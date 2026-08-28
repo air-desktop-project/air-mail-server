@@ -36,6 +36,10 @@ struct Politique {
     curseur: Cell<usize>,
 }
 
+/// Elle n'authentifie PERSONNE : le défaut du trait refuse, et c'est ce qui
+/// permet au harnais d'affirmer qu'aucune suite d'octets n'ouvre de session.
+impl ams_session::Authenticator for Politique {}
+
 impl Policy for Politique {
     fn accepts_recipient(&self, _forward_path: &Path<'_>) -> RecipientVerdict {
         if self.verdicts.is_empty() {

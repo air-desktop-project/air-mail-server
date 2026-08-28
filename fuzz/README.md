@@ -280,6 +280,11 @@ Avant de pousser une modification d'API, une seule commande suffit :
 cd fuzz && cargo +nightly fuzz build --target x86_64-unknown-linux-gnu
 ```
 
+**Et il faut en LIRE le code de retour.** Passer cette commande dans un tube —
+`… | tail -1` — rend le code de `tail`, qui réussit toujours. C'est ainsi qu'un
+échec de compilation est passé inaperçu jusqu'à l'intégration continue, alors
+même que la commande avait été lancée.
+
 ## Lancement
 
 **Nommez la cible de compilation.** cargo-fuzz 0.13.1 choisissait
