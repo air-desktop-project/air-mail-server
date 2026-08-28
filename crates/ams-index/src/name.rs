@@ -194,6 +194,18 @@ pub fn compose(
     if base.is_empty() {
         return Err(NameError::Empty);
     }
+    // `U=` ET `S=` NOUS APPARTIENNENT. Si l'appelant en pose un, le nom composé
+    // en porterait deux — et si le sien est mal formé, la relecture échouerait
+    // alors que le nôtre est parfait. Le défaut ne se verrait qu'au parcours
+    // suivant. Trouvé par `fuzz_ams_index_name` en intégration continue, après
+    // qu'une campagne locale de deux millions d'exécutions l'eut manqué.
+    if unique
+        .split(|&octet| octet == b',')
+        .skip(1)
+        .any(|champ| champ.starts_with(b"U=") || champ.starts_with(b"S="))
+    {
+        return Err(NameError::ReservedField);
+    }
     let mut curseur = Curseur::new(out);
     curseur.pousser(unique)?;
     curseur.pousser(b",U=")?;
@@ -272,6 +284,12 @@ pub enum NameError {
     MalformedField,
     /// Un champ `U=0` : la RFC 9051 §2.3.1.1 réserve le zéro.
     ZeroUid,
+    /// La partie unique porte déjà un champ `U=` ou `S=`.
+    ///
+    /// Ces deux-là appartiennent au composeur : en laisser passer un ferait un
+    /// nom qui en porte deux, et un champ mal formé de l'appelant rendrait le nom
+    /// illisible alors que le nôtre serait parfait.
+    ReservedField,
     /// Le tampon de sortie ne suffit pas.
     BufferTooSmall,
     /// Les drapeaux sont irrecevables.
@@ -292,6 +310,9 @@ impl fmt::Display for NameError {
             NameError::UnsupportedInfo => f.write_str("information de nom autre que la version 2"),
             NameError::MalformedField => f.write_str("champ `U=` ou `S=` non décimal"),
             NameError::ZeroUid => f.write_str("UID nul, réservé par la RFC 9051"),
+            NameError::ReservedField => {
+                f.write_str("la partie unique porte déjà un champ `U=` ou `S=`")
+            }
             NameError::BufferTooSmall => f.write_str("tampon de nom trop petit"),
             NameError::Flags(cause) => write!(f, "drapeaux : {cause}"),
         }
@@ -446,6 +467,28 @@ mod tests {
     }
 
     #[test]
+    fn une_partie_unique_qui_porte_deja_nos_champs_est_refusee() {
+        // Sinon le nom en porterait deux, et un champ mal formé de l'appelant
+        // rendrait illisible un nom dont NOTRE part est parfaite.
+        let mut tampon = [0_u8; 128];
+        for unique in [
+            b"base,U=0".as_slice(),
+            b"base,U=7",
+            b"base,S=99",
+            b"base,x,S=",
+        ] {
+            assert_eq!(
+                compose(&mut tampon, unique, Uid::FIRST, 0, None),
+                Err(NameError::ReservedField),
+                "sur {unique:?}"
+            );
+        }
+        // Un champ qui n'est pas des nôtres passe, et se retrouve à la relecture.
+        let ecrits = compose(&mut tampon, b"base,W=9", Uid::FIRST, 0, None).expect("composable");
+        assert_eq!(&tampon[..ecrits], b"base,W=9,U=1,S=0");
+    }
+
+    #[test]
     fn un_zero_seul_reste_une_taille_licite() {
         let lu = MessageName::parse(b"base,S=0").expect("relisible");
         assert_eq!(lu.size(), Some(0));
@@ -518,6 +561,7 @@ mod tests {
             NameError::UnsupportedInfo,
             NameError::MalformedField,
             NameError::ZeroUid,
+            NameError::ReservedField,
             NameError::BufferTooSmall,
             NameError::Flags(FlagError::OutOfOrder),
         ] {

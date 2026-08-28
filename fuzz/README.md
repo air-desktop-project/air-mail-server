@@ -204,12 +204,25 @@ couvert.
 
 ## Ce que le fuzz a trouvé
 
-**`fuzz_ams_index_name`, à sa première campagne.** `compose` acceptait une partie
-unique vide — ou commençant par une virgule — et produisait alors un nom que
-`parse` refusait. Un composeur qui fabrique de l'illisible n'en est pas un, et le
+**`fuzz_ams_index_name`, deux fois — et la seconde EN INTÉGRATION CONTINUE.**
+
+La première : `compose` acceptait une partie unique vide — ou commençant par une
+virgule — et produisait un nom que `parse` refusait.
+
+La seconde : une partie unique portant DÉJÀ un champ `U=` ou `S=`. Le nôtre s'y
+ajoutait, et un champ mal formé de l'appelant (`,U=0`) rendait illisible un nom
+dont notre part était parfaite. Ces deux champs appartiennent au composeur, et
+sont désormais refusés à l'entrée.
+
+**Le smoke-fuzz de vingt secondes a trouvé ce qu'une campagne locale de deux
+millions d'exécutions avait manqué.** Ce n'est pas de la chance : les deux
+partent de corpus différents, et c'est précisément pourquoi la CI en lance un.
+Les graines ont été enrichies depuis le corpus accumulé.
+
+Dans les deux cas : un composeur qui fabrique de l'illisible n'en est pas un, et le
 défaut ne se serait vu qu'au parcours suivant : l'UID redevenu introuvable, la
 boîte à renuméroter, l'`UIDVALIDITY` à changer, et tous les clients à
-resynchroniser. La base d'un nom doit désormais être non vide.
+resynchroniser.
 
 **`fuzz_ams_guard`, deux fois, à sa première campagne.**
 
@@ -275,4 +288,4 @@ L'entrée fautive est versionnée en graine de non-régression
 | 2026-08-28 | `fuzz_ams_session_smtp` | 1 296 868 (91 s) | 0 |
 | 2026-08-28 | `fuzz_ams_smtp_data` | 4 629 514 (121 s) | **1, corrigé** |
 | 2026-08-28 | `fuzz_ams_guard` | 2 721 501 (151 s) | **2, corrigés** |
-| 2026-08-28 | `fuzz_ams_index_name` | 2 287 648 (121 s) | **1, corrigé** |
+| 2026-08-28 | `fuzz_ams_index_name` | 2 015 974 (181 s) | **2, corrigés** |

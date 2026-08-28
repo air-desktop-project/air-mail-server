@@ -178,7 +178,7 @@ que le pin exact du workspace n'admet pas — deux LLVM produisent des profils d
 couverture mutuellement illisibles. Neuf cibles, quarante-deux propriétés, dont un
 **aller-retour** sur l'encodeur de réponses, un **vocabulaire de sortie clos** sur
 la session, et l'**indépendance au découpage** sur la phase de données — celle qui
-vise directement la contrebande SMTP. **Cinq défauts réels** trouvés et
+vise directement la contrebande SMTP. **Six défauts réels** trouvés et
 corrigés, dont deux dans le garde. Voir
 [`fuzz/README.md`](fuzz/README.md).
 

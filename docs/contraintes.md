@@ -103,7 +103,8 @@ seul tenant puis par tranches arbitraires, doit rendre le même verdict et les
 mêmes octets. C'est exactement ce que la contrebande SMTP exploite quand ce n'est
 pas le cas.
 
-**Le fuzz a déjà payé cinq fois.** `fuzz_ams_smtp_data` a trouvé, à sa première
+**Le fuzz a déjà payé six fois**, dont une en intégration continue, sur une
+entrée qu'une campagne locale de deux millions d'exécutions avait manquée. `fuzz_ams_smtp_data` a trouvé, à sa première
 campagne, une faute qui dépendait de l'endroit où la lecture avait été coupée — la
 contrebande SMTP en miniature. Et `fuzz_ams_smtp_reply` avait trouvé, en soixante
 secondes, un défaut réel : sous une borne de réponse inférieure à
