@@ -826,13 +826,15 @@ mod tests {
     /// Son mot de passe.
     const SECRET: &[u8] = b"ouvre-toi";
 
+    impl crate::Authenticator for Verdict {
+        fn authenticate(&self, credentials: &ams_sasl::Credentials<'_>) -> bool {
+            credentials.authentication_identity == COMPTE && credentials.password == SECRET
+        }
+    }
+
     impl Policy for Verdict {
         fn accepts_recipient(&self, _forward_path: &Path<'_>) -> RecipientVerdict {
             self.0
-        }
-
-        fn authenticate(&self, credentials: &ams_sasl::Credentials<'_>) -> bool {
-            credentials.authentication_identity == COMPTE && credentials.password == SECRET
         }
     }
 

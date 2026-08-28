@@ -33,6 +33,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_tls_kx` | `seeds/tls` | la part de clé TLS du pair — **les deux rôles** |
 | `fuzz_ams_sasl` | `seeds/sasl` | la réponse SASL — **décodage canonique** |
 | `fuzz_ams_pop3` | `seeds/pop3` | la ligne POP3 — **et le doublement du point** |
+| `fuzz_ams_session_pop3` | `seeds/pop3-session` | la session POP3 — **vocabulaire clos, états tenus** |
 
 Les variantes « bornes » existent parce que les bornes de C3 viennent de la
 configuration (C8), donc d'un administrateur : un zéro, un `usize::MAX`, ou toute
@@ -172,6 +173,19 @@ mille boîtes se resynchronisent.
 5. Le repliement compte chaque nom une fois et une seule.
 6. Le prochain UID est strictement au-dessus de tous ceux qui existent — sauf
    quand la boîte est épuisée, auquel cas elle le déclare.
+
+### Session POP3 (cinq, dont DEUX INVARIANTS D'ÉTAT)
+
+1. Rien ne panique, et le tampon de mille octets suffit toujours.
+2. **Le vocabulaire de sortie est CLOS** : `+OK` ou `-ERR`, un seul `CRLF`, et
+   rien qui vienne du pair. Un serveur qui renverrait ce qu'on lui envoie
+   offrirait un moyen d'écrire dans le dialogue.
+3. **Aucune session ne s'ouvre sans le bon mot de passe.**
+4. **`USER`/`PASS` n'aboutissent jamais hors chiffrement** (C6) : une ouverture
+   demandée sans TLS serait la faille.
+5. **`CommitAndClose` n'est jamais rendu sans boîte ouverte.** L'état UPDATE
+   n'est atteint que depuis TRANSACTION : c'est ce qui empêche une coupure
+   réseau d'effacer du courrier.
 
 ### POP3 (quatre, dont le DOUBLEMENT DU POINT)
 
@@ -405,6 +419,7 @@ L'entrée fautive est versionnée en graine de non-régression
 | 2026-08-28 | `fuzz_ams_tls_kx` | 47 296 (121 s) | **1 fuite, corrigée** |
 | 2026-08-28 | `fuzz_ams_sasl` | 4 786 307 (61 s) | 0 |
 | 2026-08-29 | `fuzz_ams_pop3` | 11 871 878 (91 s) | 0 |
+| 2026-08-29 | `fuzz_ams_session_pop3` | 1 179 107 (91 s) | 0 |
 | 2026-08-28 | `fuzz_ams_session_smtp` (SASL) | 521 646 (91 s) | 0 |
 
 Le débit de `fuzz_ams_tls_kx` est trois ordres de grandeur sous les autres : une

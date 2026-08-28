@@ -1,0 +1,4 @@
+LIST
+RETR 1
+DELE 1
+QUIT

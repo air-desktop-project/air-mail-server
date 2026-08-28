@@ -20,34 +20,18 @@ pub enum RecipientVerdict {
     RelayDenied,
 }
 
-/// Qui décide des destinataires.
+/// Qui vérifie des identifiants.
 ///
-/// # Pourquoi ce trait existe, et pourquoi il n'est pas facultatif
+/// # Pourquoi ce trait est SÉPARÉ de [`Policy`]
 ///
-/// Un serveur qui accepterait tout destinataire est un **relais ouvert**, que C6
-/// exclut. La session ne prend pas cette décision — elle n'en a pas les moyens,
-/// n'ayant ni table de domaines ni comptes — et elle ne l'invente donc pas : elle
-/// **exige** qu'on la lui fournisse. On ne peut pas construire une session sans
-/// politique, et c'est ce qui rend le relais ouvert inexprimable plutôt
-/// qu'improbable.
-///
-/// # La décision doit être PURE, et rendue immédiatement
-///
-/// Pas d'entrée-sortie : ni requête LDAP, ni base de données, ni résolution DNS.
-/// C1 l'interdit, et ce n'est pas la seule raison — une décision qui attend est
-/// une décision qu'un pair peut faire attendre, et cent connexions qui attendent
-/// ensemble sont un déni de service. La table des domaines et des boîtes doit
-/// être en mémoire au moment où `RCPT` arrive.
-pub trait Policy {
-    /// Ce destinataire est-il acceptable ?
-    ///
-    /// Appelé une fois par `RCPT TO:`, avec le chemin **déjà validé**
-    /// grammaticalement.
-    fn accepts_recipient(&self, forward_path: &Path<'_>) -> RecipientVerdict;
-
+/// POP3 authentifie et ne relaie rien : lui imposer une politique de
+/// destinataires l'obligerait à écrire une méthode qui n'a aucun sens chez lui,
+/// et une méthode sans usage finit par être remplie n'importe comment. SMTP, lui,
+/// a besoin des deux — d'où [`Policy`], qui exige celui-ci.
+pub trait Authenticator {
     /// Ces identifiants ouvrent-ils une session ?
     ///
-    /// # Pourquoi CELUI-CI a un défaut alors que l'autre n'en a pas
+    /// # Pourquoi CELUI-CI a un défaut alors que les destinataires n'en ont pas
     ///
     /// Ce n'est pas une inconséquence, c'est le SENS du défaut qui diffère. Pour
     /// les destinataires, le seul défaut concevable serait « accepter », c'est-à-
@@ -65,13 +49,43 @@ pub trait Policy {
     /// **tels que le pair les a envoyés** — ni normalisés, ni validés en UTF-8
     /// (voir [`ams_sasl`] pour ce que SASLprep aurait changé).
     ///
-    /// Pure, comme l'autre : pas de requête à un annuaire, pas de lecture de
-    /// fichier. Une décision qui attend est une décision qu'un pair peut faire
-    /// attendre.
+    /// Pure : pas de requête à un annuaire, pas de lecture de fichier. Une
+    /// décision qui attend est une décision qu'un pair peut faire attendre.
     fn authenticate(&self, credentials: &Credentials<'_>) -> bool {
         let _ = credentials;
         false
     }
+}
+
+impl<T: Authenticator + ?Sized> Authenticator for &T {
+    fn authenticate(&self, credentials: &Credentials<'_>) -> bool {
+        (**self).authenticate(credentials)
+    }
+}
+
+/// Qui décide des destinataires.
+///
+/// # Pourquoi ce trait existe, et pourquoi il n'est pas facultatif
+///
+/// Un serveur qui accepterait tout destinataire est un **relais ouvert**, que C6
+/// exclut. La session ne prend pas cette décision — elle n'en a pas les moyens,
+/// n'ayant ni table de domaines ni comptes — et elle ne l'invente donc pas : elle
+/// **exige** qu'on la lui fournisse. On ne peut pas construire une session sans
+/// politique, et c'est ce qui rend le relais ouvert inexprimable plutôt
+/// qu'improbable.
+///
+/// # La décision doit être PURE, et rendue immédiatement
+///
+/// Pas d'entrée-sortie : ni requête LDAP, ni base de données, ni résolution DNS.
+/// C1 l'interdit, et ce n'est pas la seule raison — une décision qui attend est
+/// une décision qu'un pair peut faire attendre, et cent connexions qui attendent
+/// ensemble sont un déni de service.
+pub trait Policy: Authenticator {
+    /// Ce destinataire est-il acceptable ?
+    ///
+    /// Appelé une fois par `RCPT TO:`, avec le chemin **déjà validé**
+    /// grammaticalement.
+    fn accepts_recipient(&self, forward_path: &Path<'_>) -> RecipientVerdict;
 }
 
 /// Une référence partagée est une politique.
@@ -83,21 +97,21 @@ impl<T: Policy + ?Sized> Policy for &T {
     fn accepts_recipient(&self, forward_path: &Path<'_>) -> RecipientVerdict {
         (**self).accepts_recipient(forward_path)
     }
-
-    fn authenticate(&self, credentials: &Credentials<'_>) -> bool {
-        (**self).authenticate(credentials)
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Policy, RecipientVerdict};
+    use super::{Authenticator, Policy, RecipientVerdict};
     use ams_proto_smtp::Path;
     use ams_sasl::Credentials;
 
     /// Une politique qui rend toujours le même verdict, **et n'implémente pas
     /// `authenticate`** : c'est tout l'objet de l'un des tests ci-dessous.
     struct Toujours(RecipientVerdict);
+
+    /// Elle n'implémente PAS `authenticate` : c'est tout l'objet de l'un des
+    /// tests ci-dessous.
+    impl Authenticator for Toujours {}
 
     impl Policy for Toujours {
         fn accepts_recipient(&self, _forward_path: &Path<'_>) -> RecipientVerdict {
@@ -113,7 +127,7 @@ mod tests {
     };
 
     /// Interroge l'authentification **par générique**, pour la même raison.
-    fn authentifier<P: Policy>(politique: P) -> bool {
+    fn authentifier<P: Authenticator>(politique: P) -> bool {
         politique.authenticate(&IDENTIFIANTS)
     }
 
@@ -131,12 +145,14 @@ mod tests {
         // retomberait sur le défaut — c'est-à-dire refuserait tout le monde,
         // en silence, alors que sa cible sait ouvrir.
         struct Ouvre;
+        impl Authenticator for Ouvre {
+            fn authenticate(&self, credentials: &Credentials<'_>) -> bool {
+                credentials.authentication_identity == b"jean"
+            }
+        }
         impl Policy for Ouvre {
             fn accepts_recipient(&self, _forward_path: &Path<'_>) -> RecipientVerdict {
                 RecipientVerdict::Accept
-            }
-            fn authenticate(&self, credentials: &Credentials<'_>) -> bool {
-                credentials.authentication_identity == b"jean"
             }
         }
         let politique = Ouvre;

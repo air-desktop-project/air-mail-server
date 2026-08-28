@@ -5,7 +5,7 @@ use std::sync::{Condvar, Mutex};
 use ams_auth::Account;
 use ams_proto_smtp::Path;
 use ams_sasl::Credentials;
-use ams_session::{Policy, RecipientVerdict};
+use ams_session::{Authenticator, Policy, RecipientVerdict};
 
 /// Combien de vérifications Argon2id peuvent avoir lieu EN MÊME TEMPS.
 ///
@@ -121,7 +121,7 @@ impl BoitesConnues {
     }
 }
 
-impl Policy for BoitesConnues {
+impl Authenticator for BoitesConnues {
     /// # Deux précautions, et aucune n'est facultative
     ///
     /// 1. **`block_in_place`** : Argon2id est délibérément lent. L'exécuter sur
@@ -142,7 +142,9 @@ impl Policy for BoitesConnues {
                 .occuper(|| ams_auth::authenticate(&self.comptes, credentials))
         })
     }
+}
 
+impl Policy for BoitesConnues {
     /// # Ce n'est plus « le domaine est-il hébergé », mais « la boîte
     /// existe-t-elle »
     ///

@@ -30,6 +30,16 @@ pub const SECRET: &[u8] = b"ouvre-toi";
 /// N'accepte que ce que ce serveur héberge, et ne connaît qu'un compte.
 pub struct NotreDomaine;
 
+impl ams_session::Authenticator for NotreDomaine {
+    /// Une comparaison de TEST, et elle n'est pas à temps constant.
+    ///
+    /// Une vraie politique doit l'être — voir la documentation du trait. Ici, le
+    /// seul secret est dans ce fichier, et le mesurer ne rapporterait rien.
+    fn authenticate(&self, credentials: &ams_sasl::Credentials<'_>) -> bool {
+        credentials.authentication_identity == COMPTE && credentials.password == SECRET
+    }
+}
+
 impl Policy for NotreDomaine {
     fn accepts_recipient(&self, forward_path: &SmtpPath<'_>) -> RecipientVerdict {
         match forward_path {
@@ -38,14 +48,6 @@ impl Policy for NotreDomaine {
             }
             _ => RecipientVerdict::RelayDenied,
         }
-    }
-
-    /// Une comparaison de TEST, et elle n'est pas à temps constant.
-    ///
-    /// Une vraie politique doit l'être — voir la documentation du trait. Ici, le
-    /// seul secret est dans ce fichier, et le mesurer ne rapporterait rien.
-    fn authenticate(&self, credentials: &ams_sasl::Credentials<'_>) -> bool {
-        credentials.authentication_identity == COMPTE && credentials.password == SECRET
     }
 }
 

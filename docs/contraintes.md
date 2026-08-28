@@ -258,6 +258,10 @@ serveur à conserver le mot de passe en clair** pour calculer le condensat. Un
 mécanisme qui interdit de stocker une empreinte aggrave la fuite qu'il prétend
 éviter.
 
+**`USER`/`PASS` hors chiffrement sont refusés depuis le 2026-08-29**, par la
+session POP3 et sans réglage possible : le mot de passe y traverse le fil tel
+quel. C'est le pendant exact du `538` d'`AUTH` en SMTP.
+
 **`APOP` est refusé depuis le 2026-08-29**, et pour la même raison de fond que
 `CRAM-MD5` : ce n'est pas MD5, c'est que le mécanisme **oblige le serveur à
 conserver le mot de passe en clair** pour calculer le condensat. `ams-proto-pop3`

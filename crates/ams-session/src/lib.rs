@@ -6,6 +6,10 @@
 //!
 //! # Ce que cette tranche couvre
 //!
+//! **La session POP3 entière** ([`pop3`]) : les trois états de la RFC 1939, le
+//! refus d'`USER`/`PASS` hors chiffrement, les réponses multilignes et le
+//! doublement du point.
+//!
 //! **La session SMTP entière** : la bannière, `EHLO`/`HELO`, l'annonce des
 //! extensions, le séquencement `MAIL`/`RCPT`/`DATA`, `STARTTLS`, le refus
 //! d'`AUTH` hors chiffrement, **et la phase de données**.
@@ -49,10 +53,16 @@
 //!
 //! ```
 //! use ams_proto_smtp::{Limits, Path};
-//! use ams_session::{Action, Capabilities, Config, Policy, RecipientVerdict, SmtpSession};
+//! use ams_session::{
+//!     Action, Authenticator, Capabilities, Config, Policy, RecipientVerdict, SmtpSession,
+//! };
 //!
 //! /// N'accepte que ce que ce serveur héberge — le reste n'est pas relayé.
 //! struct NotreDomaine;
+//!
+//! // Elle n'authentifie personne : le défaut d'`Authenticator` refuse, et un
+//! // défaut qui refuse ne peut ouvrir aucune porte.
+//! impl Authenticator for NotreDomaine {}
 //!
 //! impl Policy for NotreDomaine {
 //!     fn accepts_recipient(&self, forward_path: &Path<'_>) -> RecipientVerdict {
@@ -113,11 +123,12 @@ mod config;
 mod digits;
 mod error;
 mod policy;
+pub mod pop3;
 mod recipients;
 mod smtp;
 
 pub use config::{Capabilities, Config};
 pub use error::Error;
-pub use policy::{Policy, RecipientVerdict};
+pub use policy::{Authenticator, Policy, RecipientVerdict};
 pub use recipients::{ARENA_OCTETS, RECIPIENTS_MAX, Recipients};
 pub use smtp::{Action, DataOutcome, SmtpSession, Turn};

@@ -176,6 +176,8 @@ mod tests {
 
     struct ToutAccepter;
 
+    impl ams_session::Authenticator for ToutAccepter {}
+
     impl Policy for ToutAccepter {
         fn accepts_recipient(&self, _forward_path: &Path<'_>) -> RecipientVerdict {
             RecipientVerdict::Accept

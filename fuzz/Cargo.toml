@@ -163,3 +163,10 @@ path = "fuzz_targets/fuzz_ams_pop3.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_ams_session_pop3"
+path = "fuzz_targets/fuzz_ams_session_pop3.rs"
+test = false
+doc = false
+bench = false

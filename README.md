@@ -74,7 +74,7 @@ des octets **et des actions**. Elles n'attendent jamais.
 
 | Crate | Périmètre | État |
 | --- | --- | --- |
-| `ams-session` | les sessions serveur | **SMTP : session entière** |
+| `ams-session` | les sessions serveur | **SMTP et POP3 : sessions entières** |
 | `ams-guard` | flooding et bannissement par source | **implémenté** |
 | `ams-auth` | le magasin d'identifiants, vérification Argon2id | **implémenté** |
 | `ams-tls` | TLS 1.3 uniquement, échange de clés post-quantique | **implémenté** |
@@ -109,8 +109,7 @@ clair** côté serveur pour calculer le condensat : un mécanisme qui interdit d
 stocker une empreinte aggrave la fuite qu'il prétend éviter (C6). Le doublement
 du point d'une réponse multiligne vit à **un seul endroit** : l'écrire deux fois,
 c'est se donner deux occasions de l'écrire différemment, et un point non doublé
-termine le message au milieu. La session, la boucle et la relève restent à
-écrire.
+termine le message au milieu. La boucle et la relève depuis les boîtes restent à écrire.
 
 `ams-sasl` : le mécanisme `PLAIN` et le base64 **strict** qui le transporte —
 décodage seul, sans allocation. Strict veut dire : une seule écriture par
@@ -128,7 +127,15 @@ passe. Une empreinte sous le plancher du produit est refusée **au chargement**,
 en nommant le compte — une vérification emploie les paramètres inscrits dans
 l'empreinte, si bien qu'un compte haché faiblement serait vérifié faiblement.
 
-`ams-session` : la session SMTP entière — bannière, `EHLO`, annonce des
+`ams-session` : **deux** sessions. La session POP3 d'abord — les trois états de
+la RFC 1939, `USER`/`PASS` refusés hors chiffrement, les réponses multilignes et
+le doublement du point. L'état UPDATE, celui qui efface, n'est atteint que par un
+`QUIT` venu de TRANSACTION : une coupure réseau ne perd donc jamais de courrier.
+La boîte **sort de la session** le temps d'une commande, ce qui rend l'état
+structurel — une commande de relève reçoit la boîte en argument, donc elle ne
+peut pas être appelée sans.
+
+Et la session SMTP entière — bannière, `EHLO`, annonce des
 extensions, séquencement `MAIL`/`RCPT`/`DATA`, `STARTTLS`, refus d'`AUTH` hors
 chiffrement, **la phase de données et l'échange SASL** — défi, base64, format de
 `PLAIN`, annulation par `*`. Elle n'authentifie personne pour autant : elle

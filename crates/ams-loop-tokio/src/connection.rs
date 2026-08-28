@@ -588,6 +588,8 @@ mod tests {
     /// N'accepte que ce que ce serveur héberge.
     struct NotreDomaine;
 
+    impl ams_session::Authenticator for NotreDomaine {}
+
     impl Policy for NotreDomaine {
         fn accepts_recipient(&self, forward_path: &Path<'_>) -> RecipientVerdict {
             match forward_path {
