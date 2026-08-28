@@ -51,6 +51,7 @@ CRATES_SANS_IO=(
     ams-spf
     ams-dmarc
     ams-config
+    ams-index
 )
 
 args=()

@@ -277,13 +277,53 @@ des deux ne fait quoi que ce soit.
 Un fichier par message, contenu brut RFC 5322, atomicité par `rename()` de `tmp/`
 vers `new/`, drapeaux portés par le nom du fichier. Aucun verrou.
 
-**Conséquence connue et non résolue** : Maildir ne porte pas d'identifiant stable,
-alors qu'IMAP exige des UID stables et croissants sous une `UIDVALIDITY` donnée.
-Un index sera nécessaire — et il devra être **reconstructible depuis les
-fichiers**, faute de quoi il devient une seconde source de vérité qui peut diverger
-de la première. La forme de cet index n'est pas décidée.
+### L'index : Cap'n Proto, et reconstructible depuis les fichiers
 
-**Outillé par** : rien. `ams-store` est vide.
+Maildir ne porte pas d'identifiant stable, alors qu'IMAP exige des UID stables et
+croissants sous une `UIDVALIDITY` donnée. Un **index binaire Cap'n Proto** — même
+format que la configuration (C11) — porte les UID, les drapeaux et la
+`UIDVALIDITY`.
+
+**Les fichiers restent la seule source de vérité. L'index est reconstructible
+depuis eux** (décision du 2026-08-28). Un index qui ne le serait pas deviendrait
+une seconde source de vérité, qui peut diverger de la première sans que rien ne le
+signale.
+
+### Ce que « reconstructible » exige vraiment, et ce n'est pas évident
+
+Reconstruire un index, ce n'est pas le recalculer *d'une manière ou d'une autre* :
+c'est retrouver **exactement les mêmes UID**. Un UID déduit d'un ordre — la date
+de modification, l'ordre de lecture du répertoire — n'est pas stable : il change
+au premier fichier restauré depuis une sauvegarde, et le client resynchronise
+toute la boîte.
+
+**Donc l'UID vit dans le nom du fichier**, pas seulement dans l'index. La partie
+unique d'un nom Maildir est opaque et libre — hors `:` et `/` — ce qui suffit à
+l'y porter.
+
+La propriété qui en découle est vérifiable, et c'est elle qu'il faudra défendre
+par un test : **perdre l'index coûte un parcours de répertoire, jamais une
+resynchronisation client**. La `UIDVALIDITY` n'a alors aucune raison de changer —
+et c'est bien ce qu'on veut, car la changer force chaque client à retélécharger
+l'intégralité de la boîte.
+
+### Où vit le code, et pourquoi pas dans `ams-store`
+
+La logique de reconstruction — d'une liste de noms de fichiers vers un index — est
+la partie critique, et elle ne fait **aucune entrée-sortie**. Elle vit donc dans
+`ams-index` (étage 2), avec le codec Cap'n Proto de l'index, et relève du 100 % de
+[C2](#c2--100--de-couverture-sur-les-protocoles).
+
+`ams-store` (étage 3) ne fait que fournir les noms et écrire les octets. Ce
+découpage n'est pas une élégance : le gate de couverture travaille **par crate**,
+donc une logique critique laissée dans une crate d'entrée-sortie serait, de fait,
+non couverte.
+
+L'index s'écrit comme un message se dépose — par `rename()` atomique. Un index
+douteux **se reconstruit plutôt que se répare** : c'est peu cher, et cela évite
+d'avoir à faire confiance à des octets dont on doute.
+
+**Outillé par** : rien. `ams-store` et `ams-index` sont vides.
 
 ## C14 — Échange de clés post-quantique obligatoire
 

@@ -45,6 +45,7 @@ members = [
     "crates/ams-spf",
     "crates/ams-dmarc",
     "crates/ams-config",
+    "crates/ams-index",
     # Étage 3 — exécution
     "crates/ams-loop-tokio",
     "crates/ams-store",

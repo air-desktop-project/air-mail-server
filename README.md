@@ -60,6 +60,7 @@ des octets **et des actions**. Elles n'attendent jamais.
 | `ams-spf` | RFC 7208 |
 | `ams-dmarc` | RFC 7489 |
 | `ams-config` | schéma Cap'n Proto de la configuration |
+| `ams-index` | index Maildir : codec et reconstruction |
 
 ### Étage 3 — exécution
 
@@ -68,7 +69,7 @@ Les seules crates qui lisent, écrivent et attendent. Elles ne décident de rien
 | Crate | Périmètre |
 | --- | --- |
 | `ams-loop-tokio` | la boucle Unix, sur tokio |
-| `ams-store` | Maildir |
+| `ams-store` | Maildir : les fichiers, seule source de vérité |
 | `ams-server` | le binaire `air-mail-server` |
 | `ams-admin` | le binaire `air-mail-admin` |
 
@@ -129,13 +130,13 @@ jobs indépendants : la vérification du code (les quatre commandes ci-dessus, s
 
 ### Couverture (C2)
 
-`scripts/check-couverture.sh` exige **100 %** sur les douze crates des étages 1
+`scripts/check-couverture.sh` exige **100 %** sur les treize crates des étages 1
 et 2. Le seuil porte sur les **régions** et les **lignes** — pas sur les branches,
 que `llvm-cov` n'instrumente pas sur Rust stable et dont le compteur reste à
 `0 / 0`. Les régions font le travail attendu : chaque bras d'un conditionnel en
 est une.
 
-À ce jour le gate **ne mesure rien** — les douze crates sont vides — et il le dit
+À ce jour le gate **ne mesure rien** — les treize crates sont vides — et il le dit
 au lieu d'annoncer 100 %. Un pourcentage sur un ensemble vide n'est pas une
 mesure.
 
