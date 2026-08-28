@@ -122,7 +122,15 @@ jobs:
       # Binaire pré-construit plutôt que `cargo install` : ce dernier compile
       # ~250 crates à chaque exécution, pour un outil dont la version n'a aucune
       # raison de varier d'un job à l'autre.
-      - uses: taiki-e/install-action@cargo-llvm-cov
+      # Forme EXPLICITE (`@v2` + `tool:`), et non le tag court `@cargo-llvm-cov`.
+      # Les deux existent, mais les tags courts ne couvrent qu'un jeu d'outils
+      # choisi par l'amont : `@cargo-fuzz` se résout, ne passe aucun outil, et
+      # N'INSTALLE RIEN — en vingt millisecondes, sans rien signaler. L'échec
+      # apparaît trois étapes plus loin, sur un « no such command », qui ne
+      # désigne pas sa cause. Une seule forme partout ferme ce piège.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
 
       - name: check-couverture
         run: ./scripts/check-couverture.sh
@@ -154,7 +162,14 @@ jobs:
       - name: Nightly, pour cargo-fuzz seulement
         run: rustup toolchain install nightly --profile minimal
 
-      - uses: taiki-e/install-action@cargo-fuzz
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      # L'outil doit répondre AVANT qu'on lui confie une campagne : sans cela,
+      # une installation muette ne se voit que trois étapes plus loin.
+      - name: cargo-fuzz est bien là
+        run: cargo fuzz --version
 
       # Le corpus versionné (`seeds/`) est passé en LECTURE : sans lui, une
       # campagne de quinze secondes repartirait de zéro et passerait son temps à
