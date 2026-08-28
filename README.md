@@ -73,6 +73,37 @@ Le pin est une **version exacte**, pas le canal `stable` : un canal roulant
 désigne une version différente toutes les six semaines, et deux mesures prises à
 deux mois d'écart ne sont alors plus comparables.
 
+## Vérification
+
+La CI (`.github/workflows/ci.yml`) tourne sur chaque PR et sur `main`, en deux
+jobs indépendants : la vérification du code (les quatre commandes ci-dessus, sous
+`-D warnings` et `--locked`), et le gate **DCO**.
+
+`scripts/check-dco.sh` examine les commits que la branche **ajoute** (`base..HEAD`,
+jamais tout l'historique) et fait échouer sur :
+
+- un commit sans `Signed-off-by:` — le DCO n'est pas certifié (`git commit -s`) ;
+- une attribution de paternité à un outil (`Co-Authored-By: Claude …`,
+  `Claude-Session:`, « Generated with … », une URL de session). Un outil ne
+  co-signe pas, pas plus qu'un compilateur ; seule la signature de l'auteur humain
+  fait foi.
+
+Il **signale sans faire échouer** un `Signed-off-by` qui ne nomme pas l'auteur
+(légitime pour un patch relayé) et un commit sans signature cryptographique.
+
+Ce qu'il ne peut **pas** faire : dire si une signature est *valide*. `git`
+distingue « non signé » de « signé mais invérifiable ici », et un runner de CI n'a
+le trousseau de personne — il constate qu'une signature existe, jamais qu'elle est
+bonne. La vérification effective relève de la protection de branche GitHub
+(`required_signatures`), qui n'est **pas** activée sur ce dépôt à ce jour.
+
+Le script tourne aussi en local :
+
+```sh
+./scripts/check-dco.sh            # base : origin/main
+./scripts/check-dco.sh main       # ou une base explicite
+```
+
 ## Dépendances
 
 **Aucune dépendance externe**, et c'est délibéré. Le premier crate tiers qui

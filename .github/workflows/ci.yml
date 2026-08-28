@@ -1,0 +1,106 @@
+# CI d'air-mail-server — vérification et gate DCO, sur runner GitHub-hosted.
+#
+# POURQUOI GITHUB-HOSTED, alors qu'Air tourne sur un runner self-hosted : Air a
+# des crates Linux-only et des toolchains épinglées absentes des images publiques.
+# Rien de tel ici — stable, zéro dépendance externe, aucune cible exotique. La
+# contrainte la plus faible qui suffit.
+#
+# PAS DE CACHE CARGO, et c'est un choix : le workspace n'a AUCUNE dépendance
+# externe. Il n'y a donc rien à mettre en cache que la compilation de nos huit
+# crates, qui prend moins de temps que restaurer et sauver l'archive. Ce sera à
+# reconsidérer le jour où le premier crate tiers entrera.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Une nouvelle poussée sur une PR annule la vérification de la précédente : c'est
+# le résultat du dernier état qui compte. `main` est exclu de l'annulation — on ne
+# veut pas perdre le verdict d'un commit intégré.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Un avertissement non traité est une régression qui attend son heure.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # ── Le gate DCO ────────────────────────────────────────────────────────────
+  #
+  # Séparé de la vérification du code, et volontairement : il dure quelques
+  # secondes, ne compile rien, et son verdict porte sur les MESSAGES de commit.
+  # Le noyer dans le job de build rendrait son échec illisible.
+  dco:
+    name: DCO et paternité
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Historique COMPLET, exigé par le gate : sans lui, `origin/main`
+          # n'existe pas dans le clone et la plage `base..HEAD` ne peut pas être
+          # formée. Le dépôt est petit ; le coût est négligeable.
+          fetch-depth: 0
+
+      - name: Déterminer la base de comparaison
+        id: base
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # Les commits que cette PR AJOUTE à sa branche cible.
+            base="origin/${{ github.base_ref }}"
+          else
+            # Sur un push, l'ancien sommet de la branche. Vaut quarante zéros
+            # lorsque la branche vient d'être créée : dans ce cas on laisse le
+            # script résoudre lui-même, et il dira honnêtement ce qu'il a vu.
+            base="${{ github.event.before }}"
+            case "$base" in
+              0000000000000000000000000000000000000000) base="" ;;
+            esac
+            if [ -n "$base" ] && ! git rev-parse --verify --quiet "$base" >/dev/null; then
+              base=""
+            fi
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+
+      - name: check-dco
+        run: ./scripts/check-dco.sh "${{ steps.base.outputs.base }}"
+
+  # ── La vérification du code ────────────────────────────────────────────────
+  verification:
+    name: fmt, clippy, build, tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Aucune action tierce d'installation de toolchain : `rust-toolchain.toml`
+      # épingle la version ET ses composants, et `rustup` l'honore tout seul à la
+      # première invocation de `cargo`. On le fait ici, explicitement, pour que
+      # l'installation soit une étape visible plutôt qu'un effet de bord de
+      # l'étape suivante — et pour que le journal affiche la version vérifiée.
+      - name: Toolchain épinglée
+        run: |
+          rustup show active-toolchain
+          cargo --version
+          rustc --version
+
+      # `--locked` sur chaque commande : le `Cargo.lock` est committé, et une CI
+      # qui le laisserait bouger en silence ne vérifierait plus le build qu'elle
+      # prétend vérifier.
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: cargo build
+        run: cargo build --workspace --locked
+
+      - name: cargo test
+        run: cargo test --workspace --locked
