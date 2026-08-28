@@ -189,12 +189,19 @@ Par C1, **aucun trait ne les abstrait** : chaque moteur porte sa propre boucle,
 qui pilote la même machine à états. Il n'y a donc pas de couche d'adaptation
 asynchrone à maintenir, et la logique du serveur n'est écrite qu'une fois.
 
-**Coût assumé de tokio** : ~25 crates transitives entrent dans un workspace qui
-n'en comptait aucune, dont plusieurs à `unsafe` important (`mio`, `parking_lot`).
-C'est le prix de la maturité et des audits publics ; il est payé les yeux ouverts.
+**Coût de tokio : MESURÉ, et bien moindre qu'annoncé.** Cette contrainte tablait
+sur « ~25 crates transitives ». Le graphe de build réel, sur la cible Linux et
+avec les seules features qui servent (`io-util`, `net`, `rt`, `sync`, `time`), en
+compte **cinq** : `bytes`, `libc`, `mio`, `pin-project-lite`, `socket2`.
 
-**Outillé par** : rien. `ams-loop-air` n'est pas créée — une crate vide portant ce
-nom laisserait croire qu'un portage est entamé.
+`default-features = false` fait toute la différence. L'estimation est corrigée ici
+plutôt que laissée en place : un registre qui garde ses approximations après la
+mesure vaut moins que pas de registre du tout.
+
+**Outillé par** : `ams-loop-tokio` sert une connexion de bout en bout, et ses
+tests jouent des conversations SMTP entières **en mémoire** — `tokio::io::duplex`,
+sans ouvrir de port. `ams-loop-air` n'est toujours pas créée : une crate vide
+portant ce nom laisserait croire qu'un portage est entamé.
 
 ## C6 — Aucune version ancienne de protocole
 
@@ -271,9 +278,14 @@ l'administrateur pose hors du serveur.
 privilèges à écrire, donc aucun à se tromper. Le chemin le plus sûr est celui qui
 n'existe pas.
 
-**Outillé par** : rien à ce jour. Un refus explicite de démarrer sous UID 0 est
-trivial à écrire et **doit** l'être — sans quoi cette contrainte ne tient qu'à la
-discipline de qui lance le service.
+**Outillé par** : `ams_loop_tokio::refuse_root`, qui refuse de continuer sous UID
+effectif 0. La **décision** (`is_root`) est séparée de l'appel système pour être
+éprouvable sans être `root` ; l'appel, lui, ne l'est pas, et c'est l'une des
+raisons pour lesquelles l'étage 3 est hors du périmètre de C2.
+
+Et il n'y a **aucun** code d'abandon de privilèges dans le dépôt : ni `setuid`, ni
+`capabilities`, ni séparation de privilèges. Ce n'est pas un manque, c'est ce que
+la contrainte achète — on ne se trompe pas dans ce qu'on n'écrit pas.
 
 ## C11 — La configuration est un fichier binaire Cap'n Proto
 
@@ -436,7 +448,8 @@ Deux crates portent du code : **`ams-mime`** (le squelette d'un message) et
 **`ams-proto-smtp`** (les commandes **et les réponses**). Aucun protocole n'est pour autant servi : il
 manque l'encodage des réponses, la machine à états de session, et tout le reste.
 
-Sont outillées : C2 (le gate mesure 4 528 régions, toutes couvertes), C3 (les
+Sont outillées : C2 (le gate mesure 4 631 régions, toutes couvertes), C10
+(`refuse_root`), C3 (les
 lints, l'absence d'allocation dans les décodeurs, et le fuzz), C6 **en partie et
 pour de bon** — les deux décodeurs refusent le CR et le LF isolés, et
 `ams-proto-smtp` refuse en outre les routes sources, les verbes retirés par la

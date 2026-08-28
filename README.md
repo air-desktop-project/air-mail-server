@@ -7,10 +7,10 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 > Ce dépôt compile, il est linté, et il porte quatre gates de CI. Il **ne sert
 > aucun protocole**.
 >
-> Trois crates portent du code : `ams-mime` (le squelette d'un message),
-> `ams-proto-smtp` (commandes et réponses) et `ams-session` (la phase de
-> commandes SMTP). Toutes les autres sont des emplacements réservés qui le disent
-> dans leur propre documentation.
+> Une conversation SMTP complète se joue de bout en bout — mais **en mémoire
+> seulement** : il n'y a pas encore de boucle d'acceptation, donc aucun port
+> écouté, et le stockage n'existe pas. Quatre crates portent du code ; les autres
+> sont des emplacements réservés qui le disent dans leur documentation.
 >
 > Ce que ce dépôt affirme, il le tient. Rien de plus n'est promis ici.
 
@@ -70,14 +70,14 @@ des octets **et des actions**. Elles n'attendent jamais.
 
 Les seules crates qui lisent, écrivent et attendent. Elles ne décident de rien.
 
-| Crate | Périmètre |
-| --- | --- |
-| `ams-loop-tokio` | la boucle Unix, sur tokio |
-| `ams-store` | Maildir : les fichiers, seule source de vérité |
-| `ams-server` | le binaire `air-mail-server` |
-| `ams-admin` | le binaire `air-mail-admin` |
+| Crate | Périmètre | État |
+| --- | --- | --- |
+| `ams-loop-tokio` | la boucle Unix, sur tokio | **une connexion, de bout en bout** |
+| `ams-store` | Maildir : les fichiers, seule source de vérité | vide |
+| `ams-server` | le binaire `air-mail-server` | vide |
+| `ams-admin` | le binaire `air-mail-admin` | vide |
 
-**Trois crates portent du code.** `ams-mime` : le squelette d'un message — la
+**Quatre crates portent du code.** `ams-mime` : le squelette d'un message — la
 ligne, le pliage, la séparation en-tête/corps, le découpage en champs. Les champs
 structurés, les adresses, les dates et MIME restent à écrire.
 `ams-proto-smtp` : les commandes, l'encodage des réponses multilignes, et **la
@@ -89,6 +89,10 @@ complète d'une adresse IPv6 restent à écrire.
 extensions, séquencement `MAIL`/`RCPT`/`DATA`, `STARTTLS`, refus d'`AUTH` hors
 chiffrement, et phase de données. **L'échange SASL et la boucle d'entrées-sorties
 restent à écrire.**
+
+`ams-loop-tokio` : le pilote d'**une** connexion, sur tokio. Il lit, il écrit, il
+n'décide de rien — et ses tests jouent des conversations SMTP entières en mémoire,
+sans ouvrir de port. La boucle d'acceptation, TLS et SASL restent à écrire.
 
 Toutes les autres crates sont vides, et chacune le déclare dans sa documentation.
 
@@ -167,8 +171,10 @@ que `llvm-cov` n'instrumente pas sur Rust stable et dont le compteur reste à
 `0 / 0`. Les régions font le travail attendu : chaque bras d'un conditionnel en
 est une.
 
-Le gate mesure aujourd'hui **4 528 régions** et **2 706 lignes**, toutes
-couvertes. Il naissait à zéro dette et n'en a pas pris.
+Le gate mesure aujourd'hui **4 631 régions** et **2 765 lignes**, toutes
+couvertes. `ams-loop-tokio` en est **hors** : elle lit, écrit et attend, et y
+atteindre 100 % exigerait de simuler les pannes du noyau — on mesurerait alors la
+fidélité de la simulation. Il naissait à zéro dette et n'en a pas pris.
 
 ```sh
 ./scripts/check-couverture.sh
@@ -204,9 +210,17 @@ Le script tourne aussi en local :
 
 ## Dépendances
 
-**Aucune dépendance externe**, et c'est délibéré. Le premier crate tiers qui
-entrera dans ce workspace mérite d'être discuté pour lui-même, plutôt que d'entrer
-par habitude dans un squelette.
+**Une seule dépendance externe** : `tokio`, pour la boucle d'entrées-sorties (C5).
+Le graphe de build réel, sur Linux et avec les seules features qui servent, compte
+**cinq crates transitives** — `bytes`, `libc`, `mio`, `pin-project-lite`,
+`socket2`. Le registre tablait sur vingt-cinq ; `default-features = false` fait
+toute la différence, et l'estimation y a été corrigée.
+
+`libc` est déclarée en direct bien que tokio la tire déjà : `refuse_root` (C10)
+appelle `geteuid` elle-même, et une dépendance qu'on utilise se déclare.
+
+Les crates des étages 1 et 2 n'en ont **aucune** : elles sont `#![no_std]` sans
+`alloc`.
 
 ## Licence
 

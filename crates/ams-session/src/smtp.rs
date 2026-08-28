@@ -407,14 +407,15 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         posees = posees.saturating_add(1);
         lignes[posees] = self.size_line.get(..self.size_len).unwrap_or_default();
         posees = posees.saturating_add(1);
-        if !self.tls {
+        // On n'annonce QUE ce que l'appelant a declare savoir conduire, et
+        // `AUTH` seulement sous chiffrement (C6) : annoncer un mecanisme qu'on
+        // refusera ensuite ferait envoyer un mot de passe en clair a un client
+        // qui aurait cru l'offre.
+        if self.config.capabilities().starttls && !self.tls {
             lignes[posees] = b"STARTTLS";
             posees = posees.saturating_add(1);
         }
-        if self.tls {
-            // `AUTH` n'est annonce QUE sous chiffrement (C6). Annoncer un
-            // mecanisme qu'on refusera ensuite ferait envoyer un mot de passe en
-            // clair a un client qui aurait cru l'offre.
+        if self.config.capabilities().auth && self.tls {
             lignes[posees] = b"AUTH PLAIN";
             posees = posees.saturating_add(1);
         }
@@ -517,6 +518,9 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
 
     /// `STARTTLS` (RFC 3207 §4).
     fn on_starttls<'b, 'l>(&mut self, out: &'b mut [u8]) -> Result<Turn<'b, 'l>, Error> {
+        if !self.config.capabilities().starttls {
+            return self.simple(Code::NOT_IMPLEMENTED, b"Command not implemented", out);
+        }
         if self.tls {
             return self.simple(Code::BAD_SEQUENCE, b"TLS already active", out);
         }
@@ -538,6 +542,9 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         initial_response: Option<&'l [u8]>,
         out: &'b mut [u8],
     ) -> Result<Turn<'b, 'l>, Error> {
+        if !self.config.capabilities().auth {
+            return self.simple(Code::NOT_IMPLEMENTED, b"Command not implemented", out);
+        }
         if !self.tls {
             // Ce refus n'est PAS reglable. Un mot de passe envoye en clair est
             // lu par qui regarde passer les paquets, et l'avoir accepte une fois
@@ -599,7 +606,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
 #[cfg(test)]
 mod tests {
     use super::{Action, DataOutcome, SmtpSession};
-    use crate::{Config, Error, Policy, RecipientVerdict};
+    use crate::{Capabilities, Config, Error, Policy, RecipientVerdict};
     use ams_proto_smtp::{DataEvent, Error as SmtpError, Limits, Path};
 
     /// L'erreur qu'un tampon de `disponible` octets provoque quand il en faut
@@ -622,7 +629,12 @@ mod tests {
     }
 
     fn config() -> Config<'static> {
-        Config::new(b"mail.example.com", 2, 10_485_760, Limits::DEFAULT).expect("configurable")
+        Config::new(b"mail.example.com", 2, 10_485_760, Limits::DEFAULT)
+            .expect("configurable")
+            .with_capabilities(Capabilities {
+                starttls: true,
+                auth: true,
+            })
     }
 
     fn session(verdict: RecipientVerdict) -> SmtpSession<'static, Verdict> {
@@ -1221,6 +1233,30 @@ mod tests {
     }
 
     // ── Les types ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn ce_qui_n_est_pas_declare_n_est_ni_annonce_ni_servi() {
+        // UN SERVEUR N'OFFRE QUE CE QUE QUELQU'UN SAIT CONDUIRE. Annoncer
+        // `STARTTLS` sans savoir chiffrer ferait attendre un chiffrement qui ne
+        // viendrait pas ; annoncer `AUTH` ferait envoyer un mot de passe.
+        let nue = Config::new(b"mail.example.com", 2, 1024, Limits::DEFAULT).expect("configurable");
+        let mut session = SmtpSession::new(nue, Verdict(RecipientVerdict::Accept));
+
+        let annonce = jouer(&mut session, b"EHLO client.example\r\n");
+        assert_eq!(annonce, "250-mail.example.com\r\n250 SIZE 1024\r\n");
+        assert!(!annonce.contains("STARTTLS"));
+        assert!(!annonce.contains("AUTH"));
+
+        // Et les commandes correspondantes sont refusées comme non servies.
+        assert_eq!(
+            jouer(&mut session, b"STARTTLS\r\n"),
+            "502 Command not implemented\r\n"
+        );
+        assert_eq!(
+            jouer(&mut session, b"AUTH PLAIN\r\n"),
+            "502 Command not implemented\r\n"
+        );
+    }
 
     #[test]
     fn les_types_publics_se_copient_et_se_deboguent() {

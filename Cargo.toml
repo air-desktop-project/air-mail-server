@@ -81,13 +81,29 @@ repository = "https://github.com/air-desktop-project/air-mail-server"
 # Les arêtes INTERNES ne se déclarent qu'à mesure qu'elles servent : une
 # dépendance posée d'avance affirmerait un assemblage qui n'existe pas.
 ams-proto-smtp = { path = "crates/ams-proto-smtp", version = "0.1.0" }
+ams-session = { path = "crates/ams-session", version = "0.1.0" }
 
 #
-# Les choix EXTERNES sont pourtant faits, et consignés dans `docs/contraintes.md`
-# plutôt qu'ici : `tokio` pour la boucle Unix (C5), `capnp` pour la configuration
-# binaire (C11), `rustls` pour TLS 1.3 (C4, dont le fournisseur cryptographique
-# reste à trancher). Chacune entrera le jour où une crate la consommera —
-# la déclarer avant ne ferait que gonfler ce fichier d'une intention.
+# LES DÉPENDANCES EXTERNES n'entrent qu'au moment où une crate les consomme.
+# Restent à venir, et consignées dans `docs/contraintes.md` plutôt qu'ici :
+# `capnp` pour la configuration binaire (C11) et `rustls` pour TLS 1.3 (C4).
+#
+# tokio (C5) — le moteur d'entrées-sorties de la boucle Unix. PREMIÈRE dépendance
+# externe du workspace.
+#
+# C5 tablait sur « ~25 crates transitives ». MESURÉ sur la cible Linux, avec les
+# seules features qui servent : CINQ — `bytes`, `libc`, `mio`, `pin-project-lite`,
+# `socket2`. `default-features = false` fait toute la différence, et l'estimation
+# a été rectifiée dans le registre plutôt que laissée telle quelle.
+#
+# Pas de `rt-multi-thread` ici : le choix de l'ordonnanceur appartient au binaire
+# qui lance la boucle, pas à la boucle.
+#
+# `libc` est déclarée EN DIRECT bien que tokio la tire déjà : `refuse_root` (C10)
+# appelle `geteuid` elle-même, et une dépendance qu'on utilise se déclare, même
+# quand elle est déjà là par ailleurs.
+tokio = { version = "1", default-features = false, features = ["io-util", "net", "rt", "sync", "time"] }
+libc = "0.2"
 
 # Lints du workspace, hérités par chaque crate via `[lints] workspace = true`.
 [workspace.lints.rust]

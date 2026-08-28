@@ -9,6 +9,15 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+ams-proto-smtp = { workspace = true }
+ams-session = { workspace = true }
+tokio = { workspace = true }
+libc = { workspace = true }
+
+[dev-dependencies]
+# `macros` et `rt-multi-thread` ne servent qu'aux tests : le choix de
+# l'ordonnanceur appartient au binaire, pas à la bibliothèque.
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-util"] }
 
 
 [lints]

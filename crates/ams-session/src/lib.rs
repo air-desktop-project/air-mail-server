@@ -27,6 +27,10 @@
 //!    par être basculé « juste pour un test ». `AUTH` n'est même pas *annoncé*
 //!    avant chiffrement — annoncer un mécanisme qu'on refusera ferait envoyer un
 //!    mot de passe en clair à un client qui aurait cru l'offre.
+//!
+//!    Et rien n'est annoncé que l'appelant n'ait **déclaré savoir conduire**
+//!    ([`Capabilities`]) : le défaut n'offre ni `STARTTLS` ni `AUTH`, parce que
+//!    c'est le seul défaut qui ne mente pas.
 //! 2. **`STARTTLS` remet toute la session à zéro** (RFC 3207 §4.2). Ce qu'un pair
 //!    a dit en clair a pu être dit par quelqu'un d'autre.
 //! 3. **Un message refusé par la grammaire ne peut pas être accepté par
@@ -43,7 +47,7 @@
 //!
 //! ```
 //! use ams_proto_smtp::{Limits, Path};
-//! use ams_session::{Action, Config, Policy, RecipientVerdict, SmtpSession};
+//! use ams_session::{Action, Capabilities, Config, Policy, RecipientVerdict, SmtpSession};
 //!
 //! /// N'accepte que ce que ce serveur héberge — le reste n'est pas relayé.
 //! struct NotreDomaine;
@@ -59,7 +63,11 @@
 //!     }
 //! }
 //!
-//! let config = Config::new(b"mail.example.com", 100, 10_485_760, Limits::DEFAULT)?;
+//! // On ne déclare que ce que la boucle sait conduire. Ici, elle sait chiffrer
+//! // et conduire un échange SASL ; sans cette déclaration, ni `STARTTLS` ni
+//! // `AUTH` ne seraient annoncés, et tous deux seraient refusés en `502`.
+//! let config = Config::new(b"mail.example.com", 100, 10_485_760, Limits::DEFAULT)?
+//!     .with_capabilities(Capabilities { starttls: true, auth: true });
 //! let mut session = SmtpSession::new(config, NotreDomaine);
 //! let mut out = [0_u8; 512];
 //!
@@ -105,7 +113,7 @@ mod error;
 mod policy;
 mod smtp;
 
-pub use config::Config;
+pub use config::{Capabilities, Config};
 pub use error::Error;
 pub use policy::{Policy, RecipientVerdict};
 pub use smtp::{Action, DataOutcome, SmtpSession, Turn};

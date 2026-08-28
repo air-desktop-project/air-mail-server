@@ -4,6 +4,25 @@ use ams_proto_smtp::{ClientId, Limits};
 
 use crate::Error;
 
+/// Ce que la boucle qui pilote la session sait réellement faire.
+///
+/// # Annoncer ce qu'on ne sait pas faire est un mensonge coûteux
+///
+/// Une session n'exécute ni la poignée de main TLS ni l'échange SASL : elle les
+/// **délègue**. Si l'appelant ne sait pas les conduire, les annoncer dans l'`EHLO`
+/// ferait envoyer un mot de passe à un serveur qui n'a pas de quoi le protéger, ou
+/// attendre un chiffrement qui ne viendra pas.
+///
+/// Le défaut est donc **tout à `false`** : un serveur n'offre que ce que quelqu'un
+/// a explicitement déclaré savoir faire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Capabilities {
+    /// L'appelant sait conduire une poignée de main TLS.
+    pub starttls: bool,
+    /// L'appelant sait conduire un échange SASL.
+    pub auth: bool,
+}
+
 /// Ce dont une session SMTP a besoin pour exister.
 ///
 /// # Ce qui n'est PAS réglable, et pourquoi
@@ -18,6 +37,7 @@ pub struct Config<'a> {
     max_recipients: usize,
     max_message_octets: u64,
     limits: Limits,
+    capabilities: Capabilities,
 }
 
 impl<'a> Config<'a> {
@@ -54,7 +74,24 @@ impl<'a> Config<'a> {
             max_recipients,
             max_message_octets,
             limits,
+            capabilities: Capabilities::default(),
         })
+    }
+
+    /// Déclare ce que l'appelant sait conduire.
+    ///
+    /// Sans cet appel, la session n'annonce **ni `STARTTLS` ni `AUTH`**, et les
+    /// refuse : c'est le seul défaut qui ne mente pas.
+    #[must_use]
+    pub fn with_capabilities(mut self, capabilities: Capabilities) -> Self {
+        self.capabilities = capabilities;
+        self
+    }
+
+    /// Ce que l'appelant sait conduire.
+    #[must_use]
+    pub fn capabilities(&self) -> Capabilities {
+        self.capabilities
     }
 
     /// Le nom que le serveur annonce.
@@ -87,7 +124,7 @@ impl<'a> Config<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::Config;
+    use super::{Capabilities, Config};
     use crate::Error;
     use ams_proto_smtp::Limits;
 
@@ -99,6 +136,31 @@ mod tests {
         assert_eq!(config.max_recipients(), 100);
         assert_eq!(config.max_message_octets(), 10_485_760);
         assert_eq!(config.limits(), &Limits::DEFAULT);
+        // Le défaut n'annonce rien : un serveur n'offre que ce que quelqu'un a
+        // déclaré savoir faire.
+        assert_eq!(config.capabilities(), Capabilities::default());
+        assert!(!config.capabilities().starttls);
+        assert!(!config.capabilities().auth);
+    }
+
+    #[test]
+    fn les_capacites_se_declarent_explicitement() {
+        let config = Config::new(b"example.com", 1, 1, Limits::DEFAULT)
+            .expect("configurable")
+            .with_capabilities(Capabilities {
+                starttls: true,
+                auth: false,
+            });
+        assert!(config.capabilities().starttls);
+        assert!(!config.capabilities().auth);
+        assert!(!std::format!("{:?}", config.capabilities()).is_empty());
+        assert_ne!(
+            config.capabilities(),
+            Capabilities {
+                starttls: true,
+                auth: true
+            }
+        );
     }
 
     #[test]

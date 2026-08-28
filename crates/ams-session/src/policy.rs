@@ -44,3 +44,48 @@ pub trait Policy {
     /// grammaticalement.
     fn accepts_recipient(&self, forward_path: &Path<'_>) -> RecipientVerdict;
 }
+
+/// Une référence partagée est une politique.
+///
+/// Une boucle qui sert mille connexions n'a qu'UNE table de domaines : sans cette
+/// implémentation, chaque session en exigerait une copie, ou l'appelant devrait
+/// écrire ce même relais à la main.
+impl<T: Policy + ?Sized> Policy for &T {
+    fn accepts_recipient(&self, forward_path: &Path<'_>) -> RecipientVerdict {
+        (**self).accepts_recipient(forward_path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Policy, RecipientVerdict};
+    use ams_proto_smtp::Path;
+
+    struct Toujours(RecipientVerdict);
+
+    impl Policy for Toujours {
+        fn accepts_recipient(&self, _forward_path: &Path<'_>) -> RecipientVerdict {
+            self.0
+        }
+    }
+
+    /// Interroge une politique **par générique**.
+    ///
+    /// L'appel direct sur une référence ne prouverait rien : l'auto-déréférence
+    /// irait chercher l'implémentation concrète, et l'implémentation générique
+    /// resterait morte. Il faut que `P` VAILLE `&Toujours` pour l'emprunter.
+    fn interroger<P: Policy>(politique: P) -> RecipientVerdict {
+        politique.accepts_recipient(&Path::Null)
+    }
+
+    #[test]
+    fn une_reference_partagee_est_une_politique() {
+        let politique = Toujours(RecipientVerdict::RelayDenied);
+        assert_eq!(interroger(&politique), RecipientVerdict::RelayDenied);
+        // Et la politique elle-même en est une, évidemment.
+        assert_eq!(
+            interroger(Toujours(RecipientVerdict::Accept)),
+            RecipientVerdict::Accept
+        );
+    }
+}
