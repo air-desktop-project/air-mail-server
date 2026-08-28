@@ -11,6 +11,10 @@ repository.workspace = true
 [dependencies]
 ams-config = { workspace = true }
 ams-index = { workspace = true }
+# `flock` : le verrou d'une boîte POP3. Un fichier témoin le ferait aussi, mais
+# survivrait à un arrêt brutal — un verrou que le noyau relâche tout seul n'a
+# pas ce défaut.
+libc = { workspace = true }
 
 
 [lints]

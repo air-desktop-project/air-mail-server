@@ -96,6 +96,16 @@ fn port_libre() -> u16 {
 }
 
 fn configuration(atelier: &Atelier, port: u16, tls: Tls, comptes: &str) -> PathBuf {
+    configuration_pop3(atelier, port, tls, comptes, "")
+}
+
+fn configuration_pop3(
+    atelier: &Atelier,
+    port: u16,
+    tls: Tls,
+    comptes: &str,
+    pop3: &str,
+) -> PathBuf {
     let config = Configuration {
         domain: String::from("mail.example.com"),
         listen: format!("127.0.0.1:{port}"),
@@ -113,6 +123,7 @@ fn configuration(atelier: &Atelier, port: u16, tls: Tls, comptes: &str) -> PathB
         },
         tls,
         accounts: comptes.to_string(),
+        listen_pop3: pop3.to_string(),
     };
     let chemin = atelier.0.join("ams.conf");
     std::fs::write(&chemin, ams_config::encode(&config).expect("encodable")).expect("écriture");
@@ -448,4 +459,182 @@ fn chaque_destinataire_recoit_dans_sa_boite() {
         !atelier.0.join("boite").join("personne").exists(),
         "une boîte a été créée pour une adresse refusée"
     );
+}
+
+/// Dialogue POP3 chiffré : rend ce que le client a lu dans le tuyau.
+fn pop3(port: u16, dialogue: &str) -> String {
+    let mut processus = Command::new("openssl")
+        .args(["s_client", "-connect"])
+        .arg(format!("127.0.0.1:{port}"))
+        .args(["-starttls", "pop3", "-ign_eof"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect(SANS_OPENSSL);
+    processus
+        .stdin
+        .as_mut()
+        .expect("entrée standard")
+        .write_all(dialogue.as_bytes())
+        .expect("écriture");
+    let sortie = processus.wait_with_output().expect("openssl s_client");
+    String::from_utf8_lossy(&sortie.stdout).into_owned()
+}
+
+#[test]
+fn un_client_pop3_releve_puis_efface_son_courrier() {
+    // LA CHAÎNE ENTIÈRE, DANS L'AUTRE SENS : un message remis par SMTP, relevé
+    // par POP3 sur un second port, puis effacé — et le disque le confirme.
+    let atelier = atelier("pop3");
+    let Some((cert, cle)) = paire(&atelier.0) else {
+        panic!("{SANS_OPENSSL}");
+    };
+
+    let magasin = atelier.0.join("comptes.bin");
+    let empreinte = ams_auth::hash_password(b"ouvre-toi", b"seize octets ici").expect("hachable");
+    let comptes = vec![ams_auth::Account {
+        login: String::from("jean"),
+        hash: empreinte,
+        addresses: vec![String::from("jean@example.com")],
+    }];
+    std::fs::write(
+        &magasin,
+        ams_config::encode_accounts(&comptes).expect("encodable"),
+    )
+    .expect("écriture");
+    std::fs::set_permissions(&magasin, std::fs::Permissions::from_mode(0o600))
+        .expect("permissions");
+
+    let port_smtp = port_libre();
+    let port_pop3 = port_libre();
+    let config = configuration_pop3(
+        &atelier,
+        port_smtp,
+        Tls {
+            certificate_chain_path: cert.display().to_string(),
+            private_key_path: cle.display().to_string(),
+        },
+        &magasin.display().to_string(),
+        &format!("127.0.0.1:{port_pop3}"),
+    );
+    let _serveur = lancer(&config, port_smtp);
+
+    // ── 1. Un message arrive par SMTP ───────────────────────────────────────
+    let mut flux =
+        TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], port_smtp))).expect("connexion SMTP");
+    flux.set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("délai");
+    flux.write_all(
+        concat!(
+            "EHLO client.example\r\n",
+            "MAIL FROM:<expediteur@ailleurs.example>\r\n",
+            "RCPT TO:<jean@example.com>\r\n",
+            "DATA\r\n",
+            "Subject: par la poste\r\n\r\nbonjour jean\r\n.\r\n",
+            "QUIT\r\n"
+        )
+        .as_bytes(),
+    )
+    .expect("écriture SMTP");
+    let mut dit = String::new();
+    std::io::Read::read_to_string(&mut flux, &mut dit).expect("lecture SMTP");
+    assert!(dit.contains("250 Message accepted"), "{dit}");
+
+    // ── 2. Le client POP3 le relève ─────────────────────────────────────────
+    let vu = pop3(
+        port_pop3,
+        concat!(
+            "USER jean\r\n",
+            "PASS ouvre-toi\r\n",
+            "STAT\r\n",
+            "UIDL\r\n",
+            "RETR 1\r\n",
+            "QUIT\r\n"
+        ),
+    );
+    assert!(vu.contains("+OK Mailbox open"), "connexion refusée.\n{vu}");
+    assert!(
+        vu.contains("+OK 1 "),
+        "STAT n'a pas compté le message.\n{vu}"
+    );
+    assert!(
+        vu.contains("bonjour jean"),
+        "le message n'est pas venu.\n{vu}"
+    );
+    assert!(
+        vu.contains("Subject: par la poste"),
+        "l'en-tête manque.\n{vu}"
+    );
+    // Le terminateur d'une réponse multiligne, et rien après lui.
+    assert!(vu.contains("\r\n.\r\n"), "pas de terminateur.\n{vu}");
+
+    // Le message est TOUJOURS là : `RETR` ne supprime rien.
+    let restants = || {
+        std::fs::read_dir(atelier.0.join("boite").join("jean").join("new"))
+            .expect("boîte lisible")
+            .count()
+    };
+    assert_eq!(restants(), 1, "RETR a effacé quelque chose");
+
+    // ── 3. Une seconde session efface ───────────────────────────────────────
+    let vu = pop3(
+        port_pop3,
+        concat!(
+            "USER jean\r\n",
+            "PASS ouvre-toi\r\n",
+            "DELE 1\r\n",
+            "QUIT\r\n"
+        ),
+    );
+    assert!(vu.contains("+OK Message deleted"), "{vu}");
+    assert_eq!(restants(), 0, "le QUIT n'a pas appliqué l'effacement");
+}
+
+#[test]
+fn un_quit_sans_dele_n_efface_rien_et_un_mauvais_mot_de_passe_non_plus() {
+    let atelier = atelier("pop3-refus");
+    let Some((cert, cle)) = paire(&atelier.0) else {
+        panic!("{SANS_OPENSSL}");
+    };
+    let magasin = atelier.0.join("comptes.bin");
+    let empreinte = ams_auth::hash_password(b"ouvre-toi", b"seize octets ici").expect("hachable");
+    std::fs::write(
+        &magasin,
+        ams_config::encode_accounts(&[ams_auth::Account {
+            login: String::from("jean"),
+            hash: empreinte,
+            addresses: vec![String::from("jean@example.com")],
+        }])
+        .expect("encodable"),
+    )
+    .expect("écriture");
+    std::fs::set_permissions(&magasin, std::fs::Permissions::from_mode(0o600))
+        .expect("permissions");
+
+    let port_smtp = port_libre();
+    let port_pop3 = port_libre();
+    let config = configuration_pop3(
+        &atelier,
+        port_smtp,
+        Tls {
+            certificate_chain_path: cert.display().to_string(),
+            private_key_path: cle.display().to_string(),
+        },
+        &magasin.display().to_string(),
+        &format!("127.0.0.1:{port_pop3}"),
+    );
+    let _serveur = lancer(&config, port_smtp);
+
+    // UN MAUVAIS MOT DE PASSE N'OUVRE RIEN, et ne dit pas pourquoi.
+    let vu = pop3(port_pop3, "USER jean\r\nPASS autre\r\nSTAT\r\nQUIT\r\n");
+    assert!(vu.contains("-ERR Authentication failed"), "{vu}");
+    assert!(
+        !vu.contains("+OK Mailbox open"),
+        "une session s'est ouverte.\n{vu}"
+    );
+
+    // Un compte INCONNU obtient exactement la même réponse.
+    let autre = pop3(port_pop3, "USER paul\r\nPASS ouvre-toi\r\nQUIT\r\n");
+    assert!(autre.contains("-ERR Authentication failed"), "{autre}");
 }

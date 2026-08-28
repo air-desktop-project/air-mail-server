@@ -30,6 +30,12 @@ pub enum Error {
 
     /// La session a refusé quelque chose à l'appelant — donc à cette boucle.
     Session(ams_session::Error),
+
+    /// La session POP3 a refusé quelque chose à cette boucle.
+    ///
+    /// Un vocabulaire séparé, comme du côté de la session : celui de SMTP parle
+    /// de phase de données et de destinataires, dont POP3 n'a que faire.
+    Pop3(ams_session::pop3::Error),
 }
 
 impl fmt::Display for Error {
@@ -45,6 +51,7 @@ impl fmt::Display for Error {
             Error::Timeout => f.write_str("le pair n'a rien envoyé dans le délai imparti"),
             Error::Io(cause) => write!(f, "entrée-sortie : {cause}"),
             Error::Session(cause) => write!(f, "session : {cause}"),
+            Error::Pop3(cause) => write!(f, "session POP3 : {cause}"),
         }
     }
 }
@@ -67,5 +74,11 @@ impl From<std::io::Error> for Error {
 impl From<ams_session::Error> for Error {
     fn from(cause: ams_session::Error) -> Self {
         Error::Session(cause)
+    }
+}
+
+impl From<ams_session::pop3::Error> for Error {
+    fn from(cause: ams_session::pop3::Error) -> Self {
+        Error::Pop3(cause)
     }
 }

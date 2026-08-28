@@ -11,6 +11,9 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 > clair pour les domaines qu'on lui nomme, le dépose dans une boîte Maildir, et
 > refuse les sources qui abusent.
 >
+> **Il relève** : POP3 sur un second port, `STLS` puis `USER`/`PASS`, la boîte
+> verrouillée le temps d'une session, et le `QUIT` qui efface — lui seul.
+>
 > **Il chiffre** : nommez-lui un certificat et une clé, il annonce `STARTTLS` et
 > monte en TLS 1.3, échange de clés post-quantique en tête. Sans certificat, il
 > sert en clair — et ne l'annonce pas, faute de quoi il mentirait. Les deux
@@ -90,7 +93,7 @@ Les seules crates qui lisent, écrivent et attendent. Elles ne décident de rien
 
 | Crate | Périmètre | État |
 | --- | --- | --- |
-| `ams-loop-tokio` | la boucle Unix, sur tokio | **connexions + `STARTTLS`** |
+| `ams-loop-tokio` | les boucles Unix, sur tokio | **SMTP et POP3** |
 | `ams-store` | Maildir : les fichiers, seule source de vérité | **implémenté** |
 | `ams-server` | le binaire `air-mail-server` | **il tourne** |
 | `ams-admin` | le binaire `air-mail-admin` | **`summary`** |
@@ -109,7 +112,7 @@ clair** côté serveur pour calculer le condensat : un mécanisme qui interdit d
 stocker une empreinte aggrave la fuite qu'il prétend éviter (C6). Le doublement
 du point d'une réponse multiligne vit à **un seul endroit** : l'écrire deux fois,
 c'est se donner deux occasions de l'écrire différemment, et un point non doublé
-termine le message au milieu. La boucle et la relève depuis les boîtes restent à écrire.
+termine le message au milieu. La boucle POP3 les emploie.
 
 `ams-sasl` : le mécanisme `PLAIN` et le base64 **strict** qui le transporte —
 décodage seul, sans allocation. Strict veut dire : une seule écriture par
@@ -181,7 +184,10 @@ vérité, capable de diverger de la première sans que rien ne le signale. Le
 perdre ne perd aucun message ni aucun UID : cela oblige seulement à changer
 l'`UIDVALIDITY`, c'est-à-dire à demander aux clients de resynchroniser.
 
-`ams-store` : la boîte Maildir. Arrivée par `rename()` atomique, **deux `fsync`**
+`ams-store` : la boîte Maildir. Une session de relève la **verrouille** par un
+`flock` — pas par un fichier témoin, qui survivrait à un arrêt brutal et
+obligerait à décider au bout de combien de temps un verrou devient « périmé ».
+Personne ne décide bien cela ; le noyau, lui, relâche à la mort du processus. Arrivée par `rename()` atomique, **deux `fsync`**
 — le fichier avant, le répertoire après —, adoption des messages déposés par
 d'autres outils, et nettoyage de `tmp/` même quand une remise est abandonnée.
 L'index s'écrit avec la même discipline, et son filigrane est **réservé par

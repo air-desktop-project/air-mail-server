@@ -68,6 +68,7 @@ mod connection;
 mod delivery;
 mod error;
 mod guard;
+pub mod pop3;
 mod privileges;
 mod server;
 

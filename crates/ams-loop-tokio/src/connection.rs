@@ -556,7 +556,7 @@ where
 }
 
 /// Lit, en abandonnant un pair qui se tait trop longtemps.
-async fn lire<S: AsyncRead + Unpin>(
+pub(crate) async fn lire<S: AsyncRead + Unpin>(
     stream: &mut S,
     cible: &mut [u8],
     delai: Duration,
@@ -568,7 +568,7 @@ async fn lire<S: AsyncRead + Unpin>(
 }
 
 /// L'indice **après** le premier CRLF, s'il y en a un.
-fn trouver_crlf(tampon: &[u8]) -> Option<usize> {
+pub(crate) fn trouver_crlf(tampon: &[u8]) -> Option<usize> {
     tampon
         .windows(2)
         .position(|paire| paire == b"\r\n")

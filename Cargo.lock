@@ -47,6 +47,7 @@ dependencies = [
  "ams-index",
  "ams-proto-smtp",
  "ams-store",
+ "libc",
 ]
 
 [[package]]
@@ -89,6 +90,7 @@ name = "ams-loop-tokio"
 version = "0.1.0"
 dependencies = [
  "ams-guard",
+ "ams-proto-pop3",
  "ams-proto-smtp",
  "ams-sasl",
  "ams-session",
@@ -132,6 +134,7 @@ dependencies = [
  "ams-guard",
  "ams-index",
  "ams-loop-tokio",
+ "ams-proto-pop3",
  "ams-proto-smtp",
  "ams-sasl",
  "ams-session",
@@ -160,6 +163,7 @@ version = "0.1.0"
 dependencies = [
  "ams-config",
  "ams-index",
+ "libc",
 ]
 
 [[package]]

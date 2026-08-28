@@ -108,13 +108,12 @@ fn ouvrir(tailles: &[u64]) -> Session<UnCompte, Boite> {
 fn multiligne(session: &mut Session<UnCompte, Boite>) -> std::vec::Vec<std::string::String> {
     let mut lignes = std::vec::Vec::new();
     let mut tampon = [0_u8; 512];
+    // ON BOUCLE JUSQU'À `None`, et pas jusqu'au terminateur : c'est le contrat
+    // que l'appelant tiendra, et s'arrêter plus tôt cachait que la session
+    // refusait l'appel d'après. Le pilote, lui, prenait ce refus pour une panne.
     while let Some(ligne) = session.next_listing(&mut tampon).expect("ligne") {
-        let texte = std::string::String::from_utf8_lossy(ligne).into_owned();
-        let terminateur = texte == ".\r\n";
-        lignes.push(texte);
-        if terminateur {
-            break;
-        }
+        lignes.push(std::string::String::from_utf8_lossy(ligne).into_owned());
+        assert!(lignes.len() < 100, "listing sans fin");
     }
     lignes
 }
@@ -391,6 +390,28 @@ fn un_quit_depuis_la_transaction_demande_d_appliquer_les_effacements() {
     let mut tampon = [0_u8; 512];
     let tour = session.handle(b"QUIT\r\n", &mut tampon).expect("réponse");
     assert_eq!(tour.action(), Action::CommitAndClose);
+
+    // ET L'APPELANT REPREND LA BOÎTE pour effacer. Elle ne revient pas : la
+    // session est close, il n'y a plus rien à servir, et la laisser en place
+    // inviterait à s'en servir après coup.
+    let reprise = session.take_mailbox().expect("la boîte devait être là");
+    assert!(reprise.effaces[0], "la marque devait avoir suivi");
+    assert!(!session.is_open());
+    assert!(session.take_mailbox().is_none(), "elle ne revient pas");
+}
+
+#[test]
+fn l_appelant_peut_lire_la_boite_pour_en_tirer_un_message() {
+    // La session ne lit aucun fichier : c'est l'appelant qui le fait, et il lui
+    // faut l'objet qu'il a lui-même remis.
+    let neuve = session();
+    assert!(neuve.mailbox().is_none(), "rien à lire avant l'ouverture");
+
+    let mut session = ouvrir(&[100, 200]);
+    let mut tampon = [0_u8; 512];
+    session.handle(b"RETR 2\r\n", &mut tampon).expect("réponse");
+    let boite = session.mailbox().expect("boîte ouverte");
+    assert_eq!(boite.tailles, [100, 200]);
 }
 
 #[test]

@@ -92,6 +92,13 @@ pub struct Configuration {
     pub timeouts: Timeouts,
     /// De quoi chiffrer, ou deux chaînes vides.
     pub tls: Tls,
+    /// Où écouter en POP3, ou une chaîne vide.
+    ///
+    /// Vide, POP3 n'est pas servi. Comme [`Configuration::listen`], cette crate
+    /// ne l'interprète pas : `core` ne sait pas lire une adresse de socket, et
+    /// un second lecteur écrit ici finirait par diverger de celui de la
+    /// bibliothèque standard.
+    pub listen_pop3: String,
     /// Le fichier de comptes, ou une chaîne vide.
     ///
     /// Vide, le serveur n'annonce pas `AUTH` : il n'a personne à qui répondre
@@ -226,6 +233,7 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
     let delais = lu.get_timeouts()?;
 
     let comptes = texte(lu.get_accounts()?)?;
+    let ecoute_pop3 = texte(lu.get_listen_pop3()?)?;
 
     let chiffrement = lu.get_tls()?;
     let tls = Tls {
@@ -269,6 +277,7 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
         },
         tls,
         accounts: comptes,
+        listen_pop3: ecoute_pop3,
     })
 }
 
@@ -329,6 +338,7 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
             chiffrement.set_private_key_path(&config.tls.private_key_path);
         }
         ecrit.set_accounts(&config.accounts);
+        ecrit.set_listen_pop3(&config.listen_pop3);
     }
     Ok(serialize::write_message_to_words(&message))
 }
@@ -383,6 +393,7 @@ mod tests {
             // fichiers qui n'existent pas.
             tls: Tls::default(),
             accounts: String::new(),
+            listen_pop3: String::new(),
         }
     }
 
@@ -393,6 +404,7 @@ mod tests {
                 private_key_path: String::from("/etc/ams/cle.pem"),
             },
             accounts: String::from("/etc/ams/comptes.bin"),
+            listen_pop3: String::from("127.0.0.1:2110"),
             ..exemple()
         }
     }
@@ -421,9 +433,11 @@ mod tests {
         let original = exemple_chiffrant();
         let relue = decode(&encode(&original).expect("encodable")).expect("relisible");
         assert_eq!(relue.accounts, "/etc/ams/comptes.bin");
+        assert_eq!(relue.listen_pop3, "127.0.0.1:2110");
         // Et son absence se lit à une chaîne vide, pas à un drapeau.
         let sans = decode(&encode(&exemple()).expect("encodable")).expect("relisible");
         assert!(sans.accounts.is_empty());
+        assert!(sans.listen_pop3.is_empty());
     }
 
     #[test]

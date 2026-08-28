@@ -51,6 +51,9 @@ struct Entree {
     tls: [String; 2],
     /// Le chemin du magasin de comptes.
     comptes: String,
+    /// L'adresse d'écoute POP3 — libre, y compris absurde : cette crate ne
+    /// l'interprète pas, et c'est l'appelant qui la lit.
+    ecoute_pop3: String,
     /// Des comptes — noms et adresses LIBRES : vides, en double, invalides comme
     /// noms de répertoire. Ce sont exactement les cas que le décodeur refuse, et
     /// les contraindre ici cacherait ces refus au lieu de les éprouver.
@@ -103,6 +106,7 @@ fuzz_target!(|entree: Entree| {
             private_key_path: entree.tls[1].clone(),
         },
         accounts: entree.comptes.clone(),
+        listen_pop3: entree.ecoute_pop3.clone(),
     };
 
     let Ok(ecrit) = encode(&original) else {

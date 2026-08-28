@@ -439,6 +439,23 @@ sans laisser de trace. Le partage par GROUPE reste permis — c'est ainsi que le
 certificats se partagent sur un système bien tenu, et punir cela punirait la
 bonne pratique au lieu de la mauvaise.
 
+### La relève verrouille la boîte, et le verrou est un `flock`
+
+Écrit le 2026-08-29. La RFC 1939 §3 veut un accès exclusif pendant toute une
+session POP3 : deux sessions qui effacent en même temps se marcheraient dessus,
+et le second `QUIT` porterait sur des numéros qui ne désignent plus rien.
+
+Un fichier témoin donnerait l'exclusion — mais il **survivrait à un arrêt
+brutal**, et il faudrait alors décider au bout de combien de temps un verrou
+devient « périmé ». Personne ne décide bien cela : trop court, on ouvre à deux ;
+trop long, une boîte reste inaccessible après un simple redémarrage. `flock` est
+relâché par le noyau à la mort du processus — il n'y a pas de verrou périmé, donc
+pas de règle à se tromper.
+
+Le fichier de verrou, lui, **reste en place** : l'effacer à la fin ouvrirait une
+course où deux sessions verrouillent deux fichiers différents portant le même
+nom.
+
 ### Un compte, une boîte — et la fin du fourre-tout
 
 Écrit le 2026-08-29. Le nom du compte est **aussi le nom du répertoire de sa

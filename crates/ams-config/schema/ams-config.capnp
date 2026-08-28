@@ -53,6 +53,17 @@ struct Configuration {
   #
   # VIDE, le serveur n'annonce pas `AUTH` : il n'a personne à qui répondre oui.
   accounts @11 :Text;
+
+  # Où écouter en POP3, ou une chaîne vide.
+  #
+  # VIDE, POP3 n'est pas servi. Et comme pour SMTP : JAMAIS un port privilégié —
+  # C10 interdit d'exécuter le serveur en superutilisateur, et le 110 (ou le 995)
+  # s'atteint par une règle de redirection du pare-feu.
+  #
+  # SANS CERTIFICAT, CE PORT NE SERT PERSONNE : la session POP3 refuse
+  # `USER`/`PASS` hors chiffrement, sans réglage possible (C6). Le serveur le dit
+  # au démarrage plutôt que de laisser le découvrir.
+  listenPop3 @12 :Text;
 }
 
 # TLS (C4, C14). Deux CHEMINS, et pas le matériel lui-même : une clé privée

@@ -16,6 +16,9 @@ path = "src/main.rs"
 
 [dependencies]
 ams-auth = { workspace = true }
+# `SIGPIPE` : un outil dont la sortie passe dans un tube ne doit pas paniquer
+# quand le lecteur ferme. Rust l'ignore au démarrage ; on rend le défaut d'Unix.
+libc = { workspace = true }
 ams-config = { workspace = true }
 ams-guard = { workspace = true }
 ams-index = { workspace = true }

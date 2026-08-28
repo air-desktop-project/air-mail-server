@@ -31,6 +31,7 @@
 
 mod delivery;
 mod policy;
+mod pop3;
 
 use std::collections::BTreeMap;
 use std::process::ExitCode;
@@ -41,6 +42,7 @@ use std::time::Duration;
 
 use ams_auth::Account;
 use ams_config::{Configuration, Tls};
+use ams_loop_tokio::pop3::serve_pop3;
 use ams_loop_tokio::{ServeOptions, SharedGuard, Timeouts, refuse_root, serve};
 use ams_session::{Capabilities, Config};
 use ams_store::Maildir;
@@ -50,6 +52,7 @@ use rustls::ServerConfig;
 
 use crate::delivery::{Boites, MaildirDelivery};
 use crate::policy::BoitesConnues;
+use crate::pop3::BoitesPop3;
 
 /// Le texte de `--help`.
 const AIDE: &str = "\
@@ -349,6 +352,61 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     let pour_la_remise = Arc::clone(&boites);
     let comptes_pour_la_remise = Arc::clone(&comptes);
 
+    let options_de_service = ServeOptions {
+        max_connections: usize::try_from(options.max_connections).unwrap_or(usize::MAX),
+        timeouts: Timeouts {
+            command: Duration::from_secs(u64::from(options.timeouts.command_seconds)),
+            data: Duration::from_secs(u64::from(options.timeouts.data_seconds)),
+            // Pas de champ dans le schéma : le délai de poignée de main reste
+            // celui de la boucle, faute d'une raison de le régler.
+            handshake: Timeouts::default().handshake,
+        },
+        // `None` quand la configuration ne nomme pas de certificat : la session
+        // n'annonce alors pas `STARTTLS`, et le serveur sert en clair sans
+        // mentir à personne.
+        tls: chiffrement,
+    };
+
+    // ── LE SERVICE POP3, S'IL EST DEMANDÉ ───────────────────────────────────
+    //
+    // Les deux boucles tournent EN MÊME TEMPS, et le même signal les arrête. Un
+    // seul `arret()` ne peut pas être attendu deux fois : on en fabrique un
+    // second, et les deux écoutent le même `SIGTERM`.
+    let pop3 = if options.listen_pop3.is_empty() {
+        eprintln!("air-mail-server : POP3 non servi — aucune adresse d'écoute configurée");
+        None
+    } else {
+        let adresse: std::net::SocketAddr = options.listen_pop3.parse().map_err(|_| {
+            format!(
+                "`{}` n'est pas une adresse d'écoute POP3",
+                options.listen_pop3
+            )
+        })?;
+        // SANS CERTIFICAT, CE PORT NE SERT PERSONNE : la session POP3 refuse
+        // `USER`/`PASS` hors chiffrement, sans réglage possible (C6). On le dit
+        // plutôt que de laisser le découvrir un client à la fois.
+        if options_de_service.tls.is_none() {
+            eprintln!(
+                "air-mail-server : ATTENTION — POP3 écoute sur {adresse} SANS certificat. \
+                 `USER`/`PASS` y seront refusés (C6), donc personne ne pourra relever son \
+                 courrier."
+            );
+        }
+        let ecouteur = TcpListener::bind(adresse)
+            .await
+            .map_err(|erreur| format!("écoute POP3 sur {adresse} : {erreur}"))?;
+        eprintln!("air-mail-server : POP3 écoute sur {adresse}");
+        Some(tokio::spawn(serve_pop3(
+            ecouteur,
+            ams_proto_pop3::Limits::DEFAULT,
+            Arc::clone(&politique),
+            Arc::new(BoitesPop3::new(Arc::clone(&boites))),
+            Arc::clone(&garde),
+            options_de_service.clone(),
+            arret(),
+        )))
+    };
+
     let stats = serve(
         ecouteur,
         config,
@@ -360,24 +418,25 @@ async fn servir(fichier: &Path) -> Result<(), String> {
                 Arc::clone(&comptes_pour_la_remise),
             )
         },
-        ServeOptions {
-            max_connections: usize::try_from(options.max_connections).unwrap_or(usize::MAX),
-            timeouts: Timeouts {
-                command: Duration::from_secs(u64::from(options.timeouts.command_seconds)),
-                data: Duration::from_secs(u64::from(options.timeouts.data_seconds)),
-                // Pas de champ dans le schéma : le délai de poignée de main
-                // reste celui de la boucle, faute d'une raison de le régler.
-                handshake: Timeouts::default().handshake,
-            },
-            // `None` quand la configuration ne nomme pas de certificat : la
-            // session n'annonce alors pas `STARTTLS`, et le serveur sert en
-            // clair sans mentir à personne.
-            tls: chiffrement,
-        },
+        options_de_service,
         arret(),
     )
     .await
     .map_err(|erreur| erreur.to_string())?;
+
+    if let Some(tache) = pop3 {
+        // La boucle POP3 s'arrête sur le même signal ; on attend qu'elle ait
+        // fini d'accepter avant de rendre la main, sans quoi le message d'arrêt
+        // partirait pendant qu'elle sert encore.
+        match tache.await {
+            Ok(Ok(stats_pop3)) => eprintln!(
+                "air-mail-server : POP3 ; {} connexion(s) acceptée(s), {} refusée(s) par le noyau",
+                stats_pop3.accepted, stats_pop3.failed
+            ),
+            Ok(Err(erreur)) => eprintln!("air-mail-server : POP3 : {erreur}"),
+            Err(erreur) => eprintln!("air-mail-server : POP3 : {erreur}"),
+        }
+    }
 
     eprintln!(
         "air-mail-server : arrêt ; {} connexion(s) acceptée(s), {} refusée(s) par le noyau",

@@ -44,6 +44,8 @@ pub struct Options {
     pub tls_key: Option<PathBuf>,
     /// Le fichier de comptes. Vide : pas d'`AUTH`.
     pub accounts: Option<PathBuf>,
+    /// Où écouter en POP3. Vide : POP3 n'est pas servi.
+    pub listen_pop3: Option<SocketAddr>,
 }
 
 impl Default for Options {
@@ -64,6 +66,9 @@ impl Default for Options {
             // PAS DE COMPTES PAR DÉFAUT : un serveur qui n'a personne à qui
             // répondre oui n'annonce pas `AUTH`.
             accounts: None,
+            // PAS DE POP3 PAR DÉFAUT : un port ouvert qu'on n'a pas demandé est
+            // une surface de plus, et celui-ci ne sert personne sans certificat.
+            listen_pop3: None,
         }
     }
 }
@@ -96,6 +101,10 @@ impl Options {
                 private_key_path: chemin(self.tls_key.as_ref()),
             },
             accounts: chemin(self.accounts.as_ref()),
+            listen_pop3: self
+                .listen_pop3
+                .map(|adresse| adresse.to_string())
+                .unwrap_or_default(),
         }
     }
 }
@@ -140,6 +149,7 @@ OPTIONS DE `config write`
     --tls-cert <chemin>    chaîne de certificats, en PEM
     --tls-key <chemin>     clé privée, en PEM
     --accounts <chemin>    fichier de comptes (`air-mail-admin account add`)
+    --listen-pop3 <adr>    où écouter en POP3 (défaut : pas de POP3)
 
     LES DEUX OPTIONS TLS VONT ENSEMBLE, ou aucune. Avec elles, le serveur annonce
     `STARTTLS` et chiffre ; sans elles, il sert en clair et ne l'annonce pas. Il
@@ -148,6 +158,11 @@ OPTIONS DE `config write`
 
     Le serveur refuse de démarrer si la clé privée est lisible par tout le monde.
     Le partage par groupe, lui, reste permis.
+
+    POP3 EXIGE UN CERTIFICAT POUR SERVIR À QUELQUE CHOSE : la session y refuse
+    `USER`/`PASS` hors chiffrement, sans réglage possible. Un `--listen-pop3`
+    sans `--tls-cert` ouvre un port où personne ne pourra relever son courrier ;
+    le serveur le dit au démarrage.
 
     LE MAGASIN DE COMPTES SERT DEUX CHOSES, et il faut les distinguer :
 
@@ -209,6 +224,14 @@ where
             "--tls-cert" => options.tls_cert = Some(PathBuf::from(valeur()?)),
             "--tls-key" => options.tls_key = Some(PathBuf::from(valeur()?)),
             "--accounts" => options.accounts = Some(PathBuf::from(valeur()?)),
+            "--listen-pop3" => {
+                let brute = valeur()?;
+                options.listen_pop3 = Some(
+                    brute
+                        .parse()
+                        .map_err(|_| ArgError::new(format!("`{brute}` n'est pas une adresse")))?,
+                );
+            }
             "--max-connections" => {
                 let brute = valeur()?;
                 options.max_connections = brute
@@ -271,6 +294,32 @@ mod tests {
         let config = ecrire(&["--domain", "mail.example.com"]).en_configuration();
         assert!(!config.tls.est_configure());
         assert!(config.tls.certificate_chain_path.is_empty());
+    }
+
+    #[test]
+    fn l_adresse_pop3_traverse_jusqu_a_la_configuration() {
+        let config = ecrire(&[
+            "--domain",
+            "mail.example.com",
+            "--listen-pop3",
+            "127.0.0.1:2110",
+        ])
+        .en_configuration();
+        assert_eq!(config.listen_pop3, "127.0.0.1:2110");
+        // Sans l'option, POP3 n'est pas servi — et l'absence se lit à une
+        // chaîne vide, pas à un drapeau qui pourrait la contredire.
+        let sans = ecrire(&["--domain", "mail.example.com"]).en_configuration();
+        assert!(sans.listen_pop3.is_empty());
+    }
+
+    #[test]
+    fn une_adresse_pop3_illisible_est_refusee() {
+        let erreur = parse(["--listen-pop3", "pas-une-adresse"]).expect_err("refusé");
+        assert!(
+            erreur.message.contains("n'est pas une adresse"),
+            "{}",
+            erreur.message
+        );
     }
 
     #[test]

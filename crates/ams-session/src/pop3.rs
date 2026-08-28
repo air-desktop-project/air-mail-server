@@ -204,6 +204,16 @@ enum Listing {
     Uidl(u32),
     /// Il ne reste que le terminateur.
     Terminator,
+    /// Le terminateur est parti ; l'appel suivant rend `None`.
+    ///
+    /// **Cet état existe parce que l'appelant ne peut pas savoir.** Il boucle sur
+    /// `next_listing` jusqu'à `None` — c'est le contrat — et sans cet état, la
+    /// session lui répondait `NotInCommandPhase` après le terminateur. Le pilote
+    /// prenait ce refus pour une panne et abandonnait la connexion : le premier
+    /// `RETR` qui suivait un `LIST` n'a jamais eu lieu. Trouvé par le test de
+    /// bout en bout, pas par les tests de la session — dont le harnais
+    /// s'arrêtait, lui, sur le terminateur.
+    Done,
 }
 
 /// La session POP3.
@@ -289,6 +299,26 @@ impl<A: Authenticator, M: Mailbox> Session<A, M> {
     #[must_use]
     pub const fn is_open(&self) -> bool {
         self.mailbox.is_some()
+    }
+
+    /// La boîte ouverte, pour y lire un message.
+    ///
+    /// La session ne lit aucun fichier : c'est l'appelant qui le fait, et il lui
+    /// faut donc l'objet qu'il a lui-même remis.
+    #[must_use]
+    pub const fn mailbox(&self) -> Option<&M> {
+        self.mailbox.as_ref()
+    }
+
+    /// Reprend la boîte, pour appliquer les effacements.
+    ///
+    /// # Elle ne revient pas
+    ///
+    /// C'est l'état UPDATE : la session est close, il n'y a plus rien à servir,
+    /// et laisser la boîte en place inviterait à s'en servir après coup. La
+    /// reprendre **ferme aussi le verrou** dès que l'appelant la relâche.
+    pub fn take_mailbox(&mut self) -> Option<M> {
+        self.mailbox.take()
     }
 
     /// La poignée de main TLS a abouti.
@@ -444,8 +474,12 @@ impl<A: Authenticator, M: Mailbox> Session<A, M> {
             return Err(Error::NotInCommandPhase);
         }
         match self.listing {
-            Listing::Terminator => {
+            Listing::Done => {
                 self.phase = Phase::Transaction;
+                Ok(None)
+            }
+            Listing::Terminator => {
+                self.listing = Listing::Done;
                 // LE TERMINATEUR VIENT D'ICI, et pas de la boucle : c'est du
                 // protocole, et la boucle n'en compose aucun.
                 let ecrit = out

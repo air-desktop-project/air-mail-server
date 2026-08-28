@@ -59,7 +59,28 @@ COMMANDES
     --version           la version
 ";
 
+/// Rend à `SIGPIPE` son comportement par défaut.
+///
+/// # Pourquoi un outil en ligne de commande en a besoin
+///
+/// Rust ignore `SIGPIPE` au démarrage, ce qui convient à un serveur : une
+/// écriture sur une connexion fermée doit rendre une erreur, pas tuer le
+/// processus. Pour un outil dont on lit la sortie dans un tube, cela donne
+/// l'inverse de ce qu'on veut : `… | head -3` fait PANIQUER le programme sur
+/// « Broken pipe » au lieu de le faire finir en silence.
+///
+/// On rétablit donc le comportement d'Unix, celui que `head` et `grep`
+/// attendent de tout ce qu'ils lisent.
+fn rendre_sigpipe_au_systeme() {
+    // SAFETY: `signal` avec `SIG_DFL` sur `SIGPIPE` est l'appel que fait tout
+    // programme C au démarrage ; il ne touche à aucune mémoire de ce processus.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
 fn main() -> ExitCode {
+    rendre_sigpipe_au_systeme();
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let mots: Vec<&str> = arguments.iter().map(String::as_str).collect();
     match mots.as_slice() {
@@ -169,6 +190,14 @@ fn montrer(fichier: &Path) -> ExitCode {
 fn afficher(config: &Configuration) {
     println!("domaine            {}", config.domain);
     println!("écoute             {}", config.listen);
+    println!(
+        "écoute POP3        {}",
+        if config.listen_pop3.is_empty() {
+            "(aucune — POP3 n'est pas servi)"
+        } else {
+            &config.listen_pop3
+        }
+    );
     println!("boîte              {}", config.maildir);
     println!(
         "domaines hébergés  {}",
