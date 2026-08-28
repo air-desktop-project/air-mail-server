@@ -1,0 +1,51 @@
+# Crate de fuzzing d'air-mail-server (cargo-fuzz). **HORS du workspace**, et pour
+# une raison précise.
+#
+# `cargo-fuzz` exige un nightly. Le workspace, lui, est épinglé sur stable 1.98.0
+# en version exacte (cf. `../rust-toolchain.toml`). Deux toolchains dans un même
+# workspace, ce sont deux LLVM — et les profils de couverture que l'un écrit,
+# l'autre ne sait pas les relire. Le gate de C2 ne pourrait plus conclure.
+#
+# La séparation résout cela sans compromis : cette crate a son propre `Cargo.lock`,
+# n'entre pas dans la mesure de couverture, ne participe pas au `Cargo.lock` du
+# produit, et rien de ce qu'elle tire n'est jamais livré.
+#
+# Le nightly employé ici est ROULANT, et c'est acceptable ICI seulement : rien n'y
+# est livré, et aucun profil de couverture n'en sort qui devrait s'accorder avec un
+# autre. C'est exactement la distinction que `../rust-toolchain.toml` établit.
+#
+# Lancement : `cargo +nightly fuzz run <cible>` (cf. README.md).
+
+[package]
+name = "air-mail-server-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "MPL-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+[dependencies.ams-mime]
+path = "../crates/ams-mime"
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "fuzz_ams_mime_parse"
+path = "fuzz_targets/fuzz_ams_mime_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ams_mime_limits"
+path = "fuzz_targets/fuzz_ams_mime_limits.rs"
+test = false
+doc = false
+bench = false

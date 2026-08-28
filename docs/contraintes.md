@@ -89,12 +89,25 @@ Conséquences déjà gravées dans le workspace :
 peut pas allouer d'après un nombre venu du réseau. La crate est `#![no_std]`
 **sans `alloc`**, ce qui rend la propriété structurelle et non disciplinaire.
 
-Ce que cela ne couvre PAS : les lints voient une conversion douteuse, pas une
-borne oubliée. **Le fuzz reste le contrôle qui manque.** `cargo-fuzz` exige un
-nightly, donc une seconde toolchain, que `rust-toolchain.toml` interdit — c'est
-une décision à prendre, pas un oubli. En attendant, `ams-mime` porte un tirage
-pseudo-aléatoire à graine fixe qui vérifie l'absence de panique ; ce n'est pas du
-fuzz, et son propre code le dit.
+**Et le fuzz existe** depuis le 2026-08-28 : `fuzz/`, crate `cargo-fuzz` **hors du
+workspace**. La seconde toolchain que `cargo-fuzz` exige ne pouvait pas entrer
+dans le workspace — deux LLVM produisent des profils de couverture mutuellement
+illisibles, et le gate de C2 ne conclurait plus. Hors workspace, elle a son propre
+`Cargo.lock`, n'entre ni dans la mesure ni dans le lock du produit, et rien de ce
+qu'elle tire n'est livré.
+
+Deux cibles sur `ams-mime` — la grammaire, et les calculs de borne avec des bornes
+elles-mêmes arbitraires — éprouvant sept propriétés, dont deux qui portent le
+reste : le découpage ne perd ni n'invente aucun octet, et aucun CR ni LF isolé ne
+survit dans l'en-tête. Premières campagnes : **4 827 316 exécutions, zéro
+plantage**.
+
+La CI lance un smoke-fuzz borné à vingt secondes par cible. C'est un détecteur de
+régression, **pas une campagne**, et `fuzz/README.md` le dit à l'endroit où
+quelqu'un pourrait croire l'inverse.
+
+Ce que cela ne couvre toujours PAS : les lints voient une conversion douteuse, pas
+une borne oubliée ; et le fuzz ne voit que ce qu'il atteint.
 
 ## C4 — TLS 1.3 au minimum
 
@@ -415,8 +428,8 @@ ligne, le pliage, la séparation en-tête/corps, le découpage en champs. C'est 
 fondation des quatre protocoles, mais aucun protocole n'est écrit, et le serveur
 ne sert toujours rien.
 
-Sont outillées : C2 (le gate mesure 696 régions, toutes couvertes), C3 en partie
-(les lints, et l'absence d'allocation dans le décodeur), C6 en partie (`ams-mime`
+Sont outillées : C2 (le gate mesure 696 régions, toutes couvertes), C3 (les lints,
+l'absence d'allocation dans le décodeur, et le fuzz), C6 en partie (`ams-mime`
 refuse le CR et le LF isolés, donc l'ambiguïté dont vit la contrebande SMTP).
 
 Tout le reste — TLS, post-quantique, DKIM, SPF, DMARC, flooding, configuration

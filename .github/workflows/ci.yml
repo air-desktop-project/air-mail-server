@@ -126,3 +126,52 @@ jobs:
 
       - name: check-couverture
         run: ./scripts/check-couverture.sh
+
+  # ── Smoke-fuzz borné (C3) ─────────────────────────────────────────────────
+  #
+  # UN DÉTECTEUR DE RÉGRESSION, PAS UNE CAMPAGNE. Quelques secondes par cible
+  # depuis un corpus neuf n'explorent pas ce que des heures explorent ; ce job
+  # attrape la panique qu'un changement vient d'introduire sur un chemin déjà
+  # connu, et rien de plus. Une vraie campagne se lance à la main (fuzz/README).
+  #
+  # Le nightly employé ici est ROULANT, à rebours du pin exact du workspace — et
+  # c'est acceptable ICI seulement : `fuzz/` vit hors du workspace, rien n'en est
+  # livré, et aucun profil de couverture n'en sort qui doive s'accorder avec un
+  # autre. C'est exactement la distinction que `rust-toolchain.toml` établit.
+  fuzz:
+    name: smoke-fuzz (C3)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # `fuzz/` est hors du workspace, donc `cargo fmt --all` du job de
+      # vérification ne l'atteint pas. Le pin du dépôt s'y applique quand même —
+      # rustup remonte l'arborescence — donc un seul rustfmt pour tout le dépôt.
+      - name: cargo fmt (fuzz)
+        working-directory: fuzz
+        run: cargo fmt -- --check
+
+      - name: Nightly, pour cargo-fuzz seulement
+        run: rustup toolchain install nightly --profile minimal
+
+      - uses: taiki-e/install-action@cargo-fuzz
+
+      # Le corpus versionné (`seeds/`) est passé en LECTURE : sans lui, une
+      # campagne de quinze secondes repartirait de zéro et passerait son temps à
+      # redécouvrir qu'un message commence par un nom de champ.
+      - name: fuzz_ams_mime_parse
+        working-directory: fuzz
+        run: |
+          # libFuzzer EXIGE que le premier répertoire de corpus existe : il n'y
+          # écrit que s'il peut l'ouvrir, et refuse de démarrer sinon. cargo-fuzz
+          # ne le crée que lorsqu'on ne lui en nomme aucun.
+          mkdir -p corpus/fuzz_ams_mime_parse
+          cargo +nightly fuzz run fuzz_ams_mime_parse \
+            corpus/fuzz_ams_mime_parse seeds -- -max_total_time=20
+
+      - name: fuzz_ams_mime_limits
+        working-directory: fuzz
+        run: |
+          mkdir -p corpus/fuzz_ams_mime_limits
+          cargo +nightly fuzz run fuzz_ams_mime_limits \
+            corpus/fuzz_ams_mime_limits seeds -- -max_total_time=20

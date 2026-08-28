@@ -4,7 +4,7 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 
 > ## État : squelette
 >
-> Ce dépôt compile, il est linté, et il porte trois gates de CI. Il **ne sert
+> Ce dépôt compile, il est linté, et il porte quatre gates de CI. Il **ne sert
 > aucun protocole**.
 >
 > Une seule crate porte du code : `ams-mime`, et seulement son squelette — la
@@ -131,9 +131,21 @@ deux mois d'écart ne sont alors plus comparables.
 
 ## Vérification
 
-La CI (`.github/workflows/ci.yml`) tourne sur chaque PR et sur `main`, en trois
+La CI (`.github/workflows/ci.yml`) tourne sur chaque PR et sur `main`, en quatre
 jobs indépendants : la vérification du code (les quatre commandes ci-dessus, sous
-`-D warnings` et `--locked`), le gate **DCO**, et le gate de **couverture**.
+`-D warnings` et `--locked`), le gate **DCO**, le gate de **couverture**, et un
+**smoke-fuzz**.
+
+### Fuzzing (C3)
+
+`fuzz/` est une crate `cargo-fuzz` **hors du workspace** : elle exige un nightly,
+que le pin exact du workspace n'admet pas — deux LLVM produisent des profils de
+couverture mutuellement illisibles. Deux cibles sur `ams-mime`, sept propriétés,
+et **4 827 316 exécutions sans plantage** à ce jour. Voir
+[`fuzz/README.md`](fuzz/README.md).
+
+La CI en lance un smoke borné à vingt secondes par cible : un détecteur de
+régression, **pas une campagne**.
 
 ### Couverture (C2)
 

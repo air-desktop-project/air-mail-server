@@ -54,6 +54,15 @@ members = [
     "crates/ams-admin",
 ]
 
+# `fuzz/` est une crate cargo-fuzz HORS de ce workspace, et pas par commodité :
+# `cargo-fuzz` exige un nightly, tandis que ce workspace est épinglé sur stable
+# 1.98.0 en version exacte. Deux toolchains, ce sont deux LLVM, et les profils de
+# couverture que l'un écrit, l'autre ne sait pas les relire — le gate de C2 ne
+# pourrait plus conclure. La crate a donc son propre `Cargo.lock`, n'entre ni dans
+# la mesure de couverture ni dans le lock du produit, et rien de ce qu'elle tire
+# n'est jamais livré. Lancement : `cargo +nightly fuzz run <cible>` (fuzz/README.md).
+exclude = ["fuzz"]
+
 [workspace.package]
 # Version en LOCKSTEP : toutes les crates du workspace la partagent via
 # `version.workspace = true`. Un seul numéro à incrémenter par release, donc
