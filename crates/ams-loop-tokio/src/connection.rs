@@ -472,7 +472,20 @@ where
     P: Policy,
     D: Delivery,
 {
+    // LES DESTINATAIRES D'ABORD, et c'est la session qui les fournit. La boucle
+    // ne voit pas les `RCPT` — elle ne connaît aucun protocole — et ne les garde
+    // pas : une liste tenue ici survivrait au `RSET` qu'elle ne voit pas non
+    // plus, et livrerait le message suivant aux destinataires du précédent.
     let mut echec: Option<DeliveryFailure> = None;
+    for adresse in session.recipients() {
+        if let Err(cause) = delivery.add_recipient(adresse) {
+            echec = Some(cause);
+            break;
+        }
+    }
+    // Un échec ici n'arrête PAS la lecture : le message est lu jusqu'au bout
+    // avant d'être refusé, sans quoi la connexion resterait désynchronisée et le
+    // corps serait lu comme des commandes.
     let mut refuse = false;
     let mut fini = false;
 
@@ -589,6 +602,8 @@ mod tests {
     /// Une remise en mémoire, qui peut être réglée pour échouer.
     #[derive(Default)]
     struct Boite {
+        destinataires: Vec<Vec<u8>>,
+        echec_a_l_ouverture: Option<DeliveryFailure>,
         recu: Vec<u8>,
         acheve: bool,
         abandonne: bool,
@@ -596,6 +611,14 @@ mod tests {
     }
 
     impl Delivery for Boite {
+        fn add_recipient(&mut self, address: &[u8]) -> Result<(), DeliveryFailure> {
+            if let Some(cause) = self.echec_a_l_ouverture {
+                return Err(cause);
+            }
+            self.destinataires.push(address.to_vec());
+            Ok(())
+        }
+
         fn append(&mut self, chunk: &[u8]) -> Result<(), DeliveryFailure> {
             if let Some(cause) = self.echec {
                 return Err(cause);

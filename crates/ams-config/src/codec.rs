@@ -127,6 +127,12 @@ pub enum Error {
     /// et l'administrateur croirait avoir changé un mot de passe.
     DuplicateLogin(String),
 
+    /// Deux comptes déclarent la même adresse.
+    ///
+    /// Une question sans réponse : le premier arrivé l'emporterait en silence,
+    /// et la moitié du courrier partirait au mauvais endroit.
+    DuplicateAddress(String),
+
     /// L'empreinte d'un compte est refusée.
     ///
     /// Le nom est là **exprès** : un magasin de trente lignes sans nom oblige à
@@ -157,6 +163,9 @@ impl fmt::Display for Error {
             }
             Error::DuplicateLogin(login) => {
                 write!(f, "le compte `{login}` figure deux fois")
+            }
+            Error::DuplicateAddress(adresse) => {
+                write!(f, "l'adresse `{adresse}` est déclarée par deux comptes")
             }
             Error::WeakAccount { login, cause } => {
                 write!(f, "compte `{login}` : {cause}")

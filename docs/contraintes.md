@@ -430,6 +430,39 @@ sans laisser de trace. Le partage par GROUPE reste permis — c'est ainsi que le
 certificats se partagent sur un système bien tenu, et punir cela punirait la
 bonne pratique au lieu de la mauvaise.
 
+### Un compte, une boîte — et la fin du fourre-tout
+
+Écrit le 2026-08-29. Le nom du compte est **aussi le nom du répertoire de sa
+boîte** (`<maildir>/<compte>/`), et ses adresses d'enveloppe sont une liste.
+
+**Ce que cela change, et ce n'est pas mince** : accepter tout ce qui arrivait
+dans un domaine hébergé faisait de ce serveur un fourre-tout —
+`n.importe.qui@example.com` était accepté, écrit sur le disque, et jamais lu.
+C'est ainsi qu'on remplit un disque avec du courrier que rien n'attend.
+Désormais, une adresse qu'aucun compte ne déclare est refusée par un `550`.
+
+`--hosted` ne sert donc plus à accepter : c'est la liste de ce que le serveur
+déclare servir, confrontée aux adresses des comptes **une fois, au démarrage**.
+Ce qui était une seconde règle d'acceptation est devenu une déclaration
+contrôlée, ce qu'elle voulait dire depuis le début.
+
+**Un seul champ pour l'identité et le répertoire**, et c'est une frontière de
+sécurité : un login de `../../etc` ferait écrire hors de la racine. Le contrôle
+(`ams_auth::check_login`) a lieu à l'écriture du magasin ET à sa lecture, parce
+qu'un fichier peut arriver autrement que par notre outil.
+
+**Un message, plusieurs boîtes** : un `RCPT` par destinataire, un seul `DATA`.
+Le message est donc écrit dans chaque boîte, en parallèle. Un lien matériel
+coûterait moins de place, mais suppose un même système de fichiers — ce que rien
+ici ne garantit — et fait partager une inode entre des comptes qui n'ont rien à
+partager. Le choix est fait dans ce sens et il coûte de la place.
+
+Enfin, une limite honnête : les `rename` sont atomiques **un par un, pas
+ensemble**. Un échec au milieu d'une remise à plusieurs laisse les premiers
+remis, et le pair réessaiera — il recevra alors le message en double dans ces
+boîtes-là. C'est le compromis de tout serveur sans file d'attente, et le doublon
+est moins grave que la perte.
+
 ### Le magasin d'identifiants est UN AUTRE fichier
 
 Décidé le 2026-08-28. Le chemin est nommé dans la configuration

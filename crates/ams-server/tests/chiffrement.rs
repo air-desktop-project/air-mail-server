@@ -244,6 +244,7 @@ fn le_binaire_authentifie_un_compte_ecrit_par_l_administrateur() {
     let comptes = vec![ams_auth::Account {
         login: String::from("jean"),
         hash: empreinte,
+        addresses: vec![String::from("jean@example.com")],
     }];
     std::fs::write(
         &magasin,
@@ -341,4 +342,110 @@ fn un_magasin_lisible_par_tous_empeche_le_demarrage() {
     let plainte = String::from_utf8_lossy(&sortie.stderr);
     assert!(plainte.contains("TOUT LE MONDE"), "{plainte}");
     assert!(plainte.contains("magasin de comptes"), "{plainte}");
+}
+
+/// Lit jusqu'au `221`, ou jusqu'à ce que le pair raccroche.
+///
+/// `read_to_string` attendrait la fermeture ; or un serveur qui va bien répond
+/// `221` **puis** ferme, et une lecture qui expire entre les deux ferait échouer
+/// le test pour une raison qui n'est pas celle qu'il éprouve.
+fn lire_jusqu_au_conge(flux: &mut TcpStream, serveur: &mut Serveur) -> String {
+    use std::io::Read as _;
+    let mut tout = String::new();
+    let mut tampon = [0_u8; 1024];
+    while !tout.contains("221 ") {
+        match flux.read(&mut tampon) {
+            Ok(0) => break,
+            Ok(lus) => tout.push_str(&String::from_utf8_lossy(&tampon[..lus])),
+            Err(erreur) => {
+                // ON TUE AVANT DE LIRE : la sortie d'erreur d'un enfant vivant
+                // ne se termine jamais, et `read_to_string` y attendrait pour
+                // toujours. C'est arrivé.
+                let _ = serveur.0.kill();
+                let mut plainte = String::new();
+                if let Some(sortie) = serveur.0.stderr.as_mut() {
+                    let _ = sortie.read_to_string(&mut plainte);
+                }
+                panic!("lecture ({erreur}) après :\n{tout}\n--- serveur ---\n{plainte}")
+            }
+        }
+    }
+    tout
+}
+
+#[test]
+fn chaque_destinataire_recoit_dans_sa_boite() {
+    // LA CHAÎNE ENTIÈRE, VUE DU DISQUE : deux comptes, un message adressé aux
+    // deux, deux fichiers dans deux répertoires. Chaque pièce prise séparément
+    // était déjà juste ; ce qui casse, ce sont les jointures.
+    let atelier = atelier("deux-boites");
+    let magasin = atelier.0.join("comptes.bin");
+    let comptes: Vec<ams_auth::Account> = ["jean", "paul"]
+        .iter()
+        .map(|nom| ams_auth::Account {
+            login: (*nom).to_string(),
+            hash: String::from(ams_auth::DUMMY_HASH),
+            addresses: vec![format!("{nom}@example.com")],
+        })
+        .collect();
+    std::fs::write(
+        &magasin,
+        ams_config::encode_accounts(&comptes).expect("encodable"),
+    )
+    .expect("écriture");
+    std::fs::set_permissions(&magasin, std::fs::Permissions::from_mode(0o600))
+        .expect("permissions");
+
+    let port = port_libre();
+    let config = configuration(
+        &atelier,
+        port,
+        Tls::default(),
+        &magasin.display().to_string(),
+    );
+    let mut serveur = lancer(&config, port);
+
+    let mut flux = TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], port))).expect("connexion");
+    flux.set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("délai");
+    // Les `\r\n` sont ÉCHAPPÉS, et il faut y regarder à deux fois : un saut
+    // de ligne réel dans ce littéral donnerait un `LF` nu, que le serveur
+    // refuse de prendre pour une fin de ligne (contrebandage SMTP). Il
+    // attendrait alors le `CRLF` qui ne vient pas, et le test échouerait en
+    // accusant le serveur d'être muet. C'est arrivé.
+    flux.write_all(
+        concat!(
+            "EHLO client.example\r\n",
+            "MAIL FROM:<expediteur@ailleurs.example>\r\n",
+            "RCPT TO:<jean@example.com>\r\n",
+            "RCPT TO:<paul@example.com>\r\n",
+            "RCPT TO:<personne@example.com>\r\n",
+            "DATA\r\n",
+            "Subject: pour deux\r\n\r\nbonjour\r\n.\r\n",
+            "QUIT\r\n"
+        )
+        .as_bytes(),
+    )
+    .expect("écriture");
+    let dit = lire_jusqu_au_conge(&mut flux, &mut serveur);
+
+    // Une adresse qu'aucun compte ne déclare est refusée — CE N'EST PLUS UN
+    // FOURRE-TOUT, même dans un domaine hébergé.
+    assert!(dit.contains("550 Relay access denied"), "{dit}");
+    assert!(dit.contains("250 Message accepted"), "{dit}");
+
+    // Et sur le disque : un message dans chaque boîte, aucun ailleurs.
+    for nom in ["jean", "paul"] {
+        let recus: Vec<_> = std::fs::read_dir(atelier.0.join("boite").join(nom).join("new"))
+            .expect("boîte lisible")
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(recus.len(), 1, "boîte de {nom} : {dit}");
+        let contenu = std::fs::read_to_string(recus[0].path()).expect("message lisible");
+        assert!(contenu.contains("bonjour"), "{contenu}");
+    }
+    assert!(
+        !atelier.0.join("boite").join("personne").exists(),
+        "une boîte a été créée pour une adresse refusée"
+    );
 }

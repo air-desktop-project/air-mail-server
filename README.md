@@ -21,9 +21,9 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 > rangées dans un fichier séparé qu'`air-mail-admin` écrit. Sans comptes, il ne
 > l'annonce pas.
 >
-> Ce qu'il ne fait pas : **une seule boîte pour tout le monde** — répartir par
-> destinataire demande un modèle de comptes qui n'existe pas encore, et
-> s'authentifier n'y donne pas droit.
+> **Une boîte par compte** : seules les adresses qu'un compte déclare sont
+> acceptées, et chacune mène à `<maildir>/<compte>/`. Sans comptes, le serveur
+> n'accepte de courrier pour personne — ce n'est plus un fourre-tout.
 >
 > Onze crates portent du code ; les autres sont des emplacements réservés qui le
 > disent dans leur documentation.
@@ -110,7 +110,8 @@ donnerait plusieurs formes pour un même identifiant, de quoi passer à côté d
 filtre ou d'un comptage. `LOGIN` et `CRAM-MD5` ne sont pas servis, et la crate
 dit pourquoi plutôt que de se taire.
 
-`ams-auth` : les comptes et la vérification **Argon2id** (m = 19456 Kio, t = 2,
+`ams-auth` : les comptes — un nom, une empreinte, des adresses — et la
+vérification **Argon2id** (m = 19456 Kio, t = 2,
 p = 1 — la configuration OWASP). Un compte inconnu coûte le même temps qu'un
 compte connu, parce qu'il est comparé à une empreinte de personne : sans cela,
 l'écart de temps rendrait le magasin énumérable sans en connaître un seul mot de
@@ -275,6 +276,30 @@ détectée au démarrage**. Le fournisseur pur Rust ne sait pas comparer la clé
 certificat, si bien qu'un renouvellement qui ne remplace qu'un des deux fichiers
 donne un serveur qui démarre et dont toutes les poignées de main échouent.
 
+### Des comptes, des boîtes
+
+```sh
+printf %s "$MDP" | ./target/release/air-mail-admin account add comptes.bin \
+    --login jean --address jean@example.com --address j.dupont@example.com
+./target/release/air-mail-admin account list comptes.bin
+```
+
+**Le nom du compte est le nom de sa boîte** — `<maildir>/jean/{cur,new,tmp}`. Un
+seul champ plutôt que deux : un identifiant et un répertoire qu'on peut faire
+diverger finissent par diverger. C'est une frontière de sécurité, et le nom est
+donc contrôlé (ni `.`, ni `..`, sans `/`, sans point en tête) à l'écriture comme
+à la lecture.
+
+**Seules les adresses déclarées sont acceptées.** `--hosted` ne sert plus à
+accepter : c'est la liste de ce que le serveur annonce servir, et elle est
+confrontée aux adresses des comptes **au démarrage**. Une adresse dans un domaine
+non annoncé est presque toujours une faute de frappe, et le serveur refuse de
+démarrer en le disant.
+
+Un compte **sans adresse** est licite : il se connecte, il envoie, il ne reçoit
+rien. Et `postmaster` est un compte comme un autre — le serveur avertit au
+démarrage si personne ne le reçoit, parce que la RFC 5321 §4.5.1 l'exige.
+
 ### Authentifier
 
 ```sh
@@ -288,6 +313,11 @@ printf %s "$MDP" | ./target/release/air-mail-admin account add comptes.bin --log
     --tls-cert /etc/ams/chaine.pem --tls-key /etc/ams/cle.pem \
     --accounts comptes.bin
 ```
+
+Le magasin sert **deux choses** qu'il faut distinguer : le *routage* — quelles
+adresses existent, et vers quelle boîte — qui ne demande aucun chiffrement ; et
+l'*authentification*, qui n'est annoncée que sous TLS. Un serveur de courrier
+entrant en clair a donc des comptes sans avoir d'`AUTH`.
 
 Le magasin est un **autre fichier**, écrit en `0600` : les comptes et la
 configuration ne changent pas au même rythme, ne méritent pas les mêmes

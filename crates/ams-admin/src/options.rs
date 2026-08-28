@@ -149,9 +149,14 @@ OPTIONS DE `config write`
     Le serveur refuse de démarrer si la clé privée est lisible par tout le monde.
     Le partage par groupe, lui, reste permis.
 
-    SANS `--accounts`, le serveur n'annonce pas `AUTH` : il n'a personne à qui
-    répondre oui. Avec, il l'annonce — mais SOUS CHIFFREMENT SEULEMENT, et donc
-    jamais sans `--tls-cert`/`--tls-key`.
+    LE MAGASIN DE COMPTES SERT DEUX CHOSES, et il faut les distinguer :
+
+      - le ROUTAGE — seules les adresses qu'un compte déclare sont acceptées, et
+        chacune mène à la boîte de son compte. Cela ne demande aucun chiffrement.
+        SANS `--accounts`, le serveur n'accepte de courrier pour PERSONNE.
+      - l'AUTHENTIFICATION — `AUTH PLAIN`, qui n'est annoncé que sous
+        chiffrement, donc jamais sans `--tls-cert`/`--tls-key`. C'est un refus
+        que rien ne règle.
 
     Le port par défaut n'est pas 25 : le serveur refuse de s'exécuter en
     superutilisateur (C10), et les ports privilégiés s'atteignent par une règle
@@ -224,15 +229,6 @@ where
              « chiffre » ni « ne chiffre pas »",
         ));
     }
-    // Des comptes sans chiffrement, c'est `AUTH` qui ne sera JAMAIS annoncé —
-    // la session le refuse hors TLS, sans réglage possible. Le dire ici évite
-    // un serveur qu'on croit configuré et qui ne l'est pas.
-    if options.accounts.is_some() && options.tls_cert.is_none() {
-        return Err(ArgError::new(
-            "`--accounts` sans `--tls-cert` ne sert à rien : `AUTH` n'est jamais \
-             annoncé hors chiffrement, et ce refus n'est pas réglable",
-        ));
-    }
     Ok(Demande::Ecrire(Box::new(options)))
 }
 
@@ -275,6 +271,23 @@ mod tests {
         let config = ecrire(&["--domain", "mail.example.com"]).en_configuration();
         assert!(!config.tls.est_configure());
         assert!(config.tls.certificate_chain_path.is_empty());
+    }
+
+    #[test]
+    fn des_comptes_sans_chiffrement_sont_licites() {
+        // Ils ne servent alors qu'au ROUTAGE, et `AUTH` n'est pas annoncé. Le
+        // refuser interdirait un serveur qui reçoit du courrier en clair pour
+        // des boîtes connues — ce qui est exactement ce que fait un serveur de
+        // courrier entrant.
+        let config = ecrire(&[
+            "--domain",
+            "mail.example.com",
+            "--accounts",
+            "/etc/ams/comptes.bin",
+        ])
+        .en_configuration();
+        assert_eq!(config.accounts, "/etc/ams/comptes.bin");
+        assert!(!config.tls.est_configure());
     }
 
     #[test]

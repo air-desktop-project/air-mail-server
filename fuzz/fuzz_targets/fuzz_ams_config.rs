@@ -51,9 +51,10 @@ struct Entree {
     tls: [String; 2],
     /// Le chemin du magasin de comptes.
     comptes: String,
-    /// Des noms de comptes — VIDES ou EN DOUBLE si le fuzzer le veut : ce sont
-    /// exactement les deux cas que le décodeur refuse.
-    logins: Vec<String>,
+    /// Des comptes — noms et adresses LIBRES : vides, en double, invalides comme
+    /// noms de répertoire. Ce sont exactement les cas que le décodeur refuse, et
+    /// les contraindre ici cacherait ces refus au lieu de les éprouver.
+    logins: Vec<(String, Vec<String>)>,
     /// Les deux nombres de l'index, ZÉRO COMPRIS : c'est justement ce que le
     /// décodeur refuse, et le lui interdire ici cacherait ce refus.
     index: [u32; 2],
@@ -145,9 +146,10 @@ fuzz_target!(|entree: Entree| {
     let magasin: Vec<Account> = entree
         .logins
         .iter()
-        .map(|login| Account {
+        .map(|(login, adresses)| Account {
             login: login.clone(),
             hash: DUMMY_HASH.to_string(),
+            addresses: adresses.clone(),
         })
         .collect();
     if let Ok(ecrit) = encode_accounts(&magasin) {
@@ -159,8 +161,30 @@ fuzz_target!(|entree: Entree| {
                 for (rang, compte) in relu.iter().enumerate() {
                     assert!(
                         !relu[..rang].iter().any(|autre| autre.login == compte.login),
-                        "un doublon a traversé le décodeur"
+                        "un doublon de NOM a traversé le décodeur"
                     );
+                    // LES ADRESSES AUSSI, et à la casse près : deux boîtes pour
+                    // une adresse enverraient la moitié du courrier au mauvais
+                    // endroit.
+                    for adresse in &compte.addresses {
+                        let ailleurs = relu
+                            .iter()
+                            .enumerate()
+                            .filter(|(autre, _)| *autre != rang)
+                            .flat_map(|(_, autre)| autre.addresses.iter())
+                            .chain(
+                                compte
+                                    .addresses
+                                    .iter()
+                                    .filter(|autre| !core::ptr::eq(*autre, adresse)),
+                            );
+                        assert!(
+                            !ailleurs
+                                .into_iter()
+                                .any(|autre| autre.eq_ignore_ascii_case(adresse)),
+                            "un doublon d'ADRESSE a traversé le décodeur"
+                        );
+                    }
                 }
             }
             // Refusé : nom vide, ou nom en double. C'est le décodeur qui fait

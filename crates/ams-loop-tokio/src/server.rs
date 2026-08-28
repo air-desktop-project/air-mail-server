@@ -186,6 +186,9 @@ mod tests {
     struct Neant;
 
     impl Delivery for Neant {
+        fn add_recipient(&mut self, _address: &[u8]) -> Result<(), DeliveryFailure> {
+            Ok(())
+        }
         fn append(&mut self, _chunk: &[u8]) -> Result<(), DeliveryFailure> {
             Ok(())
         }

@@ -113,9 +113,11 @@ mod config;
 mod digits;
 mod error;
 mod policy;
+mod recipients;
 mod smtp;
 
 pub use config::{Capabilities, Config};
 pub use error::Error;
 pub use policy::{Policy, RecipientVerdict};
+pub use recipients::{ARENA_OCTETS, RECIPIENTS_MAX, Recipients};
 pub use smtp::{Action, DataOutcome, SmtpSession, Turn};

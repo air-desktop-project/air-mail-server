@@ -24,6 +24,30 @@ pub enum DeliveryFailure {
 /// ce qui arrive est le message, pas ce qui est passé sur le fil. Le ré-émettre
 /// demandera de le ré-échapper.
 pub trait Delivery {
+    /// Ouvre la remise vers **un** destinataire accepté.
+    ///
+    /// Appelée une fois par destinataire, juste avant le premier
+    /// [`Delivery::append`], et avec l'adresse sous sa forme `locale@domaine` —
+    /// le `<Postmaster>` nu a déjà été résolu par la session, qui est le seul
+    /// endroit à connaître le domaine du serveur.
+    ///
+    /// # Pourquoi ici, et pas au `RCPT`
+    ///
+    /// Parce que la boucle ne voit pas les `RCPT` : elle ne connaît aucun
+    /// protocole. C'est la session qui retient les destinataires acceptés — et
+    /// qui les oublie sur `RSET`, sur `EHLO`, à la fin d'un message et après une
+    /// poignée de main TLS. Une liste tenue ici survivrait à ces cinq
+    /// événements, et livrerait le message suivant aux destinataires du
+    /// précédent.
+    ///
+    /// # Errors
+    ///
+    /// [`DeliveryFailure`] — par exemple une boîte qu'on ne peut pas ouvrir. La
+    /// boucle refuse alors le message entier : accepter un message qu'on ne
+    /// peut remettre qu'à une partie des destinataires obligerait à en avertir
+    /// l'expéditeur, ce qui demande une file d'attente qui n'existe pas.
+    fn add_recipient(&mut self, address: &[u8]) -> Result<(), DeliveryFailure>;
+
     /// Reçoit un morceau du message.
     ///
     /// # Errors

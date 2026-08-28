@@ -14,7 +14,10 @@
 
 use alloc::vec::Vec;
 
-use ams_auth::{Account, check_stored};
+use alloc::string::String;
+use alloc::vec::Vec as ListeDeChaines;
+
+use ams_auth::{Account, check_login, check_stored};
 use capnp::message::ReaderOptions;
 use capnp::serialize;
 
@@ -25,7 +28,8 @@ use crate::codec::{Error, TRAVERSAL_LIMIT_WORDS, texte};
 ///
 /// # Ce qui est REFUSÉ au chargement, plutôt que découvert plus tard
 ///
-/// - un nom de compte vide — il ne peut correspondre à aucun pair ;
+/// - un nom de compte que [`ams_auth::check_login`] refuse — il devient un nom
+///   de RÉPERTOIRE, et c'est une frontière de sécurité ;
 /// - **un nom en double** : deux empreintes pour un nom, c'est une question
 ///   sans réponse, et le premier arrivé l'emporterait en silence ;
 /// - une empreinte que [`ams_auth::check_stored`] refuse — mauvais algorithme,
@@ -52,9 +56,10 @@ pub fn decode_accounts(octets: &[u8]) -> Result<Vec<Account>, Error> {
     let mut comptes: Vec<Account> = Vec::new();
     for compte in lu.get_accounts()?.iter() {
         let login = texte(compte.get_login()?)?;
-        if login.is_empty() {
-            return Err(Error::Empty("login"));
-        }
+        check_login(&login).map_err(|cause| Error::WeakAccount {
+            login: login.clone(),
+            cause,
+        })?;
         if comptes.iter().any(|connu| connu.login == login) {
             return Err(Error::DuplicateLogin(login));
         }
@@ -63,7 +68,32 @@ pub fn decode_accounts(octets: &[u8]) -> Result<Vec<Account>, Error> {
             login: login.clone(),
             cause,
         })?;
-        comptes.push(Account { login, hash });
+
+        let mut addresses: ListeDeChaines<String> = ListeDeChaines::new();
+        for adresse in compte.get_addresses()?.iter() {
+            let adresse = texte(adresse?)?;
+            if adresse.is_empty() {
+                return Err(Error::Empty("address"));
+            }
+            // UNE ADRESSE, UNE BOÎTE. Deux comptes qui la déclarent, c'est une
+            // question sans réponse ; le premier arrivé l'emporterait en
+            // silence, et la moitié du courrier partirait au mauvais endroit.
+            let deja = comptes
+                .iter()
+                .flat_map(|connu| connu.addresses.iter())
+                .chain(addresses.iter())
+                .any(|connue| connue.eq_ignore_ascii_case(&adresse));
+            if deja {
+                return Err(Error::DuplicateAddress(adresse));
+            }
+            addresses.push(adresse);
+        }
+
+        comptes.push(Account {
+            login,
+            hash,
+            addresses,
+        });
     }
     Ok(comptes)
 }
@@ -85,6 +115,11 @@ pub fn encode_accounts(comptes: &[Account]) -> Result<Vec<u8>, Error> {
                 .get(u32::try_from(rang).unwrap_or(u32::MAX));
             case.set_login(&compte.login);
             case.set_hash(&compte.hash);
+            let mut adresses =
+                case.init_addresses(u32::try_from(compte.addresses.len()).unwrap_or(u32::MAX));
+            for (position, adresse) in compte.addresses.iter().enumerate() {
+                adresses.set(u32::try_from(position).unwrap_or(u32::MAX), adresse);
+            }
         }
     }
     Ok(serialize::write_message_to_words(&message))
@@ -102,6 +137,7 @@ mod tests {
     fn compte(login: &str) -> Account {
         Account {
             login: String::from(login),
+            addresses: vec![alloc::format!("{login}@example.com")],
             // L'empreinte de personne fait un excellent compte de test : elle a
             // les vrais paramètres du produit, et n'ouvre rien.
             hash: DUMMY_HASH.to_string(),
@@ -140,11 +176,87 @@ mod tests {
     }
 
     #[test]
-    fn un_nom_vide_est_refuse() {
-        let mut mauvais = compte("jean");
-        mauvais.login = String::new();
-        let octets = encode_accounts(&[mauvais]).expect("encodable");
-        assert_eq!(decode_accounts(&octets), Err(Error::Empty("login")));
+    fn un_nom_qui_ne_peut_pas_etre_un_repertoire_est_refuse() {
+        // Le nom de compte est le nom du répertoire de la boîte : c'est une
+        // frontière de sécurité, et elle est tenue à la LECTURE aussi, parce
+        // qu'un fichier peut arriver autrement que par notre outil.
+        for mauvais_nom in ["", "..", "../../etc", "jean/paul"] {
+            let mut mauvais = compte("jean");
+            mauvais.login = String::from(mauvais_nom);
+            let octets = encode_accounts(&[mauvais]).expect("encodable");
+            let erreur = decode_accounts(&octets).expect_err("refusé");
+            assert!(
+                alloc::format!("{erreur}").contains("répertoire"),
+                "{mauvais_nom:?} : {erreur}"
+            );
+        }
+    }
+
+    #[test]
+    fn les_adresses_traversent_le_format() {
+        let mut jean = compte("jean");
+        jean.addresses = vec![
+            String::from("jean@example.com"),
+            String::from("j.dupont@example.com"),
+        ];
+        let relu = decode_accounts(&encode_accounts(&[jean.clone()]).expect("encodable"))
+            .expect("relisible");
+        assert_eq!(relu, vec![jean]);
+    }
+
+    #[test]
+    fn un_compte_sans_adresse_est_licite() {
+        // Il se connecte, il envoie, il ne reçoit pas. C'est un compte de
+        // soumission, et ce n'est pas un oubli à deviner.
+        let mut jean = compte("jean");
+        jean.addresses.clear();
+        let relu = decode_accounts(&encode_accounts(&[jean.clone()]).expect("encodable"))
+            .expect("relisible");
+        assert_eq!(relu, vec![jean]);
+    }
+
+    #[test]
+    fn une_adresse_vide_est_refusee() {
+        let mut jean = compte("jean");
+        jean.addresses = vec![String::new()];
+        let octets = encode_accounts(&[jean]).expect("encodable");
+        assert_eq!(decode_accounts(&octets), Err(Error::Empty("address")));
+    }
+
+    #[test]
+    fn une_adresse_declaree_deux_fois_est_refusee() {
+        // UNE ADRESSE, UNE BOÎTE. Le premier arrivé l'emporterait en silence, et
+        // la moitié du courrier partirait au mauvais endroit. La casse ne sauve
+        // personne : `route` la replie aussi.
+        let mut jean = compte("jean");
+        let mut paul = compte("paul");
+        jean.addresses = vec![String::from("contact@example.com")];
+        paul.addresses = vec![String::from("CONTACT@example.com")];
+        let octets = encode_accounts(&[jean, paul]).expect("encodable");
+        assert_eq!(
+            decode_accounts(&octets),
+            Err(Error::DuplicateAddress(String::from("CONTACT@example.com")))
+        );
+
+        // Et deux fois DANS LE MÊME compte, aussi.
+        let mut seul = compte("jean");
+        seul.addresses = vec![
+            String::from("contact@example.com"),
+            String::from("contact@example.com"),
+        ];
+        let octets = encode_accounts(&[seul]).expect("encodable");
+        let erreur = decode_accounts(&octets).expect_err("refusé");
+        assert_eq!(
+            erreur,
+            Error::DuplicateAddress(String::from("contact@example.com"))
+        );
+        // Et le message NOMME l'adresse : sans elle, il faut relire tout le
+        // magasin pour trouver laquelle.
+        let dit = alloc::format!("{erreur}");
+        assert!(
+            dit.contains("contact@example.com") && dit.contains("deux comptes"),
+            "{dit}"
+        );
     }
 
     #[test]

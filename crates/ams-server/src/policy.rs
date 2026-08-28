@@ -73,7 +73,7 @@ impl Places {
     }
 }
 
-/// N'accepte que les domaines hébergés.
+/// N'accepte que les adresses qu'un compte déclare.
 ///
 /// # Elle n'implémente PAS `Debug`, et c'est voulu
 ///
@@ -88,34 +88,40 @@ impl Places {
 /// pour tout ce qui n'est pas hébergé — **y compris quand la liste est vide**,
 /// auquel cas le serveur n'accepte de courrier pour personne. C'est le seul
 /// défaut qui ne relaie rien.
-pub struct DomainesHeberges {
-    domaines: Vec<Vec<u8>>,
-    comptes: Vec<Account>,
+pub struct BoitesConnues {
+    comptes: std::sync::Arc<Vec<Account>>,
+    /// L'adresse du postmaster de ce serveur, composée une fois.
+    postmaster: String,
     places: Places,
 }
 
-impl DomainesHeberges {
+impl BoitesConnues {
     /// Construit la politique.
+    ///
+    /// `postmaster` est l'adresse que `<Postmaster>` désigne — composée par
+    /// l'appelant, qui connaît le domaine annoncé.
     #[must_use]
-    pub fn new(domaines: &[String], comptes: Vec<Account>) -> Self {
+    pub fn new(comptes: std::sync::Arc<Vec<Account>>, postmaster: String) -> Self {
         Self {
-            domaines: domaines
-                .iter()
-                .map(|domaine| domaine.as_bytes().to_vec())
-                .collect(),
             comptes,
+            postmaster,
             places: Places::new(VERIFICATIONS_SIMULTANEES),
         }
     }
 
-    /// Y a-t-il quelqu'un à qui répondre oui ?
+    /// Y a-t-il des comptes ?
+    ///
+    /// **Ce n'est PAS « `AUTH` est-il annoncé »** : l'annonce demande aussi du
+    /// chiffrement, et c'est l'appelant qui compose les deux. Le nom précédent
+    /// disait `authentifie`, et le message de démarrage annonçait `AUTH PLAIN
+    /// offert` sur un serveur en clair qui ne l'offrait pas.
     #[must_use]
-    pub fn authentifie(&self) -> bool {
+    pub fn a_des_comptes(&self) -> bool {
         !self.comptes.is_empty()
     }
 }
 
-impl Policy for DomainesHeberges {
+impl Policy for BoitesConnues {
     /// # Deux précautions, et aucune n'est facultative
     ///
     /// 1. **`block_in_place`** : Argon2id est délibérément lent. L'exécuter sur
@@ -137,37 +143,53 @@ impl Policy for DomainesHeberges {
         })
     }
 
+    /// # Ce n'est plus « le domaine est-il hébergé », mais « la boîte
+    /// existe-t-elle »
+    ///
+    /// Accepter tout ce qui arrive dans un domaine hébergé faisait de ce serveur
+    /// un **fourre-tout** : `n.importe.qui@example.com` était accepté, écrit sur
+    /// le disque, et jamais lu par personne. C'est ainsi qu'on remplit un disque
+    /// avec du courrier que rien n'attend.
+    ///
+    /// La liste des domaines hébergés n'a pas disparu : elle est vérifiée **au
+    /// démarrage**, où chaque adresse de compte doit s'y rattacher. Ce qui était
+    /// une seconde règle d'acceptation est devenu une déclaration contrôlée une
+    /// fois, ce qui est exactement ce qu'elle voulait dire.
     fn accepts_recipient(&self, forward_path: &Path<'_>) -> RecipientVerdict {
-        match forward_path {
-            // RFC 5321 §4.5.1 : tout serveur DOIT accepter le courrier destiné à
-            // `<Postmaster>`. C'est par là qu'on signale qu'un serveur va mal, et
-            // le refuser rendrait ce signal impossible.
-            Path::Postmaster => RecipientVerdict::Accept,
-            Path::Mailbox(boite) => {
-                // Les noms de domaine sont insensibles à la casse.
-                let domaine = boite.domain().as_bytes();
-                if self
-                    .domaines
-                    .iter()
-                    .any(|heberge| heberge.eq_ignore_ascii_case(domaine))
-                {
-                    RecipientVerdict::Accept
-                } else {
-                    RecipientVerdict::RelayDenied
-                }
-            }
+        let adresse = match forward_path {
+            // RFC 5321 §4.1.1.3 : `<Postmaster>` sans domaine désigne le
+            // postmaster de CE serveur. L'adresse composée vient de l'appelant,
+            // qui la compose une fois — la session en fait autant de son côté
+            // pour la remise, et les deux doivent dire la même chose.
+            Path::Postmaster => self.postmaster.clone(),
+            Path::Mailbox(boite) => format!(
+                "{}@{}",
+                String::from_utf8_lossy(boite.local_part().as_bytes()),
+                String::from_utf8_lossy(boite.domain().as_bytes())
+            ),
             // `<>` n'est pas un destinataire ; la session le refuse déjà, et ce
             // bras est la ceinture de cette bretelle.
-            Path::Null => RecipientVerdict::RejectPermanent,
+            Path::Null => return RecipientVerdict::RejectPermanent,
+        };
+
+        if ams_auth::route(&self.comptes, adresse.as_bytes()).is_some() {
+            RecipientVerdict::Accept
+        } else {
+            // `RelayDenied` et non `RejectPermanent` : les deux rendent `550`,
+            // mais un expéditeur légitime qui se trompe de serveur doit pouvoir
+            // le comprendre sans lire les journaux d'en face.
+            RecipientVerdict::RelayDenied
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::DomainesHeberges;
+    use super::BoitesConnues;
+    use ams_auth::{Account, DUMMY_HASH};
     use ams_proto_smtp::{Command, Limits, Path};
     use ams_session::{Policy, RecipientVerdict};
+    use std::sync::Arc;
 
     /// Le chemin d'un `RCPT TO:` réel, décodé par le codec.
     fn destinataire(ligne: &[u8]) -> Path<'_> {
@@ -177,12 +199,35 @@ mod tests {
         }
     }
 
+    fn politique(adresses: &[&str]) -> BoitesConnues {
+        let comptes = if adresses.is_empty() {
+            Vec::new()
+        } else {
+            vec![Account {
+                login: String::from("jean"),
+                hash: String::from(DUMMY_HASH),
+                addresses: adresses.iter().map(|a| (*a).to_string()).collect(),
+            }]
+        };
+        BoitesConnues::new(
+            Arc::new(comptes),
+            String::from("postmaster@mail.example.com"),
+        )
+    }
+
     #[test]
-    fn seuls_les_domaines_heberges_sont_acceptes() {
-        let politique = DomainesHeberges::new(&[String::from("example.com")], Vec::new());
+    fn seule_une_adresse_declaree_est_acceptee() {
+        // CE N'EST PLUS UN FOURRE-TOUT. Avant, tout ce qui arrivait dans un
+        // domaine hébergé était accepté, écrit sur le disque, et jamais lu par
+        // personne.
+        let politique = politique(&["jean@example.com"]);
         assert_eq!(
             politique.accepts_recipient(&destinataire(b"RCPT TO:<jean@example.com>\r\n")),
             RecipientVerdict::Accept
+        );
+        assert_eq!(
+            politique.accepts_recipient(&destinataire(b"RCPT TO:<personne@example.com>\r\n")),
+            RecipientVerdict::RelayDenied
         );
         assert_eq!(
             politique.accepts_recipient(&destinataire(b"RCPT TO:<jean@ailleurs.example>\r\n")),
@@ -191,8 +236,8 @@ mod tests {
     }
 
     #[test]
-    fn la_comparaison_de_domaine_ignore_la_casse() {
-        let politique = DomainesHeberges::new(&[String::from("Example.COM")], Vec::new());
+    fn la_comparaison_ignore_la_casse_des_deux_cotes() {
+        let politique = politique(&["Jean@Example.COM"]);
         assert_eq!(
             politique.accepts_recipient(&destinataire(b"RCPT TO:<jean@example.com>\r\n")),
             RecipientVerdict::Accept
@@ -200,28 +245,43 @@ mod tests {
     }
 
     #[test]
-    fn postmaster_est_toujours_accepte() {
-        // RFC 5321 §4.5.1 : c'est par là qu'on signale qu'un serveur va mal.
-        let politique = DomainesHeberges::new(&[], Vec::new());
+    fn le_postmaster_nu_suit_la_meme_regle_que_les_autres() {
+        // RFC 5321 §4.5.1 : il DOIT être joignable, et c'est par là qu'on
+        // signale qu'un serveur va mal. Mais l'accepter sans boîte reviendrait à
+        // dire `250` pour un message qu'on n'a nulle part où mettre : le serveur
+        // avertit au démarrage plutôt que de mentir à chaque message.
+        let sans = politique(&["jean@example.com"]);
         assert_eq!(
-            politique.accepts_recipient(&destinataire(b"RCPT TO:<Postmaster>\r\n")),
+            sans.accepts_recipient(&destinataire(b"RCPT TO:<Postmaster>\r\n")),
+            RecipientVerdict::RelayDenied
+        );
+
+        let avec = politique(&["postmaster@mail.example.com"]);
+        assert_eq!(
+            avec.accepts_recipient(&destinataire(b"RCPT TO:<Postmaster>\r\n")),
+            RecipientVerdict::Accept
+        );
+        // Et sous sa forme complète, évidemment.
+        assert_eq!(
+            avec.accepts_recipient(&destinataire(b"RCPT TO:<postmaster@mail.example.com>\r\n")),
             RecipientVerdict::Accept
         );
     }
 
     #[test]
-    fn sans_domaine_heberge_rien_n_est_relaye() {
-        // Le seul défaut qui ne relaie rien.
-        let politique = DomainesHeberges::new(&[], Vec::new());
+    fn sans_compte_rien_n_est_accepte() {
+        // Le seul défaut qui ne relaie rien — et qui ne remplit aucun disque.
+        let politique = politique(&[]);
         assert_eq!(
             politique.accepts_recipient(&destinataire(b"RCPT TO:<jean@example.com>\r\n")),
             RecipientVerdict::RelayDenied
         );
+        assert!(!politique.a_des_comptes());
     }
 
     #[test]
     fn un_chemin_nul_n_est_pas_un_destinataire() {
-        let politique = DomainesHeberges::new(&[], Vec::new());
+        let politique = politique(&[]);
         assert_eq!(
             politique.accepts_recipient(&Path::Null),
             RecipientVerdict::RejectPermanent
@@ -235,7 +295,6 @@ mod tests {
         // et un `{:?}` dans une trace les y déposerait — dans un journal, dans
         // un rapport d'incident, dans un ticket. Le plus sûr est qu'il n'y ait
         // rien à imprimer.
-        let politique = DomainesHeberges::new(&[], Vec::new());
-        assert!(!politique.authentifie());
+        assert!(politique(&["jean@example.com"]).a_des_comptes());
     }
 }

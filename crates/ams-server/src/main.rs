@@ -32,6 +32,7 @@
 mod delivery;
 mod policy;
 
+use std::collections::BTreeMap;
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -47,8 +48,8 @@ use tokio::net::TcpListener;
 
 use rustls::ServerConfig;
 
-use crate::delivery::MaildirDelivery;
-use crate::policy::DomainesHeberges;
+use crate::delivery::{Boites, MaildirDelivery};
+use crate::policy::BoitesConnues;
 
 /// Le texte de `--help`.
 const AIDE: &str = "\
@@ -121,6 +122,36 @@ fn charger_comptes(chemin: &str) -> Result<Vec<Account>, String> {
     let octets =
         std::fs::read(chemin).map_err(|erreur| format!("comptes `{chemin}` : {erreur}"))?;
     ams_config::decode_accounts(&octets).map_err(|erreur| format!("comptes `{chemin}` : {erreur}"))
+}
+
+/// Chaque adresse de compte relève-t-elle d'un domaine annoncé ?
+///
+/// # Ce que `--hosted` veut dire, maintenant
+///
+/// Il ne sert plus à ACCEPTER — c'est le magasin de comptes qui décide de cela,
+/// adresse par adresse. Il reste la liste de ce que ce serveur déclare servir,
+/// et elle est confrontée aux comptes **une fois, au démarrage**. Une adresse
+/// dans un domaine qu'on n'annonce pas est presque toujours une faute de frappe,
+/// et la découvrir ici coûte une seconde plutôt qu'un courrier qui n'arrive
+/// jamais.
+fn verifier_les_domaines(comptes: &[Account], heberges: &[String]) -> Result<(), String> {
+    for compte in comptes {
+        for adresse in &compte.addresses {
+            let domaine = adresse.rsplit_once('@').map_or("", |(_, apres)| apres);
+            if !heberges
+                .iter()
+                .any(|heberge| heberge.eq_ignore_ascii_case(domaine))
+            {
+                return Err(format!(
+                    "compte `{}` : l'adresse `{adresse}` est dans un domaine qui n'est pas \
+                     annoncé. Ajoutez `--hosted {domaine}` à la configuration, ou corrigez \
+                     l'adresse.",
+                    compte.login
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Charge le matériel TLS que la configuration nomme, s'il en nomme.
@@ -210,6 +241,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     // c'est la même.
     let chiffrement = charger_tls(&options.tls)?;
     let comptes = charger_comptes(&options.accounts)?;
+    verifier_les_domaines(&comptes, &options.hosted)?;
     // `AUTH` n'est annoncé QUE si les deux conditions tiennent : quelqu'un à qui
     // répondre oui, et de quoi chiffrer. La session refuse `AUTH` hors TLS de
     // toute façon ; l'annoncer sans chiffrement ne ferait que mentir plus tôt.
@@ -223,29 +255,43 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         config
     };
 
-    let boite = Arc::new(
-        Maildir::open(&maildir, domaine, ams_store::fresh_uid_validity())
-            .map_err(|erreur| format!("boîte `{}` : {erreur}", options.maildir))?,
-    );
-    let resume = boite
-        .summary()
-        .map_err(|erreur| format!("lecture de la boîte : {erreur}"))?;
+    // UNE BOÎTE PAR COMPTE, sous `<maildir>/<login>/`. Le nom du compte est le
+    // nom du répertoire, et `ams_auth::check_login` l'a déjà validé — deux fois
+    // plutôt qu'une, ici et à l'écriture du magasin, parce que c'est une
+    // frontière de sécurité et qu'un fichier peut arriver autrement que par
+    // notre outil.
+    //
+    // Toutes sont ouvertes AU DÉMARRAGE, ce qui coûte un parcours de répertoire
+    // par compte. Le faire à la demande étalerait ce coût sur les connexions et
+    // rendrait la première remise de chaque boîte plus lente que les autres ;
+    // surtout, un magasin illisible se découvrirait alors sous charge plutôt
+    // qu'au démarrage.
+    let mut boites: BTreeMap<String, Arc<Maildir>> = BTreeMap::new();
+    let mut messages = 0_u32;
+    for compte in &comptes {
+        let racine = maildir.join(&compte.login);
+        let boite = Maildir::open(&racine, domaine, ams_store::fresh_uid_validity())
+            .map_err(|erreur| format!("boîte de `{}` : {erreur}", compte.login))?;
+        let resume = boite
+            .summary()
+            .map_err(|erreur| format!("boîte de `{}` : {erreur}", compte.login))?;
+        messages = messages.saturating_add(resume.numbered);
+        boites.insert(compte.login.clone(), Arc::new(boite));
+    }
+    let boites: Boites = Arc::new(boites);
 
     let ecouteur = TcpListener::bind(ecoute)
         .await
         .map_err(|erreur| format!("écoute sur {ecoute} : {erreur}"))?;
 
     eprintln!(
-        "air-mail-server {} : {} écoute sur {}, boîte `{}` ({} message(s), UIDVALIDITY {}, prochain UID {})",
+        "air-mail-server {} : {} écoute sur {}, {} boîte(s) sous `{}` ({} message(s))",
         env!("CARGO_PKG_VERSION"),
         options.domain,
         ecoute,
+        boites.len(),
         options.maildir,
-        resume.numbered,
-        boite.uid_validity().value(),
-        // Le numéro qui sera SERVI, et non « le plus grand des noms plus un » :
-        // après une réouverture, le filigrane écrit place le prochain plus loin.
-        boite.next_uid().value()
+        messages
     );
     eprintln!(
         "air-mail-server : {}",
@@ -267,23 +313,53 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         usize::try_from(options.tracked_sources).unwrap_or(usize::MAX),
         options.guard,
     ));
-    let politique = Arc::new(DomainesHeberges::new(&options.hosted, comptes));
+    let comptes = Arc::new(comptes);
+    let postmaster = format!("postmaster@{}", options.domain);
+    let politique = Arc::new(BoitesConnues::new(Arc::clone(&comptes), postmaster.clone()));
     eprintln!(
         "air-mail-server : {}",
-        if politique.authentifie() {
-            format!("AUTH PLAIN offert, magasin `{}`", options.accounts)
-        } else {
-            String::from("AUTH non annoncé — aucun compte configuré")
+        match (politique.a_des_comptes(), authentifie) {
+            (_, true) => format!("AUTH PLAIN offert, magasin `{}`", options.accounts),
+            // Le cas qui mentait avant : des comptes, mais pas de chiffrement.
+            // Ils servent alors au ROUTAGE seulement, et `AUTH` n'est pas
+            // annoncé — la session le refuse hors TLS, sans réglage possible.
+            (true, false) => format!(
+                "comptes chargés pour le routage, magasin `{}` — AUTH non annoncé, faute de \
+                 chiffrement",
+                options.accounts
+            ),
+            (false, false) => String::from(
+                "aucun compte : ce serveur n'accepte de courrier pour PERSONNE, et n'annonce \
+                 pas AUTH",
+            ),
         }
     );
-    let pour_la_remise = Arc::clone(&boite);
+    // LE POSTMASTER EST UN COMPTE COMME UN AUTRE, et la RFC 5321 §4.5.1 exige
+    // qu'il soit joignable. On ne le fabrique pas d'office — inventer une boîte
+    // que personne n'a demandée serait pire — mais on le DIT, parce qu'un
+    // serveur qui refuse `postmaster` est un serveur dont personne ne peut
+    // signaler qu'il va mal.
+    if ams_auth::route(&comptes, postmaster.as_bytes()).is_none() {
+        eprintln!(
+            "air-mail-server : ATTENTION — aucun compte ne reçoit `{postmaster}`. \
+             La RFC 5321 §4.5.1 l'exige : `air-mail-admin account add … --address {postmaster}`."
+        );
+    }
+
+    let pour_la_remise = Arc::clone(&boites);
+    let comptes_pour_la_remise = Arc::clone(&comptes);
 
     let stats = serve(
         ecouteur,
         config,
         politique,
         garde,
-        move || MaildirDelivery::new(Arc::clone(&pour_la_remise)),
+        move || {
+            MaildirDelivery::new(
+                Arc::clone(&pour_la_remise),
+                Arc::clone(&comptes_pour_la_remise),
+            )
+        },
         ServeOptions {
             max_connections: usize::try_from(options.max_connections).unwrap_or(usize::MAX),
             timeouts: Timeouts {
@@ -338,7 +414,10 @@ async fn arret() {
 
 #[cfg(test)]
 mod tests {
-    use super::{charger_comptes, charger_tls, refuser_fichier_lisible_par_tous};
+    use super::{
+        charger_comptes, charger_tls, refuser_fichier_lisible_par_tous, verifier_les_domaines,
+    };
+    use ams_auth::Account;
     use ams_config::Tls;
     use std::os::unix::fs::PermissionsExt as _;
     use std::path::PathBuf;
@@ -366,6 +445,39 @@ mod tests {
         std::fs::set_permissions(&chemin, std::fs::Permissions::from_mode(mode))
             .expect("permissions");
         chemin.display().to_string()
+    }
+
+    #[test]
+    fn une_adresse_hors_des_domaines_annonces_empeche_le_demarrage() {
+        // Presque toujours une faute de frappe, et la découvrir au démarrage
+        // coûte une seconde plutôt qu'un courrier qui n'arrive jamais.
+        let compte = Account {
+            login: String::from("jean"),
+            hash: String::from(ams_auth::DUMMY_HASH),
+            addresses: vec![String::from("jean@ailleurs.example")],
+        };
+        let erreur = verifier_les_domaines(
+            std::slice::from_ref(&compte),
+            &[String::from("example.com")],
+        )
+        .expect_err("refusé");
+        assert!(erreur.contains("ailleurs.example"), "{erreur}");
+        assert!(erreur.contains("--hosted"), "{erreur}");
+
+        // Et la casse ne fait pas échouer un domaine qui est bien annoncé.
+        assert!(
+            verifier_les_domaines(
+                std::slice::from_ref(&compte),
+                &[String::from("Ailleurs.EXAMPLE")]
+            )
+            .is_ok()
+        );
+        // Un compte sans adresse ne dépend d'aucun domaine.
+        let muet = Account {
+            addresses: Vec::new(),
+            ..compte
+        };
+        assert!(verifier_les_domaines(&[muet], &[]).is_ok());
     }
 
     #[test]

@@ -35,4 +35,14 @@ struct Account {
   # serveur refuse au chargement toute empreinte sous son plancher : une
   # vérification emploie les paramètres inscrits ici, pas les siens.
   hash @1 :Text;
+
+  # Les adresses d'enveloppe qui arrivent dans la boîte de ce compte.
+  #
+  # VIDE EST LICITE : un compte qui se connecte sans rien recevoir est un compte
+  # de soumission, et c'est une situation réelle. Ce n'est pas un oubli qu'il
+  # faudrait deviner.
+  #
+  # Une adresse ne peut appartenir qu'à UN compte : deux boîtes pour une adresse
+  # est une question sans réponse, et le premier arrivé l'emporterait en silence.
+  addresses @2 :List(Text);
 }

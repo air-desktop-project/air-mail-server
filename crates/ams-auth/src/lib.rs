@@ -36,6 +36,18 @@
 //! nombre**, et `ams-server` le fait. Le dire ici plutôt que de le supposer
 //! ailleurs, c'est la moitié du travail.
 //!
+//! # Un compte, une boîte, et des adresses
+//!
+//! Le nom de compte est **aussi le nom du répertoire** de sa boîte. Deux
+//! champs — un identifiant et un répertoire — auraient permis de les faire
+//! diverger ; un seul impose ses contraintes des deux côtés, et
+//! [`check_login`] les énonce. C'est une frontière de sécurité : un nom de
+//! compte qui contiendrait `../` ferait écrire hors de la racine.
+//!
+//! Les adresses d'enveloppe, elles, sont une **liste** : `jean@example.com` et
+//! `j.dupont@example.com` peuvent mener à la même boîte, et un compte sans
+//! aucune adresse est un compte de soumission, qui envoie sans recevoir.
+//!
 //! # Ce qui est vérifié D'AVANCE sur une empreinte stockée
 //!
 //! Une vérification Argon2 emploie les paramètres inscrits **dans l'empreinte**,
@@ -53,6 +65,6 @@ extern crate alloc;
 mod store;
 
 pub use store::{
-    Account, DUMMY_HASH, Error, MEMORY_KIB, PARALLELISM, TIME_COST, authenticate, check_stored,
-    hash_password,
+    Account, DUMMY_HASH, Error, MEMORY_KIB, PARALLELISM, TIME_COST, authenticate, check_login,
+    check_stored, hash_password, route,
 };

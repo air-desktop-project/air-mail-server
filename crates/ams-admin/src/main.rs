@@ -39,10 +39,15 @@ COMMANDES
                         main, et c'est délibéré.
     config show <fichier>
                         relit une configuration et l'affiche.
-    account add <fichier> --login <nom>
+    account add <fichier> --login <nom> [--address <adresse>]...
                         ajoute ou remplace un compte. LE MOT DE PASSE SE LIT SUR
                         L'ENTRÉE STANDARD, jamais sur la ligne de commande : ce
                         que `ps` affiche, tout le monde le lit.
+                        `--address` est répétable, et donne les adresses qui
+                        arrivent dans la boîte de ce compte. SANS AUCUNE, le
+                        compte se connecte mais ne reçoit rien.
+                        Le nom du compte est aussi le nom de sa boîte : ni vide,
+                        ni `.`, ni `..`, sans `/`, et sans point en tête.
     account list <fichier>
                         liste les noms de comptes. Jamais les empreintes.
     account remove <fichier> --login <nom>
@@ -69,7 +74,13 @@ fn main() -> ExitCode {
         ["summary", racine] => resumer(Path::new(racine)),
         ["config", "write", fichier, reste @ ..] => ecrire(Path::new(fichier), reste),
         ["config", "show", fichier] => montrer(Path::new(fichier)),
-        ["account", "add", fichier, "--login", nom] => ajouter(Path::new(fichier), nom),
+        ["account", "add", fichier, "--login", nom, reste @ ..] => match adresses_de(reste) {
+            Ok(adresses) => ajouter(Path::new(fichier), nom, &adresses),
+            Err(message) => {
+                eprintln!("air-mail-admin : {message}");
+                ExitCode::from(2)
+            }
+        },
         ["account", "list", fichier] => lister(Path::new(fichier)),
         ["account", "remove", fichier, "--login", nom] => retirer(Path::new(fichier), nom),
         autre => {
@@ -296,9 +307,28 @@ fn sel() -> Result<[u8; 16], String> {
     Ok(graine)
 }
 
+/// Lit les `--address` répétés.
+fn adresses_de(arguments: &[&str]) -> Result<Vec<String>, String> {
+    let mut adresses = Vec::new();
+    let mut reste = arguments.iter();
+    while let Some(argument) = reste.next() {
+        if *argument != "--address" {
+            return Err(format!("option inconnue : `{argument}`"));
+        }
+        let valeur = reste
+            .next()
+            .ok_or_else(|| String::from("`--address` attend une valeur"))?;
+        if valeur.is_empty() {
+            return Err(String::from("une adresse vide ne désigne personne"));
+        }
+        adresses.push((*valeur).to_string());
+    }
+    Ok(adresses)
+}
+
 /// Ajoute ou remplace un compte.
-fn ajouter(fichier: &Path, nom: &str) -> ExitCode {
-    match ajouter_ou_dire(fichier, nom) {
+fn ajouter(fichier: &Path, nom: &str, adresses: &[String]) -> ExitCode {
+    match ajouter_ou_dire(fichier, nom, adresses) {
         Ok(remplace) => {
             println!(
                 "{} : compte `{nom}` {}",
@@ -314,10 +344,11 @@ fn ajouter(fichier: &Path, nom: &str) -> ExitCode {
     }
 }
 
-fn ajouter_ou_dire(fichier: &Path, nom: &str) -> Result<bool, String> {
-    if nom.is_empty() {
-        return Err(String::from("un nom de compte vide ne désigne personne"));
-    }
+fn ajouter_ou_dire(fichier: &Path, nom: &str, adresses: &[String]) -> Result<bool, String> {
+    // LE MÊME CONTRÔLE QU'AU CHARGEMENT, et devant le terminal : le nom devient
+    // un nom de répertoire, et le dire ici coûte une seconde plutôt qu'un
+    // démarrage refusé.
+    ams_auth::check_login(nom).map_err(|cause| format!("nom de compte : {cause}"))?;
     let secret = lire_mot_de_passe()?;
     let empreinte = ams_auth::hash_password(&secret, &sel()?)
         .map_err(|erreur| format!("hachage : {erreur}"))?;
@@ -328,6 +359,7 @@ fn ajouter_ou_dire(fichier: &Path, nom: &str) -> Result<bool, String> {
     comptes.push(Account {
         login: nom.to_string(),
         hash: empreinte,
+        addresses: adresses.to_vec(),
     });
     // ON RELIT CE QU'ON VIENT D'ÉCRIRE avant de le poser sur le disque : c'est
     // la même discipline que `config write`. Un magasin illisible découvert au
@@ -349,7 +381,16 @@ fn lister(fichier: &Path) -> ExitCode {
         }
         Ok(comptes) => {
             for compte in &comptes {
-                println!("{}", compte.login);
+                // LE NOM ET LES ADRESSES, JAMAIS L'EMPREINTE. Elle n'a rien à
+                // faire dans un terminal, un journal ou une capture d'écran.
+                if compte.addresses.is_empty() {
+                    println!(
+                        "{}  (aucune adresse — ce compte ne reçoit rien)",
+                        compte.login
+                    );
+                } else {
+                    println!("{}  {}", compte.login, compte.addresses.join(", "));
+                }
             }
             ExitCode::SUCCESS
         }

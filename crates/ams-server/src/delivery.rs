@@ -1,11 +1,15 @@
-//! Le fil entre la boucle et la boîte.
+//! Le fil entre la boucle et les boîtes.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ams_loop_tokio::{Delivery, DeliveryFailure};
 use ams_store::{Incoming, Maildir};
 
-/// Remet les messages dans une boîte Maildir.
+/// Les boîtes du serveur, une par compte, partagées par toutes les connexions.
+pub type Boites = Arc<BTreeMap<String, Arc<Maildir>>>;
+
+/// Remet un message dans **les boîtes de ses destinataires**.
 ///
 /// # Pourquoi cette pièce vit dans le binaire
 ///
@@ -13,12 +17,24 @@ use ams_store::{Incoming, Maildir};
 /// et l'implémenter dans un écrivain de fichiers l'aurait fait dépendre de tokio.
 /// L'adaptation appartient donc à qui connaît les deux — c'est-à-dire ici.
 ///
+/// # Un message, plusieurs boîtes : ON ÉCRIT N FOIS
+///
+/// Un `RCPT` par destinataire, un seul `DATA`. Le message est donc écrit dans
+/// chaque boîte, en parallèle, morceau par morceau.
+///
+/// **Un lien matériel serait moins cher** — un seul contenu sur le disque au
+/// lieu de N — et c'est ce que font les serveurs qui optimisent. Il suppose en
+/// revanche que toutes les boîtes vivent sur le même système de fichiers, ce que
+/// rien ici ne garantit ni ne vérifie ; et il fait partager une inode entre des
+/// comptes qui n'ont, par ailleurs, rien à partager. Le choix est fait dans ce
+/// sens, il coûte de la place, et il est écrit ici plutôt que découvert.
+///
 /// # `block_in_place`, et pourquoi il n'est appelé QUE sur `finish`
 ///
-/// Valider un message fait deux `fsync` — le fichier, puis le répertoire — et un
-/// `fsync` peut prendre le temps d'une écriture disque. L'appeler dans une tâche
-/// asynchrone bloquerait l'ordonnanceur ; `block_in_place` sort le fil courant du
-/// bassin le temps de l'attente.
+/// Valider un message fait deux `fsync` par boîte — le fichier, puis le
+/// répertoire — et un `fsync` peut prendre le temps d'une écriture disque.
+/// L'appeler dans une tâche asynchrone bloquerait l'ordonnanceur ;
+/// `block_in_place` sort le fil courant du bassin le temps de l'attente.
 ///
 /// `append`, lui, ne fait qu'écrire dans le cache de pages : l'y envelopper
 /// coûterait un déménagement de fil par morceau de message, pour rien.
@@ -26,65 +42,77 @@ use ams_store::{Incoming, Maildir};
 /// **Cela exige l'ordonnanceur multi-fils** : `block_in_place` panique sur le
 /// mono-fil. Le binaire le choisit, et c'est pour cela qu'il le choisit.
 pub struct MaildirDelivery {
-    boite: Arc<Maildir>,
-    arrivee: Option<Incoming>,
-    echoue: bool,
+    boites: Boites,
+    comptes: Arc<Vec<ams_auth::Account>>,
+    arrivees: Vec<Incoming>,
 }
 
 impl MaildirDelivery {
-    /// Ouvre une remise vers cette boîte.
+    /// Ouvre une remise vers ce jeu de boîtes.
     #[must_use]
-    pub fn new(boite: Arc<Maildir>) -> Self {
+    pub fn new(boites: Boites, comptes: Arc<Vec<ams_auth::Account>>) -> Self {
         Self {
-            boite,
-            arrivee: None,
-            echoue: false,
+            boites,
+            comptes,
+            arrivees: Vec::new(),
         }
-    }
-
-    /// La remise en cours, ouverte à la demande.
-    fn arrivee(&mut self) -> Result<&mut Incoming, DeliveryFailure> {
-        if self.arrivee.is_none() {
-            // Un `deliver` qui échoue — plus d'UID, disque plein — est
-            // TEMPORAIRE : le pair a le droit de réessayer, et lui répondre
-            // « définitivement non » lui ferait jeter un message qui pourrait
-            // passer dans une heure.
-            self.arrivee = Some(
-                self.boite
-                    .deliver()
-                    .map_err(|_| DeliveryFailure::Temporary)?,
-            );
-        }
-        self.arrivee.as_mut().ok_or(DeliveryFailure::Temporary)
     }
 }
 
 impl Delivery for MaildirDelivery {
+    fn add_recipient(&mut self, address: &[u8]) -> Result<(), DeliveryFailure> {
+        // La politique a déjà accepté cette adresse au `RCPT` ; si elle ne mène
+        // plus nulle part, c'est que le magasin a changé sous nos pieds. C'est
+        // TEMPORAIRE : le pair a le droit de réessayer.
+        let compte = ams_auth::route(&self.comptes, address).ok_or(DeliveryFailure::Temporary)?;
+        let boite = self
+            .boites
+            .get(&compte.login)
+            .ok_or(DeliveryFailure::Temporary)?;
+        // Un `deliver` qui échoue — plus d'UID, disque plein — est TEMPORAIRE :
+        // lui répondre « définitivement non » ferait jeter au pair un message
+        // qui pourrait passer dans une heure.
+        let arrivee = boite.deliver().map_err(|_| DeliveryFailure::Temporary)?;
+        self.arrivees.push(arrivee);
+        Ok(())
+    }
+
     fn append(&mut self, chunk: &[u8]) -> Result<(), DeliveryFailure> {
-        let arrivee = self.arrivee()?;
-        arrivee.write(chunk).map_err(|_| {
-            self.echoue = true;
-            DeliveryFailure::Temporary
-        })
+        for arrivee in &mut self.arrivees {
+            arrivee
+                .write(chunk)
+                .map_err(|_| DeliveryFailure::Temporary)?;
+        }
+        Ok(())
     }
 
     fn finish(&mut self) -> Result<(), DeliveryFailure> {
-        // Un message vide est un message : le pair a pu envoyer `DATA` puis
-        // `.` aussitôt, et il attend un verdict comme les autres.
-        let arrivee = match self.arrivee.take() {
-            Some(arrivee) => arrivee,
-            None => self
-                .boite
-                .deliver()
-                .map_err(|_| DeliveryFailure::Temporary)?,
-        };
-        tokio::task::block_in_place(|| arrivee.commit())
-            .map(|_uid| ())
-            .map_err(|_| DeliveryFailure::Temporary)
+        // AUCUN DESTINATAIRE, AUCUNE REMISE. La session n'accepte pas de `DATA`
+        // sans `RCPT`, et accepter un message qui ne va nulle part reviendrait à
+        // répondre `250` pour une boîte qui n'existe pas.
+        if self.arrivees.is_empty() {
+            return Err(DeliveryFailure::Temporary);
+        }
+        let arrivees = core::mem::take(&mut self.arrivees);
+        tokio::task::block_in_place(|| {
+            for arrivee in arrivees {
+                // TOUT OU RIEN N'EST PAS TENABLE ICI : les `rename` sont
+                // atomiques un par un, pas ensemble. Un échec au milieu laisse
+                // les premiers remis, et le pair réessaiera — il recevra alors
+                // le message en double dans ces boîtes-là. C'est le compromis
+                // que fait tout serveur sans file d'attente, et le doublon est
+                // moins grave que la perte.
+                arrivee
+                    .commit()
+                    .map(|_uid| ())
+                    .map_err(|_| DeliveryFailure::Temporary)?;
+            }
+            Ok(())
+        })
     }
 
     fn abort(&mut self) {
-        if let Some(arrivee) = self.arrivee.take() {
+        for arrivee in core::mem::take(&mut self.arrivees) {
             arrivee.abort();
         }
     }

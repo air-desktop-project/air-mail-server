@@ -1,6 +1,7 @@
 //! Les comptes, leur validation, et la vérification d'un mot de passe.
 
 use alloc::string::{String, ToString as _};
+use alloc::vec::Vec;
 use core::fmt;
 
 use ams_sasl::Credentials;
@@ -30,13 +31,78 @@ pub const PARALLELISM: u32 = 1;
 pub const DUMMY_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$YWlyLW1haWwtc2VydmVyLWR1bW15\
                               $8MOaCJHIT7hh8m/QIhWKKUdSMDBDcVYQnCWWm1uXA0Y";
 
-/// Un compte : un nom, et une empreinte au format PHC.
+/// Un compte : un nom, une empreinte, et les adresses qui lui arrivent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Account {
     /// Le nom de compte, tel que le pair l'enverra.
+    ///
+    /// **C'est aussi le nom du répertoire de sa boîte**, ce qui impose des
+    /// contraintes que [`check_login`] énonce. Deux champs — un identifiant et
+    /// un répertoire — auraient permis de les faire diverger.
     pub login: String,
     /// L'empreinte, au format PHC.
     pub hash: String,
+    /// Les adresses d'enveloppe qui arrivent dans cette boîte.
+    ///
+    /// **Vide est licite** : un compte qui peut se connecter sans rien recevoir
+    /// est un compte de soumission, et c'est une situation réelle. Ce n'est pas
+    /// un oubli qu'il faudrait deviner.
+    pub addresses: Vec<String>,
+}
+
+/// Ce qu'un nom de compte a le droit d'être.
+///
+/// # Il devient un nom de RÉPERTOIRE, et c'est là qu'est le danger
+///
+/// La boîte d'un compte est `<racine>/<login>/`. Un login de `../../etc` ferait
+/// écrire hors de la racine ; un login vide ou réduit à `.` désignerait la
+/// racine elle-même. Ce contrôle est donc une frontière de sécurité, pas une
+/// question de goût — et il a lieu à l'ÉCRITURE du magasin comme à sa lecture,
+/// parce qu'un fichier peut arriver autrement que par notre outil.
+///
+/// Sont refusés : le vide, tout `/`, l'octet nul, `.` et `..`, un point en tête
+/// (un répertoire caché n'est pas ce qu'un administrateur croit lire), et
+/// au-delà de 64 octets. Le reste est permis, **`@` et accents compris** : un
+/// login est souvent une adresse, et beaucoup de gens ont un nom qui ne tient
+/// pas dans l'ASCII.
+///
+/// # Errors
+///
+/// [`Error::BadLogin`].
+pub fn check_login(login: &str) -> Result<(), Error> {
+    let interdit = login.is_empty()
+        || login.len() > 64
+        || login == "."
+        || login == ".."
+        || login.starts_with('.')
+        || login.contains('/')
+        || login.contains('\0');
+    if interdit {
+        return Err(Error::BadLogin);
+    }
+    Ok(())
+}
+
+/// À quelle boîte cette adresse d'enveloppe mène-t-elle ?
+///
+/// # La comparaison replie la casse, ENTIÈREMENT
+///
+/// La RFC 5321 §2.4 réserve la casse de la partie locale à l'hôte de
+/// destination. **C'est nous**, et nous choisissons de la replier : personne ne
+/// retient si son adresse a une majuscule, et deux boîtes qui ne diffèrent que
+/// par la casse seraient une source d'erreurs bien plus coûteuse que la nuance
+/// qu'on abandonne. Le domaine, lui, est insensible à la casse par la RFC.
+///
+/// Le repliement est ASCII seulement : replier de l'Unicode demanderait des
+/// tables, et deux formes normalisées différemment ne sont pas la même adresse.
+#[must_use]
+pub fn route<'a>(accounts: &'a [Account], address: &[u8]) -> Option<&'a Account> {
+    accounts.iter().find(|compte| {
+        compte
+            .addresses
+            .iter()
+            .any(|connue| connue.as_bytes().eq_ignore_ascii_case(address))
+    })
 }
 
 /// Ce qui rend un magasin ou une empreinte irrecevable.
@@ -58,6 +124,11 @@ pub enum Error {
     TooWeak,
     /// Le sel ou la sortie manque.
     Incomplete,
+    /// Le nom de compte ne peut pas être un nom de répertoire.
+    ///
+    /// Voir [`check_login`] : c'est une frontière de sécurité, puisque ce nom
+    /// devient un chemin.
+    BadLogin,
 }
 
 impl fmt::Display for Error {
@@ -71,6 +142,10 @@ impl fmt::Display for Error {
                  (m={MEMORY_KIB}, t={TIME_COST}, p={PARALLELISM}) : ce compte doit être réécrit"
             ),
             Error::Incomplete => f.write_str("l'empreinte n'a ni sel ni sortie"),
+            Error::BadLogin => f.write_str(
+                "un nom de compte est aussi un nom de répertoire : ni vide, ni `.`, ni `..`, \
+                 ni commençant par un point, sans `/` ni octet nul, et au plus 64 octets",
+            ),
         }
     }
 }
@@ -174,8 +249,8 @@ pub fn authenticate(accounts: &[Account], credentials: &Credentials<'_>) -> bool
 #[cfg(test)]
 mod tests {
     use super::{
-        Account, DUMMY_HASH, Error, MEMORY_KIB, PARALLELISM, TIME_COST, authenticate, check_stored,
-        hash_password,
+        Account, DUMMY_HASH, Error, MEMORY_KIB, PARALLELISM, TIME_COST, authenticate, check_login,
+        check_stored, hash_password, route,
     };
     use alloc::string::{String, ToString as _};
     use alloc::{format, vec};
@@ -202,6 +277,10 @@ mod tests {
     fn magasin() -> vec::Vec<Account> {
         vec![Account {
             login: String::from("jean"),
+            addresses: vec![
+                String::from("jean@example.com"),
+                String::from("j.dupont@example.com"),
+            ],
             // Le seul hachage aux vrais paramètres de toute la suite : les
             // autres tests s'appuient sur des empreintes faibles, qui se
             // vérifient en une milliseconde au lieu de trois secondes en
@@ -243,6 +322,7 @@ mod tests {
         let comptes = vec![Account {
             login: String::from("personne"),
             hash: DUMMY_HASH.to_string(),
+            addresses: vec::Vec::new(),
         }];
         for essai in [&b""[..], b"motdepasse", b"personne", DUMMY_HASH.as_bytes()] {
             assert!(!authenticate(&comptes, &identifiants(b"personne", essai)));
@@ -274,6 +354,7 @@ mod tests {
         let comptes = vec![Account {
             login: String::from("jean"),
             hash: String::from("ceci n'est pas du PHC"),
+            addresses: vec::Vec::new(),
         }];
         assert!(!authenticate(
             &comptes,
@@ -329,12 +410,75 @@ mod tests {
     }
 
     #[test]
+    fn une_adresse_mene_a_sa_boite_quelle_qu_en_soit_la_casse() {
+        // Personne ne retient si son adresse a une majuscule. La RFC 5321 §2.4
+        // réserve la casse de la partie locale à l'hôte de destination : c'est
+        // nous, et nous la replions.
+        let comptes = magasin();
+        for adresse in [
+            &b"jean@example.com"[..],
+            b"JEAN@EXAMPLE.COM",
+            b"Jean@Example.Com",
+            b"j.dupont@example.com",
+        ] {
+            assert_eq!(
+                route(&comptes, adresse).map(|compte| compte.login.as_str()),
+                Some("jean"),
+                "{adresse:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn une_adresse_inconnue_ne_mene_nulle_part() {
+        // C'EST LA FIN DU FOURRE-TOUT : une adresse qu'aucun compte ne déclare
+        // n'est pas acceptée « parce que le domaine est hébergé ». Un serveur
+        // qui accepte tout ce qui passe est un piège à spam, pas une boîte.
+        let comptes = magasin();
+        for adresse in [
+            &b"personne@example.com"[..],
+            b"jean@ailleurs.example",
+            b"jean",
+            b"",
+        ] {
+            assert!(route(&comptes, adresse).is_none(), "{adresse:?}");
+        }
+        assert!(route(&[], b"jean@example.com").is_none());
+    }
+
+    #[test]
+    fn un_nom_de_compte_est_aussi_un_nom_de_repertoire() {
+        // LA FRONTIÈRE DE SÉCURITÉ : ce nom devient un chemin.
+        for refuse in [
+            "",           // désignerait la racine
+            ".",          // idem
+            "..",         // le parent de la racine
+            "../../etc",  // hors de la racine, franchement
+            "jean/paul",  // un sous-répertoire qu'on n'a pas demandé
+            ".cache",     // un répertoire caché n'est pas ce qu'on croit lire
+            "jean\0paul", // tronqué par un appel système
+        ] {
+            assert_eq!(check_login(refuse), Err(Error::BadLogin), "{refuse:?}");
+        }
+        // Et ce qui est permis l'est vraiment : `@` et accents compris, parce
+        // qu'un login est souvent une adresse et que beaucoup de noms ne
+        // tiennent pas dans l'ASCII.
+        for permis in ["jean", "jean@example.com", "jean.dupont", "Jean-Élise", "j"] {
+            assert_eq!(check_login(permis), Ok(()), "{permis:?}");
+        }
+        // Soixante-cinq octets, c'est un de trop.
+        assert_eq!(check_login(&"a".repeat(65)), Err(Error::BadLogin));
+        assert_eq!(check_login(&"a".repeat(64)), Ok(()));
+    }
+
+    #[test]
     fn les_erreurs_disent_quelque_chose_et_se_distinguent() {
         for erreur in [
             Error::Malformed,
             Error::NotArgon2id,
             Error::TooWeak,
             Error::Incomplete,
+            Error::BadLogin,
         ] {
             assert!(format!("{erreur}").len() > 20, "{erreur:?}");
         }
@@ -344,6 +488,7 @@ mod tests {
         let compte = Account {
             login: String::from("jean"),
             hash: String::from(DUMMY_HASH),
+            addresses: vec![String::from("jean@example.com")],
         };
         assert_eq!(compte, compte.clone());
         assert!(!format!("{compte:?}").is_empty());

@@ -6,7 +6,7 @@ use ams_proto_smtp::{
 use ams_sasl::{decode_base64, parse_plain};
 
 use crate::digits::{MAX_DIGITS, decimal};
-use crate::{Config, Error, Policy, RecipientVerdict};
+use crate::{Config, Error, Policy, RecipientVerdict, Recipients};
 
 /// La bannière : le domaine (255 au plus) suivi de `" ESMTP"`.
 const BANNER_MAX: usize = 255 + 6;
@@ -156,6 +156,8 @@ pub struct SmtpSession<'a, P: Policy> {
     phase: Phase,
     tls: bool,
     authenticated: bool,
+    /// Les destinataires acceptés de la transaction en cours.
+    recipients: Recipients,
     data: DataReceiver,
     banner: [u8; BANNER_MAX],
     banner_len: usize,
@@ -194,6 +196,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
             data: DataReceiver::new(config.limits(), config.max_message_octets()),
             tls: false,
             authenticated: false,
+            recipients: Recipients::new(),
             banner,
             banner_len: fin_banniere,
             size_line,
@@ -242,6 +245,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     pub fn on_tls_established(&mut self) {
         self.tls = true;
         self.authenticated = false;
+        self.quitter_la_transaction();
         self.phase = Phase::Greeted;
     }
 
@@ -263,7 +267,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
             Phase::DataFailed(cause) => Some(cause),
             _ => return Err(Error::NotInCommandPhase),
         };
-        self.phase = Phase::Identified;
+        self.quitter_la_transaction();
         // UN MESSAGE REFUSÉ PAR LA GRAMMAIRE NE PEUT PAS ÊTRE ACCEPTÉ PAR
         // L'APPELANT : le verdict n'est pas consulté. Sans cela, une boucle
         // distraite pourrait remettre un message que le décodeur a rejeté.
@@ -427,7 +431,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     /// `EHLO` — annonce les extensions **effectivement servies**.
     fn on_ehlo<'b>(&mut self, out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
         // RFC 5321 §4.1.4 : `EHLO` annule la transaction en cours.
-        self.phase = Phase::Identified;
+        self.quitter_la_transaction();
 
         let mut lignes: [&[u8]; EHLO_LINES_MAX] = [b""; EHLO_LINES_MAX];
         let mut posees = 0_usize;
@@ -469,7 +473,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     /// `HELO` ; ce qu'une telle session a le droit de faire releve de la
     /// politique de relais, pas de cette couche.
     fn on_helo<'b>(&mut self, out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
-        self.phase = Phase::Identified;
+        self.quitter_la_transaction();
         let domaine = self.config.domain();
         let reply =
             encode(out, Code::OK, &[domaine], self.config.limits()).map_err(Error::Reply)?;
@@ -508,6 +512,12 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         }
         match self.policy.accepts_recipient(forward_path) {
             RecipientVerdict::Accept => {
+                // ON RETIENT L'ADRESSE, ET SEULEMENT SI ELLE TIENT. La refuser
+                // ici plutôt que de la tronquer n'est pas une précaution : une
+                // adresse tronquée livrerait le message à quelqu'un d'autre.
+                if !self.retenir(forward_path) {
+                    return self.simple(Code::TOO_MANY_RECIPIENTS, b"Too many recipients", out);
+                }
                 self.phase = Phase::Transaction {
                     recipients: recipients.saturating_add(1),
                 };
@@ -563,6 +573,41 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
             Action::StartTls,
             out,
         )
+    }
+
+    /// Retient un destinataire accepté, sous sa forme `locale@domaine`.
+    ///
+    /// # Le `<Postmaster>` nu est résolu ICI, et pas ailleurs
+    ///
+    /// La RFC 5321 §4.1.1.3 admet un `RCPT TO:<Postmaster>` sans domaine. Le
+    /// domaine sous-entendu est celui du serveur — et la session est le seul
+    /// endroit qui le connaisse. Le laisser nu obligerait la remise à deviner,
+    /// et deux endroits qui devinent la même chose finissent par deviner
+    /// différemment.
+    fn retenir(&mut self, forward_path: &Path<'_>) -> bool {
+        match forward_path {
+            Path::Mailbox(boite) => self.recipients.push(&[
+                boite.local_part().as_bytes(),
+                b"@",
+                boite.domain().as_bytes(),
+            ]),
+            Path::Postmaster => self
+                .recipients
+                .push(&[b"postmaster", b"@", self.config.domain()]),
+            // `<>` n'est pas un destinataire ; `on_rcpt` ne l'accepte jamais, et
+            // la grammaire le refuse avant lui.
+            Path::Null => false,
+        }
+    }
+
+    /// Les destinataires acceptés de la transaction en cours.
+    ///
+    /// Vide hors transaction, et **vidé dès qu'elle se termine** — par `RSET`,
+    /// par un nouveau `MAIL`, ou par la fin du message. C'est la session qui les
+    /// retient parce que c'est elle qui voit ces trois-là ; une liste tenue
+    /// ailleurs finirait par livrer un message aux destinataires du précédent.
+    pub fn recipients(&self) -> impl Iterator<Item = &[u8]> {
+        self.recipients.iter()
     }
 
     /// `AUTH` (RFC 4954) — **le refus emblematique de C6**.
@@ -700,9 +745,21 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
 
     /// Annule la transaction en cours, sans toucher a l'identification.
     fn reset_transaction(&mut self) {
-        if let Phase::Transaction { .. } = self.phase {
-            self.phase = Phase::Identified;
-        }
+        self.quitter_la_transaction();
+    }
+
+    /// Revient à l'état identifié, **et oublie les destinataires**.
+    ///
+    /// # Un seul endroit, et c'est le sujet
+    ///
+    /// Cinq chemins quittent une transaction : `RSET`, `EHLO`, `HELO`, la fin
+    /// d'un message, et la poignée de main TLS. Chacun devait remettre la phase
+    /// à zéro ; il leur faut maintenant vider aussi la liste des destinataires,
+    /// et **celui qui l'oublierait livrerait le message suivant aux
+    /// destinataires du précédent**. Ils passent donc tous par ici.
+    fn quitter_la_transaction(&mut self) {
+        self.phase = Phase::Identified;
+        self.recipients.clear();
     }
 
     /// Une reponse d'une ligne, sans action et sans faute du pair.
@@ -1164,6 +1221,148 @@ mod tests {
             session.feed_auth(b"", &mut tampon),
             Err(Error::NotInAuthExchange)
         );
+    }
+
+    /// Les destinataires retenus, en clair.
+    fn destinataires(session: &SmtpSession<'_, Verdict>) -> std::vec::Vec<std::string::String> {
+        session
+            .recipients()
+            .map(|adresse| std::string::String::from_utf8_lossy(adresse).into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn les_destinataires_acceptes_sont_retenus_sous_forme_complete() {
+        let mut session = acceptante();
+        identifier(&mut session);
+        jouer(&mut session, b"MAIL FROM:<a@b.co>\r\n");
+        assert!(destinataires(&session).is_empty());
+        jouer(&mut session, b"RCPT TO:<jean@example.com>\r\n");
+        jouer(&mut session, b"RCPT TO:<paul@example.org>\r\n");
+        assert_eq!(
+            destinataires(&session),
+            ["jean@example.com", "paul@example.org"]
+        );
+    }
+
+    #[test]
+    fn un_destinataire_refuse_n_est_pas_retenu() {
+        let mut session = session(RecipientVerdict::RelayDenied);
+        identifier(&mut session);
+        jouer(&mut session, b"MAIL FROM:<a@b.co>\r\n");
+        assert!(jouer(&mut session, b"RCPT TO:<jean@example.com>\r\n").starts_with("550"));
+        assert!(destinataires(&session).is_empty());
+    }
+
+    #[test]
+    fn le_postmaster_nu_est_resolu_avec_le_domaine_du_serveur() {
+        // La RFC 5321 §4.1.1.3 admet `<Postmaster>` sans domaine. Le domaine
+        // sous-entendu est celui du serveur, et la session est le seul endroit
+        // qui le connaisse : le laisser nu obligerait la remise à deviner.
+        let mut session = acceptante();
+        identifier(&mut session);
+        jouer(&mut session, b"MAIL FROM:<a@b.co>\r\n");
+        assert!(jouer(&mut session, b"RCPT TO:<Postmaster>\r\n").starts_with("250"));
+        assert_eq!(destinataires(&session), ["postmaster@mail.example.com"]);
+    }
+
+    #[test]
+    fn cinq_chemins_vident_la_liste_et_aucun_ne_l_oublie() {
+        // Celui qui l'oublierait livrerait le message suivant aux destinataires
+        // du précédent. Ils passent tous par le même endroit ; ce test le
+        // vérifie chemin par chemin plutôt que de faire confiance à la lecture.
+        let ouvrir = |session: &mut SmtpSession<'_, Verdict>| {
+            jouer(session, b"MAIL FROM:<a@b.co>\r\n");
+            jouer(session, b"RCPT TO:<jean@example.com>\r\n");
+        };
+
+        // 1. `RSET`
+        let mut session = acceptante();
+        identifier(&mut session);
+        ouvrir(&mut session);
+        jouer(&mut session, b"RSET\r\n");
+        assert!(destinataires(&session).is_empty(), "RSET");
+
+        // 2. `EHLO` (RFC 5321 §4.1.4)
+        ouvrir(&mut session);
+        jouer(&mut session, b"EHLO client.example\r\n");
+        assert!(destinataires(&session).is_empty(), "EHLO");
+
+        // 3. `HELO`
+        ouvrir(&mut session);
+        jouer(&mut session, b"HELO client.example\r\n");
+        assert!(destinataires(&session).is_empty(), "HELO");
+
+        // 4. la fin d'un message
+        ouvrir(&mut session);
+        jouer(&mut session, b"DATA\r\n");
+        let mut tampon = [0_u8; 128];
+        session.feed_data(b"corps\r\n.\r\n").expect("données lues");
+        session
+            .on_data_settled(DataOutcome::Accepted, &mut tampon)
+            .expect("verdict");
+        assert!(destinataires(&session).is_empty(), "fin de message");
+
+        // 5. la poignée de main TLS (RFC 3207 §4.2)
+        identifier(&mut session);
+        ouvrir(&mut session);
+        session.on_tls_established();
+        assert!(destinataires(&session).is_empty(), "STARTTLS");
+    }
+
+    #[test]
+    fn la_borne_de_place_repond_452_plutot_que_de_tronquer() {
+        // ATTENTION À CE QUE CE TEST MESURE. Avec la configuration ordinaire —
+        // deux destinataires au plus — c'est la borne du CONFIG qui répond, et
+        // l'arène n'est jamais touchée. Il faut donc une configuration large ET
+        // des adresses longues pour atteindre la seconde borne, celle de la
+        // place. La première version de ce test se contentait de compter des
+        // `452` : elle passait sans avoir jamais rempli l'arène.
+        let config = Config::new(b"mail.example.com", 100, 10_485_760, Limits::DEFAULT)
+            .expect("configurable");
+        let mut session = SmtpSession::new(config, Verdict(RecipientVerdict::Accept));
+        jouer(&mut session, b"EHLO client.example\r\n");
+        jouer(&mut session, b"MAIL FROM:<a@b.co>\r\n");
+
+        let locale = "a".repeat(60);
+        let domaine = [
+            "b".repeat(60),
+            "c".repeat(60),
+            std::string::String::from("example.com"),
+        ]
+        .join(".");
+        let mut acceptes = 0_usize;
+        let mut refuses = 0_usize;
+        for rang in 0..100 {
+            let ligne = std::format!("RCPT TO:<{locale}{rang:03}@{domaine}>\r\n");
+            if jouer(&mut session, ligne.as_bytes()).starts_with("452") {
+                refuses = refuses.saturating_add(1);
+            } else {
+                acceptes = acceptes.saturating_add(1);
+            }
+        }
+        assert!(refuses > 0, "la borne de place n'a jamais été atteinte");
+        assert!(
+            acceptes < 100,
+            "c'est la borne de nombre qui a répondu, pas celle de place"
+        );
+        // Et tout ce qui a été retenu est ENTIER : une adresse tronquée
+        // livrerait le message à quelqu'un d'autre.
+        assert_eq!(destinataires(&session).len(), acceptes);
+        for adresse in destinataires(&session) {
+            assert!(adresse.ends_with(&domaine), "{adresse}");
+        }
+    }
+
+    #[test]
+    fn un_chemin_nul_ne_se_retient_pas() {
+        // `on_rcpt` ne peut pas le recevoir — la grammaire refuse `<>` en
+        // destinataire — mais `retenir` doit tout de même dire non plutôt que
+        // d'inventer une adresse. Le test passe par la fonction privée, parce
+        // qu'aucun dialogue ne peut l'y amener.
+        let mut session = acceptante();
+        assert!(!session.retenir(&Path::Null));
+        assert!(destinataires(&session).is_empty());
     }
 
     #[test]
