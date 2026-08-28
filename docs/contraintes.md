@@ -96,14 +96,14 @@ illisibles, et le gate de C2 ne conclurait plus. Hors workspace, elle a son prop
 `Cargo.lock`, n'entre ni dans la mesure ni dans le lock du produit, et rien de ce
 qu'elle tire n'est livré.
 
-Sept cibles éprouvant trente-trois propriétés, dont un **aller-retour** sur
+Huit cibles éprouvant trente-six propriétés, dont un **aller-retour** sur
 l'encodeur de réponses, un **vocabulaire de sortie clos** sur la session, et
 l'**indépendance au découpage** sur la phase de données : le même flux, lu d'un
 seul tenant puis par tranches arbitraires, doit rendre le même verdict et les
 mêmes octets. C'est exactement ce que la contrebande SMTP exploite quand ce n'est
 pas le cas.
 
-**Le fuzz a déjà payé deux fois.** `fuzz_ams_smtp_data` a trouvé, à sa première
+**Le fuzz a déjà payé quatre fois.** `fuzz_ams_smtp_data` a trouvé, à sa première
 campagne, une faute qui dépendait de l'endroit où la lecture avait été coupée — la
 contrebande SMTP en miniature. Et `fuzz_ams_smtp_reply` avait trouvé, en soixante
 secondes, un défaut réel : sous une borne de réponse inférieure à
@@ -245,7 +245,28 @@ elle reçoit `(source, événement, instant)` et rend un verdict. Elle est donc
 couverte à 100 % par C2, ce qui est le bon régime pour un composant dont un faux
 positif coupe du courrier légitime.
 
-**Outillé par** : rien. `ams-guard` est vide.
+**Outillé par** : `ams-guard`. La logique est une machine à états sans
+entrée-sortie, couverte à 100 % (C2), et fuzzée.
+
+**Trois décisions qui ne se devinent pas**, et que le registre consigne parce
+qu'elles ne se lisent pas dans le code seul :
+
+1. **La clé est un préfixe, pas une adresse.** Bannir une IPv6 seule ne sert à
+   rien — le plus petit bloc attribué est un `/64`, et le pair banni revient à
+   l'adresse suivante. Longueur configurable : `/64` en IPv6, `/32` en IPv4.
+2. **La table est bornée et fournie par l'appelant.** Une table qui grandit avec
+   le nombre de sources est un épuisement de mémoire offert à qui dispose d'un
+   `/64`.
+3. **Une peine en cours n'est jamais évincée.** Le fuzz a montré qu'évincer « le
+   bannissement qui expire le plus tôt » suffisait à s'en libérer en remplissant
+   la table. Une table pleine de peines **cesse d'apprendre** plutôt que
+   d'oublier : c'est une dégradation, pas un déni.
+
+**Le revers assumé de la fenêtre fixe** : « x par minute » se compte sur une
+fenêtre qui s'ouvre au premier événement d'une source. À cheval sur deux fenêtres,
+un pair peut donc atteindre **le double** du seuil. C'est le prix d'un comptage
+entièrement en entiers, éprouvable sans approximation ; un test le vérifie plutôt
+que de le taire.
 
 ## C9 — DKIM et DMARC
 
@@ -448,7 +469,8 @@ Deux crates portent du code : **`ams-mime`** (le squelette d'un message) et
 **`ams-proto-smtp`** (les commandes **et les réponses**). Aucun protocole n'est pour autant servi : il
 manque l'encodage des réponses, la machine à états de session, et tout le reste.
 
-Sont outillées : C2 (le gate mesure 4 631 régions, toutes couvertes), C10
+Sont outillées : C2 (le gate mesure 5 456 régions, toutes couvertes), C8
+(`ams-guard`, dont la logique est complète même si rien ne l'appelle encore), C10
 (`refuse_root`), C3 (les
 lints, l'absence d'allocation dans les décodeurs, et le fuzz), C6 **en partie et
 pour de bon** — les deux décodeurs refusent le CR et le LF isolés, et

@@ -1,0 +1,651 @@
+//! La table bornée, et le verdict qu'elle rend.
+
+use crate::{Key, Source, Thresholds};
+
+/// La durée d'une fenêtre de comptage, en millisecondes.
+const WINDOW_MILLIS: u64 = 60_000;
+
+/// Un instant, en millisecondes depuis une origine que l'appelant choisit.
+///
+/// **Le garde ne lit jamais l'heure** (C1) : on la lui donne. Il exige seulement
+/// qu'elle soit **monotone** — une horloge qui recule ferait rouvrir des fenêtres
+/// déjà closes, et un pair qui contrôlerait ce recul y verrait un moyen de ne
+/// jamais franchir un seuil.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Instant(u64);
+
+impl Instant {
+    /// Un instant, en millisecondes depuis l'origine de l'appelant.
+    #[must_use]
+    pub const fn from_millis(millis: u64) -> Self {
+        Self(millis)
+    }
+
+    /// La valeur, en millisecondes.
+    #[must_use]
+    pub const fn as_millis(self) -> u64 {
+        self.0
+    }
+}
+
+/// Ce qu'une source vient de faire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Event {
+    /// Une connexion s'ouvre.
+    Connection,
+    /// Une commande a été reçue.
+    Command,
+    /// Une trame invalide a été reçue — syntaxe refusée, fin de ligne ambiguë,
+    /// authentification en échec.
+    InvalidFrame,
+}
+
+/// Ce que le garde répond.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// Servir.
+    Allow,
+    /// Refuser **pour l'instant** : le débit dépasse le seuil, mais la source
+    /// n'est pas bannie. Elle repassera à la fenêtre suivante.
+    Throttled,
+    /// Refuser **jusqu'à** cet instant.
+    Banned {
+        /// Fin du bannissement.
+        until: Instant,
+    },
+}
+
+/// Une case de la table du garde.
+///
+/// L'appelant fournit le tableau : le garde n'alloue pas, et sa mémoire est donc
+/// bornée par construction plutôt que par discipline.
+#[derive(Debug, Clone, Copy)]
+pub struct Slot {
+    occupied: bool,
+    key: Key,
+    last_seen: u64,
+    window_start: u64,
+    connections: u32,
+    commands: u32,
+    invalid: u32,
+    banned_until: Option<u64>,
+}
+
+impl Slot {
+    /// Une case libre, pour initialiser un tableau.
+    pub const EMPTY: Self = Self {
+        occupied: false,
+        key: Key::ZERO,
+        last_seen: 0,
+        window_start: 0,
+        connections: 0,
+        commands: 0,
+        invalid: 0,
+        banned_until: None,
+    };
+}
+
+impl Default for Slot {
+    fn default() -> Self {
+        Self::EMPTY
+    }
+}
+
+/// Le garde : il compte, il juge, il n'attend jamais.
+///
+/// # Sa mémoire est bornée, et c'est une défense
+///
+/// Une table qui grandit avec le nombre de sources est un épuisement de mémoire
+/// offert à qui dispose d'un `/64` — dix-huit milliards de milliards d'adresses.
+/// Le garde travaille donc dans un tableau que l'appelant lui donne, et dont il
+/// ne sort jamais.
+///
+/// # Quand la table est pleine, ce qu'on oublie est choisi
+///
+/// Oublier au hasard rendrait l'attaque triviale : il suffirait d'inonder depuis
+/// mille sources pour faire disparaître son propre bannissement. L'ordre
+/// d'éviction est donc :
+///
+/// 1. une case **libre**, s'il en reste ;
+/// 2. sinon la case **non bannie** vue le moins récemment ;
+/// 3. sinon — toutes bannies — **rien du tout** : la source nouvelle n'est pas
+///    suivie, et le garde la laisse passer.
+///
+/// **Un bannissement en cours ne s'efface JAMAIS**, pas même au profit d'un autre
+/// bannissement. La première rédaction sacrifiait celui qui expirait le plus tôt,
+/// « puisque sa perte coûte le moins » ; le fuzz a montré qu'une table pleine de
+/// peines suffisait alors à s'en libérer. Entre oublier un attaquant prouvé et ne
+/// pas commencer à compter un inconnu, c'est l'oubli qui coûte le plus cher.
+///
+/// Le revers est réel et assumé : une table entièrement occupée par des peines en
+/// cours **cesse d'apprendre**. C'est une dégradation, pas un déni — les sources
+/// non suivies sont servies — et les peines finissent par échoir.
+#[derive(Debug)]
+pub struct Guard<'a> {
+    slots: &'a mut [Slot],
+    thresholds: Thresholds,
+}
+
+impl<'a> Guard<'a> {
+    /// Ouvre un garde sur la table que l'appelant fournit.
+    #[must_use]
+    pub fn new(slots: &'a mut [Slot], thresholds: Thresholds) -> Self {
+        for case in slots.iter_mut() {
+            *case = Slot::EMPTY;
+        }
+        Self { slots, thresholds }
+    }
+
+    /// Le nombre de sources suivies.
+    #[must_use]
+    pub fn tracked(&self) -> usize {
+        self.slots.iter().filter(|case| case.occupied).count()
+    }
+
+    /// La capacité de la table.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// Le verdict pour une source, **sans rien compter**.
+    ///
+    /// À interroger avant d'accepter une connexion : demander l'avis du garde ne
+    /// doit pas être un événement de plus à son compteur.
+    #[must_use]
+    pub fn verdict(&self, source: Source, now: Instant) -> Verdict {
+        let cle = self.key(source);
+        match self
+            .slots
+            .iter()
+            .find(|case| case.occupied && case.key == cle)
+        {
+            Some(case) => Self::ban_verdict(case, now).unwrap_or(Verdict::Allow),
+            None => Verdict::Allow,
+        }
+    }
+
+    /// Enregistre un événement et rend le verdict.
+    pub fn observe(&mut self, source: Source, event: Event, now: Instant) -> Verdict {
+        let cle = self.key(source);
+        let seuils = self.thresholds;
+        let Some(case) = self.slot_for(cle, now) else {
+            // TABLE DE CAPACITÉ NULLE : le garde ne retient rien, donc ne peut
+            // rien reprocher. C'est un choix de l'appelant — passer une table
+            // vide, c'est demander un garde qui laisse passer — et non un défaut
+            // à masquer par une panique.
+            return Verdict::Allow;
+        };
+
+        if let Some(verdict) = Self::ban_verdict(case, now) {
+            case.last_seen = now.as_millis();
+            return verdict;
+        }
+        // Le bannissement est échu : on repart de zéro plutôt que de reprendre
+        // les compteurs qui l'avaient déclenché.
+        case.banned_until = None;
+
+        if now.as_millis().saturating_sub(case.window_start) >= WINDOW_MILLIS {
+            case.window_start = now.as_millis();
+            case.connections = 0;
+            case.commands = 0;
+            case.invalid = 0;
+        }
+        case.last_seen = now.as_millis();
+
+        match event {
+            Event::Connection => {
+                case.connections = case.connections.saturating_add(1);
+                if case.connections > seuils.connections_per_minute {
+                    return Verdict::Throttled;
+                }
+            }
+            Event::Command => {
+                case.commands = case.commands.saturating_add(1);
+                if case.commands > seuils.commands_per_minute {
+                    return Verdict::Throttled;
+                }
+            }
+            Event::InvalidFrame => {
+                case.invalid = case.invalid.saturating_add(1);
+                if case.invalid > seuils.invalid_frames_per_minute {
+                    let until = now.as_millis().saturating_add(seuils.ban_millis());
+                    // UNE PEINE DE DURÉE NULLE N'EN EST PAS UNE. La rendre
+                    // reviendrait à annoncer « banni jusqu'à maintenant », que
+                    // l'interrogation suivante démentirait aussitôt — un verdict
+                    // qui se contredit lui-même. Une configuration à zéro dit
+                    // « ne bannis pas » ; on refuse alors l'événement, sans plus.
+                    // Trouvé par `fuzz_ams_guard`.
+                    if until <= now.as_millis() {
+                        return Verdict::Throttled;
+                    }
+                    case.banned_until = Some(until);
+                    return Verdict::Banned {
+                        until: Instant::from_millis(until),
+                    };
+                }
+            }
+        }
+        Verdict::Allow
+    }
+
+    /// La clé sous laquelle cette source est comptée.
+    fn key(&self, source: Source) -> Key {
+        Key::from_source(
+            source,
+            self.thresholds.ipv4_prefix_bits,
+            self.thresholds.ipv6_prefix_bits,
+        )
+    }
+
+    /// Le bannissement en cours, s'il y en a un.
+    fn ban_verdict(case: &Slot, now: Instant) -> Option<Verdict> {
+        let until = case.banned_until?;
+        if now.as_millis() < until {
+            return Some(Verdict::Banned {
+                until: Instant::from_millis(until),
+            });
+        }
+        None
+    }
+
+    /// La case de cette clé, quitte à en libérer une.
+    ///
+    /// Rend `None` quand la table n'a aucune case.
+    fn slot_for(&mut self, cle: Key, now: Instant) -> Option<&mut Slot> {
+        let rang = self.index_of(cle, now)?;
+        // L'indice vient de `enumerate()` sur CETTE tranche, et `&mut self`
+        // interdit qu'elle ait changé entre-temps : il est valide par
+        // construction. Un `get_mut(..)?` ouvrirait ici une branche que rien ne
+        // pourrait exercer, et le 100 % de C2 la compterait à jamais découverte.
+        let case = &mut self.slots[rang];
+        if !case.occupied || case.key != cle {
+            *case = Slot {
+                occupied: true,
+                key: cle,
+                last_seen: now.as_millis(),
+                window_start: now.as_millis(),
+                ..Slot::EMPTY
+            };
+        }
+        Some(case)
+    }
+
+    /// Où loger cette clé, s'il y a une case.
+    fn index_of(&self, cle: Key, now: Instant) -> Option<usize> {
+        let mut libre: Option<usize> = None;
+        let mut plus_ancienne_non_bannie: Option<(usize, u64)> = None;
+
+        for (rang, case) in self.slots.iter().enumerate() {
+            if case.occupied && case.key == cle {
+                return Some(rang);
+            }
+            if !case.occupied {
+                libre = libre.or(Some(rang));
+                continue;
+            }
+            // UNE PEINE EN COURS N'EST JAMAIS CANDIDATE À L'ÉVICTION.
+            if Self::ban_verdict(case, now).is_none()
+                && plus_ancienne_non_bannie.is_none_or(|(_, vue)| case.last_seen < vue)
+            {
+                plus_ancienne_non_bannie = Some((rang, case.last_seen));
+            }
+        }
+
+        libre.or(plus_ancienne_non_bannie.map(|(rang, _)| rang))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Event, Guard, Instant, Slot, Verdict};
+    use crate::{Source, Thresholds};
+    use core::time::Duration;
+
+    const PAIR: Source = Source::V4([192, 0, 2, 1]);
+    const AUTRE: Source = Source::V4([198, 51, 100, 1]);
+
+    fn seuils_serres() -> Thresholds {
+        Thresholds {
+            connections_per_minute: 2,
+            commands_per_minute: 3,
+            invalid_frames_per_minute: 2,
+            ban_duration: Duration::from_secs(3600),
+            ..Thresholds::DEFAULT
+        }
+    }
+
+    fn t(millis: u64) -> Instant {
+        Instant::from_millis(millis)
+    }
+
+    /// Le verdict est-il un bannissement ?
+    ///
+    /// TOTAL, et c'est le point : un `matches!` engendre un bras `_ => false`
+    /// que rien n'emprunte quand l'assertion réussit toujours. Les deux bras
+    /// d'ici sont exercés.
+    fn est_banni(verdict: Verdict) -> bool {
+        match verdict {
+            Verdict::Banned { .. } => true,
+            Verdict::Allow | Verdict::Throttled => false,
+        }
+    }
+
+    // ── Le bannissement ─────────────────────────────────────────────────────
+
+    #[test]
+    fn le_seuil_de_trames_invalides_bannit_pour_la_duree_configuree() {
+        let mut table = [Slot::EMPTY; 8];
+        let mut garde = Guard::new(&mut table, seuils_serres());
+        assert_eq!(
+            garde.observe(PAIR, Event::InvalidFrame, t(0)),
+            Verdict::Allow
+        );
+        assert_eq!(
+            garde.observe(PAIR, Event::InvalidFrame, t(1)),
+            Verdict::Allow
+        );
+        assert_eq!(
+            garde.observe(PAIR, Event::InvalidFrame, t(2)),
+            Verdict::Banned {
+                until: t(3_600_002)
+            }
+        );
+    }
+
+    #[test]
+    fn un_banni_le_reste_pour_tout_evenement_et_sans_recompter() {
+        let mut table = [Slot::EMPTY; 8];
+        let mut garde = Guard::new(&mut table, seuils_serres());
+        for _ in 0..3 {
+            garde.observe(PAIR, Event::InvalidFrame, t(0));
+        }
+        // Toute activité ultérieure reçoit le même verdict.
+        for evenement in [Event::Connection, Event::Command, Event::InvalidFrame] {
+            assert!(est_banni(garde.observe(PAIR, evenement, t(1_000))));
+        }
+        // Et l'interrogation seule aussi, sans rien compter.
+        assert!(est_banni(garde.verdict(PAIR, t(1_000))));
+    }
+
+    #[test]
+    fn le_bannissement_expire_et_les_compteurs_repartent_de_zero() {
+        // Reprendre les compteurs qui avaient déclenché le bannissement le
+        // ferait retomber au premier événement suivant.
+        let mut table = [Slot::EMPTY; 8];
+        let mut garde = Guard::new(&mut table, seuils_serres());
+        for _ in 0..3 {
+            garde.observe(PAIR, Event::InvalidFrame, t(0));
+        }
+        let apres = t(3_600_003);
+        assert_eq!(garde.verdict(PAIR, apres), Verdict::Allow);
+        assert_eq!(
+            garde.observe(PAIR, Event::InvalidFrame, apres),
+            Verdict::Allow
+        );
+        assert_eq!(
+            garde.observe(PAIR, Event::InvalidFrame, apres),
+            Verdict::Allow
+        );
+    }
+
+    #[test]
+    fn une_peine_de_duree_nulle_freine_sans_bannir() {
+        // « Ne bannis pas » est une configuration licite (C8). Rendre
+        // « banni jusqu'à maintenant » serait un verdict qui se contredit.
+        let mut table = [Slot::EMPTY; 4];
+        let sans_peine = Thresholds {
+            ban_duration: Duration::ZERO,
+            ..seuils_serres()
+        };
+        let mut garde = Guard::new(&mut table, sans_peine);
+        garde.observe(PAIR, Event::InvalidFrame, t(0));
+        garde.observe(PAIR, Event::InvalidFrame, t(0));
+        assert_eq!(
+            garde.observe(PAIR, Event::InvalidFrame, t(0)),
+            Verdict::Throttled
+        );
+        // Rien n'a été retenu : l'interrogation seule le confirme.
+        assert_eq!(garde.verdict(PAIR, t(0)), Verdict::Allow);
+    }
+
+    #[test]
+    fn une_source_inconnue_est_servie() {
+        let mut table = [Slot::EMPTY; 8];
+        let garde = Guard::new(&mut table, seuils_serres());
+        assert_eq!(garde.verdict(PAIR, t(0)), Verdict::Allow);
+        assert_eq!(garde.tracked(), 0);
+        assert_eq!(garde.capacity(), 8);
+    }
+
+    #[test]
+    fn les_sources_sont_comptees_separement() {
+        let mut table = [Slot::EMPTY; 8];
+        let mut garde = Guard::new(&mut table, seuils_serres());
+        for _ in 0..3 {
+            garde.observe(PAIR, Event::InvalidFrame, t(0));
+        }
+        assert_eq!(
+            garde.observe(AUTRE, Event::InvalidFrame, t(0)),
+            Verdict::Allow
+        );
+        assert_eq!(garde.tracked(), 2);
+    }
+
+    // ── Le débit ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn le_debit_excessif_freine_sans_bannir() {
+        // Un pair pressé n'est pas un pair hostile : il repassera à la fenêtre
+        // suivante.
+        let mut table = [Slot::EMPTY; 8];
+        let mut garde = Guard::new(&mut table, seuils_serres());
+        assert_eq!(garde.observe(PAIR, Event::Connection, t(0)), Verdict::Allow);
+        assert_eq!(garde.observe(PAIR, Event::Connection, t(1)), Verdict::Allow);
+        assert_eq!(
+            garde.observe(PAIR, Event::Connection, t(2)),
+            Verdict::Throttled
+        );
+        // Le freinage n'est PAS un bannissement : l'interrogation seule passe.
+        assert_eq!(garde.verdict(PAIR, t(2)), Verdict::Allow);
+        assert!(!est_banni(Verdict::Throttled));
+        assert!(!est_banni(Verdict::Allow));
+    }
+
+    #[test]
+    fn les_commandes_ont_leur_propre_seuil() {
+        let mut table = [Slot::EMPTY; 8];
+        let mut garde = Guard::new(&mut table, seuils_serres());
+        for rang in 0..3 {
+            assert_eq!(garde.observe(PAIR, Event::Command, t(rang)), Verdict::Allow);
+        }
+        assert_eq!(
+            garde.observe(PAIR, Event::Command, t(4)),
+            Verdict::Throttled
+        );
+    }
+
+    #[test]
+    fn la_fenetre_se_remet_a_zero_apres_une_minute() {
+        let mut table = [Slot::EMPTY; 8];
+        let mut garde = Guard::new(&mut table, seuils_serres());
+        for _ in 0..3 {
+            garde.observe(PAIR, Event::Connection, t(0));
+        }
+        assert_eq!(
+            garde.observe(PAIR, Event::Connection, t(59_999)),
+            Verdict::Throttled
+        );
+        assert_eq!(
+            garde.observe(PAIR, Event::Connection, t(60_000)),
+            Verdict::Allow
+        );
+    }
+
+    #[test]
+    fn a_cheval_sur_deux_fenetres_le_seuil_peut_etre_double() {
+        // LE REVERS ASSUMÉ de la fenêtre fixe, éprouvé plutôt que seulement
+        // documenté. La fenêtre s'ouvre au PREMIER événement de la source, pas
+        // sur une minute d'horloge : deux connexions en fin de fenêtre, deux au
+        // début de la suivante, soit QUATRE sous un seuil de deux — en une
+        // milliseconde de plus qu'une minute.
+        let mut table = [Slot::EMPTY; 8];
+        let mut garde = Guard::new(&mut table, seuils_serres());
+        assert_eq!(garde.observe(PAIR, Event::Connection, t(0)), Verdict::Allow);
+        assert_eq!(
+            garde.observe(PAIR, Event::Connection, t(59_999)),
+            Verdict::Allow
+        );
+        assert_eq!(
+            garde.observe(PAIR, Event::Connection, t(60_000)),
+            Verdict::Allow
+        );
+        assert_eq!(
+            garde.observe(PAIR, Event::Connection, t(60_001)),
+            Verdict::Allow
+        );
+        // La cinquième, elle, est freinée.
+        assert_eq!(
+            garde.observe(PAIR, Event::Connection, t(60_002)),
+            Verdict::Throttled
+        );
+    }
+
+    // ── La table pleine ─────────────────────────────────────────────────────
+
+    #[test]
+    fn une_table_pleine_oublie_la_plus_ancienne_non_bannie() {
+        let mut table = [Slot::EMPTY; 2];
+        let mut garde = Guard::new(&mut table, seuils_serres());
+        garde.observe(Source::V4([10, 0, 0, 1]), Event::Command, t(0));
+        garde.observe(Source::V4([10, 0, 0, 2]), Event::Command, t(10));
+        // La table est pleine ; la troisième source évince la plus ancienne.
+        garde.observe(Source::V4([10, 0, 0, 3]), Event::Command, t(20));
+        assert_eq!(garde.tracked(), 2);
+        // La deuxième est toujours là : c'est la première qui est partie.
+        garde.observe(Source::V4([10, 0, 0, 2]), Event::Command, t(30));
+        assert_eq!(garde.tracked(), 2);
+    }
+
+    #[test]
+    fn un_bannissement_ne_s_efface_jamais_au_profit_d_un_compteur() {
+        // L'ATTAQUE QUE CETTE RÈGLE FERME : inonder depuis d'autres sources pour
+        // faire oublier son propre bannissement.
+        let mut table = [Slot::EMPTY; 2];
+        let mut garde = Guard::new(&mut table, seuils_serres());
+        let hostile = Source::V4([10, 0, 0, 1]);
+        for _ in 0..3 {
+            garde.observe(hostile, Event::InvalidFrame, t(0));
+        }
+        assert!(est_banni(garde.verdict(hostile, t(1))));
+
+        // Vingt sources innocentes défilent : aucune ne déloge le banni.
+        for rang in 0..20_u8 {
+            garde.observe(Source::V4([10, 0, 1, rang]), Event::Command, t(100));
+        }
+        assert!(
+            est_banni(garde.verdict(hostile, t(200))),
+            "le bannissement a été évincé"
+        );
+    }
+
+    #[test]
+    fn une_table_pleine_de_peines_cesse_d_apprendre_plutot_que_d_oublier() {
+        // LE FUZZ A TROUVÉ CE CAS. Sacrifier la peine qui expire le plus tôt
+        // « puisqu'elle coûte le moins » suffisait à s'en libérer : il n'y avait
+        // qu'à remplir la table.
+        let mut table = [Slot::EMPTY; 2];
+        let mut garde = Guard::new(&mut table, seuils_serres());
+        let tot = Source::V4([10, 0, 0, 1]);
+        let tard = Source::V4([10, 0, 0, 2]);
+        for _ in 0..3 {
+            garde.observe(tot, Event::InvalidFrame, t(0));
+        }
+        for _ in 0..3 {
+            garde.observe(tard, Event::InvalidFrame, t(1_000));
+        }
+
+        // Cent sources défilent : AUCUNE peine n'est perdue.
+        for rang in 0..100_u8 {
+            garde.observe(Source::V4([10, 0, 1, rang]), Event::Command, t(2_000));
+        }
+        assert!(est_banni(garde.verdict(tot, t(2_000))));
+        assert!(est_banni(garde.verdict(tard, t(2_000))));
+        // Le prix : les nouvelles sources ne sont pas suivies, et sont servies.
+        assert_eq!(garde.tracked(), 2);
+        assert_eq!(
+            garde.verdict(Source::V4([10, 0, 1, 0]), t(2_000)),
+            Verdict::Allow
+        );
+
+        // Quand les peines échoient, la table réapprend.
+        let apres = t(3_601_001);
+        garde.observe(Source::V4([10, 0, 2, 0]), Event::Command, apres);
+        assert_eq!(garde.verdict(tot, apres), Verdict::Allow);
+    }
+
+    #[test]
+    fn une_table_pleine_de_peines_juge_encore_ceux_qu_elle_connait() {
+        // Ne plus APPRENDRE n'est pas ne plus JUGER : une source déjà suivie est
+        // retrouvée dans la table, quelle que soit son occupation.
+        let mut table = [Slot::EMPTY; 1];
+        let mut garde = Guard::new(&mut table, seuils_serres());
+        for _ in 0..3 {
+            garde.observe(PAIR, Event::InvalidFrame, t(0));
+        }
+        for _ in 0..50 {
+            garde.observe(AUTRE, Event::Command, t(10));
+        }
+        assert!(est_banni(garde.observe(PAIR, Event::Command, t(20))));
+    }
+
+    #[test]
+    fn une_table_sans_case_laisse_tout_passer() {
+        // Passer une table vide, c'est demander un garde qui ne retient rien.
+        let mut table: [Slot; 0] = [];
+        let mut garde = Guard::new(&mut table, seuils_serres());
+        assert_eq!(garde.capacity(), 0);
+        for _ in 0..100 {
+            assert_eq!(
+                garde.observe(PAIR, Event::InvalidFrame, t(0)),
+                Verdict::Allow
+            );
+        }
+        assert_eq!(garde.tracked(), 0);
+    }
+
+    #[test]
+    fn une_table_reutilisee_est_remise_a_neuf() {
+        let mut table = [Slot::EMPTY; 4];
+        {
+            let mut garde = Guard::new(&mut table, seuils_serres());
+            for _ in 0..3 {
+                garde.observe(PAIR, Event::InvalidFrame, t(0));
+            }
+            assert_eq!(garde.tracked(), 1);
+        }
+        let garde = Guard::new(&mut table, seuils_serres());
+        assert_eq!(garde.tracked(), 0);
+        assert_eq!(garde.verdict(PAIR, t(1)), Verdict::Allow);
+    }
+
+    // ── Les types ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn les_types_se_copient_et_se_deboguent() {
+        assert_eq!(t(42).as_millis(), 42);
+        assert!(t(1) < t(2));
+        assert!(!std::format!("{:?}", t(1)).is_empty());
+        assert!(!std::format!("{:?}", Event::Command).is_empty());
+        assert_ne!(Event::Command, Event::Connection);
+        assert!(!std::format!("{:?}", Verdict::Throttled).is_empty());
+        assert_ne!(Verdict::Allow, Verdict::Throttled);
+
+        let vide = Slot::default();
+        let copie = vide;
+        assert!(!std::format!("{copie:?}").is_empty());
+        let mut table = [Slot::EMPTY; 1];
+        let garde = Guard::new(&mut table, Thresholds::DEFAULT);
+        assert!(!std::format!("{garde:?}").is_empty());
+    }
+}

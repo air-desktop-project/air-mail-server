@@ -6,12 +6,17 @@ version = 4
 name = "air-mail-server-fuzz"
 version = "0.0.0"
 dependencies = [
+ "ams-guard",
  "ams-mime",
  "ams-proto-smtp",
  "ams-session",
  "arbitrary",
  "libfuzzer-sys",
 ]
+
+[[package]]
+name = "ams-guard"
+version = "0.1.0"
 
 [[package]]
 name = "ams-mime"

@@ -9,7 +9,7 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 >
 > Une conversation SMTP complète se joue de bout en bout — mais **en mémoire
 > seulement** : il n'y a pas encore de boucle d'acceptation, donc aucun port
-> écouté, et le stockage n'existe pas. Quatre crates portent du code ; les autres
+> écouté, et le stockage n'existe pas. Cinq crates portent du code ; les autres
 > sont des emplacements réservés qui le disent dans leur documentation.
 >
 > Ce que ce dépôt affirme, il le tient. Rien de plus n'est promis ici.
@@ -58,7 +58,7 @@ des octets **et des actions**. Elles n'attendent jamais.
 | Crate | Périmètre | État |
 | --- | --- | --- |
 | `ams-session` | les sessions serveur | **SMTP : session entière** |
-| `ams-guard` | flooding et bannissement par source | vide |
+| `ams-guard` | flooding et bannissement par source | **implémenté** |
 | `ams-tls` | TLS 1.3 uniquement | vide |
 | `ams-dkim` | RFC 6376 | vide |
 | `ams-spf` | RFC 7208 | vide |
@@ -77,7 +77,7 @@ Les seules crates qui lisent, écrivent et attendent. Elles ne décident de rien
 | `ams-server` | le binaire `air-mail-server` | vide |
 | `ams-admin` | le binaire `air-mail-admin` | vide |
 
-**Quatre crates portent du code.** `ams-mime` : le squelette d'un message — la
+**Cinq crates portent du code.** `ams-mime` : le squelette d'un message — la
 ligne, le pliage, la séparation en-tête/corps, le découpage en champs. Les champs
 structurés, les adresses, les dates et MIME restent à écrire.
 `ams-proto-smtp` : les commandes, l'encodage des réponses multilignes, et **la
@@ -93,6 +93,11 @@ restent à écrire.**
 `ams-loop-tokio` : le pilote d'**une** connexion, sur tokio. Il lit, il écrit, il
 n'décide de rien — et ses tests jouent des conversations SMTP entières en mémoire,
 sans ouvrir de port. La boucle d'acceptation, TLS et SASL restent à écrire.
+
+`ams-guard` : la détection de flooding et le bannissement par source (C8), dans
+une table **bornée** que l'appelant fournit — et dont une peine en cours n'est
+jamais évincée. La clé est un **préfixe**, pas une adresse : bannir une IPv6 seule
+ne sert à rien.
 
 Toutes les autres crates sont vides, et chacune le déclare dans sa documentation.
 
@@ -154,10 +159,11 @@ jobs indépendants : la vérification du code (les quatre commandes ci-dessus, s
 
 `fuzz/` est une crate `cargo-fuzz` **hors du workspace** : elle exige un nightly,
 que le pin exact du workspace n'admet pas — deux LLVM produisent des profils de
-couverture mutuellement illisibles. Sept cibles, trente-trois propriétés, dont un
+couverture mutuellement illisibles. Huit cibles, trente-six propriétés, dont un
 **aller-retour** sur l'encodeur de réponses, un **vocabulaire de sortie clos** sur
 la session, et l'**indépendance au découpage** sur la phase de données — celle qui
-vise directement la contrebande SMTP. Deux défauts réels trouvés et corrigés. Voir
+vise directement la contrebande SMTP. **Quatre défauts réels** trouvés et
+corrigés, dont deux dans le garde. Voir
 [`fuzz/README.md`](fuzz/README.md).
 
 La CI en lance un smoke borné à vingt secondes par cible : un détecteur de
@@ -171,7 +177,7 @@ que `llvm-cov` n'instrumente pas sur Rust stable et dont le compteur reste à
 `0 / 0`. Les régions font le travail attendu : chaque bras d'un conditionnel en
 est une.
 
-Le gate mesure aujourd'hui **4 631 régions** et **2 765 lignes**, toutes
+Le gate mesure aujourd'hui **5 456 régions** et **3 206 lignes**, toutes
 couvertes. `ams-loop-tokio` en est **hors** : elle lit, écrit et attend, et y
 atteindre 100 % exigerait de simuler les pannes du noyau — on mesurerait alors la
 fidélité de la simulation. Il naissait à zéro dette et n'en a pas pris.

@@ -27,6 +27,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_smtp_reply` | `seeds/smtp-reply` | l'encodage d'une réponse — **aller-retour** |
 | `fuzz_ams_session_smtp` | `seeds/session` | la session — **vocabulaire de sortie clos** |
 | `fuzz_ams_smtp_data` | `seeds/smtp-data` | la phase de données — **indépendance au découpage** |
+| `fuzz_ams_guard` | `seeds/guard` | le garde — **une peine ne s'évince pas** |
 
 Les variantes « bornes » existent parce que les bornes de C3 viennent de la
 configuration (C8), donc d'un administrateur : un zéro, un `usize::MAX`, ou toute
@@ -136,6 +137,19 @@ d'un terminateur.
 5. Le message n'est jamais plus long que ce qui a été lu.
 6. Les bornes de ligne et de message sont tenues.
 
+### Garde anti-flooding (trois), dont l'INÉVINÇABILITÉ D'UNE PEINE
+
+La table du garde est bornée — c'est ce qui l'empêche d'être un épuisement de
+mémoire. Mais une table bornée doit oublier, et **ce qu'elle oublie est
+précisément ce qu'un attaquant veut choisir**.
+
+1. **Un banni le reste tant que sa peine court**, quel que soit le flot d'autres
+   sources qui martèle la table. C'est l'attaque évidente : inonder pour se faire
+   oublier.
+2. **Un bannissement rendu n'est jamais déjà échu.** Un verdict qui se contredit
+   au moment où il est prononcé ne vaut rien.
+3. La table ne déborde jamais de sa capacité.
+
 ## Lancement
 
 **Nommez la cible de compilation.** cargo-fuzz 0.13.1 choisissait
@@ -170,6 +184,24 @@ main, et l'absence de plantage en CI ne prouve rien de plus que ce qu'elle a
 couvert.
 
 ## Ce que le fuzz a trouvé
+
+**`fuzz_ams_guard`, deux fois, à sa première campagne.**
+
+1. **Une peine pouvait être évincée.** La règle d'éviction sacrifiait, quand la
+   table était pleine de bannissements, celui qui expirait le plus tôt — « puisque
+   sa perte coûte le moins ». Il suffisait donc de remplir la table pour se
+   libérer. La règle est devenue : **une peine en cours n'est jamais candidate à
+   l'éviction**, et une table pleine de peines cesse d'apprendre plutôt que
+   d'oublier. Entre oublier un attaquant prouvé et ne pas commencer à compter un
+   inconnu, c'est l'oubli qui coûte le plus cher.
+2. **Une peine de durée nulle était prononcée quand même**, sous la forme
+   `Banned { until: maintenant }` — que l'interrogation suivante démentait
+   aussitôt. Une configuration à zéro dit « ne bannis pas » : l'événement est
+   désormais freiné, sans plus.
+
+Une troisième défaillance venait de la cible elle-même : elle comparait des
+ADRESSES là où le garde compare des PRÉFIXES. Sous un `/0`, deux adresses
+différentes sont la même source, et le garde avait raison de la recompter.
 
 **`fuzz_ams_smtp_data`, à sa première campagne, sur le flux `\rF\n`.** Sous une
 borne de ligne étroite, la lecture d'un seul tenant rendait « CR isolé » et la
@@ -216,3 +248,4 @@ L'entrée fautive est versionnée en graine de non-régression
 | 2026-08-28 | `fuzz_ams_smtp_reply` | 3 226 422 (91 s) | **1, corrigé** |
 | 2026-08-28 | `fuzz_ams_session_smtp` | 1 296 868 (91 s) | 0 |
 | 2026-08-28 | `fuzz_ams_smtp_data` | 4 629 514 (121 s) | **1, corrigé** |
+| 2026-08-28 | `fuzz_ams_guard` | 2 721 501 (151 s) | **2, corrigés** |
