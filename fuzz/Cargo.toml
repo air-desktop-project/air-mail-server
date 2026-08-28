@@ -33,6 +33,9 @@ arbitrary = { version = "1", features = ["derive"] }
 [dependencies.ams-mime]
 path = "../crates/ams-mime"
 
+[dependencies.ams-proto-smtp]
+path = "../crates/ams-proto-smtp"
+
 [profile.release]
 debug = 1
 
@@ -46,6 +49,20 @@ bench = false
 [[bin]]
 name = "fuzz_ams_mime_limits"
 path = "fuzz_targets/fuzz_ams_mime_limits.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ams_smtp_command"
+path = "fuzz_targets/fuzz_ams_smtp_command.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ams_smtp_limits"
+path = "fuzz_targets/fuzz_ams_smtp_limits.rs"
 test = false
 doc = false
 bench = false

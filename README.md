@@ -7,10 +7,9 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 > Ce dépôt compile, il est linté, et il porte quatre gates de CI. Il **ne sert
 > aucun protocole**.
 >
-> Une seule crate porte du code : `ams-mime`, et seulement son squelette — la
-> ligne, le pliage, la séparation en-tête/corps, le découpage en champs. Toutes
-> les autres sont des emplacements réservés qui le disent dans leur propre
-> documentation.
+> Deux crates portent du code : `ams-mime` (le squelette d'un message) et
+> `ams-proto-smtp` (les commandes). Toutes les autres sont des emplacements
+> réservés qui le disent dans leur propre documentation.
 >
 > Ce que ce dépôt affirme, il le tient. Rien de plus n'est promis ici.
 
@@ -45,7 +44,7 @@ horloge.
 | Crate | Périmètre | État |
 | --- | --- | --- |
 | `ams-mime` | RFC 5322 et MIME — le socle des quatre protocoles | **squelette du message : ligne, pliage, champs** |
-| `ams-proto-smtp` | RFC 5321 | vide |
+| `ams-proto-smtp` | RFC 5321 | **les commandes : ligne, verbe, chemins, paramètres** |
 | `ams-proto-pop3` | RFC 1939 | vide |
 | `ams-proto-imap` | RFC 9051 (IMAP4rev2) | vide |
 | `ams-proto-http` | RFC 9110 / 9112 | vide |
@@ -77,10 +76,13 @@ Les seules crates qui lisent, écrivent et attendent. Elles ne décident de rien
 | `ams-server` | le binaire `air-mail-server` |
 | `ams-admin` | le binaire `air-mail-admin` |
 
-**Seule `ams-mime` porte du code**, et seulement son squelette : la ligne, le
-pliage, la séparation en-tête/corps et le découpage en champs. Les champs
-structurés, les adresses, les dates et MIME restent à écrire. Toutes les autres
-crates sont vides, et chacune le déclare dans sa documentation.
+**Deux crates portent du code.** `ams-mime` : le squelette d'un message — la
+ligne, le pliage, la séparation en-tête/corps, le découpage en champs. Les champs
+structurés, les adresses, les dates et MIME restent à écrire.
+`ams-proto-smtp` : les commandes — la ligne, le verbe, les chemins d'enveloppe,
+les paramètres ESMTP. L'encodage des réponses reste à écrire.
+
+Toutes les autres crates sont vides, et chacune le déclare dans sa documentation.
 
 ### Pourquoi les étages 1 et 2 ne font aucune entrée-sortie
 
@@ -140,8 +142,8 @@ jobs indépendants : la vérification du code (les quatre commandes ci-dessus, s
 
 `fuzz/` est une crate `cargo-fuzz` **hors du workspace** : elle exige un nightly,
 que le pin exact du workspace n'admet pas — deux LLVM produisent des profils de
-couverture mutuellement illisibles. Deux cibles sur `ams-mime`, sept propriétés,
-et **4 827 316 exécutions sans plantage** à ce jour. Voir
+couverture mutuellement illisibles. Quatre cibles — deux par grammaire —, quinze
+propriétés, et **27 585 613 exécutions sans plantage** à ce jour. Voir
 [`fuzz/README.md`](fuzz/README.md).
 
 La CI en lance un smoke borné à vingt secondes par cible : un détecteur de
@@ -155,9 +157,8 @@ que `llvm-cov` n'instrumente pas sur Rust stable et dont le compteur reste à
 `0 / 0`. Les régions font le travail attendu : chaque bras d'un conditionnel en
 est une.
 
-Le gate mesure aujourd'hui **696 régions** et **399 lignes**, toutes couvertes,
-apportées par la seule crate implémentée. Il naissait à zéro dette et n'en a pas
-pris.
+Le gate mesure aujourd'hui **2 242 régions** et **1 363 lignes**, toutes
+couvertes. Il naissait à zéro dette et n'en a pas pris.
 
 ```sh
 ./scripts/check-couverture.sh

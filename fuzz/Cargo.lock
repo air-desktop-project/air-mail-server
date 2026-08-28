@@ -7,12 +7,17 @@ name = "air-mail-server-fuzz"
 version = "0.0.0"
 dependencies = [
  "ams-mime",
+ "ams-proto-smtp",
  "arbitrary",
  "libfuzzer-sys",
 ]
 
 [[package]]
 name = "ams-mime"
+version = "0.1.0"
+
+[[package]]
+name = "ams-proto-smtp"
 version = "0.1.0"
 
 [[package]]

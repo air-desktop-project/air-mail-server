@@ -96,11 +96,9 @@ illisibles, et le gate de C2 ne conclurait plus. Hors workspace, elle a son prop
 `Cargo.lock`, n'entre ni dans la mesure ni dans le lock du produit, et rien de ce
 qu'elle tire n'est livré.
 
-Deux cibles sur `ams-mime` — la grammaire, et les calculs de borne avec des bornes
-elles-mêmes arbitraires — éprouvant sept propriétés, dont deux qui portent le
-reste : le découpage ne perd ni n'invente aucun octet, et aucun CR ni LF isolé ne
-survit dans l'en-tête. Premières campagnes : **4 827 316 exécutions, zéro
-plantage**.
+Quatre cibles — deux par grammaire écrite, l'une sur la grammaire, l'autre sur les
+calculs de borne avec des bornes elles-mêmes arbitraires — éprouvant quinze
+propriétés. Campagnes au 2026-08-28 : **27 585 613 exécutions, zéro plantage**.
 
 La CI lance un smoke-fuzz borné à vingt secondes par cible. C'est un détecteur de
 régression, **pas une campagne**, et `fuzz/README.md` le dit à l'endroit où
@@ -423,14 +421,15 @@ et une couture inutilisée finit par être utilisée.
 
 ## L'état réel, sans complaisance
 
-Une seule crate porte du code : **`ams-mime`**, et seulement son squelette — la
-ligne, le pliage, la séparation en-tête/corps, le découpage en champs. C'est la
-fondation des quatre protocoles, mais aucun protocole n'est écrit, et le serveur
-ne sert toujours rien.
+Deux crates portent du code : **`ams-mime`** (le squelette d'un message) et
+**`ams-proto-smtp`** (les commandes). Aucun protocole n'est pour autant servi : il
+manque l'encodage des réponses, la machine à états de session, et tout le reste.
 
-Sont outillées : C2 (le gate mesure 696 régions, toutes couvertes), C3 (les lints,
-l'absence d'allocation dans le décodeur, et le fuzz), C6 en partie (`ams-mime`
-refuse le CR et le LF isolés, donc l'ambiguïté dont vit la contrebande SMTP).
+Sont outillées : C2 (le gate mesure 2 242 régions, toutes couvertes), C3 (les
+lints, l'absence d'allocation dans les décodeurs, et le fuzz), C6 **en partie et
+pour de bon** — les deux décodeurs refusent le CR et le LF isolés, et
+`ams-proto-smtp` refuse en outre les routes sources et les verbes retirés par la
+RFC 5321.
 
 Tout le reste — TLS, post-quantique, DKIM, SPF, DMARC, flooding, configuration
 binaire, stockage, non-root — est une décision écrite, pas un code vérifié.
