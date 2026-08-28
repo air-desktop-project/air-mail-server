@@ -177,16 +177,23 @@ jobs:
       - name: fuzz_ams_mime_parse
         working-directory: fuzz
         run: |
-          # libFuzzer EXIGE que le premier répertoire de corpus existe : il n'y
-          # écrit que s'il peut l'ouvrir, et refuse de démarrer sinon. cargo-fuzz
-          # ne le crée que lorsqu'on ne lui en nomme aucun.
+          # LA CIBLE EST NOMMÉE, jamais laissée au défaut de l'outil. cargo-fuzz
+          # 0.13.1 choisissait `x86_64-unknown-linux-gnu`, 0.13.2 choisit musl —
+          # dont la libc statique est INCOMPATIBLE avec le sanitizer, et dont la
+          # bibliothèque standard n'est pas installée. Le job passait en local et
+          # échouait en CI, à la seule faveur d'un écart de version de l'outil.
+          # La nommer supprime la dépendance à un défaut, quel qu'il devienne.
+          #
+          # libFuzzer EXIGE par ailleurs que le premier répertoire de corpus
+          # existe : il n'y écrit que s'il peut l'ouvrir, et refuse de démarrer
+          # sinon. cargo-fuzz ne le crée que lorsqu'on ne lui en nomme aucun.
           mkdir -p corpus/fuzz_ams_mime_parse
-          cargo +nightly fuzz run fuzz_ams_mime_parse \
+          cargo +nightly fuzz run --target x86_64-unknown-linux-gnu fuzz_ams_mime_parse \
             corpus/fuzz_ams_mime_parse seeds -- -max_total_time=20
 
       - name: fuzz_ams_mime_limits
         working-directory: fuzz
         run: |
           mkdir -p corpus/fuzz_ams_mime_limits
-          cargo +nightly fuzz run fuzz_ams_mime_limits \
+          cargo +nightly fuzz run --target x86_64-unknown-linux-gnu fuzz_ams_mime_limits \
             corpus/fuzz_ams_mime_limits seeds -- -max_total_time=20

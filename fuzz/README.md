@@ -50,16 +50,22 @@ jamais par ce qu'elles exigent.
 
 ## Lancement
 
+**Nommez la cible de compilation.** cargo-fuzz 0.13.1 choisissait
+`x86_64-unknown-linux-gnu` par défaut, 0.13.2 choisit musl — dont la libc statique
+est incompatible avec le sanitizer. Sans `--target`, la commande dépend de la
+version de l'outil installée sur la machine.
+
 ```sh
 # Campagne (Ctrl-C pour arrêter)
-cargo +nightly fuzz run fuzz_ams_mime_parse
-cargo +nightly fuzz run fuzz_ams_mime_limits
+cargo +nightly fuzz run --target x86_64-unknown-linux-gnu fuzz_ams_mime_parse
+cargo +nightly fuzz run --target x86_64-unknown-linux-gnu fuzz_ams_mime_limits
 
 # Bornée, en partant du corpus versionné. Le `mkdir` n'est pas superflu :
 # libFuzzer REFUSE DE DÉMARRER si le premier répertoire de corpus n'existe pas,
 # et cargo-fuzz ne le crée que lorsqu'on ne lui en nomme aucun.
 mkdir -p corpus/fuzz_ams_mime_parse
-cargo +nightly fuzz run fuzz_ams_mime_parse corpus/fuzz_ams_mime_parse seeds -- -max_total_time=30
+cargo +nightly fuzz run --target x86_64-unknown-linux-gnu fuzz_ams_mime_parse \
+  corpus/fuzz_ams_mime_parse seeds -- -max_total_time=30
 ```
 
 `corpus/` et `artifacts/` ne sont **pas** versionnés : ils sont propres à une
