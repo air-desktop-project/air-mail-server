@@ -128,12 +128,22 @@ pub struct Guard<'a> {
 
 impl<'a> Guard<'a> {
     /// Ouvre un garde sur la table que l'appelant fournit.
+    ///
+    /// **La table n'est PAS effacée.** Une table neuve s'initialise avec
+    /// [`Slot::EMPTY`], qui est aussi son `Default` ; effacer ici interdirait de
+    /// rouvrir un garde sur un état qui doit survivre — ce dont a besoin tout
+    /// appelant qui sert plusieurs connexions à partir d'une seule table.
+    /// [`Guard::reset`] efface, quand c'est ce qu'on veut.
     #[must_use]
     pub fn new(slots: &'a mut [Slot], thresholds: Thresholds) -> Self {
-        for case in slots.iter_mut() {
+        Self { slots, thresholds }
+    }
+
+    /// Oublie tout ce qui a été observé.
+    pub fn reset(&mut self) {
+        for case in self.slots.iter_mut() {
             *case = Slot::EMPTY;
         }
-        Self { slots, thresholds }
     }
 
     /// Le nombre de sources suivies.
@@ -615,16 +625,24 @@ mod tests {
     }
 
     #[test]
-    fn une_table_reutilisee_est_remise_a_neuf() {
+    fn rouvrir_un_garde_ne_perd_rien_mais_le_remettre_a_zero_oublie_tout() {
+        // C'est ce dont a besoin un appelant qui sert plusieurs connexions à
+        // partir d'une seule table : le garde se rouvre à chaque événement, et
+        // ce qu'il a appris doit survivre.
         let mut table = [Slot::EMPTY; 4];
         {
             let mut garde = Guard::new(&mut table, seuils_serres());
             for _ in 0..3 {
                 garde.observe(PAIR, Event::InvalidFrame, t(0));
             }
-            assert_eq!(garde.tracked(), 1);
         }
-        let garde = Guard::new(&mut table, seuils_serres());
+        {
+            let garde = Guard::new(&mut table, seuils_serres());
+            assert_eq!(garde.tracked(), 1);
+            assert!(est_banni(garde.verdict(PAIR, t(1))));
+        }
+        let mut garde = Guard::new(&mut table, seuils_serres());
+        garde.reset();
         assert_eq!(garde.tracked(), 0);
         assert_eq!(garde.verdict(PAIR, t(1)), Verdict::Allow);
     }

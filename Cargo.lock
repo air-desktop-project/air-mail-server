@@ -30,6 +30,7 @@ version = "0.1.0"
 name = "ams-loop-tokio"
 version = "0.1.0"
 dependencies = [
+ "ams-guard",
  "ams-proto-smtp",
  "ams-session",
  "libc",

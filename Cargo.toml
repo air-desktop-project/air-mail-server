@@ -80,6 +80,7 @@ repository = "https://github.com/air-desktop-project/air-mail-server"
 [workspace.dependencies]
 # Les arêtes INTERNES ne se déclarent qu'à mesure qu'elles servent : une
 # dépendance posée d'avance affirmerait un assemblage qui n'existe pas.
+ams-guard = { path = "crates/ams-guard", version = "0.1.0" }
 ams-proto-smtp = { path = "crates/ams-proto-smtp", version = "0.1.0" }
 ams-session = { path = "crates/ams-session", version = "0.1.0" }
 
@@ -92,9 +93,13 @@ ams-session = { path = "crates/ams-session", version = "0.1.0" }
 # externe du workspace.
 #
 # C5 tablait sur « ~25 crates transitives ». MESURÉ sur la cible Linux, avec les
-# seules features qui servent : CINQ — `bytes`, `libc`, `mio`, `pin-project-lite`,
-# `socket2`. `default-features = false` fait toute la différence, et l'estimation
-# a été rectifiée dans le registre plutôt que laissée telle quelle.
+# seules features qui servent : DIX, dont CINQ SEULEMENT À L'EXÉCUTION — `bytes`,
+# `libc`, `mio`, `pin-project-lite`, `socket2`. Les cinq autres (`tokio-macros`,
+# `proc-macro2`, `quote`, `syn`, `unicode-ident`) servent la macro `select!` :
+# elles compilent pour l'HÔTE et n'entrent dans aucun binaire livré.
+#
+# `default-features = false` fait toute la différence, et l'estimation a été
+# rectifiée dans le registre plutôt que laissée telle quelle.
 #
 # Pas de `rt-multi-thread` ici : le choix de l'ordonnanceur appartient au binaire
 # qui lance la boucle, pas à la boucle.
@@ -102,7 +107,7 @@ ams-session = { path = "crates/ams-session", version = "0.1.0" }
 # `libc` est déclarée EN DIRECT bien que tokio la tire déjà : `refuse_root` (C10)
 # appelle `geteuid` elle-même, et une dépendance qu'on utilise se déclare, même
 # quand elle est déjà là par ailleurs.
-tokio = { version = "1", default-features = false, features = ["io-util", "net", "rt", "sync", "time"] }
+tokio = { version = "1", default-features = false, features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 libc = "0.2"
 
 # Lints du workspace, hérités par chaque crate via `[lints] workspace = true`.

@@ -2,12 +2,13 @@
 
 use core::time::Duration;
 
+use ams_guard::{Event as GuardEvent, Source, Verdict};
 use ams_proto_smtp::DataEvent;
 use ams_session::{Action, Config, DataOutcome, Policy, SmtpSession};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio::time::timeout;
 
-use crate::{Delivery, DeliveryFailure, Error};
+use crate::{Delivery, DeliveryFailure, Error, SharedGuard};
 
 /// Combien de lignes une réponse peut compter au plus.
 ///
@@ -67,6 +68,22 @@ impl Default for Timeouts {
     }
 }
 
+/// Comment une connexion s'est terminée.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Outcome {
+    /// Servie jusqu'à son terme.
+    #[default]
+    Served,
+    /// Le pair était banni : **rien ne lui a été dit**.
+    ///
+    /// Pas même une bannière. Répondre confirmerait qu'il y a un serveur ici, et
+    /// le texte du refus lui apprendrait qu'il est banni plutôt que hors service
+    /// — deux renseignements qu'on n'a aucune raison de lui offrir.
+    Banned,
+    /// Le débit du pair dépassait le seuil : il a reçu un `421` et la fermeture.
+    Throttled,
+}
+
 /// Ce qu'une connexion a produit.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Summary {
@@ -74,6 +91,8 @@ pub struct Summary {
     pub commands: u64,
     /// Messages remis avec succès.
     pub messages: u64,
+    /// Comment elle s'est terminée.
+    pub outcome: Outcome,
 }
 
 /// Sert une connexion jusqu'à sa fin.
@@ -88,6 +107,15 @@ pub struct Summary {
 /// C'est ce qui permet d'en écrire une seconde pour Air sans rien réécrire
 /// d'autre — et c'est ce que C1 achète.
 ///
+/// # Un pair qui parle encore quand on ferme peut perdre la dernière réponse
+///
+/// Quand la connexion se ferme alors que le pair vient d'écrire, TCP jette la
+/// connexion (`RST`) au lieu de la clore proprement, et ce qui restait dans le
+/// tampon de réception du pair est perdu — y compris le `421` qui explique le
+/// refus. Vider ce qui reste avant de fermer l'éviterait, au prix d'une place de
+/// connexion tenue plus longtemps par un pair hostile. Le choix n'est pas
+/// tranché ; le comportement est celui-ci, et il est écrit plutôt que découvert.
+///
 /// # Errors
 ///
 /// [`Error::CapabilityNotSupported`] si `config` annonce une extension que cette
@@ -98,6 +126,8 @@ pub async fn serve_connection<S, P, D>(
     config: Config<'_>,
     policy: P,
     delivery: &mut D,
+    guard: &SharedGuard,
+    source: Source,
     timeouts: &Timeouts,
 ) -> Result<Summary, Error>
 where
@@ -116,6 +146,13 @@ where
     let mut session = SmtpSession::new(config, policy);
     let mut resume = Summary::default();
 
+    // ON NE PARLE PAS À UN BANNI. Interroger le garde ne compte pas comme un
+    // événement : demander son avis ne doit pas nourrir ses compteurs.
+    if matches!(guard.verdict(source), Verdict::Banned { .. }) {
+        resume.outcome = Outcome::Banned;
+        return Ok(resume);
+    }
+
     // Le tampon de LECTURE est borné par la borne de commande, plus un octet :
     // quand il se remplit sans CRLF, la ligne dépasse forcément la borne, et la
     // session répond « 500 Line too long » d'elle-même. La boucle n'a donc aucune
@@ -131,6 +168,20 @@ where
             .max_reply_octets
             .saturating_mul(REPLY_LINES_MAX)
     ];
+
+    if matches!(
+        guard.observe(source, GuardEvent::Connection),
+        Verdict::Throttled | Verdict::Banned { .. }
+    ) {
+        // Le débit dépasse le seuil : on le dit, et on ferme. Le `421` vient de
+        // la SESSION — une réponse fabriquée ici serait la première fuite de
+        // protocole hors des crates sans entrée-sortie.
+        let refus = session.unavailable(&mut sortie)?;
+        stream.write_all(refus).await?;
+        stream.flush().await?;
+        resume.outcome = Outcome::Throttled;
+        return Ok(resume);
+    }
 
     let banniere = session.greeting(&mut sortie)?;
     stream.write_all(banniere).await?;
@@ -163,11 +214,33 @@ where
         stream.flush().await?;
         resume.commands = resume.commands.saturating_add(1);
         let suite = Suite::depuis(tour.action());
+        // C'EST LA SESSION QUI DIT CE QUI EST UNE FAUTE, pas le code de réponse :
+        // `502` sanctionne un verbe retiré — une faute — comme un `EXPN` qu'on
+        // décline, qui n'en est pas une.
+        let faute = tour.peer_fault();
 
         // On décale ce qui reste : plusieurs commandes peuvent tenir dans une
         // seule lecture, et les jeter obligerait le pair à les renvoyer.
         lecture.copy_within(fin_ligne..rempli, 0);
         rempli = rempli.saturating_sub(fin_ligne);
+
+        let evenement = if faute {
+            GuardEvent::InvalidFrame
+        } else {
+            GuardEvent::Command
+        };
+        if matches!(
+            guard.observe(source, evenement),
+            Verdict::Throttled | Verdict::Banned { .. }
+        ) {
+            // Le pair a reçu sa réponse ; il apprend maintenant que le canal se
+            // ferme. L'ordre compte : répondre d'abord, refuser ensuite.
+            let refus = session.unavailable(&mut sortie)?;
+            stream.write_all(refus).await?;
+            stream.flush().await?;
+            resume.outcome = Outcome::Throttled;
+            return Ok(resume);
+        }
 
         match suite {
             Suite::Continuer => {}
@@ -303,8 +376,9 @@ fn trouver_crlf(tampon: &[u8]) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Summary, Timeouts, serve_connection};
-    use crate::{Delivery, DeliveryFailure, Error};
+    use super::{Outcome, Summary, Timeouts, serve_connection};
+    use crate::{Delivery, DeliveryFailure, Error, SharedGuard};
+    use ams_guard::{Source, Thresholds};
     use ams_proto_smtp::{Limits, Path};
     use ams_session::{Capabilities, Config, Policy, RecipientVerdict};
     use core::time::Duration;
@@ -357,6 +431,13 @@ mod tests {
         Config::new(b"mail.example.com", 100, 10_485_760, Limits::DEFAULT).expect("configurable")
     }
 
+    const PAIR: Source = Source::V4([192, 0, 2, 1]);
+
+    /// Un garde qui ne freine ni ne bannit personne.
+    fn garde_permissif() -> SharedGuard {
+        SharedGuard::new(16, Thresholds::DEFAULT)
+    }
+
     /// Joue une conversation entière en mémoire, et rend ce que le serveur a dit.
     async fn conversation(envoi: &[u8], boite: &mut Boite) -> (Result<Summary, Error>, String) {
         conversation_avec(config(), envoi, boite).await
@@ -366,6 +447,15 @@ mod tests {
         config: Config<'_>,
         envoi: &[u8],
         boite: &mut Boite,
+    ) -> (Result<Summary, Error>, String) {
+        conversation_gardee(config, envoi, boite, &garde_permissif()).await
+    }
+
+    async fn conversation_gardee(
+        config: Config<'_>,
+        envoi: &[u8],
+        boite: &mut Boite,
+        garde: &SharedGuard,
     ) -> (Result<Summary, Error>, String) {
         // `duplex` donne deux bouts de tuyau en mémoire : la conversation se joue
         // ENTIÈREMENT sans ouvrir un port, donc sans dépendre du réseau de la
@@ -391,6 +481,8 @@ mod tests {
             config,
             NotreDomaine,
             boite,
+            garde,
+            PAIR,
             &Timeouts::default(),
         )
         .await;
@@ -562,11 +654,14 @@ mod tests {
     async fn un_pair_muet_est_abandonne() {
         let (mut serveur, _client) = tokio::io::duplex(64);
         let mut boite = Boite::default();
+        let garde = garde_permissif();
         let resultat = serve_connection(
             &mut serveur,
             config(),
             NotreDomaine,
             &mut boite,
+            &garde,
+            PAIR,
             &Timeouts {
                 command: Duration::from_millis(20),
                 data: Duration::from_millis(20),
@@ -574,6 +669,122 @@ mod tests {
         )
         .await;
         assert!(matches!(resultat, Err(Error::Timeout)));
+    }
+
+    // ── Le garde ────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn on_ne_dit_pas_un_mot_a_un_banni() {
+        // Répondre confirmerait qu'il y a un serveur ici, et le texte du refus
+        // apprendrait au pair qu'il est banni plutôt que hors service.
+        let garde = SharedGuard::new(
+            8,
+            Thresholds {
+                invalid_frames_per_minute: 0,
+                ..Thresholds::DEFAULT
+            },
+        );
+        garde.observe(PAIR, ams_guard::Event::InvalidFrame);
+
+        let mut boite = Boite::default();
+        let (resume, dit) = conversation_gardee(config(), b"QUIT\r\n", &mut boite, &garde).await;
+        assert_eq!(resume.expect("servie").outcome, Outcome::Banned);
+        assert_eq!(dit, "", "le serveur n'a pas dit un mot");
+    }
+
+    #[tokio::test]
+    async fn un_debit_de_connexion_excessif_recoit_un_421_et_la_fermeture() {
+        let garde = SharedGuard::new(
+            8,
+            Thresholds {
+                connections_per_minute: 1,
+                ..Thresholds::DEFAULT
+            },
+        );
+        let mut boite = Boite::default();
+        // La première connexion passe.
+        let (premiere, _) = conversation_gardee(config(), b"QUIT\r\n", &mut boite, &garde).await;
+        assert_eq!(premiere.expect("servie").outcome, Outcome::Served);
+        // La seconde est refusée avant même la bannière.
+        let (seconde, dit) = conversation_gardee(config(), b"QUIT\r\n", &mut boite, &garde).await;
+        assert_eq!(seconde.expect("servie").outcome, Outcome::Throttled);
+        assert_eq!(
+            dit,
+            "421 Service not available, closing transmission channel\r\n"
+        );
+        assert!(!dit.contains("220 "), "aucune bannière n'a été envoyée");
+    }
+
+    #[tokio::test]
+    async fn les_trames_invalides_finissent_par_bannir_en_cours_de_connexion() {
+        let garde = SharedGuard::new(
+            8,
+            Thresholds {
+                invalid_frames_per_minute: 2,
+                ..Thresholds::DEFAULT
+            },
+        );
+        let mut boite = Boite::default();
+        let (resume, dit) = conversation_gardee(
+            config(),
+            b"XYZZY\r\nXYZZY\r\nXYZZY\r\nNOOP\r\n",
+            &mut boite,
+            &garde,
+        )
+        .await;
+        let resume = resume.expect("servie");
+        assert_eq!(resume.outcome, Outcome::Throttled);
+        // Le pair a reçu ses trois réponses, PUIS la fermeture. L'ordre compte.
+        assert_eq!(dit.matches("500 Command not recognised\r\n").count(), 3);
+        assert!(dit.ends_with("421 Service not available, closing transmission channel\r\n"));
+        // Le `NOOP` qui suivait n'a jamais été traité.
+        assert!(!dit.contains("250 OK\r\n"));
+    }
+
+    #[tokio::test]
+    async fn les_refus_legitimes_ne_bannissent_personne() {
+        // UN EXPÉDITEUR QUI SE TROMPE D'ADRESSE N'EST PAS UN ATTAQUANT. Vingt
+        // destinataires refusés, sous un seuil de deux trames invalides.
+        let garde = SharedGuard::new(
+            8,
+            Thresholds {
+                invalid_frames_per_minute: 2,
+                ..Thresholds::DEFAULT
+            },
+        );
+        let mut envoi =
+            Vec::from(b"EHLO client.example\r\nMAIL FROM:<moi@ailleurs.example>\r\n".as_slice());
+        for _ in 0..20 {
+            envoi.extend_from_slice(b"RCPT TO:<qui@ailleurs.example>\r\n");
+        }
+        envoi.extend_from_slice(b"QUIT\r\n");
+
+        let mut boite = Boite::default();
+        let (resume, dit) = conversation_gardee(config(), &envoi, &mut boite, &garde).await;
+        assert_eq!(resume.expect("servie").outcome, Outcome::Served);
+        assert_eq!(dit.matches("550 Relay access denied\r\n").count(), 20);
+        assert!(dit.ends_with("221 Bye\r\n"));
+    }
+
+    #[tokio::test]
+    async fn le_garde_partage_survit_aux_connexions() {
+        // C'est tout l'intérêt : ce qu'une connexion a appris sert à la suivante.
+        let garde = SharedGuard::new(
+            8,
+            Thresholds {
+                invalid_frames_per_minute: 1,
+                ..Thresholds::DEFAULT
+            },
+        );
+        let mut boite = Boite::default();
+        let (premiere, _) =
+            conversation_gardee(config(), b"XYZZY\r\nXYZZY\r\n", &mut boite, &garde).await;
+        assert_eq!(premiere.expect("servie").outcome, Outcome::Throttled);
+        assert_eq!(garde.tracked(), 1);
+
+        let (seconde, dit) = conversation_gardee(config(), b"NOOP\r\n", &mut boite, &garde).await;
+        assert_eq!(seconde.expect("servie").outcome, Outcome::Banned);
+        assert_eq!(dit, "");
     }
 
     #[test]
@@ -587,7 +798,8 @@ mod tests {
             Summary::default(),
             Summary {
                 commands: 0,
-                messages: 0
+                messages: 0,
+                outcome: Outcome::Served,
             }
         );
     }

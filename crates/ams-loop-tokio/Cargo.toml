@@ -10,6 +10,7 @@ repository.workspace = true
 
 [dependencies]
 ams-proto-smtp = { workspace = true }
+ams-guard = { workspace = true }
 ams-session = { workspace = true }
 tokio = { workspace = true }
 libc = { workspace = true }

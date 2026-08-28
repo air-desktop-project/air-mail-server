@@ -191,16 +191,19 @@ asynchrone à maintenir, et la logique du serveur n'est écrite qu'une fois.
 
 **Coût de tokio : MESURÉ, et bien moindre qu'annoncé.** Cette contrainte tablait
 sur « ~25 crates transitives ». Le graphe de build réel, sur la cible Linux et
-avec les seules features qui servent (`io-util`, `net`, `rt`, `sync`, `time`), en
-compte **cinq** : `bytes`, `libc`, `mio`, `pin-project-lite`, `socket2`.
+avec les seules features qui servent, en compte **dix, dont cinq seulement à
+l'exécution** : `bytes`, `libc`, `mio`, `pin-project-lite`, `socket2`. Les cinq
+autres — `tokio-macros` et son outillage proc-macro — compilent pour l'hôte et
+n'entrent dans aucun binaire livré.
 
 `default-features = false` fait toute la différence. L'estimation est corrigée ici
 plutôt que laissée en place : un registre qui garde ses approximations après la
 mesure vaut moins que pas de registre du tout.
 
-**Outillé par** : `ams-loop-tokio` sert une connexion de bout en bout, et ses
-tests jouent des conversations SMTP entières **en mémoire** — `tokio::io::duplex`,
-sans ouvrir de port. `ams-loop-air` n'est toujours pas créée : une crate vide
+**Outillé par** : `ams-loop-tokio` accepte des connexions sur un port et les
+sert. Ses tests jouent des conversations SMTP entières **en mémoire**
+(`tokio::io::duplex`) et de vraies connexions sur la boucle locale, sur un port
+que le noyau choisit. `ams-loop-air` n'est toujours pas créée : une crate vide
 portant ce nom laisserait croire qu'un portage est entamé.
 
 ## C6 — Aucune version ancienne de protocole
@@ -245,8 +248,24 @@ elle reçoit `(source, événement, instant)` et rend un verdict. Elle est donc
 couverte à 100 % par C2, ce qui est le bon régime pour un composant dont un faux
 positif coupe du courrier légitime.
 
-**Outillé par** : `ams-guard`. La logique est une machine à états sans
-entrée-sortie, couverte à 100 % (C2), et fuzzée.
+**Outillé par** : `ams-guard` pour la logique, et `ams-loop-tokio` pour le
+câblage — le garde est consulté **avant la bannière**, puis à chaque commande.
+
+**Qui compte comme « trame invalide » est décidé par la SESSION**, pas par la
+boucle : `Turn::peer_fault`. La boucle ne peut pas le déduire d'un code de
+réponse, puisque `502` sanctionne un verbe retiré par la RFC — une faute — comme
+un `EXPN` qu'on décline, qui n'en est pas une. Le lui faire deviner y remettrait
+du protocole.
+
+**Un refus légitime n'est pas une faute** : boîte inconnue, relais refusé, trop de
+destinataires. Un expéditeur qui se trompe d'adresse n'est pas un attaquant. Le
+revers est nommé : une rafale de destinataires refusés est la signature d'une
+récolte d'adresses, et cela mérite un compteur à soi, avec son propre seuil.
+**Ce n'est pas fait.**
+
+**On ne dit pas un mot à un banni** : pas même une bannière. Répondre confirmerait
+qu'il y a un serveur ici, et le texte du refus lui apprendrait qu'il est banni
+plutôt que hors service.
 
 **Trois décisions qui ne se devinent pas**, et que le registre consigne parce
 qu'elles ne se lisent pas dans le code seul :
@@ -469,9 +488,8 @@ Deux crates portent du code : **`ams-mime`** (le squelette d'un message) et
 **`ams-proto-smtp`** (les commandes **et les réponses**). Aucun protocole n'est pour autant servi : il
 manque l'encodage des réponses, la machine à états de session, et tout le reste.
 
-Sont outillées : C2 (le gate mesure 5 456 régions, toutes couvertes), C8
-(`ams-guard`, dont la logique est complète même si rien ne l'appelle encore), C10
-(`refuse_root`), C3 (les
+Sont outillées : C2 (le gate mesure 5 605 régions, toutes couvertes), C8
+(`ams-guard`, câblé), C10 (`refuse_root`, appelé avant la première acceptation), C3 (les
 lints, l'absence d'allocation dans les décodeurs, et le fuzz), C6 **en partie et
 pour de bon** — les deux décodeurs refusent le CR et le LF isolés, et
 `ams-proto-smtp` refuse en outre les routes sources, les verbes retirés par la

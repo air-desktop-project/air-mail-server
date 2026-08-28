@@ -7,10 +7,13 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 > Ce dépôt compile, il est linté, et il porte quatre gates de CI. Il **ne sert
 > aucun protocole**.
 >
-> Une conversation SMTP complète se joue de bout en bout — mais **en mémoire
-> seulement** : il n'y a pas encore de boucle d'acceptation, donc aucun port
-> écouté, et le stockage n'existe pas. Cinq crates portent du code ; les autres
-> sont des emplacements réservés qui le disent dans leur documentation.
+> **Un serveur écoute, accepte et sert** : bannière, `EHLO`, enveloppe, message,
+> remise — en refusant les sources qui abusent. Le stockage, lui, n'existe pas :
+> la remise est un trait que l'appelant fournit, et rien n'écrit sur un disque.
+> Les deux binaires sont toujours vides.
+>
+> Cinq crates portent du code ; les autres sont des emplacements réservés qui le
+> disent dans leur documentation.
 >
 > Ce que ce dépôt affirme, il le tient. Rien de plus n'est promis ici.
 
@@ -90,14 +93,17 @@ extensions, séquencement `MAIL`/`RCPT`/`DATA`, `STARTTLS`, refus d'`AUTH` hors
 chiffrement, et phase de données. **L'échange SASL et la boucle d'entrées-sorties
 restent à écrire.**
 
-`ams-loop-tokio` : le pilote d'**une** connexion, sur tokio. Il lit, il écrit, il
-n'décide de rien — et ses tests jouent des conversations SMTP entières en mémoire,
-sans ouvrir de port. La boucle d'acceptation, TLS et SASL restent à écrire.
+`ams-loop-tokio` : la boucle d'acceptation et le pilote d'une connexion, sur
+tokio. Elle lit, elle écrit, elle ne décide de rien — pas même le `421` qui refuse
+une source trop pressée, qui vient de la session. Ses tests jouent des
+conversations en mémoire **et** de vraies connexions sur la boucle locale. TLS et
+SASL restent à écrire.
 
 `ams-guard` : la détection de flooding et le bannissement par source (C8), dans
 une table **bornée** que l'appelant fournit — et dont une peine en cours n'est
 jamais évincée. La clé est un **préfixe**, pas une adresse : bannir une IPv6 seule
-ne sert à rien.
+ne sert à rien. Le garde est consulté avant la bannière, puis à chaque commande ;
+**on ne dit pas un mot à un banni**.
 
 Toutes les autres crates sont vides, et chacune le déclare dans sa documentation.
 
@@ -177,7 +183,7 @@ que `llvm-cov` n'instrumente pas sur Rust stable et dont le compteur reste à
 `0 / 0`. Les régions font le travail attendu : chaque bras d'un conditionnel en
 est une.
 
-Le gate mesure aujourd'hui **5 456 régions** et **3 206 lignes**, toutes
+Le gate mesure aujourd'hui **5 605 régions** et **3 299 lignes**, toutes
 couvertes. `ams-loop-tokio` en est **hors** : elle lit, écrit et attend, et y
 atteindre 100 % exigerait de simuler les pannes du noyau — on mesurerait alors la
 fidélité de la simulation. Il naissait à zéro dette et n'en a pas pris.
@@ -218,9 +224,11 @@ Le script tourne aussi en local :
 
 **Une seule dépendance externe** : `tokio`, pour la boucle d'entrées-sorties (C5).
 Le graphe de build réel, sur Linux et avec les seules features qui servent, compte
-**cinq crates transitives** — `bytes`, `libc`, `mio`, `pin-project-lite`,
-`socket2`. Le registre tablait sur vingt-cinq ; `default-features = false` fait
-toute la différence, et l'estimation y a été corrigée.
+**dix crates transitives, dont cinq seulement à l'exécution** — `bytes`, `libc`,
+`mio`, `pin-project-lite`, `socket2`. Les cinq autres (`tokio-macros` et son
+outillage proc-macro) compilent pour l'hôte et n'entrent dans aucun binaire. Le
+registre tablait sur vingt-cinq ; `default-features = false` fait toute la
+différence, et l'estimation y a été corrigée.
 
 `libc` est déclarée en direct bien que tokio la tire déjà : `refuse_root` (C10)
 appelle `geteuid` elle-même, et une dépendance qu'on utilise se déclare.

@@ -75,6 +75,7 @@ pub enum DataOutcome {
 pub struct Turn<'b, 'l> {
     reply: &'b [u8],
     action: Action<'l>,
+    peer_fault: bool,
 }
 
 impl<'b, 'l> Turn<'b, 'l> {
@@ -88,6 +89,32 @@ impl<'b, 'l> Turn<'b, 'l> {
     #[must_use]
     pub fn action(&self) -> Action<'l> {
         self.action
+    }
+
+    /// Cette réponse sanctionne-t-elle une faute du pair ?
+    ///
+    /// # À quoi elle sert, et pourquoi la session doit la rendre
+    ///
+    /// C8 compte les « trames invalides » par source. La boucle ne peut pas le
+    /// déduire d'un code de réponse : `502` sanctionne un verbe retiré par la
+    /// RFC — une faute — mais aussi un `EXPN` qu'on décline poliment, qui n'en
+    /// est pas une. Seul l'endroit qui compose la réponse sait laquelle des deux
+    /// c'est, et le faire deviner à la boucle y remettrait du protocole.
+    ///
+    /// **Vrai pour** : syntaxe irrecevable, verbe inconnu ou retiré, mauvaise
+    /// séquence, extension non annoncée, données refusées par la grammaire.
+    ///
+    /// **Faux pour** : tout le reste, y compris les refus LÉGITIMES — boîte
+    /// inconnue, relais refusé, trop de destinataires, `VRFY`/`EXPN` déclinés.
+    /// Un expéditeur qui se trompe d'adresse n'est pas un attaquant.
+    ///
+    /// **Ce que cela ne couvre pas** : un destinataire refusé n'est pas compté,
+    /// alors qu'une rafale de refus est la signature d'une récolte d'adresses.
+    /// Cela mérite un compteur à soi, avec son propre seuil ; le mêler à celui-ci
+    /// bannirait des expéditeurs légitimes. Ce n'est pas fait.
+    #[must_use]
+    pub fn peer_fault(&self) -> bool {
+        self.peer_fault
     }
 }
 
@@ -167,6 +194,28 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         encode(out, Code::SERVICE_READY, &[banniere], self.config.limits()).map_err(Error::Reply)
     }
 
+    /// La réponse à émettre avant de fermer une connexion qu'on ne peut pas
+    /// servir : garde anti-flooding, arrêt du service, saturation.
+    ///
+    /// # Pourquoi elle vient d'ici et non de la boucle
+    ///
+    /// La boucle ne compose aucune réponse — c'est ce qui garde le vocabulaire de
+    /// sortie CLOS, et donc l'écho inexprimable. Un `421` fabriqué là-bas serait
+    /// la première fuite de protocole hors des crates sans entrée-sortie.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Reply`] si `out` est trop petit.
+    pub fn unavailable<'b>(&self, out: &'b mut [u8]) -> Result<&'b [u8], Error> {
+        encode(
+            out,
+            Code::SERVICE_CLOSING,
+            &[b"Service not available, closing transmission channel"],
+            self.config.limits(),
+        )
+        .map_err(Error::Reply)
+    }
+
     /// La poignée de main TLS a abouti.
     ///
     /// **Toute la session est remise à zéro**, et ce n'est pas une précaution :
@@ -237,15 +286,15 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         // distraite pourrait remettre un message que le décodeur a rejeté.
         if let Some(cause) = refus {
             return match cause {
-                DataFault::BareLineEnding => self.simple(
+                DataFault::BareLineEnding => self.refus(
                     Code::TRANSACTION_FAILED,
                     b"Bare CR or LF in message data",
                     out,
                 ),
                 DataFault::LineTooLong { .. } => {
-                    self.simple(Code::SYNTAX_ERROR, b"Line too long", out)
+                    self.refus(Code::SYNTAX_ERROR, b"Line too long", out)
                 }
-                DataFault::MessageTooLarge { .. } => self.simple(
+                DataFault::MessageTooLarge { .. } => self.refus(
                     Code::MESSAGE_TOO_LARGE,
                     b"Message exceeds maximum size",
                     out,
@@ -376,19 +425,19 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         out: &'b mut [u8],
     ) -> Result<Turn<'b, 'l>, Error> {
         match cause {
-            SmtpError::LineTooLong { .. } => self.simple(Code::SYNTAX_ERROR, b"Line too long", out),
+            SmtpError::LineTooLong { .. } => self.refus(Code::SYNTAX_ERROR, b"Line too long", out),
             SmtpError::MalformedLineEnding => {
-                self.simple(Code::SYNTAX_ERROR, b"Line must end with CRLF", out)
+                self.refus(Code::SYNTAX_ERROR, b"Line must end with CRLF", out)
             }
             SmtpError::UnknownVerb => {
-                self.simple(Code::SYNTAX_ERROR, b"Command not recognised", out)
+                self.refus(Code::SYNTAX_ERROR, b"Command not recognised", out)
             }
             SmtpError::ObsoleteVerb => {
-                self.simple(Code::NOT_IMPLEMENTED, b"Command not implemented", out)
+                self.refus(Code::NOT_IMPLEMENTED, b"Command not implemented", out)
             }
             // Tout le reste porte sur les ARGUMENTS, et `501` est exactement ce
             // que la RFC 5321 §4.2.2 prevoit pour cela.
-            _ => self.simple(
+            _ => self.refus(
                 Code::ARGUMENT_ERROR,
                 b"Syntax error in parameters or arguments",
                 out,
@@ -430,6 +479,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         Ok(Turn {
             reply,
             action: Action::Continue,
+            peer_fault: false,
         })
     }
 
@@ -447,15 +497,16 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         Ok(Turn {
             reply,
             action: Action::Continue,
+            peer_fault: false,
         })
     }
 
     /// `MAIL FROM:` — ouvre une transaction.
     fn on_mail<'b, 'l>(&mut self, out: &'b mut [u8]) -> Result<Turn<'b, 'l>, Error> {
         match self.phase {
-            Phase::Greeted => self.simple(Code::BAD_SEQUENCE, b"Send EHLO first", out),
+            Phase::Greeted => self.refus(Code::BAD_SEQUENCE, b"Send EHLO first", out),
             Phase::Transaction { .. } => {
-                self.simple(Code::BAD_SEQUENCE, b"Nested MAIL command", out)
+                self.refus(Code::BAD_SEQUENCE, b"Nested MAIL command", out)
             }
             _ => {
                 self.phase = Phase::Transaction { recipients: 0 };
@@ -471,7 +522,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         out: &'b mut [u8],
     ) -> Result<Turn<'b, 'l>, Error> {
         let Phase::Transaction { recipients } = self.phase else {
-            return self.simple(Code::BAD_SEQUENCE, b"Need MAIL before RCPT", out);
+            return self.refus(Code::BAD_SEQUENCE, b"Need MAIL before RCPT", out);
         };
         if recipients >= self.config.max_recipients() {
             return self.simple(Code::TOO_MANY_RECIPIENTS, b"Too many recipients", out);
@@ -512,20 +563,20 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
                     out,
                 )
             }
-            _ => self.simple(Code::BAD_SEQUENCE, b"Need RCPT before DATA", out),
+            _ => self.refus(Code::BAD_SEQUENCE, b"Need RCPT before DATA", out),
         }
     }
 
     /// `STARTTLS` (RFC 3207 §4).
     fn on_starttls<'b, 'l>(&mut self, out: &'b mut [u8]) -> Result<Turn<'b, 'l>, Error> {
         if !self.config.capabilities().starttls {
-            return self.simple(Code::NOT_IMPLEMENTED, b"Command not implemented", out);
+            return self.refus(Code::NOT_IMPLEMENTED, b"Command not implemented", out);
         }
         if self.tls {
-            return self.simple(Code::BAD_SEQUENCE, b"TLS already active", out);
+            return self.refus(Code::BAD_SEQUENCE, b"TLS already active", out);
         }
         if self.phase == Phase::Greeted {
-            return self.simple(Code::BAD_SEQUENCE, b"Send EHLO first", out);
+            return self.refus(Code::BAD_SEQUENCE, b"Send EHLO first", out);
         }
         self.finish(
             Code::SERVICE_READY,
@@ -543,23 +594,23 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         out: &'b mut [u8],
     ) -> Result<Turn<'b, 'l>, Error> {
         if !self.config.capabilities().auth {
-            return self.simple(Code::NOT_IMPLEMENTED, b"Command not implemented", out);
+            return self.refus(Code::NOT_IMPLEMENTED, b"Command not implemented", out);
         }
         if !self.tls {
             // Ce refus n'est PAS reglable. Un mot de passe envoye en clair est
             // lu par qui regarde passer les paquets, et l'avoir accepte une fois
             // suffit a le compromettre pour toujours.
-            return self.simple(
+            return self.refus(
                 Code::ENCRYPTION_REQUIRED,
                 b"Encryption required for authentication",
                 out,
             );
         }
         if self.authenticated {
-            return self.simple(Code::BAD_SEQUENCE, b"Already authenticated", out);
+            return self.refus(Code::BAD_SEQUENCE, b"Already authenticated", out);
         }
         if self.phase == Phase::Greeted {
-            return self.simple(Code::BAD_SEQUENCE, b"Send EHLO first", out);
+            return self.refus(Code::BAD_SEQUENCE, b"Send EHLO first", out);
         }
         self.phase = Phase::Auth;
         self.finish(
@@ -580,14 +631,25 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         }
     }
 
-    /// Une reponse d'une ligne, sans action.
+    /// Une reponse d'une ligne, sans action et sans faute du pair.
     fn simple<'b, 'l>(
         &self,
         code: Code,
         texte: &[u8],
         out: &'b mut [u8],
     ) -> Result<Turn<'b, 'l>, Error> {
-        self.finish(code, texte, Action::Continue, out)
+        self.compose(code, texte, Action::Continue, false, out)
+    }
+
+    /// Une reponse d'une ligne qui SANCTIONNE UNE FAUTE du pair (cf.
+    /// [`Turn::peer_fault`]).
+    fn refus<'b, 'l>(
+        &self,
+        code: Code,
+        texte: &[u8],
+        out: &'b mut [u8],
+    ) -> Result<Turn<'b, 'l>, Error> {
+        self.compose(code, texte, Action::Continue, true, out)
     }
 
     /// Une reponse d'une ligne, avec une action.
@@ -598,8 +660,24 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         action: Action<'l>,
         out: &'b mut [u8],
     ) -> Result<Turn<'b, 'l>, Error> {
+        self.compose(code, texte, action, false, out)
+    }
+
+    /// Compose une reponse d'une ligne.
+    fn compose<'b, 'l>(
+        &self,
+        code: Code,
+        texte: &[u8],
+        action: Action<'l>,
+        peer_fault: bool,
+        out: &'b mut [u8],
+    ) -> Result<Turn<'b, 'l>, Error> {
         let reply = encode(out, code, &[texte], self.config.limits()).map_err(Error::Reply)?;
-        Ok(Turn { reply, action })
+        Ok(Turn {
+            reply,
+            action,
+            peer_fault,
+        })
     }
 }
 
@@ -658,6 +736,23 @@ mod tests {
     }
 
     // ── L'ouverture ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn le_refus_de_servir_vient_de_la_session_pas_de_la_boucle() {
+        // Un `421` fabriqué par la boucle serait la première fuite de protocole
+        // hors des crates sans entrée-sortie.
+        let session = acceptante();
+        let mut tampon = [0_u8; 128];
+        assert_eq!(
+            session.unavailable(&mut tampon).expect("réponse"),
+            b"421 Service not available, closing transmission channel\r\n"
+        );
+        let mut minuscule = [0_u8; 4];
+        assert_eq!(
+            session.unavailable(&mut minuscule),
+            Err(tampon_trop_petit(57))
+        );
+    }
 
     #[test]
     fn la_banniere_nomme_le_serveur() {
@@ -1256,6 +1351,66 @@ mod tests {
             jouer(&mut session, b"AUTH PLAIN\r\n"),
             "502 Command not implemented\r\n"
         );
+    }
+
+    #[test]
+    fn la_session_distingue_une_faute_du_pair_d_un_refus_legitime() {
+        // C8 compte les « trames invalides ». La boucle ne peut pas le déduire
+        // d'un code : `502` sanctionne un verbe retiré — une faute — mais aussi
+        // un `EXPN` qu'on décline, qui n'en est pas une.
+        let mut session = acceptante();
+        let mut tampon = [0_u8; 512];
+
+        for (ligne, attendu) in [
+            (b"XYZZY\r\n".as_slice(), true), // verbe inconnu
+            (b"TURN\r\n", true),             // verbe retiré
+            (b"MAIL FROM:<x>\r\n", true),    // syntaxe d'argument
+            (b"RCPT TO:<c@d.co>\r\n", true), // hors séquence
+            (b"NOOP\r\n", false),            // rien de fautif
+            (b"EXPN liste\r\n", false),      // décliné, pas fautif
+            (b"VRFY jean\r\n", false),
+            (b"EHLO client.example\r\n", false),
+        ] {
+            let tour = session.handle(ligne, &mut tampon).expect("réponse");
+            assert_eq!(tour.peer_fault(), attendu, "sur {ligne:?}");
+        }
+    }
+
+    #[test]
+    fn un_destinataire_refuse_n_est_pas_une_faute_du_pair() {
+        // Un expéditeur qui se trompe d'adresse n'est pas un attaquant. La
+        // récolte d'adresses mérite un compteur à soi ; le mêler à celui-ci
+        // bannirait des expéditeurs légitimes.
+        let mut session = session(RecipientVerdict::RelayDenied);
+        let mut tampon = [0_u8; 512];
+        identifier(&mut session);
+        jouer(&mut session, b"MAIL FROM:<a@b.co>\r\n");
+        let tour = session
+            .handle(b"RCPT TO:<c@d.co>\r\n", &mut tampon)
+            .expect("réponse");
+        assert!(tour.reply().starts_with(b"550 "));
+        assert!(!tour.peer_fault());
+    }
+
+    #[test]
+    fn des_donnees_refusees_sont_une_faute_du_pair() {
+        let mut session = acceptante();
+        jusqu_aux_donnees(&mut session);
+        assert_eq!(remettre(&mut session, b"a\n.\r\n"), Err(Error::DataRefused));
+        let mut tampon = [0_u8; 128];
+        let tour = session
+            .on_data_settled(DataOutcome::Accepted, &mut tampon)
+            .expect("verdict");
+        assert!(tour.peer_fault());
+
+        // Un message accepté, lui, n'a rien de fautif.
+        let mut propre = acceptante();
+        jusqu_aux_donnees(&mut propre);
+        remettre(&mut propre, b"corps\r\n.\r\n").expect("recevable");
+        let tour = propre
+            .on_data_settled(DataOutcome::Accepted, &mut tampon)
+            .expect("verdict");
+        assert!(!tour.peer_fault());
     }
 
     #[test]
