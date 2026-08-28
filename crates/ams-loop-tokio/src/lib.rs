@@ -32,11 +32,11 @@
 //!    de se lier à un port. Les ports privilégiés s'atteignent par une règle de
 //!    redirection du pare-feu. Il n'y a donc **aucun** code d'abandon de
 //!    privilèges ici : on ne se trompe pas dans ce qu'on n'écrit pas.
-//! 2. **Une capacité qu'elle ne sait pas conduire.** Cette boucle ne fait pas de
-//!    SASL, et ne fait de TLS que si on lui en donne le moyen ([`Service::tls`]).
-//!    Annoncer `STARTTLS` sans certificat, ou `AUTH` tout court, reviendrait à
-//!    mentir au pair dès la bannière — alors [`serve_connection`] refuse d'ouvrir
-//!    la bouche.
+//! 2. **`STARTTLS` annoncé sans certificat.** Ce serait mentir au pair dès la
+//!    bannière — et un pair peut décider d'envoyer un mot de passe sur la foi de
+//!    cette annonce. [`serve_connection`] refuse alors d'ouvrir la bouche.
+//!    `AUTH`, lui, ne figure plus dans ce refus : la boucle sait le conduire,
+//!    parce qu'elle n'a rien à en connaître.
 //!
 //! # `STARTTLS` : ce que la boucle fait, et ce qu'elle ne décide pas
 //!
@@ -46,12 +46,21 @@
 //! de `ams-tls`, et l'appelant l'apporte tout fait. **Ce qu'un pair envoie
 //! derrière son `STARTTLS` n'est jamais exécuté** : voir [`serve_connection`].
 //!
+//! # `AUTH` : la boucle lit une ligne de plus, et c'est tout
+//!
+//! Après un défi, la session rend
+//! [`Action::ReadAuthResponse`](ams_session::Action::ReadAuthResponse) : la
+//! boucle lit **une ligne**, la décadre de son `CRLF`, et la passe à
+//! [`feed_auth`](ams_session::SmtpSession::feed_auth). Elle ne connaît ni le
+//! base64, ni le format de `PLAIN`, ni l'annulation par `*` — tout cela vit dans
+//! `ams-sasl` et `ams-session`, c'est-à-dire dans le périmètre couvert à 100 %,
+//! et n'aura pas à être réécrit pour Air.
+//!
 //! # Ce qui n'est pas écrit
 //!
-//! SASL, et le chargement d'un certificat par le binaire `air-mail-server` — le
-//! schéma de configuration (C11) n'a pas encore de section TLS, si bien que le
-//! serveur livré ne chiffre pas encore, faute de pouvoir recevoir de quoi le
-//! faire.
+//! Le magasin d'identifiants. La boucle et la session savent conduire un échange
+//! SASL, mais rien dans ce dépôt ne sait dire si un mot de passe est le bon : le
+//! binaire livré n'annonce donc pas `AUTH`.
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 

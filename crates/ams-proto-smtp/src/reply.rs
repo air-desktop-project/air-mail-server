@@ -101,6 +101,12 @@ impl Code {
     pub const NOT_IMPLEMENTED: Self = Self(502);
     /// `503` — mauvaise séquence de commandes.
     pub const BAD_SEQUENCE: Self = Self(503);
+    /// `504` — paramètre de commande non servi (RFC 4954 §4).
+    ///
+    /// Distinct d'[`Code::NOT_IMPLEMENTED`] : la commande est servie, c'est
+    /// l'argument qui ne l'est pas. `AUTH CRAM-MD5` obtient celui-ci, et non un
+    /// `502` qui laisserait croire qu'`AUTH` n'existe pas ici.
+    pub const PARAMETER_NOT_IMPLEMENTED: Self = Self(504);
     /// `530` — authentification requise (RFC 4954 §6).
     pub const AUTH_REQUIRED: Self = Self(530);
     /// `535` — authentification refusée (RFC 4954 §6).

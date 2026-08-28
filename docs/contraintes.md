@@ -240,13 +240,25 @@ ouverte :
   défaut ;
 - le relais ouvert, sous toutes ses formes.
 
-**Outillé par** : partiellement, et seulement pour TLS. Deux `default-features =
-false` — sur `rustls-rustcrypto` et sur `tokio-rustls` — retirent la feature
-`tls12` du graphe ; un test de `ams-tls` vérifie que le fournisseur n'offre que
-trois suites, **toutes en 1.3**. Ce sont les deux seules lignes de C6 qu'un
-contrôle tient. Le reste de la liste — `APOP`, `CRAM-MD5`, le relais ouvert —
-reste une décision : rien ne l'empêche mécaniquement, sinon que le code qui
-l'appliquerait n'est pas écrit.
+**Outillé par** : pour TLS, deux `default-features = false` — sur
+`rustls-rustcrypto` et sur `tokio-rustls` — retirent la feature `tls12` du
+graphe, et un test de `ams-tls` vérifie que le fournisseur n'offre que trois
+suites, **toutes en 1.3**.
+
+Pour l'authentification, depuis le 2026-08-28 : `ams-sasl` ne connaît qu'un
+mécanisme, `PLAIN`, et la session répond `504 Unrecognized authentication type`
+à tout autre — `CRAM-MD5` et `LOGIN` compris, et c'est éprouvé. `AUTH` hors TLS
+reste refusé par un `538` qui n'est réglable par rien.
+
+`CRAM-MD5` mérite sa phrase, parce que la raison de l'exclure n'est pas celle
+qu'on croit : ce n'est pas seulement MD5, c'est que le mécanisme **oblige le
+serveur à conserver le mot de passe en clair** pour calculer le condensat. Un
+mécanisme qui interdit de stocker une empreinte aggrave la fuite qu'il prétend
+éviter.
+
+Le reste de la liste — `APOP`, IMAP4rev1, le relais ouvert — reste une décision :
+rien ne l'empêche mécaniquement, sinon que le code qui l'appliquerait n'est pas
+écrit.
 
 **Le piège vaut d'être nommé** : les défauts de `tokio-rustls` sont
 `["logging", "tls12", "aws-lc-rs"]`. Les laisser ferait entrer TLS 1.2 **et** du

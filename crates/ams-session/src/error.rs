@@ -38,6 +38,14 @@ pub enum Error {
     /// Des octets de message ont été fournis hors de la phase de données.
     NotInDataPhase,
 
+    /// Une réponse SASL a été fournie alors qu'aucun défi n'est en attente.
+    ///
+    /// L'appelant n'a pas vu passer
+    /// [`Action::ReadAuthResponse`](crate::Action::ReadAuthResponse), ou l'a vue
+    /// deux fois. Distinct de [`Error::NotInCommandPhase`] : ce n'est pas une
+    /// commande de trop, c'est une réponse qui n'a pas de question.
+    NotInAuthExchange,
+
     /// Les données du message ont été refusées.
     ///
     /// Le pair a envoyé quelque chose que la grammaire n'accepte pas — un `CR`
@@ -68,6 +76,9 @@ impl fmt::Display for Error {
             Error::NotInDataPhase => {
                 f.write_str("des données ont été fournies hors de la phase de données")
             }
+            Error::NotInAuthExchange => {
+                f.write_str("une réponse SASL a été fournie hors d'un échange d'authentification")
+            }
             Error::DataRefused => {
                 f.write_str("les données du message sont refusées ; conclure la transaction")
             }
@@ -87,6 +98,7 @@ mod tests {
         Error::NotInCommandPhase,
         Error::SessionClosed,
         Error::NotInDataPhase,
+        Error::NotInAuthExchange,
         Error::DataRefused,
         Error::ServerDomainInvalid(ams_proto_smtp::Error::MalformedDomain),
     ];

@@ -31,6 +31,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_index_name` | `seeds/index` | les noms Maildir — **aller-retour de l'UID** |
 | `fuzz_ams_config` | `seeds/config` | la configuration binaire — **aller-retour, et corruption** |
 | `fuzz_ams_tls_kx` | `seeds/tls` | la part de clé TLS du pair — **les deux rôles** |
+| `fuzz_ams_sasl` | `seeds/sasl` | la réponse SASL — **décodage canonique** |
 
 Les variantes « bornes » existent parce que les bornes de C3 viennent de la
 configuration (C8), donc d'un administrateur : un zéro, un `usize::MAX`, ou toute
@@ -170,6 +171,27 @@ mille boîtes se resynchronisent.
 5. Le repliement compte chaque nom une fois et une seule.
 6. Le prochain UID est strictement au-dessus de tous ceux qui existent — sauf
    quand la boîte est épuisée, auquel cas elle le déclare.
+
+### Réponse SASL (quatre, dont une CANONICITÉ)
+
+Ces octets-là arrivent d'un inconnu — chiffrés, oui, mais le chiffrement
+n'authentifie personne. C'est la dernière grammaire que le serveur lit avant de
+savoir à qui il parle.
+
+1. N'importe quels octets rendent une erreur ou des identifiants, jamais une
+   panique.
+2. **Ce qui est décodé tient dans ce que `decoded_len` annonce** (C3) : la
+   sortie est bornée par l'entrée, et jamais l'inverse.
+3. **Deux chaînes base64 distinctes ne rendent jamais les mêmes octets.** C'est
+   la propriété qui empêche un même identifiant de s'écrire de plusieurs façons,
+   et donc de passer à côté d'un filtre ou d'un comptage qui compare les formes
+   encodées. Le fuzzer la vérifie en changeant un caractère et en exigeant que
+   la sortie change — ou que l'entrée soit refusée.
+4. Les trois champs de `PLAIN`, remis bout à bout avec leurs deux séparateurs,
+   recouvrent exactement ce qui a été lu.
+
+La cible replie une partie de ses octets sur l'alphabet base64 : muter au hasard
+produirait surtout des refus, et le décodeur lui-même ne serait jamais atteint.
 
 ### Échange de clés TLS (une, et elle se suffit)
 
@@ -354,6 +376,8 @@ L'entrée fautive est versionnée en graine de non-régression
 | 2026-08-28 | `fuzz_ams_index_name` | 2 015 974 (181 s) | **2, corrigés** |
 | 2026-08-28 | `fuzz_ams_config` | 573 580 (91 s) | 0 |
 | 2026-08-28 | `fuzz_ams_tls_kx` | 47 296 (121 s) | **1 fuite, corrigée** |
+| 2026-08-28 | `fuzz_ams_sasl` | 4 786 307 (61 s) | 0 |
+| 2026-08-28 | `fuzz_ams_session_smtp` (SASL) | 521 646 (91 s) | 0 |
 
 Le débit de `fuzz_ams_tls_kx` est trois ordres de grandeur sous les autres : une
 génération de clé ML-KEM et deux X25519 par exécution, ce que rien n'accélérera.

@@ -41,6 +41,7 @@ fi
 CRATES_SANS_IO=(
     ams-mime
     ams-proto-smtp
+    ams-sasl
     ams-proto-pop3
     ams-proto-imap
     ams-proto-http

@@ -31,6 +31,12 @@ impl DomainesHeberges {
 }
 
 impl Policy for DomainesHeberges {
+    // `authenticate` N'EST PAS IMPLÉMENTÉE, et l'omission est délibérée : le
+    // défaut du trait refuse tout le monde. Ce serveur n'a pas de magasin
+    // d'identifiants — le schéma de configuration n'a pas de comptes — et sa
+    // configuration n'annonce donc pas `AUTH`. Le jour où elle en aura un, c'est
+    // ici que la comparaison à temps constant s'écrira.
+
     fn accepts_recipient(&self, forward_path: &Path<'_>) -> RecipientVerdict {
         match forward_path {
             // RFC 5321 §4.5.1 : tout serveur DOIT accepter le courrier destiné à

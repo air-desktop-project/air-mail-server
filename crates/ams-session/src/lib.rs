@@ -12,8 +12,10 @@
 //!
 //! # Ce qu'elle NE couvre PAS, et il faut le lire avant de s'en servir
 //!
-//! - **L'échange SASL.** `AUTH` rend [`Action::BeginAuth`] : la session **gate**
-//!   et délègue, elle n'authentifie personne.
+//! - **La vérification des identifiants.** La session conduit l'échange SASL de
+//!   bout en bout — défi, base64, format de `PLAIN`, annulation par `*` — mais
+//!   elle n'authentifie personne : elle demande à [`Policy::authenticate`]. Elle
+//!   n'a ni comptes ni empreintes, et ne les invente pas.
 //! - **La politique de relais.** Voir [`Policy`] : la session l'exige plutôt que
 //!   de l'inventer.
 //! - **Les délais et la limitation de débit.** Ils appartiennent à la boucle

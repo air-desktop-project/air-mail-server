@@ -1,6 +1,6 @@
 [package]
-name = "ams-session"
-description = "Machines à états des sessions serveur, sans entrée-sortie"
+name = "ams-sasl"
+description = "SASL (RFC 4422) : le mécanisme PLAIN et son transport base64, sans entrée-sortie"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,8 +9,6 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
-ams-proto-smtp = { workspace = true }
-ams-sasl = { workspace = true }
 
 
 [lints]

@@ -58,6 +58,7 @@ horloge.
 | --- | --- | --- |
 | `ams-mime` | RFC 5322 et MIME — le socle des quatre protocoles | **squelette du message : ligne, pliage, champs** |
 | `ams-proto-smtp` | RFC 5321 | **commandes, réponses, phase de données** |
+| `ams-sasl` | RFC 4422/4616 : `PLAIN` et son base64 | **implémenté** |
 | `ams-proto-pop3` | RFC 1939 | vide |
 | `ams-proto-imap` | RFC 9051 (IMAP4rev2) | vide |
 | `ams-proto-http` | RFC 9110 / 9112 | vide |
@@ -89,7 +90,7 @@ Les seules crates qui lisent, écrivent et attendent. Elles ne décident de rien
 | `ams-server` | le binaire `air-mail-server` | **il tourne** |
 | `ams-admin` | le binaire `air-mail-admin` | **`summary`** |
 
-**Onze crates portent du code.** `ams-mime` : le squelette d'un message — la
+**Douze crates portent du code.** `ams-mime` : le squelette d'un message — la
 ligne, le pliage, la séparation en-tête/corps, le découpage en champs. Les champs
 structurés, les adresses, les dates et MIME restent à écrire.
 `ams-proto-smtp` : les commandes, l'encodage des réponses multilignes, et **la
@@ -97,10 +98,18 @@ phase de données** — `<CRLF>.<CRLF>`, le point échappé, et le refus de tout
 ou `LF` isolé. `BDAT`/`CHUNKING`, l'échappement à l'émission et la validation
 complète d'une adresse IPv6 restent à écrire.
 
+`ams-sasl` : le mécanisme `PLAIN` et le base64 **strict** qui le transporte —
+décodage seul, sans allocation. Strict veut dire : une seule écriture par
+valeur. `Zg==` et `Zh==` décodent tous deux vers `f` ; accepter le second
+donnerait plusieurs formes pour un même identifiant, de quoi passer à côté d'un
+filtre ou d'un comptage. `LOGIN` et `CRAM-MD5` ne sont pas servis, et la crate
+dit pourquoi plutôt que de se taire.
+
 `ams-session` : la session SMTP entière — bannière, `EHLO`, annonce des
 extensions, séquencement `MAIL`/`RCPT`/`DATA`, `STARTTLS`, refus d'`AUTH` hors
-chiffrement, et phase de données. **L'échange SASL et la boucle d'entrées-sorties
-restent à écrire.**
+chiffrement, **la phase de données et l'échange SASL** — défi, base64, format de
+`PLAIN`, annulation par `*`. Elle n'authentifie personne pour autant : elle
+demande à la politique, qui refuse par défaut.
 
 `ams-loop-tokio` : la boucle d'acceptation et le pilote d'une connexion, sur
 tokio. Elle lit, elle écrit, elle ne décide de rien — pas même le `421` qui refuse
@@ -112,7 +121,8 @@ rejoué au-dessus du flux chiffré**, la session remise à zéro. Ce qu'un pair 
 derrière son `STARTTLS` n'est jamais exécuté — c'est la faille de 2011, et le
 tampon n'est pas vidé en silence : le pair reçoit un `421` au lieu de son `220`.
 Le fournisseur cryptographique, lui, ne vient jamais d'ici : l'appelant apporte
-celui de `ams-tls`. SASL reste à écrire.
+celui de `ams-tls`. De l'échange SASL, elle ne sait qu'une chose : après un
+défi, la ligne suivante va à la session plutôt qu'à la grammaire des commandes.
 
 `ams-guard` : la détection de flooding et le bannissement par source (C8), dans
 une table **bornée** que l'appelant fournit — et dont une peine en cours n'est

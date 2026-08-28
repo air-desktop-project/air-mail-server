@@ -28,6 +28,8 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-util"] 
 # pas un autre. Une dépendance de TEST seulement — la boucle, elle, reste
 # ignorante du fournisseur qu'on lui donne.
 ams-tls = { workspace = true }
+# La politique de test authentifie : il lui faut le type des identifiants.
+ams-sasl = { workspace = true }
 
 
 [lints]

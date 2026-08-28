@@ -18,37 +18,6 @@ use crate::{Delivery, DeliveryFailure, Error, SharedGuard};
 /// L'`EHLO` est la plus longue : domaine, `SIZE`, `STARTTLS`, `AUTH`.
 const REPLY_LINES_MAX: usize = 4;
 
-/// Ce que la boucle retient d'une action, une fois la ligne oubliée.
-///
-/// [`Action`] emprunte la ligne de commande — le mécanisme d'un `AUTH` y pointe.
-/// La boucle n'en a aucun usage, et le garder l'empêcherait de réutiliser son
-/// tampon de lecture. On en extrait donc ce dont elle a besoin, et rien de plus.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Suite {
-    /// Lire la commande suivante.
-    Continuer,
-    /// Fermer la connexion.
-    Fermer,
-    /// Lire le message.
-    LireLeMessage,
-    /// Conduire la poignée de main TLS, puis tout recommencer par-dessus.
-    Chiffrer,
-    /// Une extension que cette boucle ne sait pas conduire.
-    NonServie,
-}
-
-impl Suite {
-    fn depuis(action: Action<'_>) -> Self {
-        match action {
-            Action::Continue => Suite::Continuer,
-            Action::Close => Suite::Fermer,
-            Action::ReceiveData => Suite::LireLeMessage,
-            Action::StartTls => Suite::Chiffrer,
-            Action::BeginAuth { .. } => Suite::NonServie,
-        }
-    }
-}
-
 /// Les délais au-delà desquels un pair silencieux est abandonné.
 ///
 /// # Ils appartiennent à la boucle, pas à la session
@@ -112,6 +81,8 @@ pub struct Summary {
     pub messages: u64,
     /// La connexion a-t-elle été chiffrée ?
     pub tls: bool,
+    /// Le pair s'est-il authentifié ?
+    pub authenticated: bool,
     /// Comment elle s'est terminée.
     pub outcome: Outcome,
 }
@@ -262,10 +233,10 @@ where
     // extension qu'on ne sait pas conduire reviendrait à mentir au pair dès la
     // bannière — et un serveur qui annonce `STARTTLS` puis ne chiffre pas est
     // pire qu'un serveur qui ne l'annonce pas.
+    // `AUTH` ne figure plus ici : la boucle sait le conduire, parce qu'elle n'a
+    // rien à en connaître — c'est la session qui décode, lit et tranche. Seul
+    // `STARTTLS` exige encore quelque chose d'elle : du matériel TLS.
     let capacites = service.config.capabilities();
-    if capacites.auth {
-        return Err(Error::CapabilityNotSupported);
-    }
     let accepteur = match (capacites.starttls, service.tls.as_ref()) {
         (true, None) => return Err(Error::CapabilityNotSupported),
         (true, Some(configuration)) => Some(TlsAcceptor::from(Arc::clone(configuration))),
@@ -371,6 +342,10 @@ where
     D: Delivery,
 {
     let capacite = etat.lecture.len();
+    // La ligne SUIVANTE est-elle une réponse SASL plutôt qu'une commande ?
+    // C'est tout ce que la boucle sait de l'authentification : ni base64, ni
+    // format de `PLAIN`, ni annulation par `*`.
+    let mut reponse_sasl_attendue = false;
     loop {
         let Some(fin_ligne) = trouver_crlf(&etat.lecture[..etat.rempli]) else {
             if etat.rempli == capacite {
@@ -398,8 +373,22 @@ where
             continue;
         };
 
-        let tour = session.handle(&etat.lecture[..fin_ligne], &mut etat.sortie)?;
-        let suite = Suite::depuis(tour.action());
+        let tour = if reponse_sasl_attendue {
+            reponse_sasl_attendue = false;
+            // SANS le `CRLF` : c'est la couche qui encadre les lignes qui les
+            // décadre, et elle vient justement de le trouver. `handle`, lui,
+            // reçoit la ligne entière parce que la grammaire des commandes
+            // VALIDE cet encadrement (le contrebandage SMTP se joue là).
+            let fin_utile = fin_ligne.saturating_sub(2);
+            session.feed_auth(&etat.lecture[..fin_utile], &mut etat.sortie)?
+        } else {
+            session.handle(&etat.lecture[..fin_ligne], &mut etat.sortie)?
+        };
+        let action = tour.action();
+        // Le résumé porte l'état de la SESSION, pas une déduction de la boucle —
+        // et il est relevé AVANT le `match`, dont plusieurs bras rendent la main.
+        // Le relever après en aurait perdu la dernière valeur sur un `QUIT`.
+        etat.resume.authenticated = session.is_authenticated();
         // C'EST LA SESSION QUI DIT CE QUI EST UNE FAUTE, pas le code de réponse :
         // `502` sanctionne un verbe retiré — une faute — comme un `EXPN` qu'on
         // décline, qui n'en est pas une.
@@ -407,7 +396,7 @@ where
 
         // Le pair a-t-il déjà envoyé autre chose derrière son `STARTTLS` ? Alors
         // il n'aura pas son `220` : voir `serve_connection`.
-        if suite == Suite::Chiffrer && etat.rempli > fin_ligne {
+        if action == Action::StartTls && etat.rempli > fin_ligne {
             service.guard.observe(source, GuardEvent::InvalidFrame);
             let refus = session.unavailable(&mut etat.sortie)?;
             stream.write_all(refus).await?;
@@ -443,11 +432,13 @@ where
             return Ok(Etape::Terminee);
         }
 
-        match suite {
-            Suite::Continuer => {}
-            Suite::Fermer => return Ok(Etape::Terminee),
-            Suite::Chiffrer => return Ok(Etape::Chiffrement),
-            Suite::LireLeMessage => {
+        match action {
+            Action::Continue => {}
+            Action::Close => return Ok(Etape::Terminee),
+            Action::StartTls => return Ok(Etape::Chiffrement),
+            // La session vient de poser son défi ; la ligne suivante y répond.
+            Action::ReadAuthResponse => reponse_sasl_attendue = true,
+            Action::ReceiveData => {
                 let remis = recevoir_message(
                     stream,
                     session,
@@ -462,11 +453,6 @@ where
                     etat.resume.messages = etat.resume.messages.saturating_add(1);
                 }
             }
-            // Inatteignable : les capacités ont été refusées à l'entrée. Cette
-            // crate est de l'étage 3, hors du 100 % de C2 — c'est le seul endroit
-            // du dépôt où une garde inexerçable a sa place, et elle est ici parce
-            // qu'un `unreachable!()` ferait tomber un serveur.
-            Suite::NonServie => return Err(Error::CapabilityNotSupported),
         }
     }
 }
@@ -1001,6 +987,7 @@ mod tests {
                 commands: 0,
                 messages: 0,
                 tls: false,
+                authenticated: false,
                 outcome: Outcome::Served,
             }
         );

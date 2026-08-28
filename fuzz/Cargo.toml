@@ -48,6 +48,9 @@ path = "../crates/ams-config"
 [dependencies.ams-guard]
 path = "../crates/ams-guard"
 
+[dependencies.ams-sasl]
+path = "../crates/ams-sasl"
+
 [dependencies.ams-tls]
 path = "../crates/ams-tls"
 
@@ -137,6 +140,13 @@ bench = false
 [[bin]]
 name = "fuzz_ams_tls_kx"
 path = "fuzz_targets/fuzz_ams_tls_kx.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ams_sasl"
+path = "fuzz_targets/fuzz_ams_sasl.rs"
 test = false
 doc = false
 bench = false

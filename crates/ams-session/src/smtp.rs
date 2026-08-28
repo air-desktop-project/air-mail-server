@@ -3,6 +3,7 @@
 use ams_proto_smtp::{
     Code, Command, DataEvent, DataFault, DataReceiver, Error as SmtpError, Path, encode,
 };
+use ams_sasl::{decode_base64, parse_plain};
 
 use crate::digits::{MAX_DIGITS, decimal};
 use crate::{Config, Error, Policy, RecipientVerdict};
@@ -11,6 +12,14 @@ use crate::{Config, Error, Policy, RecipientVerdict};
 const BANNER_MAX: usize = 255 + 6;
 /// La ligne `SIZE` : le mot-clé, une espace, et vingt chiffres au plus.
 const SIZE_LINE_MAX: usize = 5 + MAX_DIGITS;
+/// Ce qu'une réponse SASL peut faire, une fois décodée.
+///
+/// Fixe, parce que cette crate n'alloue pas (C3). Cinq cent douze octets
+/// majorent très largement une réponse `PLAIN` réelle — un nom de compte et un
+/// mot de passe — et laissent passer tout ce qu'une ligne de commande de la RFC
+/// 5321 peut porter, dont le base64 ne rend que trois quarts.
+const SASL_DECODED_MAX: usize = 512;
+
 /// Le nombre maximal de lignes d'un `EHLO` : domaine, `SIZE`, `STARTTLS`, `AUTH`.
 const EHLO_LINES_MAX: usize = 4;
 
@@ -40,19 +49,27 @@ enum Phase {
 /// [`Command`](ams_proto_smtp::Command) : une action nouvelle doit casser la
 /// compilation de la boucle qui la pilote, pas tomber dans un bras `_`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Action<'l> {
+pub enum Action {
     /// Rien de particulier : lire la commande suivante.
     Continue,
     /// Conduire la poignée de main TLS, puis appeler
     /// [`SmtpSession::on_tls_established`].
     StartTls,
-    /// Conduire l'échange SASL, puis appeler [`SmtpSession::on_auth_settled`].
-    BeginAuth {
-        /// Le mécanisme demandé.
-        mechanism: &'l [u8],
-        /// La réponse initiale, si le pair en a fourni une.
-        initial_response: Option<&'l [u8]>,
-    },
+    /// Lire **une ligne de plus** et la passer à
+    /// [`SmtpSession::feed_auth`] : le pair doit répondre au défi SASL.
+    ///
+    /// # Elle ne porte AUCUNE donnée, et c'est le sujet
+    ///
+    /// Une version antérieure passait à l'appelant le mécanisme et la réponse
+    /// initiale, à charge pour lui de conduire l'échange. C'était mettre du
+    /// protocole dans la boucle — base64, format de `PLAIN`, annulation par
+    /// `*` — c'est-à-dire hors du périmètre couvert à 100 %, et à réécrire une
+    /// seconde fois pour Air. L'échange est donc conduit par la session, et la
+    /// boucle ne sait qu'une chose : lire une ligne de plus.
+    ///
+    /// C'est aussi ce qui a fait disparaître le paramètre de durée de vie
+    /// d'`Action` : plus rien n'y emprunte la ligne de commande.
+    ReadAuthResponse,
     /// Lire le message jusqu'à `<CRLF>.<CRLF>`.
     ReceiveData,
     /// Fermer la connexion.
@@ -72,13 +89,13 @@ pub enum DataOutcome {
 
 /// Une réponse à émettre, et ce qu'il faut faire ensuite.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Turn<'b, 'l> {
+pub struct Turn<'b> {
     reply: &'b [u8],
-    action: Action<'l>,
+    action: Action,
     peer_fault: bool,
 }
 
-impl<'b, 'l> Turn<'b, 'l> {
+impl<'b> Turn<'b> {
     /// Les octets à émettre, tels quels.
     #[must_use]
     pub fn reply(&self) -> &'b [u8] {
@@ -87,7 +104,7 @@ impl<'b, 'l> Turn<'b, 'l> {
 
     /// Ce qu'il faut faire **après** les avoir émis.
     #[must_use]
-    pub fn action(&self) -> Action<'l> {
+    pub fn action(&self) -> Action {
         self.action
     }
 
@@ -228,40 +245,6 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         self.phase = Phase::Greeted;
     }
 
-    /// L'échange SASL s'est conclu : rend la réponse à émettre.
-    ///
-    /// La session revient à l'état identifié dans les deux cas. **Un échec
-    /// d'authentification ne ferme pas la connexion** : c'est à la politique de
-    /// bannissement (C8) d'en décider, pas à la grammaire — et fermer sur le
-    /// premier échec transformerait chaque faute de frappe en incident.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::NotInCommandPhase`] si aucun `AUTH` n'est en cours.
-    pub fn on_auth_settled<'b, 'l>(
-        &mut self,
-        succeeded: bool,
-        out: &'b mut [u8],
-    ) -> Result<Turn<'b, 'l>, Error> {
-        if self.phase != Phase::Auth {
-            return Err(Error::NotInCommandPhase);
-        }
-        self.authenticated = succeeded;
-        self.phase = Phase::Identified;
-        if succeeded {
-            self.simple(Code::AUTH_SUCCEEDED, b"Authentication successful", out)
-        } else {
-            // Le refus ne dit PAS ce qui a manqué. « Utilisateur inconnu » et
-            // « mot de passe faux » sont deux réponses différentes, et cette
-            // différence est un annuaire pour qui la mesure.
-            self.simple(
-                Code::AUTH_FAILED,
-                b"Authentication credentials invalid",
-                out,
-            )
-        }
-    }
-
     /// Le message a été lu : rend la réponse à émettre.
     ///
     /// C'est ici que la transaction se termine. La session revient à l'état
@@ -270,11 +253,11 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     /// # Errors
     ///
     /// [`Error::NotInCommandPhase`] si aucun `DATA` n'est en cours.
-    pub fn on_data_settled<'b, 'l>(
+    pub fn on_data_settled<'b>(
         &mut self,
         outcome: DataOutcome,
         out: &'b mut [u8],
-    ) -> Result<Turn<'b, 'l>, Error> {
+    ) -> Result<Turn<'b>, Error> {
         let refus = match self.phase {
             Phase::Data => None,
             Phase::DataFailed(cause) => Some(cause),
@@ -363,11 +346,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     /// [`Error::SessionClosed`], [`Error::NotInCommandPhase`] ou
     /// [`Error::Reply`]. Un pair qui envoie n'importe quoi obtient une
     /// **réponse**, jamais une erreur.
-    pub fn handle<'b, 'l>(
-        &mut self,
-        line: &'l [u8],
-        out: &'b mut [u8],
-    ) -> Result<Turn<'b, 'l>, Error> {
+    pub fn handle<'b>(&mut self, line: &[u8], out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
         match self.phase {
             Phase::Closed => return Err(Error::SessionClosed),
             Phase::Auth | Phase::Data | Phase::DataFailed(_) => {
@@ -419,11 +398,11 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     /// **Le detail n'est jamais renvoye au pair.** Il sait ce qu'il a envoye ;
     /// le lui reciter n'ajoute rien, et exposerait le vocabulaire interne de
     /// l'analyseur a qui cherche a le cartographier.
-    fn on_parse_error<'b, 'l>(
+    fn on_parse_error<'b>(
         &mut self,
         cause: &SmtpError,
         out: &'b mut [u8],
-    ) -> Result<Turn<'b, 'l>, Error> {
+    ) -> Result<Turn<'b>, Error> {
         match cause {
             SmtpError::LineTooLong { .. } => self.refus(Code::SYNTAX_ERROR, b"Line too long", out),
             SmtpError::MalformedLineEnding => {
@@ -446,7 +425,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     }
 
     /// `EHLO` — annonce les extensions **effectivement servies**.
-    fn on_ehlo<'b, 'l>(&mut self, out: &'b mut [u8]) -> Result<Turn<'b, 'l>, Error> {
+    fn on_ehlo<'b>(&mut self, out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
         // RFC 5321 §4.1.4 : `EHLO` annule la transaction en cours.
         self.phase = Phase::Identified;
 
@@ -489,7 +468,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     /// remettre du courrier en clair et sans s'authentifier. C6 n'interdit pas
     /// `HELO` ; ce qu'une telle session a le droit de faire releve de la
     /// politique de relais, pas de cette couche.
-    fn on_helo<'b, 'l>(&mut self, out: &'b mut [u8]) -> Result<Turn<'b, 'l>, Error> {
+    fn on_helo<'b>(&mut self, out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
         self.phase = Phase::Identified;
         let domaine = self.config.domain();
         let reply =
@@ -502,7 +481,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     }
 
     /// `MAIL FROM:` — ouvre une transaction.
-    fn on_mail<'b, 'l>(&mut self, out: &'b mut [u8]) -> Result<Turn<'b, 'l>, Error> {
+    fn on_mail<'b>(&mut self, out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
         match self.phase {
             Phase::Greeted => self.refus(Code::BAD_SEQUENCE, b"Send EHLO first", out),
             Phase::Transaction { .. } => {
@@ -516,11 +495,11 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     }
 
     /// `RCPT TO:` — la seule commande dont la session ne decide pas elle-meme.
-    fn on_rcpt<'b, 'l>(
+    fn on_rcpt<'b>(
         &mut self,
         forward_path: &Path<'_>,
         out: &'b mut [u8],
-    ) -> Result<Turn<'b, 'l>, Error> {
+    ) -> Result<Turn<'b>, Error> {
         let Phase::Transaction { recipients } = self.phase else {
             return self.refus(Code::BAD_SEQUENCE, b"Need MAIL before RCPT", out);
         };
@@ -547,7 +526,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     }
 
     /// `DATA` — exige au moins un destinataire accepte.
-    fn on_data<'b, 'l>(&mut self, out: &'b mut [u8]) -> Result<Turn<'b, 'l>, Error> {
+    fn on_data<'b>(&mut self, out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
         match self.phase {
             Phase::Transaction { recipients } if recipients > 0 => {
                 self.phase = Phase::Data;
@@ -568,7 +547,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     }
 
     /// `STARTTLS` (RFC 3207 §4).
-    fn on_starttls<'b, 'l>(&mut self, out: &'b mut [u8]) -> Result<Turn<'b, 'l>, Error> {
+    fn on_starttls<'b>(&mut self, out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
         if !self.config.capabilities().starttls {
             return self.refus(Code::NOT_IMPLEMENTED, b"Command not implemented", out);
         }
@@ -587,12 +566,12 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     }
 
     /// `AUTH` (RFC 4954) — **le refus emblematique de C6**.
-    fn on_auth<'b, 'l>(
+    fn on_auth<'b>(
         &mut self,
-        mechanism: &'l [u8],
-        initial_response: Option<&'l [u8]>,
+        mechanism: &[u8],
+        initial_response: Option<&[u8]>,
         out: &'b mut [u8],
-    ) -> Result<Turn<'b, 'l>, Error> {
+    ) -> Result<Turn<'b>, Error> {
         if !self.config.capabilities().auth {
             return self.refus(Code::NOT_IMPLEMENTED, b"Command not implemented", out);
         }
@@ -612,16 +591,111 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         if self.phase == Phase::Greeted {
             return self.refus(Code::BAD_SEQUENCE, b"Send EHLO first", out);
         }
-        self.phase = Phase::Auth;
-        self.finish(
-            Code::AUTH_CHALLENGE,
-            b"Proceed",
-            Action::BeginAuth {
-                mechanism,
-                initial_response,
+        // `504` et non `502` : `AUTH` est servi, c'est le mecanisme qui ne l'est
+        // pas. Un `502` laisserait croire qu'`AUTH` n'existe pas ici, et un
+        // client qui sait faire `PLAIN` renoncerait pour rien.
+        // Comparaison EXACTE, et non « à la casse près » : la RFC 4422 §3.1
+        // impose des majuscules, et `ams_proto_smtp` refuse déjà tout le reste.
+        // Une seconde lecture, plus tolérante que la première, finirait par
+        // diverger d'elle — c'est la règle qu'on s'applique partout ailleurs.
+        if mechanism != b"PLAIN" {
+            return self.refus(
+                Code::PARAMETER_NOT_IMPLEMENTED,
+                b"Unrecognized authentication type",
+                out,
+            );
+        }
+
+        match initial_response {
+            // RFC 4954 §4 : avec une reponse initiale, IL NE FAUT PAS envoyer de
+            // defi. Le `334` de trop desynchroniserait la conversation — le
+            // client attendrait un verdict, le serveur une reponse.
+            Some(reponse) => {
+                // Un `=` SEUL vaut reponse initiale VIDE (meme §) : sans cette
+                // convention, « rien » et « une chaine vide » s'ecriraient pareil.
+                let brut: &[u8] = if reponse == b"=" { b"" } else { reponse };
+                self.regler_authentification(brut, out)
+            }
+            None => {
+                self.phase = Phase::Auth;
+                // Le defi de `PLAIN` est VIDE : la ligne est `334 ` et rien de
+                // plus. Il n'y a donc rien a encoder en base64, et c'est
+                // pourquoi `ams_sasl` n'a pas d'encodeur.
+                self.finish(Code::AUTH_CHALLENGE, b"", Action::ReadAuthResponse, out)
+            }
+        }
+    }
+
+    /// Lit la reponse du pair au defi SASL, et rend le verdict.
+    ///
+    /// # Ce que l'appelant doit faire, et rien de plus
+    ///
+    /// Voir [`Action::ReadAuthResponse`] : lire **une ligne** — sans son
+    /// `CRLF` — et la passer ici. Il n'a ni base64 a decoder, ni format a
+    /// connaitre, ni annulation a reconnaitre.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotInAuthExchange`] si aucun defi n'est en attente.
+    pub fn feed_auth<'b>(&mut self, response: &[u8], out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
+        if self.phase != Phase::Auth {
+            return Err(Error::NotInAuthExchange);
+        }
+        // RFC 4954 §4 : `*` annule l'echange. Ce n'est PAS une faute du pair —
+        // un client qui renonce parce que l'utilisateur a ferme sa fenetre fait
+        // exactement ce que la RFC prevoit. Le compter au garde punirait la
+        // conformite.
+        if response == b"*" {
+            self.phase = Phase::Identified;
+            return self.simple(Code::ARGUMENT_ERROR, b"Authentication aborted", out);
+        }
+        self.regler_authentification(response, out)
+    }
+
+    /// Decode, lit, interroge la politique, et repond.
+    fn regler_authentification<'b>(
+        &mut self,
+        base64: &[u8],
+        out: &'b mut [u8],
+    ) -> Result<Turn<'b>, Error> {
+        self.phase = Phase::Identified;
+
+        // Un tampon FIXE : cette crate n'alloue pas (C3). Sa taille majore ce
+        // qu'une ligne de commande peut porter apres decodage — `MAX_COMMAND` de
+        // la RFC 5321 fait 512 octets, dont le base64 ne rend que 384. Une
+        // configuration qui releverait la borne au-dela de 683 verrait des
+        // reponses refusees ici, et c'est le bon sens de l'erreur.
+        let mut clair = [0_u8; SASL_DECODED_MAX];
+        let succes = match decode_base64(base64, &mut clair) {
+            // `ecrits` ne depasse jamais la taille du tampon : `decode` n'ecrit
+            // qu'a travers `get_mut`. L'indexation ne peut donc pas paniquer, et
+            // un `get(..)` ouvrirait ici une branche qu'aucun test ne peut
+            // atteindre — ce que C2 refuse.
+            Ok(ecrits) => match parse_plain(&clair[..ecrits]) {
+                Ok(identifiants) => self.policy.authenticate(&identifiants),
+                Err(_) => false,
             },
-            out,
-        )
+            Err(_) => false,
+        };
+
+        self.authenticated = succes;
+        if succes {
+            self.simple(Code::AUTH_SUCCEEDED, b"Authentication successful", out)
+        } else {
+            // LE REFUS NE DIT PAS CE QUI A MANQUE. « Utilisateur inconnu » et
+            // « mot de passe faux » sont deux reponses differentes, et cette
+            // difference est un annuaire pour qui la mesure.
+            //
+            // Il est en revanche compte comme une FAUTE (C8) : un mot de passe
+            // essaye au hasard est exactement ce qu'un garde doit voir passer.
+            // Une faute de frappe humaine n'atteindra pas le seuil ; mille
+            // tentatives par minute, si.
+            self.refus(
+                Code::AUTH_FAILED,
+                b"Authentication credentials invalid",
+                out,
+            )
+        }
     }
 
     /// Annule la transaction en cours, sans toucher a l'identification.
@@ -632,46 +706,36 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     }
 
     /// Une reponse d'une ligne, sans action et sans faute du pair.
-    fn simple<'b, 'l>(
-        &self,
-        code: Code,
-        texte: &[u8],
-        out: &'b mut [u8],
-    ) -> Result<Turn<'b, 'l>, Error> {
+    fn simple<'b>(&self, code: Code, texte: &[u8], out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
         self.compose(code, texte, Action::Continue, false, out)
     }
 
     /// Une reponse d'une ligne qui SANCTIONNE UNE FAUTE du pair (cf.
     /// [`Turn::peer_fault`]).
-    fn refus<'b, 'l>(
-        &self,
-        code: Code,
-        texte: &[u8],
-        out: &'b mut [u8],
-    ) -> Result<Turn<'b, 'l>, Error> {
+    fn refus<'b>(&self, code: Code, texte: &[u8], out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
         self.compose(code, texte, Action::Continue, true, out)
     }
 
     /// Une reponse d'une ligne, avec une action.
-    fn finish<'b, 'l>(
+    fn finish<'b>(
         &self,
         code: Code,
         texte: &[u8],
-        action: Action<'l>,
+        action: Action,
         out: &'b mut [u8],
-    ) -> Result<Turn<'b, 'l>, Error> {
+    ) -> Result<Turn<'b>, Error> {
         self.compose(code, texte, action, false, out)
     }
 
     /// Compose une reponse d'une ligne.
-    fn compose<'b, 'l>(
+    fn compose<'b>(
         &self,
         code: Code,
         texte: &[u8],
-        action: Action<'l>,
+        action: Action,
         peer_fault: bool,
         out: &'b mut [u8],
-    ) -> Result<Turn<'b, 'l>, Error> {
+    ) -> Result<Turn<'b>, Error> {
         let reply = encode(out, code, &[texte], self.config.limits()).map_err(Error::Reply)?;
         Ok(Turn {
             reply,
@@ -697,12 +761,21 @@ mod tests {
         Error::Reply(SmtpError::BufferTooSmall { needed })
     }
 
-    /// Une politique qui rend toujours le même verdict.
+    /// Une politique qui rend toujours le même verdict, et connaît un compte.
     struct Verdict(RecipientVerdict);
+
+    /// Le seul compte que la politique de test connaisse.
+    const COMPTE: &[u8] = b"jean";
+    /// Son mot de passe.
+    const SECRET: &[u8] = b"ouvre-toi";
 
     impl Policy for Verdict {
         fn accepts_recipient(&self, _forward_path: &Path<'_>) -> RecipientVerdict {
             self.0
+        }
+
+        fn authenticate(&self, credentials: &ams_sasl::Credentials<'_>) -> bool {
+            credentials.authentication_identity == COMPTE && credentials.password == SECRET
         }
     }
 
@@ -1088,8 +1161,8 @@ mod tests {
             Err(Error::NotInCommandPhase)
         );
         assert_eq!(
-            session.on_auth_settled(true, &mut tampon),
-            Err(Error::NotInCommandPhase)
+            session.feed_auth(b"", &mut tampon),
+            Err(Error::NotInAuthExchange)
         );
     }
 
@@ -1215,53 +1288,182 @@ mod tests {
         );
     }
 
+    /// `\0jean\0ouvre-toi` en base64 : la réponse `PLAIN` qui ouvre.
+    const REPONSE_JUSTE: &[u8] = b"AGplYW4Ab3V2cmUtdG9p";
+
     #[test]
-    fn auth_sous_chiffrement_delegue_l_echange() {
+    fn une_reponse_initiale_est_reglee_sans_defi() {
+        // RFC 4954 §4 : avec une réponse initiale, le serveur NE DOIT PAS
+        // envoyer de `334`. Le défi de trop désynchroniserait la conversation —
+        // le client attendrait un verdict, le serveur une réponse.
         let mut session = acceptante();
         session.on_tls_established();
         identifier(&mut session);
         let mut tampon = [0_u8; 128];
         let tour = session
-            .handle(b"AUTH PLAIN dGVzdA==\r\n", &mut tampon)
+            .handle(b"AUTH PLAIN AGplYW4Ab3V2cmUtdG9p\r\n", &mut tampon)
             .expect("réponse");
-        assert_eq!(
-            tour.action(),
-            Action::BeginAuth {
-                mechanism: b"PLAIN",
-                initial_response: Some(b"dGVzdA=="),
-            }
-        );
-        // La session attend le verdict : elle ne traite plus de commande.
+        assert_eq!(tour.reply(), b"235 Authentication successful\r\n");
+        assert_eq!(tour.action(), Action::Continue);
+        assert!(session.is_authenticated());
+        // Et l'on ne s'authentifie pas deux fois.
+        assert!(jouer(&mut session, b"AUTH PLAIN\r\n").starts_with("503"));
+    }
+
+    #[test]
+    fn sans_reponse_initiale_le_defi_est_vide_puis_la_reponse_suit() {
+        let mut session = acceptante();
+        session.on_tls_established();
+        identifier(&mut session);
+        let mut tampon = [0_u8; 128];
+        let tour = session
+            .handle(b"AUTH PLAIN\r\n", &mut tampon)
+            .expect("réponse");
+        // Le défi de `PLAIN` est vide : `334 ` et rien de plus. C'est pourquoi
+        // `ams_sasl` n'a pas d'encodeur base64.
+        assert_eq!(tour.reply(), b"334 \r\n");
+        assert_eq!(tour.action(), Action::ReadAuthResponse);
+        // La session n'accepte plus de commande : elle attend une RÉPONSE.
         assert_eq!(
             session.handle(b"NOOP\r\n", &mut tampon),
             Err(Error::NotInCommandPhase)
         );
 
-        let tour = session.on_auth_settled(true, &mut tampon).expect("verdict");
+        let tour = session
+            .feed_auth(REPONSE_JUSTE, &mut tampon)
+            .expect("verdict");
         assert_eq!(tour.reply(), b"235 Authentication successful\r\n");
         assert!(session.is_authenticated());
-        assert!(jouer(&mut session, b"AUTH PLAIN\r\n").starts_with("503"));
     }
 
     #[test]
-    fn un_echec_d_authentification_ne_ferme_pas_la_connexion() {
-        // C'est à la politique de bannissement (C8) d'en décider, pas à la
-        // grammaire.
+    fn un_mot_de_passe_faux_est_refuse_et_compte_comme_une_faute() {
+        // `\0jean\0autre` : le compte existe, le mot de passe non.
         let mut session = acceptante();
         session.on_tls_established();
         identifier(&mut session);
         let mut tampon = [0_u8; 128];
         session
             .handle(b"AUTH PLAIN\r\n", &mut tampon)
-            .expect("réponse");
+            .expect("défi");
         let tour = session
-            .on_auth_settled(false, &mut tampon)
+            .feed_auth(b"AGplYW4AYXV0cmU=", &mut tampon)
             .expect("verdict");
         // Le refus ne dit PAS ce qui a manqué : la différence entre « utilisateur
         // inconnu » et « mot de passe faux » est un annuaire pour qui la mesure.
         assert_eq!(tour.reply(), b"535 Authentication credentials invalid\r\n");
+        // ET c'est une faute au sens de C8 : mille essais par minute doivent
+        // finir par fermer la porte. Une faute de frappe, elle, n'atteint aucun
+        // seuil.
+        assert!(tour.peer_fault());
         assert!(!session.is_authenticated());
+        // La connexion, elle, reste ouverte : c'est au garde d'en décider.
         assert!(jouer(&mut session, b"NOOP\r\n").starts_with("250"));
+    }
+
+    #[test]
+    fn un_compte_inconnu_obtient_exactement_la_meme_reponse() {
+        // `\0paul\0ouvre-toi`. Deux réponses différentes feraient de ce serveur
+        // un annuaire de comptes valides, interrogeable sans mot de passe.
+        let mut session = acceptante();
+        session.on_tls_established();
+        identifier(&mut session);
+        let mut tampon = [0_u8; 128];
+        session
+            .handle(b"AUTH PLAIN\r\n", &mut tampon)
+            .expect("défi");
+        let tour = session
+            .feed_auth(b"AHBhdWwAb3V2cmUtdG9p", &mut tampon)
+            .expect("verdict");
+        assert_eq!(tour.reply(), b"535 Authentication credentials invalid\r\n");
+    }
+
+    #[test]
+    fn une_reponse_illisible_est_refusee_comme_une_autre() {
+        // Base64 invalide, `PLAIN` mal formé, tampon dépassé : le pair n'apprend
+        // pas LEQUEL. Ce qui est illisible n'ouvre pas de session, et n'en dit
+        // pas plus.
+        for reponse in [
+            &b"pas du base64!"[..],
+            b"Zm9v",         // lisible, mais pas du `PLAIN`
+            b"AGplYW4=",     // un seul séparateur
+            b"AABzZWNyZXQ=", // nom de compte vide
+        ] {
+            let mut session = acceptante();
+            session.on_tls_established();
+            identifier(&mut session);
+            let mut tampon = [0_u8; 128];
+            session
+                .handle(b"AUTH PLAIN\r\n", &mut tampon)
+                .expect("défi");
+            let tour = session.feed_auth(reponse, &mut tampon).expect("verdict");
+            assert_eq!(
+                tour.reply(),
+                b"535 Authentication credentials invalid\r\n",
+                "{reponse:?}"
+            );
+            assert!(!session.is_authenticated());
+        }
+    }
+
+    #[test]
+    fn une_reponse_initiale_reduite_a_un_signe_egal_vaut_le_vide() {
+        // RFC 4954 §4 : sans cette convention, « rien » et « une chaîne vide »
+        // s'écriraient pareil. Le vide n'est pas du `PLAIN`, donc c'est un refus
+        // — mais un refus, pas un défi.
+        let mut session = acceptante();
+        session.on_tls_established();
+        identifier(&mut session);
+        let mut tampon = [0_u8; 128];
+        let tour = session
+            .handle(b"AUTH PLAIN =\r\n", &mut tampon)
+            .expect("réponse");
+        assert_eq!(tour.reply(), b"535 Authentication credentials invalid\r\n");
+        assert_eq!(tour.action(), Action::Continue);
+    }
+
+    #[test]
+    fn le_pair_peut_annuler_et_ce_n_est_pas_une_faute() {
+        // RFC 4954 §4 : `*` annule. Un client dont l'utilisateur ferme la
+        // fenêtre fait exactement ce que la RFC prévoit ; le compter au garde
+        // punirait la conformité.
+        let mut session = acceptante();
+        session.on_tls_established();
+        identifier(&mut session);
+        let mut tampon = [0_u8; 128];
+        session
+            .handle(b"AUTH PLAIN\r\n", &mut tampon)
+            .expect("défi");
+        let tour = session.feed_auth(b"*", &mut tampon).expect("annulation");
+        assert_eq!(tour.reply(), b"501 Authentication aborted\r\n");
+        assert!(!tour.peer_fault());
+        assert!(!session.is_authenticated());
+        // Et la session reprend là où elle en était.
+        assert!(jouer(&mut session, b"NOOP\r\n").starts_with("250"));
+    }
+
+    #[test]
+    fn un_mecanisme_inconnu_obtient_504_et_non_502() {
+        // `502` laisserait croire qu'`AUTH` n'existe pas ici, et un client qui
+        // sait faire `PLAIN` renoncerait pour rien.
+        let mut session = acceptante();
+        session.on_tls_established();
+        identifier(&mut session);
+        for ligne in [
+            &b"AUTH CRAM-MD5\r\n"[..],
+            b"AUTH LOGIN\r\n",
+            b"AUTH SCRAM-SHA-256\r\n",
+        ] {
+            assert_eq!(
+                jouer(&mut session, ligne),
+                "504 Unrecognized authentication type\r\n",
+                "{ligne:?}"
+            );
+        }
+        // Un nom en minuscules, lui, n'arrive JAMAIS jusqu'ici : la RFC 4422
+        // §3.1 impose des majuscules, et la grammaire le refuse en amont. C'est
+        // dit ici pour qu'on sache où vit cette décision.
+        assert!(jouer(&mut session, b"AUTH plain\r\n").starts_with("501"));
     }
 
     #[test]

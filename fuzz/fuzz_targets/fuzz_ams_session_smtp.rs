@@ -59,8 +59,8 @@ enum Evenement {
     Ligne(Vec<u8>),
     /// La poignée de main TLS a abouti.
     TlsEtabli,
-    /// L'échange SASL s'est conclu.
-    AuthReglee(bool),
+    /// Le pair répond au défi SASL — n'importe quels octets.
+    ReponseSasl(Vec<u8>),
     /// Le message a été lu.
     MessageRegle(u8),
 }
@@ -89,7 +89,7 @@ fn vocabulaire() -> Vec<Vec<u8>> {
         "221 Bye",
         "220 Ready to start TLS",
         "235 Authentication successful",
-        "334 Proceed",
+        "334 ",
         "354 Start mail input; end with <CRLF>.<CRLF>",
         "252 Cannot verify; message will be attempted",
         "214 See RFC 5321",
@@ -100,6 +100,8 @@ fn vocabulaire() -> Vec<Vec<u8>> {
         "500 Line must end with CRLF",
         "500 Command not recognised",
         "501 Syntax error in parameters or arguments",
+        "501 Authentication aborted",
+        "504 Unrecognized authentication type",
         "502 Command not implemented",
         "502 EXPN not available",
         "503 Send EHLO first",
@@ -154,11 +156,21 @@ fuzz_target!(|entree: Entree| {
                 assert!(session.is_encrypted());
                 assert!(!session.is_authenticated());
             }
-            Evenement::AuthReglee(succes) => {
-                if let Ok(tour) = session.on_auth_settled(succes, &mut tampon) {
+            Evenement::ReponseSasl(reponse) => {
+                // N'IMPORTE QUELS OCTETS : base64 valide ou non, `PLAIN` bien
+                // formé ou non, annulation par `*`. La session doit rendre une
+                // réponse de son vocabulaire, et jamais paniquer.
+                if let Ok(tour) = session.feed_auth(&reponse, &mut tampon) {
                     verifier_reponse(tour.reply(), &connu);
                     assert_eq!(tour.action(), Action::Continue);
-                    assert_eq!(session.is_authenticated(), succes);
+                    // ON NE S'AUTHENTIFIE PAS PAR HASARD : la politique de ce
+                    // harnais ne connaît AUCUN compte, donc aucune suite
+                    // d'octets ne doit ouvrir de session.
+                    assert!(
+                        !session.is_authenticated(),
+                        "une réponse SASL a ouvert une session sans compte : {:?}",
+                        String::from_utf8_lossy(&reponse)
+                    );
                 }
             }
             Evenement::MessageRegle(choix) => {
@@ -185,7 +197,7 @@ fuzz_target!(|entree: Entree| {
                 match tour.action() {
                     // LE REFUS EMBLÉMATIQUE DE C6, ÉPROUVÉ : jamais d'échange
                     // SASL sans chiffrement.
-                    Action::BeginAuth { .. } => {
+                    Action::ReadAuthResponse => {
                         assert!(
                             session.is_encrypted(),
                             "AUTH engagé hors chiffrement : {:?}",
