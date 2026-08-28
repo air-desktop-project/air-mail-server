@@ -38,6 +38,7 @@ use std::sync::Arc;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use ams_auth::Account;
 use ams_config::{Configuration, Tls};
 use ams_loop_tokio::{ServeOptions, SharedGuard, Timeouts, refuse_root, serve};
 use ams_session::{Capabilities, Config};
@@ -103,6 +104,25 @@ async fn main() -> ExitCode {
     }
 }
 
+/// Charge le magasin de comptes que la configuration nomme, s'il en nomme.
+///
+/// # Le fichier doit être illisible par tout le monde, comme une clé
+///
+/// Ce ne sont que des empreintes, et l'on n'en remonte pas aux mots de passe.
+/// Mais un fichier de comptes lisible par tous est **un dictionnaire de noms à
+/// essayer**, offert à qui a un compte sur la machine — et c'est aussi le
+/// matériel d'une attaque hors ligne, menée à loisir, sans qu'aucun garde ne
+/// compte les essais.
+fn charger_comptes(chemin: &str) -> Result<Vec<Account>, String> {
+    if chemin.is_empty() {
+        return Ok(Vec::new());
+    }
+    refuser_fichier_lisible_par_tous(chemin, "magasin de comptes")?;
+    let octets =
+        std::fs::read(chemin).map_err(|erreur| format!("comptes `{chemin}` : {erreur}"))?;
+    ams_config::decode_accounts(&octets).map_err(|erreur| format!("comptes `{chemin}` : {erreur}"))
+}
+
 /// Charge le matériel TLS que la configuration nomme, s'il en nomme.
 ///
 /// # Le refus d'une clé lisible par tout le monde
@@ -125,24 +145,24 @@ fn charger_tls(tls: &Tls) -> Result<Option<Arc<ServerConfig>>, String> {
         .map_err(|erreur| format!("certificat `{}` : {erreur}", tls.certificate_chain_path))?;
     let cle = std::fs::read(&tls.private_key_path)
         .map_err(|erreur| format!("clé privée `{}` : {erreur}", tls.private_key_path))?;
-    refuser_cle_lisible_par_tous(&tls.private_key_path)?;
+    refuser_fichier_lisible_par_tous(&tls.private_key_path, "clé privée")?;
 
     let config = ams_tls::server_config(&chaine, &cle)
         .map_err(|erreur| format!("matériel TLS : {erreur}"))?;
     Ok(Some(Arc::new(config)))
 }
 
-/// Refuse une clé privée que le reste du monde peut lire.
-fn refuser_cle_lisible_par_tous(chemin: &str) -> Result<(), String> {
+/// Refuse un fichier secret que le reste du monde peut lire.
+fn refuser_fichier_lisible_par_tous(chemin: &str, quoi: &str) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt as _;
 
     let etat =
-        std::fs::metadata(chemin).map_err(|erreur| format!("clé privée `{chemin}` : {erreur}"))?;
+        std::fs::metadata(chemin).map_err(|erreur| format!("{quoi} `{chemin}` : {erreur}"))?;
     let mode = etat.permissions().mode();
     if mode & 0o004 != 0 {
         return Err(format!(
-            "clé privée `{chemin}` : lisible par TOUT LE MONDE (mode {:o}). \
-             `chmod o-r` la répare. Le partage par groupe, lui, reste permis.",
+            "{quoi} `{chemin}` : lisible par TOUT LE MONDE (mode {:o}). \
+             `chmod o-r` le répare. Le partage par groupe, lui, reste permis.",
             mode & 0o777
         ));
     }
@@ -189,10 +209,15 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     // « annoncer » d'un côté, « savoir chiffrer » de l'autre — n'existent pas :
     // c'est la même.
     let chiffrement = charger_tls(&options.tls)?;
+    let comptes = charger_comptes(&options.accounts)?;
+    // `AUTH` n'est annoncé QUE si les deux conditions tiennent : quelqu'un à qui
+    // répondre oui, et de quoi chiffrer. La session refuse `AUTH` hors TLS de
+    // toute façon ; l'annoncer sans chiffrement ne ferait que mentir plus tôt.
+    let authentifie = !comptes.is_empty() && chiffrement.is_some();
     let config = if chiffrement.is_some() {
         config.with_capabilities(Capabilities {
             starttls: true,
-            auth: false,
+            auth: authentifie,
         })
     } else {
         config
@@ -239,7 +264,15 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         usize::try_from(options.tracked_sources).unwrap_or(usize::MAX),
         options.guard,
     ));
-    let politique = Arc::new(DomainesHeberges::new(&options.hosted));
+    let politique = Arc::new(DomainesHeberges::new(&options.hosted, comptes));
+    eprintln!(
+        "air-mail-server : {}",
+        if politique.authentifie() {
+            format!("AUTH PLAIN offert, magasin `{}`", options.accounts)
+        } else {
+            String::from("AUTH non annoncé — aucun compte configuré")
+        }
+    );
     let pour_la_remise = Arc::clone(&boite);
 
     let stats = serve(
@@ -302,7 +335,7 @@ async fn arret() {
 
 #[cfg(test)]
 mod tests {
-    use super::{charger_tls, refuser_cle_lisible_par_tous};
+    use super::{charger_comptes, charger_tls, refuser_fichier_lisible_par_tous};
     use ams_config::Tls;
     use std::os::unix::fs::PermissionsExt as _;
     use std::path::PathBuf;
@@ -333,6 +366,24 @@ mod tests {
     }
 
     #[test]
+    fn sans_chemin_le_serveur_n_a_aucun_compte() {
+        // Chaîne vide : pas de magasin, donc personne à qui répondre oui, donc
+        // `AUTH` non annoncé. L'absence se lit à un chemin vide, pas à un
+        // drapeau qui pourrait le contredire.
+        assert!(
+            charger_comptes("")
+                .expect("aucun magasin est normal")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn un_magasin_introuvable_le_dit_avec_son_chemin() {
+        let erreur = charger_comptes("/nulle/part/comptes.bin").expect_err("introuvable");
+        assert!(erreur.contains("/nulle/part/comptes.bin"), "{erreur}");
+    }
+
+    #[test]
     fn sans_chemins_le_serveur_ne_chiffre_pas() {
         assert!(
             charger_tls(&Tls::default())
@@ -347,7 +398,7 @@ mod tests {
         // l'identité du serveur, et le vol ne laisse aucune trace.
         let atelier = atelier("cle-ouverte");
         let chemin = fichier(&atelier, "cle.pem", 0o644);
-        let erreur = refuser_cle_lisible_par_tous(&chemin).expect_err("refusée");
+        let erreur = refuser_fichier_lisible_par_tous(&chemin, "clé privée").expect_err("refusée");
         assert!(erreur.contains("TOUT LE MONDE"), "{erreur}");
         assert!(erreur.contains("chmod o-r"), "{erreur}");
     }
@@ -361,7 +412,7 @@ mod tests {
         for mode in [0o600, 0o640, 0o660] {
             let chemin = fichier(&atelier, &format!("cle-{mode:o}.pem"), mode);
             assert!(
-                refuser_cle_lisible_par_tous(&chemin).is_ok(),
+                refuser_fichier_lisible_par_tous(&chemin, "clé privée").is_ok(),
                 "le mode {mode:o} devrait être accepté"
             );
         }

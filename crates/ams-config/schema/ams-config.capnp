@@ -44,6 +44,15 @@ struct Configuration {
   guard @8 :Guard;
   timeouts @9 :Timeouts;
   tls @10 :Tls;
+
+  # Le fichier de COMPTES, ou une chaîne vide.
+  #
+  # Séparé de ce fichier-ci, et pour trois raisons : les deux ne changent pas au
+  # même rythme, ils ne méritent pas les mêmes permissions, et une fuite de l'un
+  # n'est pas une fuite de l'autre. Voir `ams-accounts.capnp`.
+  #
+  # VIDE, le serveur n'annonce pas `AUTH` : il n'a personne à qui répondre oui.
+  accounts @11 :Text;
 }
 
 # TLS (C4, C14). Deux CHEMINS, et pas le matériel lui-même : une clé privée

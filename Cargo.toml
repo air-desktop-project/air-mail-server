@@ -34,6 +34,7 @@ members = [
     # Étage 1 — grammaires, sans entrée-sortie
     "crates/ams-mime",
     "crates/ams-proto-smtp",
+    "crates/ams-auth",
     "crates/ams-sasl",
     "crates/ams-proto-pop3",
     "crates/ams-proto-imap",
@@ -86,6 +87,7 @@ ams-guard = { path = "crates/ams-guard", version = "0.1.0" }
 ams-index = { path = "crates/ams-index", version = "0.1.0" }
 ams-loop-tokio = { path = "crates/ams-loop-tokio", version = "0.1.0" }
 ams-proto-smtp = { path = "crates/ams-proto-smtp", version = "0.1.0" }
+ams-auth = { path = "crates/ams-auth", version = "0.1.0" }
 ams-sasl = { path = "crates/ams-sasl", version = "0.1.0" }
 ams-session = { path = "crates/ams-session", version = "0.1.0" }
 ams-store = { path = "crates/ams-store", version = "0.1.0" }
@@ -152,6 +154,14 @@ ml-kem = { version = "=0.3.2", default-features = false, features = ["zeroize"] 
 # X25519 — l'autre moitié. Déjà tirée par `rustls-rustcrypto` ; déclarée en
 # direct parce que nous l'appelons nous-mêmes.
 x25519-dalek = { version = "2", default-features = false, features = ["static_secrets", "zeroize"] }
+# argon2 (magasin d'identifiants) — Argon2id, pur Rust, sans une ligne de C.
+# Mesuré : huit crates transitives, aucune `*-sys`, aucun `cc`.
+#
+# `default-features = false` retire `getrandom` et `rand_core` : cette crate est
+# `no_std` et NE TIRE PAS LE SEL ELLE-MÊME. Le sel vient de l'appelant, qui seul
+# a une source d'aléa — c'est C1, et c'est aussi ce qui rend le hachage
+# reproductible sous test.
+argon2 = { version = "0.6", default-features = false, features = ["alloc", "password-hash"] }
 # tokio-rustls (C4/C5) — le pont entre la boucle et rustls, RIEN DE PLUS : il
 # conduit la poignée de main sur un flux tokio, et ne décide d'aucun protocole.
 #

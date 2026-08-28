@@ -19,6 +19,7 @@ mod options;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use ams_auth::Account;
 use ams_config::Configuration;
 use ams_store::Maildir;
 
@@ -38,6 +39,14 @@ COMMANDES
                         main, et c'est délibéré.
     config show <fichier>
                         relit une configuration et l'affiche.
+    account add <fichier> --login <nom>
+                        ajoute ou remplace un compte. LE MOT DE PASSE SE LIT SUR
+                        L'ENTRÉE STANDARD, jamais sur la ligne de commande : ce
+                        que `ps` affiche, tout le monde le lit.
+    account list <fichier>
+                        liste les noms de comptes. Jamais les empreintes.
+    account remove <fichier> --login <nom>
+                        retire un compte.
     summary <maildir>   relit une boîte et rend ce que ses noms de fichiers
                         portent : messages numérotés, messages à adopter, noms
                         illisibles, et le prochain UID.
@@ -60,6 +69,9 @@ fn main() -> ExitCode {
         ["summary", racine] => resumer(Path::new(racine)),
         ["config", "write", fichier, reste @ ..] => ecrire(Path::new(fichier), reste),
         ["config", "show", fichier] => montrer(Path::new(fichier)),
+        ["account", "add", fichier, "--login", nom] => ajouter(Path::new(fichier), nom),
+        ["account", "list", fichier] => lister(Path::new(fichier)),
+        ["account", "remove", fichier, "--login", nom] => retirer(Path::new(fichier), nom),
         autre => {
             eprintln!("air-mail-admin : commande inconnue : {autre:?}");
             eprintln!("Essayez `air-mail-admin --help`.");
@@ -183,6 +195,190 @@ fn afficher(config: &Configuration) {
         println!("  clé privée       {}", config.tls.private_key_path);
     } else {
         println!("TLS                AUCUN — le serveur sert EN CLAIR");
+    }
+    // Là encore, on DIT l'absence. Une ligne manquante se lit « rien à
+    // signaler » ; or un serveur sans comptes n'authentifie personne, et c'est
+    // précisément ce qu'il faut signaler.
+    if config.accounts.is_empty() {
+        println!("comptes            AUCUN — `AUTH` n'est pas annoncé");
+    } else {
+        println!("comptes            {}", config.accounts);
+    }
+}
+
+/// Lit le magasin, ou rend un magasin vide si le fichier n'existe pas encore.
+///
+/// **Un fichier absent n'est pas une erreur** pour `account add` : c'est le
+/// premier compte. Il en est une pour `list` et `remove`, qui n'ont rien à dire
+/// d'un fichier qui n'existe pas.
+fn lire_magasin(fichier: &Path, tolerer_absence: bool) -> Result<Vec<Account>, String> {
+    match std::fs::read(fichier) {
+        Ok(octets) => ams_config::decode_accounts(&octets)
+            .map_err(|erreur| format!("`{}` : {erreur}", fichier.display())),
+        Err(erreur) if tolerer_absence && erreur.kind() == std::io::ErrorKind::NotFound => {
+            Ok(Vec::new())
+        }
+        Err(erreur) => Err(format!("`{}` : {erreur}", fichier.display())),
+    }
+}
+
+/// Écrit le magasin, en `0600`.
+///
+/// # Les permissions sont posées AVANT le contenu
+///
+/// Un fichier créé en `0644` puis resserré est lisible par tout le monde
+/// pendant l'intervalle. Court, mais réel — et il n'y a aucune raison de le
+/// laisser ouvert une seule instruction.
+fn ecrire_magasin(fichier: &Path, comptes: &[Account]) -> Result<(), String> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let octets =
+        ams_config::encode_accounts(comptes).map_err(|erreur| format!("encodage : {erreur}"))?;
+    let mut sortie = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(fichier)
+        .map_err(|erreur| format!("`{}` : {erreur}", fichier.display()))?;
+    sortie
+        .write_all(&octets)
+        .map_err(|erreur| format!("`{}` : {erreur}", fichier.display()))?;
+    Ok(())
+}
+
+/// Lit un mot de passe sur l'entrée standard.
+///
+/// # Pourquoi pas une option de ligne de commande
+///
+/// Parce que `ps` l'afficherait à tous les comptes de la machine, et que
+/// l'historique du shell le garderait. Un mot de passe passé en argument est un
+/// mot de passe publié.
+///
+/// L'écho n'est pas coupé : cela demanderait `termios`, et cet outil n'a pas de
+/// dépendance système. L'usage prévu est donc le tube —
+/// `printf %s "$MDP" | air-mail-admin account add …` — et le texte d'aide le dit.
+fn lire_mot_de_passe() -> Result<Vec<u8>, String> {
+    use std::io::Read as _;
+    let mut secret = Vec::new();
+    std::io::stdin()
+        .read_to_end(&mut secret)
+        .map_err(|erreur| format!("lecture du mot de passe : {erreur}"))?;
+    // Un tube ajoute presque toujours un saut de ligne final, et un mot de passe
+    // qui finit par `\n` est un mot de passe que personne ne saura retaper.
+    while secret
+        .last()
+        .is_some_and(|&octet| octet == b'\n' || octet == b'\r')
+    {
+        secret.pop();
+    }
+    if secret.is_empty() {
+        return Err(String::from(
+            "mot de passe vide : il se lit sur l'entrée standard, par exemple \
+             `printf %s \"$MDP\" | air-mail-admin account add …`",
+        ));
+    }
+    Ok(secret)
+}
+
+/// Un sel de seize octets, tiré du noyau.
+///
+/// `/dev/urandom` plutôt qu'une crate : ce binaire est déjà Unix seulement
+/// (C10), et une dépendance de plus pour seize octets serait une dépendance de
+/// plus à surveiller.
+fn sel() -> Result<[u8; 16], String> {
+    use std::io::Read as _;
+    let mut graine = [0_u8; 16];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut source| source.read_exact(&mut graine))
+        .map_err(|erreur| format!("/dev/urandom : {erreur}"))?;
+    Ok(graine)
+}
+
+/// Ajoute ou remplace un compte.
+fn ajouter(fichier: &Path, nom: &str) -> ExitCode {
+    match ajouter_ou_dire(fichier, nom) {
+        Ok(remplace) => {
+            println!(
+                "{} : compte `{nom}` {}",
+                fichier.display(),
+                if remplace { "remplacé" } else { "ajouté" }
+            );
+            ExitCode::SUCCESS
+        }
+        Err(message) => {
+            eprintln!("air-mail-admin : {message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn ajouter_ou_dire(fichier: &Path, nom: &str) -> Result<bool, String> {
+    if nom.is_empty() {
+        return Err(String::from("un nom de compte vide ne désigne personne"));
+    }
+    let secret = lire_mot_de_passe()?;
+    let empreinte = ams_auth::hash_password(&secret, &sel()?)
+        .map_err(|erreur| format!("hachage : {erreur}"))?;
+
+    let mut comptes = lire_magasin(fichier, true)?;
+    let remplace = comptes.iter().any(|compte| compte.login == nom);
+    comptes.retain(|compte| compte.login != nom);
+    comptes.push(Account {
+        login: nom.to_string(),
+        hash: empreinte,
+    });
+    // ON RELIT CE QU'ON VIENT D'ÉCRIRE avant de le poser sur le disque : c'est
+    // la même discipline que `config write`. Un magasin illisible découvert au
+    // démarrage du serveur coûte bien plus cher qu'ici.
+    let octets =
+        ams_config::encode_accounts(&comptes).map_err(|erreur| format!("encodage : {erreur}"))?;
+    ams_config::decode_accounts(&octets)
+        .map_err(|erreur| format!("le magasin écrit ne se relit pas : {erreur}"))?;
+    ecrire_magasin(fichier, &comptes)?;
+    Ok(remplace)
+}
+
+/// Liste les noms de comptes — **jamais les empreintes**.
+fn lister(fichier: &Path) -> ExitCode {
+    match lire_magasin(fichier, false) {
+        Ok(comptes) if comptes.is_empty() => {
+            println!("{} : aucun compte", fichier.display());
+            ExitCode::SUCCESS
+        }
+        Ok(comptes) => {
+            for compte in &comptes {
+                println!("{}", compte.login);
+            }
+            ExitCode::SUCCESS
+        }
+        Err(message) => {
+            eprintln!("air-mail-admin : {message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Retire un compte.
+fn retirer(fichier: &Path, nom: &str) -> ExitCode {
+    let resultat = lire_magasin(fichier, false).and_then(|mut comptes| {
+        let avant = comptes.len();
+        comptes.retain(|compte| compte.login != nom);
+        if comptes.len() == avant {
+            return Err(format!("aucun compte `{nom}` dans ce magasin"));
+        }
+        ecrire_magasin(fichier, &comptes)
+    });
+    match resultat {
+        Ok(()) => {
+            println!("{} : compte `{nom}` retiré", fichier.display());
+            ExitCode::SUCCESS
+        }
+        Err(message) => {
+            eprintln!("air-mail-admin : {message}");
+            ExitCode::FAILURE
+        }
     }
 }
 

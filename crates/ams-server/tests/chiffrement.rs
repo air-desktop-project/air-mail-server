@@ -20,6 +20,7 @@
 
 use std::io::Write as _;
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -62,8 +63,6 @@ fn atelier(nom: &str) -> Atelier {
 
 /// Fabrique une paire certificat/clé, la clé en `0600`.
 fn paire(repertoire: &Path) -> Option<(PathBuf, PathBuf)> {
-    use std::os::unix::fs::PermissionsExt as _;
-
     let cert = repertoire.join("chaine.pem");
     let cle = repertoire.join("cle.pem");
     let genere = Command::new("openssl")
@@ -96,7 +95,7 @@ fn port_libre() -> u16 {
     ecouteur.local_addr().expect("adresse").port()
 }
 
-fn configuration(atelier: &Atelier, port: u16, tls: Tls) -> PathBuf {
+fn configuration(atelier: &Atelier, port: u16, tls: Tls, comptes: &str) -> PathBuf {
     let config = Configuration {
         domain: String::from("mail.example.com"),
         listen: format!("127.0.0.1:{port}"),
@@ -113,6 +112,7 @@ fn configuration(atelier: &Atelier, port: u16, tls: Tls) -> PathBuf {
             data_seconds: 10,
         },
         tls,
+        accounts: comptes.to_string(),
     };
     let chemin = atelier.0.join("ams.conf");
     std::fs::write(&chemin, ams_config::encode(&config).expect("encodable")).expect("écriture");
@@ -168,6 +168,7 @@ fn le_binaire_offre_starttls_quand_la_configuration_nomme_un_certificat() {
             certificate_chain_path: cert.display().to_string(),
             private_key_path: cle.display().to_string(),
         },
+        "",
     );
     let _serveur = lancer(&config, port);
 
@@ -208,7 +209,7 @@ fn sans_certificat_le_binaire_sert_en_clair_et_ne_ment_pas() {
     // pair des données qu'il croirait sur le point d'être protégées.
     let atelier = atelier("en-clair");
     let port = port_libre();
-    let config = configuration(&atelier, port, Tls::default());
+    let config = configuration(&atelier, port, Tls::default(), "");
     let _serveur = lancer(&config, port);
 
     let mut flux = TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], port))).expect("connexion");
@@ -224,4 +225,120 @@ fn sans_certificat_le_binaire_sert_en_clair_et_ne_ment_pas() {
         !dit.contains("STARTTLS"),
         "le serveur annonce STARTTLS sans savoir chiffrer.\n{dit}"
     );
+}
+
+#[test]
+fn le_binaire_authentifie_un_compte_ecrit_par_l_administrateur() {
+    // LA CHAÎNE ENTIÈRE, ET C'EST LE SEUL TEST QUI LA PARCOURT : une empreinte
+    // Argon2id écrite dans un magasin binaire, relue par le serveur, comparée à
+    // un mot de passe qui arrive par un `AUTH PLAIN` chiffré. Chaque crate prise
+    // séparément est déjà juste ; ce qui se casse, ce sont les jointures.
+    let atelier = atelier("authentification");
+    let Some((cert, cle)) = paire(&atelier.0) else {
+        panic!("{SANS_OPENSSL}");
+    };
+
+    // Le magasin, écrit comme `air-mail-admin account add` l'écrirait.
+    let magasin = atelier.0.join("comptes.bin");
+    let empreinte = ams_auth::hash_password(b"ouvre-toi", b"seize octets ici").expect("hachable");
+    let comptes = vec![ams_auth::Account {
+        login: String::from("jean"),
+        hash: empreinte,
+    }];
+    std::fs::write(
+        &magasin,
+        ams_config::encode_accounts(&comptes).expect("encodable"),
+    )
+    .expect("écriture");
+    std::fs::set_permissions(&magasin, std::fs::Permissions::from_mode(0o600))
+        .expect("permissions");
+
+    let port = port_libre();
+    let config = configuration(
+        &atelier,
+        port,
+        Tls {
+            certificate_chain_path: cert.display().to_string(),
+            private_key_path: cle.display().to_string(),
+        },
+        &magasin.display().to_string(),
+    );
+    let _serveur = lancer(&config, port);
+
+    let mut client = Command::new("openssl")
+        .args(["s_client", "-connect"])
+        .arg(format!("127.0.0.1:{port}"))
+        .args(["-starttls", "smtp", "-ign_eof"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect(SANS_OPENSSL);
+    client
+        .stdin
+        .as_mut()
+        .expect("entrée standard")
+        // `AGplYW4Ab3V2cmUtdG9p` est `\0jean\0ouvre-toi` en base64. Une seule
+        // chaîne, sans continuation de ligne : une continuation garde son
+        // indentation DANS la commande, et le serveur répond alors « 500 » à
+        // une ligne qui a l'air juste. C'est arrivé en écrivant ce test.
+        .write_all(
+            concat!(
+                "EHLO client.example\r\n",
+                "AUTH PLAIN AGplYW4Ab3V2cmUtdG9p\r\n",
+                "QUIT\r\n"
+            )
+            .as_bytes(),
+        )
+        .expect("écriture");
+    let dit = client.wait_with_output().expect("openssl s_client");
+    let chiffre = String::from_utf8_lossy(&dit.stdout).into_owned();
+
+    assert!(
+        chiffre.contains("250 AUTH PLAIN"),
+        "le serveur n'annonce pas AUTH.\n{chiffre}"
+    );
+    assert!(
+        chiffre.contains("235 Authentication successful"),
+        "le compte n'a pas été reconnu.\n{chiffre}"
+    );
+}
+
+#[test]
+fn un_magasin_lisible_par_tous_empeche_le_demarrage() {
+    // Ce ne sont que des empreintes — mais un fichier de comptes lisible par
+    // tous est un DICTIONNAIRE DE NOMS à essayer, et le matériel d'une attaque
+    // hors ligne que nul garde ne compte.
+    let atelier = atelier("magasin-ouvert");
+    let Some((cert, cle)) = paire(&atelier.0) else {
+        panic!("{SANS_OPENSSL}");
+    };
+    let magasin = atelier.0.join("comptes.bin");
+    std::fs::write(
+        &magasin,
+        ams_config::encode_accounts(&[]).expect("encodable"),
+    )
+    .expect("écriture");
+    std::fs::set_permissions(&magasin, std::fs::Permissions::from_mode(0o644))
+        .expect("permissions");
+
+    let port = port_libre();
+    let config = configuration(
+        &atelier,
+        port,
+        Tls {
+            certificate_chain_path: cert.display().to_string(),
+            private_key_path: cle.display().to_string(),
+        },
+        &magasin.display().to_string(),
+    );
+    let sortie = Command::new(env!("CARGO_BIN_EXE_air-mail-server"))
+        .arg("--config")
+        .arg(&config)
+        .output()
+        .expect("lançable");
+    assert!(!sortie.status.success(), "le serveur a démarré malgré tout");
+    let plainte = String::from_utf8_lossy(&sortie.stderr);
+    assert!(plainte.contains("TOUT LE MONDE"), "{plainte}");
+    assert!(plainte.contains("magasin de comptes"), "{plainte}");
 }

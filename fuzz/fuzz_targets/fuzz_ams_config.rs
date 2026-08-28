@@ -17,7 +17,8 @@
 
 use core::time::Duration;
 
-use ams_config::{Configuration, Timeouts, Tls, decode, encode};
+use ams_auth::{Account, DUMMY_HASH};
+use ams_config::{Configuration, Timeouts, Tls, decode, decode_accounts, encode, encode_accounts};
 use ams_guard::Thresholds;
 use ams_proto_smtp::Limits;
 use arbitrary::Arbitrary;
@@ -44,6 +45,11 @@ struct Entree {
     /// composer « un seul des deux », qui est justement le cas que le décodeur
     /// refuse. Les lier ici cacherait ce refus au lieu de l'éprouver.
     tls: [String; 2],
+    /// Le chemin du magasin de comptes.
+    comptes: String,
+    /// Des noms de comptes — VIDES ou EN DOUBLE si le fuzzer le veut : ce sont
+    /// exactement les deux cas que le décodeur refuse.
+    logins: Vec<String>,
 }
 
 fuzz_target!(|entree: Entree| {
@@ -88,6 +94,7 @@ fuzz_target!(|entree: Entree| {
             certificate_chain_path: entree.tls[0].clone(),
             private_key_path: entree.tls[1].clone(),
         },
+        accounts: entree.comptes.clone(),
     };
 
     let Ok(ecrit) = encode(&original) else {
@@ -116,5 +123,42 @@ fuzz_target!(|entree: Entree| {
             *octet ^= 0xFF;
         }
         let _ = decode(&corrompu);
+    }
+
+    // ── 5. LE MAGASIN DE COMPTES ────────────────────────────────────────────
+    //
+    // Un fichier de comptes est écrit par l'administrateur, jamais par un pair.
+    // Mais un serveur qui panique en lisant SON magasin ne démarre pas, et le
+    // symptôme n'a rien à voir avec la cause.
+    let _ = decode_accounts(&entree.octets);
+
+    // L'aller-retour, avec l'empreinte de personne : elle a les vrais
+    // paramètres du produit, donc elle franchit `check_stored`, et le hachage
+    // réel coûterait des secondes par exécution.
+    let magasin: Vec<Account> = entree
+        .logins
+        .iter()
+        .map(|login| Account {
+            login: login.clone(),
+            hash: DUMMY_HASH.to_string(),
+        })
+        .collect();
+    if let Ok(ecrit) = encode_accounts(&magasin) {
+        match decode_accounts(&ecrit) {
+            Ok(relu) => {
+                assert_eq!(relu, magasin, "l'aller-retour a changé le magasin");
+                // ET LES NOMS SONT UNIQUES : le décodeur refuse les doublons,
+                // donc tout magasin qu'il accepte en est exempt.
+                for (rang, compte) in relu.iter().enumerate() {
+                    assert!(
+                        !relu[..rang].iter().any(|autre| autre.login == compte.login),
+                        "un doublon a traversé le décodeur"
+                    );
+                }
+            }
+            // Refusé : nom vide, ou nom en double. C'est le décodeur qui fait
+            // son travail.
+            Err(_) => {}
+        }
     }
 });

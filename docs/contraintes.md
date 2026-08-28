@@ -248,7 +248,9 @@ suites, **toutes en 1.3**.
 Pour l'authentification, depuis le 2026-08-28 : `ams-sasl` ne connaît qu'un
 mécanisme, `PLAIN`, et la session répond `504 Unrecognized authentication type`
 à tout autre — `CRAM-MD5` et `LOGIN` compris, et c'est éprouvé. `AUTH` hors TLS
-reste refusé par un `538` qui n'est réglable par rien.
+reste refusé par un `538` qui n'est réglable par rien. Le magasin refuse par
+ailleurs toute empreinte qui n'est pas de l'`argon2id` aux paramètres du produit
+(voir C11), ce qui ferme la porte à un fichier écrit par un outil plus ancien.
 
 `CRAM-MD5` mérite sa phrase, parce que la raison de l'exclure n'est pas celle
 qu'on croit : ce n'est pas seulement MD5, c'est que le mécanisme **oblige le
@@ -427,6 +429,62 @@ il suffirait d'un compte de service compromis pour repartir avec son identité,
 sans laisser de trace. Le partage par GROUPE reste permis — c'est ainsi que les
 certificats se partagent sur un système bien tenu, et punir cela punirait la
 bonne pratique au lieu de la mauvaise.
+
+### Le magasin d'identifiants est UN AUTRE fichier
+
+Décidé le 2026-08-28. Le chemin est nommé dans la configuration
+(`accounts @11`), le contenu vit ailleurs, sous son propre schéma
+(`ams-accounts.capnp`). Trois raisons, et chacune suffirait : les deux ne
+changent pas au même rythme, ils ne méritent pas les mêmes permissions, et une
+fuite de l'un n'est pas une fuite de l'autre.
+
+**Argon2id, m = 19456 Kio, t = 2, p = 1** — la première des configurations
+équivalentes de l'OWASP *Password Storage Cheat Sheet*. `Argon2id` et non
+`Argon2i` ni `Argon2d` : c'est l'hybride, celui que la RFC 9106 §4 recommande
+quand on ne sait rien de l'attaquant, ce qui est notre cas. Ces chiffres sont
+écrits ici parce qu'on les changera un jour, et qu'il faudra alors savoir ce
+qu'on remplace.
+
+#### Le coût est le sujet, et il se retourne contre nous
+
+Dix-neuf mébioctets par vérification, c'est ce qui rend une attaque par
+dictionnaire coûteuse. C'est aussi une **amplification** : quelques octets sur le
+fil deviennent 19 Mio chez nous. Deux cent cinquante-six connexions simultanées
+réclameraient cinq gibioctets.
+
+Le serveur borne donc à **quatre vérifications simultanées** (`ams-server`,
+`VERIFICATIONS_SIMULTANEES`), sous `block_in_place` : le pire cas tient dans
+76 Mio, les tentatives excédentaires attendent leur tour sur un fil bloquant, et
+l'ordonnanceur asynchrone n'est jamais bloqué. C'est la contrainte C7 dans les
+deux sens à la fois — la sécurité prime, et elle ne doit pas devenir le levier.
+
+#### Trois contrôles au chargement, plutôt que trois surprises plus tard
+
+1. **Un nom en double est refusé.** Deux empreintes pour un nom, c'est une
+   question sans réponse ; le premier arrivé l'emporterait en silence, et
+   l'administrateur croirait avoir changé un mot de passe.
+2. **Une empreinte sous le plancher est refusée, en nommant le compte.** Une
+   vérification Argon2 emploie les paramètres inscrits DANS l'empreinte — c'est
+   ce qui permet de les faire évoluer sans invalider les comptes. C'est aussi ce
+   qui rend ce contrôle indispensable : un compte haché en `m=8,t=1` serait
+   vérifié en `m=8,t=1`, et le magasin paraîtrait sain.
+3. **Un magasin lisible par tout le monde empêche le démarrage.** Ce ne sont que
+   des empreintes, mais c'est un **dictionnaire de noms** offert à qui a un
+   compte sur la machine, et le matériel d'une attaque hors ligne qu'aucun garde
+   ne compte.
+
+#### Ce qu'un refus ne dit pas
+
+Un compte inconnu passe tout de même par une vérification, contre une empreinte
+de personne (`ams_auth::DUMMY_HASH`). Sans elle, l'écart de temps entre « ce
+compte n'existe pas » et « ce mot de passe est faux » rendrait le magasin
+énumérable **sans en connaître un seul mot de passe**. Un test vérifie que cette
+empreinte porte bien les paramètres du produit : le jour où ils changeront sans
+qu'elle suive, l'écart reviendrait.
+
+Le mot de passe, lui, ne passe **jamais** par la ligne de commande :
+`air-mail-admin account add` le lit sur l'entrée standard. Ce que `ps` affiche,
+tout le monde le lit.
 
 ## C12 — Deux exécutables, aux noms distincts
 

@@ -29,7 +29,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_smtp_data` | `seeds/smtp-data` | la phase de données — **indépendance au découpage** |
 | `fuzz_ams_guard` | `seeds/guard` | le garde — **une peine ne s'évince pas** |
 | `fuzz_ams_index_name` | `seeds/index` | les noms Maildir — **aller-retour de l'UID** |
-| `fuzz_ams_config` | `seeds/config` | la configuration binaire — **aller-retour, et corruption** |
+| `fuzz_ams_config` | `seeds/config` | la configuration binaire ET le magasin de comptes |
 | `fuzz_ams_tls_kx` | `seeds/tls` | la part de clé TLS du pair — **les deux rôles** |
 | `fuzz_ams_sasl` | `seeds/sasl` | la réponse SASL — **décodage canonique** |
 
@@ -210,7 +210,7 @@ cible éprouve, ce sont les **découpages de longueur** et les primitives qui le
 suivent. La preuve que les deux camps calculent *le même* secret ne peut pas venir
 d'un fuzzer : elle vient du test d'interopérabilité contre OpenSSL.
 
-### Configuration binaire (quatre)
+### Configuration binaire et magasin de comptes (six)
 
 Une configuration est écrite par l'administrateur, pas par un pair : ce n'est pas
 une entrée hostile au sens de C3. Mais un disque vieillit, une copie s'interrompt,
@@ -223,6 +223,14 @@ configuration ne démarre pas, et ne dit pas pourquoi**.
    avoir demandé.
 3. Réécrire ce qui a été relu rend les mêmes octets.
 4. Corrompre un octet rend une erreur, jamais une panique.
+5. **Le magasin de comptes fait l'aller-retour, lui aussi** — avec l'empreinte
+   de personne, qui a les vrais paramètres du produit et franchit donc son
+   contrôle de plancher, là où un vrai hachage coûterait des secondes par
+   exécution.
+6. **Tout magasin que le décodeur accepte a des noms uniques.** Les noms de la
+   graine sont libres — vides, en double, quelconques : ce sont exactement les
+   cas que le décodeur refuse, et les lier dans l'entrée cacherait ces refus au
+   lieu de les éprouver.
 
 ## LE PIÈGE DE LA SÉPARATION, et il a déjà mordu
 

@@ -11,6 +11,7 @@ repository.workspace = true
 [dependencies]
 ams-guard = { workspace = true }
 ams-proto-smtp = { workspace = true }
+ams-auth = { workspace = true }
 capnp = { workspace = true }
 
 

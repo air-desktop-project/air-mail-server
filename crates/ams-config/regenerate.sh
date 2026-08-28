@@ -30,8 +30,8 @@ trap 'rm -rf "$SORTIE"' EXIT
 
 capnp compile -I schema --src-prefix schema \
   -o "$(command -v capnpc-rust):$SORTIE" \
-  schema/ams-config.capnp || {
-    echo 'échec de la compilation du schéma (capnp 1.1.0 + capnpc-rust requis)' >&2
+  schema/ams-config.capnp schema/ams-accounts.capnp || {
+    echo 'échec de la compilation des schémas (capnp 1.1.0 + capnpc-rust requis)' >&2
     exit 1
   }
 
@@ -42,7 +42,11 @@ capnp compile -I schema --src-prefix schema \
 # L'en-tête passe par un heredoc QUOTÉ et non par une chaîne entre apostrophes :
 # une apostrophe française y fermerait la chaîne, et le reste deviendrait des
 # commandes. C'est arrivé.
-cat > src/ams_config_capnp.rs <<'ENTETE'
+# Les deux schémas passent par le même en-tête et le même traitement : une
+# boucle plutôt que deux copies, parce que la seconde copie est celle qu'on
+# oublie de corriger.
+for schema in ams_config ams_accounts; do
+cat > "src/${schema}_capnp.rs" <<'ENTETE'
 // CODE GÉNÉRÉ — NE PAS ÉDITER À LA MAIN.
 //
 // Régénérer via `crates/ams-config/regenerate.sh` (outil C++ capnp 1.1.0 +
@@ -53,5 +57,6 @@ cat > src/ams_config_capnp.rs <<'ENTETE'
 
 ENTETE
 
-cat "$SORTIE/ams_config_capnp.rs" >> src/ams_config_capnp.rs
-echo "régénéré : src/ams_config_capnp.rs"
+cat "$SORTIE/${schema}_capnp.rs" >> "src/${schema}_capnp.rs"
+echo "régénéré : src/${schema}_capnp.rs"
+done

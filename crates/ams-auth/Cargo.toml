@@ -1,0 +1,17 @@
+[package]
+name = "ams-auth"
+description = "Le magasin d'identifiants et la vérification Argon2id, sans entrée-sortie"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+ams-sasl = { workspace = true }
+argon2 = { workspace = true }
+
+
+[lints]
+workspace = true

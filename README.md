@@ -17,9 +17,13 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 > moitiés de cette phrase sont éprouvées sur l'exécutable lui-même, face à un
 > vrai OpenSSL.
 >
-> Ce qu'il ne fait pas : **pas d'authentification** — `AUTH` n'est pas conduit.
-> Et **une seule boîte pour tout le monde** : répartir par destinataire demande
-> un modèle de comptes qui n'existe pas.
+> **Il authentifie** : `AUTH PLAIN` sous TLS, contre des empreintes Argon2id
+> rangées dans un fichier séparé qu'`air-mail-admin` écrit. Sans comptes, il ne
+> l'annonce pas.
+>
+> Ce qu'il ne fait pas : **une seule boîte pour tout le monde** — répartir par
+> destinataire demande un modèle de comptes qui n'existe pas encore, et
+> s'authentifier n'y donne pas droit.
 >
 > Onze crates portent du code ; les autres sont des emplacements réservés qui le
 > disent dans leur documentation.
@@ -72,6 +76,7 @@ des octets **et des actions**. Elles n'attendent jamais.
 | --- | --- | --- |
 | `ams-session` | les sessions serveur | **SMTP : session entière** |
 | `ams-guard` | flooding et bannissement par source | **implémenté** |
+| `ams-auth` | le magasin d'identifiants, vérification Argon2id | **implémenté** |
 | `ams-tls` | TLS 1.3 uniquement, échange de clés post-quantique | **implémenté** |
 | `ams-dkim` | RFC 6376 | vide |
 | `ams-spf` | RFC 7208 | vide |
@@ -90,7 +95,7 @@ Les seules crates qui lisent, écrivent et attendent. Elles ne décident de rien
 | `ams-server` | le binaire `air-mail-server` | **il tourne** |
 | `ams-admin` | le binaire `air-mail-admin` | **`summary`** |
 
-**Douze crates portent du code.** `ams-mime` : le squelette d'un message — la
+**Treize crates portent du code.** `ams-mime` : le squelette d'un message — la
 ligne, le pliage, la séparation en-tête/corps, le découpage en champs. Les champs
 structurés, les adresses, les dates et MIME restent à écrire.
 `ams-proto-smtp` : les commandes, l'encodage des réponses multilignes, et **la
@@ -104,6 +109,14 @@ valeur. `Zg==` et `Zh==` décodent tous deux vers `f` ; accepter le second
 donnerait plusieurs formes pour un même identifiant, de quoi passer à côté d'un
 filtre ou d'un comptage. `LOGIN` et `CRAM-MD5` ne sont pas servis, et la crate
 dit pourquoi plutôt que de se taire.
+
+`ams-auth` : les comptes et la vérification **Argon2id** (m = 19456 Kio, t = 2,
+p = 1 — la configuration OWASP). Un compte inconnu coûte le même temps qu'un
+compte connu, parce qu'il est comparé à une empreinte de personne : sans cela,
+l'écart de temps rendrait le magasin énumérable sans en connaître un seul mot de
+passe. Une empreinte sous le plancher du produit est refusée **au chargement**,
+en nommant le compte — une vérification emploie les paramètres inscrits dans
+l'empreinte, si bien qu'un compte haché faiblement serait vérifié faiblement.
 
 `ams-session` : la session SMTP entière — bannière, `EHLO`, annonce des
 extensions, séquencement `MAIL`/`RCPT`/`DATA`, `STARTTLS`, refus d'`AUTH` hors
@@ -248,6 +261,29 @@ Une mise en garde, mesurée et non supposée : **une paire dépareillée n'est p
 détectée au démarrage**. Le fournisseur pur Rust ne sait pas comparer la clé au
 certificat, si bien qu'un renouvellement qui ne remplace qu'un des deux fichiers
 donne un serveur qui démarre et dont toutes les poignées de main échouent.
+
+### Authentifier
+
+```sh
+# Le mot de passe se lit sur l'ENTRÉE STANDARD, jamais sur la ligne de commande :
+# ce que `ps` affiche, tout le monde le lit.
+printf %s "$MDP" | ./target/release/air-mail-admin account add comptes.bin --login jean
+./target/release/air-mail-admin account list comptes.bin      # les noms, jamais les empreintes
+
+./target/release/air-mail-admin config write air-mail.conf \
+    --domain mail.example.com --hosted example.com \
+    --tls-cert /etc/ams/chaine.pem --tls-key /etc/ams/cle.pem \
+    --accounts comptes.bin
+```
+
+Le magasin est un **autre fichier**, écrit en `0600` : les comptes et la
+configuration ne changent pas au même rythme, ne méritent pas les mêmes
+permissions, et une fuite de l'un n'est pas une fuite de l'autre. Le serveur
+refuse de démarrer s'il est lisible par tout le monde — ce ne sont que des
+empreintes, mais c'est un dictionnaire de noms à essayer.
+
+`--accounts` sans `--tls-cert` est refusé : `AUTH` n'est **jamais** annoncé hors
+chiffrement, et ce refus n'est pas réglable.
 
 ## Construire
 

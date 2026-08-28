@@ -48,6 +48,9 @@ path = "../crates/ams-config"
 [dependencies.ams-guard]
 path = "../crates/ams-guard"
 
+[dependencies.ams-auth]
+path = "../crates/ams-auth"
+
 [dependencies.ams-sasl]
 path = "../crates/ams-sasl"
 

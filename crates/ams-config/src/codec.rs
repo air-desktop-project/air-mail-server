@@ -92,6 +92,12 @@ pub struct Configuration {
     pub timeouts: Timeouts,
     /// De quoi chiffrer, ou deux chaînes vides.
     pub tls: Tls,
+    /// Le fichier de comptes, ou une chaîne vide.
+    ///
+    /// Vide, le serveur n'annonce pas `AUTH` : il n'a personne à qui répondre
+    /// oui. Séparé de ce fichier-ci — voir `ams-accounts.capnp` pour les trois
+    /// raisons.
+    pub accounts: String,
 }
 
 /// Ce qui rend un fichier de configuration irrecevable.
@@ -115,6 +121,23 @@ pub enum Error {
     /// l'administrateur, et démarrer en annonçant `STARTTLS` sans pouvoir le
     /// tenir mentirait à chaque pair.
     TlsIncomplete,
+    /// Deux comptes portent le même nom.
+    ///
+    /// Une question sans réponse : le premier arrivé l'emporterait en silence,
+    /// et l'administrateur croirait avoir changé un mot de passe.
+    DuplicateLogin(String),
+
+    /// L'empreinte d'un compte est refusée.
+    ///
+    /// Le nom est là **exprès** : un magasin de trente lignes sans nom oblige à
+    /// les essayer une par une.
+    WeakAccount {
+        /// Le compte fautif.
+        login: String,
+        /// Ce que `ams-auth` en a dit.
+        cause: ams_auth::Error,
+    },
+
     /// Un champ texte n'est pas de l'UTF-8.
     ///
     /// Cap'n Proto promet de l'UTF-8 sur ses champs `Text` ; un fichier corrompu
@@ -131,6 +154,12 @@ impl fmt::Display for Error {
             Error::Empty(champ) => write!(f, "le champ `{champ}` est vide"),
             Error::TlsIncomplete => {
                 f.write_str("TLS demande LES DEUX chemins — certificat et clé — ou aucun des deux")
+            }
+            Error::DuplicateLogin(login) => {
+                write!(f, "le compte `{login}` figure deux fois")
+            }
+            Error::WeakAccount { login, cause } => {
+                write!(f, "compte `{login}` : {cause}")
             }
             Error::NotUtf8 => f.write_str("un champ texte n'est pas de l'UTF-8"),
         }
@@ -187,6 +216,8 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
     let garde = lu.get_guard()?;
     let delais = lu.get_timeouts()?;
 
+    let comptes = texte(lu.get_accounts()?)?;
+
     let chiffrement = lu.get_tls()?;
     let tls = Tls {
         certificate_chain_path: texte(chiffrement.get_certificate_chain_path()?)?,
@@ -228,6 +259,7 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
             data_seconds: delais.get_data_seconds(),
         },
         tls,
+        accounts: comptes,
     })
 }
 
@@ -287,12 +319,13 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
             chiffrement.set_certificate_chain_path(&config.tls.certificate_chain_path);
             chiffrement.set_private_key_path(&config.tls.private_key_path);
         }
+        ecrit.set_accounts(&config.accounts);
     }
     Ok(serialize::write_message_to_words(&message))
 }
 
 /// Une chaîne du message, copiée.
-fn texte(brut: capnp::text::Reader<'_>) -> Result<String, Error> {
+pub(crate) fn texte(brut: capnp::text::Reader<'_>) -> Result<String, Error> {
     brut.to_string().map_err(|_| Error::NotUtf8)
 }
 
@@ -336,9 +369,11 @@ mod tests {
                 command_seconds: 300,
                 data_seconds: 600,
             },
-            // L'exemple ne chiffre PAS : c'est le défaut, et un défaut qui
-            // chiffrerait nommerait des fichiers qui n'existent pas.
+            // L'exemple ne chiffre PAS et n'a AUCUN compte : c'est le défaut, et
+            // un défaut qui chiffrerait ou authentifierait nommerait des
+            // fichiers qui n'existent pas.
             tls: Tls::default(),
+            accounts: String::new(),
         }
     }
 
@@ -348,6 +383,7 @@ mod tests {
                 certificate_chain_path: String::from("/etc/ams/chaine.pem"),
                 private_key_path: String::from("/etc/ams/cle.pem"),
             },
+            accounts: String::from("/etc/ams/comptes.bin"),
             ..exemple()
         }
     }
@@ -369,6 +405,16 @@ mod tests {
         let relue = decode(&encode(&original).expect("encodable")).expect("relisible");
         assert_eq!(relue.tls, original.tls);
         assert!(relue.tls.est_configure());
+    }
+
+    #[test]
+    fn le_chemin_des_comptes_traverse_le_format() {
+        let original = exemple_chiffrant();
+        let relue = decode(&encode(&original).expect("encodable")).expect("relisible");
+        assert_eq!(relue.accounts, "/etc/ams/comptes.bin");
+        // Et son absence se lit à une chaîne vide, pas à un drapeau.
+        let sans = decode(&encode(&exemple()).expect("encodable")).expect("relisible");
+        assert!(sans.accounts.is_empty());
     }
 
     #[test]

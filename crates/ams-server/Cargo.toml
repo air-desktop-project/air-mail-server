@@ -22,6 +22,8 @@ ams-loop-tokio = { workspace = true }
 ams-proto-smtp = { workspace = true }
 ams-session = { workspace = true }
 ams-store = { workspace = true }
+ams-auth = { workspace = true }
+ams-sasl = { workspace = true }
 ams-tls = { workspace = true }
 # `rustls` n'est nommée que pour le TYPE `ServerConfig`, que `ams-tls` construit
 # et que la boucle consomme. Ce binaire n'en appelle aucune fonction.

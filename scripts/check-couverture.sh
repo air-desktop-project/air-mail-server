@@ -42,6 +42,7 @@ CRATES_SANS_IO=(
     ams-mime
     ams-proto-smtp
     ams-sasl
+    ams-auth
     ams-proto-pop3
     ams-proto-imap
     ams-proto-http
@@ -57,18 +58,20 @@ CRATES_SANS_IO=(
 
 # ── LA SEULE DÉROGATION, ET ELLE EST NOMMÉE ─────────────────────────────────
 #
-# Le code dérivé du schéma Cap'n Proto (`ams_config_capnp.rs`) est GÉNÉRÉ : il
+# Le code dérivé des schémas Cap'n Proto (`ams_*_capnp.rs`) est GÉNÉRÉ : il
 # porte un accesseur par champ et par sens, dont la plupart ne seront jamais
 # appelés. Exiger 100 % dessus reviendrait à écrire des tests qui n'éprouvent
 # rien de nos décisions — et un test qui n'éprouve rien affaiblit la mesure au
 # lieu de la renforcer.
 #
-# La dérogation est ÉTROITE : elle nomme UN fichier, pas une crate. Le code écrit
-# à la main d'`ams-config` reste soumis au 100 %.
+# La dérogation est ÉTROITE : elle nomme les fichiers GÉNÉRÉS, pas une crate. Le
+# code écrit à la main d'`ams-config` reste soumis au 100 %. Le motif se termine
+# par `_capnp.rs` : un fichier écrit à la main ne portera pas ce suffixe, et un
+# schéma de plus n'obligera pas à revenir ici.
 #
 # Elle est aussi VISIBLE : ce script l'annonce à chaque exécution. Une dérogation
 # qu'on ne voit plus est une dérogation qui s'élargit.
-IGNORE='/ams_config_capnp\.rs$'
+IGNORE='/ams_[a-z]+_capnp\.rs$'
 
 args=(--ignore-filename-regex "$IGNORE")
 for crate in "${CRATES_SANS_IO[@]}"; do
@@ -104,7 +107,7 @@ lecture=$(printf '%s' "$rapport" | python3 "$(dirname "$0")/lire-couverture.py")
 
 echo "périmètre : ${#CRATES_SANS_IO[@]} crates sans entrée-sortie"
 echo "seuil     : ${seuil} %"
-echo "exclu     : le code GÉNÉRÉ du schéma Cap'n Proto (ams_config_capnp.rs)"
+echo "exclu     : le code GÉNÉRÉ des schémas Cap'n Proto (ams_*_capnp.rs)"
 echo
 
 regions_total=0

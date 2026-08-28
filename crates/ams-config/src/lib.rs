@@ -57,6 +57,20 @@ mod ams_config_capnp {
     include!("ams_config_capnp.rs");
 }
 
+#[allow(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    missing_docs,
+    unused_qualifications,
+    reason = "code généré par capnpc-rust, hors de notre contrôle éditorial"
+)]
+mod ams_accounts_capnp {
+    include!("ams_accounts_capnp.rs");
+}
+
+mod accounts;
 mod codec;
 
+pub use accounts::{decode_accounts, encode_accounts};
 pub use codec::{Configuration, Error, TRAVERSAL_LIMIT_WORDS, Timeouts, Tls, decode, encode};

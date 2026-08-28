@@ -42,6 +42,8 @@ pub struct Options {
     pub tls_cert: Option<PathBuf>,
     /// La clé privée, au format PEM. Vide : pas de chiffrement.
     pub tls_key: Option<PathBuf>,
+    /// Le fichier de comptes. Vide : pas d'`AUTH`.
+    pub accounts: Option<PathBuf>,
 }
 
 impl Default for Options {
@@ -59,6 +61,9 @@ impl Default for Options {
             // que personne n'a demandée.
             tls_cert: None,
             tls_key: None,
+            // PAS DE COMPTES PAR DÉFAUT : un serveur qui n'a personne à qui
+            // répondre oui n'annonce pas `AUTH`.
+            accounts: None,
         }
     }
 }
@@ -90,6 +95,7 @@ impl Options {
                 certificate_chain_path: chemin(self.tls_cert.as_ref()),
                 private_key_path: chemin(self.tls_key.as_ref()),
             },
+            accounts: chemin(self.accounts.as_ref()),
         }
     }
 }
@@ -133,6 +139,7 @@ OPTIONS DE `config write`
     --max-connections <n>  connexions simultanées (défaut 256)
     --tls-cert <chemin>    chaîne de certificats, en PEM
     --tls-key <chemin>     clé privée, en PEM
+    --accounts <chemin>    fichier de comptes (`air-mail-admin account add`)
 
     LES DEUX OPTIONS TLS VONT ENSEMBLE, ou aucune. Avec elles, le serveur annonce
     `STARTTLS` et chiffre ; sans elles, il sert en clair et ne l'annonce pas. Il
@@ -141,6 +148,10 @@ OPTIONS DE `config write`
 
     Le serveur refuse de démarrer si la clé privée est lisible par tout le monde.
     Le partage par groupe, lui, reste permis.
+
+    SANS `--accounts`, le serveur n'annonce pas `AUTH` : il n'a personne à qui
+    répondre oui. Avec, il l'annonce — mais SOUS CHIFFREMENT SEULEMENT, et donc
+    jamais sans `--tls-cert`/`--tls-key`.
 
     Le port par défaut n'est pas 25 : le serveur refuse de s'exécuter en
     superutilisateur (C10), et les ports privilégiés s'atteignent par une règle
@@ -192,6 +203,7 @@ where
             }
             "--tls-cert" => options.tls_cert = Some(PathBuf::from(valeur()?)),
             "--tls-key" => options.tls_key = Some(PathBuf::from(valeur()?)),
+            "--accounts" => options.accounts = Some(PathBuf::from(valeur()?)),
             "--max-connections" => {
                 let brute = valeur()?;
                 options.max_connections = brute
@@ -210,6 +222,15 @@ where
         return Err(ArgError::new(
             "`--tls-cert` et `--tls-key` vont ENSEMBLE : l'un sans l'autre ne veut dire ni \
              « chiffre » ni « ne chiffre pas »",
+        ));
+    }
+    // Des comptes sans chiffrement, c'est `AUTH` qui ne sera JAMAIS annoncé —
+    // la session le refuse hors TLS, sans réglage possible. Le dire ici évite
+    // un serveur qu'on croit configuré et qui ne l'est pas.
+    if options.accounts.is_some() && options.tls_cert.is_none() {
+        return Err(ArgError::new(
+            "`--accounts` sans `--tls-cert` ne sert à rien : `AUTH` n'est jamais \
+             annoncé hors chiffrement, et ce refus n'est pas réglable",
         ));
     }
     Ok(Demande::Ecrire(Box::new(options)))
