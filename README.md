@@ -8,11 +8,13 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 > aucun protocole**.
 >
 > **Un serveur écoute, accepte et sert** : bannière, `EHLO`, enveloppe, message,
-> remise — en refusant les sources qui abusent. Le stockage, lui, n'existe pas :
-> la remise est un trait que l'appelant fournit, et rien n'écrit sur un disque.
-> Les deux binaires sont toujours vides.
+> remise — en refusant les sources qui abusent. **Et un message sait atterrir
+> dans une boîte Maildir**, avec son UID dans son nom.
 >
-> Cinq crates portent du code ; les autres sont des emplacements réservés qui le
+> Il manque le fil : les deux binaires sont vides, donc rien n'assemble encore
+> ces pièces en un programme qu'on lance.
+>
+> Sept crates portent du code ; les autres sont des emplacements réservés qui le
 > disent dans leur documentation.
 >
 > Ce que ce dépôt affirme, il le tient. Rien de plus n'est promis ici.
@@ -67,7 +69,7 @@ des octets **et des actions**. Elles n'attendent jamais.
 | `ams-spf` | RFC 7208 | vide |
 | `ams-dmarc` | RFC 7489 | vide |
 | `ams-config` | schéma Cap'n Proto de la configuration | vide |
-| `ams-index` | index Maildir : codec et reconstruction | vide |
+| `ams-index` | noms Maildir, drapeaux, reconstruction | **implémenté** |
 
 ### Étage 3 — exécution
 
@@ -76,11 +78,11 @@ Les seules crates qui lisent, écrivent et attendent. Elles ne décident de rien
 | Crate | Périmètre | État |
 | --- | --- | --- |
 | `ams-loop-tokio` | la boucle Unix, sur tokio | **une connexion, de bout en bout** |
-| `ams-store` | Maildir : les fichiers, seule source de vérité | vide |
+| `ams-store` | Maildir : les fichiers, seule source de vérité | **implémenté** |
 | `ams-server` | le binaire `air-mail-server` | vide |
 | `ams-admin` | le binaire `air-mail-admin` | vide |
 
-**Cinq crates portent du code.** `ams-mime` : le squelette d'un message — la
+**Sept crates portent du code.** `ams-mime` : le squelette d'un message — la
 ligne, le pliage, la séparation en-tête/corps, le découpage en champs. Les champs
 structurés, les adresses, les dates et MIME restent à écrire.
 `ams-proto-smtp` : les commandes, l'encodage des réponses multilignes, et **la
@@ -104,6 +106,14 @@ une table **bornée** que l'appelant fournit — et dont une peine en cours n'es
 jamais évincée. La clé est un **préfixe**, pas une adresse : bannir une IPv6 seule
 ne sert à rien. Le garde est consulté avant la bannière, puis à chaque commande ;
 **on ne dit pas un mot à un banni**.
+
+`ams-index` : les noms Maildir, les drapeaux, et la **reconstruction** — un
+repliement sur les noms, sans table donc sans allocation. C'est là que vit la
+raison d'être du `,U=` dans un nom de fichier.
+
+`ams-store` : la boîte Maildir. Arrivée par `rename()` atomique, **deux `fsync`**
+— le fichier avant, le répertoire après —, adoption des messages déposés par
+d'autres outils, et nettoyage de `tmp/` même quand une remise est abandonnée.
 
 Toutes les autres crates sont vides, et chacune le déclare dans sa documentation.
 
@@ -165,10 +175,10 @@ jobs indépendants : la vérification du code (les quatre commandes ci-dessus, s
 
 `fuzz/` est une crate `cargo-fuzz` **hors du workspace** : elle exige un nightly,
 que le pin exact du workspace n'admet pas — deux LLVM produisent des profils de
-couverture mutuellement illisibles. Huit cibles, trente-six propriétés, dont un
+couverture mutuellement illisibles. Neuf cibles, quarante-deux propriétés, dont un
 **aller-retour** sur l'encodeur de réponses, un **vocabulaire de sortie clos** sur
 la session, et l'**indépendance au découpage** sur la phase de données — celle qui
-vise directement la contrebande SMTP. **Quatre défauts réels** trouvés et
+vise directement la contrebande SMTP. **Cinq défauts réels** trouvés et
 corrigés, dont deux dans le garde. Voir
 [`fuzz/README.md`](fuzz/README.md).
 
@@ -183,7 +193,7 @@ que `llvm-cov` n'instrumente pas sur Rust stable et dont le compteur reste à
 `0 / 0`. Les régions font le travail attendu : chaque bras d'un conditionnel en
 est une.
 
-Le gate mesure aujourd'hui **5 605 régions** et **3 299 lignes**, toutes
+Le gate mesure aujourd'hui **6 400 régions** et **3 762 lignes**, toutes
 couvertes. `ams-loop-tokio` en est **hors** : elle lit, écrit et attend, et y
 atteindre 100 % exigerait de simuler les pannes du noyau — on mesurerait alors la
 fidélité de la simulation. Il naissait à zéro dette et n'en a pas pris.

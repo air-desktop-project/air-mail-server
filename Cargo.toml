@@ -81,6 +81,7 @@ repository = "https://github.com/air-desktop-project/air-mail-server"
 # Les arêtes INTERNES ne se déclarent qu'à mesure qu'elles servent : une
 # dépendance posée d'avance affirmerait un assemblage qui n'existe pas.
 ams-guard = { path = "crates/ams-guard", version = "0.1.0" }
+ams-index = { path = "crates/ams-index", version = "0.1.0" }
 ams-proto-smtp = { path = "crates/ams-proto-smtp", version = "0.1.0" }
 ams-session = { path = "crates/ams-session", version = "0.1.0" }
 

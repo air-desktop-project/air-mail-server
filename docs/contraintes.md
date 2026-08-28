@@ -96,14 +96,14 @@ illisibles, et le gate de C2 ne conclurait plus. Hors workspace, elle a son prop
 `Cargo.lock`, n'entre ni dans la mesure ni dans le lock du produit, et rien de ce
 qu'elle tire n'est livré.
 
-Huit cibles éprouvant trente-six propriétés, dont un **aller-retour** sur
+Neuf cibles éprouvant quarante-deux propriétés, dont un **aller-retour** sur
 l'encodeur de réponses, un **vocabulaire de sortie clos** sur la session, et
 l'**indépendance au découpage** sur la phase de données : le même flux, lu d'un
 seul tenant puis par tranches arbitraires, doit rendre le même verdict et les
 mêmes octets. C'est exactement ce que la contrebande SMTP exploite quand ce n'est
 pas le cas.
 
-**Le fuzz a déjà payé quatre fois.** `fuzz_ams_smtp_data` a trouvé, à sa première
+**Le fuzz a déjà payé cinq fois.** `fuzz_ams_smtp_data` a trouvé, à sa première
 campagne, une faute qui dépendait de l'endroit où la lecture avait été coupée — la
 contrebande SMTP en miniature. Et `fuzz_ams_smtp_reply` avait trouvé, en soixante
 secondes, un défaut réel : sous une borne de réponse inférieure à
@@ -405,7 +405,28 @@ L'index s'écrit comme un message se dépose — par `rename()` atomique. Un ind
 douteux **se reconstruit plutôt que se répare** : c'est peu cher, et cela évite
 d'avoir à faire confiance à des octets dont on doute.
 
-**Outillé par** : rien. `ams-store` et `ams-index` sont vides.
+**Outillé par** : `ams-index` pour les noms, les drapeaux et la reconstruction —
+sans entrée-sortie, couvert à 100 %, et fuzzé sur l'aller-retour de l'UID — et
+`ams-store` pour la boîte elle-même.
+
+**Ce qui est fait** : arrivée par `rename()` atomique, UID dans le nom (`,U=`),
+adoption des messages déposés par un autre outil, nettoyage de `tmp/` même quand
+une remise est abandonnée, et **deux `fsync`** — le fichier avant le `rename`, le
+répertoire après. La seconde est celle qu'on oublie : un `rename` n'est durable
+que lorsque le répertoire qui le porte l'est, et un serveur qui répond `250` sans
+cela n'a pas pris la responsabilité du message, il l'a promise (RFC 5321 §6.1).
+
+**Ce qui ne l'est pas** : la PERSISTANCE de l'index, que cette contrainte veut en
+Cap'n Proto — même format que la configuration (C11). Elle viendra avec
+l'outillage que C11 exige de toute façon. Le coût du report est exactement celui
+que cette contrainte annonce : un parcours de répertoire, jamais une
+resynchronisation client. C'est ce que gagne un index reconstructible par
+construction, et c'est pourquoi le report est tenable.
+
+**Ce qui n'est pas fait non plus** : `ams-store` n'implémente pas le trait
+`Delivery` de la boucle — l'adaptation appartient au binaire, qui connaît les
+deux. Et elle **bloque** : `commit` fait deux `fsync`, donc l'adaptation devra
+passer par `spawn_blocking`.
 
 ## C14 — Échange de clés post-quantique obligatoire
 
@@ -488,8 +509,9 @@ Deux crates portent du code : **`ams-mime`** (le squelette d'un message) et
 **`ams-proto-smtp`** (les commandes **et les réponses**). Aucun protocole n'est pour autant servi : il
 manque l'encodage des réponses, la machine à états de session, et tout le reste.
 
-Sont outillées : C2 (le gate mesure 5 605 régions, toutes couvertes), C8
-(`ams-guard`, câblé), C10 (`refuse_root`, appelé avant la première acceptation), C3 (les
+Sont outillées : C2 (le gate mesure 6 400 régions, toutes couvertes), C8
+(`ams-guard`, câblé), C10 (`refuse_root`, appelé avant la première acceptation), C13 en grande partie
+(`ams-index` et `ams-store`, hors persistance de l'index), C3 (les
 lints, l'absence d'allocation dans les décodeurs, et le fuzz), C6 **en partie et
 pour de bon** — les deux décodeurs refusent le CR et le LF isolés, et
 `ams-proto-smtp` refuse en outre les routes sources, les verbes retirés par la

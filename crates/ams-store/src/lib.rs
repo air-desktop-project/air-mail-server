@@ -1,27 +1,36 @@
 //! Stockage Maildir des messages (C13).
 //!
-//! Un fichier par message, contenu brut RFC 5322, atomicité par `rename()` de
-//! `tmp/` vers `new/`, drapeaux portés par le nom du fichier. Aucun verrou : c'est
-//! la propriété qui fait choisir Maildir.
+//! Un fichier par message, contenu brut RFC 5322, arrivée par `rename()` de
+//! `tmp/` vers `new/`. `rename()` est **atomique** sur POSIX : un lecteur voit le
+//! message entier ou ne le voit pas. Aucun verrou n'est nécessaire, donc aucun
+//! n'est oublié — c'est la propriété qui fait choisir ce format.
 //!
-//! Cette crate **fait des entrées-sorties** — c'est son objet — et se trouve donc
-//! hors du périmètre de couverture à 100 % de C2.
+//! # Les fichiers sont la seule source de vérité
 //!
-//! # L'index vit ailleurs, et c'est délibéré
+//! Rien n'est cru sur parole. L'UID d'un message vit dans **son nom** (`,U=`),
+//! et [`Maildir::summary`] le relit depuis le répertoire. L'index de C13 sera un
+//! accélérateur, jamais une seconde vérité ; c'est [`ams_index`] qui en porte la
+//! grammaire et la reconstruction, sans entrée-sortie.
 //!
-//! Maildir ne porte pas d'identifiant stable, alors qu'IMAP exige des UID
-//! stables. Un index binaire Cap'n Proto les porte — mais son codec et sa
-//! **reconstruction** vivent dans [`ams_index`], pas ici.
+//! # Cette crate fait des entrées-sorties, donc elle est hors du 100 % (C2)
 //!
-//! La raison n'est pas esthétique : la reconstruction est la partie critique, elle
-//! ne fait aucune entrée-sortie, et le gate de couverture de C2 travaille **par
-//! crate**. La laisser dans cette crate-ci l'aurait de fait exemptée du 100 %.
+//! Y atteindre 100 % exigerait de simuler les pannes du système de fichiers — un
+//! `ENOSPC` ici, un `EINTR` là — et l'on mesurerait alors la fidélité de la
+//! simulation. Ses tests écrivent donc dans de vrais répertoires temporaires.
 //!
-//! Cette crate fournit donc les noms de fichiers et écrit les octets ; elle ne
-//! décide de rien. L'index s'y dépose comme un message : par `rename()` atomique.
-//! Un index douteux **se reconstruit plutôt qu'il ne se répare** — c'est peu cher,
-//! et cela évite d'avoir à faire confiance à des octets dont on doute.
+//! # Elle n'implémente PAS `Delivery`
 //!
-//! # État
+//! Le trait vit dans `ams-loop-tokio`, et l'implémenter ici ferait dépendre un
+//! écrivain de fichiers de tokio. L'adaptation — quinze lignes — appartient au
+//! binaire qui connaît les deux.
 //!
-//! **Rien n'est implémenté.** Emplacement réservé.
+//! **Et elle bloque.** `commit` fait deux `fsync`, ce qui peut prendre le temps
+//! d'une écriture disque. Appelée telle quelle depuis une tâche asynchrone, elle
+//! bloque l'ordonnanceur : l'adaptation devra passer par `spawn_blocking`. C'est
+//! écrit ici plutôt que découvert en production.
+
+mod error;
+mod maildir;
+
+pub use error::Error;
+pub use maildir::{Incoming, Maildir, flags_of};

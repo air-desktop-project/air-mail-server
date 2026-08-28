@@ -75,6 +75,9 @@ version = "0.1.0"
 [[package]]
 name = "ams-store"
 version = "0.1.0"
+dependencies = [
+ "ams-index",
+]
 
 [[package]]
 name = "ams-tls"

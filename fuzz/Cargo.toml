@@ -42,6 +42,9 @@ path = "../crates/ams-session"
 [dependencies.ams-guard]
 path = "../crates/ams-guard"
 
+[dependencies.ams-index]
+path = "../crates/ams-index"
+
 [profile.release]
 debug = 1
 
@@ -97,6 +100,13 @@ bench = false
 [[bin]]
 name = "fuzz_ams_guard"
 path = "fuzz_targets/fuzz_ams_guard.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ams_index_name"
+path = "fuzz_targets/fuzz_ams_index_name.rs"
 test = false
 doc = false
 bench = false

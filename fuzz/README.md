@@ -28,6 +28,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_session_smtp` | `seeds/session` | la session — **vocabulaire de sortie clos** |
 | `fuzz_ams_smtp_data` | `seeds/smtp-data` | la phase de données — **indépendance au découpage** |
 | `fuzz_ams_guard` | `seeds/guard` | le garde — **une peine ne s'évince pas** |
+| `fuzz_ams_index_name` | `seeds/index` | les noms Maildir — **aller-retour de l'UID** |
 
 Les variantes « bornes » existent parce que les bornes de C3 viennent de la
 configuration (C8), donc d'un administrateur : un zéro, un `usize::MAX`, ou toute
@@ -150,6 +151,24 @@ précisément ce qu'un attaquant veut choisir**.
    au moment où il est prononcé ne vaut rien.
 3. La table ne déborde jamais de sa capacité.
 
+### Noms Maildir (six), dont l'ALLER-RETOUR DE L'UID
+
+L'UID d'un message vit dans son nom de fichier : c'est ce qui rend l'index
+reconstructible (C13). Si un nom composé ne se relisait pas à l'identique, l'UID
+changerait au prochain parcours — et un UID qui change force à incrémenter
+l'`UIDVALIDITY`, ce qui fait **retélécharger la boîte entière à tous les
+clients**. Un défaut ici ne se voit pas quand il se produit : il se voit quand
+mille boîtes se resynchronisent.
+
+1. **Composer puis relire rend l'identique** — UID, taille, drapeaux.
+2. **Recomposer depuis ce qui a été relu rend les mêmes octets.**
+3. Un nom accepté ne porte jamais de `/` : la traversée de répertoire est fermée
+   avant le système de fichiers.
+4. Un UID lu n'est jamais nul (RFC 9051 §2.3.1.1).
+5. Le repliement compte chaque nom une fois et une seule.
+6. Le prochain UID est strictement au-dessus de tous ceux qui existent — sauf
+   quand la boîte est épuisée, auquel cas elle le déclare.
+
 ## Lancement
 
 **Nommez la cible de compilation.** cargo-fuzz 0.13.1 choisissait
@@ -184,6 +203,13 @@ main, et l'absence de plantage en CI ne prouve rien de plus que ce qu'elle a
 couvert.
 
 ## Ce que le fuzz a trouvé
+
+**`fuzz_ams_index_name`, à sa première campagne.** `compose` acceptait une partie
+unique vide — ou commençant par une virgule — et produisait alors un nom que
+`parse` refusait. Un composeur qui fabrique de l'illisible n'en est pas un, et le
+défaut ne se serait vu qu'au parcours suivant : l'UID redevenu introuvable, la
+boîte à renuméroter, l'`UIDVALIDITY` à changer, et tous les clients à
+resynchroniser. La base d'un nom doit désormais être non vide.
 
 **`fuzz_ams_guard`, deux fois, à sa première campagne.**
 
@@ -249,3 +275,4 @@ L'entrée fautive est versionnée en graine de non-régression
 | 2026-08-28 | `fuzz_ams_session_smtp` | 1 296 868 (91 s) | 0 |
 | 2026-08-28 | `fuzz_ams_smtp_data` | 4 629 514 (121 s) | **1, corrigé** |
 | 2026-08-28 | `fuzz_ams_guard` | 2 721 501 (151 s) | **2, corrigés** |
+| 2026-08-28 | `fuzz_ams_index_name` | 2 287 648 (121 s) | **1, corrigé** |
