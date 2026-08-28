@@ -258,9 +258,14 @@ serveur à conserver le mot de passe en clair** pour calculer le condensat. Un
 mécanisme qui interdit de stocker une empreinte aggrave la fuite qu'il prétend
 éviter.
 
-Le reste de la liste — `APOP`, IMAP4rev1, le relais ouvert — reste une décision :
-rien ne l'empêche mécaniquement, sinon que le code qui l'appliquerait n'est pas
-écrit.
+**`APOP` est refusé depuis le 2026-08-29**, et pour la même raison de fond que
+`CRAM-MD5` : ce n'est pas MD5, c'est que le mécanisme **oblige le serveur à
+conserver le mot de passe en clair** pour calculer le condensat. `ams-proto-pop3`
+ne le reconnaît pas — il n'est même pas distingué d'un verbe inconnu, parce qu'un
+pair à qui l'on apprendrait qu'il est « reconnu mais désactivé » réessaierait.
+
+Le reste de la liste — IMAP4rev1, le relais ouvert — reste une décision : rien ne
+l'empêche mécaniquement, sinon que le code qui l'appliquerait n'est pas écrit.
 
 **Le piège vaut d'être nommé** : les défauts de `tokio-rustls` sont
 `["logging", "tls12", "aws-lc-rs"]`. Les laisser ferait entrer TLS 1.2 **et** du

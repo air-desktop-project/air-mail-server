@@ -63,7 +63,7 @@ horloge.
 | `ams-mime` | RFC 5322 et MIME — le socle des quatre protocoles | **squelette du message : ligne, pliage, champs** |
 | `ams-proto-smtp` | RFC 5321 | **commandes, réponses, phase de données** |
 | `ams-sasl` | RFC 4422/4616 : `PLAIN` et son base64 | **implémenté** |
-| `ams-proto-pop3` | RFC 1939 | vide |
+| `ams-proto-pop3` | RFC 1939 | **commandes et réponses** |
 | `ams-proto-imap` | RFC 9051 (IMAP4rev2) | vide |
 | `ams-proto-http` | RFC 9110 / 9112 | vide |
 
@@ -95,13 +95,22 @@ Les seules crates qui lisent, écrivent et attendent. Elles ne décident de rien
 | `ams-server` | le binaire `air-mail-server` | **il tourne** |
 | `ams-admin` | le binaire `air-mail-admin` | **`summary`** |
 
-**Treize crates portent du code.** `ams-mime` : le squelette d'un message — la
+**Quatorze crates portent du code.** `ams-mime` : le squelette d'un message — la
 ligne, le pliage, la séparation en-tête/corps, le découpage en champs. Les champs
 structurés, les adresses, les dates et MIME restent à écrire.
 `ams-proto-smtp` : les commandes, l'encodage des réponses multilignes, et **la
 phase de données** — `<CRLF>.<CRLF>`, le point échappé, et le refus de tout `CR`
 ou `LF` isolé. `BDAT`/`CHUNKING`, l'échappement à l'émission et la validation
 complète d'une adresse IPv6 restent à écrire.
+
+`ams-proto-pop3` : les commandes de la RFC 1939 et leurs réponses. `APOP`
+n'existe pas ici — MD5, et surtout l'obligation de garder le mot de passe **en
+clair** côté serveur pour calculer le condensat : un mécanisme qui interdit de
+stocker une empreinte aggrave la fuite qu'il prétend éviter (C6). Le doublement
+du point d'une réponse multiligne vit à **un seul endroit** : l'écrire deux fois,
+c'est se donner deux occasions de l'écrire différemment, et un point non doublé
+termine le message au milieu. La session, la boucle et la relève restent à
+écrire.
 
 `ams-sasl` : le mécanisme `PLAIN` et le base64 **strict** qui le transporte —
 décodage seul, sans allocation. Strict veut dire : une seule écriture par

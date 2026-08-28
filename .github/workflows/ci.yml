@@ -174,7 +174,7 @@ jobs:
       # Le corpus versionné (`seeds/`) est passé en LECTURE : sans lui, une
       # campagne de quinze secondes repartirait de zéro et passerait son temps à
       # redécouvrir qu'un message commence par un nom de champ.
-      # Une seule étape pour les douze cibles : six lignes répétées par cible
+      # Une seule étape pour les treize cibles : six lignes répétées par cible
       # finiraient par diverger, et c'est la divergence qu'on ne verrait pas.
       #
       # LA CIBLE DE COMPILATION EST NOMMÉE, jamais laissée au défaut de l'outil.
@@ -186,7 +186,7 @@ jobs:
       # libFuzzer EXIGE par ailleurs que le premier répertoire de corpus existe :
       # il n'y écrit que s'il peut l'ouvrir, et refuse de démarrer sinon.
       # cargo-fuzz ne le crée que lorsqu'on ne lui en nomme aucun.
-      - name: smoke-fuzz des douze cibles
+      - name: smoke-fuzz des treize cibles
         working-directory: fuzz
         run: |
           set -eu
@@ -202,7 +202,8 @@ jobs:
             "fuzz_ams_index_name index" \
             "fuzz_ams_config config" \
             "fuzz_ams_tls_kx tls" \
-            "fuzz_ams_sasl sasl"
+            "fuzz_ams_sasl sasl" \
+            "fuzz_ams_pop3 pop3"
           do
             set -- $paire
             cible="$1"

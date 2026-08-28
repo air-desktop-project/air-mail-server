@@ -32,6 +32,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_config` | `seeds/config` | les trois formats binaires : configuration, comptes, index |
 | `fuzz_ams_tls_kx` | `seeds/tls` | la part de clé TLS du pair — **les deux rôles** |
 | `fuzz_ams_sasl` | `seeds/sasl` | la réponse SASL — **décodage canonique** |
+| `fuzz_ams_pop3` | `seeds/pop3` | la ligne POP3 — **et le doublement du point** |
 
 Les variantes « bornes » existent parce que les bornes de C3 viennent de la
 configuration (C8), donc d'un administrateur : un zéro, un `usize::MAX`, ou toute
@@ -171,6 +172,20 @@ mille boîtes se resynchronisent.
 5. Le repliement compte chaque nom une fois et une seule.
 6. Le prochain UID est strictement au-dessus de tous ceux qui existent — sauf
    quand la boîte est épuisée, auquel cas elle le déclare.
+
+### POP3 (quatre, dont le DOUBLEMENT DU POINT)
+
+1. N'importe quels octets, avec n'importe quelles bornes, rendent une erreur ou
+   une commande — jamais une panique.
+2. **Une commande acceptée a son `CRLF` à la fin et n'en porte pas ailleurs.**
+   C'est le contrebandage, dans un autre protocole : deux lecteurs qui ne
+   s'accordent pas sur ce qui termine une ligne découpent le même flux en deux
+   séries de commandes différentes.
+3. **Ce qui est écrit fait exactement la taille annoncée**, et `encode` refuse
+   tout ce que `encoded_len` refuse — les deux ne peuvent pas diverger.
+4. **Toute ligne de corps commençant par un point en porte deux**, et aucune
+   ligne doublée n'est le terminateur. Sans cela, le message finirait au milieu,
+   et ce qui suit serait lu comme des commandes.
 
 ### Réponse SASL (quatre, dont une CANONICITÉ)
 
@@ -389,6 +404,7 @@ L'entrée fautive est versionnée en graine de non-régression
 | 2026-08-28 | `fuzz_ams_config` | 573 580 (91 s) | 0 |
 | 2026-08-28 | `fuzz_ams_tls_kx` | 47 296 (121 s) | **1 fuite, corrigée** |
 | 2026-08-28 | `fuzz_ams_sasl` | 4 786 307 (61 s) | 0 |
+| 2026-08-29 | `fuzz_ams_pop3` | 11 871 878 (91 s) | 0 |
 | 2026-08-28 | `fuzz_ams_session_smtp` (SASL) | 521 646 (91 s) | 0 |
 
 Le débit de `fuzz_ams_tls_kx` est trois ordres de grandeur sous les autres : une

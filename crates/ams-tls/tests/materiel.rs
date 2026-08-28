@@ -51,8 +51,12 @@ impl Drop for Atelier {
     }
 }
 
-fn atelier() -> Atelier {
-    let chemin = std::env::temp_dir().join(format!("ams-tls-materiel-{}", std::process::id()));
+/// Un répertoire PAR TEST, et pas un par processus : `cargo test` lance les
+/// tests d'un même binaire EN PARALLÈLE, et un nom partagé fait effacer par l'un
+/// le répertoire de l'autre. Invisible en les lançant un à un — et c'est sous
+/// `cargo llvm-cov`, dont le rythme diffère, que la course a fini par se voir.
+fn atelier(nom: &str) -> Atelier {
+    let chemin = std::env::temp_dir().join(format!("ams-tls-{nom}-{}", std::process::id()));
     std::fs::create_dir_all(&chemin).expect("répertoire temporaire");
     Atelier(chemin)
 }
@@ -63,7 +67,7 @@ const SANS_OPENSSL: &str = "ce test EXIGE `openssl` : sans lui, le chemin nomina
 
 #[test]
 fn une_vraie_paire_donne_un_serveur_tls_13() {
-    let atelier = atelier();
+    let atelier = atelier("paire-valide");
     let (cert, cle) = paire(&atelier.0, "localhost").expect(SANS_OPENSSL);
 
     let config = ams_tls::server_config(
@@ -107,7 +111,7 @@ fn une_vraie_paire_donne_un_serveur_tls_13() {
 /// entière.
 #[test]
 fn une_paire_depareillee_n_est_pas_detectee_par_ce_fournisseur() {
-    let atelier = atelier();
+    let atelier = atelier("paire-depareillee");
     let (cert, _) = paire(&atelier.0, "premier").expect(SANS_OPENSSL);
     let (_, cle) = paire(&atelier.0, "second").expect(SANS_OPENSSL);
 
