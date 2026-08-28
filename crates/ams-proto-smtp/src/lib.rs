@@ -6,10 +6,11 @@
 //!
 //! # Ce que cette tranche couvre
 //!
-//! **Les commandes**, et elles seules : la ligne, le verbe, les chemins
-//! d'enveloppe, les paramètres ESMTP. L'encodage des réponses est une tranche à
-//! part — décoder une commande et encoder une réponse ne forment pas un
-//! aller-retour, et les mêler ne prouverait rien de plus.
+//! **Les commandes** — la ligne, le verbe, les chemins d'enveloppe, les
+//! paramètres ESMTP — **et l'encodage des réponses**, multilignes comprises.
+//!
+//! Ne sont PAS écrits : `BDAT`/`CHUNKING`, et la validation complète d'une adresse
+//! IPv6 (seule sa forme est vérifiée, cf. `check_address_literal`).
 //!
 //! ```
 //! use ams_proto_smtp::{Command, Limits, Path};
@@ -58,6 +59,10 @@
 //! - **Les zéros de tête dans un littéral IPv4** — `[192.0.2.010]` vaut `10` en
 //!   décimal et `8` en octal selon le lecteur, et cette divergence a déjà servi à
 //!   contourner des listes d'accès.
+//! - **Tout octet non imprimable dans une réponse.** Une réponse contient souvent
+//!   ce que le client vient d'envoyer ; un CR qui y passerait lui laisserait
+//!   écrire une ligne de réponse ENTIÈRE de son choix, et donc mentir à ce qui lit
+//!   la connexion derrière lui.
 //!
 //! # Aucune allocation
 //!
@@ -83,6 +88,7 @@ mod error;
 mod limits;
 mod parameters;
 mod path;
+mod reply;
 
 pub use command::Command;
 pub use domain::ClientId;
@@ -90,3 +96,4 @@ pub use error::Error;
 pub use limits::Limits;
 pub use parameters::{Parameter, Parameters, ParametersIter};
 pub use path::{LocalPart, Mailbox, Path, PathKind};
+pub use reply::{Class, Code, encode, encoded_len};

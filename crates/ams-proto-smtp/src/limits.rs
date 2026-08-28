@@ -2,7 +2,7 @@
 
 /// Ce qu'une commande SMTP n'a pas le droit de dépasser.
 ///
-/// Quatre de ces cinq bornes viennent de la RFC 5321 §4.5.3.1, qui les nomme
+/// Cinq de ces six bornes viennent de la RFC 5321 §4.5.3.1, qui les nomme
 /// « minimums qu'une implémentation DOIT accepter ». On les emploie ici comme
 /// **maximums**, et c'est un choix : accepter plus, c'est accepter ce qu'aucun
 /// pair conforme n'a besoin d'envoyer.
@@ -28,6 +28,11 @@ pub struct Limits {
     /// RFC 5321 §4.5.3.1.3 : 256 octets.
     pub max_path_octets: usize,
 
+    /// Longueur maximale d'une ligne de réponse, **CRLF compris**.
+    ///
+    /// RFC 5321 §4.5.3.1.5 : 512 octets.
+    pub max_reply_octets: usize,
+
     /// Nombre maximal de paramètres ESMTP sur une commande.
     ///
     /// **Aucune RFC ne le borne.** Limite défensive, décidée ici : la ligne est
@@ -47,6 +52,7 @@ impl Limits {
         max_local_part_octets: 64,
         max_domain_octets: 255,
         max_path_octets: 256,
+        max_reply_octets: 512,
         max_parameters: 16,
     };
 }
@@ -67,12 +73,13 @@ mod tests {
     }
 
     #[test]
-    fn les_quatre_bornes_de_la_rfc_sont_figees() {
+    fn les_cinq_bornes_de_la_rfc_sont_figees() {
         // RFC 5321 §4.5.3.1. Elles sont opposables ; `max_parameters` ne l'est pas.
         assert_eq!(Limits::DEFAULT.max_command_octets, 512);
         assert_eq!(Limits::DEFAULT.max_local_part_octets, 64);
         assert_eq!(Limits::DEFAULT.max_domain_octets, 255);
         assert_eq!(Limits::DEFAULT.max_path_octets, 256);
+        assert_eq!(Limits::DEFAULT.max_reply_octets, 512);
     }
 
     #[test]

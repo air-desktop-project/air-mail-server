@@ -96,9 +96,15 @@ illisibles, et le gate de C2 ne conclurait plus. Hors workspace, elle a son prop
 `Cargo.lock`, n'entre ni dans la mesure ni dans le lock du produit, et rien de ce
 qu'elle tire n'est livré.
 
-Quatre cibles — deux par grammaire écrite, l'une sur la grammaire, l'autre sur les
-calculs de borne avec des bornes elles-mêmes arbitraires — éprouvant quinze
-propriétés. Campagnes au 2026-08-28 : **27 585 613 exécutions, zéro plantage**.
+Cinq cibles éprouvant vingt-deux propriétés, dont un **aller-retour** sur
+l'encodeur de réponses SMTP : ré-analyser la sortie et exiger d'y retrouver
+l'entrée à l'octet près.
+
+**Le fuzz a déjà payé.** `fuzz_ams_smtp_reply` a trouvé, à sa première campagne et
+en soixante secondes, un défaut réel : sous une borne de réponse inférieure à
+l'enveloppe incompressible de six octets, un `saturating_sub` transformait « aucune
+ligne ne tient » en « les lignes vides tiennent ». Corrigé, et l'entrée fautive est
+versionnée en graine de non-régression.
 
 La CI lance un smoke-fuzz borné à vingt secondes par cible. C'est un détecteur de
 régression, **pas une campagne**, et `fuzz/README.md` le dit à l'endroit où
@@ -422,14 +428,16 @@ et une couture inutilisée finit par être utilisée.
 ## L'état réel, sans complaisance
 
 Deux crates portent du code : **`ams-mime`** (le squelette d'un message) et
-**`ams-proto-smtp`** (les commandes). Aucun protocole n'est pour autant servi : il
+**`ams-proto-smtp`** (les commandes **et les réponses**). Aucun protocole n'est pour autant servi : il
 manque l'encodage des réponses, la machine à états de session, et tout le reste.
 
-Sont outillées : C2 (le gate mesure 2 242 régions, toutes couvertes), C3 (les
+Sont outillées : C2 (le gate mesure 2 604 régions, toutes couvertes), C3 (les
 lints, l'absence d'allocation dans les décodeurs, et le fuzz), C6 **en partie et
 pour de bon** — les deux décodeurs refusent le CR et le LF isolés, et
-`ams-proto-smtp` refuse en outre les routes sources et les verbes retirés par la
-RFC 5321.
+`ams-proto-smtp` refuse en outre les routes sources, les verbes retirés par la
+RFC 5321, et tout octet non imprimable dans une réponse — ce dernier refus étant
+ce qui interdit à un client de faire écrire au serveur une ligne de réponse de son
+choix.
 
 Tout le reste — TLS, post-quantique, DKIM, SPF, DMARC, flooding, configuration
 binaire, stockage, non-root — est une décision écrite, pas un code vérifié.

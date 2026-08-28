@@ -103,6 +103,39 @@ pub enum Error {
 
     /// La réponse initiale d'`AUTH` n'est pas du base64 (RFC 4954 §4).
     MalformedInitialResponse,
+
+    // ── Encodage des réponses ───────────────────────────────────────────────
+    /// Une réponse sans aucune ligne.
+    ///
+    /// Il n'existe pas de réponse vide : la dernière ligne est ce qui dit au pair
+    /// que la réponse est finie. Sans elle, il attend.
+    EmptyReply,
+
+    /// Le texte d'une ligne de réponse sort de `textstring` (RFC 5321 §4.1.2) :
+    /// HTAB, ou l'imprimable US-ASCII.
+    ///
+    /// **C'est le refus le plus important de l'encodeur.** Une réponse contient
+    /// souvent ce que le client vient d'envoyer — « 550 5.1.1 `<x@y.z>`:
+    /// destinataire inconnu ». Un CR ou un LF qui y passerait laisserait le
+    /// client écrire une ligne de réponse ENTIÈRE de son choix, et donc mentir à
+    /// ce qui lit la connexion derrière lui.
+    ReplyTextNotPrintable,
+
+    /// Une ligne de réponse dépasse
+    /// [`Limits::max_reply_octets`](crate::Limits::max_reply_octets).
+    ReplyLineTooLong {
+        /// La borne franchie.
+        limit: usize,
+    },
+
+    /// Le tampon fourni ne peut pas contenir la réponse.
+    ///
+    /// Ce n'est pas une erreur de protocole : c'est l'appelant qui n'a pas donné
+    /// assez de place. `needed` dit combien il en fallait.
+    BufferTooSmall {
+        /// Le nombre d'octets qu'il aurait fallu.
+        needed: usize,
+    },
 }
 
 impl fmt::Display for Error {
@@ -136,6 +169,16 @@ impl fmt::Display for Error {
             Error::MalformedInitialResponse => {
                 f.write_str("réponse initiale AUTH hors de l'alphabet base64")
             }
+            Error::EmptyReply => f.write_str("réponse sans aucune ligne"),
+            Error::ReplyTextNotPrintable => {
+                f.write_str("texte de réponse hors de `textstring` (HTAB ou imprimable)")
+            }
+            Error::ReplyLineTooLong { limit } => {
+                write!(f, "ligne de réponse de plus de {limit} octets")
+            }
+            Error::BufferTooSmall { needed } => {
+                write!(f, "tampon trop petit : {needed} octets nécessaires")
+            }
         }
     }
 }
@@ -166,6 +209,10 @@ mod tests {
         Error::TooManyParameters { limit: 16 },
         Error::MalformedMechanism,
         Error::MalformedInitialResponse,
+        Error::EmptyReply,
+        Error::ReplyTextNotPrintable,
+        Error::ReplyLineTooLong { limit: 512 },
+        Error::BufferTooSmall { needed: 40 },
     ];
 
     #[test]

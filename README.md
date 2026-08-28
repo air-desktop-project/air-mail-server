@@ -44,7 +44,7 @@ horloge.
 | Crate | Périmètre | État |
 | --- | --- | --- |
 | `ams-mime` | RFC 5322 et MIME — le socle des quatre protocoles | **squelette du message : ligne, pliage, champs** |
-| `ams-proto-smtp` | RFC 5321 | **les commandes : ligne, verbe, chemins, paramètres** |
+| `ams-proto-smtp` | RFC 5321 | **commandes et réponses** |
 | `ams-proto-pop3` | RFC 1939 | vide |
 | `ams-proto-imap` | RFC 9051 (IMAP4rev2) | vide |
 | `ams-proto-http` | RFC 9110 / 9112 | vide |
@@ -80,7 +80,8 @@ Les seules crates qui lisent, écrivent et attendent. Elles ne décident de rien
 ligne, le pliage, la séparation en-tête/corps, le découpage en champs. Les champs
 structurés, les adresses, les dates et MIME restent à écrire.
 `ams-proto-smtp` : les commandes — la ligne, le verbe, les chemins d'enveloppe,
-les paramètres ESMTP. L'encodage des réponses reste à écrire.
+les paramètres ESMTP — **et l'encodage des réponses**, multilignes comprises.
+`BDAT`/`CHUNKING` et la validation complète d'une adresse IPv6 restent à écrire.
 
 Toutes les autres crates sont vides, et chacune le déclare dans sa documentation.
 
@@ -142,8 +143,9 @@ jobs indépendants : la vérification du code (les quatre commandes ci-dessus, s
 
 `fuzz/` est une crate `cargo-fuzz` **hors du workspace** : elle exige un nightly,
 que le pin exact du workspace n'admet pas — deux LLVM produisent des profils de
-couverture mutuellement illisibles. Quatre cibles — deux par grammaire —, quinze
-propriétés, et **27 585 613 exécutions sans plantage** à ce jour. Voir
+couverture mutuellement illisibles. Cinq cibles, vingt-deux propriétés, dont un
+**aller-retour** sur l'encodeur de réponses — qui a trouvé un vrai défaut en
+soixante secondes, corrigé et devenu graine de non-régression. Voir
 [`fuzz/README.md`](fuzz/README.md).
 
 La CI en lance un smoke borné à vingt secondes par cible : un détecteur de
@@ -157,7 +159,7 @@ que `llvm-cov` n'instrumente pas sur Rust stable et dont le compteur reste à
 `0 / 0`. Les régions font le travail attendu : chaque bras d'un conditionnel en
 est une.
 
-Le gate mesure aujourd'hui **2 242 régions** et **1 363 lignes**, toutes
+Le gate mesure aujourd'hui **2 604 régions** et **1 565 lignes**, toutes
 couvertes. Il naissait à zéro dette et n'en a pas pris.
 
 ```sh

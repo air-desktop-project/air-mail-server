@@ -24,6 +24,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_mime_limits` | `seeds/mime` | le même, avec des **bornes arbitraires** |
 | `fuzz_ams_smtp_command` | `seeds/smtp` | le décodage d'une commande — la grammaire |
 | `fuzz_ams_smtp_limits` | `seeds/smtp` | le même, avec des **bornes arbitraires** |
+| `fuzz_ams_smtp_reply` | `seeds/smtp-reply` | l'encodage d'une réponse — **aller-retour** |
 
 Les variantes « bornes » existent parce que les bornes de C3 viennent de la
 configuration (C8), donc d'un administrateur : un zéro, un `usize::MAX`, ou toute
@@ -57,7 +58,7 @@ bornes, jamais par ce qu'elles exigent.
 6. Un morceau déplié ne contient plus de fin de ligne.
 7. La comparaison de nom est réflexive.
 
-### SMTP (huit)
+### SMTP — commandes (huit)
 
 1. La ligne est bornée et se termine par CRLF.
 2. **Aucun CR ni LF isolé n'a survécu** — même propriété, même raison.
@@ -71,6 +72,25 @@ bornes, jamais par ce qu'elles exigent.
 7. La distinction domaine / littéral tient aux octets : un littéral porte ses
    crochets, un domaine n'en a pas et ne porte pas de `@`.
 8. Une valeur de paramètre présente n'est jamais vide et ne porte ni `=` ni espace.
+
+### SMTP — réponses (sept), dont un ALLER-RETOUR
+
+Cette cible ne se contente pas de vérifier l'absence de panique : elle
+**ré-analyse la sortie de l'encodeur** et exige d'y retrouver, à l'octet près, ce
+qui y était entré. Un encodeur qui perdrait, tronquerait ou fusionnerait une ligne
+échoue ici — et c'est la seule propriété qui les attrape toutes.
+
+1. La taille annoncée par `encoded_len` est celle qui est écrite. C'est le contrat
+   sur lequel l'écriture se dispense de toute vérification : s'il ment, on indexe
+   hors du tampon.
+2. La sortie se termine par CRLF.
+3. **Aller-retour** : le découpage rend exactement les lignes entrées.
+4. Le séparateur dit si la réponse continue — tiret partout sauf sur la dernière
+   ligne. Un tiret final ferait attendre le pair indéfiniment ; une espace au
+   milieu lui ferait lire la suite comme une autre réponse.
+5. Le texte est celui qui est entré, à l'octet près.
+6. **Aucun CR ni LF n'a survécu dans un texte** — l'injection de réponse.
+7. Chaque ligne respecte sa borne, CRLF compris.
 
 ## Lancement
 
@@ -105,11 +125,30 @@ neuf n'explorent pas ce que des heures explorent. Une vraie campagne se lance à
 main, et l'absence de plantage en CI ne prouve rien de plus que ce qu'elle a
 couvert.
 
+## Ce que le fuzz a trouvé
+
+**`fuzz_ams_smtp_reply`, en soixante secondes, à sa première campagne.**
+`encoded_len` calculait la place disponible pour le texte d'une ligne par
+`max_reply_octets.saturating_sub(6)` — six étant l'enveloppe incompressible
+(code, séparateur, CRLF). Sous une borne inférieure à six, la saturation
+transformait « aucune ligne ne tient » en « les lignes vides tiennent », et
+l'encodeur émettait six octets sous une borne de trois.
+
+L'habitude qui a produit ce défaut est ailleurs la bonne : préférer
+`saturating_*` à `checked_*` évite une branche que rien ne pourrait exercer, et
+que le 100 % de C2 compterait à jamais découverte. Elle ne vaut que **là où
+l'échec est vraiment impossible** — et ici il ne l'était pas, puisque la borne
+vient de la configuration, donc d'un administrateur.
+
+L'entrée fautive est versionnée en graine de non-régression
+(`seeds/smtp-reply/borne-inferieure-a-l-enveloppe`).
+
 ## Résultats
 
 | Date | Cible | Exécutions | Plantages |
 | --- | --- | --- | --- |
 | 2026-08-28 | `fuzz_ams_mime_parse` | 2 780 381 (46 s) | 0 |
 | 2026-08-28 | `fuzz_ams_mime_limits` | 2 046 935 (46 s) | 0 |
-| 2026-08-28 | `fuzz_ams_smtp_command` | 12 394 301 (46 s) | 0 |
-| 2026-08-28 | `fuzz_ams_smtp_limits` | 10 364 396 (46 s) | 0 |
+| 2026-08-28 | `fuzz_ams_smtp_command` | 10 668 888 (46 s) | 0 |
+| 2026-08-28 | `fuzz_ams_smtp_limits` | 4 423 315 (46 s) | 0 |
+| 2026-08-28 | `fuzz_ams_smtp_reply` | 3 226 422 (91 s) | **1, corrigé** |
