@@ -17,7 +17,7 @@
 
 use core::time::Duration;
 
-use ams_config::{Configuration, Timeouts, decode, encode};
+use ams_config::{Configuration, Timeouts, Tls, decode, encode};
 use ams_guard::Thresholds;
 use ams_proto_smtp::Limits;
 use arbitrary::Arbitrary;
@@ -40,6 +40,10 @@ struct Entree {
     garde: [u32; 4],
     prefixes: [u8; 2],
     delais: [u32; 2],
+    /// Les deux chemins TLS, LIBREMENT INCOHÉRENTS : le fuzzer doit pouvoir
+    /// composer « un seul des deux », qui est justement le cas que le décodeur
+    /// refuse. Les lier ici cacherait ce refus au lieu de l'éprouver.
+    tls: [String; 2],
 }
 
 fuzz_target!(|entree: Entree| {
@@ -80,14 +84,19 @@ fuzz_target!(|entree: Entree| {
             command_seconds: entree.delais[0],
             data_seconds: entree.delais[1],
         },
+        tls: Tls {
+            certificate_chain_path: entree.tls[0].clone(),
+            private_key_path: entree.tls[1].clone(),
+        },
     };
 
     let Ok(ecrit) = encode(&original) else {
         return;
     };
     let Ok(relue) = decode(&ecrit) else {
-        // Refusée : domaine invalide, champ vide, texte non conforme. C'est le
-        // décodeur qui fait son travail, pas un défaut.
+        // Refusée : domaine invalide, champ vide, texte non conforme, ou un
+        // seul des deux chemins TLS. C'est le décodeur qui fait son travail,
+        // pas un défaut.
         return;
     };
     assert_eq!(relue, original, "l'aller-retour a changé la configuration");

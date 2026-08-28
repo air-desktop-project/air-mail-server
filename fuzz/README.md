@@ -202,6 +202,21 @@ configuration ne démarre pas, et ne dit pas pourquoi**.
 3. Réécrire ce qui a été relu rend les mêmes octets.
 4. Corrompre un octet rend une erreur, jamais une panique.
 
+## LE PIÈGE DE LA SÉPARATION, et il a déjà mordu
+
+Cette crate est **hors du workspace** (voir `Cargo.toml`, qui dit pourquoi). La
+conséquence se paie un jour ou l'autre : `cargo build --workspace`,
+`cargo test --workspace` et `cargo clippy --workspace` **ne la compilent pas**.
+Un champ ajouté à une structure publique — `Configuration`, par exemple — la
+casse sans qu'aucun gate local ne le dise. C'est l'intégration continue qui l'a
+attrapé, trois minutes plus tard, et c'est trois minutes de trop.
+
+Avant de pousser une modification d'API, une seule commande suffit :
+
+```sh
+cd fuzz && cargo +nightly fuzz build --target x86_64-unknown-linux-gnu
+```
+
 ## Lancement
 
 **Nommez la cible de compilation.** cargo-fuzz 0.13.1 choisissait
