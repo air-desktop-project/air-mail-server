@@ -109,6 +109,8 @@ impl Code {
     pub const ENCRYPTION_REQUIRED: Self = Self(538);
     /// `550` — boîte indisponible : action non effectuée.
     pub const MAILBOX_UNAVAILABLE: Self = Self(550);
+    /// `552` — le message dépasse la taille maximale (RFC 1870 §6).
+    pub const MESSAGE_TOO_LARGE: Self = Self(552);
     /// `554` — la transaction a échoué.
     pub const TRANSACTION_FAILED: Self = Self(554);
 }

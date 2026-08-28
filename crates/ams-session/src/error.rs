@@ -35,6 +35,20 @@ pub enum Error {
     /// [`Action::Close`](crate::Action::Close).
     SessionClosed,
 
+    /// Des octets de message ont été fournis hors de la phase de données.
+    NotInDataPhase,
+
+    /// Les données du message ont été refusées.
+    ///
+    /// Le pair a envoyé quelque chose que la grammaire n'accepte pas — un `CR`
+    /// isolé, une ligne trop longue, un message trop gros. L'appelant doit
+    /// **cesser de lire** et appeler
+    /// [`on_data_settled`](crate::SmtpSession::on_data_settled), qui rendra la
+    /// réponse correspondante. **Le verdict qu'il y passera ne sera pas
+    /// consulté** : un message refusé par la grammaire ne peut pas être accepté
+    /// par l'appelant.
+    DataRefused,
+
     /// Le domaine annoncé par le serveur n'est pas un domaine.
     ///
     /// Refusé à la **construction** : un serveur qui se nomme mal le fait dans
@@ -51,6 +65,12 @@ impl fmt::Display for Error {
                 f.write_str("la session n'attend pas de commande à cet instant")
             }
             Error::SessionClosed => f.write_str("la session est close depuis `QUIT`"),
+            Error::NotInDataPhase => {
+                f.write_str("des données ont été fournies hors de la phase de données")
+            }
+            Error::DataRefused => {
+                f.write_str("les données du message sont refusées ; conclure la transaction")
+            }
             Error::ServerDomainInvalid(cause) => {
                 write!(f, "le domaine du serveur est invalide : {cause}")
             }
@@ -66,6 +86,8 @@ mod tests {
         Error::Reply(ams_proto_smtp::Error::BufferTooSmall { needed: 40 }),
         Error::NotInCommandPhase,
         Error::SessionClosed,
+        Error::NotInDataPhase,
+        Error::DataRefused,
         Error::ServerDomainInvalid(ams_proto_smtp::Error::MalformedDomain),
     ];
 

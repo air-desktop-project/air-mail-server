@@ -6,17 +6,12 @@
 //!
 //! # Ce que cette tranche couvre
 //!
-//! **La phase de commandes SMTP** : la bannière, `EHLO`/`HELO`, l'annonce des
-//! extensions, le séquencement `MAIL`/`RCPT`/`DATA`, `STARTTLS`, et le refus
-//! d'`AUTH` hors chiffrement.
+//! **La session SMTP entière** : la bannière, `EHLO`/`HELO`, l'annonce des
+//! extensions, le séquencement `MAIL`/`RCPT`/`DATA`, `STARTTLS`, le refus
+//! d'`AUTH` hors chiffrement, **et la phase de données**.
 //!
 //! # Ce qu'elle NE couvre PAS, et il faut le lire avant de s'en servir
 //!
-//! - **La phase de données.** `DATA` rend [`Action::ReceiveData`] et s'arrête là.
-//!   La détection de `<CRLF>.<CRLF>` n'est pas écrite — et c'est précisément
-//!   l'endroit où vit la contrebande SMTP : des serveurs qui acceptent `\n.\n` ou
-//!   `\r.\r\n` comme fin de message ne découpent pas le flux au même endroit que
-//!   leur voisin. Ce n'est pas une tranche à improviser, et elle viendra seule.
 //! - **L'échange SASL.** `AUTH` rend [`Action::BeginAuth`] : la session **gate**
 //!   et délègue, elle n'authentifie personne.
 //! - **La politique de relais.** Voir [`Policy`] : la session l'exige plutôt que
@@ -34,7 +29,12 @@
 //!    mot de passe en clair à un client qui aurait cru l'offre.
 //! 2. **`STARTTLS` remet toute la session à zéro** (RFC 3207 §4.2). Ce qu'un pair
 //!    a dit en clair a pu être dit par quelqu'un d'autre.
-//! 3. **Aucune réponse ne contient de donnée venue du client.** Pas d'adresse
+//! 3. **Un message refusé par la grammaire ne peut pas être accepté par
+//!    l'appelant.** Quand [`SmtpSession::feed_data`] rend [`Error::DataRefused`],
+//!    le verdict passé ensuite à [`SmtpSession::on_data_settled`] **n'est pas
+//!    consulté** : la réponse est celle de la faute. Une boucle distraite ne peut
+//!    donc pas remettre un message que le décodeur a rejeté.
+//! 4. **Aucune réponse ne contient de donnée venue du client.** Pas d'adresse
 //!    reprise, pas de commande citée, pas de détail d'erreur d'analyse.
 //!    L'injection de réponse devient inexprimable ici, et pas seulement refusée
 //!    par l'encodeur.

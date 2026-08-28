@@ -1,6 +1,8 @@
 //! La machine à états d'une session SMTP, **sans entrée-sortie**.
 
-use ams_proto_smtp::{Code, Command, Error as SmtpError, Path, encode};
+use ams_proto_smtp::{
+    Code, Command, DataEvent, DataFault, DataReceiver, Error as SmtpError, Path, encode,
+};
 
 use crate::digits::{MAX_DIGITS, decimal};
 use crate::{Config, Error, Policy, RecipientVerdict};
@@ -25,6 +27,9 @@ enum Phase {
     Auth,
     /// Un `DATA` a été accepté : l'appelant lit le message.
     Data,
+    /// Les données ont été refusées par la grammaire. La cause décide de la
+    /// réponse, et **le verdict de l'appelant ne sera pas consulté**.
+    DataFailed(DataFault),
     /// `QUIT` a été traité.
     Closed,
 }
@@ -107,6 +112,7 @@ pub struct SmtpSession<'a, P: Policy> {
     phase: Phase,
     tls: bool,
     authenticated: bool,
+    data: DataReceiver,
     banner: [u8; BANNER_MAX],
     banner_len: usize,
     size_line: [u8; SIZE_LINE_MAX],
@@ -141,6 +147,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
             config,
             policy,
             phase: Phase::Greeted,
+            data: DataReceiver::new(config.limits(), config.max_message_octets()),
             tls: false,
             authenticated: false,
             banner,
@@ -219,10 +226,32 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         outcome: DataOutcome,
         out: &'b mut [u8],
     ) -> Result<Turn<'b, 'l>, Error> {
-        if self.phase != Phase::Data {
-            return Err(Error::NotInCommandPhase);
-        }
+        let refus = match self.phase {
+            Phase::Data => None,
+            Phase::DataFailed(cause) => Some(cause),
+            _ => return Err(Error::NotInCommandPhase),
+        };
         self.phase = Phase::Identified;
+        // UN MESSAGE REFUSÉ PAR LA GRAMMAIRE NE PEUT PAS ÊTRE ACCEPTÉ PAR
+        // L'APPELANT : le verdict n'est pas consulté. Sans cela, une boucle
+        // distraite pourrait remettre un message que le décodeur a rejeté.
+        if let Some(cause) = refus {
+            return match cause {
+                DataFault::BareLineEnding => self.simple(
+                    Code::TRANSACTION_FAILED,
+                    b"Bare CR or LF in message data",
+                    out,
+                ),
+                DataFault::LineTooLong { .. } => {
+                    self.simple(Code::SYNTAX_ERROR, b"Line too long", out)
+                }
+                DataFault::MessageTooLarge { .. } => self.simple(
+                    Code::MESSAGE_TOO_LARGE,
+                    b"Message exceeds maximum size",
+                    out,
+                ),
+            };
+        }
         match outcome {
             DataOutcome::Accepted => self.simple(Code::OK, b"Message accepted", out),
             DataOutcome::RejectedPermanent => {
@@ -234,6 +263,36 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
                 out,
             ),
         }
+    }
+
+    /// Fournit des octets de la phase de données.
+    ///
+    /// Rend l'événement et le nombre d'octets **consommés** — qui n'est pas celui
+    /// des octets rendus : un point échappé est consommé sans être rendu.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotInDataPhase`] hors de la phase de données, et
+    /// [`Error::DataRefused`] quand le pair a envoyé ce que la grammaire refuse.
+    /// Dans ce dernier cas, **cesser de lire** et appeler
+    /// [`Self::on_data_settled`].
+    pub fn feed_data<'i>(&mut self, input: &'i [u8]) -> Result<(DataEvent<'i>, usize), Error> {
+        if self.phase != Phase::Data {
+            return Err(Error::NotInDataPhase);
+        }
+        match self.data.next(input) {
+            Ok(progres) => Ok(progres),
+            Err(cause) => {
+                self.phase = Phase::DataFailed(cause);
+                Err(Error::DataRefused)
+            }
+        }
+    }
+
+    /// Le nombre d'octets de message reçus pour la transaction en cours.
+    #[must_use]
+    pub fn received_octets(&self) -> u64 {
+        self.data.content_octets()
     }
 
     /// La session est-elle chiffrée ?
@@ -262,7 +321,9 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     ) -> Result<Turn<'b, 'l>, Error> {
         match self.phase {
             Phase::Closed => return Err(Error::SessionClosed),
-            Phase::Auth | Phase::Data => return Err(Error::NotInCommandPhase),
+            Phase::Auth | Phase::Data | Phase::DataFailed(_) => {
+                return Err(Error::NotInCommandPhase);
+            }
             Phase::Greeted | Phase::Identified | Phase::Transaction { .. } => {}
         }
 
@@ -438,6 +499,11 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         match self.phase {
             Phase::Transaction { recipients } if recipients > 0 => {
                 self.phase = Phase::Data;
+                // Un récepteur NEUF par message : celui du message précédent
+                // porte ses compteurs, et les réutiliser ferait refuser le
+                // second message pour la taille du premier.
+                self.data =
+                    DataReceiver::new(self.config.limits(), self.config.max_message_octets());
                 self.finish(
                     Code::START_MAIL_INPUT,
                     b"Start mail input; end with <CRLF>.<CRLF>",
@@ -534,7 +600,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
 mod tests {
     use super::{Action, DataOutcome, SmtpSession};
     use crate::{Config, Error, Policy, RecipientVerdict};
-    use ams_proto_smtp::{Error as SmtpError, Limits, Path};
+    use ams_proto_smtp::{DataEvent, Error as SmtpError, Limits, Path};
 
     /// L'erreur qu'un tampon de `disponible` octets provoque quand il en faut
     /// `needed`.
@@ -684,6 +750,199 @@ mod tests {
         assert_eq!(tour.reply(), b"250 Message accepted\r\n");
         // On reste identifié : un autre message peut suivre sans nouvel `EHLO`.
         assert!(jouer(&mut session, b"MAIL FROM:<a@b.co>\r\n").starts_with("250"));
+    }
+
+    /// Amène une session jusqu'à la phase de données.
+    fn jusqu_aux_donnees(session: &mut SmtpSession<'_, Verdict>) {
+        identifier(session);
+        jouer(session, b"MAIL FROM:<a@b.co>\r\n");
+        jouer(session, b"RCPT TO:<c@d.co>\r\n");
+        assert!(jouer(session, b"DATA\r\n").starts_with("354"));
+    }
+
+    /// Donne un message entier à la session, et rend ce qu'elle en a extrait.
+    fn remettre(
+        session: &mut SmtpSession<'_, Verdict>,
+        flux: &[u8],
+    ) -> Result<std::vec::Vec<u8>, Error> {
+        let mut recu = std::vec::Vec::new();
+        let mut debut = 0_usize;
+        while debut < flux.len() {
+            let (evenement, consomme) = session.feed_data(&flux[debut..])?;
+            match evenement {
+                DataEvent::Complete => return Ok(recu),
+                DataEvent::Content(morceau) => recu.extend_from_slice(morceau),
+                DataEvent::NeedMore => {}
+            }
+            // L'invariante de progrès du récepteur, éprouvée ici aussi.
+            assert!(consomme > 0, "le récepteur n'a ni consommé ni conclu");
+            debut = debut.saturating_add(consomme);
+        }
+        // Le flux s'est arrêté sans `<CRLF>.<CRLF>` : le pair a raccroché.
+        Ok(recu)
+    }
+
+    // ── La phase de données ─────────────────────────────────────────────────
+
+    #[test]
+    fn un_message_traverse_la_session_intact() {
+        let mut session = acceptante();
+        jusqu_aux_donnees(&mut session);
+        assert_eq!(
+            remettre(&mut session, b"From: moi\r\n\r\nbonjour\r\n.\r\n").expect("recevable"),
+            b"From: moi\r\n\r\nbonjour\r\n"
+        );
+        assert_eq!(session.received_octets(), 22);
+
+        let mut tampon = [0_u8; 128];
+        let tour = session
+            .on_data_settled(DataOutcome::Accepted, &mut tampon)
+            .expect("verdict");
+        assert_eq!(tour.reply(), b"250 Message accepted\r\n");
+    }
+
+    #[test]
+    fn le_point_echappe_traverse_la_session_comme_le_codec() {
+        // RFC 5321 §4.5.2 : la session ne fait que relayer le récepteur, et le
+        // point échappé se consomme sans rien rendre — c'est le seul cas où un
+        // appel ne produit aucun octet tout en progressant.
+        let mut session = acceptante();
+        jusqu_aux_donnees(&mut session);
+        assert_eq!(
+            remettre(&mut session, b"..cache\r\n.\r\n").expect("recevable"),
+            b".cache\r\n"
+        );
+        // Le point échappé compte sur le fil, pas dans le message.
+        assert_eq!(session.received_octets(), 8);
+    }
+
+    #[test]
+    fn un_pair_qui_raccroche_laisse_un_message_inachevé() {
+        // La transaction ne se conclut pas d'elle-même : c'est à la boucle de
+        // constater la déconnexion, et de ne rien remettre.
+        let mut session = acceptante();
+        jusqu_aux_donnees(&mut session);
+        assert_eq!(
+            remettre(&mut session, b"debut sans fin\r\n").expect("recevable"),
+            b"debut sans fin\r\n"
+        );
+        // La session attend toujours la suite du message.
+        let mut tampon = [0_u8; 128];
+        assert_eq!(
+            session.handle(b"NOOP\r\n", &mut tampon),
+            Err(Error::NotInCommandPhase)
+        );
+    }
+
+    #[test]
+    fn des_donnees_hors_phase_sont_refusees() {
+        let mut session = acceptante();
+        assert_eq!(
+            session.feed_data(b"peu importe"),
+            Err(Error::NotInDataPhase)
+        );
+    }
+
+    #[test]
+    fn un_message_refuse_par_la_grammaire_ne_peut_pas_etre_accepte() {
+        // LA PROPRIÉTÉ QUI COMPTE : une boucle distraite ne peut pas remettre un
+        // message que le décodeur a rejeté. Le verdict n'est même pas consulté.
+        for (contrebande, attendu) in [
+            (
+                b"corps\r\n\n.\r\nMAIL FROM:<usurpe@x.co>\r\n".as_slice(),
+                "554 Bare CR or LF in message data\r\n",
+            ),
+            (b"a\r.\r\n", "554 Bare CR or LF in message data\r\n"),
+        ] {
+            let mut session = acceptante();
+            jusqu_aux_donnees(&mut session);
+            assert_eq!(
+                remettre(&mut session, contrebande),
+                Err(Error::DataRefused),
+                "{contrebande:?}"
+            );
+            let mut tampon = [0_u8; 128];
+            // L'appelant demande l'acceptation ; elle n'est PAS accordée.
+            let tour = session
+                .on_data_settled(DataOutcome::Accepted, &mut tampon)
+                .expect("verdict");
+            assert_eq!(
+                std::string::String::from_utf8(tour.reply().to_vec()).expect("ASCII"),
+                attendu
+            );
+        }
+    }
+
+    #[test]
+    fn chaque_faute_de_donnees_a_sa_reponse() {
+        let etroite = Config::new(
+            b"mail.example.com",
+            2,
+            8,
+            Limits {
+                max_text_line_octets: 6,
+                ..Limits::DEFAULT
+            },
+        )
+        .expect("configurable");
+
+        for (flux, attendu) in [
+            (b"abcdef\r\n.\r\n".as_slice(), "500 Line too long\r\n"),
+            (
+                b"abcd\r\nabcd\r\n.\r\n",
+                "552 Message exceeds maximum size\r\n",
+            ),
+        ] {
+            let mut session = SmtpSession::new(etroite, Verdict(RecipientVerdict::Accept));
+            jusqu_aux_donnees(&mut session);
+            assert_eq!(
+                remettre(&mut session, flux),
+                Err(Error::DataRefused),
+                "{flux:?}"
+            );
+            let mut tampon = [0_u8; 128];
+            let tour = session
+                .on_data_settled(DataOutcome::Accepted, &mut tampon)
+                .expect("verdict");
+            assert_eq!(
+                std::string::String::from_utf8(tour.reply().to_vec()).expect("ASCII"),
+                attendu
+            );
+        }
+    }
+
+    #[test]
+    fn le_compteur_repart_a_zero_pour_le_message_suivant() {
+        // Réutiliser le récepteur ferait refuser le second message pour la
+        // taille du premier.
+        let mut session = acceptante();
+        jusqu_aux_donnees(&mut session);
+        remettre(&mut session, b"premier\r\n.\r\n").expect("recevable");
+        let mut tampon = [0_u8; 128];
+        session
+            .on_data_settled(DataOutcome::Accepted, &mut tampon)
+            .expect("verdict");
+
+        jouer(&mut session, b"MAIL FROM:<a@b.co>\r\n");
+        jouer(&mut session, b"RCPT TO:<c@d.co>\r\n");
+        jouer(&mut session, b"DATA\r\n");
+        assert_eq!(session.received_octets(), 0);
+        assert_eq!(
+            remettre(&mut session, b"second\r\n.\r\n").expect("recevable"),
+            b"second\r\n"
+        );
+    }
+
+    #[test]
+    fn aucune_commande_n_est_traitee_apres_un_refus_de_donnees() {
+        let mut session = acceptante();
+        jusqu_aux_donnees(&mut session);
+        assert_eq!(remettre(&mut session, b"a\n.\r\n"), Err(Error::DataRefused));
+        let mut tampon = [0_u8; 128];
+        assert_eq!(
+            session.handle(b"NOOP\r\n", &mut tampon),
+            Err(Error::NotInCommandPhase)
+        );
     }
 
     #[test]

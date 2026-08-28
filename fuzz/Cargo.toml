@@ -83,3 +83,10 @@ path = "fuzz_targets/fuzz_ams_session_smtp.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_ams_smtp_data"
+path = "fuzz_targets/fuzz_ams_smtp_data.rs"
+test = false
+doc = false
+bench = false

@@ -128,6 +128,9 @@ pub enum Error {
         limit: usize,
     },
 
+    /// Les données du message sont irrecevables.
+    Data(crate::DataFault),
+
     /// Le tampon fourni ne peut pas contenir la réponse.
     ///
     /// Ce n'est pas une erreur de protocole : c'est l'appelant qui n'a pas donné
@@ -176,6 +179,7 @@ impl fmt::Display for Error {
             Error::ReplyLineTooLong { limit } => {
                 write!(f, "ligne de réponse de plus de {limit} octets")
             }
+            Error::Data(fault) => write!(f, "données irrecevables : {fault}"),
             Error::BufferTooSmall { needed } => {
                 write!(f, "tampon trop petit : {needed} octets nécessaires")
             }
@@ -213,6 +217,7 @@ mod tests {
         Error::ReplyTextNotPrintable,
         Error::ReplyLineTooLong { limit: 512 },
         Error::BufferTooSmall { needed: 40 },
+        Error::Data(crate::DataFault::BareLineEnding),
     ];
 
     #[test]

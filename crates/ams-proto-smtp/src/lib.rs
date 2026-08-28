@@ -7,9 +7,12 @@
 //! # Ce que cette tranche couvre
 //!
 //! **Les commandes** — la ligne, le verbe, les chemins d'enveloppe, les
-//! paramètres ESMTP — **et l'encodage des réponses**, multilignes comprises.
+//! paramètres ESMTP —, **l'encodage des réponses** multilignes, et **la phase de
+//! données** : `<CRLF>.<CRLF>`, le point échappé, et le refus de tout `CR` ou `LF`
+//! isolé (cf. [`DataReceiver`]).
 //!
-//! Ne sont PAS écrits : `BDAT`/`CHUNKING`, et la validation complète d'une adresse
+//! Ne sont PAS écrits : `BDAT`/`CHUNKING`, l'échappement des points à l'ÉMISSION
+//! (le serveur ne relaie pas encore), et la validation complète d'une adresse
 //! IPv6 (seule sa forme est vérifiée, cf. `check_address_literal`).
 //!
 //! ```
@@ -59,6 +62,10 @@
 //! - **Les zéros de tête dans un littéral IPv4** — `[192.0.2.010]` vaut `10` en
 //!   décimal et `8` en octal selon le lecteur, et cette divergence a déjà servi à
 //!   contourner des listes d'accès.
+//! - **Toute fin de message autre que `<CRLF>.<CRLF>`**, et tout `CR` ou `LF`
+//!   isolé dans les données. C'est la contrebande SMTP qui se ferme là : un
+//!   message que deux serveurs découpent différemment permet d'en faire passer un
+//!   second, invisible au premier.
 //! - **Tout octet non imprimable dans une réponse.** Une réponse contient souvent
 //!   ce que le client vient d'envoyer ; un CR qui y passerait lui laisserait
 //!   écrire une ligne de réponse ENTIÈRE de son choix, et donc mentir à ce qui lit
@@ -83,6 +90,7 @@
 extern crate std;
 
 mod command;
+mod data;
 mod domain;
 mod error;
 mod limits;
@@ -91,6 +99,7 @@ mod path;
 mod reply;
 
 pub use command::Command;
+pub use data::{DataFault, DataReceiver, Event as DataEvent};
 pub use domain::ClientId;
 pub use error::Error;
 pub use limits::Limits;

@@ -23,6 +23,7 @@ struct Entree {
     max_domain_octets: usize,
     max_path_octets: usize,
     max_reply_octets: usize,
+    max_text_line_octets: usize,
     max_parameters: usize,
     ligne: Vec<u8>,
 }
@@ -34,6 +35,7 @@ fuzz_target!(|entree: Entree| {
         max_domain_octets: entree.max_domain_octets,
         max_path_octets: entree.max_path_octets,
         max_reply_octets: entree.max_reply_octets,
+        max_text_line_octets: entree.max_text_line_octets,
         max_parameters: entree.max_parameters,
     };
     if let Ok(commande) = Command::parse(&entree.ligne, &limits) {

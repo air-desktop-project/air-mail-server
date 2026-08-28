@@ -26,6 +26,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_smtp_limits` | `seeds/smtp` | le même, avec des **bornes arbitraires** |
 | `fuzz_ams_smtp_reply` | `seeds/smtp-reply` | l'encodage d'une réponse — **aller-retour** |
 | `fuzz_ams_session_smtp` | `seeds/session` | la session — **vocabulaire de sortie clos** |
+| `fuzz_ams_smtp_data` | `seeds/smtp-data` | la phase de données — **indépendance au découpage** |
 
 Les variantes « bornes » existent parce que les bornes de C3 viennent de la
 configuration (C8), donc d'un administrateur : un zéro, un `usize::MAX`, ou toute
@@ -114,6 +115,27 @@ peut intercaler : poignée de main TLS, verdict SASL, verdict de message.
 5. Après la poignée de main, ni l'identification ni l'authentification n'ont
    survécu (RFC 3207 §4.2).
 
+### Phase de données SMTP (six), dont l'INDÉPENDANCE AU DÉCOUPAGE
+
+La contrebande SMTP ne tient pas à un débordement : elle tient à ce que deux
+lecteurs ne coupent pas le même flux au même endroit. C'est donc cela qu'il faut
+éprouver, et pas seulement l'absence de panique.
+
+Cette cible lit chaque flux **deux fois** : d'un seul tenant, puis par tranches
+arbitraires — dont des tranches d'un octet, qui coupent au milieu d'un `CRLF` ou
+d'un terminateur.
+
+1. **Les deux lectures rendent le même verdict et les mêmes octets.** Un décodeur
+   qui conclurait autrement sur `\r\n.\r` suivi de `\n` que sur `\r\n.\r\n` d'un
+   coup échoue ici. C'est exactement la divergence dont vit l'attaque.
+2. **L'invariante de progrès** : sur une entrée non vide, le récepteur consomme au
+   moins un octet ou conclut. Sans elle, un pair enfermerait la boucle avec trois
+   octets.
+3. Le récepteur ne consomme jamais plus qu'on ne lui a donné.
+4. **Aucun CR ni LF isolé n'a survécu** dans ce qui a été accepté.
+5. Le message n'est jamais plus long que ce qui a été lu.
+6. Les bornes de ligne et de message sont tenues.
+
 ## Lancement
 
 **Nommez la cible de compilation.** cargo-fuzz 0.13.1 choisissait
@@ -149,6 +171,24 @@ couvert.
 
 ## Ce que le fuzz a trouvé
 
+**`fuzz_ams_smtp_data`, à sa première campagne, sur le flux `\rF\n`.** Sous une
+borne de ligne étroite, la lecture d'un seul tenant rendait « CR isolé » et la
+lecture hachée « ligne trop longue » : le `CR` retenu en fin de lecture était
+compté AVANT d'être confirmé comme moitié d'un `CRLF`, alors que le même `CR` lu
+d'un trait était refusé avant tout comptage.
+
+Les deux lectures refusaient, donc rien ne passait — mais **la faute rendue
+dépendait de l'endroit où la lecture avait été coupée**, et c'est la contrebande
+SMTP en miniature. La règle est désormais unique : un `CR` n'est compté qu'une
+fois confirmé. L'entrée fautive est versionnée
+(`seeds/smtp-data/cr-compte-avant-confirmation`).
+
+Une seconde entrée a fait échouer la cible sans que le code soit en cause : la
+dernière ligne d'un flux TRONQUÉ n'a pas encore son `CRLF`, et lui appliquer la
+borne « CRLF compris » accusait un octet licite. L'assertion a été corrigée, et
+l'entrée gardée (`seeds/smtp-data/ligne-inachevee`) : une cible qui se trompe est
+aussi une régression à empêcher.
+
 **`fuzz_ams_smtp_reply`, en soixante secondes, à sa première campagne.**
 `encoded_len` calculait la place disponible pour le texte d'une ligne par
 `max_reply_octets.saturating_sub(6)` — six étant l'enveloppe incompressible
@@ -175,3 +215,4 @@ L'entrée fautive est versionnée en graine de non-régression
 | 2026-08-28 | `fuzz_ams_smtp_limits` | 4 423 315 (46 s) | 0 |
 | 2026-08-28 | `fuzz_ams_smtp_reply` | 3 226 422 (91 s) | **1, corrigé** |
 | 2026-08-28 | `fuzz_ams_session_smtp` | 1 296 868 (91 s) | 0 |
+| 2026-08-28 | `fuzz_ams_smtp_data` | 4 629 514 (121 s) | **1, corrigé** |

@@ -96,13 +96,17 @@ illisibles, et le gate de C2 ne conclurait plus. Hors workspace, elle a son prop
 `Cargo.lock`, n'entre ni dans la mesure ni dans le lock du produit, et rien de ce
 qu'elle tire n'est livré.
 
-Six cibles éprouvant vingt-sept propriétés, dont un **aller-retour** sur
-l'encodeur de réponses SMTP et un **vocabulaire de sortie clos** sur la session :
-toute réponse appartient à une liste finie connue d'avance, ce qui interdit
-l'écho au lieu de le refuser.
+Sept cibles éprouvant trente-trois propriétés, dont un **aller-retour** sur
+l'encodeur de réponses, un **vocabulaire de sortie clos** sur la session, et
+l'**indépendance au découpage** sur la phase de données : le même flux, lu d'un
+seul tenant puis par tranches arbitraires, doit rendre le même verdict et les
+mêmes octets. C'est exactement ce que la contrebande SMTP exploite quand ce n'est
+pas le cas.
 
-**Le fuzz a déjà payé.** `fuzz_ams_smtp_reply` a trouvé, à sa première campagne et
-en soixante secondes, un défaut réel : sous une borne de réponse inférieure à
+**Le fuzz a déjà payé deux fois.** `fuzz_ams_smtp_data` a trouvé, à sa première
+campagne, une faute qui dépendait de l'endroit où la lecture avait été coupée — la
+contrebande SMTP en miniature. Et `fuzz_ams_smtp_reply` avait trouvé, en soixante
+secondes, un défaut réel : sous une borne de réponse inférieure à
 l'enveloppe incompressible de six octets, un `saturating_sub` transformait « aucune
 ligne ne tient » en « les lignes vides tiennent ». Corrigé, et l'entrée fautive est
 versionnée en graine de non-régression.
@@ -432,7 +436,7 @@ Deux crates portent du code : **`ams-mime`** (le squelette d'un message) et
 **`ams-proto-smtp`** (les commandes **et les réponses**). Aucun protocole n'est pour autant servi : il
 manque l'encodage des réponses, la machine à états de session, et tout le reste.
 
-Sont outillées : C2 (le gate mesure 3 771 régions, toutes couvertes), C3 (les
+Sont outillées : C2 (le gate mesure 4 528 régions, toutes couvertes), C3 (les
 lints, l'absence d'allocation dans les décodeurs, et le fuzz), C6 **en partie et
 pour de bon** — les deux décodeurs refusent le CR et le LF isolés, et
 `ams-proto-smtp` refuse en outre les routes sources, les verbes retirés par la
@@ -440,8 +444,12 @@ RFC 5321, et tout octet non imprimable dans une réponse ; et **`ams-session`
 refuse `AUTH` hors chiffrement** — sans réglage pour le rétablir, et sans même
 l'annoncer avant TLS.
 
-C6 reste néanmoins **partielle** : rien n'exige encore TLS 1.3 (C4 n'a pas de
-code), et la phase de données — où vit la contrebande SMTP — n'est pas écrite.
+**La contrebande SMTP est fermée** : la phase de données n'accepte que
+`<CRLF>.<CRLF>`, refuse tout `CR` ou `LF` isolé, et le fuzz éprouve que le
+découpage des lectures ne change rien au verdict.
+
+C6 reste néanmoins **partielle** : rien n'exige encore TLS 1.3, C4 n'ayant pas de
+code.
 
 Tout le reste — TLS, post-quantique, DKIM, SPF, DMARC, flooding, configuration
 binaire, stockage, non-root — est une décision écrite, pas un code vérifié.
