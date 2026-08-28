@@ -15,6 +15,16 @@ name = "air-mail-server"
 path = "src/main.rs"
 
 [dependencies]
+ams-guard = { workspace = true }
+ams-index = { workspace = true }
+ams-loop-tokio = { workspace = true }
+ams-proto-smtp = { workspace = true }
+ams-session = { workspace = true }
+ams-store = { workspace = true }
+# `rt-multi-thread` : le binaire CHOISIT son ordonnanceur, et il lui en faut un
+# multi-fils — `block_in_place`, dont la remise Maildir a besoin pour ses `fsync`,
+# n'existe pas sur l'ordonnanceur mono-fil.
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
 
 [lints]
 workspace = true

@@ -24,6 +24,9 @@
 //! écrivain de fichiers de tokio. L'adaptation — quinze lignes — appartient au
 //! binaire qui connaît les deux.
 //!
+//! Une remise **possède** ce dont elle a besoin : elle n'emprunte pas la boîte,
+//! pour qu'une tâche qui la porte puisse vivre seule.
+//!
 //! **Et elle bloque.** `commit` fait deux `fsync`, ce qui peut prendre le temps
 //! d'une écriture disque. Appelée telle quelle depuis une tâche asynchrone, elle
 //! bloque l'ordonnanceur : l'adaptation devra passer par `spawn_blocking`. C'est

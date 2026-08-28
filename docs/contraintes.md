@@ -192,10 +192,11 @@ asynchrone à maintenir, et la logique du serveur n'est écrite qu'une fois.
 
 **Coût de tokio : MESURÉ, et bien moindre qu'annoncé.** Cette contrainte tablait
 sur « ~25 crates transitives ». Le graphe de build réel, sur la cible Linux et
-avec les seules features qui servent, en compte **dix, dont cinq seulement à
-l'exécution** : `bytes`, `libc`, `mio`, `pin-project-lite`, `socket2`. Les cinq
-autres — `tokio-macros` et son outillage proc-macro — compilent pour l'hôte et
-n'entrent dans aucun binaire livré.
+avec les seules features qui servent, en compte **douze, dont sept seulement à
+l'exécution** : `bytes`, `errno`, `libc`, `mio`, `pin-project-lite`,
+`signal-hook-registry`, `socket2`. Les cinq autres — `tokio-macros` et son
+outillage proc-macro — compilent pour l'hôte et n'entrent dans aucun binaire
+livré.
 
 `default-features = false` fait toute la différence. L'estimation est corrigée ici
 plutôt que laissée en place : un registre qui garde ses approximations après la
@@ -340,7 +341,11 @@ transitive, aucune surface C) pour son artefact de configuration.
 Conséquence : la configuration **n'est pas éditable à la main**. C'est ce qui rend
 C12 obligatoire plutôt que confortable.
 
-**Outillé par** : rien. `ams-config` est vide.
+**Outillé par** : rien. `ams-config` est vide, et c'est **la dernière pièce
+manquante du chemin nominal** : le serveur tourne, mais se règle par sa ligne de
+commande. Celle-ci n'est pas un fichier de configuration, donc elle n'enfreint pas
+cette contrainte ; elle ne la satisfait pas non plus, et `--help` le dit à qui le
+lit.
 
 ## C12 — Deux exécutables, aux noms distincts
 
@@ -352,8 +357,21 @@ C12 obligatoire plutôt que confortable.
 L'outil d'administration est le **seul** moyen de produire et de lire un fichier
 de configuration (C11).
 
-**Outillé par** : les deux crates existent et produisent les deux binaires. Aucune
-des deux ne fait quoi que ce soit.
+**Outillé par** : les deux binaires existent et servent.
+
+`air-mail-server` assemble les pièces et ne contient **aucune logique de
+protocole** — pas même le `421` qui refuse une source trop pressée, qui vient de
+la session. Il refuse le superutilisateur avant d'ouvrir un port, et écoute par
+défaut sur `2525` : un port privilégié serait inatteignable sans les privilèges
+que C10 interdit.
+
+`air-mail-admin summary` relit une boîte. Ce n'est pas une commodité : c'est la
+reconstruction de C13 exécutée à la demande, celle qui prouve que les fichiers
+suffisent à retrouver ce que l'index dirait.
+
+**Les commandes de configuration n'existent pas**, parce que le format de C11
+n'existe pas. Le serveur se règle en attendant par sa ligne de commande — ce qui
+n'enfreint pas C11, qui parle d'un FICHIER, mais ne la satisfait pas non plus.
 
 ## C13 — Le courrier est stocké en fichiers bruts, disposition Maildir
 
@@ -511,7 +529,8 @@ Deux crates portent du code : **`ams-mime`** (le squelette d'un message) et
 manque l'encodage des réponses, la machine à états de session, et tout le reste.
 
 Sont outillées : C2 (le gate mesure 6 400 régions, toutes couvertes), C8
-(`ams-guard`, câblé), C10 (`refuse_root`, appelé avant la première acceptation), C13 en grande partie
+(`ams-guard`, câblé), C10 (`refuse_root`, appelé avant tout le reste), C12 (les deux binaires, hors
+commandes de configuration), C13 en grande partie
 (`ams-index` et `ams-store`, hors persistance de l'index), C3 (les
 lints, l'absence d'allocation dans les décodeurs, et le fuzz), C6 **en partie et
 pour de bon** — les deux décodeurs refusent le CR et le LF isolés, et

@@ -7,14 +7,16 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 > Ce dépôt compile, il est linté, et il porte quatre gates de CI. Il **ne sert
 > aucun protocole**.
 >
-> **Un serveur écoute, accepte et sert** : bannière, `EHLO`, enveloppe, message,
-> remise — en refusant les sources qui abusent. **Et un message sait atterrir
-> dans une boîte Maildir**, avec son UID dans son nom.
+> **`air-mail-server` tourne.** Il écoute sur un port, reçoit du courrier en
+> clair pour les domaines qu'on lui nomme, le dépose dans une boîte Maildir, et
+> refuse les sources qui abusent.
 >
-> Il manque le fil : les deux binaires sont vides, donc rien n'assemble encore
-> ces pièces en un programme qu'on lance.
+> Ce qu'il ne fait pas : **ni TLS ni authentification** — ni `STARTTLS` ni `AUTH`
+> ne sont annoncés, parce que rien ne sait les conduire. Et **une seule boîte pour
+> tout le monde** : répartir par destinataire demande un modèle de comptes qui
+> n'existe pas.
 >
-> Sept crates portent du code ; les autres sont des emplacements réservés qui le
+> Neuf crates portent du code ; les autres sont des emplacements réservés qui le
 > disent dans leur documentation.
 >
 > Ce que ce dépôt affirme, il le tient. Rien de plus n'est promis ici.
@@ -79,10 +81,10 @@ Les seules crates qui lisent, écrivent et attendent. Elles ne décident de rien
 | --- | --- | --- |
 | `ams-loop-tokio` | la boucle Unix, sur tokio | **une connexion, de bout en bout** |
 | `ams-store` | Maildir : les fichiers, seule source de vérité | **implémenté** |
-| `ams-server` | le binaire `air-mail-server` | vide |
-| `ams-admin` | le binaire `air-mail-admin` | vide |
+| `ams-server` | le binaire `air-mail-server` | **il tourne** |
+| `ams-admin` | le binaire `air-mail-admin` | **`summary`** |
 
-**Sept crates portent du code.** `ams-mime` : le squelette d'un message — la
+**Neuf crates portent du code.** `ams-mime` : le squelette d'un message — la
 ligne, le pliage, la séparation en-tête/corps, le découpage en champs. Les champs
 structurés, les adresses, les dates et MIME restent à écrire.
 `ams-proto-smtp` : les commandes, l'encodage des réponses multilignes, et **la
@@ -114,6 +116,11 @@ raison d'être du `,U=` dans un nom de fichier.
 `ams-store` : la boîte Maildir. Arrivée par `rename()` atomique, **deux `fsync`**
 — le fichier avant, le répertoire après —, adoption des messages déposés par
 d'autres outils, et nettoyage de `tmp/` même quand une remise est abandonnée.
+
+`ams-server` et `ams-admin` : les deux binaires de C12. Le premier assemble les
+pièces et ne contient **aucune logique de protocole** — seulement le fil. Le
+second sait relire une boîte, ce qui est la reconstruction de C13 exécutée à la
+demande.
 
 Toutes les autres crates sont vides, et chacune le déclare dans sa documentation.
 
@@ -147,6 +154,29 @@ asynchrone d'Air — `air-async` (exécuteur mono-thread) au-dessus de `air-urin
 
 Cette boucle **n'est pas créée** : une crate vide portant ce nom laisserait croire
 qu'un portage est entamé. Aucune date, aucun engagement de calendrier.
+
+## Lancer
+
+```sh
+cargo build --release
+./target/release/air-mail-server \
+    --listen 127.0.0.1:2525 \
+    --maildir ./maildir \
+    --domain mail.example.com \
+    --hosted example.com
+
+./target/release/air-mail-admin summary ./maildir
+```
+
+Le port par défaut **n'est pas 25** : le serveur refuse de s'exécuter en
+superutilisateur (C10), et les ports privilégiés s'atteignent par une règle de
+redirection du pare-feu.
+
+Sans `--hosted`, il n'accepte de courrier pour personne — un serveur qui
+accepterait tout serait un relais ouvert.
+
+**La configuration binaire que le projet exige (C11) n'existe pas encore** : ces
+options en tiennent lieu, et `--help` le dit.
 
 ## Construire
 
@@ -193,7 +223,7 @@ que `llvm-cov` n'instrumente pas sur Rust stable et dont le compteur reste à
 `0 / 0`. Les régions font le travail attendu : chaque bras d'un conditionnel en
 est une.
 
-Le gate mesure aujourd'hui **6 400 régions** et **3 762 lignes**, toutes
+Le gate mesure aujourd'hui **6 445 régions** et **3 785 lignes**, toutes
 couvertes. `ams-loop-tokio` en est **hors** : elle lit, écrit et attend, et y
 atteindre 100 % exigerait de simuler les pannes du noyau — on mesurerait alors la
 fidélité de la simulation. Il naissait à zéro dette et n'en a pas pris.
@@ -234,9 +264,10 @@ Le script tourne aussi en local :
 
 **Une seule dépendance externe** : `tokio`, pour la boucle d'entrées-sorties (C5).
 Le graphe de build réel, sur Linux et avec les seules features qui servent, compte
-**dix crates transitives, dont cinq seulement à l'exécution** — `bytes`, `libc`,
-`mio`, `pin-project-lite`, `socket2`. Les cinq autres (`tokio-macros` et son
-outillage proc-macro) compilent pour l'hôte et n'entrent dans aucun binaire. Le
+**douze crates transitives, dont sept seulement à l'exécution** — `bytes`,
+`errno`, `libc`, `mio`, `pin-project-lite`, `signal-hook-registry`, `socket2`.
+Les cinq autres (`tokio-macros` et son outillage proc-macro) compilent pour l'hôte
+et n'entrent dans aucun binaire. Le
 registre tablait sur vingt-cinq ; `default-features = false` fait toute la
 différence, et l'estimation y a été corrigée.
 

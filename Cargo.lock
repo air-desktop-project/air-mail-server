@@ -5,6 +5,10 @@ version = 4
 [[package]]
 name = "ams-admin"
 version = "0.1.0"
+dependencies = [
+ "ams-index",
+ "ams-store",
+]
 
 [[package]]
 name = "ams-config"
@@ -60,6 +64,15 @@ version = "0.1.0"
 [[package]]
 name = "ams-server"
 version = "0.1.0"
+dependencies = [
+ "ams-guard",
+ "ams-index",
+ "ams-loop-tokio",
+ "ams-proto-smtp",
+ "ams-session",
+ "ams-store",
+ "tokio",
+]
 
 [[package]]
 name = "ams-session"
@@ -88,6 +101,16 @@ name = "bytes"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
+
+[[package]]
+name = "errno"
+version = "0.3.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
+dependencies = [
+ "libc",
+ "windows-sys",
+]
 
 [[package]]
 name = "libc"
@@ -131,6 +154,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "signal-hook-registry"
+version = "1.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
+dependencies = [
+ "errno",
+ "libc",
+]
+
+[[package]]
 name = "socket2"
 version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -161,6 +194,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys",

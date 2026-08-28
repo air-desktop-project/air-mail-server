@@ -85,13 +85,16 @@ impl Maildir {
     /// # Errors
     ///
     /// [`Error::UidExhausted`], [`Error::Io`] ou [`Error::Name`].
-    pub fn deliver(&self) -> Result<Incoming<'_>, Error> {
+    pub fn deliver(&self) -> Result<Incoming, Error> {
         let uid = self.reserver_uid()?;
         let unique = self.nom_unique();
         let chemin = self.racine.join("tmp").join(nom_de_fichier(&unique));
         let fichier = File::create(&chemin)?;
         Ok(Incoming {
-            boite: self,
+            // La remise POSSÈDE son chemin plutôt que d'emprunter la boîte : une
+            // tâche qui la porte doit pouvoir vivre seule, et un emprunt la
+            // clouerait à la pile qui l'a créée.
+            racine: self.racine.clone(),
             fichier: Some(fichier),
             chemin,
             unique,
@@ -200,8 +203,8 @@ impl Maildir {
 /// Un message en cours de remise.
 ///
 /// Tant qu'il n'est pas validé, il vit dans `tmp/` et **personne ne le voit**.
-pub struct Incoming<'a> {
-    boite: &'a Maildir,
+pub struct Incoming {
+    racine: PathBuf,
     fichier: Option<File>,
     chemin: PathBuf,
     unique: Vec<u8>,
@@ -209,7 +212,7 @@ pub struct Incoming<'a> {
     ecrits: u64,
 }
 
-impl Incoming<'_> {
+impl Incoming {
     /// L'UID que ce message portera.
     #[must_use]
     pub fn uid(&self) -> Uid {
@@ -260,13 +263,12 @@ impl Incoming<'_> {
         // qu'il n'ait pas non plus d'information de drapeaux.
         let ecrits = compose(&mut tampon, &self.unique, self.uid, self.ecrits, None)?;
         let destination = self
-            .boite
             .racine
             .join("new")
             .join(nom_de_fichier(&tampon[..ecrits]));
         fs::rename(&self.chemin, &destination)?;
 
-        File::open(self.boite.racine.join("new"))?.sync_all()?;
+        File::open(self.racine.join("new"))?.sync_all()?;
         Ok(self.uid)
     }
 
@@ -277,7 +279,7 @@ impl Incoming<'_> {
     }
 }
 
-impl Drop for Incoming<'_> {
+impl Drop for Incoming {
     /// Un message qu'on laisse tomber ne laisse pas de fichier derrière lui.
     ///
     /// Sans cela, une tâche qui panique en pleine remise emplirait `tmp/` de

@@ -82,8 +82,10 @@ repository = "https://github.com/air-desktop-project/air-mail-server"
 # dépendance posée d'avance affirmerait un assemblage qui n'existe pas.
 ams-guard = { path = "crates/ams-guard", version = "0.1.0" }
 ams-index = { path = "crates/ams-index", version = "0.1.0" }
+ams-loop-tokio = { path = "crates/ams-loop-tokio", version = "0.1.0" }
 ams-proto-smtp = { path = "crates/ams-proto-smtp", version = "0.1.0" }
 ams-session = { path = "crates/ams-session", version = "0.1.0" }
+ams-store = { path = "crates/ams-store", version = "0.1.0" }
 
 #
 # LES DÉPENDANCES EXTERNES n'entrent qu'au moment où une crate les consomme.
@@ -108,7 +110,7 @@ ams-session = { path = "crates/ams-session", version = "0.1.0" }
 # `libc` est déclarée EN DIRECT bien que tokio la tire déjà : `refuse_root` (C10)
 # appelle `geteuid` elle-même, et une dépendance qu'on utilise se déclare, même
 # quand elle est déjà là par ailleurs.
-tokio = { version = "1", default-features = false, features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+tokio = { version = "1", default-features = false, features = ["io-util", "macros", "net", "rt", "signal", "sync", "time"] }
 libc = "0.2"
 
 # Lints du workspace, hérités par chaque crate via `[lints] workspace = true`.
