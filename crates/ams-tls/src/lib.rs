@@ -22,10 +22,34 @@
 //! `ring`, aucune `cc`, aucune `*-sys` ; et exactement trois suites offertes,
 //! toutes en TLS 1.3, aucune en 1.2.
 //!
-//! Les réserves — version publiée périmée, numérotation `0.0.2-alpha` par ses
-//! propres auteurs, et **absence d'échange de clés post-quantique** — sont
-//! consignées en C4 du registre des contraintes. La dernière reste un point
-//! ouvert : un courrier intercepté aujourd'hui se déchiffre plus tard.
+//! Les réserves — version publiée périmée, et numérotation `0.0.2-alpha` par ses
+//! propres auteurs — sont consignées en C4 du registre des contraintes.
+//!
+//! # Le post-quantique est obligatoire (C14), et il est à écrire ici
+//!
+//! Le serveur doit **toujours** offrir `X25519MLKEM768` (point de code `0x11ec`)
+//! et le préférer ; `X25519` reste offert en second, pour les pairs dont la pile
+//! TLS ne sait pas encore faire de post-quantique.
+//!
+//! `rustls-rustcrypto` **n'a aucune trace de ML-KEM** — ni feature, ni une
+//! occurrence dans son code. Le seul fournisseur `rustls` qui offre ce groupe est
+//! `aws-lc-rs`, qui embarque du C, ce que C4 exclut. Cette crate portera donc une
+//! implémentation de [`rustls::crypto::SupportedKxGroup`] composant `ml-kem`
+//! 0.3.2 et `x25519-dalek`, tous deux purs Rust — la première étant exactement
+//! la version qu'Air épingle et a validée contre les vecteurs FIPS 203.
+//!
+//! **Ce que cela nous fait posséder.** Aucune primitive n'est inventée, mais le
+//! combinateur hybride et son encodage sur le fil deviennent notre code, et il
+//! est critique. L'ordre exact des octets se relève dans la spécification,
+//! jamais de mémoire : deux moitiés interverties donnent un handshake qui échoue
+//! en interopérabilité et réussit contre soi-même. Des vecteurs de test et une
+//! interopérabilité vérifiée contre une implémentation de référence (OpenSSL
+//! 3.5+, `aws-lc-rs`) sont exigés avant que ce code cesse d'être « écrit ».
+//!
+//! **Le résidu est nommé** : un pair sans post-quantique obtient `X25519`, et
+//! cette connexion-là n'est pas protégée contre « intercepter aujourd'hui,
+//! déchiffrer demain ». On ne présentera donc jamais ce serveur comme
+//! « post-quantique » sans ajouter « quand le pair le veut bien ».
 //!
 //! # État
 //!

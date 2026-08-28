@@ -18,10 +18,15 @@ qu'elle interdit, et — le plus important — **ce qui la fait respecter
 aujourd'hui**. Quand la réponse est « rien », c'est écrit.
 
 En résumé, et sans rien promettre : aucune entrée-sortie dans les protocoles *ni
-dans le serveur*, 100 % de couverture sur tout ce qui décide, TLS 1.3 sans repli,
-aucune version ancienne de protocole, jamais de privilèges superutilisateur,
-configuration binaire Cap'n Proto, stockage Maildir, DKIM/SPF/DMARC, et détection
-de flooding avec bannissement par source.
+dans le serveur*, 100 % de couverture sur tout ce qui décide, TLS 1.3 sans repli
+et **`X25519MLKEM768` toujours offert et préféré**, aucune version ancienne de
+protocole, jamais de privilèges superutilisateur, configuration binaire Cap'n
+Proto, stockage Maildir, DKIM/SPF/DMARC, et détection de flooding avec
+bannissement par source.
+
+La cryptographie est **pure Rust, sans une ligne de C** : `rustls` sur
+`rustls-rustcrypto`, et un échange de clés hybride que le projet devra écrire
+lui-même — aucun fournisseur pur Rust ne l'offre.
 
 ## Le découpage
 

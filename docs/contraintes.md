@@ -9,9 +9,14 @@ lettres. Une règle qui se croit outillée et ne l'est pas est pire qu'une règl
 absente : l'absente, on la respecte à la main en le sachant ; celle qui ment donne
 une assurance que personne ne vérifie.
 
-Les contraintes ci-dessous ont été **imposées par l'auteur du projet le
-2026-08-28**. Elles ne se négocient pas au fil de l'eau : les amender demande une
+Les contraintes ci-dessous ont été **imposées par l'auteur du projet** à partir
+du 2026-08-28. Elles ne se négocient pas au fil de l'eau : les amender demande une
 décision explicite, consignée ici.
+
+**Les numéros sont en ajout seul.** Une contrainte nouvelle prend le numéro
+suivant, jamais une place dans l'ordre thématique : c'est ce qui garantit qu'un
+`C4` cité dans un commentaire de code ou un message de commit désignera toujours
+la même chose.
 
 ---
 
@@ -136,9 +141,9 @@ exécution réelles :
    Rust, seul `aws-lc-rs` et `ring` offrant l'alternative éprouvée — au prix du C,
    que le portage vers Air ne peut pas payer.
 3. **Aucun échange de clés post-quantique.** Les trois groupes sont classiques ;
-   il n'y a pas de `X25519MLKEM768`. C'est une asymétrie avec Air, qui a
-   implémenté un KEX hybride ML-KEM pour SSH. **Point ouvert** : faut-il l'exiger
-   ici, sachant qu'un courrier intercepté aujourd'hui se déchiffre plus tard ?
+   il n'y a pas de `X25519MLKEM768`. Ce point était ouvert ; il a été **tranché le
+   2026-08-28** et fait l'objet de [C14](#c14--échange-de-clés-post-quantique-obligatoire),
+   qui impose ce groupe et dit ce qu'il faudra écrire pour l'obtenir.
 
 ## C5 — Le moteur d'entrées-sorties, par cible
 
@@ -279,6 +284,68 @@ fichiers**, faute de quoi il devient une seconde source de vérité qui peut div
 de la première. La forme de cet index n'est pas décidée.
 
 **Outillé par** : rien. `ams-store` est vide.
+
+## C14 — Échange de clés post-quantique obligatoire
+
+Le serveur **doit toujours offrir `X25519MLKEM768`** (point de code `0x11ec`), et
+le préférer à tout autre groupe. `X25519` reste offert **en second**, pour les
+pairs dont la pile TLS ne sait pas encore faire de post-quantique.
+
+L'obligation porte sur le **serveur**, pas sur le client : ce groupe doit être
+présent et préféré dans toute configuration ; aucune n'a le droit de le retirer.
+
+### Le résidu accepté, et il est nommé
+
+Un pair sans post-quantique obtient `X25519`, et cette connexion-là **n'est pas
+protégée** contre « intercepter aujourd'hui, déchiffrer demain ». C'est le prix
+de l'interopérabilité, il est payé les yeux ouverts, et il ne doit pas être
+présenté autrement — notamment pas dans une documentation qui annoncerait « le
+serveur est post-quantique » sans dire « quand le pair le veut bien ».
+
+Décision du 2026-08-28, après avoir écarté l'option « seul groupe offert », qui
+aurait fait échouer la poignée de main de tout pair sans PQ — y compris en SMTP
+entrant, où le pair n'est pas de notre ressort.
+
+### Ce qu'il faudra écrire, parce que rien ne le fournit
+
+`rustls-rustcrypto` **n'a aucune trace de ML-KEM** : ni feature, ni une seule
+occurrence dans son code (vérifié le 2026-08-28 sur le dépôt amont). Le seul
+fournisseur `rustls` qui offre `X25519MLKEM768` est `aws-lc-rs`, qui embarque du
+C — ce que [C4](#c4--tls-13-au-minimum) exclut.
+
+La voie pure Rust existe, et elle a été vérifiée avant d'être décidée :
+
+- `rustls` 0.23 **connaît déjà le point de code** — `X25519MLKEM768 => 0x11ec`
+  dans `msgs/enums.rs` ;
+- `rustls::crypto::SupportedKxGroup` et `ActiveKeyExchange` sont des traits
+  **publics**, donc implémentables hors de la crate ;
+- `ml-kem` 0.3.2 (RustCrypto) est pur Rust, `no_std`, sans dépendance C — et
+  c'est **exactement la version qu'Air épingle**, qu'il a validée contre les
+  vecteurs FIPS 203, mesurée en temps constant (dudect) et fuzzée en
+  décapsulation ;
+- `x25519-dalek` est déjà une dépendance de `rustls-rustcrypto`.
+
+`ams-tls` portera donc une implémentation de `SupportedKxGroup` composant ces
+deux primitives, ajoutée aux `kx_groups` du fournisseur.
+
+### Ce que cela nous fait posséder — et ce n'est pas rien
+
+Aucune primitive n'est inventée : ML-KEM-768 et X25519 viennent de crates
+auditées. Mais **le combinateur hybride et son encodage sur le fil deviennent
+notre code**, et c'est du code critique. Il ne suffit pas qu'il compile :
+
+- l'ordre exact des octets (clé d'encapsulation, chiffré, et concaténation des
+  deux secrets partagés) doit être **relevé dans la spécification**, jamais
+  reconstitué de mémoire — deux moitiés interverties donnent un handshake qui
+  échoue en interopérabilité et réussit contre soi-même ;
+- des **vecteurs de test** et une **interopérabilité vérifiée contre une
+  implémentation de référence** (OpenSSL 3.5+, `aws-lc-rs`) sont exigés avant que
+  cette ligne quitte le statut « écrite » ;
+- la crate étant sans entrée-sortie, elle relève du 100 % de
+  [C2](#c2--100--de-couverture-sur-les-protocoles) — les deux branches, avec et
+  sans PQ, sont à couvrir.
+
+**Outillé par** : rien. Aucune ligne n'est écrite.
 
 ---
 
