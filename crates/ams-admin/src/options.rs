@@ -12,7 +12,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use ams_config::{Configuration, Timeouts};
+use ams_config::{Configuration, Timeouts, Tls};
 use ams_guard::Thresholds;
 use ams_proto_smtp::Limits;
 
@@ -38,6 +38,10 @@ pub struct Options {
     pub max_message_octets: u64,
     /// Les connexions servies en même temps.
     pub max_connections: usize,
+    /// La chaîne de certificats, au format PEM. Vide : pas de chiffrement.
+    pub tls_cert: Option<PathBuf>,
+    /// La clé privée, au format PEM. Vide : pas de chiffrement.
+    pub tls_key: Option<PathBuf>,
 }
 
 impl Default for Options {
@@ -49,6 +53,12 @@ impl Default for Options {
             hosted: Vec::new(),
             max_message_octets: 10 * 1024 * 1024,
             max_connections: 256,
+            // PAS DE CHIFFREMENT PAR DÉFAUT, et ce n'est pas un renoncement :
+            // un défaut qui chiffrerait nommerait des fichiers qui n'existent
+            // pas, et le serveur refuserait de démarrer sur une configuration
+            // que personne n'a demandée.
+            tls_cert: None,
+            tls_key: None,
         }
     }
 }
@@ -75,6 +85,10 @@ impl Options {
             timeouts: Timeouts {
                 command_seconds: 300,
                 data_seconds: 600,
+            },
+            tls: Tls {
+                certificate_chain_path: chemin(self.tls_cert.as_ref()),
+                private_key_path: chemin(self.tls_key.as_ref()),
             },
         }
     }
@@ -117,6 +131,16 @@ OPTIONS DE `config write`
                            accepterait tout serait un relais ouvert.
     --max-message <octets> taille maximale     (défaut 10485760)
     --max-connections <n>  connexions simultanées (défaut 256)
+    --tls-cert <chemin>    chaîne de certificats, en PEM
+    --tls-key <chemin>     clé privée, en PEM
+
+    LES DEUX OPTIONS TLS VONT ENSEMBLE, ou aucune. Avec elles, le serveur annonce
+    `STARTTLS` et chiffre ; sans elles, il sert en clair et ne l'annonce pas. Il
+    n'y a pas de troisième réglage : « annoncer sans pouvoir » ferait mentir la
+    bannière, et « pouvoir sans annoncer » ne chiffrerait rien.
+
+    Le serveur refuse de démarrer si la clé privée est lisible par tout le monde.
+    Le partage par groupe, lui, reste permis.
 
     Le port par défaut n'est pas 25 : le serveur refuse de s'exécuter en
     superutilisateur (C10), et les ports privilégiés s'atteignent par une règle
@@ -166,6 +190,8 @@ where
                     .parse()
                     .map_err(|_| ArgError::new(format!("`{brute}` n'est pas un nombre")))?;
             }
+            "--tls-cert" => options.tls_cert = Some(PathBuf::from(valeur()?)),
+            "--tls-key" => options.tls_key = Some(PathBuf::from(valeur()?)),
             "--max-connections" => {
                 let brute = valeur()?;
                 options.max_connections = brute
@@ -177,7 +203,21 @@ where
             }
         }
     }
+    // On refuse ICI plutôt qu'au chargement du serveur : l'administrateur est
+    // devant son terminal, et c'est le seul moment où lui dire coûte une seconde
+    // plutôt qu'une astreinte.
+    if options.tls_cert.is_some() != options.tls_key.is_some() {
+        return Err(ArgError::new(
+            "`--tls-cert` et `--tls-key` vont ENSEMBLE : l'un sans l'autre ne veut dire ni \
+             « chiffre » ni « ne chiffre pas »",
+        ));
+    }
     Ok(Demande::Ecrire(Box::new(options)))
+}
+
+/// Un chemin, ou la chaîne vide qui dit « rien ».
+fn chemin(valeur: Option<&PathBuf>) -> String {
+    valeur.map(|c| c.display().to_string()).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -190,6 +230,42 @@ mod tests {
         match parse(arguments).expect("recevable") {
             Demande::Ecrire(options) => *options,
             autre => panic!("attendu `Ecrire`, obtenu {autre:?}"),
+        }
+    }
+
+    #[test]
+    fn les_deux_chemins_tls_traversent_jusqu_a_la_configuration() {
+        let options = ecrire(&[
+            "--domain",
+            "mail.example.com",
+            "--tls-cert",
+            "/etc/ams/chaine.pem",
+            "--tls-key",
+            "/etc/ams/cle.pem",
+        ]);
+        let config = options.en_configuration();
+        assert!(config.tls.est_configure());
+        assert_eq!(config.tls.certificate_chain_path, "/etc/ams/chaine.pem");
+        assert_eq!(config.tls.private_key_path, "/etc/ams/cle.pem");
+    }
+
+    #[test]
+    fn sans_option_tls_la_configuration_ne_chiffre_pas() {
+        let config = ecrire(&["--domain", "mail.example.com"]).en_configuration();
+        assert!(!config.tls.est_configure());
+        assert!(config.tls.certificate_chain_path.is_empty());
+    }
+
+    #[test]
+    fn un_seul_des_deux_chemins_tls_est_refuse_tout_de_suite() {
+        // Refusé DEVANT LE TERMINAL, et pas au démarrage du serveur : c'est le
+        // seul moment où le dire coûte une seconde plutôt qu'une astreinte.
+        for arguments in [
+            ["--tls-cert", "/etc/ams/chaine.pem"].as_slice(),
+            &["--tls-key", "/etc/ams/cle.pem"],
+        ] {
+            let erreur = parse(arguments).expect_err("refusé");
+            assert!(erreur.message.contains("ENSEMBLE"), "{}", erreur.message);
         }
     }
 

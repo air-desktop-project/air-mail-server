@@ -51,7 +51,9 @@ extern crate alloc;
 extern crate std;
 
 mod kx;
+mod materiel;
 mod provider;
 
 pub use kx::{CLIENT_SHARE, SERVER_SHARE, SHARED_SECRET, X25519MlKem768};
+pub use materiel::{Error as MaterialError, server_config};
 pub use provider::provider;

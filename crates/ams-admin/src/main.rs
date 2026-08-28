@@ -174,6 +174,16 @@ fn afficher(config: &Configuration) {
         "délais             commande {} s, données {} s",
         config.timeouts.command_seconds, config.timeouts.data_seconds
     );
+    // ON DIT « EN CLAIR » PLUTÔT QUE DE SE TAIRE. Une ligne absente se lit comme
+    // « rien à signaler » ; or servir en clair est précisément ce qu'il faut
+    // signaler.
+    if config.tls.est_configure() {
+        println!("TLS                STARTTLS offert");
+        println!("  certificat       {}", config.tls.certificate_chain_path);
+        println!("  clé privée       {}", config.tls.private_key_path);
+    } else {
+        println!("TLS                AUCUN — le serveur sert EN CLAIR");
+    }
 }
 
 /// Relit une boîte et rend ce que ses noms portent.

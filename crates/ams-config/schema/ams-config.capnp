@@ -43,6 +43,30 @@ struct Configuration {
   limits @7 :Limits;
   guard @8 :Guard;
   timeouts @9 :Timeouts;
+  tls @10 :Tls;
+}
+
+# TLS (C4, C14). Deux CHEMINS, et pas le matériel lui-même : une clé privée
+# recopiée dans le fichier de configuration hériterait des permissions de
+# celui-ci, et le renouvellement automatique d'un certificat — qui remplace un
+# fichier — obligerait à réécrire la configuration entière.
+#
+# LE CHIFFREMENT EST OFFERT SI ET SEULEMENT SI LES DEUX CHEMINS SONT RENSEIGNÉS.
+# Il n'y a pas de drapeau `enabled`, et c'est délibéré : un drapeau créerait deux
+# états faux — « activé sans certificat », qui ferait mentir la bannière, et
+# « certificat sans activation », qui ne chiffrerait rien en donnant l'inverse à
+# lire. Un seul chemin sur deux est refusé au chargement.
+struct Tls {
+  # La chaîne de certificats, au format PEM.
+  certificateChainPath @0 :Text;
+
+  # La clé privée, au format PEM (PKCS#8, SEC1 ou RSA).
+  #
+  # Le serveur REFUSE DE DÉMARRER si ce fichier est lisible par tout le monde :
+  # une clé privée que n'importe quel compte de la machine peut lire n'est plus
+  # une clé privée. Le partage par GROUPE, lui, reste permis — c'est la façon
+  # dont les certificats se partagent sur un système bien tenu.
+  privateKeyPath @1 :Text;
 }
 
 # Les bornes du décodeur (C3). Six des sept viennent de la RFC 5321 §4.5.3.1.

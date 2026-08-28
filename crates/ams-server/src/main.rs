@@ -38,11 +38,13 @@ use std::sync::Arc;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ams_config::Configuration;
+use ams_config::{Configuration, Tls};
 use ams_loop_tokio::{ServeOptions, SharedGuard, Timeouts, refuse_root, serve};
-use ams_session::Config;
+use ams_session::{Capabilities, Config};
 use ams_store::Maildir;
 use tokio::net::TcpListener;
+
+use rustls::ServerConfig;
 
 use crate::delivery::MaildirDelivery;
 use crate::policy::DomainesHeberges;
@@ -101,6 +103,52 @@ async fn main() -> ExitCode {
     }
 }
 
+/// Charge le matériel TLS que la configuration nomme, s'il en nomme.
+///
+/// # Le refus d'une clé lisible par tout le monde
+///
+/// Une clé privée que n'importe quel compte de la machine peut lire n'est plus
+/// une clé privée : il suffit d'un compte de service compromis pour repartir
+/// avec l'identité du serveur, et le vol ne laisse aucune trace. Le serveur
+/// refuse donc de démarrer.
+///
+/// **Le partage par GROUPE reste permis**, et ce n'est pas un oubli : c'est
+/// exactement ainsi que les certificats se partagent sur un système bien tenu
+/// (le groupe `ssl-cert` de Debian, par exemple, avec des clés en `0640`).
+/// Refuser cela punirait la bonne pratique au lieu de la mauvaise.
+fn charger_tls(tls: &Tls) -> Result<Option<Arc<ServerConfig>>, String> {
+    if !tls.est_configure() {
+        return Ok(None);
+    }
+
+    let chaine = std::fs::read(&tls.certificate_chain_path)
+        .map_err(|erreur| format!("certificat `{}` : {erreur}", tls.certificate_chain_path))?;
+    let cle = std::fs::read(&tls.private_key_path)
+        .map_err(|erreur| format!("clé privée `{}` : {erreur}", tls.private_key_path))?;
+    refuser_cle_lisible_par_tous(&tls.private_key_path)?;
+
+    let config = ams_tls::server_config(&chaine, &cle)
+        .map_err(|erreur| format!("matériel TLS : {erreur}"))?;
+    Ok(Some(Arc::new(config)))
+}
+
+/// Refuse une clé privée que le reste du monde peut lire.
+fn refuser_cle_lisible_par_tous(chemin: &str) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let etat =
+        std::fs::metadata(chemin).map_err(|erreur| format!("clé privée `{chemin}` : {erreur}"))?;
+    let mode = etat.permissions().mode();
+    if mode & 0o004 != 0 {
+        return Err(format!(
+            "clé privée `{chemin}` : lisible par TOUT LE MONDE (mode {:o}). \
+             `chmod o-r` la répare. Le partage par groupe, lui, reste permis.",
+            mode & 0o777
+        ));
+    }
+    Ok(())
+}
+
 /// Monte le serveur et le fait tourner jusqu'à l'arrêt.
 async fn servir(fichier: &Path) -> Result<(), String> {
     // LE REFUS DU SUPERUTILISATEUR VIENT AVANT TOUT LE RESTE (C10) — avant
@@ -136,6 +184,20 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     )
     .map_err(|erreur| format!("domaine `{}` : {erreur}", options.domain))?;
 
+    // LE CHIFFREMENT SE DÉCIDE ICI, ET D'UN SEUL ENDROIT : le matériel existe,
+    // donc `STARTTLS` est annoncé. Deux valeurs qui pourraient se contredire —
+    // « annoncer » d'un côté, « savoir chiffrer » de l'autre — n'existent pas :
+    // c'est la même.
+    let chiffrement = charger_tls(&options.tls)?;
+    let config = if chiffrement.is_some() {
+        config.with_capabilities(Capabilities {
+            starttls: true,
+            auth: false,
+        })
+    } else {
+        config
+    };
+
     let boite = Arc::new(
         Maildir::open(&maildir, domaine)
             .map_err(|erreur| format!("boîte `{}` : {erreur}", options.maildir))?,
@@ -156,6 +218,13 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         options.maildir,
         resume.numbered,
         resume.next_uid.value()
+    );
+    eprintln!(
+        "air-mail-server : {}",
+        match &options.tls.certificate_chain_path {
+            chaine if chiffrement.is_some() => format!("STARTTLS offert, certificat `{chaine}`"),
+            _ => String::from("EN CLAIR — aucun certificat configuré, STARTTLS n'est pas annoncé"),
+        }
     );
     eprintln!(
         "air-mail-server : domaines servis : {}",
@@ -184,21 +253,14 @@ async fn servir(fichier: &Path) -> Result<(), String> {
             timeouts: Timeouts {
                 command: Duration::from_secs(u64::from(options.timeouts.command_seconds)),
                 data: Duration::from_secs(u64::from(options.timeouts.data_seconds)),
-                // Pas de champ dans le schéma : le délai de poignée de main reste
-                // celui de la boucle. Il n'aura de sens à régler que le jour où
-                // ce binaire saura recevoir un certificat.
+                // Pas de champ dans le schéma : le délai de poignée de main
+                // reste celui de la boucle, faute d'une raison de le régler.
                 handshake: Timeouts::default().handshake,
             },
-            // AUCUN CHIFFREMENT ICI, ET C'EST DIT PLUTÔT QUE SOUS-ENTENDU. La
-            // boucle sait conduire `STARTTLS` ; ce binaire, lui, n'a aucun moyen
-            // de recevoir un certificat — le schéma Cap'n Proto (C11) n'a pas de
-            // section TLS, et `air-mail-admin` n'a donc rien à y écrire.
-            //
-            // La configuration n'annonce pas `STARTTLS` non plus : les capacités
-            // valent faux par défaut. Le serveur ne ment donc à personne — il ne
-            // chiffre simplement pas encore, et C4/C14 restent tenues par les
-            // crates, pas par le service.
-            tls: None,
+            // `None` quand la configuration ne nomme pas de certificat : la
+            // session n'annonce alors pas `STARTTLS`, et le serveur sert en
+            // clair sans mentir à personne.
+            tls: chiffrement,
         },
         arret(),
     )
@@ -235,5 +297,98 @@ async fn arret() {
             }
         }
         _ = terminaison.recv() => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{charger_tls, refuser_cle_lisible_par_tous};
+    use ams_config::Tls;
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::path::PathBuf;
+
+    /// Un répertoire de travail qui se nettoie tout seul.
+    struct Atelier(PathBuf);
+
+    impl Drop for Atelier {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn atelier(nom: &str) -> Atelier {
+        let chemin = std::env::temp_dir().join(format!("ams-server-{nom}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&chemin);
+        std::fs::create_dir_all(&chemin).expect("répertoire temporaire");
+        Atelier(chemin)
+    }
+
+    /// Écrit un fichier avec un mode donné, et rend son chemin.
+    fn fichier(atelier: &Atelier, nom: &str, mode: u32) -> String {
+        let chemin = atelier.0.join(nom);
+        std::fs::write(&chemin, b"peu importe").expect("écriture");
+        std::fs::set_permissions(&chemin, std::fs::Permissions::from_mode(mode))
+            .expect("permissions");
+        chemin.display().to_string()
+    }
+
+    #[test]
+    fn sans_chemins_le_serveur_ne_chiffre_pas() {
+        assert!(
+            charger_tls(&Tls::default())
+                .expect("aucun matériel n'est une situation normale")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn une_cle_lisible_par_tout_le_monde_empeche_le_demarrage() {
+        // Il suffit d'un compte de service compromis pour repartir avec
+        // l'identité du serveur, et le vol ne laisse aucune trace.
+        let atelier = atelier("cle-ouverte");
+        let chemin = fichier(&atelier, "cle.pem", 0o644);
+        let erreur = refuser_cle_lisible_par_tous(&chemin).expect_err("refusée");
+        assert!(erreur.contains("TOUT LE MONDE"), "{erreur}");
+        assert!(erreur.contains("chmod o-r"), "{erreur}");
+    }
+
+    #[test]
+    fn le_partage_par_groupe_reste_permis() {
+        // `0640` avec un groupe dédié est exactement la BONNE pratique — celle
+        // du groupe `ssl-cert` de Debian. La refuser punirait ceux qui rangent
+        // bien leurs clés.
+        let atelier = atelier("cle-groupe");
+        for mode in [0o600, 0o640, 0o660] {
+            let chemin = fichier(&atelier, &format!("cle-{mode:o}.pem"), mode);
+            assert!(
+                refuser_cle_lisible_par_tous(&chemin).is_ok(),
+                "le mode {mode:o} devrait être accepté"
+            );
+        }
+    }
+
+    #[test]
+    fn un_certificat_absent_le_dit_avec_son_chemin() {
+        // Le message doit nommer LE FICHIER : « certificat introuvable » sans
+        // chemin oblige à deviner lequel des deux.
+        let erreur = charger_tls(&Tls {
+            certificate_chain_path: String::from("/nulle/part/chaine.pem"),
+            private_key_path: String::from("/nulle/part/cle.pem"),
+        })
+        .expect_err("introuvable");
+        assert!(erreur.contains("/nulle/part/chaine.pem"), "{erreur}");
+    }
+
+    #[test]
+    fn un_materiel_illisible_est_refuse_au_demarrage() {
+        let atelier = atelier("materiel-bidon");
+        let chaine = fichier(&atelier, "chaine.pem", 0o644);
+        let cle = fichier(&atelier, "cle.pem", 0o600);
+        let erreur = charger_tls(&Tls {
+            certificate_chain_path: chaine,
+            private_key_path: cle,
+        })
+        .expect_err("refusé");
+        assert!(erreur.contains("matériel TLS"), "{erreur}");
     }
 }

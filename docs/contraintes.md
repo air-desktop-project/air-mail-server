@@ -394,6 +394,28 @@ d'après une longueur venue du RÉSEAU — ce qui est lu ici vient d'un fichier 
 par l'administrateur. La lecture est en outre bornée par une limite de traversée
 explicite, pour qu'un fichier corrompu ne fasse pas boucler le décodeur.
 
+### La section TLS ne porte que des CHEMINS
+
+Ajoutée le 2026-08-28. Deux champs, `certificateChainPath` et `privateKeyPath`,
+et **pas le matériel lui-même** : une clé privée recopiée dans le fichier de
+configuration hériterait des permissions de celui-ci, et le renouvellement
+automatique d'un certificat — qui remplace un fichier — obligerait à réécrire la
+configuration entière.
+
+**Il n'y a pas de drapeau `enabled`, et c'est le point.** Le chiffrement est
+offert si et seulement si les deux chemins sont renseignés. Un drapeau créerait
+deux états faux : « activé sans certificat », qui ferait mentir la bannière, et
+« certificat sans activation », qui donnerait le contraire à lire de ce qui se
+passe. Un seul chemin sur deux est refusé — par `air-mail-admin` devant le
+terminal, et de nouveau au chargement, parce qu'un fichier peut arriver
+autrement.
+
+Le serveur **refuse de démarrer si la clé privée est lisible par tout le monde** :
+il suffirait d'un compte de service compromis pour repartir avec son identité,
+sans laisser de trace. Le partage par GROUPE reste permis — c'est ainsi que les
+certificats se partagent sur un système bien tenu, et punir cela punirait la
+bonne pratique au lieu de la mauvaise.
+
 ## C12 — Deux exécutables, aux noms distincts
 
 | Binaire | Rôle |
@@ -615,12 +637,22 @@ intégration continue : il n'exige aucun groupe post-quantique, un OpenSSL 3.0 y
 négocie `X25519`. Sur une machine récente, il négocie `X25519MLKEM768` — observé
 le 2026-08-28 avec OpenSSL 3.6.3.
 
-Ce qui n'est toujours outillé par rien : **le serveur livré ne chiffre pas**. Le
-binaire `air-mail-server` n'a aucun moyen de recevoir un certificat, faute de
-section TLS dans le schéma de configuration ([C11](#c11--la-configuration-est-un-fichier-binaire-capn-proto)),
-et il n'annonce donc pas `STARTTLS`. C14 est tenue par les crates et par la
-boucle ; elle ne l'est pas encore par le service, et c'est la prochaine dette à
-solder.
+**Depuis le 2026-08-28, le serveur livré chiffre.** Le schéma porte une section
+`Tls` ([C11](#c11--la-configuration-est-un-fichier-binaire-capn-proto)), et
+`crates/ams-server/tests/chiffrement.rs` lance le **vrai exécutable** sur une
+vraie configuration binaire, puis y envoie un `openssl s_client -starttls smtp`.
+C'était la marche qui manquait : la boucle savait chiffrer depuis la veille, et
+le serveur servait pourtant en clair. Seul un test qui monte tout l'assemblage
+pouvait voir la différence — et son jumeau vérifie l'autre moitié, à savoir
+qu'un serveur SANS certificat n'annonce pas `STARTTLS`.
+
+Ce qui reste non outillé, et qui doit être su : **une paire dépareillée n'est pas
+détectée au démarrage**. `rustls` documente que `with_single_cert` refuse une clé
+qui ne correspond pas au certificat ; avec `rustls-rustcrypto`, la clé de
+signature ne sait pas rendre sa clé publique et la comparaison est sautée en
+silence. Mesuré, et consigné par un test qui échouera le jour où l'amont saura
+faire. En attendant, un renouvellement qui remplace un seul des deux fichiers
+donne un serveur qui démarre et dont toutes les poignées de main échouent.
 
 ---
 

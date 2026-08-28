@@ -118,6 +118,8 @@ dependencies = [
  "ams-proto-smtp",
  "ams-session",
  "ams-store",
+ "ams-tls",
+ "rustls",
  "tokio",
 ]
 

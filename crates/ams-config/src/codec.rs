@@ -31,6 +31,36 @@ pub struct Timeouts {
     pub data_seconds: u32,
 }
 
+/// De quoi chiffrer (C4, C14).
+///
+/// Deux **chemins**, et pas le matériel lui-même : une clé privée recopiée dans
+/// le fichier de configuration hériterait des permissions de celui-ci, et le
+/// renouvellement d'un certificat — qui remplace un fichier — obligerait à
+/// réécrire la configuration entière.
+///
+/// # Il n'y a pas de drapeau, et c'est le sujet
+///
+/// Le chiffrement est offert **si et seulement si** les deux chemins sont
+/// renseignés. Un drapeau `enabled` créerait deux états faux : « activé sans
+/// certificat », qui ferait mentir la bannière, et « certificat sans
+/// activation », qui donnerait le contraire à lire de ce qui se passe. Ici,
+/// l'absence de chiffrement se lit à l'absence de chemins.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Tls {
+    /// La chaîne de certificats, au format PEM.
+    pub certificate_chain_path: String,
+    /// La clé privée, au format PEM.
+    pub private_key_path: String,
+}
+
+impl Tls {
+    /// Ce service sait-il chiffrer ?
+    #[must_use]
+    pub fn est_configure(&self) -> bool {
+        !self.certificate_chain_path.is_empty() && !self.private_key_path.is_empty()
+    }
+}
+
 /// Tout ce qu'un fichier de configuration porte.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Configuration {
@@ -60,6 +90,8 @@ pub struct Configuration {
     pub tracked_sources: u32,
     /// Les délais.
     pub timeouts: Timeouts,
+    /// De quoi chiffrer, ou deux chaînes vides.
+    pub tls: Tls,
 }
 
 /// Ce qui rend un fichier de configuration irrecevable.
@@ -76,6 +108,13 @@ pub enum Error {
     InvalidDomain(ams_proto_smtp::Error),
     /// Un champ obligatoire est vide.
     Empty(&'static str),
+    /// Un seul des deux chemins TLS est renseigné.
+    ///
+    /// Refusé **au chargement**, parce qu'aucune des deux lectures possibles
+    /// n'est sûre : démarrer sans chiffrer trahirait l'intention de
+    /// l'administrateur, et démarrer en annonçant `STARTTLS` sans pouvoir le
+    /// tenir mentirait à chaque pair.
+    TlsIncomplete,
     /// Un champ texte n'est pas de l'UTF-8.
     ///
     /// Cap'n Proto promet de l'UTF-8 sur ses champs `Text` ; un fichier corrompu
@@ -90,6 +129,9 @@ impl fmt::Display for Error {
             Error::Malformed(detail) => write!(f, "configuration illisible : {detail}"),
             Error::InvalidDomain(cause) => write!(f, "domaine du serveur : {cause}"),
             Error::Empty(champ) => write!(f, "le champ `{champ}` est vide"),
+            Error::TlsIncomplete => {
+                f.write_str("TLS demande LES DEUX chemins — certificat et clé — ou aucun des deux")
+            }
             Error::NotUtf8 => f.write_str("un champ texte n'est pas de l'UTF-8"),
         }
     }
@@ -145,6 +187,16 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
     let garde = lu.get_guard()?;
     let delais = lu.get_timeouts()?;
 
+    let chiffrement = lu.get_tls()?;
+    let tls = Tls {
+        certificate_chain_path: texte(chiffrement.get_certificate_chain_path()?)?,
+        private_key_path: texte(chiffrement.get_private_key_path()?)?,
+    };
+    // L'un sans l'autre ne veut rien dire — ni « chiffre » ni « ne chiffre pas ».
+    if tls.certificate_chain_path.is_empty() != tls.private_key_path.is_empty() {
+        return Err(Error::TlsIncomplete);
+    }
+
     Ok(Configuration {
         domain,
         listen,
@@ -175,6 +227,7 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
             command_seconds: delais.get_command_seconds(),
             data_seconds: delais.get_data_seconds(),
         },
+        tls,
     })
 }
 
@@ -229,6 +282,11 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
             delais.set_command_seconds(config.timeouts.command_seconds);
             delais.set_data_seconds(config.timeouts.data_seconds);
         }
+        {
+            let mut chiffrement = ecrit.reborrow().init_tls();
+            chiffrement.set_certificate_chain_path(&config.tls.certificate_chain_path);
+            chiffrement.set_private_key_path(&config.tls.private_key_path);
+        }
     }
     Ok(serialize::write_message_to_words(&message))
 }
@@ -255,7 +313,7 @@ fn depuis(valeur: usize) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Configuration, Error, TRAVERSAL_LIMIT_WORDS, Timeouts, decode, encode};
+    use super::{Configuration, Error, TRAVERSAL_LIMIT_WORDS, Timeouts, Tls, decode, encode};
     use alloc::string::{String, ToString as _};
     use alloc::vec;
     use ams_guard::Thresholds;
@@ -278,6 +336,19 @@ mod tests {
                 command_seconds: 300,
                 data_seconds: 600,
             },
+            // L'exemple ne chiffre PAS : c'est le défaut, et un défaut qui
+            // chiffrerait nommerait des fichiers qui n'existent pas.
+            tls: Tls::default(),
+        }
+    }
+
+    fn exemple_chiffrant() -> Configuration {
+        Configuration {
+            tls: Tls {
+                certificate_chain_path: String::from("/etc/ams/chaine.pem"),
+                private_key_path: String::from("/etc/ams/cle.pem"),
+            },
+            ..exemple()
         }
     }
 
@@ -290,6 +361,43 @@ mod tests {
         let octets = encode(&original).expect("encodable");
         let relue = decode(&octets).expect("relisible");
         assert_eq!(relue, original);
+    }
+
+    #[test]
+    fn les_chemins_tls_traversent_le_format() {
+        let original = exemple_chiffrant();
+        let relue = decode(&encode(&original).expect("encodable")).expect("relisible");
+        assert_eq!(relue.tls, original.tls);
+        assert!(relue.tls.est_configure());
+    }
+
+    #[test]
+    fn sans_chemins_le_service_ne_chiffre_pas_et_le_dit() {
+        let relue = decode(&encode(&exemple()).expect("encodable")).expect("relisible");
+        assert!(!relue.tls.est_configure());
+        assert_eq!(relue.tls, Tls::default());
+    }
+
+    #[test]
+    fn un_seul_des_deux_chemins_est_refuse() {
+        // Aucune des deux lectures possibles n'est sûre : démarrer sans chiffrer
+        // trahirait l'intention, et annoncer `STARTTLS` sans pouvoir le tenir
+        // mentirait à chaque pair. On refuse donc de choisir à sa place.
+        for (chaine, cle) in [("/etc/ams/chaine.pem", ""), ("", "/etc/ams/cle.pem")] {
+            let mut config = exemple();
+            config.tls = Tls {
+                certificate_chain_path: String::from(chaine),
+                private_key_path: String::from(cle),
+            };
+            let octets = encode(&config).expect("encodable");
+            assert_eq!(decode(&octets), Err(Error::TlsIncomplete));
+        }
+    }
+
+    #[test]
+    fn le_message_de_l_incomplet_dit_quoi_faire() {
+        let dit = alloc::format!("{}", Error::TlsIncomplete);
+        assert!(dit.contains("LES DEUX"), "{dit}");
     }
 
     #[test]
@@ -403,7 +511,11 @@ mod tests {
         // Le balayage corrompt CHAQUE octet à son tour, plutôt que des positions
         // choisies à la main : les positions choisies vieillissent avec le
         // schéma, le balayage non.
-        let sain = encode(&exemple()).expect("encodable");
+        // On balaie la configuration QUI CHIFFRE : c'est la plus grande, et
+        // surtout la seule dont les chemins TLS sont des pointeurs réels. Sur
+        // une configuration sans TLS, ces deux champs sont nuls, et les
+        // corrompre ne fait rien traverser du tout.
+        let sain = encode(&exemple_chiffrant()).expect("encodable");
         let mut refuses = 0_u32;
         let mut acceptes = 0_u32;
         for position in 0..sain.len() {

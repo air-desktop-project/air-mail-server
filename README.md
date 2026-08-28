@@ -11,13 +11,15 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 > clair pour les domaines qu'on lui nomme, le dépose dans une boîte Maildir, et
 > refuse les sources qui abusent.
 >
-> Ce qu'il ne fait pas : **il ne chiffre pas**. La boucle sait conduire
-> `STARTTLS`, et une conversation chiffrée est éprouvée contre un vrai OpenSSL ;
-> mais le binaire livré n'a aucun moyen de recevoir un certificat, faute de
-> section TLS dans son schéma de configuration. Il ne l'annonce donc pas non
-> plus : le serveur ne ment à personne, il sert en clair. Ni authentification —
-> `AUTH` n'est pas conduit. Et **une seule boîte pour tout le monde** : répartir
-> par destinataire demande un modèle de comptes qui n'existe pas.
+> **Il chiffre** : nommez-lui un certificat et une clé, il annonce `STARTTLS` et
+> monte en TLS 1.3, échange de clés post-quantique en tête. Sans certificat, il
+> sert en clair — et ne l'annonce pas, faute de quoi il mentirait. Les deux
+> moitiés de cette phrase sont éprouvées sur l'exécutable lui-même, face à un
+> vrai OpenSSL.
+>
+> Ce qu'il ne fait pas : **pas d'authentification** — `AUTH` n'est pas conduit.
+> Et **une seule boîte pour tout le monde** : répartir par destinataire demande
+> un modèle de comptes qui n'existe pas.
 >
 > Onze crates portent du code ; les autres sont des emplacements réservés qui le
 > disent dans leur documentation.
@@ -126,8 +128,7 @@ porte de la **cryptographie composée** : les primitives viennent de `ml-kem` et
 dans `draft-ietf-tls-ecdhe-mlkem` §3.1.3 — où le secret ML-KEM vient en premier,
 à l'inverse de l'autre groupe du même brouillon — et **vérifié contre un
 `openssl s_client` réel**, seule preuve possible que les deux camps calculent le
-même secret. La boucle s'en sert désormais pour `STARTTLS` ; le binaire, lui, ne
-sait pas encore recevoir de certificat.
+même secret. La boucle s'en sert pour `STARTTLS`, et le serveur pour de bon.
 
 `ams-index` : les noms Maildir, les drapeaux, et la **reconstruction** — un
 repliement sur les noms, sans table donc sans allocation. C'est là que vit la
@@ -141,10 +142,10 @@ d'autres outils, et nettoyage de `tmp/` même quand une remise est abandonnée.
 et committé** — le build et la CI n'ont besoin d'aucun outil C++.
 
 `ams-server` et `ams-admin` : les deux binaires de C12. Le premier assemble les
-pièces et ne contient **aucune logique de protocole** — seulement le fil. Il ne
-chiffre pas encore, et c'est dit plutôt que sous-entendu : le schéma de
-configuration n'a pas de section TLS, donc rien ne peut lui remettre un
-certificat. Le
+pièces et ne contient **aucune logique de protocole** — seulement le fil. Il lit
+la section TLS de sa configuration, charge le certificat et la clé, et n'annonce
+`STARTTLS` que s'il les a. Il **refuse de démarrer sur une clé privée lisible par
+tout le monde** ; le partage par groupe, lui, reste permis. Le
 second sait relire une boîte, ce qui est la reconstruction de C13 exécutée à la
 demande.
 
@@ -213,6 +214,30 @@ redirection du pare-feu.
 
 Sans `--hosted`, il n'accepte de courrier pour personne — un serveur qui
 accepterait tout serait un relais ouvert.
+
+### Chiffrer
+
+```sh
+./target/release/air-mail-admin config write air-mail.conf \
+    --domain mail.example.com --hosted example.com \
+    --tls-cert /etc/ams/chaine.pem \
+    --tls-key  /etc/ams/cle.pem
+```
+
+**Les deux options vont ensemble, ou aucune** : l'une sans l'autre ne veut dire
+ni « chiffre » ni « ne chiffre pas », et elle est refusée devant le terminal
+plutôt qu'au démarrage. Avec elles, le serveur annonce `STARTTLS` et monte en
+TLS 1.3 (`X25519MLKEM768` préféré) ; sans elles, il sert en clair **et ne
+l'annonce pas**.
+
+Le serveur **refuse de démarrer si la clé est lisible par tout le monde** —
+`chmod o-r` la répare. Le partage par groupe (`0640`, groupe `ssl-cert`) reste
+permis : c'est la bonne pratique, pas la mauvaise.
+
+Une mise en garde, mesurée et non supposée : **une paire dépareillée n'est pas
+détectée au démarrage**. Le fournisseur pur Rust ne sait pas comparer la clé au
+certificat, si bien qu'un renouvellement qui ne remplace qu'un des deux fichiers
+donne un serveur qui démarre et dont toutes les poignées de main échouent.
 
 ## Construire
 

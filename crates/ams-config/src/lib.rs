@@ -59,4 +59,4 @@ mod ams_config_capnp {
 
 mod codec;
 
-pub use codec::{Configuration, Error, TRAVERSAL_LIMIT_WORDS, Timeouts, decode, encode};
+pub use codec::{Configuration, Error, TRAVERSAL_LIMIT_WORDS, Timeouts, Tls, decode, encode};

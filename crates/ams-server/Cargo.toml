@@ -22,6 +22,10 @@ ams-loop-tokio = { workspace = true }
 ams-proto-smtp = { workspace = true }
 ams-session = { workspace = true }
 ams-store = { workspace = true }
+ams-tls = { workspace = true }
+# `rustls` n'est nommée que pour le TYPE `ServerConfig`, que `ams-tls` construit
+# et que la boucle consomme. Ce binaire n'en appelle aucune fonction.
+rustls = { workspace = true }
 # `rt-multi-thread` : le binaire CHOISIT son ordonnanceur, et il lui en faut un
 # multi-fils — `block_in_place`, dont la remise Maildir a besoin pour ses `fsync`,
 # n'existe pas sur l'ordonnanceur mono-fil.
