@@ -5,8 +5,12 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 > ## État : squelette
 >
 > Ce dépôt compile, il est linté, et il porte trois gates de CI. Il **ne sert
-> aucun protocole** : toutes les crates fonctionnelles sont des emplacements
-> réservés qui le disent dans leur propre documentation.
+> aucun protocole**.
+>
+> Une seule crate porte du code : `ams-mime`, et seulement son squelette — la
+> ligne, le pliage, la séparation en-tête/corps, le découpage en champs. Toutes
+> les autres sont des emplacements réservés qui le disent dans leur propre
+> documentation.
 >
 > Ce que ce dépôt affirme, il le tient. Rien de plus n'est promis ici.
 
@@ -38,13 +42,13 @@ compte.
 Des octets vers des commandes, et retour. Aucune socket, aucun fichier, aucune
 horloge.
 
-| Crate | Périmètre |
-| --- | --- |
-| `ams-mime` | RFC 5322 et MIME — le socle des quatre protocoles |
-| `ams-proto-smtp` | RFC 5321 |
-| `ams-proto-pop3` | RFC 1939 |
-| `ams-proto-imap` | RFC 9051 (IMAP4rev2) |
-| `ams-proto-http` | RFC 9110 / 9112 |
+| Crate | Périmètre | État |
+| --- | --- | --- |
+| `ams-mime` | RFC 5322 et MIME — le socle des quatre protocoles | **squelette du message : ligne, pliage, champs** |
+| `ams-proto-smtp` | RFC 5321 | vide |
+| `ams-proto-pop3` | RFC 1939 | vide |
+| `ams-proto-imap` | RFC 9051 (IMAP4rev2) | vide |
+| `ams-proto-http` | RFC 9110 / 9112 | vide |
 
 ### Étage 2 — décisions, sans entrée-sortie
 
@@ -73,7 +77,10 @@ Les seules crates qui lisent, écrivent et attendent. Elles ne décident de rien
 | `ams-server` | le binaire `air-mail-server` |
 | `ams-admin` | le binaire `air-mail-admin` |
 
-**Aucune crate n'est implémentée.** Chacune le déclare dans sa documentation.
+**Seule `ams-mime` porte du code**, et seulement son squelette : la ligne, le
+pliage, la séparation en-tête/corps et le découpage en champs. Les champs
+structurés, les adresses, les dates et MIME restent à écrire. Toutes les autres
+crates sont vides, et chacune le déclare dans sa documentation.
 
 ### Pourquoi les étages 1 et 2 ne font aucune entrée-sortie
 
@@ -136,9 +143,9 @@ que `llvm-cov` n'instrumente pas sur Rust stable et dont le compteur reste à
 `0 / 0`. Les régions font le travail attendu : chaque bras d'un conditionnel en
 est une.
 
-À ce jour le gate **ne mesure rien** — les treize crates sont vides — et il le dit
-au lieu d'annoncer 100 %. Un pourcentage sur un ensemble vide n'est pas une
-mesure.
+Le gate mesure aujourd'hui **696 régions** et **399 lignes**, toutes couvertes,
+apportées par la seule crate implémentée. Il naissait à zéro dette et n'en a pas
+pris.
 
 ```sh
 ./scripts/check-couverture.sh

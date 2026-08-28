@@ -64,9 +64,10 @@ mais parce qu'y atteindre 100 % exigerait de simuler des pannes du noyau, ce qui
 mesure la simulation et non le code.
 
 **Outillé par** : `scripts/check-couverture.sh`, exécuté en CI (`cargo llvm-cov`).
-Le gate part de **zéro dette** — les crates concernées sont vides à ce jour — ce
-qui est la seule circonstance où un seuil à 100 % peut être bloquant dès sa
-naissance sans rien avoir à « résorber ».
+Le gate est né à **zéro dette** — les crates concernées étaient vides — ce qui est
+la seule circonstance où un seuil à 100 % peut être bloquant dès sa naissance sans
+rien avoir à « résorber ». Il n'en a pas pris depuis : la première crate écrite
+(`ams-mime`) est entrée à 100 %, sans dérogation.
 Il **dit combien de régions il a mesurées** : un rapport à 100 % sur zéro région
 n'est pas un succès, c'est un rapport vide, et il le déclare.
 
@@ -83,10 +84,17 @@ Conséquences déjà gravées dans le workspace :
   conversion qui tronque n'est pas une imprécision, c'est une faille.
 - `unsafe_op_in_unsafe_fn` est en **`forbid`**.
 
-**Outillé par** : les lints ci-dessus, qui font échouer la CI. Ce qu'ils ne
-couvrent PAS : ils voient une conversion douteuse, pas une borne oubliée. Le fuzz
-(`cargo-fuzz`) sur chaque décodeur est le contrôle qui manque, et il n'existe pas
-encore.
+**Outillé par** : les lints ci-dessus, qui font échouer la CI, et — depuis
+`ams-mime` — l'absence d'allocation dans les décodeurs : ce qui n'alloue pas ne
+peut pas allouer d'après un nombre venu du réseau. La crate est `#![no_std]`
+**sans `alloc`**, ce qui rend la propriété structurelle et non disciplinaire.
+
+Ce que cela ne couvre PAS : les lints voient une conversion douteuse, pas une
+borne oubliée. **Le fuzz reste le contrôle qui manque.** `cargo-fuzz` exige un
+nightly, donc une seconde toolchain, que `rust-toolchain.toml` interdit — c'est
+une décision à prendre, pas un oubli. En attendant, `ams-mime` porte un tirage
+pseudo-aléatoire à graine fixe qui vérifie l'absence de panique ; ce n'est pas du
+fuzz, et son propre code le dit.
 
 ## C4 — TLS 1.3 au minimum
 
@@ -402,10 +410,14 @@ et une couture inutilisée finit par être utilisée.
 
 ## L'état réel, sans complaisance
 
-À la date de ce document, **aucune contrainte fonctionnelle n'est implémentée**.
-Le dépôt porte une structure, des lints, deux gates de CI et ce registre. C3 est
-partiellement outillée (par les lints), C2 l'est par son gate — qui mesure zéro
-région et le dit. Tout le reste est une décision écrite, pas un code vérifié.
+Une seule crate porte du code : **`ams-mime`**, et seulement son squelette — la
+ligne, le pliage, la séparation en-tête/corps, le découpage en champs. C'est la
+fondation des quatre protocoles, mais aucun protocole n'est écrit, et le serveur
+ne sert toujours rien.
 
-C'est l'état normal d'un projet de trois commits. Ce qui ne serait pas normal
-serait de l'écrire autrement.
+Sont outillées : C2 (le gate mesure 696 régions, toutes couvertes), C3 en partie
+(les lints, et l'absence d'allocation dans le décodeur), C6 en partie (`ams-mime`
+refuse le CR et le LF isolés, donc l'ambiguïté dont vit la contrebande SMTP).
+
+Tout le reste — TLS, post-quantique, DKIM, SPF, DMARC, flooding, configuration
+binaire, stockage, non-root — est une décision écrite, pas un code vérifié.
