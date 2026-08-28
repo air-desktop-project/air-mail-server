@@ -78,9 +78,10 @@ authors = ["air-mail-server contributors"]
 repository = "https://github.com/air-desktop-project/air-mail-server"
 
 [workspace.dependencies]
-# AUCUNE dépendance, ni interne ni externe, n'est déclarée : rien n'est câblé.
-# Les crates sont des emplacements réservés, et une arête de dépendance posée
-# d'avance affirmerait un assemblage qui n'existe pas.
+# Les arêtes INTERNES ne se déclarent qu'à mesure qu'elles servent : une
+# dépendance posée d'avance affirmerait un assemblage qui n'existe pas.
+ams-proto-smtp = { path = "crates/ams-proto-smtp", version = "0.1.0" }
+
 #
 # Les choix EXTERNES sont pourtant faits, et consignés dans `docs/contraintes.md`
 # plutôt qu'ici : `tokio` pour la boucle Unix (C5), `capnp` pour la configuration

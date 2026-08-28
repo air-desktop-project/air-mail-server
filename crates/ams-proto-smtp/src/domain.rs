@@ -12,6 +12,20 @@ pub enum ClientId<'a> {
 }
 
 impl<'a> ClientId<'a> {
+    /// Valide un domaine ou un littéral d'adresse.
+    ///
+    /// Exposé parce que le domaine d'un serveur, celui qu'il annonce dans sa
+    /// bannière, doit franchir la MÊME grammaire que celui d'un client. Deux
+    /// validateurs pour une seule grammaire finissent par diverger.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::MalformedDomain`], [`Error::MalformedAddressLiteral`] ou
+    /// [`Error::DomainTooLong`].
+    pub fn parse(octets: &'a [u8], limits: &Limits) -> Result<Self, Error> {
+        parse_client_id(octets, limits)
+    }
+
     /// Les octets tels qu'ils ont été reçus.
     #[must_use]
     pub fn as_bytes(&self) -> &'a [u8] {
@@ -175,6 +189,14 @@ mod tests {
 
     fn analyser(octets: &[u8]) -> Result<ClientId<'_>, Error> {
         parse_client_id(octets, &Limits::DEFAULT)
+    }
+
+    #[test]
+    fn la_validation_publique_est_celle_qui_sert_en_interne() {
+        assert_eq!(
+            ClientId::parse(b"example.com", &Limits::DEFAULT),
+            analyser(b"example.com")
+        );
     }
 
     #[test]

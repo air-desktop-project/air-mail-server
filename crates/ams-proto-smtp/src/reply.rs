@@ -57,6 +57,8 @@ impl Code {
         }
     }
 
+    /// `214` — message d'aide.
+    pub const HELP_MESSAGE: Self = Self(214);
     /// `220` — le service est prêt.
     pub const SERVICE_READY: Self = Self(220);
     /// `221` — le service ferme le canal de transmission.
@@ -65,6 +67,11 @@ impl Code {
     pub const AUTH_SUCCEEDED: Self = Self(235);
     /// `250` — la commande a abouti.
     pub const OK: Self = Self(250);
+    /// `252` — impossible de vérifier la boîte, mais le message sera tenté.
+    ///
+    /// La réponse que la RFC 5321 §3.5.3 prévoit pour `VRFY` quand on refuse de
+    /// dire si une boîte existe : elle ne révèle rien, et reste conforme.
+    pub const CANNOT_VRFY: Self = Self(252);
     /// `334` — défi d'authentification (RFC 4954 §4).
     pub const AUTH_CHALLENGE: Self = Self(334);
     /// `354` — le corps du message est attendu, terminé par `<CRLF>.<CRLF>`.
@@ -77,6 +84,13 @@ impl Code {
     pub const LOCAL_ERROR: Self = Self(451);
     /// `452` — place insuffisante.
     pub const INSUFFICIENT_STORAGE: Self = Self(452);
+    /// `452` — trop de destinataires (RFC 5321 §4.5.3.1.10).
+    ///
+    /// Même valeur qu'[`Code::INSUFFICIENT_STORAGE`], et c'est la RFC qui le veut
+    /// ainsi. Deux noms parce que ce sont deux situations, et qu'un appelant qui
+    /// lit `INSUFFICIENT_STORAGE` là où il refuse un centième destinataire se
+    /// demanderait où est le disque plein.
+    pub const TOO_MANY_RECIPIENTS: Self = Self(452);
     /// `454` — `STARTTLS` indisponible pour l'instant (RFC 3207 §4).
     pub const TLS_UNAVAILABLE: Self = Self(454);
     /// `500` — erreur de syntaxe : la commande n'a pas été comprise.
@@ -89,6 +103,8 @@ impl Code {
     pub const BAD_SEQUENCE: Self = Self(503);
     /// `530` — authentification requise (RFC 4954 §6).
     pub const AUTH_REQUIRED: Self = Self(530);
+    /// `535` — authentification refusée (RFC 4954 §6).
+    pub const AUTH_FAILED: Self = Self(535);
     /// `538` — chiffrement requis pour ce mécanisme (RFC 4954 §6).
     pub const ENCRYPTION_REQUIRED: Self = Self(538);
     /// `550` — boîte indisponible : action non effectuée.

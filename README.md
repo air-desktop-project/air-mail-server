@@ -7,9 +7,10 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 > Ce dépôt compile, il est linté, et il porte quatre gates de CI. Il **ne sert
 > aucun protocole**.
 >
-> Deux crates portent du code : `ams-mime` (le squelette d'un message) et
-> `ams-proto-smtp` (les commandes). Toutes les autres sont des emplacements
-> réservés qui le disent dans leur propre documentation.
+> Trois crates portent du code : `ams-mime` (le squelette d'un message),
+> `ams-proto-smtp` (commandes et réponses) et `ams-session` (la phase de
+> commandes SMTP). Toutes les autres sont des emplacements réservés qui le disent
+> dans leur propre documentation.
 >
 > Ce que ce dépôt affirme, il le tient. Rien de plus n'est promis ici.
 
@@ -54,16 +55,16 @@ horloge.
 Des machines à états. Elles reçoivent des octets **et l'heure** ; elles rendent
 des octets **et des actions**. Elles n'attendent jamais.
 
-| Crate | Périmètre |
-| --- | --- |
-| `ams-session` | les sessions serveur |
-| `ams-guard` | flooding et bannissement par source |
-| `ams-tls` | TLS 1.3 uniquement |
-| `ams-dkim` | RFC 6376 |
-| `ams-spf` | RFC 7208 |
-| `ams-dmarc` | RFC 7489 |
-| `ams-config` | schéma Cap'n Proto de la configuration |
-| `ams-index` | index Maildir : codec et reconstruction |
+| Crate | Périmètre | État |
+| --- | --- | --- |
+| `ams-session` | les sessions serveur | **SMTP : phase de commandes** |
+| `ams-guard` | flooding et bannissement par source | vide |
+| `ams-tls` | TLS 1.3 uniquement | vide |
+| `ams-dkim` | RFC 6376 | vide |
+| `ams-spf` | RFC 7208 | vide |
+| `ams-dmarc` | RFC 7489 | vide |
+| `ams-config` | schéma Cap'n Proto de la configuration | vide |
+| `ams-index` | index Maildir : codec et reconstruction | vide |
 
 ### Étage 3 — exécution
 
@@ -76,12 +77,17 @@ Les seules crates qui lisent, écrivent et attendent. Elles ne décident de rien
 | `ams-server` | le binaire `air-mail-server` |
 | `ams-admin` | le binaire `air-mail-admin` |
 
-**Deux crates portent du code.** `ams-mime` : le squelette d'un message — la
+**Trois crates portent du code.** `ams-mime` : le squelette d'un message — la
 ligne, le pliage, la séparation en-tête/corps, le découpage en champs. Les champs
 structurés, les adresses, les dates et MIME restent à écrire.
 `ams-proto-smtp` : les commandes — la ligne, le verbe, les chemins d'enveloppe,
 les paramètres ESMTP — **et l'encodage des réponses**, multilignes comprises.
 `BDAT`/`CHUNKING` et la validation complète d'une adresse IPv6 restent à écrire.
+
+`ams-session` : la phase de commandes SMTP — bannière, `EHLO`, annonce des
+extensions, séquencement `MAIL`/`RCPT`/`DATA`, `STARTTLS`, et le refus d'`AUTH`
+hors chiffrement. **La phase de données n'est pas écrite**, et c'est là que vit la
+contrebande SMTP : elle viendra seule.
 
 Toutes les autres crates sont vides, et chacune le déclare dans sa documentation.
 
@@ -143,9 +149,10 @@ jobs indépendants : la vérification du code (les quatre commandes ci-dessus, s
 
 `fuzz/` est une crate `cargo-fuzz` **hors du workspace** : elle exige un nightly,
 que le pin exact du workspace n'admet pas — deux LLVM produisent des profils de
-couverture mutuellement illisibles. Cinq cibles, vingt-deux propriétés, dont un
+couverture mutuellement illisibles. Six cibles, vingt-sept propriétés, dont un
 **aller-retour** sur l'encodeur de réponses — qui a trouvé un vrai défaut en
-soixante secondes, corrigé et devenu graine de non-régression. Voir
+soixante secondes — et un **vocabulaire de sortie clos** sur la session, qui
+interdit l'écho plutôt que de le refuser. Voir
 [`fuzz/README.md`](fuzz/README.md).
 
 La CI en lance un smoke borné à vingt secondes par cible : un détecteur de
@@ -159,7 +166,7 @@ que `llvm-cov` n'instrumente pas sur Rust stable et dont le compteur reste à
 `0 / 0`. Les régions font le travail attendu : chaque bras d'un conditionnel en
 est une.
 
-Le gate mesure aujourd'hui **2 604 régions** et **1 565 lignes**, toutes
+Le gate mesure aujourd'hui **3 771 régions** et **2 234 lignes**, toutes
 couvertes. Il naissait à zéro dette et n'en a pas pris.
 
 ```sh

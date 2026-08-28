@@ -96,9 +96,10 @@ illisibles, et le gate de C2 ne conclurait plus. Hors workspace, elle a son prop
 `Cargo.lock`, n'entre ni dans la mesure ni dans le lock du produit, et rien de ce
 qu'elle tire n'est livré.
 
-Cinq cibles éprouvant vingt-deux propriétés, dont un **aller-retour** sur
-l'encodeur de réponses SMTP : ré-analyser la sortie et exiger d'y retrouver
-l'entrée à l'octet près.
+Six cibles éprouvant vingt-sept propriétés, dont un **aller-retour** sur
+l'encodeur de réponses SMTP et un **vocabulaire de sortie clos** sur la session :
+toute réponse appartient à une liste finie connue d'avance, ce qui interdit
+l'écho au lieu de le refuser.
 
 **Le fuzz a déjà payé.** `fuzz_ams_smtp_reply` a trouvé, à sa première campagne et
 en soixante secondes, un défaut réel : sous une borne de réponse inférieure à
@@ -431,13 +432,16 @@ Deux crates portent du code : **`ams-mime`** (le squelette d'un message) et
 **`ams-proto-smtp`** (les commandes **et les réponses**). Aucun protocole n'est pour autant servi : il
 manque l'encodage des réponses, la machine à états de session, et tout le reste.
 
-Sont outillées : C2 (le gate mesure 2 604 régions, toutes couvertes), C3 (les
+Sont outillées : C2 (le gate mesure 3 771 régions, toutes couvertes), C3 (les
 lints, l'absence d'allocation dans les décodeurs, et le fuzz), C6 **en partie et
 pour de bon** — les deux décodeurs refusent le CR et le LF isolés, et
 `ams-proto-smtp` refuse en outre les routes sources, les verbes retirés par la
-RFC 5321, et tout octet non imprimable dans une réponse — ce dernier refus étant
-ce qui interdit à un client de faire écrire au serveur une ligne de réponse de son
-choix.
+RFC 5321, et tout octet non imprimable dans une réponse ; et **`ams-session`
+refuse `AUTH` hors chiffrement** — sans réglage pour le rétablir, et sans même
+l'annoncer avant TLS.
+
+C6 reste néanmoins **partielle** : rien n'exige encore TLS 1.3 (C4 n'a pas de
+code), et la phase de données — où vit la contrebande SMTP — n'est pas écrite.
 
 Tout le reste — TLS, post-quantique, DKIM, SPF, DMARC, flooding, configuration
 binaire, stockage, non-root — est une décision écrite, pas un code vérifié.

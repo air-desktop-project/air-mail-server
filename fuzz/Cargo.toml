@@ -36,6 +36,9 @@ path = "../crates/ams-mime"
 [dependencies.ams-proto-smtp]
 path = "../crates/ams-proto-smtp"
 
+[dependencies.ams-session]
+path = "../crates/ams-session"
+
 [profile.release]
 debug = 1
 
@@ -70,6 +73,13 @@ bench = false
 [[bin]]
 name = "fuzz_ams_smtp_reply"
 path = "fuzz_targets/fuzz_ams_smtp_reply.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ams_session_smtp"
+path = "fuzz_targets/fuzz_ams_session_smtp.rs"
 test = false
 doc = false
 bench = false

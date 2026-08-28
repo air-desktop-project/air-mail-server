@@ -57,6 +57,9 @@ version = "0.1.0"
 [[package]]
 name = "ams-session"
 version = "0.1.0"
+dependencies = [
+ "ams-proto-smtp",
+]
 
 [[package]]
 name = "ams-spf"

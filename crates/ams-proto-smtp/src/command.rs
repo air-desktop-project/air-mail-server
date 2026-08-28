@@ -18,8 +18,20 @@ use crate::{Error, Limits, Parameters};
 ///
 /// C'est pourquoi `HELO` se décode ici alors que C6 le range parmi ce qu'on ne
 /// sert pas : **on ne peut pas refuser proprement ce qu'on ne sait pas lire.**
+///
+/// # Pourquoi cette énumération n'est PAS `#[non_exhaustive]`
+///
+/// `#[non_exhaustive]` protège les consommateurs qui suivent une version
+/// publiée : il les oblige à écrire un bras `_`, pour qu'une variante ajoutée en
+/// amont ne casse pas leur compilation. Ici, les consommateurs sont dans le même
+/// dépôt et partagent la même version (verrou de version du workspace).
+///
+/// Le marqueur y aurait donc l'effet exactement inverse de celui qu'on veut :
+/// ajouter `BDAT` un jour DOIT casser la compilation d'`ams-session`, pour que
+/// quelqu'un décide comment y répondre. Un bras `_` transformerait cette
+/// question en réponse silencieuse — et, accessoirement, en branche que rien ne
+/// pourrait exercer, donc en trou de couverture permanent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum Command<'a> {
     /// `EHLO domaine-ou-littéral`
     Ehlo(ClientId<'a>),

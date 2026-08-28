@@ -25,6 +25,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_smtp_command` | `seeds/smtp` | le décodage d'une commande — la grammaire |
 | `fuzz_ams_smtp_limits` | `seeds/smtp` | le même, avec des **bornes arbitraires** |
 | `fuzz_ams_smtp_reply` | `seeds/smtp-reply` | l'encodage d'une réponse — **aller-retour** |
+| `fuzz_ams_session_smtp` | `seeds/session` | la session — **vocabulaire de sortie clos** |
 
 Les variantes « bornes » existent parce que les bornes de C3 viennent de la
 configuration (C8), donc d'un administrateur : un zéro, un `usize::MAX`, ou toute
@@ -92,6 +93,27 @@ qui y était entré. Un encodeur qui perdrait, tronquerait ou fusionnerait une l
 6. **Aucun CR ni LF n'a survécu dans un texte** — l'injection de réponse.
 7. Chaque ligne respecte sa borne, CRLF compris.
 
+### Session SMTP (cinq), dont un VOCABULAIRE CLOS
+
+Un pair hostile choisit l'ordre des commandes, leur contenu, et le moment où il
+s'arrête. Cette cible lui donne cette liberté, plus les événements que la boucle
+peut intercaler : poignée de main TLS, verdict SASL, verdict de message.
+
+1. **Toute réponse appartient à une liste finie, connue d'avance.** La session ne
+   compose ses réponses qu'avec des textes constants et son propre domaine ; si
+   elle reprenait un seul octet venu du pair, la réponse sortirait de la liste.
+
+   C'est plus fort que « aucun CR n'a survécu » : cela interdit l'écho *tout
+   court*, donc aussi la fuite d'un nom de boîte dans un message d'erreur — le
+   genre de détail qui transforme un serveur en annuaire.
+2. **`AUTH` n'est jamais engagé hors chiffrement** — le refus emblématique de C6,
+   éprouvé plutôt qu'affirmé.
+3. `STARTTLS` n'est jamais proposé sur une session déjà chiffrée.
+4. Chaque action s'accompagne du code qui lui correspond : `354` pour les données,
+   `221` pour la fermeture, `334` pour le défi SASL, `220` pour TLS.
+5. Après la poignée de main, ni l'identification ni l'authentification n'ont
+   survécu (RFC 3207 §4.2).
+
 ## Lancement
 
 **Nommez la cible de compilation.** cargo-fuzz 0.13.1 choisissait
@@ -152,3 +174,4 @@ L'entrée fautive est versionnée en graine de non-régression
 | 2026-08-28 | `fuzz_ams_smtp_command` | 10 668 888 (46 s) | 0 |
 | 2026-08-28 | `fuzz_ams_smtp_limits` | 4 423 315 (46 s) | 0 |
 | 2026-08-28 | `fuzz_ams_smtp_reply` | 3 226 422 (91 s) | **1, corrigé** |
+| 2026-08-28 | `fuzz_ams_session_smtp` | 1 296 868 (91 s) | 0 |
