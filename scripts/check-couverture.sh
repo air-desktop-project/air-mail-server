@@ -54,7 +54,22 @@ CRATES_SANS_IO=(
     ams-index
 )
 
-args=()
+# ── LA SEULE DÉROGATION, ET ELLE EST NOMMÉE ─────────────────────────────────
+#
+# Le code dérivé du schéma Cap'n Proto (`ams_config_capnp.rs`) est GÉNÉRÉ : il
+# porte un accesseur par champ et par sens, dont la plupart ne seront jamais
+# appelés. Exiger 100 % dessus reviendrait à écrire des tests qui n'éprouvent
+# rien de nos décisions — et un test qui n'éprouve rien affaiblit la mesure au
+# lieu de la renforcer.
+#
+# La dérogation est ÉTROITE : elle nomme UN fichier, pas une crate. Le code écrit
+# à la main d'`ams-config` reste soumis au 100 %.
+#
+# Elle est aussi VISIBLE : ce script l'annonce à chaque exécution. Une dérogation
+# qu'on ne voit plus est une dérogation qui s'élargit.
+IGNORE='/ams_config_capnp\.rs$'
+
+args=(--ignore-filename-regex "$IGNORE")
 for crate in "${CRATES_SANS_IO[@]}"; do
     args+=(--package "$crate")
 done
@@ -88,6 +103,7 @@ lecture=$(printf '%s' "$rapport" | python3 "$(dirname "$0")/lire-couverture.py")
 
 echo "périmètre : ${#CRATES_SANS_IO[@]} crates sans entrée-sortie"
 echo "seuil     : ${seuil} %"
+echo "exclu     : le code GÉNÉRÉ du schéma Cap'n Proto (ams_config_capnp.rs)"
 echo
 
 regions_total=0

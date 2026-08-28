@@ -96,7 +96,7 @@ illisibles, et le gate de C2 ne conclurait plus. Hors workspace, elle a son prop
 `Cargo.lock`, n'entre ni dans la mesure ni dans le lock du produit, et rien de ce
 qu'elle tire n'est livré.
 
-Neuf cibles éprouvant quarante-deux propriétés, dont un **aller-retour** sur
+Dix cibles éprouvant quarante-six propriétés, dont un **aller-retour** sur
 l'encodeur de réponses, un **vocabulaire de sortie clos** sur la session, et
 l'**indépendance au découpage** sur la phase de données : le même flux, lu d'un
 seul tenant puis par tranches arbitraires, doit rendre le même verdict et les
@@ -341,11 +341,30 @@ transitive, aucune surface C) pour son artefact de configuration.
 Conséquence : la configuration **n'est pas éditable à la main**. C'est ce qui rend
 C12 obligatoire plutôt que confortable.
 
-**Outillé par** : rien. `ams-config` est vide, et c'est **la dernière pièce
-manquante du chemin nominal** : le serveur tourne, mais se règle par sa ligne de
-commande. Celle-ci n'est pas un fichier de configuration, donc elle n'enfreint pas
-cette contrainte ; elle ne la satisfait pas non plus, et `--help` le dit à qui le
-lit.
+**Outillé par** : `ams-config`. Le schéma `.capnp` est la définition normative ;
+le code Rust qui en dérive est **généré et committé**, pour que le build et la CI
+n'aient besoin d'aucun outil C++. Régénérer est une opération de mainteneur, rare
+et hors CI (`crates/ams-config/regenerate.sh`).
+
+**Et la conséquence est appliquée jusqu'au bout** : `air-mail-server` ne se règle
+QUE par un fichier — il n'a aucune option de réglage, et `air-mail-admin config
+write` est le seul moyen d'en produire un. Deux sources de configuration seraient
+une de trop : c'est ainsi qu'un serveur finit par tourner autrement que ce que son
+administrateur croit avoir demandé.
+
+**Une dérogation, la première, et elle est nommée.** Le code dérivé du schéma est
+GÉNÉRÉ : il porte un accesseur par champ et par sens, dont la plupart ne seront
+jamais appelés. Exiger 100 % dessus (C2) reviendrait à écrire des tests qui
+n'éprouvent aucune de nos décisions — et un test qui n'éprouve rien affaiblit la
+mesure au lieu de la renforcer. Le gate exclut donc **un fichier**, pas une crate,
+et l'annonce à chaque exécution : une dérogation qu'on ne voit plus est une
+dérogation qui s'élargit. Le code écrit à la main d'`ams-config` reste à 100 %.
+
+**`ams-config` alloue**, seule de l'étage 2 dans ce cas : construire un message
+Cap'n Proto le demande. Ce n'est pas une entorse à C3, qui interdit d'allouer
+d'après une longueur venue du RÉSEAU — ce qui est lu ici vient d'un fichier écrit
+par l'administrateur. La lecture est en outre bornée par une limite de traversée
+explicite, pour qu'un fichier corrompu ne fasse pas boucler le décodeur.
 
 ## C12 — Deux exécutables, aux noms distincts
 
@@ -529,8 +548,8 @@ Deux crates portent du code : **`ams-mime`** (le squelette d'un message) et
 manque l'encodage des réponses, la machine à états de session, et tout le reste.
 
 Sont outillées : C2 (le gate mesure 6 400 régions, toutes couvertes), C8
-(`ams-guard`, câblé), C10 (`refuse_root`, appelé avant tout le reste), C12 (les deux binaires, hors
-commandes de configuration), C13 en grande partie
+(`ams-guard`, câblé), C10 (`refuse_root`, appelé avant tout le reste), C11 (`ams-config`, et le serveur
+ne se règle QUE par un fichier), C12 (les deux binaires), C13 en grande partie
 (`ams-index` et `ams-store`, hors persistance de l'index), C3 (les
 lints, l'absence d'allocation dans les décodeurs, et le fuzz), C6 **en partie et
 pour de bon** — les deux décodeurs refusent le CR et le LF isolés, et

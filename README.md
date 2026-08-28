@@ -70,7 +70,7 @@ des octets **et des actions**. Elles n'attendent jamais.
 | `ams-dkim` | RFC 6376 | vide |
 | `ams-spf` | RFC 7208 | vide |
 | `ams-dmarc` | RFC 7489 | vide |
-| `ams-config` | schéma Cap'n Proto de la configuration | vide |
+| `ams-config` | schéma Cap'n Proto de la configuration | **implémenté** |
 | `ams-index` | noms Maildir, drapeaux, reconstruction | **implémenté** |
 
 ### Étage 3 — exécution
@@ -84,7 +84,7 @@ Les seules crates qui lisent, écrivent et attendent. Elles ne décident de rien
 | `ams-server` | le binaire `air-mail-server` | **il tourne** |
 | `ams-admin` | le binaire `air-mail-admin` | **`summary`** |
 
-**Neuf crates portent du code.** `ams-mime` : le squelette d'un message — la
+**Dix crates portent du code.** `ams-mime` : le squelette d'un message — la
 ligne, le pliage, la séparation en-tête/corps, le découpage en champs. Les champs
 structurés, les adresses, les dates et MIME restent à écrire.
 `ams-proto-smtp` : les commandes, l'encodage des réponses multilignes, et **la
@@ -116,6 +116,9 @@ raison d'être du `,U=` dans un nom de fichier.
 `ams-store` : la boîte Maildir. Arrivée par `rename()` atomique, **deux `fsync`**
 — le fichier avant, le répertoire après —, adoption des messages déposés par
 d'autres outils, et nettoyage de `tmp/` même quand une remise est abandonnée.
+
+`ams-config` : le schéma Cap'n Proto, et son codec. Le code dérivé est **généré
+et committé** — le build et la CI n'ont besoin d'aucun outil C++.
 
 `ams-server` et `ams-admin` : les deux binaires de C12. Le premier assemble les
 pièces et ne contient **aucune logique de protocole** — seulement le fil. Le
@@ -157,14 +160,27 @@ qu'un portage est entamé. Aucune date, aucun engagement de calendrier.
 
 ## Lancer
 
+La configuration est un fichier **binaire** : elle n'est pas éditable à la main,
+et `air-mail-admin` est le seul moyen d'en produire une. Le serveur, lui, n'a
+aucune option de réglage — deux sources de configuration seraient une de trop.
+
 ```sh
 cargo build --release
-./target/release/air-mail-server \
+
+# 1. Produire la configuration.
+./target/release/air-mail-admin config write air-mail.conf \
     --listen 127.0.0.1:2525 \
     --maildir ./maildir \
     --domain mail.example.com \
     --hosted example.com
 
+# 2. La relire, pour vérifier ce qu'elle dit.
+./target/release/air-mail-admin config show air-mail.conf
+
+# 3. Servir.
+./target/release/air-mail-server --config air-mail.conf
+
+# Et regarder la boîte.
 ./target/release/air-mail-admin summary ./maildir
 ```
 
@@ -174,9 +190,6 @@ redirection du pare-feu.
 
 Sans `--hosted`, il n'accepte de courrier pour personne — un serveur qui
 accepterait tout serait un relais ouvert.
-
-**La configuration binaire que le projet exige (C11) n'existe pas encore** : ces
-options en tiennent lieu, et `--help` le dit.
 
 ## Construire
 
@@ -205,7 +218,7 @@ jobs indépendants : la vérification du code (les quatre commandes ci-dessus, s
 
 `fuzz/` est une crate `cargo-fuzz` **hors du workspace** : elle exige un nightly,
 que le pin exact du workspace n'admet pas — deux LLVM produisent des profils de
-couverture mutuellement illisibles. Neuf cibles, quarante-deux propriétés, dont un
+couverture mutuellement illisibles. Dix cibles, quarante-six propriétés, dont un
 **aller-retour** sur l'encodeur de réponses, un **vocabulaire de sortie clos** sur
 la session, et l'**indépendance au découpage** sur la phase de données — celle qui
 vise directement la contrebande SMTP. **Six défauts réels** trouvés et
@@ -223,8 +236,11 @@ que `llvm-cov` n'instrumente pas sur Rust stable et dont le compteur reste à
 `0 / 0`. Les régions font le travail attendu : chaque bras d'un conditionnel en
 est une.
 
-Le gate mesure aujourd'hui **6 445 régions** et **3 785 lignes**, toutes
-couvertes. `ams-loop-tokio` en est **hors** : elle lit, écrit et attend, et y
+Le gate mesure aujourd'hui **6 891 régions** et **4 044 lignes**, toutes
+couvertes. **Une seule dérogation, et elle est annoncée à chaque exécution** : le
+code *généré* du schéma Cap'n Proto en est exclu — il porte un accesseur par champ
+et par sens, dont la plupart ne seront jamais appelés, et les couvrir n'éprouverait
+aucune de nos décisions. L'exclusion nomme **un fichier**, pas une crate. `ams-loop-tokio` en est **hors** : elle lit, écrit et attend, et y
 atteindre 100 % exigerait de simuler les pannes du noyau — on mesurerait alors la
 fidélité de la simulation. Il naissait à zéro dette et n'en a pas pris.
 
@@ -262,7 +278,9 @@ Le script tourne aussi en local :
 
 ## Dépendances
 
-**Une seule dépendance externe** : `tokio`, pour la boucle d'entrées-sorties (C5).
+**Deux dépendances externes** : `tokio` pour la boucle d'entrées-sorties (C5), et
+`capnp` pour la configuration binaire (C11) — cette dernière **pure Rust, sans
+aucune dépendance transitive**, et compatible `no_std`.
 Le graphe de build réel, sur Linux et avec les seules features qui servent, compte
 **douze crates transitives, dont sept seulement à l'exécution** — `bytes`,
 `errno`, `libc`, `mio`, `pin-project-lite`, `signal-hook-registry`, `socket2`.

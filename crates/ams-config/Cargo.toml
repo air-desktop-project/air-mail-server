@@ -9,6 +9,9 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+ams-guard = { workspace = true }
+ams-proto-smtp = { workspace = true }
+capnp = { workspace = true }
 
 
 [lints]

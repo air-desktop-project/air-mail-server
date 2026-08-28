@@ -80,6 +80,7 @@ repository = "https://github.com/air-desktop-project/air-mail-server"
 [workspace.dependencies]
 # Les arêtes INTERNES ne se déclarent qu'à mesure qu'elles servent : une
 # dépendance posée d'avance affirmerait un assemblage qui n'existe pas.
+ams-config = { path = "crates/ams-config", version = "0.1.0" }
 ams-guard = { path = "crates/ams-guard", version = "0.1.0" }
 ams-index = { path = "crates/ams-index", version = "0.1.0" }
 ams-loop-tokio = { path = "crates/ams-loop-tokio", version = "0.1.0" }
@@ -110,6 +111,18 @@ ams-store = { path = "crates/ams-store", version = "0.1.0" }
 # `libc` est déclarée EN DIRECT bien que tokio la tire déjà : `refuse_root` (C10)
 # appelle `geteuid` elle-même, et une dépendance qu'on utilise se déclare, même
 # quand elle est déjà là par ailleurs.
+# capnp (C11) — le format du fichier de configuration. Crate PURE RUST, ZÉRO
+# dépendance transitive, et compatible `no_std` avec `alloc` : elle traversera
+# donc le portage vers Air sans rien exiger de plus.
+#
+# `default-features = false, features = ["alloc"]` : la crate `ams-config` est
+# `#![no_std]`. Elle ALLOUE — construire un message Cap'n Proto le demande — et
+# c'est la seule de l'étage 2 dans ce cas. Ce n'est pas une entorse à C3 : ce qui
+# y est alloué vient d'un fichier écrit par l'administrateur, jamais d'un pair.
+#
+# L'outil C++ `capnp` n'intervient QUE pour régénérer le code committé
+# (`crates/ams-config/regenerate.sh`), jamais au build ni en CI.
+capnp = { version = "=0.26.0", default-features = false, features = ["alloc"] }
 tokio = { version = "1", default-features = false, features = ["io-util", "macros", "net", "rt", "signal", "sync", "time"] }
 libc = "0.2"
 

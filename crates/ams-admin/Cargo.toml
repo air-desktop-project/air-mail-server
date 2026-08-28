@@ -15,7 +15,10 @@ name = "air-mail-admin"
 path = "src/main.rs"
 
 [dependencies]
+ams-config = { workspace = true }
+ams-guard = { workspace = true }
 ams-index = { workspace = true }
+ams-proto-smtp = { workspace = true }
 ams-store = { workspace = true }
 
 [lints]

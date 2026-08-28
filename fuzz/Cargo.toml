@@ -39,11 +39,14 @@ path = "../crates/ams-proto-smtp"
 [dependencies.ams-session]
 path = "../crates/ams-session"
 
-[dependencies.ams-guard]
-path = "../crates/ams-guard"
-
 [dependencies.ams-index]
 path = "../crates/ams-index"
+
+[dependencies.ams-config]
+path = "../crates/ams-config"
+
+[dependencies.ams-guard]
+path = "../crates/ams-guard"
 
 [profile.release]
 debug = 1
@@ -107,6 +110,13 @@ bench = false
 [[bin]]
 name = "fuzz_ams_index_name"
 path = "fuzz_targets/fuzz_ams_index_name.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ams_config"
+path = "fuzz_targets/fuzz_ams_config.rs"
 test = false
 doc = false
 bench = false

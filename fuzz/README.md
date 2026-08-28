@@ -29,6 +29,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_smtp_data` | `seeds/smtp-data` | la phase de données — **indépendance au découpage** |
 | `fuzz_ams_guard` | `seeds/guard` | le garde — **une peine ne s'évince pas** |
 | `fuzz_ams_index_name` | `seeds/index` | les noms Maildir — **aller-retour de l'UID** |
+| `fuzz_ams_config` | `seeds/config` | la configuration binaire — **aller-retour, et corruption** |
 
 Les variantes « bornes » existent parce que les bornes de C3 viennent de la
 configuration (C8), donc d'un administrateur : un zéro, un `usize::MAX`, ou toute
@@ -169,6 +170,20 @@ mille boîtes se resynchronisent.
 6. Le prochain UID est strictement au-dessus de tous ceux qui existent — sauf
    quand la boîte est épuisée, auquel cas elle le déclare.
 
+### Configuration binaire (quatre)
+
+Une configuration est écrite par l'administrateur, pas par un pair : ce n'est pas
+une entrée hostile au sens de C3. Mais un disque vieillit, une copie s'interrompt,
+un octet se retourne — et **un serveur qui panique en lisant sa propre
+configuration ne démarre pas, et ne dit pas pourquoi**.
+
+1. Lire n'importe quoi ne panique jamais.
+2. **Ce qu'`air-mail-admin` écrit, `air-mail-server` le relit à l'identique.** Un
+   écart y serait un serveur réglé autrement que ce que l'administrateur croit
+   avoir demandé.
+3. Réécrire ce qui a été relu rend les mêmes octets.
+4. Corrompre un octet rend une erreur, jamais une panique.
+
 ## Lancement
 
 **Nommez la cible de compilation.** cargo-fuzz 0.13.1 choisissait
@@ -289,3 +304,4 @@ L'entrée fautive est versionnée en graine de non-régression
 | 2026-08-28 | `fuzz_ams_smtp_data` | 4 629 514 (121 s) | **1, corrigé** |
 | 2026-08-28 | `fuzz_ams_guard` | 2 721 501 (151 s) | **2, corrigés** |
 | 2026-08-28 | `fuzz_ams_index_name` | 2 015 974 (181 s) | **2, corrigés** |
+| 2026-08-28 | `fuzz_ams_config` | 573 580 (91 s) | 0 |

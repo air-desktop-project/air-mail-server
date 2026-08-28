@@ -15,6 +15,7 @@ name = "air-mail-server"
 path = "src/main.rs"
 
 [dependencies]
+ams-config = { workspace = true }
 ams-guard = { workspace = true }
 ams-index = { workspace = true }
 ams-loop-tokio = { workspace = true }

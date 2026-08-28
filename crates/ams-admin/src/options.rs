@@ -1,17 +1,20 @@
-//! Les paramètres du serveur, lus sur la ligne de commande.
+//! Les options de `config write`, et ce qu'elles produisent.
 //!
-//! # Ce n'est PAS ce que C11 demande
+//! # C'est ici que la ligne de commande s'arrête
 //!
-//! C11 veut un fichier de configuration **binaire**, au format Cap'n Proto, et
-//! `air-mail-admin` pour le produire. Rien de tout cela n'existe : `ams-config`
-//! est vide.
+//! C11 veut un fichier de configuration **binaire**, et cet outil pour le
+//! produire. La ligne de commande sert donc à ÉCRIRE une configuration, jamais à
+//! régler un serveur : `air-mail-server` ne lit qu'un fichier.
 //!
-//! La ligne de commande n'enfreint pas C11 — ce n'est pas un fichier de
-//! configuration — mais elle ne la satisfait pas non plus. Elle tient lieu de
-//! passerelle jusqu'à ce que le format existe, et le dit à qui lit `--help`.
+//! Deux sources de configuration seraient une de trop — c'est ainsi qu'un serveur
+//! finit par tourner autrement que ce que son administrateur croit avoir demandé.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+
+use ams_config::{Configuration, Timeouts};
+use ams_guard::Thresholds;
+use ams_proto_smtp::Limits;
 
 /// Ce dont le serveur a besoin pour démarrer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,11 +53,38 @@ impl Default for Options {
     }
 }
 
+impl Options {
+    /// Compose la configuration que ces options décrivent.
+    ///
+    /// Les bornes du décodeur et les seuils du garde prennent leurs valeurs par
+    /// défaut : les régler mérite ses propres options, et les inventer ici
+    /// donnerait un fichier qui dit autre chose que ce qui a été demandé.
+    #[must_use]
+    pub fn en_configuration(&self) -> Configuration {
+        Configuration {
+            domain: self.domain.clone(),
+            listen: self.listen.to_string(),
+            maildir: self.maildir.display().to_string(),
+            hosted: self.hosted.clone(),
+            max_recipients: 100,
+            max_message_octets: self.max_message_octets,
+            max_connections: u32::try_from(self.max_connections).unwrap_or(u32::MAX),
+            limits: Limits::DEFAULT,
+            guard: Thresholds::DEFAULT,
+            tracked_sources: 4096,
+            timeouts: Timeouts {
+                command_seconds: 300,
+                data_seconds: 600,
+            },
+        }
+    }
+}
+
 /// Ce que la ligne de commande demande.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Demande {
-    /// Servir, avec ces paramètres.
-    Servir(Box<Options>),
+    /// Écrire une configuration avec ces paramètres.
+    Ecrire(Box<Options>),
     /// Afficher l'aide.
     Aide,
     /// Afficher la version.
@@ -76,14 +106,9 @@ impl ArgError {
     }
 }
 
-/// Le texte de `--help`.
-pub const AIDE: &str = "\
-air-mail-server — serveur de courrier SMTP
-
-USAGE
-    air-mail-server [OPTIONS]
-
-OPTIONS
+/// Le texte des options de `config write`.
+pub const OPTIONS_AIDE: &str = "\
+OPTIONS DE `config write`
     --listen <adresse>     où écouter          (défaut 127.0.0.1:2525)
     --maildir <chemin>     racine de la boîte  (défaut ./maildir)
     --domain <nom>         nom annoncé         (défaut localhost)
@@ -92,17 +117,14 @@ OPTIONS
                            accepterait tout serait un relais ouvert.
     --max-message <octets> taille maximale     (défaut 10485760)
     --max-connections <n>  connexions simultanées (défaut 256)
-    --help                 ce texte
-    --version              la version
-
-CE QUI N'EST PAS ENCORE LÀ
-    La configuration BINAIRE (Cap'n Proto) que le projet exige n'existe pas :
-    ces options en tiennent lieu en attendant. TLS et l'authentification ne sont
-    pas implémentés, donc ni STARTTLS ni AUTH ne sont annoncés.
 
     Le port par défaut n'est pas 25 : le serveur refuse de s'exécuter en
-    superutilisateur, et les ports privilégiés s'atteignent par une règle de
-    redirection du pare-feu.
+    superutilisateur (C10), et les ports privilégiés s'atteignent par une règle
+    de redirection du pare-feu.
+
+    Les bornes du décodeur et les seuils du garde prennent leurs valeurs par
+    défaut : les régler mérite ses propres options, et les inventer ici donnerait
+    un fichier qui dit autre chose que ce qui a été demandé.
 ";
 
 /// Lit une ligne de commande.
@@ -155,7 +177,7 @@ where
             }
         }
     }
-    Ok(Demande::Servir(Box::new(options)))
+    Ok(Demande::Ecrire(Box::new(options)))
 }
 
 #[cfg(test)]
@@ -164,16 +186,16 @@ mod tests {
     use std::net::SocketAddr;
     use std::path::PathBuf;
 
-    fn servir(arguments: &[&str]) -> Options {
+    fn ecrire(arguments: &[&str]) -> Options {
         match parse(arguments).expect("recevable") {
-            Demande::Servir(options) => *options,
-            autre => panic!("attendu `Servir`, obtenu {autre:?}"),
+            Demande::Ecrire(options) => *options,
+            autre => panic!("attendu `Ecrire`, obtenu {autre:?}"),
         }
     }
 
     #[test]
     fn sans_argument_les_defauts_s_appliquent() {
-        let options = servir(&[]);
+        let options = ecrire(&[]);
         assert_eq!(options, Options::default());
         // LE PORT PAR DÉFAUT N'EST PAS PRIVILÉGIÉ : le serveur refuse de
         // s'exécuter en superutilisateur (C10).
@@ -185,7 +207,7 @@ mod tests {
 
     #[test]
     fn chaque_option_est_lue() {
-        let options = servir(&[
+        let options = ecrire(&[
             "--listen",
             "0.0.0.0:2626",
             "--maildir",
@@ -240,6 +262,20 @@ mod tests {
                 erreur.message
             );
         }
+    }
+
+    #[test]
+    fn les_options_deviennent_une_configuration() {
+        let options = ecrire(&["--domain", "mail.example.com", "--hosted", "example.com"]);
+        let config = options.en_configuration();
+        assert_eq!(config.domain, "mail.example.com");
+        assert_eq!(config.hosted, ["example.com"]);
+        assert_eq!(config.listen, "127.0.0.1:2525");
+        assert_eq!(config.limits, ams_proto_smtp::Limits::DEFAULT);
+        assert_eq!(config.guard, ams_guard::Thresholds::DEFAULT);
+        // Et elle se relit à l'identique une fois écrite.
+        let octets = ams_config::encode(&config).expect("encodable");
+        assert_eq!(ams_config::decode(&octets).expect("relisible"), config);
     }
 
     #[test]

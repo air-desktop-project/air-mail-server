@@ -6,6 +6,7 @@ version = 4
 name = "air-mail-server-fuzz"
 version = "0.0.0"
 dependencies = [
+ "ams-config",
  "ams-guard",
  "ams-index",
  "ams-mime",
@@ -13,6 +14,15 @@ dependencies = [
  "ams-session",
  "arbitrary",
  "libfuzzer-sys",
+]
+
+[[package]]
+name = "ams-config"
+version = "0.1.0"
+dependencies = [
+ "ams-guard",
+ "ams-proto-smtp",
+ "capnp",
 ]
 
 [[package]]
@@ -48,6 +58,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "capnp"
+version = "0.26.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71338171543626713e427635f7de390328d9e85828a816a0c88d959032b34a2f"
+dependencies = [
+ "embedded-io",
+]
+
+[[package]]
 name = "cc"
 version = "1.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -75,6 +94,12 @@ dependencies = [
  "quote",
  "syn",
 ]
+
+[[package]]
+name = "embedded-io"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9eb1aa714776b75c7e67e1da744b81a129b3ff919c8712b5e1b32252c1f07cc7"
 
 [[package]]
 name = "find-msvc-tools"
