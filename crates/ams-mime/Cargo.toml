@@ -1,6 +1,6 @@
 [package]
-name = "ams-store"
-description = "Stockage Maildir des messages"
+name = "ams-mime"
+description = "Format des messages RFC 5322 et MIME : décodage et encodage, sans entrée-sortie"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -1,0 +1,20 @@
+[package]
+name = "ams-admin"
+description = "L'outil de contrôle et de configuration d'air-mail-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+# Nom distinct de celui du serveur (C12), et seul moyen de produire ou de lire un
+# fichier de configuration, qui est binaire (C11).
+[[bin]]
+name = "air-mail-admin"
+path = "src/main.rs"
+
+[dependencies]
+
+[lints]
+workspace = true

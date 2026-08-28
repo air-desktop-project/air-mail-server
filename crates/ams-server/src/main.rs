@@ -1,14 +1,13 @@
-//! Binaire du serveur air-mail-server.
+//! Le serveur air-mail-server — binaire `air-mail-server` (C12).
 //!
-//! Ce binaire assemblera les quatre protocoles, le stockage et une implémentation
-//! d'[`ams_rt`] ; c'est ici que vivront les décisions que les bibliothèques
-//! refusent de prendre — quels ports écouter, quels délais d'attente, quelles
-//! limites, quelle journalisation.
+//! Il assemblera les codecs, les machines à états de session et une boucle
+//! d'entrées-sorties choisie par cible (C5) : tokio sur Unix, le moteur d'Air sur
+//! `*-linux-air`.
 //!
 //! # État
 //!
-//! **Aucun service n'est rendu.** Les crates de protocole sont des emplacements
-//! réservés ; ce `main` ne fait qu'annoncer sa version et le dire.
+//! **Aucun service n'est rendu.** Toutes les crates de protocole sont des
+//! emplacements réservés ; ce `main` annonce sa version et le dit.
 
 fn main() {
     println!(

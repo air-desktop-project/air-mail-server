@@ -1,6 +1,6 @@
 [package]
-name = "ams-store"
-description = "Stockage Maildir des messages"
+name = "ams-guard"
+description = "Détection de flooding et bannissement par source, sans entrée-sortie"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

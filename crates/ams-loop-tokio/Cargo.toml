@@ -1,6 +1,6 @@
 [package]
-name = "ams-store"
-description = "Stockage Maildir des messages"
+name = "ams-loop-tokio"
+description = "Boucle d'entrées-sorties Unix, sur tokio"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

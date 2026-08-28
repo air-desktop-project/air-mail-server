@@ -1,6 +1,6 @@
 [package]
-name = "ams-rt-std"
-description = "Implémentation des traits d'ams-rt sur la bibliothèque standard"
+name = "ams-session"
+description = "Machines à états des sessions serveur, sans entrée-sortie"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,7 +9,7 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
-ams-rt = { workspace = true }
+
 
 [lints]
 workspace = true

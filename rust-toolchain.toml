@@ -12,5 +12,9 @@
 
 [toolchain]
 channel = "1.98.0"
-components = ["rustfmt", "clippy"]
+# `llvm-tools-preview` : exigé par `cargo llvm-cov`, qui outille le 100 % de
+# couverture de C2. Une seule toolchain, donc un seul LLVM : deux versions
+# produiraient des profils que l'autre ne sait pas relire, et la mesure ne
+# pourrait plus conclure.
+components = ["rustfmt", "clippy", "llvm-tools-preview"]
 profile = "minimal"

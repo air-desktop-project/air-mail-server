@@ -1,6 +1,6 @@
 [package]
-name = "ams-store"
-description = "Stockage Maildir des messages"
+name = "ams-dmarc"
+description = "DMARC (RFC 7489) : évaluation d'alignement et de politique, sans entrée-sortie"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

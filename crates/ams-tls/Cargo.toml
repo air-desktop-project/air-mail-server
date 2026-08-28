@@ -1,6 +1,6 @@
 [package]
-name = "ams-store"
-description = "Stockage Maildir des messages"
+name = "ams-tls"
+description = "TLS 1.3 : établissement et chiffrement d'enregistrements, sans entrée-sortie"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

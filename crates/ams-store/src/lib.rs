@@ -1,15 +1,20 @@
-//! Stockage des messages et des boîtes.
+//! Stockage Maildir des messages (C13).
 //!
-//! Ce que les quatre protocoles ont en commun se trouve ici : des boîtes, des
-//! messages, des drapeaux, des UID stables. SMTP y dépose, POP3 et IMAP y lisent,
-//! et c'est la seule crate qui a le droit de savoir comment tout cela est rangé.
+//! Un fichier par message, contenu brut RFC 5322, atomicité par `rename()` de
+//! `tmp/` vers `new/`, drapeaux portés par le nom du fichier. Aucun verrou : c'est
+//! la propriété qui fait choisir Maildir.
 //!
-//! Le format de stockage n'est **pas choisi**. Maildir, une base embarquée, un
-//! journal propre au projet : chacun a des conséquences différentes sur les UID
-//! IMAP et sur la durabilité d'un `DATA` accepté. La décision viendra avec le
-//! premier besoin réel, pas avec le squelette.
+//! Cette crate **fait des entrées-sorties** — c'est son objet — et se trouve donc
+//! hors du périmètre de couverture à 100 % de C2.
+//!
+//! # Conséquence connue et non résolue
+//!
+//! Maildir ne porte pas d'identifiant stable, alors qu'IMAP exige des UID stables
+//! et croissants sous une `UIDVALIDITY` donnée. Un index sera nécessaire, et il
+//! devra être **reconstructible depuis les fichiers** : sans quoi il devient une
+//! seconde source de vérité, qui peut diverger de la première sans que rien ne le
+//! signale. Sa forme n'est pas décidée.
 //!
 //! # État
 //!
-//! **Rien n'est implémenté.** Cette crate est un emplacement réservé, créé avec
-//! le squelette du dépôt.
+//! **Rien n'est implémenté.** Emplacement réservé.

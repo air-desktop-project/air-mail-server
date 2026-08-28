@@ -1,6 +1,6 @@
 [package]
-name = "ams-rt"
-description = "Traits d'exécution : écoute, flux, horloge"
+name = "ams-config"
+description = "Schéma Cap'n Proto de la configuration, lecture et écriture"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

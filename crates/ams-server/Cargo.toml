@@ -1,6 +1,6 @@
 [package]
 name = "ams-server"
-description = "Binaire du serveur air-mail-server"
+description = "Le serveur air-mail-server"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,14 +8,13 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+# Le binaire ne porte PAS le nom de la crate (C12) : c'est `air-mail-server` qui
+# s'installe et qui se lance, et c'est ce nom-là que l'administrateur connaît.
+[[bin]]
+name = "air-mail-server"
+path = "src/main.rs"
+
 [dependencies]
-ams-proto-smtp = { workspace = true }
-ams-proto-pop3 = { workspace = true }
-ams-proto-imap = { workspace = true }
-ams-proto-http = { workspace = true }
-ams-rt = { workspace = true }
-ams-rt-std = { workspace = true }
-ams-store = { workspace = true }
 
 [lints]
 workspace = true

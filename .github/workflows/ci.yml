@@ -104,3 +104,25 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace --locked
+
+  # ── Le 100 % de couverture sur ce qui ne fait pas d'entrée-sortie (C2) ─────
+  #
+  # Job séparé : il installe un outil, recompile tout sous instrumentation, et
+  # dure donc bien plus longtemps que la vérification ordinaire. Le noyer dedans
+  # rendrait cette dernière lente pour rien.
+  couverture:
+    name: couverture 100 % (C2)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Toolchain épinglée
+        run: rustup show active-toolchain
+
+      # Binaire pré-construit plutôt que `cargo install` : ce dernier compile
+      # ~250 crates à chaque exécution, pour un outil dont la version n'a aucune
+      # raison de varier d'un job à l'autre.
+      - uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: check-couverture
+        run: ./scripts/check-couverture.sh

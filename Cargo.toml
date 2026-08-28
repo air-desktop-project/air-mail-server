@@ -1,32 +1,56 @@
 # Manifeste du workspace air-mail-server.
 #
 # Serveur de courrier : SMTP, POP3, IMAP et HTTP. Tous les paquets vivent sous
-# `crates/`.
+# `crates/`. Les contraintes qui gouvernent ce découpage sont consignées dans
+# `docs/contraintes.md` ; les références `C1`…`C13` ci-dessous y renvoient.
 #
-# LE DÉCOUPAGE EST CELUI DU PORTAGE (cf. README « Portage vers Air »).
+# LE DÉCOUPAGE EST CELUI DE LA CONTRAINTE « SANS ENTRÉE-SORTIE » (C1).
 #
-# Les crates `ams-proto-*` ne font AUCUNE entrée-sortie : elles décodent et
-# encodent des octets, et rien d'autre. Un protocole de courrier est une grammaire
-# ; le lire depuis une socket ou depuis un tableau d'octets de test doit être le
-# même code. C'est aussi ce qui les rend testables exhaustivement et fuzzables sans
-# ouvrir un port.
+# Trois étages, et la frontière entre le deuxième et le troisième est la seule
+# qui compte :
 #
-# `ams-rt` déclare les traits d'exécution (écoute, flux, horloge) que le serveur
-# consomme ; `ams-rt-std` en donne l'implémentation sur la bibliothèque standard.
-# Une seconde implémentation adossée au stack Air pourra prendre sa place sans
-# toucher aux protocoles.
+#   1. GRAMMAIRES      `ams-proto-*`, `ams-mime` — des octets vers des commandes,
+#                      et retour. Aucune socket, aucun fichier, aucune horloge.
+#   2. DÉCISIONS       `ams-session`, `ams-guard`, `ams-dkim`, `ams-spf`,
+#                      `ams-dmarc`, `ams-tls` — des machines à états. Elles
+#                      reçoivent des octets et l'heure ; elles rendent des octets
+#                      et des ACTIONS. Elles n'attendent jamais.
+#   3. EXÉCUTION       `ams-loop-tokio`, `ams-store` — les seules crates qui
+#                      lisent, écrivent et attendent. Elles ne décident de rien.
+#
+# Les étages 1 et 2 sont soumis au 100 % de couverture (C2) : une machine à états
+# se pilote pas à pas depuis un test, une boucle asynchrone ne se pilote pas — on
+# l'attend. L'étage 3 en est hors, non par indulgence, mais parce qu'y atteindre
+# 100 % exigerait de simuler des pannes du noyau, ce qui mesure la simulation.
+#
+# IL N'Y A AUCUNE ABSTRACTION D'EXÉCUTION (C5). Chaque moteur — tokio sur Unix,
+# `air-async`/`air-uring` sur `*-linux-air` — porte sa propre boucle, qui pilote
+# la MÊME machine à états. Rien à adapter, rien à maintenir entre les deux, et la
+# logique du serveur n'est écrite qu'une fois.
 
 [workspace]
 resolver = "3"
 members = [
+    # Étage 1 — grammaires, sans entrée-sortie
+    "crates/ams-mime",
     "crates/ams-proto-smtp",
     "crates/ams-proto-pop3",
     "crates/ams-proto-imap",
     "crates/ams-proto-http",
-    "crates/ams-rt",
-    "crates/ams-rt-std",
+    # Étage 2 — décisions, sans entrée-sortie
+    "crates/ams-session",
+    "crates/ams-guard",
+    "crates/ams-tls",
+    "crates/ams-dkim",
+    "crates/ams-spf",
+    "crates/ams-dmarc",
+    "crates/ams-config",
+    # Étage 3 — exécution
+    "crates/ams-loop-tokio",
     "crates/ams-store",
+    # Binaires (C12)
     "crates/ams-server",
+    "crates/ams-admin",
 ]
 
 [workspace.package]
@@ -44,19 +68,15 @@ authors = ["air-mail-server contributors"]
 repository = "https://github.com/air-desktop-project/air-mail-server"
 
 [workspace.dependencies]
-# Crates internes, référencées par chemin. Les versions suivent le lockstep
-# ci-dessus.
-ams-proto-smtp = { path = "crates/ams-proto-smtp", version = "0.1.0" }
-ams-proto-pop3 = { path = "crates/ams-proto-pop3", version = "0.1.0" }
-ams-proto-imap = { path = "crates/ams-proto-imap", version = "0.1.0" }
-ams-proto-http = { path = "crates/ams-proto-http", version = "0.1.0" }
-ams-rt = { path = "crates/ams-rt", version = "0.1.0" }
-ams-rt-std = { path = "crates/ams-rt-std", version = "0.1.0" }
-ams-store = { path = "crates/ams-store", version = "0.1.0" }
-
-# AUCUNE dépendance externe à ce stade, et c'est délibéré : le premier crate tiers
-# entrant dans ce workspace mérite d'être discuté pour lui-même plutôt que d'entrer
-# par habitude dans un squelette. `ams-rt-std` n'utilise que `std`.
+# AUCUNE dépendance, ni interne ni externe, n'est déclarée : rien n'est câblé.
+# Les crates sont des emplacements réservés, et une arête de dépendance posée
+# d'avance affirmerait un assemblage qui n'existe pas.
+#
+# Les choix EXTERNES sont pourtant faits, et consignés dans `docs/contraintes.md`
+# plutôt qu'ici : `tokio` pour la boucle Unix (C5), `capnp` pour la configuration
+# binaire (C11), `rustls` pour TLS 1.3 (C4, dont le fournisseur cryptographique
+# reste à trancher). Chacune entrera le jour où une crate la consommera —
+# la déclarer avant ne ferait que gonfler ce fichier d'une intention.
 
 # Lints du workspace, hérités par chaque crate via `[lints] workspace = true`.
 [workspace.lints.rust]
@@ -64,9 +84,14 @@ unsafe_op_in_unsafe_fn = "forbid"
 missing_docs = "warn"
 
 [workspace.lints.clippy]
-# Un serveur de courrier lit des longueurs et des compteurs venus du réseau. Une
-# conversion qui tronque ou qui perd un signe y devient une faille, pas une
-# imprécision : ces quatre lints sont en `deny` pour cette raison.
+# C3 — les longueurs viennent du réseau. Un décodeur qui lit un littéral IMAP
+# `{4294967295}` ne doit ni allouer, ni indexer, ni boucler sur cette valeur : il
+# doit la REFUSER. Une conversion qui tronque ou qui perd un signe est ici une
+# faille, pas une imprécision — d'où le `deny`.
+#
+# Ce que ces lints NE couvrent PAS : ils voient une conversion douteuse, jamais
+# une borne oubliée. Le contrôle qui manque est le fuzz de chaque décodeur, et
+# il n'existe pas encore.
 cast_possible_truncation = "deny"
 cast_sign_loss = "deny"
 cast_lossless = "deny"
