@@ -30,6 +30,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_guard` | `seeds/guard` | le garde — **une peine ne s'évince pas** |
 | `fuzz_ams_index_name` | `seeds/index` | les noms Maildir — **aller-retour de l'UID** |
 | `fuzz_ams_config` | `seeds/config` | la configuration binaire — **aller-retour, et corruption** |
+| `fuzz_ams_tls_kx` | `seeds/tls` | la part de clé TLS du pair — **les deux rôles** |
 
 Les variantes « bornes » existent parce que les bornes de C3 viennent de la
 configuration (C8), donc d'un administrateur : un zéro, un `usize::MAX`, ou toute
@@ -170,6 +171,23 @@ mille boîtes se resynchronisent.
 6. Le prochain UID est strictement au-dessus de tous ceux qui existent — sauf
    quand la boîte est épuisée, auquel cas elle le déclare.
 
+### Échange de clés TLS (une, et elle se suffit)
+
+La part `key_share` est lue **avant même le certificat** : c'est la première chose
+qu'un inconnu fait entrer dans le processus, et la seule surface de `ams-tls`
+atteignable sans avoir rien prouvé. La cible joue les **deux rôles** — serveur qui
+reçoit la part du client, client qui reçoit celle du serveur —, le second au prix
+d'une génération de clé par exécution.
+
+1. N'importe quels octets rendent une erreur ou un secret, **jamais une panique**.
+
+Il n'y a qu'une propriété, et c'est normal : un aller-retour n'a pas de sens ici
+(les deux parts sont aléatoires par construction) et un secret partagé ne
+s'inspecte pas — `SharedSecret` n'implémente délibérément pas `Debug`. Ce que la
+cible éprouve, ce sont les **découpages de longueur** et les primitives qui les
+suivent. La preuve que les deux camps calculent *le même* secret ne peut pas venir
+d'un fuzzer : elle vient du test d'interopérabilité contre OpenSSL.
+
 ### Configuration binaire (quatre)
 
 Une configuration est écrite par l'administrateur, pas par un pair : ce n'est pas
@@ -228,6 +246,21 @@ La seconde : une partie unique portant DÉJÀ un champ `U=` ou `S=`. Le nôtre s
 ajoutait, et un champ mal formé de l'appelant (`,U=0`) rendait illisible un nom
 dont notre part était parfaite. Ces deux champs appartiennent au composeur, et
 sont désormais refusés à l'entrée.
+
+**`fuzz_ams_tls_kx`, dès sa toute première exécution — et pas une panique.**
+
+LeakSanitizer, qui tourne avec le fuzzer, a signalé une **fuite mémoire sans
+borne** : `ams_tls::provider()` obtenait le `&'static` exigé par `kx_groups` en
+faisant `Box::leak`, sous couvert d'un commentaire disant « un fournisseur se
+construit une fois au démarrage ». C'était une consigne d'usage, pas une garantie
+— et rien dans la signature ne l'imposait à l'appelant. Appelée par connexion,
+comme une boucle serveur pourrait légitimement le faire, la fonction perdait de la
+mémoire à chaque fois.
+
+Le groupe hybride est désormais un `static`, construit **à la compilation**. La
+question n'est pas déplacée, elle est supprimée : aucune allocation, aucun verrou,
+et une durée de vie qui est une propriété du code au lieu d'une promesse écrite
+en commentaire. C'est le rappel qu'un fuzzer ne cherche pas que des paniques.
 
 **Le smoke-fuzz de vingt secondes a trouvé ce qu'une campagne locale de deux
 millions d'exécutions avait manqué.** Ce n'est pas de la chance : les deux
@@ -305,3 +338,9 @@ L'entrée fautive est versionnée en graine de non-régression
 | 2026-08-28 | `fuzz_ams_guard` | 2 721 501 (151 s) | **2, corrigés** |
 | 2026-08-28 | `fuzz_ams_index_name` | 2 015 974 (181 s) | **2, corrigés** |
 | 2026-08-28 | `fuzz_ams_config` | 573 580 (91 s) | 0 |
+| 2026-08-28 | `fuzz_ams_tls_kx` | 47 296 (121 s) | **1 fuite, corrigée** |
+
+Le débit de `fuzz_ams_tls_kx` est trois ordres de grandeur sous les autres : une
+génération de clé ML-KEM et deux X25519 par exécution, ce que rien n'accélérera.
+Ce n'est pas un défaut du harnais, c'est le coût de la cible — et la raison de
+lancer cette campagne-là plus longtemps que les autres.

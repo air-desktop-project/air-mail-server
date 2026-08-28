@@ -126,6 +126,29 @@ capnp = { version = "=0.26.0", default-features = false, features = ["alloc"] }
 tokio = { version = "1", default-features = false, features = ["io-util", "macros", "net", "rt", "signal", "sync", "time"] }
 libc = "0.2"
 
+# rustls (C4) — TLS 1.3, et RIEN EN DESSOUS. Sans entrée-sortie par
+# construction : il traite des tampons, pas des sockets, ce qui l'aligne sur C1.
+#
+# `default-features = false` N'EST PAS UNE PRÉFÉRENCE DE STYLE : la feature
+# `tls12` est dans les défauts, et la laisser active ferait entrer TLS 1.2 par la
+# porte de derrière, sans qu'aucune ligne de notre code ne le demande.
+rustls = { version = "0.23", default-features = false, features = ["std"] }
+# Le fournisseur cryptographique PUR RUST — pas une ligne de C (C4). `aws-lc-rs`
+# et `ring` en embarquent, et le portage vers Air ne peut pas payer ce prix.
+#
+# Dépendance `git` figée sur un SHA : la version publiée sur crates.io est
+# `0.0.2-alpha` du 2024-04-24, alors que le dépôt amont est vivant. Le SHA est ce
+# qui préserve la reproductibilité — et ce qui doit être revu à chaque
+# changement, puisqu'une dépendance `git` échappe à `cargo audit`.
+rustls-rustcrypto = { git = "https://github.com/RustCrypto/rustls-rustcrypto", rev = "cb967bd6427865f72e5619326c16080cbfd98e53", default-features = false, features = ["std"] }
+# ML-KEM-768 (FIPS 203) — la moitié post-quantique du KEX hybride de C14. Pur
+# Rust, `no_std`, sans dépendance C. EXACTEMENT la version qu'Air épingle et a
+# validée contre les vecteurs FIPS 203.
+ml-kem = { version = "=0.3.2", default-features = false, features = ["zeroize"] }
+# X25519 — l'autre moitié. Déjà tirée par `rustls-rustcrypto` ; déclarée en
+# direct parce que nous l'appelons nous-mêmes.
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets", "zeroize"] }
+
 # Lints du workspace, hérités par chaque crate via `[lints] workspace = true`.
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "forbid"

@@ -66,7 +66,7 @@ des octets **et des actions**. Elles n'attendent jamais.
 | --- | --- | --- |
 | `ams-session` | les sessions serveur | **SMTP : session entière** |
 | `ams-guard` | flooding et bannissement par source | **implémenté** |
-| `ams-tls` | TLS 1.3 uniquement | vide |
+| `ams-tls` | TLS 1.3 uniquement, échange de clés post-quantique | **implémenté** |
 | `ams-dkim` | RFC 6376 | vide |
 | `ams-spf` | RFC 7208 | vide |
 | `ams-dmarc` | RFC 7489 | vide |
@@ -84,7 +84,7 @@ Les seules crates qui lisent, écrivent et attendent. Elles ne décident de rien
 | `ams-server` | le binaire `air-mail-server` | **il tourne** |
 | `ams-admin` | le binaire `air-mail-admin` | **`summary`** |
 
-**Dix crates portent du code.** `ams-mime` : le squelette d'un message — la
+**Onze crates portent du code.** `ams-mime` : le squelette d'un message — la
 ligne, le pliage, la séparation en-tête/corps, le découpage en champs. Les champs
 structurés, les adresses, les dates et MIME restent à écrire.
 `ams-proto-smtp` : les commandes, l'encodage des réponses multilignes, et **la
@@ -108,6 +108,16 @@ une table **bornée** que l'appelant fournit — et dont une peine en cours n'es
 jamais évincée. La clé est un **préfixe**, pas une adresse : bannir une IPv6 seule
 ne sert à rien. Le garde est consulté avant la bannière, puis à chaque commande ;
 **on ne dit pas un mot à un banni**.
+
+`ams-tls` : le fournisseur cryptographique — pur Rust, **trois suites, toutes
+TLS 1.3**, aucune ligne de C — et l'échange de clés hybride `X25519MLKEM768`
+(C14), que `rustls-rustcrypto` ne fournit pas. C'est la seule crate du dépôt qui
+porte de la **cryptographie composée** : les primitives viennent de `ml-kem` et
+`x25519-dalek`, mais l'ordre des octets sur le fil est notre code. Il a été relevé
+dans `draft-ietf-tls-ecdhe-mlkem` §3.1.3 — où le secret ML-KEM vient en premier,
+à l'inverse de l'autre groupe du même brouillon — et **vérifié contre un
+`openssl s_client` réel**, seule preuve possible que les deux camps calculent le
+même secret. Le câblage de TLS dans la boucle (STARTTLS) reste à écrire.
 
 `ams-index` : les noms Maildir, les drapeaux, et la **reconstruction** — un
 repliement sur les noms, sans table donc sans allocation. C'est là que vit la

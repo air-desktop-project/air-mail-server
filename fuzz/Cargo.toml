@@ -48,6 +48,19 @@ path = "../crates/ams-config"
 [dependencies.ams-guard]
 path = "../crates/ams-guard"
 
+[dependencies.ams-tls]
+path = "../crates/ams-tls"
+
+# La cible TLS appelle `start` et `start_and_complete`, qui sont des méthodes de
+# TRAIT : il faut donc nommer `rustls` pour importer `SupportedKxGroup`. On ne
+# nomme en revanche PAS `rustls-rustcrypto` — la source d'aléa se prend sur
+# `ams_tls::provider()`, ce qui évite de recopier ici le SHA épinglé du
+# fournisseur amont, c'est-à-dire un second endroit où il pourrait dériver.
+[dependencies.rustls]
+version = "0.23"
+default-features = false
+features = ["std"]
+
 [profile.release]
 debug = 1
 
@@ -117,6 +130,13 @@ bench = false
 [[bin]]
 name = "fuzz_ams_config"
 path = "fuzz_targets/fuzz_ams_config.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ams_tls_kx"
+path = "fuzz_targets/fuzz_ams_tls_kx.rs"
 test = false
 doc = false
 bench = false

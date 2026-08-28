@@ -1,57 +1,57 @@
-//! TLS **1.3 uniquement** (C4), sans entrée-sortie (C1).
+//! TLS **1.3 uniquement** (C4), avec l'échange de clés hybride post-quantique
+//! `X25519MLKEM768` (C14). Sans entrée-sortie (C1).
 //!
-//! Rien en dessous de la version 1.3 : pas de TLS 1.2, pas de repli négocié, pas
-//! d'option de compatibilité. Un client qui ne sait pas faire TLS 1.3 n'est pas
-//! servi (C6).
+//! # TLS 1.3, et rien en dessous
 //!
-//! # Le fournisseur cryptographique : `rustls-rustcrypto`, pur Rust
+//! Pas de TLS 1.2, pas de repli négocié, pas d'option de compatibilité. Un client
+//! qui ne sait pas faire TLS 1.3 n'est pas servi (C6). Ce n'est pas une intention
+//! mais une **absence** : `rustls-rustcrypto` est pris sans sa feature `tls12`,
+//! et le fournisseur n'offre donc que trois suites, toutes en 1.3.
 //!
-//! `rustls` est sans entrée-sortie par construction — il traite des tampons, pas
-//! des sockets — donc naturellement aligné avec C1. Son fournisseur sera
-//! `rustls-rustcrypto`, seul fournisseur **sans une ligne de C** : `aws-lc-rs`
-//! (le défaut) et `ring` en embarquent, et le portage vers Air ne peut pas payer
-//! ce prix.
+//! # Pas une ligne de C
 //!
-//! **`default-features = false` est ce qui applique C4 et C6**, et non une
-//! préférence de style : la feature `tls12` est dans les défauts de
-//! `rustls-rustcrypto`, et la laisser active ferait entrer TLS 1.2 par la porte
-//! de derrière.
+//! `aws-lc-rs` (le défaut de rustls) et `ring` embarquent du C ; le portage vers
+//! Air ne peut pas payer ce prix. `rustls-rustcrypto` est le seul fournisseur
+//! pur Rust — au prix d'être numéroté `0.0.2-alpha` par ses propres auteurs, et
+//! d'être tiré par un `git` figé sur un SHA. C'est écrit dans le registre des
+//! contraintes plutôt que découvert.
 //!
-//! Mesuré le 2026-08-28 sur la configuration exacte du registre, par compilation
-//! et exécution — pas déduit d'une documentation : 74 crates compilées, aucune
-//! `ring`, aucune `cc`, aucune `*-sys` ; et exactement trois suites offertes,
-//! toutes en TLS 1.3, aucune en 1.2.
+//! # `X25519MLKEM768` est écrit ici, parce que personne ne le fournit
 //!
-//! Les réserves — version publiée périmée, et numérotation `0.0.2-alpha` par ses
-//! propres auteurs — sont consignées en C4 du registre des contraintes.
+//! `rustls-rustcrypto` n'a **aucune** trace de ML-KEM. Le seul fournisseur
+//! rustls qui offre ce groupe est `aws-lc-rs`, que C4 exclut. Cette crate
+//! l'implémente donc, en composant `ml-kem` et `x25519-dalek` — deux crates
+//! auditées dont **aucune primitive n'est réécrite**.
 //!
-//! # Le post-quantique est obligatoire (C14), et il est à écrire ici
+//! Ce qui est écrit ici, c'est le **combinateur** et son encodage sur le fil.
+//! C'est peu de code, et c'est du code critique : voir [`kx`] pour l'ordre des
+//! octets, relevé dans la spécification et non de mémoire.
 //!
-//! Le serveur doit **toujours** offrir `X25519MLKEM768` (point de code `0x11ec`)
-//! et le préférer ; `X25519` reste offert en second, pour les pairs dont la pile
-//! TLS ne sait pas encore faire de post-quantique.
+//! # Tout l'aléa vient du fournisseur
 //!
-//! `rustls-rustcrypto` **n'a aucune trace de ML-KEM** — ni feature, ni une
-//! occurrence dans son code. Le seul fournisseur `rustls` qui offre ce groupe est
-//! `aws-lc-rs`, qui embarque du C, ce que C4 exclut. Cette crate portera donc une
-//! implémentation de [`rustls::crypto::SupportedKxGroup`] composant `ml-kem`
-//! 0.3.2 et `x25519-dalek`, tous deux purs Rust — la première étant exactement
-//! la version qu'Air épingle et a validée contre les vecteurs FIPS 203.
+//! Aucun appel à l'aléa du système : il est fourni par `SecureRandom`. C1
+//! l'impose — lire l'aléa du système est une entrée-sortie — et le portage
+//! l'exige, puisque sur Air l'aléa vient d'`AirRandom`.
 //!
-//! **Ce que cela nous fait posséder.** Aucune primitive n'est inventée, mais le
-//! combinateur hybride et son encodage sur le fil deviennent notre code, et il
-//! est critique. L'ordre exact des octets se relève dans la spécification,
-//! jamais de mémoire : deux moitiés interverties donnent un handshake qui échoue
-//! en interopérabilité et réussit contre soi-même. Des vecteurs de test et une
-//! interopérabilité vérifiée contre une implémentation de référence (OpenSSL
-//! 3.5+, `aws-lc-rs`) sont exigés avant que ce code cesse d'être « écrit ».
+//! # Ce qui n'est PAS ici
 //!
-//! **Le résidu est nommé** : un pair sans post-quantique obtient `X25519`, et
-//! cette connexion-là n'est pas protégée contre « intercepter aujourd'hui,
-//! déchiffrer demain ». On ne présentera donc jamais ce serveur comme
-//! « post-quantique » sans ajouter « quand le pair le veut bien ».
-//!
-//! # État
-//!
-//! **Rien n'est implémenté**, et `rustls` n'est pas encore une dépendance du
-//! workspace. Emplacement réservé.
+//! Le **branchement de `STARTTLS`** dans la boucle. `ams-session` refuse déjà
+//! d'annoncer `STARTTLS` tant que l'appelant n'a pas déclaré savoir le conduire
+//! ([`Capabilities`](https://docs.rs/)), et `ams-loop-tokio` refuse de servir une
+//! configuration qui l'annoncerait. Rien ne ment donc ; il manque le fil, et il
+//! viendra seul.
+
+#![no_std]
+
+extern crate alloc;
+
+// La crate livrée n'a pas `std` en propre ; `rustls` l'exige pour l'instant, et
+// les tests s'en servent.
+#[cfg(test)]
+extern crate std;
+
+mod kx;
+mod provider;
+
+pub use kx::{CLIENT_SHARE, SERVER_SHARE, SHARED_SECRET, X25519MlKem768};
+pub use provider::provider;

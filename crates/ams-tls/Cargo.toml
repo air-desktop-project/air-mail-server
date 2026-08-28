@@ -9,6 +9,10 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+ml-kem = { workspace = true }
+rustls = { workspace = true }
+rustls-rustcrypto = { workspace = true }
+x25519-dalek = { workspace = true }
 
 
 [lints]

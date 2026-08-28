@@ -156,7 +156,17 @@ exécution réelles :
   `TLS13_AES_128_GCM_SHA256`, `TLS13_AES_256_GCM_SHA384`,
   `TLS13_CHACHA20_POLY1305_SHA256`. **Aucune suite TLS 1.2**, C6 est donc tenue
   par la construction et pas seulement par une intention.
-- Groupes d'échange de clés : X25519, secp256r1, secp384r1.
+- Groupes d'échange de clés du fournisseur amont : X25519, secp256r1, secp384r1.
+  `ams-tls` **préfixe** cette liste avec `X25519MLKEM768` ([C14](#c14--échange-de-clés-post-quantique-obligatoire)),
+  qui devient donc le groupe préféré sans qu'aucun des trois autres disparaisse.
+
+**Outillé par** : `ams-tls::provider()` et ses tests. Trois assertions y tiennent
+C4 et C6 par la mesure, pas par l'intention : les suites offertes sont exactement
+trois, **toutes de version TLS 1.3**, et le groupe hybride est en tête de liste.
+Un jour où un défaut de `rustls-rustcrypto` ferait rentrer `tls12`, ces tests
+échouent. Ce qui reste non outillé : rien n'empêche un futur appelant de
+construire un `ServerConfig` avec un autre fournisseur — c'est une revue, pas un
+gate.
 
 ### Les trois réserves, écrites plutôt que tues
 
@@ -173,8 +183,11 @@ exécution réelles :
    que le portage vers Air ne peut pas payer.
 3. **Aucun échange de clés post-quantique.** Les trois groupes sont classiques ;
    il n'y a pas de `X25519MLKEM768`. Ce point était ouvert ; il a été **tranché le
-   2026-08-28** et fait l'objet de [C14](#c14--échange-de-clés-post-quantique-obligatoire),
-   qui impose ce groupe et dit ce qu'il faudra écrire pour l'obtenir.
+   2026-08-28** et fait l'objet de [C14](#c14--échange-de-clés-post-quantique-obligatoire).
+   La réserve est **levée le 2026-08-28** : le groupe est implémenté dans
+   `ams-tls`, et le fournisseur le place en tête. La réserve garde sa place ici
+   parce qu'elle décrit toujours `rustls-rustcrypto` seul — c'est nous qui
+   comblons le manque, pas l'amont.
 
 ## C5 — Le moteur d'entrées-sorties, par cible
 
@@ -487,7 +500,7 @@ Décision du 2026-08-28, après avoir écarté l'option « seul groupe offert »
 aurait fait échouer la poignée de main de tout pair sans PQ — y compris en SMTP
 entrant, où le pair n'est pas de notre ressort.
 
-### Ce qu'il faudra écrire, parce que rien ne le fournit
+### Ce qui a été écrit, parce que rien ne le fournissait
 
 `rustls-rustcrypto` **n'a aucune trace de ML-KEM** : ni feature, ni une seule
 occurrence dans son code (vérifié le 2026-08-28 sur le dépôt amont). Le seul
@@ -506,8 +519,9 @@ La voie pure Rust existe, et elle a été vérifiée avant d'être décidée :
   décapsulation ;
 - `x25519-dalek` est déjà une dépendance de `rustls-rustcrypto`.
 
-`ams-tls` portera donc une implémentation de `SupportedKxGroup` composant ces
-deux primitives, ajoutée aux `kx_groups` du fournisseur.
+`ams-tls` porte donc une implémentation de `SupportedKxGroup` composant ces deux
+primitives, **préfixée** aux `kx_groups` du fournisseur (`ams-tls::kx` et
+`ams-tls::provider`, écrites le 2026-08-28).
 
 ### Ce que cela nous fait posséder — et ce n'est pas rien
 
@@ -526,7 +540,61 @@ notre code**, et c'est du code critique. Il ne suffit pas qu'il compile :
   [C2](#c2--100--de-couverture-sur-les-protocoles) — les deux branches, avec et
   sans PQ, sont à couvrir.
 
-**Outillé par** : rien. Aucune ligne n'est écrite.
+### La spécification a été lue, et elle avait un piège
+
+La source est `draft-ietf-tls-ecdhe-mlkem`, **récupérée et lue le 2026-08-28**,
+et non reconstituée. Son §3.1.3 dit que pour `X25519MLKEM768` le secret ML-KEM
+vient **en premier** dans la concaténation — « pour des raisons historiques » —
+alors que le même document met l'ECDH en premier pour `SecP256r1MLKEM768`. Deux
+groupes du même brouillon, deux ordres opposés : c'est exactement le genre de
+détail qu'une reconstitution de mémoire rend faux avec assurance.
+
+Au passage, une leçon sur les sources : la RFC 9814 avait été citée de mémoire
+comme étant ce hybride. Elle traite en réalité de SLH-DSA dans CMS. Une référence
+plausible et fausse est pire qu'une référence absente.
+
+### Interopérabilité : VÉRIFIÉE, avec sa date et ses limites
+
+`crates/ams-tls/tests/interoperabilite.rs` monte un `ServerConfig` sur notre
+fournisseur (TLS 1.3 seul, certificat P-256 auto-signé fabriqué à la volée) et
+fait venir dessus un **`openssl s_client` réel** contraint à
+`-groups X25519MLKEM768 -tls1_3`.
+
+Résultat obtenu le **2026-08-28 contre OpenSSL 3.6.3** :
+
+```
+CONNECTION ESTABLISHED
+Protocol version: TLSv1.3
+Negotiated TLS1.3 group: X25519MLKEM768
+```
+
+Ce que cette preuve vaut, exactement : la poignée de main ne se termine que si
+les deux camps calculent **le même secret** — le MAC du message `Finished` en
+dépend. Une inversion des deux moitiés du secret partagé passerait tous nos tests
+internes (nous serions faux des deux côtés) et échouerait ici. C'est là toute la
+raison d'être de ce test.
+
+Ses limites, écrites plutôt que tues :
+
+- **Ce n'est pas un gate de CI.** Les images GitHub livrent OpenSSL 3.0, qui
+  ignore ce groupe. Le test se **saute bruyamment** — il annonce la version
+  trouvée et pourquoi il ne conclut pas — au lieu de passer en silence, ce qui
+  serait un vert mensonger. C'est donc une vérification **manuelle**, à rejouer
+  sur une machine ayant OpenSSL 3.5+, et cette ligne dit sa date pour qu'on sache
+  quand elle a été rejouée.
+- **Pas encore de vecteurs FIPS 203 rejoués ici.** `ml-kem` les valide chez lui,
+  et Air les a rejoués sur cette même version épinglée ; ce que nous n'avons pas,
+  ce sont des vecteurs pour *le combinateur*, qu'aucune source normative ne
+  publie encore.
+
+**Outillé par** : `ams-tls` (couverte à 100 % au titre de C2, gate automatique),
+ses tests unitaires — dont le refus d'un point X25519 d'ordre faible **des deux
+côtés** (RFC 8446 §4.2.8.2) et la propagation d'une panne de la source d'aléa —
+et le test d'interopérabilité ci-dessus, **manuel**. Ce qui n'est toujours
+outillé par rien : le fait que le groupe hybride soit offert par le serveur en
+*fonctionnement* — `ams-tls` n'est pas encore câblée dans la boucle, STARTTLS
+n'existe pas. Tant que ce câblage manque, C14 est tenue par la crate, pas par le
+service.
 
 ---
 
