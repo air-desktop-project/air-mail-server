@@ -1,0 +1,43 @@
+# Rust
+target/
+**/*.rs.bk
+
+# NB : Cargo.lock est COMMITTÉ. air-mail-server produit des binaires serveur, pas
+# une bibliothèque publiée : le lock est ce qui rend un build reproductible.
+# Ne pas l'ajouter à ce fichier.
+
+# Profils de couverture LLVM (`cargo llvm-cov`, `-C instrument-coverage`).
+# Écrits à l'endroit d'où le binaire instrumenté a été lancé, donc parfois au
+# milieu des sources. Binaires, volumineux, propres à une exécution.
+*.profraw
+*.profdata
+
+# Éditeurs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Sauvegardes et temporaires
+*.bak
+*.tmp
+*.orig
+*.rej
+*.log
+
+# `.claude/` est ignoré SAUF `settings.json` (réglage de dépôt versionné :
+# désactivation du trailer Co-Authored-By).
+.claude/*
+!.claude/settings.json
+claude_session.id
+codex_session.id
+
+# Brouillons et journaux de travail — jamais versionnés.
+scratchpad/
+
+# Systèmes de fichiers
+.DS_Store
+._*
+Thumbs.db
+desktop.ini

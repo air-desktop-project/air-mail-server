@@ -1,0 +1,78 @@
+# Manifeste du workspace air-mail-server.
+#
+# Serveur de courrier : SMTP, POP3, IMAP et HTTP. Tous les paquets vivent sous
+# `crates/`.
+#
+# LE DÉCOUPAGE EST CELUI DU PORTAGE (cf. README « Portage vers Air »).
+#
+# Les crates `ams-proto-*` ne font AUCUNE entrée-sortie : elles décodent et
+# encodent des octets, et rien d'autre. Un protocole de courrier est une grammaire
+# ; le lire depuis une socket ou depuis un tableau d'octets de test doit être le
+# même code. C'est aussi ce qui les rend testables exhaustivement et fuzzables sans
+# ouvrir un port.
+#
+# `ams-rt` déclare les traits d'exécution (écoute, flux, horloge) que le serveur
+# consomme ; `ams-rt-std` en donne l'implémentation sur la bibliothèque standard.
+# Une seconde implémentation adossée au stack Air pourra prendre sa place sans
+# toucher aux protocoles.
+
+[workspace]
+resolver = "3"
+members = [
+    "crates/ams-proto-smtp",
+    "crates/ams-proto-pop3",
+    "crates/ams-proto-imap",
+    "crates/ams-proto-http",
+    "crates/ams-rt",
+    "crates/ams-rt-std",
+    "crates/ams-store",
+    "crates/ams-server",
+]
+
+[workspace.package]
+# Version en LOCKSTEP : toutes les crates du workspace la partagent via
+# `version.workspace = true`. Un seul numéro à incrémenter par release, donc
+# aucune dérive possible entre les paquets.
+version = "0.1.0"
+edition = "2024"
+# Égale au `channel` de `rust-toolchain.toml`. Les deux doivent bouger ensemble :
+# ce champ fait échouer le build avec un message clair si quelqu'un compile avec
+# une toolchain plus ancienne que celle sur laquelle le projet est vérifié.
+rust-version = "1.98.0"
+license = "MPL-2.0"
+authors = ["air-mail-server contributors"]
+repository = "https://github.com/air-desktop-project/air-mail-server"
+
+[workspace.dependencies]
+# Crates internes, référencées par chemin. Les versions suivent le lockstep
+# ci-dessus.
+ams-proto-smtp = { path = "crates/ams-proto-smtp", version = "0.1.0" }
+ams-proto-pop3 = { path = "crates/ams-proto-pop3", version = "0.1.0" }
+ams-proto-imap = { path = "crates/ams-proto-imap", version = "0.1.0" }
+ams-proto-http = { path = "crates/ams-proto-http", version = "0.1.0" }
+ams-rt = { path = "crates/ams-rt", version = "0.1.0" }
+ams-rt-std = { path = "crates/ams-rt-std", version = "0.1.0" }
+ams-store = { path = "crates/ams-store", version = "0.1.0" }
+
+# AUCUNE dépendance externe à ce stade, et c'est délibéré : le premier crate tiers
+# entrant dans ce workspace mérite d'être discuté pour lui-même plutôt que d'entrer
+# par habitude dans un squelette. `ams-rt-std` n'utilise que `std`.
+
+# Lints du workspace, hérités par chaque crate via `[lints] workspace = true`.
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+# Un serveur de courrier lit des longueurs et des compteurs venus du réseau. Une
+# conversion qui tronque ou qui perd un signe y devient une faille, pas une
+# imprécision : ces quatre lints sont en `deny` pour cette raison.
+cast_possible_truncation = "deny"
+cast_sign_loss = "deny"
+cast_lossless = "deny"
+arithmetic_side_effects = "deny"
+
+[profile.release]
+debug = "line-tables-only"
+lto = "thin"
+codegen-units = 1

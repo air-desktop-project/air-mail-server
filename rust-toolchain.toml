@@ -1,0 +1,16 @@
+# Toolchain Rust d'air-mail-server — UNE SEULE VERSION, PARTOUT.
+#
+# Le pin est DATÉ par sa version exacte, pas par un canal roulant : c'est ce qui
+# rend une vérification rejouable. Un `channel = "stable"` désigne une version
+# différente toutes les six semaines ; deux mesures prises à deux mois d'écart ne
+# sont alors plus comparables, et un échec de CI ne dit plus si c'est le code ou
+# l'amont qui a bougé.
+#
+# Ce projet vise le portage ultérieur vers le stack Air (cf. README, « Portage »).
+# Air épingle un nightly daté parce que sa cible JSON custom l'exige ; ici rien ne
+# l'exige, donc on reste sur stable — la contrainte la plus faible qui suffit.
+
+[toolchain]
+channel = "1.98.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

@@ -1,0 +1,21 @@
+[package]
+name = "ams-server"
+description = "Binaire du serveur air-mail-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+ams-proto-smtp = { workspace = true }
+ams-proto-pop3 = { workspace = true }
+ams-proto-imap = { workspace = true }
+ams-proto-http = { workspace = true }
+ams-rt = { workspace = true }
+ams-rt-std = { workspace = true }
+ams-store = { workspace = true }
+
+[lints]
+workspace = true

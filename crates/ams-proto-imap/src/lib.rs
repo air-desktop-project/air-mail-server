@@ -1,0 +1,17 @@
+//! Grammaire IMAP : décodage et encodage, **sans entrée-sortie**.
+//!
+//! Périmètre visé : RFC 9051 (IMAP4rev2), avec l'interopérabilité RFC 3501
+//! (IMAP4rev1) que les clients déployés exigent encore.
+//!
+//! IMAP est de loin la plus grosse des quatre grammaires : littéraux comptés,
+//! réponses non sollicitées, séquences et UID, `FETCH` structuré. C'est aussi
+//! celle qui justifie le plus l'absence d'entrée-sortie ici — un littéral
+//! `{1024}` annonce une longueur venue du réseau, et ce genre de chemin se
+//! vérifie sur des octets en mémoire, pas sur une connexion.
+//!
+//! # État
+//!
+//! **Rien n'est implémenté.** Cette crate est un emplacement réservé, créé avec
+//! le squelette du dépôt.
+
+#![no_std]
