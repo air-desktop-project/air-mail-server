@@ -1,12 +1,15 @@
 //! Le pilote d'une connexion : il lit, il écrit, il n'décide de rien.
 
 use core::time::Duration;
+use std::sync::Arc;
 
 use ams_guard::{Event as GuardEvent, Source, Verdict};
 use ams_proto_smtp::DataEvent;
 use ams_session::{Action, Config, DataOutcome, Policy, SmtpSession};
+use rustls::ServerConfig;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio::time::timeout;
+use tokio_rustls::TlsAcceptor;
 
 use crate::{Delivery, DeliveryFailure, Error, SharedGuard};
 
@@ -28,6 +31,8 @@ enum Suite {
     Fermer,
     /// Lire le message.
     LireLeMessage,
+    /// Conduire la poignée de main TLS, puis tout recommencer par-dessus.
+    Chiffrer,
     /// Une extension que cette boucle ne sait pas conduire.
     NonServie,
 }
@@ -38,7 +43,8 @@ impl Suite {
             Action::Continue => Suite::Continuer,
             Action::Close => Suite::Fermer,
             Action::ReceiveData => Suite::LireLeMessage,
-            Action::StartTls | Action::BeginAuth { .. } => Suite::NonServie,
+            Action::StartTls => Suite::Chiffrer,
+            Action::BeginAuth { .. } => Suite::NonServie,
         }
     }
 }
@@ -57,6 +63,14 @@ pub struct Timeouts {
     pub command: Duration,
     /// Attente d'un morceau de message.
     pub data: Duration,
+    /// Attente de la poignée de main TLS, une fois le `220` envoyé.
+    ///
+    /// **Il est plus court que les autres, et c'est délibéré.** Une poignée de
+    /// main est un échange fixe entre deux programmes : rien ne s'y compose, rien
+    /// n'y est tapé. Sans ce délai, un pair qui dirait `STARTTLS` puis se
+    /// tairait garderait une place de connexion pour toujours — un déni de
+    /// service à une ligne, et gratuit.
+    pub handshake: Duration,
 }
 
 impl Default for Timeouts {
@@ -64,6 +78,7 @@ impl Default for Timeouts {
         Self {
             command: Duration::from_secs(300),
             data: Duration::from_secs(600),
+            handshake: Duration::from_secs(60),
         }
     }
 }
@@ -82,6 +97,10 @@ pub enum Outcome {
     Banned,
     /// Le débit du pair dépassait le seuil : il a reçu un `421` et la fermeture.
     Throttled,
+    /// Le pair avait déjà envoyé autre chose derrière son `STARTTLS`.
+    ///
+    /// Voir [`serve_connection`] : ces octets-là ne seront jamais exécutés.
+    Injected,
 }
 
 /// Ce qu'une connexion a produit.
@@ -91,8 +110,92 @@ pub struct Summary {
     pub commands: u64,
     /// Messages remis avec succès.
     pub messages: u64,
+    /// La connexion a-t-elle été chiffrée ?
+    pub tls: bool,
     /// Comment elle s'est terminée.
     pub outcome: Outcome,
+}
+
+/// Ce qu'un service apporte à CHACUNE de ses connexions.
+///
+/// # Pourquoi une structure plutôt que des paramètres
+///
+/// Ces quatre-là ne varient pas d'une connexion à l'autre : ce sont les réglages
+/// du service. Ce qui varie — le flux, la politique, la remise, la source — reste
+/// en paramètres. La coupure n'est pas cosmétique : elle dit lesquelles de ces
+/// valeurs une seconde boucle (celle d'Air) devra elle aussi recevoir telles
+/// quelles.
+///
+/// Pas de `Debug` : le garde n'en a pas, et lui en donner un imprimerait sur
+/// demande la table des sources vues — un renseignement qui n'a rien à faire
+/// dans une trace.
+#[derive(Clone)]
+pub struct Service<'a> {
+    /// Ce que la session annonce et refuse.
+    pub config: Config<'a>,
+    /// Le garde anti-flooding (C8), partagé par toutes les connexions.
+    pub guard: &'a SharedGuard,
+    /// Les délais.
+    pub timeouts: Timeouts,
+    /// De quoi chiffrer, si le service sait le faire.
+    ///
+    /// **`Some` sans `capabilities().starttls` ne chiffre jamais rien** : la
+    /// session n'annonce pas l'extension, donc aucun pair ne la demande. Ce n'est
+    /// pas refusé — un port de soumission implicite pourrait un jour s'en servir
+    /// autrement — mais c'est un service en clair, et il vaut mieux le lire ici
+    /// que le découvrir sur le fil.
+    ///
+    /// L'inverse, lui, est refusé : annoncer `STARTTLS` sans matériel TLS ferait
+    /// mentir la bannière, et [`serve_connection`] rend alors
+    /// [`Error::CapabilityNotSupported`] avant d'ouvrir la bouche.
+    ///
+    /// La boucle ne construit **aucun** fournisseur cryptographique : celui-ci
+    /// vient de `ams-tls`, et l'appelant l'apporte tout fait. C'est ce qui garde
+    /// C4 et C14 à un seul endroit du dépôt.
+    pub tls: Option<Arc<ServerConfig>>,
+}
+
+/// Ce qui survit à la montée en chiffrement.
+///
+/// Les tampons et le résumé traversent la poignée de main ; le flux, lui, change
+/// de type. C'est toute la raison d'être de cette structure.
+struct Etat {
+    resume: Summary,
+    lecture: Vec<u8>,
+    rempli: usize,
+    sortie: Vec<u8>,
+}
+
+impl Etat {
+    fn neuf(config: &Config<'_>) -> Self {
+        // Le tampon de LECTURE est borné par la borne de commande, plus un octet :
+        // quand il se remplit sans CRLF, la ligne dépasse forcément la borne, et la
+        // session répond « 500 Line too long » d'elle-même. La boucle n'a donc aucune
+        // décision de protocole à prendre pour cela — et rien ne peut croître sans
+        // fin en attendant un CRLF qui ne vient pas.
+        let capacite = config.limits().max_command_octets.saturating_add(1);
+        Self {
+            resume: Summary::default(),
+            lecture: vec![0_u8; capacite],
+            rempli: 0,
+            sortie: vec![
+                0_u8;
+                config
+                    .limits()
+                    .max_reply_octets
+                    .saturating_mul(REPLY_LINES_MAX)
+            ],
+        }
+    }
+}
+
+/// Pourquoi le pilote a rendu la main.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Etape {
+    /// La connexion est finie ; il n'y a plus rien à faire.
+    Terminee,
+    /// Le pair a demandé le chiffrement, et le `220` est parti.
+    Chiffrement,
 }
 
 /// Sert une connexion jusqu'à sa fin.
@@ -107,6 +210,28 @@ pub struct Summary {
 /// C'est ce qui permet d'en écrire une seconde pour Air sans rien réécrire
 /// d'autre — et c'est ce que C1 achète.
 ///
+/// # `STARTTLS` : le même pilote, deux fois, sur deux flux différents
+///
+/// La montée en chiffrement ne change rien à la conversation — elle change le
+/// tuyau. Le pilote est donc rejoué **tel quel** au-dessus du flux TLS, avec la
+/// même session, les mêmes tampons et le même résumé. La session, elle, se remet
+/// à zéro (RFC 3207 §4.2) : ce qu'un pair a dit en clair ne compte plus, et il
+/// doit se renommer par un nouvel `EHLO`.
+///
+/// # Ce qu'un pair envoie derrière son `STARTTLS` n'est JAMAIS exécuté
+///
+/// Un client conforme attend le `220` avant de parler (RFC 3207 §4). Celui qui
+/// écrit `STARTTLS\r\nMAIL FROM:...\r\n` d'un seul trait fait autre chose : il
+/// dépose des commandes en clair dans un tampon, en pariant qu'elles y seront
+/// encore après la poignée de main — et qu'elles passeront alors pour siennes,
+/// dites sous chiffrement. C'est la faille de 2011 (CVE-2011-0411), et elle a
+/// touché à peu près tout le monde.
+///
+/// Ici, le tampon **n'est pas vidé en silence** : le pair reçoit un `421` à la
+/// place de son `220`, la connexion se ferme sans chiffrer, et le garde en est
+/// averti — c'est une trame invalide au sens de C8, parce qu'aucun client
+/// honnête ne fait cela par accident.
+///
 /// # Un pair qui parle encore quand on ferme peut perdre la dernière réponse
 ///
 /// Quand la connexion se ferme alors que le pair vient d'écrire, TCP jette la
@@ -118,111 +243,187 @@ pub struct Summary {
 ///
 /// # Errors
 ///
-/// [`Error::CapabilityNotSupported`] si `config` annonce une extension que cette
-/// boucle ne sait pas conduire, [`Error::Timeout`], [`Error::Io`] ou
-/// [`Error::Session`].
+/// [`Error::CapabilityNotSupported`] si `service` annonce une extension que cette
+/// boucle ne sait pas conduire, ou `STARTTLS` sans matériel TLS ;
+/// [`Error::Timeout`], [`Error::Io`] ou [`Error::Session`].
 pub async fn serve_connection<S, P, D>(
     stream: &mut S,
-    config: Config<'_>,
+    service: &Service<'_>,
     policy: P,
     delivery: &mut D,
-    guard: &SharedGuard,
     source: Source,
-    timeouts: &Timeouts,
 ) -> Result<Summary, Error>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     P: Policy,
     D: Delivery,
 {
-    // ON REFUSE AVANT DE PARLER, pas au milieu de la conversation. Cette boucle
-    // ne sait conduire ni TLS ni SASL ; servir une configuration qui les annonce
-    // reviendrait à mentir au pair dès la bannière.
-    let capacites = config.capabilities();
-    if capacites.starttls || capacites.auth {
+    // ON REFUSE AVANT DE PARLER, pas au milieu de la conversation. Annoncer une
+    // extension qu'on ne sait pas conduire reviendrait à mentir au pair dès la
+    // bannière — et un serveur qui annonce `STARTTLS` puis ne chiffre pas est
+    // pire qu'un serveur qui ne l'annonce pas.
+    let capacites = service.config.capabilities();
+    if capacites.auth {
         return Err(Error::CapabilityNotSupported);
     }
+    let accepteur = match (capacites.starttls, service.tls.as_ref()) {
+        (true, None) => return Err(Error::CapabilityNotSupported),
+        (true, Some(configuration)) => Some(TlsAcceptor::from(Arc::clone(configuration))),
+        (false, _) => None,
+    };
 
-    let mut session = SmtpSession::new(config, policy);
-    let mut resume = Summary::default();
+    let mut session = SmtpSession::new(service.config, policy);
+    let mut etat = Etat::neuf(&service.config);
 
     // ON NE PARLE PAS À UN BANNI. Interroger le garde ne compte pas comme un
     // événement : demander son avis ne doit pas nourrir ses compteurs.
-    if matches!(guard.verdict(source), Verdict::Banned { .. }) {
-        resume.outcome = Outcome::Banned;
-        return Ok(resume);
+    if matches!(service.guard.verdict(source), Verdict::Banned { .. }) {
+        etat.resume.outcome = Outcome::Banned;
+        return Ok(etat.resume);
     }
 
-    // Le tampon de LECTURE est borné par la borne de commande, plus un octet :
-    // quand il se remplit sans CRLF, la ligne dépasse forcément la borne, et la
-    // session répond « 500 Line too long » d'elle-même. La boucle n'a donc aucune
-    // décision de protocole à prendre pour cela — et rien ne peut croître sans
-    // fin en attendant un CRLF qui ne vient pas.
-    let capacite = config.limits().max_command_octets.saturating_add(1);
-    let mut lecture = vec![0_u8; capacite];
-    let mut rempli = 0_usize;
-    let mut sortie = vec![
-        0_u8;
-        config
-            .limits()
-            .max_reply_octets
-            .saturating_mul(REPLY_LINES_MAX)
-    ];
-
     if matches!(
-        guard.observe(source, GuardEvent::Connection),
+        service.guard.observe(source, GuardEvent::Connection),
         Verdict::Throttled | Verdict::Banned { .. }
     ) {
         // Le débit dépasse le seuil : on le dit, et on ferme. Le `421` vient de
         // la SESSION — une réponse fabriquée ici serait la première fuite de
         // protocole hors des crates sans entrée-sortie.
-        let refus = session.unavailable(&mut sortie)?;
+        let refus = session.unavailable(&mut etat.sortie)?;
         stream.write_all(refus).await?;
         stream.flush().await?;
-        resume.outcome = Outcome::Throttled;
-        return Ok(resume);
+        etat.resume.outcome = Outcome::Throttled;
+        return Ok(etat.resume);
     }
 
-    let banniere = session.greeting(&mut sortie)?;
+    let banniere = session.greeting(&mut etat.sortie)?;
     stream.write_all(banniere).await?;
     stream.flush().await?;
 
+    if conduire(stream, &mut session, &mut etat, service, delivery, source).await?
+        == Etape::Terminee
+    {
+        return Ok(etat.resume);
+    }
+
+    // Inatteignable : la session n'annonce `STARTTLS` que si les capacités le
+    // disent, et ce cas-là exige le matériel TLS ci-dessus. Comme pour
+    // `Suite::NonServie`, on rend une erreur plutôt que de faire tomber un
+    // serveur sur un `unreachable!()`.
+    let Some(accepteur) = accepteur else {
+        return Err(Error::CapabilityNotSupported);
+    };
+
+    let mut chiffre =
+        match timeout(service.timeouts.handshake, accepteur.accept(&mut *stream)).await {
+            Ok(Ok(flux)) => flux,
+            // Une poignée de main qui échoue APRÈS un `220` est une trame invalide au
+            // sens de C8 : le pair a demandé le chiffrement, puis n'a pas su le
+            // conduire. Un client mal configuré s'en remet ; un scanner, non.
+            Ok(Err(cause)) => {
+                service.guard.observe(source, GuardEvent::InvalidFrame);
+                return Err(Error::Io(cause));
+            }
+            Err(_) => {
+                service.guard.observe(source, GuardEvent::InvalidFrame);
+                return Err(Error::Timeout);
+            }
+        };
+
+    // RFC 3207 §4.2 : le serveur DOIT oublier tout ce que le pair a dit en clair.
+    // C'est la session qui le fait, pas la boucle.
+    session.on_tls_established();
+    etat.resume.tls = true;
+
+    let etape = conduire(
+        &mut chiffre,
+        &mut session,
+        &mut etat,
+        service,
+        delivery,
+        source,
+    )
+    .await?;
+    // La session refuse un second `STARTTLS` (`503 TLS already active`) : ce
+    // second passage ne peut plus demander de chiffrement. L'affirmation est
+    // vérifiée en débogage plutôt que supposée en silence.
+    debug_assert_eq!(etape, Etape::Terminee, "un second STARTTLS a été demandé");
+
+    // `close_notify` avant de raccrocher : il dit au pair que la fin est VOULUE.
+    // Sans lui, une coupure et une fin propre se ressemblent, et un pair prudent
+    // doit traiter la première comme une troncature possible.
+    let _ = chiffre.shutdown().await;
+    Ok(etat.resume)
+}
+
+/// Le pilote proprement dit : il tourne jusqu'à la fin, ou jusqu'au chiffrement.
+async fn conduire<S, P, D>(
+    stream: &mut S,
+    session: &mut SmtpSession<'_, P>,
+    etat: &mut Etat,
+    service: &Service<'_>,
+    delivery: &mut D,
+    source: Source,
+) -> Result<Etape, Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    P: Policy,
+    D: Delivery,
+{
+    let capacite = etat.lecture.len();
     loop {
-        let Some(fin_ligne) = trouver_crlf(&lecture[..rempli]) else {
-            if rempli == capacite {
+        let Some(fin_ligne) = trouver_crlf(&etat.lecture[..etat.rempli]) else {
+            if etat.rempli == capacite {
                 // La ligne dépasse la borne. On la donne telle quelle : la
                 // session la refuse et répond, puis on ferme — un pair qui envoie
                 // une commande de plus de 512 octets ne se rattrapera pas.
-                let tour = session.handle(&lecture[..rempli], &mut sortie)?;
+                let tour = session.handle(&etat.lecture[..etat.rempli], &mut etat.sortie)?;
                 stream.write_all(tour.reply()).await?;
                 stream.flush().await?;
                 // Elle a reçu une réponse : elle compte comme les autres.
-                resume.commands = resume.commands.saturating_add(1);
-                return Ok(resume);
+                etat.resume.commands = etat.resume.commands.saturating_add(1);
+                return Ok(Etape::Terminee);
             }
-            let lus = lire(stream, &mut lecture[rempli..], timeouts.command).await?;
+            let lus = lire(
+                stream,
+                &mut etat.lecture[etat.rempli..],
+                service.timeouts.command,
+            )
+            .await?;
             if lus == 0 {
                 // Le pair a raccroché sans `QUIT`.
-                return Ok(resume);
+                return Ok(Etape::Terminee);
             }
-            rempli = rempli.saturating_add(lus);
+            etat.rempli = etat.rempli.saturating_add(lus);
             continue;
         };
 
-        let tour = session.handle(&lecture[..fin_ligne], &mut sortie)?;
-        stream.write_all(tour.reply()).await?;
-        stream.flush().await?;
-        resume.commands = resume.commands.saturating_add(1);
+        let tour = session.handle(&etat.lecture[..fin_ligne], &mut etat.sortie)?;
         let suite = Suite::depuis(tour.action());
         // C'EST LA SESSION QUI DIT CE QUI EST UNE FAUTE, pas le code de réponse :
         // `502` sanctionne un verbe retiré — une faute — comme un `EXPN` qu'on
         // décline, qui n'en est pas une.
         let faute = tour.peer_fault();
 
+        // Le pair a-t-il déjà envoyé autre chose derrière son `STARTTLS` ? Alors
+        // il n'aura pas son `220` : voir `serve_connection`.
+        if suite == Suite::Chiffrer && etat.rempli > fin_ligne {
+            service.guard.observe(source, GuardEvent::InvalidFrame);
+            let refus = session.unavailable(&mut etat.sortie)?;
+            stream.write_all(refus).await?;
+            stream.flush().await?;
+            etat.resume.outcome = Outcome::Injected;
+            return Ok(Etape::Terminee);
+        }
+
+        stream.write_all(tour.reply()).await?;
+        stream.flush().await?;
+        etat.resume.commands = etat.resume.commands.saturating_add(1);
+
         // On décale ce qui reste : plusieurs commandes peuvent tenir dans une
         // seule lecture, et les jeter obligerait le pair à les renvoyer.
-        lecture.copy_within(fin_ligne..rempli, 0);
-        rempli = rempli.saturating_sub(fin_ligne);
+        etat.lecture.copy_within(fin_ligne..etat.rempli, 0);
+        etat.rempli = etat.rempli.saturating_sub(fin_ligne);
 
         let evenement = if faute {
             GuardEvent::InvalidFrame
@@ -230,34 +431,35 @@ where
             GuardEvent::Command
         };
         if matches!(
-            guard.observe(source, evenement),
+            service.guard.observe(source, evenement),
             Verdict::Throttled | Verdict::Banned { .. }
         ) {
             // Le pair a reçu sa réponse ; il apprend maintenant que le canal se
             // ferme. L'ordre compte : répondre d'abord, refuser ensuite.
-            let refus = session.unavailable(&mut sortie)?;
+            let refus = session.unavailable(&mut etat.sortie)?;
             stream.write_all(refus).await?;
             stream.flush().await?;
-            resume.outcome = Outcome::Throttled;
-            return Ok(resume);
+            etat.resume.outcome = Outcome::Throttled;
+            return Ok(Etape::Terminee);
         }
 
         match suite {
             Suite::Continuer => {}
-            Suite::Fermer => return Ok(resume),
+            Suite::Fermer => return Ok(Etape::Terminee),
+            Suite::Chiffrer => return Ok(Etape::Chiffrement),
             Suite::LireLeMessage => {
                 let remis = recevoir_message(
                     stream,
-                    &mut session,
+                    session,
                     delivery,
-                    &mut lecture,
-                    &mut rempli,
-                    &mut sortie,
-                    timeouts.data,
+                    &mut etat.lecture,
+                    &mut etat.rempli,
+                    &mut etat.sortie,
+                    service.timeouts.data,
                 )
                 .await?;
                 if remis {
-                    resume.messages = resume.messages.saturating_add(1);
+                    etat.resume.messages = etat.resume.messages.saturating_add(1);
                 }
             }
             // Inatteignable : les capacités ont été refusées à l'entrée. Cette
@@ -376,7 +578,7 @@ fn trouver_crlf(tampon: &[u8]) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Outcome, Summary, Timeouts, serve_connection};
+    use super::{Outcome, Service, Summary, Timeouts, serve_connection};
     use crate::{Delivery, DeliveryFailure, Error, SharedGuard};
     use ams_guard::{Source, Thresholds};
     use ams_proto_smtp::{Limits, Path};
@@ -476,16 +678,13 @@ mod tests {
                 recu
             }
         });
-        let resultat = serve_connection(
-            &mut serveur,
+        let service = Service {
             config,
-            NotreDomaine,
-            boite,
-            garde,
-            PAIR,
-            &Timeouts::default(),
-        )
-        .await;
+            guard: garde,
+            timeouts: Timeouts::default(),
+            tls: None,
+        };
+        let resultat = serve_connection(&mut serveur, &service, NotreDomaine, boite, PAIR).await;
         drop(serveur);
         let dit = ecriture.await.expect("tâche cliente");
         (resultat, String::from_utf8_lossy(&dit).into_owned())
@@ -655,19 +854,18 @@ mod tests {
         let (mut serveur, _client) = tokio::io::duplex(64);
         let mut boite = Boite::default();
         let garde = garde_permissif();
-        let resultat = serve_connection(
-            &mut serveur,
-            config(),
-            NotreDomaine,
-            &mut boite,
-            &garde,
-            PAIR,
-            &Timeouts {
+        let service = Service {
+            config: config(),
+            guard: &garde,
+            timeouts: Timeouts {
                 command: Duration::from_millis(20),
                 data: Duration::from_millis(20),
+                handshake: Duration::from_millis(20),
             },
-        )
-        .await;
+            tls: None,
+        };
+        let resultat =
+            serve_connection(&mut serveur, &service, NotreDomaine, &mut boite, PAIR).await;
         assert!(matches!(resultat, Err(Error::Timeout)));
     }
 
@@ -793,12 +991,16 @@ mod tests {
         let defaut = Timeouts::default();
         assert_eq!(defaut.command, Duration::from_secs(300));
         assert!(defaut.data > defaut.command);
+        // La poignée de main est plus courte que l'attente d'une commande, et
+        // c'est le sens même du réglage : rien ne s'y compose, rien n'y est tapé.
+        assert!(defaut.handshake < defaut.command);
         assert!(!format!("{defaut:?}").is_empty());
         assert_eq!(
             Summary::default(),
             Summary {
                 commands: 0,
                 messages: 0,
+                tls: false,
                 outcome: Outcome::Served,
             }
         );

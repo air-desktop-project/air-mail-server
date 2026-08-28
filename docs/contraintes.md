@@ -164,9 +164,13 @@ exécution réelles :
 C4 et C6 par la mesure, pas par l'intention : les suites offertes sont exactement
 trois, **toutes de version TLS 1.3**, et le groupe hybride est en tête de liste.
 Un jour où un défaut de `rustls-rustcrypto` ferait rentrer `tls12`, ces tests
-échouent. Ce qui reste non outillé : rien n'empêche un futur appelant de
-construire un `ServerConfig` avec un autre fournisseur — c'est une revue, pas un
-gate.
+échouent. Depuis le 2026-08-28, `crates/ams-loop-tokio/tests/starttls.rs` y
+ajoute la preuve d'usage : une connexion SMTP réelle monte en **TLS 1.3** face à
+un `openssl s_client`, sur la boucle du produit.
+
+Ce qui reste non outillé : rien n'empêche un futur appelant de construire un
+`ServerConfig` avec un autre fournisseur — la boucle reçoit celui qu'on lui
+donne, et ne vérifie pas d'où il vient. C'est une revue, pas un gate.
 
 ### Les trois réserves, écrites plutôt que tues
 
@@ -236,7 +240,18 @@ ouverte :
   défaut ;
 - le relais ouvert, sous toutes ses formes.
 
-**Outillé par** : rien à ce jour — la liste est une décision, pas un contrôle.
+**Outillé par** : partiellement, et seulement pour TLS. Deux `default-features =
+false` — sur `rustls-rustcrypto` et sur `tokio-rustls` — retirent la feature
+`tls12` du graphe ; un test de `ams-tls` vérifie que le fournisseur n'offre que
+trois suites, **toutes en 1.3**. Ce sont les deux seules lignes de C6 qu'un
+contrôle tient. Le reste de la liste — `APOP`, `CRAM-MD5`, le relais ouvert —
+reste une décision : rien ne l'empêche mécaniquement, sinon que le code qui
+l'appliquerait n'est pas écrit.
+
+**Le piège vaut d'être nommé** : les défauts de `tokio-rustls` sont
+`["logging", "tls12", "aws-lc-rs"]`. Les laisser ferait entrer TLS 1.2 **et** du
+C dans la boucle sans qu'une seule ligne du dépôt le demande — deux contraintes
+tombées par une valeur par défaut, et personne pour s'en apercevoir.
 
 ## C7 — La sécurité prime sur la performance
 
@@ -590,11 +605,22 @@ Ses limites, écrites plutôt que tues :
 **Outillé par** : `ams-tls` (couverte à 100 % au titre de C2, gate automatique),
 ses tests unitaires — dont le refus d'un point X25519 d'ordre faible **des deux
 côtés** (RFC 8446 §4.2.8.2) et la propagation d'une panne de la source d'aléa —
-et le test d'interopérabilité ci-dessus, **manuel**. Ce qui n'est toujours
-outillé par rien : le fait que le groupe hybride soit offert par le serveur en
-*fonctionnement* — `ams-tls` n'est pas encore câblée dans la boucle, STARTTLS
-n'existe pas. Tant que ce câblage manque, C14 est tenue par la crate, pas par le
-service.
+la cible de fuzzing `fuzz_ams_tls_kx`, et le test d'interopérabilité ci-dessus,
+**manuel**.
+
+Depuis le 2026-08-28, `ams-loop-tokio` conduit `STARTTLS` (RFC 3207) et
+`crates/ams-loop-tokio/tests/starttls.rs` fait monter en chiffrement un vrai
+`openssl s_client -starttls smtp` **sur la boucle elle-même**. Celui-là tourne en
+intégration continue : il n'exige aucun groupe post-quantique, un OpenSSL 3.0 y
+négocie `X25519`. Sur une machine récente, il négocie `X25519MLKEM768` — observé
+le 2026-08-28 avec OpenSSL 3.6.3.
+
+Ce qui n'est toujours outillé par rien : **le serveur livré ne chiffre pas**. Le
+binaire `air-mail-server` n'a aucun moyen de recevoir un certificat, faute de
+section TLS dans le schéma de configuration ([C11](#c11--la-configuration-est-un-fichier-binaire-capn-proto)),
+et il n'annonce donc pas `STARTTLS`. C14 est tenue par les crates et par la
+boucle ; elle ne l'est pas encore par le service, et c'est la prochaine dette à
+solder.
 
 ---
 

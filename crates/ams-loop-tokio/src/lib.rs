@@ -18,7 +18,13 @@
 //!
 //! Elle est néanmoins éprouvée de bout en bout : [`serve_connection`] est
 //! générique sur le flux, donc une conversation SMTP entière se joue en mémoire,
-//! sans ouvrir un port.
+//! sans ouvrir un port. **Et cette généricité est ce qui rend `STARTTLS`
+//! possible** : un flux chiffré est un flux comme un autre, le pilote y est
+//! rejoué tel quel.
+//!
+//! Le chiffrement, lui, ne se prouve pas en mémoire : `tests/starttls.rs` fait
+//! venir un vrai `openssl s_client -starttls smtp`, parce que se parler à
+//! soi-même n'est pas se mettre d'accord.
 //!
 //! # Deux refus, tous deux AVANT de parler
 //!
@@ -26,14 +32,26 @@
 //!    de se lier à un port. Les ports privilégiés s'atteignent par une règle de
 //!    redirection du pare-feu. Il n'y a donc **aucun** code d'abandon de
 //!    privilèges ici : on ne se trompe pas dans ce qu'on n'écrit pas.
-//! 2. **Une capacité qu'elle ne sait pas conduire.** Cette boucle ne fait ni TLS
-//!    ni SASL. Servir une configuration qui les annonce reviendrait à mentir au
-//!    pair dès la bannière, alors [`serve_connection`] refuse d'ouvrir la bouche.
+//! 2. **Une capacité qu'elle ne sait pas conduire.** Cette boucle ne fait pas de
+//!    SASL, et ne fait de TLS que si on lui en donne le moyen ([`Service::tls`]).
+//!    Annoncer `STARTTLS` sans certificat, ou `AUTH` tout court, reviendrait à
+//!    mentir au pair dès la bannière — alors [`serve_connection`] refuse d'ouvrir
+//!    la bouche.
+//!
+//! # `STARTTLS` : ce que la boucle fait, et ce qu'elle ne décide pas
+//!
+//! Elle conduit la poignée de main, puis rejoue son pilote au-dessus du flux
+//! chiffré. Elle ne décide ni de l'annoncer (c'est la configuration), ni de la
+//! réponse (c'est la session), ni du fournisseur cryptographique — celui-ci vient
+//! de `ams-tls`, et l'appelant l'apporte tout fait. **Ce qu'un pair envoie
+//! derrière son `STARTTLS` n'est jamais exécuté** : voir [`serve_connection`].
 //!
 //! # Ce qui n'est pas écrit
 //!
-//! La boucle d'acceptation, la limitation du nombre de connexions, TLS, SASL, et
-//! le stockage. Cette tranche sert **une** connexion, complètement.
+//! SASL, et le chargement d'un certificat par le binaire `air-mail-server` — le
+//! schéma de configuration (C11) n'a pas encore de section TLS, si bien que le
+//! serveur livré ne chiffre pas encore, faute de pouvoir recevoir de quoi le
+//! faire.
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
@@ -44,7 +62,7 @@ mod guard;
 mod privileges;
 mod server;
 
-pub use connection::{Summary, Timeouts, serve_connection};
+pub use connection::{Outcome, Service, Summary, Timeouts, serve_connection};
 pub use delivery::{Delivery, DeliveryFailure};
 pub use error::Error;
 pub use guard::SharedGuard;

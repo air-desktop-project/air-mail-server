@@ -184,7 +184,21 @@ async fn servir(fichier: &Path) -> Result<(), String> {
             timeouts: Timeouts {
                 command: Duration::from_secs(u64::from(options.timeouts.command_seconds)),
                 data: Duration::from_secs(u64::from(options.timeouts.data_seconds)),
+                // Pas de champ dans le schéma : le délai de poignée de main reste
+                // celui de la boucle. Il n'aura de sens à régler que le jour où
+                // ce binaire saura recevoir un certificat.
+                handshake: Timeouts::default().handshake,
             },
+            // AUCUN CHIFFREMENT ICI, ET C'EST DIT PLUTÔT QUE SOUS-ENTENDU. La
+            // boucle sait conduire `STARTTLS` ; ce binaire, lui, n'a aucun moyen
+            // de recevoir un certificat — le schéma Cap'n Proto (C11) n'a pas de
+            // section TLS, et `air-mail-admin` n'a donc rien à y écrire.
+            //
+            // La configuration n'annonce pas `STARTTLS` non plus : les capacités
+            // valent faux par défaut. Le serveur ne ment donc à personne — il ne
+            // chiffre simplement pas encore, et C4/C14 restent tenues par les
+            // crates, pas par le service.
+            tls: None,
         },
         arret(),
     )

@@ -13,12 +13,21 @@ ams-proto-smtp = { workspace = true }
 ams-guard = { workspace = true }
 ams-session = { workspace = true }
 tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+# `rustls` est nommée pour un SEUL type : `ServerConfig`, qui figure dans la
+# signature publique. La boucle ne construit aucun fournisseur — celui-ci vient
+# de `ams-tls`, et l'appelant le lui apporte tout fait.
+rustls = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]
 # `macros` et `rt-multi-thread` ne servent qu'aux tests : le choix de
 # l'ordonnanceur appartient au binaire, pas à la bibliothèque.
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-util"] }
+# Les tests montent un vrai serveur TLS : il leur faut le fournisseur du produit,
+# pas un autre. Une dépendance de TEST seulement — la boucle, elle, reste
+# ignorante du fournisseur qu'on lui donne.
+ams-tls = { workspace = true }
 
 
 [lints]

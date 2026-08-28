@@ -87,11 +87,13 @@ ams-loop-tokio = { path = "crates/ams-loop-tokio", version = "0.1.0" }
 ams-proto-smtp = { path = "crates/ams-proto-smtp", version = "0.1.0" }
 ams-session = { path = "crates/ams-session", version = "0.1.0" }
 ams-store = { path = "crates/ams-store", version = "0.1.0" }
+ams-tls = { path = "crates/ams-tls", version = "0.1.0" }
 
 #
 # LES DÉPENDANCES EXTERNES n'entrent qu'au moment où une crate les consomme.
-# Restent à venir, et consignées dans `docs/contraintes.md` plutôt qu'ici :
-# `capnp` pour la configuration binaire (C11) et `rustls` pour TLS 1.3 (C4).
+# C'est pourquoi cette liste s'est allongée au fil des crates écrites, et jamais
+# d'avance : une dépendance posée avant son usage affirme un assemblage qui
+# n'existe pas.
 #
 # tokio (C5) — le moteur d'entrées-sorties de la boucle Unix. PREMIÈRE dépendance
 # externe du workspace.
@@ -148,6 +150,15 @@ ml-kem = { version = "=0.3.2", default-features = false, features = ["zeroize"] 
 # X25519 — l'autre moitié. Déjà tirée par `rustls-rustcrypto` ; déclarée en
 # direct parce que nous l'appelons nous-mêmes.
 x25519-dalek = { version = "2", default-features = false, features = ["static_secrets", "zeroize"] }
+# tokio-rustls (C4/C5) — le pont entre la boucle et rustls, RIEN DE PLUS : il
+# conduit la poignée de main sur un flux tokio, et ne décide d'aucun protocole.
+#
+# `default-features = false` EST ICI UNE OBLIGATION, pas une préférence : les
+# défauts de cette crate sont `["logging", "tls12", "aws-lc-rs"]`. Les laisser
+# ferait entrer TLS 1.2 (C6) ET du C (C4) dans la boucle, sans qu'aucune ligne
+# de notre code ne le demande — deux contraintes tombées par une valeur par
+# défaut. Le fournisseur, lui, vient de `ams-tls` et de nulle part ailleurs.
+tokio-rustls = { version = "0.26", default-features = false }
 
 # Lints du workspace, hérités par chaque crate via `[lints] workspace = true`.
 [workspace.lints.rust]

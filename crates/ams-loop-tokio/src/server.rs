@@ -6,13 +6,18 @@ use std::sync::Arc;
 
 use ams_guard::Source;
 use ams_session::{Config, Policy};
+use rustls::ServerConfig;
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 
-use crate::{Delivery, Error, SharedGuard, Timeouts, serve_connection};
+use crate::{Delivery, Error, Service, SharedGuard, Timeouts, serve_connection};
 
 /// Ce qui borne le service.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Ni `Copy` ni `Eq` depuis que [`ServeOptions::tls`] existe : une configuration
+/// TLS est un `Arc` qu'on partage, pas une valeur qu'on recopie — et deux
+/// configurations TLS ne se comparent pas.
+#[derive(Debug, Clone)]
 pub struct ServeOptions {
     /// Connexions servies **en même temps**.
     ///
@@ -27,6 +32,12 @@ pub struct ServeOptions {
     pub max_connections: usize,
     /// Les délais appliqués à chaque connexion.
     pub timeouts: Timeouts,
+    /// De quoi chiffrer, si le service sait le faire.
+    ///
+    /// Voir [`Service::tls`] : c'est la même valeur, et les mêmes règles. Le
+    /// service refuse de démarrer une connexion qui annoncerait `STARTTLS` sans
+    /// elle.
+    pub tls: Option<Arc<ServerConfig>>,
 }
 
 impl Default for ServeOptions {
@@ -34,6 +45,7 @@ impl Default for ServeOptions {
         Self {
             max_connections: 256,
             timeouts: Timeouts::default(),
+            tls: None,
         }
     }
 }
@@ -117,22 +129,24 @@ where
         let guard = Arc::clone(&guard);
         let fabrique = Arc::clone(&fabrique);
         let timeouts = options.timeouts;
+        // Un `Arc` de plus par connexion, et rien d'autre : la configuration TLS
+        // est partagée, jamais recopiée. C'est ce qui rend le chiffrement
+        // gratuit à l'acceptation.
+        let tls = options.tls.clone();
 
         tokio::spawn(async move {
             let mut flux = flux;
             let mut remise = fabrique();
+            let service = Service {
+                config,
+                guard: &guard,
+                timeouts,
+                tls,
+            };
             // Le résultat n'est pas remonté : une connexion qui échoue ne
             // regarde qu'elle. Le journal viendra avec `air-log`.
-            let _ = serve_connection(
-                &mut flux,
-                config,
-                &*policy,
-                &mut remise,
-                &guard,
-                source_de(pair),
-                &timeouts,
-            )
-            .await;
+            let _ =
+                serve_connection(&mut flux, &service, &*policy, &mut remise, source_de(pair)).await;
             drop(place);
         });
     }
@@ -288,6 +302,7 @@ mod tests {
                 timeouts: Timeouts {
                     command: Duration::from_millis(200),
                     data: Duration::from_millis(200),
+                    handshake: Duration::from_millis(200),
                 },
                 ..ServeOptions::default()
             },

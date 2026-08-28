@@ -11,12 +11,15 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 > clair pour les domaines qu'on lui nomme, le dépose dans une boîte Maildir, et
 > refuse les sources qui abusent.
 >
-> Ce qu'il ne fait pas : **ni TLS ni authentification** — ni `STARTTLS` ni `AUTH`
-> ne sont annoncés, parce que rien ne sait les conduire. Et **une seule boîte pour
-> tout le monde** : répartir par destinataire demande un modèle de comptes qui
-> n'existe pas.
+> Ce qu'il ne fait pas : **il ne chiffre pas**. La boucle sait conduire
+> `STARTTLS`, et une conversation chiffrée est éprouvée contre un vrai OpenSSL ;
+> mais le binaire livré n'a aucun moyen de recevoir un certificat, faute de
+> section TLS dans son schéma de configuration. Il ne l'annonce donc pas non
+> plus : le serveur ne ment à personne, il sert en clair. Ni authentification —
+> `AUTH` n'est pas conduit. Et **une seule boîte pour tout le monde** : répartir
+> par destinataire demande un modèle de comptes qui n'existe pas.
 >
-> Neuf crates portent du code ; les autres sont des emplacements réservés qui le
+> Onze crates portent du code ; les autres sont des emplacements réservés qui le
 > disent dans leur documentation.
 >
 > Ce que ce dépôt affirme, il le tient. Rien de plus n'est promis ici.
@@ -79,7 +82,7 @@ Les seules crates qui lisent, écrivent et attendent. Elles ne décident de rien
 
 | Crate | Périmètre | État |
 | --- | --- | --- |
-| `ams-loop-tokio` | la boucle Unix, sur tokio | **une connexion, de bout en bout** |
+| `ams-loop-tokio` | la boucle Unix, sur tokio | **connexions + `STARTTLS`** |
 | `ams-store` | Maildir : les fichiers, seule source de vérité | **implémenté** |
 | `ams-server` | le binaire `air-mail-server` | **il tourne** |
 | `ams-admin` | le binaire `air-mail-admin` | **`summary`** |
@@ -100,8 +103,14 @@ restent à écrire.**
 `ams-loop-tokio` : la boucle d'acceptation et le pilote d'une connexion, sur
 tokio. Elle lit, elle écrit, elle ne décide de rien — pas même le `421` qui refuse
 une source trop pressée, qui vient de la session. Ses tests jouent des
-conversations en mémoire **et** de vraies connexions sur la boucle locale. TLS et
-SASL restent à écrire.
+conversations en mémoire **et** de vraies connexions sur la boucle locale.
+
+Elle conduit `STARTTLS` (RFC 3207) : la poignée de main, puis **le même pilote
+rejoué au-dessus du flux chiffré**, la session remise à zéro. Ce qu'un pair envoie
+derrière son `STARTTLS` n'est jamais exécuté — c'est la faille de 2011, et le
+tampon n'est pas vidé en silence : le pair reçoit un `421` au lieu de son `220`.
+Le fournisseur cryptographique, lui, ne vient jamais d'ici : l'appelant apporte
+celui de `ams-tls`. SASL reste à écrire.
 
 `ams-guard` : la détection de flooding et le bannissement par source (C8), dans
 une table **bornée** que l'appelant fournit — et dont une peine en cours n'est
@@ -117,7 +126,8 @@ porte de la **cryptographie composée** : les primitives viennent de `ml-kem` et
 dans `draft-ietf-tls-ecdhe-mlkem` §3.1.3 — où le secret ML-KEM vient en premier,
 à l'inverse de l'autre groupe du même brouillon — et **vérifié contre un
 `openssl s_client` réel**, seule preuve possible que les deux camps calculent le
-même secret. Le câblage de TLS dans la boucle (STARTTLS) reste à écrire.
+même secret. La boucle s'en sert désormais pour `STARTTLS` ; le binaire, lui, ne
+sait pas encore recevoir de certificat.
 
 `ams-index` : les noms Maildir, les drapeaux, et la **reconstruction** — un
 repliement sur les noms, sans table donc sans allocation. C'est là que vit la
@@ -131,7 +141,10 @@ d'autres outils, et nettoyage de `tmp/` même quand une remise est abandonnée.
 et committé** — le build et la CI n'ont besoin d'aucun outil C++.
 
 `ams-server` et `ams-admin` : les deux binaires de C12. Le premier assemble les
-pièces et ne contient **aucune logique de protocole** — seulement le fil. Le
+pièces et ne contient **aucune logique de protocole** — seulement le fil. Il ne
+chiffre pas encore, et c'est dit plutôt que sous-entendu : le schéma de
+configuration n'a pas de section TLS, donc rien ne peut lui remettre un
+certificat. Le
 second sait relire une boîte, ce qui est la reconstruction de C13 exécutée à la
 demande.
 
