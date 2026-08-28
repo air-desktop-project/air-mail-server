@@ -88,14 +88,57 @@ encore.
 Rien en dessous. Pas de TLS 1.2, pas de repli négocié, pas d'option de
 compatibilité. Un client qui ne sait pas faire TLS 1.3 n'est pas servi.
 
-**Point ouvert — le fournisseur cryptographique.** `rustls` est la seule
-implémentation Rust sérieuse, et elle est **sans entrée-sortie par construction**,
-donc alignée avec C1. Mais son fournisseur par défaut (`aws-lc-rs`) embarque du C ;
-`ring` aussi. Seul `rustls-rustcrypto` est pur Rust — au prix d'être moins
-éprouvé, et non certifié. Ce choix engage le portage vers Air, où une dépendance
-C est un problème, et **il n'est pas tranché**.
+**Le fournisseur cryptographique est `rustls-rustcrypto`** (décision du
+2026-08-28) : pur Rust, sans une ligne de C. `rustls` est sans entrée-sortie par
+construction — il traite des tampons, pas des sockets — donc naturellement aligné
+avec C1.
 
-**Outillé par** : rien. Aucune ligne de TLS n'est écrite.
+Configuration exacte, et elle n'est pas négociable :
+
+```toml
+rustls            = { version = "0.23", default-features = false, features = ["std"] }
+rustls-rustcrypto = { git = "https://github.com/RustCrypto/rustls-rustcrypto",
+                      rev = "cb967bd6427865f72e5619326c16080cbfd98e53",
+                      default-features = false, features = ["std"] }
+```
+
+`default-features = false` **est ce qui applique C4 et C6** : la feature `tls12`
+est dans les défauts de `rustls-rustcrypto`, et la laisser active ferait entrer
+TLS 1.2 par la porte de derrière.
+
+### Ce qui a été mesuré, et non supposé
+
+Vérifié le 2026-08-28 sur cette configuration exacte, par compilation et
+exécution réelles :
+
+- **Aucun C.** 74 crates compilées ; ni `ring`, ni `cc`, ni la moindre crate
+  `*-sys`. Ces trois-là figurent bien au `Cargo.lock` — un lock enregistre les
+  dépendances optionnelles même inactives — mais `cargo tree --target all -i ring`
+  ne les trouve pas dans le graphe, et aucune ne passe par `rustc` à la
+  compilation.
+- **TLS 1.3 seulement.** Le fournisseur offre exactement trois suites :
+  `TLS13_AES_128_GCM_SHA256`, `TLS13_AES_256_GCM_SHA384`,
+  `TLS13_CHACHA20_POLY1305_SHA256`. **Aucune suite TLS 1.2**, C6 est donc tenue
+  par la construction et pas seulement par une intention.
+- Groupes d'échange de clés : X25519, secp256r1, secp384r1.
+
+### Les trois réserves, écrites plutôt que tues
+
+1. **La version publiée sur crates.io est périmée.** `0.0.2-alpha`, publiée le
+   2024-04-24 — plus de deux ans. Le dépôt amont, lui, est **vivant** (dernier
+   push le 2026-08-27). D'où la dépendance `git` figée sur un SHA : c'est le seul
+   moyen d'avoir la version maintenue, et le SHA est ce qui préserve la
+   reproductibilité. Une dépendance `git` échappe en revanche à la couverture
+   habituelle de `cargo audit` — à compenser par une revue à chaque changement de
+   SHA.
+2. **Ses auteurs la numérotent `0.0.2-alpha`.** C'est une déclaration de maturité,
+   et elle vient d'eux. Le choix est fait les yeux ouverts : c'est le prix du pur
+   Rust, seul `aws-lc-rs` et `ring` offrant l'alternative éprouvée — au prix du C,
+   que le portage vers Air ne peut pas payer.
+3. **Aucun échange de clés post-quantique.** Les trois groupes sont classiques ;
+   il n'y a pas de `X25519MLKEM768`. C'est une asymétrie avec Air, qui a
+   implémenté un KEX hybride ML-KEM pour SSH. **Point ouvert** : faut-il l'exiger
+   ici, sachant qu'un courrier intercepté aujourd'hui se déchiffre plus tard ?
 
 ## C5 — Le moteur d'entrées-sorties, par cible
 
@@ -167,11 +210,11 @@ positif coupe du courrier légitime.
 DKIM (RFC 6376) en signature et en vérification ; DMARC (RFC 7489) en évaluation
 de politique.
 
-**Point déduit, à confirmer : SPF (RFC 7208).** DMARC évalue l'alignement d'un
-message sur SPF **et/ou** DKIM. Sans SPF, DMARC ne conclut que sur le courrier
-aligné DKIM — ce qui écarte une part importante des expéditeurs légitimes et rend
-la politique `p=reject` inapplicable. `ams-spf` est donc créée. Si l'intention
-était de s'en passer, c'est ici qu'il faut le dire.
+**SPF (RFC 7208) en fait partie** — déduit de DMARC, puis **confirmé le
+2026-08-28**. DMARC évalue l'alignement d'un message sur SPF **et/ou** DKIM ; sans
+SPF, il ne conclut que sur le courrier aligné DKIM, ce qui écarte une part
+importante des expéditeurs légitimes et rend une politique `p=reject`
+inapplicable.
 
 Ces trois crates sont **sans entrée-sortie** malgré leur besoin de DNS : une
 résolution est une *action rendue* par la machine à états, exécutée par la boucle,
