@@ -4,10 +4,14 @@ use std::fs::{self, File};
 use std::io::Write as _;
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ams_index::{Flags, MailboxSummary, MessageName, Uid, compose, summarise};
+use ams_index::{
+    Flags, MailboxState, MailboxSummary, MessageName, Uid, UidValidity, compose, reconcile,
+    reserved_watermark, summarise,
+};
 
 use crate::Error;
 
@@ -30,7 +34,48 @@ pub struct Maildir {
     racine: PathBuf,
     hote: Vec<u8>,
     prochain_uid: AtomicU32,
+    /// L'`UIDVALIDITY`, décidée à l'ouverture et fixe ensuite.
+    uid_validity: UidValidity,
+    /// Jusqu'où l'index écrit sur le disque couvre les UID déjà servis.
+    ///
+    /// Au-delà, il faut le réécrire AVANT de servir l'UID : c'est ce qui rend le
+    /// filigrane vrai même après un arrêt brutal.
+    reserve: Mutex<Uid>,
 }
+
+/// Une `UIDVALIDITY` tirée de l'horloge.
+///
+/// # Pourquoi l'horloge, et pourquoi elle suffit
+///
+/// La RFC 9051 §2.3.1.1 demande une valeur qui **ne redescend jamais** pour une
+/// même boîte. Les secondes écoulées depuis l'époque tiennent cette promesse
+/// tant que l'horloge de la machine avance, et elles ne sont pas coordonnées
+/// entre boîtes — ce que la RFC n'exige pas.
+///
+/// Elle n'est employée que lorsqu'il n'y a **pas** d'index à relire : une boîte
+/// qui en a un garde la sienne pour toujours.
+///
+/// La saturation à `1` est là pour deux cas également invraisemblables et
+/// également silencieux : une horloge d'avant 1970, et le débordement de 2106.
+/// Rendre zéro serait rendre une valeur que la RFC interdit.
+#[must_use]
+pub fn fresh_uid_validity() -> UidValidity {
+    let secondes = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(1, |ecoule| ecoule.as_secs());
+    UidValidity::new(u32::try_from(secondes).unwrap_or(u32::MAX)).unwrap_or(
+        // `new(1)` ne peut pas rendre `None` ; l'écrire ainsi évite une branche
+        // qu'aucun test ne pourrait atteindre.
+        UidValidity::new(1).unwrap_or(UidValidity::MIN),
+    )
+}
+
+/// Le nom du fichier d'index, dans la racine de la boîte.
+///
+/// Il n'est ni dans `cur/`, ni dans `new/`, ni dans `tmp/` : ces trois-là ne
+/// contiennent que des messages, et y déposer autre chose ferait compter l'index
+/// comme un courrier illisible par tout outil Maildir — le nôtre compris.
+const NOM_INDEX: &str = "ams-index.bin";
 
 impl Maildir {
     /// Ouvre — ou crée — une boîte, et adopte ce qu'elle contient déjà.
@@ -42,12 +87,16 @@ impl Maildir {
     /// # Errors
     ///
     /// [`Error::Io`] si les répertoires ne peuvent être créés ou lus.
-    pub fn open(racine: impl Into<PathBuf>, hote: &[u8]) -> Result<Self, Error> {
+    pub fn open(
+        racine: impl Into<PathBuf>,
+        hote: &[u8],
+        validite: UidValidity,
+    ) -> Result<Self, Error> {
         let racine = racine.into();
         for sous in ["tmp", "new", "cur"] {
             fs::create_dir_all(racine.join(sous))?;
         }
-        let boite = Self {
+        let mut boite = Self {
             racine,
             // Un `/` ou un `:` dans le nom d'hôte casserait le nom de fichier ;
             // Maildir prescrit de les remplacer plutôt que de refuser.
@@ -60,13 +109,85 @@ impl Maildir {
                 })
                 .collect(),
             prochain_uid: AtomicU32::new(1),
+            uid_validity: validite,
+            reserve: Mutex::new(Uid::FIRST),
         };
+
+        // LES FICHIERS D'ABORD, L'INDEX ENSUITE. Le parcours dit ce qui EST ;
+        // l'index dit seulement ce qui A ÉTÉ. Confronter les deux dans cet ordre
+        // rend impossible qu'un index périmé fasse oublier un message présent.
         let resume = boite.scan()?;
+        let ecrit = boite.lire_index();
+        let vu = reconcile(ecrit, &resume, validite);
+
+        boite.uid_validity = vu.state.uid_validity;
         boite
             .prochain_uid
-            .store(resume.next_uid.value(), Ordering::Relaxed);
+            .store(vu.state.uid_next.value(), Ordering::Relaxed);
         boite.adopter()?;
+
+        // On réserve dès l'ouverture, ce qui réécrit l'index : une boîte ouverte
+        // puis abandonnée sans remise laisse tout de même un index valide.
+        boite.etendre_la_reserve(vu.state.uid_next)?;
         Ok(boite)
+    }
+
+    /// L'`UIDVALIDITY` de cette boîte (RFC 9051 §2.3.1.1).
+    #[must_use]
+    pub const fn uid_validity(&self) -> UidValidity {
+        self.uid_validity
+    }
+
+    /// Relit l'index, ou rend `None` s'il n'y en a pas d'utilisable.
+    ///
+    /// # Un index illisible est un index ABSENT, pas une panne
+    ///
+    /// Fichier manquant, octet retourné, message tronqué : les trois mènent au
+    /// même endroit — on reconstruit, et l'`UIDVALIDITY` change. Refuser
+    /// d'ouvrir la boîte transformerait un octet retourné en indisponibilité,
+    /// alors que tous les messages sont là et que leurs UID le sont aussi.
+    fn lire_index(&self) -> Option<MailboxState> {
+        let octets = fs::read(self.racine.join(NOM_INDEX)).ok()?;
+        ams_config::decode_index(&octets).ok()
+    }
+
+    /// Écrit l'index, atomiquement et durablement.
+    ///
+    /// Même discipline qu'un message : écrire ailleurs, `fsync`, renommer,
+    /// `fsync` du répertoire. Le second est celui qu'on oublie — sans lui, le
+    /// renommage peut ne pas survivre à une coupure, et l'index reviendrait à sa
+    /// valeur d'avant.
+    fn ecrire_index(&self, etat: MailboxState) -> Result<(), Error> {
+        let octets = ams_config::encode_index(&etat).map_err(|_| Error::IndexUnwritable)?;
+        let provisoire = self.racine.join("tmp").join(NOM_INDEX);
+        {
+            let mut fichier = File::create(&provisoire)?;
+            fichier.write_all(&octets)?;
+            fichier.sync_all()?;
+        }
+        fs::rename(&provisoire, self.racine.join(NOM_INDEX))?;
+        File::open(&self.racine)?.sync_all()?;
+        Ok(())
+    }
+
+    /// Porte le filigrane écrit au-delà de `atteint`, s'il ne l'est pas déjà.
+    fn etendre_la_reserve(&self, atteint: Uid) -> Result<(), Error> {
+        let mut reserve = self
+            .reserve
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Un autre fil a pu étendre pendant qu'on attendait le verrou : on
+        // relit sous le verrou plutôt que de réécrire pour rien.
+        if atteint < *reserve {
+            return Ok(());
+        }
+        let filigrane = reserved_watermark(atteint);
+        self.ecrire_index(MailboxState {
+            uid_validity: self.uid_validity,
+            uid_next: filigrane,
+        })?;
+        *reserve = filigrane;
+        Ok(())
     }
 
     /// Le résumé de la boîte, relu depuis les fichiers.
@@ -87,6 +208,10 @@ impl Maildir {
     /// [`Error::UidExhausted`], [`Error::Io`] ou [`Error::Name`].
     pub fn deliver(&self) -> Result<Incoming, Error> {
         let uid = self.reserver_uid()?;
+        // AVANT de servir l'UID, et non après : un arrêt entre les deux doit
+        // laisser un filigrane qui COUVRE ce qu'on s'apprête à donner. L'ordre
+        // inverse rendrait le même UID deux fois.
+        self.etendre_la_reserve(uid)?;
         let unique = self.nom_unique();
         let chemin = self.racine.join("tmp").join(nom_de_fichier(&unique));
         let fichier = File::create(&chemin)?;
@@ -101,6 +226,20 @@ impl Maildir {
             uid,
             ecrits: 0,
         })
+    }
+
+    /// Le prochain UID que cette boîte servira.
+    ///
+    /// **Ce n'est pas toujours « le plus grand des noms, plus un »** : après une
+    /// réouverture, il repart du filigrane écrit, donc plus loin. Voir
+    /// [`ams_index::UID_RESERVATION`] pour ce que ce saut achète.
+    ///
+    /// [`MailboxSummary::next_uid`], lui, dit ce que les FICHIERS portent. Les
+    /// deux répondent à deux questions différentes, et les confondre ferait
+    /// annoncer à un opérateur un numéro qui ne sera pas servi.
+    #[must_use]
+    pub fn next_uid(&self) -> Uid {
+        Uid::new(self.prochain_uid.load(Ordering::Relaxed)).unwrap_or(Uid::FIRST)
     }
 
     /// Le chemin de la boîte.
@@ -311,7 +450,7 @@ pub fn flags_of(nom: &[u8]) -> Result<Flags, Error> {
 mod tests {
     use super::{Maildir, flags_of};
     use crate::Error;
-    use ams_index::{Flags, MessageName, Uid};
+    use ams_index::{Flags, MessageName, Uid, UidValidity};
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -338,8 +477,11 @@ mod tests {
         }
     }
 
+    /// Une validité FIXE : ces tests parlent des fichiers, pas de l'horloge.
+    const VALIDITE: UidValidity = UidValidity::MIN;
+
     fn boite(temporaire: &Ephemere) -> Maildir {
-        Maildir::open(&temporaire.0, b"mail.example.com").expect("ouvrable")
+        Maildir::open(&temporaire.0, b"mail.example.com", VALIDITE).expect("ouvrable")
     }
 
     /// Les noms présents dans un sous-répertoire.
@@ -433,12 +575,105 @@ mod tests {
                 assert_eq!(arrivee.commit().expect("validation").value(), attendu);
             }
         }
-        // La boîte rouverte reprend où elle en était : les UID sont RELUS depuis
-        // les noms, pas retenus quelque part.
+        // Ce que les FICHIERS portent : trois messages, donc le suivant serait
+        // le quatrième.
         let boite = boite(&temporaire);
         assert_eq!(boite.summary().expect("résumable").next_uid.value(), 4);
+
+        // Ce que la boîte SERVIRA : le filigrane réservé, c'est-à-dire plus
+        // loin. LE TROU EST VOULU. Reprendre à quatre demanderait d'avoir écrit
+        // l'index à chaque remise ; sauter jusqu'à 255 numéros ne coûte rien à
+        // personne (RFC 9051 §2.3.1.1), là où réattribuer un numéro déjà servi
+        // montrerait à un client un message pour un autre.
+        let prochain = boite.next_uid().value();
+        assert!(
+            prochain > 3,
+            "le filigrane doit couvrir ce qui a déjà été servi"
+        );
         let arrivee = boite.deliver().expect("remise ouverte");
-        assert_eq!(arrivee.commit().expect("validation").value(), 4);
+        assert_eq!(arrivee.commit().expect("validation").value(), prochain);
+    }
+
+    #[test]
+    fn l_uidvalidity_survit_a_une_reouverture() {
+        // C'EST TOUTE LA RAISON D'ÊTRE DE L'INDEX. Si elle changeait à chaque
+        // ouverture, tous les clients resynchroniseraient la boîte entière à
+        // chaque redémarrage du serveur.
+        let temporaire = Ephemere::nouveau();
+        let validite = {
+            let boite = Maildir::open(&temporaire.0, b"h", VALIDITE).expect("ouvrable");
+            boite.deliver().expect("remise").commit().expect("validée");
+            boite.uid_validity()
+        };
+        // On rouvre avec une AUTRE validité candidate : elle doit être ignorée,
+        // puisque l'index en porte déjà une.
+        let autre = UidValidity::new(999_999).expect("non nulle");
+        let boite = Maildir::open(&temporaire.0, b"h", autre).expect("ouvrable");
+        assert_eq!(boite.uid_validity(), validite);
+        assert_ne!(boite.uid_validity(), autre);
+    }
+
+    #[test]
+    fn un_index_perdu_fait_changer_l_uidvalidity_et_ne_perd_aucun_uid() {
+        // L'index effacé — sauvegarde partielle, disque changé, curieux. Les
+        // messages sont là, leurs UID sont dans leurs noms : rien n'est perdu.
+        // Ce qui est perdu, c'est le filigrane, donc la promesse de ne pas
+        // réattribuer. L'`UIDVALIDITY` change pour le DIRE aux clients.
+        let temporaire = Ephemere::nouveau();
+        {
+            let boite = Maildir::open(&temporaire.0, b"h", VALIDITE).expect("ouvrable");
+            for _ in 0..3 {
+                boite.deliver().expect("remise").commit().expect("validée");
+            }
+        }
+        fs::remove_file(temporaire.0.join("ams-index.bin")).expect("index effacé");
+
+        let autre = UidValidity::new(999_999).expect("non nulle");
+        let boite = Maildir::open(&temporaire.0, b"h", autre).expect("ouvrable");
+        assert_eq!(boite.uid_validity(), autre, "l'UIDVALIDITY devait changer");
+        // Les trois messages sont toujours là, avec leurs UID.
+        let resume = boite.summary().expect("résumable");
+        assert_eq!(resume.numbered, 3);
+        assert_eq!(resume.next_uid.value(), 4);
+    }
+
+    #[test]
+    fn un_index_illisible_vaut_un_index_absent() {
+        // Un octet retourné ne doit pas rendre une boîte inouvrable : tous les
+        // messages sont là, et leurs UID aussi. On reconstruit, et
+        // l'`UIDVALIDITY` change — ce qui est exactement ce qu'un index absent
+        // provoque.
+        let temporaire = Ephemere::nouveau();
+        {
+            let boite = Maildir::open(&temporaire.0, b"h", VALIDITE).expect("ouvrable");
+            boite.deliver().expect("remise").commit().expect("validée");
+        }
+        fs::write(
+            temporaire.0.join("ams-index.bin"),
+            b"ceci n'est pas un index",
+        )
+        .expect("écriture");
+
+        let autre = UidValidity::new(999_999).expect("non nulle");
+        let boite = Maildir::open(&temporaire.0, b"h", autre).expect("ouvrable");
+        assert_eq!(boite.uid_validity(), autre);
+        // Et l'index a été RÉÉCRIT : la prochaine ouverture n'aura plus à
+        // changer quoi que ce soit.
+        let encore = Maildir::open(&temporaire.0, b"h", VALIDITE).expect("ouvrable");
+        assert_eq!(encore.uid_validity(), autre);
+    }
+
+    #[test]
+    fn l_index_n_est_pas_compte_comme_un_message() {
+        // Il vit dans la RACINE, pas dans `cur/` ni `new/`. S'il y était, tout
+        // outil Maildir le compterait comme un courrier illisible — le nôtre le
+        // premier.
+        let temporaire = Ephemere::nouveau();
+        let boite = Maildir::open(&temporaire.0, b"h", VALIDITE).expect("ouvrable");
+        assert!(temporaire.0.join("ams-index.bin").is_file());
+        let resume = boite.summary().expect("résumable");
+        assert_eq!(resume.unreadable, 0);
+        assert_eq!(resume.numbered, 0);
     }
 
     #[test]
@@ -478,7 +713,7 @@ mod tests {
     fn un_hote_qui_casserait_un_nom_est_transpose() {
         // Maildir prescrit de remplacer `/` et `:` plutôt que de refuser.
         let temporaire = Ephemere::nouveau();
-        let boite = Maildir::open(&temporaire.0, b"ho/te:bizarre").expect("ouvrable");
+        let boite = Maildir::open(&temporaire.0, b"ho/te:bizarre", VALIDITE).expect("ouvrable");
         let arrivee = boite.deliver().expect("remise ouverte");
         arrivee.commit().expect("validation");
         let dans_new = noms(&boite, "new");

@@ -12,6 +12,7 @@ repository.workspace = true
 ams-guard = { workspace = true }
 ams-proto-smtp = { workspace = true }
 ams-auth = { workspace = true }
+ams-index = { workspace = true }
 capnp = { workspace = true }
 
 

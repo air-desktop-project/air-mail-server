@@ -563,9 +563,13 @@ L'index s'écrit comme un message se dépose — par `rename()` atomique. Un ind
 douteux **se reconstruit plutôt que se répare** : c'est peu cher, et cela évite
 d'avoir à faire confiance à des octets dont on doute.
 
-**Outillé par** : `ams-index` pour les noms, les drapeaux et la reconstruction —
-sans entrée-sortie, couvert à 100 %, et fuzzé sur l'aller-retour de l'UID — et
-`ams-store` pour la boîte elle-même.
+**Outillé par** : `ams-index` pour les noms, les drapeaux, la reconstruction et
+la **réconciliation** de l'index avec les fichiers — sans entrée-sortie, couvert
+à 100 %, et fuzzé sur l'aller-retour de l'UID ; `ams-config` pour le codec du
+fichier ; et `ams-store` pour la boîte elle-même, dont les tests éprouvent les
+trois propriétés qui comptent : l'`UIDVALIDITY` survit à une réouverture, un
+index perdu la fait changer sans perdre un seul UID, et un index illisible se
+comporte exactement comme un index absent.
 
 **Ce qui est fait** : arrivée par `rename()` atomique, UID dans le nom (`,U=`),
 adoption des messages déposés par un autre outil, nettoyage de `tmp/` même quand
@@ -574,12 +578,44 @@ répertoire après. La seconde est celle qu'on oublie : un `rename` n'est durabl
 que lorsque le répertoire qui le porte l'est, et un serveur qui répond `250` sans
 cela n'a pas pris la responsabilité du message, il l'a promise (RFC 5321 §6.1).
 
-**Ce qui ne l'est pas** : la PERSISTANCE de l'index, que cette contrainte veut en
-Cap'n Proto — même format que la configuration (C11). Elle viendra avec
-l'outillage que C11 exige de toute façon. Le coût du report est exactement celui
-que cette contrainte annonce : un parcours de répertoire, jamais une
-resynchronisation client. C'est ce que gagne un index reconstructible par
-construction, et c'est pourquoi le report est tenable.
+### La persistance de l'index, et pourquoi elle tient en deux nombres
+
+Écrite le 2026-08-28, en Cap'n Proto comme cette contrainte le veut
+(`ams-index.capnp`). Le fichier vit dans la racine de la boîte — ni `cur/`, ni
+`new/`, ni `tmp/`, où tout outil Maildir le compterait comme un courrier
+illisible.
+
+**Il ne porte QUE ce que les noms de fichiers ne portent pas**, et ce refus est
+la décision de conception. Un index Maildir classique recopie la liste des
+messages pour éviter un parcours de répertoire ; celui-ci s'en abstient, parce
+que recopier ce que les noms disent déjà créerait une **seconde source de
+vérité**, capable de diverger de la première sans que rien ne le signale. L'UID,
+les drapeaux et la taille sont dans les noms : ils y restent.
+
+Restent deux nombres qu'aucun nom ne peut porter :
+
+1. l'`UIDVALIDITY`, qui appartient à la BOÎTE et non à un message ;
+2. le **filigrane** des UID, qui doit survivre à l'effacement du message portant
+   le plus grand. Sans lui, effacer le dernier message ferait recommencer la
+   numérotation — et un client verrait, sous un numéro qu'il croit connaître, un
+   message qui n'est pas celui-là.
+
+**Le filigrane est écrit EN AVANCE, par tranches de 256.** Le réécrire à chaque
+remise coûterait deux `fsync` de plus par message ; ne l'écrire qu'à l'ouverture
+laisserait le trou décrit ci-dessus. La réservation ferme ce trou pour un
+`fsync` toutes les 256 remises, au prix de **trous dans la numérotation** après
+un arrêt brutal — jusqu'à 255 UID sautés. La RFC 9051 §2.3.1.1 les autorise
+explicitement : un trou ne coûte rien à personne, un UID réattribué coûte cher.
+
+**Un index illisible est un index ABSENT, pas une panne.** Fichier manquant,
+octet retourné, message tronqué : les trois mènent au même endroit — on
+reconstruit depuis les fichiers, et l'`UIDVALIDITY` change. Refuser d'ouvrir la
+boîte transformerait un octet retourné en indisponibilité, alors que tous les
+messages sont là et que leurs UID le sont aussi.
+
+Le prix de cette reconstruction est nommé : **tous les clients resynchronisent
+la boîte entière**. C'est ce que l'`UIDVALIDITY` sert à dire, et c'est pourquoi
+elle ne doit changer QUE là.
 
 **Ce qui n'est pas fait non plus** : `ams-store` n'implémente pas le trait
 `Delivery` de la boucle — l'adaptation appartient au binaire, qui connaît les

@@ -27,13 +27,17 @@
 //! **repliement** sur les noms — aucune table, donc aucune allocation, donc
 //! aucune borne à choisir.
 //!
+//! Et **ce que les noms ne portent pas** : l'`UIDVALIDITY` de la boîte, et le
+//! filigrane des UID qui doit survivre à l'effacement du message portant le plus
+//! grand. Ces deux nombres-là sont écrits ([`MailboxState`]), et
+//! [`reconcile`] dit ce qu'il faut en faire quand on les retrouve — ou quand on
+//! ne les retrouve pas.
+//!
 //! # Ce qu'elle NE couvre PAS
 //!
-//! **La persistance de l'index**, que C13 veut en Cap'n Proto — même format que
-//! la configuration (C11). Elle viendra avec l'outillage que C11 exige de toute
-//! façon. Le coût de ce report est exactement celui que C13 annonce : un parcours
-//! de répertoire, jamais une resynchronisation client. C'est ce que gagne un
-//! index reconstructible par construction.
+//! **L'écriture du fichier**, qui est une entrée-sortie : le codec Cap'n Proto
+//! vit dans `ams-config`, et le fichier lui-même dans `ams-store`. Cette crate
+//! ne fait que DÉCIDER, ce qui est exactement ce qui la rend couvrable à 100 %.
 //!
 //! ```
 //! use ams_index::{Flags, MessageName, Uid, compose, summarise};
@@ -71,8 +75,12 @@ extern crate std;
 
 mod flags;
 mod name;
+mod state;
 mod summary;
 
 pub use flags::{FlagError, Flags};
 pub use name::{MessageName, NameError, Uid, compose};
+pub use state::{
+    MailboxState, Reconciliation, UID_RESERVATION, UidValidity, reconcile, reserved_watermark,
+};
 pub use summary::{MailboxSummary, summarise};

@@ -12,6 +12,14 @@ pub enum Error {
     Io(std::io::Error),
     /// Un nom de fichier composé ou relu est irrecevable.
     Name(NameError),
+    /// L'index de la boîte n'a pas pu être encodé.
+    ///
+    /// Un défaut de la bibliothèque, jamais une configuration : les deux
+    /// nombres qu'il porte sont non nuls par construction. Il est tout de même
+    /// nommé plutôt que supposé impossible — c'est une remise qui échoue, et le
+    /// pair doit l'apprendre.
+    IndexUnwritable,
+
     /// La boîte n'a plus d'UID à attribuer.
     ///
     /// Il n'y en a que `u32::MAX`. Au-delà, c'est l'`UIDVALIDITY` qui doit
@@ -25,6 +33,7 @@ impl fmt::Display for Error {
         match self {
             Error::Io(cause) => write!(f, "système de fichiers : {cause}"),
             Error::Name(cause) => write!(f, "nom de fichier : {cause}"),
+            Error::IndexUnwritable => f.write_str("l'index de la boîte n'a pas pu être encodé"),
             Error::UidExhausted => {
                 f.write_str("la boîte n'a plus d'UID à attribuer ; son `UIDVALIDITY` doit changer")
             }

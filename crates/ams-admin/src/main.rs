@@ -386,7 +386,14 @@ fn retirer(fichier: &Path, nom: &str) -> ExitCode {
 fn resumer(racine: &Path) -> ExitCode {
     // Le nom d'hôte ne sert qu'à composer de NOUVEAUX noms ; relire n'en a pas
     // besoin, mais l'ouverture ADOPTE ce qui traîne, et l'adoption en compose.
-    let boite = match Maildir::open(PathBuf::from(racine), b"air-mail-admin") {
+    let boite = match Maildir::open(
+        PathBuf::from(racine),
+        b"air-mail-admin",
+        // Une boîte SANS index en reçoit un, avec cette validité-ci. C'est une
+        // réparation, pas un effet de bord subi : le serveur en ferait autant à
+        // sa prochaine ouverture, et une boîte qui a déjà un index garde le sien.
+        ams_store::fresh_uid_validity(),
+    ) {
         Ok(boite) => boite,
         Err(erreur) => {
             eprintln!("air-mail-admin : `{}` : {erreur}", racine.display());
@@ -402,10 +409,16 @@ fn resumer(racine: &Path) -> ExitCode {
     };
 
     println!("boîte             {}", racine.display());
+    println!("UIDVALIDITY       {}", boite.uid_validity().value());
     println!("messages          {}", resume.numbered);
     println!("sans UID          {}", resume.unnumbered);
     println!("noms illisibles   {}", resume.unreadable);
-    println!("prochain UID      {}", resume.next_uid.value());
+    // DEUX NOMBRES, ET CE N'EST PAS UNE REDONDANCE. Le premier dit ce que les
+    // FICHIERS portent ; le second, ce que la boîte SERVIRA — plus loin après
+    // une réouverture, parce que le filigrane écrit couvre les UID réservés.
+    // N'en montrer qu'un ferait annoncer un numéro qui ne sera pas donné.
+    println!("plus grand UID +1 {}", resume.next_uid.value());
+    println!("prochain UID servi {}", boite.next_uid().value());
     if resume.exhausted {
         // Ce n'est pas un détail : au-delà, il n'y a plus d'UID à donner sans
         // changer l'`UIDVALIDITY`, ce qui fait retélécharger la boîte entière à

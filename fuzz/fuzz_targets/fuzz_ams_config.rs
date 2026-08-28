@@ -18,8 +18,12 @@
 use core::time::Duration;
 
 use ams_auth::{Account, DUMMY_HASH};
-use ams_config::{Configuration, Timeouts, Tls, decode, decode_accounts, encode, encode_accounts};
+use ams_config::{
+    Configuration, Timeouts, Tls, decode, decode_accounts, decode_index, encode, encode_accounts,
+    encode_index,
+};
 use ams_guard::Thresholds;
+use ams_index::{MailboxState, Uid, UidValidity};
 use ams_proto_smtp::Limits;
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
@@ -50,6 +54,9 @@ struct Entree {
     /// Des noms de comptes — VIDES ou EN DOUBLE si le fuzzer le veut : ce sont
     /// exactement les deux cas que le décodeur refuse.
     logins: Vec<String>,
+    /// Les deux nombres de l'index, ZÉRO COMPRIS : c'est justement ce que le
+    /// décodeur refuse, et le lui interdire ici cacherait ce refus.
+    index: [u32; 2],
 }
 
 fuzz_target!(|entree: Entree| {
@@ -160,5 +167,27 @@ fuzz_target!(|entree: Entree| {
             // son travail.
             Err(_) => {}
         }
+    }
+
+    // ── 6. L'INDEX DE LA BOÎTE ──────────────────────────────────────────────
+    //
+    // Deux nombres, et un serveur qui panique en les relisant n'ouvre pas sa
+    // boîte. Le stockage traite une erreur comme une ABSENCE d'index — il
+    // reconstruit — mais une panique, elle, ne se rattrape pas.
+    let _ = decode_index(&entree.octets);
+
+    if let (Some(validite), Some(filigrane)) =
+        (UidValidity::new(entree.index[0]), Uid::new(entree.index[1]))
+    {
+        let original = MailboxState {
+            uid_validity: validite,
+            uid_next: filigrane,
+        };
+        let ecrit = encode_index(&original).expect("un état non nul s'encode toujours");
+        assert_eq!(
+            decode_index(&ecrit),
+            Ok(original),
+            "l'aller-retour a changé l'index"
+        );
     }
 });

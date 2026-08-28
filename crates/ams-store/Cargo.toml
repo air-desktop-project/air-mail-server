@@ -9,6 +9,7 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+ams-config = { workspace = true }
 ams-index = { workspace = true }
 
 

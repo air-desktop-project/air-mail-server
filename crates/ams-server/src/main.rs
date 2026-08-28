@@ -224,7 +224,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     };
 
     let boite = Arc::new(
-        Maildir::open(&maildir, domaine)
+        Maildir::open(&maildir, domaine, ams_store::fresh_uid_validity())
             .map_err(|erreur| format!("boîte `{}` : {erreur}", options.maildir))?,
     );
     let resume = boite
@@ -236,13 +236,16 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         .map_err(|erreur| format!("écoute sur {ecoute} : {erreur}"))?;
 
     eprintln!(
-        "air-mail-server {} : {} écoute sur {}, boîte `{}` ({} message(s), prochain UID {})",
+        "air-mail-server {} : {} écoute sur {}, boîte `{}` ({} message(s), UIDVALIDITY {}, prochain UID {})",
         env!("CARGO_PKG_VERSION"),
         options.domain,
         ecoute,
         options.maildir,
         resume.numbered,
-        resume.next_uid.value()
+        boite.uid_validity().value(),
+        // Le numéro qui sera SERVI, et non « le plus grand des noms plus un » :
+        // après une réouverture, le filigrane écrit place le prochain plus loin.
+        boite.next_uid().value()
     );
     eprintln!(
         "air-mail-server : {}",

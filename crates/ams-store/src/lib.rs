@@ -36,4 +36,4 @@ mod error;
 mod maildir;
 
 pub use error::Error;
-pub use maildir::{Incoming, Maildir, flags_of};
+pub use maildir::{Incoming, Maildir, flags_of, fresh_uid_validity};

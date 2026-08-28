@@ -81,8 +81,8 @@ des octets **et des actions**. Elles n'attendent jamais.
 | `ams-dkim` | RFC 6376 | vide |
 | `ams-spf` | RFC 7208 | vide |
 | `ams-dmarc` | RFC 7489 | vide |
-| `ams-config` | schéma Cap'n Proto de la configuration | **implémenté** |
-| `ams-index` | noms Maildir, drapeaux, reconstruction | **implémenté** |
+| `ams-config` | les trois formats binaires : configuration, comptes, index | **implémenté** |
+| `ams-index` | noms Maildir, drapeaux, reconstruction, `UIDVALIDITY` | **implémenté** |
 
 ### Étage 3 — exécution
 
@@ -157,12 +157,25 @@ même secret. La boucle s'en sert pour `STARTTLS`, et le serveur pour de bon.
 repliement sur les noms, sans table donc sans allocation. C'est là que vit la
 raison d'être du `,U=` dans un nom de fichier.
 
+Et ce que les noms **ne peuvent pas** porter : l'`UIDVALIDITY` de la boîte, et le
+filigrane des UID. L'index persisté ne contient que ces deux nombres, et rien
+d'autre — recopier ce que les noms disent déjà créerait une seconde source de
+vérité, capable de diverger de la première sans que rien ne le signale. Le
+perdre ne perd aucun message ni aucun UID : cela oblige seulement à changer
+l'`UIDVALIDITY`, c'est-à-dire à demander aux clients de resynchroniser.
+
 `ams-store` : la boîte Maildir. Arrivée par `rename()` atomique, **deux `fsync`**
 — le fichier avant, le répertoire après —, adoption des messages déposés par
 d'autres outils, et nettoyage de `tmp/` même quand une remise est abandonnée.
+L'index s'écrit avec la même discipline, et son filigrane est **réservé par
+tranches de 256** : un `fsync` toutes les 256 remises au lieu d'un par message,
+au prix de trous dans la numérotation après un arrêt brutal. La RFC 9051 les
+autorise ; un UID réattribué, lui, montrerait à un client un message pour un
+autre.
 
-`ams-config` : le schéma Cap'n Proto, et son codec. Le code dérivé est **généré
-et committé** — le build et la CI n'ont besoin d'aucun outil C++.
+`ams-config` : les **trois** schémas Cap'n Proto et leurs codecs — la
+configuration, les comptes, l'index d'une boîte. Le code dérivé est **généré et
+committé** : le build et la CI n'ont besoin d'aucun outil C++.
 
 `ams-server` et `ams-admin` : les deux binaires de C12. Le premier assemble les
 pièces et ne contient **aucune logique de protocole** — seulement le fil. Il lit

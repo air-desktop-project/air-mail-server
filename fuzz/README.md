@@ -29,7 +29,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_smtp_data` | `seeds/smtp-data` | la phase de données — **indépendance au découpage** |
 | `fuzz_ams_guard` | `seeds/guard` | le garde — **une peine ne s'évince pas** |
 | `fuzz_ams_index_name` | `seeds/index` | les noms Maildir — **aller-retour de l'UID** |
-| `fuzz_ams_config` | `seeds/config` | la configuration binaire ET le magasin de comptes |
+| `fuzz_ams_config` | `seeds/config` | les trois formats binaires : configuration, comptes, index |
 | `fuzz_ams_tls_kx` | `seeds/tls` | la part de clé TLS du pair — **les deux rôles** |
 | `fuzz_ams_sasl` | `seeds/sasl` | la réponse SASL — **décodage canonique** |
 
@@ -210,7 +210,7 @@ cible éprouve, ce sont les **découpages de longueur** et les primitives qui le
 suivent. La preuve que les deux camps calculent *le même* secret ne peut pas venir
 d'un fuzzer : elle vient du test d'interopérabilité contre OpenSSL.
 
-### Configuration binaire et magasin de comptes (six)
+### Les trois formats binaires (sept)
 
 Une configuration est écrite par l'administrateur, pas par un pair : ce n'est pas
 une entrée hostile au sens de C3. Mais un disque vieillit, une copie s'interrompt,
@@ -231,6 +231,10 @@ configuration ne démarre pas, et ne dit pas pourquoi**.
    graine sont libres — vides, en double, quelconques : ce sont exactement les
    cas que le décodeur refuse, et les lier dans l'entrée cacherait ces refus au
    lieu de les éprouver.
+7. **L'index fait l'aller-retour**, et n'importe quels octets le laissent rendre
+   une erreur plutôt qu'une panique. Le stockage traite une erreur comme une
+   ABSENCE d'index — il reconstruit — mais une panique, elle, ne se rattrape
+   pas : elle empêche la boîte de s'ouvrir alors que tous les messages sont là.
 
 ## LE PIÈGE DE LA SÉPARATION, et il a déjà mordu
 
