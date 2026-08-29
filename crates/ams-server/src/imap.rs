@@ -45,8 +45,8 @@ use std::sync::Arc;
 
 use ams_index::{MessageName, Uid};
 use ams_proto_imap::{Flags, StoreMode};
-use ams_session::imap::{Deposit, Mailbox, Mailboxes, MessageInfo};
-use ams_store::{Incoming, MailboxView, Maildir};
+use ams_session::imap::{Creation, Deposit, Mailbox, Mailboxes, MessageInfo};
+use ams_store::{Incoming, MailboxView, Maildir, fresh_uid_validity};
 
 /// Le seul nom de boîte que ce serveur connaisse (RFC 9051 §5.1).
 const INBOX: &[u8] = b"INBOX";
@@ -422,23 +422,127 @@ fn fin_de_l_entete(chemin: &std::path::Path) -> Option<u64> {
 
 /// Les boîtes du serveur, telles qu'IMAP les ouvre.
 pub struct BoitesImap {
+    /// La boîte d'arrivée de chaque compte, ouverte au démarrage.
     boites: Arc<BTreeMap<String, Arc<Maildir>>>,
+    /// Le nom d'hôte, qui entre dans les noms de fichiers Maildir.
+    hote: Vec<u8>,
+    /// Les dossiers déjà ouverts, par compte et par nom.
+    ///
+    /// # POURQUOI UN CACHE, ET POURQUOI IL EST BORNÉ PAR CE QUI EXISTE
+    ///
+    /// Ouvrir un Maildir relit son index, adopte les messages sans UID et
+    /// réécrit l'index : le refaire à chaque `LIST` ou chaque `SELECT`
+    /// coûterait un parcours de répertoire par commande. Le cache ne grandit
+    /// que d'une entrée par dossier RÉELLEMENT créé — un client ne peut donc
+    /// pas le faire enfler en nommant des boîtes au hasard.
+    dossiers: std::sync::Mutex<BTreeMap<(String, String), Arc<Maildir>>>,
 }
 
 impl BoitesImap {
     /// Monte le service à partir des boîtes déjà ouvertes par le serveur.
     #[must_use]
-    pub fn new(boites: Arc<BTreeMap<String, Arc<Maildir>>>) -> Self {
-        Self { boites }
+    pub fn new(boites: Arc<BTreeMap<String, Arc<Maildir>>>, hote: &[u8]) -> Self {
+        Self {
+            boites,
+            hote: hote.to_vec(),
+            dossiers: std::sync::Mutex::new(BTreeMap::new()),
+        }
     }
 
-    /// La boîte d'un compte, si le nom demandé est `INBOX`.
-    fn maildir(&self, user: &[u8], name: &[u8]) -> Option<&Arc<Maildir>> {
-        if !name.eq_ignore_ascii_case(INBOX) {
+    /// La racine de la boîte d'arrivée d'un compte.
+    fn racine(&self, user: &[u8]) -> Option<PathBuf> {
+        let nom = core::str::from_utf8(user).ok()?;
+        Some(self.boites.get(nom)?.root().to_path_buf())
+    }
+
+    /// Le répertoire d'un dossier, à la façon de Maildir++.
+    ///
+    /// # C'EST ICI QU'UN NOM DE CLIENT DEVIENT UN CHEMIN
+    ///
+    /// Et c'est pourquoi la règle est vérifiée UNE SECONDE FOIS, alors que la
+    /// session l'a déjà appliquée : c'est ce code-ci qui touche le système de
+    /// fichiers, et une vérification faite ailleurs est une vérification qu'on
+    /// ne voit pas en lisant l'endroit qui en dépend. Elle ne coûte rien, et
+    /// elle survivra à un appelant qui l'oublierait.
+    ///
+    /// `Archives/2026` devient `.Archives.2026` DANS la racine du compte : un
+    /// seul niveau de répertoires, comme Maildir++ le veut, et donc aucun
+    /// chemin composé de plusieurs morceaux venus du client.
+    fn chemin_du_dossier(&self, user: &[u8], name: &[u8]) -> Option<PathBuf> {
+        let name = ams_proto_imap::mailbox_name_trimmed(name);
+        if !ams_proto_imap::mailbox_name_is_safe(name) {
             return None;
         }
-        let nom = core::str::from_utf8(user).ok()?;
-        self.boites.get(nom)
+        let racine = self.racine(user)?;
+        let mut repertoire = std::vec::Vec::with_capacity(name.len().saturating_add(1));
+        repertoire.push(b'.');
+        for octet in name {
+            repertoire.push(if *octet == b'/' { b'.' } else { *octet });
+        }
+        // Le nom composé ne porte ni `/` ni `..` : la vérification l'a exclu, et
+        // la transcription ne peut pas en introduire.
+        Some(racine.join(std::ffi::OsString::from_vec(repertoire)))
+    }
+
+    /// La boîte d'un compte : `INBOX`, ou un dossier qui existe déjà.
+    fn maildir(&self, user: &[u8], name: &[u8]) -> Option<Arc<Maildir>> {
+        if name.eq_ignore_ascii_case(INBOX) {
+            let nom = core::str::from_utf8(user).ok()?;
+            return self.boites.get(nom).map(Arc::clone);
+        }
+        let name = ams_proto_imap::mailbox_name_trimmed(name);
+        let clef = (
+            core::str::from_utf8(user).ok()?.to_owned(),
+            core::str::from_utf8(name).ok()?.to_owned(),
+        );
+        let mut ouverts = self.dossiers.lock().ok()?;
+        if let Some(deja) = ouverts.get(&clef) {
+            return Some(Arc::clone(deja));
+        }
+        let chemin = self.chemin_du_dossier(user, name)?;
+        // ON N'OUVRE QUE CE QUI EXISTE. `Maildir::open` crée l'arborescence
+        // qu'on lui nomme : l'appeler sans regarder ferait de chaque `SELECT`
+        // sur une faute de frappe une boîte de plus.
+        if !chemin.is_dir() {
+            return None;
+        }
+        let boite = Arc::new(Maildir::open(&chemin, &self.hote, fresh_uid_validity()).ok()?);
+        ouverts.insert(clef, Arc::clone(&boite));
+        Some(boite)
+    }
+
+    /// Les dossiers d'un compte, par ordre de nom.
+    fn dossiers_de(&self, user: &[u8]) -> Vec<Vec<u8>> {
+        let mut noms = std::vec![INBOX.to_vec()];
+        let Some(racine) = self.racine(user) else {
+            return noms;
+        };
+        let Ok(entrees) = std::fs::read_dir(&racine) else {
+            return noms;
+        };
+        let mut dossiers = std::vec::Vec::new();
+        for entree in entrees.flatten() {
+            if !entree.path().is_dir() {
+                continue;
+            }
+            let nom = entree.file_name();
+            let Some(reste) = nom.as_bytes().strip_prefix(b".") else {
+                continue;
+            };
+            // ON NE REND QUE CE QU'ON SAURAIT RELIRE. Un répertoire déposé là
+            // par autre chose que nous — un point d'accueil, un `.git` — n'a pas
+            // à devenir une boîte que le client croira sienne.
+            let imap: Vec<u8> = reste
+                .iter()
+                .map(|octet| if *octet == b'.' { b'/' } else { *octet })
+                .collect();
+            if ams_proto_imap::mailbox_name_is_safe(&imap) {
+                dossiers.push(imap);
+            }
+        }
+        dossiers.sort_unstable();
+        noms.extend(dossiers);
+        noms
     }
 }
 
@@ -498,16 +602,58 @@ impl Mailboxes for BoitesImap {
         })
     }
 
-    fn name(&self, user: &[u8], index: usize) -> Option<&[u8]> {
-        // Une seule boîte par compte, et seulement si le compte existe.
+    fn name<'n>(&self, user: &[u8], index: usize, out: &'n mut [u8]) -> Option<&'n [u8]> {
+        // Le compte d'abord : sans lui, il n'y a pas de boîte à nommer.
         let nom = core::str::from_utf8(user).ok()?;
         self.boites.get(nom)?;
-        (index == 0).then_some(INBOX)
+        let noms = self.dossiers_de(user);
+        let nom = noms.get(index)?;
+        let longueur = nom.len().min(out.len());
+        for (place, octet) in out.iter_mut().zip(nom) {
+            *place = *octet;
+        }
+        out.get(..longueur)
+    }
+
+    fn create(&self, user: &[u8], name: &[u8]) -> Creation {
+        let name = ams_proto_imap::mailbox_name_trimmed(name);
+        // §6.3.4 : `INBOX` existe toujours. La session le dit déjà ; on ne s'y
+        // fie pas, puisque c'est ici qu'un répertoire naîtrait.
+        if name.eq_ignore_ascii_case(INBOX) {
+            return Creation::DejaLa;
+        }
+        let Some(chemin) = self.chemin_du_dossier(user, name) else {
+            return Creation::Refusee;
+        };
+        if chemin.is_dir() {
+            return Creation::DejaLa;
+        }
+        // §6.3.4 : CRÉER `A/B` CRÉE AUSSI `A`. En Maildir++ il n'y a qu'un
+        // niveau de répertoires, et les parents sont donc des répertoires
+        // frères — il faut les faire, sans quoi `LIST` montrerait une fille
+        // sans sa mère.
+        let mut parcouru = std::vec::Vec::new();
+        for composant in name.split(|octet| *octet == b'/') {
+            if !parcouru.is_empty() {
+                parcouru.push(b'/');
+            }
+            parcouru.extend_from_slice(composant);
+            let Some(chemin) = self.chemin_du_dossier(user, &parcouru) else {
+                return Creation::Refusee;
+            };
+            if chemin.is_dir() {
+                continue;
+            }
+            if Maildir::open(&chemin, &self.hote, fresh_uid_validity()).is_err() {
+                return Creation::Refusee;
+            }
+        }
+        Creation::Faite
     }
 
     fn open(&self, user: &[u8], name: &[u8]) -> Option<Self::Open> {
         let maildir = self.maildir(user, name)?;
-        let vue = MailboxView::open(maildir).ok()?;
+        let vue = MailboxView::open(&maildir).ok()?;
         let (drapeaux, dates) = vue
             .messages()
             .iter()
@@ -520,7 +666,7 @@ impl Mailboxes for BoitesImap {
             .collect();
         Some(BoiteImap {
             vue,
-            maildir: Arc::clone(maildir),
+            maildir: Arc::clone(&maildir),
             uid_validity: maildir.uid_validity().value(),
             drapeaux,
             dates,

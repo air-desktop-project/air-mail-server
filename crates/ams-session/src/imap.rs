@@ -329,12 +329,27 @@ pub trait Mailboxes {
     /// Ce qu'ouvrir rend.
     type Open: Mailbox;
 
-    /// Le nom de la boîte de rang `index`, ou `None` au-delà de la dernière.
+    /// Le nom de la boîte de rang `index`, écrit dans `out`, ou `None` au-delà
+    /// de la dernière.
     ///
     /// Un accès par rang plutôt qu'une liste : la session n'alloue pas, et une
     /// tranche de tranches ferait porter à l'appelant une durée de vie dont il
-    /// n'a que faire.
-    fn name(&self, user: &[u8], index: usize) -> Option<&[u8]>;
+    /// n'a que faire. **Le nom est ÉCRIT** plutôt que prêté, parce qu'un magasin
+    /// qui découvre ses boîtes sur un disque ne peut pas prêter ce qu'il vient
+    /// de lire.
+    fn name<'n>(&self, user: &[u8], index: usize, out: &'n mut [u8]) -> Option<&'n [u8]>;
+
+    /// Crée une boîte (§6.3.4).
+    ///
+    /// # LE NOM VIENT DU CLIENT ET DEVIENT UN CHEMIN
+    ///
+    /// C'est la frontière la plus délicate du serveur. La session a déjà écarté
+    /// ce que la grammaire refuse — voir `mailbox_name_is_safe` — mais **le
+    /// magasin ne doit pas s'y fier** : il vérifie à son tour, parce que c'est
+    /// lui qui touche le système de fichiers, et qu'une vérification faite
+    /// ailleurs est une vérification qu'on ne voit pas en lisant l'endroit qui
+    /// en dépend.
+    fn create(&self, user: &[u8], name: &[u8]) -> Creation;
 
     /// Ouvre une boîte, ou dit qu'elle n'existe pas.
     fn open(&self, user: &[u8], name: &[u8]) -> Option<Self::Open>;
@@ -348,6 +363,17 @@ pub trait Mailboxes {
     /// permet d'abandonner un message à moitié reçu sans que personne ne l'ait
     /// vu.
     fn append(&self, user: &[u8], name: &[u8]) -> Option<Self::Deposit>;
+}
+
+/// Ce qu'une création de boîte a donné.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Creation {
+    /// La boîte est créée.
+    Faite,
+    /// Elle existait déjà (§6.3.4 : `[ALREADYEXISTS]`).
+    DejaLa,
+    /// Le magasin n'en a pas voulu.
+    Refusee,
 }
 
 /// Un message en cours de dépôt.
@@ -381,8 +407,12 @@ impl<T: Mailboxes> Mailboxes for &T {
     type Open = T::Open;
     type Deposit = T::Deposit;
 
-    fn name(&self, user: &[u8], index: usize) -> Option<&[u8]> {
-        (**self).name(user, index)
+    fn name<'n>(&self, user: &[u8], index: usize, out: &'n mut [u8]) -> Option<&'n [u8]> {
+        (**self).name(user, index, out)
+    }
+
+    fn create(&self, user: &[u8], name: &[u8]) -> Creation {
+        (**self).create(user, name)
     }
 
     fn open(&self, user: &[u8], name: &[u8]) -> Option<Self::Open> {
@@ -415,7 +445,11 @@ pub const USER_MAX_OCTETS: usize = 64;
 pub const SEQUENCE_TEXT_MAX: usize = 1024;
 
 /// La longueur d'un nom de boîte que la session retient.
-pub const MAILBOX_NAME_MAX: usize = 255;
+///
+/// **C'est celle de la grammaire, et pas une seconde** : ce que la session
+/// retient et ce que le protocole admet doivent coïncider, faute de quoi un nom
+/// accepté serait tronqué — donc un autre nom.
+pub const MAILBOX_NAME_MAX: usize = ams_proto_imap::MAILBOX_NAME_MAX;
 
 /// Ce qu'une réponse SASL peut faire au plus, une fois décodée.
 ///
@@ -949,8 +983,8 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             Command::Examine => self.select(lue.arguments, true, out),
             Command::List => self.list(lue.arguments, out),
             Command::Status => self.status(lue.arguments, out),
+            Command::Create => self.create(lue.arguments, out),
             Command::Enable
-            | Command::Create
             | Command::Delete
             | Command::Rename
             | Command::Subscribe
@@ -1470,9 +1504,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         } else {
             b")] Flags permitted\r\n"
         })?;
-        plume.pousser(b"* LIST () \"/\" ")?;
-        plume.pousser(nom)?;
-        plume.pousser(b"\r\n")?;
+        plume.nom_de_boite(b"* LIST () \"/\" ", nom, b"\r\n")?;
         let ecrits = plume.ecrits();
 
         // Le nom tient : `un_nom` a écrit dans un tampon de cette taille-là.
@@ -2312,12 +2344,11 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         // liste, ce qui est ce qu'il attend d'un serveur à un seul espace.
         let mut plume = Plume::neuve(out);
         let mut index = 0_usize;
-        while let Some(nom) = self.boites.name(self.user(), index) {
+        let mut place = [0_u8; MAILBOX_NAME_MAX];
+        while let Some(nom) = self.boites.name(self.user(), index, &mut place) {
             index = index.saturating_add(1);
             if correspond(motif, nom) {
-                plume.pousser(b"* LIST () \"/\" ")?;
-                plume.pousser(nom)?;
-                plume.pousser(b"\r\n")?;
+                plume.nom_de_boite(b"* LIST () \"/\" ", nom, b"\r\n")?;
             }
         }
         let ecrits = plume.ecrits();
@@ -2432,6 +2463,56 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         })
     }
 
+    /// `CREATE` (§6.3.4).
+    ///
+    /// # LE PREMIER ENDROIT OÙ UN NOM DE CLIENT DEVIENT UN CHEMIN
+    ///
+    /// Jusqu'ici, `INBOX` se comparait à une constante et rien de ce que le
+    /// client écrivait ne devenait un morceau de chemin. Cette commande-là fait
+    /// exactement cela, et c'est pourquoi elle refuse tout ce qu'elle ne sait
+    /// pas transcrire SANS RIEN TRANSFORMER : rendre au client un nom qui n'est
+    /// pas celui qu'il a demandé lui ferait chercher longtemps.
+    fn create<'b>(&mut self, arguments: &[u8], out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
+        if self.etat == State::NotAuthenticated {
+            return self.faute(b"Command is not allowed before authentication", out);
+        }
+        let mut place = [0_u8; MAILBOX_NAME_MAX];
+        let Some(nom) = self.un_nom(arguments, &mut place) else {
+            return self.faute(b"CREATE expects a mailbox name", out);
+        };
+        // §6.3.4 : un `/` final ne change pas la boîte désignée.
+        let nom = ams_proto_imap::mailbox_name_trimmed(nom);
+        // §6.3.4 : `INBOX` existe toujours, et ne se crée donc pas.
+        if nom.eq_ignore_ascii_case(b"INBOX") {
+            return self.termine(
+                Status::No,
+                b"[ALREADYEXISTS] INBOX always exists",
+                Action::Continue,
+                out,
+            );
+        }
+        if !ams_proto_imap::mailbox_name_is_safe(nom) {
+            return self.termine(
+                Status::No,
+                b"[CANNOT] This mailbox name is not served",
+                Action::Continue,
+                out,
+            );
+        }
+        match self.boites.create(self.user(), nom) {
+            Creation::Faite => self.termine(Status::Ok, b"CREATE completed", Action::Continue, out),
+            Creation::DejaLa => self.termine(
+                Status::No,
+                b"[ALREADYEXISTS] Mailbox already exists",
+                Action::Continue,
+                out,
+            ),
+            Creation::Refusee => {
+                self.termine(Status::No, b"Cannot create mailbox", Action::Continue, out)
+            }
+        }
+    }
+
     /// `STATUS` (§6.3.11) : ce qu'une boîte contient, sans l'ouvrir.
     fn status<'b>(&mut self, arguments: &[u8], out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
         if self.etat == State::NotAuthenticated {
@@ -2468,9 +2549,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         // filtrer demanderait d'analyser une liste dont aucun élément ne change
         // ce qu'on sait de la boîte.
         let mut plume = Plume::neuve(out);
-        plume.pousser(b"* STATUS ")?;
-        plume.pousser(nom)?;
-        plume.pousser(b" (MESSAGES ")?;
+        plume.nom_de_boite(b"* STATUS ", nom, b" (MESSAGES ")?;
         plume.nombre(u64::from(exists))?;
         plume.pousser(b" UIDNEXT ")?;
         plume.nombre(u64::from(uid_next))?;
@@ -2959,9 +3038,16 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         let premier = lus.next()?.ok()?;
         let ecrit = premier.value(place).ok()?;
         // LE NOM VA DANS UNE RÉPONSE, et il vient du client. On n'y laisse que
-        // de l'ASCII imprimable sans espace : le recopier tel quel ferait écrire
-        // au client une réponse de notre part.
-        if ecrit.is_empty() || !ecrit.iter().all(u8::is_ascii_graphic) {
+        // de l'ASCII imprimable — espace compris, parce que « Sent Messages »
+        // est un nom de dossier des plus ordinaires, et que la réponse le CITE
+        // entre guillemets. Ce qui est exclu, ce sont les octets qui feraient
+        // écrire au client une réponse de notre part.
+        if ecrit.is_empty()
+            || !ecrit
+                .iter()
+                .all(|octet| octet.is_ascii_graphic() || *octet == b' ')
+            || ecrit.iter().any(|octet| matches!(*octet, b'"' | b'\\'))
+        {
             return None;
         }
         let longueur = ecrit.len();
@@ -3328,6 +3414,23 @@ impl<'a> Plume<'a> {
         place.copy_from_slice(morceau);
         self.ecrits = fin;
         Ok(())
+    }
+
+    /// Écrit un nom de boîte, ENTRE GUILLEMETS, entouré de ce qu'on lui donne.
+    ///
+    /// # POURQUOI TOUJOURS LES GUILLEMETS
+    ///
+    /// Un nom peut porter un espace — « Sent Messages » — et l'écrire nu ferait
+    /// lire au client deux mots là où il y en a un. Ne citer que les noms qui en
+    /// ont besoin demanderait une condition de plus, qu'il faudrait avoir juste
+    /// à chaque endroit ; citer toujours n'en demande aucune, et la grammaire
+    /// admet la forme citée partout où un nom paraît.
+    fn nom_de_boite(&mut self, avant: &[u8], nom: &[u8], apres: &[u8]) -> Result<(), Error> {
+        self.pousser(avant)?;
+        self.pousser(b"\"")?;
+        self.pousser(nom)?;
+        self.pousser(b"\"")?;
+        self.pousser(apres)
     }
 
     /// Écrit un entier décimal.

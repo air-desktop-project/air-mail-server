@@ -80,7 +80,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_dmarc` | `seeds/dmarc` | politique et alignement — **l'alignement est symétrique** |
 | `fuzz_ams_dmarc_report` | `seeds/dmarc-report` | destinations et rapport agrégé — **le rapport ne s'injecte pas** |
 | `fuzz_ams_imap` | `seeds/imap` | découpage d'une commande IMAP — **le client ne choisit pas où l'on coupe**, et l'itérateur d'arguments s'arrête |
-| `fuzz_ams_imap_fetch` | `seeds/imap-fetch` | ce qu'un `FETCH`, un `STORE`, un `SEARCH` et un `APPEND` désignent — **les deux lectures d'un ensemble s'accordent**, un drapeau accepté se réécrit, une recherche décide sans boucler, et **ce qu'un `APPEND` annonce, on peut le tenir** |
+| `fuzz_ams_imap_fetch` | `seeds/imap-fetch` | ce qu'un `FETCH`, un `STORE`, un `SEARCH` et un `APPEND` désignent — **les deux lectures d'un ensemble s'accordent**, un drapeau accepté se réécrit, une recherche décide sans boucler, et **ce qu'un `APPEND` annonce, on peut le tenir** ; **un nom de boîte accepté ne sort pas de sa racine** |
 | `fuzz_ams_session_imap` | `seeds/imap-session` | la session IMAP — **jamais authentifié sans chiffrement**, un intervalle de `FETCH` ne déborde pas du message, et **une émission conclut** |
 | `fuzz_ams_smtp_client` | `seeds/smtp-client` | réponses lues et corps émis — **le message ne se termine pas tout seul** |
 | `fuzz_ams_mime_compose` | `seeds/mime-compose` | les messages de rapport — **la pièce jointe se relit, la liste blanche tient** |
@@ -828,6 +828,7 @@ coûterait du courrier sans rien protéger — on ne les interprète jamais.
 | 2026-08-29 | `fuzz_ams_session_imap` (avec `COPY`) | 2 993 293 (181 s) | 0 |
 | 2026-08-29 | `fuzz_ams_session_imap` (avec `MOVE`) | 2 907 842 (181 s) | 0 |
 | 2026-08-29 | `fuzz_ams_imap_fetch` (avec `APPEND`) | 5 960 657 (181 s) | 0 |
+| 2026-08-29 | `fuzz_ams_imap_fetch` (noms de boîtes) | 5 427 497 (181 s) | 0 |
 | 2026-08-29 | `fuzz_ams_config` (avec l'écoute IMAP) | 208 794 (71 s) | 0 |
 | 2026-08-29 | `fuzz_ams_config` (avec SPF) | 193 256 (61 s) | 0 |
 | 2026-08-29 | `fuzz_ams_session_smtp` (avec SPF) | 381 710 (61 s) | 0 |

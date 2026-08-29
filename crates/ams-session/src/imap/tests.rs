@@ -238,15 +238,43 @@ pub struct Boites {
     ecrit: Ecrit,
     /// Ce qu'une validation a produit, partagé avec le test.
     valide: Valide,
+    /// Les boîtes créées pendant la session.
+    creees: std::rc::Rc<std::cell::RefCell<std::vec::Vec<std::vec::Vec<u8>>>>,
 }
 
 impl Mailboxes for Boites {
     type Open = Boite;
 
-    fn name(&self, _user: &[u8], index: usize) -> Option<&[u8]> {
-        [&b"INBOX"[..], b"Archives", b"Archives/2026"]
+    fn name<'n>(&self, _user: &[u8], index: usize, out: &'n mut [u8]) -> Option<&'n [u8]> {
+        // Les boîtes créées s'ajoutent à celles qui sont là de tout temps.
+        let creees = self.creees.borrow();
+        let nom = [&b"INBOX"[..], b"Archives", b"Archives/2026"]
             .get(index)
             .copied()
+            .or_else(|| {
+                creees
+                    .get(index.saturating_sub(3))
+                    .map(std::vec::Vec::as_slice)
+            })?;
+        let longueur = nom.len().min(out.len());
+        for (place, octet) in out.iter_mut().zip(nom) {
+            *place = *octet;
+        }
+        out.get(..longueur)
+    }
+
+    fn create(&self, _user: &[u8], name: &[u8]) -> super::Creation {
+        // La boîte d'épreuve refuse ce qui la fâche, comme un magasin réel.
+        if name.starts_with(b"Impossible") {
+            return super::Creation::Refusee;
+        }
+        let deja = matches!(name, b"Archives" | b"Archives/2026" | b"Trouee" | b"Tetue")
+            || self.creees.borrow().iter().any(|connu| connu == name);
+        if deja {
+            return super::Creation::DejaLa;
+        }
+        self.creees.borrow_mut().push(name.to_vec());
+        super::Creation::Faite
     }
 
     type Deposit = Depot;
@@ -700,8 +728,7 @@ fn ce_qu_on_ne_sert_pas_encore_le_dit_sans_accuser_le_client() {
     let mut session = nouvelle(true);
     dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
     for commande in [
-        &b"a002 CREATE test\r\n"[..],
-        b"a003 DELETE test\r\n",
+        &b"a003 DELETE test\r\n"[..],
         b"a004 RENAME a b\r\n",
         b"a005 SUBSCRIBE a\r\n",
         b"a006 UNSUBSCRIBE a\r\n",
@@ -746,7 +773,7 @@ fn select_dit_tout_ce_que_le_client_ne_sait_pas() {
         "* OK [UIDNEXT 31] UIDNEXT\r\n",
         "* FLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft)\r\n",
         "* OK [PERMANENTFLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft)] Flags permitted\r\n",
-        "* LIST () \"/\" INBOX\r\n",
+        "* LIST () \"/\" \"INBOX\"\r\n",
         "a002 OK [READ-WRITE] SELECT completed\r\n",
     ] {
         assert!(texte.contains(ligne), "{ligne:?} manque dans :\n{texte}");
@@ -826,13 +853,16 @@ fn les_deux_jokers_de_list_ne_disent_pas_la_meme_chose() {
     let mut session = nouvelle(true);
     dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
     let (tout, _) = dire(&mut session, b"a002 LIST \"\" *\r\n");
-    assert!(tout.contains("* LIST () \"/\" INBOX\r\n"), "{tout}");
-    assert!(tout.contains("* LIST () \"/\" Archives\r\n"), "{tout}");
-    assert!(tout.contains("* LIST () \"/\" Archives/2026\r\n"), "{tout}");
+    assert!(tout.contains("* LIST () \"/\" \"INBOX\"\r\n"), "{tout}");
+    assert!(tout.contains("* LIST () \"/\" \"Archives\"\r\n"), "{tout}");
+    assert!(
+        tout.contains("* LIST () \"/\" \"Archives/2026\"\r\n"),
+        "{tout}"
+    );
 
     let (plat, _) = dire(&mut session, b"a003 LIST \"\" %\r\n");
-    assert!(plat.contains("\"/\" INBOX\r\n"), "{plat}");
-    assert!(plat.contains("\"/\" Archives\r\n"), "{plat}");
+    assert!(plat.contains("\"/\" \"INBOX\"\r\n"), "{plat}");
+    assert!(plat.contains("\"/\" \"Archives\"\r\n"), "{plat}");
     assert!(
         !plat.contains("Archives/2026"),
         "`%` ne traverse pas le séparateur :\n{plat}"
@@ -866,7 +896,7 @@ fn status_dit_ce_qu_une_boite_contient_sans_l_ouvrir() {
     dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
     let (texte, _) = dire(&mut session, b"a002 STATUS INBOX (MESSAGES)\r\n");
     assert!(
-        texte.contains("* STATUS INBOX (MESSAGES 3 UIDNEXT 31 UIDVALIDITY 42)\r\n"),
+        texte.contains("* STATUS \"INBOX\" (MESSAGES 3 UIDNEXT 31 UIDVALIDITY 42)\r\n"),
         "{texte}"
     );
     assert!(texte.contains("a002 OK STATUS completed"), "{texte}");
@@ -887,7 +917,7 @@ fn status_repond_aussi_de_la_boite_ouverte() {
     dire(&mut session, b"a002 SELECT INBOX\r\n");
     let (texte, _) = dire(&mut session, b"a003 STATUS INBOX (MESSAGES)\r\n");
     assert!(
-        texte.contains("* STATUS INBOX (MESSAGES 3 UIDNEXT 31 UIDVALIDITY 42)\r\n"),
+        texte.contains("* STATUS \"INBOX\" (MESSAGES 3 UIDNEXT 31 UIDVALIDITY 42)\r\n"),
         "{texte}"
     );
     // Et la sélection n'a pas bougé.
@@ -897,7 +927,7 @@ fn status_repond_aussi_de_la_boite_ouverte() {
     // Une AUTRE boîte, elle, s'ouvre pour la question.
     let (autre, _) = dire(&mut session, b"a004 STATUS Archives (MESSAGES)\r\n");
     assert!(
-        autre.contains("* STATUS Archives (MESSAGES 0 UIDNEXT 1 UIDVALIDITY 42)\r\n"),
+        autre.contains("* STATUS \"Archives\" (MESSAGES 0 UIDNEXT 1 UIDVALIDITY 42)\r\n"),
         "{autre}"
     );
     assert_eq!(session.selected(), b"INBOX");
@@ -936,9 +966,12 @@ fn les_commandes_de_boite_mal_formees_sont_des_fautes() {
         let (texte, _) = dire(&mut session, commande);
         assert!(texte.contains(attendu), "{commande:?} : {texte}");
     }
-    // Un nom de boîte qu'on refuse d'écrire dans une réponse.
-    let (texte, _) = dire(&mut session, b"a006 SELECT \"a b\"\r\n");
-    assert!(texte.contains("SELECT expects"), "{texte}");
+    // UN ESPACE EST ADMIS — « Sent Messages » est un nom ordinaire —, et la
+    // réponse cite le nom. Ce qui est refusé, c'est ce qui casserait la réponse.
+    let (espace, _) = dire(&mut session, b"a006 SELECT \"a b\"\r\n");
+    assert!(espace.contains("NO [NONEXISTENT]"), "{espace}");
+    let (guillemet, _) = dire(&mut session, b"a006 SELECT \"a\\\"b\"\r\n");
+    assert!(guillemet.contains("SELECT expects"), "{guillemet}");
     // Un argument que la grammaire n'a pas su lire.
     let (texte, _) = dire(&mut session, b"a007 SELECT \"sans fin\r\n");
     assert!(texte.contains("SELECT expects"), "{texte}");
@@ -1664,11 +1697,19 @@ fn un_message_disparu_est_saute_sans_arreter_le_fetch() {
 fn un_magasin_partage_se_passe_par_reference() {
     let boites = Boites::default();
     let partage = &boites;
-    assert_eq!(Mailboxes::name(&partage, b"jean", 0), Some(&b"INBOX"[..]));
+    let mut place = [0_u8; 64];
+    assert_eq!(
+        Mailboxes::name(&partage, b"jean", 0, &mut place),
+        Some(&b"INBOX"[..])
+    );
     assert!(Mailboxes::open(&partage, b"jean", b"INBOX").is_some());
     assert!(Mailboxes::open(&partage, b"jean", b"Inconnue").is_none());
     assert!(Mailboxes::append(&partage, b"jean", b"INBOX").is_some());
     assert!(Mailboxes::append(&partage, b"jean", b"Inconnue").is_none());
+    assert_eq!(
+        Mailboxes::create(&partage, b"jean", b"Archives"),
+        super::Creation::DejaLa
+    );
 }
 
 /// Les commandes qui exigent un état le disent dans les deux sens.
@@ -2838,6 +2879,137 @@ fn un_append_du_chemin_ordinaire_se_refuse_en_le_disant() {
     let (texte, _) = dire(&mut session, b"a002 APPEND INBOX\r\n");
     assert!(
         texte.contains("BAD APPEND expects a mailbox name and a message literal"),
+        "{texte}"
+    );
+}
+
+// ── `CREATE` ────────────────────────────────────────────────────────────────
+
+/// **Une boîte créée se voit** : `LIST` la rend, et `SELECT` l'ouvre.
+#[test]
+fn une_boite_creee_apparait_dans_la_liste() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (texte, _) = dire(&mut session, b"a002 CREATE Brouillons\r\n");
+    assert!(texte.contains("a002 OK CREATE completed"), "{texte}");
+    let (liste, _) = dire(&mut session, b"a003 LIST \"\" *\r\n");
+    assert!(
+        liste.contains("* LIST () \"/\" \"Brouillons\"\r\n"),
+        "{liste}"
+    );
+}
+
+/// **§6.3.4 : `INBOX` existe toujours**, et ne se crée donc pas.
+#[test]
+fn inbox_ne_se_cree_pas() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    for commande in [&b"a002 CREATE INBOX\r\n"[..], b"a003 CREATE inbox\r\n"] {
+        let (texte, _) = dire(&mut session, commande);
+        assert!(
+            texte.contains("NO [ALREADYEXISTS] INBOX always exists"),
+            "{commande:?} : {texte}"
+        );
+    }
+}
+
+/// **Une boîte qui existe déjà se dit `[ALREADYEXISTS]`** (§6.3.4).
+#[test]
+fn une_boite_deja_la_se_dit() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (texte, _) = dire(&mut session, b"a002 CREATE Archives\r\n");
+    assert!(
+        texte.contains("NO [ALREADYEXISTS] Mailbox already exists"),
+        "{texte}"
+    );
+    // Et deux fois la même création, aussi.
+    dire(&mut session, b"a003 CREATE Neuve\r\n");
+    let (deux, _) = dire(&mut session, b"a004 CREATE Neuve\r\n");
+    assert!(deux.contains("NO [ALREADYEXISTS]"), "{deux}");
+}
+
+/// **Un nom qu'on ne sait pas transcrire est REFUSÉ, pas transformé.** Rendre au
+/// client un nom qui n'est pas celui qu'il a demandé lui ferait chercher
+/// longtemps — et transcrire, c'est ouvrir la porte à ce qu'on ne voit pas.
+#[test]
+fn un_nom_dangereux_se_refuse_sans_le_transformer() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    for nom in [
+        &b"\"../etc\""[..],
+        b"\"a/../b\"",
+        b"\"Sent.2026\"",
+        b"\"a//b\"",
+        b"\"/absolu\"",
+        b"\"a%b\"",
+    ] {
+        let mut commande = std::vec::Vec::from(&b"a002 CREATE "[..]);
+        commande.extend_from_slice(nom);
+        commande.extend_from_slice(b"\r\n");
+        let (texte, _) = dire(&mut session, &commande);
+        assert!(
+            texte.contains("NO [CANNOT] This mailbox name is not served"),
+            "{:?} : {texte}",
+            core::str::from_utf8(nom)
+        );
+    }
+}
+
+/// **« Sent Messages » est un nom de dossier des plus ordinaires**, et la
+/// réponse le cite entre guillemets plutôt que de le rendre nu — deux mots là où
+/// il y en a un se liraient mal.
+#[test]
+fn un_nom_avec_un_espace_se_cree_et_se_cite() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (texte, _) = dire(&mut session, b"a002 CREATE \"Sent Messages\"\r\n");
+    assert!(texte.contains("a002 OK CREATE completed"), "{texte}");
+    let (liste, _) = dire(&mut session, b"a003 LIST \"\" *\r\n");
+    assert!(
+        liste.contains("* LIST () \"/\" \"Sent Messages\"\r\n"),
+        "{liste}"
+    );
+}
+
+/// Un `/` final ne change pas la boîte désignée (§6.3.4).
+#[test]
+fn un_slash_final_ne_change_pas_la_boite() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (texte, _) = dire(&mut session, b"a002 CREATE \"Archives/\"\r\n");
+    assert!(texte.contains("NO [ALREADYEXISTS]"), "{texte}");
+}
+
+/// Un magasin qui refuse le dit, et ce n'est pas une faute du client.
+#[test]
+fn un_magasin_qui_refuse_de_creer_le_dit() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (texte, _) = dire(&mut session, b"a002 CREATE Impossible\r\n");
+    assert!(texte.contains("NO Cannot create mailbox"), "{texte}");
+}
+
+#[test]
+fn un_create_mal_forme_est_une_faute() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    for commande in [&b"a002 CREATE\r\n"[..], b"a003 CREATE \r\n"] {
+        let (texte, _) = dire(&mut session, commande);
+        assert!(
+            texte.contains("BAD CREATE expects a mailbox name"),
+            "{commande:?} : {texte}"
+        );
+    }
+}
+
+/// **Un `CREATE` avant authentification n'est pas un `CREATE`.**
+#[test]
+fn un_create_avant_authentification_est_refuse() {
+    let mut session = nouvelle(true);
+    let (texte, _) = dire(&mut session, b"a001 CREATE Brouillons\r\n");
+    assert!(
+        texte.contains("BAD Command is not allowed before authentication"),
         "{texte}"
     );
 }

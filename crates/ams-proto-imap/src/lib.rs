@@ -35,6 +35,7 @@ mod fetch;
 mod flags;
 mod frame;
 mod limits;
+mod mailbox;
 mod response;
 mod search;
 mod sequence;
@@ -50,6 +51,10 @@ pub use fetch::{FETCH_ITEMS_MAX, Fetch, FetchItem, Partial, Section};
 pub use flags::{Flags, INTERNALDATE_MAX, write_internal_date};
 pub use frame::{CommandReader, Need, literal_announcement};
 pub use limits::Limits;
+pub use mailbox::{
+    MAILBOX_COMPONENT_MAX, MAILBOX_DEPTH_MAX, MAILBOX_NAME_MAX, MAILBOX_SEPARATOR,
+    mailbox_name_is_safe, mailbox_name_trimmed,
+};
 pub use response::{
     Status, encode_continuation, encode_tagged, encode_untagged, encode_untagged_parts,
 };

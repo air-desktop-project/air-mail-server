@@ -651,8 +651,9 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         eprintln!(
             "air-mail-server : IMAP écoute sur {adresse} — SEULE `INBOX` EST SERVIE : \
              `SELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`, `EXPUNGE`, `SEARCH`, `COPY` et \
-             `MOVE` et `APPEND` répondent. UNE COPIE, UN DÉPLACEMENT OU UN DÉPÔT NE PEUT VISER QUE \
-             `INBOX`, faute d'une autre boîte où viser. UN `EXPUNGE` EFFACE POUR DE BON, et un `CLOSE` \
+             `MOVE`, `APPEND` et `CREATE` répondent ; `DELETE` et `RENAME` non. UN NOM DE BOÎTE \
+             DEVIENT UN RÉPERTOIRE : seuls les noms qu'on sait transcrire sans risque sont \
+             acceptés, et jamais transformés. UN `EXPUNGE` EFFACE POUR DE BON, et un `CLOSE` \
              aussi. Les critères de recherche qui demandent de LIRE le message (`SUBJECT`, \
              `BODY`, `FROM`…) sont refusés, pas rendus faux."
         );
@@ -666,7 +667,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
                 ..ams_proto_imap::Limits::DEFAULT
             },
             Arc::clone(&politique),
-            Arc::new(BoitesImap::new(Arc::clone(&boites))),
+            Arc::new(BoitesImap::new(Arc::clone(&boites), domaine)),
             Arc::clone(&garde),
             options_de_service.clone(),
             arret(),

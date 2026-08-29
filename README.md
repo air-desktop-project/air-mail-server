@@ -31,7 +31,7 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 >
 > **Il ouvre les boîtes** : IMAP sur un troisième port, `STARTTLS` puis `LOGIN`
 > ou `AUTHENTICATE PLAIN`, `SELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`,
-> `EXPUNGE`, `SEARCH`, `COPY`, `MOVE` et `APPEND` sur `INBOX` — un message traverse la socket sans jamais tenir en
+> `EXPUNGE`, `SEARCH`, `COPY`, `MOVE`, `APPEND` et `CREATE` — un message traverse la socket sans jamais tenir en
 > mémoire, les drapeaux s'écrivent dans les noms de fichiers Maildir, et un
 > effacement n'a jamais lieu sur une marque périmée.
 >
@@ -75,7 +75,7 @@ horloge.
 | `ams-sasl` | RFC 4422/4616 : `PLAIN` et son base64 | **implémenté** |
 | `ams-proto-pop3` | RFC 1939 | **commandes et réponses** |
 | `ams-dns` | RFC 1035 : le codec d'un message | **question encodée, réponse décodée** |
-| `ams-proto-imap` | RFC 9051 (IMAP4rev2) | **découpage, tag, littéraux, arguments, ensembles de séquences, éléments de `FETCH`, drapeaux de `STORE`, critères de `SEARCH`, ligne d'`APPEND`, date-heure, réponses** |
+| `ams-proto-imap` | RFC 9051 (IMAP4rev2) | **découpage, tag, littéraux, arguments, ensembles de séquences, éléments de `FETCH`, drapeaux de `STORE`, critères de `SEARCH`, ligne d'`APPEND`, date-heure, noms de boîtes, réponses** |
 | `ams-proto-http` | RFC 9110 / 9112 | vide |
 
 ### Étage 2 — décisions, sans entrée-sortie
@@ -470,18 +470,14 @@ découpage existe pour fermer. Un tag illisible, lui, ne ferme rien : la command
 ## Les boîtes IMAP : lire sans jamais tenir un message
 
 `SELECT`, `EXAMINE`, `CLOSE`, `UNSELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`,
-`EXPUNGE`, `SEARCH`, `COPY`, `MOVE`, `APPEND` et leurs formes `UID` servent la
-boîte du compte. Ce serveur en a **une par compte, et elle
-s'appelle `INBOX`** — le nom que la RFC 9051 §5.1 réserve pour cela. Créer des
-dossiers demanderait `CREATE`, un endroit où les mettre et une règle pour ce
-qu'un nom a le droit d'être ; rien de tout cela n'est écrit, et prétendre en
-avoir plusieurs ferait mentir `LIST`.
+`EXPUNGE`, `SEARCH`, `COPY`, `MOVE`, `APPEND`, `CREATE` et leurs formes `UID`
+servent les boîtes du compte. Chacun a son `INBOX` — le nom que la RFC 9051 §5.1
+réserve pour cela — et les dossiers que `CREATE` lui a faits.
 
-**AUCUN CHEMIN N'EST CONSTRUIT À PARTIR D'UN NOM DE BOÎTE.** Le nom vient du
-client ; `INBOX` est comparé à une constante, et la boîte qu'il désigne est celle
-que la table des comptes a déjà ouverte au démarrage. Un nom qui n'est pas
-`INBOX` n'ouvre rien — il ne devient jamais un morceau de chemin, et il n'y a
-donc aucune traversée de répertoire à empêcher.
+**UN NOM DE BOÎTE DEVIENT UN RÉPERTOIRE**, et c'est la frontière la plus
+délicate du serveur : voir « `CREATE` » plus bas pour les règles qui la tiennent,
+et ce qu'elles ferment. Ce qu'on n'ouvre jamais, en revanche, c'est un répertoire
+qu'on n'a pas fait : un `SELECT` sur une faute de frappe ne crée rien.
 
 **UN MESSAGE NE PASSE JAMAIS PAR LA SESSION.** `FETCH` peut demander dix
 mégaoctets ; les retenir pour les écrire ensuite donnerait au client le droit de
@@ -742,8 +738,45 @@ date-heure du message ; elle est posée sur le fichier encore dans `tmp/`, avant
 le renommage — c'est-à-dire avant que quiconque puisse le voir. Et `INTERNALDATE`
 la relit à l'identique : lire ce qu'on écrit est la moindre des cohérences.
 
-Ce qui n'y est toujours pas : `CREATE`/`DELETE`/`RENAME`, `ENVELOPE` et
-`BODYSTRUCTURE`. Ils sont reconnus, leur
+## `CREATE` : là où un nom de client devient un chemin
+
+Jusqu'ici, ce dépôt pouvait écrire en toutes lettres qu'**aucun chemin n'était
+construit à partir d'un nom de boîte** : `INBOX` se comparait à une constante.
+`CREATE` met fin à cela, et c'est la frontière la plus délicate du serveur.
+
+**On refuse, on ne transforme pas.** La RFC autorise beaucoup plus que ce serveur
+n'accepte : de l'UTF-8, des points, des caractères qu'un système de fichiers lit
+mal. Un nom qu'on ne saurait pas transcrire sans risque est **refusé**, jamais
+adapté — rendre au client un nom qui n'est pas celui qu'il a demandé lui ferait
+chercher longtemps. Les règles tiennent en un endroit : non vide et borné,
+découpé sur `/` sans composant vide, profondeur bornée, **aucun point** (ce qui
+ferme `..`), et de l'ASCII imprimable sans `\`, `%`, `*`, `"` ni `:`. Un espace
+est admis : « Sent Messages » est un nom de dossier des plus ordinaires.
+
+**La règle est vérifiée DEUX FOIS**, par la session puis par le magasin. Non par
+défiance de la première, mais parce que c'est le magasin qui touche le système de
+fichiers : une vérification faite ailleurs est une vérification qu'on ne voit pas
+en lisant l'endroit qui en dépend, et elle survivra à un appelant qui
+l'oublierait.
+
+**Sur le disque, un seul niveau de répertoires.** `Archives/2026` devient
+`.Archives.2026` dans la racine du compte, à la façon de Maildir++ : le chemin
+n'a donc jamais plus d'un morceau venu du client. Une propriété de fuzz le
+vérifie sur la transcription elle-même — pas de séparateur, pas de `..`, pas
+d'octet de contrôle — sur des noms arbitraires.
+
+**Créer `A/B/C` crée aussi `A` et `A/B`** (§6.3.4). En Maildir++ les parents sont
+des répertoires frères, et les omettre ferait montrer par `LIST` une fille sans
+sa mère.
+
+**Les noms se citent dans les réponses.** Toujours, plutôt que seulement quand
+c'est nécessaire : ne citer que les noms qui en ont besoin demanderait une
+condition de plus, qu'il faudrait avoir juste à chaque endroit.
+
+`INBOX` ne se crée pas (§6.3.4 : elle existe toujours), une boîte déjà là se dit
+`[ALREADYEXISTS]`, et un magasin qui refuse le dit sans accuser le client.
+
+Ce qui n'y est toujours pas : `DELETE`, `RENAME`, `ENVELOPE` et `BODYSTRUCTURE`. Ils sont reconnus, leur
 état est vérifié, et la session répond `NO [UNAVAILABLE]` — `NO` et non `BAD`,
 parce que la commande est correcte et permise et que c'est ce serveur qui ne la
 sert pas. `APPEND` demandera un chemin qui écoule au fil de l'eau, comme le

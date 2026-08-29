@@ -136,8 +136,27 @@ struct Boites;
 
 impl Mailboxes for Boites {
     type Open = Boite;
-    fn name(&self, _user: &[u8], index: usize) -> Option<&[u8]> {
-        (index == 0).then_some(&b"INBOX"[..])
+    fn name<'n>(&self, _user: &[u8], index: usize, out: &'n mut [u8]) -> Option<&'n [u8]> {
+        let nom: &[u8] = match index {
+            0 => b"INBOX",
+            1 => b"Brouillons",
+            _ => return None,
+        };
+        let longueur = nom.len().min(out.len());
+        for (place, octet) in out.iter_mut().zip(nom) {
+            *place = *octet;
+        }
+        out.get(..longueur)
+    }
+
+    fn create(&self, _user: &[u8], name: &[u8]) -> ams_session::imap::Creation {
+        // La boîte d'épreuve ne crée rien : elle dit ce qui existe, et refuse
+        // le reste. C'est le passage sur le fil qu'on éprouve ici.
+        if name == b"Brouillons" {
+            ams_session::imap::Creation::DejaLa
+        } else {
+            ams_session::imap::Creation::Faite
+        }
     }
     type Deposit = Depot;
 
@@ -499,7 +518,7 @@ async fn une_boite_s_ouvre_et_se_lit_sur_le_fil() {
         .await
         .expect("écriture");
     let liste = jusqu_a(&mut lecteur, "a003 ").await;
-    assert!(liste.contains("* LIST () \"/\" INBOX\r\n"), "{liste}");
+    assert!(liste.contains("* LIST () \"/\" \"INBOX\"\r\n"), "{liste}");
 
     lecteur
         .get_mut()

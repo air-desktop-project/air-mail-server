@@ -865,7 +865,7 @@ ne s'écrit — ni `STORE`, ni `APPEND`, ni `EXPUNGE` — `SELECT` répond
 modifiabilité qu'elle ne peut pas connaître ferait une promesse que le client ne
 verrait démentie qu'en essayant.
 
-Ce qui n'est toujours pas servi : `CREATE`/`DELETE`/`RENAME`, `ENVELOPE` et
+Ce qui n'est toujours pas servi : `DELETE`, `RENAME`, `ENVELOPE` et
 `BODYSTRUCTURE`.
 
 Éprouvé jusqu'au binaire, contre un vrai Maildir rempli par SMTP : `LIST`,
@@ -1156,6 +1156,58 @@ dépôt de neuf mébioctets ne coûte RIEN en mémoire résidente — quatre-vin
 dépôts laissent le serveur à 51,7 Mio, et la centaine de kibioctets qui s'ajoute
 au fil des connexions est de la rétention d'allocateur, pas une fuite. Le message
 ne séjourne nulle part : ni dans la session, ni dans le tampon du pilote.
+
+## `CREATE` : là où un nom de client devient un chemin, depuis le 2026-08-29
+
+Ce dépôt pouvait écrire en toutes lettres qu'AUCUN CHEMIN N'ÉTAIT CONSTRUIT À
+PARTIR D'UN NOM DE BOÎTE : `INBOX` se comparait à une constante. `CREATE` met fin
+à cette tranquillité, et la remplace par des règles qu'on peut lire.
+
+ON REFUSE, ON NE TRANSFORME PAS. La RFC autorise beaucoup plus que ce serveur
+n'accepte : de l'UTF-8, des points, des caractères qu'un système de fichiers lit
+mal. Un nom qu'on ne saurait pas transcrire sans risque est refusé, jamais
+adapté — rendre au client un nom qui n'est pas celui qu'il a demandé lui ferait
+chercher longtemps, et transformer, c'est ouvrir la porte à ce qu'on ne voit pas.
+Les règles tiennent en un endroit, `ams-proto-imap` : non vide et borné, découpé
+sur `/` sans composant vide, profondeur bornée, AUCUN POINT — ce qui ferme `..` —
+et de l'ASCII imprimable sans `\`, `%`, `*`, `"` ni `:`. L'espace est admis :
+« Sent Messages » est un nom de dossier des plus ordinaires.
+
+LA RÈGLE EST VÉRIFIÉE DEUX FOIS, par la session puis par le magasin. Non par
+défiance de la première, mais parce que c'est le magasin qui touche le système de
+fichiers : une vérification faite ailleurs est une vérification qu'on ne voit pas
+en lisant l'endroit qui en dépend, et celle-ci survivra à un appelant qui
+l'oublierait.
+
+UN SEUL NIVEAU DE RÉPERTOIRES SUR LE DISQUE. `Archives/2026` devient
+`.Archives.2026` dans la racine du compte, à la façon de Maildir++ : le chemin
+n'a donc jamais plus d'un morceau venu du client. `fuzz_ams_imap_fetch` en fait
+une propriété, vérifiée sur la TRANSCRIPTION elle-même — pas de séparateur, pas
+de `..`, pas d'octet de contrôle — sur des noms arbitraires.
+
+ON N'OUVRE QUE CE QUI EXISTE. `Maildir::open` crée l'arborescence qu'on lui
+nomme : l'appeler sans regarder ferait de chaque `SELECT` sur une faute de frappe
+une boîte de plus. Seul `CREATE` crée.
+
+CRÉER `A/B/C` CRÉE AUSSI `A` ET `A/B` (§6.3.4) : en Maildir++ les parents sont
+des répertoires frères, et les omettre ferait montrer par `LIST` une fille sans
+sa mère.
+
+LES NOMS SE CITENT DANS LES RÉPONSES, toujours plutôt que seulement quand c'est
+nécessaire : ne citer que les noms qui en ont besoin demanderait une condition de
+plus, qu'il faudrait avoir juste à chaque endroit.
+
+Un cache borné par ce qui existe : ouvrir un Maildir relit son index et le
+réécrit ; le refaire à chaque `LIST` coûterait un parcours de répertoire par
+commande. Le cache ne grandit que d'une entrée par dossier RÉELLEMENT créé — un
+client ne peut donc pas le faire enfler en nommant des boîtes au hasard.
+
+Éprouvé jusqu'au binaire : `CREATE Archives`, puis `Archives/2026/Janvier` qui
+crée bien ses deux parents, `"Sent Messages"` avec son espace, `LIST` qui les
+rend tous cités, `STATUS` et `SELECT` qui les ouvrent, un `APPEND` dans un
+dossier — et six noms dangereux (`../autrecompte`, `a/../../etc`, `Sent.2026`,
+`/absolu`, un `%`) refusés sans qu'aucun répertoire n'apparaisse hors de la
+racine du compte.
 
 ## Le gate de couverture arrondissait vers le haut, depuis le 2026-08-29
 
@@ -1743,7 +1795,7 @@ et une couture inutilisée finit par être utilisée.
 SMTP en réception (avec `STARTTLS`, `AUTH PLAIN`, SPF, DKIM, DMARC et remise
 Maildir), SMTP à l'émission (rapports DMARC), POP3, et IMAP — `SELECT`,
 `EXAMINE`, `CLOSE`, `UNSELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`, `EXPUNGE`,
-`SEARCH`, `COPY`, `MOVE`, `APPEND` et leurs formes `UID`. Chacun a été éprouvé de bout en bout contre le binaire, et pas
+`SEARCH`, `COPY`, `MOVE`, `APPEND`, `CREATE` et leurs formes `UID`. Chacun a été éprouvé de bout en bout contre le binaire, et pas
 seulement en tests.
 
 **HTTP n'est pas servi** : `ams-proto-http` est un emplacement réservé, et son
@@ -1766,7 +1818,7 @@ persistant, et lecture sans verrou côté IMAP), C14 (`X25519MLKEM768` en tête)
 `<CRLF>.<CRLF>`, refuse tout `CR` ou `LF` isolé, et le fuzz éprouve que le
 découpage des lectures ne change rien au verdict.
 
-Ce qui manque, et qu'aucune phrase ne doit laisser croire acquis : la gestion des
-dossiers et les critères de `SEARCH` qui lisent le message ; le signeur DKIM,
+Ce qui manque, et qu'aucune phrase ne doit laisser croire acquis : `DELETE` et
+`RENAME`, et les critères de `SEARCH` qui lisent le message ; le signeur DKIM,
 qui existe et n'a pas d'appelant ; la file de réémission des messages sortants ;
 et toute interface HTTP.

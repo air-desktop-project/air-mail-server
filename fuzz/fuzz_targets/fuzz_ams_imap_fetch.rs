@@ -38,6 +38,12 @@
 //!    petits que le sien. L'évaluation descend, et se termine — la vérifier sur
 //!    des expressions arbitraires, c'est vérifier qu'aucune entrée ne fabrique
 //!    un cycle.
+//! 10. **UN NOM DE BOÎTE ACCEPTÉ NE PEUT PAS SORTIR DE SA RACINE.** C'est la
+//!     seule règle du serveur dont dépend un chemin : un nom accepté devient un
+//!     répertoire. Sa transcription Maildir++ — les `/` deviennent des `.` — ne
+//!     doit contenir NI séparateur de chemin, NI `..`, ni commencer autrement
+//!     que par le point qu'on ajoute. Ce n'est pas une garde qu'on espère : la
+//!     propriété se vérifie sur la transcription elle-même.
 //! 9. **UNE LIGNE D'`APPEND` ACCEPTÉE ANNONCE UNE LONGUEUR QU'ON PEUT TENIR.**
 //!    C'est la seule commande dont un argument est un MESSAGE : ce que la
 //!    grammaire admet, l'appelant devra l'écouler, et une longueur au-delà de la
@@ -54,8 +60,8 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use ams_proto_imap::{
-    Append, Candidate, FETCH_ITEMS_MAX, Fetch, FetchItem, Flags, Limits, SEARCH_KEYS_MAX, Search,
-    SequenceSet, Store,
+    Append, Candidate, FETCH_ITEMS_MAX, Fetch, FetchItem, Flags, Limits, MAILBOX_NAME_MAX,
+    SEARCH_KEYS_MAX, Search, SequenceSet, Store, mailbox_name_is_safe, mailbox_name_trimmed,
 };
 
 /// Ce qu'on soumet.
@@ -75,6 +81,8 @@ struct Entree<'a> {
     criteres: &'a [u8],
     /// La ligne d'un `APPEND`.
     depot: &'a [u8],
+    /// Un nom de boîte, tel qu'un client l'écrirait.
+    boite: &'a [u8],
     /// Un message à confronter à ces critères.
     message: (u32, u32, u64, u8, u64),
 }
@@ -170,6 +178,34 @@ fuzz_target!(|entree: Entree<'_>| {
         let ensemble = ecriture.set();
         assert_eq!(ensemble.as_bytes(), ecriture.set_text());
         let _ = intervalles(&ensemble, entree.star, &bornes);
+    }
+
+    // ── PROPRIÉTÉ 10 : un nom accepté ne sort pas de sa racine ─────────────
+    if mailbox_name_is_safe(entree.boite) {
+        let nom = mailbox_name_trimmed(entree.boite);
+        assert!(!nom.is_empty(), "un nom accepté est vide");
+        assert!(
+            nom.len() <= MAILBOX_NAME_MAX,
+            "un nom accepté est trop long"
+        );
+        // La transcription Maildir++ : les `/` deviennent des `.`, et l'on
+        // préfixe d'un point. C'est CE nom-là qui devient un répertoire.
+        let mut repertoire = vec![b'.'];
+        for octet in nom {
+            repertoire.push(if *octet == b'/' { b'.' } else { *octet });
+        }
+        assert!(
+            !repertoire.contains(&b'/'),
+            "un nom accepté fabrique un chemin à plusieurs morceaux : {repertoire:?}"
+        );
+        assert!(
+            !repertoire.windows(2).any(|paire| paire == b".."),
+            "un nom accepté fabrique un `..` : {repertoire:?}"
+        );
+        assert!(
+            !repertoire.contains(&0) && !repertoire.iter().any(u8::is_ascii_control),
+            "un nom accepté porte un octet qu'un système de fichiers lit mal"
+        );
     }
 
     // ── PROPRIÉTÉ 9 : ce qu'un `APPEND` annonce, on peut le tenir ──────────

@@ -202,8 +202,20 @@ impl Mailboxes for Boites {
         })
     }
 
-    fn name(&self, _user: &[u8], index: usize) -> Option<&[u8]> {
-        (index == 0).then_some(&b"INBOX"[..])
+    fn name<'n>(&self, _user: &[u8], index: usize, out: &'n mut [u8]) -> Option<&'n [u8]> {
+        if index != 0 {
+            return None;
+        }
+        let nom: &[u8] = b"INBOX";
+        for (place, octet) in out.iter_mut().zip(nom) {
+            *place = *octet;
+        }
+        out.get(..nom.len().min(out.len()))
+    }
+
+    fn create(&self, _user: &[u8], _name: &[u8]) -> ams_session::imap::Creation {
+        // La boîte d'épreuve ne crée rien : ce qu'on éprouve est la session.
+        ams_session::imap::Creation::Refusee
     }
     fn open(&self, _user: &[u8], name: &[u8]) -> Option<Boite> {
         (name == b"INBOX").then_some(Boite {
