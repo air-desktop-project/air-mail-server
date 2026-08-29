@@ -16,6 +16,11 @@ const TOUTES: &[Error] = &[
     Error::LiteralTooLong { limit: 1_048_576 },
     Error::NonSynchronizingTooLong { limit: 4096 },
     Error::TooManyLiterals { limit: 8 },
+    Error::MalformedSequence,
+    Error::TooManySequenceItems { limit: 1024 },
+    Error::MalformedFetch,
+    Error::UnsupportedFetchItem,
+    Error::TooManyFetchItems { limit: 64 },
     Error::ResponseTextNotPrintable,
     Error::BufferTooSmall { needed: 40 },
 ];

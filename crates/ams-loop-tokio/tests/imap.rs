@@ -17,12 +17,85 @@ mod commun;
 use ams_guard::Thresholds;
 use ams_loop_tokio::SharedGuard;
 use ams_loop_tokio::imap::{ImapService, serve_imap_connection};
+use ams_proto_imap::Flags;
 use ams_proto_imap::Limits;
+use ams_session::imap::{Mailbox, Mailboxes, MessageInfo};
 use commun::{COMPTE, NotreDomaine, PAIR, SECRET, materiel};
 use core::time::Duration;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{TcpListener, TcpStream};
+
+/// Deux messages d'épreuve, en mémoire.
+const MESSAGES: [&[u8]; 2] = [
+    b"From: a@x.test\r\nSubject: un\r\n\r\nPremier corps.\r\n",
+    b"From: b@x.test\r\nSubject: deux\r\n\r\nSecond corps.\r\n",
+];
+
+/// Une boîte en mémoire : c'est le protocole qu'on éprouve ici, pas Maildir.
+struct Boite;
+
+impl Mailbox for Boite {
+    fn exists(&self) -> u32 {
+        2
+    }
+    fn uid_validity(&self) -> u32 {
+        7
+    }
+    fn uid_next(&self) -> u32 {
+        3
+    }
+    fn info(&self, sequence: u32) -> Option<MessageInfo> {
+        let corps = MESSAGES.get(usize::try_from(sequence).ok()?.checked_sub(1)?)?;
+        Some(MessageInfo {
+            uid: sequence,
+            size: corps.len() as u64,
+            flags: Flags::NONE,
+            internal_date: 1_787_987_311,
+        })
+    }
+    fn header_octets(&self, sequence: u32) -> u64 {
+        let Some(corps) = MESSAGES.get(usize::try_from(sequence).unwrap_or(0).saturating_sub(1))
+        else {
+            return 0;
+        };
+        corps
+            .windows(4)
+            .position(|fenetre| fenetre == b"\r\n\r\n")
+            .map_or(0, |rang| (rang as u64).saturating_add(4))
+    }
+    fn writable(&self) -> bool {
+        true
+    }
+    fn read(&self, sequence: u32, offset: u64, out: &mut [u8]) -> usize {
+        let Some(corps) = MESSAGES.get(usize::try_from(sequence).unwrap_or(0).saturating_sub(1))
+        else {
+            return 0;
+        };
+        let Ok(depart) = usize::try_from(offset) else {
+            return 0;
+        };
+        let reste = corps.get(depart..).unwrap_or_default();
+        let combien = reste.len().min(out.len());
+        out.get_mut(..combien)
+            .unwrap_or_default()
+            .copy_from_slice(reste.get(..combien).unwrap_or_default());
+        combien
+    }
+    fn mark_seen(&mut self, _sequence: u32) {}
+}
+
+struct Boites;
+
+impl Mailboxes for Boites {
+    type Open = Boite;
+    fn name(&self, _user: &[u8], index: usize) -> Option<&[u8]> {
+        (index == 0).then_some(&b"INBOX"[..])
+    }
+    fn open(&self, _user: &[u8], name: &[u8]) -> Option<Boite> {
+        (name == b"INBOX").then_some(Boite)
+    }
+}
 
 /// Monte un service IMAP et rend l'adresse où le joindre.
 async fn service(
@@ -39,7 +112,7 @@ async fn service(
             timeouts: ams_loop_tokio::Timeouts::default(),
             tls: chiffrement,
         };
-        let _ = serve_imap_connection(&mut flux, &service, NotreDomaine, PAIR).await;
+        let _ = serve_imap_connection(&mut flux, &service, NotreDomaine, &Boites, PAIR).await;
     });
     (adresse, tache)
 }
@@ -275,7 +348,7 @@ async fn un_pair_banni_n_obtient_pas_de_banniere() {
             timeouts: ams_loop_tokio::Timeouts::default(),
             tls: None,
         };
-        serve_imap_connection(&mut flux, &service, NotreDomaine, PAIR).await
+        serve_imap_connection(&mut flux, &service, NotreDomaine, &Boites, PAIR).await
     });
 
     let mut lecteur = BufReader::new(TcpStream::connect(adresse).await.expect("connexion"));
@@ -302,7 +375,7 @@ async fn un_pair_muet_est_abandonne() {
             },
             tls: None,
         };
-        serve_imap_connection(&mut flux, &service, NotreDomaine, PAIR).await
+        serve_imap_connection(&mut flux, &service, NotreDomaine, &Boites, PAIR).await
     });
 
     let mut lecteur = BufReader::new(TcpStream::connect(adresse).await.expect("connexion"));
@@ -310,4 +383,158 @@ async fn un_pair_muet_est_abandonne() {
     // On ne dit rien, et on attend.
     let issue = tache.await.expect("tâche");
     assert!(issue.is_err(), "le pair muet devait être abandonné");
+}
+
+// ── LES BOÎTES, DE BOUT EN BOUT ─────────────────────────────────────────────
+
+/// Ouvre une session chiffrée et authentifiée, et rend le flux.
+async fn authentifiee(
+    materiel: &commun::Materiel,
+) -> BufReader<tokio_rustls::client::TlsStream<TcpStream>> {
+    let (adresse, _) = service(Some(Arc::clone(&materiel.tls))).await;
+    let mut lecteur = BufReader::new(TcpStream::connect(adresse).await.expect("connexion"));
+    ligne(&mut lecteur).await;
+    ecrire(&mut lecteur, b"a001 STARTTLS\r\n").await;
+    ligne(&mut lecteur).await;
+    let connecteur = tokio_rustls::TlsConnector::from(Arc::new(ams_tls::relay_config()));
+    let chiffre = connecteur
+        .connect("localhost".try_into().expect("nom"), lecteur.into_inner())
+        .await
+        .expect("poignée de main");
+    let mut lecteur = BufReader::new(chiffre);
+    lecteur
+        .get_mut()
+        .write_all(b"a002 LOGIN jean ouvre-toi\r\n")
+        .await
+        .expect("écriture");
+    let mut reponse = std::string::String::new();
+    lecteur.read_line(&mut reponse).await.expect("réponse");
+    assert!(reponse.contains("OK Authenticated"), "{reponse}");
+    lecteur
+}
+
+/// Lit des lignes jusqu'à en trouver une qui commence par `tag`.
+async fn jusqu_a(
+    lecteur: &mut BufReader<tokio_rustls::client::TlsStream<TcpStream>>,
+    tag: &str,
+) -> std::string::String {
+    let mut tout = std::string::String::new();
+    loop {
+        let mut une = std::string::String::new();
+        lecteur.read_line(&mut une).await.expect("réponse");
+        let fini = une.starts_with(tag) || une.is_empty();
+        tout.push_str(&une);
+        if fini {
+            return tout;
+        }
+    }
+}
+
+#[tokio::test]
+async fn une_boite_s_ouvre_et_se_lit_sur_le_fil() {
+    let Some(materiel) = materiel("imap-boite") else {
+        return;
+    };
+    let mut lecteur = authentifiee(&materiel).await;
+
+    lecteur
+        .get_mut()
+        .write_all(b"a003 LIST \"\" *\r\n")
+        .await
+        .expect("écriture");
+    let liste = jusqu_a(&mut lecteur, "a003 ").await;
+    assert!(liste.contains("* LIST () \"/\" INBOX\r\n"), "{liste}");
+
+    lecteur
+        .get_mut()
+        .write_all(b"a004 SELECT INBOX\r\n")
+        .await
+        .expect("écriture");
+    let selection = jusqu_a(&mut lecteur, "a004 ").await;
+    assert!(selection.contains("* 2 EXISTS\r\n"), "{selection}");
+    assert!(selection.contains("[UIDVALIDITY 7]"), "{selection}");
+    assert!(selection.contains("a004 OK [READ-WRITE]"), "{selection}");
+
+    // **Le corps traverse la socket tel quel**, précédé de sa longueur.
+    lecteur
+        .get_mut()
+        .write_all(b"a005 FETCH 1 (UID BODY.PEEK[])\r\n")
+        .await
+        .expect("écriture");
+    let mut attendu = std::string::String::from("* 1 FETCH (UID 1 BODY[] {");
+    attendu.push_str(&std::format!("{}", MESSAGES[0].len()));
+    attendu.push_str("}\r\n");
+    attendu.push_str(&std::string::String::from_utf8_lossy(MESSAGES[0]));
+    attendu.push_str(")\r\n");
+    let fetch = jusqu_a(&mut lecteur, "a005 ").await;
+    assert!(
+        fetch.starts_with(&attendu),
+        "attendu :\n{attendu}\nreçu :\n{fetch}"
+    );
+    assert!(fetch.ends_with("a005 OK FETCH completed\r\n"), "{fetch}");
+}
+
+/// **Une section rend exactement ce qu'elle annonce**, et l'en-tête d'un message
+/// n'est pas son corps.
+#[tokio::test]
+async fn les_sections_rendent_ce_qu_elles_annoncent() {
+    let Some(materiel) = materiel("imap-sections") else {
+        return;
+    };
+    let mut lecteur = authentifiee(&materiel).await;
+    lecteur
+        .get_mut()
+        .write_all(b"a003 SELECT INBOX\r\n")
+        .await
+        .expect("écriture");
+    jusqu_a(&mut lecteur, "a003 ").await;
+
+    lecteur
+        .get_mut()
+        .write_all(b"a004 FETCH 1 BODY.PEEK[HEADER]\r\n")
+        .await
+        .expect("écriture");
+    let entete = jusqu_a(&mut lecteur, "a004 ").await;
+    assert!(
+        entete.contains("From: a@x.test\r\nSubject: un\r\n\r\n)"),
+        "{entete}"
+    );
+    assert!(!entete.contains("Premier corps"), "{entete}");
+
+    lecteur
+        .get_mut()
+        .write_all(b"a005 FETCH 1 BODY.PEEK[TEXT]<2.5>\r\n")
+        .await
+        .expect("écriture");
+    let tranche = jusqu_a(&mut lecteur, "a005 ").await;
+    // « Premier corps. » à partir du deuxième octet, sur cinq : « emier ».
+    assert!(tranche.contains("BODY[TEXT]<2> {5}\r\nemier)"), "{tranche}");
+}
+
+/// Un `UID FETCH` désigne par UID, et rend le rang.
+#[tokio::test]
+async fn uid_fetch_traverse_la_socket() {
+    let Some(materiel) = materiel("imap-uid") else {
+        return;
+    };
+    let mut lecteur = authentifiee(&materiel).await;
+    lecteur
+        .get_mut()
+        .write_all(b"a003 SELECT INBOX\r\n")
+        .await
+        .expect("écriture");
+    jusqu_a(&mut lecteur, "a003 ").await;
+    lecteur
+        .get_mut()
+        .write_all(b"a004 UID FETCH 2 (UID RFC822.SIZE)\r\n")
+        .await
+        .expect("écriture");
+    let fetch = jusqu_a(&mut lecteur, "a004 ").await;
+    assert!(
+        fetch.contains(&std::format!(
+            "* 2 FETCH (UID 2 RFC822.SIZE {})\r\n",
+            MESSAGES[1].len()
+        )),
+        "{fetch}"
+    );
 }

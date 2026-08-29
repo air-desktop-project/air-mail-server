@@ -31,7 +31,7 @@
 use ams_guard::{Event as GuardEvent, Source, Verdict};
 use ams_proto_imap::{CommandReader, Limits, Need};
 use ams_session::Authenticator;
-use ams_session::imap::{Action, Session};
+use ams_session::imap::{Action, FetchChunk, Mailboxes, Session};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
 
 use crate::connection::lire;
@@ -74,15 +74,17 @@ pub struct ImapSummary {
 ///
 /// [`Error::Timeout`], [`Error::Io`], ou [`Error::CapabilityNotSupported`] si le
 /// service annonce `STARTTLS` sans matériel TLS.
-pub async fn serve_imap_connection<S, A>(
+pub async fn serve_imap_connection<S, A, B>(
     stream: &mut S,
     service: &ImapService<'_>,
     auth: A,
+    boites: &B,
     source: Source,
 ) -> Result<ImapSummary, Error>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     A: Authenticator,
+    B: Mailboxes,
 {
     let mut resume = ImapSummary::default();
 
@@ -97,7 +99,7 @@ where
         .tls
         .as_ref()
         .map(|configuration| tokio_rustls::TlsAcceptor::from(std::sync::Arc::clone(configuration)));
-    let mut session = Session::new(service.limits, accepteur.is_some(), auth);
+    let mut session = Session::new(service.limits, accepteur.is_some(), auth, boites);
     let mut etat = Etat::neuf(&service.limits);
 
     if matches!(
@@ -203,7 +205,7 @@ impl Etat {
 }
 
 impl ImapSummary {
-    fn merge<A: Authenticator>(&mut self, etat: &Etat, session: &Session<A>) {
+    fn merge<A: Authenticator, M: Mailboxes>(&mut self, etat: &Etat, session: &Session<A, M>) {
         self.commands = etat.commands;
         self.tls = etat.tls;
         self.authenticated = session.state() != ams_session::imap::State::NotAuthenticated;
@@ -218,9 +220,9 @@ enum Etape {
 }
 
 /// Le pilote proprement dit.
-async fn conduire<S, A>(
+async fn conduire<S, A, B>(
     stream: &mut S,
-    session: &mut Session<A>,
+    session: &mut Session<A, &B>,
     etat: &mut Etat,
     service: &ImapService<'_>,
     source: Source,
@@ -228,6 +230,7 @@ async fn conduire<S, A>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
     A: Authenticator,
+    B: Mailboxes,
 {
     loop {
         let vu = etat.tampon.get(..etat.rempli).unwrap_or_default();
@@ -303,16 +306,83 @@ where
                     return Ok(Etape::Terminee);
                 }
             }
+            Action::SendFetch => {
+                ecouler_le_fetch(stream, session, etat).await?;
+            }
         }
     }
+}
+
+/// Écoule les réponses d'un `FETCH`.
+///
+/// # ON A ANNONCÉ UNE LONGUEUR, ET ON LA TIENT
+///
+/// Un corps est précédé d'un littéral `{n}` : le client lit exactement `n`
+/// octets, puis reprend sa lecture des réponses. En écrire moins le laisserait
+/// attendre, en écrire plus lui ferait lire le reste comme du protocole. Si le
+/// magasin ne rend pas ce qu'il avait annoncé — un fichier qui a rétréci sous
+/// nos pieds — **on complète**. Un message tronqué se voit ; un flux
+/// désynchronisé se traduit en n'importe quoi.
+async fn ecouler_le_fetch<S, A, B>(
+    stream: &mut S,
+    session: &mut Session<A, &B>,
+    etat: &mut Etat,
+) -> Result<(), Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    A: Authenticator,
+    B: Mailboxes,
+{
+    while let Some(morceau) = session.next_fetch(&mut etat.sortie)? {
+        match morceau {
+            FetchChunk::Bytes(octets) => stream.write_all(octets).await?,
+            FetchChunk::Message {
+                sequence,
+                offset,
+                length,
+            } => {
+                let mut reste = length;
+                let mut position = offset;
+                while reste > 0 {
+                    let voulu = usize::try_from(reste)
+                        .unwrap_or(usize::MAX)
+                        .min(etat.morceau.len());
+                    let place = etat.morceau.get_mut(..voulu).unwrap_or_default();
+                    let lus = session.read_selected(sequence, position, place);
+                    if lus == 0 {
+                        // Le magasin n'a plus rien à donner. On complète ce
+                        // qu'on avait annoncé plutôt que de laisser le client
+                        // attendre — voir la note ci-dessus.
+                        let mut manque = reste;
+                        while manque > 0 {
+                            let bloc = usize::try_from(manque)
+                                .unwrap_or(usize::MAX)
+                                .min(etat.morceau.len());
+                            let place = etat.morceau.get_mut(..bloc).unwrap_or_default();
+                            place.fill(b' ');
+                            stream.write_all(place).await?;
+                            manque = manque.saturating_sub(bloc as u64);
+                        }
+                        break;
+                    }
+                    let ecrits = etat.morceau.get(..lus).unwrap_or_default();
+                    stream.write_all(ecrits).await?;
+                    position = position.saturating_add(lus as u64);
+                    reste = reste.saturating_sub(lus as u64);
+                }
+            }
+        }
+    }
+    stream.flush().await?;
+    Ok(())
 }
 
 /// Lit la ligne qui répond à un défi SASL, et la donne à la session.
 ///
 /// Rend `true` s'il faut fermer.
-async fn lire_la_reponse_sasl<S, A>(
+async fn lire_la_reponse_sasl<S, A, M>(
     stream: &mut S,
-    session: &mut Session<A>,
+    session: &mut Session<A, M>,
     etat: &mut Etat,
     service: &ImapService<'_>,
     source: Source,
@@ -320,6 +390,7 @@ async fn lire_la_reponse_sasl<S, A>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
     A: Authenticator,
+    M: Mailboxes,
 {
     // UNE RÉPONSE SASL EST UNE LIGNE, pas une commande : elle ne porte ni tag,
     // ni littéral, et se termine au premier `CRLF`. Lui appliquer le découpage
@@ -368,16 +439,19 @@ where
 /// # Errors
 ///
 /// Une erreur d'entrée-sortie sur l'écouteur.
-pub async fn serve_imap<A, S>(
+pub async fn serve_imap<A, B, S>(
     listener: tokio::net::TcpListener,
     limits: Limits,
     auth: std::sync::Arc<A>,
+    boites: std::sync::Arc<B>,
     guard: std::sync::Arc<SharedGuard>,
     options: crate::ServeOptions,
     shutdown: S,
 ) -> Result<crate::Stats, Error>
 where
     A: Authenticator + Send + Sync + 'static,
+    B: Mailboxes + Send + Sync + 'static,
+    B::Open: Send,
     S: core::future::Future<Output = ()>,
 {
     let places = std::sync::Arc::new(tokio::sync::Semaphore::new(options.max_connections));
@@ -405,6 +479,7 @@ where
             return Ok(stats);
         };
         let auth = std::sync::Arc::clone(&auth);
+        let boites = std::sync::Arc::clone(&boites);
         let guard = std::sync::Arc::clone(&guard);
         let timeouts = options.timeouts;
         let tls = options.tls.clone();
@@ -419,8 +494,14 @@ where
             };
             // Le résultat n'est pas remonté : une connexion qui échoue ne
             // regarde qu'elle. Le journal viendra avec `air-log`.
-            let _ =
-                serve_imap_connection(&mut flux, &service, &*auth, crate::source_de(pair)).await;
+            let _ = serve_imap_connection(
+                &mut flux,
+                &service,
+                &*auth,
+                &*boites,
+                crate::source_de(pair),
+            )
+            .await;
             drop(place);
         });
     }

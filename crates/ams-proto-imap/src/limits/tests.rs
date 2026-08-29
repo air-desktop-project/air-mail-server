@@ -12,6 +12,8 @@ fn les_bornes_par_defaut_sont_celles_qu_on_a_choisies() {
     assert_eq!(Limits::DEFAULT.max_literal_octets, 65_536);
     assert_eq!(Limits::DEFAULT.max_literals, 8);
     assert_eq!(Limits::DEFAULT.max_response_octets, 8192);
+    assert_eq!(Limits::DEFAULT.max_sequence_items, 1024);
+    assert_eq!(Limits::DEFAULT.max_fetch_items, 64);
 }
 
 /// **Celle-là n'est pas négociable** : c'est elle qui rend le littéral non

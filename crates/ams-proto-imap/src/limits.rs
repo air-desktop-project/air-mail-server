@@ -45,6 +45,19 @@ pub struct Limits {
 
     /// Longueur maximale d'une ligne de réponse, `CRLF` non compris.
     pub max_response_octets: usize,
+
+    /// Nombre maximal d'éléments dans un ensemble de numéros.
+    ///
+    /// `1,1,1,…` cent mille fois est un `sequence-set` parfaitement valide, et
+    /// le parcourir pour chaque message d'une boîte ferait un travail
+    /// quadratique offert à qui écrit une ligne.
+    pub max_sequence_items: usize,
+
+    /// Nombre maximal d'éléments dans une liste `FETCH`.
+    ///
+    /// Chaque élément demande un travail par message ; mille de plus par
+    /// commande est déjà bien au-delà de ce qu'un client écrit.
+    pub max_fetch_items: usize,
 }
 
 impl Limits {
@@ -68,6 +81,8 @@ impl Limits {
         max_literal_octets: 65_536,
         max_literals: 8,
         max_response_octets: 8192,
+        max_sequence_items: 1024,
+        max_fetch_items: 64,
     };
 
     /// La borne d'un littéral NON SYNCHRONISANT (RFC 9051 §6.3.11, `LITERAL-`).

@@ -30,6 +30,7 @@
 //! `air-mail-admin config write`.
 
 mod delivery;
+mod imap;
 mod policy;
 mod pop3;
 
@@ -55,6 +56,7 @@ use tokio::net::TcpListener;
 use rustls::ServerConfig;
 
 use crate::delivery::{Boites, MaildirDelivery};
+use crate::imap::BoitesImap;
 use crate::policy::BoitesConnues;
 use crate::pop3::BoitesPop3;
 
@@ -644,17 +646,17 @@ async fn servir(fichier: &Path) -> Result<(), String> {
             .await
             .map_err(|erreur| format!("écoute IMAP sur {adresse} : {erreur}"))?;
         // ON DIT CE QU'ON NE SERT PAS. Un port IMAP ouvert laisse croire à un
-        // service complet ; celui-ci authentifie et rien de plus, tant qu'aucune
-        // boîte ne s'ouvre.
+        // service complet ; celui-ci lit le courrier et ne le modifie pas.
         eprintln!(
-            "air-mail-server : IMAP écoute sur {adresse} — AUCUNE BOÎTE N'EST SERVIE : la \
-             session authentifie, et `SELECT`, `LIST` et `FETCH` répondent qu'ils ne le sont \
-             pas encore."
+            "air-mail-server : IMAP écoute sur {adresse} — SEULE `INBOX` EST SERVIE, EN \
+             LECTURE : `SELECT`, `LIST`, `STATUS` et `FETCH` répondent ; `STORE`, `SEARCH`, \
+             `APPEND`, `COPY` et `MOVE` non."
         );
         Some(tokio::spawn(serve_imap(
             ecouteur,
             ams_proto_imap::Limits::DEFAULT,
             Arc::clone(&politique),
+            Arc::new(BoitesImap::new(Arc::clone(&boites))),
             Arc::clone(&garde),
             options_de_service.clone(),
             arret(),

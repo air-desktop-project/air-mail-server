@@ -38,4 +38,4 @@ mod session;
 
 pub use error::Error;
 pub use maildir::{Incoming, Maildir, flags_of, fresh_uid_validity};
-pub use session::{LockedMailbox, Message};
+pub use session::{LockedMailbox, MailboxView, Message};

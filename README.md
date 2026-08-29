@@ -68,7 +68,7 @@ horloge.
 | `ams-sasl` | RFC 4422/4616 : `PLAIN` et son base64 | **implémenté** |
 | `ams-proto-pop3` | RFC 1939 | **commandes et réponses** |
 | `ams-dns` | RFC 1035 : le codec d'un message | **question encodée, réponse décodée** |
-| `ams-proto-imap` | RFC 9051 (IMAP4rev2) | **découpage, tag, littéraux, arguments, réponses** |
+| `ams-proto-imap` | RFC 9051 (IMAP4rev2) | **découpage, tag, littéraux, arguments, ensembles de séquences, éléments de `FETCH`, réponses** |
 | `ams-proto-http` | RFC 9110 / 9112 | vide |
 
 ### Étage 2 — décisions, sans entrée-sortie
@@ -460,14 +460,65 @@ client choisir ce qu'on lira comme une commande — exactement la faille que le
 découpage existe pour fermer. Un tag illisible, lui, ne ferme rien : la commande
 était lisible, c'est son tag qui ne l'était pas.
 
-Ce qui n'y est pas : **les boîtes**. `SELECT`, `LIST`, `FETCH` et les autres sont
-reconnus, leur état est vérifié, et la session répond `NO [UNAVAILABLE]` — `NO`
-et non `BAD`, parce que la commande est correcte et permise et que c'est ce
-serveur qui ne la sert pas. Les servir demande un magasin qui porte des UID
-stables et des marques persistantes, ce que Maildir ne fait pas seul. `APPEND`
-demandera en plus un chemin qui écoule au fil de l'eau, comme le `DATA` de SMTP.
-Le serveur le dit au démarrage plutôt que de laisser un port ouvert le faire
-croire.
+## Les boîtes IMAP : lire sans jamais tenir un message
+
+`SELECT`, `EXAMINE`, `CLOSE`, `UNSELECT`, `LIST`, `STATUS`, `FETCH` et `UID
+FETCH` servent la boîte du compte. Ce serveur en a **une par compte, et elle
+s'appelle `INBOX`** — le nom que la RFC 9051 §5.1 réserve pour cela. Créer des
+dossiers demanderait `CREATE`, un endroit où les mettre et une règle pour ce
+qu'un nom a le droit d'être ; rien de tout cela n'est écrit, et prétendre en
+avoir plusieurs ferait mentir `LIST`.
+
+**AUCUN CHEMIN N'EST CONSTRUIT À PARTIR D'UN NOM DE BOÎTE.** Le nom vient du
+client ; `INBOX` est comparé à une constante, et la boîte qu'il désigne est celle
+que la table des comptes a déjà ouverte au démarrage. Un nom qui n'est pas
+`INBOX` n'ouvre rien — il ne devient jamais un morceau de chemin, et il n'y a
+donc aucune traversée de répertoire à empêcher.
+
+**UN MESSAGE NE PASSE JAMAIS PAR LA SESSION.** `FETCH` peut demander dix
+mégaoctets ; les retenir pour les écrire ensuite donnerait au client le droit de
+choisir combien de mémoire le serveur consomme. La session rend donc un
+*intervalle* — « le message 3, de l'octet 0 à l'octet 4 812 » — et le pilote
+l'écoule par tranches. **On a annoncé une longueur, et on la tient** : si le
+magasin s'arrête plus tôt, le manque est comblé plutôt que de laisser un client
+attendre des octets qui ne viendront pas.
+
+**La conclusion étiquetée est le DERNIER morceau**, pas le premier. §7 veut que
+les réponses non sollicitées d'une commande précèdent sa conclusion ; la rendre
+d'avance obligerait le pilote à la retenir et à l'écrire après — un ordre
+qu'aucun type ne lui rappellerait, et qu'il inverserait un jour. Il l'a
+inversé, d'ailleurs, et c'est un essai contre le vrai binaire qui l'a montré.
+
+**Un ensemble de séquences se lit de deux façons, et elles doivent s'accorder** :
+`contains` répond « ce message est-il demandé ? », `ranges` énumère lesquels le
+sont. Deux lectures qui se contrediraient rendraient un message à qui ne l'a pas
+demandé. Un fuzz les confronte sur des ensembles arbitraires. Les surprises de la
+§9 y sont : `*` vaut le dernier message, un intervalle n'est **pas** ordonné
+(`25:*` sur une boîte de trois messages vaut `3:25`, et rend donc le troisième),
+et sur une boîte vide `1:*` ne rend rien plutôt que le message zéro.
+
+**IMAP NE VERROUILLE PAS, PARCE QU'IL N'ÉCRIT PAS.** POP3 prend le verrou
+exclusif de la boîte — il efface, et la RFC 1939 §3 le lui demande. Une session
+IMAP, elle, dure des heures : lui donner le même verrou interdirait toute relève
+POP3 pendant ces heures, et — plus bêtement — s'interdirait à elle-même, car
+`STATUS INBOX` sur une boîte déjà sélectionnée se heurtait à son propre verrou et
+répondait qu'elle n'existe pas. Elle relève donc sans verrouiller, ce pour quoi
+Maildir est fait. Ce qu'on accepte en échange est un message effacé en cours de
+session, cas qu'il fallait tenir de toute façon.
+
+**`[READ-WRITE]` est une promesse, et c'est le magasin qui la tient.** Tant que
+rien ne s'écrit — ni `STORE`, ni `APPEND`, ni `EXPUNGE` — `SELECT` répond
+`[READ-ONLY]`, avec `PERMANENTFLAGS ()` pour dire que rien ne survivra à la
+session. Annoncer autre chose ne se découvrirait qu'en essayant.
+
+Ce qui n'y est toujours pas : `STORE`, `SEARCH`, `COPY`, `MOVE`, `APPEND`,
+`CREATE`/`DELETE`/`RENAME`, `ENVELOPE` et `BODYSTRUCTURE`. Ils sont reconnus, leur
+état est vérifié, et la session répond `NO [UNAVAILABLE]` — `NO` et non `BAD`,
+parce que la commande est correcte et permise et que c'est ce serveur qui ne la
+sert pas. Écrire demandera de décider ce qui arrive quand deux sessions marquent
+le même message ; `APPEND` demandera en plus un chemin qui écoule au fil de
+l'eau, comme le `DATA` de SMTP. Le serveur dit au démarrage ce qu'il sert et ce
+qu'il ne sert pas, plutôt que de laisser un port ouvert le faire croire.
 
 ## Émettre : le client SMTP sortant
 

@@ -77,6 +77,35 @@ pub enum Error {
         limit: usize,
     },
 
+    /// Un ensemble de numéros n'a pas la forme de §9.
+    ///
+    /// Zéro n'est pas un numéro de message — la grammaire dit `nz-number` — et
+    /// un nombre qui déborde n'est pas un grand nombre.
+    MalformedSequence,
+
+    /// Un ensemble de numéros porte plus d'éléments que
+    /// [`Limits::max_sequence_items`](crate::Limits::max_sequence_items).
+    TooManySequenceItems {
+        /// La borne franchie.
+        limit: usize,
+    },
+
+    /// Les arguments d'un `FETCH` n'ont pas la forme de §6.4.5.
+    MalformedFetch,
+
+    /// Un élément de `FETCH` est reconnu, mais non servi.
+    ///
+    /// **Ce n'est pas une erreur de syntaxe** : le client sait alors qu'il doit
+    /// demander autrement, au lieu de chercher la faute dans ce qu'il a écrit.
+    UnsupportedFetchItem,
+
+    /// Une commande `FETCH` porte plus d'éléments que
+    /// [`Limits::max_fetch_items`](crate::Limits::max_fetch_items).
+    TooManyFetchItems {
+        /// La borne franchie.
+        limit: usize,
+    },
+
     /// Un texte de réponse porte un octet qu'on refuse d'écrire.
     ResponseTextNotPrintable,
 
@@ -117,6 +146,21 @@ impl fmt::Display for Error {
             ),
             Error::TooManyLiterals { limit } => {
                 write!(f, "plus de {limit} littéraux dans une commande")
+            }
+            Error::MalformedSequence => {
+                f.write_str("un ensemble de numéros n'a pas la forme attendue")
+            }
+            Error::TooManySequenceItems { limit } => {
+                write!(f, "plus de {limit} éléments dans un ensemble de numéros")
+            }
+            Error::MalformedFetch => {
+                f.write_str("les arguments d'un `FETCH` n'ont pas la forme attendue")
+            }
+            Error::UnsupportedFetchItem => {
+                f.write_str("cet élément de `FETCH` est reconnu, mais ce serveur ne le sert pas")
+            }
+            Error::TooManyFetchItems { limit } => {
+                write!(f, "plus de {limit} éléments dans un `FETCH`")
             }
             Error::ResponseTextNotPrintable => {
                 f.write_str("un texte de réponse porte un octet qu'on refuse d'écrire")

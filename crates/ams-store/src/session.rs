@@ -136,6 +136,61 @@ impl LockedMailbox {
     }
 }
 
+/// Une boîte **lue sans verrou**, avec la liste de ses messages.
+///
+/// # Pourquoi un lecteur ne verrouille pas
+///
+/// Maildir est fait pour être lu sans verrou : un message est un fichier qui ne
+/// change plus une fois déposé, et une livraison ne fait qu'en ajouter un. C'est
+/// la propriété qui a donné son nom au format, et s'en priver coûterait cher :
+/// une session IMAP dure des heures, et un verrou exclusif tenu pendant ces
+/// heures interdirait toute relève POP3 de la même boîte. On aurait échangé une
+/// course qui n'existe pas contre une indisponibilité qui, elle, existe.
+///
+/// # Ce qu'on accepte en échange
+///
+/// Qu'un message s'efface pendant la session — une relève POP3 concurrente le
+/// peut. Le lecteur en garde alors le nom sans le fichier, et sa lecture rend
+/// zéro octet. **C'est déjà le cas qu'il faut tenir de toute façon** : entre le
+/// moment où l'on annonce la taille d'un message et celui où on l'écrit, rien
+/// n'empêchait sa disparition, verrou ou pas.
+///
+/// # L'instantané est pris UNE FOIS
+///
+/// Comme pour [`LockedMailbox`], et pour la même raison : les numéros de séquence
+/// d'IMAP sont les rangs dans cette liste, et ils ne bougent pas de la session.
+pub struct MailboxView {
+    /// La racine de la boîte.
+    racine: PathBuf,
+    /// L'instantané.
+    messages: Vec<Message>,
+}
+
+impl MailboxView {
+    /// Relève ce que la boîte contient, sans rien verrouiller.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] si la boîte ne peut être lue.
+    pub fn open(boite: &Maildir) -> Result<Self, Error> {
+        let racine = boite.root().to_path_buf();
+        let messages = relever(&racine)?;
+        Ok(Self { racine, messages })
+    }
+
+    /// Les messages, dans l'ordre de leurs rangs.
+    #[must_use]
+    pub fn messages(&self) -> &[Message] {
+        &self.messages
+    }
+
+    /// La racine de la boîte.
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.racine
+    }
+}
+
 /// Relève les messages d'une boîte, `new/` puis `cur/`, triés par UID.
 ///
 /// # L'ordre est celui des UID, et il ne doit dépendre de rien d'autre

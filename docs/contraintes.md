@@ -802,8 +802,78 @@ poignée de main reviendrait à lui faire confiance.
 
 Éprouvé jusqu'au binaire : bannière avec `LOGINDISABLED`, `LOGIN` refusé en
 clair, `STARTTLS`, capacités qui deviennent `AUTH=PLAIN`, `LOGIN` par littéral
-synchronisant avec sa demande de continuation, `SELECT` répondu
-`NO [UNAVAILABLE]`, `LOGOUT`.
+synchronisant avec sa demande de continuation, `LOGOUT`.
+
+## Les boîtes IMAP, depuis le 2026-08-29
+
+`SELECT`, `EXAMINE`, `CLOSE`, `UNSELECT`, `LIST`, `STATUS`, `FETCH` et `UID
+FETCH` servent maintenant la boîte du compte. Une par compte, nommée `INBOX` — le
+nom que la RFC 9051 §5.1 réserve pour cela.
+
+AUCUN CHEMIN N'EST CONSTRUIT À PARTIR D'UN NOM DE BOÎTE. Le nom vient du client.
+`INBOX` est comparé à une constante, et la boîte qu'il désigne est celle que la
+table des comptes a déjà ouverte au démarrage. Un nom qui n'est pas `INBOX`
+n'ouvre rien : il ne devient jamais un morceau de chemin, et il n'y a donc aucune
+traversée de répertoire à empêcher.
+
+UN MESSAGE NE PASSE JAMAIS PAR LA SESSION (C1, C3). `FETCH` peut demander dix
+mégaoctets ; les retenir pour les écrire ensuite donnerait au client le droit de
+choisir combien de mémoire le serveur consomme. La session rend un *intervalle* —
+« le message 3, de l'octet 0 à l'octet 4 812 » — et le pilote l'écoule par
+tranches, en lisant par la boîte ouverte. ON A ANNONCÉ UNE LONGUEUR, ET ON LA
+TIENT : si le magasin s'arrête plus tôt, le manque est comblé plutôt que de
+désynchroniser un client qui compte les octets qu'on lui a promis.
+
+LE COÛT D'UN `FETCH` EST BORNÉ DES DEUX CÔTÉS. Un ensemble de séquences ne rend
+pas plus de `max_sequence_items` intervalles, une liste pas plus de
+`max_fetch_items` éléments, et la boîte a un nombre fini de messages : le produit
+que le client peut faire faire au serveur est donc borné avant toute lecture. La
+lecture, elle, appartient à la BOÎTE OUVERTE et non au magasin — la demander au
+magasin l'obligerait à retrouver le message à chaque tranche de quelques
+kibioctets, c'est-à-dire à relire le répertoire, et un `FETCH 1:* BODY[]` sur dix
+mille messages y deviendrait quadratique à la demande du client.
+
+LA CONCLUSION ÉTIQUETÉE EST LE DERNIER MORCEAU. §7 veut que les réponses non
+sollicitées précèdent la conclusion de leur commande. La rendre d'avance
+obligeait le pilote à la retenir et à l'écrire après les données — un ordre
+qu'aucun type ne lui rappelait. Il l'a inversé, et **c'est l'essai contre le vrai
+binaire qui l'a montré**, pas les tests : ceux-ci lisaient les octets dans le
+bon ordre parce qu'ils les lisaient tous d'un coup.
+
+DEUX LECTURES D'UN MÊME ENSEMBLE DOIVENT S'ACCORDER. `contains` répond « ce
+message est-il demandé ? » (chemin `UID FETCH`), `ranges` énumère lesquels le
+sont (chemin de l'émission). Se contredire rendrait un message à qui ne l'a pas
+demandé. Une cible de fuzz les confronte : quinze millions d'entrées, aucune
+divergence. Les surprises de la §9 y sont — `*` vaut le dernier message, un
+intervalle n'est pas ordonné (`25:*` sur trois messages vaut `3:25`), et sur une
+boîte vide `1:*` ne rend rien plutôt que le message zéro.
+
+IMAP NE VERROUILLE PAS, PARCE QU'IL N'ÉCRIT PAS. POP3 prend le verrou exclusif de
+la boîte : il efface, et la RFC 1939 §3 le lui demande. Une session IMAP dure des
+heures ; le même verrou interdirait toute relève POP3 pendant ces heures, et
+s'interdirait à lui-même — `STATUS INBOX` sur une boîte déjà sélectionnée se
+heurtait à son propre verrou et répondait qu'elle n'existe pas, ce que l'essai
+contre le binaire a montré aussi. IMAP relève donc sans verrouiller, ce pour quoi
+Maildir est fait : un message est un fichier qui ne change plus une fois déposé.
+Ce qu'on accepte en échange est un message effacé en cours de session — cas qu'il
+fallait tenir de toute façon, puisque rien n'empêchait sa disparition entre
+l'annonce de sa taille et son écriture.
+
+`[READ-WRITE]` EST UNE PROMESSE, ET C'EST LE MAGASIN QUI LA TIENT. Tant que rien
+ne s'écrit — ni `STORE`, ni `APPEND`, ni `EXPUNGE` — `SELECT` répond
+`[READ-ONLY]`, avec `PERMANENTFLAGS ()`. Une session qui affirmerait la
+modifiabilité qu'elle ne peut pas connaître ferait une promesse que le client ne
+verrait démentie qu'en essayant.
+
+Ce qui n'est toujours pas servi : `STORE`, `SEARCH`, `COPY`, `MOVE`, `APPEND`,
+`CREATE`/`DELETE`/`RENAME`, `ENVELOPE` et `BODYSTRUCTURE`. Écrire demandera de
+décider ce qui arrive quand deux sessions marquent le même message.
+
+Éprouvé jusqu'au binaire, contre un vrai Maildir rempli par SMTP : `LIST`,
+`SELECT INBOX` et ses sept réponses, `STATUS` sur la boîte sélectionnée,
+`FETCH 1:* (UID FLAGS RFC822.SIZE INTERNALDATE)`, `FETCH 1 BODY.PEEK[]` dont les
+octets sont ceux du fichier, `BODY.PEEK[HEADER]`, `UID FETCH 2 BODY.PEEK[TEXT]
+<4.6>`, `CLOSE`, et un `FETCH` refusé une fois la boîte refermée.
 
 ## Le client SMTP sortant, depuis le 2026-08-29
 
