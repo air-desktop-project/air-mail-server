@@ -371,8 +371,17 @@ fuzz_target!(|entree: Entree<'_>| {
         }
 
         // PROPRIÉTÉ 2 : l'invariant qui porte tout le reste.
+        //
+        // CE QU'IL FAUT EXCLURE, CE SONT LES ÉTATS QUI DONNENT ACCÈS AU
+        // COURRIER. La première écriture de cette propriété disait « non
+        // authentifié OU chiffré », et se trompait : `LOGOUT` mène à l'état
+        // `Logout`, qui n'est ni l'un ni l'autre et ne donne accès à rien. La
+        // propriété tombait donc sur un `LOGOUT` en clair, sans qu'il y eût quoi
+        // que ce soit à corriger dans la session. Une propriété mal dite ne
+        // trouve pas de défaut : elle en invente.
         assert!(
-            session.state() == State::NotAuthenticated || session.is_encrypted(),
+            !matches!(session.state(), State::Authenticated | State::Selected)
+                || session.is_encrypted(),
             "authentifié sans chiffrement"
         );
 

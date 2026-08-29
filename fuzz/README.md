@@ -12,6 +12,18 @@ n'entre ni dans la mesure de couverture ni dans le lock du produit, et rien de c
 qu'elle tire n'est jamais livré. Le nightly employé ici est **roulant**, ce qui est
 acceptable *ici seulement* : rien n'en sort qui doive s'accorder avec autre chose.
 
+## UNE PROPRIÉTÉ MAL DITE N'EN TROUVE PAS : ELLE EN INVENTE
+
+`fuzz_ams_session_imap` affirmait « non authentifié OU chiffré ». C'est faux :
+`LOGOUT` mène à l'état `Logout`, qui n'est ni l'un ni l'autre — et qui ne donne
+accès à rien. La cible est donc tombée sur un `LOGOUT` en clair, sans qu'il y eût
+quoi que ce soit à corriger dans la session.
+
+Ce qu'il fallait exclure, ce sont **les états qui donnent accès au courrier** :
+`Authenticated` et `Selected`. C'est la quatrième fois qu'une campagne trouve une
+propriété fausse plutôt qu'un défaut, et cela vaut d'être écrit : une cible qui
+échoue commence par mettre en cause ce qu'elle affirme.
+
 ## `scripts/check-fuzz.sh` — le contrôle se lance chez soi
 
 Cette crate vit hors du workspace : **`cargo build --workspace` ne la touche

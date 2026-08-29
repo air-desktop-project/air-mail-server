@@ -3013,3 +3013,36 @@ fn un_create_avant_authentification_est_refuse() {
         "{texte}"
     );
 }
+
+/// **L'invariant qui porte tout le reste** : on ne peut pas être AUTHENTIFIÉ
+/// sans être chiffré.
+///
+/// Le fuzz a trouvé une suite qu'il croyait le franchir ; c'était sa propriété
+/// qui était mal dite. `LOGOUT` mène à l'état `Logout`, qui n'est ni
+/// authentifié ni chiffré — et qui ne donne accès à rien. Ce qu'il faut exclure,
+/// ce sont les deux états qui donnent accès au courrier.
+#[test]
+fn on_ne_peut_pas_etre_authentifie_sans_chiffrement() {
+    let mut session = nouvelle(false);
+    let flux: &[u8] = b"a001 C+APABILI\x00OX\r\na004 LOGOUT\r\n`BIL[ITY\r\n;0\x00\x00`a002v2e-t1 CAPABIa003 SELECT INBOX\r\na00\xcc\xdf\xb3\xb0\xb8\xb0\xaa\xab\r\n";
+    let mut sortie = [0_u8; 4096];
+    let mut lecteur = ams_proto_imap::CommandReader::new();
+    let mut reste = flux;
+    for _ in 0..20 {
+        let Ok(ams_proto_imap::Need::Complete(longueur)) = lecteur.poll(reste, &BORNES) else {
+            break;
+        };
+        let commande = reste.get(..longueur).unwrap_or_default();
+        let Ok(_) = session.handle(commande, &mut sortie) else {
+            break;
+        };
+        assert!(
+            !matches!(session.state(), State::Authenticated | State::Selected)
+                || session.is_encrypted(),
+            "authentifié sans chiffrement après {:?}",
+            std::string::String::from_utf8_lossy(commande)
+        );
+        reste = reste.get(longueur..).unwrap_or_default();
+        lecteur.reset();
+    }
+}
