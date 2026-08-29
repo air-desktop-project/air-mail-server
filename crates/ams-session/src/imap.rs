@@ -35,8 +35,8 @@
 //!
 //! # LES BOÎTES SONT SERVIES, ET LE MAGASIN RESTE AILLEURS
 //!
-//! `SELECT`, `EXAMINE`, `CLOSE`, `UNSELECT`, `LIST`, `STATUS`, `FETCH` et
-//! `STORE` sont servis. La session ne sait pas où vivent les messages : elle demande, par
+//! `SELECT`, `EXAMINE`, `CLOSE`, `UNSELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`
+//! et `EXPUNGE` sont servis. La session ne sait pas où vivent les messages : elle demande, par
 //! [`Mailboxes`] et [`Mailbox`], ce qu'elle ne peut pas savoir — combien il y
 //! en a, ce que chacun pèse, où finit son en-tête — et compose le reste.
 //!
@@ -55,10 +55,7 @@
 //!
 //! # Ce qui n'est pas ici
 //!
-//! `SEARCH`, `COPY`, `MOVE`, `APPEND`, `EXPUNGE`, `CREATE`, `DELETE`, `RENAME`.
-//! Effacer, en particulier, demande de décider ce qu'un `EXPUNGE` veut dire dans
-//! un Maildir partagé — et tant que rien n'efface, une boîte peut refuser
-//! `\Deleted` plutôt que de laisser croire à une suppression qui ne viendra pas.
+//! `SEARCH`, `COPY`, `MOVE`, `APPEND`, `CREATE`, `DELETE`, `RENAME`.
 //!
 //! `ENVELOPE` et `BODYSTRUCTURE` non plus : ce sont des analyses du message, que
 //! `ams-mime` saura faire et qui n'ont rien à voir avec une session.
@@ -237,6 +234,23 @@ pub trait Mailbox {
     /// serveur sait écrire, ce qui est une promesse plus étroite.
     fn permanent_flags(&self) -> Flags;
 
+    /// Efface DÉFINITIVEMENT le message de rang `sequence`, et renumérote : ce
+    /// qui suivait descend d'un rang.
+    ///
+    /// Rend `true` si le message n'est plus là — qu'on vienne de l'effacer ou
+    /// qu'il eût déjà disparu. Rend `false` s'il est TOUJOURS LÀ, auquel cas la
+    /// session passe au suivant sans rien annoncer : annoncer un effacement qui
+    /// n'a pas eu lieu ferait perdre au client le fil des numéros de séquence.
+    ///
+    /// # LE MAGASIN A LE DERNIER MOT SUR CE QU'IL EFFACE
+    ///
+    /// La session demande d'effacer ce que SON INSTANTANÉ dit marqué `\Deleted`.
+    /// Entre l'instantané et l'appel, une autre session a pu retirer la marque —
+    /// et effacer sur une croyance périmée, c'est perdre du courrier que
+    /// personne n'a demandé de perdre. Un magasin qui peut le vérifier doit le
+    /// vérifier, et rendre `false` s'il ne trouve plus la marque.
+    fn expunge(&mut self, sequence: u32) -> bool;
+
     /// Écrit les drapeaux du message de rang `sequence`, et rend les nouveaux.
     ///
     /// Rend `None` si le message a disparu — ce qu'une boîte lue sans verrou ne
@@ -368,6 +382,19 @@ struct Emission {
     silencieux: bool,
     /// Ce que la conclusion doit nommer.
     genre: Genre,
+    /// Combien de messages ont déjà été effacés par cette commande.
+    ///
+    /// # CE N'EST PAS UNE STATISTIQUE, C'EST LA BORNE DE LA BOUCLE
+    ///
+    /// L'effacement n'avance pas le rang courant : ce qui suivait descend à sa
+    /// place, et il faut l'examiner à son tour. Le tour ne se termine donc que
+    /// parce que la boîte rétrécit — ce que la session ne peut pas vérifier.
+    /// Une boîte qui dirait « effacé » sans rétrécir ferait une boucle sans fin,
+    /// et un appelant qui écrit ce qu'elle rend remplirait la mémoire de la
+    /// machine. **C'est arrivé ici, sur un itérateur qui ne consommait pas son
+    /// entrée** : 6 Gio, et le noyau qui tue le processus. On ne compte donc pas
+    /// sur la boîte : on n'efface jamais plus de messages qu'elle n'en portait.
+    effaces: u32,
     /// Où en est l'émission du message courant.
     etape: Etape,
 }
@@ -377,6 +404,7 @@ struct Emission {
 enum Genre {
     Fetch,
     Store,
+    Expunge,
 }
 
 impl Genre {
@@ -387,6 +415,8 @@ impl Genre {
             (Genre::Fetch, true) => b"UID FETCH completed",
             (Genre::Store, false) => b"STORE completed",
             (Genre::Store, true) => b"UID STORE completed",
+            (Genre::Expunge, false) => b"EXPUNGE completed",
+            (Genre::Expunge, true) => b"UID EXPUNGE completed",
         }
     }
 }
@@ -460,6 +490,33 @@ impl Emission {
     /// désigne. C'est `exists` fois le nombre d'intervalles — l'un borné par la
     /// boîte, l'autre par `max_sequence_items`. Aucun des deux ne vient du
     /// réseau sans borne, et c'est ce qui rend ce parcours acceptable.
+    /// Le prochain message à effacer, s'il en reste un.
+    ///
+    /// **Le rang courant n'avance pas** : ce qui suivait le message effacé
+    /// descend à sa place, et il faut l'examiner à son tour. C'est l'appelant
+    /// qui avance, quand l'effacement n'a pas eu lieu.
+    ///
+    /// `exists` est relu à chaque tour — la boîte rétrécit sous nos pieds, et
+    /// c'est précisément ce qu'on veut.
+    fn a_effacer<B: Mailbox>(&mut self, boite: &B, limits: &Limits) -> Option<u32> {
+        let texte = self.texte.get(..self.texte_len).unwrap_or_default();
+        let ensemble = SequenceSet::parse(texte, limits).unwrap_or(SequenceSet::EMPTY);
+        // ON N'EFFACE JAMAIS PLUS QUE CE QUE LA BOÎTE PORTAIT. Voir `effaces`.
+        while self.courant <= boite.exists() && self.effaces < self.exists {
+            let rang = self.courant;
+            let Some(info) = boite.info(rang) else {
+                self.courant = self.courant.saturating_add(1);
+                continue;
+            };
+            let clef = if self.par_uid { info.uid } else { rang };
+            if info.flags.contains(Flags::DELETED) && ensemble.contains(clef, self.star) {
+                return Some(rang);
+            }
+            self.courant = self.courant.saturating_add(1);
+        }
+        None
+    }
+
     fn suivant<B: Mailbox>(&mut self, boite: &B, limits: &Limits) -> Option<(u32, MessageInfo)> {
         let texte = self.texte.get(..self.texte_len).unwrap_or_default();
         // LE TEXTE A DÉJÀ ÉTÉ VALIDÉ : `fetch` ne retient que ce qui se lit.
@@ -675,13 +732,13 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             | Command::Append
             | Command::Idle => self.si_authentifie(out),
             // ── Sélectionné seulement (§6.4) ────────────────────────────────
-            Command::Close | Command::Unselect => self.close(out),
+            Command::Close => self.close(true, out),
+            Command::Unselect => self.close(false, out),
+            Command::Expunge => self.expunge(lue.arguments, false, out),
             Command::Fetch => self.fetch(lue.arguments, false, out),
             Command::Store => self.store(lue.arguments, false, out),
             Command::Uid => self.uid(lue.arguments, out),
-            Command::Expunge | Command::Search | Command::Copy | Command::Move => {
-                self.si_selectionne(out)
-            }
+            Command::Search | Command::Copy | Command::Move => self.si_selectionne(out),
             // ── Retirés par IMAP4rev2 (§A) ──────────────────────────────────
             Command::Lsub | Command::Check => self.termine(
                 Status::Bad,
@@ -1236,15 +1293,141 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
     /// n'est jamais marqué — et les deux se comportent donc pareil. **Le jour où
     /// `STORE` arrivera, cette égalité devra cesser**, et c'est écrit ici pour
     /// qu'on ne l'oublie pas.
-    fn close<'b>(&mut self, out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
-        if self.etat != State::Selected {
+    /// La boîte ouverte accepte-t-elle qu'on efface ?
+    ///
+    /// Deux conditions, et les deux comptent : la boîte doit savoir écrire
+    /// `\Deleted` — sans quoi rien n'a pu être marqué par nous — et la session
+    /// ne doit pas avoir été ouverte en lecture seule (§6.4.2).
+    fn peut_effacer(&self) -> bool {
+        !self.lecture_seule
+            && self
+                .ouverte
+                .as_ref()
+                .is_some_and(|boite| boite.permanent_flags().contains(Flags::DELETED))
+    }
+
+    /// `CLOSE` (§6.4.2) et `UNSELECT` (§6.4.4).
+    ///
+    /// # DEUX COMMANDES QUI SE RESSEMBLENT ET QUI NE SONT PAS LA MÊME
+    ///
+    /// `CLOSE` EFFACE les messages marqués `\Deleted` avant de refermer, et sans
+    /// rien annoncer — le client s'en va, il n'y a personne à qui renuméroter.
+    /// `UNSELECT` referme et n'efface rien : il existe précisément pour cela.
+    /// Les confondre ferait effacer du courrier à qui demandait le contraire.
+    fn close<'b>(&mut self, expurge: bool, out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
+        // LA PRÉSENCE DE LA BOÎTE EST L'ÉTAT. La prendre ICI plutôt que de
+        // vérifier l'état puis de la reprendre plus bas évite une seconde garde
+        // qu'aucune entrée ne pourrait emprunter — et une garde inatteignable
+        // n'est pas une garde, c'est une affirmation non vérifiée.
+        let lecture_seule = self.lecture_seule;
+        let Some(boite) = self.ouverte.as_mut() else {
             return self.faute(b"Command is not allowed unless a mailbox is selected", out);
+        };
+        if expurge && !lecture_seule && boite.permanent_flags().contains(Flags::DELETED) {
+            // ON N'EFFACE JAMAIS PLUS QUE CE QUE LA BOÎTE PORTAIT ; voir
+            // `Emission::effaces`. Ici la borne est explicite, faute d'émission
+            // où la loger.
+            let plafond = boite.exists();
+            let mut rang = 1_u32;
+            let mut effaces = 0_u32;
+            while rang <= boite.exists() && effaces < plafond {
+                let marque = boite
+                    .info(rang)
+                    .is_some_and(|info| info.flags.contains(Flags::DELETED));
+                if marque && boite.expunge(rang) {
+                    effaces = effaces.saturating_add(1);
+                    continue;
+                }
+                rang = rang.saturating_add(1);
+            }
         }
         self.ouverte = None;
         self.emission = None;
         self.nom_ouvert_len = 0;
         self.etat = State::Authenticated;
-        self.termine(Status::Ok, b"Mailbox closed", Action::Continue, out)
+        self.termine(
+            Status::Ok,
+            if expurge {
+                b"CLOSE completed".as_slice()
+            } else {
+                b"UNSELECT completed".as_slice()
+            },
+            Action::Continue,
+            out,
+        )
+    }
+
+    /// `EXPUNGE` et `UID EXPUNGE` (§6.4.3 et §6.4.9).
+    fn expunge<'b>(
+        &mut self,
+        arguments: &[u8],
+        par_uid: bool,
+        out: &'b mut [u8],
+    ) -> Result<Turn<'b>, Error> {
+        // LA PRÉSENCE DE LA BOÎTE EST L'ÉTAT ; voir `fetch`.
+        let Some(boite) = self.ouverte.as_ref() else {
+            return self.faute(b"Command is not allowed unless a mailbox is selected", out);
+        };
+        let exists = boite.exists();
+        let dernier_uid = boite.info(exists).map_or(0, |info| info.uid);
+        if !self.peut_effacer() {
+            return self.termine(
+                Status::No,
+                b"[CANNOT] Mailbox is read-only",
+                Action::Continue,
+                out,
+            );
+        }
+        // UN `EXPUNGE` NU EFFACE TOUT CE QUI EST MARQUÉ ; un `UID EXPUNGE` s'en
+        // tient à l'ensemble qu'on lui donne (§6.4.9). Le premier se dit `1:*`,
+        // ce qui évite un second chemin dans le parcours.
+        let arguments = arguments.trim_ascii();
+        let texte: &[u8] = if par_uid {
+            if arguments.is_empty() {
+                return self.faute(b"UID EXPUNGE expects a sequence set", out);
+            }
+            arguments
+        } else {
+            if !arguments.is_empty() {
+                return self.faute(b"EXPUNGE takes no arguments", out);
+            }
+            b"1:*"
+        };
+        if texte.len() > SEQUENCE_TEXT_MAX {
+            return self.termine(
+                Status::No,
+                b"[CANNOT] Sequence set is too long",
+                Action::Continue,
+                out,
+            );
+        }
+        if SequenceSet::parse(texte, &self.limits).is_err() {
+            return self.faute(b"EXPUNGE arguments are malformed", out);
+        }
+        let mut emission = Emission {
+            texte: [0; SEQUENCE_TEXT_MAX],
+            texte_len: texte.len(),
+            items: [FetchItem::Flags; ams_proto_imap::FETCH_ITEMS_MAX],
+            items_len: 0,
+            par_uid,
+            star: if par_uid { dernier_uid } else { exists },
+            courant: 1,
+            exists,
+            ecriture: None,
+            silencieux: false,
+            genre: Genre::Expunge,
+            effaces: 0,
+            etape: Etape::Choisir,
+        };
+        for (place, octet) in emission.texte.iter_mut().zip(texte) {
+            *place = *octet;
+        }
+        self.emission = Some(emission);
+        Ok(Turn {
+            reply: out.get(..0).unwrap_or_default(),
+            action: Action::SendFetch,
+            peer_fault: false,
+        })
     }
 
     /// `LIST` (§6.3.9), dans sa forme la plus simple.
@@ -1367,6 +1550,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             ecriture: Some((demande.mode(), demande.flags())),
             silencieux: demande.silent(),
             genre: Genre::Store,
+            effaces: 0,
             etape: Etape::Choisir,
         };
         for (place, octet) in emission.texte.iter_mut().zip(texte) {
@@ -1463,9 +1647,12 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         if verbe.eq_ignore_ascii_case(b"STORE") {
             return self.store(reste, true, out);
         }
+        if verbe.eq_ignore_ascii_case(b"EXPUNGE") {
+            return self.expunge(reste, true, out);
+        }
         self.termine(
             Status::No,
-            b"[CANNOT] Only UID FETCH and UID STORE are served yet",
+            b"[CANNOT] Only UID FETCH, UID STORE and UID EXPUNGE are served yet",
             Action::Continue,
             out,
         )
@@ -1547,6 +1734,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             ecriture: None,
             silencieux: false,
             genre: Genre::Fetch,
+            effaces: 0,
             etape: Etape::Choisir,
         };
         // La longueur a été vérifiée juste au-dessus ; `zip` s'arrête de
@@ -1624,6 +1812,38 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
                 )));
             }
             Etape::Choisir => {}
+        }
+
+        // ── L'EFFACEMENT SUIT UN AUTRE CHEMIN QUE LA LECTURE ────────────────
+        //
+        // §7.5.1 : chaque `* n EXPUNGE` RENUMÉROTE ce qui suit. La réponse n'a
+        // donc pas la forme d'un `FETCH`, et le parcours non plus : il ne
+        // s'arrête pas au rang courant mais à ce qu'il reste de la boîte.
+        if emission.genre == Genre::Expunge {
+            loop {
+                let Some(rang) = emission.a_effacer(boite, &self.limits) else {
+                    emission.etape = Etape::Conclure;
+                    self.emission = Some(emission);
+                    return self.next_fetch(out);
+                };
+                if !boite.expunge(rang) {
+                    // Toujours là — la marque a dû être retirée entre-temps. On
+                    // passe, et l'on n'annonce rien : annoncer un effacement qui
+                    // n'a pas eu lieu ferait perdre au client le fil des numéros.
+                    emission.courant = rang.saturating_add(1);
+                    continue;
+                }
+                emission.effaces = emission.effaces.saturating_add(1);
+                self.emission = Some(emission);
+                let mut plume = Plume::neuve(out);
+                plume.pousser(b"* ")?;
+                plume.nombre(u64::from(rang))?;
+                plume.pousser(b" EXPUNGE\r\n")?;
+                let ecrits = plume.ecrits();
+                return Ok(Some(FetchChunk::Bytes(
+                    out.get(..ecrits).unwrap_or_default(),
+                )));
+            }
         }
 
         // ON BOUCLE PLUTÔT QUE DE SE RAPPELER SOI-MÊME. Un `STORE .SILENT` sur

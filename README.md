@@ -30,10 +30,10 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 > n'accepte de courrier pour personne — ce n'est plus un fourre-tout.
 >
 > **Il ouvre les boîtes** : IMAP sur un troisième port, `STARTTLS` puis `LOGIN`
-> ou `AUTHENTICATE PLAIN`, `SELECT`, `LIST`, `STATUS`, `FETCH` et `STORE` sur
-> `INBOX` — un message traverse la socket sans jamais tenir en mémoire, et les
-> drapeaux s'écrivent dans les noms de fichiers Maildir. `\Deleted` est refusé
-> tant que rien n'efface.
+> ou `AUTHENTICATE PLAIN`, `SELECT`, `LIST`, `STATUS`, `FETCH`, `STORE` et
+> `EXPUNGE` sur `INBOX` — un message traverse la socket sans jamais tenir en
+> mémoire, les drapeaux s'écrivent dans les noms de fichiers Maildir, et un
+> effacement n'a jamais lieu sur une marque périmée.
 >
 > Dix-neuf crates sur vingt portent du code ; `ams-proto-http` est le seul
 > emplacement réservé, et il le dit dans sa documentation.
@@ -469,8 +469,8 @@ découpage existe pour fermer. Un tag illisible, lui, ne ferme rien : la command
 
 ## Les boîtes IMAP : lire sans jamais tenir un message
 
-`SELECT`, `EXAMINE`, `CLOSE`, `UNSELECT`, `LIST`, `STATUS`, `FETCH`, `STORE` et
-leurs formes `UID` servent la boîte du compte. Ce serveur en a **une par compte, et elle
+`SELECT`, `EXAMINE`, `CLOSE`, `UNSELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`,
+`EXPUNGE` et leurs formes `UID` servent la boîte du compte. Ce serveur en a **une par compte, et elle
 s'appelle `INBOX`** — le nom que la RFC 9051 §5.1 réserve pour cela. Créer des
 dossiers demanderait `CREATE`, un endroit où les mettre et une règle pour ce
 qu'un nom a le droit d'être ; rien de tout cela n'est écrit, et prétendre en
@@ -546,13 +546,8 @@ d'équivalent. Un `FLAGS (\Seen)` demande « exactement `\Seen` » — exactemen
 le vocabulaire du client, qui ne sait pas dire `P`. Le lui faire effacer serait
 lui prêter une intention qu'il ne pouvait pas former.
 
-**`\Deleted` est refusé, et c'est une promesse tenue plutôt qu'une fonction
-manquante.** Le poser n'aurait de sens que si quelque chose l'honorait : §6.4.2
-veut qu'un `CLOSE` efface les messages qui le portent, et rien n'efface encore.
-Un client qui marque son courrier pour la corbeille et le retrouve intact au
-relevé suivant a été trompé. `PERMANENTFLAGS` ne le cite donc pas, et un `STORE`
-qui l'apporte reçoit `NO [CANNOT]`. Un drapeau inconnu — `$Important`, un
-mot-clé de client — est refusé pour la même raison.
+**Un drapeau inconnu — `$Important`, un mot-clé de client — est refusé**, pour
+la même raison qu'on refuse tout ce qu'on ne sait pas faire survivre.
 
 **Ce qui se perd, et ce qui ne se perd pas.** Deux sessions qui marquent le même
 message ne s'effacent pas l'une l'autre : les écritures relisent le nom du
@@ -567,7 +562,45 @@ aucune marque — seulement du retard à en rendre compte.
 puis disparu ne fait pas échouer la commande (§6.4.6) : le client l'apprend en
 ne recevant rien pour lui.
 
-Ce qui n'y est toujours pas : `SEARCH`, `COPY`, `MOVE`, `APPEND`, `EXPUNGE`,
+## `EXPUNGE` : effacer pour de bon, sans jamais effacer de travers
+
+`\Deleted` n'est plus refusé : quelque chose l'honore enfin. `EXPUNGE` efface les
+messages qui le portent, `UID EXPUNGE` s'en tient à l'ensemble qu'on lui nomme
+(§6.4.9), et `CLOSE` efface en refermant (§6.4.2) — là où `UNSELECT` referme sans
+rien effacer, ce pour quoi il existe. Les confondre ferait effacer du courrier à
+qui demandait le contraire.
+
+**CHAQUE `* n EXPUNGE` RENUMÉROTE CE QUI SUIT** (§7.5.1). Effacer les messages 1
+et 3 d'une boîte de trois ne s'annonce donc pas « 1 puis 3 » mais « 1 puis 2 » :
+après le premier, l'ancien troisième est devenu le deuxième. Un serveur qui
+annoncerait les rangs d'origine ferait effacer au client un message qu'il voulait
+garder.
+
+**ON N'EFFACE PAS SUR UNE CROYANCE PÉRIMÉE.** La session demande d'effacer ce que
+son instantané dit marqué — un instantané pris à l'ouverture, il y a peut-être
+des heures. Le magasin relit donc les lettres dans le nom du fichier à l'instant
+d'effacer, et **refuse si la marque n'y est plus**. Le refus ne s'annonce pas :
+annoncer un effacement qui n'a pas eu lieu ferait perdre au client le fil des
+numéros. Un courrier perdu ne se retrouve pas ; un courrier qui survit une
+session de trop se ferme au prochain `EXPUNGE`.
+
+**`NotFound` NE VEUT PAS DIRE « DÉJÀ PARTI ».** Dans un Maildir, un message
+introuvable sous son nom a le plus souvent changé de nom — quelqu'un a écrit ses
+drapeaux. Le prendre pour une disparition faisait oublier de la boîte un message
+bien vivant, et pire : « effacé » sur la foi de lettres lues dans un nom qui
+n'existait plus. On le retrouve donc par son UID, et l'on recommence — trois fois
+au plus. C'est l'essai contre le vrai binaire qui l'a montré, en retirant une
+marque sous ses pieds.
+
+**Une boucle qui n'avance pas remplit la mémoire.** L'effacement n'avance pas le
+rang courant : ce qui suivait descend à sa place, et il faut l'examiner à son
+tour. Le tour ne se termine donc que parce que la boîte rétrécit — ce que la
+session ne peut pas vérifier. Elle ne compte pas dessus : **elle n'efface jamais
+plus de messages que la boîte n'en portait**. Ce n'est pas de la prudence
+abstraite : un itérateur qui ne consommait pas son entrée a déjà tué cette
+machine, 6 Gio en quelques secondes.
+
+Ce qui n'y est toujours pas : `SEARCH`, `COPY`, `MOVE`, `APPEND`,
 `CREATE`/`DELETE`/`RENAME`, `ENVELOPE` et `BODYSTRUCTURE`. Ils sont reconnus, leur
 état est vérifié, et la session répond `NO [UNAVAILABLE]` — `NO` et non `BAD`,
 parce que la commande est correcte et permise et que c'est ce serveur qui ne la

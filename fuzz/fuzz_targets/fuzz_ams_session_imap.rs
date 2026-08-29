@@ -24,11 +24,19 @@
 //!    session annonce une longueur au client, puis rend un intervalle à
 //!    l'appelant : si l'intervalle débordait, l'appelant ne pourrait pas tenir
 //!    l'annonce, et comblerait — c'est-à-dire mentirait.
+//! 7. **UNE ÉMISSION S'ARRÊTE.** Un `EXPUNGE` n'avance pas le rang courant :
+//!    ce qui suivait descend à sa place. La boucle ne se termine donc que parce
+//!    que la boîte rétrécit, et la boîte d'épreuve rétrécit VRAIMENT. Le
+//!    drainage est borné, et le franchir est une faute — un itérateur qui
+//!    n'avance pas a déjà tué cette machine une fois.
 
 #![no_main]
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
+
+use std::cell::RefCell;
+use std::rc::Rc;
 
 use ams_proto_imap::{CommandReader, Flags, Limits, Need, StoreMode};
 use ams_sasl::Credentials;
@@ -44,15 +52,30 @@ impl Authenticator for UnCompte {
     }
 }
 
-/// Deux messages, et rien de plus : c'est la session qu'on éprouve, pas Maildir.
-const TAILLES: [u64; 2] = [64, 4096];
+/// Ce que porte un message d'épreuve : sa taille et ses drapeaux.
+type Message = (u64, Flags);
+
+/// Deux messages au départ, et rien de plus : c'est la session qu'on éprouve,
+/// pas Maildir.
+fn depart() -> Vec<Message> {
+    vec![(64, Flags::NONE), (4096, Flags::NONE)]
+}
 
 /// La boîte d'épreuve.
-struct Boite;
+///
+/// **Elle RETIENT ce qu'on lui écrit, et elle RÉTRÉCIT quand on efface.** Une
+/// boîte qui n'oublierait rien ne ferait jamais tourner la boucle d'`EXPUNGE`,
+/// et la propriété d'arrêt ne prouverait rien. L'état est partagé avec le corps
+/// de la cible, qui a besoin de connaître la taille d'un message pour vérifier
+/// qu'un intervalle ne déborde pas.
+#[derive(Clone)]
+struct Boite {
+    messages: Rc<RefCell<Vec<Message>>>,
+}
 
 impl Mailbox for Boite {
     fn exists(&self) -> u32 {
-        2
+        u32::try_from(self.messages.borrow().len()).unwrap_or(u32::MAX)
     }
     fn uid_validity(&self) -> u32 {
         7
@@ -61,11 +84,12 @@ impl Mailbox for Boite {
         3
     }
     fn info(&self, sequence: u32) -> Option<MessageInfo> {
-        let taille = *TAILLES.get(usize::try_from(sequence).ok()?.checked_sub(1)?)?;
+        let rang = usize::try_from(sequence.checked_sub(1)?).ok()?;
+        let (taille, drapeaux) = *self.messages.borrow().get(rang)?;
         Some(MessageInfo {
             uid: sequence,
             size: taille,
-            flags: Flags::NONE,
+            flags: drapeaux,
             internal_date: 1_787_987_311,
         })
     }
@@ -74,7 +98,7 @@ impl Mailbox for Boite {
         self.info(sequence).map_or(0, |info| info.size / 3)
     }
     fn permanent_flags(&self) -> Flags {
-        Flags::SEEN.with(Flags::FLAGGED)
+        Flags::SEEN.with(Flags::FLAGGED).with(Flags::DELETED)
     }
     fn read(&self, sequence: u32, offset: u64, out: &mut [u8]) -> usize {
         let Some(info) = self.info(sequence) else {
@@ -86,21 +110,34 @@ impl Mailbox for Boite {
         place.fill(b'x');
         place.len()
     }
+    fn expunge(&mut self, sequence: u32) -> bool {
+        let Ok(rang) = usize::try_from(sequence.saturating_sub(1)) else {
+            return false;
+        };
+        let mut messages = self.messages.borrow_mut();
+        if rang >= messages.len() {
+            return false;
+        }
+        messages.remove(rang);
+        true
+    }
     fn store_flags(&mut self, sequence: u32, mode: StoreMode, flags: Flags) -> Option<Flags> {
-        // La boîte d'épreuve ne retient rien ; ce qu'on éprouve ici est la
-        // session, pas la persistance. Le message hors de portée disparaît, ce
-        // qui exerce le chemin « §6.4.6 : ne pas en faire une erreur ».
-        self.info(sequence)?;
-        Some(match mode {
+        let rang = usize::try_from(sequence.checked_sub(1)?).ok()?;
+        let mut messages = self.messages.borrow_mut();
+        let message = messages.get_mut(rang)?;
+        message.1 = match mode {
             StoreMode::Replace => flags,
-            StoreMode::Add => Flags::SEEN.with(flags),
-            StoreMode::Remove => Flags::SEEN.without(flags),
-        })
+            StoreMode::Add => message.1.with(flags),
+            StoreMode::Remove => message.1.without(flags),
+        };
+        Some(message.1)
     }
 }
 
 /// Le magasin : une seule boîte, `INBOX`.
-struct Boites;
+struct Boites {
+    messages: Rc<RefCell<Vec<Message>>>,
+}
 
 impl Mailboxes for Boites {
     type Open = Boite;
@@ -108,7 +145,9 @@ impl Mailboxes for Boites {
         (index == 0).then_some(&b"INBOX"[..])
     }
     fn open(&self, _user: &[u8], name: &[u8]) -> Option<Boite> {
-        (name == b"INBOX").then_some(Boite)
+        (name == b"INBOX").then_some(Boite {
+            messages: Rc::clone(&self.messages),
+        })
     }
 }
 
@@ -152,7 +191,15 @@ struct Entree<'a> {
 
 fuzz_target!(|entree: Entree<'_>| {
     let bornes = Limits::DEFAULT;
-    let mut session = Session::new(bornes, entree.starttls, UnCompte, Boites);
+    let messages = Rc::new(RefCell::new(depart()));
+    let mut session = Session::new(
+        bornes,
+        entree.starttls,
+        UnCompte,
+        Boites {
+            messages: Rc::clone(&messages),
+        },
+    );
     if entree.chiffree {
         session.on_tls_established();
     }
@@ -206,12 +253,16 @@ fuzz_target!(|entree: Entree<'_>| {
             // étiquetée EN FAIT PARTIE : elle est le dernier morceau, et la
             // propriété 4 doit donc la voir passer ici.
             Action::SendFetch => {
+                // PROPRIÉTÉ 7 : l'émission s'arrête. La borne est large — deux
+                // morceaux par message rendu, plus la conclusion, sur une boîte
+                // de deux — et la franchir n'est pas « on s'arrête là » mais une
+                // faute : c'est le signe d'une boucle qui ne tourne pas.
                 let mut morceaux = 0_u32;
-                // Deux morceaux par message rendu, plus la conclusion ; la
-                // boîte en a deux, et l'ensemble est borné par la grammaire.
+                let mut conclue = false;
                 while morceaux < 4096 {
                     morceaux = morceaux.saturating_add(1);
                     let Ok(Some(morceau)) = session.next_fetch(&mut sortie) else {
+                        conclue = true;
                         break;
                     };
                     match morceau {
@@ -222,10 +273,10 @@ fuzz_target!(|entree: Entree<'_>| {
                             length,
                         } => {
                             // PROPRIÉTÉ 6 : l'intervalle tient dans le message.
-                            let taille = TAILLES
+                            let taille = messages
+                                .borrow()
                                 .get(usize::try_from(sequence).unwrap_or(0).saturating_sub(1))
-                                .copied()
-                                .unwrap_or(0);
+                                .map_or(0, |message| message.0);
                             assert!(
                                 offset.saturating_add(length) <= taille,
                                 "un intervalle déborde du message {sequence} : \
@@ -234,6 +285,10 @@ fuzz_target!(|entree: Entree<'_>| {
                         }
                     }
                 }
+                assert!(
+                    conclue,
+                    "l'émission n'a pas conclu en {morceaux} morceaux : la boucle n'avance pas"
+                );
             }
             Action::Continue => {}
         }

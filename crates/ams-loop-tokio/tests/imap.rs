@@ -82,6 +82,13 @@ impl Mailbox for Boite {
             .copy_from_slice(reste.get(..combien).unwrap_or_default());
         combien
     }
+    fn expunge(&mut self, _sequence: u32) -> bool {
+        // La boîte d'épreuve ne rétrécit pas : rien ne s'y efface, et c'est le
+        // passage sur le fil qu'on éprouve ici. `false` dit « toujours là », ce
+        // qui fait passer la session au message suivant sans rien annoncer.
+        false
+    }
+
     fn store_flags(&mut self, sequence: u32, _mode: StoreMode, _flags: Flags) -> Option<Flags> {
         // La boîte d'épreuve ne retient rien : ce qu'on éprouve ici est le
         // passage sur le fil, pas la persistance.
@@ -593,4 +600,39 @@ async fn un_store_traverse_la_socket() {
         .expect("écriture");
     let refus = jusqu_a(&mut lecteur, "a006 ").await;
     assert!(refus.starts_with("a006 NO [CANNOT]"), "{refus}");
+}
+
+/// **`EXPUNGE` traverse la socket**, et un magasin qui refuse d'effacer n'y fait
+/// rien annoncer.
+#[tokio::test]
+async fn un_expunge_traverse_la_socket() {
+    let Some(materiel) = materiel("imap-expunge") else {
+        return;
+    };
+    let mut lecteur = authentifiee(&materiel).await;
+    lecteur
+        .get_mut()
+        .write_all(b"a003 SELECT INBOX\r\n")
+        .await
+        .expect("écriture");
+    jusqu_a(&mut lecteur, "a003 ").await;
+
+    // La boîte d'épreuve ne sait pas écrire `\Deleted` : `EXPUNGE` est donc
+    // refusé, et le dire vaut mieux que de laisser croire à un effacement.
+    lecteur
+        .get_mut()
+        .write_all(b"a004 EXPUNGE\r\n")
+        .await
+        .expect("écriture");
+    let refus = jusqu_a(&mut lecteur, "a004 ").await;
+    assert!(refus.starts_with("a004 NO [CANNOT]"), "{refus}");
+
+    // `UNSELECT` referme sans rien effacer, et se nomme.
+    lecteur
+        .get_mut()
+        .write_all(b"a005 UNSELECT\r\n")
+        .await
+        .expect("écriture");
+    let referme = jusqu_a(&mut lecteur, "a005 ").await;
+    assert_eq!(referme, "a005 OK UNSELECT completed\r\n");
 }

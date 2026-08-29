@@ -38,6 +38,14 @@ pub struct Boite {
     /// exclure, et ce dont §6.4.6 dit qu'il ne faut pas faire une erreur.
     /// `0` : aucun.
     evanescent: u32,
+    /// Combien de messages cette boîte a effacés, vu du dehors.
+    efface: std::rc::Rc<std::cell::Cell<u32>>,
+    /// L'UID d'un message qui REFUSE de s'effacer.
+    ///
+    /// C'est le cas qu'un magasin réel rencontre : entre l'instantané et
+    /// l'ordre, une autre session a retiré la marque `\Deleted`, et le magasin
+    /// refuse alors d'effacer plutôt que de perdre du courrier. `0` : aucun.
+    tetu: u32,
 }
 
 impl Mailbox for Boite {
@@ -85,6 +93,30 @@ impl Mailbox for Boite {
         place.fill(b'0'.saturating_add(u8::try_from(sequence % 10).unwrap_or(0)));
         place.len()
     }
+    fn expunge(&mut self, sequence: u32) -> bool {
+        if !self.modifiable {
+            return false;
+        }
+        let Some(rang) = usize::try_from(sequence.saturating_sub(1)).ok() else {
+            return false;
+        };
+        if rang >= self.messages.len() {
+            return false;
+        }
+        // Le têtu ne s'efface pas : sa marque a été retirée entre-temps.
+        if self
+            .info(sequence)
+            .is_some_and(|info| info.uid == self.tetu)
+        {
+            return false;
+        }
+        // Le message évanescent s'efface tout seul avant qu'on l'atteigne : il
+        // n'est plus là, ce qui est bien ce que `true` veut dire.
+        self.messages.remove(rang);
+        self.efface.set(self.efface.get().saturating_add(1));
+        true
+    }
+
     fn store_flags(&mut self, sequence: u32, mode: StoreMode, flags: Flags) -> Option<Flags> {
         if !self.modifiable || sequence == self.evanescent {
             return None;
@@ -111,8 +143,15 @@ fn message(uid: u32, size: u64, flags: Flags, internal_date: u64) -> Option<Mess
 }
 
 /// Quatre boîtes, dont une trouée.
-#[derive(Debug, Clone)]
-pub struct Boites;
+///
+/// Le compteur d'effacements est PARTAGÉ avec l'appelant : une boîte d'épreuve
+/// meurt avec la session qui la tient, et `CLOSE` efface au moment précis où
+/// elle meurt. Sans ce compteur, ce que `CLOSE` a fait ne serait observable
+/// nulle part.
+#[derive(Debug, Clone, Default)]
+pub struct Boites {
+    efface: std::rc::Rc<std::cell::Cell<u32>>,
+}
 
 impl Mailboxes for Boites {
     type Open = Boite;
@@ -137,6 +176,12 @@ impl Mailboxes for Boites {
                 None,
                 message(3, 10, Flags::NONE, 0),
             ],
+            // Trois messages ordinaires, dont le deuxième refusera de s'effacer.
+            b"Tetue" => std::vec![
+                message(10, 100, Flags::NONE, 0),
+                message(20, 200, Flags::NONE, 0),
+                message(30, 300, Flags::NONE, 0),
+            ],
             b"Archives" | b"Archives/2026" => std::vec::Vec::new(),
             _ => return None,
         };
@@ -147,13 +192,16 @@ impl Mailboxes for Boites {
             modifiable: !name.starts_with(b"Archives"),
             // Dans la boîte trouée, le troisième s'efface quand on écrit.
             evanescent: if name == b"Trouee" { 3 } else { 0 },
+            efface: std::rc::Rc::clone(&self.efface),
+            // Dans la boîte têtue, le message d'UID 20 refuse de s'effacer.
+            tetu: if name == b"Tetue" { 20 } else { 0 },
         })
     }
 }
 
 /// Une session, chiffrée ou non.
 fn nouvelle(chiffree: bool) -> Session<UnCompte, Boites> {
-    let mut session = Session::new(BORNES, true, UnCompte, Boites);
+    let mut session = Session::new(BORNES, true, UnCompte, Boites::default());
     if chiffree {
         session.on_tls_established();
     }
@@ -205,7 +253,7 @@ fn les_capacites_suivent_le_chiffrement() {
 /// **Annoncer `STARTTLS` sans savoir le faire ferait mentir la bannière.**
 #[test]
 fn sans_materiel_starttls_n_est_pas_annonce() {
-    let mut session = Session::new(BORNES, false, UnCompte, Boites);
+    let mut session = Session::new(BORNES, false, UnCompte, Boites::default());
     let (texte, _) = dire(&mut session, b"a001 CAPABILITY\r\n");
     assert!(!texte.contains("STARTTLS"), "{texte}");
     let (refus, action) = dire(&mut session, b"a002 STARTTLS\r\n");
@@ -554,8 +602,7 @@ fn ce_qu_on_ne_sert_pas_encore_le_dit_sans_accuser_le_client() {
     // hors d'état, et non hors de service.
     dire(&mut session, b"a011 SELECT INBOX\r\n");
     for commande in [
-        &b"a012 EXPUNGE\r\n"[..],
-        b"a013 SEARCH ALL\r\n",
+        &b"a013 SEARCH ALL\r\n"[..],
         b"a015 COPY 1 Archives\r\n",
         b"a016 MOVE 1 Archives\r\n",
     ] {
@@ -651,10 +698,13 @@ fn un_select_qui_echoue_ferme_la_boite_precedente() {
 
 #[test]
 fn close_et_unselect_referment_la_boite() {
-    for commande in [&b"a003 CLOSE\r\n"[..], b"a003 UNSELECT\r\n"] {
+    for (commande, conclusion) in [
+        (&b"a003 CLOSE\r\n"[..], "a003 OK CLOSE completed"),
+        (b"a003 UNSELECT\r\n", "a003 OK UNSELECT completed"),
+    ] {
         let mut session = selectionnee();
         let (texte, _) = dire(&mut session, commande);
-        assert!(texte.starts_with("a003 OK Mailbox closed"), "{texte}");
+        assert!(texte.starts_with(conclusion), "{texte}");
         assert_eq!(session.state(), State::Authenticated);
         assert!(session.selected().is_empty());
     }
@@ -1102,17 +1152,34 @@ fn genre_d_emission(issue: &Result<Option<super::FetchChunk<'_>>, super::Error>)
 /// première faute masquerait tous les morceaux suivants.
 #[test]
 fn un_tampon_trop_court_pendant_l_emission_le_dit() {
-    for commande in [
+    // Certaines émissions demandent qu'on ait d'abord marqué : un `EXPUNGE` sur
+    // une boîte où rien n'est marqué n'écrit que sa conclusion.
+    fn prete(preambule: &[u8]) -> Session<UnCompte, Boites> {
+        let mut session = selectionnee();
+        if !preambule.is_empty() {
+            ecouler(&mut session, preambule);
+        }
+        session
+    }
+
+    for (preambule, commande) in [
         // Le deuxième message porte un drapeau : sans lui, `FLAGS ()` n'écrit
         // rien, et la place ne peut pas manquer là où il faut l'éprouver.
-        &b"a003 FETCH 2 (UID FLAGS INTERNALDATE RFC822.SIZE)\r\n"[..],
-        b"a003 FETCH 1 BODY[]\r\n",
-        b"a003 FETCH 1 BODY[HEADER]<2.3>\r\n",
-        b"a003 FETCH 1:2 (UID BODY.PEEK[TEXT])\r\n",
+        (
+            &b""[..],
+            &b"a003 FETCH 2 (UID FLAGS INTERNALDATE RFC822.SIZE)\r\n"[..],
+        ),
+        (b"", b"a003 FETCH 1 BODY[]\r\n"),
+        (b"", b"a003 FETCH 1 BODY[HEADER]<2.3>\r\n"),
+        (b"", b"a003 FETCH 1:2 (UID BODY.PEEK[TEXT])\r\n"),
+        (
+            b"a003 STORE 1:2 +FLAGS.SILENT (\\Deleted)\r\n",
+            b"a004 EXPUNGE\r\n",
+        ),
     ] {
         // Combien de morceaux, et de quelle taille chacun.
         let mut assez = [0_u8; 2048];
-        let mut reference = selectionnee();
+        let mut reference = prete(preambule);
         reference.handle(commande, &mut assez).expect("traitable");
         let mut tailles = std::vec::Vec::new();
         while let Some(morceau) = reference.next_fetch(&mut assez).expect("émettable") {
@@ -1124,7 +1191,7 @@ fn un_tampon_trop_court_pendant_l_emission_le_dit() {
 
         for (rang, longueur) in tailles.iter().enumerate() {
             for taille in 0..*longueur {
-                let mut session = selectionnee();
+                let mut session = prete(preambule);
                 session.handle(commande, &mut assez).expect("traitable");
                 for _ in 0..rang {
                     session.next_fetch(&mut assez).expect("émettable");
@@ -1362,7 +1429,7 @@ fn un_uid_autre_que_fetch_ou_store_se_refuse_en_le_disant() {
     let mut session = selectionnee();
     let (texte, _) = dire(&mut session, b"a003 UID COPY 1 Archives\r\n");
     assert!(
-        texte.contains("NO [CANNOT] Only UID FETCH and UID STORE are served yet"),
+        texte.contains("NO [CANNOT] Only UID FETCH, UID STORE and UID EXPUNGE are served yet"),
         "{texte}"
     );
     // Et `UID` sans rien derrière ne trouve pas de verbe.
@@ -1483,7 +1550,7 @@ fn un_message_disparu_est_saute_sans_arreter_le_fetch() {
 /// délégations.
 #[test]
 fn un_magasin_partage_se_passe_par_reference() {
-    let boites = Boites;
+    let boites = Boites::default();
     let partage = &boites;
     assert_eq!(Mailboxes::name(&partage, b"jean", 0), Some(&b"INBOX"[..]));
     assert!(Mailboxes::open(&partage, b"jean", b"INBOX").is_some());
@@ -1678,5 +1745,186 @@ fn un_corps_sans_peek_marque_le_message_et_le_dit() {
         fil,
         "* 1 FETCH (FLAGS (\\Seen) BODY[] {100}\r\n<1:0+100>)\r\n\
          a003 OK FETCH completed\r\n"
+    );
+}
+
+// ── `EXPUNGE` ───────────────────────────────────────────────────────────────
+
+/// **Chaque `* n EXPUNGE` RENUMÉROTE ce qui suit** (§7.5.1). Effacer les
+/// messages 1 et 3 d'une boîte de trois ne rend donc pas « 1 puis 3 », mais
+/// « 1 puis 2 » : après le premier, l'ancien troisième est devenu le deuxième.
+/// Un serveur qui annoncerait les rangs d'origine ferait effacer au client un
+/// message qu'il voulait garder.
+#[test]
+fn expunge_renumerote_a_mesure_qu_il_efface() {
+    let mut session = selectionnee();
+    dire(&mut session, b"a003 STORE 1,3 +FLAGS (\\Deleted)\r\n");
+    ecouler(&mut session, b"a003 STORE 1,3 +FLAGS (\\Deleted)\r\n");
+    let fil = ecouler(&mut session, b"a004 EXPUNGE\r\n");
+    assert_eq!(
+        fil,
+        "* 1 EXPUNGE\r\n* 2 EXPUNGE\r\na004 OK EXPUNGE completed\r\n"
+    );
+    // Il ne reste que l'ancien deuxième, devenu le premier.
+    let reste = ecouler(&mut session, b"a005 FETCH 1:* UID\r\n");
+    assert_eq!(reste, "* 1 FETCH (UID 20)\r\na005 OK FETCH completed\r\n");
+}
+
+/// **Rien de marqué, rien d'effacé** — et la commande réussit quand même.
+#[test]
+fn expunge_sans_rien_de_marque_n_efface_rien() {
+    let mut session = selectionnee();
+    let fil = ecouler(&mut session, b"a003 EXPUNGE\r\n");
+    assert_eq!(fil, "a003 OK EXPUNGE completed\r\n");
+    let reste = ecouler(&mut session, b"a004 FETCH 1:* UID\r\n");
+    assert!(reste.contains("* 3 FETCH (UID 30)"), "{reste}");
+}
+
+/// **`UID EXPUNGE` s'en tient à son ensemble** (§6.4.9) : ce qui est marqué mais
+/// hors de l'ensemble RESTE. C'est la commande qu'un client utilise quand il
+/// sait que d'autres sessions marquent la même boîte.
+#[test]
+fn uid_expunge_ne_touche_que_son_ensemble() {
+    let mut session = selectionnee();
+    ecouler(&mut session, b"a003 STORE 1:3 +FLAGS (\\Deleted)\r\n");
+    let fil = ecouler(&mut session, b"a004 UID EXPUNGE 20\r\n");
+    assert_eq!(fil, "* 2 EXPUNGE\r\na004 OK UID EXPUNGE completed\r\n");
+    let reste = ecouler(&mut session, b"a005 FETCH 1:* UID\r\n");
+    assert_eq!(
+        reste,
+        "* 1 FETCH (UID 10)\r\n* 2 FETCH (UID 30)\r\na005 OK FETCH completed\r\n"
+    );
+}
+
+/// **`CLOSE` efface, `UNSELECT` non** (§6.4.2 et §6.4.4) : c'est la seule chose
+/// qui les distingue, et les confondre ferait effacer du courrier à qui
+/// demandait le contraire.
+#[test]
+fn close_efface_et_unselect_ne_touche_a_rien() {
+    for (commande, efface) in [(&b"a004 CLOSE\r\n"[..], 1), (b"a004 UNSELECT\r\n", 0)] {
+        let boites = Boites::default();
+        let compteur = std::rc::Rc::clone(&boites.efface);
+        let mut session = Session::new(BORNES, true, UnCompte, boites);
+        session.on_tls_established();
+        dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+        dire(&mut session, b"a002 SELECT INBOX\r\n");
+        ecouler(&mut session, b"a003 STORE 2 +FLAGS (\\Deleted)\r\n");
+        assert_eq!(compteur.get(), 0, "rien ne doit être effacé avant l'ordre");
+        let (texte, _) = dire(&mut session, commande);
+        assert!(texte.contains("OK"), "{texte}");
+        assert_eq!(compteur.get(), efface, "{commande:?} : {texte}");
+    }
+}
+
+/// **Un magasin peut refuser d'effacer, et cela ne s'annonce pas.** Entre
+/// l'instantané et l'ordre, une autre session a pu retirer la marque : effacer
+/// alors, ce serait perdre du courrier. La session passe au suivant sans rien
+/// dire — annoncer un effacement qui n'a pas eu lieu ferait perdre au client le
+/// fil des numéros de séquence.
+#[test]
+fn un_message_qui_refuse_de_s_effacer_n_est_pas_annonce() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut session, b"a002 SELECT Tetue\r\n");
+    ecouler(&mut session, b"a003 STORE 1:3 +FLAGS (\\Deleted)\r\n");
+    // Le premier s'efface, le deuxième refuse, le troisième s'efface. Le
+    // deuxième ayant pris la place du premier, le troisième est annoncé `2`.
+    let fil = ecouler(&mut session, b"a004 EXPUNGE\r\n");
+    assert_eq!(
+        fil,
+        "* 1 EXPUNGE\r\n* 2 EXPUNGE\r\na004 OK EXPUNGE completed\r\n"
+    );
+    // Et le têtu est bien celui qui reste.
+    let reste = ecouler(&mut session, b"a005 FETCH 1:* UID\r\n");
+    assert_eq!(reste, "* 1 FETCH (UID 20)\r\na005 OK FETCH completed\r\n");
+}
+
+/// **Un message que la boîte annonce sans le rendre n'est pas même choisi.**
+/// C'est l'autre disparition, celle qui n'a pas d'`info` — et un parcours qui
+/// s'arrêterait sur elle laisserait le reste de la boîte intact.
+#[test]
+fn un_trou_dans_la_boite_n_arrete_pas_l_effacement() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut session, b"a002 SELECT Trouee\r\n");
+    ecouler(&mut session, b"a003 STORE 1 +FLAGS (\\Deleted)\r\n");
+    let fil = ecouler(&mut session, b"a004 EXPUNGE\r\n");
+    assert_eq!(fil, "* 1 EXPUNGE\r\na004 OK EXPUNGE completed\r\n");
+}
+
+/// **Une boîte en lecture seule n'efface rien**, et le dit.
+#[test]
+fn expunge_dans_une_boite_en_lecture_seule_se_refuse() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut session, b"a002 EXAMINE INBOX\r\n");
+    let (texte, action) = dire(&mut session, b"a003 EXPUNGE\r\n");
+    assert!(
+        texte.contains("NO [CANNOT] Mailbox is read-only"),
+        "{texte}"
+    );
+    assert_eq!(action, Action::Continue);
+}
+
+/// **`CLOSE` sur une boîte ouverte en lecture seule n'efface rien** (§6.4.2).
+#[test]
+fn close_en_lecture_seule_n_efface_rien() {
+    let boites = Boites::default();
+    let compteur = std::rc::Rc::clone(&boites.efface);
+    let mut session = Session::new(BORNES, true, UnCompte, boites);
+    session.on_tls_established();
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut session, b"a002 EXAMINE INBOX\r\n");
+    dire(&mut session, b"a003 CLOSE\r\n");
+    assert_eq!(compteur.get(), 0);
+}
+
+#[test]
+fn un_expunge_mal_forme_est_une_faute() {
+    let mut session = selectionnee();
+    for (commande, attendu) in [
+        (
+            &b"a003 EXPUNGE 1:2\r\n"[..],
+            "BAD EXPUNGE takes no arguments",
+        ),
+        (
+            b"a004 UID EXPUNGE\r\n",
+            "BAD UID EXPUNGE expects a sequence set",
+        ),
+        (
+            b"a005 UID EXPUNGE x\r\n",
+            "BAD EXPUNGE arguments are malformed",
+        ),
+    ] {
+        let (texte, _) = dire(&mut session, commande);
+        assert!(texte.contains(attendu), "{commande:?} : {texte}");
+    }
+}
+
+/// **Un ensemble trop long est refusé plutôt que tronqué.**
+#[test]
+fn un_ensemble_d_expunge_trop_long_se_refuse() {
+    let mut session = selectionnee();
+    let mut commande = std::vec::Vec::from(&b"a003 UID EXPUNGE "[..]);
+    for _ in 0..(super::SEQUENCE_TEXT_MAX / 2) {
+        commande.extend_from_slice(b"1,");
+    }
+    commande.extend_from_slice(b"1\r\n");
+    let (texte, _) = dire(&mut session, &commande);
+    assert!(
+        texte.contains("NO [CANNOT] Sequence set is too long"),
+        "{texte}"
+    );
+}
+
+/// **Un `EXPUNGE` hors sélection est hors d'état, pas hors de service.**
+#[test]
+fn un_expunge_sans_boite_ouverte_est_hors_d_etat() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (texte, _) = dire(&mut session, b"a002 EXPUNGE\r\n");
+    assert!(
+        texte.contains("BAD Command is not allowed unless a mailbox is selected"),
+        "{texte}"
     );
 }

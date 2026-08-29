@@ -865,9 +865,8 @@ ne s'écrit — ni `STORE`, ni `APPEND`, ni `EXPUNGE` — `SELECT` répond
 modifiabilité qu'elle ne peut pas connaître ferait une promesse que le client ne
 verrait démentie qu'en essayant.
 
-Ce qui n'est toujours pas servi : `STORE`, `SEARCH`, `COPY`, `MOVE`, `APPEND`,
-`CREATE`/`DELETE`/`RENAME`, `ENVELOPE` et `BODYSTRUCTURE`. Écrire demandera de
-décider ce qui arrive quand deux sessions marquent le même message.
+Ce qui n'est toujours pas servi : `SEARCH`, `COPY`, `MOVE`, `APPEND`,
+`CREATE`/`DELETE`/`RENAME`, `ENVELOPE` et `BODYSTRUCTURE`.
 
 Éprouvé jusqu'au binaire, contre un vrai Maildir rempli par SMTP : `LIST`,
 `SELECT INBOX` et ses sept réponses, `STATUS` sur la boîte sélectionnée,
@@ -905,13 +904,8 @@ d'équivalent. Un `FLAGS (\Seen)` demande « exactement `\Seen` » dans le
 vocabulaire du client, qui ne sait pas dire `P` : le lui faire effacer serait lui
 prêter une intention qu'il ne pouvait pas former.
 
-`\Deleted` EST REFUSÉ, ET C'EST UNE PROMESSE TENUE. Le poser n'aurait de sens que
-si quelque chose l'honorait : §6.4.2 veut qu'un `CLOSE` efface les messages qui
-le portent, et rien n'efface encore. Un client qui marque son courrier pour la
-corbeille et le retrouve intact au relevé suivant a été trompé. `PERMANENTFLAGS`
-ne le cite donc pas, et un `STORE` qui l'apporte reçoit `NO [CANNOT]` — comme un
-drapeau inconnu, et pour la même raison : un client à qui l'on répond `OK` croit
-son étiquette posée, et ne la reverra jamais.
+UN DRAPEAU INCONNU EST REFUSÉ : un client à qui l'on répond `OK` croit son
+étiquette posée, et ne la reverra jamais.
 
 UNE SEULE VÉRITÉ SUR CE QUI S'ÉCRIT. La boîte énumère les drapeaux qu'elle sait
 faire survivre ; `PERMANENTFLAGS` les cite, `SELECT` répond `[READ-ONLY]` quand
@@ -938,6 +932,51 @@ comme un autre, ce qui a retiré une méthode au lieu d'en ajouter une.
 l'autre, la lecture du corps après renommage, un message renommé sous nos pieds
 (deux fois, avec et sans changement à écrire), et un message effacé pendant la
 commande — qui ne la fait pas échouer.
+
+## `EXPUNGE` : effacer pour de bon, depuis le 2026-08-29
+
+`\Deleted` n'est plus refusé, parce que quelque chose l'honore enfin. `EXPUNGE`
+efface les messages qui le portent, `UID EXPUNGE` s'en tient à l'ensemble qu'on
+lui nomme (§6.4.9), et `CLOSE` efface en refermant (§6.4.2) — là où `UNSELECT`
+referme sans rien effacer, ce pour quoi il existe.
+
+CHAQUE `* n EXPUNGE` RENUMÉROTE CE QUI SUIT (§7.5.1). Effacer les messages 1 et 3
+d'une boîte de trois ne s'annonce pas « 1 puis 3 » mais « 1 puis 2 » : après le
+premier, l'ancien troisième est devenu le deuxième. Un serveur qui annoncerait
+les rangs d'origine ferait effacer au client un message qu'il voulait garder.
+
+ON N'EFFACE PAS SUR UNE CROYANCE PÉRIMÉE. La session demande d'effacer ce que son
+instantané dit marqué ; le magasin relit les lettres dans le nom du fichier à
+l'instant d'effacer, et REFUSE si la marque n'y est plus. Le refus ne s'annonce
+pas : annoncer un effacement qui n'a pas eu lieu ferait perdre au client le fil
+des numéros. La dissymétrie est voulue — un courrier perdu ne se retrouve pas,
+un courrier qui survit une session de trop s'efface au prochain `EXPUNGE`.
+
+`NotFound` NE VEUT PAS DIRE « DÉJÀ PARTI ». Dans un Maildir, un message
+introuvable sous son nom a le plus souvent changé de nom : quelqu'un a écrit ses
+drapeaux. **Le prendre pour une disparition faisait oublier de la boîte un
+message bien vivant** — et pire, le déclarait « effacé » sur la foi de lettres
+lues dans un nom qui n'existait plus. On le retrouve par son UID, et l'on
+recommence, trois fois au plus. Trouvé sur le binaire, en retirant une marque
+sous ses pieds ; les tests unitaires ne pouvaient pas le voir, faute de système
+de fichiers.
+
+UNE BOUCLE QUI N'AVANCE PAS REMPLIT LA MÉMOIRE (C3, C7). L'effacement n'avance
+pas le rang courant : ce qui suivait descend à sa place, et il faut l'examiner à
+son tour. Le tour ne se termine donc que parce que la boîte rétrécit — ce que la
+session ne peut pas vérifier. Elle ne compte pas dessus : elle n'efface jamais
+plus de messages que la boîte n'en portait, et `CLOSE` porte la même borne. Ce
+n'est pas de la prudence abstraite : un itérateur qui ne consommait pas son
+entrée a déjà tué cette machine, 6 Gio en quelques secondes. La cible
+`fuzz_ams_session_imap` en fait désormais une propriété — l'émission doit
+CONCLURE, et une boîte d'épreuve qui rétrécit vraiment lui donne de quoi tourner.
+
+Éprouvé jusqu'au binaire, contre un vrai Maildir : la renumérotation (les
+fichiers 1 et 3 partent, les UID 2 et 4 restent), un `UID EXPUNGE` qui ne touche
+que son ensemble, une marque retirée sous nos pieds qui fait survivre le message,
+un message effacé par ailleurs qui s'annonce quand même effacé, `CLOSE` qui
+efface sans rien annoncer, et `EXAMINE` puis `EXPUNGE` qui répond
+`NO [CANNOT] Mailbox is read-only`.
 
 ## Le gate de couverture arrondissait vers le haut, depuis le 2026-08-29
 
@@ -1524,8 +1563,8 @@ et une couture inutilisée finit par être utilisée.
 **Trois protocoles sont servis, par un vrai binaire, contre de vrais fichiers** :
 SMTP en réception (avec `STARTTLS`, `AUTH PLAIN`, SPF, DKIM, DMARC et remise
 Maildir), SMTP à l'émission (rapports DMARC), POP3, et IMAP — `SELECT`,
-`EXAMINE`, `CLOSE`, `UNSELECT`, `LIST`, `STATUS`, `FETCH`, `STORE` et leurs
-formes `UID`. Chacun a été éprouvé de bout en bout contre le binaire, et pas
+`EXAMINE`, `CLOSE`, `UNSELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`, `EXPUNGE` et
+leurs formes `UID`. Chacun a été éprouvé de bout en bout contre le binaire, et pas
 seulement en tests.
 
 **HTTP n'est pas servi** : `ams-proto-http` est un emplacement réservé, et son
@@ -1549,6 +1588,6 @@ persistant, et lecture sans verrou côté IMAP), C14 (`X25519MLKEM768` en tête)
 découpage des lectures ne change rien au verdict.
 
 Ce qui manque, et qu'aucune phrase ne doit laisser croire acquis : `SEARCH`,
-`COPY`, `MOVE`, `APPEND`, `EXPUNGE` et la gestion des dossiers en IMAP ; le
-signeur DKIM, qui existe et n'a pas d'appelant ; la file de réémission des
-messages sortants ; et toute interface HTTP.
+`COPY`, `MOVE`, `APPEND` et la gestion des dossiers en IMAP ; le signeur DKIM,
+qui existe et n'a pas d'appelant ; la file de réémission des messages sortants ;
+et toute interface HTTP.

@@ -1,0 +1,4 @@
+a1 LOGIN jean ouvre-toi
+a2 SELECT INBOX
+a3 STORE 1:* +FLAGS (\Deleted)
+a4 EXPUNGE

@@ -20,15 +20,22 @@
 //! un morceau de chemin, et il n'y a donc aucune traversée de répertoire à
 //! empêcher.
 //!
-//! # IMAP NE VERROUILLE PAS, PARCE QU'IL N'ÉCRIT PAS
+//! # IMAP NE VERROUILLE PAS, ET C'EST LE NOM DU FICHIER QUI FAIT FOI
 //!
-//! POP3 prend le verrou exclusif de la boîte : il efface, et RFC 1939 §3 le lui
-//! demande. Ce service-ci ne fait que lire, et une session IMAP dure des heures.
-//! Lui donner le même verrou reviendrait à interdire toute relève POP3 de la
-//! boîte pendant ces heures — et, plus bêtement encore, à s'interdire à
-//! lui-même : `STATUS INBOX` sur une boîte déjà sélectionnée aurait heurté son
-//! propre verrou et répondu qu'elle n'existe pas. Il prend donc une
-//! [`MailboxView`], qui relève sans verrouiller.
+//! POP3 prend le verrou exclusif de la boîte, et RFC 1939 §3 le lui demande :
+//! ses numéros de message ne doivent pas bouger de toute la session. Une session
+//! IMAP, elle, dure des heures. Lui donner le même verrou reviendrait à
+//! interdire toute relève POP3 pendant ces heures — et, plus bêtement encore, à
+//! s'interdire à lui-même : `STATUS INBOX` sur une boîte déjà sélectionnée
+//! heurtait son propre verrou et répondait qu'elle n'existe pas. Il prend donc
+//! une [`MailboxView`], qui relève sans verrouiller.
+//!
+//! Ce qui remplace le verrou n'est pas rien : **le nom du fichier fait foi**. Il
+//! porte les drapeaux, et on le relit à l'instant d'écrire — pour un `STORE`
+//! comme pour un `EXPUNGE`. C'est ce qui permet à deux sessions de marquer la
+//! même boîte sans se perdre l'une l'autre, et surtout de **ne jamais effacer un
+//! message dont la marque a été retirée entre-temps** : un courrier perdu ne se
+//! retrouve pas.
 
 use std::collections::BTreeMap;
 use std::io::{Read as _, Seek as _, SeekFrom};
@@ -137,7 +144,79 @@ impl Mailbox for BoiteImap {
         Flags::SEEN
             .with(Flags::ANSWERED)
             .with(Flags::FLAGGED)
+            .with(Flags::DELETED)
             .with(Flags::DRAFT)
+    }
+
+    fn expunge(&mut self, sequence: u32) -> bool {
+        let Some(rang) = self.rang(sequence) else {
+            return false;
+        };
+        // TROIS TENTATIVES, comme pour `store_flags` : chaque échec vient d'un
+        // renommage concurrent, et trois de suite ne sont plus une course.
+        for _ in 0..3_u32 {
+            let Some(chemin) = self.chemins.get(rang).cloned() else {
+                return false;
+            };
+            let Some(lu) = chemin
+                .file_name()
+                .and_then(|nom| MessageName::parse(nom.as_bytes()).ok())
+            else {
+                return false;
+            };
+
+            // ON NE VÉRIFIE PAS QU'ON PEUT EFFACER, ON VÉRIFIE QU'ON DOIT.
+            //
+            // La session demande d'effacer ce que SON instantané dit marqué
+            // `\Deleted` — un instantané pris à l'ouverture, il y a peut-être
+            // des heures. Entre-temps, une autre session a pu retirer la
+            // marque. Effacer sur cette croyance-là, c'est perdre du courrier
+            // que personne n'a demandé de perdre, et un courrier perdu ne se
+            // retrouve pas. On relit donc le nom, qui porte les lettres.
+            if !lu.flags().contains(ams_index::Flags::TRASHED) {
+                // Deux causes possibles, et elles ne se valent pas : ou bien la
+                // marque a vraiment été retirée, ou bien c'est NOTRE nom qui est
+                // périmé. Le disque tranche.
+                if chemin.symlink_metadata().is_ok() {
+                    return false;
+                }
+                match lu.uid().and_then(|uid| retrouver(self.vue.root(), uid)) {
+                    Some(actuel) => {
+                        self.poser_le_chemin(rang, actuel);
+                        continue;
+                    }
+                    None => break,
+                }
+            }
+
+            match std::fs::remove_file(&chemin) {
+                Ok(()) => {
+                    self.oublier(rang);
+                    return true;
+                }
+                // `NotFound` NE VEUT PAS DIRE « DÉJÀ PARTI ». Dans un Maildir,
+                // un message qu'on ne trouve plus sous son nom a le plus souvent
+                // simplement changé de nom — quelqu'un a écrit ses drapeaux. Le
+                // prendre pour une disparition ferait oublier de la boîte un
+                // message bien vivant, et pire : on l'aurait « effacé » sur la
+                // foi de lettres lues dans un nom qui n'existe plus. Constaté
+                // sur le binaire, en retirant la marque sous ses pieds.
+                Err(erreur) if erreur.kind() == std::io::ErrorKind::NotFound => {
+                    match lu.uid().and_then(|uid| retrouver(self.vue.root(), uid)) {
+                        Some(actuel) => {
+                            self.poser_le_chemin(rang, actuel);
+                            continue;
+                        }
+                        None => break,
+                    }
+                }
+                Err(_) => return false,
+            }
+        }
+        // Introuvable sous son UID : celui-là est bien parti, et le client
+        // demandait justement qu'il n'y soit plus.
+        self.oublier(rang);
+        true
     }
 
     fn store_flags(&mut self, sequence: u32, mode: StoreMode, flags: Flags) -> Option<Flags> {
@@ -285,6 +364,33 @@ impl Mailboxes for BoitesImap {
             dates,
             chemins,
         })
+    }
+}
+
+impl BoiteImap {
+    /// Note où vit désormais le message de rang `rang`.
+    fn poser_le_chemin(&mut self, rang: usize, chemin: PathBuf) {
+        if let Some(place) = self.chemins.get_mut(rang) {
+            *place = chemin;
+        }
+    }
+
+    /// Retire un message de l'instantané, et de tout ce qui le suit rang par
+    /// rang. **Les quatre listes descendent ensemble** : en oublier une ferait
+    /// lire les drapeaux d'un message dans ceux d'un autre.
+    fn oublier(&mut self, rang: usize) {
+        self.vue.forget(rang);
+        for liste in [&mut self.chemins] {
+            if rang < liste.len() {
+                liste.remove(rang);
+            }
+        }
+        if rang < self.drapeaux.len() {
+            self.drapeaux.remove(rang);
+        }
+        if rang < self.dates.len() {
+            self.dates.remove(rang);
+        }
     }
 }
 

@@ -650,8 +650,9 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         // drapeaux.
         eprintln!(
             "air-mail-server : IMAP écoute sur {adresse} — SEULE `INBOX` EST SERVIE : \
-             `SELECT`, `LIST`, `STATUS`, `FETCH` et `STORE` répondent ; `SEARCH`, `APPEND`, \
-             `EXPUNGE`, `COPY` et `MOVE` non. `\\Deleted` est REFUSÉ tant que rien n'efface."
+             `SELECT`, `LIST`, `STATUS`, `FETCH`, `STORE` et `EXPUNGE` répondent ; `SEARCH`, \
+             `APPEND`, `COPY` et `MOVE` non. UN `EXPUNGE` EFFACE POUR DE BON, et un `CLOSE` \
+             aussi."
         );
         Some(tokio::spawn(serve_imap(
             ecouteur,

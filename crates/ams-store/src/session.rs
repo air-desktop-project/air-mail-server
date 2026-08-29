@@ -189,6 +189,21 @@ impl MailboxView {
     pub fn root(&self) -> &Path {
         &self.racine
     }
+
+    /// Retire le message de rang `index` de l'instantané.
+    ///
+    /// **Ne touche pas au disque** : c'est l'appelant qui a effacé le fichier,
+    /// et qui vient dire que l'instantané ne doit plus le compter. Les rangs qui
+    /// suivaient descendent d'un cran, ce qu'IMAP appelle renuméroter (§7.5.1) —
+    /// et ce que POP3 interdit pendant une session, raison de plus pour que
+    /// cette opération ne vive pas sur [`LockedMailbox`].
+    ///
+    /// Un rang hors de portée ne fait rien : il n'y a pas de message à oublier.
+    pub fn forget(&mut self, index: usize) {
+        if index < self.messages.len() {
+            self.messages.remove(index);
+        }
+    }
 }
 
 /// Relève les messages d'une boîte, `new/` puis `cur/`, triés par UID.
