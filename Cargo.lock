@@ -78,6 +78,10 @@ name = "ams-dmarc"
 version = "0.1.0"
 
 [[package]]
+name = "ams-dns"
+version = "0.1.0"
+
+[[package]]
 name = "ams-guard"
 version = "0.1.0"
 
@@ -89,11 +93,13 @@ version = "0.1.0"
 name = "ams-loop-tokio"
 version = "0.1.0"
 dependencies = [
+ "ams-dns",
  "ams-guard",
  "ams-proto-pop3",
  "ams-proto-smtp",
  "ams-sasl",
  "ams-session",
+ "ams-spf",
  "ams-tls",
  "libc",
  "rustls",
@@ -151,6 +157,7 @@ dependencies = [
  "ams-proto-pop3",
  "ams-proto-smtp",
  "ams-sasl",
+ "ams-spf",
 ]
 
 [[package]]

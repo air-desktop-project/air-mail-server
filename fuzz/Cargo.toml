@@ -33,6 +33,9 @@ arbitrary = { version = "1", features = ["derive"] }
 [dependencies.ams-mime]
 path = "../crates/ams-mime"
 
+[dependencies.ams-dns]
+path = "../crates/ams-dns"
+
 [dependencies.ams-proto-pop3]
 path = "../crates/ams-proto-pop3"
 
@@ -184,6 +187,13 @@ bench = false
 [[bin]]
 name = "fuzz_ams_spf_eval"
 path = "fuzz_targets/fuzz_ams_spf_eval.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ams_dns"
+path = "fuzz_targets/fuzz_ams_dns.rs"
 test = false
 doc = false
 bench = false

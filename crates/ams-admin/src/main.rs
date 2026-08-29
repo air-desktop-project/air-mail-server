@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use ams_auth::Account;
-use ams_config::Configuration;
+use ams_config::{Configuration, Enforcement};
 use ams_store::Maildir;
 
 use crate::options::{Demande, OPTIONS_AIDE};
@@ -235,6 +235,25 @@ fn afficher(config: &Configuration) {
         println!("  clé privée       {}", config.tls.private_key_path);
     } else {
         println!("TLS                AUCUN — le serveur sert EN CLAIR");
+    }
+    // Et de même pour SPF : ne rien afficher se lirait « rien à signaler », or
+    // un serveur qui ne vérifie pas l'expéditeur accepte du courrier au nom de
+    // n'importe qui.
+    if config.spf.est_configure() {
+        println!(
+            "SPF                {}",
+            match config.spf.enforcement {
+                Enforcement::Enforce =>
+                    "APPLIQUÉ — un `fail` est refusé (550), une panne \
+                                         ajournée (451)",
+                Enforcement::Observe => "vérifié et RETENU, sans rien opposer",
+            }
+        );
+        println!("  résolveurs       {}", config.spf.resolvers.join(", "));
+        println!("  délai par requête {} ms", config.spf.timeout_millis);
+        println!("  DNSSEC           NON VALIDÉ — ces résolveurs sont crus sur parole");
+    } else {
+        println!("SPF                AUCUN RÉSOLVEUR — l'expéditeur n'est pas vérifié");
     }
     // Là encore, on DIT l'absence. Une ligne manquante se lit « rien à
     // signaler » ; or un serveur sans comptes n'authentifie personne, et c'est

@@ -64,6 +64,8 @@ struct Configuration {
   # `USER`/`PASS` hors chiffrement, sans réglage possible (C6). Le serveur le dit
   # au démarrage plutôt que de laisser le découvrir.
   listenPop3 @12 :Text;
+
+  spf @13 :Spf;
 }
 
 # TLS (C4, C14). Deux CHEMINS, et pas le matériel lui-même : une clé privée
@@ -87,6 +89,41 @@ struct Tls {
   # une clé privée. Le partage par GROUPE, lui, reste permis — c'est la façon
   # dont les certificats se partagent sur un système bien tenu.
   privateKeyPath @1 :Text;
+}
+
+# SPF (C9). Comme TLS : PAS DE DRAPEAU. La vérification a lieu si et seulement
+# si des résolveurs sont nommés — un drapeau créerait « activé sans résolveur »,
+# qui ajournerait tout le courrier, et « résolveurs sans activation », qui
+# donnerait à lire le contraire de ce qui se passe.
+struct Spf {
+  # Les résolveurs à interroger, « adresse:port ». VIDE, SPF N'EST PAS VÉRIFIÉ.
+  #
+  # ILS DOIVENT ÊTRE DE CONFIANCE. Ce serveur ne valide pas DNSSEC : un `pass`
+  # ne vaut que ce que vaut le chemin jusqu'au résolveur. Un résolveur local, ou
+  # joint par un lien qu'on maîtrise, est ce que cette absence suppose.
+  #
+  # Ils sont interrogés DANS L'ORDRE, et le premier qui répond décide : deux
+  # résolveurs qui ne disent pas la même chose ne se départagent pas en prenant
+  # celui qui plaît.
+  resolvers @0 :List(Text);
+
+  # Ce qu'on fait d'un `fail`.
+  enforcement @1 :Enforcement;
+
+  # Le temps accordé à UNE question, en millisecondes.
+  #
+  # Ce n'est pas le temps d'une évaluation : une politique peut en demander dix.
+  # Le produit des deux borne ce qu'un domaine hostile peut faire attendre un
+  # `MAIL FROM:`, et c'est ce produit-là qu'il faut regarder.
+  timeoutMillis @2 :UInt32;
+
+  enum Enforcement {
+    # On vérifie, on retient, on n'oppose rien. L'état où l'on découvre ce
+    # qu'une politique refuserait AVANT de la laisser refuser.
+    observe @0;
+    # Un `fail` est refusé (550), une panne de résolution ajournée (451).
+    enforce @1;
+  }
 }
 
 # Les bornes du décodeur (C3). Six des sept viennent de la RFC 5321 §4.5.3.1.

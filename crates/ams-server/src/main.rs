@@ -41,10 +41,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ams_auth::Account;
-use ams_config::{Configuration, Tls};
+use ams_config::{Configuration, Enforcement, Tls};
 use ams_loop_tokio::pop3::serve_pop3;
-use ams_loop_tokio::{ServeOptions, SharedGuard, Timeouts, refuse_root, serve};
-use ams_session::{Capabilities, Config};
+use ams_loop_tokio::{SenderChecker, ServeOptions, SharedGuard, Timeouts, refuse_root, serve};
+use ams_session::{Capabilities, Config, SenderPolicy};
 use ams_store::Maildir;
 use tokio::net::TcpListener;
 
@@ -258,6 +258,61 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         config
     };
 
+    // ── SPF (C9) ────────────────────────────────────────────────────────────
+    //
+    // Comme le chiffrement : PAS DE DRAPEAU. La vérification a lieu si et
+    // seulement si la configuration nomme au moins un résolveur.
+    let mut resolveurs = Vec::new();
+    for brute in &options.spf.resolvers {
+        let adresse: std::net::SocketAddr = brute
+            .parse()
+            .map_err(|_| format!("résolveur `{brute}` : ce n'est pas une adresse `hôte:port`"))?;
+        resolveurs.push(adresse);
+    }
+    let politique_expediteur = if resolveurs.is_empty() {
+        SenderPolicy::Ignore
+    } else if options.spf.enforcement == Enforcement::Enforce {
+        SenderPolicy::Enforce
+    } else {
+        SenderPolicy::Observe
+    };
+    let verificateur = if resolveurs.is_empty() {
+        None
+    } else {
+        let delai = Duration::from_millis(u64::from(options.spf.timeout_millis));
+        Some(
+            SenderChecker::new(resolveurs.clone(), delai)
+                .map_err(|erreur| format!("SPF : {erreur}"))?,
+        )
+    };
+    let config = config.with_sender_policy(politique_expediteur);
+    eprintln!(
+        "air-mail-server : {}",
+        match politique_expediteur {
+            SenderPolicy::Ignore => String::from(
+                "SPF non vérifié — aucun résolveur configuré (`air-mail-admin --resolver …`)"
+            ),
+            SenderPolicy::Observe => format!(
+                "SPF vérifié et RETENU, sans rien opposer ; résolveurs : {}",
+                options.spf.resolvers.join(", ")
+            ),
+            SenderPolicy::Enforce => format!(
+                "SPF APPLIQUÉ — un `fail` est refusé (550), une panne ajournée (451) ; \
+                 résolveurs : {}",
+                options.spf.resolvers.join(", ")
+            ),
+        }
+    );
+    if !resolveurs.is_empty() {
+        // On ne valide pas DNSSEC : un `pass` ne vaut que ce que vaut le chemin
+        // jusqu'au résolveur. Le taire laisserait croire à une garantie qui
+        // n'existe pas.
+        eprintln!(
+            "air-mail-server : SPF fait CONFIANCE à ces résolveurs — DNSSEC n'est pas validé. \
+             Un résolveur local, ou joint par un lien maîtrisé, est ce que cela suppose."
+        );
+    }
+
     // UNE BOÎTE PAR COMPTE, sous `<maildir>/<login>/`. Le nom du compte est le
     // nom du répertoire, et `ams_auth::check_login` l'a déjà validé — deux fois
     // plutôt qu'une, ici et à l'écriture du magasin, parce que c'est une
@@ -365,6 +420,10 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         // n'annonce alors pas `STARTTLS`, et le serveur sert en clair sans
         // mentir à personne.
         tls: chiffrement,
+        // `None` quand aucun résolveur n'est nommé — et la session ne demande
+        // alors aucune vérification. Les deux vont ensemble, et la boucle refuse
+        // l'assemblage inverse avant même la bannière.
+        spf: verificateur,
     };
 
     // ── LE SERVICE POP3, S'IL EST DEMANDÉ ───────────────────────────────────

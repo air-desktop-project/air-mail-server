@@ -18,10 +18,7 @@
 use core::time::Duration;
 
 use ams_auth::{Account, DUMMY_HASH};
-use ams_config::{
-    Configuration, Timeouts, Tls, decode, decode_accounts, decode_index, encode, encode_accounts,
-    encode_index,
-};
+use ams_config::{Configuration, Enforcement, Spf, Timeouts, Tls, decode, decode_accounts, decode_index, encode, encode_accounts, encode_index};
 use ams_guard::Thresholds;
 use ams_index::{MailboxState, Uid, UidValidity};
 use ams_proto_smtp::Limits;
@@ -61,6 +58,14 @@ struct Entree {
     /// Les deux nombres de l'index, ZÉRO COMPRIS : c'est justement ce que le
     /// décodeur refuse, et le lui interdire ici cacherait ce refus.
     index: [u32; 2],
+    /// Les résolveurs SPF — DES CHAÎNES LIBRES : cette crate ne les interprète
+    /// pas, et lui donner des adresses bien formées cacherait qu'elle n'a pas à
+    /// s'en soucier.
+    resolveurs: Vec<String>,
+    /// Refuse-t-on un `fail` ?
+    applique: bool,
+    /// Le délai d'une question DNS.
+    delai_dns: u32,
 }
 
 fuzz_target!(|entree: Entree| {
@@ -104,6 +109,15 @@ fuzz_target!(|entree: Entree| {
         tls: Tls {
             certificate_chain_path: entree.tls[0].clone(),
             private_key_path: entree.tls[1].clone(),
+        },
+        spf: Spf {
+            resolvers: entree.resolveurs.clone(),
+            enforcement: if entree.applique {
+                Enforcement::Enforce
+            } else {
+                Enforcement::Observe
+            },
+            timeout_millis: entree.delai_dns,
         },
         accounts: entree.comptes.clone(),
         listen_pop3: entree.ecoute_pop3.clone(),

@@ -13,6 +13,12 @@ ams-proto-pop3 = { workspace = true }
 ams-proto-smtp = { workspace = true }
 ams-guard = { workspace = true }
 ams-session = { workspace = true }
+# SPF (C9) : la boucle CONDUIT l'évaluation — elle seule a le droit d'attendre
+# une réponse DNS — mais elle n'en décide rien.
+ams-spf = { workspace = true }
+# Le codec DNS. La boucle parle au résolveur ; le format, lui, s'éprouve à
+# l'étage 1.
+ams-dns = { workspace = true }
 tokio = { workspace = true }
 tokio-rustls = { workspace = true }
 # `rustls` est nommée pour un SEUL type : `ServerConfig`, qui figure dans la

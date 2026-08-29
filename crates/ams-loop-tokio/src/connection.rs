@@ -5,13 +5,14 @@ use std::sync::Arc;
 
 use ams_guard::{Event as GuardEvent, Source, Verdict};
 use ams_proto_smtp::DataEvent;
-use ams_session::{Action, Config, DataOutcome, Policy, SmtpSession};
+use ams_session::{Action, Config, DataOutcome, Policy, SenderPolicy, SmtpSession};
+use ams_spf::Verdict as SpfVerdict;
 use rustls::ServerConfig;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
 
-use crate::{Delivery, DeliveryFailure, Error, SharedGuard};
+use crate::{Delivery, DeliveryFailure, Error, SenderChecker, SharedGuard};
 
 /// Combien de lignes une réponse peut compter au plus.
 ///
@@ -124,6 +125,14 @@ pub struct Service<'a> {
     /// vient de `ams-tls`, et l'appelant l'apporte tout fait. C'est ce qui garde
     /// C4 et C14 à un seul endroit du dépôt.
     pub tls: Option<Arc<ServerConfig>>,
+    /// De quoi vérifier l'expéditeur (C9), si le service sait le faire.
+    ///
+    /// **`None` avec une politique d'expéditeur qui n'est pas
+    /// [`SenderPolicy::Ignore`] fait échouer l'ouverture** : la session
+    /// demanderait une vérification que personne ne conduirait, et attendrait
+    /// une réponse qui ne viendrait pas. Le dire au démarrage vaut mieux que de
+    /// le découvrir sur le premier `MAIL FROM:`.
+    pub spf: Option<SenderChecker>,
 }
 
 /// Ce qui survit à la montée en chiffrement.
@@ -236,6 +245,11 @@ where
     // `AUTH` ne figure plus ici : la boucle sait le conduire, parce qu'elle n'a
     // rien à en connaître — c'est la session qui décode, lit et tranche. Seul
     // `STARTTLS` exige encore quelque chose d'elle : du matériel TLS.
+    // Même règle pour SPF : une session qui réclamerait une vérification que
+    // personne ne conduit attendrait une réponse qui ne vient pas.
+    if service.config.sender_policy() != SenderPolicy::Ignore && service.spf.is_none() {
+        return Err(Error::CapabilityNotSupported);
+    }
     let capacites = service.config.capabilities();
     let accepteur = match (capacites.starttls, service.tls.as_ref()) {
         (true, None) => return Err(Error::CapabilityNotSupported),
@@ -435,6 +449,18 @@ where
         match action {
             Action::Continue => {}
             Action::Close => return Ok(Etape::Terminee),
+            // La session ne peut pas répondre seule au `MAIL FROM:` : SPF veut
+            // le DNS. On résout, on lui rend le verdict, et C'EST ELLE qui
+            // compose la réponse — le vocabulaire de sortie reste clos.
+            Action::CheckSender => {
+                let verdict = verifier_l_expediteur(service, session, source).await;
+                let tour = session.sender_checked(verdict, &mut etat.sortie)?;
+                stream.write_all(tour.reply()).await?;
+                stream.flush().await?;
+                if tour.action() == Action::Close {
+                    return Ok(Etape::Terminee);
+                }
+            }
             Action::StartTls => return Ok(Etape::Chiffrement),
             // La session vient de poser son défi ; la ligne suivante y répond.
             Action::ReadAuthResponse => reponse_sasl_attendue = true,
@@ -454,6 +480,39 @@ where
                 }
             }
         }
+    }
+}
+
+/// Conduit la vérification de l'expéditeur, et rend son verdict.
+async fn verifier_l_expediteur<P: Policy>(
+    service: &Service<'_>,
+    session: &SmtpSession<'_, P>,
+    source: Source,
+) -> SpfVerdict {
+    match (service.spf.as_ref(), session.sender_identity()) {
+        (Some(verificateur), Some(identite)) => {
+            verificateur
+                .verdict(adresse_du_pair(source), &identite)
+                .await
+        }
+        // Refusé à l'ouverture — la session ne demande une vérification que si
+        // quelqu'un a déclaré savoir la conduire. Si l'impossible arrivait, ON
+        // AJOURNE : un message ajourné revient, un message accepté en silence
+        // aurait franchi une vérification qui n'a pas eu lieu.
+        _ => SpfVerdict::TempError,
+    }
+}
+
+/// L'adresse exacte du pair.
+///
+/// **Pas celle que le garde compte** : il replie les sources sur un préfixe
+/// (`/64` en IPv6), et SPF compare des adresses. Vérifier sur une adresse
+/// repliée autoriserait tout un bloc pour ce qu'une seule machine a le droit
+/// d'émettre.
+fn adresse_du_pair(source: Source) -> std::net::IpAddr {
+    match source {
+        Source::V4(octets) => std::net::IpAddr::V4(std::net::Ipv4Addr::from(octets)),
+        Source::V6(octets) => std::net::IpAddr::V6(std::net::Ipv6Addr::from(octets)),
     }
 }
 
@@ -694,6 +753,7 @@ mod tests {
             guard: garde,
             timeouts: Timeouts::default(),
             tls: None,
+            spf: None,
         };
         let resultat = serve_connection(&mut serveur, &service, NotreDomaine, boite, PAIR).await;
         drop(serveur);
@@ -874,6 +934,7 @@ mod tests {
                 handshake: Duration::from_millis(20),
             },
             tls: None,
+            spf: None,
         };
         let resultat =
             serve_connection(&mut serveur, &service, NotreDomaine, &mut boite, PAIR).await;

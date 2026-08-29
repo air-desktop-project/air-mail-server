@@ -37,6 +37,16 @@ boucle `async` ne se pilote pas — on l'attend.
 
 **Ce qu'il coûte** : une boucle par moteur, écrite deux fois.
 
+**Et il a coûté une crate de plus, le 2026-08-29.** SPF (C9) ne conclut rien sans
+résoudre des noms. Deux chemins s'offraient : prendre une bibliothèque de
+résolution toute faite, ou écrire le codec. C1 tranche — le DNS est un protocole,
+et un protocole s'écrit ici sous forme de codec sans entrée-sortie, couvert à
+100 % et fuzzé. Une bibliothèque de résolution aurait apporté son propre modèle
+d'exécution, ses propres délais et ses propres caches, c'est-à-dire exactement ce
+que l'étage 3 doit décider — et elle ne se porterait pas telle quelle sur Air.
+`ams-dns` tient en quelques centaines de lignes parce qu'on n'écrit **qu'un
+client stub** : ce serveur pose des questions, il n'en répond aucune.
+
 **Outillé par** : rien d'automatique. Aucun gate ne vérifie qu'une crate `ams-proto-*`
 ou `ams-session` n'importe pas `std::net` ou `std::fs`. C'est faisable (un `grep`
 sur les `use`) et ce n'est pas fait.
@@ -363,10 +373,36 @@ macros du §7, et **évalue une politique jusqu'au verdict** : `include`,
 à 100 % (C2) et fuzzé sur onze propriétés réparties en deux cibles, dont
 l'indivisibilité de la validation et la terminaison de l'évaluation.
 
-Ce qui n'est pas outillé : `ams-dkim` et `ams-dmarc` restent vides, et **SPF
-n'est pas encore câblé dans la boucle SMTP** — la crate sait conclure, personne
-ne l'interroge encore. Tant que ce câblage manque, C9 n'empêche aucune
-usurpation : un verdict que personne ne demande ne protège rien.
+**SPF est câblé dans la boucle SMTP depuis le 2026-08-29.** La session rend la
+main au `MAIL FROM:` sans répondre, la boucle résout, et la session compose la
+réponse : `550 5.7.23` pour un `fail`, `451 4.4.3` pour une panne de résolution
+(RFC 7372 §3.2), `250` pour tout le reste. Trois états se règlent dans le fichier
+de configuration — ne rien vérifier, vérifier et retenir, vérifier et opposer —
+et le défaut, quand des résolveurs apparaissent, est **de regarder** : une
+politique mal écrite chez un partenaire refuse du courrier légitime, et il vaut
+mieux le lire dans un journal que l'apprendre au téléphone.
+
+Ce qui n'est pas outillé : `ams-dkim` et `ams-dmarc` restent vides. Et **aucun
+en-tête `Received-SPF` n'est écrit** (RFC 7208 §9.1) : le verdict est retenu par
+la session, mais rien ne le dépose encore dans le message. Tant qu'il manque, ce
+que le serveur a conclu ne se relit pas à la lecture d'un message — seulement
+dans son journal.
+
+### DNSSEC n'est pas validé, et c'est écrit partout
+
+Le résolveur est cru sur parole. Un `pass` ne vaut donc que ce que vaut le chemin
+jusqu'à lui, et c'est pourquoi le résolveur doit être **local, ou joint par un
+lien de confiance**. Trois endroits le disent plutôt qu'un : le schéma de
+configuration, l'aide d'`air-mail-admin`, et une ligne au démarrage du serveur.
+Une lacune qu'on nomme est une lacune ; une lacune qu'on tait est un mensonge.
+
+Deux défenses accompagnent tout de même chaque question, et elles ne coûtent
+rien : **un identifiant tiré de `/dev/urandom`** — pas un compteur, pas une
+horloge — et **un port source neuf** par question, une socket étant ouverte pour
+chacune. Trente-deux bits à deviner valent mieux que seize pour qui voudrait
+répondre à notre place. Le fichier d'aléa s'ouvre au démarrage : un serveur qui
+découvrirait à la première connexion qu'il n'a pas d'aléa n'aurait plus que de
+mauvaises options.
 
 ### Ce que l'évaluation ne fait pas, et pourquoi c'est la bonne forme
 

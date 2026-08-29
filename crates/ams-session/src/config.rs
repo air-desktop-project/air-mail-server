@@ -23,6 +23,35 @@ pub struct Capabilities {
     pub auth: bool,
 }
 
+/// Ce que la session fait du verdict SPF.
+///
+/// # Trois états, et pas un interrupteur
+///
+/// « SPF activé » ne dit pas ce qu'on fait d'un `fail`, et c'est pourtant la
+/// seule question qui compte. Un interrupteur à deux positions obligerait à
+/// choisir entre *ne rien vérifier* et *refuser tout de suite* — alors qu'un
+/// administrateur qui met SPF en service veut d'abord REGARDER : une politique
+/// mal écrite chez un partenaire refuserait du courrier légitime, et il vaut
+/// mieux le découvrir dans un journal que dans un appel téléphonique.
+///
+/// Le défaut est [`SenderPolicy::Ignore`], pour la même raison que
+/// [`Capabilities`] est tout à `false` : **la session ne demande que ce que
+/// quelqu'un a déclaré savoir faire.** Une session qui réclamerait une
+/// résolution DNS à une boucle qui n'en fait pas attendrait pour rien.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SenderPolicy {
+    /// SPF n'est pas vérifié. La session ne demande rien à personne.
+    #[default]
+    Ignore,
+    /// La boucle vérifie, la session RETIENT le verdict, et n'oppose rien.
+    ///
+    /// C'est l'état où l'on découvre ce qu'une politique refuserait avant de la
+    /// laisser refuser.
+    Observe,
+    /// Un `fail` est refusé (`550`), une panne de résolution ajournée (`451`).
+    Enforce,
+}
+
 /// Ce dont une session SMTP a besoin pour exister.
 ///
 /// # Ce qui n'est PAS réglable, et pourquoi
@@ -38,6 +67,7 @@ pub struct Config<'a> {
     max_message_octets: u64,
     limits: Limits,
     capabilities: Capabilities,
+    sender_policy: SenderPolicy,
 }
 
 impl<'a> Config<'a> {
@@ -75,6 +105,7 @@ impl<'a> Config<'a> {
             max_message_octets,
             limits,
             capabilities: Capabilities::default(),
+            sender_policy: SenderPolicy::default(),
         })
     }
 
@@ -92,6 +123,22 @@ impl<'a> Config<'a> {
     #[must_use]
     pub fn capabilities(&self) -> Capabilities {
         self.capabilities
+    }
+
+    /// Déclare ce que la session doit faire du verdict SPF.
+    ///
+    /// Sans cet appel, elle **ne demande aucune vérification** : c'est le seul
+    /// défaut qui ne suppose rien de la boucle.
+    #[must_use]
+    pub fn with_sender_policy(mut self, sender_policy: SenderPolicy) -> Self {
+        self.sender_policy = sender_policy;
+        self
+    }
+
+    /// Ce que la session fait du verdict SPF.
+    #[must_use]
+    pub fn sender_policy(&self) -> SenderPolicy {
+        self.sender_policy
     }
 
     /// Le nom que le serveur annonce.
@@ -124,7 +171,7 @@ impl<'a> Config<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Capabilities, Config};
+    use super::{Capabilities, Config, SenderPolicy};
     use crate::Error;
     use ams_proto_smtp::Limits;
 
@@ -187,5 +234,26 @@ mod tests {
         let copie = config;
         assert_eq!(copie.domain(), config.domain());
         assert!(!std::format!("{config:?}").is_empty());
+    }
+
+    #[test]
+    fn sans_declaration_aucune_verification_n_est_demandee() {
+        // La session ne réclame que ce que quelqu'un a déclaré savoir faire :
+        // demander une résolution DNS à une boucle qui n'en fait pas ferait
+        // attendre pour rien.
+        let config = Config::new(b"exemple.test", 10, 1024, Limits::DEFAULT).expect("valide");
+        assert_eq!(config.sender_policy(), SenderPolicy::Ignore);
+        assert_eq!(SenderPolicy::default(), SenderPolicy::Ignore);
+
+        for politique in [
+            SenderPolicy::Ignore,
+            SenderPolicy::Observe,
+            SenderPolicy::Enforce,
+        ] {
+            let regle = config.with_sender_policy(politique);
+            assert_eq!(regle.sender_policy(), politique);
+            assert!(!std::format!("{politique:?}").is_empty());
+        }
+        assert_ne!(SenderPolicy::Observe, SenderPolicy::Enforce);
     }
 }

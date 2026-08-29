@@ -39,6 +39,7 @@ members = [
     "crates/ams-proto-pop3",
     "crates/ams-proto-imap",
     "crates/ams-proto-http",
+    "crates/ams-dns",
     # Étage 2 — décisions, sans entrée-sortie
     "crates/ams-session",
     "crates/ams-guard",
@@ -83,6 +84,7 @@ repository = "https://github.com/air-desktop-project/air-mail-server"
 # Les arêtes INTERNES ne se déclarent qu'à mesure qu'elles servent : une
 # dépendance posée d'avance affirmerait un assemblage qui n'existe pas.
 ams-config = { path = "crates/ams-config", version = "0.1.0" }
+ams-dns = { path = "crates/ams-dns", version = "0.1.0" }
 ams-guard = { path = "crates/ams-guard", version = "0.1.0" }
 ams-index = { path = "crates/ams-index", version = "0.1.0" }
 ams-loop-tokio = { path = "crates/ams-loop-tokio", version = "0.1.0" }
@@ -90,6 +92,7 @@ ams-proto-pop3 = { path = "crates/ams-proto-pop3", version = "0.1.0" }
 ams-proto-smtp = { path = "crates/ams-proto-smtp", version = "0.1.0" }
 ams-auth = { path = "crates/ams-auth", version = "0.1.0" }
 ams-sasl = { path = "crates/ams-sasl", version = "0.1.0" }
+ams-spf = { path = "crates/ams-spf", version = "0.1.0" }
 ams-session = { path = "crates/ams-session", version = "0.1.0" }
 ams-store = { path = "crates/ams-store", version = "0.1.0" }
 ams-tls = { path = "crates/ams-tls", version = "0.1.0" }
@@ -130,7 +133,11 @@ ams-tls = { path = "crates/ams-tls", version = "0.1.0" }
 # L'outil C++ `capnp` n'intervient QUE pour régénérer le code committé
 # (`crates/ams-config/regenerate.sh`), jamais au build ni en CI.
 capnp = { version = "=0.26.0", default-features = false, features = ["alloc"] }
-tokio = { version = "1", default-features = false, features = ["io-util", "macros", "net", "rt", "signal", "sync", "time"] }
+# `fs` n'entre QUE pour `/dev/urandom` : les identifiants de requête DNS (C9)
+# doivent être imprévisibles, et lire deux octets en bloquant l'ordonnanceur pour
+# les obtenir serait payer une faute d'architecture pour une bonne intention.
+# Aucune crate transitive de plus : `fs` est du tokio.
+tokio = { version = "1", default-features = false, features = ["fs", "io-util", "macros", "net", "rt", "signal", "sync", "time"] }
 libc = "0.2"
 
 # rustls (C4) — TLS 1.3, et RIEN EN DESSOUS. Sans entrée-sortie par

@@ -51,6 +51,7 @@ async fn conversation_chiffree(nom: &str, dialogue: &'static str) -> Option<Stri
             guard: &garde,
             timeouts: Timeouts::default(),
             tls: Some(tls),
+            spf: None,
         };
         serve_connection(&mut flux, &service, NotreDomaine, &mut Neant, PAIR).await
     });

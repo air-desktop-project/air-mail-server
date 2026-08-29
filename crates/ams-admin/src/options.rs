@@ -12,7 +12,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use ams_config::{Configuration, Timeouts, Tls};
+use ams_config::{Configuration, Enforcement, Spf, Timeouts, Tls};
 use ams_guard::Thresholds;
 use ams_proto_smtp::Limits;
 
@@ -46,6 +46,12 @@ pub struct Options {
     pub accounts: Option<PathBuf>,
     /// Où écouter en POP3. Vide : POP3 n'est pas servi.
     pub listen_pop3: Option<SocketAddr>,
+    /// Les résolveurs DNS. Vide : SPF n'est pas vérifié.
+    pub resolvers: Vec<SocketAddr>,
+    /// Refuse-t-on un `fail`, ou se contente-t-on de le retenir ?
+    pub spf_enforce: bool,
+    /// Le temps accordé à une question DNS.
+    pub spf_timeout_millis: u32,
 }
 
 impl Default for Options {
@@ -69,6 +75,16 @@ impl Default for Options {
             // PAS DE POP3 PAR DÉFAUT : un port ouvert qu'on n'a pas demandé est
             // une surface de plus, et celui-ci ne sert personne sans certificat.
             listen_pop3: None,
+            // PAS DE RÉSOLVEUR PAR DÉFAUT, et surtout pas celui du système : le
+            // lire dans `/etc/resolv.conf` ferait interroger, sans que personne
+            // l'ait demandé, un serveur qui n'est peut-être pas de confiance —
+            // et un `pass` SPF ne vaut que ce que vaut ce chemin-là.
+            resolvers: Vec::new(),
+            // ON REGARDE AVANT DE REFUSER. Une politique mal écrite chez un
+            // partenaire refuserait du courrier légitime ; mieux vaut le
+            // découvrir dans un journal que dans un appel téléphonique.
+            spf_enforce: false,
+            spf_timeout_millis: 5_000,
         }
     }
 }
@@ -99,6 +115,19 @@ impl Options {
             tls: Tls {
                 certificate_chain_path: chemin(self.tls_cert.as_ref()),
                 private_key_path: chemin(self.tls_key.as_ref()),
+            },
+            spf: Spf {
+                resolvers: self
+                    .resolvers
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect(),
+                enforcement: if self.spf_enforce {
+                    Enforcement::Enforce
+                } else {
+                    Enforcement::Observe
+                },
+                timeout_millis: self.spf_timeout_millis,
             },
             accounts: chemin(self.accounts.as_ref()),
             listen_pop3: self
@@ -177,6 +206,20 @@ OPTIONS DE `config write`
     superutilisateur (C10), et les ports privilégiés s'atteignent par une règle
     de redirection du pare-feu.
 
+    SPF (C9) NE SE VÉRIFIE QUE SI UN RÉSOLVEUR EST NOMMÉ. Il n'y a pas d'option
+    pour « activer » : `--resolver` suffit, et son absence dit l'inverse. Le
+    résolveur n'est PAS lu dans `/etc/resolv.conf` — ce serveur ne valide pas
+    DNSSEC, un `pass` ne vaut donc que ce que vaut le chemin jusqu'au résolveur,
+    et hériter en silence de celui du système serait hériter d'une confiance que
+    personne n'a accordée. Nommez-en un local, ou joint par un lien que vous
+    maîtrisez.
+
+    `--spf observe` (le défaut) vérifie et RETIENT sans rien opposer ; `--spf
+    enforce` refuse un `fail` par un 550 et ajourne une panne de résolution par
+    un 451. Commencez par `observe` : une politique mal écrite chez un
+    partenaire refuse du courrier légitime, et il vaut mieux le lire dans un
+    journal que l'apprendre au téléphone.
+
     Les bornes du décodeur et les seuils du garde prennent leurs valeurs par
     défaut : les régler mérite ses propres options, et les inventer ici donnerait
     un fichier qui dit autre chose que ce qui a été demandé.
@@ -224,6 +267,31 @@ where
             "--tls-cert" => options.tls_cert = Some(PathBuf::from(valeur()?)),
             "--tls-key" => options.tls_key = Some(PathBuf::from(valeur()?)),
             "--accounts" => options.accounts = Some(PathBuf::from(valeur()?)),
+            "--resolver" => {
+                let brute = valeur()?;
+                let adresse: SocketAddr = brute
+                    .parse()
+                    .map_err(|_| ArgError::new(format!("`{brute}` n'est pas une adresse")))?;
+                options.resolvers.push(adresse);
+            }
+            "--spf" => {
+                let mot = valeur()?;
+                match mot.as_str() {
+                    "observe" => options.spf_enforce = false,
+                    "enforce" => options.spf_enforce = true,
+                    autre => {
+                        return Err(ArgError::new(format!(
+                            "`{autre}` n'est ni `observe` ni `enforce`"
+                        )));
+                    }
+                }
+            }
+            "--spf-timeout-ms" => {
+                let brute = valeur()?;
+                options.spf_timeout_millis = brute
+                    .parse()
+                    .map_err(|_| ArgError::new(format!("`{brute}` n'est pas un nombre")))?;
+            }
             "--listen-pop3" => {
                 let brute = valeur()?;
                 options.listen_pop3 = Some(

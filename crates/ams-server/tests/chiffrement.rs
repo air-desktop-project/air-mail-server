@@ -122,6 +122,7 @@ fn configuration_pop3(
             data_seconds: 10,
         },
         tls,
+        spf: ams_config::Spf::default(),
         accounts: comptes.to_string(),
         listen_pop3: pop3.to_string(),
     };

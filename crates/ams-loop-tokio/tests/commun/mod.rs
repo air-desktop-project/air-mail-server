@@ -157,3 +157,85 @@ pub fn materiel(nom: &str) -> Option<Materiel> {
         tls: Arc::new(tls),
     })
 }
+
+// ── Un résolveur DNS de test ────────────────────────────────────────────────
+
+/// Monte un résolveur qui répond **la même politique SPF** à toute question
+/// `TXT`, et « ce nom n'existe pas » au reste.
+///
+/// C'est tout ce qu'il faut pour éprouver le CÂBLAGE : ce que le résolveur sait
+/// faire de plus — `MX`, `PTR`, reprise en TCP, réponse usurpée — est éprouvé
+/// chez lui, sur un montage qui en dit bien davantage.
+pub async fn resolveur_spf(politique: &'static str) -> std::net::SocketAddr {
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("socket UDP");
+    let adresse = socket.local_addr().expect("adresse");
+    tokio::spawn(async move {
+        let mut recu = vec![0_u8; 2048];
+        loop {
+            let Ok((lus, pair)) = socket.recv_from(&mut recu).await else {
+                return;
+            };
+            let question = recu.get(..lus).unwrap_or_default().to_vec();
+            let Some((genre, fin)) = genre_et_fin(&question) else {
+                continue;
+            };
+            let mut reponse = Vec::new();
+            reponse.extend_from_slice(question.get(..2).unwrap_or_default());
+            // Réponse, récursion disponible ; `NXDOMAIN` si ce n'est pas un TXT.
+            let txt = genre == 16;
+            let drapeaux: u16 = if txt { 0x8180 } else { 0x8183 };
+            reponse.extend_from_slice(&drapeaux.to_be_bytes());
+            reponse.extend_from_slice(&1_u16.to_be_bytes());
+            reponse.extend_from_slice(&u16::from(txt).to_be_bytes());
+            reponse.extend_from_slice(&0_u16.to_be_bytes());
+            reponse.extend_from_slice(&0_u16.to_be_bytes());
+            reponse.extend_from_slice(question.get(12..fin).unwrap_or_default());
+            if txt {
+                let mut donnees = Vec::new();
+                for morceau in politique.as_bytes().chunks(255) {
+                    donnees.push(u8::try_from(morceau.len()).expect("morceau court"));
+                    donnees.extend_from_slice(morceau);
+                }
+                reponse.extend_from_slice(&[0xC0, 0x0C]);
+                reponse.extend_from_slice(&16_u16.to_be_bytes());
+                reponse.extend_from_slice(&1_u16.to_be_bytes());
+                reponse.extend_from_slice(&60_u32.to_be_bytes());
+                reponse.extend_from_slice(
+                    &u16::try_from(donnees.len())
+                        .expect("politique courte")
+                        .to_be_bytes(),
+                );
+                reponse.extend_from_slice(&donnees);
+            }
+            let _ = socket.send_to(&reponse, pair).await;
+        }
+    });
+    adresse
+}
+
+/// Le type demandé, et où finit la question.
+fn genre_et_fin(message: &[u8]) -> Option<(u16, usize)> {
+    let mut position = 12_usize;
+    loop {
+        let &longueur = message.get(position)?;
+        position = position.saturating_add(1);
+        if longueur == 0 {
+            break;
+        }
+        position = position.saturating_add(usize::from(longueur));
+    }
+    let genre = u16::from_be_bytes([
+        *message.get(position)?,
+        *message.get(position.saturating_add(1))?,
+    ]);
+    Some((genre, position.saturating_add(4)))
+}
+
+/// Une socket qui n'écoute pas : de quoi éprouver un résolveur injoignable.
+pub fn nulle_part() -> std::net::SocketAddr {
+    // Le port 1 en bouclage : rien n'y écoute, et rien n'y écoutera — un port
+    // privilégié qu'aucun service de test ne peut ouvrir (C10).
+    "127.0.0.1:1".parse().expect("adresse")
+}

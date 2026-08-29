@@ -126,9 +126,10 @@ mod policy;
 pub mod pop3;
 mod recipients;
 mod smtp;
+mod tampon;
 
-pub use config::{Capabilities, Config};
+pub use config::{Capabilities, Config, SenderPolicy};
 pub use error::Error;
 pub use policy::{Authenticator, Policy, RecipientVerdict};
 pub use recipients::{ARENA_OCTETS, RECIPIENTS_MAX, Recipients};
-pub use smtp::{Action, DataOutcome, SmtpSession, Turn};
+pub use smtp::{Action, DataOutcome, SenderIdentity, SmtpSession, Turn};

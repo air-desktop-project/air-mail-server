@@ -67,6 +67,7 @@ horloge.
 | `ams-proto-smtp` | RFC 5321 | **commandes, réponses, phase de données** |
 | `ams-sasl` | RFC 4422/4616 : `PLAIN` et son base64 | **implémenté** |
 | `ams-proto-pop3` | RFC 1939 | **commandes et réponses** |
+| `ams-dns` | RFC 1035 : le codec d'un message | **question encodée, réponse décodée** |
 | `ams-proto-imap` | RFC 9051 (IMAP4rev2) | vide |
 | `ams-proto-http` | RFC 9110 / 9112 | vide |
 
@@ -82,7 +83,7 @@ des octets **et des actions**. Elles n'attendent jamais.
 | `ams-auth` | le magasin d'identifiants, vérification Argon2id | **implémenté** |
 | `ams-tls` | TLS 1.3 uniquement, échange de clés post-quantique | **implémenté** |
 | `ams-dkim` | RFC 6376 | vide |
-| `ams-spf` | RFC 7208 | **enregistrement lu et politique évaluée** |
+| `ams-spf` | RFC 7208 | **évalué, et câblé dans la boucle SMTP** |
 | `ams-dmarc` | RFC 7489 | vide |
 | `ams-config` | les trois formats binaires : configuration, comptes, index | **implémenté** |
 | `ams-index` | noms Maildir, drapeaux, reconstruction, `UIDVALIDITY` | **implémenté** |
@@ -98,7 +99,7 @@ Les seules crates qui lisent, écrivent et attendent. Elles ne décident de rien
 | `ams-server` | le binaire `air-mail-server` | **il tourne** |
 | `ams-admin` | le binaire `air-mail-admin` | **`summary`** |
 
-**Quinze crates portent du code.** `ams-mime` : le squelette d'un message — la
+**Seize crates portent du code.** `ams-mime` : le squelette d'un message — la
 ligne, le pliage, la séparation en-tête/corps, le découpage en champs. Les champs
 structurés, les adresses, les dates et MIME restent à écrire.
 `ams-proto-smtp` : les commandes, l'encodage des réponses multilignes, et **la
@@ -149,6 +150,25 @@ c'est le terme suivant de l'appelante qui décide. Un `redirect=`, lui,
 **remplace** la politique : son verdict devient le nôtre, qualificateurs
 compris.
 
+`ams-dns` : le codec d'un message DNS — une question encodée, une réponse
+décodée. **Un client stub, et rien de plus** : ce serveur pose des questions, il
+n'en répond aucune. Prendre une bibliothèque de résolution toute faite aurait
+apporté son propre modèle d'exécution, ses propres délais et ses propres caches,
+c'est-à-dire exactement ce que l'étage 3 doit décider.
+
+La compression des noms (RFC 1035 §4.1.4) y est le point sensible : un nom peut
+se poursuivre par un **pointeur** vers un autre nom du message, et un message
+hostile peut fabriquer un cycle. **La parade n'est pas un compteur de sauts,
+c'est une impossibilité structurelle** : chaque pointeur doit viser strictement
+plus bas que le précédent, la suite des cibles décroît dans les entiers
+naturels, et une suite décroissante d'entiers naturels s'arrête. C'est aussi ce
+que dit la RFC, qui veut qu'un pointeur désigne une occurrence antérieure.
+
+**Ce que cette crate ne fait pas : DNSSEC.** C'est une lacune, pas un oubli — et
+elle est écrite partout où elle compte : sans validation, un `pass` SPF ne vaut
+que ce que vaut le chemin jusqu'au résolveur. Le résolveur doit donc être local,
+ou joint par un lien de confiance ; le serveur le répète au démarrage.
+
 `ams-auth` : les comptes — un nom, une empreinte, des adresses — et la
 vérification **Argon2id** (m = 19456 Kio, t = 2,
 p = 1 — la configuration OWASP). Un compte inconnu coûte le même temps qu'un
@@ -171,6 +191,14 @@ extensions, séquencement `MAIL`/`RCPT`/`DATA`, `STARTTLS`, refus d'`AUTH` hors
 chiffrement, **la phase de données et l'échange SASL** — défi, base64, format de
 `PLAIN`, annulation par `*`. Elle n'authentifie personne pour autant : elle
 demande à la politique, qui refuse par défaut.
+
+`ams-loop-tokio` conduit aussi **la vérification SPF** : la session rend la main
+sans répondre au `MAIL FROM:`, la boucle résout les questions posées par
+`ams-spf`, et c'est la session qui compose le `250`, le `550 5.7.23` ou le
+`451 4.4.3`. Le vocabulaire de sortie reste clos. Deux défenses gratuites
+accompagnent chaque question : un identifiant tiré de `/dev/urandom` et un port
+source neuf, soit trente-deux bits à deviner pour qui voudrait répondre à notre
+place.
 
 `ams-loop-tokio` : la boucle d'acceptation et le pilote d'une connexion, sur
 tokio. Elle lit, elle écrit, elle ne décide de rien — pas même le `421` qui refuse

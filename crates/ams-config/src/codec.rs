@@ -61,6 +61,51 @@ impl Tls {
     }
 }
 
+/// Ce qu'on fait d'un verdict SPF (C9).
+///
+/// Le défaut est [`Enforcement::Observe`] : quand des résolveurs apparaissent
+/// dans une configuration, la vérification commence par REGARDER. Une politique
+/// mal écrite chez un partenaire refuserait du courrier légitime, et il vaut
+/// mieux le découvrir dans un journal que dans un appel téléphonique.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Enforcement {
+    /// On vérifie, on retient, on n'oppose rien.
+    #[default]
+    Observe,
+    /// Un `fail` est refusé, une panne de résolution ajournée.
+    Enforce,
+}
+
+/// SPF (C9) : à qui demander, et ce qu'on fait de la réponse.
+///
+/// # Il n'y a pas de drapeau, et c'est le même sujet que pour [`Tls`]
+///
+/// La vérification a lieu **si et seulement si** des résolveurs sont nommés. Un
+/// drapeau créerait « activé sans résolveur », qui ajournerait tout le courrier,
+/// et « résolveurs sans activation », qui donnerait à lire le contraire de ce
+/// qui se passe.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Spf {
+    /// Les résolveurs, sous la forme `adresse:port`.
+    ///
+    /// Cette crate ne les interprète pas, pour la raison qui vaut pour
+    /// [`Configuration::listen`] : `core` ne sait pas lire une adresse de
+    /// socket.
+    pub resolvers: Vec<String>,
+    /// Ce qu'on fait d'un `fail`.
+    pub enforcement: Enforcement,
+    /// Le temps accordé à UNE question, en millisecondes.
+    pub timeout_millis: u32,
+}
+
+impl Spf {
+    /// Ce service vérifie-t-il l'expéditeur ?
+    #[must_use]
+    pub fn est_configure(&self) -> bool {
+        !self.resolvers.is_empty()
+    }
+}
+
 /// Tout ce qu'un fichier de configuration porte.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Configuration {
@@ -99,6 +144,8 @@ pub struct Configuration {
     /// un second lecteur écrit ici finirait par diverger de celui de la
     /// bibliothèque standard.
     pub listen_pop3: String,
+    /// SPF : les résolveurs, et ce qu'on fait du verdict.
+    pub spf: Spf,
     /// Le fichier de comptes, ou une chaîne vide.
     ///
     /// Vide, le serveur n'annonce pas `AUTH` : il n'a personne à qui répondre
@@ -128,6 +175,14 @@ pub enum Error {
     /// l'administrateur, et démarrer en annonçant `STARTTLS` sans pouvoir le
     /// tenir mentirait à chaque pair.
     TlsIncomplete,
+    /// Le fichier porte une valeur d'`enforcement` que ce binaire ne connaît
+    /// pas.
+    ///
+    /// **On refuse plutôt que de choisir.** Un fichier écrit par une version
+    /// plus récente peut dire « refuse » dans un mot que celle-ci ne sait pas
+    /// lire ; en déduire « observe » ferait laisser passer ce que
+    /// l'administrateur avait décidé de refuser, et en silence.
+    UnknownEnforcement,
     /// Deux comptes portent le même nom.
     ///
     /// Une question sans réponse : le premier arrivé l'emporterait en silence,
@@ -168,6 +223,9 @@ impl fmt::Display for Error {
             Error::TlsIncomplete => {
                 f.write_str("TLS demande LES DEUX chemins — certificat et clé — ou aucun des deux")
             }
+            Error::UnknownEnforcement => f.write_str(
+                "ce fichier dit quelque chose d'`enforcement` que cette version ne sait pas lire",
+            ),
             Error::DuplicateLogin(login) => {
                 write!(f, "le compte `{login}` figure deux fois")
             }
@@ -235,6 +293,21 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
     let comptes = texte(lu.get_accounts()?)?;
     let ecoute_pop3 = texte(lu.get_listen_pop3()?)?;
 
+    let verification = lu.get_spf()?;
+    let mut resolveurs = Vec::new();
+    for resolveur in verification.get_resolvers()? {
+        resolveurs.push(texte(resolveur?)?);
+    }
+    let spf = Spf {
+        resolvers: resolveurs,
+        enforcement: match verification.get_enforcement() {
+            Ok(crate::ams_config_capnp::spf::Enforcement::Observe) => Enforcement::Observe,
+            Ok(crate::ams_config_capnp::spf::Enforcement::Enforce) => Enforcement::Enforce,
+            Err(_) => return Err(Error::UnknownEnforcement),
+        },
+        timeout_millis: verification.get_timeout_millis(),
+    };
+
     let chiffrement = lu.get_tls()?;
     let tls = Tls {
         certificate_chain_path: texte(chiffrement.get_certificate_chain_path()?)?,
@@ -276,6 +349,7 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
             data_seconds: delais.get_data_seconds(),
         },
         tls,
+        spf,
         accounts: comptes,
         listen_pop3: ecoute_pop3,
     })
@@ -337,6 +411,19 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
             chiffrement.set_certificate_chain_path(&config.tls.certificate_chain_path);
             chiffrement.set_private_key_path(&config.tls.private_key_path);
         }
+        {
+            let mut verification = ecrit.reborrow().init_spf();
+            verification.set_enforcement(match config.spf.enforcement {
+                Enforcement::Observe => crate::ams_config_capnp::spf::Enforcement::Observe,
+                Enforcement::Enforce => crate::ams_config_capnp::spf::Enforcement::Enforce,
+            });
+            verification.set_timeout_millis(config.spf.timeout_millis);
+            let combien = u32::try_from(config.spf.resolvers.len()).unwrap_or(u32::MAX);
+            let mut liste = verification.init_resolvers(combien);
+            for (rang, resolveur) in config.spf.resolvers.iter().enumerate() {
+                liste.set(u32::try_from(rang).unwrap_or(u32::MAX), resolveur);
+            }
+        }
         ecrit.set_accounts(&config.accounts);
         ecrit.set_listen_pop3(&config.listen_pop3);
     }
@@ -365,7 +452,10 @@ fn depuis(valeur: usize) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Configuration, Error, TRAVERSAL_LIMIT_WORDS, Timeouts, Tls, decode, encode};
+    use super::{
+        Configuration, Enforcement, Error, Spf, TRAVERSAL_LIMIT_WORDS, Timeouts, Tls, decode,
+        encode,
+    };
     use alloc::string::{String, ToString as _};
     use alloc::vec;
     use ams_guard::Thresholds;
@@ -392,6 +482,9 @@ mod tests {
             // un défaut qui chiffrerait ou authentifierait nommerait des
             // fichiers qui n'existent pas.
             tls: Tls::default(),
+            // Ni résolveur : SPF n'est pas vérifié, et il n'y a pas de drapeau
+            // pour dire le contraire.
+            spf: Spf::default(),
             accounts: String::new(),
             listen_pop3: String::new(),
         }
@@ -405,6 +498,13 @@ mod tests {
             },
             accounts: String::from("/etc/ams/comptes.bin"),
             listen_pop3: String::from("127.0.0.1:2110"),
+            // ET DES RÉSOLVEURS : le balayage qui corrompt chaque octet ne
+            // traverse une liste de textes que si elle en porte.
+            spf: Spf {
+                resolvers: vec![String::from("127.0.0.1:53")],
+                enforcement: Enforcement::Enforce,
+                timeout_millis: 5_000,
+            },
             ..exemple()
         }
     }
@@ -631,5 +731,70 @@ mod tests {
         }
         assert_ne!(Error::NotUtf8, Error::Empty("domain"));
         assert!(!std::format!("{:?}", config.timeouts).is_empty());
+    }
+
+    #[test]
+    fn la_section_spf_traverse_le_format() {
+        let mut original = exemple();
+        assert!(!original.spf.est_configure());
+        original.spf = Spf {
+            resolvers: vec![String::from("127.0.0.1:53"), String::from("[::1]:53")],
+            enforcement: Enforcement::Enforce,
+            timeout_millis: 3_000,
+        };
+        let octets = encode(&original).expect("encodable");
+        let relue = decode(&octets).expect("relisible");
+        assert_eq!(relue.spf, original.spf);
+        assert!(relue.spf.est_configure());
+    }
+
+    #[test]
+    fn sans_resolveur_spf_n_est_pas_configure() {
+        // PAS DE DRAPEAU : l'absence de résolveur EST l'absence de vérification.
+        // Un `enforcement` réglé sans résolveur ne vérifie rien, et ne prétend
+        // rien vérifier.
+        let mut original = exemple();
+        original.spf.enforcement = Enforcement::Enforce;
+        let octets = encode(&original).expect("encodable");
+        let relue = decode(&octets).expect("relisible");
+        assert!(!relue.spf.est_configure());
+        assert_eq!(relue.spf.enforcement, Enforcement::Enforce);
+        assert_eq!(Enforcement::default(), Enforcement::Observe);
+        assert_ne!(Enforcement::Observe, Enforcement::Enforce);
+        assert!(!alloc::format!("{:?}", relue.spf).is_empty());
+    }
+
+    #[test]
+    fn une_valeur_d_enforcement_inconnue_est_refusee() {
+        // Un fichier écrit par une version plus récente peut dire « refuse »
+        // dans un mot que celle-ci ne sait pas lire. EN DÉDUIRE « observe »
+        // ferait laisser passer, en silence, ce que l'administrateur avait
+        // décidé de refuser.
+        let mut octets = encode(&exemple()).expect("encodable");
+        let motif = Enforcement::Observe;
+        let _ = motif;
+        // On retrouve l'entier de l'énumération dans les octets et on le pousse
+        // hors du schéma. Le champ vaut zéro : on cherche donc un seizième
+        // d'octet précis, ce qui n'est pas praticable — on passe par le
+        // décodage, qui doit refuser tout ce qui n'est ni 0 ni 1.
+        //
+        // Le message porte l'énumération sur deux octets ; on les met à 0xFFFF
+        // partout où cela ne casse pas le reste, et on vérifie qu'AU MOINS une
+        // de ces mutations est refusée pour cette raison-là.
+        let mut refusee = false;
+        for rang in 0..octets.len() {
+            let sauvegarde = octets[rang];
+            octets[rang] = 0xFF;
+            if decode(&octets) == Err(Error::UnknownEnforcement) {
+                refusee = true;
+            }
+            octets[rang] = sauvegarde;
+        }
+        assert!(
+            refusee,
+            "aucune mutation n'a produit un `enforcement` inconnu"
+        );
+        let dit = alloc::format!("{}", Error::UnknownEnforcement);
+        assert!(dit.contains("enforcement"), "{dit}");
     }
 }

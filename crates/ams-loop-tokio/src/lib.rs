@@ -71,6 +71,7 @@ mod guard;
 pub mod pop3;
 mod privileges;
 mod server;
+mod spf;
 
 pub use connection::{Outcome, Service, Summary, Timeouts, serve_connection};
 pub use delivery::{Delivery, DeliveryFailure};
@@ -78,3 +79,4 @@ pub use error::Error;
 pub use guard::SharedGuard;
 pub use privileges::{is_root, refuse_root};
 pub use server::{ServeOptions, Stats, serve, source_de};
+pub use spf::SenderChecker;

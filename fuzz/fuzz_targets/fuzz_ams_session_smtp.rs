@@ -218,6 +218,20 @@ fuzz_target!(|entree: Entree| {
                     }
                     Action::ReceiveData => assert!(reply.starts_with(b"354 ")),
                     Action::Close => assert!(reply.starts_with(b"221 ")),
+                    // UN TOUR QUI DIFFÈRE NE RÉPOND PAS. Le moindre octet émis
+                    // ici serait une réponse au `MAIL FROM:` composée AVANT de
+                    // savoir ce que vaut l'expéditeur — et le pair, lui, ne
+                    // saurait pas laquelle des deux compte.
+                    //
+                    // La session par défaut ne demande aucune vérification
+                    // (`SenderPolicy::Ignore`), donc ce bras ne s'emprunte pas
+                    // ici. Il tient quand même la propriété : si un jour la
+                    // configuration de ce harnais change, elle sera éprouvée.
+                    Action::CheckSender => assert!(
+                        reply.is_empty(),
+                        "un tour qui diffère a pourtant répondu : {}",
+                        String::from_utf8_lossy(reply)
+                    ),
                     Action::Continue => {}
                 }
             }

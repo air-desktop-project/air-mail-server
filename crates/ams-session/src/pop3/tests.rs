@@ -715,3 +715,17 @@ fn les_erreurs_disent_quelque_chose_et_se_distinguent() {
     assert_ne!(Error::NotInCommandPhase, Error::SessionClosed);
     assert_eq!(Error::SessionClosed, Error::SessionClosed);
 }
+
+#[test]
+fn la_boite_de_test_ne_repond_pas_pour_un_message_qui_n_existe_pas() {
+    // La session vérifie le numéro AVANT d'interroger la boîte : ce chemin-là ne
+    // s'emprunte donc pas à travers elle. Il existe pourtant, et une boîte de
+    // test qui mentirait ici ferait passer des épreuves pour de bonnes raisons
+    // qui n'en sont pas.
+    let boite = Boite::nouvelle(&[10, 20]);
+    let hors_bornes = MessageNumber::new(9).expect("non nul");
+    assert!(boite.size(hors_bornes).is_none());
+    assert!(boite.uid(hors_bornes).is_none());
+    let mut effacable = boite;
+    assert!(!effacable.mark_deleted(hors_bornes));
+}

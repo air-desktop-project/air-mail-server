@@ -36,6 +36,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_session_pop3` | `seeds/pop3-session` | la session POP3 — **vocabulaire clos, états tenus** |
 | `fuzz_ams_spf` | `seeds/spf` | l'enregistrement SPF — **validation d'un seul tenant** |
 | `fuzz_ams_spf_eval` | `seeds/spf-eval` | l'évaluation SPF, réponses DNS comprises — **elle conclut** |
+| `fuzz_ams_dns` | `seeds/dns` | la réponse d'un résolveur — **la compression ne boucle pas** |
 
 Les variantes « bornes » existent parce que les bornes de C3 viennent de la
 configuration (C8), donc d'un administrateur : un zéro, un `usize::MAX`, ou toute
@@ -214,6 +215,27 @@ répond pas à la question posée.
 6. **Une panne de résolution vaut `temperror`**, jamais un refus : dire `fail` à
    la place ferait jeter un message qui serait passé cinq minutes plus tard.
 7. Les bornes de l'évaluation sont fuzzées elles aussi — zéro compris.
+
+### Réponse DNS (cinq, dont LA COMPRESSION)
+
+Ces octets arrivent par UDP, d'une adresse qu'on n'a pas authentifiée, avec une
+charge que n'importe qui sur le chemin peut fabriquer. **C'est la surface la plus
+exposée du serveur après SMTP lui-même** : elle s'atteint sans ouvrir de
+connexion, en devinant un port et un identifiant.
+
+1. Rien ne panique — et surtout **rien ne boucle**. Un nom peut se poursuivre par
+   un pointeur vers un autre nom du message ; un message hostile fabrique un
+   cycle en quarante octets, et un décodeur naïf y tourne indéfiniment. La parade
+   est structurelle — chaque pointeur vise strictement plus bas — et c'est le
+   temps d'exécution qui l'éprouve ici.
+2. **Un message accepté se parcourt entièrement** : la validation est d'un seul
+   tenant, et l'itérateur rend ce que l'en-tête annonce, ni plus ni moins.
+3. **Un nom lu tient dans 255 octets.** Plus long, il ne désigne rien
+   d'interrogeable ; tronqué, il désignerait AUTRE CHOSE.
+4. **Deux lectures rendent la même chose** : rien ne dépend de l'ordre dans
+   lequel on interroge un enregistrement.
+5. **Une question qu'on encode n'est jamais prise pour une réponse.** Sans ce
+   refus, un pair injecterait ses questions dans le flot des réponses attendues.
 
 ### Session POP3 (cinq, dont DEUX INVARIANTS D'ÉTAT)
 
@@ -469,6 +491,9 @@ L'entrée fautive est versionnée en graine de non-régression
 | 2026-08-29 | `fuzz_ams_spf` | 1 886 802 (91 s) | 0 |
 | 2026-08-29 | `fuzz_ams_spf` (après `resolve`) | 2 224 920 (91 s) | 0 |
 | 2026-08-29 | `fuzz_ams_spf_eval` | 5 799 279 (181 s) | 0 |
+| 2026-08-29 | `fuzz_ams_dns` | 14 395 679 (181 s) | 0 |
+| 2026-08-29 | `fuzz_ams_config` (avec SPF) | 193 256 (61 s) | 0 |
+| 2026-08-29 | `fuzz_ams_session_smtp` (avec SPF) | 381 710 (61 s) | 0 |
 | 2026-08-28 | `fuzz_ams_session_smtp` (SASL) | 521 646 (91 s) | 0 |
 
 Le débit de `fuzz_ams_tls_kx` est trois ordres de grandeur sous les autres : une

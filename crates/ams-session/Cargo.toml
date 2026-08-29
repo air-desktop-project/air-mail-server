@@ -12,6 +12,10 @@ repository.workspace = true
 ams-proto-pop3 = { workspace = true }
 ams-proto-smtp = { workspace = true }
 ams-sasl = { workspace = true }
+# SPF (C9) pour un seul type : `Verdict`. La session ne l'évalue pas — elle en
+# décide. Redéfinir l'énumération ici en ferait deux, et deux énumérations pour
+# une seule notion finissent par diverger d'un bras.
+ams-spf = { workspace = true }
 
 
 [lints]

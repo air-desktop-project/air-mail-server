@@ -1,12 +1,14 @@
 //! La machine à états d'une session SMTP, **sans entrée-sortie**.
 
 use ams_proto_smtp::{
-    Code, Command, DataEvent, DataFault, DataReceiver, Error as SmtpError, Path, encode,
+    ClientId, Code, Command, DataEvent, DataFault, DataReceiver, Error as SmtpError, Path, encode,
 };
 use ams_sasl::{decode_base64, parse_plain};
+use ams_spf::Verdict;
 
 use crate::digits::{MAX_DIGITS, decimal};
-use crate::{Config, Error, Policy, RecipientVerdict, Recipients};
+use crate::tampon::Tampon;
+use crate::{Config, Error, Policy, RecipientVerdict, Recipients, SenderPolicy};
 
 /// La bannière : le domaine (255 au plus) suivi de `" ESMTP"`.
 const BANNER_MAX: usize = 255 + 6;
@@ -22,6 +24,13 @@ const SASL_DECODED_MAX: usize = 512;
 
 /// Le nombre maximal de lignes d'un `EHLO` : domaine, `SIZE`, `STARTTLS`, `AUTH`.
 const EHLO_LINES_MAX: usize = 4;
+
+/// Ce qu'un nom de domaine peut faire (RFC 1035 §2.3.4).
+const DOMAIN_MAX: usize = 255;
+
+/// Ce qu'un expéditeur d'enveloppe peut faire : une partie locale (64 au plus,
+/// RFC 5321 §4.5.3.1.1), un `@`, un domaine.
+const SENDER_MAX: usize = 64 + 1 + DOMAIN_MAX;
 
 /// Où en est la session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,10 +79,51 @@ pub enum Action {
     /// C'est aussi ce qui a fait disparaître le paramètre de durée de vie
     /// d'`Action` : plus rien n'y emprunte la ligne de commande.
     ReadAuthResponse,
+    /// **Vérifier l'expéditeur**, puis appeler [`SmtpSession::sender_checked`].
+    ///
+    /// # Elle ne porte AUCUNE réponse, et c'est le sujet
+    ///
+    /// Le tour qui rend cette action rend une réponse VIDE : la session n'a rien
+    /// à dire tant qu'elle ne sait pas. C'est l'appelant qui résout — SPF veut
+    /// le DNS, et le DNS est une entrée-sortie — puis lui rend le verdict, et
+    /// c'est ELLE qui compose le `250`, le `550` ou le `451`. Le vocabulaire de
+    /// sortie reste clos (C1).
+    ///
+    /// L'identité à vérifier se lit sur [`SmtpSession::sender_identity`] : la
+    /// faire porter par l'action l'aurait fait emprunter la ligne de commande,
+    /// que l'appelant recouvre en lisant la suivante.
+    CheckSender,
     /// Lire le message jusqu'à `<CRLF>.<CRLF>`.
     ReceiveData,
     /// Fermer la connexion.
     Close,
+}
+
+/// L'identité que SPF vérifie (RFC 7208 §2.4).
+///
+/// # Pourquoi TROIS champs pour une seule question
+///
+/// SPF interroge **un domaine**, mais ses macros (§7) parlent aussi de
+/// l'expéditeur entier — `%{l}` en veut la partie locale, `%{o}` le domaine — et
+/// du nom annoncé au `HELO`, `%{h}`. Les trois viennent d'endroits différents de
+/// la session, et c'est elle qui sait lesquels : la boucle ne les reconstituerait
+/// qu'en refaisant sa grammaire.
+///
+/// # Le cas de l'expéditeur nul
+///
+/// `MAIL FROM:<>` est l'avis de non-remise : il n'a pas de domaine à vérifier.
+/// La RFC 7208 §2.4 veut alors qu'on vérifie **le domaine du `HELO`**, avec
+/// `postmaster@<helo>` pour expéditeur. Sans cette règle, un avis de non-remise
+/// échapperait entièrement à SPF — et c'est précisément la forme qu'emprunte la
+/// rétrodiffusion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SenderIdentity<'s> {
+    /// Le domaine dont on lira la politique.
+    pub domain: &'s [u8],
+    /// `local@domaine`, pour les macros.
+    pub sender: &'s [u8],
+    /// Le nom annoncé au `HELO`, pour `%{h}`.
+    pub helo: &'s [u8],
 }
 
 /// Ce que l'appelant a fait du message reçu.
@@ -163,6 +213,15 @@ pub struct SmtpSession<'a, P: Policy> {
     banner_len: usize,
     size_line: [u8; SIZE_LINE_MAX],
     size_len: usize,
+    /// Le nom annoncé au `HELO`, s'il en est un — vide pour un littéral
+    /// d'adresse, qui ne désigne aucune politique.
+    helo: Tampon<DOMAIN_MAX>,
+    /// L'expéditeur de la transaction en cours, sous la forme `local@domaine`.
+    expediteur: Tampon<SENDER_MAX>,
+    /// Le domaine dont SPF lira la politique.
+    domaine_verifie: Tampon<DOMAIN_MAX>,
+    /// Le verdict rendu par l'appelant pour cette transaction.
+    verdict: Option<Verdict>,
 }
 
 impl<'a, P: Policy> SmtpSession<'a, P> {
@@ -201,6 +260,10 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
             banner_len: fin_banniere,
             size_line,
             size_len: fin_size,
+            helo: Tampon::vide(),
+            expediteur: Tampon::vide(),
+            domaine_verifie: Tampon::vide(),
+            verdict: None,
         }
     }
 
@@ -365,9 +428,9 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         };
 
         match commande {
-            Command::Ehlo(_) => self.on_ehlo(out),
-            Command::Helo(_) => self.on_helo(out),
-            Command::Mail { .. } => self.on_mail(out),
+            Command::Ehlo(client_id) => self.on_ehlo(&client_id, out),
+            Command::Helo(nom) => self.on_helo(nom, out),
+            Command::Mail { reverse_path, .. } => self.on_mail(&reverse_path, out),
             Command::Rcpt { forward_path, .. } => self.on_rcpt(&forward_path, out),
             Command::Data => self.on_data(out),
             Command::Rset => {
@@ -429,9 +492,14 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     }
 
     /// `EHLO` — annonce les extensions **effectivement servies**.
-    fn on_ehlo<'b>(&mut self, out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
+    fn on_ehlo<'b>(
+        &mut self,
+        client_id: &ClientId<'_>,
+        out: &'b mut [u8],
+    ) -> Result<Turn<'b>, Error> {
         // RFC 5321 §4.1.4 : `EHLO` annule la transaction en cours.
         self.quitter_la_transaction();
+        self.retenir_le_helo(client_id);
 
         let mut lignes: [&[u8]; EHLO_LINES_MAX] = [b""; EHLO_LINES_MAX];
         let mut posees = 0_usize;
@@ -472,8 +540,10 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     /// remettre du courrier en clair et sans s'authentifier. C6 n'interdit pas
     /// `HELO` ; ce qu'une telle session a le droit de faire releve de la
     /// politique de relais, pas de cette couche.
-    fn on_helo<'b>(&mut self, out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
+    fn on_helo<'b>(&mut self, nom: &[u8], out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
         self.quitter_la_transaction();
+        // `HELO` ne porte qu'un nom de domaine : la grammaire l'a déjà validé.
+        self.retenir_le_helo(&ClientId::Domain(nom));
         let domaine = self.config.domain();
         let reply =
             encode(out, Code::OK, &[domaine], self.config.limits()).map_err(Error::Reply)?;
@@ -485,7 +555,11 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     }
 
     /// `MAIL FROM:` — ouvre une transaction.
-    fn on_mail<'b>(&mut self, out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
+    fn on_mail<'b>(
+        &mut self,
+        reverse_path: &Path<'_>,
+        out: &'b mut [u8],
+    ) -> Result<Turn<'b>, Error> {
         match self.phase {
             Phase::Greeted => self.refus(Code::BAD_SEQUENCE, b"Send EHLO first", out),
             Phase::Transaction { .. } => {
@@ -493,9 +567,166 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
             }
             _ => {
                 self.phase = Phase::Transaction { recipients: 0 };
+                if self.retenir_l_expediteur(reverse_path) {
+                    // L'identité est vérifiable : on rend la main à l'appelant,
+                    // SANS RÉPONDRE. C'est lui qui résout.
+                    return self.differer(out);
+                }
                 self.simple(Code::OK, b"Sender ok", out)
             }
         }
+    }
+
+    /// Retient l'identité à vérifier, et dit si elle l'est.
+    ///
+    /// Rend `false` — donc « accepte sans vérifier » — dans quatre cas, et
+    /// aucun n'est un échec :
+    ///
+    /// - la politique d'expéditeur ne le demande pas ;
+    /// - l'expéditeur est nul ET le `HELO` n'était pas un domaine, si bien qu'il
+    ///   n'y a rien à interroger (RFC 7208 §2.4) ;
+    /// - le domaine de l'expéditeur est un LITTÉRAL D'ADRESSE : `jean@[192.0.2.1]`
+    ///   ne désigne aucune zone, et SPF n'a rien à y lire ;
+    /// - l'identité ne tient pas dans les tampons, ce qui veut dire qu'elle est
+    ///   plus longue qu'un nom de domaine.
+    fn retenir_l_expediteur(&mut self, reverse_path: &Path<'_>) -> bool {
+        if self.config.sender_policy() == SenderPolicy::Ignore {
+            return false;
+        }
+        match reverse_path {
+            Path::Mailbox(boite) => match boite.domain() {
+                ClientId::Domain(domaine) => {
+                    self.domaine_verifie.poser(&[domaine])
+                        && self
+                            .expediteur
+                            .poser(&[boite.local_part().as_bytes(), b"@", domaine])
+                }
+                // Un littéral d'adresse ne désigne aucune zone.
+                ClientId::AddressLiteral(_) => false,
+            },
+            // RFC 7208 §2.4 : l'expéditeur nul se vérifie sur le `HELO`.
+            Path::Null => {
+                !self.helo.est_vide()
+                    && self.domaine_verifie.poser(&[self.helo.as_bytes()])
+                    && self
+                        .expediteur
+                        .poser(&[b"postmaster@", self.helo.as_bytes()])
+            }
+            // `<Postmaster>` n'est pas un expéditeur : la grammaire le refuse en
+            // `MAIL FROM:` avant d'arriver ici.
+            Path::Postmaster => false,
+        }
+    }
+
+    /// Retient le nom annoncé, s'il en est un.
+    fn retenir_le_helo(&mut self, client_id: &ClientId<'_>) {
+        match client_id {
+            ClientId::Domain(nom) => {
+                self.helo.poser(&[nom]);
+            }
+            // UN LITTÉRAL D'ADRESSE N'EST PAS UN NOM : `[192.0.2.1]` ne désigne
+            // aucune zone, et le retenir ferait interroger un domaine qui
+            // n'existe pas. On oublie le précédent plutôt que de le garder : un
+            // second `HELO` remplace le premier, y compris par rien.
+            ClientId::AddressLiteral(_) => self.helo.vider(),
+        }
+    }
+
+    /// Un tour SANS RÉPONSE : l'appelant doit vérifier avant qu'on parle.
+    fn differer<'b>(&self, out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
+        let vide = out.get(..0).unwrap_or_default();
+        Ok(Turn {
+            reply: vide,
+            action: Action::CheckSender,
+            peer_fault: false,
+        })
+    }
+
+    /// L'identité que l'appelant doit vérifier.
+    ///
+    /// Rend `None` hors du tour qui a demandé [`Action::CheckSender`].
+    #[must_use]
+    pub fn sender_identity(&self) -> Option<SenderIdentity<'_>> {
+        if self.domaine_verifie.est_vide() {
+            return None;
+        }
+        Some(SenderIdentity {
+            domain: self.domaine_verifie.as_bytes(),
+            sender: self.expediteur.as_bytes(),
+            helo: self.helo.as_bytes(),
+        })
+    }
+
+    /// Le verdict retenu pour la transaction en cours, s'il y en a un.
+    ///
+    /// Il sert au journal et à l'en-tête `Received-SPF` : un verdict qu'on
+    /// n'écrit nulle part ne se relit pas le jour où l'on se demande pourquoi un
+    /// message est passé.
+    #[must_use]
+    pub fn sender_verdict(&self) -> Option<Verdict> {
+        self.verdict
+    }
+
+    /// Rend le verdict de la vérification, et compose la réponse au `MAIL FROM:`.
+    ///
+    /// # Ce que chaque verdict vaut, et pourquoi
+    ///
+    /// - **`Fail`** : le domaine dit lui-même que cette adresse n'a pas le droit
+    ///   d'émettre pour lui. C'est le seul verdict qui refuse (`550 5.7.23`,
+    ///   RFC 7372 §3.2) — et seulement sous [`SenderPolicy::Enforce`].
+    /// - **`TempError`** : la résolution n'a pas abouti. On AJOURNE (`451 4.4.3`)
+    ///   plutôt que de refuser : le pair réessaiera, et un message qui serait
+    ///   passé cinq minutes plus tard n'est pas jeté.
+    /// - **`SoftFail`** : le domaine dit « probablement pas », et la RFC 7208
+    ///   §8.5 veut qu'on n'en fasse pas un refus. Le retenir suffit : c'est à
+    ///   DMARC (C9) de le rapprocher de l'en-tête `From:`.
+    /// - **`PermError`** : la politique du domaine est illisible. **On accepte**,
+    ///   parce que refuser punirait l'expéditeur pour la faute de son
+    ///   administrateur — et parce qu'une politique fautive est le cas le plus
+    ///   fréquent des trois erreurs.
+    /// - **`Pass`, `Neutral`, `None`** : rien à opposer.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Reply`] si `out` est trop petit.
+    pub fn sender_checked<'b>(
+        &mut self,
+        verdict: Verdict,
+        out: &'b mut [u8],
+    ) -> Result<Turn<'b>, Error> {
+        if self.config.sender_policy() != SenderPolicy::Enforce {
+            self.verdict = Some(verdict);
+            return self.simple(Code::OK, b"Sender ok", out);
+        }
+        // LE VERDICT SE POSE APRÈS. Abandonner la transaction efface ce qu'elle
+        // portait — l'identité comprise — et le verdict serait effacé avec elle.
+        // Or il doit rester lisible : c'est ce que le journal consigne, et sans
+        // lui personne ne saurait POURQUOI ce message a été refusé.
+        let tour = match verdict {
+            Verdict::Fail => {
+                self.quitter_la_transaction();
+                self.refus(
+                    Code::MAILBOX_UNAVAILABLE,
+                    b"5.7.23 Sender address rejected: not authorized by SPF",
+                    out,
+                )
+            }
+            Verdict::TempError => {
+                self.quitter_la_transaction();
+                self.simple(
+                    Code::LOCAL_ERROR,
+                    b"4.4.3 Temporary error while checking SPF, try again later",
+                    out,
+                )
+            }
+            Verdict::Pass
+            | Verdict::Neutral
+            | Verdict::None
+            | Verdict::SoftFail
+            | Verdict::PermError => self.simple(Code::OK, b"Sender ok", out),
+        };
+        self.verdict = Some(verdict);
+        tour
     }
 
     /// `RCPT TO:` — la seule commande dont la session ne decide pas elle-meme.
@@ -760,6 +991,13 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     fn quitter_la_transaction(&mut self) {
         self.phase = Phase::Identified;
         self.recipients.clear();
+        // L'IDENTITÉ EST CELLE D'UNE TRANSACTION, pas d'une connexion. La
+        // laisser derrière ferait vérifier le message suivant sur l'expéditeur
+        // du précédent — ou pire, ferait croire à un verdict qu'on n'a pas
+        // demandé. Le `HELO`, lui, survit : c'est la connexion qui le porte.
+        self.expediteur.vider();
+        self.domaine_verifie.vider();
+        self.verdict = None;
     }
 
     /// Une reponse d'une ligne, sans action et sans faute du pair.
@@ -805,8 +1043,9 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
 #[cfg(test)]
 mod tests {
     use super::{Action, DataOutcome, SmtpSession};
-    use crate::{Capabilities, Config, Error, Policy, RecipientVerdict};
-    use ams_proto_smtp::{DataEvent, Error as SmtpError, Limits, Path};
+    use crate::{Capabilities, Config, Error, Policy, RecipientVerdict, SenderPolicy};
+    use ams_proto_smtp::{ClientId, DataEvent, Error as SmtpError, Limits, Path};
+    use ams_spf::Verdict as SpfVerdict;
 
     /// L'erreur qu'un tampon de `disponible` octets provoque quand il en faut
     /// `needed`.
@@ -1850,5 +2089,243 @@ mod tests {
             session.handle(b"HELO client.example\r\n", &mut minuscule),
             Err(tampon_trop_petit(22))
         );
+    }
+
+    // ── SPF : ce que la session demande, et ce qu'elle fait du verdict ──────
+
+    fn session_spf(politique: SenderPolicy) -> SmtpSession<'static, Verdict> {
+        let config = Config::new(b"mail.example.com", 2, 10_485_760, Limits::DEFAULT)
+            .expect("configurable")
+            .with_sender_policy(politique);
+        SmtpSession::new(config, Verdict(RecipientVerdict::Accept))
+    }
+
+    /// Joue `EHLO` puis `MAIL FROM:`, et rend la session prête à recevoir un
+    /// verdict.
+    fn jusqu_au_mail(
+        session: &mut SmtpSession<'_, Verdict>,
+        helo: &[u8],
+        mail: &[u8],
+    ) -> (std::string::String, Action) {
+        let mut tampon = [0_u8; 512];
+        let mut ligne = std::vec::Vec::from(b"EHLO ".as_slice());
+        ligne.extend_from_slice(helo);
+        ligne.extend_from_slice(b"\r\n");
+        session.handle(&ligne, &mut tampon).expect("EHLO");
+        let mut ligne = std::vec::Vec::from(b"MAIL FROM:".as_slice());
+        ligne.extend_from_slice(mail);
+        ligne.extend_from_slice(b"\r\n");
+        let tour = session.handle(&ligne, &mut tampon).expect("MAIL");
+        let reponse = std::string::String::from_utf8(tour.reply().to_vec()).expect("ASCII");
+        (reponse, tour.action())
+    }
+
+    #[test]
+    fn sans_politique_d_expediteur_la_session_ne_demande_rien() {
+        // Elle ne réclame que ce que quelqu'un a déclaré savoir faire : demander
+        // une résolution DNS à une boucle qui n'en fait pas ferait attendre pour
+        // rien.
+        let mut session = session_spf(SenderPolicy::Ignore);
+        let (reponse, action) =
+            jusqu_au_mail(&mut session, b"client.example.net", b"<jean@example.com>");
+        assert_eq!(action, Action::Continue);
+        assert!(reponse.starts_with("250"), "{reponse}");
+        assert!(session.sender_identity().is_none());
+        assert!(session.sender_verdict().is_none());
+    }
+
+    #[test]
+    fn la_session_rend_la_main_sans_repondre() {
+        // Le tour ne porte AUCUNE réponse : elle n'a rien à dire tant qu'elle ne
+        // sait pas. C'est l'appelant qui résout, puis elle compose.
+        let mut session = session_spf(SenderPolicy::Enforce);
+        let (reponse, action) =
+            jusqu_au_mail(&mut session, b"client.example.net", b"<jean@example.com>");
+        assert_eq!(action, Action::CheckSender);
+        assert_eq!(reponse, "", "un tour qui diffère ne répond pas");
+
+        let identite = session.sender_identity().expect("identité");
+        assert_eq!(identite.domain, b"example.com");
+        assert_eq!(identite.sender, b"jean@example.com");
+        assert_eq!(identite.helo, b"client.example.net");
+    }
+
+    #[test]
+    fn un_expediteur_nul_se_verifie_sur_le_helo() {
+        // RFC 7208 §2.4. Sans cette règle, un avis de non-remise échapperait
+        // entièrement à SPF — et c'est la forme qu'emprunte la rétrodiffusion.
+        let mut session = session_spf(SenderPolicy::Enforce);
+        let (_, action) = jusqu_au_mail(&mut session, b"client.example.net", b"<>");
+        assert_eq!(action, Action::CheckSender);
+        let identite = session.sender_identity().expect("identité");
+        assert_eq!(identite.domain, b"client.example.net");
+        assert_eq!(identite.sender, b"postmaster@client.example.net");
+    }
+
+    #[test]
+    fn un_litteral_d_adresse_ne_se_verifie_pas() {
+        // `jean@[192.0.2.1]` ne désigne aucune zone : SPF n'a rien à y lire, et
+        // interroger `[192.0.2.1]` comme un nom serait interroger n'importe quoi.
+        let mut session = session_spf(SenderPolicy::Enforce);
+        let (reponse, action) =
+            jusqu_au_mail(&mut session, b"client.example.net", b"<jean@[192.0.2.1]>");
+        assert_eq!(action, Action::Continue);
+        assert!(reponse.starts_with("250"), "{reponse}");
+
+        // Et un `HELO` littéral suivi d'un expéditeur nul : il ne reste RIEN à
+        // interroger.
+        let mut session = session_spf(SenderPolicy::Enforce);
+        let (reponse, action) = jusqu_au_mail(&mut session, b"[192.0.2.1]", b"<>");
+        assert_eq!(action, Action::Continue);
+        assert!(reponse.starts_with("250"), "{reponse}");
+    }
+
+    #[test]
+    fn un_second_helo_litteral_efface_le_premier() {
+        // Un `HELO` remplace le précédent, Y COMPRIS PAR RIEN : garder l'ancien
+        // ferait vérifier un nom que le pair a cessé d'annoncer.
+        let mut session = session_spf(SenderPolicy::Enforce);
+        let mut tampon = [0_u8; 512];
+        session
+            .handle(b"EHLO client.example.net\r\n", &mut tampon)
+            .expect("EHLO");
+        session
+            .handle(b"EHLO [192.0.2.1]\r\n", &mut tampon)
+            .expect("EHLO");
+        let tour = session
+            .handle(b"MAIL FROM:<>\r\n", &mut tampon)
+            .expect("MAIL");
+        assert_eq!(tour.action(), Action::Continue);
+    }
+
+    #[test]
+    fn un_fail_est_refuse_et_la_transaction_abandonnee() {
+        let mut session = session_spf(SenderPolicy::Enforce);
+        jusqu_au_mail(&mut session, b"client.example.net", b"<jean@example.com>");
+        let mut tampon = [0_u8; 512];
+        let tour = session
+            .sender_checked(SpfVerdict::Fail, &mut tampon)
+            .expect("réponse");
+        let reponse = std::string::String::from_utf8(tour.reply().to_vec()).expect("ASCII");
+        assert!(reponse.starts_with("550 5.7.23"), "{reponse}");
+        assert!(
+            tour.peer_fault(),
+            "un expéditeur usurpé est une faute du pair"
+        );
+        assert_eq!(session.sender_verdict(), Some(SpfVerdict::Fail));
+
+        // La transaction est abandonnée : le destinataire qui suit n'a plus de
+        // `MAIL` devant lui.
+        let refus = jouer(&mut session, b"RCPT TO:<marie@example.com>\r\n");
+        assert!(refus.starts_with("503"), "{refus}");
+        // Et l'identité ne survit pas : elle est celle d'une TRANSACTION.
+        assert!(session.sender_identity().is_none());
+    }
+
+    #[test]
+    fn une_panne_de_resolution_ajourne() {
+        // 451, JAMAIS 550 : un message ajourné revient, un message refusé est
+        // perdu.
+        let mut session = session_spf(SenderPolicy::Enforce);
+        jusqu_au_mail(&mut session, b"client.example.net", b"<jean@example.com>");
+        let mut tampon = [0_u8; 512];
+        let tour = session
+            .sender_checked(SpfVerdict::TempError, &mut tampon)
+            .expect("réponse");
+        let reponse = std::string::String::from_utf8(tour.reply().to_vec()).expect("ASCII");
+        assert!(reponse.starts_with("451 4.4.3"), "{reponse}");
+        assert!(!tour.peer_fault(), "une panne chez nous n'est pas sa faute");
+    }
+
+    #[test]
+    fn les_autres_verdicts_laissent_passer() {
+        // `softfail` dit « probablement pas » et la RFC 7208 §8.5 veut qu'on n'en
+        // fasse pas un refus ; `permerror` punirait l'expéditeur pour la faute de
+        // son administrateur.
+        for verdict in [
+            SpfVerdict::Pass,
+            SpfVerdict::Neutral,
+            SpfVerdict::None,
+            SpfVerdict::SoftFail,
+            SpfVerdict::PermError,
+        ] {
+            let mut session = session_spf(SenderPolicy::Enforce);
+            jusqu_au_mail(&mut session, b"client.example.net", b"<jean@example.com>");
+            let mut tampon = [0_u8; 512];
+            let tour = session
+                .sender_checked(verdict, &mut tampon)
+                .expect("réponse");
+            let reponse = std::string::String::from_utf8(tour.reply().to_vec()).expect("ASCII");
+            assert!(reponse.starts_with("250"), "{verdict:?} : {reponse}");
+            assert_eq!(session.sender_verdict(), Some(verdict));
+        }
+    }
+
+    #[test]
+    fn en_observation_rien_n_est_oppose_mais_tout_est_retenu() {
+        let mut session = session_spf(SenderPolicy::Observe);
+        let (_, action) = jusqu_au_mail(&mut session, b"client.example.net", b"<jean@example.com>");
+        assert_eq!(action, Action::CheckSender);
+        let mut tampon = [0_u8; 512];
+        let tour = session
+            .sender_checked(SpfVerdict::Fail, &mut tampon)
+            .expect("réponse");
+        let reponse = std::string::String::from_utf8(tour.reply().to_vec()).expect("ASCII");
+        assert!(reponse.starts_with("250"), "{reponse}");
+        // RETENU : c'est ce qui permet de découvrir ce qu'une politique
+        // refuserait avant de la laisser refuser.
+        assert_eq!(session.sender_verdict(), Some(SpfVerdict::Fail));
+    }
+
+    #[test]
+    fn une_identite_plus_longue_qu_un_nom_ne_se_verifie_pas() {
+        // Un contenu tronqué désignerait AUTRE CHOSE, et vérifier autre chose ne
+        // vérifie rien. Le domaine du serveur est borné à 255 ; celui d'un pair
+        // peut aller jusqu'à la borne du décodeur.
+        let bornes = Limits {
+            max_domain_octets: 512,
+            max_path_octets: 1024,
+            ..Limits::DEFAULT
+        };
+        let config = Config::new(b"mail.example.com", 2, 10_485_760, bornes)
+            .expect("configurable")
+            .with_sender_policy(SenderPolicy::Enforce);
+        let mut session = SmtpSession::new(config, Verdict(RecipientVerdict::Accept));
+        // Cinq étiquettes de soixante : un domaine grammaticalement valide de
+        // 304 octets, plus long que ce qu'un nom peut faire.
+        let long = [
+            "a".repeat(60),
+            "b".repeat(60),
+            "c".repeat(60),
+            "d".repeat(60),
+            "e".repeat(60),
+        ]
+        .join(".");
+        let mut mail = std::vec::Vec::from(b"<jean@".as_slice());
+        mail.extend_from_slice(long.as_bytes());
+        mail.extend_from_slice(b">");
+        let (reponse, action) = jusqu_au_mail(&mut session, b"client.example.net", &mail);
+        assert_eq!(action, Action::Continue);
+        assert!(reponse.starts_with("250"), "{reponse}");
+    }
+
+    #[test]
+    fn un_postmaster_nu_n_est_pas_un_expediteur() {
+        // La grammaire refuse `<Postmaster>` en `MAIL FROM:` avant d'arriver ici
+        // — c'est `RCPT TO:` qui l'admet (RFC 5321 §4.1.1.3). On éprouve donc la
+        // fonction elle-même : elle est TOTALE sur son type d'entrée, et rien
+        // n'y suppose ce que la grammaire aura filtré.
+        let mut session = session_spf(SenderPolicy::Enforce);
+        assert!(!session.retenir_l_expediteur(&Path::Postmaster));
+        assert!(session.sender_identity().is_none());
+    }
+
+    #[test]
+    fn le_helo_ne_retient_que_ce_qui_est_un_nom() {
+        let mut session = session_spf(SenderPolicy::Enforce);
+        session.retenir_le_helo(&ClientId::Domain(b"mx.example.net"));
+        assert_eq!(session.helo.as_bytes(), b"mx.example.net");
+        session.retenir_le_helo(&ClientId::AddressLiteral(b"[192.0.2.1]"));
+        assert!(session.helo.est_vide());
     }
 }

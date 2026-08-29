@@ -86,5 +86,7 @@ mod codec;
 mod index;
 
 pub use accounts::{decode_accounts, encode_accounts};
-pub use codec::{Configuration, Error, TRAVERSAL_LIMIT_WORDS, Timeouts, Tls, decode, encode};
+pub use codec::{
+    Configuration, Enforcement, Error, Spf, TRAVERSAL_LIMIT_WORDS, Timeouts, Tls, decode, encode,
+};
 pub use index::{decode_index, encode_index};

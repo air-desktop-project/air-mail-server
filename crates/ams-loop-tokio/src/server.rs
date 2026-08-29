@@ -10,7 +10,7 @@ use rustls::ServerConfig;
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 
-use crate::{Delivery, Error, Service, SharedGuard, Timeouts, serve_connection};
+use crate::{Delivery, Error, SenderChecker, Service, SharedGuard, Timeouts, serve_connection};
 
 /// Ce qui borne le service.
 ///
@@ -38,6 +38,12 @@ pub struct ServeOptions {
     /// service refuse de démarrer une connexion qui annoncerait `STARTTLS` sans
     /// elle.
     pub tls: Option<Arc<ServerConfig>>,
+    /// De quoi vérifier l'expéditeur (C9), si le service sait le faire.
+    ///
+    /// Voir [`Service::spf`] : mêmes règles. Une politique d'expéditeur qui
+    /// n'est pas `Ignore` sans ce champ fait échouer chaque connexion — au
+    /// démarrage plutôt qu'au premier `MAIL FROM:`.
+    pub spf: Option<SenderChecker>,
 }
 
 impl Default for ServeOptions {
@@ -46,6 +52,7 @@ impl Default for ServeOptions {
             max_connections: 256,
             timeouts: Timeouts::default(),
             tls: None,
+            spf: None,
         }
     }
 }
@@ -133,6 +140,7 @@ where
         // est partagée, jamais recopiée. C'est ce qui rend le chiffrement
         // gratuit à l'acceptation.
         let tls = options.tls.clone();
+        let spf = options.spf.clone();
 
         tokio::spawn(async move {
             let mut flux = flux;
@@ -142,6 +150,7 @@ where
                 guard: &guard,
                 timeouts,
                 tls,
+                spf,
             };
             // Le résultat n'est pas remonté : une connexion qui échoue ne
             // regarde qu'elle. Le journal viendra avec `air-log`.
