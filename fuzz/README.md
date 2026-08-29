@@ -35,6 +35,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_pop3` | `seeds/pop3` | la ligne POP3 — **et le doublement du point** |
 | `fuzz_ams_session_pop3` | `seeds/pop3-session` | la session POP3 — **vocabulaire clos, états tenus** |
 | `fuzz_ams_spf` | `seeds/spf` | l'enregistrement SPF — **validation d'un seul tenant** |
+| `fuzz_ams_spf_eval` | `seeds/spf-eval` | l'évaluation SPF, réponses DNS comprises — **elle conclut** |
 
 Les variantes « bornes » existent parce que les bornes de C3 viennent de la
 configuration (C8), donc d'un administrateur : un zéro, un `usize::MAX`, ou toute
@@ -187,9 +188,32 @@ arrêt à qui sait publier un TXT.
    demande appliquerait une politique différente selon le pair.
 3. **Les bornes sont tenues** : ni plus de termes ni plus d'octets que ce qu'on
    a permis.
-4. **Un mécanisme qui résout ne répond jamais seul.** Lui faire dire `false`
-   le ferait passer pour « ne correspond pas », ce qui est une réponse — et il
-   n'en a pas encore.
+4. **Un mécanisme qui résout ne répond jamais seul**, et il dit exactement ce
+   qu'il lui faut. Lui faire dire `false` le ferait passer pour « ne correspond
+   pas », ce qui est une réponse — et il n'en a pas encore.
+
+### Évaluation SPF (sept, dont LA TERMINAISON)
+
+La cible voisine éprouve la LECTURE d'un enregistrement ; celle-ci éprouve ce
+qui vient après, et qui est plus exposé. Une évaluation enchaîne des politiques
+que **l'expéditeur choisit** — les siennes, celles des domaines qu'il inclut — et
+des réponses DNS qu'il peut, en partie, fabriquer. Tout, ici, vient d'ailleurs :
+le harnais sert donc des réponses arbitraires, y compris d'un genre qui ne
+répond pas à la question posée.
+
+1. Rien ne panique, quelles que soient les bornes et les réponses.
+2. **ELLE CONCLUT.** Un évaluateur qui tourne sans fin est un déni de service
+   offert à qui publie un `redirect=` circulaire. La borne n'est pas une
+   supposition : elle se déduit des dix résolutions (RFC 7208 §4.6.4).
+3. **Le nombre de questions ne dépasse pas la borne** : une question de départ,
+   puis une par résolution permise, et pas une de plus.
+4. **Un verdict est définitif** : rappeler `poll` après la fin rend le même, et
+   une réponse tardive ne rouvre rien.
+5. **Une question porte un nom interrogeable** — au plus 255 octets, la longueur
+   d'un nom de domaine. Un nom tronqué en désignerait un AUTRE.
+6. **Une panne de résolution vaut `temperror`**, jamais un refus : dire `fail` à
+   la place ferait jeter un message qui serait passé cinq minutes plus tard.
+7. Les bornes de l'évaluation sont fuzzées elles aussi — zéro compris.
 
 ### Session POP3 (cinq, dont DEUX INVARIANTS D'ÉTAT)
 
@@ -443,6 +467,8 @@ L'entrée fautive est versionnée en graine de non-régression
 | 2026-08-29 | `fuzz_ams_pop3` | 11 871 878 (91 s) | 0 |
 | 2026-08-29 | `fuzz_ams_session_pop3` | 1 179 107 (91 s) | 0 |
 | 2026-08-29 | `fuzz_ams_spf` | 1 886 802 (91 s) | 0 |
+| 2026-08-29 | `fuzz_ams_spf` (après `resolve`) | 2 224 920 (91 s) | 0 |
+| 2026-08-29 | `fuzz_ams_spf_eval` | 5 799 279 (181 s) | 0 |
 | 2026-08-28 | `fuzz_ams_session_smtp` (SASL) | 521 646 (91 s) | 0 |
 
 Le débit de `fuzz_ams_tls_kx` est trois ordres de grandeur sous les autres : une

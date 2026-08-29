@@ -180,3 +180,10 @@ path = "fuzz_targets/fuzz_ams_spf.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_ams_spf_eval"
+path = "fuzz_targets/fuzz_ams_spf_eval.rs"
+test = false
+doc = false
+bench = false

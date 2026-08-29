@@ -19,7 +19,7 @@ const VERSION: &[u8] = b"v=spf1";
 ///
 /// Passé cet appel, [`Record::terms`] ne peut plus échouer, et ne rend donc pas
 /// de `Result`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Record<'a> {
     corps: &'a [u8],
 }

@@ -386,6 +386,7 @@ fn les_bornes_de_taille_et_de_nombre_sont_tenues() {
     let etroites = Limits {
         max_record_octets: 20,
         max_terms: 2,
+        ..Limits::DEFAULT
     };
     assert_eq!(
         Record::parse(b"v=spf1 ip4:192.0.2.0/24 -all", &etroites),
@@ -450,14 +451,28 @@ fn les_mecanismes_sans_dns_repondent_sur_un_enregistrement_reel() {
     let enregistrement =
         lire(b"v=spf1 ip4:192.0.2.0/24 include:x.example exp=e.example -all").expect("recevable");
     let client = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 42));
-    let reponses: std::vec::Vec<Option<bool>> = enregistrement
+    let reponses: std::vec::Vec<crate::Resolution<'_>> = enregistrement
         .terms()
         .filter_map(|terme| match terme {
-            Term::Mechanism { mechanism, .. } => Some(mechanism.matches_without_dns(client)),
+            Term::Mechanism { mechanism, .. } => Some(mechanism.resolve(client)),
             Term::Modifier(_) => None,
         })
         .collect();
-    assert_eq!(reponses, [Some(true), None, Some(true)]);
+    assert_eq!(
+        reponses,
+        [
+            crate::Resolution::Answered(true),
+            crate::Resolution::Needs {
+                domain: crate::term::DomainSpec {
+                    spec: b"x.example",
+                    prefix4: 32,
+                    prefix6: 128
+                },
+                lookup: crate::Lookup::Policy
+            },
+            crate::Resolution::Answered(true),
+        ]
+    );
 }
 
 #[test]

@@ -1,0 +1,2 @@
+v=spf1 exists:%{ir}.%{v}.liste.example.org ?all
+1.2.0.192.in-addr.liste.example.org

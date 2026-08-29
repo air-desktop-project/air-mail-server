@@ -130,30 +130,101 @@ pub enum Term<'a> {
     Modifier(Modifier<'a>),
 }
 
+/// Ce qu'il faut demander au DNS pour trancher un mécanisme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lookup {
+    /// La politique SPF du nom — c'est ce que fait un `include`.
+    Policy,
+    /// Les adresses (A **et** AAAA) du nom.
+    Addresses,
+    /// Les adresses des serveurs de courrier du nom.
+    MxAddresses,
+    /// Le nom existe-t-il ?
+    Exists,
+    /// Les noms que la résolution inverse de l'adresse du pair confirme.
+    PtrNames,
+}
+
+/// Ce qu'un mécanisme répond, ou ce qu'il lui faut pour répondre.
+///
+/// # Un seul aiguillage, et il est total
+///
+/// La première version rendait `Option<bool>` : `None` voulait dire « il me faut
+/// le DNS », et l'appelant devait alors REFAIRE le tri des mécanismes pour
+/// savoir quoi demander. Deux aiguillages sur la même énumération, dont le
+/// second portait des bras qu'aucun test ne pouvait atteindre.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resolution<'a> {
+    /// Le mécanisme a répondu sans personne.
+    Answered(bool),
+    /// Il lui faut une résolution.
+    Needs {
+        /// Le domaine à interroger — vide pour « celui de la politique ».
+        domain: DomainSpec<'a>,
+        /// Ce qu'on veut en savoir.
+        lookup: Lookup,
+    },
+}
+
 impl<'a> Mechanism<'a> {
-    /// Cette adresse correspond-elle, **sans aucune résolution** ?
-    ///
-    /// Rend `None` pour les mécanismes qui en demandent une : c'est à
-    /// l'évaluateur de les conduire, et répondre `false` à leur place les
-    /// ferait passer pour « ne correspond pas ».
+    /// Ce mécanisme répond-il seul, et sinon que lui faut-il ?
     #[must_use]
-    pub fn matches_without_dns(&self, client: IpAddr) -> Option<bool> {
+    pub fn resolve(&self, client: IpAddr) -> Resolution<'a> {
         match (self, client) {
-            (Self::All, _) => Some(true),
+            (Self::All, _) => Resolution::Answered(true),
             (Self::Ip4 { address, prefix }, IpAddr::V4(vue)) => {
-                Some(meme_prefixe(&address.octets(), &vue.octets(), *prefix))
+                Resolution::Answered(meme_prefixe(&address.octets(), &vue.octets(), *prefix))
             }
             (Self::Ip6 { address, prefix }, IpAddr::V6(vue)) => {
-                Some(meme_prefixe(&address.octets(), &vue.octets(), *prefix))
+                Resolution::Answered(meme_prefixe(&address.octets(), &vue.octets(), *prefix))
             }
             // UN `ip4:` NE CORRESPOND PAS À UNE ADRESSE IPv6, et inversement.
             // La RFC 7208 §5.6 est explicite ; les confondre ferait autoriser
             // un pair d'une autre famille que celle qu'on a écrite.
-            (Self::Ip4 { .. } | Self::Ip6 { .. }, _) => Some(false),
-            (Self::A(_) | Self::Mx(_) | Self::Include(_) | Self::Exists(_) | Self::Ptr(_), _) => {
-                None
-            }
+            (Self::Ip4 { .. } | Self::Ip6 { .. }, _) => Resolution::Answered(false),
+            (Self::A(domain), _) => Resolution::Needs {
+                domain: *domain,
+                lookup: Lookup::Addresses,
+            },
+            (Self::Mx(domain), _) => Resolution::Needs {
+                domain: *domain,
+                lookup: Lookup::MxAddresses,
+            },
+            (Self::Include(domain), _) => Resolution::Needs {
+                domain: *domain,
+                lookup: Lookup::Policy,
+            },
+            (Self::Exists(domain), _) => Resolution::Needs {
+                domain: *domain,
+                lookup: Lookup::Exists,
+            },
+            (Self::Ptr(domain), _) => Resolution::Needs {
+                domain: *domain,
+                lookup: Lookup::PtrNames,
+            },
         }
+    }
+}
+
+/// Deux adresses de la même famille partagent-elles leurs `prefix` premiers
+/// bits ?
+///
+/// Rend `false` pour deux familles différentes : la RFC 7208 §5.6 l'exige, et
+/// les confondre autoriserait un pair d'une autre famille que celle qu'on a
+/// écrite.
+/// `prefixes` porte les deux longueurs du mécanisme — `a/24//64` en écrit une
+/// par famille — et c'est ICI qu'on choisit laquelle s'applique. L'appelant qui
+/// trierait les familles avant d'appeler ferait le même tri deux fois, dont un
+/// qu'aucun test ne pourrait atteindre.
+pub(crate) fn meme_adresse(reseau: IpAddr, vue: IpAddr, prefixes: (u8, u8)) -> bool {
+    match (reseau, vue) {
+        (IpAddr::V4(reseau), IpAddr::V4(vue)) => {
+            meme_prefixe(&reseau.octets(), &vue.octets(), prefixes.0)
+        }
+        (IpAddr::V6(reseau), IpAddr::V6(vue)) => {
+            meme_prefixe(&reseau.octets(), &vue.octets(), prefixes.1)
+        }
+        _ => false,
     }
 }
 
@@ -211,7 +282,7 @@ pub(crate) fn prefixe(brut: &[u8], maximum: u8) -> Result<u8, Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Mechanism, Qualifier, meme_prefixe, prefixe};
+    use super::{Lookup, Mechanism, Qualifier, Resolution, meme_prefixe, prefixe};
     use crate::Error;
     use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -234,10 +305,13 @@ mod tests {
     #[test]
     fn all_correspond_toujours() {
         let quelconque = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
-        assert_eq!(Mechanism::All.matches_without_dns(quelconque), Some(true));
         assert_eq!(
-            Mechanism::All.matches_without_dns(IpAddr::V6(Ipv6Addr::LOCALHOST)),
-            Some(true)
+            Mechanism::All.resolve(quelconque),
+            Resolution::Answered(true)
+        );
+        assert_eq!(
+            Mechanism::All.resolve(IpAddr::V6(Ipv6Addr::LOCALHOST)),
+            Resolution::Answered(true)
         );
     }
 
@@ -254,8 +328,8 @@ mod tests {
             (Ipv4Addr::new(198, 51, 100, 1), false),
         ] {
             assert_eq!(
-                mecanisme.matches_without_dns(IpAddr::V4(adresse)),
-                Some(attendu),
+                mecanisme.resolve(IpAddr::V4(adresse)),
+                Resolution::Answered(attendu),
                 "{adresse}"
             );
         }
@@ -270,12 +344,12 @@ mod tests {
             prefix: 12,
         };
         assert_eq!(
-            mecanisme.matches_without_dns(IpAddr::V4(Ipv4Addr::new(10, 31, 255, 255))),
-            Some(true)
+            mecanisme.resolve(IpAddr::V4(Ipv4Addr::new(10, 31, 255, 255))),
+            Resolution::Answered(true)
         );
         assert_eq!(
-            mecanisme.matches_without_dns(IpAddr::V4(Ipv4Addr::new(10, 32, 0, 0))),
-            Some(false)
+            mecanisme.resolve(IpAddr::V4(Ipv4Addr::new(10, 32, 0, 0))),
+            Resolution::Answered(false)
         );
     }
 
@@ -286,20 +360,20 @@ mod tests {
             prefix: 0,
         };
         assert_eq!(
-            tout.matches_without_dns(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7))),
-            Some(true)
+            tout.resolve(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7))),
+            Resolution::Answered(true)
         );
         let seule = Mechanism::Ip4 {
             address: Ipv4Addr::new(203, 0, 113, 7),
             prefix: 32,
         };
         assert_eq!(
-            seule.matches_without_dns(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7))),
-            Some(true)
+            seule.resolve(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7))),
+            Resolution::Answered(true)
         );
         assert_eq!(
-            seule.matches_without_dns(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 8))),
-            Some(false)
+            seule.resolve(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 8))),
+            Resolution::Answered(false)
         );
     }
 
@@ -310,12 +384,12 @@ mod tests {
             prefix: 32,
         };
         assert_eq!(
-            mecanisme.matches_without_dns(IpAddr::V6("2001:db8:1234::1".parse().expect("adresse"))),
-            Some(true)
+            mecanisme.resolve(IpAddr::V6("2001:db8:1234::1".parse().expect("adresse"))),
+            Resolution::Answered(true)
         );
         assert_eq!(
-            mecanisme.matches_without_dns(IpAddr::V6("2001:db9::1".parse().expect("adresse"))),
-            Some(false)
+            mecanisme.resolve(IpAddr::V6("2001:db9::1".parse().expect("adresse"))),
+            Resolution::Answered(false)
         );
     }
 
@@ -328,37 +402,45 @@ mod tests {
             prefix: 0,
         };
         assert_eq!(
-            ip4.matches_without_dns(IpAddr::V6(Ipv6Addr::LOCALHOST)),
-            Some(false)
+            ip4.resolve(IpAddr::V6(Ipv6Addr::LOCALHOST)),
+            Resolution::Answered(false)
         );
         let ip6 = Mechanism::Ip6 {
             address: Ipv6Addr::UNSPECIFIED,
             prefix: 0,
         };
         assert_eq!(
-            ip6.matches_without_dns(IpAddr::V4(Ipv4Addr::LOCALHOST)),
-            Some(false)
+            ip6.resolve(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            Resolution::Answered(false)
         );
     }
 
     #[test]
-    fn les_mecanismes_qui_resolvent_ne_repondent_pas() {
+    fn les_mecanismes_qui_resolvent_disent_ce_qu_il_leur_faut() {
         // Répondre `false` à leur place les ferait passer pour « ne correspond
-        // pas », ce qui est une réponse — et ils n'en ont pas encore.
+        // pas », ce qui est une réponse — et ils n'en ont pas encore. Dire ce
+        // qu'il leur faut évite en outre à l'appelant de refaire le tri.
         let vide = super::DomainSpec {
             spec: b"",
             prefix4: 32,
             prefix6: 128,
         };
         let client = IpAddr::V4(Ipv4Addr::LOCALHOST);
-        for mecanisme in [
-            Mechanism::A(vide),
-            Mechanism::Mx(vide),
-            Mechanism::Include(vide),
-            Mechanism::Exists(vide),
-            Mechanism::Ptr(vide),
+        for (mecanisme, attendu) in [
+            (Mechanism::A(vide), Lookup::Addresses),
+            (Mechanism::Mx(vide), Lookup::MxAddresses),
+            (Mechanism::Include(vide), Lookup::Policy),
+            (Mechanism::Exists(vide), Lookup::Exists),
+            (Mechanism::Ptr(vide), Lookup::PtrNames),
         ] {
-            assert_eq!(mecanisme.matches_without_dns(client), None, "{mecanisme:?}");
+            assert_eq!(
+                mecanisme.resolve(client),
+                Resolution::Needs {
+                    domain: vide,
+                    lookup: attendu
+                },
+                "{mecanisme:?}"
+            );
         }
     }
 

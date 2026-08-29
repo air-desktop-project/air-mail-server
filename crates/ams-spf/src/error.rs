@@ -30,6 +30,13 @@ pub enum Error {
     MalformedPrefix,
     /// Une adresse littérale n'en est pas une.
     MalformedAddress,
+    /// Une macro est mal formée (RFC 7208 §7.1).
+    MalformedMacro,
+    /// Une expansion dépasse la taille d'un nom de domaine.
+    ///
+    /// La tronquer désignerait un AUTRE nom, et l'interroger serait pire que de
+    /// refuser.
+    MacroTooLong,
     /// Un modificateur `redirect=` ou `exp=` figure deux fois.
     ///
     /// RFC 7208 §6 : ils sont uniques. Deux `redirect=` désigneraient deux
@@ -47,6 +54,8 @@ impl fmt::Display for Error {
             Error::MalformedArgument => f.write_str("argument absent ou irrecevable"),
             Error::MalformedPrefix => f.write_str("préfixe CIDR absent ou hors bornes"),
             Error::MalformedAddress => f.write_str("adresse littérale irrecevable"),
+            Error::MalformedMacro => f.write_str("macro mal formée (RFC 7208 §7.1)"),
+            Error::MacroTooLong => f.write_str("l'expansion dépasse la taille d'un nom de domaine"),
             Error::DuplicateModifier => {
                 f.write_str("`redirect=` ou `exp=` figure deux fois (RFC 7208 §6)")
             }
@@ -68,6 +77,8 @@ mod tests {
         Error::MalformedArgument,
         Error::MalformedPrefix,
         Error::MalformedAddress,
+        Error::MalformedMacro,
+        Error::MacroTooLong,
         Error::DuplicateModifier,
     ];
 

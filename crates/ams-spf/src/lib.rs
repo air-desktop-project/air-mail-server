@@ -51,11 +51,15 @@
 extern crate std;
 
 mod error;
+mod eval;
 mod limits;
+pub mod macros;
 mod record;
 mod term;
 
 pub use error::Error;
+pub use eval::{Answer, Evaluator, Query, Question, Step, Verdict};
 pub use limits::Limits;
+pub use macros::{Context, Expanded};
 pub use record::{Record, Terms};
-pub use term::{Mechanism, Modifier, Qualifier, Term};
+pub use term::{Lookup, Mechanism, Modifier, Qualifier, Resolution, Term};

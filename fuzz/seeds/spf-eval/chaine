@@ -1,0 +1,4 @@
+v=spf1 include:un.example -all
+v=spf1 include:deux.example -all
+v=spf1 ptr:example -all
+mx.example

@@ -82,7 +82,7 @@ des octets **et des actions**. Elles n'attendent jamais.
 | `ams-auth` | le magasin d'identifiants, vérification Argon2id | **implémenté** |
 | `ams-tls` | TLS 1.3 uniquement, échange de clés post-quantique | **implémenté** |
 | `ams-dkim` | RFC 6376 | vide |
-| `ams-spf` | RFC 7208 | **enregistrement lu, `ip4`/`ip6`/`all`** |
+| `ams-spf` | RFC 7208 | **enregistrement lu et politique évaluée** |
 | `ams-dmarc` | RFC 7489 | vide |
 | `ams-config` | les trois formats binaires : configuration, comptes, index | **implémenté** |
 | `ams-index` | noms Maildir, drapeaux, reconstruction, `UIDVALIDITY` | **implémenté** |
@@ -121,14 +121,33 @@ donnerait plusieurs formes pour un même identifiant, de quoi passer à côté d
 filtre ou d'un comptage. `LOGIN` et `CRAM-MD5` ne sont pas servis, et la crate
 dit pourquoi plutôt que de se taire.
 
-`ams-spf` : la lecture d'un enregistrement `v=spf1`, et les mécanismes qui n'ont
-besoin de personne — `ip4`, `ip6`, `all`. **La validation a lieu d'un seul
+`ams-spf` : la lecture d'un enregistrement `v=spf1`, l'expansion des macros
+(§7) et l'évaluation d'une politique entière. **La validation a lieu d'un seul
 tenant** : un terme fautif en queue fait échouer tout l'enregistrement, parce
 qu'un parcours s'arrêtant au premier terme utile appliquerait la moitié d'une
 politique — et deux pairs verraient deux politiques différentes pour le même
-domaine, selon celui qui correspond en premier. L'évaluation, qui résout des
-noms, viendra avec sa limite de dix résolutions (RFC 7208 §4.6.4) : elle rendra
-ses résolutions sous forme d'actions, comme `ams-dkim` le fera pour ses clés.
+domaine, selon celui qui correspond en premier.
+
+**L'évaluateur pose des questions ; il n'interroge personne.** `poll` rend soit
+un verdict, soit une question — un nom, et ce qu'on veut en savoir — que
+l'appelant résout comme il l'entend avant de rendre la réponse par `answer`.
+C'est C1, et ce n'est pas seulement une affaire de principe : **la limite des
+dix résolutions (§4.6.4) se compte ici**, sur une machine à états qu'on peut
+éprouver, plutôt que dans un résolveur où elle se perdrait. Elle existe pour
+empêcher qu'un enregistrement hostile fasse travailler le résolveur d'autrui.
+
+Ce qu'on demande n'est pas une requête, c'est une **question** : `MxAddresses`
+veut « les adresses des serveurs de courrier de ce domaine », deux tours de DNS
+que l'appelant enchaîne. Ce découpage est celui de la RFC, qui compte **un**
+mécanisme `mx` comme **une** résolution — et il évite à la crate de retenir une
+liste de noms entre deux réponses, donc d'allouer.
+
+La règle la plus contre-intuitive de SPF y est éprouvée nommément : un `include`
+correspond **si et seulement si** la politique incluse rend `pass`. Une incluse
+qui dit `fail` ne fait pas échouer l'évaluation — elle ne correspond pas, et
+c'est le terme suivant de l'appelante qui décide. Un `redirect=`, lui,
+**remplace** la politique : son verdict devient le nôtre, qualificateurs
+compris.
 
 `ams-auth` : les comptes — un nom, une empreinte, des adresses — et la
 vérification **Argon2id** (m = 19456 Kio, t = 2,

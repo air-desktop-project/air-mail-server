@@ -356,20 +356,34 @@ résolution est une *action rendue* par la machine à états, exécutée par la 
 et dont le résultat lui est réinjecté. C'est ce qui les rend couvrables à 100 %
 sans serveur DNS de test.
 
-**Outillé par** : partiellement, depuis le 2026-08-29. `ams-spf` lit un
-enregistrement `v=spf1` — termes, qualificateurs, préfixes CIDR — et répond pour
-les mécanismes qui n'exigent aucune résolution. Couvert à 100 % (C2) et fuzzé sur
-quatre propriétés, dont l'indivisibilité de la validation.
+**Outillé par** : SPF l'est entièrement, depuis le 2026-08-29. `ams-spf` lit un
+enregistrement `v=spf1` — termes, qualificateurs, préfixes CIDR —, développe les
+macros du §7, et **évalue une politique jusqu'au verdict** : `include`,
+`redirect=`, `a`, `mx`, `ptr`, `exists`, avec les sept issues de la RFC. Couvert
+à 100 % (C2) et fuzzé sur onze propriétés réparties en deux cibles, dont
+l'indivisibilité de la validation et la terminaison de l'évaluation.
 
-Ce qui n'est pas outillé : **l'évaluation**, qui résout des noms, et donc tout ce
-que SPF conclut. `ams-dkim` et `ams-dmarc` restent vides. Tant que l'évaluation
-manque, C9 n'est tenue par rien de ce qui compte — un enregistrement lu
-n'empêche aucune usurpation.
+Ce qui n'est pas outillé : `ams-dkim` et `ams-dmarc` restent vides, et **SPF
+n'est pas encore câblé dans la boucle SMTP** — la crate sait conclure, personne
+ne l'interroge encore. Tant que ce câblage manque, C9 n'empêche aucune
+usurpation : un verdict que personne ne demande ne protège rien.
 
-La limite des **dix résolutions** (RFC 7208 §4.6.4) mérite d'être nommée
-d'avance : elle existe pour empêcher qu'un enregistrement hostile fasse
-travailler le résolveur d'autrui, et c'est exactement le genre de borne qui se
-vérifie sur une machine à états et se perd dans un résolveur.
+### Ce que l'évaluation ne fait pas, et pourquoi c'est la bonne forme
+
+Elle ne résout rien. `Evaluator::poll` rend soit un verdict, soit une
+**question** — un nom, et ce qu'on veut en savoir — que l'appelant résout avant
+de rendre la réponse. C'est ce qui rend la crate couvrable à 100 % sans serveur
+DNS de test, et c'est surtout ce qui met **la limite des dix résolutions** (RFC
+7208 §4.6.4) là où elle se vérifie. Cette limite n'est pas une commodité : sans
+elle, un enregistrement hostile fait travailler le résolveur d'autrui, et un
+message devient autant de requêtes payées par celui qui le reçoit. Elle est
+éprouvée par une chaîne de onze `include`, et la **profondeur de la pile** l'est
+séparément — car en desserrant les résolutions, c'est elle qui doit tenir.
+
+Deux sous-limites appartiennent à l'appelant, parce que la question posée en
+recouvre plusieurs : au plus dix enregistrements `MX`, au plus dix noms rendus
+par une résolution inverse (§4.6.4). Elles sont écrites sur le type `Query` —
+**un contrat qu'on ne peut pas vérifier doit au moins être lisible.**
 
 ## C10 — Le serveur ne s'exécute jamais avec les privilèges du superutilisateur
 
