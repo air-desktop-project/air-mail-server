@@ -9,7 +9,9 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
-
+rsa = { workspace = true }
+sha2 = { workspace = true }
+ed25519-dalek = { workspace = true }
 
 [lints]
 workspace = true

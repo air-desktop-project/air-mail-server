@@ -412,11 +412,42 @@ simplement toutes les signatures invalides — ou en valide qui ne devraient pas
 l'être. Une épreuve inventée ici passerait ses propres tests et échouerait contre
 le reste du monde.
 
-Ce qui n'est pas outillé : **le condensat et la signature elle-même**. Savoir ce
-qui est signé et savoir PAR QUI sont deux questions ; la seconde demande de la
-cryptographie et une clé publique qui vit dans le DNS. `ams-dmarc` reste vide, et
-tant qu'il l'est, DMARC ne conclut rien — c'est pourtant lui qui rapproche le
-verdict SPF de l'en-tête `From:` que lira l'humain.
+**La vérification est là depuis le 2026-08-29** : condensat du corps en flux,
+condensat des en-têtes signés, et signature `rsa-sha256` ou `ed25519-sha256`
+(RFC 8463). Le condensat du corps se compare AVANT la signature — c'est gratuit,
+là où une exponentiation modulaire ne l'est pas — et deux bornes encadrent les
+clés RSA : moins de 1024 bits se factorise (RFC 8301 §3.2), plus de 4096 bits est
+du calcul offert à qui le publie.
+
+### D'où viennent les vecteurs, et pourquoi pas d'ici
+
+Une épreuve écrite avec le code qu'elle éprouve passe toujours. Les deux ancrages
+de la vérification viennent donc d'ailleurs : **le `bh=` que la RFC 6376 annexe A
+publie**, recalculé sur son propre message sans qu'une ligne de ce projet y
+serve ; et **des signatures produites par OpenSSL**, sur un condensat fixe pour
+la cryptographie seule, et sur un bloc d'en-têtes canonicalisé par une
+implémentation Python écrite séparément pour la chaîne entière. Si notre
+canonicalisation dérivait d'un octet, cette dernière signature ne vérifierait
+plus.
+
+### La cryptographie n'a coûté aucun paquet de plus
+
+`rsa`, `sha2` et `ed25519-dalek` étaient DÉJÀ dans l'arbre, tirées par
+`rustls-rustcrypto` (C4). Les déclarer en direct a ajouté trois arêtes au
+`Cargo.lock` et zéro paquet — c'est vérifiable dans son diff. `rsa` est épinglée
+sur la version candidate qu'amont épingle : en prendre une autre mettrait deux
+implémentations de la même arithmétique dans le binaire, dont une seule serait
+revue le jour d'un avis de sécurité.
+
+`ams-dkim` alloue désormais — `rsa` ne peut pas faire autrement. C'est la
+deuxième crate de l'étage 2 dans ce cas, après `ams-config`, et la différence
+compte : ce qui est alloué ici vient d'un pair. Les deux bornes sur les clés sont
+ce qui empêche ce pair de choisir combien.
+
+Ce qui n'est pas outillé : **la signature à l'émission**, et le câblage dans la
+boucle. `ams-dmarc` reste vide, et tant qu'il l'est, DMARC ne conclut rien —
+c'est pourtant lui qui rapproche le verdict SPF de l'en-tête `From:` que lira
+l'humain.
 
 ### DNSSEC n'est pas validé, et c'est écrit partout
 

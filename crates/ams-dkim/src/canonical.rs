@@ -138,15 +138,36 @@ pub fn canonicalize_header(
     fin: Trailer,
     sortie: &mut impl FnMut(&[u8]),
 ) {
+    canonicalize_header_parts(canon, name, &[value], fin, sortie);
+}
+
+/// Canonicalise un champ dont la valeur est donnée **en morceaux**.
+///
+/// # Pourquoi des morceaux, alors qu'un champ tient en mémoire
+///
+/// Le `DKIM-Signature` entre dans son propre condensat **avec la valeur de son
+/// `b=` retirée** (§3.7). Ce retrait laisse un trou au milieu de la valeur, et
+/// la canonicalisation `relaxed` a une mémoire d'un octet à l'autre — un blanc
+/// en attente traverse la coupure. Recoller les deux bouts dans un tampon
+/// obligerait à allouer ; les donner tels quels ne coûte rien.
+pub fn canonicalize_header_parts(
+    canon: Canon,
+    name: &[u8],
+    parts: &[&[u8]],
+    fin: Trailer,
+    sortie: &mut impl FnMut(&[u8]),
+) {
     match canon {
         // §3.4.1 : rien ne change. Le champ est rendu tel qu'il figure dans le
         // message, deux-points et pliage compris.
         Canon::Simple => {
             sortie(name);
             sortie(b":");
-            sortie(value);
+            for morceau in parts {
+                sortie(morceau);
+            }
         }
-        Canon::Relaxed => relaxed_header(name, value, sortie),
+        Canon::Relaxed => relaxed_header(name, parts, sortie),
     }
     if fin == Trailer::Crlf {
         sortie(b"\r\n");
@@ -154,7 +175,7 @@ pub fn canonicalize_header(
 }
 
 /// §3.4.2, dans l'ordre où la RFC l'écrit.
-fn relaxed_header(name: &[u8], value: &[u8], sortie: &mut impl FnMut(&[u8])) {
+fn relaxed_header(name: &[u8], parts: &[&[u8]], sortie: &mut impl FnMut(&[u8])) {
     // 1. Le nom en minuscules, et 5. sans le blanc qui le sépare du
     //    deux-points — « B<SP>:<SP>Y » se canonicalise en « b:Y », et c'est le
     //    vecteur de la RFC qui le dit. `trim_ascii` porte ce retrait dans la
@@ -173,7 +194,7 @@ fn relaxed_header(name: &[u8], value: &[u8], sortie: &mut impl FnMut(&[u8])) {
     // de pliage est toujours suivi d'un blanc, et le tout compte pour un.
     let mut blanc_en_attente = false;
     let mut quelque_chose = false;
-    for octet in value {
+    for octet in parts.iter().copied().flatten() {
         if est_blanc_ou_pliage(*octet) {
             // On ne l'écrit pas tout de suite : s'il n'y a plus rien après, il
             // ne s'écrira jamais.

@@ -204,6 +204,40 @@ impl<'a> Signature<'a> {
     }
 }
 
+/// L'étendue de la VALEUR du `b=` dans la valeur brute du champ.
+///
+/// Rend `(début, fin)` : de l'octet qui suit le `=` jusqu'au `;` qui clôt
+/// l'étiquette, ou la fin de la valeur.
+///
+/// # Pourquoi jusqu'au point-virgule, blancs compris
+///
+/// Au moment où le signataire a calculé son condensat, `b=` était **vide** :
+/// rien entre le `=` et le `;`. C'est cette forme-là qu'il faut reconstituer, et
+/// y laisser un pliage ou une espace donnerait un condensat différent du sien.
+pub(crate) fn etendue_du_b(valeur: &[u8]) -> Option<(usize, usize)> {
+    // `unwrap_or_default` partout : `depart` ne dépasse jamais la longueur,
+    // `longueur` ne dépasse jamais le reste, et `rang` est un rang trouvé DANS
+    // le morceau. Trois tranches qui ne peuvent pas manquer, et trois gardes
+    // qu'aucun message ne pourrait emprunter.
+    let mut depart = 0_usize;
+    while depart <= valeur.len() {
+        let reste = valeur.get(depart..).unwrap_or_default();
+        let longueur = reste
+            .iter()
+            .position(|octet| *octet == b';')
+            .unwrap_or(reste.len());
+        let morceau = reste.get(..longueur).unwrap_or_default();
+        if let Some(rang) = morceau.iter().position(|octet| *octet == b'=')
+            && morceau.get(..rang).unwrap_or_default().trim_ascii() == b"b"
+        {
+            let debut = depart.saturating_add(rang).saturating_add(1);
+            return Some((debut, depart.saturating_add(longueur)));
+        }
+        depart = depart.saturating_add(longueur).saturating_add(1);
+    }
+    None
+}
+
 /// Pose une valeur, ou dit qu'elle l'était déjà.
 fn poser<T>(place: &mut Option<T>, valeur: T) -> Result<(), Error> {
     if place.is_some() {

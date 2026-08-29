@@ -240,6 +240,19 @@ message** — ce qu'un pair envoie de plus gros.
    `rsa-sha1` —, `from` couvert, `i=` sous `d=`, `x=` après `t=`.
 7. **Une clé acceptée n'est pas révoquée**, et deux lectures rendent la même
    chose.
+8. **Le base64 n'admet qu'une écriture par valeur** : ce qui se décode a une
+   longueur multiple de quatre, remplissage compris.
+9. **Retirer le `b=` ne touche à rien d'autre.** `bh=` commence par les mêmes
+   deux octets que `b=` suivi de `h` : un analyseur qui chercherait « b= » sans
+   regarder les limites d'étiquette effacerait le condensat du corps, et TOUTES
+   les signatures échoueraient sans qu'aucun message ne dise pourquoi.
+
+**Ce que cette cible ne fuzze pas, et pourquoi.** La vérification RSA elle-même :
+une exponentiation modulaire par exécution ferait tomber le débit de trois ordres
+de grandeur, et ce qu'on éprouverait alors serait l'arithmétique de `rsa` — une
+crate qui a ses propres épreuves, et que ce projet ne saurait pas mieux fuzzer
+que ses auteurs. Ce qui est à nous, ici, c'est ce qui ENTRE dans la
+cryptographie : la canonicalisation, le base64, et le retrait du `b=`.
 
 ### En-tête `Received-SPF` (cinq, dont L'INJECTION DE LIGNE)
 
@@ -577,6 +590,7 @@ L'entrée fautive est versionnée en graine de non-régression
 | 2026-08-29 | `fuzz_ams_dns` | 14 395 679 (181 s) | 0 |
 | 2026-08-29 | `fuzz_ams_spf_header` | 7 478 784 (181 s) | 0 |
 | 2026-08-29 | `fuzz_ams_dkim` | 3 255 821 (181 s) | **1, contrat corrigé** |
+| 2026-08-29 | `fuzz_ams_dkim` (avec la vérification) | 2 921 202 (181 s) | 0 |
 | 2026-08-29 | `fuzz_ams_config` (avec SPF) | 193 256 (61 s) | 0 |
 | 2026-08-29 | `fuzz_ams_session_smtp` (avec SPF) | 381 710 (61 s) | 0 |
 | 2026-08-28 | `fuzz_ams_session_smtp` (SASL) | 521 646 (91 s) | 0 |

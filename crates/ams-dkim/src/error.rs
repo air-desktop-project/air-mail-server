@@ -70,6 +70,28 @@ pub enum Error {
     NotForEmail,
     /// La sortie ne tient pas dans le tampon offert.
     BufferTooSmall,
+    /// Le condensat du corps ne correspond pas au `bh=`.
+    ///
+    /// Le corps a changé depuis la signature — ou n'a jamais été celui qui a été
+    /// signé. **C'est le contrôle qu'on fait EN PREMIER** : il coûte une
+    /// comparaison de trente-deux octets, là où la signature coûte une
+    /// exponentiation modulaire.
+    BodyHashMismatch,
+    /// La signature ne correspond pas.
+    SignatureMismatch,
+    /// La clé publique ne se décode pas.
+    MalformedKey,
+    /// La clé RSA fait moins de 1024 bits.
+    ///
+    /// RFC 8301 §3.2 l'interdit aux signataires, et l'accepter en vérification
+    /// reviendrait à valider ce qu'on sait falsifiable : une clé de 512 bits se
+    /// factorise pour le prix de quelques heures de calcul.
+    KeyTooSmall,
+    /// La clé RSA fait plus de 4096 bits.
+    ///
+    /// Elle ne protège personne de plus, et coûte à NOUS : c'est une zone
+    /// hostile qui la publierait, pour faire brûler du calcul à qui lui écrit.
+    KeyTooLarge,
 }
 
 impl fmt::Display for Error {
@@ -100,6 +122,11 @@ impl fmt::Display for Error {
             Self::UnsupportedKeyType => f.write_str("type de clé non géré"),
             Self::NotForEmail => f.write_str("cette clé ne sert pas le courrier (`s=`)"),
             Self::BufferTooSmall => f.write_str("le tampon offert ne suffit pas"),
+            Self::BodyHashMismatch => f.write_str("le corps ne correspond pas au `bh=`"),
+            Self::SignatureMismatch => f.write_str("la signature ne correspond pas"),
+            Self::MalformedKey => f.write_str("la clé publique ne se décode pas"),
+            Self::KeyTooSmall => f.write_str("clé RSA de moins de 1024 bits (RFC 8301 §3.2)"),
+            Self::KeyTooLarge => f.write_str("clé RSA de plus de 4096 bits"),
         }
     }
 }
@@ -142,6 +169,11 @@ mod tests {
             Error::UnsupportedKeyType,
             Error::NotForEmail,
             Error::BufferTooSmall,
+            Error::BodyHashMismatch,
+            Error::SignatureMismatch,
+            Error::MalformedKey,
+            Error::KeyTooSmall,
+            Error::KeyTooLarge,
         ] {
             let mut compteur = Compteur(0);
             core::fmt::write(&mut compteur, format_args!("{erreur}")).expect("formatable");

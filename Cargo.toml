@@ -162,6 +162,29 @@ ml-kem = { version = "=0.3.2", default-features = false, features = ["zeroize"] 
 # X25519 — l'autre moitié. Déjà tirée par `rustls-rustcrypto` ; déclarée en
 # direct parce que nous l'appelons nous-mêmes.
 x25519-dalek = { version = "2", default-features = false, features = ["static_secrets", "zeroize"] }
+# LA CRYPTOGRAPHIE DE DKIM (C9), et RIEN DE PLUS QUE CE QUI EST DÉJÀ LÀ.
+#
+# Ces trois crates étaient DÉJÀ dans l'arbre, tirées par `rustls-rustcrypto` :
+# les déclarer en direct n'ajoute aucune dépendance transitive, aucune ligne de C
+# (C4), et aucune surface d'approvisionnement nouvelle. C'est ce qui a fait
+# pencher la balance contre une bibliothèque DKIM toute faite.
+#
+# `default-features = false` partout : `rsa` et `sha2` tirent `std` par défaut,
+# et `ams-dkim` est `no_std`.
+#
+# `rsa` est une VERSION CANDIDATE (`0.10.0-rc.18`), et c'est celle que
+# `rustls-rustcrypto` épingle. En prendre une autre mettrait DEUX `rsa` dans le
+# binaire — deux implémentations de la même arithmétique, dont une seule serait
+# revue le jour d'un avis de sécurité. Le pin exact est donc la version d'amont,
+# et il devra être revu avec elle.
+rsa = { version = "=0.10.0-rc.18", default-features = false, features = ["encoding"] }
+# SHA-256, avec son OID : `Pkcs1v15Sign` en a besoin pour composer le préfixe
+# `DigestInfo` que la signature couvre.
+sha2 = { version = "=0.11.0", default-features = false, features = ["oid"] }
+# Ed25519 (RFC 8463). Sans `fast` : les tables précalculées pèsent dans le
+# binaire, et une vérification par message ne les rentabilise pas.
+ed25519-dalek = { version = "=3.0.0", default-features = false }
+
 # argon2 (magasin d'identifiants) — Argon2id, pur Rust, sans une ligne de C.
 # Mesuré : huit crates transitives, aucune `*-sys`, aucun `cc`.
 #

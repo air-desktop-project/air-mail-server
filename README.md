@@ -82,7 +82,7 @@ des octets **et des actions**. Elles n'attendent jamais.
 | `ams-guard` | flooding et bannissement par source | **implémenté** |
 | `ams-auth` | le magasin d'identifiants, vérification Argon2id | **implémenté** |
 | `ams-tls` | TLS 1.3 uniquement, échange de clés post-quantique | **implémenté** |
-| `ams-dkim` | RFC 6376 | **grammaire et canonicalisation** |
+| `ams-dkim` | RFC 6376 | **signatures vérifiées** |
 | `ams-spf` | RFC 7208 | **évalué, câblé, et écrit dans le message** |
 | `ams-dmarc` | RFC 7489 | vide |
 | `ams-config` | les trois formats binaires : configuration, comptes, index | **implémenté** |
@@ -186,10 +186,32 @@ pas `from` est refusée** : elle ne dit rien de l'auteur, et c'est pourtant lui
 que l'humain lira. **Un `p=` vide est une révocation**, pas un enregistrement
 illisible — le détenteur du domaine dit que cette clé ne doit plus rien signer.
 
-Ce qui reste : **le condensat et la signature elle-même**. Savoir ce qui est
-signé et savoir par qui sont deux questions ; la seconde demande SHA-256, RSA et
-Ed25519, et une clé publique qui vit dans le DNS — elle viendra avec sa
-résolution rendue sous forme d'action, comme `ams-spf` le fait de ses questions.
+**Une signature se vérifie maintenant de bout en bout** : le condensat du corps
+(SHA-256 sur le corps canonicalisé, en flux), celui des en-têtes signés, et la
+signature elle-même — `rsa-sha256` (RFC 6376) ou `ed25519-sha256` (RFC 8463).
+
+L'ordre des opérations n'est pas indifférent : **le condensat du corps se compare
+AVANT la signature**. C'est gratuit — trente-deux octets — là où vérifier une
+signature RSA coûte une exponentiation modulaire. Un message dont le corps a
+changé est ainsi rejeté sans qu'on ait payé la cryptographie, et un pair qui
+envoie mille messages falsifiés ne fait pas travailler la machine pour autant.
+
+Deux bornes sur les clés RSA, et aucune n'est décorative. **Moins de 1024 bits :
+refusé** — une telle clé se factorise, la RFC 8301 §3.2 l'interdit aux
+signataires, et l'accepter en vérification reviendrait à valider ce qu'on sait
+falsifiable. **Plus de 4096 bits : refusé aussi** — elle ne protège personne de
+plus, et coûte à *nous* : c'est une zone hostile qui la publierait, pour faire
+brûler du calcul à qui lui écrit.
+
+La cryptographie vient de `rsa`, `sha2` et `ed25519-dalek` — **trois crates déjà
+présentes dans l'arbre**, tirées par `rustls-rustcrypto`. Les déclarer en direct
+n'a ajouté aucun paquet au `Cargo.lock` : trois arêtes, et rien d'autre. C'est
+pur Rust (C4), et c'est ce qui a fait pencher la balance contre une bibliothèque
+DKIM toute faite.
+
+Ce qui reste : **la signature à l'émission**, et le câblage dans la boucle — avec
+la résolution de `<sélecteur>._domainkey.<domaine>` rendue sous forme d'action,
+comme `ams-spf` le fait de ses questions.
 
 `ams-dns` : le codec d'un message DNS — une question encodée, une réponse
 décodée. **Un client stub, et rien de plus** : ce serveur pose des questions, il

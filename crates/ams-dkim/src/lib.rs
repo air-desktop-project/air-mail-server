@@ -53,10 +53,16 @@ mod error;
 mod key;
 mod signature;
 mod tag;
+mod verify;
 
 pub use body::BodyCanon;
-pub use canonical::{Canon, Canonicalization, Trailer, canonicalize_header};
+pub use canonical::{
+    Canon, Canonicalization, Trailer, canonicalize_header, canonicalize_header_parts,
+};
 pub use error::Error;
 pub use key::{KeyType, PublicKeyRecord};
 pub use signature::{Algorithm, Signature, SignedHeaders};
 pub use tag::{Tag, Tags};
+pub use verify::{
+    BodyHasher, DIGEST_LEN, HeaderHasher, decoder_base64, verifier_la_signature, verify,
+};

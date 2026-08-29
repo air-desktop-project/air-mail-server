@@ -23,6 +23,20 @@
 //! 6. **Une signature acceptée est cohérente** : `v=1`, un algorithme admis,
 //!    `from` couvert, `i=` sous `d=`, `x=` après `t=`.
 //! 7. **Une clé acceptée n'est pas révoquée.**
+//! 8. **Le base64 n'admet qu'une écriture par valeur** : ce qui se décode a une
+//!    longueur multiple de quatre, remplissage compris.
+//! 9. **Retirer le `b=` ne touche à rien d'autre** : ce qui reste se relit, et
+//!    porte les mêmes étiquettes — `bh=` compris, qui commence par les mêmes
+//!    octets.
+//!
+//! # Ce que cette cible NE fuzze PAS, et pourquoi
+//!
+//! **La vérification RSA elle-même.** Une exponentiation modulaire par exécution
+//! ferait tomber le débit de trois ordres de grandeur, et ce qu'on éprouverait
+//! alors serait l'arithmétique de `rsa` — une crate qui a ses propres épreuves,
+//! et que ce projet ne saurait pas mieux fuzzer que ses auteurs. Ce qui est à
+//! nous, ici, c'est ce qui ENTRE dans la cryptographie : la canonicalisation, le
+//! base64, et le retrait du `b=`.
 
 #![no_main]
 
@@ -30,7 +44,8 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use ams_dkim::{
-    Algorithm, BodyCanon, Canon, PublicKeyRecord, Signature, Trailer, canonicalize_header,
+    Algorithm, BodyCanon, Canon, HeaderHasher, PublicKeyRecord, Signature, Trailer,
+    canonicalize_header, decoder_base64,
 };
 
 #[derive(Debug, Arbitrary)]
@@ -200,6 +215,38 @@ fuzz_target!(|entree: Entree| {
                 "un blanc a survécu au dépliage"
             );
         }
+
+        // ── 9 : retirer le `b=` ne touche à rien d'autre ────────────────────
+        //
+        // `bh=` commence par les mêmes deux octets que `b=` suivi de `h`. Un
+        // analyseur qui chercherait « b= » sans regarder les limites
+        // d'étiquette effacerait le condensat du corps — et TOUTES les
+        // signatures échoueraient, sans qu'aucun message ne dise pourquoi.
+        let mut condensat = HeaderHasher::new(canon);
+        condensat
+            .signature_field(b"DKIM-Signature", entree.signature)
+            .expect("la signature porte un `b=`");
+        // Deux calculs sur la même entrée rendent le même condensat.
+        let mut encore = HeaderHasher::new(canon);
+        encore
+            .signature_field(b"DKIM-Signature", entree.signature)
+            .expect("la signature porte un `b=`");
+        assert_eq!(condensat.finish(), encore.finish());
+    }
+
+    // ── 8 : le base64 n'admet qu'une écriture par valeur ────────────────────
+    let mut decode = vec![0_u8; entree.signature.len()];
+    if decoder_base64(entree.signature, &mut decode).is_ok() {
+        let sans_blancs = entree
+            .signature
+            .iter()
+            .filter(|octet| !octet.is_ascii_whitespace())
+            .count();
+        assert_eq!(
+            sans_blancs % 4,
+            0,
+            "un base64 accepté n'a pas une longueur multiple de quatre"
+        );
     }
 
     // ── 7 : une clé acceptée n'est pas révoquée ─────────────────────────────
