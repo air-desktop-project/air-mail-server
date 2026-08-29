@@ -91,14 +91,17 @@ impl Mailbox for Boite {
         let mut texte = std::vec::Vec::from(&b"(NIL NIL ((NIL NIL \"m"[..]);
         texte.extend_from_slice(std::format!("{}", info.uid).as_bytes());
         texte.extend_from_slice(b"\" \"x.test\")) NIL NIL NIL NIL NIL NIL NIL)");
-        let reste = texte
-            .get(usize::try_from(offset).unwrap_or(usize::MAX)..)
-            .unwrap_or_default();
-        let combien = reste.len().min(out.len());
-        for (place, octet) in out.iter_mut().zip(reste.get(..combien).unwrap_or_default()) {
-            *place = *octet;
-        }
-        combien
+        ecouler_le_texte(&texte, offset, out)
+    }
+
+    fn body_structure(&self, sequence: u32, offset: u64, out: &mut [u8]) -> usize {
+        let Some(info) = self.info(sequence) else {
+            return 0;
+        };
+        let mut texte = std::vec::Vec::from(&b"(\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" "[..]);
+        texte.extend_from_slice(std::format!("{}", info.size).as_bytes());
+        texte.extend_from_slice(b" 1 NIL NIL NIL NIL)");
+        ecouler_le_texte(&texte, offset, out)
     }
 
     fn read(&self, sequence: u32, offset: u64, out: &mut [u8]) -> usize {
@@ -1041,6 +1044,7 @@ fn la_session_lit_par_la_boite_ouverte() {
     // Sans boîte ouverte, il n'y a rien à lire.
     assert_eq!(session.read_selected(1, 0, &mut tampon), 0);
     assert_eq!(session.read_envelope(1, 0, &mut tampon), 0);
+    assert_eq!(session.read_body_structure(1, 0, &mut tampon), 0);
 
     dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
     dire(&mut session, b"a002 SELECT INBOX\r\n");
@@ -1049,9 +1053,11 @@ fn la_session_lit_par_la_boite_ouverte() {
     assert_eq!(&tampon, b"11111111");
     // Un rang qui n'existe pas ne rend rien.
     assert_eq!(session.read_selected(99, 0, &mut tampon), 0);
-    // L'enveloppe se lit par le même chemin.
+    // Les deux analyses se lisent par le même chemin.
     assert!(session.read_envelope(1, 0, &mut tampon) > 0);
     assert_eq!(session.read_envelope(99, 0, &mut tampon), 0);
+    assert!(session.read_body_structure(1, 0, &mut tampon) > 0);
+    assert_eq!(session.read_body_structure(99, 0, &mut tampon), 0);
 }
 
 #[test]
@@ -1695,10 +1701,22 @@ fn deux_corps_dans_un_fetch_se_refusent_en_le_disant() {
     );
 }
 
+/// Écoule un texte déjà composé, comme une vraie boîte le ferait.
+fn ecouler_le_texte(texte: &[u8], offset: u64, out: &mut [u8]) -> usize {
+    let reste = texte
+        .get(usize::try_from(offset).unwrap_or(usize::MAX)..)
+        .unwrap_or_default();
+    let combien = reste.len().min(out.len());
+    for (place, octet) in out.iter_mut().zip(reste.get(..combien).unwrap_or_default()) {
+        *place = *octet;
+    }
+    combien
+}
+
 #[test]
 fn un_element_reconnu_mais_non_servi_se_dit_sans_accuser_le_client() {
     let mut session = selectionnee();
-    let (texte, _) = dire(&mut session, b"a003 FETCH 1 BODYSTRUCTURE\r\n");
+    let (texte, _) = dire(&mut session, b"a003 FETCH 1 RFC822\r\n");
     assert!(
         texte.contains("NO [CANNOT] This FETCH item is not served yet"),
         "{texte}"
@@ -1787,6 +1805,78 @@ fn ce_qui_suit_un_element_ecoule_vient_apres_lui() {
         corps,
         "* 1 FETCH (BODY[] {100}\r\n<1:0+100> UID 10)\r\na004 OK FETCH completed\r\n"
     );
+}
+
+// ── `BODYSTRUCTURE` ─────────────────────────────────────────────────────────
+
+/// **La structure s'écoule par le même chemin que l'enveloppe.** Elle se compose
+/// hors de la session, et la session ne fait que la faire passer.
+#[test]
+fn la_structure_s_ecoule_dans_la_reponse() {
+    let mut session = selectionnee();
+    let fil = ecouler(&mut session, b"a003 FETCH 1 BODYSTRUCTURE\r\n");
+    assert_eq!(
+        fil,
+        "* 1 FETCH (BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 100 1 \
+         NIL NIL NIL NIL))\r\na003 OK FETCH completed\r\n"
+    );
+}
+
+/// Les deux analyses d'un même message se suivent, chacune entière, et ce qui
+/// vient après vient bien après.
+#[test]
+fn deux_analyses_du_meme_message_se_suivent() {
+    let mut session = selectionnee();
+    let fil = ecouler(
+        &mut session,
+        b"a003 FETCH 1 (ENVELOPE BODYSTRUCTURE UID)\r\n",
+    );
+    assert_eq!(
+        fil,
+        "* 1 FETCH (ENVELOPE (NIL NIL ((NIL NIL \"m10\" \"x.test\")) \
+         NIL NIL NIL NIL NIL NIL NIL) \
+         BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 100 1 NIL NIL NIL NIL) \
+         UID 10)\r\na003 OK FETCH completed\r\n"
+    );
+}
+
+/// La structure se découpe sans changer de résultat.
+#[test]
+fn la_structure_se_decoupe_sans_changer_de_resultat() {
+    let mut reference = selectionnee();
+    let attendu = ecouler(&mut reference, b"a003 FETCH 1 BODYSTRUCTURE\r\n");
+    for taille in 1..=48_usize {
+        let mut session = selectionnee();
+        let mut grand = [0_u8; 512];
+        session
+            .handle(b"a003 FETCH 1 BODYSTRUCTURE\r\n", &mut grand)
+            .expect("traitable");
+        let mut fil = std::string::String::new();
+        let mut petit = std::vec![0_u8; taille];
+        let mut refuse = false;
+        loop {
+            match session.next_fetch(&mut petit) {
+                Ok(None) => break,
+                Ok(Some(super::FetchChunk::Bytes(octets))) => {
+                    fil.push_str(&std::string::String::from_utf8_lossy(octets));
+                }
+                Ok(Some(super::FetchChunk::Message { .. })) => {
+                    unreachable!("une structure n'est pas un corps")
+                }
+                Err(erreur) => {
+                    assert!(
+                        matches!(erreur, super::Error::Reply(_)),
+                        "taille {taille} : {erreur:?}"
+                    );
+                    refuse = true;
+                    break;
+                }
+            }
+        }
+        if !refuse {
+            assert_eq!(fil, attendu, "taille {taille}");
+        }
+    }
 }
 
 #[test]

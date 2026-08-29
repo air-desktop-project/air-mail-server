@@ -8,11 +8,12 @@
 //! entiers demande** : les drapeaux, l'UID, la taille, la date d'arrivée, et le
 //! message ou l'une de ses deux moitiés.
 //!
-//! `ENVELOPE` s'y ajoute — ce que demande un client qui n'affiche qu'une liste
-//! d'en-têtes. `BODYSTRUCTURE`, lui, ne se lit pas encore : il est **reconnu et
-//! refusé**, ce qui n'est pas la même chose qu'une erreur de syntaxe : le client
-//! sait alors qu'il doit demander autrement, au lieu de chercher la faute dans
-//! ce qu'il a écrit.
+//! `ENVELOPE` et `BODYSTRUCTURE` s'y ajoutent — ce que demande un client qui
+//! n'affiche qu'une liste de messages et leurs pièces jointes.
+//!
+//! Ce qui reste **reconnu et refusé** — `RFC822`, `BINARY`, et les sections de
+//! partie — n'est pas une erreur de syntaxe : le client sait alors qu'il doit
+//! demander autrement, au lieu de chercher la faute dans ce qu'il a écrit.
 //!
 //! # LA DEMANDE PARTIELLE EST UNE SURFACE
 //!
@@ -61,6 +62,8 @@ pub enum FetchItem {
     InternalDate,
     /// `ENVELOPE` : ce que l'en-tête dit du message (§7.5.2).
     Envelope,
+    /// `BODYSTRUCTURE` : la structure MIME du message (§7.5.2).
+    BodyStructure,
     /// `RFC822.SIZE` — la taille, en octets.
     Rfc822Size,
     /// `BODY[…]` ou `BODY.PEEK[…]`.
@@ -194,10 +197,12 @@ fn lire_un(mot: &[u8]) -> Result<FetchItem, Error> {
     if mot.eq_ignore_ascii_case(b"ENVELOPE") {
         return Ok(FetchItem::Envelope);
     }
+    if mot.eq_ignore_ascii_case(b"BODYSTRUCTURE") {
+        return Ok(FetchItem::BodyStructure);
+    }
     // Reconnus, et refusés : le client sait alors qu'il doit demander
     // autrement, au lieu de chercher la faute dans ce qu'il a écrit.
-    if mot.eq_ignore_ascii_case(b"BODYSTRUCTURE")
-        || mot.eq_ignore_ascii_case(b"BODY")
+    if mot.eq_ignore_ascii_case(b"BODY")
         || mot.eq_ignore_ascii_case(b"RFC822")
         || mot.eq_ignore_ascii_case(b"RFC822.HEADER")
         || mot.eq_ignore_ascii_case(b"RFC822.TEXT")

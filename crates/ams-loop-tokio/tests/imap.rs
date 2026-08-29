@@ -94,6 +94,27 @@ impl Mailbox for Boite {
         voulu
     }
 
+    fn body_structure(&self, sequence: u32, offset: u64, out: &mut [u8]) -> usize {
+        let Some(corps) = MESSAGES.get(usize::try_from(sequence).unwrap_or(0).saturating_sub(1))
+        else {
+            return 0;
+        };
+        let mut compose = std::vec![0_u8; 4096];
+        let Ok(ecrits) =
+            ams_mime::write_body_structure(corps, &mut compose, &ams_mime::Limits::DEFAULT)
+        else {
+            return 0;
+        };
+        let reste = compose
+            .get(usize::try_from(offset).unwrap_or(usize::MAX)..ecrits)
+            .unwrap_or_default();
+        let voulu = reste.len().min(out.len());
+        for (place, octet) in out.iter_mut().zip(reste.get(..voulu).unwrap_or_default()) {
+            *place = *octet;
+        }
+        voulu
+    }
+
     fn read(&self, sequence: u32, offset: u64, out: &mut [u8]) -> usize {
         let Some(corps) = MESSAGES.get(usize::try_from(sequence).unwrap_or(0).saturating_sub(1))
         else {
@@ -1049,5 +1070,34 @@ async fn une_enveloppe_traverse_la_socket() {
          ((NIL NIL \"a\" \"x.test\")) ((NIL NIL \"a\" \"x.test\")) NIL NIL NIL NIL NIL) \
          UID 1)\r\na004 OK FETCH completed\r\n",
         "{enveloppe}"
+    );
+}
+
+/// **La structure traverse la socket**, composée par `ams-mime` et écoulée par
+/// la boucle comme n'importe quelle réponse.
+#[tokio::test]
+async fn une_structure_traverse_la_socket() {
+    let Some(materiel) = materiel("imap-structure") else {
+        return;
+    };
+    let mut lecteur = authentifiee(&materiel).await;
+    lecteur
+        .get_mut()
+        .write_all(b"a003 SELECT INBOX\r\n")
+        .await
+        .expect("écriture");
+    jusqu_a(&mut lecteur, "a003 ").await;
+
+    lecteur
+        .get_mut()
+        .write_all(b"a004 FETCH 1 (BODYSTRUCTURE UID)\r\n")
+        .await
+        .expect("écriture");
+    let structure = jusqu_a(&mut lecteur, "a004 ").await;
+    assert_eq!(
+        structure,
+        "* 1 FETCH (BODYSTRUCTURE (\"TEXT\" \"PLAIN\" (\"CHARSET\" \"us-ascii\") \
+         NIL NIL \"7BIT\" 16 1 NIL NIL NIL NIL) UID 1)\r\na004 OK FETCH completed\r\n",
+        "{structure}"
     );
 }

@@ -107,6 +107,13 @@ impl Mailbox for Boite {
         0
     }
 
+    fn body_structure(&self, sequence: u32, _offset: u64, _out: &mut [u8]) -> usize {
+        // Même raison que pour l'enveloppe : la boîte d'épreuve n'a pas de
+        // message, donc pas de structure. Ce qu'on éprouve ici est la session.
+        let _ = sequence;
+        0
+    }
+
     fn read(&self, sequence: u32, offset: u64, out: &mut [u8]) -> usize {
         let Some(info) = self.info(sequence) else {
             return 0;

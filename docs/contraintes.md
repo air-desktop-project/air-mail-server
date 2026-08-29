@@ -865,7 +865,7 @@ ne s'écrit — ni `STORE`, ni `APPEND`, ni `EXPUNGE` — `SELECT` répond
 modifiabilité qu'elle ne peut pas connaître ferait une promesse que le client ne
 verrait démentie qu'en essayant.
 
-Ce qui n'est toujours pas servi : `BODYSTRUCTURE`.
+Ce qui n'est toujours pas servi : une PARTIE désignée — `BODY[1]`, `BODY[1.MIME]`.
 
 Éprouvé jusqu'au binaire, contre un vrai Maildir rempli par SMTP : `LIST`,
 `SELECT INBOX` et ses sept réponses, `STATUS` sur la boîte sélectionnée,
@@ -1325,6 +1325,66 @@ réponse au milieu d'un élément.
 le sujet reste encodé, `"Dupont, Jean"` survit, `Sender` reprend `From`, le groupe
 s'ouvre et se referme, le commentaire tombe, et `In-Reply-To` est `NIL` quand
 `Message-Id` est rendu verbatim.
+
+## `BODYSTRUCTURE` : l'arbre du message, depuis le 2026-08-30
+
+Un client qui affiche une liste de pièces jointes ne veut pas les pièces
+jointes : il veut leur nom, leur type et leur taille, pour chaque partie et pour
+chaque partie emboîtée. C'est ce que `BODYSTRUCTURE` (§7.5.2) lui donne.
+
+**LE MESSAGE NE SÉJOURNE PAS, LA DESCRIPTION SEULE RESTE** (C1, C3). Une
+enveloppe se lit dans l'en-tête ; une structure se lit dans TOUT le message,
+parce que ce sont les frontières de la RFC 2046 qui la dessinent et qu'elles sont
+semées d'un bout à l'autre. Retenir le message pour les trouver reviendrait à
+réserver ce que l'expéditeur a choisi d'écrire — exactement ce que C3 interdit.
+Le balayeur se fait donc POUSSER les octets, par morceaux, et ne retient qu'un
+état borné : au plus soixante-quatre parties, huit niveaux d'emboîtement, une
+arène d'en-têtes de seize kibioctets et une fenêtre de lecture de soixante-quatre.
+Un message d'un gibioctet et un message de mille octets coûtent la même mémoire.
+
+**LE DÉCOUPAGE NE CHANGE PAS LE RÉSULTAT**, et c'est la propriété que
+`fuzz_ams_mime_structure` éprouve. Les morceaux ont la taille du tampon de celui
+qui lit — une taille que le message ne choisit pas, et que rien ne garantit
+stable. Une frontière tombant à cheval sur deux morceaux ne doit pas se voir.
+C'est la même propriété que pour la phase de données de SMTP, et pour la même
+raison : deux lecteurs qui découpent différemment doivent conclure pareil, faute
+de quoi ce qu'un client voit dépend de la mémoire du serveur. 540 822 exécutions,
+sans panne.
+
+**RIEN DE CE QUI DÉBORDE NE FAIT ÉCHOUER.** Une structure absente couperait la
+réponse au milieu d'un élément, ce qui est pire qu'une structure incomplète : au
+delà des bornes, on décrit ce qu'on a pu voir, dans une forme que la grammaire
+admet toujours. Un `multipart` qu'on n'a pas su ouvrir — sans frontière, ou sans
+place pour l'emboîter — est décrit en `application/octet-stream`, ce que MIME
+prescrit pour une entité qu'on ne sait pas interpréter (RFC 2049 §2) et ce qu'un
+client ne lira pas de travers : un type `MULTIPART` suivi d'une taille n'existe
+pas dans la grammaire de §7.5.2. Un `multipart` sans fille reçoit un corps vide,
+que §7.5.2 exige (`1*body`).
+
+Trois détails que l'on manque, et que l'écriture a coûtés :
+
+- **Le `CRLF` qui précède une frontière lui appartient** (RFC 2046 §5.1.1) : il
+  quitte donc la TAILLE du corps. Mais il ne quitte pas son nombre de LIGNES —
+  ce qu'il terminait reste une ligne, simplement une ligne sans fin. Retrancher
+  les deux faisait disparaître la dernière ligne de chaque partie.
+- **Une ligne d'en-tête n'est pas dans le corps qu'elle ouvre**, mais elle est
+  dans celui de tout ce qui la contient. C'est ce qui fait qu'un `message/rfc822`
+  compte les lignes du message entier, en-tête compris, comme §7.5.2 le veut.
+- **Les parties ouvertes sont exactement ce qui contient la ligne** : une fille
+  est créée après ce qui la porte, donc son rang est plus grand. L'ordre de la
+  table dit l'emboîtement, et il n'y a aucune chaîne de parents à remonter sans
+  se tromper.
+
+Éprouvé jusqu'au binaire, sur un message déposé par `APPEND` portant un
+`multipart/mixed` de trois parties dont un `multipart/alternative` de deux, une
+pièce jointe en base64 avec son `Content-Id` et un nom de fichier à apostrophe,
+et un `message/rfc822` : les tailles, les lignes, les paramètres, la disposition,
+l'enveloppe du message porté et sa structure sont toutes rendues, et exactes.
+
+Ce qui n'est toujours pas servi : une PARTIE désignée — `BODY[1]`,
+`BODY[1.MIME]`. Le serveur sait DIRE la structure d'un message, il ne sait pas
+encore en rendre un morceau choisi, et un client qui veut une pièce jointe
+télécharge le message entier.
 
 ## Le gate de couverture arrondissait vers le haut, depuis le 2026-08-29
 
@@ -1922,7 +1982,7 @@ en-tête le dit.
 Sont outillées : C1 (les trois étages, et la couverture qui n'est exigible que
 parce qu'ils sont séparés), C2 (le gate mesure 23 578 régions sur 16 crates,
 toutes couvertes — et il compare désormais des comptes, non un pourcentage
-arrondi), C3 (les lints, l'absence d'allocation dans les décodeurs, et 27 cibles
+arrondi), C3 (les lints, l'absence d'allocation dans les décodeurs, et 28 cibles
 de fuzz dont la CI vérifie qu'elle les lance toutes), C4 (`ams-tls` n'offre que
 TLS 1.3), C6 (les décodeurs refusent le CR et le LF isolés ; `AUTH`, `USER`/`PASS`
 et `LOGIN` sont refusés hors chiffrement, sans réglage pour le rétablir), C8
@@ -1937,6 +1997,6 @@ persistant, et lecture sans verrou côté IMAP), C14 (`X25519MLKEM768` en tête)
 découpage des lectures ne change rien au verdict.
 
 Ce qui manque, et qu'aucune phrase ne doit laisser croire acquis : les critères
-de `SEARCH` qui lisent le message et `BODYSTRUCTURE` ; le signeur DKIM,
+de `SEARCH` qui lisent le message et les sections de partie ; le signeur DKIM,
 qui existe et n'a pas d'appelant ; la file de réémission des messages sortants ;
 et toute interface HTTP.

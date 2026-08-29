@@ -157,6 +157,23 @@ fn le_seul_raccourci_servi_est_fast() {
 /// **Reconnus, et refusés.** Ce n'est pas une erreur de syntaxe : le client sait
 /// alors qu'il doit demander autrement, au lieu de chercher la faute dans ce
 /// qu'il a écrit.
+/// `BODYSTRUCTURE` se lit désormais comme les autres.
+#[test]
+fn la_structure_se_lit() {
+    assert_eq!(
+        elements(b"1 BODYSTRUCTURE"),
+        std::vec![FetchItem::BodyStructure]
+    );
+    assert_eq!(
+        elements(b"1 (UID BODYSTRUCTURE ENVELOPE)"),
+        std::vec![
+            FetchItem::Uid,
+            FetchItem::BodyStructure,
+            FetchItem::Envelope
+        ]
+    );
+}
+
 /// `ENVELOPE` se lit désormais comme les autres.
 #[test]
 fn l_enveloppe_se_lit() {
@@ -170,8 +187,7 @@ fn l_enveloppe_se_lit() {
 #[test]
 fn ce_qui_est_reconnu_sans_etre_servi_se_dit_comme_tel() {
     for mot in [
-        &b"1 BODYSTRUCTURE"[..],
-        b"1 BODY",
+        &b"1 BODY"[..],
         b"1 RFC822",
         b"1 RFC822.HEADER",
         b"1 RFC822.TEXT",
@@ -180,7 +196,6 @@ fn ce_qui_est_reconnu_sans_etre_servi_se_dit_comme_tel() {
         b"1 BODY[1]",
         b"1 BODY[1.MIME]",
         b"1 BODY[HEADER.FIELDS",
-        b"1 (UID BODYSTRUCTURE)",
     ] {
         assert_eq!(
             Fetch::parse(mot, &BORNES),

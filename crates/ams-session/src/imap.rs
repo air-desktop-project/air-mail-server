@@ -55,12 +55,15 @@
 //!
 //! # Ce qui n'est pas ici
 //!
-//! `APPEND`, `CREATE`, `DELETE`, `RENAME` — et les critères de
-//! `SEARCH` qui demandent de LIRE le message (`BODY`, `TEXT`, `SUBJECT`,
-//! `FROM`, `HEADER`…), qui sont refusés plutôt que rendus faux.
+//! Les critères de `SEARCH` qui demandent de LIRE le message (`BODY`, `TEXT`,
+//! `SUBJECT`, `FROM`, `HEADER`…) : ils sont refusés plutôt que rendus faux.
 //!
-//! `ENVELOPE` et `BODYSTRUCTURE` non plus : ce sont des analyses du message, que
-//! `ams-mime` saura faire et qui n'ont rien à voir avec une session.
+//! Les sections de partie non plus — `BODY[1]`, `BODY[1.MIME]` : la session sait
+//! DIRE la structure d'un message, elle ne sait pas encore en servir un morceau
+//! désigné.
+//!
+//! L'analyse d'un message n'est pas ici et n'y sera pas : `ENVELOPE` et
+//! `BODYSTRUCTURE` se composent dans `ams-mime`, et la boîte les écoule.
 
 use ams_proto_imap::{
     Args, Candidate, Command, Error as ImapError, Fetch, FetchItem, Flags, Limits, Line, Search,
@@ -229,6 +232,18 @@ pub trait Mailbox {
     /// message a le droit d'avoir. Elle passe donc par le même chemin qu'un
     /// corps : par morceaux, sans jamais séjourner dans la session.
     fn envelope(&self, sequence: u32, offset: u64, out: &mut [u8]) -> usize;
+
+    /// Écrit dans `out` un morceau de la `BODYSTRUCTURE` du message de rang
+    /// `sequence`, à partir de `offset`. Rend combien ; zéro signifie « fini ».
+    ///
+    /// # ELLE COÛTE PLUS CHER QUE L'ENVELOPPE, ET IL FAUT LE SAVOIR
+    ///
+    /// Une enveloppe se lit dans l'en-tête ; une structure se lit dans TOUT le
+    /// message, parce que ce sont les frontières de la RFC 2046 qui la
+    /// dessinent et qu'elles sont semées d'un bout à l'autre. Ce qu'on en RETIENT
+    /// reste borné — la description, jamais le message — mais ce qu'on en LIT ne
+    /// l'est pas.
+    fn body_structure(&self, sequence: u32, offset: u64, out: &mut [u8]) -> usize;
 
     /// Lit au plus `out.len()` octets du message de rang `sequence`, à partir
     /// de `offset`. Rend combien ont été lus ; zéro signifie « plus rien ».
@@ -726,6 +741,20 @@ impl Genre {
     }
 }
 
+/// Ce qu'une analyse de message rend.
+///
+/// Les deux s'écoulent par le même chemin : elles se composent hors de la
+/// session, dans le tampon de l'appelant, et par morceaux. Un chemin par analyse
+/// ferait deux fois le même code, et l'une des deux finirait par ne plus
+/// conclure comme l'autre.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Analyse {
+    /// `ENVELOPE` (§7.5.2).
+    Enveloppe,
+    /// `BODYSTRUCTURE` (§7.5.2).
+    Structure,
+}
+
 /// Ce que l'émission d'un `FETCH` reste à faire.
 ///
 /// **L'intervalle voyage dans l'étape**, et non à côté d'elle : une étape
@@ -743,8 +772,12 @@ enum Etape {
     },
     /// Reprendre l'écriture des éléments du message `rang`.
     Suite { rang: u32 },
-    /// Écouler l'enveloppe du message `sequence`, à partir de `offset`.
-    Enveloppe { sequence: u32, offset: u64 },
+    /// Écouler une analyse du message `sequence`, à partir de `offset`.
+    Analyse {
+        quoi: Analyse,
+        sequence: u32,
+        offset: u64,
+    },
     /// Écrire la conclusion étiquetée, et finir.
     ///
     /// # LA CONCLUSION EST LE DERNIER MORCEAU, ET C'EST VOULU
@@ -982,6 +1015,16 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
     pub fn read_envelope(&self, sequence: u32, offset: u64, out: &mut [u8]) -> usize {
         match &self.ouverte {
             Some(boite) => boite.envelope(sequence, offset, out),
+            None => 0,
+        }
+    }
+
+    /// Écrit un morceau de structure, pour le compte de l'appelant.
+    ///
+    /// Rend zéro si aucune boîte n'est ouverte, ou si la structure est finie.
+    pub fn read_body_structure(&self, sequence: u32, offset: u64, out: &mut [u8]) -> usize {
+        match &self.ouverte {
+            Some(boite) => boite.body_structure(sequence, offset, out),
             None => 0,
         }
     }
@@ -3056,16 +3099,24 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
                 self.emission = Some(emission);
                 return self.ecrire_les_items(rang, info, entete, out);
             }
-            Etape::Enveloppe { sequence, offset } => {
-                let ecrits = boite.envelope(sequence, offset, out);
+            Etape::Analyse {
+                quoi,
+                sequence,
+                offset,
+            } => {
+                let ecrits = match quoi {
+                    Analyse::Enveloppe => boite.envelope(sequence, offset, out),
+                    Analyse::Structure => boite.body_structure(sequence, offset, out),
+                };
                 if ecrits == 0 {
-                    // L'enveloppe est finie : la suite de la réponse reprend là
-                    // où elle s'était arrêtée.
+                    // L'analyse est finie : la suite de la réponse reprend là où
+                    // elle s'était arrêtée.
                     emission.etape = Etape::Suite { rang: sequence };
                     self.emission = Some(emission);
                     return self.next_fetch(out);
                 }
-                emission.etape = Etape::Enveloppe {
+                emission.etape = Etape::Analyse {
+                    quoi,
                     sequence,
                     offset: offset.saturating_add(ecrits as u64),
                 };
@@ -3313,7 +3364,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         }
         let mut premier = emission.items_faits == 0;
         let mut corps = None;
-        let mut enveloppe = false;
+        let mut analyse = None;
         for item in items.iter().skip(emission.items_faits) {
             if !premier {
                 plume.pousser(b" ")?;
@@ -3365,22 +3416,28 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
                 }
                 FetchItem::Envelope => {
                     plume.pousser(b"ENVELOPE ")?;
-                    enveloppe = true;
+                    analyse = Some(Analyse::Enveloppe);
+                    break;
+                }
+                FetchItem::BodyStructure => {
+                    plume.pousser(b"BODYSTRUCTURE ")?;
+                    analyse = Some(Analyse::Structure);
                     break;
                 }
             }
         }
-        emission.etape = match (corps, enveloppe) {
+        emission.etape = match (corps, analyse) {
             (Some((sequence, offset, length)), _) => Etape::Corps {
                 sequence,
                 offset,
                 length,
             },
-            (None, true) => Etape::Enveloppe {
+            (None, Some(quoi)) => Etape::Analyse {
+                quoi,
                 sequence: rang,
                 offset: 0,
             },
-            (None, false) => {
+            (None, None) => {
                 plume.pousser(b")\r\n")?;
                 Etape::Choisir
             }

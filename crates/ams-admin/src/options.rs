@@ -253,10 +253,12 @@ OPTIONS DE `config write`
     Un `--listen-pop3` ou un `--listen-imap` sans `--tls-cert` ouvre un port où
     personne ne pourra relever son courrier ; le serveur le dit au démarrage.
 
-    IMAP NE SERT ENCORE AUCUNE BOÎTE : la session tient ses quatre états et
-    authentifie, mais `SELECT`, `LIST` et `FETCH` répondent qu'ils ne sont pas
-    servis. Le port est utile pour éprouver l'authentification, et pas pour lire
-    son courrier.
+    IMAP SERT LES BOÎTES D'UN COMPTE : `SELECT`, `LIST`, `STATUS`, `FETCH`,
+    `STORE`, `EXPUNGE`, `SEARCH`, `COPY`, `MOVE`, `APPEND`, `CREATE`, `DELETE` et
+    `RENAME`. `FETCH` rend une `ENVELOPE` et une `BODYSTRUCTURE`, mais PAS une
+    partie désignée : `BODY[1]` est refusé, et le client télécharge le message
+    entier. Les critères de recherche qui demandent de LIRE le message sont
+    refusés plutôt que rendus faux.
 
     LE MAGASIN DE COMPTES SERT DEUX CHOSES, et il faut les distinguer :
 

@@ -1,0 +1,12 @@
+Content-Type: multipart/mixed; boundary="A"
+
+--A
+Content-Type: text/plain
+
+un
+--A
+Content-Type: application/pdf; name="x.pdf"
+Content-Disposition: attachment
+
+QQ==
+--A--

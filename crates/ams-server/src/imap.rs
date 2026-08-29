@@ -40,7 +40,7 @@
 use std::collections::BTreeMap;
 use std::io::{Read as _, Seek as _, SeekFrom};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ams_index::{MessageName, Uid};
@@ -61,8 +61,55 @@ const ENTETE_MAX: usize = 64 * 1024;
 /// Ce qu'une enveloppe composée occupe au plus.
 const ENVELOPPE_MAX: usize = 128 * 1024;
 
+/// Ce qu'une structure composée occupe au plus.
+///
+/// Elle est bornée par le nombre de parties qu'`ams-mime` décrit, pas par la
+/// taille du message : une structure ne grandit pas avec les pièces jointes,
+/// seulement avec leur nombre.
+const STRUCTURE_MAX: usize = 128 * 1024;
+
+/// Par combien d'octets à la fois le message passe devant le balayeur.
+///
+/// **C'est ce que la structure coûte en mémoire, et rien de plus** : le message
+/// ne séjourne pas, il défile. Un message d'un gibioctet et un message de mille
+/// octets tiennent dans la même fenêtre.
+const FENETRE: usize = 64 * 1024;
+
 /// Le seul nom de boîte que ce serveur connaisse (RFC 9051 §5.1).
 const INBOX: &[u8] = b"INBOX";
+
+/// Écoule un texte déjà composé : `out.len()` octets au plus, depuis `offset`.
+fn ecouler(texte: &[u8], offset: u64, out: &mut [u8]) -> usize {
+    let reste = texte
+        .get(usize::try_from(offset).unwrap_or(usize::MAX)..)
+        .unwrap_or_default();
+    let voulu = reste.len().min(out.len());
+    for (place, octet) in out.iter_mut().zip(reste.get(..voulu).unwrap_or_default()) {
+        *place = *octet;
+    }
+    voulu
+}
+
+/// Fait défiler un message devant le balayeur, et compose sa structure.
+///
+/// Rend `None` si le fichier ne se lit pas, ou si la structure ne tient pas.
+fn balayer(chemin: &Path, compose: &mut [u8]) -> Option<usize> {
+    let mut fichier = std::fs::File::open(chemin).ok()?;
+    // LE BALAYEUR EST GROS, ET IL VA SUR LE TAS. Une vingtaine de kibioctets sur
+    // la pile d'un fil qui en sert d'autres n'est pas une dépense qu'on veut
+    // laisser à la profondeur d'appel.
+    let mut balayeur = Box::new(ams_mime::BodyScanner::new(&ams_mime::Limits::DEFAULT));
+    let mut fenetre = std::vec![0_u8; FENETRE];
+    loop {
+        let lus = fichier.read(&mut fenetre).ok()?;
+        if lus == 0 {
+            break;
+        }
+        balayeur.push(fenetre.get(..lus).unwrap_or_default());
+    }
+    balayeur.finish();
+    balayeur.write(compose).ok()
+}
 
 /// Une boîte relevée, vue par IMAP.
 pub struct BoiteImap {
@@ -162,14 +209,33 @@ impl Mailbox for BoiteImap {
                 Ok(ecrits) => compose.get(..ecrits).unwrap_or(RIEN),
                 Err(_) => RIEN,
             };
-        let reste = texte
-            .get(usize::try_from(offset).unwrap_or(usize::MAX)..)
-            .unwrap_or_default();
-        let voulu = reste.len().min(out.len());
-        for (place, octet) in out.iter_mut().zip(reste.get(..voulu).unwrap_or_default()) {
-            *place = *octet;
-        }
-        voulu
+        ecouler(texte, offset, out)
+    }
+
+    fn body_structure(&self, sequence: u32, offset: u64, out: &mut [u8]) -> usize {
+        // LE MESSAGE SE RELIT À CHAQUE MORCEAU, comme l'en-tête pour l'enveloppe
+        // — mais ici la relecture porte sur tout le message, et non sur quelques
+        // kibioctets. C'est le prix d'un état par session en moins, et il reste
+        // rare : une structure tient presque toujours dans un seul morceau de
+        // réponse, donc en un seul passage.
+        let Some(rang) = self.rang(sequence) else {
+            return 0;
+        };
+        let Some(chemin) = self.chemins.get(rang) else {
+            return 0;
+        };
+        let mut compose = std::vec![0_u8; STRUCTURE_MAX];
+        // UNE STRUCTURE QU'ON NE SAIT PAS COMPOSER RESTE UNE STRUCTURE. Rendre
+        // zéro octet couperait la réponse au milieu d'un élément, et le client
+        // lirait la suite comme autre chose. Le corps simple et vide de la RFC
+        // 2045 dit « je ne sais rien » dans une forme que la grammaire admet.
+        const RIEN: &[u8] =
+            b"(\"TEXT\" \"PLAIN\" (\"CHARSET\" \"US-ASCII\") NIL NIL \"7BIT\" 0 0 NIL NIL NIL NIL)";
+        let texte = match balayer(chemin, &mut compose) {
+            Some(ecrits) => compose.get(..ecrits).unwrap_or(RIEN),
+            None => RIEN,
+        };
+        ecouler(texte, offset, out)
     }
 
     fn read(&self, sequence: u32, offset: u64, out: &mut [u8]) -> usize {

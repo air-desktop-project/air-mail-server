@@ -1,0 +1,10 @@
+Content-Type: multipart/mixed; boundary=A
+
+--A
+Content-Type: multipart/alternative; boundary=B
+
+--B
+
+x
+--B--
+--A--

@@ -45,6 +45,7 @@
 use crate::error::Error;
 use crate::limits::Limits;
 use crate::message::Message;
+use crate::plume::Plume;
 
 /// Combien d'adresses au plus par champ.
 ///
@@ -66,7 +67,7 @@ const CHAMPS_D_ADRESSE: [&[u8]; 6] = [b"from", b"sender", b"reply-to", b"to", b"
 /// de l'en-tête.
 pub fn write_envelope(entete: &[u8], out: &mut [u8], limits: &Limits) -> Result<usize, Error> {
     let message = Message::parse(entete, limits)?;
-    let mut plume = Plume { out, ecrits: 0 };
+    let mut plume = Plume::neuve(out);
     plume.pousser(b"(")?;
 
     // `Date:` et `Subject:` : le texte, tel quel.
@@ -94,7 +95,7 @@ pub fn write_envelope(entete: &[u8], out: &mut [u8], limits: &Limits) -> Result<
     plume.pousser(b" ")?;
     ecrire_chaine(&mut plume, valeur_de(&message, b"message-id"))?;
     plume.pousser(b")")?;
-    Ok(plume.ecrits)
+    Ok(plume.ecrits())
 }
 
 /// La valeur brute du PREMIER champ portant ce nom.
@@ -102,38 +103,11 @@ pub fn write_envelope(entete: &[u8], out: &mut [u8], limits: &Limits) -> Result<
 /// **Le premier, et pas le dernier** : un message qui porte deux `From:` est
 /// mal formé, et prendre le dernier laisserait qui l'a fabriqué choisir lequel
 /// on montre.
-fn valeur_de<'a>(message: &Message<'a>, nom: &[u8]) -> Option<&'a [u8]> {
+pub(crate) fn valeur_de<'a>(message: &Message<'a>, nom: &[u8]) -> Option<&'a [u8]> {
     message
         .fields()
         .find(|champ| champ.name_is(nom))
         .map(|champ| champ.raw_value())
-}
-
-/// De quoi écrire dans un tampon fixe, sans jamais déborder.
-struct Plume<'a> {
-    out: &'a mut [u8],
-    ecrits: usize,
-}
-
-impl Plume<'_> {
-    fn pousser(&mut self, morceau: &[u8]) -> Result<(), Error> {
-        let fin = self.ecrits.saturating_add(morceau.len());
-        let place = self
-            .out
-            .get_mut(self.ecrits..fin)
-            .ok_or(Error::BufferTooSmall)?;
-        place.copy_from_slice(morceau);
-        self.ecrits = fin;
-        Ok(())
-    }
-
-    /// Écrit un octet, échappé comme une chaîne IMAP l'exige.
-    fn octet_de_chaine(&mut self, octet: u8) -> Result<(), Error> {
-        if matches!(octet, b'"' | b'\\') {
-            self.pousser(b"\\")?;
-        }
-        self.pousser(&[octet])
-    }
 }
 
 /// Écrit une chaîne IMAP, ou `NIL` si la valeur est absente ou vide.

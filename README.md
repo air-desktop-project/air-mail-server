@@ -863,11 +863,45 @@ son tampon —, le serveur rend `(NIL NIL NIL NIL NIL NIL NIL NIL NIL NIL)` plut
 que rien : une enveloppe vide est une réponse, une enveloppe absente couperait la
 réponse au milieu d'un élément.
 
-Ce qui n'y est toujours pas : `BODYSTRUCTURE`. Elle est reconnue, son état est
-vérifié, et la session répond `NO [UNAVAILABLE]` — `NO` et non `BAD`, parce que
-la commande est correcte et permise et que c'est ce serveur qui ne la sert pas.
-Le serveur dit au démarrage ce qu'il sert et ce qu'il ne sert pas, plutôt que de
-laisser un port ouvert le faire croire.
+### `BODYSTRUCTURE` : l'arbre du message, sans le message
+
+Un client qui affiche une liste de pièces jointes ne veut pas les pièces
+jointes : il veut leur nom, leur type et leur taille. `BODYSTRUCTURE` (§7.5.2)
+les lui donne, pour chaque partie, y compris les parties emboîtées.
+
+**Le message ne séjourne pas ; la description seule reste.** C'est la différence
+avec l'enveloppe, et elle coûte cher : une enveloppe se lit dans l'en-tête, une
+structure se lit dans TOUT le message, parce que ce sont les frontières de la RFC
+2046 qui la dessinent et qu'elles sont semées d'un bout à l'autre. Retenir le
+message pour les trouver reviendrait à réserver ce que l'expéditeur a choisi
+d'écrire — exactement ce que C3 interdit. Le balayeur se fait donc **pousser** les
+octets, par morceaux, et ne retient qu'un état borné : au plus soixante-quatre
+parties, huit niveaux d'emboîtement, et une arène d'en-têtes de taille fixe. Un
+message d'un gibioctet et un message de mille octets y coûtent la même mémoire.
+
+**Le découpage ne change pas le résultat**, et c'est ce que le fuzz éprouve. Les
+morceaux ont la taille du tampon de celui qui lit — une taille que le message ne
+choisit pas et que rien ne garantit stable. Une frontière tombant à cheval sur
+deux morceaux ne doit pas se voir. C'est la même propriété que pour la phase de
+données de SMTP, et pour la même raison : deux lecteurs qui découpent
+différemment doivent conclure pareil.
+
+**Rien de ce qui déborde ne fait échouer.** Une structure absente couperait la
+réponse au milieu d'un élément, ce qui est pire qu'une structure incomplète : au
+delà des bornes, on décrit ce qu'on a pu voir, dans une forme que la grammaire
+admet toujours. Un `multipart` qu'on n'a pas su ouvrir — pas de frontière, ou
+plus de place pour l'emboîter — est décrit en `application/octet-stream`, ce que
+MIME prescrit pour une entité qu'on ne sait pas interpréter (RFC 2049 §2) et ce
+qu'un client ne lira pas de travers : un type `MULTIPART` suivi d'une taille
+n'existe pas dans la grammaire.
+
+Ce qui n'y est toujours pas : **servir une PARTIE désignée**. `BODY[1]`,
+`BODY[1.MIME]` restent refusés — le serveur sait DIRE la structure d'un message,
+il ne sait pas encore en rendre un morceau choisi, et un client qui veut une
+pièce jointe télécharge le message entier. La réponse est `NO [UNAVAILABLE]` —
+`NO` et non `BAD`, parce que la commande est correcte et permise et que c'est ce
+serveur qui ne la sert pas. Le serveur dit au démarrage ce qu'il sert et ce qu'il
+ne sert pas, plutôt que de laisser un port ouvert le faire croire.
 
 ## Émettre : le client SMTP sortant
 
