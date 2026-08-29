@@ -202,7 +202,12 @@ impl Mailboxes for Boites {
         })
     }
 
-    fn name<'n>(&self, _user: &[u8], index: usize, out: &'n mut [u8]) -> Option<&'n [u8]> {
+    fn name<'n>(
+        &self,
+        _user: &[u8],
+        index: usize,
+        out: &'n mut [u8],
+    ) -> Option<ams_session::imap::Listing<'n>> {
         if index != 0 {
             return None;
         }
@@ -210,7 +215,15 @@ impl Mailboxes for Boites {
         for (place, octet) in out.iter_mut().zip(nom) {
             *place = *octet;
         }
-        out.get(..nom.len().min(out.len()))
+        Some(ams_session::imap::Listing {
+            name: out.get(..nom.len().min(out.len()))?,
+            selectable: true,
+        })
+    }
+
+    fn delete(&self, _user: &[u8], _name: &[u8]) -> ams_session::imap::Deletion {
+        // La boîte d'épreuve n'efface rien : ce qu'on éprouve est la session.
+        ams_session::imap::Deletion::Absente
     }
 
     fn create(&self, _user: &[u8], _name: &[u8]) -> ams_session::imap::Creation {

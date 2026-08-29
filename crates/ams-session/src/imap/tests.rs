@@ -240,14 +240,23 @@ pub struct Boites {
     valide: Valide,
     /// Les boîtes créées pendant la session.
     creees: std::rc::Rc<std::cell::RefCell<std::vec::Vec<std::vec::Vec<u8>>>>,
+    /// Les boîtes effacées : celles qui restent nommées sont `\Noselect`.
+    effacees: std::rc::Rc<std::cell::RefCell<std::vec::Vec<std::vec::Vec<u8>>>>,
 }
 
 impl Mailboxes for Boites {
     type Open = Boite;
 
-    fn name<'n>(&self, _user: &[u8], index: usize, out: &'n mut [u8]) -> Option<&'n [u8]> {
-        // Les boîtes créées s'ajoutent à celles qui sont là de tout temps.
+    fn name<'n>(
+        &self,
+        _user: &[u8],
+        index: usize,
+        out: &'n mut [u8],
+    ) -> Option<super::Listing<'n>> {
+        // Les boîtes créées s'ajoutent à celles qui sont là de tout temps, et
+        // les effacées s'en retirent.
         let creees = self.creees.borrow();
+        let effacees = self.effacees.borrow();
         let nom = [&b"INBOX"[..], b"Archives", b"Archives/2026"]
             .get(index)
             .copied()
@@ -260,7 +269,31 @@ impl Mailboxes for Boites {
         for (place, octet) in out.iter_mut().zip(nom) {
             *place = *octet;
         }
-        out.get(..longueur)
+        Some(super::Listing {
+            name: out.get(..longueur)?,
+            selectable: !effacees.iter().any(|vide| vide == nom),
+        })
+    }
+
+    fn delete(&self, _user: &[u8], name: &[u8]) -> super::Deletion {
+        if name.starts_with(b"Impossible") {
+            return super::Deletion::Refusee;
+        }
+        let connue = matches!(name, b"Archives" | b"Archives/2026")
+            || self.creees.borrow().iter().any(|connu| connu == name);
+        if !connue || self.effacees.borrow().iter().any(|vide| vide == name) {
+            return super::Deletion::Absente;
+        }
+        // `Archives` a une fille : elle se vide sans disparaître.
+        if name == b"Archives" {
+            self.effacees.borrow_mut().push(name.to_vec());
+            return super::Deletion::Videe;
+        }
+        self.creees.borrow_mut().retain(|connu| connu != name);
+        if name == b"Archives/2026" {
+            self.effacees.borrow_mut().push(name.to_vec());
+        }
+        super::Deletion::Faite
     }
 
     fn create(&self, _user: &[u8], name: &[u8]) -> super::Creation {
@@ -728,8 +761,7 @@ fn ce_qu_on_ne_sert_pas_encore_le_dit_sans_accuser_le_client() {
     let mut session = nouvelle(true);
     dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
     for commande in [
-        &b"a003 DELETE test\r\n"[..],
-        b"a004 RENAME a b\r\n",
+        &b"a004 RENAME a b\r\n"[..],
         b"a005 SUBSCRIBE a\r\n",
         b"a006 UNSUBSCRIBE a\r\n",
         b"a007 NAMESPACE\r\n",
@@ -1699,7 +1731,7 @@ fn un_magasin_partage_se_passe_par_reference() {
     let partage = &boites;
     let mut place = [0_u8; 64];
     assert_eq!(
-        Mailboxes::name(&partage, b"jean", 0, &mut place),
+        Mailboxes::name(&partage, b"jean", 0, &mut place).map(|boite| boite.name),
         Some(&b"INBOX"[..])
     );
     assert!(Mailboxes::open(&partage, b"jean", b"INBOX").is_some());
@@ -1709,6 +1741,10 @@ fn un_magasin_partage_se_passe_par_reference() {
     assert_eq!(
         Mailboxes::create(&partage, b"jean", b"Archives"),
         super::Creation::DejaLa
+    );
+    assert_eq!(
+        Mailboxes::delete(&partage, b"jean", b"Inconnue"),
+        super::Deletion::Absente
     );
 }
 
@@ -3045,4 +3081,121 @@ fn on_ne_peut_pas_etre_authentifie_sans_chiffrement() {
         reste = reste.get(longueur..).unwrap_or_default();
         lecteur.reset();
     }
+}
+
+// ── `DELETE` ────────────────────────────────────────────────────────────────
+
+/// Une boîte sans fille disparaît, nom compris.
+#[test]
+fn une_boite_sans_fille_disparait() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut session, b"a002 CREATE Brouillons\r\n");
+    let (texte, _) = dire(&mut session, b"a003 DELETE Brouillons\r\n");
+    assert!(texte.contains("a003 OK DELETE completed"), "{texte}");
+    let (liste, _) = dire(&mut session, b"a004 LIST \"\" *\r\n");
+    assert!(!liste.contains("Brouillons"), "{liste}");
+}
+
+/// **§6.3.5 : une boîte qui a des filles ne disparaît pas.** Son courrier s'en
+/// va, son nom demeure et se marque `\Noselect` — l'effacer romprait la
+/// hiérarchie, et ses filles n'auraient plus de chemin.
+#[test]
+fn une_boite_qui_a_des_filles_garde_son_nom() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (texte, _) = dire(&mut session, b"a002 DELETE Archives\r\n");
+    assert!(texte.contains("a002 OK DELETE completed"), "{texte}");
+    let (liste, _) = dire(&mut session, b"a003 LIST \"\" *\r\n");
+    assert!(
+        liste.contains("* LIST (\\Noselect) \"/\" \"Archives\"\r\n"),
+        "{liste}"
+    );
+    // Et la fille est toujours atteignable.
+    assert!(
+        liste.contains("* LIST () \"/\" \"Archives/2026\"\r\n"),
+        "{liste}"
+    );
+}
+
+/// **§6.3.5 : `INBOX` ne s'efface pas.** C'est le seul endroit où le courrier
+/// arrive.
+#[test]
+fn inbox_ne_s_efface_pas() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    for commande in [&b"a002 DELETE INBOX\r\n"[..], b"a003 DELETE inbox\r\n"] {
+        let (texte, _) = dire(&mut session, commande);
+        assert!(
+            texte.contains("NO [CANNOT] INBOX cannot be deleted"),
+            "{commande:?} : {texte}"
+        );
+    }
+}
+
+/// Une boîte qui n'existe pas se dit `[NONEXISTENT]`, y compris quand son nom
+/// n'en est pas un.
+#[test]
+fn une_boite_absente_se_dit_nonexistent() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    for nom in [&b"Inconnue"[..], b"\"../etc\"", b"\"a.b\""] {
+        let mut commande = std::vec::Vec::from(&b"a002 DELETE "[..]);
+        commande.extend_from_slice(nom);
+        commande.extend_from_slice(b"\r\n");
+        let (texte, _) = dire(&mut session, &commande);
+        assert!(
+            texte.contains("NO [NONEXISTENT] Mailbox does not exist"),
+            "{:?} : {texte}",
+            core::str::from_utf8(nom)
+        );
+    }
+}
+
+/// **On ne garde pas ouverte une boîte qu'on vient d'effacer** : la session en
+/// tient un instantané qui ne désigne plus rien.
+#[test]
+fn effacer_la_boite_ouverte_la_referme() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut session, b"a002 SELECT Archives\r\n");
+    assert_eq!(session.state(), State::Selected);
+    let (texte, _) = dire(&mut session, b"a003 DELETE Archives\r\n");
+    assert!(texte.contains("OK DELETE completed"), "{texte}");
+    assert_eq!(session.state(), State::Authenticated);
+    assert!(session.selected().is_empty());
+}
+
+/// Un magasin qui refuse le dit, et ce n'est pas une faute du client.
+#[test]
+fn un_magasin_qui_refuse_d_effacer_le_dit() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut session, b"a002 CREATE Impossible2\r\n");
+    let (texte, _) = dire(&mut session, b"a003 DELETE Impossible2\r\n");
+    assert!(texte.contains("NO Cannot delete mailbox"), "{texte}");
+}
+
+#[test]
+fn un_delete_mal_forme_est_une_faute() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    for commande in [&b"a002 DELETE\r\n"[..], b"a003 DELETE \r\n"] {
+        let (texte, _) = dire(&mut session, commande);
+        assert!(
+            texte.contains("BAD DELETE expects a mailbox name"),
+            "{commande:?} : {texte}"
+        );
+    }
+}
+
+/// **Un `DELETE` avant authentification n'est pas un `DELETE`.**
+#[test]
+fn un_delete_avant_authentification_est_refuse() {
+    let mut session = nouvelle(true);
+    let (texte, _) = dire(&mut session, b"a001 DELETE Brouillons\r\n");
+    assert!(
+        texte.contains("BAD Command is not allowed before authentication"),
+        "{texte}"
+    );
 }

@@ -865,8 +865,7 @@ ne s'écrit — ni `STORE`, ni `APPEND`, ni `EXPUNGE` — `SELECT` répond
 modifiabilité qu'elle ne peut pas connaître ferait une promesse que le client ne
 verrait démentie qu'en essayant.
 
-Ce qui n'est toujours pas servi : `DELETE`, `RENAME`, `ENVELOPE` et
-`BODYSTRUCTURE`.
+Ce qui n'est toujours pas servi : `RENAME`, `ENVELOPE` et `BODYSTRUCTURE`.
 
 Éprouvé jusqu'au binaire, contre un vrai Maildir rempli par SMTP : `LIST`,
 `SELECT INBOX` et ses sept réponses, `STATUS` sur la boîte sélectionnée,
@@ -1208,6 +1207,40 @@ rend tous cités, `STATUS` et `SELECT` qui les ouvrent, un `APPEND` dans un
 dossier — et six noms dangereux (`../autrecompte`, `a/../../etc`, `Sent.2026`,
 `/absolu`, un `%`) refusés sans qu'aucun répertoire n'apparaisse hors de la
 racine du compte.
+
+## `DELETE` : ce qui s'en va et ce qui reste, depuis le 2026-08-29
+
+§6.3.5 : UNE BOÎTE QUI A DES FILLES NE DISPARAÎT PAS. Son courrier s'en va, son
+NOM demeure, et il se marque `\Noselect`. Effacer le nom romprait la hiérarchie :
+ses filles existeraient sans que personne puisse les atteindre.
+
+SUR LE DISQUE, CELA SE DIT SANS MARQUEUR. Le répertoire reste, ses trois
+sous-répertoires Maildir s'en vont : un nom sans `cur/` est `\Noselect`, et il le
+reste tant qu'un `CREATE` ne le refait pas — ce que §6.3.4 autorise expressément.
+C'est la même règle qui empêche `Maildir::open` de ressusciter une boîte effacée,
+puisqu'il recrée ce qui manque : on n'ouvre que ce qui a un `cur/`.
+
+L'INDEX PART AVEC LE COURRIER, et une boîte recréée reçoit une `UIDVALIDITY`
+neuve. Le piège est la résolution de l'horloge : effacer puis recréer dans la
+même seconde rendait la MÊME validité avec des UID repartis de un, et un client
+qui a gardé ses UID aurait montré à son porteur des messages qui ne sont pas ceux
+qu'il désigne — ce que §5.3.1 interdit précisément. `fresh_uid_validity` porte
+donc un compteur : deux appels ne rendent jamais la même valeur, et l'horloge ne
+sert qu'à faire avancer plus vite.
+
+`INBOX` NE S'EFFACE PAS : c'est le seul endroit où le courrier arrive, et un
+client qui la perdrait ne recevrait plus rien. La session le dit, le magasin le
+redit — c'est lui qui ferait disparaître des fichiers.
+
+ON NE GARDE PAS OUVERTE UNE BOÎTE QU'ON VIENT D'EFFACER. La session en tient un
+instantané, des chemins, un état : tout cela désigne ce qui n'est plus. Le client
+se retrouve authentifié sans sélection.
+
+Éprouvé jusqu'au binaire : une boîte sans fille dont le répertoire disparaît, une
+boîte avec fille dont le nom demeure marqué `\Noselect` — sa fille restant
+ouvrable —, un `SELECT` sur le nom vidé refusé, un `CREATE` qui le rend ouvrable
+de nouveau, `INBOX` refusée, et une boîte effacée puis recréée dans la même
+seconde dont la validité a bien changé.
 
 ## Le gate de couverture arrondissait vers le haut, depuis le 2026-08-29
 
@@ -1795,7 +1828,7 @@ et une couture inutilisée finit par être utilisée.
 SMTP en réception (avec `STARTTLS`, `AUTH PLAIN`, SPF, DKIM, DMARC et remise
 Maildir), SMTP à l'émission (rapports DMARC), POP3, et IMAP — `SELECT`,
 `EXAMINE`, `CLOSE`, `UNSELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`, `EXPUNGE`,
-`SEARCH`, `COPY`, `MOVE`, `APPEND`, `CREATE` et leurs formes `UID`. Chacun a été éprouvé de bout en bout contre le binaire, et pas
+`SEARCH`, `COPY`, `MOVE`, `APPEND`, `CREATE`, `DELETE` et leurs formes `UID`. Chacun a été éprouvé de bout en bout contre le binaire, et pas
 seulement en tests.
 
 **HTTP n'est pas servi** : `ams-proto-http` est un emplacement réservé, et son
@@ -1818,7 +1851,7 @@ persistant, et lecture sans verrou côté IMAP), C14 (`X25519MLKEM768` en tête)
 `<CRLF>.<CRLF>`, refuse tout `CR` ou `LF` isolé, et le fuzz éprouve que le
 découpage des lectures ne change rien au verdict.
 
-Ce qui manque, et qu'aucune phrase ne doit laisser croire acquis : `DELETE` et
-`RENAME`, et les critères de `SEARCH` qui lisent le message ; le signeur DKIM,
+Ce qui manque, et qu'aucune phrase ne doit laisser croire acquis : `RENAME`, et
+les critères de `SEARCH` qui lisent le message ; le signeur DKIM,
 qui existe et n'a pas d'appelant ; la file de réémission des messages sortants ;
 et toute interface HTTP.

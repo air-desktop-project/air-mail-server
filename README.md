@@ -31,7 +31,7 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 >
 > **Il ouvre les boîtes** : IMAP sur un troisième port, `STARTTLS` puis `LOGIN`
 > ou `AUTHENTICATE PLAIN`, `SELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`,
-> `EXPUNGE`, `SEARCH`, `COPY`, `MOVE`, `APPEND` et `CREATE` — un message traverse la socket sans jamais tenir en
+> `EXPUNGE`, `SEARCH`, `COPY`, `MOVE`, `APPEND`, `CREATE` et `DELETE` — un message traverse la socket sans jamais tenir en
 > mémoire, les drapeaux s'écrivent dans les noms de fichiers Maildir, et un
 > effacement n'a jamais lieu sur une marque périmée.
 >
@@ -470,8 +470,8 @@ découpage existe pour fermer. Un tag illisible, lui, ne ferme rien : la command
 ## Les boîtes IMAP : lire sans jamais tenir un message
 
 `SELECT`, `EXAMINE`, `CLOSE`, `UNSELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`,
-`EXPUNGE`, `SEARCH`, `COPY`, `MOVE`, `APPEND`, `CREATE` et leurs formes `UID`
-servent les boîtes du compte. Chacun a son `INBOX` — le nom que la RFC 9051 §5.1
+`EXPUNGE`, `SEARCH`, `COPY`, `MOVE`, `APPEND`, `CREATE`, `DELETE` et leurs formes
+`UID` servent les boîtes du compte. Chacun a son `INBOX` — le nom que la RFC 9051 §5.1
 réserve pour cela — et les dossiers que `CREATE` lui a faits.
 
 **UN NOM DE BOÎTE DEVIENT UN RÉPERTOIRE**, et c'est la frontière la plus
@@ -776,7 +776,32 @@ condition de plus, qu'il faudrait avoir juste à chaque endroit.
 `INBOX` ne se crée pas (§6.3.4 : elle existe toujours), une boîte déjà là se dit
 `[ALREADYEXISTS]`, et un magasin qui refuse le dit sans accuser le client.
 
-Ce qui n'y est toujours pas : `DELETE`, `RENAME`, `ENVELOPE` et `BODYSTRUCTURE`. Ils sont reconnus, leur
+## `DELETE` : ce qui s'en va, et ce qui doit rester
+
+**§6.3.5 : une boîte qui a des filles ne disparaît pas.** Son courrier s'en va,
+son **nom demeure**, et il se marque `\Noselect` dans `LIST`. Effacer le nom
+romprait la hiérarchie : ses filles existeraient sans que personne puisse les
+atteindre.
+
+**Sur le disque, cela se dit sans marqueur.** Le répertoire reste, ses trois
+sous-répertoires Maildir s'en vont : un nom qui n'a plus de `cur/` est
+`\Noselect`, et il le reste tant qu'un `CREATE` ne le refait pas — ce que §6.3.4
+autorise expressément, et qui marche. C'est aussi la garde qui empêche
+`Maildir::open` de ressusciter une boîte effacée, puisqu'il recrée ce qui manque.
+
+**L'index part avec le courrier**, et une boîte recréée sous le même nom reçoit
+une `UIDVALIDITY` neuve. Le piège est la résolution de l'horloge : effacer puis
+recréer dans la même seconde rendait la MÊME validité avec des UID repartis de
+un, et un client qui a gardé ses UID aurait montré à son porteur des messages qui
+ne sont pas ceux qu'il désigne. Un compteur fait avancer ce que l'horloge n'a pas
+fait avancer, et **deux appels ne rendent jamais la même valeur**.
+
+**`INBOX` ne s'efface pas** (§6.3.5) : c'est le seul endroit où le courrier
+arrive. Et une boîte qu'on vient d'effacer ne reste pas ouverte : la session en
+tient un instantané qui ne désigne plus rien, et le client se retrouve
+authentifié sans sélection — il doit le savoir.
+
+Ce qui n'y est toujours pas : `RENAME`, `ENVELOPE` et `BODYSTRUCTURE`. Ils sont reconnus, leur
 état est vérifié, et la session répond `NO [UNAVAILABLE]` — `NO` et non `BAD`,
 parce que la commande est correcte et permise et que c'est ce serveur qui ne la
 sert pas. `APPEND` demandera un chemin qui écoule au fil de l'eau, comme le

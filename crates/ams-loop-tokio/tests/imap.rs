@@ -136,17 +136,35 @@ struct Boites;
 
 impl Mailboxes for Boites {
     type Open = Boite;
-    fn name<'n>(&self, _user: &[u8], index: usize, out: &'n mut [u8]) -> Option<&'n [u8]> {
-        let nom: &[u8] = match index {
-            0 => b"INBOX",
-            1 => b"Brouillons",
+    fn name<'n>(
+        &self,
+        _user: &[u8],
+        index: usize,
+        out: &'n mut [u8],
+    ) -> Option<ams_session::imap::Listing<'n>> {
+        let (nom, selectable): (&[u8], bool) = match index {
+            0 => (b"INBOX", true),
+            1 => (b"Brouillons", true),
+            // Une boîte effacée qui avait des filles : elle garde son nom.
+            2 => (b"Videe", false),
             _ => return None,
         };
         let longueur = nom.len().min(out.len());
         for (place, octet) in out.iter_mut().zip(nom) {
             *place = *octet;
         }
-        out.get(..longueur)
+        Some(ams_session::imap::Listing {
+            name: out.get(..longueur)?,
+            selectable,
+        })
+    }
+
+    fn delete(&self, _user: &[u8], name: &[u8]) -> ams_session::imap::Deletion {
+        if name == b"Brouillons" {
+            ams_session::imap::Deletion::Faite
+        } else {
+            ams_session::imap::Deletion::Absente
+        }
     }
 
     fn create(&self, _user: &[u8], name: &[u8]) -> ams_session::imap::Creation {
@@ -900,4 +918,40 @@ async fn un_append_demesure_ferme_la_connexion() {
         .expect("écriture");
     let adieu = jusqu_a(&mut lecteur, "a003 ").await;
     assert!(adieu.contains("BYE") || adieu.contains("BAD"), "{adieu}");
+}
+
+/// **`DELETE` traverse la socket**, et une boîte effacée qui avait des filles
+/// garde son nom, marqué `\Noselect`.
+#[tokio::test]
+async fn un_effacement_traverse_la_socket() {
+    let Some(materiel) = materiel("imap-delete") else {
+        return;
+    };
+    let mut lecteur = authentifiee(&materiel).await;
+    lecteur
+        .get_mut()
+        .write_all(b"a003 LIST \"\" *\r\n")
+        .await
+        .expect("écriture");
+    let liste = jusqu_a(&mut lecteur, "a003 ").await;
+    assert!(
+        liste.contains("* LIST (\\Noselect) \"/\" \"Videe\"\r\n"),
+        "{liste}"
+    );
+
+    lecteur
+        .get_mut()
+        .write_all(b"a004 DELETE Brouillons\r\n")
+        .await
+        .expect("écriture");
+    let efface = jusqu_a(&mut lecteur, "a004 ").await;
+    assert_eq!(efface, "a004 OK DELETE completed\r\n");
+
+    lecteur
+        .get_mut()
+        .write_all(b"a005 DELETE INBOX\r\n")
+        .await
+        .expect("écriture");
+    let refus = jusqu_a(&mut lecteur, "a005 ").await;
+    assert!(refus.starts_with("a005 NO [CANNOT]"), "{refus}");
 }

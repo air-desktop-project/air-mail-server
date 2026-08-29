@@ -337,7 +337,7 @@ pub trait Mailboxes {
     /// n'a que faire. **Le nom est ÉCRIT** plutôt que prêté, parce qu'un magasin
     /// qui découvre ses boîtes sur un disque ne peut pas prêter ce qu'il vient
     /// de lire.
-    fn name<'n>(&self, user: &[u8], index: usize, out: &'n mut [u8]) -> Option<&'n [u8]>;
+    fn name<'n>(&self, user: &[u8], index: usize, out: &'n mut [u8]) -> Option<Listing<'n>>;
 
     /// Crée une boîte (§6.3.4).
     ///
@@ -351,6 +351,14 @@ pub trait Mailboxes {
     /// en dépend.
     fn create(&self, user: &[u8], name: &[u8]) -> Creation;
 
+    /// Efface une boîte (§6.3.5).
+    ///
+    /// **Une boîte qui a des filles ne disparaît pas** : §6.3.5 veut que son
+    /// courrier s'en aille et que son NOM demeure, marqué `\Noselect`, faute de
+    /// quoi la hiérarchie se romprait et les filles deviendraient
+    /// inatteignables.
+    fn delete(&self, user: &[u8], name: &[u8]) -> Deletion;
+
     /// Ouvre une boîte, ou dit qu'elle n'existe pas.
     fn open(&self, user: &[u8], name: &[u8]) -> Option<Self::Open>;
 
@@ -363,6 +371,32 @@ pub trait Mailboxes {
     /// permet d'abandonner un message à moitié reçu sans que personne ne l'ait
     /// vu.
     fn append(&self, user: &[u8], name: &[u8]) -> Option<Self::Deposit>;
+}
+
+/// Une boîte, telle que `LIST` la rend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Listing<'n> {
+    /// Son nom.
+    pub name: &'n [u8],
+    /// Peut-on l'ouvrir ?
+    ///
+    /// **Une boîte effacée qui avait des filles garde son nom sans son
+    /// courrier** (§6.3.5) : elle paraît dans la liste, marquée `\Noselect`, et
+    /// `SELECT` la refuse. Sans elle, ses filles n'auraient plus de chemin.
+    pub selectable: bool,
+}
+
+/// Ce qu'un effacement de boîte a donné.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Deletion {
+    /// La boîte est effacée.
+    Faite,
+    /// Elle avait des filles : son courrier est parti, son nom demeure.
+    Videe,
+    /// Elle n'existe pas (§6.3.5 : `[NONEXISTENT]`).
+    Absente,
+    /// Le magasin n'a pas pu.
+    Refusee,
 }
 
 /// Ce qu'une création de boîte a donné.
@@ -407,12 +441,16 @@ impl<T: Mailboxes> Mailboxes for &T {
     type Open = T::Open;
     type Deposit = T::Deposit;
 
-    fn name<'n>(&self, user: &[u8], index: usize, out: &'n mut [u8]) -> Option<&'n [u8]> {
+    fn name<'n>(&self, user: &[u8], index: usize, out: &'n mut [u8]) -> Option<Listing<'n>> {
         (**self).name(user, index, out)
     }
 
     fn create(&self, user: &[u8], name: &[u8]) -> Creation {
         (**self).create(user, name)
+    }
+
+    fn delete(&self, user: &[u8], name: &[u8]) -> Deletion {
+        (**self).delete(user, name)
     }
 
     fn open(&self, user: &[u8], name: &[u8]) -> Option<Self::Open> {
@@ -984,8 +1022,8 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             Command::List => self.list(lue.arguments, out),
             Command::Status => self.status(lue.arguments, out),
             Command::Create => self.create(lue.arguments, out),
+            Command::Delete => self.delete(lue.arguments, out),
             Command::Enable
-            | Command::Delete
             | Command::Rename
             | Command::Subscribe
             | Command::Unsubscribe
@@ -2345,10 +2383,17 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         let mut plume = Plume::neuve(out);
         let mut index = 0_usize;
         let mut place = [0_u8; MAILBOX_NAME_MAX];
-        while let Some(nom) = self.boites.name(self.user(), index, &mut place) {
+        while let Some(boite) = self.boites.name(self.user(), index, &mut place) {
             index = index.saturating_add(1);
-            if correspond(motif, nom) {
-                plume.nom_de_boite(b"* LIST () \"/\" ", nom, b"\r\n")?;
+            if correspond(motif, boite.name) {
+                // §6.3.5 : une boîte effacée qui avait des filles garde son nom
+                // sans son courrier, et le dit.
+                let attributs: &[u8] = if boite.selectable {
+                    b"* LIST () \"/\" "
+                } else {
+                    b"* LIST (\\Noselect) \"/\" "
+                };
+                plume.nom_de_boite(attributs, boite.name, b"\r\n")?;
             }
         }
         let ecrits = plume.ecrits();
@@ -2509,6 +2554,68 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             ),
             Creation::Refusee => {
                 self.termine(Status::No, b"Cannot create mailbox", Action::Continue, out)
+            }
+        }
+    }
+
+    /// `DELETE` (§6.3.5).
+    ///
+    /// # UNE BOÎTE QUI A DES FILLES NE DISPARAÎT PAS
+    ///
+    /// §6.3.5 : son courrier s'en va, son NOM demeure, et il se marque
+    /// `\Noselect`. Effacer le nom romprait la hiérarchie, et ses filles
+    /// n'auraient plus de chemin par où être nommées — elles existeraient sans
+    /// que personne puisse les atteindre.
+    fn delete<'b>(&mut self, arguments: &[u8], out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
+        if self.etat == State::NotAuthenticated {
+            return self.faute(b"Command is not allowed before authentication", out);
+        }
+        let mut place = [0_u8; MAILBOX_NAME_MAX];
+        let Some(nom) = self.un_nom(arguments, &mut place) else {
+            return self.faute(b"DELETE expects a mailbox name", out);
+        };
+        let nom = ams_proto_imap::mailbox_name_trimmed(nom);
+        // §6.3.5 : `INBOX` ne s'efface pas. Elle est le seul endroit où le
+        // courrier arrive, et un client qui la perdrait ne recevrait plus rien.
+        if nom.eq_ignore_ascii_case(b"INBOX") {
+            return self.termine(
+                Status::No,
+                b"[CANNOT] INBOX cannot be deleted",
+                Action::Continue,
+                out,
+            );
+        }
+        if !ams_proto_imap::mailbox_name_is_safe(nom) {
+            return self.termine(
+                Status::No,
+                b"[NONEXISTENT] Mailbox does not exist",
+                Action::Continue,
+                out,
+            );
+        }
+        let issue = self.boites.delete(self.user(), nom);
+        // ON NE GARDE PAS OUVERTE UNE BOÎTE QU'ON VIENT D'EFFACER. La session
+        // en tient un instantané, des chemins, un état — tout cela désigne
+        // désormais ce qui n'est plus. Le client se retrouve authentifié sans
+        // sélection, et il doit le savoir.
+        if matches!(issue, Deletion::Faite | Deletion::Videe) && nom == self.selected() {
+            self.ouverte = None;
+            self.emission = None;
+            self.nom_ouvert_len = 0;
+            self.etat = State::Authenticated;
+        }
+        match issue {
+            Deletion::Faite | Deletion::Videe => {
+                self.termine(Status::Ok, b"DELETE completed", Action::Continue, out)
+            }
+            Deletion::Absente => self.termine(
+                Status::No,
+                b"[NONEXISTENT] Mailbox does not exist",
+                Action::Continue,
+                out,
+            ),
+            Deletion::Refusee => {
+                self.termine(Status::No, b"Cannot delete mailbox", Action::Continue, out)
             }
         }
     }

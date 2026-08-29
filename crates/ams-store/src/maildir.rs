@@ -58,12 +58,33 @@ pub struct Maildir {
 /// La saturation à `1` est là pour deux cas également invraisemblables et
 /// également silencieux : une horloge d'avant 1970, et le débordement de 2106.
 /// Rendre zéro serait rendre une valeur que la RFC interdit.
+///
+/// # DEUX APPELS NE RENDENT JAMAIS LA MÊME VALEUR
+///
+/// L'horloge a une seconde de résolution. Effacer une boîte puis la recréer dans
+/// la même seconde lui rendrait la MÊME validité, avec des UID repartis de un :
+/// un client qui a gardé ses UID croirait sa vue encore bonne, et montrerait à
+/// son porteur des messages qui ne sont pas ceux qu'il désigne. La RFC 9051
+/// §5.3.1 l'interdit explicitement pour une boîte recréée — d'où le compteur,
+/// qui ne fait avancer que ce que l'horloge n'a pas fait avancer.
 #[must_use]
 pub fn fresh_uid_validity() -> UidValidity {
+    /// La dernière valeur rendue par ce processus.
+    static DERNIERE: AtomicU32 = AtomicU32::new(0);
+
     let secondes = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(1, |ecoule| ecoule.as_secs());
-    UidValidity::new(u32::try_from(secondes).unwrap_or(u32::MAX)).unwrap_or(
+    let horloge = u32::try_from(secondes).unwrap_or(u32::MAX);
+    // `fetch_update` rend la valeur PRÉCÉDENTE ; la nouvelle se recalcule de la
+    // même façon, et c'est elle qu'on rend.
+    let precedente = DERNIERE
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |derniere| {
+            Some(horloge.max(derniere.saturating_add(1)))
+        })
+        .unwrap_or(0);
+    let valeur = horloge.max(precedente.saturating_add(1));
+    UidValidity::new(valeur).unwrap_or(
         // `new(1)` ne peut pas rendre `None` ; l'écrire ainsi évite une branche
         // qu'aucun test ne pourrait atteindre.
         UidValidity::new(1).unwrap_or(UidValidity::MIN),

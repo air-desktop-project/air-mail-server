@@ -45,7 +45,7 @@ use std::sync::Arc;
 
 use ams_index::{MessageName, Uid};
 use ams_proto_imap::{Flags, StoreMode};
-use ams_session::imap::{Creation, Deposit, Mailbox, Mailboxes, MessageInfo};
+use ams_session::imap::{Creation, Deletion, Deposit, Listing, Mailbox, Mailboxes, MessageInfo};
 use ams_store::{Incoming, MailboxView, Maildir, fresh_uid_validity};
 
 /// Le seul nom de boîte que ce serveur connaisse (RFC 9051 §5.1).
@@ -503,12 +503,28 @@ impl BoitesImap {
         // ON N'OUVRE QUE CE QUI EXISTE. `Maildir::open` crée l'arborescence
         // qu'on lui nomme : l'appeler sans regarder ferait de chaque `SELECT`
         // sur une faute de frappe une boîte de plus.
-        if !chemin.is_dir() {
+        // ON N'OUVRE QUE CE QUI EST UNE BOÎTE. Un répertoire sans `cur/` est un
+        // nom que §6.3.5 a laissé derrière un effacement : l'ouvrir le
+        // ressusciterait, puisque `Maildir::open` recrée ce qui manque.
+        if !chemin.is_dir() || !Self::selectionnable(&chemin) {
             return None;
         }
         let boite = Arc::new(Maildir::open(&chemin, &self.hote, fresh_uid_validity()).ok()?);
         ouverts.insert(clef, Arc::clone(&boite));
         Some(boite)
+    }
+
+    /// Cette boîte est-elle ouvrable ?
+    ///
+    /// # UN RÉPERTOIRE SANS `cur/` N'EST PAS UNE BOÎTE
+    ///
+    /// §6.3.5 : une boîte effacée qui avait des filles garde son nom sans son
+    /// courrier. Sur le disque, cela se dit sans marqueur : le répertoire reste,
+    /// et ses trois sous-répertoires Maildir s'en vont. Un nom qui n'a plus de
+    /// `cur/` est donc `\Noselect`, et il le RESTE tant qu'un `CREATE` ne le
+    /// refait pas — ce que §6.3.4 autorise expressément.
+    fn selectionnable(chemin: &std::path::Path) -> bool {
+        chemin.join("cur").is_dir()
     }
 
     /// Les dossiers d'un compte, par ordre de nom.
@@ -602,17 +618,73 @@ impl Mailboxes for BoitesImap {
         })
     }
 
-    fn name<'n>(&self, user: &[u8], index: usize, out: &'n mut [u8]) -> Option<&'n [u8]> {
+    fn name<'n>(&self, user: &[u8], index: usize, out: &'n mut [u8]) -> Option<Listing<'n>> {
         // Le compte d'abord : sans lui, il n'y a pas de boîte à nommer.
-        let nom = core::str::from_utf8(user).ok()?;
-        self.boites.get(nom)?;
+        let compte = core::str::from_utf8(user).ok()?;
+        self.boites.get(compte)?;
         let noms = self.dossiers_de(user);
         let nom = noms.get(index)?;
+        let selectable = nom.as_slice() == INBOX
+            || self
+                .chemin_du_dossier(user, nom)
+                .is_some_and(|chemin| Self::selectionnable(&chemin));
         let longueur = nom.len().min(out.len());
         for (place, octet) in out.iter_mut().zip(nom) {
             *place = *octet;
         }
-        out.get(..longueur)
+        Some(Listing {
+            name: out.get(..longueur)?,
+            selectable,
+        })
+    }
+
+    fn delete(&self, user: &[u8], name: &[u8]) -> Deletion {
+        let name = ams_proto_imap::mailbox_name_trimmed(name);
+        // §6.3.5 : `INBOX` ne s'efface pas. La session le dit déjà ; on ne s'y
+        // fie pas, puisque c'est ici que des fichiers disparaîtraient.
+        if name.eq_ignore_ascii_case(INBOX) {
+            return Deletion::Refusee;
+        }
+        let Some(chemin) = self.chemin_du_dossier(user, name) else {
+            return Deletion::Absente;
+        };
+        if !chemin.is_dir() || !Self::selectionnable(&chemin) {
+            return Deletion::Absente;
+        }
+        // La boîte cesse d'être ouverte AVANT d'être effacée : un `Maildir`
+        // gardé en cache écrirait son index dans un répertoire qui n'est plus.
+        if let Ok(mut ouverts) = self.dossiers.lock()
+            && let (Ok(compte), Ok(boite)) =
+                (core::str::from_utf8(user), core::str::from_utf8(name))
+        {
+            ouverts.remove(&(compte.to_owned(), boite.to_owned()));
+        }
+
+        // §6.3.5 : UNE BOÎTE QUI A DES FILLES NE DISPARAÎT PAS. Son courrier
+        // s'en va, son nom demeure — sans quoi ses filles n'auraient plus de
+        // chemin par où être nommées.
+        let a_des_filles = self.dossiers_de(user).iter().any(|autre| {
+            autre.len() > name.len()
+                && autre.starts_with(name)
+                && autre.get(name.len()) == Some(&b'/')
+        });
+        for sous in ["cur", "new", "tmp"] {
+            if std::fs::remove_dir_all(chemin.join(sous)).is_err() {
+                return Deletion::Refusee;
+            }
+        }
+        // L'index part avec le courrier : le garder ferait qu'une boîte recréée
+        // sous le même nom reprendrait les UID de l'ancienne.
+        let _ = std::fs::remove_file(chemin.join("ams-index.bin"));
+        if a_des_filles {
+            return Deletion::Videe;
+        }
+        if std::fs::remove_dir(&chemin).is_err() {
+            // Le répertoire n'est pas vide : quelque chose y vit qui n'est pas à
+            // nous. On a retiré le courrier, on ne retire pas le reste.
+            return Deletion::Videe;
+        }
+        Deletion::Faite
     }
 
     fn create(&self, user: &[u8], name: &[u8]) -> Creation {
@@ -625,7 +697,10 @@ impl Mailboxes for BoitesImap {
         let Some(chemin) = self.chemin_du_dossier(user, name) else {
             return Creation::Refusee;
         };
-        if chemin.is_dir() {
+        // §6.3.4 : CRÉER SUR UN NOM `\Noselect` LE REND OUVRABLE. C'est
+        // exactement ce que la RFC prévoit pour reprendre une boîte effacée qui
+        // avait des filles.
+        if chemin.is_dir() && Self::selectionnable(&chemin) {
             return Creation::DejaLa;
         }
         // §6.3.4 : CRÉER `A/B` CRÉE AUSSI `A`. En Maildir++ il n'y a qu'un
@@ -641,7 +716,7 @@ impl Mailboxes for BoitesImap {
             let Some(chemin) = self.chemin_du_dossier(user, &parcouru) else {
                 return Creation::Refusee;
             };
-            if chemin.is_dir() {
+            if chemin.is_dir() && Self::selectionnable(&chemin) {
                 continue;
             }
             if Maildir::open(&chemin, &self.hote, fresh_uid_validity()).is_err() {
