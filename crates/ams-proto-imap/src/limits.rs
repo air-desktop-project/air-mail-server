@@ -56,11 +56,16 @@ impl Limits {
     pub const DEFAULT: Self = Self {
         max_line_octets: 8192,
         max_tag_octets: 32,
-        // Un mébioctet : de quoi porter un nom de boîte, une recherche, un
-        // mot de passe. **Pas de quoi porter un message** — `APPEND` demandera
-        // un chemin qui écoule au fil de l'eau, comme le `DATA` de SMTP, et ce
-        // chemin n'existe pas encore.
-        max_literal_octets: 1_048_576,
+        // Soixante-quatre kibioctets : de quoi porter un nom de boîte, une
+        // recherche, un mot de passe. **Pas de quoi porter un message** —
+        // `APPEND` demandera un chemin qui écoule au fil de l'eau, comme le
+        // `DATA` de SMTP, et ce chemin n'existe pas encore.
+        //
+        // Cette valeur est aussi ce qu'une connexion peut RETENIR : le pilote
+        // accumule une commande entière avant de la traiter, et huit littéraux
+        // d'un mébioctet feraient huit mébioctets par connexion, pour un serveur
+        // qui n'a rien à en faire.
+        max_literal_octets: 65_536,
         max_literals: 8,
         max_response_octets: 8192,
     };

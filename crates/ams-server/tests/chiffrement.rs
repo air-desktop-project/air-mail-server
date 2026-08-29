@@ -150,6 +150,7 @@ fn configuration_pop3(
         dmarc: ams_config::Dmarc::default(),
         accounts: comptes.to_string(),
         listen_pop3: pop3.to_string(),
+        listen_imap: String::new(),
     };
     let chemin = atelier.0.join("ams.conf");
     std::fs::write(&chemin, ams_config::encode(&config).expect("encodable")).expect("écriture");

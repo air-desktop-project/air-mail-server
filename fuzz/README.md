@@ -779,6 +779,7 @@ coûterait du courrier sans rien protéger — on ne les interprète jamais.
 | 2026-08-29 | `fuzz_ams_imap` | 11 944 609 (241 s) | 0 |
 | 2026-08-29 | `fuzz_ams_imap` (avec les arguments) | 7 738 126 (151 s) | 0 |
 | 2026-08-29 | `fuzz_ams_session_imap` | 3 058 685 (221 s) | 0 |
+| 2026-08-29 | `fuzz_ams_config` (avec l'écoute IMAP) | 208 794 (71 s) | 0 |
 | 2026-08-29 | `fuzz_ams_config` (avec SPF) | 193 256 (61 s) | 0 |
 | 2026-08-29 | `fuzz_ams_session_smtp` (avec SPF) | 381 710 (61 s) | 0 |
 | 2026-08-28 | `fuzz_ams_session_smtp` (SASL) | 521 646 (91 s) | 0 |

@@ -20,6 +20,8 @@ ams-guard = { workspace = true }
 ams-index = { workspace = true }
 ams-loop-tokio = { workspace = true }
 ams-proto-pop3 = { workspace = true }
+# IMAP : le binaire nomme les bornes du décodeur, comme pour les deux autres.
+ams-proto-imap = { workspace = true }
 ams-proto-smtp = { workspace = true }
 ams-session = { workspace = true }
 ams-store = { workspace = true }

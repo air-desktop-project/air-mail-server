@@ -1,0 +1,427 @@
+//! Le pilote d'une connexion IMAP : il lit, il écrit, il ne décide de rien.
+//!
+//! # Ce qu'il sait du protocole : trois choses, et pas une de plus
+//!
+//! 1. **qu'une commande ne se découpe pas au premier `CRLF`** — c'est
+//!    `ams_proto_imap::CommandReader` qui le sait, et le pilote se contente de
+//!    lui redonner un tampon qui grandit ;
+//! 2. qu'une réponse s'écrit telle quelle ;
+//! 3. que la session lui dit quoi faire ensuite.
+//!
+//! Ni le vocabulaire, ni les états, ni les capacités : tout cela vit dans
+//! `ams-session` et `ams-proto-imap`, c'est-à-dire dans le périmètre couvert à
+//! 100 %, et n'aura pas à être réécrit pour Air.
+//!
+//! # LE TAMPON GRANDIT, ET IL EST BORNÉ PAR LA GRAMMAIRE
+//!
+//! Un pilote SMTP ou POP3 lit dans un tampon de taille fixe : une ligne y tient
+//! ou ne tient pas. Une commande IMAP, elle, porte des littéraux, et sa longueur
+//! n'est connue qu'en la lisant. Le tampon grandit donc au fil de l'eau — et ce
+//! qui l'empêche de croître sans fin n'est pas une taille choisie ici, mais les
+//! bornes du découpage : un littéral trop gros, trop de littéraux, une ligne
+//! trop longue sont refusés **avant** que le moindre octet ne soit lu.
+//!
+//! # Une commande indécodable ferme la connexion
+//!
+//! Quand la syntaxe est fautive, on ne sait plus où la commande se termine.
+//! Reprendre la lecture laisserait le client choisir ce qu'on lira comme une
+//! commande — exactement la faille que le découpage existe pour fermer. On le
+//! dit, et l'on raccroche.
+
+use ams_guard::{Event as GuardEvent, Source, Verdict};
+use ams_proto_imap::{CommandReader, Limits, Need};
+use ams_session::Authenticator;
+use ams_session::imap::{Action, Session};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
+
+use crate::connection::lire;
+use crate::{Error, SharedGuard};
+
+/// Ce qu'un service IMAP apporte à chacune de ses connexions.
+#[derive(Clone)]
+pub struct ImapService<'a> {
+    /// Les bornes du décodeur (C3).
+    pub limits: Limits,
+    /// Le garde anti-flooding (C8), partagé par toutes les connexions.
+    pub guard: &'a SharedGuard,
+    /// Les délais.
+    pub timeouts: crate::Timeouts,
+    /// De quoi chiffrer, si le service sait le faire.
+    ///
+    /// **Sans elle, `LOGIN` et `AUTHENTICATE` sont refusés** : la session
+    /// l'impose sans réglage possible, et ce service ne servira donc personne.
+    /// Un IMAP sans TLS n'est pas un IMAP dégradé, c'est un IMAP inutile — et le
+    /// dire ici évite de le découvrir en production.
+    pub tls: Option<std::sync::Arc<rustls::ServerConfig>>,
+}
+
+/// Ce qu'une connexion IMAP a fait.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ImapSummary {
+    /// Commandes traitées.
+    pub commands: u64,
+    /// La session a-t-elle été chiffrée ?
+    pub tls: bool,
+    /// Le pair s'est-il authentifié ?
+    pub authenticated: bool,
+    /// Le pair était-il banni ? **Rien ne lui a alors été dit.**
+    pub banned: bool,
+}
+
+/// Sert une connexion IMAP jusqu'à sa fin.
+///
+/// # Errors
+///
+/// [`Error::Timeout`], [`Error::Io`], ou [`Error::CapabilityNotSupported`] si le
+/// service annonce `STARTTLS` sans matériel TLS.
+pub async fn serve_imap_connection<S, A>(
+    stream: &mut S,
+    service: &ImapService<'_>,
+    auth: A,
+    source: Source,
+) -> Result<ImapSummary, Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    A: Authenticator,
+{
+    let mut resume = ImapSummary::default();
+
+    // ON NE PARLE PAS À UN BANNI. Interroger le garde ne compte pas comme un
+    // événement : demander son avis ne doit pas nourrir ses compteurs.
+    if matches!(service.guard.verdict(source), Verdict::Banned { .. }) {
+        resume.banned = true;
+        return Ok(resume);
+    }
+
+    let accepteur = service
+        .tls
+        .as_ref()
+        .map(|configuration| tokio_rustls::TlsAcceptor::from(std::sync::Arc::clone(configuration)));
+    let mut session = Session::new(service.limits, accepteur.is_some(), auth);
+    let mut etat = Etat::neuf(&service.limits);
+
+    if matches!(
+        service.guard.observe(source, GuardEvent::Connection),
+        Verdict::Throttled | Verdict::Banned { .. }
+    ) {
+        let refus = session.unavailable(&mut etat.sortie)?;
+        stream.write_all(refus).await?;
+        stream.flush().await?;
+        return Ok(resume);
+    }
+
+    let banniere = session.greeting(&mut etat.sortie)?;
+    stream.write_all(banniere).await?;
+    stream.flush().await?;
+
+    match conduire(stream, &mut session, &mut etat, service, source).await? {
+        Etape::Terminee => {
+            resume.merge(&etat, &session);
+            return Ok(resume);
+        }
+        Etape::Chiffrement => {}
+    }
+
+    // Inatteignable : la session n'offre `STARTTLS` que si l'accepteur existe.
+    // Comme ailleurs dans cette crate — étage 3, hors du 100 % de C2 — on rend
+    // une erreur plutôt que de faire tomber un serveur.
+    let Some(accepteur) = accepteur else {
+        return Err(Error::CapabilityNotSupported);
+    };
+    let mut chiffre = match tokio::time::timeout(
+        service.timeouts.handshake,
+        accepteur.accept(&mut *stream),
+    )
+    .await
+    {
+        Ok(Ok(flux)) => flux,
+        // Une poignée de main ratée après un `OK` est une trame invalide au sens
+        // de C8 : le pair a demandé le chiffrement, puis n'a pas su le conduire.
+        Ok(Err(cause)) => {
+            service.guard.observe(source, GuardEvent::InvalidFrame);
+            resume.merge(&etat, &session);
+            return Err(Error::Io(cause));
+        }
+        Err(_) => {
+            service.guard.observe(source, GuardEvent::InvalidFrame);
+            resume.merge(&etat, &session);
+            return Err(Error::Timeout);
+        }
+    };
+    session.on_tls_established();
+    etat.tls = true;
+    // §6.2.1 : tout ce qui précède est oublié, LE TAMPON COMPRIS. Ce qui restait
+    // à lire a été envoyé en clair, donc peut-être par quelqu'un d'autre ; le
+    // traiter après la poignée de main reviendrait à lui faire confiance.
+    etat.rempli = 0;
+    etat.lecteur.reset();
+
+    let etape = conduire(&mut chiffre, &mut session, &mut etat, service, source).await?;
+    debug_assert_eq!(etape, Etape::Terminee, "un second STARTTLS a été demandé");
+    // `close_notify` avant de raccrocher : il dit au pair que la fin est VOULUE.
+    let _ = chiffre.shutdown().await;
+    resume.merge(&etat, &session);
+    Ok(resume)
+}
+
+/// Ce qui survit à la montée en chiffrement.
+struct Etat {
+    /// Le tampon d'accumulation, qui grandit avec les littéraux.
+    tampon: Vec<u8>,
+    rempli: usize,
+    /// De quoi lire un morceau à la fois.
+    morceau: Vec<u8>,
+    sortie: Vec<u8>,
+    lecteur: CommandReader,
+    commands: u64,
+    tls: bool,
+}
+
+impl Etat {
+    fn neuf(limits: &Limits) -> Self {
+        Self {
+            // On commence petit : la plupart des commandes tiennent sur une
+            // ligne, et une connexion qui n'en envoie que de courtes ne doit pas
+            // payer la place d'un littéral qu'elle n'utilisera jamais.
+            tampon: Vec::with_capacity(1024),
+            rempli: 0,
+            morceau: vec![0_u8; 4096],
+            // Deux lignes de réponse : `CAPABILITY` et `LOGOUT` en écrivent
+            // chacune deux, et rien n'en écrit davantage.
+            sortie: vec![
+                0_u8;
+                limits
+                    .max_response_octets
+                    .saturating_mul(2)
+                    .saturating_add(64)
+            ],
+            lecteur: CommandReader::new(),
+            commands: 0,
+            tls: false,
+        }
+    }
+}
+
+impl ImapSummary {
+    fn merge<A: Authenticator>(&mut self, etat: &Etat, session: &Session<A>) {
+        self.commands = etat.commands;
+        self.tls = etat.tls;
+        self.authenticated = session.state() != ams_session::imap::State::NotAuthenticated;
+    }
+}
+
+/// Pourquoi le pilote a rendu la main.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Etape {
+    Terminee,
+    Chiffrement,
+}
+
+/// Le pilote proprement dit.
+async fn conduire<S, A>(
+    stream: &mut S,
+    session: &mut Session<A>,
+    etat: &mut Etat,
+    service: &ImapService<'_>,
+    source: Source,
+) -> Result<Etape, Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    A: Authenticator,
+{
+    loop {
+        let vu = etat.tampon.get(..etat.rempli).unwrap_or_default();
+        let besoin = match etat.lecteur.poll(vu, &service.limits) {
+            Ok(besoin) => besoin,
+            Err(_) => {
+                // ON NE SAIT PLUS OÙ LA COMMANDE SE TERMINE. On le dit, et l'on
+                // raccroche : reprendre laisserait le client choisir ce qu'on
+                // lira comme une commande.
+                service.guard.observe(source, GuardEvent::InvalidFrame);
+                let adieu = session.cannot_parse(&mut etat.sortie)?;
+                stream.write_all(adieu).await?;
+                stream.flush().await?;
+                return Ok(Etape::Terminee);
+            }
+        };
+
+        let longueur = match besoin {
+            Need::More => {
+                let lus = lire(stream, &mut etat.morceau, service.timeouts.command).await?;
+                if lus == 0 {
+                    // Le pair a raccroché sans `LOGOUT`. Rien à faire de plus :
+                    // aucune boîte n'est ouverte, donc rien n'est en attente.
+                    return Ok(Etape::Terminee);
+                }
+                etat.tampon
+                    .extend_from_slice(etat.morceau.get(..lus).unwrap_or_default());
+                etat.rempli = etat.rempli.saturating_add(lus);
+                continue;
+            }
+            Need::Continuation => {
+                let invite = session.literal_continuation(&mut etat.sortie)?;
+                stream.write_all(invite).await?;
+                stream.flush().await?;
+                continue;
+            }
+            Need::Complete(longueur) => longueur,
+        };
+
+        let commande = etat.tampon.get(..longueur).unwrap_or_default();
+        let tour = session.handle(commande, &mut etat.sortie)?;
+        let action = tour.action();
+        let faute = tour.peer_fault();
+        stream.write_all(tour.reply()).await?;
+        stream.flush().await?;
+        etat.commands = etat.commands.saturating_add(1);
+
+        etat.tampon.drain(..longueur.min(etat.tampon.len()));
+        etat.rempli = etat.rempli.saturating_sub(longueur);
+        etat.lecteur.reset();
+
+        let evenement = if faute {
+            GuardEvent::InvalidFrame
+        } else {
+            GuardEvent::Command
+        };
+        if matches!(
+            service.guard.observe(source, evenement),
+            Verdict::Throttled | Verdict::Banned { .. }
+        ) {
+            let refus = session.unavailable(&mut etat.sortie)?;
+            stream.write_all(refus).await?;
+            stream.flush().await?;
+            return Ok(Etape::Terminee);
+        }
+
+        match action {
+            Action::Continue => {}
+            Action::StartTls => return Ok(Etape::Chiffrement),
+            Action::Close => return Ok(Etape::Terminee),
+            Action::ReadAuthResponse => {
+                if lire_la_reponse_sasl(stream, session, etat, service, source).await? {
+                    return Ok(Etape::Terminee);
+                }
+            }
+        }
+    }
+}
+
+/// Lit la ligne qui répond à un défi SASL, et la donne à la session.
+///
+/// Rend `true` s'il faut fermer.
+async fn lire_la_reponse_sasl<S, A>(
+    stream: &mut S,
+    session: &mut Session<A>,
+    etat: &mut Etat,
+    service: &ImapService<'_>,
+    source: Source,
+) -> Result<bool, Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    A: Authenticator,
+{
+    // UNE RÉPONSE SASL EST UNE LIGNE, pas une commande : elle ne porte ni tag,
+    // ni littéral, et se termine au premier `CRLF`. Lui appliquer le découpage
+    // des commandes lui ferait chercher une syntaxe qu'elle n'a pas.
+    loop {
+        let vu = etat.tampon.get(..etat.rempli).unwrap_or_default();
+        if let Some(rang) = vu.windows(2).position(|paire| paire == b"\r\n") {
+            let ligne = etat.tampon.get(..rang).unwrap_or_default().to_vec();
+            etat.tampon
+                .drain(..rang.saturating_add(2).min(etat.tampon.len()));
+            etat.rempli = etat.rempli.saturating_sub(rang.saturating_add(2));
+            let tour = session.on_auth_response(&ligne, &mut etat.sortie)?;
+            let faute = tour.peer_fault();
+            stream.write_all(tour.reply()).await?;
+            stream.flush().await?;
+            let evenement = if faute {
+                GuardEvent::InvalidFrame
+            } else {
+                GuardEvent::Command
+            };
+            return Ok(matches!(
+                service.guard.observe(source, evenement),
+                Verdict::Throttled | Verdict::Banned { .. }
+            ));
+        }
+        if vu.len() > service.limits.max_line_octets {
+            // Une réponse SASL plus longue qu'une ligne de commande n'en est
+            // pas une : on ferme, comme pour une commande indécodable.
+            let adieu = session.cannot_parse(&mut etat.sortie)?;
+            stream.write_all(adieu).await?;
+            stream.flush().await?;
+            return Ok(true);
+        }
+        let lus = lire(stream, &mut etat.morceau, service.timeouts.command).await?;
+        if lus == 0 {
+            return Ok(true);
+        }
+        etat.tampon
+            .extend_from_slice(etat.morceau.get(..lus).unwrap_or_default());
+        etat.rempli = etat.rempli.saturating_add(lus);
+    }
+}
+
+/// Sert des connexions IMAP jusqu'à l'arrêt.
+///
+/// # Errors
+///
+/// Une erreur d'entrée-sortie sur l'écouteur.
+pub async fn serve_imap<A, S>(
+    listener: tokio::net::TcpListener,
+    limits: Limits,
+    auth: std::sync::Arc<A>,
+    guard: std::sync::Arc<SharedGuard>,
+    options: crate::ServeOptions,
+    shutdown: S,
+) -> Result<crate::Stats, Error>
+where
+    A: Authenticator + Send + Sync + 'static,
+    S: core::future::Future<Output = ()>,
+{
+    let places = std::sync::Arc::new(tokio::sync::Semaphore::new(options.max_connections));
+    let mut stats = crate::Stats::default();
+    let mut arret = core::pin::pin!(shutdown);
+
+    loop {
+        let acceptee = tokio::select! {
+            // `biased` : l'arrêt est examiné EN PREMIER. Un serveur qu'on ne
+            // peut pas arrêter sous charge est un serveur qu'on finit par tuer.
+            biased;
+            () = &mut arret => return Ok(stats),
+            acceptee = listener.accept() => acceptee,
+        };
+        let (flux, pair) = match acceptee {
+            Ok(connexion) => connexion,
+            Err(_) => {
+                stats.failed = stats.failed.saturating_add(1);
+                continue;
+            }
+        };
+        stats.accepted = stats.accepted.saturating_add(1);
+
+        let Ok(place) = std::sync::Arc::clone(&places).acquire_owned().await else {
+            return Ok(stats);
+        };
+        let auth = std::sync::Arc::clone(&auth);
+        let guard = std::sync::Arc::clone(&guard);
+        let timeouts = options.timeouts;
+        let tls = options.tls.clone();
+
+        tokio::spawn(async move {
+            let mut flux = flux;
+            let service = ImapService {
+                limits,
+                guard: &guard,
+                timeouts,
+                tls,
+            };
+            // Le résultat n'est pas remonté : une connexion qui échoue ne
+            // regarde qu'elle. Le journal viendra avec `air-log`.
+            let _ =
+                serve_imap_connection(&mut flux, &service, &*auth, crate::source_de(pair)).await;
+            drop(place);
+        });
+    }
+}

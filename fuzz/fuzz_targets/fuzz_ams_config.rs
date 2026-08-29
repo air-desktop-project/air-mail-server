@@ -54,6 +54,8 @@ struct Entree {
     /// L'adresse d'écoute POP3 — libre, y compris absurde : cette crate ne
     /// l'interprète pas, et c'est l'appelant qui la lit.
     ecoute_pop3: String,
+    /// L'adresse d'écoute IMAP — libre elle aussi, et pour la même raison.
+    ecoute_imap: String,
     /// Des comptes — noms et adresses LIBRES : vides, en double, invalides comme
     /// noms de répertoire. Ce sont exactement les cas que le décodeur refuse, et
     /// les contraindre ici cacherait ces refus au lieu de les éprouver.
@@ -156,6 +158,7 @@ fuzz_target!(|entree: Entree| {
         },
         accounts: entree.comptes.clone(),
         listen_pop3: entree.ecoute_pop3.clone(),
+        listen_imap: entree.ecoute_imap.clone(),
     };
 
     let Ok(ecrit) = encode(&original) else {

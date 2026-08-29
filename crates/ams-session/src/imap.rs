@@ -252,6 +252,46 @@ impl<A: Authenticator> Session<A> {
         encode_continuation(out, b"ready for literal", &self.limits).map_err(Error::Reply)
     }
 
+    /// Ce qu'on dit à un pair qu'on ne servira pas maintenant.
+    ///
+    /// Le garde (C8) l'a écarté : on le lui dit, et l'on ferme. `BYE` est la
+    /// seule réponse qu'un serveur puisse émettre sans qu'une commande l'ait
+    /// demandée (§7.1.5), et c'est exactement le cas ici.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Reply`] si `out` ne suffit pas.
+    pub fn unavailable<'b>(&self, out: &'b mut [u8]) -> Result<&'b [u8], Error> {
+        encode_untagged(
+            out,
+            b"BYE [UNAVAILABLE] Service temporarily unavailable",
+            &self.limits,
+        )
+        .map_err(Error::Reply)
+    }
+
+    /// Ce qu'on dit avant de raccrocher sur une commande indécodable.
+    ///
+    /// # POURQUOI ON FERME PLUTÔT QUE DE REPRENDRE
+    ///
+    /// Une commande IMAP se termine là où sa syntaxe le dit — un `CRLF` hors
+    /// littéral. Quand cette syntaxe est fautive, **on ne sait plus où elle se
+    /// termine** : reprendre la lecture reviendrait à laisser le client choisir
+    /// ce qu'on lira comme une commande, ce qui est exactement la faille que le
+    /// découpage existe pour fermer.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Reply`] si `out` ne suffit pas.
+    pub fn cannot_parse<'b>(&self, out: &'b mut [u8]) -> Result<&'b [u8], Error> {
+        encode_untagged(
+            out,
+            b"BAD Command could not be parsed; closing connection",
+            &self.limits,
+        )
+        .map_err(Error::Reply)
+    }
+
     /// Reprend après la poignée de main.
     ///
     /// **Tout ce qui précède est oublié** (RFC 9051 §6.2.1) : ce qui a été dit

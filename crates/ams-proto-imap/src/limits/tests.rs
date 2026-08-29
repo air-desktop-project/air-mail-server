@@ -9,7 +9,7 @@ fn les_bornes_par_defaut_sont_celles_qu_on_a_choisies() {
     // Les autres viennent d'ici, et les noms de champ ne prétendent pas
     // autrement.
     assert_eq!(Limits::DEFAULT.max_tag_octets, 32);
-    assert_eq!(Limits::DEFAULT.max_literal_octets, 1_048_576);
+    assert_eq!(Limits::DEFAULT.max_literal_octets, 65_536);
     assert_eq!(Limits::DEFAULT.max_literals, 8);
     assert_eq!(Limits::DEFAULT.max_response_octets, 8192);
 }

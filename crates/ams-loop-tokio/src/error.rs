@@ -36,6 +36,12 @@ pub enum Error {
     /// Un vocabulaire séparé, comme du côté de la session : celui de SMTP parle
     /// de phase de données et de destinataires, dont POP3 n'a que faire.
     Pop3(ams_session::pop3::Error),
+
+    /// La session IMAP a refusé quelque chose à cette boucle.
+    ///
+    /// Un vocabulaire séparé, comme les deux autres : celui d'IMAP parle
+    /// d'échange SASL et de session close, dont SMTP et POP3 n'ont que faire.
+    Imap(ams_session::imap::Error),
 }
 
 impl fmt::Display for Error {
@@ -52,6 +58,7 @@ impl fmt::Display for Error {
             Error::Io(cause) => write!(f, "entrée-sortie : {cause}"),
             Error::Session(cause) => write!(f, "session : {cause}"),
             Error::Pop3(cause) => write!(f, "session POP3 : {cause}"),
+            Error::Imap(cause) => write!(f, "session IMAP : {cause}"),
         }
     }
 }
@@ -80,5 +87,11 @@ impl From<ams_session::Error> for Error {
 impl From<ams_session::pop3::Error> for Error {
     fn from(cause: ams_session::pop3::Error) -> Self {
         Error::Pop3(cause)
+    }
+}
+
+impl From<ams_session::imap::Error> for Error {
+    fn from(cause: ams_session::imap::Error) -> Self {
+        Error::Imap(cause)
     }
 }

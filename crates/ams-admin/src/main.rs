@@ -198,6 +198,14 @@ fn afficher(config: &Configuration) {
             &config.listen_pop3
         }
     );
+    println!(
+        "écoute IMAP        {}",
+        if config.listen_imap.is_empty() {
+            "(aucune — IMAP n'est pas servi)"
+        } else {
+            &config.listen_imap
+        }
+    );
     println!("boîte              {}", config.maildir);
     println!(
         "domaines hébergés  {}",

@@ -773,9 +773,37 @@ que la commande est correcte et permise et que c'est ce serveur qui ne la sert
 pas. Les servir demande un magasin qui porte des UID stables et des marques
 persistantes, ce que Maildir ne fait pas seul et ce à quoi `ams-index` existe.
 `APPEND` demandera en plus un chemin qui écoule au fil de l'eau, comme le `DATA`
-de SMTP : la borne d'un littéral est aujourd'hui d'un mébioctet, ce qui suffit à
-un nom de boîte ou à une recherche, et pas à un message. Et la BOUCLE IMAP
-n'existe pas : rien n'écoute encore sur le port 143.
+de SMTP : la borne d'un littéral est de soixante-quatre kibioctets, ce qui suffit
+à un nom de boîte ou à une recherche, et pas à un message.
+
+### La boucle, depuis le 2026-08-29
+
+Le port 143 écoute (`--listen-imap`). Le pilote ne sait du protocole que trois
+choses : qu'une commande ne se découpe pas au premier `CRLF`, qu'une réponse
+s'écrit telle quelle, et que la session lui dit quoi faire ensuite.
+
+LE TAMPON GRANDIT, ET IL EST BORNÉ PAR LA GRAMMAIRE. Les pilotes SMTP et POP3
+lisent dans un tampon de taille fixe : une ligne y tient ou n'y tient pas. La
+longueur d'une commande IMAP, elle, n'est connue qu'en la lisant. Ce qui empêche
+le tampon de croître sans fin n'est donc pas une taille choisie dans le pilote,
+mais les bornes du découpage — refusées **avant** que le moindre octet ne soit
+lu. C'est la raison pour laquelle la borne d'un littéral est passée d'un
+mébioctet à soixante-quatre kibioctets : ce que la grammaire admet, une connexion
+doit pouvoir le retenir.
+
+UNE COMMANDE INDÉCODABLE FERME LA CONNEXION. Quand la syntaxe est fautive, on ne
+sait plus où la commande se termine ; reprendre la lecture laisserait le client
+choisir ce qu'on lira comme une commande. Un tag illisible, lui, ne ferme rien :
+la commande était lisible, c'est son tag qui ne l'était pas.
+
+Après `STARTTLS`, le tampon est vidé lui aussi : ce qui restait à lire a été
+envoyé en clair, donc peut-être par quelqu'un d'autre, et le traiter après la
+poignée de main reviendrait à lui faire confiance.
+
+Éprouvé jusqu'au binaire : bannière avec `LOGINDISABLED`, `LOGIN` refusé en
+clair, `STARTTLS`, capacités qui deviennent `AUTH=PLAIN`, `LOGIN` par littéral
+synchronisant avec sa demande de continuation, `SELECT` répondu
+`NO [UNAVAILABLE]`, `LOGOUT`.
 
 ## Le client SMTP sortant, depuis le 2026-08-29
 

@@ -509,6 +509,38 @@ fn un_verbe_inconnu_se_dit_avec_le_tag() {
 
 // ── LE RESTE ────────────────────────────────────────────────────────────────
 
+/// **`BYE` est la seule réponse qu'un serveur puisse émettre sans qu'une
+/// commande l'ait demandée** (§7.1.5), et c'est exactement le cas quand le garde
+/// écarte un pair.
+#[test]
+fn l_indisponibilite_se_dit_sans_tag() {
+    let mut sortie = [0_u8; 128];
+    assert_eq!(
+        nouvelle(false)
+            .unavailable(&mut sortie)
+            .expect("composable"),
+        b"* BYE [UNAVAILABLE] Service temporarily unavailable\r\n"
+    );
+}
+
+/// **On ne sait plus où la commande se termine** : reprendre la lecture
+/// laisserait le client choisir ce qu'on lira comme une commande.
+#[test]
+fn une_commande_indecodable_se_dit_avant_de_raccrocher() {
+    let mut sortie = [0_u8; 128];
+    assert_eq!(
+        nouvelle(false)
+            .cannot_parse(&mut sortie)
+            .expect("composable"),
+        b"* BAD Command could not be parsed; closing connection\r\n"
+    );
+    // Les deux ont aussi besoin de place.
+    let mut court = [0_u8; 4];
+    let session = nouvelle(false);
+    assert!(session.unavailable(&mut court).is_err());
+    assert!(session.cannot_parse(&mut court).is_err());
+}
+
 #[test]
 fn la_demande_de_continuation_s_ecrit() {
     let mut sortie = [0_u8; 64];

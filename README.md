@@ -443,12 +443,31 @@ n'y a rien à désigner — et le recopier pour le dire serait précisément
 l'injection que sa validation ferme. On répond alors par `*`, la seule forme qui
 n'affirme rien.
 
+**Le port 143 écoute**, avec `--listen-imap`. Le pilote ne sait du protocole que
+trois choses : qu'une commande ne se découpe pas au premier `CRLF`, qu'une
+réponse s'écrit telle quelle, et que la session lui dit quoi faire ensuite.
+
+Là où les pilotes SMTP et POP3 lisent dans un tampon de taille fixe — une ligne y
+tient ou n'y tient pas — **celui-ci fait grandir le sien**, parce que la longueur
+d'une commande IMAP n'est connue qu'en la lisant. Ce qui l'empêche de croître
+sans fin n'est pas une taille choisie dans le pilote, mais les bornes du
+découpage : un littéral trop gros, trop de littéraux, une ligne trop longue sont
+refusés **avant** que le moindre octet ne soit lu.
+
+**Une commande indécodable ferme la connexion.** Quand la syntaxe est fautive, on
+ne sait plus où la commande se termine ; reprendre la lecture laisserait le
+client choisir ce qu'on lira comme une commande — exactement la faille que le
+découpage existe pour fermer. Un tag illisible, lui, ne ferme rien : la commande
+était lisible, c'est son tag qui ne l'était pas.
+
 Ce qui n'y est pas : **les boîtes**. `SELECT`, `LIST`, `FETCH` et les autres sont
 reconnus, leur état est vérifié, et la session répond `NO [UNAVAILABLE]` — `NO`
 et non `BAD`, parce que la commande est correcte et permise et que c'est ce
 serveur qui ne la sert pas. Les servir demande un magasin qui porte des UID
 stables et des marques persistantes, ce que Maildir ne fait pas seul. `APPEND`
 demandera en plus un chemin qui écoule au fil de l'eau, comme le `DATA` de SMTP.
+Le serveur le dit au démarrage plutôt que de laisser un port ouvert le faire
+croire.
 
 ## Émettre : le client SMTP sortant
 

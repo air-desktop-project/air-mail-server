@@ -68,6 +68,15 @@ struct Configuration {
   spf @13 :Spf;
 
   dmarc @14 :Dmarc;
+
+  # Où écouter en IMAP (RFC 9051), ou une chaîne vide.
+  #
+  # Vide, IMAP n'est pas servi. Comme `listen` et `listenPop3`, cette crate ne
+  # l'interprète pas : `core` ne sait pas lire une adresse de socket.
+  #
+  # SANS CERTIFICAT, CE PORT NE SERT PERSONNE : la session IMAP refuse `LOGIN`
+  # et `AUTHENTICATE` hors chiffrement, sans réglage possible (C6).
+  listenImap @15 :Text;
 }
 
 # TLS (C4, C14). Deux CHEMINS, et pas le matériel lui-même : une clé privée

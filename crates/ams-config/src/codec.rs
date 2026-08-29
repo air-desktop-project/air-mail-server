@@ -229,6 +229,11 @@ pub struct Configuration {
     /// un second lecteur écrit ici finirait par diverger de celui de la
     /// bibliothèque standard.
     pub listen_pop3: String,
+    /// Où écouter en IMAP, ou une chaîne vide.
+    ///
+    /// Vide, IMAP n'est pas servi. Comme les deux autres adresses, cette crate
+    /// ne l'interprète pas.
+    pub listen_imap: String,
     /// SPF : les résolveurs, et ce qu'on fait du verdict.
     pub spf: Spf,
     /// DMARC : la liste des suffixes publics, et ce qu'on fait du verdict.
@@ -379,6 +384,7 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
 
     let comptes = texte(lu.get_accounts()?)?;
     let ecoute_pop3 = texte(lu.get_listen_pop3()?)?;
+    let ecoute_imap = texte(lu.get_listen_imap()?)?;
 
     let verification = lu.get_spf()?;
     let mut resolveurs = Vec::new();
@@ -456,6 +462,7 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
         dmarc,
         accounts: comptes,
         listen_pop3: ecoute_pop3,
+        listen_imap: ecoute_imap,
     })
 }
 
@@ -544,6 +551,7 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
         }
         ecrit.set_accounts(&config.accounts);
         ecrit.set_listen_pop3(&config.listen_pop3);
+        ecrit.set_listen_imap(&config.listen_imap);
     }
     Ok(serialize::write_message_to_words(&message))
 }
@@ -608,6 +616,7 @@ mod tests {
             dmarc: Dmarc::default(),
             accounts: String::new(),
             listen_pop3: String::new(),
+            listen_imap: String::new(),
         }
     }
 
@@ -619,6 +628,7 @@ mod tests {
             },
             accounts: String::from("/etc/ams/comptes.bin"),
             listen_pop3: String::from("127.0.0.1:2110"),
+            listen_imap: String::from("127.0.0.1:2143"),
             // ET DES RÉSOLVEURS : le balayage qui corrompt chaque octet ne
             // traverse une liste de textes que si elle en porte.
             spf: Spf {
@@ -665,10 +675,12 @@ mod tests {
         let relue = decode(&encode(&original).expect("encodable")).expect("relisible");
         assert_eq!(relue.accounts, "/etc/ams/comptes.bin");
         assert_eq!(relue.listen_pop3, "127.0.0.1:2110");
+        assert_eq!(relue.listen_imap, "127.0.0.1:2143");
         // Et son absence se lit à une chaîne vide, pas à un drapeau.
         let sans = decode(&encode(&exemple()).expect("encodable")).expect("relisible");
         assert!(sans.accounts.is_empty());
         assert!(sans.listen_pop3.is_empty());
+        assert!(sans.listen_imap.is_empty());
     }
 
     #[test]

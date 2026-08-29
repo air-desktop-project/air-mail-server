@@ -46,6 +46,8 @@ pub struct Options {
     pub accounts: Option<PathBuf>,
     /// Où écouter en POP3. Vide : POP3 n'est pas servi.
     pub listen_pop3: Option<SocketAddr>,
+    /// Où écouter en IMAP. Absente : IMAP n'est pas servi.
+    pub listen_imap: Option<SocketAddr>,
     /// Les résolveurs DNS. Vide : SPF n'est pas vérifié.
     pub resolvers: Vec<SocketAddr>,
     /// Refuse-t-on un `fail`, ou se contente-t-on de le retenir ?
@@ -91,6 +93,7 @@ impl Default for Options {
             // PAS DE POP3 PAR DÉFAUT : un port ouvert qu'on n'a pas demandé est
             // une surface de plus, et celui-ci ne sert personne sans certificat.
             listen_pop3: None,
+            listen_imap: None,
             // PAS DE RÉSOLVEUR PAR DÉFAUT, et surtout pas celui du système : le
             // lire dans `/etc/resolv.conf` ferait interroger, sans que personne
             // l'ait demandé, un serveur qui n'est peut-être pas de confiance —
@@ -186,6 +189,10 @@ impl Options {
                 .listen_pop3
                 .map(|adresse| adresse.to_string())
                 .unwrap_or_default(),
+            listen_imap: self
+                .listen_imap
+                .map(|adresse| adresse.to_string())
+                .unwrap_or_default(),
         }
     }
 }
@@ -231,6 +238,7 @@ OPTIONS DE `config write`
     --tls-key <chemin>     clé privée, en PEM
     --accounts <chemin>    fichier de comptes (`air-mail-admin account add`)
     --listen-pop3 <adr>    où écouter en POP3 (défaut : pas de POP3)
+    --listen-imap <adr>    où écouter en IMAP (défaut : pas d'IMAP)
 
     LES DEUX OPTIONS TLS VONT ENSEMBLE, ou aucune. Avec elles, le serveur annonce
     `STARTTLS` et chiffre ; sans elles, il sert en clair et ne l'annonce pas. Il
@@ -240,10 +248,15 @@ OPTIONS DE `config write`
     Le serveur refuse de démarrer si la clé privée est lisible par tout le monde.
     Le partage par groupe, lui, reste permis.
 
-    POP3 EXIGE UN CERTIFICAT POUR SERVIR À QUELQUE CHOSE : la session y refuse
-    `USER`/`PASS` hors chiffrement, sans réglage possible. Un `--listen-pop3`
-    sans `--tls-cert` ouvre un port où personne ne pourra relever son courrier ;
-    le serveur le dit au démarrage.
+    POP3 ET IMAP EXIGENT UN CERTIFICAT POUR SERVIR À QUELQUE CHOSE : leurs
+    sessions refusent l'authentification hors chiffrement, sans réglage possible.
+    Un `--listen-pop3` ou un `--listen-imap` sans `--tls-cert` ouvre un port où
+    personne ne pourra relever son courrier ; le serveur le dit au démarrage.
+
+    IMAP NE SERT ENCORE AUCUNE BOÎTE : la session tient ses quatre états et
+    authentifie, mais `SELECT`, `LIST` et `FETCH` répondent qu'ils ne sont pas
+    servis. Le port est utile pour éprouver l'authentification, et pas pour lire
+    son courrier.
 
     LE MAGASIN DE COMPTES SERT DEUX CHOSES, et il faut les distinguer :
 
@@ -426,6 +439,14 @@ where
                         .map_err(|_| ArgError::new(format!("`{brute}` n'est pas une adresse")))?,
                 );
             }
+            "--listen-imap" => {
+                let brute = valeur()?;
+                options.listen_imap = Some(
+                    brute
+                        .parse()
+                        .map_err(|_| ArgError::new(format!("`{brute}` n'est pas une adresse")))?,
+                );
+            }
             "--max-connections" => {
                 let brute = valeur()?;
                 options.max_connections = brute
@@ -504,6 +525,30 @@ mod tests {
         // chaîne vide, pas à un drapeau qui pourrait la contredire.
         let sans = ecrire(&["--domain", "mail.example.com"]).en_configuration();
         assert!(sans.listen_pop3.is_empty());
+    }
+
+    #[test]
+    fn l_adresse_imap_traverse_jusqu_a_la_configuration() {
+        let config = ecrire(&[
+            "--domain",
+            "mail.example.com",
+            "--listen-imap",
+            "127.0.0.1:2143",
+        ])
+        .en_configuration();
+        assert_eq!(config.listen_imap, "127.0.0.1:2143");
+        let sans = ecrire(&["--domain", "mail.example.com"]).en_configuration();
+        assert!(sans.listen_imap.is_empty());
+    }
+
+    #[test]
+    fn une_adresse_imap_illisible_est_refusee() {
+        let erreur = parse(["--listen-imap", "pas-une-adresse"]).expect_err("refusé");
+        assert!(
+            erreur.message.contains("n'est pas une adresse"),
+            "{}",
+            erreur.message
+        );
     }
 
     #[test]

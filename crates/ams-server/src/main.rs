@@ -42,6 +42,7 @@ use std::time::Duration;
 
 use ams_auth::Account;
 use ams_config::{Configuration, Enforcement, Tls};
+use ams_loop_tokio::imap::serve_imap;
 use ams_loop_tokio::pop3::serve_pop3;
 use ams_loop_tokio::{
     DkimChecker, DmarcChecker, Relay, ReportSpool, SenderChecker, ServeOptions, SharedGuard,
@@ -619,6 +620,47 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         )))
     };
 
+    // ── LE SERVICE IMAP, S'IL EST DEMANDÉ ───────────────────────────────────
+    let imap = if options.listen_imap.is_empty() {
+        eprintln!("air-mail-server : IMAP non servi — aucune adresse d'écoute configurée");
+        None
+    } else {
+        let adresse: std::net::SocketAddr = options.listen_imap.parse().map_err(|_| {
+            format!(
+                "`{}` n'est pas une adresse d'écoute IMAP",
+                options.listen_imap
+            )
+        })?;
+        // SANS CERTIFICAT, CE PORT NE SERT PERSONNE : la session IMAP refuse
+        // `LOGIN` et `AUTHENTICATE` hors chiffrement, sans réglage possible (C6).
+        if options_de_service.tls.is_none() {
+            eprintln!(
+                "air-mail-server : ATTENTION — IMAP écoute sur {adresse} SANS certificat. \
+                 `LOGIN` et `AUTHENTICATE` y seront refusés (C6), donc personne ne pourra s'y \
+                 connecter."
+            );
+        }
+        let ecouteur = TcpListener::bind(adresse)
+            .await
+            .map_err(|erreur| format!("écoute IMAP sur {adresse} : {erreur}"))?;
+        // ON DIT CE QU'ON NE SERT PAS. Un port IMAP ouvert laisse croire à un
+        // service complet ; celui-ci authentifie et rien de plus, tant qu'aucune
+        // boîte ne s'ouvre.
+        eprintln!(
+            "air-mail-server : IMAP écoute sur {adresse} — AUCUNE BOÎTE N'EST SERVIE : la \
+             session authentifie, et `SELECT`, `LIST` et `FETCH` répondent qu'ils ne le sont \
+             pas encore."
+        );
+        Some(tokio::spawn(serve_imap(
+            ecouteur,
+            ams_proto_imap::Limits::DEFAULT,
+            Arc::clone(&politique),
+            Arc::clone(&garde),
+            options_de_service.clone(),
+            arret(),
+        )))
+    };
+
     let stats = serve(
         ecouteur,
         config,
@@ -647,6 +689,16 @@ async fn servir(fichier: &Path) -> Result<(), String> {
             ),
             Ok(Err(erreur)) => eprintln!("air-mail-server : POP3 : {erreur}"),
             Err(erreur) => eprintln!("air-mail-server : POP3 : {erreur}"),
+        }
+    }
+    if let Some(tache) = imap {
+        match tache.await {
+            Ok(Ok(stats_imap)) => eprintln!(
+                "air-mail-server : IMAP ; {} connexion(s) acceptée(s), {} refusée(s) par le noyau",
+                stats_imap.accepted, stats_imap.failed
+            ),
+            Ok(Err(erreur)) => eprintln!("air-mail-server : IMAP : {erreur}"),
+            Err(erreur) => eprintln!("air-mail-server : IMAP : {erreur}"),
         }
     }
 
