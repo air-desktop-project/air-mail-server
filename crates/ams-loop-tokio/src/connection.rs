@@ -14,6 +14,7 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
 
+use crate::dkim::{DkimChecker, DkimStream, DkimVerdict};
 use crate::{Delivery, DeliveryFailure, Error, SenderChecker, SharedGuard};
 
 /// Combien de lignes une réponse peut compter au plus.
@@ -88,6 +89,29 @@ pub struct Summary {
     pub authenticated: bool,
     /// Comment elle s'est terminée.
     pub outcome: Outcome,
+    /// Ce que les signatures DKIM ont donné.
+    pub dkim: DkimTally,
+}
+
+/// Le compte des verdicts DKIM d'une connexion.
+///
+/// # Un compte, et pas la liste
+///
+/// Le résumé d'une connexion est `Copy` — il traverse la boucle sans allouer —
+/// et une liste de domaines ne l'est pas. Ce qu'un journal veut à ce niveau,
+/// c'est de savoir COMBIEN ; ce que DMARC voudra, ce sont les résultats
+/// eux-mêmes, et il les prendra là où ils sont produits.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DkimTally {
+    /// Signatures vraies.
+    pub pass: u32,
+    /// Signatures fausses. **Ce n'est pas « messages faux »** : une liste de
+    /// diffusion qui ajoute un pied de page casse une signature honnête.
+    pub fail: u32,
+    /// Clés qu'on n'a pas pu résoudre.
+    pub temp_error: u32,
+    /// Signatures, clés ou algorithmes irrecevables.
+    pub perm_error: u32,
 }
 
 /// Ce qu'un service apporte à CHACUNE de ses connexions.
@@ -135,6 +159,12 @@ pub struct Service<'a> {
     /// une réponse qui ne viendrait pas. Le dire au démarrage vaut mieux que de
     /// le découvrir sur le premier `MAIL FROM:`.
     pub spf: Option<SenderChecker>,
+    /// De quoi vérifier les signatures DKIM (C9), si le service sait le faire.
+    ///
+    /// `None` ne refuse rien : DKIM ne décide d'aucun message, et un service qui
+    /// ne le vérifie pas sert exactement comme avant. C'est la différence avec
+    /// [`Service::spf`], dont la session ATTEND une réponse.
+    pub dkim: Option<DkimChecker>,
 }
 
 /// Ce qui survit à la montée en chiffrement.
@@ -467,15 +497,8 @@ where
             // La session vient de poser son défi ; la ligne suivante y répond.
             Action::ReadAuthResponse => reponse_sasl_attendue = true,
             Action::ReceiveData => {
-                let remis = recevoir_message(
-                    stream,
-                    session,
-                    delivery,
-                    etat,
-                    service.timeouts.data,
-                    source,
-                )
-                .await?;
+                let remis =
+                    recevoir_message(stream, session, delivery, etat, service, source).await?;
                 if remis {
                     etat.resume.messages = etat.resume.messages.saturating_add(1);
                 }
@@ -523,7 +546,7 @@ async fn recevoir_message<S, P, D>(
     session: &mut SmtpSession<'_, P>,
     delivery: &mut D,
     etat: &mut Etat,
-    delai: Duration,
+    service: &Service<'_>,
     source: Source,
 ) -> Result<bool, Error>
 where
@@ -566,10 +589,14 @@ where
     // corps serait lu comme des commandes.
     let mut refuse = false;
     let mut fini = false;
+    // La vérification DKIM (C9) suit le message OCTET PAR OCTET : son condensat
+    // porte sur le corps entier, et rassembler celui-ci laisserait le pair
+    // choisir combien de mémoire on lui consacre.
+    let mut dkim = service.dkim.as_ref().map(|_| DkimStream::new());
 
     while !fini {
         if etat.rempli == 0 {
-            let lus = lire(stream, &mut etat.lecture, delai).await?;
+            let lus = lire(stream, &mut etat.lecture, service.timeouts.data).await?;
             if lus == 0 {
                 // Le pair a raccroché en plein message : rien n'est remis.
                 delivery.abort();
@@ -588,6 +615,9 @@ where
                         // `append` n'est plus appelé du tout. Un tuple
                         // `(echec, delivery.append(..))` l'appellerait encore,
                         // et continuerait d'écrire dans une remise abandonnée.
+                        if let Some(flux) = dkim.as_mut() {
+                            flux.update(morceau);
+                        }
                         if echec.is_none()
                             && let Err(cause) = delivery.append(morceau)
                         {
@@ -605,6 +635,24 @@ where
                 fini = true;
             }
             Err(autre) => return Err(Error::Session(autre)),
+        }
+    }
+
+    // ON NE VÉRIFIE PAS CE QU'ON REFUSE. Chaque signature coûte une résolution
+    // DNS et une exponentiation modulaire ; les dépenser pour un message qu'on
+    // jette offrirait à un pair de faire travailler la machine sans rien livrer.
+    if !refuse
+        && echec.is_none()
+        && let (Some(flux), Some(verificateur)) = (dkim, service.dkim.as_ref())
+    {
+        for resultat in flux.finish(verificateur).await {
+            let compte = &mut etat.resume.dkim;
+            match resultat.verdict {
+                DkimVerdict::Pass => compte.pass = compte.pass.saturating_add(1),
+                DkimVerdict::Fail => compte.fail = compte.fail.saturating_add(1),
+                DkimVerdict::TempError => compte.temp_error = compte.temp_error.saturating_add(1),
+                DkimVerdict::PermError => compte.perm_error = compte.perm_error.saturating_add(1),
+            }
         }
     }
 
@@ -656,6 +704,7 @@ pub(crate) fn trouver_crlf(tampon: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::{Outcome, Service, Summary, Timeouts, serve_connection};
+    use crate::connection::DkimTally;
     use crate::{Delivery, DeliveryFailure, Error, SharedGuard};
     use ams_guard::{Source, Thresholds};
     use ams_proto_smtp::{Limits, Path};
@@ -773,6 +822,7 @@ mod tests {
             timeouts: Timeouts::default(),
             tls: None,
             spf: None,
+            dkim: None,
         };
         let resultat = serve_connection(&mut serveur, &service, NotreDomaine, boite, PAIR).await;
         drop(serveur);
@@ -954,6 +1004,7 @@ mod tests {
             },
             tls: None,
             spf: None,
+            dkim: None,
         };
         let resultat =
             serve_connection(&mut serveur, &service, NotreDomaine, &mut boite, PAIR).await;
@@ -1094,6 +1145,7 @@ mod tests {
                 tls: false,
                 authenticated: false,
                 outcome: Outcome::Served,
+                dkim: DkimTally::default(),
             }
         );
     }

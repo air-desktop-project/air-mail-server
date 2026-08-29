@@ -160,13 +160,14 @@ pub fn materiel(nom: &str) -> Option<Materiel> {
 
 // ── Un résolveur DNS de test ────────────────────────────────────────────────
 
-/// Monte un résolveur qui répond **la même politique SPF** à toute question
-/// `TXT`, et « ce nom n'existe pas » au reste.
+/// Monte un résolveur qui répond **le même `TXT`** à toute question `TXT`, et
+/// « ce nom n'existe pas » au reste.
 ///
-/// C'est tout ce qu'il faut pour éprouver le CÂBLAGE : ce que le résolveur sait
-/// faire de plus — `MX`, `PTR`, reprise en TCP, réponse usurpée — est éprouvé
-/// chez lui, sur un montage qui en dit bien davantage.
-pub async fn resolveur_spf(politique: &'static str) -> std::net::SocketAddr {
+/// Une politique SPF ou une clé DKIM : c'est le même enregistrement pour qui
+/// répond. Et c'est tout ce qu'il faut pour éprouver un CÂBLAGE — ce que le
+/// résolveur sait faire de plus (`MX`, `PTR`, reprise en TCP, réponse usurpée)
+/// est éprouvé chez lui, sur un montage qui en dit bien davantage.
+pub async fn resolveur_txt(texte: &'static str) -> std::net::SocketAddr {
     let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
         .await
         .expect("socket UDP");
@@ -194,7 +195,7 @@ pub async fn resolveur_spf(politique: &'static str) -> std::net::SocketAddr {
             reponse.extend_from_slice(question.get(12..fin).unwrap_or_default());
             if txt {
                 let mut donnees = Vec::new();
-                for morceau in politique.as_bytes().chunks(255) {
+                for morceau in texte.as_bytes().chunks(255) {
                     donnees.push(u8::try_from(morceau.len()).expect("morceau court"));
                     donnees.extend_from_slice(morceau);
                 }

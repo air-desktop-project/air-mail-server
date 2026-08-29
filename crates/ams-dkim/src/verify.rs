@@ -162,6 +162,59 @@ impl HeaderHasher {
     }
 }
 
+/// Condense les champs que `h=` nomme, **dans l'ordre et depuis le bas**.
+///
+/// `fields` est appelée autant de fois qu'il le faut : elle doit rendre les
+/// champs du message dans l'ordre où ils y figurent, du haut vers le bas. La
+/// crate n'alloue pas, et ne peut donc pas les retenir.
+///
+/// # Depuis le bas, et une seule fois chacun (RFC 6376 §5.4.2)
+///
+/// La `k`-ième mention d'un nom dans `h=` désigne la `k`-ième instance de ce
+/// champ **en partant du bas** du bloc d'en-tête. Ce n'est pas une bizarrerie :
+/// un relais qui AJOUTE un champ l'écrit en haut, et cette règle fait qu'un
+/// champ ajouté n'est jamais celui qu'on condense.
+///
+/// # Un nom qu'on ne trouve plus se traite comme ABSENT
+///
+/// Si `h=` nomme un champ trois fois et que le message n'en porte que deux, la
+/// troisième mention ne condense rien — et c'est ce qui ferme l'attaque par
+/// AJOUT : un signataire qui nomme `subject` deux fois alors qu'il n'y en a
+/// qu'un fait échouer la signature dès qu'un second apparaît.
+pub fn hash_signed_headers<'a, F, I>(
+    signature: &Signature<'_>,
+    hasher: &mut HeaderHasher,
+    fields: F,
+) where
+    F: Fn() -> I,
+    I: Iterator<Item = (&'a [u8], &'a [u8])>,
+{
+    for (rang, nom) in signature.signed_headers().enumerate() {
+        // Combien de fois ce nom a-t-il déjà été demandé avant ce rang ?
+        let deja = signature
+            .signed_headers()
+            .take(rang)
+            .filter(|autre| autre.eq_ignore_ascii_case(nom))
+            .count();
+        let combien = fields()
+            .filter(|(present, _)| present.eq_ignore_ascii_case(nom))
+            .count();
+        // La `deja + 1`-ième instance EN PARTANT DU BAS.
+        let Some(indice) = combien.checked_sub(deja.saturating_add(1)) else {
+            continue;
+        };
+        // `into_iter` plutôt qu'un `if let` : l'instance existe forcément —
+        // `indice` est strictement inférieur au nombre qu'on vient de compter —
+        // et une garde qu'aucun message ne pourrait emprunter n'est pas une
+        // garde.
+        fields()
+            .filter(|(present, _)| present.eq_ignore_ascii_case(nom))
+            .nth(indice)
+            .into_iter()
+            .for_each(|(present, valeur)| hasher.field(present, valeur));
+    }
+}
+
 /// Vérifie une signature contre une clé publique.
 ///
 /// `body` est le condensat rendu par [`BodyHasher::finish`], `headers` celui de

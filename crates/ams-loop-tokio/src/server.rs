@@ -3,6 +3,7 @@
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use ams_guard::Source;
 use ams_session::{Config, Policy};
@@ -10,7 +11,9 @@ use rustls::ServerConfig;
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 
-use crate::{Delivery, Error, SenderChecker, Service, SharedGuard, Timeouts, serve_connection};
+use crate::{
+    Delivery, DkimChecker, Error, SenderChecker, Service, SharedGuard, Timeouts, serve_connection,
+};
 
 /// Ce qui borne le service.
 ///
@@ -44,6 +47,10 @@ pub struct ServeOptions {
     /// n'est pas `Ignore` sans ce champ fait échouer chaque connexion — au
     /// démarrage plutôt qu'au premier `MAIL FROM:`.
     pub spf: Option<SenderChecker>,
+    /// De quoi vérifier les signatures DKIM (C9).
+    ///
+    /// Voir [`Service::dkim`] : son absence ne refuse rien.
+    pub dkim: Option<DkimChecker>,
 }
 
 impl Default for ServeOptions {
@@ -53,6 +60,7 @@ impl Default for ServeOptions {
             timeouts: Timeouts::default(),
             tls: None,
             spf: None,
+            dkim: None,
         }
     }
 }
@@ -64,6 +72,63 @@ pub struct Stats {
     pub accepted: u64,
     /// Acceptations que le noyau a refusées.
     pub failed: u64,
+    /// Ce que les signatures DKIM ont donné, toutes connexions confondues.
+    ///
+    /// # Pourquoi ici, et pas dans un journal
+    ///
+    /// Parce qu'il n'y en a pas encore. Un verdict qu'on ne rend nulle part ne
+    /// sert à rien — c'est ce qu'on a écrit pour SPF, et cela vaut ici. En
+    /// attendant `air-log`, ce compte-là est ce que le serveur peut dire, et il
+    /// le dit à l'arrêt.
+    pub dkim: DkimSums,
+}
+
+/// Le compte des verdicts DKIM, sur toute la durée du service.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DkimSums {
+    /// Signatures vraies.
+    pub pass: u64,
+    /// Signatures fausses.
+    pub fail: u64,
+    /// Clés qu'on n'a pas pu résoudre.
+    pub temp_error: u64,
+    /// Signatures, clés ou algorithmes irrecevables.
+    pub perm_error: u64,
+}
+
+/// Les mêmes comptes, partagés par les tâches de connexion.
+///
+/// Une tâche par connexion, et chacune rend son résumé à personne : c'est ce
+/// compteur-là qui les rassemble. Des entiers atomiques suffisent — il n'y a
+/// rien à lire en cours de route, seulement à ajouter.
+#[derive(Debug, Default)]
+struct CompteurDkim {
+    pass: AtomicU64,
+    fail: AtomicU64,
+    temp_error: AtomicU64,
+    perm_error: AtomicU64,
+}
+
+impl CompteurDkim {
+    fn ajouter(&self, tally: crate::connection::DkimTally) {
+        self.pass
+            .fetch_add(u64::from(tally.pass), Ordering::Relaxed);
+        self.fail
+            .fetch_add(u64::from(tally.fail), Ordering::Relaxed);
+        self.temp_error
+            .fetch_add(u64::from(tally.temp_error), Ordering::Relaxed);
+        self.perm_error
+            .fetch_add(u64::from(tally.perm_error), Ordering::Relaxed);
+    }
+
+    fn sommes(&self) -> DkimSums {
+        DkimSums {
+            pass: self.pass.load(Ordering::Relaxed),
+            fail: self.fail.load(Ordering::Relaxed),
+            temp_error: self.temp_error.load(Ordering::Relaxed),
+            perm_error: self.perm_error.load(Ordering::Relaxed),
+        }
+    }
 }
 
 /// Accepte des connexions et les sert, jusqu'à l'arrêt demandé.
@@ -102,6 +167,7 @@ where
 
     let places = Arc::new(Semaphore::new(options.max_connections));
     let fabrique = Arc::new(make_delivery);
+    let comptes_dkim = Arc::new(CompteurDkim::default());
     let mut stats = Stats::default();
     let mut arret = core::pin::pin!(shutdown);
 
@@ -112,7 +178,7 @@ where
             // serveur qu'on ne peut pas arrêter sous charge est un serveur qu'on
             // finit par tuer.
             biased;
-            () = &mut arret => return Ok(stats),
+            () = &mut arret => return Ok(avec_dkim(stats, &comptes_dkim)),
             acceptee = listener.accept() => acceptee,
         };
 
@@ -130,8 +196,9 @@ where
 
         let Ok(place) = Arc::clone(&places).acquire_owned().await else {
             // Le sémaphore n'est jamais fermé : ce chemin ne s'emprunte pas.
-            return Ok(stats);
+            return Ok(avec_dkim(stats, &comptes_dkim));
         };
+        let comptes = Arc::clone(&comptes_dkim);
         let policy = Arc::clone(&policy);
         let guard = Arc::clone(&guard);
         let fabrique = Arc::clone(&fabrique);
@@ -141,6 +208,7 @@ where
         // gratuit à l'acceptation.
         let tls = options.tls.clone();
         let spf = options.spf.clone();
+        let dkim = options.dkim.clone();
 
         tokio::spawn(async move {
             let mut flux = flux;
@@ -151,13 +219,26 @@ where
                 timeouts,
                 tls,
                 spf,
+                dkim,
             };
-            // Le résultat n'est pas remonté : une connexion qui échoue ne
-            // regarde qu'elle. Le journal viendra avec `air-log`.
-            let _ =
-                serve_connection(&mut flux, &service, &*policy, &mut remise, source_de(pair)).await;
+            // L'ÉCHEC d'une connexion ne regarde qu'elle — le journal viendra
+            // avec `air-log`. Ce qu'elle a CONCLU des signatures, en revanche,
+            // se rassemble : un verdict qu'on ne rend nulle part ne sert à rien.
+            if let Ok(resume) =
+                serve_connection(&mut flux, &service, &*policy, &mut remise, source_de(pair)).await
+            {
+                comptes.ajouter(resume.dkim);
+            }
             drop(place);
         });
+    }
+}
+
+/// Verse les comptes DKIM dans le résumé du service.
+fn avec_dkim(stats: Stats, comptes: &CompteurDkim) -> Stats {
+    Stats {
+        dkim: comptes.sommes(),
+        ..stats
     }
 }
 
@@ -172,7 +253,7 @@ pub fn source_de(adresse: SocketAddr) -> Source {
 
 #[cfg(test)]
 mod tests {
-    use super::{ServeOptions, Stats, serve, source_de};
+    use super::{DkimSums, ServeOptions, Stats, serve, source_de};
     use crate::{Delivery, DeliveryFailure, Error, SharedGuard, Timeouts};
     use ams_guard::{Source, Thresholds};
     use ams_proto_smtp::{Limits, Path};
@@ -359,7 +440,8 @@ mod tests {
             Stats::default(),
             Stats {
                 accepted: 0,
-                failed: 0
+                failed: 0,
+                dkim: DkimSums::default(),
             }
         );
         assert!(!format!("{:?}", Stats::default()).is_empty());

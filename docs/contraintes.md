@@ -444,10 +444,45 @@ deuxième crate de l'étage 2 dans ce cas, après `ams-config`, et la différenc
 compte : ce qui est alloué ici vient d'un pair. Les deux bornes sur les clés sont
 ce qui empêche ce pair de choisir combien.
 
-Ce qui n'est pas outillé : **la signature à l'émission**, et le câblage dans la
-boucle. `ams-dmarc` reste vide, et tant qu'il l'est, DMARC ne conclut rien —
-c'est pourtant lui qui rapproche le verdict SPF de l'en-tête `From:` que lira
-l'humain.
+**Le câblage est là depuis le 2026-08-29.** La boucle retient le bloc d'en-tête
+pendant que le corps s'écoule, condense en flux, va chercher la clé sous
+`<sélecteur>._domainkey.<domaine>`, et verse le verdict dans le résumé de la
+connexion — que le serveur annonce à l'arrêt. Éprouvé de bout en bout, jusqu'au
+binaire : un message signé par OpenSSL, une clé servie par un vrai résolveur sur
+une socket locale, et « 1 signature vraie » au journal.
+
+### Le verdict n'arrive qu'après le corps, et rien n'est écrit dans le message
+
+SPF conclut au `MAIL FROM:` — avant que le message existe. DKIM signe le corps :
+son verdict ne peut pas être connu avant le dernier octet. Un en-tête de résultat
+se pose EN TÊTE ; l'écrire demanderait donc soit de garder tout le message, soit
+de le récrire. Les deux méritent leur propre décision, et c'est DMARC qui la
+portera — avec l'`Authentication-Results` (RFC 8601) qui rapportera les trois
+méthodes ensemble. En attendant, le verdict va au seul endroit qui existe : le
+compte que le serveur rend à l'arrêt.
+
+### DKIM ne refuse aucun message, et c'est voulu
+
+Une signature qui échoue ne dit pas qu'un message est faux : une liste de
+diffusion qui ajoute un pied de page casse une signature parfaitement honnête.
+RFC 7489 le pose — c'est DMARC qui rapproche un `pass` du domaine de l'en-tête
+`From:`, et lui seul qui décide. Il n'y a donc **aucun réglage** à écrire ici :
+la vérification a lieu dès qu'un résolveur est configuré, et n'oppose rien.
+
+### Deux bornes contre l'amplification
+
+Chaque signature coûte **une résolution DNS et une exponentiation modulaire**. Un
+message qui en porterait cent ferait travailler la machine cent fois pour un seul
+envoi : **cinq au plus sont vérifiées**. Et le bloc d'en-tête, qui doit être
+retenu en entier pour condenser les champs que `h=` nomme, est borné à 256 Kio —
+au-delà, on renonce à vérifier plutôt que de laisser un pair choisir combien de
+mémoire il occupe. On ne vérifie pas non plus ce qu'on refuse : dépenser une clé
+et une exponentiation pour un message qu'on jette offrirait de faire travailler
+la machine sans rien livrer.
+
+Ce qui n'est pas outillé : **la signature à l'émission**. `ams-dmarc` reste vide,
+et tant qu'il l'est, DMARC ne conclut rien — c'est pourtant lui qui rapproche les
+verdicts SPF et DKIM de l'en-tête `From:` que lira l'humain.
 
 ### DNSSEC n'est pas validé, et c'est écrit partout
 

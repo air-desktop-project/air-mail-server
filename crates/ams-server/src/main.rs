@@ -43,7 +43,9 @@ use std::time::Duration;
 use ams_auth::Account;
 use ams_config::{Configuration, Enforcement, Tls};
 use ams_loop_tokio::pop3::serve_pop3;
-use ams_loop_tokio::{SenderChecker, ServeOptions, SharedGuard, Timeouts, refuse_root, serve};
+use ams_loop_tokio::{
+    DkimChecker, SenderChecker, ServeOptions, SharedGuard, Timeouts, refuse_root, serve,
+};
 use ams_session::{Capabilities, Config, SenderPolicy};
 use ams_store::Maildir;
 use tokio::net::TcpListener;
@@ -304,12 +306,19 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         }
     );
     if !resolveurs.is_empty() {
+        // DKIM (C9) vérifie dès qu'il y a un résolveur, sans réglage de plus :
+        // il ne décide d'aucun message — c'est DMARC qui décidera — donc il n'y
+        // a rien à activer ni à opposer.
+        eprintln!(
+            "air-mail-server : DKIM vérifié sur les mêmes résolveurs — les verdicts vont au \
+             journal, et n'opposent rien (c'est DMARC qui décidera)"
+        );
         // On ne valide pas DNSSEC : un `pass` ne vaut que ce que vaut le chemin
         // jusqu'au résolveur. Le taire laisserait croire à une garantie qui
         // n'existe pas.
         eprintln!(
-            "air-mail-server : SPF fait CONFIANCE à ces résolveurs — DNSSEC n'est pas validé. \
-             Un résolveur local, ou joint par un lien maîtrisé, est ce que cela suppose."
+            "air-mail-server : SPF et DKIM font CONFIANCE à ces résolveurs — DNSSEC n'est pas \
+             validé. Un résolveur local, ou joint par un lien maîtrisé, est ce que cela suppose."
         );
     }
 
@@ -420,6 +429,13 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         // n'annonce alors pas `STARTTLS`, et le serveur sert en clair sans
         // mentir à personne.
         tls: chiffrement,
+        // DKIM VÉRIFIE DÈS QU'IL Y A UN RÉSOLVEUR, sans réglage de plus : il ne
+        // décide d'aucun message — c'est DMARC qui décidera — donc il n'y a rien
+        // à activer ni à opposer. Ce sont les mêmes serveurs que SPF, la même
+        // confiance, et le démarrage l'a déjà dit.
+        dkim: verificateur
+            .as_ref()
+            .map(|checker| DkimChecker::new(checker.resolver().clone())),
         // `None` quand aucun résolveur n'est nommé — et la session ne demande
         // alors aucune vérification. Les deux vont ensemble, et la boucle refuse
         // l'assemblage inverse avant même la bannière.
@@ -501,6 +517,17 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         "air-mail-server : arrêt ; {} connexion(s) acceptée(s), {} refusée(s) par le noyau",
         stats.accepted, stats.failed
     );
+    // ON DIT CE QU'ON A CONCLU. Un verdict qu'on ne rend nulle part ne sert à
+    // rien : en attendant `air-log`, ce compte-là est ce que le serveur peut
+    // dire des signatures qu'il a vérifiées.
+    if politique_expediteur != SenderPolicy::Ignore {
+        let dkim = stats.dkim;
+        eprintln!(
+            "air-mail-server : DKIM ; {} signature(s) vraie(s), {} fausse(s), {} clé(s) \
+             injoignable(s), {} irrecevable(s)",
+            dkim.pass, dkim.fail, dkim.temp_error, dkim.perm_error
+        );
+    }
     Ok(())
 }
 

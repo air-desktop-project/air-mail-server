@@ -82,7 +82,7 @@ des octets **et des actions**. Elles n'attendent jamais.
 | `ams-guard` | flooding et bannissement par source | **implémenté** |
 | `ams-auth` | le magasin d'identifiants, vérification Argon2id | **implémenté** |
 | `ams-tls` | TLS 1.3 uniquement, échange de clés post-quantique | **implémenté** |
-| `ams-dkim` | RFC 6376 | **signatures vérifiées** |
+| `ams-dkim` | RFC 6376 | **signatures vérifiées, et câblées dans la boucle** |
 | `ams-spf` | RFC 7208 | **évalué, câblé, et écrit dans le message** |
 | `ams-dmarc` | RFC 7489 | vide |
 | `ams-config` | les trois formats binaires : configuration, comptes, index | **implémenté** |
@@ -209,9 +209,34 @@ n'a ajouté aucun paquet au `Cargo.lock` : trois arêtes, et rien d'autre. C'est
 pur Rust (C4), et c'est ce qui a fait pencher la balance contre une bibliothèque
 DKIM toute faite.
 
-Ce qui reste : **la signature à l'émission**, et le câblage dans la boucle — avec
-la résolution de `<sélecteur>._domainkey.<domaine>` rendue sous forme d'action,
-comme `ams-spf` le fait de ses questions.
+**La vérification est câblée dans la boucle** : le bloc d'en-tête est retenu
+pendant que le corps s'écoule, le condensat se calcule en flux, la clé se
+cherche sous `<sélecteur>._domainkey.<domaine>`, et le verdict rejoint le résumé
+de la connexion — que le serveur annonce à l'arrêt.
+
+**Le verdict n'arrive qu'après le corps, et cela change tout.** SPF conclut au
+`MAIL FROM:`, avant que le message existe ; DKIM signe le corps, donc son verdict
+ne peut pas être connu avant le dernier octet. Deux conséquences : le condensat
+se calcule morceau par morceau — rassembler le message laisserait un pair choisir
+combien de mémoire on lui consacre — et **rien n'est écrit dans le message**. Un
+en-tête de résultat se pose en tête, or à ce moment-là le corps n'a pas été lu :
+l'écrire demanderait de garder tout le message ou de le récrire, et ces deux
+décisions appartiennent à DMARC, qui les portera avec le reste.
+
+**DKIM ne décide de rien tout seul, et ne refuse aucun message.** Une signature
+qui échoue ne dit pas qu'un message est faux : une liste de diffusion qui ajoute
+un pied de page casse une signature parfaitement honnête. RFC 7489 le pose —
+c'est DMARC qui rapproche un `pass` du domaine de l'en-tête `From:`, et lui seul
+qui décide.
+
+Deux bornes protègent le vérificateur de qui l'emploierait comme amplificateur :
+**le bloc d'en-tête est borné** (au-delà, on renonce à vérifier plutôt que de
+laisser un pair choisir la mémoire), et **cinq signatures au plus sont
+vérifiées** — chacune coûte une résolution DNS et une exponentiation modulaire,
+et un message qui en porterait cent ferait travailler la machine cent fois pour
+un seul envoi. On ne vérifie pas non plus ce qu'on refuse.
+
+Ce qui reste : **la signature à l'émission**.
 
 `ams-dns` : le codec d'un message DNS — une question encodée, une réponse
 décodée. **Un client stub, et rien de plus** : ce serveur pose des questions, il

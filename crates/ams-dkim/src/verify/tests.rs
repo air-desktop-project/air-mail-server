@@ -533,3 +533,79 @@ fn trente_deux_octets_ne_font_pas_toujours_une_cle_ed25519() {
         Err(Error::SignatureMismatch)
     );
 }
+
+// ── LE CHOIX DES CHAMPS SIGNÉS (§5.4.2) ─────────────────────────────────────
+
+/// Condense les champs de `message` que `h=` nomme, et rend le condensat.
+fn condensat_choisi(h: &str, message: &[(&[u8], &[u8])]) -> [u8; DIGEST_LEN] {
+    let valeur = std::format!(
+        "v=1; a=rsa-sha256; c=relaxed/relaxed; d=example.com; s=x; bh={BH_RFC}; h={h}; b=AAAA"
+    );
+    let signature = Signature::parse(valeur.as_bytes()).expect("lisible");
+    let mut condensat = HeaderHasher::new(Canon::Relaxed);
+    super::hash_signed_headers(&signature, &mut condensat, || message.iter().copied());
+    condensat.finish()
+}
+
+#[test]
+fn les_champs_se_prennent_depuis_le_bas() {
+    // RFC 6376 §5.4.2. Un relais qui AJOUTE un champ l'écrit en haut : cette
+    // règle fait qu'un champ ajouté n'est jamais celui qu'on condense.
+    let deux_sujets: [(&[u8], &[u8]); 3] = [
+        (b"Subject", b" ajoute par un relais"),
+        (b"From", b" jean@example.com"),
+        (b"Subject", b" le vrai"),
+    ];
+    let un_seul: [(&[u8], &[u8]); 2] = [(b"From", b" jean@example.com"), (b"Subject", b" le vrai")];
+    assert_eq!(
+        condensat_choisi("from:subject", &deux_sujets),
+        condensat_choisi("from:subject", &un_seul),
+        "le sujet ajouté en haut a été condensé"
+    );
+}
+
+#[test]
+fn un_nom_nomme_deux_fois_prend_deux_instances() {
+    let deux: [(&[u8], &[u8]); 3] = [
+        (b"Received", b" par le premier"),
+        (b"Received", b" par le second"),
+        (b"From", b" jean@example.com"),
+    ];
+    // `received:received` prend le dernier PUIS l'avant-dernier. (`from` est
+    // là parce qu'une signature qui ne le couvre pas est refusée à la lecture.)
+    let attendu = {
+        let mut condensat = HeaderHasher::new(Canon::Relaxed);
+        condensat.field(b"From", b" jean@example.com");
+        condensat.field(b"Received", b" par le second");
+        condensat.field(b"Received", b" par le premier");
+        condensat.finish()
+    };
+    assert_eq!(condensat_choisi("from:received:received", &deux), attendu);
+}
+
+#[test]
+fn un_nom_qu_on_ne_trouve_plus_se_traite_comme_absent() {
+    // C'EST CE QUI FERME L'ATTAQUE PAR AJOUT : un signataire qui nomme `subject`
+    // deux fois alors qu'il n'y en a qu'un fait échouer la signature dès qu'un
+    // second apparaît — parce qu'alors, ce second sera condensé.
+    let un_seul: [(&[u8], &[u8]); 2] = [(b"From", b" jean@example.com"), (b"Subject", b" le vrai")];
+    let attendu = {
+        let mut condensat = HeaderHasher::new(Canon::Relaxed);
+        condensat.field(b"From", b" jean@example.com");
+        condensat.field(b"Subject", b" le vrai");
+        condensat.finish()
+    };
+    assert_eq!(condensat_choisi("from:subject:subject", &un_seul), attendu);
+
+    // Et le même message avec un sujet AJOUTÉ ne rend plus le même condensat :
+    // la seconde mention trouve désormais quelque chose.
+    let ajoute: [(&[u8], &[u8]); 3] = [
+        (b"Subject", b" ajoute"),
+        (b"From", b" jean@example.com"),
+        (b"Subject", b" le vrai"),
+    ];
+    assert_ne!(condensat_choisi("from:subject:subject", &ajoute), attendu);
+
+    // Un nom que le message ne porte pas du tout ne condense rien non plus.
+    assert_eq!(condensat_choisi("from:subject:absent", &un_seul), attendu);
+}

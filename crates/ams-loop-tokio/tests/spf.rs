@@ -24,7 +24,7 @@ use ams_loop_tokio::{Delivery, DeliveryFailure};
 use ams_loop_tokio::{SenderChecker, Service, SharedGuard, Timeouts, serve_connection};
 use ams_proto_smtp::Limits;
 use ams_session::{Config, SenderPolicy};
-use commun::{Neant, NotreDomaine, PAIR, nulle_part, resolveur_spf};
+use commun::{Neant, NotreDomaine, PAIR, nulle_part, resolveur_txt};
 use core::time::Duration;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -58,6 +58,7 @@ async fn dialogue(
             timeouts: Timeouts::default(),
             tls: None,
             spf,
+            dkim: None,
         };
         serve_connection(&mut flux, &service, NotreDomaine, &mut Neant, PAIR).await
     });
@@ -110,7 +111,7 @@ fn reponse_au_mail(lues: &[String]) -> &str {
 async fn un_expediteur_refuse_par_sa_propre_politique_est_refuse() {
     // Le domaine dit lui-même que cette adresse n'a pas le droit d'émettre pour
     // lui. C'est le SEUL verdict qui refuse.
-    let resolveur = resolveur_spf("v=spf1 ip4:203.0.113.0/24 -all").await;
+    let resolveur = resolveur_txt("v=spf1 ip4:203.0.113.0/24 -all").await;
     let lues = dialogue(
         SenderPolicy::Enforce,
         Some(resolveur),
@@ -126,7 +127,7 @@ async fn un_expediteur_refuse_par_sa_propre_politique_est_refuse() {
 async fn un_refus_abandonne_la_transaction() {
     // Sans cela, un pair refusé au `MAIL FROM:` enchaînerait ses destinataires
     // comme si de rien n'était.
-    let resolveur = resolveur_spf("v=spf1 -all").await;
+    let resolveur = resolveur_txt("v=spf1 -all").await;
     let lues = dialogue(
         SenderPolicy::Enforce,
         Some(resolveur),
@@ -144,7 +145,7 @@ async fn un_refus_abandonne_la_transaction() {
 
 #[tokio::test]
 async fn un_expediteur_autorise_passe() {
-    let resolveur = resolveur_spf("v=spf1 ip4:127.0.0.0/8 -all").await;
+    let resolveur = resolveur_txt("v=spf1 ip4:127.0.0.0/8 -all").await;
     let lues = dialogue(
         SenderPolicy::Enforce,
         Some(resolveur),
@@ -160,7 +161,7 @@ async fn un_expediteur_autorise_passe() {
 async fn en_observation_rien_n_est_oppose() {
     // C'est l'état où l'on découvre ce qu'une politique refuserait AVANT de la
     // laisser refuser.
-    let resolveur = resolveur_spf("v=spf1 -all").await;
+    let resolveur = resolveur_txt("v=spf1 -all").await;
     let lues = dialogue(
         SenderPolicy::Observe,
         Some(resolveur),
@@ -217,6 +218,7 @@ async fn verifier_sans_verificateur_est_refuse_avant_la_banniere() {
             timeouts: Timeouts::default(),
             tls: None,
             spf: None,
+            dkim: None,
         };
         serve_connection(&mut flux, &service, NotreDomaine, &mut Neant, PAIR).await
     });
@@ -273,6 +275,7 @@ async fn message_remis(
             timeouts: Timeouts::default(),
             tls: None,
             spf,
+            dkim: None,
         };
         let mut remise = copie;
         serve_connection(&mut flux, &service, NotreDomaine, &mut remise, PAIR).await
@@ -324,7 +327,7 @@ async fn le_message_remis_porte_l_en_tete_received_spf() {
     // UN VERDICT QU'ON N'ÉCRIT PAS NE SERT À RIEN : sans cet en-tête, ni le
     // lecteur, ni un filtre en aval, ni DMARC ne peuvent savoir ce qu'on a
     // vérifié.
-    let resolveur = resolveur_spf("v=spf1 ip4:127.0.0.0/8 -all").await;
+    let resolveur = resolveur_txt("v=spf1 ip4:127.0.0.0/8 -all").await;
     let remis = message_remis(
         SenderPolicy::Enforce,
         Some(resolveur),
@@ -354,7 +357,7 @@ async fn un_softfail_est_remis_avec_sa_trace() {
     // En observation, rien n'est opposé — mais TOUT est écrit. C'est l'état où
     // l'on découvre ce qu'une politique refuserait, et il ne sert à rien si le
     // message ne porte pas ce qu'on a conclu.
-    let resolveur = resolveur_spf("v=spf1 ~all").await;
+    let resolveur = resolveur_txt("v=spf1 ~all").await;
     let remis = message_remis(
         SenderPolicy::Observe,
         Some(resolveur),

@@ -19,6 +19,12 @@ ams-spf = { workspace = true }
 # Le codec DNS. La boucle parle au résolveur ; le format, lui, s'éprouve à
 # l'étage 1.
 ams-dns = { workspace = true }
+# DKIM (C9) : la boucle conduit la vérification — elle seule a le droit
+# d'attendre une clé — mais elle n'en décide rien.
+ams-dkim = { workspace = true }
+# Le squelette d'un message : la boucle doit découper un bloc d'en-tête en
+# champs pour savoir lesquels une signature couvre.
+ams-mime = { workspace = true }
 tokio = { workspace = true }
 tokio-rustls = { workspace = true }
 # `rustls` est nommée pour un SEUL type : `ServerConfig`, qui figure dans la
