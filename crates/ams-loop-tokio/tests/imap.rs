@@ -636,3 +636,49 @@ async fn un_expunge_traverse_la_socket() {
     let referme = jusqu_a(&mut lecteur, "a005 ").await;
     assert_eq!(referme, "a005 OK UNSELECT completed\r\n");
 }
+
+/// **`SEARCH` traverse la socket**, et rend un `ESEARCH` en une ligne.
+#[tokio::test]
+async fn une_recherche_traverse_la_socket() {
+    let Some(materiel) = materiel("imap-search") else {
+        return;
+    };
+    let mut lecteur = authentifiee(&materiel).await;
+    lecteur
+        .get_mut()
+        .write_all(b"a003 SELECT INBOX\r\n")
+        .await
+        .expect("écriture");
+    jusqu_a(&mut lecteur, "a003 ").await;
+
+    lecteur
+        .get_mut()
+        .write_all(b"a004 SEARCH ALL\r\n")
+        .await
+        .expect("écriture");
+    let tout = jusqu_a(&mut lecteur, "a004 ").await;
+    assert_eq!(
+        tout,
+        "* ESEARCH (TAG \"a004\") ALL 1:2\r\na004 OK SEARCH completed\r\n"
+    );
+
+    lecteur
+        .get_mut()
+        .write_all(b"a005 UID SEARCH LARGER 40\r\n")
+        .await
+        .expect("écriture");
+    let grands = jusqu_a(&mut lecteur, "a005 ").await;
+    assert_eq!(
+        grands,
+        "* ESEARCH (TAG \"a005\") UID ALL 1:2\r\na005 OK UID SEARCH completed\r\n"
+    );
+
+    // Un critère qu'on ne sert pas est refusé, pas rendu faux.
+    lecteur
+        .get_mut()
+        .write_all(b"a006 SEARCH SUBJECT facture\r\n")
+        .await
+        .expect("écriture");
+    let refus = jusqu_a(&mut lecteur, "a006 ").await;
+    assert!(refus.starts_with("a006 NO [CANNOT]"), "{refus}");
+}

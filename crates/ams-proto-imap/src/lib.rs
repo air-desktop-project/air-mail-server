@@ -34,6 +34,7 @@ mod flags;
 mod frame;
 mod limits;
 mod response;
+mod search;
 mod sequence;
 mod store;
 mod tag;
@@ -48,6 +49,7 @@ pub use limits::Limits;
 pub use response::{
     Status, encode_continuation, encode_tagged, encode_untagged, encode_untagged_parts,
 };
+pub use search::{Candidate, SEARCH_DEPTH_MAX, SEARCH_KEYS_MAX, Search};
 pub use sequence::{Ranges, SequenceSet};
 pub use store::{Store, StoreMode};
 pub use tag::Tag;

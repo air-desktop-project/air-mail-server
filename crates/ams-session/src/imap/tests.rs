@@ -182,6 +182,13 @@ impl Mailboxes for Boites {
                 message(20, 200, Flags::NONE, 0),
                 message(30, 300, Flags::NONE, 0),
             ],
+            // Deux messages aux UID les plus grands qui soient : de quoi
+            // composer une plage de vingt-six octets, plus longue qu'un tampon
+            // qui a pourtant suffi à l'en-tête.
+            b"Grande" => std::vec![
+                message(u32::MAX.saturating_sub(1), 10, Flags::NONE, 0),
+                message(u32::MAX, 10, Flags::NONE, 0),
+            ],
             b"Archives" | b"Archives/2026" => std::vec::Vec::new(),
             _ => return None,
         };
@@ -602,8 +609,7 @@ fn ce_qu_on_ne_sert_pas_encore_le_dit_sans_accuser_le_client() {
     // hors d'état, et non hors de service.
     dire(&mut session, b"a011 SELECT INBOX\r\n");
     for commande in [
-        &b"a013 SEARCH ALL\r\n"[..],
-        b"a015 COPY 1 Archives\r\n",
+        &b"a015 COPY 1 Archives\r\n"[..],
         b"a016 MOVE 1 Archives\r\n",
     ] {
         let (texte, _) = dire(&mut session, commande);
@@ -1429,7 +1435,7 @@ fn un_uid_autre_que_fetch_ou_store_se_refuse_en_le_disant() {
     let mut session = selectionnee();
     let (texte, _) = dire(&mut session, b"a003 UID COPY 1 Archives\r\n");
     assert!(
-        texte.contains("NO [CANNOT] Only UID FETCH, UID STORE and UID EXPUNGE are served yet"),
+        texte.contains("NO [CANNOT] Only UID FETCH, STORE, EXPUNGE and SEARCH are served yet"),
         "{texte}"
     );
     // Et `UID` sans rien derrière ne trouve pas de verbe.
@@ -1926,5 +1932,300 @@ fn un_expunge_sans_boite_ouverte_est_hors_d_etat() {
     assert!(
         texte.contains("BAD Command is not allowed unless a mailbox is selected"),
         "{texte}"
+    );
+}
+
+// ── `SEARCH` ────────────────────────────────────────────────────────────────
+
+/// **IMAP4rev2 a remplacé `* SEARCH` par `* ESEARCH`** (§7.3.4), et les
+/// résultats y sont un ENSEMBLE, pas une liste.
+#[test]
+fn search_rend_un_esearch_et_comprime_ses_resultats() {
+    let mut session = selectionnee();
+    let fil = ecouler(&mut session, b"a003 SEARCH ALL\r\n");
+    assert_eq!(
+        fil,
+        "* ESEARCH (TAG \"a003\") ALL 1:3\r\na003 OK SEARCH completed\r\n"
+    );
+}
+
+/// **Rien trouvé, rien annoncé** : `ESEARCH` omet `ALL` plutôt que de rendre un
+/// ensemble vide, qui ne s'écrit pas.
+#[test]
+fn une_recherche_sans_resultat_omet_l_ensemble() {
+    let mut session = selectionnee();
+    let fil = ecouler(&mut session, b"a003 SEARCH ANSWERED DELETED\r\n");
+    assert_eq!(
+        fil,
+        "* ESEARCH (TAG \"a003\")\r\na003 OK SEARCH completed\r\n"
+    );
+}
+
+/// Les plages non contiguës se séparent par une virgule.
+#[test]
+fn les_resultats_epars_se_separent() {
+    let mut session = selectionnee();
+    // Les messages 1 et 3 : deux plages d'un seul élément.
+    let fil = ecouler(&mut session, b"a003 SEARCH OR 1 3\r\n");
+    assert_eq!(
+        fil,
+        "* ESEARCH (TAG \"a003\") ALL 1,3\r\na003 OK SEARCH completed\r\n"
+    );
+}
+
+/// **`UID SEARCH` rend des UID**, et le dit dans la réponse (§7.3.4).
+#[test]
+fn uid_search_rend_des_uid_et_l_annonce() {
+    let mut session = selectionnee();
+    let fil = ecouler(&mut session, b"a003 UID SEARCH NOT SEEN\r\n");
+    assert_eq!(
+        fil,
+        "* ESEARCH (TAG \"a003\") UID ALL 10,30\r\na003 OK UID SEARCH completed\r\n"
+    );
+}
+
+#[test]
+fn les_criteres_ordinaires_se_cherchent() {
+    let mut session = selectionnee();
+    for (commande, attendu) in [
+        // Des trois messages d'épreuve, seul le deuxième est `\Seen` et seul le
+        // troisième est `\Answered`.
+        (&b"a003 SEARCH UNSEEN\r\n"[..], "ALL 1,3"),
+        (b"a003 SEARCH SEEN\r\n", "ALL 2"),
+        (b"a003 SEARCH LARGER 150\r\n", "ALL 2:3"),
+        (b"a003 SEARCH SMALLER 250 SEEN\r\n", "ALL 2"),
+        (b"a003 SEARCH NOT SEEN\r\n", "ALL 1,3"),
+        (b"a003 SEARCH UID 20:*\r\n", "ALL 2:3"),
+        (b"a003 SEARCH 2:*\r\n", "ALL 2:3"),
+        (b"a003 SEARCH ANSWERED\r\n", "ALL 3"),
+        (b"a003 SEARCH OR SEEN ANSWERED\r\n", "ALL 2:3"),
+    ] {
+        let fil = ecouler(&mut session, commande);
+        assert!(fil.contains(attendu), "{commande:?} : {fil}");
+    }
+}
+
+/// **Le jeu de caractères est optionnel, et rev2 impose UTF-8.** Chercher dans
+/// un encodage qu'on ignore ferait rendre n'importe quoi.
+#[test]
+fn le_jeu_de_caracteres_se_lit_ou_se_refuse() {
+    let mut session = selectionnee();
+    let fil = ecouler(&mut session, b"a003 SEARCH CHARSET UTF-8 SEEN\r\n");
+    assert!(fil.contains("ALL 2\r\n"), "{fil}");
+    let aussi = ecouler(&mut session, b"a004 SEARCH CHARSET \"US-ASCII\" SEEN\r\n");
+    assert!(aussi.contains("ALL 2\r\n"), "{aussi}");
+    let (refus, _) = dire(&mut session, b"a005 SEARCH CHARSET ISO-8859-1 SEEN\r\n");
+    assert!(
+        refus.contains("NO [BADCHARSET (UTF-8 US-ASCII)]"),
+        "{refus}"
+    );
+}
+
+/// **Un critère qu'on ne sert pas est refusé, pas rendu faux.**
+#[test]
+fn un_critere_de_recherche_non_servi_se_refuse() {
+    let mut session = selectionnee();
+    let (texte, _) = dire(&mut session, b"a003 SEARCH SUBJECT facture\r\n");
+    assert!(
+        texte.contains("NO [CANNOT] This search key is not served yet"),
+        "{texte}"
+    );
+}
+
+#[test]
+fn un_search_mal_forme_est_une_faute() {
+    let mut session = selectionnee();
+    for commande in [
+        &b"a003 SEARCH\r\n"[..],
+        b"a004 SEARCH NOT\r\n",
+        b"a005 SEARCH (SEEN\r\n",
+        b"a006 SEARCH LARGER x\r\n",
+    ] {
+        let (texte, _) = dire(&mut session, commande);
+        assert!(
+            texte.contains("BAD SEARCH arguments are malformed"),
+            "{commande:?} : {texte}"
+        );
+    }
+}
+
+/// **Un critère plus long que ce qu'on retient est refusé plutôt que tronqué.**
+#[test]
+fn un_critere_trop_long_se_refuse() {
+    let mut session = selectionnee();
+    let mut commande = std::vec::Vec::from(&b"a003 SEARCH "[..]);
+    commande.resize(commande.len() + super::SEQUENCE_TEXT_MAX + 1, b'x');
+    commande.extend_from_slice(b"\r\n");
+    let (texte, _) = dire(&mut session, &commande);
+    assert!(
+        texte.contains("NO [CANNOT] Search criteria are too long"),
+        "{texte}"
+    );
+}
+
+/// **Une expression trop touffue est une borne, pas une faute de syntaxe.**
+#[test]
+fn une_expression_trop_touffue_se_refuse() {
+    let mut session = selectionnee();
+    let mut commande = std::vec::Vec::from(&b"a003 SEARCH "[..]);
+    for _ in 0..100 {
+        commande.extend_from_slice(b"SEEN ");
+    }
+    commande.extend_from_slice(b"\r\n");
+    let (texte, _) = dire(&mut session, &commande);
+    assert!(
+        texte.contains("NO [CANNOT] Search expression is too complex"),
+        "{texte}"
+    );
+
+    let mut profonde = std::vec::Vec::from(&b"a004 SEARCH "[..]);
+    for _ in 0..32 {
+        profonde.extend_from_slice(b"NOT ");
+    }
+    profonde.extend_from_slice(b"SEEN\r\n");
+    let (aussi, _) = dire(&mut session, &profonde);
+    assert!(
+        aussi.contains("NO [CANNOT] Search expression is too complex"),
+        "{aussi}"
+    );
+}
+
+/// **Un `SEARCH` hors sélection est hors d'état, pas hors de service.**
+#[test]
+fn un_search_sans_boite_ouverte_est_hors_d_etat() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (texte, _) = dire(&mut session, b"a002 SEARCH ALL\r\n");
+    assert!(
+        texte.contains("BAD Command is not allowed unless a mailbox is selected"),
+        "{texte}"
+    );
+}
+
+/// **Un message que la boîte annonce sans le rendre ne correspond à rien**, et
+/// n'arrête pas le parcours.
+#[test]
+fn un_trou_dans_la_boite_n_arrete_pas_la_recherche() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut session, b"a002 SELECT Trouee\r\n");
+    let fil = ecouler(&mut session, b"a003 SEARCH ALL\r\n");
+    assert_eq!(
+        fil,
+        "* ESEARCH (TAG \"a003\") ALL 1,3\r\na003 OK SEARCH completed\r\n"
+    );
+}
+
+/// **Une commande de boîte hors sélection est hors d'état, pas hors de
+/// service** : `BAD` et non `NO [UNAVAILABLE]`, parce que c'est le client qui
+/// l'a demandée au mauvais moment.
+#[test]
+fn une_commande_de_boite_sans_selection_est_hors_d_etat() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    for commande in [
+        &b"a002 COPY 1 Archives\r\n"[..],
+        b"a003 MOVE 1 Archives\r\n",
+    ] {
+        let (texte, _) = dire(&mut session, commande);
+        assert!(
+            texte.contains("BAD Command is not allowed unless a mailbox is selected"),
+            "{commande:?} : {texte}"
+        );
+    }
+}
+
+/// **UNE LIGNE `ESEARCH` PEUT ÊTRE PLUS LONGUE QU'UN TAMPON.** C'est la seule
+/// réponse du serveur qui ne tienne pas forcément dans un morceau : elle se
+/// découpe, et **le découpage ne change pas ce que le client lit**. Un tampon
+/// trop court pour avancer d'un seul octet le dit, plutôt que de rendre du vide
+/// indéfiniment — ce qui serait une boucle sans fin chez l'appelant.
+#[test]
+fn une_recherche_se_decoupe_sans_changer_de_resultat() {
+    let attendu = "* ESEARCH (TAG \"a003\") ALL 1,3\r\na003 OK SEARCH completed\r\n";
+    let mut reference = selectionnee();
+    assert_eq!(ecouler(&mut reference, b"a003 SEARCH OR 1 3\r\n"), attendu);
+
+    for taille in 1..=64_usize {
+        let mut session = selectionnee();
+        let mut grand = [0_u8; 512];
+        session
+            .handle(b"a003 SEARCH OR 1 3\r\n", &mut grand)
+            .expect("traitable");
+        let mut fil = std::string::String::new();
+        let mut petit = std::vec![0_u8; taille];
+        let mut refuse = false;
+        loop {
+            match session.next_fetch(&mut petit) {
+                Ok(None) => break,
+                Ok(Some(super::FetchChunk::Bytes(octets))) => {
+                    fil.push_str(&std::string::String::from_utf8_lossy(octets));
+                }
+                Ok(Some(super::FetchChunk::Message { .. })) => {
+                    unreachable!("une recherche ne rend pas de corps")
+                }
+                Err(erreur) => {
+                    assert!(
+                        matches!(erreur, super::Error::Reply(_)),
+                        "taille {taille} : {erreur:?}"
+                    );
+                    refuse = true;
+                    break;
+                }
+            }
+        }
+        if !refuse {
+            assert_eq!(fil, attendu, "taille {taille}");
+        }
+    }
+}
+
+/// **Un tampon peut suffire à l'en-tête et pas à la première plage.** Il faut le
+/// dire, plutôt que de rendre indéfiniment du vide à un appelant qui l'écrira
+/// indéfiniment — une boucle sans fin chez lui, née d'un tampon chez nous.
+///
+/// Le cas demande un tag court et des UID longs : `* ESEARCH (TAG "a") UID`
+/// tient en vingt-trois octets, ` ALL 4294967294:4294967295` en demande
+/// vingt-six.
+#[test]
+fn un_tampon_qui_suffit_a_l_entete_et_pas_a_la_plage_le_dit() {
+    for taille in 23..=25_usize {
+        let mut session = nouvelle(true);
+        dire(&mut session, b"a LOGIN jean ouvre-toi\r\n");
+        dire(&mut session, b"b SELECT Grande\r\n");
+        let mut grand = [0_u8; 512];
+        session
+            .handle(b"a UID SEARCH ALL\r\n", &mut grand)
+            .expect("traitable");
+        let mut petit = std::vec![0_u8; taille];
+        // Le premier morceau passe : c'est l'en-tête.
+        let premier = session.next_fetch(&mut petit).expect("émettable");
+        assert!(premier.is_some(), "taille {taille}");
+        // Le second ne peut rien écrire, et le dit.
+        let second = session.next_fetch(&mut petit);
+        assert!(
+            matches!(second, Err(super::Error::Reply(_))),
+            "taille {taille} : {second:?}"
+        );
+    }
+    // Vingt-six octets suffisent à la plage ; la conclusion étiquetée, elle,
+    // en demande vingt-sept, et c'est un morceau comme les autres.
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a LOGIN jean ouvre-toi\r\n");
+    dire(&mut session, b"b SELECT Grande\r\n");
+    let mut grand = [0_u8; 512];
+    session
+        .handle(b"a UID SEARCH ALL\r\n", &mut grand)
+        .expect("traitable");
+    let mut fil = std::string::String::new();
+    let mut petit = [0_u8; 27];
+    while let Some(morceau) = session.next_fetch(&mut petit).expect("émettable") {
+        if let super::FetchChunk::Bytes(octets) = morceau {
+            fil.push_str(&std::string::String::from_utf8_lossy(octets));
+        }
+    }
+    assert_eq!(
+        fil,
+        "* ESEARCH (TAG \"a\") UID ALL 4294967294:4294967295\r\na OK UID SEARCH completed\r\n"
     );
 }

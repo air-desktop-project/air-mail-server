@@ -30,8 +30,8 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 > n'accepte de courrier pour personne — ce n'est plus un fourre-tout.
 >
 > **Il ouvre les boîtes** : IMAP sur un troisième port, `STARTTLS` puis `LOGIN`
-> ou `AUTHENTICATE PLAIN`, `SELECT`, `LIST`, `STATUS`, `FETCH`, `STORE` et
-> `EXPUNGE` sur `INBOX` — un message traverse la socket sans jamais tenir en
+> ou `AUTHENTICATE PLAIN`, `SELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`,
+> `EXPUNGE` et `SEARCH` sur `INBOX` — un message traverse la socket sans jamais tenir en
 > mémoire, les drapeaux s'écrivent dans les noms de fichiers Maildir, et un
 > effacement n'a jamais lieu sur une marque périmée.
 >
@@ -75,7 +75,7 @@ horloge.
 | `ams-sasl` | RFC 4422/4616 : `PLAIN` et son base64 | **implémenté** |
 | `ams-proto-pop3` | RFC 1939 | **commandes et réponses** |
 | `ams-dns` | RFC 1035 : le codec d'un message | **question encodée, réponse décodée** |
-| `ams-proto-imap` | RFC 9051 (IMAP4rev2) | **découpage, tag, littéraux, arguments, ensembles de séquences, éléments de `FETCH`, drapeaux de `STORE`, réponses** |
+| `ams-proto-imap` | RFC 9051 (IMAP4rev2) | **découpage, tag, littéraux, arguments, ensembles de séquences, éléments de `FETCH`, drapeaux de `STORE`, critères de `SEARCH`, réponses** |
 | `ams-proto-http` | RFC 9110 / 9112 | vide |
 
 ### Étage 2 — décisions, sans entrée-sortie
@@ -470,7 +470,7 @@ découpage existe pour fermer. Un tag illisible, lui, ne ferme rien : la command
 ## Les boîtes IMAP : lire sans jamais tenir un message
 
 `SELECT`, `EXAMINE`, `CLOSE`, `UNSELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`,
-`EXPUNGE` et leurs formes `UID` servent la boîte du compte. Ce serveur en a **une par compte, et elle
+`EXPUNGE`, `SEARCH` et leurs formes `UID` servent la boîte du compte. Ce serveur en a **une par compte, et elle
 s'appelle `INBOX`** — le nom que la RFC 9051 §5.1 réserve pour cela. Créer des
 dossiers demanderait `CREATE`, un endroit où les mettre et une règle pour ce
 qu'un nom a le droit d'être ; rien de tout cela n'est écrit, et prétendre en
@@ -600,7 +600,47 @@ plus de messages que la boîte n'en portait**. Ce n'est pas de la prudence
 abstraite : un itérateur qui ne consommait pas son entrée a déjà tué cette
 machine, 6 Gio en quelques secondes.
 
-Ce qui n'y est toujours pas : `SEARCH`, `COPY`, `MOVE`, `APPEND`,
+## `SEARCH` : un arbre sans allocation, et un ensemble sans liste
+
+**IMAP4rev2 a remplacé `* SEARCH` par `* ESEARCH`** (§7.3.4). L'ancienne réponse
+`* SEARCH 2 4 5 6 7` a disparu ; la nouvelle rend `* ESEARCH (TAG "a001") ALL
+2,4:7`, où les résultats sont un **ensemble** et non une liste. Ce serveur
+n'annonce que `IMAP4rev2`, et rendre l'ancienne forme à un client qui a lu
+l'annonce serait le tromper.
+
+**On comprime en avançant, sans rien retenir.** Comprimer demande de savoir si le
+résultat suivant prolonge le précédent, ce qui tient dans deux entiers : la plage
+ouverte. Retenir tous les résultats pour les comprimer à la fin demanderait une
+mémoire que le client choisirait.
+
+**C'est la seule réponse du serveur qui ne tienne pas forcément dans un
+morceau.** Une ligne `ESEARCH` peut être plus longue qu'un tampon : elle se
+découpe, et le découpage ne change pas ce que le client lit. Chaque morceau
+s'écrit d'un seul geste — composé dans un tampon de taille fixe par des routines
+qui ne peuvent pas échouer, puis poussé une fois — parce que découvrir le manque
+de place au milieu d'une plage laisserait un résultat à moitié écrit, que le
+client lirait comme un résultat faux.
+
+**`NOT`, `OR` et les parenthèses font de `SEARCH` un arbre**, et C1 interdit
+d'allouer. Les nœuds vivent dans un tableau de taille fixe et se désignent par
+leur indice — et **un nœud ne référence que des indices strictement
+inférieurs**, parce qu'un enfant est rangé avant son parent. Ce n'est pas une
+convention qu'on espère tenir : c'est la seule façon dont le tableau se remplit,
+et elle rend le cycle impossible. L'évaluation descend donc toujours, et se
+termine sans qu'on ait à compter les tours. L'imbrication est bornée à huit
+niveaux : sans quoi `NOT NOT NOT …` ferait descendre l'analyseur aussi profond
+que le client le demande, et la pile n'est pas extensible.
+
+**Ce qui est cherché, et ce qui est refusé.** Tout ce qui se décide avec ce que
+la boîte sait déjà : `ALL`, les cinq drapeaux et leurs formes `UN…`, `LARGER`,
+`SMALLER`, `BEFORE`/`ON`/`SINCE`, `UID <ensemble>`, un ensemble de rangs, et les
+combinaisons. **Rien qui demande de lire le message** — `BODY`, `TEXT`,
+`SUBJECT`, `FROM`, `HEADER` et leurs semblables sont reconnus et **refusés**,
+parce qu'un `SEARCH SUBJECT "facture"` qui répondrait « aucun résultat » serait
+un mensonge exact. Ils viendront avec la machinerie qui lit un message au fil de
+l'eau.
+
+Ce qui n'y est toujours pas : `COPY`, `MOVE`, `APPEND`,
 `CREATE`/`DELETE`/`RENAME`, `ENVELOPE` et `BODYSTRUCTURE`. Ils sont reconnus, leur
 état est vérifié, et la session répond `NO [UNAVAILABLE]` — `NO` et non `BAD`,
 parce que la commande est correcte et permise et que c'est ce serveur qui ne la

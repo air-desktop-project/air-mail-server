@@ -23,6 +23,10 @@ const TOUTES: &[Error] = &[
     Error::TooManyFetchItems { limit: 64 },
     Error::MalformedStore,
     Error::UnknownFlag,
+    Error::MalformedSearch,
+    Error::UnsupportedSearchKey,
+    Error::SearchTooComplex { limit: 64 },
+    Error::SearchTooDeep { limit: 8 },
     Error::ResponseTextNotPrintable,
     Error::BufferTooSmall { needed: 40 },
 ];

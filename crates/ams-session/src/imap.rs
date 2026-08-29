@@ -35,8 +35,8 @@
 //!
 //! # LES BOÎTES SONT SERVIES, ET LE MAGASIN RESTE AILLEURS
 //!
-//! `SELECT`, `EXAMINE`, `CLOSE`, `UNSELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`
-//! et `EXPUNGE` sont servis. La session ne sait pas où vivent les messages : elle demande, par
+//! `SELECT`, `EXAMINE`, `CLOSE`, `UNSELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`,
+//! `EXPUNGE` et `SEARCH` sont servis. La session ne sait pas où vivent les messages : elle demande, par
 //! [`Mailboxes`] et [`Mailbox`], ce qu'elle ne peut pas savoir — combien il y
 //! en a, ce que chacun pèse, où finit son en-tête — et compose le reste.
 //!
@@ -55,15 +55,17 @@
 //!
 //! # Ce qui n'est pas ici
 //!
-//! `SEARCH`, `COPY`, `MOVE`, `APPEND`, `CREATE`, `DELETE`, `RENAME`.
+//! `COPY`, `MOVE`, `APPEND`, `CREATE`, `DELETE`, `RENAME` — et les critères de
+//! `SEARCH` qui demandent de LIRE le message (`BODY`, `TEXT`, `SUBJECT`,
+//! `FROM`, `HEADER`…), qui sont refusés plutôt que rendus faux.
 //!
 //! `ENVELOPE` et `BODYSTRUCTURE` non plus : ce sont des analyses du message, que
 //! `ams-mime` saura faire et qui n'ont rien à voir avec une session.
 
 use ams_proto_imap::{
-    Args, Command, Error as ImapError, Fetch, FetchItem, Flags, Limits, Line, Section, SequenceSet,
-    Status, Store, StoreMode, Tag, encode_continuation, encode_tagged, encode_untagged,
-    encode_untagged_parts, write_internal_date,
+    Args, Candidate, Command, Error as ImapError, Fetch, FetchItem, Flags, Limits, Line, Search,
+    Section, SequenceSet, Status, Store, StoreMode, Tag, encode_continuation, encode_tagged,
+    encode_untagged, encode_untagged_parts, write_internal_date,
 };
 use ams_sasl::{decode_base64, parse_plain};
 use core::fmt;
@@ -364,8 +366,14 @@ struct Emission {
     items_len: usize,
     /// L'ensemble porte-t-il des UID, ou des numéros de séquence ?
     par_uid: bool,
-    /// Ce que vaut l'étoile.
+    /// Ce que vaut l'étoile pour l'ensemble de la commande.
     star: u32,
+    /// Ce que vaut l'étoile dans un `UID <ensemble>` d'une recherche.
+    ///
+    /// Une expression peut porter les deux — `UID 5:* 2:*` — et l'étoile n'y
+    /// désigne pas la même chose : le plus grand UID d'un côté, le plus grand
+    /// rang de l'autre.
+    star_uid: u32,
     /// Le prochain rang à examiner.
     courant: u32,
     /// Combien la boîte en porte.
@@ -382,6 +390,27 @@ struct Emission {
     silencieux: bool,
     /// Ce que la conclusion doit nommer.
     genre: Genre,
+    /// La plage de résultats en cours de constitution : `(début, fin)`.
+    ///
+    /// # ON COMPRIME EN AVANÇANT, SANS RIEN RETENIR
+    ///
+    /// §7.3.4 : `ESEARCH` rend un ENSEMBLE de numéros, pas une liste — `2,4:7`
+    /// et non `2,4,5,6,7`. Comprimer demande de savoir si le résultat suivant
+    /// prolonge le précédent, ce qui tient dans deux entiers : la plage ouverte.
+    /// Retenir tous les résultats pour les comprimer à la fin demanderait une
+    /// mémoire que le client choisirait.
+    plage: Option<(u32, u32)>,
+    /// Une plage CLOSE, qui attend qu'il y ait la place de l'écrire.
+    ///
+    /// Sans elle, un tampon qui déborde au milieu d'une plage perdrait le
+    /// résultat qu'on venait de lire — et un résultat de recherche perdu ne se
+    /// voit pas : le client croit simplement que le message ne correspondait
+    /// pas.
+    a_ecrire: Option<(u32, u32)>,
+    /// A-t-on déjà écrit l'en-tête `* ESEARCH (TAG "…")` ?
+    entame: bool,
+    /// A-t-on déjà écrit au moins un résultat ?
+    trouve: bool,
     /// Combien de messages ont déjà été effacés par cette commande.
     ///
     /// # CE N'EST PAS UNE STATISTIQUE, C'EST LA BORNE DE LA BOUCLE
@@ -405,6 +434,7 @@ enum Genre {
     Fetch,
     Store,
     Expunge,
+    Search,
 }
 
 impl Genre {
@@ -417,6 +447,8 @@ impl Genre {
             (Genre::Store, true) => b"UID STORE completed",
             (Genre::Expunge, false) => b"EXPUNGE completed",
             (Genre::Expunge, true) => b"UID EXPUNGE completed",
+            (Genre::Search, false) => b"SEARCH completed",
+            (Genre::Search, true) => b"UID SEARCH completed",
         }
     }
 }
@@ -490,6 +522,40 @@ impl Emission {
     /// désigne. C'est `exists` fois le nombre d'intervalles — l'un borné par la
     /// boîte, l'autre par `max_sequence_items`. Aucun des deux ne vient du
     /// réseau sans borne, et c'est ce qui rend ce parcours acceptable.
+    /// Le prochain résultat d'une recherche, ou `None` quand la boîte est
+    /// parcourue.
+    ///
+    /// Rend la CLEF — l'UID pour un `UID SEARCH`, le rang sinon — parce que
+    /// c'est elle que la réponse porte (§6.4.4).
+    fn trouvaille<B: Mailbox>(&mut self, boite: &B, limits: &Limits) -> Option<u32> {
+        let texte = self.texte.get(..self.texte_len).unwrap_or_default();
+        // LE TEXTE A DÉJÀ ÉTÉ VALIDÉ par `search` : on ne retient que ce qui se
+        // lit. Une expression qu'on ne saurait plus lire ne désigne rien, ce qui
+        // est aussi la bonne réponse.
+        let recherche = Search::parse(texte, limits).unwrap_or(Search::NONE);
+        while self.courant <= self.exists {
+            let rang = self.courant;
+            self.courant = self.courant.saturating_add(1);
+            let Some(info) = boite.info(rang) else {
+                continue;
+            };
+            let candidat = Candidate {
+                sequence: rang,
+                uid: info.uid,
+                size: info.size,
+                flags: info.flags,
+                internal_date: info.internal_date,
+            };
+            // L'ÉTOILE D'UN ENSEMBLE IMBRIQUÉ NE VEUT PAS DIRE LA MÊME CHOSE
+            // SELON LE CÔTÉ : `UID 5:*` parle d'UID, `5:*` de rangs, et les deux
+            // peuvent se rencontrer dans la même expression.
+            if recherche.matches(&candidat, self.exists, self.star_uid) {
+                return Some(if self.par_uid { info.uid } else { rang });
+            }
+        }
+        None
+    }
+
     /// Le prochain message à effacer, s'il en reste un.
     ///
     /// **Le rang courant n'avance pas** : ce qui suivait le message effacé
@@ -735,10 +801,11 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             Command::Close => self.close(true, out),
             Command::Unselect => self.close(false, out),
             Command::Expunge => self.expunge(lue.arguments, false, out),
+            Command::Search => self.search(lue.arguments, false, out),
             Command::Fetch => self.fetch(lue.arguments, false, out),
             Command::Store => self.store(lue.arguments, false, out),
             Command::Uid => self.uid(lue.arguments, out),
-            Command::Search | Command::Copy | Command::Move => self.si_selectionne(out),
+            Command::Copy | Command::Move => self.si_selectionne(out),
             // ── Retirés par IMAP4rev2 (§A) ──────────────────────────────────
             Command::Lsub | Command::Check => self.termine(
                 Status::Bad,
@@ -1357,6 +1424,116 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         )
     }
 
+    /// `SEARCH` et `UID SEARCH` (§6.4.4).
+    ///
+    /// # IMAP4rev2 A REMPLACÉ `* SEARCH` PAR `* ESEARCH`
+    ///
+    /// La réponse `* SEARCH 2 4 5 6 7` de rev1 a disparu (§7.3.4) : rev2 rend
+    /// `* ESEARCH (TAG "a001") ALL 2,4:7`, où les résultats sont un ENSEMBLE et
+    /// non une liste. Ce serveur n'annonce que `IMAP4rev2`, et rendre l'ancienne
+    /// forme à un client qui a lu l'annonce serait le tromper.
+    fn search<'b>(
+        &mut self,
+        arguments: &[u8],
+        par_uid: bool,
+        out: &'b mut [u8],
+    ) -> Result<Turn<'b>, Error> {
+        // LA PRÉSENCE DE LA BOÎTE EST L'ÉTAT ; voir `fetch`.
+        let Some(boite) = self.ouverte.as_ref() else {
+            return self.faute(b"Command is not allowed unless a mailbox is selected", out);
+        };
+        let exists = boite.exists();
+        let dernier_uid = boite.info(exists).map_or(0, |info| info.uid);
+
+        // §6.4.4 : le jeu de caractères est optionnel, et rev2 impose UTF-8. On
+        // accepte ce qu'on sait lire, et l'on refuse le reste par le code que la
+        // RFC prévoit — plutôt que de chercher dans un encodage qu'on ignore.
+        let mut critere = arguments.trim_ascii();
+        if let Some(reste) = tete_sans_casse(critere, b"CHARSET") {
+            let reste = reste.trim_ascii_start();
+            let fin = reste
+                .iter()
+                .position(|octet| *octet == b' ')
+                .unwrap_or(reste.len());
+            let nom = reste.get(..fin).unwrap_or_default();
+            let nom = nom.strip_prefix(b"\"").unwrap_or(nom);
+            let nom = nom.strip_suffix(b"\"").unwrap_or(nom);
+            if !nom.eq_ignore_ascii_case(b"UTF-8") && !nom.eq_ignore_ascii_case(b"US-ASCII") {
+                return self.termine(
+                    Status::No,
+                    b"[BADCHARSET (UTF-8 US-ASCII)] Unsupported charset",
+                    Action::Continue,
+                    out,
+                );
+            }
+            critere = reste.get(fin..).unwrap_or_default().trim_ascii();
+        }
+
+        if critere.len() > SEQUENCE_TEXT_MAX {
+            return self.termine(
+                Status::No,
+                b"[CANNOT] Search criteria are too long",
+                Action::Continue,
+                out,
+            );
+        }
+        match Search::parse(critere, &self.limits) {
+            Ok(_) => {}
+            Err(ImapError::SearchTooComplex { .. } | ImapError::SearchTooDeep { .. }) => {
+                // CE N'EST PAS UNE FAUTE DE SYNTAXE, c'est une borne. Le client
+                // saura qu'il doit demander plus simplement, au lieu de chercher
+                // l'erreur dans ce qu'il a écrit.
+                return self.termine(
+                    Status::No,
+                    b"[CANNOT] Search expression is too complex",
+                    Action::Continue,
+                    out,
+                );
+            }
+            Err(ImapError::UnsupportedSearchKey) => {
+                // RECONNU, ET REFUSÉ : un `SEARCH SUBJECT "facture"` à qui l'on
+                // répondrait « aucun résultat » serait un mensonge exact.
+                return self.termine(
+                    Status::No,
+                    b"[CANNOT] This search key is not served yet",
+                    Action::Continue,
+                    out,
+                );
+            }
+            Err(_) => return self.faute(b"SEARCH arguments are malformed", out),
+        }
+
+        let mut emission = Emission {
+            texte: [0; SEQUENCE_TEXT_MAX],
+            texte_len: critere.len(),
+            items: [FetchItem::Flags; ams_proto_imap::FETCH_ITEMS_MAX],
+            items_len: 0,
+            par_uid,
+            star: exists,
+            star_uid: dernier_uid,
+            courant: 1,
+            exists,
+            ecriture: None,
+            silencieux: false,
+            genre: Genre::Search,
+            plage: None,
+            a_ecrire: None,
+            entame: false,
+            trouve: false,
+            effaces: 0,
+            etape: Etape::Choisir,
+        };
+        for (place, octet) in emission.texte.iter_mut().zip(critere) {
+            *place = *octet;
+        }
+        self.emission = Some(emission);
+        Ok(Turn {
+            reply: out.get(..0).unwrap_or_default(),
+            action: Action::SendFetch,
+            peer_fault: false,
+        })
+    }
+
     /// `EXPUNGE` et `UID EXPUNGE` (§6.4.3 et §6.4.9).
     fn expunge<'b>(
         &mut self,
@@ -1411,11 +1588,16 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             items_len: 0,
             par_uid,
             star: if par_uid { dernier_uid } else { exists },
+            star_uid: dernier_uid,
             courant: 1,
             exists,
             ecriture: None,
             silencieux: false,
             genre: Genre::Expunge,
+            plage: None,
+            a_ecrire: None,
+            entame: false,
+            trouve: false,
             effaces: 0,
             etape: Etape::Choisir,
         };
@@ -1545,11 +1727,16 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             items_len: 1,
             par_uid,
             star: if par_uid { dernier_uid } else { exists },
+            star_uid: dernier_uid,
             courant: 1,
             exists,
             ecriture: Some((demande.mode(), demande.flags())),
             silencieux: demande.silent(),
             genre: Genre::Store,
+            plage: None,
+            a_ecrire: None,
+            entame: false,
+            trouve: false,
             effaces: 0,
             etape: Etape::Choisir,
         };
@@ -1650,9 +1837,12 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         if verbe.eq_ignore_ascii_case(b"EXPUNGE") {
             return self.expunge(reste, true, out);
         }
+        if verbe.eq_ignore_ascii_case(b"SEARCH") {
+            return self.search(reste, true, out);
+        }
         self.termine(
             Status::No,
-            b"[CANNOT] Only UID FETCH, UID STORE and UID EXPUNGE are served yet",
+            b"[CANNOT] Only UID FETCH, STORE, EXPUNGE and SEARCH are served yet",
             Action::Continue,
             out,
         )
@@ -1729,11 +1919,16 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             items_len: demande.items().len(),
             par_uid,
             star,
+            star_uid: dernier_uid,
             courant: 1,
             exists,
             ecriture: None,
             silencieux: false,
             genre: Genre::Fetch,
+            plage: None,
+            a_ecrire: None,
+            entame: false,
+            trouve: false,
             effaces: 0,
             etape: Etape::Choisir,
         };
@@ -1812,6 +2007,97 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
                 )));
             }
             Etape::Choisir => {}
+        }
+
+        // ── UNE RECHERCHE REND UN ENSEMBLE, PAS UNE SUITE DE RÉPONSES ───────
+        //
+        // §7.3.4 : `* ESEARCH (TAG "a001") ALL 2,4:7`. UNE seule ligne, dont les
+        // résultats sont comprimés en plages — et une ligne peut être longue,
+        // donc elle traverse plusieurs morceaux. C'est la seule réponse du
+        // serveur qui ne tienne pas dans un morceau, et l'appelant n'a rien à en
+        // savoir : il écrit ce qu'on lui donne, dans l'ordre.
+        if emission.genre == Genre::Search {
+            // Le tag est recopié AVANT d'emprunter la boîte : il vit dans la
+            // session, et l'emprunter en lecture pendant qu'on écrit dans la
+            // boîte fâcherait le compilateur — à juste titre.
+            let mut tag = [0_u8; TAG_MAX_OCTETS];
+            let tag_len = self.tag_len.min(tag.len());
+            for (place, octet) in tag.iter_mut().zip(self.tag.iter()) {
+                *place = *octet;
+            }
+            let tag = tag.get(..tag_len).unwrap_or_default();
+            let bornes = self.limits;
+
+            // CHAQUE MORCEAU S'ÉCRIT D'UN SEUL GESTE.
+            //
+            // Une plage s'écrit en plusieurs bouts — le séparateur, un nombre,
+            // deux-points, un nombre — et découvrir le manque de place au
+            // troisième laisserait une plage à moitié écrite, que le client
+            // lirait comme un résultat faux. On compose donc dans un tampon de
+            // taille fixe, par des routines qui ne peuvent pas échouer, et l'on
+            // ne pousse qu'une fois. Ce qui rend le manque de place ORDINAIRE :
+            // on rend la main, et l'on reprendra au même endroit.
+            let mut petit = [0_u8; ESEARCH_MORCEAU_MAX];
+            let mut plume = Plume::neuve(out);
+            if !emission.entame {
+                let ecrits = entete_esearch(&mut petit, tag, emission.par_uid);
+                plume.pousser(petit.get(..ecrits).unwrap_or_default())?;
+                emission.entame = true;
+            }
+            loop {
+                // 1. Une plage close attend-elle d'être écrite ?
+                if let Some((debut, fin)) = emission.a_ecrire {
+                    let ecrits = plage_esearch(&mut petit, emission.trouve, debut, fin);
+                    if plume
+                        .pousser(petit.get(..ecrits).unwrap_or_default())
+                        .is_err()
+                    {
+                        break;
+                    }
+                    emission.trouve = true;
+                    emission.a_ecrire = None;
+                    continue;
+                }
+                // 2. Sinon, on avance d'un résultat.
+                let Some(clef) = emission.trouvaille(boite, &bornes) else {
+                    // La boîte est parcourue : la plage ouverte se ferme, puis
+                    // la ligne.
+                    if let Some(plage) = emission.plage.take() {
+                        emission.a_ecrire = Some(plage);
+                        continue;
+                    }
+                    if plume.pousser(b"\r\n").is_ok() {
+                        emission.etape = Etape::Conclure;
+                    }
+                    break;
+                };
+                match emission.plage {
+                    // Le résultat prolonge la plage ouverte.
+                    Some((debut, fin)) if clef == fin.saturating_add(1) => {
+                        emission.plage = Some((debut, clef));
+                    }
+                    // Il ouvre une plage, et ferme la précédente.
+                    Some(plage) => {
+                        emission.a_ecrire = Some(plage);
+                        emission.plage = Some((clef, clef));
+                    }
+                    None => emission.plage = Some((clef, clef)),
+                }
+            }
+            let ecrits = plume.ecrits();
+            // UN MORCEAU VIDE QUI NE CONCLUT RIEN EST UNE BOUCLE SANS FIN. Si le
+            // tampon est trop court pour qu'on avance d'un seul octet, le dire
+            // vaut mieux que de rendre indéfiniment du vide à un appelant qui
+            // l'écrira indéfiniment.
+            if ecrits == 0 && emission.etape != Etape::Conclure {
+                return Err(Error::Reply(ImapError::BufferTooSmall {
+                    needed: ESEARCH_MORCEAU_MAX,
+                }));
+            }
+            self.emission = Some(emission);
+            return Ok(Some(FetchChunk::Bytes(
+                out.get(..ecrits).unwrap_or_default(),
+            )));
         }
 
         // ── L'EFFACEMENT SUIT UN AUTRE CHEMIN QUE LA LECTURE ────────────────
@@ -2047,6 +2333,85 @@ struct Plume<'a> {
     ecrits: usize,
 }
 
+/// La plus grande taille d'un morceau d'`ESEARCH` composé d'un seul geste.
+///
+/// L'en-tête est le plus long : `* ESEARCH (TAG "` plus un tag, plus `") UID`.
+const ESEARCH_MORCEAU_MAX: usize = TAG_MAX_OCTETS + 32;
+
+/// Écrit un entier décimal dans `out`, et rend le nombre d'octets écrits.
+///
+/// **Rien ne peut échouer** : dix chiffres majorent tout `u32`, et l'appelant
+/// donne toujours au moins cela. Ce qui déborderait n'est pas écrit, ce qui ne
+/// peut pas arriver.
+fn nombre_en_octets(out: &mut [u8], valeur: u32) -> usize {
+    let mut chiffres = [b'0'; 10];
+    let mut reste = valeur;
+    let mut significatifs = 1_usize;
+    for (rang, place) in chiffres.iter_mut().rev().enumerate() {
+        *place = b'0'.wrapping_add(u8::try_from(reste % 10).unwrap_or_default());
+        reste /= 10;
+        if reste != 0 {
+            significatifs = rang.saturating_add(2);
+        }
+    }
+    let debut = chiffres.len().saturating_sub(significatifs);
+    let mut ecrits = 0_usize;
+    for (place, chiffre) in out
+        .iter_mut()
+        .zip(chiffres.get(debut..).unwrap_or_default())
+    {
+        *place = *chiffre;
+        ecrits = ecrits.saturating_add(1);
+    }
+    ecrits
+}
+
+/// Recopie `morceau` à partir de `ecrits`, et rend la nouvelle position.
+fn recopier(out: &mut [u8], ecrits: usize, morceau: &[u8]) -> usize {
+    let mut ecrits = ecrits;
+    for (place, octet) in out.iter_mut().skip(ecrits).zip(morceau) {
+        *place = *octet;
+        ecrits = ecrits.saturating_add(1);
+    }
+    ecrits
+}
+
+/// Compose `* ESEARCH (TAG "…")` et, si la recherche porte sur des UID, ` UID`.
+fn entete_esearch(out: &mut [u8], tag: &[u8], par_uid: bool) -> usize {
+    let mut ecrits = recopier(out, 0, b"* ESEARCH (TAG \"");
+    ecrits = recopier(out, ecrits, tag);
+    ecrits = recopier(out, ecrits, b"\")");
+    if par_uid {
+        ecrits = recopier(out, ecrits, b" UID");
+    }
+    ecrits
+}
+
+/// Compose une plage de résultats : ` ALL 1:3` la première, `,7` les suivantes.
+fn plage_esearch(out: &mut [u8], deja: bool, debut: u32, fin: u32) -> usize {
+    let mut ecrits = recopier(out, 0, if deja { b"," } else { b" ALL " });
+    ecrits = ecrits.saturating_add(nombre_en_octets(
+        out.get_mut(ecrits..).unwrap_or_default(),
+        debut,
+    ));
+    if fin != debut {
+        ecrits = recopier(out, ecrits, b":");
+        ecrits = ecrits.saturating_add(nombre_en_octets(
+            out.get_mut(ecrits..).unwrap_or_default(),
+            fin,
+        ));
+    }
+    ecrits
+}
+
+/// Rend ce qui suit `tete`, si le texte commence par elle — sans égard à la
+/// casse, ce que `strip_prefix` ne sait pas faire.
+fn tete_sans_casse<'a>(texte: &'a [u8], tete: &[u8]) -> Option<&'a [u8]> {
+    let (debut, reste) = texte.split_at_checked(tete.len())?;
+    debut.eq_ignore_ascii_case(tete).then_some(reste)
+}
+
+/// Rend `nom` privé de `suffixe`
 impl<'a> Plume<'a> {
     fn neuve(out: &'a mut [u8]) -> Self {
         Self { out, ecrits: 0 }

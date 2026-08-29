@@ -865,7 +865,7 @@ ne s'écrit — ni `STORE`, ni `APPEND`, ni `EXPUNGE` — `SELECT` répond
 modifiabilité qu'elle ne peut pas connaître ferait une promesse que le client ne
 verrait démentie qu'en essayant.
 
-Ce qui n'est toujours pas servi : `SEARCH`, `COPY`, `MOVE`, `APPEND`,
+Ce qui n'est toujours pas servi : `COPY`, `MOVE`, `APPEND`,
 `CREATE`/`DELETE`/`RENAME`, `ENVELOPE` et `BODYSTRUCTURE`.
 
 Éprouvé jusqu'au binaire, contre un vrai Maildir rempli par SMTP : `LIST`,
@@ -977,6 +977,60 @@ que son ensemble, une marque retirée sous nos pieds qui fait survivre le messag
 un message effacé par ailleurs qui s'annonce quand même effacé, `CLOSE` qui
 efface sans rien annoncer, et `EXAMINE` puis `EXPUNGE` qui répond
 `NO [CANNOT] Mailbox is read-only`.
+
+## `SEARCH` : un arbre sans allocation, depuis le 2026-08-29
+
+IMAP4rev2 A REMPLACÉ `* SEARCH` PAR `* ESEARCH` (§7.3.4). La réponse
+`* SEARCH 2 4 5 6 7` de rev1 a disparu ; rev2 rend
+`* ESEARCH (TAG "a001") ALL 2,4:7`, où les résultats sont un ENSEMBLE et non une
+liste. Ce serveur n'annonce que `IMAP4rev2` : rendre l'ancienne forme à un client
+qui a lu l'annonce serait le tromper.
+
+ON COMPRIME EN AVANÇANT, SANS RIEN RETENIR. Savoir si le résultat suivant
+prolonge le précédent tient dans deux entiers — la plage ouverte. Tout retenir
+pour comprimer à la fin demanderait une mémoire que le client choisirait.
+
+C'EST LA SEULE RÉPONSE QUI NE TIENNE PAS FORCÉMENT DANS UN MORCEAU. Une ligne
+`ESEARCH` peut dépasser le tampon : elle se découpe, et le découpage ne change
+pas ce que le client lit — éprouvé sur toutes les tailles de un à soixante-quatre
+octets. Chaque morceau s'écrit d'un seul geste : composé dans un tampon fixe par
+des routines qui ne peuvent pas échouer, puis poussé une fois. Découvrir le
+manque de place au milieu d'une plage laisserait un résultat à moitié écrit, que
+le client lirait comme un résultat faux. Et un tampon qui suffit à l'en-tête sans
+suffire à la première plage le DIT, au lieu de rendre indéfiniment du vide — ce
+qui serait une boucle sans fin chez l'appelant, née d'un tampon chez nous.
+
+UN ARBRE SANS ALLOCATION, ET SANS CYCLE POSSIBLE (C1, C3). `NOT`, `OR` et les
+parenthèses font de `SEARCH` une expression. Les nœuds vivent dans un tableau de
+soixante-quatre places et se désignent par leur indice — et **un nœud ne
+référence que des indices strictement inférieurs**, parce qu'un enfant est rangé
+avant son parent. Ce n'est pas une convention qu'on espère tenir : c'est la seule
+façon dont le tableau se remplit, et elle rend le cycle impossible. L'évaluation
+descend donc toujours, et se termine sans compteur de tours. L'imbrication est
+bornée à huit : sans quoi `NOT NOT NOT …` ferait descendre l'analyseur aussi
+profond que le client le demande, et la pile n'est pas extensible.
+
+Deux gardes inatteignables ont été retirées plutôt que couvertes : l'accès au
+tableau de nœuds est devenu un PARCOURS TOTAL — soixante-quatre comparaisons
+bornées, comme « vingt chiffres majorent tout `u64` » ailleurs — et l'indice des
+nœuds est un `u16`, ce qui a fait disparaître une conversion qui ne pouvait pas
+échouer.
+
+CE QUI EST CHERCHÉ, ET CE QUI EST REFUSÉ. Tout ce qui se décide avec ce que la
+boîte sait déjà : `ALL`, les cinq drapeaux et leurs formes `UN…`, `LARGER`,
+`SMALLER`, `BEFORE`/`ON`/`SINCE`, `UID <ensemble>`, un ensemble de rangs, et
+leurs combinaisons. RIEN qui demande de lire le message — `BODY`, `TEXT`,
+`SUBJECT`, `FROM`, `HEADER` sont reconnus et REFUSÉS, parce qu'un
+`SEARCH SUBJECT "facture"` répondant « aucun résultat » serait un mensonge exact.
+Le jeu de caractères se lit et se refuse de même : chercher dans un encodage
+qu'on ignore ferait rendre n'importe quoi, et `NO [BADCHARSET]` est le code que
+la RFC prévoit.
+
+Éprouvé jusqu'au binaire, contre un vrai Maildir : `ALL`, `LARGER`, `SMALLER`,
+`UNSEEN`/`SEEN`, `NOT`, `OR`, les parenthèses, les trois formes de date, `UID
+SEARCH`, la compression (`1,3:4` et `1:2,4`), une recherche sans résultat qui
+omet `ALL`, trente-quatre messages dont un sur deux marqué — seize plages sur UNE
+ligne — et les deux refus.
 
 ## Le gate de couverture arrondissait vers le haut, depuis le 2026-08-29
 
@@ -1563,8 +1617,8 @@ et une couture inutilisée finit par être utilisée.
 **Trois protocoles sont servis, par un vrai binaire, contre de vrais fichiers** :
 SMTP en réception (avec `STARTTLS`, `AUTH PLAIN`, SPF, DKIM, DMARC et remise
 Maildir), SMTP à l'émission (rapports DMARC), POP3, et IMAP — `SELECT`,
-`EXAMINE`, `CLOSE`, `UNSELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`, `EXPUNGE` et
-leurs formes `UID`. Chacun a été éprouvé de bout en bout contre le binaire, et pas
+`EXAMINE`, `CLOSE`, `UNSELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`, `EXPUNGE`,
+`SEARCH` et leurs formes `UID`. Chacun a été éprouvé de bout en bout contre le binaire, et pas
 seulement en tests.
 
 **HTTP n'est pas servi** : `ams-proto-http` est un emplacement réservé, et son
@@ -1587,7 +1641,8 @@ persistant, et lecture sans verrou côté IMAP), C14 (`X25519MLKEM768` en tête)
 `<CRLF>.<CRLF>`, refuse tout `CR` ou `LF` isolé, et le fuzz éprouve que le
 découpage des lectures ne change rien au verdict.
 
-Ce qui manque, et qu'aucune phrase ne doit laisser croire acquis : `SEARCH`,
-`COPY`, `MOVE`, `APPEND` et la gestion des dossiers en IMAP ; le signeur DKIM,
+Ce qui manque, et qu'aucune phrase ne doit laisser croire acquis : `COPY`,
+`MOVE`, `APPEND`, la gestion des dossiers et les critères de `SEARCH` qui lisent
+le message ; le signeur DKIM,
 qui existe et n'a pas d'appelant ; la file de réémission des messages sortants ;
 et toute interface HTTP.

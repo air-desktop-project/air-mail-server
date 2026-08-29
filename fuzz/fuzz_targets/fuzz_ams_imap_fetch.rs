@@ -2,8 +2,9 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! **Cible : ce qu'un `FETCH` et un `STORE` désignent** — l'ensemble de numéros,
-//! la liste d'éléments, et les drapeaux à écrire.
+//! **Cible : ce qu'un `FETCH`, un `STORE` et un `SEARCH` désignent** —
+//! l'ensemble de numéros, la liste d'éléments, les drapeaux à écrire, et
+//! l'expression de recherche.
 //!
 //! # Pourquoi celle-ci
 //!
@@ -32,6 +33,11 @@
 //!    `items().len()` ne dépasse pas `max_fetch_items`, et une section partielle
 //!    ne demande jamais zéro octet — une longueur nulle annoncée serait un
 //!    littéral `{0}` que le client attendrait de lire.
+//! 8. **UNE RECHERCHE ACCEPTÉE DÉCIDE, ET NE BOUCLE PAS.** Son arbre est un
+//!    arbre : chaque nœud ne nomme que des indices déjà remplis, donc plus
+//!    petits que le sien. L'évaluation descend, et se termine — la vérifier sur
+//!    des expressions arbitraires, c'est vérifier qu'aucune entrée ne fabrique
+//!    un cycle.
 //! 7. **UN `STORE` ACCEPTÉ NE PORTE QUE DES DRAPEAUX QU'ON SAIT ÉCRIRE.** Le
 //!    reste doit être refusé plutôt que laissé tomber : un client à qui l'on
 //!    répond `OK` croit son étiquette posée, et ne la reverra jamais. La
@@ -43,7 +49,10 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-use ams_proto_imap::{FETCH_ITEMS_MAX, Fetch, FetchItem, Flags, Limits, SequenceSet, Store};
+use ams_proto_imap::{
+    Candidate, FETCH_ITEMS_MAX, Fetch, FetchItem, Flags, Limits, SEARCH_KEYS_MAX, Search,
+    SequenceSet, Store,
+};
 
 /// Ce qu'on soumet.
 #[derive(Arbitrary, Debug)]
@@ -58,6 +67,10 @@ struct Entree<'a> {
     arguments: &'a [u8],
     /// Les arguments complets d'un `STORE`.
     ecriture: &'a [u8],
+    /// Les critères d'un `SEARCH`.
+    criteres: &'a [u8],
+    /// Un message à confronter à ces critères.
+    message: (u32, u32, u64, u8, u64),
 }
 
 /// Rassemble les intervalles rendus, en s'arrêtant à la borne.
@@ -151,5 +164,42 @@ fuzz_target!(|entree: Entree<'_>| {
         let ensemble = ecriture.set();
         assert_eq!(ensemble.as_bytes(), ecriture.set_text());
         let _ = intervalles(&ensemble, entree.star, &bornes);
+    }
+
+    if let Ok(recherche) = Search::parse(entree.criteres, &bornes) {
+        // PROPRIÉTÉ 8 : l'arbre est borné, et l'évaluation se termine.
+        assert!(recherche.len() <= SEARCH_KEYS_MAX);
+        assert!(!recherche.is_empty());
+        let (sequence, uid, size, drapeaux, date) = entree.message;
+        let mut flags = Flags::NONE;
+        for (bit, drapeau) in [
+            Flags::SEEN,
+            Flags::ANSWERED,
+            Flags::FLAGGED,
+            Flags::DELETED,
+            Flags::DRAFT,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if drapeaux & (1_u8 << (bit % 8)) != 0 {
+                flags = flags.with(drapeau);
+            }
+        }
+        let candidat = Candidate {
+            sequence,
+            uid,
+            size,
+            flags,
+            internal_date: date,
+        };
+        // Qu'elle rende vrai ou faux importe peu : ce qu'on éprouve est
+        // qu'elle RENDE, et deux fois la même chose.
+        let verdict = recherche.matches(&candidat, entree.star, entree.star);
+        assert_eq!(
+            verdict,
+            recherche.matches(&candidat, entree.star, entree.star),
+            "une recherche a changé d'avis sur le même message"
+        );
     }
 });

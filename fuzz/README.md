@@ -80,7 +80,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_dmarc` | `seeds/dmarc` | politique et alignement — **l'alignement est symétrique** |
 | `fuzz_ams_dmarc_report` | `seeds/dmarc-report` | destinations et rapport agrégé — **le rapport ne s'injecte pas** |
 | `fuzz_ams_imap` | `seeds/imap` | découpage d'une commande IMAP — **le client ne choisit pas où l'on coupe**, et l'itérateur d'arguments s'arrête |
-| `fuzz_ams_imap_fetch` | `seeds/imap-fetch` | ce qu'un `FETCH` et un `STORE` désignent — **les deux lectures d'un ensemble s'accordent**, et un drapeau accepté se réécrit |
+| `fuzz_ams_imap_fetch` | `seeds/imap-fetch` | ce qu'un `FETCH`, un `STORE` et un `SEARCH` désignent — **les deux lectures d'un ensemble s'accordent**, un drapeau accepté se réécrit, et **une recherche décide sans boucler** |
 | `fuzz_ams_session_imap` | `seeds/imap-session` | la session IMAP — **jamais authentifié sans chiffrement**, un intervalle de `FETCH` ne déborde pas du message, et **une émission conclut** |
 | `fuzz_ams_smtp_client` | `seeds/smtp-client` | réponses lues et corps émis — **le message ne se termine pas tout seul** |
 | `fuzz_ams_mime_compose` | `seeds/mime-compose` | les messages de rapport — **la pièce jointe se relit, la liste blanche tient** |
@@ -824,6 +824,7 @@ coûterait du courrier sans rien protéger — on ne les interprète jamais.
 | 2026-08-29 | `fuzz_ams_session_imap` (avec `STORE`) | 1 993 276 (181 s) | 0 |
 | 2026-08-29 | `fuzz_ams_imap` (arrêt de l'itérateur) | 5 072 564 (121 s) | 0 |
 | 2026-08-29 | `fuzz_ams_session_imap` (avec `EXPUNGE`) | 2 188 197 (181 s) | 0 |
+| 2026-08-29 | `fuzz_ams_imap_fetch` (avec `SEARCH`) | 9 490 143 (201 s) | 0 |
 | 2026-08-29 | `fuzz_ams_config` (avec l'écoute IMAP) | 208 794 (71 s) | 0 |
 | 2026-08-29 | `fuzz_ams_config` (avec SPF) | 193 256 (61 s) | 0 |
 | 2026-08-29 | `fuzz_ams_session_smtp` (avec SPF) | 381 710 (61 s) | 0 |

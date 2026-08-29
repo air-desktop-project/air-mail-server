@@ -115,6 +115,30 @@ pub enum Error {
     /// croit son étiquette posée, et ne la reverra jamais.
     UnknownFlag,
 
+    /// Les arguments d'un `SEARCH` n'ont pas la forme de §6.4.4.
+    MalformedSearch,
+
+    /// Un critère de `SEARCH` est reconnu, mais non servi.
+    ///
+    /// **Ce n'est pas une erreur de syntaxe** : un `SEARCH SUBJECT "facture"` à
+    /// qui l'on répondrait « aucun résultat » serait un mensonge exact.
+    UnsupportedSearchKey,
+
+    /// Une expression de recherche porte plus de critères qu'on n'en range.
+    SearchTooComplex {
+        /// La borne franchie.
+        limit: usize,
+    },
+
+    /// Une expression de recherche est imbriquée plus profond qu'on ne descend.
+    ///
+    /// Sans cette borne, `NOT NOT NOT …` ferait descendre l'analyseur aussi
+    /// profond que le client le demande, et la pile n'est pas extensible.
+    SearchTooDeep {
+        /// La borne franchie.
+        limit: usize,
+    },
+
     /// Un texte de réponse porte un octet qu'on refuse d'écrire.
     ResponseTextNotPrintable,
 
@@ -176,6 +200,18 @@ impl fmt::Display for Error {
             }
             Error::UnknownFlag => {
                 f.write_str("ce drapeau n'est pas un de ceux que ce serveur sait écrire")
+            }
+            Error::MalformedSearch => {
+                f.write_str("les arguments d'un `SEARCH` n'ont pas la forme attendue")
+            }
+            Error::UnsupportedSearchKey => {
+                f.write_str("ce critère de `SEARCH` est reconnu, mais ce serveur ne le sert pas")
+            }
+            Error::SearchTooComplex { limit } => {
+                write!(f, "une recherche ne porte pas plus de {limit} critères")
+            }
+            Error::SearchTooDeep { limit } => {
+                write!(f, "une recherche ne s'imbrique pas plus de {limit} fois")
             }
             Error::ResponseTextNotPrintable => {
                 f.write_str("un texte de réponse porte un octet qu'on refuse d'écrire")
