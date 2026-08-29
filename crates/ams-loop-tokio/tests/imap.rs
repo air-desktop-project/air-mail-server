@@ -92,6 +92,11 @@ impl Mailbox for Boite {
         // Rien à défaire : la boîte d'épreuve n'a rien retenu.
     }
 
+    fn remove(&mut self, _sequence: u32) -> bool {
+        // La boîte d'épreuve ne rétrécit pas ; voir `expunge`.
+        false
+    }
+
     fn expunge(&mut self, _sequence: u32) -> bool {
         // La boîte d'épreuve ne rétrécit pas : rien ne s'y efface, et c'est le
         // passage sur le fil qu'on éprouve ici. `false` dit « toujours là », ce
@@ -719,6 +724,43 @@ async fn une_copie_traverse_la_socket() {
     lecteur
         .get_mut()
         .write_all(b"a005 COPY 1 Archives\r\n")
+        .await
+        .expect("écriture");
+    let refus = jusqu_a(&mut lecteur, "a005 ").await;
+    assert!(refus.starts_with("a005 NO [TRYCREATE]"), "{refus}");
+}
+
+/// **`MOVE` traverse la socket, et dans l'ordre de §6.4.8** : le `COPYUID` non
+/// sollicité d'abord, les `EXPUNGE` ensuite, la conclusion enfin.
+#[tokio::test]
+async fn un_deplacement_traverse_la_socket_dans_le_bon_ordre() {
+    let Some(materiel) = materiel("imap-move") else {
+        return;
+    };
+    let mut lecteur = authentifiee(&materiel).await;
+    lecteur
+        .get_mut()
+        .write_all(b"a003 SELECT INBOX\r\n")
+        .await
+        .expect("écriture");
+    jusqu_a(&mut lecteur, "a003 ").await;
+
+    // La boîte d'épreuve ne rétrécit pas : le `COPYUID` passe, et aucun
+    // `EXPUNGE` ne suit — ce qui est exactement ce que le magasin a fait.
+    lecteur
+        .get_mut()
+        .write_all(b"a004 MOVE 1 INBOX\r\n")
+        .await
+        .expect("écriture");
+    let deplace = jusqu_a(&mut lecteur, "a004 ").await;
+    assert_eq!(
+        deplace,
+        "* OK [COPYUID 7 1 3] Moved\r\na004 OK MOVE completed\r\n"
+    );
+
+    lecteur
+        .get_mut()
+        .write_all(b"a005 MOVE 1 Archives\r\n")
         .await
         .expect("écriture");
     let refus = jusqu_a(&mut lecteur, "a005 ").await;

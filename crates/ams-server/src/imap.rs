@@ -216,6 +216,46 @@ impl Mailbox for BoiteImap {
         }
     }
 
+    fn remove(&mut self, sequence: u32) -> bool {
+        let Some(rang) = self.rang(sequence) else {
+            return false;
+        };
+        // RETIRER NE RELIT PAS LA MARQUE, et c'est toute la différence avec
+        // `expunge` : il n'y a pas de marque à relire. Le message vient d'être
+        // copié, à l'instant, et le client a demandé qu'il ne reste pas ici.
+        // On le cherche quand même par son UID si son nom a changé — un
+        // renommage concurrent ne doit pas laisser un doublon derrière un `MOVE`.
+        for _ in 0..3_u32 {
+            let Some(chemin) = self.chemins.get(rang).cloned() else {
+                return false;
+            };
+            match std::fs::remove_file(&chemin) {
+                Ok(()) => {
+                    self.oublier(rang);
+                    return true;
+                }
+                Err(erreur) if erreur.kind() == std::io::ErrorKind::NotFound => {
+                    let uid = chemin
+                        .file_name()
+                        .and_then(|nom| MessageName::parse(nom.as_bytes()).ok())
+                        .and_then(|lu| lu.uid());
+                    match uid.and_then(|uid| retrouver(self.vue.root(), uid)) {
+                        Some(actuel) => {
+                            self.poser_le_chemin(rang, actuel);
+                            continue;
+                        }
+                        None => break,
+                    }
+                }
+                Err(_) => return false,
+            }
+        }
+        // Introuvable sous son UID : il est bien parti, ce qui est ce qu'on
+        // voulait.
+        self.oublier(rang);
+        true
+    }
+
     fn expunge(&mut self, sequence: u32) -> bool {
         let Some(rang) = self.rang(sequence) else {
             return false;

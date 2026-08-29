@@ -36,7 +36,7 @@
 //! # LES BOÎTES SONT SERVIES, ET LE MAGASIN RESTE AILLEURS
 //!
 //! `SELECT`, `EXAMINE`, `CLOSE`, `UNSELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`,
-//! `EXPUNGE` et `SEARCH` sont servis. La session ne sait pas où vivent les messages : elle demande, par
+//! `EXPUNGE`, `SEARCH`, `COPY` et `MOVE` sont servis. La session ne sait pas où vivent les messages : elle demande, par
 //! [`Mailboxes`] et [`Mailbox`], ce qu'elle ne peut pas savoir — combien il y
 //! en a, ce que chacun pèse, où finit son en-tête — et compose le reste.
 //!
@@ -55,7 +55,7 @@
 //!
 //! # Ce qui n'est pas ici
 //!
-//! `COPY`, `MOVE`, `APPEND`, `CREATE`, `DELETE`, `RENAME` — et les critères de
+//! `APPEND`, `CREATE`, `DELETE`, `RENAME` — et les critères de
 //! `SEARCH` qui demandent de LIRE le message (`BODY`, `TEXT`, `SUBJECT`,
 //! `FROM`, `HEADER`…), qui sont refusés plutôt que rendus faux.
 //!
@@ -267,6 +267,19 @@ pub trait Mailbox {
     /// à retenir pour défaire, et pas de mémoire que le client puisse choisir.
     fn undo_copies(&mut self, mailbox: &[u8], premier: u32, dernier: u32);
 
+    /// Retire le message de rang `sequence`, SANS RIEN VÉRIFIER, et renumérote.
+    ///
+    /// # POURQUOI CE N'EST PAS [`expunge`](Mailbox::expunge)
+    ///
+    /// `EXPUNGE` efface sur la foi d'une marque `\Deleted` posée il y a
+    /// peut-être des heures, et le magasin doit donc la relire avant d'effacer :
+    /// c'est la garde qui empêche de perdre du courrier sur une croyance
+    /// périmée. `MOVE`, lui, n'a aucune marque à relire — il retire un message
+    /// qu'il vient de copier, à l'instant, et sur ordre exprès du client. Faire
+    /// passer l'un pour l'autre ferait ou bien un `MOVE` qui ne déplace rien, ou
+    /// bien un `EXPUNGE` qui efface ce qu'on ne lui a pas demandé.
+    fn remove(&mut self, sequence: u32) -> bool;
+
     /// Efface DÉFINITIVEMENT le message de rang `sequence`, et renumérote : ce
     /// qui suivait descend d'un rang.
     ///
@@ -395,8 +408,21 @@ struct Emission {
     texte_len: usize,
     items: [FetchItem; ams_proto_imap::FETCH_ITEMS_MAX],
     items_len: usize,
-    /// L'ensemble porte-t-il des UID, ou des numéros de séquence ?
+    /// La COMMANDE portait-elle sur des UID ? Cela ne décide que du nom qu'on
+    /// donne à la conclusion.
     par_uid: bool,
+    /// L'ensemble RETENU porte-t-il des UID, ou des numéros de séquence ?
+    ///
+    /// # LES DEUX NE COÏNCIDENT PAS TOUJOURS
+    ///
+    /// Un `MOVE` retire des messages en marchant, et retirer RENUMÉROTE. Un
+    /// ensemble de rangs cesse donc de désigner ce qu'il désignait dès le
+    /// premier retrait — alors qu'un ensemble d'UID, lui, ne bouge pas. Un
+    /// `MOVE` traduit donc son ensemble en UID avant de retirer, quelle que soit
+    /// la forme sous laquelle le client l'a écrit.
+    cles_uid: bool,
+    /// Le retrait exige-t-il la marque `\Deleted` ? `EXPUNGE` oui, `MOVE` non.
+    exige_la_marque: bool,
     /// Ce que vaut l'étoile pour l'ensemble de la commande.
     star: u32,
     /// Ce que vaut l'étoile dans un `UID <ensemble>` d'une recherche.
@@ -466,6 +492,7 @@ enum Genre {
     Store,
     Expunge,
     Search,
+    Move,
 }
 
 impl Genre {
@@ -480,6 +507,8 @@ impl Genre {
             (Genre::Expunge, true) => b"UID EXPUNGE completed",
             (Genre::Search, false) => b"SEARCH completed",
             (Genre::Search, true) => b"UID SEARCH completed",
+            (Genre::Move, false) => b"MOVE completed",
+            (Genre::Move, true) => b"UID MOVE completed",
         }
     }
 }
@@ -605,8 +634,9 @@ impl Emission {
                 self.courant = self.courant.saturating_add(1);
                 continue;
             };
-            let clef = if self.par_uid { info.uid } else { rang };
-            if info.flags.contains(Flags::DELETED) && ensemble.contains(clef, self.star) {
+            let clef = if self.cles_uid { info.uid } else { rang };
+            let marque = !self.exige_la_marque || info.flags.contains(Flags::DELETED);
+            if marque && ensemble.contains(clef, self.star) {
                 return Some(rang);
             }
             self.courant = self.courant.saturating_add(1);
@@ -627,7 +657,7 @@ impl Emission {
             let Some(info) = boite.info(rang) else {
                 continue;
             };
-            let clef = if self.par_uid { info.uid } else { rang };
+            let clef = if self.cles_uid { info.uid } else { rang };
             if ensemble.contains(clef, self.star) {
                 return Some((rang, info));
             }
@@ -834,10 +864,10 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             Command::Expunge => self.expunge(lue.arguments, false, out),
             Command::Search => self.search(lue.arguments, false, out),
             Command::Copy => self.copy(lue.arguments, false, out),
+            Command::Move => self.deplacer(lue.arguments, false, out),
             Command::Fetch => self.fetch(lue.arguments, false, out),
             Command::Store => self.store(lue.arguments, false, out),
             Command::Uid => self.uid(lue.arguments, out),
-            Command::Move => self.si_selectionne(out),
             // ── Retirés par IMAP4rev2 (§A) ──────────────────────────────────
             Command::Lsub | Command::Check => self.termine(
                 Status::Bad,
@@ -1135,19 +1165,6 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
     fn si_authentifie<'b>(&mut self, out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
         if self.etat == State::NotAuthenticated {
             return self.faute(b"Command is not allowed before authentication", out);
-        }
-        self.pas_encore(out)
-    }
-
-    /// Une commande qui demande une boîte ouverte.
-    ///
-    /// La comparaison d'état est revenue avec `SELECT` : tant qu'aucune boîte ne
-    /// pouvait s'ouvrir, elle était une garde qu'aucune entrée ne pouvait faire
-    /// céder, et elle n'était pas écrite. Elle l'est de nouveau, et un test
-    /// l'emprunte dans les deux sens.
-    fn si_selectionne<'b>(&mut self, out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
-        if self.etat != State::Selected {
-            return self.faute(b"Command is not allowed unless a mailbox is selected", out);
         }
         self.pas_encore(out)
     }
@@ -1514,46 +1531,20 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         });
         let star = if par_uid { dernier_uid } else { exists };
 
-        // ON COPIE DANS UN NOMBRE DE MESSAGES ARRÊTÉ D'AVANCE. Copier dans la
-        // boîte ouverte l'agrandit ; relire `exists` à chaque tour ferait de
-        // `COPY 1:* INBOX` une boucle que le client n'aurait qu'à demander.
-        let mut source = Plage::neuve();
-        let mut premier_copie = 0_u32;
-        let mut dernier_copie = 0_u32;
-        let mut copies = 0_u32;
-        for rang in 1..=exists {
-            let Some(info) = self.ouverte.as_ref().and_then(|boite| boite.info(rang)) else {
-                continue;
-            };
-            let clef = if par_uid { info.uid } else { rang };
-            if !ensemble.contains(clef, star) {
-                continue;
-            }
-            let Some(nouveau) = self
-                .ouverte
-                .as_mut()
-                .and_then(|boite| boite.copy_to(rang, nom))
-            else {
-                // §6.4.7 : ON DÉFAIT CE QU'ON A FAIT. Un `COPY` à moitié réussi
-                // laisserait le client se demander lesquels de ses messages sont
-                // déjà passés — et recommencer en ferait des doublons.
-                if let Some(boite) = self.ouverte.as_mut().filter(|_| copies != 0) {
-                    boite.undo_copies(nom, premier_copie, dernier_copie);
-                }
-                return self.termine(
-                    Status::No,
-                    b"Copy failed; no messages were copied",
-                    Action::Continue,
-                    out,
-                );
-            };
-            source.pousser(info.uid);
-            if copies == 0 {
-                premier_copie = nouveau;
-            }
-            dernier_copie = nouveau;
-            copies = copies.saturating_add(1);
-        }
+        let Ok(Copies {
+            source,
+            premier_copie,
+            dernier_copie,
+            copies,
+        }) = self.copier(&ensemble, nom, par_uid, exists, star, false)
+        else {
+            return self.termine(
+                Status::No,
+                b"Copy failed; no messages were copied",
+                Action::Continue,
+                out,
+            );
+        };
 
         if copies == 0 {
             // §6.4.7 : rien de copié, rien à dire de plus.
@@ -1573,7 +1564,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         let ecrits = copyuid(
             &mut texte_reponse,
             uid_validity,
-            &mut source,
+            &source,
             premier_copie,
             dernier_copie,
             par_uid,
@@ -1584,6 +1575,241 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             Action::Continue,
             out,
         )
+    }
+
+    /// Copie tout ce que l'ensemble désigne, et défait tout si l'une échoue.
+    ///
+    /// Rend `None` quand une copie a échoué : ce qui avait été copié est alors
+    /// déjà défait, et l'appelant n'a plus qu'à le dire.
+    fn copier(
+        &mut self,
+        ensemble: &SequenceSet<'_>,
+        nom: &[u8],
+        par_uid: bool,
+        exists: u32,
+        star: u32,
+        exiger_les_noms: bool,
+    ) -> Result<Copies, Echec> {
+        // ON COPIE DANS UN NOMBRE DE MESSAGES ARRÊTÉ D'AVANCE. Copier dans la
+        // boîte ouverte l'agrandit ; relire `exists` à chaque tour ferait de
+        // `COPY 1:* INBOX` une boucle que le client n'aurait qu'à demander.
+        let mut faites = Copies {
+            source: Plage::neuve(),
+            premier_copie: 0,
+            dernier_copie: 0,
+            copies: 0,
+        };
+        let mut echec = None;
+        for rang in 1..=exists {
+            let Some(info) = self.ouverte.as_ref().and_then(|boite| boite.info(rang)) else {
+                continue;
+            };
+            let clef = if par_uid { info.uid } else { rang };
+            if !ensemble.contains(clef, star) {
+                continue;
+            }
+            let Some(nouveau) = self
+                .ouverte
+                .as_mut()
+                .and_then(|boite| boite.copy_to(rang, nom))
+            else {
+                echec = Some(Echec::Copie);
+                break;
+            };
+            faites.source.pousser(info.uid);
+            if faites.copies == 0 {
+                faites.premier_copie = nouveau;
+            }
+            faites.dernier_copie = nouveau;
+            faites.copies = faites.copies.saturating_add(1);
+        }
+        faites.source.fermer();
+        // UN `MOVE` DOIT POUVOIR NOMMER CE QU'IL RETIRERA. S'il ne le peut pas,
+        // il vaut mieux ne rien déplacer que retirer au hasard.
+        if echec.is_none() && exiger_les_noms && faites.source.a_deborde() && faites.copies != 0 {
+            echec = Some(Echec::TropMorcele);
+        }
+        if let Some(raison) = echec {
+            // §6.4.7 : ON DÉFAIT CE QU'ON A FAIT. Une copie à moitié réussie
+            // laisserait le client se demander lesquels de ses messages sont
+            // déjà passés — et recommencer en ferait des doublons.
+            if let Some(boite) = self.ouverte.as_mut().filter(|_| faites.copies != 0) {
+                boite.undo_copies(nom, faites.premier_copie, faites.dernier_copie);
+            }
+            return Err(raison);
+        }
+        Ok(faites)
+    }
+
+    /// Lit `<ensemble> SP <boîte>`, et vérifie que la boîte existe.
+    ///
+    /// Rend l'ensemble, le nom recopié dans `place`, et l'`UIDVALIDITY` de la
+    /// destination. `Err` porte la réponse à faire.
+    fn destination<'n>(
+        &self,
+        arguments: &[u8],
+        place: &'n mut [u8; MAILBOX_NAME_MAX],
+    ) -> Result<(&'n [u8], u32), &'static [u8]> {
+        let arguments = arguments.trim_ascii();
+        let rang = arguments
+            .iter()
+            .position(|octet| *octet == b' ')
+            .unwrap_or(arguments.len());
+        let texte = arguments.get(..rang).unwrap_or_default();
+        let reste = arguments.get(rang.saturating_add(1)..).unwrap_or_default();
+        if SequenceSet::parse(texte, &self.limits).is_err() {
+            return Err(b"");
+        }
+        let longueur = match self.un_nom(reste, place) {
+            Some(nom) => nom.len(),
+            None => return Err(b""),
+        };
+        let nom = place.get(..longueur).unwrap_or_default();
+        // §6.4.7 : UNE DESTINATION QUI N'EXISTE PAS SE DIT `[TRYCREATE]`, et pas
+        // autrement. C'est le code qui apprend au client qu'un `CREATE` suivi de
+        // la même commande marcherait — le lui refuser sèchement le laisserait
+        // deviner.
+        let Some(boite) = self.boites.open(self.user(), nom) else {
+            return Err(b"[TRYCREATE] Destination mailbox does not exist");
+        };
+        Ok((nom, boite.uid_validity()))
+    }
+
+    /// `MOVE` et `UID MOVE` (§6.4.8).
+    ///
+    /// # L'ORDRE DES RÉPONSES EST CELUI QUE §6.4.8 IMPOSE
+    ///
+    /// D'abord `* OK [COPYUID …]`, **non sollicité**, qui dit où les messages
+    /// sont allés ; puis les `* n EXPUNGE` qui disent qu'ils ne sont plus là ;
+    /// enfin la conclusion. Le premier voyage donc comme réponse du tour, et les
+    /// autres comme morceaux d'émission : c'est exactement l'ordre où l'appelant
+    /// les écrit.
+    fn deplacer<'b>(
+        &mut self,
+        arguments: &[u8],
+        par_uid: bool,
+        out: &'b mut [u8],
+    ) -> Result<Turn<'b>, Error> {
+        if self.ouverte.is_none() {
+            return self.faute(b"Command is not allowed unless a mailbox is selected", out);
+        }
+        let mut place = [0_u8; MAILBOX_NAME_MAX];
+        let (nom, uid_validity) = match self.destination(arguments, &mut place) {
+            Ok(trouvee) => trouvee,
+            Err(b"") => {
+                return self.faute(b"MOVE expects a sequence set and a mailbox name", out);
+            }
+            Err(refus) => return self.termine(Status::No, refus, Action::Continue, out),
+        };
+        let texte = arguments.trim_ascii();
+        let fin = texte
+            .iter()
+            .position(|octet| *octet == b' ')
+            .unwrap_or(texte.len());
+        let ensemble = SequenceSet::parse(texte.get(..fin).unwrap_or_default(), &self.limits)
+            .unwrap_or(SequenceSet::EMPTY);
+
+        let (exists, dernier_uid) = self.ouverte.as_ref().map_or((0, 0), |boite| {
+            let exists = boite.exists();
+            (exists, boite.info(exists).map_or(0, |info| info.uid))
+        });
+        let star = if par_uid { dernier_uid } else { exists };
+
+        let faites = match self.copier(&ensemble, nom, par_uid, exists, star, true) {
+            Ok(faites) => faites,
+            Err(Echec::Copie) => {
+                return self.termine(
+                    Status::No,
+                    b"Move failed; no messages were moved",
+                    Action::Continue,
+                    out,
+                );
+            }
+            Err(Echec::TropMorcele) => {
+                return self.termine(
+                    Status::No,
+                    b"[CANNOT] Move set is too fragmented",
+                    Action::Continue,
+                    out,
+                );
+            }
+        };
+        if faites.copies == 0 {
+            return self.termine(
+                Status::Ok,
+                if par_uid {
+                    b"UID MOVE completed".as_slice()
+                } else {
+                    b"MOVE completed".as_slice()
+                },
+                Action::Continue,
+                out,
+            );
+        }
+
+        // ON RETIRE PAR UID, MÊME QUAND LE CLIENT A DÉSIGNÉ DES RANGS. Retirer
+        // renumérote : un ensemble de rangs cesserait de désigner ce qu'il
+        // désignait dès le premier retrait, et l'on retirerait des messages que
+        // personne n'a nommés.
+        // `copier` a refusé de rendre des copies dont il ne saurait pas nommer
+        // les sources : le texte est donc là.
+        let ecrit = faites.source.texte().unwrap_or_default();
+        let mut uids = [0_u8; SEQUENCE_TEXT_MAX];
+        for (place, octet) in uids.iter_mut().zip(ecrit) {
+            *place = *octet;
+        }
+        let uids_len = ecrit.len().min(uids.len());
+
+        let mut emission = Emission {
+            texte: uids,
+            texte_len: uids_len,
+            items: [FetchItem::Flags; ams_proto_imap::FETCH_ITEMS_MAX],
+            items_len: 0,
+            par_uid,
+            cles_uid: true,
+            exige_la_marque: false,
+            star: dernier_uid,
+            star_uid: dernier_uid,
+            courant: 1,
+            exists,
+            ecriture: None,
+            silencieux: false,
+            genre: Genre::Move,
+            plage: None,
+            a_ecrire: None,
+            entame: false,
+            trouve: false,
+            effaces: 0,
+            etape: Etape::Choisir,
+        };
+        emission.texte_len = uids_len;
+        self.emission = Some(emission);
+
+        // La réponse du tour EST le `* OK [COPYUID …]` : il précède les
+        // `EXPUNGE`, comme §6.4.8 le demande.
+        let mut texte_reponse = [0_u8; COPYUID_MAX];
+        let ecrits = copyuid_non_sollicite(
+            &mut texte_reponse,
+            uid_validity,
+            uids.get(..uids_len).unwrap_or_default(),
+            faites.premier_copie,
+            faites.dernier_copie,
+        );
+        // SI LA LIGNE NE TIENT PAS, ON L'OMET — et le déplacement a lieu quand
+        // même. `COPYUID` est un `SHOULD` (§6.4.8) ; échouer ici laisserait les
+        // copies faites et les retraits à faire, ce qui est bien pire que de ne
+        // pas dire où les messages sont allés.
+        let ligne = encode_untagged(
+            out,
+            texte_reponse.get(..ecrits).unwrap_or_default(),
+            &self.limits,
+        )
+        .map_or(0, <[u8]>::len);
+        Ok(Turn {
+            reply: out.get(..ligne).unwrap_or_default(),
+            action: Action::SendFetch,
+            peer_fault: false,
+        })
     }
 
     /// `SEARCH` et `UID SEARCH` (§6.4.4).
@@ -1671,6 +1897,8 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             items: [FetchItem::Flags; ams_proto_imap::FETCH_ITEMS_MAX],
             items_len: 0,
             par_uid,
+            cles_uid: par_uid,
+            exige_la_marque: true,
             star: exists,
             star_uid: dernier_uid,
             courant: 1,
@@ -1749,6 +1977,8 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             items: [FetchItem::Flags; ams_proto_imap::FETCH_ITEMS_MAX],
             items_len: 0,
             par_uid,
+            cles_uid: par_uid,
+            exige_la_marque: true,
             star: if par_uid { dernier_uid } else { exists },
             star_uid: dernier_uid,
             courant: 1,
@@ -1888,6 +2118,8 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             items: [FetchItem::Flags; ams_proto_imap::FETCH_ITEMS_MAX],
             items_len: 1,
             par_uid,
+            cles_uid: par_uid,
+            exige_la_marque: true,
             star: if par_uid { dernier_uid } else { exists },
             star_uid: dernier_uid,
             courant: 1,
@@ -2005,9 +2237,12 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         if verbe.eq_ignore_ascii_case(b"COPY") {
             return self.copy(reste, true, out);
         }
+        if verbe.eq_ignore_ascii_case(b"MOVE") {
+            return self.deplacer(reste, true, out);
+        }
         self.termine(
             Status::No,
-            b"[CANNOT] Only UID FETCH, STORE, EXPUNGE, SEARCH and COPY are served yet",
+            b"[CANNOT] This UID command is not served yet",
             Action::Continue,
             out,
         )
@@ -2083,6 +2318,8 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             items: [FetchItem::Uid; ams_proto_imap::FETCH_ITEMS_MAX],
             items_len: demande.items().len(),
             par_uid,
+            cles_uid: par_uid,
+            exige_la_marque: true,
             star,
             star_uid: dernier_uid,
             courant: 1,
@@ -2270,14 +2507,23 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         // §7.5.1 : chaque `* n EXPUNGE` RENUMÉROTE ce qui suit. La réponse n'a
         // donc pas la forme d'un `FETCH`, et le parcours non plus : il ne
         // s'arrête pas au rang courant mais à ce qu'il reste de la boîte.
-        if emission.genre == Genre::Expunge {
+        if matches!(emission.genre, Genre::Expunge | Genre::Move) {
             loop {
                 let Some(rang) = emission.a_effacer(boite, &self.limits) else {
                     emission.etape = Etape::Conclure;
                     self.emission = Some(emission);
                     return self.next_fetch(out);
                 };
-                if !boite.expunge(rang) {
+                // `EXPUNGE` relit la marque avant d'effacer, `MOVE` non : voir
+                // `Mailbox::remove`. Les confondre ferait ou bien un `MOVE` qui
+                // ne déplace rien, ou bien un `EXPUNGE` qui efface ce qu'on ne
+                // lui a pas demandé.
+                let parti = if emission.genre == Genre::Move {
+                    boite.remove(rang)
+                } else {
+                    boite.expunge(rang)
+                };
+                if !parti {
                     // Toujours là — la marque a dû être retirée entre-temps. On
                     // passe, et l'on n'annonce rien : annoncer un effacement qui
                     // n'a pas eu lieu ferait perdre au client le fil des numéros.
@@ -2572,19 +2818,26 @@ impl Plage {
         }
     }
 
-    /// Le texte de l'ensemble, ou `None` s'il a débordé.
-    fn texte(&mut self) -> Option<&[u8]> {
-        // ON PARCOURT UNE TRANCHE PLUTÔT QUE DE TESTER UNE OPTION : `texte`
-        // n'est appelé qu'après au moins un `pousser`, donc il y a toujours une
-        // plage ouverte. Un `if let` porterait un « et sinon » qu'aucun appel ne
-        // peut emprunter, et une garde inatteignable n'est pas une garde. Une
-        // tranche d'un élément se parcourt sans rien affirmer — et sans fâcher
-        // `clippy::for_loops_over_fallibles`, qui a raison de refuser qu'on
-        // boucle sur une option.
+    /// Ferme la plage en cours : après cela, le texte est complet.
+    ///
+    /// **On parcourt une tranche plutôt que de tester une option** : une plage
+    /// ouverte n'est pas une condition, c'est un élément qu'on a ou qu'on n'a
+    /// pas. Un `if let` porterait un « et sinon » qui ne dit rien, et une
+    /// tranche d'au plus un élément se parcourt sans rien affirmer.
+    fn fermer(&mut self) {
         let a_fermer = self.ouverte.take();
         for plage in a_fermer.as_slice() {
             self.ecrire(*plage);
         }
+    }
+
+    /// L'ensemble a-t-il débordé ?
+    fn a_deborde(&self) -> bool {
+        self.deborde
+    }
+
+    /// Le texte de l'ensemble, ou `None` s'il a débordé.
+    fn texte(&self) -> Option<&[u8]> {
         if self.deborde {
             return None;
         }
@@ -2592,11 +2845,62 @@ impl Plage {
     }
 }
 
+/// Pourquoi une phase de copie n'a rien laissé derrière elle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Echec {
+    /// Une copie a échoué.
+    Copie,
+    /// Les sources ne tiennent pas dans ce qu'on sait nommer.
+    TropMorcele,
+}
+
+/// Ce qu'une phase de copie a produit.
+struct Copies {
+    /// Les UID des messages copiés, comprimés en ensemble.
+    source: Plage,
+    /// Le premier UID attribué dans la destination.
+    premier_copie: u32,
+    /// Le dernier.
+    dernier_copie: u32,
+    /// Combien de messages ont été copiés.
+    copies: u32,
+}
+
+/// Compose le texte d'un `* OK [COPYUID …]` non sollicité (§6.4.8).
+fn copyuid_non_sollicite(
+    out: &mut [u8],
+    uid_validity: u32,
+    source: &[u8],
+    premier: u32,
+    dernier: u32,
+) -> usize {
+    let mut ecrits = recopier(out, 0, b"OK [COPYUID ");
+    ecrits = ecrits.saturating_add(nombre_en_octets(
+        out.get_mut(ecrits..).unwrap_or_default(),
+        uid_validity,
+    ));
+    ecrits = recopier(out, ecrits, b" ");
+    ecrits = recopier(out, ecrits, source);
+    ecrits = recopier(out, ecrits, b" ");
+    ecrits = ecrits.saturating_add(nombre_en_octets(
+        out.get_mut(ecrits..).unwrap_or_default(),
+        premier,
+    ));
+    if dernier != premier {
+        ecrits = recopier(out, ecrits, b":");
+        ecrits = ecrits.saturating_add(nombre_en_octets(
+            out.get_mut(ecrits..).unwrap_or_default(),
+            dernier,
+        ));
+    }
+    recopier(out, ecrits, b"] Moved")
+}
+
 /// Compose la conclusion d'un `COPY`, `COPYUID` compris s'il tient.
 fn copyuid(
     out: &mut [u8],
     uid_validity: u32,
-    source: &mut Plage,
+    source: &Plage,
     premier: u32,
     dernier: u32,
     par_uid: bool,

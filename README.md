@@ -31,7 +31,7 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 >
 > **Il ouvre les boîtes** : IMAP sur un troisième port, `STARTTLS` puis `LOGIN`
 > ou `AUTHENTICATE PLAIN`, `SELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`,
-> `EXPUNGE`, `SEARCH` et `COPY` sur `INBOX` — un message traverse la socket sans jamais tenir en
+> `EXPUNGE`, `SEARCH`, `COPY` et `MOVE` sur `INBOX` — un message traverse la socket sans jamais tenir en
 > mémoire, les drapeaux s'écrivent dans les noms de fichiers Maildir, et un
 > effacement n'a jamais lieu sur une marque périmée.
 >
@@ -470,7 +470,8 @@ découpage existe pour fermer. Un tag illisible, lui, ne ferme rien : la command
 ## Les boîtes IMAP : lire sans jamais tenir un message
 
 `SELECT`, `EXAMINE`, `CLOSE`, `UNSELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`,
-`EXPUNGE`, `SEARCH`, `COPY` et leurs formes `UID` servent la boîte du compte. Ce serveur en a **une par compte, et elle
+`EXPUNGE`, `SEARCH`, `COPY`, `MOVE` et leurs formes `UID` servent la boîte du
+compte. Ce serveur en a **une par compte, et elle
 s'appelle `INBOX`** — le nom que la RFC 9051 §5.1 réserve pour cela. Créer des
 dossiers demanderait `CREATE`, un endroit où les mettre et une règle pour ce
 qu'un nom a le droit d'être ; rien de tout cela n'est écrit, et prétendre en
@@ -675,8 +676,36 @@ ouverte l'agrandit ; relire le nombre de messages à chaque tour ferait de
 `COPY 1:* INBOX` une boucle que le client n'aurait qu'à demander. Le nombre est
 donc arrêté d'avance.
 
-Ce qui n'y est toujours pas : `MOVE`, `APPEND`, `CREATE`/`DELETE`/`RENAME`,
-`ENVELOPE` et `BODYSTRUCTURE`. Ils sont reconnus, leur
+## `MOVE` : copier, puis retirer — dans cet ordre, et en le disant dans cet ordre
+
+`MOVE` est un `COPY` suivi d'un retrait, et §6.4.8 **impose l'ordre des
+réponses** : d'abord `* OK [COPYUID …]`, non sollicité, qui dit où les messages
+sont allés ; puis les `* n EXPUNGE`, qui disent qu'ils ne sont plus là ; enfin la
+conclusion. Le premier voyage donc comme réponse du tour et les autres comme
+morceaux d'émission — c'est exactement l'ordre où l'appelant les écrit, sans
+qu'il ait rien à se rappeler.
+
+**ON RETIRE PAR UID, MÊME QUAND LE CLIENT A DÉSIGNÉ DES RANGS.** Retirer
+renumérote : un ensemble de rangs cesserait de désigner ce qu'il désignait dès le
+premier retrait, et l'on retirerait des messages que personne n'a nommés. Les
+sources sont donc traduites en UID pendant la copie — et **si cette traduction ne
+tient pas** dans ce qu'on sait nommer, le déplacement est refusé et les copies
+défaites : retirer au hasard serait perdre du courrier.
+
+**Retirer n'est pas effacer.** `EXPUNGE` relit la marque `\Deleted` dans le nom
+du fichier avant d'effacer — c'est la garde qui empêche de perdre du courrier sur
+une croyance périmée. `MOVE` n'a aucune marque à relire : il retire un message
+qu'il vient de copier, à l'instant, sur ordre exprès. Confondre les deux ferait ou
+bien un `MOVE` qui ne déplace rien, ou bien un `EXPUNGE` qui efface ce qu'on ne
+lui a pas demandé. Ce sont donc deux opérations distinctes du magasin.
+
+**Si la ligne `COPYUID` ne tient pas dans le tampon de l'appelant, elle est
+omise** — et le déplacement a lieu quand même. C'est un `SHOULD` de la RFC ;
+échouer là laisserait les copies faites et les retraits à faire, ce qui est bien
+pire que de ne pas dire où les messages sont allés.
+
+Ce qui n'y est toujours pas : `APPEND`, `CREATE`/`DELETE`/`RENAME`, `ENVELOPE` et
+`BODYSTRUCTURE`. Ils sont reconnus, leur
 état est vérifié, et la session répond `NO [UNAVAILABLE]` — `NO` et non `BAD`,
 parce que la commande est correcte et permise et que c'est ce serveur qui ne la
 sert pas. `APPEND` demandera un chemin qui écoule au fil de l'eau, comme le

@@ -650,9 +650,9 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         // drapeaux.
         eprintln!(
             "air-mail-server : IMAP écoute sur {adresse} — SEULE `INBOX` EST SERVIE : \
-             `SELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`, `EXPUNGE`, `SEARCH` et `COPY` \
-             répondent ; `APPEND` et `MOVE` non. UNE COPIE NE PEUT VISER QUE `INBOX`, faute \
-             d'une autre boîte où viser. UN `EXPUNGE` EFFACE POUR DE BON, et un `CLOSE` \
+             `SELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`, `EXPUNGE`, `SEARCH`, `COPY` et \
+             `MOVE` répondent ; `APPEND` non. UNE COPIE OU UN DÉPLACEMENT NE PEUT VISER QUE \
+             `INBOX`, faute d'une autre boîte où viser. UN `EXPUNGE` EFFACE POUR DE BON, et un `CLOSE` \
              aussi. Les critères de recherche qui demandent de LIRE le message (`SUBJECT`, \
              `BODY`, `FROM`…) sont refusés, pas rendus faux."
         );

@@ -120,6 +120,19 @@ impl Mailbox for Boite {
             .retain(|message| message.is_none_or(|info| info.uid < premier || info.uid > dernier));
     }
 
+    fn remove(&mut self, sequence: u32) -> bool {
+        // Retirer, c'est effacer sans regarder la marque — et la boîte
+        // d'épreuve n'en regarde pas non plus.
+        let Ok(rang) = usize::try_from(sequence.saturating_sub(1)) else {
+            return false;
+        };
+        if rang >= self.messages.len() || !self.modifiable {
+            return false;
+        }
+        self.messages.remove(rang);
+        true
+    }
+
     fn expunge(&mut self, sequence: u32) -> bool {
         if !self.modifiable {
             return false;
@@ -646,14 +659,6 @@ fn ce_qu_on_ne_sert_pas_encore_le_dit_sans_accuser_le_client() {
             "{commande:?} n'est pas une faute du pair"
         );
     }
-    // Celles qui exigent une boîte ouverte le disent autrement : elles sont
-    // hors d'état, et non hors de service.
-    dire(&mut session, b"a011 SELECT INBOX\r\n");
-    let (texte, _) = dire(&mut session, b"a016 MOVE 1 Archives\r\n");
-    assert!(
-        texte.contains("NO [UNAVAILABLE] Mailbox commands are not served yet"),
-        "{texte}"
-    );
 }
 
 // ── LES BOÎTES ──────────────────────────────────────────────────────────────
@@ -1304,9 +1309,12 @@ fn ce_qui_se_deroule_se_montre() {
 fn ecouler(session: &mut Session<UnCompte, Boites>, commande: &[u8]) -> std::string::String {
     let mut sortie = [0_u8; 2048];
     let tour = session.handle(commande, &mut sortie).expect("traitable");
-    let conclusion = std::string::String::from_utf8_lossy(tour.reply()).into_owned();
-    assert_eq!(tour.action(), Action::SendFetch, "{conclusion}");
-    let mut fil = std::string::String::new();
+    // LA RÉPONSE DU TOUR VIENT D'ABORD, comme la boucle l'écrit : un `MOVE` y
+    // loge son `* OK [COPYUID …]`, que §6.4.8 veut AVANT les `EXPUNGE`. La
+    // mettre à la fin ferait passer un ordre faux pour un ordre bon.
+    let debut = std::string::String::from_utf8_lossy(tour.reply()).into_owned();
+    assert_eq!(tour.action(), Action::SendFetch, "{debut}");
+    let mut fil = debut;
     let mut morceaux = [0_u8; 2048];
     while let Some(morceau) = session.next_fetch(&mut morceaux).expect("émettable") {
         match morceau {
@@ -1322,7 +1330,6 @@ fn ecouler(session: &mut Session<UnCompte, Boites>, commande: &[u8]) -> std::str
             }
         }
     }
-    fil.push_str(&conclusion);
     fil
 }
 
@@ -1466,13 +1473,14 @@ fn uid_fetch_designe_par_uid_et_rend_le_rang() {
     assert_eq!(fil, "* 3 FETCH (UID 30)\r\na005 OK FETCH completed\r\n");
 }
 
+/// **`UID` porte un verbe, et pas n'importe lequel.** Un verbe inconnu se refuse
+/// en le disant, plutôt que de laisser le client croire à une syntaxe fautive.
 #[test]
-fn un_uid_autre_que_fetch_ou_store_se_refuse_en_le_disant() {
+fn un_uid_dont_le_verbe_est_inconnu_se_refuse_en_le_disant() {
     let mut session = selectionnee();
-    let (texte, _) = dire(&mut session, b"a003 UID MOVE 1 Archives\r\n");
+    let (texte, _) = dire(&mut session, b"a003 UID CHERCHE 1\r\n");
     assert!(
-        texte
-            .contains("NO [CANNOT] Only UID FETCH, STORE, EXPUNGE, SEARCH and COPY are served yet"),
+        texte.contains("NO [CANNOT] This UID command is not served yet"),
         "{texte}"
     );
     // Et `UID` sans rien derrière ne trouve pas de verbe.
@@ -2414,4 +2422,144 @@ fn un_uid_copy_qui_deborde_omet_aussi_son_copyuid() {
     dire(&mut session, b"a002 SELECT Eparse\r\n");
     let (texte, _) = dire(&mut session, b"a003 UID COPY 1:* INBOX\r\n");
     assert_eq!(texte, "a003 OK UID COPY completed\r\n");
+}
+
+// ── `MOVE` ──────────────────────────────────────────────────────────────────
+
+/// **§6.4.8 impose l'ordre des réponses** : d'abord `* OK [COPYUID …]`, qui dit
+/// où les messages sont allés ; puis les `* n EXPUNGE`, qui disent qu'ils ne
+/// sont plus là ; enfin la conclusion.
+#[test]
+fn move_dit_ou_avant_de_dire_que_ce_n_est_plus_la() {
+    let mut session = selectionnee();
+    let fil = ecouler(&mut session, b"a003 MOVE 1:2 INBOX\r\n");
+    assert_eq!(
+        fil,
+        "* OK [COPYUID 42 10,20 31:32] Moved\r\n\
+         * 1 EXPUNGE\r\n* 1 EXPUNGE\r\n\
+         a003 OK MOVE completed\r\n"
+    );
+    // Il reste l'ancien troisième et les deux copies.
+    let reste = ecouler(&mut session, b"a004 FETCH 1:* UID\r\n");
+    assert_eq!(
+        reste,
+        "* 1 FETCH (UID 30)\r\n* 2 FETCH (UID 31)\r\n* 3 FETCH (UID 32)\r\n\
+         a004 OK FETCH completed\r\n"
+    );
+}
+
+/// **On retire par UID, même quand le client a désigné des rangs.** Retirer
+/// renumérote : un ensemble de rangs cesserait de désigner ce qu'il désignait
+/// dès le premier retrait, et l'on retirerait des messages que personne n'a
+/// nommés.
+#[test]
+fn move_retire_ceux_qu_on_a_nommes_et_pas_leurs_voisins() {
+    let mut session = selectionnee();
+    // On déplace le PREMIER seulement : le deuxième ne doit pas suivre.
+    let fil = ecouler(&mut session, b"a003 MOVE 1 INBOX\r\n");
+    assert_eq!(
+        fil,
+        "* OK [COPYUID 42 10 31] Moved\r\n* 1 EXPUNGE\r\na003 OK MOVE completed\r\n"
+    );
+    let reste = ecouler(&mut session, b"a004 FETCH 1:* UID\r\n");
+    assert_eq!(
+        reste,
+        "* 1 FETCH (UID 20)\r\n* 2 FETCH (UID 30)\r\n* 3 FETCH (UID 31)\r\n\
+         a004 OK FETCH completed\r\n"
+    );
+}
+
+/// **`UID MOVE` désigne par UID**, et le dit dans sa conclusion.
+#[test]
+fn uid_move_designe_par_uid() {
+    let mut session = selectionnee();
+    let fil = ecouler(&mut session, b"a003 UID MOVE 30 INBOX\r\n");
+    assert_eq!(
+        fil,
+        "* OK [COPYUID 42 30 31] Moved\r\n* 3 EXPUNGE\r\na003 OK UID MOVE completed\r\n"
+    );
+}
+
+/// **§6.4.8 : une destination qui n'existe pas se dit `[TRYCREATE]`.**
+#[test]
+fn une_destination_inconnue_se_dit_trycreate_aussi_pour_move() {
+    let mut session = selectionnee();
+    let (texte, _) = dire(&mut session, b"a003 MOVE 1 Inconnue\r\n");
+    assert!(
+        texte.contains("NO [TRYCREATE] Destination mailbox does not exist"),
+        "{texte}"
+    );
+}
+
+/// **Un `MOVE` qui ne peut pas tout copier ne déplace rien**, et défait ses
+/// copies : rien n'est retiré de la source.
+#[test]
+fn un_move_qui_echoue_ne_retire_rien() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut session, b"a002 SELECT Tetue\r\n");
+    let (texte, _) = dire(&mut session, b"a003 MOVE 1:3 INBOX\r\n");
+    assert!(
+        texte.contains("NO Move failed; no messages were moved"),
+        "{texte}"
+    );
+    let fil = ecouler(&mut session, b"a004 FETCH 1:* UID\r\n");
+    assert_eq!(fil.matches("* ").count(), 3, "{fil}");
+}
+
+/// Rien à déplacer n'est pas un échec.
+#[test]
+fn un_move_qui_ne_designe_rien_reussit() {
+    let mut session = selectionnee();
+    let (texte, action) = dire(&mut session, b"a003 MOVE 9 INBOX\r\n");
+    assert_eq!(texte, "a003 OK MOVE completed\r\n");
+    assert_eq!(action, Action::Continue);
+    let (aussi, _) = dire(&mut session, b"a004 UID MOVE 999 INBOX\r\n");
+    assert_eq!(aussi, "a004 OK UID MOVE completed\r\n");
+}
+
+/// **Un ensemble qu'on ne saurait plus nommer fait REFUSER le déplacement**, et
+/// défaire les copies : retirer au hasard serait perdre du courrier.
+#[test]
+fn un_move_dont_l_ensemble_est_trop_morcele_se_refuse() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut session, b"a002 SELECT Eparse\r\n");
+    let (texte, _) = dire(&mut session, b"a003 MOVE 1:* INBOX\r\n");
+    assert!(
+        texte.contains("NO [CANNOT] Move set is too fragmented"),
+        "{texte}"
+    );
+    // La source est intacte : soixante messages, et pas un de plus.
+    let fil = ecouler(&mut session, b"a004 SEARCH ALL\r\n");
+    assert!(fil.contains("ALL 1:60"), "{fil}");
+}
+
+#[test]
+fn un_move_mal_forme_est_une_faute() {
+    let mut session = selectionnee();
+    for commande in [
+        &b"a003 MOVE\r\n"[..],
+        b"a004 MOVE 1\r\n",
+        b"a005 MOVE x INBOX\r\n",
+        b"a006 MOVE 1 \r\n",
+    ] {
+        let (texte, _) = dire(&mut session, commande);
+        assert!(
+            texte.contains("BAD MOVE expects a sequence set and a mailbox name"),
+            "{commande:?} : {texte}"
+        );
+    }
+}
+
+/// **Un `MOVE` hors sélection est hors d'état, pas hors de service.**
+#[test]
+fn un_move_sans_boite_ouverte_est_hors_d_etat() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (texte, _) = dire(&mut session, b"a002 MOVE 1 INBOX\r\n");
+    assert!(
+        texte.contains("BAD Command is not allowed unless a mailbox is selected"),
+        "{texte}"
+    );
 }

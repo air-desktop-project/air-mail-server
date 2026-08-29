@@ -865,8 +865,8 @@ ne s'écrit — ni `STORE`, ni `APPEND`, ni `EXPUNGE` — `SELECT` répond
 modifiabilité qu'elle ne peut pas connaître ferait une promesse que le client ne
 verrait démentie qu'en essayant.
 
-Ce qui n'est toujours pas servi : `MOVE`, `APPEND`,
-`CREATE`/`DELETE`/`RENAME`, `ENVELOPE` et `BODYSTRUCTURE`.
+Ce qui n'est toujours pas servi : `APPEND`, `CREATE`/`DELETE`/`RENAME`,
+`ENVELOPE` et `BODYSTRUCTURE`.
 
 Éprouvé jusqu'au binaire, contre un vrai Maildir rempli par SMTP : `LIST`,
 `SELECT INBOX` et ses sept réponses, `STATUS` sur la boîte sélectionnée,
@@ -1072,6 +1072,44 @@ drapeaux préservés (`:2,FS` recopié, et le message sans drapeau resté dans
 `new/`), `NO [TRYCREATE]` pour une boîte inconnue, et surtout **un message rendu
 illisible en cours de commande** : la copie du précédent a bien été défaite, et
 aucun UID neuf n'est resté.
+
+## `MOVE` : copier puis retirer, depuis le 2026-08-29
+
+§6.4.8 IMPOSE L'ORDRE DES RÉPONSES : d'abord `* OK [COPYUID …]`, non sollicité,
+qui dit où les messages sont allés ; puis les `* n EXPUNGE` ; enfin la
+conclusion. Le premier voyage comme réponse du tour et les autres comme morceaux
+d'émission — c'est exactement l'ordre où l'appelant les écrit, sans qu'il ait
+rien à se rappeler. Un premier essai les avait mis dans l'autre sens, et c'est
+l'aide de test qui mentait : elle ajoutait la réponse du tour à la FIN, là où la
+boucle l'écrit en tête. Corrigée, elle dit maintenant ce que le fil dit.
+
+ON RETIRE PAR UID, MÊME QUAND LE CLIENT A DÉSIGNÉ DES RANGS. Retirer renumérote :
+un ensemble de rangs cesserait de désigner ce qu'il désignait dès le premier
+retrait. Les sources sont traduites en UID pendant la copie, et si cette
+traduction ne tient pas dans ce qu'on sait nommer, le déplacement est REFUSÉ et
+les copies défaites — retirer au hasard serait perdre du courrier.
+
+RETIRER N'EST PAS EFFACER. `EXPUNGE` relit la marque `\Deleted` dans le nom du
+fichier avant d'effacer ; `MOVE` n'a aucune marque à relire, puisqu'il retire un
+message qu'il vient de copier sur ordre exprès. Le magasin porte donc deux
+opérations distinctes, et le dit : les confondre ferait ou bien un `MOVE` qui ne
+déplace rien, ou bien un `EXPUNGE` qui efface ce qu'on ne lui a pas demandé.
+
+SI LA LIGNE `COPYUID` NE TIENT PAS, ELLE EST OMISE, et le déplacement a lieu
+quand même. C'est un `SHOULD` ; échouer là laisserait les copies faites et les
+retraits à faire, ce qui est bien pire que de ne pas dire où les messages sont
+allés.
+
+`si_selectionne` a disparu : plus aucune commande n'y menait, toutes les
+commandes de boîte étant servies. Une fonction que rien n'appelle est une
+affirmation que rien ne vérifie.
+
+Éprouvé jusqu'au binaire, contre un vrai Maildir : le `COPYUID` non sollicité
+avant deux `* 1 EXPUNGE` — le second vaut « 1 » parce que le premier a
+renuméroté —, les UID d'origine disparus et les copies présentes, les drapeaux
+préservés, `NO [TRYCREATE]` pour une destination inconnue, et **un message rendu
+illisible en cours de commande** : rien n'a été retiré, et aucune copie n'est
+restée.
 
 ## Le gate de couverture arrondissait vers le haut, depuis le 2026-08-29
 
@@ -1659,7 +1697,7 @@ et une couture inutilisée finit par être utilisée.
 SMTP en réception (avec `STARTTLS`, `AUTH PLAIN`, SPF, DKIM, DMARC et remise
 Maildir), SMTP à l'émission (rapports DMARC), POP3, et IMAP — `SELECT`,
 `EXAMINE`, `CLOSE`, `UNSELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`, `EXPUNGE`,
-`SEARCH`, `COPY` et leurs formes `UID`. Chacun a été éprouvé de bout en bout contre le binaire, et pas
+`SEARCH`, `COPY`, `MOVE` et leurs formes `UID`. Chacun a été éprouvé de bout en bout contre le binaire, et pas
 seulement en tests.
 
 **HTTP n'est pas servi** : `ams-proto-http` est un emplacement réservé, et son
@@ -1682,8 +1720,7 @@ persistant, et lecture sans verrou côté IMAP), C14 (`X25519MLKEM768` en tête)
 `<CRLF>.<CRLF>`, refuse tout `CR` ou `LF` isolé, et le fuzz éprouve que le
 découpage des lectures ne change rien au verdict.
 
-Ce qui manque, et qu'aucune phrase ne doit laisser croire acquis : `MOVE`,
-`APPEND`, la gestion des dossiers et les critères de `SEARCH` qui lisent le
-message ; le signeur DKIM,
+Ce qui manque, et qu'aucune phrase ne doit laisser croire acquis : `APPEND`, la
+gestion des dossiers et les critères de `SEARCH` qui lisent le message ; le signeur DKIM,
 qui existe et n'a pas d'appelant ; la file de réémission des messages sortants ;
 et toute interface HTTP.

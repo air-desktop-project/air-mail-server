@@ -135,6 +135,10 @@ impl Mailbox for Boite {
         }
     }
 
+    fn remove(&mut self, sequence: u32) -> bool {
+        self.expunge(sequence)
+    }
+
     fn expunge(&mut self, sequence: u32) -> bool {
         let Ok(rang) = usize::try_from(sequence.saturating_sub(1)) else {
             return false;
