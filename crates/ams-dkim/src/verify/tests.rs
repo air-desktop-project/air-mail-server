@@ -387,58 +387,6 @@ fn une_cle_ou_une_signature_ed25519_de_la_mauvaise_taille_est_refusee() {
     }
 }
 
-// ── LE BASE64, ET SA STRICTESSE ─────────────────────────────────────────────
-
-#[test]
-fn le_base64_se_decode() {
-    let mut sortie = [0_u8; 8];
-    for (encode, attendu) in [
-        ("", &b""[..]),
-        ("Zg==", b"f"),
-        ("Zm8=", b"fo"),
-        ("Zm9v", b"foo"),
-        ("Zm9vYmFy", b"foobar"),
-    ] {
-        let ecrits = decoder_base64(encode.as_bytes(), &mut sortie).expect("lisible");
-        assert_eq!(&sortie[..ecrits], attendu, "{encode}");
-    }
-    // Les blancs du pliage se traversent.
-    let ecrits = decoder_base64(b"Zm9v\r\n YmFy", &mut sortie).expect("lisible");
-    assert_eq!(&sortie[..ecrits], b"foobar");
-}
-
-#[test]
-fn le_base64_n_admet_qu_une_ecriture_par_valeur() {
-    // `Zg==` et `Zh==` décodent tous deux vers `f`. Accepter le second donnerait
-    // plusieurs formes pour un même condensat — de quoi passer à côté d'une
-    // comparaison, ou d'un journal.
-    let mut sortie = [0_u8; 8];
-    for mechant in [
-        "Zh==",     // des bits de remplissage non nuls
-        "Zg=",      // remplissage incomplet
-        "Zg",       // remplissage absent
-        "Zg===",    // remplissage de trop
-        "Zg==Zg==", // deux valeurs collées
-        "Zm9!",     // un octet qui n'est pas du base64
-        "Z",        // un seul sextet : rien à en faire
-    ] {
-        assert_eq!(
-            decoder_base64(mechant.as_bytes(), &mut sortie),
-            Err(Error::MalformedBase64),
-            "{mechant}"
-        );
-    }
-}
-
-#[test]
-fn le_base64_refuse_plutot_que_de_tronquer() {
-    let mut minuscule = [0_u8; 2];
-    assert_eq!(
-        decoder_base64(b"Zm9vYmFy", &mut minuscule),
-        Err(Error::BufferTooSmall)
-    );
-}
-
 #[test]
 fn un_condensat_de_corps_illisible_est_refuse() {
     // `bh=` n'est pas du base64, ou ne fait pas trente-deux octets.

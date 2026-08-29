@@ -247,6 +247,13 @@ message** — ce qu'un pair envoie de plus gros.
    regarder les limites d'étiquette effacerait le condensat du corps, et TOUTES
    les signatures échoueraient sans qu'aucun message ne dise pourquoi.
 
+10. **CE QU'ON SIGNE SE RELIT.** Le champ que le signataire écrit est un
+    `DKIM-Signature` valide — ou bien il refuse d'écrire. Aucune ligne n'y
+    dépasse ce qu'une ligne peut porter, et aucun saut de ligne n'y est autre
+    chose qu'un repli. On signe en Ed25519 : une signature RSA par exécution
+    ferait tomber le débit de trois ordres de grandeur, et ce qu'on éprouve ici
+    est l'ÉCRITURE, que l'algorithme ne change pas.
+
 **Ce que cette cible ne fuzze pas, et pourquoi.** La vérification RSA elle-même :
 une exponentiation modulaire par exécution ferait tomber le débit de trois ordres
 de grandeur, et ce qu'on éprouverait alors serait l'arithmétique de `rsa` — une
@@ -459,6 +466,25 @@ couvert.
 
 ## Ce que le fuzz a trouvé
 
+**`fuzz_ams_dkim`, une seconde fois — et celle-là était une injection d'en-tête.**
+
+Le signataire écrivait dans son champ le domaine et le sélecteur qu'on lui
+donnait, tels quels. La cible lui a donné un domaine fait de deux points et de
+sauts de ligne : le champ produit portait donc un `CRLF` suivi d'autre chose,
+c'est-à-dire **la fin de l'en-tête et le début d'un autre**. Qui contrôlerait la
+configuration d'un signataire pourrait ainsi écrire les en-têtes qu'il veut dans
+le courrier signé.
+
+L'assertion qui l'a trouvée ne cherchait pourtant pas cela : elle vérifiait
+seulement que le champ écrit se relit avec le domaine qu'on avait demandé. Il se
+relisait avec un domaine RACCOURCI — la grammaire des étiquettes retire les
+blancs de tête et de queue — et c'est ce décalage d'un octet qui a dénoncé le
+reste.
+
+Le signataire refuse désormais tout ce qui n'est pas un octet de valeur
+d'étiquette dans `d=`, `s=` et `i=`, et tout ce qui n'est pas `ftext` dans les
+noms de `h=`.
+
 **`fuzz_ams_dkim`, dès sa première exécution — et ce n'était pas un défaut du
 code, c'était un contrat qui n'était écrit nulle part.**
 
@@ -591,6 +617,7 @@ L'entrée fautive est versionnée en graine de non-régression
 | 2026-08-29 | `fuzz_ams_spf_header` | 7 478 784 (181 s) | 0 |
 | 2026-08-29 | `fuzz_ams_dkim` | 3 255 821 (181 s) | **1, contrat corrigé** |
 | 2026-08-29 | `fuzz_ams_dkim` (avec la vérification) | 2 921 202 (181 s) | 0 |
+| 2026-08-29 | `fuzz_ams_dkim` (avec la signature) | 707 978 (181 s) | **1, corrigée** |
 | 2026-08-29 | `fuzz_ams_config` (avec SPF) | 193 256 (61 s) | 0 |
 | 2026-08-29 | `fuzz_ams_session_smtp` (avec SPF) | 381 710 (61 s) | 0 |
 | 2026-08-28 | `fuzz_ams_session_smtp` (SASL) | 521 646 (91 s) | 0 |

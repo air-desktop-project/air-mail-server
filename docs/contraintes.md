@@ -480,9 +480,28 @@ mémoire il occupe. On ne vérifie pas non plus ce qu'on refuse : dépenser une 
 et une exponentiation pour un message qu'on jette offrirait de faire travailler
 la machine sans rien livrer.
 
-Ce qui n'est pas outillé : **la signature à l'émission**. `ams-dmarc` reste vide,
-et tant qu'il l'est, DMARC ne conclut rien — c'est pourtant lui qui rapproche les
-verdicts SPF et DKIM de l'en-tête `From:` que lira l'humain.
+**La signature à l'émission est écrite depuis le 2026-08-29.** `Signer` compose
+le champ, le relit avec le même analyseur que le vérificateur, condense ce qu'il
+vient d'écrire, et le signe. Cette relecture est le seul endroit où l'on vérifie
+que ce qu'on écrit est ce qu'on croit écrire — et c'est elle qui refuse une
+signature qui ne couvrirait pas `from`.
+
+Deux choses ne s'écrivent pas, et les deux sont des décisions : **`l=`**, parce
+que la borne de corps laisse ajouter ce qu'on veut après les `n` premiers octets
+(§8.2) ; et **l'heure**, qui vient de l'appelant parce que cette crate n'a pas
+d'horloge (C1).
+
+### Personne n'appelle encore le signataire, et c'est dit
+
+Ce serveur reçoit du courrier ; il n'en émet pas. Le relais est refusé
+explicitement (`RelayDenied`), et une signature n'a de sens qu'à l'émission. Le
+signataire est donc écrit, couvert et fuzzé, mais **aucun chemin ne l'emprunte**
+— il attend la soumission. C9 demande « DKIM en signature et en vérification » :
+la première moitié existe, la seconde tourne.
+
+Ce qui n'est pas outillé : `ams-dmarc` reste vide, et tant qu'il l'est, DMARC ne
+conclut rien — c'est pourtant lui qui rapproche les verdicts SPF et DKIM de
+l'en-tête `From:` que lira l'humain.
 
 ### DNSSEC n'est pas validé, et c'est écrit partout
 

@@ -82,7 +82,7 @@ des octets **et des actions**. Elles n'attendent jamais.
 | `ams-guard` | flooding et bannissement par source | **implémenté** |
 | `ams-auth` | le magasin d'identifiants, vérification Argon2id | **implémenté** |
 | `ams-tls` | TLS 1.3 uniquement, échange de clés post-quantique | **implémenté** |
-| `ams-dkim` | RFC 6376 | **signatures vérifiées, et câblées dans la boucle** |
+| `ams-dkim` | RFC 6376 | **vérifiées, câblées, et posées** |
 | `ams-spf` | RFC 7208 | **évalué, câblé, et écrit dans le message** |
 | `ams-dmarc` | RFC 7489 | vide |
 | `ams-config` | les trois formats binaires : configuration, comptes, index | **implémenté** |
@@ -236,7 +236,29 @@ vérifiées** — chacune coûte une résolution DNS et une exponentiation modul
 et un message qui en porterait cent ferait travailler la machine cent fois pour
 un seul envoi. On ne vérifie pas non plus ce qu'on refuse.
 
-Ce qui reste : **la signature à l'émission**.
+**La signature à l'émission est là aussi** : `Signer` compose le champ
+`DKIM-Signature`, le relit, condense ce qu'il vient d'écrire et le signe — en
+`rsa-sha256` ou `ed25519-sha256`.
+
+Signer, c'est écrire exactement ce que le vérificateur relira. Un signataire et
+un vérificateur qui divergent d'un octet ne se le disent jamais : les signatures
+échouent, et personne ne sait pourquoi. Le signataire **ne compose donc pas son
+propre condensat** — il écrit le champ, le relit avec le même analyseur, et le
+donne à condenser au même code que la vérification. Cette relecture n'est pas une
+politesse : c'est le seul endroit où l'on vérifie que ce qu'on vient d'écrire est
+ce qu'on croit avoir écrit, et c'est elle qui refuse une signature qui ne
+couvrirait pas `from`.
+
+Deux choses ne s'écrivent pas. **`l=`** : la borne de corps laisse ajouter ce
+qu'on veut après les `n` premiers octets sans invalider la signature (§8.2) — la
+crate sait la lire, elle n'en écrit pas. **L'heure** : `t=` et `x=` viennent de
+l'appelant, parce que cette crate n'a pas d'horloge (C1).
+
+**Rien n'appelle encore le signataire, et c'est normal** : ce serveur reçoit du
+courrier, il n'en émet pas. Le relais est refusé explicitement, et une signature
+n'a de sens qu'à l'émission. Le signataire attend donc le chemin de soumission —
+et C9, qui demande « DKIM en signature ET en vérification », est tenue des deux
+côtés le jour où ce chemin existera.
 
 `ams-dns` : le codec d'un message DNS — une question encodée, une réponse
 décodée. **Un client stub, et rien de plus** : ce serveur pose des questions, il

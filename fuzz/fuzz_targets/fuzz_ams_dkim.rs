@@ -28,6 +28,11 @@
 //! 9. **Retirer le `b=` ne touche à rien d'autre** : ce qui reste se relit, et
 //!    porte les mêmes étiquettes — `bh=` compris, qui commence par les mêmes
 //!    octets.
+//! 10. **CE QU'ON SIGNE SE RELIT.** Le champ que le signataire écrit est un
+//!     `DKIM-Signature` valide, quels que soient le domaine, le sélecteur et la
+//!     liste des champs qu'on lui donne — ou bien il refuse d'écrire. Aucune
+//!     ligne n'y dépasse ce qu'une ligne peut porter, et aucun saut de ligne n'y
+//!     est autre chose qu'un repli.
 //!
 //! # Ce que cette cible NE fuzze PAS, et pourquoi
 //!
@@ -44,8 +49,9 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use ams_dkim::{
-    Algorithm, BodyCanon, Canon, HeaderHasher, PublicKeyRecord, Signature, Trailer,
-    canonicalize_header, decoder_base64,
+    Algorithm, BodyCanon, BodyHasher, Canon, Canonicalization, HeaderHasher, PublicKeyRecord,
+    SIGNATURE_FIELD_MAX, Signature, Signer, SigningKey, Trailer, canonicalize_header,
+    decoder_base64,
 };
 
 #[derive(Debug, Arbitrary)]
@@ -63,6 +69,11 @@ struct Entree<'a> {
     /// Les choix : `relaxed` ou non, et la borne `l=`.
     relaxed: bool,
     limite: Option<u32>,
+    /// De quoi signer : un domaine, un sélecteur, et des noms de champs.
+    domaine: &'a [u8],
+    selecteur: &'a [u8],
+    couverts: Vec<&'a [u8]>,
+    horodatage: Option<u64>,
 }
 
 /// Ramène des octets quelconques à ce qu'un nom de champ peut être.
@@ -247,6 +258,49 @@ fuzz_target!(|entree: Entree| {
             0,
             "un base64 accepté n'a pas une longueur multiple de quatre"
         );
+    }
+
+    // ── 10 : ce qu'on signe se relit ────────────────────────────────────────
+    //
+    // On signe en Ed25519 : une signature RSA par exécution ferait tomber le
+    // débit de trois ordres de grandeur, et ce qu'on éprouve ici est l'ÉCRITURE,
+    // que l'algorithme ne change pas.
+    let signataire = Signer {
+        domain: entree.domaine,
+        selector: entree.selecteur,
+        canonicalization: Canonicalization {
+            header: canon,
+            body: canon,
+        },
+        headers: &entree.couverts,
+        timestamp: entree.horodatage,
+        expiration: None,
+        identity: None,
+    };
+    let mut condenseur = BodyHasher::new(canon, None);
+    condenseur.update(&entier);
+    let (condensat, _) = condenseur.finish();
+    let cle = SigningKey::ed25519_from_seed(&[5_u8; 32]);
+    let mut champ = [0_u8; SIGNATURE_FIELD_MAX];
+    if let Ok(ecrit) = signataire.sign(&cle, &condensat, &[], &mut champ) {
+        assert!(
+            ecrit.starts_with(b"DKIM-Signature:"),
+            "le champ écrit ne porte pas son nom"
+        );
+        assert!(ecrit.ends_with(b"\r\n"), "le champ n'est pas terminé");
+        // Il se relit — c'est la seule façon de savoir qu'on a écrit ce qu'on
+        // croyait écrire.
+        let valeur = &ecrit[b"DKIM-Signature:".len()..ecrit.len() - 2];
+        let relue = Signature::parse(valeur).expect("un champ écrit ici doit se relire");
+        assert_eq!(relue.domain, entree.domaine);
+        assert_eq!(relue.selector, entree.selecteur);
+        // Aucune ligne trop longue, et aucun saut qui ne soit un repli.
+        for (rang, ligne) in ecrit.split(|octet| *octet == b'\n').enumerate() {
+            assert!(ligne.len() <= 999, "une ligne de {} octets", ligne.len());
+            if rang > 0 && !ligne.is_empty() {
+                assert_eq!(ligne.first(), Some(&b' '), "un saut qui n'est pas un repli");
+            }
+        }
     }
 
     // ── 7 : une clé acceptée n'est pas révoquée ─────────────────────────────

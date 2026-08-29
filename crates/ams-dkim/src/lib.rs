@@ -47,23 +47,26 @@
 #[cfg(test)]
 extern crate std;
 
+mod base64;
 mod body;
 mod canonical;
 mod error;
 mod key;
+mod sign;
 mod signature;
 mod tag;
 mod verify;
 
+pub use base64::{decoder_base64, encoder_base64};
 pub use body::BodyCanon;
 pub use canonical::{
     Canon, Canonicalization, Trailer, canonicalize_header, canonicalize_header_parts,
 };
 pub use error::Error;
 pub use key::{KeyType, PublicKeyRecord};
+pub use sign::{SIGNATURE_FIELD_MAX, Signer, SigningKey};
 pub use signature::{Algorithm, Signature, SignedHeaders};
 pub use tag::{Tag, Tags};
 pub use verify::{
-    BodyHasher, DIGEST_LEN, HeaderHasher, decoder_base64, hash_signed_headers,
-    verifier_la_signature, verify,
+    BodyHasher, DIGEST_LEN, HeaderHasher, hash_signed_headers, verifier_la_signature, verify,
 };

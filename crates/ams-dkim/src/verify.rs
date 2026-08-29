@@ -34,6 +34,7 @@ use rsa::pkcs8::DecodePublicKey as _;
 use rsa::traits::{PublicKeyParts as _, SignatureScheme as _};
 use sha2::{Digest as _, Sha256};
 
+use crate::base64::decoder_base64;
 use crate::body::BodyCanon;
 use crate::canonical::{Canon, Trailer, canonicalize_header, canonicalize_header_parts};
 use crate::signature::{Algorithm, Signature, etendue_du_b};
@@ -153,6 +154,19 @@ impl HeaderHasher {
             },
         );
         Ok(())
+    }
+
+    /// Ajoute un champ `DKIM-Signature` **dont le `b=` est déjà vide**.
+    ///
+    /// C'est le cas du signataire, qui vient de l'écrire ainsi : il n'y a rien à
+    /// retirer, et donc aucune raison d'échouer. Le vérificateur, lui, emploie
+    /// [`HeaderHasher::signature_field`], qui doit d'abord trouver où le `b=`
+    /// s'arrête.
+    pub fn written_signature_field(&mut self, name: &[u8], value: &[u8]) {
+        let sha = &mut self.sha;
+        canonicalize_header(self.canon, name, value, Trailer::Aucun, &mut |octets| {
+            sha.update(octets);
+        });
     }
 
     /// Termine, et rend le condensat.
@@ -308,76 +322,6 @@ fn verifier_ed25519(key: &[u8], digest: &[u8; DIGEST_LEN], signature: &[u8]) -> 
     publique
         .verify_strict(digest, &EdSignature::from_bytes(scellee))
         .map_err(|_| Error::SignatureMismatch)
-}
-
-/// Décode du base64 **strict**, et rend le nombre d'octets écrits.
-///
-/// # Une seule écriture par valeur
-///
-/// Les bits de remplissage doivent être nuls, et le remplissage doit être
-/// présent. Sans cela, un même condensat s'écrirait de plusieurs façons — de
-/// quoi passer à côté d'une comparaison, ou d'un journal.
-///
-/// # Errors
-///
-/// [`Error::MalformedBase64`] ou [`Error::BufferTooSmall`].
-pub fn decoder_base64(valeur: &[u8], sortie: &mut [u8]) -> Result<usize, Error> {
-    let mut ecrits = 0_usize;
-    let mut accumulateur = 0_u32;
-    let mut bits = 0_u32;
-    let mut remplissage = 0_usize;
-
-    for octet in valeur {
-        if octet.is_ascii_whitespace() {
-            continue;
-        }
-        if *octet == b'=' {
-            remplissage = remplissage.saturating_add(1);
-            continue;
-        }
-        if remplissage > 0 {
-            // Des données APRÈS le remplissage : ce n'est pas un encodage, c'est
-            // deux valeurs collées.
-            return Err(Error::MalformedBase64);
-        }
-        let valeur6 = valeur_base64(*octet).ok_or(Error::MalformedBase64)?;
-        accumulateur = (accumulateur << 6) | u32::from(valeur6);
-        bits = bits.saturating_add(6);
-        if bits >= 8 {
-            bits = bits.saturating_sub(8);
-            let case = sortie.get_mut(ecrits).ok_or(Error::BufferTooSmall)?;
-            *case = u8::try_from((accumulateur >> bits) & 0xFF).unwrap_or(0);
-            ecrits = ecrits.saturating_add(1);
-        }
-    }
-
-    // Les bits qui restent doivent être NULS : `Zg==` et `Zh==` décodent tous
-    // deux vers `f`, et accepter le second donnerait plusieurs formes pour un
-    // même condensat.
-    let masque = 1_u32.checked_shl(bits).unwrap_or(0).saturating_sub(1);
-    if bits >= 6 || (accumulateur & masque) != 0 {
-        return Err(Error::MalformedBase64);
-    }
-    // Le remplissage complète le dernier groupe, et pas davantage.
-    let attendu = match bits {
-        0 => 0,
-        _ => 4_usize.saturating_sub((ecrits % 3).saturating_add(1)),
-    };
-    if remplissage != attendu {
-        return Err(Error::MalformedBase64);
-    }
-    Ok(ecrits)
-}
-
-fn valeur_base64(octet: u8) -> Option<u8> {
-    match octet {
-        b'A'..=b'Z' => Some(octet.wrapping_sub(b'A')),
-        b'a'..=b'z' => Some(octet.wrapping_sub(b'a').saturating_add(26)),
-        b'0'..=b'9' => Some(octet.wrapping_sub(b'0').saturating_add(52)),
-        b'+' => Some(62),
-        b'/' => Some(63),
-        _ => None,
-    }
 }
 
 /// Compare deux condensats **sans fuir où ils diffèrent**.

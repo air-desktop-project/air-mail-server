@@ -113,7 +113,7 @@ fn lire_une(morceau: &[u8]) -> Result<Tag<'_>, Error> {
 /// base64 se termine par des `=` de remplissage, et aucune signature ne se
 /// lirait sous la première lecture. C'est l'erratum 3192, et c'est le
 /// commentaire qui a raison.
-fn est_valchar(octet: u8) -> bool {
+pub(crate) fn est_valchar(octet: u8) -> bool {
     (0x21..=0x7E).contains(&octet) && octet != b';'
 }
 
