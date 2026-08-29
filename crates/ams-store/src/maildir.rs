@@ -414,11 +414,42 @@ impl Incoming {
         self.valider(Some(flags))
     }
 
+    /// Valide le message avec des drapeaux ET une date d'arrivée.
+    ///
+    /// # POURQUOI LA DATE SE POSE ICI ET PAS AILLEURS
+    ///
+    /// `INTERNALDATE` se lit dans la date de modification du fichier. Un
+    /// `APPEND` peut en donner une (§6.3.12), et la poser après coup laisserait
+    /// une fenêtre où le message porte la mauvaise. On la pose donc sur le
+    /// fichier encore dans `tmp/`, avant le renommage — c'est-à-dire avant que
+    /// quiconque puisse le voir.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] ou [`Error::Name`].
+    pub fn commit_with(self, flags: Flags, date: Option<SystemTime>) -> Result<Uid, Error> {
+        self.valider_avec(Some(flags), date)
+    }
+
     /// Le corps commun aux deux validations.
-    fn valider(mut self, flags: Option<Flags>) -> Result<Uid, Error> {
+    fn valider(self, flags: Option<Flags>) -> Result<Uid, Error> {
+        self.valider_avec(flags, None)
+    }
+
+    /// Le corps commun à toutes.
+    fn valider_avec(
+        mut self,
+        flags: Option<Flags>,
+        date: Option<SystemTime>,
+    ) -> Result<Uid, Error> {
         let Some(fichier) = self.fichier.take() else {
             return Ok(self.uid);
         };
+        // La date d'arrivée demandée se pose AVANT la synchronisation : elle
+        // fait partie du message, pas de ce qui vient après.
+        if let Some(date) = date {
+            fichier.set_times(fs::FileTimes::new().set_modified(date))?;
+        }
         fichier.sync_all()?;
         drop(fichier);
 

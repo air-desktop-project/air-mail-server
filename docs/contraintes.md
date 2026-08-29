@@ -865,8 +865,8 @@ ne s'écrit — ni `STORE`, ni `APPEND`, ni `EXPUNGE` — `SELECT` répond
 modifiabilité qu'elle ne peut pas connaître ferait une promesse que le client ne
 verrait démentie qu'en essayant.
 
-Ce qui n'est toujours pas servi : `APPEND`, `CREATE`/`DELETE`/`RENAME`,
-`ENVELOPE` et `BODYSTRUCTURE`.
+Ce qui n'est toujours pas servi : `CREATE`/`DELETE`/`RENAME`, `ENVELOPE` et
+`BODYSTRUCTURE`.
 
 Éprouvé jusqu'au binaire, contre un vrai Maildir rempli par SMTP : `LIST`,
 `SELECT INBOX` et ses sept réponses, `STATUS` sur la boîte sélectionnée,
@@ -1110,6 +1110,52 @@ renuméroté —, les UID d'origine disparus et les copies présentes, les drape
 préservés, `NO [TRYCREATE]` pour une destination inconnue, et **un message rendu
 illisible en cours de commande** : rien n'a été retiré, et aucune copie n'est
 restée.
+
+## `APPEND` : un message qui ne séjourne nulle part, depuis le 2026-08-29
+
+C'EST LA SEULE COMMANDE DONT UN ARGUMENT EST UN MESSAGE. Toutes les autres
+tiennent dans ce qu'une connexion peut retenir ; celle-ci porte ce que le client
+veut, et la retenir lui donnerait le droit de choisir combien de mémoire le
+serveur consomme. Elle se lit en deux temps : la grammaire lit ce qui précède le
+littéral, et le message s'écoule vers le magasin au fil de l'eau — exactement
+comme le `DATA` de SMTP, et par la même danse Maildir.
+
+`APPEND` NE PASSE DONC PAS PAR LE DÉCOUPAGE ORDINAIRE (C1, C3). Le pilote
+reconnaît sa première ligne AVANT de découper, parce que découper voudrait dire
+accumuler. Ce qui n'est pas de cette forme — un `APPEND` sans littéral, ou dont
+le nom de boîte EST un littéral, ce qui est légal — retombe sur le chemin
+ordinaire, qui le refuse en le disant : écouler ce littéral-là écrirait un nom de
+boîte dans le courrier.
+
+ON REFUSE AVANT D'INVITER. Un littéral synchronisant attend une invitation ; la
+donner puis refuser ferait attendre le serveur pour des octets que le client
+n'enverra jamais. **Le défaut a existé** : un test d'intégration a mis cinq
+minutes au lieu d'une seconde, et c'est ce délai qui l'a montré. Une boîte
+inconnue, une session non authentifiée, un message plus gros que la borne se
+disent maintenant sans qu'un octet n'ait été lu. Un littéral NON synchronisant,
+lui, part sans prévenir : ses octets arrivent quoi qu'on réponde, on les lit et
+on les jette.
+
+DEUX BORNES, ET CE NE SONT PAS LES MÊMES. `max_literal_octets` dit ce qu'une
+connexion RETIENT ; `max_append_octets` dit ce qu'un MESSAGE pèse, et le serveur
+lui donne la borne SMTP — un message qu'on refuserait de recevoir par un chemin
+n'a pas de raison de passer par l'autre.
+
+RIEN N'EST VISIBLE TANT QUE LE DÉPÔT N'EST PAS VALIDÉ, et un message tronqué ne
+se dépose pas : si le pair raccroche au milieu, le dépôt est abandonné. Valider
+ce qu'on a reçu déposerait du courrier que personne n'a envoyé.
+
+LA DATE DEMANDÉE EST HONORÉE. §6.3.12 permet au client de donner la date-heure du
+message ; `std::fs::File::set_times` la pose sur le fichier encore dans `tmp/`,
+avant le renommage — donc avant que quiconque puisse le voir, et sans dépendance.
+`INTERNALDATE` la relit à l'identique : lire ce qu'on écrit est la moindre des
+cohérences, et c'est éprouvé dans les deux sens.
+
+MESURÉ SUR LE BINAIRE, puisque c'est la question que cette commande pose : un
+dépôt de neuf mébioctets ne coûte RIEN en mémoire résidente — quatre-vingts
+dépôts laissent le serveur à 51,7 Mio, et la centaine de kibioctets qui s'ajoute
+au fil des connexions est de la rétention d'allocateur, pas une fuite. Le message
+ne séjourne nulle part : ni dans la session, ni dans le tampon du pilote.
 
 ## Le gate de couverture arrondissait vers le haut, depuis le 2026-08-29
 
@@ -1697,7 +1743,7 @@ et une couture inutilisée finit par être utilisée.
 SMTP en réception (avec `STARTTLS`, `AUTH PLAIN`, SPF, DKIM, DMARC et remise
 Maildir), SMTP à l'émission (rapports DMARC), POP3, et IMAP — `SELECT`,
 `EXAMINE`, `CLOSE`, `UNSELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`, `EXPUNGE`,
-`SEARCH`, `COPY`, `MOVE` et leurs formes `UID`. Chacun a été éprouvé de bout en bout contre le binaire, et pas
+`SEARCH`, `COPY`, `MOVE`, `APPEND` et leurs formes `UID`. Chacun a été éprouvé de bout en bout contre le binaire, et pas
 seulement en tests.
 
 **HTTP n'est pas servi** : `ams-proto-http` est un emplacement réservé, et son
@@ -1720,7 +1766,7 @@ persistant, et lecture sans verrou côté IMAP), C14 (`X25519MLKEM768` en tête)
 `<CRLF>.<CRLF>`, refuse tout `CR` ou `LF` isolé, et le fuzz éprouve que le
 découpage des lectures ne change rien au verdict.
 
-Ce qui manque, et qu'aucune phrase ne doit laisser croire acquis : `APPEND`, la
-gestion des dossiers et les critères de `SEARCH` qui lisent le message ; le signeur DKIM,
+Ce qui manque, et qu'aucune phrase ne doit laisser croire acquis : la gestion des
+dossiers et les critères de `SEARCH` qui lisent le message ; le signeur DKIM,
 qui existe et n'a pas d'appelant ; la file de réémission des messages sortants ;
 et toute interface HTTP.

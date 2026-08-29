@@ -651,14 +651,20 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         eprintln!(
             "air-mail-server : IMAP écoute sur {adresse} — SEULE `INBOX` EST SERVIE : \
              `SELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`, `EXPUNGE`, `SEARCH`, `COPY` et \
-             `MOVE` répondent ; `APPEND` non. UNE COPIE OU UN DÉPLACEMENT NE PEUT VISER QUE \
+             `MOVE` et `APPEND` répondent. UNE COPIE, UN DÉPLACEMENT OU UN DÉPÔT NE PEUT VISER QUE \
              `INBOX`, faute d'une autre boîte où viser. UN `EXPUNGE` EFFACE POUR DE BON, et un `CLOSE` \
              aussi. Les critères de recherche qui demandent de LIRE le message (`SUBJECT`, \
              `BODY`, `FROM`…) sont refusés, pas rendus faux."
         );
         Some(tokio::spawn(serve_imap(
             ecouteur,
-            ams_proto_imap::Limits::DEFAULT,
+            // LA BORNE D'UN `APPEND` EST CELLE D'UN MESSAGE, et c'est la même
+            // que celle de SMTP : un message qu'on refuserait de recevoir par un
+            // chemin n'a pas de raison de passer par l'autre.
+            ams_proto_imap::Limits {
+                max_append_octets: options.max_message_octets,
+                ..ams_proto_imap::Limits::DEFAULT
+            },
             Arc::clone(&politique),
             Arc::new(BoitesImap::new(Arc::clone(&boites))),
             Arc::clone(&garde),

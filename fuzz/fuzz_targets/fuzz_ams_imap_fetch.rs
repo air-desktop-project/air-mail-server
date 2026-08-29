@@ -2,9 +2,9 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! **Cible : ce qu'un `FETCH`, un `STORE` et un `SEARCH` désignent** —
-//! l'ensemble de numéros, la liste d'éléments, les drapeaux à écrire, et
-//! l'expression de recherche.
+//! **Cible : ce qu'un `FETCH`, un `STORE`, un `SEARCH` et un `APPEND`
+//! désignent** — l'ensemble de numéros, la liste d'éléments, les drapeaux à
+//! écrire, l'expression de recherche, et la ligne qui précède un message.
 //!
 //! # Pourquoi celle-ci
 //!
@@ -38,6 +38,10 @@
 //!    petits que le sien. L'évaluation descend, et se termine — la vérifier sur
 //!    des expressions arbitraires, c'est vérifier qu'aucune entrée ne fabrique
 //!    un cycle.
+//! 9. **UNE LIGNE D'`APPEND` ACCEPTÉE ANNONCE UNE LONGUEUR QU'ON PEUT TENIR.**
+//!    C'est la seule commande dont un argument est un MESSAGE : ce que la
+//!    grammaire admet, l'appelant devra l'écouler, et une longueur au-delà de la
+//!    borne doit être refusée AVANT qu'un octet n'arrive.
 //! 7. **UN `STORE` ACCEPTÉ NE PORTE QUE DES DRAPEAUX QU'ON SAIT ÉCRIRE.** Le
 //!    reste doit être refusé plutôt que laissé tomber : un client à qui l'on
 //!    répond `OK` croit son étiquette posée, et ne la reverra jamais. La
@@ -50,7 +54,7 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use ams_proto_imap::{
-    Candidate, FETCH_ITEMS_MAX, Fetch, FetchItem, Flags, Limits, SEARCH_KEYS_MAX, Search,
+    Append, Candidate, FETCH_ITEMS_MAX, Fetch, FetchItem, Flags, Limits, SEARCH_KEYS_MAX, Search,
     SequenceSet, Store,
 };
 
@@ -69,6 +73,8 @@ struct Entree<'a> {
     ecriture: &'a [u8],
     /// Les critères d'un `SEARCH`.
     criteres: &'a [u8],
+    /// La ligne d'un `APPEND`.
+    depot: &'a [u8],
     /// Un message à confronter à ces critères.
     message: (u32, u32, u64, u8, u64),
 }
@@ -164,6 +170,24 @@ fuzz_target!(|entree: Entree<'_>| {
         let ensemble = ecriture.set();
         assert_eq!(ensemble.as_bytes(), ecriture.set_text());
         let _ = intervalles(&ensemble, entree.star, &bornes);
+    }
+
+    // ── PROPRIÉTÉ 9 : ce qu'un `APPEND` annonce, on peut le tenir ──────────
+    const APPEND_MAX: u64 = 1_048_576;
+    if let Ok(Some(depot)) = Append::parse(entree.depot, APPEND_MAX) {
+        assert!(
+            depot.octets() <= APPEND_MAX,
+            "un APPEND accepté annonce {} octets, au-delà de la borne",
+            depot.octets()
+        );
+        assert!(
+            !depot.mailbox().is_empty(),
+            "un APPEND accepté ne nomme aucune boîte"
+        );
+        // La date, si elle est là, se relit comme celle qu'on écrit.
+        let _ = depot.date();
+        let _ = depot.flags();
+        let _ = depot.synchronizing();
     }
 
     if let Ok(recherche) = Search::parse(entree.criteres, &bornes) {

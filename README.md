@@ -31,7 +31,7 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 >
 > **Il ouvre les boîtes** : IMAP sur un troisième port, `STARTTLS` puis `LOGIN`
 > ou `AUTHENTICATE PLAIN`, `SELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`,
-> `EXPUNGE`, `SEARCH`, `COPY` et `MOVE` sur `INBOX` — un message traverse la socket sans jamais tenir en
+> `EXPUNGE`, `SEARCH`, `COPY`, `MOVE` et `APPEND` sur `INBOX` — un message traverse la socket sans jamais tenir en
 > mémoire, les drapeaux s'écrivent dans les noms de fichiers Maildir, et un
 > effacement n'a jamais lieu sur une marque périmée.
 >
@@ -75,7 +75,7 @@ horloge.
 | `ams-sasl` | RFC 4422/4616 : `PLAIN` et son base64 | **implémenté** |
 | `ams-proto-pop3` | RFC 1939 | **commandes et réponses** |
 | `ams-dns` | RFC 1035 : le codec d'un message | **question encodée, réponse décodée** |
-| `ams-proto-imap` | RFC 9051 (IMAP4rev2) | **découpage, tag, littéraux, arguments, ensembles de séquences, éléments de `FETCH`, drapeaux de `STORE`, critères de `SEARCH`, réponses** |
+| `ams-proto-imap` | RFC 9051 (IMAP4rev2) | **découpage, tag, littéraux, arguments, ensembles de séquences, éléments de `FETCH`, drapeaux de `STORE`, critères de `SEARCH`, ligne d'`APPEND`, date-heure, réponses** |
 | `ams-proto-http` | RFC 9110 / 9112 | vide |
 
 ### Étage 2 — décisions, sans entrée-sortie
@@ -470,8 +470,8 @@ découpage existe pour fermer. Un tag illisible, lui, ne ferme rien : la command
 ## Les boîtes IMAP : lire sans jamais tenir un message
 
 `SELECT`, `EXAMINE`, `CLOSE`, `UNSELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`,
-`EXPUNGE`, `SEARCH`, `COPY`, `MOVE` et leurs formes `UID` servent la boîte du
-compte. Ce serveur en a **une par compte, et elle
+`EXPUNGE`, `SEARCH`, `COPY`, `MOVE`, `APPEND` et leurs formes `UID` servent la
+boîte du compte. Ce serveur en a **une par compte, et elle
 s'appelle `INBOX`** — le nom que la RFC 9051 §5.1 réserve pour cela. Créer des
 dossiers demanderait `CREATE`, un endroit où les mettre et une règle pour ce
 qu'un nom a le droit d'être ; rien de tout cela n'est écrit, et prétendre en
@@ -704,7 +704,45 @@ omise** — et le déplacement a lieu quand même. C'est un `SHOULD` de la RFC ;
 échouer là laisserait les copies faites et les retraits à faire, ce qui est bien
 pire que de ne pas dire où les messages sont allés.
 
-Ce qui n'y est toujours pas : `APPEND`, `CREATE`/`DELETE`/`RENAME`, `ENVELOPE` et
+## `APPEND` : la seule commande dont un argument est un message
+
+Toutes les autres tiennent dans ce qu'une connexion peut retenir. Celle-ci porte
+ce que le client veut — **la retenir en mémoire lui donnerait le droit de choisir
+combien le serveur en consomme**. Elle se lit donc en deux temps : la grammaire
+lit ce qui précède le littéral, et le message s'écoule vers le magasin au fil de
+l'eau, exactement comme le `DATA` de SMTP.
+
+**`APPEND` ne passe pas par le découpage ordinaire.** Le pilote reconnaît sa
+première ligne AVANT de découper, parce que découper voudrait dire accumuler.
+Ce qui n'est pas de cette forme — un `APPEND` sans littéral, ou dont le nom de
+boîte EST un littéral, ce qui est légal — retombe sur le chemin ordinaire, qui
+le refuse en le disant : écouler ce littéral-là écrirait un nom de boîte dans le
+courrier.
+
+**On refuse AVANT d'inviter.** Un littéral synchronisant attend une invitation ;
+la donner puis refuser ferait attendre le serveur pour des octets que le client
+n'enverra jamais — un délai d'attente entier, par commande refusée. Une boîte
+inconnue, une session non authentifiée, un message plus gros que la borne : tout
+cela se dit sans qu'un octet de message n'ait été lu, et c'est tout l'intérêt de
+la forme synchronisante. Un littéral **non** synchronisant, lui, part sans
+prévenir : ses octets arrivent quoi qu'on réponde, on les lit donc et on les
+jette — ne pas les lire ferait lire un message comme des commandes.
+
+**Deux bornes, et elles ne sont pas la même.** Celle d'un littéral ordinaire dit
+ce qu'une connexion RETIENT (soixante-quatre kibioctets) ; celle d'un `APPEND`
+dit ce qu'un MESSAGE pèse, et vaut la borne SMTP — un message qu'on refuserait
+de recevoir par un chemin n'a pas de raison de passer par l'autre.
+
+**Rien n'est visible tant que le dépôt n'est pas validé**, et un message tronqué
+ne se dépose pas : si le pair raccroche au milieu, le dépôt est abandonné.
+Valider ce qu'on a reçu déposerait du courrier que personne n'a envoyé.
+
+**La date d'arrivée demandée est honorée.** §6.3.12 permet au client de donner la
+date-heure du message ; elle est posée sur le fichier encore dans `tmp/`, avant
+le renommage — c'est-à-dire avant que quiconque puisse le voir. Et `INTERNALDATE`
+la relit à l'identique : lire ce qu'on écrit est la moindre des cohérences.
+
+Ce qui n'y est toujours pas : `CREATE`/`DELETE`/`RENAME`, `ENVELOPE` et
 `BODYSTRUCTURE`. Ils sont reconnus, leur
 état est vérifié, et la session répond `NO [UNAVAILABLE]` — `NO` et non `BAD`,
 parce que la commande est correcte et permise et que c'est ce serveur qui ne la

@@ -45,8 +45,8 @@ use std::sync::Arc;
 
 use ams_index::{MessageName, Uid};
 use ams_proto_imap::{Flags, StoreMode};
-use ams_session::imap::{Mailbox, Mailboxes, MessageInfo};
-use ams_store::{MailboxView, Maildir};
+use ams_session::imap::{Deposit, Mailbox, Mailboxes, MessageInfo};
+use ams_store::{Incoming, MailboxView, Maildir};
 
 /// Le seul nom de boîte que ce serveur connaisse (RFC 9051 §5.1).
 const INBOX: &[u8] = b"INBOX";
@@ -442,8 +442,61 @@ impl BoitesImap {
     }
 }
 
+/// Un message en cours de dépôt, vu par IMAP.
+///
+/// Ce n'est qu'une [`Incoming`] : la danse Maildir — écrire dans `tmp/`,
+/// synchroniser, renommer — est la même qu'une remise SMTP, et il n'y a aucune
+/// raison d'en avoir deux.
+pub struct DepotImap {
+    entrant: Option<Incoming>,
+}
+
+impl Deposit for DepotImap {
+    fn write(&mut self, chunk: &[u8]) -> bool {
+        let Some(entrant) = self.entrant.as_mut() else {
+            return false;
+        };
+        entrant.write(chunk).is_ok()
+    }
+
+    fn commit(mut self, flags: Flags, date: Option<u64>) -> Option<u32> {
+        let entrant = self.entrant.take()?;
+        let quand = date.map(|secondes| {
+            std::time::UNIX_EPOCH
+                .checked_add(std::time::Duration::from_secs(secondes))
+                .unwrap_or(std::time::UNIX_EPOCH)
+        });
+        // Sans drapeaux ET sans date, c'est une arrivée ordinaire : elle va dans
+        // `new/`, là où Maildir met ce qu'on n'a pas encore vu.
+        let uid = if flags == Flags::NONE && quand.is_none() {
+            entrant.commit().ok()?
+        } else {
+            entrant.commit_with(drapeaux_maildir(flags), quand).ok()?
+        };
+        Some(uid.value())
+    }
+
+    fn abort(mut self) {
+        // On parcourt une tranche plutôt que de tester une option : un dépôt
+        // ouvert n'est pas une condition, c'est une chose qu'on a ou qu'on n'a
+        // pas. Ici il faut le CONSOMMER, d'où le `take` puis le `if let` — et
+        // le « et sinon » est bien atteignable : un dépôt abandonné deux fois.
+        if let Some(entrant) = self.entrant.take() {
+            entrant.abort();
+        }
+    }
+}
+
 impl Mailboxes for BoitesImap {
     type Open = BoiteImap;
+    type Deposit = DepotImap;
+
+    fn append(&self, user: &[u8], name: &[u8]) -> Option<DepotImap> {
+        let maildir = self.maildir(user, name)?;
+        Some(DepotImap {
+            entrant: Some(maildir.deliver().ok()?),
+        })
+    }
 
     fn name(&self, user: &[u8], index: usize) -> Option<&[u8]> {
         // Une seule boîte par compte, et seulement si le compte existe.

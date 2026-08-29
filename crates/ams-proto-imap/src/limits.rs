@@ -37,6 +37,19 @@ pub struct Limits {
     /// ce soit est toute la raison d'être de ce module.
     pub max_literal_octets: u64,
 
+    /// Longueur maximale du littéral d'un `APPEND`.
+    ///
+    /// # POURQUOI CELLE-CI N'EST PAS L'AUTRE
+    ///
+    /// [`max_literal_octets`](Limits::max_literal_octets) borne ce qu'une
+    /// connexion RETIENT : le pilote accumule une commande entière avant de la
+    /// traiter. Le littéral d'un `APPEND` ne se retient pas — il s'écoule vers
+    /// le magasin au fil de l'eau, comme le `DATA` de SMTP — et sa borne est
+    /// donc celle d'un MESSAGE, pas celle d'un tampon. Les confondre ferait ou
+    /// bien refuser tout message d'un peu de tenue, ou bien retenir en mémoire
+    /// ce qu'un client choisit.
+    pub max_append_octets: u64,
+
     /// Nombre maximal de littéraux dans une même commande.
     ///
     /// Sans cette borne, mille littéraux d'un octet passeraient chacun sous la
@@ -71,14 +84,18 @@ impl Limits {
         max_tag_octets: 32,
         // Soixante-quatre kibioctets : de quoi porter un nom de boîte, une
         // recherche, un mot de passe. **Pas de quoi porter un message** —
-        // `APPEND` demandera un chemin qui écoule au fil de l'eau, comme le
-        // `DATA` de SMTP, et ce chemin n'existe pas encore.
+        // `APPEND` écoule le sien au fil de l'eau, comme le `DATA` de SMTP.
         //
         // Cette valeur est aussi ce qu'une connexion peut RETENIR : le pilote
         // accumule une commande entière avant de la traiter, et huit littéraux
         // d'un mébioctet feraient huit mébioctets par connexion, pour un serveur
-        // qui n'a rien à en faire.
+        // qui n'a rien à en faire. Le littéral d'un `APPEND`, lui, ne se retient
+        // pas : voir `max_append_octets`.
         max_literal_octets: 65_536,
+        // Dix mébioctets, la même valeur que la borne SMTP par défaut : un
+        // message qu'on refuserait de recevoir par un chemin n'a pas de raison
+        // de passer par l'autre.
+        max_append_octets: 10_485_760,
         max_literals: 8,
         max_response_octets: 8192,
         max_sequence_items: 1024,

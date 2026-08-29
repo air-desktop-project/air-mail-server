@@ -83,6 +83,18 @@ impl CommandReader {
         *self = Self::new();
     }
 
+    /// Ce lecteur n'a-t-il encore rien examiné ?
+    ///
+    /// Un appelant qui veut reconnaître une commande AVANT le découpage — parce
+    /// qu'elle porte un message, et qu'un message ne se retient pas — doit
+    /// savoir si le tampon commence une commande ou en continue une. La question
+    /// n'a de sens qu'au début : au milieu d'un littéral, ce qui suit n'est pas
+    /// une commande.
+    #[must_use]
+    pub fn is_fresh(&self) -> bool {
+        self.examine == 0 && self.attendus == 0 && self.litteraux == 0
+    }
+
     /// Examine le tampon, sans rien consommer.
     ///
     /// # Errors
@@ -164,6 +176,49 @@ impl CommandReader {
 /// ferait lire cinq octets de la commande suivante comme un argument — et
 /// laisserait le client choisir où l'on découpe.
 fn annonce_de_litteral(ligne: &[u8], limits: &Limits) -> Result<Option<(u64, bool)>, Error> {
+    lire_l_annonce(ligne, limits.max_literal_octets)
+}
+
+/// Cette ligne se termine-t-elle par l'annonce d'un littéral d'au plus
+/// `max_octets` octets ?
+///
+/// Rend la longueur annoncée et si le littéral est synchronisant.
+///
+/// # POURQUOI LA BORNE EST UN ARGUMENT
+///
+/// Un littéral qu'on RETIENT et un littéral qu'on ÉCOULE ne se bornent pas
+/// pareil : le premier tient dans un tampon, le second dans un fichier. C'est
+/// l'appelant qui sait lequel il s'apprête à lire, et lui seul.
+///
+/// # L'accolade se cherche EN DEHORS DES GUILLEMETS
+///
+/// `a001 LOGIN "toto{5}" motdepasse` ne porte aucun littéral : l'accolade y est
+/// dans une chaîne. Chercher la dernière accolade sans suivre les guillemets
+/// ferait lire cinq octets de la commande suivante comme un argument — et
+/// laisserait le client choisir où l'on découpe.
+///
+/// # Errors
+///
+/// [`Error::MalformedLiteral`] si l'annonce est illisible,
+/// [`Error::LiteralTooLong`] au-delà de `max_octets`, et
+/// [`Error::NonSynchronizingTooLong`] pour un `{n+}` au-delà de ce que §6.3.11
+/// admet.
+pub fn literal_announcement(
+    ligne: &[u8],
+    max_octets: u64,
+) -> Result<Option<(usize, u64, bool)>, Error> {
+    let Some((longueur, synchronisant)) = lire_l_annonce(ligne, max_octets)? else {
+        return Ok(None);
+    };
+    // L'accolade EXISTE, puisque l'annonce a été lue : la rendre ici évite à
+    // l'appelant de la rechercher, et donc de se garder d'une absence que cette
+    // fonction vient d'exclure.
+    let ouvrante = derniere_accolade(ligne).unwrap_or(0);
+    Ok(Some((ouvrante, longueur, synchronisant)))
+}
+
+/// Le corps commun aux deux lectures.
+fn lire_l_annonce(ligne: &[u8], max_octets: u64) -> Result<Option<(u64, bool)>, Error> {
     if ligne.last() != Some(&b'}') {
         return Ok(None);
     }
@@ -189,10 +244,8 @@ fn annonce_de_litteral(ligne: &[u8], limits: &Limits) -> Result<Option<(u64, boo
             .and_then(|dizaines| dizaines.checked_add(u64::from(octet.wrapping_sub(b'0'))))
             .ok_or(Error::MalformedLiteral)?;
     }
-    if longueur > limits.max_literal_octets {
-        return Err(Error::LiteralTooLong {
-            limit: limits.max_literal_octets,
-        });
+    if longueur > max_octets {
+        return Err(Error::LiteralTooLong { limit: max_octets });
     }
     if !synchronisant && longueur > Limits::NON_SYNCHRONIZING_MAX {
         return Err(Error::NonSynchronizingTooLong {

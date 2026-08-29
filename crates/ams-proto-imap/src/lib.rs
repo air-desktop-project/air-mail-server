@@ -26,8 +26,10 @@
 #[cfg(test)]
 extern crate std;
 
+mod append;
 mod arguments;
 mod command;
+mod date;
 mod error;
 mod fetch;
 mod flags;
@@ -39,12 +41,14 @@ mod sequence;
 mod store;
 mod tag;
 
+pub use append::Append;
 pub use arguments::{Args, Argument, argument_max};
 pub use command::{Command, Line};
+pub use date::parse_date_time;
 pub use error::Error;
 pub use fetch::{FETCH_ITEMS_MAX, Fetch, FetchItem, Partial, Section};
 pub use flags::{Flags, INTERNALDATE_MAX, write_internal_date};
-pub use frame::{CommandReader, Need};
+pub use frame::{CommandReader, Need, literal_announcement};
 pub use limits::Limits;
 pub use response::{
     Status, encode_continuation, encode_tagged, encode_untagged, encode_untagged_parts,

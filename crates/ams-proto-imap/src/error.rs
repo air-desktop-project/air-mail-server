@@ -115,6 +115,9 @@ pub enum Error {
     /// croit son étiquette posée, et ne la reverra jamais.
     UnknownFlag,
 
+    /// Les arguments d'un `APPEND` n'ont pas la forme de §6.3.12.
+    MalformedAppend,
+
     /// Les arguments d'un `SEARCH` n'ont pas la forme de §6.4.4.
     MalformedSearch,
 
@@ -200,6 +203,9 @@ impl fmt::Display for Error {
             }
             Error::UnknownFlag => {
                 f.write_str("ce drapeau n'est pas un de ceux que ce serveur sait écrire")
+            }
+            Error::MalformedAppend => {
+                f.write_str("les arguments d'un `APPEND` n'ont pas la forme attendue")
             }
             Error::MalformedSearch => {
                 f.write_str("les arguments d'un `SEARCH` n'ont pas la forme attendue")

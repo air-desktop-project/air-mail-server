@@ -133,6 +133,15 @@ pub enum Action {
     /// Émettre les réponses d'un `FETCH` : appeler [`Session::next_fetch`]
     /// jusqu'à `None`, et écouler ce qu'elle désigne.
     SendFetch,
+    /// Un `APPEND` est accepté : écouler le littéral vers la session.
+    ///
+    /// L'appelant écrit la demande de continuation si le littéral est
+    /// synchronisant, puis passe les octets à [`Session::append_chunk`] — autant
+    /// de fois qu'il le faut — et conclut par [`Session::end_append`].
+    ///
+    /// **Le message ne passe pas par la session** : elle le fait suivre au
+    /// magasin sans en retenir un octet.
+    ReadAppend,
     /// Fermer la connexion.
     Close,
 }
@@ -329,6 +338,38 @@ pub trait Mailboxes {
 
     /// Ouvre une boîte, ou dit qu'elle n'existe pas.
     fn open(&self, user: &[u8], name: &[u8]) -> Option<Self::Open>;
+
+    /// Ce qu'un dépôt en cours est.
+    type Deposit: Deposit;
+
+    /// Ouvre un dépôt dans la boîte nommée, ou dit qu'elle n'existe pas.
+    ///
+    /// **Rien n'est visible tant que le dépôt n'est pas validé** : c'est ce qui
+    /// permet d'abandonner un message à moitié reçu sans que personne ne l'ait
+    /// vu.
+    fn append(&self, user: &[u8], name: &[u8]) -> Option<Self::Deposit>;
+}
+
+/// Un message en cours de dépôt.
+///
+/// # POURQUOI CE N'EST PAS UNE TRANCHE D'OCTETS
+///
+/// `APPEND` est la seule commande dont un argument est un MESSAGE. Le retenir en
+/// mémoire pour le remettre ensuite donnerait au client le droit de choisir
+/// combien de mémoire le serveur consomme — dix mébioctets par connexion, pour
+/// un serveur qui n'a rien à en faire. Le message s'écoule donc au fil de l'eau,
+/// exactement comme le `DATA` de SMTP.
+pub trait Deposit {
+    /// Ajoute des octets au message. Rend `false` si le dépôt est perdu.
+    fn write(&mut self, chunk: &[u8]) -> bool;
+
+    /// Valide le dépôt, et rend l'UID que le message porte.
+    ///
+    /// `date` à `None` : la date d'arrivée est celle du dépôt.
+    fn commit(self, flags: Flags, date: Option<u64>) -> Option<u32>;
+
+    /// Abandonne le dépôt : rien n'en subsiste.
+    fn abort(self);
 }
 
 /// Un magasin PARTAGÉ en est un aussi.
@@ -338,6 +379,7 @@ pub trait Mailboxes {
 /// deux, sans que personne n'ait à recopier une table de boîtes par connexion.
 impl<T: Mailboxes> Mailboxes for &T {
     type Open = T::Open;
+    type Deposit = T::Deposit;
 
     fn name(&self, user: &[u8], index: usize) -> Option<&[u8]> {
         (**self).name(user, index)
@@ -345,6 +387,10 @@ impl<T: Mailboxes> Mailboxes for &T {
 
     fn open(&self, user: &[u8], name: &[u8]) -> Option<Self::Open> {
         (**self).open(user, name)
+    }
+
+    fn append(&self, user: &[u8], name: &[u8]) -> Option<Self::Deposit> {
+        (**self).append(user, name)
     }
 }
 
@@ -485,6 +531,51 @@ struct Emission {
     etape: Etape,
 }
 
+/// Ce qu'un dépôt fait des octets qu'il reçoit.
+///
+/// # ON LIT MÊME CE QU'ON REFUSE
+///
+/// Un littéral NON synchronisant part sans que le serveur ait rien dit : ses
+/// octets arrivent que la commande soit acceptée ou non, et ne pas les lire
+/// ferait lire un message comme des commandes. On les lit donc, et on les
+/// jette — c'est la seule façon de rester en phase avec le client.
+///
+/// Un littéral synchronisant, lui, se refuse AVANT : le client attend une
+/// invitation qu'on ne donnera pas, et §6.3.12 veut précisément qu'on réponde
+/// `NO` à sa place. C'est tout l'intérêt de la forme.
+enum Dedans<D> {
+    /// Le dépôt est ouvert : les octets y vont.
+    Ouvert(D),
+    /// Les octets se jettent, et voici pourquoi.
+    Jete(Refus),
+}
+
+/// Pourquoi un `APPEND` sera refusé, une fois ses octets lus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Refus {
+    /// La session n'est pas authentifiée.
+    Authentification,
+    /// La boîte n'existe pas.
+    Inconnue,
+}
+
+/// Un `APPEND` en cours de réception.
+struct Depot<D> {
+    /// Le dépôt lui-même, ou la raison pour laquelle on jette les octets.
+    dedans: Dedans<D>,
+    /// Combien d'octets restent à recevoir.
+    reste: u64,
+    /// Les drapeaux à poser au dépôt validé.
+    flags: Flags,
+    /// La date d'arrivée demandée.
+    date: Option<u64>,
+    /// Le magasin a-t-il lâché en route ?
+    perdu: bool,
+    /// La boîte visée, pour l'`UIDVALIDITY` de la conclusion.
+    nom: [u8; MAILBOX_NAME_MAX],
+    nom_len: usize,
+}
+
 /// La commande qui a ouvert l'émission, pour la nommer dans sa conclusion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Genre {
@@ -543,7 +634,13 @@ enum Etape {
 }
 
 /// Une session IMAP.
-#[derive(Debug, Clone)]
+///
+/// # NI `Clone`, NI `Debug`, ET C'EST VOULU
+///
+/// Une session peut tenir un DÉPÔT en cours — un fichier ouvert dans lequel un
+/// message s'écoule. Le recopier ferait deux sessions qui écrivent dans le même
+/// message ; l'afficher ferait passer un morceau de courrier dans un journal.
+/// Ce que la session porte se lit par ses accesseurs, et rien d'autre.
 pub struct Session<A: Authenticator, M: Mailboxes> {
     limits: Limits,
     /// Ce serveur sait-il monter en chiffrement ?
@@ -571,6 +668,8 @@ pub struct Session<A: Authenticator, M: Mailboxes> {
     lecture_seule: bool,
     /// Le `FETCH` en cours d'émission.
     emission: Option<Emission>,
+    /// Le dépôt d'un `APPEND` en cours, s'il y en a un.
+    depot: Option<Depot<M::Deposit>>,
 }
 
 impl Emission {
@@ -697,6 +796,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             nom_ouvert_len: 0,
             lecture_seule: false,
             emission: None,
+            depot: None,
         }
     }
 
@@ -856,8 +956,16 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             | Command::Subscribe
             | Command::Unsubscribe
             | Command::Namespace
-            | Command::Append
             | Command::Idle => self.si_authentifie(out),
+            // UN `APPEND` QUI ARRIVE ICI N'EST PAS CELUI QU'ON SAIT ÉCOULER.
+            // Le chemin ordinaire ne voit que les commandes COMPLÈTES : un
+            // `APPEND` normal n'y passe jamais, puisque son message s'écoule.
+            // Ce qui y passe, c'est un `APPEND` sans littéral, ou dont le nom de
+            // boîte EST un littéral — une forme légale que ce serveur ne sert
+            // pas, et le dire vaut mieux que de la laisser deviner.
+            Command::Append => {
+                self.faute(b"APPEND expects a mailbox name and a message literal", out)
+            }
             // ── Sélectionné seulement (§6.4) ────────────────────────────────
             Command::Close => self.close(true, out),
             Command::Unselect => self.close(false, out),
@@ -1673,6 +1781,185 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             return Err(b"[TRYCREATE] Destination mailbox does not exist");
         };
         Ok((nom, boite.uid_validity()))
+    }
+
+    /// Ouvre un `APPEND` (§6.3.12) : la ligne est lue, le message va suivre.
+    ///
+    /// # POURQUOI CE N'EST PAS `handle`
+    ///
+    /// `handle` reçoit une commande COMPLÈTE. Celle-ci ne l'est jamais : son
+    /// dernier argument est un message, et l'attendre en entier avant de
+    /// commencer donnerait au client le droit de choisir combien de mémoire le
+    /// serveur consomme. L'appelant passe donc la LIGNE, et écoule le reste.
+    ///
+    /// Rend `Action::ReadAppend` dans tous les cas où le littéral doit être lu —
+    /// **y compris quand la commande est déjà refusée** : un littéral non
+    /// synchronisant est en route quoi qu'on réponde, et ne pas le lire ferait
+    /// lire un message comme des commandes. La réponse, elle, attend la fin.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Reply`] si `out` ne suffit pas.
+    pub fn begin_append<'b>(
+        &mut self,
+        ligne: &[u8],
+        append: &ams_proto_imap::Append<'_>,
+        out: &'b mut [u8],
+    ) -> Result<Turn<'b>, Error> {
+        // LE TAG VIENT DE LA LIGNE, et il sera recopié dans la conclusion : on
+        // le relit par la grammaire plutôt que de le découper à la main, pour
+        // que ce qu'on recopie soit ce qu'elle a validé.
+        let tag = Line::parse(ligne, &self.limits)
+            .map(|lue| lue.tag)
+            .unwrap_or(Tag::PLACEHOLDER);
+        self.retenir_le_tag(tag);
+
+        // §6.3.12 : LA BOÎTE DOIT EXISTER, et son absence se dit `[TRYCREATE]`.
+        let dedans = if self.etat == State::NotAuthenticated {
+            Dedans::Jete(Refus::Authentification)
+        } else {
+            match self.boites.append(self.user(), append.mailbox()) {
+                Some(depot) => Dedans::Ouvert(depot),
+                None => Dedans::Jete(Refus::Inconnue),
+            }
+        };
+        // ON REFUSE AVANT D'INVITER. Un littéral synchronisant attend une
+        // invitation ; la donner puis refuser ferait attendre le serveur pour
+        // des octets que le client n'enverra jamais — un délai d'attente entier,
+        // par commande refusée.
+        if let Dedans::Jete(raison) = &dedans
+            && append.synchronizing()
+        {
+            let (statut, texte) = Self::dire_le_refus(*raison);
+            return self.termine(statut, texte, Action::Continue, out);
+        }
+        let mut nom = [0_u8; MAILBOX_NAME_MAX];
+        let nom_len = append.mailbox().len().min(nom.len());
+        for (place, octet) in nom.iter_mut().zip(append.mailbox()) {
+            *place = *octet;
+        }
+        self.depot = Some(Depot {
+            dedans,
+            reste: append.octets(),
+            flags: append.flags(),
+            date: append.date(),
+            perdu: false,
+            nom,
+            nom_len,
+        });
+        Ok(Turn {
+            reply: out.get(..0).unwrap_or_default(),
+            action: Action::ReadAppend,
+            peer_fault: false,
+        })
+    }
+
+    /// Ce qu'un refus de dépôt vaut comme réponse.
+    fn dire_le_refus(raison: Refus) -> (Status, &'static [u8]) {
+        match raison {
+            Refus::Authentification => (
+                Status::Bad,
+                b"Command is not allowed before authentication".as_slice(),
+            ),
+            Refus::Inconnue => (
+                Status::No,
+                b"[TRYCREATE] Destination mailbox does not exist".as_slice(),
+            ),
+        }
+    }
+
+    /// Combien d'octets de message restent à recevoir.
+    #[must_use]
+    pub fn append_remaining(&self) -> u64 {
+        self.depot.as_ref().map_or(0, |depot| depot.reste)
+    }
+
+    /// Écoule un morceau du message vers le magasin.
+    ///
+    /// Rend combien d'octets ont été CONSOMMÉS : l'appelant garde le reste, qui
+    /// est ce qui suit le littéral.
+    pub fn append_chunk(&mut self, morceau: &[u8]) -> usize {
+        let Some(depot) = self.depot.as_mut() else {
+            return 0;
+        };
+        let pris = usize::try_from(depot.reste)
+            .unwrap_or(usize::MAX)
+            .min(morceau.len());
+        let morceau = morceau.get(..pris).unwrap_or_default();
+        depot.reste = depot.reste.saturating_sub(pris as u64);
+        // ON ÉCRIT TANT QU'ON PEUT, ET L'ON LIT JUSQU'AU BOUT. Un dépôt perdu
+        // n'autorise pas à cesser de lire : les octets restants sont un message,
+        // pas des commandes.
+        if let Dedans::Ouvert(dedans) = &mut depot.dedans
+            && !dedans.write(morceau)
+        {
+            depot.perdu = true;
+        }
+        pris
+    }
+
+    /// Conclut un `APPEND` : le message est reçu.
+    ///
+    /// # `APPENDUID` DIT OÙ LE MESSAGE EST ALLÉ
+    ///
+    /// §6.3.12 : `OK [APPENDUID <validité> <uid>]`. C'est ce qui permet au
+    /// client de retrouver ce qu'il vient de déposer sans relire la boîte.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Reply`] si `out` ne suffit pas.
+    pub fn end_append<'b>(&mut self, out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
+        let Some(depot) = self.depot.take() else {
+            return self.termine(Status::Bad, b"No APPEND in progress", Action::Continue, out);
+        };
+        // Quatre issues, et une seule dépose : on jetait déjà, le magasin a
+        // lâché, le message est arrivé tronqué — le pair a raccroché au milieu —
+        // ou tout s'est bien passé. VALIDER UN MESSAGE TRONQUÉ serait déposer du
+        // courrier que personne n'a envoyé.
+        let uid = match depot.dedans {
+            Dedans::Jete(raison) => {
+                let (statut, texte) = Self::dire_le_refus(raison);
+                return self.termine(statut, texte, Action::Continue, out);
+            }
+            Dedans::Ouvert(dedans) if depot.perdu || depot.reste != 0 => {
+                dedans.abort();
+                None
+            }
+            Dedans::Ouvert(dedans) => dedans.commit(depot.flags, depot.date),
+        };
+        let Some(uid) = uid else {
+            return self.termine(
+                Status::No,
+                b"Append failed; the message was not stored",
+                Action::Continue,
+                out,
+            );
+        };
+        let validite = self
+            .boites
+            .open(
+                self.user(),
+                depot.nom.get(..depot.nom_len).unwrap_or_default(),
+            )
+            .map_or(0, |boite| boite.uid_validity());
+        let mut texte = [0_u8; 64];
+        let mut ecrits = recopier(&mut texte, 0, b"[APPENDUID ");
+        ecrits = ecrits.saturating_add(nombre_en_octets(
+            texte.get_mut(ecrits..).unwrap_or_default(),
+            validite,
+        ));
+        ecrits = recopier(&mut texte, ecrits, b" ");
+        ecrits = ecrits.saturating_add(nombre_en_octets(
+            texte.get_mut(ecrits..).unwrap_or_default(),
+            uid,
+        ));
+        ecrits = recopier(&mut texte, ecrits, b"] APPEND completed");
+        self.termine(
+            Status::Ok,
+            texte.get(..ecrits).unwrap_or_default(),
+            Action::Continue,
+            out,
+        )
     }
 
     /// `MOVE` et `UID MOVE` (§6.4.8).

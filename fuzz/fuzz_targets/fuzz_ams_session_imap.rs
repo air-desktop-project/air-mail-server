@@ -168,8 +168,40 @@ struct Boites {
     messages: Rc<RefCell<Vec<Message>>>,
 }
 
+/// Un dépôt d'épreuve : il compte, et il rend un UID.
+struct Depot {
+    messages: Rc<RefCell<Vec<Message>>>,
+    recus: u64,
+}
+
+impl ams_session::imap::Deposit for Depot {
+    fn write(&mut self, chunk: &[u8]) -> bool {
+        self.recus = self
+            .recus
+            .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+        true
+    }
+
+    fn commit(self, flags: Flags, _date: Option<u64>) -> Option<u32> {
+        let mut messages = self.messages.borrow_mut();
+        messages.push((self.recus, flags));
+        u32::try_from(messages.len()).ok()
+    }
+
+    fn abort(self) {}
+}
+
 impl Mailboxes for Boites {
     type Open = Boite;
+    type Deposit = Depot;
+
+    fn append(&self, _user: &[u8], name: &[u8]) -> Option<Depot> {
+        (name == b"INBOX").then(|| Depot {
+            messages: Rc::clone(&self.messages),
+            recus: 0,
+        })
+    }
+
     fn name(&self, _user: &[u8], index: usize) -> Option<&[u8]> {
         (index == 0).then_some(&b"INBOX"[..])
     }
@@ -319,6 +351,10 @@ fuzz_target!(|entree: Entree<'_>| {
                     "l'émission n'a pas conclu en {morceaux} morceaux : la boucle n'avance pas"
                 );
             }
+            // Un `APPEND` ne passe pas par le découpage ordinaire : la cible ne
+            // le produit donc jamais. Le nommer quand même évite qu'un ajout à
+            // l'énumération passe inaperçu.
+            Action::ReadAppend => {}
             Action::Continue => {}
         }
 

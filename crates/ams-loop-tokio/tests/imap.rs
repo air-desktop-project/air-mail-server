@@ -111,6 +111,27 @@ impl Mailbox for Boite {
     }
 }
 
+/// Un dépôt d'épreuve : il compte, et ne garde rien.
+#[derive(Default)]
+struct Depot {
+    recus: usize,
+}
+
+impl ams_session::imap::Deposit for Depot {
+    fn write(&mut self, chunk: &[u8]) -> bool {
+        self.recus = self.recus.saturating_add(chunk.len());
+        true
+    }
+
+    fn commit(self, _flags: Flags, _date: Option<u64>) -> Option<u32> {
+        // L'UID rendu dit combien d'octets sont passés : de quoi vérifier sur le
+        // fil que le message est arrivé entier.
+        u32::try_from(self.recus).ok()
+    }
+
+    fn abort(self) {}
+}
+
 struct Boites;
 
 impl Mailboxes for Boites {
@@ -118,6 +139,12 @@ impl Mailboxes for Boites {
     fn name(&self, _user: &[u8], index: usize) -> Option<&[u8]> {
         (index == 0).then_some(&b"INBOX"[..])
     }
+    type Deposit = Depot;
+
+    fn append(&self, _user: &[u8], name: &[u8]) -> Option<Depot> {
+        (name == b"INBOX").then(Depot::default)
+    }
+
     fn open(&self, _user: &[u8], name: &[u8]) -> Option<Boite> {
         (name == b"INBOX").then_some(Boite)
     }
@@ -137,6 +164,7 @@ async fn service(
             guard: &garde,
             timeouts: ams_loop_tokio::Timeouts::default(),
             tls: chiffrement,
+            max_append_octets: 1_000_000,
         };
         let _ = serve_imap_connection(&mut flux, &service, NotreDomaine, &Boites, PAIR).await;
     });
@@ -373,6 +401,7 @@ async fn un_pair_banni_n_obtient_pas_de_banniere() {
             guard: &garde,
             timeouts: ams_loop_tokio::Timeouts::default(),
             tls: None,
+            max_append_octets: 1_000_000,
         };
         serve_imap_connection(&mut flux, &service, NotreDomaine, &Boites, PAIR).await
     });
@@ -400,6 +429,7 @@ async fn un_pair_muet_est_abandonne() {
                 ..ams_loop_tokio::Timeouts::default()
             },
             tls: None,
+            max_append_octets: 1_000_000,
         };
         serve_imap_connection(&mut flux, &service, NotreDomaine, &Boites, PAIR).await
     });
@@ -765,4 +795,90 @@ async fn un_deplacement_traverse_la_socket_dans_le_bon_ordre() {
         .expect("écriture");
     let refus = jusqu_a(&mut lecteur, "a005 ").await;
     assert!(refus.starts_with("a005 NO [TRYCREATE]"), "{refus}");
+}
+
+/// **`APPEND` écoule son message sans le retenir.** Le dépôt d'épreuve rend le
+/// nombre d'octets reçus comme UID : la conclusion dit donc, sur le fil, que le
+/// message est arrivé entier.
+#[tokio::test]
+async fn un_append_ecoule_son_message() {
+    let Some(materiel) = materiel("imap-append") else {
+        return;
+    };
+    let mut lecteur = authentifiee(&materiel).await;
+    let message = "From: a@x.test\r\nSubject: déposé\r\n\r\nUn corps.\r\n";
+    lecteur
+        .get_mut()
+        .write_all(std::format!("a003 APPEND INBOX {{{}}}\r\n", message.len()).as_bytes())
+        .await
+        .expect("écriture");
+    // Le littéral est synchronisant : le serveur invite avant tout octet.
+    let mut invite = std::string::String::new();
+    lecteur.read_line(&mut invite).await.expect("invite");
+    assert!(invite.starts_with("+ "), "{invite}");
+    lecteur
+        .get_mut()
+        .write_all(message.as_bytes())
+        .await
+        .expect("écriture");
+    let conclusion = jusqu_a(&mut lecteur, "a003 ").await;
+    assert_eq!(
+        conclusion,
+        std::format!(
+            "a003 OK [APPENDUID 7 {}] APPEND completed\r\n",
+            message.len()
+        )
+    );
+
+    // Et la session continue : le flux n'a pas été désynchronisé.
+    lecteur
+        .get_mut()
+        .write_all(b"a004 SELECT INBOX\r\n")
+        .await
+        .expect("écriture");
+    let apres = jusqu_a(&mut lecteur, "a004 ").await;
+    assert!(apres.contains("a004 OK ["), "{apres}");
+}
+
+/// **Une boîte inconnue se dit `[TRYCREATE]`, sans qu'un octet ait été lu.**
+/// C'est tout l'intérêt du littéral synchronisant : le client attend.
+#[tokio::test]
+async fn un_append_vers_une_boite_inconnue_se_refuse_avant_le_message() {
+    let Some(materiel) = materiel("imap-append-inconnue") else {
+        return;
+    };
+    let mut lecteur = authentifiee(&materiel).await;
+    lecteur
+        .get_mut()
+        .write_all(b"a003 APPEND Archives {100}\r\n")
+        .await
+        .expect("écriture");
+    let refus = jusqu_a(&mut lecteur, "a003 ").await;
+    assert!(refus.starts_with("a003 NO [TRYCREATE]"), "{refus}");
+
+    // Aucun octet de message n'a été envoyé, et la session suit toujours.
+    lecteur
+        .get_mut()
+        .write_all(b"a004 SELECT INBOX\r\n")
+        .await
+        .expect("écriture");
+    let apres = jusqu_a(&mut lecteur, "a004 ").await;
+    assert!(apres.contains("a004 OK"), "{apres}");
+}
+
+/// **Un message plus gros que ce qu'on accepte ferme la connexion**, plutôt que
+/// de laisser ses octets se lire comme des commandes.
+#[tokio::test]
+async fn un_append_demesure_ferme_la_connexion() {
+    let Some(materiel) = materiel("imap-append-gros") else {
+        return;
+    };
+    let mut lecteur = authentifiee(&materiel).await;
+    lecteur
+        .get_mut()
+        .write_all(b"a003 APPEND INBOX {99999999}\r\n")
+        .await
+        .expect("écriture");
+    let adieu = jusqu_a(&mut lecteur, "a003 ").await;
+    assert!(adieu.contains("BYE") || adieu.contains("BAD"), "{adieu}");
 }

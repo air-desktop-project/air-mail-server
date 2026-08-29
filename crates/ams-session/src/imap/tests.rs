@@ -182,6 +182,49 @@ fn message(uid: u32, size: u64, flags: Flags, internal_date: u64) -> Option<Mess
     })
 }
 
+/// Ce qu'une validation produit, vu du test : l'UID, les drapeaux, la date.
+type Valide = std::rc::Rc<std::cell::Cell<Option<(u32, Flags, Option<u64>)>>>;
+
+/// Ce qu'un dépôt a reçu, vu du test.
+type Ecrit = std::rc::Rc<std::cell::RefCell<std::vec::Vec<u8>>>;
+
+/// Un dépôt d'épreuve : il retient ce qu'on lui écrit, et le partage.
+#[derive(Debug, Default)]
+pub struct Depot {
+    /// Ce qui a été écrit, pour que le test le relise.
+    ecrit: Ecrit,
+    /// Ce dépôt refuse-t-il d'écrire ? De quoi éprouver un magasin qui lâche.
+    refuse: bool,
+    /// Ce dépôt refuse-t-il de se valider ?
+    invalide: bool,
+    /// Le prochain UID de la boîte.
+    uid: u32,
+    /// Ce que la validation a produit, pour que le test le relise.
+    valide: Valide,
+}
+
+impl super::Deposit for Depot {
+    fn write(&mut self, chunk: &[u8]) -> bool {
+        if self.refuse {
+            return false;
+        }
+        self.ecrit.borrow_mut().extend_from_slice(chunk);
+        true
+    }
+
+    fn commit(self, flags: Flags, date: Option<u64>) -> Option<u32> {
+        if self.invalide {
+            return None;
+        }
+        self.valide.set(Some((self.uid, flags, date)));
+        Some(self.uid)
+    }
+
+    fn abort(self) {
+        self.ecrit.borrow_mut().clear();
+    }
+}
+
 /// Quatre boîtes, dont une trouée.
 ///
 /// Le compteur d'effacements est PARTAGÉ avec l'appelant : une boîte d'épreuve
@@ -191,6 +234,10 @@ fn message(uid: u32, size: u64, flags: Flags, internal_date: u64) -> Option<Mess
 #[derive(Debug, Clone, Default)]
 pub struct Boites {
     efface: std::rc::Rc<std::cell::Cell<u32>>,
+    /// Ce qu'un dépôt a reçu, partagé avec le test.
+    ecrit: Ecrit,
+    /// Ce qu'une validation a produit, partagé avec le test.
+    valide: Valide,
 }
 
 impl Mailboxes for Boites {
@@ -200,6 +247,22 @@ impl Mailboxes for Boites {
         [&b"INBOX"[..], b"Archives", b"Archives/2026"]
             .get(index)
             .copied()
+    }
+
+    type Deposit = Depot;
+
+    fn append(&self, _user: &[u8], name: &[u8]) -> Option<Depot> {
+        // `Refusante` accepte le dépôt et le perd en route ; `Ingrate` l'accepte
+        // et refuse de le valider. Les deux existent parce que ce sont deux
+        // façons différentes d'échouer.
+        let connue = matches!(name, b"INBOX" | b"Archives" | b"Refusante" | b"Ingrate");
+        connue.then(|| Depot {
+            ecrit: std::rc::Rc::clone(&self.ecrit),
+            refuse: name == b"Refusante",
+            invalide: name == b"Ingrate",
+            uid: 31,
+            valide: std::rc::Rc::clone(&self.valide),
+        })
     }
 
     fn open(&self, _user: &[u8], name: &[u8]) -> Option<Boite> {
@@ -643,7 +706,6 @@ fn ce_qu_on_ne_sert_pas_encore_le_dit_sans_accuser_le_client() {
         b"a005 SUBSCRIBE a\r\n",
         b"a006 UNSUBSCRIBE a\r\n",
         b"a007 NAMESPACE\r\n",
-        b"a008 APPEND INBOX {3+}\r\nabc\r\n",
         b"a009 IDLE\r\n",
         b"a010 ENABLE UTF8=ACCEPT\r\n",
     ] {
@@ -1287,9 +1349,8 @@ fn chaque_genre_d_issue_se_produit() {
 
 #[test]
 fn ce_qui_se_deroule_se_montre() {
-    let session = nouvelle(false);
-    assert!(!std::format!("{session:?}").is_empty());
-    assert!(!std::format!("{:?}", session.clone()).is_empty());
+    // La session, elle, ne s'affiche pas et ne se recopie pas : elle peut tenir
+    // un dépôt en cours, c'est-à-dire un fichier ouvert.
     assert!(!std::format!("{:?}", State::Selected).is_empty());
     assert_eq!(State::Selected, State::Selected);
     assert_ne!(Action::Continue, Action::Close);
@@ -1606,6 +1667,8 @@ fn un_magasin_partage_se_passe_par_reference() {
     assert_eq!(Mailboxes::name(&partage, b"jean", 0), Some(&b"INBOX"[..]));
     assert!(Mailboxes::open(&partage, b"jean", b"INBOX").is_some());
     assert!(Mailboxes::open(&partage, b"jean", b"Inconnue").is_none());
+    assert!(Mailboxes::append(&partage, b"jean", b"INBOX").is_some());
+    assert!(Mailboxes::append(&partage, b"jean", b"Inconnue").is_none());
 }
 
 /// Les commandes qui exigent un état le disent dans les deux sens.
@@ -2560,6 +2623,221 @@ fn un_move_sans_boite_ouverte_est_hors_d_etat() {
     let (texte, _) = dire(&mut session, b"a002 MOVE 1 INBOX\r\n");
     assert!(
         texte.contains("BAD Command is not allowed unless a mailbox is selected"),
+        "{texte}"
+    );
+}
+
+// ── `APPEND` ────────────────────────────────────────────────────────────────
+
+/// Conduit un `APPEND` de bout en bout, et rend la conclusion.
+fn deposer(
+    session: &mut Session<UnCompte, Boites>,
+    ligne: &[u8],
+    message: &[u8],
+) -> std::string::String {
+    let mut sortie = [0_u8; 1024];
+    let append = ams_proto_imap::Append::parse(ligne, 1_000_000)
+        .expect("lisible")
+        .expect("un APPEND qu'on sait écouler");
+    let tour = session
+        .begin_append(ligne, &append, &mut sortie)
+        .expect("traitable");
+    if tour.action() != Action::ReadAppend {
+        // Refusé avant d'avoir rien lu : c'est l'intérêt du synchronisant.
+        return std::string::String::from_utf8_lossy(tour.reply()).into_owned();
+    }
+    // On écoule par petits morceaux : c'est ce que fait la boucle.
+    let mut reste = message;
+    while !reste.is_empty() && session.append_remaining() > 0 {
+        let coupe = reste.len().min(7);
+        let pris = session.append_chunk(reste.get(..coupe).unwrap_or_default());
+        reste = reste.get(pris..).unwrap_or_default();
+    }
+    let fin = session.end_append(&mut sortie).expect("traitable");
+    std::string::String::from_utf8_lossy(fin.reply()).into_owned()
+}
+
+/// **§6.3.12 : `APPENDUID` dit où le message est allé.**
+#[test]
+fn append_depose_le_message_et_dit_ou() {
+    let boites = Boites::default();
+    let ecrit = std::rc::Rc::clone(&boites.ecrit);
+    let valide = std::rc::Rc::clone(&boites.valide);
+    let mut session = Session::new(BORNES, true, UnCompte, boites);
+    session.on_tls_established();
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let conclusion = deposer(
+        &mut session,
+        b"a002 APPEND INBOX {13}\r\n",
+        b"Bonjour !\r\n\r\n",
+    );
+    assert_eq!(conclusion, "a002 OK [APPENDUID 42 31] APPEND completed\r\n");
+    assert_eq!(&*ecrit.borrow(), b"Bonjour !\r\n\r\n");
+    assert_eq!(valide.get(), Some((31, Flags::NONE, None)));
+}
+
+/// **Les drapeaux et la date suivent le message** (§6.3.12).
+#[test]
+fn les_drapeaux_et_la_date_arrivent_avec_le_message() {
+    let boites = Boites::default();
+    let valide = std::rc::Rc::clone(&boites.valide);
+    let mut session = Session::new(BORNES, true, UnCompte, boites);
+    session.on_tls_established();
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let conclusion = deposer(
+        &mut session,
+        b"a002 APPEND INBOX (\\Seen \\Draft) \"29-Aug-2026 07:08:31 +0000\" {5}\r\n",
+        b"salut",
+    );
+    assert!(conclusion.contains("OK [APPENDUID 42 31]"), "{conclusion}");
+    let (uid, flags, date) = valide.get().expect("validé");
+    assert_eq!(uid, 31);
+    assert!(flags.contains(Flags::SEEN));
+    assert!(flags.contains(Flags::DRAFT));
+    assert_eq!(date, Some(1_787_987_311));
+}
+
+/// **On lit même ce qu'on refuse.** Les octets d'un littéral non synchronisant
+/// arrivent quoi qu'on réponde ; ne pas les lire ferait lire un message comme
+/// des commandes. Un littéral SYNCHRONISANT, lui, se refuse avant d'inviter :
+/// inviter puis refuser ferait attendre le serveur pour des octets que le client
+/// n'enverra jamais.
+#[test]
+fn une_boite_inconnue_se_dit_trycreate_apres_avoir_tout_lu() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    // Non synchronisant : les octets arrivent quoi qu'on réponde.
+    let conclusion = deposer(&mut session, b"a002 APPEND Inconnue {5+}\r\n", b"salut");
+    assert!(
+        conclusion.contains("NO [TRYCREATE] Destination mailbox does not exist"),
+        "{conclusion}"
+    );
+    assert_eq!(session.append_remaining(), 0);
+
+    // Le même, synchronisant : refusé sans qu'un octet ait été lu.
+    let mut sortie = [0_u8; 1024];
+    let ligne = &b"a003 APPEND Inconnue {5}\r\n"[..];
+    let append = ams_proto_imap::Append::parse(ligne, 1_000_000)
+        .expect("lisible")
+        .expect("écoulable");
+    let tour = session
+        .begin_append(ligne, &append, &mut sortie)
+        .expect("traitable");
+    assert_eq!(tour.action(), Action::Continue);
+    let texte = std::string::String::from_utf8_lossy(tour.reply()).into_owned();
+    assert!(texte.contains("NO [TRYCREATE]"), "{texte}");
+    assert_eq!(session.append_remaining(), 0);
+}
+
+/// **Un magasin qui lâche en route ne fait pas cesser la lecture** : les octets
+/// restants sont un message, pas des commandes.
+#[test]
+fn un_magasin_qui_lache_ne_fait_pas_cesser_la_lecture() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let conclusion = deposer(
+        &mut session,
+        b"a002 APPEND Refusante {9}\r\n",
+        b"un message",
+    );
+    assert!(
+        conclusion.contains("NO Append failed; the message was not stored"),
+        "{conclusion}"
+    );
+    assert_eq!(session.append_remaining(), 0);
+}
+
+/// Un dépôt qui refuse de se valider est un échec, pas un succès muet.
+#[test]
+fn un_depot_qui_refuse_de_se_valider_le_dit() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let conclusion = deposer(&mut session, b"a002 APPEND Ingrate {5}\r\n", b"salut");
+    assert!(
+        conclusion.contains("NO Append failed; the message was not stored"),
+        "{conclusion}"
+    );
+}
+
+/// **VALIDER UN MESSAGE TRONQUÉ serait déposer du courrier que personne n'a
+/// envoyé.** Le pair a raccroché au milieu : rien ne se dépose.
+#[test]
+fn un_message_tronque_ne_se_depose_pas() {
+    let boites = Boites::default();
+    let ecrit = std::rc::Rc::clone(&boites.ecrit);
+    let mut session = Session::new(BORNES, true, UnCompte, boites);
+    session.on_tls_established();
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let mut sortie = [0_u8; 1024];
+    let ligne = &b"a002 APPEND INBOX {20}\r\n"[..];
+    let append = ams_proto_imap::Append::parse(ligne, 1_000_000)
+        .expect("lisible")
+        .expect("écoulable");
+    session
+        .begin_append(ligne, &append, &mut sortie)
+        .expect("traitable");
+    session.append_chunk(b"court");
+    assert_eq!(session.append_remaining(), 15);
+    let fin = session.end_append(&mut sortie).expect("traitable");
+    let conclusion = std::string::String::from_utf8_lossy(fin.reply()).into_owned();
+    assert!(
+        conclusion.contains("NO Append failed; the message was not stored"),
+        "{conclusion}"
+    );
+    // Le dépôt a été abandonné : il n'en subsiste rien.
+    assert!(ecrit.borrow().is_empty());
+}
+
+/// **Un `APPEND` avant authentification n'est pas un `APPEND`.**
+#[test]
+fn un_append_avant_authentification_est_refuse() {
+    let mut session = nouvelle(true);
+    let mut sortie = [0_u8; 1024];
+    let ligne = &b"a001 APPEND INBOX {5}\r\n"[..];
+    let append = ams_proto_imap::Append::parse(ligne, 1_000_000)
+        .expect("lisible")
+        .expect("écoulable");
+    let tour = session
+        .begin_append(ligne, &append, &mut sortie)
+        .expect("traitable");
+    let texte = std::string::String::from_utf8_lossy(tour.reply()).into_owned();
+    assert!(
+        texte.contains("BAD Command is not allowed before authentication"),
+        "{texte}"
+    );
+    assert_eq!(tour.action(), Action::Continue);
+
+    // Non synchronisant : les octets arrivent, on les jette, et l'on répond à la
+    // fin.
+    let conclusion = deposer(&mut session, b"a002 APPEND INBOX {5+}\r\n", b"salut");
+    assert!(
+        conclusion.contains("BAD Command is not allowed before authentication"),
+        "{conclusion}"
+    );
+}
+
+/// Conclure un `APPEND` qu'on n'a pas commencé n'est pas un `APPEND`.
+#[test]
+fn conclure_un_append_qui_n_existe_pas_est_une_faute() {
+    let mut session = nouvelle(true);
+    let mut sortie = [0_u8; 1024];
+    let fin = session.end_append(&mut sortie).expect("traitable");
+    let texte = std::string::String::from_utf8_lossy(fin.reply()).into_owned();
+    assert!(texte.contains("BAD No APPEND in progress"), "{texte}");
+    // Et écouler sans dépôt ne consomme rien.
+    assert_eq!(session.append_chunk(b"x"), 0);
+}
+
+/// **Un `APPEND` qui passe par le chemin ordinaire n'est pas celui qu'on sait
+/// écouler** : c'est un nom de boîte donné comme littéral, ou pas de littéral
+/// du tout.
+#[test]
+fn un_append_du_chemin_ordinaire_se_refuse_en_le_disant() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (texte, _) = dire(&mut session, b"a002 APPEND INBOX\r\n");
+    assert!(
+        texte.contains("BAD APPEND expects a mailbox name and a message literal"),
         "{texte}"
     );
 }

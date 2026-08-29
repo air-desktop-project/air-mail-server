@@ -224,6 +224,29 @@ fn une_accolade_qui_n_annonce_pas_un_nombre_est_une_faute() {
     assert_eq!(examiner(b"a001 SEARCH x}\r\n"), Ok(Need::Complete(16)));
 }
 
+/// **Un lecteur neuf n'a rien examiné**, et c'est ce qui dit à l'appelant que le
+/// tampon COMMENCE une commande — la seule situation où l'on peut en reconnaître
+/// une avant de la découper.
+#[test]
+fn un_lecteur_dit_s_il_est_neuf() {
+    let mut lecteur = CommandReader::new();
+    assert!(lecteur.is_fresh());
+    // Un littéral en cours : ce qui suit n'est plus le début d'une commande.
+    assert_eq!(
+        lecteur.poll(b"a001 LOGIN {4}\r\n", &BORNES),
+        Ok(Need::Continuation)
+    );
+    assert!(!lecteur.is_fresh());
+    lecteur.reset();
+    assert!(lecteur.is_fresh());
+    // Une ligne examinée sans conclure suffit aussi à ne plus être neuf.
+    assert_eq!(
+        lecteur.poll(b"a001 LOGIN {4+}\r\nto", &BORNES),
+        Ok(Need::More)
+    );
+    assert!(!lecteur.is_fresh());
+}
+
 #[test]
 fn un_lecteur_se_remet_a_zero() {
     let mut lecteur = CommandReader::new();

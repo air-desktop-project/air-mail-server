@@ -53,6 +53,12 @@ pub struct ImapService<'a> {
     /// Un IMAP sans TLS n'est pas un IMAP dégradé, c'est un IMAP inutile — et le
     /// dire ici évite de le découvrir en production.
     pub tls: Option<std::sync::Arc<rustls::ServerConfig>>,
+    /// La taille maximale d'un message déposé par `APPEND`.
+    ///
+    /// **Ce n'est pas la borne d'un littéral ordinaire** : celle-là dit ce
+    /// qu'une connexion RETIENT, celle-ci ce qu'un message pèse. Voir
+    /// `Limits::max_append_octets`.
+    pub max_append_octets: u64,
 }
 
 /// Ce qu'une connexion IMAP a fait.
@@ -233,6 +239,45 @@ where
     B: Mailboxes,
 {
     loop {
+        // ── `APPEND` NE PASSE PAS PAR LE DÉCOUPAGE ORDINAIRE ────────────────
+        //
+        // C'est la seule commande dont un argument est un MESSAGE. Le découpage
+        // ordinaire accumule une commande entière avant de la rendre ; pour
+        // celle-ci, il accumulerait le message — et donnerait au client le droit
+        // de choisir combien de mémoire le serveur consomme. On la reconnaît
+        // donc AVANT, sur sa première ligne, et l'on écoule le reste.
+        //
+        // Ce qui n'est pas de cette forme-là — un `APPEND` sans littéral, ou
+        // dont le nom de boîte EST un littéral — retombe sur le chemin
+        // ordinaire, qui le refusera en le disant.
+        if etat.lecteur.is_fresh()
+            && let Some(fin) = fin_de_ligne(etat.tampon.get(..etat.rempli).unwrap_or_default())
+        {
+            // La ligne est recopiée : `deposer` a besoin du tampon en écriture,
+            // et l'annonce qu'on vient d'y lire ne survivrait pas à cet emprunt.
+            let ligne = etat.tampon.get(..fin).unwrap_or_default().to_vec();
+            match ams_proto_imap::Append::parse(&ligne, service.max_append_octets) {
+                Ok(Some(append)) => {
+                    if deposer(stream, session, etat, service, source, fin, &append).await? {
+                        return Ok(Etape::Terminee);
+                    }
+                    continue;
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    // L'annonce est illisible, ou le message trop gros. On le
+                    // dit et l'on raccroche : le client attend une continuation
+                    // qu'on ne donnera pas, et reprendre laisserait ses octets
+                    // se lire comme des commandes.
+                    service.guard.observe(source, GuardEvent::InvalidFrame);
+                    let adieu = session.cannot_parse(&mut etat.sortie)?;
+                    stream.write_all(adieu).await?;
+                    stream.flush().await?;
+                    return Ok(Etape::Terminee);
+                }
+            }
+        }
+
         let vu = etat.tampon.get(..etat.rempli).unwrap_or_default();
         let besoin = match etat.lecteur.poll(vu, &service.limits) {
             Ok(besoin) => besoin,
@@ -309,8 +354,93 @@ where
             Action::SendFetch => {
                 ecouler_le_fetch(stream, session, etat).await?;
             }
+            // Un `APPEND` ne passe pas par ici : sa ligne est reconnue avant le
+            // découpage, et son message écoulé là-bas.
+            Action::ReadAppend => return Ok(Etape::Terminee),
         }
     }
+}
+
+/// Où finit la première ligne du tampon, `CRLF` compris.
+fn fin_de_ligne(tampon: &[u8]) -> Option<usize> {
+    tampon
+        .windows(2)
+        .position(|paire| paire == b"\r\n")
+        .map(|rang| rang.saturating_add(2))
+}
+
+/// Conduit un `APPEND` : la ligne est lue, le message va suivre.
+///
+/// Rend `true` si la connexion doit se fermer.
+async fn deposer<S, A, B>(
+    stream: &mut S,
+    session: &mut Session<A, &B>,
+    etat: &mut Etat,
+    service: &ImapService<'_>,
+    source: Source,
+    fin: usize,
+    append: &ams_proto_imap::Append<'_>,
+) -> Result<bool, Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    A: Authenticator,
+    B: Mailboxes,
+{
+    let ligne = etat.tampon.get(..fin).unwrap_or_default().to_vec();
+    let tour = session.begin_append(&ligne, append, &mut etat.sortie)?;
+    let accepte = tour.action() == Action::ReadAppend;
+    stream.write_all(tour.reply()).await?;
+    stream.flush().await?;
+    etat.commands = etat.commands.saturating_add(1);
+    etat.tampon.drain(..fin.min(etat.tampon.len()));
+    etat.rempli = etat.rempli.saturating_sub(fin);
+
+    if !accepte {
+        // Refusé avant d'avoir rien lu : c'est TOUT L'INTÉRÊT du littéral
+        // synchronisant, et le client n'enverra rien. S'il n'était pas
+        // synchronisant, ses octets arrivent quand même — mais la session a
+        // déjà répondu, et le chemin ordinaire les lira comme des commandes.
+        // C'est le prix d'un `{n+}` refusé, et la RFC le prévoit ainsi.
+        return Ok(false);
+    }
+    if append.synchronizing() {
+        let invite = session.literal_continuation(&mut etat.sortie)?;
+        stream.write_all(invite).await?;
+        stream.flush().await?;
+    }
+
+    // ── LE MESSAGE S'ÉCOULE, ET NE SÉJOURNE NULLE PART ─────────────────────
+    while session.append_remaining() > 0 {
+        if etat.rempli == 0 {
+            let lus = lire(stream, &mut etat.morceau, service.timeouts.command).await?;
+            if lus == 0 {
+                // Le pair a raccroché au milieu du message : rien ne se dépose.
+                let _ = session.end_append(&mut etat.sortie);
+                return Ok(true);
+            }
+            etat.tampon
+                .extend_from_slice(etat.morceau.get(..lus).unwrap_or_default());
+            etat.rempli = etat.rempli.saturating_add(lus);
+        }
+        let disponible = etat.tampon.get(..etat.rempli).unwrap_or_default();
+        let pris = session.append_chunk(disponible);
+        etat.tampon.drain(..pris.min(etat.tampon.len()));
+        etat.rempli = etat.rempli.saturating_sub(pris);
+    }
+
+    let tour = session.end_append(&mut etat.sortie)?;
+    let faute = tour.peer_fault();
+    stream.write_all(tour.reply()).await?;
+    stream.flush().await?;
+    let evenement = if faute {
+        GuardEvent::InvalidFrame
+    } else {
+        GuardEvent::Command
+    };
+    Ok(matches!(
+        service.guard.observe(source, evenement),
+        Verdict::Throttled | Verdict::Banned { .. }
+    ))
 }
 
 /// Écoule les réponses d'un `FETCH`.
@@ -451,6 +581,7 @@ pub async fn serve_imap<A, B, S>(
 where
     A: Authenticator + Send + Sync + 'static,
     B: Mailboxes + Send + Sync + 'static,
+    B::Deposit: Send,
     B::Open: Send,
     S: core::future::Future<Output = ()>,
 {
@@ -491,6 +622,7 @@ where
                 guard: &guard,
                 timeouts,
                 tls,
+                max_append_octets: limits.max_append_octets,
             };
             // Le résultat n'est pas remonté : une connexion qui échoue ne
             // regarde qu'elle. Le journal viendra avec `air-log`.
