@@ -178,6 +178,14 @@ struct Dmarc {
   # personne n'attend. Zéro vaut le défaut de `ri=` : un jour.
   reportIntervalSeconds @5 :UInt32;
 
+  # Remet-on les rapports, ou se contente-t-on de les déposer ?
+  #
+  # ÉMETTRE DU COURRIER VERS DES TIERS NE SE DÉCIDE PAS À LA PLACE DE CELUI QUI
+  # EXPLOITE LA MACHINE. Faux — le défaut — dépose les rapports dans le dossier
+  # et n'en envoie aucun ; un opérateur peut les relever lui-même. Vrai les
+  # remet, aux destinations qui ont consenti (§7.1) et à elles seules.
+  sendReports @6 :Bool;
+
   enum Enforcement {
     # On évalue, on retient, on n'oppose rien. L'état où l'on découvre ce qu'une
     # politique refuserait AVANT de la laisser refuser — et il faut y rester

@@ -142,6 +142,11 @@ pub struct Dmarc {
     pub report_email: String,
     /// Tous les combien vider le journal, en secondes. Zéro vaut un jour.
     pub report_interval_seconds: u32,
+    /// Remet-on les rapports, ou se contente-t-on de les déposer ?
+    ///
+    /// **Émettre du courrier vers des tiers ne se décide pas à la place de celui
+    /// qui exploite la machine.** Le défaut dépose et n'envoie rien.
+    pub send_reports: bool,
 }
 
 impl Dmarc {
@@ -149,6 +154,15 @@ impl Dmarc {
     #[must_use]
     pub fn est_configure(&self) -> bool {
         !self.public_suffix_list.is_empty()
+    }
+
+    /// Ce service REMET-il les rapports qu'il compose ?
+    ///
+    /// Composer et remettre sont deux services distincts : le premier n'écrit
+    /// que dans un dossier de la machine, le second parle à des tiers.
+    #[must_use]
+    pub fn envoie(&self) -> bool {
+        self.rapporte() && self.send_reports
     }
 
     /// Ce service compose-t-il des rapports ?
@@ -379,6 +393,7 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
         report_org_name: texte(alignement.get_report_org_name()?)?,
         report_email: texte(alignement.get_report_email()?)?,
         report_interval_seconds: alignement.get_report_interval_seconds(),
+        send_reports: alignement.get_send_reports(),
     };
 
     let chiffrement = lu.get_tls()?;
@@ -509,6 +524,7 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
             alignement.set_report_org_name(&config.dmarc.report_org_name);
             alignement.set_report_email(&config.dmarc.report_email);
             alignement.set_report_interval_seconds(config.dmarc.report_interval_seconds);
+            alignement.set_send_reports(config.dmarc.send_reports);
         }
         ecrit.set_accounts(&config.accounts);
         ecrit.set_listen_pop3(&config.listen_pop3);
@@ -601,6 +617,7 @@ mod tests {
                 report_org_name: String::from("mail.example.com"),
                 report_email: String::from("dmarc@example.com"),
                 report_interval_seconds: 3_600,
+                send_reports: true,
             },
             ..exemple()
         }
@@ -907,6 +924,7 @@ mod tests {
             report_org_name: String::from("mail.example.com"),
             report_email: String::from("dmarc@example.com"),
             report_interval_seconds: 3_600,
+            send_reports: true,
         };
         let octets = encode(&original).expect("encodable");
         let relue = decode(&octets).expect("relisible");
@@ -919,6 +937,21 @@ mod tests {
     /// **Évaluer et rapporter sont deux services distincts.** Un dossier sans
     /// liste de suffixes ne rapporterait rien, puisqu'il n'y aurait rien à
     /// rapporter — et une liste sans dossier évalue sans rien écrire.
+    /// **Composer et remettre sont deux services distincts** : le premier
+    /// n'écrit que dans un dossier de la machine, le second parle à des tiers.
+    #[test]
+    fn remettre_se_demande_en_plus_de_composer() {
+        let mut config = exemple();
+        config.dmarc.public_suffix_list = String::from("/etc/ams/psl.dat");
+        config.dmarc.report_directory = String::from("/var/spool/ams/rapports");
+        assert!(config.dmarc.rapporte());
+        assert!(!config.dmarc.envoie(), "le défaut dépose et n'envoie rien");
+        config.dmarc.send_reports = true;
+        assert!(config.dmarc.envoie());
+        config.dmarc.report_directory.clear();
+        assert!(!config.dmarc.envoie(), "rien à remettre sans dossier");
+    }
+
     #[test]
     fn rapporter_demande_les_deux() {
         let mut config = exemple();

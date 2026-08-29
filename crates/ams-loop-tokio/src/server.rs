@@ -13,8 +13,8 @@ use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 
 use crate::{
-    Delivery, DkimChecker, DmarcChecker, Error, ReportSpool, SenderChecker, Service, SharedGuard,
-    SpoolTally, Timeouts, serve_connection,
+    Delivery, DkimChecker, DmarcChecker, Error, ReportSpool, SendTally, SenderChecker, Service,
+    SharedGuard, SpoolTally, Timeouts, serve_connection,
 };
 
 /// Ce qui borne le service.
@@ -108,6 +108,8 @@ pub struct Stats {
     pub dmarc: DmarcSums,
     /// Ce que les vidanges du journal des rapports ont produit.
     pub reports: SpoolTally,
+    /// Ce que les tournées de remise ont produit.
+    pub sends: SendTally,
 }
 
 /// Le compte des verdicts DMARC, sur toute la durée du service.
@@ -272,6 +274,10 @@ where
                 // rapports à chaque redémarrage.
                 if let Some(spool) = options.reports.as_ref() {
                     comptes_rapports.ajouter(spool.vider().await);
+                    // ON REMET AVANT DE PARTIR, et l'on attend : ce qui vient
+                    // d'être composé partirait sinon au prochain démarrage, ou
+                    // jamais.
+                    comptes_rapports.ajouter_remises(spool.envoyer().await);
                 }
                 return Ok(avec_dkim(stats, &comptes_dkim, &comptes_rapports));
             }
@@ -280,12 +286,16 @@ where
                 // destinations demande des interrogations DNS, et un serveur qui
                 // n'accepte plus rien pendant qu'il compose ses rapports serait
                 // une porte fermée à heure fixe.
-                if let Some(spool) = options.reports.as_ref()
-                    && spool.en_attente()
-                {
+                // ON PASSE MÊME QUAND LE JOURNAL EST VIDE : le dossier peut
+                // porter des rapports d'hier qu'un serveur injoignable a fait
+                // remettre à plus tard, et « plus tard », c'est maintenant.
+                if let Some(spool) = options.reports.as_ref() {
                     let spool = Arc::clone(spool);
                     let comptes = Arc::clone(&comptes_rapports);
-                    tokio::spawn(async move { comptes.ajouter(spool.vider().await) });
+                    tokio::spawn(async move {
+                        comptes.ajouter(spool.vider().await);
+                        comptes.ajouter_remises(spool.envoyer().await);
+                    });
                 }
                 continue;
             }
@@ -357,6 +367,11 @@ struct CompteurRapports {
     destinations: AtomicU64,
     refused: AtomicU64,
     errors: AtomicU64,
+    envoyes: AtomicU64,
+    rejetes: AtomicU64,
+    differes: AtomicU64,
+    perimes: AtomicU64,
+    incomposables: AtomicU64,
 }
 
 impl CompteurRapports {
@@ -367,6 +382,25 @@ impl CompteurRapports {
             .fetch_add(compte.destinations, Ordering::Relaxed);
         self.refused.fetch_add(compte.refused, Ordering::Relaxed);
         self.errors.fetch_add(compte.errors, Ordering::Relaxed);
+    }
+
+    fn ajouter_remises(&self, compte: SendTally) {
+        self.envoyes.fetch_add(compte.sent, Ordering::Relaxed);
+        self.rejetes.fetch_add(compte.rejected, Ordering::Relaxed);
+        self.differes.fetch_add(compte.deferred, Ordering::Relaxed);
+        self.perimes.fetch_add(compte.expired, Ordering::Relaxed);
+        self.incomposables
+            .fetch_add(compte.unsendable, Ordering::Relaxed);
+    }
+
+    fn sommes_remises(&self) -> SendTally {
+        SendTally {
+            sent: self.envoyes.load(Ordering::Relaxed),
+            rejected: self.rejetes.load(Ordering::Relaxed),
+            deferred: self.differes.load(Ordering::Relaxed),
+            expired: self.perimes.load(Ordering::Relaxed),
+            unsendable: self.incomposables.load(Ordering::Relaxed),
+        }
     }
 
     fn sommes(&self) -> SpoolTally {
@@ -386,6 +420,7 @@ fn avec_dkim(stats: Stats, comptes: &CompteurDkim, rapports: &CompteurRapports) 
         dkim: comptes.sommes(),
         dmarc: comptes.sommes_dmarc(),
         reports: rapports.sommes(),
+        sends: rapports.sommes_remises(),
         ..stats
     }
 }
@@ -401,7 +436,9 @@ pub fn source_de(adresse: SocketAddr) -> Source {
 
 #[cfg(test)]
 mod tests {
-    use super::{DkimSums, DmarcSums, ServeOptions, SpoolTally, Stats, serve, source_de};
+    use super::{
+        DkimSums, DmarcSums, SendTally, ServeOptions, SpoolTally, Stats, serve, source_de,
+    };
     use crate::{Delivery, DeliveryFailure, Error, SharedGuard, Timeouts};
     use ams_guard::{Source, Thresholds};
     use ams_proto_smtp::{Limits, Path};
@@ -592,6 +629,7 @@ mod tests {
                 dkim: DkimSums::default(),
                 dmarc: DmarcSums::default(),
                 reports: SpoolTally::default(),
+                sends: SendTally::default(),
             }
         );
         assert!(!format!("{:?}", Stats::default()).is_empty());

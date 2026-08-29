@@ -44,8 +44,8 @@ use ams_auth::Account;
 use ams_config::{Configuration, Enforcement, Tls};
 use ams_loop_tokio::pop3::serve_pop3;
 use ams_loop_tokio::{
-    DkimChecker, DmarcChecker, ReportSpool, SenderChecker, ServeOptions, SharedGuard, Timeouts,
-    refuse_root, serve,
+    DkimChecker, DmarcChecker, Relay, ReportSpool, SenderChecker, ServeOptions, SharedGuard,
+    Timeouts, refuse_root, serve,
 };
 use ams_session::{Capabilities, Config, SenderPolicy};
 use ams_store::Maildir;
@@ -360,20 +360,37 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     // rien à rapporter. Et il ne s'ouvre que si un dossier est nommé — composer
     // des rapports est un service qu'on rend à autrui, et il se demande.
     let journal_rapports = match (verificateur.as_ref(), options.dmarc.rapporte()) {
-        (Some(checker), true) => Some(std::sync::Arc::new(ReportSpool::new(
-            if options.dmarc.report_org_name.is_empty() {
-                options.domain.clone()
+        (Some(checker), true) => {
+            let spool = ReportSpool::new(
+                if options.dmarc.report_org_name.is_empty() {
+                    options.domain.clone()
+                } else {
+                    options.dmarc.report_org_name.clone()
+                },
+                if options.dmarc.report_email.is_empty() {
+                    format!("postmaster@{}", options.domain)
+                } else {
+                    options.dmarc.report_email.clone()
+                },
+                PathBuf::from(&options.dmarc.report_directory),
+                checker.resolver().clone(),
+            );
+            // LE REMETTEUR N'EST LÀ QUE SI ON L'A DEMANDÉ. Émettre du courrier
+            // vers des tiers ne se décide pas à la place de celui qui exploite
+            // la machine.
+            let spool = if options.dmarc.envoie() {
+                spool.with_relay(Relay::new(
+                    checker.resolver().clone(),
+                    std::sync::Arc::new(ams_tls::relay_config()),
+                    options.domain.clone(),
+                    false,
+                    Duration::from_secs(u64::from(options.timeouts.command_seconds)),
+                ))
             } else {
-                options.dmarc.report_org_name.clone()
-            },
-            if options.dmarc.report_email.is_empty() {
-                format!("postmaster@{}", options.domain)
-            } else {
-                options.dmarc.report_email.clone()
-            },
-            PathBuf::from(&options.dmarc.report_directory),
-            checker.resolver().clone(),
-        ))),
+                spool
+            };
+            Some(std::sync::Arc::new(spool))
+        }
         _ => None,
     };
     let intervalle_rapports =
@@ -391,9 +408,15 @@ async fn servir(fichier: &Path) -> Result<(), String> {
             None => String::from(
                 "rapports DMARC non composés — aucun dossier nommé (`air-mail-admin                  --dmarc-report-dir …`)"
             ),
+            Some(_) if options.dmarc.envoie() => format!(
+                "rapports DMARC composés dans `{}` toutes les {} s, PUIS REMIS aux destinations \
+                 qui ont consenti (§7.1). Chiffrement opportuniste : il n'authentifie personne.",
+                options.dmarc.report_directory,
+                intervalle_rapports.as_secs()
+            ),
             Some(_) => format!(
-                "rapports DMARC déposés dans `{}` toutes les {} s. DÉPOSÉS, PAS ENVOYÉS : \
-                 ce serveur n'a pas de client SMTP sortant.",
+                "rapports DMARC déposés dans `{}` toutes les {} s. DÉPOSÉS, PAS REMIS : \
+                 `air-mail-admin --dmarc-send` les enverrait.",
                 options.dmarc.report_directory,
                 intervalle_rapports.as_secs()
             ),
@@ -640,6 +663,23 @@ async fn servir(fichier: &Path) -> Result<(), String> {
             dmarc.temp_error,
             dmarc.unusable
         );
+        let remises = stats.sends;
+        if remises.sent > 0
+            || remises.rejected > 0
+            || remises.deferred > 0
+            || remises.expired > 0
+            || remises.unsendable > 0
+        {
+            eprintln!(
+                "air-mail-server : remise des rapports ; {} remis, {} refusé(s) définitivement, \
+                 {} différé(s), {} périmé(s), {} incomposable(s)",
+                remises.sent,
+                remises.rejected,
+                remises.deferred,
+                remises.expired,
+                remises.unsendable
+            );
+        }
         let rapports = stats.reports;
         if rapports.reports > 0 || rapports.errors > 0 || rapports.refused > 0 {
             eprintln!(

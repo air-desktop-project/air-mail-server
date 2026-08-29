@@ -75,6 +75,8 @@ struct Entree {
     /// L'intervalle entre deux vidanges, ZÉRO COMPRIS : c'est la valeur qui vaut
     /// « le défaut », et elle doit traverser le format comme les autres.
     intervalle: u32,
+    /// Remet-on les rapports ? Un booléen traverse le format comme le reste.
+    remet: bool,
     /// Le délai d'une question DNS.
     delai_dns: u32,
     /// Le chemin de la liste des suffixes publics — UNE CHAÎNE LIBRE : cette
@@ -147,6 +149,7 @@ fuzz_target!(|entree: Entree| {
             report_org_name: entree.rapports[1].clone(),
             report_email: entree.rapports[2].clone(),
             report_interval_seconds: entree.intervalle,
+            send_reports: entree.remet,
         },
         accounts: entree.comptes.clone(),
         listen_pop3: entree.ecoute_pop3.clone(),

@@ -91,6 +91,27 @@ pub enum Error {
         /// La borne franchie.
         limit: usize,
     },
+
+    /// Le tampon offert ne suffit pas à ce qu'on veut y écrire.
+    ///
+    /// Ce n'est pas une faute de format : c'est l'appelant qui n'a pas donné
+    /// assez de place. Voir `base64_max` et `report_mail_max`.
+    BufferTooSmall,
+
+    /// Une valeur porte un octet qu'on refuse d'écrire dans un message.
+    ///
+    /// **Un `CRLF` dans une adresse ou dans un sujet écrirait des en-têtes à
+    /// notre place** — dans un message qu'on compose et qu'on remet nous-mêmes.
+    /// Seul l'ASCII imprimable passe, et pour les en-têtes seulement lui.
+    NotPrintable,
+
+    /// Le délimiteur de parties figure dans une partie.
+    ///
+    /// Un `multipart` dont le délimiteur apparaît dans le contenu ne se découpe
+    /// plus là où son auteur croyait : le destinataire lit une pièce jointe
+    /// tronquée, ou une partie de plus. On refuse de composer plutôt que
+    /// d'émettre un message dont on ne sait pas ce qu'il sera lu.
+    BoundaryInContent,
 }
 
 impl fmt::Display for Error {
@@ -104,6 +125,13 @@ impl fmt::Display for Error {
             }
             Error::LineTooLong { line, limit } => {
                 write!(f, "ligne {line} : plus de {limit} octets")
+            }
+            Error::BufferTooSmall => f.write_str("le tampon offert ne suffit pas"),
+            Error::NotPrintable => {
+                f.write_str("une valeur porte un octet qu'on refuse d'écrire dans un message")
+            }
+            Error::BoundaryInContent => {
+                f.write_str("le délimiteur de parties figure dans une partie")
             }
             Error::MissingSeparator => {
                 f.write_str("aucune ligne vide ne sépare l'en-tête du corps")
@@ -149,6 +177,9 @@ mod tests {
         Error::HeaderTooLong { limit: 9 },
         Error::NoAddress,
         Error::MultipleAddresses,
+        Error::BufferTooSmall,
+        Error::NotPrintable,
+        Error::BoundaryInContent,
     ];
 
     #[test]

@@ -63,7 +63,7 @@ horloge.
 
 | Crate | Périmètre | État |
 | --- | --- | --- |
-| `ams-mime` | RFC 5322 et MIME — le socle des quatre protocoles | **squelette du message, et le domaine d'un `From:`** |
+| `ams-mime` | RFC 5322 et MIME — le socle des quatre protocoles | **squelette du message, domaine d'un `From:`, et composition d'un rapport** |
 | `ams-proto-smtp` | RFC 5321 | **commandes, réponses écrites ET lues, phase de données, point-farcissage** |
 | `ams-sasl` | RFC 4422/4616 : `PLAIN` et son base64 | **implémenté** |
 | `ams-proto-pop3` | RFC 1939 | **commandes et réponses** |
@@ -313,10 +313,22 @@ en particulier. **On y rapporte ce qu'on a FAIT**, jamais ce qui était demandé
 un message que `p=quarantine` visait et que ce serveur a remis se rapporte
 `none`, parce que c'est la vérité.
 
-Ils sont déposés, **pas envoyés** : remettre un rapport demande un client SMTP
-sortant, que ce serveur n'a pas encore. Chaque rapport est accompagné d'un
-fichier `.destinations`, et ce fichier est le résultat d'un contrôle sans lequel
-DMARC serait une arme.
+**Ils sont déposés, puis remis** — et les deux gestes sont séparés par un
+dossier. Ce n'est pas une commodité : c'est ce qui fait qu'un rapport composé
+survit à un redémarrage, à une panne de réseau, à un serveur d'en face qui ne
+répond pas ce jour-là. Ce qui est remis est retiré ; ce qu'un domaine refuse
+définitivement l'est aussi, parce qu'insister remplirait le dossier de messages
+que personne ne veut ; ce qui n'a pas abouti reste, et repart plus tard ; et un
+rapport de plus de sept jours s'efface, parce que le compte d'une journée qu'on
+remettrait un mois après n'apprend plus rien à personne.
+
+**Remettre ne se décide pas à la place de celui qui exploite la machine.** Sans
+`--dmarc-send`, les rapports s'accumulent dans le dossier et un opérateur les
+relève ; avec, ils partent. Émettre du courrier vers des tiers en son nom est
+une décision, et elle se prend une fois, explicitement.
+
+Chaque rapport est accompagné d'un fichier `.destinations`, et ce fichier est le
+résultat d'un contrôle sans lequel DMARC serait une arme.
 
 **SANS LA VÉRIFICATION DE §7.1, DMARC EST UN AMPLIFICATEUR.** N'importe qui peut
 publier `rua=mailto:victime@banque.test` sous un domaine qu'il détient, puis

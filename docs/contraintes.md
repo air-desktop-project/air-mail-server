@@ -592,13 +592,41 @@ La comparaison se fait sur les domaines eux-mêmes, pas sur leurs domaines
 organisationnels : se tromper dans le sens strict coûte une interrogation DNS ;
 se tromper dans l'autre autorise un envoi que personne n'a accepté.
 
-Ce qui n'est pas outillé : **l'envoi**. Les rapports sont déposés dans un
-dossier, accompagnés d'un fichier `.destinations` qui dit à qui ils reviennent.
-Le transport, lui, existe depuis le 2026-08-29 (voir « Le client SMTP sortant ») ;
-ce qui manque entre les deux est la composition du message qui les portera —
-un `multipart/mixed` avec la pièce jointe en base64. Les rapports d'échec
-(`ruf=`, RFC 6591) ne sont pas composés non plus : ils portent des morceaux de
-messages réels, et ce qu'on met dedans mérite sa propre décision.
+### La remise des rapports, depuis le 2026-08-29
+
+Les rapports sont désormais **composés, déposés, puis remis** — et les deux
+derniers gestes sont séparés par un dossier. Ce n'est pas une commodité : c'est
+ce qui fait qu'un rapport composé survit à un redémarrage, à une panne de réseau,
+à un serveur d'en face qui ne répond pas ce jour-là.
+
+CE QUI EST REMIS EST RETIRÉ, ET CE QU'ON REFUSE AUSSI. Un `5yz` retire le
+rapport : insister remplirait le dossier de messages que personne ne veut, et
+harcèlerait un serveur qui a dit non. Un refus temporaire, lui, laisse le fichier
+en place — c'est tout l'intérêt de l'avoir écrit sur un disque. Et **un rapport
+de plus de sept jours s'efface** : sans cette borne, un domaine injoignable ferait
+croître le dossier sans fin, et l'on réessaierait des années durant d'envoyer le
+compte d'une journée que plus personne ne peut exploiter.
+
+REMETTRE NE SE DÉCIDE PAS À LA PLACE DE CELUI QUI EXPLOITE LA MACHINE. Le défaut
+dépose et n'envoie rien ; `--dmarc-send` remet. Émettre du courrier vers des
+tiers en son nom est une décision, et elle se prend une fois, explicitement.
+
+Le message qui porte un rapport est un `multipart/mixed` : un texte d'explication
+et le XML gzippé en base64. Il est composé par `ams-mime`, qui a gagné pour
+l'occasion **un troisième base64** — celui-ci replie en `CRLF` seul, là où celui
+de DKIM replie en `CRLF` suivi d'une espace, parce qu'un corps MIME n'est pas un
+en-tête et que l'espace de continuation ferait partie des données. Trois usages,
+trois règles de pliage, trois analyseurs : les partager ferait qu'un jour, en
+corrigeant l'un, on casserait les deux autres.
+
+Le texte d'explication est **en anglais**, et c'est délibéré : ce message part
+vers des systèmes et des opérateurs du monde entier, dont la seule langue commune
+est celle-là — et le composeur n'admet que de l'ASCII, ce qui exclut d'écrire un
+français correct.
+
+Ce qui n'est pas outillé : les rapports d'échec (`ruf=`, RFC 6591) ne sont pas
+composés. Ils portent des morceaux de messages réels, et ce qu'on met dedans
+mérite sa propre décision.
 
 ## Le client SMTP sortant, depuis le 2026-08-29
 
@@ -650,13 +678,15 @@ plancher (C6), fût-ce au prix de quelques remises manquées.
 ### Ce qui n'a pas encore d'appelant
 
 Le client est écrit, couvert à 100 %, fuzzé et **éprouvé contre notre propre
-serveur** — deux moitiés qui ne partagent aucun code, mises face à face. Il n'a
-pourtant pas encore de caller dans le binaire : son premier sera l'envoi des
-rapports DMARC, qui demande de composer un message MIME. Il n'y a pas non plus de
-**file d'attente** : `send` remet ou dit pourquoi il n'a pas pu, et c'est à
-l'appelant de décider s'il réessaie. Une file demande de la persistance, une
-politique de reprise et des avis de non-remise — trois décisions qui ne se
-prennent pas en passant.
+serveur** — deux moitiés qui ne partagent aucun code, mises face à face. Son
+premier appelant est arrivé le même jour : la remise des rapports DMARC.
+
+Il n'y a toujours pas de **file d'attente générale** : `send` remet, ou dit
+pourquoi il n'a pas pu. Le dossier des rapports en tient lieu pour eux seuls — il
+sait différer et abandonner, ce qui suffit à des messages qu'on peut perdre sans
+que personne n'en souffre. Une vraie file demanderait des avis de non-remise et
+une politique de reprise, deux décisions qui ne se prennent pas en passant, et
+qu'un serveur qui n'accepte pas de soumission n'a pas encore à prendre.
 
 ### DNSSEC n'est pas validé, et c'est écrit partout
 

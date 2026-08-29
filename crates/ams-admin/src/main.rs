@@ -274,7 +274,11 @@ fn afficher(config: &Configuration) {
                     config.dmarc.report_interval_seconds
                 }
             );
-            println!("  DÉPOSÉS, PAS ENVOYÉS — ce serveur n'a pas de client SMTP sortant");
+            if config.dmarc.envoie() {
+                println!("  remise           OUI — vers les destinations qui ont consenti (§7.1)");
+            } else {
+                println!("  remise           NON — les rapports sont déposés, pas envoyés");
+            }
         } else {
             println!("  rapports         AUCUN DOSSIER — rien n'est rapporté aux domaines");
         }

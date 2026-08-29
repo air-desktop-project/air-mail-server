@@ -64,6 +64,8 @@ pub struct Options {
     pub dmarc_report_email: Option<String>,
     /// Tous les combien vider le journal des rapports.
     pub dmarc_report_interval: u32,
+    /// Remet-on les rapports, ou se contente-t-on de les déposer ?
+    pub dmarc_send: bool,
 }
 
 impl Default for Options {
@@ -113,6 +115,10 @@ impl Default for Options {
             dmarc_report_email: None,
             // Un jour, comme le défaut de `ri=` (RFC 7489 §6.3).
             dmarc_report_interval: 86_400,
+            // ÉMETTRE DU COURRIER VERS DES TIERS NE SE DÉCIDE PAS À LA PLACE DE
+            // CELUI QUI EXPLOITE LA MACHINE. On dépose ; il relève, ou il
+            // demande qu'on remette.
+            dmarc_send: false,
         }
     }
 }
@@ -168,6 +174,7 @@ impl Options {
                 report_org_name: self.dmarc_org_name.clone().unwrap_or_default(),
                 report_email: self.dmarc_report_email.clone().unwrap_or_default(),
                 report_interval_seconds: self.dmarc_report_interval,
+                send_reports: self.dmarc_send,
             },
             accounts: chemin(self.accounts.as_ref()),
             listen_pop3: self
@@ -284,6 +291,14 @@ OPTIONS DE `config write`
     publierait `rua=mailto:victime@banque.test` et ferait bombarder cette adresse
     par tous les receveurs du monde.
 
+    `--dmarc-send` REMET les rapports au lieu de seulement les déposer. Ce n'est
+    pas le défaut : émettre du courrier vers des tiers ne se décide pas à la
+    place de celui qui exploite la machine. Sans lui, les rapports s'accumulent
+    dans le dossier et un opérateur les relève. Avec lui, ils partent — aux
+    destinations qui ont consenti (§7.1) et à elles seules, un rapport remis est
+    effacé, un rapport refusé définitivement aussi, et un rapport de plus de sept
+    jours est abandonné.
+
     `--dmarc-org-name` est le nom sous lequel ce receveur se présente (défaut :
     le nom annoncé), `--dmarc-report-email` l'adresse où le joindre (défaut :
     `postmaster@` suivi du nom annoncé), `--dmarc-report-interval` le nombre de
@@ -358,6 +373,7 @@ where
             "--dmarc-report-dir" => {
                 options.dmarc_report_dir = Some(PathBuf::from(valeur()?));
             }
+            "--dmarc-send" => options.dmarc_send = true,
             "--dmarc-org-name" => options.dmarc_org_name = Some(valeur()?),
             "--dmarc-report-email" => options.dmarc_report_email = Some(valeur()?),
             "--dmarc-report-interval" => {

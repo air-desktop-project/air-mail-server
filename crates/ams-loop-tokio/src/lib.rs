@@ -88,7 +88,9 @@ pub use error::Error;
 pub use guard::SharedGuard;
 pub use privileges::{is_root, refuse_root};
 pub use relay::{Outgoing, Relay, RelayOutcome, SMTP_PORT};
-pub use reports::{Observation, PolitiqueLue, ReportSpool, SignatureVue, SpfVu, SpoolTally};
+pub use reports::{
+    Observation, PolitiqueLue, ReportSpool, SendTally, SignatureVue, SpfVu, SpoolTally,
+};
 pub use resolver::Resolver;
 pub use server::{DkimSums, DmarcSums, ServeOptions, Stats, serve, source_de};
 pub use spf::SenderChecker;

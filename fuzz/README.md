@@ -42,6 +42,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_dmarc` | `seeds/dmarc` | politique et alignement — **l'alignement est symétrique** |
 | `fuzz_ams_dmarc_report` | `seeds/dmarc-report` | destinations et rapport agrégé — **le rapport ne s'injecte pas** |
 | `fuzz_ams_smtp_client` | `seeds/smtp-client` | réponses lues et corps émis — **le message ne se termine pas tout seul** |
+| `fuzz_ams_mime_compose` | `seeds/mime-compose` | le message qui porte un rapport — **la pièce jointe se relit** |
 
 Les variantes « bornes » existent parce que les bornes de C3 viennent de la
 configuration (C8), donc d'un administrateur : un zéro, un `usize::MAX`, ou toute
@@ -259,6 +260,24 @@ d'enveloppe : **ce que le pair a dicté**.
 5. **Le nom interrogé pour vérifier une destination est toujours dans la zone de
    cette destination.** C'est tout ce qui empêche l'attaquant de se donner le
    droit d'être rapporté à quelqu'un d'autre.
+
+### Le message d'un rapport (cinq, dont L'ALLER-RETOUR DE LA PIÈCE JOINTE)
+
+L'adresse du destinataire d'un rapport est publiée par le domaine qu'on
+rapporte ; le nom du fichier joint se compose à partir de ce même domaine. **Un
+message qu'on compose soi-même et qu'on remet soi-même est le dernier endroit où
+une injection passerait inaperçue.**
+
+1. Rien ne panique, quels que soient les octets.
+2. **Un message composé n'a que les en-têtes qu'on a écrits** — on les compte,
+   DANS LE BLOC D'EN-TÊTE seulement : un corps `text/plain` a le droit de
+   contenir « From: », c'est du texte.
+3. **Le délimiteur figure exactement trois fois** : deux ouvertures, une clôture.
+   Un `multipart` qui se découpe ailleurs se lit autrement que ce qu'on a écrit.
+4. **LA PIÈCE JOINTE SE RELIT**, à l'octet près. Le décodeur base64 est écrit
+   dans la cible, séparé de l'encodeur : réencoder avec le code qu'on éprouve
+   prouverait seulement qu'il est d'accord avec lui-même.
+5. **Une date s'écrit toujours**, et tient dans ce qu'elle annonce.
 
 ### Le côté ÉMETTEUR de SMTP (cinq, dont LA CONTREBANDE PAR L'AUTRE BOUT)
 
@@ -708,6 +727,8 @@ coûterait du courrier sans rien protéger — on ne les interprète jamais.
 | 2026-08-29 | `fuzz_ams_config` (avec les rapports) | 222 412 (71 s) | 0 |
 | 2026-08-29 | `fuzz_ams_smtp_client` | (avant correctif) | **1, corrigé** |
 | 2026-08-29 | `fuzz_ams_smtp_client` | 8 247 626 (241 s) | 0 |
+| 2026-08-29 | `fuzz_ams_mime_compose` | 1 434 635 (241 s) | 0 |
+| 2026-08-29 | `fuzz_ams_config` (avec la remise) | 267 065 (71 s) | 0 |
 | 2026-08-29 | `fuzz_ams_config` (avec SPF) | 193 256 (61 s) | 0 |
 | 2026-08-29 | `fuzz_ams_session_smtp` (avec SPF) | 381 710 (61 s) | 0 |
 | 2026-08-28 | `fuzz_ams_session_smtp` (SASL) | 521 646 (91 s) | 0 |

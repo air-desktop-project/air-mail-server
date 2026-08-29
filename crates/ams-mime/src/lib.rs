@@ -72,11 +72,17 @@
 extern crate std;
 
 mod address;
+mod base64;
+mod compose;
+mod date;
 mod error;
 mod limits;
 mod message;
 
 pub use address::author_domain;
+pub use base64::{BASE64_LINE, base64_max, encode_base64};
+pub use compose::{ReportMail, report_mail_max, write_report_mail};
+pub use date::{DATE_MAX, write_date};
 pub use error::Error;
 pub use limits::Limits;
 pub use message::{Field, Fields, Message, Unfolded};

@@ -8,16 +8,28 @@
 //! `p=reject` découvre ses propres prestataires oubliés en même temps que ses
 //! correspondants découvrent que son courrier ne passe plus.
 //!
-//! # Ce qui est fait ici, et ce qui ne l'est pas
+//! # Deux gestes, et un dossier entre les deux
 //!
 //! Les rapports sont **comptés, composés, nommés, compressés et déposés** dans
-//! un dossier. Ils ne sont pas ENVOYÉS : envoyer demande un client SMTP sortant,
-//! que ce serveur n'a pas encore. Le dire ainsi vaut mieux que de laisser croire
-//! qu'un `rua=` publié suffit à recevoir quelque chose.
+//! un dossier ; puis, dans un second temps, **remis**. Le dossier n'est pas une
+//! commodité : c'est ce qui fait qu'un rapport composé survit à un redémarrage,
+//! à une panne de réseau, à un serveur d'en face qui ne répond pas ce jour-là.
 //!
-//! Ce qui est déposé est néanmoins **prêt à partir** : le fichier porte le nom
-//! exact qu'exige §7.2.1.1, il est gzippé comme §7.2.1 l'impose, et un second
-//! fichier `.destinations` dit à qui il revient — après vérification.
+//! Chaque rapport y porte le nom exact qu'exige §7.2.1.1, il est gzippé comme
+//! §7.2.1 l'impose, et un second fichier `.destinations` dit à qui il revient —
+//! après la vérification de §7.1.
+//!
+//! # CE QUI EST REMIS EST RETIRÉ, ET CE QUI EST REFUSÉ AUSSI
+//!
+//! Un rapport remis n'a plus lieu d'être ; un rapport qu'un domaine refuse
+//! définitivement (`5yz`) non plus — insister remplirait le dossier de messages
+//! que personne ne veut, et harcèlerait un serveur qui a dit non. Un refus
+//! TEMPORAIRE, lui, laisse le fichier en place : c'est tout l'intérêt de l'avoir
+//! écrit sur un disque.
+//!
+//! Et **un rapport vieilli s'efface**. Sans cette borne, un domaine injoignable
+//! ferait croître le dossier sans fin, et l'on réessaierait des années durant
+//! d'envoyer le compte d'une journée que plus personne ne peut exploiter.
 //!
 //! # LES DESTINATIONS SONT VÉRIFIÉES AVANT D'ÊTRE ÉCRITES
 //!
@@ -44,10 +56,12 @@ use ams_dmarc::report::aggregate::{
 use ams_dmarc::report::external::{
     VERIFICATION_NAME_MAX, authorizes, needs_verification, verification_name,
 };
-use ams_dmarc::report::naming::{FILENAME_MAX, filename};
+use ams_dmarc::report::naming::{FILENAME_MAX, SUBJECT_MAX, filename, subject};
 use ams_dmarc::report::uri::{Uris, decode};
 use ams_dmarc::{Alignment, Policy, Verdict};
+use ams_mime::{ReportMail, report_mail_max, write_report_mail};
 
+use crate::relay::{Outgoing, Relay, RelayOutcome};
 use crate::resolver::{Resolver, Txt};
 
 /// La politique telle qu'elle a été LUE — pas celle qu'on croit qu'elle est.
@@ -134,6 +148,21 @@ pub struct SpoolTally {
     pub errors: u64,
 }
 
+/// Ce qu'une tournée de remise a produit.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SendTally {
+    /// Rapports remis, et retirés du dossier.
+    pub sent: u64,
+    /// Rapports qu'un domaine a refusés définitivement, et retirés eux aussi.
+    pub rejected: u64,
+    /// Rapports laissés en place pour une prochaine fois.
+    pub deferred: u64,
+    /// Rapports trop vieux, effacés sans avoir été remis.
+    pub expired: u64,
+    /// Rapports qu'on n'a pas su composer ou lire.
+    pub unsendable: u64,
+}
+
 /// Le journal des observations, et le dossier où leurs rapports se déposent.
 #[derive(Debug)]
 pub struct ReportSpool {
@@ -143,8 +172,11 @@ pub struct ReportSpool {
     email: String,
     /// Où déposer.
     directory: PathBuf,
-    /// De quoi vérifier les destinations externes (§7.1).
+    /// De quoi vérifier les destinations externes (§7.1), et tirer un
+    /// délimiteur de parties imprévisible.
     resolveur: Resolver,
+    /// De quoi remettre les rapports, si ce serveur les envoie.
+    relay: Option<Relay>,
     journal: Mutex<HashMap<String, Domaine>>,
     /// Le début de la période courante, en secondes depuis l'époque.
     debut: Mutex<u64>,
@@ -170,10 +202,23 @@ impl ReportSpool {
             email,
             directory,
             resolveur,
+            relay: None,
             journal: Mutex::new(HashMap::new()),
             debut: Mutex::new(maintenant()),
             numero: AtomicU64::new(0),
         }
+    }
+
+    /// Donne à ce journal de quoi remettre ce qu'il compose.
+    ///
+    /// **Sans remetteur, les rapports sont déposés et rien de plus.** C'est un
+    /// état parfaitement défendable — un opérateur peut les relever lui-même —
+    /// et c'est le défaut : émettre du courrier vers des tiers ne se décide pas
+    /// à la place de celui qui exploite la machine.
+    #[must_use]
+    pub fn with_relay(mut self, relay: Relay) -> Self {
+        self.relay = Some(relay);
+        self
     }
 
     /// Retient un message de plus.
@@ -366,6 +411,227 @@ impl ReportSpool {
             Txt::Absent | Txt::Panne => false,
         }
     }
+}
+
+/// Au-delà, un rapport ne vaut plus la peine d'être remis : sept jours.
+///
+/// Le compte d'une journée qu'on remettrait un mois plus tard n'apprend plus
+/// rien à personne — et sans cette borne, un domaine injoignable ferait croître
+/// le dossier sans fin.
+const PEREMPTION: u64 = 7 * 86_400;
+
+/// Le texte que lira l'humain qui ouvrira un rapport.
+///
+/// **Il est en anglais, et c'est délibéré.** Ce message part vers des systèmes
+/// et des opérateurs du monde entier, dont la seule langue commune est
+/// celle-là ; et le composeur n'admet que de l'ASCII, ce qui exclut d'écrire un
+/// français correct. Un texte sans accents serait une troisième langue, que
+/// personne ne parle.
+const TEXTE: &[u8] = b"This is a DMARC aggregate report (RFC 7489).\r\n    The attached file is the report itself, gzipped XML.\r\n    \r\n    This message was generated automatically; replies are not read.\r\n";
+
+impl ReportSpool {
+    /// Remet ce qui attend dans le dossier.
+    ///
+    /// Ne fait rien sans remetteur : voir [`ReportSpool::with_relay`].
+    pub async fn envoyer(&self) -> SendTally {
+        let mut compte = SendTally::default();
+        let Some(relay) = self.relay.as_ref() else {
+            return compte;
+        };
+        let Ok(mut entrees) = tokio::fs::read_dir(&self.directory).await else {
+            return compte;
+        };
+        let maintenant = maintenant();
+        while let Ok(Some(entree)) = entrees.next_entry().await {
+            let chemin = entree.path();
+            let Some(nom) = chemin.file_name().and_then(|brut| brut.to_str()) else {
+                continue;
+            };
+            let Some(parts) = decouper_le_nom(nom) else {
+                // Ce n'est pas un rapport à nous : on n'y touche pas. Un dossier
+                // qu'on partage avec autre chose ne se nettoie pas au jugé.
+                continue;
+            };
+            let nom = String::from(nom);
+            self.remettre(relay, &parts, &chemin, &nom, maintenant, &mut compte)
+                .await;
+        }
+        compte
+    }
+
+    /// Remet un rapport, et décide de ce qu'on fait du fichier.
+    async fn remettre(
+        &self,
+        relay: &Relay,
+        parts: &Nomme,
+        chemin: &std::path::Path,
+        nom: &str,
+        maintenant: u64,
+        compte: &mut SendTally,
+    ) {
+        let voisin = {
+            let mut voisin = chemin.to_path_buf().into_os_string();
+            voisin.push(".destinations");
+            PathBuf::from(voisin)
+        };
+        // UN RAPPORT VIEILLI S'EFFACE. Le compte d'une journée qu'on remettrait
+        // un mois plus tard n'apprend plus rien à personne.
+        if maintenant.saturating_sub(parts.fin) > PEREMPTION {
+            let _ = tokio::fs::remove_file(chemin).await;
+            let _ = tokio::fs::remove_file(&voisin).await;
+            compte.expired = compte.expired.saturating_add(1);
+            return;
+        }
+        let (Ok(piece), Ok(destinations)) = (
+            tokio::fs::read(chemin).await,
+            tokio::fs::read_to_string(&voisin).await,
+        ) else {
+            // Sans destination vérifiée, il n'y a personne à qui l'envoyer. On
+            // le laisse : c'est peut-être la vérification qui n'a pas abouti.
+            compte.deferred = compte.deferred.saturating_add(1);
+            return;
+        };
+
+        let mut tout_est_reglé = true;
+        for adresse in destinations.lines().filter(|ligne| !ligne.is_empty()) {
+            match self.remettre_a(relay, parts, nom, &piece, adresse).await {
+                Some(RelayOutcome::Delivered { .. }) => {
+                    compte.sent = compte.sent.saturating_add(1);
+                }
+                // UN REFUS DÉFINITIF RETIRE LE RAPPORT. Insister remplirait le
+                // dossier de messages que personne ne veut.
+                Some(RelayOutcome::Rejected(_) | RelayOutcome::NullMx) => {
+                    compte.rejected = compte.rejected.saturating_add(1);
+                }
+                None => {
+                    compte.unsendable = compte.unsendable.saturating_add(1);
+                }
+                // Tout le reste est temporaire : le fichier reste, et c'est tout
+                // l'intérêt de l'avoir écrit sur un disque.
+                Some(_) => {
+                    compte.deferred = compte.deferred.saturating_add(1);
+                    tout_est_reglé = false;
+                }
+            }
+        }
+        if tout_est_reglé {
+            let _ = tokio::fs::remove_file(chemin).await;
+            let _ = tokio::fs::remove_file(&voisin).await;
+        }
+    }
+
+    /// Compose le message et le remet à une adresse.
+    ///
+    /// Rend `None` quand il n'a pas pu être composé — une adresse qu'on refuse
+    /// d'écrire, un tampon qui ne suffit pas.
+    async fn remettre_a(
+        &self,
+        relay: &Relay,
+        parts: &Nomme,
+        nom: &str,
+        piece: &[u8],
+        adresse: &str,
+    ) -> Option<RelayOutcome> {
+        let domaine = adresse.rsplit_once('@').map(|(_, apres)| apres)?;
+        let mut sujet = [0_u8; SUBJECT_MAX];
+        let sujet = subject(
+            parts.domaine.as_bytes(),
+            self.org_name.as_bytes(),
+            parts.identifiant.as_bytes(),
+            &mut sujet,
+        )
+        .ok()?;
+        let identifiant = format!("{}.{}@{}", parts.identifiant, parts.debut, self.org_name);
+        let delimiteur = format!("----ams-{}", self.jeton().await);
+        let courrier = ReportMail {
+            from: self.email.as_bytes(),
+            to: adresse.as_bytes(),
+            subject: sujet,
+            message_id: identifiant.as_bytes(),
+            date: maintenant(),
+            boundary: delimiteur.as_bytes(),
+            text: TEXTE,
+            filename: nom.as_bytes(),
+            attachment: piece,
+        };
+        let mut message = std::vec![0_u8; report_mail_max(&courrier)];
+        let ecrit = write_report_mail(&mut message, &courrier).ok()?.len();
+        message.truncate(ecrit);
+
+        let destinataires = std::vec![String::from(adresse)];
+        Some(
+            relay
+                .send(
+                    domaine,
+                    &Outgoing {
+                        // L'expéditeur d'enveloppe est une VRAIE adresse, et non
+                        // l'expéditeur nul : c'est par là qu'un refus nous
+                        // reviendra, et un rapport dont on ignore qu'il n'arrive
+                        // jamais ne vaut pas mieux que pas de rapport.
+                        sender: &self.email,
+                        recipients: &destinataires,
+                        body: &message,
+                    },
+                )
+                .await,
+        )
+    }
+
+    /// Huit octets d'aléa, en hexadécimal.
+    ///
+    /// Le délimiteur de parties doit être imprévisible : un tiers qui saurait le
+    /// deviner pourrait le glisser dans un contenu et faire découper le message
+    /// ailleurs. Le composeur refuse déjà un délimiteur qui figure dans une
+    /// partie ; l'aléa ferme la porte de l'autre côté.
+    async fn jeton(&self) -> String {
+        let mut texte = String::new();
+        for _ in 0..8_u8 {
+            let octet = self.resolveur.octet().await.unwrap_or(0);
+            texte.push(char::from(chiffre_hexa(octet >> 4)));
+            texte.push(char::from(chiffre_hexa(octet & 0x0F)));
+        }
+        texte
+    }
+}
+
+/// Un chiffre hexadécimal minuscule.
+fn chiffre_hexa(quartet: u8) -> u8 {
+    match quartet & 0x0F {
+        petit @ 0..=9 => b'0'.wrapping_add(petit),
+        grand => b'a'.wrapping_add(grand.wrapping_sub(10)),
+    }
+}
+
+/// Ce qu'un nom de fichier de rapport porte (§7.2.1.1).
+#[derive(Debug, PartialEq, Eq)]
+struct Nomme {
+    domaine: String,
+    debut: u64,
+    fin: u64,
+    identifiant: String,
+}
+
+/// Découpe `receveur!domaine!début!fin!identifiant.xml.gz`.
+///
+/// **Rien de ce qui n'a pas cette forme n'est touché.** Un dossier qu'on partage
+/// avec autre chose ne se nettoie pas au jugé.
+fn decouper_le_nom(nom: &str) -> Option<Nomme> {
+    let corps = nom.strip_suffix(".xml.gz")?;
+    let mut parts = corps.split('!');
+    let _receveur = parts.next()?;
+    let domaine = parts.next()?;
+    let debut = parts.next()?.parse().ok()?;
+    let fin = parts.next()?.parse().ok()?;
+    let identifiant = parts.next()?;
+    if parts.next().is_some() || domaine.is_empty() || identifiant.is_empty() {
+        return None;
+    }
+    Some(Nomme {
+        domaine: String::from(domaine),
+        debut,
+        fin,
+        identifiant: String::from(identifiant),
+    })
 }
 
 /// Ce qui fait que deux messages ne comptent que pour une ligne.

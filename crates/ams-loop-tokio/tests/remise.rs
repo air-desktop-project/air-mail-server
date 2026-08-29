@@ -370,3 +370,181 @@ async fn un_domaine_qu_on_ne_sait_pas_joindre_est_une_panne() {
         .await;
     assert_eq!(issue, RelayOutcome::Unreachable);
 }
+
+// ── DU JOURNAL DMARC JUSQU'AU SERVEUR D'EN FACE ─────────────────────────────
+
+/// **La chaîne entière**, du message observé au rapport remis : DMARC compte,
+/// le journal compose, le MIME emballe, le client remet, et notre propre serveur
+/// reçoit. C'est le seul test qui la parcourt d'un bout à l'autre.
+#[tokio::test]
+async fn un_rapport_observe_finit_dans_la_boite_d_en_face() {
+    use ams_dmarc::report::aggregate::{DkimAuthResult, SpfAuthResult, SpfScope};
+    use ams_dmarc::{Alignment, Policy, Verdict};
+    use ams_loop_tokio::{Observation, PolitiqueLue, ReportSpool, SignatureVue, SpfVu};
+    use std::net::{IpAddr, Ipv4Addr};
+
+    // Le domaine rapporté demande ses rapports CHEZ LUI : aucune vérification
+    // externe n'est due (§7.1), et `example.com` est justement ce que notre
+    // serveur d'épreuve accepte.
+    const TABLE: &[(&str, Enregistrement)] = &[("example.com", Enregistrement::A([127, 0, 0, 1]))];
+    let dns = resolveur_courrier(TABLE).await;
+    let (adresse, cahier) = serveur(None).await;
+
+    let dossier =
+        std::env::temp_dir().join(std::format!("ams-remise-rapport-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dossier);
+    let spool = ReportSpool::new(
+        std::string::String::from("mail.nous.test"),
+        std::string::String::from("dmarc@nous.test"),
+        dossier.clone(),
+        Resolver::new(std::vec![dns], Duration::from_secs(2)).expect("résolveur"),
+    )
+    .with_relay(remetteur_resolvant(dns, adresse.port()));
+
+    spool.observer(Observation {
+        domain: std::string::String::from("example.com"),
+        published: PolitiqueLue {
+            dkim_alignment: Alignment::Relaxed,
+            spf_alignment: Alignment::Relaxed,
+            policy: Policy::None,
+            subdomain_policy: None,
+            percent: 100,
+        },
+        destinations: std::string::String::from("mailto:dmarc@example.com"),
+        source: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+        disposition: Policy::None,
+        dkim: Verdict::Fail,
+        spf: Verdict::Pass,
+        envelope_from: Some(std::string::String::from("example.com")),
+        signatures: std::vec![SignatureVue {
+            domain: std::string::String::from("example.com"),
+            selector: std::string::String::from("sel"),
+            result: DkimAuthResult::Fail,
+        }],
+        spf_auth: SpfVu {
+            domain: std::string::String::from("example.com"),
+            scope: SpfScope::MailFrom,
+            result: SpfAuthResult::Pass,
+        },
+    });
+
+    let compose = spool.vider().await;
+    assert_eq!(compose.reports, 1);
+    assert_eq!(compose.destinations, 1);
+
+    let remis = spool.envoyer().await;
+    assert_eq!(remis.sent, 1, "le rapport devait partir : {remis:?}");
+    assert_eq!(remis.deferred, 0);
+
+    // **Ce qui est remis est retiré.** Le dossier est vide.
+    let restants: std::vec::Vec<_> = std::fs::read_dir(&dossier)
+        .expect("dossier lisible")
+        .filter_map(Result::ok)
+        .collect();
+    assert!(
+        restants.is_empty(),
+        "{} fichier(s) restant(s)",
+        restants.len()
+    );
+
+    let recu = cahier.0.lock().expect("verrou").clone();
+    let texte = std::string::String::from_utf8_lossy(&recu).into_owned();
+    for morceau in [
+        "From: <dmarc@nous.test>\r\n",
+        "To: <dmarc@example.com>\r\n",
+        "Subject: Report Domain: example.com Submitter: mail.nous.test Report-ID:",
+        "MIME-Version: 1.0\r\n",
+        "Auto-Submitted: auto-generated\r\n",
+        "Content-Type: multipart/mixed; boundary=\"----ams-",
+        "Content-Type: application/gzip\r\n",
+        "Content-Transfer-Encoding: base64\r\n",
+        "filename=\"mail.nous.test!example.com!",
+        "This is a DMARC aggregate report (RFC 7489).",
+    ] {
+        assert!(
+            texte.contains(morceau),
+            "{morceau:?} manque dans :\n{texte}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dossier);
+}
+
+/// **Un rapport que personne ne peut recevoir aujourd'hui reste pour demain** :
+/// c'est tout l'intérêt de l'avoir écrit sur un disque.
+#[tokio::test]
+async fn un_serveur_injoignable_laisse_le_rapport_en_place() {
+    use ams_dmarc::report::aggregate::{SpfAuthResult, SpfScope};
+    use ams_dmarc::{Alignment, Policy, Verdict};
+    use ams_loop_tokio::{Observation, PolitiqueLue, ReportSpool, SpfVu};
+    use std::net::{IpAddr, Ipv4Addr};
+
+    const TABLE: &[(&str, Enregistrement)] = &[("example.com", Enregistrement::A([127, 0, 0, 1]))];
+    let dns = resolveur_courrier(TABLE).await;
+    let dossier =
+        std::env::temp_dir().join(std::format!("ams-remise-differee-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dossier);
+    let spool = ReportSpool::new(
+        std::string::String::from("mail.nous.test"),
+        std::string::String::from("dmarc@nous.test"),
+        dossier.clone(),
+        Resolver::new(std::vec![dns], Duration::from_secs(2)).expect("résolveur"),
+    )
+    // Le port 1 sur la boucle locale : personne n'écoute.
+    .with_relay(remetteur_resolvant(dns, 1));
+
+    spool.observer(Observation {
+        domain: std::string::String::from("example.com"),
+        published: PolitiqueLue {
+            dkim_alignment: Alignment::Relaxed,
+            spf_alignment: Alignment::Relaxed,
+            policy: Policy::None,
+            subdomain_policy: None,
+            percent: 100,
+        },
+        destinations: std::string::String::from("mailto:dmarc@example.com"),
+        source: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+        disposition: Policy::None,
+        dkim: Verdict::Fail,
+        spf: Verdict::Fail,
+        envelope_from: None,
+        signatures: std::vec![],
+        spf_auth: SpfVu {
+            domain: std::string::String::from("example.com"),
+            scope: SpfScope::Helo,
+            result: SpfAuthResult::None,
+        },
+    });
+    spool.vider().await;
+    let remis = spool.envoyer().await;
+    assert_eq!(remis.sent, 0);
+    assert_eq!(remis.deferred, 1);
+
+    let restants = std::fs::read_dir(&dossier)
+        .expect("dossier lisible")
+        .filter_map(Result::ok)
+        .count();
+    assert_eq!(restants, 2, "le rapport et ses destinations restent");
+    let _ = std::fs::remove_dir_all(&dossier);
+}
+
+/// Sans remetteur, on dépose et rien de plus — et c'est le défaut.
+#[tokio::test]
+async fn sans_remetteur_rien_ne_part() {
+    use ams_loop_tokio::ReportSpool;
+
+    let dossier = std::env::temp_dir().join(std::format!(
+        "ams-remise-sans-relais-{}",
+        std::process::id()
+    ));
+    let spool = ReportSpool::new(
+        std::string::String::from("mail.nous.test"),
+        std::string::String::from("dmarc@nous.test"),
+        dossier,
+        Resolver::new(
+            std::vec!["127.0.0.1:1".parse().expect("adresse")],
+            Duration::from_secs(1),
+        )
+        .expect("résolveur"),
+    );
+    assert_eq!(spool.envoyer().await, Default::default());
+}
