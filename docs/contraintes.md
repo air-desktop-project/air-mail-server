@@ -865,7 +865,7 @@ ne s'écrit — ni `STORE`, ni `APPEND`, ni `EXPUNGE` — `SELECT` répond
 modifiabilité qu'elle ne peut pas connaître ferait une promesse que le client ne
 verrait démentie qu'en essayant.
 
-Ce qui n'est toujours pas servi : `RENAME`, `ENVELOPE` et `BODYSTRUCTURE`.
+Ce qui n'est toujours pas servi : `ENVELOPE` et `BODYSTRUCTURE`.
 
 Éprouvé jusqu'au binaire, contre un vrai Maildir rempli par SMTP : `LIST`,
 `SELECT INBOX` et ses sept réponses, `STATUS` sur la boîte sélectionnée,
@@ -1241,6 +1241,38 @@ boîte avec fille dont le nom demeure marqué `\Noselect` — sa fille restant
 ouvrable —, un `SELECT` sur le nom vidé refusé, un `CREATE` qui le rend ouvrable
 de nouveau, `INBOX` refusée, et une boîte effacée puis recréée dans la même
 seconde dont la validité a bien changé.
+
+## `RENAME` : deux règles qu'on manque facilement, depuis le 2026-08-29
+
+§6.3.6 : LES FILLES SUIVENT. Renommer `Vieux` renomme aussi `Vieux/2026` : les
+laisser derrière ferait des boîtes dont le chemin ne mène plus nulle part. On
+rassemble d'abord tout ce qui bouge, on vérifie que RIEN n'est déjà pris, puis on
+renomme — et si l'un échoue, on défait les précédents. Un renommage à moitié
+réussi laisserait la mère sous un nom et ses filles sous l'autre, ce qu'aucun
+client ne saurait démêler.
+
+§6.3.6 : RENOMMER `INBOX` LA VIDE SANS LA FAIRE DISPARAÎTRE. Son courrier s'en va
+vers le nouveau nom ; elle reste. Les messages se déplacent par `rename` dans le
+même système de fichiers : ils ne passent jamais par la mémoire, et n'existent à
+aucun instant en deux exemplaires.
+
+ET SON INDEX RESTE. C'est le détail qui coûte cher si on le manque — et je l'ai
+manqué d'abord : l'index porte le prochain UID à servir, et la validité d'`INBOX`
+NE CHANGE PAS en la renommant. Le retirer ferait repartir les UID de un après un
+redémarrage, sous la même validité, c'est-à-dire réattribuer des numéros déjà
+donnés — ce que §2.3.1.1 interdit. Un index qui compte des messages partis n'est
+pas un problème : le parcours dit ce qui EST, l'index seulement ce qui A ÉTÉ, et
+`reconcile` les confronte dans cet ordre.
+
+Le même essai a montré un second défaut, plus ancien : `UIDNEXT` se calculait sur
+l'INSTANTANÉ — le dernier message plus un — et redescendait donc dès qu'un
+message était effacé. §2.3.1.1 veut qu'il ne recule jamais ; il se demande
+désormais au compteur du Maildir, qui est le seul à le savoir.
+
+Éprouvé jusqu'au binaire : `Vieux` et ses deux filles renommés d'un coup,
+`INBOX` renommée dont les deux messages se retrouvent dans la destination pendant
+qu'elle reste ouvrable et vide, son compteur d'UID intact, et `UIDNEXT` qui ne
+recule pas après un effacement total.
 
 ## Le gate de couverture arrondissait vers le haut, depuis le 2026-08-29
 
@@ -1828,7 +1860,8 @@ et une couture inutilisée finit par être utilisée.
 SMTP en réception (avec `STARTTLS`, `AUTH PLAIN`, SPF, DKIM, DMARC et remise
 Maildir), SMTP à l'émission (rapports DMARC), POP3, et IMAP — `SELECT`,
 `EXAMINE`, `CLOSE`, `UNSELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`, `EXPUNGE`,
-`SEARCH`, `COPY`, `MOVE`, `APPEND`, `CREATE`, `DELETE` et leurs formes `UID`. Chacun a été éprouvé de bout en bout contre le binaire, et pas
+`SEARCH`, `COPY`, `MOVE`, `APPEND`, `CREATE`, `DELETE`, `RENAME` et leurs formes
+`UID`. Chacun a été éprouvé de bout en bout contre le binaire, et pas
 seulement en tests.
 
 **HTTP n'est pas servi** : `ams-proto-http` est un emplacement réservé, et son
@@ -1851,7 +1884,7 @@ persistant, et lecture sans verrou côté IMAP), C14 (`X25519MLKEM768` en tête)
 `<CRLF>.<CRLF>`, refuse tout `CR` ou `LF` isolé, et le fuzz éprouve que le
 découpage des lectures ne change rien au verdict.
 
-Ce qui manque, et qu'aucune phrase ne doit laisser croire acquis : `RENAME`, et
-les critères de `SEARCH` qui lisent le message ; le signeur DKIM,
+Ce qui manque, et qu'aucune phrase ne doit laisser croire acquis : les critères
+de `SEARCH` qui lisent le message, `ENVELOPE` et `BODYSTRUCTURE` ; le signeur DKIM,
 qui existe et n'a pas d'appelant ; la file de réémission des messages sortants ;
 et toute interface HTTP.

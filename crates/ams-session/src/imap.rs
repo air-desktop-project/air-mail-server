@@ -359,6 +359,17 @@ pub trait Mailboxes {
     /// inatteignables.
     fn delete(&self, user: &[u8], name: &[u8]) -> Deletion;
 
+    /// Renomme une boîte (§6.3.6).
+    ///
+    /// **Les filles suivent** : renommer `Archives` en `Vieux` renomme aussi
+    /// `Archives/2026` en `Vieux/2026`. Les laisser derrière ferait des boîtes
+    /// dont le chemin ne mène plus nulle part.
+    ///
+    /// **Renommer `INBOX` la vide, sans la faire disparaître** : ses messages
+    /// s'en vont vers le nouveau nom, et elle reste — c'est le seul endroit où
+    /// le courrier arrive.
+    fn rename(&self, user: &[u8], from: &[u8], to: &[u8]) -> Renaming;
+
     /// Ouvre une boîte, ou dit qu'elle n'existe pas.
     fn open(&self, user: &[u8], name: &[u8]) -> Option<Self::Open>;
 
@@ -396,6 +407,19 @@ pub enum Deletion {
     /// Elle n'existe pas (§6.3.5 : `[NONEXISTENT]`).
     Absente,
     /// Le magasin n'a pas pu.
+    Refusee,
+}
+
+/// Ce qu'un renommage de boîte a donné.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Renaming {
+    /// La boîte est renommée.
+    Faite,
+    /// L'ancienne n'existe pas (§6.3.6 : `[NONEXISTENT]`).
+    Absente,
+    /// La nouvelle existe déjà (§6.3.6 : `[ALREADYEXISTS]`).
+    DejaLa,
+    /// Le magasin n'a pas pu, et n'a rien changé.
     Refusee,
 }
 
@@ -451,6 +475,10 @@ impl<T: Mailboxes> Mailboxes for &T {
 
     fn delete(&self, user: &[u8], name: &[u8]) -> Deletion {
         (**self).delete(user, name)
+    }
+
+    fn rename(&self, user: &[u8], from: &[u8], to: &[u8]) -> Renaming {
+        (**self).rename(user, from, to)
     }
 
     fn open(&self, user: &[u8], name: &[u8]) -> Option<Self::Open> {
@@ -1023,8 +1051,8 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             Command::Status => self.status(lue.arguments, out),
             Command::Create => self.create(lue.arguments, out),
             Command::Delete => self.delete(lue.arguments, out),
+            Command::Rename => self.rename(lue.arguments, out),
             Command::Enable
-            | Command::Rename
             | Command::Subscribe
             | Command::Unsubscribe
             | Command::Namespace
@@ -2616,6 +2644,112 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             ),
             Deletion::Refusee => {
                 self.termine(Status::No, b"Cannot delete mailbox", Action::Continue, out)
+            }
+        }
+    }
+
+    /// `RENAME` (§6.3.6).
+    ///
+    /// # LES FILLES SUIVENT, ET `INBOX` NE PART PAS
+    ///
+    /// Deux règles qu'on manque facilement. Renommer `Archives` renomme aussi
+    /// `Archives/2026` : les laisser derrière ferait des boîtes dont le chemin
+    /// ne mène plus nulle part. Et renommer `INBOX` déplace son courrier sans la
+    /// faire disparaître — c'est le seul endroit où le courrier arrive, et un
+    /// compte qui la perdrait ne recevrait plus rien.
+    fn rename<'b>(&mut self, arguments: &[u8], out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
+        if self.etat == State::NotAuthenticated {
+            return self.faute(b"Command is not allowed before authentication", out);
+        }
+        let mut lus = Args::new(arguments);
+        let mut avant = [0_u8; MAILBOX_NAME_MAX];
+        let mut apres = [0_u8; MAILBOX_NAME_MAX];
+        let (Some(Ok(premier)), Some(Ok(second)), None) = (lus.next(), lus.next(), lus.next())
+        else {
+            return self.faute(b"RENAME expects two mailbox names", out);
+        };
+        let (Ok(avant), Ok(apres)) = (premier.value(&mut avant), second.value(&mut apres)) else {
+            return self.faute(b"RENAME arguments are too long", out);
+        };
+        let avant = ams_proto_imap::mailbox_name_trimmed(avant);
+        let apres = ams_proto_imap::mailbox_name_trimmed(apres);
+        if avant.is_empty() || apres.is_empty() {
+            return self.faute(b"RENAME expects two mailbox names", out);
+        }
+
+        // §6.3.6 : `INBOX` peut être renommée — cela la vide —, mais rien ne
+        // peut être renommé EN `INBOX` : elle existe déjà, de tout temps.
+        if apres.eq_ignore_ascii_case(b"INBOX") {
+            return self.termine(
+                Status::No,
+                b"[ALREADYEXISTS] INBOX always exists",
+                Action::Continue,
+                out,
+            );
+        }
+        if !ams_proto_imap::mailbox_name_is_safe(apres) {
+            return self.termine(
+                Status::No,
+                b"[CANNOT] This mailbox name is not served",
+                Action::Continue,
+                out,
+            );
+        }
+        let source_valide =
+            avant.eq_ignore_ascii_case(b"INBOX") || ams_proto_imap::mailbox_name_is_safe(avant);
+        if !source_valide {
+            return self.termine(
+                Status::No,
+                b"[NONEXISTENT] Mailbox does not exist",
+                Action::Continue,
+                out,
+            );
+        }
+        // UNE BOÎTE NE SE RANGE PAS SOUS ELLE-MÊME. `Archives` vers
+        // `Archives/2026` ferait descendre la mère sous sa propre fille, et le
+        // renommage des filles n'aurait plus de fin qui ait un sens.
+        if apres.len() > avant.len()
+            && apres.starts_with(avant)
+            && apres.get(avant.len()) == Some(&b'/')
+        {
+            return self.termine(
+                Status::No,
+                b"[CANNOT] A mailbox cannot be renamed under itself",
+                Action::Continue,
+                out,
+            );
+        }
+
+        let issue = self.boites.rename(self.user(), avant, apres);
+        // ON NE GARDE PAS OUVERTE UNE BOÎTE QUI A CHANGÉ DE NOM — ni une de ses
+        // filles : la session en tient un instantané et des chemins, et tout
+        // cela désigne désormais autre chose.
+        let ouverte_touchee = self.selected() == avant
+            || (self.selected().len() > avant.len()
+                && self.selected().starts_with(avant)
+                && self.selected().get(avant.len()) == Some(&b'/'));
+        if issue == Renaming::Faite && ouverte_touchee {
+            self.ouverte = None;
+            self.emission = None;
+            self.nom_ouvert_len = 0;
+            self.etat = State::Authenticated;
+        }
+        match issue {
+            Renaming::Faite => self.termine(Status::Ok, b"RENAME completed", Action::Continue, out),
+            Renaming::Absente => self.termine(
+                Status::No,
+                b"[NONEXISTENT] Mailbox does not exist",
+                Action::Continue,
+                out,
+            ),
+            Renaming::DejaLa => self.termine(
+                Status::No,
+                b"[ALREADYEXISTS] Mailbox already exists",
+                Action::Continue,
+                out,
+            ),
+            Renaming::Refusee => {
+                self.termine(Status::No, b"Cannot rename mailbox", Action::Continue, out)
             }
         }
     }

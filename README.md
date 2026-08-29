@@ -31,7 +31,7 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 >
 > **Il ouvre les boîtes** : IMAP sur un troisième port, `STARTTLS` puis `LOGIN`
 > ou `AUTHENTICATE PLAIN`, `SELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`,
-> `EXPUNGE`, `SEARCH`, `COPY`, `MOVE`, `APPEND`, `CREATE` et `DELETE` — un message traverse la socket sans jamais tenir en
+> `EXPUNGE`, `SEARCH`, `COPY`, `MOVE`, `APPEND`, `CREATE`, `DELETE` et `RENAME` — un message traverse la socket sans jamais tenir en
 > mémoire, les drapeaux s'écrivent dans les noms de fichiers Maildir, et un
 > effacement n'a jamais lieu sur une marque périmée.
 >
@@ -470,8 +470,8 @@ découpage existe pour fermer. Un tag illisible, lui, ne ferme rien : la command
 ## Les boîtes IMAP : lire sans jamais tenir un message
 
 `SELECT`, `EXAMINE`, `CLOSE`, `UNSELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`,
-`EXPUNGE`, `SEARCH`, `COPY`, `MOVE`, `APPEND`, `CREATE`, `DELETE` et leurs formes
-`UID` servent les boîtes du compte. Chacun a son `INBOX` — le nom que la RFC 9051 §5.1
+`EXPUNGE`, `SEARCH`, `COPY`, `MOVE`, `APPEND`, `CREATE`, `DELETE`, `RENAME` et
+leurs formes `UID` servent les boîtes du compte. Chacun a son `INBOX` — le nom que la RFC 9051 §5.1
 réserve pour cela — et les dossiers que `CREATE` lui a faits.
 
 **UN NOM DE BOÎTE DEVIENT UN RÉPERTOIRE**, et c'est la frontière la plus
@@ -801,7 +801,33 @@ arrive. Et une boîte qu'on vient d'effacer ne reste pas ouverte : la session en
 tient un instantané qui ne désigne plus rien, et le client se retrouve
 authentifié sans sélection — il doit le savoir.
 
-Ce qui n'y est toujours pas : `RENAME`, `ENVELOPE` et `BODYSTRUCTURE`. Ils sont reconnus, leur
+## `RENAME` : deux règles qu'on manque facilement
+
+**§6.3.6 : les filles suivent.** Renommer `Vieux` en `Anciens` renomme aussi
+`Vieux/2026` : les laisser derrière ferait des boîtes dont le chemin ne mène plus
+nulle part. On rassemble donc d'abord tout ce qui bouge, on vérifie que **rien**
+n'est déjà pris, puis on renomme — et si l'un échoue, on défait les précédents.
+Un renommage à moitié réussi laisserait la mère sous un nom et ses filles sous
+l'autre, ce qu'aucun client ne saurait démêler.
+
+**§6.3.6 : renommer `INBOX` la vide, sans la faire disparaître.** Son courrier
+s'en va vers le nouveau nom ; elle reste, vide. C'est le seul endroit où le
+courrier arrive, et un compte qui la perdrait ne recevrait plus rien. Les
+messages se déplacent par `rename` dans le même système de fichiers : ils ne
+passent jamais par la mémoire, et n'existent à aucun instant en deux exemplaires.
+
+**Et son index reste.** C'est le détail qui coûte cher si on le manque : l'index
+porte le prochain UID à servir, et la validité d'`INBOX` **ne change pas** en la
+renommant. Le retirer ferait repartir les UID de un après un redémarrage, sous la
+même validité — c'est-à-dire réattribuer des numéros déjà donnés, ce que
+§2.3.1.1 interdit. Un index qui compte des messages partis n'est pas un
+problème : le parcours dit ce qui EST, l'index seulement ce qui A ÉTÉ.
+
+Une boîte ne se renomme pas sous elle-même, rien ne se renomme en `INBOX`, et une
+boîte qui vient de changer de nom — ou dont la mère a changé de nom — ne reste pas
+ouverte : la session en tient un instantané qui désigne désormais autre chose.
+
+Ce qui n'y est toujours pas : `ENVELOPE` et `BODYSTRUCTURE`. Ils sont reconnus, leur
 état est vérifié, et la session répond `NO [UNAVAILABLE]` — `NO` et non `BAD`,
 parce que la commande est correcte et permise et que c'est ce serveur qui ne la
 sert pas. `APPEND` demandera un chemin qui écoule au fil de l'eau, comme le

@@ -275,6 +275,42 @@ impl Mailboxes for Boites {
         })
     }
 
+    fn rename(&self, _user: &[u8], from: &[u8], to: &[u8]) -> super::Renaming {
+        if to.starts_with(b"Impossible") {
+            return super::Renaming::Refusee;
+        }
+        let connue = |nom: &[u8]| {
+            matches!(nom, b"Archives" | b"Archives/2026")
+                || self.creees.borrow().iter().any(|connu| connu == nom)
+        };
+        // `INBOX` se renomme : cela la vide, elle ne disparaît pas.
+        if !from.eq_ignore_ascii_case(b"INBOX") && !connue(from) {
+            return super::Renaming::Absente;
+        }
+        if connue(to) {
+            return super::Renaming::DejaLa;
+        }
+        // Les filles suivent.
+        let mut creees = self.creees.borrow_mut();
+        let mut nouvelles = std::vec::Vec::new();
+        for connu in creees.iter() {
+            if connu == from {
+                nouvelles.push(to.to_vec());
+            } else if connu.starts_with(from) && connu.get(from.len()) == Some(&b'/') {
+                let mut neuf = to.to_vec();
+                neuf.extend_from_slice(connu.get(from.len()..).unwrap_or_default());
+                nouvelles.push(neuf);
+            } else {
+                nouvelles.push(connu.clone());
+            }
+        }
+        if from == b"Archives" || from.eq_ignore_ascii_case(b"INBOX") {
+            nouvelles.push(to.to_vec());
+        }
+        *creees = nouvelles;
+        super::Renaming::Faite
+    }
+
     fn delete(&self, _user: &[u8], name: &[u8]) -> super::Deletion {
         if name.starts_with(b"Impossible") {
             return super::Deletion::Refusee;
@@ -306,7 +342,18 @@ impl Mailboxes for Boites {
         if deja {
             return super::Creation::DejaLa;
         }
-        self.creees.borrow_mut().push(name.to_vec());
+        // §6.3.4 : créer `A/B` crée aussi `A`, comme le magasin réel.
+        let mut creees = self.creees.borrow_mut();
+        let mut parcouru = std::vec::Vec::new();
+        for composant in name.split(|octet| *octet == b'/') {
+            if !parcouru.is_empty() {
+                parcouru.push(b'/');
+            }
+            parcouru.extend_from_slice(composant);
+            if !creees.contains(&parcouru) {
+                creees.push(parcouru.clone());
+            }
+        }
         super::Creation::Faite
     }
 
@@ -761,8 +808,7 @@ fn ce_qu_on_ne_sert_pas_encore_le_dit_sans_accuser_le_client() {
     let mut session = nouvelle(true);
     dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
     for commande in [
-        &b"a004 RENAME a b\r\n"[..],
-        b"a005 SUBSCRIBE a\r\n",
+        &b"a005 SUBSCRIBE a\r\n"[..],
         b"a006 UNSUBSCRIBE a\r\n",
         b"a007 NAMESPACE\r\n",
         b"a009 IDLE\r\n",
@@ -1745,6 +1791,10 @@ fn un_magasin_partage_se_passe_par_reference() {
     assert_eq!(
         Mailboxes::delete(&partage, b"jean", b"Inconnue"),
         super::Deletion::Absente
+    );
+    assert_eq!(
+        Mailboxes::rename(&partage, b"jean", b"Inconnue", b"Autre"),
+        super::Renaming::Absente
     );
 }
 
@@ -3194,6 +3244,154 @@ fn un_delete_mal_forme_est_une_faute() {
 fn un_delete_avant_authentification_est_refuse() {
     let mut session = nouvelle(true);
     let (texte, _) = dire(&mut session, b"a001 DELETE Brouillons\r\n");
+    assert!(
+        texte.contains("BAD Command is not allowed before authentication"),
+        "{texte}"
+    );
+}
+
+// ── `RENAME` ────────────────────────────────────────────────────────────────
+
+/// **§6.3.6 : les filles suivent.** Les laisser derrière ferait des boîtes dont
+/// le chemin ne mène plus nulle part.
+#[test]
+fn renommer_une_mere_renomme_ses_filles() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut session, b"a002 CREATE Vieux/2026\r\n");
+    dire(&mut session, b"a003 CREATE Vieux/2025\r\n");
+    let (texte, _) = dire(&mut session, b"a004 RENAME Vieux Anciens\r\n");
+    assert!(texte.contains("a004 OK RENAME completed"), "{texte}");
+    let (liste, _) = dire(&mut session, b"a005 LIST \"\" *\r\n");
+    assert!(liste.contains("\"Anciens/2026\""), "{liste}");
+    assert!(liste.contains("\"Anciens/2025\""), "{liste}");
+    assert!(!liste.contains("Vieux"), "{liste}");
+}
+
+/// **§6.3.6 : `INBOX` se renomme, et ne disparaît pas.** Son courrier s'en va
+/// vers le nouveau nom ; elle reste, vide.
+#[test]
+fn renommer_inbox_la_vide_sans_la_faire_disparaitre() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (texte, _) = dire(&mut session, b"a002 RENAME INBOX Sauvegarde\r\n");
+    assert!(texte.contains("a002 OK RENAME completed"), "{texte}");
+    let (liste, _) = dire(&mut session, b"a003 LIST \"\" *\r\n");
+    assert!(liste.contains("\"INBOX\""), "{liste}");
+    assert!(liste.contains("\"Sauvegarde\""), "{liste}");
+}
+
+/// **Rien ne se renomme EN `INBOX`** : elle existe déjà, de tout temps.
+#[test]
+fn rien_ne_se_renomme_en_inbox() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (texte, _) = dire(&mut session, b"a002 RENAME Archives INBOX\r\n");
+    assert!(
+        texte.contains("NO [ALREADYEXISTS] INBOX always exists"),
+        "{texte}"
+    );
+}
+
+/// **Une boîte ne se range pas sous elle-même.**
+#[test]
+fn une_boite_ne_se_range_pas_sous_elle_meme() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (texte, _) = dire(&mut session, b"a002 RENAME Archives Archives/vieux\r\n");
+    assert!(
+        texte.contains("NO [CANNOT] A mailbox cannot be renamed under itself"),
+        "{texte}"
+    );
+}
+
+#[test]
+fn les_deux_bouts_du_renommage_se_verifient() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    // La source doit exister.
+    let (absente, _) = dire(&mut session, b"a002 RENAME Inconnue Autre\r\n");
+    assert!(absente.contains("NO [NONEXISTENT]"), "{absente}");
+    // Une source qu'on ne saurait pas transcrire n'existe pas non plus.
+    let (fautive, _) = dire(&mut session, b"a003 RENAME \"a.b\" Autre\r\n");
+    assert!(fautive.contains("NO [NONEXISTENT]"), "{fautive}");
+    // La destination ne doit pas exister.
+    let (deja, _) = dire(&mut session, b"a004 RENAME Archives \"Archives/2026\"\r\n");
+    assert!(deja.contains("NO [CANNOT]"), "{deja}");
+    let (prise, _) = dire(&mut session, b"a005 RENAME \"Archives/2026\" Archives\r\n");
+    assert!(prise.contains("NO [ALREADYEXISTS]"), "{prise}");
+    // Et elle doit être transcriptible.
+    let (mauvaise, _) = dire(&mut session, b"a006 RENAME Archives \"../ailleurs\"\r\n");
+    assert!(mauvaise.contains("NO [CANNOT]"), "{mauvaise}");
+}
+
+/// **On ne garde pas ouverte une boîte qui a changé de nom** — ni une de ses
+/// filles.
+#[test]
+fn renommer_la_boite_ouverte_la_referme() {
+    for (ouverte, renommee) in [
+        (
+            &b"a002 SELECT Archives\r\n"[..],
+            &b"a003 RENAME Archives Vieux\r\n"[..],
+        ),
+        (
+            b"a002 SELECT \"Archives/2026\"\r\n",
+            b"a003 RENAME Archives Vieux\r\n",
+        ),
+    ] {
+        let mut session = nouvelle(true);
+        dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+        dire(&mut session, ouverte);
+        assert_eq!(session.state(), State::Selected);
+        let (texte, _) = dire(&mut session, renommee);
+        assert!(texte.contains("OK RENAME completed"), "{texte}");
+        assert_eq!(session.state(), State::Authenticated, "{ouverte:?}");
+        assert!(session.selected().is_empty());
+    }
+}
+
+/// Un magasin qui refuse le dit, et n'a rien changé.
+#[test]
+fn un_magasin_qui_refuse_de_renommer_le_dit() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (texte, _) = dire(&mut session, b"a002 RENAME Archives Impossible3\r\n");
+    assert!(texte.contains("NO Cannot rename mailbox"), "{texte}");
+}
+
+#[test]
+fn un_rename_mal_forme_est_une_faute() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    for commande in [
+        &b"a002 RENAME\r\n"[..],
+        b"a003 RENAME Archives\r\n",
+        b"a004 RENAME a b c\r\n",
+        b"a005 RENAME \"\" b\r\n",
+        b"a006 RENAME a \"\"\r\n",
+    ] {
+        let (texte, _) = dire(&mut session, commande);
+        assert!(
+            texte.contains("BAD RENAME expects two mailbox names"),
+            "{commande:?} : {texte}"
+        );
+    }
+    // Un nom plus long que ce que la session retient.
+    let mut trop = std::vec::Vec::from(&b"a007 RENAME Archives \""[..]);
+    trop.resize(trop.len() + super::MAILBOX_NAME_MAX + 8, b'x');
+    trop.extend_from_slice(b"\"\r\n");
+    let (texte, _) = dire(&mut session, &trop);
+    assert!(
+        texte.contains("BAD RENAME arguments are too long"),
+        "{texte}"
+    );
+}
+
+/// **Un `RENAME` avant authentification n'est pas un `RENAME`.**
+#[test]
+fn un_rename_avant_authentification_est_refuse() {
+    let mut session = nouvelle(true);
+    let (texte, _) = dire(&mut session, b"a001 RENAME a b\r\n");
     assert!(
         texte.contains("BAD Command is not allowed before authentication"),
         "{texte}"

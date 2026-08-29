@@ -45,7 +45,9 @@ use std::sync::Arc;
 
 use ams_index::{MessageName, Uid};
 use ams_proto_imap::{Flags, StoreMode};
-use ams_session::imap::{Creation, Deletion, Deposit, Listing, Mailbox, Mailboxes, MessageInfo};
+use ams_session::imap::{
+    Creation, Deletion, Deposit, Listing, Mailbox, Mailboxes, MessageInfo, Renaming,
+};
 use ams_store::{Incoming, MailboxView, Maildir, fresh_uid_validity};
 
 /// Le seul nom de boîte que ce serveur connaisse (RFC 9051 §5.1).
@@ -90,10 +92,12 @@ impl Mailbox for BoiteImap {
     }
 
     fn uid_next(&self) -> u32 {
-        self.vue
-            .messages()
-            .last()
-            .map_or(1, |dernier| dernier.uid.value().saturating_add(1))
+        // ON DEMANDE À LA BOÎTE, PAS À L'INSTANTANÉ. Le dernier message plus un
+        // serait faux dès qu'un message a été effacé : `UIDNEXT` redescendrait,
+        // et un client qui l'a retenu croirait pouvoir attendre un numéro déjà
+        // servi. §2.3.1.1 veut que le prochain UID ne recule jamais, et c'est
+        // le compteur du Maildir qui le sait.
+        self.maildir.next_uid().value()
     }
 
     fn info(&self, sequence: u32) -> Option<MessageInfo> {
@@ -514,6 +518,54 @@ impl BoitesImap {
         Some(boite)
     }
 
+    /// Oublie les boîtes ouvertes d'un compte à partir d'un nom, filles
+    /// comprises.
+    fn oublier_les_ouverts(&self, user: &[u8], depuis: &[u8]) {
+        let (Ok(compte), Ok(nom)) = (core::str::from_utf8(user), core::str::from_utf8(depuis))
+        else {
+            return;
+        };
+        if let Ok(mut ouverts) = self.dossiers.lock() {
+            ouverts.retain(|(c, boite), _| {
+                c != compte || (boite != nom && !boite.starts_with(&std::format!("{nom}/")))
+            });
+        }
+    }
+
+    /// §6.3.6 : renommer `INBOX` DÉPLACE SON COURRIER et la laisse en place.
+    ///
+    /// Elle n'est pas une boîte comme une autre : c'est le seul endroit où le
+    /// courrier arrive, et un compte qui la perdrait ne recevrait plus rien. On
+    /// crée donc la destination, on y déplace les messages un à un, et l'arrivée
+    /// reste — vide.
+    fn vider_l_arrivee(&self, user: &[u8], to: &[u8], cible: &std::path::Path) -> Renaming {
+        let Some(arrivee) = self.racine(user) else {
+            return Renaming::Absente;
+        };
+        if self.create(user, to) == Creation::Refusee {
+            return Renaming::Refusee;
+        }
+        for sous in ["cur", "new"] {
+            let Ok(entrees) = std::fs::read_dir(arrivee.join(sous)) else {
+                continue;
+            };
+            for entree in entrees.flatten() {
+                // Un déplacement dans le même système de fichiers est un
+                // renommage : le message ne passe jamais par la mémoire, et il
+                // n'existe à aucun instant en deux exemplaires.
+                let _ = std::fs::rename(entree.path(), cible.join(sous).join(entree.file_name()));
+            }
+        }
+        // ON GARDE L'INDEX DE L'ARRIVÉE, et c'est essentiel. Il porte le
+        // prochain UID à servir, et son `UIDVALIDITY` NE CHANGE PAS : la retirer
+        // ferait repartir les UID de un après un redémarrage, sous la même
+        // validité — c'est-à-dire réattribuer des numéros déjà donnés, ce que
+        // §2.3.1.1 interdit. Un index qui compte des messages partis n'est pas
+        // un problème : le parcours dit ce qui EST, l'index seulement ce qui A
+        // ÉTÉ, et `reconcile` les confronte dans cet ordre.
+        Renaming::Faite
+    }
+
     /// Cette boîte est-elle ouvrable ?
     ///
     /// # UN RÉPERTOIRE SANS `cur/` N'EST PAS UNE BOÎTE
@@ -636,6 +688,76 @@ impl Mailboxes for BoitesImap {
             name: out.get(..longueur)?,
             selectable,
         })
+    }
+
+    fn rename(&self, user: &[u8], from: &[u8], to: &[u8]) -> Renaming {
+        let from = ams_proto_imap::mailbox_name_trimmed(from);
+        let to = ams_proto_imap::mailbox_name_trimmed(to);
+        if to.eq_ignore_ascii_case(INBOX) || !ams_proto_imap::mailbox_name_is_safe(to) {
+            return Renaming::Refusee;
+        }
+        let Some(cible) = self.chemin_du_dossier(user, to) else {
+            return Renaming::Refusee;
+        };
+        if cible.exists() {
+            return Renaming::DejaLa;
+        }
+        // La boîte d'arrivée est un cas à part : elle ne se déplace pas.
+        if from.eq_ignore_ascii_case(INBOX) {
+            return self.vider_l_arrivee(user, to, &cible);
+        }
+
+        let Some(source) = self.chemin_du_dossier(user, from) else {
+            return Renaming::Refusee;
+        };
+        if !source.is_dir() {
+            return Renaming::Absente;
+        }
+
+        // §6.3.6 : LES FILLES SUIVENT. On rassemble d'abord tout ce qui bouge,
+        // et l'on vérifie que RIEN n'est déjà pris : renommer à moitié laisserait
+        // des boîtes dont le chemin ne mène plus nulle part.
+        let mut mouvements = std::vec::Vec::new();
+        mouvements.push((source.clone(), cible.clone()));
+        for autre in self.dossiers_de(user) {
+            if autre.len() <= from.len()
+                || !autre.starts_with(from)
+                || autre.get(from.len()) != Some(&b'/')
+            {
+                continue;
+            }
+            let mut neuf = to.to_vec();
+            neuf.extend_from_slice(autre.get(from.len()..).unwrap_or_default());
+            let (Some(vieux), Some(neuf)) = (
+                self.chemin_du_dossier(user, &autre),
+                self.chemin_du_dossier(user, &neuf),
+            ) else {
+                return Renaming::Refusee;
+            };
+            if neuf.exists() {
+                return Renaming::DejaLa;
+            }
+            mouvements.push((vieux, neuf));
+        }
+
+        // Les boîtes concernées cessent d'être ouvertes : un `Maildir` gardé en
+        // cache écrirait son index dans un répertoire qui a changé de nom.
+        self.oublier_les_ouverts(user, from);
+
+        // ON DÉFAIT CE QU'ON A FAIT. Un renommage à moitié réussi laisserait la
+        // mère sous un nom et ses filles sous l'autre, ce qu'aucun client ne
+        // saurait démêler.
+        let mut faits = std::vec::Vec::new();
+        for (vieux, neuf) in &mouvements {
+            if std::fs::rename(vieux, neuf).is_err() {
+                for (vieux, neuf) in faits.iter().rev() {
+                    let _ = std::fs::rename(neuf, vieux);
+                }
+                return Renaming::Refusee;
+            }
+            faits.push((vieux.clone(), neuf.clone()));
+        }
+        Renaming::Faite
     }
 
     fn delete(&self, user: &[u8], name: &[u8]) -> Deletion {

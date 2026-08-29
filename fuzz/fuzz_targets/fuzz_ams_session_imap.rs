@@ -221,6 +221,11 @@ impl Mailboxes for Boites {
         })
     }
 
+    fn rename(&self, _user: &[u8], _from: &[u8], _to: &[u8]) -> ams_session::imap::Renaming {
+        // La boîte d'épreuve ne renomme rien : ce qu'on éprouve est la session.
+        ams_session::imap::Renaming::Absente
+    }
+
     fn delete(&self, _user: &[u8], _name: &[u8]) -> ams_session::imap::Deletion {
         // La boîte d'épreuve n'efface rien : ce qu'on éprouve est la session.
         ams_session::imap::Deletion::Absente

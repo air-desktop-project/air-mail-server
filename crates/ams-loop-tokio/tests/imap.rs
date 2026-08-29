@@ -159,6 +159,14 @@ impl Mailboxes for Boites {
         })
     }
 
+    fn rename(&self, _user: &[u8], from: &[u8], to: &[u8]) -> ams_session::imap::Renaming {
+        match (from, to) {
+            (b"Brouillons", b"Anciens") => ams_session::imap::Renaming::Faite,
+            (b"Brouillons", _) => ams_session::imap::Renaming::DejaLa,
+            _ => ams_session::imap::Renaming::Absente,
+        }
+    }
+
     fn delete(&self, _user: &[u8], name: &[u8]) -> ams_session::imap::Deletion {
         if name == b"Brouillons" {
             ams_session::imap::Deletion::Faite
@@ -954,4 +962,36 @@ async fn un_effacement_traverse_la_socket() {
         .expect("écriture");
     let refus = jusqu_a(&mut lecteur, "a005 ").await;
     assert!(refus.starts_with("a005 NO [CANNOT]"), "{refus}");
+}
+
+/// **`RENAME` traverse la socket**, et ses deux refus se distinguent.
+#[tokio::test]
+async fn un_renommage_traverse_la_socket() {
+    let Some(materiel) = materiel("imap-rename") else {
+        return;
+    };
+    let mut lecteur = authentifiee(&materiel).await;
+    lecteur
+        .get_mut()
+        .write_all(b"a003 RENAME Brouillons Anciens\r\n")
+        .await
+        .expect("écriture");
+    let renomme = jusqu_a(&mut lecteur, "a003 ").await;
+    assert_eq!(renomme, "a003 OK RENAME completed\r\n");
+
+    lecteur
+        .get_mut()
+        .write_all(b"a004 RENAME Inconnue Autre\r\n")
+        .await
+        .expect("écriture");
+    let absente = jusqu_a(&mut lecteur, "a004 ").await;
+    assert!(absente.starts_with("a004 NO [NONEXISTENT]"), "{absente}");
+
+    lecteur
+        .get_mut()
+        .write_all(b"a005 RENAME Brouillons INBOX\r\n")
+        .await
+        .expect("écriture");
+    let prise = jusqu_a(&mut lecteur, "a005 ").await;
+    assert!(prise.starts_with("a005 NO [ALREADYEXISTS]"), "{prise}");
 }
