@@ -191,7 +191,7 @@ pub fn write_report_mail<'b>(
 /// **complètes**. Un `CR` ou un `LF` isolé est refusé : c'est le désaccord entre
 /// implémentations sur ce qui termine une ligne qui a rendu la contrebande SMTP
 /// possible, et un message qu'on compose soi-même n'a aucune excuse.
-fn texte_recevable(texte: &[u8]) -> bool {
+pub(crate) fn texte_recevable(texte: &[u8]) -> bool {
     let mut attend_lf = false;
     for octet in texte {
         if attend_lf {
@@ -213,7 +213,7 @@ fn texte_recevable(texte: &[u8]) -> bool {
 }
 
 /// `aiguille` figure-t-elle dans `botte` ?
-fn contient(botte: &[u8], aiguille: &[u8]) -> bool {
+pub(crate) fn contient(botte: &[u8], aiguille: &[u8]) -> bool {
     botte
         .windows(aiguille.len().max(1))
         .any(|fenetre| fenetre == aiguille)

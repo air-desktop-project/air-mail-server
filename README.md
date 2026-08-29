@@ -330,6 +330,32 @@ une décision, et elle se prend une fois, explicitement.
 Chaque rapport est accompagné d'un fichier `.destinations`, et ce fichier est le
 résultat d'un contrôle sans lequel DMARC serait une arme.
 
+## Les rapports d'échec, et pourquoi ils demandent des précautions
+
+`ruf=` est servi (RFC 6591). **Un rapport agrégé est un dénombrement ; un rapport
+d'échec porte le courrier de quelqu'un.** Il dit tout d'un message précis, et il
+part chez le domaine qu'on rapporte — c'est-à-dire, quand cela compte, chez celui
+qui usurpe. Ce qu'on y met, on le lui donne.
+
+**On ne recopie pas le corps** : la pièce jointe est un `text/rfc822-headers`, pas
+un `message/rfc822`. Le corps est ce qu'une personne a écrit ; il n'apprend rien
+sur une authentification.
+
+**On ne recopie même pas tous les en-têtes.** `EXPOSES` est une liste BLANCHE :
+ce qui reste sert à comprendre un échec — ce que le message prétendait être, les
+traces de ce qu'on a vérifié — ce qui tombe parle de tiers (`To`, `Cc`) ou de nos
+machines (chaque `Received` décrit un chemin interne). Une liste noire aurait été
+plus douce et se serait trompée : le jour où un en-tête nouveau porte une donnée
+personnelle, une liste noire le laisse passer. Le `Original-Rcpt-To` de la
+RFC 6591 n'est pas écrit non plus.
+
+**Sans plafond, une usurpation en masse deviendrait un déluge** : un rapport part
+par message, et cent mille usurpations feraient cent mille messages vers un
+domaine qui n'a rien demandé. Cent par période et par domaine.
+
+`fo=` dit quand un rapport est dû, et son défaut est le plus étroit. Le défaut de
+ce serveur, lui, n'en compose aucun : `--dmarc-failure-reports` le demande.
+
 **SANS LA VÉRIFICATION DE §7.1, DMARC EST UN AMPLIFICATEUR.** N'importe qui peut
 publier `rua=mailto:victime@banque.test` sous un domaine qu'il détient, puis
 émettre en masse en son nom : tous les receveurs du monde composeraient alors un

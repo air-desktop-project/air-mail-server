@@ -14,6 +14,8 @@
 //! - [`uri`] lit `rua=` et `ruf=` : *où* envoyer, et jusqu'à quelle taille.
 //! - [`external`] répond à *a-t-on le droit* — sans quoi DMARC est une arme.
 //! - [`aggregate`] compose le XML : *ce qu'on dit*.
+//! - [`failure`] compose un rapport d'échec : *ce qu'on dit d'UN message* — et
+//!   c'est celui-là qui porte le courrier de quelqu'un.
 //! - [`naming`] écrit le nom du fichier et le sujet : *comment il se range*.
 //!
 //! Aucune ne fait d'entrée-sortie (C1). Composer un rapport et l'envoyer sont
@@ -21,5 +23,6 @@
 
 pub mod aggregate;
 pub mod external;
+pub mod failure;
 pub mod naming;
 pub mod uri;

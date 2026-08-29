@@ -56,10 +56,16 @@ use ams_dmarc::report::aggregate::{
 use ams_dmarc::report::external::{
     VERIFICATION_NAME_MAX, authorizes, needs_verification, verification_name,
 };
+use ams_dmarc::report::failure::{
+    AuthFailure, DeliveryResult, FeedbackReport, feedback_report_max, write_feedback_report,
+};
 use ams_dmarc::report::naming::{FILENAME_MAX, SUBJECT_MAX, filename, subject};
 use ams_dmarc::report::uri::{Uris, decode};
 use ams_dmarc::{Alignment, Policy, Verdict};
-use ams_mime::{ReportMail, report_mail_max, write_report_mail};
+use ams_mime::{
+    DATE_MAX, FailureMail, Limits as MimeLimits, ReportMail, failure_mail_max, report_mail_max,
+    write_date, write_failure_mail, write_report_mail,
+};
 
 use crate::relay::{Outgoing, Relay, RelayOutcome};
 use crate::resolver::{Resolver, Txt};
@@ -148,6 +154,38 @@ pub struct SpoolTally {
     pub errors: u64,
 }
 
+/// Un message dont l'authentification a échoué, tel qu'un rapport le décrira.
+///
+/// **Celui-ci parle d'UN message, pas d'un compte.** C'est ce qui le rend
+/// délicat : voir `ams_mime::EXPOSES`, qui décide de ce qui sort d'ici.
+#[derive(Debug, Clone)]
+pub struct FailureObservation {
+    /// Le domaine du `From:`, qui publie la politique.
+    pub domain: String,
+    /// Sa liste `ruf=`, telle quelle.
+    pub destinations: String,
+    /// D'où le message est venu.
+    pub source: IpAddr,
+    /// Quand il est arrivé, en secondes depuis l'époque.
+    pub arrival: u64,
+    /// Le domaine de l'enveloppe.
+    pub envelope_from: Option<String>,
+    /// Le domaine d'une signature examinée.
+    pub dkim_domain: Option<String>,
+    /// Son sélecteur.
+    pub dkim_selector: Option<String>,
+    /// Le domaine que SPF a examiné.
+    pub spf_domain: Option<String>,
+    /// Le message a-t-il été refusé ?
+    pub rejected: bool,
+    /// DKIM s'alignait-il ?
+    pub aligned_dkim: bool,
+    /// SPF s'alignait-il ?
+    pub aligned_spf: bool,
+    /// Le bloc d'en-tête du message, **tel qu'il est arrivé**.
+    pub headers: Vec<u8>,
+}
+
 /// Ce qu'une tournée de remise a produit.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SendTally {
@@ -177,11 +215,19 @@ pub struct ReportSpool {
     resolveur: Resolver,
     /// De quoi remettre les rapports, si ce serveur les envoie.
     relay: Option<Relay>,
+    /// Compose-t-on des rapports d'ÉCHEC ?
+    ///
+    /// **Ils portent le courrier de quelqu'un** — voir `ams_mime::EXPOSES` —
+    /// et ce n'est pas une décision qu'on prend à la place de celui qui exploite
+    /// la machine.
+    echecs_actifs: bool,
     journal: Mutex<HashMap<String, Domaine>>,
     /// Le début de la période courante, en secondes depuis l'époque.
     debut: Mutex<u64>,
     /// De quoi distinguer deux rapports d'une même seconde.
     numero: AtomicU64,
+    /// Combien de rapports d'échec ce domaine a déjà valus, sur la période.
+    echecs: Mutex<HashMap<String, u32>>,
 }
 
 /// Ce qu'on a retenu d'un domaine sur la période.
@@ -203,9 +249,11 @@ impl ReportSpool {
             directory,
             resolveur,
             relay: None,
+            echecs_actifs: false,
             journal: Mutex::new(HashMap::new()),
             debut: Mutex::new(maintenant()),
             numero: AtomicU64::new(0),
+            echecs: Mutex::new(HashMap::new()),
         }
     }
 
@@ -218,6 +266,17 @@ impl ReportSpool {
     #[must_use]
     pub fn with_relay(mut self, relay: Relay) -> Self {
         self.relay = Some(relay);
+        self
+    }
+
+    /// Autorise ce journal à composer des rapports d'ÉCHEC.
+    ///
+    /// **Sans cela, aucun n'est composé, et c'est le défaut.** Un rapport
+    /// d'échec parle d'un message précis, arrivé chez quelqu'un ; l'envoyer est
+    /// une décision, pas un réglage.
+    #[must_use]
+    pub fn with_failure_reports(mut self) -> Self {
+        self.echecs_actifs = true;
         self
     }
 
@@ -274,6 +333,11 @@ impl ReportSpool {
             Ok(mut journal) => core::mem::take(&mut *journal),
             Err(_) => return compte,
         };
+        // La période se referme aussi pour les rapports d'échec : leur plafond
+        // repart à zéro.
+        if let Ok(mut echecs) = self.echecs.lock() {
+            echecs.clear();
+        }
         if domaines.is_empty() {
             return compte;
         }
@@ -447,14 +511,21 @@ impl ReportSpool {
             let Some(nom) = chemin.file_name().and_then(|brut| brut.to_str()) else {
                 continue;
             };
-            let Some(parts) = decouper_le_nom(nom) else {
-                // Ce n'est pas un rapport à nous : on n'y touche pas. Un dossier
-                // qu'on partage avec autre chose ne se nettoie pas au jugé.
-                continue;
-            };
-            let nom = String::from(nom);
-            self.remettre(relay, &parts, &chemin, &nom, maintenant, &mut compte)
-                .await;
+            // DEUX FORMES DE FICHIER, UNE SEULE TOURNÉE. Un rapport agrégé se
+            // compose au moment de partir — il faut sa date de départ ; un
+            // rapport d'échec, lui, a été composé au moment des faits, parce
+            // qu'il parle d'un message qu'on n'a plus.
+            if let Some(parts) = decouper_le_nom(nom) {
+                let nom = String::from(nom);
+                self.remettre(relay, &parts, &chemin, &nom, maintenant, &mut compte)
+                    .await;
+            } else if let Some(parts) = decouper_un_echec(nom) {
+                self.remettre_tel_quel(relay, &parts, &chemin, maintenant, &mut compte)
+                    .await;
+            }
+            // Ce qui n'a ni l'une ni l'autre forme n'est pas à nous : on n'y
+            // touche pas. Un dossier qu'on partage avec autre chose ne se
+            // nettoie pas au jugé.
         }
         compte
     }
@@ -518,6 +589,68 @@ impl ReportSpool {
             let _ = tokio::fs::remove_file(chemin).await;
             let _ = tokio::fs::remove_file(&voisin).await;
         }
+    }
+
+    /// Remet un message DÉJÀ COMPOSÉ, tel qu'il est sur le disque.
+    async fn remettre_tel_quel(
+        &self,
+        relay: &Relay,
+        parts: &Nomme,
+        chemin: &std::path::Path,
+        maintenant: u64,
+        compte: &mut SendTally,
+    ) {
+        let voisin = {
+            let mut voisin = chemin.to_path_buf().into_os_string();
+            voisin.push(".destinations");
+            PathBuf::from(voisin)
+        };
+        if maintenant.saturating_sub(parts.fin) > PEREMPTION {
+            let _ = tokio::fs::remove_file(chemin).await;
+            let _ = tokio::fs::remove_file(&voisin).await;
+            compte.expired = compte.expired.saturating_add(1);
+            return;
+        }
+        let (Ok(message), Ok(destinations)) = (
+            tokio::fs::read(chemin).await,
+            tokio::fs::read_to_string(&voisin).await,
+        ) else {
+            compte.deferred = compte.deferred.saturating_add(1);
+            return;
+        };
+        let Some(adresse) = destinations.lines().find(|ligne| !ligne.is_empty()) else {
+            compte.unsendable = compte.unsendable.saturating_add(1);
+            return;
+        };
+        let Some(domaine) = adresse.rsplit_once('@').map(|(_, apres)| apres) else {
+            compte.unsendable = compte.unsendable.saturating_add(1);
+            return;
+        };
+        let destinataires = std::vec![String::from(adresse)];
+        let issue = relay
+            .send(
+                domaine,
+                &Outgoing {
+                    sender: &self.email,
+                    recipients: &destinataires,
+                    body: &message,
+                },
+            )
+            .await;
+        match issue {
+            RelayOutcome::Delivered { .. } => {
+                compte.sent = compte.sent.saturating_add(1);
+            }
+            RelayOutcome::Rejected(_) | RelayOutcome::NullMx => {
+                compte.rejected = compte.rejected.saturating_add(1);
+            }
+            _ => {
+                compte.deferred = compte.deferred.saturating_add(1);
+                return;
+            }
+        }
+        let _ = tokio::fs::remove_file(chemin).await;
+        let _ = tokio::fs::remove_file(&voisin).await;
     }
 
     /// Compose le message et le remet à une adresse.
@@ -609,6 +742,27 @@ struct Nomme {
     debut: u64,
     fin: u64,
     identifiant: String,
+}
+
+/// Découpe `failure!domaine!date!identifiant.eml`.
+fn decouper_un_echec(nom: &str) -> Option<Nomme> {
+    let corps = nom.strip_suffix(".eml")?;
+    let mut parts = corps.split('!');
+    if parts.next()? != "failure" {
+        return None;
+    }
+    let domaine = parts.next()?;
+    let date = parts.next()?.parse().ok()?;
+    let identifiant = parts.next()?;
+    if parts.next().is_some() || domaine.is_empty() || identifiant.is_empty() {
+        return None;
+    }
+    Some(Nomme {
+        domaine: String::from(domaine),
+        debut: date,
+        fin: date,
+        identifiant: String::from(identifiant),
+    })
 }
 
 /// Découpe `receveur!domaine!début!fin!identifiant.xml.gz`.
@@ -743,4 +897,143 @@ fn maintenant() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |ecoule| ecoule.as_secs())
+}
+
+/// Combien de rapports d'échec un même domaine peut valoir, par période.
+///
+/// # SANS CE PLAFOND, UNE USURPATION EN MASSE DEVIENT UN DÉLUGE
+///
+/// Un rapport d'échec part par message. Quelqu'un qui usurpe un domaine cent
+/// mille fois nous ferait donc écrire cent mille messages à ce domaine — qui n'a
+/// rien demandé de tel, et qui en subirait les conséquences à notre place. La
+/// RFC 6591 §5 le dit, et c'est une des raisons pour lesquelles tant de
+/// receveurs n'envoient aucun rapport d'échec.
+///
+/// Cent par période et par domaine : assez pour comprendre un flux mal
+/// configuré, trop peu pour nuire.
+const ECHECS_MAX_PAR_DOMAINE: u32 = 100;
+
+/// Le texte que lira l'humain qui ouvrira un rapport d'échec.
+const TEXTE_ECHEC: &[u8] = b"This is a DMARC authentication failure report (RFC 6591).\r\n\
+    The message headers below have been filtered: recipients and internal\r\n\
+    routing are never included, and no message body is ever sent.\r\n\
+    \r\n\
+    This message was generated automatically; replies are not read.\r\n";
+
+impl ReportSpool {
+    /// Compose et dépose un rapport d'échec.
+    ///
+    /// Ne fait rien si le domaine a déjà atteint son plafond sur la période, ni
+    /// si aucune destination n'a consenti (§7.1).
+    pub async fn echec(&self, observation: &FailureObservation) {
+        if !self.echecs_actifs {
+            return;
+        }
+        if !self.sous_le_plafond(&observation.domain) {
+            return;
+        }
+        let (adresses, _) = self
+            .destinations(&observation.domain, &observation.destinations)
+            .await;
+        if adresses.is_empty() {
+            return;
+        }
+        if tokio::fs::create_dir_all(&self.directory).await.is_err() {
+            return;
+        }
+        // UN MESSAGE PAR DESTINATION, et non un message pour plusieurs. Le
+        // `To:` d'un rapport doit nommer celui qui le reçoit ; en composer un
+        // seul pour deux adresses ferait qu'au moins l'un des deux lirait le nom
+        // de l'autre.
+        for adresse in &adresses {
+            let Some(message) = self.composer_echec(observation, adresse).await else {
+                continue;
+            };
+            let numero = self.numero.fetch_add(1, Ordering::Relaxed);
+            let nom = format!(
+                "failure!{}!{}!{}.{}.eml",
+                observation.domain, observation.arrival, observation.arrival, numero
+            );
+            let chemin = self.directory.join(&nom);
+            if tokio::fs::write(&chemin, &message).await.is_err() {
+                continue;
+            }
+            let mut voisin = chemin.into_os_string();
+            voisin.push(".destinations");
+            let _ = tokio::fs::write(voisin, format!("{adresse}\n")).await;
+        }
+    }
+
+    /// Ce domaine a-t-il encore droit à un rapport d'échec sur cette période ?
+    fn sous_le_plafond(&self, domaine: &str) -> bool {
+        let Ok(mut echecs) = self.echecs.lock() else {
+            // Un verrou empoisonné veut dire qu'un fil a paniqué en le tenant.
+            // On n'envoie rien plutôt que d'envoyer sans compter.
+            return false;
+        };
+        let compte = echecs.entry(String::from(domaine)).or_insert(0);
+        if *compte >= ECHECS_MAX_PAR_DOMAINE {
+            return false;
+        }
+        *compte = compte.saturating_add(1);
+        true
+    }
+
+    /// Compose le message d'un rapport d'échec, prêt à partir.
+    async fn composer_echec(
+        &self,
+        observation: &FailureObservation,
+        destinataire: &str,
+    ) -> Option<Vec<u8>> {
+        let mut date = [0_u8; DATE_MAX];
+        let date = write_date(observation.arrival, &mut date).ok()?;
+        let agent = concat!("air-mail-server/", env!("CARGO_PKG_VERSION"));
+        let rapport = FeedbackReport {
+            user_agent: agent.as_bytes(),
+            arrival_date: date,
+            source_ip: observation.source,
+            reported_domain: observation.domain.as_bytes(),
+            original_mail_from: observation.envelope_from.as_deref().map(str::as_bytes),
+            dkim_domain: observation.dkim_domain.as_deref().map(str::as_bytes),
+            dkim_selector: observation.dkim_selector.as_deref().map(str::as_bytes),
+            spf_dns: observation.spf_domain.as_deref().map(str::as_bytes),
+            auth_failure: AuthFailure::Dmarc,
+            delivery_result: if observation.rejected {
+                DeliveryResult::Rejected
+            } else {
+                DeliveryResult::Delivered
+            },
+            aligned_dkim: observation.aligned_dkim,
+            aligned_spf: observation.aligned_spf,
+        };
+        let mut champs = std::vec![0_u8; feedback_report_max(&rapport)];
+        let ecrits = write_feedback_report(&mut champs, &rapport).ok()?.len();
+        champs.truncate(ecrits);
+
+        let sujet = format!("DMARC failure report for {}", observation.domain);
+        let identifiant = format!(
+            "{}.{}@{}",
+            observation.arrival,
+            self.numero.load(Ordering::Relaxed),
+            self.org_name
+        );
+        let delimiteur = format!("----ams-{}", self.jeton().await);
+        let courrier = FailureMail {
+            from: self.email.as_bytes(),
+            to: destinataire.as_bytes(),
+            subject: sujet.as_bytes(),
+            message_id: identifiant.as_bytes(),
+            date: observation.arrival,
+            boundary: delimiteur.as_bytes(),
+            text: TEXTE_ECHEC,
+            feedback: &champs,
+            reported_headers: &observation.headers,
+        };
+        let mut message = std::vec![0_u8; failure_mail_max(&courrier)];
+        let ecrit = write_failure_mail(&mut message, &courrier, &MimeLimits::DEFAULT)
+            .ok()?
+            .len();
+        message.truncate(ecrit);
+        Some(message)
+    }
 }

@@ -1,8 +1,9 @@
 //! Ce qu'un enregistrement DMARC doit tenir.
 
-use super::{POLICY_NAME_MAX, Policy, Record, policy_name};
+use super::{FailureOptions, POLICY_NAME_MAX, Policy, Record, ReportFormat, policy_name};
 use crate::Error;
 use crate::alignment::Alignment;
+use crate::evaluate::Verdict;
 
 fn lire(txt: &[u8]) -> Result<Record<'_>, Error> {
     Record::parse(txt)
@@ -242,4 +243,143 @@ fn les_types_se_deboguent_et_se_comparent() {
     assert!(!std::format!("{lu:?}").is_empty());
     assert!(!std::format!("{:?}", Policy::Reject).is_empty());
     assert_ne!(Policy::None, Policy::Reject);
+}
+
+// ── `fo=` ET `rf=` : QUAND UN RAPPORT D'ÉCHEC EST DEMANDÉ ───────────────────
+
+/// **Le défaut est le plus étroit** : sans `fo=`, un domaine ne reçoit un
+/// rapport que si RIEN n'a réussi.
+#[test]
+fn sans_fo_le_defaut_est_le_plus_etroit() {
+    let lu = Record::parse(b"v=DMARC1; p=none").expect("lisible");
+    assert_eq!(lu.failure_options, FailureOptions::default());
+    assert!(lu.failure_options.all_failed);
+    assert!(!lu.failure_options.any_failed);
+    assert_eq!(lu.failure_format, ReportFormat::Afrf);
+}
+
+/// `fo=0` s'écrit aussi, et vaut le défaut.
+#[test]
+fn la_demande_la_plus_etroite_s_ecrit_aussi() {
+    let lu = Record::parse(b"v=DMARC1; p=none; fo=0").expect("lisible");
+    assert_eq!(lu.failure_options, FailureOptions::default());
+}
+
+/// La même étiquette deux fois est une faute, ici comme partout.
+#[test]
+fn une_etiquette_de_rapport_en_double_est_une_faute() {
+    assert_eq!(
+        Record::parse(b"v=DMARC1; p=none; fo=1; fo=d"),
+        Err(Error::DuplicateTag)
+    );
+    assert_eq!(
+        Record::parse(b"v=DMARC1; p=none; rf=afrf; rf=afrf"),
+        Err(Error::DuplicateTag)
+    );
+}
+
+#[test]
+fn les_quatre_demandes_se_cumulent() {
+    let lu = Record::parse(b"v=DMARC1; p=none; fo=1:d:s").expect("lisible");
+    assert_eq!(
+        lu.failure_options,
+        FailureOptions {
+            all_failed: false,
+            any_failed: true,
+            dkim_broken: true,
+            spf_broken: true,
+        }
+    );
+    // La casse des lettres ne compte pas.
+    assert_eq!(
+        Record::parse(b"v=DMARC1; p=none; fo=D:S")
+            .expect("lisible")
+            .failure_options,
+        FailureOptions {
+            all_failed: false,
+            any_failed: false,
+            dkim_broken: true,
+            spf_broken: true,
+        }
+    );
+}
+
+/// **On ne se rabat pas sur le défaut** : un domaine qui demande quelque chose
+/// qu'on ne comprend pas ne demande pas « ce qui était prévu par défaut ».
+#[test]
+fn un_fo_qu_on_ne_comprend_pas_ecarte_l_enregistrement() {
+    for texte in [
+        &b"v=DMARC1; p=none; fo=2"[..],
+        b"v=DMARC1; p=none; fo=x",
+        b"v=DMARC1; p=none; fo=",
+        b"v=DMARC1; p=none; fo=1:z",
+    ] {
+        assert_eq!(
+            Record::parse(texte),
+            Err(Error::UnknownFailureOption),
+            "{texte:?}"
+        );
+    }
+}
+
+#[test]
+fn une_forme_de_rapport_inconnue_ecarte_l_enregistrement() {
+    assert_eq!(
+        Record::parse(b"v=DMARC1; p=none; rf=iodef"),
+        Err(Error::UnknownReportFormat)
+    );
+    assert_eq!(
+        Record::parse(b"v=DMARC1; p=none; rf=AFRF")
+            .expect("lisible")
+            .failure_format,
+        ReportFormat::Afrf
+    );
+}
+
+/// Ce que chaque demande vise, mécanisme par mécanisme.
+#[test]
+fn chaque_demande_vise_ce_qu_elle_annonce() {
+    let zero = FailureOptions::default();
+    // `0` : seulement quand RIEN ne s'aligne.
+    assert!(zero.wants(Verdict::Fail, Verdict::Fail, false, false));
+    assert!(!zero.wants(Verdict::Pass, Verdict::Fail, false, false));
+    assert!(!zero.wants(Verdict::Fail, Verdict::Pass, false, false));
+
+    let un = FailureOptions {
+        all_failed: false,
+        any_failed: true,
+        dkim_broken: false,
+        spf_broken: false,
+    };
+    // `1` : dès que l'un des deux ne s'aligne pas.
+    assert!(un.wants(Verdict::Pass, Verdict::Fail, false, false));
+    assert!(un.wants(Verdict::Fail, Verdict::Pass, false, false));
+    assert!(!un.wants(Verdict::Pass, Verdict::Pass, false, false));
+
+    // `d` et `s` regardent le mécanisme LUI-MÊME, alignement mis à part : une
+    // signature fausse sur un message par ailleurs aligné se rapporte quand
+    // même, et c'est tout l'intérêt de ces deux-là.
+    let d = FailureOptions {
+        all_failed: false,
+        any_failed: false,
+        dkim_broken: true,
+        spf_broken: false,
+    };
+    assert!(d.wants(Verdict::Pass, Verdict::Pass, true, false));
+    assert!(!d.wants(Verdict::Pass, Verdict::Pass, false, true));
+    let s = FailureOptions {
+        all_failed: false,
+        any_failed: false,
+        dkim_broken: false,
+        spf_broken: true,
+    };
+    assert!(s.wants(Verdict::Pass, Verdict::Pass, false, true));
+    assert!(!s.wants(Verdict::Pass, Verdict::Pass, true, false));
+}
+
+#[test]
+fn ce_qui_se_demande_se_montre() {
+    assert!(!std::format!("{:?}", FailureOptions::default()).is_empty());
+    assert!(!std::format!("{:?}", ReportFormat::Afrf).is_empty());
+    assert_eq!(ReportFormat::Afrf, ReportFormat::default());
 }

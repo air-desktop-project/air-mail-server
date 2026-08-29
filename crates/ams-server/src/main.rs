@@ -378,6 +378,11 @@ async fn servir(fichier: &Path) -> Result<(), String> {
             // LE REMETTEUR N'EST LÀ QUE SI ON L'A DEMANDÉ. Émettre du courrier
             // vers des tiers ne se décide pas à la place de celui qui exploite
             // la machine.
+            let spool = if options.dmarc.rapporte_les_echecs() {
+                spool.with_failure_reports()
+            } else {
+                spool
+            };
             let spool = if options.dmarc.envoie() {
                 spool.with_relay(Relay::new(
                     checker.resolver().clone(),
@@ -407,6 +412,13 @@ async fn servir(fichier: &Path) -> Result<(), String> {
             ),
             None => String::from(
                 "rapports DMARC non composés — aucun dossier nommé (`air-mail-admin                  --dmarc-report-dir …`)"
+            ),
+            Some(_) if options.dmarc.envoie() && options.dmarc.rapporte_les_echecs() => format!(
+                "rapports DMARC composés dans `{}` toutes les {} s, agrégés ET D'ÉCHEC, puis \
+                 remis aux destinations qui ont consenti (§7.1). Un rapport d'échec porte des \
+                 en-têtes filtrés, jamais de corps ni de destinataire.",
+                options.dmarc.report_directory,
+                intervalle_rapports.as_secs()
             ),
             Some(_) if options.dmarc.envoie() => format!(
                 "rapports DMARC composés dans `{}` toutes les {} s, PUIS REMIS aux destinations \

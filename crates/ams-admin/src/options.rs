@@ -66,6 +66,8 @@ pub struct Options {
     pub dmarc_report_interval: u32,
     /// Remet-on les rapports, ou se contente-t-on de les déposer ?
     pub dmarc_send: bool,
+    /// Compose-t-on des rapports d'échec ?
+    pub dmarc_failures: bool,
 }
 
 impl Default for Options {
@@ -119,6 +121,8 @@ impl Default for Options {
             // CELUI QUI EXPLOITE LA MACHINE. On dépose ; il relève, ou il
             // demande qu'on remette.
             dmarc_send: false,
+            // ILS PORTENT LE COURRIER DE QUELQU'UN. Le défaut n'en compose pas.
+            dmarc_failures: false,
         }
     }
 }
@@ -175,6 +179,7 @@ impl Options {
                 report_email: self.dmarc_report_email.clone().unwrap_or_default(),
                 report_interval_seconds: self.dmarc_report_interval,
                 send_reports: self.dmarc_send,
+                failure_reports: self.dmarc_failures,
             },
             accounts: chemin(self.accounts.as_ref()),
             listen_pop3: self
@@ -299,6 +304,15 @@ OPTIONS DE `config write`
     effacé, un rapport refusé définitivement aussi, et un rapport de plus de sept
     jours est abandonné.
 
+    `--dmarc-failure-reports` compose en plus des rapports d'ÉCHEC (`ruf=`,
+    RFC 6591). ILS PORTENT LE COURRIER DE QUELQU'UN : un rapport agrégé est un
+    dénombrement, celui-ci dit tout d'un message précis, et il part chez le
+    domaine qu'on rapporte — c'est-à-dire, quand ça compte, chez celui qui
+    usurpe. Ce serveur n'y met ni le corps, ni le destinataire, ni les en-têtes
+    de routage : seule une liste blanche d'en-têtes en sort, et un même domaine
+    n'en vaut que cent par période. Cela ne rend pas la décision anodine, et
+    c'est pourquoi ce n'est pas le défaut.
+
     `--dmarc-org-name` est le nom sous lequel ce receveur se présente (défaut :
     le nom annoncé), `--dmarc-report-email` l'adresse où le joindre (défaut :
     `postmaster@` suivi du nom annoncé), `--dmarc-report-interval` le nombre de
@@ -374,6 +388,7 @@ where
                 options.dmarc_report_dir = Some(PathBuf::from(valeur()?));
             }
             "--dmarc-send" => options.dmarc_send = true,
+            "--dmarc-failure-reports" => options.dmarc_failures = true,
             "--dmarc-org-name" => options.dmarc_org_name = Some(valeur()?),
             "--dmarc-report-email" => options.dmarc_report_email = Some(valeur()?),
             "--dmarc-report-interval" => {

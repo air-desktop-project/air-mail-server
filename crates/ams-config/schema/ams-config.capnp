@@ -186,6 +186,18 @@ struct Dmarc {
   # remet, aux destinations qui ont consenti (§7.1) et à elles seules.
   sendReports @6 :Bool;
 
+  # Compose-t-on des rapports d'ÉCHEC (`ruf=`, RFC 6591) ?
+  #
+  # ILS PORTENT LE COURRIER DE QUELQU'UN. Un rapport agrégé est un
+  # dénombrement ; celui-ci dit tout d'un message précis, et il part chez le
+  # domaine qu'on rapporte — c'est-à-dire, quand ça compte, chez celui qui
+  # usurpe. Ce qu'on y met, on le lui donne.
+  #
+  # Ce serveur n'y met ni le corps, ni le destinataire, ni les en-têtes de
+  # routage : seule une liste blanche d'en-têtes sort. Cela ne rend pas la
+  # décision anodine, et c'est pourquoi le défaut est FAUX.
+  failureReports @7 :Bool;
+
   enum Enforcement {
     # On évalue, on retient, on n'oppose rien. L'état où l'on découvre ce qu'une
     # politique refuserait AVANT de la laisser refuser — et il faut y rester

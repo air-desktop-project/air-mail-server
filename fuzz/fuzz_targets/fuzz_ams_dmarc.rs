@@ -24,6 +24,9 @@
 //!    n'aligne rien.
 //! 6. **Le pourcentage tient dans ses bornes** : de zéro à cent, jamais
 //!    au-delà.
+//! 7. **UN MESSAGE PARFAITEMENT ALIGNÉ NE VAUT JAMAIS UN RAPPORT D'ÉCHEC**,
+//!    quelle que soit la valeur de `fo=`. Un domaine qui recevrait un rapport
+//!    pour un message que rien n'accuse cesserait de les lire.
 
 #![no_main]
 
@@ -122,6 +125,13 @@ fuzz_target!(|entree: Entree| {
     );
     // ── 6 : le pourcentage ──────────────────────────────────────────────────
     assert!(enregistrement.percent <= 100, "un pourcentage hors bornes");
+    // PROPRIÉTÉ 7 : rien à rapporter quand tout s'aligne et que rien n'a cassé.
+    assert!(
+        !enregistrement
+            .failure_options
+            .wants(Verdict::Pass, Verdict::Pass, false, false),
+        "un message parfaitement aligné vaudrait un rapport d'échec"
+    );
 
     // ── 5 : le verdict ──────────────────────────────────────────────────────
     let authentification = Authentication {

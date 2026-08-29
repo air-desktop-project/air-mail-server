@@ -76,6 +76,7 @@ mod base64;
 mod compose;
 mod date;
 mod error;
+mod failure;
 mod limits;
 mod message;
 
@@ -84,5 +85,8 @@ pub use base64::{BASE64_LINE, base64_max, encode_base64};
 pub use compose::{ReportMail, report_mail_max, write_report_mail};
 pub use date::{DATE_MAX, write_date};
 pub use error::Error;
+pub use failure::{
+    EXPOSES, FailureMail, failure_mail_max, write_failure_mail, write_reported_headers,
+};
 pub use limits::Limits;
 pub use message::{Field, Fields, Message, Unfolded};

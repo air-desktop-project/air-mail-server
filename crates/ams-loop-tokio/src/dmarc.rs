@@ -24,8 +24,8 @@ use std::string::String;
 use std::vec::Vec;
 
 use ams_dmarc::{
-    Assessment, Authentication, POLICY_NAME_MAX, Policy, PublicSuffix, Record, Suffixes, Verdict,
-    evaluate, policy_name,
+    Assessment, Authentication, FailureOptions, POLICY_NAME_MAX, Policy, PublicSuffix, Record,
+    Suffixes, Verdict, evaluate, policy_name,
 };
 use ams_mime::{Limits as MimeLimits, Message, author_domain};
 
@@ -79,6 +79,10 @@ pub struct PourRapport {
     pub published: PolitiqueLue,
     /// La liste `rua=`, telle quelle. Vide s'il n'y en avait pas.
     pub destinations: String,
+    /// La liste `ruf=`, telle quelle. Vide s'il n'y en avait pas.
+    pub failure_destinations: String,
+    /// `fo=` — quand ce domaine veut un rapport d'échec.
+    pub failure_options: FailureOptions,
     /// DKIM s'alignait-il ?
     pub dkim: Verdict,
     /// SPF s'alignait-il ?
@@ -200,6 +204,11 @@ impl DmarcChecker {
                 .aggregate_reports
                 .map(|brut| String::from_utf8_lossy(brut).into_owned())
                 .unwrap_or_default(),
+            failure_destinations: enregistrement
+                .failure_reports
+                .map(|brut| String::from_utf8_lossy(brut).into_owned())
+                .unwrap_or_default(),
+            failure_options: enregistrement.failure_options,
             dkim: juge.dkim,
             spf: juge.spf,
         });

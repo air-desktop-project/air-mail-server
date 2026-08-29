@@ -548,3 +548,163 @@ async fn sans_remetteur_rien_ne_part() {
     );
     assert_eq!(spool.envoyer().await, Default::default());
 }
+
+// ── LE RAPPORT D'ÉCHEC : CE QU'IL DIT, ET CE QU'IL TAIT ─────────────────────
+
+/// Le bloc d'en-tête d'un message rapporté, avec de tout dedans.
+const ENTETES_RAPPORTES: &[u8] = b"Received: from mechant.test (mechant.test [192.0.2.1])\r\n\
+                                   \tby mail.nous.test with ESMTP id 42\r\n\
+                                   From: Service <securite@example.com>\r\n\
+                                   To: Marie Dupont <marie@nous.test>\r\n\
+                                   Subject: Votre compte\r\n\
+                                   Date: Sat, 29 Aug 2026 07:08:31 +0000\r\n\
+                                   X-Interne: dossier 12345\r\n\
+                                   \r\n";
+
+fn observation_d_echec() -> ams_loop_tokio::FailureObservation {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    ams_loop_tokio::FailureObservation {
+        domain: std::string::String::from("example.com"),
+        destinations: std::string::String::from("mailto:echecs@example.com"),
+        source: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+        arrival: 1_787_987_311,
+        envelope_from: Some(std::string::String::from("expediteur@ailleurs.test")),
+        dkim_domain: Some(std::string::String::from("signataire.test")),
+        dkim_selector: Some(std::string::String::from("sel")),
+        spf_domain: Some(std::string::String::from("ailleurs.test")),
+        rejected: true,
+        aligned_dkim: false,
+        aligned_spf: false,
+        headers: ENTETES_RAPPORTES.to_vec(),
+    }
+}
+
+/// Ouvre un journal branché sur le serveur d'épreuve.
+async fn journal_d_echec(
+    nom: &str,
+    port: u16,
+    dns: std::net::SocketAddr,
+    actif: bool,
+) -> (ams_loop_tokio::ReportSpool, std::path::PathBuf) {
+    use ams_loop_tokio::ReportSpool;
+
+    let dossier = std::env::temp_dir().join(std::format!("ams-echec-{nom}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dossier);
+    let spool = ReportSpool::new(
+        std::string::String::from("mail.nous.test"),
+        std::string::String::from("dmarc@nous.test"),
+        dossier.clone(),
+        Resolver::new(std::vec![dns], Duration::from_secs(2)).expect("résolveur"),
+    )
+    .with_relay(remetteur_resolvant(dns, port));
+    let spool = if actif {
+        spool.with_failure_reports()
+    } else {
+        spool
+    };
+    (spool, dossier)
+}
+
+/// **Ce qui sort d'ici est une liste blanche.** Le destinataire du message, les
+/// en-têtes de routage et le corps ne sortent jamais.
+#[tokio::test]
+async fn un_rapport_d_echec_ne_livre_ni_le_corps_ni_le_destinataire() {
+    const TABLE: &[(&str, Enregistrement)] = &[("example.com", Enregistrement::A([127, 0, 0, 1]))];
+    let dns = resolveur_courrier(TABLE).await;
+    let (adresse, cahier) = serveur(None).await;
+    let (spool, dossier) = journal_d_echec("livre", adresse.port(), dns, true).await;
+
+    spool.echec(&observation_d_echec()).await;
+    let remis = spool.envoyer().await;
+    assert_eq!(
+        remis.sent, 1,
+        "le rapport d'échec devait partir : {remis:?}"
+    );
+
+    let recu = cahier.0.lock().expect("verrou").clone();
+    let texte = std::string::String::from_utf8_lossy(&recu).into_owned();
+    for garde in [
+        "Content-Type: multipart/report; report-type=feedback-report;",
+        "Content-Type: message/feedback-report\r\n",
+        "Content-Type: text/rfc822-headers\r\n",
+        "Feedback-Type: auth-failure\r\n",
+        "Reported-Domain: example.com\r\n",
+        "Source-IP: 192.0.2.1\r\n",
+        "Delivery-Result: reject\r\n",
+        "Identity-Alignment: none\r\n",
+        "DKIM-Domain: signataire.test\r\n",
+        "SPF-DNS: ailleurs.test\r\n",
+        // Ce qui reste du message : son auteur prétendu, et son sujet.
+        "From: Service <securite@example.com>\r\n",
+        "Subject: Votre compte\r\n",
+    ] {
+        assert!(texte.contains(garde), "{garde:?} manque dans :\n{texte}");
+    }
+    for interdit in [
+        "marie@nous.test",
+        "Marie Dupont",
+        "Received: from mechant.test",
+        "X-Interne",
+        "12345",
+        "Original-Rcpt-To",
+    ] {
+        assert!(!texte.contains(interdit), "{interdit:?} a fuité :\n{texte}");
+    }
+    let _ = std::fs::remove_dir_all(&dossier);
+}
+
+/// **Sans qu'on l'ait demandé, aucun rapport d'échec n'est composé.**
+#[tokio::test]
+async fn sans_la_demande_aucun_rapport_d_echec_n_est_compose() {
+    const TABLE: &[(&str, Enregistrement)] = &[("example.com", Enregistrement::A([127, 0, 0, 1]))];
+    let dns = resolveur_courrier(TABLE).await;
+    let (spool, dossier) = journal_d_echec("muet", 1, dns, false).await;
+    spool.echec(&observation_d_echec()).await;
+    assert!(
+        !dossier.exists(),
+        "un dossier a été créé pour un rapport qu'on n'a pas demandé"
+    );
+}
+
+/// **Sans ce plafond, une usurpation en masse devient un déluge** : un rapport
+/// par message ferait écrire cent mille fois à un domaine qui n'a rien demandé
+/// de tel.
+#[tokio::test]
+async fn un_meme_domaine_ne_vaut_qu_un_nombre_borne_de_rapports() {
+    const TABLE: &[(&str, Enregistrement)] = &[("example.com", Enregistrement::A([127, 0, 0, 1]))];
+    let dns = resolveur_courrier(TABLE).await;
+    let (spool, dossier) = journal_d_echec("plafond", 1, dns, true).await;
+
+    for _ in 0..120 {
+        spool.echec(&observation_d_echec()).await;
+    }
+    let composes = std::fs::read_dir(&dossier)
+        .expect("dossier lisible")
+        .filter_map(Result::ok)
+        .filter(|entree| {
+            entree
+                .file_name()
+                .to_str()
+                .is_some_and(|nom| nom.ends_with(".eml"))
+        })
+        .count();
+    assert_eq!(composes, 100, "le plafond n'a pas tenu");
+    let _ = std::fs::remove_dir_all(&dossier);
+}
+
+/// Une destination externe qui n'a pas consenti n'obtient rien — ici comme pour
+/// les rapports agrégés, et pour la même raison.
+#[tokio::test]
+async fn un_rapport_d_echec_ne_part_pas_vers_qui_n_a_pas_consenti() {
+    const TABLE: &[(&str, Enregistrement)] = &[];
+    let dns = resolveur_courrier(TABLE).await;
+    let (spool, dossier) = journal_d_echec("consentement", 1, dns, true).await;
+    spool
+        .echec(&ams_loop_tokio::FailureObservation {
+            destinations: std::string::String::from("mailto:victime@banque.test"),
+            ..observation_d_echec()
+        })
+        .await;
+    assert!(!dossier.exists(), "un rapport est parti sans consentement");
+}

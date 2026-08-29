@@ -17,9 +17,10 @@ use tokio_rustls::TlsAcceptor;
 
 use crate::dkim::{DkimChecker, DkimStream, DkimVerdict};
 use crate::dmarc::{Authenticated, DmarcChecker, DmarcResult, DmarcVerdict};
-use crate::reports::{Observation, ReportSpool, SignatureVue, SpfVu};
+use crate::reports::{FailureObservation, Observation, ReportSpool, SignatureVue, SpfVu};
 use crate::{Delivery, DeliveryFailure, Error, SenderChecker, SharedGuard};
 use ams_dmarc::Policy as DmarcPolicy;
+use ams_dmarc::Verdict as DmarcVerdict2;
 use ams_dmarc::report::aggregate::{DkimAuthResult, SpfAuthResult, SpfScope};
 use std::string::String;
 
@@ -543,6 +544,16 @@ where
     }
 }
 
+/// Le nombre de secondes depuis l'époque.
+///
+/// Une horloge d'avant 1970 rendrait zéro : une date à l'époque se remarque, là
+/// où une soustraction qui déborde ne se remarquerait pas.
+fn maintenant() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |ecoule| ecoule.as_secs())
+}
+
 /// Ce qu'une signature DKIM devient dans un rapport (§7.2, `DKIMResultType`).
 fn resultat_dkim(verdict: DkimVerdict) -> DkimAuthResult {
     match verdict {
@@ -793,6 +804,51 @@ where
             if let Some(spool) = service.reports.as_ref()
                 && let Some(pour) = resultat.report.as_ref()
             {
+                // ── LE RAPPORT D'ÉCHEC, S'IL EST DEMANDÉ ────────────────
+                //
+                // Il part AVANT le compte agrégé : il a besoin des signatures
+                // et du bloc d'en-tête, que la ligne suivante consomme. Et il
+                // ne part que si `fo=` le demande — le défaut du défaut étant
+                // « seulement quand rien n'a réussi ».
+                let vu_pour_le_compte = spf_vu(session);
+                let signature_fautive = vues
+                    .iter()
+                    .find(|vue| vue.result == DkimAuthResult::Fail)
+                    .or_else(|| vues.first());
+                let spf_casse = matches!(
+                    session.sender_verdict(),
+                    Some(verdict) if verdict != SpfVerdict::Pass
+                );
+                if !pour.failure_destinations.is_empty()
+                    && pour.failure_options.wants(
+                        pour.dkim,
+                        pour.spf,
+                        signature_fautive.is_some_and(|vue| vue.result == DkimAuthResult::Fail),
+                        spf_casse,
+                    )
+                {
+                    let vu = &vu_pour_le_compte;
+                    spool
+                        .echec(&FailureObservation {
+                            domain: resultat.domain.clone(),
+                            destinations: pour.failure_destinations.clone(),
+                            source: adresse_du_pair(source),
+                            arrival: maintenant(),
+                            envelope_from: session.sender_identity().map(|identite| {
+                                String::from_utf8_lossy(identite.sender).into_owned()
+                            }),
+                            dkim_domain: signature_fautive.map(|vue| vue.domain.clone()),
+                            dkim_selector: signature_fautive
+                                .map(|vue| vue.selector.clone())
+                                .filter(|selecteur| !selecteur.is_empty()),
+                            spf_domain: (!vu.domain.is_empty()).then(|| vu.domain.clone()),
+                            rejected: usurpe,
+                            aligned_dkim: pour.dkim == DmarcVerdict2::Pass,
+                            aligned_spf: pour.spf == DmarcVerdict2::Pass,
+                            headers: lecture.headers().to_vec(),
+                        })
+                        .await;
+                }
                 spool.observer(Observation {
                     domain: resultat.domain.clone(),
                     published: pour.published,
@@ -809,7 +865,7 @@ where
                         .sender_identity()
                         .map(|identite| String::from_utf8_lossy(identite.domain).into_owned()),
                     signatures: vues,
-                    spf_auth: spf_vu(session),
+                    spf_auth: vu_pour_le_compte,
                 });
             }
         }

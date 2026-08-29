@@ -42,7 +42,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_dmarc` | `seeds/dmarc` | politique et alignement — **l'alignement est symétrique** |
 | `fuzz_ams_dmarc_report` | `seeds/dmarc-report` | destinations et rapport agrégé — **le rapport ne s'injecte pas** |
 | `fuzz_ams_smtp_client` | `seeds/smtp-client` | réponses lues et corps émis — **le message ne se termine pas tout seul** |
-| `fuzz_ams_mime_compose` | `seeds/mime-compose` | le message qui porte un rapport — **la pièce jointe se relit** |
+| `fuzz_ams_mime_compose` | `seeds/mime-compose` | les messages de rapport — **la pièce jointe se relit, la liste blanche tient** |
 
 Les variantes « bornes » existent parce que les bornes de C3 viennent de la
 configuration (C8), donc d'un administrateur : un zéro, un `usize::MAX`, ou toute
@@ -222,7 +222,7 @@ répond pas à la question posée.
    la place ferait jeter un message qui serait passé cinq minutes plus tard.
 7. Les bornes de l'évaluation sont fuzzées elles aussi — zéro compris.
 
-### DMARC (six, dont LA SYMÉTRIE DE L'ALIGNEMENT)
+### DMARC (sept, dont LA SYMÉTRIE DE L'ALIGNEMENT)
 
 L'enregistrement vient du DNS, c'est-à-dire d'un domaine que **l'expéditeur
 choisit** — celui de son propre `From:`. Les domaines comparés viennent, eux, de
@@ -240,6 +240,9 @@ SPF et de DKIM : ce sont des noms qu'un pair a écrits.
 5. **Une réussite exige un mécanisme aligné** — il doit être possible de dire
    lequel — et un `From:` vide n'aligne rien.
 6. **Le pourcentage tient dans ses bornes**, de zéro à cent.
+7. **UN MESSAGE PARFAITEMENT ALIGNÉ NE VAUT JAMAIS UN RAPPORT D'ÉCHEC**, quelle
+   que soit la valeur de `fo=`. Un domaine qui recevrait un rapport pour un
+   message que rien n'accuse cesserait de les lire.
 
 ### Rapports DMARC (cinq, dont LE NOM QUI NE DEVIENT PAS UN CHEMIN)
 
@@ -261,7 +264,7 @@ d'enveloppe : **ce que le pair a dicté**.
    cette destination.** C'est tout ce qui empêche l'attaquant de se donner le
    droit d'être rapporté à quelqu'un d'autre.
 
-### Le message d'un rapport (cinq, dont L'ALLER-RETOUR DE LA PIÈCE JOINTE)
+### Les messages de rapport (six, dont LA LISTE BLANCHE)
 
 L'adresse du destinataire d'un rapport est publiée par le domaine qu'on
 rapporte ; le nom du fichier joint se compose à partir de ce même domaine. **Un
@@ -278,6 +281,11 @@ une injection passerait inaperçue.**
    dans la cible, séparé de l'encodeur : réencoder avec le code qu'on éprouve
    prouverait seulement qu'il est d'accord avec lui-même.
 5. **Une date s'écrit toujours**, et tient dans ce qu'elle annonce.
+6. **LA LISTE BLANCHE TIENT** : dans un rapport d'échec, la partie qui recopie le
+   message rapporté ne porte que des champs dont le nom figure dans `EXPOSES`.
+   C'est la propriété qui protège le tiers dont on rapporte le courrier, et c'est
+   celle qui compte le plus ici. Elle est vérifiée sur des blocs d'en-tête
+   arbitraires, ce qu'aucun test écrit à la main ne couvrirait.
 
 ### Le côté ÉMETTEUR de SMTP (cinq, dont LA CONTREBANDE PAR L'AUTRE BOUT)
 
@@ -729,6 +737,9 @@ coûterait du courrier sans rien protéger — on ne les interprète jamais.
 | 2026-08-29 | `fuzz_ams_smtp_client` | 8 247 626 (241 s) | 0 |
 | 2026-08-29 | `fuzz_ams_mime_compose` | 1 434 635 (241 s) | 0 |
 | 2026-08-29 | `fuzz_ams_config` (avec la remise) | 267 065 (71 s) | 0 |
+| 2026-08-29 | `fuzz_ams_mime_compose` (avec les échecs) | 1 925 299 (201 s) | 0 |
+| 2026-08-29 | `fuzz_ams_dmarc` (avec `fo=`) | 8 851 543 (151 s) | 0 |
+| 2026-08-29 | `fuzz_ams_config` (avec les échecs) | 215 062 (71 s) | 0 |
 | 2026-08-29 | `fuzz_ams_config` (avec SPF) | 193 256 (61 s) | 0 |
 | 2026-08-29 | `fuzz_ams_session_smtp` (avec SPF) | 381 710 (61 s) | 0 |
 | 2026-08-28 | `fuzz_ams_session_smtp` (SASL) | 521 646 (91 s) | 0 |

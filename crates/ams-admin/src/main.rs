@@ -274,6 +274,11 @@ fn afficher(config: &Configuration) {
                     config.dmarc.report_interval_seconds
                 }
             );
+            if config.dmarc.rapporte_les_echecs() {
+                println!("  rapports d'échec OUI — en-têtes filtrés, corps jamais recopié");
+            } else {
+                println!("  rapports d'échec NON — seuls les rapports agrégés sont composés");
+            }
             if config.dmarc.envoie() {
                 println!("  remise           OUI — vers les destinations qui ont consenti (§7.1)");
             } else {

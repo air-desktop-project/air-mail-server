@@ -77,6 +77,8 @@ struct Entree {
     intervalle: u32,
     /// Remet-on les rapports ? Un booléen traverse le format comme le reste.
     remet: bool,
+    /// En compose-t-on d'échec ? Idem.
+    echecs: bool,
     /// Le délai d'une question DNS.
     delai_dns: u32,
     /// Le chemin de la liste des suffixes publics — UNE CHAÎNE LIBRE : cette
@@ -150,6 +152,7 @@ fuzz_target!(|entree: Entree| {
             report_email: entree.rapports[2].clone(),
             report_interval_seconds: entree.intervalle,
             send_reports: entree.remet,
+            failure_reports: entree.echecs,
         },
         accounts: entree.comptes.clone(),
         listen_pop3: entree.ecoute_pop3.clone(),

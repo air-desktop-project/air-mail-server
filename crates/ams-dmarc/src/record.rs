@@ -2,6 +2,7 @@
 
 use crate::Error;
 use crate::alignment::Alignment;
+use crate::evaluate::Verdict;
 use crate::tag::{Tag, Tags};
 
 /// Ce qu'un domaine demande qu'on fasse d'un message non aligné (§6.3, `p=`).
@@ -53,6 +54,116 @@ impl Policy {
     }
 }
 
+/// Quand un domaine veut un rapport d'échec (§6.3, `fo=`).
+///
+/// # Quatre demandes, et elles se cumulent
+///
+/// La valeur est une liste séparée par des deux-points : `fo=1:d:s` demande les
+/// trois. Ce n'est pas un choix entre quatre modes, c'est un ensemble.
+///
+/// **Le défaut est le plus étroit**, et c'est voulu : sans `fo=`, un domaine ne
+/// reçoit un rapport que si RIEN n'a réussi. Un domaine qui veut davantage le
+/// demande — et un receveur qui en enverrait davantage sans qu'on le lui demande
+/// enverrait du courrier que personne n'attend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FailureOptions {
+    /// `0` : quand **aucun** mécanisme n'a produit de réussite alignée.
+    pub all_failed: bool,
+    /// `1` : quand **l'un** des deux n'a pas produit de réussite alignée.
+    pub any_failed: bool,
+    /// `d` : quand une signature DKIM était fausse, alignée ou non.
+    pub dkim_broken: bool,
+    /// `s` : quand SPF a rendu autre chose que `pass`, aligné ou non.
+    pub spf_broken: bool,
+}
+
+impl Default for FailureOptions {
+    fn default() -> Self {
+        // §6.3 : en l'absence de `fo=`, c'est `0`.
+        Self {
+            all_failed: true,
+            any_failed: false,
+            dkim_broken: false,
+            spf_broken: false,
+        }
+    }
+}
+
+impl FailureOptions {
+    /// Lit un `fo=`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnknownFailureOption`] si une valeur n'est ni `0`, ni `1`, ni
+    /// `d`, ni `s`. **On ne se rabat pas sur le défaut** : un domaine qui
+    /// demande quelque chose qu'on ne comprend pas ne demande pas « ce qui était
+    /// prévu par défaut », et lui envoyer autre chose que ce qu'il a écrit est
+    /// exactement ce qu'on évite partout ailleurs ici.
+    pub fn parse(valeur: &[u8]) -> Result<Self, Error> {
+        let mut options = Self {
+            all_failed: false,
+            any_failed: false,
+            dkim_broken: false,
+            spf_broken: false,
+        };
+        // `split` rend toujours au moins un morceau, fût-il vide : un `fo=`
+        // sans valeur tombe donc dans le bras qui refuse, sans qu'on ait à
+        // écrire une garde de plus pour le cas vide.
+        for morceau in valeur.split(|octet| *octet == b':') {
+            let morceau = morceau.trim_ascii();
+            match morceau {
+                b"0" => options.all_failed = true,
+                b"1" => options.any_failed = true,
+                b"d" | b"D" => options.dkim_broken = true,
+                b"s" | b"S" => options.spf_broken = true,
+                _ => return Err(Error::UnknownFailureOption),
+            }
+        }
+        Ok(options)
+    }
+
+    /// Un rapport d'échec est-il demandé pour ce message ?
+    ///
+    /// `dkim` et `spf` disent si chaque mécanisme a produit une réussite
+    /// **alignée** ; `dkim_broken` et `spf_broken` disent s'il a échoué en
+    /// lui-même, alignement mis à part.
+    #[must_use]
+    pub fn wants(self, dkim: Verdict, spf: Verdict, dkim_broken: bool, spf_broken: bool) -> bool {
+        let aucun = dkim == Verdict::Fail && spf == Verdict::Fail;
+        let au_moins_un = dkim == Verdict::Fail || spf == Verdict::Fail;
+        (self.all_failed && aucun)
+            || (self.any_failed && au_moins_un)
+            || (self.dkim_broken && dkim_broken)
+            || (self.spf_broken && spf_broken)
+    }
+}
+
+/// La forme demandée pour les rapports d'échec (§6.3, `rf=`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReportFormat {
+    /// `afrf` — RFC 6591, la seule forme définie.
+    #[default]
+    Afrf,
+}
+
+impl ReportFormat {
+    /// Lit un `rf=`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnknownReportFormat`]. Une seule forme est définie ; en
+    /// composer une autre au jugé donnerait un document que le destinataire ne
+    /// saurait pas lire, et qu'il jetterait sans le dire.
+    pub fn parse(valeur: &[u8]) -> Result<Self, Error> {
+        for morceau in valeur.split(|octet| *octet == b':') {
+            if !morceau.trim_ascii().eq_ignore_ascii_case(b"afrf") {
+                return Err(Error::UnknownReportFormat);
+            }
+        }
+        Ok(Self::Afrf)
+    }
+}
+
 /// Un enregistrement DMARC, lu et vérifié dans sa cohérence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Record<'a> {
@@ -74,6 +185,10 @@ pub struct Record<'a> {
     pub failure_reports: Option<&'a [u8]>,
     /// `ri=` — l'intervalle demandé entre deux rapports agrégés, en secondes.
     pub report_interval: u32,
+    /// `fo=` — quand ce domaine veut un rapport d'échec.
+    pub failure_options: FailureOptions,
+    /// `rf=` — sous quelle forme il le veut.
+    pub failure_format: ReportFormat,
 }
 
 impl<'a> Record<'a> {
@@ -111,6 +226,8 @@ impl<'a> Record<'a> {
         let mut agreges: Option<&[u8]> = None;
         let mut echecs: Option<&[u8]> = None;
         let mut intervalle: Option<u32> = None;
+        let mut options: Option<FailureOptions> = None;
+        let mut forme: Option<ReportFormat> = None;
 
         for etiquette in etiquettes {
             let Tag { name, value } = etiquette?;
@@ -134,8 +251,13 @@ impl<'a> Record<'a> {
                 () if name.eq_ignore_ascii_case(b"rua") => poser(&mut agreges, value)?,
                 () if name.eq_ignore_ascii_case(b"ruf") => poser(&mut echecs, value)?,
                 () if name.eq_ignore_ascii_case(b"ri") => poser(&mut intervalle, nombre(value)?)?,
-                // §6.3 : les étiquettes inconnues s'ignorent — `fo=` et `rf=`
-                // décrivent la forme des rapports, que ce serveur n'envoie pas.
+                () if name.eq_ignore_ascii_case(b"fo") => {
+                    poser(&mut options, FailureOptions::parse(value)?)?;
+                }
+                () if name.eq_ignore_ascii_case(b"rf") => {
+                    poser(&mut forme, ReportFormat::parse(value)?)?;
+                }
+                // §6.3 : les étiquettes inconnues s'ignorent.
                 () => {}
             }
         }
@@ -151,6 +273,8 @@ impl<'a> Record<'a> {
             failure_reports: echecs,
             // Le défaut est 86 400 secondes, soit un jour (§6.3).
             report_interval: intervalle.unwrap_or(86_400),
+            failure_options: options.unwrap_or_default(),
+            failure_format: forme.unwrap_or_default(),
         })
     }
 

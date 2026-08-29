@@ -624,9 +624,59 @@ vers des systèmes et des opérateurs du monde entier, dont la seule langue comm
 est celle-là — et le composeur n'admet que de l'ASCII, ce qui exclut d'écrire un
 français correct.
 
-Ce qui n'est pas outillé : les rapports d'échec (`ruf=`, RFC 6591) ne sont pas
-composés. Ils portent des morceaux de messages réels, et ce qu'on met dedans
-mérite sa propre décision.
+### Les rapports d'échec, depuis le 2026-08-29
+
+`ruf=` est servi (RFC 6591, sur RFC 5965), et c'est la partie de DMARC qu'il faut
+approcher avec le plus de précautions.
+
+UN RAPPORT AGRÉGÉ EST UN DÉNOMBREMENT ; UN RAPPORT D'ÉCHEC PORTE LE COURRIER DE
+QUELQU'UN. Le premier ne dit rien d'un message en particulier ; le second dit
+tout d'un message précis — d'où il vient, ce qu'il prétendait être, ce qu'on en a
+fait — et il part chez le domaine qu'on rapporte, c'est-à-dire, quand cela
+compte, **chez celui qui usurpe**. Ce qu'on y met, on le lui donne. C'est une des
+raisons pour lesquelles tant de receveurs n'en envoient aucun.
+
+Trois décisions découlent de là, et elles sont prises dans le code plutôt que
+laissées à un réglage.
+
+**On ne recopie pas le corps.** La partie jointe est un `text/rfc822-headers`
+(RFC 6522 §4), pas un `message/rfc822`. Le corps d'un message est ce qu'une
+personne a écrit ; il n'apprend rien sur une authentification.
+
+**ON NE RECOPIE MÊME PAS TOUS LES EN-TÊTES.** `ams_mime::EXPOSES` est une liste
+BLANCHE, et le reste tombe : ce qui reste sert à comprendre un échec
+d'authentification — ce que le message prétendait être, et les traces de ce qu'on
+a vérifié — ce qui tombe parle de tiers (`To`, `Cc`) ou de nos machines (chaque
+`Received` décrit un chemin interne que personne n'a demandé à publier). Une
+liste noire aurait été plus douce et se serait trompée : le jour où un en-tête
+nouveau porte une donnée personnelle, une liste noire le laisse passer, une liste
+blanche l'arrête sans qu'on ait rien à faire. Le champ `Original-Rcpt-To` de la
+RFC 6591 §3.2 n'est pas écrit non plus : dire à celui qui usurpe QUI a reçu son
+message serait lui livrer ce qu'il cherchait.
+
+Le `Subject:`, lui, y est. Le rapport part chez le domaine du `From:` : si le
+message est légitime et mal configuré, ce sujet est le sien ; s'il est usurpé, ce
+sujet est celui de l'attaquant. Dans les deux cas il n'appartient pas à celui qui
+a reçu le message — et il est ce qui permet à un domaine de reconnaître son
+propre flux.
+
+**SANS PLAFOND, UNE USURPATION EN MASSE DEVIENT UN DÉLUGE.** Un rapport d'échec
+part par message : quelqu'un qui usurpe un domaine cent mille fois nous ferait
+écrire cent mille messages à ce domaine, qui n'a rien demandé de tel et qui en
+subirait les conséquences à notre place (RFC 6591 §5). Cent par période et par
+domaine : assez pour comprendre un flux mal configuré, trop peu pour nuire.
+
+`fo=` dit quand un rapport est dû, et son défaut est le plus étroit : sans lui,
+un domaine n'en reçoit que si RIEN n'a réussi. Les quatre demandes se cumulent
+(`fo=1:d:s`), et `d` comme `s` regardent le mécanisme lui-même, alignement mis à
+part — une signature fausse sur un message par ailleurs aligné se rapporte, et
+c'est tout leur intérêt. Une valeur qu'on ne comprend pas fait ÉCARTER
+l'enregistrement : un domaine qui demande autre chose que `0`, `1`, `d` ou `s` ne
+demande pas « ce qui était prévu par défaut ».
+
+Et, comme pour les agrégés, une destination externe doit avoir consenti (§7.1)
+avant de recevoir quoi que ce soit. Le défaut, enfin, n'en compose aucun :
+`--dmarc-failure-reports` le demande.
 
 ## Le client SMTP sortant, depuis le 2026-08-29
 

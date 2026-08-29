@@ -25,13 +25,20 @@
 //!    qu'on a donnée. Le décodeur est écrit ici, dans la cible, pour qu'une
 //!    erreur symétrique ne passe pas inaperçue.
 //! 5. **Une date s'écrit toujours**, et tient dans ce qu'elle annonce.
+//! 6. **LA LISTE BLANCHE TIENT** : dans un rapport d'échec, la partie qui
+//!    recopie le message rapporté ne porte QUE des champs dont le nom figure
+//!    dans `EXPOSES`. C'est la propriété qui protège le tiers dont on rapporte
+//!    le courrier, et c'est celle qui compte le plus ici.
 
 #![no_main]
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-use ams_mime::{DATE_MAX, ReportMail, report_mail_max, write_date, write_report_mail};
+use ams_mime::{
+    DATE_MAX, EXPOSES, FailureMail, Limits, ReportMail, failure_mail_max, report_mail_max,
+    write_date, write_failure_mail, write_report_mail,
+};
 
 /// Ce qu'on soumet.
 #[derive(Arbitrary, Debug)]
@@ -45,6 +52,8 @@ struct Entree<'a> {
     filename: &'a [u8],
     attachment: &'a [u8],
     date: u64,
+    /// Le bloc d'en-tête d'un message rapporté — **des octets de pair**.
+    reported_headers: &'a [u8],
 }
 
 /// Un décodeur base64 écrit ICI, et volontairement séparé de l'encodeur.
@@ -183,4 +192,64 @@ fuzz_target!(|entree: Entree<'_>| {
         .expect("la clôture de la partie");
     let relu = decoder(&reste[..fin]).expect("du base64 et rien d'autre");
     assert_eq!(relu, entree.attachment, "la pièce jointe a été abîmée");
+
+    // ── Le rapport d'échec, et sa liste blanche ─────────────────────────────
+    let echec = FailureMail {
+        from: entree.from,
+        to: entree.to,
+        subject: entree.subject,
+        message_id: entree.message_id,
+        date: entree.date,
+        boundary: entree.boundary,
+        text: entree.text,
+        feedback: entree.attachment,
+        reported_headers: entree.reported_headers,
+    };
+    let mut place = vec![0_u8; failure_mail_max(&echec)];
+    let Ok(rapport) = write_failure_mail(&mut place, &echec, &Limits::DEFAULT) else {
+        return;
+    };
+
+    // PROPRIÉTÉ 6 : la partie qui recopie le message rapporté ne porte que des
+    // champs autorisés. On la découpe à la clôture, puis on lit ses lignes.
+    let ouvre = {
+        let mut morceau = Vec::from(&b"\r\n--"[..]);
+        morceau.extend_from_slice(entree.boundary);
+        morceau.extend_from_slice(b"\r\nContent-Type: text/rfc822-headers\r\n\r\n");
+        morceau
+    };
+    let debut = rapport
+        .windows(ouvre.len())
+        .position(|f| f == ouvre)
+        .expect("la partie qui recopie le message")
+        + ouvre.len();
+    let reste = &rapport[debut..];
+    let cloture = {
+        let mut morceau = Vec::from(&b"\r\n--"[..]);
+        morceau.extend_from_slice(entree.boundary);
+        morceau.extend_from_slice(b"--\r\n");
+        morceau
+    };
+    let fin = reste
+        .windows(cloture.len())
+        .position(|f| f == cloture)
+        .expect("la clôture du message");
+    for ligne in reste[..fin].split(|octet| *octet == b'\n') {
+        let ligne = ligne.strip_suffix(b"\r").unwrap_or(ligne);
+        // Une continuation de pliage n'ouvre pas un champ.
+        if ligne.is_empty() || ligne.starts_with(b" ") || ligne.starts_with(b"\t") {
+            continue;
+        }
+        let nom = ligne
+            .split(|octet| *octet == b':')
+            .next()
+            .expect("un nom de champ");
+        assert!(
+            EXPOSES
+                .iter()
+                .any(|permis| permis.eq_ignore_ascii_case(nom)),
+            "le champ {:?} a fuité dans un rapport d'échec",
+            core::str::from_utf8(nom)
+        );
+    }
 });

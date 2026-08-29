@@ -54,6 +54,10 @@ pub enum Error {
     NotPrintable,
     /// Un rapport agrégé n'a aucune ligne, et l'annexe C en exige une.
     EmptyReport,
+    /// Un `fo=` demande quelque chose qui n'est ni `0`, ni `1`, ni `d`, ni `s`.
+    UnknownFailureOption,
+    /// Un `rf=` demande une forme de rapport qui n'existe pas.
+    UnknownReportFormat,
 }
 
 impl fmt::Display for Error {
@@ -75,6 +79,8 @@ impl fmt::Display for Error {
             Self::MalformedSize => "la taille maximale d'un rapport n'est pas un nombre",
             Self::NotPrintable => "une valeur porte un octet qu'on refuse d'écrire",
             Self::EmptyReport => "un rapport agrégé sans aucune ligne n'est pas un rapport",
+            Self::UnknownFailureOption => "`fo=` demande autre chose que `0`, `1`, `d` ou `s`",
+            Self::UnknownReportFormat => "`rf=` demande une forme de rapport qui n'existe pas",
         };
         f.write_str(texte)
     }
@@ -115,6 +121,8 @@ mod tests {
             Error::MalformedSize,
             Error::NotPrintable,
             Error::EmptyReport,
+            Error::UnknownFailureOption,
+            Error::UnknownReportFormat,
         ] {
             let mut compteur = Compteur(0);
             core::fmt::write(&mut compteur, format_args!("{erreur}")).expect("formatable");
