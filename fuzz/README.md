@@ -12,16 +12,25 @@ n'entre ni dans la mesure de couverture ni dans le lock du produit, et rien de c
 qu'elle tire n'est jamais livré. Le nightly employé ici est **roulant**, ce qui est
 acceptable *ici seulement* : rien n'en sort qui doive s'accorder avec autre chose.
 
-## Le smoke-test de la CI nomme ses cibles, et la CI vérifie qu'il les nomme toutes
+## `scripts/check-fuzz.sh` — le contrôle se lance chez soi
 
-Chaque cible a ses graines, qu'aucune convention de nommage ne devine :
-`fuzz_ams_mime_parse` se sème avec `seeds/mime`. La liste du smoke-test est donc
-tenue à la main — et une cible ajoutée sans y être inscrite n'était jamais
-lancée, la CI restant verte en ne l'ayant pas examinée. Six cibles vivaient
-ainsi hors du gate, dont une qui **ne compilait plus depuis deux commits**.
+Cette crate vit hors du workspace : **`cargo build --workspace` ne la touche
+pas**. Une cible qui cesse de compiler ne se voit donc ni au build, ni aux tests,
+ni au clippy — seulement en intégration continue, après un `push`. C'est arrivé
+deux fois, les deux fois en changeant un trait que les cibles implémentent ; la
+première, la cible ne compilait plus depuis deux commits sans que rien ne le
+dise.
 
-La CI confronte maintenant sa liste aux `[[bin]]` de `Cargo.toml`, et l'écart
-échoue. Un rapport vert qui n'a rien examiné est un mensonge poli.
+    scripts/check-fuzz.sh            # la liste, et la compilation des 26 cibles
+    scripts/check-fuzz.sh --smoke    # et vingt secondes chacune
+    AMS_FUZZ_SECONDES=300 scripts/check-fuzz.sh --smoke   # une vraie campagne
+
+Le script porte la liste des cibles et de leurs graines, et **la CI l'appelle**
+plutôt que d'en tenir une seconde : un contrôle qu'on ne peut pas rejouer chez
+soi est un contrôle qu'on découvre en CI. La liste est confrontée aux `[[bin]]`
+de `Cargo.toml`, et l'écart échoue — une cible qu'on oublie d'y inscrire ne
+serait jamais lancée, et le gate resterait vert en ne l'ayant pas examinée. Un
+rapport vert qui n'a rien examiné est un mensonge poli.
 
 ## Ce qu'on fuzze, et pourquoi
 

@@ -30,8 +30,7 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-use ams_proto_imap::Flags;
-use ams_proto_imap::{CommandReader, Limits, Need};
+use ams_proto_imap::{CommandReader, Flags, Limits, Need, StoreMode};
 use ams_sasl::Credentials;
 use ams_session::Authenticator;
 use ams_session::imap::{Action, FetchChunk, Mailbox, Mailboxes, MessageInfo, Session, State};
@@ -74,8 +73,8 @@ impl Mailbox for Boite {
         // Un tiers du message, de quoi distinguer les trois sections.
         self.info(sequence).map_or(0, |info| info.size / 3)
     }
-    fn writable(&self) -> bool {
-        true
+    fn permanent_flags(&self) -> Flags {
+        Flags::SEEN.with(Flags::FLAGGED)
     }
     fn read(&self, sequence: u32, offset: u64, out: &mut [u8]) -> usize {
         let Some(info) = self.info(sequence) else {
@@ -87,7 +86,17 @@ impl Mailbox for Boite {
         place.fill(b'x');
         place.len()
     }
-    fn mark_seen(&mut self, _sequence: u32) {}
+    fn store_flags(&mut self, sequence: u32, mode: StoreMode, flags: Flags) -> Option<Flags> {
+        // La boîte d'épreuve ne retient rien ; ce qu'on éprouve ici est la
+        // session, pas la persistance. Le message hors de portée disparaît, ce
+        // qui exerce le chemin « §6.4.6 : ne pas en faire une erreur ».
+        self.info(sequence)?;
+        Some(match mode {
+            StoreMode::Replace => flags,
+            StoreMode::Add => Flags::SEEN.with(flags),
+            StoreMode::Remove => Flags::SEEN.without(flags),
+        })
+    }
 }
 
 /// Le magasin : une seule boîte, `INBOX`.

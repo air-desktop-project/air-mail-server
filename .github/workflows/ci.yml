@@ -187,56 +187,9 @@ jobs:
       # il n'y écrit que s'il peut l'ouvrir, et refuse de démarrer sinon.
       # cargo-fuzz ne le crée que lorsqu'on ne lui en nomme aucun.
       - name: smoke-fuzz de toutes les cibles
-        working-directory: fuzz
-        run: |
-          set -eu
-          # LA LISTE EST TENUE À LA MAIN, ET C'EST POURQUOI ON LA VÉRIFIE.
-          # Chaque cible a ses graines, qu'aucune convention de nommage ne
-          # devine : `fuzz_ams_mime_parse` se sème avec `seeds/mime`. Mais une
-          # cible ajoutée sans être inscrite ici ne serait jamais lancée, et le
-          # gate resterait vert en ne l'ayant pas examinée — un rapport vert qui
-          # n'a rien examiné est un mensonge poli. On confronte donc la liste aux
-          # cibles déclarées dans `Cargo.toml`, et l'oubli échoue au lieu de
-          # passer. C'est arrivé : six cibles vivaient hors du smoke-test.
-          cat > /tmp/cibles.txt <<'CIBLES'
-          fuzz_ams_mime_parse mime
-          fuzz_ams_mime_limits mime
-          fuzz_ams_mime_compose mime-compose
-          fuzz_ams_smtp_command smtp
-          fuzz_ams_smtp_limits smtp
-          fuzz_ams_smtp_reply smtp-reply
-          fuzz_ams_smtp_data smtp-data
-          fuzz_ams_smtp_client smtp-client
-          fuzz_ams_session_smtp session
-          fuzz_ams_pop3 pop3
-          fuzz_ams_session_pop3 pop3-session
-          fuzz_ams_imap imap
-          fuzz_ams_imap_fetch imap-fetch
-          fuzz_ams_session_imap imap-session
-          fuzz_ams_guard guard
-          fuzz_ams_index_name index
-          fuzz_ams_config config
-          fuzz_ams_tls_kx tls
-          fuzz_ams_sasl sasl
-          fuzz_ams_spf spf
-          fuzz_ams_spf_eval spf-eval
-          fuzz_ams_spf_header spf-header
-          fuzz_ams_dns dns
-          fuzz_ams_dkim dkim
-          fuzz_ams_dmarc dmarc
-          fuzz_ams_dmarc_report dmarc-report
-          CIBLES
-          awk '{print $1}' /tmp/cibles.txt | sort > /tmp/cibles-listees.txt
-          grep -A1 '^\[\[bin\]\]' Cargo.toml \
-            | sed -n 's/^name = "\(.*\)"/\1/p' | sort > /tmp/cibles-declarees.txt
-          if ! diff -u /tmp/cibles-declarees.txt /tmp/cibles-listees.txt; then
-            echo "::error::le smoke-test et Cargo.toml ne nomment pas les mêmes cibles ; celles qui manquent ici ne seraient jamais lancées"
-            exit 1
-          fi
-          while read -r cible graines; do
-            echo "::group::$cible"
-            mkdir -p "corpus/$cible"
-            cargo +nightly fuzz run --target x86_64-unknown-linux-gnu "$cible" \
-              "corpus/$cible" "seeds/$graines" -- -max_total_time=20
-            echo "::endgroup::"
-          done < /tmp/cibles.txt
+        # LA LISTE VIT DANS LE SCRIPT, PAS ICI. Un contrôle qu'on ne peut pas
+        # rejouer chez soi est un contrôle qu'on découvre en intégration
+        # continue — et c'est ainsi qu'une cible a cessé de compiler pendant deux
+        # commits sans que rien ne le dise. `scripts/check-fuzz.sh` fait
+        # exactement ce que fait cette étape, et se lance en local.
+        run: scripts/check-fuzz.sh --smoke
