@@ -87,6 +87,11 @@ Toute longueur qui vient du réseau est vérifiée avant d'être employée. Un d
 qui lit un littéral IMAP `{4294967295}` ne doit ni allouer, ni indexer, ni boucler
 sur cette valeur : il doit la **refuser**.
 
+**C'est fait depuis le 2026-08-29** : cet exemple-là n'est plus une intention.
+`ams_proto_imap::CommandReader` refuse ce littéral avant de lire un seul octet,
+et le fuzz l'éprouve sur onze millions d'entrées. Voir « IMAP » plus bas pour ce
+que le découpage d'une commande demande de plus.
+
 Conséquences déjà gravées dans le workspace :
 
 - `clippy::arithmetic_side_effects`, `cast_possible_truncation`, `cast_sign_loss`
@@ -677,6 +682,59 @@ demande pas « ce qui était prévu par défaut ».
 Et, comme pour les agrégés, une destination externe doit avoir consenti (§7.1)
 avant de recevoir quoi que ce soit. Le défaut, enfin, n'en compose aucun :
 `--dmarc-failure-reports` le demande.
+
+## IMAP : le découpage, depuis le 2026-08-29
+
+IMAP N'EST PAS UN PROTOCOLE DE LIGNES, et c'est ce qui le rend délicat. SMTP et
+POP3 se lisent ligne par ligne : un `CRLF`, une commande. IMAP non — une commande
+peut porter un LITTÉRAL, `{42}` suivi d'un `CRLF` puis de quarante-deux octets
+bruts qui peuvent contenir tout ce qu'on veut, `CRLF` compris, et la commande
+continue après. Chercher le premier `CRLF` pour découper cela, c'est offrir à un
+client de faire lire n'importe quoi comme une commande.
+
+Ce découpage est donc la première chose écrite, avant tout vocabulaire d'argument
+— un serveur IMAP qui découpe mal est un serveur qu'on fait lire ce qu'on veut,
+**avant toute authentification**.
+
+### Deux formes de littéral, et une seule est sûre par construction
+
+`{42}` est synchronisant : le client attend un `+` du serveur, qui peut donc
+refuser avant de rien lire. `{42+}` (RFC 7888) ne l'est pas — les octets suivent
+immédiatement, et le serveur n'a aucun moyen de dire non. C'est pourquoi la
+RFC 9051 §6.3.11 les borne à quatre kibioctets, et pourquoi **cette borne-là
+n'est pas la nôtre à choisir** : toutes les autres bornes de ce module sont
+décidées ici, et les noms de champ ne prétendent pas le contraire — la RFC 9051
+n'en donne qu'une, les 8192 octets d'une ligne (§4).
+
+### L'accolade se cherche en dehors des guillemets
+
+`a001 LOGIN "toto{5}" x` ne porte aucun littéral : l'accolade y est dans une
+chaîne. La chercher sans suivre les guillemets — et sans traiter le guillemet
+échappé — laisserait le client choisir où l'on découpe.
+
+### LE TAG EST RECOPIÉ DANS LA RÉPONSE
+
+IMAP entrelace les commandes ; c'est le tag qui dit à quelle commande une réponse
+répond, et le serveur le recopie verbatim (§7). Un `CRLF` dedans écrirait une
+réponse entière de la main du client ; un `*` en ferait une réponse non
+sollicitée ; un `+` une demande de continuation, à laquelle le client répondrait
+par des octets que le serveur lirait comme une commande. Ce ne sont pas des cas
+particuliers : ce sont les trois formes que prend une réponse IMAP. La grammaire
+de la RFC les exclut déjà du tag, et ce module l'applique à la lettre plutôt que
+de faire confiance.
+
+Le tag est aussi borné à trente-deux octets — il est recopié, donc un tag de deux
+kibioctets ferait une réponse de deux kibioctets pour un client qui n'a rien
+demandé de tel.
+
+### Ce qui n'y est pas
+
+Le vocabulaire des ARGUMENTS. `FETCH`, `SEARCH` et `STORE` ont chacun leur
+grammaire, et elles viendront une par une. `APPEND` demandera en plus un chemin
+qui écoule au fil de l'eau, comme le `DATA` de SMTP : la borne d'un littéral est
+aujourd'hui d'un mébioctet, ce qui suffit à un nom de boîte ou à une recherche et
+pas à un message. Et la session IMAP — les états, les réponses non sollicitées,
+les UID — n'existe pas : ce qui est là est la grammaire, pas le serveur.
 
 ## Le client SMTP sortant, depuis le 2026-08-29
 

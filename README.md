@@ -68,7 +68,7 @@ horloge.
 | `ams-sasl` | RFC 4422/4616 : `PLAIN` et son base64 | **implémenté** |
 | `ams-proto-pop3` | RFC 1939 | **commandes et réponses** |
 | `ams-dns` | RFC 1035 : le codec d'un message | **question encodée, réponse décodée** |
-| `ams-proto-imap` | RFC 9051 (IMAP4rev2) | vide |
+| `ams-proto-imap` | RFC 9051 (IMAP4rev2) | **découpage des commandes, tag, littéraux, réponses** |
 | `ams-proto-http` | RFC 9110 / 9112 | vide |
 
 ### Étage 2 — décisions, sans entrée-sortie
@@ -364,6 +364,48 @@ dans le domaine qui l'a demandée, **c'est à la destination de consentir**, en
 publiant `<demandeur>._report._dmarc.<sa-zone>` — un nom que l'attaquant ne peut
 pas écrire, puisqu'il est chez la victime. Une panne de résolution ne vaut pas un
 consentement.
+
+## IMAP : découper une commande avant de la comprendre
+
+**IMAP n'est pas un protocole de lignes**, et c'est ce qui le rend délicat. SMTP
+et POP3 se lisent ligne par ligne : un `CRLF`, une commande. IMAP non — une
+commande peut porter un **littéral**, `{42}` suivi d'un `CRLF` puis de
+quarante-deux octets bruts qui peuvent contenir tout ce qu'on veut, `CRLF`
+compris, et la commande continue après :
+
+```text
+a001 LOGIN {5}
+toto
+ MOTDEPASSE
+```
+
+Chercher le premier `CRLF` pour découper cela, c'est offrir à un client de faire
+lire n'importe quoi comme une commande. Ce découpage-là est donc la première
+chose écrite, avant tout vocabulaire : un serveur IMAP qui découpe mal est un
+serveur qu'on fait lire ce qu'on veut, **avant toute authentification**.
+
+**Deux formes de littéral, et une seule est sûre par construction.** `{42}` est
+synchronisant : le client attend un `+` du serveur, qui peut donc refuser avant
+de rien lire. `{42+}` (RFC 7888) ne l'est pas — les octets suivent
+immédiatement, et le serveur n'a aucun moyen de dire non. C'est pourquoi la
+RFC 9051 §6.3.11 les borne à quatre kibioctets, et pourquoi cette borne-là n'est
+pas la nôtre à choisir. `{4294967295}` est une ligne de treize octets qui demande
+quatre gibioctets ; elle est refusée avant que rien ne soit lu.
+
+**L'accolade se cherche en dehors des guillemets.** `a001 LOGIN "toto{5}" x` ne
+porte aucun littéral : l'accolade y est dans une chaîne. La chercher sans suivre
+les guillemets laisserait le client choisir où l'on découpe.
+
+**LE TAG EST RECOPIÉ DANS LA RÉPONSE**, et c'est l'autre surface. IMAP entrelace
+les commandes ; c'est le tag qui dit à quelle commande une réponse répond, et le
+serveur le recopie verbatim. Un `CRLF` dedans écrirait une réponse entière de la
+main du client ; un `*` en ferait une réponse non sollicitée ; un `+` une demande
+de continuation. Ce ne sont pas des cas particuliers — ce sont les trois formes
+que prend une réponse IMAP, et la grammaire de la RFC les exclut déjà du tag.
+
+Ce qui n'y est pas : le vocabulaire des **arguments**. `FETCH`, `SEARCH` et
+`STORE` ont chacun leur grammaire, et elles viendront une par une. `APPEND`
+demandera en plus un chemin qui écoule au fil de l'eau, comme le `DATA` de SMTP.
 
 ## Émettre : le client SMTP sortant
 

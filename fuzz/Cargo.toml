@@ -33,6 +33,9 @@ arbitrary = { version = "1", features = ["derive"] }
 [dependencies.ams-mime]
 path = "../crates/ams-mime"
 
+[dependencies.ams-proto-imap]
+path = "../crates/ams-proto-imap"
+
 [dependencies.ams-dns]
 path = "../crates/ams-dns"
 
@@ -242,6 +245,13 @@ bench = false
 [[bin]]
 name = "fuzz_ams_mime_compose"
 path = "fuzz_targets/fuzz_ams_mime_compose.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ams_imap"
+path = "fuzz_targets/fuzz_ams_imap.rs"
 test = false
 doc = false
 bench = false

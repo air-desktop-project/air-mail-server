@@ -11,7 +11,31 @@
 //!
 //! # État
 //!
-//! **Rien n'est implémenté.** Cette crate est un emplacement réservé, créé avec
-//! le squelette du dépôt.
+//! **Le découpage des commandes est là** : le tag, les littéraux, les bornes, et
+//! l'encodage des réponses. C'est la moitié du protocole qui décide de tout le
+//! reste — un serveur IMAP qui découpe mal ses commandes est un serveur qu'on
+//! fait lire ce qu'on veut.
+//!
+//! Ce qui n'y est pas : le vocabulaire des ARGUMENTS. `FETCH`, `SEARCH` et
+//! `STORE` ont chacun leur grammaire, et elles viendront une par une.
 
 #![no_std]
+#![forbid(unsafe_op_in_unsafe_fn)]
+
+// LES TESTS, EUX, ONT LE DROIT D'ALLOUER.
+#[cfg(test)]
+extern crate std;
+
+mod command;
+mod error;
+mod frame;
+mod limits;
+mod response;
+mod tag;
+
+pub use command::{Command, Line};
+pub use error::Error;
+pub use frame::{CommandReader, Need};
+pub use limits::Limits;
+pub use response::{Status, encode_continuation, encode_tagged, encode_untagged};
+pub use tag::Tag;

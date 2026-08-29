@@ -41,6 +41,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_dkim` | `seeds/dkim` | signature, clé et canonicalisation — **le découpage ne change rien** |
 | `fuzz_ams_dmarc` | `seeds/dmarc` | politique et alignement — **l'alignement est symétrique** |
 | `fuzz_ams_dmarc_report` | `seeds/dmarc-report` | destinations et rapport agrégé — **le rapport ne s'injecte pas** |
+| `fuzz_ams_imap` | `seeds/imap` | découpage d'une commande IMAP — **le client ne choisit pas où l'on coupe** |
 | `fuzz_ams_smtp_client` | `seeds/smtp-client` | réponses lues et corps émis — **le message ne se termine pas tout seul** |
 | `fuzz_ams_mime_compose` | `seeds/mime-compose` | les messages de rapport — **la pièce jointe se relit, la liste blanche tient** |
 
@@ -263,6 +264,24 @@ d'enveloppe : **ce que le pair a dicté**.
 5. **Le nom interrogé pour vérifier une destination est toujours dans la zone de
    cette destination.** C'est tout ce qui empêche l'attaquant de se donner le
    droit d'être rapporté à quelqu'un d'autre.
+
+### Découpage IMAP (cinq, dont L'INDÉPENDANCE À LA FRAGMENTATION)
+
+Une commande IMAP peut porter un littéral — `{42}` puis quarante-deux octets
+bruts, `CRLF` compris — et continuer après. **C'est avant toute
+authentification que cette surface est exposée.**
+
+1. Rien ne panique, quels que soient les octets.
+2. **Une commande complète tient dans ce qu'on a donné** : la longueur rendue ne
+   dépasse jamais le tampon, et elle se termine par un `CRLF`.
+3. **LE DÉCOUPAGE NE DÉPEND PAS DE L'ARRIVÉE DES OCTETS.** Sans cela, un client
+   choisirait où l'on coupe rien qu'en fragmentant ses paquets. Les deux
+   lecteurs sont conduits jusqu'à leur terme avant d'être comparés : une demande
+   de continuation est un ÉVÉNEMENT, pas un état — c'est la cible qui l'a appris
+   à sa première campagne, et la propriété a été corrigée, pas le code.
+4. **Un tag accepté est recopiable dans une réponse** : il ne porte aucun octet
+   qui pourrait en écrire une seconde.
+5. **Une réponse encodée tient sur une ligne**, et une seule.
 
 ### Les messages de rapport (six, dont LA LISTE BLANCHE)
 
@@ -740,6 +759,7 @@ coûterait du courrier sans rien protéger — on ne les interprète jamais.
 | 2026-08-29 | `fuzz_ams_mime_compose` (avec les échecs) | 1 925 299 (201 s) | 0 |
 | 2026-08-29 | `fuzz_ams_dmarc` (avec `fo=`) | 8 851 543 (151 s) | 0 |
 | 2026-08-29 | `fuzz_ams_config` (avec les échecs) | 215 062 (71 s) | 0 |
+| 2026-08-29 | `fuzz_ams_imap` | 11 944 609 (241 s) | 0 |
 | 2026-08-29 | `fuzz_ams_config` (avec SPF) | 193 256 (61 s) | 0 |
 | 2026-08-29 | `fuzz_ams_session_smtp` (avec SPF) | 381 710 (61 s) | 0 |
 | 2026-08-28 | `fuzz_ams_session_smtp` (SASL) | 521 646 (91 s) | 0 |

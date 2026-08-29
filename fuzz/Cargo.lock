@@ -49,6 +49,7 @@ dependencies = [
  "ams-guard",
  "ams-index",
  "ams-mime",
+ "ams-proto-imap",
  "ams-proto-pop3",
  "ams-proto-smtp",
  "ams-sasl",
@@ -106,6 +107,10 @@ version = "0.1.0"
 
 [[package]]
 name = "ams-mime"
+version = "0.1.0"
+
+[[package]]
+name = "ams-proto-imap"
 version = "0.1.0"
 
 [[package]]
