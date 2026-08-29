@@ -126,3 +126,74 @@ fn une_paire_depareillee_n_est_pas_detectee_par_ce_fournisseur() {
          disent encore le contraire. À corriger."
     );
 }
+
+/// **Une vraie poignée de main, de bout en bout, en mémoire.**
+///
+/// Le chiffrement opportuniste (RFC 7435) n'authentifie pas le pair — c'est
+/// écrit partout — mais il VÉRIFIE la signature de la poignée de main. Un test
+/// qui ne ferait qu'appeler le vérificateur avec une fausse signature ne
+/// prouverait que le refus ; c'est le chemin nominal qu'il faut voir aboutir,
+/// et il n'aboutit qu'avec un vrai certificat en face.
+///
+/// Aucune socket : les deux connexions s'échangent leurs octets à la main. Le
+/// test dit donc quelque chose de rustls et de notre fournisseur, et rien du
+/// réseau.
+#[test]
+fn le_chiffrement_opportuniste_conduit_une_vraie_poignee_de_main() {
+    use std::sync::Arc;
+
+    let atelier = atelier("poignee-opportuniste");
+    let (cert, cle) = paire(&atelier.0, "mx.eux.test").expect(SANS_OPENSSL);
+    let serveur = ams_tls::server_config(
+        &std::fs::read(&cert).expect("certificat lisible"),
+        &std::fs::read(&cle).expect("clé lisible"),
+    )
+    .expect("la paire devrait être acceptée");
+
+    let mut client = rustls::ClientConnection::new(
+        Arc::new(ams_tls::relay_config()),
+        "mx.eux.test".try_into().expect("nom de serveur"),
+    )
+    .expect("connexion cliente");
+    let mut hote = rustls::ServerConnection::new(Arc::new(serveur)).expect("connexion serveur");
+
+    // Vingt allers-retours majorent très largement une poignée de main TLS 1.3 ;
+    // la boucle s'arrête d'elle-même dès que les deux ont fini.
+    for _ in 0..20 {
+        if !client.is_handshaking() && !hote.is_handshaking() {
+            break;
+        }
+        let mut fil = Vec::new();
+        client.write_tls(&mut fil).expect("le client écrit");
+        if !fil.is_empty() {
+            hote.read_tls(&mut fil.as_slice()).expect("le serveur lit");
+            hote.process_new_packets().expect("le serveur traite");
+        }
+        let mut retour = Vec::new();
+        hote.write_tls(&mut retour).expect("le serveur écrit");
+        if !retour.is_empty() {
+            client
+                .read_tls(&mut retour.as_slice())
+                .expect("le client lit");
+            client.process_new_packets().expect("le client traite");
+        }
+    }
+
+    assert!(
+        !client.is_handshaking(),
+        "la poignée de main n'a pas abouti"
+    );
+    assert!(!hote.is_handshaking());
+    // C6, vérifié sur la connexion réellement établie.
+    assert_eq!(
+        client.protocol_version(),
+        Some(rustls::ProtocolVersion::TLSv1_3)
+    );
+    // Et le groupe de C14, celui qu'aucun autre fournisseur pur Rust n'offre.
+    assert!(
+        client
+            .negotiated_key_exchange_group()
+            .is_some_and(|groupe| groupe.name() == rustls::NamedGroup::X25519MLKEM768),
+        "l'échange hybride post-quantique n'a pas été négocié"
+    );
+}

@@ -1,0 +1,3 @@
+250-mail.example.com
+250-STARTTLS
+250 SIZE 10485760

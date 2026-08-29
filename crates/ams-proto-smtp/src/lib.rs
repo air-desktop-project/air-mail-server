@@ -89,6 +89,7 @@
 #[cfg(test)]
 extern crate std;
 
+mod answer;
 mod command;
 mod data;
 mod domain;
@@ -97,7 +98,9 @@ mod limits;
 mod parameters;
 mod path;
 mod reply;
+mod stuff;
 
+pub use answer::{REPLY_LINES_MAX, Reply, ReplyLines, reply_len};
 pub use command::Command;
 pub use data::{DataFault, DataReceiver, Event as DataEvent};
 pub use domain::ClientId;
@@ -106,3 +109,4 @@ pub use limits::Limits;
 pub use parameters::{Parameter, Parameters, ParametersIter};
 pub use path::{LocalPart, Mailbox, Path, PathKind};
 pub use reply::{Class, Code, encode, encoded_len};
+pub use stuff::{Stuffer, stuffed_max};

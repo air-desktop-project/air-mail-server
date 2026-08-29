@@ -23,6 +23,16 @@ pub enum Error {
     /// vérifie plutôt que de le supposer.
     Reply(ams_proto_smtp::Error),
 
+    /// Une adresse ou un nom porte un octet qu'on refuse d'écrire sur le fil.
+    ///
+    /// Seul l'ASCII imprimable sans espace ni chevrons passe. Ce n'est pas une
+    /// validation d'adresse — c'est la garantie qu'un `CRLF` glissé dans une
+    /// adresse publiée par autrui n'écrira pas de commandes à notre place.
+    UnsafeAddress,
+
+    /// Une remise a été demandée sans personne à qui écrire.
+    NoRecipient,
+
     /// Une commande a été soumise alors que la session n'attend pas de commande.
     ///
     /// Après `354`, elle attend le message ; après un `AUTH` accepté, elle attend
@@ -69,6 +79,12 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Reply(cause) => write!(f, "réponse inencodable : {cause}"),
+            Error::UnsafeAddress => {
+                f.write_str("une adresse porte un octet qu'on refuse d'écrire dans une commande")
+            }
+            Error::NoRecipient => {
+                f.write_str("une remise a été demandée sans personne à qui écrire")
+            }
             Error::NotInCommandPhase => {
                 f.write_str("la session n'attend pas de commande à cet instant")
             }
@@ -101,6 +117,8 @@ mod tests {
         Error::NotInAuthExchange,
         Error::DataRefused,
         Error::ServerDomainInvalid(ams_proto_smtp::Error::MalformedDomain),
+        Error::UnsafeAddress,
+        Error::NoRecipient,
     ];
 
     #[test]

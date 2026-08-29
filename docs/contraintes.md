@@ -493,11 +493,16 @@ d'horloge (C1).
 
 ### Personne n'appelle encore le signataire, et c'est dit
 
-Ce serveur reçoit du courrier ; il n'en émet pas. Le relais est refusé
-explicitement (`RelayDenied`), et une signature n'a de sens qu'à l'émission. Le
-signataire est donc écrit, couvert et fuzzé, mais **aucun chemin ne l'emprunte**
-— il attend la soumission. C9 demande « DKIM en signature et en vérification » :
-la première moitié existe, la seconde tourne.
+Le relais entrant est refusé explicitement (`RelayDenied`), et une signature n'a
+de sens qu'à l'émission. Le signataire est donc écrit, couvert et fuzzé, mais
+**aucun chemin ne l'emprunte** — il attend qu'un message sorte d'ici. C9 demande
+« DKIM en signature et en vérification » : la première moitié existe, la seconde
+tourne.
+
+Depuis le 2026-08-29, ce serveur SAIT ÉMETTRE : le client SMTP sortant est écrit
+et éprouvé (voir plus bas). Ce qui manque au signataire n'est donc plus le
+transport, mais un message à signer — c'est-à-dire une soumission, ou l'envoi des
+rapports.
 
 **DMARC est commencé depuis le 2026-08-29** : la grammaire de l'enregistrement
 `_dmarc` (§6.3), l'alignement (§3.1) et le verdict (§6.6.2). Couvert à 100 % (C2)
@@ -588,11 +593,70 @@ organisationnels : se tromper dans le sens strict coûte une interrogation DNS ;
 se tromper dans l'autre autorise un envoi que personne n'a accepté.
 
 Ce qui n'est pas outillé : **l'envoi**. Les rapports sont déposés dans un
-dossier, accompagnés d'un fichier `.destinations` qui dit à qui ils reviennent ;
-les remettre demande un client SMTP sortant, que ce serveur n'a pas encore — le
-même qui manque au signataire DKIM. Les rapports d'échec (`ruf=`, RFC 6591) ne
-sont pas composés non plus : ils portent des morceaux de messages réels, et ce
-qu'on met dedans mérite sa propre décision.
+dossier, accompagnés d'un fichier `.destinations` qui dit à qui ils reviennent.
+Le transport, lui, existe depuis le 2026-08-29 (voir « Le client SMTP sortant ») ;
+ce qui manque entre les deux est la composition du message qui les portera —
+un `multipart/mixed` avec la pièce jointe en base64. Les rapports d'échec
+(`ruf=`, RFC 6591) ne sont pas composés non plus : ils portent des morceaux de
+messages réels, et ce qu'on met dedans mérite sa propre décision.
+
+## Le client SMTP sortant, depuis le 2026-08-29
+
+Jusqu'ici, tout venait à ce serveur : des pairs frappaient, il répondait. Émettre
+inverse la relation, et avec elle toutes les questions de confiance — **le
+serveur qu'on joint est désigné par le destinataire**, c'est-à-dire par quiconque
+publie un `MX`, et ce qu'il répond est une entrée hostile comme une autre.
+
+Les trois étages y sont, comme partout (C1). L'étage 1 lit les réponses
+(`ams-proto-smtp`) et point-farcit les corps ; l'étage 2 tient la session cliente
+(`ams-session`) ; l'étage 3 résout, se connecte, chiffre et conduit
+(`ams-loop-tokio`). Rien de tout cela ne partage une ligne avec le côté serveur :
+lire une réponse n'est pas en écrire une, et les faire dériver d'un même code
+ferait qu'un jour, en corrigeant l'un, on casserait l'autre.
+
+### TROIS REFUS QUI SE RESSEMBLENT ET QUI NE SONT PAS LE MÊME
+
+`4yz` : réessayer plus tard a un sens, et jeter ici perd du courrier qui serait
+passé. `5yz` : réessayer n'en a aucun, et insister revient à harceler un serveur
+qui a dit non. Le **`MX` nul** (RFC 7505) : le domaine déclare à l'avance ne
+recevoir aucun courrier, et le confondre avec une panne ferait réessayer des
+jours durant ce qu'il a explicitement fermé. Un serveur injoignable, lui, n'est
+aucun des trois : c'est une panne, donc temporaire.
+
+### LE CHIFFREMENT SORTANT N'AUTHENTIFIE PERSONNE, ET C'EST ÉCRIT
+
+Le `MX` vient d'un DNS **non validé** (pas de DNSSEC, cf. plus haut). Un tiers
+capable de détourner cette résolution peut aussi bien présenter un certificat
+parfaitement valide pour le nom qu'il vient de fabriquer : **vérifier le
+certificat contre le nom `MX` ne prouverait rien de plus que de ne pas le
+vérifier**, puisque la chaîne de confiance s'arrête un cran plus tôt.
+
+Ce qu'il faudrait pour authentifier vraiment, ce sont DANE (RFC 7672, qui demande
+DNSSEC) ou MTA-STS (RFC 8461, qui demande HTTPS et une politique publiée). Aucun
+des deux n'est ici, et les nommer vaut mieux que de laisser croire à une
+protection qui n'existe pas.
+
+Ce que le chiffrement apporte est réel et limité : on passe d'un espion passif à
+un attaquant actif. Lire le courrier de tout le monde sur un lien devient
+impossible ; il faut s'insérer dans chaque connexion, ce qui se voit et ce qui
+coûte. C'est la thèse de la RFC 7435, et c'est aussi pourquoi elle ne doit
+**jamais** être présentée comme une authentification.
+
+**Le repli, lui, n'est pas opportuniste.** Un serveur qui annonce `STARTTLS` puis
+refuse — la commande ou la poignée de main — ne nous fera pas parler en clair :
+c'est exactement le levier d'une attaque par déclassement. Et TLS 1.3 reste le
+plancher (C6), fût-ce au prix de quelques remises manquées.
+
+### Ce qui n'a pas encore d'appelant
+
+Le client est écrit, couvert à 100 %, fuzzé et **éprouvé contre notre propre
+serveur** — deux moitiés qui ne partagent aucun code, mises face à face. Il n'a
+pourtant pas encore de caller dans le binaire : son premier sera l'envoi des
+rapports DMARC, qui demande de composer un message MIME. Il n'y a pas non plus de
+**file d'attente** : `send` remet ou dit pourquoi il n'a pas pu, et c'est à
+l'appelant de décider s'il réessaie. Une file demande de la persistance, une
+politique de reprise et des avis de non-remise — trois décisions qui ne se
+prennent pas en passant.
 
 ### DNSSEC n'est pas validé, et c'est écrit partout
 

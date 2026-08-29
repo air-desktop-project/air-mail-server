@@ -325,3 +325,87 @@ fn nom_genre_et_fin(message: &[u8]) -> Option<(String, u16, usize)> {
     ]);
     Some((nom, genre, position.saturating_add(4)))
 }
+
+/// Ce qu'un résolveur de test sait répondre pour la remise sortante.
+pub enum Enregistrement {
+    /// Un `MX` : préférence et cible. **Une cible vide est le `MX` nul**
+    /// (RFC 7505), qui déclare que le domaine ne reçoit aucun courrier.
+    Mx(u16, &'static str),
+    /// Un `A`.
+    A([u8; 4]),
+}
+
+/// Monte un résolveur qui répond des `MX` et des `A`.
+///
+/// C'est ce qu'il faut pour éprouver la remise sortante : trouver le serveur
+/// d'un domaine demande les deux, et la moitié des décisions se prend sur ce
+/// que le DNS a dit — ou n'a pas dit.
+pub async fn resolveur_courrier(
+    table: &'static [(&'static str, Enregistrement)],
+) -> std::net::SocketAddr {
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("socket UDP");
+    let adresse = socket.local_addr().expect("adresse");
+    tokio::spawn(async move {
+        let mut recu = vec![0_u8; 2048];
+        loop {
+            let Ok((lus, pair)) = socket.recv_from(&mut recu).await else {
+                return;
+            };
+            let question = recu.get(..lus).unwrap_or_default().to_vec();
+            let Some((nom, genre, fin)) = nom_genre_et_fin(&question) else {
+                continue;
+            };
+            let trouves: Vec<&Enregistrement> = table
+                .iter()
+                .filter(|(connu, _)| connu.eq_ignore_ascii_case(&nom))
+                .map(|(_, valeur)| valeur)
+                .filter(|valeur| match valeur {
+                    Enregistrement::Mx(_, _) => genre == 15,
+                    Enregistrement::A(_) => genre == 1,
+                })
+                .collect();
+
+            let mut reponse = Vec::new();
+            reponse.extend_from_slice(question.get(..2).unwrap_or_default());
+            let drapeaux: u16 = if trouves.is_empty() { 0x8183 } else { 0x8180 };
+            reponse.extend_from_slice(&drapeaux.to_be_bytes());
+            reponse.extend_from_slice(&1_u16.to_be_bytes());
+            reponse.extend_from_slice(&u16::try_from(trouves.len()).unwrap_or(0).to_be_bytes());
+            reponse.extend_from_slice(&0_u16.to_be_bytes());
+            reponse.extend_from_slice(&0_u16.to_be_bytes());
+            reponse.extend_from_slice(question.get(12..fin).unwrap_or_default());
+            for valeur in trouves {
+                let (kind, donnees) = match valeur {
+                    Enregistrement::Mx(preference, cible) => {
+                        let mut rdata = Vec::from(preference.to_be_bytes());
+                        rdata.extend_from_slice(&nom_dns(cible));
+                        (15_u16, rdata)
+                    }
+                    Enregistrement::A(octets) => (1_u16, Vec::from(&octets[..])),
+                };
+                reponse.extend_from_slice(&[0xC0, 0x0C]);
+                reponse.extend_from_slice(&kind.to_be_bytes());
+                reponse.extend_from_slice(&1_u16.to_be_bytes());
+                reponse.extend_from_slice(&60_u32.to_be_bytes());
+                reponse
+                    .extend_from_slice(&u16::try_from(donnees.len()).expect("court").to_be_bytes());
+                reponse.extend_from_slice(&donnees);
+            }
+            let _ = socket.send_to(&reponse, pair).await;
+        }
+    });
+    adresse
+}
+
+/// Écrit un nom en étiquettes. Une chaîne vide donne la racine — le `MX` nul.
+fn nom_dns(nom: &str) -> Vec<u8> {
+    let mut octets = Vec::new();
+    for etiquette in nom.split('.').filter(|part| !part.is_empty()) {
+        octets.push(u8::try_from(etiquette.len()).expect("étiquette courte"));
+        octets.extend_from_slice(etiquette.as_bytes());
+    }
+    octets.push(0);
+    octets
+}

@@ -64,7 +64,7 @@ horloge.
 | Crate | Périmètre | État |
 | --- | --- | --- |
 | `ams-mime` | RFC 5322 et MIME — le socle des quatre protocoles | **squelette du message, et le domaine d'un `From:`** |
-| `ams-proto-smtp` | RFC 5321 | **commandes, réponses, phase de données** |
+| `ams-proto-smtp` | RFC 5321 | **commandes, réponses écrites ET lues, phase de données, point-farcissage** |
 | `ams-sasl` | RFC 4422/4616 : `PLAIN` et son base64 | **implémenté** |
 | `ams-proto-pop3` | RFC 1939 | **commandes et réponses** |
 | `ams-dns` | RFC 1035 : le codec d'un message | **question encodée, réponse décodée** |
@@ -78,10 +78,10 @@ des octets **et des actions**. Elles n'attendent jamais.
 
 | Crate | Périmètre | État |
 | --- | --- | --- |
-| `ams-session` | les sessions serveur | **SMTP et POP3 : sessions entières** |
+| `ams-session` | les sessions, serveur ET cliente | **SMTP et POP3 en réception, SMTP à l'émission** |
 | `ams-guard` | flooding et bannissement par source | **implémenté** |
 | `ams-auth` | le magasin d'identifiants, vérification Argon2id | **implémenté** |
-| `ams-tls` | TLS 1.3 uniquement, échange de clés post-quantique | **implémenté** |
+| `ams-tls` | TLS 1.3 uniquement, échange de clés post-quantique | **implémenté, en entrant et en sortant** |
 | `ams-dkim` | RFC 6376 | **vérifiées, câblées, et posées** |
 | `ams-spf` | RFC 7208 | **évalué, câblé, et écrit dans le message** |
 | `ams-dmarc` | RFC 7489 | **alignement, politique, et câblé dans la boucle** |
@@ -326,6 +326,48 @@ dans le domaine qui l'a demandée, **c'est à la destination de consentir**, en
 publiant `<demandeur>._report._dmarc.<sa-zone>` — un nom que l'attaquant ne peut
 pas écrire, puisqu'il est chez la victime. Une panne de résolution ne vaut pas un
 consentement.
+
+## Émettre : le client SMTP sortant
+
+Jusqu'ici, tout venait à ce serveur : des pairs frappaient, il répondait. Émettre
+inverse la relation, et avec elle toutes les questions de confiance — **le
+serveur qu'on joint est désigné par le destinataire**, c'est-à-dire par quiconque
+publie un `MX`, et ce qu'il répond est une entrée hostile comme une autre.
+
+Les trois étages y sont, et aucun ne partage une ligne avec le côté serveur :
+lire une réponse n'est pas en écrire une, et les faire dériver d'un même code
+ferait qu'un jour, en corrigeant l'un, on casserait l'autre.
+
+**Trois refus qui se ressemblent et qui ne sont pas le même.** `4yz` : réessayer
+plus tard a un sens, et jeter ici perd du courrier qui serait passé. `5yz` :
+réessayer n'en a aucun, et insister revient à harceler un serveur qui a dit non.
+Le `MX` nul (RFC 7505) : le domaine déclare à l'avance ne recevoir aucun
+courrier. Un serveur injoignable n'est aucun des trois — c'est une panne, donc
+temporaire.
+
+**Le chiffrement sortant n'authentifie personne, et c'est écrit.** Le `MX` vient
+d'un DNS non validé : un tiers capable de détourner cette résolution peut aussi
+bien présenter un certificat valide pour le nom qu'il vient de fabriquer, et
+vérifier ce certificat ne prouverait rien de plus que de ne pas le vérifier.
+DANE (RFC 7672) et MTA-STS (RFC 8461) sont ce qu'il faudrait ; ni l'un ni l'autre
+n'est ici. Ce qui est acquis est réel et limité : on passe d'un espion passif à
+un attaquant actif. **Le repli, lui, n'est pas opportuniste** — un serveur qui
+annonce `STARTTLS` puis refuse ne nous fera pas parler en clair.
+
+**Ce qui n'écrit rien à moitié.** Une adresse de destination peut venir d'un tiers
+— celle d'un rapport DMARC est publiée par le domaine qu'on rapporte. Un `CRLF`
+glissé dedans écrirait des commandes à notre place sur notre propre connexion :
+seul l'ASCII imprimable sans espace ni chevrons passe. Et un corps qui porte un
+`LF` isolé n'est pas « réparé » : il ne part pas, parce que ce qu'on émettrait ne
+serait plus ce qu'on a lu — et la signature DKIM qui le couvre ne vaudrait plus
+rien.
+
+Le client est éprouvé **contre notre propre serveur** : deux moitiés qui ne
+partagent aucun code, mises face à face. C'est là que se vérifie que le
+point-farcissage et sa défaite se répondent, et qu'un message contenant une ligne
+au seul point arrive intact. Il n'a pas encore d'appelant dans le binaire — son
+premier sera l'envoi des rapports — et il n'y a pas de file d'attente : `send`
+remet, ou dit pourquoi il n'a pas pu.
 
 **La quarantaine n'est pas encore un endroit.** `p=quarantine` demande de traiter
 le message comme suspect ; ce serveur n'a pas de dossier pour cela. Il le remet,

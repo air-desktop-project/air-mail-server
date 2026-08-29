@@ -27,6 +27,24 @@ pub enum Error {
     /// contrebande SMTP possible en 2023.
     MalformedLineEnding,
 
+    /// Ce qu'un serveur a répondu n'est pas une réponse.
+    ///
+    /// Trois chiffres, puis un tiret, une espace ou rien ; toutes les lignes du
+    /// même bloc portant le même code (RFC 5321 §4.2.1). Ce qui s'en écarte
+    /// n'est pas interprété « au mieux » : un bloc dont le code change en route
+    /// se lit différemment selon l'implémentation, et c'est la matière d'une
+    /// contrebande.
+    MalformedReply,
+
+    /// Une réponse porte plus de lignes que [`REPLY_LINES_MAX`](crate::REPLY_LINES_MAX).
+    ///
+    /// Une réponse de trois cent mille lignes serait parfaitement bien formée,
+    /// et coûterait tout autant à celui qui la lit.
+    TooManyReplyLines {
+        /// La borne franchie.
+        limit: usize,
+    },
+
     /// Le verbe n'appartient pas au vocabulaire SMTP.
     UnknownVerb,
 
@@ -150,6 +168,12 @@ impl fmt::Display for Error {
             Error::MalformedLineEnding => {
                 f.write_str("la ligne ne se termine pas proprement par CRLF")
             }
+            Error::MalformedReply => {
+                f.write_str("ce que le serveur a répondu n'est pas une réponse SMTP")
+            }
+            Error::TooManyReplyLines { limit } => {
+                write!(f, "réponse de plus de {limit} lignes")
+            }
             Error::UnknownVerb => f.write_str("verbe inconnu"),
             Error::ObsoleteVerb => f.write_str("verbe obsolète, retiré par la RFC 5321"),
             Error::MissingArgument => f.write_str("argument manquant"),
@@ -218,6 +242,8 @@ mod tests {
         Error::ReplyLineTooLong { limit: 512 },
         Error::BufferTooSmall { needed: 40 },
         Error::Data(crate::DataFault::BareLineEnding),
+        Error::MalformedReply,
+        Error::TooManyReplyLines { limit: 64 },
     ];
 
     #[test]

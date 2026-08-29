@@ -121,6 +121,77 @@ impl Resolver {
         Txt::Trouves(trouves)
     }
 
+    /// Les serveurs de courrier d'un domaine, du plus préféré au moins
+    /// (RFC 5321 §5.1).
+    ///
+    /// # Le `MX` nul veut dire « n'écrivez pas ici » (RFC 7505)
+    ///
+    /// Un domaine qui publie **un seul** `MX`, de préférence zéro et de cible
+    /// racine (`.`), déclare qu'il ne reçoit aucun courrier. Ce n'est pas une
+    /// absence de `MX` : c'est un refus, et il vaut un échec DÉFINITIF. Le
+    /// confondre avec une panne ferait réessayer pendant des jours ce qu'un
+    /// domaine a explicitement fermé.
+    pub(crate) async fn mx(&self, domaine: &[u8]) -> Mx {
+        let octets = match self.interroger(domaine, Kind::Mx).await {
+            Issue::Reponse(octets) => octets,
+            Issue::Absent => return Mx::Absent,
+            Issue::Panne => return Mx::Panne,
+        };
+        let Ok(message) = Message::parse(&octets) else {
+            return Mx::Panne;
+        };
+        let mut serveurs: Vec<(u16, Vec<u8>)> = message
+            .answers()
+            .filter(|enregistrement| enregistrement.kind() == Kind::Mx.code())
+            .filter_map(|enregistrement| enregistrement.exchange().ok())
+            .map(|(preference, nom)| (preference, nom.as_bytes().to_vec()))
+            .collect();
+        if serveurs.len() == 1
+            && serveurs
+                .first()
+                .is_some_and(|(preference, nom)| *preference == 0 && nom.is_empty())
+        {
+            return Mx::Nul;
+        }
+        // Les cibles racines qui ne sont PAS seules s'écartent : elles ne
+        // désignent aucune machine, et rien ne dit ce que leur auteur voulait.
+        serveurs.retain(|(_, nom)| !nom.is_empty());
+        if serveurs.is_empty() {
+            return Mx::Absent;
+        }
+        // À préférence égale, la RFC 5321 §5.1 demande un ordre ALÉATOIRE, pour
+        // répartir la charge entre serveurs équivalents. On s'en tient à l'ordre
+        // du serveur : mélanger demanderait de l'aléa à chaque remise, et
+        // l'équilibrage d'un serveur qui n'émet que des rapports n'intéresse
+        // personne.
+        serveurs.sort_by_key(|(preference, _)| *preference);
+        Mx::Trouves(serveurs)
+    }
+
+    /// Les adresses d'un nom, IPv4 puis IPv6.
+    ///
+    /// **L'ordre n'est pas une préférence de protocole** : c'est celui qui rate
+    /// le moins souvent depuis une machine dont on ne sait pas si elle a une
+    /// route IPv6. Chacune sera essayée à son tour.
+    pub(crate) async fn addresses(&self, nom: &[u8]) -> Vec<IpAddr> {
+        let mut trouvees = Vec::new();
+        for genre in [Kind::A, Kind::Aaaa] {
+            let Issue::Reponse(octets) = self.interroger(nom, genre).await else {
+                continue;
+            };
+            let Ok(message) = Message::parse(&octets) else {
+                continue;
+            };
+            trouvees.extend(
+                message
+                    .answers()
+                    .filter(|enregistrement| enregistrement.kind() == genre.code())
+                    .filter_map(|enregistrement| enregistrement.address()),
+            );
+        }
+        trouvees
+    }
+
     pub(crate) async fn interroger(&self, nom: &[u8], kind: Kind) -> Issue {
         let mut derniere = Issue::Panne;
         for serveur in self.serveurs.iter() {
@@ -245,6 +316,19 @@ pub(crate) enum Txt {
     Trouves(Vec<Vec<u8>>),
     /// Le nom n'existe pas, ou ne porte pas de `TXT`.
     Absent,
+    /// On n'a pas su demander, ou pas su lire.
+    Panne,
+}
+
+/// Ce qu'une question `MX` a rendu.
+pub(crate) enum Mx {
+    /// Des serveurs, du plus préféré au moins.
+    Trouves(Vec<(u16, Vec<u8>)>),
+    /// Le domaine ne publie pas de `MX` : c'est le nom lui-même qui reçoit
+    /// (RFC 5321 §5.1, « `MX` implicite »).
+    Absent,
+    /// Le domaine déclare ne recevoir aucun courrier (RFC 7505).
+    Nul,
     /// On n'a pas su demander, ou pas su lire.
     Panne,
 }

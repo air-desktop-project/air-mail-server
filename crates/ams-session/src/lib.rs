@@ -119,6 +119,7 @@
 #[cfg(test)]
 extern crate std;
 
+mod client;
 mod config;
 mod digits;
 mod error;
@@ -133,6 +134,7 @@ mod tampon;
 /// Réexportée pour que l'appelant n'ait pas à dépendre d'`ams-spf` seulement
 /// pour dimensionner un tableau.
 pub use ams_spf::{Identity, RECEIVED_SPF_MAX};
+pub use client::{CLIENT_COMMAND_MAX, ClientConfig, ClientOutcome, ClientStep, SmtpClient};
 pub use config::{Capabilities, Config, SenderPolicy};
 pub use error::Error;
 pub use policy::{Authenticator, Policy, RecipientVerdict};

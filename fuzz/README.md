@@ -41,6 +41,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_dkim` | `seeds/dkim` | signature, clé et canonicalisation — **le découpage ne change rien** |
 | `fuzz_ams_dmarc` | `seeds/dmarc` | politique et alignement — **l'alignement est symétrique** |
 | `fuzz_ams_dmarc_report` | `seeds/dmarc-report` | destinations et rapport agrégé — **le rapport ne s'injecte pas** |
+| `fuzz_ams_smtp_client` | `seeds/smtp-client` | réponses lues et corps émis — **le message ne se termine pas tout seul** |
 
 Les variantes « bornes » existent parce que les bornes de C3 viennent de la
 configuration (C8), donc d'un administrateur : un zéro, un `usize::MAX`, ou toute
@@ -258,6 +259,23 @@ d'enveloppe : **ce que le pair a dicté**.
 5. **Le nom interrogé pour vérifier une destination est toujours dans la zone de
    cette destination.** C'est tout ce qui empêche l'attaquant de se donner le
    droit d'être rapporté à quelqu'un d'autre.
+
+### Le côté ÉMETTEUR de SMTP (cinq, dont LA CONTREBANDE PAR L'AUTRE BOUT)
+
+Jusqu'ici, tout venait à ce serveur. Émettre inverse la relation : **le serveur
+auquel on remet est désigné par le destinataire**, et ses réponses décident de ce
+qu'on fait du message.
+
+1. Rien ne panique, quels que soient les octets.
+2. **Une réponse délimitée se relit** : si `reply_len` rend une longueur,
+   `Reply::parse` accepte exactement ces octets-là, et toutes ses lignes portent
+   le même code.
+3. **`Done` EST TERMINAL** : une session qui a conclu ne repart pas. Sans cela,
+   un pair bavard pourrait faire remettre deux fois le même message.
+4. **UN CORPS FARCI NE PEUT PAS SE TERMINER TOUT SEUL** : la seule ligne au point
+   est celle qu'on écrit à la fin. C'est la contrebande SMTP, et c'est la
+   propriété qui compte le plus ici.
+5. **Le farcissage ne dépend pas du découpage.**
 
 ### DKIM (sept, dont L'INDÉPENDANCE AU DÉCOUPAGE)
 
@@ -645,6 +663,18 @@ domaine en se reposant sur l'absence d'un second octet est exactement le
 raisonnement qui finit par céder, le jour où quelqu'un ajoute une jointure de
 chemin ailleurs. Chaque étiquette doit désormais porter quelque chose.
 
+**`fuzz_ams_smtp_client`, en quelques secondes, à sa première campagne.** Le
+texte d'une réponse pouvait porter un `CR` ou un `LF` isolé : `250 a\nb\r\n`
+passait. Ce qui suivait le saut de ligne était du texte pour nous, et une ligne
+pour tout ce qui lirait ce texte ensuite — un journal, un rapport, un message de
+non-remise. **C'est la contrebande SMTP prise par l'autre bout**, et c'est
+exactement la faute que ce dépôt ferme partout ailleurs.
+
+Le correctif refuse tout octet de contrôle dans le texte d'une réponse, la
+tabulation exceptée (RFC 5321 §4.2 la prévoit). Les octets HAUTS, eux, passent :
+des serveurs en émettent dans leur bannière, et refuser une remise pour un accent
+coûterait du courrier sans rien protéger — on ne les interprète jamais.
+
 ## Résultats
 
 | Date | Cible | Exécutions | Plantages |
@@ -676,6 +706,8 @@ chemin ailleurs. Chaque étiquette doit désormais porter quelque chose.
 | 2026-08-29 | `fuzz_ams_dmarc_report` | (avant correctif) | **1, corrigé** |
 | 2026-08-29 | `fuzz_ams_dmarc_report` | 1 625 597 (221 s) | 0 |
 | 2026-08-29 | `fuzz_ams_config` (avec les rapports) | 222 412 (71 s) | 0 |
+| 2026-08-29 | `fuzz_ams_smtp_client` | (avant correctif) | **1, corrigé** |
+| 2026-08-29 | `fuzz_ams_smtp_client` | 8 247 626 (241 s) | 0 |
 | 2026-08-29 | `fuzz_ams_config` (avec SPF) | 193 256 (61 s) | 0 |
 | 2026-08-29 | `fuzz_ams_session_smtp` (avec SPF) | 381 710 (61 s) | 0 |
 | 2026-08-28 | `fuzz_ams_session_smtp` (SASL) | 521 646 (91 s) | 0 |
