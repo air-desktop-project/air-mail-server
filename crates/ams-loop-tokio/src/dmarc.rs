@@ -29,6 +29,7 @@ use ams_dmarc::{
 };
 use ams_mime::{Limits as MimeLimits, Message, author_domain};
 
+use crate::reports::PolitiqueLue;
 use crate::resolver::{Resolver, Txt};
 
 /// Ce que DMARC a conclu d'un message.
@@ -63,6 +64,25 @@ pub struct DmarcResult {
     /// Faux quand le verdict passe, quand le domaine ne demande rien, ou quand
     /// le tirage de `pct=` a désigné ce message pour être épargné.
     pub applies: bool,
+    /// De quoi rapporter ce message, quand il y avait une politique à lire.
+    ///
+    /// **`None` veut dire qu'il n'y a rien à rapporter** : un domaine qui ne
+    /// publie pas de politique n'attend pas de rapport, et lui en envoyer un
+    /// serait du courrier qu'il n'a pas demandé.
+    pub report: Option<PourRapport>,
+}
+
+/// Ce qu'un rapport dira de la politique qu'on a lue, et à qui.
+#[derive(Debug, Clone)]
+pub struct PourRapport {
+    /// La politique **telle qu'elle a été lue**.
+    pub published: PolitiqueLue,
+    /// La liste `rua=`, telle quelle. Vide s'il n'y en avait pas.
+    pub destinations: String,
+    /// DKIM s'alignait-il ?
+    pub dkim: Verdict,
+    /// SPF s'alignait-il ?
+    pub spf: Verdict,
 }
 
 /// Ce qu'un message a obtenu de SPF et de DKIM.
@@ -108,6 +128,7 @@ impl DmarcChecker {
             verdict: DmarcVerdict::Unusable,
             policy: Policy::None,
             applies: false,
+            report: None,
         };
 
         let Some(from) = domaine_de_l_auteur(entetes) else {
@@ -167,6 +188,21 @@ impl DmarcChecker {
             &liste,
         );
 
+        resultat.report = Some(PourRapport {
+            published: PolitiqueLue {
+                dkim_alignment: enregistrement.dkim_alignment,
+                spf_alignment: enregistrement.spf_alignment,
+                policy: enregistrement.policy,
+                subdomain_policy: enregistrement.subdomain_policy,
+                percent: enregistrement.percent,
+            },
+            destinations: enregistrement
+                .aggregate_reports
+                .map(|brut| String::from_utf8_lossy(brut).into_owned())
+                .unwrap_or_default(),
+            dkim: juge.dkim,
+            spf: juge.spf,
+        });
         resultat.policy = juge.policy;
         resultat.verdict = match juge.verdict {
             Verdict::Pass => DmarcVerdict::Pass,

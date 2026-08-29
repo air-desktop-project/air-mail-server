@@ -1,5 +1,6 @@
 //! La boucle d'acceptation.
 
+use core::time::Duration;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -12,8 +13,8 @@ use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 
 use crate::{
-    Delivery, DkimChecker, DmarcChecker, Error, SenderChecker, Service, SharedGuard, Timeouts,
-    serve_connection,
+    Delivery, DkimChecker, DmarcChecker, Error, ReportSpool, SenderChecker, Service, SharedGuard,
+    SpoolTally, Timeouts, serve_connection,
 };
 
 /// Ce qui borne le service.
@@ -57,6 +58,18 @@ pub struct ServeOptions {
     /// Voir [`Service::dmarc`] : c'est le seul des trois qui peut refuser un
     /// message.
     pub dmarc: Option<DmarcChecker>,
+    /// Où déposer les rapports agrégés (RFC 7489 §7.2).
+    ///
+    /// Voir [`Service::reports`] : son absence ne change aucun verdict.
+    pub reports: Option<Arc<ReportSpool>>,
+    /// Tous les combien vider le journal des rapports.
+    ///
+    /// La RFC 7489 §6.3 laisse le domaine demander un intervalle (`ri=`, un jour
+    /// par défaut) ; **cette valeur-ci est celle du receveur**, et elle vaut pour
+    /// tous les domaines. Les honorer un par un demanderait un journal par
+    /// intervalle, et rien n'oblige à leur obéir à la seconde (§7.2 : « au
+    /// mieux »).
+    pub report_interval: Duration,
 }
 
 impl Default for ServeOptions {
@@ -68,6 +81,9 @@ impl Default for ServeOptions {
             spf: None,
             dkim: None,
             dmarc: None,
+            reports: None,
+            // Un jour, comme le défaut de `ri=`.
+            report_interval: Duration::from_secs(86_400),
         }
     }
 }
@@ -90,6 +106,8 @@ pub struct Stats {
     pub dkim: DkimSums,
     /// Ce que DMARC a conclu, toutes connexions confondues.
     pub dmarc: DmarcSums,
+    /// Ce que les vidanges du journal des rapports ont produit.
+    pub reports: SpoolTally,
 }
 
 /// Le compte des verdicts DMARC, sur toute la durée du service.
@@ -226,8 +244,19 @@ where
     let places = Arc::new(Semaphore::new(options.max_connections));
     let fabrique = Arc::new(make_delivery);
     let comptes_dkim = Arc::new(CompteurDkim::default());
+    let comptes_rapports = Arc::new(CompteurRapports::default());
     let mut stats = Stats::default();
     let mut arret = core::pin::pin!(shutdown);
+
+    // L'HORLOGE BAT MÊME SANS JOURNAL, et son battement ne fait alors rien. Un
+    // `select!` dont une branche existe ou non selon la configuration se lit
+    // deux fois plus mal qu'un battement inutile toutes les vingt-quatre heures.
+    //
+    // Le premier `tick` est immédiat (c'est le contrat de `interval`) : on le
+    // consomme ici, sans quoi la première vidange aurait lieu sur un journal
+    // vide, à la seconde du démarrage.
+    let mut horloge = tokio::time::interval(options.report_interval.max(Duration::from_secs(1)));
+    horloge.tick().await;
 
     loop {
         let acceptee = tokio::select! {
@@ -236,7 +265,30 @@ where
             // serveur qu'on ne peut pas arrêter sous charge est un serveur qu'on
             // finit par tuer.
             biased;
-            () = &mut arret => return Ok(avec_dkim(stats, &comptes_dkim)),
+            () = &mut arret => {
+                // ON VIDE AVANT DE PARTIR, et on l'attend. Ce qui a été observé
+                // pendant la dernière période n'a pas d'autre occasion d'être
+                // écrit : le laisser en mémoire serait perdre une journée de
+                // rapports à chaque redémarrage.
+                if let Some(spool) = options.reports.as_ref() {
+                    comptes_rapports.ajouter(spool.vider().await);
+                }
+                return Ok(avec_dkim(stats, &comptes_dkim, &comptes_rapports));
+            }
+            _ = horloge.tick() => {
+                // LA VIDANGE NE BLOQUE PAS L'ACCEPTATION. Vérifier les
+                // destinations demande des interrogations DNS, et un serveur qui
+                // n'accepte plus rien pendant qu'il compose ses rapports serait
+                // une porte fermée à heure fixe.
+                if let Some(spool) = options.reports.as_ref()
+                    && spool.en_attente()
+                {
+                    let spool = Arc::clone(spool);
+                    let comptes = Arc::clone(&comptes_rapports);
+                    tokio::spawn(async move { comptes.ajouter(spool.vider().await) });
+                }
+                continue;
+            }
             acceptee = listener.accept() => acceptee,
         };
 
@@ -254,7 +306,7 @@ where
 
         let Ok(place) = Arc::clone(&places).acquire_owned().await else {
             // Le sémaphore n'est jamais fermé : ce chemin ne s'emprunte pas.
-            return Ok(avec_dkim(stats, &comptes_dkim));
+            return Ok(avec_dkim(stats, &comptes_dkim, &comptes_rapports));
         };
         let comptes = Arc::clone(&comptes_dkim);
         let policy = Arc::clone(&policy);
@@ -268,6 +320,7 @@ where
         let spf = options.spf.clone();
         let dkim = options.dkim.clone();
         let dmarc = options.dmarc.clone();
+        let rapports = options.reports.clone();
 
         tokio::spawn(async move {
             let mut flux = flux;
@@ -280,6 +333,7 @@ where
                 spf,
                 dkim,
                 dmarc,
+                reports: rapports,
             };
             // L'ÉCHEC d'une connexion ne regarde qu'elle — le journal viendra
             // avec `air-log`. Ce qu'elle a CONCLU des signatures, en revanche,
@@ -295,11 +349,43 @@ where
     }
 }
 
+/// Ce que les vidanges ont produit, tous fils confondus.
+#[derive(Debug, Default)]
+struct CompteurRapports {
+    reports: AtomicU64,
+    rows: AtomicU64,
+    destinations: AtomicU64,
+    refused: AtomicU64,
+    errors: AtomicU64,
+}
+
+impl CompteurRapports {
+    fn ajouter(&self, compte: SpoolTally) {
+        self.reports.fetch_add(compte.reports, Ordering::Relaxed);
+        self.rows.fetch_add(compte.rows, Ordering::Relaxed);
+        self.destinations
+            .fetch_add(compte.destinations, Ordering::Relaxed);
+        self.refused.fetch_add(compte.refused, Ordering::Relaxed);
+        self.errors.fetch_add(compte.errors, Ordering::Relaxed);
+    }
+
+    fn sommes(&self) -> SpoolTally {
+        SpoolTally {
+            reports: self.reports.load(Ordering::Relaxed),
+            rows: self.rows.load(Ordering::Relaxed),
+            destinations: self.destinations.load(Ordering::Relaxed),
+            refused: self.refused.load(Ordering::Relaxed),
+            errors: self.errors.load(Ordering::Relaxed),
+        }
+    }
+}
+
 /// Verse les comptes DKIM dans le résumé du service.
-fn avec_dkim(stats: Stats, comptes: &CompteurDkim) -> Stats {
+fn avec_dkim(stats: Stats, comptes: &CompteurDkim, rapports: &CompteurRapports) -> Stats {
     Stats {
         dkim: comptes.sommes(),
         dmarc: comptes.sommes_dmarc(),
+        reports: rapports.sommes(),
         ..stats
     }
 }
@@ -315,7 +401,7 @@ pub fn source_de(adresse: SocketAddr) -> Source {
 
 #[cfg(test)]
 mod tests {
-    use super::{DkimSums, DmarcSums, ServeOptions, Stats, serve, source_de};
+    use super::{DkimSums, DmarcSums, ServeOptions, SpoolTally, Stats, serve, source_de};
     use crate::{Delivery, DeliveryFailure, Error, SharedGuard, Timeouts};
     use ams_guard::{Source, Thresholds};
     use ams_proto_smtp::{Limits, Path};
@@ -505,6 +591,7 @@ mod tests {
                 failed: 0,
                 dkim: DkimSums::default(),
                 dmarc: DmarcSums::default(),
+                reports: SpoolTally::default(),
             }
         );
         assert!(!format!("{:?}", Stats::default()).is_empty());

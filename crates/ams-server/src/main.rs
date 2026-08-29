@@ -44,8 +44,8 @@ use ams_auth::Account;
 use ams_config::{Configuration, Enforcement, Tls};
 use ams_loop_tokio::pop3::serve_pop3;
 use ams_loop_tokio::{
-    DkimChecker, DmarcChecker, SenderChecker, ServeOptions, SharedGuard, Timeouts, refuse_root,
-    serve,
+    DkimChecker, DmarcChecker, ReportSpool, SenderChecker, ServeOptions, SharedGuard, Timeouts,
+    refuse_root, serve,
 };
 use ams_session::{Capabilities, Config, SenderPolicy};
 use ams_store::Maildir;
@@ -339,7 +339,8 @@ async fn servir(fichier: &Path) -> Result<(), String> {
                 "DMARC non évalué — une liste de suffixes est nommée, mais aucun résolveur"
             ),
             (None, _) => String::from(
-                "DMARC non évalué — aucune liste de suffixes publics                  (`air-mail-admin --public-suffix-list …`)"
+                "DMARC non évalué — aucune liste de suffixes publics (`air-mail-admin \
+                 --public-suffix-list …`)"
             ),
             (Some(_), false) => format!(
                 "DMARC évalué et RETENU, sans rien opposer ; suffixes publics `{}`",
@@ -349,6 +350,52 @@ async fn servir(fichier: &Path) -> Result<(), String> {
                 "DMARC APPLIQUÉ — un `p=reject` est opposé (550) ; suffixes publics `{}`. \
                  La quarantaine, elle, n'est pas encore un endroit : ces messages sont remis.",
                 options.dmarc.public_suffix_list
+            ),
+        }
+    );
+
+    // ── LE JOURNAL DES RAPPORTS (RFC 7489 §7.2) ─────────────────────────────
+    //
+    // Il ne se compose que si DMARC est évalué : sans évaluation, il n'y aurait
+    // rien à rapporter. Et il ne s'ouvre que si un dossier est nommé — composer
+    // des rapports est un service qu'on rend à autrui, et il se demande.
+    let journal_rapports = match (verificateur.as_ref(), options.dmarc.rapporte()) {
+        (Some(checker), true) => Some(std::sync::Arc::new(ReportSpool::new(
+            if options.dmarc.report_org_name.is_empty() {
+                options.domain.clone()
+            } else {
+                options.dmarc.report_org_name.clone()
+            },
+            if options.dmarc.report_email.is_empty() {
+                format!("postmaster@{}", options.domain)
+            } else {
+                options.dmarc.report_email.clone()
+            },
+            PathBuf::from(&options.dmarc.report_directory),
+            checker.resolver().clone(),
+        ))),
+        _ => None,
+    };
+    let intervalle_rapports =
+        Duration::from_secs(u64::from(if options.dmarc.report_interval_seconds == 0 {
+            86_400
+        } else {
+            options.dmarc.report_interval_seconds
+        }));
+    eprintln!(
+        "air-mail-server : {}",
+        match &journal_rapports {
+            None if options.dmarc.rapporte() => String::from(
+                "rapports DMARC non composés — un dossier est nommé, mais DMARC n'est pas évalué"
+            ),
+            None => String::from(
+                "rapports DMARC non composés — aucun dossier nommé (`air-mail-admin                  --dmarc-report-dir …`)"
+            ),
+            Some(_) => format!(
+                "rapports DMARC déposés dans `{}` toutes les {} s. DÉPOSÉS, PAS ENVOYÉS : \
+                 ce serveur n'a pas de client SMTP sortant.",
+                options.dmarc.report_directory,
+                intervalle_rapports.as_secs()
             ),
         }
     );
@@ -487,6 +534,10 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         // Le seul des trois qui peut REFUSER un message — et seulement quand le
         // domaine du `From:` le demande.
         dmarc: verificateur_dmarc,
+        // Ce qui permettra aux domaines protégés de durcir leur politique sans
+        // le faire à l'aveugle.
+        reports: journal_rapports,
+        report_interval: intervalle_rapports,
         // `None` quand aucun résolveur n'est nommé — et la session ne demande
         // alors aucune vérification. Les deux vont ensemble, et la boucle refuse
         // l'assemblage inverse avant même la bannière.
@@ -589,6 +640,19 @@ async fn servir(fichier: &Path) -> Result<(), String> {
             dmarc.temp_error,
             dmarc.unusable
         );
+        let rapports = stats.reports;
+        if rapports.reports > 0 || rapports.errors > 0 || rapports.refused > 0 {
+            eprintln!(
+                "air-mail-server : rapports DMARC ; {} déposé(s) pour {} ligne(s), {} \
+                 destination(s) retenue(s), {} ÉCARTÉE(S) faute de consentement (§7.1), {} \
+                 en échec",
+                rapports.reports,
+                rapports.rows,
+                rapports.destinations,
+                rapports.refused,
+                rapports.errors
+            );
+        }
     }
     Ok(())
 }

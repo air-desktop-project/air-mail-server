@@ -55,6 +55,7 @@ async fn annoncer_starttls_sans_materiel_est_refuse_avant_la_banniere() {
         spf: None,
         dkim: None,
         dmarc: None,
+        reports: None,
     };
     let resultat = serve_connection(&mut serveur, &service, NotreDomaine, &mut Neant, PAIR).await;
     assert!(matches!(resultat, Err(Error::CapabilityNotSupported)));
@@ -79,6 +80,7 @@ async fn une_commande_derriere_starttls_n_est_jamais_executee() {
         spf: None,
         dkim: None,
         dmarc: None,
+        reports: None,
     };
 
     let (mut serveur, mut client) = tokio::io::duplex(4096);
@@ -140,6 +142,7 @@ async fn une_poignee_de_main_ratee_compte_comme_une_trame_invalide() {
         spf: None,
         dkim: None,
         dmarc: None,
+        reports: None,
     };
 
     let (mut serveur, mut client) = tokio::io::duplex(4096);
@@ -193,6 +196,7 @@ async fn openssl_monte_en_chiffrement_et_le_ehlo_suivant_change() {
             spf: None,
             dkim: None,
             dmarc: None,
+            reports: None,
         };
         serve_connection(&mut flux, &service, NotreDomaine, &mut Neant, PAIR).await
     });

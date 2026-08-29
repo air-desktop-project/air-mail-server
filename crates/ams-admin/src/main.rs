@@ -264,6 +264,20 @@ fn afficher(config: &Configuration) {
             }
         );
         println!("  suffixes publics {}", config.dmarc.public_suffix_list);
+        if config.dmarc.rapporte() {
+            println!("  rapports         {}", config.dmarc.report_directory);
+            println!(
+                "  vidange          toutes les {} s",
+                if config.dmarc.report_interval_seconds == 0 {
+                    86_400
+                } else {
+                    config.dmarc.report_interval_seconds
+                }
+            );
+            println!("  DÉPOSÉS, PAS ENVOYÉS — ce serveur n'a pas de client SMTP sortant");
+        } else {
+            println!("  rapports         AUCUN DOSSIER — rien n'est rapporté aux domaines");
+        }
     } else {
         println!("DMARC              AUCUNE LISTE DE SUFFIXES — l'alignement n'est pas évalué");
     }

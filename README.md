@@ -304,6 +304,29 @@ toutes les semaines, et l'alignement relâché en dépend. Embarquée, elle
 vieillirait avec le binaire sans que personne ne sache de quand date la sienne.
 Sans elle, DMARC n'est pas évalué — et le serveur le dit au démarrage.
 
+**Les rapports agrégés (§7.2) sont composés, nommés, compressés et déposés.**
+Sans eux, un domaine durcit sa politique à l'aveugle : il découvre ses
+prestataires oubliés en même temps que ses correspondants découvrent que son
+courrier ne passe plus. Un rapport est un dénombrement, jamais une copie — deux
+messages qui se ressemblent ne font qu'une ligne, et rien n'y désigne un message
+en particulier. **On y rapporte ce qu'on a FAIT**, jamais ce qui était demandé :
+un message que `p=quarantine` visait et que ce serveur a remis se rapporte
+`none`, parce que c'est la vérité.
+
+Ils sont déposés, **pas envoyés** : remettre un rapport demande un client SMTP
+sortant, que ce serveur n'a pas encore. Chaque rapport est accompagné d'un
+fichier `.destinations`, et ce fichier est le résultat d'un contrôle sans lequel
+DMARC serait une arme.
+
+**SANS LA VÉRIFICATION DE §7.1, DMARC EST UN AMPLIFICATEUR.** N'importe qui peut
+publier `rua=mailto:victime@banque.test` sous un domaine qu'il détient, puis
+émettre en masse en son nom : tous les receveurs du monde composeraient alors un
+rapport et l'enverraient à la victime. La parade : quand la destination n'est pas
+dans le domaine qui l'a demandée, **c'est à la destination de consentir**, en
+publiant `<demandeur>._report._dmarc.<sa-zone>` — un nom que l'attaquant ne peut
+pas écrire, puisqu'il est chez la victime. Une panne de résolution ne vaut pas un
+consentement.
+
 **La quarantaine n'est pas encore un endroit.** `p=quarantine` demande de traiter
 le message comme suspect ; ce serveur n'a pas de dossier pour cela. Il le remet,
 et consigne la demande. Le refuser serait faire plus que ce que le domaine a

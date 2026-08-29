@@ -29,6 +29,9 @@ ams-dmarc = { workspace = true }
 # champs pour savoir lesquels une signature couvre.
 ams-mime = { workspace = true }
 tokio = { workspace = true }
+# `gzip` pour les rapports DMARC (RFC 7489 §7.2.1) : un rapport agrégé remis par
+# courrier DOIT être compressé.
+flate2 = { workspace = true }
 tokio-rustls = { workspace = true }
 # `rustls` est nommée pour un SEUL type : `ServerConfig`, qui figure dans la
 # signature publique. La boucle ne construit aucun fournisseur — celui-ci vient

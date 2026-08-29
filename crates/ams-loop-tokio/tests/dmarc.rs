@@ -231,6 +231,7 @@ async fn message_refuse(applique: bool) -> (std::string::String, u32) {
             spf: None,
             dkim: None,
             dmarc: Some(verificateur),
+            reports: None,
         };
         serve_connection(&mut flux, &service, NotreDomaine, &mut Neant, PAIR).await
     });

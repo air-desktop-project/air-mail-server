@@ -126,6 +126,13 @@ pub struct SenderIdentity<'s> {
     pub sender: &'s [u8],
     /// Le nom annoncé au `HELO`, pour `%{h}`.
     pub helo: &'s [u8],
+    /// LAQUELLE des deux identités a été vérifiée.
+    ///
+    /// Un rapport DMARC doit le dire (`<scope>`), et un journal a tout intérêt
+    /// à le dire aussi : « SPF a réussi » ne veut pas la même chose selon qu'il
+    /// s'agit de l'enveloppe ou d'un nom annoncé au `HELO`, que personne ne
+    /// vérifie par ailleurs.
+    pub scope: Identity,
 }
 
 /// Ce que l'appelant a fait du message reçu.
@@ -682,6 +689,11 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
             domain: self.domaine_verifie.as_bytes(),
             sender: self.expediteur.as_bytes(),
             helo: self.helo.as_bytes(),
+            scope: if self.identite_helo {
+                Identity::Helo
+            } else {
+                Identity::MailFrom
+            },
         })
     }
 

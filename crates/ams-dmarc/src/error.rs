@@ -45,6 +45,15 @@ pub enum Error {
     BufferTooSmall,
     /// Le domaine est trop long pour qu'on puisse en nommer la politique.
     DomainTooLong,
+    /// Une destination de rapport (`rua=`, `ruf=`) n'est pas une URI.
+    MalformedUri,
+    /// La taille maximale accolée à une destination n'en est pas une.
+    MalformedSize,
+    /// Une valeur porte un octet qu'on refuse d'écrire — voir
+    /// [`report::aggregate`](crate::report::aggregate).
+    NotPrintable,
+    /// Un rapport agrégé n'a aucune ligne, et l'annexe C en exige une.
+    EmptyReport,
 }
 
 impl fmt::Display for Error {
@@ -62,6 +71,10 @@ impl fmt::Display for Error {
             Self::MalformedInterval => "l'intervalle de rapport n'est pas un nombre",
             Self::BufferTooSmall => "le tampon offert ne suffit pas",
             Self::DomainTooLong => "le domaine est trop long pour qu'on en nomme la politique",
+            Self::MalformedUri => "la destination de rapport n'est pas une URI",
+            Self::MalformedSize => "la taille maximale d'un rapport n'est pas un nombre",
+            Self::NotPrintable => "une valeur porte un octet qu'on refuse d'écrire",
+            Self::EmptyReport => "un rapport agrégé sans aucune ligne n'est pas un rapport",
         };
         f.write_str(texte)
     }
@@ -98,6 +111,10 @@ mod tests {
             Error::MalformedInterval,
             Error::BufferTooSmall,
             Error::DomainTooLong,
+            Error::MalformedUri,
+            Error::MalformedSize,
+            Error::NotPrintable,
+            Error::EmptyReport,
         ] {
             let mut compteur = Compteur(0);
             core::fmt::write(&mut compteur, format_args!("{erreur}")).expect("formatable");

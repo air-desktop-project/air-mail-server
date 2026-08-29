@@ -146,6 +146,38 @@ struct Dmarc {
   # Ce qu'on fait d'un message que la politique condamne.
   enforcement @1 :Enforcement;
 
+  # Le dossier où DÉPOSER les rapports agrégés (RFC 7489 §7.2), ou une chaîne
+  # vide.
+  #
+  # VIDE, AUCUN RAPPORT N'EST COMPOSÉ. C'est la même règle que partout ailleurs
+  # ici : pas de drapeau, l'absence de valeur EST l'absence de service.
+  #
+  # Les rapports sont déposés, jamais envoyés : envoyer demande un client SMTP
+  # sortant que ce serveur n'a pas encore. Chaque rapport est accompagné d'un
+  # fichier `.destinations` qui dit à qui il revient — après la vérification de
+  # §7.1, sans laquelle DMARC serait un amplificateur.
+  reportDirectory @2 :Text;
+
+  # Le nom sous lequel ce receveur se présente dans ses rapports (`<org_name>`).
+  #
+  # Il devient aussi le premier morceau du nom de fichier (§7.2.1.1), donc il ne
+  # peut porter que des lettres, des chiffres, un tiret, un point ou un souligné.
+  # Vide, le nom annoncé par le serveur (`domain`) en tient lieu.
+  reportOrgName @3 :Text;
+
+  # L'adresse à laquelle nous joindre à propos d'un rapport (`<email>`).
+  #
+  # Vide, `postmaster@` suivi du nom annoncé en tient lieu.
+  reportEmail @4 :Text;
+
+  # Tous les combien vider le journal, en secondes.
+  #
+  # C'est l'intervalle DU RECEVEUR, et il vaut pour tous les domaines. Le `ri=`
+  # que chaque domaine publie est une demande (« au mieux », §7.2) : les honorer
+  # un par un demanderait un journal par intervalle, pour une exactitude que
+  # personne n'attend. Zéro vaut le défaut de `ri=` : un jour.
+  reportIntervalSeconds @5 :UInt32;
+
   enum Enforcement {
     # On évalue, on retient, on n'oppose rien. L'état où l'on découvre ce qu'une
     # politique refuserait AVANT de la laisser refuser — et il faut y rester

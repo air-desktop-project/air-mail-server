@@ -196,6 +196,22 @@ ed25519-dalek = { version = "=3.0.0", default-features = false }
 # a une source d'aléa — c'est C1, et c'est aussi ce qui rend le hachage
 # reproductible sous test.
 argon2 = { version = "0.6", default-features = false, features = ["alloc", "password-hash"] }
+# flate2 (C9) — la compression `gzip` des rapports DMARC. RFC 7489 §7.2.1 ne la
+# rend pas facultative : un rapport agrégé remis par courrier DOIT être gzippé,
+# et un domaine qui borne la taille qu'il accepte (`rua=...!10m`) compte sur elle.
+#
+# `default-features = false, features = ["rust_backend"]` : les défauts de cette
+# crate incluent déjà `rust_backend`, mais l'écrire est ce qui empêche un
+# changement d'amont de faire entrer `zlib` — donc du C (C4) — sans qu'aucune
+# ligne d'ici ne le demande.
+#
+# MESURÉ sur la cible : TROIS crates transitives — `miniz_oxide` (le `deflate`),
+# `adler` (sa somme de contrôle) et `crc32fast` (celle du format `gzip`) — toutes
+# pures Rust, aucune `*-sys`, aucun `cc`. Écrire nous-mêmes un gzip « en blocs
+# stockés » aurait évité ces trois arêtes, et produit des rapports qui ne
+# compressent rien : c'est-à-dire précisément ce que la RFC cherche à éviter en
+# imposant la compression.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 # tokio-rustls (C4/C5) — le pont entre la boucle et rustls, RIEN DE PLUS : il
 # conduit la poignée de main sur un flux tokio, et ne décide d'aucun protocole.
 #

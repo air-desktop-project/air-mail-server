@@ -546,10 +546,53 @@ dossier pour cela : il le REMET, et consigne la demande. Le refuser serait faire
 plus que ce que le domaine a demandé ; le taire serait faire moins que ce qu'on
 sait.
 
-Ce qui n'est pas outillé : les rapports (`rua=`, `ruf=`) ne sont ni composés ni
-envoyés — l'enregistrement les rend tels quels, à qui saura les lire. C'est ce
-qui manque pour qu'un domaine puisse durcir sa politique en connaissance de
-cause : sans rapports, il durcit à l'aveugle.
+### Les rapports agrégés, depuis le 2026-08-29
+
+Sans rapports, un domaine durcit sa politique à l'aveugle : il découvre ses
+propres prestataires oubliés en même temps que ses correspondants découvrent que
+son courrier ne passe plus. C'est la raison pour laquelle tant de domaines
+restent à `p=none` pour toujours. Les rapports agrégés (§7.2) sont maintenant
+**comptés, composés, nommés, compressés et déposés**.
+
+Un rapport est un DÉNOMBREMENT, jamais une copie : on n'y met aucun message,
+seulement combien il en est venu de telle adresse et ce qu'on en a conclu. Deux
+messages qui se ressemblent — même source, même conclusion, mêmes identifiants —
+ne font qu'une ligne, et c'est ce qui garantit qu'un rapport ne dit jamais rien
+d'un message en particulier.
+
+ON RAPPORTE CE QU'ON A FAIT, JAMAIS CE QUI ÉTAIT DEMANDÉ. Un message que
+`p=quarantine` visait et que ce serveur a remis se rapporte `none`, parce que
+c'est la vérité. Écrire `quarantine` ferait croire à un domaine qu'il est protégé
+là où il ne l'est pas, et c'est le seul mensonge qu'un rapport ne peut pas se
+permettre.
+
+### SANS LE CONTRÔLE DE §7.1, DMARC EST UN AMPLIFICATEUR
+
+Un enregistrement DMARC est public, et personne ne vérifie qui le publie pour son
+propre domaine. Rien n'empêche donc quiconque d'écrire, sous un domaine qu'il
+détient, `rua=mailto:victime@banque.test`, puis d'émettre en masse du courrier
+prétendant venir de là : chaque receveur du monde qui applique DMARC compose
+alors un rapport et l'envoie — à la victime. Le coût est payé par des tiers de
+bonne foi, et le volume est multiplié par le nombre de receveurs. Une attaque par
+réflexion, montée avec un seul enregistrement DNS.
+
+La parade tient en une phrase : *quand la destination n'est pas dans le domaine
+qui l'a demandée, c'est à la DESTINATION de dire qu'elle accepte*. Elle le fait
+en publiant `<domaine-demandeur>._report._dmarc.<sa-zone>` — un nom que
+l'attaquant ne peut pas écrire, puisqu'il est chez la victime. Ce serveur le
+vérifie une fois par période et par domaine, et **une panne de résolution ne vaut
+pas un consentement**.
+
+La comparaison se fait sur les domaines eux-mêmes, pas sur leurs domaines
+organisationnels : se tromper dans le sens strict coûte une interrogation DNS ;
+se tromper dans l'autre autorise un envoi que personne n'a accepté.
+
+Ce qui n'est pas outillé : **l'envoi**. Les rapports sont déposés dans un
+dossier, accompagnés d'un fichier `.destinations` qui dit à qui ils reviennent ;
+les remettre demande un client SMTP sortant, que ce serveur n'a pas encore — le
+même qui manque au signataire DKIM. Les rapports d'échec (`ruf=`, RFC 6591) ne
+sont pas composés non plus : ils portent des morceaux de messages réels, et ce
+qu'on met dedans mérite sa propre décision.
 
 ### DNSSEC n'est pas validé, et c'est écrit partout
 

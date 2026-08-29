@@ -6,7 +6,8 @@ use std::sync::Arc;
 use ams_guard::{Event as GuardEvent, Source, Verdict};
 use ams_proto_smtp::DataEvent;
 use ams_session::{
-    Action, Config, DataOutcome, Policy, RECEIVED_SPF_MAX, SenderPolicy, SmtpSession,
+    Action, Config, DataOutcome, Identity as SpfIdentity, Policy, RECEIVED_SPF_MAX, SenderPolicy,
+    SmtpSession,
 };
 use ams_spf::Verdict as SpfVerdict;
 use rustls::ServerConfig;
@@ -16,8 +17,10 @@ use tokio_rustls::TlsAcceptor;
 
 use crate::dkim::{DkimChecker, DkimStream, DkimVerdict};
 use crate::dmarc::{Authenticated, DmarcChecker, DmarcResult, DmarcVerdict};
+use crate::reports::{Observation, ReportSpool, SignatureVue, SpfVu};
 use crate::{Delivery, DeliveryFailure, Error, SenderChecker, SharedGuard};
 use ams_dmarc::Policy as DmarcPolicy;
+use ams_dmarc::report::aggregate::{DkimAuthResult, SpfAuthResult, SpfScope};
 use std::string::String;
 
 /// Combien de lignes une réponse peut compter au plus.
@@ -192,6 +195,12 @@ pub struct Service<'a> {
     /// **C'est le seul de ces trois-là qui peut REFUSER un message** — et
     /// seulement quand le domaine du `From:` le demande.
     pub dmarc: Option<DmarcChecker>,
+    /// Où consigner ce qu'on rapportera aux domaines qui le demandent.
+    ///
+    /// `None` ne refuse rien et ne change aucun verdict : un serveur qui ne
+    /// rapporte pas sert exactement comme avant. Il laisse simplement les
+    /// domaines qu'il protège durcir leur politique à l'aveugle.
+    pub reports: Option<Arc<ReportSpool>>,
 }
 
 /// Ce qui survit à la montée en chiffrement.
@@ -534,6 +543,44 @@ where
     }
 }
 
+/// Ce qu'une signature DKIM devient dans un rapport (§7.2, `DKIMResultType`).
+fn resultat_dkim(verdict: DkimVerdict) -> DkimAuthResult {
+    match verdict {
+        DkimVerdict::Pass => DkimAuthResult::Pass,
+        DkimVerdict::Fail => DkimAuthResult::Fail,
+        DkimVerdict::TempError => DkimAuthResult::TempError,
+        DkimVerdict::PermError => DkimAuthResult::PermError,
+    }
+}
+
+/// Ce que SPF devient dans un rapport (§7.2, `SPFResultType`).
+///
+/// **Sans verdict, on écrit `none`** : c'est le mot de la RFC 7208 §2.6 pour
+/// « rien n'a été évalué », et c'est exactement la situation d'un serveur qui ne
+/// vérifie pas l'expéditeur. Écrire autre chose ferait dire au rapport une
+/// évaluation qui n'a pas eu lieu.
+fn spf_vu<P: Policy>(session: &SmtpSession<'_, P>) -> SpfVu {
+    let identite = session.sender_identity();
+    SpfVu {
+        domain: identite
+            .map(|vue| String::from_utf8_lossy(vue.domain).into_owned())
+            .unwrap_or_default(),
+        scope: match identite.map(|vue| vue.scope) {
+            Some(SpfIdentity::Helo) => SpfScope::Helo,
+            _ => SpfScope::MailFrom,
+        },
+        result: match session.sender_verdict() {
+            Some(SpfVerdict::Pass) => SpfAuthResult::Pass,
+            Some(SpfVerdict::Fail) => SpfAuthResult::Fail,
+            Some(SpfVerdict::SoftFail) => SpfAuthResult::SoftFail,
+            Some(SpfVerdict::Neutral) => SpfAuthResult::Neutral,
+            Some(SpfVerdict::TempError) => SpfAuthResult::TempError,
+            Some(SpfVerdict::PermError) => SpfAuthResult::PermError,
+            Some(SpfVerdict::None) | None => SpfAuthResult::None,
+        },
+    }
+}
+
 /// Verse un verdict DMARC dans le compte d'une connexion.
 fn compter_dmarc(compte: DmarcTally, resultat: &DmarcResult) -> DmarcTally {
     let mut compte = compte;
@@ -692,8 +739,18 @@ where
         && let Some(mut lecture) = flux
     {
         let mut authentifies = Authenticated::default();
+        // CE QUE LES SIGNATURES ONT DONNÉ, TOUTES, et pas seulement les vraies :
+        // un rapport qui ne nommerait que les signatures réussies cacherait au
+        // domaine le prestataire dont la clé a expiré — c'est-à-dire exactement
+        // ce qu'il cherche à apprendre.
+        let mut vues: Vec<SignatureVue> = Vec::new();
         if let Some(verificateur) = service.dkim.as_ref() {
             for resultat in lecture.finish(verificateur).await {
+                vues.push(SignatureVue {
+                    domain: resultat.domain.clone(),
+                    selector: resultat.selector.clone(),
+                    result: resultat_dkim(resultat.verdict),
+                });
                 let compte = &mut etat.resume.dkim;
                 match resultat.verdict {
                     DkimVerdict::Pass => {
@@ -725,6 +782,36 @@ where
             // QU'IL PRÉTEND ÊTRE. La quarantaine, elle, n'est pas encore un
             // endroit : le message est remis, et la demande consignée.
             usurpe = resultat.applies && resultat.policy == DmarcPolicy::Reject;
+            // ── Ce qu'on en rapportera (RFC 7489 §7.2) ──────────────────────
+            //
+            // On rapporte CE QU'ON A FAIT, jamais ce qui était demandé : un
+            // message que `p=quarantine` visait et que ce serveur a remis se
+            // rapporte `none`, parce que c'est la vérité. Écrire `quarantine`
+            // ferait croire à un domaine qu'il est protégé là où il ne l'est
+            // pas, et c'est le seul mensonge qu'un rapport ne peut pas se
+            // permettre.
+            if let Some(spool) = service.reports.as_ref()
+                && let Some(pour) = resultat.report.as_ref()
+            {
+                spool.observer(Observation {
+                    domain: resultat.domain.clone(),
+                    published: pour.published,
+                    destinations: pour.destinations.clone(),
+                    source: adresse_du_pair(source),
+                    disposition: if usurpe {
+                        DmarcPolicy::Reject
+                    } else {
+                        DmarcPolicy::None
+                    },
+                    dkim: pour.dkim,
+                    spf: pour.spf,
+                    envelope_from: session
+                        .sender_identity()
+                        .map(|identite| String::from_utf8_lossy(identite.domain).into_owned()),
+                    signatures: vues,
+                    spf_auth: spf_vu(session),
+                });
+            }
         }
     }
 
@@ -905,6 +992,7 @@ mod tests {
             spf: None,
             dkim: None,
             dmarc: None,
+            reports: None,
         };
         let resultat = serve_connection(&mut serveur, &service, NotreDomaine, boite, PAIR).await;
         drop(serveur);
@@ -1088,6 +1176,7 @@ mod tests {
             spf: None,
             dkim: None,
             dmarc: None,
+            reports: None,
         };
         let resultat =
             serve_connection(&mut serveur, &service, NotreDomaine, &mut boite, PAIR).await;

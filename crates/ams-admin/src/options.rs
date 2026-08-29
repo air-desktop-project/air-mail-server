@@ -56,6 +56,14 @@ pub struct Options {
     pub public_suffix_list: Option<PathBuf>,
     /// Oppose-t-on un `p=reject`, ou se contente-t-on de le retenir ?
     pub dmarc_enforce: bool,
+    /// Où déposer les rapports agrégés. Vide : aucun n'est composé.
+    pub dmarc_report_dir: Option<PathBuf>,
+    /// Le nom sous lequel ce receveur se présente dans ses rapports.
+    pub dmarc_org_name: Option<String>,
+    /// L'adresse à laquelle le joindre à propos d'un rapport.
+    pub dmarc_report_email: Option<String>,
+    /// Tous les combien vider le journal des rapports.
+    pub dmarc_report_interval: u32,
 }
 
 impl Default for Options {
@@ -97,6 +105,14 @@ impl Default for Options {
             // domaine qui publie `p=reject` refuse aussi le courrier de ses
             // propres listes de diffusion.
             dmarc_enforce: false,
+            // PAS DE DOSSIER PAR DÉFAUT : composer des rapports est un service
+            // qu'on rend à autrui, et il se demande. En choisir un d'office
+            // ferait écrire un serveur là où l'administrateur ne l'attend pas.
+            dmarc_report_dir: None,
+            dmarc_org_name: None,
+            dmarc_report_email: None,
+            // Un jour, comme le défaut de `ri=` (RFC 7489 §6.3).
+            dmarc_report_interval: 86_400,
         }
     }
 }
@@ -148,6 +164,10 @@ impl Options {
                 } else {
                     Enforcement::Observe
                 },
+                report_directory: chemin(self.dmarc_report_dir.as_ref()),
+                report_org_name: self.dmarc_org_name.clone().unwrap_or_default(),
+                report_email: self.dmarc_report_email.clone().unwrap_or_default(),
+                report_interval_seconds: self.dmarc_report_interval,
             },
             accounts: chemin(self.accounts.as_ref()),
             listen_pop3: self
@@ -256,6 +276,19 @@ OPTIONS DE `config write`
     longtemps qu'ailleurs : un domaine qui publie `p=reject` refuse aussi le
     courrier de ses propres listes de diffusion.
 
+    LES RAPPORTS AGRÉGÉS (RFC 7489 §7.2) NE SONT COMPOSÉS QUE SI UN DOSSIER EST
+    NOMMÉ : `--dmarc-report-dir /var/spool/ams/rapports`. Ils y sont DÉPOSÉS, pas
+    envoyés — envoyer demande un client SMTP sortant que ce serveur n'a pas
+    encore. Chaque rapport est accompagné d'un fichier `.destinations` qui dit à
+    qui il revient, après la vérification de §7.1 : sans elle, n'importe qui
+    publierait `rua=mailto:victime@banque.test` et ferait bombarder cette adresse
+    par tous les receveurs du monde.
+
+    `--dmarc-org-name` est le nom sous lequel ce receveur se présente (défaut :
+    le nom annoncé), `--dmarc-report-email` l'adresse où le joindre (défaut :
+    `postmaster@` suivi du nom annoncé), `--dmarc-report-interval` le nombre de
+    secondes entre deux vidanges du journal (défaut : 86400, un jour).
+
     Les bornes du décodeur et les seuils du garde prennent leurs valeurs par
     défaut : les régler mérite ses propres options, et les inventer ici donnerait
     un fichier qui dit autre chose que ce qui a été demandé.
@@ -321,6 +354,17 @@ where
                         )));
                     }
                 }
+            }
+            "--dmarc-report-dir" => {
+                options.dmarc_report_dir = Some(PathBuf::from(valeur()?));
+            }
+            "--dmarc-org-name" => options.dmarc_org_name = Some(valeur()?),
+            "--dmarc-report-email" => options.dmarc_report_email = Some(valeur()?),
+            "--dmarc-report-interval" => {
+                let brute = valeur()?;
+                options.dmarc_report_interval = brute
+                    .parse()
+                    .map_err(|_| ArgError::new(format!("`{brute}` n'est pas un nombre")))?;
             }
             "--public-suffix-list" => {
                 options.public_suffix_list = Some(PathBuf::from(valeur()?));

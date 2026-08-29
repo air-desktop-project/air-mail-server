@@ -54,6 +54,7 @@ async fn conversation_chiffree(nom: &str, dialogue: &'static str) -> Option<Stri
             spf: None,
             dkim: None,
             dmarc: None,
+            reports: None,
         };
         serve_connection(&mut flux, &service, NotreDomaine, &mut Neant, PAIR).await
     });

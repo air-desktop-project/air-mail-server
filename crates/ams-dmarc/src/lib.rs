@@ -47,6 +47,7 @@ mod error;
 mod evaluate;
 mod psl;
 mod record;
+pub mod report;
 mod tag;
 
 pub use alignment::{Alignment, PublicSuffix, aligned};

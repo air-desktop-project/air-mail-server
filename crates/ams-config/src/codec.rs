@@ -126,6 +126,22 @@ pub struct Dmarc {
     pub public_suffix_list: String,
     /// Ce qu'on fait d'un message que la politique condamne.
     pub enforcement: Enforcement,
+    /// Le dossier où déposer les rapports agrégés, ou une chaîne vide.
+    ///
+    /// **Vide, aucun rapport n'est composé.** Même règle que partout ailleurs
+    /// ici : l'absence de valeur EST l'absence de service, et il n'y a pas de
+    /// drapeau pour la contredire.
+    pub report_directory: String,
+    /// Le nom sous lequel ce receveur se présente dans ses rapports.
+    ///
+    /// Vide, le nom annoncé par le serveur en tient lieu.
+    pub report_org_name: String,
+    /// L'adresse à laquelle nous joindre à propos d'un rapport.
+    ///
+    /// Vide, `postmaster@` suivi du nom annoncé en tient lieu.
+    pub report_email: String,
+    /// Tous les combien vider le journal, en secondes. Zéro vaut un jour.
+    pub report_interval_seconds: u32,
 }
 
 impl Dmarc {
@@ -133,6 +149,17 @@ impl Dmarc {
     #[must_use]
     pub fn est_configure(&self) -> bool {
         !self.public_suffix_list.is_empty()
+    }
+
+    /// Ce service compose-t-il des rapports ?
+    ///
+    /// **Évaluer et rapporter sont deux services distincts.** Un serveur peut
+    /// très bien opposer les politiques sans rien rapporter ; l'inverse — des
+    /// rapports sans évaluation — n'a rien à écrire, et c'est pourquoi les deux
+    /// conditions sont exigées.
+    #[must_use]
+    pub fn rapporte(&self) -> bool {
+        self.est_configure() && !self.report_directory.is_empty()
     }
 }
 
@@ -348,6 +375,10 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
             Ok(crate::ams_config_capnp::dmarc::Enforcement::Enforce) => Enforcement::Enforce,
             Err(_) => return Err(Error::UnknownEnforcement),
         },
+        report_directory: texte(alignement.get_report_directory()?)?,
+        report_org_name: texte(alignement.get_report_org_name()?)?,
+        report_email: texte(alignement.get_report_email()?)?,
+        report_interval_seconds: alignement.get_report_interval_seconds(),
     };
 
     let chiffrement = lu.get_tls()?;
@@ -474,6 +505,10 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
                 Enforcement::Observe => crate::ams_config_capnp::dmarc::Enforcement::Observe,
                 Enforcement::Enforce => crate::ams_config_capnp::dmarc::Enforcement::Enforce,
             });
+            alignement.set_report_directory(&config.dmarc.report_directory);
+            alignement.set_report_org_name(&config.dmarc.report_org_name);
+            alignement.set_report_email(&config.dmarc.report_email);
+            alignement.set_report_interval_seconds(config.dmarc.report_interval_seconds);
         }
         ecrit.set_accounts(&config.accounts);
         ecrit.set_listen_pop3(&config.listen_pop3);
@@ -562,6 +597,10 @@ mod tests {
             dmarc: Dmarc {
                 public_suffix_list: String::from("/etc/ams/public_suffix_list.dat"),
                 enforcement: Enforcement::Enforce,
+                report_directory: String::from("/var/spool/ams/rapports"),
+                report_org_name: String::from("mail.example.com"),
+                report_email: String::from("dmarc@example.com"),
+                report_interval_seconds: 3_600,
             },
             ..exemple()
         }
@@ -860,15 +899,37 @@ mod tests {
     fn la_section_dmarc_traverse_le_format() {
         let mut original = exemple();
         assert!(!original.dmarc.est_configure());
+        assert!(!original.dmarc.rapporte());
         original.dmarc = Dmarc {
             public_suffix_list: String::from("/etc/ams/psl.dat"),
             enforcement: Enforcement::Enforce,
+            report_directory: String::from("/var/spool/ams/rapports"),
+            report_org_name: String::from("mail.example.com"),
+            report_email: String::from("dmarc@example.com"),
+            report_interval_seconds: 3_600,
         };
         let octets = encode(&original).expect("encodable");
         let relue = decode(&octets).expect("relisible");
         assert_eq!(relue.dmarc, original.dmarc);
         assert!(relue.dmarc.est_configure());
+        assert!(relue.dmarc.rapporte());
         assert!(!alloc::format!("{:?}", relue.dmarc).is_empty());
+    }
+
+    /// **Évaluer et rapporter sont deux services distincts.** Un dossier sans
+    /// liste de suffixes ne rapporterait rien, puisqu'il n'y aurait rien à
+    /// rapporter — et une liste sans dossier évalue sans rien écrire.
+    #[test]
+    fn rapporter_demande_les_deux() {
+        let mut config = exemple();
+        config.dmarc.report_directory = String::from("/var/spool/ams/rapports");
+        assert!(!config.dmarc.est_configure());
+        assert!(!config.dmarc.rapporte());
+        config.dmarc.public_suffix_list = String::from("/etc/ams/psl.dat");
+        assert!(config.dmarc.rapporte());
+        config.dmarc.report_directory.clear();
+        assert!(config.dmarc.est_configure());
+        assert!(!config.dmarc.rapporte());
     }
 
     #[test]

@@ -132,7 +132,7 @@ mod tampon;
 ///
 /// Réexportée pour que l'appelant n'ait pas à dépendre d'`ams-spf` seulement
 /// pour dimensionner un tableau.
-pub use ams_spf::RECEIVED_SPF_MAX;
+pub use ams_spf::{Identity, RECEIVED_SPF_MAX};
 pub use config::{Capabilities, Config, SenderPolicy};
 pub use error::Error;
 pub use policy::{Authenticator, Policy, RecipientVerdict};

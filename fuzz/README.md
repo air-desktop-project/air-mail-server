@@ -40,6 +40,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_spf_header` | `seeds/spf-header` | l'en-tête `Received-SPF` — **aucune injection de ligne** |
 | `fuzz_ams_dkim` | `seeds/dkim` | signature, clé et canonicalisation — **le découpage ne change rien** |
 | `fuzz_ams_dmarc` | `seeds/dmarc` | politique et alignement — **l'alignement est symétrique** |
+| `fuzz_ams_dmarc_report` | `seeds/dmarc-report` | destinations et rapport agrégé — **le rapport ne s'injecte pas** |
 
 Les variantes « bornes » existent parce que les bornes de C3 viennent de la
 configuration (C8), donc d'un administrateur : un zéro, un `usize::MAX`, ou toute
@@ -237,6 +238,26 @@ SPF et de DKIM : ce sont des noms qu'un pair a écrits.
 5. **Une réussite exige un mécanisme aligné** — il doit être possible de dire
    lequel — et un `From:` vide n'aligne rien.
 6. **Le pourcentage tient dans ses bornes**, de zéro à cent.
+
+### Rapports DMARC (cinq, dont LE NOM QUI NE DEVIENT PAS UN CHEMIN)
+
+Deux surfaces, et les deux viennent d'ailleurs. La liste `rua=` est publiée par
+**le domaine qu'on rapporte** — c'est-à-dire, quand ça compte, par celui qui
+usurpe. Le contenu du rapport, lui, porte le `header_from` et les adresses
+d'enveloppe : **ce que le pair a dicté**.
+
+1. Rien ne panique, quels que soient les octets.
+2. **Ce qui sort du décodage `%XX` est de l'ASCII imprimable**, toujours : c'est
+   ce qui empêche un `%0D%0A` d'écrire des en-têtes dans le message qu'on
+   enverra à cette adresse.
+3. **Un rapport composé ne porte aucune balise qu'on n'a pas écrite.** On compte
+   les ouvrantes : un `<record>` injecté se verrait immédiatement.
+4. **UN NOM DE FICHIER NE PEUT PAS DEVENIR UN CHEMIN** — ni barre oblique, ni
+   `..`. Ce nom est écrit chez autrui, à partir d'un domaine choisi par celui
+   qu'on rapporte.
+5. **Le nom interrogé pour vérifier une destination est toujours dans la zone de
+   cette destination.** C'est tout ce qui empêche l'attaquant de se donner le
+   droit d'être rapporté à quelqu'un d'autre.
 
 ### DKIM (sept, dont L'INDÉPENDANCE AU DÉCOUPAGE)
 
@@ -612,6 +633,18 @@ vient de la configuration, donc d'un administrateur.
 L'entrée fautive est versionnée en graine de non-régression
 (`seeds/smtp-reply/borne-inferieure-a-l-enveloppe`).
 
+**`fuzz_ams_dmarc_report`, en trois minutes, à sa première campagne.** Le nom
+d'un rapport n'admettait que des lettres, des chiffres, un tiret, un point et un
+souligné — ce qui laissait passer `a..b`, et donc un `..` dans un nom de fichier
+écrit chez autrui. Rien n'était exploitable : sans barre oblique, `..` ne
+remonte nulle part, et la barre oblique était déjà refusée.
+
+Le correctif n'en est pas moins réel. `a..b` **n'est pas un domaine** — une
+étiquette DNS ne peut pas être vide — et laisser entrer ce qui n'est pas un
+domaine en se reposant sur l'absence d'un second octet est exactement le
+raisonnement qui finit par céder, le jour où quelqu'un ajoute une jointure de
+chemin ailleurs. Chaque étiquette doit désormais porter quelque chose.
+
 ## Résultats
 
 | Date | Cible | Exécutions | Plantages |
@@ -640,6 +673,9 @@ L'entrée fautive est versionnée en graine de non-régression
 | 2026-08-29 | `fuzz_ams_dkim` (avec la signature) | 707 978 (181 s) | **1, corrigée** |
 | 2026-08-29 | `fuzz_ams_dmarc` | 10 092 643 (181 s) | 0 |
 | 2026-08-29 | `fuzz_ams_config` (avec DMARC) | 187 544 (61 s) | 0 |
+| 2026-08-29 | `fuzz_ams_dmarc_report` | (avant correctif) | **1, corrigé** |
+| 2026-08-29 | `fuzz_ams_dmarc_report` | 1 625 597 (221 s) | 0 |
+| 2026-08-29 | `fuzz_ams_config` (avec les rapports) | 222 412 (71 s) | 0 |
 | 2026-08-29 | `fuzz_ams_config` (avec SPF) | 193 256 (61 s) | 0 |
 | 2026-08-29 | `fuzz_ams_session_smtp` (avec SPF) | 381 710 (61 s) | 0 |
 | 2026-08-28 | `fuzz_ams_session_smtp` (SASL) | 521 646 (91 s) | 0 |

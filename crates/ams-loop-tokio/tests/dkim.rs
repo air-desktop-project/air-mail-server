@@ -197,6 +197,7 @@ async fn le_resume_de_la_connexion_porte_le_verdict() {
             spf: None,
             dkim: Some(checker),
             dmarc: None,
+            reports: None,
         };
         serve_connection(&mut flux, &service, NotreDomaine, &mut Neant, PAIR).await
     });

@@ -67,6 +67,14 @@ struct Entree {
     resolveurs: Vec<String>,
     /// Refuse-t-on un `fail` ?
     applique: bool,
+    /// Le dossier des rapports, le nom de l'organisation et l'adresse de
+    /// contact — TROIS CHAÎNES LIBRES, y compris incohérentes entre elles.
+    /// Cette crate les transporte ; c'est ailleurs qu'on refuse ce qui n'est pas
+    /// un nom, et le lui faire faire ici cacherait ce partage.
+    rapports: [String; 3],
+    /// L'intervalle entre deux vidanges, ZÉRO COMPRIS : c'est la valeur qui vaut
+    /// « le défaut », et elle doit traverser le format comme les autres.
+    intervalle: u32,
     /// Le délai d'une question DNS.
     delai_dns: u32,
     /// Le chemin de la liste des suffixes publics — UNE CHAÎNE LIBRE : cette
@@ -135,6 +143,10 @@ fuzz_target!(|entree: Entree| {
             } else {
                 Enforcement::Observe
             },
+            report_directory: entree.rapports[0].clone(),
+            report_org_name: entree.rapports[1].clone(),
+            report_email: entree.rapports[2].clone(),
+            report_interval_seconds: entree.intervalle,
         },
         accounts: entree.comptes.clone(),
         listen_pop3: entree.ecoute_pop3.clone(),

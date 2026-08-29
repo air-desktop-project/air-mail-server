@@ -42,6 +42,18 @@ pub struct Authentication<'a> {
 pub struct Assessment {
     /// Le verdict.
     pub verdict: Verdict,
+    /// DKIM a-t-il réussi **et** s'est-il aligné ?
+    ///
+    /// # Pourquoi le détail, quand le verdict suffit à décider
+    ///
+    /// Il ne sert à rien pour décider — un seul mécanisme suffit — et il est
+    /// indispensable pour RAPPORTER (§7.2, `policy_evaluated`). Un domaine qui
+    /// lit ses rapports veut savoir LEQUEL de ses deux mécanismes tient : celui
+    /// dont la signature casse chez un relais, ou celui dont l'enveloppe change
+    /// à chaque redirection. Le verdict combiné ne le lui dirait jamais.
+    pub dkim: Verdict,
+    /// SPF a-t-il réussi **et** s'est-il aligné ?
+    pub spf: Verdict,
     /// La politique demandée, si le verdict est un échec.
     pub policy: Policy,
     /// La part des messages à laquelle elle s'applique (`pct=`).
@@ -74,13 +86,13 @@ pub fn evaluate(
         .spf
         .is_some_and(|enveloppe| aligned(record.spf_alignment, enveloppe, from, suffixes));
 
-    let verdict = if par_dkim || par_spf {
-        Verdict::Pass
-    } else {
-        Verdict::Fail
+    let dit = |aligne: bool| {
+        if aligne { Verdict::Pass } else { Verdict::Fail }
     };
     Assessment {
-        verdict,
+        verdict: dit(par_dkim || par_spf),
+        dkim: dit(par_dkim),
+        spf: dit(par_spf),
         policy: record.applicable(from_is_subdomain),
         percent: record.percent,
     }

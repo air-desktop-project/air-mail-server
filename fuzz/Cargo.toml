@@ -224,3 +224,10 @@ path = "fuzz_targets/fuzz_ams_dmarc.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_ams_dmarc_report"
+path = "fuzz_targets/fuzz_ams_dmarc_report.rs"
+test = false
+doc = false
+bench = false

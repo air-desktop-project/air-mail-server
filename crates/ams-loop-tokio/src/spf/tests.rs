@@ -223,6 +223,7 @@ async fn resolveur(table: Table) -> SocketAddr {
 
 fn identite<'a>(domaine: &'a str, expediteur: &'a str, helo: &'a str) -> SenderIdentity<'a> {
     SenderIdentity {
+        scope: ams_session::Identity::MailFrom,
         domain: domaine.as_bytes(),
         sender: expediteur.as_bytes(),
         helo: helo.as_bytes(),
