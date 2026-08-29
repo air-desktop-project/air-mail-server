@@ -82,7 +82,7 @@ des octets **et des actions**. Elles n'attendent jamais.
 | `ams-guard` | flooding et bannissement par source | **implémenté** |
 | `ams-auth` | le magasin d'identifiants, vérification Argon2id | **implémenté** |
 | `ams-tls` | TLS 1.3 uniquement, échange de clés post-quantique | **implémenté** |
-| `ams-dkim` | RFC 6376 | vide |
+| `ams-dkim` | RFC 6376 | **grammaire et canonicalisation** |
 | `ams-spf` | RFC 7208 | **évalué, câblé, et écrit dans le message** |
 | `ams-dmarc` | RFC 7489 | vide |
 | `ams-config` | les trois formats binaires : configuration, comptes, index | **implémenté** |
@@ -99,7 +99,7 @@ Les seules crates qui lisent, écrivent et attendent. Elles ne décident de rien
 | `ams-server` | le binaire `air-mail-server` | **il tourne** |
 | `ams-admin` | le binaire `air-mail-admin` | **`summary`** |
 
-**Seize crates portent du code.** `ams-mime` : le squelette d'un message — la
+**Dix-sept crates portent du code.** `ams-mime` : le squelette d'un message — la
 ligne, le pliage, la séparation en-tête/corps, le découpage en champs. Les champs
 structurés, les adresses, les dates et MIME restent à écrire.
 `ams-proto-smtp` : les commandes, l'encodage des réponses multilignes, et **la
@@ -162,6 +162,34 @@ contre-oblique. Le pliage (RFC 5322 §2.2.3) n'est pas cosmétique non plus : la
 borne des 998 octets par ligne est **vérifiée à l'écriture**, et un en-tête qui
 la dépasserait est refusé plutôt qu'émis — un en-tête coupé en aval se lit comme
 un en-tête entier qui dit autre chose.
+
+`ams-dkim` : ce qu'une signature **couvre**, et ce qu'elle **dit** — la
+grammaire des listes `tag=valeur` (§3.2), le champ `DKIM-Signature` (§3.5),
+l'enregistrement de clé publique (§3.6.1), et **la canonicalisation** (§3.4).
+Cette dernière est la définition exacte des octets qu'une signature couvre : une
+erreur d'un octet n'y produit aucun symptôme visible, elle rend simplement toutes
+les signatures invalides — ou, bien pire, en valide qui ne devraient pas l'être.
+Les épreuves sont donc **les vecteurs de la RFC elle-même** (§3.4.5), et pas des
+exemples inventés ici.
+
+Le corps se canonicalise **en flux** : c'est ce qu'un pair envoie de plus gros,
+et le rassembler lui laisserait choisir combien de mémoire on lui consacre. La
+machine ne retient jamais que deux choses, et aucune ne grandit avec le message :
+combien de fins de ligne attendent — les lignes vides de la fin s'ignorent, et on
+ne sait qu'une ligne était finale qu'en voyant qu'il n'y a plus rien — et qu'un
+blanc attend d'être réduit.
+
+Trois refus y sont écrits plutôt que supposés. **`rsa-sha1` est refusé** : RFC
+8301 §3.1 l'interdit aux signataires comme aux vérificateurs, et l'accepter
+reviendrait à valider ce qu'on sait falsifiable. **Une signature qui ne couvre
+pas `from` est refusée** : elle ne dit rien de l'auteur, et c'est pourtant lui
+que l'humain lira. **Un `p=` vide est une révocation**, pas un enregistrement
+illisible — le détenteur du domaine dit que cette clé ne doit plus rien signer.
+
+Ce qui reste : **le condensat et la signature elle-même**. Savoir ce qui est
+signé et savoir par qui sont deux questions ; la seconde demande SHA-256, RSA et
+Ed25519, et une clé publique qui vit dans le DNS — elle viendra avec sa
+résolution rendue sous forme d'action, comme `ams-spf` le fait de ses questions.
 
 `ams-dns` : le codec d'un message DNS — une question encodée, une réponse
 décodée. **Un client stub, et rien de plus** : ce serveur pose des questions, il

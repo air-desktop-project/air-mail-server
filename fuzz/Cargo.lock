@@ -43,6 +43,7 @@ version = "0.0.0"
 dependencies = [
  "ams-auth",
  "ams-config",
+ "ams-dkim",
  "ams-dns",
  "ams-guard",
  "ams-index",
@@ -76,6 +77,10 @@ dependencies = [
  "ams-proto-smtp",
  "capnp",
 ]
+
+[[package]]
+name = "ams-dkim"
+version = "0.1.0"
 
 [[package]]
 name = "ams-dns"

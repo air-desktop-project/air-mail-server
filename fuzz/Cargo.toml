@@ -36,6 +36,9 @@ path = "../crates/ams-mime"
 [dependencies.ams-dns]
 path = "../crates/ams-dns"
 
+[dependencies.ams-dkim]
+path = "../crates/ams-dkim"
+
 [dependencies.ams-proto-pop3]
 path = "../crates/ams-proto-pop3"
 
@@ -201,6 +204,13 @@ bench = false
 [[bin]]
 name = "fuzz_ams_spf_header"
 path = "fuzz_targets/fuzz_ams_spf_header.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ams_dkim"
+path = "fuzz_targets/fuzz_ams_dkim.rs"
 test = false
 doc = false
 bench = false

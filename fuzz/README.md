@@ -38,6 +38,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_spf_eval` | `seeds/spf-eval` | l'évaluation SPF, réponses DNS comprises — **elle conclut** |
 | `fuzz_ams_dns` | `seeds/dns` | la réponse d'un résolveur — **la compression ne boucle pas** |
 | `fuzz_ams_spf_header` | `seeds/spf-header` | l'en-tête `Received-SPF` — **aucune injection de ligne** |
+| `fuzz_ams_dkim` | `seeds/dkim` | signature, clé et canonicalisation — **le découpage ne change rien** |
 
 Les variantes « bornes » existent parce que les bornes de C3 viennent de la
 configuration (C8), donc d'un administrateur : un zéro, un `usize::MAX`, ou toute
@@ -216,6 +217,29 @@ répond pas à la question posée.
 6. **Une panne de résolution vaut `temperror`**, jamais un refus : dire `fail` à
    la place ferait jeter un message qui serait passé cinq minutes plus tard.
 7. Les bornes de l'évaluation sont fuzzées elles aussi — zéro compris.
+
+### DKIM (sept, dont L'INDÉPENDANCE AU DÉCOUPAGE)
+
+Trois surfaces, toutes fournies par autrui : le champ `DKIM-Signature` d'un
+message, l'enregistrement de clé publique lu dans le DNS, et **le corps du
+message** — ce qu'un pair envoie de plus gros.
+
+1. Rien ne panique, quels que soient les octets et le découpage.
+2. **LE DÉCOUPAGE NE CHANGE RIEN.** La canonicalisation du corps est une machine
+   en flux : le pair choisit la taille de ses paquets, et le condensat ne doit
+   pas en dépendre. Une fin de ligne coupée en deux est le cas qui casse les
+   implémentations naïves — la cible éprouve le découpage donné, celui d'un seul
+   tenant, et celui d'un octet par octet.
+3. **`relaxed` tient ses promesses** : aucune tabulation ne survit, aucune suite
+   de deux espaces, aucun blanc avant une fin de ligne, aucun pliage.
+4. **Le corps canonicalisé finit par une fin de ligne**, sauf le corps vide en
+   `relaxed` — et cette exception-là est dans la RFC.
+5. **La borne `l=` coupe, elle ne réécrit pas** : ce qui sort sous une borne est
+   un préfixe exact de ce qui sort sans elle.
+6. **Une signature acceptée est cohérente** : `v=1`, un algorithme admis — jamais
+   `rsa-sha1` —, `from` couvert, `i=` sous `d=`, `x=` après `t=`.
+7. **Une clé acceptée n'est pas révoquée**, et deux lectures rendent la même
+   chose.
 
 ### En-tête `Received-SPF` (cinq, dont L'INJECTION DE LIGNE)
 
@@ -422,6 +446,26 @@ couvert.
 
 ## Ce que le fuzz a trouvé
 
+**`fuzz_ams_dkim`, dès sa première exécution — et ce n'était pas un défaut du
+code, c'était un contrat qui n'était écrit nulle part.**
+
+La canonicalisation `relaxed` d'un en-tête promet qu'aucun pliage ne survit. La
+cible lui a donné un NOM DE CHAMP contenant un `CRLF` — et le `CRLF` est ressorti,
+puisque le nom n'est que mis en minuscules.
+
+Aucun message ne peut porter un tel nom : le bloc d'en-tête est validé bien
+avant, et un nom de champ y est `%d33-57 / %d59-126` (RFC 5322 §3.6.8). Mais rien
+ne le DISAIT, et une fonction publique qui suppose sans le dire est une fonction
+qu'on appellera un jour autrement. La précondition est donc écrite sur la
+fonction — avec la raison pour laquelle rien ne la vérifie à l'exécution : ce
+qu'elle rend est une entrée de condensat, jamais un en-tête qu'on émet, et un nom
+absurde y donne un condensat absurde, donc une vérification qui échoue. La cible,
+elle, ramène désormais son nom à ce qu'un nom peut être.
+
+**La leçon n'est pas « le fuzz a trouvé un bogue », c'est « le fuzz a trouvé une
+supposition ».** C'est le genre de trouvaille qui ne vaut rien tant qu'on ne
+l'écrit pas.
+
 **`fuzz_ams_index_name`, deux fois — et la seconde EN INTÉGRATION CONTINUE.**
 
 La première : `compose` acceptait une partie unique vide — ou commençant par une
@@ -532,6 +576,7 @@ L'entrée fautive est versionnée en graine de non-régression
 | 2026-08-29 | `fuzz_ams_spf_eval` | 5 799 279 (181 s) | 0 |
 | 2026-08-29 | `fuzz_ams_dns` | 14 395 679 (181 s) | 0 |
 | 2026-08-29 | `fuzz_ams_spf_header` | 7 478 784 (181 s) | 0 |
+| 2026-08-29 | `fuzz_ams_dkim` | 3 255 821 (181 s) | **1, contrat corrigé** |
 | 2026-08-29 | `fuzz_ams_config` (avec SPF) | 193 256 (61 s) | 0 |
 | 2026-08-29 | `fuzz_ams_session_smtp` (avec SPF) | 381 710 (61 s) | 0 |
 | 2026-08-28 | `fuzz_ams_session_smtp` (SASL) | 521 646 (91 s) | 0 |

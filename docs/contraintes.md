@@ -398,9 +398,25 @@ plus long est refusé, car coupé en aval il se lirait comme un en-tête entier
 disant autre chose. Une cible de fuzz éprouve nommément qu'aucun saut de ligne
 n'y est autre chose qu'un repli.
 
-Ce qui n'est pas outillé : `ams-dkim` et `ams-dmarc` restent vides. Tant qu'ils
-le sont, DMARC ne conclut rien — et c'est DMARC qui rapproche le verdict SPF de
-l'en-tête `From:` que lira l'humain.
+**DKIM est commencé depuis le 2026-08-29**, par ce qu'une signature COUVRE : la
+grammaire des listes `tag=valeur` (§3.2), le champ `DKIM-Signature` (§3.5),
+l'enregistrement de clé publique (§3.6.1) et la canonicalisation (§3.4), `simple`
+et `relaxed`, en-têtes et corps. Couvert à 100 % (C2) et fuzzé sur sept
+propriétés, dont l'indépendance au découpage — le corps se canonicalise en flux,
+et le condensat ne doit pas dépendre de la taille des paquets que le pair choisit.
+
+Les épreuves de la canonicalisation sont **les vecteurs de la RFC 6376 §3.4.5**,
+et non des exemples écrits ici. Ce n'est pas de la coquetterie : une erreur d'un
+octet dans une canonicalisation ne produit aucun symptôme visible, elle rend
+simplement toutes les signatures invalides — ou en valide qui ne devraient pas
+l'être. Une épreuve inventée ici passerait ses propres tests et échouerait contre
+le reste du monde.
+
+Ce qui n'est pas outillé : **le condensat et la signature elle-même**. Savoir ce
+qui est signé et savoir PAR QUI sont deux questions ; la seconde demande de la
+cryptographie et une clé publique qui vit dans le DNS. `ams-dmarc` reste vide, et
+tant qu'il l'est, DMARC ne conclut rien — c'est pourtant lui qui rapproche le
+verdict SPF de l'en-tête `From:` que lira l'humain.
 
 ### DNSSEC n'est pas validé, et c'est écrit partout
 
