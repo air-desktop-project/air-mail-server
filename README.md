@@ -82,7 +82,7 @@ des octets **et des actions**. Elles n'attendent jamais.
 | `ams-auth` | le magasin d'identifiants, vérification Argon2id | **implémenté** |
 | `ams-tls` | TLS 1.3 uniquement, échange de clés post-quantique | **implémenté** |
 | `ams-dkim` | RFC 6376 | vide |
-| `ams-spf` | RFC 7208 | vide |
+| `ams-spf` | RFC 7208 | **enregistrement lu, `ip4`/`ip6`/`all`** |
 | `ams-dmarc` | RFC 7489 | vide |
 | `ams-config` | les trois formats binaires : configuration, comptes, index | **implémenté** |
 | `ams-index` | noms Maildir, drapeaux, reconstruction, `UIDVALIDITY` | **implémenté** |
@@ -98,7 +98,7 @@ Les seules crates qui lisent, écrivent et attendent. Elles ne décident de rien
 | `ams-server` | le binaire `air-mail-server` | **il tourne** |
 | `ams-admin` | le binaire `air-mail-admin` | **`summary`** |
 
-**Quatorze crates portent du code.** `ams-mime` : le squelette d'un message — la
+**Quinze crates portent du code.** `ams-mime` : le squelette d'un message — la
 ligne, le pliage, la séparation en-tête/corps, le découpage en champs. Les champs
 structurés, les adresses, les dates et MIME restent à écrire.
 `ams-proto-smtp` : les commandes, l'encodage des réponses multilignes, et **la
@@ -120,6 +120,15 @@ valeur. `Zg==` et `Zh==` décodent tous deux vers `f` ; accepter le second
 donnerait plusieurs formes pour un même identifiant, de quoi passer à côté d'un
 filtre ou d'un comptage. `LOGIN` et `CRAM-MD5` ne sont pas servis, et la crate
 dit pourquoi plutôt que de se taire.
+
+`ams-spf` : la lecture d'un enregistrement `v=spf1`, et les mécanismes qui n'ont
+besoin de personne — `ip4`, `ip6`, `all`. **La validation a lieu d'un seul
+tenant** : un terme fautif en queue fait échouer tout l'enregistrement, parce
+qu'un parcours s'arrêtant au premier terme utile appliquerait la moitié d'une
+politique — et deux pairs verraient deux politiques différentes pour le même
+domaine, selon celui qui correspond en premier. L'évaluation, qui résout des
+noms, viendra avec sa limite de dix résolutions (RFC 7208 §4.6.4) : elle rendra
+ses résolutions sous forme d'actions, comme `ams-dkim` le fera pour ses clés.
 
 `ams-auth` : les comptes — un nom, une empreinte, des adresses — et la
 vérification **Argon2id** (m = 19456 Kio, t = 2,

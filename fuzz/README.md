@@ -34,6 +34,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_sasl` | `seeds/sasl` | la réponse SASL — **décodage canonique** |
 | `fuzz_ams_pop3` | `seeds/pop3` | la ligne POP3 — **et le doublement du point** |
 | `fuzz_ams_session_pop3` | `seeds/pop3-session` | la session POP3 — **vocabulaire clos, états tenus** |
+| `fuzz_ams_spf` | `seeds/spf` | l'enregistrement SPF — **validation d'un seul tenant** |
 
 Les variantes « bornes » existent parce que les bornes de C3 viennent de la
 configuration (C8), donc d'un administrateur : un zéro, un `usize::MAX`, ou toute
@@ -173,6 +174,22 @@ mille boîtes se resynchronisent.
 5. Le repliement compte chaque nom une fois et une seule.
 6. Le prochain UID est strictement au-dessus de tous ceux qui existent — sauf
    quand la boîte est épuisée, auquel cas elle le déclare.
+
+### Enregistrement SPF (quatre, dont l'INDIVISIBILITÉ)
+
+Ces octets-là viennent du DNS, c'est-à-dire d'un domaine que **l'expéditeur
+choisit**. Un serveur qui panique en lisant l'enregistrement d'autrui offre son
+arrêt à qui sait publier un TXT.
+
+1. Rien ne panique, quelles que soient les bornes — zéro compris.
+2. **Un enregistrement accepté se reparcourt en entier sans jamais échouer**, et
+   rend toujours les mêmes termes. Un parcours qui dépendrait de ce qu'on lui
+   demande appliquerait une politique différente selon le pair.
+3. **Les bornes sont tenues** : ni plus de termes ni plus d'octets que ce qu'on
+   a permis.
+4. **Un mécanisme qui résout ne répond jamais seul.** Lui faire dire `false`
+   le ferait passer pour « ne correspond pas », ce qui est une réponse — et il
+   n'en a pas encore.
 
 ### Session POP3 (cinq, dont DEUX INVARIANTS D'ÉTAT)
 
@@ -425,6 +442,7 @@ L'entrée fautive est versionnée en graine de non-régression
 | 2026-08-28 | `fuzz_ams_sasl` | 4 786 307 (61 s) | 0 |
 | 2026-08-29 | `fuzz_ams_pop3` | 11 871 878 (91 s) | 0 |
 | 2026-08-29 | `fuzz_ams_session_pop3` | 1 179 107 (91 s) | 0 |
+| 2026-08-29 | `fuzz_ams_spf` | 1 886 802 (91 s) | 0 |
 | 2026-08-28 | `fuzz_ams_session_smtp` (SASL) | 521 646 (91 s) | 0 |
 
 Le débit de `fuzz_ams_tls_kx` est trois ordres de grandeur sous les autres : une

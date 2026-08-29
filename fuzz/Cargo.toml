@@ -57,6 +57,9 @@ path = "../crates/ams-auth"
 [dependencies.ams-sasl]
 path = "../crates/ams-sasl"
 
+[dependencies.ams-spf]
+path = "../crates/ams-spf"
+
 [dependencies.ams-tls]
 path = "../crates/ams-tls"
 
@@ -167,6 +170,13 @@ bench = false
 [[bin]]
 name = "fuzz_ams_session_pop3"
 path = "fuzz_targets/fuzz_ams_session_pop3.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ams_spf"
+path = "fuzz_targets/fuzz_ams_spf.rs"
 test = false
 doc = false
 bench = false

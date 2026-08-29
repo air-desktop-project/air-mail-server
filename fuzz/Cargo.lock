@@ -50,6 +50,7 @@ dependencies = [
  "ams-proto-smtp",
  "ams-sasl",
  "ams-session",
+ "ams-spf",
  "ams-tls",
  "arbitrary",
  "libfuzzer-sys",
@@ -107,6 +108,10 @@ dependencies = [
  "ams-proto-smtp",
  "ams-sasl",
 ]
+
+[[package]]
+name = "ams-spf"
+version = "0.1.0"
 
 [[package]]
 name = "ams-tls"

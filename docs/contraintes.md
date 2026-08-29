@@ -356,7 +356,20 @@ résolution est une *action rendue* par la machine à états, exécutée par la 
 et dont le résultat lui est réinjecté. C'est ce qui les rend couvrables à 100 %
 sans serveur DNS de test.
 
-**Outillé par** : rien. Les trois crates sont vides.
+**Outillé par** : partiellement, depuis le 2026-08-29. `ams-spf` lit un
+enregistrement `v=spf1` — termes, qualificateurs, préfixes CIDR — et répond pour
+les mécanismes qui n'exigent aucune résolution. Couvert à 100 % (C2) et fuzzé sur
+quatre propriétés, dont l'indivisibilité de la validation.
+
+Ce qui n'est pas outillé : **l'évaluation**, qui résout des noms, et donc tout ce
+que SPF conclut. `ams-dkim` et `ams-dmarc` restent vides. Tant que l'évaluation
+manque, C9 n'est tenue par rien de ce qui compte — un enregistrement lu
+n'empêche aucune usurpation.
+
+La limite des **dix résolutions** (RFC 7208 §4.6.4) mérite d'être nommée
+d'avance : elle existe pour empêcher qu'un enregistrement hostile fasse
+travailler le résolveur d'autrui, et c'est exactement le genre de borne qui se
+vérifie sur une machine à états et se perd dans un résolveur.
 
 ## C10 — Le serveur ne s'exécute jamais avec les privilèges du superutilisateur
 
