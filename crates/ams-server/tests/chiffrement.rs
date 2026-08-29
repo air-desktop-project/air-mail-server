@@ -23,6 +23,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 
 use ams_config::{Configuration, Timeouts, Tls};
@@ -90,9 +91,32 @@ fn paire(repertoire: &Path) -> Option<(PathBuf, PathBuf)> {
 /// un autre processus pourrait prendre le port. C'est la façon habituelle de
 /// faire, faute de pouvoir demander à un exécutable quel port éphémère il a
 /// obtenu, et l'échec serait bruyant plutôt que silencieux.
+/// Un port qu'aucun autre test de ce fichier ne demandera.
+///
+/// # Pourquoi pas `bind(":0")`, qui serait plus court
+///
+/// Parce qu'il faut RENDRE le port avant que le serveur ne le prenne — la
+/// configuration le nomme, et le serveur est un autre processus. Entre les deux,
+/// le noyau peut donner le même port à un test voisin qui demande au même
+/// instant : deux serveurs se disputent alors une adresse, le second meurt, et
+/// le premier voit sa sonde de démarrage réussir sur le serveur de l'autre. On
+/// l'a vu — « connexion refusée » sur un serveur que la sonde venait de joindre.
+///
+/// Un compteur atomique ferme cela : deux appels ne rendent jamais le même
+/// nombre. La plage est choisie SOUS les ports éphémères du noyau (32768 et
+/// au-delà sous Linux), là où rien d'autre n'écoute.
 fn port_libre() -> u16 {
-    let ecouteur = TcpListener::bind("127.0.0.1:0").expect("écoute");
-    ecouteur.local_addr().expect("adresse").port()
+    static SUIVANT: AtomicU16 = AtomicU16::new(0);
+    for _ in 0..64_u16 {
+        let rang = SUIVANT.fetch_add(1, Ordering::Relaxed);
+        let candidat = 24_000_u16.saturating_add(rang % 4_000);
+        // On éprouve qu'il est libre, et on le rend aussitôt : c'est tout ce
+        // qu'on peut faire pour un serveur qui liera lui-même.
+        if TcpListener::bind(("127.0.0.1", candidat)).is_ok() {
+            return candidat;
+        }
+    }
+    panic!("aucun port libre dans la plage des tests");
 }
 
 fn configuration(atelier: &Atelier, port: u16, tls: Tls, comptes: &str) -> PathBuf {

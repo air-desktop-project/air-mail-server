@@ -197,3 +197,10 @@ path = "fuzz_targets/fuzz_ams_dns.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_ams_spf_header"
+path = "fuzz_targets/fuzz_ams_spf_header.rs"
+test = false
+doc = false
+bench = false

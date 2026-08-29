@@ -52,6 +52,7 @@ extern crate std;
 
 mod error;
 mod eval;
+mod header;
 mod limits;
 pub mod macros;
 mod record;
@@ -59,6 +60,7 @@ mod term;
 
 pub use error::Error;
 pub use eval::{Answer, Evaluator, Query, Question, Step, Verdict};
+pub use header::{Identity, RECEIVED_SPF_MAX, ReceivedSpf, write_received_spf};
 pub use limits::Limits;
 pub use macros::{Context, Expanded};
 pub use record::{Record, Terms};

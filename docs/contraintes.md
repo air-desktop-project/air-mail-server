@@ -382,11 +382,25 @@ et le défaut, quand des résolveurs apparaissent, est **de regarder** : une
 politique mal écrite chez un partenaire refuse du courrier légitime, et il vaut
 mieux le lire dans un journal que l'apprendre au téléphone.
 
-Ce qui n'est pas outillé : `ams-dkim` et `ams-dmarc` restent vides. Et **aucun
-en-tête `Received-SPF` n'est écrit** (RFC 7208 §9.1) : le verdict est retenu par
-la session, mais rien ne le dépose encore dans le message. Tant qu'il manque, ce
-que le serveur a conclu ne se relit pas à la lecture d'un message — seulement
-dans son journal.
+**Le verdict est écrit dans le message depuis le 2026-08-29**, sous la forme
+d'un en-tête `Received-SPF` (RFC 7208 §9.1) posé EN TÊTE, avant les en-têtes du
+pair. Un verdict qu'on n'écrit pas ne sert à rien : le message accepté ne
+porterait aucune trace de ce qu'on a vérifié, et ni le lecteur, ni un filtre en
+aval, ni DMARC ne pourraient le savoir.
+
+L'en-tête porte deux valeurs **que le pair choisit**, et il est écrit DANS le
+message qu'on remet. Deux règles le ferment, et aucune n'est facultative : tout
+octet hors de l'ASCII imprimable fait refuser l'en-tête entier — pas
+d'échappement de secours, pas de remplacement — et les quatre octets qui ont un
+sens syntaxique sont préfixés d'une contre-oblique. La borne des 998 octets par
+ligne (RFC 5322 §2.1.1) est **vérifiée à l'écriture**, pas supposée : un en-tête
+plus long est refusé, car coupé en aval il se lirait comme un en-tête entier
+disant autre chose. Une cible de fuzz éprouve nommément qu'aucun saut de ligne
+n'y est autre chose qu'un repli.
+
+Ce qui n'est pas outillé : `ams-dkim` et `ams-dmarc` restent vides. Tant qu'ils
+le sont, DMARC ne conclut rien — et c'est DMARC qui rapproche le verdict SPF de
+l'en-tête `From:` que lira l'humain.
 
 ### DNSSEC n'est pas validé, et c'est écrit partout
 

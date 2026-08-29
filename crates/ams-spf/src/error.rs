@@ -42,6 +42,20 @@ pub enum Error {
     /// RFC 7208 §6 : ils sont uniques. Deux `redirect=` désigneraient deux
     /// politiques, et rien ne dirait laquelle s'applique.
     DuplicateModifier,
+    /// L'en-tête `Received-SPF` ne tient pas, ou une de ses lignes dépasserait
+    /// 998 octets (RFC 5322 §2.1.1).
+    ///
+    /// **On refuse plutôt que de couper** : un en-tête tronqué se lit comme un
+    /// en-tête entier qui dit autre chose, et les analyseurs en aval le coupent
+    /// où ils veulent.
+    HeaderTooLong,
+    /// Une valeur à écrire dans un en-tête porte un octet hors de l'ASCII
+    /// imprimable.
+    ///
+    /// L'expéditeur d'enveloppe et le `HELO` sont CHOISIS PAR LE PAIR. Un
+    /// `CR LF` recopié tel quel dans un en-tête lui laisserait écrire les
+    /// en-têtes qu'il veut dans le message qu'on remet.
+    NotPrintable,
 }
 
 impl fmt::Display for Error {
@@ -58,6 +72,12 @@ impl fmt::Display for Error {
             Error::MacroTooLong => f.write_str("l'expansion dépasse la taille d'un nom de domaine"),
             Error::DuplicateModifier => {
                 f.write_str("`redirect=` ou `exp=` figure deux fois (RFC 7208 §6)")
+            }
+            Error::HeaderTooLong => {
+                f.write_str("l'en-tête `Received-SPF` ne tient pas dans une ligne")
+            }
+            Error::NotPrintable => {
+                f.write_str("une valeur porte un octet hors de l'ASCII imprimable")
             }
         }
     }
@@ -80,6 +100,8 @@ mod tests {
         Error::MalformedMacro,
         Error::MacroTooLong,
         Error::DuplicateModifier,
+        Error::HeaderTooLong,
+        Error::NotPrintable,
     ];
 
     /// Un `Write` qui compte : la crate est `no_std` SANS `alloc`.

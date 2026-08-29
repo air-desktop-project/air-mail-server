@@ -37,6 +37,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_spf` | `seeds/spf` | l'enregistrement SPF — **validation d'un seul tenant** |
 | `fuzz_ams_spf_eval` | `seeds/spf-eval` | l'évaluation SPF, réponses DNS comprises — **elle conclut** |
 | `fuzz_ams_dns` | `seeds/dns` | la réponse d'un résolveur — **la compression ne boucle pas** |
+| `fuzz_ams_spf_header` | `seeds/spf-header` | l'en-tête `Received-SPF` — **aucune injection de ligne** |
 
 Les variantes « bornes » existent parce que les bornes de C3 viennent de la
 configuration (C8), donc d'un administrateur : un zéro, un `usize::MAX`, ou toute
@@ -215,6 +216,24 @@ répond pas à la question posée.
 6. **Une panne de résolution vaut `temperror`**, jamais un refus : dire `fail` à
    la place ferait jeter un message qui serait passé cinq minutes plus tard.
 7. Les bornes de l'évaluation sont fuzzées elles aussi — zéro compris.
+
+### En-tête `Received-SPF` (cinq, dont L'INJECTION DE LIGNE)
+
+Cet en-tête porte deux valeurs que **le pair choisit** — son expéditeur
+d'enveloppe et son `HELO` — et il est écrit DANS LE MESSAGE QU'ON REMET. Un
+`CR LF` recopié tel quel, et le pair écrit les en-têtes qu'il veut : un
+`Authentication-Results` fabriqué, un destinataire de plus, un faux
+`Received-SPF: pass` sous le nôtre.
+
+1. Rien ne panique, quelle que soit la taille du tampon — zéro comprise.
+2. **AUCUN SAUT DE LIGNE QUI NE SOIT UN REPLI.** Tout `CR` est suivi d'un `LF` ;
+   tout `LF` est précédé d'un `CR` et suivi d'une espace, sauf celui qui termine
+   l'en-tête. C'est la propriété qui ferme l'injection.
+3. **Aucune ligne ne dépasse 998 octets** (RFC 5322 §2.1.1).
+4. **La forme est tenue** : le nom du champ, puis l'un des sept mots de la RFC
+   7208 §2.6, puis un `CRLF` final.
+5. **Une valeur non imprimable fait TOUJOURS refuser** — et pour cette
+   raison-là, jamais une autre.
 
 ### Réponse DNS (cinq, dont LA COMPRESSION)
 
@@ -512,6 +531,7 @@ L'entrée fautive est versionnée en graine de non-régression
 | 2026-08-29 | `fuzz_ams_spf` (après `resolve`) | 2 224 920 (91 s) | 0 |
 | 2026-08-29 | `fuzz_ams_spf_eval` | 5 799 279 (181 s) | 0 |
 | 2026-08-29 | `fuzz_ams_dns` | 14 395 679 (181 s) | 0 |
+| 2026-08-29 | `fuzz_ams_spf_header` | 7 478 784 (181 s) | 0 |
 | 2026-08-29 | `fuzz_ams_config` (avec SPF) | 193 256 (61 s) | 0 |
 | 2026-08-29 | `fuzz_ams_session_smtp` (avec SPF) | 381 710 (61 s) | 0 |
 | 2026-08-28 | `fuzz_ams_session_smtp` (SASL) | 521 646 (91 s) | 0 |

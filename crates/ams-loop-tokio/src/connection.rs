@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 use ams_guard::{Event as GuardEvent, Source, Verdict};
 use ams_proto_smtp::DataEvent;
-use ams_session::{Action, Config, DataOutcome, Policy, SenderPolicy, SmtpSession};
+use ams_session::{
+    Action, Config, DataOutcome, Policy, RECEIVED_SPF_MAX, SenderPolicy, SmtpSession,
+};
 use ams_spf::Verdict as SpfVerdict;
 use rustls::ServerConfig;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
@@ -469,10 +471,9 @@ where
                     stream,
                     session,
                     delivery,
-                    &mut etat.lecture,
-                    &mut etat.rempli,
-                    &mut etat.sortie,
+                    etat,
                     service.timeouts.data,
+                    source,
                 )
                 .await?;
                 if remis {
@@ -521,10 +522,9 @@ async fn recevoir_message<S, P, D>(
     stream: &mut S,
     session: &mut SmtpSession<'_, P>,
     delivery: &mut D,
-    lecture: &mut [u8],
-    rempli: &mut usize,
-    sortie: &mut [u8],
+    etat: &mut Etat,
     delai: Duration,
+    source: Source,
 ) -> Result<bool, Error>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -542,6 +542,25 @@ where
             break;
         }
     }
+    // ── L'EN-TÊTE `Received-SPF` (RFC 7208 §9.1) ────────────────────────────
+    //
+    // AVANT le premier octet du message : un en-tête de trace se pose EN TÊTE,
+    // et l'écrire après les en-têtes du pair le mettrait dans le corps, où
+    // personne ne le lirait. La session le compose — la boucle ne fabrique
+    // aucun texte de protocole — et n'apporte ici que ce qu'elle seule sait :
+    // l'adresse du pair.
+    //
+    // Rien n'est écrit quand rien n'a été vérifié : un en-tête qui dirait
+    // `none` sans qu'aucune résolution ait eu lieu mentirait sur ce qu'on a
+    // fait.
+    let mut entete = [0_u8; RECEIVED_SPF_MAX];
+    if echec.is_none()
+        && let Some(trace) = session.received_spf(adresse_du_pair(source), &mut entete)
+        && let Err(cause) = delivery.append(trace)
+    {
+        echec = Some(cause);
+    }
+
     // Un échec ici n'arrête PAS la lecture : le message est lu jusqu'au bout
     // avant d'être refusé, sans quoi la connexion resterait désynchronisée et le
     // corps serait lu comme des commandes.
@@ -549,16 +568,16 @@ where
     let mut fini = false;
 
     while !fini {
-        if *rempli == 0 {
-            let lus = lire(stream, lecture, delai).await?;
+        if etat.rempli == 0 {
+            let lus = lire(stream, &mut etat.lecture, delai).await?;
             if lus == 0 {
                 // Le pair a raccroché en plein message : rien n'est remis.
                 delivery.abort();
                 return Ok(false);
             }
-            *rempli = lus;
+            etat.rempli = lus;
         }
-        match session.feed_data(&lecture[..*rempli]) {
+        match session.feed_data(&etat.lecture[..etat.rempli]) {
             Ok((evenement, consomme)) => {
                 match evenement {
                     DataEvent::Content(morceau) => {
@@ -578,8 +597,8 @@ where
                     DataEvent::Complete => fini = true,
                     DataEvent::NeedMore => {}
                 }
-                lecture.copy_within(consomme..*rempli, 0);
-                *rempli = rempli.saturating_sub(consomme);
+                etat.lecture.copy_within(consomme..etat.rempli, 0);
+                etat.rempli = etat.rempli.saturating_sub(consomme);
             }
             Err(ams_session::Error::DataRefused) => {
                 refuse = true;
@@ -608,7 +627,7 @@ where
         }
     };
 
-    let tour = session.on_data_settled(verdict, sortie)?;
+    let tour = session.on_data_settled(verdict, &mut etat.sortie)?;
     stream.write_all(tour.reply()).await?;
     stream.flush().await?;
     Ok(verdict == DataOutcome::Accepted)

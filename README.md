@@ -83,7 +83,7 @@ des octets **et des actions**. Elles n'attendent jamais.
 | `ams-auth` | le magasin d'identifiants, vérification Argon2id | **implémenté** |
 | `ams-tls` | TLS 1.3 uniquement, échange de clés post-quantique | **implémenté** |
 | `ams-dkim` | RFC 6376 | vide |
-| `ams-spf` | RFC 7208 | **évalué, et câblé dans la boucle SMTP** |
+| `ams-spf` | RFC 7208 | **évalué, câblé, et écrit dans le message** |
 | `ams-dmarc` | RFC 7489 | vide |
 | `ams-config` | les trois formats binaires : configuration, comptes, index | **implémenté** |
 | `ams-index` | noms Maildir, drapeaux, reconstruction, `UIDVALIDITY` | **implémenté** |
@@ -149,6 +149,19 @@ qui dit `fail` ne fait pas échouer l'évaluation — elle ne correspond pas, et
 c'est le terme suivant de l'appelante qui décide. Un `redirect=`, lui,
 **remplace** la politique : son verdict devient le nôtre, qualificateurs
 compris.
+
+**Le verdict est écrit dans le message**, en tête, sous la forme d'un en-tête
+`Received-SPF` (RFC 7208 §9.1). Sans lui, un message accepté ne porte aucune
+trace de ce qu'on a vérifié : ni le lecteur, ni un filtre en aval, ni DMARC ne
+peuvent le savoir. Cet en-tête porte deux valeurs **que le pair choisit** — son
+expéditeur d'enveloppe et son `HELO` — et il est écrit dans le message qu'on
+remet : deux règles le ferment. Tout octet hors de l'ASCII imprimable fait
+**refuser l'en-tête entier**, sans échappement de secours ; et les quatre octets
+qui ont un sens syntaxique — `"`, `\`, `(`, `)` — sont préfixés d'une
+contre-oblique. Le pliage (RFC 5322 §2.2.3) n'est pas cosmétique non plus : la
+borne des 998 octets par ligne est **vérifiée à l'écriture**, et un en-tête qui
+la dépasserait est refusé plutôt qu'émis — un en-tête coupé en aval se lit comme
+un en-tête entier qui dit autre chose.
 
 `ams-dns` : le codec d'un message DNS — une question encodée, une réponse
 décodée. **Un client stub, et rien de plus** : ce serveur pose des questions, il

@@ -4,7 +4,9 @@ use ams_proto_smtp::{
     ClientId, Code, Command, DataEvent, DataFault, DataReceiver, Error as SmtpError, Path, encode,
 };
 use ams_sasl::{decode_base64, parse_plain};
-use ams_spf::Verdict;
+use core::net::IpAddr;
+
+use ams_spf::{Identity, ReceivedSpf, Verdict, write_received_spf};
 
 use crate::digits::{MAX_DIGITS, decimal};
 use crate::tampon::Tampon;
@@ -222,6 +224,12 @@ pub struct SmtpSession<'a, P: Policy> {
     domaine_verifie: Tampon<DOMAIN_MAX>,
     /// Le verdict rendu par l'appelant pour cette transaction.
     verdict: Option<Verdict>,
+    /// L'identité vérifiée était-elle celle du `HELO` ?
+    ///
+    /// C'est le cas de l'expéditeur nul (RFC 7208 §2.4), et l'en-tête
+    /// `Received-SPF` doit le DIRE : ne pas le dire ferait croire que l'adresse
+    /// de l'enveloppe a été vérifiée.
+    identite_helo: bool,
 }
 
 impl<'a, P: Policy> SmtpSession<'a, P> {
@@ -264,6 +272,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
             expediteur: Tampon::vide(),
             domaine_verifie: Tampon::vide(),
             verdict: None,
+            identite_helo: false,
         }
     }
 
@@ -596,6 +605,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         match reverse_path {
             Path::Mailbox(boite) => match boite.domain() {
                 ClientId::Domain(domaine) => {
+                    self.identite_helo = false;
                     self.domaine_verifie.poser(&[domaine])
                         && self
                             .expediteur
@@ -606,6 +616,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
             },
             // RFC 7208 §2.4 : l'expéditeur nul se vérifie sur le `HELO`.
             Path::Null => {
+                self.identite_helo = true;
                 !self.helo.est_vide()
                     && self.domaine_verifie.poser(&[self.helo.as_bytes()])
                     && self
@@ -655,6 +666,40 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
             sender: self.expediteur.as_bytes(),
             helo: self.helo.as_bytes(),
         })
+    }
+
+    /// L'en-tête `Received-SPF` de la transaction en cours (RFC 7208 §9.1).
+    ///
+    /// Rend `None` quand rien n'a été vérifié — et **rien n'est alors écrit** :
+    /// un en-tête qui dirait `none` sans qu'aucune résolution ait eu lieu
+    /// mentirait sur ce qu'on a fait.
+    ///
+    /// # Pourquoi la session, et pas la boucle
+    ///
+    /// La boucle ne compose aucun texte de protocole, pas plus un en-tête qu'une
+    /// réponse : c'est ce qui garde le vocabulaire de sortie clos. Elle apporte
+    /// la seule chose qu'elle sache et que la session ignore — l'adresse du
+    /// pair — et reçoit des octets à écrire.
+    #[must_use]
+    pub fn received_spf<'b>(&self, client: IpAddr, out: &'b mut [u8]) -> Option<&'b [u8]> {
+        let verdict = self.verdict?;
+        let champ = ReceivedSpf {
+            result: verdict,
+            client,
+            sender: self.expediteur.as_bytes(),
+            helo: self.helo.as_bytes(),
+            receiver: self.config.domain(),
+            identity: if self.identite_helo {
+                Identity::Helo
+            } else {
+                Identity::MailFrom
+            },
+        };
+        // UN EN-TÊTE QU'ON NE SAIT PAS ÉCRIRE NE S'ÉCRIT PAS. La composition
+        // refuse ce qui ne tient pas dans une ligne et ce qui porte un octet
+        // hors de l'ASCII imprimable ; dans les deux cas, le message part sans
+        // trace plutôt qu'avec une trace douteuse.
+        write_received_spf(out, &champ).ok()
     }
 
     /// Le verdict retenu pour la transaction en cours, s'il y en a un.
@@ -2327,5 +2372,97 @@ mod tests {
         assert_eq!(session.helo.as_bytes(), b"mx.example.net");
         session.retenir_le_helo(&ClientId::AddressLiteral(b"[192.0.2.1]"));
         assert!(session.helo.est_vide());
+    }
+
+    // ── L'en-tête `Received-SPF` ────────────────────────────────────────────
+
+    fn pair() -> core::net::IpAddr {
+        "192.0.2.1".parse().expect("adresse")
+    }
+
+    fn trace(session: &SmtpSession<'_, Verdict>) -> Option<std::string::String> {
+        let mut tampon = [0_u8; crate::RECEIVED_SPF_MAX];
+        session
+            .received_spf(pair(), &mut tampon)
+            .map(|octets| std::string::String::from_utf8_lossy(octets).replace("\r\n ", " "))
+    }
+
+    #[test]
+    fn sans_verdict_aucune_trace() {
+        // Un en-tête qui dirait `none` sans qu'aucune résolution ait eu lieu
+        // mentirait sur ce qu'on a fait.
+        let mut session = session_spf(SenderPolicy::Ignore);
+        jusqu_au_mail(&mut session, b"client.example.net", b"<jean@example.com>");
+        assert!(trace(&session).is_none());
+    }
+
+    #[test]
+    fn la_trace_porte_le_verdict_et_l_identite() {
+        let mut session = session_spf(SenderPolicy::Observe);
+        jusqu_au_mail(&mut session, b"client.example.net", b"<jean@example.com>");
+        let mut tampon = [0_u8; 512];
+        session
+            .sender_checked(SpfVerdict::Fail, &mut tampon)
+            .expect("réponse");
+        let ecrit = trace(&session).expect("trace");
+        assert!(ecrit.starts_with("Received-SPF: fail "), "{ecrit}");
+        assert!(
+            ecrit.contains("envelope-from=\"jean@example.com\""),
+            "{ecrit}"
+        );
+        assert!(ecrit.contains("helo=\"client.example.net\""), "{ecrit}");
+        assert!(ecrit.contains("identity=mailfrom"), "{ecrit}");
+        assert!(ecrit.contains("receiver=\"mail.example.com\""), "{ecrit}");
+        assert!(ecrit.contains("client-ip=192.0.2.1"), "{ecrit}");
+    }
+
+    #[test]
+    fn une_trace_sur_l_expediteur_nul_nomme_le_helo() {
+        // RFC 7208 §2.4 : c'est le `HELO` qui a été vérifié. Ne pas le dire
+        // ferait croire que l'adresse de l'enveloppe l'a été.
+        let mut session = session_spf(SenderPolicy::Observe);
+        jusqu_au_mail(&mut session, b"client.example.net", b"<>");
+        let mut tampon = [0_u8; 512];
+        session
+            .sender_checked(SpfVerdict::Pass, &mut tampon)
+            .expect("réponse");
+        let ecrit = trace(&session).expect("trace");
+        assert!(ecrit.contains("identity=helo"), "{ecrit}");
+        assert!(
+            ecrit.contains("envelope-from=\"postmaster@client.example.net\""),
+            "{ecrit}"
+        );
+    }
+
+    #[test]
+    fn la_trace_ne_survit_pas_a_la_transaction() {
+        // Elle appartient au message qu'on est en train de recevoir. La laisser
+        // derrière ferait écrire, dans le message suivant, ce qu'on a conclu du
+        // précédent.
+        let mut session = session_spf(SenderPolicy::Observe);
+        jusqu_au_mail(&mut session, b"client.example.net", b"<jean@example.com>");
+        let mut tampon = [0_u8; 512];
+        session
+            .sender_checked(SpfVerdict::Pass, &mut tampon)
+            .expect("réponse");
+        assert!(trace(&session).is_some());
+        jouer(&mut session, b"RSET\r\n");
+        assert!(trace(&session).is_none());
+    }
+
+    #[test]
+    fn un_en_tete_qui_ne_tient_pas_ne_s_ecrit_pas() {
+        // La composition refuse ce qui ne tient pas dans une ligne. Le message
+        // part alors SANS TRACE plutôt qu'avec une trace douteuse — et surtout
+        // pas avec un en-tête coupé, qui se lirait comme un en-tête entier
+        // disant autre chose.
+        let mut session = session_spf(SenderPolicy::Observe);
+        jusqu_au_mail(&mut session, b"client.example.net", b"<jean@example.com>");
+        let mut tampon = [0_u8; 512];
+        session
+            .sender_checked(SpfVerdict::Pass, &mut tampon)
+            .expect("réponse");
+        let mut minuscule = [0_u8; 8];
+        assert!(session.received_spf(pair(), &mut minuscule).is_none());
     }
 }
