@@ -68,7 +68,7 @@ horloge.
 | `ams-sasl` | RFC 4422/4616 : `PLAIN` et son base64 | **implémenté** |
 | `ams-proto-pop3` | RFC 1939 | **commandes et réponses** |
 | `ams-dns` | RFC 1035 : le codec d'un message | **question encodée, réponse décodée** |
-| `ams-proto-imap` | RFC 9051 (IMAP4rev2) | **découpage des commandes, tag, littéraux, réponses** |
+| `ams-proto-imap` | RFC 9051 (IMAP4rev2) | **découpage, tag, littéraux, arguments, réponses** |
 | `ams-proto-http` | RFC 9110 / 9112 | vide |
 
 ### Étage 2 — décisions, sans entrée-sortie
@@ -78,7 +78,7 @@ des octets **et des actions**. Elles n'attendent jamais.
 
 | Crate | Périmètre | État |
 | --- | --- | --- |
-| `ams-session` | les sessions, serveur ET cliente | **SMTP et POP3 en réception, SMTP à l'émission** |
+| `ams-session` | les sessions, serveur ET cliente | **SMTP, POP3 et IMAP en réception, SMTP à l'émission** |
 | `ams-guard` | flooding et bannissement par source | **implémenté** |
 | `ams-auth` | le magasin d'identifiants, vérification Argon2id | **implémenté** |
 | `ams-tls` | TLS 1.3 uniquement, échange de clés post-quantique | **implémenté, en entrant et en sortant** |
@@ -403,8 +403,51 @@ main du client ; un `*` en ferait une réponse non sollicitée ; un `+` une dema
 de continuation. Ce ne sont pas des cas particuliers — ce sont les trois formes
 que prend une réponse IMAP, et la grammaire de la RFC les exclut déjà du tag.
 
-Ce qui n'y est pas : le vocabulaire des **arguments**. `FETCH`, `SEARCH` et
-`STORE` ont chacun leur grammaire, et elles viendront une par une. `APPEND`
+**Les arguments se lisent sous leurs trois écritures.** Un argument IMAP est un
+atome (`INBOX`), une chaîne (`"Mon dossier"`, avec `\"` et `\\`), ou un
+littéral. Un serveur qui n'en lit que deux refuse du courrier légitime ; un
+serveur qui les confond laisse le client décider de ce qu'il lit. La valeur ne se
+rend pas par emprunt — `"a\"b"` vaut trois octets là où la source en porte cinq —
+et s'écrit donc dans le tampon de l'appelant, comme tout ce qui produit des
+octets sans allouer.
+
+## La session IMAP : quatre états, et c'est l'état qui décide
+
+IMAP est le seul des trois protocoles dont le vocabulaire dépend entièrement d'où
+l'on en est (§3). **`SELECT` avant authentification est une commande parfaitement
+formée** : c'est l'état qui la refuse, pas la grammaire. Mélanger les deux ferait
+un analyseur qui doit connaître l'état, et un état qui doit connaître la
+grammaire.
+
+**UN MOT DE PASSE NE TRAVERSE PAS UNE CONNEXION EN CLAIR.** `LOGIN` envoie
+l'identifiant et le mot de passe tels quels, et `AUTHENTICATE PLAIN` fait la même
+chose en base64 — qui n'est pas un chiffrement. La RFC 9051 §6.2.3 impose
+d'annoncer `LOGINDISABLED` tant que la connexion n'est pas protégée ; cette
+session va au bout de la même idée et **refuse les deux**, avec le code
+`[PRIVACYREQUIRED]` que la RFC prévoit pour cela. Annoncer sans refuser
+laisserait un client mal écrit envoyer le mot de passe quand même, et l'annonce
+n'aurait servi qu'à se donner bonne conscience.
+
+De cet invariant découle une simplification qui se lit dans le code : **on ne
+peut pas être authentifié sans être chiffré**, donc `STARTTLS` n'a pas à
+vérifier l'état — une session authentifiée est déjà repartie par « TLS is already
+active ». Le fuzz éprouve l'invariant sur des suites de commandes arbitraires.
+
+**`STARTTLS` efface tout ce qui précède** (§6.2.1) : ce qui a été dit en clair a
+pu être dit par quelqu'un d'autre. La session repart de l'état non authentifié,
+et oublie l'utilisateur comme le tag en cours.
+
+**Quand le tag est illisible, la réponse est non sollicitée.** Une réponse
+conclut la commande que son tag désigne ; si le tag lui-même est irrecevable, il
+n'y a rien à désigner — et le recopier pour le dire serait précisément
+l'injection que sa validation ferme. On répond alors par `*`, la seule forme qui
+n'affirme rien.
+
+Ce qui n'y est pas : **les boîtes**. `SELECT`, `LIST`, `FETCH` et les autres sont
+reconnus, leur état est vérifié, et la session répond `NO [UNAVAILABLE]` — `NO`
+et non `BAD`, parce que la commande est correcte et permise et que c'est ce
+serveur qui ne la sert pas. Les servir demande un magasin qui porte des UID
+stables et des marques persistantes, ce que Maildir ne fait pas seul. `APPEND`
 demandera en plus un chemin qui écoule au fil de l'eau, comme le `DATA` de SMTP.
 
 ## Émettre : le client SMTP sortant

@@ -91,6 +91,7 @@ ams-dns = { path = "crates/ams-dns", version = "0.1.0" }
 ams-guard = { path = "crates/ams-guard", version = "0.1.0" }
 ams-index = { path = "crates/ams-index", version = "0.1.0" }
 ams-loop-tokio = { path = "crates/ams-loop-tokio", version = "0.1.0" }
+ams-proto-imap = { path = "crates/ams-proto-imap", version = "0.1.0" }
 ams-proto-pop3 = { path = "crates/ams-proto-pop3", version = "0.1.0" }
 ams-proto-smtp = { path = "crates/ams-proto-smtp", version = "0.1.0" }
 ams-auth = { path = "crates/ams-auth", version = "0.1.0" }

@@ -77,6 +77,39 @@ pub fn encode_untagged<'b>(
     ecrire(out, &[b"*", b" ", texte], limits)
 }
 
+/// Écrit une réponse non sollicitée dont le texte vient EN MORCEAUX.
+///
+/// La liste des capacités se compose de bouts choisis selon l'état de la
+/// connexion. Les recoller dans un tampon intermédiaire demanderait de borner ce
+/// tampon — donc d'écrire une garde qu'aucun état ne peut faire céder. Les
+/// passer tels quels laisse la seule borne qui compte, celle du tampon de
+/// sortie, être la seule à pouvoir échouer.
+///
+/// # Errors
+///
+/// Comme [`encode_untagged`].
+pub fn encode_untagged_parts<'b>(
+    out: &'b mut [u8],
+    parts: &[&[u8]],
+    limits: &Limits,
+) -> Result<&'b [u8], Error> {
+    let mut tous = [&b""[..]; 16];
+    let (tete, _) = tous.split_at_mut(2);
+    tete.copy_from_slice(&[b"*", b" "]);
+    let place = tous
+        .get_mut(2..parts.len().saturating_add(2))
+        .ok_or(Error::BufferTooSmall {
+            needed: parts.len(),
+        })?;
+    place.copy_from_slice(parts);
+    ecrire(
+        out,
+        tous.get(..parts.len().saturating_add(2))
+            .unwrap_or_default(),
+        limits,
+    )
+}
+
 /// Écrit une demande de continuation : `+ <texte>`.
 ///
 /// # Errors

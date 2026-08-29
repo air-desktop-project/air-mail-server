@@ -42,6 +42,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_dmarc` | `seeds/dmarc` | politique et alignement — **l'alignement est symétrique** |
 | `fuzz_ams_dmarc_report` | `seeds/dmarc-report` | destinations et rapport agrégé — **le rapport ne s'injecte pas** |
 | `fuzz_ams_imap` | `seeds/imap` | découpage d'une commande IMAP — **le client ne choisit pas où l'on coupe** |
+| `fuzz_ams_session_imap` | `seeds/imap-session` | la session IMAP — **jamais authentifié sans chiffrement** |
 | `fuzz_ams_smtp_client` | `seeds/smtp-client` | réponses lues et corps émis — **le message ne se termine pas tout seul** |
 | `fuzz_ams_mime_compose` | `seeds/mime-compose` | les messages de rapport — **la pièce jointe se relit, la liste blanche tient** |
 
@@ -282,6 +283,22 @@ authentification que cette surface est exposée.**
 4. **Un tag accepté est recopiable dans une réponse** : il ne porte aucun octet
    qui pourrait en écrire une seconde.
 5. **Une réponse encodée tient sur une ligne**, et une seule.
+
+### Session IMAP (cinq, dont L'INVARIANT QUI PORTE TOUT LE RESTE)
+
+La grammaire découpe, la session décide. Ce qu'on éprouve ici n'est pas la
+syntaxe mais **ce que l'état autorise**, et ce que la session écrit en retour.
+
+1. Rien ne panique, quelle que soit la suite de commandes.
+2. **ON NE PEUT PAS ÊTRE AUTHENTIFIÉ SANS ÊTRE CHIFFRÉ.** C'est l'invariant qui
+   porte tout le reste : un mot de passe ne traverse pas une connexion en clair,
+   et aucune suite de commandes ne doit pouvoir contourner cela.
+3. **Toute réponse est faite de lignes complètes**, sans quoi le client
+   recollerait deux réponses en une.
+4. **UNE RÉPONSE ÉTIQUETÉE NE REPREND QUE LE TAG QU'ON A REÇU.** Le tag est
+   recopié : s'il en sortait un que le client n'a pas envoyé, ce serait qu'on
+   l'a fabriqué — ou pire, qu'on a recopié autre chose.
+5. **Après `LOGOUT`, la session ne répond plus.**
 
 ### Les messages de rapport (six, dont LA LISTE BLANCHE)
 
@@ -760,6 +777,8 @@ coûterait du courrier sans rien protéger — on ne les interprète jamais.
 | 2026-08-29 | `fuzz_ams_dmarc` (avec `fo=`) | 8 851 543 (151 s) | 0 |
 | 2026-08-29 | `fuzz_ams_config` (avec les échecs) | 215 062 (71 s) | 0 |
 | 2026-08-29 | `fuzz_ams_imap` | 11 944 609 (241 s) | 0 |
+| 2026-08-29 | `fuzz_ams_imap` (avec les arguments) | 7 738 126 (151 s) | 0 |
+| 2026-08-29 | `fuzz_ams_session_imap` | 3 058 685 (221 s) | 0 |
 | 2026-08-29 | `fuzz_ams_config` (avec SPF) | 193 256 (61 s) | 0 |
 | 2026-08-29 | `fuzz_ams_session_smtp` (avec SPF) | 381 710 (61 s) | 0 |
 | 2026-08-28 | `fuzz_ams_session_smtp` (SASL) | 521 646 (91 s) | 0 |

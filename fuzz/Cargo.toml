@@ -255,3 +255,10 @@ path = "fuzz_targets/fuzz_ams_imap.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_ams_session_imap"
+path = "fuzz_targets/fuzz_ams_session_imap.rs"
+test = false
+doc = false
+bench = false

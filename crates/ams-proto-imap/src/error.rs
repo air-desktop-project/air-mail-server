@@ -44,6 +44,9 @@ pub enum Error {
     /// Le verbe n'appartient pas au vocabulaire d'IMAP4rev2.
     UnknownCommand,
 
+    /// Un argument n'est ni un atome, ni une chaîne close, ni un littéral.
+    MalformedArgument,
+
     /// Un littéral annonce une longueur qui n'est pas un nombre.
     MalformedLiteral,
 
@@ -99,6 +102,9 @@ impl fmt::Display for Error {
             Error::ReservedTag => f.write_str("`+` est réservé et ne peut pas être un tag"),
             Error::MissingCommand => f.write_str("la commande ne porte pas de verbe"),
             Error::UnknownCommand => f.write_str("verbe inconnu du vocabulaire IMAP4rev2"),
+            Error::MalformedArgument => {
+                f.write_str("un argument n'est ni un atome, ni une chaîne close, ni un littéral")
+            }
             Error::MalformedLiteral => {
                 f.write_str("un littéral annonce une longueur qui n'est pas un nombre")
             }

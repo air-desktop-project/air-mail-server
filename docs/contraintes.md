@@ -727,14 +727,55 @@ Le tag est aussi borné à trente-deux octets — il est recopié, donc un tag d
 kibioctets ferait une réponse de deux kibioctets pour un client qui n'a rien
 demandé de tel.
 
+### Les arguments, sous leurs trois écritures
+
+Un argument IMAP est un atome, une chaîne ou un littéral, et le client choisit. Un
+serveur qui n'en lit que deux refuse du courrier légitime ; un serveur qui les
+confond laisse le client décider de ce qu'il lit. La valeur ne se rend pas par
+emprunt — `"a\"b"` vaut trois octets là où la source en porte cinq — et s'écrit
+donc dans le tampon de l'appelant.
+
+Un détail trouvé par un test avant que le fuzz n'ait à le chercher : **une faute
+arrête la lecture**. Aucune des trois écritures ne sait où reprendre après ce
+qu'elle n'a pas compris, et rendre la faute sans avancer faisait un itérateur qui
+la répétait sans fin — un appelant qui collectait n'en voyait jamais la fin.
+
+### La session, depuis le 2026-08-29
+
+Quatre états (§3), et c'est l'état qui décide de tout. `SELECT` avant
+authentification est une commande parfaitement FORMÉE : c'est l'état qui la
+refuse, pas la grammaire.
+
+UN MOT DE PASSE NE TRAVERSE PAS UNE CONNEXION EN CLAIR. `LOGIN` et `AUTHENTICATE
+PLAIN` sont tous deux refusés hors chiffrement, avec le `[PRIVACYREQUIRED]` que
+la RFC 9051 prévoit — annoncer `LOGINDISABLED` sans refuser laisserait un client
+mal écrit envoyer le mot de passe quand même.
+
+De cet invariant découle une simplification qui se lit dans le code : on ne peut
+pas être authentifié sans être chiffré, donc `STARTTLS` n'a pas à vérifier
+l'état. Une comparaison de plus serait une garde qu'aucune entrée ne peut faire
+céder — et le fuzz éprouve l'invariant lui-même, sur des suites de commandes
+arbitraires.
+
+`STARTTLS` efface tout ce qui précède (§6.2.1) : ce qui a été dit en clair a pu
+être dit par quelqu'un d'autre.
+
+QUAND LE TAG EST ILLISIBLE, LA RÉPONSE EST NON SOLLICITÉE. Une réponse conclut la
+commande que son tag désigne ; si le tag lui-même est irrecevable, il n'y a rien à
+désigner — et le recopier pour le dire serait précisément l'injection que sa
+validation ferme.
+
 ### Ce qui n'y est pas
 
-Le vocabulaire des ARGUMENTS. `FETCH`, `SEARCH` et `STORE` ont chacun leur
-grammaire, et elles viendront une par une. `APPEND` demandera en plus un chemin
-qui écoule au fil de l'eau, comme le `DATA` de SMTP : la borne d'un littéral est
-aujourd'hui d'un mébioctet, ce qui suffit à un nom de boîte ou à une recherche et
-pas à un message. Et la session IMAP — les états, les réponses non sollicitées,
-les UID — n'existe pas : ce qui est là est la grammaire, pas le serveur.
+**Les boîtes.** `SELECT`, `LIST`, `FETCH` et les autres sont reconnus, leur état
+est vérifié, et la session répond `NO [UNAVAILABLE]` — `NO` et non `BAD`, parce
+que la commande est correcte et permise et que c'est ce serveur qui ne la sert
+pas. Les servir demande un magasin qui porte des UID stables et des marques
+persistantes, ce que Maildir ne fait pas seul et ce à quoi `ams-index` existe.
+`APPEND` demandera en plus un chemin qui écoule au fil de l'eau, comme le `DATA`
+de SMTP : la borne d'un littéral est aujourd'hui d'un mébioctet, ce qui suffit à
+un nom de boîte ou à une recherche, et pas à un message. Et la BOUCLE IMAP
+n'existe pas : rien n'écoute encore sur le port 143.
 
 ## Le client SMTP sortant, depuis le 2026-08-29
 

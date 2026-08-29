@@ -26,6 +26,7 @@
 #[cfg(test)]
 extern crate std;
 
+mod arguments;
 mod command;
 mod error;
 mod frame;
@@ -33,9 +34,12 @@ mod limits;
 mod response;
 mod tag;
 
+pub use arguments::{Args, Argument, argument_max};
 pub use command::{Command, Line};
 pub use error::Error;
 pub use frame::{CommandReader, Need};
 pub use limits::Limits;
-pub use response::{Status, encode_continuation, encode_tagged, encode_untagged};
+pub use response::{
+    Status, encode_continuation, encode_tagged, encode_untagged, encode_untagged_parts,
+};
 pub use tag::Tag;

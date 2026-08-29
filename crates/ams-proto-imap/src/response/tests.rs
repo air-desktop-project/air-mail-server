@@ -116,3 +116,43 @@ fn un_texte_vide_passe() {
         b"* \r\n"
     );
 }
+
+/// Les morceaux se recollent sans tampon intermédiaire — et il y a une borne au
+/// nombre de morceaux, sans quoi la sienne serait la seule à ne pas exister.
+#[test]
+fn une_reponse_en_morceaux_s_ecrit() {
+    use super::encode_untagged_parts;
+
+    let mut sortie = [0_u8; 128];
+    assert_eq!(
+        encode_untagged_parts(
+            &mut sortie,
+            &[b"CAPABILITY ", b"IMAP4rev2", b" LITERAL-", b"", b""],
+            &BORNES
+        )
+        .expect("encodable"),
+        b"* CAPABILITY IMAP4rev2 LITERAL-\r\n"
+    );
+    // Aucun morceau : la réponse la plus courte qui soit.
+    assert_eq!(
+        encode_untagged_parts(&mut sortie, &[], &BORNES).expect("encodable"),
+        b"* \r\n"
+    );
+    // Un morceau irrecevable fait refuser la réponse entière.
+    assert_eq!(
+        encode_untagged_parts(&mut sortie, &[b"ok", b"\r\n* BYE"], &BORNES),
+        Err(Error::ResponseTextNotPrintable)
+    );
+    // Trop de morceaux : la borne existe, et elle se dit.
+    let beaucoup = [&b"x"[..]; 15];
+    assert_eq!(
+        encode_untagged_parts(&mut sortie, &beaucoup, &BORNES),
+        Err(Error::BufferTooSmall { needed: 15 })
+    );
+    // Un tampon trop court le dit aussi.
+    let mut court = [0_u8; 3];
+    assert!(matches!(
+        encode_untagged_parts(&mut court, &[b"long texte"], &BORNES),
+        Err(Error::BufferTooSmall { .. })
+    ));
+}

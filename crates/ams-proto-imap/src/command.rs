@@ -18,8 +18,12 @@
 use crate::{Error, Limits, Tag};
 
 /// Un verbe d'IMAP4rev2.
+///
+/// **Pas `#[non_exhaustive]`, et c'est délibéré.** Une session doit décider de
+/// chaque verbe : ajouter le prochain doit casser la compilation de ce qui les
+/// traite, pas tomber dans un bras `_` où il serait servi par accident. C'est la
+/// même règle que pour les actions de `ams-session`, et pour la même raison.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum Command {
     /// `CAPABILITY` — ce que ce serveur sait faire.
     Capability,

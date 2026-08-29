@@ -25,6 +25,14 @@ use crate::{Error, Limits};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Tag<'a>(&'a [u8]);
 
+impl Tag<'static> {
+    /// Un tag valide, à écrire quand la commande n'en a pas fourni.
+    ///
+    /// Le point est le plus court des `ATOM-CHAR`, et il ne peut désigner
+    /// aucune commande en cours — ce qui est exactement ce qu'on veut dire.
+    pub const PLACEHOLDER: Self = Self(b".");
+}
+
 impl<'a> Tag<'a> {
     /// Lit un tag.
     ///

@@ -10,6 +10,8 @@ repository.workspace = true
 
 [dependencies]
 ams-proto-pop3 = { workspace = true }
+# IMAP (RFC 9051) : la session tient les quatre états, la grammaire découpe.
+ams-proto-imap = { workspace = true }
 ams-proto-smtp = { workspace = true }
 ams-sasl = { workspace = true }
 # SPF (C9) pour un seul type : `Verdict`. La session ne l'évalue pas — elle en

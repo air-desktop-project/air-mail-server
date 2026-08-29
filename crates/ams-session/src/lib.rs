@@ -123,6 +123,7 @@ mod client;
 mod config;
 mod digits;
 mod error;
+pub mod imap;
 mod policy;
 pub mod pop3;
 mod recipients;

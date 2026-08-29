@@ -11,6 +11,7 @@ const TOUTES: &[Error] = &[
     Error::ReservedTag,
     Error::MissingCommand,
     Error::UnknownCommand,
+    Error::MalformedArgument,
     Error::MalformedLiteral,
     Error::LiteralTooLong { limit: 1_048_576 },
     Error::NonSynchronizingTooLong { limit: 4096 },
