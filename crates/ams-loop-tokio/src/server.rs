@@ -12,7 +12,8 @@ use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 
 use crate::{
-    Delivery, DkimChecker, Error, SenderChecker, Service, SharedGuard, Timeouts, serve_connection,
+    Delivery, DkimChecker, DmarcChecker, Error, SenderChecker, Service, SharedGuard, Timeouts,
+    serve_connection,
 };
 
 /// Ce qui borne le service.
@@ -51,6 +52,11 @@ pub struct ServeOptions {
     ///
     /// Voir [`Service::dkim`] : son absence ne refuse rien.
     pub dkim: Option<DkimChecker>,
+    /// De quoi évaluer DMARC (C9).
+    ///
+    /// Voir [`Service::dmarc`] : c'est le seul des trois qui peut refuser un
+    /// message.
+    pub dmarc: Option<DmarcChecker>,
 }
 
 impl Default for ServeOptions {
@@ -61,6 +67,7 @@ impl Default for ServeOptions {
             tls: None,
             spf: None,
             dkim: None,
+            dmarc: None,
         }
     }
 }
@@ -81,6 +88,25 @@ pub struct Stats {
     /// attendant `air-log`, ce compte-là est ce que le serveur peut dire, et il
     /// le dit à l'arrêt.
     pub dkim: DkimSums,
+    /// Ce que DMARC a conclu, toutes connexions confondues.
+    pub dmarc: DmarcSums,
+}
+
+/// Le compte des verdicts DMARC, sur toute la durée du service.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DmarcSums {
+    /// Messages dont un mécanisme s'alignait.
+    pub pass: u64,
+    /// Messages dont aucun ne s'alignait.
+    pub fail: u64,
+    /// Domaines qui ne publient pas de politique.
+    pub no_policy: u64,
+    /// Politiques qu'on n'a pas pu résoudre.
+    pub temp_error: u64,
+    /// Messages dont le `From:` est illisible ou multiple.
+    pub unusable: u64,
+    /// Messages **refusés** parce que leur domaine d'auteur le demandait.
+    pub applied: u64,
 }
 
 /// Le compte des verdicts DKIM, sur toute la durée du service.
@@ -107,6 +133,12 @@ struct CompteurDkim {
     fail: AtomicU64,
     temp_error: AtomicU64,
     perm_error: AtomicU64,
+    dmarc_pass: AtomicU64,
+    dmarc_fail: AtomicU64,
+    dmarc_sans: AtomicU64,
+    dmarc_panne: AtomicU64,
+    dmarc_illisible: AtomicU64,
+    dmarc_applique: AtomicU64,
 }
 
 impl CompteurDkim {
@@ -119,6 +151,32 @@ impl CompteurDkim {
             .fetch_add(u64::from(tally.temp_error), Ordering::Relaxed);
         self.perm_error
             .fetch_add(u64::from(tally.perm_error), Ordering::Relaxed);
+    }
+
+    fn ajouter_dmarc(&self, tally: crate::connection::DmarcTally) {
+        self.dmarc_pass
+            .fetch_add(u64::from(tally.pass), Ordering::Relaxed);
+        self.dmarc_fail
+            .fetch_add(u64::from(tally.fail), Ordering::Relaxed);
+        self.dmarc_sans
+            .fetch_add(u64::from(tally.no_policy), Ordering::Relaxed);
+        self.dmarc_panne
+            .fetch_add(u64::from(tally.temp_error), Ordering::Relaxed);
+        self.dmarc_illisible
+            .fetch_add(u64::from(tally.unusable), Ordering::Relaxed);
+        self.dmarc_applique
+            .fetch_add(u64::from(tally.applied), Ordering::Relaxed);
+    }
+
+    fn sommes_dmarc(&self) -> DmarcSums {
+        DmarcSums {
+            pass: self.dmarc_pass.load(Ordering::Relaxed),
+            fail: self.dmarc_fail.load(Ordering::Relaxed),
+            no_policy: self.dmarc_sans.load(Ordering::Relaxed),
+            temp_error: self.dmarc_panne.load(Ordering::Relaxed),
+            unusable: self.dmarc_illisible.load(Ordering::Relaxed),
+            applied: self.dmarc_applique.load(Ordering::Relaxed),
+        }
     }
 
     fn sommes(&self) -> DkimSums {
@@ -209,6 +267,7 @@ where
         let tls = options.tls.clone();
         let spf = options.spf.clone();
         let dkim = options.dkim.clone();
+        let dmarc = options.dmarc.clone();
 
         tokio::spawn(async move {
             let mut flux = flux;
@@ -220,6 +279,7 @@ where
                 tls,
                 spf,
                 dkim,
+                dmarc,
             };
             // L'ÉCHEC d'une connexion ne regarde qu'elle — le journal viendra
             // avec `air-log`. Ce qu'elle a CONCLU des signatures, en revanche,
@@ -228,6 +288,7 @@ where
                 serve_connection(&mut flux, &service, &*policy, &mut remise, source_de(pair)).await
             {
                 comptes.ajouter(resume.dkim);
+                comptes.ajouter_dmarc(resume.dmarc);
             }
             drop(place);
         });
@@ -238,6 +299,7 @@ where
 fn avec_dkim(stats: Stats, comptes: &CompteurDkim) -> Stats {
     Stats {
         dkim: comptes.sommes(),
+        dmarc: comptes.sommes_dmarc(),
         ..stats
     }
 }
@@ -253,7 +315,7 @@ pub fn source_de(adresse: SocketAddr) -> Source {
 
 #[cfg(test)]
 mod tests {
-    use super::{DkimSums, ServeOptions, Stats, serve, source_de};
+    use super::{DkimSums, DmarcSums, ServeOptions, Stats, serve, source_de};
     use crate::{Delivery, DeliveryFailure, Error, SharedGuard, Timeouts};
     use ams_guard::{Source, Thresholds};
     use ams_proto_smtp::{Limits, Path};
@@ -442,6 +504,7 @@ mod tests {
                 accepted: 0,
                 failed: 0,
                 dkim: DkimSums::default(),
+                dmarc: DmarcSums::default(),
             }
         );
         assert!(!format!("{:?}", Stats::default()).is_empty());

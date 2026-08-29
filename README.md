@@ -63,7 +63,7 @@ horloge.
 
 | Crate | Périmètre | État |
 | --- | --- | --- |
-| `ams-mime` | RFC 5322 et MIME — le socle des quatre protocoles | **squelette du message : ligne, pliage, champs** |
+| `ams-mime` | RFC 5322 et MIME — le socle des quatre protocoles | **squelette du message, et le domaine d'un `From:`** |
 | `ams-proto-smtp` | RFC 5321 | **commandes, réponses, phase de données** |
 | `ams-sasl` | RFC 4422/4616 : `PLAIN` et son base64 | **implémenté** |
 | `ams-proto-pop3` | RFC 1939 | **commandes et réponses** |
@@ -84,7 +84,7 @@ des octets **et des actions**. Elles n'attendent jamais.
 | `ams-tls` | TLS 1.3 uniquement, échange de clés post-quantique | **implémenté** |
 | `ams-dkim` | RFC 6376 | **vérifiées, câblées, et posées** |
 | `ams-spf` | RFC 7208 | **évalué, câblé, et écrit dans le message** |
-| `ams-dmarc` | RFC 7489 | **alignement et politique** |
+| `ams-dmarc` | RFC 7489 | **alignement, politique, et câblé dans la boucle** |
 | `ams-config` | les trois formats binaires : configuration, comptes, index | **implémenté** |
 | `ams-index` | noms Maildir, drapeaux, reconstruction, `UIDVALIDITY` | **implémenté** |
 
@@ -285,7 +285,29 @@ pourquoi la crate n'en fournit aucune, et pourquoi une épreuve porte ce nom-là
 
 Elle ne tire pas au sort non plus : `pct=` échantillonne l'application d'une
 politique, et choisir demande de l'aléa — que C1 laisse à l'étage 3. Le verdict
-rend le pourcentage ; l'appelant tire.
+rend le pourcentage ; l'appelant tire, **et il tire uniformément** : un octet
+modulo cent biaiserait le tirage, puisque 256 ne se divise pas par 100, et un
+domaine qui demande `pct=10` a le droit d'obtenir dix pour cent, pas onze.
+
+**DMARC est câblé dans la boucle, et c'est le seul endroit du serveur où un
+message est refusé pour ce qu'il PRÉTEND être.** SPF refuse une enveloppe, le
+garde refuse un débit, la session refuse une syntaxe ; DMARC refuse un `From:`
+qui ne correspond à rien de ce qui a été authentifié — et seulement si le
+domaine de ce `From:` le demande. La réponse le dit : `550 5.7.1 Message
+rejected: sender domain policy (DMARC)`, et non le `554` générique — le pair n'a
+rien à corriger chez lui, et l'envoyer chercher la faute au mauvais endroit ne
+sert personne.
+
+**La liste des suffixes publics est un fichier**, nommé dans la configuration.
+Elle n'est pas embarquée : elle pèse quelques centaines de kibioctets, change
+toutes les semaines, et l'alignement relâché en dépend. Embarquée, elle
+vieillirait avec le binaire sans que personne ne sache de quand date la sienne.
+Sans elle, DMARC n'est pas évalué — et le serveur le dit au démarrage.
+
+**La quarantaine n'est pas encore un endroit.** `p=quarantine` demande de traiter
+le message comme suspect ; ce serveur n'a pas de dossier pour cela. Il le remet,
+et consigne la demande. Le refuser serait faire plus que ce que le domaine a
+demandé ; le taire serait faire moins que ce qu'on sait.
 
 `ams-dns` : le codec d'un message DNS — une question encodée, une réponse
 décodée. **Un client stub, et rien de plus** : ce serveur pose des questions, il

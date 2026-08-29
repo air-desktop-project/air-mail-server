@@ -12,7 +12,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use ams_config::{Configuration, Enforcement, Spf, Timeouts, Tls};
+use ams_config::{Configuration, Dmarc, Enforcement, Spf, Timeouts, Tls};
 use ams_guard::Thresholds;
 use ams_proto_smtp::Limits;
 
@@ -52,6 +52,10 @@ pub struct Options {
     pub spf_enforce: bool,
     /// Le temps accordé à une question DNS.
     pub spf_timeout_millis: u32,
+    /// La liste des suffixes publics. Vide : DMARC n'est pas évalué.
+    pub public_suffix_list: Option<PathBuf>,
+    /// Oppose-t-on un `p=reject`, ou se contente-t-on de le retenir ?
+    pub dmarc_enforce: bool,
 }
 
 impl Default for Options {
@@ -85,6 +89,14 @@ impl Default for Options {
             // découvrir dans un journal que dans un appel téléphonique.
             spf_enforce: false,
             spf_timeout_millis: 5_000,
+            // PAS DE LISTE PAR DÉFAUT : sans elle, DMARC n'est pas évalué. En
+            // embarquer une la ferait vieillir avec le binaire, et personne ne
+            // saurait de quand date la sienne.
+            public_suffix_list: None,
+            // ON REGARDE AVANT DE REFUSER, et plus longtemps qu'ailleurs : un
+            // domaine qui publie `p=reject` refuse aussi le courrier de ses
+            // propres listes de diffusion.
+            dmarc_enforce: false,
         }
     }
 }
@@ -128,6 +140,14 @@ impl Options {
                     Enforcement::Observe
                 },
                 timeout_millis: self.spf_timeout_millis,
+            },
+            dmarc: Dmarc {
+                public_suffix_list: chemin(self.public_suffix_list.as_ref()),
+                enforcement: if self.dmarc_enforce {
+                    Enforcement::Enforce
+                } else {
+                    Enforcement::Observe
+                },
             },
             accounts: chemin(self.accounts.as_ref()),
             listen_pop3: self
@@ -220,6 +240,22 @@ OPTIONS DE `config write`
     partenaire refuse du courrier légitime, et il vaut mieux le lire dans un
     journal que l'apprendre au téléphone.
 
+    DMARC (C9) N'EST ÉVALUÉ QUE SI UNE LISTE DE SUFFIXES PUBLICS EST NOMMÉE, et
+    que des résolveurs le sont aussi — il faut aller chercher la politique du
+    domaine de l'en-tête `From:`. La liste est celle de publicsuffix.org, telle
+    quelle : `--public-suffix-list /chemin/public_suffix_list.dat`.
+
+    Elle n'est PAS embarquée dans le binaire, et c'est délibéré : elle pèse
+    quelques centaines de kibioctets, change toutes les semaines, et l'alignement
+    relâché de DMARC en dépend. Embarquée, elle vieillirait sans que personne ne
+    sache de quand date la sienne — et s'y tromper fait aligner deux domaines
+    étrangers, ce que DMARC existe précisément pour empêcher.
+
+    `--dmarc observe` (le défaut) évalue et retient ; `--dmarc enforce` oppose un
+    550 aux messages qu'un `p=reject` condamne. Restez en observation plus
+    longtemps qu'ailleurs : un domaine qui publie `p=reject` refuse aussi le
+    courrier de ses propres listes de diffusion.
+
     Les bornes du décodeur et les seuils du garde prennent leurs valeurs par
     défaut : les régler mérite ses propres options, et les inventer ici donnerait
     un fichier qui dit autre chose que ce qui a été demandé.
@@ -279,6 +315,21 @@ where
                 match mot.as_str() {
                     "observe" => options.spf_enforce = false,
                     "enforce" => options.spf_enforce = true,
+                    autre => {
+                        return Err(ArgError::new(format!(
+                            "`{autre}` n'est ni `observe` ni `enforce`"
+                        )));
+                    }
+                }
+            }
+            "--public-suffix-list" => {
+                options.public_suffix_list = Some(PathBuf::from(valeur()?));
+            }
+            "--dmarc" => {
+                let mot = valeur()?;
+                match mot.as_str() {
+                    "observe" => options.dmarc_enforce = false,
+                    "enforce" => options.dmarc_enforce = true,
                     autre => {
                         return Err(ArgError::new(format!(
                             "`{autre}` n'est ni `observe` ni `enforce`"

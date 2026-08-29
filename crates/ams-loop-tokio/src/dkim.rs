@@ -151,23 +151,31 @@ pub struct DkimStream {
     entetes: Vec<u8>,
     phase: Phase,
     candidats: Vec<Candidate>,
-}
-
-impl Default for DkimStream {
-    fn default() -> Self {
-        Self::new()
-    }
+    condenser: bool,
 }
 
 impl DkimStream {
-    /// Ouvre la vérification.
+    /// Ouvre la lecture d'un message.
+    ///
+    /// `condenser` dit s'il faut suivre les signatures : DMARC a besoin du bloc
+    /// d'en-tête même quand DKIM n'est pas vérifié, et condenser un corps qu'on
+    /// ne vérifiera pas serait payer un SHA-256 pour rien.
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(condenser: bool) -> Self {
         Self {
             entetes: Vec::new(),
             phase: Phase::Entetes,
             candidats: Vec::new(),
+            condenser,
         }
+    }
+
+    /// Le bloc d'en-tête retenu, séparateur compris.
+    ///
+    /// Vide s'il a débordé, ou si le message n'en portait pas.
+    #[must_use]
+    pub fn headers(&self) -> &[u8] {
+        &self.entetes
     }
 
     /// Donne un morceau du message, **dé-échappé** comme la remise le reçoit.
@@ -212,6 +220,9 @@ impl DkimStream {
             // un refus du message : la session, elle, l'a accepté.
             return;
         };
+        if !self.condenser {
+            return;
+        }
         for (rang, champ) in message.fields().enumerate() {
             if self.candidats.len() >= SIGNATURES_MAX {
                 return;
@@ -241,12 +252,12 @@ impl DkimStream {
     ///
     /// Un message sans signature lisible rend une liste vide — c'est le `none`
     /// de la RFC 8601, et c'est la moitié du courrier.
-    pub async fn finish(self, checker: &DkimChecker) -> Vec<DkimResult> {
+    pub async fn finish(&mut self, checker: &DkimChecker) -> Vec<DkimResult> {
         let Ok(message) = Message::parse(&self.entetes, &MimeLimits::DEFAULT) else {
             return Vec::new();
         };
         let mut verdicts = Vec::with_capacity(self.candidats.len());
-        for candidat in self.candidats {
+        for candidat in core::mem::take(&mut self.candidats) {
             let Some(champ) = message.fields().nth(candidat.rang) else {
                 continue;
             };

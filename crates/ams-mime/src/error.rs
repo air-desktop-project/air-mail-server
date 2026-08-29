@@ -41,6 +41,17 @@ pub enum Error {
     /// Aucune ligne vide ne sépare l'en-tête du corps.
     MissingSeparator,
 
+    /// Un champ d'adresse ne porte pas d'adresse lisible.
+    NoAddress,
+
+    /// Un champ d'adresse en porte plusieurs.
+    ///
+    /// RFC 5322 l'autorise ; RFC 7489 §6.6.1 laisse le receveur refuser. C'est
+    /// ce qu'on fait : **avec deux auteurs, il y a deux domaines, deux
+    /// politiques, et rien pour dire laquelle s'applique.** Choisir la première
+    /// reviendrait à laisser l'expéditeur choisir laquelle on vérifie.
+    MultipleAddresses,
+
     /// Le bloc d'en-tête commence par une continuation, qui ne continue rien.
     FoldedFirstField {
         /// Ligne fautive (diagnostic).
@@ -97,6 +108,10 @@ impl fmt::Display for Error {
             Error::MissingSeparator => {
                 f.write_str("aucune ligne vide ne sépare l'en-tête du corps")
             }
+            Error::NoAddress => f.write_str("ce champ ne porte pas d'adresse lisible"),
+            Error::MultipleAddresses => {
+                f.write_str("ce champ porte plusieurs adresses (RFC 7489 §6.6.1)")
+            }
             Error::FoldedFirstField { line } => {
                 write!(f, "ligne {line} : continuation en tête d'en-tête")
             }
@@ -132,6 +147,8 @@ mod tests {
         Error::InvalidFieldName { line: 7 },
         Error::TooManyFields { limit: 8 },
         Error::HeaderTooLong { limit: 9 },
+        Error::NoAddress,
+        Error::MultipleAddresses,
     ];
 
     #[test]

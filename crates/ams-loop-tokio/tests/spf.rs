@@ -59,6 +59,7 @@ async fn dialogue(
             tls: None,
             spf,
             dkim: None,
+            dmarc: None,
         };
         serve_connection(&mut flux, &service, NotreDomaine, &mut Neant, PAIR).await
     });
@@ -219,6 +220,7 @@ async fn verifier_sans_verificateur_est_refuse_avant_la_banniere() {
             tls: None,
             spf: None,
             dkim: None,
+            dmarc: None,
         };
         serve_connection(&mut flux, &service, NotreDomaine, &mut Neant, PAIR).await
     });
@@ -276,6 +278,7 @@ async fn message_remis(
             tls: None,
             spf,
             dkim: None,
+            dmarc: None,
         };
         let mut remise = copie;
         serve_connection(&mut flux, &service, NotreDomaine, &mut remise, PAIR).await

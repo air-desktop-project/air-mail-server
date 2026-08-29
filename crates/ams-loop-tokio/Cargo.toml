@@ -22,6 +22,9 @@ ams-dns = { workspace = true }
 # DKIM (C9) : la boucle conduit la vérification — elle seule a le droit
 # d'attendre une clé — mais elle n'en décide rien.
 ams-dkim = { workspace = true }
+# DMARC (C9) : c'est le seul endroit où un message est refusé pour ce qu'il
+# prétend être.
+ams-dmarc = { workspace = true }
 # Le squelette d'un message : la boucle doit découper un bloc d'en-tête en
 # champs pour savoir lesquels une signature couvre.
 ams-mime = { workspace = true }

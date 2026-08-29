@@ -523,10 +523,33 @@ par un trait, et n'en fournit aucune implémentation : **celui qui répond doit
 savoir ce qu'il répond.** C'est le même partage que pour les questions DNS de
 SPF, et pour la même raison.
 
-Ce qui n'est pas outillé : **le câblage**. Il demande trois choses que ce serveur
-n'a pas encore réunies — le domaine du `From:`, une liste de suffixes publics, et
-un endroit où refuser. Et les rapports (`rua=`, `ruf=`) ne sont ni composés ni
-envoyés : l'enregistrement les rend tels quels, à qui saura les lire.
+**Le câblage est là depuis le 2026-08-29**, et il a demandé les trois choses qui
+manquaient. Le domaine du `From:` : `ams_mime::author_domain` le lit, en
+traversant les commentaires et en REFUSANT un champ qui porte plusieurs auteurs
+(§6.6.1) — avec deux auteurs, il y a deux politiques et rien pour dire laquelle
+s'applique. La liste des suffixes publics : un fichier nommé dans la
+configuration. Et un endroit où refuser : le point final du `DATA`, où le verdict
+arrive enfin.
+
+C'EST LE SEUL ENDROIT DU SERVEUR OÙ UN MESSAGE EST REFUSÉ POUR CE QU'IL PRÉTEND
+ÊTRE. SPF refuse une enveloppe, le garde refuse un débit, la session refuse une
+syntaxe. La réponse le nomme — `550 5.7.1 … (DMARC)`, et non le `554` générique :
+le pair n'a rien à corriger chez lui, et l'envoyer chercher la faute au mauvais
+endroit ne sert personne. Éprouvé jusqu'au binaire : un message dont le `From:`
+dit `banque.test` et dont rien ne s'aligne reçoit son 550 et n'est pas remis ;
+le message aligné qui suit passe.
+
+### La quarantaine n'est pas encore un endroit
+
+`p=quarantine` demande de traiter le message comme suspect. Ce serveur n'a pas de
+dossier pour cela : il le REMET, et consigne la demande. Le refuser serait faire
+plus que ce que le domaine a demandé ; le taire serait faire moins que ce qu'on
+sait.
+
+Ce qui n'est pas outillé : les rapports (`rua=`, `ruf=`) ne sont ni composés ni
+envoyés — l'enregistrement les rend tels quels, à qui saura les lire. C'est ce
+qui manque pour qu'un domaine puisse durcir sa politique en connaissance de
+cause : sans rapports, il durcit à l'aveugle.
 
 ### DNSSEC n'est pas validé, et c'est écrit partout
 

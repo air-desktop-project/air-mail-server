@@ -45,11 +45,13 @@ extern crate std;
 mod alignment;
 mod error;
 mod evaluate;
+mod psl;
 mod record;
 mod tag;
 
 pub use alignment::{Alignment, PublicSuffix, aligned};
 pub use error::Error;
 pub use evaluate::{Assessment, Authentication, Verdict, evaluate};
+pub use psl::Suffixes;
 pub use record::{POLICY_NAME_MAX, Policy, Record, policy_name};
 pub use tag::{Tag, Tags};

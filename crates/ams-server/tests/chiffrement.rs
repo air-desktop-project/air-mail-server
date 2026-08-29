@@ -147,6 +147,7 @@ fn configuration_pop3(
         },
         tls,
         spf: ams_config::Spf::default(),
+        dmarc: ams_config::Dmarc::default(),
         accounts: comptes.to_string(),
         listen_pop3: pop3.to_string(),
     };

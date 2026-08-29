@@ -639,6 +639,7 @@ L'entrée fautive est versionnée en graine de non-régression
 | 2026-08-29 | `fuzz_ams_dkim` (avec la vérification) | 2 921 202 (181 s) | 0 |
 | 2026-08-29 | `fuzz_ams_dkim` (avec la signature) | 707 978 (181 s) | **1, corrigée** |
 | 2026-08-29 | `fuzz_ams_dmarc` | 10 092 643 (181 s) | 0 |
+| 2026-08-29 | `fuzz_ams_config` (avec DMARC) | 187 544 (61 s) | 0 |
 | 2026-08-29 | `fuzz_ams_config` (avec SPF) | 193 256 (61 s) | 0 |
 | 2026-08-29 | `fuzz_ams_session_smtp` (avec SPF) | 381 710 (61 s) | 0 |
 | 2026-08-28 | `fuzz_ams_session_smtp` (SASL) | 521 646 (91 s) | 0 |

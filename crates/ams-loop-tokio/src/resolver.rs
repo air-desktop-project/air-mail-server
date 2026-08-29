@@ -80,6 +80,21 @@ impl Resolver {
         self.delai
     }
 
+    /// Un octet imprévisible.
+    ///
+    /// La même source que les identifiants de requête : `/dev/urandom`, ouvert
+    /// au démarrage. DMARC s'en sert pour le tirage de `pct=`.
+    ///
+    /// # Errors
+    ///
+    /// Si la lecture échoue.
+    pub(crate) async fn octet(&self) -> io::Result<u8> {
+        self.alea
+            .identifiant()
+            .await
+            .map(|paire| u8::try_from(paire & 0xFF).unwrap_or(0))
+    }
+
     /// Les `TXT` d'un nom, chaînes recollées.
     ///
     /// **RFC 6376 §3.6.2.1 comme RFC 7208 §3.3 veulent qu'on les concatène SANS

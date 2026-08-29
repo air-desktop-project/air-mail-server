@@ -99,6 +99,7 @@ name = "ams-loop-tokio"
 version = "0.1.0"
 dependencies = [
  "ams-dkim",
+ "ams-dmarc",
  "ams-dns",
  "ams-guard",
  "ams-mime",

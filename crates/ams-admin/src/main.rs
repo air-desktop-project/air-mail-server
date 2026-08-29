@@ -255,6 +255,18 @@ fn afficher(config: &Configuration) {
     } else {
         println!("SPF                AUCUN RÉSOLVEUR — l'expéditeur n'est pas vérifié");
     }
+    if config.dmarc.est_configure() {
+        println!(
+            "DMARC              {}",
+            match config.dmarc.enforcement {
+                Enforcement::Enforce => "APPLIQUÉ — un `p=reject` est opposé (550)",
+                Enforcement::Observe => "évalué et RETENU, sans rien opposer",
+            }
+        );
+        println!("  suffixes publics {}", config.dmarc.public_suffix_list);
+    } else {
+        println!("DMARC              AUCUNE LISTE DE SUFFIXES — l'alignement n'est pas évalué");
+    }
     // Là encore, on DIT l'absence. Une ligne manquante se lit « rien à
     // signaler » ; or un serveur sans comptes n'authentifie personne, et c'est
     // précisément ce qu'il faut signaler.

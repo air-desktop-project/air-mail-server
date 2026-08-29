@@ -66,6 +66,8 @@ struct Configuration {
   listenPop3 @12 :Text;
 
   spf @13 :Spf;
+
+  dmarc @14 :Dmarc;
 }
 
 # TLS (C4, C14). Deux CHEMINS, et pas le matériel lui-même : une clé privée
@@ -122,6 +124,37 @@ struct Spf {
     # qu'une politique refuserait AVANT de la laisser refuser.
     observe @0;
     # Un `fail` est refusé (550), une panne de résolution ajournée (451).
+    enforce @1;
+  }
+}
+
+# DMARC (C9). Comme TLS et SPF : PAS DE DRAPEAU. DMARC est évalué si et
+# seulement si une liste de suffixes publics est nommée — ET que des résolveurs
+# le sont, puisqu'il faut aller chercher la politique.
+struct Dmarc {
+  # Le fichier de la liste des suffixes publics, ou une chaîne vide.
+  #
+  # Celui de <https://publicsuffix.org>, tel quel. VIDE, DMARC N'EST PAS ÉVALUÉ.
+  #
+  # POURQUOI UN FICHIER ET NON UNE LISTE EMBARQUÉE. Elle pèse quelques centaines
+  # de kibioctets et change toutes les semaines : embarquée, elle vieillirait
+  # avec le binaire, et personne ne saurait de quand date la sienne. L'alignement
+  # relâché de DMARC en dépend — s'y tromper fait aligner deux domaines
+  # étrangers, ce que DMARC existe précisément pour empêcher.
+  publicSuffixList @0 :Text;
+
+  # Ce qu'on fait d'un message que la politique condamne.
+  enforcement @1 :Enforcement;
+
+  enum Enforcement {
+    # On évalue, on retient, on n'oppose rien. L'état où l'on découvre ce qu'une
+    # politique refuserait AVANT de la laisser refuser — et il faut y rester
+    # quelque temps : un domaine qui publie `p=reject` refuse aussi le courrier
+    # de ses propres listes de diffusion.
+    observe @0;
+    # Un `p=reject` est opposé (550). `p=quarantine` ne l'est pas : ce serveur
+    # n'a pas de dossier de quarantaine, et refuser à la place serait faire plus
+    # que ce que le domaine a demandé.
     enforce @1;
   }
 }

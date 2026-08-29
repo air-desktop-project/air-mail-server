@@ -135,6 +135,16 @@ pub enum DataOutcome {
     Accepted,
     /// Refusé **définitivement**.
     RejectedPermanent,
+    /// Refusé parce que **le domaine d'auteur le demande** (DMARC, RFC 7489).
+    ///
+    /// # Pourquoi une issue à part
+    ///
+    /// Le pair n'a rien fait de mal : son message est syntaxiquement correct, et
+    /// la remise aurait réussi. Ce qui le refuse, c'est la politique publiée par
+    /// le domaine qu'il affiche dans son `From:` — et lui dire « transaction
+    /// échouée » l'enverrait chercher la faute là où elle n'est pas. RFC 7489
+    /// §10.3 veut un `550 5.7.1`, et c'est ce qu'on répond.
+    RejectedByPolicy,
     /// Refusé **pour l'instant** : le pair doit réessayer.
     RejectedTemporary,
 }
@@ -365,6 +375,13 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
             DataOutcome::RejectedPermanent => {
                 self.simple(Code::TRANSACTION_FAILED, b"Message rejected", out)
             }
+            // On NOMME la raison : le pair doit pouvoir corriger, et il ne
+            // corrigera pas ce qu'il ne sait pas.
+            DataOutcome::RejectedByPolicy => self.simple(
+                Code::MAILBOX_UNAVAILABLE,
+                b"5.7.1 Message rejected: sender domain policy (DMARC)",
+                out,
+            ),
             DataOutcome::RejectedTemporary => self.simple(
                 Code::LOCAL_ERROR,
                 b"Message not accepted, try again later",
@@ -2464,5 +2481,30 @@ mod tests {
             .expect("réponse");
         let mut minuscule = [0_u8; 8];
         assert!(session.received_spf(pair(), &mut minuscule).is_none());
+    }
+
+    #[test]
+    fn un_refus_par_politique_ne_dit_pas_la_meme_chose_qu_une_faute() {
+        // Le pair n'a rien fait de mal : son message est correct, et la remise
+        // aurait réussi. Lui dire « transaction échouée » l'enverrait chercher
+        // la faute là où elle n'est pas. RFC 7489 §10.3 veut un `550 5.7.1`.
+        let mut session = acceptante();
+        identifier(&mut session);
+        jouer(&mut session, b"MAIL FROM:<jean@example.com>\r\n");
+        jouer(&mut session, b"RCPT TO:<marie@example.com>\r\n");
+        jouer(&mut session, b"DATA\r\n");
+        session
+            .feed_data(b"From: jean@example.com\r\n\r\ncorps\r\n.\r\n")
+            .expect("données");
+
+        let mut tampon = [0_u8; 512];
+        let tour = session
+            .on_data_settled(DataOutcome::RejectedByPolicy, &mut tampon)
+            .expect("réponse");
+        let reponse = std::string::String::from_utf8(tour.reply().to_vec()).expect("ASCII");
+        assert!(reponse.starts_with("550 5.7.1"), "{reponse}");
+        assert!(reponse.contains("DMARC"), "{reponse}");
+        // Ce n'est PAS une faute du pair : son message était bien formé.
+        assert!(!tour.peer_fault(), "{reponse}");
     }
 }

@@ -106,6 +106,36 @@ impl Spf {
     }
 }
 
+/// DMARC (C9) : la liste des suffixes publics, et ce qu'on fait du verdict.
+///
+/// # Il n'y a pas de drapeau, et c'est le même sujet que pour [`Tls`] et [`Spf`]
+///
+/// DMARC est évalué **si et seulement si** une liste est nommée — et que des
+/// résolveurs le sont aussi, puisqu'il faut aller chercher la politique.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Dmarc {
+    /// Le fichier de la liste des suffixes publics, ou une chaîne vide.
+    ///
+    /// # Pourquoi un fichier, et non une liste embarquée
+    ///
+    /// Elle pèse quelques centaines de kibioctets et change toutes les
+    /// semaines : embarquée, elle vieillirait avec le binaire, et personne ne
+    /// saurait de quand date la sienne. L'alignement relâché en dépend — s'y
+    /// tromper fait aligner deux domaines étrangers, ce que DMARC existe
+    /// précisément pour empêcher.
+    pub public_suffix_list: String,
+    /// Ce qu'on fait d'un message que la politique condamne.
+    pub enforcement: Enforcement,
+}
+
+impl Dmarc {
+    /// Ce service évalue-t-il DMARC ?
+    #[must_use]
+    pub fn est_configure(&self) -> bool {
+        !self.public_suffix_list.is_empty()
+    }
+}
+
 /// Tout ce qu'un fichier de configuration porte.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Configuration {
@@ -146,6 +176,8 @@ pub struct Configuration {
     pub listen_pop3: String,
     /// SPF : les résolveurs, et ce qu'on fait du verdict.
     pub spf: Spf,
+    /// DMARC : la liste des suffixes publics, et ce qu'on fait du verdict.
+    pub dmarc: Dmarc,
     /// Le fichier de comptes, ou une chaîne vide.
     ///
     /// Vide, le serveur n'annonce pas `AUTH` : il n'a personne à qui répondre
@@ -308,6 +340,16 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
         timeout_millis: verification.get_timeout_millis(),
     };
 
+    let alignement = lu.get_dmarc()?;
+    let dmarc = Dmarc {
+        public_suffix_list: texte(alignement.get_public_suffix_list()?)?,
+        enforcement: match alignement.get_enforcement() {
+            Ok(crate::ams_config_capnp::dmarc::Enforcement::Observe) => Enforcement::Observe,
+            Ok(crate::ams_config_capnp::dmarc::Enforcement::Enforce) => Enforcement::Enforce,
+            Err(_) => return Err(Error::UnknownEnforcement),
+        },
+    };
+
     let chiffrement = lu.get_tls()?;
     let tls = Tls {
         certificate_chain_path: texte(chiffrement.get_certificate_chain_path()?)?,
@@ -350,6 +392,7 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
         },
         tls,
         spf,
+        dmarc,
         accounts: comptes,
         listen_pop3: ecoute_pop3,
     })
@@ -424,6 +467,14 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
                 liste.set(u32::try_from(rang).unwrap_or(u32::MAX), resolveur);
             }
         }
+        {
+            let mut alignement = ecrit.reborrow().init_dmarc();
+            alignement.set_public_suffix_list(&config.dmarc.public_suffix_list);
+            alignement.set_enforcement(match config.dmarc.enforcement {
+                Enforcement::Observe => crate::ams_config_capnp::dmarc::Enforcement::Observe,
+                Enforcement::Enforce => crate::ams_config_capnp::dmarc::Enforcement::Enforce,
+            });
+        }
         ecrit.set_accounts(&config.accounts);
         ecrit.set_listen_pop3(&config.listen_pop3);
     }
@@ -453,8 +504,8 @@ fn depuis(valeur: usize) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        Configuration, Enforcement, Error, Spf, TRAVERSAL_LIMIT_WORDS, Timeouts, Tls, decode,
-        encode,
+        Configuration, Dmarc, Enforcement, Error, Spf, TRAVERSAL_LIMIT_WORDS, Timeouts, Tls,
+        decode, encode,
     };
     use alloc::string::{String, ToString as _};
     use alloc::vec;
@@ -485,6 +536,9 @@ mod tests {
             // Ni résolveur : SPF n'est pas vérifié, et il n'y a pas de drapeau
             // pour dire le contraire.
             spf: Spf::default(),
+            // Ni liste de suffixes : DMARC n'est pas évalué, et il n'y a pas de
+            // drapeau pour dire le contraire.
+            dmarc: Dmarc::default(),
             accounts: String::new(),
             listen_pop3: String::new(),
         }
@@ -504,6 +558,10 @@ mod tests {
                 resolvers: vec![String::from("127.0.0.1:53")],
                 enforcement: Enforcement::Enforce,
                 timeout_millis: 5_000,
+            },
+            dmarc: Dmarc {
+                public_suffix_list: String::from("/etc/ams/public_suffix_list.dat"),
+                enforcement: Enforcement::Enforce,
             },
             ..exemple()
         }
@@ -796,5 +854,33 @@ mod tests {
         );
         let dit = alloc::format!("{}", Error::UnknownEnforcement);
         assert!(dit.contains("enforcement"), "{dit}");
+    }
+
+    #[test]
+    fn la_section_dmarc_traverse_le_format() {
+        let mut original = exemple();
+        assert!(!original.dmarc.est_configure());
+        original.dmarc = Dmarc {
+            public_suffix_list: String::from("/etc/ams/psl.dat"),
+            enforcement: Enforcement::Enforce,
+        };
+        let octets = encode(&original).expect("encodable");
+        let relue = decode(&octets).expect("relisible");
+        assert_eq!(relue.dmarc, original.dmarc);
+        assert!(relue.dmarc.est_configure());
+        assert!(!alloc::format!("{:?}", relue.dmarc).is_empty());
+    }
+
+    #[test]
+    fn sans_liste_de_suffixes_dmarc_n_est_pas_configure() {
+        // PAS DE DRAPEAU : l'absence de liste EST l'absence d'évaluation. Un
+        // `enforcement` réglé sans liste n'évalue rien, et ne prétend rien
+        // évaluer.
+        let mut original = exemple();
+        original.dmarc.enforcement = Enforcement::Enforce;
+        let octets = encode(&original).expect("encodable");
+        let relue = decode(&octets).expect("relisible");
+        assert!(!relue.dmarc.est_configure());
+        assert_eq!(relue.dmarc.enforcement, Enforcement::Enforce);
     }
 }

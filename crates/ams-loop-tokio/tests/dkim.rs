@@ -57,7 +57,7 @@ async fn verdicts(message: &str, resolveur: SocketAddr, morceaux: usize) -> Vec<
     let checker = DkimChecker::new(
         Resolver::new(std::vec![resolveur], Duration::from_secs(2)).expect("résolveur"),
     );
-    let mut flux = DkimStream::new();
+    let mut flux = DkimStream::new(true);
     for morceau in message.as_bytes().chunks(morceaux.max(1)) {
         flux.update(morceau);
     }
@@ -196,6 +196,7 @@ async fn le_resume_de_la_connexion_porte_le_verdict() {
             tls: None,
             spf: None,
             dkim: Some(checker),
+            dmarc: None,
         };
         serve_connection(&mut flux, &service, NotreDomaine, &mut Neant, PAIR).await
     });

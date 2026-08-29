@@ -71,10 +71,12 @@
 #[cfg(test)]
 extern crate std;
 
+mod address;
 mod error;
 mod limits;
 mod message;
 
+pub use address::author_domain;
 pub use error::Error;
 pub use limits::Limits;
 pub use message::{Field, Fields, Message, Unfolded};

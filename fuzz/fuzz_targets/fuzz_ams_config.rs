@@ -19,8 +19,8 @@ use core::time::Duration;
 
 use ams_auth::{Account, DUMMY_HASH};
 use ams_config::{
-    Configuration, Enforcement, Spf, Timeouts, Tls, decode, decode_accounts, decode_index, encode,
-    encode_accounts, encode_index,
+    Configuration, Dmarc, Enforcement, Spf, Timeouts, Tls, decode, decode_accounts, decode_index,
+    encode, encode_accounts, encode_index,
 };
 use ams_guard::Thresholds;
 use ams_index::{MailboxState, Uid, UidValidity};
@@ -69,6 +69,12 @@ struct Entree {
     applique: bool,
     /// Le délai d'une question DNS.
     delai_dns: u32,
+    /// Le chemin de la liste des suffixes publics — UNE CHAÎNE LIBRE : cette
+    /// crate ne l'ouvre pas, et lui donner un chemin plausible cacherait
+    /// qu'elle n'a pas à s'en soucier.
+    suffixes: String,
+    /// Oppose-t-on un `p=reject` ?
+    aligne: bool,
 }
 
 fuzz_target!(|entree: Entree| {
@@ -121,6 +127,14 @@ fuzz_target!(|entree: Entree| {
                 Enforcement::Observe
             },
             timeout_millis: entree.delai_dns,
+        },
+        dmarc: Dmarc {
+            public_suffix_list: entree.suffixes.clone(),
+            enforcement: if entree.aligne {
+                Enforcement::Enforce
+            } else {
+                Enforcement::Observe
+            },
         },
         accounts: entree.comptes.clone(),
         listen_pop3: entree.ecoute_pop3.clone(),

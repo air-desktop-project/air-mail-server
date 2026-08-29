@@ -44,7 +44,8 @@ use ams_auth::Account;
 use ams_config::{Configuration, Enforcement, Tls};
 use ams_loop_tokio::pop3::serve_pop3;
 use ams_loop_tokio::{
-    DkimChecker, SenderChecker, ServeOptions, SharedGuard, Timeouts, refuse_root, serve,
+    DkimChecker, DmarcChecker, SenderChecker, ServeOptions, SharedGuard, Timeouts, refuse_root,
+    serve,
 };
 use ams_session::{Capabilities, Config, SenderPolicy};
 use ams_store::Maildir;
@@ -305,6 +306,53 @@ async fn servir(fichier: &Path) -> Result<(), String> {
             ),
         }
     );
+    // ── DMARC (C9) ──────────────────────────────────────────────────────────
+    //
+    // Comme le reste : PAS DE DRAPEAU. DMARC est évalué si et seulement si une
+    // liste de suffixes publics est nommée ET qu'un résolveur l'est aussi — il
+    // faut aller chercher la politique du domaine de l'en-tête `From:`.
+    let alignement = if options.dmarc.est_configure() && !resolveurs.is_empty() {
+        let chemin = Path::new(&options.dmarc.public_suffix_list);
+        let liste = std::fs::read(chemin).map_err(|erreur| {
+            format!(
+                "liste des suffixes publics `{}` : {erreur}",
+                chemin.display()
+            )
+        })?;
+        Some(std::sync::Arc::new(liste))
+    } else {
+        None
+    };
+    let dmarc_applique = options.dmarc.enforcement == Enforcement::Enforce;
+    let verificateur_dmarc = match (verificateur.as_ref(), alignement) {
+        (Some(checker), Some(liste)) => Some(DmarcChecker::new(
+            checker.resolver().clone(),
+            liste,
+            dmarc_applique,
+        )),
+        _ => None,
+    };
+    eprintln!(
+        "air-mail-server : {}",
+        match (&verificateur_dmarc, dmarc_applique) {
+            (None, _) if options.dmarc.est_configure() => String::from(
+                "DMARC non évalué — une liste de suffixes est nommée, mais aucun résolveur"
+            ),
+            (None, _) => String::from(
+                "DMARC non évalué — aucune liste de suffixes publics                  (`air-mail-admin --public-suffix-list …`)"
+            ),
+            (Some(_), false) => format!(
+                "DMARC évalué et RETENU, sans rien opposer ; suffixes publics `{}`",
+                options.dmarc.public_suffix_list
+            ),
+            (Some(_), true) => format!(
+                "DMARC APPLIQUÉ — un `p=reject` est opposé (550) ; suffixes publics `{}`. \
+                 La quarantaine, elle, n'est pas encore un endroit : ces messages sont remis.",
+                options.dmarc.public_suffix_list
+            ),
+        }
+    );
+
     if !resolveurs.is_empty() {
         // DKIM (C9) vérifie dès qu'il y a un résolveur, sans réglage de plus :
         // il ne décide d'aucun message — c'est DMARC qui décidera — donc il n'y
@@ -436,6 +484,9 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         dkim: verificateur
             .as_ref()
             .map(|checker| DkimChecker::new(checker.resolver().clone())),
+        // Le seul des trois qui peut REFUSER un message — et seulement quand le
+        // domaine du `From:` le demande.
+        dmarc: verificateur_dmarc,
         // `None` quand aucun résolveur n'est nommé — et la session ne demande
         // alors aucune vérification. Les deux vont ensemble, et la boucle refuse
         // l'assemblage inverse avant même la bannière.
@@ -526,6 +577,17 @@ async fn servir(fichier: &Path) -> Result<(), String> {
             "air-mail-server : DKIM ; {} signature(s) vraie(s), {} fausse(s), {} clé(s) \
              injoignable(s), {} irrecevable(s)",
             dkim.pass, dkim.fail, dkim.temp_error, dkim.perm_error
+        );
+        let dmarc = stats.dmarc;
+        eprintln!(
+            "air-mail-server : DMARC ; {} aligné(s), {} non aligné(s) dont {} REFUSÉ(S), \
+             {} sans politique, {} injoignable(s), {} illisible(s)",
+            dmarc.pass,
+            dmarc.fail,
+            dmarc.applied,
+            dmarc.no_policy,
+            dmarc.temp_error,
+            dmarc.unusable
         );
     }
     Ok(())

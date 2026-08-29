@@ -15,7 +15,10 @@ use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
 
 use crate::dkim::{DkimChecker, DkimStream, DkimVerdict};
+use crate::dmarc::{Authenticated, DmarcChecker, DmarcResult, DmarcVerdict};
 use crate::{Delivery, DeliveryFailure, Error, SenderChecker, SharedGuard};
+use ams_dmarc::Policy as DmarcPolicy;
+use std::string::String;
 
 /// Combien de lignes une réponse peut compter au plus.
 ///
@@ -91,6 +94,25 @@ pub struct Summary {
     pub outcome: Outcome,
     /// Ce que les signatures DKIM ont donné.
     pub dkim: DkimTally,
+    /// Ce que DMARC a conclu.
+    pub dmarc: DmarcTally,
+}
+
+/// Le compte des verdicts DMARC d'une connexion.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DmarcTally {
+    /// Messages dont un mécanisme s'alignait.
+    pub pass: u32,
+    /// Messages dont aucun ne s'alignait.
+    pub fail: u32,
+    /// Domaines qui ne publient pas de politique.
+    pub no_policy: u32,
+    /// Politiques qu'on n'a pas pu résoudre.
+    pub temp_error: u32,
+    /// Messages dont le `From:` est illisible ou multiple.
+    pub unusable: u32,
+    /// Messages auxquels la politique a été **appliquée**.
+    pub applied: u32,
 }
 
 /// Le compte des verdicts DKIM d'une connexion.
@@ -165,6 +187,11 @@ pub struct Service<'a> {
     /// ne le vérifie pas sert exactement comme avant. C'est la différence avec
     /// [`Service::spf`], dont la session ATTEND une réponse.
     pub dkim: Option<DkimChecker>,
+    /// De quoi évaluer DMARC (C9), si le service sait le faire.
+    ///
+    /// **C'est le seul de ces trois-là qui peut REFUSER un message** — et
+    /// seulement quand le domaine du `From:` le demande.
+    pub dmarc: Option<DmarcChecker>,
 }
 
 /// Ce qui survit à la montée en chiffrement.
@@ -507,6 +534,22 @@ where
     }
 }
 
+/// Verse un verdict DMARC dans le compte d'une connexion.
+fn compter_dmarc(compte: DmarcTally, resultat: &DmarcResult) -> DmarcTally {
+    let mut compte = compte;
+    match resultat.verdict {
+        DmarcVerdict::Pass => compte.pass = compte.pass.saturating_add(1),
+        DmarcVerdict::Fail => compte.fail = compte.fail.saturating_add(1),
+        DmarcVerdict::NoPolicy => compte.no_policy = compte.no_policy.saturating_add(1),
+        DmarcVerdict::TempError => compte.temp_error = compte.temp_error.saturating_add(1),
+        DmarcVerdict::Unusable => compte.unusable = compte.unusable.saturating_add(1),
+    }
+    if resultat.applies {
+        compte.applied = compte.applied.saturating_add(1);
+    }
+    compte
+}
+
 /// Conduit la vérification de l'expéditeur, et rend son verdict.
 async fn verifier_l_expediteur<P: Policy>(
     service: &Service<'_>,
@@ -591,8 +634,10 @@ where
     let mut fini = false;
     // La vérification DKIM (C9) suit le message OCTET PAR OCTET : son condensat
     // porte sur le corps entier, et rassembler celui-ci laisserait le pair
-    // choisir combien de mémoire on lui consacre.
-    let mut dkim = service.dkim.as_ref().map(|_| DkimStream::new());
+    // choisir combien de mémoire on lui consacre. DMARC, lui, n'a besoin que du
+    // bloc d'en-tête — mais il en a besoin même quand DKIM n'est pas vérifié.
+    let suivre = service.dkim.is_some() || service.dmarc.is_some();
+    let mut flux = suivre.then(|| DkimStream::new(service.dkim.is_some()));
 
     while !fini {
         if etat.rempli == 0 {
@@ -615,8 +660,8 @@ where
                         // `append` n'est plus appelé du tout. Un tuple
                         // `(echec, delivery.append(..))` l'appellerait encore,
                         // et continuerait d'écrire dans une remise abandonnée.
-                        if let Some(flux) = dkim.as_mut() {
-                            flux.update(morceau);
+                        if let Some(lecture) = flux.as_mut() {
+                            lecture.update(morceau);
                         }
                         if echec.is_none()
                             && let Err(cause) = delivery.append(morceau)
@@ -641,26 +686,62 @@ where
     // ON NE VÉRIFIE PAS CE QU'ON REFUSE. Chaque signature coûte une résolution
     // DNS et une exponentiation modulaire ; les dépenser pour un message qu'on
     // jette offrirait à un pair de faire travailler la machine sans rien livrer.
+    let mut usurpe = false;
     if !refuse
         && echec.is_none()
-        && let (Some(flux), Some(verificateur)) = (dkim, service.dkim.as_ref())
+        && let Some(mut lecture) = flux
     {
-        for resultat in flux.finish(verificateur).await {
-            let compte = &mut etat.resume.dkim;
-            match resultat.verdict {
-                DkimVerdict::Pass => compte.pass = compte.pass.saturating_add(1),
-                DkimVerdict::Fail => compte.fail = compte.fail.saturating_add(1),
-                DkimVerdict::TempError => compte.temp_error = compte.temp_error.saturating_add(1),
-                DkimVerdict::PermError => compte.perm_error = compte.perm_error.saturating_add(1),
+        let mut authentifies = Authenticated::default();
+        if let Some(verificateur) = service.dkim.as_ref() {
+            for resultat in lecture.finish(verificateur).await {
+                let compte = &mut etat.resume.dkim;
+                match resultat.verdict {
+                    DkimVerdict::Pass => {
+                        compte.pass = compte.pass.saturating_add(1);
+                        // C'est ce domaine-là que DMARC comparera au `From:`.
+                        authentifies.dkim.push(resultat.domain);
+                    }
+                    DkimVerdict::Fail => compte.fail = compte.fail.saturating_add(1),
+                    DkimVerdict::TempError => {
+                        compte.temp_error = compte.temp_error.saturating_add(1);
+                    }
+                    DkimVerdict::PermError => {
+                        compte.perm_error = compte.perm_error.saturating_add(1);
+                    }
+                }
             }
+        }
+        if let Some(verificateur) = service.dmarc.as_ref() {
+            // Le domaine que SPF a autorisé est celui de l'ENVELOPPE, et il ne
+            // compte que si SPF a bien rendu `pass`.
+            if session.sender_verdict() == Some(SpfVerdict::Pass)
+                && let Some(identite) = session.sender_identity()
+            {
+                authentifies.spf = Some(String::from_utf8_lossy(identite.domain).into_owned());
+            }
+            let resultat = verificateur.verdict(lecture.headers(), &authentifies).await;
+            etat.resume.dmarc = compter_dmarc(etat.resume.dmarc, &resultat);
+            // C'EST ICI, ET SEULEMENT ICI, QU'UN MESSAGE EST REFUSÉ POUR CE
+            // QU'IL PRÉTEND ÊTRE. La quarantaine, elle, n'est pas encore un
+            // endroit : le message est remis, et la demande consignée.
+            usurpe = resultat.applies && resultat.policy == DmarcPolicy::Reject;
         }
     }
 
-    let verdict = if refuse {
-        // Le verdict ne sera pas consulté : la session répond la faute. On
-        // nettoie tout de même ce qui a pu être écrit.
+    let verdict = if refuse || usurpe {
+        // Refusé : soit la session a dit la faute, soit DMARC vient de dire que
+        // ce message n'est pas de qui il prétend. On nettoie ce qui a été écrit
+        // — un message refusé ne se remet pas à moitié.
+        //
+        // LES DEUX RAISONS NE SE DISENT PAS PAREIL : le pair dont le message est
+        // mal formé doit corriger son message ; celui qu'une politique refuse
+        // n'a rien à corriger chez lui.
         delivery.abort();
-        DataOutcome::RejectedPermanent
+        if usurpe {
+            DataOutcome::RejectedByPolicy
+        } else {
+            DataOutcome::RejectedPermanent
+        }
     } else {
         match echec.map_or_else(|| delivery.finish(), Err) {
             Ok(()) => DataOutcome::Accepted,
@@ -704,7 +785,7 @@ pub(crate) fn trouver_crlf(tampon: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::{Outcome, Service, Summary, Timeouts, serve_connection};
-    use crate::connection::DkimTally;
+    use crate::connection::{DkimTally, DmarcTally};
     use crate::{Delivery, DeliveryFailure, Error, SharedGuard};
     use ams_guard::{Source, Thresholds};
     use ams_proto_smtp::{Limits, Path};
@@ -823,6 +904,7 @@ mod tests {
             tls: None,
             spf: None,
             dkim: None,
+            dmarc: None,
         };
         let resultat = serve_connection(&mut serveur, &service, NotreDomaine, boite, PAIR).await;
         drop(serveur);
@@ -1005,6 +1087,7 @@ mod tests {
             tls: None,
             spf: None,
             dkim: None,
+            dmarc: None,
         };
         let resultat =
             serve_connection(&mut serveur, &service, NotreDomaine, &mut boite, PAIR).await;
@@ -1146,6 +1229,7 @@ mod tests {
                 authenticated: false,
                 outcome: Outcome::Served,
                 dkim: DkimTally::default(),
+                dmarc: DmarcTally::default(),
             }
         );
     }
