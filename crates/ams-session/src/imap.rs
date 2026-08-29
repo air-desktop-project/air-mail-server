@@ -218,6 +218,18 @@ pub trait Mailbox {
     /// c'est-à-dire une fois par message réellement rendu.
     fn header_octets(&self, sequence: u32) -> u64;
 
+    /// Écrit dans `out` un morceau de l'`ENVELOPE` du message de rang
+    /// `sequence`, à partir de `offset`. Rend combien ; zéro signifie « fini ».
+    ///
+    /// # POURQUOI ELLE S'ÉCOULE PLUTÔT QU'ELLE NE SE REND
+    ///
+    /// Une enveloppe porte tous les destinataires d'un message. Sa longueur est
+    /// donc CHOISIE PAR CELUI QUI L'A ÉCRIT, et la faire tenir dans un tampon de
+    /// réponse reviendrait à décider d'avance combien de destinataires un
+    /// message a le droit d'avoir. Elle passe donc par le même chemin qu'un
+    /// corps : par morceaux, sans jamais séjourner dans la session.
+    fn envelope(&self, sequence: u32, offset: u64, out: &mut [u8]) -> usize;
+
     /// Lit au plus `out.len()` octets du message de rang `sequence`, à partir
     /// de `offset`. Rend combien ont été lus ; zéro signifie « plus rien ».
     ///
@@ -627,6 +639,16 @@ struct Emission {
     /// entrée** : 6 Gio, et le noyau qui tue le processus. On ne compte donc pas
     /// sur la boîte : on n'efface jamais plus de messages qu'elle n'en portait.
     effaces: u32,
+    /// Combien d'éléments ont déjà été écrits pour le message courant.
+    ///
+    /// # UN ÉLÉMENT QUI S'ÉCOULE N'EST PAS FORCÉMENT LE DERNIER
+    ///
+    /// `FETCH 1 (BODY[] UID)` est licite : le corps s'écoule, et `UID 1` doit
+    /// venir APRÈS lui. Sans ce curseur, la réponse écrivait tous les éléments
+    /// puis le corps — c'est-à-dire les octets du message après le `UID`, alors
+    /// que le littéral les annonçait avant. Le client lisait alors le début du
+    /// message comme du protocole.
+    items_faits: usize,
     /// Où en est l'émission du message courant.
     etape: Etape,
 }
@@ -719,8 +741,10 @@ enum Etape {
         offset: u64,
         length: u64,
     },
-    /// Refermer la parenthèse du message courant.
-    Fermer,
+    /// Reprendre l'écriture des éléments du message `rang`.
+    Suite { rang: u32 },
+    /// Écouler l'enveloppe du message `sequence`, à partir de `offset`.
+    Enveloppe { sequence: u32, offset: u64 },
     /// Écrire la conclusion étiquetée, et finir.
     ///
     /// # LA CONCLUSION EST LE DERNIER MORCEAU, ET C'EST VOULU
@@ -773,6 +797,34 @@ pub struct Session<A: Authenticator, M: Mailboxes> {
 }
 
 impl Emission {
+    /// Une émission qui ne désigne rien.
+    ///
+    /// Elle sert d'issue à qui reprend une émission qu'il vient de poser : ne
+    /// rien désigner est la seule réponse qui ne mente pas.
+    const VIDE: Self = Self {
+        texte: [0; SEQUENCE_TEXT_MAX],
+        texte_len: 0,
+        items: [FetchItem::Uid; ams_proto_imap::FETCH_ITEMS_MAX],
+        items_len: 0,
+        par_uid: false,
+        cles_uid: false,
+        exige_la_marque: true,
+        star: 0,
+        star_uid: 0,
+        courant: 1,
+        exists: 0,
+        ecriture: None,
+        silencieux: false,
+        genre: Genre::Fetch,
+        plage: None,
+        a_ecrire: None,
+        entame: false,
+        trouve: false,
+        effaces: 0,
+        items_faits: 0,
+        etape: Etape::Choisir,
+    };
+
     /// Le prochain rang qui appartient à l'ensemble, et son information.
     ///
     /// # Le coût est le produit de deux bornes, et les deux existent
@@ -922,6 +974,16 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
     #[must_use]
     pub fn selected(&self) -> &[u8] {
         self.nom_ouvert.get(..self.nom_ouvert_len).unwrap_or(&[])
+    }
+
+    /// Écrit un morceau d'enveloppe, pour le compte de l'appelant.
+    ///
+    /// Rend zéro si aucune boîte n'est ouverte, ou si l'enveloppe est finie.
+    pub fn read_envelope(&self, sequence: u32, offset: u64, out: &mut [u8]) -> usize {
+        match &self.ouverte {
+            Some(boite) => boite.envelope(sequence, offset, out),
+            None => 0,
+        }
     }
 
     /// Lit dans la boîte ouverte, pour le compte de l'appelant.
@@ -2165,6 +2227,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             entame: false,
             trouve: false,
             effaces: 0,
+            items_faits: 0,
             etape: Etape::Choisir,
         };
         emission.texte_len = uids_len;
@@ -2296,6 +2359,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             entame: false,
             trouve: false,
             effaces: 0,
+            items_faits: 0,
             etape: Etape::Choisir,
         };
         for (place, octet) in emission.texte.iter_mut().zip(critere) {
@@ -2376,6 +2440,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             entame: false,
             trouve: false,
             effaces: 0,
+            items_faits: 0,
             etape: Etape::Choisir,
         };
         for (place, octet) in emission.texte.iter_mut().zip(texte) {
@@ -2523,6 +2588,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             entame: false,
             trouve: false,
             effaces: 0,
+            items_faits: 0,
             etape: Etape::Choisir,
         };
         for (place, octet) in emission.texte.iter_mut().zip(texte) {
@@ -2939,6 +3005,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             entame: false,
             trouve: false,
             effaces: 0,
+            items_faits: 0,
             etape: Etape::Choisir,
         };
         // La longueur a été vérifiée juste au-dessus ; `zip` s'arrête de
@@ -2977,28 +3044,48 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             return Ok(None);
         };
         match emission.etape {
+            Etape::Suite { rang } => {
+                let info = boite.info(rang).unwrap_or(MessageInfo {
+                    uid: 0,
+                    size: 0,
+                    flags: Flags::NONE,
+                    internal_date: 0,
+                });
+                let entete = entete_si_besoin(boite, &emission, rang);
+                emission.etape = Etape::Choisir;
+                self.emission = Some(emission);
+                return self.ecrire_les_items(rang, info, entete, out);
+            }
+            Etape::Enveloppe { sequence, offset } => {
+                let ecrits = boite.envelope(sequence, offset, out);
+                if ecrits == 0 {
+                    // L'enveloppe est finie : la suite de la réponse reprend là
+                    // où elle s'était arrêtée.
+                    emission.etape = Etape::Suite { rang: sequence };
+                    self.emission = Some(emission);
+                    return self.next_fetch(out);
+                }
+                emission.etape = Etape::Enveloppe {
+                    sequence,
+                    offset: offset.saturating_add(ecrits as u64),
+                };
+                self.emission = Some(emission);
+                return Ok(Some(FetchChunk::Bytes(
+                    out.get(..ecrits).unwrap_or_default(),
+                )));
+            }
             Etape::Corps {
                 sequence,
                 offset,
                 length,
             } => {
-                emission.etape = Etape::Fermer;
+                emission.etape = Etape::Suite { rang: sequence };
                 self.emission = Some(emission);
                 return Ok(Some(FetchChunk::Message {
                     sequence,
                     offset,
                     length,
                 }));
-            }
-            Etape::Fermer => {
-                emission.etape = Etape::Choisir;
-                self.emission = Some(emission);
-                let mut plume = Plume::neuve(out);
-                plume.pousser(b")\r\n")?;
-                let ecrits = plume.ecrits();
-                return Ok(Some(FetchChunk::Bytes(
-                    out.get(..ecrits).unwrap_or_default(),
-                )));
             }
             Etape::Conclure => {
                 self.emission = None;
@@ -3194,17 +3281,45 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             info
         };
 
+        emission.items_faits = 0;
+        let entete = entete_si_besoin(boite, &emission, rang);
+        self.emission = Some(emission);
+        self.ecrire_les_items(rang, info, entete, out)
+    }
+
+    /// Écrit les éléments d'un `FETCH` pour un message, et s'arrête au premier
+    /// qui s'écoule.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Reply`] si `out` ne suffit pas.
+    fn ecrire_les_items<'b>(
+        &mut self,
+        rang: u32,
+        info: MessageInfo,
+        entete: u64,
+        out: &'b mut [u8],
+    ) -> Result<Option<FetchChunk<'b>>, Error> {
+        // L'ÉMISSION EST LÀ : l'appelant vient de la poser. On la reprend par
+        // `unwrap_or`, qui porte cette impossibilité dans la bibliothèque
+        // standard plutôt que dans une garde qu'aucune entrée n'emprunte.
+        let mut emission = self.emission.unwrap_or(Emission::VIDE);
+        let items = emission.items.get(..emission.items_len).unwrap_or_default();
         let mut plume = Plume::neuve(out);
-        plume.pousser(b"* ")?;
-        plume.nombre(u64::from(rang))?;
-        plume.pousser(b" FETCH (")?;
-        let mut premier = true;
+        if emission.items_faits == 0 {
+            plume.pousser(b"* ")?;
+            plume.nombre(u64::from(rang))?;
+            plume.pousser(b" FETCH (")?;
+        }
+        let mut premier = emission.items_faits == 0;
         let mut corps = None;
-        for item in items {
+        let mut enveloppe = false;
+        for item in items.iter().skip(emission.items_faits) {
             if !premier {
                 plume.pousser(b" ")?;
             }
             premier = false;
+            emission.items_faits = emission.items_faits.saturating_add(1);
             match item {
                 FetchItem::Uid => {
                     plume.pousser(b"UID ")?;
@@ -3228,12 +3343,6 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
                     partial,
                     peek: _,
                 } => {
-                    // On ne demande où finit l'en-tête QUE si la section le
-                    // réclame : le trouver demande de lire le message.
-                    let entete = match section {
-                        Section::Full => 0,
-                        Section::Header | Section::Text => boite.header_octets(rang),
-                    };
                     let (debut, fin) = decouper(*section, &info, entete);
                     let (offset, longueur) = tailler(debut, fin, *partial);
                     plume.pousser(b"BODY[")?;
@@ -3252,16 +3361,26 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
                     plume.nombre(longueur)?;
                     plume.pousser(b"}\r\n")?;
                     corps = Some((rang, offset, longueur));
+                    break;
+                }
+                FetchItem::Envelope => {
+                    plume.pousser(b"ENVELOPE ")?;
+                    enveloppe = true;
+                    break;
                 }
             }
         }
-        emission.etape = match corps {
-            Some((sequence, offset, length)) => Etape::Corps {
+        emission.etape = match (corps, enveloppe) {
+            (Some((sequence, offset, length)), _) => Etape::Corps {
                 sequence,
                 offset,
                 length,
             },
-            None => {
+            (None, true) => Etape::Enveloppe {
+                sequence: rang,
+                offset: 0,
+            },
+            (None, false) => {
                 plume.pousser(b")\r\n")?;
                 Etape::Choisir
             }
@@ -3466,6 +3585,24 @@ enum Echec {
     Copie,
     /// Les sources ne tiennent pas dans ce qu'on sait nommer.
     TropMorcele,
+}
+
+/// Où finit l'en-tête, mais SEULEMENT si un élément le réclame.
+///
+/// Le trouver demande de lire le message : le calculer d'office ferait ouvrir un
+/// fichier pour un `FETCH 1 UID`, qui n'en a que faire.
+fn entete_si_besoin<B: Mailbox>(boite: &B, emission: &Emission, rang: u32) -> u64 {
+    let items = emission.items.get(..emission.items_len).unwrap_or_default();
+    let besoin = items.iter().any(|item| {
+        matches!(
+            item,
+            FetchItem::Body {
+                section: Section::Header | Section::Text,
+                ..
+            }
+        )
+    });
+    if besoin { boite.header_octets(rang) } else { 0 }
 }
 
 /// Ce qu'une phase de copie a produit.

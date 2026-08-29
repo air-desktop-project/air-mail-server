@@ -46,6 +46,7 @@ CIBLES=$(cat <<'TABLE'
 fuzz_ams_mime_parse mime
 fuzz_ams_mime_limits mime
 fuzz_ams_mime_compose mime-compose
+fuzz_ams_mime_envelope mime-envelope
 fuzz_ams_smtp_command smtp
 fuzz_ams_smtp_limits smtp
 fuzz_ams_smtp_reply smtp-reply

@@ -82,6 +82,25 @@ impl Mailbox for Boite {
             Flags::NONE
         }
     }
+    fn envelope(&self, sequence: u32, offset: u64, out: &mut [u8]) -> usize {
+        // L'enveloppe d'épreuve nomme le message, et rien de plus : c'est
+        // l'écoulement qu'on éprouve ici, pas la composition.
+        let Some(info) = self.info(sequence) else {
+            return 0;
+        };
+        let mut texte = std::vec::Vec::from(&b"(NIL NIL ((NIL NIL \"m"[..]);
+        texte.extend_from_slice(std::format!("{}", info.uid).as_bytes());
+        texte.extend_from_slice(b"\" \"x.test\")) NIL NIL NIL NIL NIL NIL NIL)");
+        let reste = texte
+            .get(usize::try_from(offset).unwrap_or(usize::MAX)..)
+            .unwrap_or_default();
+        let combien = reste.len().min(out.len());
+        for (place, octet) in out.iter_mut().zip(reste.get(..combien).unwrap_or_default()) {
+            *place = *octet;
+        }
+        combien
+    }
+
     fn read(&self, sequence: u32, offset: u64, out: &mut [u8]) -> usize {
         // Le message d'épreuve est fait de son rang, répété.
         let Some(info) = self.info(sequence) else {
@@ -1021,6 +1040,7 @@ fn la_session_lit_par_la_boite_ouverte() {
 
     // Sans boîte ouverte, il n'y a rien à lire.
     assert_eq!(session.read_selected(1, 0, &mut tampon), 0);
+    assert_eq!(session.read_envelope(1, 0, &mut tampon), 0);
 
     dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
     dire(&mut session, b"a002 SELECT INBOX\r\n");
@@ -1029,6 +1049,9 @@ fn la_session_lit_par_la_boite_ouverte() {
     assert_eq!(&tampon, b"11111111");
     // Un rang qui n'existe pas ne rend rien.
     assert_eq!(session.read_selected(99, 0, &mut tampon), 0);
+    // L'enveloppe se lit par le même chemin.
+    assert!(session.read_envelope(1, 0, &mut tampon) > 0);
+    assert_eq!(session.read_envelope(99, 0, &mut tampon), 0);
 }
 
 #[test]
@@ -1675,10 +1698,94 @@ fn deux_corps_dans_un_fetch_se_refusent_en_le_disant() {
 #[test]
 fn un_element_reconnu_mais_non_servi_se_dit_sans_accuser_le_client() {
     let mut session = selectionnee();
-    let (texte, _) = dire(&mut session, b"a003 FETCH 1 ENVELOPE\r\n");
+    let (texte, _) = dire(&mut session, b"a003 FETCH 1 BODYSTRUCTURE\r\n");
     assert!(
         texte.contains("NO [CANNOT] This FETCH item is not served yet"),
         "{texte}"
+    );
+}
+
+// ── `ENVELOPE` ──────────────────────────────────────────────────────────────
+
+/// **L'enveloppe s'écoule**, comme un corps : sa longueur est choisie par celui
+/// qui a écrit le message, et la faire tenir dans un tampon reviendrait à
+/// décider d'avance combien de destinataires un message a le droit d'avoir.
+#[test]
+fn l_enveloppe_s_ecoule_dans_la_reponse() {
+    let mut session = selectionnee();
+    let fil = ecouler(&mut session, b"a003 FETCH 1 ENVELOPE\r\n");
+    assert_eq!(
+        fil,
+        "* 1 FETCH (ENVELOPE (NIL NIL ((NIL NIL \"m10\" \"x.test\")) \
+         NIL NIL NIL NIL NIL NIL NIL))\r\na003 OK FETCH completed\r\n"
+    );
+}
+
+/// **L'enveloppe se découpe sans changer de résultat**, comme la ligne d'un
+/// `ESEARCH` : elle s'écoule, et le découpage est une affaire de tampon, pas de
+/// contenu. Le morceau qui l'ANNONCE, lui, s'écrit d'un seul geste : un tampon
+/// trop court pour lui le dit.
+#[test]
+fn l_enveloppe_se_decoupe_sans_changer_de_resultat() {
+    let attendu = "* 1 FETCH (ENVELOPE (NIL NIL ((NIL NIL \"m10\" \"x.test\")) \
+                   NIL NIL NIL NIL NIL NIL NIL))\r\na003 OK FETCH completed\r\n";
+    let mut reference = selectionnee();
+    assert_eq!(
+        ecouler(&mut reference, b"a003 FETCH 1 ENVELOPE\r\n"),
+        attendu
+    );
+
+    for taille in 1..=48_usize {
+        let mut session = selectionnee();
+        let mut grand = [0_u8; 512];
+        session
+            .handle(b"a003 FETCH 1 ENVELOPE\r\n", &mut grand)
+            .expect("traitable");
+        let mut fil = std::string::String::new();
+        let mut petit = std::vec![0_u8; taille];
+        let mut refuse = false;
+        loop {
+            match session.next_fetch(&mut petit) {
+                Ok(None) => break,
+                Ok(Some(super::FetchChunk::Bytes(octets))) => {
+                    fil.push_str(&std::string::String::from_utf8_lossy(octets));
+                }
+                Ok(Some(super::FetchChunk::Message { .. })) => {
+                    unreachable!("une enveloppe n'est pas un corps")
+                }
+                Err(erreur) => {
+                    assert!(
+                        matches!(erreur, super::Error::Reply(_)),
+                        "taille {taille} : {erreur:?}"
+                    );
+                    refuse = true;
+                    break;
+                }
+            }
+        }
+        if !refuse {
+            assert_eq!(fil, attendu, "taille {taille}");
+        }
+    }
+}
+
+/// **UN ÉLÉMENT QUI S'ÉCOULE N'EST PAS FORCÉMENT LE DERNIER.** Ce qui suit doit
+/// venir APRÈS lui, sans quoi le client lirait les octets du message comme du
+/// protocole.
+#[test]
+fn ce_qui_suit_un_element_ecoule_vient_apres_lui() {
+    let mut session = selectionnee();
+    let enveloppe = ecouler(&mut session, b"a003 FETCH 1 (ENVELOPE UID)\r\n");
+    assert_eq!(
+        enveloppe,
+        "* 1 FETCH (ENVELOPE (NIL NIL ((NIL NIL \"m10\" \"x.test\")) \
+         NIL NIL NIL NIL NIL NIL NIL) UID 10)\r\na003 OK FETCH completed\r\n"
+    );
+    // Un corps, de même : le `UID` vient après les octets qu'on a annoncés.
+    let corps = ecouler(&mut session, b"a004 FETCH 1 (BODY.PEEK[] UID)\r\n");
+    assert_eq!(
+        corps,
+        "* 1 FETCH (BODY[] {100}\r\n<1:0+100> UID 10)\r\na004 OK FETCH completed\r\n"
     );
 }
 

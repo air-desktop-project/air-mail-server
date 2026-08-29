@@ -50,6 +50,17 @@ use ams_session::imap::{
 };
 use ams_store::{Incoming, MailboxView, Maildir, fresh_uid_validity};
 
+/// Ce qu'on lit d'un en-tête pour en composer l'enveloppe.
+///
+/// **Aucune RFC ne le borne.** Au-delà, l'enveloppe est composée de ce qu'on a
+/// lu : un en-tête de plus de soixante-quatre kibioctets n'est pas un message
+/// qu'un humain a écrit, et le lire en entier offrirait à qui l'envoie le coût
+/// de son parcours.
+const ENTETE_MAX: usize = 64 * 1024;
+
+/// Ce qu'une enveloppe composée occupe au plus.
+const ENVELOPPE_MAX: usize = 128 * 1024;
+
 /// Le seul nom de boîte que ce serveur connaisse (RFC 9051 §5.1).
 const INBOX: &[u8] = b"INBOX";
 
@@ -120,6 +131,45 @@ impl Mailbox for BoiteImap {
             return 0;
         };
         fin_de_l_entete(chemin).unwrap_or(message.size)
+    }
+
+    fn envelope(&self, sequence: u32, offset: u64, out: &mut [u8]) -> usize {
+        // L'EN-TÊTE SE RELIT À CHAQUE MORCEAU, et c'est un choix. Le retenir
+        // entre deux appels demanderait un état par session et par message ;
+        // le relire coûte une lecture de quelques kibioctets, bornée, sur une
+        // commande qu'un client n'émet qu'une fois par message affiché.
+        let Some(rang) = self.rang(sequence) else {
+            return 0;
+        };
+        let Some(chemin) = self.chemins.get(rang) else {
+            return 0;
+        };
+        let fin = fin_de_l_entete(chemin).unwrap_or(0);
+        let combien = usize::try_from(fin).unwrap_or(usize::MAX).min(ENTETE_MAX);
+        let mut entete = std::vec![0_u8; combien];
+        if let Ok(mut fichier) = std::fs::File::open(chemin) {
+            let _ = fichier.read_exact(&mut entete);
+        }
+
+        let mut compose = std::vec![0_u8; ENVELOPPE_MAX];
+        // UNE ENVELOPPE QU'ON NE SAIT PAS COMPOSER RESTE UNE ENVELOPPE. Rendre
+        // zéro octet couperait la réponse au milieu d'un élément, et le client
+        // lirait la suite comme autre chose. Dix `NIL` disent « je ne sais
+        // rien » dans une forme que la grammaire admet.
+        const RIEN: &[u8] = b"(NIL NIL NIL NIL NIL NIL NIL NIL NIL NIL)";
+        let texte =
+            match ams_mime::write_envelope(&entete, &mut compose, &ams_mime::Limits::DEFAULT) {
+                Ok(ecrits) => compose.get(..ecrits).unwrap_or(RIEN),
+                Err(_) => RIEN,
+            };
+        let reste = texte
+            .get(usize::try_from(offset).unwrap_or(usize::MAX)..)
+            .unwrap_or_default();
+        let voulu = reste.len().min(out.len());
+        for (place, octet) in out.iter_mut().zip(reste.get(..voulu).unwrap_or_default()) {
+            *place = *octet;
+        }
+        voulu
     }
 
     fn read(&self, sequence: u32, offset: u64, out: &mut [u8]) -> usize {

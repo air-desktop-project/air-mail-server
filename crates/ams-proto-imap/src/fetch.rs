@@ -8,11 +8,11 @@
 //! entiers demande** : les drapeaux, l'UID, la taille, la date d'arrivée, et le
 //! message ou l'une de ses deux moitiés.
 //!
-//! `ENVELOPE` et `BODYSTRUCTURE` — ce que demande un client qui n'affiche
-//! qu'une liste d'en-têtes — ne sont pas lus. Ils sont **reconnus et refusés**,
-//! ce qui n'est pas la même chose qu'une erreur de syntaxe : le client sait
-//! alors qu'il doit demander autrement, au lieu de chercher la faute dans ce
-//! qu'il a écrit.
+//! `ENVELOPE` s'y ajoute — ce que demande un client qui n'affiche qu'une liste
+//! d'en-têtes. `BODYSTRUCTURE`, lui, ne se lit pas encore : il est **reconnu et
+//! refusé**, ce qui n'est pas la même chose qu'une erreur de syntaxe : le client
+//! sait alors qu'il doit demander autrement, au lieu de chercher la faute dans
+//! ce qu'il a écrit.
 //!
 //! # LA DEMANDE PARTIELLE EST UNE SURFACE
 //!
@@ -59,6 +59,8 @@ pub enum FetchItem {
     Flags,
     /// `INTERNALDATE` — la date d'arrivée.
     InternalDate,
+    /// `ENVELOPE` : ce que l'en-tête dit du message (§7.5.2).
+    Envelope,
     /// `RFC822.SIZE` — la taille, en octets.
     Rfc822Size,
     /// `BODY[…]` ou `BODY.PEEK[…]`.
@@ -189,10 +191,12 @@ fn lire_un(mot: &[u8]) -> Result<FetchItem, Error> {
     if mot.eq_ignore_ascii_case(b"RFC822.SIZE") {
         return Ok(FetchItem::Rfc822Size);
     }
+    if mot.eq_ignore_ascii_case(b"ENVELOPE") {
+        return Ok(FetchItem::Envelope);
+    }
     // Reconnus, et refusés : le client sait alors qu'il doit demander
     // autrement, au lieu de chercher la faute dans ce qu'il a écrit.
-    if mot.eq_ignore_ascii_case(b"ENVELOPE")
-        || mot.eq_ignore_ascii_case(b"BODYSTRUCTURE")
+    if mot.eq_ignore_ascii_case(b"BODYSTRUCTURE")
         || mot.eq_ignore_ascii_case(b"BODY")
         || mot.eq_ignore_ascii_case(b"RFC822")
         || mot.eq_ignore_ascii_case(b"RFC822.HEADER")

@@ -75,6 +75,7 @@ mod address;
 mod base64;
 mod compose;
 mod date;
+mod envelope;
 mod error;
 mod failure;
 mod limits;
@@ -84,6 +85,7 @@ pub use address::author_domain;
 pub use base64::{BASE64_LINE, base64_max, encode_base64};
 pub use compose::{ReportMail, report_mail_max, write_report_mail};
 pub use date::{DATE_MAX, write_date};
+pub use envelope::{ENVELOPE_ADDRESSES_MAX, write_envelope};
 pub use error::Error;
 pub use failure::{
     EXPOSES, FailureMail, failure_mail_max, write_failure_mail, write_reported_headers,

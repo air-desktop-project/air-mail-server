@@ -100,6 +100,13 @@ impl Mailbox for Boite {
     fn permanent_flags(&self) -> Flags {
         Flags::SEEN.with(Flags::FLAGGED).with(Flags::DELETED)
     }
+    fn envelope(&self, sequence: u32, _offset: u64, _out: &mut [u8]) -> usize {
+        // La boîte d'épreuve n'a pas d'en-tête : elle n'a donc pas d'enveloppe,
+        // et le dire par zéro fait passer la session à la suite.
+        let _ = sequence;
+        0
+    }
+
     fn read(&self, sequence: u32, offset: u64, out: &mut [u8]) -> usize {
         let Some(info) = self.info(sequence) else {
             return 0;

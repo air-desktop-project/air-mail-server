@@ -865,7 +865,7 @@ ne s'écrit — ni `STORE`, ni `APPEND`, ni `EXPUNGE` — `SELECT` répond
 modifiabilité qu'elle ne peut pas connaître ferait une promesse que le client ne
 verrait démentie qu'en essayant.
 
-Ce qui n'est toujours pas servi : `ENVELOPE` et `BODYSTRUCTURE`.
+Ce qui n'est toujours pas servi : `BODYSTRUCTURE`.
 
 Éprouvé jusqu'au binaire, contre un vrai Maildir rempli par SMTP : `LIST`,
 `SELECT INBOX` et ses sept réponses, `STATUS` sur la boîte sélectionnée,
@@ -1273,6 +1273,58 @@ désormais au compteur du Maildir, qui est le seul à le savoir.
 `INBOX` renommée dont les deux messages se retrouvent dans la destination pendant
 qu'elle reste ouvrable et vide, son compteur d'UID intact, et `UIDNEXT` qui ne
 recule pas après un effacement total.
+
+## `ENVELOPE` : le message dit de lui-même, depuis le 2026-08-29
+
+Un client qui affiche une liste de messages ne veut pas les messages : il veut
+dix champs par message. `ENVELOPE` (§7.5.2) les lui donne sans qu'il ait à lire
+quoi que ce soit.
+
+**ON NE DÉCODE RIEN.** L'enveloppe porte le TEXTE DE L'EN-TÊTE, tel quel : un
+`Subject:` en mots encodés (`=?utf-8?B?…?=`) se recopie encodé, et c'est au
+client de le lire. Décoder ici lui rendrait autre chose que ce que le message
+porte, et lui ôterait le moyen de le vérifier. Ce qui s'en va est la SYNTAXE de
+la RFC 5322, pas le texte : les guillemets d'un nom cité et ses échappements, les
+commentaires — traversés, jamais recopiés —, et les routes source, que la RFC
+5322 a retirées et qu'`adl` rend donc toujours `NIL`. Les défauts de §7.5.2 sont
+tenus : un `Sender:` ou un `Reply-To:` absent — ou vide — prend la valeur de
+`From:`.
+
+**UNE CHAÎNE NE PORTE PAS DE FIN DE LIGNE**, et c'est la propriété qui compte. Le
+pliage disparaît partout, y compris à l'intérieur d'un nom cité — le cas qu'on
+oublie, et celui que le fuzz a trouvé alors que les essais unitaires, écrits
+pourtant en visant le pliage, ne l'avaient pas vu. Une chaîne IMAP qui porterait un `CR` ou un `LF`
+ferait lire au client la fin de la réponse au milieu d'un nom, puis la suite du
+dialogue comme du protocole : ce n'est pas une laideur d'affichage, c'est une
+désynchronisation. Le pli s'EFFACE au lieu de devenir un blanc — celui qui suit
+un `CRLF` appartient déjà à la chaîne, et le compter deux fois écarterait les
+deux mots d'un espace de trop. Un nom qui n'est qu'un pli ne vaut rien : `NIL`,
+et non `""`. Le contrôle qui précède l'écriture doit dire ce que la plume écrira,
+sans quoi il ouvrirait des guillemets que rien ne viendrait remplir.
+
+D'où la cible `fuzz_ams_mime_envelope` : ce qui part sur le fil est bien formé —
+dix champs, parenthèses équilibrées, aucune fin de ligne dans une chaîne, et un
+tampon trop court le dit au lieu d'écrire une enveloppe à moitié. 2 468 400
+exécutions après le correctif, sans panne.
+
+**L'ENVELOPPE NE SÉJOURNE PAS DANS LA SESSION** (C1), comme aucun message n'y
+séjourne : elle se compose dans le tampon de l'appelant et s'écoule par morceaux.
+Un défaut latent est tombé en l'écrivant : `FETCH 1 (BODY[] UID)` émettait
+`BODY[] {100}` puis ` UID 1`, PUIS les cent octets — les données d'un élément
+arrivaient après l'élément suivant, et aucun client n'aurait pu les recoller. La
+session compte désormais les éléments déjà écrits et reprend où elle s'était
+arrêtée, au lieu de rouvrir la ligne à chaque morceau.
+
+Là où la composition échoue — en-tête illisible, enveloppe plus grande que son
+tampon —, le serveur rend `(NIL NIL NIL NIL NIL NIL NIL NIL NIL NIL)` plutôt que
+rien : une enveloppe vide est une réponse, une enveloppe absente couperait la
+réponse au milieu d'un élément.
+
+Éprouvé jusqu'au binaire, sur un message déposé par `APPEND` portant un nom cité
+à virgule, un groupe, un commentaire, un `Reply-To:` et un sujet en mots encodés :
+le sujet reste encodé, `"Dupont, Jean"` survit, `Sender` reprend `From`, le groupe
+s'ouvre et se referme, le commentaire tombe, et `In-Reply-To` est `NIL` quand
+`Message-Id` est rendu verbatim.
 
 ## Le gate de couverture arrondissait vers le haut, depuis le 2026-08-29
 
@@ -1870,7 +1922,7 @@ en-tête le dit.
 Sont outillées : C1 (les trois étages, et la couverture qui n'est exigible que
 parce qu'ils sont séparés), C2 (le gate mesure 23 578 régions sur 16 crates,
 toutes couvertes — et il compare désormais des comptes, non un pourcentage
-arrondi), C3 (les lints, l'absence d'allocation dans les décodeurs, et 26 cibles
+arrondi), C3 (les lints, l'absence d'allocation dans les décodeurs, et 27 cibles
 de fuzz dont la CI vérifie qu'elle les lance toutes), C4 (`ams-tls` n'offre que
 TLS 1.3), C6 (les décodeurs refusent le CR et le LF isolés ; `AUTH`, `USER`/`PASS`
 et `LOGIN` sont refusés hors chiffrement, sans réglage pour le rétablir), C8
@@ -1885,6 +1937,6 @@ persistant, et lecture sans verrou côté IMAP), C14 (`X25519MLKEM768` en tête)
 découpage des lectures ne change rien au verdict.
 
 Ce qui manque, et qu'aucune phrase ne doit laisser croire acquis : les critères
-de `SEARCH` qui lisent le message, `ENVELOPE` et `BODYSTRUCTURE` ; le signeur DKIM,
+de `SEARCH` qui lisent le message et `BODYSTRUCTURE` ; le signeur DKIM,
 qui existe et n'a pas d'appelant ; la file de réémission des messages sortants ;
 et toute interface HTTP.

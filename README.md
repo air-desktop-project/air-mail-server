@@ -827,12 +827,47 @@ Une boîte ne se renomme pas sous elle-même, rien ne se renomme en `INBOX`, et 
 boîte qui vient de changer de nom — ou dont la mère a changé de nom — ne reste pas
 ouverte : la session en tient un instantané qui désigne désormais autre chose.
 
-Ce qui n'y est toujours pas : `ENVELOPE` et `BODYSTRUCTURE`. Ils sont reconnus, leur
-état est vérifié, et la session répond `NO [UNAVAILABLE]` — `NO` et non `BAD`,
-parce que la commande est correcte et permise et que c'est ce serveur qui ne la
-sert pas. `APPEND` demandera un chemin qui écoule au fil de l'eau, comme le
-`DATA` de SMTP. Le serveur dit au démarrage ce qu'il sert et ce qu'il ne sert
-pas, plutôt que de laisser un port ouvert le faire croire.
+### `ENVELOPE` : ce que le message dit de lui-même
+
+Un client qui affiche une liste de messages ne veut pas les messages : il veut
+dix champs par message — la date, le sujet, l'expéditeur, les destinataires.
+`ENVELOPE` (§7.5.2) les lui donne sans qu'il ait à lire quoi que ce soit.
+
+**On ne décode rien, et c'est la règle.** L'enveloppe porte le TEXTE DE
+L'EN-TÊTE, tel quel : un `Subject:` en mots encodés (`=?utf-8?B?…?=`) se recopie
+encodé, et c'est au client de le lire. Décoder ici lui rendrait autre chose que
+ce que le message porte, et lui ôterait le moyen de le vérifier. En revanche, ce
+qui appartient à la SYNTAXE de la RFC 5322 et non au texte s'en va : les
+guillemets d'un nom cité et ses échappements, les commentaires — qui se
+traversent sans se recopier —, et les routes source, que la RFC 5322 a retirées
+et qu'`adl` rend donc toujours `NIL`.
+
+**Une chaîne ne porte pas de fin de ligne.** Le pliage disparaît partout, y
+compris à l'intérieur d'un nom cité — c'est le cas qu'on oublie, et c'est
+exactement celui que le fuzzing a trouvé. Une chaîne IMAP ne peut porter ni `CR`
+ni `LF` : le client lirait la fin de la réponse au milieu d'un nom, puis la suite
+du dialogue comme du protocole. Ce n'est pas une laideur d'affichage, c'est une
+désynchronisation. Le pli s'efface au lieu de devenir un blanc — celui qui suit
+un `CRLF` appartient déjà à la chaîne —, et un nom qui n'est qu'un pli ne vaut
+rien : `NIL`, et non `""`.
+
+**L'enveloppe ne séjourne pas dans la session**, comme aucun message n'y
+séjourne : elle se compose dans le tampon de l'appelant et s'écoule par morceaux.
+Un défaut latent est tombé en l'écrivant : `FETCH 1 (BODY[] UID)` émettait
+`BODY[] {100}` puis `UID 1`, PUIS les cent octets — les données d'un élément
+arrivaient après l'élément suivant. La session compte désormais les éléments
+déjà écrits, et reprend où elle s'était arrêtée au lieu de recommencer la ligne.
+
+Là où la composition échoue — un en-tête illisible, une enveloppe plus grande que
+son tampon —, le serveur rend `(NIL NIL NIL NIL NIL NIL NIL NIL NIL NIL)` plutôt
+que rien : une enveloppe vide est une réponse, une enveloppe absente couperait la
+réponse au milieu d'un élément.
+
+Ce qui n'y est toujours pas : `BODYSTRUCTURE`. Elle est reconnue, son état est
+vérifié, et la session répond `NO [UNAVAILABLE]` — `NO` et non `BAD`, parce que
+la commande est correcte et permise et que c'est ce serveur qui ne la sert pas.
+Le serveur dit au démarrage ce qu'il sert et ce qu'il ne sert pas, plutôt que de
+laisser un port ouvert le faire croire.
 
 ## Émettre : le client SMTP sortant
 

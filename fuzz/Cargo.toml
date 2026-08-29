@@ -96,6 +96,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_ams_mime_envelope"
+path = "fuzz_targets/fuzz_ams_mime_envelope.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_ams_mime_limits"
 path = "fuzz_targets/fuzz_ams_mime_limits.rs"
 test = false

@@ -651,7 +651,8 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         eprintln!(
             "air-mail-server : IMAP écoute sur {adresse} — SEULE `INBOX` EST SERVIE : \
              `SELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`, `EXPUNGE`, `SEARCH`, `COPY` et \
-             `MOVE`, `APPEND`, `CREATE`, `DELETE` et `RENAME` répondent. UN NOM DE BOÎTE \
+             `MOVE`, `APPEND`, `CREATE`, `DELETE` et `RENAME` répondent, et `FETCH` sait \
+             rendre une `ENVELOPE` ; `BODYSTRUCTURE` non. UN NOM DE BOÎTE \
              DEVIENT UN RÉPERTOIRE : seuls les noms qu'on sait transcrire sans risque sont \
              acceptés, et jamais transformés. UN `EXPUNGE` EFFACE POUR DE BON, et un `CLOSE` \
              aussi. Les critères de recherche qui demandent de LIRE le message (`SUBJECT`, \

@@ -156,6 +156,7 @@ dependencies = [
  "ams-guard",
  "ams-index",
  "ams-loop-tokio",
+ "ams-mime",
  "ams-proto-imap",
  "ams-proto-pop3",
  "ams-proto-smtp",
