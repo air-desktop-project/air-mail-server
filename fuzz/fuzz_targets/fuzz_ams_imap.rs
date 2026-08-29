@@ -26,6 +26,12 @@
 //! 4. **Un tag accepté est recopiable dans une réponse** : il ne porte aucun
 //!    octet qui pourrait en écrire une seconde.
 //! 5. **Une réponse encodée tient sur une ligne**, et une seule.
+//! 6. **UN ITÉRATEUR D'ARGUMENTS S'ARRÊTE.** Chaque tour doit consommer au
+//!    moins un octet ; sans quoi une faute rendue sans avancer se répète sans
+//!    fin, et l'appelant qui collecte remplit la mémoire de la machine jusqu'à
+//!    ce que le noyau le tue. **C'est arrivé** : 6 Gio en quelques secondes,
+//!    trouvés par un test avant que le fuzz n'ait à le faire. Cette propriété
+//!    est là pour que cela ne revienne pas en silence.
 
 #![no_main]
 
@@ -33,7 +39,7 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use ams_proto_imap::{
-    CommandReader, Error, Limits, Line, Need, Status, encode_continuation, encode_tagged,
+    Args, CommandReader, Error, Limits, Line, Need, Status, encode_continuation, encode_tagged,
     encode_untagged,
 };
 
@@ -76,6 +82,22 @@ fn conduire(flux: &[u8], coupure: usize, bornes: &Limits) -> Result<Need, Error>
 
 fuzz_target!(|entree: Entree<'_>| {
     let bornes = Limits::DEFAULT;
+
+    // ── PROPRIÉTÉ 6 : l'itérateur d'arguments s'arrête ──────────────────────
+    //
+    // La borne est celle de la structure et non un plafond choisi : un argument
+    // occupe au moins un octet, donc il n'y en a jamais plus que d'octets. Un
+    // itérateur qui rendrait sa faute sans avancer la franchirait au premier
+    // tour de trop, et l'on saurait pourquoi.
+    let mut arguments = 0_usize;
+    for _ in Args::new(entree.flux).take(entree.flux.len().saturating_add(2)) {
+        arguments = arguments.saturating_add(1);
+    }
+    assert!(
+        arguments <= entree.flux.len(),
+        "{arguments} arguments pour {} octets : l'itérateur n'avance pas",
+        entree.flux.len()
+    );
 
     // ── Le découpage, d'un seul tenant ──────────────────────────────────────
     let mut lecteur = CommandReader::new();

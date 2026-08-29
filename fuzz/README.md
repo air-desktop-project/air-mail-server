@@ -32,6 +32,24 @@ de `Cargo.toml`, et l'écart échoue — une cible qu'on oublie d'y inscrire ne
 serait jamais lancée, et le gate resterait vert en ne l'ayant pas examinée. Un
 rapport vert qui n'a rien examiné est un mensonge poli.
 
+## UN ITÉRATEUR QUI N'AVANCE PAS TUE LA MACHINE
+
+`Args`, l'itérateur d'arguments IMAP, rendait sa faute **sans consommer d'octet**
+: il la répétait donc sans fin, et un appelant qui collecte remplissait la
+mémoire. Le noyau a tué le binaire de test à 6,1 Gio, sur une machine qui en a
+7,6. Trouvé par un test — avant que le fuzz n'ait à le faire, faute d'y avoir
+pensé.
+
+`fuzz_ams_imap` porte maintenant la propriété : **un itérateur rend au plus
+autant d'éléments que son entrée a d'octets**, ce qui n'est pas un plafond
+choisi mais la structure même (un argument occupe au moins un octet). Le drainage
+est borné par `take`, si bien que la propriété échoue en un tour au lieu
+d'allouer : réintroduire le défaut la fait tomber en une seconde, sur une entrée
+de trois octets — vérifié.
+
+Les quatorze autres itérateurs du dépôt ont été relus : tous avancent avant de
+rendre leur faute.
+
 ## Ce qu'on fuzze, et pourquoi
 
 Un message est **la** donnée externe d'un serveur de courrier : n'importe qui peut
@@ -61,7 +79,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_dkim` | `seeds/dkim` | signature, clé et canonicalisation — **le découpage ne change rien** |
 | `fuzz_ams_dmarc` | `seeds/dmarc` | politique et alignement — **l'alignement est symétrique** |
 | `fuzz_ams_dmarc_report` | `seeds/dmarc-report` | destinations et rapport agrégé — **le rapport ne s'injecte pas** |
-| `fuzz_ams_imap` | `seeds/imap` | découpage d'une commande IMAP — **le client ne choisit pas où l'on coupe** |
+| `fuzz_ams_imap` | `seeds/imap` | découpage d'une commande IMAP — **le client ne choisit pas où l'on coupe**, et l'itérateur d'arguments s'arrête |
 | `fuzz_ams_imap_fetch` | `seeds/imap-fetch` | ce qu'un `FETCH` et un `STORE` désignent — **les deux lectures d'un ensemble s'accordent**, et un drapeau accepté se réécrit |
 | `fuzz_ams_session_imap` | `seeds/imap-session` | la session IMAP — **jamais authentifié sans chiffrement**, et un intervalle de `FETCH` ne déborde pas du message |
 | `fuzz_ams_smtp_client` | `seeds/smtp-client` | réponses lues et corps émis — **le message ne se termine pas tout seul** |
@@ -803,6 +821,8 @@ coûterait du courrier sans rien protéger — on ne les interprète jamais.
 | 2026-08-29 | `fuzz_ams_imap_fetch` | 15 261 189 (241 s) | 0 |
 | 2026-08-29 | `fuzz_ams_session_imap` (avec les boîtes) | 3 292 791 (241 s) | 0 |
 | 2026-08-29 | `fuzz_ams_imap_fetch` (avec `STORE`) | 7 303 754 (241 s) | 0 |
+| 2026-08-29 | `fuzz_ams_session_imap` (avec `STORE`) | 1 993 276 (181 s) | 0 |
+| 2026-08-29 | `fuzz_ams_imap` (arrêt de l'itérateur) | 5 072 564 (121 s) | 0 |
 | 2026-08-29 | `fuzz_ams_config` (avec l'écoute IMAP) | 208 794 (71 s) | 0 |
 | 2026-08-29 | `fuzz_ams_config` (avec SPF) | 193 256 (61 s) | 0 |
 | 2026-08-29 | `fuzz_ams_session_smtp` (avec SPF) | 381 710 (61 s) | 0 |
