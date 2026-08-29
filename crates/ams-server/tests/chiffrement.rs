@@ -45,10 +45,47 @@ impl Drop for Atelier {
 /// Un serveur lancé, tué à la fin quoi qu'il arrive.
 struct Serveur(Child);
 
+impl Serveur {
+    /// Ce que le serveur est devenu, et ce qu'il en a dit.
+    ///
+    /// # UNE CONNEXION REFUSÉE NE DIT PAS POURQUOI
+    ///
+    /// « Connection refused » ne distingue pas un serveur qui n'a jamais démarré
+    /// d'un serveur qui s'est arrêté en chemin. C'est arrivé en intégration
+    /// continue, et le journal n'en disait rien de plus : le test échouait sans
+    /// que personne ne puisse conclure. On lit donc l'état de l'enfant ET ce
+    /// qu'il a écrit sur l'erreur standard, et l'échec porte la raison.
+    fn plainte(&mut self) -> String {
+        let etat = match self.0.try_wait() {
+            Ok(Some(code)) => format!("le serveur s'est arrêté ({code})"),
+            Ok(None) => String::from("le serveur tourne encore"),
+            Err(erreur) => format!("état du serveur illisible : {erreur}"),
+        };
+        let mut plainte = String::new();
+        if let Some(erreur) = self.0.stderr.as_mut() {
+            // La lecture ne bloque pas indéfiniment : le tuyau se ferme avec le
+            // processus, et s'il tourne encore on ne lit que ce qui est déjà là.
+            let _ = std::io::Read::read_to_string(erreur, &mut plainte);
+        }
+        format!("{etat} — il a dit : {plainte}")
+    }
+}
+
 impl Drop for Serveur {
     fn drop(&mut self) {
         let _ = self.0.kill();
         let _ = self.0.wait();
+    }
+}
+
+/// Se connecte au serveur, ou dit ce qu'il est devenu.
+fn joindre(serveur: &mut Serveur, port: u16) -> TcpStream {
+    match TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], port))) {
+        Ok(flux) => flux,
+        Err(erreur) => panic!(
+            "connexion au port {port} : {erreur} — {}",
+            serveur.plainte()
+        ),
     }
 }
 
@@ -175,21 +212,26 @@ fn lancer(config: &Path, port: u16) -> Serveur {
     let depart = Instant::now();
     while depart.elapsed() < Duration::from_secs(10) {
         if TcpStream::connect_timeout(&adresse, Duration::from_millis(200)).is_ok() {
-            return serveur;
+            // ON VÉRIFIE QUE C'EST BIEN LUI QUI A RÉPONDU. Une sonde qui aboutit
+            // pendant que l'enfant est mort désigne quelqu'un d'autre sur ce
+            // port, et le test irait alors éprouver un serveur qui n'est pas le
+            // sien — jusqu'à ce que l'autre s'en aille.
+            if let Ok(None) = serveur.0.try_wait() {
+                return serveur;
+            }
         }
-        if let Ok(Some(code)) = serveur.0.try_wait() {
+        if let Ok(Some(_)) = serveur.0.try_wait() {
             // On lit ce qu'il a dit : un démarrage refusé porte toujours sa
             // raison sur l'erreur standard, et la taire ferait de ce test un
             // « le serveur n'écoute pas » sans plus d'explication.
-            let mut plainte = String::new();
-            if let Some(erreur) = serveur.0.stderr.as_mut() {
-                let _ = std::io::Read::read_to_string(erreur, &mut plainte);
-            }
-            panic!("le serveur s'est arrêté au démarrage ({code}) : {plainte}");
+            panic!("au démarrage : {}", serveur.plainte());
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    panic!("le serveur n'écoute toujours pas au bout de dix secondes");
+    panic!(
+        "le serveur n'écoute toujours pas au bout de dix secondes — {}",
+        serveur.plainte()
+    );
 }
 
 #[test]
@@ -248,9 +290,9 @@ fn sans_certificat_le_binaire_sert_en_clair_et_ne_ment_pas() {
     let atelier = atelier("en-clair");
     let port = port_libre();
     let config = configuration(&atelier, port, Tls::default(), "");
-    let _serveur = lancer(&config, port);
+    let mut serveur = lancer(&config, port);
 
-    let mut flux = TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], port))).expect("connexion");
+    let mut flux = joindre(&mut serveur, port);
     flux.set_read_timeout(Some(Duration::from_secs(5)))
         .expect("délai");
     flux.write_all(b"EHLO client.example\r\nQUIT\r\n")
@@ -443,7 +485,7 @@ fn chaque_destinataire_recoit_dans_sa_boite() {
     );
     let mut serveur = lancer(&config, port);
 
-    let mut flux = TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], port))).expect("connexion");
+    let mut flux = joindre(&mut serveur, port);
     flux.set_read_timeout(Some(Duration::from_secs(5)))
         .expect("délai");
     // Les `\r\n` sont ÉCHAPPÉS, et il faut y regarder à deux fois : un saut
@@ -545,11 +587,10 @@ fn un_client_pop3_releve_puis_efface_son_courrier() {
         &magasin.display().to_string(),
         &format!("127.0.0.1:{port_pop3}"),
     );
-    let _serveur = lancer(&config, port_smtp);
+    let mut serveur = lancer(&config, port_smtp);
 
     // ── 1. Un message arrive par SMTP ───────────────────────────────────────
-    let mut flux =
-        TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], port_smtp))).expect("connexion SMTP");
+    let mut flux = joindre(&mut serveur, port_smtp);
     flux.set_read_timeout(Some(Duration::from_secs(5)))
         .expect("délai");
     flux.write_all(
