@@ -1,0 +1,4 @@
+a1 LOGIN jean ouvre-toi
+a2 SELECT INBOX
+a3 COPY 1:* INBOX
+a4 UID COPY 1 INBOX

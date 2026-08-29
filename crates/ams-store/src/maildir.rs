@@ -390,7 +390,32 @@ impl Incoming {
     /// # Errors
     ///
     /// [`Error::Io`] ou [`Error::Name`].
-    pub fn commit(mut self) -> Result<Uid, Error> {
+    pub fn commit(self) -> Result<Uid, Error> {
+        // `None` : un message qui arrive n'a pas de drapeaux, et Maildir veut
+        // qu'il n'ait pas non plus d'information de drapeaux.
+        self.valider(None)
+    }
+
+    /// Valide le message **avec des drapeaux**, donc dans `cur/`.
+    ///
+    /// C'est ce dont une COPIE a besoin : RFC 9051 §6.4.7 veut que les drapeaux
+    /// du message d'origine soient préservés, et un message qui les porte n'a
+    /// rien à faire dans `new/` — cette moitié-là du Maildir est celle du
+    /// courrier qu'on n'a pas encore vu.
+    ///
+    /// **En un seul `rename`**, et non « déposer puis renommer » : entre les
+    /// deux, la copie serait visible sans ses drapeaux, et un client qui
+    /// regarderait à cet instant la croirait non lue.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] ou [`Error::Name`].
+    pub fn commit_with_flags(self, flags: Flags) -> Result<Uid, Error> {
+        self.valider(Some(flags))
+    }
+
+    /// Le corps commun aux deux validations.
+    fn valider(mut self, flags: Option<Flags>) -> Result<Uid, Error> {
         let Some(fichier) = self.fichier.take() else {
             return Ok(self.uid);
         };
@@ -398,16 +423,15 @@ impl Incoming {
         drop(fichier);
 
         let mut tampon = [0_u8; NOM_MAX];
-        // `None` : un message qui arrive n'a pas de drapeaux, et Maildir veut
-        // qu'il n'ait pas non plus d'information de drapeaux.
-        let ecrits = compose(&mut tampon, &self.unique, self.uid, self.ecrits, None)?;
+        let ecrits = compose(&mut tampon, &self.unique, self.uid, self.ecrits, flags)?;
+        let sous = if flags.is_some() { "cur" } else { "new" };
         let destination = self
             .racine
-            .join("new")
+            .join(sous)
             .join(nom_de_fichier(&tampon[..ecrits]));
         fs::rename(&self.chemin, &destination)?;
 
-        File::open(self.racine.join("new"))?.sync_all()?;
+        File::open(self.racine.join(sous))?.sync_all()?;
         Ok(self.uid)
     }
 

@@ -865,7 +865,7 @@ ne s'écrit — ni `STORE`, ni `APPEND`, ni `EXPUNGE` — `SELECT` répond
 modifiabilité qu'elle ne peut pas connaître ferait une promesse que le client ne
 verrait démentie qu'en essayant.
 
-Ce qui n'est toujours pas servi : `COPY`, `MOVE`, `APPEND`,
+Ce qui n'est toujours pas servi : `MOVE`, `APPEND`,
 `CREATE`/`DELETE`/`RENAME`, `ENVELOPE` et `BODYSTRUCTURE`.
 
 Éprouvé jusqu'au binaire, contre un vrai Maildir rempli par SMTP : `LIST`,
@@ -1031,6 +1031,47 @@ la RFC prévoit.
 SEARCH`, la compression (`1,3:4` et `1:2,4`), une recherche sans résultat qui
 omet `ALL`, trente-quatre messages dont un sur deux marqué — seize plages sur UNE
 ligne — et les deux refus.
+
+## `COPY` : tout ou rien, depuis le 2026-08-29
+
+`COPY` et `UID COPY` copient dans la boîte nommée. `INBOX` est la seule qui
+existe, donc la seule destination possible ; toute autre reçoit `NO [TRYCREATE]`,
+le code qui apprend au client qu'un `CREATE` suivi du même `COPY` marcherait.
+
+§6.4.7 : UN `COPY` N'EST PAS PARTIELLEMENT RÉUSSI. « If the server can't copy all
+the messages, it should restore the destination mailbox to its state before the
+COPY and return a tagged error. » Ce qui a été copié avant l'échec est donc
+défait. Défaire ne demande rien à retenir : les UID attribués se suivent, donc ce
+qu'il faut retirer est une plage — et l'on ne retire QUE cette plage, dont
+personne d'autre ne détient les UID.
+
+`COPYUID` DIT OÙ, OU NE DIT RIEN. L'ensemble de destination tient toujours en une
+plage, puisque les UID sont attribués en croissant. Celui de source est ce que le
+client a désigné, trous compris : sa longueur est choisie par le client. On
+l'accumule dans un tampon borné, et s'il déborde on OMET `COPYUID` entièrement —
+un ensemble tronqué désignerait d'autres messages que ceux qu'on a copiés, ce qui
+est pire que de ne rien dire. C'est un `SHOULD` de la RFC, et un `SHOULD` tenu à
+moitié ne vaut rien.
+
+COPIER, C'EST DÉPOSER UN MESSAGE NEUF, avec la danse que Maildir impose et que la
+remise SMTP connaît déjà : écrire dans `tmp/`, synchroniser, renommer. Les
+drapeaux d'origine sont préservés en UN SEUL renommage — déposer puis renommer
+laisserait la copie visible sans eux, et un client qui regarderait à cet instant
+la croirait non lue. La date d'arrivée est celle de la copie : la reculer
+demanderait une dépendance pour un `utimensat`, et §6.4.7 n'en fait qu'un
+souhait. C'est dit ici plutôt que tu.
+
+CE QU'ON PARCOURT NE DOIT PAS GRANDIR SOUS NOS PIEDS. Copier dans la boîte
+ouverte l'agrandit ; relire le nombre de messages à chaque tour ferait de
+`COPY 1:* INBOX` une boucle que le client n'aurait qu'à demander. Le nombre est
+arrêté d'avance, comme pour `EXPUNGE`.
+
+Éprouvé jusqu'au binaire, contre un vrai Maildir : `COPYUID` avec la validité de
+la destination, des copies dont l'empreinte SHA-256 est celle de l'original, les
+drapeaux préservés (`:2,FS` recopié, et le message sans drapeau resté dans
+`new/`), `NO [TRYCREATE]` pour une boîte inconnue, et surtout **un message rendu
+illisible en cours de commande** : la copie du précédent a bien été défaite, et
+aucun UID neuf n'est resté.
 
 ## Le gate de couverture arrondissait vers le haut, depuis le 2026-08-29
 
@@ -1618,7 +1659,7 @@ et une couture inutilisée finit par être utilisée.
 SMTP en réception (avec `STARTTLS`, `AUTH PLAIN`, SPF, DKIM, DMARC et remise
 Maildir), SMTP à l'émission (rapports DMARC), POP3, et IMAP — `SELECT`,
 `EXAMINE`, `CLOSE`, `UNSELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`, `EXPUNGE`,
-`SEARCH` et leurs formes `UID`. Chacun a été éprouvé de bout en bout contre le binaire, et pas
+`SEARCH`, `COPY` et leurs formes `UID`. Chacun a été éprouvé de bout en bout contre le binaire, et pas
 seulement en tests.
 
 **HTTP n'est pas servi** : `ams-proto-http` est un emplacement réservé, et son
@@ -1641,8 +1682,8 @@ persistant, et lecture sans verrou côté IMAP), C14 (`X25519MLKEM768` en tête)
 `<CRLF>.<CRLF>`, refuse tout `CR` ou `LF` isolé, et le fuzz éprouve que le
 découpage des lectures ne change rien au verdict.
 
-Ce qui manque, et qu'aucune phrase ne doit laisser croire acquis : `COPY`,
-`MOVE`, `APPEND`, la gestion des dossiers et les critères de `SEARCH` qui lisent
-le message ; le signeur DKIM,
+Ce qui manque, et qu'aucune phrase ne doit laisser croire acquis : `MOVE`,
+`APPEND`, la gestion des dossiers et les critères de `SEARCH` qui lisent le
+message ; le signeur DKIM,
 qui existe et n'a pas d'appelant ; la file de réémission des messages sortants ;
 et toute interface HTTP.

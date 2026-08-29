@@ -54,6 +54,9 @@ const INBOX: &[u8] = b"INBOX";
 /// Une boîte relevée, vue par IMAP.
 pub struct BoiteImap {
     vue: MailboxView,
+    /// La boîte elle-même, pour ce qui s'écrit : une COPIE y dépose un message
+    /// neuf, et l'UID vient de son compteur.
+    maildir: Arc<Maildir>,
     uid_validity: u32,
     /// Les drapeaux, un par message, lus à l'ouverture depuis les noms de
     /// fichiers. Les relire à chaque `FETCH` rouvrirait le répertoire.
@@ -146,6 +149,71 @@ impl Mailbox for BoiteImap {
             .with(Flags::FLAGGED)
             .with(Flags::DELETED)
             .with(Flags::DRAFT)
+    }
+
+    fn copy_to(&mut self, sequence: u32, mailbox: &[u8]) -> Option<u32> {
+        // AUCUN CHEMIN N'EST CONSTRUIT À PARTIR D'UN NOM DE BOÎTE, ici non plus :
+        // le nom est comparé à une constante, et la seule destination possible
+        // est la boîte qu'on tient déjà.
+        if !mailbox.eq_ignore_ascii_case(INBOX) {
+            return None;
+        }
+        let rang = self.rang(sequence)?;
+        let chemin = self.chemins.get(rang)?.clone();
+        let drapeaux = self.drapeaux.get(rang).copied().unwrap_or_default();
+
+        // ON ÉCRIT DANS `tmp/`, PUIS ON RENOMME. C'est la danse que Maildir
+        // impose, et `Incoming` la connaît : tant que le message n'est pas
+        // validé, personne ne le voit.
+        let mut source = std::fs::File::open(&chemin).ok()?;
+        let mut entrant = self.maildir.deliver().ok()?;
+        let mut tampon = [0_u8; 8192];
+        loop {
+            let lus = source.read(&mut tampon).ok()?;
+            if lus == 0 {
+                break;
+            }
+            if entrant
+                .write(tampon.get(..lus).unwrap_or_default())
+                .is_err()
+            {
+                entrant.abort();
+                return None;
+            }
+        }
+        // §6.4.7 : les drapeaux du message d'origine sont préservés — en UN
+        // renommage, pour qu'aucun client ne voie la copie sans eux.
+        let uid = if drapeaux == Flags::NONE {
+            entrant.commit().ok()?
+        } else {
+            entrant.commit_with_flags(drapeaux_maildir(drapeaux)).ok()?
+        };
+        Some(uid.value())
+    }
+
+    fn undo_copies(&mut self, mailbox: &[u8], premier: u32, dernier: u32) {
+        if !mailbox.eq_ignore_ascii_case(INBOX) {
+            return;
+        }
+        // On ne défait QUE ce qu'on vient de faire : les UID de la plage sont
+        // ceux que `deliver` vient d'attribuer, et personne d'autre ne les a.
+        for sous in ["new", "cur"] {
+            let Ok(entrees) = std::fs::read_dir(self.maildir.root().join(sous)) else {
+                continue;
+            };
+            for entree in entrees.flatten() {
+                let nom = entree.file_name();
+                let Ok(lu) = MessageName::parse(nom.as_bytes()) else {
+                    continue;
+                };
+                let Some(uid) = lu.uid() else {
+                    continue;
+                };
+                if uid.value() >= premier && uid.value() <= dernier {
+                    let _ = std::fs::remove_file(entree.path());
+                }
+            }
+        }
     }
 
     fn expunge(&mut self, sequence: u32) -> bool {
@@ -359,6 +427,7 @@ impl Mailboxes for BoitesImap {
             .collect();
         Some(BoiteImap {
             vue,
+            maildir: Arc::clone(maildir),
             uid_validity: maildir.uid_validity().value(),
             drapeaux,
             dates,

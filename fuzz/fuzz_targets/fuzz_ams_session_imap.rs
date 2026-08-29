@@ -110,6 +110,31 @@ impl Mailbox for Boite {
         place.fill(b'x');
         place.len()
     }
+    fn copy_to(&mut self, sequence: u32, mailbox: &[u8]) -> Option<u32> {
+        // La copie va dans la boîte elle-même : c'est la seule qui existe, et
+        // c'est ce qui fait GRANDIR la boîte — de quoi éprouver qu'une commande
+        // qui agrandit ce qu'elle parcourt s'arrête quand même.
+        if !mailbox.eq_ignore_ascii_case(b"INBOX") {
+            return None;
+        }
+        let info = self.info(sequence)?;
+        let mut messages = self.messages.borrow_mut();
+        let uid = u32::try_from(messages.len())
+            .unwrap_or(u32::MAX)
+            .saturating_add(1);
+        messages.push((info.size, info.flags));
+        Some(uid)
+    }
+
+    fn undo_copies(&mut self, _mailbox: &[u8], premier: u32, dernier: u32) {
+        let combien =
+            usize::try_from(dernier.saturating_sub(premier).saturating_add(1)).unwrap_or(0);
+        let mut messages = self.messages.borrow_mut();
+        for _ in 0..combien {
+            messages.pop();
+        }
+    }
+
     fn expunge(&mut self, sequence: u32) -> bool {
         let Ok(rang) = usize::try_from(sequence.saturating_sub(1)) else {
             return false;

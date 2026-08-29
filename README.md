@@ -31,7 +31,7 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 >
 > **Il ouvre les boîtes** : IMAP sur un troisième port, `STARTTLS` puis `LOGIN`
 > ou `AUTHENTICATE PLAIN`, `SELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`,
-> `EXPUNGE` et `SEARCH` sur `INBOX` — un message traverse la socket sans jamais tenir en
+> `EXPUNGE`, `SEARCH` et `COPY` sur `INBOX` — un message traverse la socket sans jamais tenir en
 > mémoire, les drapeaux s'écrivent dans les noms de fichiers Maildir, et un
 > effacement n'a jamais lieu sur une marque périmée.
 >
@@ -470,7 +470,7 @@ découpage existe pour fermer. Un tag illisible, lui, ne ferme rien : la command
 ## Les boîtes IMAP : lire sans jamais tenir un message
 
 `SELECT`, `EXAMINE`, `CLOSE`, `UNSELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`,
-`EXPUNGE`, `SEARCH` et leurs formes `UID` servent la boîte du compte. Ce serveur en a **une par compte, et elle
+`EXPUNGE`, `SEARCH`, `COPY` et leurs formes `UID` servent la boîte du compte. Ce serveur en a **une par compte, et elle
 s'appelle `INBOX`** — le nom que la RFC 9051 §5.1 réserve pour cela. Créer des
 dossiers demanderait `CREATE`, un endroit où les mettre et une règle pour ce
 qu'un nom a le droit d'être ; rien de tout cela n'est écrit, et prétendre en
@@ -640,8 +640,43 @@ parce qu'un `SEARCH SUBJECT "facture"` qui répondrait « aucun résultat » ser
 un mensonge exact. Ils viendront avec la machinerie qui lit un message au fil de
 l'eau.
 
-Ce qui n'y est toujours pas : `COPY`, `MOVE`, `APPEND`,
-`CREATE`/`DELETE`/`RENAME`, `ENVELOPE` et `BODYSTRUCTURE`. Ils sont reconnus, leur
+## `COPY` : tout ou rien, et dire où
+
+`COPY` et `UID COPY` copient dans la boîte nommée. **`INBOX` est la seule qui
+existe**, donc la seule destination possible ; toute autre reçoit
+`NO [TRYCREATE]`, le code qui apprend au client qu'un `CREATE` suivi du même
+`COPY` marcherait — le lui refuser sèchement le laisserait deviner.
+
+**§6.4.7 : un `COPY` n'est pas partiellement réussi.** Si un message ne peut pas
+être copié, ce qui l'a été avant lui est **défait**, et la commande répond `NO`.
+Un client qui reçoit `NO` doit pouvoir recommencer sans se demander lesquels de
+ses messages sont déjà passés — et sans faire de doublons. Défaire ne demande
+rien à retenir : les UID attribués se suivent, donc ce qu'il faut retirer est une
+plage.
+
+**`COPYUID` dit au client OÙ ses messages ont atterri** — `[COPYUID <validité>
+<source> <destination>]`, les deux ensembles se lisant dans le même ordre. Celui
+de destination tient toujours en une plage, puisque les UID sont attribués en
+croissant ; celui de source est ce que le client a désigné, trous compris, et sa
+longueur est donc **choisie par le client**. On l'accumule dans un tampon borné,
+et **s'il déborde, `COPYUID` est omis entièrement** : un ensemble tronqué
+désignerait d'autres messages que ceux qu'on a copiés, ce qui est pire que de ne
+rien dire.
+
+**Copier, c'est déposer un message neuf**, avec la même danse que la remise SMTP :
+écrire dans `tmp/`, synchroniser, renommer. Les drapeaux d'origine sont préservés
+en **un seul** renommage — déposer puis renommer laisserait la copie visible sans
+eux, et un client qui regarderait à cet instant la croirait non lue. La date
+d'arrivée, elle, est celle de la copie : la reculer demanderait une dépendance
+pour un `utimensat`, et §6.4.7 n'en fait qu'un souhait.
+
+**Ce qu'on parcourt ne doit pas grandir sous nos pieds.** Copier dans la boîte
+ouverte l'agrandit ; relire le nombre de messages à chaque tour ferait de
+`COPY 1:* INBOX` une boucle que le client n'aurait qu'à demander. Le nombre est
+donc arrêté d'avance.
+
+Ce qui n'y est toujours pas : `MOVE`, `APPEND`, `CREATE`/`DELETE`/`RENAME`,
+`ENVELOPE` et `BODYSTRUCTURE`. Ils sont reconnus, leur
 état est vérifié, et la session répond `NO [UNAVAILABLE]` — `NO` et non `BAD`,
 parce que la commande est correcte et permise et que c'est ce serveur qui ne la
 sert pas. `APPEND` demandera un chemin qui écoule au fil de l'eau, comme le

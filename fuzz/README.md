@@ -825,6 +825,7 @@ coûterait du courrier sans rien protéger — on ne les interprète jamais.
 | 2026-08-29 | `fuzz_ams_imap` (arrêt de l'itérateur) | 5 072 564 (121 s) | 0 |
 | 2026-08-29 | `fuzz_ams_session_imap` (avec `EXPUNGE`) | 2 188 197 (181 s) | 0 |
 | 2026-08-29 | `fuzz_ams_imap_fetch` (avec `SEARCH`) | 9 490 143 (201 s) | 0 |
+| 2026-08-29 | `fuzz_ams_session_imap` (avec `COPY`) | 2 993 293 (181 s) | 0 |
 | 2026-08-29 | `fuzz_ams_config` (avec l'écoute IMAP) | 208 794 (71 s) | 0 |
 | 2026-08-29 | `fuzz_ams_config` (avec SPF) | 193 256 (61 s) | 0 |
 | 2026-08-29 | `fuzz_ams_session_smtp` (avec SPF) | 381 710 (61 s) | 0 |

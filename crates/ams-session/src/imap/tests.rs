@@ -93,6 +93,33 @@ impl Mailbox for Boite {
         place.fill(b'0'.saturating_add(u8::try_from(sequence % 10).unwrap_or(0)));
         place.len()
     }
+    fn copy_to(&mut self, sequence: u32, mailbox: &[u8]) -> Option<u32> {
+        // La boîte d'épreuve ne copie que vers elle-même, comme le magasin
+        // réel : c'est la seule boîte qui existe.
+        if !mailbox.eq_ignore_ascii_case(b"INBOX") {
+            return None;
+        }
+        let info = self.info(sequence)?;
+        // Le têtu ne se copie pas non plus : de quoi éprouver qu'une copie
+        // manquée n'emporte pas les autres.
+        if info.uid == self.tetu {
+            return None;
+        }
+        let neuf = self.uid_next();
+        self.messages
+            .push(message(neuf, info.size, info.flags, info.internal_date));
+        self.efface.set(self.efface.get());
+        Some(neuf)
+    }
+
+    fn undo_copies(&mut self, mailbox: &[u8], premier: u32, dernier: u32) {
+        if !mailbox.eq_ignore_ascii_case(b"INBOX") {
+            return;
+        }
+        self.messages
+            .retain(|message| message.is_none_or(|info| info.uid < premier || info.uid > dernier));
+    }
+
     fn expunge(&mut self, sequence: u32) -> bool {
         if !self.modifiable {
             return false;
@@ -175,6 +202,20 @@ impl Mailboxes for Boites {
                 message(1, 10, Flags::NONE, 0),
                 None,
                 message(3, 10, Flags::NONE, 0),
+            ],
+            // Assez de messages aux UID espacés pour que leur ensemble ne
+            // tienne pas dans ce qu'on accepte d'écrire pour un `COPYUID`.
+            b"Eparse" => (0..60)
+                .map(|rang: u32| {
+                    message(rang.saturating_mul(2).saturating_add(1), 10, Flags::NONE, 0)
+                })
+                .collect(),
+            // Trois messages aux UID QUI SE SUIVENT : de quoi éprouver qu'un
+            // ensemble se comprime en plage plutôt qu'en liste.
+            b"Suite" => std::vec![
+                message(5, 100, Flags::NONE, 0),
+                message(6, 100, Flags::NONE, 0),
+                message(7, 100, Flags::NONE, 0),
             ],
             // Trois messages ordinaires, dont le deuxième refusera de s'effacer.
             b"Tetue" => std::vec![
@@ -608,16 +649,11 @@ fn ce_qu_on_ne_sert_pas_encore_le_dit_sans_accuser_le_client() {
     // Celles qui exigent une boîte ouverte le disent autrement : elles sont
     // hors d'état, et non hors de service.
     dire(&mut session, b"a011 SELECT INBOX\r\n");
-    for commande in [
-        &b"a015 COPY 1 Archives\r\n"[..],
-        b"a016 MOVE 1 Archives\r\n",
-    ] {
-        let (texte, _) = dire(&mut session, commande);
-        assert!(
-            texte.contains("NO [UNAVAILABLE] Mailbox commands are not served yet"),
-            "{commande:?} : {texte}"
-        );
-    }
+    let (texte, _) = dire(&mut session, b"a016 MOVE 1 Archives\r\n");
+    assert!(
+        texte.contains("NO [UNAVAILABLE] Mailbox commands are not served yet"),
+        "{texte}"
+    );
 }
 
 // ── LES BOÎTES ──────────────────────────────────────────────────────────────
@@ -1433,9 +1469,10 @@ fn uid_fetch_designe_par_uid_et_rend_le_rang() {
 #[test]
 fn un_uid_autre_que_fetch_ou_store_se_refuse_en_le_disant() {
     let mut session = selectionnee();
-    let (texte, _) = dire(&mut session, b"a003 UID COPY 1 Archives\r\n");
+    let (texte, _) = dire(&mut session, b"a003 UID MOVE 1 Archives\r\n");
     assert!(
-        texte.contains("NO [CANNOT] Only UID FETCH, STORE, EXPUNGE and SEARCH are served yet"),
+        texte
+            .contains("NO [CANNOT] Only UID FETCH, STORE, EXPUNGE, SEARCH and COPY are served yet"),
         "{texte}"
     );
     // Et `UID` sans rien derrière ne trouve pas de verbe.
@@ -2123,10 +2160,7 @@ fn un_trou_dans_la_boite_n_arrete_pas_la_recherche() {
 fn une_commande_de_boite_sans_selection_est_hors_d_etat() {
     let mut session = nouvelle(true);
     dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
-    for commande in [
-        &b"a002 COPY 1 Archives\r\n"[..],
-        b"a003 MOVE 1 Archives\r\n",
-    ] {
+    for commande in [&b"a002 COPY 1 INBOX\r\n"[..], b"a003 MOVE 1 Archives\r\n"] {
         let (texte, _) = dire(&mut session, commande);
         assert!(
             texte.contains("BAD Command is not allowed unless a mailbox is selected"),
@@ -2228,4 +2262,156 @@ fn un_tampon_qui_suffit_a_l_entete_et_pas_a_la_plage_le_dit() {
         fil,
         "* ESEARCH (TAG \"a\") UID ALL 4294967294:4294967295\r\na OK UID SEARCH completed\r\n"
     );
+}
+
+// ── `COPY` ──────────────────────────────────────────────────────────────────
+
+/// **§6.4.7 : `COPYUID` dit au client OÙ ses messages ont atterri**, et les deux
+/// ensembles se lisent dans le même ordre.
+#[test]
+fn copy_rend_un_copyuid_qui_apparie_source_et_destination() {
+    let mut session = selectionnee();
+    let (texte, _) = dire(&mut session, b"a003 COPY 1:2 INBOX\r\n");
+    // 10 et 20 ne se suivent pas : deux plages d'un élément, séparées.
+    assert_eq!(texte, "a003 OK [COPYUID 42 10,20 31:32] COPY completed\r\n");
+    // Les copies sont bien là, à la suite.
+    let fil = ecouler(&mut session, b"a004 FETCH 1:* UID\r\n");
+    assert!(fil.contains("* 4 FETCH (UID 31)"), "{fil}");
+    assert!(fil.contains("* 5 FETCH (UID 32)"), "{fil}");
+}
+
+/// L'ensemble source est celui que le client a désigné, TROUS COMPRIS.
+#[test]
+fn copyuid_nomme_les_uid_epars_de_la_source() {
+    let mut session = selectionnee();
+    let (texte, _) = dire(&mut session, b"a003 COPY 1,3 INBOX\r\n");
+    assert_eq!(texte, "a003 OK [COPYUID 42 10,30 31:32] COPY completed\r\n");
+}
+
+/// **`UID COPY` désigne par UID**, et le dit dans sa conclusion.
+#[test]
+fn uid_copy_designe_par_uid() {
+    let mut session = selectionnee();
+    let (texte, _) = dire(&mut session, b"a003 UID COPY 30 INBOX\r\n");
+    assert_eq!(texte, "a003 OK [COPYUID 42 30 31] UID COPY completed\r\n");
+}
+
+/// **§6.4.7 : une destination qui n'existe pas se dit `[TRYCREATE]`.** C'est le
+/// code qui apprend au client qu'un `CREATE` suivi du même `COPY` marcherait.
+#[test]
+fn une_destination_inconnue_se_dit_trycreate() {
+    let mut session = selectionnee();
+    let (texte, _) = dire(&mut session, b"a003 COPY 1 Inconnue\r\n");
+    assert!(
+        texte.contains("NO [TRYCREATE] Destination mailbox does not exist"),
+        "{texte}"
+    );
+}
+
+/// **§6.4.7 : un `COPY` n'est pas partiellement réussi.** Ce qui a été copié
+/// avant l'échec est défait, et le client peut recommencer sans faire de
+/// doublons.
+#[test]
+fn un_copy_qui_echoue_defait_ce_qu_il_avait_fait() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut session, b"a002 SELECT Tetue\r\n");
+    // Le deuxième message refuse d'être copié ; le premier ne doit pas rester.
+    let (texte, _) = dire(&mut session, b"a003 COPY 1:3 INBOX\r\n");
+    assert!(
+        texte.contains("NO Copy failed; no messages were copied"),
+        "{texte}"
+    );
+    let fil = ecouler(&mut session, b"a004 FETCH 1:* UID\r\n");
+    assert_eq!(fil.matches("* ").count(), 3, "{fil}");
+}
+
+/// Rien à copier n'est pas un échec, et ne s'accompagne d'aucun `COPYUID`.
+#[test]
+fn un_copy_qui_ne_designe_rien_reussit_sans_rien_dire() {
+    let mut session = selectionnee();
+    let (texte, _) = dire(&mut session, b"a003 COPY 9 INBOX\r\n");
+    assert_eq!(texte, "a003 OK COPY completed\r\n");
+}
+
+#[test]
+fn un_copy_mal_forme_est_une_faute() {
+    let mut session = selectionnee();
+    for commande in [
+        &b"a003 COPY\r\n"[..],
+        b"a004 COPY 1\r\n",
+        b"a005 COPY x INBOX\r\n",
+        b"a006 COPY 1 \r\n",
+    ] {
+        let (texte, _) = dire(&mut session, commande);
+        assert!(
+            texte.contains("BAD COPY expects a sequence set and a mailbox name"),
+            "{commande:?} : {texte}"
+        );
+    }
+}
+
+/// **Un ensemble source trop long fait OMETTRE `COPYUID`**, jamais le tronquer :
+/// un ensemble tronqué désignerait d'autres messages que ceux qu'on a copiés.
+#[test]
+fn un_copyuid_qui_deborde_est_omis_entierement() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut session, b"a002 SELECT Eparse\r\n");
+    let (texte, _) = dire(&mut session, b"a003 COPY 1:* INBOX\r\n");
+    assert_eq!(texte, "a003 OK COPY completed\r\n");
+}
+
+/// **Des UID qui se suivent se comprime en plage**, et non en liste.
+#[test]
+fn copyuid_comprime_une_source_contigue() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut session, b"a002 SELECT Suite\r\n");
+    let (texte, _) = dire(&mut session, b"a003 COPY 1:3 INBOX\r\n");
+    assert_eq!(texte, "a003 OK [COPYUID 42 5:7 8:10] COPY completed\r\n");
+}
+
+/// **Un message que la boîte annonce sans le rendre n'est pas copié**, et
+/// n'arrête pas la copie des autres.
+#[test]
+fn un_trou_dans_la_boite_n_arrete_pas_la_copie() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut session, b"a002 SELECT Trouee\r\n");
+    let (texte, _) = dire(&mut session, b"a003 COPY 1:3 INBOX\r\n");
+    assert_eq!(texte, "a003 OK [COPYUID 42 1,3 4:5] COPY completed\r\n");
+}
+
+/// Le premier message qui échoue n'a rien à défaire derrière lui.
+#[test]
+fn un_copy_qui_echoue_au_premier_ne_defait_rien() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut session, b"a002 SELECT Tetue\r\n");
+    let (texte, _) = dire(&mut session, b"a003 COPY 2 INBOX\r\n");
+    assert!(
+        texte.contains("NO Copy failed; no messages were copied"),
+        "{texte}"
+    );
+    let fil = ecouler(&mut session, b"a004 FETCH 1:* UID\r\n");
+    assert_eq!(fil.matches("* ").count(), 3, "{fil}");
+}
+
+/// Un `UID COPY` qui ne désigne rien réussit, et le nomme.
+#[test]
+fn un_uid_copy_qui_ne_designe_rien_le_nomme() {
+    let mut session = selectionnee();
+    let (texte, _) = dire(&mut session, b"a003 UID COPY 999 INBOX\r\n");
+    assert_eq!(texte, "a003 OK UID COPY completed\r\n");
+}
+
+/// Le débordement du `COPYUID` vaut aussi pour un `UID COPY`.
+#[test]
+fn un_uid_copy_qui_deborde_omet_aussi_son_copyuid() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut session, b"a002 SELECT Eparse\r\n");
+    let (texte, _) = dire(&mut session, b"a003 UID COPY 1:* INBOX\r\n");
+    assert_eq!(texte, "a003 OK UID COPY completed\r\n");
 }

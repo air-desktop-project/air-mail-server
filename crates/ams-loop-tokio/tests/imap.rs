@@ -82,6 +82,16 @@ impl Mailbox for Boite {
             .copy_from_slice(reste.get(..combien).unwrap_or_default());
         combien
     }
+    fn copy_to(&mut self, sequence: u32, mailbox: &[u8]) -> Option<u32> {
+        // La boîte d'épreuve ne grandit pas : elle rend un UID plausible, ce qui
+        // suffit à éprouver ce qui passe sur le fil.
+        (mailbox == b"INBOX" && (1..=2).contains(&sequence)).then_some(sequence.saturating_add(2))
+    }
+
+    fn undo_copies(&mut self, _mailbox: &[u8], _premier: u32, _dernier: u32) {
+        // Rien à défaire : la boîte d'épreuve n'a rien retenu.
+    }
+
     fn expunge(&mut self, _sequence: u32) -> bool {
         // La boîte d'épreuve ne rétrécit pas : rien ne s'y efface, et c'est le
         // passage sur le fil qu'on éprouve ici. `false` dit « toujours là », ce
@@ -681,4 +691,36 @@ async fn une_recherche_traverse_la_socket() {
         .expect("écriture");
     let refus = jusqu_a(&mut lecteur, "a006 ").await;
     assert!(refus.starts_with("a006 NO [CANNOT]"), "{refus}");
+}
+
+/// **`COPY` traverse la socket**, et sa conclusion porte le `COPYUID`.
+#[tokio::test]
+async fn une_copie_traverse_la_socket() {
+    let Some(materiel) = materiel("imap-copy") else {
+        return;
+    };
+    let mut lecteur = authentifiee(&materiel).await;
+    lecteur
+        .get_mut()
+        .write_all(b"a003 SELECT INBOX\r\n")
+        .await
+        .expect("écriture");
+    jusqu_a(&mut lecteur, "a003 ").await;
+
+    lecteur
+        .get_mut()
+        .write_all(b"a004 COPY 1:2 INBOX\r\n")
+        .await
+        .expect("écriture");
+    let copie = jusqu_a(&mut lecteur, "a004 ").await;
+    assert_eq!(copie, "a004 OK [COPYUID 7 1:2 3:4] COPY completed\r\n");
+
+    // Une destination inconnue se dit `[TRYCREATE]`, jamais autrement.
+    lecteur
+        .get_mut()
+        .write_all(b"a005 COPY 1 Archives\r\n")
+        .await
+        .expect("écriture");
+    let refus = jusqu_a(&mut lecteur, "a005 ").await;
+    assert!(refus.starts_with("a005 NO [TRYCREATE]"), "{refus}");
 }
