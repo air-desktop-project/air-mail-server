@@ -12,6 +12,17 @@ n'entre ni dans la mesure de couverture ni dans le lock du produit, et rien de c
 qu'elle tire n'est jamais livré. Le nightly employé ici est **roulant**, ce qui est
 acceptable *ici seulement* : rien n'en sort qui doive s'accorder avec autre chose.
 
+## Le smoke-test de la CI nomme ses cibles, et la CI vérifie qu'il les nomme toutes
+
+Chaque cible a ses graines, qu'aucune convention de nommage ne devine :
+`fuzz_ams_mime_parse` se sème avec `seeds/mime`. La liste du smoke-test est donc
+tenue à la main — et une cible ajoutée sans y être inscrite n'était jamais
+lancée, la CI restant verte en ne l'ayant pas examinée. Six cibles vivaient
+ainsi hors du gate, dont une qui **ne compilait plus depuis deux commits**.
+
+La CI confronte maintenant sa liste aux `[[bin]]` de `Cargo.toml`, et l'écart
+échoue. Un rapport vert qui n'a rien examiné est un mensonge poli.
+
 ## Ce qu'on fuzze, et pourquoi
 
 Un message est **la** donnée externe d'un serveur de courrier : n'importe qui peut
@@ -43,7 +54,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_dmarc_report` | `seeds/dmarc-report` | destinations et rapport agrégé — **le rapport ne s'injecte pas** |
 | `fuzz_ams_imap` | `seeds/imap` | découpage d'une commande IMAP — **le client ne choisit pas où l'on coupe** |
 | `fuzz_ams_imap_fetch` | `seeds/imap-fetch` | ce qu'un `FETCH` désigne — **les deux lectures d'un ensemble s'accordent** |
-| `fuzz_ams_session_imap` | `seeds/imap-session` | la session IMAP — **jamais authentifié sans chiffrement** |
+| `fuzz_ams_session_imap` | `seeds/imap-session` | la session IMAP — **jamais authentifié sans chiffrement**, et un intervalle de `FETCH` ne déborde pas du message |
 | `fuzz_ams_smtp_client` | `seeds/smtp-client` | réponses lues et corps émis — **le message ne se termine pas tout seul** |
 | `fuzz_ams_mime_compose` | `seeds/mime-compose` | les messages de rapport — **la pièce jointe se relit, la liste blanche tient** |
 
@@ -781,6 +792,7 @@ coûterait du courrier sans rien protéger — on ne les interprète jamais.
 | 2026-08-29 | `fuzz_ams_imap` (avec les arguments) | 7 738 126 (151 s) | 0 |
 | 2026-08-29 | `fuzz_ams_session_imap` | 3 058 685 (221 s) | 0 |
 | 2026-08-29 | `fuzz_ams_imap_fetch` | 15 261 189 (241 s) | 0 |
+| 2026-08-29 | `fuzz_ams_session_imap` (avec les boîtes) | 3 292 791 (241 s) | 0 |
 | 2026-08-29 | `fuzz_ams_config` (avec l'écoute IMAP) | 208 794 (71 s) | 0 |
 | 2026-08-29 | `fuzz_ams_config` (avec SPF) | 193 256 (61 s) | 0 |
 | 2026-08-29 | `fuzz_ams_session_smtp` (avec SPF) | 381 710 (61 s) | 0 |

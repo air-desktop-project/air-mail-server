@@ -20,16 +20,21 @@
 //!    recopié : s'il en sortait un que le client n'a pas envoyé, ce serait qu'on
 //!    l'a fabriqué, ou pire, qu'on a recopié autre chose.
 //! 5. **Après `LOGOUT`, la session ne répond plus.**
+//! 6. **UN INTERVALLE DE `FETCH` NE DÉSIGNE JAMAIS HORS DU MESSAGE.** La
+//!    session annonce une longueur au client, puis rend un intervalle à
+//!    l'appelant : si l'intervalle débordait, l'appelant ne pourrait pas tenir
+//!    l'annonce, et comblerait — c'est-à-dire mentirait.
 
 #![no_main]
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
+use ams_proto_imap::Flags;
 use ams_proto_imap::{CommandReader, Limits, Need};
 use ams_sasl::Credentials;
 use ams_session::Authenticator;
-use ams_session::imap::{Action, Session, State};
+use ams_session::imap::{Action, FetchChunk, Mailbox, Mailboxes, MessageInfo, Session, State};
 
 /// Le seul compte que la politique connaisse.
 struct UnCompte;
@@ -37,6 +42,91 @@ struct UnCompte;
 impl Authenticator for UnCompte {
     fn authenticate(&self, credentials: &Credentials<'_>) -> bool {
         credentials.authentication_identity == b"jean" && credentials.password == b"ouvre-toi"
+    }
+}
+
+/// Deux messages, et rien de plus : c'est la session qu'on éprouve, pas Maildir.
+const TAILLES: [u64; 2] = [64, 4096];
+
+/// La boîte d'épreuve.
+struct Boite;
+
+impl Mailbox for Boite {
+    fn exists(&self) -> u32 {
+        2
+    }
+    fn uid_validity(&self) -> u32 {
+        7
+    }
+    fn uid_next(&self) -> u32 {
+        3
+    }
+    fn info(&self, sequence: u32) -> Option<MessageInfo> {
+        let taille = *TAILLES.get(usize::try_from(sequence).ok()?.checked_sub(1)?)?;
+        Some(MessageInfo {
+            uid: sequence,
+            size: taille,
+            flags: Flags::NONE,
+            internal_date: 1_787_987_311,
+        })
+    }
+    fn header_octets(&self, sequence: u32) -> u64 {
+        // Un tiers du message, de quoi distinguer les trois sections.
+        self.info(sequence).map_or(0, |info| info.size / 3)
+    }
+    fn writable(&self) -> bool {
+        true
+    }
+    fn read(&self, sequence: u32, offset: u64, out: &mut [u8]) -> usize {
+        let Some(info) = self.info(sequence) else {
+            return 0;
+        };
+        let reste = info.size.saturating_sub(offset);
+        let voulu = usize::try_from(reste).unwrap_or(usize::MAX).min(out.len());
+        let place = out.get_mut(..voulu).unwrap_or_default();
+        place.fill(b'x');
+        place.len()
+    }
+    fn mark_seen(&mut self, _sequence: u32) {}
+}
+
+/// Le magasin : une seule boîte, `INBOX`.
+struct Boites;
+
+impl Mailboxes for Boites {
+    type Open = Boite;
+    fn name(&self, _user: &[u8], index: usize) -> Option<&[u8]> {
+        (index == 0).then_some(&b"INBOX"[..])
+    }
+    fn open(&self, _user: &[u8], name: &[u8]) -> Option<Boite> {
+        (name == b"INBOX").then_some(Boite)
+    }
+}
+
+/// Vérifie qu'une réponse est faite de lignes complètes, et qu'une ligne
+/// étiquetée ne porte que le tag reçu (propriétés 3 et 4).
+fn verifier(reponse: &[u8], commande: &[u8]) {
+    assert!(
+        reponse.is_empty() || reponse.ends_with(b"\r\n"),
+        "une réponse ne se termine pas par un CRLF"
+    );
+    for ligne in reponse.split(|octet| *octet == b'\n') {
+        let ligne = ligne.strip_suffix(b"\r").unwrap_or(ligne);
+        if ligne.is_empty() || ligne.starts_with(b"* ") || ligne.starts_with(b"+ ") {
+            continue;
+        }
+        let tag = ligne
+            .split(|octet| *octet == b' ')
+            .next()
+            .expect("un premier mot");
+        let envoye = commande
+            .split(|octet| matches!(*octet, b' ' | b'\r'))
+            .next()
+            .expect("un premier mot");
+        assert_eq!(
+            tag, envoye,
+            "une réponse étiquetée porte un tag qu'on n'a pas reçu"
+        );
     }
 }
 
@@ -53,7 +143,7 @@ struct Entree<'a> {
 
 fuzz_target!(|entree: Entree<'_>| {
     let bornes = Limits::DEFAULT;
-    let mut session = Session::new(bornes, entree.starttls, UnCompte);
+    let mut session = Session::new(bornes, entree.starttls, UnCompte, Boites);
     if entree.chiffree {
         session.on_tls_established();
     }
@@ -92,35 +182,8 @@ fuzz_target!(|entree: Entree<'_>| {
         let Ok(tour) = issue else {
             break;
         };
-        let reponse = tour.reply();
-
-        // PROPRIÉTÉ 3 : des lignes complètes, et rien d'autre.
-        assert!(
-            reponse.is_empty() || reponse.ends_with(b"\r\n"),
-            "une réponse ne se termine pas par un CRLF"
-        );
-        // PROPRIÉTÉ 4 : le tag rendu est celui qu'on a reçu, ou aucun.
-        for ligne in reponse.split(|octet| *octet == b'\n') {
-            let ligne = ligne.strip_suffix(b"\r").unwrap_or(ligne);
-            if ligne.is_empty() {
-                continue;
-            }
-            if ligne.starts_with(b"* ") || ligne.starts_with(b"+ ") {
-                continue;
-            }
-            let tag = ligne
-                .split(|octet| *octet == b' ')
-                .next()
-                .expect("un premier mot");
-            let envoye = commande
-                .split(|octet| matches!(*octet, b' ' | b'\r'))
-                .next()
-                .expect("un premier mot");
-            assert_eq!(
-                tag, envoye,
-                "une réponse étiquetée porte un tag qu'on n'a pas reçu"
-            );
-        }
+        // PROPRIÉTÉS 3 et 4.
+        verifier(tour.reply(), commande);
 
         match tour.action() {
             Action::StartTls => session.on_tls_established(),
@@ -130,6 +193,39 @@ fuzz_target!(|entree: Entree<'_>| {
                 let _ = session.on_auth_response(b"AGplYW4Ab3V2cmUtdG9p", &mut sortie);
             }
             Action::Close => close = true,
+            // On écoule l'émission comme la boucle le ferait. La conclusion
+            // étiquetée EN FAIT PARTIE : elle est le dernier morceau, et la
+            // propriété 4 doit donc la voir passer ici.
+            Action::SendFetch => {
+                let mut morceaux = 0_u32;
+                // Deux morceaux par message rendu, plus la conclusion ; la
+                // boîte en a deux, et l'ensemble est borné par la grammaire.
+                while morceaux < 4096 {
+                    morceaux = morceaux.saturating_add(1);
+                    let Ok(Some(morceau)) = session.next_fetch(&mut sortie) else {
+                        break;
+                    };
+                    match morceau {
+                        FetchChunk::Bytes(octets) => verifier(octets, commande),
+                        FetchChunk::Message {
+                            sequence,
+                            offset,
+                            length,
+                        } => {
+                            // PROPRIÉTÉ 6 : l'intervalle tient dans le message.
+                            let taille = TAILLES
+                                .get(usize::try_from(sequence).unwrap_or(0).saturating_sub(1))
+                                .copied()
+                                .unwrap_or(0);
+                            assert!(
+                                offset.saturating_add(length) <= taille,
+                                "un intervalle déborde du message {sequence} : \
+                                 {offset}+{length} > {taille}"
+                            );
+                        }
+                    }
+                }
+            }
             Action::Continue => {}
         }
 
