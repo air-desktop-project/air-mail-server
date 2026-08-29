@@ -499,9 +499,34 @@ signataire est donc écrit, couvert et fuzzé, mais **aucun chemin ne l'emprunte
 — il attend la soumission. C9 demande « DKIM en signature et en vérification » :
 la première moitié existe, la seconde tourne.
 
-Ce qui n'est pas outillé : `ams-dmarc` reste vide, et tant qu'il l'est, DMARC ne
-conclut rien — c'est pourtant lui qui rapproche les verdicts SPF et DKIM de
-l'en-tête `From:` que lira l'humain.
+**DMARC est commencé depuis le 2026-08-29** : la grammaire de l'enregistrement
+`_dmarc` (§6.3), l'alignement (§3.1) et le verdict (§6.6.2). Couvert à 100 % (C2)
+et fuzzé sur six propriétés, dont la symétrie de l'alignement et le fait que le
+mode strict est plus étroit que le relâché — l'inverse ferait qu'un domaine qui
+durcit sa politique laisserait passer davantage.
+
+### Ce que DMARC ajoute, et pourquoi il fallait les deux autres d'abord
+
+SPF autorise un domaine d'ENVELOPPE ; DKIM en fait signer un autre. Ni l'un ni
+l'autre ne parle du `From:` — la seule ligne que l'humain lira. Un message peut
+donc passer les deux sans que rien ne dise quoi que ce soit de son auteur
+affiché : il suffit d'émettre depuis un domaine qu'on détient, de le signer, et
+d'écrire ce qu'on veut dans le `From:`.
+
+### Le domaine organisationnel est DEMANDÉ, pas deviné
+
+L'alignement relâché compare des domaines organisationnels, et il n'existe
+aucune règle syntaxique pour les trouver : il faut la liste des suffixes
+publics. Une implémentation naïve — « les deux dernières étiquettes » — ferait
+aligner `attaquant.co.uk` avec `victime.co.uk`. La crate demande donc la réponse
+par un trait, et n'en fournit aucune implémentation : **celui qui répond doit
+savoir ce qu'il répond.** C'est le même partage que pour les questions DNS de
+SPF, et pour la même raison.
+
+Ce qui n'est pas outillé : **le câblage**. Il demande trois choses que ce serveur
+n'a pas encore réunies — le domaine du `From:`, une liste de suffixes publics, et
+un endroit où refuser. Et les rapports (`rua=`, `ruf=`) ne sont ni composés ni
+envoyés : l'enregistrement les rend tels quels, à qui saura les lire.
 
 ### DNSSEC n'est pas validé, et c'est écrit partout
 

@@ -39,6 +39,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_dns` | `seeds/dns` | la réponse d'un résolveur — **la compression ne boucle pas** |
 | `fuzz_ams_spf_header` | `seeds/spf-header` | l'en-tête `Received-SPF` — **aucune injection de ligne** |
 | `fuzz_ams_dkim` | `seeds/dkim` | signature, clé et canonicalisation — **le découpage ne change rien** |
+| `fuzz_ams_dmarc` | `seeds/dmarc` | politique et alignement — **l'alignement est symétrique** |
 
 Les variantes « bornes » existent parce que les bornes de C3 viennent de la
 configuration (C8), donc d'un administrateur : un zéro, un `usize::MAX`, ou toute
@@ -217,6 +218,25 @@ répond pas à la question posée.
 6. **Une panne de résolution vaut `temperror`**, jamais un refus : dire `fail` à
    la place ferait jeter un message qui serait passé cinq minutes plus tard.
 7. Les bornes de l'évaluation sont fuzzées elles aussi — zéro compris.
+
+### DMARC (six, dont LA SYMÉTRIE DE L'ALIGNEMENT)
+
+L'enregistrement vient du DNS, c'est-à-dire d'un domaine que **l'expéditeur
+choisit** — celui de son propre `From:`. Les domaines comparés viennent, eux, de
+SPF et de DKIM : ce sont des noms qu'un pair a écrits.
+
+1. Rien ne panique, quels que soient les octets.
+2. **Un enregistrement accepté commence par `v=DMARC1` et porte un `p=`** — les
+   deux choses sans lesquelles la RFC 7489 §6.6.3 l'écarte.
+3. **L'ALIGNEMENT EST RÉFLEXIF ET SYMÉTRIQUE.** Un domaine s'aligne avec
+   lui-même, et l'ordre des deux ne change rien : une comparaison qui dépendrait
+   de l'ordre ferait passer un message dans un sens et pas dans l'autre.
+4. **Le mode strict est plus étroit que le relâché** : ce que `s` aligne, `r`
+   l'aligne aussi. L'inverse ferait qu'un domaine qui durcit sa politique
+   laisserait passer davantage.
+5. **Une réussite exige un mécanisme aligné** — il doit être possible de dire
+   lequel — et un `From:` vide n'aligne rien.
+6. **Le pourcentage tient dans ses bornes**, de zéro à cent.
 
 ### DKIM (sept, dont L'INDÉPENDANCE AU DÉCOUPAGE)
 
@@ -618,6 +638,7 @@ L'entrée fautive est versionnée en graine de non-régression
 | 2026-08-29 | `fuzz_ams_dkim` | 3 255 821 (181 s) | **1, contrat corrigé** |
 | 2026-08-29 | `fuzz_ams_dkim` (avec la vérification) | 2 921 202 (181 s) | 0 |
 | 2026-08-29 | `fuzz_ams_dkim` (avec la signature) | 707 978 (181 s) | **1, corrigée** |
+| 2026-08-29 | `fuzz_ams_dmarc` | 10 092 643 (181 s) | 0 |
 | 2026-08-29 | `fuzz_ams_config` (avec SPF) | 193 256 (61 s) | 0 |
 | 2026-08-29 | `fuzz_ams_session_smtp` (avec SPF) | 381 710 (61 s) | 0 |
 | 2026-08-28 | `fuzz_ams_session_smtp` (SASL) | 521 646 (91 s) | 0 |

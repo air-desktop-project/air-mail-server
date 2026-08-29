@@ -39,6 +39,9 @@ path = "../crates/ams-dns"
 [dependencies.ams-dkim]
 path = "../crates/ams-dkim"
 
+[dependencies.ams-dmarc]
+path = "../crates/ams-dmarc"
+
 [dependencies.ams-proto-pop3]
 path = "../crates/ams-proto-pop3"
 
@@ -211,6 +214,13 @@ bench = false
 [[bin]]
 name = "fuzz_ams_dkim"
 path = "fuzz_targets/fuzz_ams_dkim.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ams_dmarc"
+path = "fuzz_targets/fuzz_ams_dmarc.rs"
 test = false
 doc = false
 bench = false

@@ -84,7 +84,7 @@ des octets **et des actions**. Elles n'attendent jamais.
 | `ams-tls` | TLS 1.3 uniquement, échange de clés post-quantique | **implémenté** |
 | `ams-dkim` | RFC 6376 | **vérifiées, câblées, et posées** |
 | `ams-spf` | RFC 7208 | **évalué, câblé, et écrit dans le message** |
-| `ams-dmarc` | RFC 7489 | vide |
+| `ams-dmarc` | RFC 7489 | **alignement et politique** |
 | `ams-config` | les trois formats binaires : configuration, comptes, index | **implémenté** |
 | `ams-index` | noms Maildir, drapeaux, reconstruction, `UIDVALIDITY` | **implémenté** |
 
@@ -99,7 +99,7 @@ Les seules crates qui lisent, écrivent et attendent. Elles ne décident de rien
 | `ams-server` | le binaire `air-mail-server` | **il tourne** |
 | `ams-admin` | le binaire `air-mail-admin` | **`summary`** |
 
-**Dix-sept crates portent du code.** `ams-mime` : le squelette d'un message — la
+**Dix-huit crates portent du code.** `ams-mime` : le squelette d'un message — la
 ligne, le pliage, la séparation en-tête/corps, le découpage en champs. Les champs
 structurés, les adresses, les dates et MIME restent à écrire.
 `ams-proto-smtp` : les commandes, l'encodage des réponses multilignes, et **la
@@ -259,6 +259,33 @@ courrier, il n'en émet pas. Le relais est refusé explicitement, et une signatu
 n'a de sens qu'à l'émission. Le signataire attend donc le chemin de soumission —
 et C9, qui demande « DKIM en signature ET en vérification », est tenue des deux
 côtés le jour où ce chemin existera.
+
+`ams-dmarc` : ce que SPF et DKIM ne disent pas. SPF autorise un domaine
+d'**enveloppe** ; DKIM en fait signer un autre. **Ni l'un ni l'autre ne parle du
+`From:`** — la seule ligne que l'humain lira. Un message peut donc passer les
+deux sans que rien ne dise quoi que ce soit de son auteur affiché : il suffit
+d'émettre depuis un domaine qu'on détient, de le signer, et d'écrire ce qu'on
+veut dans le `From:`. C'est l'usurpation la plus ordinaire, et c'est celle que
+DMARC ferme.
+
+**Un seul mécanisme suffit** (§6.6.2) : SPF ou DKIM, pourvu qu'il réussisse ET
+s'aligne. C'est ce qui laisse un message survivre à une redirection — qui casse
+SPF mais laisse la signature — ou à une liste de diffusion, qui casse la
+signature mais réémet depuis un domaine qu'elle contrôle.
+
+**Le domaine organisationnel ne se devine pas.** L'alignement relâché compare
+`mail.example.com` et `example.com` par leur domaine organisationnel — et il
+n'existe aucune règle syntaxique pour le trouver : `example.co.uk` en est un,
+`co.uk` n'en est pas un. Il faut la liste des suffixes publics, une donnée qui
+change et qui vit hors du code. Cette crate ne la devine donc pas : **elle la
+demande**, par un trait. Une implémentation naïve — « les deux dernières
+étiquettes » — ferait aligner `attaquant.co.uk` avec `victime.co.uk`,
+c'est-à-dire exactement l'usurpation que DMARC existe pour empêcher ; c'est
+pourquoi la crate n'en fournit aucune, et pourquoi une épreuve porte ce nom-là.
+
+Elle ne tire pas au sort non plus : `pct=` échantillonne l'application d'une
+politique, et choisir demande de l'aléa — que C1 laisse à l'étage 3. Le verdict
+rend le pourcentage ; l'appelant tire.
 
 `ams-dns` : le codec d'un message DNS — une question encodée, une réponse
 décodée. **Un client stub, et rien de plus** : ce serveur pose des questions, il

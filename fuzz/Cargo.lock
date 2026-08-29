@@ -44,6 +44,7 @@ dependencies = [
  "ams-auth",
  "ams-config",
  "ams-dkim",
+ "ams-dmarc",
  "ams-dns",
  "ams-guard",
  "ams-index",
@@ -86,6 +87,10 @@ dependencies = [
  "rsa",
  "sha2",
 ]
+
+[[package]]
+name = "ams-dmarc"
+version = "0.1.0"
 
 [[package]]
 name = "ams-dns"
