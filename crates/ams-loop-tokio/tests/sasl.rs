@@ -84,10 +84,35 @@ async fn conversation_chiffree(nom: &str, dialogue: &'static str) -> Option<Stri
     // Le résumé porte l'état de la session, et c'est notre point de vue à nous
     // sur le même échange.
     let vu_du_serveur = if resume.authenticated { "[OK]" } else { "[KO]" };
-    Some(format!(
-        "{vu_du_serveur}\n{}",
-        String::from_utf8_lossy(&client.stdout)
-    ))
+    // ON NE GARDE QUE LES RÉPONSES SMTP, et ce n'est pas de la cosmétique.
+    // `openssl s_client` écrit sur sa SORTIE STANDARD, avant le dialogue, la
+    // chaîne de certificats en base64 et le vidage hexadécimal de la session —
+    // plusieurs milliers de caractères tirés au hasard à chaque exécution.
+    // Chercher « 334 » là-dedans, c'est chercher trois chiffres dans du bruit :
+    // la CI l'a trouvé un jour dans un certificat, et le test a échoué en
+    // annonçant un défi que personne n'avait envoyé.
+    let sortie = String::from_utf8_lossy(&client.stdout);
+    let dialogue: Vec<&str> = sortie
+        .lines()
+        .filter(|ligne| est_une_reponse(ligne))
+        .collect();
+    Some(format!("{vu_du_serveur}\n{}", dialogue.join("\n")))
+}
+
+/// Cette ligne est-elle une réponse SMTP ?
+///
+/// Trois chiffres, puis une espace ou un tiret (RFC 5321 §4.2). Le vidage
+/// d'`openssl` ne peut pas s'y glisser : ses lignes de base64 n'ont pas
+/// d'espace, et celles du vidage hexadécimal commencent par des espaces.
+fn est_une_reponse(ligne: &str) -> bool {
+    let octets = ligne.as_bytes();
+    let Some([a, b, c, quatrieme]) = octets.first_chunk::<4>() else {
+        return false;
+    };
+    a.is_ascii_digit()
+        && b.is_ascii_digit()
+        && c.is_ascii_digit()
+        && (*quatrieme == b' ' || *quatrieme == b'-')
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
