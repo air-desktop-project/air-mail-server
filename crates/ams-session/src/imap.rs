@@ -2574,12 +2574,16 @@ impl Plage {
 
     /// Le texte de l'ensemble, ou `None` s'il a débordé.
     fn texte(&mut self) -> Option<&[u8]> {
-        // ON PARCOURT L'OPTION PLUTÔT QUE DE LA TESTER : `texte` n'est appelé
-        // qu'après au moins un `pousser`, donc il y a toujours une plage
-        // ouverte. Un `if let` porterait un « et sinon » qu'aucun appel ne peut
-        // emprunter, et une garde inatteignable n'est pas une garde.
-        for plage in self.ouverte.take() {
-            self.ecrire(plage);
+        // ON PARCOURT UNE TRANCHE PLUTÔT QUE DE TESTER UNE OPTION : `texte`
+        // n'est appelé qu'après au moins un `pousser`, donc il y a toujours une
+        // plage ouverte. Un `if let` porterait un « et sinon » qu'aucun appel ne
+        // peut emprunter, et une garde inatteignable n'est pas une garde. Une
+        // tranche d'un élément se parcourt sans rien affirmer — et sans fâcher
+        // `clippy::for_loops_over_fallibles`, qui a raison de refuser qu'on
+        // boucle sur une option.
+        let a_fermer = self.ouverte.take();
+        for plage in a_fermer.as_slice() {
+            self.ecrire(*plage);
         }
         if self.deborde {
             return None;
