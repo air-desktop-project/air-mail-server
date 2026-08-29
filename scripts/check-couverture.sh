@@ -129,7 +129,13 @@ while read -r cle total couvert pourcent; do
     # 100 %.
     case "$cle" in
         regions | lines)
-            if [ "$total" -gt 0 ] && ! awk "BEGIN { exit !($pourcent + 1e-9 >= $seuil) }"; then
+            # ON COMPARE DES COMPTES, PAS UN POURCENTAGE ARRONDI. Le
+            # pourcentage affiché tient sur deux décimales : 23 580 régions sur
+            # 23 581 s'y écrivent « 100,00 % », et le seuil de 100 % laissait
+            # donc passer une région non couverte. Arrivé une fois, en écrivant
+            # `STORE` — le gate a dit OK sur 23580/23581.
+            if [ "$total" -gt 0 ] \
+                && ! awk "BEGIN { exit !(100 * $couvert / $total + 1e-9 >= $seuil) }"; then
                 manquants=$((manquants + 1))
             fi
             ;;

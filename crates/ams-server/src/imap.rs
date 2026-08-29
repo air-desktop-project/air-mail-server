@@ -32,10 +32,12 @@
 
 use std::collections::BTreeMap;
 use std::io::{Read as _, Seek as _, SeekFrom};
+use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use ams_index::MessageName;
-use ams_proto_imap::Flags;
+use ams_index::{MessageName, Uid};
+use ams_proto_imap::{Flags, StoreMode};
 use ams_session::imap::{Mailbox, Mailboxes, MessageInfo};
 use ams_store::{MailboxView, Maildir};
 
@@ -51,6 +53,14 @@ pub struct BoiteImap {
     drapeaux: Vec<Flags>,
     /// Les dates d'arrivée, une par message.
     dates: Vec<u64>,
+    /// Le chemin COURANT de chaque message.
+    ///
+    /// # Pourquoi il ne suffit pas de garder celui de l'instantané
+    ///
+    /// Dans un Maildir, les drapeaux vivent DANS LE NOM DU FICHIER : les écrire,
+    /// c'est renommer. Le chemin relevé à l'ouverture cesse donc d'être valide
+    /// au premier `STORE` — le nôtre comme celui d'une autre session.
+    chemins: Vec<PathBuf>,
 }
 
 impl BoiteImap {
@@ -91,32 +101,25 @@ impl Mailbox for BoiteImap {
         let Some(rang) = self.rang(sequence) else {
             return 0;
         };
-        let Some(message) = self.vue.messages().get(rang) else {
+        let (Some(chemin), Some(message)) = (self.chemins.get(rang), self.vue.messages().get(rang))
+        else {
             return 0;
         };
-        fin_de_l_entete(&message.path).unwrap_or(message.size)
-    }
-
-    fn writable(&self) -> bool {
-        // RIEN NE S'ÉCRIT ENCORE : ni `STORE`, ni `APPEND`, ni `EXPUNGE`, et
-        // `mark_seen` ne fait rien. Annoncer `[READ-WRITE]` promettrait au
-        // client des modifications qu'il n'obtiendrait qu'en `BAD`. Ce sera
-        // vrai le jour où les écritures le seront.
-        false
+        fin_de_l_entete(chemin).unwrap_or(message.size)
     }
 
     fn read(&self, sequence: u32, offset: u64, out: &mut [u8]) -> usize {
         let Some(rang) = self.rang(sequence) else {
             return 0;
         };
-        let Some(message) = self.vue.messages().get(rang) else {
+        let Some(chemin) = self.chemins.get(rang) else {
             return 0;
         };
         // ON ROUVRE LE FICHIER À CHAQUE MORCEAU, plutôt que de garder un
         // descripteur par message : une table de descripteurs épuisée arrête le
         // serveur entier, et une ouverture coûte moins que cela. Ce qu'on ne
         // refait PAS, c'est chercher le message — l'instantané le tient.
-        let Ok(mut fichier) = std::fs::File::open(&message.path) else {
+        let Ok(mut fichier) = std::fs::File::open(chemin) else {
             return 0;
         };
         if fichier.seek(SeekFrom::Start(offset)).is_err() {
@@ -125,11 +128,65 @@ impl Mailbox for BoiteImap {
         fichier.read(out).unwrap_or(0)
     }
 
-    fn mark_seen(&mut self, _sequence: u32) {
-        // RIEN N'EST ÉCRIT ENCORE. Marquer un message comme lu veut dire le
-        // renommer dans le Maildir, et renommer sous un verrou partagé demande
-        // de décider ce qui arrive quand deux sessions le font en même temps.
-        // `STORE` n'est pas servi non plus : les deux viendront ensemble.
+    fn permanent_flags(&self) -> Flags {
+        // `\Deleted` N'EST PAS DE LA LISTE, ET C'EST VOULU. Le poser n'aurait de
+        // sens que si quelque chose l'honorait : §6.4.2 veut qu'un `CLOSE`
+        // efface les messages qui le portent, et rien n'efface encore. Un client
+        // qui marque son courrier pour la corbeille et le retrouve intact au
+        // relevé suivant a été trompé ; mieux vaut lui dire non tout de suite.
+        Flags::SEEN
+            .with(Flags::ANSWERED)
+            .with(Flags::FLAGGED)
+            .with(Flags::DRAFT)
+    }
+
+    fn store_flags(&mut self, sequence: u32, mode: StoreMode, flags: Flags) -> Option<Flags> {
+        let rang = self.rang(sequence)?;
+        // TROIS TENTATIVES, ET PAS UNE BOUCLE SANS FIN. Chaque échec vient d'un
+        // renommage concurrent ; s'il s'en produit trois de suite pendant qu'on
+        // écrit une ligne, ce n'est plus une course, c'est un autre programme qui
+        // remue la boîte, et insister ne fera que l'accompagner.
+        for _ in 0..3_u32 {
+            let chemin = self.chemins.get(rang)?.clone();
+            let nom = chemin.file_name()?.as_bytes();
+            let lu = MessageName::parse(nom).ok()?;
+            // ON PART DE CE QU'ON VIENT DE LIRE, PAS DE CE QU'ON CROYAIT SAVOIR.
+            // Les drapeaux sont relus dans le nom du fichier à l'instant où l'on
+            // écrit : deux `+FLAGS` concurrents se composent alors, au lieu que
+            // le second efface ce que le premier venait de poser. Un `FLAGS` nu,
+            // lui, écrase — mais c'est ce que le client a demandé.
+            let voulus = maildir_apres(lu.flags(), mode, flags);
+            if voulus == lu.flags() && lu.has_info() {
+                // RIEN À ÉCRIRE — ENCORE FAUT-IL QUE CE « RIEN » PORTE SUR UN
+                // FICHIER QUI EXISTE. Les drapeaux qu'on vient de lire sont
+                // ceux d'un NOM, et ce nom peut être celui que quelqu'un a
+                // renommé pendant qu'on le tenait : croire qu'il n'y a rien à
+                // faire reviendrait alors à répondre `OK` sans avoir rien écrit,
+                // ce qui est exactement le mensonge qu'un `STORE` ne doit pas
+                // faire. Constaté sur le binaire : un message renommé sous nos
+                // pieds recevait `* 2 FETCH (FLAGS (\Seen \Flagged))` et un
+                // `OK`, pendant que le fichier gardait ses anciennes lettres.
+                if chemin.symlink_metadata().is_ok() {
+                    return Some(drapeaux_imap(voulus));
+                }
+                *self.chemins.get_mut(rang)? = retrouver(self.vue.root(), lu.uid()?)?;
+                continue;
+            }
+            let cible = self.vue.root().join("cur").join(nom_avec(nom, voulus));
+            if std::fs::rename(&chemin, &cible).is_ok() {
+                *self.chemins.get_mut(rang)? = cible;
+                let nouveaux = drapeaux_imap(voulus);
+                if let Some(place) = self.drapeaux.get_mut(rang) {
+                    *place = nouveaux;
+                }
+                return Some(nouveaux);
+            }
+            // Le renommage a échoué : le message a bougé sous nos pieds. On le
+            // retrouve par son UID — le seul identifiant qui survive à un
+            // changement de drapeaux — et l'on recommence sur son nom actuel.
+            *self.chemins.get_mut(rang)? = retrouver(self.vue.root(), lu.uid()?)?;
+        }
+        None
     }
 }
 
@@ -216,24 +273,103 @@ impl Mailboxes for BoitesImap {
             .iter()
             .map(|message| (drapeaux_de(&message.path), date_de(&message.path)))
             .unzip();
+        let chemins = vue
+            .messages()
+            .iter()
+            .map(|message| message.path.clone())
+            .collect();
         Some(BoiteImap {
             vue,
             uid_validity: maildir.uid_validity().value(),
             drapeaux,
             dates,
+            chemins,
         })
     }
 }
 
-/// Les drapeaux d'un message, lus dans son nom de fichier.
-fn drapeaux_de(chemin: &std::path::Path) -> Flags {
-    let Some(nom) = chemin.file_name().and_then(|brut| brut.to_str()) else {
-        return Flags::NONE;
-    };
-    let Ok(lu) = MessageName::parse(nom.as_bytes()) else {
-        return Flags::NONE;
-    };
-    let maildir = lu.flags();
+/// Ce que deviennent les lettres Maildir d'un message après un `STORE`.
+///
+/// # `P` N'EST PAS DANS LE VOCABULAIRE D'IMAP, DONC IMAP NE PEUT PAS LE RETIRER
+///
+/// Maildir a six lettres, IMAP cinq drapeaux, et `P` (*passed*, transmis) n'a
+/// pas d'équivalent. Un `FLAGS (\Seen)` demande « exactement `\Seen` » — mais
+/// exactement dans le vocabulaire du client, qui ne sait pas dire `P`. Le lui
+/// faire effacer serait lui prêter une intention qu'il ne pouvait pas former.
+fn maildir_apres(actuels: ams_index::Flags, mode: StoreMode, demandes: Flags) -> ams_index::Flags {
+    let demandes = drapeaux_maildir(demandes);
+    match mode {
+        StoreMode::Add => actuels.with(demandes),
+        StoreMode::Remove => actuels.without(demandes),
+        // Ce qu'IMAP ne sait pas nommer, il ne le remplace pas.
+        StoreMode::Replace => {
+            let hors_du_vocabulaire = actuels.contains(ams_index::Flags::PASSED);
+            if hors_du_vocabulaire {
+                demandes.with(ams_index::Flags::PASSED)
+            } else {
+                demandes
+            }
+        }
+    }
+}
+
+/// Le nom d'un message, avec d'autres lettres.
+///
+/// **On recopie tout ce qui précède le `:`**, champs étrangers compris : un
+/// autre outil a pu y poser le sien, et le recomposer à partir de ce qu'on en
+/// comprend lui ferait perdre ce qu'il y avait mis.
+fn nom_avec(nom: &[u8], drapeaux: ams_index::Flags) -> std::ffi::OsString {
+    let unique = nom.split(|octet| *octet == b':').next().unwrap_or_default();
+    let mut lettres = [0_u8; ams_index::Flags::MAX_OCTETS];
+    let ecrites = drapeaux.write_into(&mut lettres);
+    let mut compose = Vec::with_capacity(unique.len().saturating_add(3).saturating_add(ecrites));
+    compose.extend_from_slice(unique);
+    compose.extend_from_slice(b":2,");
+    compose.extend_from_slice(lettres.get(..ecrites).unwrap_or_default());
+    std::ffi::OsString::from_vec(compose)
+}
+
+/// Retrouve un message par son UID, quand son nom a changé sous nos pieds.
+fn retrouver(racine: &std::path::Path, uid: Uid) -> Option<PathBuf> {
+    for sous in ["cur", "new"] {
+        let Ok(entrees) = std::fs::read_dir(racine.join(sous)) else {
+            continue;
+        };
+        for entree in entrees.flatten() {
+            let nom = entree.file_name();
+            let Ok(lu) = MessageName::parse(nom.as_bytes()) else {
+                continue;
+            };
+            if lu.uid() == Some(uid) {
+                return Some(entree.path());
+            }
+        }
+    }
+    None
+}
+
+/// Les lettres Maildir d'un jeu de drapeaux IMAP.
+fn drapeaux_maildir(drapeaux: Flags) -> ams_index::Flags {
+    let mut maildir = ams_index::Flags::NONE;
+    for (present, lettre) in [
+        (drapeaux.contains(Flags::SEEN), ams_index::Flags::SEEN),
+        (
+            drapeaux.contains(Flags::ANSWERED),
+            ams_index::Flags::REPLIED,
+        ),
+        (drapeaux.contains(Flags::FLAGGED), ams_index::Flags::FLAGGED),
+        (drapeaux.contains(Flags::DELETED), ams_index::Flags::TRASHED),
+        (drapeaux.contains(Flags::DRAFT), ams_index::Flags::DRAFT),
+    ] {
+        if present {
+            maildir = maildir.with(lettre);
+        }
+    }
+    maildir
+}
+
+/// Les drapeaux IMAP d'un jeu de lettres Maildir.
+fn drapeaux_imap(maildir: ams_index::Flags) -> Flags {
     let mut drapeaux = Flags::NONE;
     // LES LETTRES DE MAILDIR NE SONT PAS LES DRAPEAUX D'IMAP, et la
     // correspondance n'est pas totale : `P` (transmis) n'a pas d'équivalent, et
@@ -250,6 +386,17 @@ fn drapeaux_de(chemin: &std::path::Path) -> Flags {
         }
     }
     drapeaux
+}
+
+/// Les drapeaux d'un message, lus dans son nom de fichier.
+fn drapeaux_de(chemin: &std::path::Path) -> Flags {
+    let Some(nom) = chemin.file_name().and_then(|brut| brut.to_str()) else {
+        return Flags::NONE;
+    };
+    let Ok(lu) = MessageName::parse(nom.as_bytes()) else {
+        return Flags::NONE;
+    };
+    drapeaux_imap(lu.flags())
 }
 
 /// La date d'arrivée d'un message : celle du fichier.

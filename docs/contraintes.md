@@ -875,6 +875,83 @@ décider ce qui arrive quand deux sessions marquent le même message.
 octets sont ceux du fichier, `BODY.PEEK[HEADER]`, `UID FETCH 2 BODY.PEEK[TEXT]
 <4.6>`, `CLOSE`, et un `FETCH` refusé une fois la boîte refermée.
 
+## `STORE` : écrire dans un Maildir, depuis le 2026-08-29
+
+Dans un Maildir, LES DRAPEAUX VIVENT DANS LE NOM DU FICHIER : les écrire, c'est
+renommer. Trois questions qu'aucun protocole ne tranche, et qui se tranchent ici.
+
+ON N'ÉCRIT PAS CE QU'ON CROIT SAVOIR, ON ÉCRIT CE QU'ON VIENT DE LIRE. Les
+drapeaux sont relus dans le nom du fichier à l'instant du renommage, et non dans
+l'instantané pris à l'ouverture. Deux `+FLAGS` concurrents se composent alors, au
+lieu que le second efface ce que le premier venait de poser. Un `FLAGS` nu écrase
+— mais c'est ce que le client a demandé : `+`/`-` fusionnent, `FLAGS` remplace.
+
+LE NOM QU'ON LIT DOIT ÊTRE CELUI QUI EXISTE. Quand le renommage échoue, le
+message a bougé : on le retrouve par son UID — le seul identifiant qui survive à
+un changement de drapeaux — et l'on recommence, trois fois au plus. Trois échecs
+de suite ne sont plus une course, c'est un autre programme qui remue la boîte, et
+insister ne ferait que l'accompagner.
+
+**Le piège n'était pas là où on l'attendait.** C'est le raccourci « rien à
+écrire » qui mordait : il concluait à partir d'un nom disparu, et répondait `OK`
+sans avoir rien écrit. Un `STORE` qui ment sur ce qu'il a fait est pire qu'un
+`STORE` qui échoue. Le raccourci vérifie maintenant que le fichier est là, et le
+défaut a été trouvé en renommant un message sous les pieds du binaire — aucun
+test unitaire ne l'aurait vu, faute de système de fichiers.
+
+`P` N'EST PAS DANS LE VOCABULAIRE D'IMAP, DONC IMAP NE PEUT PAS LE RETIRER.
+Maildir a six lettres, IMAP cinq drapeaux, et `P` (*passed*) n'a pas
+d'équivalent. Un `FLAGS (\Seen)` demande « exactement `\Seen` » dans le
+vocabulaire du client, qui ne sait pas dire `P` : le lui faire effacer serait lui
+prêter une intention qu'il ne pouvait pas former.
+
+`\Deleted` EST REFUSÉ, ET C'EST UNE PROMESSE TENUE. Le poser n'aurait de sens que
+si quelque chose l'honorait : §6.4.2 veut qu'un `CLOSE` efface les messages qui
+le portent, et rien n'efface encore. Un client qui marque son courrier pour la
+corbeille et le retrouve intact au relevé suivant a été trompé. `PERMANENTFLAGS`
+ne le cite donc pas, et un `STORE` qui l'apporte reçoit `NO [CANNOT]` — comme un
+drapeau inconnu, et pour la même raison : un client à qui l'on répond `OK` croit
+son étiquette posée, et ne la reverra jamais.
+
+UNE SEULE VÉRITÉ SUR CE QUI S'ÉCRIT. La boîte énumère les drapeaux qu'elle sait
+faire survivre ; `PERMANENTFLAGS` les cite, `SELECT` répond `[READ-ONLY]` quand
+il n'y en a aucun, et `STORE` refuse ce qui n'y figure pas. Une seconde méthode
+« est-elle modifiable ? » aurait fini par ne plus dire la même chose.
+
+CE QUI SE PERD, ET CE QUI NE SE PERD PAS. Deux sessions qui marquent le même
+message ne s'effacent pas l'une l'autre — vérifié sur le binaire, deux connexions
+IMAP simultanées, `+FLAGS (\Seen)` d'un côté et `+FLAGS (\Flagged)` de l'autre :
+le fichier porte les deux lettres. En revanche une session ne VOIT pas ce qu'une
+autre vient de poser : son instantané fixe les rangs et les noms pour toute la
+sélection, et le relire à chaque `FETCH` coûterait un parcours de répertoire par
+commande. Elle le verra à la prochaine sélection. C'est une limite, elle est dite,
+et elle ne fait perdre aucune marque — seulement du retard à en rendre compte.
+
+`STORE` emprunte la machine d'émission de `FETCH` : §6.4.6 veut qu'un `STORE` non
+silencieux rende une réponse `FETCH` par message modifié — mêmes réponses, même
+ordre, même ensemble. Les écrire deux fois aurait fait deux codes qui divergent.
+Et l'implicite `\Seen` d'un `BODY[…]` sans `PEEK` (§6.4.5) est devenu un `STORE`
+comme un autre, ce qui a retiré une méthode au lieu d'en ajouter une.
+
+Éprouvé jusqu'au binaire, contre un vrai Maildir : les trois verbes, `.SILENT`,
+`UID STORE`, le refus de `\Deleted`, la survie des drapeaux d'une session à
+l'autre, la lecture du corps après renommage, un message renommé sous nos pieds
+(deux fois, avec et sans changement à écrire), et un message effacé pendant la
+commande — qui ne la fait pas échouer.
+
+## Le gate de couverture arrondissait vers le haut, depuis le 2026-08-29
+
+`check-couverture` comparait un POURCENTAGE ARRONDI à son seuil. Sur deux
+décimales, 23 580 régions couvertes sur 23 581 s'écrivent « 100,00 % » : le gate
+a dit OK alors qu'il manquait une région, et c'est en écrivant `STORE` que
+l'écart s'est vu. Il compare maintenant des COMPTES, et le rapport arrondit vers
+le bas — un rapport qui affiche la perfection alors qu'il manque une région ment
+poliment, et c'est ce chiffre-là qu'on lit avant de conclure.
+
+La région manquante était une garde inatteignable de plus : `(Some(b'('),
+Some(b')')) if liste.len() >= 2`, alors qu'un octet ne peut pas être à la fois
+`(` et `)`.
+
 ## Le client SMTP sortant, depuis le 2026-08-29
 
 Jusqu'ici, tout venait à ce serveur : des pairs frappaient, il répondait. Émettre
@@ -1444,27 +1521,34 @@ et une couture inutilisée finit par être utilisée.
 
 ## L'état réel, sans complaisance
 
-Deux crates portent du code : **`ams-mime`** (le squelette d'un message) et
-**`ams-proto-smtp`** (les commandes **et les réponses**). Aucun protocole n'est pour autant servi : il
-manque l'encodage des réponses, la machine à états de session, et tout le reste.
+**Trois protocoles sont servis, par un vrai binaire, contre de vrais fichiers** :
+SMTP en réception (avec `STARTTLS`, `AUTH PLAIN`, SPF, DKIM, DMARC et remise
+Maildir), SMTP à l'émission (rapports DMARC), POP3, et IMAP — `SELECT`,
+`EXAMINE`, `CLOSE`, `UNSELECT`, `LIST`, `STATUS`, `FETCH`, `STORE` et leurs
+formes `UID`. Chacun a été éprouvé de bout en bout contre le binaire, et pas
+seulement en tests.
 
-Sont outillées : C2 (le gate mesure 6 400 régions, toutes couvertes), C8
-(`ams-guard`, câblé), C10 (`refuse_root`, appelé avant tout le reste), C11 (`ams-config`, et le serveur
-ne se règle QUE par un fichier), C12 (les deux binaires), C13 en grande partie
-(`ams-index` et `ams-store`, hors persistance de l'index), C3 (les
-lints, l'absence d'allocation dans les décodeurs, et le fuzz), C6 **en partie et
-pour de bon** — les deux décodeurs refusent le CR et le LF isolés, et
-`ams-proto-smtp` refuse en outre les routes sources, les verbes retirés par la
-RFC 5321, et tout octet non imprimable dans une réponse ; et **`ams-session`
-refuse `AUTH` hors chiffrement** — sans réglage pour le rétablir, et sans même
-l'annoncer avant TLS.
+**HTTP n'est pas servi** : `ams-proto-http` est un emplacement réservé, et son
+en-tête le dit.
+
+Sont outillées : C1 (les trois étages, et la couverture qui n'est exigible que
+parce qu'ils sont séparés), C2 (le gate mesure 23 578 régions sur 16 crates,
+toutes couvertes — et il compare désormais des comptes, non un pourcentage
+arrondi), C3 (les lints, l'absence d'allocation dans les décodeurs, et 26 cibles
+de fuzz dont la CI vérifie qu'elle les lance toutes), C4 (`ams-tls` n'offre que
+TLS 1.3), C6 (les décodeurs refusent le CR et le LF isolés ; `AUTH`, `USER`/`PASS`
+et `LOGIN` sont refusés hors chiffrement, sans réglage pour le rétablir), C8
+(`ams-guard`, câblé sur les trois services), C9 (DKIM vérifié, SPF et DMARC
+évalués, rapports agrégés et d'échec composés et émis), C10 (`refuse_root`,
+appelé avant tout le reste), C11 (le serveur ne se règle QUE par un fichier
+Cap'n Proto), C12 (les deux binaires aux noms distincts), C13 (Maildir, index
+persistant, et lecture sans verrou côté IMAP), C14 (`X25519MLKEM768` en tête).
 
 **La contrebande SMTP est fermée** : la phase de données n'accepte que
 `<CRLF>.<CRLF>`, refuse tout `CR` ou `LF` isolé, et le fuzz éprouve que le
 découpage des lectures ne change rien au verdict.
 
-C6 reste néanmoins **partielle** : rien n'exige encore TLS 1.3, C4 n'ayant pas de
-code.
-
-Tout le reste — TLS, post-quantique, DKIM, SPF, DMARC, flooding, configuration
-binaire, stockage, non-root — est une décision écrite, pas un code vérifié.
+Ce qui manque, et qu'aucune phrase ne doit laisser croire acquis : `SEARCH`,
+`COPY`, `MOVE`, `APPEND`, `EXPUNGE` et la gestion des dossiers en IMAP ; le
+signeur DKIM, qui existe et n'a pas d'appelant ; la file de réémission des
+messages sortants ; et toute interface HTTP.

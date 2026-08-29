@@ -2,10 +2,11 @@
 
 Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 
-> ## État : squelette
+> ## État : trois protocoles servis, HTTP non
 >
-> Ce dépôt compile, il est linté, et il porte quatre gates de CI. Il **ne sert
-> aucun protocole**.
+> Ce dépôt compile, il est linté, et il porte quatre gates de CI. Il sert
+> **SMTP**, **POP3** et **IMAP** ; `ams-proto-http` reste un emplacement réservé,
+> et son en-tête le dit.
 >
 > **`air-mail-server` tourne.** Il écoute sur un port, reçoit du courrier en
 > clair pour les domaines qu'on lui nomme, le dépose dans une boîte Maildir, et
@@ -28,8 +29,14 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 > acceptées, et chacune mène à `<maildir>/<compte>/`. Sans comptes, le serveur
 > n'accepte de courrier pour personne — ce n'est plus un fourre-tout.
 >
-> Onze crates portent du code ; les autres sont des emplacements réservés qui le
-> disent dans leur documentation.
+> **Il ouvre les boîtes** : IMAP sur un troisième port, `STARTTLS` puis `LOGIN`
+> ou `AUTHENTICATE PLAIN`, `SELECT`, `LIST`, `STATUS`, `FETCH` et `STORE` sur
+> `INBOX` — un message traverse la socket sans jamais tenir en mémoire, et les
+> drapeaux s'écrivent dans les noms de fichiers Maildir. `\Deleted` est refusé
+> tant que rien n'efface.
+>
+> Dix-neuf crates sur vingt portent du code ; `ams-proto-http` est le seul
+> emplacement réservé, et il le dit dans sa documentation.
 >
 > Ce que ce dépôt affirme, il le tient. Rien de plus n'est promis ici.
 
@@ -68,7 +75,7 @@ horloge.
 | `ams-sasl` | RFC 4422/4616 : `PLAIN` et son base64 | **implémenté** |
 | `ams-proto-pop3` | RFC 1939 | **commandes et réponses** |
 | `ams-dns` | RFC 1035 : le codec d'un message | **question encodée, réponse décodée** |
-| `ams-proto-imap` | RFC 9051 (IMAP4rev2) | **découpage, tag, littéraux, arguments, ensembles de séquences, éléments de `FETCH`, réponses** |
+| `ams-proto-imap` | RFC 9051 (IMAP4rev2) | **découpage, tag, littéraux, arguments, ensembles de séquences, éléments de `FETCH`, drapeaux de `STORE`, réponses** |
 | `ams-proto-http` | RFC 9110 / 9112 | vide |
 
 ### Étage 2 — décisions, sans entrée-sortie
@@ -462,8 +469,8 @@ découpage existe pour fermer. Un tag illisible, lui, ne ferme rien : la command
 
 ## Les boîtes IMAP : lire sans jamais tenir un message
 
-`SELECT`, `EXAMINE`, `CLOSE`, `UNSELECT`, `LIST`, `STATUS`, `FETCH` et `UID
-FETCH` servent la boîte du compte. Ce serveur en a **une par compte, et elle
+`SELECT`, `EXAMINE`, `CLOSE`, `UNSELECT`, `LIST`, `STATUS`, `FETCH`, `STORE` et
+leurs formes `UID` servent la boîte du compte. Ce serveur en a **une par compte, et elle
 s'appelle `INBOX`** — le nom que la RFC 9051 §5.1 réserve pour cela. Créer des
 dossiers demanderait `CREATE`, un endroit où les mettre et une règle pour ce
 qu'un nom a le droit d'être ; rien de tout cela n'est écrit, et prétendre en
@@ -506,19 +513,67 @@ répondait qu'elle n'existe pas. Elle relève donc sans verrouiller, ce pour quo
 Maildir est fait. Ce qu'on accepte en échange est un message effacé en cours de
 session, cas qu'il fallait tenir de toute façon.
 
-**`[READ-WRITE]` est une promesse, et c'est le magasin qui la tient.** Tant que
-rien ne s'écrit — ni `STORE`, ni `APPEND`, ni `EXPUNGE` — `SELECT` répond
-`[READ-ONLY]`, avec `PERMANENTFLAGS ()` pour dire que rien ne survivra à la
-session. Annoncer autre chose ne se découvrirait qu'en essayant.
+**UNE SEULE VÉRITÉ SUR CE QUI S'ÉCRIT.** La boîte énumère les drapeaux qu'elle
+sait faire survivre, et trois réponses en découlent : `PERMANENTFLAGS` les cite,
+`SELECT` répond `[READ-ONLY]` quand il n'y en a aucun, et `STORE` refuse ce qui
+n'y figure pas. Une seconde méthode « est-elle modifiable ? » aurait fini par ne
+plus dire la même chose que la première.
 
-Ce qui n'y est toujours pas : `STORE`, `SEARCH`, `COPY`, `MOVE`, `APPEND`,
+## `STORE` : écrire dans un Maildir que personne ne verrouille
+
+Dans un Maildir, **les drapeaux vivent dans le nom du fichier** : les écrire,
+c'est renommer. Ce qui donne trois questions qu'aucun protocole ne tranche, et
+que ce serveur tranche ainsi.
+
+**ON N'ÉCRIT PAS CE QU'ON CROIT SAVOIR, ON ÉCRIT CE QU'ON VIENT DE LIRE.** Les
+drapeaux sont relus dans le nom du fichier à l'instant du renommage, pas dans
+l'instantané pris à l'ouverture. Deux `+FLAGS` concurrents se composent donc, au
+lieu que le second efface ce que le premier venait de poser. Un `FLAGS` nu, lui,
+écrase — mais c'est exactement ce que le client a demandé : `+`/`-` fusionnent,
+`FLAGS` remplace, et la distinction n'est pas cosmétique.
+
+**LE NOM QU'ON LIT DOIT ÊTRE CELUI QUI EXISTE.** Quand le renommage échoue, le
+message a bougé sous nos pieds : on le retrouve par son UID — le seul
+identifiant qui survive à un changement de drapeaux — et l'on recommence, trois
+fois au plus. Le piège n'est pas là où on l'attend : c'est le raccourci « rien à
+écrire » qui mordait, parce qu'il concluait à partir d'un nom disparu et
+répondait `OK` sans avoir rien écrit. Il vérifie maintenant que le fichier est
+là.
+
+**`P` N'EST PAS DANS LE VOCABULAIRE D'IMAP, DONC IMAP NE PEUT PAS LE RETIRER.**
+Maildir a six lettres, IMAP cinq drapeaux, et `P` (*passed*) n'a pas
+d'équivalent. Un `FLAGS (\Seen)` demande « exactement `\Seen` » — exactement dans
+le vocabulaire du client, qui ne sait pas dire `P`. Le lui faire effacer serait
+lui prêter une intention qu'il ne pouvait pas former.
+
+**`\Deleted` est refusé, et c'est une promesse tenue plutôt qu'une fonction
+manquante.** Le poser n'aurait de sens que si quelque chose l'honorait : §6.4.2
+veut qu'un `CLOSE` efface les messages qui le portent, et rien n'efface encore.
+Un client qui marque son courrier pour la corbeille et le retrouve intact au
+relevé suivant a été trompé. `PERMANENTFLAGS` ne le cite donc pas, et un `STORE`
+qui l'apporte reçoit `NO [CANNOT]`. Un drapeau inconnu — `$Important`, un
+mot-clé de client — est refusé pour la même raison.
+
+**Ce qui se perd, et ce qui ne se perd pas.** Deux sessions qui marquent le même
+message ne s'effacent pas l'une l'autre : les écritures relisent le nom du
+fichier au moment d'écrire, et les deux lettres se retrouvent sur le disque. En
+revanche, **une session ne VOIT pas ce qu'une autre vient de poser** : son
+instantané fixe les rangs et les noms pour toute la sélection, et le relire à
+chaque `FETCH` coûterait un parcours de répertoire par commande. Elle le verra à
+la prochaine sélection. C'est une limite, elle est dite, et elle ne fait perdre
+aucune marque — seulement du retard à en rendre compte.
+
+**`.SILENT` ne rend rien et fait le travail quand même**, et un message annoncé
+puis disparu ne fait pas échouer la commande (§6.4.6) : le client l'apprend en
+ne recevant rien pour lui.
+
+Ce qui n'y est toujours pas : `SEARCH`, `COPY`, `MOVE`, `APPEND`, `EXPUNGE`,
 `CREATE`/`DELETE`/`RENAME`, `ENVELOPE` et `BODYSTRUCTURE`. Ils sont reconnus, leur
 état est vérifié, et la session répond `NO [UNAVAILABLE]` — `NO` et non `BAD`,
 parce que la commande est correcte et permise et que c'est ce serveur qui ne la
-sert pas. Écrire demandera de décider ce qui arrive quand deux sessions marquent
-le même message ; `APPEND` demandera en plus un chemin qui écoule au fil de
-l'eau, comme le `DATA` de SMTP. Le serveur dit au démarrage ce qu'il sert et ce
-qu'il ne sert pas, plutôt que de laisser un port ouvert le faire croire.
+sert pas. `APPEND` demandera un chemin qui écoule au fil de l'eau, comme le
+`DATA` de SMTP. Le serveur dit au démarrage ce qu'il sert et ce qu'il ne sert
+pas, plutôt que de laisser un port ouvert le faire croire.
 
 ## Émettre : le client SMTP sortant
 

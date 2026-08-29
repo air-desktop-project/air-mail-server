@@ -35,6 +35,7 @@ mod frame;
 mod limits;
 mod response;
 mod sequence;
+mod store;
 mod tag;
 
 pub use arguments::{Args, Argument, argument_max};
@@ -48,4 +49,5 @@ pub use response::{
     Status, encode_continuation, encode_tagged, encode_untagged, encode_untagged_parts,
 };
 pub use sequence::{Ranges, SequenceSet};
+pub use store::{Store, StoreMode};
 pub use tag::Tag;

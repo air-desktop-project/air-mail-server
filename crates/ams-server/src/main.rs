@@ -646,11 +646,12 @@ async fn servir(fichier: &Path) -> Result<(), String> {
             .await
             .map_err(|erreur| format!("écoute IMAP sur {adresse} : {erreur}"))?;
         // ON DIT CE QU'ON NE SERT PAS. Un port IMAP ouvert laisse croire à un
-        // service complet ; celui-ci lit le courrier et ne le modifie pas.
+        // service complet ; celui-ci lit le courrier et n'en marque que les
+        // drapeaux.
         eprintln!(
-            "air-mail-server : IMAP écoute sur {adresse} — SEULE `INBOX` EST SERVIE, EN \
-             LECTURE : `SELECT`, `LIST`, `STATUS` et `FETCH` répondent ; `STORE`, `SEARCH`, \
-             `APPEND`, `COPY` et `MOVE` non."
+            "air-mail-server : IMAP écoute sur {adresse} — SEULE `INBOX` EST SERVIE : \
+             `SELECT`, `LIST`, `STATUS`, `FETCH` et `STORE` répondent ; `SEARCH`, `APPEND`, \
+             `EXPUNGE`, `COPY` et `MOVE` non. `\\Deleted` est REFUSÉ tant que rien n'efface."
         );
         Some(tokio::spawn(serve_imap(
             ecouteur,

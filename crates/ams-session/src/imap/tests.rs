@@ -1,6 +1,6 @@
 //! Ce qu'une session IMAP dit, et ce qu'elle refuse.
 
-use ams_proto_imap::{Flags, Limits};
+use ams_proto_imap::{Flags, Limits, StoreMode};
 use ams_sasl::Credentials;
 
 use super::{Action, Mailbox, Mailboxes, MessageInfo, Session, State, TAG_MAX_OCTETS};
@@ -30,6 +30,14 @@ pub struct Boite {
     messages: std::vec::Vec<Option<MessageInfo>>,
     /// Se laisse-t-elle modifier ? `Archives` ne le fait pas.
     modifiable: bool,
+    /// Le rang d'un message qui S'EFFACE ENTRE L'INSTANTANÉ ET L'ÉCRITURE.
+    ///
+    /// Ce n'est pas la même disparition qu'un `None` dans `messages` : celui-là
+    /// n'est jamais choisi, puisqu'il n'a pas d'`info`. Celui-ci est choisi, et
+    /// s'évanouit quand on écrit — ce qu'une boîte lue sans verrou ne peut pas
+    /// exclure, et ce dont §6.4.6 dit qu'il ne faut pas faire une erreur.
+    /// `0` : aucun.
+    evanescent: u32,
 }
 
 impl Mailbox for Boite {
@@ -55,8 +63,16 @@ impl Mailbox for Boite {
         self.info(sequence)
             .map_or(0, |info| info.size.saturating_mul(2) / 5)
     }
-    fn writable(&self) -> bool {
-        self.modifiable
+    fn permanent_flags(&self) -> Flags {
+        if self.modifiable {
+            Flags::SEEN
+                .with(Flags::ANSWERED)
+                .with(Flags::FLAGGED)
+                .with(Flags::DELETED)
+                .with(Flags::DRAFT)
+        } else {
+            Flags::NONE
+        }
     }
     fn read(&self, sequence: u32, offset: u64, out: &mut [u8]) -> usize {
         // Le message d'épreuve est fait de son rang, répété.
@@ -69,11 +85,18 @@ impl Mailbox for Boite {
         place.fill(b'0'.saturating_add(u8::try_from(sequence % 10).unwrap_or(0)));
         place.len()
     }
-    fn mark_seen(&mut self, sequence: u32) {
-        let rang = usize::try_from(sequence.saturating_sub(1)).unwrap_or(usize::MAX);
-        for message in self.messages.iter_mut().skip(rang).take(1).flatten() {
-            message.flags = message.flags.with(Flags::SEEN);
+    fn store_flags(&mut self, sequence: u32, mode: StoreMode, flags: Flags) -> Option<Flags> {
+        if !self.modifiable || sequence == self.evanescent {
+            return None;
         }
+        let rang = usize::try_from(sequence.checked_sub(1)?).unwrap_or(usize::MAX);
+        let message = self.messages.get_mut(rang)?.as_mut()?;
+        message.flags = match mode {
+            StoreMode::Replace => flags,
+            StoreMode::Add => message.flags.with(flags),
+            StoreMode::Remove => message.flags.without(flags),
+        };
+        Some(message.flags)
     }
 }
 
@@ -122,6 +145,8 @@ impl Mailboxes for Boites {
         Some(Boite {
             messages,
             modifiable: !name.starts_with(b"Archives"),
+            // Dans la boîte trouée, le troisième s'efface quand on écrit.
+            evanescent: if name == b"Trouee" { 3 } else { 0 },
         })
     }
 }
@@ -531,7 +556,6 @@ fn ce_qu_on_ne_sert_pas_encore_le_dit_sans_accuser_le_client() {
     for commande in [
         &b"a012 EXPUNGE\r\n"[..],
         b"a013 SEARCH ALL\r\n",
-        b"a014 STORE 1 +FLAGS (\\Seen)\r\n",
         b"a015 COPY 1 Archives\r\n",
         b"a016 MOVE 1 Archives\r\n",
     ] {
@@ -1334,13 +1358,16 @@ fn uid_fetch_designe_par_uid_et_rend_le_rang() {
 }
 
 #[test]
-fn un_uid_autre_que_fetch_se_refuse_en_le_disant() {
+fn un_uid_autre_que_fetch_ou_store_se_refuse_en_le_disant() {
     let mut session = selectionnee();
-    let (texte, _) = dire(&mut session, b"a003 UID STORE 1 +FLAGS (\\Seen)\r\n");
+    let (texte, _) = dire(&mut session, b"a003 UID COPY 1 Archives\r\n");
     assert!(
-        texte.contains("NO [CANNOT] Only UID FETCH is served yet"),
+        texte.contains("NO [CANNOT] Only UID FETCH and UID STORE are served yet"),
         "{texte}"
     );
+    // Et `UID` sans rien derrière ne trouve pas de verbe.
+    let (nu, _) = dire(&mut session, b"a004 UID\r\n");
+    assert!(nu.contains("NO [CANNOT]"), "{nu}");
 }
 
 /// **Un seul corps par commande** : en rendre deux demanderait d'entrelacer
@@ -1496,4 +1523,160 @@ fn un_argument_de_list_demesure_est_refuse() {
     commande.extend_from_slice(b"\r\n");
     let (texte, _) = dire(&mut session, &commande);
     assert!(texte.contains("BAD LIST arguments are too long"), "{texte}");
+}
+
+// ── `STORE` ─────────────────────────────────────────────────────────────────
+
+/// **Les trois verbes ne font pas la même chose**, et c'est tout l'intérêt.
+#[test]
+fn les_trois_verbes_de_store_ecrivent_ce_qu_ils_disent() {
+    let mut session = selectionnee();
+    // Le message 2 porte déjà `\Seen`.
+    let ajout = ecouler(&mut session, b"a003 STORE 2 +FLAGS (\\Flagged)\r\n");
+    assert_eq!(
+        ajout,
+        "* 2 FETCH (FLAGS (\\Seen \\Flagged))\r\na003 OK STORE completed\r\n"
+    );
+    let retrait = ecouler(&mut session, b"a004 STORE 2 -FLAGS (\\Seen)\r\n");
+    assert_eq!(
+        retrait,
+        "* 2 FETCH (FLAGS (\\Flagged))\r\na004 OK STORE completed\r\n"
+    );
+    let remplacement = ecouler(&mut session, b"a005 STORE 2 FLAGS (\\Draft)\r\n");
+    assert_eq!(
+        remplacement,
+        "* 2 FETCH (FLAGS (\\Draft))\r\na005 OK STORE completed\r\n"
+    );
+    // Et `FLAGS ()` efface tout.
+    let efface = ecouler(&mut session, b"a006 STORE 2 FLAGS ()\r\n");
+    assert_eq!(
+        efface,
+        "* 2 FETCH (FLAGS ())\r\na006 OK STORE completed\r\n"
+    );
+}
+
+/// **`.SILENT` ne rend rien, et fait le travail quand même.**
+#[test]
+fn silent_ecrit_sans_rien_rendre() {
+    let mut session = selectionnee();
+    let silencieux = ecouler(&mut session, b"a003 STORE 1:3 +FLAGS.SILENT (\\Draft)\r\n");
+    assert_eq!(silencieux, "a003 OK STORE completed\r\n");
+    // Le travail est fait : un `FETCH` le montre.
+    let apres = ecouler(&mut session, b"a004 FETCH 1 FLAGS\r\n");
+    assert_eq!(
+        apres,
+        "* 1 FETCH (FLAGS (\\Draft))\r\na004 OK FETCH completed\r\n"
+    );
+}
+
+/// **`UID STORE` désigne par UID, et rend le rang.**
+#[test]
+fn uid_store_designe_par_uid() {
+    let mut session = selectionnee();
+    let fil = ecouler(&mut session, b"a003 UID STORE 30 +FLAGS (\\Flagged)\r\n");
+    assert_eq!(
+        fil,
+        "* 3 FETCH (FLAGS (\\Answered \\Flagged))\r\na003 OK UID STORE completed\r\n"
+    );
+}
+
+/// **Un message annoncé et disparu ne fait pas échouer la commande** (§6.4.6) :
+/// le client l'apprend en ne recevant rien pour lui.
+#[test]
+fn un_message_disparu_ne_fait_pas_echouer_le_store() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut session, b"a002 SELECT Trouee\r\n");
+    // Le deuxième n'a pas d'`info` : il n'est même pas choisi. Le troisième en
+    // a une, et s'efface quand on écrit — deux disparitions différentes, et
+    // aucune des deux ne fait échouer la commande.
+    let fil = ecouler(&mut session, b"a003 STORE 1:3 +FLAGS (\\Seen)\r\n");
+    assert_eq!(
+        fil,
+        "* 1 FETCH (FLAGS (\\Seen))\r\na003 OK STORE completed\r\n"
+    );
+}
+
+/// **On ne promet que ce qui survit.** Un drapeau hors de `PERMANENTFLAGS`
+/// serait écrit puis perdu, et le client ne l'apprendrait jamais.
+#[test]
+fn store_dans_une_boite_en_lecture_seule_se_refuse() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut session, b"a002 SELECT Archives\r\n");
+    let (texte, action) = dire(&mut session, b"a003 STORE 1 +FLAGS (\\Seen)\r\n");
+    assert!(
+        texte.contains("NO [CANNOT] This flag does not persist in this mailbox"),
+        "{texte}"
+    );
+    assert_eq!(action, Action::Continue);
+}
+
+/// **Un drapeau inconnu est un REFUS, pas un silence.**
+#[test]
+fn un_drapeau_inconnu_se_refuse_en_le_disant() {
+    let mut session = selectionnee();
+    let (texte, _) = dire(&mut session, b"a003 STORE 1 +FLAGS ($Important)\r\n");
+    assert!(
+        texte.contains("NO [CANNOT] This flag cannot be stored"),
+        "{texte}"
+    );
+}
+
+#[test]
+fn un_store_mal_forme_est_une_faute() {
+    let mut session = selectionnee();
+    for commande in [
+        &b"a003 STORE\r\n"[..],
+        b"a004 STORE 1\r\n",
+        b"a005 STORE 1 MARKS (\\Seen)\r\n",
+        b"a006 STORE x +FLAGS (\\Seen)\r\n",
+    ] {
+        let (texte, _) = dire(&mut session, commande);
+        assert!(
+            texte.contains("BAD STORE arguments are malformed"),
+            "{commande:?} : {texte}"
+        );
+    }
+}
+
+/// **Un ensemble trop long est refusé plutôt que tronqué.**
+#[test]
+fn un_ensemble_de_store_trop_long_se_refuse() {
+    let mut session = selectionnee();
+    let mut commande = std::vec::Vec::from(&b"a003 STORE "[..]);
+    for _ in 0..(super::SEQUENCE_TEXT_MAX / 2) {
+        commande.extend_from_slice(b"1,");
+    }
+    commande.extend_from_slice(b"1 +FLAGS (\\Seen)\r\n");
+    let (texte, _) = dire(&mut session, &commande);
+    assert!(
+        texte.contains("NO [CANNOT] Sequence set is too long"),
+        "{texte}"
+    );
+}
+
+/// **Un `STORE` hors sélection est hors d'état, pas hors de service.**
+#[test]
+fn un_store_sans_boite_ouverte_est_hors_d_etat() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (texte, _) = dire(&mut session, b"a002 STORE 1 +FLAGS (\\Seen)\r\n");
+    assert!(
+        texte.contains("BAD Command is not allowed unless a mailbox is selected"),
+        "{texte}"
+    );
+}
+
+/// **§6.4.5 : un corps rendu SANS `PEEK` marque le message comme lu**, et les
+/// `FLAGS` de la même réponse le disent.
+#[test]
+fn un_corps_sans_peek_marque_le_message_et_le_dit() {
+    let mut session = selectionnee();
+    let fil = ecouler(&mut session, b"a003 FETCH 1 (FLAGS BODY[])\r\n");
+    assert_eq!(
+        fil,
+        "* 1 FETCH (FLAGS (\\Seen) BODY[] {100}\r\n<1:0+100>)\r\n\
+         a003 OK FETCH completed\r\n"
+    );
 }

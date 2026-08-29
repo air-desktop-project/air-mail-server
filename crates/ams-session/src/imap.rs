@@ -35,8 +35,8 @@
 //!
 //! # LES BOÎTES SONT SERVIES, ET LE MAGASIN RESTE AILLEURS
 //!
-//! `SELECT`, `EXAMINE`, `CLOSE`, `UNSELECT`, `LIST`, `STATUS` et `FETCH` sont
-//! servis. La session ne sait pas où vivent les messages : elle demande, par
+//! `SELECT`, `EXAMINE`, `CLOSE`, `UNSELECT`, `LIST`, `STATUS`, `FETCH` et
+//! `STORE` sont servis. La session ne sait pas où vivent les messages : elle demande, par
 //! [`Mailboxes`] et [`Mailbox`], ce qu'elle ne peut pas savoir — combien il y
 //! en a, ce que chacun pèse, où finit son en-tête — et compose le reste.
 //!
@@ -45,19 +45,28 @@
 //! C'est ce qui permet de servir un message de cent mébioctets sans en tenir un
 //! seul en mémoire, et c'est aussi C1 — lire un fichier est une entrée-sortie.
 //!
+//! # UNE SEULE VÉRITÉ SUR CE QUI S'ÉCRIT
+//!
+//! [`Mailbox::permanent_flags`] énumère les drapeaux que la boîte sait faire
+//! survivre, et trois réponses en découlent : `PERMANENTFLAGS` les cite,
+//! `SELECT` annonce `[READ-ONLY]` quand il n'y en a aucun, et `STORE` refuse ce
+//! qui n'y figure pas. Une seconde méthode « est-elle modifiable ? » aurait fini
+//! par ne plus dire la même chose que la première.
+//!
 //! # Ce qui n'est pas ici
 //!
-//! `STORE`, `SEARCH`, `COPY`, `MOVE`, `APPEND`, `CREATE`, `DELETE`, `RENAME` :
-//! tout ce qui ÉCRIT. Lire d'abord, écrire ensuite — et écrire demande de
-//! décider ce qu'un effacement veut dire dans un Maildir partagé.
+//! `SEARCH`, `COPY`, `MOVE`, `APPEND`, `EXPUNGE`, `CREATE`, `DELETE`, `RENAME`.
+//! Effacer, en particulier, demande de décider ce qu'un `EXPUNGE` veut dire dans
+//! un Maildir partagé — et tant que rien n'efface, une boîte peut refuser
+//! `\Deleted` plutôt que de laisser croire à une suppression qui ne viendra pas.
 //!
 //! `ENVELOPE` et `BODYSTRUCTURE` non plus : ce sont des analyses du message, que
 //! `ams-mime` saura faire et qui n'ont rien à voir avec une session.
 
 use ams_proto_imap::{
     Args, Command, Error as ImapError, Fetch, FetchItem, Flags, Limits, Line, Section, SequenceSet,
-    Status, Tag, encode_continuation, encode_tagged, encode_untagged, encode_untagged_parts,
-    write_internal_date,
+    Status, Store, StoreMode, Tag, encode_continuation, encode_tagged, encode_untagged,
+    encode_untagged_parts, write_internal_date,
 };
 use ams_sasl::{decode_base64, parse_plain};
 use core::fmt;
@@ -213,22 +222,31 @@ pub trait Mailbox {
     /// client qui l'écrit. La boîte ouverte, elle, tient déjà son instantané.
     fn read(&self, sequence: u32, offset: u64, out: &mut [u8]) -> usize;
 
-    /// Cette boîte accepte-t-elle qu'on la modifie ?
+    /// Les drapeaux que cette boîte sait faire SURVIVRE à la session.
     ///
-    /// # LA SESSION NE PEUT PAS LE DEVINER, ET NE DOIT PAS LE SUPPOSER
+    /// # UNE SEULE VÉRITÉ SUR CE QUI S'ÉCRIT
     ///
-    /// `SELECT` annonce `[READ-WRITE]`, ce qui promet au client qu'il pourra
-    /// marquer, effacer, déposer. Un magasin qui ne sait rien écrire rendrait
-    /// cette promesse fausse, et le client ne l'apprendrait qu'en essayant.
-    /// C'est donc le magasin qui répond, et `SELECT` se range à ce qu'il dit :
-    /// une boîte qui ne se modifie pas est annoncée `[READ-ONLY]`, comme après
-    /// un `EXAMINE`.
-    fn writable(&self) -> bool;
+    /// Trois réponses en dépendent, et les faire dériver d'un même mot les
+    /// empêche de se contredire : `PERMANENTFLAGS` les énumère, `SELECT`
+    /// annonce `[READ-ONLY]` quand il n'y en a aucun, et `STORE` refuse ce qui
+    /// n'y est pas. Deux méthodes — « est-elle modifiable ? » et « que
+    /// sait-elle écrire ? » — auraient fini par ne plus dire la même chose.
+    ///
+    /// **Ce n'est pas la liste de ce qu'un message peut porter** : un message
+    /// peut arriver marqué par un autre outil. C'est la liste de ce que ce
+    /// serveur sait écrire, ce qui est une promesse plus étroite.
+    fn permanent_flags(&self) -> Flags;
 
-    /// Marque un message comme lu.
+    /// Écrit les drapeaux du message de rang `sequence`, et rend les nouveaux.
     ///
-    /// Appelé quand un `BODY[…]` **sans `PEEK`** le rend (§6.4.5).
-    fn mark_seen(&mut self, sequence: u32);
+    /// Rend `None` si le message a disparu — ce qu'une boîte lue sans verrou ne
+    /// peut pas exclure, et ce dont §6.4.6 dit précisément qu'il ne faut pas
+    /// faire une erreur : le client apprend l'absence en ne recevant rien pour
+    /// ce message.
+    ///
+    /// **N'écrit jamais hors de [`permanent_flags`](Mailbox::permanent_flags)** :
+    /// la session ne lui soumet que ce qui y figure.
+    fn store_flags(&mut self, sequence: u32, mode: StoreMode, flags: Flags) -> Option<Flags>;
 }
 
 /// Ce qu'il faut savoir énumérer et ouvrir pour servir une session.
@@ -338,8 +356,39 @@ struct Emission {
     courant: u32,
     /// Combien la boîte en porte.
     exists: u32,
+    /// Ce qu'il faut ÉCRIRE dans chaque message choisi, s'il faut écrire.
+    ///
+    /// # POURQUOI `STORE` EMPRUNTE LA MACHINE DE `FETCH`
+    ///
+    /// §6.4.6 : un `STORE` non silencieux rend une réponse `FETCH` par message
+    /// modifié. Ce sont donc les mêmes réponses, dans le même ordre, sur le même
+    /// ensemble — et les écrire deux fois aurait fait deux codes qui divergent.
+    ecriture: Option<(StoreMode, Flags)>,
+    /// Le client a-t-il demandé qu'on ne lui rende rien (`.SILENT`) ?
+    silencieux: bool,
+    /// Ce que la conclusion doit nommer.
+    genre: Genre,
     /// Où en est l'émission du message courant.
     etape: Etape,
+}
+
+/// La commande qui a ouvert l'émission, pour la nommer dans sa conclusion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Genre {
+    Fetch,
+    Store,
+}
+
+impl Genre {
+    /// Le texte de la conclusion.
+    fn conclusion(self, par_uid: bool) -> &'static [u8] {
+        match (self, par_uid) {
+            (Genre::Fetch, false) => b"FETCH completed",
+            (Genre::Fetch, true) => b"UID FETCH completed",
+            (Genre::Store, false) => b"STORE completed",
+            (Genre::Store, true) => b"UID STORE completed",
+        }
+    }
 }
 
 /// Ce que l'émission d'un `FETCH` reste à faire.
@@ -628,8 +677,9 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             // ── Sélectionné seulement (§6.4) ────────────────────────────────
             Command::Close | Command::Unselect => self.close(out),
             Command::Fetch => self.fetch(lue.arguments, false, out),
+            Command::Store => self.store(lue.arguments, false, out),
             Command::Uid => self.uid(lue.arguments, out),
-            Command::Expunge | Command::Search | Command::Store | Command::Copy | Command::Move => {
+            Command::Expunge | Command::Search | Command::Copy | Command::Move => {
                 self.si_selectionne(out)
             }
             // ── Retirés par IMAP4rev2 (§A) ──────────────────────────────────
@@ -1115,21 +1165,29 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             );
         };
 
-        // Une boîte qu'on ne peut pas modifier est en lecture seule, que le
-        // client ait dit `SELECT` ou `EXAMINE`.
-        let lecture_seule = examine || !boite.writable();
+        // UNE BOÎTE OÙ RIEN NE SURVIT EST EN LECTURE SEULE, que le client ait
+        // dit `SELECT` ou `EXAMINE`. C'est la même vérité qui sert aux trois
+        // réponses, plutôt que trois qui finiraient par se contredire.
+        let permanents = if examine {
+            Flags::NONE
+        } else {
+            boite.permanent_flags()
+        };
+        let lecture_seule = permanents == Flags::NONE;
         let mut plume = Plume::neuve(out);
         plume.nombre_non_sollicite(boite.exists(), b"EXISTS")?;
         plume.crochet(b"UIDVALIDITY", boite.uid_validity())?;
         plume.crochet(b"UIDNEXT", boite.uid_next())?;
+        // `FLAGS` dit ce qu'un message PEUT PORTER — un autre outil a pu en
+        // poser. `PERMANENTFLAGS` dit ce que CE serveur sait écrire, et les deux
+        // ne coïncident pas forcément.
         plume.pousser(b"* FLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft)\r\n")?;
-        // PERMANENTFLAGS dit ce qui SURVIT à la session. En lecture seule, rien
-        // ne survit — et le dire évite qu'un client croie avoir marqué un
-        // message.
+        plume.pousser(b"* OK [PERMANENTFLAGS (")?;
+        plume.drapeaux(permanents)?;
         plume.pousser(if lecture_seule {
-            b"* OK [PERMANENTFLAGS ()] Read-only mailbox\r\n"
+            b")] Read-only mailbox\r\n"
         } else {
-            b"* OK [PERMANENTFLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft)] Flags permitted\r\n"
+            b")] Flags permitted\r\n"
         })?;
         plume.pousser(b"* LIST () \"/\" ")?;
         plume.pousser(nom)?;
@@ -1238,6 +1296,90 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         })
     }
 
+    /// `STORE` et `UID STORE` (§6.4.6).
+    ///
+    /// # Ce qui se décide ici, et ce qui se décide dans le magasin
+    ///
+    /// Ici : la commande est-elle recevable, les drapeaux demandés sont-ils de
+    /// ceux que cette boîte sait faire survivre, et l'ensemble tient-il. Là-bas :
+    /// comment deux sessions qui écrivent en même temps se départagent — une
+    /// question de système de fichiers, pas de protocole.
+    fn store<'b>(
+        &mut self,
+        arguments: &[u8],
+        par_uid: bool,
+        out: &'b mut [u8],
+    ) -> Result<Turn<'b>, Error> {
+        // LA PRÉSENCE DE LA BOÎTE EST L'ÉTAT ; voir `fetch`.
+        let Some(boite) = self.ouverte.as_ref() else {
+            return self.faute(b"Command is not allowed unless a mailbox is selected", out);
+        };
+        let permanents = boite.permanent_flags();
+        let (exists, dernier_uid) = {
+            let exists = boite.exists();
+            (exists, boite.info(exists).map_or(0, |info| info.uid))
+        };
+        let demande = match Store::parse(arguments, &self.limits) {
+            Ok(demande) => demande,
+            Err(ImapError::UnknownFlag) => {
+                // RECONNU, ET REFUSÉ : le client sait que son étiquette n'est
+                // pas posée, au lieu de la croire posée pour toujours.
+                return self.termine(
+                    Status::No,
+                    b"[CANNOT] This flag cannot be stored",
+                    Action::Continue,
+                    out,
+                );
+            }
+            Err(_) => return self.faute(b"STORE arguments are malformed", out),
+        };
+        // ON NE PROMET QUE CE QUI SURVIT. Un drapeau hors de `PERMANENTFLAGS`
+        // serait écrit puis perdu, et le client ne l'apprendrait jamais.
+        if !permanents.contains(demande.flags()) {
+            return self.termine(
+                Status::No,
+                b"[CANNOT] This flag does not persist in this mailbox",
+                Action::Continue,
+                out,
+            );
+        }
+        let texte = demande.set_text();
+        if texte.len() > SEQUENCE_TEXT_MAX {
+            return self.termine(
+                Status::No,
+                b"[CANNOT] Sequence set is too long",
+                Action::Continue,
+                out,
+            );
+        }
+        let mut emission = Emission {
+            texte: [0; SEQUENCE_TEXT_MAX],
+            texte_len: texte.len(),
+            // §6.4.6 : la réponse d'un `STORE` dit les drapeaux, et rien
+            // d'autre. Même si le `STORE` était par UID — le client sait déjà de
+            // quel UID il parle, et le numéro de séquence lui suffit à recoller.
+            items: [FetchItem::Flags; ams_proto_imap::FETCH_ITEMS_MAX],
+            items_len: 1,
+            par_uid,
+            star: if par_uid { dernier_uid } else { exists },
+            courant: 1,
+            exists,
+            ecriture: Some((demande.mode(), demande.flags())),
+            silencieux: demande.silent(),
+            genre: Genre::Store,
+            etape: Etape::Choisir,
+        };
+        for (place, octet) in emission.texte.iter_mut().zip(texte) {
+            *place = *octet;
+        }
+        self.emission = Some(emission);
+        Ok(Turn {
+            reply: out.get(..0).unwrap_or_default(),
+            action: Action::SendFetch,
+            peer_fault: false,
+        })
+    }
+
     /// `STATUS` (§6.3.11) : ce qu'une boîte contient, sans l'ouvrir.
     fn status<'b>(&mut self, arguments: &[u8], out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
         if self.etat == State::NotAuthenticated {
@@ -1318,9 +1460,12 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         if verbe.eq_ignore_ascii_case(b"FETCH") {
             return self.fetch(reste, true, out);
         }
+        if verbe.eq_ignore_ascii_case(b"STORE") {
+            return self.store(reste, true, out);
+        }
         self.termine(
             Status::No,
-            b"[CANNOT] Only UID FETCH is served yet",
+            b"[CANNOT] Only UID FETCH and UID STORE are served yet",
             Action::Continue,
             out,
         )
@@ -1399,6 +1544,9 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             star,
             courant: 1,
             exists,
+            ecriture: None,
+            silencieux: false,
+            genre: Genre::Fetch,
             etape: Etape::Choisir,
         };
         // La longueur a été vérifiée juste au-dessus ; `zip` s'arrête de
@@ -1466,11 +1614,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
                     out,
                     self.tag_lu(),
                     Status::Ok,
-                    if emission.par_uid {
-                        b"UID FETCH completed"
-                    } else {
-                        b"FETCH completed"
-                    },
+                    emission.genre.conclusion(emission.par_uid),
                     &self.limits,
                 )
                 .map_err(Error::Reply)?
@@ -1482,22 +1626,49 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             Etape::Choisir => {}
         }
 
-        let Some((rang, info)) = emission.suivant(boite, &self.limits) else {
-            emission.etape = Etape::Conclure;
-            self.emission = Some(emission);
-            return self.next_fetch(out);
+        // ON BOUCLE PLUTÔT QUE DE SE RAPPELER SOI-MÊME. Un `STORE .SILENT` sur
+        // dix mille messages n'écrit rien pour chacun : une récursion par
+        // message userait la pile à la demande du client.
+        let (rang, info) = loop {
+            let Some((rang, info)) = emission.suivant(boite, &self.limits) else {
+                emission.etape = Etape::Conclure;
+                self.emission = Some(emission);
+                return self.next_fetch(out);
+            };
+            if let Some((mode, drapeaux)) = emission.ecriture {
+                // Le message a pu disparaître entre l'instantané et l'écriture ;
+                // §6.4.6 veut qu'on n'en fasse pas une erreur, et le client
+                // l'apprend en ne recevant rien pour lui.
+                let Some(nouveaux) = boite.store_flags(rang, mode, drapeaux) else {
+                    continue;
+                };
+                if !emission.silencieux {
+                    break (
+                        rang,
+                        MessageInfo {
+                            flags: nouveaux,
+                            ..info
+                        },
+                    );
+                }
+                continue;
+            }
+            break (rang, info);
         };
         // §6.4.5 : un corps rendu SANS `PEEK` marque le message comme lu. On le
         // marque AVANT de composer, pour que les `FLAGS` de la même réponse
         // disent la vérité plutôt que l'état d'avant.
         let items = emission.items.get(..emission.items_len).unwrap_or_default();
-        if items
+        let info = if items
             .iter()
             .any(|item| matches!(item, FetchItem::Body { peek: false, .. }))
         {
-            boite.mark_seen(rang);
-        }
-        let info = boite.info(rang).unwrap_or(info);
+            boite
+                .store_flags(rang, StoreMode::Add, Flags::SEEN)
+                .map_or(info, |flags| MessageInfo { flags, ..info })
+        } else {
+            info
+        };
 
         let mut plume = Plume::neuve(out);
         plume.pousser(b"* ")?;

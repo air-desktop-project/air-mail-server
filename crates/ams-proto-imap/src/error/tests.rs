@@ -21,6 +21,8 @@ const TOUTES: &[Error] = &[
     Error::MalformedFetch,
     Error::UnsupportedFetchItem,
     Error::TooManyFetchItems { limit: 64 },
+    Error::MalformedStore,
+    Error::UnknownFlag,
     Error::ResponseTextNotPrintable,
     Error::BufferTooSmall { needed: 40 },
 ];

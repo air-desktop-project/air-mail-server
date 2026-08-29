@@ -8,6 +8,7 @@ Sortie, une ligne par mesure :  <mesure> <total> <couvert> <pourcentage>
 """
 
 import json
+import math
 import sys
 
 MESURES = ("regions", "lines", "branches", "functions")
@@ -22,7 +23,12 @@ def main() -> None:
         couvert = mesure.get("covered", 0)
         # Le pourcentage est arrondi ICI, et non par `printf`, dont le format
         # flottant dépend de la locale de qui lance le script.
-        pourcent = mesure.get("percent", 0.0)
+        #
+        # ET IL EST ARRONDI VERS LE BAS. Arrondir au plus proche écrit
+        # « 100,00 % » pour 23 580 régions sur 23 581 : un rapport qui affiche la
+        # perfection alors qu'il manque une région ment poliment, et c'est ce
+        # chiffre-là qu'on lit avant de conclure.
+        pourcent = math.floor(mesure.get("percent", 0.0) * 100) / 100
         # Une mesure VIDE ne vaut pas « 0,00 % » : un pourcentage sur un ensemble
         # vide n'est pas une mesure, et l'afficher comme telle ferait croire à un
         # échec là où il n'y a rien.

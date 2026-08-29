@@ -17,8 +17,8 @@ mod commun;
 use ams_guard::Thresholds;
 use ams_loop_tokio::SharedGuard;
 use ams_loop_tokio::imap::{ImapService, serve_imap_connection};
-use ams_proto_imap::Flags;
 use ams_proto_imap::Limits;
+use ams_proto_imap::{Flags, StoreMode};
 use ams_session::imap::{Mailbox, Mailboxes, MessageInfo};
 use commun::{COMPTE, NotreDomaine, PAIR, SECRET, materiel};
 use core::time::Duration;
@@ -64,8 +64,8 @@ impl Mailbox for Boite {
             .position(|fenetre| fenetre == b"\r\n\r\n")
             .map_or(0, |rang| (rang as u64).saturating_add(4))
     }
-    fn writable(&self) -> bool {
-        true
+    fn permanent_flags(&self) -> Flags {
+        Flags::SEEN.with(Flags::FLAGGED)
     }
     fn read(&self, sequence: u32, offset: u64, out: &mut [u8]) -> usize {
         let Some(corps) = MESSAGES.get(usize::try_from(sequence).unwrap_or(0).saturating_sub(1))
@@ -82,7 +82,11 @@ impl Mailbox for Boite {
             .copy_from_slice(reste.get(..combien).unwrap_or_default());
         combien
     }
-    fn mark_seen(&mut self, _sequence: u32) {}
+    fn store_flags(&mut self, sequence: u32, _mode: StoreMode, _flags: Flags) -> Option<Flags> {
+        // La boîte d'épreuve ne retient rien : ce qu'on éprouve ici est le
+        // passage sur le fil, pas la persistance.
+        (1..=2).contains(&sequence).then_some(Flags::SEEN)
+    }
 }
 
 struct Boites;
@@ -537,4 +541,56 @@ async fn uid_fetch_traverse_la_socket() {
         )),
         "{fetch}"
     );
+}
+
+/// **Un `STORE` traverse la socket, et sa conclusion vient APRÈS ses réponses.**
+#[tokio::test]
+async fn un_store_traverse_la_socket() {
+    let Some(materiel) = materiel("imap-store") else {
+        return;
+    };
+    let mut lecteur = authentifiee(&materiel).await;
+    lecteur
+        .get_mut()
+        .write_all(b"a003 SELECT INBOX\r\n")
+        .await
+        .expect("écriture");
+    let selection = jusqu_a(&mut lecteur, "a003 ").await;
+    // La boîte sait écrire deux drapeaux, et le dit.
+    assert!(
+        selection.contains("* OK [PERMANENTFLAGS (\\Seen \\Flagged)] Flags permitted\r\n"),
+        "{selection}"
+    );
+    assert!(selection.contains("a003 OK [READ-WRITE]"), "{selection}");
+
+    lecteur
+        .get_mut()
+        .write_all(b"a004 STORE 1:2 +FLAGS (\\Seen)\r\n")
+        .await
+        .expect("écriture");
+    let store = jusqu_a(&mut lecteur, "a004 ").await;
+    assert_eq!(
+        store,
+        "* 1 FETCH (FLAGS (\\Seen))\r\n* 2 FETCH (FLAGS (\\Seen))\r\n\
+         a004 OK STORE completed\r\n",
+        "{store}"
+    );
+
+    // `.SILENT` ne rend que la conclusion.
+    lecteur
+        .get_mut()
+        .write_all(b"a005 STORE 1 +FLAGS.SILENT (\\Seen)\r\n")
+        .await
+        .expect("écriture");
+    let silencieux = jusqu_a(&mut lecteur, "a005 ").await;
+    assert_eq!(silencieux, "a005 OK STORE completed\r\n");
+
+    // Un drapeau que la boîte ne fait pas survivre est refusé, pas ignoré.
+    lecteur
+        .get_mut()
+        .write_all(b"a006 STORE 1 +FLAGS (\\Draft)\r\n")
+        .await
+        .expect("écriture");
+    let refus = jusqu_a(&mut lecteur, "a006 ").await;
+    assert!(refus.starts_with("a006 NO [CANNOT]"), "{refus}");
 }

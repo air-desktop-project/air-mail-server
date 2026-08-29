@@ -106,6 +106,15 @@ pub enum Error {
         limit: usize,
     },
 
+    /// Les arguments d'un `STORE` n'ont pas la forme de §6.4.6.
+    MalformedStore,
+
+    /// Un `STORE` porte un drapeau qu'on ne sait pas écrire.
+    ///
+    /// **Le refuser vaut mieux que le taire** : un client à qui l'on répond `OK`
+    /// croit son étiquette posée, et ne la reverra jamais.
+    UnknownFlag,
+
     /// Un texte de réponse porte un octet qu'on refuse d'écrire.
     ResponseTextNotPrintable,
 
@@ -161,6 +170,12 @@ impl fmt::Display for Error {
             }
             Error::TooManyFetchItems { limit } => {
                 write!(f, "plus de {limit} éléments dans un `FETCH`")
+            }
+            Error::MalformedStore => {
+                f.write_str("les arguments d'un `STORE` n'ont pas la forme attendue")
+            }
+            Error::UnknownFlag => {
+                f.write_str("ce drapeau n'est pas un de ceux que ce serveur sait écrire")
             }
             Error::ResponseTextNotPrintable => {
                 f.write_str("un texte de réponse porte un octet qu'on refuse d'écrire")

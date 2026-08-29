@@ -2,8 +2,8 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! **Cible : ce qu'un `FETCH` désigne** — l'ensemble de numéros et la liste
-//! d'éléments.
+//! **Cible : ce qu'un `FETCH` et un `STORE` désignent** — l'ensemble de numéros,
+//! la liste d'éléments, et les drapeaux à écrire.
 //!
 //! # Pourquoi celle-ci
 //!
@@ -32,13 +32,18 @@
 //!    `items().len()` ne dépasse pas `max_fetch_items`, et une section partielle
 //!    ne demande jamais zéro octet — une longueur nulle annoncée serait un
 //!    littéral `{0}` que le client attendrait de lire.
+//! 7. **UN `STORE` ACCEPTÉ NE PORTE QUE DES DRAPEAUX QU'ON SAIT ÉCRIRE.** Le
+//!    reste doit être refusé plutôt que laissé tomber : un client à qui l'on
+//!    répond `OK` croit son étiquette posée, et ne la reverra jamais. La
+//!    propriété se vérifie en réécrivant les drapeaux lus — ce qui sort doit se
+//!    relire à l'identique.
 
 #![no_main]
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-use ams_proto_imap::{FETCH_ITEMS_MAX, Fetch, FetchItem, Limits, SequenceSet};
+use ams_proto_imap::{FETCH_ITEMS_MAX, Fetch, FetchItem, Flags, Limits, SequenceSet, Store};
 
 /// Ce qu'on soumet.
 #[derive(Arbitrary, Debug)]
@@ -51,6 +56,8 @@ struct Entree<'a> {
     numeros: [u32; 4],
     /// Les arguments complets d'un `FETCH`.
     arguments: &'a [u8],
+    /// Les arguments complets d'un `STORE`.
+    ecriture: &'a [u8],
 }
 
 /// Rassemble les intervalles rendus, en s'arrêtant à la borne.
@@ -116,6 +123,33 @@ fuzz_target!(|entree: Entree<'_>| {
         // L'ensemble qu'il porte est celui qu'il a lu, et il est lisible.
         let ensemble = fetch.set();
         assert_eq!(ensemble.as_bytes(), fetch.set_text());
+        let _ = intervalles(&ensemble, entree.star, &bornes);
+    }
+
+    if let Ok(ecriture) = Store::parse(entree.ecriture, &bornes) {
+        // PROPRIÉTÉ 7 : ce qui est accepté se réécrit à l'identique.
+        let mut rendu = [0_u8; 64];
+        let ecrits = ecriture
+            .flags()
+            .write(&mut rendu)
+            .expect("les drapeaux d'un STORE accepté tiennent en soixante-quatre octets");
+        let mut relus = Flags::NONE;
+        for mot in ecrits.split(|octet| *octet == b' ') {
+            if mot.is_empty() {
+                continue;
+            }
+            let drapeau =
+                Flags::parse_one(mot).expect("un drapeau qu'on vient d'écrire doit se relire");
+            relus = relus.with(drapeau);
+        }
+        assert_eq!(
+            relus,
+            ecriture.flags(),
+            "un drapeau s'est perdu à l'écriture"
+        );
+
+        let ensemble = ecriture.set();
+        assert_eq!(ensemble.as_bytes(), ecriture.set_text());
         let _ = intervalles(&ensemble, entree.star, &bornes);
     }
 });
