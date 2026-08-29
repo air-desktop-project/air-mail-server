@@ -57,7 +57,10 @@ fuzz_target!(|entree: Entree| {
             // LA BORNE DE PARCOURS. L'en-tête compte les réponses sur seize
             // bits : au-delà, l'itérateur rendrait plus que ce qui peut être
             // annoncé, ce qui voudrait dire qu'il ne s'arrête pas.
-            assert!(combien <= usize::from(u16::MAX), "l'itérateur ne s'arrête pas");
+            assert!(
+                combien <= usize::from(u16::MAX),
+                "l'itérateur ne s'arrête pas"
+            );
 
             let premier = enregistrement.owner();
             let second = enregistrement.owner();

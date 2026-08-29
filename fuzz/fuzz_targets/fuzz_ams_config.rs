@@ -18,7 +18,10 @@
 use core::time::Duration;
 
 use ams_auth::{Account, DUMMY_HASH};
-use ams_config::{Configuration, Enforcement, Spf, Timeouts, Tls, decode, decode_accounts, decode_index, encode, encode_accounts, encode_index};
+use ams_config::{
+    Configuration, Enforcement, Spf, Timeouts, Tls, decode, decode_accounts, decode_index, encode,
+    encode_accounts, encode_index,
+};
 use ams_guard::Thresholds;
 use ams_index::{MailboxState, Uid, UidValidity};
 use ams_proto_smtp::Limits;

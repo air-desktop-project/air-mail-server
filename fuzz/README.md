@@ -368,6 +368,26 @@ cargo +nightly fuzz run --target x86_64-unknown-linux-gnu fuzz_ams_smtp_command 
   corpus/fuzz_ams_smtp_command seeds/smtp -- -max_total_time=30
 ```
 
+## CETTE CRATE EST HORS DU WORKSPACE, ET ÇA SE PAIE À CHAQUE FOIS
+
+`cargo fmt --all`, `cargo clippy --workspace` et `cargo test --workspace` lancés
+à la racine **ne la voient pas**. Trois fois déjà, une API changée l'a laissée
+cassée sans qu'aucune commande locale ne le dise ; une quatrième, c'est le
+`cargo fmt -- --check` de la CI qui a échoué sur un `use` trop long.
+
+Après toute modification qui la touche — la sienne, ou celle d'une crate qu'elle
+consomme :
+
+```sh
+cd fuzz
+cargo fmt                       # elle a son propre formatage à faire
+cargo +nightly fuzz build       # ET ON EN LIT LE CODE DE RETOUR
+```
+
+**La leçon n'est pas « lancer la commande », c'est « en lire le code de
+retour »** : `cargo +nightly fuzz build | tail -1` rend celui de `tail`, qui
+réussit toujours.
+
 `corpus/` et `artifacts/` ne sont **pas** versionnés : ils sont propres à une
 machine et à une campagne. `seeds/` l'est, rangé **par grammaire** — des entrées
 qui la franchissent, pour qu'une campagne courte ne passe pas son temps à la
