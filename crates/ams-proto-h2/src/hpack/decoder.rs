@@ -170,41 +170,63 @@ impl Decoder {
 
         let (index, lus) = decode_integer(bloc, bits)?;
         let mut consommes = lus;
+        let court = || Error::connection(ErrorCode::CompressionError, Cause::BufferTooSmall);
+
+        // **LE NOM D'ABORD, LA VALEUR JUSTE APRÈS, DANS LE MÊME TAMPON.**
+        //
+        // Une première écriture coupait `out` en deux parts égales, ce qui
+        // obligeait l'appelant à fournir deux fois le plus long des deux au lieu
+        // de leur somme — et un nom long avec une valeur vide échouait sur un
+        // tampon pourtant suffisant. Le fuzz l'a trouvé en quelques secondes.
+        // Les emprunts se referment donc entre les deux écritures, et l'on ne
+        // retient que des LONGUEURS.
+        //
         // ZÉRO VEUT DIRE « LE NOM SUIT EN CLAIR » (§6.2.1) ; tout le reste
         // désigne une entrée dont on reprend le NOM, et pas la valeur.
-        let (nom_place, valeur_place) = out.split_at_mut(out.len() / 2);
         let nom_len = match index {
             0 => {
                 let suite = bloc.get(consommes..).unwrap_or_default();
-                let (nom, apres) = decode_string(suite, nom_place)?;
+                let (nom, apres) = decode_string(suite, out)?;
+                let longueur = nom.len();
                 consommes = consommes.saturating_add(apres);
-                nom.len()
+                longueur
             }
             _ => {
                 let (nom, _) = self.chercher(index)?;
-                let place = nom_place.get_mut(..nom.len()).ok_or_else(|| {
-                    Error::connection(ErrorCode::CompressionError, Cause::BufferTooSmall)
-                })?;
+                let longueur = nom.len();
+                let place = out.get_mut(..longueur).ok_or_else(court)?;
                 place.copy_from_slice(nom);
-                nom.len()
+                longueur
             }
         };
-        let suite = bloc.get(consommes..).unwrap_or_default();
-        let (valeur, apres) = decode_string(suite, valeur_place)?;
-        consommes = consommes.saturating_add(apres);
-        let valeur_len = valeur.len();
+        let valeur_len = {
+            let suite = bloc.get(consommes..).unwrap_or_default();
+            // Le nom vient d'être écrit DANS `out` : la tranche qui le suit
+            // existe toujours, fût-elle vide. `unwrap_or_default` porte cela
+            // dans la bibliothèque plutôt que dans une garde qu'aucune entrée
+            // n'emprunte — et si elle est vide, c'est `decode_string` qui dira
+            // que la place manque.
+            let apres_le_nom = out.get_mut(nom_len..).unwrap_or_default();
+            let (valeur, apres) = decode_string(suite, apres_le_nom)?;
+            let longueur = valeur.len();
+            consommes = consommes.saturating_add(apres);
+            longueur
+        };
 
+        // LES DEUX ONT ÉTÉ ÉCRITS DANS `out` : la coupure y tient. Le `min`
+        // rend `split_at_mut` total — il panique au-delà, et une panique vaut
+        // moins qu'une borne —, et `unwrap_or_default` fait le reste.
+        let (place_nom, apres) = out.split_at_mut(nom_len.min(out.len()));
+        let place_valeur = apres.get_mut(..valeur_len).unwrap_or_default();
         if indexer {
             // L'insertion RECOPIE : la table a son arène, et les tranches qu'on
             // vient d'écrire vivent dans celle de l'appelant.
-            let nom = nom_place.get(..nom_len).unwrap_or_default();
-            let valeur = valeur_place.get(..valeur_len).unwrap_or_default();
-            self.table.insert(nom, valeur);
+            self.table.insert(place_nom, place_valeur);
         }
         Ok(Some((
             Field {
-                name: nom_place.get(..nom_len).unwrap_or_default(),
-                value: valeur_place.get(..valeur_len).unwrap_or_default(),
+                name: place_nom,
+                value: place_valeur,
                 sensitivity: sensibilite,
             },
             consommes,

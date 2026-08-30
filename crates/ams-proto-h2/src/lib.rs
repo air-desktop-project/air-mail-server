@@ -41,6 +41,7 @@
 #[cfg(test)]
 extern crate std;
 
+mod block;
 mod error;
 mod flow;
 mod frame;
@@ -49,6 +50,7 @@ mod preface;
 mod settings;
 mod stream;
 
+pub use block::{BLOCK_OCTETS_MAX, BlockState, CONTINUATIONS_MAX, HeaderBlock};
 pub use error::{Cause, Error, ErrorCode};
 pub use flow::{INITIAL_WINDOW_SIZE, WINDOW_MAX, Window};
 pub use frame::{

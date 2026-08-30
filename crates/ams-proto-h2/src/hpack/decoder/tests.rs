@@ -259,18 +259,35 @@ fn un_tampon_trop_court_le_dit() {
         let issue = decodeur.next(&[0x81], &mut petit).expect_err("refusé");
         assert_eq!(issue.cause(), Cause::BufferTooSmall, "{taille}");
     }
-    // Un littéral dont le NOM vient de la table : `:path` fait cinq octets, et
-    // le tampon se coupe en deux.
-    for taille in 0..10_usize {
+    // **LE NOM ET LA VALEUR SE SUIVENT DANS LE MÊME TAMPON** : `:path` fait
+    // cinq octets, `/` en fait un, et six suffisent donc. Une première écriture
+    // coupait le tampon en deux parts égales et en réclamait dix — le fuzz l'a
+    // trouvé, avec un nom long et une valeur vide.
+    for taille in 0..6_usize {
         let mut petit = std::vec![0_u8; taille];
         decodeur.begin_block();
         let issue = decodeur
             .next(&[0x04, 0x01, b'/'], &mut petit)
             .expect_err("refusé");
-        assert!(
-            matches!(issue.cause(), Cause::BufferTooSmall),
-            "{taille} : {issue:?}"
-        );
+        assert_eq!(issue.cause(), Cause::BufferTooSmall, "{taille}");
+    }
+    let mut juste = [0_u8; 6];
+    decodeur.begin_block();
+    let (champ, _) = decodeur
+        .next(&[0x04, 0x01, b'/'], &mut juste)
+        .expect("six octets suffisent")
+        .expect("un champ");
+    assert_eq!(champ.name, b":path");
+    assert_eq!(champ.value, b"/");
+
+    // Et le nom en clair suit la même règle.
+    for taille in 0..2_usize {
+        let mut petit = std::vec![0_u8; taille];
+        decodeur.begin_block();
+        let issue = decodeur
+            .next(&[0x00, 0x01, b'a', 0x01, b'b'], &mut petit)
+            .expect_err("refusé");
+        assert_eq!(issue.cause(), Cause::BufferTooSmall, "{taille}");
     }
 }
 

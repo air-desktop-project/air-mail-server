@@ -84,6 +84,8 @@ fn chaque_cause_se_dit() {
         (Cause::BadStreamId, "numéro de flux"),
         (Cause::TooManyStreams, "de front"),
         (Cause::WrongStreamState, "dans cet état"),
+        (Cause::BlockInterrupted, "intercalé"),
+        (Cause::BlockTooLong, "bloc d'en-têtes dépasse"),
     ] {
         let texte = std::format!("{}", Error::connection(ErrorCode::ProtocolError, cause));
         assert!(texte.contains(extrait), "{cause:?} : {texte}");

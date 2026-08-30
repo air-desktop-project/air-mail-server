@@ -22,6 +22,7 @@
 
 mod decoder;
 mod dynamique;
+mod encoder;
 mod huffman;
 mod integer;
 mod string;
@@ -30,6 +31,7 @@ mod table_statique;
 
 pub use decoder::{Decoder, Field, Sensitivity};
 pub use dynamique::{Dynamique, TABLE_SIZE_MAX};
+pub use encoder::{encode_field, encode_status};
 pub use huffman::{decode_huffman, encode_huffman, encoded_huffman_len};
 pub use integer::{decode_integer, encode_integer};
 pub use string::{decode_string, encode_string};

@@ -2698,6 +2698,58 @@ quelques secondes :
 `Window::new` borne désormais elle aussi : **une structure qui garantit son
 invariant vaut mieux qu'une qui le suppose**.
 
+### Le flot de `CONTINUATION` : une borne que la RFC ne donne pas
+
+Un bloc d'en-têtes peut s'étaler sur autant de cadres qu'on veut. Un `HEADERS`
+sans `END_HEADERS`, puis des `CONTINUATION` — **et rien dans la RFC ne borne leur
+nombre.** Un pair envoie donc un `HEADERS` puis des `CONTINUATION` sans fin,
+chacun d'un octet, et un serveur qui accumule sans compter s'arrête quand sa
+mémoire s'arrête.
+
+C'est la faille dite « CONTINUATION flood », qui a touché la plupart des
+implémentations en 2024. Ce n'est pas une erreur de code : c'est une borne que la
+RFC ne donne pas et que chacun devait poser.
+
+**ON EN POSE DEUX**, parce qu'aucune ne suffit seule : mille cadres d'un octet
+passent sous une borne de taille, et un seul cadre de seize mébioctets passe sous
+une borne de nombre.
+
+§4.3 exige par ailleurs que les cadres d'un bloc se suivent **sans aucun autre
+cadre entre eux, sur aucun flux**. Ce n'est pas une commodité : la table HPACK
+est mise à jour dans l'ordre du bloc, et laisser un cadre s'intercaler rendrait
+cet ordre dépendant de l'entrelacement — donc non reproductible.
+
+### L'encodeur n'indexe JAMAIS, et c'est une décision
+
+HPACK permet d'insérer dans une table dynamique pour que le champ suivant coûte
+un octet. §7.1 de RFC 7541 décrit ce que cela ouvre : quand un attaquant peut
+faire émettre par le serveur des en-têtes de son choix À CÔTÉ d'un secret, la
+TAILLE du bloc comprimé lui dit si sa devinette coïncide. C'est CRIME et BREACH,
+transposées à HPACK. La RFC recommande de ne pas indexer les champs sensibles —
+ce qui suppose de savoir lesquels le sont.
+
+**On renverse la question** : rien n'est indexé, donc rien ne fuit, et il n'y a
+pas de liste de champs sensibles à tenir à jour. Le coût est quelques dizaines
+d'octets par réponse ; C7 dit que la sécurité prime, et il n'y a même pas
+d'arbitrage difficile ici. La table STATIQUE, elle, sert : elle est publique,
+identique pour tous, et ne porte aucun secret — `:status 200` s'écrit en un
+octet.
+
+Corollaire : notre table dynamique d'émission reste vide, il n'y a rien à
+évincer, et **un encodeur sans état ne peut pas se désynchroniser**.
+
+### Un troisième défaut trouvé par le fuzz
+
+Le décodeur HPACK coupait le tampon de l'appelant en DEUX PARTS ÉGALES, une pour
+le nom et une pour la valeur. Un nom long avec une valeur vide échouait donc sur
+un tampon pourtant suffisant, et l'appelant devait fournir deux fois le plus long
+des deux au lieu de leur somme. Le nom et la valeur s'écrivent maintenant l'un
+après l'autre dans le même tampon, et la coupure se fait à la longueur du nom.
+
+Ce n'était pas une faille — c'était une interface qui mentait sur ce qu'elle
+demandait, et le fuzz l'a trouvée en quelques secondes parce que la propriété
+« ce qu'on écrit se relit » ne tenait pas.
+
 ### La bombe de décompression a sa propre borne
 
 HPACK et QPACK compriment : mille champs identiques tiennent en quelques octets

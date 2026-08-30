@@ -164,6 +164,11 @@ pub enum Cause {
     TooManyStreams,
     /// Un cadre est arrivé sur un flux qui ne pouvait pas le recevoir.
     WrongStreamState,
+    /// Un cadre s'est intercalé dans un bloc d'en-têtes, ou une `CONTINUATION`
+    /// n'avait rien à continuer.
+    BlockInterrupted,
+    /// Un bloc d'en-têtes dépasse ce qu'on accepte d'accumuler.
+    BlockTooLong,
 }
 
 impl Error {
@@ -231,6 +236,8 @@ impl fmt::Display for Error {
             Cause::BadStreamId => "un numéro de flux qui n'en est pas un",
             Cause::TooManyStreams => "plus de flux de front qu'on n'en traite",
             Cause::WrongStreamState => "ce cadre n'a pas sa place dans cet état",
+            Cause::BlockInterrupted => "un cadre s'est intercalé dans un bloc d'en-têtes",
+            Cause::BlockTooLong => "un bloc d'en-têtes dépasse ce qu'on accumule",
         };
         let portee = match self.fatal {
             true => "connexion",

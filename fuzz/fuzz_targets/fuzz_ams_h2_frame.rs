@@ -36,6 +36,10 @@
 //! 9. **LES FLUX NE SE RÉEMPLOIENT PAS ET NE DÉBORDENT PAS.** Un numéro accepté
 //!    progresse strictement, et la table n'excède jamais ce qu'on a annoncé
 //!    traiter de front.
+//! 10. **UN BLOC D'EN-TÊTES NE S'ACCUMULE PAS SANS FIN.** C'est la faille dite
+//!     « CONTINUATION flood » : rien dans la RFC ne borne le nombre de cadres
+//!     d'un bloc, et un serveur qui accumule sans compter s'arrête quand sa
+//!     mémoire s'arrête.
 
 #![no_main]
 
@@ -43,9 +47,9 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use ams_proto_h2::{
-    FRAME_HEADER_OCTETS, FrameHeader, FrameKind, FrameReader, INITIAL_WINDOW_SIZE,
-    MAX_CONCURRENT_STREAMS, Need, PREFACE, Padded, Preface, Settings, SettingsReader, StreamState,
-    Streams, WINDOW_MAX, Window, read_preface,
+    BLOCK_OCTETS_MAX, BlockState, FRAME_HEADER_OCTETS, FrameHeader, FrameKind, FrameReader,
+    HeaderBlock, INITIAL_WINDOW_SIZE, MAX_CONCURRENT_STREAMS, Need, PREFACE, Padded, Preface,
+    Settings, SettingsReader, StreamState, Streams, WINDOW_MAX, Window, read_preface,
 };
 
 /// Ce qu'on soumet.
@@ -133,6 +137,40 @@ fuzz_target!(|entree: Entree<'_>| {
                 "le remplissage a rallongé la charge"
             );
         }
+    }
+
+    // ── L'accumulation d'un bloc d'en-têtes ─────────────────────────────────
+    //
+    // On rejoue le flux de cadres, cette fois pour l'accumulateur : c'est
+    // l'ordre des cadres qui compte, et non leur contenu.
+    let mut bloc = HeaderBlock::new();
+    let mut accumule = vec![0_u8; BLOCK_OCTETS_MAX];
+    let mut reste = entree.flux;
+    let mut tours = 0_u32;
+    while let Ok(Need::Complete(entete)) = FrameReader::poll(reste, max) {
+        tours = tours.saturating_add(1);
+        assert!(tours < 100_000, "l'accumulation n'avance pas");
+        let charge = reste
+            .get(FRAME_HEADER_OCTETS..entete.total())
+            .unwrap_or_default();
+        if matches!(entete.kind(), FrameKind::Headers | FrameKind::Continuation) {
+            match bloc.push(entete, charge, &mut accumule) {
+                // PROPRIÉTÉ 10 : ce qui est complet tient dans la borne.
+                Ok(BlockState::Complete(total)) => {
+                    assert!(total <= BLOCK_OCTETS_MAX, "un bloc a dépassé la borne");
+                    assert!(!bloc.in_progress(), "un bloc complet reste ouvert");
+                }
+                Ok(BlockState::More) => {
+                    assert!(bloc.in_progress(), "un bloc qui continue s'est refermé");
+                }
+                // Une faute referme tout : l'appelant coupe la connexion.
+                Err(_) => break,
+            }
+        } else if bloc.accepts(entete).is_err() {
+            // §4.3 : rien ne s'intercale. L'appelant coupe.
+            break;
+        }
+        reste = reste.get(entete.total()..).unwrap_or_default();
     }
 
     // ── Les fenêtres et les flux ────────────────────────────────────────────

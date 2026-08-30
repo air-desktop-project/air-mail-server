@@ -34,6 +34,9 @@
 //!    trois octets.
 //! 8. **LA TABLE DYNAMIQUE RESTE DANS SA BORNE**, quoi qu'un bloc demande, et
 //!    ce qu'elle rend se relit d'un seul tenant.
+//! 10. **CE QU'ON ÉCRIT, ON LE RELIT — ET LA TABLE RESTE VIDE.** L'encodeur
+//!     n'indexe jamais : c'est ce qui ferme CRIME et BREACH, et cela se vérifie
+//!     en lisant ce qu'il vient d'écrire.
 //! 9. **LES DEUX ÉTAGES SE COMPOSENT.** HPACK ne juge PAS les champs — il rend
 //!    les octets qu'on lui a donnés à comprimer —, et c'est `HeadBuilder` qui
 //!    décide si une liste est recevable. La propriété éprouve donc la JOINTURE :
@@ -51,7 +54,7 @@ use libfuzzer_sys::fuzz_target;
 
 use ams_proto_h2::hpack::{
     Decoder, STATIQUE_LEN, TABLE_SIZE_MAX, decode_huffman, decode_integer, decode_string,
-    encode_huffman, encode_integer, encode_string, encoded_huffman_len,
+    encode_field, encode_huffman, encode_integer, encode_string, encoded_huffman_len,
 };
 use ams_proto_http::{HeadBuilder, Limits as LimitesHttp};
 
@@ -68,6 +71,8 @@ struct Entree<'a> {
     comprime: &'a [u8],
     /// Des octets à comprimer.
     clair: &'a [u8],
+    /// Un nom et une valeur à écrire, puis à relire.
+    a_ecrire: (&'a [u8], &'a [u8]),
     /// Deux blocs d'en-têtes, lus l'un après l'autre par le MÊME décodeur.
     ///
     /// Deux, parce que la table dynamique survit d'un bloc à l'autre : c'est
@@ -218,6 +223,27 @@ fuzz_target!(|entree: Entree<'_>| {
             }
         }
         let _ = juge.finish();
+    }
+
+    // ── L'encodeur : ce qu'on écrit se relit, et n'indexe rien ──────────────
+    let (nom, valeur) = entree.a_ecrire;
+    let mut ecrit = vec![0_u8; nom.len().saturating_add(valeur.len()).saturating_add(64)];
+    if let Ok(ecrits) = encode_field(nom, valeur, &mut ecrit) {
+        let mut relecteur = Decoder::new();
+        relecteur.begin_block();
+        let mut relu = vec![0_u8; nom.len().saturating_add(valeur.len()).saturating_add(64)];
+        let (champ, lus) = relecteur
+            .next(ecrit.get(..ecrits).unwrap_or_default(), &mut relu)
+            .expect("ce qu'on écrit se relit")
+            .expect("un champ");
+        assert_eq!(champ.name, nom, "un nom réécrit a changé");
+        assert_eq!(champ.value, valeur, "une valeur réécrite a changé");
+        assert_eq!(lus, ecrits, "on relit exactement ce qu'on a écrit");
+        // PROPRIÉTÉ 10 : rien n'entre en table, jamais.
+        assert!(
+            relecteur.table().is_empty(),
+            "l'encodeur a indexé, et rouvre CRIME"
+        );
     }
 
     // ── La compression, dans l'autre sens ───────────────────────────────────
