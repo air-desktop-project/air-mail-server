@@ -147,6 +147,10 @@ name = "ams-proto-pop3"
 version = "0.1.0"
 
 [[package]]
+name = "ams-proto-quic"
+version = "0.1.0"
+
+[[package]]
 name = "ams-proto-smtp"
 version = "0.1.0"
 

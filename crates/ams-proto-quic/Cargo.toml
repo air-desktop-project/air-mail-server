@@ -1,0 +1,14 @@
+[package]
+name = "ams-proto-quic"
+description = "Grammaire QUIC (RFC 9000) : entiers, paquets et trames, sans entrée-sortie"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

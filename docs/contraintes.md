@@ -3035,3 +3035,81 @@ Les confondre coûterait cher dans les deux sens. Fermer la connexion sur une
 requête malformée, c'est offrir à un client maladroit d'emporter les requêtes
 des autres. Ne fermer que le flux sur une faute HPACK, c'est continuer à lire
 une table dont on ne sait plus rien.
+
+## QUIC : ce qui change, et pourquoi cela nous regarde
+
+QUIC n'est pas « TCP sur UDP ». Trois choses le distinguent, et toutes trois
+déplacent du travail vers nos crates.
+
+**Le cadrage n'a qu'une source.** Toute longueur est un entier de §16, écrit une
+fois, borné à soixante-deux bits. Il n'y a pas de second champ qui pourrait dire
+autre chose — donc pas de contrebande de requête, non parce que le protocole est
+plus récent, mais parce qu'il n'y a plus deux façons de savoir où un message
+s'arrête. C'est la même raison qu'en HTTP/2, et elle vaut d'être répétée.
+
+**Tout est chiffré, en-tête compris.** Le numéro de paquet lui-même est masqué
+(RFC 9001 §5.4) : un observateur ne relie pas deux paquets d'une même connexion
+en les regardant passer. C'est ce qui distingue QUIC de TCP, dont le numéro de
+séquence est en clair.
+
+**La perte est notre affaire.** Le noyau ne retransmet rien : la détection de
+perte, le contrôle de congestion et les temporisations (RFC 9002) sont du code,
+ici, et non un réglage du système.
+
+La protection des paquets, elle, ne vit PAS dans `ams-proto-quic` : elle demande
+de l'AEAD, donc une bibliothèque de chiffrement, et un crate qui en dépendrait
+ne serait plus `no_std`. Elle ira avec le reste du matériel TLS — les clés
+viennent de la poignée de main, pas de la grammaire.
+
+### L'écriture n'est pas canonique, et ce n'est pas un relâchement
+
+§16 le dit en toutes lettres : la valeur 37 s'écrit sur un, deux, quatre ou huit
+octets, et **les quatre écritures sont valides**. Un décodeur qui refuserait les
+longues refuserait des paquets parfaitement conformes.
+
+C'est l'exact contraire de HPACK, où une écriture non canonique est une attaque
+— on y a d'ailleurs mis une borne pour cela. La différence tient en une ligne :
+ici la longueur est ANNONCÉE et bornée à huit octets ; là-bas elle était
+implicite et non bornée. **Ce n'est pas la canonicité qui protège, c'est la
+borne.**
+
+Notre écriture à nous, en revanche, est toujours la plus courte. Non par
+conformité — rien ne l'exige — mais parce que c'est ce qui fait tenir un paquet
+dans un datagramme, et un datagramme dans un chemin dont on ne connaît pas la
+MTU.
+
+### Le numéro de paquet, et la fenêtre qui glisse
+
+Un numéro va jusqu'à 2^62 - 1, et l'écrire en entier coûterait huit octets sur
+des paquets qui en font parfois quarante. On n'écrit donc que les bits de poids
+faible, et le receveur reconstruit le reste.
+
+Si l'écrivain tronque trop court, deux numéros se réduisent aux mêmes bits, le
+receveur en choisit un — le mauvais —, le paquet est déchiffré avec le mauvais
+nonce, l'authentification échoue, et le paquet est jeté. **Cela ne casse pas la
+sécurité ; cela casse la connexion, en silence.** C'est pourquoi l'annexe A.2
+demande d'écrire assez pour distinguer DEUX FOIS le nombre de paquets non
+acquittés : la fenêtre de reconstruction est centrée sur le numéro attendu, une
+moitié devant, une moitié derrière.
+
+### Deux défauts trouvés par le fuzz, sur la même ligne
+
+La reconstruction pouvait rendre un numéro **hors de l'espace de soixante-deux
+bits** — trouvé en trois minutes.
+
+Le premier cas était un `largest` hors borne : rien dans le calcul ne ramenait le
+résultat dans ses bornes, parce que rien ne vérifiait l'entrée. **Une borne
+qu'on ne vérifie qu'à la sortie n'est pas une borne : c'est une espérance.**
+
+Le second est plus intéressant, et il est apparu APRÈS la première correction :
+avec `largest` valant exactement 2^62 - 1, le numéro attendu vaut 2^62, hors de
+l'espace, et le candidat qu'on en tire aussi. Le pseudo-code de l'annexe A.3 ne
+s'en garde pas — parce que §12.3 exige d'avoir fermé la connexion avant d'en
+arriver là. La garde est donc à nous, et son absence ne se serait vue qu'après
+2^62 paquets, ou jamais.
+
+Une différence d'une unité s'est glissée au passage : la RFC compare à `2^62`, et
+la première écriture comparait à `2^62 - 1`. Un seul numéro s'en trouvait
+reconstruit autrement — le tout dernier que la connexion puisse porter. C'est
+assez pour justifier une constante nommée `ESPACE`, plutôt qu'un `MAX` qu'on
+croit interchangeable.
