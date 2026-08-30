@@ -66,6 +66,10 @@ fn chaque_raison_porte_son_code() {
         (Reason::UnknownFrame, TransportError::FrameEncodingError),
         (Reason::BadFrameField, TransportError::FrameEncodingError),
         (Reason::BadAckRange, TransportError::FrameEncodingError),
+        (
+            Reason::BadTransportParameter,
+            TransportError::TransportParameterError,
+        ),
     ];
     for (raison, code) in cas {
         let faute = Error::new(raison);
@@ -90,6 +94,7 @@ fn chaque_faute_se_dit() {
         (Reason::UnknownFrame, "négocié"),
         (Reason::BadFrameField, "champ de trame"),
         (Reason::BadAckRange, "acquittement"),
+        (Reason::BadTransportParameter, "paramètre de transport"),
     ];
     for (raison, morceau) in cas {
         let dit = std::format!("{}", Error::new(raison));

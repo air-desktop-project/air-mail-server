@@ -46,6 +46,7 @@ mod packet;
 mod packet_number;
 mod rtt;
 mod stream_id;
+mod transport;
 mod varint;
 
 pub use congestion::{
@@ -65,6 +66,11 @@ pub use packet::{
 pub use packet_number::{PACKET_NUMBER_MAX, PACKET_NUMBER_OCTETS_MAX};
 pub use rtt::{ACK_DELAY_EXPONENT_MAX, GRANULARITY_US, INITIAL_RTT_US, Rtt, decode_ack_delay};
 pub use stream_id::{Initiator, StreamId};
+pub use transport::{
+    DEFAULT_ACK_DELAY_EXPONENT, DEFAULT_ACTIVE_CONNECTION_ID_LIMIT, DEFAULT_MAX_ACK_DELAY_MS,
+    DEFAULT_MAX_UDP_PAYLOAD_SIZE, MAX_ACK_DELAY_LIMIT_MS, MIN_ACTIVE_CONNECTION_ID_LIMIT,
+    MIN_UDP_PAYLOAD_SIZE, Sender, TransportParameters,
+};
 pub use varint::VARINT_MAX;
 
 /// Les entiers de longueur variable de §16.

@@ -3323,3 +3323,49 @@ Le contrôle de congestion n'est pas une optimisation : §7 en fait une
 obligation. Un émetteur QUIC sans contrôle de congestion n'est pas un émetteur
 rapide, c'est un émetteur qui écroule le chemin qu'il partage — et le noyau ne
 l'en empêchera pas.
+
+## Les paramètres de transport, et la règle qui explique l'autre
+
+§18.1 : « An endpoint MUST ignore transport parameters that it does not
+understand. » Les paramètres inconnus s'IGNORENT — c'est exactement l'inverse
+des trames, où §12.4 fait d'un type inconnu une faute de connexion.
+
+Les deux règles vont ensemble, et ne se comprennent qu'ensemble : **on ignore ce
+qu'on ne connaît pas là où l'on NÉGOCIE, et on refuse ce qu'on ne connaît pas là
+où l'on EXÉCUTE.** Un pair qui veut une extension l'annonce dans ses paramètres ;
+s'il n'obtient pas de réponse, il sait qu'il ne doit pas s'en servir. Une trame
+inconnue veut donc dire que cette négociation n'a pas eu lieu, ou qu'elle a été
+mal comprise.
+
+C'est la troisième fois dans ce dépôt que deux protocoles voisins traitent
+l'inconnu de deux façons opposées, et la troisième fois que la raison en vaut la
+peine. Il fallait l'écrire quelque part.
+
+### Les défauts sont des valeurs, pas des absences
+
+§18.2 donne à presque chaque paramètre une valeur par défaut, qui vaut dès le
+premier paquet — avant même que les paramètres du pair n'arrivent. Traiter un
+paramètre absent comme « pas de limite » plutôt que comme sa valeur par défaut
+ouvrirait exactement les portes que ces défauts ferment.
+
+### Un paramètre deux fois est une faute, et ce n'est pas de la pédanterie
+
+§7.4. Sans cette règle, deux valeurs pour un même paramètre laisseraient chaque
+mise en œuvre choisir la sienne — et deux pairs n'auraient plus les mêmes
+limites, sans qu'aucun sache lequel a tort. Un bit par paramètre connu suffit à
+le refuser : dix-sept paramètres tiennent dans un `u32`.
+
+### Une valeur occupe tout ce qu'elle annonce, et rien de plus
+
+Des octets en trop derrière un entier voudraient dire qu'on n'a pas lu ce que le
+pair a écrit — et l'on prendrait sa limite pour une autre. La vérification tient
+en une comparaison, et il faut la faire pour CHAQUE paramètre entier : un seul
+oublié laisserait passer une limite lue de travers.
+
+### Ce qu'un client ne peut pas annoncer
+
+Quatre paramètres n'appartiennent qu'au serveur : l'identifiant de destination
+d'origine, le jeton de réinitialisation, l'adresse préférée, et l'identifiant de
+source d'un `Retry`. Un client qui les enverrait prétendrait avoir émis ce
+`Retry` ou choisi cet identifiant d'origine — c'est-à-dire **réécrire ce qui
+prouve que la poignée de main n'a pas été détournée**.

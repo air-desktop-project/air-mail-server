@@ -31,6 +31,9 @@
 //!    qui avance trop lit le paquet suivant comme le sien.
 //! 8. **CE QU'UNE TRAME REND EST DANS CE QU'ON A DONNÉ** : chaque tranche est
 //!    une sous-tranche du tampon, et aucune longueur n'excède sa source.
+//! 9. **DES PARAMÈTRES DE TRANSPORT ACCEPTÉS SONT DES PARAMÈTRES UTILISABLES** :
+//!    chaque borne de §18.2 tient, et ce qu'un CLIENT n'a pas le droit
+//!    d'annoncer n'est jamais retenu de lui.
 
 #![no_main]
 
@@ -38,8 +41,9 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use ams_proto_quic::{
-    CONNECTION_ID_MAX, Frame, Long, LongKind, MAX_STREAMS_LIMIT, RETRY_TAG_OCTETS, ShortHeader,
-    VERSION_NEGOTIATION, is_long, parse_long,
+    CONNECTION_ID_MAX, Frame, Long, LongKind, MAX_ACK_DELAY_LIMIT_MS, MAX_STREAMS_LIMIT,
+    MIN_ACTIVE_CONNECTION_ID_LIMIT, MIN_UDP_PAYLOAD_SIZE, RETRY_TAG_OCTETS, Sender, ShortHeader,
+    TransportParameters, VERSION_NEGOTIATION, is_long, parse_long,
 };
 
 /// Ce qu'on soumet.
@@ -138,6 +142,33 @@ fuzz_target!(|entree: Entree| {
         reste = reste.get(lus..).unwrap_or_default();
         if reste.is_empty() {
             break;
+        }
+    }
+
+    // PROPRIÉTÉ 9 : les mêmes octets lus comme des paramètres de transport.
+    for de in [Sender::Client, Sender::Server] {
+        let Ok(lus) = TransportParameters::read(paquet, de) else {
+            continue;
+        };
+        assert!(lus.max_udp_payload_size >= MIN_UDP_PAYLOAD_SIZE);
+        assert!(lus.initial_max_streams_bidi <= MAX_STREAMS_LIMIT);
+        assert!(lus.initial_max_streams_uni <= MAX_STREAMS_LIMIT);
+        assert!(lus.ack_delay_exponent <= 20);
+        assert!(lus.max_ack_delay_ms < MAX_ACK_DELAY_LIMIT_MS);
+        assert!(lus.active_connection_id_limit >= MIN_ACTIVE_CONNECTION_ID_LIMIT);
+        for id in [
+            lus.initial_source_connection_id,
+            lus.original_destination_connection_id,
+            lus.retry_source_connection_id,
+        ] {
+            assert!(id.is_none_or(|id| id.len() <= CONNECTION_ID_MAX));
+        }
+        // **CE QU'UN CLIENT N'A PAS LE DROIT D'ANNONCER N'EST JAMAIS RETENU DE
+        // LUI** : le laisser réécrirait ce qui prouve que la poignée de main
+        // n'a pas été détournée.
+        if matches!(de, Sender::Client) {
+            assert!(lus.original_destination_connection_id.is_none());
+            assert!(lus.retry_source_connection_id.is_none());
         }
     }
 });

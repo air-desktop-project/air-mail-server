@@ -106,6 +106,9 @@ pub enum Reason {
     BadFrameField,
     /// Un intervalle d'acquittement qui descend sous zéro (§19.3.1).
     BadAckRange,
+    /// Un paramètre de transport hors borne, répété, ou qui n'est pas à celui
+    /// qui l'envoie (§7.4, §18.2).
+    BadTransportParameter,
     /// L'espace des numéros de paquet est épuisé (§12.3).
     ///
     /// **§12.3 EXIGE QUE LA CONNEXION SOIT FERMÉE AVANT D'EN ARRIVER LÀ.** Un
@@ -133,6 +136,10 @@ impl Reason {
             | Self::UnknownFrame
             | Self::BadFrameField
             | Self::BadAckRange => TransportError::FrameEncodingError,
+            // §7.4 nomme son propre code : les paramètres ne sont pas des
+            // trames, et un pair doit pouvoir distinguer les deux dans son
+            // journal.
+            Self::BadTransportParameter => TransportError::TransportParameterError,
             // §17.2 dit de JETER le paquet, pas de fermer la connexion — il
             // peut venir de n'importe qui, et une connexion qu'on ferme sur un
             // paquet égaré est une connexion qu'un tiers peut fermer.
@@ -189,6 +196,7 @@ impl core::fmt::Display for Error {
             Reason::UnknownFrame => "un type de trame qu'on n'a pas négocié",
             Reason::BadFrameField => "un champ de trame hors de ses bornes",
             Reason::BadAckRange => "un intervalle d'acquittement descend sous zéro",
+            Reason::BadTransportParameter => "un paramètre de transport qu'on ne peut pas accepter",
             Reason::PacketNumberSpaceExhausted => {
                 "l'espace des numéros de paquet est épuisé, et §12.3 veut qu'on ferme"
             }
