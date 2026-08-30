@@ -1149,9 +1149,24 @@ boîte est déjà de l'ASCII imprimable sans `LF`. Une ligne par nom est une
 outil. Le fichier se réécrit à côté puis se renomme : un `LIST` concurrent voit
 l'ancienne liste ou la nouvelle, jamais un entre-deux.
 
-**Avec cela, IMAP4rev2 est servi en entier.** Ce qui reste hors du serveur, et
-qu'aucune phrase ne doit laisser croire acquis : la file de réémission des
-messages sortants, et toute interface HTTP.
+### Ce qui manque encore à IMAP4rev2
+
+Toutes les COMMANDES de RFC 9051 répondent. Trois de leurs options, que rev2 a
+fait entrer dans le protocole de base en absorbant des extensions de rev1, ne
+sont en revanche pas servies — et il faut le dire plutôt que de laisser
+l'énumération des commandes le faire croire :
+
+- **`STATUS` ne rend que `MESSAGES`, `UIDNEXT` et `UIDVALIDITY`**, quels que
+  soient les éléments demandés. `UNSEEN`, `DELETED` et `SIZE` manquent, et §7.3.3
+  veut que la réponse porte CE QUI A ÉTÉ DEMANDÉ.
+- **`SEARCH` n'accepte pas d'options de retour** — `RETURN (MIN MAX COUNT ALL)`,
+  ce que rev1 appelait ESEARCH. La recherche répond, mais toujours par la liste
+  entière.
+- **`LIST` n'accepte pas `RETURN (STATUS (…))`**, ce que rev1 appelait
+  LIST-STATUS, et le refuse explicitement plutôt que de l'ignorer.
+
+Hors d'IMAP : la file de réémission des messages sortants, et toute interface
+HTTP.
 
 ## Émettre : le client SMTP sortant
 

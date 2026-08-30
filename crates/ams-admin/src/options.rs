@@ -275,7 +275,7 @@ OPTIONS DE `config write`
     Un `--listen-pop3` ou un `--listen-imap` sans `--tls-cert` ouvre un port où
     personne ne pourra relever son courrier ; le serveur le dit au démarrage.
 
-    IMAP4rev2 EST SERVI EN ENTIER : `SELECT`, `LIST`, `STATUS`, `FETCH`,
+    TOUTES LES COMMANDES DE RFC 9051 RÉPONDENT : `SELECT`, `LIST`, `STATUS`, `FETCH`,
     `STORE`, `EXPUNGE`, `SEARCH`, `COPY`, `MOVE`, `APPEND`, `CREATE`, `DELETE`,
     `RENAME`, `SUBSCRIBE` et `UNSUBSCRIBE`. `FETCH` rend une `ENVELOPE`, une `BODYSTRUCTURE`, une partie
     désignée — `BODY[1]`, `BODY[1.MIME]` — et un choix de champs d'en-tête —
@@ -290,6 +290,11 @@ OPTIONS DE `config write`
     COMPTE, un nom par ligne, sous `ams-abonnements` — `LIST (SUBSCRIBED)` les
     filtre, `LIST … RETURN (SUBSCRIBED)` les signale, et un abonnement dont la
     boîte a disparu se rend `\\NonExistent` plutôt que d'être retiré d'office.
+
+    TROIS OPTIONS MANQUENT ENCORE, et l'énumération ci-dessus ne doit pas les faire
+    croire acquises : `STATUS` ne rend que `MESSAGES`, `UIDNEXT` et `UIDVALIDITY`
+    quels que soient les éléments demandés ; `SEARCH` n'accepte pas de
+    `RETURN (MIN MAX COUNT ALL)` ; `LIST` refuse `RETURN (STATUS (…))`.
 
     LE MAGASIN DE COMPTES SERT DEUX CHOSES, et il faut les distinguer :
 

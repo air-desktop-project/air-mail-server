@@ -2323,6 +2323,13 @@ persistant, et lecture sans verrou côté IMAP), C14 (`X25519MLKEM768` en tête)
 découpage des lectures ne change rien au verdict.
 
 Ce qui manque, et qu'aucune phrase ne doit laisser croire acquis : la file de
-réémission des messages sortants, et toute interface HTTP. **IMAP4rev2, lui, est
-servi en entier** — c'est-à-dire que plus aucune commande de RFC 9051 ne reçoit
-un `NO [UNAVAILABLE]`, et que la méthode qui l'écrivait a disparu du code.
+réémission des messages sortants, et toute interface HTTP.
+
+**Toutes les COMMANDES de RFC 9051 répondent** — plus aucune ne reçoit un
+`NO [UNAVAILABLE]`, et la méthode qui l'écrivait a disparu du code. Trois de
+leurs OPTIONS manquent encore, et l'énumération des commandes ne doit pas les
+faire croire acquises : les éléments de `STATUS` autres que `MESSAGES`,
+`UIDNEXT` et `UIDVALIDITY` ; les options de retour de `SEARCH` — ce que rev1
+appelait ESEARCH ; et `LIST … RETURN (STATUS (…))` — ce que rev1 appelait
+LIST-STATUS. Les trois sont dans le protocole de BASE de rev2, qui a absorbé ces
+extensions.
