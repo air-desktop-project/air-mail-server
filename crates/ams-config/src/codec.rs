@@ -31,6 +31,34 @@ pub struct Timeouts {
     pub data_seconds: u32,
 }
 
+/// DKIM : de quoi SIGNER ce que ce serveur émet.
+///
+/// # Signer se configure, vérifier ne se configure pas
+///
+/// La vérification a lieu sur tout ce qui arrive, parce que DMARC en dépend :
+/// il n'y a rien à régler. Signer demande une clé qu'un administrateur a
+/// publiée dans le DNS — c'est cela seul qui se configure.
+///
+/// # Il n'y a pas de drapeau, et c'est le même sujet qu'ailleurs
+///
+/// On signe **si et seulement si** le sélecteur et le chemin sont renseignés.
+/// Un drapeau créerait un état où l'on croirait signer sans le faire.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Dkim {
+    /// `s=` — le sélecteur qui nomme la clé dans le DNS.
+    pub selector: String,
+    /// La clé privée, au format PEM.
+    pub private_key_path: String,
+}
+
+impl Dkim {
+    /// Ce service sait-il signer ?
+    #[must_use]
+    pub fn est_configure(&self) -> bool {
+        !self.selector.is_empty() && !self.private_key_path.is_empty()
+    }
+}
+
 /// De quoi chiffrer (C4, C14).
 ///
 /// Deux **chemins**, et pas le matériel lui-même : une clé privée recopiée dans
@@ -238,6 +266,8 @@ pub struct Configuration {
     pub spf: Spf,
     /// DMARC : la liste des suffixes publics, et ce qu'on fait du verdict.
     pub dmarc: Dmarc,
+    /// DKIM : de quoi signer ce qu'on émet, ou deux chaînes vides.
+    pub dkim: Dkim,
     /// Le fichier de comptes, ou une chaîne vide.
     ///
     /// Vide, le serveur n'annonce pas `AUTH` : il n'a personne à qui répondre
@@ -386,6 +416,12 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
     let ecoute_pop3 = texte(lu.get_listen_pop3()?)?;
     let ecoute_imap = texte(lu.get_listen_imap()?)?;
 
+    let signature = lu.get_dkim()?;
+    let dkim = Dkim {
+        selector: texte(signature.get_selector()?)?,
+        private_key_path: texte(signature.get_private_key_path()?)?,
+    };
+
     let verification = lu.get_spf()?;
     let mut resolveurs = Vec::new();
     for resolveur in verification.get_resolvers()? {
@@ -460,6 +496,7 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
         tls,
         spf,
         dmarc,
+        dkim,
         accounts: comptes,
         listen_pop3: ecoute_pop3,
         listen_imap: ecoute_imap,
@@ -523,6 +560,11 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
             chiffrement.set_private_key_path(&config.tls.private_key_path);
         }
         {
+            let mut signature = ecrit.reborrow().init_dkim();
+            signature.set_selector(&config.dkim.selector);
+            signature.set_private_key_path(&config.dkim.private_key_path);
+        }
+        {
             let mut verification = ecrit.reborrow().init_spf();
             verification.set_enforcement(match config.spf.enforcement {
                 Enforcement::Observe => crate::ams_config_capnp::spf::Enforcement::Observe,
@@ -579,7 +621,7 @@ fn depuis(valeur: usize) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        Configuration, Dmarc, Enforcement, Error, Spf, TRAVERSAL_LIMIT_WORDS, Timeouts, Tls,
+        Configuration, Dkim, Dmarc, Enforcement, Error, Spf, TRAVERSAL_LIMIT_WORDS, Timeouts, Tls,
         decode, encode,
     };
     use alloc::string::{String, ToString as _};
@@ -614,6 +656,9 @@ mod tests {
             // Ni liste de suffixes : DMARC n'est pas évalué, et il n'y a pas de
             // drapeau pour dire le contraire.
             dmarc: Dmarc::default(),
+            // Ni sélecteur : rien n'est signé, et il n'y a pas de drapeau pour
+            // dire le contraire.
+            dkim: Dkim::default(),
             accounts: String::new(),
             listen_pop3: String::new(),
             listen_imap: String::new(),
@@ -646,6 +691,10 @@ mod tests {
                 send_reports: true,
                 failure_reports: false,
             },
+            dkim: Dkim {
+                selector: String::from("mars2026"),
+                private_key_path: String::from("/etc/ams/dkim.pem"),
+            },
             ..exemple()
         }
     }
@@ -667,6 +716,34 @@ mod tests {
         let relue = decode(&encode(&original).expect("encodable")).expect("relisible");
         assert_eq!(relue.tls, original.tls);
         assert!(relue.tls.est_configure());
+    }
+
+    /// **PAS DE DRAPEAU, ICI NON PLUS** : on signe si et seulement si le
+    /// sélecteur ET la clé sont nommés. Un sélecteur sans clé ne veut dire ni
+    /// « signe » ni « ne signe pas ».
+    #[test]
+    fn le_signataire_dkim_traverse_le_format() {
+        let original = exemple_chiffrant();
+        let relue = decode(&encode(&original).expect("encodable")).expect("relisible");
+        assert_eq!(relue.dkim, original.dkim);
+        assert!(relue.dkim.est_configure());
+
+        let sans = decode(&encode(&exemple()).expect("encodable")).expect("relisible");
+        assert_eq!(sans.dkim, Dkim::default());
+        assert!(!sans.dkim.est_configure());
+        // Et l'un sans l'autre ne configure rien.
+        for boiteux in [
+            Dkim {
+                selector: String::from("mars2026"),
+                private_key_path: String::new(),
+            },
+            Dkim {
+                selector: String::new(),
+                private_key_path: String::from("/etc/ams/dkim.pem"),
+            },
+        ] {
+            assert!(!boiteux.est_configure(), "{boiteux:?}");
+        }
     }
 
     #[test]

@@ -18,6 +18,7 @@ path = "src/main.rs"
 ams-config = { workspace = true }
 ams-guard = { workspace = true }
 ams-index = { workspace = true }
+ams-dkim = { workspace = true }
 ams-loop-tokio = { workspace = true }
 ams-mime = { workspace = true }
 ams-proto-pop3 = { workspace = true }

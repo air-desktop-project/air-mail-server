@@ -43,11 +43,12 @@ use std::time::Duration;
 
 use ams_auth::Account;
 use ams_config::{Configuration, Enforcement, Tls};
+use ams_dkim::SigningKey;
 use ams_loop_tokio::imap::serve_imap;
 use ams_loop_tokio::pop3::serve_pop3;
 use ams_loop_tokio::{
-    DkimChecker, DmarcChecker, Relay, ReportSpool, SenderChecker, ServeOptions, SharedGuard,
-    Timeouts, refuse_root, serve,
+    DkimChecker, DkimSigner, DmarcChecker, Relay, ReportSpool, SenderChecker, ServeOptions,
+    SharedGuard, Timeouts, refuse_root, serve,
 };
 use ams_session::{Capabilities, Config, SenderPolicy};
 use ams_store::Maildir;
@@ -192,6 +193,31 @@ fn charger_tls(tls: &Tls) -> Result<Option<Arc<ServerConfig>>, String> {
     Ok(Some(Arc::new(config)))
 }
 
+/// Charge la clé DKIM que la configuration nomme, s'il y en a une.
+///
+/// # LA MÊME EXIGENCE QUE POUR TLS, ET POUR LA MÊME RAISON
+///
+/// Une clé de signature lisible par tout le monde n'est plus une clé de
+/// signature : qui la vole signe en notre nom, et rien ne le distingue de nous.
+/// Le serveur refuse donc de démarrer, et le partage par groupe reste permis.
+///
+/// # ON LA LIT AU DÉMARRAGE, ET PAS À CHAQUE SIGNATURE
+///
+/// Un serveur qui découvrirait à la première émission que sa clé est illisible
+/// aurait déjà annoncé qu'il signe. Ce qui ne peut pas marcher doit refuser de
+/// démarrer.
+fn charger_dkim(dkim: &ams_config::Dkim) -> Result<Option<Arc<SigningKey>>, String> {
+    if !dkim.est_configure() {
+        return Ok(None);
+    }
+    refuser_fichier_lisible_par_tous(&dkim.private_key_path, "clé DKIM")?;
+    let pem = std::fs::read(&dkim.private_key_path)
+        .map_err(|erreur| format!("clé DKIM `{}` : {erreur}", dkim.private_key_path))?;
+    let cle = SigningKey::from_pem(&pem)
+        .map_err(|erreur| format!("clé DKIM `{}` : {erreur}", dkim.private_key_path))?;
+    Ok(Some(Arc::new(cle)))
+}
+
 /// Refuse un fichier secret que le reste du monde peut lire.
 fn refuser_fichier_lisible_par_tous(chemin: &str, quoi: &str) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt as _;
@@ -249,6 +275,10 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     // « annoncer » d'un côté, « savoir chiffrer » de l'autre — n'existent pas :
     // c'est la même.
     let chiffrement = charger_tls(&options.tls)?;
+    // LA CLÉ DE SIGNATURE SE LIT AVANT D'OUVRIR QUOI QUE CE SOIT : ce qui ne
+    // peut pas marcher doit refuser de démarrer, et non le découvrir à la
+    // première émission.
+    let signature = charger_dkim(&options.dkim)?;
     let comptes = charger_comptes(&options.accounts)?;
     verifier_les_domaines(&comptes, &options.hosted)?;
     // `AUTH` n'est annoncé QUE si les deux conditions tiennent : quelqu'un à qui
@@ -386,6 +416,12 @@ async fn servir(fichier: &Path) -> Result<(), String> {
             } else {
                 spool
             };
+            // LA SIGNATURE N'EST LÀ QUE SI UNE CLÉ L'EST : pas de drapeau, et
+            // donc pas d'état où l'on croirait signer sans le faire.
+            let spool = match signature.clone() {
+                Some(cle) => spool.with_dkim(DkimSigner::new(options.dkim.selector.clone(), cle)),
+                None => spool,
+            };
             let spool = if options.dmarc.envoie() {
                 spool.with_relay(Relay::new(
                     checker.resolver().clone(),
@@ -401,6 +437,24 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         }
         _ => None,
     };
+    // ON DIT SI L'ON SIGNE. Un serveur qui n'annonce rien laisse croire qu'il
+    // signe : c'est ce que l'on attend d'un serveur de courrier, et le
+    // découvrir chez le destinataire coûte une réputation.
+    eprintln!(
+        "air-mail-server : {}",
+        match &signature {
+            Some(_) => format!(
+                "ce qui est ÉMIS est signé (DKIM, RFC 6376) — sélecteur `{}`, à publier sous \
+                 `{}._domainkey.<domaine>`",
+                options.dkim.selector, options.dkim.selector
+            ),
+            None => String::from(
+                "ce qui est ÉMIS n'est PAS signé — aucune clé DKIM nommée \
+                 (`air-mail-admin config write … --dkim-selector … --dkim-key …`)"
+            ),
+        }
+    );
+
     let intervalle_rapports =
         Duration::from_secs(u64::from(if options.dmarc.report_interval_seconds == 0 {
             86_400

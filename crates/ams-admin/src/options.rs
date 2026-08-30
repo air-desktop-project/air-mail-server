@@ -12,7 +12,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use ams_config::{Configuration, Dmarc, Enforcement, Spf, Timeouts, Tls};
+use ams_config::{Configuration, Dkim, Dmarc, Enforcement, Spf, Timeouts, Tls};
 use ams_guard::Thresholds;
 use ams_proto_smtp::Limits;
 
@@ -40,6 +40,10 @@ pub struct Options {
     pub max_connections: usize,
     /// La chaîne de certificats, au format PEM. Vide : pas de chiffrement.
     pub tls_cert: Option<PathBuf>,
+    /// `s=` — le sélecteur DKIM publié dans le DNS.
+    pub dkim_selector: Option<String>,
+    /// La clé privée DKIM, en PEM.
+    pub dkim_key: Option<PathBuf>,
     /// La clé privée, au format PEM. Vide : pas de chiffrement.
     pub tls_key: Option<PathBuf>,
     /// Le fichier de comptes. Vide : pas d'`AUTH`.
@@ -86,6 +90,8 @@ impl Default for Options {
             // pas, et le serveur refuserait de démarrer sur une configuration
             // que personne n'a demandée.
             tls_cert: None,
+            dkim_selector: None,
+            dkim_key: None,
             tls_key: None,
             // PAS DE COMPTES PAR DÉFAUT : un serveur qui n'a personne à qui
             // répondre oui n'annonce pas `AUTH`.
@@ -184,6 +190,10 @@ impl Options {
                 send_reports: self.dmarc_send,
                 failure_reports: self.dmarc_failures,
             },
+            dkim: Dkim {
+                selector: self.dkim_selector.clone().unwrap_or_default(),
+                private_key_path: chemin(self.dkim_key.as_ref()),
+            },
             accounts: chemin(self.accounts.as_ref()),
             listen_pop3: self
                 .listen_pop3
@@ -234,11 +244,23 @@ OPTIONS DE `config write`
                            accepterait tout serait un relais ouvert.
     --max-message <octets> taille maximale     (défaut 10485760)
     --max-connections <n>  connexions simultanées (défaut 256)
+    --dkim-selector <s>    sélecteur DKIM publié dans le DNS
+    --dkim-key <chemin>    clé privée DKIM, en PEM
     --tls-cert <chemin>    chaîne de certificats, en PEM
     --tls-key <chemin>     clé privée, en PEM
     --accounts <chemin>    fichier de comptes (`air-mail-admin account add`)
     --listen-pop3 <adr>    où écouter en POP3 (défaut : pas de POP3)
     --listen-imap <adr>    où écouter en IMAP (défaut : pas d'IMAP)
+
+    LES DEUX OPTIONS DKIM VONT ENSEMBLE, ou aucune. Avec elles, le serveur SIGNE ce
+    qu'il émet — aujourd'hui les rapports DMARC. Sans elles, il émet non signé, ce
+    qui reste recevable. Il n'y a pas de troisième réglage : un sélecteur sans clé
+    ne veut dire ni « signe » ni « ne signe pas ».
+
+    La clé se publie dans le DNS sous `<sélecteur>._domainkey.<domaine>`, et le
+    serveur refuse de démarrer si elle est lisible par tout le monde. Les formats
+    lus sont le PKCS#8 (`BEGIN PRIVATE KEY`, RSA ou Ed25519) et le PKCS#1
+    (`BEGIN RSA PRIVATE KEY`).
 
     LES DEUX OPTIONS TLS VONT ENSEMBLE, ou aucune. Avec elles, le serveur annonce
     `STARTTLS` et chiffre ; sans elles, il sert en clair et ne l'annonce pas. Il
@@ -378,6 +400,8 @@ where
                     .map_err(|_| ArgError::new(format!("`{brute}` n'est pas un nombre")))?;
             }
             "--tls-cert" => options.tls_cert = Some(PathBuf::from(valeur()?)),
+            "--dkim-selector" => options.dkim_selector = Some(valeur()?),
+            "--dkim-key" => options.dkim_key = Some(PathBuf::from(valeur()?)),
             "--tls-key" => options.tls_key = Some(PathBuf::from(valeur()?)),
             "--accounts" => options.accounts = Some(PathBuf::from(valeur()?)),
             "--resolver" => {
@@ -467,6 +491,12 @@ where
         return Err(ArgError::new(
             "`--tls-cert` et `--tls-key` vont ENSEMBLE : l'un sans l'autre ne veut dire ni \
              « chiffre » ni « ne chiffre pas »",
+        ));
+    }
+    if options.dkim_selector.is_some() != options.dkim_key.is_some() {
+        return Err(ArgError::new(
+            "`--dkim-selector` et `--dkim-key` vont ENSEMBLE : l'un sans l'autre ne veut dire ni \
+             « signe » ni « ne signe pas »",
         ));
     }
     Ok(Demande::Ecrire(Box::new(options)))

@@ -18,9 +18,10 @@
 
 mod commun;
 
+use ams_dkim::SigningKey;
 use ams_guard::Thresholds;
 use ams_loop_tokio::{
-    DkimChecker, DkimStream, DkimVerdict, Resolver, Service, SharedGuard, Timeouts,
+    DkimChecker, DkimSigner, DkimStream, DkimVerdict, Resolver, Service, SharedGuard, Timeouts,
     serve_connection,
 };
 use ams_proto_smtp::Limits;
@@ -271,4 +272,83 @@ async fn le_nombre_de_signatures_verifiees_est_borne() {
     let beaucoup = une.repeat(20) + "From: jean@example.com\r\n\r\nBonjour.\r\n";
     let rendus = verdicts(&beaucoup, resolveur, 4096).await;
     assert_eq!(rendus.len(), 5, "{rendus:?}");
+}
+
+// ── Signer ce qu'on émet ────────────────────────────────────────────────────
+
+/// Une clé Ed25519 (RFC 8463) JETABLE, écrite ici et nulle part ailleurs.
+///
+/// Ed25519 plutôt que RSA parce qu'elle tient en trois lignes : ce qu'on éprouve
+/// ici est le CÂBLAGE, et la signature elle-même l'est chez elle, jusqu'à la
+/// comparaison avec OpenSSL.
+const CLE_PRIVEE: &str = "-----BEGIN PRIVATE KEY-----\n\
+     MC4CAQAwBQYDK2VwBCIEIPycWR71gsJjQjlyixhg1EFwd/RmkyoHfIBubnK3v8rE\n\
+     -----END PRIVATE KEY-----\n";
+
+const RAPPORT: &[u8] = b"From: postmaster@exemple.test\r\n\
+To: dmarc@ailleurs.test\r\n\
+Subject: rapport\r\n\
+Date: Mon, 31 Aug 2026 09:00:00 +0200\r\n\
+Message-Id: <1@exemple.test>\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: text/plain\r\n\
+\r\n\
+Le corps du rapport.\r\n";
+
+fn signataire() -> DkimSigner {
+    let cle = SigningKey::from_pem(CLE_PRIVEE.as_bytes()).expect("la clé d'épreuve se lit");
+    DkimSigner::new(String::from("epreuve"), std::sync::Arc::new(cle))
+}
+
+/// **CE QU'ON ÉMET PORTE SA SIGNATURE**, et le reste du message ne bouge pas.
+///
+/// Ce que cette épreuve ajoute aux autres : la JONCTION. Que le champ se pose EN
+/// TÊTE — §3.5 veut qu'il précède ce qu'il couvre —, qu'il nomme le domaine du
+/// `From:` et le sélecteur configuré, et que rien de ce qui suit n'ait changé.
+#[test]
+fn ce_qu_on_emet_porte_sa_signature() {
+    let signe = signataire().sign(
+        std::vec::Vec::from(RAPPORT),
+        "postmaster@exemple.test",
+        1_788_000_000,
+    );
+    let texte = String::from_utf8_lossy(&signe).into_owned();
+
+    assert!(texte.starts_with("DKIM-Signature: "), "{texte}");
+    assert!(texte.contains("d=exemple.test"), "{texte}");
+    assert!(texte.contains("s=epreuve"), "{texte}");
+    assert!(texte.contains("a=ed25519-sha256"), "{texte}");
+    assert!(texte.contains("t=1788000000"), "{texte}");
+    // `from` DOIT être couvert : sans lui, la signature ne dirait rien de
+    // l'auteur, et le signataire refuse d'écrire un champ pareil.
+    assert!(texte.contains("h=from:"), "{texte}");
+    // Et ce qui suit le champ est le message, à l'octet près.
+    assert!(
+        signe
+            .windows(RAPPORT.len())
+            .any(|fenetre| fenetre == RAPPORT),
+        "le message a changé : {texte}"
+    );
+}
+
+/// **UN MESSAGE QU'ON NE SAIT PAS SIGNER PART QUAND MÊME.** Un `From:` sans
+/// arobase ne donne pas de domaine, donc pas de `d=` — et un rapport non signé
+/// vaut mieux qu'un rapport qui n'arrive pas.
+#[test]
+fn un_message_qu_on_ne_sait_pas_signer_part_quand_meme() {
+    const NU: &[u8] = b"From: personne\r\n\r\nCorps.\r\n";
+    assert_eq!(
+        signataire().sign(std::vec::Vec::from(NU), "personne", 0),
+        std::vec::Vec::from(NU)
+    );
+}
+
+/// **LA CLÉ N'APPARAÎT JAMAIS DANS UNE TRACE.** Une clé privée qui figure dans
+/// un journal n'est plus une clé privée, et c'est le genre de fuite qu'on ne
+/// remarque qu'après.
+#[test]
+fn la_trace_du_signataire_ne_porte_pas_la_cle() {
+    let rendu = std::format!("{:?}", signataire());
+    assert!(rendu.contains("epreuve"), "{rendu}");
+    assert!(!rendu.contains("MC4CAQAw"), "{rendu}");
 }

@@ -65,6 +65,11 @@ pub use canonical::{
 pub use error::Error;
 pub use key::{KeyType, PublicKeyRecord};
 pub use sign::{SIGNATURE_FIELD_MAX, Signer, SigningKey};
+// LA CRATE QUI EXIGE LE TRAIT LE DONNE. `Signer::sign_with` demande une source
+// d'aléa qui implémente ces traits ; obliger l'appelant à nommer `rsa` pour les
+// atteindre ferait dépendre son `Cargo.toml` d'un choix qui est le nôtre, et
+// laisserait deux versions de `rand_core` diverger sans que rien ne le dise.
+pub use rsa::rand_core::{TryCryptoRng, TryRng};
 pub use signature::{Algorithm, Signature, SignedHeaders};
 pub use tag::{Tag, Tags};
 pub use verify::{

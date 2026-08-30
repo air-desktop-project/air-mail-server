@@ -261,11 +261,32 @@ qu'on veut après les `n` premiers octets sans invalider la signature (§8.2) �
 crate sait la lire, elle n'en écrit pas. **L'heure** : `t=` et `x=` viennent de
 l'appelant, parce que cette crate n'a pas d'horloge (C1).
 
-**Rien n'appelle encore le signataire, et c'est normal** : ce serveur reçoit du
-courrier, il n'en émet pas. Le relais est refusé explicitement, et une signature
-n'a de sens qu'à l'émission. Le signataire attend donc le chemin de soumission —
-et C9, qui demande « DKIM en signature ET en vérification », est tenue des deux
-côtés le jour où ce chemin existera.
+**Et le signataire est appelé** : tout ce que ce serveur ÉMET part signé, dès
+qu'une clé est nommée. Aujourd'hui, ce qu'il émet, ce sont ses rapports DMARC —
+et c'est précisément ce qui devait être signé en premier : un rapport arrive chez
+un domaine qui, par définition, se méfie de ce qui n'est pas authentifié. C9, qui
+demande « DKIM en signature ET en vérification », est donc tenue des deux côtés.
+
+Trois décisions, et elles se lisent toutes de la même façon :
+
+- **Pas de drapeau.** On signe si et seulement si un sélecteur ET une clé sont
+  nommés. Un `--dkim-selector` sans `--dkim-key` ne veut dire ni « signe » ni
+  « ne signe pas », et l'outil d'administration le refuse devant l'opérateur.
+- **La clé se lit au DÉMARRAGE**, jamais à la première émission. Un serveur qui
+  découvrirait alors qu'elle est illisible aurait déjà annoncé qu'il signe. Et
+  une clé lisible par tout le monde empêche le démarrage, comme celle de TLS et
+  pour la même raison : qui la vole signe en notre nom.
+- **L'aveuglement, parce qu'on signe à la demande.** Qui observe ce serveur
+  obtient autant de mesures qu'il veut ; sans aveuglement, RSA les lui laisse
+  exploiter. La signature sort donc de la boucle asynchrone — une exponentiation
+  privée et une lecture d'`/dev/urandom` sont bloquantes, et n'ont rien à faire
+  dans un fil que d'autres partagent.
+
+**Un message qu'on ne sait pas signer part quand même.** Un rapport non signé
+vaut mieux qu'un rapport qui n'arrive pas : le destinataire n'en a pas moins
+besoin, et rien dans DMARC n'exige que nos propres rapports soient signés. Le
+serveur dit au démarrage s'il signe ou non, plutôt que de laisser le découvrir
+chez le destinataire.
 
 `ams-dmarc` : ce que SPF et DKIM ne disent pas. SPF autorise un domaine
 d'**enveloppe** ; DKIM en fait signer un autre. **Ni l'un ni l'autre ne parle du

@@ -185,6 +185,7 @@ fn configuration_pop3(
         tls,
         spf: ams_config::Spf::default(),
         dmarc: ams_config::Dmarc::default(),
+        dkim: ams_config::Dkim::default(),
         accounts: comptes.to_string(),
         listen_pop3: pop3.to_string(),
         listen_imap: String::new(),
@@ -422,6 +423,58 @@ fn un_magasin_lisible_par_tous_empeche_le_demarrage() {
     let plainte = String::from_utf8_lossy(&sortie.stderr);
     assert!(plainte.contains("TOUT LE MONDE"), "{plainte}");
     assert!(plainte.contains("magasin de comptes"), "{plainte}");
+}
+
+/// **UNE CLÉ DE SIGNATURE LISIBLE PAR TOUS EMPÊCHE LE DÉMARRAGE**, comme celle
+/// de TLS et pour la même raison : qui la vole signe en notre nom, et rien ne le
+/// distingue de nous.
+#[test]
+fn une_cle_dkim_lisible_par_tous_empeche_le_demarrage() {
+    let atelier = atelier("dkim-ouvert");
+    let cle = atelier.0.join("dkim.pem");
+    // Une clé Ed25519 jetable : ce qu'on éprouve est le REFUS, pas la clé.
+    std::fs::write(
+        &cle,
+        "-----BEGIN PRIVATE KEY-----\n\
+         MC4CAQAwBQYDK2VwBCIEIPycWR71gsJjQjlyixhg1EFwd/RmkyoHfIBubnK3v8rE\n\
+         -----END PRIVATE KEY-----\n",
+    )
+    .expect("écriture");
+    std::fs::set_permissions(&cle, std::fs::Permissions::from_mode(0o644)).expect("permissions");
+
+    let port = port_libre();
+    let mut config = configuration(&atelier, port, Tls::default(), "");
+    reecrire_avec_dkim(&mut config, &cle);
+    let sortie = Command::new(env!("CARGO_BIN_EXE_air-mail-server"))
+        .arg("--config")
+        .arg(&config)
+        .output()
+        .expect("lançable");
+    assert!(!sortie.status.success(), "le serveur a démarré malgré tout");
+    let plainte = String::from_utf8_lossy(&sortie.stderr);
+    assert!(plainte.contains("TOUT LE MONDE"), "{plainte}");
+    assert!(plainte.contains("clé DKIM"), "{plainte}");
+
+    // Resserrée, elle passe : le refus vise les permissions, pas la clé.
+    std::fs::set_permissions(&cle, std::fs::Permissions::from_mode(0o600)).expect("permissions");
+    let mut serveur = lancer(&config, port);
+    let mut flux = joindre(&mut serveur, port);
+    flux.set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("délai");
+    flux.write_all(b"QUIT\r\n").expect("écriture");
+    let dit = lire_jusqu_au_conge(&mut flux, &mut serveur);
+    assert!(dit.contains("220 "), "{dit}");
+}
+
+/// Réécrit une configuration en y ajoutant un signataire DKIM.
+fn reecrire_avec_dkim(config: &mut PathBuf, cle: &Path) {
+    let brut = std::fs::read(&config).expect("lecture");
+    let mut lue = ams_config::decode(&brut).expect("configuration lisible");
+    lue.dkim = ams_config::Dkim {
+        selector: String::from("epreuve"),
+        private_key_path: cle.display().to_string(),
+    };
+    std::fs::write(&config, ams_config::encode(&lue).expect("encodable")).expect("écriture");
 }
 
 /// Lit jusqu'au `221`, ou jusqu'à ce que le pair raccroche.

@@ -368,6 +368,33 @@ fn signer_deux_fois_le_meme_condensat_rend_la_meme_signature() {
     );
 }
 
+/// **UN SERVEUR SIGNE AVEC AVEUGLEMENT**, et le champ qu'il écrit est le même :
+/// l'aveuglement protège LA CLÉ, pas la signature. C'est ce qui permet de
+/// l'employer sans rien changer d'autre.
+#[test]
+fn le_champ_signe_avec_aveuglement_est_le_meme() {
+    let noms: [&[u8]; 2] = [b"from", b"subject"];
+    let canon = Canonicalization {
+        header: Canon::Relaxed,
+        body: Canon::Relaxed,
+    };
+    let mut corps = BodyHasher::new(canon.body, None);
+    corps.update(b"Bonjour.\r\n");
+    let (condensat, _) = corps.finish();
+    let signataire = signataire(&noms, canon);
+
+    let mut sans = [0_u8; SIGNATURE_FIELD_MAX];
+    let attendu = signataire
+        .sign(&cle(), &condensat, &CHAMPS, &mut sans)
+        .expect("signable");
+    let mut avec = [0_u8; SIGNATURE_FIELD_MAX];
+    let mut alea = AleaFixe(0x0f1e_2d3c_4b5a_6978);
+    let vu = signataire
+        .sign_with(&cle(), &condensat, &CHAMPS, &mut alea, &mut avec)
+        .expect("signable");
+    assert_eq!(vu, attendu);
+}
+
 #[test]
 fn l_aveuglement_rend_la_meme_signature_qu_un_signataire_sans_alea() {
     // L'aveuglement protège LA CLÉ, pas la signature : le résultat est le même,
@@ -631,4 +658,102 @@ fn ce_qui_ne_peut_pas_s_ecrire_est_refuse() {
             std::string::String::from_utf8_lossy(mechant)
         );
     }
+}
+
+// ── Lire une clé écrite par un administrateur ───────────────────────────────
+
+/// Enveloppe un corps base64 dans un bloc PEM.
+fn pem(etiquette: &str, corps: &str) -> std::string::String {
+    std::format!("-----BEGIN {etiquette}-----\n{corps}\n-----END {etiquette}-----\n")
+}
+
+/// La même clé RSA que ci-dessus, au format PKCS#1 (`BEGIN RSA PRIVATE KEY`).
+const CLE_PKCS1: &str = "MIIEogIBAAKCAQEAx6X1Z8atmh0Hi6UhKel/kQjPVpzANayrU7CW+Ds8LPQfHgnHu2xys6Telb\
+     22NitOEcIL3BufK1wzm+6AXU42QbSxIXOlzwbiM1r6/1nzaLd0iGrrZyBIlAoAAE5jM/7Hh12P\
+     gf5WFyV1fAfof1OcN5/jqs/PKIn12zer+nBX2XFRHUWeT9mBmCHe2LaP2mbEkeq3waiOvlGQ1N\
+     9IrHPYeuiPlB3yAxBn9+FXI1lEamF7u4lVBNc921dGMxDZvE9XPNL9qHRRU8RHwhEeQjO4yVaL\
+     GxNlmNOnIukKpdic/WyxcjiK951IEjVj2EOzPxd+N574bs57d9A8RmOa3uU9OQIDAQABAoIBAD\
+     7PoSoRkSuDx4xxGsJvYkF0dprGvRgF527wh0a4iCGSejm+lPaL03hePeL5aRqYvDqNBKMuk4CW\
+     ROxheEQip6I7YWDnW/qKrV6/2Gi+2XwP/5stnDr5JqxgiwiNoNtKZGbbkhsxM8+bat9nM4ffe6\
+     3qYTurnn6gDNf3p2UmtBTF6XWxklmWHHTOM2OexFUCxduTPT/WkLYFGmdHNlefzc+brULkbFnc\
+     8FnJqrZIfp/dUWDV3L2C+Zd2EzA/ejOmRfoXRC8peA0S+Ch3CjKl2je0vfwxVTEI9y4HCzrbb/\
+     atKQf/0k9mqJ1IaaSol7xPMwevI1msljMTf7SWLVudrwMCgYEA+RddwavhZe77iM3lpNZtUC+D\
+     Sw5GnosXTBOSffNdFWJnVrOJ5MHOuu6gCYw6JKPIH7bgvp/4H/dhhaUX4G6ZuzuIftMEM9loZf\
+     zarPaOSIO0Aw3CJgac4UXIl6iupn0ehegD+hlP8Y9DRgfXXiBS/ySn6kOWBM1dfnmULHFhJzcC\
+     gYEAzS+HsvuVWbLQTZB3b68BBhnRk+J/XRmfMXl1mH73t3NYyn3cw2UC2R9nsx3p52iinmk5th\
+     ssau7I4PZuy+JV+sJ7QYljSWfFmGk53HS5XJxJcaxFC3gJ/FB7Oc7f9y7C8k5haKTUI30RAitB\
+     hfjn2mB4Vj1ytW7cd3ZPKXjCFw8CgYAcxJ8WbBR3Ile4oBcCp6UuWp5uP7LWQrgpGCWWGFJK0v\
+     eeYtPtMJkAq+id0a0xaB0H1KY2PeF5R6fiuIN+byegISsNgq98kYJmLQLQcRVTuKpEpAUlQSRD\
+     PD0Djv7EybSJwJcc/mlmO6aIYwVzoIYVY5VlD/M2kMVYgxAi5eFTlwKBgCcKojFmOXbF1WjM0k\
+     0H6ZP1mbEf6cgXNfk9+Sg5EH1xjzWIWVc8gxw5I4wrZvRHLpohv39tEDiQktxrR4231VBPbRB9\
+     Sc0P18M2UnImK5b5jef5NXIHNy8xSSEowejQlvtv+ozkwBC4nWHiRSduwv8EWCFgs9Dd9Ukt08\
+     Y6WgP1AoGAS+T8xA9qmCRsVXuUBlygcsmRrRPhTmqSOeyu5P0bc0IxHwqX6ZawjTTDOPlEX0uz\
+     n5H/tdITfAmCzfZWdEZ9P6h5fxODGm5ZGNj0y55VYoKRzP9k3Xe41PvTPgvpp/NriSNgruOAi+\
+     AiySH2AylZXADTKRVIy3UA519GQQcx6VI=";
+
+/// Une clé Ed25519 jetable, en PKCS#8 v1 (RFC 8410 §7).
+const CLE_ED25519: &str = "MC4CAQAwBQYDK2VwBCIEIPycWR71gsJjQjlyixhg1EFwd/RmkyoHfIBubnK3v8rE";
+
+/// **C'EST L'ÉTIQUETTE QUI DIT LE FORMAT** : PKCS#8 et PKCS#1 se lisent tous
+/// deux, et chacun par le chemin que son bloc annonce.
+#[test]
+fn les_deux_formats_de_cle_se_lisent() {
+    let pkcs8 = SigningKey::from_pem(pem("PRIVATE KEY", CLE_PRIVEE).as_bytes()).expect("PKCS#8");
+    assert_eq!(pkcs8.algorithm(), Algorithm::RsaSha256);
+    let pkcs1 = SigningKey::from_pem(pem("RSA PRIVATE KEY", CLE_PKCS1).as_bytes()).expect("PKCS#1");
+    assert_eq!(pkcs1.algorithm(), Algorithm::RsaSha256);
+    // Et c'est bien la MÊME clé : elle signe pareil.
+    let condensat = [0x42_u8; DIGEST_LEN];
+    assert_eq!(
+        pkcs8.sign(&condensat).expect("signable"),
+        pkcs1.sign(&condensat).expect("signable")
+    );
+}
+
+/// Une clé Ed25519 se reconnaît à ses quarante-huit octets et à son préfixe.
+#[test]
+fn une_cle_ed25519_se_reconnait() {
+    let cle = SigningKey::from_pem(pem("PRIVATE KEY", CLE_ED25519).as_bytes()).expect("Ed25519");
+    assert_eq!(cle.algorithm(), Algorithm::Ed25519Sha256);
+    // Elle signe comme celle qu'on aurait construite depuis sa graine.
+    let mut graine = [0_u8; 32];
+    let der = decode(CLE_ED25519);
+    graine.copy_from_slice(der.get(16..48).expect("graine"));
+    let condensat = [0x11_u8; DIGEST_LEN];
+    assert_eq!(
+        cle.sign(&condensat).expect("signable"),
+        SigningKey::ed25519_from_seed(&graine)
+            .sign(&condensat)
+            .expect("signable")
+    );
+}
+
+/// Ce qui n'est pas une clé le dit, et ne devine rien.
+#[test]
+fn ce_qui_n_est_pas_une_cle_le_dit() {
+    for mechant in [
+        std::string::String::from("pas de PEM du tout"),
+        // Un bloc qui ne se ferme pas.
+        std::format!("-----BEGIN PRIVATE KEY-----\n{CLE_ED25519}\n"),
+        // Une étiquette qui ne se ferme pas non plus.
+        std::string::String::from("-----BEGIN PRIVATE KEY"),
+        // Une étiquette qu'on ne sert pas : on ne devine pas le format.
+        pem("EC PRIVATE KEY", CLE_ED25519),
+        pem("CERTIFICATE", CLE_PRIVEE),
+        // Du base64 qui n'est pas du DER.
+        pem("PRIVATE KEY", "AAAA"),
+        pem("RSA PRIVATE KEY", "AAAA"),
+        // Un préfixe Ed25519 sans sa graine.
+        pem("PRIVATE KEY", "MC4CAQAwBQYDK2Vw"),
+    ] {
+        assert_eq!(
+            SigningKey::from_pem(mechant.as_bytes()).err(),
+            Some(Error::MalformedKey),
+            "{mechant}"
+        );
+    }
+    // Et un corps plus long que ce qu'on retient : la taille du fichier sert à
+    // BORNER, jamais à réserver.
+    let enorme = pem("PRIVATE KEY", &"A".repeat(64 * 1024));
+    assert!(SigningKey::from_pem(enorme.as_bytes()).is_err());
 }

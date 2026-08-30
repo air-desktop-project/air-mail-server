@@ -35,6 +35,7 @@ use alloc::vec::Vec;
 
 use ed25519_dalek::Signer as _;
 use rsa::RsaPrivateKey;
+use rsa::pkcs1::DecodeRsaPrivateKey as _;
 use rsa::pkcs1v15::Pkcs1v15Sign;
 use rsa::pkcs8::DecodePrivateKey as _;
 use rsa::rand_core::TryCryptoRng;
@@ -78,6 +79,46 @@ pub enum SigningKey {
 }
 
 impl SigningKey {
+    /// Lit une clé privée au format PEM, telle qu'un administrateur en écrit.
+    ///
+    /// # C'EST L'ÉTIQUETTE QUI DIT LE FORMAT, ET NON UNE DEVINETTE
+    ///
+    /// `BEGIN PRIVATE KEY` est du PKCS#8, `BEGIN RSA PRIVATE KEY` du PKCS#1.
+    /// Essayer l'un puis l'autre marcherait aussi, et masquerait une clé
+    /// abîmée derrière un second essai qui échoue pour une autre raison. On
+    /// lit ce que le fichier DÉCLARE être.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::MalformedKey`] si le PEM ne se lit pas, si son étiquette est
+    /// inconnue, ou si ce qu'il porte n'est pas une clé.
+    pub fn from_pem(pem: &[u8]) -> Result<Self, Error> {
+        let (etiquette, corps) = bornes_pem(pem).ok_or(Error::MalformedKey)?;
+        // LA TAILLE VIENT DU FICHIER : elle sert à BORNER, jamais à réserver
+        // (C3). Une RSA de 8 192 bits tient dans quatre kibioctets de DER.
+        let mut der = [0_u8; CLE_DER_MAX];
+        let ecrits = crate::base64::decoder_base64(corps, &mut der)?;
+        let der = der.get(..ecrits).unwrap_or_default();
+        if etiquette == b"RSA PRIVATE KEY" {
+            return RsaPrivateKey::from_pkcs1_der(der)
+                .map(|cle| Self::Rsa(Box::new(cle)))
+                .map_err(|_| Error::MalformedKey);
+        }
+        if etiquette != b"PRIVATE KEY" {
+            return Err(Error::MalformedKey);
+        }
+        // Une clé Ed25519 en PKCS#8 v1 tient en quarante-huit octets, dont un
+        // préfixe qui ne varie pas : le reconnaître exactement vaut mieux que
+        // de lire un OID à la main pour s'en assurer.
+        if let Some(graine) = der
+            .strip_prefix(&ED25519_PKCS8)
+            .and_then(|reste| <[u8; 32]>::try_from(reste).ok())
+        {
+            return Ok(Self::ed25519_from_seed(&graine));
+        }
+        Self::rsa_from_pkcs8_der(der)
+    }
+
     /// Lit une clé RSA au format PKCS#8 (`BEGIN PRIVATE KEY`), en DER.
     ///
     /// # Errors
@@ -146,6 +187,48 @@ impl SigningKey {
             Self::Ed25519(cle) => Ok(cle.sign(digest).to_bytes().to_vec()),
         }
     }
+}
+
+/// Ce qu'une clé privée occupe au plus, en DER.
+///
+/// **Aucune RFC ne le borne.** Une RSA de 8 192 bits en occupe un peu moins de
+/// quatre ; le double laisse de la place sans en offrir à qui écrirait un
+/// fichier immense.
+const CLE_DER_MAX: usize = 8 * 1024;
+
+/// Le préfixe d'une clé Ed25519 en PKCS#8 v1 (RFC 8410 §7).
+///
+/// `SEQUENCE { INTEGER 0, SEQUENCE { OID 1.3.101.112 }, OCTET STRING { OCTET
+/// STRING (32) } }` : les seize octets ne varient pas, les trente-deux suivants
+/// sont la graine.
+const ED25519_PKCS8: [u8; 16] = [
+    0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
+];
+
+/// L'étiquette et le corps d'un bloc PEM.
+fn bornes_pem(pem: &[u8]) -> Option<(&[u8], &[u8])> {
+    const OUVERTURE: &[u8] = b"-----BEGIN ";
+    const TIRETS: &[u8] = b"-----";
+    // TROIS REFUS, ET TROIS SEULEMENT : pas d'ouverture, pas de fin
+    // d'étiquette, pas de fermeture. Tout le reste se découpe à des rangs que
+    // la recherche vient de rendre, donc sans refus possible — un `?` de plus
+    // serait une garde qu'aucun fichier ne pourrait faire céder.
+    let debut = trouver(pem, OUVERTURE)?.saturating_add(OUVERTURE.len());
+    let reste = pem.get(debut..).unwrap_or_default();
+    let fin_etiquette = trouver(reste, TIRETS)?;
+    let etiquette = reste.get(..fin_etiquette).unwrap_or_default();
+    let corps = reste
+        .get(fin_etiquette.saturating_add(TIRETS.len())..)
+        .unwrap_or_default();
+    let fin_corps = trouver(corps, b"-----END ")?;
+    Some((etiquette, corps.get(..fin_corps).unwrap_or_default()))
+}
+
+/// Le rang où `aiguille` commence dans `botte`.
+fn trouver(botte: &[u8], aiguille: &[u8]) -> Option<usize> {
+    botte
+        .windows(aiguille.len())
+        .position(|fenetre| fenetre == aiguille)
 }
 
 /// Un aléa qui n'existe pas, et qu'on ne demande jamais.
@@ -236,6 +319,49 @@ impl Signer<'_> {
         fields: &[(&[u8], &[u8])],
         out: &'b mut [u8],
     ) -> Result<&'b [u8], Error> {
+        self.composer_et_sceller(key.algorithm(), body, fields, out, |condensat| {
+            key.sign(condensat)
+        })
+    }
+
+    /// La même chose, **avec aveuglement** quand la clé est RSA.
+    ///
+    /// # C'EST CELLE-CI QU'UN SERVEUR EMPLOIE
+    ///
+    /// L'aveuglement protège la clé contre les attaques par mesure du temps et
+    /// par faute. Un serveur qui signe à la demande — et le nôtre signe ce
+    /// qu'il émet — donne à qui l'observe autant de mesures qu'il veut.
+    /// [`Signer::sign`] reste, parce qu'Ed25519 n'a besoin de rien et qu'une
+    /// signature déterministe est ce qu'une épreuve peut comparer.
+    ///
+    /// # Errors
+    ///
+    /// Les mêmes que [`Signer::sign`].
+    pub fn sign_with<'b, R>(
+        &self,
+        key: &SigningKey,
+        body: &[u8; DIGEST_LEN],
+        fields: &[(&[u8], &[u8])],
+        alea: &mut R,
+        out: &'b mut [u8],
+    ) -> Result<&'b [u8], Error>
+    where
+        R: TryCryptoRng + ?Sized,
+    {
+        self.composer_et_sceller(key.algorithm(), body, fields, out, |condensat| {
+            key.sign_with(condensat, alea)
+        })
+    }
+
+    /// Compose le champ, le relit, et le scelle avec ce que `sceller` rend.
+    fn composer_et_sceller<'b>(
+        &self,
+        algorithme: Algorithm,
+        body: &[u8; DIGEST_LEN],
+        fields: &[(&[u8], &[u8])],
+        out: &'b mut [u8],
+        sceller: impl FnOnce(&[u8; DIGEST_LEN]) -> Result<Vec<u8>, Error>,
+    ) -> Result<&'b [u8], Error> {
         // ── 0. CE QU'ON NOUS DONNE DOIT POUVOIR S'ÉCRIRE ────────────────────
         //
         // Un `d=` qui porterait un `CRLF` terminerait l'en-tête et en ouvrirait
@@ -262,7 +388,7 @@ impl Signer<'_> {
         //
         // En dernier, parce que ce qui vient après lui n'est pas condensé : la
         // signature s'y ajoutera sans rien déplacer.
-        let jusqu_au_b = self.composer(key.algorithm(), body, out)?;
+        let jusqu_au_b = self.composer(algorithme, body, out)?;
 
         // ── 2. On RELIT ce qu'on vient d'écrire ─────────────────────────────
         //
@@ -282,7 +408,7 @@ impl Signer<'_> {
             // Le `b=` qu'on vient d'écrire est DÉJÀ vide : il n'y a rien à en
             // retirer, et donc aucune raison que cette écriture-là échoue.
             condensat.written_signature_field(NOM, valeur);
-            key.sign(&condensat.finish())?
+            sceller(&condensat.finish())?
         };
 
         // ── 3. La signature, pliée, puis la fin de ligne ────────────────────

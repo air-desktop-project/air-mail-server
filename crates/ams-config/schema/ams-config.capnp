@@ -77,6 +77,31 @@ struct Configuration {
   # SANS CERTIFICAT, CE PORT NE SERT PERSONNE : la session IMAP refuse `LOGIN`
   # et `AUTHENTICATE` hors chiffrement, sans réglage possible (C6).
   listenImap @15 :Text;
+
+  # DKIM (RFC 6376) : de quoi SIGNER ce que ce serveur émet.
+  dkim @16 :Dkim;
+}
+
+# DKIM : SIGNER, et non vérifier.
+#
+# La vérification ne se règle pas : elle a lieu sur tout ce qui arrive, parce
+# que DMARC en dépend. Signer, en revanche, demande une clé qu'un
+# administrateur a publiée dans le DNS — c'est pourquoi cela se configure.
+struct Dkim {
+  # `s=` — le sélecteur qui nomme la clé dans le DNS, sous
+  # `<sélecteur>._domainkey.<domaine>`.
+  #
+  # VIDE, ON NE SIGNE PAS. Comme partout ici, l'absence de valeur EST l'absence
+  # de service : il n'y a pas de drapeau pour la contredire, et donc pas d'état
+  # où l'on croirait signer sans le faire.
+  selector @0 :Text;
+
+  # Le chemin de la clé privée, en PEM (`PRIVATE KEY` ou `RSA PRIVATE KEY`).
+  #
+  # Un CHEMIN, et non la clé : recopiée ici, elle hériterait des permissions de
+  # ce fichier — la même raison que pour TLS. Le serveur refuse de démarrer si
+  # elle est lisible par tout le monde.
+  privateKeyPath @1 :Text;
 }
 
 # TLS (C4, C14). Deux CHEMINS, et pas le matériel lui-même : une clé privée

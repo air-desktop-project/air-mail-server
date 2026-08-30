@@ -1437,6 +1437,54 @@ partie, et deux parties dans une même commande.
 Ce qui n'est toujours pas servi : `HEADER.FIELDS (…)` et `HEADER.FIELDS.NOT (…)`,
 qui rendent un CHOIX de champs d'en-tête.
 
+## Le signeur DKIM a un appelant, depuis le 2026-08-30
+
+C9 demande « DKIM en signature ET en vérification ». La vérification tournait
+depuis longtemps ; le signataire, lui, existait, était couvert à 100 %, comparé à
+OpenSSL — et **n'était appelé par personne**. C'était la dette la plus visible du
+produit : une fonctionnalité écrite qui ne servait à rien.
+
+**CE QU'ON ÉMET PART SIGNÉ**, dès qu'une clé est nommée. Ce que ce serveur émet,
+ce sont ses rapports DMARC — et c'est précisément ce qui devait être signé en
+premier : un rapport arrive chez un domaine qui, par définition, se méfie de ce
+qui n'est pas authentifié.
+
+**PAS DE DRAPEAU** (C8, comme partout ici) : on signe si et seulement si un
+sélecteur ET une clé sont nommés. Un sélecteur sans clé ne veut dire ni « signe »
+ni « ne signe pas », et `air-mail-admin` le refuse devant l'opérateur — c'est le
+seul moment où le lui dire coûte une seconde plutôt qu'une astreinte.
+
+**LA CLÉ SE LIT AU DÉMARRAGE**, jamais à la première émission : un serveur qui
+découvrirait alors qu'elle est illisible aurait déjà annoncé qu'il signe. Ce qui
+ne peut pas marcher doit refuser de démarrer. Et une clé lisible par tout le
+monde l'empêche, comme celle de TLS et pour la même raison — qui la vole signe en
+notre nom, et rien ne le distingue de nous. Le partage par groupe reste permis.
+
+**L'AVEUGLEMENT, PARCE QU'ON SIGNE À LA DEMANDE.** `Signer::sign` scellait sans
+aveuglement, ce que la crate elle-même déconseille à un serveur : qui l'observe
+obtient autant de mesures qu'il veut. `Signer::sign_with` a donc été écrit — même
+champ, même signature, l'aveuglement ne protège que LA CLÉ —, et la signature
+sort de la boucle asynchrone : une exponentiation RSA privée et une lecture
+d'`/dev/urandom` sont bloquantes, et n'ont rien à faire dans un fil que d'autres
+partagent.
+
+**LA CLÉ N'APPARAÎT JAMAIS DANS UNE TRACE.** `SigningKey` n'a délibérément pas de
+`Debug` ; le signataire de la boucle en a un, écrit à la main, qui montre le
+sélecteur et rien d'autre. Une clé privée qui figure dans un journal n'est plus
+une clé privée.
+
+**UN MESSAGE QU'ON NE SAIT PAS SIGNER PART QUAND MÊME.** Il vaut mieux un rapport
+non signé qu'un rapport qui n'arrive pas : le destinataire n'en a pas moins
+besoin, et rien dans DMARC n'exige que nos propres rapports le soient. Le serveur
+dit au démarrage s'il signe, plutôt que de laisser le découvrir chez le
+destinataire.
+
+Il a fallu, pour cela, apprendre à lire une clé : `SigningKey::from_pem` lit le
+PKCS#8 (`BEGIN PRIVATE KEY`, RSA ou Ed25519) et le PKCS#1 (`BEGIN RSA PRIVATE
+KEY`). **C'EST L'ÉTIQUETTE QUI DIT LE FORMAT, ET NON UNE DEVINETTE** : essayer
+l'un puis l'autre marcherait aussi, et masquerait une clé abîmée derrière un
+second essai qui échoue pour une autre raison.
+
 ## Le gate de couverture arrondissait vers le haut, depuis le 2026-08-29
 
 `check-couverture` comparait un POURCENTAGE ARRONDI à son seuil. Sur deux
@@ -2048,6 +2096,5 @@ persistant, et lecture sans verrou côté IMAP), C14 (`X25519MLKEM768` en tête)
 découpage des lectures ne change rien au verdict.
 
 Ce qui manque, et qu'aucune phrase ne doit laisser croire acquis : les critères
-de `SEARCH` qui lisent le message et le choix de champs d'en-tête ; le signeur DKIM,
-qui existe et n'a pas d'appelant ; la file de réémission des messages sortants ;
-et toute interface HTTP.
+de `SEARCH` qui lisent le message et le choix de champs d'en-tête ; la file de
+réémission des messages sortants ; et toute interface HTTP.

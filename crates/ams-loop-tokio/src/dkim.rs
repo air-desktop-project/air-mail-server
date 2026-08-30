@@ -25,10 +25,12 @@
 //! seul qui décide. Ce module ne refuse donc aucun message.
 
 use std::string::String;
+use std::sync::Arc;
 use std::vec::Vec;
 
 use ams_dkim::{
-    BodyHasher, HeaderHasher, PublicKeyRecord, Signature, decoder_base64, hash_signed_headers,
+    BodyHasher, Canon, Canonicalization, HeaderHasher, PublicKeyRecord, SIGNATURE_FIELD_MAX,
+    Signature, Signer, SigningKey, TryCryptoRng, TryRng, decoder_base64, hash_signed_headers,
     verify,
 };
 use ams_mime::{Limits as MimeLimits, Message};
@@ -371,3 +373,168 @@ async fn conclure(
     };
     resultat
 }
+
+// ── Signer ce que ce serveur émet ───────────────────────────────────────────
+
+/// De quoi signer : le sélecteur publié dans le DNS, et la clé qu'il nomme.
+///
+/// # LA CLÉ EST LUE UNE FOIS, AU DÉMARRAGE
+///
+/// Un serveur qui découvrirait à la première émission que sa clé est illisible
+/// aurait déjà annoncé qu'il signe. Ce qui ne peut pas marcher doit refuser de
+/// démarrer, et c'est pourquoi cette structure porte une clé DÉJÀ lue.
+#[derive(Clone)]
+pub struct DkimSigner {
+    selector: String,
+    key: Arc<SigningKey>,
+}
+
+/// # LA CLÉ N'APPARAÎT JAMAIS, ET C'EST POURQUOI CE `Debug` EST ÉCRIT À LA MAIN
+///
+/// `SigningKey` n'en a pas, délibérément : une clé privée qui figure dans une
+/// trace n'est plus une clé privée, et c'est le genre de fuite qu'on ne
+/// remarque qu'après. Le dérivé aurait forcé à lui en donner un.
+impl core::fmt::Debug for DkimSigner {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("DkimSigner")
+            .field("selector", &self.selector)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Les champs qu'on couvre, dans l'ordre.
+///
+/// # POURQUOI CEUX-LÀ, ET PAS TOUS
+///
+/// `h=` doit nommer ce qui identifie le message, et RIEN QUI PUISSE MANQUER : un
+/// champ nommé mais absent fait échouer la vérification chez le receveur. Ceux-ci
+/// sont exactement ceux que ce serveur écrit lui-même dans les rapports qu'il
+/// compose — il ne signe rien qu'il n'ait écrit.
+///
+/// `from` en fait partie, et c'est la condition sans laquelle la signature ne
+/// dirait rien de l'auteur : le signataire refuse de l'omettre.
+const CHAMPS_SIGNES: [&[u8]; 7] = [
+    b"from",
+    b"to",
+    b"subject",
+    b"date",
+    b"message-id",
+    b"mime-version",
+    b"content-type",
+];
+
+impl DkimSigner {
+    /// Un signataire, à partir d'un sélecteur et d'une clé déjà lue.
+    #[must_use]
+    pub fn new(selector: String, key: Arc<SigningKey>) -> Self {
+        Self { selector, key }
+    }
+
+    /// Signe un message, et rend celui qui porte sa signature.
+    ///
+    /// # UN MESSAGE QU'ON NE SAIT PAS SIGNER PART QUAND MÊME
+    ///
+    /// Il vaut mieux un rapport non signé qu'un rapport qui n'arrive pas : le
+    /// destinataire n'en a pas moins besoin, et rien dans DMARC n'exige que nos
+    /// propres rapports soient signés. Le refus serait une punition qu'on
+    /// s'infligerait.
+    ///
+    /// Cela ne peut arriver que sur un défaut de ce code — la clé a été lue au
+    /// démarrage, et le message vient d'être composé ici.
+    #[must_use]
+    pub fn sign(&self, message: Vec<u8>, from: &str, timestamp: u64) -> Vec<u8> {
+        match self.champ(&message, from, timestamp) {
+            Some(champ) => {
+                // EN TÊTE, et non à la fin : §3.5 veut que le champ précède ce
+                // qu'il couvre, et un vérificateur qui le trouve ailleurs ne
+                // condense pas la même chose.
+                let mut signe = champ;
+                signe.extend_from_slice(&message);
+                signe
+            }
+            None => message,
+        }
+    }
+
+    /// Compose le champ `DKIM-Signature`, s'il se compose.
+    fn champ(&self, message: &[u8], from: &str, timestamp: u64) -> Option<Vec<u8>> {
+        let domaine = from.rsplit_once('@').map(|(_, apres)| apres)?;
+        let lu = Message::parse(message, &MimeLimits::DEFAULT).ok()?;
+        let canon = Canonicalization {
+            header: Canon::Relaxed,
+            body: Canon::Relaxed,
+        };
+
+        let mut corps = BodyHasher::new(canon.body, None);
+        corps.update(lu.body());
+        let (condensat, _) = corps.finish();
+
+        let champs: Vec<(&[u8], &[u8])> = lu
+            .fields()
+            .map(|champ| (champ.name(), champ.raw_value()))
+            .collect();
+
+        let signataire = Signer {
+            domain: domaine.as_bytes(),
+            selector: self.selector.as_bytes(),
+            canonicalization: canon,
+            headers: &CHAMPS_SIGNES,
+            timestamp: Some(timestamp),
+            // Pas de `x=` : une signature qui expire fait échouer la
+            // vérification d'un message archivé, et rien ici ne demande qu'elle
+            // cesse de valoir.
+            expiration: None,
+            identity: None,
+        };
+        let mut sortie = std::vec![0_u8; SIGNATURE_FIELD_MAX];
+        // L'AVEUGLEMENT, PARCE QUE NOUS SIGNONS À LA DEMANDE. Qui observe ce
+        // serveur obtient autant de mesures qu'il veut ; sans aveuglement, RSA
+        // les lui laisse exploiter.
+        let mut alea = Urandom::ouvrir()?;
+        let ecrits = signataire
+            .sign_with(&self.key, &condensat, &champs, &mut alea, &mut sortie)
+            .ok()?
+            .len();
+        sortie.truncate(ecrits);
+        Some(sortie)
+    }
+}
+
+/// Une source d'aléa qui lit `/dev/urandom`.
+///
+/// # POURQUOI UNE LECTURE BLOQUANTE EST ICI ACCEPTABLE
+///
+/// `/dev/urandom` ne bloque pas une fois la machine amorcée, et la signature
+/// elle-même — une exponentiation RSA privée — occupe déjà le fil bien plus
+/// longtemps. C'est pour cela que l'appelant signe hors de la boucle.
+struct Urandom(std::fs::File);
+
+impl Urandom {
+    fn ouvrir() -> Option<Self> {
+        std::fs::File::open("/dev/urandom").ok().map(Self)
+    }
+}
+
+impl TryRng for Urandom {
+    type Error = std::io::Error;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        let mut octets = [0_u8; 4];
+        self.try_fill_bytes(&mut octets)?;
+        Ok(u32::from_ne_bytes(octets))
+    }
+
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        let mut octets = [0_u8; 8];
+        self.try_fill_bytes(&mut octets)?;
+        Ok(u64::from_ne_bytes(octets))
+    }
+
+    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+        // ON NE SE RABAT SUR RIEN. Un aveuglement fait d'octets prévisibles ne
+        // protège pas la clé : il donne à croire qu'elle l'est.
+        std::io::Read::read_exact(&mut self.0, dst)
+    }
+}
+
+impl TryCryptoRng for Urandom {}

@@ -67,6 +67,7 @@ use ams_mime::{
     write_date, write_failure_mail, write_report_mail,
 };
 
+use crate::dkim::DkimSigner;
 use crate::relay::{Outgoing, Relay, RelayOutcome};
 use crate::resolver::{Resolver, Txt};
 
@@ -215,6 +216,13 @@ pub struct ReportSpool {
     resolveur: Resolver,
     /// De quoi remettre les rapports, si ce serveur les envoie.
     relay: Option<Relay>,
+    /// De quoi les SIGNER, si ce serveur a une clé.
+    ///
+    /// **Ce qu'on émet vaut ce que vaut son authentification** : un rapport
+    /// DMARC non signé arrive chez un domaine qui, précisément, se méfie de ce
+    /// qui n'est pas authentifié. Sans clé, on émet quand même — un rapport non
+    /// signé vaut mieux qu'aucun rapport.
+    dkim: Option<DkimSigner>,
     /// Compose-t-on des rapports d'ÉCHEC ?
     ///
     /// **Ils portent le courrier de quelqu'un** — voir `ams_mime::EXPOSES` —
@@ -249,12 +257,23 @@ impl ReportSpool {
             directory,
             resolveur,
             relay: None,
+            dkim: None,
             echecs_actifs: false,
             journal: Mutex::new(HashMap::new()),
             debut: Mutex::new(maintenant()),
             numero: AtomicU64::new(0),
             echecs: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Donne à ce journal de quoi SIGNER ce qu'il compose.
+    ///
+    /// Sans signataire, les rapports partent non signés : ils restent
+    /// recevables, et l'absence de clé n'est pas une raison de se taire.
+    #[must_use]
+    pub fn with_dkim(mut self, signataire: DkimSigner) -> Self {
+        self.dkim = Some(signataire);
+        self
     }
 
     /// Donne à ce journal de quoi remettre ce qu'il compose.
@@ -690,6 +709,7 @@ impl ReportSpool {
         let mut message = std::vec![0_u8; report_mail_max(&courrier)];
         let ecrit = write_report_mail(&mut message, &courrier).ok()?.len();
         message.truncate(ecrit);
+        let message = self.signer(message).await;
 
         let destinataires = std::vec![String::from(adresse)];
         Some(
@@ -1034,6 +1054,28 @@ impl ReportSpool {
             .ok()?
             .len();
         message.truncate(ecrit);
-        Some(message)
+        Some(self.signer(message).await)
+    }
+
+    /// Signe un message, s'il y a de quoi.
+    ///
+    /// # LA SIGNATURE SORT DE LA BOUCLE
+    ///
+    /// Une exponentiation RSA privée occupe le fil des millisecondes durant, et
+    /// l'aveuglement lit `/dev/urandom`. Les deux sont bloquants ; les laisser
+    /// dans une tâche asynchrone ferait attendre toutes celles qui la
+    /// partagent, pour un travail qui n'attend rien.
+    async fn signer(&self, message: Vec<u8>) -> Vec<u8> {
+        let Some(signataire) = self.dkim.clone() else {
+            return message;
+        };
+        let de = self.email.clone();
+        let quand = maintenant();
+        // La tâche ne panique pas — la signature ne panique pas —, mais
+        // l'exécuteur peut être en train de s'arrêter. Un rapport perdu à
+        // l'arrêt ne vaut pas qu'on garde une copie du message pour le cas.
+        tokio::task::spawn_blocking(move || signataire.sign(message, &de, quand))
+            .await
+            .unwrap_or_default()
     }
 }

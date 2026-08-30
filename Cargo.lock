@@ -153,6 +153,7 @@ version = "0.1.0"
 dependencies = [
  "ams-auth",
  "ams-config",
+ "ams-dkim",
  "ams-guard",
  "ams-index",
  "ams-loop-tokio",

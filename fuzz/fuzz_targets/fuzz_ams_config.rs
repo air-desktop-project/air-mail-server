@@ -19,8 +19,8 @@ use core::time::Duration;
 
 use ams_auth::{Account, DUMMY_HASH};
 use ams_config::{
-    Configuration, Dmarc, Enforcement, Spf, Timeouts, Tls, decode, decode_accounts, decode_index,
-    encode, encode_accounts, encode_index,
+    Configuration, Dkim, Dmarc, Enforcement, Spf, Timeouts, Tls, decode, decode_accounts,
+    decode_index, encode, encode_accounts, encode_index,
 };
 use ams_guard::Thresholds;
 use ams_index::{MailboxState, Uid, UidValidity};
@@ -49,6 +49,8 @@ struct Entree {
     /// composer « un seul des deux », qui est justement le cas que le décodeur
     /// refuse. Les lier ici cacherait ce refus au lieu de l'éprouver.
     tls: [String; 2],
+    /// Le sélecteur DKIM et le chemin de sa clé.
+    dkim: [String; 2],
     /// Le chemin du magasin de comptes.
     comptes: String,
     /// L'adresse d'écoute POP3 — libre, y compris absurde : cette crate ne
@@ -132,6 +134,10 @@ fuzz_target!(|entree: Entree| {
         tls: Tls {
             certificate_chain_path: entree.tls[0].clone(),
             private_key_path: entree.tls[1].clone(),
+        },
+        dkim: Dkim {
+            selector: entree.dkim[0].clone(),
+            private_key_path: entree.dkim[1].clone(),
         },
         spf: Spf {
             resolvers: entree.resolveurs.clone(),
