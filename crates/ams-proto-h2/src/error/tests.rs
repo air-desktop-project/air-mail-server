@@ -72,6 +72,10 @@ fn chaque_cause_se_dit() {
         (Cause::SettingValueOutOfRange, "valeur exclue"),
         (Cause::BadPreface, "préambule"),
         (Cause::ZeroWindowUpdate, "WINDOW_UPDATE"),
+        (Cause::BadInteger, "entier HPACK"),
+        (Cause::BadString, "chaîne HPACK"),
+        (Cause::BadHuffman, "Huffman"),
+        (Cause::BufferTooSmall, "tampon de sortie"),
     ] {
         let texte = std::format!("{}", Error::connection(ErrorCode::ProtocolError, cause));
         assert!(texte.contains(extrait), "{cause:?} : {texte}");

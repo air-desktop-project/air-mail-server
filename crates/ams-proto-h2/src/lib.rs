@@ -43,6 +43,7 @@ extern crate std;
 
 mod error;
 mod frame;
+pub mod hpack;
 mod preface;
 mod settings;
 

@@ -2542,6 +2542,48 @@ priorités que la RFC a retiré, et dont la complexité a produit sa part de fai
 `PUSH_PROMISE` est refusé — §8.4 l'a déprécié, un client n'a jamais eu le droit
 d'en envoyer, et ce serveur annonce `SETTINGS_ENABLE_PUSH` à zéro.
 
+### HPACK : la table vient de la RFC, pas de la mémoire
+
+Deux cent cinquante-sept codes de Huffman recopiés à la main, c'est deux cent
+cinquante-sept occasions de se tromper d'un bit — et une erreur y est invisible :
+elle décode un caractère pour un autre, sur une entrée précise, chez un client
+précis. Les tables ont donc été **extraites du texte de la RFC**, et deux
+propriétés vérifiées avant d'être écrites : le code est PRÉFIXE, et il est
+CANONIQUE.
+
+La seconde permet de décoder sans table de correspondance géante : par longueur
+croissante, on compare le code accumulé au premier code de cette longueur. Une
+table plate de 2^30 entrées serait plus rapide ; elle serait aussi impossible à
+couvrir et à relire. C7 tranche.
+
+**AUCUNE GARDE DE LONGUEUR DANS LE DÉCODEUR**, et c'est démontré plutôt que
+supposé : la table est COMPLÈTE à trente bits — aucun nœud interne n'y subsiste —,
+donc tout chemin de trente bits aboutit à un symbole. Un test le prouve. Écrire
+un `if bits >= 30 { refuser }` aurait été une garde qu'aucune entrée ne peut
+emprunter. Et si la table changeait, le contrôle de remplissage refuserait quand
+même : le filet est là, il est simplement ailleurs.
+
+**LE REMPLISSAGE EST FAIT DES BITS DE TÊTE DU CODE D'`EOS`**, et le code le dit
+ainsi plutôt que « des uns ». Les deux formulations donnent le même octet ; seule
+la seconde dit pourquoi.
+
+### Un défaut écrit, puis trouvé par son propre test
+
+Le décodeur d'entier HPACK accumulait les octets de continuation avec
+`checked_shl`. **`checked_shl` ne rend `None` que si le DÉCALAGE dépasse la
+largeur du type** : `127u32.checked_shl(28)` rend `Some`, et jette silencieusement
+les bits qui débordent. La suite `ff ff ff ff ff 7f` se lisait donc comme la
+valeur 255.
+
+Un multiplicateur, lui, déborde AVANT — et c'est ce débordement-là qui refuse
+l'entier. Il rend du même coup inutile la borne sur le NOMBRE d'octets de
+continuation, qu'il atteint toujours le premier : une garde de moins, et c'est
+la mesure de couverture qui l'a montrée inatteignable.
+
+La leçon générale se range à côté de celle du `saturating_sub` de 2026-08-28 :
+**les fonctions `checked_*` ne vérifient que ce que leur nom dit**, et `shl`
+vérifie le décalage, pas la valeur.
+
 ### La bombe de décompression a sa propre borne
 
 HPACK et QPACK compriment : mille champs identiques tiennent en quelques octets

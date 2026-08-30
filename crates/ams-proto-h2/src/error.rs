@@ -139,6 +139,15 @@ pub enum Cause {
     BadPreface,
     /// Un `WINDOW_UPDATE` de zéro, que §6.9 interdit.
     ZeroWindowUpdate,
+    /// Un entier HPACK déborde, n'est pas terminé, ou s'écrit trop long.
+    BadInteger,
+    /// Une chaîne HPACK déborde de ce qui reste, ou de ce qu'on retient.
+    BadString,
+    /// Un code de Huffman inconnu, un remplissage fautif, ou `EOS`.
+    BadHuffman,
+    /// Le tampon de sortie ne suffit pas. **C'est notre faute, pas celle du
+    /// pair** : d'où `INTERNAL_ERROR`.
+    BufferTooSmall,
 }
 
 impl Error {
@@ -194,6 +203,10 @@ impl fmt::Display for Error {
             Cause::SettingValueOutOfRange => "un réglage porte une valeur exclue",
             Cause::BadPreface => "le préambule n'est pas celui de §3.4",
             Cause::ZeroWindowUpdate => "un `WINDOW_UPDATE` de zéro",
+            Cause::BadInteger => "un entier HPACK déborde ou ne se termine pas",
+            Cause::BadString => "une chaîne HPACK déborde",
+            Cause::BadHuffman => "un code de Huffman fautif",
+            Cause::BufferTooSmall => "le tampon de sortie ne suffit pas",
         };
         let portee = match self.fatal {
             true => "connexion",

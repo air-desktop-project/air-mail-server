@@ -310,3 +310,10 @@ path = "fuzz_targets/fuzz_ams_h2_frame.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_ams_h2_hpack"
+path = "fuzz_targets/fuzz_ams_h2_hpack.rs"
+test = false
+doc = false
+bench = false
