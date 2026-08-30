@@ -491,6 +491,298 @@ impl<'a> Frame<'a> {
             reason: lecteur.tranche_annoncee()?,
         })
     }
+
+    /// Écrit cette trame, et rend ce qu'elle occupe.
+    ///
+    /// # ON ÉCRIT CE QUE L'ON SAIT LIRE, ET RÉCIPROQUEMENT
+    ///
+    /// Un décodeur sans encodeur ne se vérifie que sur des exemples ; avec lui,
+    /// il se vérifie sur **tout ce qu'on peut fabriquer** — c'est la propriété
+    /// d'aller-retour, et c'est la seule qui couvre les combinaisons auxquelles
+    /// personne n'a pensé.
+    ///
+    /// # ELLE N'ÉCRIT PAS TOUJOURS CE QU'ON LUI A DONNÉ
+    ///
+    /// Une trame `STREAM` lue sans champ de longueur se réécrit AVEC : la forme
+    /// sans longueur n'a de sens qu'en dernière position d'un paquet, et
+    /// l'écrivain ne sait pas s'il y est. C'est à l'appelant de choisir cette
+    /// économie, et [`Frame::write_last`] la lui donne.
+    ///
+    /// # Errors
+    ///
+    /// [`Reason::BufferTooSmall`] si `out` ne suffit pas ;
+    /// [`Reason::VarintTooLarge`] pour une valeur hors de l'espace de §16.
+    pub fn write(&self, out: &mut [u8]) -> Result<usize, Error> {
+        self.ecrire(out, false)
+    }
+
+    /// Écrit cette trame en dernière position d'un paquet.
+    ///
+    /// Seule une trame `STREAM` s'en trouve changée : elle omet alors sa
+    /// longueur, et va jusqu'au bout du paquet (§19.8). Quelques octets gagnés
+    /// sur chaque paquet de données.
+    ///
+    /// # Errors
+    ///
+    /// Les mêmes que [`Frame::write`].
+    pub fn write_last(&self, out: &mut [u8]) -> Result<usize, Error> {
+        self.ecrire(out, true)
+    }
+
+    /// Écrit la trame, en dernière position ou non.
+    fn ecrire(&self, out: &mut [u8], derniere: bool) -> Result<usize, Error> {
+        let mut plume = Plume::new(out);
+        match *self {
+            Self::Padding { count } => plume.zeros(count)?,
+            Self::Ping => plume.varint(0x01)?,
+            Self::Ack(ref ack) => Self::ecrire_ack(&mut plume, ack)?,
+            Self::ResetStream {
+                stream,
+                code,
+                final_size,
+            } => {
+                plume.varint(0x04)?;
+                plume.varint(stream)?;
+                plume.varint(code)?;
+                plume.varint(final_size)?;
+            }
+            Self::StopSending { stream, code } => {
+                plume.varint(0x05)?;
+                plume.varint(stream)?;
+                plume.varint(code)?;
+            }
+            Self::Crypto { offset, data } => {
+                plume.varint(0x06)?;
+                plume.varint(offset)?;
+                plume.tranche_annoncee(data)?;
+            }
+            Self::NewToken { token } => {
+                plume.varint(0x07)?;
+                plume.tranche_annoncee(token)?;
+            }
+            Self::Stream {
+                stream,
+                offset,
+                data,
+                fin,
+            } => Self::ecrire_stream(&mut plume, stream, offset, data, fin, derniere)?,
+            Self::MaxData { maximum } => {
+                plume.varint(0x10)?;
+                plume.varint(maximum)?;
+            }
+            Self::MaxStreamData { stream, maximum } => {
+                plume.varint(0x11)?;
+                plume.varint(stream)?;
+                plume.varint(maximum)?;
+            }
+            Self::MaxStreams {
+                directional,
+                maximum,
+            } => {
+                plume.varint(type_de_sens(0x12, directional))?;
+                plume.varint(borner_les_flux(maximum)?)?;
+            }
+            Self::DataBlocked { limit } => {
+                plume.varint(0x14)?;
+                plume.varint(limit)?;
+            }
+            Self::StreamDataBlocked { stream, limit } => {
+                plume.varint(0x15)?;
+                plume.varint(stream)?;
+                plume.varint(limit)?;
+            }
+            Self::StreamsBlocked { directional, limit } => {
+                plume.varint(type_de_sens(0x16, directional))?;
+                plume.varint(borner_les_flux(limit)?)?;
+            }
+            Self::NewConnectionId {
+                sequence,
+                retire_prior_to,
+                ref id,
+                ref token,
+            } => {
+                // §19.15 : le rang de retrait ne peut pas dépasser le rang
+                // annoncé — on refuse de l'écrire comme on refuse de le lire.
+                if retire_prior_to > sequence || id.is_empty() {
+                    return Err(Error::new(Reason::BadFrameField));
+                }
+                plume.varint(0x18)?;
+                plume.varint(sequence)?;
+                plume.varint(retire_prior_to)?;
+                plume.octet(u8::try_from(id.len()).unwrap_or(0))?;
+                plume.brut(id.as_bytes())?;
+                plume.brut(token)?;
+            }
+            Self::RetireConnectionId { sequence } => {
+                plume.varint(0x19)?;
+                plume.varint(sequence)?;
+            }
+            Self::PathChallenge { ref data } => {
+                plume.varint(0x1a)?;
+                plume.brut(data)?;
+            }
+            Self::PathResponse { ref data } => {
+                plume.varint(0x1b)?;
+                plume.brut(data)?;
+            }
+            Self::ConnectionClose {
+                code,
+                frame_type,
+                reason,
+            } => {
+                // §19.19 : c'est la PRÉSENCE du type de trame qui dit de quel
+                // espace vient le code, et non le code lui-même.
+                match frame_type {
+                    Some(quelle) => {
+                        plume.varint(0x1c)?;
+                        plume.varint(code)?;
+                        plume.varint(quelle)?;
+                    }
+                    None => {
+                        plume.varint(0x1d)?;
+                        plume.varint(code)?;
+                    }
+                }
+                plume.tranche_annoncee(reason)?;
+            }
+            Self::HandshakeDone => plume.varint(0x1e)?,
+        }
+        Ok(plume.ecrits())
+    }
+
+    /// Écrit un `ACK` et ses intervalles.
+    fn ecrire_ack(plume: &mut Plume<'_>, ack: &Ack<'a>) -> Result<(), Error> {
+        plume.varint(match ack.ecn.is_some() {
+            true => 0x03,
+            false => 0x02,
+        })?;
+        plume.varint(ack.largest)?;
+        plume.varint(ack.delay)?;
+        plume.varint(ack.range_count)?;
+        plume.varint(ack.first_range)?;
+        // **LES INTERVALLES SE RECOPIENT TELS QUELS.** Ils sont déjà écrits en
+        // entiers de §16, et les relire pour les réécrire n'ajouterait qu'une
+        // occasion de les changer.
+        plume.brut(ack.encoded_ranges)?;
+        if let Some(comptes) = ack.ecn {
+            plume.varint(comptes.ect0)?;
+            plume.varint(comptes.ect1)?;
+            plume.varint(comptes.ce)?;
+        }
+        Ok(())
+    }
+
+    /// Écrit un `STREAM`, dont les trois bits de bas disent la forme.
+    fn ecrire_stream(
+        plume: &mut Plume<'_>,
+        stream: u64,
+        offset: u64,
+        data: &[u8],
+        fin: bool,
+        derniere: bool,
+    ) -> Result<(), Error> {
+        borner_la_fin(offset, data.len())?;
+        // §19.8 : `OFF` en 0x04, `LEN` en 0x02, `FIN` en 0x01. On n'écrit `OFF`
+        // que s'il sert : un décalage nul se déduit.
+        let mut type_de_trame = 0x08_u64;
+        if offset != 0 {
+            type_de_trame |= 0x04;
+        }
+        if !derniere {
+            type_de_trame |= 0x02;
+        }
+        if fin {
+            type_de_trame |= 0x01;
+        }
+        plume.varint(type_de_trame)?;
+        plume.varint(stream)?;
+        if offset != 0 {
+            plume.varint(offset)?;
+        }
+        match derniere {
+            true => plume.brut(data),
+            false => plume.tranche_annoncee(data),
+        }
+    }
+}
+
+/// Le type d'une trame qui se décline en deux sens.
+const fn type_de_sens(base: u64, sens: Directional) -> u64 {
+    match sens {
+        Directional::Bidirectional => base,
+        Directional::Unidirectional => base | 0x01,
+    }
+}
+
+/// Un curseur d'écriture.
+struct Plume<'a> {
+    /// Où l'on écrit.
+    vers: &'a mut [u8],
+    /// Combien on a écrit.
+    ecrits: usize,
+}
+
+impl<'a> Plume<'a> {
+    /// Une plume au début.
+    const fn new(vers: &'a mut [u8]) -> Self {
+        Self { vers, ecrits: 0 }
+    }
+
+    /// Combien d'octets ont été écrits.
+    const fn ecrits(&self) -> usize {
+        self.ecrits
+    }
+
+    /// Ce qui reste à écrire.
+    fn reste(&mut self) -> &mut [u8] {
+        self.vers.get_mut(self.ecrits..).unwrap_or_default()
+    }
+
+    /// Un entier de §16.
+    fn varint(&mut self, valeur: u64) -> Result<(), Error> {
+        let poses = varint::encode(valeur, self.reste())?;
+        self.ecrits = self.ecrits.saturating_add(poses);
+        Ok(())
+    }
+
+    /// Un octet.
+    fn octet(&mut self, valeur: u8) -> Result<(), Error> {
+        let place = self
+            .reste()
+            .first_mut()
+            .ok_or_else(|| Error::new(Reason::BufferTooSmall))?;
+        *place = valeur;
+        self.ecrits = self.ecrits.saturating_add(1);
+        Ok(())
+    }
+
+    /// Des octets, tels quels.
+    fn brut(&mut self, octets: &[u8]) -> Result<(), Error> {
+        let place = self
+            .reste()
+            .get_mut(..octets.len())
+            .ok_or_else(|| Error::new(Reason::BufferTooSmall))?;
+        place.copy_from_slice(octets);
+        self.ecrits = self.ecrits.saturating_add(octets.len());
+        Ok(())
+    }
+
+    /// Des octets, précédés de leur longueur.
+    fn tranche_annoncee(&mut self, octets: &[u8]) -> Result<(), Error> {
+        self.varint(u64::try_from(octets.len()).unwrap_or(u64::MAX))?;
+        self.brut(octets)
+    }
+
+    /// Des zéros, pour le remplissage.
+    fn zeros(&mut self, combien: usize) -> Result<(), Error> {
+        let place = self
+            .reste()
+            .get_mut(..combien)
+            .ok_or_else(|| Error::new(Reason::BufferTooSmall))?;
+        place.fill(0);
+        self.ecrits = self.ecrits.saturating_add(combien);
+        Ok(())
+    }
 }
 
 /// Le sens d'un flux, depuis le bit de bas du type.

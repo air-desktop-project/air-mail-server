@@ -664,3 +664,333 @@ fn chaque_type_de_trame_se_refuse_tronque() {
         }
     }
 }
+
+/// Relit une trame écrite, et compare.
+fn aller_retour(trame: &Frame<'_>) -> std::vec::Vec<u8> {
+    let mut place = [0_u8; 512];
+    let ecrits = trame.write(&mut place).expect("écrivable");
+    let brut = place.get(..ecrits).unwrap_or_default().to_vec();
+    let (relue, lus) = Frame::parse(&brut).expect("relisible");
+    assert_eq!(lus, ecrits, "on relit exactement ce qu'on a écrit");
+    assert_eq!(&relue, trame, "un aller-retour a changé la trame");
+    brut
+}
+
+/// Une trame de chaque type, pour les épreuves qui les parcourent toutes.
+///
+/// **ELLE EST ÉCRITE UNE FOIS, ET SERT DEUX FOIS.** Deux listes séparées
+/// divergeraient : l'une gagnerait un type que l'autre n'aurait pas, et
+/// l'épreuve qui compte le moins serait celle qui l'aurait manqué.
+fn une_de_chaque() -> std::vec::Vec<Frame<'static>> {
+    const JETON: [u8; STATELESS_RESET_TOKEN_OCTETS] = [0x77; STATELESS_RESET_TOKEN_OCTETS];
+    const HUIT: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+    let identifiant = crate::connection_id::ConnectionId::new(&[0xaa, 0xbb, 0xcc]).expect("licite");
+    std::vec::Vec::from([
+        Frame::Padding { count: 7 },
+        Frame::Ping,
+        Frame::ResetStream {
+            stream: 7,
+            code: 42,
+            final_size: 1_000,
+        },
+        Frame::StopSending {
+            stream: 7,
+            code: 42,
+        },
+        Frame::Crypto {
+            offset: 16,
+            data: b"salut",
+        },
+        Frame::NewToken { token: b"abc" },
+        Frame::Stream {
+            stream: 9,
+            offset: 0,
+            data: b"douze",
+            fin: false,
+        },
+        Frame::Stream {
+            stream: 9,
+            offset: 1_000,
+            data: b"douze",
+            fin: true,
+        },
+        Frame::MaxData { maximum: 65_536 },
+        Frame::MaxStreamData {
+            stream: 3,
+            maximum: 4_096,
+        },
+        Frame::MaxStreams {
+            directional: Directional::Bidirectional,
+            maximum: 100,
+        },
+        Frame::MaxStreams {
+            directional: Directional::Unidirectional,
+            maximum: 3,
+        },
+        Frame::DataBlocked { limit: 99 },
+        Frame::StreamDataBlocked {
+            stream: 3,
+            limit: 99,
+        },
+        Frame::StreamsBlocked {
+            directional: Directional::Bidirectional,
+            limit: 100,
+        },
+        Frame::StreamsBlocked {
+            directional: Directional::Unidirectional,
+            limit: 100,
+        },
+        Frame::NewConnectionId {
+            sequence: 4,
+            retire_prior_to: 2,
+            id: identifiant,
+            token: JETON,
+        },
+        Frame::RetireConnectionId { sequence: 2 },
+        Frame::PathChallenge { data: HUIT },
+        Frame::PathResponse { data: HUIT },
+        Frame::ConnectionClose {
+            code: 0x0a,
+            frame_type: Some(0x08),
+            reason: b"assez",
+        },
+        Frame::ConnectionClose {
+            code: 0x0a,
+            frame_type: None,
+            reason: b"",
+        },
+        Frame::HandshakeDone,
+    ])
+}
+
+/// **CHAQUE TRAME S'ÉCRIT ET SE RELIT IDENTIQUE.** Un décodeur sans encodeur ne
+/// se vérifie que sur des exemples ; avec lui, il se vérifie sur tout ce qu'on
+/// peut fabriquer.
+#[test]
+fn chaque_trame_fait_un_aller_retour() {
+    for trame in &une_de_chaque() {
+        aller_retour(trame);
+    }
+}
+
+/// **UN `ACK` SE RÉÉCRIT AVEC SES INTERVALLES**, et ceux-ci se recopient tels
+/// quels : les relire pour les réécrire n'ajouterait qu'une occasion de les
+/// changer.
+#[test]
+fn un_ack_fait_un_aller_retour() {
+    let brut = octets(&[
+        Bout::Entier(0x02),
+        Bout::Entier(100),
+        Bout::Entier(3),
+        Bout::Entier(2),
+        Bout::Entier(10),
+        Bout::Entier(1),
+        Bout::Entier(5),
+        Bout::Entier(0),
+        Bout::Entier(7),
+    ]);
+    let (trame, _) = Frame::parse(&brut).expect("lisible");
+    let reecrit = aller_retour(&trame);
+    assert_eq!(reecrit, brut, "l'écriture n'est pas celle du pair");
+
+    // Et avec les comptes ECN.
+    let brut = octets(&[
+        Bout::Entier(0x03),
+        Bout::Entier(50),
+        Bout::Entier(0),
+        Bout::Entier(0),
+        Bout::Entier(1),
+        Bout::Entier(11),
+        Bout::Entier(22),
+        Bout::Entier(33),
+    ]);
+    let (trame, _) = Frame::parse(&brut).expect("lisible");
+    let reecrit = aller_retour(&trame);
+    assert_eq!(reecrit, brut);
+}
+
+/// **UNE TRAME `STREAM` LUE SANS LONGUEUR SE RÉÉCRIT AVEC** : la forme sans
+/// longueur n'a de sens qu'en dernière position d'un paquet, et l'écrivain ne
+/// sait pas s'il y est.
+#[test]
+fn un_stream_sans_longueur_se_reecrit_avec() {
+    let brut = octets(&[
+        Bout::Entier(0x08),
+        Bout::Entier(1),
+        Bout::Octets(b"tout ce qui suit"),
+    ]);
+    let (trame, _) = Frame::parse(&brut).expect("lisible");
+    let mut place = [0_u8; 64];
+    let ecrits = trame.write(&mut place).expect("écrivable");
+    assert!(ecrits > brut.len(), "la longueur s'est ajoutée");
+    let (relue, _) = Frame::parse(place.get(..ecrits).unwrap_or_default()).expect("relisible");
+    assert_eq!(relue, trame);
+
+    // **ET `write_last` LA REND À SA FORME COURTE**, si l'appelant sait qu'elle
+    // est en dernière position.
+    let ecrits = trame.write_last(&mut place).expect("écrivable");
+    assert_eq!(place.get(..ecrits).unwrap_or_default(), brut.as_slice());
+}
+
+/// **UN DÉCALAGE NUL NE S'ÉCRIT PAS** : il se déduit, et l'écrire coûterait un
+/// octet sur chaque première trame de chaque flux.
+#[test]
+fn un_decalage_nul_ne_s_ecrit_pas() {
+    let sans = Frame::Stream {
+        stream: 1,
+        offset: 0,
+        data: b"x",
+        fin: false,
+    };
+    let avec = Frame::Stream {
+        stream: 1,
+        offset: 1,
+        data: b"x",
+        fin: false,
+    };
+    let mut place = [0_u8; 64];
+    let court = sans.write(&mut place).expect("écrivable");
+    let premier = place.first().copied().expect("écrit");
+    assert_eq!(premier & 0x04, 0, "le fanion OFF ne devrait pas être là");
+    let long = avec.write(&mut place).expect("écrivable");
+    let premier = place.first().copied().expect("écrit");
+    assert_ne!(premier & 0x04, 0, "le fanion OFF devrait être là");
+    assert!(long > court);
+}
+
+/// **CE QU'ON REFUSE DE LIRE, ON REFUSE DE L'ÉCRIRE.** Un rang de retrait
+/// au-delà du rang annoncé retirerait l'identifiant qu'on donne.
+#[test]
+fn ce_qu_on_refuse_de_lire_on_refuse_de_l_ecrire() {
+    let jeton = [0_u8; STATELESS_RESET_TOKEN_OCTETS];
+    let identifiant = crate::connection_id::ConnectionId::new(&[0xaa]).expect("licite");
+    let fautive = Frame::NewConnectionId {
+        sequence: 2,
+        retire_prior_to: 4,
+        id: identifiant,
+        token: jeton,
+    };
+    let issue = fautive
+        .write(&mut [0_u8; 64])
+        .expect_err("retrait trop haut");
+    assert_eq!(issue.reason(), Reason::BadFrameField);
+
+    // §19.15 : un identifiant VIDE n'a pas sa place dans cette trame, alors
+    // qu'il en a une dans un en-tête.
+    let vide = Frame::NewConnectionId {
+        sequence: 4,
+        retire_prior_to: 2,
+        id: crate::connection_id::ConnectionId::EMPTY,
+        token: jeton,
+    };
+    let issue = vide.write(&mut [0_u8; 64]).expect_err("identifiant vide");
+    assert_eq!(issue.reason(), Reason::BadFrameField);
+
+    // Et un compte de flux au-delà de 2^60.
+    let trop = Frame::MaxStreams {
+        directional: Directional::Bidirectional,
+        maximum: MAX_STREAMS_LIMIT.saturating_add(1),
+    };
+    assert_eq!(
+        trop.write(&mut [0_u8; 64])
+            .expect_err("hors borne")
+            .reason(),
+        Reason::BadFrameField
+    );
+    let trop = Frame::StreamsBlocked {
+        directional: Directional::Unidirectional,
+        limit: MAX_STREAMS_LIMIT.saturating_add(1),
+    };
+    assert_eq!(
+        trop.write(&mut [0_u8; 64])
+            .expect_err("hors borne")
+            .reason(),
+        Reason::BadFrameField
+    );
+
+    // Et un flux dont la fin sortirait de l'espace des entiers.
+    let deborde = Frame::Stream {
+        stream: 1,
+        offset: crate::varint::VARINT_MAX,
+        data: b"x",
+        fin: false,
+    };
+    assert_eq!(
+        deborde
+            .write(&mut [0_u8; 64])
+            .expect_err("hors de l'espace")
+            .reason(),
+        Reason::BadFrameField
+    );
+}
+
+/// **LA PLACE MANQUE, À CHAQUE ENDROIT POSSIBLE DE CHAQUE TRAME.** Un seul type
+/// qu'on n'éprouverait pas laisserait une écriture déborder de son tampon.
+#[test]
+fn l_ecriture_veut_de_la_place() {
+    for trame in &une_de_chaque() {
+        let complet = trame.write(&mut [0_u8; 128]).expect("écrivable");
+        for taille in 0..complet {
+            let mut court = [0_u8; 128];
+            let issue = trame
+                .write(court.get_mut(..taille).expect("assez court"))
+                .expect_err("la place manque");
+            assert_eq!(
+                issue.reason(),
+                Reason::BufferTooSmall,
+                "{trame:?} à {taille}"
+            );
+        }
+    }
+
+    // Un `ACK` avec ses intervalles et ses comptes ECN.
+    let brut = octets(&[
+        Bout::Entier(0x03),
+        Bout::Entier(100),
+        Bout::Entier(3),
+        Bout::Entier(1),
+        Bout::Entier(10),
+        Bout::Entier(1),
+        Bout::Entier(5),
+        Bout::Entier(1),
+        Bout::Entier(2),
+        Bout::Entier(3),
+    ]);
+    let (ack, _) = Frame::parse(&brut).expect("lisible");
+    let complet = ack.write(&mut [0_u8; 128]).expect("écrivable");
+    for taille in 0..complet {
+        let mut court = [0_u8; 128];
+        assert!(
+            ack.write(court.get_mut(..taille).expect("assez court"))
+                .is_err(),
+            "ACK à {taille}"
+        );
+    }
+
+    // Et la forme courte d'un `STREAM`, qui a son propre chemin d'écriture.
+    let flux = Frame::Stream {
+        stream: 1,
+        offset: 0,
+        data: b"douze",
+        fin: false,
+    };
+    let complet = flux.write_last(&mut [0_u8; 64]).expect("écrivable");
+    for taille in 0..complet {
+        let mut court = [0_u8; 64];
+        assert!(
+            flux.write_last(court.get_mut(..taille).expect("assez court"))
+                .is_err(),
+            "STREAM court à {taille}"
+        );
+    }
+}
+
+/// **UN ENTIER HORS DE L'ESPACE DE §16 NE S'ÉCRIT PAS.**
+#[test]
+fn un_entier_hors_de_l_espace_ne_s_ecrit_pas() {
+    let trame = Frame::MaxData {
+        maximum: crate::varint::VARINT_MAX.saturating_add(1),
+    };
+    let issue = trame.write(&mut [0_u8; 64]).expect_err("hors de l'espace");
+    assert_eq!(issue.reason(), Reason::VarintTooLarge);
+}

@@ -3730,3 +3730,77 @@ c'est ce compte-là qui les borne.
 Une mise à jour de clé remet à zéro le compte des paquets CHIFFRÉS, et jamais
 celui des refusés : les essais d'un adversaire ne s'oublient pas parce qu'on a
 changé de clé.
+
+## L'écriture des trames, et l'aller-retour qui la vérifie
+
+Un décodeur sans encodeur ne se vérifie que sur des exemples. Avec lui, il se
+vérifie sur **tout ce qu'on peut fabriquer** — c'est la propriété d'aller-retour,
+et c'est la seule qui couvre les combinaisons auxquelles personne n'a pensé.
+
+Deux détails valent d'être écrits :
+
+- **une trame `STREAM` lue sans champ de longueur se réécrit AVEC.** La forme
+  sans longueur n'a de sens qu'en dernière position d'un paquet, et l'écrivain ne
+  sait pas s'il y est. C'est à l'appelant de choisir cette économie, et
+  `write_last` la lui donne.
+- **un décalage nul ne s'écrit pas** : il se déduit, et l'écrire coûterait un
+  octet sur la première trame de chaque flux.
+
+Et ce qu'on refuse de lire, on refuse de l'écrire : un rang de retrait au-delà du
+rang annoncé, un identifiant de connexion vide dans un `NEW_CONNECTION_ID`, un
+compte de flux au-delà de 2^60. Les mêmes bornes, aux deux bouts.
+
+## Les acquittements, et un défaut que seul le fuzz pouvait trouver
+
+### Trois espaces de numéros, et ils ne se mélangent jamais
+
+§12.3 : `Initial`, `Handshake` et les données applicatives ont chacun leur
+numérotation. Ce n'est pas une commodité : les trois emploient des CLÉS
+différentes, et le numéro de paquet entre dans le nonce. Partager la numérotation
+ferait réemployer un nonce entre deux espaces — et un nonce réemployé livre la
+clé d'authentification de GCM.
+
+La seule exception est `0-RTT` et `1-RTT`, qui partagent un espace : un paquet
+précoce peut être retransmis en `1-RTT`, et c'est la même donnée sous une autre
+protection.
+
+### On ne répond pas à un acquittement par un acquittement
+
+§13.2.1 : un paquet qui ne sollicite rien ne fait rien envoyer, **même s'il laisse
+un trou**. Sans cette règle, deux pairs qui n'ont plus rien à se dire
+s'acquitteraient mutuellement sans fin, et la connexion ne deviendrait jamais
+oisive.
+
+En revanche, un paquet sollicitant qui arrive DANS LE DÉSORDRE s'acquitte sans
+attendre : c'est ce qui évite au pair de croire à une perte et de retransmettre
+ce qui était en route.
+
+### On oublie les plus anciens, jamais les plus récents
+
+§13.2.3 permet d'oublier des intervalles. Un pair qui enverrait des paquets aux
+numéros très espacés obligerait sinon à en retenir autant qu'il en choisit. Ce
+sont les récents qui empêchent une retransmission inutile — ce sont donc les
+anciens qui tombent.
+
+### L'ordre des deux côtés d'un `zip` décide lequel perd un élément
+
+`Zip::next` interroge le PREMIER itérateur, puis le second ; si le second est
+épuisé, **l'élément déjà tiré du premier est jeté**. Une première écriture de la
+réunion des intervalles mettait la destination en premier : chaque écriture
+consommait donc deux places de la table et n'en remplissait qu'une, laissant un
+trou.
+
+La table restait triée, les trous ne se voyaient pas, et l'on continuait d'y
+ranger — jusqu'à ce qu'un intervalle se retrouve du mauvais côté d'un autre.
+L'`ACK` acquittait alors **un paquet jamais reçu**, et l'émetteur, le croyant
+arrivé, ne le retransmettait jamais.
+
+C'est le pire défaut de cette famille : la connexion ne se ferme pas, rien ne se
+plaint, et des données disparaissent. Il a fallu cinq numéros dans un ordre
+précis pour qu'il se voie — **le fuzz l'a trouvé, et aucun test écrit à la main
+ne serait tombé dessus**.
+
+Deux leçons. La première : `zip` n'est pas symétrique, et l'employer pour éviter
+une branche demande de savoir de quel côté mettre quoi. La seconde : l'invariant
+qui a été violé — *la table ne prend jamais de trou* — se vérifie mieux
+directement que par ses conséquences, et il a maintenant son test.

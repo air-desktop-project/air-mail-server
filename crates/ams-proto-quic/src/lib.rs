@@ -45,6 +45,7 @@ mod frame;
 mod packet;
 mod packet_number;
 mod rtt;
+mod space;
 mod stream_id;
 mod transport;
 mod varint;
@@ -65,6 +66,7 @@ pub use packet::{
 };
 pub use packet_number::{PACKET_NUMBER_MAX, PACKET_NUMBER_OCTETS_MAX};
 pub use rtt::{ACK_DELAY_EXPONENT_MAX, GRANULARITY_US, INITIAL_RTT_US, Rtt, decode_ack_delay};
+pub use space::{ELICITING_BEFORE_ACK, RANGES_MAX, Received, Space};
 pub use stream_id::{Initiator, StreamId};
 pub use transport::{
     DEFAULT_ACK_DELAY_EXPONENT, DEFAULT_ACTIVE_CONNECTION_ID_LIMIT, DEFAULT_MAX_ACK_DELAY_MS,

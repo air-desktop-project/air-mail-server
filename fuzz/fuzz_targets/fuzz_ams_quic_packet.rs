@@ -34,6 +34,16 @@
 //! 9. **DES PARAMÈTRES DE TRANSPORT ACCEPTÉS SONT DES PARAMÈTRES UTILISABLES** :
 //!    chaque borne de §18.2 tient, et ce qu'un CLIENT n'a pas le droit
 //!    d'annoncer n'est jamais retenu de lui.
+//! 10. **UNE TRAME LUE SE RÉÉCRIT ET SE RELIT IDENTIQUE.** C'est la propriété
+//!     qui couvre les combinaisons auxquelles personne n'a pensé — un décodeur
+//!     sans encodeur ne se vérifie que sur des exemples. Les OCTETS, eux,
+//!     peuvent différer : le pair a pu écrire un entier plus long que
+//!     nécessaire, et §16 le permet.
+//! 11. **UN `ACK` ACQUITTE EXACTEMENT CE QU'ON A REÇU**, et rien d'autre.
+//!     Acquitter un paquet qu'on n'a pas reçu ferait croire à l'émetteur qu'il
+//!     est arrivé, et il ne le retransmettrait jamais. C'est le seul défaut de
+//!     cette famille qui ne se voit pas : la connexion continue, en perdant des
+//!     données.
 
 #![no_main]
 
@@ -42,8 +52,8 @@ use libfuzzer_sys::fuzz_target;
 
 use ams_proto_quic::{
     CONNECTION_ID_MAX, Frame, Long, LongKind, MAX_ACK_DELAY_LIMIT_MS, MAX_STREAMS_LIMIT,
-    MIN_ACTIVE_CONNECTION_ID_LIMIT, MIN_UDP_PAYLOAD_SIZE, RETRY_TAG_OCTETS, Sender, ShortHeader,
-    TransportParameters, VERSION_NEGOTIATION, is_long, parse_long,
+    MIN_ACTIVE_CONNECTION_ID_LIMIT, MIN_UDP_PAYLOAD_SIZE, RETRY_TAG_OCTETS, Received, Sender,
+    ShortHeader, TransportParameters, VERSION_NEGOTIATION, is_long, parse_long,
 };
 
 /// Ce qu'on soumet.
@@ -139,9 +149,67 @@ fuzz_target!(|entree: Entree| {
             reste.len()
         );
         verifier(&trame, reste);
+        // PROPRIÉTÉ 10 : ce qu'on a lu se réécrit et se relit identique.
+        let mut reecrit = [0_u8; 4096];
+        if let Ok(poses) = trame.write(&mut reecrit) {
+            let (relue, encore) = Frame::parse(reecrit.get(..poses).unwrap_or_default())
+                .expect("ce qu'on écrit se relit");
+            assert_eq!(relue, trame, "un aller-retour a changé la trame");
+            assert_eq!(encore, poses, "on relit exactement ce qu'on a écrit");
+        }
         reste = reste.get(lus..).unwrap_or_default();
         if reste.is_empty() {
             break;
+        }
+    }
+
+    // PROPRIÉTÉ 11 : un `ACK` acquitte exactement ce qu'on a reçu.
+    {
+        let mut recu = Received::new();
+        let mut vus = std::collections::BTreeSet::new();
+        // Les octets du paquet, pris deux par deux, font des numéros.
+        for paire in paquet.chunks_exact(2).take(64) {
+            let numero = u64::from(u16::from_be_bytes([paire[0], paire[1]]));
+            let sollicite = numero % 3 != 0;
+            recu.on_received(numero, sollicite, numero)
+                .expect("sous la borne");
+            vus.insert(numero);
+        }
+        if let Some(plus_grand) = recu.largest() {
+            assert_eq!(
+                Some(plus_grand),
+                vus.iter().next_back().copied(),
+                "le plus grand reçu n'est pas le plus grand vu"
+            );
+            let mut sortie = [0_u8; 1024];
+            let ecrits = recu
+                .write_ack(0, 0, &mut sortie)
+                .expect("écrivable")
+                .expect("il y a de quoi acquitter");
+            let (trame, lus) =
+                Frame::parse(sortie.get(..ecrits).unwrap_or_default()).expect("relisible");
+            assert_eq!(lus, ecrits);
+            let Frame::Ack(ack) = trame else {
+                panic!("ce devait être un ACK");
+            };
+            // **TOUT CE QUE L'ACK COUVRE A ÉTÉ REÇU.** L'inverse n'est pas vrai :
+            // §13.2.3 permet d'oublier les plus anciens.
+            let mut haut = ack.largest;
+            let mut bas = ack.largest.saturating_sub(ack.first_range);
+            for numero in bas..=haut {
+                assert!(vus.contains(&numero), "l'ACK couvre {numero}, jamais reçu");
+                assert!(recu.contains(numero));
+            }
+            for issue in ack.ranges() {
+                let intervalle = issue.expect("lisible");
+                haut = bas
+                    .checked_sub(intervalle.gap.saturating_add(2))
+                    .expect("un intervalle sous zéro");
+                bas = haut.saturating_sub(intervalle.length);
+                for numero in bas..=haut {
+                    assert!(vus.contains(&numero), "l'ACK couvre {numero}, jamais reçu");
+                }
+            }
         }
     }
 
