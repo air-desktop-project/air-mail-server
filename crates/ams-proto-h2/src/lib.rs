@@ -33,6 +33,7 @@
 //! - [`FrameReader`] — le découpage, sur un tampon qui ne fait que croître.
 //! - [`Settings`] — les six réglages de §6.5.2.
 //! - [`ErrorCode`] — les codes de §7, ceux qu'on écrit sur le fil.
+//! - [`Connection`] — l'étage qui les noue tous, et qui décide.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -42,6 +43,7 @@
 extern crate std;
 
 mod block;
+mod connection;
 mod error;
 mod flow;
 mod frame;
@@ -51,6 +53,10 @@ mod settings;
 mod stream;
 
 pub use block::{BLOCK_OCTETS_MAX, BlockState, CONTINUATIONS_MAX, HeaderBlock};
+pub use connection::{
+    CANCELLATIONS_MAX, CODE_OCTETS, Connection, Event, GOAWAY_OCTETS, Handshake, PING_OCTETS,
+    PRIORITY_OCTETS, SERVICE_FRAMES_MAX,
+};
 pub use error::{Cause, Error, ErrorCode};
 pub use flow::{INITIAL_WINDOW_SIZE, WINDOW_MAX, Window};
 pub use frame::{

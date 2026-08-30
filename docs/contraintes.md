@@ -2822,3 +2822,116 @@ Un fil recopie maintenant ce tuyau dans un tampon partagé. Le journal est
 lisible à tout instant sans jamais bloquer, le démarrage s'y adosse, l'échec
 porte l'état RÉEL du serveur, et le tuyau ne se remplit plus au point d'arrêter
 l'enfant qui écrit dedans.
+
+## L'étage deux d'HTTP/2 : ce qu'une connexion ne peut pas devenir
+
+Les cadres, les réglages, les flux et HPACK savaient chacun une chose. La
+machine de connexion les noue : un cadre entre, l'état bouge, une réponse
+s'écrit dans un tampon que l'appelant fournit, un événement remonte. Elle ne
+lit ni n'écrit rien elle-même (C1).
+
+### Le préambule est dans le type, pas dans une garde
+
+Une connexion ne s'obtient qu'en lisant le préambule : `Handshake::open` rend
+une `Connection`, ou rien. Il n'existe donc aucun état « connexion dont le
+préambule n'est pas encore lu », et pas davantage la garde qui l'aurait vérifié
+à chaque cadre.
+
+C'est la même règle qu'ailleurs dans ce dépôt, et elle a encore servi ici :
+**une garde inatteignable n'est pas une garde, c'est une affirmation non
+vérifiée.** Le compte des régions couvertes la trouve à chaque fois, parce
+qu'une branche qu'aucune entrée n'emprunte ne s'exécute jamais.
+
+Quatre autres ont été retirées de la même façon en écrivant cet étage :
+
+- `Settings::write` écrivait dans un tampon intermédiaire de la BONNE TAILLE,
+  ce qui rendait son échec impossible — et il fallait quand même vérifier la
+  place du tampon de sortie. Elle écrit maintenant directement dans celui-ci :
+  une seule vérification, sur le seul tampon qui puisse manquer.
+- `Streams::end_remote` rendait `STREAM_CLOSED` sur un flux qui avait déjà fini.
+  Or tout `END_STREAM` est précédé de ce qui rend déjà cette faute — `consume`
+  pour un `DATA`, `open` pour un `HEADERS`. Elle ne rend plus rien.
+- La recharge de fenêtre AJOUTAIT un crédit qu'elle venait de calculer à partir
+  de cette même fenêtre : le débordement était arithmétiquement impossible. Elle
+  REMPLIT désormais, ce qui ne peut pas échouer. `Streams::credit` a disparu
+  avec elle — personne ne crédite notre fenêtre de réception, c'est nous qui
+  l'ouvrons.
+- Les règles de taille et de flux de §4 étaient écrites deux fois : dans
+  `FrameHeader::check`, et à nouveau dans chaque traitement de cadre. Deux
+  vérités pour une règle. La machine appelle `check` en tête, et ne les redit
+  plus.
+
+### Deux inondations qu'aucune fenêtre n'arrête
+
+Le contrôle de flux borne les DONNÉES. Il ne borne rien d'autre, et deux
+familles de cadres passent donc à côté.
+
+**Les cadres de service** — `PING`, `SETTINGS`, `PRIORITY`, `WINDOW_UPDATE`, les
+types inconnus — coûtent un traitement, parfois une réponse, et ne font
+progresser aucun flux. Un compteur les compte, et un `DATA` ou un bloc
+d'en-têtes complet le remet à zéro : une connexion qui travaille ne l'approche
+jamais.
+
+**Les flux annulés** sont l'autre inondation, et **ce n'est pas la même borne**.
+`HEADERS` puis `RST_STREAM`, aussitôt, sans relâche : le compteur de flux
+simultanés ne les voit jamais, puisqu'ils sont fermés avant d'être comptés, et
+le serveur travaille pour rien. C'est *Rapid Reset* (CVE-2023-44487), qui a mis
+à genoux la moitié du web en octobre 2023.
+
+Les compter avec les cadres de service ne servirait à RIEN : chaque `HEADERS`
+est un progrès, et remettrait à zéro le compteur que le `RST_STREAM` suivant
+vient d'incrémenter. Il faut donc un second compte, et **ce n'est pas un
+compteur mais un budget** : chaque annulation en dépense un, chaque réponse
+menée à son terme en rend un. Un client qui annule ce qu'il n'attend plus reste
+sous la borne aussi longtemps qu'il consomme aussi ce qu'il demande ; un client
+qui n'annule que pour faire travailler la remplit sans jamais la vider.
+
+C'est aussi la couture avec l'étage qui émettra : `Connection::response_sent`
+n'a pas d'autre raison d'exister.
+
+### Un flux refusé se décode quand même
+
+La table dynamique HPACK est **commune à toute la connexion**, et se met à jour
+dans l'ordre des blocs. Sauter le décodage d'un bloc parce que son flux est
+refusé décalerait la table pour tous les blocs suivants : le pair et nous ne
+lirions plus les mêmes en-têtes, sans qu'un seul cadre soit fautif.
+
+Un flux refusé — trop de flux de front, remorques, flux déjà fermé — remonte
+donc son bloc à décoder, accompagné de la raison du refus, et son `RST_STREAM`
+part avec. L'appelant décode, puis jette.
+
+### Les remorques ne sont pas servies, et c'est une décision
+
+§8.1 permet un second `HEADERS` en fin de message. Rien ne s'en sert pour une
+REQUÊTE — gRPC les emploie dans l'autre sens — et les servir ferait passer un
+second jeu d'en-têtes par toute la pile, après que la requête a été jugée sur
+le premier. C7 tranche : ce qui n'apporte rien et ouvre un chemin de plus ne se
+sert pas. Le flux est annulé, et lui seul.
+
+### Deux fenêtres par flux, et elles ne se ressemblent pas
+
+§5.2.1 en donne une par sens. Celle de réception dit ce que le pair peut encore
+nous envoyer : c'est nous qui l'ouvrons, lui qui la consomme. Celle d'émission
+dit ce que nous pouvons encore lui envoyer : c'est lui qui l'ouvre, nous qui la
+consommons. N'en tenir qu'une reviendrait à croire son propre compte pour celui
+du pair.
+
+La conséquence la plus facile à manquer est dans §6.9.2 : quand le pair change
+sa `SETTINGS_INITIAL_WINDOW_SIZE`, ce sont NOS fenêtres d'ÉMISSION qui bougent,
+pas celles de réception. Les confondre ferait bouger les fenêtres du mauvais
+côté, et les deux comptes divergeraient sans qu'un seul cadre soit fautif.
+
+Et la fenêtre de la CONNEXION, elle, ne suit pas ce réglage du tout (§6.9.2) :
+elle part de la valeur de §6.9.1, et seul un `WINDOW_UPDATE` la change. Lui
+appliquer le réglage compterait deux crédits pour un.
+
+### La recharge, et le crédit nul
+
+Recharger à chaque cadre ferait un `WINDOW_UPDATE` par `DATA` — autant de cadres
+que de données. Attendre l'épuisement complet arrêterait l'émission entre le
+moment où la fenêtre se ferme et celui où notre crédit arrive. On recharge donc
+à la moitié.
+
+Une fenêtre annoncée à zéro est licite, et mènerait tout droit à fabriquer un
+`WINDOW_UPDATE` de zéro — que §6.9 refuse. Le crédit se calcule donc avant de
+décider d'écrire, et un crédit nul n'écrit rien.

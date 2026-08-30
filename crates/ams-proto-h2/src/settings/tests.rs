@@ -4,7 +4,7 @@
 
 //! Ce qu'un réglage a le droit d'être.
 
-use super::{Setting, Settings, SettingsReader};
+use super::{SETTINGS_ENTRY_OCTETS, Setting, Settings, SettingsReader};
 use crate::error::{Cause, ErrorCode};
 
 /// Compose une charge de `SETTINGS`.
@@ -142,4 +142,68 @@ fn une_charge_vide_ne_change_rien() {
     SettingsReader::apply_all(b"", &mut reglages).expect("recevable");
     assert_eq!(reglages, Settings::DEFAULT);
     assert!(std::format!("{:?}", Setting::MaxFrameSize).contains("MaxFrameSize"));
+}
+
+/// **CE QU'ON N'A PAS ANNONCÉ NE S'ÉCRIT PAS.** `MAX_CONCURRENT_STREAMS` et
+/// `MAX_HEADER_LIST_SIZE` absents veulent dire « sans limite annoncée » ;
+/// écrire une valeur inventée promettrait le contraire.
+#[test]
+fn ce_qu_on_n_a_pas_annonce_ne_s_ecrit_pas() {
+    let mut octets = [0_u8; Settings::OCTETS_MAX];
+
+    let muets = Settings {
+        max_concurrent_streams: None,
+        max_header_list_size: None,
+        ..Settings::DEFAULT
+    };
+    let ecrits = muets.write(&mut octets).expect("il y a la place");
+    assert_eq!(
+        ecrits,
+        4 * SETTINGS_ENTRY_OCTETS,
+        "quatre réglages, pas six"
+    );
+
+    let bavards = Settings {
+        max_concurrent_streams: Some(128),
+        max_header_list_size: Some(16_384),
+        ..Settings::DEFAULT
+    };
+    let ecrits = bavards.write(&mut octets).expect("il y a la place");
+    assert_eq!(ecrits, 6 * SETTINGS_ENTRY_OCTETS);
+
+    // Et ce qui s'écrit se relit tel quel.
+    let mut relus = Settings::DEFAULT;
+    SettingsReader::apply_all(octets.get(..ecrits).expect("la charge"), &mut relus)
+        .expect("relisible");
+    assert_eq!(relus, bavards);
+}
+
+/// La place manque, et c'est NOTRE tampon : `INTERNAL_ERROR`.
+#[test]
+fn nos_reglages_veulent_de_la_place() {
+    let tous = Settings {
+        max_concurrent_streams: Some(128),
+        max_header_list_size: Some(16_384),
+        ..Settings::DEFAULT
+    };
+    // Quatre réglages tiennent en vingt-quatre octets ; les six en trente-six.
+    // On éprouve la place qui manque À CHAQUE ÉCRITURE, la première comprise.
+    for (reglages, taille) in [
+        (Settings::DEFAULT, 0_usize),
+        (Settings::DEFAULT, 5),
+        (Settings::DEFAULT, 11),
+        (Settings::DEFAULT, 17),
+        (Settings::DEFAULT, 23),
+        (tous, 17),
+        (tous, 23),
+        (tous, 29),
+        (tous, 35),
+    ] {
+        let mut court = [0_u8; Settings::OCTETS_MAX];
+        let issue = reglages
+            .write(court.get_mut(..taille).expect("assez court"))
+            .expect_err("la place manque");
+        assert_eq!(issue.cause(), Cause::BufferTooSmall, "{taille}");
+        assert_eq!(issue.code(), ErrorCode::InternalError, "{taille}");
+    }
 }

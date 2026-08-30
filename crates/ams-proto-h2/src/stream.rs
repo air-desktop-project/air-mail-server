@@ -45,14 +45,27 @@ pub enum StreamState {
 }
 
 /// Ce qu'un flux porte.
+///
+/// # DEUX FENÊTRES, ET ELLES NE SE RESSEMBLENT PAS
+///
+/// §5.2.1 en donne une par SENS. Celle de réception dit ce que le pair peut
+/// encore nous envoyer : c'est NOUS qui l'ouvrons, et lui qui la consomme.
+/// Celle d'émission dit ce que nous pouvons encore lui envoyer : c'est LUI qui
+/// l'ouvre, et nous qui la consommons.
+///
+/// N'en tenir qu'une reviendrait à croire son propre compte pour celui du pair.
+/// Elles partent de valeurs différentes — chacun annonce la sienne — et rien ne
+/// les ramène jamais l'une à l'autre.
 #[derive(Debug, Clone, Copy)]
 struct Flux {
     /// Son numéro.
     id: u32,
     /// Où il en est.
     etat: StreamState,
-    /// Sa fenêtre de réception.
+    /// Sa fenêtre de RÉCEPTION : ce que le pair peut encore nous envoyer.
     fenetre: Window,
+    /// Sa fenêtre d'ÉMISSION : ce que nous pouvons encore lui envoyer.
+    emission: Window,
 }
 
 /// Les flux d'une connexion.
@@ -67,8 +80,15 @@ pub struct Streams {
     /// fermé. Sans lui, il faudrait retenir tous les flux fermés d'une
     /// connexion — ce qu'un pair choisirait alors comme il veut.
     dernier_recu: u32,
-    /// La fenêtre initiale des flux à venir.
+    /// La fenêtre initiale de RÉCEPTION des flux à venir — celle qu'on annonce.
     fenetre_initiale: u32,
+    /// La fenêtre initiale d'ÉMISSION des flux à venir — celle que le pair
+    /// annonce.
+    ///
+    /// Elle vaut la valeur par défaut de §6.5.2 **tant que le pair n'a rien
+    /// dit** : ses cadres peuvent précéder son `SETTINGS`, et attendre pour
+    /// compter reviendrait à ne pas compter.
+    fenetre_pair: u32,
 }
 
 impl Streams {
@@ -79,6 +99,7 @@ impl Streams {
             ouverts: [None; MAX_CONCURRENT_STREAMS as usize],
             dernier_recu: 0,
             fenetre_initiale,
+            fenetre_pair: crate::flow::INITIAL_WINDOW_SIZE,
         }
     }
 
@@ -156,6 +177,7 @@ impl Streams {
             id,
             etat: StreamState::Open,
             fenetre: Window::new(self.fenetre_initiale),
+            emission: Window::new(self.fenetre_pair),
         });
         self.dernier_recu = id;
         Ok(())
@@ -163,24 +185,20 @@ impl Streams {
 
     /// Le pair a fini d'envoyer sur ce flux (`END_STREAM`).
     ///
-    /// # Errors
+    /// # ELLE NE REND PAS DE FAUTE, ET CE N'EST PAS UN RELÂCHEMENT
     ///
-    /// [`Cause::WrongStreamState`] si le flux ne pouvait plus rien envoyer.
-    pub fn end_remote(&mut self, id: u32) -> Result<(), Error> {
-        let etat = self.exiger(id)?;
-        match etat {
-            StreamState::Open => {
-                self.poser(id, StreamState::HalfClosedRemote);
-                Ok(())
-            }
-            // §5.1 : recevoir sur un flux dont le pair a déjà fini, c'est
-            // `STREAM_CLOSED`. Le tolérer laisserait un pair envoyer deux corps
-            // pour une requête.
-            StreamState::HalfClosedRemote | StreamState::Closed => Err(Error::stream(
-                ErrorCode::StreamClosed,
-                Cause::WrongStreamState,
-            )),
-        }
+    /// La faute qu'elle pourrait rendre — recevoir sur un flux dont le pair a
+    /// déjà fini — est rendue par ce qui PRÉCÈDE nécessairement tout
+    /// `END_STREAM` : [`Streams::consume`] pour un `DATA`, [`Streams::open`]
+    /// pour un `HEADERS`. La rendre ici une seconde fois ferait une branche
+    /// qu'aucun appel ne peut emprunter, et **une garde inatteignable n'est pas
+    /// une garde : c'est une affirmation non vérifiée.**
+    ///
+    /// Elle ne peut rien abîmer non plus : elle ne touche que les flux VIVANTS
+    /// de la table — un flux fermé n'y est plus, et un flux qui avait déjà fini
+    /// y reste tel quel.
+    pub fn end_remote(&mut self, id: u32) {
+        self.poser(id, StreamState::HalfClosedRemote);
     }
 
     /// Ferme un flux, et rend sa place.
@@ -227,20 +245,23 @@ impl Streams {
         Ok(())
     }
 
-    /// Ajoute du crédit à la fenêtre d'un flux.
+    /// Rend pleine la fenêtre de réception d'un flux vivant.
     ///
-    /// # Errors
+    /// # POURQUOI REMPLIR, ET NON CRÉDITER
     ///
-    /// [`Cause::ZeroWindowUpdate`], [`Cause::WindowOverflow`], ou l'état.
-    pub fn credit(&mut self, id: u32, octets: u32) -> Result<(), Error> {
-        self.exiger(id)?;
-        let mut fenetre = self
-            .trouver(id)
-            .map(|flux| flux.fenetre)
-            .unwrap_or_default();
-        fenetre.increase(octets)?;
-        self.poser_fenetre(id, fenetre);
-        Ok(())
+    /// Personne ne crédite notre fenêtre de réception : c'est NOUS qui
+    /// l'ouvrons, et nous savons donc toujours à quelle valeur la ramener. Une
+    /// méthode qui ajouterait un crédit rendrait deux fautes — un crédit nul,
+    /// un débordement — qu'aucun appel ne pourrait provoquer, puisque
+    /// l'appelant calcule ce crédit à partir de la fenêtre elle-même. Remplir
+    /// ne peut pas échouer, et c'est ce qui rend la garde inutile plutôt
+    /// qu'inatteignable.
+    ///
+    /// Elle ne touche que les flux VIVANTS : un flux fermé n'est plus dans la
+    /// table, et lui rendre une fenêtre serait lui promettre ce qu'on ne
+    /// tiendra pas.
+    pub fn refill(&mut self, id: u32, pleine: u32) {
+        self.poser_fenetre(id, Window::new(pleine));
     }
 
     /// Applique une nouvelle `SETTINGS_INITIAL_WINDOW_SIZE` (§6.9.2).
@@ -281,6 +302,76 @@ impl Streams {
         Ok(())
     }
 
+    /// La fenêtre d'émission d'un flux vivant : ce qu'on peut encore lui
+    /// envoyer.
+    #[must_use]
+    pub fn send_window(&self, id: u32) -> Option<Window> {
+        self.trouver(id).map(|flux| flux.emission)
+    }
+
+    /// Consomme la fenêtre d'émission d'un flux : on vient de lui envoyer des
+    /// données.
+    ///
+    /// # Errors
+    ///
+    /// [`Cause::WindowExceeded`] au-delà de ce que le pair a ouvert ;
+    /// [`Cause::WrongStreamState`] hors d'un flux vivant.
+    pub fn consume_send(&mut self, id: u32, octets: u32) -> Result<(), Error> {
+        self.exiger(id)?;
+        let mut fenetre = self.send_window(id).unwrap_or_default();
+        fenetre.consume(octets)?;
+        self.poser_emission(id, fenetre);
+        Ok(())
+    }
+
+    /// Ajoute du crédit à la fenêtre d'émission d'un flux : le pair vient
+    /// d'envoyer un `WINDOW_UPDATE`.
+    ///
+    /// # Errors
+    ///
+    /// [`Cause::ZeroWindowUpdate`], [`Cause::WindowOverflow`], ou l'état.
+    pub fn credit_send(&mut self, id: u32, octets: u32) -> Result<(), Error> {
+        self.exiger(id)?;
+        let mut fenetre = self.send_window(id).unwrap_or_default();
+        fenetre.increase(octets)?;
+        self.poser_emission(id, fenetre);
+        Ok(())
+    }
+
+    /// Applique la `SETTINGS_INITIAL_WINDOW_SIZE` que LE PAIR vient d'annoncer
+    /// (§6.9.2).
+    ///
+    /// # CE N'EST PAS LA MÊME QUE LA NÔTRE, ET CE N'EST PAS LE MÊME SENS
+    ///
+    /// Le réglage qu'un pair annonce dit ce qu'IL accepte de recevoir : il borne
+    /// donc ce que NOUS émettons. Le confondre avec le nôtre ferait bouger les
+    /// fenêtres du mauvais côté — et les deux comptes divergeraient sans qu'un
+    /// seul cadre soit fautif.
+    ///
+    /// # Errors
+    ///
+    /// [`Cause::WindowOverflow`] si une fenêtre dépasserait 2^31-1.
+    pub fn set_peer_initial_window(&mut self, taille: u32) -> Result<(), Error> {
+        if i64::from(taille) > crate::flow::WINDOW_MAX {
+            return Err(Error::connection(
+                ErrorCode::FlowControlError,
+                Cause::WindowOverflow,
+            ));
+        }
+        let variation = i64::from(taille).saturating_sub(i64::from(self.fenetre_pair));
+        // ON VÉRIFIE TOUT AVANT D'APPLIQUER, comme pour la réception : la moitié
+        // des fenêtres déplacées serait un état que personne ne sait décrire.
+        let mut essai = self.ouverts;
+        for place in &mut essai {
+            if let Some(flux) = place.as_mut() {
+                flux.emission.adjust(variation)?;
+            }
+        }
+        self.ouverts = essai;
+        self.fenetre_pair = taille;
+        Ok(())
+    }
+
     /// Le flux vivant de ce numéro.
     fn trouver(&self, id: u32) -> Option<Flux> {
         self.ouverts
@@ -312,13 +403,24 @@ impl Streams {
         }
     }
 
-    /// Pose la fenêtre d'un flux.
+    /// Pose la fenêtre de réception d'un flux.
     fn poser_fenetre(&mut self, id: u32, fenetre: Window) {
         for place in &mut self.ouverts {
             if let Some(flux) = place.as_mut()
                 && flux.id == id
             {
                 flux.fenetre = fenetre;
+            }
+        }
+    }
+
+    /// Pose la fenêtre d'émission d'un flux.
+    fn poser_emission(&mut self, id: u32, fenetre: Window) {
+        for place in &mut self.ouverts {
+            if let Some(flux) = place.as_mut()
+                && flux.id == id
+            {
+                flux.emission = fenetre;
             }
         }
     }

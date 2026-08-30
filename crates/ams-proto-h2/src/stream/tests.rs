@@ -33,7 +33,7 @@ fn un_flux_parcourt_ses_etats() {
         Some(i64::from(INITIAL_WINDOW_SIZE) - 1_000)
     );
 
-    flux.end_remote(1).expect("le pair a fini");
+    flux.end_remote(1);
     assert_eq!(flux.state(1), Some(StreamState::HalfClosedRemote));
 
     flux.close(1);
@@ -107,31 +107,31 @@ fn au_dela_de_ce_qu_on_traite_on_refuse_sans_commencer() {
 fn ce_qui_arrive_apres_la_fin_se_refuse() {
     let mut flux = neuve();
     flux.open(1).expect("ouvert");
-    flux.end_remote(1).expect("le pair a fini");
+    flux.end_remote(1);
 
-    for issue in [
-        flux.end_remote(1).expect_err("deux fois"),
-        flux.consume(1, 1).expect_err("des données après la fin"),
-    ] {
-        assert_eq!(issue.cause(), Cause::WrongStreamState);
-        assert_eq!(issue.code(), ErrorCode::StreamClosed);
-        assert!(!issue.is_fatal());
-    }
+    let issue = flux.consume(1, 1).expect_err("des données après la fin");
+    assert_eq!(issue.cause(), Cause::WrongStreamState);
+    assert_eq!(issue.code(), ErrorCode::StreamClosed);
+    assert!(!issue.is_fatal());
 
-    // Sur un flux fermé, et sur un flux oisif, c'est la même réponse.
+    // **RÉPÉTER LA FIN NE FAIT RIEN, ET NE REND RIEN.** La faute qu'on
+    // pourrait rendre ici est déjà rendue par `consume`, qui précède
+    // nécessairement tout `END_STREAM` de `DATA`.
+    flux.end_remote(1);
+    assert_eq!(flux.state(1), Some(StreamState::HalfClosedRemote));
+
+    // Sur un flux fermé, la fin ne ressuscite rien : la table ne le porte plus.
     flux.close(1);
-    assert_eq!(
-        flux.end_remote(1).expect_err("fermé").cause(),
-        Cause::WrongStreamState
-    );
+    flux.end_remote(1);
+    assert_eq!(flux.state(1), Some(StreamState::Closed));
     assert_eq!(
         flux.consume(9, 1).expect_err("oisif").cause(),
         Cause::WrongStreamState
     );
-    assert_eq!(
-        flux.credit(9, 1).expect_err("oisif").cause(),
-        Cause::WrongStreamState
-    );
+    // Remplir la fenêtre d'un flux qui n'est plus là ne fait rien : la table ne
+    // le porte plus, et lui promettre une fenêtre serait mentir.
+    flux.refill(9, 100);
+    assert_eq!(flux.window(9), None);
 }
 
 /// **UN `RST_STREAM` SUR UN FLUX DÉJÀ FERMÉ N'EST PAS UNE FAUTE** : il a pu
@@ -161,11 +161,10 @@ fn la_fenetre_d_un_flux_se_gere() {
     flux.consume(1, INITIAL_WINDOW_SIZE).expect("jusqu'au bout");
     assert_eq!(flux.window(1).map(|f| f.available()), Some(0));
 
-    flux.credit(1, 100).expect("du crédit");
+    // **ON REMPLIT, ON NE CRÉDITE PAS** : personne d'autre que nous n'ouvre
+    // cette fenêtre-là, et nous savons donc toujours à quelle valeur la ramener.
+    flux.refill(1, 100);
     assert_eq!(flux.window(1).map(|f| f.available()), Some(100));
-
-    let issue = flux.credit(1, 0).expect_err("un crédit nul");
-    assert_eq!(issue.cause(), Cause::ZeroWindowUpdate);
 }
 
 /// **TOUTES LES FENÊTRES OUVERTES BOUGENT, DE LA MÊME DIFFÉRENCE** (§6.9.2), et
@@ -194,7 +193,7 @@ fn un_changement_de_fenetre_initiale_bouge_tout_le_monde() {
     // Un ajustement qui ferait déborder est une faute. Il faut pour cela une
     // fenêtre déjà créditée : l'ajustement seul ramène chacune à la nouvelle
     // taille, et ne peut donc pas la dépasser.
-    flux.credit(3, 1).expect("du crédit");
+    flux.refill(3, INITIAL_WINDOW_SIZE.saturating_add(1));
     let issue = flux.set_initial_window(0x7fff_ffff).expect_err("refusé");
     assert_eq!(issue.cause(), Cause::WindowOverflow);
 }
@@ -210,7 +209,7 @@ fn un_ajustement_qui_echoue_ne_deplace_rien() {
     let mut flux = neuve();
     flux.open(1).expect("ouvert");
     flux.open(3).expect("ouvert");
-    flux.credit(3, 1_000).expect("du crédit");
+    flux.refill(3, INITIAL_WINDOW_SIZE.saturating_add(1_000));
     let avant = (
         flux.window(1).map(|f| f.available()),
         flux.window(3).map(|f| f.available()),
@@ -259,4 +258,84 @@ fn l_ensemble_se_montre() {
     let flux = neuve();
     assert!(std::format!("{flux:?}").contains("Streams"));
     assert!(std::format!("{:?}", StreamState::Open).contains("Open"));
+}
+
+/// **DEUX FENÊTRES PAR FLUX, ET ELLES NE SE MÉLANGENT PAS** (§5.2.1) : celle de
+/// réception se consomme quand le pair envoie, celle d'émission quand nous
+/// envoyons. N'en tenir qu'une reviendrait à croire son propre compte pour celui
+/// du pair.
+#[test]
+fn la_fenetre_d_emission_est_une_autre_fenetre() {
+    let mut flux = neuve();
+    flux.open(1).expect("ouvert");
+    assert_eq!(
+        flux.send_window(3),
+        None,
+        "un flux qui n'existe pas n'en a pas"
+    );
+    assert_eq!(
+        flux.send_window(1).map(|f| f.available()),
+        Some(i64::from(INITIAL_WINDOW_SIZE))
+    );
+
+    flux.consume_send(1, 1_000).expect("il y a la place");
+    assert_eq!(
+        flux.send_window(1).map(|f| f.available()),
+        Some(i64::from(INITIAL_WINDOW_SIZE) - 1_000)
+    );
+    // La fenêtre de RÉCEPTION, elle, n'a pas bougé.
+    assert_eq!(
+        flux.window(1).map(|f| f.available()),
+        Some(i64::from(INITIAL_WINDOW_SIZE))
+    );
+
+    let issue = flux
+        .consume_send(1, INITIAL_WINDOW_SIZE)
+        .expect_err("au-delà de ce que le pair a ouvert");
+    assert_eq!(issue.cause(), Cause::WindowExceeded);
+
+    let issue = flux.consume_send(9, 1).expect_err("oisif");
+    assert_eq!(issue.cause(), Cause::WrongStreamState);
+    let issue = flux.credit_send(9, 1).expect_err("oisif");
+    assert_eq!(issue.cause(), Cause::WrongStreamState);
+
+    // Un crédit qui ferait dépasser 2^31-1 est une faute de contrôle de flux.
+    flux.credit_send(1, 0x7fff_0000).expect("du crédit");
+    let issue = flux.credit_send(1, 0x7fff_0000).expect_err("cela déborde");
+    assert_eq!(issue.cause(), Cause::WindowOverflow);
+}
+
+/// **LE RÉGLAGE DU PAIR BOUGE LES FENÊTRES D'ÉMISSION, PAS LES NÔTRES** (§6.9.2).
+/// Le confondre avec le nôtre ferait bouger les fenêtres du mauvais côté, et les
+/// deux comptes divergeraient sans qu'un seul cadre soit fautif.
+#[test]
+fn le_reglage_du_pair_ne_bouge_que_l_emission() {
+    let mut flux = neuve();
+    flux.open(1).expect("ouvert");
+    flux.set_peer_initial_window(1_000).expect("mille");
+    assert_eq!(flux.send_window(1).map(|f| f.available()), Some(1_000));
+    assert_eq!(
+        flux.window(1).map(|f| f.available()),
+        Some(i64::from(INITIAL_WINDOW_SIZE)),
+        "la réception n'a pas bougé"
+    );
+
+    // Un flux ouvert APRÈS part de la nouvelle taille.
+    flux.open(3).expect("ouvert");
+    assert_eq!(flux.send_window(3).map(|f| f.available()), Some(1_000));
+
+    // Au-delà de 2^31-1, §6.5.2 refuse. La lecture des `SETTINGS` le refuse
+    // déjà — et on le refuse ICI aussi, parce que cette méthode est publique.
+    let issue = flux
+        .set_peer_initial_window(0x8000_0000)
+        .expect_err("hors borne");
+    assert_eq!(issue.cause(), Cause::WindowOverflow);
+    assert_eq!(issue.code(), ErrorCode::FlowControlError);
+
+    // Et un ajustement qui ferait déborder une fenêtre déjà créditée.
+    flux.credit_send(1, 1).expect("du crédit");
+    let issue = flux
+        .set_peer_initial_window(0x7fff_ffff)
+        .expect_err("cela déborde");
+    assert_eq!(issue.cause(), Cause::WindowOverflow);
 }

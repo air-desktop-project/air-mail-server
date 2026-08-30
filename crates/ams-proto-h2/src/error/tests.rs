@@ -86,6 +86,10 @@ fn chaque_cause_se_dit() {
         (Cause::WrongStreamState, "dans cet état"),
         (Cause::BlockInterrupted, "intercalé"),
         (Cause::BlockTooLong, "bloc d'en-têtes dépasse"),
+        (Cause::FirstFrameNotSettings, "premier cadre"),
+        (Cause::PushFromClient, "poussé"),
+        (Cause::TooManyServiceFrames, "progresser"),
+        (Cause::TooManyCancellations, "annulés"),
     ] {
         let texte = std::format!("{}", Error::connection(ErrorCode::ProtocolError, cause));
         assert!(texte.contains(extrait), "{cause:?} : {texte}");

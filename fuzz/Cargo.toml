@@ -317,3 +317,10 @@ path = "fuzz_targets/fuzz_ams_h2_hpack.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_ams_h2_connection"
+path = "fuzz_targets/fuzz_ams_h2_connection.rs"
+test = false
+doc = false
+bench = false

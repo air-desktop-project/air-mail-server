@@ -169,6 +169,14 @@ pub enum Cause {
     BlockInterrupted,
     /// Un bloc d'en-têtes dépasse ce qu'on accepte d'accumuler.
     BlockTooLong,
+    /// Le premier cadre après le préambule n'était pas un `SETTINGS` (§3.4).
+    FirstFrameNotSettings,
+    /// Un client a envoyé un `PUSH_PROMISE`, que §8.4 lui interdit.
+    PushFromClient,
+    /// Trop de cadres qui ne font progresser aucun flux.
+    TooManyServiceFrames,
+    /// Trop de flux annulés avant d'avoir été servis.
+    TooManyCancellations,
 }
 
 impl Error {
@@ -238,6 +246,10 @@ impl fmt::Display for Error {
             Cause::WrongStreamState => "ce cadre n'a pas sa place dans cet état",
             Cause::BlockInterrupted => "un cadre s'est intercalé dans un bloc d'en-têtes",
             Cause::BlockTooLong => "un bloc d'en-têtes dépasse ce qu'on accumule",
+            Cause::FirstFrameNotSettings => "le premier cadre n'était pas un SETTINGS",
+            Cause::PushFromClient => "un client a poussé, ce que §8.4 lui interdit",
+            Cause::TooManyServiceFrames => "trop de cadres qui ne font rien progresser",
+            Cause::TooManyCancellations => "trop de flux annulés avant d'être servis",
         };
         let portee = match self.fatal {
             true => "connexion",

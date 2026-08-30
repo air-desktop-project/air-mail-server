@@ -137,6 +137,51 @@ impl Settings {
         max_header_list_size: None,
     };
 
+    /// Ce qu'un `SETTINGS` complet occupe : six réglages de six octets.
+    pub const OCTETS_MAX: usize = 6 * SETTINGS_ENTRY_OCTETS;
+
+    /// Écrit ces réglages sous la forme d'une charge de `SETTINGS`.
+    ///
+    /// # ON ANNONCE TOUT, Y COMPRIS CE QUI VAUT LE DÉFAUT
+    ///
+    /// §6.5 le permet — un `SETTINGS` peut être vide — mais taire une valeur
+    /// qui se trouve valoir le défaut du protocole rendrait notre annonce
+    /// dépendante de ce défaut. Elle serait alors juste par coïncidence, et
+    /// fausse le jour où l'on change une constante sans y penser.
+    ///
+    /// Les deux réglages qu'on peut ne pas avoir — `MAX_CONCURRENT_STREAMS` et
+    /// `MAX_HEADER_LIST_SIZE` — ne s'écrivent que si on les a : leur absence
+    /// veut dire « sans limite annoncée », et écrire une valeur inventée
+    /// promettrait le contraire.
+    ///
+    /// # Errors
+    ///
+    /// [`Cause::BufferTooSmall`] si `out` ne suffit pas.
+    pub fn write(&self, out: &mut [u8]) -> Result<usize, Error> {
+        let court = || Error::connection(ErrorCode::InternalError, Cause::BufferTooSmall);
+        let mut ecrits = 0_usize;
+        let mut poser = |reglage: Setting, valeur: u32| -> Result<(), Error> {
+            let fin = ecrits.saturating_add(SETTINGS_ENTRY_OCTETS);
+            let place = out.get_mut(ecrits..fin).ok_or_else(court)?;
+            let (identifiant, corps) = place.split_at_mut(2);
+            identifiant.copy_from_slice(&reglage.value().to_be_bytes());
+            corps.copy_from_slice(&valeur.to_be_bytes());
+            ecrits = fin;
+            Ok(())
+        };
+        poser(Setting::HeaderTableSize, self.header_table_size)?;
+        poser(Setting::EnablePush, u32::from(self.enable_push))?;
+        if let Some(flux) = self.max_concurrent_streams {
+            poser(Setting::MaxConcurrentStreams, flux)?;
+        }
+        poser(Setting::InitialWindowSize, self.initial_window_size)?;
+        poser(Setting::MaxFrameSize, self.max_frame_size)?;
+        if let Some(entetes) = self.max_header_list_size {
+            poser(Setting::MaxHeaderListSize, entetes)?;
+        }
+        Ok(ecrits)
+    }
+
     /// Applique un réglage lu.
     fn apply(&mut self, reglage: Setting, valeur: u32) {
         match reglage {
