@@ -45,6 +45,9 @@ path = "../crates/ams-proto-quic"
 [dependencies.ams-proto-h3]
 path = "../crates/ams-proto-h3"
 
+[dependencies.ams-field-codec]
+path = "../crates/ams-field-codec"
+
 [dependencies.ams-proto-h2]
 path = "../crates/ams-proto-h2"
 

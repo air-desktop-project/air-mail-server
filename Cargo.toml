@@ -38,6 +38,7 @@ members = [
     "crates/ams-sasl",
     "crates/ams-proto-pop3",
     "crates/ams-proto-imap",
+    "crates/ams-field-codec",
     "crates/ams-proto-http",
     "crates/ams-proto-h2",
     "crates/ams-proto-quic",

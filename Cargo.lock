@@ -93,6 +93,10 @@ name = "ams-dns"
 version = "0.1.0"
 
 [[package]]
+name = "ams-field-codec"
+version = "0.1.0"
+
+[[package]]
 name = "ams-guard"
 version = "0.1.0"
 
@@ -131,6 +135,7 @@ version = "0.1.0"
 name = "ams-proto-h2"
 version = "0.1.0"
 dependencies = [
+ "ams-field-codec",
  "ams-proto-http",
 ]
 

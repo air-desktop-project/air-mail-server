@@ -34,9 +34,9 @@
 //! pseudo-en-têtes, les champs interdits, la bombe de décompression — vit dans
 //! [`ams_proto_http::HeadBuilder`], et n'est écrit qu'une fois pour h2 et h3.
 
+use super::decode_integer;
+use super::decode_string;
 use super::dynamique::Dynamique;
-use super::integer::decode_integer;
-use super::string::decode_string;
 use super::table_statique::{STATIQUE_LEN, entree_statique};
 use crate::error::{Cause, Error, ErrorCode};
 

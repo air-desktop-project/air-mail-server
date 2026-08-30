@@ -3447,3 +3447,39 @@ De même, zéro flux bloqué par défaut — et c'est tout l'intérêt de QPACK.
 bloqué attend une insertion qu'un autre flux n'a pas encore livrée ; zéro veut
 dire « ne me fais jamais attendre », et c'est ce qui rend QPACK utilisable sur un
 transport qui livre dans le désordre.
+
+## Un socle pour HPACK et QPACK, et pourquoi il fallait l'extraire
+
+QPACK réemploie **la table de Huffman de RFC 7541 Appendice B** et **les entiers
+à préfixe de son §5.1**, à l'identique : RFC 9204 §4.1.1 renvoie à RFC 7541
+plutôt que de les redéfinir.
+
+Les recopier dans deux crates ferait deux vérités pour une table de deux cent
+cinquante-sept entrées. Mais ce n'est pas le pire.
+
+**Le pire serait deux occasions d'écrire le même défaut.** Le décodeur d'entiers
+de ce dépôt en a déjà eu un : `checked_shl` ne dit rien du débordement de
+VALEUR, et faisait lire `ff ff ff ff ff 7f` comme la valeur 255. Il a été trouvé
+par son propre test, corrigé, et documenté. Le réimplémenter pour QPACK serait
+offrir l'occasion de le réécrire — et cette fois, peut-être, sans le test qui
+l'avait vu.
+
+### Ce que le socle ne sait pas
+
+Il ne connaît ni HTTP/2 ni HTTP/3, et ne nomme donc **aucun code de fil** :
+HPACK ferme avec `COMPRESSION_ERROR`, QPACK avec
+`QPACK_DECOMPRESSION_FAILED`. Un socle qui nommerait le premier obligerait le
+second à le traduire — ou pire, à s'en accommoder. Il rend ce qui a mal tourné,
+et la traduction est le travail de celui qui a une connexion à fermer.
+
+Il ne connaît pas non plus les TABLES : la statique de HPACK a soixante et une
+entrées, celle de QPACK quatre-vingt-dix-neuf, et leurs tables dynamiques n'ont
+ni les mêmes règles ni le même ordre. **Seul ce qui est vraiment commun y vit** —
+extraire ce qui se ressemble sans être identique aurait fait un socle plein de
+conditions, et c'est exactement ce qu'on voulait éviter.
+
+### Et ce que l'extraction a retiré au passage
+
+HPACK réexportait Huffman, sans s'en servir autrement qu'à travers les chaînes.
+Un enrobage que personne n'appelle est une interface qu'on entretient sans s'en
+servir : il est parti avec le reste. Qui veut Huffman prend le socle.

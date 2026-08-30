@@ -45,6 +45,7 @@ CRATES_SANS_IO=(
     ams-auth
     ams-proto-pop3
     ams-proto-imap
+    ams-field-codec
     ams-proto-http
     ams-proto-h2
     ams-proto-quic

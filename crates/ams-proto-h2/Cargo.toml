@@ -9,6 +9,7 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+ams-field-codec = { path = "../ams-field-codec" }
 ams-proto-http = { path = "../ams-proto-http" }
 
 [lints]

@@ -53,9 +53,13 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use ams_proto_h2::hpack::{
-    Decoder, STATIQUE_LEN, TABLE_SIZE_MAX, decode_huffman, decode_integer, decode_string,
-    encode_field, encode_huffman, encode_integer, encode_string, encoded_huffman_len,
+    Decoder, STATIQUE_LEN, TABLE_SIZE_MAX, decode_integer, decode_string, encode_field,
+    encode_integer, encode_string,
 };
+// **HUFFMAN VIT DANS LE SOCLE**, avec les entiers à préfixe : QPACK les
+// réemploie à l'identique, et les recopier ferait deux occasions d'écrire le
+// même défaut.
+use ams_field_codec::{decode_huffman, encode_huffman, encoded_huffman_len};
 use ams_proto_http::{HeadBuilder, Limits as LimitesHttp};
 
 /// Ce qu'on soumet.

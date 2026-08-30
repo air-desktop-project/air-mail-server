@@ -5,7 +5,7 @@
 //! Ce qu'une chaîne littérale a le droit d'être.
 
 use super::{decode_string, encode_string};
-use crate::error::Cause;
+use crate::error::Fault;
 
 /// Écrit puis relit.
 fn aller_retour(clair: &[u8]) -> (std::vec::Vec<u8>, usize) {
@@ -71,7 +71,7 @@ fn une_longueur_qui_deborde_se_refuse() {
     ] {
         let issue = decode_string(entree, &mut relu).expect_err("refusé");
         assert!(
-            matches!(issue.cause(), Cause::BadString | Cause::BadInteger),
+            matches!(issue.fault(), Fault::BadString | Fault::BadInteger),
             "{entree:?} : {issue:?}"
         );
     }
@@ -84,14 +84,14 @@ fn un_tampon_trop_court_le_dit() {
     for taille in 0..3_usize {
         let mut petit = std::vec![0_u8; taille];
         let issue = decode_string(&entree, &mut petit).expect_err("refusé");
-        assert_eq!(issue.cause(), Cause::BufferTooSmall, "{taille}");
+        assert_eq!(issue.fault(), Fault::BufferTooSmall, "{taille}");
     }
     // `abc` tient en trois octets une fois comprimé — un de longueur, deux de
     // contenu —, et c'est donc à deux que la place manque.
     for taille in 0..3_usize {
         let mut petit = std::vec![0_u8; taille];
         let issue = encode_string(b"abc", &mut petit).expect_err("refusé");
-        assert_eq!(issue.cause(), Cause::BufferTooSmall, "{taille}");
+        assert_eq!(issue.fault(), Fault::BufferTooSmall, "{taille}");
     }
     assert_eq!(encode_string(b"abc", &mut [0_u8; 3]), Ok(3));
 
@@ -101,7 +101,7 @@ fn un_tampon_trop_court_le_dit() {
     for taille in 0..33_usize {
         let mut petit = std::vec![0_u8; taille];
         let issue = encode_string(&long, &mut petit).expect_err("refusé");
-        assert_eq!(issue.cause(), Cause::BufferTooSmall, "{taille}");
+        assert_eq!(issue.fault(), Fault::BufferTooSmall, "{taille}");
     }
     assert!(encode_string(&long, &mut [0_u8; 33]).is_ok());
 }
@@ -114,7 +114,7 @@ fn un_corps_comprime_fautif_remonte() {
     // Comprimée, un octet : `0x00` termine sur un remplissage qui n'est pas
     // fait de un.
     let issue = decode_string(&[0x81, 0x00], &mut relu).expect_err("refusé");
-    assert_eq!(issue.cause(), Cause::BadHuffman);
+    assert_eq!(issue.fault(), Fault::BadHuffman);
 }
 
 /// Une chaîne littérale non comprimée se lit telle quelle.

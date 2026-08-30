@@ -5,7 +5,7 @@
 //! Ce qu'un entier à préfixe a le droit d'être.
 
 use super::{decode_integer, encode_integer};
-use crate::error::Cause;
+use crate::error::Fault;
 
 /// Les trois exemples de l'annexe C.1 de RFC 7541.
 #[test]
@@ -74,8 +74,7 @@ fn un_entier_qui_deborde_se_refuse() {
         &[0xff, 0xff, 0xff, 0xff, 0xff, 0x7f],
     ] {
         let issue = decode_integer(octets, 8).expect_err("refusé");
-        assert_eq!(issue.cause(), Cause::BadInteger, "{octets:?}");
-        assert!(issue.is_fatal(), "l'état HPACK est perdu");
+        assert_eq!(issue.fault(), Fault::BadInteger, "{octets:?}");
     }
 }
 
@@ -85,7 +84,7 @@ fn un_entier_qui_deborde_se_refuse() {
 fn un_entier_inacheve_se_refuse() {
     for octets in [&[][..], &[0x1f], &[0x1f, 0x80], &[0x1f, 0x80, 0x80]] {
         let issue = decode_integer(octets, 5).expect_err("refusé");
-        assert_eq!(issue.cause(), Cause::BadInteger, "{octets:?}");
+        assert_eq!(issue.fault(), Fault::BadInteger, "{octets:?}");
     }
 }
 
@@ -98,7 +97,7 @@ fn un_entier_inacheve_se_refuse() {
 #[test]
 fn un_decalage_ne_suffit_pas_a_voir_le_debordement() {
     let issue = decode_integer(&[0xff, 0xff, 0xff, 0xff, 0xff, 0x7f], 8).expect_err("refusé");
-    assert_eq!(issue.cause(), Cause::BadInteger);
+    assert_eq!(issue.fault(), Fault::BadInteger);
 }
 
 /// **UNE ÉCRITURE NON CANONIQUE SE REFUSE** : `0x80` ajoute sept bits nuls, donc
@@ -110,7 +109,7 @@ fn une_ecriture_trop_longue_se_refuse() {
     assert!(decode_integer(&[0xff, 0x80, 0x80, 0x80, 0x80, 0x00], 8).is_ok());
     // Six, c'est un de trop.
     let issue = decode_integer(&[0xff, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00], 8).expect_err("refusé");
-    assert_eq!(issue.cause(), Cause::BadInteger);
+    assert_eq!(issue.fault(), Fault::BadInteger);
 }
 
 /// Un tampon trop court pour écrire le dit.
@@ -119,7 +118,7 @@ fn un_tampon_trop_court_pour_ecrire_le_dit() {
     for taille in 0..3_usize {
         let mut petit = std::vec![0_u8; taille];
         let issue = encode_integer(1337, 5, 0, &mut petit).expect_err("refusé");
-        assert_eq!(issue.cause(), Cause::BufferTooSmall, "{taille}");
+        assert_eq!(issue.fault(), Fault::BufferTooSmall, "{taille}");
     }
     // Un seul octet suffit pour ce qui tient dans le préfixe.
     let mut un = [0_u8; 1];

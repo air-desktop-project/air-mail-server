@@ -6,7 +6,7 @@
 
 use super::huffman::{decode_huffman, encode_huffman, encoded_huffman_len};
 use super::integer::{decode_integer, encode_integer};
-use crate::error::{Cause, Error, ErrorCode};
+use crate::error::{Error, Fault};
 
 /// Décode une chaîne littérale dans `out`.
 ///
@@ -22,11 +22,11 @@ use crate::error::{Cause, Error, ErrorCode};
 ///
 /// # Errors
 ///
-/// [`Cause::BadString`] si la longueur déborde de ce qui reste ;
-/// [`Cause::BufferTooSmall`] si `out` ne suffit pas ; les fautes de Huffman.
+/// [`Fault::BadString`] si la longueur déborde de ce qui reste ;
+/// [`Fault::BufferTooSmall`] si `out` ne suffit pas ; les fautes de Huffman.
 pub fn decode_string<'o>(entree: &[u8], out: &'o mut [u8]) -> Result<(&'o [u8], usize), Error> {
-    let faute = || Error::connection(ErrorCode::CompressionError, Cause::BadString);
-    let court = || Error::connection(ErrorCode::CompressionError, Cause::BufferTooSmall);
+    let faute = || Error::new(Fault::BadString);
+    let court = || Error::new(Fault::BufferTooSmall);
     // L'ENTIER D'ABORD : s'il se lit, c'est qu'il y avait un premier octet, et
     // le fanion de compression s'y trouve. Le demander avant obligerait à
     // refuser deux fois le tampon vide.
@@ -61,9 +61,9 @@ pub fn decode_string<'o>(entree: &[u8], out: &'o mut [u8]) -> Result<(&'o [u8], 
 ///
 /// # Errors
 ///
-/// [`Cause::BufferTooSmall`] si `out` ne suffit pas.
+/// [`Fault::BufferTooSmall`] si `out` ne suffit pas.
 pub fn encode_string(clair: &[u8], out: &mut [u8]) -> Result<usize, Error> {
-    let court = || Error::connection(ErrorCode::InternalError, Cause::BufferTooSmall);
+    let court = || Error::new(Fault::BufferTooSmall);
     let comprime = encoded_huffman_len(clair);
     let serre = comprime < clair.len();
     let (drapeau, taille) = match serre {

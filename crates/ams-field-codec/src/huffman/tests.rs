@@ -5,7 +5,7 @@
 //! Ce qu'une chaîne comprimée a le droit d'être.
 
 use super::{decode_huffman, encode_huffman, encoded_huffman_len};
-use crate::error::Cause;
+use crate::error::Fault;
 
 /// Comprime, et rend les octets.
 fn comprime(clair: &[u8]) -> std::vec::Vec<u8> {
@@ -82,13 +82,13 @@ fn un_remplissage_fautif_se_refuse() {
     // `0x00` : le code de `0` fait cinq bits (`00000`), suivi de trois bits
     // nuls — un remplissage qui n'est pas fait de un.
     let issue = decode_huffman(&[0x00], &mut sortie).expect_err("refusé");
-    assert_eq!(issue.cause(), Cause::BadHuffman);
+    assert_eq!(issue.fault(), Fault::BadHuffman);
 
     // Un octet entier de remplissage : huit bits, c'est un symbole omis.
     // `0xff` seul ne complète aucun code court : ce sont les bits de tête de
     // codes longs, et huit bits en attente sont refusés.
     let issue = decode_huffman(&[0xff], &mut sortie).expect_err("refusé");
-    assert_eq!(issue.cause(), Cause::BadHuffman);
+    assert_eq!(issue.fault(), Fault::BadHuffman);
 
     // Un remplissage de un, mais trop long : deux octets de `0xff` après un
     // symbole complet.
@@ -105,7 +105,7 @@ fn eos_dans_une_chaine_se_refuse() {
     // bits de remplissage.
     let mut sortie = [0_u8; 64];
     let issue = decode_huffman(&[0xff, 0xff, 0xff, 0xff], &mut sortie).expect_err("refusé");
-    assert_eq!(issue.cause(), Cause::BadHuffman);
+    assert_eq!(issue.fault(), Fault::BadHuffman);
 }
 
 /// Un code qui n'existe pas se refuse, sans boucler.
@@ -115,7 +115,7 @@ fn un_code_inconnu_se_refuse() {
     // Trente et un bits à un : au-delà du plus long code, et ce n'est pas
     // `EOS`.
     let issue = decode_huffman(&[0xff, 0xff, 0xff, 0xff, 0xfe], &mut sortie).expect_err("refusé");
-    assert_eq!(issue.cause(), Cause::BadHuffman);
+    assert_eq!(issue.fault(), Fault::BadHuffman);
 }
 
 /// Un tampon trop court le dit, dans les deux sens.
@@ -125,11 +125,11 @@ fn un_tampon_trop_court_le_dit() {
     for taille in 0..15_usize {
         let mut petit = std::vec![0_u8; taille];
         let issue = decode_huffman(&brut, &mut petit).expect_err("refusé");
-        assert_eq!(issue.cause(), Cause::BufferTooSmall, "{taille}");
+        assert_eq!(issue.fault(), Fault::BufferTooSmall, "{taille}");
     }
     for taille in 0..brut.len() {
         let mut petit = std::vec![0_u8; taille];
         let issue = encode_huffman(b"www.example.com", &mut petit).expect_err("refusé");
-        assert_eq!(issue.cause(), Cause::BufferTooSmall, "{taille}");
+        assert_eq!(issue.fault(), Fault::BufferTooSmall, "{taille}");
     }
 }

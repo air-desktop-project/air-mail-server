@@ -18,17 +18,17 @@
 //! sur lequel est valide, ce qui est le début d'une contrebande.
 
 use super::table_huffman::{CODE_EOS, CODE_MIN_BITS, EOS, code_d_octet, symbole_de};
-use crate::error::{Cause, Error, ErrorCode};
+use crate::error::{Error, Fault};
 
 /// Décode une chaîne comprimée, et rend ce qu'elle occupe une fois décodée.
 ///
 /// # Errors
 ///
-/// [`Cause::BadHuffman`] pour un code inconnu, un `EOS`, un remplissage trop
-/// long ou mal formé ; [`Cause::BufferTooSmall`] si `out` ne suffit pas.
+/// [`Fault::BadHuffman`] pour un code inconnu, un `EOS`, un remplissage trop
+/// long ou mal formé ; [`Fault::BufferTooSmall`] si `out` ne suffit pas.
 pub fn decode_huffman(comprime: &[u8], out: &mut [u8]) -> Result<usize, Error> {
-    let faute = || Error::connection(ErrorCode::CompressionError, Cause::BadHuffman);
-    let court = || Error::connection(ErrorCode::CompressionError, Cause::BufferTooSmall);
+    let faute = || Error::new(Fault::BadHuffman);
+    let court = || Error::new(Fault::BufferTooSmall);
     let mut ecrits = 0_usize;
     let mut code = 0_u32;
     let mut bits = 0_u32;
@@ -101,9 +101,9 @@ pub fn encoded_huffman_len(clair: &[u8]) -> usize {
 ///
 /// # Errors
 ///
-/// [`Cause::BufferTooSmall`] si `out` ne suffit pas.
+/// [`Fault::BufferTooSmall`] si `out` ne suffit pas.
 pub fn encode_huffman(clair: &[u8], out: &mut [u8]) -> Result<usize, Error> {
-    let court = || Error::connection(ErrorCode::InternalError, Cause::BufferTooSmall);
+    let court = || Error::new(Fault::BufferTooSmall);
     let mut ecrits = 0_usize;
     let mut reserve = 0_u64;
     let mut bits = 0_u32;

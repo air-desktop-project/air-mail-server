@@ -25,7 +25,7 @@
 //! déborde au sixième. Compter les octets EN PLUS aurait été une garde qu'aucune
 //! entrée ne peut emprunter — le multiplicateur y arrive toujours le premier.
 
-use crate::error::{Cause, Error, ErrorCode};
+use crate::error::{Error, Fault};
 
 /// Lit un entier à préfixe de `bits` bits.
 ///
@@ -33,10 +33,10 @@ use crate::error::{Cause, Error, ErrorCode};
 ///
 /// # Errors
 ///
-/// [`Cause::BadInteger`] si l'entier déborde, s'il n'est pas terminé, ou s'il
+/// [`Fault::BadInteger`] si l'entier déborde, s'il n'est pas terminé, ou s'il
 /// est écrit sur plus d'octets qu'un `u32` n'en exige.
 pub fn decode_integer(octets: &[u8], bits: u32) -> Result<(u32, usize), Error> {
-    let faute = || Error::connection(ErrorCode::CompressionError, Cause::BadInteger);
+    let faute = || Error::new(Fault::BadInteger);
     // `bits` vient du code appelant, jamais du réseau : entre 1 et 8.
     let masque = u32::from(u8::MAX)
         .checked_shr(8_u32.saturating_sub(bits))
@@ -78,14 +78,14 @@ pub fn decode_integer(octets: &[u8], bits: u32) -> Result<(u32, usize), Error> {
 ///
 /// # Errors
 ///
-/// [`Cause::BufferTooSmall`] si `out` ne suffit pas.
+/// [`Fault::BufferTooSmall`] si `out` ne suffit pas.
 pub fn encode_integer(
     valeur: u32,
     bits: u32,
     drapeaux: u8,
     out: &mut [u8],
 ) -> Result<usize, Error> {
-    let court = || Error::connection(ErrorCode::InternalError, Cause::BufferTooSmall);
+    let court = || Error::new(Fault::BufferTooSmall);
     let masque = u32::from(u8::MAX)
         .checked_shr(8_u32.saturating_sub(bits))
         .unwrap_or(0);

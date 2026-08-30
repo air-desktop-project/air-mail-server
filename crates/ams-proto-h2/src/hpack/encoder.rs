@@ -28,8 +28,8 @@
 //! On n'a donc rien à en tenir, et rien à évincer. C'est aussi ce qui rend cet
 //! encodeur sans état — et un encodeur sans état ne peut pas se désynchroniser.
 
-use super::integer::encode_integer;
-use super::string::encode_string;
+use super::encode_integer;
+use super::encode_string;
 use super::table_statique::STATIQUE;
 use crate::error::{Cause, Error, ErrorCode};
 
