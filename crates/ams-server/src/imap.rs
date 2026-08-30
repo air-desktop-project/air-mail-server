@@ -608,6 +608,21 @@ impl Mailbox for BoiteImap {
         }
     }
 
+    fn sent_day(&self, sequence: u32) -> Option<u64> {
+        let rang = self.rang(sequence)?;
+        let chemin = self.chemins.get(rang)?;
+        let entete = entete_de(chemin)?;
+        let message = ams_mime::Message::parse(&entete, &ams_mime::Limits::DEFAULT).ok()?;
+        // **LE PREMIER `Date:` GAGNE.** §3.6 de RFC 5322 n'en admet qu'un ; un
+        // message qui en porte deux est mal formé, et prendre le dernier
+        // laisserait un expéditeur choisir laquelle des deux dates le serveur
+        // retiendra.
+        message
+            .fields()
+            .find(|champ| champ.name_is(b"date"))
+            .and_then(|champ| ams_mime::read_day(champ.raw_value()))
+    }
+
     fn contains(&self, sequence: u32, scope: SearchScope, field: &[u8], needle: &[u8]) -> bool {
         let Some(rang) = self.rang(sequence) else {
             return false;

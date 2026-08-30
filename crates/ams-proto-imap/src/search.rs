@@ -59,6 +59,12 @@ enum Noeud<'a> {
     Le(u64),
     /// `SINCE date` : arrivé ce jour-là ou après.
     Depuis(u64),
+    /// `SENTBEFORE date` : ÉCRIT avant ce jour, d'après son champ `Date:`.
+    EcritAvant(u64),
+    /// `SENTON date` : écrit ce jour-là.
+    EcritLe(u64),
+    /// `SENTSINCE date` : écrit ce jour-là ou après.
+    EcritDepuis(u64),
     /// `UID <ensemble>`.
     Uid(SequenceSet<'a>),
     /// Un ensemble de numéros de séquence, écrit sans mot-clé.
@@ -79,10 +85,30 @@ enum Noeud<'a> {
     },
 }
 
-/// Ce à quoi l'appelant répond pour les critères qui lisent le message.
+/// Ce à quoi l'appelant répond pour les critères qui LISENT le message.
 ///
-/// La portée, le champ visé — vide hors d'un en-tête — et le texte cherché.
-pub type SearchReader<'r> = &'r mut dyn FnMut(SearchScope, &[u8], &[u8]) -> bool;
+/// # POURQUOI UN TRAIT PLUTÔT QU'UNE FERMETURE
+///
+/// Il y a deux questions, et elles ne se posent pas de la même façon : « ce
+/// champ porte-t-il ce texte ? » et « quel jour ce message a-t-il été écrit ? ».
+/// Une fermeture n'en porte qu'une ; deux fermetures feraient deux paramètres
+/// que chaque appelant devrait accorder. Le trait les tient ensemble, et une
+/// question de plus s'y ajoutera sans changer aucune signature.
+pub trait SearchSource {
+    /// Le champ visé porte-t-il ce texte ?
+    ///
+    /// La portée, le champ visé — vide hors d'un en-tête — et le texte cherché.
+    fn contains(&mut self, scope: SearchScope, field: &[u8], text: &[u8]) -> bool;
+
+    /// Le jour du champ `Date:` : le nombre de jours depuis l'époque.
+    ///
+    /// `None` s'il n'y en a pas, ou qu'on ne sait pas le lire — **et alors aucun
+    /// critère `SENT…` ne correspond** : on ne compare pas ce qui n'est pas là.
+    fn sent_day(&mut self) -> Option<u64>;
+}
+
+/// Ce que [`Search::matches`] emprunte pour lire le message.
+pub type SearchReader<'r> = &'r mut dyn SearchSource;
 
 /// Où un critère cherche son texte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -333,6 +359,18 @@ impl<'a> Search<'a> {
             Noeud::Avant(jour) => jour_de(message.internal_date) < jour,
             Noeud::Le(jour) => jour_de(message.internal_date) == jour,
             Noeud::Depuis(jour) => jour_de(message.internal_date) >= jour,
+            // **CE N'EST PAS LA MÊME DATE** : `BEFORE` compare la date
+            // d'ARRIVÉE, `SENTBEFORE` celle que le message porte dans son champ
+            // `Date:` (§6.4.4). Un message écrit lundi et reçu vendredi répond à
+            // l'une et pas à l'autre — les confondre ferait manquer au client
+            // exactement ce qu'il cherchait.
+            //
+            // **UN MESSAGE SANS DATE LISIBLE NE CORRESPOND À AUCUN** : on ne
+            // compare pas ce qui n'est pas là, et le tenir pour l'époque le
+            // ferait répondre à tous les `SENTBEFORE`.
+            Noeud::EcritAvant(jour) => contient.sent_day().is_some_and(|ecrit| ecrit < jour),
+            Noeud::EcritLe(jour) => contient.sent_day() == Some(jour),
+            Noeud::EcritDepuis(jour) => contient.sent_day().is_some_and(|ecrit| ecrit >= jour),
             Noeud::Uid(ensemble) => ensemble.contains(message.uid, star_uid),
             Noeud::Rang(ensemble) => ensemble.contains(message.sequence, star_seq),
             Noeud::Non(clef) => !self.evaluer(clef, message, star_seq, star_uid, contient),
@@ -352,9 +390,9 @@ impl<'a> Search<'a> {
                 champ,
                 texte,
             } => match portee {
-                SearchScope::Header if texte.is_empty() => contient(portee, champ, texte),
+                SearchScope::Header if texte.is_empty() => contient.contains(portee, champ, texte),
                 _ if texte.is_empty() => true,
-                _ => contient(portee, champ, texte),
+                _ => contient.contains(portee, champ, texte),
             },
         }
     }
@@ -492,7 +530,17 @@ impl<'a> Lecteur<'a, '_> {
             });
         }
         for (nom, faire) in [
-            (&b"BEFORE"[..], Noeud::Avant as fn(u64) -> Noeud<'a>),
+            // LES PLUS LONGS D'ABORD : `SENTBEFORE` commence par `SENT`, et non
+            // par `BEFORE` — mais si l'on comparait `ON` avant `SENTON`, le
+            // second ne serait jamais atteint. L'ordre de cette table est donc
+            // une règle, pas un agrément.
+            (
+                &b"SENTBEFORE"[..],
+                Noeud::EcritAvant as fn(u64) -> Noeud<'a>,
+            ),
+            (b"SENTON", Noeud::EcritLe as fn(u64) -> Noeud<'a>),
+            (b"SENTSINCE", Noeud::EcritDepuis as fn(u64) -> Noeud<'a>),
+            (b"BEFORE", Noeud::Avant as fn(u64) -> Noeud<'a>),
             (b"ON", Noeud::Le as fn(u64) -> Noeud<'a>),
             (b"SINCE", Noeud::Depuis as fn(u64) -> Noeud<'a>),
         ] {

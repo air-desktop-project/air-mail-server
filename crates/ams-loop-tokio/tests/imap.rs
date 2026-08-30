@@ -58,6 +58,12 @@ impl Mailbox for Boite {
     fn exists(&self) -> u32 {
         2
     }
+    fn sent_day(&self, sequence: u32) -> Option<u64> {
+        // Les messages d'épreuve ne portent pas de `Date:` : c'est le passage
+        // sur le fil qu'on éprouve ici.
+        let _ = sequence;
+        None
+    }
     fn refresh(&mut self) -> u32 {
         // Cette boîte-ci ne bouge pas : ce qu'on éprouve dans ce fichier, c'est
         // que le pilote sait attendre et conclure, pas que le magasin sait voir

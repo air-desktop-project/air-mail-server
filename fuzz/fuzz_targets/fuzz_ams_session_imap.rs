@@ -82,6 +82,16 @@ impl Mailbox for Boite {
     fn exists(&self) -> u32 {
         u32::try_from(self.messages.borrow().len()).unwrap_or(u32::MAX)
     }
+    fn sent_day(&self, sequence: u32) -> Option<u64> {
+        // UN MESSAGE SUR DEUX PORTE UNE DATE : les deux chemins des critères
+        // `SENT…` — la comparaison et l'absence — se prennent donc tous les
+        // deux, quel que soit ce que l'entrée demande.
+        match sequence % 2 {
+            0 => None,
+            _ => Some(u64::from(sequence)),
+        }
+    }
+
     fn refresh(&mut self) -> u32 {
         // ELLE GRANDIT D'UN MESSAGE À CHAQUE REGARD : c'est ce qui fait passer
         // l'écriture du `* n EXISTS`, et qui éprouve que la propriété 4 vaut

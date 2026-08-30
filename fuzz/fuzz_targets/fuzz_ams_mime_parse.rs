@@ -14,7 +14,7 @@
 
 #![no_main]
 
-use ams_mime::{Limits, Message};
+use ams_mime::{Limits, Message, read_day, write_date};
 use libfuzzer_sys::fuzz_target;
 
 #[path = "invariants.rs"]
@@ -24,5 +24,20 @@ fuzz_target!(|data: &[u8]| {
     let limits = Limits::DEFAULT;
     if let Ok(message) = Message::parse(data, &limits) {
         invariants::verifier(data, &message, &limits);
+    }
+
+    // **UNE DATE ACCEPTÉE SE RÉÉCRIT ET SE RELIT PAREIL.** `read_day` lit des
+    // octets venus d'un en-tête, c'est-à-dire de n'importe qui ; ce qu'il en
+    // tire doit désigner le jour qu'il a lu, et non un autre. La réécriture le
+    // vérifie sans table de correspondance : on repasse par l'écriture, qui est
+    // l'inverse, et l'on relit.
+    if let Some(jour) = read_day(data) {
+        let mut sortie = [0_u8; ams_mime::DATE_MAX];
+        let ecrite = write_date(jour.saturating_mul(86_400), &mut sortie).expect("datable");
+        assert_eq!(
+            read_day(ecrite),
+            Some(jour),
+            "une date relue ne désigne pas le même jour"
+        );
     }
 });

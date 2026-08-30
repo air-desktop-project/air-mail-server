@@ -296,6 +296,23 @@ pub trait Mailbox {
     /// session ouverte.
     fn refresh(&mut self) -> u32;
 
+    /// Le jour que le champ `Date:` du message porte, compté depuis l'époque.
+    ///
+    /// # CE N'EST PAS LA DATE D'ARRIVÉE
+    ///
+    /// `INTERNALDATE` dit quand le message est ARRIVÉ ; celle-ci dit quand il a
+    /// été ÉCRIT. §6.4.4 fait de la seconde une famille de critères à part —
+    /// `SENTBEFORE`, `SENTON`, `SENTSINCE` — parce qu'un message écrit lundi et
+    /// reçu vendredi répond à l'une et pas à l'autre.
+    ///
+    /// **L'heure et le fuseau ne comptent pas** : §6.4.4 dit « disregarding time
+    /// and timezone ». Ce qu'on rend est donc un NOMBRE DE JOURS, tel que le
+    /// message l'écrit — et non des secondes, qu'il faudrait rediviser.
+    ///
+    /// `None` si le message n'en porte pas, ou qu'on ne sait pas la lire —
+    /// aucun critère `SENT…` ne correspond alors.
+    fn sent_day(&self, sequence: u32) -> Option<u64>;
+
     /// Ce que `BINARY[…]` vaut : sa taille décodée, ou pourquoi il ne vaut rien.
     ///
     /// # POURQUOI LA TAILLE D'ABORD, ENCORE
@@ -1247,12 +1264,8 @@ impl Emission {
             // LA SESSION NE LIT PAS LES MESSAGES : elle passe la question à la
             // boîte, qui seule sait les ouvrir. C'est la même frontière que pour
             // l'enveloppe et la structure.
-            let correspond = recherche.matches(
-                &candidat,
-                self.exists,
-                self.star_uid,
-                &mut |portee, champ, texte| boite.contains(rang, portee, champ, texte),
-            );
+            let mut source = Lecture { boite, rang };
+            let correspond = recherche.matches(&candidat, self.exists, self.star_uid, &mut source);
             if correspond {
                 return Some(if self.par_uid { info.uid } else { rang });
             }
@@ -4637,6 +4650,32 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         }
         let longueur = ecrit.len();
         place.get(..longueur)
+    }
+}
+
+/// Ce que la recherche demande au message, et que seule la boîte sait lire.
+///
+/// # POURQUOI CE N'EST PAS UNE FERMETURE
+///
+/// La grammaire pose désormais deux questions — « ce champ porte-t-il ce
+/// texte ? » et « quel jour ce message a-t-il été écrit ? » —, et une fermeture
+/// n'en porte qu'une. **Ce n'est pas non plus une fonction générique** : elle
+/// serait recopiée pour chaque magasin, et chaque copie porterait des chemins
+/// qu'aucun appelant n'emprunte. Voir C2.
+struct Lecture<'b, B: Mailbox + ?Sized> {
+    /// La boîte, qui seule sait ouvrir les messages.
+    boite: &'b B,
+    /// Le rang du message examiné.
+    rang: u32,
+}
+
+impl<B: Mailbox + ?Sized> ams_proto_imap::SearchSource for Lecture<'_, B> {
+    fn contains(&mut self, portee: SearchScope, champ: &[u8], texte: &[u8]) -> bool {
+        self.boite.contains(self.rang, portee, champ, texte)
+    }
+
+    fn sent_day(&mut self) -> Option<u64> {
+        self.boite.sent_day(self.rang)
     }
 }
 

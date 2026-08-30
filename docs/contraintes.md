@@ -1434,6 +1434,32 @@ partie, et deux parties dans une même commande.
 
 Ce qui n'était alors pas servi — `IDLE`, `SUBSCRIBE` — l'est depuis.
 
+## `SENTBEFORE` : la date écrite, depuis le 2026-08-30
+
+**CE N'EST PAS LA MÊME DATE.** `BEFORE` compare la date d'ARRIVÉE, `SENTBEFORE`
+celle que le message porte dans son champ `Date:` (§6.4.4). Un message écrit
+lundi et reçu vendredi répond à l'une et pas à l'autre.
+
+§6.4.4 dit « disregarding time and timezone », et c'est ce qui rend la lecture
+simple : on ne lit qu'un JOUR. Cela écarte toute la zoologie des fuseaux
+obsolètes de RFC 5322 §4.3, qu'il faudrait sinon interpréter pour un résultat
+qu'on jetterait.
+
+**LE LECTEUR DE LA RECHERCHE EST DEVENU UN TRAIT.** Il y a maintenant deux
+questions — « ce champ porte-t-il ce texte ? » et « quel jour ce message a-t-il
+été écrit ? » —, et une fermeture n'en porte qu'une ; deux fermetures feraient
+deux paramètres que chaque appelant devrait accorder. Ce n'est pas non plus une
+fonction générique : elle serait recopiée pour chaque magasin, et chaque copie
+porterait des chemins qu'aucun appelant n'emprunte (C2).
+
+**UN JOUR HORS DU MOIS N'EST PAS UNE DATE** : `31 Feb` se lirait sinon comme le
+3 mars. **Un message sans `Date:` lisible ne correspond à aucun critère
+`SENT…`** : on ne compare pas ce qui n'est pas là, et tenir l'absence pour
+l'époque le ferait répondre à tous les `SENTBEFORE`.
+
+Le fuzz éprouve que ce qu'on lit se réécrit et se relit pareil : on repasse par
+l'écriture, qui est l'inverse, plutôt que par une table de correspondance.
+
 ## Les options de rev2, depuis le 2026-08-30
 
 **`STATUS` REND CE QUI EST DEMANDÉ** (§7.3.3), dans l'ordre demandé, et compte
@@ -2370,17 +2396,12 @@ options que §E dit absorbées dans le protocole de base le sont aussi :
 NAMESPACE, UNSELECT, UIDPLUS, ESEARCH, SEARCHRES, ENABLE, IDLE, SASL-IR,
 LIST-EXTENDED, LIST-STATUS, MOVE, LITERAL-, le côté FETCH de BINARY.
 
-**Deux morceaux de la grammaire de base manquent encore**, et il faut les nommer
-plutôt que de laisser l'énumération ci-dessus les faire croire acquis :
-
-  - les critères `SENTBEFORE`, `SENTON` et `SENTSINCE`, qui comparent le champ
-    `Date:` du message et non sa date d'arrivée ;
-  - les MOTS-CLEFS — `flag-keyword` de §9 —, et donc les critères `KEYWORD` et
-    `UNKEYWORD`, ainsi que les cinq mots-clefs que §E.15 recommande de servir :
-    `$MDNSent`, `$Forwarded`, `$Junk`, `$NonJunk` et `$Phishing`.
-
-Les deux se refusent explicitement — `NO [CANNOT]` pour les critères, `BAD` pour
-un drapeau qu'on ne sait pas écrire — plutôt que d'être tus.
+**Un morceau de la grammaire de base manque encore**, et il faut le nommer
+plutôt que de laisser l'énumération ci-dessus le faire croire acquis : les
+MOTS-CLEFS — `flag-keyword` de §9 —, et donc les critères `KEYWORD` et
+`UNKEYWORD`, ainsi que les cinq mots-clefs que §E.15 recommande de servir :
+`$MDNSent`, `$Forwarded`, `$Junk`, `$NonJunk` et `$Phishing`. Un drapeau qu'on ne
+sait pas écrire est refusé par un `BAD` plutôt que tu.
 
 **LA MANIÈRE DONT ON S'EN EST APERÇU MÉRITE D'ÊTRE NOTÉE.** Deux fois de suite,
 une énumération complète d'une chose a servi à conclure la complétude d'une

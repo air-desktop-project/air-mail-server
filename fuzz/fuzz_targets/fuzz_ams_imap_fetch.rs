@@ -71,8 +71,8 @@ use libfuzzer_sys::fuzz_target;
 
 use ams_proto_imap::{
     Append, Candidate, FETCH_ITEMS_MAX, Fetch, FetchItem, Flags, LIST_PATTERNS_MAX, Limits, List,
-    MAILBOX_NAME_MAX, SEARCH_KEYS_MAX, STATUS_ATTS_MAX, Search, SearchReturn, SequenceSet,
-    StatusItems, Store, mailbox_name_is_safe, mailbox_name_trimmed,
+    MAILBOX_NAME_MAX, SEARCH_KEYS_MAX, STATUS_ATTS_MAX, Search, SearchReturn, SearchScope,
+    SearchSource, SequenceSet, StatusItems, Store, mailbox_name_is_safe, mailbox_name_trimmed,
 };
 
 /// Ce qu'on soumet.
@@ -102,6 +102,27 @@ struct Entree<'a> {
     retour: &'a [u8],
     /// Un message à confronter à ces critères.
     message: (u32, u32, u64, u8, u64),
+}
+
+/// Ce que la recherche demande au message : une réponse constante.
+///
+/// **ELLE RÉPOND TOUJOURS PAREIL**, et c'est le point : un critère qui lit le
+/// message ne doit pas rendre la recherche instable.
+struct Lecteur {
+    /// Ce qu'on répond aux critères de contenu.
+    reponse: bool,
+    /// Ce qu'on répond aux critères `SENT…`.
+    jour: Option<u64>,
+}
+
+impl SearchSource for Lecteur {
+    fn contains(&mut self, _: SearchScope, _: &[u8], _: &[u8]) -> bool {
+        self.reponse
+    }
+
+    fn sent_day(&mut self) -> Option<u64> {
+        self.jour
+    }
 }
 
 /// Rassemble les intervalles rendus, en s'arrêtant à la borne.
@@ -324,19 +345,26 @@ fuzz_target!(|entree: Entree<'_>| {
         // LE LECTEUR RÉPOND TOUJOURS PAREIL : un critère qui lit le message ne
         // doit pas rendre la recherche instable, et c'est ce qu'on vérifie en
         // lui donnant une réponse constante.
-        let mut lecteur = |_, _: &[u8], _: &[u8]| true;
+        let mut lecteur = Lecteur {
+            reponse: true,
+            jour: Some(date),
+        };
         let verdict = recherche.matches(&candidat, entree.star, entree.star, &mut lecteur);
         assert_eq!(
             verdict,
             recherche.matches(&candidat, entree.star, entree.star, &mut lecteur),
             "une recherche a changé d'avis sur le même message"
         );
-        // Et la réponse inverse donne un verdict, elle aussi.
+        // Et la réponse inverse donne un verdict, elle aussi — sans date, ce qui
+        // fait passer les critères `SENT…` par leur chemin d'absence.
         let _ = recherche.matches(
             &candidat,
             entree.star,
             entree.star,
-            &mut |_, _: &[u8], _: &[u8]| false,
+            &mut Lecteur {
+                reponse: false,
+                jour: None,
+            },
         );
     }
 });

@@ -1,6 +1,6 @@
 //! Ce qu'une date dit.
 
-use super::{DATE_MAX, write_date};
+use super::{DATE_MAX, read_day, write_date};
 use crate::Error;
 
 fn dater(secondes: u64) -> std::string::String {
@@ -69,5 +69,76 @@ fn un_tampon_trop_court_le_dit_ou_qu_il_cede() {
             Err(Error::BufferTooSmall),
             "taille {taille}"
         );
+    }
+}
+
+// ── LIRE UNE DATE ───────────────────────────────────────────────────────────
+
+/// Les formes ordinaires de §3.3 se lisent, avec ou sans nom de jour.
+#[test]
+fn les_dates_ordinaires_se_lisent() {
+    // Le 29 août 2026, en jours depuis l'époque.
+    const AOUT: u64 = 20_694;
+    for valeur in [
+        &b"Sat, 29 Aug 2026 09:08:31 +0000"[..],
+        b"29 Aug 2026 09:08:31 +0000",
+        b"  Sat,  29  Aug  2026  09:08:31  -0500",
+        // L'heure et le fuseau ne comptent pas (§6.4.4 de RFC 9051), et ce qui
+        // suit la date non plus.
+        b"Sat, 29 Aug 2026 23:59:59 +1400",
+        b"29 Aug 2026",
+        b"29 aug 2026 00:00:00 GMT",
+    ] {
+        assert_eq!(read_day(valeur), Some(AOUT), "{valeur:?}");
+    }
+    // Le jour tient sur un ou deux chiffres.
+    assert_eq!(read_day(b"1 Jan 1970"), Some(0));
+    assert_eq!(read_day(b"01 Jan 1970 00:00:00 +0000"), Some(0));
+    // Une tabulation sépare comme un espace : un en-tête replié en met une.
+    assert_eq!(read_day(b"Sat,\t29\tAug\t2026"), Some(AOUT));
+}
+
+/// **UN JOUR HORS DU MOIS N'EST PAS UNE DATE.** `31 Feb` se lirait sinon comme
+/// le 3 mars, et le message répondrait à une recherche portant sur un jour qu'il
+/// ne nomme pas.
+#[test]
+fn un_jour_hors_du_mois_n_est_pas_une_date() {
+    assert_eq!(read_day(b"31 Feb 2026"), None);
+    assert_eq!(read_day(b"30 Feb 2024"), None);
+    assert_eq!(read_day(b"31 Apr 2026"), None);
+    assert_eq!(read_day(b"0 Jan 2026"), None);
+    assert_eq!(read_day(b"32 Jan 2026"), None);
+    // Février compte vingt-neuf jours les années bissextiles, et pas les
+    // autres — y compris la règle des siècles.
+    assert!(read_day(b"29 Feb 2024").is_some());
+    assert_eq!(read_day(b"29 Feb 2026"), None);
+    assert_eq!(read_day(b"29 Feb 2100"), None);
+    assert!(read_day(b"29 Feb 2000").is_some());
+}
+
+/// Ce qui n'a pas la forme de §3.3 se refuse.
+#[test]
+fn ce_qui_n_a_pas_la_forme_d_une_date_se_refuse() {
+    for valeur in [
+        &b""[..],
+        b"   ",
+        // Il manque un morceau.
+        b"29 Aug",
+        b"Aug 2026",
+        b"29",
+        // Un mois qui n'en est pas un.
+        b"29 Zzz 2026",
+        // Une année à deux chiffres : §4.3 les admet, mais les interpréter
+        // demanderait de choisir un siècle.
+        b"29 Aug 26",
+        // Une année hors de ce qu'on sait comparer.
+        b"29 Aug 1969",
+        // Ce qui n'est pas un nombre.
+        b"vingt-neuf Aug 2026",
+        b"29 Aug deux-mille",
+        // Une virgule qui mange la date entière.
+        b"29 Aug 2026,",
+    ] {
+        assert_eq!(read_day(valeur), None, "{valeur:?}");
     }
 }

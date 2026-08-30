@@ -20,6 +20,129 @@ use crate::Error;
 /// La longueur d'une date : `Tue, 29 Aug 2026 09:08:31 +0000`.
 pub const DATE_MAX: usize = 40;
 
+/// Lit le JOUR d'une date RFC 5322 : le nombre de jours depuis l'époque.
+///
+/// # ON NE LIT QUE LE JOUR, ET C'EST CE QU'ON DEMANDE
+///
+/// RFC 9051 §6.4.4 : `SENTBEFORE`, `SENTON` et `SENTSINCE` comparent le champ
+/// `Date:` « disregarding time and timezone ». L'heure ne sert donc à rien, et
+/// le fuseau non plus — ce qui écarte du même coup toute la zoologie des zones
+/// obsolètes de RFC 5322 §4.3 (`EST`, `PDT`, une lettre isolée…), qu'il faudrait
+/// sinon interpréter pour un résultat qu'on jetterait.
+///
+/// # CE QU'ON ACCEPTE
+///
+/// `[Jour, ]JJ Mois AAAA` — le nom du jour est facultatif (§3.3), le jour tient
+/// sur un ou deux chiffres, et l'année sur quatre. Les années à deux chiffres de
+/// §4.3 sont refusées : les interpréter demanderait de choisir un siècle, et se
+/// tromper de cent ans vaut moins que de ne rien dire.
+///
+/// Ce qui suit la date — l'heure, le fuseau, un commentaire — est ignoré.
+#[must_use]
+pub fn read_day(valeur: &[u8]) -> Option<u64> {
+    // LE NUMÉRO EST DANS LA TABLE, et non déduit du rang : le déduire
+    // demanderait de convertir un `usize` en `u64`, donc d'écrire une garde
+    // contre un débordement que douze entrées excluent — et qu'aucun test ne
+    // pourrait donc atteindre.
+    const MOIS: [(&[u8], u64); 12] = [
+        (b"Jan", 1),
+        (b"Feb", 2),
+        (b"Mar", 3),
+        (b"Apr", 4),
+        (b"May", 5),
+        (b"Jun", 6),
+        (b"Jul", 7),
+        (b"Aug", 8),
+        (b"Sep", 9),
+        (b"Oct", 10),
+        (b"Nov", 11),
+        (b"Dec", 12),
+    ];
+    // Le nom du jour, s'il est là, se termine par une virgule.
+    let reste = valeur.trim_ascii_start();
+    let reste = match reste.iter().position(|octet| *octet == b',') {
+        Some(rang) => reste.get(rang.saturating_add(1)..).unwrap_or_default(),
+        None => reste,
+    };
+    let mut mots = reste
+        .split(|octet| matches!(*octet, b' ' | b'\t'))
+        .filter(|mot| !mot.is_empty());
+    let jour = lire_un_nombre(mots.next()?)?;
+    let nom = mots.next()?;
+    let annee = lire_un_nombre(mots.next()?)?;
+    let mois = MOIS
+        .iter()
+        .find(|(connu, _)| nom.eq_ignore_ascii_case(connu))
+        .map(|(_, numero)| *numero)?;
+    // UN JOUR HORS DU MOIS N'EST PAS UNE DATE. `31 Feb` se lirait sinon comme
+    // le 3 mars, et le message répondrait à une recherche portant sur un jour
+    // qu'il ne nomme pas.
+    if jour == 0 || jour > jours_du_mois(annee, mois) || !(1970..=9999).contains(&annee) {
+        return None;
+    }
+    // UN NOMBRE DE JOURS, PAS DE SECONDES : c'est un JOUR qu'on compare, et le
+    // rendre en secondes obligerait chaque appelant à diviser — donc à savoir
+    // que l'heure ne compte pas, alors que c'est justement ce qu'on lui épargne.
+    Some(jours_depuis_l_epoque(annee, mois, jour))
+}
+
+/// Combien de jours ce mois-là porte.
+fn jours_du_mois(annee: u64, mois: u64) -> u64 {
+    const LONGUEURS: [u64; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let ordinaire = LONGUEURS
+        .get(usize::try_from(mois.saturating_sub(1)).unwrap_or(0))
+        .copied()
+        .unwrap_or(31);
+    let bissextile =
+        annee.is_multiple_of(4) && (!annee.is_multiple_of(100) || annee.is_multiple_of(400));
+    match mois == 2 && bissextile {
+        true => 29,
+        false => ordinaire,
+    }
+}
+
+/// Lit un nombre décimal, sans signe et sans espace.
+fn lire_un_nombre(mot: &[u8]) -> Option<u64> {
+    if mot.is_empty() || mot.len() > 4 || !mot.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let mut valeur = 0_u64;
+    for octet in mot {
+        valeur = valeur
+            .saturating_mul(10)
+            .saturating_add(u64::from(octet.wrapping_sub(b'0')));
+    }
+    Some(valeur)
+}
+
+/// Combien de jours séparent cette date civile de l'époque.
+///
+/// L'algorithme est celui de Howard Hinnant, le même que [`civil`] à l'envers.
+fn jours_depuis_l_epoque(annee: u64, mois: u64, jour: u64) -> u64 {
+    let annee = if mois <= 2 {
+        annee.saturating_sub(1)
+    } else {
+        annee
+    };
+    let ere = annee / 400;
+    let an_de_l_ere = annee.saturating_sub(ere.saturating_mul(400));
+    let mois_decale = if mois > 2 {
+        mois.saturating_sub(3)
+    } else {
+        mois.saturating_add(9)
+    };
+    let jour_de_l_an = (mois_decale.saturating_mul(153).saturating_add(2) / 5)
+        .saturating_add(jour.saturating_sub(1));
+    let jour_de_l_ere = an_de_l_ere
+        .saturating_mul(365)
+        .saturating_add(an_de_l_ere / 4)
+        .saturating_sub(an_de_l_ere / 100)
+        .saturating_add(jour_de_l_an);
+    ere.saturating_mul(146_097)
+        .saturating_add(jour_de_l_ere)
+        .saturating_sub(719_468)
+}
+
 /// Écrit une date RFC 5322 depuis un nombre de secondes depuis l'époque.
 ///
 /// # Errors

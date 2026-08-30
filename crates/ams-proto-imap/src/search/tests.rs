@@ -5,6 +5,35 @@ use crate::{Error, Flags, Limits};
 
 const BORNES: Limits = Limits::DEFAULT;
 
+/// Une source d'épreuve : une fermeture pour le texte, un jour pour la date.
+///
+/// La grammaire pose deux questions ; les tests répondent aux deux du même
+/// geste, sans que chacun ait à écrire une structure.
+struct Source<F: FnMut(SearchScope, &[u8], &[u8]) -> bool> {
+    /// Ce qu'on répond aux critères de contenu.
+    texte: F,
+    /// Ce qu'on répond aux critères `SENT…`.
+    jour: Option<u64>,
+}
+
+impl<F: FnMut(SearchScope, &[u8], &[u8]) -> bool> super::SearchSource for Source<F> {
+    fn contains(&mut self, portee: SearchScope, champ: &[u8], texte: &[u8]) -> bool {
+        (self.texte)(portee, champ, texte)
+    }
+
+    fn sent_day(&mut self) -> Option<u64> {
+        self.jour
+    }
+}
+
+/// Une source qui ne sait rien : ni texte, ni date.
+fn muette() -> Source<impl FnMut(SearchScope, &[u8], &[u8]) -> bool> {
+    Source {
+        texte: |_, _, _| false,
+        jour: None,
+    }
+}
+
 /// Un message d'épreuve.
 fn message(sequence: u32, uid: u32, size: u64, flags: Flags, date: u64) -> Candidate {
     Candidate {
@@ -32,12 +61,10 @@ fn trouves(critere: &[u8]) -> std::vec::Vec<u32> {
     messages
         .iter()
         .filter(|message| {
-            recherche.matches(message, 3, 30, &mut |_, _, _| {
-                // Cette liste-ci ne cherche rien DANS les messages : les
-                // critères de contenu ont leurs propres épreuves, où la
-                // fermeture dit ce qu'elle voit.
-                false
-            })
+            // Cette liste-ci ne cherche rien DANS les messages : les critères
+            // de contenu ont leurs propres épreuves, où la source dit ce
+            // qu'elle voit.
+            recherche.matches(message, 3, 30, &mut muette())
         })
         .map(|message| message.sequence)
         .collect()
@@ -232,7 +259,7 @@ fn l_expression_vide_ne_designe_rien() {
             &message(sequence, sequence, 0, Flags::NONE, 0),
             3,
             30,
-            &mut |_, _, _| false
+            &mut muette()
         ));
     }
 }
@@ -267,13 +294,16 @@ fn demandes(critere: &[u8]) -> std::vec::Vec<(SearchScope, std::vec::Vec<u8>, st
         &message(1, 10, 100, Flags::NONE, JANVIER),
         3,
         30,
-        &mut |portee, champ, texte| {
-            vues.push((
-                portee,
-                std::vec::Vec::from(champ),
-                std::vec::Vec::from(texte),
-            ));
-            true
+        &mut Source {
+            texte: |portee, champ: &[u8], texte: &[u8]| {
+                vues.push((
+                    portee,
+                    std::vec::Vec::from(champ),
+                    std::vec::Vec::from(texte),
+                ));
+                true
+            },
+            jour: None,
         },
     );
     vues
@@ -359,9 +389,12 @@ fn un_texte_vide_ne_fait_pas_lire_le_message() {
         &message(1, 10, 100, Flags::NONE, JANVIER),
         3,
         30,
-        &mut |_, _, _| {
-            demande = true;
-            false
+        &mut Source {
+            texte: |_, _: &[u8], _: &[u8]| {
+                demande = true;
+                false
+            },
+            jour: None,
         }
     ));
     assert!(!demande, "le corps vide n'avait rien à demander");
@@ -374,8 +407,16 @@ fn un_texte_vide_ne_fait_pas_lire_le_message() {
 fn les_criteres_de_contenu_se_combinent() {
     let recherche = Search::parse(b"NOT SUBJECT facture", &BORNES).expect("lisible");
     let candidat = message(1, 10, 100, Flags::NONE, JANVIER);
-    assert!(!recherche.matches(&candidat, 3, 30, &mut |_, _, _| true));
-    assert!(recherche.matches(&candidat, 3, 30, &mut |_, _, _| false));
+    assert!(!recherche.matches(
+        &candidat,
+        3,
+        30,
+        &mut Source {
+            texte: |_, _: &[u8], _: &[u8]| true,
+            jour: None,
+        }
+    ));
+    assert!(recherche.matches(&candidat, 3, 30, &mut muette()));
 }
 
 /// Une clef de contenu sans son texte est une faute.
@@ -476,4 +517,66 @@ fn les_options_de_retour_se_montrent() {
     let (demande, _) = SearchReturn::parse(b"RETURN (COUNT) ALL").expect("lisible");
     assert!(std::format!("{demande:?}").contains("count: true"));
     assert_eq!(demande, demande);
+}
+
+// ── LA DATE ÉCRITE N'EST PAS LA DATE D'ARRIVÉE ──────────────────────────────
+
+/// Cherche avec une source qui dit un jour donné.
+fn ecrit_le(critere: &[u8], jour: Option<u64>) -> bool {
+    let recherche = Search::parse(critere, &BORNES).expect("lisible");
+    recherche.matches(
+        &message(1, 10, 100, Flags::NONE, JANVIER),
+        3,
+        30,
+        &mut Source {
+            texte: |_, _: &[u8], _: &[u8]| false,
+            jour,
+        },
+    )
+}
+
+/// **`SENTBEFORE` COMPARE LE CHAMP `Date:`**, là où `BEFORE` compare la date
+/// d'arrivée. Un message écrit lundi et reçu vendredi répond à l'une et pas à
+/// l'autre.
+#[test]
+fn les_criteres_d_ecriture_lisent_le_champ_date() {
+    // Le 29 août 2026, en jours depuis l'époque.
+    const AOUT_ECRIT: u64 = 20_694;
+    const VEILLE: u64 = AOUT_ECRIT - 1;
+
+    assert!(ecrit_le(b"SENTON 29-Aug-2026", Some(AOUT_ECRIT)));
+    assert!(!ecrit_le(b"SENTON 29-Aug-2026", Some(VEILLE)));
+    assert!(ecrit_le(b"SENTBEFORE 29-Aug-2026", Some(VEILLE)));
+    assert!(!ecrit_le(b"SENTBEFORE 29-Aug-2026", Some(AOUT_ECRIT)));
+    assert!(ecrit_le(b"SENTSINCE 29-Aug-2026", Some(AOUT_ECRIT)));
+    assert!(!ecrit_le(b"SENTSINCE 29-Aug-2026", Some(VEILLE)));
+
+    // **LES DEUX FAMILLES NE DISENT PAS LA MÊME CHOSE** : ce message est ARRIVÉ
+    // en janvier, et l'on prétend ici qu'il a été ÉCRIT en août.
+    assert!(ecrit_le(b"SENTSINCE 29-Aug-2026", Some(AOUT_ECRIT)));
+    assert!(!ecrit_le(b"SINCE 29-Aug-2026", Some(AOUT_ECRIT)));
+
+    // **SANS DATE LISIBLE, AUCUN NE CORRESPOND** : on ne compare pas ce qui
+    // n'est pas là, et tenir l'absence pour l'époque ferait répondre le message
+    // à tous les `SENTBEFORE`.
+    for critere in [
+        &b"SENTBEFORE 29-Aug-2026"[..],
+        b"SENTON 29-Aug-2026",
+        b"SENTSINCE 29-Aug-2026",
+    ] {
+        assert!(!ecrit_le(critere, None), "{critere:?}");
+    }
+}
+
+/// **`SENTON` NE SE LIT PAS COMME `ON`** : les mots les plus longs se
+/// reconnaissent d'abord, sans quoi le second ne serait jamais atteint.
+#[test]
+fn les_mots_les_plus_longs_se_reconnaissent_d_abord() {
+    // Si `ON` gagnait, `SENTON …` ne serait pas même lisible.
+    assert!(Search::parse(b"SENTON 29-Aug-2026", &BORNES).is_ok());
+    assert!(Search::parse(b"SENTBEFORE 29-Aug-2026", &BORNES).is_ok());
+    assert!(Search::parse(b"SENTSINCE 29-Aug-2026", &BORNES).is_ok());
+    // Et une date illisible reste illisible.
+    assert!(Search::parse(b"SENTON 32-Aug-2026", &BORNES).is_err());
+    assert!(Search::parse(b"SENTON", &BORNES).is_err());
 }

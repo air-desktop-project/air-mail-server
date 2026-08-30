@@ -1198,12 +1198,26 @@ non. Sans lui, un client qui a désigné ses messages par UID reçoit des rangs 
 doit deviner lequel est lequel — alors qu'il a choisi les UID pour ne pas avoir à
 le faire.
 
-### Ce qui manque encore
+### `SENTBEFORE` : la date écrite, pas la date reçue
 
-**`SENTBEFORE`, `SENTON` et `SENTSINCE`** comparent le champ `Date:` du message,
-là où `BEFORE`, `ON` et `SINCE` comparent sa date d'arrivée. Les deux existent
-parce qu'elles ne disent pas la même chose : un message écrit lundi et reçu
-vendredi répond à l'une et pas à l'autre.
+`BEFORE`, `ON` et `SINCE` comparent la date d'ARRIVÉE — celle qu'`INTERNALDATE`
+rend. `SENTBEFORE`, `SENTON` et `SENTSINCE` comparent le champ `Date:` que le
+message porte. Les deux familles existent parce qu'elles ne disent pas la même
+chose : un message écrit lundi et reçu vendredi répond à l'une et pas à l'autre,
+et les confondre ferait manquer au client exactement ce qu'il cherchait.
+
+**L'heure et le fuseau ne comptent pas** : §6.4.4 dit « disregarding time and
+timezone ». Ce qui est lu est donc un JOUR, ce qui écarte du même coup toute la
+zoologie des fuseaux obsolètes de RFC 5322 §4.3 — `EST`, `PDT`, une lettre
+isolée — qu'il faudrait sinon interpréter pour un résultat qu'on jetterait.
+
+**Un jour hors du mois n'est pas une date** : `31 Feb` se lirait sinon comme le
+3 mars, et le message répondrait à une recherche portant sur un jour qu'il ne
+nomme pas. **Un message sans `Date:` lisible ne correspond à AUCUN** critère
+`SENT…` : on ne compare pas ce qui n'est pas là, et tenir l'absence pour l'époque
+le ferait répondre à tous les `SENTBEFORE`.
+
+### Ce qui manque encore
 
 **Les MOTS-CLEFS** — `flag-keyword` de §9 — et avec eux `KEYWORD` et
 `UNKEYWORD`, ainsi que les cinq que §E.15 recommande : `$MDNSent`,

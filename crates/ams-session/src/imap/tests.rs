@@ -73,6 +73,16 @@ impl Mailbox for Boite {
         self.info(sequence)
             .map_or(0, |info| info.size.saturating_mul(2) / 5)
     }
+    fn sent_day(&self, sequence: u32) -> Option<u64> {
+        // LE PREMIER MESSAGE PORTE UNE DATE, LES AUTRES NON : c'est ce qui
+        // éprouve à la fois la comparaison et le « sans date, rien ne
+        // correspond » de §6.4.4. Le 15 janvier 2026, en jours depuis l'époque.
+        match sequence {
+            1 => Some(20_468),
+            _ => None,
+        }
+    }
+
     fn refresh(&mut self) -> u32 {
         // LA BOÎTE D'ÉPREUVE GRANDIT D'UN MESSAGE À CHAQUE REGARD, tant qu'on le
         // lui demande : c'est ce qui permet d'éprouver qu'un `* n EXISTS` ne se
@@ -5420,5 +5430,44 @@ fn un_nom_de_status_qu_on_ne_saurait_pas_citer_est_une_faute() {
     assert!(
         texte.contains("BAD STATUS expects a mailbox name and items"),
         "{texte}"
+    );
+}
+
+/// **`SENTBEFORE` NE COMPARE PAS LA MÊME DATE QUE `BEFORE`.** Le premier lit le
+/// champ `Date:` du message, le second sa date d'arrivée.
+#[test]
+fn les_criteres_d_ecriture_ne_sont_pas_ceux_d_arrivee() {
+    let mut session = selectionnee();
+    // Le message 1 dit avoir été écrit le 15 janvier 2026 ; il est arrivé le
+    // 29 août 2026, comme les deux autres.
+    let ecrit = ecouler(&mut session, b"a003 SEARCH SENTBEFORE 1-Feb-2026\r\n");
+    assert_eq!(
+        ecrit,
+        "* ESEARCH (TAG \"a003\") ALL 1\r\na003 OK SEARCH completed\r\n"
+    );
+    let arrive = ecouler(&mut session, b"a004 SEARCH BEFORE 1-Feb-2026\r\n");
+    assert_eq!(
+        arrive,
+        "* ESEARCH (TAG \"a004\")\r\na004 OK SEARCH completed\r\n"
+    );
+
+    // `SENTON` et `SENTSINCE` lisent la même date.
+    let le = ecouler(&mut session, b"a005 SEARCH SENTON 15-Jan-2026\r\n");
+    assert_eq!(
+        le,
+        "* ESEARCH (TAG \"a005\") ALL 1\r\na005 OK SEARCH completed\r\n"
+    );
+    let depuis = ecouler(&mut session, b"a006 SEARCH SENTSINCE 15-Jan-2026\r\n");
+    assert_eq!(
+        depuis,
+        "* ESEARCH (TAG \"a006\") ALL 1\r\na006 OK SEARCH completed\r\n"
+    );
+
+    // **LES MESSAGES SANS `Date:` LISIBLE NE CORRESPONDENT À AUCUN** : les deux
+    // autres n'en portent pas, et ne paraissent nulle part ci-dessus.
+    let rien = ecouler(&mut session, b"a007 SEARCH SENTSINCE 1-Jan-1970\r\n");
+    assert_eq!(
+        rien,
+        "* ESEARCH (TAG \"a007\") ALL 1\r\na007 OK SEARCH completed\r\n"
     );
 }
