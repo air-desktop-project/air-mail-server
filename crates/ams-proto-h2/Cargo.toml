@@ -1,0 +1,15 @@
+[package]
+name = "ams-proto-h2"
+description = "Grammaire HTTP/2 (RFC 9113) : cadres, réglages et HPACK, sans entrée-sortie"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+ams-proto-http = { path = "../ams-proto-http" }
+
+[lints]
+workspace = true

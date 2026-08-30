@@ -39,6 +39,7 @@ members = [
     "crates/ams-proto-pop3",
     "crates/ams-proto-imap",
     "crates/ams-proto-http",
+    "crates/ams-proto-h2",
     "crates/ams-dns",
     # Étage 2 — décisions, sans entrée-sortie
     "crates/ams-session",

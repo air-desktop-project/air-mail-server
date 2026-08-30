@@ -2510,6 +2510,38 @@ versions du même serveur est exactement ce qu'un attaquant cherche.
 - **Deux `content-length` qui se contredisent** ; deux qui s'accordent sont
   licites, et le restent.
 
+### Le cadrage : on ignore l'inconnu, on refuse le faux
+
+`ams-proto-h2` porte les neuf octets de §4 et les réglages de §6.5.2. La règle
+qui gouverne tout le module tient en une phrase, et elle se paie quand on
+l'oublie dans un sens comme dans l'autre :
+
+**Un cadre d'un type inconnu s'IGNORE** (§4.1), et un réglage d'un identifiant
+inconnu aussi (§6.5.2). C'est ce qui permet aux extensions d'exister sans casser
+les serveurs déployés — un serveur qui refuserait ce qu'il ne connaît pas serait
+le maillon par lequel toute évolution devient impossible.
+
+**Mais un `SETTINGS_MAX_FRAME_SIZE` à quarante-deux se REFUSE.** On sait ce qu'il
+veut dire, et ce qu'il dit est hors de la plage que la RFC définit. Ignorer le
+faux ferait tourner une connexion sur un réglage qu'on n'a pas retenu.
+
+La borne de longueur, elle, s'applique à TOUS les types, inconnus compris : ce
+qu'on ignore, il faut quand même le sauter, donc le retenir ou le lire. C'est la
+seule borne qui protège la mémoire.
+
+**LE BIT RÉSERVÉ EST IGNORÉ À LA LECTURE ET ÉCRIT À ZÉRO** (§4.1). Le refuser
+casserait une extension future qui s'en servirait.
+
+**LE REMPLISSAGE NON NUL EST REFUSÉ**, et c'est un choix : §6.1 dit qu'un
+récepteur « MAY » le traiter comme une faute. Des octets qu'un pair choisit et
+qu'on ne regarde pas sont un canal caché, et C7 tranche en faveur de la sécurité.
+
+`PRIORITY` se lit et ne fait rien : §5.3.2 l'a déprécié. Le refuser casserait des
+clients qui l'envoient toujours ; l'honorer demanderait de construire l'arbre de
+priorités que la RFC a retiré, et dont la complexité a produit sa part de failles.
+`PUSH_PROMISE` est refusé — §8.4 l'a déprécié, un client n'a jamais eu le droit
+d'en envoyer, et ce serveur annonce `SETTINGS_ENABLE_PUSH` à zéro.
+
 ### La bombe de décompression a sa propre borne
 
 HPACK et QPACK compriment : mille champs identiques tiennent en quelques octets

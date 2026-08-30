@@ -63,6 +63,7 @@ fuzz_ams_imap imap
 fuzz_ams_imap_fetch imap-fetch
 fuzz_ams_session_imap imap-session
 fuzz_ams_http_head http-head
+fuzz_ams_h2_frame h2-frame
 fuzz_ams_guard guard
 fuzz_ams_index_name index
 fuzz_ams_config config

@@ -46,6 +46,7 @@ CRATES_SANS_IO=(
     ams-proto-pop3
     ams-proto-imap
     ams-proto-http
+    ams-proto-h2
     ams-session
     ams-guard
     ams-tls
