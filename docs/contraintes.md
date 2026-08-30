@@ -3602,3 +3602,38 @@ au-delà de quatre milliards ne peut donc pas s'écrire.
 On le dit plutôt que de tronquer : un accusé tronqué désignerait un AUTRE flux,
 et l'encodeur du pair évincerait des entrées qu'une section en vol référence
 encore.
+
+## La jointure QPACK, et une règle qui a trouvé sa place
+
+`read_section` fait d'une section de champs une `RequestHead` ; `write_section`
+fait d'un statut et de champs une section. C'est le pendant exact de
+`Connection::read_head` et `write_head` en HTTP/2 — et cela devait l'être :
+les deux protocoles servent la même sémantique.
+
+### Sans table dynamique, une section ne dépend de rien
+
+Une section qui réclamerait des insertions n'attendrait pas : **elle attendrait
+pour toujours**, puisque nous avons annoncé zéro et que §3.2.3 interdit au pair
+d'en faire. On le dit plutôt que de le subir.
+
+De même, un index qui désigne la table dynamique ne désigne rien — le pair
+n'aurait pas pu l'y mettre. Les quatre représentations qui la référencent sont
+donc refusées d'un bloc.
+
+### Une règle qui vivait à deux endroits
+
+« Ce qu'on refuse de recevoir, on refuse de l'écrire » était écrite dans HTTP/2.
+RFC 9114 §4.2 la reprend mot pour mot pour HTTP/3. L'écrire une seconde fois
+aurait fait deux vérités pour une règle — et le jour où l'une changerait, l'autre
+laisserait passer ce que la première refuse.
+
+Elle vit maintenant dans `ams-proto-http`, avec le reste de la sémantique
+commune. C'est le troisième morceau qui remonte là : les champs propres à la
+connexion, les pseudo-en-têtes, et maintenant ce que l'on s'autorise à écrire.
+
+### Deux familles de fautes, pour la troisième fois
+
+Une faute de DÉCOMPRESSION condamne la connexion ; une liste bien décomprimée
+qui ne fait pas une requête ne condamne que son flux (§4.1.2 de RFC 9114). C'est
+la même distinction qu'en HTTP/2 §8.1.1, avec des codes différents — et c'est
+elle qui empêche un client maladroit d'emporter les requêtes des autres.

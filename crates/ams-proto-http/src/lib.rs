@@ -63,6 +63,7 @@ mod status;
 pub use error::Error;
 pub use field::{
     FieldKind, field_kind, field_name_is_valid, field_value_is_valid, is_connection_specific,
+    response_field_is_serviceable,
 };
 pub use head::{FIELDS_MAX, HeadBuilder, RequestHead};
 pub use limits::Limits;

@@ -101,6 +101,16 @@ fn chaque_raison_porte_son_code_et_se_dit() {
             H3Error::QpackEncoderStreamError,
             "table qu'on a annoncée nulle",
         ),
+        (
+            Reason::MalformedRequest,
+            H3Error::MessageError,
+            "ne fait pas une requête",
+        ),
+        (
+            Reason::BadResponseField,
+            H3Error::InternalError,
+            "champ de réponse",
+        ),
     ];
     for (raison, code, morceau) in cas {
         let faute = Error::new(raison);

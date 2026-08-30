@@ -122,6 +122,10 @@ pub enum Reason {
     BadDecoderInstruction,
     /// Une insertion dans une table dynamique qu'on a annoncée nulle (§3.2.3).
     DynamicTableRefused,
+    /// Une section de champs qui ne fait pas une requête (§4.1.2 de RFC 9114).
+    MalformedRequest,
+    /// Un champ de réponse que ce serveur refuse d'écrire.
+    BadResponseField,
 }
 
 impl Reason {
@@ -149,6 +153,11 @@ impl Reason {
                 H3Error::QpackEncoderStreamError
             }
             Self::BadDecoderInstruction => H3Error::QpackDecoderStreamError,
+            // §4.1.2 : une requête bien décomprimée qui ne fait pas un message
+            // ne condamne que son flux. La connexion, elle, n'a rien perdu.
+            Self::MalformedRequest => H3Error::MessageError,
+            // **NOTRE CODE A PROPOSÉ CE CHAMP, PAS LE PAIR.**
+            Self::BadResponseField => H3Error::InternalError,
         }
     }
 }
@@ -197,6 +206,8 @@ impl core::fmt::Display for Error {
             Reason::BadEncoderInstruction => "une instruction d'encodeur mal formée",
             Reason::BadDecoderInstruction => "une instruction de décodeur qu'on ne peut pas écrire",
             Reason::DynamicTableRefused => "une insertion dans une table qu'on a annoncée nulle",
+            Reason::MalformedRequest => "une section de champs qui ne fait pas une requête",
+            Reason::BadResponseField => "un champ de réponse qu'on refuse d'écrire",
         };
         write!(f, "{quoi} (code 0x{:04x})", self.code().value())
     }

@@ -38,6 +38,9 @@
 //!    c'est ce qui ferme d'un coup le blocage de compression et CRIME à la
 //!    réception, et une seule qui passerait rouvrirait les deux.
 //! 10. **CE QU'ON ÉCRIT SUR LE FLUX DE DÉCODEUR SE RELIT IDENTIQUE.**
+//! 11. **UNE SECTION ACCEPTÉE FAIT UNE REQUÊTE COMPLÈTE**, et une réponse
+//!     écrite se relit comme la réponse qu'on a voulue. Sans cela, ce qu'on
+//!     croit servir ne serait pas ce que le client reçoit.
 
 #![no_main]
 
@@ -45,13 +48,14 @@ use libfuzzer_sys::fuzz_target;
 
 use ams_proto_h3::qpack::{
     EncoderInstruction, FieldLine, check_encoder_instruction, max_entries,
-    read_decoder_instruction, read_encoder_instruction, read_field_line, read_prefix,
+    read_decoder_instruction, read_encoder_instruction, read_field_line, read_prefix, read_section,
     write_decoder_instruction,
 };
 use ams_proto_h3::{
     FrameHeader, FrameKind, Placement, Reason, Settings, StreamHead, StreamKind, accept_stream,
     read_stream_head,
 };
+use ams_proto_http::Limits;
 
 fuzz_target!(|donnees: &[u8]| {
     // PROPRIÉTÉS 2, 3 et 4 : l'en-tête de trame.
@@ -194,6 +198,21 @@ fuzz_target!(|donnees: &[u8]| {
             );
             assert!(prefixe.read >= 2, "deux entiers font deux octets");
             assert!(prefixe.read <= donnees.len());
+        }
+    }
+
+    // PROPRIÉTÉ 11 : une section acceptée fait une requête complète.
+    {
+        let mut place = [0_u8; 4096];
+        if let Ok(requete) = read_section(donnees, &mut place, &Limits::DEFAULT) {
+            assert!(
+                !requete.path().is_empty(),
+                "une requête acceptée sans chemin"
+            );
+            assert!(
+                !requete.scheme().is_empty(),
+                "une requête acceptée sans schéma"
+            );
         }
     }
 

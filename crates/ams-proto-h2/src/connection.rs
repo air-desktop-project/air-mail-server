@@ -50,10 +50,7 @@ use crate::hpack::{Decoder, encode_field, encode_status};
 use crate::preface::{Preface, read_preface};
 use crate::settings::{Settings, SettingsReader};
 use crate::stream::{StreamState, Streams};
-use ams_proto_http::{
-    FieldKind, HeadBuilder, Limits, RequestHead, StatusCode, field_kind, field_value_is_valid,
-    is_connection_specific,
-};
+use ams_proto_http::{HeadBuilder, Limits, RequestHead, StatusCode, response_field_is_serviceable};
 
 /// La charge d'un `PING`, en octets (§6.7).
 pub const PING_OCTETS: usize = 8;
@@ -1031,18 +1028,12 @@ const DRAPEAU_FIN_DE_BLOC: u8 = 0x4;
 /// La faute est `INTERNAL_ERROR` : c'est notre code qui a proposé ce champ, pas
 /// le pair.
 fn verifier_champ(nom: &[u8], valeur: &[u8]) -> Result<(), Error> {
-    let refus = || {
-        Err(Error::connection(
+    match response_field_is_serviceable(nom, valeur) {
+        true => Ok(()),
+        false => Err(Error::connection(
             ErrorCode::InternalError,
             Cause::BadResponseField,
-        ))
-    };
-    if field_kind(nom) != FieldKind::Ordinary || is_connection_specific(nom) {
-        return refus();
-    }
-    match field_value_is_valid(valeur) {
-        true => Ok(()),
-        false => refus(),
+        )),
     }
 }
 

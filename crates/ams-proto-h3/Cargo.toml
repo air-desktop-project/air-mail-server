@@ -10,6 +10,7 @@ repository.workspace = true
 
 [dependencies]
 ams-field-codec = { path = "../ams-field-codec" }
+ams-proto-http = { path = "../ams-proto-http" }
 ams-proto-quic = { path = "../ams-proto-quic" }
 
 [dev-dependencies]

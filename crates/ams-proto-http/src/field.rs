@@ -135,5 +135,27 @@ pub fn field_kind(nom: &[u8]) -> FieldKind {
     }
 }
 
+/// Ce champ peut-il figurer dans une réponse qu'on ÉCRIT ?
+///
+/// # CE QU'ON REFUSE DE RECEVOIR, ON REFUSE DE L'ÉCRIRE
+///
+/// §8.2.2 de RFC 9113 interdit les champs propres à la connexion, et §8.3
+/// réserve le `:` aux pseudo-en-têtes — que la couche de transport écrit
+/// elle-même. Un serveur qui vérifie ces règles à la RÉCEPTION mais pas à
+/// l'ÉMISSION laisse l'intermédiaire suivant recevoir ce qu'il vient de
+/// refuser, et la contrebande repart de là.
+///
+/// # ELLE VIT ICI, ET NON DANS HTTP/2 NI DANS HTTP/3
+///
+/// RFC 9114 §4.2 reprend la règle mot pour mot pour HTTP/3. L'écrire dans les
+/// deux crates ferait deux vérités pour une règle — et le jour où l'une
+/// changerait, l'autre laisserait passer ce que la première refuse.
+#[must_use]
+pub fn response_field_is_serviceable(nom: &[u8], valeur: &[u8]) -> bool {
+    field_kind(nom) == FieldKind::Ordinary
+        && !is_connection_specific(nom)
+        && field_value_is_valid(valeur)
+}
+
 #[cfg(test)]
 mod tests;
