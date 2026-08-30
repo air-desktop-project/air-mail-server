@@ -38,6 +38,8 @@ pub struct Boite {
     /// exclure, et ce dont §6.4.6 dit qu'il ne faut pas faire une erreur.
     /// `0` : aucun.
     evanescent: u32,
+    /// Grandira-t-elle au prochain regard ? `Vivante` le fait, une fois.
+    grandit: bool,
     /// Combien de messages cette boîte a effacés, vu du dehors.
     efface: std::rc::Rc<std::cell::Cell<u32>>,
     /// L'UID d'un message qui REFUSE de s'effacer.
@@ -71,6 +73,22 @@ impl Mailbox for Boite {
         self.info(sequence)
             .map_or(0, |info| info.size.saturating_mul(2) / 5)
     }
+    fn refresh(&mut self) -> u32 {
+        // LA BOÎTE D'ÉPREUVE GRANDIT D'UN MESSAGE À CHAQUE REGARD, tant qu'on le
+        // lui demande : c'est ce qui permet d'éprouver qu'un `* n EXISTS` ne se
+        // dit qu'une fois par changement.
+        if self.grandit {
+            self.messages.push(Some(MessageInfo {
+                uid: 40,
+                size: 100,
+                flags: Flags::NONE,
+                internal_date: 0,
+            }));
+            self.grandit = false;
+        }
+        self.exists()
+    }
+
     fn permanent_flags(&self) -> Flags {
         if self.modifiable {
             Flags::SEEN
@@ -505,6 +523,9 @@ impl Mailboxes for Boites {
                 message(20, 200, Flags::SEEN, 1_787_987_400),
                 message(30, 300, Flags::ANSWERED, 1_787_987_500),
             ],
+            // Celle-ci reçoit un message pendant qu'on la regarde : c'est ce
+            // qu'un `IDLE` doit voir.
+            b"Vivante" => std::vec![message(10, 100, Flags::NONE, 0)],
             // Celle-ci en annonce trois, et n'en rend que deux : le deuxième a
             // disparu sous nos pieds.
             b"Trouee" => std::vec![
@@ -549,6 +570,7 @@ impl Mailboxes for Boites {
             modifiable: !name.starts_with(b"Archives"),
             // Dans la boîte trouée, le troisième s'efface quand on écrit.
             evanescent: if name == b"Trouee" { 3 } else { 0 },
+            grandit: name == b"Vivante",
             efface: std::rc::Rc::clone(&self.efface),
             // Dans la boîte têtue, le message d'UID 20 refuse de s'effacer.
             tetu: if name == b"Tetue" { 20 } else { 0 },
@@ -582,7 +604,7 @@ fn la_banniere_annonce_ce_qu_on_sait_faire() {
     let mut sortie = [0_u8; 256];
     let banniere = nouvelle(false).greeting(&mut sortie).expect("composable");
     let texte = std::string::String::from_utf8_lossy(banniere).into_owned();
-    assert!(texte.starts_with("* OK [CAPABILITY IMAP4rev2 LITERAL- STARTTLS LOGINDISABLED]"));
+    assert!(texte.starts_with("* OK [CAPABILITY IMAP4rev2 LITERAL- IDLE STARTTLS LOGINDISABLED]"));
     assert!(texte.ends_with("service ready\r\n"), "{texte}");
 }
 
@@ -932,11 +954,7 @@ fn des_identifiants_demesures_sont_refuses_comme_les_autres() {
 fn ce_qu_on_ne_sert_pas_encore_le_dit_sans_accuser_le_client() {
     let mut session = nouvelle(true);
     dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
-    for commande in [
-        &b"a005 SUBSCRIBE a\r\n"[..],
-        b"a006 UNSUBSCRIBE a\r\n",
-        b"a009 IDLE\r\n",
-    ] {
+    for commande in [&b"a005 SUBSCRIBE a\r\n"[..], b"a006 UNSUBSCRIBE a\r\n"] {
         let mut sortie = [0_u8; 2048];
         let tour = session.handle(commande, &mut sortie).expect("traitable");
         let texte = std::string::String::from_utf8_lossy(tour.reply()).into_owned();
@@ -1432,6 +1450,7 @@ fn un_tampon_trop_court_le_dit_ou_qu_il_cede() {
     // de place à un endroit différent.
     const APRES_LOGIN: &[&[u8]] = &[b"a000 LOGIN jean ouvre-toi\r\n"];
     const APRES_SELECT: &[&[u8]] = &[b"a000 LOGIN jean ouvre-toi\r\n", b"a000 SELECT INBOX\r\n"];
+    court(APRES_LOGIN, b"a001 IDLE\r\n", true);
     court(APRES_LOGIN, b"a001 EXAMINE INBOX\r\n", true);
     court(APRES_LOGIN, b"a001 SELECT Inconnue\r\n", true);
     court(APRES_LOGIN, b"a001 SELECT\r\n", true);
@@ -4405,4 +4424,138 @@ fn une_boite_videe_porte_les_deux_marques() {
         texte.contains("* LIST (\\Noselect \\HasChildren) \"/\" \"Archives\""),
         "{texte}"
     );
+}
+
+// ── `IDLE` ──────────────────────────────────────────────────────────────────
+
+/// **LA CONTINUATION N'EST PAS UNE CONCLUSION.** `+ idling` dit que l'attente
+/// commence ; la conclusion étiquetée ne vient qu'après le `DONE`.
+#[test]
+fn idle_ouvre_l_attente_sans_la_conclure() {
+    let mut session = selectionnee();
+    let mut sortie = [0_u8; 512];
+    let tour = session
+        .handle(b"a003 IDLE\r\n", &mut sortie)
+        .expect("traitable");
+    assert_eq!(tour.action(), Action::Idle);
+    assert_eq!(
+        std::string::String::from_utf8_lossy(tour.reply()),
+        "+ idling\r\n"
+    );
+}
+
+/// `DONE` conclut, et rien d'autre ne le fait.
+#[test]
+fn seul_done_conclut_l_attente() {
+    let mut session = selectionnee();
+    let mut sortie = [0_u8; 512];
+    session
+        .handle(b"a003 IDLE\r\n", &mut sortie)
+        .expect("traitable");
+    let tour = session
+        .end_idle(b"DONE\r\n", &mut sortie)
+        .expect("conclusion");
+    assert_eq!(tour.action(), Action::Continue);
+    assert_eq!(
+        std::string::String::from_utf8_lossy(tour.reply()),
+        "a003 OK IDLE terminated\r\n"
+    );
+    // La casse ne compte pas ; ce qui n'est pas `DONE` est une faute.
+    session
+        .handle(b"a004 IDLE\r\n", &mut sortie)
+        .expect("traitable");
+    let minuscule = session
+        .end_idle(b"done\r\n", &mut sortie)
+        .expect("conclusion");
+    assert!(
+        std::string::String::from_utf8_lossy(minuscule.reply()).contains("a004 OK"),
+        "la casse ne compte pas"
+    );
+    session
+        .handle(b"a005 IDLE\r\n", &mut sortie)
+        .expect("traitable");
+    let autre = session
+        .end_idle(b"a006 NOOP\r\n", &mut sortie)
+        .expect("conclusion");
+    assert!(
+        std::string::String::from_utf8_lossy(autre.reply())
+            .contains("BAD Expected DONE while idling"),
+        "ce qui n'est pas DONE est une faute"
+    );
+}
+
+/// **SEULE LA CROISSANCE SE DIT**, et elle ne se dit qu'une fois.
+#[test]
+fn seule_la_croissance_se_dit_et_une_seule_fois() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut session, b"a002 SELECT Vivante\r\n");
+    let mut sortie = [0_u8; 512];
+    session
+        .handle(b"a003 IDLE\r\n", &mut sortie)
+        .expect("traitable");
+
+    // Le premier regard voit le message qui vient d'arriver.
+    let ecrits = session.idle_poll(&mut sortie).expect("regard");
+    assert_eq!(
+        std::string::String::from_utf8_lossy(sortie.get(..ecrits).unwrap_or_default()),
+        "* 2 EXISTS\r\n"
+    );
+    // Le second ne redit rien : le compte n'a pas changé.
+    assert_eq!(session.idle_poll(&mut sortie).expect("regard"), 0);
+}
+
+/// **SANS BOÎTE OUVERTE, `IDLE` ATTEND SANS RIEN AVOIR À DIRE**, ce que §6.3.13
+/// permet — c'est ce que fait un client qui garde sa connexion chaude.
+#[test]
+fn idle_sans_boite_ouverte_attend_sans_rien_dire() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let mut sortie = [0_u8; 512];
+    let tour = session
+        .handle(b"a002 IDLE\r\n", &mut sortie)
+        .expect("traitable");
+    assert_eq!(tour.action(), Action::Idle);
+    assert_eq!(session.idle_poll(&mut sortie).expect("regard"), 0);
+}
+
+/// Avant l'authentification, il n'y a rien à attendre.
+#[test]
+fn idle_avant_l_authentification_est_une_faute() {
+    let mut session = nouvelle(true);
+    let (texte, _) = dire(&mut session, b"a001 IDLE\r\n");
+    assert!(
+        texte.contains("BAD Command is not allowed before authentication"),
+        "{texte}"
+    );
+}
+
+/// **ON RACCROCHE EN LE DISANT** : abandonner sans un mot laisserait le client
+/// croire qu'il idle encore, et attendre du courrier qui ne viendrait jamais.
+#[test]
+fn une_attente_trop_longue_se_dit() {
+    let session = selectionnee();
+    let mut sortie = [0_u8; 512];
+    let adieu = session.idle_timed_out(&mut sortie).expect("congé");
+    assert_eq!(
+        std::string::String::from_utf8_lossy(adieu),
+        "* BYE Idle timeout\r\n"
+    );
+}
+
+/// Un tampon trop court le dit, pour l'attente comme pour le reste.
+#[test]
+fn un_tampon_trop_court_pour_l_attente_le_dit() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut session, b"a002 SELECT Vivante\r\n");
+    for taille in 0..12_usize {
+        let mut petit = std::vec![0_u8; taille];
+        assert!(session.idle_timed_out(&mut petit).is_err(), "{taille}");
+        let mut autre = nouvelle(true);
+        dire(&mut autre, b"a001 LOGIN jean ouvre-toi\r\n");
+        dire(&mut autre, b"a002 SELECT Vivante\r\n");
+        let mut place = std::vec![0_u8; taille];
+        assert!(autre.idle_poll(&mut place).is_err(), "regard {taille}");
+    }
 }

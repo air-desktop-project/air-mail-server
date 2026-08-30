@@ -82,6 +82,13 @@ impl Mailbox for Boite {
     fn exists(&self) -> u32 {
         u32::try_from(self.messages.borrow().len()).unwrap_or(u32::MAX)
     }
+    fn refresh(&mut self) -> u32 {
+        // ELLE GRANDIT D'UN MESSAGE À CHAQUE REGARD : c'est ce qui fait passer
+        // l'écriture du `* n EXISTS`, et qui éprouve que la propriété 4 vaut
+        // aussi pour ce que le serveur dit sans qu'on le lui demande.
+        self.messages.borrow_mut().push((ENTETE_D_EPREUVE.len() as u64, Flags::NONE));
+        self.exists()
+    }
     fn uid_validity(&self) -> u32 {
         7
     }
@@ -491,6 +498,17 @@ fuzz_target!(|entree: Entree<'_>| {
             // Un `APPEND` ne passe pas par le découpage ordinaire : la cible ne
             // le produit donc jamais. Le nommer quand même évite qu'un ajout à
             // l'énumération passe inaperçu.
+            // L'ATTENTE EST LE SEUL ENDROIT OÙ LE SERVEUR PARLE SANS QU'ON LUI
+            // DEMANDE : ce qu'il y écrit doit satisfaire la propriété 4 comme
+            // le reste, et sa conclusion doit venir de ce que le pair a dit.
+            Action::Idle => {
+                let ecrits = session.idle_poll(&mut sortie).unwrap_or(0);
+                verifier(sortie.get(..ecrits).unwrap_or_default(), commande);
+                let fin = session.end_idle(commande, &mut sortie);
+                if let Ok(tour) = fin {
+                    verifier(tour.reply(), commande);
+                }
+            }
             Action::ReadAppend => {}
             Action::Continue => {}
         }

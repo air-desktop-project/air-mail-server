@@ -1431,7 +1431,34 @@ ses lignes d'en-tête, `[3.HEADER]`, `[3.TEXT]` et `[3.1]` du message encapsulé
 `[9]` qui vaut `NIL` sans empêcher l'`UID` qui suit, une demande partielle sur une
 partie, et deux parties dans une même commande.
 
-Ce qui n'est toujours pas servi : `IDLE` et `SUBSCRIBE`.
+Ce qui n'est toujours pas servi : `SUBSCRIBE`.
+
+## `IDLE` : l'attente, depuis le 2026-08-30
+
+**C'est la seule commande où le serveur parle sans qu'on lui demande**, et c'est
+ce qui la rend particulière à tenir : `+ idling` ouvre l'attente, et la conclusion
+étiquetée ne vient qu'après le `DONE`. Le pilote attend alors deux choses à la
+fois — la ligne du client et le changement de la boîte — par un `tokio::select!`
+dont la lecture est annulable sans perte.
+
+**SEULE LA CROISSANCE SE DIT.** Un `* n EXPUNGE` renumérote (§7.5.1) tous les
+rangs qui suivent, et un client qui idle les a retenus. §6.3.13 n'oblige à rien
+envoyer : se taire est correct, mentir sur les rangs ne l'est pas. La règle est
+tenue par le magasin, pas par une convention : il n'ajoute qu'à la fin, et
+seulement si le nouveau relevé COMMENCE par l'ancien, UID pour UID.
+
+**DEUX `stat` PLUTÔT QU'UN PARCOURS.** La question se pose toutes les cinq
+secondes, pour chaque session ouverte. Les dates de `new/` et `cur/` y répondent
+sans lire le répertoire, et c'est la réponse dans l'immense majorité des cas.
+`inotify` réveillerait plus vite, au prix d'une dépendance et d'un descripteur de
+surveillance par session.
+
+**ON RACCROCHE EN LE DISANT** : au bout de trente minutes (RFC 2177),
+`* BYE Idle timeout`. Abandonner sans un mot laisserait le client croire qu'il
+idle encore.
+
+Éprouvé jusqu'au binaire : un message déposé dans `new/` pendant l'attente
+ressort en `* 2 EXISTS`, et ne se redit pas au regard suivant.
 
 ## `HEADER.FIELDS` : quelques champs, depuis le 2026-08-30
 
@@ -2261,6 +2288,5 @@ persistant, et lecture sans verrou côté IMAP), C14 (`X25519MLKEM768` en tête)
 `<CRLF>.<CRLF>`, refuse tout `CR` ou `LF` isolé, et le fuzz éprouve que le
 découpage des lectures ne change rien au verdict.
 
-Ce qui manque, et qu'aucune phrase ne doit laisser croire acquis : `IDLE` et
-`SUBSCRIBE` ; la file de réémission des messages sortants ; et toute interface
-HTTP.
+Ce qui manque, et qu'aucune phrase ne doit laisser croire acquis : `SUBSCRIBE` ;
+la file de réémission des messages sortants ; et toute interface HTTP.

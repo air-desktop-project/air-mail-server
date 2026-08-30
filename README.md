@@ -1089,9 +1089,40 @@ le client se demander si la commande a été comprise. Et l'état compte : §6.3
 réserve à l'état authentifié, AVANT toute sélection — une extension activée en
 cours de session changerait ce que des réponses déjà en vol signifient.
 
-Ce qui n'y est toujours pas : `IDLE` et `SUBSCRIBE`. Le serveur dit au démarrage
-ce qu'il sert et ce qu'il ne sert pas, plutôt que de laisser un port ouvert le
-faire croire.
+### `IDLE` : attendre, et pousser ce qui arrive
+
+C'est la seule commande où le serveur parle sans qu'on lui demande. `+ idling`
+ouvre l'attente ; la conclusion étiquetée ne vient qu'après le `DONE` du client.
+Écrire les deux d'un coup fermerait la commande avant qu'elle ait servi à quoi
+que ce soit.
+
+Pendant l'attente, le pilote attend DEUX choses à la fois : la ligne du client et
+le changement de la boîte. Les attendre l'une puis l'autre ferait manquer celle
+qui arrive en premier ; `tokio::select!` les attend ensemble, et la lecture y est
+annulable sans perte — rien n'est consommé tant qu'elle n'a pas abouti.
+
+**Seule la croissance se dit.** `* n EXISTS` annonce que la boîte porte plus de
+messages qu'avant. Ce qui a disparu ne se dit PAS : l'annoncer renumérote (§7.5.1)
+tous les rangs qui suivent, et un client qui idle les a retenus. La RFC 9051
+§6.3.13 n'oblige à rien envoyer — se taire est donc correct, et mentir sur les
+rangs ne le serait pas. Le magasin le tient structurellement : il n'ajoute qu'à
+la fin, et seulement si le nouveau relevé COMMENCE par l'ancien, UID pour UID.
+
+**On regarde, plutôt que d'être prévenu.** `inotify` réveillerait à l'instant
+près, au prix d'une dépendance et d'un descripteur de surveillance par session
+ouverte. Deux `stat` sur `new/` et `cur/` toutes les cinq secondes répondent
+« rien de neuf » dans l'immense majorité des cas, sans lire le répertoire — pour
+une boîte de dix mille messages, c'est la différence entre deux appels système et
+dix mille entrées, à chaque regard et pour chaque session.
+
+**Une attente trop longue se conclut EN LE DISANT** : au bout de trente minutes
+(RFC 2177), `* BYE Idle timeout`, puis on raccroche. Abandonner sans un mot
+laisserait le client croire qu'il idle encore, et attendre du courrier qui ne
+viendrait jamais.
+
+Ce qui n'y est toujours pas : `SUBSCRIBE`. Le serveur dit au démarrage ce qu'il
+sert et ce qu'il ne sert pas, plutôt que de laisser un port ouvert le faire
+croire.
 
 ## Émettre : le client SMTP sortant
 

@@ -716,7 +716,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
              au plus un mébioctet par partie, et seulement en `us-ascii`, `utf-8` ou \
              `iso-8859-1`. `BINARY[…]` REND CE QUE LES OCTETS VEULENT DIRE, transfert-décodé, et \
              refuse par `NO [UNKNOWN-CTE]` un encodage qu'il ne sait pas défaire. \
-             `NAMESPACE` et `ENABLE` répondent ; `IDLE` et `SUBSCRIBE`, non."
+             `NAMESPACE`, `ENABLE` et `IDLE` répondent ; `SUBSCRIBE`, non."
         );
         Some(tokio::spawn(serve_imap(
             ecouteur,

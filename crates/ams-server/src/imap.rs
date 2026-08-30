@@ -251,6 +251,16 @@ fn balayer(chemin: &Path) -> Option<Box<ams_mime::BodyScanner>> {
 /// Une boîte relevée, vue par IMAP.
 pub struct BoiteImap {
     vue: MailboxView,
+    /// Ce que le répertoire portait au dernier regard.
+    ///
+    /// # DEUX `stat` PLUTÔT QU'UN PARCOURS
+    ///
+    /// Un client qui `IDLE` fait poser la question toutes les cinq secondes. La
+    /// poser en relisant le répertoire coûterait, pour une boîte de dix mille
+    /// messages, dix mille entrées à chaque fois et pour chaque session. Les
+    /// dates de `new/` et `cur/` disent en deux appels qu'il n'y a rien de neuf,
+    /// et c'est la réponse dans l'immense majorité des cas.
+    vu: Empreinte,
     /// La boîte elle-même, pour ce qui s'écrit : une COPIE y dépose un message
     /// neuf, et l'UID vient de son compteur.
     maildir: Arc<Maildir>,
@@ -268,6 +278,28 @@ pub struct BoiteImap {
     /// c'est renommer. Le chemin relevé à l'ouverture cesse donc d'être valide
     /// au premier `STORE` — le nôtre comme celui d'une autre session.
     chemins: Vec<PathBuf>,
+}
+
+/// Ce qu'on retient d'un répertoire pour savoir s'il a bougé.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct Empreinte {
+    /// La date de `new/` : le courrier qui arrive s'y pose.
+    neuf: Option<std::time::SystemTime>,
+    /// Celle de `cur/` : ce qui a été adopté, ou renommé par un `STORE`.
+    courant: Option<std::time::SystemTime>,
+}
+
+/// Relève l'empreinte des deux répertoires d'un Maildir.
+fn empreinte_du_maildir(maildir: &Maildir) -> Empreinte {
+    let date = |quoi: &str| {
+        std::fs::metadata(maildir.root().join(quoi))
+            .ok()
+            .and_then(|etat| etat.modified().ok())
+    };
+    Empreinte {
+        neuf: date("new"),
+        courant: date("cur"),
+    }
 }
 
 impl BoiteImap {
@@ -424,6 +456,42 @@ impl Mailbox for BoiteImap {
                 PartWhat::HeaderFields { .. } => return None,
             },
         )
+    }
+
+    fn refresh(&mut self) -> u32 {
+        // RIEN N'A BOUGÉ : deux `stat`, et l'on s'arrête là.
+        let maintenant = empreinte_du_maildir(&self.maildir);
+        if maintenant == self.vu {
+            return self.exists();
+        }
+        self.vu = maintenant;
+        let Ok(vue) = MailboxView::open(&self.maildir) else {
+            return self.exists();
+        };
+        // ON N'AJOUTE, ON NE RETIRE PAS : les rangs qu'un client a retenus
+        // doivent rester valides, et retirer RENUMÉROTE tout ce qui suit.
+        //
+        // **LE NOUVEAU RELEVÉ DOIT DONC COMMENCER PAR L'ANCIEN**, UID pour UID.
+        // S'il ne le fait pas, c'est qu'un message a disparu au milieu : on se
+        // tait, et le client gardera les rangs qu'il connaît jusqu'à sa
+        // prochaine ouverture. Le dire renuméroterait chez lui.
+        let connus = self.vue.messages().len();
+        let prefixe = vue.messages().len() >= connus
+            && vue
+                .messages()
+                .iter()
+                .zip(self.vue.messages())
+                .all(|(neuf, ancien)| neuf.uid == ancien.uid);
+        if !prefixe {
+            return self.exists();
+        }
+        for message in vue.messages().iter().skip(connus) {
+            self.drapeaux.push(drapeaux_de(&message.path));
+            self.dates.push(date_de(&message.path));
+            self.chemins.push(message.path.clone());
+        }
+        self.vue = vue;
+        self.exists()
     }
 
     fn binary_size(&self, sequence: u32, path: &[u32]) -> BinarySize {
@@ -1318,6 +1386,7 @@ impl Mailboxes for BoitesImap {
             drapeaux,
             dates,
             chemins,
+            vu: empreinte_du_maildir(&maildir),
         })
     }
 }

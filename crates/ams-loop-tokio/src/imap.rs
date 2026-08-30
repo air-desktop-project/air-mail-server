@@ -32,7 +32,10 @@ use ams_guard::{Event as GuardEvent, Source, Verdict};
 use ams_proto_imap::{CommandReader, Limits, Need};
 use ams_session::Authenticator;
 use ams_session::imap::{Action, FetchChunk, Mailboxes, Session};
+use core::time::Duration;
+
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
+use tokio::time::Instant;
 
 use crate::connection::lire;
 use crate::{Error, SharedGuard};
@@ -354,9 +357,125 @@ where
             Action::SendFetch => {
                 ecouler_le_fetch(stream, session, etat).await?;
             }
+            Action::Idle => {
+                if attendre(stream, session, etat, service, source).await? {
+                    return Ok(Etape::Terminee);
+                }
+            }
             // Un `APPEND` ne passe pas par ici : sa ligne est reconnue avant le
             // découpage, et son message écoulé là-bas.
             Action::ReadAppend => return Ok(Etape::Terminee),
+        }
+    }
+}
+
+/// Tous les combien l'on regarde si la boîte a changé.
+///
+/// # POURQUOI ON REGARDE, PLUTÔT QUE D'ÊTRE PRÉVENU
+///
+/// Se faire prévenir demanderait `inotify` : une dépendance de plus, et un
+/// descripteur de surveillance par session ouverte. Regarder coûte deux `stat` —
+/// le magasin ne relit le répertoire que si l'un des deux a bougé —, ce qui est
+/// bien moins qu'un descripteur qu'on ne rend jamais.
+///
+/// Cinq secondes : un client voit son courrier arriver dans le temps qu'il met à
+/// lever les yeux, et une boîte au repos coûte deux `stat` toutes les cinq
+/// secondes.
+const REGARD: Duration = Duration::from_secs(5);
+
+/// Combien de temps un `IDLE` peut durer.
+///
+/// RFC 2177 : le client doit le relancer au moins toutes les vingt-neuf minutes,
+/// et le serveur peut le tenir pour inactif au-delà de trente. **On raccroche en
+/// le disant** : une connexion qu'on abandonne sans un mot laisse le client
+/// croire qu'il idle encore.
+const IDLE_MAX: Duration = Duration::from_secs(30 * 60);
+
+/// Conduit un `IDLE` : on attend, et l'on pousse ce qui change.
+///
+/// Rend `true` si la connexion doit se fermer.
+///
+/// # DEUX ATTENTES À LA FOIS, ET C'EST TOUT L'OBJET DE LA COMMANDE
+///
+/// Le client peut parler — `DONE` — pendant que la boîte change. Attendre l'un
+/// puis l'autre ferait manquer celui qui arrive en premier ; `select!` les attend
+/// ensemble. La lecture y est ANNULABLE sans perte : tokio ne consomme rien
+/// tant que le futur n'a pas abouti.
+async fn attendre<S, A, B>(
+    stream: &mut S,
+    session: &mut Session<A, &B>,
+    etat: &mut Etat,
+    service: &ImapService<'_>,
+    source: Source,
+) -> Result<bool, Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    A: Authenticator,
+    B: Mailboxes,
+{
+    let debut = Instant::now();
+    loop {
+        // Le client a peut-être déjà parlé : sa ligne peut être arrivée collée
+        // à l'`IDLE` lui-même.
+        if let Some(longueur) = fin_de_ligne(etat.tampon.get(..etat.rempli).unwrap_or_default()) {
+            let ligne = etat.tampon.get(..longueur).unwrap_or_default();
+            let tour = session.end_idle(ligne, &mut etat.sortie)?;
+            let faute = tour.peer_fault();
+            stream.write_all(tour.reply()).await?;
+            stream.flush().await?;
+            etat.tampon.drain(..longueur.min(etat.tampon.len()));
+            etat.rempli = etat.rempli.saturating_sub(longueur);
+            etat.lecteur.reset();
+            let evenement = match faute {
+                true => GuardEvent::InvalidFrame,
+                false => GuardEvent::Command,
+            };
+            if matches!(
+                service.guard.observe(source, evenement),
+                Verdict::Throttled | Verdict::Banned { .. }
+            ) {
+                let refus = session.unavailable(&mut etat.sortie)?;
+                stream.write_all(refus).await?;
+                stream.flush().await?;
+                return Ok(true);
+            }
+            return Ok(false);
+        }
+
+        tokio::select! {
+            lus = tokio::io::AsyncReadExt::read(stream, &mut etat.morceau) => {
+                let lus = lus.map_err(Error::Io)?;
+                if lus == 0 {
+                    // Le pair a raccroché sans `DONE`. Rien à conclure.
+                    return Ok(true);
+                }
+                if etat.rempli.saturating_add(lus) > service.limits.max_line_octets {
+                    // MÊME BORNE QU'AILLEURS : `DONE` fait quatre octets, et ce
+                    // qui déborde n'est pas un `DONE`.
+                    let adieu = session.cannot_parse(&mut etat.sortie)?;
+                    stream.write_all(adieu).await?;
+                    stream.flush().await?;
+                    return Ok(true);
+                }
+                etat.tampon
+                    .extend_from_slice(etat.morceau.get(..lus).unwrap_or_default());
+                etat.rempli = etat.rempli.saturating_add(lus);
+            }
+            () = tokio::time::sleep(REGARD) => {
+                let ecrits = session.idle_poll(&mut etat.sortie)?;
+                if ecrits > 0 {
+                    stream
+                        .write_all(etat.sortie.get(..ecrits).unwrap_or_default())
+                        .await?;
+                    stream.flush().await?;
+                }
+                if debut.elapsed() >= IDLE_MAX {
+                    let adieu = session.idle_timed_out(&mut etat.sortie)?;
+                    stream.write_all(adieu).await?;
+                    stream.flush().await?;
+                    return Ok(true);
+                }
+            }
         }
     }
 }

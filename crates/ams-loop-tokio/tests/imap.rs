@@ -58,6 +58,12 @@ impl Mailbox for Boite {
     fn exists(&self) -> u32 {
         2
     }
+    fn refresh(&mut self) -> u32 {
+        // Cette boîte-ci ne bouge pas : ce qu'on éprouve dans ce fichier, c'est
+        // que le pilote sait attendre et conclure, pas que le magasin sait voir
+        // arriver le courrier.
+        2
+    }
     fn uid_validity(&self) -> u32 {
         7
     }
@@ -426,7 +432,7 @@ async fn la_banniere_annonce_puis_la_session_repond() {
 
     let banniere = ligne(&mut lecteur).await;
     assert!(
-        banniere.starts_with("* OK [CAPABILITY IMAP4rev2 LITERAL- LOGINDISABLED]"),
+        banniere.starts_with("* OK [CAPABILITY IMAP4rev2 LITERAL- IDLE LOGINDISABLED]"),
         "{banniere}"
     );
 
@@ -1445,4 +1451,67 @@ async fn l_espace_et_l_activation_traversent_la_socket() {
         .expect("écriture");
     let tard = jusqu_a(&mut lecteur, "a006 ").await;
     assert!(tard.starts_with("a006 BAD"), "{tard}");
+}
+
+/// **L'ATTENTE S'OUVRE, ET SEUL `DONE` LA FERME.** Le pilote doit lire la ligne
+/// du client PENDANT qu'il regarde la boîte : c'est la seule commande où les
+/// deux attentes sont simultanées.
+#[tokio::test]
+async fn une_attente_traverse_la_socket() {
+    let Some(materiel) = materiel("imap-attente") else {
+        return;
+    };
+    let mut lecteur = authentifiee(&materiel).await;
+
+    lecteur
+        .get_mut()
+        .write_all(b"a003 SELECT INBOX\r\n")
+        .await
+        .expect("écriture");
+    jusqu_a(&mut lecteur, "a003 ").await;
+
+    // Ce qui n'est pas `DONE` est une faute — et l'attente reprend.
+    lecteur
+        .get_mut()
+        .write_all(b"a004 IDLE\r\n")
+        .await
+        .expect("écriture");
+    let ouverture = jusqu_a(&mut lecteur, "+ ").await;
+    assert_eq!(ouverture, "+ idling\r\n", "{ouverture}");
+    lecteur
+        .get_mut()
+        .write_all(b"a005 NOOP\r\n")
+        .await
+        .expect("écriture");
+    let faute = jusqu_a(&mut lecteur, "a004 ").await;
+    assert!(
+        faute.contains("a004 BAD Expected DONE while idling"),
+        "{faute}"
+    );
+
+    // Et `DONE` conclut, avec l'étiquette de l'`IDLE`.
+    lecteur
+        .get_mut()
+        .write_all(b"a006 IDLE\r\n")
+        .await
+        .expect("écriture");
+    assert_eq!(jusqu_a(&mut lecteur, "+ ").await, "+ idling\r\n");
+    lecteur
+        .get_mut()
+        .write_all(b"DONE\r\n")
+        .await
+        .expect("écriture");
+    let conclusion = jusqu_a(&mut lecteur, "a006 ").await;
+    assert_eq!(conclusion, "a006 OK IDLE terminated\r\n", "{conclusion}");
+
+    // LA SESSION CONTINUE APRÈS L'ATTENTE : ce n'est pas une impasse.
+    lecteur
+        .get_mut()
+        .write_all(b"a007 NOOP\r\n")
+        .await
+        .expect("écriture");
+    assert_eq!(
+        jusqu_a(&mut lecteur, "a007 ").await,
+        "a007 OK NOOP completed\r\n"
+    );
 }

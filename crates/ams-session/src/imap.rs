@@ -144,6 +144,15 @@ pub enum Action {
     /// **Le message ne passe pas par la session** : elle le fait suivre au
     /// magasin sans en retenir un octet.
     ReadAppend,
+    /// Un `IDLE` commence : l'appelant attend, et pousse ce qui change.
+    ///
+    /// # C'EST LE SEUL ENDROIT OÙ LE SERVEUR PARLE SANS QU'ON LUI DEMANDE
+    ///
+    /// L'appelant lit la ligne suivante — qui doit être `DONE` — ET surveille la
+    /// boîte : [`Session::idle_poll`] dit ce qui a changé, [`Session::end_idle`]
+    /// conclut. Les deux attentes sont simultanées, et c'est tout l'objet de la
+    /// commande.
+    Idle,
     /// Fermer la connexion.
     Close,
 }
@@ -271,6 +280,21 @@ pub trait Mailbox {
     /// `field` nomme le champ pour [`SearchScope::Header`] ; il est vide
     /// ailleurs. Un `needle` vide demande que le champ EXISTE.
     fn contains(&self, sequence: u32, scope: SearchScope, field: &[u8], needle: &[u8]) -> bool;
+
+    /// Relève la boîte, et rend combien de messages elle porte.
+    ///
+    /// # ON N'AJOUTE, ON NE RETIRE PAS
+    ///
+    /// Les rangs qu'un client a retenus doivent rester valides : retirer un
+    /// message RENUMÉROTE tous ceux qui suivent, et un client qui idle ne s'y
+    /// attend pas. Un message disparu reste donc au relevé — il se lira vide,
+    /// cas qu'il fallait tenir de toute façon — et seuls les nouveaux s'ajoutent,
+    /// à la fin.
+    ///
+    /// **Ce doit être bon marché quand rien ne change** : un client qui idle
+    /// fait poser cette question toutes les quelques secondes, pour chaque
+    /// session ouverte.
+    fn refresh(&mut self) -> u32;
 
     /// Ce que `BINARY[…]` vaut : sa taille décodée, ou pourquoi il ne vaut rien.
     ///
@@ -1036,6 +1060,12 @@ pub struct Session<A: Authenticator, M: Mailboxes> {
     /// Son nom, tel que le client l'a écrit.
     nom_ouvert: [u8; MAILBOX_NAME_MAX],
     nom_ouvert_len: usize,
+    /// Combien de messages la session a DÉJÀ annoncés.
+    ///
+    /// Un `* n EXISTS` répété ne dit rien de neuf, et un client qui idle en
+    /// recevrait un toutes les quelques secondes. On ne l'écrit donc que
+    /// lorsque le compte a changé — ce qui suppose de retenir le dernier.
+    exists_vus: u32,
     /// A-t-elle été ouverte en lecture seule (`EXAMINE`) ?
     lecture_seule: bool,
     /// Le `FETCH` en cours d'émission.
@@ -1206,6 +1236,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             ouverte: None,
             nom_ouvert: [0; MAILBOX_NAME_MAX],
             nom_ouvert_len: 0,
+            exists_vus: 0,
             lecture_seule: false,
             emission: None,
             depot: None,
@@ -1386,7 +1417,8 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             Command::Rename => self.rename(lue.arguments, out),
             Command::Namespace => self.namespace(out),
             Command::Enable => self.enable(lue.arguments, out),
-            Command::Subscribe | Command::Unsubscribe | Command::Idle => self.si_authentifie(out),
+            Command::Idle => self.idle(out),
+            Command::Subscribe | Command::Unsubscribe => self.si_authentifie(out),
             // UN `APPEND` QUI ARRIVE ICI N'EST PAS CELUI QU'ON SAIT ÉCOULER.
             // Le chemin ordinaire ne voit que les commandes COMPLÈTES : un
             // `APPEND` normal n'y passe jamais, puisque son message s'écoule.
@@ -1724,6 +1756,86 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         false
     }
 
+    /// L'attente a duré trop longtemps : on raccroche EN LE DISANT.
+    ///
+    /// RFC 2177 : un serveur peut tenir pour inactif un client qui idle depuis
+    /// plus de trente minutes. **Abandonner sans un mot** le laisserait croire
+    /// qu'il idle encore, et attendre du courrier qui ne viendrait jamais.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Reply`] si `out` ne suffit pas.
+    pub fn idle_timed_out<'b>(&self, out: &'b mut [u8]) -> Result<&'b [u8], Error> {
+        encode_untagged(out, b"BYE Idle timeout", &self.limits).map_err(Error::Reply)
+    }
+
+    /// `IDLE` (§6.3.13) : attendre que la boîte change.
+    ///
+    /// # LA CONTINUATION N'EST PAS UNE CONCLUSION
+    ///
+    /// `+ idling` dit au client que l'attente commence ; la conclusion étiquetée
+    /// ne viendra qu'après son `DONE`. Écrire les deux d'un coup fermerait la
+    /// commande avant qu'elle ait servi à quoi que ce soit.
+    fn idle<'b>(&mut self, out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
+        if self.etat == State::NotAuthenticated {
+            return self.faute(b"Command is not allowed before authentication", out);
+        }
+        let ecrit = encode_continuation(out, b"idling", &self.limits)
+            .map_err(Error::Reply)?
+            .len();
+        Ok(Turn {
+            reply: out.get(..ecrit).unwrap_or_default(),
+            action: Action::Idle,
+            peer_fault: false,
+        })
+    }
+
+    /// Ce qui a changé depuis le dernier regard, s'il y a de quoi le dire.
+    ///
+    /// Rend le nombre d'octets écrits ; zéro signifie « rien de neuf ».
+    ///
+    /// # SEULE LA CROISSANCE SE DIT
+    ///
+    /// `* n EXISTS` annonce que la boîte porte plus de messages qu'avant. Ce qui
+    /// a disparu ne se dit PAS : l'annoncer renumérote, et un client qui idle a
+    /// retenu des rangs. RFC 9051 §6.3.13 n'oblige à rien envoyer — se taire est
+    /// donc correct, et mentir sur les rangs ne le serait pas.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Reply`] si `out` ne suffit pas.
+    pub fn idle_poll(&mut self, out: &mut [u8]) -> Result<usize, Error> {
+        let Some(boite) = self.ouverte.as_mut() else {
+            // Sans boîte ouverte, `IDLE` attend sans rien avoir à dire : c'est
+            // permis (§6.3.13), et c'est ce que fait un client qui garde sa
+            // connexion chaude.
+            return Ok(0);
+        };
+        let combien = boite.refresh();
+        if combien <= self.exists_vus {
+            return Ok(0);
+        }
+        self.exists_vus = combien;
+        let mut plume = Plume::neuve(out);
+        plume.nombre_non_sollicite(combien, b"EXISTS")?;
+        Ok(plume.ecrits())
+    }
+
+    /// Le client a parlé pendant l'attente : c'est `DONE`, ou c'est une faute.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Reply`] si `out` ne suffit pas.
+    pub fn end_idle<'b>(&mut self, ligne: &[u8], out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
+        // `DONE` N'A PAS D'ÉTIQUETTE (§9, `idle`) : c'est la seule ligne du
+        // protocole qui n'en porte pas, et la conclusion reprend celle de
+        // l'`IDLE`.
+        if ligne.trim_ascii().eq_ignore_ascii_case(b"DONE") {
+            return self.termine(Status::Ok, b"IDLE terminated", Action::Continue, out);
+        }
+        self.faute(b"Expected DONE while idling", out)
+    }
+
     /// `NAMESPACE` (§6.3.10) : où les boîtes vivent.
     ///
     /// # UN SEUL ESPACE, ET C'EST TOUT CE QU'IL Y A À DIRE
@@ -1833,7 +1945,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         };
         [
             prefixe,
-            b"IMAP4rev2 LITERAL-",
+            b"IMAP4rev2 LITERAL- IDLE",
             troisieme,
             quatrieme,
             suffixe,
@@ -1975,7 +2087,11 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         };
         let lecture_seule = permanents == Flags::NONE;
         let mut plume = Plume::neuve(out);
-        plume.nombre_non_sollicite(boite.exists(), b"EXISTS")?;
+        let combien = boite.exists();
+        // CE QU'ON VIENT D'ANNONCER EST CE QU'ON A ANNONCÉ : un `IDLE` qui
+        // suivrait ne doit pas redire le même compte.
+        self.exists_vus = combien;
+        plume.nombre_non_sollicite(combien, b"EXISTS")?;
         plume.crochet(b"UIDVALIDITY", boite.uid_validity())?;
         plume.crochet(b"UIDNEXT", boite.uid_next())?;
         // `FLAGS` dit ce qu'un message PEUT PORTER — un autre outil a pu en
