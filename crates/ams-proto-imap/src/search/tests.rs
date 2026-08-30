@@ -580,3 +580,47 @@ fn les_mots_les_plus_longs_se_reconnaissent_d_abord() {
     assert!(Search::parse(b"SENTON 32-Aug-2026", &BORNES).is_err());
     assert!(Search::parse(b"SENTON", &BORNES).is_err());
 }
+
+// ── LES MOTS-CLEFS (§6.4.4) ─────────────────────────────────────────────────
+
+/// **`KEYWORD` PORTE SON MOT-CLEF EN ARGUMENT**, là où `SEEN` le porte dans son
+/// nom — et `UNKEYWORD` est le même, nié.
+#[test]
+fn keyword_porte_son_mot_clef_en_argument() {
+    let messages = |drapeaux: Flags| message(1, 10, 100, drapeaux, JANVIER);
+    let pose = Search::parse(b"KEYWORD $Junk", &BORNES).expect("lisible");
+    assert!(pose.matches(&messages(Flags::JUNK), 3, 30, &mut muette()));
+    assert!(!pose.matches(&messages(Flags::NONE), 3, 30, &mut muette()));
+
+    let absent = Search::parse(b"UNKEYWORD $Junk", &BORNES).expect("lisible");
+    assert!(!absent.matches(&messages(Flags::JUNK), 3, 30, &mut muette()));
+    assert!(absent.matches(&messages(Flags::NONE), 3, 30, &mut muette()));
+
+    // La casse ne compte pas, ni pour le mot-clef ni pour le critère.
+    let casse = Search::parse(b"keyword $junk", &BORNES).expect("lisible");
+    assert!(casse.matches(&messages(Flags::JUNK), 3, 30, &mut muette()));
+
+    // **`$NonJunk` N'EST PAS L'INVERSE DE `$Junk`** : les deux peuvent manquer,
+    // et cela veut dire « personne n'a tranché ».
+    let ni = Search::parse(b"UNKEYWORD $Junk UNKEYWORD $NonJunk", &BORNES).expect("lisible");
+    assert!(ni.matches(&messages(Flags::NONE), 3, 30, &mut muette()));
+}
+
+/// **UN MOT-CLEF QU'ON NE SERT PAS EST UN REFUS, PAS UNE FAUTE DE SYNTAXE** : le
+/// dire ainsi évite au client de chercher l'erreur dans ce qu'il a écrit.
+#[test]
+fn un_mot_clef_qu_on_ne_sert_pas_se_refuse() {
+    for critere in [
+        &b"KEYWORD $Invente"[..],
+        b"UNKEYWORD monetiquette",
+        b"KEYWORD $NonExistant",
+        // Sans argument non plus, il n'y a rien à servir.
+        b"KEYWORD",
+    ] {
+        assert_eq!(
+            Search::parse(critere, &BORNES).err(),
+            Some(Error::UnsupportedSearchKey),
+            "{critere:?}"
+        );
+    }
+}

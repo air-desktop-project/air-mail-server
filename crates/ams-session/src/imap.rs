@@ -2307,7 +2307,10 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         // `FLAGS` dit ce qu'un message PEUT PORTER — un autre outil a pu en
         // poser. `PERMANENTFLAGS` dit ce que CE serveur sait écrire, et les deux
         // ne coïncident pas forcément.
-        plume.pousser(b"* FLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft)\r\n")?;
+        plume.pousser(
+            b"* FLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft \
+              $MDNSent $Forwarded $Junk $NonJunk $Phishing)\r\n",
+        )?;
         plume.pousser(b"* OK [PERMANENTFLAGS (")?;
         plume.drapeaux(permanents)?;
         plume.pousser(if lecture_seule {

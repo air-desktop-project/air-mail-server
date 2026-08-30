@@ -1434,6 +1434,44 @@ partie, et deux parties dans une même commande.
 
 Ce qui n'était alors pas servi — `IDLE`, `SUBSCRIBE` — l'est depuis.
 
+## Les mots-clefs, depuis le 2026-08-30
+
+**CINQ, ET L'ENSEMBLE EST FERMÉ.** §2.3.2 n'oblige aucun serveur à servir un
+mot-clef ; §E.15 en recommande cinq. Ce serveur sert ceux-là, et refuse le reste.
+
+Le refus est la partie qui compte. Un serveur qui accepte un mot-clef qu'il ne
+sait pas faire survivre répond `OK` à un client qui pose une étiquette, et cette
+étiquette ne se reverra jamais. C'est le même raisonnement que pour un drapeau
+système inconnu — et c'est aussi pourquoi `PERMANENTFLAGS` n'annonce pas `\*` :
+`\*` promet qu'on accepte tout mot-clef nouveau, et cette promesse-là ne se
+tient pas.
+
+**MAILDIR LES PORTE DANS LE NOM DU FICHIER**, en minuscules, ce qui les fait
+survivre comme les autres drapeaux — par un `rename()`, sans verrou et sans
+réécrire le message. La correspondance des cinq lettres est écrite dans le code,
+une fois pour toutes : la convention répandue la met dans un fichier annexe, qui
+ne servirait ici qu'à rendre variable ce qui ne l'est pas, donc à la rendre
+fausse le jour où il manque. Les minuscules suivent les majuscules dans l'ordre
+ASCII, si bien que la règle d'ordre du format tient sans rien changer.
+
+**`$NonJunk` N'EST PAS L'INVERSE DE `$Junk`** : les deux peuvent manquer, et cela
+veut dire « personne n'a tranché ». Les traiter comme un seul drapeau perdrait
+cette troisième réponse, qui est la plus fréquente.
+
+Avec eux, **toute la grammaire de §9 est servie** : chaque commande, chaque
+option de retour, chaque `search-key`, chaque `status-att`, chaque `fetch-att`.
+Cette affirmation-là a été fausse deux fois avant d'être vraie, et ce qui l'a
+rendue vraie n'est pas une liste de plus : c'est la confrontation à l'ABNF, mot
+par mot.
+
+**CE QUI RESTE, CE SONT DES `SHOULD`, ET ILS SE NOMMENT AUSSI.** §6.2.2 recommande
+d'offrir un mécanisme SASL qui ne transporte pas le mot de passe en clair —
+SCRAM-SHA-256, GSSAPI, EXTERNAL ; ce serveur n'offre que `PLAIN`, et seulement
+sous chiffrement. Les attributs de SPECIAL-USE — `\Drafts`, `\Sent`, `\Trash` —
+ne sont pas rendus non plus : ils désignent des boîtes que le serveur DÉSIGNE, et
+celui-ci n'en désigne aucune. Un `SHOULD` qu'on ne tient pas se dit ; ne pas le
+dire est la seule faute.
+
 ## `SENTBEFORE` : la date écrite, depuis le 2026-08-30
 
 **CE N'EST PAS LA MÊME DATE.** `BEFORE` compare la date d'ARRIVÉE, `SENTBEFORE`
@@ -2396,12 +2434,10 @@ options que §E dit absorbées dans le protocole de base le sont aussi :
 NAMESPACE, UNSELECT, UIDPLUS, ESEARCH, SEARCHRES, ENABLE, IDLE, SASL-IR,
 LIST-EXTENDED, LIST-STATUS, MOVE, LITERAL-, le côté FETCH de BINARY.
 
-**Un morceau de la grammaire de base manque encore**, et il faut le nommer
-plutôt que de laisser l'énumération ci-dessus le faire croire acquis : les
-MOTS-CLEFS — `flag-keyword` de §9 —, et donc les critères `KEYWORD` et
-`UNKEYWORD`, ainsi que les cinq mots-clefs que §E.15 recommande de servir :
-`$MDNSent`, `$Forwarded`, `$Junk`, `$NonJunk` et `$Phishing`. Un drapeau qu'on ne
-sait pas écrire est refusé par un `BAD` plutôt que tu.
+**Les MOTS-CLEFS y sont aussi**, ceux de §E.15 : `$MDNSent`, `$Forwarded`,
+`$Junk`, `$NonJunk` et `$Phishing`, avec les critères `KEYWORD` et `UNKEYWORD`.
+L'ensemble est FERMÉ, et `PERMANENTFLAGS` n'annonce donc pas `\*` : ce serait
+promettre qu'on accepte tout mot-clef nouveau.
 
 **LA MANIÈRE DONT ON S'EN EST APERÇU MÉRITE D'ÊTRE NOTÉE.** Deux fois de suite,
 une énumération complète d'une chose a servi à conclure la complétude d'une

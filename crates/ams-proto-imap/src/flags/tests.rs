@@ -142,3 +142,73 @@ fn ce_qui_se_lit_se_montre_et_se_compare() {
     assert_eq!(Flags::SEEN, Flags::SEEN);
     assert_ne!(Flags::SEEN, Flags::DRAFT);
 }
+
+// ── LES CINQ MOTS-CLEFS (§E.15) ─────────────────────────────────────────────
+
+/// Les cinq se lisent, s'écrivent, et cohabitent avec les drapeaux système.
+#[test]
+fn les_cinq_mots_clefs_se_lisent_et_s_ecrivent() {
+    for (nom, attendu) in [
+        (&b"$MDNSent"[..], Flags::MDN_SENT),
+        (b"$Forwarded", Flags::FORWARDED),
+        (b"$Junk", Flags::JUNK),
+        (b"$NonJunk", Flags::NON_JUNK),
+        (b"$Phishing", Flags::PHISHING),
+        // La casse ne compte pas : §2.3.2 dit les mots-clefs insensibles.
+        (b"$junk", Flags::JUNK),
+        (b"$PHISHING", Flags::PHISHING),
+    ] {
+        assert_eq!(Flags::parse_one(nom), Some(attendu), "{nom:?}");
+    }
+
+    let tout = Flags::SEEN.with(Flags::JUNK).with(Flags::MDN_SENT);
+    let mut sortie = [0_u8; 128];
+    assert_eq!(
+        Flags::write(tout, &mut sortie).expect("écrivable"),
+        b"\\Seen $MDNSent $Junk"
+    );
+}
+
+/// **UN MOT-CLEF QU'ON NE SAIT PAS FAIRE SURVIVRE SE REFUSE.** Répondre `OK` à
+/// un client qui pose une étiquette qu'on perdra, c'est lui faire chercher
+/// longtemps.
+#[test]
+fn un_mot_clef_inconnu_se_refuse() {
+    for nom in [
+        &b"$Inconnu"[..],
+        b"monetiquette",
+        b"$",
+        b"",
+        // Un drapeau système inventé ne passe pas davantage.
+        b"\\Recent",
+        b"\\Chose",
+    ] {
+        assert_eq!(Flags::parse_one(nom), None, "{nom:?}");
+    }
+}
+
+/// Les dix tiennent dans ce qu'on annonce écrire.
+#[test]
+fn les_dix_tiennent_dans_leur_borne() {
+    let tous = Flags::SEEN
+        .with(Flags::ANSWERED)
+        .with(Flags::FLAGGED)
+        .with(Flags::DELETED)
+        .with(Flags::DRAFT)
+        .with(Flags::MDN_SENT)
+        .with(Flags::FORWARDED)
+        .with(Flags::JUNK)
+        .with(Flags::NON_JUNK)
+        .with(Flags::PHISHING);
+    let mut assez = [0_u8; 128];
+    let ecrit = Flags::write(tous, &mut assez).expect("écrivable");
+    assert_eq!(
+        ecrit,
+        b"\\Seen \\Answered \\Flagged \\Deleted \\Draft \
+          $MDNSent $Forwarded $Junk $NonJunk $Phishing"
+    );
+    // Et un tampon d'un octet de moins le dit.
+    let taille = ecrit.len();
+    let mut juste = std::vec![0_u8; taille.saturating_sub(1)];
+    assert!(Flags::write(tous, &mut juste).is_err());
+}

@@ -10,6 +10,19 @@
 //! `\Recent` n'est pas ici : la RFC 9051 §2.3.2 l'a retiré d'IMAP4rev2, avec
 //! toute la machinerie de session qu'il traînait.
 //!
+//! # CINQ MOTS-CLEFS, ET L'ENSEMBLE EST FERMÉ
+//!
+//! §2.3.2 admet des mots-clefs propres à chaque serveur, et §E.15 en recommande
+//! cinq : `$MDNSent`, `$Forwarded`, `$Junk`, `$NonJunk`, `$Phishing`. Ce serveur
+//! sert ceux-là, et **refuse les autres** plutôt que d'en accepter n'importe
+//! lequel.
+//!
+//! Le refus est la partie qui compte. Un serveur qui accepte un mot-clef qu'il ne
+//! sait pas faire survivre répond `OK` à un client qui pose une étiquette — et
+//! cette étiquette ne se reverra jamais, sans que personne sache pourquoi. C'est
+//! aussi pourquoi `PERMANENTFLAGS` n'annonce PAS `\*` : `\*` promet qu'on
+//! accepte tout mot-clef nouveau, et cette promesse-là, on ne la tient pas.
+//!
 //! # La date d'arrivée n'est pas la date du message
 //!
 //! `INTERNALDATE` dit quand le message est arrivé ICI ; le `Date:` du message
@@ -22,30 +35,53 @@ use crate::Error;
 
 /// Les drapeaux d'un message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Flags(u8);
+pub struct Flags(u16);
 
-/// Les cinq drapeaux, avec leur bit et leur nom.
-const CONNUS: [(u8, &[u8]); 5] = [
-    (0b0000_0001, b"\\Seen"),
-    (0b0000_0010, b"\\Answered"),
-    (0b0000_0100, b"\\Flagged"),
-    (0b0000_1000, b"\\Deleted"),
-    (0b0001_0000, b"\\Draft"),
+/// Les dix drapeaux servis, avec leur bit et leur nom.
+///
+/// **L'ORDRE EST CELUI DE LA RÉPONSE** : les cinq systèmes d'abord, les cinq
+/// mots-clefs ensuite. Rien ne l'exige, mais un ordre stable rend une réponse
+/// comparable d'une fois sur l'autre.
+const CONNUS: [(u16, &[u8]); 10] = [
+    (0b0000_0000_0000_0001, b"\\Seen"),
+    (0b0000_0000_0000_0010, b"\\Answered"),
+    (0b0000_0000_0000_0100, b"\\Flagged"),
+    (0b0000_0000_0000_1000, b"\\Deleted"),
+    (0b0000_0000_0001_0000, b"\\Draft"),
+    (0b0000_0000_0010_0000, b"$MDNSent"),
+    (0b0000_0000_0100_0000, b"$Forwarded"),
+    (0b0000_0000_1000_0000, b"$Junk"),
+    (0b0000_0001_0000_0000, b"$NonJunk"),
+    (0b0000_0010_0000_0000, b"$Phishing"),
 ];
 
 impl Flags {
     /// Aucun drapeau.
     pub const NONE: Self = Self(0);
     /// `\Seen` — le message a été lu.
-    pub const SEEN: Self = Self(0b0000_0001);
+    pub const SEEN: Self = Self(0b0000_0000_0000_0001);
     /// `\Answered` — on y a répondu.
-    pub const ANSWERED: Self = Self(0b0000_0010);
+    pub const ANSWERED: Self = Self(0b0000_0000_0000_0010);
     /// `\Flagged` — marqué comme important.
-    pub const FLAGGED: Self = Self(0b0000_0100);
+    pub const FLAGGED: Self = Self(0b0000_0000_0000_0100);
     /// `\Deleted` — marqué pour effacement.
-    pub const DELETED: Self = Self(0b0000_1000);
+    pub const DELETED: Self = Self(0b0000_0000_0000_1000);
     /// `\Draft` — brouillon.
-    pub const DRAFT: Self = Self(0b0001_0000);
+    pub const DRAFT: Self = Self(0b0000_0000_0001_0000);
+    /// `$MDNSent` — un accusé de réception a été envoyé.
+    pub const MDN_SENT: Self = Self(0b0000_0000_0010_0000);
+    /// `$Forwarded` — le message a été transmis.
+    pub const FORWARDED: Self = Self(0b0000_0000_0100_0000);
+    /// `$Junk` — le destinataire le tient pour indésirable.
+    pub const JUNK: Self = Self(0b0000_0000_1000_0000);
+    /// `$NonJunk` — le destinataire le tient pour désirable.
+    ///
+    /// **CE N'EST PAS L'INVERSE DE `$Junk`** : les deux peuvent manquer, et cela
+    /// veut dire « personne n'a tranché ». Les traiter comme un seul drapeau
+    /// perdrait cette troisième réponse, qui est la plus fréquente.
+    pub const NON_JUNK: Self = Self(0b0000_0001_0000_0000);
+    /// `$Phishing` — le message tente d'usurper une identité.
+    pub const PHISHING: Self = Self(0b0000_0010_0000_0000);
 
     /// Ce drapeau est-il posé ?
     #[must_use]
@@ -71,8 +107,8 @@ impl Flags {
     ///
     /// [`Error::BufferTooSmall`] si `out` ne suffit pas.
     pub fn write(self, out: &mut [u8]) -> Result<&[u8], Error> {
-        /// Les cinq, leurs espaces comprises.
-        const BESOIN: usize = 40;
+        /// Les dix, leurs espaces comprises.
+        const BESOIN: usize = 92;
         let mut ecrits = 0_usize;
         for (bit, nom) in CONNUS {
             if self.0 & bit == 0 {
@@ -87,12 +123,15 @@ impl Flags {
             .ok_or(Error::BufferTooSmall { needed: BESOIN })
     }
 
-    /// Lit un nom de drapeau. Rend `None` pour ce qu'on ne connaît pas.
+    /// Lit un nom de drapeau. Rend `None` pour ce qu'on ne sert pas.
     ///
-    /// **Un drapeau inconnu n'est pas une faute** : la RFC 9051 §2.3.2 admet des
-    /// mots-clés propres à chaque serveur, et un client qui en pose un obtient
-    /// simplement qu'il n'est pas retenu. Le refuser ferait échouer un `STORE`
-    /// que la RFC autorise.
+    /// # UN MOT-CLEF QU'ON NE SAIT PAS FAIRE SURVIVRE SE REFUSE
+    ///
+    /// §2.3.2 admet des mots-clefs propres à chaque serveur, et n'oblige aucun
+    /// serveur à en accepter. **Ce serveur en sert cinq** — ceux de §E.15 — et
+    /// rend `None` pour tout le reste, ce que l'appelant traduit en refus. Le
+    /// taire ferait répondre `OK` à un client qui pose une étiquette, et cette
+    /// étiquette ne se reverrait jamais.
     #[must_use]
     pub fn parse_one(nom: &[u8]) -> Option<Self> {
         CONNUS

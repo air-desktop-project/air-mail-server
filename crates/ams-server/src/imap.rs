@@ -697,11 +697,19 @@ impl Mailbox for BoiteImap {
         // efface les messages qui le portent, et rien n'efface encore. Un client
         // qui marque son courrier pour la corbeille et le retrouve intact au
         // relevé suivant a été trompé ; mieux vaut lui dire non tout de suite.
+        // LES CINQ MOTS-CLEFS SURVIVENT AUSSI : Maildir les porte dans le nom du
+        // fichier, comme les autres. Les annoncer sans les faire survivre serait
+        // le mensonge que `permanent_flags` existe pour éviter.
         Flags::SEEN
             .with(Flags::ANSWERED)
             .with(Flags::FLAGGED)
             .with(Flags::DELETED)
             .with(Flags::DRAFT)
+            .with(Flags::MDN_SENT)
+            .with(Flags::FORWARDED)
+            .with(Flags::JUNK)
+            .with(Flags::NON_JUNK)
+            .with(Flags::PHISHING)
     }
 
     fn copy_to(&mut self, sequence: u32, mailbox: &[u8]) -> Option<u32> {
@@ -1758,6 +1766,24 @@ fn drapeaux_maildir(drapeaux: Flags) -> ams_index::Flags {
         (drapeaux.contains(Flags::FLAGGED), ams_index::Flags::FLAGGED),
         (drapeaux.contains(Flags::DELETED), ams_index::Flags::TRASHED),
         (drapeaux.contains(Flags::DRAFT), ams_index::Flags::DRAFT),
+        // LES CINQ MOTS-CLEFS, dans les minuscules que Maildir laisse libres.
+        (
+            drapeaux.contains(Flags::MDN_SENT),
+            ams_index::Flags::MDN_SENT,
+        ),
+        (
+            drapeaux.contains(Flags::FORWARDED),
+            ams_index::Flags::FORWARDED,
+        ),
+        (drapeaux.contains(Flags::JUNK), ams_index::Flags::JUNK),
+        (
+            drapeaux.contains(Flags::NON_JUNK),
+            ams_index::Flags::NON_JUNK,
+        ),
+        (
+            drapeaux.contains(Flags::PHISHING),
+            ams_index::Flags::PHISHING,
+        ),
     ] {
         if present {
             maildir = maildir.with(lettre);
@@ -1778,6 +1804,23 @@ fn drapeaux_imap(maildir: ams_index::Flags) -> Flags {
         (maildir.contains(ams_index::Flags::FLAGGED), Flags::FLAGGED),
         (maildir.contains(ams_index::Flags::TRASHED), Flags::DELETED),
         (maildir.contains(ams_index::Flags::DRAFT), Flags::DRAFT),
+        (
+            maildir.contains(ams_index::Flags::MDN_SENT),
+            Flags::MDN_SENT,
+        ),
+        (
+            maildir.contains(ams_index::Flags::FORWARDED),
+            Flags::FORWARDED,
+        ),
+        (maildir.contains(ams_index::Flags::JUNK), Flags::JUNK),
+        (
+            maildir.contains(ams_index::Flags::NON_JUNK),
+            Flags::NON_JUNK,
+        ),
+        (
+            maildir.contains(ams_index::Flags::PHISHING),
+            Flags::PHISHING,
+        ),
     ] {
         if present {
             drapeaux = drapeaux.with(drapeau);

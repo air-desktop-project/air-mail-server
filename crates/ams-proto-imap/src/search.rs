@@ -566,6 +566,19 @@ impl<'a> Lecteur<'a, '_> {
             let ensemble = SequenceSet::parse(self.mot(), self.limits)?;
             return self.ranger(Noeud::Uid(ensemble));
         }
+        // §6.4.4 : `KEYWORD` et `UNKEYWORD` portent un mot-clef en ARGUMENT, là
+        // où `SEEN` et `UNSEEN` le portent dans leur nom. **UN MOT-CLEF QU'ON NE
+        // SERT PAS N'EST PAS UNE FAUTE DE SYNTAXE** : c'est un refus, et le dire
+        // ainsi évite au client de chercher l'erreur dans ce qu'il a écrit.
+        for (nom, pose) in [(&b"KEYWORD"[..], true), (b"UNKEYWORD", false)] {
+            if mot.eq_ignore_ascii_case(nom) {
+                let drapeau = Flags::parse_one(self.mot()).ok_or(Error::UnsupportedSearchKey)?;
+                return self.ranger(Noeud::Drapeau {
+                    drapeau,
+                    present: pose,
+                });
+            }
+        }
         // Ce qui reste est soit un ensemble de numéros, soit un critère qu'on ne
         // sert pas. **Les distinguer par la forme, et non par une liste de
         // mots-clefs** : un mot-clef qu'on oublierait deviendrait un ensemble

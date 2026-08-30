@@ -724,7 +724,10 @@ async fn servir(fichier: &Path) -> Result<(), String> {
              sorte de lui-même. Les abonnements s'écrivent dans la racine du compte, sous \
              `ams-abonnements`. `SENTBEFORE`, `SENTON` et `SENTSINCE` comparent le champ \
              `Date:` du message, là où `BEFORE`, `ON` et `SINCE` comparent sa date d'arrivée. \
-             UN MORCEAU MANQUE ENCORE : les MOTS-CLEFS, donc `KEYWORD` et `UNKEYWORD`."
+             LES CINQ MOTS-CLEFS DE §E.15 SONT SERVIS — `$MDNSent`, `$Forwarded`, `$Junk`, \
+             `$NonJunk`, `$Phishing` —, avec `KEYWORD` et `UNKEYWORD` ; Maildir les porte dans \
+             le nom du fichier. L'ENSEMBLE EST FERMÉ, et `PERMANENTFLAGS` n'annonce donc pas \
+             `\\*` : ce serait promettre qu'on accepte tout mot-clef nouveau."
         );
         Some(tokio::spawn(serve_imap(
             ecouteur,

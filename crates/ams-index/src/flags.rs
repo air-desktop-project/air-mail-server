@@ -1,4 +1,17 @@
 //! Les drapeaux d'un message, tels que Maildir les écrit.
+//!
+//! # LES MINUSCULES SONT DES MOTS-CLEFS, ET LEUR SENS EST FIXÉ ICI
+//!
+//! Maildir ne définit que six lettres majuscules. Les mots-clefs d'IMAP — RFC
+//! 9051 §2.3.2 — n'ont pas de place réservée : la convention répandue est
+//! d'employer `a` à `z`, dont un fichier annexe dit le sens. **Ce serveur ne sert
+//! qu'un ensemble FERMÉ de cinq mots-clefs** — ceux que RFC 9051 §E.15
+//! recommande —, et leur correspondance est donc écrite ici, dans le code, une
+//! fois pour toutes. Un fichier annexe ne servirait qu'à la rendre variable, donc
+//! à la rendre fausse le jour où il manque.
+//!
+//! Les minuscules viennent APRÈS les majuscules dans l'ordre ASCII, si bien que
+//! la règle d'ordre du format tient sans rien changer.
 
 use core::fmt;
 
@@ -8,33 +21,48 @@ use core::fmt;
 /// l'ordre ASCII**. C'est ce qui permet de changer l'état d'un message par un
 /// simple `rename()`, donc sans verrou et sans réécrire son contenu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Flags(u8);
+pub struct Flags(u16);
 
 /// Les lettres, dans l'ordre ASCII, et le bit de chacune.
-const LETTRES: [(u8, u8); 6] = [
-    (b'D', 0b0000_0001),
-    (b'F', 0b0000_0010),
-    (b'P', 0b0000_0100),
-    (b'R', 0b0000_1000),
-    (b'S', 0b0001_0000),
-    (b'T', 0b0010_0000),
+const LETTRES: [(u8, u16); 11] = [
+    (b'D', 0b0000_0000_0000_0001),
+    (b'F', 0b0000_0000_0000_0010),
+    (b'P', 0b0000_0000_0000_0100),
+    (b'R', 0b0000_0000_0000_1000),
+    (b'S', 0b0000_0000_0001_0000),
+    (b'T', 0b0000_0000_0010_0000),
+    (b'a', 0b0000_0000_0100_0000),
+    (b'b', 0b0000_0000_1000_0000),
+    (b'c', 0b0000_0001_0000_0000),
+    (b'd', 0b0000_0010_0000_0000),
+    (b'e', 0b0000_0100_0000_0000),
 ];
 
 impl Flags {
     /// Aucun drapeau.
     pub const NONE: Self = Self(0);
     /// `D` — brouillon.
-    pub const DRAFT: Self = Self(0b0000_0001);
+    pub const DRAFT: Self = Self(0b0000_0000_0000_0001);
     /// `F` — marqué.
-    pub const FLAGGED: Self = Self(0b0000_0010);
+    pub const FLAGGED: Self = Self(0b0000_0000_0000_0010);
     /// `P` — transmis.
-    pub const PASSED: Self = Self(0b0000_0100);
+    pub const PASSED: Self = Self(0b0000_0000_0000_0100);
     /// `R` — répondu.
-    pub const REPLIED: Self = Self(0b0000_1000);
+    pub const REPLIED: Self = Self(0b0000_0000_0000_1000);
     /// `S` — lu.
-    pub const SEEN: Self = Self(0b0001_0000);
+    pub const SEEN: Self = Self(0b0000_0000_0001_0000);
     /// `T` — supprimé.
-    pub const TRASHED: Self = Self(0b0010_0000);
+    pub const TRASHED: Self = Self(0b0000_0000_0010_0000);
+    /// `a` — le mot-clef `$MDNSent`.
+    pub const MDN_SENT: Self = Self(0b0000_0000_0100_0000);
+    /// `b` — le mot-clef `$Forwarded`.
+    pub const FORWARDED: Self = Self(0b0000_0000_1000_0000);
+    /// `c` — le mot-clef `$Junk`.
+    pub const JUNK: Self = Self(0b0000_0001_0000_0000);
+    /// `d` — le mot-clef `$NonJunk`.
+    pub const NON_JUNK: Self = Self(0b0000_0010_0000_0000);
+    /// `e` — le mot-clef `$Phishing`.
+    pub const PHISHING: Self = Self(0b0000_0100_0000_0000);
 
     /// Le nombre maximal d'octets qu'écrit [`Flags::write_into`].
     pub const MAX_OCTETS: usize = LETTRES.len();
@@ -49,7 +77,7 @@ impl Flags {
     ///
     /// [`FlagError`].
     pub fn parse(lettres: &[u8]) -> Result<Self, FlagError> {
-        let mut bits = 0_u8;
+        let mut bits = 0_u16;
         let mut precedente = 0_u8;
         for &lettre in lettres {
             let Some(&(_, bit)) = LETTRES.iter().find(|&&(connue, _)| connue == lettre) else {

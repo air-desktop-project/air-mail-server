@@ -106,6 +106,11 @@ impl Mailbox for Boite {
                 .with(Flags::FLAGGED)
                 .with(Flags::DELETED)
                 .with(Flags::DRAFT)
+                .with(Flags::MDN_SENT)
+                .with(Flags::FORWARDED)
+                .with(Flags::JUNK)
+                .with(Flags::NON_JUNK)
+                .with(Flags::PHISHING)
         } else {
             Flags::NONE
         }
@@ -1053,8 +1058,10 @@ fn select_dit_tout_ce_que_le_client_ne_sait_pas() {
         "* 3 EXISTS\r\n",
         "* OK [UIDVALIDITY 42] UIDVALIDITY\r\n",
         "* OK [UIDNEXT 31] UIDNEXT\r\n",
-        "* FLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft)\r\n",
-        "* OK [PERMANENTFLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft)] Flags permitted\r\n",
+        "* FLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft \
+         $MDNSent $Forwarded $Junk $NonJunk $Phishing)\r\n",
+        "* OK [PERMANENTFLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft \
+         $MDNSent $Forwarded $Junk $NonJunk $Phishing)] Flags permitted\r\n",
         "* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n",
         "a002 OK [READ-WRITE] SELECT completed\r\n",
     ] {
@@ -5470,4 +5477,68 @@ fn les_criteres_d_ecriture_ne_sont_pas_ceux_d_arrivee() {
         rien,
         "* ESEARCH (TAG \"a007\") ALL 1\r\na007 OK SEARCH completed\r\n"
     );
+}
+
+// ── LES MOTS-CLEFS ──────────────────────────────────────────────────────────
+
+/// **LES CINQ MOTS-CLEFS S'ANNONCENT, SE POSENT ET SE CHERCHENT.**
+#[test]
+fn les_mots_clefs_se_posent_et_se_cherchent() {
+    let mut session = selectionnee();
+    let pose = ecouler(&mut session, b"a003 STORE 1 +FLAGS ($Junk $Phishing)\r\n");
+    assert_eq!(
+        pose,
+        "* 1 FETCH (FLAGS ($Junk $Phishing))\r\na003 OK STORE completed\r\n"
+    );
+
+    // `KEYWORD` les retrouve, `UNKEYWORD` désigne les autres.
+    let trouve = ecouler(&mut session, b"a004 SEARCH KEYWORD $Junk\r\n");
+    assert_eq!(
+        trouve,
+        "* ESEARCH (TAG \"a004\") ALL 1\r\na004 OK SEARCH completed\r\n"
+    );
+    let autres = ecouler(&mut session, b"a005 SEARCH UNKEYWORD $Junk\r\n");
+    assert_eq!(
+        autres,
+        "* ESEARCH (TAG \"a005\") ALL 2:3\r\na005 OK SEARCH completed\r\n"
+    );
+
+    // Ils se retirent comme les autres.
+    let retire = ecouler(&mut session, b"a006 STORE 1 -FLAGS ($Junk)\r\n");
+    assert_eq!(
+        retire,
+        "* 1 FETCH (FLAGS ($Phishing))\r\na006 OK STORE completed\r\n"
+    );
+}
+
+/// **UN MOT-CLEF QU'ON NE SERT PAS SE REFUSE**, et le dit — plutôt que de
+/// répondre `OK` à une étiquette qu'on perdrait.
+#[test]
+fn un_mot_clef_qu_on_ne_sert_pas_se_refuse_en_le_disant() {
+    let mut session = selectionnee();
+    let (refus, _) = dire(&mut session, b"a003 STORE 1 +FLAGS ($Inconnu)\r\n");
+    assert_eq!(refus, "a003 NO [CANNOT] This flag cannot be stored\r\n");
+
+    let (cherche, _) = dire(&mut session, b"a004 SEARCH KEYWORD $Inconnu\r\n");
+    assert!(
+        cherche.contains("NO [CANNOT] This search key is not served yet"),
+        "{cherche}"
+    );
+}
+
+/// `PERMANENTFLAGS` N'ANNONCE PAS `\*` : `\*` promet qu'on accepte tout mot-clef
+/// nouveau, et cette promesse-là, on ne la tient pas.
+#[test]
+fn les_mots_clefs_survivent_mais_l_ensemble_est_ferme() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (texte, _) = dire(&mut session, b"a002 SELECT INBOX\r\n");
+    assert!(
+        texte.contains(
+            "* FLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft \
+             $MDNSent $Forwarded $Junk $NonJunk $Phishing)\r\n"
+        ),
+        "{texte}"
+    );
+    assert!(!texte.contains("\\*"), "{texte}");
 }

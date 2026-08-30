@@ -303,10 +303,12 @@ OPTIONS DE `config write`
     où `BEFORE`, `ON` et `SINCE` comparent sa date d'arrivée : un message écrit
     lundi et reçu vendredi répond à l'une et pas à l'autre.
 
-    UN MORCEAU DE LA GRAMMAIRE DE BASE MANQUE, et l'énumération ci-dessus ne doit
-    pas le faire croire acquis : les MOTS-CLEFS, donc `KEYWORD` et `UNKEYWORD`. Ce
-    serveur ne sait écrire que les cinq drapeaux système, et refuse le reste plutôt
-    que de répondre `OK` à une étiquette qu'il perdrait.
+    LES CINQ MOTS-CLEFS DE §E.15 SONT SERVIS — `$MDNSent`, `$Forwarded`, `$Junk`,
+    `$NonJunk` et `$Phishing` —, avec `KEYWORD` et `UNKEYWORD`. Maildir les porte
+    dans le nom du fichier, en minuscules, ce qui les fait survivre comme les
+    autres drapeaux. L'ENSEMBLE EST FERMÉ : un mot-clef qu'on ne saurait pas faire
+    survivre est refusé, plutôt que de répondre `OK` à une étiquette qu'on
+    perdrait, et `PERMANENTFLAGS` n'annonce donc pas `\\*`.
 
     LE MAGASIN DE COMPTES SERT DEUX CHOSES, et il faut les distinguer :
 

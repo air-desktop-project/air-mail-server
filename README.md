@@ -1217,13 +1217,43 @@ nomme pas. **Un message sans `Date:` lisible ne correspond à AUCUN** critère
 `SENT…` : on ne compare pas ce qui n'est pas là, et tenir l'absence pour l'époque
 le ferait répondre à tous les `SENTBEFORE`.
 
-### Ce qui manque encore
+### Les mots-clefs : cinq, et l'ensemble est fermé
 
-**Les MOTS-CLEFS** — `flag-keyword` de §9 — et avec eux `KEYWORD` et
-`UNKEYWORD`, ainsi que les cinq que §E.15 recommande : `$MDNSent`,
-`$Forwarded`, `$Junk`, `$NonJunk` et `$Phishing`. Ce serveur ne sait écrire que
-les cinq drapeaux système, et refuse le reste plutôt que de répondre `OK` à une
-étiquette qu'il perdrait.
+§2.3.2 admet des mots-clefs propres à chaque serveur, et §E.15 en recommande
+cinq : `$MDNSent`, `$Forwarded`, `$Junk`, `$NonJunk` et `$Phishing`. Ce serveur
+sert ceux-là — ils se posent par `STORE`, se cherchent par `KEYWORD` et
+`UNKEYWORD`, et survivent à la déconnexion.
+
+**Ils survivent parce que Maildir les porte dans le nom du fichier**, comme les
+autres drapeaux : cinq lettres minuscules, dont le sens est écrit dans le code
+une fois pour toutes. La convention répandue emploie un fichier annexe qui dit
+le sens des lettres ; il ne servirait ici qu'à rendre variable une
+correspondance qui ne l'est pas, donc à la rendre fausse le jour où il manque.
+Les minuscules viennent après les majuscules dans l'ordre ASCII, si bien que la
+règle d'ordre du format tient sans rien changer.
+
+**Un mot-clef qu'on ne sait pas faire survivre est REFUSÉ.** C'est la partie qui
+compte : un serveur qui accepte tout répond `OK` à un client qui pose une
+étiquette, et cette étiquette ne se reverra jamais, sans que personne sache
+pourquoi. C'est aussi pourquoi `PERMANENTFLAGS` n'annonce PAS `\*` — `\*`
+promet qu'on accepte tout mot-clef nouveau, et cette promesse-là, on ne la tient
+pas.
+
+**`$NonJunk` n'est pas l'inverse de `$Junk`** : les deux peuvent manquer, et
+cela veut dire « personne n'a tranché ». Les traiter comme un seul drapeau
+perdrait cette troisième réponse, qui est la plus fréquente.
+
+### Ce qui reste
+
+**Toute la grammaire de §9 est servie** : chaque commande, chaque option de
+retour, chaque `search-key`, chaque `status-att`, chaque `fetch-att`.
+
+Restent des `SHOULD`, qui se nomment aussi. §6.2.2 recommande d'offrir un
+mécanisme SASL qui ne transporte pas le mot de passe en clair —
+SCRAM-SHA-256, GSSAPI, EXTERNAL ; ce serveur n'offre que `PLAIN`, et seulement
+sous chiffrement. Les attributs de SPECIAL-USE — `\Drafts`, `\Sent`, `\Trash` —
+ne sont pas rendus : ils désignent des boîtes que le serveur DÉSIGNE, et celui-ci
+n'en désigne aucune.
 
 Hors d'IMAP : la file de réémission des messages sortants, et toute interface
 HTTP.
