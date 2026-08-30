@@ -73,6 +73,9 @@ struct Boite {
     messages: Rc<RefCell<Vec<Message>>>,
 }
 
+/// Le choix qu'une boîte d'épreuve rend, quel que soit ce qu'on lui demande.
+const ENTETE_D_EPREUVE: &[u8] = b"From: personne@x.test\r\n\r\n";
+
 impl Mailbox for Boite {
     fn exists(&self) -> u32 {
         u32::try_from(self.messages.borrow().len()).unwrap_or(u32::MAX)
@@ -116,6 +119,48 @@ impl Mailbox for Boite {
             0 => None,
             _ => Some((0, info.size)),
         }
+    }
+
+    fn header_fields_len(
+        &self,
+        sequence: u32,
+        path: &[u32],
+        _names: &[u8],
+        _except: bool,
+    ) -> Option<u64> {
+        // UN CHOIX SUR DEUX N'EXISTE PAS, comme pour les parties : la session
+        // doit conclure aussi bien sur le `NIL` d'une section absente que sur
+        // l'écoulement d'un choix présent.
+        self.info(sequence)?;
+        match path.first().copied().unwrap_or(1) % 2 {
+            0 => None,
+            _ => Some(ENTETE_D_EPREUVE.len() as u64),
+        }
+    }
+
+    fn header_fields(
+        &self,
+        sequence: u32,
+        path: &[u32],
+        names: &[u8],
+        except: bool,
+        offset: u64,
+        out: &mut [u8],
+    ) -> usize {
+        if self
+            .header_fields_len(sequence, path, names, except)
+            .is_none()
+        {
+            return 0;
+        }
+        let reste = ENTETE_D_EPREUVE
+            .get(usize::try_from(offset).unwrap_or(usize::MAX)..)
+            .unwrap_or_default();
+        let voulu = reste.len().min(out.len());
+        for (place, octet) in out.iter_mut().zip(reste.get(..voulu).unwrap_or_default()) {
+            *place = *octet;
+        }
+        voulu
     }
 
     fn body_structure(&self, sequence: u32, _offset: u64, _out: &mut [u8]) -> usize {

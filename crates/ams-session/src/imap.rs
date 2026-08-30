@@ -58,15 +58,12 @@
 //! Les critères de `SEARCH` qui demandent de LIRE le message (`BODY`, `TEXT`,
 //! `SUBJECT`, `FROM`, `HEADER`…) : ils sont refusés plutôt que rendus faux.
 //!
-//! Le CHOIX de champs d'en-tête non plus — `HEADER.FIELDS (…)` : la session sait
-//! rendre l'en-tête entier d'une partie, pas un tri de ses champs.
-//!
 //! L'analyse d'un message n'est pas ici et n'y sera pas : `ENVELOPE` et
 //! `BODYSTRUCTURE` se composent dans `ams-mime`, et la boîte les écoule.
 
 use ams_proto_imap::{
-    Args, Candidate, Command, Error as ImapError, Fetch, FetchItem, Flags, Limits, Line, PartWhat,
-    Search, Section, SequenceSet, Status, Store, StoreMode, Tag, encode_continuation,
+    Args, Candidate, Command, Error as ImapError, Fetch, FetchItem, Flags, Limits, Line, PartPath,
+    PartWhat, Search, Section, SequenceSet, Status, Store, StoreMode, Tag, encode_continuation,
     encode_tagged, encode_untagged, encode_untagged_parts, write_internal_date,
 };
 use ams_sasl::{decode_base64, parse_plain};
@@ -257,6 +254,33 @@ pub trait Mailbox {
     /// retrouver les frontières, donc lire le message. La session ne la demande
     /// que pour l'élément qu'elle est sur le point d'écrire.
     fn part_span(&self, sequence: u32, path: &[u32], what: PartWhat) -> Option<(u64, u64)>;
+
+    /// Ce qu'un CHOIX de champs occupe, ou `None` si la section n'existe pas.
+    ///
+    /// # POURQUOI LA LONGUEUR D'ABORD
+    ///
+    /// Un `BODY[…]` s'annonce par un littéral `{n}` : le client compte les
+    /// octets qui suivent. On ne peut donc pas commencer à écrire sans savoir
+    /// combien il y en aura, et un choix de champs n'est pas un intervalle du
+    /// message — c'est une sélection, que le magasin compose.
+    fn header_fields_len(
+        &self,
+        sequence: u32,
+        path: &[u32],
+        names: &[u8],
+        except: bool,
+    ) -> Option<u64>;
+
+    /// Écrit un morceau du choix, à partir de `offset`. Rend combien.
+    fn header_fields(
+        &self,
+        sequence: u32,
+        path: &[u32],
+        names: &[u8],
+        except: bool,
+        offset: u64,
+        out: &mut [u8],
+    ) -> usize;
 
     /// Lit au plus `out.len()` octets du message de rang `sequence`, à partir
     /// de `offset`. Rend combien ont été lus ; zéro signifie « plus rien ».
@@ -594,6 +618,17 @@ struct Emission {
     texte_len: usize,
     items: [FetchItem; ams_proto_imap::FETCH_ITEMS_MAX],
     items_len: usize,
+    /// Les noms de champs que les éléments choisissent, bout à bout.
+    ///
+    /// # POURQUOI UNE RÉSERVE, ET NON UN CHAMP PAR ÉLÉMENT
+    ///
+    /// `BODY[HEADER.FIELDS (…)]` porte une liste de noms qu'il faut relire à
+    /// chaque morceau — pour l'écrire dans la réponse, et pour redemander le
+    /// choix au magasin. La loger dans l'élément ferait porter à CHACUN des
+    /// soixante-quatre la place que le plus gourmand demanderait.
+    noms: [u8; NOMS_MAX],
+    /// Où chaque élément trouve les siens, dans la réserve.
+    noms_par_item: [(u16, u16); ams_proto_imap::FETCH_ITEMS_MAX],
     /// La COMMANDE portait-elle sur des UID ? Cela ne décide que du nom qu'on
     /// donne à la conclusion.
     par_uid: bool,
@@ -754,6 +789,22 @@ impl Genre {
     }
 }
 
+impl Emission {
+    /// Les noms que l'élément de rang `item` choisit.
+    fn noms_de(&self, item: usize) -> &[u8] {
+        let (debut, fin) = self.noms_par_item.get(item).copied().unwrap_or((0, 0));
+        let debut = usize::from(debut);
+        let fin = usize::from(fin);
+        self.noms.get(debut..fin).unwrap_or_default()
+    }
+}
+
+/// La place totale des listes de noms d'une commande.
+///
+/// **Aucune RFC ne la borne.** C'est ce qu'un client peut faire retenir à la
+/// session pour une seule commande, et sans borne il en choisirait la taille.
+const NOMS_MAX: usize = 512;
+
 /// Ce qui reste à faire après avoir écrit les éléments qu'on pouvait.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Apres {
@@ -767,6 +818,15 @@ enum Apres {
     },
     /// Écouler une analyse.
     Analyse(Analyse),
+    /// Écouler un choix de champs, composé par le magasin.
+    Champs {
+        sequence: u32,
+        item: usize,
+        path: PartPath,
+        except: bool,
+        offset: u64,
+        restant: u64,
+    },
     /// Reprendre l'écriture : la portée de l'élément suivant reste à demander.
     ///
     /// Une partie absente s'écrit `NIL` et n'écoule rien — mais la portée de la
@@ -784,6 +844,12 @@ enum Portee {
     Intervalle(u64, u64),
     /// Elle n'existe pas : la réponse est `NIL` (§6.4.5).
     Absente,
+    /// Un CHOIX de champs, long de tant d'octets.
+    ///
+    /// Il ne se lit pas dans le message par un intervalle : c'est une SÉLECTION,
+    /// que le magasin compose. Seule sa longueur voyage ici — elle suffit à
+    /// annoncer le littéral, et le reste s'écoule.
+    Champs(u64),
 }
 
 /// Ce qu'une analyse de message rend.
@@ -817,6 +883,21 @@ enum Etape {
     },
     /// Reprendre l'écriture des éléments du message `rang`.
     Suite { rang: u32 },
+    /// Écouler un choix de champs, à partir de `offset`.
+    ///
+    /// **LE CHEMIN ET LE SENS VOYAGENT ICI**, et non dans l'élément qu'il
+    /// faudrait relire : une étape « écouler un choix » sans choix à écouler
+    /// serait un état qu'aucune entrée ne produit, et qu'il faudrait pourtant
+    /// traiter. Seuls les NOMS restent à côté — ils ne tiennent pas dans une
+    /// étape, et le rang de l'élément suffit à les retrouver.
+    Champs {
+        sequence: u32,
+        item: usize,
+        path: PartPath,
+        except: bool,
+        offset: u64,
+        restant: u64,
+    },
     /// Écouler une analyse du message `sequence`, à partir de `offset`.
     Analyse {
         quoi: Analyse,
@@ -884,6 +965,8 @@ impl Emission {
         texte_len: 0,
         items: [FetchItem::Uid; ams_proto_imap::FETCH_ITEMS_MAX],
         items_len: 0,
+        noms: [0; NOMS_MAX],
+        noms_par_item: [(0, 0); ams_proto_imap::FETCH_ITEMS_MAX],
         par_uid: false,
         cles_uid: false,
         exige_la_marque: true,
@@ -2300,6 +2383,8 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             texte_len: uids_len,
             items: [FetchItem::Flags; ams_proto_imap::FETCH_ITEMS_MAX],
             items_len: 0,
+            noms: [0; NOMS_MAX],
+            noms_par_item: [(0, 0); ams_proto_imap::FETCH_ITEMS_MAX],
             par_uid,
             cles_uid: true,
             exige_la_marque: false,
@@ -2432,6 +2517,8 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             texte_len: critere.len(),
             items: [FetchItem::Flags; ams_proto_imap::FETCH_ITEMS_MAX],
             items_len: 0,
+            noms: [0; NOMS_MAX],
+            noms_par_item: [(0, 0); ams_proto_imap::FETCH_ITEMS_MAX],
             par_uid,
             cles_uid: par_uid,
             exige_la_marque: true,
@@ -2513,6 +2600,8 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             texte_len: texte.len(),
             items: [FetchItem::Flags; ams_proto_imap::FETCH_ITEMS_MAX],
             items_len: 0,
+            noms: [0; NOMS_MAX],
+            noms_par_item: [(0, 0); ams_proto_imap::FETCH_ITEMS_MAX],
             par_uid,
             cles_uid: par_uid,
             exige_la_marque: true,
@@ -2661,6 +2750,8 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             // quel UID il parle, et le numéro de séquence lui suffit à recoller.
             items: [FetchItem::Flags; ams_proto_imap::FETCH_ITEMS_MAX],
             items_len: 1,
+            noms: [0; NOMS_MAX],
+            noms_par_item: [(0, 0); ams_proto_imap::FETCH_ITEMS_MAX],
             par_uid,
             cles_uid: par_uid,
             exige_la_marque: true,
@@ -3060,6 +3151,8 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             texte: [0; SEQUENCE_TEXT_MAX],
             texte_len: texte.len(),
             items: [FetchItem::Uid; ams_proto_imap::FETCH_ITEMS_MAX],
+            noms: [0; NOMS_MAX],
+            noms_par_item: [(0, 0); ams_proto_imap::FETCH_ITEMS_MAX],
             items_len: demande.items().len(),
             par_uid,
             cles_uid: par_uid,
@@ -3086,6 +3179,35 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         }
         for (place, item) in emission.items.iter_mut().zip(demande.items()) {
             *place = *item;
+        }
+        // LES NOMS SE RECOPIENT, parce que la commande ne survit pas au tour :
+        // ils seront relus à chaque morceau, pour écrire la réponse et pour
+        // redemander le choix au magasin.
+        let mut ecrits = 0_usize;
+        for (rang, ou) in emission
+            .noms_par_item
+            .iter_mut()
+            .take(demande.items().len())
+            .enumerate()
+        {
+            let noms = demande.header_names(rang);
+            let fin = ecrits.saturating_add(noms.len());
+            let Some(place) = emission.noms.get_mut(ecrits..fin) else {
+                // Ce qu'on accepte doit tenir dans ce qui le retient. On le dit
+                // plutôt que de servir un choix amputé de ses derniers noms.
+                return self.termine(
+                    Status::No,
+                    b"[LIMIT] Too many header field names in this FETCH",
+                    Action::Continue,
+                    out,
+                );
+            };
+            place.copy_from_slice(noms);
+            *ou = (
+                u16::try_from(ecrits).unwrap_or(u16::MAX),
+                u16::try_from(fin).unwrap_or(u16::MAX),
+            );
+            ecrits = fin;
         }
         self.emission = Some(emission);
         // RIEN N'EST ÉCRIT ICI : la conclusion sera le dernier morceau, après
@@ -3127,6 +3249,45 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
                 emission.etape = Etape::Choisir;
                 self.emission = Some(emission);
                 return self.ecrire_les_items(rang, info, entete, portee, out);
+            }
+            Etape::Champs {
+                sequence,
+                item,
+                path,
+                except,
+                offset,
+                restant,
+            } => {
+                let voulu = usize::try_from(restant)
+                    .unwrap_or(usize::MAX)
+                    .min(out.len());
+                let place = out.get_mut(..voulu).unwrap_or_default();
+                let ecrits = boite.header_fields(
+                    sequence,
+                    path.numbers(),
+                    emission.noms_de(item),
+                    except,
+                    offset,
+                    place,
+                );
+                if ecrits == 0 {
+                    emission.etape = Etape::Suite { rang: sequence };
+                    self.emission = Some(emission);
+                    return self.next_fetch(out);
+                }
+                let ecrits_64 = u64::try_from(ecrits).unwrap_or(u64::MAX);
+                emission.etape = Etape::Champs {
+                    sequence,
+                    item,
+                    path,
+                    except,
+                    offset: offset.saturating_add(ecrits_64),
+                    restant: restant.saturating_sub(ecrits_64),
+                };
+                self.emission = Some(emission);
+                return Ok(Some(FetchChunk::Bytes(
+                    out.get(..ecrits).unwrap_or_default(),
+                )));
             }
             Etape::Analyse {
                 quoi,
@@ -3424,8 +3585,9 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
                     partial,
                     peek: _,
                 } => {
+                    let rang_item = emission.items_faits.saturating_sub(1);
                     plume.pousser(b"BODY[")?;
-                    ecrire_la_section(&mut plume, *section)?;
+                    ecrire_la_section(&mut plume, *section, emission.noms_de(rang_item))?;
                     plume.pousser(b"]")?;
                     if let Some(partie) = partial {
                         plume.pousser(b"<")?;
@@ -3433,7 +3595,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
                         plume.pousser(b">")?;
                     }
                     let ou = match section {
-                        Section::Part { .. } => portee,
+                        Section::HeaderFields { .. } | Section::Part { .. } => portee,
                         Section::Full => Portee::Intervalle(0, info.size),
                         Section::Header => Portee::Intervalle(0, entete.min(info.size)),
                         Section::Text => Portee::Intervalle(entete.min(info.size), info.size),
@@ -3451,10 +3613,35 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
                             };
                             break;
                         }
+                        Portee::Champs(longueur) => {
+                            let (offset, longueur) = tailler(0, longueur, *partial);
+                            plume.pousser(b" {")?;
+                            plume.nombre(longueur)?;
+                            plume.pousser(b"}\r\n")?;
+                            let (path, except) = match section {
+                                Section::Part {
+                                    path,
+                                    what: PartWhat::HeaderFields { except },
+                                } => (*path, *except),
+                                // `Portee::Champs` ne vient que d'un choix, et
+                                // celui qui n'a pas de chemin porte le sien.
+                                autre => (PartPath::EMPTY, sens_du_choix(*autre)),
+                            };
+                            apres = Apres::Champs {
+                                sequence: rang,
+                                item: rang_item,
+                                path,
+                                except,
+                                offset,
+                                restant: longueur,
+                            };
+                            break;
+                        }
                         // `Sans` ne peut venir que d'un élément qui ne demande
-                        // pas de partie, et l'on n'est ici que pour un élément
-                        // qui en demande une. Le traiter comme une absence rend
-                        // une réponse licite plutôt qu'une réponse tronquée.
+                        // pas de section composée, et l'on n'est ici que pour un
+                        // élément qui en demande une. Le traiter comme une
+                        // absence rend une réponse licite plutôt qu'une réponse
+                        // tronquée.
                         Portee::Absente | Portee::Sans => {
                             plume.pousser(b" NIL")?;
                             apres = Apres::Reprendre;
@@ -3488,6 +3675,21 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
                 quoi,
                 sequence: rang,
                 offset: 0,
+            },
+            Apres::Champs {
+                sequence,
+                item,
+                path,
+                except,
+                offset,
+                restant,
+            } => Etape::Champs {
+                sequence,
+                item,
+                path,
+                except,
+                offset,
+                restant,
             },
             Apres::Reprendre => Etape::Suite { rang },
             Apres::Fin => {
@@ -3529,11 +3731,12 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
 ///
 /// **La réponse ÉCHOIT la section demandée** (§7.5.2) : c'est ainsi que le
 /// client rattache la donnée à sa demande quand il en a posé plusieurs.
-fn ecrire_la_section(plume: &mut Plume<'_>, section: Section) -> Result<(), Error> {
+fn ecrire_la_section(plume: &mut Plume<'_>, section: Section, noms: &[u8]) -> Result<(), Error> {
     match section {
         Section::Full => Ok(()),
         Section::Header => plume.pousser(b"HEADER"),
         Section::Text => plume.pousser(b"TEXT"),
+        Section::HeaderFields { except } => ecrire_le_choix(plume, except, noms),
         Section::Part { path, what } => {
             for (rang, numero) in path.numbers().iter().enumerate() {
                 if rang > 0 {
@@ -3541,14 +3744,41 @@ fn ecrire_la_section(plume: &mut Plume<'_>, section: Section) -> Result<(), Erro
                 }
                 plume.nombre(u64::from(*numero))?;
             }
-            plume.pousser(match what {
-                PartWhat::Content => b"".as_slice(),
-                PartWhat::Mime => b".MIME",
-                PartWhat::Header => b".HEADER",
-                PartWhat::Text => b".TEXT",
-            })
+            match what {
+                PartWhat::Content => Ok(()),
+                PartWhat::Mime => plume.pousser(b".MIME"),
+                PartWhat::Header => plume.pousser(b".HEADER"),
+                PartWhat::Text => plume.pousser(b".TEXT"),
+                PartWhat::HeaderFields { except } => {
+                    plume.pousser(b".")?;
+                    ecrire_le_choix(plume, except, noms)
+                }
+            }
         }
     }
+}
+
+/// Le sens d'un choix qui porte sur l'en-tête du message.
+///
+/// **Une section qui n'est pas un choix n'atteint jamais cette fonction** : la
+/// portée d'où l'on vient n'est `Champs` que pour un choix. Rendre `false`
+/// ailleurs vaut mieux qu'une garde qu'aucune entrée ne peut faire céder.
+fn sens_du_choix(section: Section) -> bool {
+    matches!(section, Section::HeaderFields { except: true })
+}
+
+/// `HEADER.FIELDS (…)`, avec les noms tels que le client les a écrits.
+///
+/// **On les rend comme on les a reçus** : c'est à cela que le client rattache la
+/// donnée à sa demande, et les remettre au propre lui donnerait à comparer autre
+/// chose que ce qu'il a envoyé.
+fn ecrire_le_choix(plume: &mut Plume<'_>, except: bool, noms: &[u8]) -> Result<(), Error> {
+    plume.pousser(match except {
+        true => b"HEADER.FIELDS.NOT (".as_slice(),
+        false => b"HEADER.FIELDS (",
+    })?;
+    plume.pousser(noms)?;
+    plume.pousser(b")")
 }
 
 /// Applique la demande partielle, sans jamais sortir du message.
@@ -3741,8 +3971,35 @@ fn entete_si_besoin<B: Mailbox>(boite: &B, emission: &Emission, rang: u32) -> u6
 /// la reprise, et sa portée demandée alors.
 fn portee_si_besoin<B: Mailbox>(boite: &B, emission: &Emission, rang: u32) -> Portee {
     let items = emission.items.get(..emission.items_len).unwrap_or_default();
-    for item in items.iter().skip(emission.items_faits) {
+    for (vu, item) in items.iter().enumerate().skip(emission.items_faits) {
         match item {
+            FetchItem::Body {
+                section: Section::HeaderFields { except },
+                ..
+            } => {
+                return match boite.header_fields_len(rang, &[], emission.noms_de(vu), *except) {
+                    Some(longueur) => Portee::Champs(longueur),
+                    None => Portee::Absente,
+                };
+            }
+            FetchItem::Body {
+                section:
+                    Section::Part {
+                        path,
+                        what: PartWhat::HeaderFields { except },
+                    },
+                ..
+            } => {
+                return match boite.header_fields_len(
+                    rang,
+                    path.numbers(),
+                    emission.noms_de(vu),
+                    *except,
+                ) {
+                    Some(longueur) => Portee::Champs(longueur),
+                    None => Portee::Absente,
+                };
+            }
             FetchItem::Body {
                 section: Section::Part { path, what },
                 ..

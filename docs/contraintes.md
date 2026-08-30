@@ -1381,9 +1381,6 @@ pièce jointe en base64 avec son `Content-Id` et un nom de fichier à apostrophe
 et un `message/rfc822` : les tailles, les lignes, les paramètres, la disposition,
 l'enveloppe du message porté et sa structure sont toutes rendues, et exactes.
 
-Ce qui n'est toujours pas servi : `HEADER.FIELDS (…)`, qui rend un CHOIX de
-champs d'en-tête.
-
 ## `BODY[1]` : rendre une partie, et rien qu'elle, depuis le 2026-08-30
 
 Dire la structure ne suffisait pas : un client qui voulait une pièce jointe
@@ -1434,8 +1431,51 @@ ses lignes d'en-tête, `[3.HEADER]`, `[3.TEXT]` et `[3.1]` du message encapsulé
 `[9]` qui vaut `NIL` sans empêcher l'`UID` qui suit, une demande partielle sur une
 partie, et deux parties dans une même commande.
 
-Ce qui n'est toujours pas servi : `HEADER.FIELDS (…)` et `HEADER.FIELDS.NOT (…)`,
-qui rendent un CHOIX de champs d'en-tête.
+Ce qui n'est toujours pas servi : les critères de `SEARCH` qui lisent le message,
+et `IDLE`.
+
+## `HEADER.FIELDS` : quelques champs, depuis le 2026-08-30
+
+`BODY[HEADER.FIELDS (FROM SUBJECT)]` est ce qu'un client demande pour peupler une
+liste de messages sans tout télécharger. `.NOT` fait l'inverse, et les deux valent
+aussi sur une partie qui encapsule un message.
+
+**LES CHAMPS SORTENT TELS QU'ILS SONT ÉCRITS** : pliage, ordre du message,
+doublons. Un client qui vérifie une signature DKIM sur ce qu'il a reçu condense
+les octets du message, pas une version remise au propre. Et **la ligne vide est
+toujours là**, même quand aucun champ ne correspond — un client qui recevrait
+zéro octet ne saurait pas distinguer « aucun champ » de « pas de réponse ».
+
+**LE DÉCOUPAGE DES ÉLÉMENTS RESPECTE LES CROCHETS**, et c'est ce qui manquait
+d'abord : `BODY[HEADER.FIELDS (FROM TO)]` porte des blancs à l'intérieur d'un
+élément, et couper dessus rendait deux morceaux dont aucun n'était lisible. C'est
+exactement ce qui faisait refuser `HEADER.FIELDS` comme « non servi ».
+
+**LES NOMS VOYAGENT À CÔTÉ DES ÉLÉMENTS.** Un élément de `FETCH` est retenu dans
+un tableau de taille fixe ; y loger une liste de noms ferait porter à CHACUN des
+soixante-quatre la place que le plus gourmand demanderait. Ils vivent donc dans
+une réserve bornée, un intervalle par élément — et ce qu'on accepte doit tenir
+dans ce qui le retient : au-delà, la commande est refusée par `NO [LIMIT]` plutôt
+que servie amputée de ses derniers noms.
+
+**UN CHOIX N'EST PAS UN INTERVALLE DU MESSAGE**, c'est une sélection : il ne peut
+pas s'écouler comme un `BODY[]`, qui se lit dans le fichier. Le magasin le
+compose, en annonce la longueur — le littéral `{n}` l'exige avant le premier
+octet — puis le sert par morceaux. C'est pourquoi le trait porte deux méthodes et
+non une : on ne peut pas commencer à écrire sans savoir combien il y en aura.
+
+**UN NOM CITÉ EST RECEVABLE, ET ON NE LE SERT PAS.** `header-fld-name` est un
+`astring` : `"From"` et un littéral annoncé sont licites. On ne sait pas les
+déciter, et rendre le nom tel quel donnerait un choix qui ne désigne pas ce que le
+client a demandé. C'est donc un REFUS de service, et non une faute — les
+confondre ferait chercher au client une erreur là où il n'y en a pas, ou
+l'inverse.
+
+Éprouvé jusqu'au binaire, sur un message à pièce jointe et message encapsulé :
+deux champs rendus dans l'ordre du message et non dans celui de la demande, le
+choix inverse, `[2.HEADER.FIELDS]` qui rend le sujet du message porté sans son
+`X-Interne`, `[1.HEADER.FIELDS]` qui vaut `NIL` sur une partie qui n'encapsule
+rien, un choix mêlé à `UID` et `FLAGS`, et une demande partielle.
 
 ## Le signeur DKIM a un appelant, depuis le 2026-08-30
 
@@ -2096,5 +2136,5 @@ persistant, et lecture sans verrou côté IMAP), C14 (`X25519MLKEM768` en tête)
 découpage des lectures ne change rien au verdict.
 
 Ce qui manque, et qu'aucune phrase ne doit laisser croire acquis : les critères
-de `SEARCH` qui lisent le message et le choix de champs d'en-tête ; la file de
-réémission des messages sortants ; et toute interface HTTP.
+de `SEARCH` qui lisent le message ; `IDLE` ; la file de réémission des messages
+sortants ; et toute interface HTTP.

@@ -69,6 +69,12 @@ const ENVELOPPE_MAX: usize = 128 * 1024;
 /// seulement avec leur nombre.
 const STRUCTURE_MAX: usize = 128 * 1024;
 
+/// Ce qu'un choix de champs composé occupe au plus.
+///
+/// Il ne peut pas dépasser l'en-tête dont il est tiré, plus la ligne vide qui le
+/// termine.
+const CHOIX_MAX: usize = ENTETE_MAX + 2;
+
 /// Par combien d'octets à la fois le message passe devant le balayeur.
 ///
 /// **C'est ce que la structure coûte en mémoire, et rien de plus** : le message
@@ -135,6 +141,37 @@ pub struct BoiteImap {
 }
 
 impl BoiteImap {
+    /// Compose le choix de champs d'un message, ou dit qu'il n'y en a pas.
+    fn choisir(
+        &self,
+        sequence: u32,
+        path: &[u32],
+        names: &[u8],
+        except: bool,
+        out: &mut [u8],
+    ) -> Option<usize> {
+        let chemin = self.chemins.get(self.rang(sequence)?)?;
+        // UN CHOIX PORTE SUR UN EN-TÊTE, et lequel dépend du chemin : celui du
+        // message, ou celui du message qu'une partie encapsule. `HEADER.FIELDS`
+        // sur une partie qui ne porte pas de message ne désigne rien, et
+        // `span` le dit.
+        let (debut, fin) = match path.is_empty() {
+            true => (0, fin_de_l_entete(chemin).unwrap_or(0)),
+            false => balayer(chemin)?.span(path, BodySpan::Header)?,
+        };
+        let combien = usize::try_from(fin.saturating_sub(debut))
+            .unwrap_or(usize::MAX)
+            .min(ENTETE_MAX);
+        let mut entete = std::vec![0_u8; combien];
+        let mut fichier = std::fs::File::open(chemin).ok()?;
+        fichier.seek(SeekFrom::Start(debut)).ok()?;
+        // `read_exact` ÉCHOUE SI LE MESSAGE A RÉTRÉCI, et c'est ce qu'on veut :
+        // un en-tête tronqué composerait un choix qui n'est pas celui du
+        // message.
+        fichier.read_exact(&mut entete).ok()?;
+        ams_mime::write_header_fields(&entete, names, except, out, &ams_mime::Limits::DEFAULT).ok()
+    }
+
     fn rang(&self, sequence: u32) -> Option<usize> {
         let rang = usize::try_from(sequence.checked_sub(1)?).ok()?;
         (rang < self.vue.messages().len()).then_some(rang)
@@ -251,8 +288,43 @@ impl Mailbox for BoiteImap {
                 PartWhat::Mime => BodySpan::Mime,
                 PartWhat::Header => BodySpan::Header,
                 PartWhat::Text => BodySpan::Text,
+                // UN CHOIX N'EST PAS UN INTERVALLE : il se compose, et passe par
+                // `header_fields`. Le demander ici serait demander où se trouve
+                // une sélection, ce qui n'a pas de lieu.
+                PartWhat::HeaderFields { .. } => return None,
             },
         )
+    }
+
+    fn header_fields_len(
+        &self,
+        sequence: u32,
+        path: &[u32],
+        names: &[u8],
+        except: bool,
+    ) -> Option<u64> {
+        let mut compose = std::vec![0_u8; CHOIX_MAX];
+        let ecrits = self.choisir(sequence, path, names, except, &mut compose)?;
+        Some(u64::try_from(ecrits).unwrap_or(u64::MAX))
+    }
+
+    fn header_fields(
+        &self,
+        sequence: u32,
+        path: &[u32],
+        names: &[u8],
+        except: bool,
+        offset: u64,
+        out: &mut [u8],
+    ) -> usize {
+        // LE CHOIX SE RECOMPOSE À CHAQUE MORCEAU, comme l'enveloppe : le retenir
+        // entre deux appels demanderait un état par session et par message, et
+        // le recomposer coûte une lecture d'en-tête, bornée.
+        let mut compose = std::vec![0_u8; CHOIX_MAX];
+        let Some(ecrits) = self.choisir(sequence, path, names, except, &mut compose) else {
+            return 0;
+        };
+        ecouler(compose.get(..ecrits).unwrap_or_default(), offset, out)
     }
 
     fn read(&self, sequence: u32, offset: u64, out: &mut [u8]) -> usize {

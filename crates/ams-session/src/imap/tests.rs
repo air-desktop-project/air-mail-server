@@ -107,6 +107,34 @@ impl Mailbox for Boite {
         }
     }
 
+    fn header_fields_len(
+        &self,
+        sequence: u32,
+        path: &[u32],
+        names: &[u8],
+        except: bool,
+    ) -> Option<u64> {
+        let mut sortie = [0_u8; 512];
+        let ecrits = self.choisir(sequence, path, names, except, &mut sortie)?;
+        Some(u64::try_from(ecrits).unwrap_or(u64::MAX))
+    }
+
+    fn header_fields(
+        &self,
+        sequence: u32,
+        path: &[u32],
+        names: &[u8],
+        except: bool,
+        offset: u64,
+        out: &mut [u8],
+    ) -> usize {
+        let mut sortie = [0_u8; 512];
+        let Some(ecrits) = self.choisir(sequence, path, names, except, &mut sortie) else {
+            return 0;
+        };
+        ecouler_le_texte(sortie.get(..ecrits).unwrap_or_default(), offset, out)
+    }
+
     fn body_structure(&self, sequence: u32, offset: u64, out: &mut [u8]) -> usize {
         let Some(info) = self.info(sequence) else {
             return 0;
@@ -1720,6 +1748,56 @@ fn deux_corps_dans_un_fetch_s_ecoulent_l_un_apres_l_autre() {
     );
 }
 
+impl Boite {
+    /// Compose le choix de champs d'un message d'épreuve.
+    ///
+    /// L'en-tête d'épreuve est le même pour tous : ce qu'on éprouve ici est le
+    /// PLOMBAGE, et la sélection elle-même vit dans `ams-mime`, où elle est
+    /// éprouvée.
+    fn choisir(
+        &self,
+        sequence: u32,
+        path: &[u32],
+        names: &[u8],
+        except: bool,
+        out: &mut [u8],
+    ) -> Option<usize> {
+        self.info(sequence)?;
+        // UN MESSAGE DISPARU N'A PLUS D'EN-TÊTE, et donc plus de choix : c'est
+        // ce que fait le vrai magasin quand le fichier ne se lit plus.
+        if sequence == self.evanescent {
+            return None;
+        }
+        // Une partie désignée : seule la première existe.
+        if !matches!(path, [] | [1]) {
+            return None;
+        }
+        // LA BOÎTE D'ÉPREUVE COMPOSE À LA MAIN, et n'appelle pas `ams-mime` :
+        // la session ne connaît pas cette crate, et lui en donner une pour un
+        // essai ferait entrer l'analyse d'un message là où il n'y a que des
+        // décisions de protocole.
+        const CHAMPS: [(&[u8], &[u8]); 2] = [
+            (b"From", b"From: jean@x.test\r\n"),
+            (b"Subject", b"Subject: sujet\r\n"),
+        ];
+        let mut ecrits = 0_usize;
+        for (nom, ligne) in CHAMPS {
+            let choisi = names
+                .split(|octet| *octet == b' ')
+                .any(|vu| vu.eq_ignore_ascii_case(nom));
+            if choisi == except {
+                continue;
+            }
+            let fin = ecrits.saturating_add(ligne.len());
+            out.get_mut(ecrits..fin)?.copy_from_slice(ligne);
+            ecrits = fin;
+        }
+        let fin = ecrits.saturating_add(2);
+        out.get_mut(ecrits..fin)?.copy_from_slice(b"\r\n");
+        Some(fin)
+    }
+}
+
 /// Écoule un texte déjà composé, comme une vraie boîte le ferait.
 fn ecouler_le_texte(texte: &[u8], offset: u64, out: &mut [u8]) -> usize {
     let reste = texte
@@ -1937,6 +2015,198 @@ fn une_demande_partielle_ne_sort_pas_de_la_partie() {
     assert_eq!(
         fil,
         "* 1 FETCH (BODY[1]<5> {85}\r\n<1:15+85>)\r\na003 OK FETCH completed\r\n"
+    );
+}
+
+// ── Le choix de champs ──────────────────────────────────────────────────────
+
+/// **UN CHOIX DE CHAMPS S'ANNONCE ET S'ÉCOULE**, et la réponse ÉCHOIT les noms
+/// tels que le client les a écrits : c'est à cela qu'il rattache la donnée à sa
+/// demande.
+#[test]
+fn un_choix_de_champs_s_annonce_et_s_ecoule() {
+    let mut session = selectionnee();
+    let fil = ecouler(
+        &mut session,
+        b"a003 FETCH 1 BODY.PEEK[HEADER.FIELDS (From)]\r\n",
+    );
+    assert_eq!(
+        fil,
+        "* 1 FETCH (BODY[HEADER.FIELDS (From)] {21}\r\nFrom: jean@x.test\r\n\r\n)\r\n\
+         a003 OK FETCH completed\r\n"
+    );
+}
+
+/// `.NOT` renverse le choix, et la réponse le dit.
+#[test]
+fn le_choix_se_renverse_et_la_reponse_le_dit() {
+    let mut session = selectionnee();
+    let fil = ecouler(
+        &mut session,
+        b"a003 FETCH 1 BODY.PEEK[HEADER.FIELDS.NOT (From)]\r\n",
+    );
+    assert!(fil.contains("BODY[HEADER.FIELDS.NOT (From)] {18}"), "{fil}");
+    assert!(fil.contains("Subject: sujet"), "{fil}");
+    assert!(!fil.contains("From: jean"), "{fil}");
+}
+
+/// Un choix sur une PARTIE se demande par son chemin, et la réponse l'échoit.
+#[test]
+fn un_choix_sur_une_partie_s_echoit_avec_son_chemin() {
+    let mut session = selectionnee();
+    let fil = ecouler(
+        &mut session,
+        b"a003 FETCH 1 BODY.PEEK[1.HEADER.FIELDS (From)]\r\n",
+    );
+    assert!(fil.contains("BODY[1.HEADER.FIELDS (From)] {21}"), "{fil}");
+    // Et une partie qui n'existe pas vaut `NIL`, comme partout ailleurs.
+    let absente = ecouler(
+        &mut session,
+        b"a004 FETCH 1 BODY.PEEK[7.HEADER.FIELDS (From)]\r\n",
+    );
+    assert!(
+        absente.contains("BODY[7.HEADER.FIELDS (From)] NIL"),
+        "{absente}"
+    );
+}
+
+/// **LES NOMS SUIVENT LEUR ÉLÉMENT, ET LUI SEUL.** Deux choix dans une même
+/// commande n'ont pas la même liste ; les confondre rendrait au second ce que le
+/// premier avait demandé.
+#[test]
+fn deux_choix_ne_se_confondent_pas() {
+    let mut session = selectionnee();
+    let fil = ecouler(
+        &mut session,
+        b"a003 FETCH 1 (BODY.PEEK[HEADER.FIELDS (From)] BODY.PEEK[HEADER.FIELDS (Subject)])\r\n",
+    );
+    assert!(
+        fil.contains("BODY[HEADER.FIELDS (From)] {21}\r\nFrom: jean@x.test"),
+        "{fil}"
+    );
+    assert!(
+        fil.contains("BODY[HEADER.FIELDS (Subject)] {18}\r\nSubject: sujet"),
+        "{fil}"
+    );
+}
+
+/// Le choix se découpe sans changer de résultat.
+#[test]
+fn le_choix_se_decoupe_sans_changer_de_resultat() {
+    let mut reference = selectionnee();
+    let attendu = ecouler(
+        &mut reference,
+        b"a003 FETCH 1 BODY.PEEK[HEADER.FIELDS (From Subject)]\r\n",
+    );
+    for taille in 1..=72_usize {
+        let mut session = selectionnee();
+        let mut grand = [0_u8; 512];
+        session
+            .handle(
+                b"a003 FETCH 1 BODY.PEEK[HEADER.FIELDS (From Subject)]\r\n",
+                &mut grand,
+            )
+            .expect("traitable");
+        let mut fil = std::string::String::new();
+        let mut petit = std::vec![0_u8; taille];
+        let mut refuse = false;
+        loop {
+            match session.next_fetch(&mut petit) {
+                Ok(None) => break,
+                Ok(Some(super::FetchChunk::Bytes(octets))) => {
+                    fil.push_str(&std::string::String::from_utf8_lossy(octets));
+                }
+                Ok(Some(super::FetchChunk::Message { .. })) => {
+                    unreachable!("un choix de champs n'est pas un intervalle du message")
+                }
+                Err(erreur) => {
+                    assert!(matches!(erreur, super::Error::Reply(_)), "{erreur:?}");
+                    refuse = true;
+                    break;
+                }
+            }
+        }
+        if !refuse {
+            assert_eq!(fil, attendu, "taille {taille}");
+        }
+    }
+}
+
+/// Une demande partielle s'applique au choix comme au reste.
+#[test]
+fn une_demande_partielle_s_applique_au_choix() {
+    let mut session = selectionnee();
+    let fil = ecouler(
+        &mut session,
+        b"a003 FETCH 1 BODY.PEEK[HEADER.FIELDS (From)]<6.5>\r\n",
+    );
+    assert!(
+        fil.contains("BODY[HEADER.FIELDS (From)]<6> {5}\r\njean@"),
+        "{fil}"
+    );
+}
+
+/// Un tampon trop court pour écrire un choix SUR UNE PARTIE le dit : le chemin,
+/// le point qui le sépare du mot-clef, et la liste s'écrivent d'un seul geste.
+#[test]
+fn un_tampon_trop_court_pour_un_choix_de_partie_le_dit() {
+    for taille in 1..=48_usize {
+        let mut session = selectionnee();
+        let mut grand = [0_u8; 512];
+        session
+            .handle(
+                b"a003 FETCH 1 BODY.PEEK[1.HEADER.FIELDS (From)]\r\n",
+                &mut grand,
+            )
+            .expect("traitable");
+        let mut petit = std::vec![0_u8; taille];
+        loop {
+            match session.next_fetch(&mut petit) {
+                Ok(None) => break,
+                Ok(Some(_)) => {}
+                Err(erreur) => {
+                    assert!(matches!(erreur, super::Error::Reply(_)), "{erreur:?}");
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// **UN MESSAGE QUI DISPARAÎT PENDANT L'ÉMISSION N'A PLUS DE CHOIX** : `NIL`,
+/// comme pour toute section absente. Le refuser ferait échouer la commande
+/// entière pour un message que le client n'aura de toute façon plus.
+#[test]
+fn un_choix_sur_un_message_disparu_vaut_nil() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut session, b"a002 SELECT Trouee\r\n");
+    let fil = ecouler(
+        &mut session,
+        b"a003 FETCH 3 BODY.PEEK[HEADER.FIELDS (From)]\r\n",
+    );
+    assert!(fil.contains("BODY[HEADER.FIELDS (From)] NIL"), "{fil}");
+}
+
+/// **CE QU'ON ACCEPTE DOIT TENIR DANS CE QUI LE RETIENT.** Une commande dont les
+/// listes de noms débordent la réserve se refuse, plutôt que de servir un choix
+/// amputé de ses derniers noms.
+#[test]
+fn trop_de_noms_se_refuse_en_le_disant() {
+    let mut commande = std::string::String::from("a003 FETCH 1 (");
+    for _ in 0..8 {
+        commande.push_str("BODY.PEEK[HEADER.FIELDS (");
+        for rang in 0..10 {
+            commande.push_str(&std::format!("X-Bourrage-Assez-Long-{rang} "));
+        }
+        commande.push_str("From)] ");
+    }
+    commande.push_str("UID)\r\n");
+    let mut session = selectionnee();
+    let (texte, _) = dire(&mut session, commande.as_bytes());
+    assert!(
+        texte.contains("NO [LIMIT] Too many header field names"),
+        "{texte}"
     );
 }
 

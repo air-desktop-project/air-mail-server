@@ -219,6 +219,117 @@ fn chemin_de(numeros: &[u32]) -> PartPath {
     }
 }
 
+/// **UN CHOIX DE CHAMPS SE LIT, LISTE COMPRISE.** C'est le seul endroit d'un
+/// élément où un blanc figure, et couper dessus rendait deux morceaux dont aucun
+/// n'était lisible.
+#[test]
+fn un_choix_de_champs_se_lit() {
+    let lu = Fetch::parse(b"1 BODY.PEEK[HEADER.FIELDS (From Subject)]", &BORNES).expect("lisible");
+    assert_eq!(
+        lu.items(),
+        [FetchItem::Body {
+            section: Section::HeaderFields { except: false },
+            peek: true,
+            partial: None,
+        }]
+    );
+    assert_eq!(lu.header_names(0), b"From Subject");
+
+    // `.NOT` renverse le choix.
+    let sauf = Fetch::parse(b"1 BODY[HEADER.FIELDS.NOT (received)]", &BORNES).expect("lisible");
+    assert_eq!(
+        sauf.items(),
+        [FetchItem::Body {
+            section: Section::HeaderFields { except: true },
+            peek: false,
+            partial: None,
+        }]
+    );
+    assert_eq!(sauf.header_names(0), b"received");
+}
+
+/// Un choix sur une PARTIE se lit aussi, chemin compris.
+#[test]
+fn un_choix_sur_une_partie_se_lit() {
+    let lu = Fetch::parse(b"1 BODY.PEEK[2.1.HEADER.FIELDS (To)]", &BORNES).expect("lisible");
+    match lu.items().first().copied() {
+        Some(FetchItem::Body {
+            section: Section::Part { path, what },
+            ..
+        }) => {
+            assert_eq!(path.numbers(), [2, 1]);
+            assert_eq!(what, PartWhat::HeaderFields { except: false });
+        }
+        autre => panic!("{autre:?}"),
+    }
+    assert_eq!(lu.header_names(0), b"To");
+}
+
+/// **UN ÉLÉMENT QUI PORTE UNE LISTE N'EMPÊCHE PAS DE LIRE LES SUIVANTS.** C'est
+/// ce que le découpage respectueux des crochets rend possible.
+#[test]
+fn un_choix_n_empeche_pas_de_lire_la_suite() {
+    let lu =
+        Fetch::parse(b"1 (UID BODY.PEEK[HEADER.FIELDS (From)] FLAGS)", &BORNES).expect("lisible");
+    assert_eq!(lu.items().len(), 3);
+    assert_eq!(lu.items().first().copied(), Some(FetchItem::Uid));
+    assert_eq!(lu.items().get(2).copied(), Some(FetchItem::Flags));
+    // Les noms suivent l'élément qui les porte, et lui seul.
+    assert_eq!(lu.header_names(0), b"");
+    assert_eq!(lu.header_names(1), b"From");
+    assert_eq!(lu.header_names(2), b"");
+    // Et au-delà des éléments lus, il n'y a rien.
+    assert_eq!(lu.header_names(60), b"");
+}
+
+/// Un choix mal formé est une faute, et non un refus de service.
+#[test]
+fn un_choix_mal_forme_est_une_faute() {
+    for mechant in [
+        // Une liste vide ne désigne rien.
+        &b"1 BODY[HEADER.FIELDS ()]"[..],
+        b"1 BODY[HEADER.FIELDS (  )]",
+        // Un choix sans liste n'en est pas un.
+        b"1 BODY[HEADER.FIELDS]",
+        b"1 BODY[HEADER.FIELDS.NOT]",
+        // Une liste sans parenthèses.
+        b"1 BODY[HEADER.FIELDS From]",
+        // Un nom qui n'est pas un atome : le deux-points sépare, il ne nomme pas.
+        b"1 BODY[HEADER.FIELDS (From:)]",
+        // Un chemin qui n'a pas la forme, devant un choix qui l'a.
+        b"1 BODY[0.HEADER.FIELDS (From)]",
+        b"1 BODY[1..2.HEADER.FIELDS (From)]",
+        // Une liste derrière autre chose qu'un choix.
+        b"1 BODY[TEXT (From)]",
+        b"1 BODY[1.MIME (From)]",
+        b"1 BODY[1 (From)]",
+    ] {
+        assert_eq!(
+            Fetch::parse(mechant, &BORNES),
+            Err(Error::MalformedFetch),
+            "{mechant:?}"
+        );
+    }
+}
+
+/// **UN NOM CITÉ EST RECEVABLE, ET ON NE LE SERT PAS.** `header-fld-name` est un
+/// `astring` : le refuser comme une FAUTE ferait chercher au client une erreur
+/// là où il n'y en a pas.
+#[test]
+fn un_nom_cite_se_refuse_sans_accuser_le_client() {
+    for cite in [
+        &b"1 BODY[HEADER.FIELDS (\"From\")]"[..],
+        b"1 BODY[HEADER.FIELDS (From {4})]",
+        b"1 BODY[HEADER.FIELDS (Fro\\m)]",
+    ] {
+        assert_eq!(
+            Fetch::parse(cite, &BORNES),
+            Err(Error::UnsupportedFetchItem),
+            "{cite:?}"
+        );
+    }
+}
+
 /// UN CHEMIN QUI N'A PAS LA FORME EST UNE FAUTE, et non un refus de service :
 /// les confondre ferait chercher au client une erreur là où il n'y en a pas.
 #[test]
@@ -381,4 +492,22 @@ fn ce_qui_se_lit_se_montre_et_se_compare() {
         .is_empty()
     );
     assert_ne!(FetchItem::Uid, FetchItem::Flags);
+}
+
+/// Deux lectures d'une même commande se comparent et s'affichent.
+///
+/// Ce n'est pas une coquetterie : les dérivés de `Fetch` portent la comparaison
+/// de ses noms, et un dérivé qu'aucune épreuve n'exerce est du code livré que
+/// rien ne regarde.
+#[test]
+fn deux_lectures_d_une_meme_commande_se_comparent() {
+    let commande = &b"1 (UID BODY.PEEK[HEADER.FIELDS (From To)])"[..];
+    let une = Fetch::parse(commande, &BORNES).expect("lisible");
+    let autre = Fetch::parse(commande, &BORNES).expect("lisible");
+    assert_eq!(une, autre);
+    let differente =
+        Fetch::parse(b"1 (UID BODY.PEEK[HEADER.FIELDS (From)])", &BORNES).expect("lisible");
+    assert_ne!(une, differente);
+    // Les noms sont des octets : le rendu les montre en nombres.
+    assert!(std::format!("{une:?}").contains("70, 114, 111, 109"));
 }

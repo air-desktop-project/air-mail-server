@@ -957,12 +957,48 @@ depuis qu'elle compte les éléments déjà écrits, elle reprend où elle s'ét
 arrêtée, et deux intervalles de fichier se suivent sans se mêler. Le refus n'avait
 plus de raison : il est retiré.
 
-Ce qui n'y est toujours pas : `HEADER.FIELDS (…)` et `HEADER.FIELDS.NOT (…)`,
-qui rendent un CHOIX de champs. Ils sont reconnus et refusés par `NO
-[UNAVAILABLE]` — `NO` et non `BAD`, parce que la commande est correcte et permise
-et que c'est ce serveur qui ne la sert pas. Le serveur dit au démarrage ce qu'il
-sert et ce qu'il ne sert pas, plutôt que de laisser un port ouvert le faire
-croire.
+### `HEADER.FIELDS` : quelques champs, et pas l'en-tête entier
+
+`BODY[HEADER.FIELDS (FROM SUBJECT)]` est ce qu'un client demande pour peupler une
+liste de messages : quelques champs, et non l'en-tête entier — qui porte le
+routage, les signatures et tout ce dont l'affichage n'a que faire.
+`HEADER.FIELDS.NOT (…)` fait l'inverse, et les deux valent aussi sur une partie
+qui encapsule un message : `BODY[2.HEADER.FIELDS (SUBJECT)]`.
+
+**LES CHAMPS SORTENT TELS QU'ILS SONT ÉCRITS** : pliage compris, ordre du message
+compris, doublons compris. Ce n'est pas de la paresse — un client qui vérifie une
+signature DKIM sur ce qu'il a reçu condense les octets du message, pas une
+version remise au propre.
+
+**La ligne vide est toujours là**, même quand aucun champ ne correspond : c'est
+le cas qu'on oublie, et un client qui recevrait zéro octet ne saurait pas
+distinguer « aucun champ » de « pas de réponse ».
+
+Trois choses ont dû changer autour :
+
+- **Le découpage des éléments respecte maintenant les crochets.** `BODY[HEADER.
+  FIELDS (FROM TO)]` porte des blancs À L'INTÉRIEUR d'un élément ; couper dessus
+  rendait deux morceaux dont aucun n'était lisible — et c'est exactement ce qui
+  faisait refuser `HEADER.FIELDS` comme « non servi ».
+- **Les noms voyagent à côté des éléments, dans une réserve bornée.** Un élément
+  de `FETCH` est retenu dans un tableau de taille fixe ; y loger une liste de
+  noms ferait porter à chacun des soixante-quatre la place que le plus gourmand
+  demanderait. Ce qu'on accepte doit tenir dans ce qui le retient : au-delà, la
+  commande est refusée plutôt que servie amputée de ses derniers noms.
+- **Un choix n'est pas un intervalle du message**, c'est une sélection. Il ne
+  peut donc pas s'écouler comme un `BODY[]` : le magasin le compose, en annonce
+  la longueur — le littéral `{n}` l'exige avant le premier octet — puis le sert
+  par morceaux.
+
+**Un nom cité est recevable, et on ne le sert pas.** `header-fld-name` est un
+`astring` : `"From"` est une forme licite qu'on ne sait pas déciter, et rendre le
+nom tel quel donnerait un choix qui ne désigne pas ce que le client a demandé.
+C'est donc un refus de service — `NO [UNAVAILABLE]` —, et non une faute : les
+confondre ferait chercher au client une erreur là où il n'y en a pas.
+
+Ce qui n'y est toujours pas : les critères de `SEARCH` qui lisent le message, et
+`IDLE`. Le serveur dit au démarrage ce qu'il sert et ce qu'il ne sert pas, plutôt
+que de laisser un port ouvert le faire croire.
 
 ## Émettre : le client SMTP sortant
 

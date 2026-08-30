@@ -81,6 +81,7 @@ mod failure;
 mod limits;
 mod message;
 mod plume;
+mod select;
 mod structure;
 
 pub use address::author_domain;
@@ -94,6 +95,7 @@ pub use failure::{
 };
 pub use limits::Limits;
 pub use message::{Field, Fields, Message, Unfolded};
+pub use select::write_header_fields;
 pub use structure::{
     BodyScanner, BodySpan, STRUCTURE_DEPTH_MAX, STRUCTURE_PARTS_MAX, write_body_structure,
 };

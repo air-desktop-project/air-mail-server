@@ -14,7 +14,10 @@
 //! Les parties désignées s'y ajoutent : `BODY[1]`, `BODY[1.2.MIME]`,
 //! `BODY[3.TEXT]`.
 //!
-//! Ce qui reste **reconnu et refusé** — `RFC822`, `BINARY`, `HEADER.FIELDS (…)`
+//! Et le CHOIX de champs : `BODY[HEADER.FIELDS (FROM SUBJECT)]`, ce qu'un client
+//! demande pour peupler une liste de messages sans tout télécharger.
+//!
+//! Ce qui reste **reconnu et refusé** — `RFC822`, `BINARY`, un nom de champ cité
 //! — n'est pas une erreur de syntaxe : le client sait alors qu'il doit demander
 //! autrement, au lieu de chercher la faute dans ce qu'il a écrit.
 //!
@@ -73,6 +76,16 @@ pub enum PartWhat {
     Header,
     /// `[1.TEXT]` — le corps du message qu'elle encapsule.
     Text,
+    /// `[1.HEADER.FIELDS (…)]` — un CHOIX de ses champs.
+    ///
+    /// **Les noms ne sont pas ici**, et c'est délibéré : un élément de `FETCH`
+    /// est retenu dans un tableau de taille fixe, et y loger une liste de noms
+    /// ferait porter à chaque élément la place que le plus gourmand demanderait.
+    /// Ils vivent à côté, un par élément — voir [`Fetch::header_names`].
+    HeaderFields {
+        /// `.NOT` : tous les autres.
+        except: bool,
+    },
 }
 
 /// La partie du message demandée.
@@ -84,6 +97,13 @@ pub enum Section {
     Header,
     /// `[TEXT]` — le corps seul.
     Text,
+    /// `[HEADER.FIELDS (…)]` — un CHOIX de champs d'en-tête.
+    ///
+    /// Les noms vivent à côté : voir [`PartWhat::HeaderFields`].
+    HeaderFields {
+        /// `.NOT` : tous les autres.
+        except: bool,
+    },
     /// `[1]`, `[1.2.MIME]` — une partie désignée.
     Part {
         /// Où elle se trouve dans l'arbre.
@@ -141,9 +161,26 @@ pub struct Fetch<'a> {
     set: SequenceSet<'a>,
     items: [FetchItem; FETCH_ITEMS_MAX],
     count: usize,
+    /// La liste de noms de chaque élément, empruntée aux arguments.
+    ///
+    /// # POURQUOI À CÔTÉ, ET NON DANS L'ÉLÉMENT
+    ///
+    /// Les éléments sont retenus dans un tableau de taille fixe. Y loger une
+    /// liste de noms ferait porter à CHACUN la place que le plus gourmand
+    /// demanderait — soixante-quatre fois, pour une liste qu'un seul élément
+    /// porte d'ordinaire.
+    noms: [&'a [u8]; FETCH_ITEMS_MAX],
 }
 
 impl<'a> Fetch<'a> {
+    /// Les noms que l'élément de rang `index` choisit, ou une tranche vide.
+    ///
+    /// Les noms sont séparés par des blancs, tels que le client les a écrits.
+    #[must_use]
+    pub fn header_names(&self, index: usize) -> &'a [u8] {
+        self.noms.get(index).copied().unwrap_or_default()
+    }
+
     /// Les messages visés.
     #[must_use]
     pub fn set(&self) -> SequenceSet<'a> {
@@ -213,11 +250,17 @@ impl<'a> Fetch<'a> {
         // lui-même à la plus courte des deux suites, ce qui retire la question
         // « et si le tableau était plein ? » — donc une garde qu'aucune entrée
         // ne pourrait faire céder.
-        let mut mots = liste
-            .split(|octet| *octet == b' ')
-            .filter(|mot| !mot.is_empty());
-        for (place, mot) in items.iter_mut().take(plafond).zip(mots.by_ref()) {
-            *place = lire_un(mot)?;
+        let mut noms: [&[u8]; FETCH_ITEMS_MAX] = [b""; FETCH_ITEMS_MAX];
+        let mut mots = Mots::new(liste);
+        for ((place, ou), mot) in items
+            .iter_mut()
+            .zip(noms.iter_mut())
+            .take(plafond)
+            .zip(mots.by_ref())
+        {
+            let (item, choisis) = lire_un(mot)?;
+            *place = item;
+            *ou = choisis;
             count = count.saturating_add(1);
         }
         // S'il en reste, c'est qu'il y en avait trop.
@@ -227,29 +270,34 @@ impl<'a> Fetch<'a> {
         if count == 0 {
             return Err(Error::MalformedFetch);
         }
-        Ok(Self { set, items, count })
+        Ok(Self {
+            set,
+            items,
+            count,
+            noms,
+        })
     }
 }
 
 /// Lit un élément.
-fn lire_un(mot: &[u8]) -> Result<FetchItem, Error> {
+fn lire_un(mot: &[u8]) -> Result<(FetchItem, &[u8]), Error> {
     if mot.eq_ignore_ascii_case(b"UID") {
-        return Ok(FetchItem::Uid);
+        return Ok((FetchItem::Uid, b""));
     }
     if mot.eq_ignore_ascii_case(b"FLAGS") {
-        return Ok(FetchItem::Flags);
+        return Ok((FetchItem::Flags, b""));
     }
     if mot.eq_ignore_ascii_case(b"INTERNALDATE") {
-        return Ok(FetchItem::InternalDate);
+        return Ok((FetchItem::InternalDate, b""));
     }
     if mot.eq_ignore_ascii_case(b"RFC822.SIZE") {
-        return Ok(FetchItem::Rfc822Size);
+        return Ok((FetchItem::Rfc822Size, b""));
     }
     if mot.eq_ignore_ascii_case(b"ENVELOPE") {
-        return Ok(FetchItem::Envelope);
+        return Ok((FetchItem::Envelope, b""));
     }
     if mot.eq_ignore_ascii_case(b"BODYSTRUCTURE") {
-        return Ok(FetchItem::BodyStructure);
+        return Ok((FetchItem::BodyStructure, b""));
     }
     // Reconnus, et refusés : le client sait alors qu'il doit demander
     // autrement, au lieu de chercher la faute dans ce qu'il a écrit.
@@ -265,7 +313,7 @@ fn lire_un(mot: &[u8]) -> Result<FetchItem, Error> {
 }
 
 /// Lit un `BODY[…]` ou un `BODY.PEEK[…]`, avec sa demande partielle.
-fn lire_un_corps(mot: &[u8]) -> Result<FetchItem, Error> {
+fn lire_un_corps(mot: &[u8]) -> Result<(FetchItem, &[u8]), Error> {
     let reste = mot
         .get(..4)
         .filter(|debut| debut.eq_ignore_ascii_case(b"BODY"))
@@ -292,23 +340,171 @@ fn lire_un_corps(mot: &[u8]) -> Result<FetchItem, Error> {
     if ouvrante.is_none() {
         return Err(Error::MalformedFetch);
     }
-    let section = match reste.get(1..fermante).unwrap_or_default() {
-        b"" => Section::Full,
-        nom if nom.eq_ignore_ascii_case(b"HEADER") => Section::Header,
-        nom if nom.eq_ignore_ascii_case(b"TEXT") => Section::Text,
-        nom => lire_une_partie_designee(nom)?,
-    };
+    let (section, noms) = lire_une_section(reste.get(1..fermante).unwrap_or_default())?;
     let apres = reste.get(fermante.saturating_add(1)..).unwrap_or_default();
     let partial = if apres.is_empty() {
         None
     } else {
         Some(lire_une_partie(apres)?)
     };
-    Ok(FetchItem::Body {
-        section,
-        peek,
-        partial,
-    })
+    Ok((
+        FetchItem::Body {
+            section,
+            peek,
+            partial,
+        },
+        noms,
+    ))
+}
+
+/// Lit ce qui tient entre les crochets d'un `BODY[…]`.
+fn lire_une_section(nom: &[u8]) -> Result<(Section, &[u8]), Error> {
+    // UNE LISTE DE NOMS SE RECONNAÎT AU BLANC QUI LA PRÉCÈDE, et c'est le seul
+    // endroit d'une section où un blanc puisse figurer.
+    let Some((tete, reste)) = couper_au_blanc(nom) else {
+        return lire_une_section_simple(nom).map(|section| (section, &b""[..]));
+    };
+    let noms = lire_les_noms(reste)?;
+    let (chemin, except) = decouper_le_choix(tete)?;
+    if chemin.is_empty() {
+        return Ok((Section::HeaderFields { except }, noms));
+    }
+    // `false` : `1.HEADER.FIELDS` a DÉJÀ son mot-clef, et un second — `1.MIME`
+    // suivi d'une liste — ne veut rien dire.
+    let (path, _) = lire_un_chemin(chemin, false)?;
+    Ok((
+        Section::Part {
+            path,
+            what: PartWhat::HeaderFields { except },
+        },
+        noms,
+    ))
+}
+
+/// Une section sans liste de noms.
+fn lire_une_section_simple(nom: &[u8]) -> Result<Section, Error> {
+    if nom.is_empty() {
+        return Ok(Section::Full);
+    }
+    if nom.eq_ignore_ascii_case(b"HEADER") {
+        return Ok(Section::Header);
+    }
+    if nom.eq_ignore_ascii_case(b"TEXT") {
+        return Ok(Section::Text);
+    }
+    // UN CHOIX SANS LISTE N'EN EST PAS UN : `HEADER.FIELDS` tout seul ne
+    // désigne rien, et le prendre pour un chemin de partie ferait chercher au
+    // client une erreur là où il n'y en a pas.
+    if decouper_le_choix(nom).is_ok() {
+        return Err(Error::MalformedFetch);
+    }
+    lire_une_partie_designee(nom)
+}
+
+/// Sépare le chemin du mot-clef `HEADER.FIELDS[.NOT]` qui le termine.
+fn decouper_le_choix(tete: &[u8]) -> Result<(&[u8], bool), Error> {
+    for (suffixe, except) in [
+        (&b"HEADER.FIELDS.NOT"[..], true),
+        (&b"HEADER.FIELDS"[..], false),
+    ] {
+        let Some(rang) = tete.len().checked_sub(suffixe.len()) else {
+            continue;
+        };
+        let avant = tete.get(..rang).unwrap_or_default();
+        let fin = tete.get(rang..).unwrap_or_default();
+        if fin.eq_ignore_ascii_case(suffixe) {
+            return Ok((avant.strip_suffix(b".").unwrap_or(avant), except));
+        }
+    }
+    Err(Error::MalformedFetch)
+}
+
+/// Lit `(nom nom nom)` et rend ce qu'il y a dedans.
+fn lire_les_noms(texte: &[u8]) -> Result<&[u8], Error> {
+    let dedans = texte
+        .strip_prefix(b"(")
+        .and_then(|reste| reste.strip_suffix(b")"))
+        .ok_or(Error::MalformedFetch)?;
+    if dedans.trim_ascii().is_empty() {
+        return Err(Error::MalformedFetch);
+    }
+    for octet in dedans {
+        if matches!(*octet, b' ' | b'\t') {
+            continue;
+        }
+        // UN NOM CITÉ EST RECEVABLE, ET ON NE LE SERT PAS. `header-fld-name` est
+        // un `astring` : `"From"` et `{4}\r\nFrom` sont des formes licites. On
+        // ne sait pas les déciter, et rendre le nom tel quel donnerait un choix
+        // qui ne désigne pas ce que le client a demandé. C'est donc un REFUS de
+        // service, et non une faute — les confondre ferait chercher au client
+        // une erreur là où il n'y en a pas.
+        if matches!(*octet, b'"' | b'\\' | b'{') {
+            return Err(Error::UnsupportedFetchItem);
+        }
+        // Hors de là, un nom de champ est un atome (RFC 5322 §3.6.8) : ni
+        // blanc, ni deux-points — celui-ci les sépare.
+        if !est_ftext(*octet) {
+            return Err(Error::MalformedFetch);
+        }
+    }
+    Ok(dedans)
+}
+
+/// Un octet qui peut faire un nom de champ (RFC 5322 §3.6.8).
+fn est_ftext(octet: u8) -> bool {
+    (33..=57).contains(&octet) || (59..=126).contains(&octet)
+}
+
+/// Coupe au premier blanc : le mot, et ce qui suit, élagué.
+fn couper_au_blanc(texte: &[u8]) -> Option<(&[u8], &[u8])> {
+    let rang = texte
+        .iter()
+        .position(|octet| matches!(*octet, b' ' | b'\t'))?;
+    Some((
+        texte.get(..rang).unwrap_or_default(),
+        texte.get(rang..).unwrap_or_default().trim_ascii_start(),
+    ))
+}
+
+/// Les mots d'une liste d'éléments, crochets et parenthèses respectés.
+///
+/// # POURQUOI ON NE COUPE PAS SUR TOUS LES BLANCS
+///
+/// `BODY[HEADER.FIELDS (FROM TO)]` porte des blancs À L'INTÉRIEUR d'un élément.
+/// Couper dessus rendait deux morceaux dont aucun n'était lisible — et c'est
+/// exactement ce qui faisait refuser `HEADER.FIELDS` comme « non servi ».
+struct Mots<'a> {
+    reste: &'a [u8],
+}
+
+impl<'a> Mots<'a> {
+    fn new(liste: &'a [u8]) -> Self {
+        Self { reste: liste }
+    }
+}
+
+impl<'a> Iterator for Mots<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<&'a [u8]> {
+        let debut = self.reste.iter().position(|octet| *octet != b' ')?;
+        let reste = self.reste.get(debut..).unwrap_or_default();
+        let mut profondeur = 0_usize;
+        let mut fin = reste.len();
+        for (rang, octet) in reste.iter().enumerate() {
+            match *octet {
+                b'[' | b'(' => profondeur = profondeur.saturating_add(1),
+                b']' | b')' => profondeur = profondeur.saturating_sub(1),
+                b' ' if profondeur == 0 => {
+                    fin = rang;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        self.reste = reste.get(fin..).unwrap_or_default();
+        reste.get(..fin)
+    }
 }
 
 /// Lit un chemin de partie : `1`, `1.2`, `3.1.MIME` (§6.4.5).
@@ -321,6 +517,17 @@ fn lire_un_corps(mot: &[u8]) -> Result<FetchItem, Error> {
 /// syntaxe, et les confondre ferait chercher au client une erreur là où il n'y
 /// en a pas — ou l'inverse.
 fn lire_une_partie_designee(nom: &[u8]) -> Result<Section, Error> {
+    let (path, what) = lire_un_chemin(nom, true)?;
+    Ok(Section::Part { path, what })
+}
+
+/// Lit un chemin de partie, avec ou sans le mot-clef qui peut le fermer.
+///
+/// # Errors
+///
+/// [`Error::MalformedFetch`] si le chemin n'a pas la forme ;
+/// [`Error::UnsupportedFetchItem`] s'il est plus profond que ce qu'on retient.
+fn lire_un_chemin(nom: &[u8], mots_clefs: bool) -> Result<(PartPath, PartWhat), Error> {
     let mut chemin = PartPath::EMPTY;
     let mut what = PartWhat::Content;
     let mut reste = nom;
@@ -334,7 +541,7 @@ fn lire_une_partie_designee(nom: &[u8]) -> Result<Section, Error> {
         };
         // Un mot-clé ferme le chemin : rien ne peut le suivre.
         if let Some(vu) = mot_clef(morceau) {
-            if chemin.len == 0 || suite.is_some() {
+            if !mots_clefs || chemin.len == 0 || suite.is_some() {
                 return Err(Error::MalformedFetch);
             }
             what = vu;
@@ -355,7 +562,7 @@ fn lire_une_partie_designee(nom: &[u8]) -> Result<Section, Error> {
             None => break,
         }
     }
-    Ok(Section::Part { path: chemin, what })
+    Ok((chemin, what))
 }
 
 /// Le mot-clef qui ferme un chemin de partie, s'il en est un.

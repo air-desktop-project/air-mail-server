@@ -35,6 +35,25 @@ const MESSAGES: [&[u8]; 2] = [
 /// Une boîte en mémoire : c'est le protocole qu'on éprouve ici, pas Maildir.
 struct Boite;
 
+impl Boite {
+    /// Compose un choix de champs sur l'en-tête d'un message.
+    fn choisir(
+        &self,
+        sequence: u32,
+        path: &[u32],
+        names: &[u8],
+        except: bool,
+        out: &mut [u8],
+    ) -> Option<usize> {
+        let corps = MESSAGES.get(usize::try_from(sequence).unwrap_or(0).saturating_sub(1))?;
+        // Seul l'en-tête du message : les messages d'épreuve n'encapsulent rien.
+        if !path.is_empty() {
+            return None;
+        }
+        ams_mime::write_header_fields(corps, names, except, out, &ams_mime::Limits::DEFAULT).ok()
+    }
+}
+
 impl Mailbox for Boite {
     fn exists(&self) -> u32 {
         2
@@ -106,8 +125,46 @@ impl Mailbox for Boite {
                 PartWhat::Mime => ams_mime::BodySpan::Mime,
                 PartWhat::Header => ams_mime::BodySpan::Header,
                 PartWhat::Text => ams_mime::BodySpan::Text,
+                // Un choix n'est pas un intervalle : il passe par
+                // `header_fields`.
+                PartWhat::HeaderFields { .. } => return None,
             },
         )
+    }
+
+    fn header_fields_len(
+        &self,
+        sequence: u32,
+        path: &[u32],
+        names: &[u8],
+        except: bool,
+    ) -> Option<u64> {
+        let mut sortie = std::vec![0_u8; 4096];
+        let ecrits = self.choisir(sequence, path, names, except, &mut sortie)?;
+        Some(u64::try_from(ecrits).unwrap_or(u64::MAX))
+    }
+
+    fn header_fields(
+        &self,
+        sequence: u32,
+        path: &[u32],
+        names: &[u8],
+        except: bool,
+        offset: u64,
+        out: &mut [u8],
+    ) -> usize {
+        let mut sortie = std::vec![0_u8; 4096];
+        let Some(ecrits) = self.choisir(sequence, path, names, except, &mut sortie) else {
+            return 0;
+        };
+        let reste = sortie
+            .get(usize::try_from(offset).unwrap_or(usize::MAX)..ecrits)
+            .unwrap_or_default();
+        let voulu = reste.len().min(out.len());
+        for (place, octet) in out.iter_mut().zip(reste.get(..voulu).unwrap_or_default()) {
+            *place = *octet;
+        }
+        voulu
     }
 
     fn body_structure(&self, sequence: u32, offset: u64, out: &mut [u8]) -> usize {
@@ -1164,4 +1221,42 @@ async fn une_partie_designee_traverse_la_socket() {
         absente, "* 1 FETCH (BODY[4] NIL UID 1)\r\na006 OK FETCH completed\r\n",
         "{absente}"
     );
+}
+
+/// **Un choix de champs traverse la socket**, et la réponse échoit les noms.
+#[tokio::test]
+async fn un_choix_de_champs_traverse_la_socket() {
+    let Some(materiel) = materiel("imap-choix") else {
+        return;
+    };
+    let mut lecteur = authentifiee(&materiel).await;
+    lecteur
+        .get_mut()
+        .write_all(b"a003 SELECT INBOX\r\n")
+        .await
+        .expect("écriture");
+    jusqu_a(&mut lecteur, "a003 ").await;
+
+    lecteur
+        .get_mut()
+        .write_all(b"a004 FETCH 1 BODY.PEEK[HEADER.FIELDS (Subject)]\r\n")
+        .await
+        .expect("écriture");
+    let choix = jusqu_a(&mut lecteur, "a004 ").await;
+    assert_eq!(
+        choix,
+        "* 1 FETCH (BODY[HEADER.FIELDS (Subject)] {15}\r\nSubject: un\r\n\r\n)\r\n\
+         a004 OK FETCH completed\r\n",
+        "{choix}"
+    );
+
+    // Et son inverse rend tout le reste.
+    lecteur
+        .get_mut()
+        .write_all(b"a005 FETCH 1 BODY.PEEK[HEADER.FIELDS.NOT (Subject)]\r\n")
+        .await
+        .expect("écriture");
+    let sauf = jusqu_a(&mut lecteur, "a005 ").await;
+    assert!(sauf.contains("From: a@x.test"), "{sauf}");
+    assert!(!sauf.contains("Subject: un"), "{sauf}");
 }
