@@ -135,6 +135,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ams-proto-h3"
+version = "0.1.0"
+dependencies = [
+ "ams-proto-quic",
+]
+
+[[package]]
 name = "ams-proto-http"
 version = "0.1.0"
 

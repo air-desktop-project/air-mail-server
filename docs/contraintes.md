@@ -3369,3 +3369,81 @@ d'origine, le jeton de réinitialisation, l'adresse préférée, et l'identifian
 source d'un `Retry`. Un client qui les enverrait prétendrait avoir émis ce
 `Retry` ou choisi cet identifiant d'origine — c'est-à-dire **réécrire ce qui
 prouve que la poignée de main n'a pas été détournée**.
+
+## HTTP/3 : ce qui disparaît, et pourquoi c'est l'essentiel
+
+HTTP/2 devait construire des flux au-dessus d'une connexion TCP unique :
+numéros de flux, machine d'états par flux, contrôle de flux par flux,
+`WINDOW_UPDATE`, `RST_STREAM`, `PRIORITY`. Tout cela est descendu dans QUIC, et
+n'a plus à être écrit.
+
+**Ce qui disparaît avec, et qui compte davantage** : le blocage de tête de
+ligne. En HTTP/2, un paquet perdu arrêtait TOUS les flux, parce que TCP livre
+dans l'ordre ou ne livre pas. En HTTP/3, il n'arrête que le flux auquel il
+appartenait.
+
+Ce qui reste ici tient en peu de chose, et c'est voulu : le cadrage, les types
+de flux unidirectionnels, trois réglages, et QPACK.
+
+### Une trame porte sa longueur, et c'est l'inverse de QUIC
+
+Une trame QUIC se lit jusqu'au bout ou pas du tout : son type dit sa forme, et
+sa forme dit sa fin. Une trame HTTP/3 annonce un type PUIS une longueur.
+
+La raison tient à ce qu'elles servent : QUIC cadre ce qu'il COMPREND, HTTP/3
+cadre ce qu'il TRANSPORTE. Un type inconnu doit pouvoir être sauté, et l'on ne
+saute que ce dont on connaît la taille.
+
+### Troisième règle, troisième protocole
+
+HTTP/2 ignore ce qu'il ne connaît pas. QUIC le refuse. HTTP/3 l'ignore à
+nouveau. Ce n'est pas de l'inconstance :
+
+- **QUIC refuse** parce que ses extensions se négocient dans les paramètres de
+  transport, et qu'une trame inconnue y signale une négociation manquée ;
+- **HTTP/3 ignore** parce que ses trames portent leur longueur, et qu'une
+  extension peut donc traverser un pair qui ne la connaît pas.
+
+Trois protocoles, trois traitements de l'inconnu, et chacun est juste dans son
+cadre. C'est le genre de chose qu'on confond en écrivant les crates l'un après
+l'autre — d'où ce paragraphe.
+
+### Les types réservés sont un piège, et il est voulu
+
+§11.2.1 réserve 0x02, 0x06, 0x08 et 0x09 — ceux que RFC 7540 donnait à
+`PRIORITY`, `PING`, `WINDOW_UPDATE` et `CONTINUATION`. §11.2.2 fait de même pour
+quatre identifiants de réglage.
+
+Les recevoir n'est pas une trame inconnue qu'on ignore : c'est un pair qui parle
+HTTP/2 sur une connexion HTTP/3, et **ce qui suit ne sera pas ce qu'on croit**.
+La RFC en fait donc une faute, et non un silence. C'est une trappe posée exprès,
+et la respecter est ce qui empêche une confusion de protocoles de passer pour
+une extension.
+
+### Un flux critique ne se ferme pas
+
+Le flux de contrôle et les deux flux QPACK ne se ferment pas : §6.2.1 en fait
+une faute `H3_CLOSED_CRITICAL_STREAM`. La connexion n'aurait plus par où
+s'entendre.
+
+Un flux de type INCONNU, en revanche, s'abandonne sans que la connexion en
+souffre — c'est ce qui permet à une extension d'ouvrir ses propres flux sans
+casser les pairs qui ne la connaissent pas.
+
+### La poussée n'est pas servie, et c'est une décision
+
+Un flux de poussée est ouvert par le SERVEUR (§4.6). Un client qui en ouvrirait
+un prétendrait pousser vers nous — ce qui n'existe pas. Et ce serveur n'en émet
+pas : la poussée serveur a été retirée d'HTTP/2 faute d'usage, et rien ne
+justifie de la réintroduire.
+
+### Zéro est la valeur par défaut de la table QPACK
+
+Et ce n'est pas rien : sans annonce, aucune table dynamique n'existe, et
+l'encodeur ne peut employer que la table statique. C'est le contraire d'HPACK,
+dont la table faisait quatre kibioctets d'office.
+
+De même, zéro flux bloqué par défaut — et c'est tout l'intérêt de QPACK. Un flux
+bloqué attend une insertion qu'un autre flux n'a pas encore livrée ; zéro veut
+dire « ne me fais jamais attendre », et c'est ce qui rend QPACK utilisable sur un
+transport qui livre dans le désordre.

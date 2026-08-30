@@ -42,6 +42,9 @@ path = "../crates/ams-proto-http"
 [dependencies.ams-proto-quic]
 path = "../crates/ams-proto-quic"
 
+[dependencies.ams-proto-h3]
+path = "../crates/ams-proto-h3"
+
 [dependencies.ams-proto-h2]
 path = "../crates/ams-proto-h2"
 
@@ -338,6 +341,13 @@ bench = false
 [[bin]]
 name = "fuzz_ams_quic_packet"
 path = "fuzz_targets/fuzz_ams_quic_packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ams_h3_frame"
+path = "fuzz_targets/fuzz_ams_h3_frame.rs"
 test = false
 doc = false
 bench = false

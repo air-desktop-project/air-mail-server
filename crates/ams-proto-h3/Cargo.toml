@@ -1,0 +1,15 @@
+[package]
+name = "ams-proto-h3"
+description = "Grammaire HTTP/3 (RFC 9114) : cadrage et flux, sans entrée-sortie"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+ams-proto-quic = { path = "../ams-proto-quic" }
+
+[lints]
+workspace = true
