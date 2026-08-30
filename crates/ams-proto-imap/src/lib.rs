@@ -47,7 +47,9 @@ pub use arguments::{Args, Argument, argument_max};
 pub use command::{Command, Line};
 pub use date::parse_date_time;
 pub use error::Error;
-pub use fetch::{FETCH_ITEMS_MAX, Fetch, FetchItem, Partial, Section};
+pub use fetch::{
+    FETCH_ITEMS_MAX, Fetch, FetchItem, PartPath, PartWhat, Partial, SECTION_DEPTH_MAX, Section,
+};
 pub use flags::{Flags, INTERNALDATE_MAX, write_internal_date};
 pub use frame::{CommandReader, Need, literal_announcement};
 pub use limits::Limits;

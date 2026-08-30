@@ -96,7 +96,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_session_imap` | `seeds/imap-session` | la session IMAP — **jamais authentifié sans chiffrement**, un intervalle de `FETCH` ne déborde pas du message, et **une émission conclut** |
 | `fuzz_ams_smtp_client` | `seeds/smtp-client` | réponses lues et corps émis — **le message ne se termine pas tout seul** |
 | `fuzz_ams_mime_compose` | `seeds/mime-compose` | les messages de rapport — **la pièce jointe se relit, la liste blanche tient** |
-| `fuzz_ams_mime_structure` | `seeds/mime-structure` | la `BODYSTRUCTURE` d'un message quelconque — **le découpage ne change pas le résultat**, et ce qui part sur le fil est bien formé |
+| `fuzz_ams_mime_structure` | `seeds/mime-structure` | la `BODYSTRUCTURE` d'un message quelconque — **le découpage ne change pas le résultat**, ce qui part sur le fil est bien formé, et **une partie désignée ne sort jamais du message** |
 | `fuzz_ams_mime_envelope` | `seeds/mime-envelope` | l'`ENVELOPE` d'un en-tête quelconque — **ce qui part sur le fil est bien formé** : dix champs, parenthèses équilibrées, et **aucune fin de ligne dans une chaîne** |
 
 Les variantes « bornes » existent parce que les bornes de C3 viennent de la
@@ -840,6 +840,7 @@ coûterait du courrier sans rien protéger — on ne les interprète jamais.
 | 2026-08-29 | `fuzz_ams_session_imap` (avec `EXPUNGE`) | 2 188 197 (181 s) | 0 |
 | 2026-08-29 | `fuzz_ams_imap_fetch` (avec `SEARCH`) | 9 490 143 (201 s) | 0 |
 | 2026-08-29 | `fuzz_ams_session_imap` (avec `COPY`) | 2 993 293 (181 s) | 0 |
+| 2026-08-30 | `fuzz_ams_mime_structure` (parties désignées) | 317 620 (241 s) | 0 |
 | 2026-08-30 | `fuzz_ams_mime_structure` | 540 822 (241 s) | 0 |
 | 2026-08-29 | `fuzz_ams_mime_envelope` | (première campagne) | **1, corrigé** |
 | 2026-08-29 | `fuzz_ams_mime_envelope` | 2 468 400 (301 s) | 0 |

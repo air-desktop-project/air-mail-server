@@ -44,7 +44,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ams_index::{MessageName, Uid};
-use ams_proto_imap::{Flags, StoreMode};
+use ams_mime::BodySpan;
+use ams_proto_imap::{Flags, PartWhat, StoreMode};
 use ams_session::imap::{
     Creation, Deletion, Deposit, Listing, Mailbox, Mailboxes, MessageInfo, Renaming,
 };
@@ -90,10 +91,10 @@ fn ecouler(texte: &[u8], offset: u64, out: &mut [u8]) -> usize {
     voulu
 }
 
-/// Fait défiler un message devant le balayeur, et compose sa structure.
+/// Fait défiler un message devant le balayeur, et rend ce qu'il en a retenu.
 ///
-/// Rend `None` si le fichier ne se lit pas, ou si la structure ne tient pas.
-fn balayer(chemin: &Path, compose: &mut [u8]) -> Option<usize> {
+/// Rend `None` si le fichier ne se lit pas.
+fn balayer(chemin: &Path) -> Option<Box<ams_mime::BodyScanner>> {
     let mut fichier = std::fs::File::open(chemin).ok()?;
     // LE BALAYEUR EST GROS, ET IL VA SUR LE TAS. Une vingtaine de kibioctets sur
     // la pile d'un fil qui en sert d'autres n'est pas une dépense qu'on veut
@@ -108,7 +109,7 @@ fn balayer(chemin: &Path, compose: &mut [u8]) -> Option<usize> {
         balayeur.push(fenetre.get(..lus).unwrap_or_default());
     }
     balayeur.finish();
-    balayeur.write(compose).ok()
+    Some(balayeur)
 }
 
 /// Une boîte relevée, vue par IMAP.
@@ -231,11 +232,27 @@ impl Mailbox for BoiteImap {
         // 2045 dit « je ne sais rien » dans une forme que la grammaire admet.
         const RIEN: &[u8] =
             b"(\"TEXT\" \"PLAIN\" (\"CHARSET\" \"US-ASCII\") NIL NIL \"7BIT\" 0 0 NIL NIL NIL NIL)";
-        let texte = match balayer(chemin, &mut compose) {
+        let texte = match balayer(chemin).and_then(|vu| vu.write(&mut compose).ok()) {
             Some(ecrits) => compose.get(..ecrits).unwrap_or(RIEN),
             None => RIEN,
         };
         ecouler(texte, offset, out)
+    }
+
+    fn part_span(&self, sequence: u32, path: &[u32], what: PartWhat) -> Option<(u64, u64)> {
+        // MÊME PRIX QU'UNE STRUCTURE : trouver une partie, c'est retrouver les
+        // frontières, donc lire le message. La session ne le demande que pour
+        // l'élément qu'elle est sur le point d'écrire.
+        let chemin = self.chemins.get(self.rang(sequence)?)?;
+        balayer(chemin)?.span(
+            path,
+            match what {
+                PartWhat::Content => BodySpan::Content,
+                PartWhat::Mime => BodySpan::Mime,
+                PartWhat::Header => BodySpan::Header,
+                PartWhat::Text => BodySpan::Text,
+            },
+        )
     }
 
     fn read(&self, sequence: u32, offset: u64, out: &mut [u8]) -> usize {

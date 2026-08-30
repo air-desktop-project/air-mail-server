@@ -1,6 +1,6 @@
 //! Ce qu'une session IMAP dit, et ce qu'elle refuse.
 
-use ams_proto_imap::{Flags, Limits, StoreMode};
+use ams_proto_imap::{Flags, Limits, PartWhat, StoreMode};
 use ams_sasl::Credentials;
 
 use super::{Action, Mailbox, Mailboxes, MessageInfo, Session, State, TAG_MAX_OCTETS};
@@ -92,6 +92,19 @@ impl Mailbox for Boite {
         texte.extend_from_slice(std::format!("{}", info.uid).as_bytes());
         texte.extend_from_slice(b"\" \"x.test\")) NIL NIL NIL NIL NIL NIL NIL)");
         ecouler_le_texte(&texte, offset, out)
+    }
+
+    fn part_span(&self, sequence: u32, path: &[u32], what: PartWhat) -> Option<(u64, u64)> {
+        // La boîte d'épreuve n'a qu'une partie : c'est le PLOMBAGE qu'on
+        // éprouve ici — ce que la session écrit d'une partie présente, et d'une
+        // partie absente —, pas la résolution d'un chemin, qui vit dans
+        // `ams-mime` et y est éprouvée.
+        let info = self.info(sequence)?;
+        match (path, what) {
+            ([1], PartWhat::Content) => Some((10, info.size)),
+            ([1], PartWhat::Mime) => Some((0, 10)),
+            _ => None,
+        }
     }
 
     fn body_structure(&self, sequence: u32, offset: u64, out: &mut [u8]) -> usize {
@@ -1689,15 +1702,21 @@ fn un_uid_dont_le_verbe_est_inconnu_se_refuse_en_le_disant() {
     assert!(nu.contains("NO [CANNOT]"), "{nu}");
 }
 
-/// **Un seul corps par commande** : en rendre deux demanderait d'entrelacer
-/// deux intervalles de fichier dans une même réponse.
+/// **DEUX CORPS DANS UNE MÊME COMMANDE S'ÉCOULENT L'UN APRÈS L'AUTRE.** C'était
+/// refusé tant que la session recommençait sa ligne à chaque morceau ; depuis
+/// qu'elle compte les éléments déjà écrits, elle reprend où elle s'était
+/// arrêtée, et deux intervalles de fichier se suivent sans se mêler.
 #[test]
-fn deux_corps_dans_un_fetch_se_refusent_en_le_disant() {
+fn deux_corps_dans_un_fetch_s_ecoulent_l_un_apres_l_autre() {
     let mut session = selectionnee();
-    let (texte, _) = dire(&mut session, b"a003 FETCH 1 (BODY[] BODY[HEADER])\r\n");
-    assert!(
-        texte.contains("NO [CANNOT] Only one body item per FETCH is served"),
-        "{texte}"
+    let fil = ecouler(
+        &mut session,
+        b"a003 FETCH 1 (BODY.PEEK[] BODY.PEEK[HEADER])\r\n",
+    );
+    assert_eq!(
+        fil,
+        "* 1 FETCH (BODY[] {100}\r\n<1:0+100> BODY[HEADER] {40}\r\n<1:0+40>)\r\n\
+         a003 OK FETCH completed\r\n"
     );
 }
 
@@ -1804,6 +1823,120 @@ fn ce_qui_suit_un_element_ecoule_vient_apres_lui() {
     assert_eq!(
         corps,
         "* 1 FETCH (BODY[] {100}\r\n<1:0+100> UID 10)\r\na004 OK FETCH completed\r\n"
+    );
+}
+
+// ── Les parties désignées ───────────────────────────────────────────────────
+
+/// **Une partie désignée s'écoule comme un corps**, et la réponse ÉCHOIT la
+/// section demandée : c'est ainsi que le client rattache la donnée à sa demande
+/// quand il en a posé plusieurs.
+#[test]
+fn une_partie_designee_s_ecoule_comme_un_corps() {
+    let mut session = selectionnee();
+    let fil = ecouler(&mut session, b"a003 FETCH 1 BODY.PEEK[1]\r\n");
+    assert_eq!(
+        fil,
+        "* 1 FETCH (BODY[1] {90}\r\n<1:10+90>)\r\na003 OK FETCH completed\r\n"
+    );
+    let mime = ecouler(&mut session, b"a004 FETCH 1 BODY.PEEK[1.MIME]\r\n");
+    assert_eq!(
+        mime,
+        "* 1 FETCH (BODY[1.MIME] {10}\r\n<1:0+10>)\r\na004 OK FETCH completed\r\n"
+    );
+}
+
+/// UNE PARTIE QUI N'EXISTE PAS VAUT `NIL`, et non une erreur : §6.4.5 l'admet,
+/// et un client qui demande une partie vue dans une structure devenue périmée ne
+/// fait rien de mal. Faire échouer sa commande entière le punirait de rien.
+#[test]
+fn une_partie_absente_vaut_nil() {
+    let mut session = selectionnee();
+    let fil = ecouler(&mut session, b"a003 FETCH 1 (BODY.PEEK[7] UID)\r\n");
+    assert_eq!(
+        fil,
+        "* 1 FETCH (BODY[7] NIL UID 10)\r\na003 OK FETCH completed\r\n"
+    );
+}
+
+/// **La portée de la partie suivante se redemande.** Deux parties dans la même
+/// commande n'ont pas le même intervalle ; continuer sans repasser par le
+/// magasin rendrait à la seconde ce qu'on avait trouvé pour la première.
+#[test]
+fn deux_parties_de_suite_ne_se_confondent_pas() {
+    let mut session = selectionnee();
+    let fil = ecouler(
+        &mut session,
+        b"a003 FETCH 1 (BODY.PEEK[7] BODY.PEEK[1.MIME])\r\n",
+    );
+    assert_eq!(
+        fil,
+        "* 1 FETCH (BODY[7] NIL BODY[1.MIME] {10}\r\n<1:0+10>)\r\na003 OK FETCH completed\r\n"
+    );
+}
+
+/// **La réponse échoit le chemin tel qu'il a été écrit** : plusieurs niveaux, et
+/// le mot-clef qui les ferme. Sans cela, un client qui a posé deux demandes ne
+/// saurait pas laquelle on lui rend.
+#[test]
+fn la_reponse_echoit_le_chemin_demande() {
+    let mut session = selectionnee();
+    for (commande, attendu) in [
+        (&b"a003 FETCH 1 BODY.PEEK[1.2]\r\n"[..], "BODY[1.2] NIL"),
+        (
+            b"a004 FETCH 1 BODY.PEEK[2.HEADER]\r\n",
+            "BODY[2.HEADER] NIL",
+        ),
+        (
+            b"a005 FETCH 1 BODY.PEEK[3.1.TEXT]\r\n",
+            "BODY[3.1.TEXT] NIL",
+        ),
+    ] {
+        let fil = ecouler(&mut session, commande);
+        assert!(fil.contains(attendu), "{commande:?} : {fil}");
+    }
+}
+
+/// Un tampon trop court pour écrire `NIL` le dit, au lieu d'écrire une réponse
+/// à moitié.
+#[test]
+fn un_tampon_trop_court_pour_une_partie_absente_le_dit() {
+    for taille in 1..=32_usize {
+        let mut session = selectionnee();
+        let mut grand = [0_u8; 512];
+        session
+            .handle(b"a003 FETCH 1 (BODY.PEEK[7.2] UID)\r\n", &mut grand)
+            .expect("traitable");
+        let mut petit = std::vec![0_u8; taille];
+        let mut fil = std::string::String::new();
+        loop {
+            match session.next_fetch(&mut petit) {
+                Ok(None) => break,
+                Ok(Some(super::FetchChunk::Bytes(octets))) => {
+                    fil.push_str(&std::string::String::from_utf8_lossy(octets));
+                }
+                Ok(Some(super::FetchChunk::Message { .. })) => {
+                    unreachable!("une partie absente n'écoule rien")
+                }
+                Err(erreur) => {
+                    assert!(matches!(erreur, super::Error::Reply(_)), "{erreur:?}");
+                    break;
+                }
+            }
+        }
+        assert!(!fil.contains("BODY[7.2] N\r\n"), "taille {taille} : {fil}");
+    }
+}
+
+/// La demande partielle s'applique à une partie comme au message entier, et ne
+/// sort pas de la partie.
+#[test]
+fn une_demande_partielle_ne_sort_pas_de_la_partie() {
+    let mut session = selectionnee();
+    let fil = ecouler(&mut session, b"a003 FETCH 1 BODY.PEEK[1]<5.1000>\r\n");
+    assert_eq!(
+        fil,
+        "* 1 FETCH (BODY[1]<5> {85}\r\n<1:15+85>)\r\na003 OK FETCH completed\r\n"
     );
 }
 

@@ -255,10 +255,10 @@ OPTIONS DE `config write`
 
     IMAP SERT LES BOÎTES D'UN COMPTE : `SELECT`, `LIST`, `STATUS`, `FETCH`,
     `STORE`, `EXPUNGE`, `SEARCH`, `COPY`, `MOVE`, `APPEND`, `CREATE`, `DELETE` et
-    `RENAME`. `FETCH` rend une `ENVELOPE` et une `BODYSTRUCTURE`, mais PAS une
-    partie désignée : `BODY[1]` est refusé, et le client télécharge le message
-    entier. Les critères de recherche qui demandent de LIRE le message sont
-    refusés plutôt que rendus faux.
+    `RENAME`. `FETCH` rend une `ENVELOPE`, une `BODYSTRUCTURE` et une partie
+    désignée — `BODY[1]`, `BODY[1.MIME]`, `BODY[3.TEXT]` —, mais PAS un choix de
+    champs d'en-tête : `HEADER.FIELDS` est refusé. Les critères de recherche qui
+    demandent de LIRE le message le sont aussi, plutôt que rendus faux.
 
     LE MAGASIN DE COMPTES SERT DEUX CHOSES, et il faut les distinguer :
 

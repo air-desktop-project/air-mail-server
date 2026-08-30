@@ -18,7 +18,7 @@ use ams_guard::Thresholds;
 use ams_loop_tokio::SharedGuard;
 use ams_loop_tokio::imap::{ImapService, serve_imap_connection};
 use ams_proto_imap::Limits;
-use ams_proto_imap::{Flags, StoreMode};
+use ams_proto_imap::{Flags, PartWhat, StoreMode};
 use ams_session::imap::{Mailbox, Mailboxes, MessageInfo};
 use commun::{COMPTE, NotreDomaine, PAIR, SECRET, materiel};
 use core::time::Duration;
@@ -92,6 +92,22 @@ impl Mailbox for Boite {
             *place = *octet;
         }
         voulu
+    }
+
+    fn part_span(&self, sequence: u32, path: &[u32], what: PartWhat) -> Option<(u64, u64)> {
+        let corps = MESSAGES.get(usize::try_from(sequence).unwrap_or(0).saturating_sub(1))?;
+        let mut balayeur = ams_mime::BodyScanner::new(&ams_mime::Limits::DEFAULT);
+        balayeur.push(corps);
+        balayeur.finish();
+        balayeur.span(
+            path,
+            match what {
+                PartWhat::Content => ams_mime::BodySpan::Content,
+                PartWhat::Mime => ams_mime::BodySpan::Mime,
+                PartWhat::Header => ams_mime::BodySpan::Header,
+                PartWhat::Text => ams_mime::BodySpan::Text,
+            },
+        )
     }
 
     fn body_structure(&self, sequence: u32, offset: u64, out: &mut [u8]) -> usize {
@@ -1099,5 +1115,53 @@ async fn une_structure_traverse_la_socket() {
         "* 1 FETCH (BODYSTRUCTURE (\"TEXT\" \"PLAIN\" (\"CHARSET\" \"us-ascii\") \
          NIL NIL \"7BIT\" 16 1 NIL NIL NIL NIL) UID 1)\r\na004 OK FETCH completed\r\n",
         "{structure}"
+    );
+}
+
+/// **Une partie désignée traverse la socket**, et une partie absente vaut `NIL`.
+#[tokio::test]
+async fn une_partie_designee_traverse_la_socket() {
+    let Some(materiel) = materiel("imap-partie") else {
+        return;
+    };
+    let mut lecteur = authentifiee(&materiel).await;
+    lecteur
+        .get_mut()
+        .write_all(b"a003 SELECT INBOX\r\n")
+        .await
+        .expect("écriture");
+    jusqu_a(&mut lecteur, "a003 ").await;
+
+    lecteur
+        .get_mut()
+        .write_all(b"a004 FETCH 1 BODY.PEEK[1]\r\n")
+        .await
+        .expect("écriture");
+    let partie = jusqu_a(&mut lecteur, "a004 ").await;
+    assert_eq!(
+        partie, "* 1 FETCH (BODY[1] {16}\r\nPremier corps.\r\n)\r\na004 OK FETCH completed\r\n",
+        "{partie}"
+    );
+
+    // Les lignes d'en-tête MIME de la même partie.
+    lecteur
+        .get_mut()
+        .write_all(b"a005 FETCH 1 BODY.PEEK[1.MIME]\r\n")
+        .await
+        .expect("écriture");
+    let mime = jusqu_a(&mut lecteur, "a005 ").await;
+    assert!(mime.contains("BODY[1.MIME] {31}"), "{mime}");
+    assert!(mime.contains("Subject: un"), "{mime}");
+
+    // Et une partie qui n'existe pas : `NIL`, pas une erreur.
+    lecteur
+        .get_mut()
+        .write_all(b"a006 FETCH 1 (BODY.PEEK[4] UID)\r\n")
+        .await
+        .expect("écriture");
+    let absente = jusqu_a(&mut lecteur, "a006 ").await;
+    assert_eq!(
+        absente, "* 1 FETCH (BODY[4] NIL UID 1)\r\na006 OK FETCH completed\r\n",
+        "{absente}"
     );
 }

@@ -1,7 +1,7 @@
 //! Ce qu'une structure dit d'un message.
 
 use super::{ENTETE_DE_PARTIE_MAX, STRUCTURE_DEPTH_MAX, STRUCTURE_PARTS_MAX};
-use crate::{BodyScanner, Error, Limits, write_body_structure};
+use crate::{BodyScanner, BodySpan, Error, Limits, write_body_structure};
 
 const BORNES: Limits = Limits::DEFAULT;
 
@@ -543,4 +543,171 @@ fn un_message_encapsule_sans_place_reste_lisible() {
         "{compose}"
     );
     assert!(compose.contains("(\"CHARSET\" \"US-ASCII\")"), "{compose}");
+}
+
+// --- Les parties désignées (§6.4.5) ---------------------------------------
+
+/// Rend le texte exact que `BODY[chemin]` servirait.
+fn tranche(message: &[u8], chemin: &[u32], quoi: BodySpan) -> Option<std::string::String> {
+    let mut balayeur = BodyScanner::new(&BORNES);
+    balayeur.push(message);
+    balayeur.finish();
+    let (debut, fin) = balayeur.span(chemin, quoi)?;
+    let debut = usize::try_from(debut).unwrap_or(usize::MAX);
+    let fin = usize::try_from(fin).unwrap_or(usize::MAX);
+    Some(
+        std::string::String::from_utf8_lossy(message.get(debut..fin).unwrap_or_default())
+            .into_owned(),
+    )
+}
+
+/// UN MESSAGE SIMPLE N'A QU'UNE PARTIE, et c'est lui-même (§6.4.5).
+#[test]
+fn un_message_simple_n_a_qu_une_partie() {
+    const NU: &[u8] = b"Subject: x\r\n\r\nbonjour\r\n";
+    assert_eq!(
+        tranche(NU, &[1], BodySpan::Content).as_deref(),
+        Some("bonjour\r\n")
+    );
+    assert_eq!(
+        tranche(NU, &[1], BodySpan::Mime).as_deref(),
+        Some("Subject: x\r\n\r\n")
+    );
+    // Rien ne suit la seule partie d'un contenu simple.
+    assert_eq!(tranche(NU, &[1, 1], BodySpan::Content), None);
+    // Et il n'y a pas de partie deux.
+    assert_eq!(tranche(NU, &[2], BodySpan::Content), None);
+    // Ni de partie zéro : la grammaire dit `nz-number`, et le magasin le
+    // vérifie aussi — une vérification faite ailleurs est une vérification
+    // qu'on ne voit pas en lisant l'endroit qui en dépend.
+    assert_eq!(tranche(NU, &[0], BodySpan::Content), None);
+}
+
+/// Les parties d'un `multipart` se numérotent dans l'ordre.
+#[test]
+fn les_parties_d_un_multipart_se_numerotent() {
+    assert_eq!(
+        tranche(DEUX_PARTIES, &[1], BodySpan::Content).as_deref(),
+        Some("corps un")
+    );
+    assert_eq!(
+        tranche(DEUX_PARTIES, &[2], BodySpan::Content).as_deref(),
+        Some("QUJD")
+    );
+    assert_eq!(
+        tranche(DEUX_PARTIES, &[1], BodySpan::Mime).as_deref(),
+        Some("Content-Type: text/plain\r\n\r\n")
+    );
+    assert_eq!(tranche(DEUX_PARTIES, &[3], BodySpan::Content), None);
+}
+
+/// Les parties emboîtées se désignent par un chemin.
+#[test]
+fn les_parties_emboitees_se_designent_par_un_chemin() {
+    assert_eq!(
+        tranche(IMBRIQUE, &[1, 1], BodySpan::Content).as_deref(),
+        Some("brut")
+    );
+    assert_eq!(
+        tranche(IMBRIQUE, &[1, 2], BodySpan::Content).as_deref(),
+        Some("<p>riche</p>")
+    );
+    assert_eq!(
+        tranche(IMBRIQUE, &[2], BodySpan::Content).as_deref(),
+        Some("PNG")
+    );
+    // La partie 1 est le `multipart` lui-même : son corps est tout ce qui tient
+    // entre ses frontières.
+    let interieur = tranche(IMBRIQUE, &[1], BodySpan::Content).expect("la partie 1 existe");
+    assert!(interieur.starts_with("--B\r\n"), "{interieur}");
+    assert!(interieur.ends_with("--B--"), "{interieur}");
+    assert_eq!(tranche(IMBRIQUE, &[1, 3], BodySpan::Content), None);
+}
+
+const PORTEUR: &[u8] = b"Content-Type: multipart/mixed; boundary=A\r\n\r\n\
+--A\r\n\
+Content-Type: text/plain\r\n\r\n\
+dehors\r\n\
+--A\r\n\
+Content-Type: message/rfc822\r\n\r\n\
+From: a@b.test\r\n\
+Subject: dedans\r\n\r\n\
+le corps\r\n\
+--A--\r\n";
+
+/// UN `message/rfc822` NE COMPTE PAS POUR UN NIVEAU : `2.1` est la première
+/// partie du message qu'il porte, et non une partie de lui.
+#[test]
+fn un_message_encapsule_ne_compte_pas_pour_un_niveau() {
+    // La partie deux entière : le message porté, en-tête compris.
+    assert_eq!(
+        tranche(PORTEUR, &[2], BodySpan::Content).as_deref(),
+        Some("From: a@b.test\r\nSubject: dedans\r\n\r\nle corps")
+    );
+    // Son en-tête, et son corps.
+    assert_eq!(
+        tranche(PORTEUR, &[2], BodySpan::Header).as_deref(),
+        Some("From: a@b.test\r\nSubject: dedans\r\n\r\n")
+    );
+    assert_eq!(
+        tranche(PORTEUR, &[2], BodySpan::Text).as_deref(),
+        Some("le corps")
+    );
+    // Et sa seule partie, qui est le corps du message porté.
+    assert_eq!(
+        tranche(PORTEUR, &[2, 1], BodySpan::Content).as_deref(),
+        Some("le corps")
+    );
+    // Ses propres lignes d'en-tête MIME, elles, appartiennent à la partie.
+    assert_eq!(
+        tranche(PORTEUR, &[2], BodySpan::Mime).as_deref(),
+        Some("Content-Type: message/rfc822\r\n\r\n")
+    );
+}
+
+/// `HEADER` ET `TEXT` NE VEULENT RIEN DIRE AILLEURS que sur un message
+/// encapsulé : c'est SON en-tête et SON corps qu'ils désignent.
+#[test]
+fn l_en_tete_d_une_partie_qui_ne_porte_pas_de_message_n_existe_pas() {
+    assert_eq!(tranche(PORTEUR, &[1], BodySpan::Header), None);
+    assert_eq!(tranche(PORTEUR, &[1], BodySpan::Text), None);
+    assert_eq!(tranche(DEUX_PARTIES, &[2], BodySpan::Text), None);
+}
+
+/// Un chemin vide désigne le message entier — c'est ce dont `BODY[]` est fait.
+#[test]
+fn un_chemin_vide_designe_le_message() {
+    assert_eq!(
+        tranche(b"Subject: x\r\n\r\ncorps\r\n", &[], BodySpan::Content).as_deref(),
+        Some("corps\r\n")
+    );
+}
+
+/// `HEADER` et `TEXT` ne veulent rien dire non plus sur un `multipart` : il ne
+/// porte pas un message, il porte des parties.
+#[test]
+fn l_en_tete_d_un_multipart_n_existe_pas() {
+    assert_eq!(tranche(IMBRIQUE, &[1], BodySpan::Header), None);
+    assert_eq!(tranche(IMBRIQUE, &[1], BodySpan::Text), None);
+}
+
+/// Il n'y a pas de partie zéro, même dans un `multipart` : la grammaire dit
+/// `nz-number`, et le magasin le vérifie à son tour — une vérification faite
+/// ailleurs est une vérification qu'on ne voit pas en lisant l'endroit qui en
+/// dépend.
+#[test]
+fn il_n_y_a_pas_de_partie_zero_dans_un_multipart() {
+    assert_eq!(tranche(DEUX_PARTIES, &[0], BodySpan::Content), None);
+    assert_eq!(tranche(DEUX_PARTIES, &[1, 0], BodySpan::Content), None);
+}
+
+/// Un `message/rfc822` qui n'a pas trouvé de place pour ce qu'il porte ne mène
+/// nulle part : le chemin s'arrête là, plutôt que de désigner autre chose.
+#[test]
+fn un_message_encapsule_sans_place_ne_mene_nulle_part() {
+    let sature = message_encapsule_sature();
+    // La partie qui le porte existe ; ce qu'il contient, non.
+    assert!(tranche(&sature, &[63], BodySpan::Content).is_some());
+    assert_eq!(tranche(&sature, &[63, 1], BodySpan::Content), None);
+    assert_eq!(tranche(&sature, &[63], BodySpan::Header), None);
 }

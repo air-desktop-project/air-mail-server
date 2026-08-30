@@ -11,9 +11,12 @@
 //! `ENVELOPE` et `BODYSTRUCTURE` s'y ajoutent — ce que demande un client qui
 //! n'affiche qu'une liste de messages et leurs pièces jointes.
 //!
-//! Ce qui reste **reconnu et refusé** — `RFC822`, `BINARY`, et les sections de
-//! partie — n'est pas une erreur de syntaxe : le client sait alors qu'il doit
-//! demander autrement, au lieu de chercher la faute dans ce qu'il a écrit.
+//! Les parties désignées s'y ajoutent : `BODY[1]`, `BODY[1.2.MIME]`,
+//! `BODY[3.TEXT]`.
+//!
+//! Ce qui reste **reconnu et refusé** — `RFC822`, `BINARY`, `HEADER.FIELDS (…)`
+//! — n'est pas une erreur de syntaxe : le client sait alors qu'il doit demander
+//! autrement, au lieu de chercher la faute dans ce qu'il a écrit.
 //!
 //! # LA DEMANDE PARTIELLE EST UNE SURFACE
 //!
@@ -31,6 +34,47 @@
 
 use crate::{Error, Limits, SequenceSet};
 
+/// Combien de niveaux au plus une partie désignée peut porter.
+///
+/// **Aucune RFC ne le borne.** C'est la profondeur d'un chemin venu du réseau,
+/// et il est retenu dans un tableau de taille fixe : ce qui est accepté doit
+/// tenir dans ce qui le retient.
+pub const SECTION_DEPTH_MAX: usize = 8;
+
+/// Le chemin d'une partie : `1`, `1.2`, `3.1.4` (§6.4.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PartPath {
+    numeros: [u32; SECTION_DEPTH_MAX],
+    len: usize,
+}
+
+impl PartPath {
+    /// Le chemin vide, qui ne désigne aucune partie.
+    pub const EMPTY: Self = Self {
+        numeros: [0; SECTION_DEPTH_MAX],
+        len: 0,
+    };
+
+    /// Les numéros du chemin, dans l'ordre.
+    #[must_use]
+    pub fn numbers(&self) -> &[u32] {
+        self.numeros.get(..self.len).unwrap_or_default()
+    }
+}
+
+/// Ce qu'on demande d'une partie désignée (§6.4.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PartWhat {
+    /// `[1]` — son contenu.
+    Content,
+    /// `[1.MIME]` — ses lignes d'en-tête MIME.
+    Mime,
+    /// `[1.HEADER]` — l'en-tête du message qu'elle encapsule.
+    Header,
+    /// `[1.TEXT]` — le corps du message qu'elle encapsule.
+    Text,
+}
+
 /// La partie du message demandée.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
@@ -40,6 +84,13 @@ pub enum Section {
     Header,
     /// `[TEXT]` — le corps seul.
     Text,
+    /// `[1]`, `[1.2.MIME]` — une partie désignée.
+    Part {
+        /// Où elle se trouve dans l'arbre.
+        path: PartPath,
+        /// Ce qu'on veut d'elle.
+        what: PartWhat,
+    },
 }
 
 /// Une demande partielle, `<décalage.longueur>`.
@@ -245,7 +296,7 @@ fn lire_un_corps(mot: &[u8]) -> Result<FetchItem, Error> {
         b"" => Section::Full,
         nom if nom.eq_ignore_ascii_case(b"HEADER") => Section::Header,
         nom if nom.eq_ignore_ascii_case(b"TEXT") => Section::Text,
-        _ => return Err(Error::UnsupportedFetchItem),
+        nom => lire_une_partie_designee(nom)?,
     };
     let apres = reste.get(fermante.saturating_add(1)..).unwrap_or_default();
     let partial = if apres.is_empty() {
@@ -258,6 +309,67 @@ fn lire_un_corps(mot: &[u8]) -> Result<FetchItem, Error> {
         peek,
         partial,
     })
+}
+
+/// Lit un chemin de partie : `1`, `1.2`, `3.1.MIME` (§6.4.5).
+///
+/// # CE QU'ON NE SAIT PAS LIRE N'EST PAS UNE FAUTE DU CLIENT
+///
+/// `HEADER.FIELDS (…)`, un chemin plus profond que ce qu'on retient : la
+/// commande est correcte, c'est ce serveur qui ne la sert pas. On le dit par
+/// `UnsupportedFetchItem`. En revanche `1..2` ou `1.0` sont des fautes de
+/// syntaxe, et les confondre ferait chercher au client une erreur là où il n'y
+/// en a pas — ou l'inverse.
+fn lire_une_partie_designee(nom: &[u8]) -> Result<Section, Error> {
+    let mut chemin = PartPath::EMPTY;
+    let mut what = PartWhat::Content;
+    let mut reste = nom;
+    loop {
+        let (morceau, suite) = match reste.iter().position(|octet| *octet == b'.') {
+            Some(rang) => (
+                reste.get(..rang).unwrap_or_default(),
+                Some(reste.get(rang.saturating_add(1)..).unwrap_or_default()),
+            ),
+            None => (reste, None),
+        };
+        // Un mot-clé ferme le chemin : rien ne peut le suivre.
+        if let Some(vu) = mot_clef(morceau) {
+            if chemin.len == 0 || suite.is_some() {
+                return Err(Error::MalformedFetch);
+            }
+            what = vu;
+            break;
+        }
+        let numero = nombre(morceau)?;
+        // `nz-number` : il n'y a pas de partie zéro.
+        if numero == 0 {
+            return Err(Error::MalformedFetch);
+        }
+        let Some(place) = chemin.numeros.get_mut(chemin.len) else {
+            return Err(Error::UnsupportedFetchItem);
+        };
+        *place = numero;
+        chemin.len = chemin.len.saturating_add(1);
+        match suite {
+            Some(suite) => reste = suite,
+            None => break,
+        }
+    }
+    Ok(Section::Part { path: chemin, what })
+}
+
+/// Le mot-clef qui ferme un chemin de partie, s'il en est un.
+fn mot_clef(morceau: &[u8]) -> Option<PartWhat> {
+    if morceau.eq_ignore_ascii_case(b"MIME") {
+        return Some(PartWhat::Mime);
+    }
+    if morceau.eq_ignore_ascii_case(b"HEADER") {
+        return Some(PartWhat::Header);
+    }
+    if morceau.eq_ignore_ascii_case(b"TEXT") {
+        return Some(PartWhat::Text);
+    }
+    None
 }
 
 /// Lit `<décalage.longueur>`.

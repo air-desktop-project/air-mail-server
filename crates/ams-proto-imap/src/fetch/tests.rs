@@ -1,6 +1,6 @@
 //! Ce qu'un `FETCH` demande, et ce qu'on refuse de lui donner.
 
-use super::{Fetch, FetchItem, Partial, Section};
+use super::{Fetch, FetchItem, PartPath, PartWhat, Partial, SECTION_DEPTH_MAX, Section};
 use crate::{Error, Limits};
 
 const BORNES: Limits = Limits::DEFAULT;
@@ -157,6 +157,91 @@ fn le_seul_raccourci_servi_est_fast() {
 /// **Reconnus, et refusés.** Ce n'est pas une erreur de syntaxe : le client sait
 /// alors qu'il doit demander autrement, au lieu de chercher la faute dans ce
 /// qu'il a écrit.
+/// Une partie désignée se lit : son chemin, et ce qu'on veut d'elle.
+#[test]
+fn une_partie_designee_se_lit() {
+    let chemin = |texte: &[u8]| match elements(texte).first().copied() {
+        Some(FetchItem::Body {
+            section: Section::Part { path, what },
+            ..
+        }) => (std::vec::Vec::from(path.numbers()), what),
+        autre => panic!("{autre:?}"),
+    };
+    assert_eq!(chemin(b"1 BODY[1]"), (std::vec![1], PartWhat::Content));
+    assert_eq!(chemin(b"1 BODY[2.1]"), (std::vec![2, 1], PartWhat::Content));
+    assert_eq!(chemin(b"1 BODY[1.MIME]"), (std::vec![1], PartWhat::Mime));
+    assert_eq!(
+        chemin(b"1 BODY[3.header]"),
+        (std::vec![3], PartWhat::Header)
+    );
+    assert_eq!(
+        chemin(b"1 BODY.PEEK[3.2.TEXT]"),
+        (std::vec![3, 2], PartWhat::Text)
+    );
+    // Huit niveaux tiennent ; le neuvième, non.
+    assert_eq!(
+        chemin(b"1 BODY[1.1.1.1.1.1.1.1]").0,
+        std::vec![1_u32; SECTION_DEPTH_MAX]
+    );
+    // Et la demande partielle s'applique aussi à une partie.
+    assert_eq!(
+        elements(b"1 BODY[1]<10.5>"),
+        std::vec![FetchItem::Body {
+            section: Section::Part {
+                path: chemin_de(&[1]),
+                what: PartWhat::Content,
+            },
+            peek: false,
+            partial: Some(Partial {
+                offset: 10,
+                length: 5
+            }),
+        }]
+    );
+}
+
+/// Fabrique un chemin, pour comparer.
+fn chemin_de(numeros: &[u32]) -> PartPath {
+    let texte = numeros
+        .iter()
+        .map(|numero| std::format!("{numero}"))
+        .collect::<std::vec::Vec<_>>()
+        .join(".");
+    match elements(std::format!("1 BODY[{texte}]").as_bytes())
+        .first()
+        .copied()
+    {
+        Some(FetchItem::Body {
+            section: Section::Part { path, .. },
+            ..
+        }) => path,
+        autre => panic!("{autre:?}"),
+    }
+}
+
+/// UN CHEMIN QUI N'A PAS LA FORME EST UNE FAUTE, et non un refus de service :
+/// les confondre ferait chercher au client une erreur là où il n'y en a pas.
+#[test]
+fn un_chemin_mal_forme_est_une_faute() {
+    for mechant in [
+        &b"1 BODY[0]"[..],
+        b"1 BODY[1.0]",
+        b"1 BODY[1..2]",
+        b"1 BODY[.1]",
+        b"1 BODY[1.]",
+        b"1 BODY[MIME]",
+        b"1 BODY[1.MIME.2]",
+        b"1 BODY[1.x]",
+        b"1 BODY[-1]",
+    ] {
+        assert_eq!(
+            Fetch::parse(mechant, &BORNES),
+            Err(Error::MalformedFetch),
+            "{mechant:?}"
+        );
+    }
+}
+
 /// `BODYSTRUCTURE` se lit désormais comme les autres.
 #[test]
 fn la_structure_se_lit() {
@@ -192,10 +277,11 @@ fn ce_qui_est_reconnu_sans_etre_servi_se_dit_comme_tel() {
         b"1 RFC822.HEADER",
         b"1 RFC822.TEXT",
         b"1 BINARY",
-        // Des sections qu'on ne découpe pas.
-        b"1 BODY[1]",
-        b"1 BODY[1.MIME]",
+        // Une section dont la forme est correcte mais qu'on ne sait pas
+        // découper.
         b"1 BODY[HEADER.FIELDS",
+        // Un chemin plus profond que ce qu'on retient.
+        b"1 BODY[1.1.1.1.1.1.1.1.1]",
     ] {
         assert_eq!(
             Fetch::parse(mot, &BORNES),

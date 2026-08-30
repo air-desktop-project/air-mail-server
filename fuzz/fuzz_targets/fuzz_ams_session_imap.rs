@@ -38,7 +38,7 @@ use libfuzzer_sys::fuzz_target;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use ams_proto_imap::{CommandReader, Flags, Limits, Need, StoreMode};
+use ams_proto_imap::{CommandReader, Flags, Limits, Need, PartWhat, StoreMode};
 use ams_sasl::Credentials;
 use ams_session::Authenticator;
 use ams_session::imap::{Action, FetchChunk, Mailbox, Mailboxes, MessageInfo, Session, State};
@@ -105,6 +105,17 @@ impl Mailbox for Boite {
         // et le dire par zéro fait passer la session à la suite.
         let _ = sequence;
         0
+    }
+
+    fn part_span(&self, sequence: u32, path: &[u32], _what: PartWhat) -> Option<(u64, u64)> {
+        // UNE PARTIE SUR DEUX N'EXISTE PAS, et c'est délibéré : la session doit
+        // conclure aussi bien sur le `NIL` d'une partie absente que sur
+        // l'écoulement d'une partie présente.
+        let info = self.info(sequence)?;
+        match path.first()? % 2 {
+            0 => None,
+            _ => Some((0, info.size)),
+        }
     }
 
     fn body_structure(&self, sequence: u32, _offset: u64, _out: &mut [u8]) -> usize {

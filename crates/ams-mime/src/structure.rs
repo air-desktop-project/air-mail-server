@@ -87,6 +87,11 @@ struct Partie {
     /// Où son en-tête est retenu, dans l'arène.
     entete: usize,
     entete_len: usize,
+    /// Où ELLE commence, dans le message : le premier octet de son en-tête.
+    ///
+    /// C'est ce qui permet de servir `BODY[1.MIME]` — les lignes d'en-tête d'une
+    /// partie — sans relire le message une seconde fois pour les retrouver.
+    debut: u64,
     /// Où son corps commence, dans le message.
     corps_debut: u64,
     /// Ce que son corps pèse.
@@ -103,6 +108,7 @@ impl Partie {
         parent: SANS,
         entete: 0,
         entete_len: 0,
+        debut: 0,
         corps_debut: 0,
         octets: 0,
         lignes: 0,
@@ -410,15 +416,22 @@ impl BodyScanner {
 
     /// Une frontière du niveau `niveau` vient d'être lue.
     fn au_bord(&mut self, ouvert: usize, close: bool, fin: u64) {
+        self.fermer(ouvert.saturating_add(1), fin);
         if close {
-            // La dernière frontière ferme le `multipart` lui-même.
-            self.fermer(ouvert, fin);
+            // LA DERNIÈRE FRONTIÈRE NE FERME PAS LE `multipart` LUI-MÊME. Son
+            // contenu, c'est ce que son propre parent délimite : son délimiteur
+            // de fin et l'épilogue qui le suit en font partie. Le clore ici
+            // rendrait un `BODY[1]` amputé de sa dernière frontière — une entité
+            // que le client ne saurait pas relire. Il se fermera avec la
+            // frontière du dessus, ou avec le message.
             self.courante = SANS;
             self.dans_l_entete = false;
             return;
         }
-        self.fermer(ouvert.saturating_add(1), fin);
-        self.courante = self.nouvelle(ouvert, fin);
+        // UNE PARTIE COMMENCE APRÈS SA FRONTIÈRE, jamais avant : `fin` est là où
+        // s'arrête ce qui PRÉCÈDE, `CRLF` de frontière déduit. La position, elle,
+        // est déjà passée à la ligne suivante.
+        self.courante = self.nouvelle(ouvert, self.position);
         // ON LIT L'EN-TÊTE MÊME SANS PLACE POUR LE RETENIR : ce qui suit une
         // frontière est un en-tête, que la table soit pleine ou non. Le prendre
         // pour du corps ferait de ses lignes des lignes de corps.
@@ -476,6 +489,7 @@ impl BodyScanner {
         };
         *place = Partie {
             parent,
+            debut,
             corps_debut: debut,
             ouverte: true,
             ..Partie::VIDE
@@ -918,6 +932,110 @@ fn analyser<'a>(entete: &'a [u8], limites: &Limits) -> (Genre, &'a [u8]) {
         return (Genre::Message, &[]);
     }
     (Genre::Feuille, &[])
+}
+
+/// Ce qu'on veut d'une partie désignée (RFC 9051 §6.4.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodySpan {
+    /// `BODY[1]` — son contenu.
+    Content,
+    /// `BODY[1.MIME]` — ses lignes d'en-tête MIME.
+    Mime,
+    /// `BODY[1.HEADER]` — l'en-tête du message qu'elle encapsule.
+    Header,
+    /// `BODY[1.TEXT]` — le corps du message qu'elle encapsule.
+    Text,
+}
+
+impl BodyScanner {
+    /// Où se trouve la partie que `chemin` désigne, ou `None` si elle n'existe
+    /// pas.
+    ///
+    /// Le chemin est celui de §6.4.5 : `1.2` est la deuxième partie de la
+    /// première. **Un `message/rfc822` ne compte pas pour un niveau** — ses
+    /// numéros sont ceux du message qu'il porte, comme s'il était seul.
+    ///
+    /// # CE QUI N'EXISTE PAS N'EST PAS UNE FAUTE
+    ///
+    /// §6.4.5 admet `NIL` pour une section absente : un client qui demande une
+    /// partie qu'un autre a vue dans une structure périmée ne fait rien de mal,
+    /// et le lui dire par une erreur ferait échouer toute la commande.
+    #[must_use]
+    pub fn span(&self, chemin: &[u32], quoi: BodySpan) -> Option<(u64, u64)> {
+        let index = self.resoudre(chemin)?;
+        // `resoudre` ne rend qu'un rang de la table : le reprendre par
+        // `unwrap_or` porte cette impossibilité dans la bibliothèque standard
+        // plutôt que dans une garde qu'aucun chemin n'emprunte.
+        let partie = self.parties.get(index).copied().unwrap_or(Partie::VIDE);
+        match quoi {
+            BodySpan::Content => Some((
+                partie.corps_debut,
+                partie.corps_debut.saturating_add(partie.octets),
+            )),
+            BodySpan::Mime => Some((partie.debut, partie.corps_debut)),
+            // `HEADER` et `TEXT` ne veulent rien dire ailleurs que sur un
+            // message encapsulé : c'est SON en-tête et SON corps qu'ils
+            // désignent, pas ceux de la partie qui le porte.
+            BodySpan::Header | BodySpan::Text => {
+                let (_, porte) = self.enfant(index)?;
+                match (partie.genre, quoi) {
+                    (Genre::Message, BodySpan::Header) => Some((porte.debut, porte.corps_debut)),
+                    (Genre::Message, _) => Some((
+                        porte.corps_debut,
+                        porte.corps_debut.saturating_add(porte.octets),
+                    )),
+                    _ => None,
+                }
+            }
+        }
+    }
+
+    /// La partie qu'un chemin désigne.
+    fn resoudre(&self, chemin: &[u32]) -> Option<usize> {
+        let mut courant = 0_usize;
+        let mut reste = chemin;
+        while let Some((numero, suite)) = reste.split_first() {
+            // UN `message/rfc822` NE COMPTE PAS POUR UN NIVEAU : on entre dans
+            // le message qu'il porte, et l'on numérote ses parties à lui.
+            if self.genre_de(courant) == Genre::Message {
+                courant = self.enfant(courant)?.0;
+            }
+            if self.genre_de(courant) == Genre::Multipart {
+                courant = self.nieme(courant, *numero)?;
+            } else {
+                // Un contenu simple n'a qu'une partie — lui-même — et rien ne
+                // peut la suivre.
+                if *numero != 1 || !suite.is_empty() {
+                    return None;
+                }
+            }
+            reste = suite;
+        }
+        Some(courant)
+    }
+
+    /// Ce qu'une partie est.
+    fn genre_de(&self, index: usize) -> Genre {
+        self.parties
+            .get(index)
+            .map_or(Genre::Feuille, |partie| partie.genre)
+    }
+
+    /// La `numero`-ième fille d'une partie, à partir de un.
+    fn nieme(&self, index: usize, numero: u32) -> Option<usize> {
+        // `unwrap_or` PLUTÔT QU'UN `?` : un `u32` tient toujours dans le `usize`
+        // des cibles servies, et le refus qu'un `?` écrirait là serait une garde
+        // qu'aucun chemin ne pourrait faire céder. Une valeur qu'aucune fille
+        // n'atteint dit la même chose, et se vérifie.
+        let rang = usize::try_from(numero.checked_sub(1)?).unwrap_or(usize::MAX);
+        self.parties
+            .iter()
+            .enumerate()
+            .take(self.nb)
+            .filter(|(_, fille)| fille.parent == index)
+            .map(|(rang, _)| rang)
+            .nth(rang)
+    }
 }
 
 /// Compose la `BODYSTRUCTURE` d'un message entier.

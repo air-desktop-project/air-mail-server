@@ -58,17 +58,16 @@
 //! Les critères de `SEARCH` qui demandent de LIRE le message (`BODY`, `TEXT`,
 //! `SUBJECT`, `FROM`, `HEADER`…) : ils sont refusés plutôt que rendus faux.
 //!
-//! Les sections de partie non plus — `BODY[1]`, `BODY[1.MIME]` : la session sait
-//! DIRE la structure d'un message, elle ne sait pas encore en servir un morceau
-//! désigné.
+//! Le CHOIX de champs d'en-tête non plus — `HEADER.FIELDS (…)` : la session sait
+//! rendre l'en-tête entier d'une partie, pas un tri de ses champs.
 //!
 //! L'analyse d'un message n'est pas ici et n'y sera pas : `ENVELOPE` et
 //! `BODYSTRUCTURE` se composent dans `ams-mime`, et la boîte les écoule.
 
 use ams_proto_imap::{
-    Args, Candidate, Command, Error as ImapError, Fetch, FetchItem, Flags, Limits, Line, Search,
-    Section, SequenceSet, Status, Store, StoreMode, Tag, encode_continuation, encode_tagged,
-    encode_untagged, encode_untagged_parts, write_internal_date,
+    Args, Candidate, Command, Error as ImapError, Fetch, FetchItem, Flags, Limits, Line, PartWhat,
+    Search, Section, SequenceSet, Status, Store, StoreMode, Tag, encode_continuation,
+    encode_tagged, encode_untagged, encode_untagged_parts, write_internal_date,
 };
 use ams_sasl::{decode_base64, parse_plain};
 use core::fmt;
@@ -244,6 +243,20 @@ pub trait Mailbox {
     /// reste borné — la description, jamais le message — mais ce qu'on en LIT ne
     /// l'est pas.
     fn body_structure(&self, sequence: u32, offset: u64, out: &mut [u8]) -> usize;
+
+    /// Où se trouve, dans le message de rang `sequence`, la partie que `path`
+    /// désigne — ou `None` si elle n'existe pas.
+    ///
+    /// # CE QUI N'EXISTE PAS N'EST PAS UNE FAUTE
+    ///
+    /// §6.4.5 admet `NIL` pour une section absente. Un client qui demande une
+    /// partie qu'il a vue dans une structure devenue périmée ne fait rien de
+    /// mal, et le lui dire par une erreur ferait échouer toute sa commande.
+    ///
+    /// **Elle coûte le prix d'une structure** : trouver une partie, c'est
+    /// retrouver les frontières, donc lire le message. La session ne la demande
+    /// que pour l'élément qu'elle est sur le point d'écrire.
+    fn part_span(&self, sequence: u32, path: &[u32], what: PartWhat) -> Option<(u64, u64)>;
 
     /// Lit au plus `out.len()` octets du message de rang `sequence`, à partir
     /// de `offset`. Rend combien ont été lus ; zéro signifie « plus rien ».
@@ -739,6 +752,38 @@ impl Genre {
             (Genre::Move, true) => b"UID MOVE completed",
         }
     }
+}
+
+/// Ce qui reste à faire après avoir écrit les éléments qu'on pouvait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Apres {
+    /// Rien ne s'écoule : la réponse se referme.
+    Fin,
+    /// Écouler `length` octets du message `sequence`, à partir de `offset`.
+    Corps {
+        sequence: u32,
+        offset: u64,
+        length: u64,
+    },
+    /// Écouler une analyse.
+    Analyse(Analyse),
+    /// Reprendre l'écriture : la portée de l'élément suivant reste à demander.
+    ///
+    /// Une partie absente s'écrit `NIL` et n'écoule rien — mais la portée de la
+    /// partie SUIVANTE, elle, n'a pas encore été demandée au magasin. Continuer
+    /// sans repasser par lui rendrait la portée de la précédente.
+    Reprendre,
+}
+
+/// Où se trouve la section que le prochain élément demande.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Portee {
+    /// Aucun élément à venir ne demande une partie désignée.
+    Sans,
+    /// Elle occupe cet intervalle.
+    Intervalle(u64, u64),
+    /// Elle n'existe pas : la réponse est `NIL` (§6.4.5).
+    Absente,
 }
 
 /// Ce qu'une analyse de message rend.
@@ -2991,23 +3036,6 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             }
             Err(_) => return self.faute(b"FETCH arguments are malformed", out),
         };
-        // UN SEUL CORPS PAR COMMANDE. En rendre deux demanderait d'entrelacer
-        // deux intervalles de fichier dans une même réponse ; c'est faisable, ce
-        // n'est pas fait, et un client qui en demande deux l'apprend plutôt que
-        // d'en recevoir un.
-        let corps = demande
-            .items()
-            .iter()
-            .filter(|item| matches!(item, FetchItem::Body { .. }))
-            .count();
-        if corps > 1 {
-            return self.termine(
-                Status::No,
-                b"[CANNOT] Only one body item per FETCH is served",
-                Action::Continue,
-                out,
-            );
-        }
         let texte = demande.set_text();
         if texte.len() > SEQUENCE_TEXT_MAX {
             return self.termine(
@@ -3095,9 +3123,10 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
                     internal_date: 0,
                 });
                 let entete = entete_si_besoin(boite, &emission, rang);
+                let portee = portee_si_besoin(boite, &emission, rang);
                 emission.etape = Etape::Choisir;
                 self.emission = Some(emission);
-                return self.ecrire_les_items(rang, info, entete, out);
+                return self.ecrire_les_items(rang, info, entete, portee, out);
             }
             Etape::Analyse {
                 quoi,
@@ -3334,8 +3363,9 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
 
         emission.items_faits = 0;
         let entete = entete_si_besoin(boite, &emission, rang);
+        let portee = portee_si_besoin(boite, &emission, rang);
         self.emission = Some(emission);
-        self.ecrire_les_items(rang, info, entete, out)
+        self.ecrire_les_items(rang, info, entete, portee, out)
     }
 
     /// Écrit les éléments d'un `FETCH` pour un message, et s'arrête au premier
@@ -3349,6 +3379,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         rang: u32,
         info: MessageInfo,
         entete: u64,
+        portee: Portee,
         out: &'b mut [u8],
     ) -> Result<Option<FetchChunk<'b>>, Error> {
         // L'ÉMISSION EST LÀ : l'appelant vient de la poser. On la reprend par
@@ -3363,8 +3394,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             plume.pousser(b" FETCH (")?;
         }
         let mut premier = emission.items_faits == 0;
-        let mut corps = None;
-        let mut analyse = None;
+        let mut apres = Apres::Fin;
         for item in items.iter().skip(emission.items_faits) {
             if !premier {
                 plume.pousser(b" ")?;
@@ -3394,50 +3424,73 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
                     partial,
                     peek: _,
                 } => {
-                    let (debut, fin) = decouper(*section, &info, entete);
-                    let (offset, longueur) = tailler(debut, fin, *partial);
                     plume.pousser(b"BODY[")?;
-                    plume.pousser(match section {
-                        Section::Full => b"",
-                        Section::Header => b"HEADER",
-                        Section::Text => b"TEXT",
-                    })?;
+                    ecrire_la_section(&mut plume, *section)?;
                     plume.pousser(b"]")?;
                     if let Some(partie) = partial {
                         plume.pousser(b"<")?;
                         plume.nombre(u64::from(partie.offset))?;
                         plume.pousser(b">")?;
                     }
-                    plume.pousser(b" {")?;
-                    plume.nombre(longueur)?;
-                    plume.pousser(b"}\r\n")?;
-                    corps = Some((rang, offset, longueur));
-                    break;
+                    let ou = match section {
+                        Section::Part { .. } => portee,
+                        Section::Full => Portee::Intervalle(0, info.size),
+                        Section::Header => Portee::Intervalle(0, entete.min(info.size)),
+                        Section::Text => Portee::Intervalle(entete.min(info.size), info.size),
+                    };
+                    match ou {
+                        Portee::Intervalle(debut, fin) => {
+                            let (offset, longueur) = tailler(debut, fin, *partial);
+                            plume.pousser(b" {")?;
+                            plume.nombre(longueur)?;
+                            plume.pousser(b"}\r\n")?;
+                            apres = Apres::Corps {
+                                sequence: rang,
+                                offset,
+                                length: longueur,
+                            };
+                            break;
+                        }
+                        // `Sans` ne peut venir que d'un élément qui ne demande
+                        // pas de partie, et l'on n'est ici que pour un élément
+                        // qui en demande une. Le traiter comme une absence rend
+                        // une réponse licite plutôt qu'une réponse tronquée.
+                        Portee::Absente | Portee::Sans => {
+                            plume.pousser(b" NIL")?;
+                            apres = Apres::Reprendre;
+                            break;
+                        }
+                    }
                 }
                 FetchItem::Envelope => {
                     plume.pousser(b"ENVELOPE ")?;
-                    analyse = Some(Analyse::Enveloppe);
+                    apres = Apres::Analyse(Analyse::Enveloppe);
                     break;
                 }
                 FetchItem::BodyStructure => {
                     plume.pousser(b"BODYSTRUCTURE ")?;
-                    analyse = Some(Analyse::Structure);
+                    apres = Apres::Analyse(Analyse::Structure);
                     break;
                 }
             }
         }
-        emission.etape = match (corps, analyse) {
-            (Some((sequence, offset, length)), _) => Etape::Corps {
+        emission.etape = match apres {
+            Apres::Corps {
+                sequence,
+                offset,
+                length,
+            } => Etape::Corps {
                 sequence,
                 offset,
                 length,
             },
-            (None, Some(quoi)) => Etape::Analyse {
+            Apres::Analyse(quoi) => Etape::Analyse {
                 quoi,
                 sequence: rang,
                 offset: 0,
             },
-            (None, None) => {
+            Apres::Reprendre => Etape::Suite { rang },
+            Apres::Fin => {
                 plume.pousser(b")\r\n")?;
                 Etape::Choisir
             }
@@ -3472,12 +3525,29 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
     }
 }
 
-/// Où commence et où finit la section demandée.
-fn decouper(section: Section, info: &MessageInfo, header_octets: u64) -> (u64, u64) {
+/// Écrit la section telle que le client l'a écrite.
+///
+/// **La réponse ÉCHOIT la section demandée** (§7.5.2) : c'est ainsi que le
+/// client rattache la donnée à sa demande quand il en a posé plusieurs.
+fn ecrire_la_section(plume: &mut Plume<'_>, section: Section) -> Result<(), Error> {
     match section {
-        Section::Full => (0, info.size),
-        Section::Header => (0, header_octets.min(info.size)),
-        Section::Text => (header_octets.min(info.size), info.size),
+        Section::Full => Ok(()),
+        Section::Header => plume.pousser(b"HEADER"),
+        Section::Text => plume.pousser(b"TEXT"),
+        Section::Part { path, what } => {
+            for (rang, numero) in path.numbers().iter().enumerate() {
+                if rang > 0 {
+                    plume.pousser(b".")?;
+                }
+                plume.nombre(u64::from(*numero))?;
+            }
+            plume.pousser(match what {
+                PartWhat::Content => b"".as_slice(),
+                PartWhat::Mime => b".MIME",
+                PartWhat::Header => b".HEADER",
+                PartWhat::Text => b".TEXT",
+            })
+        }
     }
 }
 
@@ -3660,6 +3730,34 @@ fn entete_si_besoin<B: Mailbox>(boite: &B, emission: &Emission, rang: u32) -> u6
         )
     });
     if besoin { boite.header_octets(rang) } else { 0 }
+}
+
+/// Où se trouve la partie que le PROCHAIN élément demande.
+///
+/// # ON NE DEMANDE QUE CE QU'ON VA ÉCRIRE
+///
+/// Trouver une partie coûte une lecture du message entier. Le parcours s'arrête
+/// donc au premier élément qui s'écoule : ce qui vient après lui sera composé à
+/// la reprise, et sa portée demandée alors.
+fn portee_si_besoin<B: Mailbox>(boite: &B, emission: &Emission, rang: u32) -> Portee {
+    let items = emission.items.get(..emission.items_len).unwrap_or_default();
+    for item in items.iter().skip(emission.items_faits) {
+        match item {
+            FetchItem::Body {
+                section: Section::Part { path, what },
+                ..
+            } => {
+                return match boite.part_span(rang, path.numbers(), *what) {
+                    Some((debut, fin)) => Portee::Intervalle(debut, fin),
+                    None => Portee::Absente,
+                };
+            }
+            FetchItem::Body { .. } | FetchItem::Envelope | FetchItem::BodyStructure => break,
+            FetchItem::Uid | FetchItem::Flags | FetchItem::InternalDate | FetchItem::Rfc822Size => {
+            }
+        }
+    }
+    Portee::Sans
 }
 
 /// Ce qu'une phase de copie a produit.

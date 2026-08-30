@@ -652,8 +652,9 @@ async fn servir(fichier: &Path) -> Result<(), String> {
             "air-mail-server : IMAP écoute sur {adresse} — SEULE `INBOX` EST SERVIE : \
              `SELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`, `EXPUNGE`, `SEARCH`, `COPY` et \
              `MOVE`, `APPEND`, `CREATE`, `DELETE` et `RENAME` répondent, et `FETCH` sait \
-             rendre une `ENVELOPE` et une `BODYSTRUCTURE` — mais PAS une PARTIE désignée : \
-             `BODY[1]` est refusé, le client télécharge le message entier. UN NOM DE BOÎTE \
+             rendre une `ENVELOPE`, une `BODYSTRUCTURE` et une PARTIE désignée — `BODY[1]`, \
+             `BODY[1.MIME]`, `BODY[3.TEXT]` —, mais PAS un CHOIX de champs d'en-tête : \
+             `HEADER.FIELDS` est refusé. UN NOM DE BOÎTE \
              DEVIENT UN RÉPERTOIRE : seuls les noms qu'on sait transcrire sans risque sont \
              acceptés, et jamais transformés. UN `EXPUNGE` EFFACE POUR DE BON, et un `CLOSE` \
              aussi. Les critères de recherche qui demandent de LIRE le message (`SUBJECT`, \

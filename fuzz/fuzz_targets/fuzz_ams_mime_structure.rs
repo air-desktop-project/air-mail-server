@@ -26,13 +26,17 @@
 //!    un message répété, ce qui ne change ni ce qu'il rend ni le fait qu'il
 //!    rende.
 //! 4. **UN TAMPON TROP COURT LE DIT** au lieu d'écrire une structure à moitié.
+//! 5. **UNE PARTIE NE DÉSIGNE JAMAIS D'OCTETS HORS DU MESSAGE.** L'intervalle
+//!    qu'on rend part droit dans une lecture de fichier : s'il débordait, le
+//!    client recevrait ce qui suit le message — ou le serveur lirait ce qu'il
+//!    n'a pas. Le chemin, lui, vient du réseau.
 
 #![no_main]
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-use ams_mime::{BodyScanner, Error, Limits};
+use ams_mime::{BodyScanner, BodySpan, Error, Limits};
 
 /// Ce qu'on soumet.
 #[derive(Arbitrary, Debug)]
@@ -43,6 +47,8 @@ struct Entree<'a> {
     morceau: u8,
     /// La place qu'on laisse, pour éprouver le manque.
     place: u16,
+    /// Un chemin de partie, tel qu'un client l'écrirait.
+    chemin: Vec<u32>,
 }
 
 /// Vérifie qu'un texte est une structure bien formée.
@@ -121,6 +127,29 @@ fuzz_target!(|entree: Entree<'_>| {
             autre.get(..refait),
             Some(attendu.as_slice()),
             "morceaux de {taille}"
+        );
+    }
+
+    // PROPRIÉTÉ 5 : une partie ne sort pas du message.
+    let bornes = Limits::DEFAULT;
+    let mut balayeur = BodyScanner::new(&bornes);
+    balayeur.push(entree.message);
+    balayeur.finish();
+    let chemin = entree.chemin.get(..8).unwrap_or(&entree.chemin);
+    for quoi in [
+        BodySpan::Content,
+        BodySpan::Mime,
+        BodySpan::Header,
+        BodySpan::Text,
+    ] {
+        let Some((debut, fin)) = balayeur.span(chemin, quoi) else {
+            continue;
+        };
+        assert!(debut <= fin, "un intervalle à l'envers : {debut}..{fin}");
+        let taille = u64::try_from(entree.message.len()).unwrap_or(u64::MAX);
+        assert!(
+            fin <= taille,
+            "une partie qui sort du message : {debut}..{fin} pour {taille}"
         );
     }
 

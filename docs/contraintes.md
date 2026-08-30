@@ -1381,10 +1381,61 @@ pièce jointe en base64 avec son `Content-Id` et un nom de fichier à apostrophe
 et un `message/rfc822` : les tailles, les lignes, les paramètres, la disposition,
 l'enveloppe du message porté et sa structure sont toutes rendues, et exactes.
 
-Ce qui n'est toujours pas servi : une PARTIE désignée — `BODY[1]`,
-`BODY[1.MIME]`. Le serveur sait DIRE la structure d'un message, il ne sait pas
-encore en rendre un morceau choisi, et un client qui veut une pièce jointe
-télécharge le message entier.
+Ce qui n'est toujours pas servi : `HEADER.FIELDS (…)`, qui rend un CHOIX de
+champs d'en-tête.
+
+## `BODY[1]` : rendre une partie, et rien qu'elle, depuis le 2026-08-30
+
+Dire la structure ne suffisait pas : un client qui voulait une pièce jointe
+téléchargeait tout le message. `BODY[1]`, `BODY[1.2]`, `BODY[1.MIME]`,
+`BODY[3.HEADER]` et `BODY[3.TEXT]` rendent maintenant la partie désignée.
+
+**LE BALAYEUR SAVAIT OÙ SONT LES FRONTIÈRES ; IL LUI MANQUAIT DE DIRE OÙ CHAQUE
+PARTIE COMMENCE.** Chaque partie retient désormais le rang de son premier octet
+d'en-tête — ce qui donne `BODY[1.MIME]` sans relire le message une seconde fois.
+Deux erreurs de découpe sont tombées en l'écrivant, et **aucune n'était visible
+dans la structure** : c'est en servant les octets qu'elles se voient.
+
+- **Une partie commence APRÈS sa frontière, jamais avant.** Le rang qu'on avait
+  sous la main était celui où s'arrête ce qui PRÉCÈDE, `CRLF` de frontière
+  déduit : deux octets et une ligne trop tôt.
+- **La dernière frontière d'un `multipart` ne le ferme pas.** Son contenu, c'est
+  ce que son propre parent délimite : son délimiteur de fin et l'épilogue qui le
+  suit en font partie. Le clore sur lui-même rendait un `BODY[1]` amputé de sa
+  dernière frontière — une entité que le client n'aurait pas su relire.
+
+**UN `message/rfc822` NE COMPTE PAS POUR UN NIVEAU** (§6.4.5) : `3.1` est la
+première partie du message qu'il porte, et non une partie de lui. `HEADER` et
+`TEXT` ne veulent rien dire ailleurs que sur un message encapsulé — c'est SON
+en-tête et SON corps qu'ils désignent, pas ceux de la partie qui le porte.
+
+**CE QUI N'EXISTE PAS N'EST PAS UNE FAUTE.** `BODY[9]` sur un message qui n'a pas
+neuf parties vaut `NIL`, ce que §6.4.5 admet : un client qui demande une partie
+vue dans une structure devenue périmée ne fait rien de mal, et faire échouer sa
+commande entière le punirait de rien. En revanche `BODY[0]` ou `BODY[1..2]` sont
+des fautes de syntaxe — les confondre ferait chercher au client une erreur là où
+il n'y en a pas, ou l'inverse.
+
+**UN INTERVALLE DE PARTIE PART DROIT DANS UNE LECTURE DE FICHIER**, et le chemin
+qui le désigne vient du réseau. C3 : le fuzz éprouve donc qu'il ne sort jamais du
+message. 317 620 exécutions, sans panne.
+
+**DEUX CORPS DANS UNE MÊME COMMANDE S'ÉCOULENT ENFIN L'UN APRÈS L'AUTRE.**
+C'était refusé — « en rendre deux demanderait d'entrelacer deux intervalles de
+fichier dans une même réponse ». Depuis que la session compte les éléments déjà
+écrits, elle reprend où elle s'était arrêtée : le refus n'avait plus de raison, et
+il est retiré. C'est aussi ce qui rend vérifiable la règle qui veut que la portée
+de la partie SUIVANTE se redemande au magasin — sans quoi la seconde recevrait
+l'intervalle de la première.
+
+Éprouvé jusqu'au binaire, sur un message à trois niveaux : `[1.1]` et `[1.2]` des
+deux formes d'un `multipart/alternative`, `[2]` de la pièce jointe, `[2.MIME]` de
+ses lignes d'en-tête, `[3.HEADER]`, `[3.TEXT]` et `[3.1]` du message encapsulé,
+`[9]` qui vaut `NIL` sans empêcher l'`UID` qui suit, une demande partielle sur une
+partie, et deux parties dans une même commande.
+
+Ce qui n'est toujours pas servi : `HEADER.FIELDS (…)` et `HEADER.FIELDS.NOT (…)`,
+qui rendent un CHOIX de champs d'en-tête.
 
 ## Le gate de couverture arrondissait vers le haut, depuis le 2026-08-29
 
@@ -1997,6 +2048,6 @@ persistant, et lecture sans verrou côté IMAP), C14 (`X25519MLKEM768` en tête)
 découpage des lectures ne change rien au verdict.
 
 Ce qui manque, et qu'aucune phrase ne doit laisser croire acquis : les critères
-de `SEARCH` qui lisent le message et les sections de partie ; le signeur DKIM,
+de `SEARCH` qui lisent le message et le choix de champs d'en-tête ; le signeur DKIM,
 qui existe et n'a pas d'appelant ; la file de réémission des messages sortants ;
 et toute interface HTTP.

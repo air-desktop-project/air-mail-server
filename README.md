@@ -895,13 +895,53 @@ MIME prescrit pour une entité qu'on ne sait pas interpréter (RFC 2049 §2) et 
 qu'un client ne lira pas de travers : un type `MULTIPART` suivi d'une taille
 n'existe pas dans la grammaire.
 
-Ce qui n'y est toujours pas : **servir une PARTIE désignée**. `BODY[1]`,
-`BODY[1.MIME]` restent refusés — le serveur sait DIRE la structure d'un message,
-il ne sait pas encore en rendre un morceau choisi, et un client qui veut une
-pièce jointe télécharge le message entier. La réponse est `NO [UNAVAILABLE]` —
-`NO` et non `BAD`, parce que la commande est correcte et permise et que c'est ce
-serveur qui ne la sert pas. Le serveur dit au démarrage ce qu'il sert et ce qu'il
-ne sert pas, plutôt que de laisser un port ouvert le faire croire.
+### `BODY[1]` : rendre une partie, et rien qu'elle
+
+Dire la structure ne suffisait pas : un client qui voulait une pièce jointe
+téléchargeait tout le message. `BODY[1]`, `BODY[1.2]`, `BODY[1.MIME]`,
+`BODY[3.HEADER]` et `BODY[3.TEXT]` rendent maintenant la partie désignée — et
+rien qu'elle.
+
+**Le balayeur savait déjà où sont les frontières ; il lui manquait de dire où
+chaque partie COMMENCE.** Chaque partie retient désormais le rang de son premier
+octet d'en-tête, ce qui donne `BODY[1.MIME]` sans relire le message une seconde
+fois. Deux erreurs de découpe sont tombées en l'écrivant, et aucune n'était
+visible dans la structure :
+
+- **Une partie commence APRÈS sa frontière, jamais avant.** Le rang qu'on avait
+  sous la main était celui où s'arrête ce qui PRÉCÈDE, `CRLF` de frontière
+  déduit — deux octets et une ligne trop tôt.
+- **La dernière frontière d'un `multipart` ne le ferme pas.** Son contenu, c'est
+  ce que son propre parent délimite : son délimiteur de fin et l'épilogue qui le
+  suit en font partie. Le clore sur lui-même rendait un `BODY[1]` amputé de sa
+  dernière frontière — une entité que le client n'aurait pas su relire.
+
+**Un `message/rfc822` ne compte pas pour un niveau** (§6.4.5) : `3.1` est la
+première partie du message qu'il porte, pas une partie de lui. Et `HEADER` comme
+`TEXT` ne veulent rien dire ailleurs que sur un message encapsulé — c'est SON
+en-tête et SON corps qu'ils désignent.
+
+**Ce qui n'existe pas n'est pas une faute** : `BODY[9]` sur un message qui n'a
+pas neuf parties vaut `NIL`, ce que §6.4.5 admet. Un client qui demande une
+partie vue dans une structure devenue périmée ne fait rien de mal, et faire
+échouer sa commande entière le punirait de rien.
+
+Un intervalle de partie part droit dans une lecture de fichier : le fuzz éprouve
+donc qu'il **ne désigne jamais d'octets hors du message**, chemin venu du réseau
+compris.
+
+**Et deux corps dans une même commande s'écoulent enfin l'un après l'autre.**
+C'était refusé tant que la session recommençait sa ligne à chaque morceau ;
+depuis qu'elle compte les éléments déjà écrits, elle reprend où elle s'était
+arrêtée, et deux intervalles de fichier se suivent sans se mêler. Le refus n'avait
+plus de raison : il est retiré.
+
+Ce qui n'y est toujours pas : `HEADER.FIELDS (…)` et `HEADER.FIELDS.NOT (…)`,
+qui rendent un CHOIX de champs. Ils sont reconnus et refusés par `NO
+[UNAVAILABLE]` — `NO` et non `BAD`, parce que la commande est correcte et permise
+et que c'est ce serveur qui ne la sert pas. Le serveur dit au démarrage ce qu'il
+sert et ce qu'il ne sert pas, plutôt que de laisser un port ouvert le faire
+croire.
 
 ## Émettre : le client SMTP sortant
 
