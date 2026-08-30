@@ -27,6 +27,15 @@
 //!    la propriété qui compte, et la seule qui protège la connexion.
 //! 6. **UN NUMÉRO RECONSTRUIT RESTE DANS L'ESPACE** : jamais sous zéro, jamais
 //!    au-delà de 2^62 - 1, quels que soient les bits reçus.
+//! 7. **UN NUMÉRO DE FLUX SE RELIT DE SON RANG**, et son type ne change pas au
+//!    passage. Deux flux de types différents ne peuvent pas porter le même
+//!    numéro, sans quoi deux échanges se confondraient.
+//! 8. **L'ESTIMATION DU TEMPS D'ALLER-RETOUR RESTE BORNÉE** : le minimum ne
+//!    dépasse jamais le dernier échantillon vu, et le délai de retransmission
+//!    ne recule pas quand on double.
+//! 9. **LA FENÊTRE DE CONGESTION NE DESCEND JAMAIS SOUS DEUX DATAGRAMMES**, et
+//!    ce qui est en vol ne devient jamais négatif. Une fenêtre plus petite
+//!    ferait un contrôle de congestion qui arrête le service.
 
 #![no_main]
 
@@ -34,7 +43,8 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use ams_proto_quic::{
-    PACKET_NUMBER_MAX, PACKET_NUMBER_OCTETS_MAX, VARINT_MAX, packet_numbers, varints,
+    Congestion, Directional, Initiator, MINIMUM_WINDOW, PACKET_NUMBER_MAX,
+    PACKET_NUMBER_OCTETS_MAX, Rtt, StreamId, VARINT_MAX, decode_ack_delay, packet_numbers, varints,
 };
 
 /// Ce qu'on soumet.
@@ -50,6 +60,16 @@ struct Entree<'a> {
     /// Ce qu'un paquet portait, et sur combien d'octets.
     tronque: u32,
     octets: u8,
+    /// Un rang de flux, et son type.
+    rang: u64,
+    du_serveur: bool,
+    unidirectionnel: bool,
+    /// Des échantillons d'aller-retour, et ce que le pair en dit.
+    echantillons: [(u32, u32, u32); 8],
+    /// Des événements de congestion : (octets, perdu, instant).
+    evenements: [(u16, bool, u32); 16],
+    /// L'exposant d'un délai d'acquittement.
+    exposant: u8,
 }
 
 fuzz_target!(|entree: Entree| {
@@ -128,4 +148,76 @@ fuzz_target!(|entree: Entree| {
             "un numéro reconstruit est sorti de l'espace : {relu}"
         );
     }
+
+    // PROPRIÉTÉ 7 : un numéro de flux se relit de son rang, type compris.
+    let qui = match entree.du_serveur {
+        true => Initiator::Server,
+        false => Initiator::Client,
+    };
+    let sens = match entree.unidirectionnel {
+        true => Directional::Unidirectional,
+        false => Directional::Bidirectional,
+    };
+    if let Ok(flux) = StreamId::from_index(entree.rang, qui, sens) {
+        assert_eq!(flux.index(), entree.rang, "le rang a changé");
+        assert_eq!(flux.initiator(), qui, "l'auteur a changé");
+        assert_eq!(flux.directional(), sens, "le sens a changé");
+        assert!(flux.value() <= VARINT_MAX);
+        // Un flux va dans au moins un sens : un flux qui n'irait nulle part
+        // n'existe pas.
+        assert!(
+            flux.peer_can_send(qui) || flux.we_can_send(qui),
+            "un flux qui ne porte rien dans aucun sens"
+        );
+    }
+
+    // PROPRIÉTÉ 8 : l'estimation reste bornée par ce qu'elle a vu.
+    let mut rtt = Rtt::new();
+    let mut vu_le_plus_petit = u64::MAX;
+    for (mesure, delai, plafond) in entree.echantillons {
+        let mesure = u64::from(mesure);
+        rtt.sample(mesure, u64::from(delai), u64::from(plafond));
+        vu_le_plus_petit = vu_le_plus_petit.min(mesure);
+        assert_eq!(rtt.latest(), mesure, "le dernier échantillon a changé");
+        assert_eq!(
+            rtt.min(),
+            vu_le_plus_petit,
+            "le minimum n'est pas le plus petit qu'on ait vu"
+        );
+        // Le délai ne recule jamais quand on double.
+        let mut precedent = 0_u64;
+        for essais in 0..8_u32 {
+            let delai = rtt.pto(u64::from(plafond), essais);
+            assert!(delai >= precedent, "le délai a reculé à l'essai {essais}");
+            precedent = delai;
+        }
+    }
+
+    // Le délai d'acquittement se décode ou se refuse, sans jamais tronquer.
+    if let Ok(delai) = decode_ack_delay(entree.valeur, u32::from(entree.exposant)) {
+        assert!(delai >= entree.valeur || entree.valeur == 0 || delai == 0);
+    }
+
+    // PROPRIÉTÉ 9 : la fenêtre ne descend jamais sous deux datagrammes.
+    let mut congestion = Congestion::new();
+    for (octets, perdu, instant) in entree.evenements {
+        let octets = u64::from(octets);
+        let instant = u64::from(instant);
+        congestion.on_sent(octets);
+        match perdu {
+            true => congestion.on_lost(octets, instant, instant),
+            false => congestion.on_acked(octets, instant),
+        }
+        assert!(
+            congestion.window() >= MINIMUM_WINDOW,
+            "la fenêtre est descendue à {}",
+            congestion.window()
+        );
+        assert!(
+            congestion.available() <= congestion.window(),
+            "on s'autorise plus que la fenêtre"
+        );
+    }
+    congestion.on_persistent_congestion();
+    assert_eq!(congestion.window(), MINIMUM_WINDOW);
 });

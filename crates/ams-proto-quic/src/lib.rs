@@ -38,13 +38,20 @@
 #[cfg(test)]
 extern crate std;
 
+mod congestion;
 mod connection_id;
 mod error;
 mod frame;
 mod packet;
 mod packet_number;
+mod rtt;
+mod stream_id;
 mod varint;
 
+pub use congestion::{
+    Congestion, INITIAL_WINDOW, MAX_DATAGRAM_SIZE, MINIMUM_WINDOW, PACKET_THRESHOLD,
+    PERSISTENT_CONGESTION_THRESHOLD, is_lost, time_threshold,
+};
 pub use connection_id::{CONNECTION_ID_MAX, ConnectionId};
 pub use error::{Error, Reason, TransportError};
 pub use frame::{
@@ -56,6 +63,8 @@ pub use packet::{
     VERSION_NEGOTIATION, VersionNegotiation, is_long, parse_long,
 };
 pub use packet_number::{PACKET_NUMBER_MAX, PACKET_NUMBER_OCTETS_MAX};
+pub use rtt::{ACK_DELAY_EXPONENT_MAX, GRANULARITY_US, INITIAL_RTT_US, Rtt, decode_ack_delay};
+pub use stream_id::{Initiator, StreamId};
 pub use varint::VARINT_MAX;
 
 /// Les entiers de longueur variable de §16.

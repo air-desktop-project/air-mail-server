@@ -3240,3 +3240,86 @@ pour l'appelant est stricte : **il ne doit présenter QUE le paquet**, et rien d
 ce qui suit dans le datagramme. Un datagramme peut porter plusieurs paquets
 coalescés (§12.2), et se tromper de frontière ferait lire les paquets suivants
 comme la charge du premier.
+
+## Les flux QUIC, et deux bits qui suppriment une négociation
+
+Le bit de poids faible d'un numéro de flux dit QUI l'a ouvert ; le suivant dit
+s'il est bidirectionnel. Le reste est un compteur.
+
+Personne n'a donc à demander la permission d'ouvrir un flux, ni à s'accorder sur
+qui prend les numéros pairs : le numéro lui-même le dit. En HTTP/2, la même
+question se réglait par la convention « le client prend les impairs », et les
+flux poussés par le serveur ont fini par être dépréciés parce que cette
+convention ne suffisait pas.
+
+Un flux unidirectionnel ne va que dans un sens, et c'est le sien : celui qui
+l'ouvre est le seul à y écrire. Recevoir des données sur un flux unidirectionnel
+qu'on a ouvert soi-même est une faute d'état — pas un cas qu'on tolérerait.
+
+Et `MAX_STREAMS` borne le RANG, pas le numéro : §4.6 compte les flux d'un type,
+et les quatre types ont leurs comptes séparés.
+
+## La perte est notre affaire
+
+Le noyau ne retransmet rien. C'est nous qui décidons qu'un paquet est perdu, et
+quand réessayer. Une estimation trop courte fait retransmettre ce qui était en
+route — et l'on inonde un réseau déjà chargé. Une estimation trop longue fait
+attendre une seconde ce qui aurait pu partir en dix millisecondes.
+
+### Le pair dit combien de temps il a attendu, et il peut mentir
+
+Un `ACK` porte un délai d'acquittement, qu'on RETIRE de l'échantillon — sans
+quoi on prendrait la politesse du pair pour de la latence. Mais ce délai vient
+de lui. §5.3 pose donc deux gardes :
+
+- le délai est borné par ce que le pair a **annoncé pouvoir attendre** ;
+- il n'est retiré que si l'échantillon reste **au-dessus du minimum observé**.
+
+Un pair qui annoncerait un délai énorme ferait sinon croire à un réseau
+instantané, et l'on retransmettrait tout, tout le temps.
+
+L'ordre des opérations compte aussi : le minimum se met à jour sur l'échantillon
+BRUT, avant toute correction. L'inverse ferait juger une correction avec un
+minimum qu'elle vient elle-même d'abaisser, et l'estimation s'effondrerait.
+
+### Une borne qu'on PARCOURT n'est pas une borne
+
+Le délai de retransmission double à chaque essai. La première écriture doublait
+`essais` fois dans une boucle ; avec `u32::MAX`, elle tournait quatre milliards
+de fois pour un résultat connu d'avance, et le test de saturation mettait
+**soixante-treize secondes**. Au-delà de soixante-quatre doublements, toute base
+a saturé.
+
+Le défaut n'était pas dans le résultat — il était juste — mais dans le temps
+qu'il mettait à l'être. C'est le genre de chose qu'un test qui mesure trouve, et
+qu'un test qui vérifie ne voit pas.
+
+### Deux façons de dire qu'un paquet est perdu, et il faut les deux
+
+§6.1 : un paquet est perdu si un paquet suffisamment plus RÉCENT a été acquitté
+— trois d'écart —, ou s'il a été envoyé assez LONGTEMPS avant le plus récent
+acquitté — neuf huitièmes d'aller-retour.
+
+Aucun ne suffit seul. Le seuil de paquets ne voit rien quand il n'y a plus rien
+à envoyer : le dernier paquet d'un échange n'a aucun successeur pour le déclarer
+perdu. Le seuil de temps, lui, attend une fraction d'aller-retour même quand la
+preuve est déjà là.
+
+Les deux chiffres — trois, et neuf huitièmes — ne sont pas des réglages de
+confort. Ils disent ce qu'on accepte de voir arriver dans le désordre avant
+d'appeler cela une perte, et **déclarer perdu ce qui n'était qu'en retard fait
+ralentir un chemin qui va bien**.
+
+### Une rafale perdue est UN événement de congestion, pas dix
+
+§7.3.2. Diviser la fenêtre une fois par paquet perdu la ramènerait au minimum
+sur la première rafale venue, et l'on ne s'en relèverait qu'après plusieurs
+secondes. La période de récupération dure jusqu'à ce que tout ce qui était en vol
+soit acquitté ou perdu ; pendant ce temps, les pertes suivantes ne divisent plus
+rien, et les acquittements ne font plus croître — ces paquets-là étaient déjà en
+vol quand la congestion s'est produite, et ne prouvent rien du nouveau régime.
+
+Le contrôle de congestion n'est pas une optimisation : §7 en fait une
+obligation. Un émetteur QUIC sans contrôle de congestion n'est pas un émetteur
+rapide, c'est un émetteur qui écroule le chemin qu'il partage — et le noyau ne
+l'en empêchera pas.
