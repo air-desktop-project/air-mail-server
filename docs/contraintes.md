@@ -2630,6 +2630,74 @@ pour h2 et h3. Cette frontière a été confirmée par le fuzz : une propriété
 secondes par un nom d'un seul octet nul. Le fuzz avait raison ; la propriété
 éprouve maintenant la JOINTURE des deux étages, ce qui est la chose utile.
 
+### Une fenêtre de contrôle de flux peut être NÉGATIVE
+
+C'est le piège de ce module, et il n'est pas rare de le manquer. §6.9.2 : quand
+`SETTINGS_INITIAL_WINDOW_SIZE` change, toutes les fenêtres de flux OUVERTS sont
+ajustées de la différence. Si le pair réduit la fenêtre initiale alors qu'il a
+déjà envoyé des données, l'ajustement rend la fenêtre négative — et la RFC le dit
+en toutes lettres.
+
+**Une fenêtre stockée dans un `u32` ne peut pas être négative.** Elle passerait
+par zéro en soustrayant, ou déborderait par le haut ; dans les deux cas le pair
+pourrait envoyer des données qu'on aurait dû refuser. La fenêtre est donc signée,
+et sur soixante-quatre bits pour que l'arithmétique intermédiaire ne déborde
+jamais.
+
+Deux fenêtres, et il faut les deux : chaque `DATA` consomme celle de son FLUX
+**et** celle de la CONNEXION (§5.2.1). N'en vérifier qu'une laisse un pair ouvrir
+cent flux et envoyer cent fois la fenêtre — c'est la mémoire du serveur qu'il
+choisit.
+
+On refuse AVANT de consommer, jamais après : un récepteur qui soustrairait
+d'abord aurait déjà accepté les octets, et sa fenêtre dirait le contraire de ce
+qu'il a fait.
+
+### Les flux : deux mots d'état pour deux milliards de numéros
+
+§5.1.1 : un client ouvre des flux IMPAIRS, et chaque numéro doit être
+STRICTEMENT supérieur à tous les précédents. Ce n'est pas de l'hygiène — un
+numéro réemployé désignerait deux requêtes au même moment, et la réponse de l'une
+pourrait partir vers l'autre.
+
+La même section dit qu'ouvrir un flux **ferme implicitement** tous les flux
+oisifs de numéro inférieur, et c'est ce qui permet de ne RIEN retenir des flux
+fermés : au-delà du plus grand numéro reçu, un flux est oisif ; en deçà et hors
+de la table, il est fermé. Deux mots d'état suffisent là où il faudrait sinon
+retenir tout ce qu'un pair a ouvert — c'est-à-dire ce qu'il choisit.
+
+**Les états « réservés » de §5.1 n'existent pas ici** : ils ne servent qu'à la
+poussée serveur, que §8.4 a dépréciée et que ce serveur n'émet pas. Les porter
+serait écrire deux états qu'aucune transition ne peut atteindre.
+
+`REFUSED_STREAM` est une PROMESSE (§8.7) : un client peut réémettre sans risque
+ce qui l'a reçu. Le rendre pour un flux qu'on a commencé à traiter ferait
+exécuter deux fois ce qui ne devait l'être qu'une — c'est pourquoi il est rendu
+au refus d'ouverture, et là seulement.
+
+Un `RST_STREAM` sur un flux déjà fermé n'est PAS une faute : il a pu croiser
+notre réponse sur le fil.
+
+### Deux défauts trouvés par le fuzz, dans la même méthode
+
+`Streams::set_initial_window` en portait deux, et le fuzz les a trouvés en
+quelques secondes :
+
+1. **Elle acceptait une taille au-delà de 2^31-1**, que §6.5.2 refuse. La lecture
+   des `SETTINGS` l'appliquait déjà — mais cette méthode est PUBLIQUE, et un
+   appelant qui l'oublierait fabriquait des fenêtres de quatre gibioctets. C'est
+   le même raisonnement que « le magasin ne doit pas se fier à la session » :
+   une vérification faite ailleurs est une vérification qu'on ne voit pas en
+   lisant l'endroit qui en dépend.
+2. **Elle appliquait à moitié.** Elle ajustait les fenêtres au fil d'une boucle
+   et s'arrêtait à la première qui débordait, laissant la moitié déplacées et
+   l'autre non — un état que ni nous ni le pair ne saurions décrire, et qui
+   ferait diverger les deux comptes pour de bon. Elle vérifie maintenant TOUT
+   avant d'appliquer QUOI QUE CE SOIT.
+
+`Window::new` borne désormais elle aussi : **une structure qui garantit son
+invariant vaut mieux qu'une qui le suppose**.
+
 ### La bombe de décompression a sa propre borne
 
 HPACK et QPACK compriment : mille champs identiques tiennent en quelques octets

@@ -42,14 +42,18 @@
 extern crate std;
 
 mod error;
+mod flow;
 mod frame;
 pub mod hpack;
 mod preface;
 mod settings;
+mod stream;
 
-pub use error::{Error, ErrorCode};
+pub use error::{Cause, Error, ErrorCode};
+pub use flow::{INITIAL_WINDOW_SIZE, WINDOW_MAX, Window};
 pub use frame::{
     FRAME_HEADER_OCTETS, FrameFlags, FrameHeader, FrameKind, FrameReader, Need, Padded,
 };
 pub use preface::{PREFACE, Preface, read_preface};
 pub use settings::{SETTINGS_ENTRY_OCTETS, Setting, Settings, SettingsReader};
+pub use stream::{MAX_CONCURRENT_STREAMS, StreamState, Streams};

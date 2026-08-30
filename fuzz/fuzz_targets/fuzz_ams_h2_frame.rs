@@ -29,6 +29,13 @@
 //! 6. **DES RÉGLAGES ACCEPTÉS SONT DES RÉGLAGES UTILISABLES** : la taille de
 //!    cadre reste dans la plage de §6.5.2, et la fenêtre sous 2^31.
 //! 7. **LE PRÉAMBULE NE S'ACCEPTE QUE COMPLET ET EXACT.**
+//! 8. **UNE FENÊTRE RESTE DANS SES BORNES**, jusqu'à 2^31-1 par le haut. Elle
+//!    peut en revanche devenir NÉGATIVE, et c'est légal (§6.9.2) : une fenêtre
+//!    non signée passerait par zéro et laisserait entrer ce qu'elle devait
+//!    refuser.
+//! 9. **LES FLUX NE SE RÉEMPLOIENT PAS ET NE DÉBORDENT PAS.** Un numéro accepté
+//!    progresse strictement, et la table n'excède jamais ce qu'on a annoncé
+//!    traiter de front.
 
 #![no_main]
 
@@ -36,8 +43,9 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use ams_proto_h2::{
-    FRAME_HEADER_OCTETS, FrameHeader, FrameKind, FrameReader, Need, PREFACE, Padded, Preface,
-    Settings, SettingsReader, read_preface,
+    FRAME_HEADER_OCTETS, FrameHeader, FrameKind, FrameReader, INITIAL_WINDOW_SIZE,
+    MAX_CONCURRENT_STREAMS, Need, PREFACE, Padded, Preface, Settings, SettingsReader, StreamState,
+    Streams, WINDOW_MAX, Window, read_preface,
 };
 
 /// Ce qu'on soumet.
@@ -51,6 +59,9 @@ struct Entree<'a> {
     remplie: &'a [u8],
     /// Le début d'une connexion.
     preambule: &'a [u8],
+    /// Des gestes de contrôle de flux : un crédit, une consommation, un
+    /// ajustement de fenêtre initiale.
+    gestes: Vec<(u8, u32)>,
 }
 
 fuzz_target!(|entree: Entree<'_>| {
@@ -121,6 +132,62 @@ fuzz_target!(|entree: Entree<'_>| {
                 nu.data().len() <= entree.remplie.len(),
                 "le remplissage a rallongé la charge"
             );
+        }
+    }
+
+    // ── Les fenêtres et les flux ────────────────────────────────────────────
+    let mut fenetre = Window::default();
+    let mut flux = Streams::new(INITIAL_WINDOW_SIZE);
+    let mut dernier = 0_u32;
+    for (quoi, valeur) in &entree.gestes {
+        match quoi % 5 {
+            0 => {
+                let _ = fenetre.consume(*valeur);
+            }
+            1 => {
+                let _ = fenetre.increase(*valeur);
+            }
+            2 => {
+                let _ = fenetre.adjust(i64::from(*valeur));
+            }
+            3 => {
+                // PROPRIÉTÉ 9 : un numéro accepté progresse STRICTEMENT.
+                if flux.open(*valeur).is_ok() {
+                    assert!(
+                        *valeur > dernier,
+                        "un numéro accepté ne progresse pas : {valeur} après {dernier}"
+                    );
+                    assert!(!valeur.is_multiple_of(2), "un numéro pair a été accepté");
+                    dernier = *valeur;
+                    assert_eq!(flux.last_received(), *valeur);
+                }
+            }
+            _ => {
+                let _ = flux.set_initial_window(*valeur);
+            }
+        }
+        // PROPRIÉTÉ 8 : la fenêtre de connexion reste sous la borne haute.
+        assert!(
+            fenetre.available() <= WINDOW_MAX,
+            "une fenêtre a dépassé deux gibioctets"
+        );
+        // PROPRIÉTÉ 9 : la table ne déborde pas de ce qu'on a annoncé.
+        assert!(
+            flux.len() <= MAX_CONCURRENT_STREAMS,
+            "plus de flux que ce qu'on traite"
+        );
+        for chacune in (1..=dernier).step_by(2).take(8) {
+            if let Some(sienne) = flux.window(chacune) {
+                assert!(
+                    sienne.available() <= WINDOW_MAX,
+                    "fenêtre de flux hors borne"
+                );
+                assert_eq!(
+                    flux.state(chacune),
+                    Some(StreamState::Open),
+                    "un flux vivant n'est pas ouvert"
+                );
+            }
         }
     }
 

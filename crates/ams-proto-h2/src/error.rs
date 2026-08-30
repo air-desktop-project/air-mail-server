@@ -154,6 +154,16 @@ pub enum Cause {
     BadIndex,
     /// Une mise à jour de taille de table ailleurs qu'au début d'un bloc.
     TableUpdateTooLate,
+    /// Un cadre soumis au contrôle de flux dépasse la fenêtre.
+    WindowExceeded,
+    /// Une fenêtre dépasserait 2^31-1.
+    WindowOverflow,
+    /// Un numéro de flux pair, nul, ou qui ne progresse pas.
+    BadStreamId,
+    /// Plus de flux de front qu'on n'en traite.
+    TooManyStreams,
+    /// Un cadre est arrivé sur un flux qui ne pouvait pas le recevoir.
+    WrongStreamState,
 }
 
 impl Error {
@@ -216,6 +226,11 @@ impl fmt::Display for Error {
             Cause::TableSizeTooLarge => "une table plus grande que ce qu'on a annoncé",
             Cause::BadIndex => "un index HPACK qui ne désigne rien",
             Cause::TableUpdateTooLate => "une mise à jour de table ailleurs qu'au début d'un bloc",
+            Cause::WindowExceeded => "un cadre dépasse la fenêtre de contrôle de flux",
+            Cause::WindowOverflow => "une fenêtre dépasserait deux gibioctets",
+            Cause::BadStreamId => "un numéro de flux qui n'en est pas un",
+            Cause::TooManyStreams => "plus de flux de front qu'on n'en traite",
+            Cause::WrongStreamState => "ce cadre n'a pas sa place dans cet état",
         };
         let portee = match self.fatal {
             true => "connexion",

@@ -79,6 +79,11 @@ fn chaque_cause_se_dit() {
         (Cause::TableSizeTooLarge, "annoncé"),
         (Cause::BadIndex, "index HPACK"),
         (Cause::TableUpdateTooLate, "début d'un bloc"),
+        (Cause::WindowExceeded, "fenêtre de contrôle"),
+        (Cause::WindowOverflow, "deux gibioctets"),
+        (Cause::BadStreamId, "numéro de flux"),
+        (Cause::TooManyStreams, "de front"),
+        (Cause::WrongStreamState, "dans cet état"),
     ] {
         let texte = std::format!("{}", Error::connection(ErrorCode::ProtocolError, cause));
         assert!(texte.contains(extrait), "{cause:?} : {texte}");
