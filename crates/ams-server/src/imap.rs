@@ -45,7 +45,7 @@ use std::sync::Arc;
 
 use ams_index::{MessageName, Uid};
 use ams_mime::BodySpan;
-use ams_proto_imap::{Flags, PartWhat, StoreMode};
+use ams_proto_imap::{Flags, PartWhat, SearchScope, StoreMode};
 use ams_session::imap::{
     Creation, Deletion, Deposit, Listing, Mailbox, Mailboxes, MessageInfo, Renaming,
 };
@@ -84,6 +84,124 @@ const FENETRE: usize = 64 * 1024;
 
 /// Le seul nom de boîte que ce serveur connaisse (RFC 9051 §5.1).
 const INBOX: &[u8] = b"INBOX";
+
+/// Ce qu'on lit au plus d'une partie pour y chercher.
+///
+/// **Aucune RFC ne le borne.** Chercher dans une pièce jointe de vingt
+/// mébioctets coûterait à ce serveur ce qu'un client peut demander autant de
+/// fois qu'il veut. Un mébioctet de texte est un livre ; au-delà, on ne cherche
+/// pas, et le serveur le dit au démarrage plutôt que de le laisser deviner.
+const RECHERCHE_MAX: u64 = 1024 * 1024;
+
+/// Lit un intervalle d'un fichier, borné.
+fn lire(chemin: &Path, debut: u64, combien: usize) -> Option<Vec<u8>> {
+    let mut octets = std::vec![0_u8; combien];
+    let mut fichier = std::fs::File::open(chemin).ok()?;
+    fichier.seek(SeekFrom::Start(debut)).ok()?;
+    fichier.read_exact(&mut octets).ok()?;
+    Some(octets)
+}
+
+/// L'en-tête d'un message, borné.
+fn entete_de(chemin: &Path) -> Option<Vec<u8>> {
+    let fin = fin_de_l_entete(chemin).unwrap_or(0);
+    let combien = usize::try_from(fin).unwrap_or(usize::MAX).min(ENTETE_MAX);
+    lire(chemin, 0, combien)
+}
+
+/// `cherche` figure-t-il dans un champ nommé ?
+///
+/// # ON CHERCHE DANS LE TEXTE, PAS DANS LES OCTETS
+///
+/// Un `SEARCH SUBJECT "facture"` doit trouver un sujet écrit
+/// `=?utf-8?B?ZmFjdHVyZQ==?=` : répondre « non » serait un mensonge exact. C'est
+/// l'inverse de ce que rend une `ENVELOPE`, et pour la même raison — rendre et
+/// chercher ne demandent pas la même chose.
+fn dans_un_champ(chemin: &Path, champ: &[u8], cherche: &[u8]) -> bool {
+    let Some(entete) = entete_de(chemin) else {
+        return false;
+    };
+    let Ok(message) = ams_mime::Message::parse(&entete, &ams_mime::Limits::DEFAULT) else {
+        return false;
+    };
+    let mut decode = std::vec![0_u8; ams_mime::decoded_max(entete.len())];
+    for lu in message.fields() {
+        if !lu.name_is(champ) {
+            continue;
+        }
+        // UN TEXTE VIDE DEMANDE QUE LE CHAMP EXISTE (§6.4.4), et il existe.
+        if cherche.is_empty() {
+            return true;
+        }
+        let Ok(ecrits) = ams_mime::decode_encoded_words(lu.raw_value(), &mut decode) else {
+            continue;
+        };
+        if contient_sans_casse(decode.get(..ecrits).unwrap_or_default(), cherche) {
+            return true;
+        }
+    }
+    false
+}
+
+/// `cherche` figure-t-il quelque part dans l'en-tête, noms de champs compris ?
+fn dans_l_entete_entier(chemin: &Path, cherche: &[u8]) -> bool {
+    let Some(entete) = entete_de(chemin) else {
+        return false;
+    };
+    let mut decode = std::vec![0_u8; ams_mime::decoded_max(entete.len())];
+    let Ok(ecrits) = ams_mime::decode_encoded_words(&entete, &mut decode) else {
+        return false;
+    };
+    contient_sans_casse(decode.get(..ecrits).unwrap_or_default(), cherche)
+}
+
+/// `cherche` figure-t-il dans le corps d'une partie de texte ?
+///
+/// # ON NE CHERCHE QUE DANS DU TEXTE
+///
+/// Une pièce jointe binaire ne se cherche pas par son texte : ce qu'on y
+/// trouverait ne serait pas ce que le client a demandé. C'est aussi ce que font
+/// les serveurs qui indexent, et pour la même raison.
+fn dans_le_corps(chemin: &Path, cherche: &[u8]) -> bool {
+    let Some(balayeur) = balayer(chemin) else {
+        return false;
+    };
+    for rang in 0..balayeur.part_count() {
+        let Some(partie) = balayeur.part(rang).filter(|partie| partie.text) else {
+            continue;
+        };
+        let combien = usize::try_from(partie.end.saturating_sub(partie.start).min(RECHERCHE_MAX))
+            .unwrap_or(usize::MAX);
+        let Some(brut) = lire(chemin, partie.start, combien) else {
+            continue;
+        };
+        let mut decode = std::vec![0_u8; ams_mime::decoded_max(combien).max(1)];
+        let Ok(ecrits) = ams_mime::decode_transfer(partie.encoding, &brut, &mut decode) else {
+            continue;
+        };
+        if contient_sans_casse(decode.get(..ecrits).unwrap_or_default(), cherche) {
+            return true;
+        }
+    }
+    false
+}
+
+/// `aiguille` figure-t-elle dans `botte`, à la casse près ?
+///
+/// La casse ne compte pas (§6.4.4) — **pour l'ASCII**. Replier les majuscules
+/// d'un alphabet quelconque demande des tables de caractères que ce serveur n'a
+/// pas, et prétendre le faire à moitié serait pire que de le dire.
+fn contient_sans_casse(botte: &[u8], aiguille: &[u8]) -> bool {
+    if aiguille.is_empty() {
+        return true;
+    }
+    botte.windows(aiguille.len()).any(|fenetre| {
+        fenetre
+            .iter()
+            .zip(aiguille)
+            .all(|(vu, cherche)| vu.eq_ignore_ascii_case(cherche))
+    })
+}
 
 /// Écoule un texte déjà composé : `out.len()` octets au plus, depuis `offset`.
 fn ecouler(texte: &[u8], offset: u64, out: &mut [u8]) -> usize {
@@ -294,6 +412,23 @@ impl Mailbox for BoiteImap {
                 PartWhat::HeaderFields { .. } => return None,
             },
         )
+    }
+
+    fn contains(&self, sequence: u32, scope: SearchScope, field: &[u8], needle: &[u8]) -> bool {
+        let Some(rang) = self.rang(sequence) else {
+            return false;
+        };
+        let Some(chemin) = self.chemins.get(rang) else {
+            return false;
+        };
+        match scope {
+            SearchScope::Header => dans_un_champ(chemin, field, needle),
+            SearchScope::Body => dans_le_corps(chemin, needle),
+            // §6.4.4 : `TEXT` couvre l'en-tête ET le corps.
+            SearchScope::Text => {
+                dans_l_entete_entier(chemin, needle) || dans_le_corps(chemin, needle)
+            }
+        }
     }
 
     fn header_fields_len(

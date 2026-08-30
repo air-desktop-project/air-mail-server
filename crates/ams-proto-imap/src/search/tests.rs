@@ -1,6 +1,6 @@
 //! Ce qu'une recherche désigne, et ce qu'elle refuse de prétendre.
 
-use super::{Candidate, Search};
+use super::{Candidate, Search, SearchScope};
 use crate::{Error, Flags, Limits};
 
 const BORNES: Limits = Limits::DEFAULT;
@@ -31,7 +31,14 @@ fn trouves(critere: &[u8]) -> std::vec::Vec<u32> {
     ];
     messages
         .iter()
-        .filter(|message| recherche.matches(message, 3, 30))
+        .filter(|message| {
+            recherche.matches(message, 3, 30, &mut |_, _, _| {
+                // Cette liste-ci ne cherche rien DANS les messages : les
+                // critères de contenu ont leurs propres épreuves, où la
+                // fermeture dit ce qu'elle voit.
+                false
+            })
+        })
         .map(|message| message.sequence)
         .collect()
 }
@@ -111,18 +118,16 @@ fn les_parentheses_groupent() {
 #[test]
 fn un_critere_non_servi_est_refuse() {
     for critere in [
-        &b"SUBJECT facture"[..],
-        b"BODY texte",
-        b"FROM jean",
-        b"TEXT quoi",
-        b"HEADER X-Chose valeur",
-        b"KEYWORD $Important",
-        b"SEEN SUBJECT facture",
+        &b"KEYWORD $Important"[..],
+        b"UNKEYWORD $Important",
+        b"OLDER 3600",
         // Le refus traverse les parenthèses et les opérateurs.
-        b"(SEEN SUBJECT facture)",
-        b"OR SUBJECT facture SEEN",
-        b"OR SEEN SUBJECT facture",
-        b"NOT SUBJECT facture",
+        b"(SEEN KEYWORD $x)",
+        b"OR KEYWORD $x SEEN",
+        b"OR SEEN KEYWORD $x",
+        b"NOT KEYWORD $x",
+        // Une chaîne à échappement est licite, et on ne sait pas la déciter.
+        b"SUBJECT \"la \\\"facture\\\"\"",
     ] {
         assert_eq!(
             Search::parse(critere, &BORNES).err(),
@@ -223,7 +228,12 @@ fn l_expression_vide_ne_designe_rien() {
     let rien = Search::NONE;
     assert!(!rien.is_empty());
     for sequence in [0_u32, 1, 2, u32::MAX] {
-        assert!(!rien.matches(&message(sequence, sequence, 0, Flags::NONE, 0), 3, 30));
+        assert!(!rien.matches(
+            &message(sequence, sequence, 0, Flags::NONE, 0),
+            3,
+            30,
+            &mut |_, _, _| false
+        ));
     }
 }
 
@@ -244,5 +254,148 @@ fn l_arbre_ne_designe_que_vers_le_bas() {
             }
             _ => {}
         }
+    }
+}
+
+// ── Les critères qui lisent le message ──────────────────────────────────────
+
+/// Lit un critère, et rend ce qu'il demande de chercher.
+fn demandes(critere: &[u8]) -> std::vec::Vec<(SearchScope, std::vec::Vec<u8>, std::vec::Vec<u8>)> {
+    let recherche = Search::parse(critere, &BORNES).expect("lisible");
+    let mut vues = std::vec::Vec::new();
+    let _ = recherche.matches(
+        &message(1, 10, 100, Flags::NONE, JANVIER),
+        3,
+        30,
+        &mut |portee, champ, texte| {
+            vues.push((
+                portee,
+                std::vec::Vec::from(champ),
+                std::vec::Vec::from(texte),
+            ));
+            true
+        },
+    );
+    vues
+}
+
+/// **CHAQUE MOT-CLEF NOMME SON CHAMP, SAUF `HEADER`** : c'est le client qui le
+/// nomme, et les confondre ferait lire le TEXTE cherché comme un nom de champ.
+#[test]
+fn chaque_mot_clef_nomme_son_champ() {
+    assert_eq!(
+        demandes(b"SUBJECT facture"),
+        std::vec![(
+            SearchScope::Header,
+            std::vec::Vec::from(&b"subject"[..]),
+            std::vec::Vec::from(&b"facture"[..])
+        )]
+    );
+    assert_eq!(
+        demandes(b"HEADER X-Chose valeur"),
+        std::vec![(
+            SearchScope::Header,
+            std::vec::Vec::from(&b"X-Chose"[..]),
+            std::vec::Vec::from(&b"valeur"[..])
+        )]
+    );
+    for (critere, champ) in [
+        (&b"FROM jean"[..], &b"from"[..]),
+        (b"TO jean", b"to"),
+        (b"CC jean", b"cc"),
+        (b"BCC jean", b"bcc"),
+    ] {
+        assert_eq!(
+            demandes(critere).first().map(|vu| vu.1.clone()),
+            Some(std::vec::Vec::from(champ))
+        );
+    }
+}
+
+/// Le corps et le message entier ne nomment aucun champ.
+#[test]
+fn le_corps_et_le_texte_ne_nomment_aucun_champ() {
+    assert_eq!(
+        demandes(b"BODY facture"),
+        std::vec![(
+            SearchScope::Body,
+            std::vec::Vec::new(),
+            std::vec::Vec::from(&b"facture"[..])
+        )]
+    );
+    assert_eq!(
+        demandes(b"TEXT facture").first().map(|vu| vu.0),
+        Some(SearchScope::Text)
+    );
+}
+
+/// Une chaîne citée garde ses blancs : c'est tout l'intérêt des guillemets.
+#[test]
+fn une_chaine_citee_garde_ses_blancs() {
+    assert_eq!(
+        demandes(b"SUBJECT \"la facture\"")
+            .first()
+            .map(|vu| vu.2.clone()),
+        Some(std::vec::Vec::from(&b"la facture"[..]))
+    );
+    // Et une chaîne citée VIDE est licite.
+    assert_eq!(
+        demandes(b"HEADER X-Chose \"\"")
+            .first()
+            .map(|vu| vu.2.clone()),
+        Some(std::vec::Vec::new())
+    );
+}
+
+/// **UN TEXTE VIDE EST VRAI DE TOUT MESSAGE** (§6.4.4) — sauf pour `HEADER`, où
+/// il demande que le CHAMP existe. Passer les autres au magasin lui ferait lire
+/// un message pour rien.
+#[test]
+fn un_texte_vide_ne_fait_pas_lire_le_message() {
+    // Le corps : vrai sans rien demander.
+    let mut demande = false;
+    let vide = Search::parse(b"BODY \"\"", &BORNES).expect("lisible");
+    assert!(vide.matches(
+        &message(1, 10, 100, Flags::NONE, JANVIER),
+        3,
+        30,
+        &mut |_, _, _| {
+            demande = true;
+            false
+        }
+    ));
+    assert!(!demande, "le corps vide n'avait rien à demander");
+    // L'en-tête : on demande, parce que le champ peut manquer.
+    assert_eq!(demandes(b"HEADER X-Chose \"\"").len(), 1);
+}
+
+/// Les critères de contenu se combinent comme les autres.
+#[test]
+fn les_criteres_de_contenu_se_combinent() {
+    let recherche = Search::parse(b"NOT SUBJECT facture", &BORNES).expect("lisible");
+    let candidat = message(1, 10, 100, Flags::NONE, JANVIER);
+    assert!(!recherche.matches(&candidat, 3, 30, &mut |_, _, _| true));
+    assert!(recherche.matches(&candidat, 3, 30, &mut |_, _, _| false));
+}
+
+/// Une clef de contenu sans son texte est une faute.
+#[test]
+fn une_clef_de_contenu_sans_texte_est_une_faute() {
+    for critere in [
+        &b"SUBJECT"[..],
+        // `HEADER` sans même son champ.
+        b"HEADER",
+        b"HEADER X-Chose",
+        b"SUBJECT )",
+        b"OR SUBJECT SEEN",
+        // Une chaîne qui ne se ferme pas.
+        b"SUBJECT \"facture",
+    ] {
+        assert_eq!(
+            Search::parse(critere, &BORNES).err(),
+            Some(Error::MalformedSearch),
+            "{:?}",
+            core::str::from_utf8(critere)
+        );
     }
 }

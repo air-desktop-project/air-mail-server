@@ -18,7 +18,7 @@ use ams_guard::Thresholds;
 use ams_loop_tokio::SharedGuard;
 use ams_loop_tokio::imap::{ImapService, serve_imap_connection};
 use ams_proto_imap::Limits;
-use ams_proto_imap::{Flags, PartWhat, StoreMode};
+use ams_proto_imap::{Flags, PartWhat, SearchScope, StoreMode};
 use ams_session::imap::{Mailbox, Mailboxes, MessageInfo};
 use commun::{COMPTE, NotreDomaine, PAIR, SECRET, materiel};
 use core::time::Duration;
@@ -130,6 +130,33 @@ impl Mailbox for Boite {
                 PartWhat::HeaderFields { .. } => return None,
             },
         )
+    }
+
+    fn contains(&self, sequence: u32, scope: SearchScope, field: &[u8], needle: &[u8]) -> bool {
+        let Some(corps) = MESSAGES.get(usize::try_from(sequence).unwrap_or(0).saturating_sub(1))
+        else {
+            return false;
+        };
+        let Ok(message) = ams_mime::Message::parse(corps, &ams_mime::Limits::DEFAULT) else {
+            return false;
+        };
+        let ou: &[u8] = match scope {
+            SearchScope::Header => {
+                let Some(champ) = message.fields().find(|lu| lu.name_is(field)) else {
+                    return false;
+                };
+                champ.raw_value()
+            }
+            SearchScope::Body => message.body(),
+            SearchScope::Text => corps,
+        };
+        needle.is_empty()
+            || ou.windows(needle.len().max(1)).any(|fenetre| {
+                fenetre
+                    .iter()
+                    .zip(needle)
+                    .all(|(vu, cherche)| vu.eq_ignore_ascii_case(cherche))
+            })
     }
 
     fn header_fields_len(
@@ -884,14 +911,39 @@ async fn une_recherche_traverse_la_socket() {
         "* ESEARCH (TAG \"a005\") UID ALL 1:2\r\na005 OK UID SEARCH completed\r\n"
     );
 
+    // **CHERCHER DANS LE MESSAGE TRAVERSE LA SOCKET** : le sujet du premier
+    // message d'épreuve est « un ».
+    lecteur
+        .get_mut()
+        .write_all(b"a006 SEARCH SUBJECT un\r\n")
+        .await
+        .expect("écriture");
+    let sujet = jusqu_a(&mut lecteur, "a006 ").await;
+    assert_eq!(
+        sujet,
+        "* ESEARCH (TAG \"a006\") ALL 1\r\na006 OK SEARCH completed\r\n"
+    );
+
+    // Le corps est un autre endroit que l'en-tête.
+    lecteur
+        .get_mut()
+        .write_all(b"a007 SEARCH BODY \"Second corps\"\r\n")
+        .await
+        .expect("écriture");
+    let corps = jusqu_a(&mut lecteur, "a007 ").await;
+    assert_eq!(
+        corps,
+        "* ESEARCH (TAG \"a007\") ALL 2\r\na007 OK SEARCH completed\r\n"
+    );
+
     // Un critère qu'on ne sert pas est refusé, pas rendu faux.
     lecteur
         .get_mut()
-        .write_all(b"a006 SEARCH SUBJECT facture\r\n")
+        .write_all(b"a008 SEARCH KEYWORD $Important\r\n")
         .await
         .expect("écriture");
-    let refus = jusqu_a(&mut lecteur, "a006 ").await;
-    assert!(refus.starts_with("a006 NO [CANNOT]"), "{refus}");
+    let refus = jusqu_a(&mut lecteur, "a008 ").await;
+    assert!(refus.starts_with("a008 NO [CANNOT]"), "{refus}");
 }
 
 /// **`COPY` traverse la socket**, et sa conclusion porte le `COPYUID`.

@@ -16,13 +16,16 @@
 //! le cycle impossible. L'évaluation descend donc toujours vers des indices plus
 //! petits, et se termine sans qu'on ait à compter les tours.
 //!
-//! # CE QUI EST SERVI, ET CE QUI EST REFUSÉ
+//! # CE QUI EST SERVI
 //!
-//! Tout ce qui se décide avec ce que la boîte sait déjà : les drapeaux, la
-//! taille, la date d'arrivée, l'UID, le rang. **Rien qui demande de lire le
-//! message** — `BODY`, `TEXT`, `SUBJECT`, `FROM`, `HEADER` et leurs semblables
-//! sont reconnus et refusés, plutôt que rendus faux. Un `SEARCH SUBJECT "facture"`
-//! qui répondrait « aucun résultat » serait un mensonge exact.
+//! Ce qui se décide avec ce que la boîte sait déjà — drapeaux, taille, date
+//! d'arrivée, UID, rang — et ce qui demande de LIRE le message : `SUBJECT`,
+//! `FROM`, `TO`, `CC`, `BCC`, `HEADER`, `BODY`, `TEXT`.
+//!
+//! **CES DERNIERS NE SE DÉCIDENT PAS ICI.** Cette crate ne lit aucun message
+//! (C1) : elle rend le critère, et l'appelant répond à la question qu'il pose.
+//! C'est pourquoi [`Search::matches`] prend une fermeture — le nœud dit QUOI
+//! chercher et OÙ, celui qui a le message dit si ça s'y trouve.
 
 use crate::error::Error;
 use crate::flags::Flags;
@@ -66,6 +69,30 @@ enum Noeud<'a> {
     Ou(u16, u16),
     /// Deux clefs juxtaposées : les deux doivent être vraies.
     Et(u16, u16),
+    /// `SUBJECT`, `BODY`, `HEADER <champ>`… : un texte à trouver dans le
+    /// message.
+    Contenu {
+        portee: SearchScope,
+        /// Le champ visé, pour une portée d'en-tête. Vide ailleurs.
+        champ: &'a [u8],
+        texte: &'a [u8],
+    },
+}
+
+/// Ce à quoi l'appelant répond pour les critères qui lisent le message.
+///
+/// La portée, le champ visé — vide hors d'un en-tête — et le texte cherché.
+pub type SearchReader<'r> = &'r mut dyn FnMut(SearchScope, &[u8], &[u8]) -> bool;
+
+/// Où un critère cherche son texte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchScope {
+    /// Dans un champ d'en-tête nommé.
+    Header,
+    /// Dans le corps.
+    Body,
+    /// Dans l'en-tête ET le corps (§6.4.4).
+    Text,
 }
 
 /// Ce qu'il faut savoir d'un message pour décider s'il correspond.
@@ -135,8 +162,25 @@ impl<'a> Search<'a> {
 
     /// Ce message correspond-il ?
     #[must_use]
-    pub fn matches(&self, message: &Candidate, star_sequence: u32, star_uid: u32) -> bool {
-        self.evaluer(self.racine, message, star_sequence, star_uid)
+    /// `contient` répond aux critères qui demandent de LIRE le message : on lui
+    /// donne la portée, le champ visé — vide hors d'un en-tête — et le texte
+    /// cherché. Cette crate ne lit aucun message (C1), et ne saurait donc pas y
+    /// répondre elle-même.
+    ///
+    /// # UNE FERMETURE DYNAMIQUE, ET NON GÉNÉRIQUE
+    ///
+    /// Une fonction générique est recopiée une fois par appelant, et chaque
+    /// copie porte ses propres chemins d'erreur — dont aucun appelant n'emprunte
+    /// la totalité. C'est du code livré que rien ne regarde, dans une crate qui
+    /// se veut mince. Un appel indirect par expression coûte moins que cela.
+    pub fn matches(
+        &self,
+        message: &Candidate,
+        star_sequence: u32,
+        star_uid: u32,
+        contient: SearchReader<'_>,
+    ) -> bool {
+        self.evaluer(self.racine, message, star_sequence, star_uid, contient)
     }
 
     /// Combien de nœuds l'expression porte.
@@ -156,7 +200,14 @@ impl<'a> Search<'a> {
     /// **La récursion descend vers des indices strictement plus petits**, ce que
     /// la construction garantit : elle se termine donc, et il n'y a pas de
     /// compteur de tours à tenir.
-    fn evaluer(&self, indice: u16, message: &Candidate, star_seq: u32, star_uid: u32) -> bool {
+    fn evaluer(
+        &self,
+        indice: u16,
+        message: &Candidate,
+        star_seq: u32,
+        star_uid: u32,
+        contient: SearchReader<'_>,
+    ) -> bool {
         // ON PARCOURT LE TABLEAU ENTIER POUR EN TIRER UN NŒUD.
         //
         // `self.noeuds.get(indice)` rendrait un `Option` dont le `None` est
@@ -181,15 +232,27 @@ impl<'a> Search<'a> {
             Noeud::Depuis(jour) => jour_de(message.internal_date) >= jour,
             Noeud::Uid(ensemble) => ensemble.contains(message.uid, star_uid),
             Noeud::Rang(ensemble) => ensemble.contains(message.sequence, star_seq),
-            Noeud::Non(clef) => !self.evaluer(clef, message, star_seq, star_uid),
+            Noeud::Non(clef) => !self.evaluer(clef, message, star_seq, star_uid, contient),
             Noeud::Ou(gauche, droite) => {
-                self.evaluer(gauche, message, star_seq, star_uid)
-                    || self.evaluer(droite, message, star_seq, star_uid)
+                self.evaluer(gauche, message, star_seq, star_uid, contient)
+                    || self.evaluer(droite, message, star_seq, star_uid, contient)
             }
             Noeud::Et(gauche, droite) => {
-                self.evaluer(gauche, message, star_seq, star_uid)
-                    && self.evaluer(droite, message, star_seq, star_uid)
+                self.evaluer(gauche, message, star_seq, star_uid, contient)
+                    && self.evaluer(droite, message, star_seq, star_uid, contient)
             }
+            // UN TEXTE VIDE EST VRAI DE TOUT MESSAGE (§6.4.4) : `SEARCH BODY ""`
+            // désigne tout, et c'est ce que la RFC demande. Le passer au magasin
+            // lui ferait lire un message pour rien.
+            Noeud::Contenu {
+                portee,
+                champ,
+                texte,
+            } => match portee {
+                SearchScope::Header if texte.is_empty() => contient(portee, champ, texte),
+                _ if texte.is_empty() => true,
+                _ => contient(portee, champ, texte),
+            },
         }
     }
 }
@@ -237,6 +300,37 @@ impl<'a> Lecteur<'a, '_> {
             .unwrap_or(reste.len());
         self.reste = reste.get(fin..).unwrap_or_default();
         reste.get(..fin).unwrap_or_default()
+    }
+
+    /// Lit une chaîne de recherche : un atome, ou une chaîne citée.
+    ///
+    /// # UN ÉCHAPPEMENT NE SE DÉFAIT PAS ICI
+    ///
+    /// Le nœud EMPRUNTE le texte de la commande — c'est ce qui permet à cette
+    /// crate de ne rien allouer. Défaire un `\"` demanderait de recopier le
+    /// texte quelque part, et ce quelque part n'existe pas. C'est donc un refus
+    /// de service, et non une faute : la forme est licite.
+    fn chaine(&mut self) -> Result<&'a [u8], Error> {
+        let reste = self.reste.trim_ascii_start();
+        if reste.first().copied() != Some(b'"') {
+            let mot = self.mot();
+            // Une parenthèse n'est pas un texte, et un texte manquant non plus.
+            if mot.is_empty() || matches!(mot, b"(" | b")") {
+                return Err(Error::MalformedSearch);
+            }
+            return Ok(mot);
+        }
+        let dedans = reste.get(1..).unwrap_or_default();
+        let fin = dedans
+            .iter()
+            .position(|octet| *octet == b'"')
+            .ok_or(Error::MalformedSearch)?;
+        let texte = dedans.get(..fin).unwrap_or_default();
+        if texte.contains(&b'\\') {
+            return Err(Error::UnsupportedSearchKey);
+        }
+        self.reste = dedans.get(fin.saturating_add(1)..).unwrap_or_default();
+        Ok(texte)
     }
 
     /// Lit une clef, et rend l'indice de sa racine.
@@ -304,6 +398,19 @@ impl<'a> Lecteur<'a, '_> {
                 return self.ranger(faire(jour));
             }
         }
+        if let Some((portee, nomme)) = portee_de(mot) {
+            // `HEADER` nomme son champ AVANT le texte : deux mots, et non un.
+            let champ = match nomme {
+                Some(champ) => champ,
+                None => self.chaine()?,
+            };
+            let texte = self.chaine()?;
+            return self.ranger(Noeud::Contenu {
+                portee,
+                champ,
+                texte,
+            });
+        }
         if mot.eq_ignore_ascii_case(b"UID") {
             let ensemble = SequenceSet::parse(self.mot(), self.limits)?;
             return self.ranger(Noeud::Uid(ensemble));
@@ -318,6 +425,34 @@ impl<'a> Lecteur<'a, '_> {
         let ensemble = SequenceSet::parse(mot, self.limits)?;
         self.ranger(Noeud::Rang(ensemble))
     }
+}
+
+/// La portée qu'un mot-clef désigne, et le champ qu'il vise.
+///
+/// `None` veut dire « c'est le client qui nomme le champ » : `HEADER` est le
+/// seul dans ce cas, et le confondre avec les autres ferait lire le TEXTE
+/// cherché comme un nom de champ.
+fn portee_de(mot: &[u8]) -> Option<(SearchScope, Option<&'static [u8]>)> {
+    /// Un mot-clef, la portée qu'il désigne, et le champ qu'il vise.
+    type Entree = (&'static [u8], SearchScope, Option<&'static [u8]>);
+    const TABLE: [Entree; 8] = [
+        (b"SUBJECT", SearchScope::Header, Some(b"subject")),
+        (b"FROM", SearchScope::Header, Some(b"from")),
+        (b"TO", SearchScope::Header, Some(b"to")),
+        (b"CC", SearchScope::Header, Some(b"cc")),
+        (b"BCC", SearchScope::Header, Some(b"bcc")),
+        // LE SEUL DONT LE CLIENT NOMME LE CHAMP.
+        (b"HEADER", SearchScope::Header, None),
+        (b"BODY", SearchScope::Body, Some(b"")),
+        (b"TEXT", SearchScope::Text, Some(b"")),
+    ];
+    let mut trouve = None;
+    for (nom, portee, champ) in TABLE {
+        if mot.eq_ignore_ascii_case(nom) {
+            trouve = Some((portee, champ));
+        }
+    }
+    trouve
 }
 
 /// Le drapeau qu'un mot-clef désigne, et s'il doit être présent.

@@ -55,16 +55,19 @@
 //!
 //! # Ce qui n'est pas ici
 //!
-//! Les critères de `SEARCH` qui demandent de LIRE le message (`BODY`, `TEXT`,
-//! `SUBJECT`, `FROM`, `HEADER`…) : ils sont refusés plutôt que rendus faux.
+//! Les critères de `SEARCH` qui lisent le message — `SUBJECT`, `BODY`, `TEXT`… —
+//! traversent la session sans qu'elle lise quoi que ce soit : elle passe la
+//! question à la boîte, qui seule sait ouvrir un fichier. C'est la même
+//! frontière que pour l'enveloppe et la structure.
 //!
 //! L'analyse d'un message n'est pas ici et n'y sera pas : `ENVELOPE` et
 //! `BODYSTRUCTURE` se composent dans `ams-mime`, et la boîte les écoule.
 
 use ams_proto_imap::{
     Args, Candidate, Command, Error as ImapError, Fetch, FetchItem, Flags, Limits, Line, PartPath,
-    PartWhat, Search, Section, SequenceSet, Status, Store, StoreMode, Tag, encode_continuation,
-    encode_tagged, encode_untagged, encode_untagged_parts, write_internal_date,
+    PartWhat, Search, SearchScope, Section, SequenceSet, Status, Store, StoreMode, Tag,
+    encode_continuation, encode_tagged, encode_untagged, encode_untagged_parts,
+    write_internal_date,
 };
 use ams_sasl::{decode_base64, parse_plain};
 use core::fmt;
@@ -254,6 +257,20 @@ pub trait Mailbox {
     /// retrouver les frontières, donc lire le message. La session ne la demande
     /// que pour l'élément qu'elle est sur le point d'écrire.
     fn part_span(&self, sequence: u32, path: &[u32], what: PartWhat) -> Option<(u64, u64)>;
+
+    /// Le message de rang `sequence` porte-t-il `needle` là où `scope` le dit ?
+    ///
+    /// # C'EST LA BOÎTE QUI LIT, ET C'EST ELLE QUI DÉCODE
+    ///
+    /// Un `SEARCH SUBJECT "facture"` doit trouver un sujet écrit
+    /// `=?utf-8?B?ZmFjdHVyZQ==?=` : répondre « non » serait un mensonge exact.
+    /// La comparaison porte donc sur le texte DÉCODÉ, et non sur les octets du
+    /// message — c'est l'inverse de ce que rend une `ENVELOPE`, et pour la même
+    /// raison : rendre et chercher ne demandent pas la même chose.
+    ///
+    /// `field` nomme le champ pour [`SearchScope::Header`] ; il est vide
+    /// ailleurs. Un `needle` vide demande que le champ EXISTE.
+    fn contains(&self, sequence: u32, scope: SearchScope, field: &[u8], needle: &[u8]) -> bool;
 
     /// Ce qu'un CHOIX de champs occupe, ou `None` si la section n'existe pas.
     ///
@@ -1021,7 +1038,16 @@ impl Emission {
             // L'ÉTOILE D'UN ENSEMBLE IMBRIQUÉ NE VEUT PAS DIRE LA MÊME CHOSE
             // SELON LE CÔTÉ : `UID 5:*` parle d'UID, `5:*` de rangs, et les deux
             // peuvent se rencontrer dans la même expression.
-            if recherche.matches(&candidat, self.exists, self.star_uid) {
+            // LA SESSION NE LIT PAS LES MESSAGES : elle passe la question à la
+            // boîte, qui seule sait les ouvrir. C'est la même frontière que pour
+            // l'enveloppe et la structure.
+            let correspond = recherche.matches(
+                &candidat,
+                self.exists,
+                self.star_uid,
+                &mut |portee, champ, texte| boite.contains(rang, portee, champ, texte),
+            );
+            if correspond {
                 return Some(if self.par_uid { info.uid } else { rang });
             }
         }

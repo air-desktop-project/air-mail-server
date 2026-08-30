@@ -279,8 +279,10 @@ OPTIONS DE `config write`
     `STORE`, `EXPUNGE`, `SEARCH`, `COPY`, `MOVE`, `APPEND`, `CREATE`, `DELETE` et
     `RENAME`. `FETCH` rend une `ENVELOPE`, une `BODYSTRUCTURE`, une partie
     désignée — `BODY[1]`, `BODY[1.MIME]` — et un choix de champs d'en-tête —
-    `BODY[HEADER.FIELDS (FROM)]`. Les critères de recherche qui demandent de LIRE
-    le message, eux, sont refusés plutôt que rendus faux.
+    `BODY[HEADER.FIELDS (FROM)]`. La recherche lit aussi DANS les messages —
+    `SUBJECT`, `BODY`, `TEXT` — en défaisant les mots encodés et les encodages de
+    transfert : on cherche le texte, pas les octets. `IDLE`, `NAMESPACE`,
+    `ENABLE` et `SUBSCRIBE` ne sont pas servis.
 
     LE MAGASIN DE COMPTES SERT DEUX CHOSES, et il faut les distinguer :
 

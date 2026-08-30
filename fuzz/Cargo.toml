@@ -96,6 +96,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_ams_mime_decode"
+path = "fuzz_targets/fuzz_ams_mime_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_ams_mime_structure"
 path = "fuzz_targets/fuzz_ams_mime_structure.rs"
 test = false

@@ -75,6 +75,7 @@ mod address;
 mod base64;
 mod compose;
 mod date;
+mod decode;
 mod envelope;
 mod error;
 mod failure;
@@ -88,6 +89,7 @@ pub use address::author_domain;
 pub use base64::{BASE64_LINE, base64_max, encode_base64};
 pub use compose::{ReportMail, report_mail_max, write_report_mail};
 pub use date::{DATE_MAX, write_date};
+pub use decode::{decode_encoded_words, decode_transfer, decoded_max};
 pub use envelope::{ENVELOPE_ADDRESSES_MAX, write_envelope};
 pub use error::Error;
 pub use failure::{
@@ -97,5 +99,5 @@ pub use limits::Limits;
 pub use message::{Field, Fields, Message, Unfolded};
 pub use select::write_header_fields;
 pub use structure::{
-    BodyScanner, BodySpan, STRUCTURE_DEPTH_MAX, STRUCTURE_PARTS_MAX, write_body_structure,
+    BodyPart, BodyScanner, BodySpan, STRUCTURE_DEPTH_MAX, STRUCTURE_PARTS_MAX, write_body_structure,
 };

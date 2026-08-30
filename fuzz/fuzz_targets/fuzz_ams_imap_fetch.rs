@@ -255,11 +255,23 @@ fuzz_target!(|entree: Entree<'_>| {
         };
         // Qu'elle rende vrai ou faux importe peu : ce qu'on éprouve est
         // qu'elle RENDE, et deux fois la même chose.
-        let verdict = recherche.matches(&candidat, entree.star, entree.star);
+        //
+        // LE LECTEUR RÉPOND TOUJOURS PAREIL : un critère qui lit le message ne
+        // doit pas rendre la recherche instable, et c'est ce qu'on vérifie en
+        // lui donnant une réponse constante.
+        let mut lecteur = |_, _: &[u8], _: &[u8]| true;
+        let verdict = recherche.matches(&candidat, entree.star, entree.star, &mut lecteur);
         assert_eq!(
             verdict,
-            recherche.matches(&candidat, entree.star, entree.star),
+            recherche.matches(&candidat, entree.star, entree.star, &mut lecteur),
             "une recherche a changé d'avis sur le même message"
+        );
+        // Et la réponse inverse donne un verdict, elle aussi.
+        let _ = recherche.matches(
+            &candidat,
+            entree.star,
+            entree.star,
+            &mut |_, _: &[u8], _: &[u8]| false,
         );
     }
 });

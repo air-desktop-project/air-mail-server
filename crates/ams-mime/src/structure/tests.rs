@@ -711,3 +711,71 @@ fn un_message_encapsule_sans_place_ne_mene_nulle_part() {
     assert_eq!(tranche(&sature, &[63, 1], BodySpan::Content), None);
     assert_eq!(tranche(&sature, &[63], BodySpan::Header), None);
 }
+
+// --- Ce que porte chaque partie (pour chercher dedans) ---------------------
+
+/// Rend les parties qui portent un contenu.
+fn portees(message: &[u8]) -> std::vec::Vec<(std::string::String, std::string::String, bool)> {
+    let mut balayeur = BodyScanner::new(&BORNES);
+    balayeur.push(message);
+    balayeur.finish();
+    (0..balayeur.part_count())
+        .filter_map(|rang| balayeur.part(rang))
+        .map(|partie| {
+            let debut = usize::try_from(partie.start).unwrap_or(usize::MAX);
+            let fin = usize::try_from(partie.end).unwrap_or(usize::MAX);
+            (
+                std::string::String::from_utf8_lossy(message.get(debut..fin).unwrap_or_default())
+                    .into_owned(),
+                std::string::String::from_utf8_lossy(partie.encoding).into_owned(),
+                partie.text,
+            )
+        })
+        .collect()
+}
+
+/// **LES `multipart` ET LES `message/rfc822` NE PORTENT RIEN EN PROPRE** : leur
+/// contenu, ce sont leurs filles. Les rendre aussi ferait compter deux fois les
+/// mêmes octets.
+#[test]
+fn seules_les_feuilles_portent_un_contenu() {
+    let vues = portees(DEUX_PARTIES);
+    assert_eq!(
+        vues,
+        std::vec![
+            (
+                std::string::String::from("corps un"),
+                std::string::String::new(),
+                true
+            ),
+            (
+                std::string::String::from("QUJD"),
+                std::string::String::from("base64"),
+                false
+            ),
+        ]
+    );
+}
+
+/// Un message encapsulé ne compte pas deux fois : seule sa feuille porte.
+#[test]
+fn un_message_encapsule_ne_compte_pas_deux_fois() {
+    let vues = portees(PORTEUR);
+    assert_eq!(vues.len(), 2, "{vues:?}");
+    assert_eq!(
+        vues.get(1).map(|vu| vu.0.clone()),
+        Some(std::string::String::from("le corps"))
+    );
+}
+
+/// Sans `Content-Type:`, c'est du texte (RFC 2045 §5.2).
+#[test]
+fn sans_type_c_est_du_texte() {
+    let vues = portees(b"Subject: x\r\n\r\nbonjour\r\n");
+    assert_eq!(vues.first().map(|vu| vu.2), Some(true));
+    // Et un rang au-delà des parties ne rend rien.
+    let mut balayeur = BodyScanner::new(&BORNES);
+    balayeur.push(b"Subject: x\r\n\r\nbonjour\r\n");
+    balayeur.finish();
+    assert_eq!(balayeur.part(balayeur.part_count()), None);
+}

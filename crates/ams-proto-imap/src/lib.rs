@@ -60,7 +60,7 @@ pub use mailbox::{
 pub use response::{
     Status, encode_continuation, encode_tagged, encode_untagged, encode_untagged_parts,
 };
-pub use search::{Candidate, SEARCH_DEPTH_MAX, SEARCH_KEYS_MAX, Search};
+pub use search::{Candidate, SEARCH_DEPTH_MAX, SEARCH_KEYS_MAX, Search, SearchReader, SearchScope};
 pub use sequence::{Ranges, SequenceSet};
 pub use store::{Store, StoreMode};
 pub use tag::Tag;

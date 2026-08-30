@@ -934,6 +934,65 @@ fn analyser<'a>(entete: &'a [u8], limites: &Limits) -> (Genre, &'a [u8]) {
     (Genre::Feuille, &[])
 }
 
+/// Ce qu'une partie porte : où, sous quel encodage, et si c'est du texte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BodyPart<'a> {
+    /// Où son corps commence, dans le message.
+    pub start: u64,
+    /// Où il finit.
+    pub end: u64,
+    /// Son `Content-Transfer-Encoding`, tel qu'il est écrit.
+    pub encoding: &'a [u8],
+    /// Est-ce du texte ? Une pièce jointe binaire ne se cherche pas par son
+    /// texte, et la chercher quand même rendrait des correspondances qui n'en
+    /// sont pas.
+    pub text: bool,
+}
+
+impl BodyScanner {
+    /// Combien de parties la structure décrit.
+    #[must_use]
+    pub fn part_count(&self) -> usize {
+        self.nb
+    }
+
+    /// La partie de rang `index`, si elle porte un contenu.
+    ///
+    /// # LES `multipart` ET LES `message/rfc822` NE PORTENT RIEN EN PROPRE
+    ///
+    /// Leur contenu, ce sont leurs filles — que ce parcours rend aussi. Les
+    /// rendre eux-mêmes ferait compter deux fois les mêmes octets, et un
+    /// `SEARCH BODY` trouverait deux fois ce qui n'est écrit qu'une.
+    #[must_use]
+    pub fn part(&self, index: usize) -> Option<BodyPart<'_>> {
+        let partie = self.parties.get(index).filter(|_| index < self.nb)?;
+        if partie.genre != Genre::Feuille {
+            return None;
+        }
+        let entete = self.entete_de(partie);
+        let message = Message::parse(entete, &self.limites).ok();
+        let contenu = message
+            .as_ref()
+            .and_then(|message| valeur_de(message, b"content-type"));
+        // RFC 2045 §5.2 : sans `Content-Type:`, c'est du texte.
+        let text = match contenu {
+            Some(valeur) => type_de(valeur).0.eq_ignore_ascii_case(b"text"),
+            None => true,
+        };
+        let encodage = message
+            .as_ref()
+            .and_then(|message| valeur_de(message, b"content-transfer-encoding"))
+            .map(<[u8]>::trim_ascii)
+            .unwrap_or_default();
+        Some(BodyPart {
+            start: partie.corps_debut,
+            end: partie.corps_debut.saturating_add(partie.octets),
+            encoding: mot(encodage),
+            text,
+        })
+    }
+}
+
 /// Ce qu'on veut d'une partie désignée (RFC 9051 §6.4.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BodySpan {

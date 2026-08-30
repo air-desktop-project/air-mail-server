@@ -1,6 +1,6 @@
 //! Ce qu'une session IMAP dit, et ce qu'elle refuse.
 
-use ams_proto_imap::{Flags, Limits, PartWhat, StoreMode};
+use ams_proto_imap::{Flags, Limits, PartWhat, SearchScope, StoreMode};
 use ams_sasl::Credentials;
 
 use super::{Action, Mailbox, Mailboxes, MessageInfo, Session, State, TAG_MAX_OCTETS};
@@ -105,6 +105,33 @@ impl Mailbox for Boite {
             ([1], PartWhat::Mime) => Some((0, 10)),
             _ => None,
         }
+    }
+
+    fn contains(&self, sequence: u32, scope: SearchScope, field: &[u8], needle: &[u8]) -> bool {
+        // LA BOÎTE D'ÉPREUVE PORTE UN SEUL MESSAGE-TYPE : ce qu'on éprouve ici
+        // est le PLOMBAGE — que la session pose la bonne question et rende la
+        // bonne réponse —, pas la lecture d'un message, qui vit dans le magasin.
+        if self.info(sequence).is_none() {
+            return false;
+        }
+        const SUJET: &[u8] = b"la facture de mars";
+        const CORPS: &[u8] = b"le corps du message";
+        let ou: &[u8] = match scope {
+            SearchScope::Header if field.eq_ignore_ascii_case(b"subject") => SUJET,
+            // Un champ qu'on ne porte pas : il n'existe pas.
+            SearchScope::Header => return false,
+            SearchScope::Body => CORPS,
+            SearchScope::Text => SUJET,
+        };
+        if needle.is_empty() {
+            return true;
+        }
+        ou.windows(needle.len()).any(|fenetre| {
+            fenetre
+                .iter()
+                .zip(needle)
+                .all(|(vu, cherche)| vu.eq_ignore_ascii_case(cherche))
+        })
     }
 
     fn header_fields_len(
@@ -2860,11 +2887,67 @@ fn le_jeu_de_caracteres_se_lit_ou_se_refuse() {
 #[test]
 fn un_critere_de_recherche_non_servi_se_refuse() {
     let mut session = selectionnee();
-    let (texte, _) = dire(&mut session, b"a003 SEARCH SUBJECT facture\r\n");
+    let (texte, _) = dire(&mut session, b"a003 SEARCH KEYWORD $Important\r\n");
     assert!(
         texte.contains("NO [CANNOT] This search key is not served yet"),
         "{texte}"
     );
+}
+
+// ── Chercher DANS les messages ──────────────────────────────────────────────
+
+/// **LA SESSION NE LIT PAS LES MESSAGES** : elle passe la question à la boîte.
+/// Ce qu'on éprouve ici est qu'elle pose la BONNE question et rend la bonne
+/// réponse.
+#[test]
+fn un_critere_de_contenu_passe_par_la_boite() {
+    let mut session = selectionnee();
+    // La boîte d'épreuve porte « la facture de mars » en sujet.
+    let trouve = ecouler(&mut session, b"a003 SEARCH SUBJECT facture\r\n");
+    assert!(
+        trouve.contains("* ESEARCH (TAG \"a003\") ALL 1:3"),
+        "{trouve}"
+    );
+    // La casse ne compte pas (§6.4.4).
+    let casse = ecouler(&mut session, b"a004 SEARCH SUBJECT FACTURE\r\n");
+    assert!(casse.contains("ALL 1:3"), "{casse}");
+    // Ce qui ne s'y trouve pas ne se trouve pas.
+    let rien = ecouler(&mut session, b"a005 SEARCH SUBJECT devis\r\n");
+    assert!(!rien.contains("ALL"), "{rien}");
+}
+
+/// Le corps et l'en-tête ne sont pas le même endroit.
+#[test]
+fn le_corps_et_l_en_tete_ne_sont_pas_le_meme_endroit() {
+    let mut session = selectionnee();
+    let corps = ecouler(&mut session, b"a003 SEARCH BODY corps\r\n");
+    assert!(corps.contains("ALL 1:3"), "{corps}");
+    // « corps » n'est pas dans le sujet.
+    let sujet = ecouler(&mut session, b"a004 SEARCH SUBJECT corps\r\n");
+    assert!(!sujet.contains("ALL"), "{sujet}");
+    // Un champ que le message ne porte pas ne se trouve pas.
+    let absent = ecouler(&mut session, b"a005 SEARCH HEADER X-Rien valeur\r\n");
+    assert!(!absent.contains("ALL"), "{absent}");
+}
+
+/// Une chaîne citée garde ses blancs, jusque dans la session.
+#[test]
+fn une_chaine_citee_traverse_la_session() {
+    let mut session = selectionnee();
+    let trouve = ecouler(&mut session, b"a003 SEARCH SUBJECT \"facture de mars\"\r\n");
+    assert!(trouve.contains("ALL 1:3"), "{trouve}");
+    let rien = ecouler(&mut session, b"a004 SEARCH SUBJECT \"facture de juin\"\r\n");
+    assert!(!rien.contains("ALL"), "{rien}");
+}
+
+/// Les critères de contenu se combinent avec les autres.
+#[test]
+fn un_critere_de_contenu_se_combine() {
+    let mut session = selectionnee();
+    let fil = ecouler(&mut session, b"a003 SEARCH SEEN SUBJECT facture\r\n");
+    assert!(fil.contains("ALL 2"), "{fil}");
+    let nie = ecouler(&mut session, b"a004 SEARCH NOT SUBJECT facture\r\n");
+    assert!(!nie.contains("ALL"), "{nie}");
 }
 
 #[test]

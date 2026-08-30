@@ -711,8 +711,11 @@ async fn servir(fichier: &Path) -> Result<(), String> {
              UN NOM DE BOÎTE \
              DEVIENT UN RÉPERTOIRE : seuls les noms qu'on sait transcrire sans risque sont \
              acceptés, et jamais transformés. UN `EXPUNGE` EFFACE POUR DE BON, et un `CLOSE` \
-             aussi. Les critères de recherche qui demandent de LIRE le message (`SUBJECT`, \
-             `BODY`, `FROM`…) sont refusés, pas rendus faux."
+             aussi. ON CHERCHE DANS LE TEXTE, PAS DANS LES OCTETS : les mots encodés se \
+             défont, les corps se transfert-décodent, et l'on ne cherche que dans du texte — \
+             au plus un mébioctet par partie, et seulement en `us-ascii`, `utf-8` ou \
+             `iso-8859-1`. `IDLE`, `NAMESPACE`, `ENABLE` et `SUBSCRIBE` répondent qu'ils ne \
+             sont pas servis."
         );
         Some(tokio::spawn(serve_imap(
             ecouteur,

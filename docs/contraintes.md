@@ -1431,8 +1431,8 @@ ses lignes d'en-tête, `[3.HEADER]`, `[3.TEXT]` et `[3.1]` du message encapsulé
 `[9]` qui vaut `NIL` sans empêcher l'`UID` qui suit, une demande partielle sur une
 partie, et deux parties dans une même commande.
 
-Ce qui n'est toujours pas servi : les critères de `SEARCH` qui lisent le message,
-et `IDLE`.
+Ce qui n'est toujours pas servi : `IDLE`, `NAMESPACE`, `ENABLE`, `SUBSCRIBE` et
+`BINARY[…]`.
 
 ## `HEADER.FIELDS` : quelques champs, depuis le 2026-08-30
 
@@ -1476,6 +1476,58 @@ deux champs rendus dans l'ordre du message et non dans celui de la demande, le
 choix inverse, `[2.HEADER.FIELDS]` qui rend le sujet du message porté sans son
 `X-Interne`, `[1.HEADER.FIELDS]` qui vaut `NIL` sur une partie qui n'encapsule
 rien, un choix mêlé à `UID` et `FLAGS`, et une demande partielle.
+
+## Chercher DANS les messages, depuis le 2026-08-30
+
+`SUBJECT`, `FROM`, `TO`, `CC`, `BCC`, `HEADER`, `BODY`, `TEXT` étaient refusés, et
+LE REFUS ÉTAIT LE BON CHOIX tant qu'on ne savait pas décoder : un `SEARCH SUBJECT
+"facture"` qui répondrait « aucun résultat » sur un message intitulé
+`=?utf-8?B?ZmFjdHVyZQ==?=` serait un mensonge exact — et un mensonge qu'aucun
+client ne peut détecter. Ce qui a changé, c'est qu'on sait décoder.
+
+**ON CHERCHE DANS LE TEXTE, PAS DANS LES OCTETS.** C'est l'inverse de ce que rend
+une `ENVELOPE`, et ce n'est pas une contradiction : rendre et chercher ne
+demandent pas la même chose. L'un doit rendre ce que le message PORTE — le client
+doit pouvoir le vérifier —, l'autre doit trouver ce qu'il VEUT DIRE.
+
+Il a donc fallu deux décodeurs, tous deux dans `ams-mime`, sans allocation :
+
+- **Les mots encodés** (RFC 2047), `B` et `Q`, avec `us-ascii`, `utf-8` et
+  `iso-8859-1` — cette dernière se convertit sans table. Le blanc entre deux mots
+  encodés disparaît (§6.2) : il ne sert qu'à les séparer, et le garder couperait
+  en deux un texte que l'expéditeur a dû découper pour tenir dans une ligne. Un
+  mot mal formé est du texte ordinaire (§6.3), et non une erreur.
+- **Les encodages de transfert** (RFC 2045 §6) : base64 et quoted-printable,
+  coupures molles comprises. Un mot coupé en deux par un `=` de fin de ligne se
+  retrouve entier — l'oublier ferait apparaître des fins de ligne au milieu des
+  mots, et manquer ce qu'on cherche.
+
+`decoded_max` majore ce que le décodage occupera SANS LIRE L'ENTRÉE, parce que le
+décodage GRANDIT : quatre caractères de base64 rendent trois octets
+`iso-8859-1`, qui font six octets d'UTF-8. C'est la propriété que
+`fuzz_ams_mime_decode` éprouve — 1 835 632 exécutions, sans panne — avec celle
+qu'un encodage inconnu est l'identité.
+
+**TROIS CHOSES NE SE FONT PAS, ET SE DISENT** : un jeu de caractères qu'on ne
+sait pas convertir laisse son mot encodé tel quel — mieux vaut ne pas trouver que
+de trouver autre chose ; la casse ne se replie que pour l'ASCII, faute des tables
+qu'il faudrait ; et l'on ne cherche que dans du TEXTE, au plus un mébioctet par
+partie — une pièce jointe binaire ne se cherche pas par son texte, et parcourir
+vingt mébioctets coûterait à ce serveur ce qu'un client peut demander autant de
+fois qu'il veut.
+
+**NI LA GRAMMAIRE NI LA SESSION NE LISENT LE MESSAGE** (C1). Le nœud dit QUOI
+chercher et OÙ ; celui qui a le message dit si ça s'y trouve. `Search::matches`
+prend donc une fermeture — et une fermeture DYNAMIQUE : générique, elle serait
+recopiée une fois par appelant, et chaque copie porterait des chemins que
+personne n'emprunte. Le gate de couverture l'a montré avant qu'on l'écrive :
+quinze régions apparues d'un coup dans une crate qu'on n'avait pas touchée.
+
+Éprouvé jusqu'au binaire, sur deux messages : un sujet en base64 trouvé par son
+texte, un sujet en `iso-8859-1` avec son `_` valant espace, un corps en
+quoted-printable dont un mot est coupé par une coupure molle, une pièce jointe
+base64 qui ne se trouve PAS par son contenu encodé, et la forme encodée du sujet
+qui ne se trouve pas non plus — puisqu'on cherche le texte.
 
 ## Le signeur DKIM a un appelant, depuis le 2026-08-30
 
@@ -2135,6 +2187,6 @@ persistant, et lecture sans verrou côté IMAP), C14 (`X25519MLKEM768` en tête)
 `<CRLF>.<CRLF>`, refuse tout `CR` ou `LF` isolé, et le fuzz éprouve que le
 découpage des lectures ne change rien au verdict.
 
-Ce qui manque, et qu'aucune phrase ne doit laisser croire acquis : les critères
-de `SEARCH` qui lisent le message ; `IDLE` ; la file de réémission des messages
-sortants ; et toute interface HTTP.
+Ce qui manque, et qu'aucune phrase ne doit laisser croire acquis : `IDLE`,
+`NAMESPACE`, `ENABLE`, `SUBSCRIBE` et `BINARY[…]` ; la file de réémission
+des messages sortants ; et toute interface HTTP.

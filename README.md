@@ -996,9 +996,45 @@ nom tel quel donnerait un choix qui ne désigne pas ce que le client a demandé.
 C'est donc un refus de service — `NO [UNAVAILABLE]` —, et non une faute : les
 confondre ferait chercher au client une erreur là où il n'y en a pas.
 
-Ce qui n'y est toujours pas : les critères de `SEARCH` qui lisent le message, et
-`IDLE`. Le serveur dit au démarrage ce qu'il sert et ce qu'il ne sert pas, plutôt
-que de laisser un port ouvert le faire croire.
+### Chercher DANS les messages
+
+`SUBJECT`, `FROM`, `TO`, `CC`, `BCC`, `HEADER`, `BODY`, `TEXT` : ces critères
+étaient refusés, et le refus était le bon choix tant qu'on ne savait pas décoder.
+Un `SEARCH SUBJECT "facture"` qui répondrait « aucun résultat » sur un message
+intitulé `=?utf-8?B?ZmFjdHVyZQ==?=` serait un mensonge exact — et un mensonge
+qu'aucun client ne peut détecter.
+
+**ON CHERCHE DANS LE TEXTE, PAS DANS LES OCTETS.** C'est l'inverse de ce que rend
+une `ENVELOPE`, et ce n'est pas une contradiction : rendre et chercher ne
+demandent pas la même chose. L'un doit rendre ce que le message porte — le client
+doit pouvoir le vérifier —, l'autre doit trouver ce qu'il veut dire. Les mots
+encodés de la RFC 2047 se défont donc, `iso-8859-1` compris, et les corps se
+transfert-décodent : base64, quoted-printable, coupures molles comprises. Un mot
+coupé en deux par un `=` de fin de ligne se retrouve entier.
+
+Trois choses ne se font pas, et se disent :
+
+- **Un jeu de caractères qu'on ne sait pas convertir** — autre qu'`us-ascii`,
+  `utf-8` et `iso-8859-1` — laisse son mot encodé tel quel. Il ne se trouvera
+  donc pas par son texte, et c'est la vérité : mieux vaut ne pas trouver que de
+  trouver autre chose.
+- **La casse ne se replie que pour l'ASCII.** Replier les majuscules d'un
+  alphabet quelconque demande des tables que ce serveur n'a pas, et le prétendre
+  à moitié serait pire que de le dire.
+- **On ne cherche que dans du texte**, et au plus un mébioctet par partie. Une
+  pièce jointe binaire ne se cherche pas par son texte, et parcourir vingt
+  mébioctets coûterait à ce serveur ce qu'un client peut demander autant de fois
+  qu'il veut.
+
+**La session, elle, ne lit toujours aucun message** : elle passe la question à la
+boîte. La grammaire non plus — le nœud dit QUOI chercher et OÙ, celui qui a le
+message dit si ça s'y trouve. C'est une fermeture, et elle est *dynamique* : une
+fonction générique serait recopiée une fois par appelant, et chaque copie
+porterait des chemins que personne n'emprunte.
+
+Ce qui n'y est toujours pas : `IDLE`, `NAMESPACE`, `ENABLE`, `SUBSCRIBE` et
+`BINARY[…]`. Le serveur dit au démarrage ce qu'il sert et ce qu'il ne sert pas,
+plutôt que de laisser un port ouvert le faire croire.
 
 ## Émettre : le client SMTP sortant
 

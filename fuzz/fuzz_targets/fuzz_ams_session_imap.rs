@@ -38,7 +38,7 @@ use libfuzzer_sys::fuzz_target;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use ams_proto_imap::{CommandReader, Flags, Limits, Need, PartWhat, StoreMode};
+use ams_proto_imap::{CommandReader, Flags, Limits, Need, PartWhat, SearchScope, StoreMode};
 use ams_sasl::Credentials;
 use ams_session::Authenticator;
 use ams_session::imap::{Action, FetchChunk, Mailbox, Mailboxes, MessageInfo, Session, State};
@@ -119,6 +119,13 @@ impl Mailbox for Boite {
             0 => None,
             _ => Some((0, info.size)),
         }
+    }
+
+    fn contains(&self, sequence: u32, _scope: SearchScope, _field: &[u8], needle: &[u8]) -> bool {
+        // UN MESSAGE SUR DEUX RÉPOND OUI, et c'est délibéré : la session doit
+        // conclure aussi bien quand la recherche trouve que quand elle ne trouve
+        // rien, et l'alterner éprouve les deux dans une même émission.
+        self.info(sequence).is_some() && (sequence % 2 == 0 || needle.is_empty())
     }
 
     fn header_fields_len(
