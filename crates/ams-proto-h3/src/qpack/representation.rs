@@ -230,7 +230,7 @@ fn couper(tampon: &mut [u8], ou: usize) -> (&[u8], &mut [u8]) {
 /// C'est la même chaîne que partout ailleurs — un fanion, une longueur, des
 /// octets —, mais son préfixe fait `bits` bits au lieu de sept, et le fanion se
 /// trouve juste au-dessus.
-fn decode_string_prefixe<'o>(
+pub(super) fn decode_string_prefixe<'o>(
     entree: &[u8],
     bits: u32,
     out: &'o mut [u8],

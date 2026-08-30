@@ -22,10 +22,15 @@
 //! encore arrivées. Un encodeur qui ne référence rien de dynamique ne bloque
 //! jamais personne — et c'est le mode que ce serveur emploie par défaut.
 
+mod instruction;
 mod prefix;
 mod representation;
 mod table_statique;
 
+pub use instruction::{
+    DecodedInstruction, DecoderInstruction, EncoderInstruction, check_encoder_instruction,
+    read_decoder_instruction, read_encoder_instruction, write_decoder_instruction,
+};
 pub use prefix::{Prefix, max_entries, read_prefix};
 pub use representation::{Decoded, FieldLine, Table, read_field_line};
 pub use table_statique::{STATIQUE, STATIQUE_LEN, entree_statique};

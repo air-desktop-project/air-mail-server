@@ -116,6 +116,12 @@ pub enum Reason {
     BadFieldLine,
     /// Un index QPACK qui ne désigne aucune entrée.
     BadIndex,
+    /// Une instruction de flux d'encodeur mal formée (§4.3).
+    BadEncoderInstruction,
+    /// Une instruction de flux de décodeur qu'on ne peut pas écrire (§4.4).
+    BadDecoderInstruction,
+    /// Une insertion dans une table dynamique qu'on a annoncée nulle (§3.2.3).
+    DynamicTableRefused,
 }
 
 impl Reason {
@@ -137,6 +143,12 @@ impl Reason {
             Self::BadInsertCount | Self::BadFieldLine | Self::BadIndex => {
                 H3Error::QpackDecompressionFailed
             }
+            // §6 nomme un code par FLUX : le pair doit savoir lequel de ses deux
+            // flux QPACK a fauté, et non seulement que l'un des deux l'a fait.
+            Self::BadEncoderInstruction | Self::DynamicTableRefused => {
+                H3Error::QpackEncoderStreamError
+            }
+            Self::BadDecoderInstruction => H3Error::QpackDecoderStreamError,
         }
     }
 }
@@ -182,6 +194,9 @@ impl core::fmt::Display for Error {
             Reason::BadInsertCount => "un compte d'insertions qui ne se reconstruit pas",
             Reason::BadFieldLine => "une représentation de champ mal formée",
             Reason::BadIndex => "un index qui ne désigne aucune entrée",
+            Reason::BadEncoderInstruction => "une instruction d'encodeur mal formée",
+            Reason::BadDecoderInstruction => "une instruction de décodeur qu'on ne peut pas écrire",
+            Reason::DynamicTableRefused => "une insertion dans une table qu'on a annoncée nulle",
         };
         write!(f, "{quoi} (code 0x{:04x})", self.code().value())
     }

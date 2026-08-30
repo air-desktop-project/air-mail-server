@@ -86,6 +86,21 @@ fn chaque_raison_porte_son_code_et_se_dit() {
             H3Error::QpackDecompressionFailed,
             "index qui ne désigne",
         ),
+        (
+            Reason::BadEncoderInstruction,
+            H3Error::QpackEncoderStreamError,
+            "instruction d'encodeur",
+        ),
+        (
+            Reason::BadDecoderInstruction,
+            H3Error::QpackDecoderStreamError,
+            "instruction de décodeur",
+        ),
+        (
+            Reason::DynamicTableRefused,
+            H3Error::QpackEncoderStreamError,
+            "table qu'on a annoncée nulle",
+        ),
     ];
     for (raison, code, morceau) in cas {
         let faute = Error::new(raison);

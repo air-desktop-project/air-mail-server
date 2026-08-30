@@ -34,12 +34,20 @@
 //! 8. **UN COMPTE D'INSERTIONS RECONSTRUIT RESTE DANS SA FENÊTRE**, et le rang
 //!    de la section ne descend jamais sous zéro. Se tromper de tour décalerait
 //!    toute la table, sans qu'aucune faute ne se voie.
+//! 9. **AUCUNE INSERTION NE PASSE QUAND ON ANNONCE UNE TABLE NULLE** (§3.2.3) :
+//!    c'est ce qui ferme d'un coup le blocage de compression et CRIME à la
+//!    réception, et une seule qui passerait rouvrirait les deux.
+//! 10. **CE QU'ON ÉCRIT SUR LE FLUX DE DÉCODEUR SE RELIT IDENTIQUE.**
 
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
 
-use ams_proto_h3::qpack::{FieldLine, max_entries, read_field_line, read_prefix};
+use ams_proto_h3::qpack::{
+    EncoderInstruction, FieldLine, check_encoder_instruction, max_entries,
+    read_decoder_instruction, read_encoder_instruction, read_field_line, read_prefix,
+    write_decoder_instruction,
+};
 use ams_proto_h3::{
     FrameHeader, FrameKind, Placement, Reason, Settings, StreamHead, StreamKind, accept_stream,
     read_stream_head,
@@ -131,6 +139,44 @@ fuzz_target!(|donnees: &[u8]| {
             if reste.is_empty() {
                 break;
             }
+        }
+    }
+
+    // PROPRIÉTÉ 9 : aucune insertion ne passe avec une table nulle.
+    {
+        let mut place = [0_u8; 4096];
+        let mut libre = place.as_mut_slice();
+        let mut reste = donnees;
+        let mut tours = 0_u32;
+        while let Ok(decode) = read_encoder_instruction(reste, libre) {
+            tours = tours.saturating_add(1);
+            assert!(tours < 100_000, "le décodeur d'instructions n'avance pas");
+            assert!(decode.read >= 1, "une instruction sans octet consommé");
+            assert!(decode.read <= reste.len());
+            let admise = check_encoder_instruction(decode.instruction, 0).is_ok();
+            match decode.instruction {
+                EncoderInstruction::SetCapacity { capacity } => {
+                    assert_eq!(admise, capacity == 0, "seule la capacité nulle passe");
+                }
+                _ => assert!(!admise, "une insertion est passée sans table"),
+            }
+            reste = reste.get(decode.read..).unwrap_or_default();
+            libre = decode.rest;
+            if reste.is_empty() {
+                break;
+            }
+        }
+    }
+
+    // PROPRIÉTÉ 10 : le flux de décodeur fait un aller-retour.
+    if let Ok((instruction, lus)) = read_decoder_instruction(donnees) {
+        assert!(lus >= 1 && lus <= donnees.len());
+        let mut place = [0_u8; 16];
+        if let Ok(ecrits) = write_decoder_instruction(instruction, &mut place) {
+            let (relue, encore) = read_decoder_instruction(place.get(..ecrits).unwrap_or_default())
+                .expect("ce qu'on écrit se relit");
+            assert_eq!(relue, instruction, "un aller-retour a changé l'instruction");
+            assert_eq!(encore, ecrits);
         }
     }
 

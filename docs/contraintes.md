@@ -3551,3 +3551,54 @@ type. En HPACK, le nom était une chaîne ordinaire, avec son propre octet.
 Lire cette longueur avec un préfixe de sept bits, comme le ferait une chaîne
 ordinaire, la lirait de travers. C'est le genre de différence qu'on ne voit pas
 en relisant, et qu'on voit en écrivant le test.
+
+## Une table dynamique QPACK de zéro octet, et ce que cela ferme
+
+§3.2.3 : « An encoder MUST NOT insert entries into the dynamic table […] if the
+decoder's maximum table capacity is zero. » Annoncer zéro veut donc dire
+qu'aucune insertion n'est licite, et cela ferme **trois choses d'un coup** :
+
+- **le blocage de compression.** Une section ne peut dépendre d'aucune
+  insertion, donc ne peut jamais attendre. Le blocage de tête de ligne qu'on a
+  retiré du transport ne revient pas par la compression.
+- **CRIME et BREACH à la réception.** Une table dynamique partagée entre des
+  champs d'origines différentes est ce qui rend l'attaque possible ; sans table,
+  il n'y a rien à mesurer. C'est le pendant, côté décodage, de l'encodeur HPACK
+  qui n'indexe jamais.
+- **tout un étage de code.** Une table qu'on annonce inutilisable serait un
+  chemin qu'aucune entrée ne peut emprunter — et la couverture le dirait.
+
+Le coût est quelques dizaines d'octets par requête, que le client aurait
+économisés en indexant. C7 tranche, et il n'y a pas d'arbitrage difficile : une
+API REST n'envoie pas mille requêtes identiques par connexion.
+
+**On lit quand même les instructions.** Un pair qui en envoie doit s'entendre
+dire pourquoi on refuse — et non voir sa connexion se fermer sans un mot. C'est
+aussi ce qui permettra d'annoncer une table plus tard sans réécrire la lecture.
+
+### Lire et juger sont deux choses
+
+La lecture dit ce que le pair a écrit ; le jugement dit si nous l'acceptons, et
+cela dépend de ce que NOUS avons annoncé. Les mêmes octets sont licites pour un
+serveur qui tient une table et fautifs pour celui-ci.
+
+Une lecture qui refuserait d'elle-même ne pourrait plus servir aux deux — et le
+jour où l'on voudrait une table, il faudrait la réécrire. C'est pourquoi
+`read_encoder_instruction` et `check_encoder_instruction` sont deux fonctions.
+
+### Un code par flux, et non un code par faute
+
+§6 de RFC 9204 nomme `QPACK_ENCODER_STREAM_ERROR` et
+`QPACK_DECODER_STREAM_ERROR` séparément. Le pair doit savoir LEQUEL de ses deux
+flux QPACK a fauté, et non seulement que l'un des deux l'a fait — il n'a pas les
+mêmes choses à corriger.
+
+### La borne d'une représentation n'est pas celle du protocole
+
+Les entiers à préfixe de RFC 7541, que QPACK réemploie, s'arrêtent à 2^32-1. Un
+numéro de flux QUIC va jusqu'à 2^62-1. Un accusé de réception pour un flux
+au-delà de quatre milliards ne peut donc pas s'écrire.
+
+On le dit plutôt que de tronquer : un accusé tronqué désignerait un AUTRE flux,
+et l'encodeur du pair évincerait des entrées qu'une section en vol référence
+encore.
