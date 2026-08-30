@@ -19,7 +19,7 @@ use ams_loop_tokio::SharedGuard;
 use ams_loop_tokio::imap::{ImapService, serve_imap_connection};
 use ams_proto_imap::Limits;
 use ams_proto_imap::{Flags, PartWhat, SearchScope, StoreMode};
-use ams_session::imap::{Mailbox, Mailboxes, MessageInfo};
+use ams_session::imap::{BinarySize, Mailbox, Mailboxes, MessageInfo};
 use commun::{COMPTE, NotreDomaine, PAIR, SECRET, materiel};
 use core::time::Duration;
 use std::sync::Arc;
@@ -130,6 +130,44 @@ impl Mailbox for Boite {
                 PartWhat::HeaderFields { .. } => return None,
             },
         )
+    }
+
+    fn binary_size(&self, sequence: u32, path: &[u32]) -> BinarySize {
+        let Some(corps) = MESSAGES.get(usize::try_from(sequence).unwrap_or(0).saturating_sub(1))
+        else {
+            return BinarySize::Absent;
+        };
+        // Les messages d'épreuve ne sont pas encodés : leur contenu décodé EST
+        // leur corps. Ce qu'on éprouve ici est le câblage, pas le décodage.
+        if !matches!(path, [] | [1]) {
+            return BinarySize::Absent;
+        }
+        let Ok(message) = ams_mime::Message::parse(corps, &ams_mime::Limits::DEFAULT) else {
+            return BinarySize::Absent;
+        };
+        BinarySize::Octets(u64::try_from(message.body().len()).unwrap_or(0))
+    }
+
+    fn binary(&self, sequence: u32, path: &[u32], raw: u64, out: &mut [u8]) -> (u64, usize) {
+        let Some(corps) = MESSAGES.get(usize::try_from(sequence).unwrap_or(0).saturating_sub(1))
+        else {
+            return (0, 0);
+        };
+        if !matches!(path, [] | [1]) {
+            return (0, 0);
+        }
+        let Ok(message) = ams_mime::Message::parse(corps, &ams_mime::Limits::DEFAULT) else {
+            return (0, 0);
+        };
+        let reste = message
+            .body()
+            .get(usize::try_from(raw).unwrap_or(usize::MAX)..)
+            .unwrap_or_default();
+        let voulu = reste.len().min(out.len());
+        for (place, octet) in out.iter_mut().zip(reste.get(..voulu).unwrap_or_default()) {
+            *place = *octet;
+        }
+        (u64::try_from(voulu).unwrap_or(0), voulu)
     }
 
     fn contains(&self, sequence: u32, scope: SearchScope, field: &[u8], needle: &[u8]) -> bool {
@@ -1311,4 +1349,44 @@ async fn un_choix_de_champs_traverse_la_socket() {
     let sauf = jusqu_a(&mut lecteur, "a005 ").await;
     assert!(sauf.contains("From: a@x.test"), "{sauf}");
     assert!(!sauf.contains("Subject: un"), "{sauf}");
+}
+
+/// **`BINARY` traverse la socket**, annoncé par un littéral8.
+#[tokio::test]
+async fn un_binaire_traverse_la_socket() {
+    let Some(materiel) = materiel("imap-binaire") else {
+        return;
+    };
+    let mut lecteur = authentifiee(&materiel).await;
+    lecteur
+        .get_mut()
+        .write_all(b"a003 SELECT INBOX\r\n")
+        .await
+        .expect("écriture");
+    jusqu_a(&mut lecteur, "a003 ").await;
+
+    lecteur
+        .get_mut()
+        .write_all(b"a004 FETCH 1 (BINARY.SIZE[1] BINARY.PEEK[1])\r\n")
+        .await
+        .expect("écriture");
+    let binaire = jusqu_a(&mut lecteur, "a004 ").await;
+    assert_eq!(
+        binaire,
+        "* 1 FETCH (BINARY.SIZE[1] 16 BINARY[1] ~{16}\r\nPremier corps.\r\n)\r\n\
+         a004 OK FETCH completed\r\n",
+        "{binaire}"
+    );
+
+    // Une section absente vaut `NIL`, et n'empêche pas ce qui suit.
+    lecteur
+        .get_mut()
+        .write_all(b"a005 FETCH 1 (BINARY.PEEK[4] UID)\r\n")
+        .await
+        .expect("écriture");
+    let absente = jusqu_a(&mut lecteur, "a005 ").await;
+    assert_eq!(
+        absente, "* 1 FETCH (BINARY[4] NIL UID 1)\r\na005 OK FETCH completed\r\n",
+        "{absente}"
+    );
 }

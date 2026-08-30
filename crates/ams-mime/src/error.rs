@@ -92,6 +92,13 @@ pub enum Error {
         limit: usize,
     },
 
+    /// Un `Content-Transfer-Encoding` qu'on ne sait pas défaire.
+    ///
+    /// **`BINARY` l'exige** : RFC 9051 §6.4.5 veut qu'un serveur qui ne sait pas
+    /// décoder une partie le DISE (`[UNKNOWN-CTE]`), plutôt que de rendre les
+    /// octets encodés en les faisant passer pour le contenu.
+    UnknownEncoding,
+
     /// Le tampon offert ne suffit pas à ce qu'on veut y écrire.
     ///
     /// Ce n'est pas une faute de format : c'est l'appelant qui n'a pas donné
@@ -125,6 +132,9 @@ impl fmt::Display for Error {
             }
             Error::LineTooLong { line, limit } => {
                 write!(f, "ligne {line} : plus de {limit} octets")
+            }
+            Error::UnknownEncoding => {
+                f.write_str("un encodage de transfert qu'on ne sait pas défaire")
             }
             Error::BufferTooSmall => f.write_str("le tampon offert ne suffit pas"),
             Error::NotPrintable => {

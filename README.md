@@ -1032,9 +1032,45 @@ message dit si ça s'y trouve. C'est une fermeture, et elle est *dynamique* : un
 fonction générique serait recopiée une fois par appelant, et chaque copie
 porterait des chemins que personne n'emprunte.
 
-Ce qui n'y est toujours pas : `IDLE`, `NAMESPACE`, `ENABLE`, `SUBSCRIBE` et
-`BINARY[…]`. Le serveur dit au démarrage ce qu'il sert et ce qu'il ne sert pas,
-plutôt que de laisser un port ouvert le faire croire.
+### `BINARY` : ce que les octets veulent dire
+
+`BODY[1]` rend les octets du message ; `BINARY[1]` rend ce qu'ils **veulent
+dire**, transfert-décodé. `BINARY.SIZE[1]` en donne la taille décodée — celle du
+fichier ne s'en déduit pas, puisque le pliage, les blancs et les coupures molles
+ne rendent aucun octet.
+
+**C'EST LA SEULE COMMANDE D'IMAP QUI ÉCHOUE POUR CE QU'UN MESSAGE PORTE.** Un
+encodage qu'on ne sait pas défaire vaut `NO [UNKNOWN-CTE]` (§6.4.5) : rendre les
+octets encodés en les faisant passer pour le contenu tromperait le client sans
+qu'il puisse s'en apercevoir. Les données déjà émises restent sur le fil — le
+`NO` lui dit de ne pas s'y fier.
+
+**Un littéral8, et non un littéral.** `~{n}` plutôt que `{n}` : `BINARY` rend des
+octets quelconques, `NUL` compris, ce qu'un littéral ordinaire n'a pas le droit
+de porter (§4.3).
+
+Deux difficultés, et leurs réponses :
+
+- **Une pièce jointe décodée ne tient pas en mémoire**, et redécoder depuis le
+  début à chaque morceau serait quadratique. Le décodeur s'arrête donc là où **il
+  n'y a rien à retenir** — un groupe complet de base64, un octet qui n'ouvre pas
+  d'échappement — et dit combien d'octets BRUTS il a lus. La session porte ce
+  rang d'un morceau à l'autre, comme elle porte le décalage d'un corps.
+- **La demande partielle porte sur le contenu décodé.** `BINARY[1]<100.50>` ne se
+  sert pas par un déplacement dans le fichier : le rang décodé et le rang brut ne
+  sont pas proportionnels. Il faut *décoder ce qu'on jette*, et l'étape
+  d'écoulement porte donc deux compteurs — où reprendre, et ce qu'il reste à
+  jeter.
+
+Un détail qui coûte la fin de chaque pièce jointe si on le manque : **le dernier
+groupe de base64 est partiel**. Le remplissage fait qu'il porte deux ou trois
+caractères pour un ou deux octets, et un décodeur qui n'attendrait que des
+groupes entiers perdrait la queue de tout. Seul l'appelant sait où le contenu
+s'arrête — le décodeur le lui demande donc.
+
+Ce qui n'y est toujours pas : `IDLE`, `NAMESPACE`, `ENABLE` et `SUBSCRIBE`. Le
+serveur dit au démarrage ce qu'il sert et ce qu'il ne sert pas, plutôt que de
+laisser un port ouvert le faire croire.
 
 ## Émettre : le client SMTP sortant
 

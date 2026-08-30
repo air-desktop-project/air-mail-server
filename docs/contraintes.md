@@ -1431,8 +1431,7 @@ ses lignes d'en-tête, `[3.HEADER]`, `[3.TEXT]` et `[3.1]` du message encapsulé
 `[9]` qui vaut `NIL` sans empêcher l'`UID` qui suit, une demande partielle sur une
 partie, et deux parties dans une même commande.
 
-Ce qui n'est toujours pas servi : `IDLE`, `NAMESPACE`, `ENABLE`, `SUBSCRIBE` et
-`BINARY[…]`.
+Ce qui n'est toujours pas servi : `IDLE`, `NAMESPACE`, `ENABLE` et `SUBSCRIBE`.
 
 ## `HEADER.FIELDS` : quelques champs, depuis le 2026-08-30
 
@@ -1476,6 +1475,55 @@ deux champs rendus dans l'ordre du message et non dans celui de la demande, le
 choix inverse, `[2.HEADER.FIELDS]` qui rend le sujet du message porté sans son
 `X-Interne`, `[1.HEADER.FIELDS]` qui vaut `NIL` sur une partie qui n'encapsule
 rien, un choix mêlé à `UID` et `FLAGS`, et une demande partielle.
+
+## `BINARY` : ce que les octets veulent dire, depuis le 2026-08-30
+
+`BODY[1]` rend les octets du message ; `BINARY[1]` rend ce qu'ils VEULENT DIRE,
+transfert-décodé. `BINARY.SIZE[1]` en donne la taille décodée — celle du fichier
+ne s'en déduit pas, puisque le pliage, les blancs et les coupures molles ne
+rendent aucun octet, et c'est pourquoi le trait porte deux méthodes : un littéral
+s'annonce avant ses octets.
+
+**C'EST LA SEULE COMMANDE D'IMAP QUI ÉCHOUE POUR CE QU'UN MESSAGE PORTE.** Un
+encodage qu'on ne sait pas défaire vaut `NO [UNKNOWN-CTE]` (§6.4.5) : rendre les
+octets encodés en les faisant passer pour le contenu tromperait le client sans
+qu'il puisse s'en apercevoir. Les données déjà émises restent sur le fil — le
+`NO` lui dit de ne pas s'y fier.
+
+**UN LITTÉRAL8, ET NON UN LITTÉRAL** : `~{n}` plutôt que `{n}`. `BINARY` rend des
+octets quelconques, `NUL` compris, ce qu'un littéral ordinaire n'a pas le droit
+de porter (§4.3). Le tilde le dit au client avant qu'il lise.
+
+**UNE PIÈCE JOINTE DÉCODÉE NE TIENT PAS EN MÉMOIRE**, et redécoder depuis le
+début à chaque morceau serait quadratique. `decode_chunk` s'arrête donc là où IL
+N'Y A RIEN À RETENIR — un groupe complet de base64, un octet qui n'ouvre pas
+d'échappement — et dit combien d'octets BRUTS il a lus. La session porte ce rang
+d'un morceau à l'autre, comme elle porte le décalage d'un corps. Reprendre au
+milieu d'un groupe demanderait de retenir les bits en cours, donc un état que
+l'appelant finirait par perdre.
+
+**LA DEMANDE PARTIELLE PORTE SUR LE CONTENU DÉCODÉ.** `BINARY[1]<100.50>` ne se
+sert pas par un déplacement dans le fichier : le rang décodé et le rang brut ne
+sont pas proportionnels. Il faut DÉCODER CE QU'ON JETTE, et l'étape d'écoulement
+porte donc deux compteurs — où reprendre, et ce qu'il reste à jeter.
+
+**LE DERNIER GROUPE DE BASE64 EST PARTIEL**, et le manquer coûte la fin de chaque
+pièce jointe : `YQ==` porte deux caractères pour un octet, `YWI=` trois pour
+deux. Seul l'appelant sait où le contenu s'arrête — le décodeur le lui demande
+donc, plutôt que de le deviner. Le défaut a été trouvé par l'épreuve de reprise,
+qui rendait « la facture de mars et d'avr » au lieu de « d'avril ».
+
+Deux gardes qu'aucune entrée ne pouvait faire céder ont disparu au passage : les
+écritures du décodeur passent par `zip` — la place a été vérifiée juste avant —,
+et l'écoulement BOUCLE au lieu de se rappeler, ce qui faisait dépendre la pile de
+ce qu'un message porte.
+
+Éprouvé jusqu'au binaire : une pièce jointe de deux mille quarante-huit octets
+portant tous les octets possibles, `NUL` compris, rendue IDENTIQUE à travers
+plusieurs fenêtres de décodage ; un corps en quoted-printable dont la coupure
+molle a disparu ; une demande partielle sur le décodé ; un `x-uuencode` qui vaut
+`NIL` et conclut par `NO [UNKNOWN-CTE]` ; et une section absente dont la taille
+vaut zéro, faute de pouvoir valoir `NIL`.
 
 ## Chercher DANS les messages, depuis le 2026-08-30
 
@@ -2188,5 +2236,5 @@ persistant, et lecture sans verrou côté IMAP), C14 (`X25519MLKEM768` en tête)
 découpage des lectures ne change rien au verdict.
 
 Ce qui manque, et qu'aucune phrase ne doit laisser croire acquis : `IDLE`,
-`NAMESPACE`, `ENABLE`, `SUBSCRIBE` et `BINARY[…]` ; la file de réémission
-des messages sortants ; et toute interface HTTP.
+`NAMESPACE`, `ENABLE` et `SUBSCRIBE` ; la file de réémission des messages
+sortants ; et toute interface HTTP.

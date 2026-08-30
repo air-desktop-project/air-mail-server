@@ -353,6 +353,100 @@ fn un_chemin_mal_forme_est_une_faute() {
     }
 }
 
+/// **`BINARY` SE LIT, ET IL N'EST PAS `BODY`.** Il rend ce que les octets VEULENT
+/// DIRE, transfert-décodé.
+#[test]
+fn le_binaire_se_lit() {
+    assert_eq!(
+        elements(b"1 BINARY[1.2]"),
+        std::vec![FetchItem::Binary {
+            path: chemin_de(&[1, 2]),
+            peek: false,
+            partial: None,
+        }]
+    );
+    assert_eq!(
+        elements(b"1 BINARY.PEEK[3]"),
+        std::vec![FetchItem::Binary {
+            path: chemin_de(&[3]),
+            peek: true,
+            partial: None,
+        }]
+    );
+    // Un chemin vide désigne le corps du message.
+    assert_eq!(
+        elements(b"1 BINARY[]"),
+        std::vec![FetchItem::Binary {
+            path: PartPath::EMPTY,
+            peek: false,
+            partial: None,
+        }]
+    );
+    // La demande partielle porte sur le contenu DÉCODÉ.
+    assert_eq!(
+        elements(b"1 BINARY[1]<10.5>"),
+        std::vec![FetchItem::Binary {
+            path: chemin_de(&[1]),
+            peek: false,
+            partial: Some(Partial {
+                offset: 10,
+                length: 5
+            }),
+        }]
+    );
+}
+
+/// `BINARY.SIZE` rend un nombre, et ne s'écoule pas.
+#[test]
+fn la_taille_binaire_se_lit() {
+    assert_eq!(
+        elements(b"1 BINARY.SIZE[2]"),
+        std::vec![FetchItem::BinarySize {
+            path: chemin_de(&[2])
+        }]
+    );
+    // Une demande partielle sur un NOMBRE ne veut rien dire.
+    assert_eq!(
+        Fetch::parse(b"1 BINARY.SIZE[2]<0.5>", &BORNES),
+        Err(Error::MalformedFetch)
+    );
+}
+
+/// **`section-binary` NE PORTE QUE DES NOMBRES** (§9) : décoder un en-tête
+/// n'aurait pas de sens, puisqu'un en-tête n'est pas encodé.
+#[test]
+fn un_binaire_n_admet_aucun_mot_clef() {
+    for mechant in [
+        &b"1 BINARY[HEADER]"[..],
+        b"1 BINARY[TEXT]",
+        b"1 BINARY[1.MIME]",
+        b"1 BINARY[1.HEADER]",
+        b"1 BINARY[HEADER.FIELDS (From)]",
+        // Et les fautes ordinaires d'un chemin.
+        b"1 BINARY[0]",
+        b"1 BINARY[1.]",
+        // Sans crochets, ce n'est pas une section.
+        b"1 BINARY.SIZE",
+        b"1 BINARY.PEEK",
+        b"1 BINARY[1",
+        // Une demande partielle qui n'a pas la forme.
+        b"1 BINARY[1]<x>",
+        b"1 BINARY[1]<1>",
+    ] {
+        assert_eq!(
+            Fetch::parse(mechant, &BORNES),
+            Err(Error::MalformedFetch),
+            "{mechant:?}"
+        );
+    }
+    // `BINARY` tout seul reste reconnu et refusé : c'est une forme légale que ce
+    // serveur ne sert pas.
+    assert_eq!(
+        Fetch::parse(b"1 BINARY", &BORNES),
+        Err(Error::UnsupportedFetchItem)
+    );
+}
+
 /// `BODYSTRUCTURE` se lit désormais comme les autres.
 #[test]
 fn la_structure_se_lit() {

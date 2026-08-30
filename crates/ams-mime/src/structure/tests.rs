@@ -779,3 +779,27 @@ fn sans_type_c_est_du_texte() {
     balayeur.finish();
     assert_eq!(balayeur.part(balayeur.part_count()), None);
 }
+
+/// **UN CHEMIN VIDE DÉSIGNE LE MESSAGE** — ce que `BINARY[]` demande — et un
+/// chemin qui ne mène nulle part ne porte rien.
+#[test]
+fn un_chemin_designe_la_partie_qui_porte() {
+    let mut balayeur = BodyScanner::new(&BORNES);
+    balayeur.push(DEUX_PARTIES);
+    balayeur.finish();
+    // La première partie porte du texte, la seconde du base64.
+    assert_eq!(
+        balayeur.part_of(&[2]).map(|partie| partie.encoding),
+        Some(&b"base64"[..])
+    );
+    assert_eq!(balayeur.part_of(&[1]).map(|partie| partie.text), Some(true));
+    // Le message lui-même est un `multipart` : il ne porte rien en propre.
+    assert!(balayeur.part_of(&[]).is_none());
+    assert!(balayeur.part_of(&[9]).is_none());
+
+    // Sur un message simple, le chemin vide désigne bien son corps.
+    let mut nu = BodyScanner::new(&BORNES);
+    nu.push(b"Subject: x\r\n\r\nbonjour\r\n");
+    nu.finish();
+    assert_eq!(nu.part_of(&[]).map(|partie| partie.text), Some(true));
+}

@@ -956,6 +956,14 @@ impl BodyScanner {
         self.nb
     }
 
+    /// La partie qu'un chemin désigne, si elle porte un contenu.
+    ///
+    /// Un chemin vide désigne le message lui-même — ce que `BINARY[]` demande.
+    #[must_use]
+    pub fn part_of(&self, chemin: &[u32]) -> Option<BodyPart<'_>> {
+        self.part(self.resoudre(chemin)?)
+    }
+
     /// La partie de rang `index`, si elle porte un contenu.
     ///
     /// # LES `multipart` ET LES `message/rfc822` NE PORTENT RIEN EN PROPRE

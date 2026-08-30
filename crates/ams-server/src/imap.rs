@@ -47,7 +47,7 @@ use ams_index::{MessageName, Uid};
 use ams_mime::BodySpan;
 use ams_proto_imap::{Flags, PartWhat, SearchScope, StoreMode};
 use ams_session::imap::{
-    Creation, Deletion, Deposit, Listing, Mailbox, Mailboxes, MessageInfo, Renaming,
+    BinarySize, Creation, Deletion, Deposit, Listing, Mailbox, Mailboxes, MessageInfo, Renaming,
 };
 use ams_store::{Incoming, MailboxView, Maildir, fresh_uid_validity};
 
@@ -84,6 +84,18 @@ const FENETRE: usize = 64 * 1024;
 
 /// Le seul nom de boîte que ce serveur connaisse (RFC 9051 §5.1).
 const INBOX: &[u8] = b"INBOX";
+
+/// La même fenêtre, écrite en `u64`.
+///
+/// Un littéral plutôt qu'une conversion : `usize` vers `u64` n'est pas gratuit
+/// sur toute cible, et le workspace refuse les conversions muettes.
+const FENETRE_64: u64 = 64 * 1024;
+
+/// Ce qu'un nom d'encodage occupe au plus.
+///
+/// `quoted-printable` en fait seize ; le double laisse de la place à un nom
+/// qu'on ne connaîtra pas, et que l'on refusera.
+const ENCODAGE_MAX: usize = 32;
 
 /// Ce qu'on lit au plus d'une partie pour y chercher.
 ///
@@ -412,6 +424,93 @@ impl Mailbox for BoiteImap {
                 PartWhat::HeaderFields { .. } => return None,
             },
         )
+    }
+
+    fn binary_size(&self, sequence: u32, path: &[u32]) -> BinarySize {
+        let Some(rang) = self.rang(sequence) else {
+            return BinarySize::Absent;
+        };
+        let Some(chemin) = self.chemins.get(rang) else {
+            return BinarySize::Absent;
+        };
+        let Some(balayeur) = balayer(chemin) else {
+            return BinarySize::Absent;
+        };
+        let Some(partie) = balayeur.part_of(path) else {
+            return BinarySize::Absent;
+        };
+        // ON COMPTE EN DÉCODANT, PAR FENÊTRES. La taille décodée ne se déduit
+        // pas de celle du fichier : le pliage, les blancs et les coupures molles
+        // ne rendent aucun octet. Une passe, et une seule, par demande.
+        let mut sortie = std::vec![0_u8; FENETRE];
+        let mut total = 0_u64;
+        let mut vu = 0_u64;
+        while partie.start.saturating_add(vu) < partie.end {
+            let reste = partie.end.saturating_sub(partie.start).saturating_sub(vu);
+            let combien = usize::try_from(reste.min(FENETRE_64)).unwrap_or(FENETRE);
+            let Some(brut) = lire(chemin, partie.start.saturating_add(vu), combien) else {
+                return BinarySize::Absent;
+            };
+            let dernier = partie
+                .start
+                .saturating_add(vu)
+                .saturating_add(u64::try_from(combien).unwrap_or(0))
+                >= partie.end;
+            match ams_mime::decode_chunk(partie.encoding, &brut, dernier, &mut sortie) {
+                Err(_) => return BinarySize::UnknownEncoding,
+                // Rien n'avance : ce qui reste ne porte aucun groupe complet, et
+                // n'en portera pas davantage à la fenêtre suivante.
+                Ok((0, _)) => break,
+                Ok((lus, ecrits)) => {
+                    total = total.saturating_add(u64::try_from(ecrits).unwrap_or(0));
+                    vu = vu.saturating_add(u64::try_from(lus).unwrap_or(0));
+                }
+            }
+        }
+        BinarySize::Octets(total)
+    }
+
+    fn binary(&self, sequence: u32, path: &[u32], raw: u64, out: &mut [u8]) -> (u64, usize) {
+        let Some(rang) = self.rang(sequence) else {
+            return (0, 0);
+        };
+        let Some(chemin) = self.chemins.get(rang) else {
+            return (0, 0);
+        };
+        let Some(partie) = balayer(chemin).and_then(|vu| {
+            vu.part_of(path).map(|partie| {
+                (partie.start, partie.end, {
+                    let mut nom = [0_u8; ENCODAGE_MAX];
+                    let voulu = partie.encoding.len().min(ENCODAGE_MAX);
+                    for (place, octet) in nom.iter_mut().zip(partie.encoding) {
+                        *place = *octet;
+                    }
+                    (nom, voulu)
+                })
+            })
+        }) else {
+            return (0, 0);
+        };
+        let (debut, fin, (nom, voulu)) = partie;
+        let ou = debut.saturating_add(raw);
+        if ou >= fin {
+            return (0, 0);
+        }
+        let combien = usize::try_from(fin.saturating_sub(ou).min(FENETRE_64)).unwrap_or(FENETRE);
+        let Some(brut) = lire(chemin, ou, combien) else {
+            return (0, 0);
+        };
+        let encodage = nom.get(..voulu).unwrap_or_default();
+        // LE DERNIER MORCEAU SE SAIT ICI, ET NULLE PART AILLEURS : c'est le
+        // magasin qui connaît la fin de la partie, et le remplissage du base64
+        // rend son dernier groupe partiel.
+        let dernier = ou.saturating_add(u64::try_from(combien).unwrap_or(0)) >= fin;
+        match ams_mime::decode_chunk(encodage, &brut, dernier, out) {
+            Ok((lus, ecrits)) => (u64::try_from(lus).unwrap_or(0), ecrits),
+            // L'encodage a déjà été éprouvé par `binary_size` : s'il résiste
+            // ici, la demande a déjà été refusée, et rendre zéro conclut.
+            Err(_) => (0, 0),
+        }
     }
 
     fn contains(&self, sequence: u32, scope: SearchScope, field: &[u8], needle: &[u8]) -> bool {

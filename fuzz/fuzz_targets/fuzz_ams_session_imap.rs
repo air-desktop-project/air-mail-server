@@ -41,7 +41,9 @@ use std::rc::Rc;
 use ams_proto_imap::{CommandReader, Flags, Limits, Need, PartWhat, SearchScope, StoreMode};
 use ams_sasl::Credentials;
 use ams_session::Authenticator;
-use ams_session::imap::{Action, FetchChunk, Mailbox, Mailboxes, MessageInfo, Session, State};
+use ams_session::imap::{
+    Action, BinarySize, FetchChunk, Mailbox, Mailboxes, MessageInfo, Session, State,
+};
 
 /// Le seul compte que la politique connaisse.
 struct UnCompte;
@@ -119,6 +121,32 @@ impl Mailbox for Boite {
             0 => None,
             _ => Some((0, info.size)),
         }
+    }
+
+    fn binary_size(&self, sequence: u32, path: &[u32]) -> BinarySize {
+        // TROIS ISSUES, EN ALTERNANCE : la session doit conclure aussi bien sur
+        // un contenu décodé que sur un encodage qui résiste ou une section
+        // absente — et le `NO [UNKNOWN-CTE]` est le seul endroit d'IMAP où un
+        // `FETCH` échoue pour ce qu'un message porte.
+        if self.info(sequence).is_none() {
+            return BinarySize::Absent;
+        }
+        match path.first().copied().unwrap_or(1) % 3 {
+            0 => BinarySize::Absent,
+            1 => BinarySize::Octets(u64::from(sequence).saturating_mul(3)),
+            _ => BinarySize::UnknownEncoding,
+        }
+    }
+
+    fn binary(&self, sequence: u32, path: &[u32], raw: u64, out: &mut [u8]) -> (u64, usize) {
+        let BinarySize::Octets(taille) = self.binary_size(sequence, path) else {
+            return (0, 0);
+        };
+        let reste = taille.saturating_sub(raw);
+        let voulu = usize::try_from(reste).unwrap_or(usize::MAX).min(out.len());
+        let place = out.get_mut(..voulu).unwrap_or_default();
+        place.fill(b'b');
+        (u64::try_from(voulu).unwrap_or(0), voulu)
     }
 
     fn contains(&self, sequence: u32, _scope: SearchScope, _field: &[u8], needle: &[u8]) -> bool {

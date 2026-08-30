@@ -17,8 +17,11 @@
 //! Et le CHOIX de champs : `BODY[HEADER.FIELDS (FROM SUBJECT)]`, ce qu'un client
 //! demande pour peupler une liste de messages sans tout télécharger.
 //!
-//! Ce qui reste **reconnu et refusé** — `RFC822`, `BINARY`, un nom de champ cité
-//! — n'est pas une erreur de syntaxe : le client sait alors qu'il doit demander
+//! `BINARY[…]` et `BINARY.SIZE[…]` s'y ajoutent : ce que les octets VEULENT
+//! DIRE, transfert-décodé.
+//!
+//! Ce qui reste **reconnu et refusé** — `RFC822`, un nom de champ cité — n'est
+//! pas une erreur de syntaxe : le client sait alors qu'il doit demander
 //! autrement, au lieu de chercher la faute dans ce qu'il a écrit.
 //!
 //! # LA DEMANDE PARTIELLE EST UNE SURFACE
@@ -137,6 +140,29 @@ pub enum FetchItem {
     BodyStructure,
     /// `RFC822.SIZE` — la taille, en octets.
     Rfc822Size,
+    /// `BINARY[…]` ou `BINARY.PEEK[…]` — le contenu d'une partie, DÉCODÉ.
+    ///
+    /// # `BINARY` N'EST PAS `BODY`
+    ///
+    /// `BODY[1]` rend les octets du message ; `BINARY[1]` rend ce qu'ils VEULENT
+    /// DIRE, transfert-décodé. C'est la seule commande d'IMAP qui échoue pour ce
+    /// qu'un message porte : un encodage qu'on ne sait pas défaire vaut
+    /// `NO [UNKNOWN-CTE]` (§6.4.5), parce que rendre les octets encodés en les
+    /// faisant passer pour le contenu serait pire que de refuser.
+    Binary {
+        /// Quelle partie. Vide : le corps du message.
+        path: PartPath,
+        /// `PEEK` : ne pas marquer le message comme lu.
+        peek: bool,
+        /// La demande partielle, s'il y en a une. Elle porte sur le contenu
+        /// DÉCODÉ (§6.4.5), et non sur les octets du fichier.
+        partial: Option<Partial>,
+    },
+    /// `BINARY.SIZE[…]` — la taille du contenu DÉCODÉ.
+    BinarySize {
+        /// Quelle partie.
+        path: PartPath,
+    },
     /// `BODY[…]` ou `BODY.PEEK[…]`.
     Body {
         /// Quelle partie.
@@ -309,7 +335,68 @@ fn lire_un(mot: &[u8]) -> Result<(FetchItem, &[u8]), Error> {
     {
         return Err(Error::UnsupportedFetchItem);
     }
+    if mot.len() >= 6
+        && mot
+            .get(..6)
+            .unwrap_or_default()
+            .eq_ignore_ascii_case(b"BINARY")
+    {
+        return lire_un_binaire(mot.get(6..).unwrap_or_default());
+    }
     lire_un_corps(mot)
+}
+
+/// Lit ce qui suit `BINARY` : `.PEEK[…]`, `.SIZE[…]`, ou `[…]`.
+///
+/// # `section-binary` NE PORTE QUE DES NOMBRES
+///
+/// §9 : `section-binary = "[" [section-part] "]"`. Ni `HEADER`, ni `TEXT`, ni
+/// `MIME` — décoder un en-tête n'aurait pas de sens, puisqu'un en-tête n'est pas
+/// encodé. Les admettre serait accepter une demande qu'on ne saurait pas servir.
+fn lire_un_binaire(reste: &[u8]) -> Result<(FetchItem, &[u8]), Error> {
+    let (taille, reste) = match reste.get(..5) {
+        Some(mot) if mot.eq_ignore_ascii_case(b".SIZE") => {
+            (true, reste.get(5..).unwrap_or_default())
+        }
+        _ => (false, reste),
+    };
+    let (peek, reste) = match (taille, reste.get(..5)) {
+        (false, Some(mot)) if mot.eq_ignore_ascii_case(b".PEEK") => {
+            (true, reste.get(5..).unwrap_or_default())
+        }
+        _ => (false, reste),
+    };
+    let dedans = reste.strip_prefix(b"[").ok_or(Error::MalformedFetch)?;
+    let fermante = dedans
+        .iter()
+        .position(|octet| *octet == b']')
+        .ok_or(Error::MalformedFetch)?;
+    let chemin = dedans.get(..fermante).unwrap_or_default();
+    let path = match chemin.is_empty() {
+        true => PartPath::EMPTY,
+        false => lire_un_chemin(chemin, false)?.0,
+    };
+    let apres = dedans.get(fermante.saturating_add(1)..).unwrap_or_default();
+    if taille {
+        // `BINARY.SIZE` rend un nombre : une demande partielle sur un nombre ne
+        // veut rien dire, et la grammaire ne l'admet pas.
+        if !apres.is_empty() {
+            return Err(Error::MalformedFetch);
+        }
+        return Ok((FetchItem::BinarySize { path }, b""));
+    }
+    let partial = match apres.is_empty() {
+        true => None,
+        false => Some(lire_une_partie(apres)?),
+    };
+    Ok((
+        FetchItem::Binary {
+            path,
+            peek,
+            partial,
+        },
+        b"",
+    ))
 }
 
 /// Lit un `BODY[…]` ou un `BODY.PEEK[…]`, avec sa demande partielle.

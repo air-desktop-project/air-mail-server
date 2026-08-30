@@ -272,6 +272,28 @@ pub trait Mailbox {
     /// ailleurs. Un `needle` vide demande que le champ EXISTE.
     fn contains(&self, sequence: u32, scope: SearchScope, field: &[u8], needle: &[u8]) -> bool;
 
+    /// Ce que `BINARY[…]` vaut : sa taille décodée, ou pourquoi il ne vaut rien.
+    ///
+    /// # POURQUOI LA TAILLE D'ABORD, ENCORE
+    ///
+    /// Un littéral s'annonce avant ses octets. Et pour `BINARY`, la longueur
+    /// n'est pas celle du fichier : c'est celle du contenu DÉCODÉ, qu'il faut
+    /// donc compter — une passe, et une seule, par demande.
+    fn binary_size(&self, sequence: u32, path: &[u32]) -> BinarySize;
+
+    /// Décode la partie à partir du rang BRUT `raw`, et rend
+    /// `(octets bruts consommés, octets écrits)`.
+    ///
+    /// # LE RANG BRUT VOYAGE, ET NON LE RANG DÉCODÉ
+    ///
+    /// Une pièce jointe décodée ne tient pas en mémoire, et redécoder depuis le
+    /// début à chaque morceau serait quadratique. Le magasin s'arrête donc là où
+    /// **il n'y a rien à retenir** — un groupe complet de base64, un octet qui
+    /// n'ouvre pas d'échappement — et dit combien d'octets bruts il a lus. La
+    /// session porte ce rang d'un morceau à l'autre, comme elle porte le
+    /// décalage d'un corps.
+    fn binary(&self, sequence: u32, path: &[u32], raw: u64, out: &mut [u8]) -> (u64, usize);
+
     /// Ce qu'un CHOIX de champs occupe, ou `None` si la section n'existe pas.
     ///
     /// # POURQUOI LA LONGUEUR D'ABORD
@@ -635,6 +657,12 @@ struct Emission {
     texte_len: usize,
     items: [FetchItem; ams_proto_imap::FETCH_ITEMS_MAX],
     items_len: usize,
+    /// Un encodage a-t-il résisté ? La conclusion le dira.
+    ///
+    /// **C'EST LE SEUL ENDROIT OÙ UN `FETCH` ÉCHOUE POUR CE QU'UN MESSAGE
+    /// PORTE.** §6.4.5 l'exige : rendre les octets encodés en les faisant passer
+    /// pour le contenu tromperait le client sans qu'il puisse s'en apercevoir.
+    cte_inconnu: bool,
     /// Les noms de champs que les éléments choisissent, bout à bout.
     ///
     /// # POURQUOI UNE RÉSERVE, ET NON UN CHAMP PAR ÉLÉMENT
@@ -835,6 +863,14 @@ enum Apres {
     },
     /// Écouler une analyse.
     Analyse(Analyse),
+    /// Écouler une partie décodée.
+    Binaire {
+        sequence: u32,
+        path: PartPath,
+        raw: u64,
+        saute: u64,
+        restant: u64,
+    },
     /// Écouler un choix de champs, composé par le magasin.
     Champs {
         sequence: u32,
@@ -861,12 +897,27 @@ enum Portee {
     Intervalle(u64, u64),
     /// Elle n'existe pas : la réponse est `NIL` (§6.4.5).
     Absente,
+    /// Une partie décodée, longue de tant d'octets.
+    Binaire(u64),
+    /// Son encodage ne se défait pas (§6.4.5).
+    Encodage,
     /// Un CHOIX de champs, long de tant d'octets.
     ///
     /// Il ne se lit pas dans le message par un intervalle : c'est une SÉLECTION,
     /// que le magasin compose. Seule sa longueur voyage ici — elle suffit à
     /// annoncer le littéral, et le reste s'écoule.
     Champs(u64),
+}
+
+/// Ce que `BINARY[…]` vaut.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinarySize {
+    /// La section n'existe pas.
+    Absent,
+    /// Son encodage ne se défait pas : §6.4.5 veut qu'on le DISE.
+    UnknownEncoding,
+    /// Elle occupe tant d'octets, une fois décodée.
+    Octets(u64),
 }
 
 /// Ce qu'une analyse de message rend.
@@ -900,6 +951,18 @@ enum Etape {
     },
     /// Reprendre l'écriture des éléments du message `rang`.
     Suite { rang: u32 },
+    /// Écouler une partie DÉCODÉE, à partir du rang brut `raw`.
+    ///
+    /// `saute` est ce qu'il reste à jeter avant de rendre quoi que ce soit : une
+    /// demande partielle porte sur le contenu décodé, et l'on n'y saute donc pas
+    /// par un déplacement dans le fichier.
+    Binaire {
+        sequence: u32,
+        path: PartPath,
+        raw: u64,
+        saute: u64,
+        restant: u64,
+    },
     /// Écouler un choix de champs, à partir de `offset`.
     ///
     /// **LE CHEMIN ET LE SENS VOYAGENT ICI**, et non dans l'élément qu'il
@@ -982,6 +1045,7 @@ impl Emission {
         texte_len: 0,
         items: [FetchItem::Uid; ams_proto_imap::FETCH_ITEMS_MAX],
         items_len: 0,
+        cte_inconnu: false,
         noms: [0; NOMS_MAX],
         noms_par_item: [(0, 0); ams_proto_imap::FETCH_ITEMS_MAX],
         par_uid: false,
@@ -2409,6 +2473,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             texte_len: uids_len,
             items: [FetchItem::Flags; ams_proto_imap::FETCH_ITEMS_MAX],
             items_len: 0,
+            cte_inconnu: false,
             noms: [0; NOMS_MAX],
             noms_par_item: [(0, 0); ams_proto_imap::FETCH_ITEMS_MAX],
             par_uid,
@@ -2543,6 +2608,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             texte_len: critere.len(),
             items: [FetchItem::Flags; ams_proto_imap::FETCH_ITEMS_MAX],
             items_len: 0,
+            cte_inconnu: false,
             noms: [0; NOMS_MAX],
             noms_par_item: [(0, 0); ams_proto_imap::FETCH_ITEMS_MAX],
             par_uid,
@@ -2626,6 +2692,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             texte_len: texte.len(),
             items: [FetchItem::Flags; ams_proto_imap::FETCH_ITEMS_MAX],
             items_len: 0,
+            cte_inconnu: false,
             noms: [0; NOMS_MAX],
             noms_par_item: [(0, 0); ams_proto_imap::FETCH_ITEMS_MAX],
             par_uid,
@@ -2776,6 +2843,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             // quel UID il parle, et le numéro de séquence lui suffit à recoller.
             items: [FetchItem::Flags; ams_proto_imap::FETCH_ITEMS_MAX],
             items_len: 1,
+            cte_inconnu: false,
             noms: [0; NOMS_MAX],
             noms_par_item: [(0, 0); ams_proto_imap::FETCH_ITEMS_MAX],
             par_uid,
@@ -3180,6 +3248,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             noms: [0; NOMS_MAX],
             noms_par_item: [(0, 0); ams_proto_imap::FETCH_ITEMS_MAX],
             items_len: demande.items().len(),
+            cte_inconnu: false,
             par_uid,
             cles_uid: par_uid,
             exige_la_marque: true,
@@ -3276,6 +3345,59 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
                 self.emission = Some(emission);
                 return self.ecrire_les_items(rang, info, entete, portee, out);
             }
+            Etape::Binaire {
+                sequence,
+                path,
+                mut raw,
+                mut saute,
+                mut restant,
+            } => {
+                // ON BOUCLE PLUTÔT QU'ON NE SE RAPPELLE. Un morceau qui ne rend
+                // rien — que du saut, ou une fenêtre de pliage sans groupe
+                // complet — doit être suivi d'un autre ; le faire par récursion
+                // ferait dépendre la pile de ce qu'un message porte.
+                loop {
+                    // ON JETTE AVANT DE RENDRE. Une demande partielle porte sur
+                    // le contenu DÉCODÉ : on ne peut pas s'y déplacer par un
+                    // saut dans le fichier, il faut décoder ce qu'on jette.
+                    let voulu = usize::try_from(restant.saturating_add(saute))
+                        .unwrap_or(usize::MAX)
+                        .min(out.len());
+                    let place = out.get_mut(..voulu).unwrap_or_default();
+                    let (lus, ecrits) = boite.binary(sequence, path.numbers(), raw, place);
+                    if lus == 0 {
+                        // Plus rien à lire : ce qui manque au compte annoncé ne
+                        // viendra pas, et la réponse reprend où elle en était.
+                        emission.etape = Etape::Suite { rang: sequence };
+                        self.emission = Some(emission);
+                        return self.next_fetch(out);
+                    }
+                    let ecrits_64 = u64::try_from(ecrits).unwrap_or(u64::MAX);
+                    let jete = saute.min(ecrits_64);
+                    let rendus = ecrits_64.saturating_sub(jete).min(restant);
+                    raw = raw.saturating_add(lus);
+                    saute = saute.saturating_sub(jete);
+                    restant = restant.saturating_sub(rendus);
+                    if rendus == 0 {
+                        continue;
+                    }
+                    emission.etape = Etape::Binaire {
+                        sequence,
+                        path,
+                        raw,
+                        saute,
+                        restant,
+                    };
+                    self.emission = Some(emission);
+                    let debut = usize::try_from(jete).unwrap_or(usize::MAX);
+                    let fin = debut.saturating_add(usize::try_from(rendus).unwrap_or(usize::MAX));
+                    // LE SAUT SE TROUVE AU DÉBUT DU TAMPON : on rend ce qui
+                    // suit, et l'appelant écrit exactement cela.
+                    return Ok(Some(FetchChunk::Bytes(
+                        out.get(debut..fin).unwrap_or_default(),
+                    )));
+                }
+            }
             Etape::Champs {
                 sequence,
                 item,
@@ -3356,15 +3478,19 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             }
             Etape::Conclure => {
                 self.emission = None;
-                let ecrit = encode_tagged(
-                    out,
-                    self.tag_lu(),
-                    Status::Ok,
-                    emission.genre.conclusion(emission.par_uid),
-                    &self.limits,
-                )
-                .map_err(Error::Reply)?
-                .len();
+                // §6.4.5 : un `BINARY` dont l'encodage résiste FAIT ÉCHOUER la
+                // demande. Les données déjà émises restent — le client sait,
+                // par le `NO`, qu'il ne doit pas s'y fier.
+                let (etat, texte): (Status, &[u8]) = match emission.cte_inconnu {
+                    true => (
+                        Status::No,
+                        b"[UNKNOWN-CTE] Cannot decode this part's transfer encoding",
+                    ),
+                    false => (Status::Ok, emission.genre.conclusion(emission.par_uid)),
+                };
+                let ecrit = encode_tagged(out, self.tag_lu(), etat, texte, &self.limits)
+                    .map_err(Error::Reply)?
+                    .len();
                 return Ok(Some(FetchChunk::Bytes(
                     out.get(..ecrit).unwrap_or_default(),
                 )));
@@ -3663,17 +3789,76 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
                             };
                             break;
                         }
-                        // `Sans` ne peut venir que d'un élément qui ne demande
-                        // pas de section composée, et l'on n'est ici que pour un
-                        // élément qui en demande une. Le traiter comme une
-                        // absence rend une réponse licite plutôt qu'une réponse
-                        // tronquée.
-                        Portee::Absente | Portee::Sans => {
+                        // `Sans`, `Binaire` et `Encodage` ne viennent pas d'un
+                        // `BODY[…]` : le premier vient d'un élément qui ne
+                        // demande aucune section composée, les deux autres d'un
+                        // `BINARY`. Les traiter comme une absence rend une
+                        // réponse licite plutôt qu'une réponse tronquée.
+                        Portee::Absente | Portee::Sans | Portee::Binaire(_) | Portee::Encodage => {
                             plume.pousser(b" NIL")?;
                             apres = Apres::Reprendre;
                             break;
                         }
                     }
+                }
+                FetchItem::Binary {
+                    path,
+                    partial,
+                    peek: _,
+                } => {
+                    plume.pousser(b"BINARY[")?;
+                    ecrire_le_chemin(&mut plume, *path)?;
+                    plume.pousser(b"]")?;
+                    if let Some(partie) = partial {
+                        plume.pousser(b"<")?;
+                        plume.nombre(u64::from(partie.offset))?;
+                        plume.pousser(b">")?;
+                    }
+                    match portee {
+                        Portee::Binaire(longueur) => {
+                            let (saute, longueur) = tailler(0, longueur, *partial);
+                            // UN LITTÉRAL8, ET NON UN LITTÉRAL. `BINARY` rend des
+                            // octets quelconques, `NUL` compris — ce qu'un
+                            // littéral ordinaire n'a pas le droit de porter
+                            // (§4.3). Le tilde le dit au client avant qu'il lise.
+                            plume.pousser(b" ~{")?;
+                            plume.nombre(longueur)?;
+                            plume.pousser(b"}\r\n")?;
+                            apres = Apres::Binaire {
+                                sequence: rang,
+                                path: *path,
+                                raw: 0,
+                                saute,
+                                restant: longueur,
+                            };
+                            break;
+                        }
+                        autre => {
+                            emission.cte_inconnu |= autre == Portee::Encodage;
+                            plume.pousser(b" NIL")?;
+                            apres = Apres::Reprendre;
+                            break;
+                        }
+                    }
+                }
+                FetchItem::BinarySize { path } => {
+                    plume.pousser(b"BINARY.SIZE[")?;
+                    ecrire_le_chemin(&mut plume, *path)?;
+                    plume.pousser(b"] ")?;
+                    // LA GRAMMAIRE VEUT UN NOMBRE, ET RIEN D'AUTRE (§7.5.2) :
+                    // pas de `NIL` possible. Une section absente vaut zéro, ce
+                    // qui est sa taille.
+                    plume.nombre(match portee {
+                        Portee::Binaire(longueur) => longueur,
+                        autre => {
+                            emission.cte_inconnu |= autre == Portee::Encodage;
+                            0
+                        }
+                    })?;
+                    // LA PORTÉE DU SUIVANT RESTE À DEMANDER : deux tailles dans
+                    // une même commande ne sont pas la même.
+                    apres = Apres::Reprendre;
+                    break;
                 }
                 FetchItem::Envelope => {
                     plume.pousser(b"ENVELOPE ")?;
@@ -3701,6 +3886,19 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
                 quoi,
                 sequence: rang,
                 offset: 0,
+            },
+            Apres::Binaire {
+                sequence,
+                path,
+                raw,
+                saute,
+                restant,
+            } => Etape::Binaire {
+                sequence,
+                path,
+                raw,
+                saute,
+                restant,
             },
             Apres::Champs {
                 sequence,
@@ -3764,12 +3962,7 @@ fn ecrire_la_section(plume: &mut Plume<'_>, section: Section, noms: &[u8]) -> Re
         Section::Text => plume.pousser(b"TEXT"),
         Section::HeaderFields { except } => ecrire_le_choix(plume, except, noms),
         Section::Part { path, what } => {
-            for (rang, numero) in path.numbers().iter().enumerate() {
-                if rang > 0 {
-                    plume.pousser(b".")?;
-                }
-                plume.nombre(u64::from(*numero))?;
-            }
+            ecrire_le_chemin(plume, path)?;
             match what {
                 PartWhat::Content => Ok(()),
                 PartWhat::Mime => plume.pousser(b".MIME"),
@@ -3791,6 +3984,17 @@ fn ecrire_la_section(plume: &mut Plume<'_>, section: Section, noms: &[u8]) -> Re
 /// ailleurs vaut mieux qu'une garde qu'aucune entrée ne peut faire céder.
 fn sens_du_choix(section: Section) -> bool {
     matches!(section, Section::HeaderFields { except: true })
+}
+
+/// Écrit un chemin de parties : `1`, `1.2`, ou rien du tout.
+fn ecrire_le_chemin(plume: &mut Plume<'_>, path: PartPath) -> Result<(), Error> {
+    for (rang, numero) in path.numbers().iter().enumerate() {
+        if rang > 0 {
+            plume.pousser(b".")?;
+        }
+        plume.nombre(u64::from(*numero))?;
+    }
+    Ok(())
 }
 
 /// `HEADER.FIELDS (…)`, avec les noms tels que le client les a écrits.
@@ -3999,6 +4203,13 @@ fn portee_si_besoin<B: Mailbox>(boite: &B, emission: &Emission, rang: u32) -> Po
     let items = emission.items.get(..emission.items_len).unwrap_or_default();
     for (vu, item) in items.iter().enumerate().skip(emission.items_faits) {
         match item {
+            FetchItem::Binary { path, .. } | FetchItem::BinarySize { path } => {
+                return match boite.binary_size(rang, path.numbers()) {
+                    BinarySize::Octets(longueur) => Portee::Binaire(longueur),
+                    BinarySize::UnknownEncoding => Portee::Encodage,
+                    BinarySize::Absent => Portee::Absente,
+                };
+            }
             FetchItem::Body {
                 section: Section::HeaderFields { except },
                 ..

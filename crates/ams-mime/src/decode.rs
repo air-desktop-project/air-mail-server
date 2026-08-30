@@ -196,6 +196,173 @@ pub fn decode_transfer(encoding: &[u8], corps: &[u8], out: &mut [u8]) -> Result<
     Ok(plume.ecrits)
 }
 
+/// Décode ce qui tient dans `out`, et dit combien d'octets BRUTS ont servi.
+///
+/// # POURQUOI S'ARRÊTER À UNE FRONTIÈRE, ET NON OÙ LA PLACE MANQUE
+///
+/// Le décodage d'une pièce jointe ne tient pas en mémoire : il faut le REPRENDRE
+/// là où on l'a laissé. Reprendre au milieu d'un groupe de base64 demanderait de
+/// retenir les bits en cours — donc un état, que l'appelant devrait porter d'un
+/// morceau à l'autre et qu'il finirait par perdre. On s'arrête donc à un rang où
+/// **il n'y a rien à retenir** : un groupe complet pour le base64, un octet qui
+/// n'ouvre pas d'échappement pour le quoted-printable.
+///
+/// `dernier` dit que `brut` finit le contenu. **IL LE FAUT** : le remplissage
+/// du base64 rend le dernier groupe PARTIEL — deux ou trois caractères pour un
+/// ou deux octets —, et un décodeur qui n'attendrait que des groupes entiers
+/// perdrait la fin de chaque pièce jointe. Seul l'appelant sait où le contenu
+/// s'arrête.
+///
+/// Rend `(octets bruts consommés, octets écrits)`. Zéro consommé veut dire que
+/// `out` est trop petit pour avancer, ce qui n'arrive qu'avec moins de trois
+/// octets de place.
+///
+/// # Errors
+///
+/// [`Error::UnknownEncoding`] pour un encodage qu'on ne sait pas défaire.
+pub fn decode_chunk(
+    encoding: &[u8],
+    brut: &[u8],
+    dernier: bool,
+    out: &mut [u8],
+) -> Result<(usize, usize), Error> {
+    if encoding.eq_ignore_ascii_case(b"base64") {
+        return Ok(morceau_base64(brut, dernier, out));
+    }
+    if encoding.eq_ignore_ascii_case(b"quoted-printable") {
+        return Ok(morceau_qp(brut, dernier, out));
+    }
+    if !encodage_transparent(encoding) {
+        return Err(Error::UnknownEncoding);
+    }
+    // `7bit`, `8bit`, `binary` : les octets SONT le contenu.
+    let voulu = brut.len().min(out.len());
+    for (place, octet) in out.iter_mut().zip(brut.get(..voulu).unwrap_or_default()) {
+        *place = *octet;
+    }
+    Ok((voulu, voulu))
+}
+
+/// Cet encodage laisse-t-il les octets tels quels (RFC 2045 §6.2, §6.8) ?
+fn encodage_transparent(encoding: &[u8]) -> bool {
+    encoding.is_empty()
+        || encoding.eq_ignore_ascii_case(b"7bit")
+        || encoding.eq_ignore_ascii_case(b"8bit")
+        || encoding.eq_ignore_ascii_case(b"binary")
+}
+
+/// Décode des groupes ENTIERS de base64, tant que la place le permet.
+fn morceau_base64(brut: &[u8], dernier: bool, out: &mut [u8]) -> (usize, usize) {
+    let mut accumulateur = 0_u32;
+    let mut dans_le_groupe = 0_usize;
+    let mut consommes = 0_usize;
+    let mut ecrits = 0_usize;
+    for (rang, octet) in brut.iter().enumerate() {
+        let Some(valeur) = valeur_base64(*octet) else {
+            // Blancs, `=`, et tout ce qui n'est pas du base64 : ignorés, comme
+            // partout ailleurs — le pliage en sème.
+            //
+            // **ILS AVANCENT QUAND MÊME LE CURSEUR**, tant qu'aucun groupe n'est
+            // entamé : sans cela, une fenêtre entière de pliage ne consommerait
+            // rien, et l'appelant tournerait en rond sur le même rang.
+            if dans_le_groupe == 0 {
+                consommes = rang.saturating_add(1);
+            }
+            continue;
+        };
+        accumulateur = (accumulateur << 6) | u32::from(valeur);
+        dans_le_groupe = dans_le_groupe.saturating_add(1);
+        if dans_le_groupe < 4 {
+            continue;
+        }
+        // Un groupe complet rend trois octets : il faut la place pour les trois,
+        // sans quoi on s'arrêterait au milieu.
+        if ecrits.saturating_add(3) > out.len() {
+            break;
+        }
+        ecrits = ecrits.saturating_add(poser(out, ecrits, accumulateur, 3));
+        accumulateur = 0;
+        dans_le_groupe = 0;
+        consommes = rang.saturating_add(1);
+    }
+    // LE DERNIER GROUPE EST PARTIEL, et c'est le remplissage qui le veut :
+    // `YQ==` porte deux caractères pour un octet, `YWI=` trois pour deux. Ne
+    // rendre que des groupes entiers perdrait la fin de chaque pièce jointe.
+    let reste = dans_le_groupe.saturating_sub(1);
+    if dernier && dans_le_groupe >= 2 && ecrits.saturating_add(reste) <= out.len() {
+        // Les bits manquants valent zéro : on cale le groupe à gauche.
+        let cale = accumulateur
+            << (6_u32
+                .saturating_mul(4_u32.saturating_sub(u32::try_from(dans_le_groupe).unwrap_or(4))));
+        ecrits = ecrits.saturating_add(poser(out, ecrits, cale, reste));
+        consommes = brut.len();
+    }
+    (consommes, ecrits)
+}
+
+/// Écrit les `combien` octets de poids fort d'un groupe, et rend combien ont
+/// tenu.
+///
+/// # `zip` PLUTÔT QU'UN INDICE
+///
+/// La place a été vérifiée juste avant ; un `get_mut` y serait une garde
+/// qu'aucune entrée ne pourrait faire céder. Le `zip`, lui, s'arrête de lui-même
+/// à la plus courte des deux suites.
+fn poser(out: &mut [u8], depuis: usize, groupe: u32, combien: usize) -> usize {
+    let trio = [
+        u8::try_from((groupe >> 16) & 0xFF).unwrap_or(0),
+        u8::try_from((groupe >> 8) & 0xFF).unwrap_or(0),
+        u8::try_from(groupe & 0xFF).unwrap_or(0),
+    ];
+    let mut poses = 0_usize;
+    for (place, octet) in out
+        .iter_mut()
+        .skip(depuis)
+        .zip(trio.get(..combien).unwrap_or_default())
+    {
+        *place = *octet;
+        poses = poses.saturating_add(1);
+    }
+    poses
+}
+
+/// Décode du quoted-printable, en s'arrêtant hors d'un échappement.
+fn morceau_qp(brut: &[u8], dernier: bool, out: &mut [u8]) -> (usize, usize) {
+    let mut i = 0_usize;
+    let mut ecrits = 0_usize;
+    while i < brut.len() {
+        let octet = brut.get(i).copied().unwrap_or(0);
+        if octet == b'=' {
+            let suite = brut.get(i.saturating_add(1)..).unwrap_or_default();
+            // UN ÉCHAPPEMENT À CHEVAL SUR DEUX MORCEAUX NE SE DEVINE PAS : on
+            // s'arrête avant lui, et le morceau suivant le lira entier. Sauf
+            // s'il n'y a pas de morceau suivant : un `=` qui finit le contenu
+            // n'échappe rien, et se rend tel quel (RFC 2045 §6.7).
+            if !dernier && suite.len() < 2 && !suite.starts_with(b"\n") {
+                break;
+            }
+            if let Some(saut) = coupure_molle(suite) {
+                i = i.saturating_add(saut).saturating_add(1);
+                continue;
+            }
+        }
+        let (valeur, saut) = octet_echappe(brut, i, octet);
+        // Même raison qu'au-dessus : `zip` s'arrête seul, et la place a été
+        // vérifiée.
+        let mut pose = false;
+        for place in out.iter_mut().skip(ecrits).take(1) {
+            *place = valeur;
+            pose = true;
+        }
+        if !pose {
+            break;
+        }
+        ecrits = ecrits.saturating_add(1);
+        i = i.saturating_add(saut);
+    }
+    (i, ecrits)
+}
+
 /// Donne à `ecrire` chaque octet d'un base64, blancs ignorés.
 fn pour_chaque_base64(
     texte: &[u8],

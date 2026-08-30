@@ -3,7 +3,7 @@
 use ams_proto_imap::{Flags, Limits, PartWhat, SearchScope, StoreMode};
 use ams_sasl::Credentials;
 
-use super::{Action, Mailbox, Mailboxes, MessageInfo, Session, State, TAG_MAX_OCTETS};
+use super::{Action, BinarySize, Mailbox, Mailboxes, MessageInfo, Session, State, TAG_MAX_OCTETS};
 use crate::Authenticator;
 
 const BORNES: Limits = Limits::DEFAULT;
@@ -105,6 +105,38 @@ impl Mailbox for Boite {
             ([1], PartWhat::Mime) => Some((0, 10)),
             _ => None,
         }
+    }
+
+    fn binary_size(&self, sequence: u32, path: &[u32]) -> BinarySize {
+        // LA BOÎTE D'ÉPREUVE PORTE TROIS CAS, et trois seulement : une partie
+        // qui se décode, une dont l'encodage résiste, et une qui n'existe pas.
+        // Ce qu'on éprouve ici est le câblage — ce que la session écrit de
+        // chacun —, pas le décodage, qui vit dans `ams-mime`.
+        if self.info(sequence).is_none() {
+            return BinarySize::Absent;
+        }
+        match path {
+            [] | [1] => BinarySize::Octets(BINAIRE.len() as u64),
+            [2] => BinarySize::UnknownEncoding,
+            _ => BinarySize::Absent,
+        }
+    }
+
+    fn binary(&self, sequence: u32, path: &[u32], raw: u64, out: &mut [u8]) -> (u64, usize) {
+        if !matches!(self.binary_size(sequence, path), BinarySize::Octets(_)) {
+            return (0, 0);
+        }
+        let reste = BINAIRE
+            .get(usize::try_from(raw).unwrap_or(usize::MAX)..)
+            .unwrap_or_default();
+        // ON N'EN REND QU'UN PEU À LA FOIS : c'est ce que fait un vrai magasin,
+        // qui s'arrête à une frontière de groupe, et c'est ce qui éprouve la
+        // reprise.
+        let voulu = reste.len().min(out.len()).min(4);
+        for (place, octet) in out.iter_mut().zip(reste.get(..voulu).unwrap_or_default()) {
+            *place = *octet;
+        }
+        (u64::try_from(voulu).unwrap_or(0), voulu)
     }
 
     fn contains(&self, sequence: u32, scope: SearchScope, field: &[u8], needle: &[u8]) -> bool {
@@ -1825,6 +1857,9 @@ impl Boite {
     }
 }
 
+/// Ce que la boîte d'épreuve rend pour un `BINARY`.
+const BINAIRE: &[u8] = b"contenu decode";
+
 /// Écoule un texte déjà composé, comme une vraie boîte le ferait.
 fn ecouler_le_texte(texte: &[u8], offset: u64, out: &mut [u8]) -> usize {
     let reste = texte
@@ -2235,6 +2270,145 @@ fn trop_de_noms_se_refuse_en_le_disant() {
         texte.contains("NO [LIMIT] Too many header field names"),
         "{texte}"
     );
+}
+
+// ── `BINARY` ────────────────────────────────────────────────────────────────
+
+/// **UN LITTÉRAL8, ET NON UN LITTÉRAL.** `BINARY` rend des octets quelconques,
+/// `NUL` compris — ce qu'un littéral ordinaire n'a pas le droit de porter (§4.3).
+#[test]
+fn le_binaire_s_annonce_par_un_litteral8() {
+    let mut session = selectionnee();
+    let fil = ecouler(&mut session, b"a003 FETCH 1 BINARY.PEEK[1]\r\n");
+    assert_eq!(
+        fil,
+        "* 1 FETCH (BINARY[1] ~{14}\r\ncontenu decode)\r\na003 OK FETCH completed\r\n"
+    );
+}
+
+/// La taille est celle du contenu DÉCODÉ, et elle ne s'écoule pas.
+#[test]
+fn la_taille_binaire_est_celle_du_contenu_decode() {
+    let mut session = selectionnee();
+    let fil = ecouler(&mut session, b"a003 FETCH 1 (BINARY.SIZE[1] UID)\r\n");
+    assert_eq!(
+        fil,
+        "* 1 FETCH (BINARY.SIZE[1] 14 UID 10)\r\na003 OK FETCH completed\r\n"
+    );
+}
+
+/// **LA DEMANDE PARTIELLE PORTE SUR LE CONTENU DÉCODÉ**, et l'on n'y saute donc
+/// pas par un déplacement dans le fichier : il faut décoder ce qu'on jette.
+#[test]
+fn une_demande_partielle_binaire_porte_sur_le_decode() {
+    let mut session = selectionnee();
+    let fil = ecouler(&mut session, b"a003 FETCH 1 BINARY.PEEK[1]<8.6>\r\n");
+    assert_eq!(
+        fil,
+        "* 1 FETCH (BINARY[1]<8> ~{6}\r\ndecode)\r\na003 OK FETCH completed\r\n"
+    );
+}
+
+/// **UN ENCODAGE QUI RÉSISTE FAIT ÉCHOUER LA DEMANDE** (§6.4.5). C'est le seul
+/// endroit d'IMAP où un `FETCH` échoue pour ce qu'un message PORTE : rendre les
+/// octets encodés en les faisant passer pour le contenu tromperait le client
+/// sans qu'il puisse s'en apercevoir.
+#[test]
+fn un_encodage_qui_resiste_fait_echouer_la_demande() {
+    let mut session = selectionnee();
+    let fil = ecouler(&mut session, b"a003 FETCH 1 BINARY.PEEK[2]\r\n");
+    assert!(fil.contains("BINARY[2] NIL"), "{fil}");
+    assert!(
+        fil.contains("a003 NO [UNKNOWN-CTE] Cannot decode this part's transfer encoding"),
+        "{fil}"
+    );
+    // La taille aussi : elle rend zéro — la grammaire veut un nombre — et
+    // conclut par le même refus.
+    let taille = ecouler(&mut session, b"a004 FETCH 1 BINARY.SIZE[2]\r\n");
+    assert!(taille.contains("BINARY.SIZE[2] 0"), "{taille}");
+    assert!(taille.contains("a004 NO [UNKNOWN-CTE]"), "{taille}");
+}
+
+/// Une section absente vaut `NIL`, et ne fait échouer personne.
+#[test]
+fn une_section_binaire_absente_vaut_nil() {
+    let mut session = selectionnee();
+    let fil = ecouler(&mut session, b"a003 FETCH 1 (BINARY.PEEK[7] UID)\r\n");
+    assert_eq!(
+        fil,
+        "* 1 FETCH (BINARY[7] NIL UID 10)\r\na003 OK FETCH completed\r\n"
+    );
+    // Et sa taille vaut zéro, faute de pouvoir valoir `NIL`.
+    let taille = ecouler(&mut session, b"a004 FETCH 1 BINARY.SIZE[7]\r\n");
+    assert_eq!(
+        taille,
+        "* 1 FETCH (BINARY.SIZE[7] 0)\r\na004 OK FETCH completed\r\n"
+    );
+}
+
+/// Le découpage ne change pas le résultat, ici non plus.
+#[test]
+fn le_binaire_se_decoupe_sans_changer_de_resultat() {
+    let mut reference = selectionnee();
+    let attendu = ecouler(&mut reference, b"a003 FETCH 1 BINARY.PEEK[1]\r\n");
+    for taille in 1..=48_usize {
+        let mut session = selectionnee();
+        let mut grand = [0_u8; 512];
+        session
+            .handle(b"a003 FETCH 1 BINARY.PEEK[1]\r\n", &mut grand)
+            .expect("traitable");
+        let mut fil = std::string::String::new();
+        let mut petit = std::vec![0_u8; taille];
+        let mut refuse = false;
+        loop {
+            match session.next_fetch(&mut petit) {
+                Ok(None) => break,
+                Ok(Some(super::FetchChunk::Bytes(octets))) => {
+                    fil.push_str(&std::string::String::from_utf8_lossy(octets));
+                }
+                Ok(Some(super::FetchChunk::Message { .. })) => {
+                    unreachable!("un binaire n'est pas un intervalle du message")
+                }
+                Err(erreur) => {
+                    assert!(matches!(erreur, super::Error::Reply(_)), "{erreur:?}");
+                    refuse = true;
+                    break;
+                }
+            }
+        }
+        if !refuse {
+            assert_eq!(fil, attendu, "taille {taille}");
+        }
+    }
+}
+
+/// Un tampon trop court pour écrire un `BINARY` le dit, à chaque rang de son
+/// annonce : le chemin, le décalage, le littéral8, et le `NIL` d'une absence.
+#[test]
+fn un_tampon_trop_court_pour_un_binaire_le_dit() {
+    for commande in [
+        &b"a003 FETCH 1 BINARY.PEEK[1]<3.4>\r\n"[..],
+        b"a003 FETCH 1 BINARY.PEEK[7]\r\n",
+        b"a003 FETCH 1 BINARY.SIZE[1]\r\n",
+        b"a003 FETCH 1 BINARY.SIZE[7]\r\n",
+    ] {
+        for taille in 1..=40_usize {
+            let mut session = selectionnee();
+            let mut grand = [0_u8; 512];
+            session.handle(commande, &mut grand).expect("traitable");
+            let mut petit = std::vec![0_u8; taille];
+            loop {
+                match session.next_fetch(&mut petit) {
+                    Ok(None) => break,
+                    Ok(Some(_)) => {}
+                    Err(erreur) => {
+                        assert!(matches!(erreur, super::Error::Reply(_)), "{erreur:?}");
+                        break;
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ── `BODYSTRUCTURE` ─────────────────────────────────────────────────────────
