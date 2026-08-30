@@ -3637,3 +3637,96 @@ Une faute de DÉCOMPRESSION condamne la connexion ; une liste bien décomprimée
 qui ne fait pas une requête ne condamne que son flux (§4.1.2 de RFC 9114). C'est
 la même distinction qu'en HTTP/2 §8.1.1, avec des codes différents — et c'est
 elle qui empêche un client maladroit d'emporter les requêtes des autres.
+
+## La protection des paquets QUIC : le seul endroit où une erreur fuit
+
+Partout ailleurs dans ce dépôt, une erreur se traduit par un refus. Ici, elle se
+traduit par une FUITE :
+
+- un nonce réemployé livre la clé d'authentification de GCM, et donc la capacité
+  de forger n'importe quel message ;
+- un masque d'en-tête mal calculé laisse le numéro de paquet en clair, et permet
+  de suivre un utilisateur qui change de réseau ;
+- un déchiffrement qui accepte ce qu'il ne devrait pas ouvre la connexion à qui
+  sait envoyer un datagramme.
+
+C'est pourquoi ce crate est le seul dont **chaque valeur est comparée aux
+vecteurs de la RFC**, et non seulement à elle-même : l'annexe A de RFC 9001
+donne les cinq secrets, les six clés, les trois masques, le chiffré d'un paquet
+et le jeton d'un `Retry`. Tous se retrouvent, à l'octet près.
+
+### Ce sont les STRUCTURES qu'on compare, pas seulement les résultats
+
+L'annexe A.1 écrit `HkdfLabel` en toutes lettres :
+`00200f746c73313320636c69656e7420696e00` pour « client in ». Ce sont ces
+octets-là que les tests comparent d'abord.
+
+La raison est méthodologique : une structure fausse avec un secret faux peut
+donner un résultat juste par accident, et l'on ne saurait pas lequel des deux
+est en cause. Comparer la structure sépare les deux questions.
+
+### Le préfixe `tls13 ` sépare les univers
+
+Sans lui, une clé dérivée pour QUIC et une clé dérivée pour autre chose à partir
+du même secret et de la même étiquette seraient la même clé. Et le contexte vide
+s'écrit quand même : l'omettre ferait une structure d'un octet plus courte, donc
+une clé différente de celle que le pair a calculée.
+
+### Les clés des paquets `Initial` sont publiques, et c'est assumé
+
+Le sel est dans la RFC, l'identifiant de destination voyage en clair. N'importe
+qui peut calculer ces clés ; elles ne cachent rien. **Elles empêchent un
+intermédiaire de modifier un paquet sans que cela se voie** — ce que l'histoire
+de TCP a montré être un problème réel, et non théorique.
+
+Le jeton d'un `Retry` a la même nature : sa clé est publique, et ce qui rend la
+forge impossible n'est pas le secret de la clé mais le fait que le calcul inclue
+**l'identifiant de destination d'origine**, que seul un témoin du paquet
+`Initial` connaît.
+
+### L'échantillon se prend à quatre octets du numéro, toujours
+
+§5.4.2. Quelle que soit la longueur RÉELLE du numéro de paquet, on échantillonne
+comme s'il en faisait quatre — parce que le receveur ne connaît pas cette
+longueur : elle est justement sous le masque qu'il cherche à ôter.
+
+C'est un serpent qui se mord la queue, et la RFC le coupe en fixant le point
+d'échantillonnage. Un décodeur qui échantillonnerait selon la longueur qu'il
+croit lire obtiendrait un masque sans rapport.
+
+Et quatre bits sont masqués sur un en-tête long, cinq sur un court. Se tromper
+laisse le bit de phase de clé en clair, ce qui permet à un observateur de
+compter les mises à jour.
+
+### Une borne de paquet qui sert de garde de sûreté
+
+Les trois AEAD ne refusent qu'au-delà de leur propre limite de longueur —
+soixante-quatre gibioctets pour GCM. Ces refus-là sont inatteignables, et donc
+invérifiables.
+
+On borne donc le clair à 65 527 octets, la plus grande charge UDP que §18.2 de
+RFC 9000 permet d'annoncer. Cette borne est réelle, elle se vérifie, et **elle
+met les AEAD hors d'atteinte de leurs propres limites** — ce qui permet de
+traiter leur refus comme l'impossibilité qu'il est.
+
+### Une garde qu'on ne peut pas atteindre est une garde qu'on ne peut pas vérifier
+
+Les bornes d'usage de §6.6 valent 2^23 paquets chiffrés et 2^36 à 2^52 paquets
+refusés. Une première écriture les comparait directement : c'était juste, et
+aucun test ne pouvait le montrer.
+
+Elles vivent maintenant dans le compteur, et l'on peut en poser de plus basses.
+§6.6 l'autorise explicitement, un opérateur prudent peut le vouloir, et les
+tests s'en servent — **on peut descendre, jamais monter** : l'annexe B démontre
+ces bornes, elles ne sont pas des préférences.
+
+### La borne d'intégrité existe parce que QUIC jette au lieu de fermer
+
+TLS ferme au premier enregistrement qui ne s'authentifie pas. QUIC JETTE le
+paquet et continue — sans quoi n'importe qui fermerait une connexion en envoyant
+un datagramme. Mais cela donne à un adversaire autant d'essais qu'il veut, et
+c'est ce compte-là qui les borne.
+
+Une mise à jour de clé remet à zéro le compte des paquets CHIFFRÉS, et jamais
+celui des refusés : les essais d'un adversaire ne s'oublient pas parce qu'on a
+changé de clé.

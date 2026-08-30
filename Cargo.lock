@@ -169,6 +169,19 @@ name = "ams-proto-smtp"
 version = "0.1.0"
 
 [[package]]
+name = "ams-quic-crypto"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "aes-gcm",
+ "ams-proto-quic",
+ "chacha20",
+ "chacha20poly1305",
+ "hkdf",
+ "sha2",
+]
+
+[[package]]
 name = "ams-sasl"
 version = "0.1.0"
 

@@ -1,0 +1,21 @@
+[package]
+name = "ams-quic-crypto"
+description = "Protection des paquets QUIC (RFC 9001), sans entrée-sortie"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+aes = { workspace = true }
+aes-gcm = { workspace = true }
+ams-proto-quic = { workspace = true }
+chacha20 = { workspace = true }
+chacha20poly1305 = { workspace = true }
+hkdf = { workspace = true }
+sha2 = { workspace = true }
+
+[lints]
+workspace = true
