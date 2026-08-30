@@ -1434,6 +1434,45 @@ partie, et deux parties dans une même commande.
 
 Ce qui n'était alors pas servi — `IDLE`, `SUBSCRIBE` — l'est depuis.
 
+## Les options de rev2, depuis le 2026-08-30
+
+**`STATUS` REND CE QUI EST DEMANDÉ** (§7.3.3), dans l'ordre demandé, et compte
+`UNSEEN`, `DELETED` et `SIZE` en parcourant la boîte — mais SEULEMENT si on les
+demande : les trois autres sont des propriétés que la boîte connaît sans
+regarder ses messages, et un client qui surveille répète cette commande.
+`RECENT` est refusé plutôt que rendu à zéro : rev2 l'a retiré avec le drapeau
+qu'il comptait, et zéro ferait croire à une boîte sans arrivée.
+
+**`LIST … RETURN (STATUS (…))`** est la seule forme de §6.3.9 qui emboîte des
+parenthèses. La lecture compte donc les niveaux au lieu de chercher la première
+fermante — qui refermerait le `STATUS` et laisserait la liste ouverte.
+
+**`SEARCH RETURN (…)`** demande un parcours de plus : `MIN`, `MAX` et `COUNT`
+s'écrivent AVANT la liste et ne peuvent pas s'écrire avant d'être connus. Ce
+n'est pas cher — c'est le même parcours, sur une boîte déjà relevée.
+
+**`$` SE RETIENT EN UID, JAMAIS EN RANGS.** §6.4.4.1 exige qu'un message effacé
+sorte du résultat retenu, et — si l'on retenait des rangs — qu'on les décale à
+chaque `EXPUNGE`. Un UID ne se décale pas : le message effacé cesse de
+correspondre, et la règle est tenue par la NATURE de ce qu'on retient plutôt que
+par un code qu'il faudrait penser à écrire. C'est le même choix que pour
+l'`IDLE`, et pour la même raison.
+
+Ce qui déborde est abandonné, pas tronqué : quatre cents UID espacés ne se
+comprimant en aucune plage dépassent ce qu'une session retient, et le marqueur
+ne désigne alors rien. Un ensemble tronqué désignerait d'autres messages que
+ceux qu'on a trouvés.
+
+**`* OK [CLOSED]` EST UNE FRONTIÈRE, PAS UNE POLITESSE** (§7.1) : tout ce qui la
+précède parle de la boîte fermée, tout ce qui la suit parle de la nouvelle. Elle
+paraît aussi quand la nouvelle sélection échoue — §6.3.2 ferme l'ancienne dans
+ce cas-là aussi, et se taire laisserait le client croire qu'il la tient encore.
+
+**UNE RÉPONSE CAUSÉE PAR UNE COMMANDE `UID` PORTE L'UID** (§6.4.9), la note de la
+RFC nommant `UID FETCH` et `UID STORE`. Le commentaire qui justifiait l'absence
+— « le client sait déjà de quel UID il parle » — était un raisonnement, pas une
+lecture ; la RFC dit le contraire.
+
 ## `SUBSCRIBE` : les abonnements, depuis le 2026-08-30
 
 **LE MÊME MOT NE DIT PAS LA MÊME CHOSE AUX DEUX PLACES.** `LIST (SUBSCRIBED)`
@@ -2325,11 +2364,18 @@ découpage des lectures ne change rien au verdict.
 Ce qui manque, et qu'aucune phrase ne doit laisser croire acquis : la file de
 réémission des messages sortants, et toute interface HTTP.
 
-**Toutes les COMMANDES de RFC 9051 répondent** — plus aucune ne reçoit un
-`NO [UNAVAILABLE]`, et la méthode qui l'écrivait a disparu du code. Trois de
-leurs OPTIONS manquent encore, et l'énumération des commandes ne doit pas les
-faire croire acquises : les éléments de `STATUS` autres que `MESSAGES`,
-`UIDNEXT` et `UIDVALIDITY` ; les options de retour de `SEARCH` — ce que rev1
-appelait ESEARCH ; et `LIST … RETURN (STATUS (…))` — ce que rev1 appelait
-LIST-STATUS. Les trois sont dans le protocole de BASE de rev2, qui a absorbé ces
-extensions.
+**IMAP4rev2 est servi.** Toutes les commandes de RFC 9051 répondent — plus
+aucune ne reçoit un `NO [UNAVAILABLE]`, et la méthode qui l'écrivait a disparu du
+code —, et les options que §E dit absorbées dans le protocole de base le sont
+aussi : NAMESPACE, UNSELECT, UIDPLUS, ESEARCH, SEARCHRES, ENABLE, IDLE, SASL-IR,
+LIST-EXTENDED, LIST-STATUS, MOVE, LITERAL-, le côté FETCH de BINARY.
+
+Cette phrase-là a été FAUSSE pendant un commit, et la manière dont elle l'est
+devenue mérite d'être notée : l'énumération des commandes était complète, et
+l'on en a conclu que le protocole l'était. Il ne l'était pas — rev2 a absorbé
+des extensions dont les options font désormais partie de la grammaire de base.
+**Une liste complète d'une chose ne prouve rien d'une autre**, et c'est en
+relisant §E de la RFC, plutôt que sa propre liste, qu'on l'a vu.
+
+Ce qui reste hors du serveur : la file de réémission des messages sortants, et
+toute interface HTTP.

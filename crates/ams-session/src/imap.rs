@@ -65,7 +65,7 @@
 
 use ams_proto_imap::{
     Args, Candidate, Command, Error as ImapError, Fetch, FetchItem, Flags, Limits, Line, PartPath,
-    PartWhat, Search, SearchScope, Section, SequenceSet, Status, Store, StoreMode, Tag,
+    PartWhat, Search, SearchScope, Section, SequenceSet, Status, StatusAtt, Store, StoreMode, Tag,
     encode_continuation, encode_tagged, encode_untagged, encode_untagged_parts,
     write_internal_date,
 };
@@ -790,6 +790,19 @@ struct Emission {
     /// `MOVE` traduit donc son ensemble en UID avant de retirer, quelle que soit
     /// la forme sous laquelle le client l'a écrit.
     cles_uid: bool,
+    /// Ce qu'un `SEARCH` doit rendre, et le recensement qui s'ensuit.
+    retour: RetourDeRecherche,
+    /// Faut-il écrire l'`UID` que le client n'a pas demandé ?
+    ///
+    /// # UNE RÉPONSE CAUSÉE PAR UNE COMMANDE `UID` PORTE L'UID
+    ///
+    /// §6.4.9 l'exige, et le nomme : « server implementations MUST implicitly
+    /// include the UID message data item as part of any FETCH response caused by
+    /// a UID command », la note visant explicitement `UID FETCH` et `UID STORE`.
+    /// Sans lui, un client qui a désigné ses messages par UID reçoit des rangs,
+    /// et doit deviner lequel est lequel — alors qu'il a justement choisi les
+    /// UID pour ne pas avoir à le faire.
+    uid_implicite: bool,
     /// Le retrait exige-t-il la marque `\Deleted` ? `EXPUNGE` oui, `MOVE` non.
     exige_la_marque: bool,
     /// Ce que vaut l'étoile pour l'ensemble de la commande.
@@ -1136,6 +1149,24 @@ pub struct Session<A: Authenticator, M: Mailboxes> {
     /// recevrait un toutes les quelques secondes. On ne l'écrit donc que
     /// lorsque le compte a changé — ce qui suppose de retenir le dernier.
     exists_vus: u32,
+    /// Le résultat de la dernière recherche `SAVE`, EN UID (§6.4.4.1).
+    ///
+    /// # POURQUOI EN UID, ET JAMAIS EN RANGS
+    ///
+    /// §6.4.4.1 : « When a message listed in the search result variable is
+    /// EXPUNGEd, it is automatically removed from the list », et — si l'on
+    /// retenait des rangs — il faudrait les décaler à chaque `EXPUNGE`. Un UID ne
+    /// se décale pas : le message effacé cesse simplement de correspondre à
+    /// quoi que ce soit, et la règle est tenue par la nature de ce qu'on
+    /// retient plutôt que par un code qu'il faudrait penser à écrire.
+    ///
+    /// La même section demande de savoir traduire d'un espace à l'autre selon la
+    /// commande qui emploie `$`. C'est ce que fait le drapeau `cles_uid` de
+    /// l'émission : l'ensemble est comparé aux UID, et la réponse rend des rangs.
+    resultat: [u8; SEQUENCE_TEXT_MAX],
+    /// Combien de `resultat` vaut. Zéro veut dire « la liste vide », qui est un
+    /// résultat valide et non une absence (§6.4.4.1).
+    resultat_len: usize,
     /// A-t-elle été ouverte en lecture seule (`EXAMINE`) ?
     lecture_seule: bool,
     /// Le `FETCH` en cours d'émission.
@@ -1159,6 +1190,8 @@ impl Emission {
         noms_par_item: [(0, 0); ams_proto_imap::FETCH_ITEMS_MAX],
         par_uid: false,
         cles_uid: false,
+        retour: RetourDeRecherche::DEFAUT,
+        uid_implicite: false,
         exige_la_marque: true,
         star: 0,
         star_uid: 0,
@@ -1225,6 +1258,28 @@ impl Emission {
             }
         }
         None
+    }
+
+    /// Comme [`Emission::trouvaille`], mais rend AUSSI l'UID.
+    ///
+    /// # POURQUOI DEUX MÉTHODES PLUTÔT QU'UNE
+    ///
+    /// `trouvaille` rend la clef que le client a employée — un rang ou un UID
+    /// selon la commande. Le résultat retenu par `SAVE`, lui, est TOUJOURS en
+    /// UID (voir [`Session::resultat`]). Rendre les deux d'un même parcours
+    /// évite de relire la boîte pour retrouver l'UID d'un rang qu'on vient de
+    /// voir.
+    fn trouvaille_avec_uid<B: Mailbox>(
+        &mut self,
+        boite: &B,
+        limits: &Limits,
+    ) -> Option<(u32, u32)> {
+        let clef = self.trouvaille(boite, limits)?;
+        // Le rang courant a déjà avancé d'un cran ; le message qu'on vient de
+        // retenir est celui d'avant.
+        let rang = self.courant.saturating_sub(1);
+        let uid = boite.info(rang).map_or(clef, |info| info.uid);
+        Some((clef, uid))
     }
 
     /// Le prochain message à effacer, s'il en reste un.
@@ -1307,6 +1362,8 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             nom_ouvert: [0; MAILBOX_NAME_MAX],
             nom_ouvert_len: 0,
             exists_vus: 0,
+            resultat: [0; SEQUENCE_TEXT_MAX],
+            resultat_len: 0,
             lecture_seule: false,
             emission: None,
             depot: None,
@@ -1899,6 +1956,71 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         self.faute(b"Expected DONE while idling", out)
     }
 
+    /// Résout le marqueur `$` : le texte à employer, et s'il désigne des UID.
+    ///
+    /// # LE MARQUEUR DÉSIGNE DES UID, QUELLE QUE SOIT LA COMMANDE
+    ///
+    /// §6.4.4.1 : `$` peut être posé par un `SEARCH` et employé par un
+    /// `UID FETCH`, ou l'inverse, et le serveur doit traduire. Retenir des UID et
+    /// dire à la commande de comparer aux UID fait la traduction dans les deux
+    /// sens, sans table de correspondance — et la réponse rend des rangs, comme
+    /// toujours.
+    ///
+    /// **Un résultat VIDE est un résultat**, pas une absence : le texte est
+    /// alors vide, ne se relit pas, et ne désigne donc aucun message. C'est
+    /// exactement ce que §6.4.4.1 demande — « a valid, but non-matching, list ».
+    fn resoudre<'x>(&'x self, ensemble: &SequenceSet<'x>) -> (&'x [u8], bool) {
+        match ensemble.saved() {
+            true => (
+                self.resultat.get(..self.resultat_len).unwrap_or_default(),
+                true,
+            ),
+            false => (ensemble.as_bytes(), false),
+        }
+    }
+
+    /// Recense une boîte nommée, ou dit qu'elle n'existe pas.
+    ///
+    /// # ON N'INTERROGE PAS DEUX FOIS CE QU'ON TIENT DÉJÀ
+    ///
+    /// §6.3.11 déconseille `STATUS` sur la boîte sélectionnée, mais ne
+    /// l'interdit pas, et un client le fait. La rouvrir, c'est demander au
+    /// magasin de retrouver ce que la session a sous la main — et, pour un
+    /// magasin qui verrouille, c'est se heurter à son propre verrou et répondre
+    /// « elle n'existe pas » d'une boîte qu'on a ouverte.
+    fn recensement(
+        &self,
+        nom: &[u8],
+        demande: &ams_proto_imap::StatusItems,
+    ) -> Option<Recensement> {
+        match &self.ouverte {
+            Some(ouverte) if nom == self.selected() => Some(recenser(ouverte, demande)),
+            _ => Some(recenser(&self.boites.open(self.user(), nom)?, demande)),
+        }
+    }
+
+    /// Écrit la frontière `[CLOSED]`, puis un refus étiqueté.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Reply`] si `out` ne suffit pas.
+    fn conge_puis_refus<'b>(&mut self, texte: &[u8], out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
+        let mut plume = Plume::neuve(out);
+        plume.pousser(b"* OK [CLOSED] Previous mailbox is now closed\r\n")?;
+        let ecrits = plume.ecrits();
+        let suite = out.get_mut(ecrits..).unwrap_or_default();
+        let conclusion = encode_tagged(suite, self.tag_lu(), Status::No, texte, &self.limits)
+            .map_err(Error::Reply)?
+            .len();
+        Ok(Turn {
+            reply: out
+                .get(..ecrits.saturating_add(conclusion))
+                .unwrap_or_default(),
+            action: Action::Continue,
+            peer_fault: false,
+        })
+    }
+
     /// `NAMESPACE` (§6.3.10) : où les boîtes vivent.
     ///
     /// # UN SEUL ESPACE, ET C'EST TOUT CE QU'IL Y A À DIRE
@@ -2113,17 +2235,40 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         };
         // §6.3.2 : un `SELECT` qui échoue FERME la boîte précédente. Le client
         // se retrouve authentifié sans sélection, et il doit le savoir.
+        //
+        // ET IL DOIT LE SAVOIR EXPLICITEMENT : §7.1 veut `* OK [CLOSED]` dès
+        // qu'une boîte est fermée pour en ouvrir une autre. Ce n'est pas une
+        // politesse — c'est une FRONTIÈRE : tout ce qui précède parle de la
+        // boîte fermée, tout ce qui suit parle de la nouvelle. Sans elle, un
+        // client qui reçoit `* 5 EXISTS` ne sait pas de laquelle des deux il
+        // s'agit. `CLOSE` et `UNSELECT`, eux, n'en ont pas besoin : ils
+        // n'ouvrent rien après.
+        let fermait = self.ouverte.is_some();
+        // §6.4.4.1 : « Upon successful completion of a SELECT or an EXAMINE
+        // command, the current search result variable is reset to the empty
+        // sequence. » On le remet à zéro AVANT de savoir si l'ouverture
+        // réussira : ce qu'on avait retenu parlait de la boîte qu'on vient de
+        // fermer, et le garder ferait désigner des UID d'une autre boîte.
+        self.resultat_len = 0;
         self.ouverte = None;
         self.emission = None;
         self.nom_ouvert_len = 0;
         self.etat = State::Authenticated;
         let Some(boite) = self.boites.open(self.user(), nom) else {
-            return self.termine(
-                Status::No,
-                b"[NONEXISTENT] Mailbox does not exist",
-                Action::Continue,
-                out,
-            );
+            // LA BOÎTE PRÉCÉDENTE EST FERMÉE MÊME QUAND LA NOUVELLE NE S'OUVRE
+            // PAS. §6.3.2 le dit — « if a mailbox is selected and a SELECT
+            // command that fails is attempted, no mailbox is selected » —, et la
+            // frontière de §7.1 vaut donc aussi ici. Se taire laisserait le
+            // client croire qu'il tient encore l'ancienne.
+            if !fermait {
+                return self.termine(
+                    Status::No,
+                    b"[NONEXISTENT] Mailbox does not exist",
+                    Action::Continue,
+                    out,
+                );
+            }
+            return self.conge_puis_refus(b"[NONEXISTENT] Mailbox does not exist", out);
         };
 
         // UNE BOÎTE OÙ RIEN NE SURVIT EST EN LECTURE SEULE, que le client ait
@@ -2136,6 +2281,9 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         };
         let lecture_seule = permanents == Flags::NONE;
         let mut plume = Plume::neuve(out);
+        if fermait {
+            plume.pousser(b"* OK [CLOSED] Previous mailbox is now closed\r\n")?;
+        }
         let combien = boite.exists();
         // CE QU'ON VIENT D'ANNONCER EST CE QU'ON A ANNONCÉ : un `IDLE` qui
         // suivrait ne doit pas redire le même compte.
@@ -2310,6 +2458,21 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         ) else {
             return self.faute(b"COPY expects a sequence set and a mailbox name", out);
         };
+        // §6.4.4.1 : `$` désigne ce que la dernière recherche a retenu. On le
+        // RECOPIE — la copie qui suit emprunte la session, et le texte retenu y
+        // vit.
+        let mut place = [0_u8; SEQUENCE_TEXT_MAX];
+        let (resolu, par_le_marqueur) = {
+            let (texte, marqueur) = self.resoudre(&ensemble);
+            let longueur = texte.len().min(place.len());
+            for (endroit, octet) in place.iter_mut().zip(texte) {
+                *endroit = *octet;
+            }
+            (longueur, marqueur)
+        };
+        let ensemble = SequenceSet::parse(place.get(..resolu).unwrap_or_default(), &self.limits)
+            .unwrap_or(SequenceSet::EMPTY);
+        let cles_uid = par_uid || par_le_marqueur;
 
         // §6.4.7 : UNE DESTINATION QUI N'EXISTE PAS SE DIT `[TRYCREATE]`, et pas
         // autrement. C'est le code qui apprend au client qu'un `CREATE` suivi du
@@ -2330,14 +2493,14 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             let exists = boite.exists();
             (exists, boite.info(exists).map_or(0, |info| info.uid))
         });
-        let star = if par_uid { dernier_uid } else { exists };
+        let star = if cles_uid { dernier_uid } else { exists };
 
         let Ok(Copies {
             source,
             premier_copie,
             dernier_copie,
             copies,
-        }) = self.copier(&ensemble, nom, par_uid, exists, star, false)
+        }) = self.copier(&ensemble, nom, cles_uid, exists, star, false)
         else {
             return self.termine(
                 Status::No,
@@ -2686,16 +2849,30 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             .iter()
             .position(|octet| *octet == b' ')
             .unwrap_or(texte.len());
-        let ensemble = SequenceSet::parse(texte.get(..fin).unwrap_or_default(), &self.limits)
+        let ecrit = SequenceSet::parse(texte.get(..fin).unwrap_or_default(), &self.limits)
             .unwrap_or(SequenceSet::EMPTY);
+        // §6.4.4.1 : `$` désigne ce que la dernière recherche a retenu. On le
+        // RECOPIE — le déplacement qui suit emprunte la session.
+        let mut retenu = [0_u8; SEQUENCE_TEXT_MAX];
+        let (resolu, par_le_marqueur) = {
+            let (lu, marqueur) = self.resoudre(&ecrit);
+            let longueur = lu.len().min(retenu.len());
+            for (endroit, octet) in retenu.iter_mut().zip(lu) {
+                *endroit = *octet;
+            }
+            (longueur, marqueur)
+        };
+        let ensemble = SequenceSet::parse(retenu.get(..resolu).unwrap_or_default(), &self.limits)
+            .unwrap_or(SequenceSet::EMPTY);
+        let cles_uid = par_uid || par_le_marqueur;
 
         let (exists, dernier_uid) = self.ouverte.as_ref().map_or((0, 0), |boite| {
             let exists = boite.exists();
             (exists, boite.info(exists).map_or(0, |info| info.uid))
         });
-        let star = if par_uid { dernier_uid } else { exists };
+        let star = if cles_uid { dernier_uid } else { exists };
 
-        let faites = match self.copier(&ensemble, nom, par_uid, exists, star, true) {
+        let faites = match self.copier(&ensemble, nom, cles_uid, exists, star, true) {
             Ok(faites) => faites,
             Err(Echec::Copie) => {
                 return self.termine(
@@ -2750,6 +2927,8 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             noms_par_item: [(0, 0); ams_proto_imap::FETCH_ITEMS_MAX],
             par_uid,
             cles_uid: true,
+            retour: RetourDeRecherche::DEFAUT,
+            uid_implicite: false,
             exige_la_marque: false,
             star: dernier_uid,
             star_uid: dernier_uid,
@@ -2817,10 +2996,15 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         let exists = boite.exists();
         let dernier_uid = boite.info(exists).map_or(0, |info| info.uid);
 
-        // §6.4.4 : le jeu de caractères est optionnel, et rev2 impose UTF-8. On
-        // accepte ce qu'on sait lire, et l'on refuse le reste par le code que la
-        // RFC prévoit — plutôt que de chercher dans un encodage qu'on ignore.
-        let mut critere = arguments.trim_ascii();
+        // §6.4.4 : LES OPTIONS DE RETOUR VIENNENT AVANT LE JEU DE CARACTÈRES,
+        // et avant les critères. C'est ce qui distingue « rends-moi la liste »
+        // de « rends-moi seulement combien » — et rendre la liste à qui a
+        // demandé un compte, c'est envoyer des milliers de numéros pour qu'il en
+        // garde un.
+        let Ok((retour, apres_retour)) = ams_proto_imap::SearchReturn::parse(arguments) else {
+            return self.faute(b"SEARCH result options are malformed", out);
+        };
+        let mut critere = apres_retour.trim_ascii();
         if let Some(reste) = tete_sans_casse(critere, b"CHARSET") {
             let reste = reste.trim_ascii_start();
             let fin = reste
@@ -2885,6 +3069,11 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             noms_par_item: [(0, 0); ams_proto_imap::FETCH_ITEMS_MAX],
             par_uid,
             cles_uid: par_uid,
+            retour: RetourDeRecherche {
+                demande: retour,
+                ..RetourDeRecherche::DEFAUT
+            },
+            uid_implicite: false,
             exige_la_marque: true,
             star: exists,
             star_uid: dernier_uid,
@@ -2956,9 +3145,12 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
                 out,
             );
         }
-        if SequenceSet::parse(texte, &self.limits).is_err() {
+        let Ok(ecrit) = SequenceSet::parse(texte, &self.limits) else {
             return self.faute(b"EXPUNGE arguments are malformed", out);
-        }
+        };
+        // §6.4.4.1 : `$` désigne ce que la dernière recherche a retenu.
+        let (texte, par_le_marqueur) = self.resoudre(&ecrit);
+        let cles_uid = par_uid || par_le_marqueur;
         let mut emission = Emission {
             texte: [0; SEQUENCE_TEXT_MAX],
             texte_len: texte.len(),
@@ -2968,9 +3160,11 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             noms: [0; NOMS_MAX],
             noms_par_item: [(0, 0); ams_proto_imap::FETCH_ITEMS_MAX],
             par_uid,
-            cles_uid: par_uid,
+            cles_uid,
+            retour: RetourDeRecherche::DEFAUT,
+            uid_implicite: false,
             exige_la_marque: true,
-            star: if par_uid { dernier_uid } else { exists },
+            star: if cles_uid { dernier_uid } else { exists },
             star_uid: dernier_uid,
             courant: 1,
             exists,
@@ -3056,6 +3250,23 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             }
             plume.pousser(attributs)?;
             plume.nom_de_boite(b") \"/\" ", boite.name, b"\r\n")?;
+            // §6.3.9.7 : `RETURN (STATUS (…))` rend un `* STATUS` PAR BOÎTE,
+            // juste après sa ligne de liste. C'est ce qu'un client envoie pour
+            // peupler son panneau en une commande au lieu de vingt — la latence
+            // d'Internet multipliée par le nombre de dossiers.
+            //
+            // **UNE BOÎTE QU'ON NE PEUT PAS OUVRIR N'A PAS DE `STATUS`** : une
+            // `\Noselect` n'a pas de courrier à compter, et l'interroger
+            // rendrait des zéros qu'on prendrait pour une boîte vide.
+            if let Some((items, recense)) = demande
+                .status()
+                .filter(|_| boite.selectable)
+                .and_then(|items| Some((items, self.recensement(boite.name, &items)?)))
+            {
+                plume.nom_de_boite(b"* STATUS ", boite.name, b" (")?;
+                ecrire_le_recensement(&mut plume, &items, &recense)?;
+                plume.pousser(b")\r\n")?;
+            }
         }
         // §6.3.7 INTERDIT DE RETIRER DE SOI-MÊME UN ABONNEMENT dont la boîte a
         // disparu, et §6.3.9.6 veut que le filtre le rende quand même. C'est le
@@ -3145,7 +3356,9 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
                 out,
             );
         }
-        let texte = demande.set_text();
+        // §6.4.4.1 : `$` désigne ce que la dernière recherche a retenu.
+        let (texte, par_le_marqueur) = self.resoudre(&demande.set());
+        let cles_uid = par_uid || par_le_marqueur;
         if texte.len() > SEQUENCE_TEXT_MAX {
             return self.termine(
                 Status::No,
@@ -3158,17 +3371,19 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             texte: [0; SEQUENCE_TEXT_MAX],
             texte_len: texte.len(),
             // §6.4.6 : la réponse d'un `STORE` dit les drapeaux, et rien
-            // d'autre. Même si le `STORE` était par UID — le client sait déjà de
-            // quel UID il parle, et le numéro de séquence lui suffit à recoller.
+            // d'autre — SAUF l'UID quand le `STORE` était par UID, que §6.4.9
+            // exige en nommant cette commande-là.
             items: [FetchItem::Flags; ams_proto_imap::FETCH_ITEMS_MAX],
             items_len: 1,
             cte_inconnu: false,
             noms: [0; NOMS_MAX],
             noms_par_item: [(0, 0); ams_proto_imap::FETCH_ITEMS_MAX],
             par_uid,
-            cles_uid: par_uid,
+            cles_uid,
+            retour: RetourDeRecherche::DEFAUT,
+            uid_implicite: par_uid,
             exige_la_marque: true,
-            star: if par_uid { dernier_uid } else { exists },
+            star: if cles_uid { dernier_uid } else { exists },
             star_uid: dernier_uid,
             courant: 1,
             exists,
@@ -3482,7 +3697,17 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             return self.faute(b"Command is not allowed before authentication", out);
         }
         let mut nom = [0_u8; MAILBOX_NAME_MAX];
-        let Some(nom) = self.un_nom(arguments, &mut nom) else {
+        // LE NOM D'ABORD, LA LISTE ENSUITE : le nom peut être cité, et son
+        // guillemet fermant est le seul endroit où la liste peut commencer.
+        let Some(fin) = fin_du_premier_argument(arguments) else {
+            return self.faute(b"STATUS expects a mailbox name and items", out);
+        };
+        let Some(nom) = self.un_nom(arguments.get(..fin).unwrap_or_default(), &mut nom) else {
+            return self.faute(b"STATUS expects a mailbox name and items", out);
+        };
+        let Ok(demande) =
+            ams_proto_imap::StatusItems::parse(arguments.get(fin..).unwrap_or_default())
+        else {
             return self.faute(b"STATUS expects a mailbox name and items", out);
         };
         // ON N'INTERROGE PAS DEUX FOIS CE QU'ON TIENT DÉJÀ. RFC 9051 §6.3.11
@@ -3491,33 +3716,21 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         // demander au magasin de retrouver ce que la session a sous la main —
         // et, pour un magasin qui verrouille, c'est se heurter à son propre
         // verrou et répondre « elle n'existe pas » d'une boîte qu'on a ouverte.
-        let (exists, uid_next, uid_validity) = match &self.ouverte {
-            Some(ouverte) if nom == self.selected() => {
-                (ouverte.exists(), ouverte.uid_next(), ouverte.uid_validity())
-            }
-            _ => {
-                let Some(boite) = self.boites.open(self.user(), nom) else {
-                    return self.termine(
-                        Status::No,
-                        b"[NONEXISTENT] Mailbox does not exist",
-                        Action::Continue,
-                        out,
-                    );
-                };
-                (boite.exists(), boite.uid_next(), boite.uid_validity())
-            }
+        let Some(recense) = self.recensement(nom, &demande) else {
+            return self.termine(
+                Status::No,
+                b"[NONEXISTENT] Mailbox does not exist",
+                Action::Continue,
+                out,
+            );
         };
-        // ON REND LES TROIS QU'ON SAIT, sans regarder ce qui a été demandé : un
-        // client qui en demande un les lit tous sans dommage, et prétendre
-        // filtrer demanderait d'analyser une liste dont aucun élément ne change
-        // ce qu'on sait de la boîte.
+        // §7.3.3 : LA RÉPONSE PORTE CE QUI A ÉTÉ DEMANDÉ, dans l'ordre où on l'a
+        // demandé. Rendre toujours les mêmes trois est commode et faux : un
+        // client qui demande `UNSEEN` ne le trouverait pas, et ne saurait pas si
+        // la boîte n'en a aucun ou si le serveur ne sait pas compter.
         let mut plume = Plume::neuve(out);
-        plume.nom_de_boite(b"* STATUS ", nom, b" (MESSAGES ")?;
-        plume.nombre(u64::from(exists))?;
-        plume.pousser(b" UIDNEXT ")?;
-        plume.nombre(u64::from(uid_next))?;
-        plume.pousser(b" UIDVALIDITY ")?;
-        plume.nombre(u64::from(uid_validity))?;
+        plume.nom_de_boite(b"* STATUS ", nom, b" (")?;
+        ecrire_le_recensement(&mut plume, &demande, &recense)?;
         plume.pousser(b")\r\n")?;
         let ecrits = plume.ecrits();
         let suite = out.get_mut(ecrits..).unwrap_or_default();
@@ -3604,7 +3817,9 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             }
             Err(_) => return self.faute(b"FETCH arguments are malformed", out),
         };
-        let texte = demande.set_text();
+        // §6.4.4.1 : `$` désigne ce que la dernière recherche a retenu.
+        let (texte, par_le_marqueur) = self.resoudre(&demande.set());
+        let cles_uid = par_uid || par_le_marqueur;
         if texte.len() > SEQUENCE_TEXT_MAX {
             return self.termine(
                 Status::No,
@@ -3622,7 +3837,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         // L'ÉTOILE NE VEUT PAS DIRE LA MÊME CHOSE DANS LES DEUX MODES : le plus
         // grand numéro de séquence, ou le plus grand UID. Les confondre ferait
         // désigner autre chose que ce que le client a demandé.
-        let star = if par_uid { dernier_uid } else { exists };
+        let star = if cles_uid { dernier_uid } else { exists };
 
         let mut emission = Emission {
             texte: [0; SEQUENCE_TEXT_MAX],
@@ -3633,7 +3848,13 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             items_len: demande.items().len(),
             cte_inconnu: false,
             par_uid,
-            cles_uid: par_uid,
+            cles_uid,
+            // §6.4.9 : la réponse d'un `UID FETCH` porte l'UID, que le client
+            // l'ait demandé ou non. S'il l'a demandé, il l'a déjà — l'écrire
+            // deux fois ferait une réponse que la grammaire de §7.5.2 n'admet
+            // pas.
+            retour: RetourDeRecherche::DEFAUT,
+            uid_implicite: par_uid && !demande.items().contains(&FetchItem::Uid),
             exige_la_marque: true,
             star,
             star_uid: dernier_uid,
@@ -3912,9 +4133,86 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             let mut petit = [0_u8; ESEARCH_MORCEAU_MAX];
             let mut plume = Plume::neuve(out);
             if !emission.entame {
-                let ecrits = entete_esearch(&mut petit, tag, emission.par_uid);
+                // LE PARCOURS PRÉALABLE : `MIN`, `MAX` et `COUNT` s'écrivent
+                // AVANT la liste (§7.3.4), et ne peuvent pas s'écrire avant
+                // d'être connus. On parcourt donc une première fois — sur une
+                // boîte déjà relevée, c'est le même travail que l'écoulement.
+                if emission.retour.demande.min
+                    || emission.retour.demande.max
+                    || emission.retour.demande.count
+                    || emission.retour.demande.save
+                {
+                    // **CE QU'ON RETIENT EST EN UID**, et l'écriture se fait au
+                    // fil du parcours : voir `Session::resultat`. La plume écrit
+                    // dans un champ, la boîte est lue dans un autre — deux
+                    // emprunts disjoints, que le compilateur sait distinguer.
+                    let garder = emission.retour.demande.save;
+                    let mut retenue = PlumeDEnsemble::neuve();
+                    let mut premier_uid = 0_u32;
+                    let mut dernier_uid_vu = 0_u32;
+                    while let Some((clef, uid)) = emission.trouvaille_avec_uid(boite, &bornes) {
+                        if emission.retour.compte == 0 {
+                            emission.retour.min = clef;
+                            premier_uid = uid;
+                        }
+                        emission.retour.max = clef;
+                        dernier_uid_vu = uid;
+                        emission.retour.compte = emission.retour.compte.saturating_add(1);
+                        if garder {
+                            retenue.pousser(uid);
+                        }
+                    }
+                    emission.courant = 1;
+                    if garder {
+                        // Table 4 de §6.4.4.1 : `SAVE` seul avec `MIN` et/ou
+                        // `MAX`, sans `ALL` ni `COUNT`, retient CES bornes-là
+                        // et non toute la liste. Le client a demandé un
+                        // message ; lui en retenir mille ferait de son `$`
+                        // suivant autre chose que ce qu'il croit tenir.
+                        let bornes_seules = !emission.retour.demande.all
+                            && !emission.retour.demande.count
+                            && (emission.retour.demande.min || emission.retour.demande.max);
+                        if bornes_seules {
+                            retenue = PlumeDEnsemble::neuve();
+                            if emission.retour.compte != 0 {
+                                if emission.retour.demande.min {
+                                    retenue.pousser(premier_uid);
+                                }
+                                if emission.retour.demande.max
+                                    && (!emission.retour.demande.min
+                                        || dernier_uid_vu != premier_uid)
+                                {
+                                    retenue.pousser(dernier_uid_vu);
+                                }
+                            }
+                        }
+                        let (texte, longueur) = retenue.finir();
+                        for (place, octet) in self.resultat.iter_mut().zip(texte.iter()) {
+                            *place = *octet;
+                        }
+                        self.resultat_len = longueur;
+                    }
+                }
+                let ecrits = entete_esearch(&mut petit, tag, emission.par_uid, &emission.retour);
                 plume.pousser(petit.get(..ecrits).unwrap_or_default())?;
                 emission.entame = true;
+                // **`SAVE` SEUL NE FAIT RIEN ÉCRIRE**, et la liste non demandée
+                // non plus : §6.4.4 veut alors qu'aucune réponse `ESEARCH` ne
+                // soit rendue. On conclut sans écouler.
+                if !emission.retour.demande.all {
+                    emission.etape = Etape::Conclure;
+                    let ecrits = match emission.retour.demande.ecrit() {
+                        true => {
+                            plume.pousser(b"\r\n")?;
+                            plume.ecrits()
+                        }
+                        false => 0,
+                    };
+                    self.emission = Some(emission);
+                    return Ok(Some(FetchChunk::Bytes(
+                        out.get(..ecrits).unwrap_or_default(),
+                    )));
+                }
             }
             loop {
                 // 1. Une plage close attend-elle d'être écrite ?
@@ -4084,12 +4382,20 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         let mut emission = self.emission.unwrap_or(Emission::VIDE);
         let items = emission.items.get(..emission.items_len).unwrap_or_default();
         let mut plume = Plume::neuve(out);
+        let mut premier = emission.items_faits == 0;
         if emission.items_faits == 0 {
             plume.pousser(b"* ")?;
             plume.nombre(u64::from(rang))?;
             plume.pousser(b" FETCH (")?;
+            // L'UID QUE LE CLIENT N'A PAS DEMANDÉ VIENT EN TÊTE. §6.4.9 ne dit
+            // pas où le mettre ; le mettre d'abord évite d'avoir à retrouver la
+            // fin d'une liste qui s'écoule en plusieurs morceaux.
+            if emission.uid_implicite {
+                plume.pousser(b"UID ")?;
+                plume.nombre(u64::from(info.uid))?;
+                premier = false;
+            }
         }
-        let mut premier = emission.items_faits == 0;
         let mut apres = Apres::Fin;
         for item in items.iter().skip(emission.items_faits) {
             if !premier {
@@ -4332,6 +4638,230 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         let longueur = ecrit.len();
         place.get(..longueur)
     }
+}
+
+/// Compose un ensemble de numéros, en comprimant ce qui se suit.
+///
+/// # POURQUOI COMPRIMER
+///
+/// Mille messages consécutifs s'écrivent `1:1000` — six octets — ou en mille
+/// nombres séparés par des virgules, qui ne tiendraient dans aucun tampon borné.
+/// **Ce qui déborde est perdu, et la plume le dit** : un ensemble tronqué
+/// désignerait d'autres messages que ceux qu'on a trouvés, ce qui est pire que
+/// de n'en désigner aucun.
+#[derive(Debug, Clone, Copy)]
+struct PlumeDEnsemble {
+    /// Le texte composé.
+    texte: [u8; SEQUENCE_TEXT_MAX],
+    /// Combien d'octets valent.
+    ecrits: usize,
+    /// La plage ouverte, qui attend de savoir si elle se prolonge.
+    plage: Option<(u32, u32)>,
+    /// A-t-on débordé ? Alors le texte ne vaut rien.
+    deborde: bool,
+}
+
+impl PlumeDEnsemble {
+    /// Une plume vierge.
+    fn neuve() -> Self {
+        Self {
+            texte: [0; SEQUENCE_TEXT_MAX],
+            ecrits: 0,
+            plage: None,
+            deborde: false,
+        }
+    }
+
+    /// Ajoute un numéro. **Ils doivent arriver en croissant** — c'est le cas
+    /// d'un parcours de boîte, qui va du premier rang au dernier.
+    fn pousser(&mut self, numero: u32) {
+        match self.plage {
+            Some((debut, fin)) if numero == fin.saturating_add(1) => {
+                self.plage = Some((debut, numero));
+            }
+            Some(plage) => {
+                self.fermer(plage);
+                self.plage = Some((numero, numero));
+            }
+            None => self.plage = Some((numero, numero)),
+        }
+    }
+
+    /// Écrit une plage close.
+    fn fermer(&mut self, (debut, fin): (u32, u32)) {
+        let mut petit = [0_u8; 24];
+        let mut taille = 0_usize;
+        if self.ecrits != 0 {
+            taille = recopier(&mut petit, taille, b",");
+        }
+        taille = taille.saturating_add(nombre_en_octets(
+            petit.get_mut(taille..).unwrap_or_default(),
+            debut,
+        ));
+        if fin != debut {
+            taille = recopier(&mut petit, taille, b":");
+            taille = taille.saturating_add(nombre_en_octets(
+                petit.get_mut(taille..).unwrap_or_default(),
+                fin,
+            ));
+        }
+        let apres = self.ecrits.saturating_add(taille);
+        let Some(place) = self.texte.get_mut(self.ecrits..apres) else {
+            self.deborde = true;
+            return;
+        };
+        for (endroit, octet) in place.iter_mut().zip(petit.iter()) {
+            *endroit = *octet;
+        }
+        self.ecrits = apres;
+    }
+
+    /// Ferme la plage en cours, et rend le texte — vide s'il a débordé.
+    fn finir(mut self) -> ([u8; SEQUENCE_TEXT_MAX], usize) {
+        if let Some(plage) = self.plage.take() {
+            self.fermer(plage);
+        }
+        match self.deborde {
+            true => (self.texte, 0),
+            false => (self.texte, self.ecrits),
+        }
+    }
+}
+
+/// Ce qu'un `SEARCH` doit rendre, et ce qu'un parcours préalable en a appris.
+///
+/// # POURQUOI `MIN`, `MAX` ET `COUNT` DEMANDENT UN PARCOURS DE PLUS
+///
+/// La liste, elle, s'écoule : on avance d'un résultat, on l'écrit, on
+/// recommence. Ces trois-là ne peuvent pas s'écrire avant d'être connus, et ils
+/// s'écrivent AVANT la liste (§7.3.4). Il faut donc parcourir une première fois
+/// pour les apprendre, puis une seconde pour écouler — et ce n'est pas cher :
+/// c'est le même parcours, sur une boîte déjà relevée.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RetourDeRecherche {
+    /// Ce que le client a demandé.
+    demande: ams_proto_imap::SearchReturn,
+    /// Le plus petit résultat, ou zéro s'il n'y en a aucun.
+    min: u32,
+    /// Le plus grand, ou zéro.
+    max: u32,
+    /// Combien.
+    compte: u32,
+}
+
+impl RetourDeRecherche {
+    /// Ce qu'une émission qui n'est pas une recherche porte : la liste entière,
+    /// et rien de compté.
+    const DEFAUT: Self = Self {
+        demande: ams_proto_imap::SearchReturn::TOUT,
+        min: 0,
+        max: 0,
+        compte: 0,
+    };
+}
+
+/// Ce qu'un `STATUS` a compté.
+#[derive(Debug, Clone, Copy, Default)]
+struct Recensement {
+    /// Combien de messages la boîte porte.
+    exists: u32,
+    /// Le prochain UID qu'elle attribuera.
+    uid_next: u32,
+    /// L'identifiant de sa numérotation.
+    uid_validity: u32,
+    /// Combien n'ont pas `\Seen`.
+    unseen: u32,
+    /// Combien portent `\Deleted`.
+    deleted: u32,
+    /// La somme des tailles.
+    size: u64,
+}
+
+/// Compte ce qu'un `STATUS` demande, et rien de plus.
+///
+/// # ON NE PARCOURT LA BOÎTE QUE SI ON DOIT
+///
+/// Les trois premiers éléments sont des propriétés de la boîte : elle les
+/// connaît sans regarder ses messages. Les trois autres se comptent message par
+/// message — et un client qui ne demande que `UIDNEXT` n'a pas à payer ce
+/// parcours. `STATUS` est justement la commande d'un client qui SURVEILLE, et
+/// qui la répète.
+fn recenser<M: Mailbox + ?Sized>(boite: &M, demande: &ams_proto_imap::StatusItems) -> Recensement {
+    let exists = boite.exists();
+    let mut recense = Recensement {
+        exists,
+        uid_next: boite.uid_next(),
+        uid_validity: boite.uid_validity(),
+        ..Recensement::default()
+    };
+    let compte = demande.wants(StatusAtt::Unseen)
+        || demande.wants(StatusAtt::Deleted)
+        || demande.wants(StatusAtt::Size);
+    if !compte {
+        return recense;
+    }
+    for sequence in 1..=exists {
+        // UN MESSAGE DISPARU NE COMPTE POUR RIEN. Une relève concurrente peut
+        // l'avoir effacé entre l'instantané et ce parcours ; il ne se lit plus,
+        // et il ne pèse plus.
+        let Some(info) = boite.info(sequence) else {
+            continue;
+        };
+        if !info.flags.contains(Flags::SEEN) {
+            recense.unseen = recense.unseen.saturating_add(1);
+        }
+        if info.flags.contains(Flags::DELETED) {
+            recense.deleted = recense.deleted.saturating_add(1);
+        }
+        recense.size = recense.size.saturating_add(info.size);
+    }
+    recense
+}
+
+/// Écrit les éléments d'un recensement, dans l'ordre où ils ont été demandés.
+///
+/// # Errors
+///
+/// [`Error::Reply`] si le tampon ne suffit pas.
+fn ecrire_le_recensement(
+    plume: &mut Plume<'_>,
+    demande: &ams_proto_imap::StatusItems,
+    recense: &Recensement,
+) -> Result<(), Error> {
+    for (rang, att) in demande.items().iter().enumerate() {
+        if rang != 0 {
+            plume.pousser(b" ")?;
+        }
+        let (mot, valeur): (&[u8], u64) = match att {
+            StatusAtt::Messages => (b"MESSAGES ", u64::from(recense.exists)),
+            StatusAtt::UidNext => (b"UIDNEXT ", u64::from(recense.uid_next)),
+            StatusAtt::UidValidity => (b"UIDVALIDITY ", u64::from(recense.uid_validity)),
+            StatusAtt::Unseen => (b"UNSEEN ", u64::from(recense.unseen)),
+            StatusAtt::Deleted => (b"DELETED ", u64::from(recense.deleted)),
+            StatusAtt::Size => (b"SIZE ", recense.size),
+        };
+        plume.pousser(mot)?;
+        plume.nombre(valeur)?;
+    }
+    Ok(())
+}
+
+/// Où finit le premier argument d'une commande, ESPACE COMPRIS s'il y en a un.
+///
+/// # UN NOM CITÉ PORTE DES ESPACES
+///
+/// « Sent Messages » est un nom de dossier des plus ordinaires. Découper sur le
+/// premier espace couperait au milieu du nom, et la liste d'éléments qui suit
+/// commencerait alors dans le nom lui-même.
+fn fin_du_premier_argument(arguments: &[u8]) -> Option<usize> {
+    let debut = arguments.iter().position(|octet| *octet != b' ')?;
+    let reste = arguments.get(debut..).unwrap_or_default();
+    if let Some(corps) = reste.strip_prefix(b"\"") {
+        let fin = corps.iter().position(|octet| *octet == b'"')?;
+        return Some(debut.saturating_add(fin).saturating_add(2));
+    }
+    let fin = reste.iter().position(|octet| *octet == b' ')?;
+    Some(debut.saturating_add(fin))
 }
 
 /// Écrit la section telle que le client l'a écrite.
@@ -4729,8 +5259,13 @@ fn copyuid(
 
 /// La plus grande taille d'un morceau d'`ESEARCH` composé d'un seul geste.
 ///
-/// L'en-tête est le plus long : `* ESEARCH (TAG "` plus un tag, plus `") UID`.
-const ESEARCH_MORCEAU_MAX: usize = TAG_MAX_OCTETS + 32;
+/// L'en-tête est le plus long, et il porte désormais les comptes :
+/// `* ESEARCH (TAG "` (16) plus un tag, plus `")` (2), ` UID` (4), ` MIN ` et dix
+/// chiffres (15), autant pour ` MAX ` (15), et ` COUNT ` avec les siens (17) —
+/// soixante-neuf octets en plus du tag. La borne les majore d'une marge de trois,
+/// parce qu'un morceau tronqué serait un résultat FAUX et non un résultat
+/// incomplet.
+const ESEARCH_MORCEAU_MAX: usize = TAG_MAX_OCTETS + 72;
 
 /// Écrit un entier décimal dans `out`, et rend le nombre d'octets écrits.
 ///
@@ -4771,12 +5306,37 @@ fn recopier(out: &mut [u8], ecrits: usize, morceau: &[u8]) -> usize {
 }
 
 /// Compose `* ESEARCH (TAG "…")` et, si la recherche porte sur des UID, ` UID`.
-fn entete_esearch(out: &mut [u8], tag: &[u8], par_uid: bool) -> usize {
+fn entete_esearch(out: &mut [u8], tag: &[u8], par_uid: bool, retour: &RetourDeRecherche) -> usize {
     let mut ecrits = recopier(out, 0, b"* ESEARCH (TAG \"");
     ecrits = recopier(out, ecrits, tag);
     ecrits = recopier(out, ecrits, b"\")");
     if par_uid {
         ecrits = recopier(out, ecrits, b" UID");
+    }
+    // **UNE RECHERCHE SANS RÉSULTAT N'A NI `MIN` NI `MAX`**, et §6.4.4 l'exige :
+    // le zéro n'est pas un numéro de message, et l'écrire ferait désigner un
+    // message qui n'existe pas. `COUNT`, lui, s'écrit toujours — un compte nul
+    // est un renseignement, pas une absence.
+    if retour.demande.min && retour.compte != 0 {
+        ecrits = recopier(out, ecrits, b" MIN ");
+        ecrits = ecrits.saturating_add(nombre_en_octets(
+            out.get_mut(ecrits..).unwrap_or_default(),
+            retour.min,
+        ));
+    }
+    if retour.demande.max && retour.compte != 0 {
+        ecrits = recopier(out, ecrits, b" MAX ");
+        ecrits = ecrits.saturating_add(nombre_en_octets(
+            out.get_mut(ecrits..).unwrap_or_default(),
+            retour.max,
+        ));
+    }
+    if retour.demande.count {
+        ecrits = recopier(out, ecrits, b" COUNT ");
+        ecrits = ecrits.saturating_add(nombre_en_octets(
+            out.get_mut(ecrits..).unwrap_or_default(),
+            retour.compte,
+        ));
     }
     ecrits
 }

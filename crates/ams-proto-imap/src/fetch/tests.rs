@@ -39,6 +39,9 @@ fn l_ensemble_de_numeros_est_celui_qu_on_a_ecrit() {
         lu.set().ranges(10).collect::<std::vec::Vec<_>>(),
         std::vec![(2, 4)]
     );
+    // ET SON TEXTE AUSSI : un appelant qui doit retenir l'ensemble après avoir
+    // rendu la main le recopie, plutôt que de garder un emprunt sur la commande.
+    assert_eq!(lu.set_text(), b"2:4");
 }
 
 /// **`PEEK` n'est pas une variante cosmétique** : `BODY[]` marque le message

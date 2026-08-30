@@ -1,6 +1,6 @@
 //! Ce qu'une recherche désigne, et ce qu'elle refuse de prétendre.
 
-use super::{Candidate, Search, SearchScope};
+use super::{Candidate, Search, SearchReturn, SearchScope};
 use crate::{Error, Flags, Limits};
 
 const BORNES: Limits = Limits::DEFAULT;
@@ -398,4 +398,82 @@ fn une_clef_de_contenu_sans_texte_est_une_faute() {
             core::str::from_utf8(critere)
         );
     }
+}
+
+// ── LES OPTIONS DE RETOUR (§6.4.4) ──────────────────────────────────────────
+
+/// **SANS OPTION, C'EST `ALL`** — et `()` aussi, ce que §6.4.4 dit en toutes
+/// lettres.
+#[test]
+fn sans_option_de_retour_c_est_la_liste_entiere() {
+    for arguments in [&b"ALL"[..], b"RETURN () ALL", b"  ALL"] {
+        let (demande, reste) = SearchReturn::parse(arguments).expect("lisible");
+        assert_eq!(demande, SearchReturn::TOUT, "{arguments:?}");
+        assert_eq!(reste.trim_ascii(), b"ALL", "{arguments:?}");
+        assert!(demande.ecrit());
+    }
+}
+
+/// Les cinq options se lisent, dans n'importe quel ordre et n'importe quelle
+/// casse.
+#[test]
+fn les_cinq_options_se_lisent() {
+    let (demande, reste) =
+        SearchReturn::parse(b"RETURN (min MAX all Count SAVE) UNSEEN").expect("lisible");
+    assert_eq!(
+        demande,
+        SearchReturn {
+            min: true,
+            max: true,
+            all: true,
+            count: true,
+            save: true,
+        }
+    );
+    assert_eq!(reste.trim_ascii(), b"UNSEEN");
+
+    // `SAVE` SEUL N'ÉCRIT RIEN : §6.4.4 veut qu'il supprime alors la réponse.
+    let (seul, _) = SearchReturn::parse(b"RETURN (SAVE) ALL").expect("lisible");
+    assert!(seul.save);
+    assert!(!seul.ecrit());
+}
+
+/// **`RETURNED` N'EST PAS `RETURN`** : un critère qui commence par ces lettres
+/// reste un critère.
+#[test]
+fn un_critere_qui_commence_par_return_reste_un_critere() {
+    let (demande, reste) = SearchReturn::parse(b"RETURNED").expect("lisible");
+    assert_eq!(demande, SearchReturn::TOUT);
+    assert_eq!(reste, b"RETURNED");
+}
+
+/// **UNE OPTION QU'ON NE SERT PAS EST UN `BAD`** — §6.4.4 l'exige, et non un
+/// silence qui rendrait autre chose que ce qui a été demandé.
+#[test]
+fn une_option_de_retour_inconnue_se_refuse() {
+    for arguments in [
+        &b"RETURN (RELEVANCY) ALL"[..],
+        b"RETURN (MIN PARTIAL) ALL",
+        // Une parenthèse qui manque, d'un côté ou de l'autre.
+        b"RETURN MIN ALL",
+        b"RETURN (MIN ALL",
+        // Un emboîtement, qui ne voudrait rien dire ici.
+        b"RETURN ((MIN)) ALL",
+        // Rien après `RETURN`.
+        b"RETURN ",
+    ] {
+        assert_eq!(
+            SearchReturn::parse(arguments),
+            Err(Error::MalformedSearch),
+            "{arguments:?}"
+        );
+    }
+}
+
+/// Ce qui est lu se montre — la dérive sert au fuzz et aux messages d'échec.
+#[test]
+fn les_options_de_retour_se_montrent() {
+    let (demande, _) = SearchReturn::parse(b"RETURN (COUNT) ALL").expect("lisible");
+    assert!(std::format!("{demande:?}").contains("count: true"));
+    assert_eq!(demande, demande);
 }

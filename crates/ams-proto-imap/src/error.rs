@@ -113,6 +113,13 @@ pub enum Error {
     /// croirait filtrée.
     MalformedList,
 
+    /// Les éléments d'un `STATUS` n'ont pas la forme de §6.3.11.
+    ///
+    /// **Un élément qu'on ne connaît pas tombe ici** — `RECENT` compris, que
+    /// rev2 a retiré. Rendre zéro ferait croire au client une boîte vide de ce
+    /// qu'il comptait.
+    MalformedStatus,
+
     /// Les arguments d'un `STORE` n'ont pas la forme de §6.4.6.
     MalformedStore,
 
@@ -207,6 +214,9 @@ impl fmt::Display for Error {
             }
             Error::MalformedList => {
                 f.write_str("les arguments d'un `LIST` n'ont pas la forme attendue")
+            }
+            Error::MalformedStatus => {
+                f.write_str("les éléments d'un `STATUS` n'ont pas la forme attendue")
             }
             Error::MalformedStore => {
                 f.write_str("les arguments d'un `STORE` n'ont pas la forme attendue")

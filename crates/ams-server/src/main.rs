@@ -715,12 +715,14 @@ async fn servir(fichier: &Path) -> Result<(), String> {
              au plus un mébioctet par partie, et seulement en `us-ascii`, `utf-8` ou \
              `iso-8859-1`. `BINARY[…]` REND CE QUE LES OCTETS VEULENT DIRE, transfert-décodé, et \
              refuse par `NO [UNKNOWN-CTE]` un encodage qu'il ne sait pas défaire. \
-             `NAMESPACE`, `ENABLE`, `IDLE`, `SUBSCRIBE` et `UNSUBSCRIBE` RÉPONDENT : toutes \
-             les COMMANDES de RFC 9051 sont servies. Les abonnements s'écrivent dans la racine \
-             du compte, sous `ams-abonnements`. TROIS OPTIONS MANQUENT ENCORE, et il faut le \
-             dire : `STATUS` ne rend que `MESSAGES`, `UIDNEXT` et `UIDVALIDITY` quels que \
-             soient les éléments demandés ; `SEARCH` n'accepte pas de `RETURN (MIN MAX COUNT \
-             ALL)` ; `LIST` refuse `RETURN (STATUS (…))`."
+             `NAMESPACE`, `ENABLE`, `IDLE`, `SUBSCRIBE` et `UNSUBSCRIBE` RÉPONDENT, et les \
+             options que RFC 9051 §E dit absorbées dans le protocole de base le sont aussi : \
+             `STATUS` rend CE QU'ON LUI DEMANDE — `UNSEEN`, `DELETED` et `SIZE` compris —, \
+             `LIST … RETURN (STATUS (…))` en rend un par boîte, \
+             `SEARCH RETURN (MIN MAX ALL COUNT SAVE)` répond de quatre façons, et `$` désigne \
+             ce que la dernière recherche a retenu — en UID, pour qu'un message effacé en \
+             sorte de lui-même. Les abonnements s'écrivent dans la racine du compte, sous \
+             `ams-abonnements`."
         );
         Some(tokio::spawn(serve_imap(
             ecouteur,

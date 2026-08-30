@@ -145,3 +145,27 @@ fn ce_qui_se_lit_se_montre_et_se_compare() {
     assert!(!std::format!("{:?}", ensemble.ranges(5)).is_empty());
     assert!(!std::format!("{:?}", ensemble.ranges(5).clone()).is_empty());
 }
+
+/// **LE MARQUEUR `$` SE LIT, ET NE DÉSIGNE RIEN TANT QU'ON NE L'A PAS RÉSOLU**
+/// (§9 et §6.4.4.1). La grammaire n'a pas de session, donc pas de résultat
+/// retenu ; le rendre inoffensif est tout ce qu'elle peut faire d'honnête.
+#[test]
+fn le_marqueur_du_dernier_resultat_se_lit_sans_rien_designer() {
+    let lu = SequenceSet::parse(b"$", &BORNES).expect("lisible");
+    assert!(lu.saved());
+    assert_eq!(lu.as_bytes(), b"$");
+    assert_eq!(lu.ranges(10).collect::<std::vec::Vec<_>>(), []);
+    // ET SURTOUT PAS LE DERNIER MESSAGE : pris pour une étoile mal lue, ce `$`
+    // désignerait n'importe quel message plutôt que ceux qu'on a cherchés.
+    assert!(!lu.contains(10, 10));
+    assert!(!lu.contains(1, 10));
+
+    // Un ensemble ordinaire n'est pas un marqueur.
+    let ordinaire = SequenceSet::parse(b"1:3", &BORNES).expect("lisible");
+    assert!(!ordinaire.saved());
+
+    // `$` ne se mélange pas : ce n'est pas une borne.
+    for texte in [&b"$:3"[..], b"1,$", b"$$", b"$ "] {
+        assert!(SequenceSet::parse(texte, &BORNES).is_err(), "{texte:?}");
+    }
+}

@@ -52,6 +52,12 @@
 //!     un parcours de plus sur toutes les boîtes du compte, et un motif plus
 //!     long que le plus long nom de boîte ne pourrait en désigner aucune. Les
 //!     deux bornes se vérifient sur ce que la lecture rend.
+//! 12. **UN `STATUS` ACCEPTÉ DEMANDE SIX ÉLÉMENTS AU PLUS, ET AUCUN DEUX
+//!     FOIS.** §6.3.11 n'en définit que six, et la réponse en porte un par
+//!     élément demandé : un doublon ferait une réponse que §7.3.3 n'admet pas.
+//! 13. **LES OPTIONS DE RETOUR D'UN `SEARCH` NE MANGENT PAS LE CRITÈRE.** Elles
+//!     se lisent en tête, et ce qui suit est ce qu'il faut chercher ; le perdre
+//!     ferait chercher autre chose que ce qui a été demandé.
 //! 7. **UN `STORE` ACCEPTÉ NE PORTE QUE DES DRAPEAUX QU'ON SAIT ÉCRIRE.** Le
 //!    reste doit être refusé plutôt que laissé tomber : un client à qui l'on
 //!    répond `OK` croit son étiquette posée, et ne la reverra jamais. La
@@ -65,8 +71,8 @@ use libfuzzer_sys::fuzz_target;
 
 use ams_proto_imap::{
     Append, Candidate, FETCH_ITEMS_MAX, Fetch, FetchItem, Flags, LIST_PATTERNS_MAX, Limits, List,
-    MAILBOX_NAME_MAX, SEARCH_KEYS_MAX, Search, SequenceSet, Store, mailbox_name_is_safe,
-    mailbox_name_trimmed,
+    MAILBOX_NAME_MAX, SEARCH_KEYS_MAX, STATUS_ATTS_MAX, Search, SearchReturn, SequenceSet,
+    StatusItems, Store, mailbox_name_is_safe, mailbox_name_trimmed,
 };
 
 /// Ce qu'on soumet.
@@ -90,6 +96,10 @@ struct Entree<'a> {
     boite: &'a [u8],
     /// Les arguments complets d'un `LIST`.
     liste: &'a [u8],
+    /// Les éléments d'un `STATUS`.
+    etat: &'a [u8],
+    /// Les options de retour d'un `SEARCH`.
+    retour: &'a [u8],
     /// Un message à confronter à ces critères.
     message: (u32, u32, u64, u8, u64),
 }
@@ -175,6 +185,37 @@ fuzz_target!(|entree: Entree<'_>| {
                 motif.len()
             );
         }
+    }
+
+    if let Ok(etat) = StatusItems::parse(entree.etat) {
+        // PROPRIÉTÉ 12 : **SIX ÉLÉMENTS AU PLUS, ET AUCUN DEUX FOIS.** §6.3.11
+        // n'en définit que six, et la réponse en porte un par élément : un
+        // doublon ferait une réponse que la grammaire de §7.3.3 n'admet pas.
+        let items = etat.items();
+        assert!(!items.is_empty(), "un STATUS accepté ne demande rien");
+        assert!(items.len() <= STATUS_ATTS_MAX, "{} éléments", items.len());
+        for (rang, att) in items.iter().enumerate() {
+            assert!(
+                !items.get(..rang).unwrap_or_default().contains(att),
+                "l'élément {att:?} est demandé deux fois"
+            );
+            assert!(etat.wants(*att));
+        }
+    }
+
+    if let Ok((retour, reste)) = SearchReturn::parse(entree.retour) {
+        // PROPRIÉTÉ 13 : **CE QUI N'EST PAS UNE OPTION RESTE À LIRE.** Les
+        // options se lisent en tête d'un `SEARCH` ; ce qui suit est le critère,
+        // et le perdre ferait chercher autre chose que ce qui a été demandé.
+        assert!(
+            reste.len() <= entree.retour.len(),
+            "la lecture des options a rendu plus qu'elle n'a reçu"
+        );
+        // `SAVE` seul n'écrit rien ; tout le reste écrit.
+        assert_eq!(
+            retour.ecrit(),
+            retour.min || retour.max || retour.all || retour.count
+        );
     }
 
     if let Ok(ecriture) = Store::parse(entree.ecriture, &bornes) {

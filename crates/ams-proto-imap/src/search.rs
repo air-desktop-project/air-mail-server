@@ -131,6 +131,109 @@ impl Search<'static> {
     };
 }
 
+/// Ce qu'un `SEARCH` demande qu'on lui rende (RFC 9051 §6.4.4).
+///
+/// # QUATRE FAÇONS DE RÉPONDRE À LA MÊME QUESTION
+///
+/// La liste entière — `ALL` — n'est pas toujours ce qu'un client veut. Celui qui
+/// affiche « 15 non lus » veut `COUNT` ; celui qui saute au premier message non
+/// lu veut `MIN`. Les lui faire calculer à partir de la liste, c'est lui envoyer
+/// des milliers de numéros pour qu'il en garde un.
+///
+/// **Sans option, ou avec `()`, c'est `ALL`** — §6.4.4 le dit, et c'est ce que
+/// rend un `SEARCH` de rev1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SearchReturn {
+    /// Le plus petit numéro qui corresponde.
+    pub min: bool,
+    /// Le plus grand.
+    pub max: bool,
+    /// Tous, écrits en ensemble de numéros.
+    pub all: bool,
+    /// Combien.
+    pub count: bool,
+    /// Retenir le résultat pour que `$` le désigne (§6.4.4.1).
+    pub save: bool,
+}
+
+impl SearchReturn {
+    /// Ce qu'un `SEARCH` sans options rend : la liste entière.
+    pub const TOUT: Self = Self {
+        min: false,
+        max: false,
+        all: true,
+        count: false,
+        save: false,
+    };
+
+    /// Y a-t-il quelque chose à ÉCRIRE ?
+    ///
+    /// `SAVE` seul ne fait rien écrire : §6.4.4 veut qu'il supprime alors la
+    /// réponse `ESEARCH` qu'on aurait rendue. Le client a demandé qu'on retienne,
+    /// pas qu'on raconte.
+    #[must_use]
+    pub fn ecrit(&self) -> bool {
+        self.min || self.max || self.all || self.count
+    }
+
+    /// Lit les options de retour en tête d'un `SEARCH`, et rend le reste.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::MalformedSearch`] si la forme n'est pas celle de §6.4.4, ou si
+    /// l'on y nomme une option que ce serveur ne sert pas — §6.4.4 exige un
+    /// `BAD` pour celles-là, et non un silence.
+    pub fn parse(arguments: &[u8]) -> Result<(Self, &[u8]), Error> {
+        let arguments = arguments.trim_ascii_start();
+        let Some(reste) = tete_sans_casse(arguments, b"RETURN") else {
+            return Ok((Self::TOUT, arguments));
+        };
+        // `RETURNED` N'EST PAS `RETURN` : sans ce contrôle, un critère qui
+        // commencerait par ces six lettres serait pris pour une option.
+        if !matches!(reste.first(), Some(b' ')) {
+            return Ok((Self::TOUT, arguments));
+        }
+        let reste = reste.trim_ascii_start();
+        let corps = reste.strip_prefix(b"(").ok_or(Error::MalformedSearch)?;
+        let fin = corps
+            .iter()
+            .position(|octet| *octet == b')')
+            .ok_or(Error::MalformedSearch)?;
+        let dedans = corps.get(..fin).unwrap_or_default();
+        if dedans.contains(&b'(') {
+            return Err(Error::MalformedSearch);
+        }
+        let mut demande = Self::default();
+        for mot in dedans.split(|octet| *octet == b' ') {
+            if mot.is_empty() {
+                continue;
+            }
+            if mot.eq_ignore_ascii_case(b"MIN") {
+                demande.min = true;
+            } else if mot.eq_ignore_ascii_case(b"MAX") {
+                demande.max = true;
+            } else if mot.eq_ignore_ascii_case(b"ALL") {
+                demande.all = true;
+            } else if mot.eq_ignore_ascii_case(b"COUNT") {
+                demande.count = true;
+            } else if mot.eq_ignore_ascii_case(b"SAVE") {
+                demande.save = true;
+            } else {
+                return Err(Error::MalformedSearch);
+            }
+        }
+        // §6.4.4 : « If no result option is specified or empty list of options
+        // is specified as "()", ALL is assumed. »
+        if demande == Self::default() {
+            demande = Self::TOUT;
+        }
+        Ok((
+            demande,
+            corps.get(fin.saturating_add(1)..).unwrap_or_default(),
+        ))
+    }
+}
+
 impl<'a> Search<'a> {
     /// Lit les critères d'un `SEARCH`.
     ///
@@ -562,6 +665,13 @@ fn jours_depuis_l_epoque(annee: u64, mois: u64, jour: u64) -> u64 {
     ere.saturating_mul(146_097)
         .saturating_add(jour_de_l_ere)
         .saturating_sub(719_468)
+}
+
+/// Rend ce qui suit `tete`, si le texte commence par elle — sans égard à la
+/// casse, ce que `strip_prefix` ne sait pas faire.
+fn tete_sans_casse<'a>(texte: &'a [u8], tete: &[u8]) -> Option<&'a [u8]> {
+    let (debut, reste) = texte.split_at_checked(tete.len())?;
+    debut.eq_ignore_ascii_case(tete).then_some(reste)
 }
 
 #[cfg(test)]

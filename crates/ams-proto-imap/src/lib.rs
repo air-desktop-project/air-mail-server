@@ -40,6 +40,7 @@ mod mailbox;
 mod response;
 mod search;
 mod sequence;
+mod status;
 mod store;
 mod tag;
 
@@ -62,7 +63,10 @@ pub use mailbox::{
 pub use response::{
     Status, encode_continuation, encode_tagged, encode_untagged, encode_untagged_parts,
 };
-pub use search::{Candidate, SEARCH_DEPTH_MAX, SEARCH_KEYS_MAX, Search, SearchReader, SearchScope};
+pub use search::{
+    Candidate, SEARCH_DEPTH_MAX, SEARCH_KEYS_MAX, Search, SearchReader, SearchReturn, SearchScope,
+};
 pub use sequence::{Ranges, SequenceSet};
+pub use status::{STATUS_ATTS_MAX, StatusAtt, StatusItems};
 pub use store::{Store, StoreMode};
 pub use tag::Tag;

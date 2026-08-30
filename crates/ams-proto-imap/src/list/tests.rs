@@ -5,6 +5,7 @@
 //! Ce qu'un `LIST` a le droit d'être.
 
 use super::*;
+use crate::status::StatusAtt;
 
 /// La forme que tout le monde envoie : deux mots, et rien d'autre.
 #[test]
@@ -54,7 +55,6 @@ fn une_option_qu_on_ne_sert_pas_se_refuse() {
         &b"(REMOTE) \"\" *"[..],
         b"(RECURSIVEMATCH) \"\" *",
         b"(SUBSCRIBED REMOTE) \"\" *",
-        b"\"\" * RETURN (STATUS (MESSAGES))",
         b"\"\" * RETURN (SPECIAL-USE)",
     ] {
         assert_eq!(
@@ -161,6 +161,64 @@ fn ce_qui_n_a_pas_la_forme_se_refuse() {
         // Un `RETURN` sans sa liste.
         b"\"\" * RETURN",
         b"\"\" * RETURN SUBSCRIBED",
+    ] {
+        assert_eq!(
+            List::parse(arguments),
+            Err(Error::MalformedList),
+            "{arguments:?}"
+        );
+    }
+}
+
+/// **`RETURN (STATUS (…))` DEMANDE UNE RÉPONSE PAR BOÎTE** (§6.3.9.7) : c'est ce
+/// qu'un client envoie pour peupler son panneau en une commande au lieu de vingt.
+#[test]
+fn le_status_de_chaque_boite_se_demande_avec_la_liste() {
+    let lu = List::parse(b"\"\" * RETURN (STATUS (MESSAGES UNSEEN))").expect("lisible");
+    let items = lu.status().expect("un STATUS");
+    assert_eq!(items.items(), [StatusAtt::Messages, StatusAtt::Unseen]);
+    assert!(!lu.report_subscribed());
+
+    // Avec les autres options, dans n'importe quel ordre.
+    for arguments in [
+        &b"\"\" * RETURN (SUBSCRIBED STATUS (MESSAGES) CHILDREN)"[..],
+        b"\"\" * RETURN (STATUS (MESSAGES) SUBSCRIBED)",
+    ] {
+        let lu = List::parse(arguments).expect("lisible");
+        assert!(lu.report_subscribed(), "{arguments:?}");
+        assert_eq!(
+            lu.status().expect("un STATUS").items(),
+            [StatusAtt::Messages],
+            "{arguments:?}"
+        );
+    }
+
+    // Sans `STATUS`, il n'y en a pas.
+    assert!(
+        List::parse(b"\"\" * RETURN (SUBSCRIBED)")
+            .expect("lisible")
+            .status()
+            .is_none()
+    );
+
+    for arguments in [
+        // Une liste de `STATUS` qui ne se ferme pas.
+        &b"\"\" * RETURN (STATUS (MESSAGES)"[..],
+        b"\"\" * RETURN (STATUS (MESSAGES",
+        // Un élément qui n'en est pas un.
+        b"\"\" * RETURN (STATUS (RECENT))",
+        // Une liste vide.
+        b"\"\" * RETURN (STATUS ())",
+        // `STATUS` sans sa liste.
+        b"\"\" * RETURN (STATUS)",
+        b"\"\" * RETURN (STATUS SUBSCRIBED)",
+        // DEUX `STATUS` : §6.3.9.7 n'en prévoit qu'un, et le second écraserait
+        // le premier sans qu'on sache lequel était attendu.
+        b"\"\" * RETURN (STATUS (MESSAGES) STATUS (UNSEEN))",
+        // Un troisième niveau de parenthèses ne veut rien dire.
+        b"\"\" * RETURN (STATUS ((MESSAGES)))",
+        // Et une option de SÉLECTION n'emboîte rien.
+        b"(SUBSCRIBED (REMOTE)) \"\" *",
     ] {
         assert_eq!(
             List::parse(arguments),

@@ -291,10 +291,13 @@ OPTIONS DE `config write`
     filtre, `LIST … RETURN (SUBSCRIBED)` les signale, et un abonnement dont la
     boîte a disparu se rend `\\NonExistent` plutôt que d'être retiré d'office.
 
-    TROIS OPTIONS MANQUENT ENCORE, et l'énumération ci-dessus ne doit pas les faire
-    croire acquises : `STATUS` ne rend que `MESSAGES`, `UIDNEXT` et `UIDVALIDITY`
-    quels que soient les éléments demandés ; `SEARCH` n'accepte pas de
-    `RETURN (MIN MAX COUNT ALL)` ; `LIST` refuse `RETURN (STATUS (…))`.
+    LES OPTIONS QUE rev2 A ABSORBÉES SONT SERVIES AUSSI (RFC 9051 §E) : `STATUS`
+    rend ce qu'on lui demande — `UNSEEN`, `DELETED` et `SIZE` compris —,
+    `LIST … RETURN (STATUS (…))` en rend un par boîte listée,
+    `SEARCH RETURN (MIN MAX ALL COUNT SAVE)` répond de quatre façons, et `$`
+    désigne ce que la dernière recherche a retenu. Ce résultat se retient EN UID :
+    un message effacé en sort de lui-même, là où des rangs demanderaient d'être
+    décalés à chaque effacement.
 
     LE MAGASIN DE COMPTES SERT DEUX CHOSES, et il faut les distinguer :
 

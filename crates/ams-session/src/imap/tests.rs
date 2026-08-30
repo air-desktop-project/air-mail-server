@@ -598,6 +598,15 @@ impl Mailboxes for Boites {
                 None,
                 message(3, 10, Flags::NONE, 0),
             ],
+            // Assez de messages aux UID espacés pour que leur ensemble, une
+            // fois comprimé en plages, ne tienne pas dans ce qu'une session
+            // retient — c'est ce qui éprouve qu'un résultat `SAVE` trop morcelé
+            // est ABANDONNÉ plutôt que tronqué.
+            b"Foisonnante" => (0..400)
+                .map(|rang: u32| {
+                    message(rang.saturating_mul(2).saturating_add(1), 10, Flags::NONE, 0)
+                })
+                .collect(),
             // Assez de messages aux UID espacés pour que leur ensemble ne
             // tienne pas dans ce qu'on accepte d'écrire pour un `COPYUID`.
             b"Eparse" => (0..60)
@@ -1084,15 +1093,54 @@ fn une_boite_qui_ne_se_modifie_pas_est_annoncee_en_lecture_seule() {
 }
 
 /// **§6.3.2 : un `SELECT` qui échoue FERME la boîte précédente.** Le client se
-/// retrouve authentifié sans sélection, et il doit le savoir.
+/// retrouve authentifié sans sélection, et il doit le savoir — `[CLOSED]`
+/// compris, puisque la boîte a bel et bien été fermée.
 #[test]
 fn un_select_qui_echoue_ferme_la_boite_precedente() {
     let mut session = selectionnee();
     assert_eq!(session.state(), State::Selected);
     let (texte, _) = dire(&mut session, b"a003 SELECT Inconnue\r\n");
-    assert!(texte.starts_with("a003 NO [NONEXISTENT]"), "{texte}");
+    assert_eq!(
+        texte,
+        "* OK [CLOSED] Previous mailbox is now closed\r\n\
+         a003 NO [NONEXISTENT] Mailbox does not exist\r\n"
+    );
     assert_eq!(session.state(), State::Authenticated);
     assert!(session.selected().is_empty());
+
+    // SANS BOÎTE OUVERTE, IL N'Y A RIEN À FERMER, et donc rien à dire.
+    let (encore, _) = dire(&mut session, b"a004 SELECT Inconnue\r\n");
+    assert_eq!(encore, "a004 NO [NONEXISTENT] Mailbox does not exist\r\n");
+}
+
+/// **`[CLOSED]` EST UNE FRONTIÈRE** (§7.1) : tout ce qui la précède parle de la
+/// boîte fermée, tout ce qui la suit parle de la nouvelle.
+#[test]
+fn rouvrir_une_boite_dit_que_la_precedente_est_fermee() {
+    let mut session = selectionnee();
+    let (texte, _) = dire(&mut session, b"a003 SELECT Archives\r\n");
+    assert!(
+        texte.starts_with("* OK [CLOSED] Previous mailbox is now closed\r\n* 0 EXISTS"),
+        "{texte}"
+    );
+    // `EXAMINE` la pose aussi.
+    let (examine, _) = dire(&mut session, b"a004 EXAMINE INBOX\r\n");
+    assert!(
+        examine.starts_with("* OK [CLOSED] Previous mailbox is now closed\r\n"),
+        "{examine}"
+    );
+
+    // LA PREMIÈRE SÉLECTION N'EN PORTE PAS : il n'y avait rien à fermer.
+    let mut neuve = nouvelle(true);
+    dire(&mut neuve, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (premiere, _) = dire(&mut neuve, b"a002 SELECT INBOX\r\n");
+    assert!(!premiere.contains("[CLOSED]"), "{premiere}");
+
+    // ET APRÈS UN `CLOSE`, NON PLUS : §7.1 dit qu'il n'y a pas lieu de la
+    // rendre quand la commande ferme sans rien ouvrir.
+    dire(&mut neuve, b"a003 CLOSE\r\n");
+    let (apres, _) = dire(&mut neuve, b"a004 SELECT INBOX\r\n");
+    assert!(!apres.contains("[CLOSED]"), "{apres}");
 }
 
 #[test]
@@ -1163,7 +1211,10 @@ fn les_bords_de_la_boite_d_epreuve_se_visitent() {
 fn status_dit_ce_qu_une_boite_contient_sans_l_ouvrir() {
     let mut session = nouvelle(true);
     dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
-    let (texte, _) = dire(&mut session, b"a002 STATUS INBOX (MESSAGES)\r\n");
+    let (texte, _) = dire(
+        &mut session,
+        b"a002 STATUS INBOX (MESSAGES UIDNEXT UIDVALIDITY)\r\n",
+    );
     assert!(
         texte.contains("* STATUS \"INBOX\" (MESSAGES 3 UIDNEXT 31 UIDVALIDITY 42)\r\n"),
         "{texte}"
@@ -1184,7 +1235,10 @@ fn status_repond_aussi_de_la_boite_ouverte() {
     let mut session = nouvelle(true);
     dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
     dire(&mut session, b"a002 SELECT INBOX\r\n");
-    let (texte, _) = dire(&mut session, b"a003 STATUS INBOX (MESSAGES)\r\n");
+    let (texte, _) = dire(
+        &mut session,
+        b"a003 STATUS INBOX (MESSAGES UIDNEXT UIDVALIDITY)\r\n",
+    );
     assert!(
         texte.contains("* STATUS \"INBOX\" (MESSAGES 3 UIDNEXT 31 UIDVALIDITY 42)\r\n"),
         "{texte}"
@@ -1194,7 +1248,10 @@ fn status_repond_aussi_de_la_boite_ouverte() {
     assert_eq!(session.selected(), b"INBOX");
 
     // Une AUTRE boîte, elle, s'ouvre pour la question.
-    let (autre, _) = dire(&mut session, b"a004 STATUS Archives (MESSAGES)\r\n");
+    let (autre, _) = dire(
+        &mut session,
+        b"a004 STATUS Archives (MESSAGES UIDNEXT UIDVALIDITY)\r\n",
+    );
     assert!(
         autre.contains("* STATUS \"Archives\" (MESSAGES 0 UIDNEXT 1 UIDVALIDITY 42)\r\n"),
         "{autre}"
@@ -1266,7 +1323,7 @@ fn les_commandes_de_boite_demandent_l_authentification() {
     for commande in [
         &b"a001 SELECT INBOX\r\n"[..],
         b"a002 LIST \"\" *\r\n",
-        b"a003 STATUS INBOX (MESSAGES)\r\n",
+        b"a003 STATUS INBOX (MESSAGES UIDNEXT UIDVALIDITY)\r\n",
     ] {
         let (texte, _) = dire(&mut session, commande);
         assert!(
@@ -1499,6 +1556,21 @@ fn un_tampon_trop_court_le_dit_ou_qu_il_cede() {
     court(APRES_LOGIN, b"a001 SELECT Inconnue\r\n", true);
     court(APRES_LOGIN, b"a001 SELECT\r\n", true);
     court(APRES_LOGIN, b"a001 LIST \"\" *\r\n", true);
+    court(
+        APRES_LOGIN,
+        b"a001 LIST \"\" INBOX RETURN (STATUS (MESSAGES UNSEEN))\r\n",
+        true,
+    );
+    court(
+        APRES_LOGIN,
+        b"a001 STATUS INBOX (MESSAGES UNSEEN)\r\n",
+        true,
+    );
+    // Une re-sélection écrit `[CLOSED]` avant tout le reste, qu'elle
+    // aboutisse ou non.
+    court(APRES_SELECT, b"a001 SELECT Archives\r\n", true);
+    court(APRES_SELECT, b"a001 SELECT Inconnue\r\n", true);
+    court(APRES_SELECT, b"a001 UID FETCH 20 FLAGS\r\n", true);
     court(APRES_LOGIN, b"a001 LIST \"\" \"\"\r\n", true);
     const APRES_ABONNEMENT: &[&[u8]] = &[
         b"a000 LOGIN jean ouvre-toi\r\n",
@@ -1612,6 +1684,13 @@ fn un_tampon_trop_court_pendant_l_emission_le_dit() {
             b"a003 STORE 1:2 +FLAGS.SILENT (\\Deleted)\r\n",
             b"a004 EXPUNGE\r\n",
         ),
+        // L'UID qu'un `UID FETCH` porte SANS QU'ON LE DEMANDE s'écrit en tête,
+        // et la place peut manquer là aussi.
+        (b"", b"a003 UID FETCH 20 FLAGS\r\n"),
+        // Un `ESEARCH` qui porte des comptes : son en-tête est le plus long
+        // morceau que ce serveur compose d'un seul geste.
+        (b"", b"a003 SEARCH RETURN (MIN MAX COUNT) ALL\r\n"),
+        (b"", b"a003 SEARCH RETURN (SAVE) ALL\r\n"),
     ] {
         // Combien de morceaux, et de quelle taille chacun.
         let mut assez = [0_u8; 2048];
@@ -2782,14 +2861,50 @@ fn silent_ecrit_sans_rien_rendre() {
     );
 }
 
-/// **`UID STORE` désigne par UID, et rend le rang.**
+/// **`UID STORE` désigne par UID, rend le rang, ET PORTE L'UID.**
+///
+/// §6.4.9 l'exige en nommant cette commande : sans l'UID, un client qui a
+/// désigné ses messages par UID reçoit des rangs, et doit deviner lequel est
+/// lequel — alors qu'il a choisi les UID pour ne pas avoir à le faire.
 #[test]
-fn uid_store_designe_par_uid() {
+fn uid_store_designe_par_uid_et_porte_l_uid() {
     let mut session = selectionnee();
     let fil = ecouler(&mut session, b"a003 UID STORE 30 +FLAGS (\\Flagged)\r\n");
     assert_eq!(
         fil,
-        "* 3 FETCH (FLAGS (\\Answered \\Flagged))\r\na003 OK UID STORE completed\r\n"
+        "* 3 FETCH (UID 30 FLAGS (\\Answered \\Flagged))\r\n\
+         a003 OK UID STORE completed\r\n"
+    );
+    // UN `STORE` ORDINAIRE, LUI, N'EN PORTE PAS : le client a désigné des rangs,
+    // et c'est un rang qu'on lui rend. §6.4.6 ne demande que les drapeaux.
+    let sans = ecouler(&mut session, b"a004 STORE 1 +FLAGS (\\Flagged)\r\n");
+    assert_eq!(
+        sans,
+        "* 1 FETCH (FLAGS (\\Flagged))\r\na004 OK STORE completed\r\n"
+    );
+}
+
+/// **UN `UID FETCH` PORTE L'UID QUE LE CLIENT N'A PAS DEMANDÉ** (§6.4.9), et ne
+/// l'écrit pas deux fois quand il l'a demandé.
+#[test]
+fn uid_fetch_porte_l_uid_meme_sans_l_avoir_demande() {
+    let mut session = selectionnee();
+    let sans = ecouler(&mut session, b"a003 UID FETCH 20 FLAGS\r\n");
+    assert_eq!(
+        sans,
+        "* 2 FETCH (UID 20 FLAGS (\\Seen))\r\na003 OK UID FETCH completed\r\n"
+    );
+    // Demandé, il ne s'écrit qu'une fois.
+    let demande = ecouler(&mut session, b"a004 UID FETCH 20 (FLAGS UID)\r\n");
+    assert_eq!(
+        demande,
+        "* 2 FETCH (FLAGS (\\Seen) UID 20)\r\na004 OK UID FETCH completed\r\n"
+    );
+    // Et un `FETCH` ordinaire n'en porte pas.
+    let ordinaire = ecouler(&mut session, b"a005 FETCH 2 FLAGS\r\n");
+    assert_eq!(
+        ordinaire,
+        "* 2 FETCH (FLAGS (\\Seen))\r\na005 OK FETCH completed\r\n"
     );
 }
 
@@ -4821,7 +4936,7 @@ fn une_option_de_list_qu_on_ne_sert_pas_est_une_faute() {
     dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
     for commande in [
         &b"a002 LIST (RECURSIVEMATCH) \"\" *\r\n"[..],
-        b"a003 LIST \"\" * RETURN (STATUS (MESSAGES))\r\n",
+        b"a003 LIST \"\" * RETURN (STATUS (RECENT))\r\n",
     ] {
         let (texte, _) = dire(&mut session, commande);
         assert!(
@@ -4834,5 +4949,476 @@ fn une_option_de_list_qu_on_ne_sert_pas_est_une_faute() {
     assert!(
         avec.contains("* LIST (\\HasNoChildren) \"/\" \"INBOX\""),
         "{avec}"
+    );
+}
+
+/// **LA RÉPONSE PORTE CE QUI A ÉTÉ DEMANDÉ**, dans l'ordre où on l'a demandé
+/// (§7.3.3). Rendre toujours les mêmes trois est commode, et faux.
+#[test]
+fn status_rend_ce_qu_on_lui_demande_et_dans_l_ordre() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    // La boîte d'épreuve : trois messages, dont un `\Seen`, de 100, 200 et 300
+    // octets.
+    let (texte, _) = dire(&mut session, b"a002 STATUS INBOX (UNSEEN SIZE DELETED)\r\n");
+    assert_eq!(
+        texte,
+        "* STATUS \"INBOX\" (UNSEEN 2 SIZE 600 DELETED 0)\r\n\
+         a002 OK STATUS completed\r\n"
+    );
+
+    // Un seul élément ne rend que celui-là.
+    let (seul, _) = dire(&mut session, b"a003 STATUS INBOX (UIDNEXT)\r\n");
+    assert_eq!(
+        seul,
+        "* STATUS \"INBOX\" (UIDNEXT 31)\r\n\
+         a003 OK STATUS completed\r\n"
+    );
+
+    // Et `\Deleted` se compte : on en marque un.
+    dire(&mut session, b"a004 SELECT INBOX\r\n");
+    ecouler(&mut session, b"a005 STORE 1 +FLAGS (\\Deleted)\r\n");
+    let (marque, _) = dire(&mut session, b"a006 STATUS INBOX (DELETED UNSEEN)\r\n");
+    assert_eq!(
+        marque,
+        "* STATUS \"INBOX\" (DELETED 1 UNSEEN 2)\r\n\
+         a006 OK STATUS completed\r\n"
+    );
+}
+
+/// **UN NOM CITÉ PORTE DES ESPACES**, et la liste commence après son guillemet.
+#[test]
+fn status_lit_un_nom_cite_avant_sa_liste() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (texte, _) = dire(&mut session, b"a002 STATUS \"INBOX\" (MESSAGES)\r\n");
+    assert_eq!(
+        texte,
+        "* STATUS \"INBOX\" (MESSAGES 3)\r\n\
+         a002 OK STATUS completed\r\n"
+    );
+    // Un nom à espace n'existe pas dans la boîte d'épreuve, mais il doit être LU
+    // comme un nom, et non coupé en deux.
+    let (espace, _) = dire(
+        &mut session,
+        b"a003 STATUS \"Sent Messages\" (MESSAGES)\r\n",
+    );
+    assert!(espace.starts_with("a003 NO [NONEXISTENT]"), "{espace}");
+}
+
+/// Ce qui n'a pas la forme de §6.3.11 est une faute.
+#[test]
+fn une_liste_de_status_mal_formee_est_une_faute() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    for commande in [
+        // Pas de liste du tout.
+        &b"a002 STATUS INBOX\r\n"[..],
+        // Une liste vide : §9 en veut au moins un élément.
+        b"a003 STATUS INBOX ()\r\n",
+        // Un mot qui n'est pas un élément — `RECENT` a disparu de rev2.
+        b"a004 STATUS INBOX (RECENT)\r\n",
+        b"a005 STATUS INBOX (TAILLE)\r\n",
+        // Une parenthèse qui ne se ferme pas.
+        b"a006 STATUS INBOX (MESSAGES\r\n",
+        // Rien du tout.
+        b"a007 STATUS\r\n",
+        // Un guillemet qui ne se ferme pas.
+        b"a008 STATUS \"INBOX (MESSAGES)\r\n",
+    ] {
+        let (texte, _) = dire(&mut session, commande);
+        assert!(
+            texte.contains("BAD STATUS expects a mailbox name and items"),
+            "{commande:?} : {texte}"
+        );
+    }
+}
+
+/// **`RETURN (STATUS (…))` REND UN `STATUS` PAR BOÎTE** (§6.3.9.7) : c'est une
+/// commande là où il en fallait vingt.
+#[test]
+fn list_rend_le_status_de_chaque_boite_quand_on_le_demande() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (texte, _) = dire(
+        &mut session,
+        b"a002 LIST \"\" INBOX RETURN (STATUS (MESSAGES UNSEEN))\r\n",
+    );
+    assert_eq!(
+        texte,
+        "* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n\
+         * STATUS \"INBOX\" (MESSAGES 3 UNSEEN 2)\r\n\
+         a002 OK LIST completed\r\n"
+    );
+
+    // **UNE BOÎTE LISTÉE QUE LE MAGASIN N'OUVRE PAS N'A PAS DE `STATUS`** non
+    // plus : celle-ci se nomme et ne s'ouvre pas — un autre outil a pu la
+    // retirer entre la liste et la question. On ne rend alors que sa ligne de
+    // liste, sans zéros qu'on prendrait pour une boîte vide.
+    dire(&mut session, b"a003 CREATE Fugace\r\n");
+    let (toutes, _) = dire(
+        &mut session,
+        b"a004 LIST \"\" Fugace RETURN (STATUS (MESSAGES))\r\n",
+    );
+    assert_eq!(
+        toutes,
+        "* LIST (\\HasNoChildren) \"/\" \"Fugace\"\r\n\
+         a004 OK LIST completed\r\n"
+    );
+
+    // Sans l'option, aucune ligne de `STATUS`.
+    let (sans, _) = dire(&mut session, b"a005 LIST \"\" INBOX\r\n");
+    assert!(!sans.contains("STATUS"), "{sans}");
+
+    // **UNE BOÎTE QU'ON NE PEUT PAS OUVRIR N'A PAS DE `STATUS`** : `Archives` se
+    // vide en gardant son nom, et l'interroger rendrait des zéros qu'on
+    // prendrait pour une boîte vide.
+    dire(&mut session, b"a006 DELETE Archives\r\n");
+    let (videe, _) = dire(
+        &mut session,
+        b"a007 LIST \"\" Archives RETURN (STATUS (MESSAGES))\r\n",
+    );
+    assert_eq!(
+        videe,
+        "* LIST (\\Noselect \\HasChildren) \"/\" \"Archives\"\r\n\
+         a007 OK LIST completed\r\n"
+    );
+}
+
+/// La boîte SÉLECTIONNÉE se recense sans se rouvrir, dans `LIST` comme dans
+/// `STATUS` : un magasin qui verrouille se heurterait à son propre verrou.
+#[test]
+fn list_recense_la_boite_ouverte_sans_la_rouvrir() {
+    let mut session = selectionnee();
+    let (texte, _) = dire(
+        &mut session,
+        b"a003 LIST \"\" INBOX RETURN (STATUS (MESSAGES))\r\n",
+    );
+    assert!(texte.contains("* STATUS \"INBOX\" (MESSAGES 3)"), "{texte}");
+    assert_eq!(session.state(), State::Selected);
+}
+
+// ── LES OPTIONS DE RETOUR D'UNE RECHERCHE (§6.4.4) ──────────────────────────
+
+/// **QUATRE FAÇONS DE RÉPONDRE À LA MÊME QUESTION.** Rendre la liste à qui a
+/// demandé un compte, c'est envoyer des milliers de numéros pour qu'il en garde
+/// un.
+#[test]
+fn une_recherche_rend_ce_qu_on_lui_demande() {
+    let mut session = selectionnee();
+    // Sans option, c'est la liste — comme avant.
+    let tout = ecouler(&mut session, b"a003 SEARCH ALL\r\n");
+    assert_eq!(
+        tout,
+        "* ESEARCH (TAG \"a003\") ALL 1:3\r\na003 OK SEARCH completed\r\n"
+    );
+    // `()` aussi, ce que §6.4.4 dit en toutes lettres.
+    let vide = ecouler(&mut session, b"a004 SEARCH RETURN () ALL\r\n");
+    assert_eq!(
+        vide,
+        "* ESEARCH (TAG \"a004\") ALL 1:3\r\na004 OK SEARCH completed\r\n"
+    );
+
+    let compte = ecouler(&mut session, b"a005 SEARCH RETURN (COUNT) ALL\r\n");
+    assert_eq!(
+        compte,
+        "* ESEARCH (TAG \"a005\") COUNT 3\r\na005 OK SEARCH completed\r\n"
+    );
+
+    let bornes = ecouler(&mut session, b"a006 SEARCH RETURN (MIN MAX) ALL\r\n");
+    assert_eq!(
+        bornes,
+        "* ESEARCH (TAG \"a006\") MIN 1 MAX 3\r\na006 OK SEARCH completed\r\n"
+    );
+
+    // Les quatre ensemble, et dans l'ordre de §7.3.4 : MIN, MAX, ALL, COUNT —
+    // ici COUNT avant ALL, parce que ce qui se compte s'écrit avant ce qui
+    // s'écoule.
+    let toutes = ecouler(
+        &mut session,
+        b"a007 SEARCH RETURN (MIN MAX COUNT ALL) ALL\r\n",
+    );
+    assert_eq!(
+        toutes,
+        "* ESEARCH (TAG \"a007\") MIN 1 MAX 3 COUNT 3 ALL 1:3\r\n\
+         a007 OK SEARCH completed\r\n"
+    );
+
+    // `UID SEARCH` rend des UID, `MIN` et `MAX` compris.
+    let uids = ecouler(&mut session, b"a008 UID SEARCH RETURN (MIN MAX) ALL\r\n");
+    assert_eq!(
+        uids,
+        "* ESEARCH (TAG \"a008\") UID MIN 10 MAX 30\r\n\
+         a008 OK UID SEARCH completed\r\n"
+    );
+}
+
+/// **UNE RECHERCHE SANS RÉSULTAT N'A NI `MIN` NI `MAX`** (§6.4.4), mais elle a
+/// un `COUNT` : un compte nul est un renseignement, pas une absence.
+#[test]
+fn une_recherche_sans_resultat_omet_les_bornes_mais_pas_le_compte() {
+    let mut session = selectionnee();
+    let rien = ecouler(
+        &mut session,
+        b"a003 SEARCH RETURN (MIN MAX COUNT) DRAFT\r\n",
+    );
+    assert_eq!(
+        rien,
+        "* ESEARCH (TAG \"a003\") COUNT 0\r\na003 OK SEARCH completed\r\n"
+    );
+    // Et sans rien de demandé non plus, la ligne reste : §6.4.4 veut qu'elle
+    // soit envoyée même vide.
+    let liste = ecouler(&mut session, b"a004 SEARCH RETURN (ALL) DRAFT\r\n");
+    assert_eq!(
+        liste,
+        "* ESEARCH (TAG \"a004\")\r\na004 OK SEARCH completed\r\n"
+    );
+}
+
+/// Une option de retour qu'on ne sert pas est un `BAD` (§6.4.4), pas un silence.
+#[test]
+fn une_option_de_retour_inconnue_est_une_faute() {
+    let mut session = selectionnee();
+    for commande in [
+        &b"a003 SEARCH RETURN (RELEVANCY) ALL\r\n"[..],
+        b"a004 SEARCH RETURN MIN ALL\r\n",
+        b"a005 SEARCH RETURN (MIN ALL\r\n",
+    ] {
+        let (texte, _) = dire(&mut session, commande);
+        assert!(
+            texte.contains("BAD SEARCH result options are malformed"),
+            "{commande:?} : {texte}"
+        );
+    }
+}
+
+// ── `SAVE` ET LE MARQUEUR `$` (§6.4.4.1) ────────────────────────────────────
+
+/// **`SAVE` RETIENT, `$` DÉSIGNE** : le client cherche une fois, et agit sur le
+/// résultat sans le renvoyer.
+#[test]
+fn une_recherche_retenue_se_designe_par_le_marqueur() {
+    let mut session = selectionnee();
+    // `SAVE` SEUL NE FAIT RIEN ÉCRIRE : §6.4.4 veut qu'il supprime alors la
+    // réponse `ESEARCH`.
+    let sauve = ecouler(&mut session, b"a003 SEARCH RETURN (SAVE) SEEN\r\n");
+    assert_eq!(sauve, "a003 OK SEARCH completed\r\n");
+
+    // Le message 2 est le seul `\Seen` : `$` le désigne.
+    let lu = ecouler(&mut session, b"a004 FETCH $ (UID)\r\n");
+    assert_eq!(lu, "* 2 FETCH (UID 20)\r\na004 OK FETCH completed\r\n");
+
+    // ET DANS L'AUTRE SENS AUSSI : posé par un `SEARCH`, employé par un
+    // `UID FETCH`. §6.4.4.1 exige que le serveur traduise.
+    let par_uid = ecouler(&mut session, b"a005 UID FETCH $ (FLAGS)\r\n");
+    assert_eq!(
+        par_uid,
+        "* 2 FETCH (UID 20 FLAGS (\\Seen))\r\na005 OK UID FETCH completed\r\n"
+    );
+}
+
+/// **CE QU'ON RETIENT EST EN UID**, et c'est ce qui rend §6.4.4.1 vrai sans
+/// code : un message effacé cesse de correspondre, au lieu d'être remplacé par
+/// son voisin.
+#[test]
+fn le_resultat_retenu_ne_suit_pas_la_renumerotation() {
+    let mut session = selectionnee();
+    ecouler(&mut session, b"a003 SEARCH RETURN (SAVE) ALL\r\n");
+    // On efface le premier : les rangs 2 et 3 descendent à 1 et 2.
+    ecouler(&mut session, b"a004 STORE 1 +FLAGS (\\Deleted)\r\n");
+    ecouler(&mut session, b"a005 EXPUNGE\r\n");
+    // `$` désigne toujours les MÊMES messages, par leurs UID.
+    let reste = ecouler(&mut session, b"a006 FETCH $ (UID)\r\n");
+    assert_eq!(
+        reste,
+        "* 1 FETCH (UID 20)\r\n* 2 FETCH (UID 30)\r\n\
+         a006 OK FETCH completed\r\n"
+    );
+}
+
+/// **UN RÉSULTAT VIDE EST UN RÉSULTAT** (§6.4.4.1), et non une absence : les
+/// commandes qui l'emploient réussissent sans rien désigner.
+#[test]
+fn un_resultat_retenu_vide_ne_designe_rien_sans_faute() {
+    let mut session = selectionnee();
+    ecouler(&mut session, b"a003 SEARCH RETURN (SAVE) DRAFT\r\n");
+    let rien = ecouler(&mut session, b"a004 FETCH $ (UID)\r\n");
+    assert_eq!(rien, "a004 OK FETCH completed\r\n");
+    // Sans aucune recherche non plus : la session part avec la liste vide.
+    let mut neuve = selectionnee();
+    let vierge = ecouler(&mut neuve, b"a003 FETCH $ (UID)\r\n");
+    assert_eq!(vierge, "a003 OK FETCH completed\r\n");
+}
+
+/// **UN `SELECT` REMET LE RÉSULTAT À ZÉRO** (§6.4.4.1) : ce qu'on avait retenu
+/// parlait de la boîte qu'on vient de fermer.
+#[test]
+fn ouvrir_une_boite_oublie_le_resultat_retenu() {
+    let mut session = selectionnee();
+    ecouler(&mut session, b"a003 SEARCH RETURN (SAVE) ALL\r\n");
+    dire(&mut session, b"a004 SELECT INBOX\r\n");
+    let apres = ecouler(&mut session, b"a005 FETCH $ (UID)\r\n");
+    assert_eq!(apres, "a005 OK FETCH completed\r\n");
+}
+
+/// **Table 4 de §6.4.4.1** : `SAVE` avec `MIN` et/ou `MAX` seuls retient CES
+/// bornes, et non toute la liste.
+#[test]
+fn save_avec_les_bornes_ne_retient_que_les_bornes() {
+    let mut session = selectionnee();
+    let borne = ecouler(&mut session, b"a003 SEARCH RETURN (SAVE MIN) ALL\r\n");
+    assert_eq!(
+        borne,
+        "* ESEARCH (TAG \"a003\") MIN 1\r\na003 OK SEARCH completed\r\n"
+    );
+    let seul = ecouler(&mut session, b"a004 FETCH $ (UID)\r\n");
+    assert_eq!(seul, "* 1 FETCH (UID 10)\r\na004 OK FETCH completed\r\n");
+
+    // `SAVE MIN MAX` en retient deux.
+    ecouler(&mut session, b"a005 SEARCH RETURN (SAVE MIN MAX) ALL\r\n");
+    let deux = ecouler(&mut session, b"a006 FETCH $ (UID)\r\n");
+    assert_eq!(
+        deux,
+        "* 1 FETCH (UID 10)\r\n* 3 FETCH (UID 30)\r\n\
+         a006 OK FETCH completed\r\n"
+    );
+
+    // Avec `COUNT` ou `ALL`, c'est toute la liste — Table 4 encore.
+    ecouler(&mut session, b"a007 SEARCH RETURN (SAVE MIN COUNT) ALL\r\n");
+    let tout = ecouler(&mut session, b"a008 FETCH $ (UID)\r\n");
+    assert_eq!(
+        tout,
+        "* 1 FETCH (UID 10)\r\n* 2 FETCH (UID 20)\r\n* 3 FETCH (UID 30)\r\n\
+         a008 OK FETCH completed\r\n"
+    );
+
+    // Et `SAVE MIN` sur une recherche d'un seul message ne le retient qu'une
+    // fois, même avec `MAX` : les deux bornes s'y confondent.
+    ecouler(&mut session, b"a009 SEARCH RETURN (SAVE MIN MAX) SEEN\r\n");
+    let une = ecouler(&mut session, b"a010 FETCH $ (UID)\r\n");
+    assert_eq!(une, "* 2 FETCH (UID 20)\r\na010 OK FETCH completed\r\n");
+}
+
+/// Le marqueur vaut pour toutes les commandes qui prennent un ensemble.
+#[test]
+fn le_marqueur_vaut_pour_toutes_les_commandes_d_ensemble() {
+    let mut session = selectionnee();
+    ecouler(&mut session, b"a003 SEARCH RETURN (SAVE) SEEN\r\n");
+
+    // `STORE`.
+    let ecrit = ecouler(&mut session, b"a004 STORE $ +FLAGS (\\Flagged)\r\n");
+    assert_eq!(
+        ecrit,
+        "* 2 FETCH (FLAGS (\\Seen \\Flagged))\r\na004 OK STORE completed\r\n"
+    );
+
+    // `COPY`.
+    let copie = dire(&mut session, b"a005 COPY $ INBOX\r\n").0;
+    assert!(copie.contains("a005 OK"), "{copie}");
+
+    // `EXPUNGE` par UID, qui n'efface que ce qui est marqué.
+    ecouler(&mut session, b"a006 STORE $ +FLAGS (\\Deleted)\r\n");
+    let efface = ecouler(&mut session, b"a007 UID EXPUNGE $\r\n");
+    assert_eq!(efface, "* 2 EXPUNGE\r\na007 OK UID EXPUNGE completed\r\n");
+}
+
+/// `MOVE $` déplace ce que la recherche a retenu.
+#[test]
+fn le_marqueur_vaut_aussi_pour_un_deplacement() {
+    let mut session = selectionnee();
+    ecouler(&mut session, b"a003 SEARCH RETURN (SAVE) SEEN\r\n");
+    let deplace = ecouler(&mut session, b"a004 MOVE $ INBOX\r\n");
+    assert!(deplace.contains("* 2 EXPUNGE"), "{deplace}");
+    assert!(deplace.contains("a004 OK MOVE completed"), "{deplace}");
+}
+
+/// **DES UID QUI SE SUIVENT SE COMPRIMENT EN PLAGE.** `1:1000` fait six octets
+/// là où mille nombres n'en tiendraient dans aucun tampon borné.
+#[test]
+fn un_resultat_retenu_se_comprime_en_plages() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut session, b"a002 SELECT Suite\r\n");
+    ecouler(&mut session, b"a003 SEARCH RETURN (SAVE) ALL\r\n");
+    // Les UID 5, 6 et 7 se suivent : le marqueur les désigne tous les trois.
+    let tout = ecouler(&mut session, b"a004 FETCH $ (UID)\r\n");
+    assert_eq!(
+        tout,
+        "* 1 FETCH (UID 5)\r\n* 2 FETCH (UID 6)\r\n* 3 FETCH (UID 7)\r\n\
+         a004 OK FETCH completed\r\n"
+    );
+}
+
+/// **CE QUI DÉBORDE EST ABANDONNÉ, PAS TRONQUÉ** : un ensemble tronqué
+/// désignerait d'autres messages que ceux qu'on a trouvés, ce qui est pire que
+/// de n'en désigner aucun.
+#[test]
+fn un_resultat_retenu_trop_morcele_est_abandonne() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut session, b"a002 SELECT Foisonnante\r\n");
+    ecouler(&mut session, b"a003 SEARCH RETURN (SAVE) ALL\r\n");
+    // Quatre cents UID espacés ne se comprimant en aucune plage, leur texte
+    // dépasse ce qu'une session retient. Le marqueur ne désigne donc rien — et
+    // la commande réussit quand même.
+    let rien = ecouler(&mut session, b"a004 FETCH $ (UID)\r\n");
+    assert_eq!(rien, "a004 OK FETCH completed\r\n");
+}
+
+/// **`SAVE` SUR UNE RECHERCHE SANS RÉSULTAT RETIENT LA LISTE VIDE**, bornes
+/// comprises : il n'y a pas de minimum d'un ensemble vide.
+#[test]
+fn save_avec_une_borne_sur_rien_retient_le_vide() {
+    let mut session = selectionnee();
+    let rien = ecouler(&mut session, b"a003 SEARCH RETURN (SAVE MIN) DRAFT\r\n");
+    assert_eq!(
+        rien,
+        "* ESEARCH (TAG \"a003\")\r\na003 OK SEARCH completed\r\n"
+    );
+    let apres = ecouler(&mut session, b"a004 FETCH $ (UID)\r\n");
+    assert_eq!(apres, "a004 OK FETCH completed\r\n");
+}
+
+/// `SAVE MAX` seul retient le dernier, et rien d'autre (Table 4 de §6.4.4.1).
+#[test]
+fn save_avec_le_maximum_seul_ne_retient_que_lui() {
+    let mut session = selectionnee();
+    let borne = ecouler(&mut session, b"a003 SEARCH RETURN (SAVE MAX) ALL\r\n");
+    assert_eq!(
+        borne,
+        "* ESEARCH (TAG \"a003\") MAX 3\r\na003 OK SEARCH completed\r\n"
+    );
+    let seul = ecouler(&mut session, b"a004 FETCH $ (UID)\r\n");
+    assert_eq!(seul, "* 3 FETCH (UID 30)\r\na004 OK FETCH completed\r\n");
+}
+
+/// **UN MESSAGE DISPARU NE COMPTE POUR RIEN** dans un `STATUS` : une relève
+/// concurrente peut l'avoir effacé, et il ne pèse plus.
+#[test]
+fn un_message_disparu_ne_compte_pas_dans_le_status() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    // `Trouee` en annonce trois et n'en rend que deux.
+    let (texte, _) = dire(
+        &mut session,
+        b"a002 STATUS Trouee (MESSAGES UNSEEN SIZE)\r\n",
+    );
+    assert_eq!(
+        texte,
+        "* STATUS \"Trouee\" (MESSAGES 3 UNSEEN 2 SIZE 20)\r\n\
+         a002 OK STATUS completed\r\n"
+    );
+}
+
+/// Un nom que la réponse ne saurait pas citer n'est pas un nom de boîte, et
+/// `STATUS` le dit comme les autres commandes.
+#[test]
+fn un_nom_de_status_qu_on_ne_saurait_pas_citer_est_une_faute() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (texte, _) = dire(&mut session, b"a002 STATUS a\\b (MESSAGES)\r\n");
+    assert!(
+        texte.contains("BAD STATUS expects a mailbox name and items"),
+        "{texte}"
     );
 }

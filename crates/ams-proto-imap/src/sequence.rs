@@ -33,6 +33,8 @@ use crate::{Error, Limits};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SequenceSet<'a> {
     texte: &'a [u8],
+    /// Est-ce le marqueur `$` plutôt qu'un ensemble écrit ?
+    saved: bool,
 }
 
 impl SequenceSet<'static> {
@@ -41,7 +43,10 @@ impl SequenceSet<'static> {
     /// Il sert à celui qui a validé un ensemble, l'a recopié, et le relit plus
     /// tard : la relecture ne peut pas échouer, et cette constante lui évite
     /// d'écrire une garde qu'aucune entrée ne pourrait emprunter.
-    pub const EMPTY: Self = Self { texte: b"" };
+    pub const EMPTY: Self = Self {
+        texte: b"",
+        saved: false,
+    };
 }
 
 impl<'a> SequenceSet<'a> {
@@ -57,6 +62,22 @@ impl<'a> SequenceSet<'a> {
         if valeur.is_empty() {
             return Err(Error::MalformedSequence);
         }
+        // §9 : `sequence-set =/ seq-last-command`, et `seq-last-command = "$"`.
+        //
+        // # CE MARQUEUR NE DÉSIGNE RIEN ICI, ET C'EST VOULU
+        //
+        // Il renvoie au résultat de la dernière recherche `SAVE` (§6.4.4.1), que
+        // la GRAMMAIRE ne connaît pas : elle n'a pas de session, donc pas de
+        // résultat retenu. Elle le reconnaît, le nomme, et le rend inoffensif —
+        // sans quoi `Ranges` prendrait ce `$` pour une étoile mal lue et
+        // désignerait le dernier message de la boîte, c'est-à-dire n'importe
+        // lequel plutôt que ceux qu'on a cherchés.
+        if valeur == b"$" {
+            return Ok(Self {
+                texte: valeur,
+                saved: true,
+            });
+        }
         let mut elements = 0_usize;
         for morceau in valeur.split(|octet| *octet == b',') {
             elements = elements.saturating_add(1);
@@ -67,7 +88,19 @@ impl<'a> SequenceSet<'a> {
             }
             lire_un(morceau)?;
         }
-        Ok(Self { texte: valeur })
+        Ok(Self {
+            texte: valeur,
+            saved: false,
+        })
+    }
+
+    /// Est-ce le marqueur `$` — le résultat de la dernière recherche retenue ?
+    ///
+    /// L'appelant qui tient une session doit y substituer ce qu'il a retenu ;
+    /// tant qu'il ne l'a pas fait, l'ensemble ne désigne rien.
+    #[must_use]
+    pub fn saved(&self) -> bool {
+        self.saved
     }
 
     /// Les intervalles, **résolus et ordonnés**, l'étoile valant `star`.
@@ -79,7 +112,11 @@ impl<'a> SequenceSet<'a> {
     #[must_use]
     pub fn ranges(&self, star: u32) -> Ranges<'a> {
         Ranges {
-            reste: self.texte,
+            // LE MARQUEUR NON RÉSOLU NE DÉSIGNE RIEN. Voir `parse`.
+            reste: match self.saved {
+                true => &[],
+                false => self.texte,
+            },
             star,
         }
     }

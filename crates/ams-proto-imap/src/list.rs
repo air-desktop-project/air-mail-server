@@ -37,6 +37,7 @@
 
 use crate::error::Error;
 use crate::mailbox::MAILBOX_NAME_MAX;
+use crate::status::StatusItems;
 
 /// Combien de motifs un seul `LIST` peut porter.
 ///
@@ -52,6 +53,8 @@ pub struct List<'a> {
     subscribed_only: bool,
     /// Marquer `\Subscribed` sur ce qu'on rend ?
     report_subscribed: bool,
+    /// Le `STATUS` de chaque boîte rendue, si le client l'a demandé.
+    status: Option<StatusItems>,
     /// Les motifs, dans l'ordre où ils ont été écrits.
     motifs: [&'a [u8]; LIST_PATTERNS_MAX],
     /// Combien de `motifs` valent.
@@ -69,6 +72,19 @@ impl<'a> List<'a> {
     #[must_use]
     pub fn report_subscribed(&self) -> bool {
         self.report_subscribed
+    }
+
+    /// Ce que `RETURN (STATUS (…))` demande de chaque boîte rendue.
+    ///
+    /// # POURQUOI CETTE OPTION EXISTE
+    ///
+    /// Un client qui ouvre son panneau veut la liste ET le compte de non-lus de
+    /// chaque boîte. Sans elle, c'est un `LIST` puis un `STATUS` par boîte —
+    /// vingt allers-retours là où un seul suffit, sur une connexion dont la
+    /// latence est celle d'Internet.
+    #[must_use]
+    pub fn status(&self) -> Option<StatusItems> {
+        self.status
     }
 
     /// Les motifs demandés.
@@ -124,7 +140,7 @@ impl<'a> List<'a> {
         // 4. Le `RETURN (…)`, s'il est là.
         let reste = reste.trim_ascii();
         let report_subscribed = if reste.is_empty() {
-            false
+            (false, None)
         } else {
             let (mot, suite) = un_mot(reste)?;
             if !mot.eq_ignore_ascii_case(b"RETURN") {
@@ -139,7 +155,8 @@ impl<'a> List<'a> {
 
         Ok(Self {
             subscribed_only,
-            report_subscribed,
+            report_subscribed: report_subscribed.0,
+            status: report_subscribed.1,
             motifs,
             combien,
         })
@@ -148,21 +165,35 @@ impl<'a> List<'a> {
 
 /// Lit ce qu'une parenthèse ouvrante enferme, et rend le reste après elle.
 ///
-/// **Les parenthèses ne s'emboîtent pas ici** : ni les options de `LIST` ni ses
-/// motifs n'en contiennent, et accepter un emboîtement demanderait de décider ce
-/// qu'il voudrait dire.
+/// # UN SEUL NIVEAU D'EMBOÎTEMENT, ET IL A UN NOM
+///
+/// `RETURN (STATUS (MESSAGES UNSEEN))` est la seule forme de §6.3.9 qui emboîte
+/// des parenthèses. On compte donc les niveaux plutôt que de chercher la
+/// première fermante — qui refermerait le `STATUS` et laisserait la liste
+/// ouverte —, et l'on s'arrête à deux : un troisième ne voudrait rien dire.
 fn entre_parentheses(reste: &[u8]) -> Result<(&[u8], &[u8]), Error> {
     let corps = reste.strip_prefix(b"(").ok_or(Error::MalformedList)?;
-    let fin = corps
-        .iter()
-        .position(|octet| *octet == b')')
-        .ok_or(Error::MalformedList)?;
-    let dedans = corps.get(..fin).unwrap_or_default();
-    if dedans.contains(&b'(') {
-        return Err(Error::MalformedList);
+    let mut niveau = 0_usize;
+    let mut fin = None;
+    for (rang, octet) in corps.iter().enumerate() {
+        match *octet {
+            b'(' => {
+                niveau = niveau.saturating_add(1);
+                if niveau > 1 {
+                    return Err(Error::MalformedList);
+                }
+            }
+            b')' if niveau == 0 => {
+                fin = Some(rang);
+                break;
+            }
+            b')' => niveau = niveau.saturating_sub(1),
+            _ => {}
+        }
     }
+    let fin = fin.ok_or(Error::MalformedList)?;
     Ok((
-        dedans,
+        corps.get(..fin).unwrap_or_default(),
         corps.get(fin.saturating_add(1)..).unwrap_or_default(),
     ))
 }
@@ -243,27 +274,65 @@ fn options_de_selection(dedans: &[u8]) -> Result<bool, Error> {
     Ok(abonnees)
 }
 
-/// Lit les options de retour, et rend `true` si `SUBSCRIBED` y est.
+/// Lit les options de retour : `SUBSCRIBED`, et le `STATUS` s'il y est.
 ///
 /// `CHILDREN` est admis SANS RIEN CHANGER : `\HasChildren` ou `\HasNoChildren`
 /// est déjà écrit sur chaque ligne, que le client l'ait demandé ou non (§7.3.1).
 /// Le refuser ferait échouer une commande dont la réponse est déjà celle qu'elle
 /// demande.
-fn options_de_retour(dedans: &[u8]) -> Result<bool, Error> {
+///
+/// # `STATUS` PORTE SA PROPRE LISTE, ET ON NE DÉCOUPE DONC PAS SUR L'ESPACE
+///
+/// `RETURN (SUBSCRIBED STATUS (MESSAGES UNSEEN))` : le troisième mot ouvre une
+/// parenthèse, et ce qu'elle enferme n'est pas fait d'options de retour. Le
+/// parcours avance donc mot à mot, et saute la liste entière quand il en
+/// rencontre une.
+fn options_de_retour(dedans: &[u8]) -> Result<(bool, Option<StatusItems>), Error> {
     let mut abonnees = false;
-    for mot in dedans.split(|octet| *octet == b' ') {
-        if mot.is_empty() {
-            continue;
+    let mut status = None;
+    let mut reste = dedans;
+    loop {
+        reste = reste.trim_ascii_start();
+        if reste.is_empty() {
+            return Ok((abonnees, status));
         }
+        let fin = reste
+            .iter()
+            .position(|octet| *octet == b' ')
+            .unwrap_or(reste.len());
+        let mot = reste.get(..fin).unwrap_or_default();
+        reste = reste.get(fin..).unwrap_or_default();
         if mot.eq_ignore_ascii_case(b"SUBSCRIBED") {
             abonnees = true;
             continue;
         }
-        if !mot.eq_ignore_ascii_case(b"CHILDREN") {
+        if mot.eq_ignore_ascii_case(b"CHILDREN") {
+            continue;
+        }
+        if !mot.eq_ignore_ascii_case(b"STATUS") {
             return Err(Error::MalformedList);
         }
+        // DEUX `STATUS` NE VOUDRAIENT PAS DIRE DEUX RÉPONSES : §6.3.9.7 n'en
+        // prévoit qu'un, et le second écraserait le premier sans qu'on sache
+        // lequel le client attendait.
+        if status.is_some() {
+            return Err(Error::MalformedList);
+        }
+        let reste_sans_espace = reste.trim_ascii_start();
+        let fin_liste = reste_sans_espace
+            .iter()
+            .position(|octet| *octet == b')')
+            .ok_or(Error::MalformedList)?;
+        // `fin_liste` VIENT D'UN `position` SUR CETTE MÊME TRANCHE : la borne
+        // existe, et `unwrap_or_default` porte cette impossibilité dans la
+        // bibliothèque standard plutôt que dans une garde qu'aucune entrée ne
+        // peut emprunter.
+        let liste = reste_sans_espace.get(..=fin_liste).unwrap_or_default();
+        status = Some(StatusItems::parse(liste).map_err(|_| Error::MalformedList)?);
+        reste = reste_sans_espace
+            .get(fin_liste.saturating_add(1)..)
+            .unwrap_or_default();
     }
-    Ok(abonnees)
 }
 
 #[cfg(test)]

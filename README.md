@@ -1149,24 +1149,57 @@ boîte est déjà de l'ASCII imprimable sans `LF`. Une ligne par nom est une
 outil. Le fichier se réécrit à côté puis se renomme : un `LIST` concurrent voit
 l'ancienne liste ou la nouvelle, jamais un entre-deux.
 
-### Ce qui manque encore à IMAP4rev2
+### Les options que rev2 a absorbées
 
-Toutes les COMMANDES de RFC 9051 répondent. Trois de leurs options, que rev2 a
-fait entrer dans le protocole de base en absorbant des extensions de rev1, ne
-sont en revanche pas servies — et il faut le dire plutôt que de laisser
-l'énumération des commandes le faire croire :
+RFC 9051 §E énumère ce qu'IMAP4rev2 a fait entrer dans son protocole de base :
+NAMESPACE, UNSELECT, UIDPLUS, ESEARCH, SEARCHRES, ENABLE, IDLE, SASL-IR,
+LIST-EXTENDED, LIST-STATUS, MOVE, LITERAL-, le côté FETCH de BINARY, et les
+attributs de SPECIAL-USE. **Ce ne sont pas des extensions optionnelles** : un
+client de rev2 les emploie sans les négocier, parce que le serveur a annoncé
+`IMAP4rev2`. Elles sont servies.
 
-- **`STATUS` ne rend que `MESSAGES`, `UIDNEXT` et `UIDVALIDITY`**, quels que
-  soient les éléments demandés. `UNSEEN`, `DELETED` et `SIZE` manquent, et §7.3.3
-  veut que la réponse porte CE QUI A ÉTÉ DEMANDÉ.
-- **`SEARCH` n'accepte pas d'options de retour** — `RETURN (MIN MAX COUNT ALL)`,
-  ce que rev1 appelait ESEARCH. La recherche répond, mais toujours par la liste
-  entière.
-- **`LIST` n'accepte pas `RETURN (STATUS (…))`**, ce que rev1 appelait
-  LIST-STATUS, et le refuse explicitement plutôt que de l'ignorer.
+**`STATUS` rend ce qui est demandé**, dans l'ordre demandé (§7.3.3) : `MESSAGES`,
+`UIDNEXT`, `UIDVALIDITY`, `UNSEEN`, `DELETED` et `SIZE`. Rendre toujours les mêmes
+trois est commode et faux — un client qui demande `UNSEEN` pour afficher un
+compte de non-lus ne le trouverait pas, et n'aurait aucun moyen de savoir si la
+boîte n'en a aucun ou si le serveur ne sait pas compter. `RECENT`, retiré par
+rev2 avec le drapeau `\Recent` qu'il comptait, est REFUSÉ plutôt que rendu à
+zéro.
 
-Hors d'IMAP : la file de réémission des messages sortants, et toute interface
-HTTP.
+**`LIST … RETURN (STATUS (…))` rend un `* STATUS` par boîte.** C'est ce qu'un
+client envoie pour peupler son panneau en une commande au lieu de vingt — la
+latence d'Internet multipliée par le nombre de dossiers. Une boîte qu'on ne peut
+pas ouvrir n'en a pas : des zéros s'y liraient comme une boîte vide.
+
+**`SEARCH RETURN (MIN MAX ALL COUNT SAVE)`** : quatre façons de répondre à la
+même question, et une cinquième qui ne répond pas. Celui qui affiche « 15 non
+lus » veut `COUNT` ; celui qui saute au premier message non lu veut `MIN`. Leur
+rendre la liste entière, c'est envoyer des milliers de numéros pour qu'ils en
+gardent un. `SAVE` seul ne fait rien écrire — §6.4.4 veut qu'il supprime alors la
+réponse.
+
+**`$` désigne ce que la dernière recherche a retenu** (§6.4.4.1). Ce serveur le
+retient EN UID, jamais en rangs : la RFC exige qu'un message effacé sorte du
+résultat, et un UID ne se décale pas — la règle est tenue par la nature de ce
+qu'on retient plutôt que par un code qu'il faudrait penser à écrire. C'est aussi
+ce qui traduit d'un espace à l'autre : un `$` posé par un `SEARCH` s'emploie dans
+un `UID FETCH`, et l'inverse. Un résultat trop morcelé pour tenir dans ce qu'une
+session retient est ABANDONNÉ, pas tronqué : un ensemble tronqué désignerait
+d'autres messages que ceux qu'on a trouvés.
+
+**`* OK [CLOSED]` est une frontière** (§7.1) : re-sélectionner ferme la boîte
+précédente, et tout ce qui précède cette ligne parle d'elle. Sans elle, un client
+qui reçoit `* 5 EXISTS` ne sait pas de laquelle des deux boîtes il s'agit. Elle
+paraît même quand la nouvelle sélection ÉCHOUE — l'ancienne est fermée quand
+même (§6.3.2).
+
+**Une réponse causée par une commande `UID` porte l'UID** (§6.4.9), demandé ou
+non. Sans lui, un client qui a désigné ses messages par UID reçoit des rangs et
+doit deviner lequel est lequel — alors qu'il a choisi les UID pour ne pas avoir à
+le faire.
+
+Ce qui reste hors du serveur : la file de réémission des messages sortants, et
+toute interface HTTP.
 
 ## Émettre : le client SMTP sortant
 
