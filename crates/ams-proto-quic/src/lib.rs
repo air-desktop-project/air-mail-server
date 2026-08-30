@@ -38,11 +38,18 @@
 #[cfg(test)]
 extern crate std;
 
+mod connection_id;
 mod error;
+mod packet;
 mod packet_number;
 mod varint;
 
+pub use connection_id::{CONNECTION_ID_MAX, ConnectionId};
 pub use error::{Error, Reason, TransportError};
+pub use packet::{
+    Long, LongHeader, LongKind, RETRY_TAG_OCTETS, Retry, ShortHeader, VERSION_1,
+    VERSION_NEGOTIATION, VersionNegotiation, is_long, parse_long,
+};
 pub use packet_number::{PACKET_NUMBER_MAX, PACKET_NUMBER_OCTETS_MAX};
 pub use varint::VARINT_MAX;
 

@@ -96,6 +96,10 @@ pub enum Reason {
     BadPacketNumberLength,
     /// Un numéro de paquet dépasse 2^62 - 1.
     PacketNumberTooLarge,
+    /// Un identifiant de connexion dépasse vingt octets (§17.2).
+    ConnectionIdTooLong,
+    /// Ce n'est pas un paquet QUIC de cette version : forme ou bit fixe.
+    NotAPacket,
     /// L'espace des numéros de paquet est épuisé (§12.3).
     ///
     /// **§12.3 EXIGE QUE LA CONNEXION SOIT FERMÉE AVANT D'EN ARRIVER LÀ.** Un
@@ -119,6 +123,10 @@ impl Reason {
         match self {
             // §12.4 : une trame qu'on ne peut pas lire jusqu'au bout.
             Self::Truncated | Self::BadPacketNumberLength => TransportError::FrameEncodingError,
+            // §17.2 dit de JETER le paquet, pas de fermer la connexion — il
+            // peut venir de n'importe qui, et une connexion qu'on ferme sur un
+            // paquet égaré est une connexion qu'un tiers peut fermer.
+            Self::ConnectionIdTooLong | Self::NotAPacket => TransportError::ProtocolViolation,
             // **CELLES-CI SONT LES NÔTRES.** Un tampon trop court est un défaut
             // de dimensionnement chez nous, et un entier hors borne est une
             // valeur que notre code a fabriquée : le pair n'a rien fait de mal,
@@ -166,6 +174,8 @@ impl core::fmt::Display for Error {
             Reason::BufferTooSmall => "le tampon de sortie ne suffit pas",
             Reason::BadPacketNumberLength => "une longueur de numéro de paquet hors de un à quatre",
             Reason::PacketNumberTooLarge => "un numéro de paquet dépasse 2^62 - 1",
+            Reason::ConnectionIdTooLong => "un identifiant de connexion dépasse vingt octets",
+            Reason::NotAPacket => "ce n'est pas un paquet QUIC de cette version",
             Reason::PacketNumberSpaceExhausted => {
                 "l'espace des numéros de paquet est épuisé, et §12.3 veut qu'on ferme"
             }

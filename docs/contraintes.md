@@ -3113,3 +3113,60 @@ la première écriture comparait à `2^62 - 1`. Un seul numéro s'en trouvait
 reconstruit autrement — le tout dernier que la connexion puisse porter. C'est
 assez pour justifier une constante nommée `ESPACE`, plutôt qu'un `MAX` qu'on
 croit interchangeable.
+
+## Les en-têtes de paquet : ce qu'on lit avant d'avoir la moindre clé
+
+### On ne lit que la moitié, et c'est le protocole qui l'exige
+
+La protection d'en-tête (RFC 9001 §5.4) masque **les bits réservés, la longueur
+du numéro de paquet, et le numéro lui-même**. Le module d'en-têtes s'arrête donc
+exactement là où le masque commence, et rend l'endroit où il commence.
+
+Cette coupure n'est pas une commodité de mise en œuvre. C'est l'ordre imposé par
+le protocole : pour ôter le masque il faut la clé, pour trouver la clé il faut
+l'identifiant de destination, pour lire l'identifiant il faut avoir lu l'en-tête
+jusque-là. **Un module qui prétendrait tout lire d'un coup mentirait sur ce
+qu'il sait.**
+
+C'est aussi la partie de QUIC qu'on traite sans savoir à qui l'on parle : le
+port est ouvert au monde entier, et ces octets-là ont été choisis par un
+inconnu.
+
+### La longueur de l'identifiant court n'est pas sur le fil
+
+Un en-tête long annonce la longueur de chaque identifiant. Un en-tête COURT
+n'annonce rien : le receveur la connaît parce que c'est LUI qui a choisi cet
+identifiant et l'a donné au pair.
+
+La même suite d'octets, lue avec deux longueurs différentes, désigne donc deux
+connexions différentes. **Un serveur qui ne se souviendrait pas des longueurs
+qu'il émet ne saurait lire aucun paquet court** — ce n'est pas un détail de mise
+en œuvre, c'est ce que le protocole demande de retenir.
+
+### Zéro à vingt octets, et la borne n'est pas décorative
+
+La longueur vient du fil, et un octet peut en annoncer deux cent cinquante-cinq.
+Sans la borne de §17.2, un pair choisirait combien on retient de lui. Et un
+identifiant VIDE est parfaitement légal : un pair qui n'a qu'une adresse n'a
+rien à router, et vingt octets par paquet valent d'être économisés.
+
+Un identifiant hors borne fait JETER le paquet, et ne ferme pas la connexion :
+il peut venir de n'importe qui, et une connexion qu'on ferme sur un paquet
+égaré est une connexion qu'un tiers peut fermer.
+
+### Le bit fixe, et ce qu'il sert à distinguer
+
+§17.2 : le bit 0x40 vaut un, et un paquet où il vaut zéro n'est pas un paquet de
+cette version. C'est ce qui permet de distinguer QUIC d'autres protocoles sur le
+même port UDP — et le vérifier tôt évite de déchiffrer ce qui n'est pas à nous.
+
+### Trois formes qui ne se lisent pas de la même façon
+
+- Un `Initial` porte un jeton, et lui seul (§17.2.2).
+- Un `Retry` n'a **ni longueur ni numéro de paquet** (§17.2.5) : tout ce qui suit
+  les identifiants est le jeton, sauf les seize derniers octets, qui
+  l'authentifient. Il se lit donc à l'envers, par la queue.
+- La version ZÉRO n'est pas une version (§17.2.1) : le reste du paquet est une
+  liste de versions, et les bits de type du premier octet ne veulent alors plus
+  rien dire. Un serveur n'en reçoit jamais — il est celui qui les émet — mais un
+  paquet qu'on ne sait pas nommer se jette sans qu'on puisse dire pourquoi.

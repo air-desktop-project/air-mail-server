@@ -334,3 +334,10 @@ path = "fuzz_targets/fuzz_ams_quic_varint.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_ams_quic_packet"
+path = "fuzz_targets/fuzz_ams_quic_packet.rs"
+test = false
+doc = false
+bench = false

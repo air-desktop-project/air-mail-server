@@ -58,6 +58,11 @@ fn chaque_raison_porte_son_code() {
             Reason::PacketNumberSpaceExhausted,
             TransportError::InternalError,
         ),
+        (
+            Reason::ConnectionIdTooLong,
+            TransportError::ProtocolViolation,
+        ),
+        (Reason::NotAPacket, TransportError::ProtocolViolation),
     ];
     for (raison, code) in cas {
         let faute = Error::new(raison);
@@ -77,6 +82,8 @@ fn chaque_faute_se_dit() {
         (Reason::BadPacketNumberLength, "un à quatre"),
         (Reason::PacketNumberTooLarge, "numéro de paquet dépasse"),
         (Reason::PacketNumberSpaceExhausted, "espace des numéros"),
+        (Reason::ConnectionIdTooLong, "identifiant de connexion"),
+        (Reason::NotAPacket, "paquet QUIC"),
     ];
     for (raison, morceau) in cas {
         let dit = std::format!("{}", Error::new(raison));

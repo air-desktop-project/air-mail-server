@@ -67,6 +67,7 @@ fuzz_ams_h2_frame h2-frame
 fuzz_ams_h2_hpack h2-hpack
 fuzz_ams_h2_connection h2-connection
 fuzz_ams_quic_varint quic-varint
+fuzz_ams_quic_packet quic-packet
 fuzz_ams_guard guard
 fuzz_ams_index_name index
 fuzz_ams_config config
