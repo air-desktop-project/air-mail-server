@@ -299,6 +299,13 @@ OPTIONS DE `config write`
     un message effacé en sort de lui-même, là où des rangs demanderaient d'être
     décalés à chaque effacement.
 
+    DEUX MORCEAUX DE LA GRAMMAIRE DE BASE MANQUENT, et l'énumération ci-dessus ne
+    doit pas les faire croire acquis : les critères `SENTBEFORE`, `SENTON` et
+    `SENTSINCE`, qui comparent le champ `Date:` et non la date d'arrivée ; et les
+    MOTS-CLEFS, donc `KEYWORD` et `UNKEYWORD`. Ce serveur ne sait écrire que les
+    cinq drapeaux système, et refuse le reste plutôt que de répondre `OK` à une
+    étiquette qu'il perdrait.
+
     LE MAGASIN DE COMPTES SERT DEUX CHOSES, et il faut les distinguer :
 
       - le ROUTAGE — seules les adresses qu'un compte déclare sont acceptées, et

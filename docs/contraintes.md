@@ -2364,18 +2364,31 @@ découpage des lectures ne change rien au verdict.
 Ce qui manque, et qu'aucune phrase ne doit laisser croire acquis : la file de
 réémission des messages sortants, et toute interface HTTP.
 
-**IMAP4rev2 est servi.** Toutes les commandes de RFC 9051 répondent — plus
-aucune ne reçoit un `NO [UNAVAILABLE]`, et la méthode qui l'écrivait a disparu du
-code —, et les options que §E dit absorbées dans le protocole de base le sont
-aussi : NAMESPACE, UNSELECT, UIDPLUS, ESEARCH, SEARCHRES, ENABLE, IDLE, SASL-IR,
+**Toutes les commandes de RFC 9051 répondent** — plus aucune ne reçoit un
+`NO [UNAVAILABLE]`, et la méthode qui l'écrivait a disparu du code —, et les
+options que §E dit absorbées dans le protocole de base le sont aussi :
+NAMESPACE, UNSELECT, UIDPLUS, ESEARCH, SEARCHRES, ENABLE, IDLE, SASL-IR,
 LIST-EXTENDED, LIST-STATUS, MOVE, LITERAL-, le côté FETCH de BINARY.
 
-Cette phrase-là a été FAUSSE pendant un commit, et la manière dont elle l'est
-devenue mérite d'être notée : l'énumération des commandes était complète, et
-l'on en a conclu que le protocole l'était. Il ne l'était pas — rev2 a absorbé
-des extensions dont les options font désormais partie de la grammaire de base.
-**Une liste complète d'une chose ne prouve rien d'une autre**, et c'est en
-relisant §E de la RFC, plutôt que sa propre liste, qu'on l'a vu.
+**Deux morceaux de la grammaire de base manquent encore**, et il faut les nommer
+plutôt que de laisser l'énumération ci-dessus les faire croire acquis :
+
+  - les critères `SENTBEFORE`, `SENTON` et `SENTSINCE`, qui comparent le champ
+    `Date:` du message et non sa date d'arrivée ;
+  - les MOTS-CLEFS — `flag-keyword` de §9 —, et donc les critères `KEYWORD` et
+    `UNKEYWORD`, ainsi que les cinq mots-clefs que §E.15 recommande de servir :
+    `$MDNSent`, `$Forwarded`, `$Junk`, `$NonJunk` et `$Phishing`.
+
+Les deux se refusent explicitement — `NO [CANNOT]` pour les critères, `BAD` pour
+un drapeau qu'on ne sait pas écrire — plutôt que d'être tus.
+
+**LA MANIÈRE DONT ON S'EN EST APERÇU MÉRITE D'ÊTRE NOTÉE.** Deux fois de suite,
+une énumération complète d'une chose a servi à conclure la complétude d'une
+autre : les COMMANDES étaient toutes servies, donc le protocole l'était ; puis
+les OPTIONS de §E l'étaient aussi, donc le protocole l'était. Il ne l'était
+toujours pas. **Une liste complète d'une chose ne prouve rien d'une autre**, et
+la seule vérification qui vaille est la confrontation à l'ABNF de §9, mot par
+mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants, et
 toute interface HTTP.

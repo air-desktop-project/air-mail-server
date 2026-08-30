@@ -1198,8 +1198,21 @@ non. Sans lui, un client qui a désigné ses messages par UID reçoit des rangs 
 doit deviner lequel est lequel — alors qu'il a choisi les UID pour ne pas avoir à
 le faire.
 
-Ce qui reste hors du serveur : la file de réémission des messages sortants, et
-toute interface HTTP.
+### Ce qui manque encore
+
+**`SENTBEFORE`, `SENTON` et `SENTSINCE`** comparent le champ `Date:` du message,
+là où `BEFORE`, `ON` et `SINCE` comparent sa date d'arrivée. Les deux existent
+parce qu'elles ne disent pas la même chose : un message écrit lundi et reçu
+vendredi répond à l'une et pas à l'autre.
+
+**Les MOTS-CLEFS** — `flag-keyword` de §9 — et avec eux `KEYWORD` et
+`UNKEYWORD`, ainsi que les cinq que §E.15 recommande : `$MDNSent`,
+`$Forwarded`, `$Junk`, `$NonJunk` et `$Phishing`. Ce serveur ne sait écrire que
+les cinq drapeaux système, et refuse le reste plutôt que de répondre `OK` à une
+étiquette qu'il perdrait.
+
+Hors d'IMAP : la file de réémission des messages sortants, et toute interface
+HTTP.
 
 ## Émettre : le client SMTP sortant
 

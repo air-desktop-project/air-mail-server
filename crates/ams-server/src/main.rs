@@ -722,7 +722,9 @@ async fn servir(fichier: &Path) -> Result<(), String> {
              `SEARCH RETURN (MIN MAX ALL COUNT SAVE)` répond de quatre façons, et `$` désigne \
              ce que la dernière recherche a retenu — en UID, pour qu'un message effacé en \
              sorte de lui-même. Les abonnements s'écrivent dans la racine du compte, sous \
-             `ams-abonnements`."
+             `ams-abonnements`. DEUX MORCEAUX MANQUENT ENCORE : `SENTBEFORE`, `SENTON` et \
+             `SENTSINCE`, qui comparent le champ `Date:` et non la date d'arrivée ; et les \
+             MOTS-CLEFS, donc `KEYWORD` et `UNKEYWORD`."
         );
         Some(tokio::spawn(serve_imap(
             ecouteur,
