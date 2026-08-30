@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# check-fuzz — toutes les cibles de fuzz existent-elles, et compilent-elles ?
+# check-fuzz — toutes les cibles de fuzz existent-elles, se formatent-elles, et
+# compilent-elles ?
 #
 # # Pourquoi ce script existe
 #
@@ -19,8 +20,9 @@
 #   1. La LISTE des cibles coïncide avec les `[[bin]]` de `fuzz/Cargo.toml`.
 #      Une cible ajoutée sans être inscrite ici ne serait jamais lancée, et le
 #      gate resterait vert en ne l'ayant pas examinée.
-#   2. TOUTES les cibles compilent.
-#   3. Avec `--smoke`, chacune tourne vingt secondes sur ses graines —
+#   2. Elles sont FORMATÉES — `cargo fmt --all` à la racine ne les touche pas.
+#   3. TOUTES les cibles compilent.
+#   4. Avec `--smoke`, chacune tourne vingt secondes sur ses graines —
 #      `AMS_FUZZ_SECONDES` en décide autrement, pour une campagne plus longue.
 #
 # La liste vit ICI et non dans le workflow : la CI appelle ce script, et l'on
@@ -91,6 +93,13 @@ if ! diff -u "$declarees" "$listees"; then
 fi
 
 echo "$(wc -l < "$listees") cible(s), et la liste coïncide avec \`Cargo.toml\`."
+
+# LE FORMATAGE AUSSI VIT HORS DU WORKSPACE. `cargo fmt --all` à la racine ne
+# touche pas cette crate : un `cargo fmt` lancé là-haut laisse celle-ci non
+# formatée, et la CI est alors la première à le voir — après un `push`. C'est
+# exactement le genre d'aller-retour que ce script existe pour éviter.
+echo "── formatage ────────────────────────────────────────────────────────────"
+cargo fmt -- --check
 
 # UN SEUL `cargo fuzz build` LES BÂTIT TOUTES, et c'est le contrôle qui manquait.
 echo "── compilation ──────────────────────────────────────────────────────────"

@@ -1120,9 +1120,38 @@ dix mille entrées, à chaque regard et pour chaque session.
 laisserait le client croire qu'il idle encore, et attendre du courrier qui ne
 viendrait jamais.
 
-Ce qui n'y est toujours pas : `SUBSCRIBE`. Le serveur dit au démarrage ce qu'il
-sert et ce qu'il ne sert pas, plutôt que de laisser un port ouvert le faire
-croire.
+### `SUBSCRIBE` : la liste que le client retrouve ailleurs
+
+Un compte a plus de boîtes qu'un client n'en veut voir. **L'abonnement est le
+choix de celles qu'on affiche**, et il est du COMPTE, pas de la session : c'est
+ainsi qu'un panneau latéral se retrouve à l'identique sur une autre machine.
+
+`LIST` porte les deux mots, et ils ne disent pas la même chose selon la place.
+**Devant, c'est un filtre** — `LIST (SUBSCRIBED) "" *` ne rend que les boîtes
+abonnées. **Derrière, c'est un renseignement** — `LIST "" * RETURN (SUBSCRIBED)`
+les rend toutes, en marquant lesquelles. Un client qui peuple son panneau demande
+le premier ; un client qui affiche des cases à cocher demande le second. Les
+confondre rendrait à l'un la liste de l'autre.
+
+**Un abonnement survit à l'effacement de sa boîte.** §6.3.7 l'exige : le serveur
+n'a pas le droit de retirer de lui-même un abonnement dont la boîte a disparu —
+le client l'a posé, à lui de l'ôter. Le filtre le rend donc marqué
+`\NonExistent`. À l'inverse, on VALIDE à l'abonnement : accepter un abonnement à
+une boîte qui n'a jamais existé rendrait une liste où figure un nom qu'on ne peut
+pas ouvrir.
+
+Ils s'écrivent dans la racine du compte, un nom par ligne, sous
+`ams-abonnements`. **Pourquoi du texte, ici, alors que la configuration est
+binaire** : la configuration a un schéma — des champs, des types, une
+compatibilité à tenir. Une liste d'abonnements n'a rien de cela, et un nom de
+boîte est déjà de l'ASCII imprimable sans `LF`. Une ligne par nom est une
+écriture qui ne peut pas être ambiguë, et que l'administrateur peut lire sans
+outil. Le fichier se réécrit à côté puis se renomme : un `LIST` concurrent voit
+l'ancienne liste ou la nouvelle, jamais un entre-deux.
+
+**Avec cela, IMAP4rev2 est servi en entier.** Ce qui reste hors du serveur, et
+qu'aucune phrase ne doit laisser croire acquis : la file de réémission des
+messages sortants, et toute interface HTTP.
 
 ## Émettre : le client SMTP sortant
 

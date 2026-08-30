@@ -503,6 +503,36 @@ pub trait Mailboxes {
     /// Ce qu'un dépôt en cours est.
     type Deposit: Deposit;
 
+    /// Inscrit la boîte à la liste des abonnements du compte (§6.3.7).
+    ///
+    /// **L'ABONNEMENT EST DU COMPTE, PAS DE LA SESSION** : il survit à la
+    /// déconnexion, et c'est tout son objet — c'est ainsi qu'un client retrouve
+    /// son panneau latéral sur une autre machine.
+    fn subscribe(&self, user: &[u8], name: &[u8]) -> Subscription;
+
+    /// Retire la boîte de la liste des abonnements (§6.3.8).
+    ///
+    /// **Se désabonner de ce à quoi l'on n'est pas abonné n'est pas une faute** :
+    /// l'état demandé est déjà celui qu'on a.
+    fn unsubscribe(&self, user: &[u8], name: &[u8]) -> Subscription;
+
+    /// Le compte est-il abonné à cette boîte ?
+    ///
+    /// Posée une fois par boîte et par `LIST`, cette question doit rester bon
+    /// marché : c'est un test d'appartenance, pas une lecture de plus.
+    fn is_subscribed(&self, user: &[u8], name: &[u8]) -> bool;
+
+    /// Le nom d'un abonnement de rang `index` dont la boîte N'EXISTE PLUS.
+    ///
+    /// # POURQUOI CEUX-LÀ SE LISTENT À PART
+    ///
+    /// §6.3.7 interdit de retirer de soi-même un abonnement dont la boîte a
+    /// disparu, et §6.3.9.6 veut que `LIST (SUBSCRIBED)` le rende quand même,
+    /// marqué `\NonExistent`. Il ne peut pas venir de [`Mailboxes::name`], qui
+    /// ne connaît que ce qui existe : c'est justement ce qui n'existe pas qu'il
+    /// faut nommer ici.
+    fn orphan<'n>(&self, user: &[u8], index: usize, out: &'n mut [u8]) -> Option<&'n [u8]>;
+
     /// Ouvre un dépôt dans la boîte nommée, ou dit qu'elle n'existe pas.
     ///
     /// **Rien n'est visible tant que le dépôt n'est pas validé** : c'est ce qui
@@ -556,6 +586,30 @@ pub enum Renaming {
     /// La nouvelle existe déjà (§6.3.6 : `[ALREADYEXISTS]`).
     DejaLa,
     /// Le magasin n'a pas pu, et n'a rien changé.
+    Refusee,
+}
+
+/// Ce qu'un abonnement — ou un désabonnement — a donné.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Subscription {
+    /// C'est fait. **Se réabonner à ce à quoi l'on est abonné rend ceci aussi** :
+    /// §6.3.7 ne fait pas de la répétition une faute, et un client qui rejoue sa
+    /// liste au démarrage ne doit pas recevoir d'erreur.
+    Faite,
+    /// La boîte n'existe pas.
+    ///
+    /// # ON VALIDE À L'ABONNEMENT, PAS APRÈS
+    ///
+    /// §6.3.7 laisse le choix de vérifier ou non que la boîte existe. On
+    /// vérifie : accepter un abonnement à une boîte qui n'a jamais existé
+    /// rendrait au client une liste où figure un nom qu'il ne pourra pas ouvrir.
+    ///
+    /// Ce qui suit, en revanche, n'est PAS un choix : §6.3.7 interdit de retirer
+    /// de soi-même un abonnement dont la boîte a disparu depuis. L'abonnement
+    /// survit donc à l'effacement, et `LIST (SUBSCRIBED)` le rend marqué
+    /// `\NonExistent`.
+    Absente,
+    /// Le magasin n'a pas pu.
     Refusee,
 }
 
@@ -623,6 +677,22 @@ impl<T: Mailboxes> Mailboxes for &T {
 
     fn append(&self, user: &[u8], name: &[u8]) -> Option<Self::Deposit> {
         (**self).append(user, name)
+    }
+
+    fn subscribe(&self, user: &[u8], name: &[u8]) -> Subscription {
+        (**self).subscribe(user, name)
+    }
+
+    fn unsubscribe(&self, user: &[u8], name: &[u8]) -> Subscription {
+        (**self).unsubscribe(user, name)
+    }
+
+    fn is_subscribed(&self, user: &[u8], name: &[u8]) -> bool {
+        (**self).is_subscribed(user, name)
+    }
+
+    fn orphan<'n>(&self, user: &[u8], index: usize, out: &'n mut [u8]) -> Option<&'n [u8]> {
+        (**self).orphan(user, index, out)
     }
 }
 
@@ -1418,7 +1488,8 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             Command::Namespace => self.namespace(out),
             Command::Enable => self.enable(lue.arguments, out),
             Command::Idle => self.idle(out),
-            Command::Subscribe | Command::Unsubscribe => self.si_authentifie(out),
+            Command::Subscribe => self.abonner(lue.arguments, true, out),
+            Command::Unsubscribe => self.abonner(lue.arguments, false, out),
             // UN `APPEND` QUI ARRIVE ICI N'EST PAS CELUI QU'ON SAIT ÉCOULER.
             // Le chemin ordinaire ne voit que les commandes COMPLÈTES : un
             // `APPEND` normal n'y passe jamais, puisque son message s'écoule.
@@ -1731,14 +1802,6 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
 
     // ── Les états ───────────────────────────────────────────────────────────
 
-    /// Une commande qui demande d'être authentifié.
-    fn si_authentifie<'b>(&mut self, out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
-        if self.etat == State::NotAuthenticated {
-            return self.faute(b"Command is not allowed before authentication", out);
-        }
-        self.pas_encore(out)
-    }
-
     /// Cette boîte a-t-elle des filles ?
     ///
     /// On le demande au magasin, qui seul le sait — et l'on parcourt sa liste,
@@ -1906,20 +1969,6 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             action: Action::Continue,
             peer_fault: false,
         })
-    }
-
-    /// Ce que la session sait faire, et ne fait pas encore.
-    ///
-    /// **`NO`, et non `BAD`** : la commande est correcte et permise ; c'est ce
-    /// serveur qui ne la sert pas. Un `BAD` dirait au client qu'il l'a mal
-    /// écrite, et il chercherait la faute là où elle n'est pas.
-    fn pas_encore<'b>(&mut self, out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
-        self.termine(
-            Status::No,
-            b"[UNAVAILABLE] Mailbox commands are not served yet",
-            Action::Continue,
-            out,
-        )
     }
 
     // ── L'écriture des réponses ─────────────────────────────────────────────
@@ -2952,37 +3001,81 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         if self.etat == State::NotAuthenticated {
             return self.faute(b"Command is not allowed before authentication", out);
         }
-        let mut lus = Args::new(arguments);
-        let mut reference = [0_u8; MAILBOX_NAME_MAX];
-        let mut motif = [0_u8; MAILBOX_NAME_MAX];
-        let (Some(Ok(premier)), Some(Ok(second)), None) = (lus.next(), lus.next(), lus.next())
-        else {
-            return self.faute(b"LIST expects a reference and a pattern", out);
+        let Ok(demande) = ams_proto_imap::List::parse(arguments) else {
+            return self.faute(b"LIST arguments are not well formed", out);
         };
-        let (Ok(_), Ok(motif)) = (premier.value(&mut reference), second.value(&mut motif)) else {
-            return self.faute(b"LIST arguments are too long", out);
-        };
-        // La référence est ignorée : ce serveur n'a qu'un espace de noms, et
-        // prétendre en gérer plusieurs demanderait `NAMESPACE`, qui n'est pas
-        // servi. Un client qui envoie autre chose que `""` obtient la même
-        // liste, ce qui est ce qu'il attend d'un serveur à un seul espace.
         let mut plume = Plume::neuve(out);
+        // **UN MOTIF VIDE NE DEMANDE PAS DE BOÎTE** (§6.3.9) : c'est la façon
+        // convenue de demander le séparateur de hiérarchie, et la réponse est
+        // une ligne unique qui ne nomme rien. Un client s'en sert pour savoir
+        // comment écrire les noms qu'il composera ensuite.
+        for motif in demande.patterns() {
+            if motif.is_empty() {
+                plume.pousser(b"* LIST (\\Noselect) \"/\" \"\"\r\n")?;
+            }
+        }
         let mut index = 0_usize;
         let mut place = [0_u8; MAILBOX_NAME_MAX];
         while let Some(boite) = self.boites.name(self.user(), index, &mut place) {
             index = index.saturating_add(1);
-            if correspond(motif, boite.name) {
-                // §6.3.5 : une boîte effacée qui avait des filles garde son nom
-                // sans son courrier, et le dit.
-                // §7.3.1 : `\HasChildren` ou `\HasNoChildren`, TOUJOURS l'un
-                // des deux. Ne rien dire obligerait le client à demander.
-                let attributs: &[u8] = match (boite.selectable, boite.has_children) {
-                    (true, true) => b"* LIST (\\HasChildren) \"/\" ",
-                    (true, false) => b"* LIST (\\HasNoChildren) \"/\" ",
-                    (false, true) => b"* LIST (\\Noselect \\HasChildren) \"/\" ",
-                    (false, false) => b"* LIST (\\Noselect \\HasNoChildren) \"/\" ",
-                };
-                plume.nom_de_boite(attributs, boite.name, b"\r\n")?;
+            // **UNE BOÎTE QUI RÉPOND À DEUX MOTIFS NE SE REND QU'UNE FOIS** :
+            // deux lignes pour une seule boîte en feraient deux dans le panneau
+            // du client.
+            if !demande
+                .patterns()
+                .iter()
+                .any(|motif| !motif.is_empty() && correspond(motif, boite.name))
+            {
+                continue;
+            }
+            let abonnee = self.boites.is_subscribed(self.user(), boite.name);
+            // Le FILTRE de `LIST (SUBSCRIBED)` : ce à quoi l'on n'est pas abonné
+            // n'a pas été demandé.
+            if demande.subscribed_only() && !abonnee {
+                continue;
+            }
+            // §6.3.5 : une boîte effacée qui avait des filles garde son nom
+            // sans son courrier, et le dit.
+            // §7.3.1 : `\HasChildren` ou `\HasNoChildren`, TOUJOURS l'un
+            // des deux. Ne rien dire obligerait le client à demander.
+            let attributs: &[u8] = match (boite.selectable, boite.has_children) {
+                (true, true) => b"\\HasChildren",
+                (true, false) => b"\\HasNoChildren",
+                (false, true) => b"\\Noselect \\HasChildren",
+                (false, false) => b"\\Noselect \\HasNoChildren",
+            };
+            plume.pousser(b"* LIST (")?;
+            // §6.3.9.6 : `\Subscribed` va DEVANT, et l'ordre des attributs n'a
+            // rien de contraignant — mais un ordre stable est ce qui rend une
+            // réponse comparable d'une fois sur l'autre.
+            // Le RENSEIGNEMENT s'écrit quand le client l'a demandé, ou quand il
+            // a demandé le filtre : dans ce dernier cas, tout ce qu'on rend est
+            // abonné, et le taire serait taire la seule chose qu'il a dite.
+            if abonnee && (demande.report_subscribed() || demande.subscribed_only()) {
+                plume.pousser(b"\\Subscribed ")?;
+            }
+            plume.pousser(attributs)?;
+            plume.nom_de_boite(b") \"/\" ", boite.name, b"\r\n")?;
+        }
+        // §6.3.7 INTERDIT DE RETIRER DE SOI-MÊME UN ABONNEMENT dont la boîte a
+        // disparu, et §6.3.9.6 veut que le filtre le rende quand même. C'est le
+        // seul endroit où l'on nomme une boîte qui n'existe pas — et c'est le
+        // client qui l'a nommée avant nous.
+        if demande.subscribed_only() {
+            let mut orphelin = 0_usize;
+            while let Some(nom) = self.boites.orphan(self.user(), orphelin, &mut place) {
+                orphelin = orphelin.saturating_add(1);
+                if demande
+                    .patterns()
+                    .iter()
+                    .any(|motif| !motif.is_empty() && correspond(motif, nom))
+                {
+                    plume.nom_de_boite(
+                        b"* LIST (\\Subscribed \\NonExistent \\HasNoChildren) \"/\" ",
+                        nom,
+                        b"\r\n",
+                    )?;
+                }
             }
         }
         let ecrits = plume.ecrits();
@@ -3110,6 +3203,70 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
     /// exactement cela, et c'est pourquoi elle refuse tout ce qu'elle ne sait
     /// pas transcrire SANS RIEN TRANSFORMER : rendre au client un nom qui n'est
     /// pas celui qu'il a demandé lui ferait chercher longtemps.
+    /// `SUBSCRIBE` et `UNSUBSCRIBE` (§6.3.7 et §6.3.8).
+    ///
+    /// # LES DEUX SONT LA MÊME COMMANDE À L'ENVERS
+    ///
+    /// Mêmes arguments, mêmes vérifications, mêmes réponses ; seul le sens
+    /// change. Les écrire deux fois ferait deux endroits où corriger la règle de
+    /// §6.3.7 sur les boîtes disparues, et un seul serait corrigé.
+    fn abonner<'b>(
+        &mut self,
+        arguments: &[u8],
+        vers: bool,
+        out: &'b mut [u8],
+    ) -> Result<Turn<'b>, Error> {
+        if self.etat == State::NotAuthenticated {
+            return self.faute(b"Command is not allowed before authentication", out);
+        }
+        // Les quatre textes de la réponse, choisis d'un coup : les composer
+        // morceau par morceau demanderait un tampon, et l'on écrirait le même
+        // verbe à quatre endroits au lieu d'un.
+        let (attend, fait, refus): (&[u8], &[u8], &[u8]) = match vers {
+            true => (
+                b"SUBSCRIBE expects a mailbox name",
+                b"SUBSCRIBE completed",
+                b"Cannot subscribe to mailbox",
+            ),
+            false => (
+                b"UNSUBSCRIBE expects a mailbox name",
+                b"UNSUBSCRIBE completed",
+                b"Cannot unsubscribe from mailbox",
+            ),
+        };
+        let mut place = [0_u8; MAILBOX_NAME_MAX];
+        let Some(nom) = self.un_nom(arguments, &mut place) else {
+            return self.faute(attend, out);
+        };
+        // §6.3.4 : un `/` final ne change pas la boîte désignée.
+        let nom = ams_proto_imap::mailbox_name_trimmed(nom);
+        // `INBOX` s'écrit comme le client veut (§5.1) et n'a pas à passer les
+        // règles des noms qui deviennent des répertoires : elle n'en devient
+        // jamais un.
+        if !nom.eq_ignore_ascii_case(b"INBOX") && !ams_proto_imap::mailbox_name_is_safe(nom) {
+            return self.termine(
+                Status::No,
+                b"[CANNOT] This mailbox name is not served",
+                Action::Continue,
+                out,
+            );
+        }
+        let issue = match vers {
+            true => self.boites.subscribe(self.user(), nom),
+            false => self.boites.unsubscribe(self.user(), nom),
+        };
+        match issue {
+            Subscription::Faite => self.termine(Status::Ok, fait, Action::Continue, out),
+            Subscription::Absente => self.termine(
+                Status::No,
+                b"[NONEXISTENT] No such mailbox",
+                Action::Continue,
+                out,
+            ),
+            Subscription::Refusee => self.termine(Status::No, refus, Action::Continue, out),
+        }
+    }
+
     fn create<'b>(&mut self, arguments: &[u8], out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
         if self.etat == State::NotAuthenticated {
             return self.faute(b"Command is not allowed before authentication", out);

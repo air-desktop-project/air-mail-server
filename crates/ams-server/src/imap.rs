@@ -48,6 +48,7 @@ use ams_mime::BodySpan;
 use ams_proto_imap::{Flags, PartWhat, SearchScope, StoreMode};
 use ams_session::imap::{
     BinarySize, Creation, Deletion, Deposit, Listing, Mailbox, Mailboxes, MessageInfo, Renaming,
+    Subscription,
 };
 use ams_store::{Incoming, MailboxView, Maildir, fresh_uid_validity};
 
@@ -84,6 +85,32 @@ const FENETRE: usize = 64 * 1024;
 
 /// Le seul nom de boîte que ce serveur connaisse (RFC 9051 §5.1).
 const INBOX: &[u8] = b"INBOX";
+
+/// Où les abonnements d'un compte s'écrivent, dans sa racine.
+///
+/// # POURQUOI UN FICHIER DE TEXTE, ICI, ALORS QUE LA CONFIGURATION EST BINAIRE
+///
+/// La configuration est binaire parce qu'elle a un SCHÉMA — des champs, des
+/// types, une compatibilité à tenir d'une version à l'autre. Une liste
+/// d'abonnements n'a rien de tout cela : c'est une suite de noms de boîtes, et
+/// un nom de boîte est déjà de l'ASCII imprimable sans `LF` (§5.1 tel que ce
+/// serveur le restreint). Une ligne par nom est donc une écriture qui ne peut
+/// pas être ambiguë, et que l'administrateur peut lire sans outil.
+const ABONNEMENTS: &str = "ams-abonnements";
+
+/// Combien d'abonnements un compte peut porter.
+///
+/// Ce n'est pas une limite du protocole : c'est celle du travail qu'un `LIST`
+/// fait, et de la place que le cache occupe par compte connecté.
+const ABONNEMENTS_MAX: usize = 256;
+
+/// Ce que le fichier d'abonnements peut peser, au plus.
+///
+/// [`ABONNEMENTS_MAX`] noms de [`MAILBOX_NAME_MAX`](ams_proto_imap::MAILBOX_NAME_MAX)
+/// octets, plus leur fin de ligne. **On lit une borne, pas un fichier** : ce
+/// fichier vit dans la racine du compte, et rien ne garantit que personne n'y a
+/// écrit autre chose.
+const ABONNEMENTS_OCTETS_MAX: u64 = 64 * 1024;
 
 /// La même fenêtre, écrite en `u64`.
 ///
@@ -947,6 +974,32 @@ pub struct BoitesImap {
     /// que d'une entrée par dossier RÉELLEMENT créé — un client ne peut donc
     /// pas le faire enfler en nommant des boîtes au hasard.
     dossiers: std::sync::Mutex<BTreeMap<(String, String), Arc<Maildir>>>,
+    /// Les abonnements de chaque compte, tels qu'on les a lus.
+    ///
+    /// # POURQUOI UN CACHE, ET CE QU'IL COÛTE QUAND RIEN NE CHANGE
+    ///
+    /// Un `LIST` pose la question « suis-je abonné ? » une fois par boîte. La
+    /// poser en relisant le fichier ferait une lecture par boîte listée, pour
+    /// une réponse qui est la même à chaque fois. La date du fichier suffit à
+    /// savoir qu'elle n'a pas changé : un `stat` par question, et aucune lecture
+    /// tant que personne n'a écrit.
+    ///
+    /// **C'EST AUSSI CE QUI ORDONNE LES ÉCRITURES.** Deux sessions du même
+    /// compte qui s'abonnent en même temps liraient la même liste et
+    /// s'écraseraient l'une l'autre ; ce verrou-ci les met en file. Il ne dit
+    /// rien de DEUX SERVEURS sur le même magasin — mais deux serveurs sur le
+    /// même magasin se disputent bien davantage que ce fichier.
+    abonnes: std::sync::Mutex<BTreeMap<String, Abonnements>>,
+}
+
+/// Les abonnements d'un compte, et la date du fichier qui les porte.
+#[derive(Debug, Clone, Default)]
+struct Abonnements {
+    /// Ce que le fichier portait au dernier regard, ou `None` s'il n'y en avait
+    /// pas — un compte qui ne s'est jamais abonné n'a pas de fichier.
+    vu: Option<std::time::SystemTime>,
+    /// Les noms, triés et sans doublon.
+    noms: Arc<Vec<Vec<u8>>>,
 }
 
 impl BoitesImap {
@@ -957,6 +1010,7 @@ impl BoitesImap {
             boites,
             hote: hote.to_vec(),
             dossiers: std::sync::Mutex::new(BTreeMap::new()),
+            abonnes: std::sync::Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -1086,6 +1140,104 @@ impl BoitesImap {
         chemin.join("cur").is_dir()
     }
 
+    /// Le fichier d'abonnements d'un compte.
+    fn fichier_des_abonnements(&self, user: &[u8]) -> Option<PathBuf> {
+        Some(self.racine(user)?.join(ABONNEMENTS))
+    }
+
+    /// Les abonnements d'un compte, relus seulement si le fichier a bougé.
+    fn abonnements(&self, user: &[u8]) -> Arc<Vec<Vec<u8>>> {
+        let vide = || Arc::new(std::vec::Vec::new());
+        let (Some(chemin), Ok(compte)) = (
+            self.fichier_des_abonnements(user),
+            core::str::from_utf8(user),
+        ) else {
+            return vide();
+        };
+        // LA DATE D'ABORD : c'est la réponse dans l'immense majorité des cas, et
+        // elle ne lit rien.
+        let date = std::fs::metadata(&chemin)
+            .ok()
+            .and_then(|etat| etat.modified().ok());
+        let Ok(mut cache) = self.abonnes.lock() else {
+            return vide();
+        };
+        if let Some(connu) = cache.get(compte).filter(|connu| connu.vu == date) {
+            return Arc::clone(&connu.noms);
+        }
+        let noms = Arc::new(lire_les_abonnements(&chemin));
+        cache.insert(
+            compte.to_string(),
+            Abonnements {
+                vu: date,
+                noms: Arc::clone(&noms),
+            },
+        );
+        noms
+    }
+
+    /// Réécrit le fichier d'abonnements d'un compte.
+    ///
+    /// # ON ÉCRIT À CÔTÉ, PUIS ON RENOMME
+    ///
+    /// Écrire par-dessus laisserait, le temps de l'écriture, un fichier tronqué
+    /// que `LIST` pourrait lire : le client verrait alors la moitié de ses
+    /// abonnements. Le renommage est atomique — un lecteur voit l'ancienne liste
+    /// ou la nouvelle, jamais un entre-deux.
+    fn ecrire_les_abonnements(&self, user: &[u8], noms: &[Vec<u8>]) -> bool {
+        let (Some(chemin), Ok(compte)) = (
+            self.fichier_des_abonnements(user),
+            core::str::from_utf8(user),
+        ) else {
+            return false;
+        };
+        let mut texte = std::vec::Vec::new();
+        for nom in noms {
+            texte.extend_from_slice(nom);
+            texte.push(b'\n');
+        }
+        let provisoire = chemin.with_extension("tmp");
+        if std::fs::write(&provisoire, &texte).is_err() {
+            return false;
+        }
+        if std::fs::rename(&provisoire, &chemin).is_err() {
+            // Ce qu'on n'a pas pu poser, on l'enlève : un fichier provisoire
+            // laissé là resterait à jamais.
+            let _ = std::fs::remove_file(&provisoire);
+            return false;
+        }
+        // LE CACHE DOIT SUIVRE, ET IMMÉDIATEMENT : la session qui vient
+        // d'écrire va lister, et deux écritures dans la même seconde peuvent
+        // porter la même date sur un système de fichiers qui ne compte pas plus
+        // fin. S'en remettre à la date ferait relire l'ancienne liste.
+        if let Ok(mut cache) = self.abonnes.lock() {
+            let date = std::fs::metadata(&chemin)
+                .ok()
+                .and_then(|etat| etat.modified().ok());
+            cache.insert(
+                compte.to_string(),
+                Abonnements {
+                    vu: date,
+                    noms: Arc::new(noms.to_vec()),
+                },
+            );
+        }
+        true
+    }
+
+    /// Le nom sous lequel un abonnement s'inscrit.
+    ///
+    /// `INBOX` s'écrit comme le client veut (§5.1) et désigne toujours la même
+    /// boîte : on l'inscrit sous une seule écriture, faute de quoi `inbox` et
+    /// `INBOX` feraient deux abonnements pour une boîte.
+    fn nom_abonne(name: &[u8]) -> Vec<u8> {
+        let name = ams_proto_imap::mailbox_name_trimmed(name);
+        if name.eq_ignore_ascii_case(INBOX) {
+            return INBOX.to_vec();
+        }
+        name.to_vec()
+    }
+
     /// Les dossiers d'un compte, par ordre de nom.
     fn dossiers_de(&self, user: &[u8]) -> Vec<Vec<u8>> {
         let mut noms = std::vec![INBOX.to_vec()];
@@ -1119,6 +1271,44 @@ impl BoitesImap {
         noms.extend(dossiers);
         noms
     }
+}
+
+/// Relit un fichier d'abonnements.
+///
+/// **ON LIT UNE BORNE, PAS UN FICHIER** : celui-ci vit dans la racine du compte,
+/// et rien ne garantit que personne n'y a écrit autre chose. Ce qui dépasse est
+/// ignoré, et ce qui n'est pas un nom de boîte servable aussi — un nom qu'on ne
+/// saurait pas ouvrir n'a rien à faire dans la liste qu'on rend au client.
+fn lire_les_abonnements(chemin: &Path) -> Vec<Vec<u8>> {
+    let mut noms = std::vec::Vec::new();
+    let Ok(fichier) = std::fs::File::open(chemin) else {
+        return noms;
+    };
+    let mut texte = std::vec::Vec::new();
+    if std::io::Read::read_to_end(
+        &mut std::io::Read::take(fichier, ABONNEMENTS_OCTETS_MAX),
+        &mut texte,
+    )
+    .is_err()
+    {
+        return noms;
+    }
+    for ligne in texte.split(|octet| *octet == b'\n') {
+        let nom = ligne.trim_ascii();
+        if nom.is_empty() || noms.len() >= ABONNEMENTS_MAX {
+            continue;
+        }
+        if nom.eq_ignore_ascii_case(INBOX) {
+            noms.push(INBOX.to_vec());
+            continue;
+        }
+        if ams_proto_imap::mailbox_name_is_safe(nom) {
+            noms.push(nom.to_vec());
+        }
+    }
+    noms.sort_unstable();
+    noms.dedup();
+    noms
 }
 
 /// Un message en cours de dépôt, vu par IMAP.
@@ -1175,6 +1365,69 @@ impl Mailboxes for BoitesImap {
         Some(DepotImap {
             entrant: Some(maildir.deliver().ok()?),
         })
+    }
+
+    fn subscribe(&self, user: &[u8], name: &[u8]) -> Subscription {
+        let nom = Self::nom_abonne(name);
+        // ON VALIDE À L'ABONNEMENT : accepter un abonnement à une boîte qui n'a
+        // jamais existé rendrait au client une liste où figure un nom qu'il ne
+        // pourra pas ouvrir.
+        if !self.dossiers_de(user).contains(&nom) {
+            return Subscription::Absente;
+        }
+        let mut noms = (*self.abonnements(user)).clone();
+        // §6.3.7 : se réabonner n'est pas une faute. Rien à écrire, et l'état
+        // demandé est déjà celui qu'on a.
+        if noms.contains(&nom) {
+            return Subscription::Faite;
+        }
+        if noms.len() >= ABONNEMENTS_MAX {
+            return Subscription::Refusee;
+        }
+        noms.push(nom);
+        noms.sort_unstable();
+        match self.ecrire_les_abonnements(user, &noms) {
+            true => Subscription::Faite,
+            false => Subscription::Refusee,
+        }
+    }
+
+    fn unsubscribe(&self, user: &[u8], name: &[u8]) -> Subscription {
+        // **AUCUNE VÉRIFICATION D'EXISTENCE ICI**, et c'est le point de §6.3.8 :
+        // se désabonner d'une boîte disparue est exactement ce qu'un client fait
+        // pour se débarrasser d'un abonnement orphelin. Le refuser l'y
+        // enfermerait.
+        let nom = Self::nom_abonne(name);
+        let mut noms = (*self.abonnements(user)).clone();
+        let avant = noms.len();
+        noms.retain(|autre| *autre != nom);
+        if noms.len() == avant {
+            // Se désabonner de ce à quoi l'on n'est pas abonné n'est pas une
+            // faute : l'état demandé est déjà celui qu'on a.
+            return Subscription::Faite;
+        }
+        match self.ecrire_les_abonnements(user, &noms) {
+            true => Subscription::Faite,
+            false => Subscription::Refusee,
+        }
+    }
+
+    fn is_subscribed(&self, user: &[u8], name: &[u8]) -> bool {
+        let nom = Self::nom_abonne(name);
+        self.abonnements(user).contains(&nom)
+    }
+
+    fn orphan<'n>(&self, user: &[u8], index: usize, out: &'n mut [u8]) -> Option<&'n [u8]> {
+        let existantes = self.dossiers_de(user);
+        let abonnements = self.abonnements(user);
+        let nom = abonnements
+            .iter()
+            .filter(|nom| !existantes.contains(nom))
+            .nth(index)?;
+        let longueur = nom.len().min(out.len());
+        let place = out.get_mut(..longueur)?;
+        place.copy_from_slice(nom.get(..longueur)?);
+        Some(place)
     }
 
     fn name<'n>(&self, user: &[u8], index: usize, out: &'n mut [u8]) -> Option<Listing<'n>> {

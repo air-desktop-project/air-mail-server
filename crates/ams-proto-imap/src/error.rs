@@ -106,6 +106,13 @@ pub enum Error {
         limit: usize,
     },
 
+    /// Les arguments d'un `LIST` n'ont pas la forme de §6.3.9.
+    ///
+    /// **Une option de sélection qu'on ne sert pas tombe ici aussi.** L'ignorer
+    /// rendrait une liste plus longue que ce que le client a demandé, et il la
+    /// croirait filtrée.
+    MalformedList,
+
     /// Les arguments d'un `STORE` n'ont pas la forme de §6.4.6.
     MalformedStore,
 
@@ -197,6 +204,9 @@ impl fmt::Display for Error {
             }
             Error::TooManyFetchItems { limit } => {
                 write!(f, "plus de {limit} éléments dans un `FETCH`")
+            }
+            Error::MalformedList => {
+                f.write_str("les arguments d'un `LIST` n'ont pas la forme attendue")
             }
             Error::MalformedStore => {
                 f.write_str("les arguments d'un `STORE` n'ont pas la forme attendue")

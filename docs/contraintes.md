@@ -865,7 +865,8 @@ ne s'écrit — ni `STORE`, ni `APPEND`, ni `EXPUNGE` — `SELECT` répond
 modifiabilité qu'elle ne peut pas connaître ferait une promesse que le client ne
 verrait démentie qu'en essayant.
 
-Ce qui n'est toujours pas servi : une PARTIE désignée — `BODY[1]`, `BODY[1.MIME]`.
+Ce qui n'était alors pas servi — une PARTIE désignée, `BODY[1]` et
+`BODY[1.MIME]` — l'est depuis.
 
 Éprouvé jusqu'au binaire, contre un vrai Maildir rempli par SMTP : `LIST`,
 `SELECT INBOX` et ses sept réponses, `STATUS` sur la boîte sélectionnée,
@@ -1431,7 +1432,40 @@ ses lignes d'en-tête, `[3.HEADER]`, `[3.TEXT]` et `[3.1]` du message encapsulé
 `[9]` qui vaut `NIL` sans empêcher l'`UID` qui suit, une demande partielle sur une
 partie, et deux parties dans une même commande.
 
-Ce qui n'est toujours pas servi : `SUBSCRIBE`.
+Ce qui n'était alors pas servi — `IDLE`, `SUBSCRIBE` — l'est depuis.
+
+## `SUBSCRIBE` : les abonnements, depuis le 2026-08-30
+
+**LE MÊME MOT NE DIT PAS LA MÊME CHOSE AUX DEUX PLACES.** `LIST (SUBSCRIBED)`
+filtre ; `LIST … RETURN (SUBSCRIBED)` renseigne. La grammaire les sépare
+(`ams-proto-imap/src/list.rs`), et la session ne les confond pas : le filtre
+écarte, le renseignement marque.
+
+**UNE OPTION QU'ON NE SERT PAS SE REFUSE.** `RECURSIVEMATCH`, `REMOTE`,
+`RETURN (STATUS …)` : la lecture échoue plutôt que d'ignorer. Ignorer une option
+de sélection rendrait une liste plus longue que ce qui a été demandé, et le client
+la croirait filtrée — c'est-à-dire un mensonge silencieux, celui que ce projet
+refuse partout ailleurs.
+
+**ON VALIDE À L'ABONNEMENT, PAS APRÈS.** §6.3.7 laisse le choix de vérifier que
+la boîte existe : on vérifie. Ce qui suit, en revanche, n'est pas un choix — la
+même section INTERDIT de retirer de soi-même un abonnement dont la boîte a
+disparu depuis. L'abonnement survit donc, et `LIST (SUBSCRIBED)` le rend marqué
+`\NonExistent` (§6.3.9.6). C'est le seul endroit du serveur où l'on nomme une
+boîte qui n'existe pas, et c'est le client qui l'a nommée avant nous.
+
+**UN FICHIER DE TEXTE, ET C'EST COHÉRENT AVEC C11.** La configuration est binaire
+parce qu'elle a un SCHÉMA — des champs, des types, une compatibilité à tenir. Une
+liste d'abonnements n'en a pas : c'est une suite de noms, et un nom de boîte est
+déjà de l'ASCII imprimable sans `LF`. Une ligne par nom ne peut pas être ambiguë.
+Le fichier se réécrit à côté puis se renomme, pour qu'un `LIST` concurrent ne
+lise jamais une liste à moitié écrite ; un verrou de processus ordonne les
+écrivains de ce serveur, et le cache se relit sur la date du fichier — un `stat`
+par question, aucune lecture tant que rien n'a changé.
+
+**PLUSIEURS MOTIFS EN UNE FOIS**, ce que §9 admet, avec la règle qui va avec :
+une boîte qui répond à deux motifs ne se rend qu'une fois. Et un motif VIDE
+demande le séparateur de hiérarchie, pas une boîte.
 
 ## `IDLE` : l'attente, depuis le 2026-08-30
 
@@ -2288,5 +2322,7 @@ persistant, et lecture sans verrou côté IMAP), C14 (`X25519MLKEM768` en tête)
 `<CRLF>.<CRLF>`, refuse tout `CR` ou `LF` isolé, et le fuzz éprouve que le
 découpage des lectures ne change rien au verdict.
 
-Ce qui manque, et qu'aucune phrase ne doit laisser croire acquis : `SUBSCRIBE` ;
-la file de réémission des messages sortants ; et toute interface HTTP.
+Ce qui manque, et qu'aucune phrase ne doit laisser croire acquis : la file de
+réémission des messages sortants, et toute interface HTTP. **IMAP4rev2, lui, est
+servi en entier** — c'est-à-dire que plus aucune commande de RFC 9051 ne reçoit
+un `NO [UNAVAILABLE]`, et que la méthode qui l'écrivait a disparu du code.

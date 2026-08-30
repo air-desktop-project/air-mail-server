@@ -699,11 +699,10 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         let ecouteur = TcpListener::bind(adresse)
             .await
             .map_err(|erreur| format!("écoute IMAP sur {adresse} : {erreur}"))?;
-        // ON DIT CE QU'ON NE SERT PAS. Un port IMAP ouvert laisse croire à un
-        // service complet ; celui-ci lit le courrier et n'en marque que les
-        // drapeaux.
+        // ON DIT CE QU'ON SERT, ET COMMENT. Un port IMAP ouvert laisse croire à
+        // beaucoup de choses ; celles-ci sont vraies, et bornées.
         eprintln!(
-            "air-mail-server : IMAP écoute sur {adresse} — SEULE `INBOX` EST SERVIE : \
+            "air-mail-server : IMAP écoute sur {adresse} — IMAP4rev2 EST SERVI EN ENTIER : \
              `SELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`, `EXPUNGE`, `SEARCH`, `COPY` et \
              `MOVE`, `APPEND`, `CREATE`, `DELETE` et `RENAME` répondent, et `FETCH` sait \
              rendre une `ENVELOPE`, une `BODYSTRUCTURE`, une PARTIE désignée — `BODY[1]`, \
@@ -716,7 +715,9 @@ async fn servir(fichier: &Path) -> Result<(), String> {
              au plus un mébioctet par partie, et seulement en `us-ascii`, `utf-8` ou \
              `iso-8859-1`. `BINARY[…]` REND CE QUE LES OCTETS VEULENT DIRE, transfert-décodé, et \
              refuse par `NO [UNKNOWN-CTE]` un encodage qu'il ne sait pas défaire. \
-             `NAMESPACE`, `ENABLE` et `IDLE` répondent ; `SUBSCRIBE`, non."
+             `NAMESPACE`, `ENABLE`, `IDLE`, `SUBSCRIBE` et `UNSUBSCRIBE` RÉPONDENT : \
+             IMAP4rev2 est servi en entier. Les abonnements s'écrivent dans la racine du \
+             compte, sous `ams-abonnements`."
         );
         Some(tokio::spawn(serve_imap(
             ecouteur,

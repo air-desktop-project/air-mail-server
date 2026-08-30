@@ -387,6 +387,38 @@ impl Mailboxes for Boites {
     fn open(&self, _user: &[u8], name: &[u8]) -> Option<Boite> {
         (name == b"INBOX").then_some(Boite)
     }
+
+    // LES ABONNEMENTS DE CETTE BOÎTE-CI SONT FIGÉS : ce qu'on éprouve dans ce
+    // fichier, c'est qu'ils traversent la socket, pas qu'un fichier les retient.
+    fn subscribe(&self, _user: &[u8], name: &[u8]) -> ams_session::imap::Subscription {
+        match name {
+            b"INBOX" | b"Brouillons" => ams_session::imap::Subscription::Faite,
+            b"Videe" => ams_session::imap::Subscription::Refusee,
+            _ => ams_session::imap::Subscription::Absente,
+        }
+    }
+
+    fn unsubscribe(&self, _user: &[u8], _name: &[u8]) -> ams_session::imap::Subscription {
+        ams_session::imap::Subscription::Faite
+    }
+
+    fn is_subscribed(&self, _user: &[u8], name: &[u8]) -> bool {
+        name == b"INBOX"
+    }
+
+    fn orphan<'n>(&self, _user: &[u8], index: usize, out: &'n mut [u8]) -> Option<&'n [u8]> {
+        // Un abonnement dont la boîte a disparu : §6.3.7 interdit de le retirer
+        // de soi-même, et §6.3.9.6 veut qu'il paraisse quand même.
+        let nom: &[u8] = match index {
+            0 => b"Disparue",
+            _ => return None,
+        };
+        let longueur = nom.len().min(out.len());
+        for (place, octet) in out.iter_mut().zip(nom) {
+            *place = *octet;
+        }
+        out.get(..longueur)
+    }
 }
 
 /// Monte un service IMAP et rend l'adresse où le joindre.
@@ -1513,5 +1545,83 @@ async fn une_attente_traverse_la_socket() {
     assert_eq!(
         jusqu_a(&mut lecteur, "a007 ").await,
         "a007 OK NOOP completed\r\n"
+    );
+}
+
+/// **L'ABONNEMENT TRAVERSE LA SOCKET**, et `LIST` le rend des deux façons :
+/// devant c'est un filtre, derrière c'est un renseignement.
+#[tokio::test]
+async fn un_abonnement_traverse_la_socket() {
+    let Some(materiel) = materiel("imap-abonnement") else {
+        return;
+    };
+    let mut lecteur = authentifiee(&materiel).await;
+
+    lecteur
+        .get_mut()
+        .write_all(b"a003 SUBSCRIBE Brouillons\r\n")
+        .await
+        .expect("écriture");
+    assert_eq!(
+        jusqu_a(&mut lecteur, "a003 ").await,
+        "a003 OK SUBSCRIBE completed\r\n"
+    );
+
+    // Le RENSEIGNEMENT : tout, et lesquelles.
+    lecteur
+        .get_mut()
+        .write_all(b"a004 LIST \"\" * RETURN (SUBSCRIBED)\r\n")
+        .await
+        .expect("écriture");
+    let dit = jusqu_a(&mut lecteur, "a004 ").await;
+    assert!(
+        dit.contains("* LIST (\\Subscribed \\HasNoChildren) \"/\" \"INBOX\"\r\n"),
+        "{dit}"
+    );
+    assert!(dit.contains("\"Brouillons\""), "{dit}");
+
+    // Le FILTRE : rien d'autre — et l'abonnement dont la boîte a disparu, que
+    // §6.3.7 interdit de retirer de soi-même.
+    lecteur
+        .get_mut()
+        .write_all(b"a005 LIST (SUBSCRIBED) \"\" *\r\n")
+        .await
+        .expect("écriture");
+    let filtre = jusqu_a(&mut lecteur, "a005 ").await;
+    assert_eq!(
+        filtre,
+        "* LIST (\\Subscribed \\HasNoChildren) \"/\" \"INBOX\"\r\n\
+         * LIST (\\Subscribed \\NonExistent \\HasNoChildren) \"/\" \"Disparue\"\r\n\
+         a005 OK LIST completed\r\n",
+        "{filtre}"
+    );
+
+    // Ce que le magasin refuse et ce qui n'existe pas se disent aussi.
+    lecteur
+        .get_mut()
+        .write_all(b"a006 SUBSCRIBE Videe\r\n")
+        .await
+        .expect("écriture");
+    assert_eq!(
+        jusqu_a(&mut lecteur, "a006 ").await,
+        "a006 NO Cannot subscribe to mailbox\r\n"
+    );
+    lecteur
+        .get_mut()
+        .write_all(b"a007 SUBSCRIBE Fantome\r\n")
+        .await
+        .expect("écriture");
+    assert_eq!(
+        jusqu_a(&mut lecteur, "a007 ").await,
+        "a007 NO [NONEXISTENT] No such mailbox\r\n"
+    );
+    lecteur
+        .get_mut()
+        .write_all(b"a008 UNSUBSCRIBE Brouillons\r\n")
+        .await
+        .expect("écriture");
+    assert_eq!(
+        jusqu_a(&mut lecteur, "a008 ").await,
+        "a008 OK UNSUBSCRIBE completed\r\n"
     );
 }

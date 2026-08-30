@@ -48,6 +48,10 @@
 //!    C'est la seule commande dont un argument est un MESSAGE : ce que la
 //!    grammaire admet, l'appelant devra l'écouler, et une longueur au-delà de la
 //!    borne doit être refusée AVANT qu'un octet n'arrive.
+//! 11. **UN `LIST` ACCEPTÉ NE DEMANDE QUE DU TRAVAIL BORNÉ.** Chaque motif fait
+//!     un parcours de plus sur toutes les boîtes du compte, et un motif plus
+//!     long que le plus long nom de boîte ne pourrait en désigner aucune. Les
+//!     deux bornes se vérifient sur ce que la lecture rend.
 //! 7. **UN `STORE` ACCEPTÉ NE PORTE QUE DES DRAPEAUX QU'ON SAIT ÉCRIRE.** Le
 //!    reste doit être refusé plutôt que laissé tomber : un client à qui l'on
 //!    répond `OK` croit son étiquette posée, et ne la reverra jamais. La
@@ -60,8 +64,9 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use ams_proto_imap::{
-    Append, Candidate, FETCH_ITEMS_MAX, Fetch, FetchItem, Flags, Limits, MAILBOX_NAME_MAX,
-    SEARCH_KEYS_MAX, Search, SequenceSet, Store, mailbox_name_is_safe, mailbox_name_trimmed,
+    Append, Candidate, FETCH_ITEMS_MAX, Fetch, FetchItem, Flags, LIST_PATTERNS_MAX, Limits, List,
+    MAILBOX_NAME_MAX, SEARCH_KEYS_MAX, Search, SequenceSet, Store, mailbox_name_is_safe,
+    mailbox_name_trimmed,
 };
 
 /// Ce qu'on soumet.
@@ -83,6 +88,8 @@ struct Entree<'a> {
     depot: &'a [u8],
     /// Un nom de boîte, tel qu'un client l'écrirait.
     boite: &'a [u8],
+    /// Les arguments complets d'un `LIST`.
+    liste: &'a [u8],
     /// Un message à confronter à ces critères.
     message: (u32, u32, u64, u8, u64),
 }
@@ -151,6 +158,23 @@ fuzz_target!(|entree: Entree<'_>| {
         let ensemble = fetch.set();
         assert_eq!(ensemble.as_bytes(), fetch.set_text());
         let _ = intervalles(&ensemble, entree.star, &bornes);
+    }
+
+    if let Ok(liste) = List::parse(entree.liste) {
+        // PROPRIÉTÉ 11 : le travail demandé est borné aux deux bouts.
+        let motifs = liste.patterns();
+        assert!(
+            motifs.len() <= LIST_PATTERNS_MAX,
+            "{} motifs pour une borne de {LIST_PATTERNS_MAX}",
+            motifs.len()
+        );
+        for motif in motifs {
+            assert!(
+                motif.len() <= MAILBOX_NAME_MAX,
+                "un motif de {} octets ne peut désigner aucune boîte",
+                motif.len()
+            );
+        }
     }
 
     if let Ok(ecriture) = Store::parse(entree.ecriture, &bornes) {

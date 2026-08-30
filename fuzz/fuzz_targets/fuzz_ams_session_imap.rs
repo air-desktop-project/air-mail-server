@@ -86,7 +86,9 @@ impl Mailbox for Boite {
         // ELLE GRANDIT D'UN MESSAGE À CHAQUE REGARD : c'est ce qui fait passer
         // l'écriture du `* n EXISTS`, et qui éprouve que la propriété 4 vaut
         // aussi pour ce que le serveur dit sans qu'on le lui demande.
-        self.messages.borrow_mut().push((ENTETE_D_EPREUVE.len() as u64, Flags::NONE));
+        self.messages
+            .borrow_mut()
+            .push((ENTETE_D_EPREUVE.len() as u64, Flags::NONE));
         self.exists()
     }
     fn uid_validity(&self) -> u32 {
@@ -278,6 +280,8 @@ impl Mailbox for Boite {
 /// Le magasin : une seule boîte, `INBOX`.
 struct Boites {
     messages: Rc<RefCell<Vec<Message>>>,
+    /// Les abonnements du compte, bornés comme un magasin réel les borne.
+    abonnes: Rc<RefCell<Vec<Vec<u8>>>>,
 }
 
 /// Un dépôt d'épreuve : il compte, et il rend un UID.
@@ -312,6 +316,39 @@ impl Mailboxes for Boites {
             messages: Rc::clone(&self.messages),
             recus: 0,
         })
+    }
+
+    // LES ABONNEMENTS SE RETIENNENT VRAIMENT : c'est ce qui fait passer le fuzz
+    // par les deux chemins de `LIST` — le filtre et le renseignement — et par la
+    // ligne `\NonExistent`, qui nomme une boîte que le CLIENT a nommée.
+    fn subscribe(&self, _user: &[u8], name: &[u8]) -> ams_session::imap::Subscription {
+        let mut abonnes = self.abonnes.borrow_mut();
+        if abonnes.len() < 8 && !abonnes.iter().any(|connu| connu == name) {
+            abonnes.push(name.to_vec());
+        }
+        ams_session::imap::Subscription::Faite
+    }
+
+    fn unsubscribe(&self, _user: &[u8], name: &[u8]) -> ams_session::imap::Subscription {
+        self.abonnes.borrow_mut().retain(|connu| connu != name);
+        ams_session::imap::Subscription::Faite
+    }
+
+    fn is_subscribed(&self, _user: &[u8], name: &[u8]) -> bool {
+        self.abonnes.borrow().iter().any(|connu| connu == name)
+    }
+
+    fn orphan<'n>(&self, _user: &[u8], index: usize, out: &'n mut [u8]) -> Option<&'n [u8]> {
+        let abonnes = self.abonnes.borrow();
+        let nom = abonnes
+            .iter()
+            .filter(|nom| nom.as_slice() != b"INBOX")
+            .nth(index)?;
+        let longueur = nom.len().min(out.len());
+        for (place, octet) in out.iter_mut().zip(nom) {
+            *place = *octet;
+        }
+        out.get(..longueur)
     }
 
     fn name<'n>(
@@ -403,6 +440,7 @@ fuzz_target!(|entree: Entree<'_>| {
         UnCompte,
         Boites {
             messages: Rc::clone(&messages),
+            abonnes: Rc::new(RefCell::new(Vec::new())),
         },
     );
     if entree.chiffree {

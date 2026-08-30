@@ -16,8 +16,8 @@
 //! reste — un serveur IMAP qui découpe mal ses commandes est un serveur qu'on
 //! fait lire ce qu'on veut.
 //!
-//! Ce qui n'y est pas : le vocabulaire des ARGUMENTS. `FETCH`, `SEARCH` et
-//! `STORE` ont chacun leur grammaire, et elles viendront une par une.
+//! **Le vocabulaire des ARGUMENTS y est aussi**, désormais : `FETCH`, `SEARCH`,
+//! `STORE`, `APPEND` et `LIST` ont chacun leur grammaire, dans leur module.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -35,6 +35,7 @@ mod fetch;
 mod flags;
 mod frame;
 mod limits;
+mod list;
 mod mailbox;
 mod response;
 mod search;
@@ -53,6 +54,7 @@ pub use fetch::{
 pub use flags::{Flags, INTERNALDATE_MAX, write_internal_date};
 pub use frame::{CommandReader, Need, literal_announcement};
 pub use limits::Limits;
+pub use list::{LIST_PATTERNS_MAX, List};
 pub use mailbox::{
     MAILBOX_COMPONENT_MAX, MAILBOX_DEPTH_MAX, MAILBOX_NAME_MAX, MAILBOX_SEPARATOR,
     mailbox_name_is_safe, mailbox_name_trimmed,

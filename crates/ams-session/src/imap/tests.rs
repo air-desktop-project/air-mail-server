@@ -365,6 +365,15 @@ impl super::Deposit for Depot {
     }
 }
 
+/// Le nom sous lequel un abonnement s'inscrit : `INBOX` s'écrit comme le client
+/// veut, et ne fait qu'un abonnement.
+fn nom_abonne(name: &[u8]) -> std::vec::Vec<u8> {
+    match name.eq_ignore_ascii_case(b"INBOX") {
+        true => std::vec::Vec::from(&b"INBOX"[..]),
+        false => name.to_vec(),
+    }
+}
+
 /// Quatre boîtes, dont une trouée.
 ///
 /// Le compteur d'effacements est PARTAGÉ avec l'appelant : une boîte d'épreuve
@@ -382,6 +391,8 @@ pub struct Boites {
     creees: std::rc::Rc<std::cell::RefCell<std::vec::Vec<std::vec::Vec<u8>>>>,
     /// Les boîtes effacées : celles qui restent nommées sont `\Noselect`.
     effacees: std::rc::Rc<std::cell::RefCell<std::vec::Vec<std::vec::Vec<u8>>>>,
+    /// Les abonnements du compte, comme un magasin réel les retiendrait.
+    abonnees: std::rc::Rc<std::cell::RefCell<std::vec::Vec<std::vec::Vec<u8>>>>,
 }
 
 impl Mailboxes for Boites {
@@ -514,6 +525,60 @@ impl Mailboxes for Boites {
             uid: 31,
             valide: std::rc::Rc::clone(&self.valide),
         })
+    }
+
+    fn subscribe(&self, _user: &[u8], name: &[u8]) -> super::Subscription {
+        // `Tetue` existe et refuse : c'est la troisième issue, celle d'un
+        // magasin qui n'a pas pu écrire.
+        if name == b"Tetue" {
+            return super::Subscription::Refusee;
+        }
+        // ON VALIDE À L'ABONNEMENT : ce qui n'existe pas ne s'abonne pas.
+        let connue = name.eq_ignore_ascii_case(b"INBOX")
+            || matches!(name, b"Archives" | b"Archives/2026")
+            || self.creees.borrow().iter().any(|connu| connu == name);
+        if !connue {
+            return super::Subscription::Absente;
+        }
+        let nom = nom_abonne(name);
+        let mut abonnees = self.abonnees.borrow_mut();
+        if !abonnees.contains(&nom) {
+            abonnees.push(nom);
+        }
+        super::Subscription::Faite
+    }
+
+    fn unsubscribe(&self, _user: &[u8], name: &[u8]) -> super::Subscription {
+        if name == b"Tetue" {
+            return super::Subscription::Refusee;
+        }
+        // AUCUNE VÉRIFICATION D'EXISTENCE : c'est ainsi qu'on se débarrasse d'un
+        // abonnement orphelin.
+        let nom = nom_abonne(name);
+        self.abonnees.borrow_mut().retain(|connu| *connu != nom);
+        super::Subscription::Faite
+    }
+
+    fn is_subscribed(&self, _user: &[u8], name: &[u8]) -> bool {
+        self.abonnees.borrow().contains(&nom_abonne(name))
+    }
+
+    fn orphan<'n>(&self, _user: &[u8], index: usize, out: &'n mut [u8]) -> Option<&'n [u8]> {
+        let creees = self.creees.borrow();
+        let abonnees = self.abonnees.borrow();
+        let nom = abonnees
+            .iter()
+            .filter(|nom| {
+                !nom.eq_ignore_ascii_case(b"INBOX")
+                    && !matches!(nom.as_slice(), b"Archives" | b"Archives/2026")
+                    && !creees.iter().any(|connu| connu == *nom)
+            })
+            .nth(index)?;
+        let longueur = nom.len().min(out.len());
+        for (place, octet) in out.iter_mut().zip(nom) {
+            *place = *octet;
+        }
+        out.get(..longueur)
     }
 
     fn open(&self, _user: &[u8], name: &[u8]) -> Option<Boite> {
@@ -948,27 +1013,6 @@ fn des_identifiants_demesures_sont_refuses_comme_les_autres() {
     assert!(texte.contains("NO [AUTHENTICATIONFAILED]"), "{texte}");
 }
 
-/// **`NO`, et non `BAD`** : la commande est correcte et permise ; c'est ce
-/// serveur qui ne la sert pas encore.
-#[test]
-fn ce_qu_on_ne_sert_pas_encore_le_dit_sans_accuser_le_client() {
-    let mut session = nouvelle(true);
-    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
-    for commande in [&b"a005 SUBSCRIBE a\r\n"[..], b"a006 UNSUBSCRIBE a\r\n"] {
-        let mut sortie = [0_u8; 2048];
-        let tour = session.handle(commande, &mut sortie).expect("traitable");
-        let texte = std::string::String::from_utf8_lossy(tour.reply()).into_owned();
-        assert!(
-            texte.contains("NO [UNAVAILABLE] Mailbox commands are not served yet"),
-            "{commande:?} : {texte}"
-        );
-        assert!(
-            !tour.peer_fault(),
-            "{commande:?} n'est pas une faute du pair"
-        );
-    }
-}
-
 // ── LES BOÎTES ──────────────────────────────────────────────────────────────
 
 /// Ouvre une session authentifiée avec `INBOX` sélectionnée.
@@ -1192,8 +1236,8 @@ fn les_commandes_de_boite_mal_formees_sont_des_fautes() {
     for (commande, attendu) in [
         (&b"a002 SELECT\r\n"[..], "SELECT expects"),
         (b"a003 STATUS\r\n", "STATUS expects"),
-        (b"a004 LIST \"\"\r\n", "LIST expects"),
-        (b"a005 LIST a b c\r\n", "LIST expects"),
+        (b"a004 LIST \"\"\r\n", "LIST arguments are not well formed"),
+        (b"a005 LIST a b c\r\n", "LIST arguments are not well formed"),
     ] {
         let (texte, _) = dire(&mut session, commande);
         assert!(texte.contains(attendu), "{commande:?} : {texte}");
@@ -1455,6 +1499,23 @@ fn un_tampon_trop_court_le_dit_ou_qu_il_cede() {
     court(APRES_LOGIN, b"a001 SELECT Inconnue\r\n", true);
     court(APRES_LOGIN, b"a001 SELECT\r\n", true);
     court(APRES_LOGIN, b"a001 LIST \"\" *\r\n", true);
+    court(APRES_LOGIN, b"a001 LIST \"\" \"\"\r\n", true);
+    const APRES_ABONNEMENT: &[&[u8]] = &[
+        b"a000 LOGIN jean ouvre-toi\r\n",
+        b"a000 SUBSCRIBE Archives\r\n",
+    ];
+    court(
+        APRES_ABONNEMENT,
+        b"a001 LIST \"\" * RETURN (SUBSCRIBED)\r\n",
+        true,
+    );
+    const APRES_ORPHELIN: &[&[u8]] = &[
+        b"a000 LOGIN jean ouvre-toi\r\n",
+        b"a000 CREATE Passagere\r\n",
+        b"a000 SUBSCRIBE Passagere\r\n",
+        b"a000 DELETE Passagere\r\n",
+    ];
+    court(APRES_ORPHELIN, b"a001 LIST (SUBSCRIBED) \"\" *\r\n", true);
     court(APRES_LOGIN, b"a001 LIST \"\"\r\n", true);
     court(APRES_LOGIN, b"a001 STATUS INBOX (MESSAGES)\r\n", true);
     court(APRES_LOGIN, b"a001 STATUS Inconnue (MESSAGES)\r\n", true);
@@ -2623,6 +2684,20 @@ fn un_magasin_partage_se_passe_par_reference() {
         Mailboxes::rename(&partage, b"jean", b"Inconnue", b"Autre"),
         super::Renaming::Absente
     );
+    assert_eq!(
+        Mailboxes::subscribe(&partage, b"jean", b"Archives"),
+        super::Subscription::Faite
+    );
+    assert!(Mailboxes::is_subscribed(&partage, b"jean", b"Archives"));
+    assert_eq!(
+        Mailboxes::orphan(&partage, b"jean", 0, &mut place),
+        None,
+        "une boîte qui existe n'est pas orpheline"
+    );
+    assert_eq!(
+        Mailboxes::unsubscribe(&partage, b"jean", b"Archives"),
+        super::Subscription::Faite
+    );
 }
 
 /// Les commandes qui exigent un état le disent dans les deux sens.
@@ -2648,7 +2723,7 @@ fn les_commandes_hors_etat_le_disent() {
     }
 }
 
-/// Un nom plus long que ce que la session retient n'est pas un nom de boîte.
+/// Un motif plus long que le plus long nom de boîte ne désigne rien.
 #[test]
 fn un_argument_de_list_demesure_est_refuse() {
     let mut session = nouvelle(true);
@@ -2657,7 +2732,10 @@ fn un_argument_de_list_demesure_est_refuse() {
     commande.resize(commande.len() + 300, b'x');
     commande.extend_from_slice(b"\r\n");
     let (texte, _) = dire(&mut session, &commande);
-    assert!(texte.contains("BAD LIST arguments are too long"), "{texte}");
+    assert!(
+        texte.contains("BAD LIST arguments are not well formed"),
+        "{texte}"
+    );
 }
 
 // ── `STORE` ─────────────────────────────────────────────────────────────────
@@ -4558,4 +4636,203 @@ fn un_tampon_trop_court_pour_l_attente_le_dit() {
         let mut place = std::vec![0_u8; taille];
         assert!(autre.idle_poll(&mut place).is_err(), "regard {taille}");
     }
+}
+
+// ── `SUBSCRIBE`, `UNSUBSCRIBE` ET LES ABONNEMENTS DE `LIST` ─────────────────
+
+/// **L'ABONNEMENT EST DU COMPTE**, et `LIST` le rend quand on le lui demande.
+#[test]
+fn un_abonnement_se_pose_et_se_voit() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (pose, _) = dire(&mut session, b"a002 SUBSCRIBE Archives\r\n");
+    assert_eq!(pose, "a002 OK SUBSCRIBE completed\r\n");
+
+    // Sans qu'on le demande, la liste ne dit rien de l'abonnement.
+    let (muette, _) = dire(&mut session, b"a003 LIST \"\" *\r\n");
+    assert!(!muette.contains("\\Subscribed"), "{muette}");
+
+    // Le RENSEIGNEMENT : tout, et lesquelles.
+    let (dit, _) = dire(&mut session, b"a004 LIST \"\" * RETURN (SUBSCRIBED)\r\n");
+    assert!(
+        dit.contains("* LIST (\\Subscribed \\HasChildren) \"/\" \"Archives\"\r\n"),
+        "{dit}"
+    );
+    assert!(dit.contains("\"INBOX\""), "{dit}");
+
+    // Le FILTRE : rien d'autre.
+    let (filtre, _) = dire(&mut session, b"a005 LIST (SUBSCRIBED) \"\" *\r\n");
+    assert_eq!(
+        filtre,
+        "* LIST (\\Subscribed \\HasChildren) \"/\" \"Archives\"\r\n\
+         a005 OK LIST completed\r\n"
+    );
+}
+
+/// **SE RÉABONNER N'EST PAS UNE FAUTE**, et se désabonner de ce à quoi l'on
+/// n'est pas abonné non plus : l'état demandé est déjà celui qu'on a.
+#[test]
+fn repeter_un_abonnement_n_est_pas_une_faute() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut session, b"a002 SUBSCRIBE Archives\r\n");
+    let (encore, _) = dire(&mut session, b"a003 SUBSCRIBE Archives\r\n");
+    assert_eq!(encore, "a003 OK SUBSCRIBE completed\r\n");
+
+    let (retire, _) = dire(&mut session, b"a004 UNSUBSCRIBE Archives\r\n");
+    assert_eq!(retire, "a004 OK UNSUBSCRIBE completed\r\n");
+    let (deja, _) = dire(&mut session, b"a005 UNSUBSCRIBE Archives\r\n");
+    assert_eq!(deja, "a005 OK UNSUBSCRIBE completed\r\n");
+
+    // Et la liste filtrée ne rend plus rien.
+    let (vide, _) = dire(&mut session, b"a006 LIST (SUBSCRIBED) \"\" *\r\n");
+    assert_eq!(vide, "a006 OK LIST completed\r\n");
+}
+
+/// **ON VALIDE À L'ABONNEMENT** : une boîte qui n'existe pas ne s'abonne pas.
+#[test]
+fn on_ne_s_abonne_pas_a_ce_qui_n_existe_pas() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (absente, _) = dire(&mut session, b"a002 SUBSCRIBE Fantome\r\n");
+    assert_eq!(absente, "a002 NO [NONEXISTENT] No such mailbox\r\n");
+
+    // Mais SE DÉSABONNER d'une boîte disparue marche, et c'est le point : sans
+    // cela, un abonnement orphelin serait indélogeable.
+    let (retire, _) = dire(&mut session, b"a003 UNSUBSCRIBE Fantome\r\n");
+    assert_eq!(retire, "a003 OK UNSUBSCRIBE completed\r\n");
+}
+
+/// **UN ABONNEMENT SURVIT À L'EFFACEMENT DE SA BOÎTE** (§6.3.7), et le filtre
+/// le rend marqué `\NonExistent` (§6.3.9.6).
+#[test]
+fn un_abonnement_survit_a_l_effacement_de_sa_boite() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut session, b"a002 CREATE Passagere\r\n");
+    dire(&mut session, b"a003 SUBSCRIBE Passagere\r\n");
+    dire(&mut session, b"a004 DELETE Passagere\r\n");
+
+    let (filtre, _) = dire(&mut session, b"a005 LIST (SUBSCRIBED) \"\" *\r\n");
+    assert_eq!(
+        filtre,
+        "* LIST (\\Subscribed \\NonExistent \\HasNoChildren) \"/\" \"Passagere\"\r\n\
+         a005 OK LIST completed\r\n"
+    );
+    // Sans le filtre, une boîte qui n'existe pas ne paraît pas : `LIST` rend ce
+    // qui EST, et c'est le filtre seul qui demande aussi ce qui n'est plus.
+    let (tout, _) = dire(&mut session, b"a006 LIST \"\" * RETURN (SUBSCRIBED)\r\n");
+    assert!(!tout.contains("Passagere"), "{tout}");
+    // Et un motif qui ne lui correspond pas ne la rend pas non plus.
+    let (ailleurs, _) = dire(&mut session, b"a007 LIST (SUBSCRIBED) \"\" Arch*\r\n");
+    assert_eq!(ailleurs, "a007 OK LIST completed\r\n");
+}
+
+/// Ce que le magasin refuse se dit, et ce qui n'est pas un nom de boîte aussi.
+#[test]
+fn un_abonnement_refuse_se_dit() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (refus, _) = dire(&mut session, b"a002 SUBSCRIBE Tetue\r\n");
+    assert_eq!(refus, "a002 NO Cannot subscribe to mailbox\r\n");
+    let (autre, _) = dire(&mut session, b"a003 UNSUBSCRIBE Tetue\r\n");
+    assert_eq!(autre, "a003 NO Cannot unsubscribe from mailbox\r\n");
+
+    for commande in [
+        &b"a004 SUBSCRIBE ../ailleurs\r\n"[..],
+        b"a005 UNSUBSCRIBE ../ailleurs\r\n",
+    ] {
+        let (texte, _) = dire(&mut session, commande);
+        assert!(
+            texte.contains("NO [CANNOT] This mailbox name is not served"),
+            "{commande:?} : {texte}"
+        );
+    }
+    for commande in [&b"a006 SUBSCRIBE\r\n"[..], b"a007 UNSUBSCRIBE\r\n"] {
+        let (texte, _) = dire(&mut session, commande);
+        assert!(texte.contains("BAD"), "{commande:?} : {texte}");
+        assert!(texte.contains("expects a mailbox name"), "{texte}");
+    }
+    // Avant l'authentification, il n'y a pas de compte à abonner.
+    let mut vierge = nouvelle(true);
+    let (avant, _) = dire(&mut vierge, b"a001 SUBSCRIBE INBOX\r\n");
+    assert!(
+        avant.contains("BAD Command is not allowed before authentication"),
+        "{avant}"
+    );
+}
+
+/// **`INBOX` S'ÉCRIT COMME LE CLIENT VEUT** (§5.1), et ne fait qu'un abonnement.
+#[test]
+fn inbox_s_abonne_quelle_qu_en_soit_la_casse() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (pose, _) = dire(&mut session, b"a002 SUBSCRIBE inbox\r\n");
+    assert_eq!(pose, "a002 OK SUBSCRIBE completed\r\n");
+    let (filtre, _) = dire(&mut session, b"a003 LIST (SUBSCRIBED) \"\" *\r\n");
+    assert_eq!(
+        filtre,
+        "* LIST (\\Subscribed \\HasNoChildren) \"/\" \"INBOX\"\r\n\
+         a003 OK LIST completed\r\n"
+    );
+    // Et se désabonner sous une autre casse retire bien le même abonnement.
+    dire(&mut session, b"a004 UNSUBSCRIBE INBOX\r\n");
+    let (vide, _) = dire(&mut session, b"a005 LIST (SUBSCRIBED) \"\" *\r\n");
+    assert_eq!(vide, "a005 OK LIST completed\r\n");
+}
+
+/// **UN MOTIF VIDE DEMANDE LE SÉPARATEUR**, et rien d'autre (§6.3.9).
+#[test]
+fn un_motif_vide_demande_le_separateur() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (texte, _) = dire(&mut session, b"a002 LIST \"\" \"\"\r\n");
+    assert_eq!(
+        texte,
+        "* LIST (\\Noselect) \"/\" \"\"\r\n\
+         a002 OK LIST completed\r\n"
+    );
+}
+
+/// **UNE BOÎTE QUI RÉPOND À DEUX MOTIFS NE SE REND QU'UNE FOIS.**
+#[test]
+fn plusieurs_motifs_ne_rendent_pas_deux_fois_la_meme_boite() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (texte, _) = dire(&mut session, b"a002 LIST \"\" (\"INBOX\" \"IN*\")\r\n");
+    assert_eq!(
+        texte,
+        "* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n\
+         a002 OK LIST completed\r\n"
+    );
+    // Deux motifs qui désignent des boîtes différentes en rendent deux.
+    let (deux, _) = dire(&mut session, b"a003 LIST \"\" (\"INBOX\" \"Archives\")\r\n");
+    assert!(deux.contains("\"INBOX\""), "{deux}");
+    assert!(deux.contains("\"Archives\""), "{deux}");
+    // Et aucun motif ne demande rien.
+    let (rien, _) = dire(&mut session, b"a004 LIST \"\" ()\r\n");
+    assert_eq!(rien, "a004 OK LIST completed\r\n");
+}
+
+/// Une option de `LIST` qu'on ne sert pas est une faute, pas un silence.
+#[test]
+fn une_option_de_list_qu_on_ne_sert_pas_est_une_faute() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    for commande in [
+        &b"a002 LIST (RECURSIVEMATCH) \"\" *\r\n"[..],
+        b"a003 LIST \"\" * RETURN (STATUS (MESSAGES))\r\n",
+    ] {
+        let (texte, _) = dire(&mut session, commande);
+        assert!(
+            texte.contains("BAD LIST arguments are not well formed"),
+            "{commande:?} : {texte}"
+        );
+    }
+    // `CHILDREN` est admis sans rien changer : la réponse le porte déjà.
+    let (avec, _) = dire(&mut session, b"a004 LIST \"\" * RETURN (CHILDREN)\r\n");
+    assert!(
+        avec.contains("* LIST (\\HasNoChildren) \"/\" \"INBOX\""),
+        "{avec}"
+    );
 }

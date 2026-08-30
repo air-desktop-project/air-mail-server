@@ -275,9 +275,9 @@ OPTIONS DE `config write`
     Un `--listen-pop3` ou un `--listen-imap` sans `--tls-cert` ouvre un port où
     personne ne pourra relever son courrier ; le serveur le dit au démarrage.
 
-    IMAP SERT LES BOÎTES D'UN COMPTE : `SELECT`, `LIST`, `STATUS`, `FETCH`,
-    `STORE`, `EXPUNGE`, `SEARCH`, `COPY`, `MOVE`, `APPEND`, `CREATE`, `DELETE` et
-    `RENAME`. `FETCH` rend une `ENVELOPE`, une `BODYSTRUCTURE`, une partie
+    IMAP4rev2 EST SERVI EN ENTIER : `SELECT`, `LIST`, `STATUS`, `FETCH`,
+    `STORE`, `EXPUNGE`, `SEARCH`, `COPY`, `MOVE`, `APPEND`, `CREATE`, `DELETE`,
+    `RENAME`, `SUBSCRIBE` et `UNSUBSCRIBE`. `FETCH` rend une `ENVELOPE`, une `BODYSTRUCTURE`, une partie
     désignée — `BODY[1]`, `BODY[1.MIME]` — et un choix de champs d'en-tête —
     `BODY[HEADER.FIELDS (FROM)]`. La recherche lit aussi DANS les messages —
     `SUBJECT`, `BODY`, `TEXT` — en défaisant les mots encodés et les encodages de
@@ -286,7 +286,10 @@ OPTIONS DE `config write`
     qu'il ne sait pas défaire. `NAMESPACE` et `ENABLE` répondent. `IDLE` fait attendre
     la session et lui pousse un `* n EXISTS` quand du courrier arrive : seule la
     croissance se dit, parce qu'annoncer une disparition renumérote des rangs que
-    le client a déjà retenus. `SUBSCRIBE`, lui, n'est toujours pas servi.
+    le client a déjà retenus. LES ABONNEMENTS S'ÉCRIVENT DANS LA RACINE DU
+    COMPTE, un nom par ligne, sous `ams-abonnements` — `LIST (SUBSCRIBED)` les
+    filtre, `LIST … RETURN (SUBSCRIBED)` les signale, et un abonnement dont la
+    boîte a disparu se rend `\\NonExistent` plutôt que d'être retiré d'office.
 
     LE MAGASIN DE COMPTES SERT DEUX CHOSES, et il faut les distinguer :
 
