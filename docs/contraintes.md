@@ -1431,7 +1431,7 @@ ses lignes d'en-tête, `[3.HEADER]`, `[3.TEXT]` et `[3.1]` du message encapsulé
 `[9]` qui vaut `NIL` sans empêcher l'`UID` qui suit, une demande partielle sur une
 partie, et deux parties dans une même commande.
 
-Ce qui n'est toujours pas servi : `IDLE`, `NAMESPACE`, `ENABLE` et `SUBSCRIBE`.
+Ce qui n'est toujours pas servi : `IDLE` et `SUBSCRIBE`.
 
 ## `HEADER.FIELDS` : quelques champs, depuis le 2026-08-30
 
@@ -1475,6 +1475,32 @@ deux champs rendus dans l'ordre du message et non dans celui de la demande, le
 choix inverse, `[2.HEADER.FIELDS]` qui rend le sujet du message porté sans son
 `X-Interne`, `[1.HEADER.FIELDS]` qui vaut `NIL` sur une partie qui n'encapsule
 rien, un choix mêlé à `UID` et `FLAGS`, et une demande partielle.
+
+## Trois petites choses que la RFC exige, depuis le 2026-08-30
+
+**`\HasChildren` ET `\HasNoChildren`** : §7.3.1 veut que TOUT `LIST` porte l'un
+des deux. Sans eux, un client qui affiche une arborescence doit interroger chaque
+boîte pour savoir s'il faut dessiner un triangle d'ouverture — une commande par
+boîte, là où une seule suffit. Le magasin les calcule dans la liste qu'il tient
+déjà : rouvrir le système de fichiers pour la même question coûterait un parcours
+de répertoire PAR BOÎTE listée.
+
+Et le `LIST` que rend `SELECT` les porte aussi. **En omettre un ferait dire au
+serveur deux choses différentes de la même boîte**, selon la question qu'on lui
+pose — exactement le genre d'incohérence qu'un client n'a aucun moyen de
+détecter.
+
+**`NAMESPACE`** (§6.3.10) dit où les boîtes vivent. Un seul espace ici, et les
+deux autres valent `NIL` : `NIL` n'est pas « je ne sais pas », c'est « il n'y en a
+pas ». Un client qui lirait une liste vide chercherait encore.
+
+**`ENABLE` N'ACTIVE RIEN, ET LE DIT.** Aucune extension de ce serveur ne se
+négocie : tout ce qu'il sait faire, il le fait. La réponse liste ce qui a été
+activé — rien —, ce que la grammaire admet (`enable-data = "ENABLED"
+*(SP capability)`). Se taire laisserait le client se demander si la commande a été
+comprise. **L'ÉTAT COMPTE** : §6.3.1 la réserve à l'état authentifié, AVANT toute
+sélection, parce qu'une extension activée en cours de session changerait ce que
+des réponses déjà en vol signifient.
 
 ## `BINARY` : ce que les octets veulent dire, depuis le 2026-08-30
 
@@ -2235,6 +2261,6 @@ persistant, et lecture sans verrou côté IMAP), C14 (`X25519MLKEM768` en tête)
 `<CRLF>.<CRLF>`, refuse tout `CR` ou `LF` isolé, et le fuzz éprouve que le
 découpage des lectures ne change rien au verdict.
 
-Ce qui manque, et qu'aucune phrase ne doit laisser croire acquis : `IDLE`,
-`NAMESPACE`, `ENABLE` et `SUBSCRIBE` ; la file de réémission des messages
-sortants ; et toute interface HTTP.
+Ce qui manque, et qu'aucune phrase ne doit laisser croire acquis : `IDLE` et
+`SUBSCRIBE` ; la file de réémission des messages sortants ; et toute interface
+HTTP.

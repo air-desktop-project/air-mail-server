@@ -498,6 +498,15 @@ pub struct Listing<'n> {
     /// courrier** (§6.3.5) : elle paraît dans la liste, marquée `\Noselect`, et
     /// `SELECT` la refuse. Sans elle, ses filles n'auraient plus de chemin.
     pub selectable: bool,
+    /// A-t-elle des filles ?
+    ///
+    /// # CE N'EST PAS UN AGRÉMENT : LA RFC L'EXIGE
+    ///
+    /// RFC 9051 §7.3.1 veut que tout `LIST` porte `\HasChildren` ou
+    /// `\HasNoChildren`. Un client qui ne le sait pas doit interroger chaque
+    /// boîte pour savoir s'il faut afficher un triangle d'ouverture — c'est-à-dire
+    /// une commande par boîte, là où une seule suffit.
+    pub has_children: bool,
 }
 
 /// Ce qu'un effacement de boîte a donné.
@@ -1375,11 +1384,9 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             Command::Create => self.create(lue.arguments, out),
             Command::Delete => self.delete(lue.arguments, out),
             Command::Rename => self.rename(lue.arguments, out),
-            Command::Enable
-            | Command::Subscribe
-            | Command::Unsubscribe
-            | Command::Namespace
-            | Command::Idle => self.si_authentifie(out),
+            Command::Namespace => self.namespace(out),
+            Command::Enable => self.enable(lue.arguments, out),
+            Command::Subscribe | Command::Unsubscribe | Command::Idle => self.si_authentifie(out),
             // UN `APPEND` QUI ARRIVE ICI N'EST PAS CELUI QU'ON SAIT ÉCOULER.
             // Le chemin ordinaire ne voit que les commandes COMPLÈTES : un
             // `APPEND` normal n'y passe jamais, puisque son message s'écoule.
@@ -1700,6 +1707,95 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         self.pas_encore(out)
     }
 
+    /// Cette boîte a-t-elle des filles ?
+    ///
+    /// On le demande au magasin, qui seul le sait — et l'on parcourt sa liste,
+    /// puisqu'il n'y a pas d'autre chemin pour poser la question d'une boîte
+    /// nommée.
+    fn a_des_filles(&self, nom: &[u8]) -> bool {
+        let mut index = 0_usize;
+        let mut place = [0_u8; MAILBOX_NAME_MAX];
+        while let Some(boite) = self.boites.name(self.user(), index, &mut place) {
+            index = index.saturating_add(1);
+            if boite.name == nom {
+                return boite.has_children;
+            }
+        }
+        false
+    }
+
+    /// `NAMESPACE` (§6.3.10) : où les boîtes vivent.
+    ///
+    /// # UN SEUL ESPACE, ET C'EST TOUT CE QU'IL Y A À DIRE
+    ///
+    /// Ce serveur sert les boîtes d'un compte, et rien d'autre : pas de boîte
+    /// partagée, pas de boîte d'un autre utilisateur. Les deux autres espaces
+    /// valent donc `NIL` — et `NIL` n'est pas « je ne sais pas », c'est « il n'y
+    /// en a pas ». Un client qui lit une liste vide chercherait encore.
+    fn namespace<'b>(&mut self, out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
+        if self.etat == State::NotAuthenticated {
+            return self.faute(b"Command is not allowed before authentication", out);
+        }
+        // LA PLUME REND SON EMPRUNT AVANT LA CONCLUSION : le bloc le dit, et
+        // c'est ce qui permet d'écrire les deux dans le même tampon.
+        let ecrits = {
+            let mut plume = Plume::neuve(out);
+            plume.pousser(b"* NAMESPACE ((\"\" \"/\")) NIL NIL\r\n")?;
+            plume.ecrits()
+        };
+        self.apres(ecrits, b"NAMESPACE completed", out)
+    }
+
+    /// `ENABLE` (§6.3.1) : activer ce qu'on saurait activer.
+    ///
+    /// # ON N'ACTIVE RIEN, ET ON LE DIT
+    ///
+    /// Aucune extension de ce serveur ne se négocie : tout ce qu'il sait faire,
+    /// il le fait. La réponse liste donc ce qui a été activé — c'est-à-dire
+    /// rien —, ce que la grammaire admet (`enable-data = "ENABLED" *(SP
+    /// capability)`). Se taire laisserait le client se demander si la commande a
+    /// été comprise.
+    ///
+    /// **L'ÉTAT COMPTE** : §6.3.1 réserve `ENABLE` à l'état authentifié, AVANT
+    /// toute sélection. Une extension activée en cours de session changerait ce
+    /// que les réponses signifient, au milieu de réponses déjà en vol.
+    fn enable<'b>(&mut self, arguments: &[u8], out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
+        if self.etat == State::NotAuthenticated {
+            return self.faute(b"Command is not allowed before authentication", out);
+        }
+        if self.etat == State::Selected {
+            return self.faute(b"ENABLE is not allowed while a mailbox is selected", out);
+        }
+        if arguments.trim_ascii().is_empty() {
+            return self.faute(b"ENABLE expects at least one capability", out);
+        }
+        let ecrits = {
+            let mut plume = Plume::neuve(out);
+            plume.pousser(b"* ENABLED\r\n")?;
+            plume.ecrits()
+        };
+        self.apres(ecrits, b"ENABLE completed", out)
+    }
+
+    /// Écrit la conclusion étiquetée après ce qu'une plume a déjà posé.
+    fn apres<'b>(
+        &mut self,
+        ecrits: usize,
+        texte: &[u8],
+        out: &'b mut [u8],
+    ) -> Result<Turn<'b>, Error> {
+        let suite = out.get_mut(ecrits..).unwrap_or_default();
+        let conclusion = encode_tagged(suite, self.tag_lu(), Status::Ok, texte, &self.limits)
+            .map_err(Error::Reply)?
+            .len();
+        let total = ecrits.saturating_add(conclusion);
+        Ok(Turn {
+            reply: out.get(..total).unwrap_or_default(),
+            action: Action::Continue,
+            peer_fault: false,
+        })
+    }
+
     /// Ce que la session sait faire, et ne fait pas encore.
     ///
     /// **`NO`, et non `BAD`** : la commande est correcte et permise ; c'est ce
@@ -1893,7 +1989,18 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         } else {
             b")] Flags permitted\r\n"
         })?;
-        plume.nom_de_boite(b"* LIST () \"/\" ", nom, b"\r\n")?;
+        // §7.3.1 VAUT ICI AUSSI : le `LIST` que `SELECT` rend porte les mêmes
+        // marques que celui de la commande `LIST`. En omettre une ferait dire au
+        // serveur deux choses différentes de la même boîte, selon la question
+        // qu'on lui pose.
+        plume.nom_de_boite(
+            match self.a_des_filles(nom) {
+                true => b"* LIST (\\HasChildren) \"/\" ".as_slice(),
+                false => b"* LIST (\\HasNoChildren) \"/\" ",
+            },
+            nom,
+            b"\r\n",
+        )?;
         let ecrits = plume.ecrits();
 
         // Le nom tient : `un_nom` a écrit dans un tampon de cette taille-là.
@@ -2751,10 +2858,13 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             if correspond(motif, boite.name) {
                 // §6.3.5 : une boîte effacée qui avait des filles garde son nom
                 // sans son courrier, et le dit.
-                let attributs: &[u8] = if boite.selectable {
-                    b"* LIST () \"/\" "
-                } else {
-                    b"* LIST (\\Noselect) \"/\" "
+                // §7.3.1 : `\HasChildren` ou `\HasNoChildren`, TOUJOURS l'un
+                // des deux. Ne rien dire obligerait le client à demander.
+                let attributs: &[u8] = match (boite.selectable, boite.has_children) {
+                    (true, true) => b"* LIST (\\HasChildren) \"/\" ",
+                    (true, false) => b"* LIST (\\HasNoChildren) \"/\" ",
+                    (false, true) => b"* LIST (\\Noselect \\HasChildren) \"/\" ",
+                    (false, false) => b"* LIST (\\Noselect \\HasNoChildren) \"/\" ",
                 };
                 plume.nom_de_boite(attributs, boite.name, b"\r\n")?;
             }

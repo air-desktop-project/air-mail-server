@@ -342,6 +342,8 @@ impl Mailboxes for Boites {
         Some(ams_session::imap::Listing {
             name: out.get(..longueur)?,
             selectable,
+            // La boîte d'épreuve n'a pas d'arborescence.
+            has_children: false,
         })
     }
 
@@ -730,7 +732,10 @@ async fn une_boite_s_ouvre_et_se_lit_sur_le_fil() {
         .await
         .expect("écriture");
     let liste = jusqu_a(&mut lecteur, "a003 ").await;
-    assert!(liste.contains("* LIST () \"/\" \"INBOX\"\r\n"), "{liste}");
+    assert!(
+        liste.contains("* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n"),
+        "{liste}"
+    );
 
     lecteur
         .get_mut()
@@ -1154,7 +1159,7 @@ async fn un_effacement_traverse_la_socket() {
         .expect("écriture");
     let liste = jusqu_a(&mut lecteur, "a003 ").await;
     assert!(
-        liste.contains("* LIST (\\Noselect) \"/\" \"Videe\"\r\n"),
+        liste.contains("* LIST (\\Noselect \\HasNoChildren) \"/\" \"Videe\"\r\n"),
         "{liste}"
     );
 
@@ -1389,4 +1394,55 @@ async fn un_binaire_traverse_la_socket() {
         absente, "* 1 FETCH (BINARY[4] NIL UID 1)\r\na005 OK FETCH completed\r\n",
         "{absente}"
     );
+}
+
+/// **`NAMESPACE` et `ENABLE` traversent la socket**, et le `LIST` dit toujours
+/// s'il y a des filles.
+#[tokio::test]
+async fn l_espace_et_l_activation_traversent_la_socket() {
+    let Some(materiel) = materiel("imap-espace") else {
+        return;
+    };
+    let mut lecteur = authentifiee(&materiel).await;
+
+    lecteur
+        .get_mut()
+        .write_all(b"a003 NAMESPACE\r\n")
+        .await
+        .expect("écriture");
+    let espace = jusqu_a(&mut lecteur, "a003 ").await;
+    assert_eq!(
+        espace, "* NAMESPACE ((\"\" \"/\")) NIL NIL\r\na003 OK NAMESPACE completed\r\n",
+        "{espace}"
+    );
+
+    lecteur
+        .get_mut()
+        .write_all(b"a004 ENABLE CONDSTORE UTF8=ACCEPT\r\n")
+        .await
+        .expect("écriture");
+    let active = jusqu_a(&mut lecteur, "a004 ").await;
+    assert_eq!(
+        active, "* ENABLED\r\na004 OK ENABLE completed\r\n",
+        "{active}"
+    );
+
+    // Et une fois la boîte ouverte, `ENABLE` n'a plus lieu d'être.
+    lecteur
+        .get_mut()
+        .write_all(b"a005 SELECT INBOX\r\n")
+        .await
+        .expect("écriture");
+    let ouverte = jusqu_a(&mut lecteur, "a005 ").await;
+    assert!(
+        ouverte.contains("* LIST (\\HasNoChildren) \"/\" \"INBOX\""),
+        "{ouverte}"
+    );
+    lecteur
+        .get_mut()
+        .write_all(b"a006 ENABLE CONDSTORE\r\n")
+        .await
+        .expect("écriture");
+    let tard = jusqu_a(&mut lecteur, "a006 ").await;
+    assert!(tard.starts_with("a006 BAD"), "{tard}");
 }

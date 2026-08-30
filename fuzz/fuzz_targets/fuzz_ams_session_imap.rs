@@ -323,6 +323,8 @@ impl Mailboxes for Boites {
         Some(ams_session::imap::Listing {
             name: out.get(..nom.len().min(out.len()))?,
             selectable: true,
+            // Une seule boîte : elle n'a pas de fille.
+            has_children: false,
         })
     }
 

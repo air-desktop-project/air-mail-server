@@ -1119,6 +1119,16 @@ impl Mailboxes for BoitesImap {
             || self
                 .chemin_du_dossier(user, nom)
                 .is_some_and(|chemin| Self::selectionnable(&chemin));
+        // UNE FILLE EST UNE BOÎTE DONT LE NOM COMMENCE PAR LE NÔTRE, SUIVI DU
+        // SÉPARATEUR. On les cherche dans la liste qu'on tient déjà : ouvrir le
+        // système de fichiers une seconde fois pour la même question coûterait un
+        // parcours de répertoire par boîte listée.
+        let has_children = noms.iter().any(|autre| {
+            autre
+                .get(..nom.len())
+                .is_some_and(|debut| debut == nom.as_slice())
+                && autre.get(nom.len()).copied() == Some(b'/')
+        });
         let longueur = nom.len().min(out.len());
         for (place, octet) in out.iter_mut().zip(nom) {
             *place = *octet;
@@ -1126,6 +1136,7 @@ impl Mailboxes for BoitesImap {
         Some(Listing {
             name: out.get(..longueur)?,
             selectable,
+            has_children,
         })
     }
 

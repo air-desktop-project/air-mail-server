@@ -1068,9 +1068,30 @@ caractères pour un ou deux octets, et un décodeur qui n'attendrait que des
 groupes entiers perdrait la queue de tout. Seul l'appelant sait où le contenu
 s'arrête — le décodeur le lui demande donc.
 
-Ce qui n'y est toujours pas : `IDLE`, `NAMESPACE`, `ENABLE` et `SUBSCRIBE`. Le
-serveur dit au démarrage ce qu'il sert et ce qu'il ne sert pas, plutôt que de
-laisser un port ouvert le faire croire.
+### Trois petites choses que la RFC exige
+
+**`\HasChildren` et `\HasNoChildren`** ne sont pas un agrément : §7.3.1 veut que
+TOUT `LIST` porte l'un des deux. Sans eux, un client qui affiche une arborescence
+doit interroger chaque boîte pour savoir s'il faut dessiner un triangle
+d'ouverture — une commande par boîte, là où une seule suffit. Le `LIST` que rend
+`SELECT` les porte aussi : en omettre un ferait dire au serveur deux choses
+différentes de la même boîte, selon la question qu'on lui pose.
+
+**`NAMESPACE`** dit où les boîtes vivent. Ce serveur n'en a qu'un espace — pas de
+boîte partagée, pas de boîte d'autrui — et les deux autres valent donc `NIL`. Le
+point qui compte : `NIL` n'est pas « je ne sais pas », c'est « il n'y en a pas ».
+Un client qui lirait une liste vide chercherait encore.
+
+**`ENABLE` n'active rien, et le dit.** Aucune extension de ce serveur ne se
+négocie : tout ce qu'il sait faire, il le fait. La réponse liste donc ce qui a
+été activé — c'est-à-dire rien —, ce que la grammaire admet. Se taire laisserait
+le client se demander si la commande a été comprise. Et l'état compte : §6.3.1 la
+réserve à l'état authentifié, AVANT toute sélection — une extension activée en
+cours de session changerait ce que des réponses déjà en vol signifient.
+
+Ce qui n'y est toujours pas : `IDLE` et `SUBSCRIBE`. Le serveur dit au démarrage
+ce qu'il sert et ce qu'il ne sert pas, plutôt que de laisser un port ouvert le
+faire croire.
 
 ## Émettre : le client SMTP sortant
 

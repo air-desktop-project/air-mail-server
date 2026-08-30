@@ -283,8 +283,8 @@ OPTIONS DE `config write`
     `SUBJECT`, `BODY`, `TEXT` — en défaisant les mots encodés et les encodages de
     transfert : on cherche le texte, pas les octets. `BINARY[…]` rend le contenu
     transfert-décodé d'une partie, et refuse par `NO [UNKNOWN-CTE]` un encodage
-    qu'il ne sait pas défaire. `IDLE`, `NAMESPACE`, `ENABLE` et `SUBSCRIBE` ne
-    sont pas servis.
+    qu'il ne sait pas défaire. `NAMESPACE` et `ENABLE` répondent ; `IDLE` et
+    `SUBSCRIBE`, non.
 
     LE MAGASIN DE COMPTES SERT DEUX CHOSES, et il faut les distinguer :
 

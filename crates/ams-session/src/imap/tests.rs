@@ -391,9 +391,12 @@ impl Mailboxes for Boites {
         for (place, octet) in out.iter_mut().zip(nom) {
             *place = *octet;
         }
+        // Seule `Archives` a une fille, `Archives/2026`.
+        let has_children = nom == b"Archives";
         Some(super::Listing {
             name: out.get(..longueur)?,
             selectable: !effacees.iter().any(|vide| vide == nom),
+            has_children,
         })
     }
 
@@ -932,9 +935,7 @@ fn ce_qu_on_ne_sert_pas_encore_le_dit_sans_accuser_le_client() {
     for commande in [
         &b"a005 SUBSCRIBE a\r\n"[..],
         b"a006 UNSUBSCRIBE a\r\n",
-        b"a007 NAMESPACE\r\n",
         b"a009 IDLE\r\n",
-        b"a010 ENABLE UTF8=ACCEPT\r\n",
     ] {
         let mut sortie = [0_u8; 2048];
         let tour = session.handle(commande, &mut sortie).expect("traitable");
@@ -973,7 +974,7 @@ fn select_dit_tout_ce_que_le_client_ne_sait_pas() {
         "* OK [UIDNEXT 31] UIDNEXT\r\n",
         "* FLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft)\r\n",
         "* OK [PERMANENTFLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft)] Flags permitted\r\n",
-        "* LIST () \"/\" \"INBOX\"\r\n",
+        "* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n",
         "a002 OK [READ-WRITE] SELECT completed\r\n",
     ] {
         assert!(texte.contains(ligne), "{ligne:?} manque dans :\n{texte}");
@@ -1053,10 +1054,16 @@ fn les_deux_jokers_de_list_ne_disent_pas_la_meme_chose() {
     let mut session = nouvelle(true);
     dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
     let (tout, _) = dire(&mut session, b"a002 LIST \"\" *\r\n");
-    assert!(tout.contains("* LIST () \"/\" \"INBOX\"\r\n"), "{tout}");
-    assert!(tout.contains("* LIST () \"/\" \"Archives\"\r\n"), "{tout}");
     assert!(
-        tout.contains("* LIST () \"/\" \"Archives/2026\"\r\n"),
+        tout.contains("* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n"),
+        "{tout}"
+    );
+    assert!(
+        tout.contains("* LIST (\\HasChildren) \"/\" \"Archives\"\r\n"),
+        "{tout}"
+    );
+    assert!(
+        tout.contains("* LIST (\\HasNoChildren) \"/\" \"Archives/2026\"\r\n"),
         "{tout}"
     );
 
@@ -3837,7 +3844,7 @@ fn une_boite_creee_apparait_dans_la_liste() {
     assert!(texte.contains("a002 OK CREATE completed"), "{texte}");
     let (liste, _) = dire(&mut session, b"a003 LIST \"\" *\r\n");
     assert!(
-        liste.contains("* LIST () \"/\" \"Brouillons\"\r\n"),
+        liste.contains("* LIST (\\HasNoChildren) \"/\" \"Brouillons\"\r\n"),
         "{liste}"
     );
 }
@@ -3910,7 +3917,7 @@ fn un_nom_avec_un_espace_se_cree_et_se_cite() {
     assert!(texte.contains("a002 OK CREATE completed"), "{texte}");
     let (liste, _) = dire(&mut session, b"a003 LIST \"\" *\r\n");
     assert!(
-        liste.contains("* LIST () \"/\" \"Sent Messages\"\r\n"),
+        liste.contains("* LIST (\\HasNoChildren) \"/\" \"Sent Messages\"\r\n"),
         "{liste}"
     );
 }
@@ -4015,12 +4022,12 @@ fn une_boite_qui_a_des_filles_garde_son_nom() {
     assert!(texte.contains("a002 OK DELETE completed"), "{texte}");
     let (liste, _) = dire(&mut session, b"a003 LIST \"\" *\r\n");
     assert!(
-        liste.contains("* LIST (\\Noselect) \"/\" \"Archives\"\r\n"),
+        liste.contains("* LIST (\\Noselect \\HasChildren) \"/\" \"Archives\"\r\n"),
         "{liste}"
     );
     // Et la fille est toujours atteignable.
     assert!(
-        liste.contains("* LIST () \"/\" \"Archives/2026\"\r\n"),
+        liste.contains("* LIST (\\HasNoChildren) \"/\" \"Archives/2026\"\r\n"),
         "{liste}"
     );
 }
@@ -4251,6 +4258,151 @@ fn un_rename_avant_authentification_est_refuse() {
     let (texte, _) = dire(&mut session, b"a001 RENAME a b\r\n");
     assert!(
         texte.contains("BAD Command is not allowed before authentication"),
+        "{texte}"
+    );
+}
+
+// ── `NAMESPACE`, `ENABLE`, et ce qu'un `LIST` doit dire ─────────────────────
+
+/// **`NAMESPACE` DIT OÙ LES BOÎTES VIVENT** (§6.3.10), et `NIL` n'est pas « je ne
+/// sais pas » : c'est « il n'y en a pas ». Un client qui lirait une liste vide
+/// chercherait encore.
+#[test]
+fn namespace_dit_l_espace_et_l_absence_des_autres() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (texte, action) = dire(&mut session, b"a002 NAMESPACE\r\n");
+    assert_eq!(action, Action::Continue);
+    assert_eq!(
+        texte,
+        "* NAMESPACE ((\"\" \"/\")) NIL NIL\r\na002 OK NAMESPACE completed\r\n"
+    );
+}
+
+/// Avant l'authentification, il n'y a pas d'espace à dire.
+#[test]
+fn namespace_avant_l_authentification_est_une_faute() {
+    let mut session = nouvelle(true);
+    let (texte, _) = dire(&mut session, b"a001 NAMESPACE\r\n");
+    assert!(
+        texte.contains("BAD Command is not allowed before authentication"),
+        "{texte}"
+    );
+}
+
+/// **`ENABLE` N'ACTIVE RIEN, ET LE DIT.** Se taire laisserait le client se
+/// demander si la commande a été comprise.
+#[test]
+fn enable_n_active_rien_et_le_dit() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (texte, _) = dire(&mut session, b"a002 ENABLE CONDSTORE\r\n");
+    assert_eq!(texte, "* ENABLED\r\na002 OK ENABLE completed\r\n");
+}
+
+/// **L'ÉTAT COMPTE** : §6.3.1 réserve `ENABLE` à l'état authentifié, AVANT toute
+/// sélection — une extension activée en cours de session changerait ce que des
+/// réponses déjà en vol signifient.
+#[test]
+fn enable_ne_s_active_pas_une_boite_ouverte() {
+    let mut session = selectionnee();
+    let (texte, _) = dire(&mut session, b"a003 ENABLE CONDSTORE\r\n");
+    assert!(
+        texte.contains("BAD ENABLE is not allowed while a mailbox is selected"),
+        "{texte}"
+    );
+    // Et sans rien à activer, il n'y a rien à demander.
+    let mut autre = nouvelle(true);
+    dire(&mut autre, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (vide, _) = dire(&mut autre, b"a002 ENABLE\r\n");
+    assert!(
+        vide.contains("BAD ENABLE expects at least one capability"),
+        "{vide}"
+    );
+    // Avant l'authentification non plus.
+    let mut nue = nouvelle(true);
+    let (tot, _) = dire(&mut nue, b"a001 ENABLE CONDSTORE\r\n");
+    assert!(
+        tot.contains("BAD Command is not allowed before authentication"),
+        "{tot}"
+    );
+}
+
+/// **TOUT `LIST` PORTE `\HasChildren` OU `\HasNoChildren`** (§7.3.1). Ne rien
+/// dire obligerait le client à interroger chaque boîte pour savoir s'il faut
+/// dessiner un triangle d'ouverture.
+#[test]
+fn un_list_dit_toujours_s_il_y_a_des_filles() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (texte, _) = dire(&mut session, b"a002 LIST \"\" *\r\n");
+    assert!(
+        texte.contains("* LIST (\\HasNoChildren) \"/\" \"INBOX\""),
+        "{texte}"
+    );
+    assert!(
+        texte.contains("* LIST (\\HasChildren) \"/\" \"Archives\""),
+        "{texte}"
+    );
+    assert!(
+        texte.contains("* LIST (\\HasNoChildren) \"/\" \"Archives/2026\""),
+        "{texte}"
+    );
+}
+
+/// Une commande d'état qu'on ne sert pas se refuse avant l'authentification pour
+/// ce qu'elle est — non authentifiée —, et non pour ce qu'elle demande.
+#[test]
+fn une_commande_de_boite_avant_l_authentification_est_une_faute() {
+    let mut session = nouvelle(true);
+    let (texte, _) = dire(&mut session, b"a001 SUBSCRIBE Archives\r\n");
+    assert!(
+        texte.contains("BAD Command is not allowed before authentication"),
+        "{texte}"
+    );
+}
+
+/// Un tampon trop court le dit, pour l'espace comme pour l'activation.
+#[test]
+fn un_tampon_trop_court_pour_ces_reponses_le_dit() {
+    for commande in [&b"a002 NAMESPACE\r\n"[..], b"a002 ENABLE CONDSTORE\r\n"] {
+        for taille in 1..=40_usize {
+            let mut session = nouvelle(true);
+            dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+            let mut petit = std::vec![0_u8; taille];
+            // Ce qui ne tient pas se dit ; ce qui tient se rend.
+            match session.handle(commande, &mut petit) {
+                Ok(tour) => assert!(!tour.reply().is_empty()),
+                Err(erreur) => assert!(matches!(erreur, super::Error::Reply(_)), "{erreur:?}"),
+            }
+        }
+    }
+}
+
+/// Une boîte effacée SANS fille porte les deux marques aussi : elle ne s'ouvre
+/// pas, et elle n'en a pas.
+#[test]
+fn une_boite_videe_sans_fille_porte_les_deux_marques() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut session, b"a002 DELETE Archives/2026\r\n");
+    let (texte, _) = dire(&mut session, b"a003 LIST \"\" *\r\n");
+    assert!(
+        texte.contains("* LIST (\\Noselect \\HasNoChildren) \"/\" \"Archives/2026\""),
+        "{texte}"
+    );
+}
+
+/// Une boîte effacée qui avait des filles porte les deux marques : elle ne
+/// s'ouvre pas, et elle en a.
+#[test]
+fn une_boite_videe_porte_les_deux_marques() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut session, b"a002 DELETE Archives\r\n");
+    let (texte, _) = dire(&mut session, b"a003 LIST \"\" *\r\n");
+    assert!(
+        texte.contains("* LIST (\\Noselect \\HasChildren) \"/\" \"Archives\""),
         "{texte}"
     );
 }
