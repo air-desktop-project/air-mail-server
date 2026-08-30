@@ -1973,3 +1973,101 @@ fn une_reponse_conclue_recharge_le_budget() {
         assert_eq!(connexion.streams().state(servi), Some(StreamState::Closed));
     }
 }
+
+/// Encode un bloc d'en-têtes de requête, tel qu'un client l'enverrait.
+fn bloc_de_requete(champs: &[(&[u8], &[u8])]) -> std::vec::Vec<u8> {
+    let mut octets = [0_u8; 1024];
+    let mut ecrits = 0_usize;
+    for (nom, valeur) in champs {
+        let place = octets.get_mut(ecrits..).expect("la place");
+        ecrits = ecrits
+            .saturating_add(crate::hpack::encode_field(nom, valeur, place).expect("encodable"));
+    }
+    octets.get(..ecrits).unwrap_or_default().to_vec()
+}
+
+/// **LA JOINTURE** : un bloc décodé devient une requête, et tout un bloc tient
+/// dans un seul tampon.
+#[test]
+fn un_bloc_devient_une_requete() {
+    let mut connexion = ouverte();
+    let bloc = bloc_de_requete(&[
+        (b":method", b"GET"),
+        (b":scheme", b"https"),
+        (b":authority", b"exemple.test"),
+        (b":path", b"/comptes/7"),
+        (b"accept", b"application/json"),
+    ]);
+    let mut place = [0_u8; 1024];
+    let requete = connexion
+        .read_head(&bloc, &mut place, &ams_proto_http::Limits::DEFAULT)
+        .expect("une requête bien formée");
+    assert_eq!(requete.method(), ams_proto_http::Method::Get);
+    assert_eq!(requete.scheme(), b"https");
+    assert_eq!(requete.authority(), b"exemple.test");
+    assert_eq!(requete.path(), b"/comptes/7");
+    assert_eq!(
+        requete.field(b"accept"),
+        Some(b"application/json".as_slice())
+    );
+}
+
+/// **DEUX FAMILLES DE FAUTES, ET ELLES NE SE PUNISSENT PAS PAREIL.** Une faute
+/// de compression condamne la connexion ; une liste qui ne fait pas une requête
+/// ne condamne que son flux (§8.1.1).
+#[test]
+fn une_liste_malformee_ne_condamne_que_son_flux() {
+    let mut connexion = ouverte();
+    let mut place = [0_u8; 1024];
+
+    // Il manque `:path` : la requête est malformée, la connexion va bien.
+    let bloc = bloc_de_requete(&[
+        (b":method", b"GET"),
+        (b":scheme", b"https"),
+        (b":authority", b"exemple.test"),
+    ]);
+    let issue = connexion
+        .read_head(&bloc, &mut place, &ams_proto_http::Limits::DEFAULT)
+        .expect_err("il manque un pseudo");
+    assert_eq!(issue.cause(), Cause::MalformedRequest);
+    assert_eq!(issue.code(), ErrorCode::ProtocolError);
+    assert!(!issue.is_fatal(), "la connexion n'a rien perdu");
+
+    // Un champ propre à la connexion : §8.2.2, et c'est encore le flux.
+    let bloc = bloc_de_requete(&[
+        (b":method", b"GET"),
+        (b":scheme", b"https"),
+        (b":authority", b"exemple.test"),
+        (b":path", b"/"),
+        (b"transfer-encoding", b"chunked"),
+    ]);
+    let issue = connexion
+        .read_head(&bloc, &mut place, &ams_proto_http::Limits::DEFAULT)
+        .expect_err("§8.2.2");
+    assert!(!issue.is_fatal());
+
+    // Un index HPACK qui ne désigne rien : la table est perdue, la connexion
+    // aussi.
+    let issue = connexion
+        .read_head(&[0xff, 0x7f], &mut place, &ams_proto_http::Limits::DEFAULT)
+        .expect_err("un index hors table");
+    assert_eq!(issue.code(), ErrorCode::CompressionError);
+    assert!(issue.is_fatal(), "la table est partagée : tout est perdu");
+}
+
+/// Le tampon de décodage ne suffit pas.
+#[test]
+fn le_decodage_veut_de_la_place() {
+    let mut connexion = ouverte();
+    let bloc = bloc_de_requete(&[
+        (b":method", b"GET"),
+        (b":scheme", b"https"),
+        (b":authority", b"un-nom-de-domaine-plutot-long.exemple.test"),
+        (b":path", b"/"),
+    ]);
+    let mut petit = [0_u8; 16];
+    let issue = connexion
+        .read_head(&bloc, &mut petit, &ams_proto_http::Limits::DEFAULT)
+        .expect_err("pas la place");
+    assert_eq!(issue.cause(), Cause::BufferTooSmall);
+}

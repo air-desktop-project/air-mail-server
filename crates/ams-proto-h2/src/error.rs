@@ -181,6 +181,8 @@ pub enum Cause {
     BadResponseField,
     /// Une tête de réponse ne tient pas dans un cadre.
     ResponseHeadTooLong,
+    /// La liste d'en-têtes décodée ne fait pas une requête (§8.3).
+    MalformedRequest,
 }
 
 impl Error {
@@ -256,6 +258,7 @@ impl fmt::Display for Error {
             Cause::TooManyCancellations => "trop de flux annulés avant d'être servis",
             Cause::BadResponseField => "un champ de réponse qu'on refuse d'écrire",
             Cause::ResponseHeadTooLong => "une tête de réponse ne tient pas dans un cadre",
+            Cause::MalformedRequest => "la liste d'en-têtes ne fait pas une requête",
         };
         let portee = match self.fatal {
             true => "connexion",

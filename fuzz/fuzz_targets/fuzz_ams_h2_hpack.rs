@@ -182,9 +182,10 @@ fuzz_target!(|entree: Entree<'_>| {
             let Ok(issue) = decodeur.next(reste, &mut place) else {
                 break;
             };
-            let Some((champ, lus)) = issue else {
+            let Some(decode) = issue else {
                 break;
             };
+            let (champ, lus) = (decode.field, decode.read);
             assert!(lus >= 1, "un champ rendu sans consommer d'octet");
             assert!(lus <= reste.len(), "un champ a mangé plus que le bloc");
 
@@ -232,13 +233,13 @@ fuzz_target!(|entree: Entree<'_>| {
         let mut relecteur = Decoder::new();
         relecteur.begin_block();
         let mut relu = vec![0_u8; nom.len().saturating_add(valeur.len()).saturating_add(64)];
-        let (champ, lus) = relecteur
+        let decode = relecteur
             .next(ecrit.get(..ecrits).unwrap_or_default(), &mut relu)
             .expect("ce qu'on écrit se relit")
             .expect("un champ");
-        assert_eq!(champ.name, nom, "un nom réécrit a changé");
-        assert_eq!(champ.value, valeur, "une valeur réécrite a changé");
-        assert_eq!(lus, ecrits, "on relit exactement ce qu'on a écrit");
+        assert_eq!(decode.field.name, nom, "un nom réécrit a changé");
+        assert_eq!(decode.field.value, valeur, "une valeur réécrite a changé");
+        assert_eq!(decode.read, ecrits, "on relit exactement ce qu'on a écrit");
         // PROPRIÉTÉ 10 : rien n'entre en table, jamais.
         assert!(
             relecteur.table().is_empty(),

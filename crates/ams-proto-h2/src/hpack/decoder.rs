@@ -50,6 +50,28 @@ pub enum Sensitivity {
     NeverIndexed,
 }
 
+/// Ce qu'un champ décodé laisse derrière lui.
+///
+/// # POURQUOI LE RESTE DU TAMPON EN FAIT PARTIE
+///
+/// Un champ décodé EMPRUNTE le tampon qu'on a donné. Sans rendre ce qui n'a pas
+/// servi, l'appelant ne peut décoder qu'UN champ par tampon : le second appel
+/// voudrait le réemprunter, et l'emprunt du premier n'est pas fini — il vit
+/// dans le champ qu'on garde.
+///
+/// Ce n'était pas une gêne théorique : le décodeur était inutilisable pour ce à
+/// quoi il sert, et cela ne s'est vu qu'en écrivant l'appelant. **Une interface
+/// ne se juge pas sur ce qu'elle promet, mais sur ce qu'on peut en faire.**
+#[derive(Debug)]
+pub struct Decoded<'o> {
+    /// Le champ.
+    pub field: Field<'o>,
+    /// Ce qui a été consommé du bloc.
+    pub read: usize,
+    /// Ce qui reste du tampon, pour le champ suivant.
+    pub rest: &'o mut [u8],
+}
+
 /// Un champ décodé.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Field<'a> {
@@ -116,7 +138,7 @@ impl Decoder {
         &mut self,
         bloc: &[u8],
         out: &'o mut [u8],
-    ) -> Result<Option<(Field<'o>, usize)>, Error> {
+    ) -> Result<Option<Decoded<'o>>, Error> {
         let Some(premier) = bloc.first().copied() else {
             return Ok(None);
         };
@@ -137,7 +159,10 @@ impl Decoder {
             // La mise à jour ne rend rien : on enchaîne sur ce qui suit, et
             // l'appelant ne voit que des champs.
             return match self.next(suite, out)? {
-                Some((champ, apres)) => Ok(Some((champ, lus.saturating_add(apres)))),
+                Some(decode) => Ok(Some(Decoded {
+                    read: lus.saturating_add(decode.read),
+                    ..decode
+                })),
                 None => Ok(None),
             };
         }
@@ -147,8 +172,12 @@ impl Decoder {
         if premier & 0b1000_0000 != 0 {
             let (index, lus) = decode_integer(bloc, 7)?;
             let (nom, valeur) = self.chercher(index)?;
-            let champ = poser(nom, valeur, Sensitivity::Ordinary, out)?;
-            return Ok(Some((champ, lus)));
+            let (field, rest) = poser(nom, valeur, Sensitivity::Ordinary, out)?;
+            return Ok(Some(Decoded {
+                field,
+                read: lus,
+                rest,
+            }));
         }
 
         // §6.2 : LES TROIS LITTÉRAUX. **LE PLUS LONG MOTIF D'ABORD** :
@@ -213,24 +242,25 @@ impl Decoder {
             longueur
         };
 
-        // LES DEUX ONT ÉTÉ ÉCRITS DANS `out` : la coupure y tient. Le `min`
-        // rend `split_at_mut` total — il panique au-delà, et une panique vaut
-        // moins qu'une borne —, et `unwrap_or_default` fait le reste.
+        // LES DEUX ONT ÉTÉ ÉCRITS DANS `out` : les deux coupures y tiennent. Le
+        // `min` rend `split_at_mut` total — il panique au-delà, et une panique
+        // vaut moins qu'une borne —, et `unwrap_or_default` fait le reste.
         let (place_nom, apres) = out.split_at_mut(nom_len.min(out.len()));
-        let place_valeur = apres.get_mut(..valeur_len).unwrap_or_default();
+        let (place_valeur, rest) = apres.split_at_mut(valeur_len.min(apres.len()));
         if indexer {
             // L'insertion RECOPIE : la table a son arène, et les tranches qu'on
             // vient d'écrire vivent dans celle de l'appelant.
             self.table.insert(place_nom, place_valeur);
         }
-        Ok(Some((
-            Field {
+        Ok(Some(Decoded {
+            field: Field {
                 name: place_nom,
                 value: place_valeur,
                 sensitivity: sensibilite,
             },
-            consommes,
-        )))
+            read: consommes,
+            rest,
+        }))
     }
 
     /// L'entrée d'un index, statique ou dynamique (§2.3.3).
@@ -256,18 +286,23 @@ fn poser<'o>(
     valeur: &[u8],
     sensibilite: Sensitivity,
     out: &'o mut [u8],
-) -> Result<Field<'o>, Error> {
+) -> Result<(Field<'o>, &'o mut [u8]), Error> {
     let court = || Error::connection(ErrorCode::CompressionError, Cause::BufferTooSmall);
     let fin = nom.len().saturating_add(valeur.len());
-    let place = out.get_mut(..fin).ok_or_else(court)?;
+    let Some((place, reste)) = out.split_at_mut_checked(fin) else {
+        return Err(court());
+    };
     let (place_nom, place_valeur) = place.split_at_mut(nom.len());
     place_nom.copy_from_slice(nom);
     place_valeur.copy_from_slice(valeur);
-    Ok(Field {
-        name: place_nom,
-        value: place_valeur,
-        sensitivity: sensibilite,
-    })
+    Ok((
+        Field {
+            name: place_nom,
+            value: place_valeur,
+            sensitivity: sensibilite,
+        },
+        reste,
+    ))
 }
 
 #[cfg(test)]

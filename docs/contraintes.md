@@ -3002,3 +3002,36 @@ C'est la sixième garde inatteignable retirée sur cet étage. Le compte des
 régions couvertes les trouve toutes, et **c'est là son intérêt principal** :
 bien plus que de prouver que les tests passent partout, il montre les endroits
 où le code prétend se défendre contre ce qui ne peut pas arriver.
+
+## La jointure : d'un bloc décodé à une requête
+
+`Event::Head` désigne un bloc dans l'accumulateur ; `Connection::read_head` en
+fait une `RequestHead`. C'est trois lignes de code et deux décisions.
+
+### Une interface ne se juge pas sur ce qu'elle promet
+
+Le décodeur HPACK rendait un champ qui EMPRUNTE le tampon fourni. L'appelant ne
+pouvait donc décoder qu'UN champ par tampon : le second appel voulait le
+réemprunter, et l'emprunt du premier n'était pas fini — il vivait dans le champ
+qu'on venait de garder.
+
+Le décodeur était ainsi inutilisable pour ce à quoi il sert, et **cela ne s'est
+vu qu'en écrivant l'appelant**. Ni les tests ni le fuzz ne l'avaient montré : les
+uns décodaient un champ à la fois avec un tampon neuf, l'autre recopiait chaque
+paire avant de passer à la suivante. Tous deux contournaient le défaut sans le
+nommer.
+
+Il rend maintenant aussi CE QU'IL N'A PAS EMPLOYÉ, et tout un bloc se décode
+dans un seul tampon.
+
+### Deux familles de fautes, et elles ne se punissent pas pareil
+
+Une faute de COMPRESSION condamne la connexion : la table est partagée, et un
+décodeur qui s'est trompé une fois ne saura plus rien lire. Une liste bien
+décomprimée mais qui ne fait pas une requête — un pseudo-en-tête manquant, deux
+autorités qui se contredisent — ne condamne que son FLUX (§8.1.1).
+
+Les confondre coûterait cher dans les deux sens. Fermer la connexion sur une
+requête malformée, c'est offrir à un client maladroit d'emporter les requêtes
+des autres. Ne fermer que le flux sur une faute HPACK, c'est continuer à lire
+une table dont on ne sait plus rien.

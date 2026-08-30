@@ -29,7 +29,7 @@ mod string;
 mod table_huffman;
 mod table_statique;
 
-pub use decoder::{Decoder, Field, Sensitivity};
+pub use decoder::{Decoded, Decoder, Field, Sensitivity};
 pub use dynamique::{Dynamique, TABLE_SIZE_MAX};
 pub use encoder::{encode_field, encode_status};
 pub use huffman::{decode_huffman, encode_huffman, encoded_huffman_len};

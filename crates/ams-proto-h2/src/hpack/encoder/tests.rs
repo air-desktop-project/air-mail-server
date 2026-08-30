@@ -15,11 +15,12 @@ fn aller_retour(nom: &[u8], valeur: &[u8]) -> (usize, std::vec::Vec<u8>, std::ve
     let mut decodeur = Decoder::new();
     decodeur.begin_block();
     let mut place = [0_u8; 1024];
-    let (champ, lus) = decodeur
+    let decode = decodeur
         .next(ecrit.get(..ecrits).unwrap_or_default(), &mut place)
         .expect("relisible")
         .expect("un champ");
-    assert_eq!(lus, ecrits, "on relit exactement ce qu'on a écrit");
+    let champ = decode.field;
+    assert_eq!(decode.read, ecrits, "on relit exactement ce qu'on a écrit");
     // **LA TABLE RESTE VIDE CHEZ LE LECTEUR AUSSI** : on n'indexe jamais.
     assert!(
         decodeur.table().is_empty(),

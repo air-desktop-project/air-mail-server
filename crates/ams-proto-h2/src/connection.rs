@@ -51,7 +51,8 @@ use crate::preface::{Preface, read_preface};
 use crate::settings::{Settings, SettingsReader};
 use crate::stream::{StreamState, Streams};
 use ams_proto_http::{
-    FieldKind, StatusCode, field_kind, field_value_is_valid, is_connection_specific,
+    FieldKind, HeadBuilder, Limits, RequestHead, StatusCode, field_kind, field_value_is_valid,
+    is_connection_specific,
 };
 
 /// La charge d'un `PING`, en octets (§6.7).
@@ -316,6 +317,57 @@ impl Connection {
     /// finirait par tomber sur des annulations parfaitement légitimes.
     pub const fn response_sent(&mut self) {
         self.annulations = self.annulations.saturating_sub(1);
+    }
+
+    /// Lit un bloc d'en-têtes complet, et en fait une requête.
+    ///
+    /// `bloc` est ce que [`Event::Head`] a désigné dans l'accumulateur ; `out`
+    /// reçoit les noms et les valeurs décodés, que la requête rendue emprunte.
+    ///
+    /// # IL FAUT L'APPELER MÊME POUR UN FLUX REFUSÉ
+    ///
+    /// La table dynamique HPACK est commune à toute la connexion, et se met à
+    /// jour dans l'ordre des blocs. Sauter celui d'un flux refusé la décalerait
+    /// pour tous les suivants. On décode, puis on jette.
+    ///
+    /// # DEUX FAMILLES DE FAUTES, ET ELLES NE SE PUNISSENT PAS PAREIL
+    ///
+    /// Une faute de COMPRESSION condamne la connexion : la table est partagée,
+    /// et un décodeur qui s'est trompé une fois ne saura plus rien lire. Une
+    /// liste bien décomprimée mais qui ne fait pas une requête — un
+    /// pseudo-en-tête manquant, deux autorités qui se contredisent — ne
+    /// condamne que son FLUX (§8.1.1) : la connexion, elle, n'a rien perdu.
+    ///
+    /// Les confondre coûterait cher dans les deux sens. Fermer la connexion sur
+    /// une requête malformée, c'est offrir à un client maladroit d'emporter
+    /// celles des autres ; ne fermer que le flux sur une faute HPACK, c'est
+    /// continuer à lire une table dont on ne sait plus rien.
+    ///
+    /// # Errors
+    ///
+    /// Les fautes de §6 de RFC 7541, fatales ; [`Cause::MalformedRequest`] pour
+    /// une liste qui ne fait pas une requête, et qui ne l'est pas.
+    pub fn read_head<'o>(
+        &mut self,
+        bloc: &[u8],
+        out: &'o mut [u8],
+        limits: &Limits,
+    ) -> Result<RequestHead<'o>, Error> {
+        let malformee = || Error::stream(ErrorCode::ProtocolError, Cause::MalformedRequest);
+        self.decodeur.begin_block();
+        let mut tete = HeadBuilder::new(limits);
+        let mut reste = bloc;
+        let mut libre = out;
+        while let Some(decode) = self.decodeur.next(reste, libre)? {
+            // **LE DÉCODEUR REND CE QU'IL N'A PAS EMPLOYÉ**, et c'est ce qui
+            // permet de décoder tout un bloc dans un seul tampon : sans cela,
+            // le champ déjà rendu emprunterait encore celui du suivant.
+            libre = decode.rest;
+            reste = reste.get(decode.read..).unwrap_or_default();
+            tete.field(decode.field.name, decode.field.value)
+                .map_err(|_| malformee())?;
+        }
+        tete.finish().map_err(|_| malformee())
     }
 
     /// Range un cadre, et écrit ce qu'il faut répondre.

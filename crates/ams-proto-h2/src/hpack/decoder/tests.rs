@@ -17,10 +17,15 @@ fn lire(decodeur: &mut Decoder, bloc: &[u8]) -> Result<std::vec::Vec<Recopie>, c
     let mut reste = bloc;
     let mut champs = std::vec::Vec::new();
     let mut place = [0_u8; 8192];
-    while let Some((champ, lus)) = decodeur.next(reste, &mut place)? {
+    // **UN SEUL TAMPON POUR TOUT LE BLOC**, et c'est le décodeur qui rend ce
+    // qu'il n'a pas employé : sans cela, chaque champ voudrait le sien.
+    let mut libre = place.as_mut_slice();
+    while let Some(decode) = decodeur.next(reste, libre)? {
+        let champ = decode.field;
         champs.push((champ.name.to_vec(), champ.value.to_vec(), champ.sensitivity));
-        assert!(lus > 0, "le décodeur n'avance pas");
-        reste = reste.get(lus..).unwrap_or_default();
+        assert!(decode.read > 0, "le décodeur n'avance pas");
+        reste = reste.get(decode.read..).unwrap_or_default();
+        libre = decode.rest;
     }
     Ok(champs)
 }
@@ -173,10 +178,11 @@ fn une_mise_a_jour_de_taille_vient_au_debut() {
     let mut decodeur = Decoder::new();
     let mut place = [0_u8; 64];
     decodeur.begin_block();
-    let (_, lus) = decodeur
+    let lus = decodeur
         .next(&[0x82, 0x20], &mut place)
         .expect("le champ passe")
-        .expect("un champ");
+        .expect("un champ")
+        .read;
     let issue = decodeur
         .next([0x82_u8, 0x20].get(lus..).unwrap_or_default(), &mut place)
         .expect_err("refusé");
@@ -273,12 +279,13 @@ fn un_tampon_trop_court_le_dit() {
     }
     let mut juste = [0_u8; 6];
     decodeur.begin_block();
-    let (champ, _) = decodeur
+    let decode = decodeur
         .next(&[0x04, 0x01, b'/'], &mut juste)
         .expect("six octets suffisent")
         .expect("un champ");
-    assert_eq!(champ.name, b":path");
-    assert_eq!(champ.value, b"/");
+    assert_eq!(decode.field.name, b":path");
+    assert_eq!(decode.field.value, b"/");
+    assert!(decode.rest.is_empty(), "six octets, et pas un de reste");
 
     // Et le nom en clair suit la même règle.
     for taille in 0..2_usize {

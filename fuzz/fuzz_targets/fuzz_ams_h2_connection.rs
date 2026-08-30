@@ -50,7 +50,7 @@ use ams_proto_h2::{
     CODE_OCTETS, Event, FRAME_HEADER_OCTETS, FrameHeader, FrameKind, FrameReader, Handshake,
     MAX_CONCURRENT_STREAMS, Need, PREFACE, Settings, WINDOW_MAX,
 };
-use ams_proto_http::StatusCode;
+use ams_proto_http::{Limits, StatusCode};
 
 /// L'accumulateur de blocs d'en-têtes.
 const BLOC: usize = 16 * 1024;
@@ -233,6 +233,24 @@ fuzz_target!(|donnees: &[u8]| {
                     // **ON RÉPOND, ET C'EST LÀ QUE L'ÉMISSION S'ÉPROUVE.** La
                     // requête est complète : le serveur écrirait sa réponse ici.
                     repondre(&mut connexion, stream);
+                }
+                // **LE BLOC SE DÉCODE, REFUSÉ OU NON** : la table dynamique est
+                // commune à la connexion, et sauter un bloc la décalerait pour
+                // tous les suivants.
+                let mut champs = [0_u8; BLOC];
+                let lu = bloc.get(..octets).unwrap_or_default();
+                // Le tampon de sortie est aussi grand que l'accumulateur, et il
+                // n'y a donc qu'une raison de manquer de place : une bombe de
+                // décompression, que la borne de la liste arrête.
+                match connexion.read_head(lu, &mut champs, &Limits::DEFAULT) {
+                    Ok(requete) => {
+                        assert!(
+                            !requete.path().is_empty(),
+                            "une requête acceptée sans chemin"
+                        );
+                    }
+                    Err(erreur) if erreur.is_fatal() => return,
+                    Err(_) => {}
                 }
             }
             Event::Data { payload, .. } => {
