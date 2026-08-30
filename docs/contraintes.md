@@ -2405,8 +2405,10 @@ Maildir), SMTP à l'émission (rapports DMARC), POP3, et IMAP — `SELECT`,
 `UID`. Chacun a été éprouvé de bout en bout contre le binaire, et pas
 seulement en tests.
 
-**HTTP n'est pas servi** : `ams-proto-http` est un emplacement réservé, et son
-en-tête le dit.
+**HTTP est en cours** : `ams-proto-http` porte la sémantique de RFC 9110 — les
+méthodes, les codes d'état, ce qu'un champ a le droit d'être, et les règles de
+§8.3 qui disent si une liste de champs est recevable. Le CADRAGE — h2, h3 — n'y
+est pas encore, et aucun port HTTP n'est ouvert.
 
 Sont outillées : C1 (les trois étages, et la couverture qui n'est exigible que
 parce qu'ils sont séparés), C2 (le gate mesure 23 578 régions sur 16 crates,
@@ -2449,3 +2451,78 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants, et
 toute interface HTTP.
+
+## HTTP : h2 et h3, et pas HTTP/1.1
+
+Décidé le 2026-08-30, et c'est une décision au sens de C6.
+
+**LE CADRAGE D'HTTP/1.1 EST TEXTUEL, ET SA LONGUEUR SE DÉDUIT DE DEUX CHAMPS QUI
+PEUVENT SE CONTREDIRE** — `Content-Length` et `Transfer-Encoding`. Toute la
+famille des attaques par contrebande de requête vit dans cette contradiction, et
+dans les désaccords d'analyse entre deux implémentations qui se relaient : l'une
+lit une requête là où l'autre en lit deux, et la seconde n'a été envoyée par
+personne.
+
+HTTP/2 (RFC 9113) et HTTP/3 (RFC 9114) n'ont pas ce défaut. La longueur d'un
+cadre est un nombre, écrit une fois ; `Transfer-Encoding` y est **interdit**
+(§8.2.2) ; les noms de champs sont en minuscules, sans quoi la requête est mal
+formée ; et un `CR` ou un `LF` dans une valeur la rend mal formée aussi. C'est le
+même raisonnement, mot pour mot, que celui qui a fermé la contrebande SMTP dans
+ce dépôt : **un octet de structure ne se transporte pas dans de la donnée**.
+
+**LA CONSÉQUENCE EST RÉELLE ET SE DIT** : un client qui ne parle que HTTP/1.1 ne
+pourra pas joindre ce serveur. La négociation passe par ALPN, donc explicitement,
+et un client qui n'offre ni `h2` ni `h3` est refusé avant la première requête
+plutôt qu'après. Certaines bibliothèques répandues — `requests` en Python, par
+exemple — ne parlent aujourd'hui que HTTP/1.1 ; le choix des clients de l'API
+REST devra en tenir compte, et c'est une question à trancher au moment de
+définir cette API, pas avant.
+
+### La sémantique ne s'écrit qu'une fois
+
+`ams-proto-http` ne cadre RIEN, et c'est tout son objet. h2 et h3 ne partagent
+aucun octet de cadrage, et leurs compressions d'en-têtes elles-mêmes diffèrent —
+HPACK d'un côté, QPACK de l'autre. Ce qu'ils partagent, c'est le SENS : une
+méthode, une cible, des champs, un code d'état, et les règles qui disent quelle
+liste de champs est recevable. **Les écrire deux fois, c'est se donner deux
+occasions de les écrire différemment** — et une différence entre les deux
+versions du même serveur est exactement ce qu'un attaquant cherche.
+
+### Ce que la grammaire refuse, et pourquoi chacun
+
+- **`CONNECT`** demande un tunnel : c'est la méthode d'un mandataire, et ce
+  serveur n'en est pas un. Sa forme est d'ailleurs à part — ni `:scheme` ni
+  `:path` —, si bien que l'accepter ouvrirait un second jeu de règles pour une
+  fonction qu'on ne rend pas. Le `CONNECT` étendu de RFC 8441, qui porte
+  WebSocket, tombe par la même porte.
+- **`TRACE`** renvoie la requête telle que reçue, en-têtes compris : c'est un
+  miroir à jetons et à cookies.
+- **Un nom de champ en majuscules** est mal formé, PAS corrigé. Le normaliser
+  laisserait passer deux écritures du même nom là où un intermédiaire n'en
+  accepte qu'une.
+- **Une espace au bord d'une valeur** : c'est ainsi que s'écrivait le repliement
+  d'en-tête d'HTTP/1.1, qu'un intermédiaire reconstituerait.
+- **Un pseudo-en-tête après un champ ordinaire**, un pseudo-en-tête répété, un
+  pseudo-en-tête inventé. Un intermédiaire qui ignorerait un nom inconnu et un
+  serveur qui l'honorerait ne verraient pas la même requête.
+- **`:authority` et `host` qui se contredisent** : deux autorités, c'est deux
+  serveurs d'origine possibles — la contrebande, déplacée dans le nom d'hôte.
+- **Deux `content-length` qui se contredisent** ; deux qui s'accordent sont
+  licites, et le restent.
+
+### La bombe de décompression a sa propre borne
+
+HPACK et QPACK compriment : mille champs identiques tiennent en quelques octets
+sur le fil et en plusieurs mébioctets une fois décomprimés. **Aucune borne PAR
+CHAMP ne l'arrête** — seule celle du TOTAL le fait. Elle se compte comme §6.5.2
+de RFC 9113 : nom, valeur, plus trente-deux octets par champ. Ces trente-deux-là
+ne sont pas sur le fil ; ils représentent ce qu'une entrée coûte à retenir, et
+les omettre ferait passer pour gratuits dix mille champs vides.
+
+Elle s'applique AVANT tout examen du champ : le coût d'un champ ne dépend pas de
+sa validité, et une bombe faite de champs invalides passerait sinon entre les
+gouttes.
+
+`SETTINGS_MAX_HEADER_LIST_SIZE` d'HTTP/2 existe, et ne remplace pas cette
+borne : c'est un RENSEIGNEMENT donné au pair, que rien n'oblige à respecter. Un
+serveur qui n'aurait que ce réglage pour se protéger n'aurait rien du tout.

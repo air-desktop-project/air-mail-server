@@ -36,6 +36,9 @@ path = "../crates/ams-mime"
 [dependencies.ams-proto-imap]
 path = "../crates/ams-proto-imap"
 
+[dependencies.ams-proto-http]
+path = "../crates/ams-proto-http"
+
 [dependencies.ams-dns]
 path = "../crates/ams-dns"
 
@@ -287,6 +290,13 @@ bench = false
 [[bin]]
 name = "fuzz_ams_session_imap"
 path = "fuzz_targets/fuzz_ams_session_imap.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ams_http_head"
+path = "fuzz_targets/fuzz_ams_http_head.rs"
 test = false
 doc = false
 bench = false
