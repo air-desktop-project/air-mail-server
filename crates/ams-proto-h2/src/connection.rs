@@ -46,10 +46,13 @@ use crate::block::{BlockState, HeaderBlock};
 use crate::error::{Cause, Error, ErrorCode};
 use crate::flow::{INITIAL_WINDOW_SIZE, Window};
 use crate::frame::{FRAME_HEADER_OCTETS, FrameHeader, FrameKind, Padded};
-use crate::hpack::Decoder;
+use crate::hpack::{Decoder, encode_field, encode_status};
 use crate::preface::{Preface, read_preface};
 use crate::settings::{Settings, SettingsReader};
 use crate::stream::{StreamState, Streams};
+use ams_proto_http::{
+    FieldKind, StatusCode, field_kind, field_value_is_valid, is_connection_specific,
+};
 
 /// La charge d'un `PING`, en octets (§6.7).
 pub const PING_OCTETS: usize = 8;
@@ -572,7 +575,9 @@ impl Connection {
             // lettres : le crédit a pu croiser notre `RST_STREAM` sur le fil, et
             // en faire une faute punirait un pair qui n'a rien fait de mal.
             Some(StreamState::Closed) => Ok((Event::Nothing, 0)),
-            Some(StreamState::Open | StreamState::HalfClosedRemote) => {
+            Some(
+                StreamState::Open | StreamState::HalfClosedRemote | StreamState::HalfClosedLocal,
+            ) => {
                 self.flux.credit_send(entete.stream(), ajout)?;
                 Ok((Event::Nothing, 0))
             }
@@ -622,9 +627,11 @@ impl Connection {
                 // premier. C7 tranche : ce qui n'apporte rien et ouvre un
                 // chemin de plus ne se sert pas. Le flux est annulé, et lui
                 // seul.
-                Some(StreamState::Open | StreamState::HalfClosedRemote) => {
-                    Some(ErrorCode::ProtocolError)
-                }
+                Some(
+                    StreamState::Open
+                    | StreamState::HalfClosedRemote
+                    | StreamState::HalfClosedLocal,
+                ) => Some(ErrorCode::ProtocolError),
                 // §5.1 : un `HEADERS` sur un flux fermé n'a plus de
                 // destinataire.
                 Some(StreamState::Closed) => Some(ErrorCode::StreamClosed),
@@ -740,6 +747,204 @@ impl Connection {
         ecrire_credit(id, credit, sortie)
     }
 
+    /// Écrit la tête d'une réponse : un `HEADERS` comprimé par HPACK.
+    ///
+    /// `end_stream` dit que la réponse n'a pas de corps.
+    ///
+    /// # ELLE TIENT DANS UN CADRE, OU ELLE NE PART PAS
+    ///
+    /// §6.10 permettrait de l'étaler sur des `CONTINUATION`. **On ne le fait
+    /// pas**, et c'est une décision : le pair annonce au moins seize kibioctets
+    /// de charge (§6.5.2), une tête de réponse qui n'y tient pas n'existe pas
+    /// dans un service qui va bien, et n'émettre jamais de `CONTINUATION` nous
+    /// retire de la liste de ceux qui peuvent en inonder un autre.
+    ///
+    /// # Errors
+    ///
+    /// [`Cause::WrongStreamState`] si le flux ne peut plus rien recevoir de
+    /// nous ; [`Cause::BadResponseField`] pour un champ qu'on refuse d'écrire ;
+    /// [`Cause::ResponseHeadTooLong`] ; [`Cause::BufferTooSmall`].
+    pub fn write_head(
+        &mut self,
+        stream: u32,
+        status: StatusCode,
+        champs: &[(&[u8], &[u8])],
+        end_stream: bool,
+        sortie: &mut [u8],
+    ) -> Result<usize, Error> {
+        self.exiger_ecrivable(stream)?;
+        for (nom, valeur) in champs {
+            verifier_champ(nom, valeur)?;
+        }
+        // **ON ÉCRIT LE BLOC D'ABORD, L'EN-TÊTE ENSUITE** : sa longueur n'est
+        // connue qu'une fois comprimée, et un tampon intermédiaire ferait une
+        // copie et une borne de plus.
+        let Some((tete, corps)) = sortie.split_at_mut_checked(FRAME_HEADER_OCTETS) else {
+            return Err(Error::connection(
+                ErrorCode::InternalError,
+                Cause::BufferTooSmall,
+            ));
+        };
+        let mut ecrits = encode_status(status.value(), corps)?;
+        for (nom, valeur) in champs {
+            let place = corps.get_mut(ecrits..).unwrap_or_default();
+            ecrits = ecrits.saturating_add(encode_field(nom, valeur, place)?);
+        }
+        let longueur = u32::try_from(ecrits).unwrap_or(u32::MAX);
+        if longueur > self.pair.max_frame_size {
+            return Err(Error::connection(
+                ErrorCode::InternalError,
+                Cause::ResponseHeadTooLong,
+            ));
+        }
+        let fanions = match end_stream {
+            true => DRAPEAU_FIN_DE_BLOC | DRAPEAU_FIN_DE_MESSAGE,
+            false => DRAPEAU_FIN_DE_BLOC,
+        };
+        tete.copy_from_slice(
+            &FrameHeader::new(FrameKind::Headers, fanions, stream, longueur).write(),
+        );
+        if end_stream {
+            self.conclure(stream);
+        }
+        Ok(FRAME_HEADER_OCTETS.saturating_add(ecrits))
+    }
+
+    /// Écrit autant de `corps` que les fenêtres et la place le permettent.
+    ///
+    /// Rend ce qui a été écrit dans `sortie` et ce qui a été pris de `corps`.
+    /// **Zéro et zéro n'est pas une faute** : c'est une fenêtre fermée, et
+    /// l'appelant attend le `WINDOW_UPDATE` du pair.
+    ///
+    /// # TROIS BORNES, ET C'EST LA PLUS PETITE QUI DÉCIDE
+    ///
+    /// La taille de cadre que le pair accepte, sa fenêtre de connexion, sa
+    /// fenêtre de flux. En oublier une, c'est écrire un cadre que le pair
+    /// traitera comme une faute de contrôle de flux — et il aura raison.
+    ///
+    /// # Errors
+    ///
+    /// [`Cause::WrongStreamState`] ; [`Cause::BufferTooSmall`] si `sortie` ne
+    /// tient même pas un en-tête de cadre.
+    pub fn write_data(
+        &mut self,
+        stream: u32,
+        corps: &[u8],
+        end_stream: bool,
+        sortie: &mut [u8],
+    ) -> Result<(usize, usize), Error> {
+        self.exiger_ecrivable(stream)?;
+        let Some((tete, place)) = sortie.split_at_mut_checked(FRAME_HEADER_OCTETS) else {
+            return Err(Error::connection(
+                ErrorCode::InternalError,
+                Cause::BufferTooSmall,
+            ));
+        };
+        // La plus petite des quatre : ce que le pair accepte par cadre, ce que
+        // ses deux fenêtres laissent passer, et la place qu'on a.
+        let fenetre_flux = self.flux.send_window(stream).unwrap_or_default();
+        let ouvert = self
+            .emission
+            .available()
+            .min(fenetre_flux.available())
+            .max(0);
+        let longueur = self
+            .pair
+            .max_frame_size
+            .min(u32::try_from(place.len()).unwrap_or(u32::MAX))
+            .min(u32::try_from(corps.len()).unwrap_or(u32::MAX))
+            .min(u32::try_from(ouvert).unwrap_or(u32::MAX));
+        let pris = usize::try_from(longueur).unwrap_or(usize::MAX);
+        // **UN CADRE VIDE NE S'ÉCRIT QUE POUR DIRE LA FIN.** Sans cela, une
+        // fenêtre fermée ferait envoyer des cadres qui ne portent rien.
+        let fin = end_stream && pris == corps.len();
+        if pris == 0 && !fin {
+            return Ok((0, 0));
+        }
+        let morceau = corps.get(..pris).unwrap_or_default();
+        place
+            .get_mut(..pris)
+            .unwrap_or_default()
+            .copy_from_slice(morceau);
+        // **ON PREND, ON NE CONSOMME PAS.** `longueur` vient d'être calculée À
+        // PARTIR de ces deux fenêtres : une méthode qui rendrait une faute la
+        // rendrait pour un appel que personne ne peut écrire.
+        self.emission.take(longueur);
+        self.flux.take_send(stream, longueur);
+        let fanions = match fin {
+            true => DRAPEAU_FIN_DE_MESSAGE,
+            false => 0,
+        };
+        tete.copy_from_slice(&FrameHeader::new(FrameKind::Data, fanions, stream, longueur).write());
+        if fin {
+            self.conclure(stream);
+        }
+        Ok((FRAME_HEADER_OCTETS.saturating_add(pris), pris))
+    }
+
+    /// Écrit un `RST_STREAM` et ferme le flux.
+    ///
+    /// # Errors
+    ///
+    /// [`Cause::BufferTooSmall`].
+    pub fn write_reset(
+        &mut self,
+        stream: u32,
+        code: ErrorCode,
+        sortie: &mut [u8],
+    ) -> Result<usize, Error> {
+        let poses = self.ecrire_annulation(stream, code, sortie)?;
+        self.flux.close(stream);
+        Ok(poses)
+    }
+
+    /// Écrit un `GOAWAY`, en disant jusqu'où on a traité.
+    ///
+    /// # LE DERNIER FLUX EST UNE PROMESSE, PAS UNE INDICATION
+    ///
+    /// §6.8 : au-delà de ce numéro, le pair sait que rien n'a été commencé, et
+    /// peut réémettre ailleurs sans risque de doublon. Annoncer plus haut que ce
+    /// qu'on a reçu ferait perdre des requêtes que personne ne saurait avoir
+    /// perdues.
+    ///
+    /// # Errors
+    ///
+    /// [`Cause::BufferTooSmall`].
+    pub fn write_goaway(&mut self, code: ErrorCode, sortie: &mut [u8]) -> Result<usize, Error> {
+        let mut charge = [0_u8; GOAWAY_OCTETS];
+        let (dernier, raison) = charge.split_at_mut(CODE_OCTETS);
+        dernier.copy_from_slice(&self.flux.last_received().to_be_bytes());
+        raison.copy_from_slice(&code.value().to_be_bytes());
+        let longueur = u32::try_from(GOAWAY_OCTETS).unwrap_or(u32::MAX);
+        let entete = FrameHeader::new(FrameKind::GoAway, 0, 0, longueur);
+        ecrire_cadre(entete, &charge, sortie)
+    }
+
+    /// Ce flux peut-il encore recevoir quelque chose de nous ?
+    fn exiger_ecrivable(&self, stream: u32) -> Result<(), Error> {
+        match self.flux.state(stream) {
+            Some(StreamState::Open | StreamState::HalfClosedRemote) => Ok(()),
+            // Un flux que le pair a annulé, ou dont nous avons déjà fini : la
+            // réponse arrive trop tard, et l'écrire serait parler dans le vide.
+            // Ce n'est pas une faute de connexion — c'est une course que §5.1
+            // prévoit.
+            _ => Err(Error::stream(
+                ErrorCode::StreamClosed,
+                Cause::WrongStreamState,
+            )),
+        }
+    }
+
+    /// Nous avons dit notre dernier mot sur ce flux.
+    ///
+    /// **ET LE BUDGET DES ANNULATIONS S'EN TROUVE RECHARGÉ** : une réponse menée
+    /// à son terme est exactement ce qui distingue un client qui travaille d'un
+    /// client qui fait travailler.
+    fn conclure(&mut self, stream: u32) {
+        self.flux.end_local(stream);
+        self.response_sent();
+    }
+
     /// Écrit un `RST_STREAM`.
     fn ecrire_annulation(
         &self,
@@ -755,6 +960,39 @@ impl Connection {
 /// Le fanion `ACK`, qui vaut aussi `END_STREAM` sur d'autres cadres — c'est le
 /// même bit, et son sens vient du type.
 const DRAPEAU_ACK: u8 = 0x1;
+
+/// `END_STREAM`, le même bit que `ACK` sous un autre nom.
+const DRAPEAU_FIN_DE_MESSAGE: u8 = 0x1;
+
+/// `END_HEADERS`.
+const DRAPEAU_FIN_DE_BLOC: u8 = 0x4;
+
+/// Ce champ peut-il figurer dans une réponse qu'on écrit ?
+///
+/// # CE QU'ON REFUSE D'ÉCRIRE, ON LE REFUSE AUSSI DE SOI-MÊME
+///
+/// §8.2.2 interdit les champs propres à la connexion, et §8.3 réserve le `:` aux
+/// pseudo-en-têtes — que cette couche écrit elle-même. Un serveur qui vérifie
+/// ces règles à la RÉCEPTION mais pas à l'ÉMISSION laisse l'intermédiaire
+/// suivant recevoir ce qu'il vient de refuser, et la contrebande repart de là.
+///
+/// La faute est `INTERNAL_ERROR` : c'est notre code qui a proposé ce champ, pas
+/// le pair.
+fn verifier_champ(nom: &[u8], valeur: &[u8]) -> Result<(), Error> {
+    let refus = || {
+        Err(Error::connection(
+            ErrorCode::InternalError,
+            Cause::BadResponseField,
+        ))
+    };
+    if field_kind(nom) != FieldKind::Ordinary || is_connection_specific(nom) {
+        return refus();
+    }
+    match field_value_is_valid(valeur) {
+        true => Ok(()),
+        false => refus(),
+    }
+}
 
 /// Le masque qui ôte le bit de réserve d'un numéro de flux ou d'un crédit.
 const MASQUE_RESERVE: u32 = 0x7fff_ffff;

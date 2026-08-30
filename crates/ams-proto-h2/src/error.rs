@@ -177,6 +177,10 @@ pub enum Cause {
     TooManyServiceFrames,
     /// Trop de flux annulés avant d'avoir été servis.
     TooManyCancellations,
+    /// Un champ de réponse que ce serveur refuse d'écrire.
+    BadResponseField,
+    /// Une tête de réponse ne tient pas dans un cadre.
+    ResponseHeadTooLong,
 }
 
 impl Error {
@@ -250,6 +254,8 @@ impl fmt::Display for Error {
             Cause::PushFromClient => "un client a poussé, ce que §8.4 lui interdit",
             Cause::TooManyServiceFrames => "trop de cadres qui ne font rien progresser",
             Cause::TooManyCancellations => "trop de flux annulés avant d'être servis",
+            Cause::BadResponseField => "un champ de réponse qu'on refuse d'écrire",
+            Cause::ResponseHeadTooLong => "une tête de réponse ne tient pas dans un cadre",
         };
         let portee = match self.fatal {
             true => "connexion",

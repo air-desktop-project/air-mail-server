@@ -278,7 +278,7 @@ fn la_fenetre_d_emission_est_une_autre_fenetre() {
         Some(i64::from(INITIAL_WINDOW_SIZE))
     );
 
-    flux.consume_send(1, 1_000).expect("il y a la place");
+    assert_eq!(flux.take_send(1, 1_000), 1_000, "il y a la place");
     assert_eq!(
         flux.send_window(1).map(|f| f.available()),
         Some(i64::from(INITIAL_WINDOW_SIZE) - 1_000)
@@ -289,13 +289,16 @@ fn la_fenetre_d_emission_est_une_autre_fenetre() {
         Some(i64::from(INITIAL_WINDOW_SIZE))
     );
 
-    let issue = flux
-        .consume_send(1, INITIAL_WINDOW_SIZE)
-        .expect_err("au-delà de ce que le pair a ouvert");
-    assert_eq!(issue.cause(), Cause::WindowExceeded);
+    // **ON PREND AU PLUS CE QUI EST OUVERT.** Demander davantage ne rend pas de
+    // faute : à l'émission, c'est nous qui choisissons, et la fenêtre borne.
+    assert_eq!(
+        flux.take_send(1, INITIAL_WINDOW_SIZE),
+        INITIAL_WINDOW_SIZE.saturating_sub(1_000)
+    );
+    assert_eq!(flux.send_window(1).map(|f| f.available()), Some(0));
+    assert_eq!(flux.take_send(1, 10), 0, "une fenêtre fermée ne donne rien");
+    assert_eq!(flux.take_send(9, 10), 0, "un flux oisif non plus");
 
-    let issue = flux.consume_send(9, 1).expect_err("oisif");
-    assert_eq!(issue.cause(), Cause::WrongStreamState);
     let issue = flux.credit_send(9, 1).expect_err("oisif");
     assert_eq!(issue.cause(), Cause::WrongStreamState);
 
@@ -338,4 +341,38 @@ fn le_reglage_du_pair_ne_bouge_que_l_emission() {
         .set_peer_initial_window(0x7fff_ffff)
         .expect_err("cela déborde");
     assert_eq!(issue.cause(), Cause::WindowOverflow);
+}
+
+/// **LES DEUX MOITIÉS D'UNE FERMETURE.** Chacune laisse l'autre côté parler ;
+/// c'est la seconde qui rend la place, et l'ordre n'y change rien.
+#[test]
+fn les_deux_moities_d_une_fermeture() {
+    // Nous d'abord, le pair ensuite.
+    let mut flux = neuve();
+    flux.open(1).expect("ouvert");
+    flux.end_local(1);
+    assert_eq!(flux.state(1), Some(StreamState::HalfClosedLocal));
+    // Le pair peut encore envoyer : c'est tout l'intérêt de cet état.
+    flux.consume(1, 100).expect("il envoie encore");
+    flux.end_remote(1);
+    assert_eq!(flux.state(1), Some(StreamState::Closed));
+    assert!(flux.is_empty(), "le flux a rendu sa place");
+
+    // Le pair d'abord, nous ensuite.
+    let mut flux = neuve();
+    flux.open(1).expect("ouvert");
+    flux.end_remote(1);
+    assert_eq!(flux.state(1), Some(StreamState::HalfClosedRemote));
+    flux.end_local(1);
+    assert_eq!(flux.state(1), Some(StreamState::Closed));
+    assert!(flux.is_empty());
+
+    // Répéter ne fait rien, et sur un flux qui n'est plus là non plus.
+    flux.end_local(1);
+    flux.end_local(99);
+    let mut flux = neuve();
+    flux.open(1).expect("ouvert");
+    flux.end_local(1);
+    flux.end_local(1);
+    assert_eq!(flux.state(1), Some(StreamState::HalfClosedLocal));
 }

@@ -35,6 +35,12 @@
 //! 7. **UN FLUX REFUSÉ EST FERMÉ**, et l'annulation part avec le bloc. Le
 //!    laisser ouvert le compterait dans les flux simultanés sans que personne
 //!    ne le serve jamais.
+//! 8. **CE QU'ON ÉCRIT EN RÉPONSE RESPECTE CE QUE LE PAIR A ANNONCÉ** : jamais
+//!    plus que sa taille de cadre, jamais plus que ses fenêtres. Un cadre qui
+//!    les dépasserait serait traité par lui comme une faute de contrôle de
+//!    flux — et il aurait raison.
+//! 9. **UNE RÉPONSE ÉCRITE NE DÉBORDE PAS DE SON TAMPON**, et se relit comme
+//!    une suite de cadres entiers.
 
 #![no_main]
 
@@ -44,6 +50,7 @@ use ams_proto_h2::{
     CODE_OCTETS, Event, FRAME_HEADER_OCTETS, FrameHeader, FrameKind, FrameReader, Handshake,
     MAX_CONCURRENT_STREAMS, Need, PREFACE, Settings, WINDOW_MAX,
 };
+use ams_proto_http::StatusCode;
 
 /// L'accumulateur de blocs d'en-têtes.
 const BLOC: usize = 16 * 1024;
@@ -78,6 +85,61 @@ fn relire(ecrit: &[u8]) {
             reste.len()
         );
         reste = reste.get(total..).unwrap_or_default();
+    }
+}
+
+/// Écrit une réponse complète, et vérifie que ce qui sort respecte ce que le
+/// pair a annoncé.
+fn repondre(connexion: &mut ams_proto_h2::Connection, stream: u32) {
+    let mut sortie = [0_u8; SORTIE];
+    let ok = StatusCode::new(200).expect("deux cents est un code licite");
+    let champs: [(&[u8], &[u8]); 1] = [(b"content-type", b"application/json")];
+    let Ok(poses) = connexion.write_head(stream, ok, &champs, false, &mut sortie) else {
+        return;
+    };
+    verifier_sortie(connexion, sortie.get(..poses).unwrap_or_default());
+
+    // Le corps part par morceaux, tant que les fenêtres en laissent passer.
+    let corps = [b'x'; 4096];
+    let mut reste = corps.as_slice();
+    for _ in 0..8_u8 {
+        let Ok((poses, pris)) = connexion.write_data(stream, reste, true, &mut sortie) else {
+            return;
+        };
+        verifier_sortie(connexion, sortie.get(..poses).unwrap_or_default());
+        if pris == 0 {
+            // Fenêtre fermée : l'appelant attend un `WINDOW_UPDATE`.
+            return;
+        }
+        reste = reste.get(pris..).unwrap_or_default();
+        if reste.is_empty() {
+            return;
+        }
+    }
+}
+
+/// Ce qu'on vient d'écrire respecte-t-il ce que le pair a annoncé ?
+fn verifier_sortie(connexion: &ams_proto_h2::Connection, ecrit: &[u8]) {
+    assert!(ecrit.len() <= SORTIE);
+    relire(ecrit);
+    let max = connexion.peer_settings().max_frame_size;
+    let mut reste = ecrit;
+    while !reste.is_empty() {
+        let neuf: [u8; FRAME_HEADER_OCTETS] = reste
+            .get(..FRAME_HEADER_OCTETS)
+            .and_then(|tete| tete.try_into().ok())
+            .expect("relire l'a déjà vérifié");
+        let entete = FrameHeader::parse(&neuf);
+        assert!(
+            entete.length() <= max,
+            "on a écrit un cadre de {} octets pour un maximum de {max}",
+            entete.length()
+        );
+        assert!(
+            connexion.send_window().available() >= 0,
+            "la fenêtre d'émission de la connexion est passée sous zéro"
+        );
+        reste = reste.get(entete.total()..).unwrap_or_default();
     }
 }
 
@@ -151,8 +213,8 @@ fuzz_target!(|donnees: &[u8]| {
             Event::Head {
                 stream,
                 octets,
+                end_stream,
                 refused,
-                ..
             } => {
                 // 6. Un bloc complet tient dans l'accumulateur.
                 assert!(octets <= BLOC, "un bloc de {octets} octets pour {BLOC}");
@@ -167,6 +229,10 @@ fuzz_target!(|donnees: &[u8]| {
                         poses >= FRAME_HEADER_OCTETS.saturating_add(CODE_OCTETS),
                         "un flux refusé n'a pas envoyé son annulation"
                     );
+                } else if end_stream {
+                    // **ON RÉPOND, ET C'EST LÀ QUE L'ÉMISSION S'ÉPROUVE.** La
+                    // requête est complète : le serveur écrirait sa réponse ici.
+                    repondre(&mut connexion, stream);
                 }
             }
             Event::Data { payload, .. } => {

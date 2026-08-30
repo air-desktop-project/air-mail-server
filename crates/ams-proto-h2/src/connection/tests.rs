@@ -14,6 +14,8 @@ use crate::frame::{FRAME_HEADER_OCTETS, FrameHeader, FrameKind};
 use crate::preface::PREFACE;
 use crate::settings::{Setting, Settings};
 use crate::stream::StreamState;
+use ams_proto_http::StatusCode;
+use std::string::String;
 
 /// Les fanions, par leur nom.
 const END_STREAM: u8 = 0x1;
@@ -1561,4 +1563,413 @@ fn la_recharge_de_la_connexion_veut_de_la_place() {
         )
         .expect_err("pas la place");
     assert_eq!(issue.cause(), Cause::BufferTooSmall);
+}
+
+/// Lit un cadre écrit dans `sortie`, et rend son en-tête et sa charge.
+fn relire(sortie: &[u8], depuis: usize) -> (FrameHeader, &[u8]) {
+    let fin = depuis.saturating_add(FRAME_HEADER_OCTETS);
+    let entete = FrameHeader::parse(
+        sortie
+            .get(depuis..fin)
+            .and_then(|neuf| neuf.try_into().ok())
+            .expect("neuf octets"),
+    );
+    let charge = sortie
+        .get(fin..fin.saturating_add(entete.total().saturating_sub(FRAME_HEADER_OCTETS)))
+        .expect("la charge suit");
+    (entete, charge)
+}
+
+/// Une réponse complète : la tête, puis le corps, puis le flux se ferme.
+#[test]
+fn une_reponse_s_ecrit_et_ferme_son_flux() {
+    let mut connexion = ouverte();
+    let mut sortie = [0_u8; 256];
+    // Le pair a fini d'envoyer : le flux est demi-fermé de SON côté.
+    connexion
+        .receive(
+            entete(FrameKind::Headers, END_HEADERS | END_STREAM, 1, 0),
+            &[],
+            &mut [0_u8; 16],
+            &mut sortie,
+        )
+        .expect("une requête sans corps");
+    assert_eq!(
+        connexion.streams().state(1),
+        Some(StreamState::HalfClosedRemote)
+    );
+
+    let poses = connexion
+        .write_head(
+            1,
+            StatusCode::new(200).expect("un code licite"),
+            &[(b"content-type", b"application/json")],
+            false,
+            &mut sortie,
+        )
+        .expect("la tête part");
+    let (tete, bloc) = relire(&sortie, 0);
+    assert_eq!(tete.kind(), FrameKind::Headers);
+    assert_eq!(tete.stream(), 1);
+    assert!(
+        tete.flags().end_headers(),
+        "un seul cadre, donc END_HEADERS"
+    );
+    assert!(!tete.flags().end_stream(), "le corps suit");
+    assert_eq!(poses, FRAME_HEADER_OCTETS.saturating_add(bloc.len()));
+    // `:status 200` est le premier de la table statique : un octet.
+    assert_eq!(bloc.first(), Some(&0x88));
+
+    let (poses, pris) = connexion
+        .write_data(1, b"{}", true, &mut sortie)
+        .expect("le corps part");
+    assert_eq!(pris, 2);
+    let (corps, charge) = relire(&sortie, 0);
+    assert_eq!(corps.kind(), FrameKind::Data);
+    assert!(corps.flags().end_stream());
+    assert_eq!(charge, b"{}");
+    assert_eq!(poses, FRAME_HEADER_OCTETS.saturating_add(2));
+
+    // Les deux côtés ont dit leur dernier mot : le flux rend sa place.
+    assert_eq!(connexion.streams().state(1), Some(StreamState::Closed));
+    assert!(connexion.streams().is_empty());
+}
+
+/// **RÉPONDRE AVANT LA FIN LAISSE LE FLUX À DEMI FERMÉ DE NOTRE CÔTÉ**, et ce
+/// qui arrive ensuite compte toujours dans les fenêtres.
+#[test]
+fn repondre_avant_la_fin_laisse_le_flux_a_demi_ferme() {
+    let mut connexion = ouverte();
+    ouvrir(&mut connexion, 1);
+    let mut sortie = [0_u8; 256];
+
+    connexion
+        .write_head(
+            1,
+            StatusCode::new(413).expect("un code licite"),
+            &[],
+            true,
+            &mut sortie,
+        )
+        .expect("un refus qui n'attend pas le corps");
+    let (tete, _) = relire(&sortie, 0);
+    assert!(tete.flags().end_stream());
+    assert_eq!(
+        connexion.streams().state(1),
+        Some(StreamState::HalfClosedLocal)
+    );
+
+    // Le client envoie encore : cela compte, et cela ne fâche personne.
+    connexion
+        .receive(
+            entete(FrameKind::Data, 0, 1, 4),
+            &[1, 2, 3, 4],
+            &mut [],
+            &mut sortie,
+        )
+        .expect("le pair peut encore envoyer");
+    assert_eq!(
+        connexion.receive_window().available(),
+        i64::from(INITIAL_WINDOW_SIZE) - 4
+    );
+
+    // Et sa fin ferme le flux pour de bon.
+    connexion
+        .receive(
+            entete(FrameKind::Data, END_STREAM, 1, 0),
+            &[],
+            &mut [],
+            &mut sortie,
+        )
+        .expect("il a fini");
+    assert_eq!(connexion.streams().state(1), Some(StreamState::Closed));
+}
+
+/// **TROIS BORNES, ET C'EST LA PLUS PETITE QUI DÉCIDE.** En oublier une ferait
+/// écrire un cadre que le pair traitera comme une faute de contrôle de flux.
+#[test]
+fn le_corps_respecte_la_plus_petite_des_bornes() {
+    let mut connexion = ouverte();
+    ouvrir(&mut connexion, 1);
+    let mut sortie = [0_u8; 256];
+
+    // Le pair n'ouvre qu'une fenêtre de flux de dix octets.
+    connexion
+        .receive(
+            entete(FrameKind::Settings, 0, 0, 6),
+            &[0, 4, 0, 0, 0, 10],
+            &mut [],
+            &mut sortie,
+        )
+        .expect("dix");
+
+    let corps = [0xaa_u8; 100];
+    let (_, pris) = connexion
+        .write_data(1, &corps, true, &mut sortie)
+        .expect("dix octets, pas cent");
+    assert_eq!(pris, 10, "la fenêtre du flux décide");
+    assert!(
+        !relire(&sortie, 0).0.flags().end_stream(),
+        "le corps n'est pas fini : pas de END_STREAM"
+    );
+
+    // La fenêtre est fermée : rien ne part, et ce n'est pas une faute.
+    let (poses, pris) = connexion
+        .write_data(1, corps.get(10..).expect("la suite"), true, &mut sortie)
+        .expect("une fenêtre fermée n'est pas une faute");
+    assert_eq!((poses, pris), (0, 0));
+
+    // La place du tampon borne aussi.
+    connexion
+        .receive(
+            entete(FrameKind::WindowUpdate, 0, 1, CODE_LONGUEUR),
+            &1_000_u32.to_be_bytes(),
+            &mut [],
+            &mut sortie,
+        )
+        .expect("du crédit");
+    let mut etroit = [0_u8; FRAME_HEADER_OCTETS + 5];
+    let (_, pris) = connexion
+        .write_data(1, &corps, false, &mut etroit)
+        .expect("cinq octets, pas plus");
+    assert_eq!(pris, 5, "la place du tampon décide");
+}
+
+/// Un corps vide se dit quand même, s'il faut annoncer la fin.
+#[test]
+fn un_corps_vide_dit_la_fin() {
+    let mut connexion = ouverte();
+    ouvrir(&mut connexion, 1);
+    let mut sortie = [0_u8; 64];
+    let (poses, pris) = connexion
+        .write_data(1, &[], true, &mut sortie)
+        .expect("la fin, et rien d'autre");
+    assert_eq!((poses, pris), (FRAME_HEADER_OCTETS, 0));
+    let (cadre, _) = relire(&sortie, 0);
+    assert_eq!(cadre.length(), 0);
+    assert!(cadre.flags().end_stream());
+}
+
+/// **CE QU'ON REFUSE DE RECEVOIR, ON REFUSE DE L'ÉCRIRE.** Un serveur qui
+/// vérifie §8.2.2 à la réception mais pas à l'émission laisse l'intermédiaire
+/// suivant recevoir ce qu'il vient de refuser.
+#[test]
+fn un_champ_de_reponse_interdit_se_refuse() {
+    let mut connexion = ouverte();
+    ouvrir(&mut connexion, 1);
+    let mut sortie = [0_u8; 256];
+    let ok = StatusCode::new(200).expect("licite");
+    for (nom, valeur) in [
+        (b"connection".as_slice(), b"close".as_slice()),
+        (b"transfer-encoding", b"chunked"),
+        (b"upgrade", b"h2c"),
+        (b":status", b"200"),
+        (b"Content-Type", b"text/plain"),
+        (b"content-type", b"text/plain\r\nx: y"),
+        (b"", b"vide"),
+    ] {
+        let issue = connexion
+            .write_head(1, ok, &[(nom, valeur)], false, &mut sortie)
+            .expect_err("refusé");
+        assert_eq!(
+            issue.cause(),
+            Cause::BadResponseField,
+            "{}",
+            String::from_utf8_lossy(nom)
+        );
+        assert_eq!(issue.code(), ErrorCode::InternalError);
+    }
+}
+
+/// Une tête de réponse qui ne tient pas dans un cadre ne part pas.
+#[test]
+fn une_tete_trop_longue_ne_part_pas() {
+    let mut connexion = ouverte();
+    ouvrir(&mut connexion, 1);
+    let mut sortie = [0_u8; 64 * 1024];
+    // Le pair ramène sa taille de cadre au minimum de §6.5.2.
+    connexion
+        .receive(
+            entete(FrameKind::Settings, 0, 0, 6),
+            &[0, 5, 0, 0, 0x40, 0],
+            &mut [],
+            &mut [0_u8; 64],
+        )
+        .expect("seize kibioctets");
+
+    // **DES OCTETS QUE HUFFMAN N'AIME PAS.** Quatre mille `a` se compriment à
+    // deux mille cinq cents, et tiendraient : le codage ne raccourcit que ce
+    // qu'il sait raccourcir, et c'est justement ce qu'on éprouve ici.
+    let long = [0xff_u8; 4_000];
+    let champs: [(&[u8], &[u8]); 6] = [
+        (b"x-un", &long),
+        (b"x-deux", &long),
+        (b"x-trois", &long),
+        (b"x-quatre", &long),
+        (b"x-cinq", &long),
+        (b"x-six", &long),
+    ];
+    let issue = connexion
+        .write_head(
+            1,
+            StatusCode::new(200).expect("licite"),
+            &champs,
+            false,
+            &mut sortie,
+        )
+        .expect_err("trop longue");
+    assert_eq!(issue.cause(), Cause::ResponseHeadTooLong);
+}
+
+/// **ON N'ÉCRIT PAS SUR UN FLUX QUI N'EST PLUS LÀ.** C'est une course que §5.1
+/// prévoit, et non une faute de connexion.
+#[test]
+fn on_n_ecrit_pas_sur_un_flux_mort() {
+    let mut connexion = ouverte();
+    ouvrir(&mut connexion, 1);
+    let mut sortie = [0_u8; 256];
+    connexion
+        .receive(
+            entete(FrameKind::RstStream, 0, 1, CODE_LONGUEUR),
+            &[0; CODE_OCTETS],
+            &mut [],
+            &mut sortie,
+        )
+        .expect("le pair a annulé");
+
+    let ok = StatusCode::new(200).expect("licite");
+    for issue in [
+        connexion
+            .write_head(1, ok, &[], false, &mut sortie)
+            .expect_err("trop tard"),
+        connexion
+            .write_data(1, b"corps", false, &mut sortie)
+            .expect_err("trop tard"),
+    ] {
+        assert_eq!(issue.cause(), Cause::WrongStreamState);
+        assert_eq!(issue.code(), ErrorCode::StreamClosed);
+        assert!(!issue.is_fatal(), "un flux mort ne tue pas la connexion");
+    }
+}
+
+/// La place manque, et c'est notre tampon : `INTERNAL_ERROR`.
+#[test]
+fn l_ecriture_veut_de_la_place() {
+    let mut connexion = ouverte();
+    ouvrir(&mut connexion, 1);
+    let ok = StatusCode::new(200).expect("licite");
+    let issue = connexion
+        .write_head(1, ok, &[], false, &mut [0_u8; 4])
+        .expect_err("pas la place de l'en-tête");
+    assert_eq!(issue.cause(), Cause::BufferTooSmall);
+
+    // Neuf octets : l'en-tête tient, et il ne reste rien pour `:status`.
+    let issue = connexion
+        .write_head(1, ok, &[], false, &mut [0_u8; FRAME_HEADER_OCTETS])
+        .expect_err("pas la place du statut");
+    assert_eq!(issue.cause(), Cause::BufferTooSmall);
+
+    let issue = connexion
+        .write_head(1, ok, &[(b"x-un", b"deux")], false, &mut [0_u8; 10])
+        .expect_err("pas la place du bloc");
+    assert_eq!(issue.cause(), Cause::BufferTooSmall);
+
+    let issue = connexion
+        .write_data(1, b"corps", false, &mut [0_u8; 4])
+        .expect_err("pas la place de l'en-tête");
+    assert_eq!(issue.cause(), Cause::BufferTooSmall);
+}
+
+/// Une annulation qu'on émet ferme le flux de notre côté aussi.
+#[test]
+fn une_annulation_emise_ferme_le_flux() {
+    let mut connexion = ouverte();
+    ouvrir(&mut connexion, 1);
+    let mut sortie = [0_u8; 64];
+    let poses = connexion
+        .write_reset(1, ErrorCode::EnhanceYourCalm, &mut sortie)
+        .expect("l'annulation part");
+    let (cadre, charge) = relire(&sortie, 0);
+    assert_eq!(cadre.kind(), FrameKind::RstStream);
+    assert_eq!(cadre.stream(), 1);
+    assert_eq!(
+        charge,
+        ErrorCode::EnhanceYourCalm.value().to_be_bytes().as_slice()
+    );
+    assert_eq!(poses, FRAME_HEADER_OCTETS.saturating_add(CODE_OCTETS));
+    assert_eq!(connexion.streams().state(1), Some(StreamState::Closed));
+
+    let issue = connexion
+        .write_reset(1, ErrorCode::Cancel, &mut [0_u8; 4])
+        .expect_err("pas la place");
+    assert_eq!(issue.cause(), Cause::BufferTooSmall);
+}
+
+/// **LE DERNIER FLUX D'UN `GOAWAY` EST UNE PROMESSE** (§6.8) : au-delà, le pair
+/// sait que rien n'a été commencé, et peut réémettre ailleurs.
+#[test]
+fn un_adieu_dit_jusqu_ou_on_a_traite() {
+    let mut connexion = ouverte();
+    ouvrir(&mut connexion, 1);
+    ouvrir(&mut connexion, 3);
+    let mut sortie = [0_u8; 64];
+    let poses = connexion
+        .write_goaway(ErrorCode::NoError, &mut sortie)
+        .expect("l'adieu part");
+    let (cadre, charge) = relire(&sortie, 0);
+    assert_eq!(cadre.kind(), FrameKind::GoAway);
+    assert_eq!(cadre.stream(), 0);
+    assert_eq!(poses, FRAME_HEADER_OCTETS.saturating_add(GOAWAY_OCTETS));
+    assert_eq!(
+        charge.get(..CODE_OCTETS),
+        Some(3_u32.to_be_bytes().as_slice())
+    );
+    assert_eq!(
+        charge.get(CODE_OCTETS..),
+        Some(ErrorCode::NoError.value().to_be_bytes().as_slice())
+    );
+
+    let issue = connexion
+        .write_goaway(ErrorCode::NoError, &mut [0_u8; 4])
+        .expect_err("pas la place");
+    assert_eq!(issue.cause(), Cause::BufferTooSmall);
+}
+
+/// **UNE RÉPONSE MENÉE À SON TERME RECHARGE LE BUDGET DES ANNULATIONS**, et
+/// c'est `write_data` qui le fait, sans que personne ait à y penser.
+#[test]
+fn une_reponse_conclue_recharge_le_budget() {
+    let mut connexion = ouverte();
+    let mut sortie = [0_u8; 256];
+    let ok = StatusCode::new(204).expect("licite");
+    for tour in 0..CANCELLATIONS_MAX.saturating_add(10) {
+        // Quatre par tour : deux numéros servent, et deux restent libres. Les
+        // faire se chevaucher ferait retomber sur un flux FERMÉ, que §5.1
+        // refuse — et le test éprouverait alors autre chose.
+        let id = tour.saturating_mul(4).saturating_add(1);
+        ouvrir(&mut connexion, id);
+        connexion
+            .receive(
+                entete(FrameKind::RstStream, 0, id, CODE_LONGUEUR),
+                &[0; CODE_OCTETS],
+                &mut [],
+                &mut sortie,
+            )
+            .unwrap_or_else(|erreur| panic!("tour {tour} : {erreur:?}"));
+        // Un flux qu'on sert jusqu'au bout rend le jeton que l'annulation a
+        // pris — et le flux, lui, rend sa place.
+        let servi = id.saturating_add(2);
+        connexion
+            .receive(
+                entete(FrameKind::Headers, END_HEADERS | END_STREAM, servi, 0),
+                &[],
+                &mut [0_u8; 16],
+                &mut sortie,
+            )
+            .expect("une requête sans corps");
+        connexion
+            .write_head(servi, ok, &[], true, &mut sortie)
+            .expect("une réponse sans corps");
+        assert_eq!(connexion.streams().state(servi), Some(StreamState::Closed));
+    }
 }

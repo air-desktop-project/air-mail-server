@@ -2935,3 +2935,70 @@ moment où la fenêtre se ferme et celui où notre crédit arrive. On recharge d
 Une fenêtre annoncée à zéro est licite, et mènerait tout droit à fabriquer un
 `WINDOW_UPDATE` de zéro — que §6.9 refuse. Le crédit se calcule donc avant de
 décider d'écrire, et un crédit nul n'écrit rien.
+
+## L'étage qui répond, et le quatrième état des flux
+
+### Le demi-fermé qui manquait
+
+Un serveur qui refuse une requête n'attend pas d'en avoir lu le corps : il
+répond `413`, et le client peut encore être en train d'envoyer. Le flux n'est
+pas fermé pour autant — ce qui arrive après compte toujours dans les fenêtres,
+et l'oublier ferait diverger notre contrôle de flux de celui du pair.
+
+`half-closed (local)` de §5.1 porte donc son poids : c'est le seul état où l'on
+accepte encore des données sur un flux dont on n'écrira plus rien. Les deux
+moitiés d'une fermeture sont symétriques, et **c'est la seconde qui rend la
+place** — un flux dont les deux côtés ont dit leur dernier mot ne compte plus
+dans les flux simultanés de §5.1.2.
+
+Les deux états réservés de §5.1, en revanche, restent absents : ils ne servent
+qu'à la poussée serveur, que §8.4 a dépréciée et que ce serveur n'émet pas. Les
+porter serait écrire deux états qu'aucune transition ne peut atteindre.
+
+### Une tête de réponse tient dans un cadre, ou elle ne part pas
+
+§6.10 permettrait de l'étaler sur des `CONTINUATION`. On ne le fait pas. Le pair
+annonce au moins seize kibioctets de charge (§6.5.2), une tête de réponse qui
+n'y tient pas n'existe pas dans un service qui va bien, et **n'émettre jamais de
+`CONTINUATION` nous retire de la liste de ceux qui peuvent en inonder un
+autre** : on refuse cette inondation à la réception, il serait étrange de se
+réserver le droit de la produire.
+
+### Ce qu'on refuse de recevoir, on refuse de l'écrire
+
+§8.2.2 interdit les champs propres à la connexion, et §8.3 réserve le `:` aux
+pseudo-en-têtes. Un serveur qui vérifie ces règles à la RÉCEPTION mais pas à
+l'ÉMISSION laisse l'intermédiaire suivant recevoir ce qu'il vient de refuser —
+et `transfer-encoding` est justement la moitié de la contradiction dont vit la
+contrebande de requête.
+
+La faute est donc `INTERNAL_ERROR` : c'est notre code qui a proposé le champ,
+pas le pair.
+
+### Trois bornes pour un corps, et c'est la plus petite qui décide
+
+La taille de cadre que le pair accepte, sa fenêtre de connexion, sa fenêtre de
+flux — plus la place du tampon qu'on nous donne. En oublier une, c'est écrire un
+cadre que le pair traitera comme une faute de contrôle de flux, et il aura
+raison.
+
+Écrire zéro octet n'est pas une faute : c'est une fenêtre fermée, et l'appelant
+attend le `WINDOW_UPDATE`. Un cadre vide ne s'écrit que pour dire la fin.
+
+### `take` plutôt que `consume`, et pourquoi ce n'est pas un relâchement
+
+`Window::consume` sert à la RÉCEPTION : le pair a déjà envoyé, dépasser la
+fenêtre est sa faute, et il faut le dire. À l'ÉMISSION il n'y a pas de faute
+possible — on choisit combien envoyer, et jamais plus que ce qui est ouvert. Une
+méthode qui rendrait une faute là la rendrait pour un appel que personne ne peut
+écrire.
+
+`Window::take` prend au plus ce qui est ouvert et rend ce qu'elle a pris. Elle
+ne peut pas rendre une fenêtre négative, et elle ne fabrique pas de garde
+inatteignable. `Streams::consume_send` a disparu au profit de `take_send` pour
+la même raison.
+
+C'est la sixième garde inatteignable retirée sur cet étage. Le compte des
+régions couvertes les trouve toutes, et **c'est là son intérêt principal** :
+bien plus que de prouver que les tests passent partout, il montre les endroits
+où le code prétend se défendre contre ce qui ne peut pas arriver.

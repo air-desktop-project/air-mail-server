@@ -90,6 +90,8 @@ fn chaque_cause_se_dit() {
         (Cause::PushFromClient, "poussé"),
         (Cause::TooManyServiceFrames, "progresser"),
         (Cause::TooManyCancellations, "annulés"),
+        (Cause::BadResponseField, "champ de réponse"),
+        (Cause::ResponseHeadTooLong, "tête de réponse"),
     ] {
         let texte = std::format!("{}", Error::connection(ErrorCode::ProtocolError, cause));
         assert!(texte.contains(extrait), "{cause:?} : {texte}");

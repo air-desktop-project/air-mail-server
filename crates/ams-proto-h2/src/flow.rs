@@ -93,6 +93,26 @@ impl Window {
         Ok(())
     }
 
+    /// Prend AU PLUS `voulu` octets, et rend ce qui a été pris.
+    ///
+    /// # POURQUOI ELLE NE REND PAS DE FAUTE
+    ///
+    /// [`Window::consume`] sert à la RÉCEPTION : le pair a déjà envoyé, et
+    /// dépasser la fenêtre est sa faute. À l'ÉMISSION, il n'y a pas de faute
+    /// possible — on choisit combien envoyer, et on ne choisit jamais plus que
+    /// ce qui est ouvert. Une méthode qui rendrait une faute ici la rendrait
+    /// pour un appel que personne ne peut écrire.
+    ///
+    /// Elle borne quand même, plutôt que de croire l'appelant sur parole : une
+    /// fenêtre ne peut donc pas devenir négative par ce chemin.
+    pub fn take(&mut self, voulu: u32) -> u32 {
+        // Une fenêtre NÉGATIVE ne donne rien : `max(0)` avant la conversion.
+        let ouvert = u32::try_from(self.disponible.max(0)).unwrap_or(u32::MAX);
+        let pris = voulu.min(ouvert);
+        self.disponible = self.disponible.saturating_sub(i64::from(pris));
+        pris
+    }
+
     /// Ajoute du crédit, comme un `WINDOW_UPDATE`.
     ///
     /// # Errors

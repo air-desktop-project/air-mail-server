@@ -40,6 +40,16 @@ pub enum StreamState {
     Open,
     /// `half-closed (remote)` — le pair a fini ; nous pouvons répondre.
     HalfClosedRemote,
+    /// `half-closed (local)` — NOUS avons fini ; le pair peut encore envoyer.
+    ///
+    /// # IL EXISTE PARCE QU'ON RÉPOND PARFOIS AVANT LA FIN
+    ///
+    /// Un serveur qui refuse une requête n'attend pas d'en avoir lu le corps :
+    /// il répond `413`, et le client peut encore être en train d'envoyer. Le
+    /// flux n'est pas fermé pour autant — ce qui arrive après compte toujours
+    /// dans les fenêtres, et l'oublier ferait diverger notre contrôle de flux de
+    /// celui du pair.
+    HalfClosedLocal,
     /// `closed` — plus rien ne passe.
     Closed,
 }
@@ -197,8 +207,32 @@ impl Streams {
     /// Elle ne peut rien abîmer non plus : elle ne touche que les flux VIVANTS
     /// de la table — un flux fermé n'y est plus, et un flux qui avait déjà fini
     /// y reste tel quel.
+    ///
+    /// **QUAND NOUS AVIONS DÉJÀ FINI, LE FLUX SE FERME** : les deux côtés ont
+    /// dit leur dernier mot, et le garder occuperait une place que §5.1.2
+    /// compte.
     pub fn end_remote(&mut self, id: u32) {
-        self.poser(id, StreamState::HalfClosedRemote);
+        match self.state(id) {
+            Some(StreamState::HalfClosedLocal) => self.close(id),
+            Some(StreamState::Open | StreamState::HalfClosedRemote) => {
+                self.poser(id, StreamState::HalfClosedRemote);
+            }
+            Some(StreamState::Closed) | None => {}
+        }
+    }
+
+    /// NOUS avons fini d'envoyer sur ce flux (`END_STREAM`).
+    ///
+    /// Comme sa jumelle, elle ne rend pas de faute : l'appelant a déjà dû
+    /// obtenir la permission d'écrire, et écrire deux fins ne change rien à
+    /// l'état.
+    pub fn end_local(&mut self, id: u32) {
+        match self.state(id) {
+            // Le pair avait fini : les deux côtés ont dit leur dernier mot.
+            Some(StreamState::HalfClosedRemote) => self.close(id),
+            Some(StreamState::Open) => self.poser(id, StreamState::HalfClosedLocal),
+            Some(StreamState::HalfClosedLocal | StreamState::Closed) | None => {}
+        }
     }
 
     /// Ferme un flux, et rend sa place.
@@ -228,7 +262,10 @@ impl Streams {
     /// [`Cause::WindowExceeded`] au-delà de la fenêtre.
     pub fn consume(&mut self, id: u32, octets: u32) -> Result<(), Error> {
         let etat = self.exiger(id)?;
-        if etat != StreamState::Open {
+        // **UN FLUX DONT NOUS AVONS FINI REÇOIT ENCORE.** Nous avons cessé
+        // d'écrire, pas lui : ce qui arrive compte dans les fenêtres, et le
+        // refuser ferait diverger notre contrôle de flux du sien.
+        if !matches!(etat, StreamState::Open | StreamState::HalfClosedLocal) {
             return Err(Error::stream(
                 ErrorCode::StreamClosed,
                 Cause::WrongStreamState,
@@ -309,19 +346,19 @@ impl Streams {
         self.trouver(id).map(|flux| flux.emission)
     }
 
-    /// Consomme la fenêtre d'émission d'un flux : on vient de lui envoyer des
-    /// données.
+    /// Prend AU PLUS `voulu` octets à la fenêtre d'émission d'un flux, et rend
+    /// ce qui a été pris.
     ///
-    /// # Errors
-    ///
-    /// [`Cause::WindowExceeded`] au-delà de ce que le pair a ouvert ;
-    /// [`Cause::WrongStreamState`] hors d'un flux vivant.
-    pub fn consume_send(&mut self, id: u32, octets: u32) -> Result<(), Error> {
-        self.exiger(id)?;
-        let mut fenetre = self.send_window(id).unwrap_or_default();
-        fenetre.consume(octets)?;
+    /// Comme [`Window::take`], elle ne rend pas de faute : à l'émission, on
+    /// choisit combien envoyer, et jamais plus que ce qui est ouvert. Un flux
+    /// qui n'est plus là ne donne rien.
+    pub fn take_send(&mut self, id: u32, voulu: u32) -> u32 {
+        let Some(mut fenetre) = self.send_window(id) else {
+            return 0;
+        };
+        let pris = fenetre.take(voulu);
         self.poser_emission(id, fenetre);
-        Ok(())
+        pris
     }
 
     /// Ajoute du crédit à la fenêtre d'émission d'un flux : le pair vient
