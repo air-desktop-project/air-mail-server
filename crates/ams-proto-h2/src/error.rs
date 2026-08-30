@@ -148,6 +148,12 @@ pub enum Cause {
     /// Le tampon de sortie ne suffit pas. **C'est notre faute, pas celle du
     /// pair** : d'où `INTERNAL_ERROR`.
     BufferTooSmall,
+    /// Une mise à jour de taille de table dépasse ce qu'on a annoncé.
+    TableSizeTooLarge,
+    /// Un index HPACK ne désigne aucune entrée — zéro compris.
+    BadIndex,
+    /// Une mise à jour de taille de table ailleurs qu'au début d'un bloc.
+    TableUpdateTooLate,
 }
 
 impl Error {
@@ -207,6 +213,9 @@ impl fmt::Display for Error {
             Cause::BadString => "une chaîne HPACK déborde",
             Cause::BadHuffman => "un code de Huffman fautif",
             Cause::BufferTooSmall => "le tampon de sortie ne suffit pas",
+            Cause::TableSizeTooLarge => "une table plus grande que ce qu'on a annoncé",
+            Cause::BadIndex => "un index HPACK qui ne désigne rien",
+            Cause::TableUpdateTooLate => "une mise à jour de table ailleurs qu'au début d'un bloc",
         };
         let portee = match self.fatal {
             true => "connexion",

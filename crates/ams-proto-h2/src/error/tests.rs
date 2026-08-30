@@ -76,6 +76,9 @@ fn chaque_cause_se_dit() {
         (Cause::BadString, "chaîne HPACK"),
         (Cause::BadHuffman, "Huffman"),
         (Cause::BufferTooSmall, "tampon de sortie"),
+        (Cause::TableSizeTooLarge, "annoncé"),
+        (Cause::BadIndex, "index HPACK"),
+        (Cause::TableUpdateTooLate, "début d'un bloc"),
     ] {
         let texte = std::format!("{}", Error::connection(ErrorCode::ProtocolError, cause));
         assert!(texte.contains(extrait), "{cause:?} : {texte}");

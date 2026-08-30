@@ -2584,6 +2584,52 @@ La leçon générale se range à côté de celle du `saturating_sub` de 2026-08-
 **les fonctions `checked_*` ne vérifient que ce que leur nom dit**, et `shl`
 vérifie le décalage, pas la valeur.
 
+### Les tables HPACK, et ce que le décompresseur ne fait PAS
+
+La table statique est extraite de la RFC comme celle de Huffman : soixante et
+une entrées dont l'index est un NOMBRE QUE LE PAIR ENVOIE. Se tromper d'une
+ligne, c'est décoder `:method` là où le client a écrit `:path`, et router une
+requête vers autre chose que ce qu'elle demandait.
+
+**LA TABLE DYNAMIQUE EST L'ÉTAT PARTAGÉ D'UNE CONNEXION**, et trois conséquences
+en découlent, chacune écrite dans le code :
+
+1. **Une désynchronisation ne se rattrape pas.** Si l'encodeur et le décodeur
+   cessent d'être d'accord sur le contenu de la table, tous les en-têtes suivants
+   se lisent de travers, et rien ne le signale. C'est pourquoi une faute HPACK
+   tue la connexion, jamais un seul flux.
+2. **Insérer DÉCALE les index.** Un décodeur qui insère là où l'encodeur n'a pas
+   inséré lira tout le reste avec un cran d'écart.
+3. **La taille est bornée par CE QU'ON A ANNONCÉ**, pas par ce que le pair
+   demande. `SETTINGS_HEADER_TABLE_SIZE` est notre chiffre ; une mise à jour qui
+   le dépasse est une faute, et non une requête à honorer.
+
+Une entrée plus grosse que la table la VIDE et n'entre pas (§4.4) : ce n'est pas
+une faute, et un décodeur qui refuserait se désynchroniserait d'un encodeur qui,
+lui, a vidé. Une mise à jour de taille doit venir AU DÉBUT d'un bloc (§4.2) ; la
+tolérer ailleurs laisserait un encodeur changer la taille au milieu.
+
+L'arène des octets est LINÉAIRE, et se recompacte quand la place manque en
+queue : un anneau couperait un nom en deux au bord, et un nom coupé ne se compare
+pas. La compaction est rare, et C7 préfère son coût à une lecture en deux
+morceaux qu'il faudrait traiter partout.
+
+**« JAMAIS INDEXÉ » N'EST PAS « SANS INDEXATION »** (§7.1.3). Le premier dit
+qu'un intermédiaire ne doit JAMAIS mettre le champ dans sa table, même en
+ré-encodant — c'est ce qu'un client pose sur un jeton d'autorisation, pour qu'il
+ne finisse pas dans un état partagé où une attaque par compression pourrait le
+deviner. Le second dit seulement « moi je ne l'indexe pas ». Les deux
+représentations partagent leurs trois premiers bits, et **l'ordre de
+reconnaissance est donc une règle** : tester le plus court motif d'abord
+trahirait une promesse qu'on n'a pas faite mais qu'on relaie.
+
+**LE DÉCOMPRESSEUR NE JUGE PAS LES CHAMPS.** Il rend des paires ; ce qui décide
+qu'une LISTE est recevable vit dans `ams-proto-http`, et n'est écrit qu'une fois
+pour h2 et h3. Cette frontière a été confirmée par le fuzz : une propriété
+écrite à l'envers — « un nom décodé est un nom » — a été démentie en trois
+secondes par un nom d'un seul octet nul. Le fuzz avait raison ; la propriété
+éprouve maintenant la JOINTURE des deux étages, ce qui est la chose utile.
+
 ### La bombe de décompression a sa propre borne
 
 HPACK et QPACK compriment : mille champs identiques tiennent en quelques octets

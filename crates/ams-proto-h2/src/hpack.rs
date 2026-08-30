@@ -20,11 +20,17 @@
 //!    le fil. Aucune borne PAR CHAMP n'arrête cela ; seule celle du total le
 //!    fait, et elle vit dans [`ams_proto_http::HeadBuilder`].
 
+mod decoder;
+mod dynamique;
 mod huffman;
 mod integer;
 mod string;
 mod table_huffman;
+mod table_statique;
 
+pub use decoder::{Decoder, Field, Sensitivity};
+pub use dynamique::{Dynamique, TABLE_SIZE_MAX};
 pub use huffman::{decode_huffman, encode_huffman, encoded_huffman_len};
 pub use integer::{decode_integer, encode_integer};
 pub use string::{decode_string, encode_string};
+pub use table_statique::{STATIQUE, STATIQUE_LEN, entree_statique};
