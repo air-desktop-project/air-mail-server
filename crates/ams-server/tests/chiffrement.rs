@@ -24,6 +24,7 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ams_config::{Configuration, Timeouts, Tls};
@@ -43,9 +44,35 @@ impl Drop for Atelier {
 }
 
 /// Un serveur lancé, tué à la fin quoi qu'il arrive.
-struct Serveur(Child);
+///
+/// # SON ERREUR STANDARD EST LUE EN CONTINU, PAR UN FIL À PART
+///
+/// La lire à la demande ne marche pas : `read_to_string` sur le tuyau d'un
+/// enfant VIVANT n'atteint jamais la fin de fichier, et l'appel y attend pour
+/// toujours. Le tuer d'abord répondait à cela, mais alors le journal n'est
+/// disponible qu'une fois — et le démarrage, lui, a besoin de le lire pendant
+/// que le serveur tourne.
+///
+/// Un fil qui recopie le tuyau dans un tampon partagé ferme les deux : le
+/// journal est lisible à tout instant, sans jamais bloquer, et le tuyau ne se
+/// remplit pas au point d'arrêter l'enfant qui écrit dedans.
+struct Serveur {
+    enfant: Child,
+    journal: Arc<Mutex<String>>,
+}
 
 impl Serveur {
+    /// Ce que le serveur a écrit jusqu'ici.
+    fn journal(&self) -> String {
+        match self.journal.lock() {
+            Ok(lu) => lu.clone(),
+            // Un fil de lecture qui a paniqué a laissé le verrou empoisonné :
+            // ce qu'il avait déjà recopié reste bon à lire, et c'est justement
+            // dans ce cas-là qu'on en a besoin.
+            Err(empoisonne) => empoisonne.into_inner().clone(),
+        }
+    }
+
     /// Ce que le serveur est devenu, et ce qu'il en a dit.
     ///
     /// # UNE CONNEXION REFUSÉE NE DIT PAS POURQUOI
@@ -56,25 +83,19 @@ impl Serveur {
     /// que personne ne puisse conclure. On lit donc l'état de l'enfant ET ce
     /// qu'il a écrit sur l'erreur standard, et l'échec porte la raison.
     fn plainte(&mut self) -> String {
-        let etat = match self.0.try_wait() {
+        let etat = match self.enfant.try_wait() {
             Ok(Some(code)) => format!("le serveur s'est arrêté ({code})"),
             Ok(None) => String::from("le serveur tourne encore"),
             Err(erreur) => format!("état du serveur illisible : {erreur}"),
         };
-        let mut plainte = String::new();
-        if let Some(erreur) = self.0.stderr.as_mut() {
-            // La lecture ne bloque pas indéfiniment : le tuyau se ferme avec le
-            // processus, et s'il tourne encore on ne lit que ce qui est déjà là.
-            let _ = std::io::Read::read_to_string(erreur, &mut plainte);
-        }
-        format!("{etat} — il a dit : {plainte}")
+        format!("{etat} — il a dit : {}", self.journal())
     }
 }
 
 impl Drop for Serveur {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        let _ = self.enfant.kill();
+        let _ = self.enfant.wait();
     }
 }
 
@@ -195,39 +216,75 @@ fn configuration_pop3(
     chemin
 }
 
-/// Lance le serveur et attend qu'il accepte, ou explique ce qu'il a dit.
+/// Lance le serveur et attend qu'il écoute, ou explique ce qu'il a dit.
+///
+/// # ON NE SONDE PLUS LE PORT, ET C'EST UN DÉFAUT RÉEL QUI L'A IMPOSÉ
+///
+/// Cette fonction ouvrait une connexion d'essai et la fermait aussitôt, sans
+/// rien lire. Le serveur y répondait sa bannière ; le pair, déjà fermé, la
+/// renvoyait par un `RST` — **et un `RST` détruit la socket cliente sans passer
+/// par `TIME-WAIT`**. Le port éphémère redevenait donc libre sur-le-champ, et le
+/// `connect` suivant pouvait le reprendre : même quadruplet, à quelques
+/// microsecondes de la connexion que le serveur n'avait pas encore effacée de sa
+/// table. Le `SYN` tombait alors sur une connexion qu'il croyait établie, et la
+/// nouvelle connexion mourait sans qu'un octet ne l'ait traversée.
+///
+/// C'est ce qui faisait échouer ce fichier une fois sur vingt-cinq — davantage
+/// sous charge, la fenêtre s'élargissant avec l'ordonnancement — et ce qui a
+/// fini par arrêter l'intégration continue. Le symptôme accusait le serveur, qui
+/// n'y était pour rien : il écoutait, il était vivant, il avait tout dit.
+///
+/// **La sonde était donc la panne qu'elle prétendait mesurer.** On attend
+/// maintenant que le serveur ANNONCE son écoute — il l'écrit sur son erreur
+/// standard, juste après le `bind` — et l'attente ne touche plus au réseau. Le
+/// port n'a pas besoin d'être sondé : entre le `bind` et le premier `accept`,
+/// le noyau met les connexions en file, et le client n'y voit rien.
 fn lancer(config: &Path, port: u16) -> Serveur {
-    let enfant = Command::new(env!("CARGO_BIN_EXE_air-mail-server"))
+    let mut enfant = Command::new(env!("CARGO_BIN_EXE_air-mail-server"))
         .arg("--config")
         .arg(config)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("le serveur devrait se lancer");
-    let mut serveur = Serveur(enfant);
+    let journal = Arc::new(Mutex::new(String::new()));
+    // ON VIDE LE TUYAU SANS DISCONTINUER : un enfant dont l'erreur standard se
+    // remplit s'arrête d'écrire, donc de servir. Le fil s'achève tout seul à la
+    // mort de l'enfant, quand le tuyau atteint sa fin de fichier.
+    if let Some(sortie) = enfant.stderr.take() {
+        let vers = Arc::clone(&journal);
+        std::thread::spawn(move || {
+            let mut sortie = sortie;
+            let mut tampon = [0_u8; 512];
+            while let Ok(lus) = std::io::Read::read(&mut sortie, &mut tampon) {
+                if lus == 0 {
+                    return;
+                }
+                let morceau = String::from_utf8_lossy(tampon.get(..lus).unwrap_or_default());
+                if let Ok(mut journal) = vers.lock() {
+                    journal.push_str(&morceau);
+                }
+            }
+        });
+    }
+    let mut serveur = Serveur { enfant, journal };
 
-    let adresse = SocketAddr::from(([127, 0, 0, 1], port));
-    // `checked_add` plutôt qu'un `+` : le workspace interdit l'arithmétique qui
-    // peut déborder, y compris dans les tests, et une exception ici serait la
-    // première d'une longue série.
+    // La ligne que le serveur écrit juste après avoir lié son écoute. La
+    // chercher AVEC le port distingue l'annonce SMTP de celles de POP3 et
+    // d'IMAP, qui portent le même verbe sur d'autres adresses.
+    let annonce = format!("écoute sur 127.0.0.1:{port}");
     let depart = Instant::now();
     while depart.elapsed() < Duration::from_secs(10) {
-        if TcpStream::connect_timeout(&adresse, Duration::from_millis(200)).is_ok() {
-            // ON VÉRIFIE QUE C'EST BIEN LUI QUI A RÉPONDU. Une sonde qui aboutit
-            // pendant que l'enfant est mort désigne quelqu'un d'autre sur ce
-            // port, et le test irait alors éprouver un serveur qui n'est pas le
-            // sien — jusqu'à ce que l'autre s'en aille.
-            if let Ok(None) = serveur.0.try_wait() {
-                return serveur;
-            }
+        if serveur.journal().contains(&annonce) {
+            return serveur;
         }
-        if let Ok(Some(_)) = serveur.0.try_wait() {
+        if let Ok(Some(_)) = serveur.enfant.try_wait() {
             // On lit ce qu'il a dit : un démarrage refusé porte toujours sa
             // raison sur l'erreur standard, et la taire ferait de ce test un
             // « le serveur n'écoute pas » sans plus d'explication.
             panic!("au démarrage : {}", serveur.plainte());
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(10));
     }
     panic!(
         "le serveur n'écoute toujours pas au bout de dix secondes — {}",
@@ -491,15 +548,13 @@ fn lire_jusqu_au_conge(flux: &mut TcpStream, serveur: &mut Serveur) -> String {
             Ok(0) => break,
             Ok(lus) => tout.push_str(&String::from_utf8_lossy(&tampon[..lus])),
             Err(erreur) => {
-                // ON TUE AVANT DE LIRE : la sortie d'erreur d'un enfant vivant
-                // ne se termine jamais, et `read_to_string` y attendrait pour
-                // toujours. C'est arrivé.
-                let _ = serveur.0.kill();
-                let mut plainte = String::new();
-                if let Some(sortie) = serveur.0.stderr.as_mut() {
-                    let _ = sortie.read_to_string(&mut plainte);
-                }
-                panic!("lecture ({erreur}) après :\n{tout}\n--- serveur ---\n{plainte}")
+                // ON NE TUE PLUS POUR LIRE : le journal est recopié en continu
+                // par un fil, et se lit à tout instant. Tuer d'abord, c'était
+                // effacer l'état du serveur avant de le rapporter.
+                panic!(
+                    "lecture ({erreur}) après :\n{tout}\n--- serveur ---\n{}",
+                    serveur.plainte()
+                )
             }
         }
     }

@@ -2766,3 +2766,59 @@ gouttes.
 `SETTINGS_MAX_HEADER_LIST_SIZE` d'HTTP/2 existe, et ne remplace pas cette
 borne : c'est un RENSEIGNEMENT donné au pair, que rien n'oblige à respecter. Un
 serveur qui n'aurait que ce réglage pour se protéger n'aurait rien du tout.
+
+## La sonde qui fabriquait la panne qu'elle mesurait
+
+`crates/ams-server/tests/chiffrement.rs` échouait environ une fois sur
+vingt-cinq, toujours de la même façon : `Connection reset by peer`, **zéro octet
+lu**, sur une connexion ouverte quelques microsecondes plus tôt. Le défaut a
+tenu plusieurs semaines parce que le symptôme accusait le serveur, et qu'une
+première tentative de correction — faire lire la bannière à la sonde — avait
+remplacé un échec sur vingt-cinq par deux blocages sur vingt-cinq, et fut
+annulée.
+
+L'instrumentation a tranché. Au moment de l'échec, l'enfant était **vivant**, il
+**écoutait** (`ss` le montrait en `LISTEN` sur son port), et il avait écrit ses
+onze lignes de démarrage. Le serveur n'y était donc pour rien.
+
+La panne venait de la fonction qui attendait le démarrage. Elle ouvrait une
+connexion d'essai et la fermait aussitôt, sans rien lire :
+
+1. le serveur accepte la sonde et lui écrit sa bannière ;
+2. la sonde est déjà fermée : son noyau répond un `RST` ;
+3. **un `RST` détruit la socket cliente sans passer par `TIME-WAIT`** — le port
+   éphémère redevient libre sur-le-champ, au lieu des soixante secondes
+   habituelles ;
+4. le `connect` suivant peut reprendre ce port, donc le MÊME quadruplet, alors
+   que le serveur n'a pas encore effacé l'ancienne connexion de sa table ;
+5. le `SYN` tombe sur une connexion que le serveur croit établie, et la nouvelle
+   connexion meurt sans qu'un octet ne l'ait traversée.
+
+Sous charge — huit tests en parallèle sur quatre cœurs, plus `openssl` — la
+fenêtre entre 4 et 5 s'élargit avec l'ordonnancement, et c'est là que le test
+tombait. C'est aussi pourquoi il ne tombait JAMAIS lancé seul : quarante
+exécutions isolées, aucune faute.
+
+### Ce qu'on en retient
+
+**Une sonde qui parle le protocole modifie ce qu'elle mesure.** Celle-ci
+consommait une place de connexion, nourrissait le compteur du garde anti-flooding
+(C8), et laissait derrière elle une connexion réinitialisée. Aucune de ces trois
+choses n'était voulue, et la troisième cassait le test.
+
+Le serveur ANNONCE son écoute sur son erreur standard, juste après le `bind` :
+c'est cela qu'on attend maintenant, et l'attente ne touche plus au réseau. Rien
+n'est perdu à ne plus sonder — entre le `bind` et le premier `accept`, le noyau
+met les connexions en file, et un client n'y voit aucune différence.
+
+### Et le journal se lit sans tuer
+
+L'ancien code tuait le serveur pour lire son erreur standard, parce que
+`read_to_string` sur le tuyau d'un enfant vivant n'atteint jamais la fin de
+fichier. Rapporter l'état d'un serveur exigeait donc de le détruire d'abord —
+et l'attente du démarrage, elle, ne pouvait rien lire du tout.
+
+Un fil recopie maintenant ce tuyau dans un tampon partagé. Le journal est
+lisible à tout instant sans jamais bloquer, le démarrage s'y adosse, l'échec
+porte l'état RÉEL du serveur, et le tuyau ne se remplit plus au point d'arrêter
+l'enfant qui écrit dedans.
