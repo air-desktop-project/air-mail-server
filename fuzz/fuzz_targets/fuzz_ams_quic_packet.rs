@@ -25,6 +25,12 @@
 //!    jamais : ce qui se lit comme un en-tête long n'est pas un en-tête court.
 //! 6. **LA LONGUEUR D'UN IDENTIFIANT COURT VIENT DE NOUS**, et une longueur
 //!    au-delà de vingt se refuse même quand c'est nous qui la demandons.
+//! 7. **UNE TRAME LUE A CONSOMMÉ CE QU'ELLE DIT AVOIR CONSOMMÉ**, jamais plus
+//!    que ce qu'on lui a donné, et jamais zéro. Une trame ne porte pas sa
+//!    longueur : un décodeur qui n'avance pas boucle sans fin, et un décodeur
+//!    qui avance trop lit le paquet suivant comme le sien.
+//! 8. **CE QU'UNE TRAME REND EST DANS CE QU'ON A DONNÉ** : chaque tranche est
+//!    une sous-tranche du tampon, et aucune longueur n'excède sa source.
 
 #![no_main]
 
@@ -32,8 +38,8 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use ams_proto_quic::{
-    CONNECTION_ID_MAX, Long, LongKind, RETRY_TAG_OCTETS, ShortHeader, VERSION_NEGOTIATION, is_long,
-    parse_long,
+    CONNECTION_ID_MAX, Frame, Long, LongKind, MAX_STREAMS_LIMIT, RETRY_TAG_OCTETS, ShortHeader,
+    VERSION_NEGOTIATION, is_long, parse_long,
 };
 
 /// Ce qu'on soumet.
@@ -114,4 +120,69 @@ fuzz_target!(|entree: Entree| {
         }
         Err(_) => {}
     }
+
+    // PROPRIÉTÉS 7 et 8 : les trames se lisent l'une après l'autre, et chacune
+    // avance d'au moins un octet.
+    let mut reste = paquet;
+    let mut tours = 0_u32;
+    while let Ok((trame, lus)) = Frame::parse(reste) {
+        tours = tours.saturating_add(1);
+        assert!(tours < 100_000, "le décodeur de trames n'avance pas");
+        assert!(lus >= 1, "une trame rendue sans consommer d'octet");
+        assert!(
+            lus <= reste.len(),
+            "une trame a consommé {lus} octets pour {}",
+            reste.len()
+        );
+        verifier(&trame, reste);
+        reste = reste.get(lus..).unwrap_or_default();
+        if reste.is_empty() {
+            break;
+        }
+    }
 });
+
+/// Ce qu'une trame rend est dans ce qu'on lui a donné.
+fn verifier(trame: &Frame<'_>, source: &[u8]) {
+    match trame {
+        Frame::Padding { count } => assert!(*count <= source.len()),
+        Frame::Crypto { data, .. } | Frame::Stream { data, .. } => {
+            assert!(
+                data.len() <= source.len(),
+                "une tranche plus longue que sa source"
+            );
+        }
+        Frame::NewToken { token } => assert!(token.len() <= source.len()),
+        Frame::ConnectionClose { reason, .. } => assert!(reason.len() <= source.len()),
+        Frame::Ack(ack) => {
+            assert!(ack.encoded_ranges.len() <= source.len());
+            // Le parcours s'arrête : il ne rend jamais plus d'intervalles qu'il
+            // n'en a annoncé.
+            let vus = ack.ranges().count();
+            assert!(u64::try_from(vus).unwrap_or(u64::MAX) <= ack.range_count);
+        }
+        Frame::MaxStreams { maximum, .. } => assert!(*maximum <= MAX_STREAMS_LIMIT),
+        Frame::StreamsBlocked { limit, .. } => assert!(*limit <= MAX_STREAMS_LIMIT),
+        Frame::NewConnectionId {
+            sequence,
+            retire_prior_to,
+            id,
+            ..
+        } => {
+            assert!(retire_prior_to <= sequence, "un retrait au-delà du rang");
+            assert!(!id.is_empty(), "§19.15 veut au moins un octet");
+            assert!(id.len() <= CONNECTION_ID_MAX);
+        }
+        Frame::Ping
+        | Frame::ResetStream { .. }
+        | Frame::StopSending { .. }
+        | Frame::MaxData { .. }
+        | Frame::MaxStreamData { .. }
+        | Frame::DataBlocked { .. }
+        | Frame::StreamDataBlocked { .. }
+        | Frame::RetireConnectionId { .. }
+        | Frame::PathChallenge { .. }
+        | Frame::PathResponse { .. }
+        | Frame::HandshakeDone => {}
+    }
+}

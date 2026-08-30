@@ -63,6 +63,9 @@ fn chaque_raison_porte_son_code() {
             TransportError::ProtocolViolation,
         ),
         (Reason::NotAPacket, TransportError::ProtocolViolation),
+        (Reason::UnknownFrame, TransportError::FrameEncodingError),
+        (Reason::BadFrameField, TransportError::FrameEncodingError),
+        (Reason::BadAckRange, TransportError::FrameEncodingError),
     ];
     for (raison, code) in cas {
         let faute = Error::new(raison);
@@ -84,6 +87,9 @@ fn chaque_faute_se_dit() {
         (Reason::PacketNumberSpaceExhausted, "espace des numéros"),
         (Reason::ConnectionIdTooLong, "identifiant de connexion"),
         (Reason::NotAPacket, "paquet QUIC"),
+        (Reason::UnknownFrame, "négocié"),
+        (Reason::BadFrameField, "champ de trame"),
+        (Reason::BadAckRange, "acquittement"),
     ];
     for (raison, morceau) in cas {
         let dit = std::format!("{}", Error::new(raison));

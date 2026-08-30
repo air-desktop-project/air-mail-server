@@ -40,12 +40,17 @@ extern crate std;
 
 mod connection_id;
 mod error;
+mod frame;
 mod packet;
 mod packet_number;
 mod varint;
 
 pub use connection_id::{CONNECTION_ID_MAX, ConnectionId};
 pub use error::{Error, Reason, TransportError};
+pub use frame::{
+    Ack, AckRange, AckRanges, Directional, EcnCounts, Frame, MAX_STREAMS_LIMIT, PATH_DATA_OCTETS,
+    STATELESS_RESET_TOKEN_OCTETS,
+};
 pub use packet::{
     Long, LongHeader, LongKind, RETRY_TAG_OCTETS, Retry, ShortHeader, VERSION_1,
     VERSION_NEGOTIATION, VersionNegotiation, is_long, parse_long,

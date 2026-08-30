@@ -100,6 +100,12 @@ pub enum Reason {
     ConnectionIdTooLong,
     /// Ce n'est pas un paquet QUIC de cette version : forme ou bit fixe.
     NotAPacket,
+    /// Un type de trame que §19 ne définit pas, et qu'on n'a pas négocié.
+    UnknownFrame,
+    /// Un champ de trame hors de ses bornes.
+    BadFrameField,
+    /// Un intervalle d'acquittement qui descend sous zéro (§19.3.1).
+    BadAckRange,
     /// L'espace des numéros de paquet est épuisé (§12.3).
     ///
     /// **§12.3 EXIGE QUE LA CONNEXION SOIT FERMÉE AVANT D'EN ARRIVER LÀ.** Un
@@ -122,7 +128,11 @@ impl Reason {
     pub const fn code(self) -> TransportError {
         match self {
             // §12.4 : une trame qu'on ne peut pas lire jusqu'au bout.
-            Self::Truncated | Self::BadPacketNumberLength => TransportError::FrameEncodingError,
+            Self::Truncated
+            | Self::BadPacketNumberLength
+            | Self::UnknownFrame
+            | Self::BadFrameField
+            | Self::BadAckRange => TransportError::FrameEncodingError,
             // §17.2 dit de JETER le paquet, pas de fermer la connexion — il
             // peut venir de n'importe qui, et une connexion qu'on ferme sur un
             // paquet égaré est une connexion qu'un tiers peut fermer.
@@ -176,6 +186,9 @@ impl core::fmt::Display for Error {
             Reason::PacketNumberTooLarge => "un numéro de paquet dépasse 2^62 - 1",
             Reason::ConnectionIdTooLong => "un identifiant de connexion dépasse vingt octets",
             Reason::NotAPacket => "ce n'est pas un paquet QUIC de cette version",
+            Reason::UnknownFrame => "un type de trame qu'on n'a pas négocié",
+            Reason::BadFrameField => "un champ de trame hors de ses bornes",
+            Reason::BadAckRange => "un intervalle d'acquittement descend sous zéro",
             Reason::PacketNumberSpaceExhausted => {
                 "l'espace des numéros de paquet est épuisé, et §12.3 veut qu'on ferme"
             }

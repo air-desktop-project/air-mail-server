@@ -3170,3 +3170,73 @@ même port UDP — et le vérifier tôt évite de déchiffrer ce qui n'est pas �
   liste de versions, et les bits de type du premier octet ne veulent alors plus
   rien dire. Un serveur n'en reçoit jamais — il est celui qui les émet — mais un
   paquet qu'on ne sait pas nommer se jette sans qu'on puisse dire pourquoi.
+
+## Les trames de QUIC, et l'inverse d'HTTP/2
+
+### Ce qu'on ne connaît pas est une FAUTE
+
+§12.4 : « An endpoint MUST treat the receipt of a frame of unknown type as a
+connection error of type FRAME_ENCODING_ERROR. » En HTTP/2, un cadre inconnu
+s'IGNORE ; ici, il condamne la connexion.
+
+Ce n'est pas une incohérence entre deux protocoles voisins : ce sont deux façons
+différentes d'étendre. HTTP/2 laisse un émetteur essayer et voir. QUIC exige que
+toute extension soit NÉGOCIÉE d'abord, par un paramètre de transport. Un type
+inconnu veut donc dire qu'on n'a pas négocié ce qu'on croyait — et continuer à
+lire un flux qu'on ne comprend plus serait deviner.
+
+Les deux règles se ressemblent au point qu'on pourrait les confondre en écrivant
+les deux crates l'un après l'autre. Elles sont écrites ici pour qu'on ne le
+fasse pas.
+
+### Une trame ne porte pas sa longueur
+
+Son type dit sa forme, et sa forme dit sa fin. Rien n'annonce « la trame
+suivante commence à tel octet ». Un décodeur qui se tromperait d'un octet lirait
+donc le reste du paquet comme des trames imaginaires — et c'est exactement
+pourquoi tout se refuse au premier doute plutôt que de tenter de se rattraper.
+
+C'est aussi pourquoi la cible de fuzz vérifie qu'une trame lue consomme **au
+moins un octet et jamais plus qu'on ne lui en a donné** : un décodeur qui
+n'avance pas boucle sans fin, et un décodeur qui avance trop lit le paquet
+suivant comme le sien.
+
+### Les intervalles d'un `ACK` restent sur le fil
+
+Leur nombre vient du pair, et rien ne le borne d'utile : les retenir tous
+demanderait une table dont il choisirait la taille. On garde donc les octets, et
+un parcours les lit à la demande — l'appelant décide combien il en veut.
+
+Une faute arrête ce parcours définitivement. Continuer après un intervalle
+illisible lirait les octets suivants comme des intervalles, et il n'y a plus
+aucune raison de croire qu'ils en sont.
+
+### Trois bornes que la RFC pose et qu'on aurait pu manquer
+
+- **2^60 pour un compte de flux** (§19.11), et non 2^62 : un numéro de flux est
+  fait d'un compte et de deux bits de type, et un compte plus grand ferait un
+  numéro hors de l'espace des entiers.
+- **La somme du décalage et de la longueur** d'un `STREAM` ou d'un `CRYPTO` ne
+  peut pas dépasser 2^62 - 1 (§19.8), sans quoi le flux désignerait des octets
+  qu'aucun décalage ne pourrait nommer.
+- **Le rang de retrait d'un `NEW_CONNECTION_ID`** ne peut pas dépasser le rang
+  annoncé (§19.15) : il retirerait l'identifiant qu'on vient de donner.
+
+### Un identifiant vide est licite dans un en-tête, et pas dans une trame
+
+§17.2 admet zéro octet : un pair qui n'a rien à router économise vingt octets par
+paquet. §19.15, elle, exige de un à vingt — un identifiant qu'on DONNE au pair
+pour qu'il s'en serve doit désigner quelque chose.
+
+La borne haute, en revanche, n'est écrite qu'une fois : c'est le type
+`ConnectionId` qui la porte, et la redire dans la trame ferait deux vérités pour
+une règle.
+
+### Sans `LEN`, une trame `STREAM` va jusqu'au bout du paquet
+
+C'est ce qui permet de n'écrire aucune longueur pour la dernière trame d'un
+paquet — quelques octets gagnés sur chaque paquet de données. La conséquence
+pour l'appelant est stricte : **il ne doit présenter QUE le paquet**, et rien de
+ce qui suit dans le datagramme. Un datagramme peut porter plusieurs paquets
+coalescés (§12.2), et se tromper de frontière ferait lire les paquets suivants
+comme la charge du premier.
