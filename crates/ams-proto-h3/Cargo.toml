@@ -9,7 +9,11 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+ams-field-codec = { path = "../ams-field-codec" }
 ams-proto-quic = { path = "../ams-proto-quic" }
+
+[dev-dependencies]
+ams-field-codec = { path = "../ams-field-codec" }
 
 [lints]
 workspace = true

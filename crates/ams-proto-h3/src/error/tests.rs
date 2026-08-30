@@ -71,6 +71,21 @@ fn chaque_raison_porte_son_code_et_se_dit() {
             "type de flux",
         ),
         (Reason::PushRefused, H3Error::IdError, "poussée"),
+        (
+            Reason::BadInsertCount,
+            H3Error::QpackDecompressionFailed,
+            "compte d'insertions",
+        ),
+        (
+            Reason::BadFieldLine,
+            H3Error::QpackDecompressionFailed,
+            "représentation de champ",
+        ),
+        (
+            Reason::BadIndex,
+            H3Error::QpackDecompressionFailed,
+            "index qui ne désigne",
+        ),
     ];
     for (raison, code, morceau) in cas {
         let faute = Error::new(raison);

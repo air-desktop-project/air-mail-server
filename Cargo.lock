@@ -143,6 +143,7 @@ dependencies = [
 name = "ams-proto-h3"
 version = "0.1.0"
 dependencies = [
+ "ams-field-codec",
  "ams-proto-quic",
 ]
 

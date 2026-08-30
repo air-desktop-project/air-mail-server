@@ -27,11 +27,19 @@
 //! 6. **UN TYPE DE FLUX SE LIT OU SE RAPPELLE**, jamais autre chose : un flux
 //!    QUIC livre par morceaux, et refuser un type incomplet refuserait un pair
 //!    qui n'a rien fait de mal.
+//! 7. **UNE LIGNE DE CHAMP QPACK CONSOMME AU MOINS UN OCTET**, jamais plus
+//!    qu'on ne lui en a donné, et ce qu'elle rend tient dans le tampon. Un
+//!    décodeur qui n'avance pas boucle sans fin ; un décodeur qui avance trop
+//!    lit la ligne suivante comme la sienne.
+//! 8. **UN COMPTE D'INSERTIONS RECONSTRUIT RESTE DANS SA FENÊTRE**, et le rang
+//!    de la section ne descend jamais sous zéro. Se tromper de tour décalerait
+//!    toute la table, sans qu'aucune faute ne se voie.
 
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
 
+use ams_proto_h3::qpack::{FieldLine, max_entries, read_field_line, read_prefix};
 use ams_proto_h3::{
     FrameHeader, FrameKind, Placement, Reason, Settings, StreamHead, StreamKind, accept_stream,
     read_stream_head,
@@ -88,6 +96,59 @@ fuzz_target!(|donnees: &[u8]| {
         let relus = Settings::read(place.get(..ecrits).unwrap_or_default())
             .expect("ce qu'on écrit se relit");
         assert_eq!(relus, lus, "un aller-retour a changé les réglages");
+    }
+
+    // PROPRIÉTÉS 7 et 8 : QPACK.
+    {
+        let mut place = [0_u8; 4096];
+        let capacite = place.len();
+        let mut libre = place.as_mut_slice();
+        let mut reste = donnees;
+        let mut tours = 0_u32;
+        while let Ok(decode) = read_field_line(reste, libre) {
+            tours = tours.saturating_add(1);
+            assert!(tours < 100_000, "le décodeur de lignes n'avance pas");
+            assert!(decode.read >= 1, "une ligne rendue sans consommer d'octet");
+            assert!(
+                decode.read <= reste.len(),
+                "une ligne a consommé {} octets pour {}",
+                decode.read,
+                reste.len()
+            );
+            // Ce qu'elle rend tient dans ce qu'on a donné.
+            match decode.line {
+                FieldLine::Literal { name, value, .. } => {
+                    assert!(name.len().saturating_add(value.len()) <= capacite);
+                }
+                FieldLine::LiteralWithName { value, .. }
+                | FieldLine::LiteralWithPostBaseName { value, .. } => {
+                    assert!(value.len() <= capacite);
+                }
+                FieldLine::Indexed { .. } | FieldLine::IndexedPostBase { .. } => {}
+            }
+            reste = reste.get(decode.read..).unwrap_or_default();
+            libre = decode.rest;
+            if reste.is_empty() {
+                break;
+            }
+        }
+    }
+
+    // Le préfixe d'une section : le compte reconstruit reste dans sa fenêtre.
+    for capacite in [0_u64, 32, 4_096] {
+        for inserees in [0_u64, 40, 1_000_000] {
+            let Ok(prefixe) = read_prefix(donnees, inserees, capacite) else {
+                continue;
+            };
+            let plafond = inserees.saturating_add(max_entries(capacite));
+            assert!(
+                prefixe.required_insert_count <= plafond,
+                "un compte au-delà de ce qu'on a reçu : {} pour {plafond}",
+                prefixe.required_insert_count
+            );
+            assert!(prefixe.read >= 2, "deux entiers font deux octets");
+            assert!(prefixe.read <= donnees.len());
+        }
     }
 
     // PROPRIÉTÉ 6 : le type d'un flux se lit, ou se rappelle.

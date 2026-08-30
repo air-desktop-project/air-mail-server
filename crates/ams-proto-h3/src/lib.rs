@@ -31,6 +31,7 @@ extern crate std;
 
 mod error;
 mod frame;
+pub mod qpack;
 mod settings;
 mod stream;
 

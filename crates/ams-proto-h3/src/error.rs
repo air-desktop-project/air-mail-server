@@ -110,6 +110,12 @@ pub enum Reason {
     UnknownStreamType,
     /// Un identifiant de poussée, alors qu'on n'en accepte aucune.
     PushRefused,
+    /// Un compte d'insertions QPACK qui ne se reconstruit pas (§4.5.1.1).
+    BadInsertCount,
+    /// Une représentation de champ QPACK mal formée (§4.5).
+    BadFieldLine,
+    /// Un index QPACK qui ne désigne aucune entrée.
+    BadIndex,
 }
 
 impl Reason {
@@ -125,6 +131,12 @@ impl Reason {
             Self::BadSetting => H3Error::SettingsError,
             Self::UnknownStreamType => H3Error::StreamCreationError,
             Self::PushRefused => H3Error::IdError,
+            // §6 de RFC 9204 : quand la table n'est plus la même des deux
+            // côtés, plus rien ne se lira — et il n'y a pas de reprise
+            // possible, seulement une fermeture.
+            Self::BadInsertCount | Self::BadFieldLine | Self::BadIndex => {
+                H3Error::QpackDecompressionFailed
+            }
         }
     }
 }
@@ -167,6 +179,9 @@ impl core::fmt::Display for Error {
             Reason::BadSetting => "un réglage réservé, ou répété",
             Reason::UnknownStreamType => "un type de flux qu'on ne sait pas conduire",
             Reason::PushRefused => "une poussée, alors qu'on n'en accepte aucune",
+            Reason::BadInsertCount => "un compte d'insertions qui ne se reconstruit pas",
+            Reason::BadFieldLine => "une représentation de champ mal formée",
+            Reason::BadIndex => "un index qui ne désigne aucune entrée",
         };
         write!(f, "{quoi} (code 0x{:04x})", self.code().value())
     }
