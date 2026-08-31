@@ -4677,3 +4677,46 @@ document que son analyseur lit autrement que le nôtre, ou pas du tout.
 L'écrivain refuse donc désormais, comme le lecteur : les clés répétées, plus de
 champs qu'on n'en retient, et les noms de champ qui ne sont pas des identifiants
 ASCII. **La borne des deux côtés est la même, et ce n'est pas une coïncidence.**
+
+## L'ALPN : ce qu'on annonce, et où l'on l'assemble
+
+### `h2`, et rien d'autre
+
+HTTP/1.1 n'est pas servi (C6) : son cadrage est textuel et sa longueur se déduit
+de deux champs qui peuvent se contredire, d'où toute la famille des attaques par
+contrebande de requête. Il n'a donc rien à faire dans une liste ALPN.
+
+§3.4 de RFC 9113 : un client qui veut parler HTTP/2 sur TLS l'annonce par ALPN,
+et le serveur le confirme. Comme on n'annonce que `h2`, un client qui n'offre que
+`http/1.1` voit sa poignée de main échouer — **c'est le bon endroit pour dire
+non**, puisque refuser après coup obligerait à répondre dans un cadrage qu'on ne
+sait pas écrire.
+
+### Une fonction, et non un paramètre
+
+Une liste passée par l'appelant se remplirait un jour de `http/1.1` — « juste pour
+un client ancien ». Or annoncer un protocole qu'on refuse de servir est pire que
+de ne pas l'annoncer : le client le négocie, croit avoir accordé, et se voit
+refuser après la poignée de main. `ams_tls::alpn()` rend toujours la même liste,
+et c'est la seule qui soit sanctionnée.
+
+L'essai vérifie l'absence autant que la présence : ni `http/1.1`, ni `http/1.0`,
+ni `h2c`, ni `http/0.9`. C'est cette absence-là qui porte la garantie.
+
+### Et pourquoi l'assemblage ne vit pas dans `ams-tls`
+
+Poser cette liste sur une configuration demande une configuration, donc un
+certificat — que cette crate ne peut pas fabriquer sans matériel, et qu'on ne
+versionne pas.
+
+**Le seuil de couverture ne mesure que les crates du périmètre sans
+entrée-sortie**, et il ne lance que leurs essais. Une ligne d'assemblage posée
+dans `ams-tls` ne serait donc couverte que par un essai d'intégration qui n'y
+compte pas — ou bien il faudrait fabriquer un certificat dans les essais
+unitaires, et faire dépendre le seuil de la présence d'`openssl` sur la machine.
+Une fragilité qu'on ne veut pas dans un gate.
+
+La découpe suit donc ce que chaque morceau peut prouver seul : **ce qu'on annonce
+se vérifie sans rien, l'assemblage demande de quoi assembler.** Le second vit dans
+l'écoute qui s'en sert, avec un essai d'intégration qui fabrique un certificat à
+la volée.

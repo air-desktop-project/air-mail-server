@@ -64,6 +64,38 @@ impl fmt::Display for Error {
 
 impl core::error::Error for Error {}
 
+/// Le seul protocole applicatif que ce serveur annonce sur TLS.
+///
+/// **`h2`, ET RIEN D'AUTRE.** HTTP/1.1 n'est pas servi (C6) : son cadrage est
+/// textuel et sa longueur se déduit de deux champs qui peuvent se contredire,
+/// d'où toute la famille des attaques par contrebande de requête.
+pub const ALPN_H2: &[u8] = b"h2";
+
+/// Les protocoles qu'on annonce, dans l'ordre de préférence.
+///
+/// # POURQUOI UNE FONCTION, ET NON UN PARAMÈTRE DE [`server_config`]
+///
+/// Une liste passée par l'appelant se remplirait un jour de `http/1.1` — « juste
+/// pour un client ancien ». Or annoncer un protocole qu'on refuse de servir est
+/// pire que de ne pas l'annoncer : le client le négocie, croit avoir accordé, et
+/// se voit refuser après la poignée de main.
+///
+/// **IL N'Y A DONC QU'UNE SEULE LISTE SANCTIONNÉE**, et c'est celle-ci.
+///
+/// # ET POURQUOI L'ASSEMBLAGE N'EST PAS ICI
+///
+/// Poser cette liste sur une configuration demande une configuration, donc un
+/// certificat — que cette crate ne peut pas fabriquer sans matériel, et qu'on ne
+/// versionne pas. L'assemblage vit donc là où un certificat existe : dans
+/// l'écoute qui s'en sert.
+///
+/// La découpe suit ce que chaque morceau peut prouver seul : ce qu'on annonce se
+/// vérifie sans rien, l'assemblage demande de quoi assembler.
+#[must_use]
+pub fn alpn() -> Vec<Vec<u8>> {
+    alloc::vec![ALPN_H2.to_vec()]
+}
+
 /// Assemble un `ServerConfig` à partir d'une chaîne et d'une clé, en PEM.
 ///
 /// La configuration rendue est **TLS 1.3 uniquement** (C4) et offre
@@ -104,6 +136,7 @@ pub fn server_config(chain_pem: &[u8], key_pem: &[u8]) -> Result<ServerConfig, E
 mod tests {
     use super::{Error, server_config};
     use alloc::format;
+    use alloc::vec::Vec;
 
     /// Un bloc PEM bien formé qui ne contient pas ce qu'il annonce.
     const CERT_BIDON: &[u8] = b"-----BEGIN CERTIFICATE-----\naGVsbG8=\n-----END CERTIFICATE-----\n";
@@ -153,6 +186,24 @@ mod tests {
         let erreur = server_config(CERT_BIDON, b"pas de clef ici").expect_err("refusée");
         assert_eq!(genre(&erreur), "clé", "{erreur:?}");
         assert!(format!("{erreur}").contains("clé privée"));
+    }
+
+    /// **`h2`, ET RIEN D'AUTRE** : annoncer un protocole qu'on refuse de servir
+    /// est pire que de ne pas l'annoncer, puisque le client le négocie et croit
+    /// avoir accordé.
+    #[test]
+    fn on_n_annonce_que_http2() {
+        let dits = super::alpn();
+        assert_eq!(dits.len(), 1, "{dits:?}");
+        assert_eq!(dits.first().map(Vec::as_slice), Some(super::ALPN_H2));
+        assert_eq!(super::ALPN_H2, b"h2");
+        // Rien qui ressemble à HTTP/1.1 : ni le nom, ni une variante.
+        for refuse in [&b"http/1.1"[..], b"http/1.0", b"h2c", b"http/0.9"] {
+            assert!(
+                !dits.iter().any(|dit| dit.as_slice() == refuse),
+                "{refuse:?} est annoncé"
+            );
+        }
     }
 
     #[test]
