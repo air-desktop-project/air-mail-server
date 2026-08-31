@@ -61,6 +61,11 @@ fn jeter_et_ne_pas_avoir_de_code_sont_la_meme_chose() {
             "à contresens",
         ),
         (
+            Reason::StreamNotCreated,
+            Some(TransportError::StreamStateError),
+            "qu'on n'a pas ouvert",
+        ),
+        (
             Reason::WindowTooSmall,
             Some(TransportError::InternalError),
             "la taille annoncée",

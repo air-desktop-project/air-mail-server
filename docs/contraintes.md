@@ -516,6 +516,81 @@ pas ses clés entre deux datagrammes, la seconde parce qu'une substitution de
 texte avait échoué en silence et laissé l'ancienne version en place. **Le
 symptôme désignait le serveur ; la cause était ailleurs, deux fois.**
 
+### La collection de flux, et ce que le fuzz a trouvé
+
+Écrite le 2026-08-31, dans `ams-quic::streams`. **Toutes les machines par flux
+existaient** — `Send` (§3.1), `Recv` (§3.2), `Flow` (§4.1), `Concurrences`
+(§4.6) — et aucune ne savait à quel flux une trame s'adresse, avec quelle limite
+il s'ouvre, ni quand sa place se libère. C'est le même vide qu'avant le
+conducteur de connexion, et le module ne comble que celui-là.
+
+#### Elle ne garde pas les octets
+
+`Recv::on_stream` demandait déjà sa fenêtre en argument ; la collection se
+contente de la lui passer, et rend en échange un rang de table stable par lequel
+l'appelant retrouve ses tampons. **C'est ce qui garde `ams-quic` sans allocation
+et sa taille bornée** : un flux y coûte quelques centaines d'octets d'état, et
+non la taille de sa fenêtre.
+
+La mesure qui a tranché : un flux pèse 3 184 octets d'état, dont 3 072 pour les
+deux jeux d'intervalles de réassemblage. Ramener ceux-ci de 64 à 8 intervalles
+les ferait tomber à 496 — mais `HOLES_MAX` porte déjà son argument, et il est
+juste : soixante-quatre intervalles couvrent les vingt-huit paquets qu'un pair
+peut avoir en vol sur un flux avec une fenêtre de 32 kibioctets. **Et surtout, la
+fenêtre que l'appelant doit tenir domine tout le reste** : économiser 2,7 Ko
+d'état devant 32 Ko de fenêtre ne valait pas la tolérance au désordre qu'on y
+perdait.
+
+#### Un plafond par famille, et non un seul pour la table
+
+§4.6 compte quatre familles : deux sens d'ouverture, deux directionnalités. Si
+les quatre puisaient dans le même crédit, **le pair pourrait remplir la table
+avec une seule famille et rendre les trois autres inutilisables — sans jamais
+dépasser aucune limite qu'on lui a annoncée**. Chaque famille a donc sa part de
+table, et la somme des parts est la table entière. Le débordement devient
+impossible par construction, et non gardé par un test qu'aucun essai
+n'atteindrait.
+
+Le plafond annoncé vaut « ce qu'on a rendu, plus une part ». Les deux termes
+comptent : un pair qui nous avait annoncé peu nous laisse de la place dès le
+départ, et chaque flux rendu en libère une de plus. §4.6 compte les flux ouverts
+depuis toujours et jamais les vivants — sans ce compte, une connexion n'aurait
+droit qu'à huit flux par famille pour toute sa vie, et une page HTTP/3 en demande
+davantage.
+
+**Une place libre n'est pas une promesse.** Tant que le `MAX_STREAMS` n'est pas
+parti, le pair ne sait rien du crédit qu'une place rendue vient d'ouvrir : rendre
+la place et relever le plafond sont donc deux gestes, `oublier` et
+`set_max_streams`, et `grant_streams` propose entre les deux. Les confondre
+accepterait des flux que le pair n'a pas le droit d'ouvrir.
+
+#### Ce que le fuzz a trouvé, et par sa conséquence
+
+`fuzz_ams_quic_streams` a fait tomber une propriété qui ne parlait pas de la
+faute : **le rang d'un flux vivant avait bougé**. La cause était ailleurs — §19.8
+exige de refuser une trame qui parle d'un flux à nous que nous n'avons pas
+ouvert, et la collection l'ouvrait à la place du pair. Le jour où `open` prenait
+ce rang, il en existait alors deux du même numéro, donc deux contrôles de flux
+pour un seul flux, qui divergeaient en silence.
+
+§2.1 donne à chaque côté ses propres numéros, et celui qui ouvre est le seul à
+choisir quand. Un pair qui parle d'un numéro à nous ne prend pas de l'avance : il
+désigne quelque chose dont nous n'avons aucune idée. D'où `Reason::StreamNotCreated`,
+qui porte le `STREAM_STATE_ERROR` de §19.8.
+
+**La faute ne s'est pas vue là où elle était commise**, et c'est le troisième
+défaut de suite trouvé de cette façon : c'est la propriété d'ensemble qui l'a
+révélée, longtemps après le geste fautif.
+
+#### Trois défauts trouvés en relisant, avant toute compilation
+
+`oublier` relevait le plafond que `grant_streams` était censé proposer ; `on_sent`
+consommait le crédit de connexion avant de vérifier que le flux existe, laissant
+un refus dépenser pour des octets jamais émis ; et deux gardes de `read` et
+`credit` étaient inatteignables, `slot` ne rendant jamais que le rang d'un flux
+vivant. Quatre autres gardes inatteignables ont été retirées ensuite, chacune
+signalée par la couverture.
+
 ### L'écoute UDP (`ams-loop-tokio::quic`)
 
 Écrite le 2026-08-31. C'est la troisième étape pour QUIC : les grammaires

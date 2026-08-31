@@ -89,6 +89,7 @@ fuzz_ams_session_render session-render
 fuzz_ams_quic_crypto quic-crypto
 fuzz_ams_quic_receive quic-receive
 fuzz_ams_quic_stream quic-stream
+fuzz_ams_quic_streams quic-streams
 fuzz_ams_quic_connection quic-connection
 fuzz_ams_quic_handshake quic-handshake
 fuzz_ams_quic_routing quic-routing

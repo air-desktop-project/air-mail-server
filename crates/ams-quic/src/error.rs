@@ -69,6 +69,16 @@ pub enum Reason {
     /// auteur. Y écrire à contresens veut dire que le pair a mal compris à qui
     /// appartient le flux — donc que la suite ne sera pas ce qu'on croit.
     WrongStreamDirection,
+    /// Le pair parle d'un flux que NOUS devions ouvrir, et que nous n'avons pas
+    /// ouvert (§19.8).
+    ///
+    /// **CE N'EST PAS UN FLUX EN AVANCE, C'EST UN FLUX QUI N'EXISTE PAS.** §2.1
+    /// donne à chaque côté ses propres numéros : celui qui ouvre est le seul à
+    /// choisir quand. Un pair qui parle d'un numéro à nous qu'on n'a pas encore
+    /// pris n'a pas pris de l'avance sur nous — il désigne quelque chose dont
+    /// nous n'avons aucune idée, et la suite de la connexion ne sera pas ce
+    /// qu'il croit.
+    StreamNotCreated,
     /// La fenêtre de réassemblage ne fait pas la taille qu'on a annoncée.
     ///
     /// **C'EST NOTRE FAUTE, ET LA PIRE DE TOUTES** : sans ce refus, les octets
@@ -141,7 +151,9 @@ impl Reason {
                 Some(TransportError::InternalError)
             }
             Self::StreamLimit => Some(TransportError::StreamLimitError),
-            Self::WrongStreamDirection => Some(TransportError::StreamStateError),
+            Self::WrongStreamDirection | Self::StreamNotCreated => {
+                Some(TransportError::StreamStateError)
+            }
             // §4.1.3 et §8.3 de RFC 9001 : trois façons de parler mal entre les
             // niveaux, et la même sanction.
             Self::CryptoInZeroRtt | Self::CryptoAfterLevel | Self::CryptoNotConsumed => {
@@ -215,6 +227,7 @@ impl core::fmt::Display for Error {
             Reason::SendOverflow => "on a voulu émettre au-delà de ce qui nous est ouvert",
             Reason::StreamLimit => "le pair a ouvert plus de flux qu'on ne lui en a ouvert",
             Reason::WrongStreamDirection => "le pair écrit sur un flux à contresens",
+            Reason::StreamNotCreated => "le pair parle d'un flux qu'on n'a pas ouvert",
             Reason::WindowTooSmall => "la fenêtre ne fait pas la taille annoncée",
             Reason::CryptoInZeroRtt => "une trame CRYPTO dans un paquet 0-RTT",
             Reason::CryptoAfterLevel => "du neuf à un niveau de chiffrement déjà dépassé",

@@ -50,6 +50,7 @@ mod recv;
 mod routing;
 mod send;
 mod sent;
+pub mod streams;
 
 pub use connection::{AMPLIFICATION_FACTOR, CLOSING_PTOS, Connection, IDLE_PTOS, State};
 pub use emit::{Plan, payload_capacity, seal_packet};
@@ -65,3 +66,4 @@ pub use routing::{
 };
 pub use send::{Send, SendState};
 pub use sent::{Acked, Lost, SENT_MAX, Sent};
+pub use streams::{FLUX_MAX, FLUX_PAR_FAMILLE_MAX, Streams};
