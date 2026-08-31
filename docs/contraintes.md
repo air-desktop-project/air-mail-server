@@ -590,6 +590,37 @@ Toutes signalées par la couverture, dont une redondance introduite dans
 `Streams::can_send`, qui distingue « ce flux n'émet pas » de « son crédit est
 nul » — deux choses que confondre aurait fait refuser un flux simplement bloqué.
 
+### Un flux sur la vraie socket, et son contrôle négatif
+
+Écrit le 2026-08-31. `crates/ams-loop-tokio/tests/quic.rs` fait désormais ouvrir
+au client un flux bidirectionnel, y écrire et le terminer — sur la pile réseau du
+système.
+
+**Ce que cet essai prouve** : §12.4, §4.1 et §4.6 sont servis de bout en bout, la
+trame arrive au bon niveau, le crédit est compté, le flux est rangé dans sa part
+de table. **Ce qu'il ne prouve pas** : qu'une application reçoive ces octets.
+L'écoute n'a pas encore de couture applicative, et c'est le conducteur HTTP/3 qui
+l'apportera ; l'inventer avant de connaître ses besoins reviendrait à deviner.
+
+#### Un essai qui ne peut pas échouer ne prouve rien
+
+« La connexion est restée ouverte » ne dirait rien d'une écoute qui jetterait
+toutes les trames de flux en silence. Un second essai fait donc dépasser au
+client le plafond de §4.6, et vérifie que le serveur le lui DIT plutôt que de
+jeter. Sans ce contrôle négatif, le premier essai aurait été décoratif.
+
+Il a d'ailleurs corrigé une attente fausse : `QuicStats::closed` ne compte pas
+les connexions qu'on ferme, mais celles qui ont fini d'attendre. §10.2 garde une
+connexion en fermeture trois PTO durant, pour redire son `CONNECTION_CLOSE` au
+pair qui n'aurait pas entendu.
+
+#### Le même défaut de bourrage, dans le second client d'essai
+
+Il bourrait lui aussi tout datagramme à 1200 octets. Il n'échouait pas visiblement
+tant que l'essai s'arrêtait à la poignée de main — les paquets à en-tête long ont
+un champ de longueur —, mais aucun acquittement applicatif ne pouvait lui
+parvenir. Corrigé de la même façon que l'autre, et pour la même raison (§17.3).
+
 ### La collection de flux, et ce que le fuzz a trouvé
 
 Écrite le 2026-08-31, dans `ams-quic::streams`. **Toutes les machines par flux

@@ -26,7 +26,7 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 
-use ams_proto_quic::{ConnectionId, Frame, Space};
+use ams_proto_quic::{ConnectionId, Frame, Sender, Space, TransportParameters};
 use ams_quic::{Incoming, Level, Plan, open_packet, seal_packet};
 use ams_quic_crypto::{Keys, Role, Secret};
 use ams_quic_tls::Clefs;
@@ -47,7 +47,26 @@ const ORIGINE: [u8; 8] = [0x21, 0x43, 0x65, 0x87, 0xa9, 0xcb, 0xed, 0x0f];
 const CLIENT: [u8; 4] = [0x11, 0x22, 0x33, 0x44];
 
 /// Les paramètres de transport que le client annonce.
-const SES_PARAMETRES: &[u8] = b"\x04\x04\x80\x0c\x00\x00";
+/// Les paramètres que le client annonce (§18.2).
+///
+/// **LES SIX LIMITES, ET NON LA SEULE `initial_max_data`** : sans les crédits par
+/// flux et les plafonds de §4.6, tout vaudrait zéro et un essai de flux passerait
+/// en ne prouvant rien.
+fn ses_parametres() -> Vec<u8> {
+    let mut siens = TransportParameters::DEFAULT;
+    siens.initial_max_data = 100_000;
+    siens.initial_max_stream_data_bidi_local = 50_000;
+    siens.initial_max_stream_data_bidi_remote = 50_000;
+    siens.initial_max_stream_data_uni = 50_000;
+    siens.initial_max_streams_bidi = 8;
+    siens.initial_max_streams_uni = 8;
+    let mut octets = vec![0_u8; 256];
+    let ecrits = siens
+        .write(Sender::Client, &mut octets)
+        .expect("nos propres paramètres tiennent");
+    octets.truncate(ecrits);
+    octets
+}
 
 /// Un répertoire par test.
 struct Atelier(std::path::PathBuf);
@@ -172,6 +191,12 @@ struct Client {
     reassemblage: ams_quic::Handshake,
     fenetres: [Vec<u8>; 3],
     en_attente: Vec<(Level, Vec<u8>)>,
+    /// Des trames applicatives à poser au prochain datagramme.
+    a_dire: Vec<u8>,
+    /// Le serveur a-t-il fermé, et avec quel code ?
+    ferme: Option<u64>,
+    /// Ce datagramme-ci porte-t-il un `Initial` ?
+    a_pose_un_initial: bool,
 }
 
 impl Client {
@@ -188,7 +213,7 @@ impl Client {
                 config,
                 Version::V1,
                 ServerName::try_from("localhost").expect("un nom"),
-                SES_PARAMETRES.to_vec(),
+                ses_parametres(),
             )
             .expect("le client se construit"),
             socket,
@@ -210,6 +235,9 @@ impl Client {
                 vec![0_u8; ams_quic::CRYPTO_OCTETS_MAX],
             ],
             en_attente: Vec::new(),
+            a_dire: Vec::new(),
+            ferme: None,
+            a_pose_un_initial: false,
         }
     }
 
@@ -251,7 +279,13 @@ impl Client {
 
     /// Compose un datagramme et l'envoie pour de bon.
     async fn parler(&mut self) -> bool {
+        self.a_pose_un_initial = false;
         let mut datagramme = Vec::new();
+        // Ce que l'essai veut dire au serveur, en `1-RTT`.
+        let a_dire = core::mem::take(&mut self.a_dire);
+        if !a_dire.is_empty() {
+            self.poser(&mut datagramme, Space::Application, &a_dire);
+        }
         for espace in [Space::Initial, Space::Handshake, Space::Application] {
             let rang = Self::rang(espace);
             if self.a_acquitter[rang].is_empty() {
@@ -292,7 +326,15 @@ impl Client {
             return false;
         }
         // §14.1 : un datagramme portant un `Initial` fait 1200 octets au moins.
-        if datagramme.len() < 1_200 {
+        //
+        // # ET SEULEMENT CELUI-LÀ
+        //
+        // **UN EN-TÊTE COURT N'A PAS DE CHAMP DE LONGUEUR** (§17.3) : sa charge
+        // va jusqu'au bout du datagramme. Bourrer derrière lui ferait entrer les
+        // zéros dans le chiffré, et le paquet ne s'authentifierait plus — il
+        // serait jeté sans un mot, ce qu'un essai confondrait avec un serveur
+        // muet.
+        if self.a_pose_un_initial && datagramme.len() < 1_200 {
             datagramme.resize(1_200, 0);
         }
         self.socket
@@ -304,6 +346,7 @@ impl Client {
 
     /// Scelle un paquet de cet espace et l'ajoute au datagramme.
     fn poser(&mut self, datagramme: &mut Vec<u8>, espace: Space, trames: &[u8]) {
+        self.a_pose_un_initial |= matches!(espace, Space::Initial);
         let rang = Self::rang(espace);
         let plan = match espace {
             Space::Initial => Plan::Initial {
@@ -391,6 +434,9 @@ impl Client {
                 };
                 suite = &suite[lus..];
                 sollicite |= !matches!(trame, Frame::Ack(_) | Frame::Padding { .. });
+                if let Frame::ConnectionClose { code, .. } = trame {
+                    self.ferme = Some(code);
+                }
                 if let Frame::Crypto { offset, data } = trame {
                     self.reassemblage
                         .on_crypto(niveau, offset, data, &mut self.fenetres[quel])
@@ -530,4 +576,154 @@ async fn du_bruit_sur_le_port_n_ouvre_rien() {
         .expect("l'écoute rend ses comptes");
     assert_eq!(stats.accepted, 0, "aucun bruit n'ouvre de connexion");
     assert!(stats.discarded >= 4, "et tous sont comptés : {stats:?}");
+}
+
+/// **UN FLUX TRAVERSE LA VRAIE SOCKET.**
+///
+/// La poignée de main aboutissait déjà ; celui-ci va plus loin : le client ouvre
+/// un flux bidirectionnel, y écrit, et le termine — le tout sur la pile réseau
+/// du système.
+///
+/// # CE QUE CET ESSAI PROUVE, ET CE QU'IL NE PROUVE PAS
+///
+/// Il prouve que §12.4, §4.1 et §4.6 sont servis de bout en bout : la trame
+/// arrive au bon niveau, le crédit est compté, le flux est ouvert et rangé dans
+/// sa part de table. **Il ne prouve pas qu'une application reçoit ces octets** —
+/// l'écoute n'a pas encore de couture applicative, et c'est le conducteur HTTP/3
+/// qui l'apportera. Une connexion qui reste ouverte est donc tout ce qu'on peut
+/// observer d'ici, et c'est déjà ce qui tomberait si l'un des trois manquait.
+#[tokio::test(flavor = "current_thread")]
+async fn un_flux_traverse_la_vraie_socket() {
+    let atelier = atelier("flux");
+    let (autorite, cert, cle) = materiel(&atelier.0).expect(SANS_OPENSSL);
+
+    let mut config = ams_tls::quic_server_config(&cert, &cle).expect("la paire est bonne");
+    config.alpn_protocols = ams_tls::alpn_h3();
+    let socket = UdpSocket::bind("127.0.0.1:0").await.expect("une socket");
+    let adresse = socket.local_addr().expect("une adresse");
+
+    let (fin, arret) = tokio::sync::oneshot::channel::<()>();
+    let ecoute = tokio::spawn(async move {
+        ams_loop_tokio::serve_quic(socket, Arc::new(config), async {
+            let _ = arret.await;
+        })
+        .await
+    });
+
+    let mut client = Client::new(config_client(&autorite), adresse).await;
+    for _ in 0..16 {
+        if !client.parler().await && !client.tls.is_handshaking() {
+            break;
+        }
+        if !client.ecouter().await && !client.tls.is_handshaking() {
+            break;
+        }
+    }
+    assert!(!client.tls.is_handshaking(), "la poignée de main aboutit");
+
+    // Le flux zéro : le premier bidirectionnel du client (§2.1).
+    let mut trames = [0_u8; 64];
+    let ecrits = (Frame::Stream {
+        stream: 0,
+        offset: 0,
+        data: b"une requete",
+        fin: true,
+    })
+    .write(&mut trames)
+    .expect("écrivable");
+    client
+        .a_dire
+        .extend_from_slice(trames.get(..ecrits).expect("écrits"));
+
+    for _ in 0..6 {
+        client.parler().await;
+        client.ecouter().await;
+    }
+
+    assert_eq!(
+        client.ferme, None,
+        "LE FLUX A ÉTÉ ACCEPTÉ : une faute de §12.4, §4.1 ou §4.6 aurait fermé"
+    );
+
+    let _ = fin.send(());
+    let stats = ecoute
+        .await
+        .expect("la tâche d'écoute")
+        .expect("l'écoute rend ses comptes");
+    assert_eq!(stats.accepted, 1);
+    assert_eq!(stats.closed, 0, "et la connexion vit toujours");
+}
+
+/// **ET UNE FAUTE DE FLUX FERME, SUR LA MÊME SOCKET.**
+///
+/// # C'EST LE CONTRÔLE NÉGATIF DE L'ESSAI PRÉCÉDENT
+///
+/// Sans lui, « la connexion est restée ouverte » ne prouverait rien : une écoute
+/// qui jetterait toutes les trames de flux en silence passerait aussi bien. Ici
+/// le client dépasse le plafond de §4.6, et le serveur doit le lui dire.
+#[tokio::test(flavor = "current_thread")]
+async fn une_faute_de_flux_ferme_sur_la_vraie_socket() {
+    let atelier = atelier("faute-de-flux");
+    let (autorite, cert, cle) = materiel(&atelier.0).expect(SANS_OPENSSL);
+
+    let mut config = ams_tls::quic_server_config(&cert, &cle).expect("la paire est bonne");
+    config.alpn_protocols = ams_tls::alpn_h3();
+    let socket = UdpSocket::bind("127.0.0.1:0").await.expect("une socket");
+    let adresse = socket.local_addr().expect("une adresse");
+
+    let (fin, arret) = tokio::sync::oneshot::channel::<()>();
+    let ecoute = tokio::spawn(async move {
+        ams_loop_tokio::serve_quic(socket, Arc::new(config), async {
+            let _ = arret.await;
+        })
+        .await
+    });
+
+    let mut client = Client::new(config_client(&autorite), adresse).await;
+    for _ in 0..16 {
+        if !client.parler().await && !client.tls.is_handshaking() {
+            break;
+        }
+        if !client.ecouter().await && !client.tls.is_handshaking() {
+            break;
+        }
+    }
+    assert!(!client.tls.is_handshaking(), "la poignée de main aboutit");
+
+    // Le rang cent, très au-delà des huit flux qu'on lui a annoncés.
+    let mut trames = [0_u8; 64];
+    let ecrits = (Frame::Stream {
+        stream: 400,
+        offset: 0,
+        data: b"trop",
+        fin: false,
+    })
+    .write(&mut trames)
+    .expect("écrivable");
+    client
+        .a_dire
+        .extend_from_slice(trames.get(..ecrits).expect("écrits"));
+
+    for _ in 0..6 {
+        client.parler().await;
+        client.ecouter().await;
+    }
+
+    assert_eq!(
+        client.ferme,
+        Some(ams_proto_quic::TransportError::StreamLimitError.value()),
+        "§4.6 : le serveur le dit, et ne se contente pas de jeter"
+    );
+
+    let _ = fin.send(());
+    let stats = ecoute
+        .await
+        .expect("la tâche d'écoute")
+        .expect("l'écoute rend ses comptes");
+    assert_eq!(stats.accepted, 1);
+    // **ELLE N'EST PAS ENCORE ÉTEINTE, ET C'EST §10.2** : après avoir dit sa
+    // fermeture, une connexion reste en état de fermeture trois PTO durant, pour
+    // pouvoir redire son `CONNECTION_CLOSE` au pair qui n'aurait pas entendu.
+    // `closed` ne compte que ce qui a fini d'attendre.
+    assert_eq!(stats.closed, 0);
 }
