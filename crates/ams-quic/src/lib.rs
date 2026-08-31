@@ -48,6 +48,7 @@ mod receive;
 mod recv;
 mod routing;
 mod send;
+mod sent;
 
 pub use connection::{AMPLIFICATION_FACTOR, CLOSING_PTOS, Connection, IDLE_PTOS, State};
 pub use emit::{Plan, payload_capacity, seal_packet};
@@ -61,3 +62,4 @@ pub use routing::{
     Discard, INITIAL_DATAGRAM_OCTETS_MIN, Incoming, LOCAL_CONNECTION_ID_OCTETS, Route,
 };
 pub use send::{Send, SendState};
+pub use sent::{Acked, Lost, SENT_MAX, Sent};

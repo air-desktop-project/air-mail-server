@@ -252,10 +252,9 @@ dialogue avec elle-même. La cible de fuzz `fuzz_ams_tls_quic` étend la même
 comparaison à tout ce qui n'est pas dans l'annexe.
 
 **Ce qui reste à faire** : le fournisseur est capable de QUIC, ce n'est pas la
-même chose que servir HTTP/3. Le pont de poignée de main, le tri des datagrammes
-et l'émission d'un paquet protégé ont suivi le 2026-08-31 (voir ci-dessous) ;
-restent la reprise sur perte et la génération d'`ACK`, l'écoute UDP elle-même,
-puis seulement le conducteur HTTP/3.
+même chose que servir HTTP/3. Le pont de poignée de main, le tri des datagrammes,
+l'émission d'un paquet protégé et la détection de perte ont suivi le 2026-08-31
+(voir ci-dessous) ; restent l'écoute UDP elle-même, puis le conducteur HTTP/3.
 
 ### La poignée de main, et pourquoi elle occupe deux crates
 
@@ -453,6 +452,63 @@ n'emprunte. Le partage est net : `disposer` vérifie tout ce qui est vérifiable
 le numéro, l'échantillon, la borne d'un datagramme — et tout ce qui suit est
 infaillible par construction, y compris l'écriture de l'en-tête, qui reçoit une
 tranche de la taille exacte.
+
+### La détection de perte, et ce que deux essais ont trouvé
+
+Écrit le 2026-08-31, dans `ams-quic::sent`. QUIC n'a pas de retransmission
+automatique : un paquet perdu est perdu, et c'est à l'émetteur de s'en
+apercevoir. **Sans ce module, une poignée de main ne finit pas** dès qu'un seul
+datagramme se perd.
+
+Les trois pièces qui l'entourent existaient déjà : `Rtt` mesure le trajet (§5),
+`Congestion` borne le débit (§7), `Received` fabrique les `ACK` que l'on ENVOIE
+(§13.2 de RFC 9000). Manquait celle qui se souvient de ce qu'on a envoyé.
+
+Il ne retient qu'un numéro, une date, une taille et deux drapeaux. **Retenir
+aussi les trames doublerait la mémoire d'une connexion** et ferait de ce module
+le propriétaire de données qu'il ne relit jamais. Quand il déclare un paquet
+perdu, il en rend le NUMÉRO ; c'est l'appelant, qui a composé les trames, qui
+sait ce qu'il faut recomposer.
+
+Un objet par espace de numérotation (§12.3) : un seul pour les trois compterait
+des seuils de réordonnancement entre des numéros qui n'ont rien à voir.
+
+#### Deux défauts trouvés par les essais, et non par la relecture
+
+1. **Un paquet émis à l'origine de l'horloge était perdu d'avance.** §A.10 pose
+   `lost_send_time = now - loss_delay` ; la première version saturait cette
+   soustraction à zéro, ce qui rendait `parti_a <= 0` vrai pour tout paquet émis
+   à l'instant zéro. Une horloge monotone commence près de zéro : ce sont les
+   tout premiers paquets d'une connexion — ceux de la poignée de main — qui
+   auraient été retransmis pour rien. `checked_sub` dit ce que la RFC dit :
+   quand l'horloge n'a pas atteint le délai, rien n'a pu être émis si tôt.
+2. **Un même numéro de paquet était accepté deux fois.** §12.3 de RFC 9000 :
+   « A QUIC endpoint MUST NOT reuse a packet number within the same packet
+   number space. » Rien n'obligeait ce module à le vérifier — c'est l'appelant
+   qui numérote. Mais deux entrées pour un même numéro font compter deux fois
+   les mêmes octets à l'acquittement, et la comptabilité des octets en vol
+   dérive **sans que rien ne le dise** : cela se verrait dans un débit qui
+   s'écroule, et nulle part ailleurs. C'est la cible de fuzz qui l'a montré, en
+   soumettant deux fois le même numéro.
+
+#### Les bornes, et pourquoi elles ne se valent pas
+
+- **256 paquets retenus par espace.** Refuser d'émettre au-delà ne perd rien :
+  cela plafonne le débit, exactement comme le fait déjà le contrôleur de
+  congestion. C'est l'inverse d'une borne en réception, où ce qu'on ne retient
+  pas est perdu pour de bon.
+- **32 intervalles lus dans un `ACK`** — le nombre qu'on écrit soi-même. Un pair
+  qui en envoie davantage décrit un réseau plus troué que tout ce qu'on sait
+  tenir ; le refuser vaut mieux que de lire à moitié un acquittement, ce qui
+  ferait déclarer perdus des paquets qui ne le sont pas.
+
+#### Ce que le seuil temporel doit à un détail d'écriture
+
+§6.1.2 : `9/8 × max(smoothed_rtt, latest_rtt)`, jamais moins que la granularité
+de l'horloge. Le multiplicateur est porté **en huitièmes, en entiers** : un
+flottant introduirait un arrondi là où la RFC parle d'une fraction exacte. Et le
+plancher n'est pas décoratif — un seuil plus fin que ce qu'on sait mesurer
+déclarerait perdu ce qui vient d'arriver.
 
 ## C5 — Le moteur d'entrées-sorties, par cible
 

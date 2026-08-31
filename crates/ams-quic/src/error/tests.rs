@@ -89,6 +89,12 @@ fn jeter_et_ne_pas_avoir_de_code_sont_la_meme_chose() {
             Some(TransportError::CryptoBufferExceeded),
             "hors d'ordre",
         ),
+        // §12.3 : celle-ci nous vise, NOUS.
+        (
+            Reason::PacketNumberReused,
+            Some(TransportError::InternalError),
+            "réemployer un numéro",
+        ),
     ];
     for (raison, code, morceau) in cas {
         let faute = Error::new(raison);

@@ -103,6 +103,16 @@ pub enum Reason {
     /// quand même donné un code, parce que la borne devait bien exister quelque
     /// part.
     CryptoBufferExceeded,
+    /// On a voulu émettre deux fois le même numéro de paquet (§12.3 de
+    /// RFC 9000).
+    ///
+    /// **C'EST NOTRE FAUTE, ET ELLE SE TAIRAIT SANS CE REFUS.** « A QUIC
+    /// endpoint MUST NOT reuse a packet number within the same packet number
+    /// space. » Deux entrées pour un même numéro font compter deux fois les
+    /// mêmes octets à l'acquittement, et la comptabilité des octets en vol
+    /// dérive — ce qui se voit dans un débit qui s'écroule, jamais dans un
+    /// journal.
+    PacketNumberReused,
 }
 
 impl Reason {
@@ -138,6 +148,8 @@ impl Reason {
                 Some(TransportError::ProtocolViolation)
             }
             Self::CryptoBufferExceeded => Some(TransportError::CryptoBufferExceeded),
+            // §12.3 nous l'interdit à NOUS : le pair n'y est pour rien.
+            Self::PacketNumberReused => Some(TransportError::InternalError),
         }
     }
 
@@ -208,6 +220,7 @@ impl core::fmt::Display for Error {
             Reason::CryptoAfterLevel => "du neuf à un niveau de chiffrement déjà dépassé",
             Reason::CryptoNotConsumed => "des clés plus hautes, et des octets non lus plus bas",
             Reason::CryptoBufferExceeded => "plus de CRYPTO hors d'ordre qu'on n'en retient",
+            Reason::PacketNumberReused => "on a voulu réemployer un numéro de paquet",
         };
         let suite = match self.se_jette() {
             true => "on le jette",

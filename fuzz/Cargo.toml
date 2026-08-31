@@ -421,6 +421,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_ams_quic_sent"
+path = "fuzz_targets/fuzz_ams_quic_sent.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_ams_h3_connection"
 path = "fuzz_targets/fuzz_ams_h3_connection.rs"
 test = false
