@@ -253,8 +253,9 @@ comparaison à tout ce qui n'est pas dans l'annexe.
 
 **Ce qui reste à faire** : le fournisseur est capable de QUIC, ce n'est pas la
 même chose que servir HTTP/3. Le pont de poignée de main, le tri des datagrammes,
-l'émission d'un paquet protégé et la détection de perte ont suivi le 2026-08-31
-(voir ci-dessous) ; restent l'écoute UDP elle-même, puis le conducteur HTTP/3.
+l'émission d'un paquet protégé, la détection de perte et le conducteur de
+connexion ont suivi le 2026-08-31 (voir ci-dessous) ; restent l'écoute UDP
+elle-même, les flux, puis le conducteur HTTP/3.
 
 ### La poignée de main, et pourquoi elle occupe deux crates
 
@@ -452,6 +453,68 @@ n'emprunte. Le partage est net : `disposer` vérifie tout ce qui est vérifiable
 le numéro, l'échantillon, la borne d'un datagramme — et tout ce qui suit est
 infaillible par construction, y compris l'écriture de l'en-tête, qui reçoit une
 tranche de la taille exacte.
+
+### Le conducteur de connexion, et ce que trois essais ont trouvé
+
+Écrit le 2026-08-31, dans `ams-quic-tls::Connection`. **Toutes les pièces
+existaient ; aucune ne savait ce qu'il fallait faire ensuite.** Ce qui se décide
+là, et nulle part ailleurs : quelles trames vont dans quel paquet et à quel
+niveau, combien on a le droit d'émettre, et quand se réveiller.
+
+La portée est la poignée de main : `CRYPTO`, `ACK`, `PADDING`, `PING`,
+`HANDSHAKE_DONE` et `CONNECTION_CLOSE`. **Pas de flux.** Une trame qu'on ne sait
+pas encore traiter est ignorée plutôt que refusée — la refuser fermerait des
+connexions qu'on servira demain, et §12.4 ne condamne que ce qu'on ne sait pas
+LIRE.
+
+#### Trois défauts trouvés par les essais
+
+1. **Un drapeau emprunté à une autre question.** Le verrou « a-t-on déjà pris
+   acte de la fin de la poignée de main ? » se servait de « l'adresse est-elle
+   validée ? ». Or §8.1 la valide dès le premier paquet `Handshake` reçu,
+   c'est-à-dire AVANT la fin de la poignée de main : le verrou était déjà fermé
+   quand on en avait besoin, et rien de ce qu'il gardait ne se faisait — ni la
+   vérification de l'ALPN, ni la lecture des paramètres du pair, ni le
+   `HANDSHAKE_DONE`. **Un drapeau emprunté à une autre question finit toujours
+   par répondre à celle-là.**
+2. **`State::s_eteint()` couvre `Closing`.** La garde de `poll_transmit` s'en
+   servait, ce qui empêchait la fermeture elle-même de partir. §10.2.2 ne fait
+   taire qu'en `Draining` : en `Closing`, il reste précisément une chose à dire.
+3. **Les acquittements comptaient dans la fenêtre de congestion.** §2 de RFC 9002
+   l'interdit : « Packets that contain only ACK frames do not count toward
+   congestion control limits. » Un serveur qui n'a plus que des acquittements à
+   envoyer voyait sa fenêtre se remplir d'octets que personne n'acquitterait
+   jamais — puisqu'un acquittement ne s'acquitte pas — et **finissait par se
+   taire tout seul**. C'est un essai de tampon étroit qui l'a fait voir.
+
+#### Ce que la retransmission fait, et ce qu'elle ne fait pas
+
+Quand un paquet se perd, on ramène le curseur d'émission du flux `CRYPTO` au
+décalage qu'il portait : tout ce qui suit repart. C'est parfois plus que
+nécessaire — des octets déjà reçus repartent —, et c'est sans conséquence : le
+pair les reconnaît comme des doublons (§7.5 de RFC 9000), et une poignée de main
+tient dans quelques kibioctets. Tenir la liste exacte des trous demanderait un
+ensemble d'intervalles de plus, pour économiser des octets sur un échange qui
+n'a lieu qu'une fois par connexion.
+
+#### Ce que l'essai principal prouve, et ce qu'il ne prouve pas
+
+Une poignée de main QUIC complète aboutit, en vrais paquets, contre un
+`rustls::quic::ClientConnection`. Elle aboutit **aussi lorsqu'un datagramme se
+perd en chemin** — c'est l'essai qui compte le plus, puisque QUIC n'a pas de
+retransmission automatique.
+
+La moitié TLS du client ne partage rien avec nous : c'est elle qui refuserait un
+`ServerHello` mal placé ou une transcription incomplète. **Sa moitié QUIC, en
+revanche, est notre code** : cet essai ne prouve donc pas l'interopérabilité,
+mais que le conducteur assemble correctement des pièces déjà éprouvées
+séparément. L'interopérabilité demandera un client tiers.
+
+Et il a fallu instrumenter deux fois pour trouver que la faute était dans le
+client d'essai, non dans le serveur : la première fois parce qu'il n'installait
+pas ses clés entre deux datagrammes, la seconde parce qu'une substitution de
+texte avait échoué en silence et laissé l'ancienne version en place. **Le
+symptôme désignait le serveur ; la cause était ailleurs, deux fois.**
 
 ### La détection de perte, et ce que deux essais ont trouvé
 

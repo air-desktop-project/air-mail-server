@@ -155,8 +155,8 @@ fn le_demasquage_ne_touche_que_la_longueur_annoncee() {
             .expect("scellable");
         let mut datagramme = tampon.get(..ecrit).expect("écrit").to_vec();
         let plus_grand = numero.checked_sub(1);
-        let ouvert = open_packet(&mut datagramme, &siennes, plus_grand, DCID.len())
-            .unwrap_or_else(|issue| panic!("{numero} : {issue:?}"));
+        let ouvert =
+            open_packet(&mut datagramme, &siennes, plus_grand, DCID.len()).expect("lisible");
         assert_eq!(ouvert.number, numero);
         assert_eq!(
             datagramme.get(ouvert.payload_at..ouvert.payload_at + ouvert.payload_len),
@@ -182,12 +182,19 @@ fn un_paquet_abime_ne_s_ouvre_pas() {
     for rang in 0..paquet.len() {
         let mut abime = paquet.clone();
         abime[rang] ^= 0x01;
-        let relu = open_packet(&mut abime, &siennes, None, DCID.len());
-        let intact = relu.is_ok_and(|ouvert| {
-            ouvert.number == 1
-                && abime.get(ouvert.payload_at..ouvert.payload_at + ouvert.payload_len)
-                    == Some(&b"une charge"[..])
-        });
+        // **PAS DE CLÔTURE ICI** : `is_ok_and` n'appellerait la sienne que
+        // lorsqu'un paquet abîmé s'ouvre quand même — c'est-à-dire jamais, si
+        // l'authentification tient. Une clôture que rien n'emprunte est une
+        // affirmation non vérifiée.
+        let intact = match open_packet(&mut abime, &siennes, None, DCID.len()) {
+            Ok(ouvert) => {
+                ouvert.number == 1
+                    && abime.get(
+                        ouvert.payload_at..ouvert.payload_at.saturating_add(ouvert.payload_len),
+                    ) == Some(&b"une charge"[..])
+            }
+            Err(_) => false,
+        };
         assert!(!intact, "l'octet {rang} n'est pas authentifié");
     }
 }

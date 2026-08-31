@@ -23,6 +23,8 @@ fn chaque_raison_a_son_code_et_son_mot() {
         (Reason::TlsSansAlerte, 0x0128, "sans produire d'alerte"),
         // §6.2 de RFC 8446 : `no_application_protocol` vaut 120.
         (Reason::WrongAlpn, 0x0178, "h3"),
+        // §20.1 de RFC 9000 : `TRANSPORT_PARAMETER_ERROR` vaut 0x08.
+        (Reason::BadParameters, 0x08, "paramètres de transport"),
         (
             Reason::Quic(ams_quic::Reason::CryptoInZeroRtt),
             0x0a,

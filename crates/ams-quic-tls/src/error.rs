@@ -38,6 +38,13 @@ pub enum Reason {
     /// que la négociation a laissé passer autre chose serait servir ce qu'on
     /// n'a pas annoncé.
     WrongAlpn,
+    /// Les paramètres de transport du pair ne se lisent pas (§7.4 de RFC 9000).
+    ///
+    /// « An endpoint MUST treat receipt of transport parameters that it cannot
+    /// process as a connection error of type TRANSPORT_PARAMETER_ERROR. » Les
+    /// ignorer laisserait la connexion tourner sur des limites qu'on aurait
+    /// inventées — et le pair, lui, tiendrait les siennes.
+    BadParameters,
     /// Ce que §4.1.3, §8.3 ou §7.5 refusent entre les niveaux.
     Quic(ams_quic::Reason),
 }
@@ -75,6 +82,9 @@ impl Error {
             Reason::Tls(alerte) => crypto_error(alerte),
             Reason::TlsSansAlerte => crypto_error(HANDSHAKE_FAILURE),
             Reason::WrongAlpn => crypto_error(NO_APPLICATION_PROTOCOL),
+            Reason::BadParameters => {
+                ams_proto_quic::TransportError::TransportParameterError.value()
+            }
             // La raison QUIC porte déjà le sien, et c'est celui-là qu'on écrit.
             Reason::Quic(raison) => raison.code().map_or(0x0a, ams_proto_quic_code),
         }
@@ -108,6 +118,7 @@ impl core::fmt::Display for Error {
             Reason::Tls(_) => "TLS a refusé la poignée de main",
             Reason::TlsSansAlerte => "TLS a refusé sans produire d'alerte",
             Reason::WrongAlpn => "le protocole négocié n'est pas h3",
+            Reason::BadParameters => "les paramètres de transport du pair ne se lisent pas",
             Reason::Quic(_) => "les niveaux de chiffrement ont été mal employés",
         };
         write!(f, "{quoi} — on ferme avec {:#06x}", self.close_code())

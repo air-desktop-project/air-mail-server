@@ -73,7 +73,7 @@ fn atelier(nom: &str) -> Atelier {
 /// de main pour une raison qui n'a rien à voir avec ce qu'on éprouve ici.
 ///
 /// Rend (le certificat de l'autorité, le certificat serveur, la clé serveur).
-fn materiel(repertoire: &Path) -> Option<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+pub(crate) fn materiel(repertoire: &Path) -> Option<(Vec<u8>, Vec<u8>, Vec<u8>)> {
     let ca_cert = repertoire.join("ca.pem");
     let ca_cle = repertoire.join("ca.key");
     let srv_cle = repertoire.join("srv.key");

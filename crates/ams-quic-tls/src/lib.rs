@@ -40,9 +40,11 @@ use ams_quic::{CRYPTO_OCTETS_MAX, Handshake, Level, crypto_error};
 use rustls::ServerConfig;
 use rustls::quic::{KeyChange, ServerConnection, Version};
 
+mod connection;
 mod error;
 mod keys;
 
+pub use connection::{ACQUITTEMENT_MAX_MS, Connection, INACTIVITE_US};
 pub use error::{Error, Reason};
 pub use keys::Clefs;
 

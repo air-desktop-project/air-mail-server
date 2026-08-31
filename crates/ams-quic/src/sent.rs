@@ -207,6 +207,19 @@ impl Sent {
         self.perte_a
     }
 
+    /// Le plus grand numéro que le pair a acquitté, s'il y en a un.
+    ///
+    /// **C'EST DE LUI QUE DÉPEND LA LONGUEUR DU NUMÉRO À ÉCRIRE** (§17.1) :
+    /// « After an acknowledgment is received for a packet number space, the
+    /// sender MUST use a packet number size able to represent more than twice as
+    /// large a range as the difference between the largest acknowledged packet
+    /// number and the packet number being sent. » Sans lui, tout numéro
+    /// s'écrirait au plus large.
+    #[must_use]
+    pub const fn largest_acked(&self) -> Option<u64> {
+        self.plus_grand_acquitte
+    }
+
     /// Reste-t-il quelque chose qui sollicite un acquittement ?
     ///
     /// §A.8 : le délai de sondage ne s'arme que s'il y a de quoi sonder.
