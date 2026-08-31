@@ -43,6 +43,7 @@ fn emettre(token: &Token<'_>) -> std::vec::Vec<u8> {
     let mut place = [0_u8; ENCODED_OCTETS_MAX];
     issue(&clef(), token, MAINTENANT, &mut place)
         .expect("émissible")
+        .as_bytes()
         .to_vec()
 }
 

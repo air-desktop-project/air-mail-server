@@ -4499,3 +4499,90 @@ S'y ajoutent quatre invariants qui ne tiennent pas dans un appel : un document
 accepté est équilibré et fini, aucune de ses clés n'est répétée ni échappée,
 chacune de ses troncatures se refuse, et le lecteur avance toujours — un corps de
 `n` octets rend au plus `n` événements, donc la boucle de l'appelant se termine.
+
+## Le raccordement HTTP : la session (`ams-session::http`)
+
+### Écrite une fois, servie par deux protocoles
+
+HTTP/2 et HTTP/3 ne partagent aucun octet de cadrage, mais ils produisent tous
+deux un `RequestHead` : une méthode, une cible, des champs. Tout ce qui suit —
+router, authentifier, autoriser, refuser — ne dépend que de cela.
+
+L'écrire deux fois, ce serait se donner deux occasions de l'écrire différemment,
+et une différence entre les deux moitiés d'un même serveur est exactement ce
+qu'un attaquant cherche : il lui suffirait de choisir le protocole où la règle
+manque.
+
+### Elle ne touche à rien, et c'est tout son objet
+
+Cette session ne lit aucune boîte, ne vérifie aucun mot de passe, n'écrit aucun
+message. Elle décide, et rend à l'appelant ce qu'il reste à faire — la même forme
+que les sessions SMTP, POP3 et IMAP, et pour la même raison : une machine qui
+n'attend jamais n'a besoin ni d'horloge, ni de disque, ni de réseau (C1).
+
+### Trois refus précèdent le routage
+
+Ce qui vaut pour toute ressource se vérifie avant de savoir laquelle est visée :
+sinon, il existerait une ressource dont le chemin, à lui seul, ferait sauter une
+règle générale.
+
+1. **Le schéma doit être `https`.** La grammaire d'`ams-proto-http` accepte les
+   deux et dit elle-même que « que `http` soit recevable est une question de
+   POLITIQUE ». C'est ici qu'on la tranche (C4).
+2. **Un corps n'est permis que là où il a un sens.** §9.3.1 de RFC 9110 : « content
+   received in a GET request has no generally defined semantics ». Ce qui n'a pas
+   de sens défini se lit différemment d'un logiciel à l'autre, et c'est de là que
+   vient toute la famille de la contrebande de requête.
+3. **Le type d'un corps doit être celui qu'on lit.** Les paramètres sont admis
+   (§8.3), la casse ne compte pas (§8.3.1), mais le type lui-même doit être
+   exactement le nôtre.
+
+### Le tampon se partage en trois, et c'est ce qui rend le compte utilisable
+
+Le chemin décodé, le jeton déchiffré, la réponse. Le premier jet déchiffrait le
+jeton dans un tampon local, et cherchait ensuite le nom de compte dans l'écriture
+du jeton — qui est encodée, donc ne le contient pas. Trois parts disjointes du
+tampon de l'appelant font vivre le nom aussi longtemps que la réponse, sans
+qu'aucune n'écrase l'autre.
+
+### Une durée de vie impossible se refuse au montage
+
+Au-delà de ce qu'un jeton peut vivre, chaque échange d'identifiants répondrait
+500 — une faute de configuration qui ne se verrait qu'en production, requête après
+requête. `Http::new` la refuse une fois pour toutes.
+
+### Ce qu'on n'écrit pas compte autant
+
+Pas de `server` : nommer le logiciel et sa version à qui demande, c'est répondre à
+la première question de tout balayage.
+
+Et deux champs sur **toute** réponse :
+
+- `cache-control: no-store`, parce que ce qu'on rend dépend du jeton présenté, et
+  qu'un intermédiaire qui garderait une réponse la servirait au compte suivant ;
+- `x-content-type-options: nosniff`, parce qu'un JSON servi à un navigateur qui
+  devine le type peut se faire lire comme du HTML — et ce qu'il porte vient
+  d'ailleurs.
+
+Un 401 porte en plus un `WWW-Authenticate` (§3 de RFC 6750), sans quoi un client
+honnête ne peut que deviner comment s'authentifier.
+
+### Un refus d'identifiants ne dit pas ce qui cloche
+
+Ni « ce compte n'existe pas », ni « ce mot de passe est faux », ni « ce corps est
+mal formé » : les trois se répondent à l'identique, sans quoi la forme de la
+réponse dirait laquelle des trois choses on a réussie. C'est la même règle que
+pour `AUTH` en SMTP.
+
+### La bonne formulation de « aucune réponse ne redit ce que le client a écrit »
+
+Le premier jet de la cible de fuzz cherchait les octets du client dans la
+réponse. C'était plus faible ET faux : un client peut copier notre propre document
+d'erreur et l'envoyer comme corps, ce que le fuzz a trouvé en quelques secondes.
+
+Ce qui compte n'est pas que la réponse DIFFÈRE de l'entrée, c'est qu'elle n'en
+DÉPENDE pas. La propriété juste est donc : **un refus est tiré d'un vocabulaire
+fini**, écrit d'avance — l'un des dix documents que les dix raisons produisent, et
+rien d'autre. Ajouter une raison sans l'ajouter à ce vocabulaire fait échouer la
+cible, ce qui est exactement ce qu'on veut : une réponse qu'on n'a pas prévue est
+une réponse qu'on n'a pas relue.

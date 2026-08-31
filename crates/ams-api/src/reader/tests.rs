@@ -214,10 +214,11 @@ fn chaque_troncature_d_un_corps_valide_se_refuse() {
     assert!(accepte(entier), "le corps entier doit passer");
     for coupe in 0..entier.len() {
         let tronque = entier.get(..coupe).unwrap_or_default();
+        // Le message ne calcule rien : ce qui n'est évalué qu'en cas d'échec
+        // n'est jamais parcouru quand l'essai passe.
         assert!(
             !accepte(tronque),
-            "la troncature à {coupe} octets est passée : {:?}",
-            core::str::from_utf8(tronque)
+            "la troncature à {coupe} octets est passée"
         );
     }
 }

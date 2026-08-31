@@ -84,6 +84,7 @@ fuzz_ams_h3_connection h3-connection
 fuzz_ams_api_route api-route
 fuzz_ams_api_token api-token
 fuzz_ams_api_json api-json
+fuzz_ams_session_http session-http
 fuzz_ams_quic_crypto quic-crypto
 fuzz_ams_quic_receive quic-receive
 fuzz_ams_quic_stream quic-stream

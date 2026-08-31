@@ -419,3 +419,10 @@ path = "fuzz_targets/fuzz_ams_api_json.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_ams_session_http"
+path = "fuzz_targets/fuzz_ams_session_http.rs"
+test = false
+doc = false
+bench = false

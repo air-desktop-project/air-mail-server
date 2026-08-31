@@ -195,6 +195,8 @@ version = "0.1.0"
 name = "ams-session"
 version = "0.1.0"
 dependencies = [
+ "ams-api",
+ "ams-proto-http",
  "ams-proto-imap",
  "ams-proto-pop3",
  "ams-proto-smtp",

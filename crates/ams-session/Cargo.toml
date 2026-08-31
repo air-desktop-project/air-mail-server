@@ -9,6 +9,10 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+# L'API REST (routage, portées, jetons, JSON) et la sémantique HTTP : la
+# session HTTP décide, et ne touche à rien.
+ams-api = { workspace = true }
+ams-proto-http = { workspace = true }
 ams-proto-pop3 = { workspace = true }
 # IMAP (RFC 9051) : la session tient les quatre états, la grammaire découpe.
 ams-proto-imap = { workspace = true }

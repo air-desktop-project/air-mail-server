@@ -109,7 +109,7 @@ fuzz_target!(|entree: Entree| {
         );
         return;
     };
-    let jeton = jeton.to_vec();
+    let jeton = jeton.as_bytes().to_vec();
 
     // L'écriture ne porte que l'alphabet de §5 de RFC 4648.
     assert!(

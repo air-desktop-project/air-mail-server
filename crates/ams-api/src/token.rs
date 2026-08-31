@@ -127,6 +127,9 @@ pub struct Token<'o> {
 
 /// Écrit un jeton scellé, en base64url.
 ///
+/// Rend du texte : l'alphabet de §5 de RFC 4648 est de l'ASCII, et l'appelant
+/// n'a donc rien à convertir.
+///
 /// # Errors
 ///
 /// [`Reason::BadToken`] pour un nom de compte vide ou trop long, ou une
@@ -137,7 +140,7 @@ pub fn issue<'o>(
     token: &Token<'_>,
     maintenant: u64,
     sortie: &'o mut [u8],
-) -> Result<&'o [u8], Error> {
+) -> Result<&'o str, Error> {
     let login = token.login.as_bytes();
     if login.is_empty() || login.len() > LOGIN_OCTETS_MAX {
         return Err(Error::new(Reason::BadToken));
@@ -164,7 +167,12 @@ pub fn issue<'o>(
     for (ou, lu) in sceau.iter_mut().zip(calcule.iter()) {
         *ou = *lu;
     }
-    base64url::encode(place, sortie)
+    let ecrit = base64url::encode(place, sortie)?;
+    // **C'EST DE L'ASCII PAR CONSTRUCTION** : chaque octet sort de l'alphabet de
+    // §5 de RFC 4648, qui n'en contient pas d'autre. Une garde ici serait une
+    // branche qu'aucun jeton ne peut emprunter — et la cible de fuzz vérifie
+    // justement que rien d'autre ne s'écrit.
+    Ok(core::str::from_utf8(ecrit).unwrap_or_default())
 }
 
 /// Écrit la partie en clair d'un jeton.
