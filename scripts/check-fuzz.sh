@@ -29,10 +29,21 @@
 # peut donc lancer en local exactement ce qu'elle lancera. Un contrôle qu'on ne
 # peut pas rejouer chez soi est un contrôle qu'on découvre en CI.
 #
+# # ET LES MÊMES DRAPEAUX QU'EN INTÉGRATION CONTINUE
+#
+# Le workflow pose `RUSTFLAGS: -D warnings` pour tout le travail. Ce script ne le
+# posait pas : un `unused import` dans une cible passait donc en local et
+# échouait après le `push`. « On peut lancer en local ce que la CI lancera »
+# n'est vrai que si les drapeaux suivent — sans quoi c'est le même script, et
+# pas la même épreuve.
+#
 # Chaque cible a ses graines, qu'aucune convention de nommage ne devine :
 # `fuzz_ams_mime_parse` se sème avec `seeds/mime`. D'où la table.
 
 set -euo pipefail
+
+# Les mêmes que le workflow, pour que l'épreuve locale soit celle de la CI.
+export RUSTFLAGS="${RUSTFLAGS:--D warnings}"
 
 smoke=0
 if [ "${1-}" = "--smoke" ]; then

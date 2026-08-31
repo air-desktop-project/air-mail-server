@@ -37,7 +37,7 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-use ams_quic_crypto::{Keys, Role, Secret, Suite, protect, retry_tag, unprotect, verify_retry};
+use ams_quic_crypto::{Role, Secret, Suite, protect, retry_tag, unprotect, verify_retry};
 
 /// Ce qu'on soumet.
 #[derive(Arbitrary, Debug)]
