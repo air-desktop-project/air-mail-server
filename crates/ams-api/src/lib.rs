@@ -32,6 +32,13 @@
 //! C'est l'inverse d'une liste de contrôle tenue à part, qui se désynchronise
 //! au premier ajout — et dont le premier symptôme est une ressource servie sans
 //! droit.
+//!
+//! # LE JETON, LUI, NE NÉGOCIE RIEN
+//!
+//! Un JWT porte son algorithme dans un champ que le vérificateur est censé lire
+//! pour savoir comment vérifier : c'est demander à un message non authentifié
+//! comment l'authentifier. [`Token`] n'a pas de champ d'algorithme — sa version
+//! en fixe un seul, et il n'y a qu'une version.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -40,12 +47,19 @@
 #[cfg(test)]
 extern crate std;
 
+mod base64url;
 mod error;
+mod mac;
 mod path;
 mod route;
 mod scope;
+mod token;
 
 pub use error::{Error, Reason};
-pub use path::{SEGMENTS_MAX, Segments, split_query};
+pub use path::{SEGMENT_OCTETS_MAX, SEGMENTS_MAX, Segments, split_query};
 pub use route::{Resolved, Resource, resolve};
 pub use scope::{Area, Rights, Scope};
+pub use token::{
+    ENCODED_OCTETS_MAX, KEY_OCTETS_MIN, Key, LIFETIME_MAX_US, LOGIN_OCTETS_MAX, MAC_OCTETS,
+    TOKEN_OCTETS_MAX, Token, VERSION as TOKEN_VERSION, authorize, bearer, issue, verify,
+};

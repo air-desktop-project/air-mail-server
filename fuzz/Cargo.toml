@@ -405,3 +405,10 @@ path = "fuzz_targets/fuzz_ams_api_route.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_ams_api_token"
+path = "fuzz_targets/fuzz_ams_api_token.rs"
+test = false
+doc = false
+bench = false

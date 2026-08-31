@@ -30,6 +30,17 @@ fn chaque_raison_a_son_code_et_son_message() {
         ),
         (Reason::Forbidden, StatusCode::NOT_FOUND, "aucune ressource"),
         (
+            Reason::BadToken,
+            StatusCode::UNAUTHORIZED,
+            "n'est pas recevable",
+        ),
+        (Reason::TokenExpired, StatusCode::UNAUTHORIZED, "a expiré"),
+        (
+            Reason::BadKey,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "n'a pas pu authentifier",
+        ),
+        (
             Reason::BufferTooSmall,
             StatusCode::INTERNAL_SERVER_ERROR,
             "n'a pas pu écrire",
@@ -76,9 +87,11 @@ fn le_message_ne_nomme_aucune_regle() {
         Reason::PathTooLong,
         Reason::NoSuchResource,
         Reason::Forbidden,
+        Reason::BadToken,
+        Reason::TokenExpired,
     ] {
         let dit = raison.message();
-        for indice in ["segment", "..", "%", "UTF-8", "portée", "jeton"] {
+        for indice in ["segment", "..", "%", "UTF-8", "portée", "sceau", "clé"] {
             assert!(
                 !dit.contains(indice),
                 "« {dit} » nomme « {indice} », ce qui apprend où appuyer"

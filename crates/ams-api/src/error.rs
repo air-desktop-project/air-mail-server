@@ -33,6 +33,20 @@ pub enum Reason {
     MethodNotAllowed,
     /// Le jeton présenté n'ouvre pas cette portée.
     Forbidden,
+    /// Le jeton présenté ne se vérifie pas — sceau, structure, ou écriture.
+    ///
+    /// **UNE SEULE RAISON POUR TOUTES CES FAUTES** : dire laquelle apprendrait à
+    /// qui forge jusqu'où il est allé.
+    BadToken,
+    /// Le jeton est authentique, et son heure est passée.
+    ///
+    /// **LE DISTINGUER N'APPREND RIEN À QUI FORGE** : on ne l'atteint qu'après
+    /// un sceau valide. Et cela apprend au client honnête qu'il doit se
+    /// réauthentifier plutôt que de croire son jeton refusé.
+    TokenExpired,
+    /// La clé de scellement n'est pas acceptable. **Notre faute** : c'est la
+    /// configuration du serveur qui la fournit.
+    BadKey,
     /// Le tampon de sortie ne suffit pas. **Notre faute, pas celle du client.**
     BufferTooSmall,
 }
@@ -52,7 +66,11 @@ impl Reason {
             // l'information elle-même.
             Self::NoSuchResource | Self::Forbidden => StatusCode::NOT_FOUND,
             Self::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
-            Self::BufferTooSmall => StatusCode::INTERNAL_SERVER_ERROR,
+            // §11.6.1 de RFC 9110 : « the request has not been applied because
+            // it lacks valid authentication credentials ». Un jeton qui ne se
+            // vérifie pas et un jeton périmé sont tous deux cela.
+            Self::BadToken | Self::TokenExpired => StatusCode::UNAUTHORIZED,
+            Self::BadKey | Self::BufferTooSmall => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 
@@ -71,6 +89,9 @@ impl Reason {
             Self::PathTooLong => "le chemin est trop long",
             Self::NoSuchResource | Self::Forbidden => "aucune ressource ici",
             Self::MethodNotAllowed => "cette méthode n'est pas servie ici",
+            Self::BadToken => "l'authentification n'est pas recevable",
+            Self::TokenExpired => "l'authentification a expiré",
+            Self::BadKey => "le serveur n'a pas pu authentifier la requête",
             Self::BufferTooSmall => "le serveur n'a pas pu écrire la réponse",
         }
     }

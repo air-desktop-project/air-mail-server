@@ -4306,3 +4306,96 @@ et chacune est une seconde clé pour un cache ou pour un journal.
 
 Et la vérification est sur CHAQUE route qui en porte un, pas seulement la plus
 courte : chacune est une porte, et une porte oubliée suffit.
+
+## L'API REST : les jetons porteurs
+
+### Ce n'est pas un JWT, et c'est la décision principale
+
+Un JWT porte son algorithme DANS le jeton, dans un champ `alg` que le
+vérificateur est censé lire pour savoir comment vérifier. C'est demander à un
+message non authentifié comment l'authentifier, et deux familles d'attaques
+entières vivent dans cette question : `alg: none`, qui supprime la vérification,
+et la confusion `RS256` → `HS256`, qui fait vérifier une signature avec la clé
+publique prise pour un secret partagé.
+
+Ce jeton n'a pas de champ d'algorithme. Sa version en fixe un seul, et il n'y a
+qu'une version. Il n'existe donc rien à négocier, et par conséquent rien à
+confondre.
+
+### L'ordre de vérification est tout
+
+1. on décode l'écriture — et l'on refuse ce qui a plusieurs formes ;
+2. on découpe la structure, **sans rien en croire** ;
+3. on vérifie le sceau, sans jamais s'arrêter plus tôt ;
+4. **et alors seulement** on interprète les champs.
+
+Intervertir 3 et 4 ferait agir sur une expiration, une portée ou un nom de compte
+que personne n'a authentifiés — c'est-à-dire sur ce que l'attaquant a écrit.
+
+### HMAC est écrit ici, et vérifié contre RFC 4231
+
+HMAC n'est pas une primitive : c'est une construction de quinze lignes au-dessus
+d'un hachage, et RFC 4231 en donne sept vecteurs d'essai. Ces vecteurs prouvent
+le résultat, là où appeler une bibliothèque ne prouve que la provenance.
+
+Et l'écrire ici rend infaillible ce qui ne l'était pas : le constructeur des
+bibliothèques HMAC rend un `Result` qu'aucune clé ne peut faire échouer, donc une
+branche qu'aucun essai ne peut atteindre.
+
+**Les motifs des vecteurs se construisent, ils ne se transcrivent pas.** Le
+premier jet les recopiait à la main ; deux des sept étaient faux — un compte
+d'octets répétés, chaque fois. Un vecteur mal transcrit ne prouve plus rien : il
+fait échouer un code juste, ou passer un code faux.
+
+### La comparaison est la moitié qui compte
+
+Un sceau juste vérifié avec un `==` ne protège rien. `==` s'arrête au premier
+octet qui diffère, et le temps qu'il met dit combien d'octets étaient bons : on
+devine alors le sceau octet par octet, en trente-deux fois deux cent cinquante-six
+essais au lieu de deux à la puissance deux cent cinquante-six.
+
+### Une seule écriture par jeton
+
+§3.5 de RFC 4648 : « the pad bits MUST be set to zero by conforming encoders », et
+un décodeur qui les ignore accepte plusieurs écritures d'une même valeur.
+
+Pour un jeton porteur, ce n'est pas une subtilité d'encodage : c'est une liste de
+révocation qui ne reconnaît plus le jeton qu'elle a révoqué, ou un compteur
+d'usage qu'on remet à zéro en changeant un caractère.
+
+**Le calcul de ces bits est plus subtil qu'il n'y paraît.** Un groupe de `n`
+caractères porte `6n` bits, dont `8(n-1)` font des octets ; le reste est du
+remplissage. Le premier jet comptait les bits des caractères ABSENTS — douze au
+lieu de quatre — et le masque couvrait alors les données elles-mêmes : « Zg », le
+vecteur de §10 de RFC 4648 pour « f », se refusait. Trouvé par les vecteurs.
+
+### Un jeton ne se révoque pas tout seul
+
+Il se vérifie sans consulter quoi que ce soit — c'est ce qui le rend utilisable
+sans état. Sa seule fin garantie est donc son expiration, et plus il vit, plus
+longtemps un vol reste utile. D'où la borne de douze heures, vérifiée **à
+l'émission** : la vérifier seulement à la lecture laisserait circuler des jetons
+qu'on refuserait ensuite sans que personne ne comprenne pourquoi.
+
+Et l'identifiant qu'il porte est ce qui rend une révocation possible : sans lui,
+deux jetons du même compte avec la même expiration seraient identiques, et
+révoquer l'un révoquerait le compte.
+
+### Un jeton expiré se distingue d'un jeton faux, et cela ne coûte rien
+
+On ne l'atteint qu'après un sceau valide : le dire n'apprend donc rien à qui
+forge. Et cela apprend au client honnête qu'il doit se réauthentifier plutôt que
+de croire son jeton refusé.
+
+### Une clé ne s'affiche pas
+
+Pas de `PartialEq`, et un `Debug` qui écrit `Key(<secret>)`. Une clé qui apparaît
+dans un journal n'est plus une clé.
+
+### Un seul espace après `Bearer`
+
+§11.1 de RFC 9110 rend le nom du schéma insensible à la casse — le refuser
+écarterait des clients conformes. Mais §11.4 tolère des espaces supplémentaires,
+et les accepter donnerait deux écritures d'un même en-tête : c'est la valeur
+entière qu'un journal ou un cache retient. Un jeton ne porte de toute façon
+aucune espace.

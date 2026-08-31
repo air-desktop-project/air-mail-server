@@ -9,6 +9,7 @@ description = "L'API REST : ce qu'une requête désigne, et le droit qu'elle dem
 
 [dependencies]
 ams-proto-http = { workspace = true }
+sha2 = { workspace = true }
 
 [lints]
 workspace = true

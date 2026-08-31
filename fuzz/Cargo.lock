@@ -74,6 +74,7 @@ name = "ams-api"
 version = "0.1.0"
 dependencies = [
  "ams-proto-http",
+ "sha2",
 ]
 
 [[package]]
