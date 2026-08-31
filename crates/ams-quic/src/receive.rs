@@ -37,10 +37,10 @@
 //! pourrait plus ouvrir le suivant. Des rangs le laissent libre — et c'est lui
 //! qui découpe, puisque c'est lui qui possède le tampon.
 
+use crate::protection::Protection;
 use ams_proto_quic::{
     Long, LongKind, PACKET_NUMBER_OCTETS_MAX, ShortHeader, is_long, packet_numbers, parse_long,
 };
-use ams_quic_crypto::{Keys, unprotect};
 
 use crate::error::{Error, Reason};
 
@@ -97,7 +97,7 @@ pub struct Opened {
 /// [`Reason::ReservedBitsSet`] et [`Reason::BadPacketNumber`] condamnent.
 pub fn open_packet(
     datagramme: &mut [u8],
-    clefs: &Keys,
+    clefs: &(impl Protection + ?Sized),
     plus_grand: Option<u64>,
     identifiant: usize,
 ) -> Result<Opened, Error> {
@@ -110,7 +110,7 @@ pub fn open_packet(
 /// Ouvre un paquet à en-tête long.
 fn ouvrir_long(
     datagramme: &mut [u8],
-    clefs: &Keys,
+    clefs: &(impl Protection + ?Sized),
     plus_grand: Option<u64>,
 ) -> Result<Opened, Error> {
     let jeter = || Error::new(Reason::NotForUs);
@@ -144,7 +144,7 @@ fn ouvrir_long(
 /// Ouvre un paquet à en-tête court.
 fn ouvrir_court(
     datagramme: &mut [u8],
-    clefs: &Keys,
+    clefs: &(impl Protection + ?Sized),
     plus_grand: Option<u64>,
     identifiant: usize,
 ) -> Result<Opened, Error> {
@@ -174,14 +174,14 @@ fn ouvrir_court(
 /// Démasque, reconstruit, déchiffre, puis vérifie les bits réservés.
 fn ouvrir(
     paquet: &mut [u8],
-    clefs: &Keys,
+    clefs: &(impl Protection + ?Sized),
     plus_grand: Option<u64>,
     numero_a: usize,
     reserves: u8,
 ) -> Result<Opened, Error> {
     let jeter = || Error::new(Reason::NotForUs);
     // 3. La protection d'en-tête découvre la longueur du numéro.
-    let longueur = unprotect(clefs, paquet, numero_a).map_err(|_| jeter())?;
+    let longueur = clefs.unprotect(paquet, numero_a).map_err(|_| jeter())?;
     let fin_du_numero = numero_a.saturating_add(longueur);
     let tronque = lire_numero(paquet, numero_a, longueur);
     // 4. Le numéro se reconstruit à partir de ce qu'on a déjà traité.

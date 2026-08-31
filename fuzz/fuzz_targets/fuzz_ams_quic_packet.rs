@@ -238,6 +238,21 @@ fuzz_target!(|entree: Entree| {
             assert!(lus.original_destination_connection_id.is_none());
             assert!(lus.retry_source_connection_id.is_none());
         }
+
+        // **ET CE QU'ON RÉÉCRIT SE RELIT À L'IDENTIQUE.**
+        //
+        // Les paramètres voyagent dans une extension TLS : un pair qui les
+        // relirait autrement qu'on ne les a écrits prendrait nos limites pour
+        // d'autres — sans que rien ne le dise, jusqu'à ce qu'un flux se fige.
+        // La propriété va dans les deux sens, et c'est ce qui la rend forte :
+        // ce qu'un pair a pu écrire, nous devons savoir le réécrire.
+        let mut reecrits = std::vec![0_u8; paquet.len().saturating_mul(2).saturating_add(256)];
+        let ecrits = lus
+            .write(de, &mut reecrits)
+            .expect("ce qui a été lu doit pouvoir être réécrit");
+        let relus = TransportParameters::read(reecrits.get(..ecrits).unwrap_or_default(), de)
+            .expect("ce qu'on écrit doit se relire");
+        assert_eq!(relus, lus, "l'aller-retour a changé les paramètres");
     }
 });
 

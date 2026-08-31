@@ -33,7 +33,9 @@
 //! une étape qu'on peut oublier d'écrire.
 
 use ams_proto_quic::{ConnectionId, VERSION_1, packet_numbers, varints};
-use ams_quic_crypto::{Keys, PACKET_OCTETS_MAX, TAG_OCTETS, protect};
+use ams_quic_crypto::{PACKET_OCTETS_MAX, TAG_OCTETS};
+
+use crate::protection::Protection;
 
 use crate::error::{Error, Reason};
 
@@ -168,7 +170,7 @@ struct Disposition {
 /// ce que §12.3 permet, ou si le paquet dépasse ce qu'un datagramme porte.
 pub fn seal_packet(
     out: &mut [u8],
-    clefs: &Keys,
+    clefs: &(impl Protection + ?Sized),
     plan: &Plan<'_>,
     number: u64,
     largest_acked: Option<u64>,
@@ -212,7 +214,8 @@ pub fn seal_packet(
         .seal(number, aad, corps, frames.len())
         .expect("`disposer` a borné la charge à ce qu'un datagramme porte");
     // 4. **ET SEULEMENT MAINTENANT** le masque : il se calcule sur le chiffré.
-    protect(clefs, paquet, pose.numero_a, pose.numero_octets)
+    clefs
+        .protect(paquet, pose.numero_a, pose.numero_octets)
         .expect("`disposer` a garanti l'échantillon de §5.4.2");
     Ok(pose.total)
 }

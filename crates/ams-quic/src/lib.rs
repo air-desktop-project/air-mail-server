@@ -44,6 +44,7 @@ mod error;
 mod flow;
 mod handshake;
 mod plages;
+mod protection;
 mod receive;
 mod recv;
 mod routing;
@@ -56,6 +57,7 @@ pub use error::{Error, Reason};
 pub use flow::{Concurrence, Concurrences, Cote, Flow};
 pub use handshake::{CRYPTO_OCTETS_MAX, Handshake, Level, crypto_error};
 pub use plages::HOLES_MAX;
+pub use protection::Protection;
 pub use receive::{Opened, PacketKind, open_packet};
 pub use recv::{Recv, RecvState};
 pub use routing::{

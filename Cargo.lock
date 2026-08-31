@@ -206,6 +206,7 @@ version = "0.1.0"
 dependencies = [
  "ams-proto-quic",
  "ams-quic",
+ "ams-quic-crypto",
  "ams-tls",
  "rustls",
 ]

@@ -13,6 +13,11 @@ use crate::error::{Reason, TransportError};
 use crate::frame::{MAX_STREAMS_LIMIT, STATELESS_RESET_TOKEN_OCTETS};
 use crate::varint;
 
+/// Un identifiant de connexion à partir de ces octets.
+fn identifiant(octets: &[u8]) -> crate::ConnectionId {
+    crate::ConnectionId::new(octets).expect("vingt octets au plus")
+}
+
 /// Écrit un entier de §16 dans un tampon.
 fn entier(valeur: u64) -> std::vec::Vec<u8> {
     let mut place = [0_u8; 8];
@@ -362,4 +367,164 @@ fn les_identifiants_du_serveur_ont_leur_borne() {
             "{identifiant:#x}"
         );
     }
+}
+
+/// **CE QU'ON ÉCRIT SE RELIT, ET REND CE QU'ON AVAIT** (§18).
+///
+/// C'est la seule propriété qui compte : les paramètres voyagent dans une
+/// extension TLS, et un pair qui les relit autrement qu'on ne les a écrits
+/// prendrait nos limites pour d'autres — sans que rien ne le dise, jusqu'à ce
+/// qu'un flux se fige.
+#[test]
+fn ce_qu_on_ecrit_se_relit() {
+    let mut poses = TransportParameters::DEFAULT;
+    poses.max_idle_timeout_ms = 30_000;
+    poses.max_udp_payload_size = 1_452;
+    poses.initial_max_data = 1_048_576;
+    poses.initial_max_stream_data_bidi_local = 262_144;
+    poses.initial_max_stream_data_bidi_remote = 262_144;
+    poses.initial_max_stream_data_uni = 262_144;
+    poses.initial_max_streams_bidi = 100;
+    poses.initial_max_streams_uni = 3;
+    poses.ack_delay_exponent = 3;
+    poses.max_ack_delay_ms = 25;
+    poses.disable_active_migration = true;
+    poses.active_connection_id_limit = 4;
+    poses.initial_source_connection_id = Some(identifiant(&[1, 2, 3, 4, 5, 6, 7, 8]));
+    poses.original_destination_connection_id = Some(identifiant(&[9, 8, 7, 6]));
+
+    let mut octets = [0_u8; 256];
+    let ecrits = poses
+        .write(Sender::Server, &mut octets)
+        .expect("écrivables");
+    let relus = TransportParameters::read(octets.get(..ecrits).expect("écrits"), Sender::Server)
+        .expect("relisibles");
+    assert_eq!(relus, poses);
+}
+
+/// **LES DÉFAUTS AUSSI FONT L'ALLER-RETOUR.**
+///
+/// §18 permet d'omettre un paramètre dont la valeur est celle par défaut. On les
+/// écrit quand même — les omettre demanderait de comparer chaque champ à
+/// `DEFAULT`, et une comparaison de ce genre se tait le jour où le défaut
+/// change.
+#[test]
+fn les_defauts_aussi_font_l_aller_retour() {
+    let mut octets = [0_u8; 256];
+    let ecrits = TransportParameters::DEFAULT
+        .write(Sender::Client, &mut octets)
+        .expect("écrivables");
+    let relus = TransportParameters::read(octets.get(..ecrits).expect("écrits"), Sender::Client)
+        .expect("relisibles");
+    assert_eq!(relus, TransportParameters::DEFAULT);
+}
+
+/// **UN PARAMÈTRE SANS VALEUR SE DÉCLARE PAR SA PRÉSENCE** (§18.2).
+///
+/// `disable_active_migration` n'a pas de valeur : l'écrire vaut « vrai ». Un
+/// écrivain qui le poserait toujours annoncerait donc une migration désactivée
+/// alors qu'on ne l'a pas demandée.
+#[test]
+fn un_parametre_sans_valeur_se_declare_par_sa_presence() {
+    let mut octets = [0_u8; 256];
+    let ecrits = TransportParameters::DEFAULT
+        .write(Sender::Client, &mut octets)
+        .expect("écrivables");
+    let ecrit = octets.get(..ecrits).expect("écrits");
+    // §18.2 : l'identifiant 0x0c, suivi d'une longueur nulle.
+    assert!(
+        !ecrit.windows(2).any(|paire| paire == [0x0c, 0x00]),
+        "il ne doit pas être écrit quand il est faux"
+    );
+
+    let mut avec = TransportParameters::DEFAULT;
+    avec.disable_active_migration = true;
+    let ecrits = avec.write(Sender::Client, &mut octets).expect("écrivables");
+    let ecrit = octets.get(..ecrits).expect("écrits");
+    assert!(
+        ecrit.windows(2).any(|paire| paire == [0x0c, 0x00]),
+        "il doit être écrit quand il est vrai"
+    );
+}
+
+/// **CE QUI N'APPARTIENT PAS À CELUI QUI ENVOIE SE REFUSE** (§18.2).
+///
+/// La taire ferait rejeter la poignée de main par le pair, très loin d'ici — et
+/// pour une raison qu'aucun journal de ce côté-ci n'expliquerait.
+#[test]
+fn ce_qui_n_appartient_pas_a_l_envoyeur_se_refuse() {
+    let mut octets = [0_u8; 256];
+    for (quoi, poses) in [
+        ("original_destination_connection_id", {
+            let mut poses = TransportParameters::DEFAULT;
+            poses.original_destination_connection_id = Some(identifiant(&[1, 2]));
+            poses
+        }),
+        ("retry_source_connection_id", {
+            let mut poses = TransportParameters::DEFAULT;
+            poses.retry_source_connection_id = Some(identifiant(&[3, 4]));
+            poses
+        }),
+    ] {
+        let issue = poses
+            .write(Sender::Client, &mut octets)
+            .expect_err("§18.2 réserve celui-ci au serveur");
+        assert_eq!(issue.reason(), Reason::BadTransportParameter, "{quoi}");
+        // Et le serveur, lui, l'écrit.
+        assert!(poses.write(Sender::Server, &mut octets).is_ok(), "{quoi}");
+    }
+}
+
+/// **UN TAMPON TROP PETIT SE REFUSE, ET N'ÉCRIT RIEN QUI SE LISE.**
+#[test]
+fn un_tampon_trop_petit_se_refuse() {
+    // **DES PARAMÈTRES COMPLETS**, et non les défauts : les identifiants et le
+    // drapeau de migration ne s'écrivent que s'ils sont là, et ce sont
+    // justement leurs écritures qu'un tampon trop court doit refuser.
+    let mut poses = TransportParameters::DEFAULT;
+    poses.disable_active_migration = true;
+    poses.initial_source_connection_id = Some(identifiant(&[1, 2, 3, 4, 5, 6, 7, 8]));
+    poses.original_destination_connection_id = Some(identifiant(&[9, 8, 7, 6]));
+    poses.retry_source_connection_id = Some(identifiant(&[5, 5]));
+
+    let mut assez = [0_u8; 256];
+    let taille = poses.write(Sender::Server, &mut assez).expect("écrivables");
+
+    for place in 0..taille {
+        let mut juste = std::vec![0_u8; place];
+        let issue = poses
+            .write(Sender::Server, &mut juste)
+            .expect_err("il manque de la place");
+        assert_eq!(issue.reason(), Reason::BufferTooSmall, "{place} octets");
+    }
+    // La taille exacte suffit, et l'aller-retour tient.
+    let mut pile = std::vec![0_u8; taille];
+    assert_eq!(
+        poses.write(Sender::Server, &mut pile).expect("pile"),
+        taille
+    );
+    assert_eq!(
+        TransportParameters::read(&pile, Sender::Server).expect("relisibles"),
+        poses
+    );
+}
+
+/// **UNE VALEUR QUE §16 NE SAIT PAS ÉCRIRE SE REFUSE.**
+///
+/// Les paramètres de transport sont des entiers de longueur variable, bornés à
+/// 2^62 - 1. Une valeur au-delà ne s'écrit pas — et la tronquer annoncerait une
+/// limite qui n'est pas celle qu'on a voulue.
+#[test]
+fn une_valeur_hors_borne_se_refuse() {
+    let mut poses = TransportParameters::DEFAULT;
+    poses.initial_max_data = crate::VARINT_MAX + 1;
+    let mut octets = [0_u8; 256];
+    let issue = poses
+        .write(Sender::Server, &mut octets)
+        .expect_err("§16 ne l'écrit pas");
+    assert_eq!(issue.reason(), Reason::VarintTooLarge);
+
+    // La borne elle-même s'écrit.
+    poses.initial_max_data = crate::VARINT_MAX;
+    assert!(poses.write(Sender::Server, &mut octets).is_ok());
 }

@@ -19,6 +19,8 @@ ams-tls = { workspace = true }
 rustls = { workspace = true }
 # Les codes de fermeture de §20.1, pour ne pas les réécrire.
 ams-proto-quic = { workspace = true }
+# Les erreurs de protection de paquet, pour ne pas en inventer d'autres.
+ams-quic-crypto = { workspace = true }
 
 [lints]
 workspace = true

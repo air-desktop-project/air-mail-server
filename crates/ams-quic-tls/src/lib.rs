@@ -41,8 +41,10 @@ use rustls::ServerConfig;
 use rustls::quic::{KeyChange, ServerConnection, Version};
 
 mod error;
+mod keys;
 
 pub use error::{Error, Reason};
+pub use keys::Clefs;
 
 /// La version de QUIC qu'on sert.
 ///

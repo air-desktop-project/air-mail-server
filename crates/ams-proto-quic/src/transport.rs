@@ -142,6 +142,67 @@ impl TransportParameters {
         retry_source_connection_id: None,
     };
 
+    /// Écrit ces paramètres, tels que §18 les veut, et rend ce qu'ils occupent.
+    ///
+    /// # POURQUOI LES ENTIERS S'ÉCRIVENT TOUS, MÊME ÉGAUX À LEUR DÉFAUT
+    ///
+    /// §18 permet d'omettre un paramètre dont la valeur est celle par défaut :
+    /// le pair l'assume. L'omettre demanderait de comparer chaque champ à
+    /// `DEFAULT` — **et une comparaison de ce genre se tait le jour où le défaut
+    /// change**, en laissant croire qu'on a annoncé ce qu'on n'a pas annoncé.
+    /// Les écrire tous coûte une quarantaine d'octets, une fois par connexion.
+    ///
+    /// Les booléens et les identifiants, eux, se déclarent PAR LEUR PRÉSENCE
+    /// (§18.2) : `disable_active_migration` n'a pas de valeur, et l'écrire
+    /// vaudrait « vrai ». Ceux-là ne peuvent donc pas s'écrire inconditionnellement.
+    ///
+    /// # Errors
+    ///
+    /// [`Reason::BufferTooSmall`] si `out` ne suffit pas ;
+    /// [`Reason::BadTransportParameter`] si l'on demande d'écrire un paramètre
+    /// qui n'appartient pas à celui qui l'envoie (§18.2) — c'est une faute de
+    /// l'appelant, et la taire ferait rejeter la poignée de main par le pair,
+    /// très loin d'ici.
+    pub fn write(&self, de: Sender, out: &mut [u8]) -> Result<usize, Error> {
+        let faute = || Error::new(Reason::BadTransportParameter);
+        let mut plume = Plume { out, rang: 0 };
+
+        // §18.2 : ces deux-là ne viennent que d'un serveur, et ils disent ce
+        // que LUI a fait de la poignée de main.
+        for (identifiant, identite) in [
+            (0x00_u64, self.original_destination_connection_id),
+            (0x10, self.retry_source_connection_id),
+        ] {
+            let Some(identite) = identite else {
+                continue;
+            };
+            if !appartient_a(identifiant, de) {
+                return Err(faute());
+            }
+            plume.octets(identifiant, identite.as_bytes())?;
+        }
+
+        plume.entier(0x01, self.max_idle_timeout_ms)?;
+        plume.entier(0x03, self.max_udp_payload_size)?;
+        plume.entier(0x04, self.initial_max_data)?;
+        plume.entier(0x05, self.initial_max_stream_data_bidi_local)?;
+        plume.entier(0x06, self.initial_max_stream_data_bidi_remote)?;
+        plume.entier(0x07, self.initial_max_stream_data_uni)?;
+        plume.entier(0x08, self.initial_max_streams_bidi)?;
+        plume.entier(0x09, self.initial_max_streams_uni)?;
+        plume.entier(0x0a, u64::from(self.ack_delay_exponent))?;
+        plume.entier(0x0b, self.max_ack_delay_ms)?;
+        // §18.2 : il ne porte AUCUNE valeur. Sa présence est ce qu'il dit.
+        if self.disable_active_migration {
+            plume.octets(0x0c, &[])?;
+        }
+        plume.entier(0x0e, self.active_connection_id_limit)?;
+        if let Some(identite) = self.initial_source_connection_id {
+            plume.octets(0x0f, identite.as_bytes())?;
+        }
+        Ok(plume.rang)
+    }
+
     /// Lit les paramètres qu'un pair a envoyés.
     ///
     /// # Errors
@@ -262,6 +323,55 @@ impl TransportParameters {
             // Il ne reste que 0x10 : `rang_connu` n'a laissé passer que ceux-là.
             _ => self.retry_source_connection_id = Some(ConnectionId::new(valeur)?),
         }
+        Ok(())
+    }
+}
+
+/// Ce qui pose des paramètres dans un tampon, l'un après l'autre.
+///
+/// **CHAQUE PARAMÈTRE EST UN TRIPLET** (§18) : identifiant, longueur, valeur —
+/// les trois en entiers de longueur variable pour les deux premiers. Les écrire
+/// à la main à chaque fois inviterait à en oublier un.
+struct Plume<'a> {
+    /// Où l'on écrit.
+    out: &'a mut [u8],
+    /// Jusqu'où l'on a écrit.
+    rang: usize,
+}
+
+impl Plume<'_> {
+    /// Pose un paramètre dont la valeur est un entier de longueur variable.
+    fn entier(&mut self, identifiant: u64, valeur: u64) -> Result<(), Error> {
+        let mut place = [0_u8; 8];
+        let ecrits = varint::encode(valeur, &mut place)?;
+        self.octets(identifiant, place.get(..ecrits).unwrap_or_default())
+    }
+
+    /// Pose un paramètre dont la valeur est une suite d'octets.
+    fn octets(&mut self, identifiant: u64, valeur: &[u8]) -> Result<(), Error> {
+        let court = || Error::new(Reason::BufferTooSmall);
+        // **PAS DE GARDE SUR LA CONVERSION** : une valeur de paramètre est un
+        // identifiant de connexion ou rien, donc au plus vingt octets (§17.2).
+        // Un `map_err` ici ouvrirait une branche qu'aucune valeur ne peut
+        // emprunter, et C2 les refuse.
+        let longueur =
+            u64::try_from(valeur.len()).expect("une valeur de paramètre tient dans un u64");
+        for entier in [identifiant, longueur] {
+            // **PAS DE GARDE ICI NON PLUS** : `rang` ne dépasse jamais la
+            // longueur du tampon, puisque chaque écriture réussit entièrement ou
+            // échoue. Une tranche vide suffit à ce que l'écriture refuse, et
+            // c'est ce refus-là qui est éprouvé — plutôt qu'un `None` que rien
+            // ne peut produire.
+            let place = self.out.get_mut(self.rang..).unwrap_or_default();
+            let ecrits = varint::encode(entier, place)?;
+            self.rang = self.rang.saturating_add(ecrits);
+        }
+        let fin = self.rang.saturating_add(valeur.len());
+        self.out
+            .get_mut(self.rang..fin)
+            .ok_or_else(court)?
+            .copy_from_slice(valeur);
+        self.rang = fin;
         Ok(())
     }
 }
