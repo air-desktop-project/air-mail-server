@@ -23,6 +23,13 @@
 //! se touche, et refuser ce qu'on ne peut pas retenir — c'est [`Recv`], [`Send`]
 //! et [`Flow`], et c'est là que le contrôle de flux empêche un pair de commander
 //! notre mémoire.
+//!
+//! # ET C'EST ICI QUE LA CONNEXION SAIT QUAND ELLE S'ÉTEINT
+//!
+//! [`Connection`] tient ce qui vaut pour la connexion entière et non pour un
+//! flux : la borne d'amplification qui empêche notre serveur d'être l'arme de
+//! quelqu'un d'autre, le délai d'inactivité, et les deux états où l'on n'est plus
+//! là mais où l'on répond encore.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -31,6 +38,7 @@
 #[cfg(test)]
 extern crate std;
 
+mod connection;
 mod error;
 mod flow;
 mod plages;
@@ -38,6 +46,7 @@ mod receive;
 mod recv;
 mod send;
 
+pub use connection::{AMPLIFICATION_FACTOR, CLOSING_PTOS, Connection, IDLE_PTOS, State};
 pub use error::{Error, Reason};
 pub use flow::{Concurrence, Concurrences, Cote, Flow};
 pub use plages::HOLES_MAX;

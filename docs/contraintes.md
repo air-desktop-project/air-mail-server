@@ -3994,3 +3994,104 @@ l'émission : « qu'est-ce qui est acquitté, et qu'est-ce qu'il faut renvoyer ?
 C'est le même calcul, sur les mêmes décalages, avec les mêmes façons de se
 tromper. Il vit donc dans un seul ensemble d'intervalles, `Plages` : l'écrire
 deux fois donnerait deux occasions de le rater.
+
+## La machine d'état d'une connexion (RFC 9000 §8.1, §10 ; RFC 9001 §4.1, §4.9)
+
+### Une connexion QUIC ne se ferme pas, elle s'éteint
+
+Il n'y a pas de `FIN` à acquitter, pas de poignée de main de fermeture : un
+`CONNECTION_CLOSE` part, et l'émetteur reste encore trois délais de
+retransmission à répondre aux paquets en retard.
+
+Disparaître tout de suite ferait répondre par un `Stateless Reset` au prochain
+paquet retardé — c'est-à-dire dire à un pair qui n'a rien fait de mal que sa
+connexion n'a jamais existé.
+
+### La borne d'amplification est une propriété de sécurité, non de service
+
+§8.1 : un serveur qui répond librement à une adresse qu'il n'a pas validée est
+une machine à amplifier. L'attaquant écrit l'adresse de sa victime dans un
+datagramme de mille deux cents octets, et le serveur envoie à cette victime ce
+qu'il croit être une réponse.
+
+D'où la borne de trois. Elle ne se règle pas : la monter donnerait un meilleur
+levier à l'attaquant, la descendre empêcherait des poignées de main honnêtes
+d'aboutir — un certificat ne tient pas dans 1200 octets.
+
+Et le compte porte sur TOUS les octets reçus et attribués à la connexion, y
+compris ceux des paquets qu'on a jetés. Ne compter que ce qu'on sait lire
+donnerait moins de crédit à un pair honnête dont un paquet s'est perdu qu'à
+celui qui n'envoie que du bruit.
+
+### Un `Handshake` valide l'adresse, et c'est gratuit
+
+§8.1 : ses clés ne se dérivent qu'après avoir lu les trames `CRYPTO` de
+l'`Initial`, ce qu'un attaquant qui usurpe une adresse ne peut pas faire — il ne
+voit pas la réponse. La preuve est donc dans le fait même d'avoir su déchiffrer,
+et ne coûte aucun aller-retour supplémentaire.
+
+### Les clés se jettent, et pas au même moment des deux côtés
+
+§4.9.1 de RFC 9001 : le client jette ses clés `Initial` quand il ÉMET son premier
+`Handshake`, le serveur quand il en TRAITE un. La différence n'est pas
+cosmétique : elle vient de ce que chacun sait avec certitude de l'autre.
+
+Les clés de l'espace applicatif, elles, n'ont pas de champ dans cette machine —
+§4.9.3 ne parle que des clés `0-RTT`, qu'on n'offre pas (C6), et celles de
+`1-RTT` vivent aussi longtemps que la connexion. Un booléen de plus serait un
+état qu'aucun événement ne peut changer.
+
+### Le délai effectif est le plus petit des deux NON NULS
+
+§10.1. Prendre le minimum tout court ferait qu'un pair qui n'annonce rien —
+c'est-à-dire qui accepte de rester indéfiniment — annulerait le délai de celui
+qui en voulait un.
+
+Et le plancher de trois délais de retransmission existe pour qu'un pair ne puisse
+pas annoncer une milliseconde et faire expirer toute connexion avant la première
+retransmission.
+
+### Le délai ne repart à l'émission que pour le premier paquet
+
+§10.1 : « if no other ack-eliciting packets have been sent since last receiving
+and processing a packet ». Le remettre à chaque envoi laisserait un pair muet
+nous retenir indéfiniment, à la seule condition qu'on parle.
+
+### L'inactivité ferme en silence
+
+§10.1 : pas de `CONNECTION_CLOSE`. Si le pair est parti, personne ne le lira ;
+s'il est encore là, son propre délai vient d'expirer aussi.
+
+### En fermeture, on répond de moins en moins souvent
+
+§10.2.1 : « an endpoint could wait for a progressively increasing number of
+received packets ». Sans cela, un pair qui continue d'émettre — parce qu'il n'a
+pas reçu notre fermeture, ou parce qu'il le fait exprès — obtiendrait une réponse
+par paquet, et l'on amplifierait au moment précis où l'on n'a plus rien à dire.
+
+On répond au premier, au deuxième, au quatrième, au huitième : l'écart double, et
+le coût total reste logarithmique.
+
+### En drainage, on ne répond jamais
+
+§10.2.2 : sans cette règle, deux pairs qui se répondent échangeraient des
+`CONNECTION_CLOSE` jusqu'à ce que l'un des deux abandonne.
+
+Et venant de `Closing`, l'échéance ne bouge pas : « the draining state ends when
+the closing state would have ended ». La repousser laisserait un pair prolonger
+notre état en fermant après nous.
+
+### Le temps vient de l'appelant
+
+Ce crate ne lit pas d'horloge (C1). Tous les instants et toutes les durées sont
+en microsecondes, et c'est l'appelant qui les fournit. La machine dit quand il
+faudra la rappeler ; elle ne se réveille pas toute seule.
+
+### Ce que le fuzz vérifie ici, et qu'un test ne peut pas
+
+Deux des invariants sont des propriétés d'ORDRE : elles ne tiennent pas dans un
+appel, mais dans une suite d'appels quelconque. Un crédit qui dépasserait la
+borne après une séquence particulière d'événements, une clé qui reviendrait, un
+état qui remonterait la pente — un test les vérifie sur les séquences qu'on a
+imaginées, le fuzz sur celles qu'on n'a pas imaginées.
+

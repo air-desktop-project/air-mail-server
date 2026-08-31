@@ -381,3 +381,10 @@ path = "fuzz_targets/fuzz_ams_quic_stream.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_ams_quic_connection"
+path = "fuzz_targets/fuzz_ams_quic_connection.rs"
+test = false
+doc = false
+bench = false
