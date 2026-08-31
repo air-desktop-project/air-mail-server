@@ -80,6 +80,30 @@ struct Configuration {
 
   # DKIM (RFC 6376) : de quoi SIGNER ce que ce serveur émet.
   dkim @16 :Dkim;
+
+  # Où écouter en HTTP/2 (RFC 9113), ou une chaîne vide.
+  #
+  # Vide, l'API REST n'est pas servie. Comme les autres écoutes, cette crate ne
+  # l'interprète pas : `core` ne sait pas lire une adresse de socket.
+  #
+  # SANS CERTIFICAT, CE PORT N'EXISTE PAS DU TOUT — et c'est la différence avec
+  # les trois autres. SMTP, POP3 et IMAP montent en TLS par `STARTTLS` et servent
+  # en clair sans certificat ; l'API, elle, porte des jetons porteurs, et un jeton
+  # qui traverse un réseau en clair est un jeton volé. Le serveur refuse donc
+  # d'ouvrir ce port plutôt que de servir sans chiffrement (C4).
+  listenHttp @17 :Text;
+
+  # Le secret qui scelle les jetons de l'API, en hexadécimal — trente-deux octets,
+  # donc soixante-quatre caractères.
+  #
+  # VIDE, L'API N'EST PAS SERVIE, même si `listenHttp` est renseigné : sans clé,
+  # aucun jeton ne peut être scellé ni vérifié, et le serveur le dit au démarrage
+  # plutôt que de laisser le découvrir à la première requête.
+  #
+  # IL VIT ICI, ET NON DANS LE FICHIER DE COMPTES : ce n'est pas un secret de
+  # compte, c'est un secret de serveur. Le changer révoque tous les jetons en
+  # cours d'un seul coup — ce qui est parfois exactement ce qu'on veut.
+  tokenKey @18 :Text;
 }
 
 # DKIM : SIGNER, et non vérifier.

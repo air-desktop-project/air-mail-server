@@ -29,6 +29,7 @@
 //! que ce que son administrateur croit avoir demandé. Le fichier se produit avec
 //! `air-mail-admin config write`.
 
+mod api;
 mod delivery;
 mod imap;
 mod policy;
@@ -113,6 +114,132 @@ async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Combien de temps un jeton d'API vaut, en microsecondes.
+///
+/// Une heure. **UN JETON NE SE RÉVOQUE PAS TOUT SEUL** : il se vérifie sans
+/// consulter quoi que ce soit, donc sa seule fin garantie est son expiration.
+/// Plus il vit, plus longtemps un vol reste utile.
+const DUREE_DE_JETON_US: u64 = 3_600 * 1_000_000;
+
+/// Ce qu'il faut pour servir l'API.
+type MontageApi = (
+    TcpListener,
+    ams_session::http::Http,
+    Arc<ServerConfig>,
+    Arc<crate::api::ApiMaildir>,
+);
+
+/// Monte l'API REST, ou explique pourquoi elle n'est pas servie.
+///
+/// # TROIS CONDITIONS, ET AUCUNE N'EST FACULTATIVE
+///
+/// Une adresse d'écoute, un certificat, et une clé de scellement.
+///
+/// **Le certificat n'est pas négociable, et c'est la différence avec les trois
+/// autres écoutes.** SMTP, POP3 et IMAP servent en clair et refusent
+/// l'authentification ; l'API, elle, porte des jetons porteurs, et un jeton qui
+/// traverse un réseau en clair est un jeton volé. Ce port ne s'ouvre donc pas
+/// sans chiffrement (C4).
+///
+/// Chaque refus se dit **au démarrage**, avec sa raison. Un port qu'on ouvrirait
+/// pour répondre 500 à chaque requête serait pire qu'un port fermé.
+fn monter_l_api(
+    options: &Configuration,
+    tls: Option<&Arc<ServerConfig>>,
+    boites: Arc<BoitesImap>,
+    comptes: Arc<Vec<Account>>,
+) -> Result<Option<MontageApi>, String> {
+    if options.listen_http.is_empty() {
+        eprintln!("air-mail-server : API REST non servie — aucune adresse d'écoute configurée");
+        return Ok(None);
+    }
+    let Some(tls) = tls else {
+        eprintln!(
+            "air-mail-server : API REST NON SERVIE — aucun certificat. Elle porte des jetons \
+             porteurs, et un jeton qui traverse un réseau en clair est un jeton volé : ce port \
+             ne s'ouvre pas sans chiffrement (C4)."
+        );
+        return Ok(None);
+    };
+    if options.token_key.is_empty() {
+        eprintln!(
+            "air-mail-server : API REST NON SERVIE — aucun secret de scellement. Sans clé, aucun \
+             jeton ne peut être scellé ni vérifié."
+        );
+        return Ok(None);
+    }
+
+    let octets = octets_hexadecimaux(&options.token_key)?;
+    let clef = ams_api::Key::new(&octets).map_err(|_| {
+        String::from(
+            "le secret de scellement des jetons fait moins de trente-deux octets : une clé plus \
+             courte que le sceau qu'elle produit donnerait moins de sécurité que la taille du \
+             sceau ne le laisse croire",
+        )
+    })?;
+    let session = ams_session::http::Http::new(clef, DUREE_DE_JETON_US).map_err(|_| {
+        String::from("la durée de vie des jetons dépasse ce qu'un jeton peut vivre")
+    })?;
+
+    let adresse: std::net::SocketAddr = options.listen_http.parse().map_err(|_| {
+        format!(
+            "`{}` n'est pas une adresse d'écoute HTTP",
+            options.listen_http
+        )
+    })?;
+    let ecouteur = std::net::TcpListener::bind(adresse)
+        .map_err(|erreur| format!("écoute HTTP sur {adresse} : {erreur}"))?;
+    ecouteur
+        .set_nonblocking(true)
+        .map_err(|erreur| format!("écoute HTTP sur {adresse} : {erreur}"))?;
+    let ecouteur = TcpListener::from_std(ecouteur)
+        .map_err(|erreur| format!("écoute HTTP sur {adresse} : {erreur}"))?;
+
+    // **LA CONFIGURATION TLS DE L'API N'EST PAS CELLE DES AUTRES ÉCOUTES** :
+    // elle porte l'ALPN `h2`, et rien d'autre. La partager telle quelle ferait
+    // annoncer `h2` sur le port SMTP, où il ne veut rien dire.
+    let mut http_tls = (**tls).clone();
+    http_tls.alpn_protocols = ams_tls::alpn();
+
+    eprintln!(
+        "air-mail-server : API REST sur {adresse} — HTTP/2 sur TLS, ALPN `h2` seul. \
+         UN MOT DE PASSE N'OUVRE PAS L'ADMINISTRATION : il ouvre le courrier, la soumission \
+         et la supervision du compte, et rien de plus."
+    );
+    Ok(Some((
+        ecouteur,
+        session,
+        Arc::new(http_tls),
+        Arc::new(crate::api::ApiMaildir::new(boites, comptes)),
+    )))
+}
+
+/// Les octets que décrit cette écriture hexadécimale.
+///
+/// **PAS DE BASE64, ET PAS DE TEXTE BRUT** : l'hexadécimal a une seule écriture
+/// par octet, se relit à l'œil, et ne se confond pas avec une phrase de passe —
+/// ce qui évite qu'un secret de trente-deux octets soit renseigné avec huit
+/// caractères tapés au clavier.
+fn octets_hexadecimaux(texte: &str) -> Result<Vec<u8>, String> {
+    if !texte.len().is_multiple_of(2) {
+        return Err(String::from(
+            "le secret de scellement des jetons n'a pas un nombre pair de chiffres",
+        ));
+    }
+    texte
+        .as_bytes()
+        .chunks(2)
+        .map(|paire| {
+            core::str::from_utf8(paire)
+                .ok()
+                .and_then(|deux| u8::from_str_radix(deux, 16).ok())
+                .ok_or_else(|| {
+                    String::from("le secret de scellement des jetons n'est pas de l'hexadécimal")
+                })
+        })
+        .collect()
 }
 
 /// Charge le magasin de comptes que la configuration nomme, s'il en nomme.
@@ -677,6 +804,11 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     };
 
     // ── LE SERVICE IMAP, S'IL EST DEMANDÉ ───────────────────────────────────
+    // **UN SEUL SERVICE DE BOÎTES POUR IMAP ET POUR L'API** : deux voies de
+    // lecture finiraient par ne plus montrer la même chose, et personne ne
+    // saurait laquelle croire.
+    let boites_imap = Arc::new(BoitesImap::new(Arc::clone(&boites), domaine));
+
     let imap = if options.listen_imap.is_empty() {
         eprintln!("air-mail-server : IMAP non servi — aucune adresse d'écoute configurée");
         None
@@ -739,12 +871,31 @@ async fn servir(fichier: &Path) -> Result<(), String> {
                 ..ams_proto_imap::Limits::DEFAULT
             },
             Arc::clone(&politique),
-            Arc::new(BoitesImap::new(Arc::clone(&boites), domaine)),
+            Arc::clone(&boites_imap),
             Arc::clone(&garde),
             options_de_service.clone(),
             arret(),
         )))
     };
+
+    let http = monter_l_api(
+        &options,
+        options_de_service.tls.as_ref(),
+        Arc::clone(&boites_imap),
+        Arc::clone(&comptes),
+    )?
+    .map(|(ecouteur, session, tls, api)| {
+        tokio::spawn(ams_loop_tokio::http::serve_http(
+            ecouteur,
+            ams_proto_http::Limits::DEFAULT,
+            api,
+            Arc::clone(&garde),
+            session,
+            tls,
+            options_de_service.clone(),
+            arret(),
+        ))
+    });
 
     let stats = serve(
         ecouteur,
@@ -784,6 +935,16 @@ async fn servir(fichier: &Path) -> Result<(), String> {
             ),
             Ok(Err(erreur)) => eprintln!("air-mail-server : IMAP : {erreur}"),
             Err(erreur) => eprintln!("air-mail-server : IMAP : {erreur}"),
+        }
+    }
+    if let Some(tache) = http {
+        match tache.await {
+            Ok(Ok(stats_http)) => eprintln!(
+                "air-mail-server : HTTP ; {} connexion(s) acceptée(s), {} refusée(s) par le noyau",
+                stats_http.accepted, stats_http.failed
+            ),
+            Ok(Err(erreur)) => eprintln!("air-mail-server : HTTP : {erreur}"),
+            Err(erreur) => eprintln!("air-mail-server : HTTP : {erreur}"),
         }
     }
 

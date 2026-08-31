@@ -150,6 +150,13 @@ impl Options {
             maildir: self.maildir.display().to_string(),
             hosted: self.hosted.clone(),
             max_recipients: 100,
+            // **L'API REST N'EST PAS SERVIE PAR DÉFAUT**, et ce n'est pas un
+            // oubli : elle demande un certificat ET un secret de scellement, et
+            // inventer l'un des deux ici donnerait un fichier qui promet ce
+            // qu'on n'a pas demandé. `air-mail-admin` gagnera ses options quand
+            // on saura ce qu'elles doivent dire.
+            listen_http: String::new(),
+            token_key: String::new(),
             max_message_octets: self.max_message_octets,
             max_connections: u32::try_from(self.max_connections).unwrap_or(u32::MAX),
             limits: Limits::DEFAULT,

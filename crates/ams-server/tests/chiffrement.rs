@@ -194,6 +194,8 @@ fn configuration_pop3(
         maildir: atelier.0.join("boite").display().to_string(),
         hosted: vec![String::from("example.com")],
         max_recipients: 100,
+        listen_http: String::new(),
+        token_key: String::new(),
         max_message_octets: 10_485_760,
         max_connections: 16,
         limits: Limits::DEFAULT,

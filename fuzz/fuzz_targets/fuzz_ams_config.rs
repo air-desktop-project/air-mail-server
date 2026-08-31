@@ -45,6 +45,10 @@ struct Entree {
     garde: [u32; 4],
     prefixes: [u8; 2],
     delais: [u32; 2],
+    /// L'écoute HTTP et le secret de scellement des jetons, eux aussi
+    /// libres : l'un sans l'autre est un cas que le SERVEUR refuse, et le
+    /// décodeur, lui, doit les rendre tels quels.
+    http: [String; 2],
     /// Les deux chemins TLS, LIBREMENT INCOHÉRENTS : le fuzzer doit pouvoir
     /// composer « un seul des deux », qui est justement le cas que le décodeur
     /// refuse. Les lier ici cacherait ce refus au lieu de l'éprouver.
@@ -109,6 +113,8 @@ fuzz_target!(|entree: Entree| {
         max_recipients: entree.max_recipients,
         max_message_octets: entree.max_message_octets,
         max_connections: entree.max_connections,
+        listen_http: entree.http[0].clone(),
+        token_key: entree.http[1].clone(),
         limits: Limits {
             max_command_octets: entree.bornes[0] as usize,
             max_local_part_octets: entree.bornes[1] as usize,

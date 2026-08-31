@@ -32,13 +32,13 @@ const VERIFICATIONS_SIMULTANEES: usize = 4;
 /// tokio a déjà sorti de son ordonnanceur. Un sémaphore asynchrone ne servirait
 /// à rien ici : la vérification qui suit est bloquante de toute façon, et c'est
 /// justement pour cela qu'elle a quitté le fil de l'ordonnanceur.
-struct Places {
+pub struct Places {
     libres: Mutex<usize>,
     liberee: Condvar,
 }
 
 impl Places {
-    fn new(total: usize) -> Self {
+    pub fn new(total: usize) -> Self {
         Self {
             libres: Mutex::new(total),
             liberee: Condvar::new(),
@@ -46,7 +46,7 @@ impl Places {
     }
 
     /// Attend une place, l'occupe, et la rend à la fin du bloc.
-    fn occuper<T>(&self, travail: impl FnOnce() -> T) -> T {
+    pub fn occuper<T>(&self, travail: impl FnOnce() -> T) -> T {
         {
             let mut libres = self
                 .libres

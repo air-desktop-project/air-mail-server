@@ -208,6 +208,7 @@ version = "0.1.0"
 name = "ams-server"
 version = "0.1.0"
 dependencies = [
+ "ams-api",
  "ams-auth",
  "ams-config",
  "ams-dkim",
@@ -215,6 +216,7 @@ dependencies = [
  "ams-index",
  "ams-loop-tokio",
  "ams-mime",
+ "ams-proto-http",
  "ams-proto-imap",
  "ams-proto-pop3",
  "ams-proto-smtp",

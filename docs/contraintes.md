@@ -4790,3 +4790,78 @@ l'intérieur.
 
 Ce qui reste hors de portée : qu'un vrai client tiers nous lise. Cela demande un
 vrai client tiers, comme `starttls.rs` emploie un vrai OpenSSL.
+
+## L'API adossée au magasin (`ams-server::api`)
+
+### Une seule vue du magasin pour les deux protocoles
+
+Ce module ne lit pas les Maildir : il interroge le MÊME `Mailboxes` qu'IMAP. Ce
+n'est pas une économie de lignes.
+
+Une seconde voie de lecture aurait sa propre idée de ce qu'est un message
+lisible, de ce que vaut un `UIDVALIDITY`, de quels dossiers existent. Deux
+fenêtres ouvertes sur la même boîte finiraient par ne plus montrer la même chose,
+et personne ne saurait laquelle croire.
+
+### Un compte ordinaire n'obtient jamais la portée d'administration
+
+Un mot de passe ouvre le courrier, la soumission et la supervision de SON compte.
+Il n'ouvre pas l'administration — créer un compte, en effacer un, lever un
+bannissement.
+
+**Cette limite est dans le code, et non dans une configuration** : un réglage
+finirait par être basculé, et un compte compromis deviendrait alors le serveur
+entier. Le serveur l'annonce au démarrage, plutôt que de le laisser découvrir.
+
+### Le sujet et l'expéditeur ne sont pas dans une liste
+
+`Mailbox::info` est décrite comme devant être **bon marché** : la session IMAP
+l'appelle pour chaque message qu'un ensemble pourrait désigner, y compris ceux
+qu'il ne désigne pas. Y ajouter la lecture d'une enveloppe ferait ouvrir un
+fichier par message listé, et défairait cette promesse pour les deux protocoles à
+la fois.
+
+Les rendre demande donc une voie séparée, avec sa propre borne — et cette
+voie-là mérite sa propre tranche.
+
+### Ce qui n'est pas encore servi le dit
+
+Les ressources d'administration et de soumission répondent `501`. §15.6.2 de
+RFC 9110 : « the server does not support the functionality required ». C'est la
+réponse honnête — un `404` ferait croire que la ressource n'existe pas, et un
+`500` qu'elle a échoué.
+
+### Trois conditions pour ouvrir le port, et aucune n'est facultative
+
+Une adresse d'écoute, un certificat, et un secret de scellement.
+
+**Le certificat n'est pas négociable, et c'est la différence avec les trois autres
+écoutes.** SMTP, POP3 et IMAP servent en clair et refusent l'authentification ;
+l'API porte des jetons porteurs, et un jeton qui traverse un réseau en clair est
+un jeton volé. Ce port ne s'ouvre donc pas sans chiffrement (C4).
+
+Chaque refus se dit **au démarrage**, avec sa raison. Un port qu'on ouvrirait pour
+répondre 500 à chaque requête serait pire qu'un port fermé. Et un secret illisible
+**arrête** le démarrage : une configuration qui dit vouloir l'API avec un secret
+qu'on ne peut pas lire s'est trompée, et démarrer sans elle ferait croire que tout
+va bien.
+
+Les essais du binaire vérifient les trois refus **et le port fermé** : vérifier
+l'annonce sans vérifier le port laisserait passer un serveur qui dit non et écoute
+quand même.
+
+### Le secret est de l'hexadécimal, et il vit dans la configuration du serveur
+
+Pas de base64, pas de texte brut : l'hexadécimal a une seule écriture par octet,
+se relit à l'œil, et ne se confond pas avec une phrase de passe — ce qui évite
+qu'un secret de trente-deux octets soit renseigné avec huit caractères tapés au
+clavier.
+
+Il vit dans la configuration du serveur et non dans le fichier de comptes : ce
+n'est pas un secret de compte, c'est un secret de serveur. Le changer révoque tous
+les jetons en cours d'un seul coup — ce qui est parfois exactement ce qu'on veut.
+
+### La configuration TLS de l'API n'est pas celle des autres écoutes
+
+Elle porte l'ALPN `h2`, et rien d'autre. La partager telle quelle ferait annoncer
+`h2` sur le port SMTP, où il ne veut rien dire.

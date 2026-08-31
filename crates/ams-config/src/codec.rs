@@ -268,6 +268,15 @@ pub struct Configuration {
     pub dmarc: Dmarc,
     /// DKIM : de quoi signer ce qu'on émet, ou deux chaînes vides.
     pub dkim: Dkim,
+    /// Où écouter en HTTP/2, ou une chaîne vide.
+    ///
+    /// **SANS CERTIFICAT, CE PORT N'EXISTE PAS** : l'API porte des jetons
+    /// porteurs, et un jeton qui traverse un réseau en clair est un jeton volé.
+    pub listen_http: String,
+    /// Le secret qui scelle les jetons de l'API, en hexadécimal.
+    ///
+    /// Vide, l'API n'est pas servie — sans clé, aucun jeton ne se scelle.
+    pub token_key: String,
     /// Le fichier de comptes, ou une chaîne vide.
     ///
     /// Vide, le serveur n'annonce pas `AUTH` : il n'a personne à qui répondre
@@ -415,6 +424,8 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
     let comptes = texte(lu.get_accounts()?)?;
     let ecoute_pop3 = texte(lu.get_listen_pop3()?)?;
     let ecoute_imap = texte(lu.get_listen_imap()?)?;
+    let ecoute_http = texte(lu.get_listen_http()?)?;
+    let clef_de_jeton = texte(lu.get_token_key()?)?;
 
     let signature = lu.get_dkim()?;
     let dkim = Dkim {
@@ -500,6 +511,8 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
         accounts: comptes,
         listen_pop3: ecoute_pop3,
         listen_imap: ecoute_imap,
+        listen_http: ecoute_http,
+        token_key: clef_de_jeton,
     })
 }
 
@@ -594,6 +607,8 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
         ecrit.set_accounts(&config.accounts);
         ecrit.set_listen_pop3(&config.listen_pop3);
         ecrit.set_listen_imap(&config.listen_imap);
+        ecrit.set_listen_http(&config.listen_http);
+        ecrit.set_token_key(&config.token_key);
     }
     Ok(serialize::write_message_to_words(&message))
 }
@@ -662,6 +677,8 @@ mod tests {
             accounts: String::new(),
             listen_pop3: String::new(),
             listen_imap: String::new(),
+            listen_http: String::new(),
+            token_key: String::new(),
         }
     }
 
@@ -674,6 +691,10 @@ mod tests {
             accounts: String::from("/etc/ams/comptes.bin"),
             listen_pop3: String::from("127.0.0.1:2110"),
             listen_imap: String::from("127.0.0.1:2143"),
+            listen_http: String::from("127.0.0.1:2443"),
+            token_key: String::from(
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            ),
             // ET DES RÉSOLVEURS : le balayage qui corrompt chaque octet ne
             // traverse une liste de textes que si elle en porte.
             spf: Spf {
