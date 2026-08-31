@@ -41,6 +41,7 @@ dependencies = [
 name = "air-mail-server-fuzz"
 version = "0.0.0"
 dependencies = [
+ "ams-api",
  "ams-auth",
  "ams-config",
  "ams-dkim",
@@ -66,6 +67,13 @@ dependencies = [
  "arbitrary",
  "libfuzzer-sys",
  "rustls",
+]
+
+[[package]]
+name = "ams-api"
+version = "0.1.0"
+dependencies = [
+ "ams-proto-http",
 ]
 
 [[package]]

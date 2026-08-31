@@ -39,6 +39,9 @@ path = "../crates/ams-proto-imap"
 [dependencies.ams-proto-http]
 path = "../crates/ams-proto-http"
 
+[dependencies.ams-api]
+path = "../crates/ams-api"
+
 [dependencies.ams-proto-quic]
 path = "../crates/ams-proto-quic"
 
@@ -392,6 +395,13 @@ bench = false
 [[bin]]
 name = "fuzz_ams_h3_connection"
 path = "fuzz_targets/fuzz_ams_h3_connection.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ams_api_route"
+path = "fuzz_targets/fuzz_ams_api_route.rs"
 test = false
 doc = false
 bench = false

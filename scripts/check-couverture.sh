@@ -61,6 +61,7 @@ CRATES_SANS_IO=(
     ams-dmarc
     ams-config
     ams-index
+    ams-api
 )
 
 # ── LA SEULE DÉROGATION, ET ELLE EST NOMMÉE ─────────────────────────────────

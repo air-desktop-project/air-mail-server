@@ -4182,3 +4182,127 @@ Les trames inconnues, elles, ne font pas avancer la séquence et ne la rompent p
 
 Un flux qui se termine sans en-têtes, en revanche, ne condamne que lui-même : un
 client qui abandonne sa requête en route n'a pas cassé la connexion.
+
+## L'API REST : le routage (`ams-api`)
+
+### C'est la première surface de ce serveur qu'aucune RFC ne décrit
+
+SMTP, POP3, IMAP, HTTP, QUIC : jusqu'ici, chaque octet accepté ou refusé l'était
+parce qu'un document le disait. Ici, c'est nous qui décidons — et c'est
+précisément pour cela que les règles doivent être écrites d'un seul endroit, sous
+une forme qui se vérifie.
+
+### On ne normalise pas : on refuse
+
+Presque toute faute d'autorisation d'une API vit dans l'écart entre deux
+écritures d'un même chemin. `/v1/accounts/marc`, `/v1/accounts/./marc`,
+`/v1//accounts/marc` : trois chaînes, une ressource. Si le contrôle d'accès
+regarde la chaîne et le service regarde la ressource, il existe une écriture qui
+passe l'un et atteint l'autre.
+
+Normaliser ne résout pas cela, **cela le déplace** : il faut alors que tout le
+monde normalise pareil, y compris les intermédiaires, y compris demain. Refuser
+n'exige d'accord avec personne : une seule écriture est acceptée, et c'est la
+plus simple.
+
+### On découpe avant de décoder, et l'on juge après
+
+Les deux moitiés se contredisent en apparence, et ne se contredisent pas : le
+découpage regarde une SYNTAXE — où sont les séparateurs — et le jugement regarde
+un SENS — que dit ce segment.
+
+Découper après décoder ferait d'un `%2F` un séparateur, et `a%2F..%2Fb`
+deviendrait trois segments dont un `..`. Juger avant décoder laisserait passer
+`%2e%2e`, qui s'écrit avec six octets dont aucun n'est un point et se décode en
+`..`.
+
+**Le premier jet faisait la seconde faute**, et un test l'a trouvée.
+
+### La longueur se mesure après décodage, pour la même raison
+
+Un nom de 255 octets s'écrit sur 255 octets, ou sur 765 s'il est entièrement
+encodé. Mesurer la forme reçue ferait accepter ce nom dans une écriture et le
+refuser dans l'autre — deux réponses pour une ressource.
+
+**Défaut écrit puis trouvé par le fuzz**, sur un aller-retour qui réencodait ce
+qu'on venait de décoder.
+
+### « Une seule écriture » aurait été une propriété fausse
+
+§6.2.2.2 de RFC 3986 déclare équivalentes les écritures qui ne diffèrent que par
+le percent-encodage des caractères non réservés. La propriété juste est
+l'aller-retour : réencoder ce qu'on a décodé doit redonner la même ressource.
+Sans elle, il existerait un nom que le serveur accepte mais ne sait pas
+désigner — et les deux moitiés du serveur ne parleraient plus du même objet.
+
+### La chaîne vide ne peut désigner qu'une absence
+
+Un segment vide est refusé au décodage. Il n'existe donc AUCUN segment valide
+égal à `""`, et un accesseur qui rend `""` hors des bornes ne peut pas se
+confondre avec un segment réel.
+
+C'est ce qui permet à la table de routage de n'avoir aucune garde sur l'absence.
+Le premier jet en avait une par accès — une douzaine de branches qu'aucun chemin
+ne pouvait emprunter, et que la couverture a signalées une à une.
+
+### Une ressource, puis une méthode — et non l'inverse
+
+Le chemin dit CE QU'ON DÉSIGNE ; la méthode dit CE QU'ON EN FAIT. Les confondre
+en une seule table rendrait impossible la distinction que §15.5.6 de RFC 9110
+exige : 404 quand la ressource n'existe pas, 405 avec un `Allow` quand elle
+existe mais pas avec ce verbe.
+
+Ce n'est pas de la politesse. Un client qui reçoit 404 sur un `PATCH` ne sait pas
+s'il s'est trompé de chemin ou de verbe, et réessaiera les deux.
+
+### Chaque ressource porte sa portée, dans le même `match`
+
+Ajouter une ressource sans lui donner de portée **ne compile pas**. C'est
+l'inverse d'une liste de contrôle tenue à part, qui se désynchronise au premier
+ajout — et dont le premier symptôme est une ressource servie sans droit.
+
+Le domaine ne dépend que du chemin, le droit ne dépend que du verbe. Une
+ressource qui aurait besoin d'échapper à cette règle serait le signe qu'elle en
+mélange deux.
+
+### `HEAD` demande le même droit que `GET`
+
+§9.3.2 : il rend les mêmes en-têtes. Le laisser passer plus facilement rendrait
+lisible par sa longueur ce qu'on refusait de rendre.
+
+### L'empreinte d'un compte n'a aucune méthode de lecture
+
+`/v1/accounts/{compte}/password` ne sert que `PUT`. C'est ce qui permet à
+`GET /v1/accounts/{compte}` d'exister sans jamais rendre une empreinte : il n'y a
+pas de représentation du compte qui la contienne.
+
+### 404 pour ce qui n'existe pas ET pour ce qu'on n'a pas le droit de voir
+
+La différence entre les deux réponses **est** l'information « cette ressource
+existe », et un client sans aucun droit pourrait la collecter en balayant. 403
+reste pour ce qui est visible mais interdit.
+
+Et le message ne nomme jamais la règle touchée : « le chemin est refusé », et non
+« le segment 3 contient un `..` ». La seconde formulation apprend à qui sonde
+laquelle contourner. Le journal du serveur, lui, a le droit d'être précis — il ne
+va pas au client.
+
+### Quatre domaines qui n'ont rien à voir entre eux
+
+Lire son courrier, administrer les comptes, déposer un message, regarder les
+compteurs. Le premier ne doit jamais donner le deuxième : un jeton de client de
+messagerie qui pourrait créer un compte serait un jeton d'administration déguisé.
+
+Et la lecture n'est pas l'écriture — la distinction coûte un bit et évite la
+faute la plus commune : un jeton donné pour consulter et qui pouvait effacer.
+
+La portée vide est le défaut, de sorte qu'un jeton mal construit n'ouvre rien
+plutôt que tout.
+
+### Un identifiant n'a qu'une écriture
+
+« 12 », et ni « +12 », ni « 012 », ni « 0x0c ». Chacune désigne le même message,
+et chacune est une seconde clé pour un cache ou pour un journal.
+
+Et la vérification est sur CHAQUE route qui en porte un, pas seulement la plus
+courte : chacune est une porte, et une porte oubliée suffit.
