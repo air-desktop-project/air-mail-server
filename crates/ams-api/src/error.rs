@@ -47,6 +47,16 @@ pub enum Reason {
     /// La clé de scellement n'est pas acceptable. **Notre faute** : c'est la
     /// configuration du serveur qui la fournit.
     BadKey,
+    /// Le corps reçu n'est pas un JSON que ce serveur accepte.
+    ///
+    /// **UNE SEULE RAISON POUR TOUT** : profondeur, clé répétée, virgule finale,
+    /// nombre à virgule, moitié de paire d'indirection. Dire laquelle
+    /// apprendrait à qui sonde quelle règle il a touchée.
+    BadJsonBody,
+    /// L'écrivain JSON a reçu une suite impossible. **Notre faute.**
+    BadJson,
+    /// Une représentation plus profonde que ce qu'on écrit. **Notre faute.**
+    JsonTooDeep,
     /// Le tampon de sortie ne suffit pas. **Notre faute, pas celle du client.**
     BufferTooSmall,
 }
@@ -56,7 +66,7 @@ impl Reason {
     #[must_use]
     pub const fn status(self) -> StatusCode {
         match self {
-            Self::BadPath => StatusCode::BAD_REQUEST,
+            Self::BadPath | Self::BadJsonBody => StatusCode::BAD_REQUEST,
             // §15.5.15 : celui-ci existe exactement pour un chemin trop long, et
             // le distinguer d'un 400 dit au client que c'est la LONGUEUR qui
             // gêne — donc qu'il peut réessayer plus court.
@@ -70,7 +80,9 @@ impl Reason {
             // it lacks valid authentication credentials ». Un jeton qui ne se
             // vérifie pas et un jeton périmé sont tous deux cela.
             Self::BadToken | Self::TokenExpired => StatusCode::UNAUTHORIZED,
-            Self::BadKey | Self::BufferTooSmall => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::BadKey | Self::BadJson | Self::JsonTooDeep | Self::BufferTooSmall => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
         }
     }
 
@@ -86,13 +98,19 @@ impl Reason {
     pub const fn message(self) -> &'static str {
         match self {
             Self::BadPath => "le chemin est refusé",
+            Self::BadJsonBody => "le corps de la requête est refusé",
             Self::PathTooLong => "le chemin est trop long",
             Self::NoSuchResource | Self::Forbidden => "aucune ressource ici",
             Self::MethodNotAllowed => "cette méthode n'est pas servie ici",
             Self::BadToken => "l'authentification n'est pas recevable",
             Self::TokenExpired => "l'authentification a expiré",
-            Self::BadKey => "le serveur n'a pas pu authentifier la requête",
-            Self::BufferTooSmall => "le serveur n'a pas pu écrire la réponse",
+            // **CE QUI EST NÔTRE SE DIT D'UNE SEULE FAÇON.** Distinguer nos
+            // fautes internes apprendrait au client ce que notre code a fait de
+            // travers, et ne lui servirait à rien : il n'y peut rien. Le journal
+            // du serveur, lui, garde la raison exacte.
+            Self::BadKey | Self::BadJson | Self::JsonTooDeep | Self::BufferTooSmall => {
+                "le serveur n'a pas pu produire la réponse"
+            }
         }
     }
 }

@@ -39,6 +39,21 @@
 //! pour savoir comment vérifier : c'est demander à un message non authentifié
 //! comment l'authentifier. [`Token`] n'a pas de champ d'algorithme — sa version
 //! en fixe un seul, et il n'y a qu'une version.
+//!
+//! # ET CE QU'ON REND NE SE CONCATÈNE JAMAIS
+//!
+//! Presque tout ce que cette API rend vient d'ailleurs : un nom de boîte qu'un
+//! client a choisi, un sujet qu'un inconnu a écrit. Un seul guillemet non
+//! échappé dans l'un d'eux ferme la chaîne, et ce qui suit devient de la
+//! STRUCTURE. [`Json`] est le seul chemin par lequel une représentation sort
+//! d'ici, et [`problem`] le seul par lequel une faute sort.
+//!
+//! # ET CE QU'ON LIT, ON N'EST JAMAIS SEUL À LE LIRE
+//!
+//! Un corps JSON traverse souvent plus d'un logiciel avant nous. Si deux d'entre
+//! eux ne lisent pas la même chose dans les mêmes octets, le filtre protège un
+//! document que le serveur ne verra jamais. [`Reader`] refuse donc tout ce sur
+//! quoi les analyseurs divergent, même quand la RFC le tolère.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -49,14 +64,20 @@ extern crate std;
 
 mod base64url;
 mod error;
+mod json;
 mod mac;
 mod path;
+mod problem;
+mod reader;
 mod route;
 mod scope;
 mod token;
 
 pub use error::{Error, Reason};
+pub use json::{DEPTH_MAX, Json};
 pub use path::{SEGMENT_OCTETS_MAX, SEGMENTS_MAX, Segments, split_query};
+pub use problem::{JSON_MEDIA_TYPE, PROBLEM_MEDIA_TYPE, problem};
+pub use reader::{BODY_DEPTH_MAX, Event, FIELDS_MAX, Number, Reader, Str};
 pub use route::{Resolved, Resource, resolve};
 pub use scope::{Area, Rights, Scope};
 pub use token::{

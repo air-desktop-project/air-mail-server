@@ -17,6 +17,11 @@ fn chaque_raison_a_son_code_et_son_message() {
             StatusCode::BAD_REQUEST,
             "chemin est refusé",
         ),
+        (
+            Reason::BadJsonBody,
+            StatusCode::BAD_REQUEST,
+            "corps de la requête est refusé",
+        ),
         (Reason::PathTooLong, StatusCode::URI_TOO_LONG, "trop long"),
         (
             Reason::NoSuchResource,
@@ -38,12 +43,22 @@ fn chaque_raison_a_son_code_et_son_message() {
         (
             Reason::BadKey,
             StatusCode::INTERNAL_SERVER_ERROR,
-            "n'a pas pu authentifier",
+            "n'a pas pu produire",
+        ),
+        (
+            Reason::BadJson,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "n'a pas pu produire",
+        ),
+        (
+            Reason::JsonTooDeep,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "n'a pas pu produire",
         ),
         (
             Reason::BufferTooSmall,
             StatusCode::INTERNAL_SERVER_ERROR,
-            "n'a pas pu écrire",
+            "n'a pas pu produire",
         ),
     ];
     for (raison, code, morceau) in cas {
@@ -77,6 +92,31 @@ fn l_absence_et_l_interdit_ne_se_distinguent_pas() {
     );
 }
 
+/// **CE QUI EST NÔTRE SE DIT D'UNE SEULE FAÇON** : distinguer nos fautes
+/// internes apprendrait au client ce que notre code a fait de travers, et ne lui
+/// servirait à rien — il n'y peut rien.
+#[test]
+fn nos_propres_fautes_se_disent_pareil() {
+    let miennes = [
+        Reason::BadKey,
+        Reason::BadJson,
+        Reason::JsonTooDeep,
+        Reason::BufferTooSmall,
+    ];
+    for raison in miennes {
+        assert_eq!(
+            raison.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "{raison:?}"
+        );
+        assert_eq!(
+            raison.message(),
+            Reason::BufferTooSmall.message(),
+            "{raison:?} se distingue des autres fautes internes"
+        );
+    }
+}
+
 /// **ON NE DIT JAMAIS CE QU'ON A REFUSÉ PRÉCISÉMENT** : la formulation précise
 /// apprendrait à qui sonde quelle règle il a touchée, et donc laquelle
 /// contourner.
@@ -89,9 +129,20 @@ fn le_message_ne_nomme_aucune_regle() {
         Reason::Forbidden,
         Reason::BadToken,
         Reason::TokenExpired,
+        Reason::BadJsonBody,
     ] {
         let dit = raison.message();
-        for indice in ["segment", "..", "%", "UTF-8", "portée", "sceau", "clé"] {
+        for indice in [
+            "segment",
+            "..",
+            "%",
+            "UTF-8",
+            "portée",
+            "sceau",
+            "clé",
+            "profondeur",
+            "virgule",
+        ] {
             assert!(
                 !dit.contains(indice),
                 "« {dit} » nomme « {indice} », ce qui apprend où appuyer"

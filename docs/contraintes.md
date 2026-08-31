@@ -4399,3 +4399,103 @@ dans un journal n'est plus une clé.
 et les accepter donnerait deux écritures d'un même en-tête : c'est la valeur
 entière qu'un journal ou un cache retient. Un jeton ne porte de toute façon
 aucune espace.
+
+## L'API REST : les représentations JSON
+
+### Échapper n'est pas une formalité, c'est la sécurité entière
+
+Presque tout ce que cette API rend vient d'ailleurs : un nom de boîte qu'un
+client a choisi, un sujet qu'un inconnu a écrit, une adresse qu'un serveur
+distant a envoyée. Un seul guillemet non échappé dans l'un d'eux ferme la chaîne,
+et ce qui suit devient de la STRUCTURE — des champs que personne n'a voulus, dans
+un document que le client croira de nous.
+
+C'est la même faute que l'injection SQL, avec le même remède : ne jamais
+concaténer, toujours passer par un écrivain qui sait ce qu'il écrit.
+
+On échappe au-delà de ce que §7 de RFC 8259 exige. `<`, `>` et `&`, parce qu'un
+document JSON finit parfois dans une page HTML et qu'un `<` non échappé y ouvre
+une balise. `U+2028` et `U+2029`, licites en JSON, parce qu'ils **terminent une
+ligne en JavaScript** : ce n'est pas notre faute, mais c'est notre client qui
+plante.
+
+### La structure est tenue par le type, et `finish` refuse l'inachevé
+
+Un écrivain qui laisserait poser `{` puis `]` produirait un document illisible qui
+partirait tout de même avec un 200. Et un JSON tronqué servi avec un 200 est pire
+qu'une erreur : le client le lit à moitié, et croit avoir tout.
+
+### Pas de nombres à virgule, dans un sens comme dans l'autre
+
+§6 laisse la précision à l'implémentation et prévient que seuls les entiers de
+-(2^53)+1 à (2^53)-1 sont sûrs d'être interopérables. Un flottant écrit ici serait
+relu ailleurs avec une autre précision. Cette API n'a de toute façon que des
+entiers à rendre : ce qui n'existe pas ne peut pas diverger.
+
+### Le type de problème vient du code d'état, et non de la raison
+
+C'est la décision qui compte dans les documents d'erreur. `NoSuchResource` et
+`Forbidden` répondent toutes deux 404, précisément pour que « cette ressource
+existe » ne se lise pas dans la réponse. Si le `type` venait de la raison, il
+rendrait immédiatement la distinction qu'on venait d'effacer.
+
+En le dérivant du code, l'indiscernabilité devient **structurelle** : deux raisons
+qui partagent un code partagent nécessairement un type. Il n'y a plus de règle à
+maintenir, seulement une fonction — et un essai vérifie que les deux documents
+sont identiques octet pour octet.
+
+Par la même logique, toutes nos fautes internes disent la même phrase : les
+distinguer apprendrait au client ce que notre code a fait de travers, ce à quoi
+il ne peut rien. Le journal du serveur, lui, garde la raison exacte.
+
+### On n'est jamais seul à lire un corps JSON
+
+Un corps traverse souvent plus d'un logiciel : un mandataire qui journalise, une
+passerelle qui filtre, et nous. Si deux d'entre eux ne lisent pas la même chose
+dans les mêmes octets, le filtre protège un document que le serveur ne verra
+jamais.
+
+Le lecteur refuse donc tout ce sur quoi les analyseurs divergent, même quand la
+RFC le tolère :
+
+- **les clés répétées** — §4 dit seulement « SHOULD be unique », et chaque
+  analyseur en fait ce qu'il veut. `{"admin":false,"admin":true}` est le cas
+  d'école ;
+- **ce qui suit la valeur racine** — `{"a":1}{"b":2}` fait un document pour nous
+  et deux pour un lecteur en flux ;
+- **les échappements dans les clés** — savoir lequel de deux noms équivalents
+  gagne est une question qu'on préfère ne pas poser, et les refuser rend la
+  détection des doublons exacte ;
+- **les virgules finales, les zéros de tête, les moitiés de paire
+  d'indirection** — chacune a au moins deux interprétations répandues, dont
+  certaines silencieuses.
+
+Aucun client honnête n'écrit rien de tout cela.
+
+### Le lecteur ne récurse pas
+
+La pile d'imbrication est un tableau de taille fixe. Un corps qui n'est que cent
+mille crochets ouvrants ne fait donc pas grandir la pile d'appels : il se heurte à
+une borne, et se refuse.
+
+### On ne décode que ce que l'appelant demande
+
+La plupart des chaînes d'un corps n'ont aucun échappement : les rendre telles
+quelles évite de copier, et évite surtout d'exiger un tampon pour chacune. Ce qui
+en a se décode à la demande.
+
+Et le signe d'un nombre est séparé de sa grandeur : aucun type entier de Rust ne
+porte à la fois `u64::MAX` et les négatifs, et en choisir un obligerait à refuser
+à la LECTURE ce que l'appelant aurait peut-être accepté.
+
+### Ce que le fuzz vérifie ici, et qu'aucune moitié ne pourrait prouver seule
+
+C'est la seule cible où l'écriture et la lecture d'un même format se font face.
+Cela permet l'aller-retour : **ce que l'écrivain produit, le lecteur le relit à
+l'identique.** Si l'un échappe mal ou si l'autre décode mal, la propriété s'en
+aperçoit — sur des chaînes qu'on n'a pas choisies.
+
+S'y ajoutent quatre invariants qui ne tiennent pas dans un appel : un document
+accepté est équilibré et fini, aucune de ses clés n'est répétée ni échappée,
+chacune de ses troncatures se refuse, et le lecteur avance toujours — un corps de
+`n` octets rend au plus `n` événements, donc la boucle de l'appelant se termine.
