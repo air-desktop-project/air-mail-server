@@ -590,6 +590,62 @@ Toutes signalées par la couverture, dont une redondance introduite dans
 `Streams::can_send`, qui distingue « ce flux n'émet pas » de « son crédit est
 nul » — deux choses que confondre aurait fait refuser un flux simplement bloqué.
 
+### La couture applicative (`ams-loop-tokio::quic::Application`)
+
+Écrite le 2026-09-01. C'est le point où une application reçoit les octets d'un
+flux — **et c'est tout ce qu'elle reçoit** : l'écoute sait ouvrir un paquet,
+compter un crédit et retransmettre ; elle ne sait pas ce qu'un octet veut dire,
+et n'a pas à le savoir. Le même partage qu'entre `ams-session::http` et
+`ams-loop-tokio::http`, et pour la même raison — ce qui décide et ce qui exécute
+ne se vérifient pas de la même façon.
+
+Trois rendez-vous, et pas un de plus :
+
+- `on_established` — **le premier instant où l'on peut ouvrir un flux**, §7.4 ne
+  laissant croire les limites du pair qu'authentifiées. HTTP/3 y ouvrira ses
+  trois unidirectionnels, que le client attend sans les avoir demandés. Dit une
+  fois et une seule : les rouvrir à chaque datagramme épuiserait le plafond de
+  §4.6 en quelques tours.
+- `on_readable` — appelé tant qu'il reste de quoi lire, **et borné à soixante-
+  quatre appels par tour** (C3) : une application qui prendrait un octet à la
+  fois ferait autrement tourner la boucle pendant que les autres connexions
+  attendent.
+- `on_closed` — ce qu'on tenait pour cette connexion ne sert plus.
+
+L'écoute relit la table des flux à chaque tour plutôt que de tenir une file des
+flux devenus lisibles. Cette file demanderait d'être juste à l'arrivée d'un
+octet, à la lecture d'un autre et à l'annulation d'un flux, et un oubli s'y
+verrait comme un flux qui se fige sans raison. **Trente-deux entrées se relisent
+pour moins cher qu'une erreur.**
+
+`SansApplication` n'est pas un bouchon : un serveur QUIC sans application sert
+quand même la poignée de main, les acquittements et le contrôle de flux, ce qui
+est exactement ce qu'il faut pour éprouver le transport seul.
+
+#### Ce qu'un essai d'écho a prouvé, et deux fautes qu'il a montrées
+
+`crates/ams-loop-tokio/tests/quic.rs` fait maintenant l'aller-retour complet : le
+client ouvre un flux, écrit une requête, et reçoit la réponse d'une application
+qui n'a jamais touché à une socket.
+
+Le monter a montré deux fautes dans le client d'essai, toutes deux dans la
+composition d'un datagramme :
+
+**Le client rendait `false` et abandonnait le datagramme avant d'y poser ce
+qu'il avait à dire.** Une requête seule, sans acquittement à joindre, ne partait
+donc jamais.
+
+**Et §17.3, pour la troisième fois.** Un en-tête court n'ayant pas de champ de
+longueur, sa charge va jusqu'au bout du datagramme : **un paquet `1-RTT` est
+toujours le dernier**, et il ne peut y en avoir qu'un. L'acquittement applicatif
+et les trames de l'essai vont donc dans le MÊME paquet. La première version en
+posait deux, et le premier était jeté sans un mot — ce qui se voyait comme un
+serveur qui ne fermait pas sur une faute qu'on venait de lui envoyer.
+
+Cette faute-là était **intermittente** : elle dépendait de la présence d'un
+acquittement à joindre au même tour. Un essai qui passe quatre fois sur six ne
+passe pas.
+
 ### Un flux sur la vraie socket, et son contrôle négatif
 
 Écrit le 2026-08-31. `crates/ams-loop-tokio/tests/quic.rs` fait désormais ouvrir

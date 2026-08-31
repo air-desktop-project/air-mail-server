@@ -195,6 +195,10 @@ struct Client {
     a_dire: Vec<u8>,
     /// Le serveur a-t-il fermé, et avec quel code ?
     ferme: Option<u64>,
+    /// Ce qu'un flux nous a apporté, replacé à son décalage.
+    recu: Vec<u8>,
+    /// Le pair a-t-il terminé ce flux ?
+    fin_recue: bool,
     /// Ce datagramme-ci porte-t-il un `Initial` ?
     a_pose_un_initial: bool,
 }
@@ -237,6 +241,8 @@ impl Client {
             en_attente: Vec::new(),
             a_dire: Vec::new(),
             ferme: None,
+            recu: Vec::new(),
+            fin_recue: false,
             a_pose_un_initial: false,
         }
     }
@@ -277,36 +283,50 @@ impl Client {
         niveau
     }
 
+    /// L'acquittement de cet espace, s'il y a quelque chose à acquitter.
+    fn acquittement(&mut self, espace: Space) -> Option<Vec<u8>> {
+        let rang = Self::rang(espace);
+        if self.a_acquitter[rang].is_empty() {
+            return None;
+        }
+        let plus_grand = self.a_acquitter[rang].iter().copied().max().unwrap_or(0);
+        let plus_petit = self.a_acquitter[rang].iter().copied().min().unwrap_or(0);
+        let mut trames = [0_u8; 64];
+        let ack = Frame::Ack(ams_proto_quic::Ack {
+            largest: plus_grand,
+            delay: 0,
+            first_range: plus_grand.saturating_sub(plus_petit),
+            range_count: 0,
+            encoded_ranges: &[],
+            ecn: None,
+        });
+        let ecrits = ack.write(&mut trames).expect("écrivable");
+        self.a_acquitter[rang].clear();
+        Some(trames[..ecrits].to_vec())
+    }
+
     /// Compose un datagramme et l'envoie pour de bon.
+    ///
+    /// # UN SEUL PAQUET `1-RTT`, ET IL EST LE DERNIER
+    ///
+    /// §17.3 : un en-tête court n'a pas de champ de longueur, et sa charge va
+    /// jusqu'au BOUT du datagramme. Tout ce qu'on poserait derrière lui entrerait
+    /// dans son chiffré, et il ne s'authentifierait plus — il serait jeté sans un
+    /// mot, ce qu'un essai confondrait avec un serveur muet.
+    ///
+    /// L'acquittement applicatif et ce que l'essai veut dire vont donc dans le
+    /// MÊME paquet, posé en dernier.
     async fn parler(&mut self) -> bool {
         self.a_pose_un_initial = false;
         let mut datagramme = Vec::new();
-        // Ce que l'essai veut dire au serveur, en `1-RTT`.
-        let a_dire = core::mem::take(&mut self.a_dire);
-        if !a_dire.is_empty() {
-            self.poser(&mut datagramme, Space::Application, &a_dire);
-        }
-        for espace in [Space::Initial, Space::Handshake, Space::Application] {
-            let rang = Self::rang(espace);
-            if self.a_acquitter[rang].is_empty() {
-                continue;
-            }
-            let plus_grand = self.a_acquitter[rang].iter().copied().max().unwrap_or(0);
-            let plus_petit = self.a_acquitter[rang].iter().copied().min().unwrap_or(0);
-            let mut trames = [0_u8; 64];
-            let ack = Frame::Ack(ams_proto_quic::Ack {
-                largest: plus_grand,
-                delay: 0,
-                first_range: plus_grand.saturating_sub(plus_petit),
-                range_count: 0,
-                encoded_ranges: &[],
-                ecn: None,
-            });
-            let ecrits = ack.write(&mut trames).expect("écrivable");
-            self.a_acquitter[rang].clear();
-            self.poser(&mut datagramme, espace, &trames[..ecrits]);
-        }
 
+        // Les deux espaces à en-tête long : ils portent leur longueur, et se
+        // coalescent sans se gêner (§12.2).
+        for espace in [Space::Initial, Space::Handshake] {
+            if let Some(ack) = self.acquittement(espace) {
+                self.poser(&mut datagramme, espace, &ack);
+            }
+        }
         self.avancer();
         for (niveau, octets) in std::mem::take(&mut self.en_attente) {
             let espace = niveau.space();
@@ -320,20 +340,29 @@ impl Client {
             self.decalage[rang] = self.decalage[rang]
                 .checked_add(u64::try_from(octets.len()).expect("tient"))
                 .expect("pas de débordement");
-            self.poser(&mut datagramme, espace, &trames[..ecrits]);
+            match espace {
+                Space::Application => self.a_dire.extend_from_slice(&trames[..ecrits]),
+                _ => self.poser(&mut datagramme, espace, &trames[..ecrits]),
+            }
         }
+
+        // Puis l'espace applicatif, tout entier dans un seul paquet.
+        let mut applicatif = self.acquittement(Space::Application).unwrap_or_default();
+        applicatif.extend_from_slice(&std::mem::take(&mut self.a_dire));
+        if !applicatif.is_empty() {
+            self.poser(&mut datagramme, Space::Application, &applicatif);
+        }
+
         if datagramme.is_empty() {
             return false;
         }
+
         // §14.1 : un datagramme portant un `Initial` fait 1200 octets au moins.
         //
         // # ET SEULEMENT CELUI-LÀ
         //
-        // **UN EN-TÊTE COURT N'A PAS DE CHAMP DE LONGUEUR** (§17.3) : sa charge
-        // va jusqu'au bout du datagramme. Bourrer derrière lui ferait entrer les
-        // zéros dans le chiffré, et le paquet ne s'authentifierait plus — il
-        // serait jeté sans un mot, ce qu'un essai confondrait avec un serveur
-        // muet.
+        // Bourrer derrière un en-tête court ferait entrer les zéros dans son
+        // chiffré, pour la raison dite plus haut.
         if self.a_pose_un_initial && datagramme.len() < 1_200 {
             datagramme.resize(1_200, 0);
         }
@@ -437,6 +466,21 @@ impl Client {
                 if let Frame::ConnectionClose { code, .. } = trame {
                     self.ferme = Some(code);
                 }
+                if let Frame::Stream {
+                    offset, data, fin, ..
+                } = trame
+                {
+                    let debut = usize::try_from(offset).unwrap_or(usize::MAX);
+                    let bout = debut.saturating_add(data.len());
+                    if self.recu.len() < bout {
+                        self.recu.resize(bout, 0);
+                    }
+                    self.recu
+                        .get_mut(debut..bout)
+                        .expect("la place vient d'être faite")
+                        .copy_from_slice(data);
+                    self.fin_recue |= fin;
+                }
                 if let Frame::Crypto { offset, data } = trame {
                     self.reassemblage
                         .on_crypto(niveau, offset, data, &mut self.fenetres[quel])
@@ -482,9 +526,14 @@ async fn une_poignee_de_main_sur_une_vraie_socket() {
 
     let (fin, arret) = tokio::sync::oneshot::channel::<()>();
     let ecoute = tokio::spawn(async move {
-        ams_loop_tokio::serve_quic(socket, Arc::new(config), async {
-            let _ = arret.await;
-        })
+        ams_loop_tokio::serve_quic(
+            socket,
+            Arc::new(config),
+            &mut ams_loop_tokio::SansApplication,
+            async {
+                let _ = arret.await;
+            },
+        )
         .await
     });
 
@@ -541,9 +590,14 @@ async fn du_bruit_sur_le_port_n_ouvre_rien() {
 
     let (fin, arret) = tokio::sync::oneshot::channel::<()>();
     let ecoute = tokio::spawn(async move {
-        ams_loop_tokio::serve_quic(socket, Arc::new(config), async {
-            let _ = arret.await;
-        })
+        ams_loop_tokio::serve_quic(
+            socket,
+            Arc::new(config),
+            &mut ams_loop_tokio::SansApplication,
+            async {
+                let _ = arret.await;
+            },
+        )
         .await
     });
 
@@ -604,9 +658,14 @@ async fn un_flux_traverse_la_vraie_socket() {
 
     let (fin, arret) = tokio::sync::oneshot::channel::<()>();
     let ecoute = tokio::spawn(async move {
-        ams_loop_tokio::serve_quic(socket, Arc::new(config), async {
-            let _ = arret.await;
-        })
+        ams_loop_tokio::serve_quic(
+            socket,
+            Arc::new(config),
+            &mut ams_loop_tokio::SansApplication,
+            async {
+                let _ = arret.await;
+            },
+        )
         .await
     });
 
@@ -673,9 +732,14 @@ async fn une_faute_de_flux_ferme_sur_la_vraie_socket() {
 
     let (fin, arret) = tokio::sync::oneshot::channel::<()>();
     let ecoute = tokio::spawn(async move {
-        ams_loop_tokio::serve_quic(socket, Arc::new(config), async {
-            let _ = arret.await;
-        })
+        ams_loop_tokio::serve_quic(
+            socket,
+            Arc::new(config),
+            &mut ams_loop_tokio::SansApplication,
+            async {
+                let _ = arret.await;
+            },
+        )
         .await
     });
 
@@ -704,9 +768,13 @@ async fn une_faute_de_flux_ferme_sur_la_vraie_socket() {
         .a_dire
         .extend_from_slice(trames.get(..ecrits).expect("écrits"));
 
-    for _ in 0..6 {
-        client.parler().await;
-        client.ecouter().await;
+    for tour in 0..6 {
+        let dit = client.parler().await;
+        let entendu = client.ecouter().await;
+        std::eprintln!(
+            "DEBUG tour={tour} dit={dit} entendu={entendu} ferme={:?}",
+            client.ferme
+        );
     }
 
     assert_eq!(
@@ -726,4 +794,122 @@ async fn une_faute_de_flux_ferme_sur_la_vraie_socket() {
     // pouvoir redire son `CONNECTION_CLOSE` au pair qui n'aurait pas entendu.
     // `closed` ne compte que ce qui a fini d'attendre.
     assert_eq!(stats.closed, 0);
+}
+
+/// Une application qui renvoie ce qu'on lui dit, et termine.
+///
+/// **C'EST LE PLUS PETIT USAGE DE LA COUTURE QUI PROUVE QUELQUE CHOSE** : elle
+/// lit, elle écrit, elle conclut. Un conducteur HTTP/3 fera davantage, mais rien
+/// d'autre en nature.
+#[derive(Default)]
+struct Echo {
+    /// Ce que chaque flux a dit jusqu'ici.
+    recu: std::collections::HashMap<u64, Vec<u8>>,
+    /// Combien de flux ont été servis.
+    servis: usize,
+}
+
+impl ams_loop_tokio::Application for Echo {
+    fn on_readable(
+        &mut self,
+        connexion: &mut ams_quic_tls::Connection,
+        flux: ams_proto_quic::StreamId,
+    ) {
+        let mut vers = [0_u8; 256];
+        let lus = connexion.read(flux, &mut vers);
+        if lus > 0 {
+            self.recu
+                .entry(flux.value())
+                .or_default()
+                .extend_from_slice(vers.get(..lus).expect("lus"));
+        }
+        // **ON NE RÉPOND QU'À UNE REQUÊTE COMPLÈTE** : §3.2 distingue « tout est
+        // là » de « il en manque », et répondre trop tôt servirait une requête
+        // tronquée.
+        if !matches!(
+            connexion.recv_state(flux),
+            Some(ams_quic::RecvState::DataRecvd | ams_quic::RecvState::DataRead)
+        ) {
+            return;
+        }
+        let Some(dit) = self.recu.remove(&flux.value()) else {
+            return;
+        };
+        let mut reponse = b"vous avez dit: ".to_vec();
+        reponse.extend_from_slice(&dit);
+        if connexion.write(flux, &reponse).is_ok() {
+            let _ = connexion.finish(flux);
+            self.servis = self.servis.saturating_add(1);
+        }
+    }
+}
+
+/// **DES OCTETS D'APPLICATION FONT L'ALLER-RETOUR SUR LA VRAIE SOCKET.**
+///
+/// C'est ce que toute la pile QUIC sert à rendre possible : le client ouvre un
+/// flux, y écrit une requête, et reçoit la réponse d'une application qui n'a
+/// jamais touché à une socket.
+#[tokio::test(flavor = "current_thread")]
+async fn des_octets_d_application_font_l_aller_retour() {
+    let atelier = atelier("echo");
+    let (autorite, cert, cle) = materiel(&atelier.0).expect(SANS_OPENSSL);
+
+    let mut config = ams_tls::quic_server_config(&cert, &cle).expect("la paire est bonne");
+    config.alpn_protocols = ams_tls::alpn_h3();
+    let socket = UdpSocket::bind("127.0.0.1:0").await.expect("une socket");
+    let adresse = socket.local_addr().expect("une adresse");
+
+    let (fin, arret) = tokio::sync::oneshot::channel::<()>();
+    let ecoute = tokio::spawn(async move {
+        let mut echo = Echo::default();
+        let stats = ams_loop_tokio::serve_quic(socket, Arc::new(config), &mut echo, async {
+            let _ = arret.await;
+        })
+        .await;
+        (stats, echo.servis)
+    });
+
+    let mut client = Client::new(config_client(&autorite), adresse).await;
+    for _ in 0..16 {
+        if !client.parler().await && !client.tls.is_handshaking() {
+            break;
+        }
+        if !client.ecouter().await && !client.tls.is_handshaking() {
+            break;
+        }
+    }
+    assert!(!client.tls.is_handshaking(), "la poignée de main aboutit");
+
+    let mut trames = [0_u8; 64];
+    let ecrits = (Frame::Stream {
+        stream: 0,
+        offset: 0,
+        data: b"bonjour",
+        fin: true,
+    })
+    .write(&mut trames)
+    .expect("écrivable");
+    client
+        .a_dire
+        .extend_from_slice(trames.get(..ecrits).expect("écrits"));
+
+    for _ in 0..8 {
+        client.parler().await;
+        client.ecouter().await;
+        if client.fin_recue {
+            break;
+        }
+    }
+
+    assert_eq!(client.ferme, None, "rien n'a fermé");
+    assert_eq!(
+        client.recu, b"vous avez dit: bonjour",
+        "LA RÉPONSE DE L'APPLICATION EST ARRIVÉE"
+    );
+    assert!(client.fin_recue, "§19.8 : et le flux est terminé");
+
+    let _ = fin.send(());
+    let (stats, servis) = ecoute.await.expect("la tâche d'écoute");
+    assert_eq!(servis, 1, "un flux servi, et un seul");
+    assert_eq!(stats.expect("l'écoute rend ses comptes").accepted, 1);
 }

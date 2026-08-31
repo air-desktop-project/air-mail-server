@@ -2401,3 +2401,71 @@ fn un_paquet_qui_ne_s_authentifie_pas_se_jette() {
         .expect("il se jette, il ne condamne pas");
     assert!(!serveur.is_closed(), "et surtout, il ne ferme rien");
 }
+
+/// **L'APPLICATION VOIT CE QUI EST PRÊT, ET CE QUE LE PAIR A CONCLU.**
+///
+/// Ce sont les trois choses dont une couture applicative a besoin : quels flux
+/// vivent, combien d'octets sont prêts sur chacun, et si le pair a terminé ou
+/// annulé. Sans la troisième, une application servirait une requête tronquée dès
+/// qu'un datagramme arriverait en deux morceaux.
+#[test]
+fn l_application_voit_ce_qui_est_pret() {
+    let (_atelier, mut serveur, mut client, horloge) = etabli("visible");
+    let zero = ams_proto_quic::StreamId::new(0).expect("un numéro");
+
+    // Avant toute trame, rien ne vit et rien n'est prêt.
+    assert_eq!(serveur.streams_alive().count(), 0);
+    assert_eq!(serveur.readable(zero), 0);
+    assert_eq!(serveur.recv_state(zero), None);
+
+    // Un morceau en avance : il est arrivé, il n'est pas prêt (§2.2).
+    let mut trames = std::vec![0_u8; 64];
+    let ecrits = (Frame::Stream {
+        stream: 0,
+        offset: 3,
+        data: b"def",
+        fin: true,
+    })
+    .write(&mut trames)
+    .expect("écrivable");
+    let mut datagramme = un_paquet_du_client(&mut client, trames.get(..ecrits).expect("écrits"));
+    serveur
+        .on_datagram(&mut datagramme, horloge)
+        .expect("le désordre s'accepte");
+    assert_eq!(serveur.streams_alive().collect::<Vec<_>>(), std::vec![zero]);
+    assert_eq!(serveur.readable(zero), 0, "le trou n'est pas comblé");
+    assert_eq!(
+        serveur.recv_state(zero),
+        Some(ams_quic::RecvState::SizeKnown),
+        "§3.2 : le `FIN` est là, les octets non"
+    );
+
+    // Le début arrive : tout devient prêt d'un coup.
+    let ecrits = (Frame::Stream {
+        stream: 0,
+        offset: 0,
+        data: b"abc",
+        fin: false,
+    })
+    .write(&mut trames)
+    .expect("écrivable");
+    let mut suite = un_paquet_du_client(&mut client, trames.get(..ecrits).expect("écrits"));
+    serveur
+        .on_datagram(&mut suite, horloge)
+        .expect("le début s'accepte");
+    assert_eq!(serveur.readable(zero), 6);
+    assert_eq!(
+        serveur.recv_state(zero),
+        Some(ams_quic::RecvState::DataRecvd),
+        "**C'EST LÀ QU'UNE REQUÊTE EST COMPLÈTE**, et pas avant"
+    );
+
+    let mut vers = [0_u8; 16];
+    assert_eq!(serveur.read(zero, &mut vers), 6);
+    assert_eq!(vers.get(..6), Some(&b"abcdef"[..]));
+    assert_eq!(serveur.readable(zero), 0);
+    assert_eq!(
+        serveur.recv_state(zero),
+        Some(ams_quic::RecvState::DataRead)
+    );
+}

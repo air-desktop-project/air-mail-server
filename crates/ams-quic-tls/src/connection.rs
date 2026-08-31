@@ -889,6 +889,31 @@ impl Connection {
         collection.read(flux, &mut self.fenetres[rang], vers)
     }
 
+    /// Combien d'octets sont prêts à être lus sur ce flux, dans l'ordre.
+    #[must_use]
+    pub fn readable(&self, flux: StreamId) -> u64 {
+        self.flux
+            .as_ref()
+            .map_or(0, |collection| collection.readable(flux))
+    }
+
+    /// L'état de réception de ce flux, s'il en reçoit (§3.2).
+    #[must_use]
+    pub fn recv_state(&self, flux: StreamId) -> Option<ams_quic::RecvState> {
+        self.flux
+            .as_ref()
+            .and_then(|collection| collection.recv_state(flux))
+    }
+
+    /// Les flux vivants, dans l'ordre de la table.
+    ///
+    /// **C'EST PAR LÀ QU'UNE APPLICATION LES PARCOURT** sans tenir elle-même la
+    /// liste de ce qui vit — et sans que la table lui soit ouverte.
+    pub fn streams_alive(&self) -> impl Iterator<Item = StreamId> + '_ {
+        let collection = self.flux.as_ref();
+        (0..FLUX_MAX).filter_map(move |rang| collection.and_then(|flux| flux.occupant(rang)))
+    }
+
     /// L'application prend acte de l'annulation d'un flux (§3.2).
     ///
     /// **SANS CET APPEL, LA PLACE NE SE REND JAMAIS** : §3.2 sépare `Reset

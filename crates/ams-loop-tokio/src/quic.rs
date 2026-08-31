@@ -43,8 +43,8 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use ams_proto_quic::ConnectionId;
-use ams_quic::{Incoming, LOCAL_CONNECTION_ID_OCTETS, Route};
+use ams_proto_quic::{ConnectionId, StreamId};
+use ams_quic::{Incoming, LOCAL_CONNECTION_ID_OCTETS, RecvState, Route};
 use ams_quic_tls::Connection;
 use rustls::ServerConfig;
 use tokio::net::UdpSocket;
@@ -69,6 +69,14 @@ const RECEPTION_OCTETS_MAX: usize = 65_535;
 /// et ces paquets-là ne sont authentifiés par personne (§5.2 de RFC 9001).
 const CONNEXIONS_MAX: usize = 1_024;
 
+/// Combien de fois on rappelle l'application sur un même flux, en un tour.
+///
+/// **C'EST NOTRE BORNE, PAS LA SIENNE** (C3) : une application qui prendrait un
+/// octet à la fois ferait tourner la boucle autant de fois qu'il y a d'octets,
+/// pendant que les autres connexions attendent. Ce qui reste sera lu au tour
+/// suivant.
+const LECTURES_MAX: u32 = 64;
+
 /// Ce qu'une écoute QUIC a compté.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct QuicStats {
@@ -90,6 +98,12 @@ pub struct QuicStats {
 struct Vivante {
     /// Ce qui décide, et qui ne touche à rien.
     conduite: Connection,
+    /// A-t-on déjà dit à l'application que cette connexion était établie ?
+    ///
+    /// **UNE FOIS, ET UNE SEULE** : c'est là qu'une application ouvre ses flux
+    /// de contrôle, et les rouvrir à chaque datagramme épuiserait le plafond de
+    /// §4.6 en quelques tours.
+    etablie_dite: bool,
     /// D'où le pair écrit.
     ///
     /// **ON NE SUIT PAS LES MIGRATIONS** (§9) : une connexion qui change
@@ -99,6 +113,53 @@ struct Vivante {
     pair: SocketAddr,
 }
 
+/// Ce qu'une application fait des flux d'une connexion.
+///
+/// # LA BOUCLE CONDUIT LE TRANSPORT, CETTE INTERFACE DÉCIDE DU RESTE
+///
+/// C'est le même partage qu'entre `ams-session::http` et `ams-loop-tokio::http`,
+/// et pour la même raison : ce qui décide et ce qui exécute ne se vérifient pas
+/// de la même façon. L'écoute sait ouvrir un paquet, compter un crédit et
+/// retransmettre ; **elle ne sait pas ce qu'un octet veut dire**, et n'a pas à
+/// le savoir.
+///
+/// Une implémentation ne fait aucune entrée-sortie : elle lit avec
+/// [`Connection::read`], répond avec [`Connection::write`] et
+/// [`Connection::finish`], et c'est l'écoute qui décide quand ces octets partent
+/// et comment ils sont retransmis.
+pub trait Application {
+    /// Une connexion vient de s'établir.
+    ///
+    /// **C'EST LE PREMIER INSTANT OÙ L'ON PEUT OUVRIR UN FLUX** : avant, les
+    /// limites du pair ne sont pas authentifiées (§7.4). HTTP/3 y ouvre ses trois
+    /// unidirectionnels — contrôle et QPACK —, que le client attend sans les
+    /// avoir demandés.
+    fn on_established(&mut self, _connexion: &mut Connection) {}
+
+    /// Ce flux a de quoi être lu, ou son pair vient d'en changer l'état.
+    ///
+    /// Appelé tant qu'il reste des octets prêts : une implémentation qui n'en
+    /// lit qu'une partie sera rappelée. **L'état de réception dit le reste** —
+    /// [`Connection::recv_state`] distingue un flux terminé d'un flux annulé, et
+    /// les confondre ferait servir une requête tronquée.
+    fn on_readable(&mut self, connexion: &mut Connection, flux: StreamId);
+
+    /// Cette connexion s'éteint : ce qu'on tenait pour elle ne sert plus.
+    fn on_closed(&mut self, _connexion: &Connection) {}
+}
+
+/// Une application qui ne fait rien.
+///
+/// **ELLE N'EST PAS UN BOUCHON** : un serveur QUIC sans application sert quand
+/// même la poignée de main, les acquittements et le contrôle de flux, et c'est
+/// exactement ce qu'on veut pour éprouver le transport seul.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SansApplication;
+
+impl Application for SansApplication {
+    fn on_readable(&mut self, _connexion: &mut Connection, _flux: StreamId) {}
+}
+
 /// Sert QUIC sur cette socket, jusqu'à l'arrêt.
 ///
 /// # Errors
@@ -106,12 +167,14 @@ struct Vivante {
 /// [`Error`] si la socket refuse de lire — c'est-à-dire si l'écoute elle-même
 /// n'est plus possible. **Une connexion qui échoue ne regarde qu'elle** et ne
 /// remonte pas ici.
-pub async fn serve_quic<Arret>(
+pub async fn serve_quic<App, Arret>(
     socket: UdpSocket,
     tls: Arc<ServerConfig>,
+    application: &mut App,
     shutdown: Arret,
 ) -> Result<QuicStats, Error>
 where
+    App: Application,
     Arret: Future<Output = ()>,
 {
     let mut ecoute = Ecoute {
@@ -148,6 +211,10 @@ where
             Some(Ok((combien, pair))) => {
                 let datagramme = recu.get_mut(..combien).unwrap_or_default();
                 ecoute.un_datagramme(datagramme, pair, maintenant);
+                // **APRÈS LE DATAGRAMME, ET AVANT L'ÉMISSION** : ce que
+                // l'application écrit en réponse part dans le même tour, sans
+                // attendre un réveil de plus.
+                ecoute.servir(application);
             }
             // **UNE LECTURE QUI ÉCHOUE N'EST PAS UNE ÉCOUTE QUI S'ARRÊTE.** Sur
             // UDP, `recv_from` peut rendre une erreur qui appartient au
@@ -158,7 +225,7 @@ where
         }
         ecoute.les_delais(maintenant);
         ecoute.emettre(&mut place, maintenant).await;
-        ecoute.oublier_les_eteintes();
+        ecoute.oublier_les_eteintes(application);
     }
 }
 
@@ -253,7 +320,11 @@ impl Ecoute {
         }
         let rang = self.connexions.len();
         self.carte.insert(local.as_bytes().to_vec(), rang);
-        self.connexions.push(Vivante { conduite, pair });
+        self.connexions.push(Vivante {
+            conduite,
+            pair,
+            etablie_dite: false,
+        });
         self.stats.accepted = self.stats.accepted.saturating_add(1);
     }
 
@@ -310,7 +381,55 @@ impl Ecoute {
     /// On compacte le vecteur plutôt que d'y laisser des trous : un trou serait
     /// un rang qu'on peut encore trouver dans la carte, et donc un datagramme
     /// remis à une connexion qui n'existe plus.
-    fn oublier_les_eteintes(&mut self) {
+    /// Donne à l'application ce qui est prêt, connexion par connexion.
+    ///
+    /// # POURQUOI RELIRE LA LISTE DES FLUX À CHAQUE TOUR
+    ///
+    /// Tenir une file des flux devenus lisibles demanderait de la maintenir
+    /// juste — à l'arrivée d'un octet, à la lecture d'un autre, à l'annulation
+    /// d'un flux —, et un oubli s'y verrait comme un flux qui se fige sans
+    /// raison. La table fait trente-deux entrées : la relire coûte moins que de
+    /// se tromper.
+    ///
+    /// **ON RAPPELLE TANT QU'IL RESTE DE QUOI LIRE**, mais pas indéfiniment :
+    /// une application qui ne lirait rien ferait autrement tourner la boucle
+    /// sans fin, et c'est nous que cela arrêterait, pas elle.
+    fn servir<App: Application>(&mut self, application: &mut App) {
+        for vivante in &mut self.connexions {
+            if !vivante.conduite.is_established() {
+                continue;
+            }
+            if !vivante.etablie_dite {
+                vivante.etablie_dite = true;
+                application.on_established(&mut vivante.conduite);
+            }
+            let flux: Vec<StreamId> = vivante.conduite.streams_alive().collect();
+            for un in flux {
+                let mut tours = 0_u32;
+                while tours < LECTURES_MAX {
+                    let avant = vivante.conduite.readable(un);
+                    let etat = vivante.conduite.recv_state(un);
+                    // Rien à lire, et rien de neuf à dire : on passe.
+                    if avant == 0
+                        && !matches!(etat, Some(RecvState::DataRecvd | RecvState::ResetRecvd))
+                    {
+                        break;
+                    }
+                    application.on_readable(&mut vivante.conduite, un);
+                    // **L'APPLICATION N'A RIEN PRIS NI RIEN CONCLU** : la
+                    // rappeler ne donnerait que le même appel.
+                    if vivante.conduite.readable(un) == avant
+                        && vivante.conduite.recv_state(un) == etat
+                    {
+                        break;
+                    }
+                    tours = tours.saturating_add(1);
+                }
+            }
+        }
+    }
+
+    fn oublier_les_eteintes<App: Application>(&mut self, application: &mut App) {
         if !self.connexions.iter().any(|v| v.conduite.is_closed()) {
             return;
         }
@@ -319,6 +438,8 @@ impl Ecoute {
         for vivante in core::mem::take(&mut self.connexions) {
             if vivante.conduite.is_closed() {
                 self.stats.closed = self.stats.closed.saturating_add(1);
+                // Ce que l'application tenait pour cette connexion ne sert plus.
+                application.on_closed(&vivante.conduite);
                 continue;
             }
             carte.insert(

@@ -780,3 +780,49 @@ fn ce_qu_un_flux_rendu_n_avait_pas_livre_compte_comme_consomme() {
         "LE CRÉDIT REVIENT : sans quoi il serait perdu pour toujours"
     );
 }
+
+/// **CE QUI EST PRÊT N'EST PAS CE QUI EST ARRIVÉ** (§2.2).
+///
+/// Un flux se lit dans l'ordre : ce qui est en avance d'un trou attend que le
+/// trou se comble. Rendre ce qui est arrivé ferait lire à l'application des
+/// octets qui ne sont pas les siens.
+#[test]
+fn ce_qui_est_pret_n_est_pas_ce_qui_est_arrive() {
+    let mut flux_ = serveur();
+    let sien = flux(0);
+    let mut fenetre = [0_u8; 2_000];
+    // Le second morceau d'abord : rien n'est prêt, bien que trois octets soient
+    // arrivés.
+    flux_
+        .on_stream(sien, 3, b"def", false, &mut fenetre)
+        .expect("le désordre");
+    assert_eq!(flux_.readable(sien), 0);
+    assert_eq!(flux_.recv_state(sien), Some(crate::RecvState::Recv));
+
+    flux_
+        .on_stream(sien, 0, b"abc", true, &mut fenetre)
+        .expect("le début, et le `FIN`");
+    assert_eq!(flux_.readable(sien), 6);
+    assert_eq!(
+        flux_.recv_state(sien),
+        Some(crate::RecvState::DataRecvd),
+        "§3.2 : tout est là, et rien n'est encore lu"
+    );
+
+    let mut vers = [0_u8; 8];
+    assert_eq!(flux_.read(sien, &mut fenetre, &mut vers), 6);
+    assert_eq!(flux_.recv_state(sien), Some(crate::RecvState::DataRead));
+
+    // Un flux qui n'existe pas, et un flux qui ne reçoit rien.
+    assert_eq!(flux_.readable(flux(400)), 0);
+    assert_eq!(flux_.recv_state(flux(400)), None);
+    let notre = flux_
+        .open(Directional::Unidirectional)
+        .expect("de la place");
+    assert_eq!(flux_.readable(notre), 0);
+    assert_eq!(
+        flux_.recv_state(notre),
+        None,
+        "il n'a pas de moitié réception"
+    );
+}

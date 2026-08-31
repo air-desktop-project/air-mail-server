@@ -36,7 +36,7 @@ use ams_proto_quic::{Directional, Initiator, StreamId, TransportParameters};
 
 use crate::error::{Error, Reason};
 use crate::flow::{Concurrences, Flow};
-use crate::recv::Recv;
+use crate::recv::{Recv, RecvState};
 use crate::send::Send;
 
 /// Combien de flux d'une même famille (§4.6) une connexion tient à la fois.
@@ -586,6 +586,40 @@ impl Streams {
         if let Some(reception) = place.reception.as_mut() {
             reception.read_reset();
         }
+    }
+
+    /// Combien d'octets sont prêts à être lus sur ce flux, dans l'ordre.
+    ///
+    /// **CE N'EST PAS CE QUI EST ARRIVÉ** : §2.2 livre dans l'ordre, et ce qui
+    /// est en avance d'un trou attend que le trou se comble. Rendre ce qui est
+    /// arrivé ferait lire à l'application des octets qui ne sont pas les siens.
+    #[must_use]
+    pub fn readable(&self, flux: StreamId) -> u64 {
+        let Some(rang) = self.slot(flux) else {
+            return 0;
+        };
+        self.flux[rang]
+            .as_ref()
+            .expect("`slot` ne rend que le rang d'un flux vivant")
+            .reception
+            .map_or(0, |reception| reception.readable())
+    }
+
+    /// L'état de réception de ce flux, s'il en reçoit (§3.2).
+    ///
+    /// C'est par là qu'une application apprend que le pair a terminé
+    /// (`DataRecvd`, puis `DataRead` une fois tout lu) ou qu'il a annulé
+    /// (`ResetRecvd`). **Les distinguer compte** : un flux annulé n'aura pas la
+    /// suite qu'on attendait, et le traiter comme un flux terminé ferait servir
+    /// une requête tronquée.
+    #[must_use]
+    pub fn recv_state(&self, flux: StreamId) -> Option<RecvState> {
+        let rang = self.slot(flux)?;
+        self.flux[rang]
+            .as_ref()
+            .expect("`slot` ne rend que le rang d'un flux vivant")
+            .reception
+            .map(|reception| reception.state())
     }
 
     /// Peut-on encore écrire sur ce flux (§3.1) ?
