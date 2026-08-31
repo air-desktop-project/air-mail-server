@@ -126,6 +126,29 @@ pub enum Reason {
     MalformedRequest,
     /// Un champ de réponse que ce serveur refuse d'écrire.
     BadResponseField,
+    /// Un second flux critique du même type (§6.2.1, §4.2 de RFC 9204).
+    ///
+    /// **DEUX FLUX DE CONTRÔLE PRÉTENDRAIENT DÉCRIRE LE MÊME ÉTAT**, et rien ne
+    /// dirait lequel croire.
+    DuplicateCriticalStream,
+    /// Un flux critique s'est fermé (§6.2.1, §4.2 de RFC 9204).
+    CriticalStreamClosed,
+    /// Le flux de contrôle n'a pas commencé par ses réglages (§6.2.1).
+    MissingSettings,
+    /// Un second `SETTINGS` sur le flux de contrôle (§7.2.4).
+    RepeatedSettings,
+    /// Une suite de trames que §4.1 interdit sur un flux de requête.
+    FrameOutOfOrder,
+    /// Un `GOAWAY` dont l'identifiant MONTE (§5.2).
+    ///
+    /// **UN CLIENT A PU RÉÉMETTRE AILLEURS** les requêtes qu'un `GOAWAY`
+    /// précédent avait déclarées perdues ; les réaccepter les ferait exécuter
+    /// deux fois.
+    GoAwayIncreased,
+    /// Le pair n'envoie plus que des trames qui ne font rien avancer.
+    ServiceFlood,
+    /// Un flux de requête s'est fermé avant de faire un message (§4.1).
+    IncompleteRequest,
 }
 
 impl Reason {
@@ -158,6 +181,17 @@ impl Reason {
             Self::MalformedRequest => H3Error::MessageError,
             // **NOTRE CODE A PROPOSÉ CE CHAMP, PAS LE PAIR.**
             Self::BadResponseField => H3Error::InternalError,
+            Self::DuplicateCriticalStream => H3Error::StreamCreationError,
+            Self::CriticalStreamClosed => H3Error::ClosedCriticalStream,
+            Self::MissingSettings => H3Error::MissingSettings,
+            // §7.2.4 et §4.1 emploient le même code pour deux fautes de même
+            // nature : une trame là où la suite n'en attendait pas.
+            Self::RepeatedSettings | Self::FrameOutOfOrder => H3Error::FrameUnexpected,
+            Self::GoAwayIncreased => H3Error::IdError,
+            Self::ServiceFlood => H3Error::ExcessiveLoad,
+            // §4.1 : celle-ci ne condamne que le flux. Un client qui abandonne
+            // sa requête en route n'a pas cassé la connexion.
+            Self::IncompleteRequest => H3Error::RequestIncomplete,
         }
     }
 }
@@ -208,6 +242,14 @@ impl core::fmt::Display for Error {
             Reason::DynamicTableRefused => "une insertion dans une table qu'on a annoncée nulle",
             Reason::MalformedRequest => "une section de champs qui ne fait pas une requête",
             Reason::BadResponseField => "un champ de réponse qu'on refuse d'écrire",
+            Reason::DuplicateCriticalStream => "un second flux critique du même type",
+            Reason::CriticalStreamClosed => "un flux critique s'est fermé",
+            Reason::MissingSettings => "le flux de contrôle n'a pas commencé par ses réglages",
+            Reason::RepeatedSettings => "un second `SETTINGS` sur le flux de contrôle",
+            Reason::FrameOutOfOrder => "une suite de trames que §4.1 interdit",
+            Reason::GoAwayIncreased => "un `GOAWAY` dont l'identifiant monte",
+            Reason::ServiceFlood => "le pair n'envoie plus que ce qui ne fait rien avancer",
+            Reason::IncompleteRequest => "un flux de requête fermé avant de faire un message",
         };
         write!(f, "{quoi} (code 0x{:04x})", self.code().value())
     }

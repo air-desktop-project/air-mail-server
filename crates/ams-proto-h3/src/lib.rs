@@ -29,12 +29,14 @@
 #[cfg(test)]
 extern crate std;
 
+mod connection;
 mod error;
 mod frame;
 pub mod qpack;
 mod settings;
 mod stream;
 
+pub use connection::{Connection, GOAWAY_MAX, Message, MessageState, SERVICE_FRAMES_MAX, State};
 pub use error::{Error, H3Error, Reason};
 pub use frame::{FRAME_LENGTH_MAX, FrameHeader, FrameKind, Placement};
 pub use settings::{DEFAULT_MAX_FIELD_SECTION_SIZE, Settings};

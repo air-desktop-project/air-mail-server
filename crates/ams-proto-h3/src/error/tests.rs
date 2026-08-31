@@ -111,6 +111,46 @@ fn chaque_raison_porte_son_code_et_se_dit() {
             H3Error::InternalError,
             "champ de réponse",
         ),
+        (
+            Reason::DuplicateCriticalStream,
+            H3Error::StreamCreationError,
+            "second flux critique",
+        ),
+        (
+            Reason::CriticalStreamClosed,
+            H3Error::ClosedCriticalStream,
+            "flux critique s'est fermé",
+        ),
+        (
+            Reason::MissingSettings,
+            H3Error::MissingSettings,
+            "n'a pas commencé par ses réglages",
+        ),
+        (
+            Reason::RepeatedSettings,
+            H3Error::FrameUnexpected,
+            "second `SETTINGS`",
+        ),
+        (
+            Reason::FrameOutOfOrder,
+            H3Error::FrameUnexpected,
+            "que §4.1 interdit",
+        ),
+        (
+            Reason::GoAwayIncreased,
+            H3Error::IdError,
+            "`GOAWAY` dont l'identifiant monte",
+        ),
+        (
+            Reason::ServiceFlood,
+            H3Error::ExcessiveLoad,
+            "ne fait rien avancer",
+        ),
+        (
+            Reason::IncompleteRequest,
+            H3Error::RequestIncomplete,
+            "avant de faire un message",
+        ),
     ];
     for (raison, code, morceau) in cas {
         let faute = Error::new(raison);

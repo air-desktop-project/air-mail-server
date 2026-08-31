@@ -80,6 +80,7 @@ fuzz_ams_h2_connection h2-connection
 fuzz_ams_quic_varint quic-varint
 fuzz_ams_quic_packet quic-packet
 fuzz_ams_h3_frame h3-frame
+fuzz_ams_h3_connection h3-connection
 fuzz_ams_quic_crypto quic-crypto
 fuzz_ams_quic_receive quic-receive
 fuzz_ams_quic_stream quic-stream

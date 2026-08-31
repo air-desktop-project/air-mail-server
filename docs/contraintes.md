@@ -4095,3 +4095,90 @@ borne après une séquence particulière d'événements, une clé qui reviendrai
 état qui remonterait la pente — un test les vérifie sur les séquences qu'on a
 imaginées, le fuzz sur celles qu'on n'a pas imaginées.
 
+## La machine de connexion HTTP/3 (§4.1, §5.2, §6.2, §7.2.4 de RFC 9114)
+
+### Nous sommes le serveur, et cela simplifie beaucoup
+
+Ce serveur ne pousse pas, ne promet pas, et n'ouvre aucun flux bidirectionnel.
+Les états qu'un client aurait — attendre une promesse, tenir un compte de
+poussées à soi — n'existent donc pas, et pas davantage les gardes qui les
+auraient protégés.
+
+### Une connexion HTTP/3 tient à trois flux, et ils ne se ferment pas
+
+Le flux de contrôle et les deux flux QPACK sont critiques : §6.2.1 et §4.2 de
+RFC 9204 disent que les fermer est une faute, et non un adieu. Il n'y en a qu'un
+de chaque par sens, et un second est une faute aussi.
+
+La raison est la même dans les deux cas : ces flux portent l'état que les autres
+présupposent. Un flux de contrôle qui se ferme emporte le seul canal par où la
+connexion s'entend ; un second prétendrait décrire le même état deux fois, et
+rien ne dirait lequel croire.
+
+`on_critical_stream_closed` ne rend jamais `Ok`, et c'est voulu : son type dit ce
+que la RFC dit, plutôt que de laisser l'appelant croire qu'il existe une
+fermeture bénigne.
+
+### Un type de flux inconnu n'est pas une faute de connexion
+
+§6.2 : « The recipient MUST NOT consider unknown stream types to be a connection
+error of any kind. » On abandonne le flux, et rien de plus — c'est ce qui permet
+à une extension d'ouvrir les siens sans casser les pairs qui ne la connaissent
+pas.
+
+### La règle de §6.2.1 passe avant celle de §7.2
+
+« If the first frame of the control stream is any other frame type, this MUST be
+treated as a connection error of type H3_MISSING_SETTINGS. » *Any other* ne fait
+pas d'exception pour les trames qui n'avaient de toute façon pas leur place là.
+
+Les deux règles ferment la connexion, mais pas avec le même code — et c'est le
+code que le pair lira dans son journal pour comprendre ce qu'il a fait de
+travers. Lui dire « trame inattendue » quand il a simplement oublié ses réglages
+l'enverrait chercher au mauvais endroit.
+
+Le premier jet vérifiait la place d'abord ; la divergence a été trouvée par le
+fuzz, sur un `DATA` en première trame.
+
+### Aucune fenêtre ne borne le flux de contrôle
+
+§6.2.1 nous demande même de lui donner assez de crédit pour qu'il ne bloque
+jamais. Un pair peut donc y écrire des `MAX_PUSH_ID`, des trames inconnues et des
+`CANCEL_PUSH` sans fin : chacune coûte un traitement, et aucune ne fait
+progresser quoi que ce soit.
+
+C'est la même famille de défaut que *Rapid Reset* en HTTP/2 — un travail gratuit
+qu'aucun compteur existant ne voit. Seul un progrès remet le compteur à zéro.
+
+### Un `GOAWAY` ne remonte jamais, dans les deux sens
+
+§5.2 en fait une faute `H3_ID_ERROR` à la réception, parce qu'un client a pu
+réémettre ailleurs les requêtes qu'un `GOAWAY` précédent avait déclarées perdues.
+Les réaccepter les ferait exécuter deux fois — pour un serveur de courrier, un
+message livré deux fois.
+
+Et la même règle vaut pour le nôtre, où c'est nous qu'elle protège de nous-mêmes.
+§5.2 décrit l'extinction en deux temps qu'elle rend possible : d'abord le maximum,
+pour que le client cesse d'ouvrir ; puis, une fois les requêtes en vol arrivées,
+le rang réel de ce qu'on servira.
+
+### Un `MAX_PUSH_ID` qui recule contredit ce qu'il a déjà autorisé
+
+§7.2.7 ne parle que de l'augmenter. On ne pousse pas, et ce plafond ne sert donc
+qu'à une chose : vérifier que le client ne se contredit pas. Le garder sans
+l'employer serait inutile ; l'ignorer laisserait passer une contradiction qu'on a
+le devoir de voir.
+
+### La séquence d'un message est courte, et c'est tout l'intérêt
+
+§4.1 : une section d'en-têtes, puis des `DATA`, puis au plus une section
+terminale. Un `DATA` avant les en-têtes ou quoi que ce soit après la section
+terminale est une faute de CONNEXION, et non de flux — parce qu'une telle suite
+ne vient pas d'un pair qui s'est trompé sur une requête, mais d'un pair qui ne
+sait pas ce qu'il fait.
+
+Les trames inconnues, elles, ne font pas avancer la séquence et ne la rompent pas
+(« before, after, or interleaved with other frames »).
+
+Un flux qui se termine sans en-têtes, en revanche, ne condamne que lui-même : un
+client qui abandonne sa requête en route n'a pas cassé la connexion.
