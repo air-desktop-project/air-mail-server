@@ -374,3 +374,10 @@ path = "fuzz_targets/fuzz_ams_quic_receive.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_ams_quic_stream"
+path = "fuzz_targets/fuzz_ams_quic_stream.rs"
+test = false
+doc = false
+bench = false

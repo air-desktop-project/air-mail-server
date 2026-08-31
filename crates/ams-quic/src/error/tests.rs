@@ -25,6 +25,46 @@ fn jeter_et_ne_pas_avoir_de_code_sont_la_meme_chose() {
             Some(TransportError::ProtocolViolation),
             "ne se reconstruit pas",
         ),
+        (
+            Reason::FlowControl,
+            Some(TransportError::FlowControlError),
+            "dépassé ce qu'on lui avait ouvert",
+        ),
+        (
+            Reason::FinalSize,
+            Some(TransportError::FinalSizeError),
+            "taille finale d'un flux se contredit",
+        ),
+        (
+            Reason::TooManyHoles,
+            Some(TransportError::InternalError),
+            "désordre qu'on ne retient pas",
+        ),
+        (
+            Reason::SendClosed,
+            Some(TransportError::InternalError),
+            "un flux qui n'émet plus",
+        ),
+        (
+            Reason::SendOverflow,
+            Some(TransportError::InternalError),
+            "au-delà de ce qui nous est ouvert",
+        ),
+        (
+            Reason::StreamLimit,
+            Some(TransportError::StreamLimitError),
+            "plus de flux qu'on ne lui en a ouvert",
+        ),
+        (
+            Reason::WrongStreamDirection,
+            Some(TransportError::StreamStateError),
+            "à contresens",
+        ),
+        (
+            Reason::WindowTooSmall,
+            Some(TransportError::InternalError),
+            "la taille annoncée",
+        ),
     ];
     for (raison, code, morceau) in cas {
         let faute = Error::new(raison);

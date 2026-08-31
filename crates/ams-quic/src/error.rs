@@ -36,6 +36,45 @@ pub enum Reason {
     /// avant d'y arriver. Qu'on nous demande de reconstruire quand même veut
     /// dire qu'on a manqué cette fermeture.
     BadPacketNumber,
+    /// Le pair a dépassé ce qu'on lui avait ouvert (§4.1).
+    FlowControl,
+    /// La taille finale d'un flux a changé, ou des octets arrivent au-delà
+    /// (§4.5).
+    ///
+    /// **C'EST LA MÊME CONTRADICTION QU'UNE DOUBLE LONGUEUR EN HTTP/1.1** : deux
+    /// façons de savoir où un flux s'arrête, et rien pour les départager. QUIC
+    /// la refuse plutôt que de choisir.
+    FinalSize,
+    /// Un flux arrive dans un désordre plus grand que ce qu'on retient.
+    ///
+    /// **ON NE PEUT PAS RETIRER UN ACQUITTEMENT.** Un réassembleur qui jetterait
+    /// ce qu'il ne peut pas ranger perdrait des octets en silence, et le flux se
+    /// figerait sans que rien ne l'explique. On le dit, et l'on ferme.
+    TooManyHoles,
+    /// On a voulu émettre sur un flux qui n'émet plus (§3.1).
+    ///
+    /// **C'EST NOTRE FAUTE, ET NON CELLE DU PAIR.**
+    SendClosed,
+    /// On a voulu émettre au-delà de ce que le pair nous a ouvert (§4.1).
+    ///
+    /// **C'EST NOTRE FAUTE AUSSI**, et c'est celle qui compte : le pair
+    /// fermerait la connexion sans autre explication. La rendre ici la fait voir
+    /// en essai plutôt qu'en production.
+    SendOverflow,
+    /// Le pair a ouvert plus de flux qu'on ne lui en avait ouvert (§4.6).
+    StreamLimit,
+    /// Le pair écrit sur un flux où il n'a pas le droit d'écrire (§2.1).
+    ///
+    /// **UN FLUX UNIDIRECTIONNEL NE VA QUE DANS UN SENS**, et c'est celui de son
+    /// auteur. Y écrire à contresens veut dire que le pair a mal compris à qui
+    /// appartient le flux — donc que la suite ne sera pas ce qu'on croit.
+    WrongStreamDirection,
+    /// La fenêtre de réassemblage ne fait pas la taille qu'on a annoncée.
+    ///
+    /// **C'EST NOTRE FAUTE, ET LA PIRE DE TOUTES** : sans ce refus, les octets
+    /// qui ne tiennent pas disparaîtraient en silence, et le flux se figerait
+    /// sans que rien ne l'explique.
+    WindowTooSmall,
 }
 
 impl Reason {
@@ -55,6 +94,16 @@ impl Reason {
             Self::ReservedBitsSet | Self::BadPacketNumber => {
                 Some(TransportError::ProtocolViolation)
             }
+            Self::FlowControl => Some(TransportError::FlowControlError),
+            Self::FinalSize => Some(TransportError::FinalSizeError),
+            // **CELLE-CI EST NOTRE BORNE, PAS LA SIENNE.** Un pair honnête ne
+            // l'atteint pas ; le lui reprocher comme une faute de contrôle de
+            // flux serait lui imputer une limite qu'on ne lui a pas annoncée.
+            Self::TooManyHoles | Self::SendClosed | Self::SendOverflow | Self::WindowTooSmall => {
+                Some(TransportError::InternalError)
+            }
+            Self::StreamLimit => Some(TransportError::StreamLimitError),
+            Self::WrongStreamDirection => Some(TransportError::StreamStateError),
         }
     }
 
@@ -113,6 +162,14 @@ impl core::fmt::Display for Error {
             Reason::NotAuthentic => "le paquet ne s'authentifie pas",
             Reason::ReservedBitsSet => "les bits réservés ne sont pas nuls",
             Reason::BadPacketNumber => "le numéro de paquet ne se reconstruit pas",
+            Reason::FlowControl => "le pair a dépassé ce qu'on lui avait ouvert",
+            Reason::FinalSize => "la taille finale d'un flux se contredit",
+            Reason::TooManyHoles => "un flux arrive dans un désordre qu'on ne retient pas",
+            Reason::SendClosed => "on a voulu émettre sur un flux qui n'émet plus",
+            Reason::SendOverflow => "on a voulu émettre au-delà de ce qui nous est ouvert",
+            Reason::StreamLimit => "le pair a ouvert plus de flux qu'on ne lui en a ouvert",
+            Reason::WrongStreamDirection => "le pair écrit sur un flux à contresens",
+            Reason::WindowTooSmall => "la fenêtre ne fait pas la taille annoncée",
         };
         let suite = match self.se_jette() {
             true => "on le jette",

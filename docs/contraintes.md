@@ -3866,3 +3866,131 @@ soit.
 
 Le paquet du client rend sa trame `CRYPTO` de 245 octets suivie de 917 octets de
 remplissage — soit exactement les 1162 que l'annexe annonce.
+
+## Les flux QUIC (RFC 9000 §3, §4.1, §4.5, §4.6)
+
+Un flux arrive dans le désordre et se lit dans l'ordre. Tout le reste de ce
+module n'est que le moyen de tenir cette promesse-là.
+
+### La fenêtre appartient à l'appelant, et sa taille EST la limite annoncée
+
+`ams-quic` n'alloue pas. La fenêtre de réassemblage est donc fournie par
+l'appelant, et les deux ne peuvent pas diverger : annoncer plus qu'on ne peut
+retenir ferait perdre des octets qu'on a déjà acquittés, et annoncer moins ferait
+attendre un pair qui a le droit d'envoyer.
+
+### On ne peut pas retirer un acquittement
+
+C'est la contrainte qui décide de tout dans le réassemblage. Une fois un paquet
+acquitté, son contenu est à nous : le pair ne le renverra plus. Un réassembleur
+qui jetterait ce qu'il ne peut pas ranger perdrait donc des octets **en
+silence**, et le flux se figerait sans que rien ne l'explique.
+
+D'où le refus explicite (`TooManyHoles`) plutôt que l'oubli, et une borne —
+soixante-quatre intervalles — qu'un pair honnête ne peut pas atteindre : un
+intervalle par paquet en vol au pire, et une fenêtre de trente-deux kibioctets
+n'en laisse pas plus de vingt-huit sur un même flux.
+
+### On réunit en insérant, et non après
+
+Insérer d'abord puis réunir demande une place de plus le temps d'un appel — et
+cette place-là manque exactement quand on comble le dernier trou, c'est-à-dire au
+moment où le désordre DIMINUE. Un flux honnête se voyait fermer pour avoir rangé
+ce qui manquait.
+
+Défaut écrit, puis trouvé par le test qui comble les trous. Il n'aurait pas été
+trouvé par le fuzz avant longtemps : il demande d'atteindre la borne, puis de
+descendre.
+
+### Une fenêtre trop courte se refuse
+
+La règle — fenêtre aussi grande que la limite annoncée — est celle de
+l'appelant. Une contrainte qu'on ne vérifie pas n'en est pas une : elle se
+saurait en production, sous la forme d'un flux qui se fige. Et c'est le pire des
+manquements possibles ici, puisqu'il fait exactement ce que ce module existe pour
+empêcher.
+
+### On range avant de compter
+
+Si la place manque, rien ne doit avoir bougé. Un refus qui aurait déjà fait
+monter le plus grand décalage laisserait le contrôle de connexion désaccordé de
+ce que le flux dit — et l'écart ne se rattrape pas.
+
+### C'est la somme des plus grands décalages, non le nombre d'octets
+
+§4.1 : « the maximum of the sum of the absolute byte offsets of all streams ».
+Compter les octets reçus ferait payer deux fois une retransmission, et un pair
+honnête finirait par se voir fermer la connexion pour avoir renvoyé ce qu'on
+n'avait pas reçu.
+
+C'est pourquoi `Recv::on_stream` et `Recv::on_reset` rendent une PROGRESSION, et
+non une longueur : le contrôle de connexion ne peut consommer que cela.
+
+### La même arithmétique, deux fautes différentes
+
+Dépasser la limite qu'on a annoncée est la faute du PAIR, et se dit par un
+`FLOW_CONTROL_ERROR`. Dépasser celle qu'il nous a annoncée est la NÔTRE, et ne se
+dit à personne : le pair fermerait la connexion sans explication. `Flow` porte
+donc un côté, et la même opération rend deux fautes.
+
+Rendre la nôtre plutôt que de la saturer en silence est ce qui la fait voir en
+essai plutôt qu'en production.
+
+### Une limite plus basse n'est pas une faute
+
+§4.1 : « it is not an error to advertise a smaller limit, but the smaller limit
+has no effect ». La refuser fermerait des connexions pour deux `MAX_DATA` arrivés
+dans le désordre — ce qui arrive sans que personne n'ait tort. Il en va de même
+pour `MAX_STREAMS` (§4.6), qui « MUST be ignored » s'il n'augmente pas.
+
+### Une taille finale ne change pas
+
+§4.5. C'est la même contradiction qu'une double longueur en HTTP/1.1 : deux
+façons de savoir où un flux s'arrête, et rien pour les départager. QUIC la refuse
+plutôt que de choisir, et ce module aussi — y compris APRÈS la fin du flux, car
+§4.5 ne s'arrête pas à `Data Recvd`.
+
+### Un flux annulé compte quand même sa taille finale
+
+§4.5 : le receveur la compte dans son contrôle de connexion **même s'il n'a
+jamais reçu ces octets**. C'est pourquoi `Send::reset` déclare exactement ce
+qu'on a émis : moins se contredirait avec ce que le pair a déjà, plus lui ferait
+réserver du crédit pour des octets qui ne viendront jamais.
+
+### `Reset Read` est un état séparé
+
+§3.2. Entre `Reset Recvd` et `Reset Read`, on sait que le flux est mort mais
+l'application ne le sait pas encore, et c'est elle qui décide quand libérer ce
+qui va avec. Lire ce qui était arrivé avant l'annulation ne ramène pas le flux
+dans un état où il se terminerait normalement.
+
+### Un `STOP_SENDING` n'est pas une fermeture, c'est une demande
+
+§3.5 : on DEVRAIT répondre par un `RESET_STREAM`, mais rien n'oblige à le faire
+dans l'instant — un `STOP_SENDING` peut croiser sur le fil le `FIN` qui rendait
+la demande sans objet. C'est à l'appelant de décider, et `Send::stop_sending` lui
+dit seulement qu'il y a une décision à prendre.
+
+### On compte les flux par rang, et non par flux vivants
+
+§4.6 : « Only streams with a stream ID less than (max_streams * 4 +
+first_stream_id_of_type) can be opened ». Un flux fermé n'a pas rendu son rang ;
+c'est un `MAX_STREAMS` qui rend du crédit, et lui seul.
+
+Et ouvrir le rang N ouvre aussi tous ceux d'avant (§2.1) : les flux d'un type ne
+s'ouvrent pas dans l'ordre, et un rang qui saute des numéros les crée
+implicitement. Compter autrement laisserait des rangs jamais consommés, et le
+plafond ne bornerait plus rien.
+
+### Les quatre comptes sont indépendants
+
+Deux types de flux, deux sens d'ouverture. Les confondre laisserait un pair
+épuiser un crédit qu'on avait accordé pour autre chose.
+
+### Les deux côtés d'un flux posent la même question
+
+À la réception : « qu'est-ce qui est arrivé, et qu'est-ce qui manque ? » À
+l'émission : « qu'est-ce qui est acquitté, et qu'est-ce qu'il faut renvoyer ? »
+C'est le même calcul, sur les mêmes décalages, avec les mêmes façons de se
+tromper. Il vit donc dans un seul ensemble d'intervalles, `Plages` : l'écrire
+deux fois donnerait deux occasions de le rater.

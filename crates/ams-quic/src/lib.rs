@@ -15,6 +15,14 @@
 //! §5.4 de RFC 9001. Pour ôter le masque il faut la clé, pour trouver la clé il
 //! faut l'identifiant de destination, pour lire l'identifiant il faut avoir lu
 //! l'en-tête. **Grammaire d'abord, clés ensuite, assemblage ici.**
+//!
+//! # ET C'EST ICI QU'UN FLUX DEVIENT UNE SUITE D'OCTETS
+//!
+//! Un paquet ouvert porte des trames ; une trame `STREAM` porte un morceau à un
+//! décalage. Entre les deux, il faut retenir ce qui est en avance, réunir ce qui
+//! se touche, et refuser ce qu'on ne peut pas retenir — c'est [`Recv`], [`Send`]
+//! et [`Flow`], et c'est là que le contrôle de flux empêche un pair de commander
+//! notre mémoire.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -24,7 +32,15 @@
 extern crate std;
 
 mod error;
+mod flow;
+mod plages;
 mod receive;
+mod recv;
+mod send;
 
 pub use error::{Error, Reason};
+pub use flow::{Concurrence, Concurrences, Cote, Flow};
+pub use plages::HOLES_MAX;
 pub use receive::{Opened, PacketKind, open_packet};
+pub use recv::{Recv, RecvState};
+pub use send::{Send, SendState};
