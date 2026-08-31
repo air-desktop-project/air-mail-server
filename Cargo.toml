@@ -101,6 +101,7 @@ ams-loop-tokio = { path = "crates/ams-loop-tokio", version = "0.1.0" }
 ams-proto-imap = { path = "crates/ams-proto-imap", version = "0.1.0" }
 ams-proto-pop3 = { path = "crates/ams-proto-pop3", version = "0.1.0" }
 ams-proto-http = { path = "crates/ams-proto-http", version = "0.1.0" }
+ams-proto-h2 = { path = "crates/ams-proto-h2", version = "0.1.0" }
 ams-proto-quic = { path = "crates/ams-proto-quic", version = "0.1.0" }
 ams-quic-crypto = { path = "crates/ams-quic-crypto", version = "0.1.0" }
 ams-proto-smtp = { path = "crates/ams-proto-smtp", version = "0.1.0" }

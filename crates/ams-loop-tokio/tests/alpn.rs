@@ -60,10 +60,8 @@ fn la_configuration_http_annonce_h2_et_l_autre_rien() {
         return;
     };
 
-    // Ce que l'écoute HTTP fera : la configuration ordinaire, plus la seule
-    // liste qu'`ams-tls` sanctionne.
-    let mut http = ams_tls::server_config(&cert, &cle).expect("configuration assemblée");
-    http.alpn_protocols = ams_tls::alpn();
+    let http =
+        ams_loop_tokio::http::http_server_config(&cert, &cle).expect("configuration assemblée");
     assert_eq!(
         http.alpn_protocols,
         vec![b"h2".to_vec()],

@@ -116,11 +116,14 @@ version = "0.1.0"
 name = "ams-loop-tokio"
 version = "0.1.0"
 dependencies = [
+ "ams-api",
  "ams-dkim",
  "ams-dmarc",
  "ams-dns",
  "ams-guard",
  "ams-mime",
+ "ams-proto-h2",
+ "ams-proto-http",
  "ams-proto-imap",
  "ams-proto-pop3",
  "ams-proto-smtp",

@@ -4720,3 +4720,73 @@ La découpe suit donc ce que chaque morceau peut prouver seul : **ce qu'on annon
 se vérifie sans rien, l'assemblage demande de quoi assembler.** Le second vit dans
 l'écoute qui s'en sert, avec un essai d'intégration qui fabrique un certificat à
 la volée.
+
+## L'écoute HTTP/2 (`ams-loop-tokio::http`)
+
+### Il n'y a pas de HTTP en clair, et ce n'est pas un réglage
+
+SMTP, POP3 et IMAP montent en TLS par `STARTTLS`, et servent en clair quand aucun
+certificat n'est nommé. Cette écoute-ci ne le peut pas : elle porte des jetons
+porteurs, et un jeton qui traverse un réseau en clair est un jeton volé. La
+configuration TLS n'est donc **pas** un `Option` — sans certificat, il n'y a pas
+d'écoute HTTP du tout (C4).
+
+### L'ALPN se vérifie, même en n'annonçant que `h2`
+
+Un client qui n'envoie aucune extension ALPN négocie « rien » **sans que la
+poignée de main échoue**, et §3.4 de RFC 9113 en fait une faute. Le refus après
+coup ne coûte rien de plus, mais il faut le poser explicitement : la seule
+présence d'une liste d'un élément ne suffit pas.
+
+Un client qui n'offre que `http/1.1`, lui, voit sa poignée de main échouer. C'est
+le bon endroit pour dire non : refuser après obligerait à répondre dans un cadrage
+qu'on ne sait pas écrire.
+
+### Une requête à la fois, et c'est annoncé
+
+`SETTINGS_MAX_CONCURRENT_STREAMS = 1`. Entrelacer sert plus vite, mais demande de
+retenir autant de requêtes à demi lues que de flux ouverts — donc de laisser le
+pair décider combien de mémoire on garde. C7 tranche, et le pair reçoit le réglage
+avant sa première requête.
+
+### La boucle conduit, une interface répond
+
+Tout ce qui touche au magasin vit derrière le trait `Api` : la boucle n'ouvre
+aucune boîte et ne connaît aucun compte. C'est la même séparation qu'entre une
+session et sa politique, et pour la même raison — ce qui décide et ce qui exécute
+ne se vérifient pas de la même façon.
+
+L'autorisation est faite **avant** l'appel : recevoir `Api::serve` veut dire qu'un
+jeton scellé par notre clé, non expiré, ouvrait la portée que la route exige.
+Cette interface n'a donc rien à revérifier, et rien à décider sur l'identité de
+qui appelle.
+
+Et l'identifiant qui distingue un jeton des autres du même compte vient de
+l'appelant, lui aussi : une source d'aléa est une dépendance, et les dépendances
+entrent par l'appelant.
+
+### Deux règles que la relecture a imposées
+
+**Le bloc d'en-têtes se décode même quand le flux est refusé.** La table HPACK est
+commune à toute la connexion : sauter un bloc décalerait tous les suivants, et le
+pair et nous ne lirions plus les mêmes en-têtes sans qu'un seul cadre soit fautif.
+
+**Un corps qui déborde ne se tronque pas.** On cesse d'écrire, et la session voit
+un corps plus court que ce qui était annoncé — ce qu'elle refuse. Tronquer en
+silence ferait agir sur ce que le client n'a pas demandé.
+
+### Ce que l'essai de bout en bout prouve, et ce qu'il ne peut pas
+
+Le client est écrit à la main et **n'emploie pas notre encodeur HPACK** : les
+en-têtes partent en représentations littérales sans indexation, que §6.2.2 de
+RFC 7541 impose à tout décodeur d'accepter. C'est donc bien notre décodeur qui est
+mis à l'épreuve, par des octets qu'il n'a pas produits.
+
+**L'autoréférence qui demeure est du côté des réponses** : pour lire un code
+d'état il faudrait décoder du HPACK, et le seul décodeur à portée est le nôtre.
+L'essai contourne le problème plutôt que de le masquer — il vérifie les CORPS, qui
+ne sont pas comprimés, et nos documents d'erreur portent leur code d'état à
+l'intérieur.
+
+Ce qui reste hors de portée : qu'un vrai client tiers nous lise. Cela demande un
+vrai client tiers, comme `starttls.rs` emploie un vrai OpenSSL.

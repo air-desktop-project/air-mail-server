@@ -42,6 +42,23 @@ pub enum Error {
     /// Un vocabulaire séparé, comme les deux autres : celui d'IMAP parle
     /// d'échange SASL et de session close, dont SMTP et POP3 n'ont que faire.
     Imap(ams_session::imap::Error),
+
+    /// Le pair n'a pas annoncé `h2` par ALPN.
+    ///
+    /// §3.4 de RFC 9113 : un client qui veut parler HTTP/2 sur TLS l'annonce.
+    /// **On refuse ici plutôt qu'après**, parce que refuser après obligerait à
+    /// répondre dans un cadrage qu'on ne sait pas écrire.
+    Alpn,
+
+    /// Le pair parle mal HTTP/2.
+    ///
+    /// Une seule variante pour toutes les fautes de cadrage : ce que la boucle
+    /// en fait est toujours le même — un `GOAWAY`, puis on s'en va. Le code
+    /// exact est parti au pair, qui est le seul à en avoir l'usage.
+    Http,
+
+    /// Le videur a banni cette source (C8).
+    Refused,
 }
 
 impl fmt::Display for Error {
@@ -55,6 +72,9 @@ impl fmt::Display for Error {
                 "la configuration annonce une extension que cette boucle ne sait pas conduire",
             ),
             Error::Timeout => f.write_str("le pair n'a rien envoyé dans le délai imparti"),
+            Error::Alpn => f.write_str("le pair n'a pas annoncé `h2` par ALPN (§3.4 de RFC 9113)"),
+            Error::Http => f.write_str("le pair parle mal HTTP/2"),
+            Error::Refused => f.write_str("le videur a banni cette source"),
             Error::Io(cause) => write!(f, "entrée-sortie : {cause}"),
             Error::Session(cause) => write!(f, "session : {cause}"),
             Error::Pop3(cause) => write!(f, "session POP3 : {cause}"),

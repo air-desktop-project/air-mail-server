@@ -70,6 +70,7 @@ mod dkim;
 mod dmarc;
 mod error;
 mod guard;
+pub mod http;
 pub mod imap;
 pub mod pop3;
 mod privileges;

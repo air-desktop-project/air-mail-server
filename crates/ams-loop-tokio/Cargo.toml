@@ -14,6 +14,13 @@ ams-proto-pop3 = { workspace = true }
 ams-proto-imap = { workspace = true }
 ams-proto-smtp = { workspace = true }
 ams-guard = { workspace = true }
+# L'API REST et ses deux grammaires HTTP : l'écoute conduit HTTP/2, la session
+# décide, et le rendu écrit. Aucune des trois ne touche au réseau.
+ams-api = { workspace = true }
+# TLS : l'écoute HTTP assemble la configuration, ALPN compris.
+ams-tls = { workspace = true }
+ams-proto-h2 = { workspace = true }
+ams-proto-http = { workspace = true }
 ams-session = { workspace = true }
 # SPF (C9) : la boucle CONDUIT l'évaluation — elle seule a le droit d'attendre
 # une réponse DNS — mais elle n'en décide rien.
