@@ -407,6 +407,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_ams_quic_routing"
+path = "fuzz_targets/fuzz_ams_quic_routing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_ams_h3_connection"
 path = "fuzz_targets/fuzz_ams_h3_connection.rs"
 test = false

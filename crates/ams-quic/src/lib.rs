@@ -45,6 +45,7 @@ mod handshake;
 mod plages;
 mod receive;
 mod recv;
+mod routing;
 mod send;
 
 pub use connection::{AMPLIFICATION_FACTOR, CLOSING_PTOS, Connection, IDLE_PTOS, State};
@@ -54,4 +55,7 @@ pub use handshake::{CRYPTO_OCTETS_MAX, Handshake, Level, crypto_error};
 pub use plages::HOLES_MAX;
 pub use receive::{Opened, PacketKind, open_packet};
 pub use recv::{Recv, RecvState};
+pub use routing::{
+    Discard, INITIAL_DATAGRAM_OCTETS_MIN, Incoming, LOCAL_CONNECTION_ID_OCTETS, Route,
+};
 pub use send::{Send, SendState};

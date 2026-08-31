@@ -252,10 +252,10 @@ dialogue avec elle-même. La cible de fuzz `fuzz_ams_tls_quic` étend la même
 comparaison à tout ce qui n'est pas dans l'annexe.
 
 **Ce qui reste à faire** : le fournisseur est capable de QUIC, ce n'est pas la
-même chose que servir HTTP/3. Le pont de poignée de main a suivi le 2026-08-31
-(voir ci-dessous) ; restent l'écoute UDP avec démultiplexage par identifiant de
-connexion et garde d'amplification, la reprise sur perte et la génération
-d'`ACK`, puis seulement le conducteur HTTP/3.
+même chose que servir HTTP/3. Le pont de poignée de main et le tri des
+datagrammes ont suivi le 2026-08-31 (voir ci-dessous) ; restent l'émission d'un
+paquet protégé, la reprise sur perte et la génération d'`ACK`, l'écoute UDP
+elle-même, puis seulement le conducteur HTTP/3.
 
 ### La poignée de main, et pourquoi elle occupe deux crates
 
@@ -315,6 +315,79 @@ son `Finished` est seul dans la file, et `write_hs` le rend dans le même appel
 que les clés de `Handshake`, alors qu'il appartient au niveau `Handshake`. C'est
 la raison pour laquelle `ams-quic-tls` n'offre pas de côté client : la règle
 simple qui suffit ici ne suffirait pas là.
+
+### Le tri des datagrammes, et pourquoi il ne tient pas de table
+
+Écrit le 2026-08-31, dans `ams-quic::routing`. **C'est le tout premier code que
+touche un octet venu du réseau**, et il le touche avant que quoi que ce soit soit
+authentifié : les clés d'un `Initial` se dérivent d'un identifiant que le paquet
+porte en clair (§5.2 de RFC 9001), donc tout le monde peut en fabriquer un.
+Chacune de ses décisions doit être sûre pour un menteur.
+
+Il **ne tient pas de carte** des identifiants. Associer un identifiant à une
+connexion demande une structure qui grandit et rétrécit, et `ams-quic` n'alloue
+pas — mais surtout, une carte n'est pas une décision : c'est du rangement. Ce qui
+est une décision, c'est ce qu'on fait d'un datagramme SELON ce que la carte
+répond. On lit donc d'abord ce que le datagramme dit de lui-même (`Incoming::read`),
+l'appelant interroge sa carte, puis `Incoming::route` tranche. Le même partage que
+`Recv`, qui tient les décalages et laisse les octets.
+
+#### Les règles, et l'ordre dans lequel elles se posent
+
+L'ordre n'est pas libre. §5.2.2 : « Packets with a supported version, or no
+Version field, are matched to a connection using the connection ID. » **La version
+se juge donc AVANT la carte** — l'inverse ferait remettre à une connexion en cours
+un paquet d'une version qu'elle ne parle pas. Et le `Retry` se juge avant tout le
+reste : c'est le seul paquet dont la seule présence est déjà une faute côté
+serveur, et le laisser filer jusqu'à la carte lui donnerait une chance d'être
+remis à quelqu'un.
+
+| Ce qui arrive | Où c'est écrit | Ce qu'on en fait |
+| --- | --- | --- |
+| Une négociation de version | §6.1 | jeter — un serveur les émet, il n'en reçoit pas |
+| Un `Retry` | §17.2.5 | jeter — idem |
+| Une version qu'on ne sert pas, ≥ 1200 octets | §5.2.2 | négocier |
+| Une version qu'on ne sert pas, < 1200 octets | §5.2.2 | jeter — répondre ferait un amplificateur |
+| Un identifiant connu | §5.2 | à sa connexion |
+| Un `Initial` ≥ 1200 octets | §14.1 | une connexion neuve |
+| Un `Initial` < 1200 octets | §14.1 | jeter |
+| Un `Handshake` sans connexion | §5.2.2 | jeter |
+| Un `0-RTT` sans connexion | §5.2.2 | jeter |
+| Un en-tête court inconnu | §5.2.2 | jeter |
+
+Le plancher de 1200 octets **est la garde d'amplification au plus tôt**. §8.1
+borne ce qu'on renvoie à trois fois ce qu'on a reçu ; §14.1 fixe le plancher de
+ce « reçu ». Sans lui, un attaquant obtiendrait trois fois un tout petit
+datagramme, autant de fois qu'il veut. La garde elle-même vit dans
+`ams_quic::Connection` (`send_budget`, `amplification_limited`), écrite plus tôt.
+
+**Ce qu'on jette est nommé.** Le résultat est le même — rien ne part —, mais un
+compteur par raison est la seule façon de distinguer, en exploitation, un réseau
+qui perd des paquets d'un balayage de port, et un client mal réglé d'une attaque.
+Un unique compteur « jetés » ne dirait rien de tout cela. En revanche, ce qu'on
+**ne sait pas lire** n'a qu'un seul refus, délibérément : distinguer un bit fixe
+absent d'une troncature apprendrait, à qui balaie le port, ce que nous savons
+lire.
+
+#### Deux décisions qui ne sont pas des réglages
+
+- **Les identifiants qu'on distribue font huit octets**, et c'est une constante.
+  §5.1 : leur longueur n'est pas sur le fil dans un en-tête court, donc un serveur
+  ne peut lire ces paquets-là que s'il sait d'avance combien d'octets il a
+  distribués. Une longueur qui varierait d'une connexion à l'autre rendrait ses
+  propres paquets illisibles. Huit, c'est-à-dire soixante-quatre bits : §8.1
+  ouvre la validation implicite d'adresse à partir de « at least 64 bits of
+  entropy », et prendre plus court la fermerait.
+- **Un paquet de négociation de version n'a pas de type**, et `Incoming::kind`
+  rend `None` pour lui. §17.2.1 : la version zéro n'est pas une version, et les
+  bits de type ne veulent alors rien dire. Leur donner une valeur laisserait un
+  `match` prendre une décision sur des bits qui ne décrivent rien.
+
+Une limite est écrite plutôt que tue : un en-tête qu'on ne sait pas lire se jette,
+même quand il aurait mérité une négociation. §6.1 demande d'échouer en renvoyant
+les deux identifiants du paquet reçu, et on ne peut pas les renvoyer si on ne sait
+pas les lire — une version future dont les identifiants dépasseraient vingt octets
+tomberait là.
 
 ## C5 — Le moteur d'entrées-sorties, par cible
 
