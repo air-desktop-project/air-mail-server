@@ -4586,3 +4586,94 @@ fini**, écrit d'avance — l'un des dix documents que les dix raisons produisen
 rien d'autre. Ajouter une raison sans l'ajouter à ce vocabulaire fait échouer la
 cible, ce qui est exactement ce qu'on veut : une réponse qu'on n'a pas prévue est
 une réponse qu'on n'a pas relue.
+
+## Les représentations des ressources (`ams-session::http::render`)
+
+### Le magasin lit, ce module écrit
+
+Rien ici n'ouvre un fichier. L'appelant a lu la boîte — c'est son travail, et il
+a le droit d'attendre — puis il passe ce qu'il a lu sous une forme que cette
+crate sait rendre. La séparation n'est pas une élégance : c'est ce qui permet à
+ces représentations d'être éprouvées exhaustivement, sans disque et sans horloge
+(C1).
+
+### Un UID n'est pas un rang, et c'est la décision principale
+
+IMAP a deux façons de désigner un message : son numéro de séquence — sa place
+dans la boîte — et son UID. Le premier CHANGE quand un message est effacé : le
+message numéro 4 d'hier est le numéro 3 d'aujourd'hui.
+
+Une API où l'on agit par requêtes séparées ne peut pas s'en servir. Un client qui
+lirait la liste puis effacerait « le troisième » effacerait un autre message si
+une livraison s'est glissée entre les deux appels. **Cette API ne connaît donc que
+des UID**, et le mot « rang » n'y apparaît nulle part.
+
+### Et un UID ne vaut que sous son `uidvalidity`
+
+§2.3.1.1 de RFC 9051 : quand une boîte ne peut plus garantir la stabilité de ses
+UID, elle change d'`UIDVALIDITY`, et tous les UID connus deviennent caducs. Il
+accompagne donc **toute** représentation qui porte un UID.
+
+### La pagination est par UID, et non par décalage
+
+Une page repérée par « les vingt suivants à partir du rang 40 » se déplace dès
+qu'un message arrive ou disparaît : le client voit deux fois le même message, ou
+en saute un, sans jamais s'en apercevoir. Un curseur sur l'UID ne bouge pas.
+
+Et la fin d'une pagination s'écrit `null`, non par l'absence du champ : un client
+qui cherche `next` doit trouver une réponse, et non avoir à distinguer « il n'y a
+plus rien » de « ce serveur ne pagine pas ».
+
+### Les dates sont des nombres
+
+Des secondes depuis l'époque, et non une chaîne. Un nombre n'a qu'une écriture ;
+une date en a autant que de fuseaux, de décalages et de conventions de secondes
+intercalaires — et deux logiciels qui l'écrivent différemment ne trient plus
+pareil. Le client la met en forme, puisque c'est lui qui sait pour qui.
+
+### Les drapeaux portent leurs noms d'IMAP
+
+Deux vocabulaires pour la même chose finiraient par diverger, et un client qui
+parle les deux ne saurait plus lequel croire — alors que c'est le même serveur, et
+souvent la même boîte, qu'il regarde par deux fenêtres.
+
+**Conséquence qu'il a fallu apprendre :** cinq des dix noms commencent par une
+barre oblique inverse, qu'aucun JSON ne peut écrire nue. Ils sont donc TOUJOURS
+échappés, et un lecteur qui se contenterait des chaînes non échappées refuserait
+`\Seen` — le drapeau le plus employé de tous. Défaut écrit, puis trouvé par le
+premier essai qui a nommé un drapeau système.
+
+### On pose et l'on ôte, on ne remplace pas
+
+Un remplacement complet des drapeaux écrase ce qu'un autre client vient de
+poser : deux fenêtres ouvertes sur la même boîte se défont mutuellement, et
+personne ne voit passer le conflit. Poser et ôter ne touchent que ce qu'on nomme.
+
+Et poser puis ôter le même drapeau se refuse : choisir lequel l'emporte serait
+inventer une règle que le client ne connaît pas.
+
+### Un champ inconnu se refuse, sur une modification
+
+Ailleurs, ignorer ce qu'on ne comprend pas est la bonne façon de rester
+compatible. Sur une MODIFICATION, non : l'ignorer ferait croire au client qu'on a
+fait ce qu'il demandait.
+
+### La santé ne dit que « oui »
+
+Pas de version, pas de date de construction, pas de nom de machine. Ce serait un
+champ `server` sous un autre nom — et cette ressource-ci est justement celle qu'un
+balayage interroge en premier.
+
+### On n'écrit pas ce qu'on ne sait pas lire
+
+C'est le défaut que le fuzz a trouvé, et il valait le détour. L'écrivain JSON
+pouvait produire deux clés identiques dans un objet, ou une clé échappée — deux
+choses que notre propre lecteur refuse, à juste titre.
+
+Un écrivain qui peut produire un document que notre lecteur rejette est une
+asymétrie, et les asymétries de ce genre finissent chez le client : il reçoit un
+document que son analyseur lit autrement que le nôtre, ou pas du tout.
+
+L'écrivain refuse donc désormais, comme le lecteur : les clés répétées, plus de
+champs qu'on n'en retient, et les noms de champ qui ne sont pas des identifiants
+ASCII. **La borne des deux côtés est la même, et ce n'est pas une coïncidence.**

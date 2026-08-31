@@ -543,5 +543,7 @@ fn refus(raison: Reason, sortie: &mut [u8]) -> Turn<'_> {
     }
 }
 
+pub mod render;
+
 #[cfg(test)]
 mod tests;

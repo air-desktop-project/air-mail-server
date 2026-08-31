@@ -426,3 +426,10 @@ path = "fuzz_targets/fuzz_ams_session_http.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_ams_session_render"
+path = "fuzz_targets/fuzz_ams_session_render.rs"
+test = false
+doc = false
+bench = false

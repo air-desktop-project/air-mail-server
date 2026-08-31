@@ -6,7 +6,7 @@
 
 use std::string::{String, ToString};
 
-use super::{DEPTH_MAX, Json};
+use super::{DEPTH_MAX, FIELDS_MAX, Json};
 use crate::error::{Error, Reason};
 
 /// Un tampon confortable.
@@ -251,6 +251,104 @@ fn une_suite_impossible_se_refuse() {
         }),
         Err(Reason::BadJson)
     );
+}
+
+/// **ON N'ÉCRIT PAS CE QU'ON NE SAIT PAS LIRE** : notre propre lecteur refuse
+/// les clés répétées, et un écrivain qui pourrait en produire serait une
+/// asymétrie — le client recevrait un document que son analyseur lit autrement
+/// que le nôtre, ou pas du tout.
+///
+/// Défaut trouvé par le fuzz, sur deux compteurs de même nom.
+#[test]
+fn une_clef_repetee_se_refuse() {
+    assert_eq!(
+        ecrire(&|json| {
+            json.begin_object().expect("cette étape doit passer");
+            json.field_u64("a", 1).expect("cette étape doit passer");
+            json.field_u64("a", 2)
+        }),
+        Err(Reason::BadJson)
+    );
+    // Deux objets frères peuvent porter la même clé : ce n'est pas une
+    // répétition.
+    assert_eq!(
+        ecrire(&|json| {
+            json.begin_array().expect("cette étape doit passer");
+            json.begin_object().expect("cette étape doit passer");
+            json.field_u64("a", 1).expect("cette étape doit passer");
+            json.end_object().expect("cette étape doit passer");
+            json.begin_object().expect("cette étape doit passer");
+            json.field_u64("a", 2).expect("cette étape doit passer");
+            json.end_object().expect("cette étape doit passer");
+            json.end_array()
+        }),
+        Ok(r#"[{"a":1},{"a":2}]"#.to_string())
+    );
+    // Et un objet imbriqué non plus.
+    assert_eq!(
+        ecrire(&|json| {
+            json.begin_object().expect("cette étape doit passer");
+            json.key("a").expect("cette étape doit passer");
+            json.begin_object().expect("cette étape doit passer");
+            json.field_u64("a", 1).expect("cette étape doit passer");
+            json.end_object().expect("cette étape doit passer");
+            json.end_object()
+        }),
+        Ok(r#"{"a":{"a":1}}"#.to_string())
+    );
+}
+
+/// **UN NOM DE CHAMP EST UN IDENTIFIANT, PAS DU TEXTE LIBRE** : un nom qui
+/// demanderait un échappement produirait une clé que notre lecteur refuse.
+#[test]
+fn un_nom_de_champ_qui_n_est_pas_un_identifiant_se_refuse() {
+    for mauvais in ["", "a b", "a\"b", "a\\b", "a\nb", "é", "<a>", "a:b", "a,b"] {
+        assert_eq!(
+            ecrire(&|json| {
+                json.begin_object().expect("cette étape doit passer");
+                json.field_u64(mauvais, 1)
+            }),
+            Err(Reason::BadJson),
+            "« {mauvais} »"
+        );
+    }
+    // Ce qui est un identifiant passe.
+    for bon in ["a", "uidValidity", "content-type", "a_b", "a.b", "A1"] {
+        assert!(
+            ecrire(&|json| {
+                json.begin_object().expect("cette étape doit passer");
+                json.field_u64(bon, 1).expect("cette étape doit passer");
+                json.end_object()
+            })
+            .is_ok(),
+            "« {bon} »"
+        );
+    }
+}
+
+/// **ET PAS PLUS DE CHAMPS QUE LE LECTEUR N'EN RETIENT** : la borne est la
+/// même des deux côtés, et ce n'est pas une coïncidence.
+#[test]
+fn au_dela_des_champs_qu_on_relit_on_refuse() {
+    let pile = ecrire(&|json| {
+        json.begin_object().expect("cette étape doit passer");
+        for rang in 0..FIELDS_MAX {
+            let nom = std::format!("c{rang}");
+            json.field_u64(&nom, 1).expect("cette étape doit passer");
+        }
+        json.end_object()
+    });
+    assert!(pile.is_ok(), "{pile:?}");
+
+    let trop = ecrire(&|json| {
+        json.begin_object().expect("cette étape doit passer");
+        for rang in 0..FIELDS_MAX {
+            let nom = std::format!("c{rang}");
+            json.field_u64(&nom, 1).expect("cette étape doit passer");
+        }
+        json.field_u64("un_de_trop", 1)
+    });
+    assert_eq!(trop, Err(Reason::BadJson));
 }
 
 /// **UNE SEULE VALEUR À LA RACINE** (§2 de RFC 8259) : deux à la suite feraient

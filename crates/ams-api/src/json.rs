@@ -47,6 +47,24 @@ use crate::error::{Error, Reason};
 /// à la pile d'être un tableau, donc à cette crate de ne rien allouer.
 pub const DEPTH_MAX: usize = 8;
 
+/// Combien de champs un objet peut porter.
+///
+/// **C'EST CELLE DU LECTEUR, ET CE N'EST PAS UNE COÏNCIDENCE** : voir
+/// [`Json::key`].
+pub const FIELDS_MAX: usize = 16;
+
+/// Ce nom de champ est-il un identifiant ?
+///
+/// Lettres, chiffres, `-`, `_` et `.`, et au moins un caractère. Rien de tout
+/// cela ne s'échappe, donc rien de tout cela ne peut produire une clé que notre
+/// lecteur refuserait.
+fn nom_de_champ_licite(nom: &str) -> bool {
+    !nom.is_empty()
+        && nom
+            .bytes()
+            .all(|octet| octet.is_ascii_alphanumeric() || matches!(octet, b'-' | b'_' | b'.'))
+}
+
 /// Un niveau d'imbrication.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Niveau {
@@ -56,6 +74,10 @@ struct Niveau {
     vide: bool,
     /// Une clé attend-elle sa valeur ?
     clef_posee: bool,
+    /// Les clés déjà écrites, en rangs dans la sortie.
+    clefs: [(usize, usize); FIELDS_MAX],
+    /// Combien.
+    combien: usize,
 }
 
 /// Un écrivain JSON qui écrit dans le tampon de l'appelant.
@@ -84,6 +106,8 @@ impl<'o> Json<'o> {
                 objet: false,
                 vide: true,
                 clef_posee: false,
+                clefs: [(0, 0); FIELDS_MAX],
+                combien: 0,
             }; DEPTH_MAX],
             profondeur: 0,
             racine_ecrite: false,
@@ -136,24 +160,77 @@ impl<'o> Json<'o> {
 
     /// Écrit une clé.
     ///
+    /// # ON N'ÉCRIT PAS CE QU'ON NE SAIT PAS LIRE
+    ///
+    /// Deux clés identiques dans un objet, ou plus de champs qu'on n'en retient :
+    /// notre propre lecteur les refuse, et il a raison de le faire — §4 de
+    /// RFC 8259 laisse chaque analyseur décider ce qu'une répétition veut dire.
+    ///
+    /// Un écrivain qui pourrait produire un document que notre lecteur rejette
+    /// serait une asymétrie, et les asymétries de ce genre finissent chez le
+    /// client : il reçoit un document que son analyseur lit autrement que le
+    /// nôtre, ou pas du tout.
+    ///
+    /// **Défaut trouvé par le fuzz**, sur deux compteurs de même nom.
+    ///
     /// # Errors
     ///
-    /// [`Reason::BadJson`] hors d'un objet, ou si une clé attend déjà sa valeur ;
+    /// [`Reason::BadJson`] hors d'un objet, si une clé attend déjà sa valeur, si
+    /// ce nom est déjà écrit à ce niveau, ou au-delà de [`FIELDS_MAX`] champs ;
     /// [`Reason::BufferTooSmall`].
     pub fn key(&mut self, nom: &str) -> Result<(), Error> {
         let niveau = self.niveau().ok_or(Error::new(Reason::BadJson))?;
-        if !niveau.objet || niveau.clef_posee {
+        if !niveau.objet || niveau.clef_posee || niveau.combien >= FIELDS_MAX {
+            return Err(Error::new(Reason::BadJson));
+        }
+        // **UN NOM DE CHAMP EST UN IDENTIFIANT, PAS DU TEXTE LIBRE.**
+        //
+        // Notre lecteur refuse les clés échappées — savoir lequel de deux noms
+        // équivalents gagne est une question qu'on préfère ne pas poser. Un
+        // écrivain qui pourrait en produire refermerait l'asymétrie qu'on vient
+        // d'ouvrir ailleurs : le document sortirait, et ne se relirait pas.
+        //
+        // Tous les noms de cette API sont des identifiants ASCII. Celui qui n'en
+        // est pas un ne vient pas de nous.
+        if !nom_de_champ_licite(nom) {
             return Err(Error::new(Reason::BadJson));
         }
         if !niveau.vide {
             self.poser(b',')?;
         }
+        let debut = self.ecrits;
         self.ecrire_une_chaine(nom)?;
+        let fin = self.ecrits;
+        self.verifier_que_la_clef_est_neuve(&niveau, debut, fin)?;
         self.poser(b':')?;
         self.marquer(|niveau| {
+            niveau.clefs[niveau.combien] = (debut, fin);
+            niveau.combien = niveau.combien.saturating_add(1);
             niveau.clef_posee = true;
             niveau.vide = false;
         });
+        Ok(())
+    }
+
+    /// Cette clé est-elle absente du niveau courant ?
+    ///
+    /// La comparaison porte sur les octets ÉCRITS, donc échappements compris :
+    /// deux noms qui s'écrivent pareil sont le même champ, et c'est exactement ce
+    /// qu'un lecteur verra.
+    /// Le niveau vient de l'appelant, qui l'a déjà : le retrouver ici
+    /// ajouterait une garde qu'aucune écriture ne peut emprunter.
+    fn verifier_que_la_clef_est_neuve(
+        &self,
+        niveau: &Niveau,
+        debut: usize,
+        fin: usize,
+    ) -> Result<(), Error> {
+        let neuve = self.sortie.get(debut..fin).unwrap_or_default();
+        for (un, deux) in niveau.clefs.iter().take(niveau.combien) {
+            if self.sortie.get(*un..*deux).unwrap_or_default() == neuve {
+                return Err(Error::new(Reason::BadJson));
+            }
+        }
         Ok(())
     }
 
@@ -325,11 +402,11 @@ impl<'o> Json<'o> {
         // Le niveau parent voit une valeur : c'est celle qu'on ouvre.
         self.apres_une_valeur();
         // La borne vient d'être vérifiée : le rang tient dans le tableau.
-        self.niveaux[self.profondeur] = Niveau {
-            objet,
-            vide: true,
-            clef_posee: false,
-        };
+        let place = &mut self.niveaux[self.profondeur];
+        place.objet = objet;
+        place.vide = true;
+        place.clef_posee = false;
+        place.combien = 0;
         self.profondeur = self.profondeur.saturating_add(1);
         Ok(())
     }
