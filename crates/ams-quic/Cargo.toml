@@ -1,0 +1,16 @@
+[package]
+name = "ams-quic"
+description = "La machine de connexion QUIC : réception des paquets et état, sans entrée-sortie"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+ams-proto-quic = { workspace = true }
+ams-quic-crypto = { workspace = true }
+
+[lints]
+workspace = true

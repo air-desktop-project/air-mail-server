@@ -169,6 +169,14 @@ name = "ams-proto-smtp"
 version = "0.1.0"
 
 [[package]]
+name = "ams-quic"
+version = "0.1.0"
+dependencies = [
+ "ams-proto-quic",
+ "ams-quic-crypto",
+]
+
+[[package]]
 name = "ams-quic-crypto"
 version = "0.1.0"
 dependencies = [

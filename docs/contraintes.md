@@ -3804,3 +3804,65 @@ Deux leçons. La première : `zip` n'est pas symétrique, et l'employer pour év
 une branche demande de savoir de quel côté mettre quoi. La seconde : l'invariant
 qui a été violé — *la table ne prend jamais de trou* — se vérifie mieux
 directement que par ses conséquences, et il a maintenant son test.
+
+## L'ouverture d'un paquet : six étapes dont l'ordre n'est pas négociable
+
+1. lire l'en-tête EN CLAIR, jusqu'à l'identifiant de destination ;
+2. y trouver les clés ;
+3. ôter la protection d'en-tête, ce qui découvre la longueur du numéro ;
+4. reconstruire le numéro, qui entre dans le nonce ;
+5. déchiffrer, l'en-tête servant de données associées ;
+6. **alors seulement**, vérifier les bits réservés.
+
+Chaque étape a besoin de la précédente. La sixième est celle qu'on met au mauvais
+endroit : §17.2 dit « after removing both packet and header protection », et §9.5
+de RFC 9001 explique pourquoi. **Refuser un paquet après n'avoir ôté que la
+protection d'EN-TÊTE dit à un attaquant que son masque était bon**, et lui donne
+un oracle pour le deviner.
+
+C'est aussi pourquoi ce crate existe séparément : la grammaire ne connaît pas les
+clés, le chiffrement ne connaît pas la grammaire, et ni l'un ni l'autre ne sait
+ouvrir un paquet. La séparation suit l'ordre des opérations, elle n'est pas une
+élégance.
+
+### Deux façons de refuser, et elles ne se valent pas
+
+Un paquet se JETTE, ou il condamne la connexion. La distinction n'est pas de
+degré : le port est ouvert au monde entier, et **fermer une connexion sur un
+paquet qu'on n'a pas pu authentifier l'offrirait à qui sait envoyer un
+datagramme**.
+
+On ne condamne donc que ce qu'on découvre APRÈS avoir déchiffré — c'est-à-dire ce
+qui vient d'un pair authentifié. Les bits réservés, et l'espace de numéros
+épuisé. Tout le reste se jette.
+
+Et la question se pose une seule fois : `code()` rend `None` pour ce qui se
+jette, et `se_jette()` est défini comme `code().is_none()`. Deux réponses
+séparées auraient pu diverger, et c'est exactement le genre de divergence qui ne
+se voit pas.
+
+### Les charges se rendent par leurs rangs, et non par des tranches
+
+Le déchiffrement se fait en place. Rendre une tranche du datagramme
+l'emprunterait pour toute la durée du paquet, et l'appelant ne pourrait plus
+ouvrir le suivant — or §12.2 en met plusieurs dans un datagramme.
+
+Des rangs le laissent libre, et c'est lui qui découpe, puisque c'est lui qui
+possède le tampon. La contrainte du protocole a donc dicté la forme de
+l'interface, et non l'inverse.
+
+### Un en-tête court ne peut être que le dernier
+
+§12.2 : il ne porte pas de longueur. Les paquets à en-tête long, eux, disent où
+ils s'arrêtent — c'est ce qui permet d'en coaliser plusieurs.
+
+### Ce que les vecteurs de l'annexe A prouvent
+
+Les deux `Initial` de RFC 9001 font mille deux cents et cent trente-cinq octets,
+chiffrés et masqués. Les ouvrir met en jeu toute la chaîne, et **une seule des
+six étapes fausse fait tout échouer**. C'est ce qu'aucun test écrit à la main ne
+remplace : chaque morceau pris séparément peut être juste sans que le tout le
+soit.
+
+Le paquet du client rend sa trame `CRYPTO` de 245 octets suivie de 917 octets de
+remplissage — soit exactement les 1162 que l'annexe annonce.

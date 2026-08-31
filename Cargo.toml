@@ -44,6 +44,7 @@ members = [
     "crates/ams-proto-quic",
     "crates/ams-proto-h3",
     "crates/ams-quic-crypto",
+    "crates/ams-quic",
     "crates/ams-dns",
     # Étage 2 — décisions, sans entrée-sortie
     "crates/ams-session",
@@ -99,6 +100,7 @@ ams-loop-tokio = { path = "crates/ams-loop-tokio", version = "0.1.0" }
 ams-proto-imap = { path = "crates/ams-proto-imap", version = "0.1.0" }
 ams-proto-pop3 = { path = "crates/ams-proto-pop3", version = "0.1.0" }
 ams-proto-quic = { path = "crates/ams-proto-quic", version = "0.1.0" }
+ams-quic-crypto = { path = "crates/ams-quic-crypto", version = "0.1.0" }
 ams-proto-smtp = { path = "crates/ams-proto-smtp", version = "0.1.0" }
 ams-auth = { path = "crates/ams-auth", version = "0.1.0" }
 ams-sasl = { path = "crates/ams-sasl", version = "0.1.0" }

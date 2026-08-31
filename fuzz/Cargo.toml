@@ -48,6 +48,9 @@ path = "../crates/ams-proto-h3"
 [dependencies.ams-quic-crypto]
 path = "../crates/ams-quic-crypto"
 
+[dependencies.ams-quic]
+path = "../crates/ams-quic"
+
 [dependencies.ams-field-codec]
 path = "../crates/ams-field-codec"
 
@@ -361,6 +364,13 @@ bench = false
 [[bin]]
 name = "fuzz_ams_quic_crypto"
 path = "fuzz_targets/fuzz_ams_quic_crypto.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ams_quic_receive"
+path = "fuzz_targets/fuzz_ams_quic_receive.rs"
 test = false
 doc = false
 bench = false
