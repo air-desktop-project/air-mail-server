@@ -440,6 +440,15 @@ fn le_credit_de_connexion_a_annoncer() {
     flux_
         .on_stream(sien, 0, &[0; 2_000], false, &mut fenetre)
         .expect("neuf");
+    // **DEUX MILLE OCTETS SONT ARRIVÉS, ET RIEN N'EST ENCORE LU** : §4.1 ne fait
+    // rouvrir la fenêtre qu'à mesure qu'on consomme. Les asseoir sur l'arrivée
+    // la rouvrirait même si l'application ne lit jamais.
+    assert_eq!(flux_.consumed(), 0);
+    assert_eq!(flux_.grant_data(10_000), None, "rien n'a été lu");
+
+    let mut vers = [0_u8; 2_000];
+    assert_eq!(flux_.read(sien, &mut fenetre, &mut vers), 2_000);
+    assert_eq!(flux_.consumed(), 2_000);
     assert_eq!(flux_.grant_data(9_000), Some(11_000));
     // **ET LE PLAFOND SE PROPOSE MÊME SANS RIEN AVOIR RENDU** : le pair nous
     // avait annoncé quatre flux, la table en tient huit, et cette place-là est
@@ -733,4 +742,41 @@ fn un_flux_a_nous_qu_on_n_a_pas_ouvert_n_existe_pas() {
     let ouvert = flux_.open(Directional::Bidirectional).expect("de la place");
     assert_eq!(ouvert, notre);
     assert!(flux_.on_stream(notre, 0, b"x", false, &mut fenetre).is_ok());
+}
+
+/// **CE QU'UN FLUX RENDU N'AVAIT PAS LIVRÉ COMPTE COMME CONSOMMÉ** (§4.1, §4.5).
+///
+/// Les octets d'un flux annulé ne seront jamais lus. Ne pas les compter ferait
+/// perdre définitivement le crédit de connexion qu'ils avaient pris : un pair
+/// qui annule tous ses flux étoufferait la connexion sans jamais commettre de
+/// faute.
+#[test]
+fn ce_qu_un_flux_rendu_n_avait_pas_livre_compte_comme_consomme() {
+    let mut flux_ = serveur();
+    let sien = flux(2);
+    let rang = flux_.accueillir(sien).expect("un unidirectionnel du pair");
+    flux_.on_reset_stream(sien, 500).expect("§19.4");
+    assert_eq!(flux_.incoming().used(), 500);
+    assert_eq!(flux_.consumed(), 0, "rien n'a été lu, et rien ne le sera");
+
+    assert!(
+        !flux_.fini(rang),
+        "§3.2 : l'application ne sait pas encore que le flux est mort"
+    );
+    flux_.read_reset(sien);
+    assert!(flux_.fini(rang), "maintenant elle le sait");
+    // Et le redire ne fait rien, comme sur un flux qui n'existe pas.
+    flux_.read_reset(sien);
+    flux_.read_reset(flux(400));
+    // Et sur un flux qui ne reçoit rien, il n'y a rien dont prendre acte.
+    let notre = flux_
+        .open(Directional::Unidirectional)
+        .expect("de la place");
+    flux_.read_reset(notre);
+    assert_eq!(flux_.oublier(rang), Some(sien));
+    assert_eq!(
+        flux_.consumed(),
+        500,
+        "LE CRÉDIT REVIENT : sans quoi il serait perdu pour toujours"
+    );
 }

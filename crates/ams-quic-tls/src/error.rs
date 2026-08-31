@@ -47,6 +47,13 @@ pub enum Reason {
     BadParameters,
     /// Ce que §4.1.3, §8.3 ou §7.5 refusent entre les niveaux.
     Quic(ams_quic::Reason),
+    /// On a parlé de flux avant que la poignée de main les rende possibles.
+    ///
+    /// **C'EST NOTRE FAUTE, ET NON CELLE DU PAIR** : §4.1 et §4.6 se règlent sur
+    /// des paramètres que §7.4 ne laisse croire qu'authentifiés. Rendre cette
+    /// faute plutôt que de la taire la fait voir en essai, où elle se corrige,
+    /// plutôt qu'en production, où l'application croirait ses octets partis.
+    PasEncoreDeFlux,
 }
 
 /// Une faute.
@@ -77,8 +84,10 @@ impl Error {
     #[must_use]
     pub fn close_code(self) -> u64 {
         match self.reason {
-            // §20.1 : `INTERNAL_ERROR`. Le pair n'y est pour rien.
-            Reason::NoQuicSuite => 0x01,
+            // §20.1 : `INTERNAL_ERROR`. Le pair n'y est pour rien — et il n'y
+            // est pour rien non plus quand c'est nous qui parlons de flux trop
+            // tôt.
+            Reason::NoQuicSuite | Reason::PasEncoreDeFlux => 0x01,
             Reason::Tls(alerte) => crypto_error(alerte),
             Reason::TlsSansAlerte => crypto_error(HANDSHAKE_FAILURE),
             Reason::WrongAlpn => crypto_error(NO_APPLICATION_PROTOCOL),
@@ -120,6 +129,7 @@ impl core::fmt::Display for Error {
             Reason::WrongAlpn => "le protocole négocié n'est pas h3",
             Reason::BadParameters => "les paramètres de transport du pair ne se lisent pas",
             Reason::Quic(_) => "les niveaux de chiffrement ont été mal employés",
+            Reason::PasEncoreDeFlux => "la poignée de main n'a pas encore ouvert les flux",
         };
         write!(f, "{quoi} — on ferme avec {:#06x}", self.close_code())
     }

@@ -154,6 +154,14 @@ pub struct Streams {
     nos: Limites,
     /// Ce que le PAIR a annoncé : les limites d'émission.
     ses: Limites,
+    /// Ce que l'application a réellement consommé, en octets cumulés.
+    ///
+    /// **CE N'EST PAS CE QUI EST ARRIVÉ** : §4.1 fait rouvrir la fenêtre à
+    /// mesure qu'on consomme, et non à mesure qu'on reçoit. La rouvrir sur ce
+    /// qui arrive la rendrait toujours grande ouverte, et le crédit de connexion
+    /// ne bornerait plus rien — un pair pourrait alors nous faire retenir la
+    /// somme des fenêtres de flux, ce que §4.1 existe précisément pour éviter.
+    consommes: u64,
     /// Combien de flux de chaque famille ont été rendus à la table.
     ///
     /// **C'EST CE QUI FAIT MONTER LE PLAFOND** : §4.6 compte les flux ouverts
@@ -192,6 +200,7 @@ impl Streams {
             nous,
             nos: Limites::de(nos),
             ses: Limites::de(ses),
+            consommes: 0,
             rendus: [0; FAMILLES],
         }
     }
@@ -554,7 +563,47 @@ impl Streams {
         let Some(reception) = place.reception.as_mut() else {
             return 0;
         };
-        reception.read(fenetre, vers)
+        let pris = reception.read(fenetre, vers);
+        self.consommes = self
+            .consommes
+            .saturating_add(u64::try_from(pris).unwrap_or(0));
+        pris
+    }
+
+    /// L'application prend acte de l'annulation d'un flux (§3.2).
+    ///
+    /// **C'EST UN ÉTAT SÉPARÉ, ET C'EST VOULU** : entre `Reset Recvd` et
+    /// `Reset Read`, on sait que le flux est mort et l'application ne le sait
+    /// pas encore. Tant qu'elle ne l'a pas su, sa place ne se rend pas — sans
+    /// quoi le rang qu'elle tient encore désignerait un autre flux.
+    pub fn read_reset(&mut self, flux: StreamId) {
+        let Some(rang) = self.slot(flux) else {
+            return;
+        };
+        let place = self.flux[rang]
+            .as_mut()
+            .expect("`slot` ne rend que le rang d'un flux vivant");
+        if let Some(reception) = place.reception.as_mut() {
+            reception.read_reset();
+        }
+    }
+
+    /// Peut-on encore écrire sur ce flux (§3.1) ?
+    ///
+    /// **CE N'EST PAS « LE CRÉDIT EST-IL NUL »** : un flux ouvert dont le pair
+    /// n'a rien rouvert a bien un crédit nul, et il attend. Celui-ci dit si le
+    /// flux existe et si sa moitié d'émission accepte encore quelque chose —
+    /// c'est-à-dire s'il y a un sens à lui donner des octets.
+    #[must_use]
+    pub fn can_send(&self, flux: StreamId) -> bool {
+        let Some(rang) = self.slot(flux) else {
+            return false;
+        };
+        self.flux[rang]
+            .as_ref()
+            .expect("`slot` ne rend que le rang d'un flux vivant")
+            .envoi
+            .is_some_and(|envoi| envoi.state().ouvert())
     }
 
     /// Combien on peut émettre sur ce flux, **crédit de connexion compris**.
@@ -655,11 +704,28 @@ impl Streams {
             .reset()
     }
 
-    /// La limite de connexion à annoncer pour laisser passer `voulu` de plus,
-    /// ou `None` si celle en vigueur suffit (§19.9).
+    /// La limite de connexion à annoncer pour laisser `voulu` octets d'avance à
+    /// l'application, ou `None` si celle en vigueur suffit (§19.9).
+    ///
+    /// # ELLE SUIT CE QUI EST LU, ET NON CE QUI ARRIVE
+    ///
+    /// §4.1 : « A receiver … extends the limit as data is consumed. » L'asseoir
+    /// sur ce qui arrive la rouvrirait même si l'application ne lit rien, et le
+    /// crédit de connexion ne bornerait plus la mémoire qu'un pair peut nous
+    /// faire retenir.
     #[must_use]
     pub const fn grant_data(&self, voulu: u64) -> Option<u64> {
-        self.entrant.grant(voulu)
+        let cible = self.consommes.saturating_add(voulu);
+        match cible > self.entrant.limit() {
+            true => Some(cible),
+            false => None,
+        }
+    }
+
+    /// Ce que l'application a consommé, en octets cumulés.
+    #[must_use]
+    pub const fn consumed(&self) -> u64 {
+        self.consommes
     }
 
     /// Le plafond de flux à annoncer pour cette famille, ou `None` s'il ne dit
@@ -682,6 +748,15 @@ impl Streams {
             true => Some(tenu),
             false => None,
         }
+    }
+
+    /// Entérine la limite qu'on vient d'annoncer par un `MAX_DATA` (§19.9).
+    ///
+    /// **À N'APPELER QU'UNE FOIS LA TRAME ÉCRITE**, pour la même raison que
+    /// [`Streams::set_max_streams`] : tant qu'elle n'est pas partie, le pair ne
+    /// sait rien de ce crédit.
+    pub const fn set_max_data(&mut self, limite: u64) {
+        self.entrant.set_limit(limite);
     }
 
     /// Entérine le plafond qu'on vient d'annoncer par un `MAX_STREAMS`.
@@ -731,6 +806,13 @@ impl Streams {
             .expect("`fini` ne dit vrai que d'un rang occupé");
         // La famille se relit du numéro, et non du rang : c'est la même chose,
         // mais l'une des deux se vérifie.
+        // **CE QUI N'A PAS ÉTÉ LU NE LE SERA PLUS**, et compte donc comme
+        // consommé : sans cela, un pair qui annule tous ses flux nous ferait
+        // perdre définitivement le crédit qu'ils avaient pris (§4.5).
+        if let Some(reception) = parti.reception {
+            let reste = reception.largest().saturating_sub(reception.read_offset());
+            self.consommes = self.consommes.saturating_add(reste);
+        }
         let famille = self.famille(parti.id);
         self.rendus[famille] = self.rendus[famille].saturating_add(1);
         // **LE PLAFOND NE MONTE PAS ICI.** Une place libre n'est pas une

@@ -66,6 +66,11 @@ fn jeter_et_ne_pas_avoir_de_code_sont_la_meme_chose() {
             "qu'on n'a pas ouvert",
         ),
         (
+            Reason::FrameNotAllowed,
+            Some(TransportError::ProtocolViolation),
+            "à un niveau qui ne l'admet pas",
+        ),
+        (
             Reason::WindowTooSmall,
             Some(TransportError::InternalError),
             "la taille annoncée",

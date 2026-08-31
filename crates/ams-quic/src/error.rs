@@ -79,6 +79,16 @@ pub enum Reason {
     /// nous n'avons aucune idée, et la suite de la connexion ne sera pas ce
     /// qu'il croit.
     StreamNotCreated,
+    /// Une trame est arrivée à un niveau de chiffrement qui ne l'admet pas
+    /// (§12.4).
+    ///
+    /// **§12.4 EST UN TABLEAU, ET NON UNE INDICATION.** « An endpoint MUST treat
+    /// receipt of a frame in a packet type that is not permitted as a connection
+    /// error of type PROTOCOL_VIOLATION. » Une trame de flux dans un paquet de
+    /// poignée de main veut dire que le pair croit la connexion ailleurs qu'elle
+    /// n'est — et la servir quand même la ferait travailler sur des limites qui
+    /// n'existent pas encore.
+    FrameNotAllowed,
     /// La fenêtre de réassemblage ne fait pas la taille qu'on a annoncée.
     ///
     /// **C'EST NOTRE FAUTE, ET LA PIRE DE TOUTES** : sans ce refus, les octets
@@ -139,7 +149,7 @@ impl Reason {
             Self::NotForUs | Self::NotAuthentic => None,
             // §17.2 et §12.3 les nomment : ce sont des pairs authentifiés qui
             // parlent mal.
-            Self::ReservedBitsSet | Self::BadPacketNumber => {
+            Self::ReservedBitsSet | Self::BadPacketNumber | Self::FrameNotAllowed => {
                 Some(TransportError::ProtocolViolation)
             }
             Self::FlowControl => Some(TransportError::FlowControlError),
@@ -227,6 +237,7 @@ impl core::fmt::Display for Error {
             Reason::SendOverflow => "on a voulu émettre au-delà de ce qui nous est ouvert",
             Reason::StreamLimit => "le pair a ouvert plus de flux qu'on ne lui en a ouvert",
             Reason::WrongStreamDirection => "le pair écrit sur un flux à contresens",
+            Reason::FrameNotAllowed => "une trame est arrivée à un niveau qui ne l'admet pas",
             Reason::StreamNotCreated => "le pair parle d'un flux qu'on n'a pas ouvert",
             Reason::WindowTooSmall => "la fenêtre ne fait pas la taille annoncée",
             Reason::CryptoInZeroRtt => "une trame CRYPTO dans un paquet 0-RTT",

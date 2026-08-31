@@ -38,13 +38,14 @@ use core::cmp::min;
 use std::sync::Arc;
 
 use ams_proto_quic::{
-    Congestion, ConnectionId, DEFAULT_ACK_DELAY_EXPONENT, Frame, LongKind, MAX_DATAGRAM_SIZE,
-    Received, Rtt, Sender, Space, TransportError, TransportParameters, decode_ack_delay,
+    Congestion, ConnectionId, DEFAULT_ACK_DELAY_EXPONENT, Directional, Frame, Initiator, LongKind,
+    MAX_DATAGRAM_SIZE, Received, Rtt, Sender, Space, StreamId, TransportError, TransportParameters,
+    decode_ack_delay,
 };
 use ams_quic::State;
 use ams_quic::{
-    INITIAL_DATAGRAM_OCTETS_MIN, Incoming, Level, PacketKind, Plan, Sent, open_packet,
-    payload_capacity, seal_packet,
+    FLUX_MAX, FLUX_PAR_FAMILLE_MAX, INITIAL_DATAGRAM_OCTETS_MIN, Incoming, Level, PacketKind, Plan,
+    Sent, Streams, open_packet, payload_capacity, seal_packet,
 };
 use ams_quic_crypto::{Keys, Role, Secret};
 use rustls::ServerConfig;
@@ -54,6 +55,42 @@ use crate::{Clefs, Error, Reason, Server};
 
 /// Combien d'espaces de numérotation une connexion tient (§12.3).
 const ESPACES: usize = 3;
+
+/// Ce qu'on annonce par flux, en octets (§18.2).
+///
+/// # POURQUOI SEIZE KIBIOCTETS, ET NON TRENTE-DEUX
+///
+/// C'est la fenêtre que l'appelant doit tenir POUR CHAQUE FLUX VIVANT, et elle
+/// domine tout le reste du coût d'un flux — l'état, lui, tient en trois
+/// kibioctets. Avec les trente-deux flux qu'une connexion tient, seize
+/// kibioctets font un demi-mébioctet par connexion : c'est ce qu'un pair peut
+/// nous faire retenir sans rien lire, et il faut pouvoir le multiplier par le
+/// nombre de connexions qu'on accepte.
+pub const FLUX_OCTETS: u64 = 16 * 1_024;
+
+/// Le même nombre, dans le type que compte un tampon. L'assertion échoue à la
+/// compilation s'ils divergent.
+const FLUX_FENETRE: usize = 16 * 1_024;
+
+const _: () = assert!(FLUX_OCTETS == FLUX_FENETRE as u64);
+
+/// Et ce qu'on annonce pour toute la connexion.
+///
+/// Quatre fois la fenêtre d'un flux, et non leur somme : §4.1 est justement là
+/// pour que le total ne soit pas le produit. Un pair qui ouvre trente-deux flux
+/// n'obtient pas trente-deux fenêtres, mais quatre.
+pub const CONNEXION_OCTETS: u64 = 4 * FLUX_OCTETS;
+
+/// Ce qu'on garde en attente d'émission sur un flux.
+///
+/// **C'EST NOTRE PROPRE BORNE** (C3) : l'application écrit, et ces octets
+/// attendent qu'un paquet les emporte. Sans borne, une application pressée
+/// remplirait la mémoire du serveur plus vite que le réseau ne la vide.
+pub const SORTIE_OCTETS_MAX: usize = 64 * 1_024;
+
+/// L'en-tête d'une trame `STREAM` au pire (§19.8) : le type, puis trois entiers
+/// de §16 à huit octets — numéro, décalage, longueur.
+const ENTETE_STREAM_MAX: usize = 25;
 
 /// Le délai d'inactivité qu'on annonce, en microsecondes.
 ///
@@ -95,6 +132,13 @@ struct Enveloppe {
     numero: u64,
     /// Ce qu'il portait du flux `CRYPTO` : décalage et longueur.
     crypto: Option<(u64, u64)>,
+    /// Et ce qu'il emportait d'un flux : le numéro, le décalage, la longueur.
+    ///
+    /// **UN PAQUET N'EN PORTE QU'UN SEUL ICI.** En porter plusieurs demanderait
+    /// une liste par paquet, pour économiser des en-têtes sur un échange que le
+    /// contrôle de congestion borne déjà. Le jour où cela comptera, c'est ce
+    /// champ qui deviendra une liste, et rien d'autre.
+    flux: Option<(StreamId, u64, u64)>,
 }
 
 /// Ce qu'on a à émettre en `CRYPTO`, pour un niveau.
@@ -146,6 +190,31 @@ impl Sortie {
     /// Ce morceau s'est perdu : on repart de là.
     fn on_lost(&mut self, decalage: u64) {
         self.emis = self.emis.min(decalage);
+    }
+}
+
+/// Cette trame a-t-elle le droit d'arriver à ce niveau (§12.4) ?
+///
+/// # LE TABLEAU DE §12.4, RÉDUIT À CE QU'ON ACCEPTE
+///
+/// Cinq trames vont partout : `PADDING`, `PING`, `ACK`, `CRYPTO` et
+/// `CONNECTION_CLOSE`. **Tout le reste demande le niveau applicatif** — et
+/// puisqu'on refuse le `0-RTT` (§8.3 de RFC 9001), « applicatif » veut dire
+/// `1-RTT` et rien d'autre.
+///
+/// `HANDSHAKE_DONE` est à part : §19.20 en fait une faute pour un SERVEUR qui le
+/// reçoit, quel que soit le niveau. C'est le client qui l'apprend, jamais lui.
+const fn permise(trame: &Frame<'_>, niveau: Level) -> bool {
+    match trame {
+        Frame::Padding { .. }
+        | Frame::Ping
+        | Frame::Ack(_)
+        | Frame::Crypto { .. }
+        | Frame::ConnectionClose { .. } => true,
+        // §19.20 : « A server MUST treat receipt of a HANDSHAKE_DONE frame as a
+        // connection error of type PROTOCOL_VIOLATION. »
+        Frame::HandshakeDone => false,
+        _ => matches!(niveau, Level::OneRtt),
     }
 }
 
@@ -217,6 +286,31 @@ pub struct Connection {
     a_dire: bool,
     /// Les paramètres que le pair a annoncés (§8.2 de RFC 9001).
     siens: Option<TransportParameters>,
+    /// Ce que nous avons annoncé — gardé pour bâtir les flux quand les siens
+    /// arrivent (§4.1, §4.6).
+    notres: TransportParameters,
+    /// Les flux, une fois la poignée de main aboutie.
+    ///
+    /// **PAS AVANT** : §4.1 et §4.6 se règlent sur des paramètres qu'on n'a le
+    /// droit de croire qu'une fois TLS les ayant authentifiés (§7.4). Les bâtir
+    /// plus tôt les réglerait sur des limites inventées.
+    flux: Option<Streams>,
+    /// Les fenêtres de réassemblage, une par rang de table.
+    ///
+    /// Elles ne s'allouent qu'au premier octet reçu sur un flux : un pair qui
+    /// ouvre trente-deux flux sans rien y écrire ne doit pas nous faire réserver
+    /// un demi-mébioctet.
+    fenetres: Vec<Vec<u8>>,
+    /// Ce qui attend d'être émis sur chaque flux, une par rang de table.
+    sorties: Vec<Sortie>,
+    /// Le `FIN` que l'application a demandé et qu'on n'a pas encore émis.
+    fins: Vec<bool>,
+    /// Le prochain rang par lequel commencer le tour d'émission.
+    ///
+    /// **SANS LUI, LE PREMIER FLUX AFFAMERAIT TOUS LES AUTRES** : à chaque
+    /// paquet on repartirait du rang zéro, et un flux qui a toujours de quoi
+    /// dire ne laisserait jamais la place.
+    tour: usize,
     /// L'exposant qui décode le délai d'un `ACK` (§18.2).
     ///
     /// # POURQUOI UNE VALEUR, ET NON UNE QUESTION POSÉE À CHAQUE FOIS
@@ -261,6 +355,15 @@ impl Connection {
         annonce.max_idle_timeout_ms = INACTIVITE_US.saturating_div(1_000);
         annonce.max_ack_delay_ms = ACQUITTEMENT_MAX_MS;
         annonce.initial_source_connection_id = Some(local);
+        // §4.1 et §4.6 : ce qu'on ouvre au pair. **CE QU'ON ANNONCE EST CE QU'ON
+        // TIENT** — les plafonds de flux sont ceux de la table, et les fenêtres
+        // celles qu'on saura vraiment réserver.
+        annonce.initial_max_data = CONNEXION_OCTETS;
+        annonce.initial_max_stream_data_bidi_local = FLUX_OCTETS;
+        annonce.initial_max_stream_data_bidi_remote = FLUX_OCTETS;
+        annonce.initial_max_stream_data_uni = FLUX_OCTETS;
+        annonce.initial_max_streams_bidi = FLUX_PAR_FAMILLE_MAX;
+        annonce.initial_max_streams_uni = FLUX_PAR_FAMILLE_MAX;
         // §7.3 : le serveur annonce l'identifiant que le client avait choisi.
         // **C'EST CE QUI PROUVE QUE LA POIGNÉE DE MAIN N'A PAS ÉTÉ DÉTOURNÉE** :
         // un intermédiaire qui aurait réécrit le premier paquet ne pourrait pas
@@ -307,6 +410,12 @@ impl Connection {
             fermeture: None,
             a_dire: false,
             siens: None,
+            notres: annonce,
+            flux: None,
+            fenetres: Vec::new(),
+            sorties: Vec::new(),
+            fins: Vec::new(),
+            tour: 0,
             exposant: DEFAULT_ACK_DELAY_EXPONENT,
         })
     }
@@ -418,6 +527,10 @@ impl Connection {
             // rendrait une branche que rien ne peut emprunter.
             rang = rang.saturating_add(avance);
         }
+        // Ce qui s'est terminé pendant ce datagramme rend sa place tout de
+        // suite : la garder jusqu'au prochain refuserait une ouverture que le
+        // pair a le droit de faire.
+        self.recolter_les_flux();
         Ok(())
     }
 
@@ -434,6 +547,10 @@ impl Connection {
         if self.muet() {
             return Ok(0);
         }
+        // Ce que l'application vient de finir de lire rend sa place avant qu'on
+        // compose : c'est ce qui met le `MAX_STREAMS` dans CE paquet-ci plutôt
+        // que dans le suivant.
+        self.recolter_les_flux();
         self.avancer_la_poignee(maintenant)?;
 
         // §8.1 : trois fois ce qu'on a reçu, tant que l'adresse n'est pas
@@ -644,6 +761,17 @@ impl Connection {
         niveau: Level,
         maintenant: u64,
     ) -> Result<(), Error> {
+        // §12.4 : chaque trame a ses niveaux. « An endpoint MUST treat receipt of
+        // a frame in a packet type that is not permitted as a connection error
+        // of type PROTOCOL_VIOLATION. »
+        //
+        // **CE N'EST PAS UNE FORMALITÉ** : sans ce contrôle, une trame de flux
+        // dans un paquet de poignée de main atteindrait une collection qui
+        // n'existe pas encore. Et l'ignorer en silence ne vaut pas mieux — le
+        // pair croirait avoir dit quelque chose.
+        if !permise(trame, niveau) {
+            return Err(Error::new(Reason::Quic(ams_quic::Reason::FrameNotAllowed)));
+        }
         match *trame {
             Frame::Crypto { offset, data } => {
                 self.poignee.on_crypto(niveau, offset, data)?;
@@ -653,11 +781,214 @@ impl Connection {
                 let pto = self.rtt.pto(ACQUITTEMENT_MAX_US, self.sondages);
                 self.etat.on_connection_close(pto, maintenant);
             }
+            Frame::Stream {
+                stream,
+                offset,
+                data,
+                fin,
+            } => self.sur_un_flux(stream, offset, data, fin)?,
+            Frame::ResetStream {
+                stream, final_size, ..
+            } => {
+                self.sur_une_trame_de_flux(stream, |flux, id| flux.on_reset_stream(id, final_size))?
+            }
+            Frame::StopSending { stream, code } => {
+                self.sur_une_trame_de_flux(stream, |flux, id| flux.on_stop_sending(id, code))?
+            }
+            Frame::MaxStreamData { stream, maximum } => {
+                self.sur_une_trame_de_flux(stream, |flux, id| flux.on_max_stream_data(id, maximum))?
+            }
+            Frame::MaxData { maximum } => self
+                .flux
+                .as_mut()
+                .expect("§12.4 a refusé cette trame avant que les flux existent")
+                .on_max_data(maximum),
+            Frame::MaxStreams {
+                directional,
+                maximum,
+            } => self
+                .flux
+                .as_mut()
+                .expect("§12.4 a refusé cette trame avant que les flux existent")
+                .on_max_streams(directional, maximum),
             // Le reste ne concerne pas encore cette portée. **ON L'IGNORE
             // PLUTÔT QUE DE FERMER** : ce sont des trames que §19 définit, et
-            // qu'on saura servir quand les flux arriveront.
+            // qu'on saura servir quand le chemin et les identifiants viendront.
             _ => {}
         }
+        Ok(())
+    }
+
+    /// Les flux, une fois la poignée de main aboutie.
+    ///
+    /// `None` avant : §7.4 ne laisse croire les limites du pair qu'authentifiées.
+    #[must_use]
+    pub const fn streams(&self) -> Option<&Streams> {
+        self.flux.as_ref()
+    }
+
+    /// On ouvre un flux (§2.1).
+    ///
+    /// # Errors
+    ///
+    /// [`Reason::PasEncoreDeFlux`] avant la fin de la poignée de main, et la
+    /// faute de §4.6 au-delà du plafond que le pair a annoncé.
+    pub fn open_stream(&mut self, sens: Directional) -> Result<StreamId, Error> {
+        let flux = self
+            .flux
+            .as_mut()
+            .ok_or_else(|| Error::new(Reason::PasEncoreDeFlux))?;
+        flux.open(sens).map_err(Error::depuis_quic)
+    }
+
+    /// L'application écrit sur ce flux.
+    ///
+    /// Rend combien d'octets ont été pris. **CE N'EST PAS FORCÉMENT TOUT** : ce
+    /// qui attend d'être émis est borné (C3), et une application pressée
+    /// remplirait autrement la mémoire du serveur plus vite que le réseau ne la
+    /// vide. Le reste se réécrit quand la place se libère.
+    ///
+    /// # Errors
+    ///
+    /// [`Reason::PasEncoreDeFlux`] avant la fin de la poignée de main, et la
+    /// faute de §3.1 sur un flux qui n'émet pas.
+    pub fn write(&mut self, flux: StreamId, octets: &[u8]) -> Result<usize, Error> {
+        let rang = self.rang_ouvert(flux)?;
+        let sortie = &mut self.sorties[rang];
+        let place = SORTIE_OCTETS_MAX.saturating_sub(sortie.octets.len());
+        let combien = place.min(octets.len());
+        sortie
+            .octets
+            .extend_from_slice(octets.get(..combien).unwrap_or_default());
+        Ok(combien)
+    }
+
+    /// L'application a fini d'écrire : le prochain paquet portera le `FIN`
+    /// (§19.8).
+    ///
+    /// # Errors
+    ///
+    /// [`Reason::PasEncoreDeFlux`], et la faute de §3.1 sur un flux qui n'émet
+    /// pas.
+    pub fn finish(&mut self, flux: StreamId) -> Result<(), Error> {
+        let rang = self.rang_ouvert(flux)?;
+        self.fins[rang] = true;
+        Ok(())
+    }
+
+    /// L'application lit ce qui est prêt sur ce flux, dans l'ordre.
+    ///
+    /// Rend combien d'octets ont été pris ; zéro si rien n'est prêt.
+    pub fn read(&mut self, flux: StreamId, vers: &mut [u8]) -> usize {
+        let Some(collection) = self.flux.as_mut() else {
+            return 0;
+        };
+        let Some(rang) = collection.slot(flux) else {
+            return 0;
+        };
+        collection.read(flux, &mut self.fenetres[rang], vers)
+    }
+
+    /// L'application prend acte de l'annulation d'un flux (§3.2).
+    ///
+    /// **SANS CET APPEL, LA PLACE NE SE REND JAMAIS** : §3.2 sépare `Reset
+    /// Recvd` de `Reset Read` justement pour que ce soit l'application qui
+    /// décide quand elle a fini avec ce flux.
+    pub fn read_reset(&mut self, flux: StreamId) {
+        if let Some(collection) = self.flux.as_mut() {
+            collection.read_reset(flux);
+        }
+    }
+
+    /// Rend à la table les places des flux finis, et libère ce qui allait avec.
+    ///
+    /// # SANS CELA, UNE CONNEXION S'ÉPUISE SANS FAUTE
+    ///
+    /// Trente-deux flux, et plus jamais un de plus : la table se remplirait de
+    /// flux morts, et le pair verrait ses ouvertures refusées sans avoir rien
+    /// fait de mal. C'est aussi ce qui libère les fenêtres — un demi-mébioctet
+    /// par connexion resterait autrement réservé pour rien.
+    fn recolter_les_flux(&mut self) {
+        let Some(collection) = self.flux.as_mut() else {
+            return;
+        };
+        for rang in 0..FLUX_MAX {
+            if collection.oublier(rang).is_some() {
+                self.fenetres[rang] = Vec::new();
+                self.sorties[rang] = Sortie::default();
+                self.fins[rang] = false;
+            }
+        }
+    }
+
+    /// Le rang de ce flux, s'il est ouvert et que nous pouvons y écrire.
+    fn rang_ouvert(&mut self, flux: StreamId) -> Result<usize, Error> {
+        let collection = self
+            .flux
+            .as_ref()
+            .ok_or_else(|| Error::new(Reason::PasEncoreDeFlux))?;
+        // §3.1 : écrire sur un flux qui n'émet pas — parce qu'il n'existe pas,
+        // parce qu'il ne va pas dans ce sens, ou parce qu'il est déjà terminé —
+        // est NOTRE faute. La taire laisserait l'application croire que ses
+        // octets partiront.
+        match collection.can_send(flux) {
+            true => Ok(collection
+                .slot(flux)
+                .expect("`can_send` ne dit vrai que d'un flux vivant")),
+            false => Err(Error::new(Reason::PasEncoreDeFlux)),
+        }
+    }
+
+    /// Range une trame `STREAM` (§19.8).
+    ///
+    /// # LA FENÊTRE NE S'ALLOUE QU'AU PREMIER OCTET
+    ///
+    /// Un pair qui ouvre trente-deux flux sans rien y écrire ne doit pas nous
+    /// faire réserver un demi-mébioctet. C'est la même prudence que §5.2.2 pour
+    /// les datagrammes : on ne dépense qu'après avoir vu quelque chose.
+    fn sur_un_flux(
+        &mut self,
+        stream: u64,
+        offset: u64,
+        data: &[u8],
+        fin: bool,
+    ) -> Result<(), Error> {
+        // **LA COLLECTION EXISTE FORCÉMENT ICI** : §12.4 vient de refuser cette
+        // trame hors du niveau applicatif, et les clés de lecture `1-RTT`
+        // s'installent dans le même appel que la construction des flux. Un
+        // `else` ouvrirait une branche que rien ne peut emprunter.
+        let flux = self
+            .flux
+            .as_mut()
+            .expect("§12.4 a refusé cette trame avant que les flux existent");
+        // Le numéro vient d'un entier de §16, et `StreamId` a le même espace.
+        let id = StreamId::new(stream).expect("un numéro de flux tient dans l'espace de §16");
+        let rang = flux.accueillir(id).map_err(Error::depuis_quic)?;
+        let fenetre = &mut self.fenetres[rang];
+        if fenetre.is_empty() {
+            fenetre.resize(FLUX_FENETRE, 0);
+        }
+        flux.on_stream(id, offset, data, fin, fenetre)
+            .map_err(Error::depuis_quic)?;
+        Ok(())
+    }
+
+    /// Range une trame qui parle d'un flux sans en porter les octets.
+    ///
+    /// **AVANT LA POIGNÉE DE MAIN, ON N'A PAS DE FLUX ET L'ON N'EN INVENTE PAS**
+    /// : ces trames ne peuvent arriver qu'en `1-RTT`, et si les paramètres du
+    /// pair ne sont pas encore lus, il n'y a rien à quoi les appliquer.
+    fn sur_une_trame_de_flux(
+        &mut self,
+        stream: u64,
+        quoi_faire: impl FnOnce(&mut Streams, StreamId) -> Result<(), ams_quic::Error>,
+    ) -> Result<(), Error> {
+        let flux = self
+            .flux
+            .as_mut()
+            .expect("§12.4 a refusé cette trame avant que les flux existent");
+        let id = StreamId::new(stream).expect("un numéro de flux tient dans l'espace de §16");
+        quoi_faire(flux, id).map_err(Error::depuis_quic)?;
         Ok(())
     }
 
@@ -714,12 +1045,26 @@ impl Connection {
             // avancer un préfixe, et ce qui reste sera crédité par l'`ACK`
             // suivant — qui réacquitte (§13.2.3 de RFC 9000).
             let acquitte = enveloppe.numero >= plus_petit && enveloppe.numero <= ack.largest;
-            match (acquitte, enveloppe.crypto) {
-                (true, Some((decalage, longueur))) => {
-                    self.sortie[rang].on_acked(decalage, longueur);
-                }
-                (true, None) => {}
-                (false, _) => restantes.push(*enveloppe),
+            if !acquitte {
+                restantes.push(*enveloppe);
+                continue;
+            }
+            if let Some((decalage, longueur)) = enveloppe.crypto {
+                self.sortie[rang].on_acked(decalage, longueur);
+            }
+            if let Some((id, decalage, longueur)) = enveloppe.flux
+                && let Some(place) = self.flux.as_ref().and_then(|flux| flux.slot(id))
+            {
+                // §3.1 : c'est ce qui fait passer un flux à `Data Recvd`, donc
+                // ce qui rend sa place à la table.
+                //
+                // La collection existe : `slot` vient d'en rendre un rang.
+                let _ = self
+                    .flux
+                    .as_mut()
+                    .expect("`slot` vient d'en rendre un rang")
+                    .on_acked(id, decalage, longueur);
+                self.sorties[place].on_acked(decalage, longueur);
             }
         }
         self.enveloppes[rang] = restantes;
@@ -736,6 +1081,12 @@ impl Connection {
                 true => {
                     if let Some((decalage, _)) = enveloppe.crypto {
                         self.sortie[rang].on_lost(decalage);
+                    }
+                    // §13.3 : ce qui s'est perdu repart, en reculant le curseur.
+                    if let Some((id, decalage, _)) = enveloppe.flux
+                        && let Some(place) = self.flux.as_ref().and_then(|flux| flux.slot(id))
+                    {
+                        self.sorties[place].on_lost(decalage);
                     }
                 }
                 false => restantes.push(*enveloppe),
@@ -771,6 +1122,12 @@ impl Connection {
             // **ET C'EST MAINTENANT SEULEMENT** qu'on croit son exposant : avant,
             // rien ne l'authentifiait.
             self.exposant = siens.ack_delay_exponent;
+            // **C'EST LE PREMIER INSTANT OÙ L'ON A LE DROIT DE BÂTIR LES FLUX** :
+            // avant, ses limites n'étaient pas authentifiées.
+            self.flux = Some(Streams::new(Initiator::Server, &self.notres, &siens));
+            self.fenetres = (0..FLUX_MAX).map(|_| Vec::new()).collect();
+            self.sorties = (0..FLUX_MAX).map(|_| Sortie::default()).collect();
+            self.fins = vec![false; FLUX_MAX];
             self.siens = Some(siens);
             self.etat.on_handshake_confirmed();
             self.confirmee = true;
@@ -895,6 +1252,17 @@ impl Connection {
             }
         }
 
+        // Les flux, à la place qui reste, et seulement en `1-RTT`.
+        let mut emporte = None;
+        if self.fermeture.is_none() && espace == Space::Application {
+            pose = self.annoncer_les_credits(&mut trames, pose, borne, &mut sollicite);
+            if let Some((porte_flux, ecrits)) = self.poser_un_flux(&mut trames, pose, borne) {
+                pose = pose.saturating_add(ecrits);
+                sollicite = true;
+                emporte = Some(porte_flux);
+            }
+        }
+
         // §19.20 : le serveur, et lui seul, dit que la poignée est confirmée.
         if self.a_confirmer && espace == Space::Application && pose < borne {
             let place = trames.get_mut(pose..borne).unwrap_or_default();
@@ -950,11 +1318,134 @@ impl Connection {
         self.enveloppes[rang].push(Enveloppe {
             numero,
             crypto: porte,
+            flux: emporte,
         });
         if let Some((_, longueur)) = porte {
             self.sortie[rang].on_sent(longueur);
         }
         Some((ecrit, sollicite))
+    }
+
+    /// Annonce les crédits qu'on peut annoncer (§19.9, §19.11).
+    ///
+    /// # ON N'ANNONCE QUE CE QUI DIT QUELQUE CHOSE DE NEUF
+    ///
+    /// `grant_data` et `grant_streams` rendent `None` quand la limite en vigueur
+    /// suffit déjà. Écrire quand même coûterait un paquet au pair sans rien lui
+    /// apprendre — et §4.1 ne demande d'annoncer que ce qui change.
+    fn annoncer_les_credits(
+        &mut self,
+        trames: &mut [u8],
+        depart: usize,
+        borne: usize,
+        sollicite: &mut bool,
+    ) -> usize {
+        let mut pose = depart;
+        let Some(flux) = self.flux.as_mut() else {
+            return pose;
+        };
+        // §4.1 : on rouvre ce que l'application a lu. Une fenêtre qu'on ne
+        // rouvrirait jamais figerait le flux dès qu'elle serait pleine.
+        if let Some(limite) = flux.grant_data(CONNEXION_OCTETS)
+            && let Some(place) = trames.get_mut(pose..borne)
+            && let Ok(ecrits) = (Frame::MaxData { maximum: limite }).write(place)
+        {
+            pose = pose.saturating_add(ecrits);
+            *sollicite = true;
+            flux.set_max_data(limite);
+        }
+        for sens in [Directional::Bidirectional, Directional::Unidirectional] {
+            if let Some(plafond) = flux.grant_streams(sens)
+                && let Some(place) = trames.get_mut(pose..borne)
+                && let Ok(ecrits) = (Frame::MaxStreams {
+                    directional: sens,
+                    maximum: plafond,
+                })
+                .write(place)
+            {
+                pose = pose.saturating_add(ecrits);
+                *sollicite = true;
+                // **APRÈS L'ÉCRITURE, ET PAS AVANT** : le plafond ne vaut que
+                // lorsque la trame est réellement dans le paquet.
+                flux.set_max_streams(sens, plafond);
+            }
+        }
+        pose
+    }
+
+    /// Pose les octets d'un flux, à tour de rôle.
+    ///
+    /// Rend ce que le paquet emporte et combien d'octets la trame a pris.
+    ///
+    /// # UN SEUL FLUX PAR PAQUET, ET LE TOUR REPART D'OÙ IL S'ÉTAIT ARRÊTÉ
+    ///
+    /// Repartir du rang zéro à chaque paquet laisserait un flux qui a toujours
+    /// de quoi dire affamer tous les autres. Le tour est ce qui rend
+    /// l'entrelacement possible, et il ne coûte qu'un entier.
+    fn poser_un_flux(
+        &mut self,
+        trames: &mut [u8],
+        depart: usize,
+        borne: usize,
+    ) -> Option<((StreamId, u64, u64), usize)> {
+        let libre = borne
+            .saturating_sub(depart)
+            .saturating_sub(ENTETE_STREAM_MAX);
+        if libre == 0 {
+            return None;
+        }
+        for tour in 0..FLUX_MAX {
+            let rang = self.tour.saturating_add(tour) % FLUX_MAX;
+            let Some(id) = self.flux.as_ref().and_then(|flux| flux.occupant(rang)) else {
+                continue;
+            };
+            let (decalage, attente) = self.sorties[rang].en_attente();
+            // §4.1 : ni au-delà du crédit du flux, ni au-delà de celui de la
+            // connexion — et `credit` rend déjà le plus bas des deux.
+            let credit = self.flux.as_ref().map_or(0, |flux| flux.credit(id));
+            let combien = usize::try_from(credit)
+                .unwrap_or(usize::MAX)
+                .min(libre)
+                .min(attente.len());
+            // **LE `FIN` CHEVAUCHE LES DERNIERS OCTETS** (§19.8), et ne part pas
+            // dans une trame à lui : l'attendre coûterait un paquet de plus par
+            // flux, et un aller-retour de plus pour l'acquitter.
+            let fin = self.fins[rang] && combien == attente.len();
+            if combien == 0 && !fin {
+                continue;
+            }
+            let longueur = u64::try_from(combien).unwrap_or(0);
+            // **LES DEUX CONTRÔLES DE FLUX SE CONSOMMENT AVANT L'ÉCRITURE**, et
+            // c'est l'ordre qui compte : un `FIN` redemandé sur un flux déjà
+            // terminé est refusé ici (§3.1), et rien ne doit avoir été écrit.
+            let flux = self.flux.as_mut().expect("`occupant` vient d'en rendre un");
+            // **CE NE PEUT PAS ÉCHOUER, ET LA RAISON TIENT EN DEUX POINTS** :
+            // `write` et `finish` refusent déjà un flux qui n'émet plus (§3.1),
+            // et `combien` est tiré de `credit`, qui est le plus bas des deux
+            // contrôles de flux (§4.1). Un `if` ici serait une garde qu'aucun
+            // essai ne pourrait atteindre.
+            flux.on_sent(id, longueur, fin)
+                .expect("`can_send` et `credit` ont déjà tout vérifié");
+            let morceau = attente.get(..combien).unwrap_or_default();
+            let trame = Frame::Stream {
+                stream: id.value(),
+                offset: decalage,
+                data: morceau,
+                fin,
+            };
+            let place = trames.get_mut(depart..).unwrap_or_default();
+            // **LA PLACE A ÉTÉ RÉSERVÉE**, en-tête compris.
+            let ecrits = trame
+                .write(place)
+                .expect("`libre` a réservé l'en-tête de la trame");
+            self.sorties[rang].on_sent(longueur);
+            if fin {
+                self.fins[rang] = false;
+            }
+            self.tour = rang.saturating_add(1) % FLUX_MAX;
+            return Some(((id, decalage, longueur), ecrits));
+        }
+        None
     }
 
     /// À quel espace dire la fermeture (§10.2.3).

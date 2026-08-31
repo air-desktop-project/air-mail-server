@@ -49,6 +49,28 @@ const CLIENT: [u8; 4] = [0xaa, 0xbb, 0xcc, 0xdd];
 /// 786 432 (§18.2), et rien d'autre.
 const SES_PARAMETRES: &[u8] = b"\x04\x04\x80\x0c\x00\x00";
 
+/// Les paramètres d'un client qui ouvre vraiment des flux (§18.2).
+///
+/// **`SES_PARAMETRES` N'EN OUVRE AUCUN** : il ne porte qu'un `initial_max_data`,
+/// ce qui suffisait tant que la poignée de main était toute la portée. Un flux
+/// demande les six limites, et sans elles le crédit vaudrait zéro partout —
+/// l'essai passerait en ne prouvant rien.
+fn ses_parametres_avec_flux() -> Vec<u8> {
+    let mut siens = TransportParameters::DEFAULT;
+    siens.initial_max_data = 100_000;
+    siens.initial_max_stream_data_bidi_local = 50_000;
+    siens.initial_max_stream_data_bidi_remote = 50_000;
+    siens.initial_max_stream_data_uni = 50_000;
+    siens.initial_max_streams_bidi = 8;
+    siens.initial_max_streams_uni = 8;
+    let mut octets = std::vec![0_u8; 256];
+    let ecrits = siens
+        .write(Sender::Client, &mut octets)
+        .expect("nos propres paramètres tiennent");
+    octets.truncate(ecrits);
+    octets
+}
+
 /// Un identifiant de connexion à partir de ces octets.
 fn identifiant(octets: &[u8]) -> ConnectionId {
     ConnectionId::new(octets).expect("vingt octets au plus")
@@ -127,6 +149,16 @@ struct Client {
     fenetres: [Vec<u8>; 3],
     /// Ce que TLS veut dire et qui n'est pas encore parti.
     en_attente: Vec<(Level, Vec<u8>)>,
+    /// Les octets qu'un flux nous a apportés.
+    recu: Vec<u8>,
+    /// Sur quel flux, et avec un `FIN` ou non.
+    flux_recu: Option<u64>,
+    fin_recue: bool,
+    /// Ce datagramme-ci porte-t-il un `Initial` ?
+    a_pose_un_initial: bool,
+    /// Les crédits que le serveur a annoncés.
+    plafond_recu: Option<u64>,
+    credit_recu: Option<u64>,
 }
 
 impl Client {
@@ -161,6 +193,12 @@ impl Client {
                 std::vec![0_u8; ams_quic::CRYPTO_OCTETS_MAX],
             ],
             en_attente: Vec::new(),
+            a_pose_un_initial: false,
+            recu: Vec::new(),
+            flux_recu: None,
+            fin_recue: false,
+            plafond_recu: None,
+            credit_recu: None,
         }
     }
 
@@ -197,6 +235,7 @@ impl Client {
 
     /// Compose un datagramme : ce que TLS veut dire, et ce qu'il doit acquitter.
     fn parler(&mut self) -> Vec<u8> {
+        self.a_pose_un_initial = false;
         let mut datagramme = Vec::new();
         // D'abord les acquittements que l'on doit, espace par espace.
         for espace in [Space::Initial, Space::Handshake, Space::Application] {
@@ -250,7 +289,15 @@ impl Client {
             );
         }
         // §14.1 : un datagramme portant un `Initial` fait 1200 octets au moins.
-        if !datagramme.is_empty() && datagramme.len() < 1_200 {
+        //
+        // # ET SEULEMENT CELUI-LÀ
+        //
+        // **UN EN-TÊTE COURT N'A PAS DE CHAMP DE LONGUEUR** (§17.3) : sa charge
+        // va jusqu'au bout du datagramme. Bourrer derrière lui ferait entrer les
+        // zéros dans le chiffré, et le paquet ne s'authentifierait plus — il
+        // serait jeté sans un mot, ce qui est exactement ce qu'un essai ne doit
+        // pas confondre avec un serveur muet.
+        if self.a_pose_un_initial && !datagramme.is_empty() && datagramme.len() < 1_200 {
             datagramme.resize(1_200, 0);
         }
         datagramme
@@ -258,6 +305,7 @@ impl Client {
 
     /// Scelle un paquet de cet espace et l'ajoute au datagramme.
     fn poser(&mut self, datagramme: &mut Vec<u8>, espace: Space, trames: &[u8]) {
+        self.a_pose_un_initial |= matches!(espace, Space::Initial);
         let rang = Self::rang(espace);
         let plan = match espace {
             Space::Initial => Plan::Initial {
@@ -333,6 +381,33 @@ impl Client {
                 };
                 suite = suite.get(lus..).unwrap_or_default();
                 sollicite |= !matches!(trame, Frame::Ack(_) | Frame::Padding { .. });
+                match trame {
+                    Frame::Stream {
+                        stream,
+                        offset,
+                        data,
+                        fin,
+                    } => {
+                        // **LES OCTETS SE REPLACENT À LEUR DÉCALAGE**, et ne
+                        // s'empilent pas : une retransmission redit ce qui est
+                        // déjà là, et les empiler ferait passer un essai de
+                        // perte qui ne prouverait rien.
+                        let debut = usize::try_from(offset).unwrap_or(usize::MAX);
+                        let fin_de = debut.saturating_add(data.len());
+                        if self.recu.len() < fin_de {
+                            self.recu.resize(fin_de, 0);
+                        }
+                        self.recu
+                            .get_mut(debut..fin_de)
+                            .expect("la place vient d'être faite")
+                            .copy_from_slice(data);
+                        self.flux_recu = Some(stream);
+                        self.fin_recue |= fin;
+                    }
+                    Frame::MaxStreams { maximum, .. } => self.plafond_recu = Some(maximum),
+                    Frame::MaxData { maximum } => self.credit_recu = Some(maximum),
+                    _ => {}
+                }
                 if let Frame::Crypto { offset, data } = trame {
                     // **LE DÉCALAGE COMPTE** : un vol coupé en deux arrive en
                     // deux morceaux, et les remettre à TLS dans l'ordre
@@ -766,7 +841,10 @@ fn etabli(nom: &str) -> (Atelier, Connection, Client, u64) {
     let atelier = atelier(nom);
     let (autorite, cert, cle) = materiel(&atelier.0).expect(SANS_OPENSSL);
     let mut horloge = 1_000_000_u64;
-    let mut client = Client::new(config_client(&autorite, ams_tls::alpn_h3()), SES_PARAMETRES);
+    let mut client = Client::new(
+        config_client(&autorite, ams_tls::alpn_h3()),
+        &ses_parametres_avec_flux(),
+    );
     let mut premier_datagramme = client.parler();
     let arrivee = premier(&premier_datagramme);
     let mut serveur = Connection::accept(
@@ -832,8 +910,9 @@ fn une_trame_illisible_arrete_le_paquet() {
 
 /// **LES TRAMES QU'ON NE SERT PAS ENCORE SONT IGNORÉES**, et non refusées.
 ///
-/// Ce sont des trames que §19 définit, et qu'on saura servir quand les flux
-/// arriveront. Les refuser fermerait des connexions qu'on servira demain.
+/// Ce sont des trames que §19 définit et que §12.4 admet à ce niveau ; on les
+/// servira quand le chemin et les jetons viendront. Les refuser fermerait des
+/// connexions qu'on servira demain.
 #[test]
 fn les_trames_qu_on_ne_sert_pas_encore_sont_ignorees() {
     let (_atelier, mut serveur, mut client, horloge) = etabli("trames-ignorees");
@@ -842,7 +921,11 @@ fn les_trames_qu_on_ne_sert_pas_encore_sont_ignorees() {
     for trame in [
         Frame::Ping,
         Frame::MaxData { maximum: 1_000_000 },
-        Frame::HandshakeDone,
+        // Celles-ci, §12.4 les admet en `1-RTT` et nous ne les servons pas
+        // encore : le chemin et les jetons viendront plus tard.
+        Frame::NewToken { token: b"jeton" },
+        Frame::DataBlocked { limit: 10 },
+        Frame::PathChallenge { data: [0; 8] },
     ] {
         let place = trames.get_mut(pose..).expect("de la place");
         pose = pose.saturating_add(trame.write(place).expect("écrivable"));
@@ -1679,4 +1762,642 @@ fn le_plus_proche_de_deux_instants() {
     assert_eq!(super::plus_tot(None, Some(9)), Some(9));
     assert_eq!(super::plus_tot(Some(7), Some(9)), Some(7));
     assert_eq!(super::plus_tot(Some(9), Some(7)), Some(7));
+}
+
+/// **DES OCTETS D'APPLICATION TRAVERSENT UN FLUX, DANS LES DEUX SENS.**
+///
+/// C'est ce que tout le reste sert à rendre possible. Le client ouvre un flux
+/// bidirectionnel, y écrit ; le serveur lit, répond et termine ; le client
+/// reçoit la réponse et le `FIN`.
+#[test]
+fn des_octets_d_application_traversent_un_flux() {
+    let (_atelier, mut serveur, mut client, mut horloge) = etabli("flux");
+    let flux = ams_proto_quic::StreamId::new(0).expect("le premier bidirectionnel du client");
+
+    // Le client écrit sur le flux zéro.
+    let mut trames = [0_u8; 64];
+    let ecrits = (Frame::Stream {
+        stream: 0,
+        offset: 0,
+        data: b"bonjour",
+        fin: false,
+    })
+    .write(&mut trames)
+    .expect("écrivable");
+    let mut datagramme = un_paquet_du_client(&mut client, trames.get(..ecrits).expect("écrits"));
+    serveur
+        .on_datagram(&mut datagramme, horloge)
+        .expect("le serveur accepte un flux");
+
+    // **UN SECOND MORCEAU, SUR LE MÊME FLUX** : la fenêtre est déjà réservée, et
+    // ne doit pas l'être une seconde fois — sans quoi ce qui est arrivé
+    // disparaîtrait.
+    let ecrits = (Frame::Stream {
+        stream: 0,
+        offset: 7,
+        data: b" toi",
+        fin: false,
+    })
+    .write(&mut trames)
+    .expect("écrivable");
+    let mut suite = un_paquet_du_client(&mut client, trames.get(..ecrits).expect("écrits"));
+    serveur
+        .on_datagram(&mut suite, horloge)
+        .expect("le serveur accepte la suite");
+
+    // Le serveur lit ce qui est arrivé.
+    let mut vers = [0_u8; 32];
+    let lus = serveur.read(flux, &mut vers);
+    assert_eq!(vers.get(..lus), Some(&b"bonjour toi"[..]));
+
+    // Il répond, et termine.
+    assert_eq!(serveur.write(flux, b"salut").expect("il peut écrire"), 5);
+    serveur.finish(flux).expect("et terminer");
+
+    // Le paquet part, et le client le reçoit.
+    for _ in 0..4 {
+        let mut place = std::vec![0_u8; 1_500];
+        let ecrit = serveur
+            .poll_transmit(&mut place, horloge)
+            .expect("le serveur avance");
+        if ecrit == 0 {
+            break;
+        }
+        client.ecouter(place.get(..ecrit).expect("écrit"));
+        horloge = horloge.saturating_add(1_000);
+    }
+
+    assert_eq!(client.recu, b"salut", "LA RÉPONSE EST ARRIVÉE");
+    assert_eq!(client.flux_recu, Some(0), "sur le flux qu'il avait ouvert");
+    assert!(client.fin_recue, "§19.8 : et le flux est terminé");
+}
+
+/// **AVANT LA POIGNÉE DE MAIN, IL N'Y A PAS DE FLUX** (§7.4).
+///
+/// §4.1 et §4.6 se règlent sur des paramètres qu'on n'a le droit de croire
+/// qu'authentifiés. Les inventer plus tôt réglerait la connexion sur des limites
+/// que le pair n'a jamais annoncées.
+#[test]
+fn avant_la_poignee_de_main_il_n_y_a_pas_de_flux() {
+    let atelier = atelier("sans-flux");
+    let (autorite, cert, cle) = materiel(&atelier.0).expect(SANS_OPENSSL);
+    let mut client = Client::new(
+        config_client(&autorite, ams_tls::alpn_h3()),
+        &ses_parametres_avec_flux(),
+    );
+    let premier_datagramme = client.parler();
+    let arrivee = premier(&premier_datagramme);
+    let mut serveur = Connection::accept(
+        config_serveur(&cert, &cle),
+        &arrivee,
+        identifiant(&LOCAL),
+        identifiant(&CLIENT),
+        1_000_000,
+    )
+    .expect("constructible");
+
+    assert!(serveur.streams().is_none());
+    let flux = ams_proto_quic::StreamId::new(0).expect("un numéro");
+    assert!(
+        serveur
+            .open_stream(ams_proto_quic::Directional::Unidirectional)
+            .is_err()
+    );
+    assert!(serveur.write(flux, b"x").is_err());
+    assert!(serveur.finish(flux).is_err());
+    assert_eq!(serveur.read(flux, &mut [0_u8; 4]), 0);
+    // §3.2 : et il n'y a aucune annulation dont prendre acte.
+    serveur.read_reset(flux);
+}
+
+/// **LE SERVEUR ANNONCE CE QU'IL TIENT** (§19.9, §19.11).
+///
+/// Le client de cet essai n'ouvre que huit flux par famille et cent mille
+/// octets ; le serveur en tient davantage, et le dire est ce qui permet au
+/// client de s'en servir.
+#[test]
+fn le_serveur_annonce_ce_qu_il_tient() {
+    let (_atelier, mut serveur, mut client, mut horloge) = etabli("credits");
+    // Le client écrit, et le serveur lit : **c'est la lecture qui rouvre la
+    // fenêtre** (§4.1), et non l'arrivée des octets.
+    //
+    // Un unidirectionnel, terminé d'un coup : il n'a qu'une moitié, et une fois
+    // lu il est fini — donc sa place se rend, et c'est cela qui donne au serveur
+    // un plafond neuf à annoncer.
+    let mut trames = [0_u8; 64];
+    let ecrits = (Frame::Stream {
+        stream: 2,
+        offset: 0,
+        data: b"bonjour",
+        fin: true,
+    })
+    .write(&mut trames)
+    .expect("écrivable");
+    let mut datagramme = un_paquet_du_client(&mut client, trames.get(..ecrits).expect("écrits"));
+    serveur
+        .on_datagram(&mut datagramme, horloge)
+        .expect("le serveur accepte un flux");
+    let flux = ams_proto_quic::StreamId::new(2).expect("un numéro");
+    assert_eq!(serveur.read(flux, &mut [0_u8; 32]), 7);
+    for _ in 0..4 {
+        let mut place = std::vec![0_u8; 1_500];
+        let ecrit = serveur
+            .poll_transmit(&mut place, horloge)
+            .expect("le serveur avance");
+        if ecrit == 0 {
+            break;
+        }
+        client.ecouter(place.get(..ecrit).expect("écrit"));
+        horloge = horloge.saturating_add(1_000);
+    }
+    assert_eq!(
+        client.credit_recu,
+        Some(crate::connection::CONNEXION_OCTETS.saturating_add(7)),
+        "§19.9 : sept octets lus, sept octets rouverts"
+    );
+    assert_eq!(
+        client.plafond_recu,
+        Some(ams_quic::FLUX_PAR_FAMILLE_MAX.saturating_add(1)),
+        "§19.11 : une place rendue, un flux de plus annoncé"
+    );
+}
+
+/// **LE SERVEUR SERT TOUTES LES TRAMES QUI PARLENT D'UN FLUX** (§19.4, §19.5,
+/// §19.9 à §19.11).
+///
+/// Elles n'arrivent qu'en `1-RTT`, et les ignorer laisserait la connexion
+/// tourner sur des crédits périmés — le pair croirait avoir ouvert ce qu'on
+/// n'aurait pas entendu.
+#[test]
+fn le_serveur_sert_toutes_les_trames_de_flux() {
+    let (_atelier, mut serveur, mut client, horloge) = etabli("trames-de-flux");
+
+    // Le pair nous ouvre en grand, puis annule et arrête un flux.
+    let mut trames = std::vec![0_u8; 256];
+    let mut pose = 0_usize;
+    for trame in [
+        Frame::MaxData { maximum: 500_000 },
+        Frame::MaxStreams {
+            directional: ams_proto_quic::Directional::Unidirectional,
+            maximum: 6,
+        },
+        Frame::Stream {
+            stream: 0,
+            offset: 0,
+            data: b"salut",
+            fin: false,
+        },
+        Frame::MaxStreamData {
+            stream: 0,
+            maximum: 400_000,
+        },
+        Frame::StopSending {
+            stream: 0,
+            code: 0x10,
+        },
+        // **UN UNIDIRECTIONNEL DU CLIENT** : un `RESET_STREAM` en termine la
+        // seule moitié, là où un bidirectionnel garderait la nôtre ouverte.
+        Frame::ResetStream {
+            stream: 6,
+            code: 0x10,
+            final_size: 3,
+        },
+    ] {
+        let place = trames.get_mut(pose..).expect("de la place");
+        pose = pose.saturating_add(trame.write(place).expect("écrivable"));
+    }
+    let mut datagramme = un_paquet_du_client(&mut client, trames.get(..pose).expect("posées"));
+    serveur
+        .on_datagram(&mut datagramme, horloge)
+        .expect("le serveur sert tout cela");
+
+    let flux = serveur.streams().expect("établie");
+    let zero = ams_proto_quic::StreamId::new(0).expect("un numéro");
+    assert_eq!(
+        flux.credit(zero),
+        400_000,
+        "§19.10 : le crédit du flux a monté"
+    );
+    assert_eq!(
+        flux.outgoing().limit(),
+        500_000,
+        "§19.9 : et celui de la connexion"
+    );
+
+    // §19.4 : le flux annulé a pris son crédit de connexion, sans un octet reçu.
+    assert_eq!(flux.incoming().used(), 8, "cinq octets, plus trois annulés");
+
+    // §3.2 : on prend acte de l'annulation, et la place se rend.
+    let annule = ams_proto_quic::StreamId::new(6).expect("un numéro");
+    serveur.read_reset(annule);
+    let mut place = std::vec![0_u8; 1_500];
+    let _ = serveur.poll_transmit(&mut place, horloge);
+    assert!(
+        serveur.streams().expect("établie").slot(annule).is_none(),
+        "la place du flux annulé est rendue"
+    );
+}
+
+/// **LE SERVEUR OUVRE SES PROPRES FLUX** (§2.1).
+///
+/// C'est ce dont HTTP/3 a besoin pour son flux de contrôle et ceux de QPACK :
+/// trois unidirectionnels que le serveur ouvre de lui-même, sans que le client
+/// ait rien demandé.
+#[test]
+fn le_serveur_ouvre_ses_propres_flux() {
+    let (_atelier, mut serveur, mut client, mut horloge) = etabli("ouvrir");
+    let sien = serveur
+        .open_stream(ams_proto_quic::Directional::Unidirectional)
+        .expect("le client lui en a ouvert huit");
+    assert_eq!(
+        sien.value(),
+        3,
+        "§2.1 : le premier unidirectionnel du serveur"
+    );
+
+    assert_eq!(serveur.write(sien, b"controle").expect("il écrit"), 8);
+    serveur.finish(sien).expect("et termine");
+    for _ in 0..4 {
+        let mut place = std::vec![0_u8; 1_500];
+        let ecrit = serveur
+            .poll_transmit(&mut place, horloge)
+            .expect("le serveur avance");
+        if ecrit == 0 {
+            break;
+        }
+        client.ecouter(place.get(..ecrit).expect("écrit"));
+        horloge = horloge.saturating_add(1_000);
+    }
+    assert_eq!(client.recu, b"controle");
+    assert_eq!(client.flux_recu, Some(3));
+    assert!(client.fin_recue);
+}
+
+/// **CE QU'ON N'A PAS OUVERT NE S'ÉCRIT PAS, ET NE SE LIT PAS.**
+#[test]
+fn ce_qu_on_n_a_pas_ouvert_ne_s_ecrit_pas() {
+    let (_atelier, mut serveur, _client, _horloge) = etabli("inconnu");
+    let inconnu = ams_proto_quic::StreamId::new(400).expect("un numéro");
+    assert_eq!(serveur.read(inconnu, &mut [0_u8; 8]), 0);
+    assert!(serveur.write(inconnu, b"x").is_err());
+    assert!(serveur.finish(inconnu).is_err());
+    // Et le dire à un flux qui n'existe pas ne fait rien.
+    serveur.read_reset(inconnu);
+}
+
+/// **L'ATTENTE D'ÉMISSION EST BORNÉE** (C3).
+///
+/// L'application écrit, et ces octets attendent qu'un paquet les emporte. Sans
+/// borne, une application pressée remplirait la mémoire du serveur plus vite que
+/// le réseau ne la vide — et ce serait notre faute, non celle du pair.
+#[test]
+fn l_attente_d_emission_est_bornee() {
+    let (_atelier, mut serveur, _client, _horloge) = etabli("borne");
+    let sien = serveur
+        .open_stream(ams_proto_quic::Directional::Unidirectional)
+        .expect("de la place");
+    let beaucoup = std::vec![0x61_u8; crate::connection::SORTIE_OCTETS_MAX];
+    assert_eq!(
+        serveur.write(sien, &beaucoup).expect("il prend tout"),
+        crate::connection::SORTIE_OCTETS_MAX
+    );
+    assert_eq!(
+        serveur
+            .write(sien, b"un octet de trop")
+            .expect("il en prend zéro"),
+        0,
+        "ET IL LE DIT, plutôt que de faire croire que c'est parti"
+    );
+}
+
+/// **UNE TRAME HORS DE SON NIVEAU FERME LA CONNEXION** (§12.4).
+///
+/// « An endpoint MUST treat receipt of a frame in a packet type that is not
+/// permitted as a connection error of type PROTOCOL_VIOLATION. »
+///
+/// # CE N'EST PAS UNE FORMALITÉ
+///
+/// Sans ce contrôle, une trame de flux dans un paquet de poignée de main
+/// atteindrait une collection qui n'existe pas encore. Et l'ignorer en silence
+/// ne vaudrait pas mieux : le pair croirait avoir dit quelque chose.
+#[test]
+fn une_trame_hors_de_son_niveau_ferme_la_connexion() {
+    let atelier = atelier("hors-niveau");
+    let (autorite, cert, cle) = materiel(&atelier.0).expect(SANS_OPENSSL);
+    let horloge = 1_000_000_u64;
+    let mut client = Client::new(
+        config_client(&autorite, ams_tls::alpn_h3()),
+        &ses_parametres_avec_flux(),
+    );
+    let premier_datagramme = client.parler();
+    let arrivee = premier(&premier_datagramme);
+    let mut serveur = Connection::accept(
+        config_serveur(&cert, &cle),
+        &arrivee,
+        identifiant(&LOCAL),
+        identifiant(&CLIENT),
+        horloge,
+    )
+    .expect("constructible");
+
+    // Une trame `STREAM` dans un paquet `Initial` : §12.4 ne l'admet pas.
+    let mut trames = [0_u8; 64];
+    let ecrits = (Frame::Stream {
+        stream: 0,
+        offset: 0,
+        data: b"trop tot",
+        fin: false,
+    })
+    .write(&mut trames)
+    .expect("écrivable");
+    let mut datagramme = Vec::new();
+    client.poser(
+        &mut datagramme,
+        Space::Initial,
+        trames.get(..ecrits).expect("écrits"),
+    );
+    datagramme.resize(1_200.max(datagramme.len()), 0);
+
+    let faute = serveur
+        .on_datagram(&mut datagramme, horloge)
+        .expect_err("§12.4 la refuse");
+    assert_eq!(
+        faute.close_code(),
+        TransportError::ProtocolViolation.value()
+    );
+}
+
+/// **UN SERVEUR NE REÇOIT PAS DE `HANDSHAKE_DONE`** (§19.20).
+///
+/// « A server MUST treat receipt of a HANDSHAKE_DONE frame as a connection error
+/// of type PROTOCOL_VIOLATION. » C'est lui qui l'émet : en recevoir un veut dire
+/// que le pair se croit serveur, et rien de ce qui suivrait n'aurait le sens
+/// qu'on lui prêterait.
+#[test]
+fn un_serveur_ne_recoit_pas_de_handshake_done() {
+    let (_atelier, mut serveur, mut client, horloge) = etabli("handshake-done");
+    let mut trames = [0_u8; 8];
+    let ecrits = Frame::HandshakeDone.write(&mut trames).expect("écrivable");
+    let mut datagramme = un_paquet_du_client(&mut client, trames.get(..ecrits).expect("écrits"));
+    let faute = serveur
+        .on_datagram(&mut datagramme, horloge)
+        .expect_err("§19.20 la refuse");
+    assert_eq!(
+        faute.close_code(),
+        TransportError::ProtocolViolation.value()
+    );
+}
+
+/// **UN FLUX ACQUITTÉ SE TERMINE, ET REND SA PLACE** (§3.1).
+///
+/// C'est l'acquittement du `FIN` qui fait passer le côté émission à
+/// `Data Recvd`. Sans lui, un flux resterait vivant pour toujours et sa place ne
+/// reviendrait jamais à la table.
+#[test]
+fn un_flux_acquitte_se_termine_et_rend_sa_place() {
+    let (_atelier, mut serveur, mut client, mut horloge) = etabli("acquitte");
+    let sien = serveur
+        .open_stream(ams_proto_quic::Directional::Unidirectional)
+        .expect("de la place");
+    serveur.write(sien, b"bonjour").expect("il écrit");
+    serveur.finish(sien).expect("et termine");
+
+    // Le paquet part, le client l'entend, puis l'acquitte.
+    for _ in 0..6 {
+        let mut place = std::vec![0_u8; 1_500];
+        let ecrit = serveur
+            .poll_transmit(&mut place, horloge)
+            .expect("le serveur avance");
+        if ecrit == 0 {
+            break;
+        }
+        client.ecouter(place.get(..ecrit).expect("écrit"));
+        horloge = horloge.saturating_add(1_000);
+        let mut du_client = client.parler();
+        if !du_client.is_empty() {
+            serveur
+                .on_datagram(&mut du_client, horloge)
+                .expect("son acquittement");
+        }
+    }
+    assert_eq!(client.recu, b"bonjour");
+    assert!(
+        client.fin_recue,
+        "§19.8 : le `FIN` chevauchait les derniers octets"
+    );
+    assert!(
+        serveur.streams().expect("établie").slot(sien).is_none(),
+        "TOUT EST ACQUITTÉ : la place est revenue à la table"
+    );
+}
+
+/// **CE QUI S'EST PERDU REPART** (§13.3).
+///
+/// Le premier paquet n'arrive jamais. C'est la détection de perte de §6.1.1 qui
+/// recule le curseur d'émission, et les paquets suivants redisent ce qui
+/// manquait. Sans cela, le flux se figerait sur un trou que personne ne
+/// comblerait — et rien ne le dirait.
+///
+/// # IL FAUT PLUSIEURS PAQUETS, ET C'EST TOUT LE MONTAGE
+///
+/// §6.1.1 déclare perdu ce qu'un acquittement distance de trois paquets. Avec un
+/// seul paquet en vol, rien ne le distance jamais : l'essai passerait sans avoir
+/// rien éprouvé. On écrit donc de quoi en remplir plusieurs.
+#[test]
+fn ce_qui_s_est_perdu_repart() {
+    let (_atelier, mut serveur, mut client, mut horloge) = etabli("perte-de-flux");
+    let sien = serveur
+        .open_stream(ams_proto_quic::Directional::Unidirectional)
+        .expect("de la place");
+    let dire = std::vec![0x7a_u8; 5_000];
+    let mut ecrits = 0_usize;
+    while ecrits < dire.len() {
+        let pris = serveur
+            .write(sien, dire.get(ecrits..).expect("le reste"))
+            .expect("il écrit");
+        if pris == 0 {
+            break;
+        }
+        ecrits = ecrits.saturating_add(pris);
+    }
+    assert_eq!(ecrits, dire.len());
+    serveur.finish(sien).expect("et termine");
+
+    let mut jete = false;
+    for _ in 0..40 {
+        let mut place = std::vec![0_u8; 1_500];
+        let ecrit = serveur
+            .poll_transmit(&mut place, horloge)
+            .expect("le serveur avance");
+        if ecrit > 0 {
+            // **LE PREMIER SE PERD, ET LUI SEUL.**
+            match jete {
+                false => jete = true,
+                true => client.ecouter(place.get(..ecrit).expect("écrit")),
+            }
+        }
+        horloge = horloge.saturating_add(20_000);
+        let mut du_client = client.parler();
+        if !du_client.is_empty() {
+            serveur
+                .on_datagram(&mut du_client, horloge)
+                .expect("ses acquittements");
+        }
+    }
+    assert!(jete, "un paquet a bien été perdu");
+    assert_eq!(
+        client.recu, dire,
+        "LES OCTETS PERDUS SONT REPARTIS, et le flux ne s'est pas figé"
+    );
+    assert!(client.fin_recue, "§19.8 : le `FIN` aussi");
+}
+
+/// **ON NE TERMINE UN FLUX QU'UNE FOIS** (§3.1).
+///
+/// Un second `FIN` sur un flux déjà terminé n'a rien à dire, et l'écrire ferait
+/// se contredire la taille finale (§4.5).
+#[test]
+fn on_ne_termine_un_flux_qu_une_fois() {
+    let (_atelier, mut serveur, _client, horloge) = etabli("deux-fins");
+    let sien = serveur
+        .open_stream(ams_proto_quic::Directional::Unidirectional)
+        .expect("de la place");
+    // **DES OCTETS, ET NON UN `FIN` SEUL** : un flux qui ne dit rien passe
+    // aussitôt à `Data Recvd` — il n'y a rien à acquitter —, et sa place
+    // reviendrait à la table avant qu'on ait pu redire quoi que ce soit.
+    serveur.write(sien, b"quelque chose").expect("il écrit");
+    serveur.finish(sien).expect("une fois");
+    let mut place = std::vec![0_u8; 1_500];
+    let _ = serveur.poll_transmit(&mut place, horloge);
+
+    // **LE FLUX EST EN `Data Sent`, ET IL LE DIT.** Se taire laisserait
+    // l'application croire qu'un second `FIN` partira — et §4.5 ferait alors se
+    // contredire la taille finale.
+    assert!(
+        serveur.finish(sien).is_err(),
+        "§3.1 : on ne termine un flux qu'une fois"
+    );
+    assert!(
+        serveur.write(sien, b"encore").is_err(),
+        "et l'on n'y écrit plus rien"
+    );
+    let mut encore = std::vec![0_u8; 1_500];
+    let _ = serveur.poll_transmit(&mut encore, horloge);
+    assert!(!serveur.is_closed(), "et cela ne condamne pas la connexion");
+    assert!(
+        serveur.streams().expect("établie").slot(sien).is_some(),
+        "le flux attend toujours son acquittement"
+    );
+}
+
+/// **UNE TRAME DE FLUX FAUTIVE FERME LA CONNEXION**, chacune avec son code.
+///
+/// §12.4 fait des fautes de flux des erreurs de connexion, et non des paquets à
+/// jeter : le pair a déjà agi sur ce qu'il croyait vrai, et continuer le
+/// laisserait s'enfoncer.
+#[test]
+fn une_trame_de_flux_fautive_ferme_la_connexion() {
+    // §4.1 : au-delà de ce qu'on a annoncé pour ce flux.
+    let cas: [(Frame<'_>, TransportError); 4] = [
+        (
+            Frame::Stream {
+                stream: 0,
+                offset: crate::connection::FLUX_OCTETS,
+                data: b"x",
+                fin: false,
+            },
+            TransportError::FlowControlError,
+        ),
+        // §4.6 : au-delà du plafond de flux qu'on a annoncé.
+        (
+            Frame::Stream {
+                stream: 400,
+                offset: 0,
+                data: b"x",
+                fin: false,
+            },
+            TransportError::StreamLimitError,
+        ),
+        // §19.5 : arrêter ce que nous n'écrivons pas.
+        (
+            Frame::StopSending {
+                stream: 2,
+                code: 0x10,
+            },
+            TransportError::StreamStateError,
+        ),
+        // §19.10 : ouvrir du crédit là où nous n'écrivons pas.
+        (
+            Frame::MaxStreamData {
+                stream: 2,
+                maximum: 10,
+            },
+            TransportError::StreamStateError,
+        ),
+    ];
+
+    for (numero, (trame, attendu)) in cas.into_iter().enumerate() {
+        let (_atelier, mut serveur, mut client, horloge) =
+            etabli(&std::format!("fautive-{numero}"));
+        let mut trames = std::vec![0_u8; 64];
+        let ecrits = trame.write(&mut trames).expect("écrivable");
+        let mut datagramme =
+            un_paquet_du_client(&mut client, trames.get(..ecrits).expect("écrits"));
+        let faute = serveur
+            .on_datagram(&mut datagramme, horloge)
+            .expect_err("cette trame est une faute");
+        assert_eq!(faute.close_code(), attendu.value(), "cas {numero}");
+    }
+}
+
+/// **UN `RESET_STREAM` QUI SE CONTREDIT FERME LA CONNEXION** (§4.5).
+///
+/// « Once a final size for a stream is known, it cannot change. » Une taille
+/// finale qui change veut dire que l'un des deux messages mentait — et
+/// l'application a peut-être déjà livré ce qu'elle a lu.
+#[test]
+fn un_reset_stream_qui_se_contredit_ferme_la_connexion() {
+    let (_atelier, mut serveur, mut client, horloge) = etabli("finale-contredite");
+    let mut trames = std::vec![0_u8; 64];
+    let mut pose = 0_usize;
+    for trame in [
+        Frame::Stream {
+            stream: 2,
+            offset: 0,
+            data: b"abcde",
+            fin: true,
+        },
+        Frame::ResetStream {
+            stream: 2,
+            code: 0x10,
+            final_size: 9,
+        },
+    ] {
+        let place = trames.get_mut(pose..).expect("de la place");
+        pose = pose.saturating_add(trame.write(place).expect("écrivable"));
+    }
+    let mut datagramme = un_paquet_du_client(&mut client, trames.get(..pose).expect("posées"));
+    let faute = serveur
+        .on_datagram(&mut datagramme, horloge)
+        .expect_err("§4.5 la refuse");
+    assert_eq!(faute.close_code(), TransportError::FinalSizeError.value());
+}
+
+/// **UN PAQUET QUI NE S'AUTHENTIFIE PAS SE JETTE** (§5.3 de RFC 9001).
+///
+/// « An endpoint MUST discard packets that cannot be authenticated. » Ce n'est
+/// pas une indulgence : c'est ce qui empêche un tiers de fermer une connexion
+/// qui ne lui appartient pas — il lui suffirait sinon d'envoyer n'importe quoi à
+/// la bonne adresse.
+#[test]
+fn un_paquet_qui_ne_s_authentifie_pas_se_jette() {
+    let (_atelier, mut serveur, mut client, horloge) = etabli("faux-paquet");
+    let mut datagramme = un_paquet_du_client(&mut client, &[0x01]);
+    // Le dernier octet est dans l'étiquette d'authentification.
+    let dernier = datagramme.len().saturating_sub(1);
+    datagramme[dernier] ^= 0xff;
+    serveur
+        .on_datagram(&mut datagramme, horloge)
+        .expect("il se jette, il ne condamne pas");
+    assert!(!serveur.is_closed(), "et surtout, il ne ferme rien");
 }

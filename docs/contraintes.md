@@ -516,6 +516,80 @@ pas ses clés entre deux datagrammes, la seconde parce qu'une substitution de
 texte avait échoué en silence et laissé l'ancienne version en place. **Le
 symptôme désignait le serveur ; la cause était ailleurs, deux fois.**
 
+### Les flux câblés au conducteur, et quatre manques que les essais ont montrés
+
+Écrit le 2026-08-31. `ams-quic-tls::Connection` sert désormais `STREAM`,
+`RESET_STREAM`, `STOP_SENDING`, `MAX_DATA`, `MAX_STREAM_DATA` et `MAX_STREAMS`,
+émet des octets d'application, et offre à l'appelant `open_stream`, `write`,
+`finish`, `read` et `read_reset`.
+
+Les flux ne se bâtissent **qu'à la fin de la poignée de main** : §4.1 et §4.6 se
+règlent sur des paramètres que §7.4 ne laisse croire qu'authentifiés. Les bâtir
+plus tôt réglerait la connexion sur des limites que le pair n'a jamais annoncées,
+et `Reason::PasEncoreDeFlux` dit à l'application qu'elle a parlé trop tôt plutôt
+que de la laisser croire ses octets partis.
+
+Ce qu'on annonce est ce qu'on tient : seize kibioctets par flux, quatre fois cela
+pour la connexion, et les plafonds de la table. **La fenêtre par flux domine tout
+le coût d'un flux** — l'état tient en trois kibioctets —, et elle ne s'alloue
+qu'au premier octet reçu : un pair qui ouvre trente-deux flux sans rien y écrire
+ne doit pas nous faire réserver un demi-mébioctet.
+
+#### §12.4 n'était pas appliqué du tout
+
+Une trame de flux dans un paquet de poignée de main était ignorée en silence.
+« An endpoint MUST treat receipt of a frame in a packet type that is not
+permitted as a connection error of type PROTOCOL_VIOLATION. » Ce n'est pas une
+formalité : **sans ce contrôle, la trame atteignait une collection qui n'existe
+pas encore**. Et l'ignorer ne valait pas mieux, le pair croyant avoir dit quelque
+chose.
+
+Le même contrôle porte §19.20 : un serveur qui reçoit un `HANDSHAKE_DONE` doit
+fermer, puisque c'est lui qui l'émet. En recevoir un veut dire que le pair se
+croit serveur, et rien de ce qui suivrait n'aurait le sens qu'on lui prêterait.
+
+#### La fenêtre se rouvrait sur ce qui arrive, et non sur ce qui est lu
+
+§4.1 : « A receiver … extends the limit as data is consumed. » L'asseoir sur
+l'arrivée la laissait grande ouverte même si l'application ne lisait rien — et
+**le crédit de connexion ne bornait plus la mémoire qu'un pair peut nous faire
+retenir**, ce pour quoi il existe. `Streams` compte donc ce qui est consommé, et
+y ajoute ce qu'un flux rendu n'avait pas livré : ces octets-là ne seront jamais
+lus, et ne pas les compter perdrait leur crédit pour toujours.
+
+#### Rien ne rendait jamais les places
+
+Trente-deux flux, et plus jamais un de plus : la table se serait remplie de flux
+morts, et le pair aurait vu ses ouvertures refusées **sans avoir rien fait de
+mal**. La récolte passe donc à chaque datagramme reçu et avant chaque émission —
+ce qui met le `MAX_STREAMS` dans le paquet courant plutôt que dans le suivant.
+
+#### Le `FIN` chevauche les derniers octets
+
+§19.8 le pose sur la trame qui porte la fin. L'attendre coûtait un paquet de plus
+par flux, et un aller-retour de plus pour l'acquitter. Un détail de bande
+passante, trouvé parce qu'un essai attendait l'acquittement d'un flux qui ne
+venait jamais dans le tour prévu.
+
+#### Et un défaut du CLIENT D'ESSAI, pour la troisième fois de suite
+
+Il bourrait tout datagramme à 1200 octets, alors que §14.1 ne l'exige que pour
+ceux qui portent un `Initial`. **Un en-tête court n'a pas de champ de longueur**
+(§17.3) : sa charge va jusqu'au bout du datagramme, et les zéros entraient donc
+dans le chiffré. Les paquets ne s'authentifiaient plus, et **aucun acquittement
+applicatif n'était jamais parvenu au serveur** — ce qui se voyait comme un
+conducteur qui ne terminait pas ses flux.
+
+Le symptôme désignait le conducteur ; la faute était dans l'essai. C'est la
+troisième fois, et les trois fois le symptôme a désigné le serveur.
+
+#### Sept gardes inatteignables de plus
+
+Toutes signalées par la couverture, dont une redondance introduite dans
+`rang_ouvert` en écrivant cette tranche même. Elle est remplacée par
+`Streams::can_send`, qui distingue « ce flux n'émet pas » de « son crédit est
+nul » — deux choses que confondre aurait fait refuser un flux simplement bloqué.
+
 ### La collection de flux, et ce que le fuzz a trouvé
 
 Écrite le 2026-08-31, dans `ams-quic::streams`. **Toutes les machines par flux

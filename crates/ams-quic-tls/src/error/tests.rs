@@ -25,6 +25,13 @@ fn chaque_raison_a_son_code_et_son_mot() {
         (Reason::WrongAlpn, 0x0178, "h3"),
         // §20.1 de RFC 9000 : `TRANSPORT_PARAMETER_ERROR` vaut 0x08.
         (Reason::BadParameters, 0x08, "paramètres de transport"),
+        // §20.1 : `INTERNAL_ERROR`. Le pair n'y est pour rien quand c'est nous
+        // qui parlons de flux avant que la poignée de main les ouvre.
+        (
+            Reason::PasEncoreDeFlux,
+            0x01,
+            "n'a pas encore ouvert les flux",
+        ),
         (
             Reason::Quic(ams_quic::Reason::CryptoInZeroRtt),
             0x0a,
