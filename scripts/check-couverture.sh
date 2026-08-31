@@ -52,6 +52,7 @@ CRATES_SANS_IO=(
     ams-proto-h3
     ams-quic-crypto
     ams-quic
+    ams-quic-tls
     ams-session
     ams-guard
     ams-tls

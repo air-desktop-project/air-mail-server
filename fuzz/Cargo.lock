@@ -212,6 +212,7 @@ version = "0.1.0"
 name = "ams-tls"
 version = "0.1.0"
 dependencies = [
+ "ams-quic-crypto",
  "ml-kem",
  "rustls",
  "rustls-rustcrypto",

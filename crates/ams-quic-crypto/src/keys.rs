@@ -112,6 +112,74 @@ impl Keys {
         Ok(clefs)
     }
 
+    /// Les clés de paquet que ces octets DÉJÀ DÉRIVÉS décrivent.
+    ///
+    /// # POURQUOI CE CONSTRUCTEUR EXISTE
+    ///
+    /// L'interface QUIC de rustls conduit la poignée de main TLS et rend le
+    /// matériel déjà dérivé, moitié par moitié : les clés de paquet d'un côté,
+    /// la protection d'en-tête de l'autre. [`Keys::from_secret`] ne peut donc pas
+    /// servir ce pont-là.
+    ///
+    /// Il n'est pas public : ce qu'il rend porte des zéros dans la moitié qu'on
+    /// ne lui a pas donnée, et un `Keys` à moitié nul n'a pas de sens hors du
+    /// type qui l'encapsule. Voir [`PacketKeys`].
+    ///
+    /// # LA LONGUEUR EST EXACTE, ET NON « AU PLUS »
+    ///
+    /// **Une clé plus courte que la suite n'emploie serait complétée de zéros**,
+    /// et le chiffrement marcherait — avec une clé dont la queue est publique.
+    /// Personne ne le verrait : l'aller-retour passerait. On refuse donc tout ce
+    /// qui n'a pas exactement la longueur attendue.
+    ///
+    /// # Errors
+    ///
+    /// [`Reason::BadSecretLength`] si la clé ou le vecteur n'ont pas exactement
+    /// la longueur que la suite emploie.
+    pub(crate) fn packet_parts(suite: Suite, cle: &[u8], iv: &[u8]) -> Result<Self, Error> {
+        if cle.len() != suite.key_len() || iv.len() != IV_OCTETS {
+            return Err(Error::new(Reason::BadSecretLength));
+        }
+        let mut clefs = Self {
+            suite,
+            cle: [0_u8; KEY_OCTETS_MAX],
+            iv: [0_u8; IV_OCTETS],
+            hp: [0_u8; KEY_OCTETS_MAX],
+        };
+        for (place, lu) in clefs.cle.iter_mut().zip(cle) {
+            *place = *lu;
+        }
+        for (place, lu) in clefs.iv.iter_mut().zip(iv) {
+            *place = *lu;
+        }
+        Ok(clefs)
+    }
+
+    /// La clé de protection d'en-tête que ces octets DÉJÀ DÉRIVÉS décrivent.
+    ///
+    /// Le pendant de [`Keys::packet_parts`], pour l'autre moitié. Voir
+    /// [`HeaderKeys`].
+    ///
+    /// # Errors
+    ///
+    /// [`Reason::BadSecretLength`] si la clé n'a pas exactement la longueur que
+    /// la suite emploie.
+    pub(crate) fn header_parts(suite: Suite, hp: &[u8]) -> Result<Self, Error> {
+        if hp.len() != suite.header_key_len() {
+            return Err(Error::new(Reason::BadSecretLength));
+        }
+        let mut clefs = Self {
+            suite,
+            cle: [0_u8; KEY_OCTETS_MAX],
+            iv: [0_u8; IV_OCTETS],
+            hp: [0_u8; KEY_OCTETS_MAX],
+        };
+        for (place, lu) in clefs.hp.iter_mut().zip(hp) {
+            *place = *lu;
+        }
+        Ok(clefs)
+    }
+
     /// La suite.
     #[must_use]
     pub const fn suite(&self) -> Suite {
@@ -224,6 +292,20 @@ impl Keys {
             .get(..SAMPLE_OCTETS)
             .and_then(|lus| lus.try_into().ok())
             .ok_or_else(court)?;
+        Ok(self.masque_de(&seize))
+    }
+
+    /// Le masque d'un échantillon DONT LA LONGUEUR EST PORTÉE PAR LE TYPE.
+    ///
+    /// # POURQUOI CETTE VERSION-CI NE PEUT PAS ÉCHOUER
+    ///
+    /// [`Keys::header_mask`] a une seule cause d'échec : un échantillon trop
+    /// court. Ici, il n'y en a plus — le tableau a sa taille. **Un `Result` dont
+    /// la variante d'erreur est inatteignable n'est pas une prudence : c'est une
+    /// branche que personne n'éprouvera jamais**, et qui masque, dans chaque
+    /// appelant, un `?` mort.
+    fn masque_de(&self, seize: &[u8; SAMPLE_OCTETS]) -> [u8; MASK_OCTETS] {
+        let seize = *seize;
         let mut masque = [0_u8; MASK_OCTETS];
         match self.suite {
             // §5.4.3 : le masque est le chiffré du bloc, par AES en mode ECB.
@@ -269,7 +351,7 @@ impl Keys {
                 flux.apply_keystream(&mut masque);
             }
         }
-        Ok(masque)
+        masque
     }
 }
 
@@ -363,6 +445,103 @@ fn dechiffrer(
                 .decrypt_inout_detached(nonce.into(), aad, corps.into(), tag.into())
                 .map_err(|_| faux())
         }
+    }
+}
+
+/// Ce qui chiffre la charge d'un paquet, **et rien d'autre**.
+///
+/// # POURQUOI UN TYPE, ET NON UN `Keys` À MOITIÉ REMPLI
+///
+/// L'interface QUIC de rustls demande les deux moitiés séparément. Rendre un
+/// [`Keys`] dont la protection d'en-tête serait nulle donnerait un objet qui
+/// SAIT masquer un en-tête, et le masquerait avec une clé de zéros — une faute
+/// qu'aucun essai ne verrait, puisque le masque serait bien appliqué.
+///
+/// Ce type-ci ne sait pas masquer. La faute devient inexprimable.
+#[derive(Debug, Clone, Copy)]
+pub struct PacketKeys(Keys);
+
+impl PacketKeys {
+    /// Les clés que ces octets décrivent.
+    ///
+    /// # Errors
+    ///
+    /// [`Reason::BadSecretLength`] si la clé ou le vecteur n'ont pas exactement
+    /// la longueur que la suite emploie.
+    pub fn new(suite: Suite, cle: &[u8], iv: &[u8]) -> Result<Self, Error> {
+        Keys::packet_parts(suite, cle, iv).map(Self)
+    }
+
+    /// La suite.
+    #[must_use]
+    pub const fn suite(&self) -> Suite {
+        self.0.suite()
+    }
+
+    /// Le nonce d'un numéro de paquet (§5.3).
+    #[must_use]
+    pub fn nonce(&self, numero: u64) -> [u8; IV_OCTETS] {
+        self.0.nonce(numero)
+    }
+
+    /// Chiffre en place — voir [`Keys::seal`].
+    ///
+    /// # Errors
+    ///
+    /// [`Reason::BufferTooSmall`].
+    pub fn seal(
+        &self,
+        numero: u64,
+        aad: &[u8],
+        tampon: &mut [u8],
+        clair: usize,
+    ) -> Result<usize, Error> {
+        self.0.seal(numero, aad, tampon, clair)
+    }
+
+    /// Déchiffre en place — voir [`Keys::open`].
+    ///
+    /// # Errors
+    ///
+    /// [`Reason::NotAuthentic`], [`Reason::BufferTooSmall`].
+    pub fn open(&self, numero: u64, aad: &[u8], tampon: &mut [u8]) -> Result<usize, Error> {
+        self.0.open(numero, aad, tampon)
+    }
+}
+
+/// Ce qui masque un en-tête, **et rien d'autre**.
+///
+/// Le pendant de [`PacketKeys`] : il ne sait ni chiffrer ni déchiffrer une
+/// charge, donc il ne peut pas le faire avec une clé de zéros.
+#[derive(Debug, Clone, Copy)]
+pub struct HeaderKeys(Keys);
+
+impl HeaderKeys {
+    /// La clé que ces octets décrivent.
+    ///
+    /// # Errors
+    ///
+    /// [`Reason::BadSecretLength`] si la clé n'a pas exactement la longueur que
+    /// la suite emploie.
+    pub fn new(suite: Suite, cle: &[u8]) -> Result<Self, Error> {
+        Keys::header_parts(suite, cle).map(Self)
+    }
+
+    /// La suite.
+    #[must_use]
+    pub const fn suite(&self) -> Suite {
+        self.0.suite()
+    }
+
+    /// Le masque d'un échantillon — voir [`Keys::header_mask`].
+    ///
+    /// **CELUI-CI NE PEUT PAS ÉCHOUER** : l'échantillon a sa taille, parce que
+    /// son type la porte. C'est ce qui permet au pont vers rustls de n'avoir
+    /// aucune branche de refus à cet endroit — et donc aucune branche que
+    /// personne n'éprouve.
+    #[must_use]
+    pub fn mask(&self, echantillon: &[u8; SAMPLE_OCTETS]) -> [u8; MASK_OCTETS] {
+        self.0.masque_de(echantillon)
     }
 }
 

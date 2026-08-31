@@ -201,6 +201,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ams-quic-tls"
+version = "0.1.0"
+dependencies = [
+ "ams-proto-quic",
+ "ams-quic",
+ "ams-tls",
+ "rustls",
+]
+
+[[package]]
 name = "ams-sasl"
 version = "0.1.0"
 
@@ -258,6 +268,7 @@ dependencies = [
 name = "ams-tls"
 version = "0.1.0"
 dependencies = [
+ "ams-quic-crypto",
  "ml-kem",
  "rustls",
  "rustls-rustcrypto",

@@ -9,6 +9,9 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+# La protection de paquet QUIC : vérifiée contre les vecteurs de l'annexe A de
+# RFC 9001, et branchée telle quelle sur l'interface QUIC de rustls.
+ams-quic-crypto = { workspace = true }
 ml-kem = { workspace = true }
 rustls = { workspace = true }
 rustls-rustcrypto = { workspace = true }

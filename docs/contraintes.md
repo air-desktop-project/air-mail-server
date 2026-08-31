@@ -208,6 +208,114 @@ donne, et ne vérifie pas d'où il vient. C'est une revue, pas un gate.
    parce qu'elle décrit toujours `rustls-rustcrypto` seul — c'est nous qui
    comblons le manque, pas l'amont.
 
+### La quatrième réserve : aucune suite ne savait chiffrer un paquet QUIC
+
+Constaté le 2026-08-31, en cherchant à monter HTTP/3.
+
+`rustls` sait conduire la poignée de main TLS 1.3 de QUIC, mais **seulement pour
+les suites dont le fournisseur déclare savoir chiffrer un PAQUET QUIC** — ce qui
+n'est pas la même chose que chiffrer un enregistrement TLS. §5 de RFC 9001
+définit une protection de paquet distincte : un AEAD dont le nonce dérive du
+numéro de paquet, et un masquage d'en-tête qui n'existe pas en TLS.
+
+Les trois suites de `rustls-rustcrypto` portaient `quic: None`.
+`rustls::quic::ServerConnection` refusait donc de se construire, avec le message
+« at least one ciphersuite must support QUIC ». **HTTP/3 était bloqué avant sa
+première ligne.**
+
+La réserve est **levée le 2026-08-31**, par `crates/ams-tls/src/quic.rs` :
+
+- `provider_quic()` rend le fournisseur ordinaire dont chaque suite porte en plus
+  un algorithme QUIC. Les suites que ce module ne sait pas conduire sont
+  **écartées** plutôt que laissées sans QUIC : les laisser passer les ferait
+  échouer APRÈS la poignée de main, au premier paquet — un symptôme très loin de
+  sa cause.
+- Les trois traits de `rustls::quic` (`Algorithm`, `PacketKey`,
+  `HeaderProtectionKey`) sont branchés sur **`ams-quic-crypto`**, vérifié contre
+  les vecteurs de l'annexe A de RFC 9001. Rien n'est réimplémenté : une seconde
+  implémentation de la même chose finit par diverger sur le cas que personne n'a
+  éprouvé, et celle-ci n'aurait pas eu de vecteurs.
+- Les suites capables de QUIC sont des **constantes de compilation**, pas des
+  objets fuités à l'exécution. La première version employait `Box::leak` une fois
+  par appel ; c'est `LeakSanitizer`, sous `cargo fuzz`, qui a compté les octets
+  perdus. Un serveur n'appelle `provider_quic()` qu'au démarrage — mais une
+  fonction publique ne choisit pas ses appelants.
+- `ALPN_H3` et `alpn_h3()` annoncent `h3`, et rien d'autre. Même règle que `h2`
+  sur TCP : annoncer un protocole qu'on refuse de servir est pire que de ne pas
+  l'annoncer.
+
+**Ce qui est mesuré, et non supposé** : `rustls` et `ams-quic-crypto` dérivent
+les MÊMES clés initiales. L'essai `rustls_et_nous_derivons_les_memes_clefs_initiales`
+fait chiffrer le même paquet par les deux chemins et compare les octets. Aucun
+essai d'`ams-quic-crypto` ne pouvait l'établir : là-bas, notre dérivation
+dialogue avec elle-même. La cible de fuzz `fuzz_ams_tls_quic` étend la même
+comparaison à tout ce qui n'est pas dans l'annexe.
+
+**Ce qui reste à faire** : le fournisseur est capable de QUIC, ce n'est pas la
+même chose que servir HTTP/3. Le pont de poignée de main a suivi le 2026-08-31
+(voir ci-dessous) ; restent l'écoute UDP avec démultiplexage par identifiant de
+connexion et garde d'amplification, la reprise sur perte et la génération
+d'`ACK`, puis seulement le conducteur HTTP/3.
+
+### La poignée de main, et pourquoi elle occupe deux crates
+
+Écrit le 2026-08-31. §4 de RFC 9001 décrit comment TLS et QUIC se parlent. Deux
+crates s'en partagent le travail, et le partage n'est pas décoratif :
+
+- **`ams-quic::handshake`** tient les RÈGLES : trois flux `CRYPTO` (un par
+  niveau, `0-RTT` excepté), le réassemblage hors d'ordre, et les quatre refus que
+  §4.1.3, §8.3 et §7.5 nomment. **Elle n'alloue pas** — comme le reste
+  d'`ams-quic`, elle tient les décalages et laisse les octets à l'appelant.
+- **`ams-quic-tls`** conduit `rustls::quic::ServerConnection` d'après ces règles,
+  possède les trois fenêtres de quatre kibioctets, et traduit chaque refus en
+  code de fermeture.
+
+Pourquoi pas dans `ams-tls` ? Parce que son manifeste dit « TLS 1.3 :
+établissement et chiffrement d'enregistrements », et qu'une machine de connexion
+QUIC n'est pas cela. RFC 9001 est elle-même un document séparé de RFC 8446 et de
+RFC 9000, pour la même raison.
+
+#### Les quatre refus, et leurs codes
+
+| Ce qui arrive | Où c'est écrit | Ce qu'on ferme avec |
+| --- | --- | --- |
+| Une trame `CRYPTO` dans un paquet `0-RTT` | §8.3 | `PROTOCOL_VIOLATION` |
+| Du NEUF à un niveau déjà dépassé | §4.1.3 | `PROTOCOL_VIOLATION` |
+| Des clés plus hautes, des octets non lus plus bas | §4.1.3 | `PROTOCOL_VIOLATION` |
+| Plus de `CRYPTO` hors d'ordre qu'on n'en retient | §7.5 de RFC 9000 | `CRYPTO_BUFFER_EXCEEDED` |
+
+Le dernier **n'est pas une faute interne**, contrairement à la fenêtre trop
+courte d'un flux ordinaire : il n'y a pas de contrôle de flux sur `CRYPTO`, donc
+rien n'avait annoncé de limite au pair — mais la RFC lui a quand même donné un
+code, parce que la borne devait bien exister quelque part. La nôtre est de
+**4096 octets par niveau**, le plancher que §7.5 impose.
+
+#### Ce que le vrai client a trouvé, et qu'un faux n'aurait pas vu
+
+L'essai monte un `rustls::quic::ClientConnection` en face, avec une autorité et
+un certificat produits par `openssl`. Il a fait tomber deux choses :
+
+1. **Lire et écrire n'avancent pas ensemble.** La première version installait le
+   même niveau des deux côtés à chaque changement de clés. Or le serveur reçoit
+   ses clés de `1-RTT` en même temps qu'il envoie son `Finished`, tandis que le
+   `Finished` DU CLIENT arrive encore en `Handshake` : passer la lecture en
+   `1-RTT` à ce moment-là faisait refuser, comme « du neuf à un niveau déjà
+   dépassé », la seule chose qui termine la poignée de main. Un essai avec
+   soi-même aurait fait la même faute des deux côtés.
+2. **Un certificat auto-signé n'est pas un certificat serveur.** `openssl req
+   -x509` produit `CA:TRUE`, et webpki refuse `CaUsedAsEndEntity` — à raison,
+   puisqu'une autorité peut signer n'importe quel nom. Le matériel d'essai monte
+   donc une autorité, puis une paire qu'elle signe.
+
+Une troisième subtilité est consignée sans être corrigée, parce qu'elle ne nous
+concerne pas : `write_hs` coupe le vol avant le premier message à chiffrer, **ce
+qui ne se produit que s'il reste quelque chose à émettre en clair devant**. Côté
+serveur, c'est toujours le cas — le `ServerHello` précède tout. Côté client, non :
+son `Finished` est seul dans la file, et `write_hs` le rend dans le même appel
+que les clés de `Handshake`, alors qu'il appartient au niveau `Handshake`. C'est
+la raison pour laquelle `ams-quic-tls` n'offre pas de côté client : la règle
+simple qui suffit ici ne suffirait pas là.
+
 ## C5 — Le moteur d'entrées-sorties, par cible
 
 | Cible | Moteur |

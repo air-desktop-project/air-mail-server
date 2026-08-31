@@ -65,6 +65,30 @@ fn jeter_et_ne_pas_avoir_de_code_sont_la_meme_chose() {
             Some(TransportError::InternalError),
             "la taille annoncée",
         ),
+        // §8.3 et §4.1.3 de RFC 9001 : trois façons de parler mal entre les
+        // niveaux de chiffrement, et la même sanction.
+        (
+            Reason::CryptoInZeroRtt,
+            Some(TransportError::ProtocolViolation),
+            "0-RTT",
+        ),
+        (
+            Reason::CryptoAfterLevel,
+            Some(TransportError::ProtocolViolation),
+            "déjà dépassé",
+        ),
+        (
+            Reason::CryptoNotConsumed,
+            Some(TransportError::ProtocolViolation),
+            "non lus",
+        ),
+        // **ET CELLE-CI N'EST PAS UNE FAUTE INTERNE** : la RFC lui a donné son
+        // propre code, parce qu'il n'y a pas de contrôle de flux sur CRYPTO.
+        (
+            Reason::CryptoBufferExceeded,
+            Some(TransportError::CryptoBufferExceeded),
+            "hors d'ordre",
+        ),
     ];
     for (raison, code, morceau) in cas {
         let faute = Error::new(raison);

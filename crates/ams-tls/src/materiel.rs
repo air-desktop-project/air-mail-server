@@ -107,6 +107,42 @@ pub fn alpn() -> Vec<Vec<u8>> {
 /// [`Error`] — chaîne illisible ou vide, clé illisible, ou clé qui ne
 /// correspond pas au certificat de tête.
 pub fn server_config(chain_pem: &[u8], key_pem: &[u8]) -> Result<ServerConfig, Error> {
+    assembler(chain_pem, key_pem, provider())
+}
+
+/// La même chose, mais capable de conduire une poignée de main QUIC.
+///
+/// # POURQUOI DEUX FONCTIONS PLUTÔT QU'UN PARAMÈTRE
+///
+/// Un paramètre « quel fournisseur » se renseignerait mal un jour. **Une
+/// configuration QUIC montée sur le fournisseur ordinaire ne se voit pas** :
+/// elle se construit, elle démarre, et `rustls::quic::ServerConnection` refuse
+/// ensuite avec « at least one ciphersuite must support QUIC » — au montage de
+/// la première connexion, loin du fichier où le choix a été fait.
+///
+/// Ici, le nom de la fonction EST le choix, et il n'y a rien à renseigner. C'est
+/// la même règle que pour l'ALPN : ce qu'on ne peut pas exprimer ne peut pas
+/// être faux.
+///
+/// L'ALPN, elle, reste à la charge de l'appelant : cette configuration sert la
+/// poignée de main, et le protocole applicatif est une décision de la couche du
+/// dessus. Voir [`alpn_h3`](crate::alpn_h3).
+///
+/// # Errors
+///
+/// [`Error`] — chaîne illisible ou vide, clé illisible, ou clé qui ne
+/// correspond pas au certificat de tête.
+pub fn quic_server_config(chain_pem: &[u8], key_pem: &[u8]) -> Result<ServerConfig, Error> {
+    assembler(chain_pem, key_pem, crate::provider_quic())
+}
+
+/// Le corps commun des deux : les mêmes refus, le même TLS 1.3, un fournisseur
+/// qui change.
+fn assembler(
+    chain_pem: &[u8],
+    key_pem: &[u8],
+    fournisseur: rustls::crypto::CryptoProvider,
+) -> Result<ServerConfig, Error> {
     let chaine: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(chain_pem)
         .collect::<Result<_, _>>()
         .map_err(Error::Certificate)?;
@@ -119,7 +155,7 @@ pub fn server_config(chain_pem: &[u8], key_pem: &[u8]) -> Result<ServerConfig, E
 
     let cle = PrivateKeyDer::from_pem_slice(key_pem).map_err(Error::PrivateKey)?;
 
-    ServerConfig::builder_with_provider(Arc::new(provider()))
+    ServerConfig::builder_with_provider(Arc::new(fournisseur))
         .with_protocol_versions(&[&rustls::version::TLS13])
         // Ce `expect` ne peut pas se déclencher : il faudrait que le fournisseur
         // n'offre AUCUNE suite TLS 1.3, ce qu'un test de `provider` interdit

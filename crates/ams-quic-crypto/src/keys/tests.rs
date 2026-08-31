@@ -4,7 +4,7 @@
 
 //! Ce que les clés doivent produire, d'après RFC 9001 annexe A.
 
-use super::{INITIAL_SALT, Keys};
+use super::{HeaderKeys, INITIAL_SALT, IV_OCTETS, Keys, MASK_OCTETS, PacketKeys, SAMPLE_OCTETS};
 use crate::error::Reason;
 use crate::label::{expand_sha256, extract_sha256};
 use crate::suite::Suite;
@@ -355,4 +355,113 @@ fn le_trop_long_et_le_trop_court_ne_se_disent_pas_au_meme_endroit() {
     assert_eq!(issue.reason(), Reason::BadSecretLength);
     let issue = Keys::from_secret(Suite::Aes128Gcm, &[0_u8; 16]).expect_err("trop court");
     assert_eq!(issue.reason(), Reason::BadSecretLength);
+}
+
+/// **LES DEUX MOITIÉS RENDENT CE QUE LE TOUT RENDAIT** — annexe A.1 et A.2.
+///
+/// C'est la seule propriété qui compte pour le pont vers rustls : ce qui passe
+/// par [`PacketKeys`] doit chiffrer comme [`Keys`] chiffre, sans quoi le pont
+/// aurait sa propre implémentation, avec ses propres fautes.
+#[test]
+fn les_moities_chiffrent_comme_le_tout() {
+    let clefs = clefs_initiales(b"client in");
+    let paquet = PacketKeys::new(Suite::Aes128Gcm, clefs.key(), clefs.iv()).expect("constructible");
+    assert_eq!(paquet.suite(), Suite::Aes128Gcm);
+    assert_eq!(paquet.nonce(2), clefs.nonce(2));
+
+    let entete = hexa("c300000001088394c8f03e5157080000449e00000002");
+    let clair = hexa("060040f1010000ed0303ebf8fa56f129");
+    let mut par_le_tout = clair.clone();
+    par_le_tout.resize(clair.len() + 16, 0);
+    let mut par_la_moitie = par_le_tout.clone();
+    clefs
+        .seal(2, &entete, &mut par_le_tout, clair.len())
+        .expect("chiffrable");
+    paquet
+        .seal(2, &entete, &mut par_la_moitie, clair.len())
+        .expect("chiffrable");
+    assert_eq!(par_la_moitie, par_le_tout);
+
+    // Et ce que la moitié chiffre, la moitié le relit.
+    let lu = paquet
+        .open(2, &entete, &mut par_la_moitie)
+        .expect("lisible");
+    assert_eq!(par_la_moitie.get(..lu), Some(clair.as_slice()));
+}
+
+/// **LE MASQUE DE L'ANNEXE A.2, PAR LA MOITIÉ QUI MASQUE.**
+#[test]
+fn la_moitie_qui_masque_rend_le_masque_de_l_annexe() {
+    let clefs = clefs_initiales(b"client in");
+    let entete = HeaderKeys::new(Suite::Aes128Gcm, clefs.header_key()).expect("constructible");
+    assert_eq!(entete.suite(), Suite::Aes128Gcm);
+    let echantillon = hexa("d1b1c98dd7689fb8ec11d242b123dc9b");
+    let seize: [u8; SAMPLE_OCTETS] = echantillon.as_slice().try_into().expect("seize octets");
+    assert_eq!(
+        entete.mask(&seize).as_slice(),
+        hexa("437b9aec36").as_slice()
+    );
+}
+
+/// **UNE MOITIÉ NE SAIT FAIRE QUE SA MOITIÉ**, et chaque suite a ses longueurs.
+#[test]
+fn chaque_suite_a_ses_longueurs() {
+    for suite in [Suite::Aes128Gcm, Suite::Aes256Gcm, Suite::ChaCha20Poly1305] {
+        let cle = std::vec![0x2a_u8; suite.key_len()];
+        let paquet = PacketKeys::new(suite, &cle, &[0x0b_u8; IV_OCTETS]).expect("constructible");
+        assert_eq!(paquet.suite(), suite);
+        let hp = std::vec![0x3c_u8; suite.header_key_len()];
+        let entete = HeaderKeys::new(suite, &hp).expect("constructible");
+        assert_eq!(entete.suite(), suite);
+        assert_ne!(entete.mask(&[0x11_u8; SAMPLE_OCTETS]), [0_u8; MASK_OCTETS]);
+    }
+}
+
+/// **UNE LONGUEUR APPROCHANTE N'EST PAS UNE LONGUEUR.**
+///
+/// Une clé plus courte serait complétée de zéros, et tout marcherait — avec une
+/// clé dont la queue est publique. C'est la faute que ce refus rend impossible,
+/// et elle ne se verrait dans aucun aller-retour.
+#[test]
+fn une_moitie_de_la_mauvaise_longueur_se_refuse() {
+    let bon_iv = [0_u8; IV_OCTETS];
+    for (cle, iv) in [
+        (15_usize, IV_OCTETS),
+        (17, IV_OCTETS),
+        (0, IV_OCTETS),
+        (32, IV_OCTETS),
+        (16, IV_OCTETS - 1),
+        (16, IV_OCTETS + 1),
+        (16, 0),
+    ] {
+        let matiere = std::vec![0_u8; cle];
+        let vecteur = std::vec![0_u8; iv];
+        let issue = PacketKeys::new(Suite::Aes128Gcm, &matiere, &vecteur)
+            .expect_err("ni la clé ni le vecteur ne sont de la bonne taille");
+        assert_eq!(issue.reason(), Reason::BadSecretLength, "{cle} / {iv}");
+    }
+    assert!(PacketKeys::new(Suite::Aes128Gcm, &[0_u8; 16], &bon_iv).is_ok());
+
+    for longueur in [0_usize, 15, 17, 32] {
+        let matiere = std::vec![0_u8; longueur];
+        let issue = HeaderKeys::new(Suite::Aes128Gcm, &matiere).expect_err("mauvaise taille");
+        assert_eq!(issue.reason(), Reason::BadSecretLength, "{longueur}");
+    }
+    // Et ChaCha20 en veut trente-deux, pas seize.
+    assert!(HeaderKeys::new(Suite::ChaCha20Poly1305, &[0_u8; 16]).is_err());
+    assert!(HeaderKeys::new(Suite::ChaCha20Poly1305, &[0_u8; 32]).is_ok());
+}
+
+/// Une charge qui ne s'authentifie pas se refuse aussi par la moitié.
+#[test]
+fn la_moitie_refuse_ce_qui_est_abime() {
+    let clefs = clefs_initiales(b"client in");
+    let paquet = PacketKeys::new(Suite::Aes128Gcm, clefs.key(), clefs.iv()).expect("constructible");
+    let mut place = std::vec![0_u8; 32];
+    paquet
+        .seal(1, b"entete", &mut place, 16)
+        .expect("chiffrable");
+    place[0] ^= 0x01;
+    let issue = paquet.open(1, b"entete", &mut place).expect_err("abîmée");
+    assert_eq!(issue.reason(), Reason::NotAuthentic);
 }

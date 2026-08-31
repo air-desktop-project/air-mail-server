@@ -90,10 +90,12 @@ fuzz_ams_quic_crypto quic-crypto
 fuzz_ams_quic_receive quic-receive
 fuzz_ams_quic_stream quic-stream
 fuzz_ams_quic_connection quic-connection
+fuzz_ams_quic_handshake quic-handshake
 fuzz_ams_guard guard
 fuzz_ams_index_name index
 fuzz_ams_config config
 fuzz_ams_tls_kx tls
+fuzz_ams_tls_quic tls-quic
 fuzz_ams_sasl sasl
 fuzz_ams_spf spf
 fuzz_ams_spf_eval spf-eval

@@ -49,7 +49,7 @@ mod usage;
 
 pub use error::{Error, Reason};
 pub use header::{longueur_du_numero, protect, unprotect};
-pub use keys::{INITIAL_SALT, Keys};
+pub use keys::{HeaderKeys, INITIAL_SALT, Keys, PACKET_OCTETS_MAX, PacketKeys};
 pub use label::{expand_sha256, expand_sha384, extract_sha256, hkdf_label};
 pub use retry::{RETRY_KEY, RETRY_NONCE, retry_tag, verify_retry};
 pub use secret::{Role, Secret};

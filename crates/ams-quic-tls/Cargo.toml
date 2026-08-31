@@ -1,0 +1,24 @@
+[package]
+name = "ams-quic-tls"
+description = "La poignée de main TLS d'une connexion QUIC (RFC 9001 §4), sans entrée-sortie"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# LES RÈGLES DE §4 : quels octets vont à quel niveau, et ce qui se refuse entre
+# eux. Elles n'allouent pas, et ne connaissent pas rustls.
+ams-quic = { workspace = true }
+# LE FOURNISSEUR CAPABLE DE QUIC, et l'ALPN qu'on annonce.
+ams-tls = { workspace = true }
+# CELUI QUI CONDUIT LA POIGNÉE DE MAIN. `rustls::quic` traite des tampons, pas
+# des sockets : C1 tient.
+rustls = { workspace = true }
+# Les codes de fermeture de §20.1, pour ne pas les réécrire.
+ams-proto-quic = { workspace = true }
+
+[lints]
+workspace = true

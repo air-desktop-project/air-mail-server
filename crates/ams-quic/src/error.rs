@@ -75,6 +75,34 @@ pub enum Reason {
     /// qui ne tiennent pas disparaîtraient en silence, et le flux se figerait
     /// sans que rien ne l'explique.
     WindowTooSmall,
+    /// Une trame `CRYPTO` dans un paquet `0-RTT` (§8.3 de RFC 9001).
+    ///
+    /// **C'EST PAR LÀ QU'UN `EndOfEarlyData` ENTRERAIT** dans la transcription
+    /// de la poignée de main sans que personne ne l'ait autorisé. La RFC nomme
+    /// ce cas, et elle le condamne.
+    CryptoInZeroRtt,
+    /// De la matière NOUVELLE à un niveau de chiffrement déjà dépassé (§4.1.3).
+    ///
+    /// Une retransmission de ce qu'on a déjà vu reste licite — elle est même
+    /// attendue, puisque les acquittements se croisent. Ce qui est refusé, c'est
+    /// ce qui étend le flux d'un niveau que TLS a quitté : cela entrerait dans
+    /// une transcription que le pair croit close.
+    CryptoAfterLevel,
+    /// Des clés d'un niveau supérieur alors qu'un niveau inférieur a encore des
+    /// octets non consommés (§4.1.3).
+    ///
+    /// **CE QUE LES DEUX CÔTÉS ONT HACHÉ DIFFÉRERAIT** — précisément ce que la
+    /// poignée de main est censée rendre impossible.
+    CryptoNotConsumed,
+    /// Plus d'octets `CRYPTO` hors d'ordre qu'on ne peut en retenir (§7.5 de
+    /// RFC 9000).
+    ///
+    /// **ET CE N'EST PAS UNE FAUTE INTERNE**, contrairement à
+    /// [`Reason::WindowTooSmall`] : il n'y a pas de contrôle de flux sur
+    /// `CRYPTO`, donc rien n'avait annoncé de limite au pair — mais la RFC lui a
+    /// quand même donné un code, parce que la borne devait bien exister quelque
+    /// part.
+    CryptoBufferExceeded,
 }
 
 impl Reason {
@@ -104,6 +132,12 @@ impl Reason {
             }
             Self::StreamLimit => Some(TransportError::StreamLimitError),
             Self::WrongStreamDirection => Some(TransportError::StreamStateError),
+            // §4.1.3 et §8.3 de RFC 9001 : trois façons de parler mal entre les
+            // niveaux, et la même sanction.
+            Self::CryptoInZeroRtt | Self::CryptoAfterLevel | Self::CryptoNotConsumed => {
+                Some(TransportError::ProtocolViolation)
+            }
+            Self::CryptoBufferExceeded => Some(TransportError::CryptoBufferExceeded),
         }
     }
 
@@ -170,6 +204,10 @@ impl core::fmt::Display for Error {
             Reason::StreamLimit => "le pair a ouvert plus de flux qu'on ne lui en a ouvert",
             Reason::WrongStreamDirection => "le pair écrit sur un flux à contresens",
             Reason::WindowTooSmall => "la fenêtre ne fait pas la taille annoncée",
+            Reason::CryptoInZeroRtt => "une trame CRYPTO dans un paquet 0-RTT",
+            Reason::CryptoAfterLevel => "du neuf à un niveau de chiffrement déjà dépassé",
+            Reason::CryptoNotConsumed => "des clés plus hautes, et des octets non lus plus bas",
+            Reason::CryptoBufferExceeded => "plus de CRYPTO hors d'ordre qu'on n'en retient",
         };
         let suite = match self.se_jette() {
             true => "on le jette",

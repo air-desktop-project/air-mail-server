@@ -211,6 +211,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_ams_tls_quic"
+path = "fuzz_targets/fuzz_ams_tls_quic.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_ams_sasl"
 path = "fuzz_targets/fuzz_ams_sasl.rs"
 test = false
@@ -388,6 +395,13 @@ bench = false
 [[bin]]
 name = "fuzz_ams_quic_connection"
 path = "fuzz_targets/fuzz_ams_quic_connection.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ams_quic_handshake"
+path = "fuzz_targets/fuzz_ams_quic_handshake.rs"
 test = false
 doc = false
 bench = false
