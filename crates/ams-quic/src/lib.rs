@@ -39,6 +39,7 @@
 extern crate std;
 
 mod connection;
+mod emit;
 mod error;
 mod flow;
 mod handshake;
@@ -49,6 +50,7 @@ mod routing;
 mod send;
 
 pub use connection::{AMPLIFICATION_FACTOR, CLOSING_PTOS, Connection, IDLE_PTOS, State};
+pub use emit::{Plan, payload_capacity, seal_packet};
 pub use error::{Error, Reason};
 pub use flow::{Concurrence, Concurrences, Cote, Flow};
 pub use handshake::{CRYPTO_OCTETS_MAX, Handshake, Level, crypto_error};

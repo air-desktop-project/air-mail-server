@@ -92,6 +92,7 @@ fuzz_ams_quic_stream quic-stream
 fuzz_ams_quic_connection quic-connection
 fuzz_ams_quic_handshake quic-handshake
 fuzz_ams_quic_routing quic-routing
+fuzz_ams_quic_emit quic-emit
 fuzz_ams_guard guard
 fuzz_ams_index_name index
 fuzz_ams_config config

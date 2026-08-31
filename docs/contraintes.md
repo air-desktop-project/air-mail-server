@@ -252,10 +252,10 @@ dialogue avec elle-même. La cible de fuzz `fuzz_ams_tls_quic` étend la même
 comparaison à tout ce qui n'est pas dans l'annexe.
 
 **Ce qui reste à faire** : le fournisseur est capable de QUIC, ce n'est pas la
-même chose que servir HTTP/3. Le pont de poignée de main et le tri des
-datagrammes ont suivi le 2026-08-31 (voir ci-dessous) ; restent l'émission d'un
-paquet protégé, la reprise sur perte et la génération d'`ACK`, l'écoute UDP
-elle-même, puis seulement le conducteur HTTP/3.
+même chose que servir HTTP/3. Le pont de poignée de main, le tri des datagrammes
+et l'émission d'un paquet protégé ont suivi le 2026-08-31 (voir ci-dessous) ;
+restent la reprise sur perte et la génération d'`ACK`, l'écoute UDP elle-même,
+puis seulement le conducteur HTTP/3.
 
 ### La poignée de main, et pourquoi elle occupe deux crates
 
@@ -388,6 +388,71 @@ même quand il aurait mérité une négociation. §6.1 demande d'échouer en ren
 les deux identifiants du paquet reçu, et on ne peut pas les renvoyer si on ne sait
 pas les lire — une version future dont les identifiants dépasseraient vingt octets
 tomberait là.
+
+### L'émission d'un paquet, et pourquoi son ordre est l'inverse de la lecture
+
+Écrit le 2026-08-31, dans `ams-quic::emit`. **Une faute d'émission ne se voit
+jamais chez nous** : elle se voit chez le pair, sous la forme d'un paquet
+illisible, à un moment et pour une raison qui n'ont plus rien à voir avec
+l'endroit où la faute a été commise. C'est ce qui rend ce module plus délicat que
+son symétrique.
+
+L'ordre est celui de `open_packet`, à l'envers :
+
+1. écrire l'en-tête en clair, la longueur du numéro dans son premier octet ;
+2. écrire le numéro tronqué (§17.1) ;
+3. chiffrer la charge, **l'en-tête entier servant de données associées** ;
+4. **alors seulement**, masquer l'en-tête.
+
+La quatrième vient en dernier parce que le masque se calcule sur un échantillon
+du CHIFFRÉ (§5.4.2 de RFC 9001). Masquer avant de chiffrer prendrait
+l'échantillon dans du clair, et le pair — qui masque après avoir reçu —
+n'obtiendrait pas le même.
+
+#### Trois choses que le type rend impossibles
+
+- **Pas de `0-RTT`.** `Plan` n'a pas de variante pour lui. Nous ne l'offrons pas
+  (C6) : des données précoces ne sont pas protégées contre le rejeu (§17.2.3), et
+  une requête rejouée est une requête traitée deux fois. Un champ « veut-on du
+  `0-RTT` ? » finirait par être basculé ; une variante absente ne se bascule pas.
+- **Pas de `Retry` ni de négociation de version.** Ceux-là ne portent ni numéro
+  ni charge chiffrée : rien de ce module ne les concerne. Les faire entrer dans
+  le même `Plan` obligerait chaque étape à écarter deux cas qui ne lui
+  ressemblent pas — et une étape qui écarte est une étape qu'on peut oublier
+  d'écrire.
+- **Pas de champ sans effet.** Un jeton n'existe que dans un `Initial`, un
+  identifiant de source que dans un en-tête long, une phase de clé que dans un
+  en-tête court. Une structure unique laisserait renseigner un jeton pour un
+  paquet `1-RTT` : **un réglage sans effet est pire qu'un réglage absent**, parce
+  qu'on croit l'avoir posé.
+
+#### Le plancher de charge, et d'où vient son nombre
+
+§5.4.2 : l'échantillon de protection d'en-tête se prend seize octets, quatre
+octets après le début du numéro — **comme si le numéro faisait toujours quatre
+octets**, puisque le pair qui démasque ne connaît pas encore sa longueur réelle.
+Il faut donc que le numéro, la charge et le tag atteignent ensemble vingt octets,
+soit « at least 3 bytes of frames […] if the packet number is encoded on a single
+byte, or 2 bytes for a 2-byte packet number encoding ».
+
+La condition est écrite en toutes lettres dans le code plutôt que réduite à
+`charge >= 3` : l'égalité ne tient que parce que le tag fait justement seize
+octets, ce qui est vrai des suites de §5.4.2 et de nulle part ailleurs.
+
+#### Ce que la couverture a fait retirer
+
+Une seconde vérification de §5.4.2 « sur le paquet fini » avait été écrite par
+prudence. Elle disait `numero_a + 4 + 16 <= total` — or `total` vaut
+`numero_a + numero + charge + 16`, donc c'était mot pour mot la condition déjà
+posée. **Une garde qui répète une garde n'ajoute rien : elle ajoute une branche
+que rien ne peut emprunter.**
+
+Le reste des gardes inatteignables a été remplacé par des `expect` qui DISENT
+pourquoi elles ne peuvent pas se déclencher, plutôt que par des `?` que nul essai
+n'emprunte. Le partage est net : `disposer` vérifie tout ce qui est vérifiable —
+le numéro, l'échantillon, la borne d'un datagramme — et tout ce qui suit est
+infaillible par construction, y compris l'écriture de l'en-tête, qui reçoit une
+tranche de la taille exacte.
 
 ## C5 — Le moteur d'entrées-sorties, par cible
 
