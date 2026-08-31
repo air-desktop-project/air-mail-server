@@ -356,7 +356,20 @@ impl Connection {
 
     /// Ferme la connexion avec ce code de transport (§10.2).
     pub fn close(&mut self, code: TransportError, maintenant: u64) {
-        self.fermeture = Some(code.value());
+        self.close_with(code.value(), maintenant);
+    }
+
+    /// La même chose, avec un code déjà calculé.
+    ///
+    /// # POURQUOI DEUX PORTES POUR LA MÊME CHOSE
+    ///
+    /// [`Error::close_code`](crate::Error::close_code) rend un `u64` qui n'est
+    /// pas toujours un code de transport : §4.8 de RFC 9001 loge les alertes TLS
+    /// dans une plage à part. Les faire passer par [`TransportError`] demanderait
+    /// de les y traduire, **et il n'y a pas de traduction** — c'est deux espaces
+    /// de codes qui se recouvrent, et §20 les sépare exprès.
+    pub fn close_with(&mut self, code: u64, maintenant: u64) {
+        self.fermeture = Some(code);
         self.a_dire = true;
         let pto = self.rtt.pto(ACQUITTEMENT_MAX_US, self.sondages);
         self.etat.close(pto, maintenant);

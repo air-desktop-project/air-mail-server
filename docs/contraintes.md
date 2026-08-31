@@ -516,6 +516,83 @@ pas ses clés entre deux datagrammes, la seconde parce qu'une substitution de
 texte avait échoué en silence et laissé l'ancienne version en place. **Le
 symptôme désignait le serveur ; la cause était ailleurs, deux fois.**
 
+### L'écoute UDP (`ams-loop-tokio::quic`)
+
+Écrite le 2026-08-31. C'est la troisième étape pour QUIC : les grammaires
+décident sans entrée-sortie, `ams-quic-tls::Connection` conduit une connexion
+sans savoir d'où viennent ses octets, et **ce module ne fait que tenir la socket
+et la carte**. Le même partage que pour HTTP/2, où `ams-session::http` décide et
+`ams-loop-tokio::http` exécute.
+
+Depuis le 2026-08-31, `crates/ams-loop-tokio/tests/quic.rs` mène **une poignée
+de main QUIC complète sur une vraie socket UDP de bouclage**, avec un certificat
+fabriqué par `openssl` et un client bâti sur `rustls::quic::ClientConnection`.
+
+#### Une seule tâche, et non une par connexion
+
+Un serveur QUIC n'a qu'une socket : tout arrive au même endroit. Distribuer les
+datagrammes à mille tâches demanderait mille files et mille réveils pour ce
+qu'une boucle fait sans partage — et le partage est précisément ce qui coûte.
+La conséquence assumée : une connexion lente retarde les autres. C'est
+acceptable tant que le traitement d'un datagramme est borné, ce que la grammaire
+garantit (C3).
+
+#### Ce que l'écoute décide, et ce qu'elle ne décide pas
+
+Elle décide de quatre choses, et de rien d'autre :
+
+- **à qui appartient ce datagramme**, par la carte des identifiants que nous
+  avons distribués (§5.2) ;
+- **quand se réveiller**, par le plus proche des délais que les connexions
+  annoncent — et `core::future::pending()` quand il n'y en a aucun, pour qu'un
+  serveur au repos ne se réveille jamais pour rien ;
+- **vers quelle adresse** partent les octets qu'une connexion produit ;
+- **quand oublier** ce qui s'est éteint.
+
+Tout le reste — les clés, les numéros, la fenêtre, les retransmissions — est
+déjà décidé ailleurs, et l'écoute n'en sait rien.
+
+#### Trois refus délibérés
+
+**Une erreur de lecture n'arrête pas l'écoute.** Sur UDP, un `ECONNREFUSED`
+remonte d'un datagramme précédent qu'un pair a rejeté : arrêter là fermerait le
+service au premier pair discourtois.
+
+**Une erreur d'émission ne ferme pas la connexion.** Le pair peut être
+momentanément injoignable ; §13.3 prévoit déjà la retransmission de ce qui n'est
+pas acquitté. Fermer sur un échec d'envoi transformerait une gêne passagère en
+perte définitive.
+
+**Un `Initial` au-delà de la capacité est jeté en silence.** §5.2.2 l'autorise,
+et une réponse serait exactement l'amplification qu'on refuse d'offrir.
+
+**La migration n'est pas suivie** (§9) : un datagramme reçu d'une autre adresse
+est traité, mais les réponses continuent de partir vers l'adresse connue. Suivre
+un changement d'adresse sans le valider (§8.2) donnerait un moyen simple de
+rediriger un flot vers un tiers.
+
+#### Ce que cet essai éprouve, et que les autres ne pouvaient pas
+
+Les essais du conducteur passent les datagrammes de main en main dans le même
+processus. Ici ils traversent la pile du système, ce qui met à l'épreuve les
+quatre décisions ci-dessus — dont la carte : **l'essai vérifie que le client
+finit par adresser ses paquets à l'identifiant que le serveur lui a donné**, et
+non à celui qu'il avait choisi au départ. Si la carte rangeait mal, la poignée de
+main s'arrêterait au deuxième aller-retour.
+
+Le second essai écrit du bruit sur le port — un datagramme quelconque, un
+`Initial` trop court, du texte HTTP — et vérifie qu'aucun n'ouvre de connexion et
+qu'aucun n'arrête l'écoute. Le port est ouvert au monde ; c'est la première
+chose qu'il faut prouver.
+
+Deux ajouts au périmètre ont été nécessaires, et tous deux sont couverts :
+`Incoming::source()`, parce que §7.2 fait choisir à chacun l'identifiant que
+l'autre emploie — l'adresse de retour se LIT, elle ne se déduit pas ; et
+`Connection::close_with(u64, u64)`, parce que `Error::close_code()` rend un code
+qui n'est pas toujours un code de transport : §4.8 de la RFC 9001 loge les
+alertes TLS dans une plage à part, et §20 garde les deux espaces distincts
+exprès.
+
 ### La détection de perte, et ce que deux essais ont trouvé
 
 Écrit le 2026-08-31, dans `ams-quic::sent`. QUIC n'a pas de retransmission

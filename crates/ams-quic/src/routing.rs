@@ -153,6 +153,11 @@ pub struct Incoming {
     version: u32,
     /// L'identifiant de destination qu'il porte.
     destination: ConnectionId,
+    /// L'identifiant de source, **c'est-à-dire celui qu'on doit lui adresser**.
+    ///
+    /// Vide pour un en-tête court, qui n'en porte pas (§17.3) : à ce moment-là,
+    /// la connexion est établie et l'on sait déjà à qui l'on parle.
+    source: ConnectionId,
     /// Ce que le datagramme ENTIER occupe.
     ///
     /// **ET NON CE QUE LE PAQUET OCCUPE** : §14.1 borne le datagramme, parce
@@ -183,6 +188,7 @@ impl Incoming {
                 kind: Some(PacketKind::Short),
                 version: VERSION_1,
                 destination: court.destination(),
+                source: ConnectionId::EMPTY,
                 datagram: taille,
             });
         }
@@ -191,25 +197,30 @@ impl Incoming {
         // reçu ; on ne peut pas les renvoyer si on ne sait pas les lire. Une
         // version future dont les identifiants dépasseraient vingt octets
         // tomberait ici — c'est une limite, et elle est écrite.
-        let (kind, version, destination) = match parse_long(datagram) {
+        let (kind, version, destination, source) = match parse_long(datagram) {
             Ok(Long::Numbered(entete)) => (
                 Some(PacketKind::Long(entete.kind())),
                 entete.version(),
                 entete.destination(),
+                entete.source(),
             ),
             Ok(Long::Retry(retry)) => (
                 Some(PacketKind::Long(LongKind::Retry)),
                 VERSION_1,
                 retry.destination,
+                retry.source,
             ),
             // §17.2.1 : pas de type, parce qu'il n'y en a pas.
-            Ok(Long::Negotiation(negociation)) => (None, 0, negociation.destination),
+            Ok(Long::Negotiation(negociation)) => {
+                (None, 0, negociation.destination, negociation.source)
+            }
             Err(_) => return Err(Discard::NotAPacket),
         };
         Ok(Self {
             kind,
             version,
             destination,
+            source,
             datagram: taille,
         })
     }
@@ -231,6 +242,17 @@ impl Incoming {
     #[must_use]
     pub const fn destination(&self) -> ConnectionId {
         self.destination
+    }
+
+    /// L'identifiant de source — **c'est LUI qu'on lui adresse en retour**.
+    ///
+    /// §7.2 : le premier paquet du client porte l'identifiant qu'il veut voir en
+    /// destination des nôtres. Le confondre avec celui de destination ferait
+    /// répondre à un identifiant que le client a lui-même choisi au hasard, et
+    /// qu'il ne reconnaîtrait pas.
+    #[must_use]
+    pub const fn source(&self) -> ConnectionId {
+        self.source
     }
 
     /// Ce que le datagramme entier occupe.

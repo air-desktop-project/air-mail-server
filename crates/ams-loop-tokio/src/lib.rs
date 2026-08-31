@@ -74,6 +74,7 @@ pub mod http;
 pub mod imap;
 pub mod pop3;
 mod privileges;
+pub mod quic;
 mod relay;
 mod reports;
 mod resolver;
@@ -89,6 +90,7 @@ pub use dmarc::{Authenticated, DmarcChecker, DmarcResult, DmarcVerdict, PourRapp
 pub use error::Error;
 pub use guard::SharedGuard;
 pub use privileges::{is_root, refuse_root};
+pub use quic::{QuicStats, serve_quic};
 pub use relay::{Outgoing, Relay, RelayOutcome, SMTP_PORT};
 pub use reports::{
     FailureObservation, Observation, PolitiqueLue, ReportSpool, SendTally, SignatureVue, SpfVu,

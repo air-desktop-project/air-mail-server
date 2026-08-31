@@ -343,3 +343,58 @@ fn la_taille_mesuree_est_celle_du_datagramme() {
     assert!(arrivee.big_enough_for_initial());
     assert_eq!(arrivee.route(None), Route::New);
 }
+
+/// **L'ADRESSE DE RETOUR EST CELLE QUE LE PAIR S'EST DONNÉE** (§7.2).
+///
+/// « Each endpoint […] chooses the connection ID that its peer uses. » Le
+/// destinataire d'un paquet ne peut donc pas déduire de sa propre adresse celle
+/// à écrire dans sa réponse : il lui faut LIRE l'identifiant de source, et c'est
+/// la seule chose du datagramme qui la porte.
+///
+/// Un serveur qui l'ignorerait répondrait à un identifiant que le client ne
+/// reconnaît pas, et sa réponse serait jetée sans un mot.
+#[test]
+fn l_adresse_de_retour_est_celle_que_le_pair_s_est_donnee() {
+    /// L'identifiant que le pair s'est donné — d'une AUTRE longueur que le
+    /// nôtre, pour qu'une confusion des deux se voie.
+    const SCID: [u8; 4] = [0x11, 0x22, 0x33, 0x44];
+
+    let mut octets = std::vec::Vec::new();
+    octets.push(premier_octet(LongKind::Initial));
+    octets.extend_from_slice(&VERSION_1.to_be_bytes());
+    octets.push(u8::try_from(DCID.len()).expect("huit"));
+    octets.extend_from_slice(&DCID);
+    octets.push(u8::try_from(SCID.len()).expect("quatre"));
+    octets.extend_from_slice(&SCID);
+    octets.push(0); // jeton vide
+    octets.extend_from_slice(&[0x44, 0x00]);
+    octets.resize(INITIAL_DATAGRAM_OCTETS_MIN, 0);
+
+    let arrivee = lire(&octets).expect("lisible");
+    assert_eq!(arrivee.destination().as_bytes(), DCID);
+    assert_eq!(
+        arrivee.source().as_bytes(),
+        SCID,
+        "c'est cet identifiant-là qu'une réponse doit porter"
+    );
+    assert_ne!(
+        arrivee.source(),
+        arrivee.destination(),
+        "les deux sens ont chacun le leur"
+    );
+}
+
+/// **UN EN-TÊTE COURT NE PORTE PAS D'ADRESSE DE RETOUR** (§17.3).
+///
+/// Le champ n'existe pas dans la forme courte : à ce stade, chacun connaît déjà
+/// l'identifiant de l'autre. Rendre un identifiant vide plutôt qu'une option
+/// dit exactement cela — il n'y a rien à y lire, jamais.
+#[test]
+fn un_en_tete_court_ne_porte_pas_d_adresse_de_retour() {
+    let arrivee = lire(&court(64)).expect("lisible");
+    assert_eq!(arrivee.destination().as_bytes(), DCID);
+    assert!(
+        arrivee.source().is_empty(),
+        "§17.3 : la forme courte n'a pas ce champ"
+    );
+}
