@@ -601,6 +601,82 @@ impl ApiMaildir {
         rendre(render::write_metrics(&[("delivered", combien)], sortie))
     }
 
+    /// Cherche dans une boîte.
+    ///
+    /// # ON RÉEMPLOIE L'ÉVALUATEUR D'IMAP, ET ON NE LE RÉÉCRIT PAS
+    ///
+    /// `ams-proto-imap` sait déjà décider si un message correspond à une
+    /// expression, et `BoiteImap` sait déjà lui lire ce qu'il demande — c'est ce
+    /// qui sert `SEARCH`. Un second évaluateur aurait fini par répondre
+    /// différemment de celui d'IMAP sur le même message, et personne ne saurait
+    /// lequel croire.
+    ///
+    /// Les critères JSON se traduisent donc vers la syntaxe de §6.4.4, et
+    /// `write_quoted` échappe les textes : un sujet portant un guillemet aurait
+    /// coupé l'expression en deux, et la recherche aurait porté sur la moitié.
+    fn search<'o>(
+        &self,
+        compte: &str,
+        nom: &str,
+        corps: &[u8],
+        sortie: &'o mut [u8],
+    ) -> Served<'o> {
+        let Ok(criteres) = render::read_search_criteria(corps) else {
+            return refus_de_corps(sortie);
+        };
+        // **UNE RECHERCHE SANS CRITÈRE N'EN EST PAS UNE** : elle rendrait la boîte
+        // entière, ce que la liste des messages fait déjà, en paginé.
+        if criteres.is_empty() {
+            return refus_de_corps(sortie);
+        }
+        let Some(expression) = expression_de(&criteres) else {
+            return refus_de_corps(sortie);
+        };
+        let Some(boite) = self.boites.open(compte.as_bytes(), nom.as_bytes()) else {
+            return absente(sortie);
+        };
+        let bornes = ams_proto_imap::Limits::DEFAULT;
+        let Ok(recherche) = ams_proto_imap::Search::parse(&expression, &bornes) else {
+            return refus_de_corps(sortie);
+        };
+
+        let exists = boite.exists();
+        let dernier = boite.info(exists).map_or(0, |info| info.uid);
+        let mut trouves = std::vec::Vec::with_capacity(PAGE_MAX);
+        let mut complet = true;
+        for sequence in 1..=exists {
+            let Some(info) = boite.info(sequence) else {
+                continue;
+            };
+            if trouves.len() >= RESULTATS_MAX {
+                // **ON LE DIT** : un client qui croirait avoir tous les résultats
+                // agirait sur une moitié.
+                complet = false;
+                break;
+            }
+            let candidat = ams_proto_imap::Candidate {
+                sequence,
+                uid: info.uid,
+                size: info.size,
+                flags: info.flags,
+                internal_date: info.internal_date,
+            };
+            let mut source = Lecteur {
+                boite: &boite,
+                sequence,
+            };
+            if recherche.matches(&candidat, exists, dernier, &mut source) {
+                trouves.push(info.uid);
+            }
+        }
+        rendre(render::write_search(
+            &trouves,
+            boite.uid_validity(),
+            complet,
+            sortie,
+        ))
+    }
+
     /// Un message.
     fn message<'o>(&self, compte: &str, nom: &str, uid: u64, sortie: &'o mut [u8]) -> Served<'o> {
         let Some(boite) = self.boites.open(compte.as_bytes(), nom.as_bytes()) else {
@@ -641,6 +717,7 @@ impl Api for ApiMaildir {
             Resource::Mailbox { boite } => self.mailbox(account, boite, sortie),
             Resource::Messages { boite } => self.messages(account, boite, sortie),
             Resource::Message { boite, uid } => self.message(account, boite, uid, sortie),
+            Resource::Search { boite } => self.search(account, boite, body, sortie),
             Resource::Submissions => self.submissions(account, body, sortie),
             // **L'ADMINISTRATION, EN LECTURE ET EN ÉCRITURE.** Le magasin est
             // modifiable pendant qu'on sert : voir `crate::comptes`.
@@ -678,7 +755,9 @@ impl Api for ApiMaildir {
                 self.lift(source, sortie)
             }
             // **CE QUI N'EST PAS ENCORE SERVI LE DIT** (§15.6.2 de RFC 9110) :
-            // le message brut, une partie MIME, et la recherche.
+            // le message brut et une partie MIME. Tous deux rendent des octets
+            // dont la taille est choisie par l'expéditeur, et le contrat de cette
+            // interface rend une tranche d'un tampon.
             _ => pas_encore(sortie),
         }
     }
@@ -962,6 +1041,91 @@ fn source_de(texte: &str) -> Option<ams_guard::Source> {
     match texte.parse::<std::net::IpAddr>().ok()? {
         std::net::IpAddr::V4(adresse) => Some(ams_guard::Source::V4(adresse.octets())),
         std::net::IpAddr::V6(adresse) => Some(ams_guard::Source::V6(adresse.octets())),
+    }
+}
+
+/// Ce qu'une recherche peut rendre d'UID.
+///
+/// Deux cent cinquante-six. Une recherche parcourt toute la boîte ; ce qui est
+/// borné ici, c'est ce qu'on RETIENT et ce qu'on écrit — et un client qui en veut
+/// davantage a `SEARCH` en IMAP, qui écoule.
+const RESULTATS_MAX: usize = 256;
+
+/// L'expression de §6.4.4 que ces critères décrivent.
+///
+/// **LES CRITÈRES SE COMBINENT PAR « ET »**, et c'est l'implicite de §6.4.4 :
+/// deux clefs côte à côte demandent les deux. `OR` et `NOT` ne sont pas servis —
+/// les offrir demanderait un arbre en JSON, c'est-à-dire un second langage de
+/// recherche à côté de celui d'IMAP.
+///
+/// Rend `None` si un texte ne peut pas s'écrire : il porte alors une fin de ligne,
+/// qu'une chaîne citée ne peut pas transporter (§4.3).
+fn expression_de(criteres: &render::SearchCriteria<'_>) -> Option<std::vec::Vec<u8>> {
+    let mut expression: std::vec::Vec<u8> = std::vec::Vec::new();
+    // **UNE FONCTION, ET NON UNE FERMETURE** : une fermeture qui emprunte
+    // `expression` interdirait de l'employer autrement dans la même portée, et
+    // l'écriture d'un texte cité demande justement les deux.
+    fn mot(expression: &mut std::vec::Vec<u8>, quoi: &[u8]) {
+        if !expression.is_empty() {
+            expression.push(b' ');
+        }
+        expression.extend_from_slice(quoi);
+    }
+
+    for (valeur, pose, ote) in [
+        (criteres.seen, &b"SEEN"[..], &b"UNSEEN"[..]),
+        (criteres.answered, b"ANSWERED", b"UNANSWERED"),
+        (criteres.flagged, b"FLAGGED", b"UNFLAGGED"),
+        (criteres.deleted, b"DELETED", b"UNDELETED"),
+        (criteres.draft, b"DRAFT", b"UNDRAFT"),
+    ] {
+        match valeur {
+            Some(true) => mot(&mut expression, pose),
+            Some(false) => mot(&mut expression, ote),
+            None => {}
+        }
+    }
+
+    for (texte, clef) in [
+        (criteres.from, &b"FROM"[..]),
+        (criteres.to, b"TO"),
+        (criteres.subject, b"SUBJECT"),
+        (criteres.body, b"BODY"),
+        (criteres.text, b"TEXT"),
+    ] {
+        let Some(texte) = texte else {
+            continue;
+        };
+        let mut place = std::vec![0_u8; texte.len().saturating_mul(2).saturating_add(2)];
+        let ecrits = ams_proto_imap::write_quoted(texte.as_bytes(), &mut place).ok()?;
+        mot(&mut expression, clef);
+        expression.push(b' ');
+        expression.extend_from_slice(place.get(..ecrits).unwrap_or_default());
+    }
+    Some(expression)
+}
+
+/// Ce que l'évaluateur de recherche demande à lire d'un message.
+///
+/// **IL NE LIT RIEN LUI-MÊME** (C1) : `ams-proto-imap` ne connaît ni fichier ni
+/// boîte, et c'est cette pièce-ci qui va chercher les octets — la même que celle
+/// qui sert `SEARCH` en IMAP.
+struct Lecteur<'a> {
+    /// La boîte ouverte.
+    boite: &'a crate::imap::BoiteImap,
+    /// Le message qu'on juge en ce moment.
+    sequence: u32,
+}
+
+impl ams_proto_imap::SearchSource for Lecteur<'_> {
+    fn contains(&mut self, scope: ams_proto_imap::SearchScope, field: &[u8], text: &[u8]) -> bool {
+        use ams_session::imap::Mailbox as _;
+        self.boite.contains(self.sequence, scope, field, text)
+    }
+
+    fn sent_day(&mut self) -> Option<u64> {
+        use ams_session::imap::Mailbox as _;
+        self.boite.sent_day(self.sequence)
     }
 }
 

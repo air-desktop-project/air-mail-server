@@ -6217,18 +6217,41 @@ Les rendre demande donc une voie séparée, avec sa propre borne. **Elle existe
 désormais** : voir « Le résumé d'un message, et pourquoi ce n'est pas une
 enveloppe ».
 
+### La recherche réemploie l'évaluateur d'IMAP
+
+`ams-proto-imap` sait déjà décider si un message correspond à une expression de
+§6.4.4, et `BoiteImap` sait déjà lui lire ce qu'il demande — c'est ce qui sert
+`SEARCH`. Un second évaluateur aurait fini par répondre différemment de celui
+d'IMAP sur le même message, et personne ne saurait lequel croire.
+
+Les critères JSON se traduisent donc vers la syntaxe d'IMAP. **Cela demandait un
+écrivain de chaîne citée**, que la crate n'exposait pas : un sujet portant un
+guillemet aurait coupé l'expression en deux, et la recherche aurait porté sur la
+moitié — sans faute de syntaxe, avec des résultats plausibles. `write_quoted` vit
+donc là où l'expression se lit, et non chez celui qui la construit.
+
+**LES CRITÈRES SE COMBINENT PAR « ET », ET IL N'Y A PAS D'AUTRE FAÇON.** §6.4.4
+admet `OR` et `NOT` ; cette ressource ne les sert pas. Un arbre en JSON serait un
+second langage de recherche à côté de celui d'IMAP, qui le sert déjà.
+
+**DES UID, ET NON DES RANGS** (§2.3.1.1) : un rang change dès qu'un message
+disparaît, et rendre des rangs ferait désigner au client, une seconde plus tard,
+d'autres messages que ceux qu'il a trouvés. La réponse dit aussi si la liste est
+complète — un client qui croirait avoir tous les résultats agirait sur une moitié.
+
 ### Ce qui n'est pas encore servi le dit
 
-La soumission et l'administration sont servies, en lecture comme en écriture. Ce
-qui reste en `501` : le message BRUT, une partie MIME, et la recherche. §15.6.2 de
-RFC 9110 : « the server does not support the functionality required ». C'est la
-réponse honnête — un `404` ferait croire que la ressource n'existe pas, et un `500`
-qu'elle a échoué.
+Reste en `501` : le message BRUT et une partie MIME. §15.6.2 de RFC 9110 : « the
+server does not support the functionality required ».
 
-Ces trois-là ont en commun de rendre des octets qui ne tiennent pas dans un tampon
-de réponse : un message entier, une partie de message, une liste de résultats. Il
-leur faut le même écoulement par morceaux que l'`ENVELOPE` d'IMAP, et cela ne
-s'ajoute pas en passant.
+Ces deux-là ont en commun de rendre des octets dont **la taille est choisie par
+l'expéditeur** : un message peut faire des mébioctets, et le contrat de l'API rend
+une tranche d'un tampon que la boucle a alloué. Les servir demande soit une borne
+qu'on assume et qu'on dit, soit les requêtes de portée de §14 de RFC 9110 — et
+celles-ci demandent des champs de réponse que `Served` ne sait pas porter.
+
+C'est une tranche à part, et elle n'est pas une commodité : c'est le seul moyen de
+lire un message entier par HTTP.
 
 ### Trois conditions pour ouvrir le port, et aucune n'est facultative
 

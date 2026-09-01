@@ -645,6 +645,38 @@ async fn un_compte_cree_a_chaud_recoit_du_courrier() {
         "et il relit son message : {texte}"
     );
 
+    // 3 bis. Et il le TROUVE : la recherche traverse l'évaluateur d'IMAP, la
+    //        lecture du message, et rend des UID.
+    envoyer_une_requete(
+        &mut client,
+        24,
+        20,
+        b"/v1/mailboxes/INBOX/search",
+        Some(&sien),
+        br#"{"subject":"bienvenue","seen":false}"#,
+    )
+    .await;
+    let texte = String::from_utf8_lossy(&attendre_la_reponse(&mut client, 24).await).to_string();
+    assert!(
+        texte.contains(r#""uids":[1]"#) && texte.contains(r#""complete":true"#),
+        "la recherche doit le trouver : {texte} — {}",
+        serveur.journal()
+    );
+
+    // **ET NE TROUVE PAS CE QUI N'Y EST PAS.** Un essai qui ne montre que le cas
+    // positif ne distingue pas une recherche d'un « tout rendre ».
+    envoyer_une_requete(
+        &mut client,
+        28,
+        20,
+        b"/v1/mailboxes/INBOX/search",
+        Some(&sien),
+        br#"{"subject":"facture"}"#,
+    )
+    .await;
+    let texte = String::from_utf8_lossy(&attendre_la_reponse(&mut client, 28).await).to_string();
+    assert!(texte.contains(r#""uids":[]"#), "{texte}");
+
     // 4. Le magasin sur le DISQUE porte la même chose : le serveur redémarrerait
     //    sur ce qu'il vient d'écrire.
     let octets = std::fs::read(&magasin).expect("lisible");

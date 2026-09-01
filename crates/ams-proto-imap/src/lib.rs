@@ -65,7 +65,7 @@ pub use response::{
 };
 pub use search::{
     Candidate, SEARCH_DEPTH_MAX, SEARCH_KEYS_MAX, Search, SearchReader, SearchReturn, SearchScope,
-    SearchSource,
+    SearchSource, write_quoted,
 };
 pub use sequence::{Ranges, SequenceSet};
 pub use status::{STATUS_ATTS_MAX, StatusAtt, StatusItems};

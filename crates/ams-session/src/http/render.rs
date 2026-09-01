@@ -392,6 +392,162 @@ pub fn write_metrics<'o>(
     json.finish()
 }
 
+/// Ce qu'une recherche demande.
+///
+/// # LES CRITÈRES SE COMBINENT PAR « ET », ET IL N'Y A PAS D'AUTRE FAÇON
+///
+/// §6.4.4 de RFC 9051 admet `OR` et `NOT` ; cette ressource ne les sert pas. Un
+/// langage d'expression en JSON demanderait un arbre, une profondeur bornée et sa
+/// propre grammaire — c'est-à-dire un second langage de recherche à côté de celui
+/// d'IMAP, qui le sert déjà. **Ce qui manque le dit** plutôt que de le laisser
+/// deviner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SearchCriteria<'a> {
+    /// `\Seen` : posé, ôté, ou indifférent.
+    pub seen: Option<bool>,
+    /// `\Answered`.
+    pub answered: Option<bool>,
+    /// `\Flagged`.
+    pub flagged: Option<bool>,
+    /// `\Deleted`.
+    pub deleted: Option<bool>,
+    /// `\Draft`.
+    pub draft: Option<bool>,
+    /// Un texte cherché dans le champ `From:`.
+    pub from: Option<&'a str>,
+    /// Dans le champ `To:`.
+    pub to: Option<&'a str>,
+    /// Dans le champ `Subject:`.
+    pub subject: Option<&'a str>,
+    /// Dans le corps.
+    pub body: Option<&'a str>,
+    /// Dans l'en-tête ET le corps (§6.4.4).
+    pub text: Option<&'a str>,
+}
+
+impl SearchCriteria<'_> {
+    /// Cette recherche demande-t-elle quelque chose ?
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.seen.is_none()
+            && self.answered.is_none()
+            && self.flagged.is_none()
+            && self.deleted.is_none()
+            && self.draft.is_none()
+            && self.from.is_none()
+            && self.to.is_none()
+            && self.subject.is_none()
+            && self.body.is_none()
+            && self.text.is_none()
+    }
+}
+
+/// Lit les critères d'une recherche.
+///
+/// # LES TEXTES NE SE DÉSÉCHAPPENT PAS
+///
+/// Un critère qui aurait besoin d'être échappé en JSON porte un guillemet, une
+/// barre oblique inverse ou une commande — et ce serveur ne les cherche pas. Le
+/// refuser ici est plus honnête que de le déséchapper pour ne rien trouver.
+///
+/// **Tout le reste passe tel quel**, accents compris : du texte non ASCII s'écrit
+/// directement en JSON (§8.1 de RFC 8259) et n'a pas besoin d'échappement.
+///
+/// # Errors
+///
+/// [`Reason::BadJsonBody`] : un champ qu'on ne connaît pas, un champ répété, une
+/// valeur du mauvais type, ou une chaîne échappée.
+pub fn read_search_criteria(corps: &[u8]) -> Result<SearchCriteria<'_>, Error> {
+    let mauvais = Error::new(Reason::BadJsonBody);
+    let mut lecteur = Reader::new(corps);
+    let mut vu = SearchCriteria::default();
+    // Le champ en cours : 1..=5 les drapeaux, 6..=10 les textes.
+    let mut quel = 0_u8;
+
+    loop {
+        match lecteur.read().map_err(|_| mauvais)? {
+            None => break,
+            Some(Event::Key(clef)) => {
+                let noms: [(&str, u8); 10] = [
+                    ("seen", 1),
+                    ("answered", 2),
+                    ("flagged", 3),
+                    ("deleted", 4),
+                    ("draft", 5),
+                    ("from", 6),
+                    ("to", 7),
+                    ("subject", 8),
+                    ("body", 9),
+                    ("text", 10),
+                ];
+                // **UNE CLEF RÉPÉTÉE NE PEUT PAS ARRIVER ICI** : `Reader` la
+                // refuse déjà, parce que §4 de RFC 8259 dit seulement « SHOULD be
+                // unique » et que chaque analyseur en fait ce qu'il veut. Une
+                // garde de plus serait un chemin qu'aucun corps ne peut emprunter.
+                let trouve = noms.iter().find(|(nom, _)| clef.is(nom));
+                let (_, rang) = trouve.ok_or(mauvais)?;
+                quel = *rang;
+            }
+            Some(Event::Bool(valeur)) => match quel {
+                1 => vu.seen = Some(valeur),
+                2 => vu.answered = Some(valeur),
+                3 => vu.flagged = Some(valeur),
+                4 => vu.deleted = Some(valeur),
+                5 => vu.draft = Some(valeur),
+                _ => return Err(mauvais),
+            },
+            Some(Event::Text(texte)) => {
+                let clair = texte.as_plain().ok_or(mauvais)?;
+                match quel {
+                    6 => vu.from = Some(clair),
+                    7 => vu.to = Some(clair),
+                    8 => vu.subject = Some(clair),
+                    9 => vu.body = Some(clair),
+                    10 => vu.text = Some(clair),
+                    _ => return Err(mauvais),
+                }
+            }
+            Some(Event::ObjectStart | Event::ObjectEnd) => {}
+            Some(_) => return Err(mauvais),
+        }
+    }
+    Ok(vu)
+}
+
+/// Écrit le résultat d'une recherche.
+///
+/// # DES UID, ET NON DES RANGS
+///
+/// Un rang change dès qu'un message disparaît de la boîte ; un UID ne change
+/// jamais tant que `uidValidity` ne bouge pas (§2.3.1.1 de RFC 9051). Rendre des
+/// rangs ferait désigner au client, une seconde plus tard, d'autres messages que
+/// ceux qu'il a trouvés.
+///
+/// # Errors
+///
+/// [`Reason::BufferTooSmall`] si `sortie` ne suffit pas.
+pub fn write_search<'o>(
+    uids: &[u32],
+    uid_validity: u32,
+    complet: bool,
+    sortie: &'o mut [u8],
+) -> Result<&'o [u8], Error> {
+    let mut json = Json::new(sortie);
+    json.begin_object()?;
+    json.key("uids")?;
+    json.begin_array()?;
+    for uid in uids {
+        json.number(u64::from(*uid))?;
+    }
+    json.end_array()?;
+    json.field_u64("uidValidity", u64::from(uid_validity))?;
+    // **DIRE QUE LA LISTE EST TRONQUÉE, ET NON LA TRONQUER EN SILENCE** : un
+    // client qui croirait avoir tous les résultats agirait sur une moitié.
+    json.field_bool("complete", complet)?;
+    json.end_object()?;
+    json.finish()
+}
+
 /// Ce qu'un corps de compte a dit.
 ///
 /// # UNE SEULE LECTURE POUR QUATRE RESSOURCES
@@ -458,12 +614,13 @@ pub fn read_account_body<'c, 's>(
         match lecteur.read().map_err(|_| mauvais)? {
             None => break,
             Some(Event::Key(clef)) => {
+                // **RÉPÉTÉ NE PEUT PAS ARRIVER ICI** : `Reader` refuse déjà une
+                // clef en double (§4 de RFC 8259 ne dit que « SHOULD be
+                // unique »). Il ne reste donc que le champ inconnu à refuser.
                 quel = match (clef.is("login"), clef.is("password"), clef.is("addresses")) {
-                    (true, _, _) if login.is_none() => 1,
-                    (_, true, _) if secret_dit.is_none() => 2,
-                    (_, _, true) if adresses.is_none() => 3,
-                    // Un champ inconnu, ou répété. **RÉPÉTÉ EST AUSSI GRAVE** :
-                    // rien ne dit lequel des deux le client voulait.
+                    (true, _, _) => 1,
+                    (_, true, _) => 2,
+                    (_, _, true) => 3,
                     _ => return Err(mauvais),
                 };
             }

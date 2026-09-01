@@ -136,6 +136,60 @@ pub struct Candidate {
     pub internal_date: u64,
 }
 
+/// Écrit un texte sous la forme d'une chaîne CITÉE d'IMAP (§4.3 de RFC 9051).
+///
+/// # POURQUOI CELA VIT ICI, ET NON CHEZ CELUI QUI CONSTRUIT UNE RECHERCHE
+///
+/// Une expression de recherche se LIT ici, et §4.3 dit exactement ce qu'une
+/// chaîne citée peut porter. Un appelant qui construirait une expression à la
+/// main devrait redire cette règle, et un échappement oublié ne ferait pas une
+/// faute de syntaxe : il ferait chercher **autre chose** que ce qu'on a demandé.
+///
+/// L'API REST prend ses critères en JSON et les traduit vers cette syntaxe. Sans
+/// cette fonction, un sujet contenant un guillemet aurait coupé l'expression en
+/// deux, et la recherche aurait porté sur la moitié.
+///
+/// # CE QU'UNE CHAÎNE CITÉE NE PEUT PAS PORTER
+///
+/// §4.3 : ni `CR`, ni `LF`. Une chaîne qui en porterait ferait deux lignes d'une,
+/// et le lecteur prendrait la seconde pour du protocole — c'est la même
+/// désynchronisation que celle qu'une `ENVELOPE` mal écrite provoque. On refuse
+/// plutôt que d'effacer : effacer chercherait un texte que personne n'a demandé.
+///
+/// # Errors
+///
+/// [`Error::BufferTooSmall`] si `out` ne suffit pas ;
+/// [`Error::ResponseTextNotPrintable`] pour une fin de ligne.
+pub fn write_quoted(texte: &[u8], out: &mut [u8]) -> Result<usize, Error> {
+    // **CE QU'IL AURAIT FALLU, ET NON « ça ne tient pas »** : deux guillemets, le
+    // texte, et au pire un échappement par octet. L'appelant peut alors demander
+    // la bonne taille du premier coup.
+    let besoin = texte.len().saturating_mul(2).saturating_add(2);
+    let mut ecrits = 0_usize;
+    let mut poser = |octet: u8| -> Result<(), Error> {
+        let place = out
+            .get_mut(ecrits)
+            .ok_or(Error::BufferTooSmall { needed: besoin })?;
+        *place = octet;
+        ecrits = ecrits.saturating_add(1);
+        Ok(())
+    };
+    poser(b'"')?;
+    for octet in texte {
+        match *octet {
+            b'\r' | b'\n' => return Err(Error::ResponseTextNotPrintable),
+            // §4.3 : seuls ces deux-là s'échappent, et ils DOIVENT l'être.
+            b'"' | b'\\' => {
+                poser(b'\\')?;
+                poser(*octet)?;
+            }
+            autre => poser(autre)?,
+        }
+    }
+    poser(b'"')?;
+    Ok(ecrits)
+}
+
 /// Une expression de recherche, lue et prête à décider.
 #[derive(Debug, Clone, Copy)]
 pub struct Search<'a> {

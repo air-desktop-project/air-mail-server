@@ -11,8 +11,8 @@ use ams_proto_imap::Flags;
 
 use super::{
     AccountRow, BanRow, FlagPatch, MailboxRow, MessageRow, read_account_body, read_flag_patch,
-    write_account, write_accounts, write_bans, write_domains, write_health, write_mailbox,
-    write_mailboxes, write_message, write_messages, write_metrics,
+    read_search_criteria, write_account, write_accounts, write_bans, write_domains, write_health,
+    write_mailbox, write_mailboxes, write_message, write_messages, write_metrics, write_search,
 };
 
 /// Un tampon confortable.
@@ -350,7 +350,7 @@ fn un_corps_qui_n_est_pas_une_modification_se_refuse() {
 #[test]
 fn chaque_tampon_insuffisant_se_dit() {
     type Ecrivain = fn(&mut [u8]) -> Result<&[u8], ams_api::Error>;
-    let ecrivains: [(&str, Ecrivain); 12] = [
+    let ecrivains: [(&str, Ecrivain); 14] = [
         ("mailboxes", |place| write_mailboxes(&[boite()], place)),
         ("mailbox", |place| write_mailbox(&boite(), place)),
         ("messages", |place| {
@@ -377,6 +377,12 @@ fn chaque_tampon_insuffisant_se_dit() {
             write_domains(&["exemple.test", "autre.test"], place)
         }),
         ("bans", |place| write_bans(&[bannissement()], place)),
+        ("search", |place| write_search(&[3, 41], 7, true, place)),
+        // `complete: false` écrit un mot de plus : c'est une place de plus à
+        // manquer.
+        ("search-tronquee", |place| {
+            write_search(&[3], 7, false, place)
+        }),
     ];
     for (nom, ecrire) in ecrivains {
         let mut place = [0_u8; PLACE];
@@ -574,7 +580,7 @@ fn l_absence_d_un_champ_n_est_pas_une_liste_vide() {
 ///
 /// Sur une modification, ignorer un champ ferait croire au client qu'on a fait ce
 /// qu'il demandait. Répété est aussi grave : rien ne dit lequel des deux il
-/// voulait.
+/// voulait — et c'est `Reader` qui l'écarte, une couche plus bas.
 #[test]
 fn un_champ_inconnu_ou_repete_se_refuse() {
     for json in [
@@ -653,4 +659,141 @@ fn un_secret_trop_long_se_refuse() {
     let json = br#"{"password":"beaucoup trop long pour huit octets"}"#;
     let faute = read_account_body(json, &mut secret, &mut adresses).expect_err("trop long");
     assert_eq!(faute.reason(), Reason::BadJsonBody);
+}
+
+/// **LES CRITÈRES SE LISENT, DRAPEAUX ET TEXTES.**
+#[test]
+fn des_criteres_de_recherche_se_lisent() {
+    let lu =
+        read_search_criteria(br#"{"seen":false,"flagged":true,"subject":"facture","from":"marc"}"#)
+            .expect("lisible");
+    assert_eq!(lu.seen, Some(false));
+    assert_eq!(lu.flagged, Some(true));
+    assert_eq!(lu.subject, Some("facture"));
+    assert_eq!(lu.from, Some("marc"));
+    assert_eq!(lu.to, None, "ce qu'on n'a pas demandé reste indifférent");
+    assert!(!lu.is_empty());
+}
+
+/// **UNE RECHERCHE SANS CRITÈRE SE RECONNAÎT**, et c'est l'appelant qui décide
+/// quoi en faire.
+#[test]
+fn une_recherche_sans_critere_se_reconnait() {
+    let lu = read_search_criteria(b"{}").expect("lisible");
+    assert!(lu.is_empty());
+}
+
+/// **UN CHAMP INCONNU, RÉPÉTÉ, OU DU MAUVAIS TYPE SE REFUSE.**
+///
+/// Ignorer un critère rendrait au client d'autres messages que ceux qu'il a
+/// demandés, et rien dans la réponse ne le dirait.
+#[test]
+fn un_critere_inconnu_ou_repete_se_refuse() {
+    for json in [
+        &br#"{"urgent":true}"#[..],
+        br#"{"seen":true,"seen":false}"#,
+        br#"{"subject":"a","subject":"b"}"#,
+        br#"{"seen":"oui"}"#,
+        br#"{"subject":true}"#,
+        br#"{"subject":["a"]}"#,
+        b"pas du json",
+    ] {
+        assert!(
+            read_search_criteria(json).is_err(),
+            "{}",
+            std::string::String::from_utf8_lossy(json)
+        );
+    }
+}
+
+/// **UN TEXTE ÉCHAPPÉ SE REFUSE** : il porte un guillemet, une barre oblique
+/// inverse ou une commande, et ce serveur ne les cherche pas.
+#[test]
+fn un_critere_echappe_se_refuse() {
+    assert!(read_search_criteria(br#"{"subject":"fa\u0063ture"}"#).is_err());
+    assert!(read_search_criteria(br#"{"from":"dit \\"oui\\""}"#).is_err());
+}
+
+/// **DES UID, ET NON DES RANGS** (§2.3.1.1 de RFC 9051).
+///
+/// Un rang change dès qu'un message disparaît ; rendre des rangs ferait désigner
+/// au client, une seconde plus tard, d'autres messages que ceux qu'il a trouvés.
+///
+/// **ET L'ON DIT SI LA LISTE EST COMPLÈTE** : un client qui croirait avoir tous
+/// les résultats agirait sur une moitié.
+#[test]
+fn un_resultat_de_recherche_se_rend() {
+    let mut place = [0_u8; PLACE];
+    assert_eq!(
+        texte(write_search(&[], 7, true, &mut place).expect("écrivable")),
+        r#"{"uids":[],"uidValidity":7,"complete":true}"#
+    );
+    assert_eq!(
+        texte(write_search(&[3, 41], 7, false, &mut place).expect("écrivable")),
+        r#"{"uids":[3,41],"uidValidity":7,"complete":false}"#
+    );
+}
+
+/// **LES DIX CRITÈRES SE LISENT, ET CHACUN SE REFUSE S'IL EST RÉPÉTÉ.**
+///
+/// Les éprouver un par un n'est pas du zèle : chaque clef a son bras, et un bras
+/// qui rangerait la valeur dans le mauvais champ ferait chercher autre chose que
+/// ce qu'on a demandé — sans jamais échouer.
+///
+/// La répétition, elle, est écartée par `Reader` une couche plus bas ; on
+/// l'éprouve ici parce que c'est ici qu'on en dépend.
+#[test]
+fn les_dix_criteres_se_lisent_et_ne_se_repetent_pas() {
+    let lu = read_search_criteria(
+        br#"{"seen":true,"answered":false,"flagged":true,"deleted":false,"draft":true,
+             "from":"a","to":"b","subject":"c","body":"d","text":"e"}"#,
+    )
+    .expect("lisible");
+    assert_eq!(
+        (lu.seen, lu.answered, lu.flagged, lu.deleted, lu.draft),
+        (Some(true), Some(false), Some(true), Some(false), Some(true))
+    );
+    assert_eq!(
+        (lu.from, lu.to, lu.subject, lu.body, lu.text),
+        (Some("a"), Some("b"), Some("c"), Some("d"), Some("e"))
+    );
+
+    for (nom, valeur) in [
+        ("seen", "true"),
+        ("answered", "true"),
+        ("flagged", "true"),
+        ("deleted", "true"),
+        ("draft", "true"),
+        ("from", "\"a\""),
+        ("to", "\"a\""),
+        ("subject", "\"a\""),
+        ("body", "\"a\""),
+        ("text", "\"a\""),
+    ] {
+        let json = std::format!(r#"{{"{nom}":{valeur},"{nom}":{valeur}}}"#);
+        assert!(
+            read_search_criteria(json.as_bytes()).is_err(),
+            "« {nom} » répété devait être refusé"
+        );
+    }
+}
+
+/// **UN DRAPEAU N'EST PAS UN TEXTE, ET RÉCIPROQUEMENT.**
+///
+/// Les deux se refusent, et pour la même raison : ranger la valeur ailleurs
+/// ferait chercher autre chose que ce qu'on a demandé.
+#[test]
+fn un_drapeau_et_un_texte_ne_se_confondent_pas() {
+    for json in [
+        &br#"{"subject":true}"#[..],
+        br#"{"from":false}"#,
+        br#"{"seen":"oui"}"#,
+        br#"{"draft":"non"}"#,
+    ] {
+        assert!(
+            read_search_criteria(json).is_err(),
+            "{}",
+            std::string::String::from_utf8_lossy(json)
+        );
+    }
 }

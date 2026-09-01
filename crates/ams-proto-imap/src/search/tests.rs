@@ -624,3 +624,76 @@ fn un_mot_clef_qu_on_ne_sert_pas_se_refuse() {
         );
     }
 }
+
+/// **UN GUILLEMET DANS UN TEXTE COUPERAIT L'EXPRESSION EN DEUX.**
+///
+/// Ce n'est pas une faute de syntaxe qu'on verrait : c'est une recherche qui
+/// porterait sur la moitié du texte demandé, et qui rendrait des résultats
+/// plausibles. §4.3 de RFC 9051 échappe donc le guillemet et la barre oblique
+/// inverse, et rien d'autre.
+#[test]
+fn une_chaine_citee_echappe_ce_qui_la_fermerait() {
+    let mut place = [0_u8; 64];
+    let cas: [(&[u8], &str); 4] = [
+        (b"facture", "\"facture\""),
+        (b"", "\"\""),
+        (b"dit \"oui\"", "\"dit \\\"oui\\\"\""),
+        (b"c:\\dossier", "\"c:\\\\dossier\""),
+    ];
+    for (texte, attendu) in cas {
+        let ecrits = super::write_quoted(texte, &mut place).expect("écrivable");
+        assert_eq!(
+            core::str::from_utf8(place.get(..ecrits).expect("écrits")),
+            Ok(attendu),
+            "{texte:?}"
+        );
+    }
+}
+
+/// **UNE CHAÎNE CITÉE NE PORTE PAS DE FIN DE LIGNE** (§4.3).
+///
+/// Elle ferait deux lignes d'une, et le lecteur prendrait la seconde pour du
+/// protocole. On refuse plutôt que d'effacer : effacer chercherait un texte que
+/// personne n'a demandé.
+#[test]
+fn une_chaine_citee_refuse_une_fin_de_ligne() {
+    let mut place = [0_u8; 64];
+    for texte in [&b"deux\r\nlignes"[..], b"avec\rretour", b"avec\nsaut"] {
+        assert_eq!(
+            super::write_quoted(texte, &mut place),
+            Err(Error::ResponseTextNotPrintable),
+            "{texte:?}"
+        );
+    }
+}
+
+/// **UN TAMPON TROP COURT DIT COMBIEN IL AURAIT FALLU**, et non « ça ne tient
+/// pas » : l'appelant peut alors demander la bonne taille du premier coup.
+///
+/// **TOUTES LES TAILLES JUSQU'À LA BONNE**, et pas seulement une : chaque octet
+/// écrit a son chemin d'échec — le guillemet ouvrant, l'antislash d'un
+/// échappement, le caractère qu'il protège, le guillemet fermant. Une seule
+/// taille n'en met en jeu qu'un.
+#[test]
+fn un_tampon_trop_court_dit_ce_qu_il_aurait_fallu() {
+    let mut place = [0_u8; 4];
+    let faute = super::write_quoted(b"facture", &mut place).expect_err("trop court");
+    assert_eq!(faute, Error::BufferTooSmall { needed: 16 });
+
+    // Un texte qui porte les deux octets à échapper, pour que chaque chemin
+    // d'écriture soit atteint.
+    let texte: &[u8] = b"a\"b\\c";
+    let mut grand = [0_u8; 32];
+    let entier = super::write_quoted(texte, &mut grand).expect("écrivable");
+    for taille in 0..entier {
+        let mut petit = std::vec![0_u8; taille];
+        assert!(
+            matches!(
+                super::write_quoted(texte, &mut petit),
+                Err(Error::BufferTooSmall { .. })
+            ),
+            "à {taille} octets, cela devait manquer de place"
+        );
+    }
+    assert!(super::write_quoted(texte, &mut grand[..entier]).is_ok());
+}
