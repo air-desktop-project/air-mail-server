@@ -67,8 +67,8 @@ use ams_mime::{
     write_date, write_failure_mail, write_report_mail,
 };
 
+use crate::delivery::DeliveryFailure;
 use crate::dkim::DkimSigner;
-use crate::relay::{Outgoing, Relay, RelayOutcome};
 use crate::resolver::{Resolver, Txt};
 
 /// La politique telle qu'elle a été LUE — pas celle qu'on croit qu'elle est.
@@ -215,7 +215,14 @@ pub struct ReportSpool {
     /// délimiteur de parties imprévisible.
     resolveur: Resolver,
     /// De quoi remettre les rapports, si ce serveur les envoie.
-    relay: Option<Relay>,
+    /// La file d'attente du serveur, si l'exploitant a demandé la remise.
+    ///
+    /// **CE N'EST PLUS UN REMETTEUR.** Un rapport n'est pas moins un message
+    /// qu'un autre : il passe par la même file, la même attente qui double, la
+    /// même péremption, et le même rapport de non-remise quand on renonce.
+    /// Trois politiques de reprise dans un produit, c'est trois vérités qui
+    /// divergent — et deux d'entre elles n'avaient jamais été éprouvées.
+    file: Option<std::sync::Arc<crate::queue::Spool>>,
     /// De quoi les SIGNER, si ce serveur a une clé.
     ///
     /// **Ce qu'on émet vaut ce que vaut son authentification** : un rapport
@@ -256,7 +263,7 @@ impl ReportSpool {
             email,
             directory,
             resolveur,
-            relay: None,
+            file: None,
             dkim: None,
             echecs_actifs: false,
             journal: Mutex::new(HashMap::new()),
@@ -283,8 +290,8 @@ impl ReportSpool {
     /// et c'est le défaut : émettre du courrier vers des tiers ne se décide pas
     /// à la place de celui qui exploite la machine.
     #[must_use]
-    pub fn with_relay(mut self, relay: Relay) -> Self {
-        self.relay = Some(relay);
+    pub fn with_queue(mut self, file: std::sync::Arc<crate::queue::Spool>) -> Self {
+        self.file = Some(file);
         self
     }
 
@@ -496,13 +503,6 @@ impl ReportSpool {
     }
 }
 
-/// Au-delà, un rapport ne vaut plus la peine d'être remis : sept jours.
-///
-/// Le compte d'une journée qu'on remettrait un mois plus tard n'apprend plus
-/// rien à personne — et sans cette borne, un domaine injoignable ferait croître
-/// le dossier sans fin.
-const PEREMPTION: u64 = 7 * 86_400;
-
 /// Le texte que lira l'humain qui ouvrira un rapport.
 ///
 /// **Il est en anglais, et c'est délibéré.** Ce message part vers des systèmes
@@ -515,10 +515,15 @@ const TEXTE: &[u8] = b"This is a DMARC aggregate report (RFC 7489).\r\n    The a
 impl ReportSpool {
     /// Remet ce qui attend dans le dossier.
     ///
-    /// Ne fait rien sans remetteur : voir [`ReportSpool::with_relay`].
+    /// **ELLE NE REMET PLUS ELLE-MÊME** : elle DÉPOSE EN FILE. La reprise, la
+    /// péremption et le rapport de non-remise appartiennent à `ams-queue`, où
+    /// ils sont couverts à 100 % — il n'y a plus qu'une politique dans ce
+    /// produit.
+    ///
+    /// Ne fait rien sans file : voir [`ReportSpool::with_queue`].
     pub async fn envoyer(&self) -> SendTally {
         let mut compte = SendTally::default();
-        let Some(relay) = self.relay.as_ref() else {
+        let Some(file) = self.file.as_ref() else {
             return compte;
         };
         let Ok(mut entrees) = tokio::fs::read_dir(&self.directory).await else {
@@ -536,10 +541,10 @@ impl ReportSpool {
             // qu'il parle d'un message qu'on n'a plus.
             if let Some(parts) = decouper_le_nom(nom) {
                 let nom = String::from(nom);
-                self.remettre(relay, &parts, &chemin, &nom, maintenant, &mut compte)
+                self.remettre(file, &parts, &chemin, &nom, maintenant, &mut compte)
                     .await;
             } else if let Some(parts) = decouper_un_echec(nom) {
-                self.remettre_tel_quel(relay, &parts, &chemin, maintenant, &mut compte)
+                self.remettre_tel_quel(file, &parts, &chemin, maintenant, &mut compte)
                     .await;
             }
             // Ce qui n'a ni l'une ni l'autre forme n'est pas à nous : on n'y
@@ -549,10 +554,10 @@ impl ReportSpool {
         compte
     }
 
-    /// Remet un rapport, et décide de ce qu'on fait du fichier.
+    /// Dépose un rapport en file, et décide de ce qu'on fait du fichier.
     async fn remettre(
         &self,
-        relay: &Relay,
+        file: &crate::queue::Spool,
         parts: &Nomme,
         chemin: &std::path::Path,
         nom: &str,
@@ -564,14 +569,6 @@ impl ReportSpool {
             voisin.push(".destinations");
             PathBuf::from(voisin)
         };
-        // UN RAPPORT VIEILLI S'EFFACE. Le compte d'une journée qu'on remettrait
-        // un mois plus tard n'apprend plus rien à personne.
-        if maintenant.saturating_sub(parts.fin) > PEREMPTION {
-            let _ = tokio::fs::remove_file(chemin).await;
-            let _ = tokio::fs::remove_file(&voisin).await;
-            compte.expired = compte.expired.saturating_add(1);
-            return;
-        }
         let (Ok(piece), Ok(destinations)) = (
             tokio::fs::read(chemin).await,
             tokio::fs::read_to_string(&voisin).await,
@@ -582,39 +579,40 @@ impl ReportSpool {
             return;
         };
 
-        let mut tout_est_reglé = true;
+        let mut tout_est_regle = true;
         for adresse in destinations.lines().filter(|ligne| !ligne.is_empty()) {
-            match self.remettre_a(relay, parts, nom, &piece, adresse).await {
-                Some(RelayOutcome::Delivered { .. }) => {
-                    compte.sent = compte.sent.saturating_add(1);
-                }
-                // UN REFUS DÉFINITIF RETIRE LE RAPPORT. Insister remplirait le
-                // dossier de messages que personne ne veut.
-                Some(RelayOutcome::Rejected(_) | RelayOutcome::NullMx) => {
-                    compte.rejected = compte.rejected.saturating_add(1);
-                }
-                None => {
+            match self
+                .deposer_pour(file, parts, nom, &piece, adresse, maintenant)
+                .await
+            {
+                // **LE RAPPORT EST EN FILE : IL EST PARTI, POUR CE MODULE.** Ce
+                // qu'il advient ensuite — les essais, la péremption, l'avis de
+                // non-remise dans la boîte du postmaster — appartient à la file.
+                Ok(()) => compte.sent = compte.sent.saturating_add(1),
+                // Ce qu'aucune reprise n'arrangerait : une adresse qu'on refuse
+                // d'écrire, un message qu'on n'a pas su composer.
+                Err(DeliveryFailure::Permanent) => {
                     compte.unsendable = compte.unsendable.saturating_add(1);
                 }
-                // Tout le reste est temporaire : le fichier reste, et c'est tout
+                // Une écriture qui a échoué : le fichier reste, et c'est tout
                 // l'intérêt de l'avoir écrit sur un disque.
-                Some(_) => {
+                Err(DeliveryFailure::Temporary) => {
                     compte.deferred = compte.deferred.saturating_add(1);
-                    tout_est_reglé = false;
+                    tout_est_regle = false;
                 }
             }
         }
-        if tout_est_reglé {
+        if tout_est_regle {
             let _ = tokio::fs::remove_file(chemin).await;
             let _ = tokio::fs::remove_file(&voisin).await;
         }
     }
 
-    /// Remet un message DÉJÀ COMPOSÉ, tel qu'il est sur le disque.
+    /// Dépose en file un message DÉJÀ COMPOSÉ, tel qu'il est sur le disque.
     async fn remettre_tel_quel(
         &self,
-        relay: &Relay,
-        parts: &Nomme,
+        file: &crate::queue::Spool,
+        _parts: &Nomme,
         chemin: &std::path::Path,
         maintenant: u64,
         compte: &mut SendTally,
@@ -624,12 +622,6 @@ impl ReportSpool {
             voisin.push(".destinations");
             PathBuf::from(voisin)
         };
-        if maintenant.saturating_sub(parts.fin) > PEREMPTION {
-            let _ = tokio::fs::remove_file(chemin).await;
-            let _ = tokio::fs::remove_file(&voisin).await;
-            compte.expired = compte.expired.saturating_add(1);
-            return;
-        }
         let (Ok(message), Ok(destinations)) = (
             tokio::fs::read(chemin).await,
             tokio::fs::read_to_string(&voisin).await,
@@ -641,29 +633,13 @@ impl ReportSpool {
             compte.unsendable = compte.unsendable.saturating_add(1);
             return;
         };
-        let Some(domaine) = adresse.rsplit_once('@').map(|(_, apres)| apres) else {
-            compte.unsendable = compte.unsendable.saturating_add(1);
-            return;
-        };
         let destinataires = std::vec![String::from(adresse)];
-        let issue = relay
-            .send(
-                domaine,
-                &Outgoing {
-                    sender: &self.email,
-                    recipients: &destinataires,
-                    body: &message,
-                },
-            )
-            .await;
-        match issue {
-            RelayOutcome::Delivered { .. } => {
-                compte.sent = compte.sent.saturating_add(1);
+        match file.deposer(&self.email, &destinataires, &message, maintenant) {
+            Ok(()) => compte.sent = compte.sent.saturating_add(1),
+            Err(DeliveryFailure::Permanent) => {
+                compte.unsendable = compte.unsendable.saturating_add(1);
             }
-            RelayOutcome::Rejected(_) | RelayOutcome::NullMx => {
-                compte.rejected = compte.rejected.saturating_add(1);
-            }
-            _ => {
+            Err(DeliveryFailure::Temporary) => {
                 compte.deferred = compte.deferred.saturating_add(1);
                 return;
             }
@@ -672,19 +648,22 @@ impl ReportSpool {
         let _ = tokio::fs::remove_file(&voisin).await;
     }
 
-    /// Compose le message et le remet à une adresse.
+    /// Compose le message, et le DÉPOSE EN FILE pour cette adresse.
     ///
-    /// Rend `None` quand il n'a pas pu être composé — une adresse qu'on refuse
-    /// d'écrire, un tampon qui ne suffit pas.
-    async fn remettre_a(
+    /// # Errors
+    ///
+    /// [`DeliveryFailure::Permanent`] pour ce qu'aucune reprise n'arrangerait —
+    /// une adresse qu'on refuse d'écrire, un message qu'on n'a pas su composer ;
+    /// [`DeliveryFailure::Temporary`] pour une écriture qui a échoué.
+    async fn deposer_pour(
         &self,
-        relay: &Relay,
+        file: &crate::queue::Spool,
         parts: &Nomme,
         nom: &str,
         piece: &[u8],
         adresse: &str,
-    ) -> Option<RelayOutcome> {
-        let domaine = adresse.rsplit_once('@').map(|(_, apres)| apres)?;
+        maintenant: u64,
+    ) -> Result<(), DeliveryFailure> {
         let mut sujet = [0_u8; SUBJECT_MAX];
         let sujet = subject(
             parts.domaine.as_bytes(),
@@ -692,7 +671,7 @@ impl ReportSpool {
             parts.identifiant.as_bytes(),
             &mut sujet,
         )
-        .ok()?;
+        .map_err(|_| DeliveryFailure::Permanent)?;
         let identifiant = format!("{}.{}@{}", parts.identifiant, parts.debut, self.org_name);
         let delimiteur = format!("----ams-{}", self.jeton().await);
         let courrier = ReportMail {
@@ -700,34 +679,31 @@ impl ReportSpool {
             to: adresse.as_bytes(),
             subject: sujet,
             message_id: identifiant.as_bytes(),
-            date: maintenant(),
+            date: maintenant,
             boundary: delimiteur.as_bytes(),
             text: TEXTE,
             filename: nom.as_bytes(),
             attachment: piece,
         };
         let mut message = std::vec![0_u8; report_mail_max(&courrier)];
-        let ecrit = write_report_mail(&mut message, &courrier).ok()?.len();
+        // **UN MESSAGE QU'ON NE SAIT PAS COMPOSER NE SE COMPOSERA PAS MIEUX
+        // DEMAIN** : c'est définitif, et le laisser sur le disque ne ferait que
+        // le relire tous les jours.
+        let ecrit = write_report_mail(&mut message, &courrier)
+            .map_err(|_| DeliveryFailure::Permanent)?
+            .len();
         message.truncate(ecrit);
+        // **ON SIGNE UNE FOIS, ET LA FILE RÉÉMET LES MÊMES OCTETS.** Signer à
+        // chaque essai donnerait des signatures différentes pour un même
+        // rapport, et rendrait insoluble la question de savoir laquelle est
+        // arrivée.
         let message = self.signer(message).await;
 
+        // L'expéditeur d'enveloppe est une VRAIE adresse, et non l'expéditeur
+        // nul : c'est par là qu'un refus nous reviendra, et c'est aussi là que
+        // la file déposera son rapport de non-remise si elle renonce.
         let destinataires = std::vec![String::from(adresse)];
-        Some(
-            relay
-                .send(
-                    domaine,
-                    &Outgoing {
-                        // L'expéditeur d'enveloppe est une VRAIE adresse, et non
-                        // l'expéditeur nul : c'est par là qu'un refus nous
-                        // reviendra, et un rapport dont on ignore qu'il n'arrive
-                        // jamais ne vaut pas mieux que pas de rapport.
-                        sender: &self.email,
-                        recipients: &destinataires,
-                        body: &message,
-                    },
-                )
-                .await,
-        )
+        file.deposer(&self.email, &destinataires, &message, maintenant)
     }
 
     /// Huit octets d'aléa, en hexadécimal.

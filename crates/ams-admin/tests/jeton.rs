@@ -67,6 +67,8 @@ fn configuration(repertoire: &Path, clef: &str) -> PathBuf {
         tracked_sources: 64,
         // AUCUNE ÉMISSION : ces essais reçoivent, ils n'émettent pas.
         relay: ams_config::Relay::default(),
+        // ET AUCUNE FILE : rien ne sort dans ces essais.
+        queue: ams_config::Queue::default(),
         // MTA-STS NON ÉVALUÉ : ces essais ne joignent aucun hôte de politique.
         mtasts: ams_config::Mtasts::default(),
         // AUCUN RAPPORT TLS : ces essais n'émettent vers personne.

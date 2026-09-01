@@ -293,6 +293,8 @@ pub struct Configuration {
     pub accounts: String,
     /// La file de réémission sortante.
     pub relay: Relay,
+    /// La file d'attente du serveur.
+    pub queue: Queue,
     /// MTA-STS (RFC 8461).
     pub mtasts: Mtasts,
     /// TLSRPT (RFC 8460).
@@ -361,7 +363,7 @@ impl Mtasts {
     }
 }
 
-/// Ce que ce serveur émet POUR SES COMPTES, et comment il insiste.
+/// Ce que ce serveur émet POUR SES COMPTES.
 ///
 /// # ÉTEINT PAR DÉFAUT, ET UN FICHIER ANCIEN DÉCODE ÉTEINT
 ///
@@ -369,15 +371,29 @@ impl Mtasts {
 /// exploite la machine — la même règle que pour les rapports DMARC. Et parce que
 /// ce champ a été ajouté après coup, une configuration écrite avant lui décode
 /// `enabled: false` : une mise à jour ne transforme personne en relais.
+///
+/// # LA FILE N'EST PLUS ICI
+///
+/// Elle est devenue celle du SERVEUR — les rapports DMARC et TLS l'empruntent
+/// aussi — et vit dans [`Queue`]. Ne restait ici que le drapeau qui dit si l'on
+/// relaie.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Relay {
     /// Relaie-t-on pour les comptes authentifiés ?
     pub enabled: bool,
+}
+
+/// La file d'attente du serveur — **tout ce qui sort passe par elle**.
+///
+/// # POURQUOI ELLE N'APPARTIENT PLUS AU RELAIS
+///
+/// Il y avait TROIS politiques de reprise dans ce produit : celle-ci, et deux
+/// écrites à la main pour les rapports DMARC et TLS. Trois politiques, c'est
+/// trois vérités qui divergent, et deux d'entre elles n'avaient jamais été
+/// éprouvées. Il n'y en a plus qu'une, couverte à 100 % dans `ams-queue`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Queue {
     /// Le dossier de la file, ou une chaîne vide.
-    ///
-    /// **Distinct du Maildir** : ce qui attend d'être émis n'est pas du courrier
-    /// reçu, et les mélanger ferait apparaître dans une boîte ce qui n'y est
-    /// jamais arrivé.
     pub spool: String,
     /// L'attente après le premier échec, en secondes. Zéro prend le défaut.
     pub retry_seconds: u32,
@@ -387,7 +403,7 @@ pub struct Relay {
     pub expire_seconds: u32,
 }
 
-impl Relay {
+impl Queue {
     /// Les durées que cette configuration décrit.
     ///
     /// **ZÉRO PREND LE DÉFAUT**, à chaque champ séparément : c'est ce qui permet
@@ -578,10 +594,19 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
     let emission = lu.get_relay()?;
     let relay = Relay {
         enabled: emission.get_enabled(),
-        spool: texte(emission.get_spool()?)?,
-        retry_seconds: emission.get_retry_seconds(),
-        max_retry_seconds: emission.get_max_retry_seconds(),
-        expire_seconds: emission.get_expire_seconds(),
+    };
+
+    // **UN FICHIER ÉCRIT AVANT CE CHAMP DÉCODE UN DOSSIER VIDE**, et le serveur
+    // refuse alors de démarrer dès que quelque chose doit sortir. Les cinq
+    // champs retirés de `Relay` ne sont PAS lus : reprendre l'ancienne valeur en
+    // silence ferait déposer des rapports dans un répertoire que l'exploitant
+    // croyait réservé au courrier.
+    let attente = lu.get_queue()?;
+    let queue = Queue {
+        spool: texte(attente.get_spool()?)?,
+        retry_seconds: attente.get_retry_seconds(),
+        max_retry_seconds: attente.get_max_retry_seconds(),
+        expire_seconds: attente.get_expire_seconds(),
     };
 
     let signature = lu.get_dkim()?;
@@ -676,6 +701,7 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
         listen_h3: ecoute_h3,
         token_key: clef_de_jeton,
         relay,
+        queue,
         mtasts,
         tlsrpt,
     })
@@ -779,10 +805,13 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
         {
             let mut emission = ecrit.reborrow().init_relay();
             emission.set_enabled(config.relay.enabled);
-            emission.set_spool(&config.relay.spool);
-            emission.set_retry_seconds(config.relay.retry_seconds);
-            emission.set_max_retry_seconds(config.relay.max_retry_seconds);
-            emission.set_expire_seconds(config.relay.expire_seconds);
+        }
+        {
+            let mut attente = ecrit.reborrow().init_queue();
+            attente.set_spool(&config.queue.spool);
+            attente.set_retry_seconds(config.queue.retry_seconds);
+            attente.set_max_retry_seconds(config.queue.max_retry_seconds);
+            attente.set_expire_seconds(config.queue.expire_seconds);
         }
         {
             let mut sts = ecrit.reborrow().init_mtasts();
@@ -824,7 +853,7 @@ mod tests {
         Configuration, Dkim, Dmarc, Enforcement, Error, Spf, TRAVERSAL_LIMIT_WORDS, Timeouts, Tls,
         decode, encode,
     };
-    use super::{Mtasts, Relay, Tlsrpt};
+    use super::{Mtasts, Queue, Relay, Tlsrpt};
     use alloc::string::{String, ToString as _};
     use alloc::vec;
     use ams_guard::Thresholds;
@@ -846,6 +875,9 @@ mod tests {
             // AUCUNE ÉMISSION dans l'exemple : c'est le défaut, et c'est aussi
             // ce qu'un fichier écrit avant que ce champ n'existe décodera.
             relay: Relay::default(),
+            // ET AUCUNE FILE : sans rien à émettre, il n'y a rien à mettre en
+            // attente.
+            queue: Queue::default(),
             // MTA-STS NON ÉVALUÉ dans l'exemple : c'est le défaut, et c'est
             // aussi ce qu'un fichier antérieur à ce champ décodera.
             mtasts: Mtasts::default(),
@@ -1326,51 +1358,59 @@ mod tests {
     /// **UN FICHIER ANCIEN DÉCODE « AUCUNE ÉMISSION ».**
     ///
     /// C'est ce qui rend ce champ ajoutable : un serveur qu'on met à jour ne
-    /// devient pas un relais sans que personne l'ait décidé. Le test l'éprouve
-    /// par le seul moyen honnête — le défaut de la structure, qui est ce que
-    /// Cap'n Proto rend d'un champ absent.
+    /// devient pas un relais sans que personne l'ait décidé.
     #[test]
     fn sans_champ_de_relais_rien_ne_sort() {
-        let relais = Relay::default();
-        assert!(!relais.enabled);
-        assert!(relais.spool.is_empty());
-        // Et l'exemple, qui est le défaut, ne relaie pas davantage.
+        assert!(!Relay::default().enabled);
         assert!(!exemple().relay.enabled);
     }
 
-    /// Les cinq champs traversent l'encodage et la relecture.
+    /// **ET UN FICHIER ANCIEN DÉCODE AUSSI UNE FILE VIDE.**
+    ///
+    /// Les réglages ont déménagé de `Relay` vers `Queue`, sous de NOUVEAUX
+    /// numéros de champ. Reprendre l'ancienne valeur en silence ferait déposer
+    /// des rapports dans un répertoire que l'exploitant croyait réservé au
+    /// courrier ; le serveur refuse de démarrer et le dit.
+    #[test]
+    fn sans_champ_de_file_le_dossier_est_vide() {
+        let attente = Queue::default();
+        assert!(attente.spool.is_empty());
+        assert!(exemple().queue.spool.is_empty());
+        // Et les durées prennent le défaut de `ams-queue`.
+        assert_eq!(attente.backoff(), ams_queue::Backoff::DEFAULT);
+    }
+
+    /// Les cinq réglages traversent l'encodage et la relecture.
     #[test]
     fn la_file_traverse_le_format() {
-        let voulu = Relay {
-            enabled: true,
+        let voulue = Queue {
             spool: String::from("/var/spool/ams/file"),
             retry_seconds: 60,
             max_retry_seconds: 3_600,
             expire_seconds: 172_800,
         };
         let config = Configuration {
-            relay: voulu.clone(),
+            relay: Relay { enabled: true },
+            queue: voulue.clone(),
             ..exemple()
         };
         let octets = encode(&config).expect("encodable");
         let relue = decode(&octets).expect("relisible");
-        assert_eq!(relue.relay, voulu);
+        assert!(relue.relay.enabled);
+        assert_eq!(relue.queue, voulue);
         assert_eq!(relue, config);
     }
 
     /// **ZÉRO PREND LE DÉFAUT, CHAMP PAR CHAMP.**
-    ///
-    /// Sans cela, un fichier écrit avant ces durées ferait réessayer aussi vite
-    /// que le disque tourne, et renoncerait avant d'avoir essayé une seule fois.
     #[test]
     fn un_zero_prend_le_defaut_champ_par_champ() {
         let defaut = ams_queue::Backoff::DEFAULT;
-        assert_eq!(Relay::default().backoff(), defaut);
+        assert_eq!(Queue::default().backoff(), defaut);
 
         // Un seul champ nommé : les deux autres restent au défaut.
-        let partielle = Relay {
+        let partielle = Queue {
             retry_seconds: 42,
-            ..Relay::default()
+            ..Queue::default()
         };
         let reprise = partielle.backoff();
         assert_eq!(reprise.first, Duration::from_secs(42));
@@ -1378,11 +1418,11 @@ mod tests {
         assert_eq!(reprise.expiry, defaut.expiry);
 
         // Et les trois nommés : plus rien du défaut.
-        let entiere = Relay {
+        let entiere = Queue {
             retry_seconds: 1,
             max_retry_seconds: 2,
             expire_seconds: 3,
-            ..Relay::default()
+            ..Queue::default()
         };
         assert_eq!(
             entiere.backoff(),
@@ -1396,27 +1436,25 @@ mod tests {
 
     /// **UN DOSSIER DE FILE QUI N'EST PAS DE L'UTF-8 FAIT REFUSER LE FICHIER.**
     ///
-    /// Le refus vaut pour tous les champs texte, mais celui-ci se décode EN
-    /// DERNIER : des octets au hasard échouent toujours plus tôt, et sa garde
-    /// n'était donc jamais éprouvée. On écrit le message à la main pour
-    /// l'atteindre — un chemin illisible ferait ouvrir un dossier qui n'est pas
-    /// celui que l'administrateur a nommé.
+    /// Le refus vaut pour tous les champs texte, mais celui-ci se décode parmi
+    /// les DERNIERS : des octets au hasard échouent toujours plus tôt, et sa
+    /// garde n'était donc jamais éprouvée. On écrit le message à la main pour
+    /// l'atteindre — un chemin illisible ferait poser du courrier dans un
+    /// répertoire qui n'est pas celui que l'administrateur a nommé.
     #[test]
     fn un_dossier_de_file_illisible_fait_refuser() {
         use crate::ams_config_capnp::configuration;
 
         let bon = encode(&Configuration {
-            relay: Relay {
-                enabled: true,
+            queue: Queue {
                 spool: String::from("/var/spool/ams/file"),
-                ..Relay::default()
+                ..Queue::default()
             },
             ..exemple()
         })
         .expect("encodable");
         assert!(decode(&bon).is_ok(), "le témoin doit se relire");
 
-        // Le même, dont le seul dossier porte un octet qui n'est pas de l'UTF-8.
         let mut message = capnp::message::Builder::new_default();
         {
             let lu = capnp::serialize::read_message(
@@ -1430,9 +1468,8 @@ mod tests {
             let mut ecrit = message
                 .get_root::<configuration::Builder<'_>>()
                 .expect("racine");
-            let mut emission = ecrit.reborrow().init_relay();
-            emission.set_enabled(true);
-            emission.set_spool(capnp::text::Reader(b"/var/\xff/file"));
+            let mut attente = ecrit.reborrow().init_queue();
+            attente.set_spool(capnp::text::Reader(b"/var/\xff/file"));
         }
         let octets = capnp::serialize::write_message_to_words(&message);
         assert_eq!(decode(&octets), Err(Error::NotUtf8));
@@ -1440,13 +1477,18 @@ mod tests {
 
     #[test]
     fn la_file_se_debogue_et_se_compare() {
-        let relais = Relay {
-            enabled: true,
-            ..Relay::default()
-        };
+        let relais = Relay { enabled: true };
         assert!(!std::format!("{relais:?}").is_empty());
         assert_ne!(relais, Relay::default());
         assert_eq!(relais.clone(), relais);
+
+        let attente = Queue {
+            spool: String::from("/x"),
+            ..Queue::default()
+        };
+        assert!(!std::format!("{attente:?}").is_empty());
+        assert_ne!(attente, Queue::default());
+        assert_eq!(attente.clone(), attente);
     }
 
     // ── MTA-STS (RFC 8461) ──────────────────────────────────────────────────

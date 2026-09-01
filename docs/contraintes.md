@@ -1250,6 +1250,37 @@ SMTP authentifié et `/v1/submissions` mènent tous deux à la même file. N'en
 ouvrir qu'une ferait deux règles pour un même geste, et l'utilisateur
 découvrirait laquelle relaie en essayant.
 
+**ET TOUT CE QUI SORT Y PASSE, depuis le 2026-09-02.** Il y avait TROIS
+politiques de reprise dans ce produit : celle-ci, et deux écrites à la main pour
+les rapports DMARC et TLS — qui réessayaient à chaque tour de leur intervalle
+quotidien et s'effaçaient EN SILENCE au bout de sept jours. Trois politiques,
+c'est trois vérités qui divergent, et deux d'entre elles n'avaient jamais été
+éprouvées : leur reprise n'était couverte par aucun essai, et leur péremption non
+plus.
+
+Il n'y en a plus qu'une. Un rapport n'est pas moins un message qu'un autre : il
+est composé, signé UNE FOIS, puis déposé en file, et c'est `ams-queue` — couvert
+à 100 % — qui décide de recommencer et de renoncer. **Quand on renonce, un
+rapport de non-remise arrive dans la boîte du postmaster** : le chemin de retour
+d'un rapport est déjà son adresse, et l'exploitant apprend enfin qu'un domaine ne
+reçoit pas ce qu'on lui envoie. Auparavant le fichier disparaissait sans un mot.
+
+**La file a donc cessé d'appartenir au relais.** `Relay` ne garde que son
+drapeau ; les réglages vivent dans `Queue`, sous de NOUVEAUX numéros de champ.
+Un fichier de configuration écrit avant ce déménagement décode donc un dossier
+VIDE, et le serveur refuse de démarrer en le disant — reprendre l'ancienne valeur
+en silence ferait déposer des rapports dans un répertoire que l'exploitant
+croyait réservé au courrier. Les cinq champs retirés restent dans le schéma sous
+un nom qui dit ce qu'ils sont : Cap'n Proto identifie un champ par son NUMÉRO, et
+les supprimer décalerait tout ce qui suit.
+
+Côté ligne de commande, `--relay-spool` et ses trois voisins deviennent
+`--queue-spool` et compagnie. **Les anciens noms sont refusés en disant le
+nouveau** plutôt que traités comme des options inconnues : la file n'appartient
+plus au relais, et les laisser passer ferait croire qu'ils ne gouvernent que lui.
+`--queue-spool` est désormais exigé dès que quelque chose sort — `--relay`,
+`--dmarc-send` ou `--tlsrpt-send`.
+
 **Quatre décisions de la file elle-même**, consignées parce qu'elles ne se lisent
 pas dans le code seul :
 
@@ -3688,7 +3719,7 @@ il l'a commis sur lui-même : une section qui s'intitule « l'état réel » est
 qu'on relit le moins, parce qu'on croit la connaître.
 
 Sont outillées : C1 (les trois étages, et la couverture qui n'est exigible que
-parce qu'ils sont séparés), C2 (le gate mesure 51 733 régions sur 29 crates,
+parce qu'ils sont séparés), C2 (le gate mesure 51 760 régions sur 29 crates,
 toutes couvertes — et il compare des comptes, non un pourcentage arrondi), C3
 (les lints, l'absence d'allocation dans les décodeurs, et 60 cibles de fuzz dont
 la CI vérifie qu'elle les lance toutes), C4 (`ams-tls` n'offre que

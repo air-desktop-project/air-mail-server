@@ -60,6 +60,8 @@ rustls = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]
+# Les essais des rapports passent par la file, comme le produit.
+ams-queue = { workspace = true }
 ams-quic-client = { workspace = true }
 ams-proto-h3 = { workspace = true }
 ams-guard = { workspace = true }

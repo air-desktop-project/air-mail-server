@@ -83,19 +83,19 @@ pub struct Options {
     /// fausse en pratique : personne ne pouvait desserrer un seuil qui se
     /// trompe, ni resserrer celui qui ne suffit plus.
     pub guard: Thresholds,
-    /// La file de réémission sortante — voir [`Options::relay_spool`].
+    /// L'émission pour les comptes authentifiés — voir [`Options::queue_spool`].
     ///
     /// **ÉTEINTE PAR DÉFAUT.** Émettre du courrier vers des tiers ne se décide
     /// pas à la place de celui qui exploite la machine.
     pub relay: bool,
-    /// Le dossier de la file. **Exigé avec `--relay`.**
-    pub relay_spool: Option<PathBuf>,
+    /// Le dossier de la file. **Exigé dès que quelque chose sort.**
+    pub queue_spool: Option<PathBuf>,
     /// L'attente après le premier échec, en secondes. Zéro prend le défaut.
-    pub relay_retry: u32,
+    pub queue_retry: u32,
     /// Le plafond de l'attente, en secondes. Zéro prend le défaut.
-    pub relay_max_retry: u32,
+    pub queue_max_retry: u32,
     /// Le temps accordé à un message depuis son dépôt. Zéro prend le défaut.
-    pub relay_expire: u32,
+    pub queue_expire: u32,
     /// Le fichier PEM des autorités pour MTA-STS. Absent : non évalué.
     pub mtasts_anchors: Option<PathBuf>,
     /// Le dossier du cache des politiques MTA-STS. **Exigé avec le premier.**
@@ -172,12 +172,12 @@ impl Default for Options {
             // pas un émetteur sans que personne l'ait décidé — la même règle que
             // pour `--dmarc-send`, et pour la même raison.
             relay: false,
-            relay_spool: None,
+            queue_spool: None,
             // ZÉRO PARTOUT, QUI VEUT DIRE « LE DÉFAUT DE `ams-queue` ». Recopier
             // les durées ici ferait deux vérités pour une seule décision.
-            relay_retry: 0,
-            relay_max_retry: 0,
-            relay_expire: 0,
+            queue_retry: 0,
+            queue_max_retry: 0,
+            queue_expire: 0,
             // PAS DE MTA-STS PAR DÉFAUT, et pas de drapeau : l'absence de
             // valeur EST l'absence de service. Embarquer des racines les ferait
             // vieillir avec le binaire ; lire celles du système sans qu'on l'ait
@@ -279,10 +279,12 @@ impl Options {
             },
             relay: ams_config::Relay {
                 enabled: self.relay,
-                spool: chemin(self.relay_spool.as_ref()),
-                retry_seconds: self.relay_retry,
-                max_retry_seconds: self.relay_max_retry,
-                expire_seconds: self.relay_expire,
+            },
+            queue: ams_config::Queue {
+                spool: chemin(self.queue_spool.as_ref()),
+                retry_seconds: self.queue_retry,
+                max_retry_seconds: self.queue_max_retry,
+                expire_seconds: self.queue_expire,
             },
             listen_pop3: self
                 .listen_pop3
@@ -351,10 +353,12 @@ OPTIONS DE `config write`
 
     LA FILE DE RÉÉMISSION SORTANTE
     --relay                             émettre pour les comptes authentifiés
-    --relay-spool <chemin>              le dossier de la file (EXIGÉ avec --relay)
-    --relay-retry-seconds <n>           attente après le 1er échec  (défaut 900)
-    --relay-max-retry-seconds <n>       plafond de l'attente        (défaut 21600)
-    --relay-expire-seconds <n>          avant d'abandonner          (défaut 432000)
+
+    LA FILE D'ATTENTE — tout ce qui sort passe par elle
+    --queue-spool <chemin>              le dossier de la file (EXIGÉ dès qu'on émet)
+    --queue-retry-seconds <n>           attente après le 1er échec  (défaut 900)
+    --queue-max-retry-seconds <n>       plafond de l'attente        (défaut 21600)
+    --queue-expire-seconds <n>          avant d'abandonner          (défaut 432000)
 
     LES SEUILS DU GARDE (C8)
     --connections-per-minute <n>        connexions par source   (défaut 60)
@@ -508,11 +512,21 @@ OPTIONS DE `config write`
     L'authentification n'étant annoncée que sous chiffrement, `--relay` sans
     `--tls-cert` n'ouvre l'émission à personne ; le serveur le dit au démarrage.
 
-    `--relay-spool` EST EXIGÉ AVEC `--relay`, et il est DISTINCT du Maildir : ce
-    qui attend d'être émis n'est pas du courrier reçu, et les mélanger ferait
-    apparaître dans une boîte ce qui n'y est jamais arrivé. Accepter un message
-    qu'on n'a nulle part où poser serait le perdre en silence, et c'est pourquoi
-    l'un sans l'autre est refusé ici plutôt qu'au démarrage.
+    `--queue-spool` EST EXIGÉ DÈS QUE QUELQUE CHOSE SORT — `--relay`,
+    `--dmarc-send` ou `--tlsrpt-send`. TOUT ce qui sort passe par la même file :
+    il y avait trois politiques de reprise dans ce produit, dont deux écrites à
+    la main pour les rapports, et trois politiques sont trois vérités qui
+    divergent. Il n'y en a plus qu'une.
+
+    Le dossier est DISTINCT du Maildir : ce qui attend d'être émis n'est pas du
+    courrier reçu, et les mélanger ferait apparaître dans une boîte ce qui n'y
+    est jamais arrivé. Accepter un message qu'on n'a nulle part où poser serait
+    le perdre en silence, et c'est pourquoi le manque est refusé ici plutôt qu'au
+    démarrage.
+
+    LES ANCIENS NOMS `--relay-spool` ET SES TROIS VOISINS SONT REFUSÉS, en
+    disant le nouveau : la file n'appartient plus au relais, et les laisser
+    passer ferait croire qu'ils ne gouvernent que lui.
 
     L'ATTENTE DOUBLE À CHAQUE ÉCHEC, jusqu'au plafond. Réessayer à intervalle fixe
     pendant cinq jours, c'est frapper des centaines de fois à une porte fermée —
@@ -776,25 +790,41 @@ where
             "--mta-sts-cache" => options.mtasts_cache = Some(PathBuf::from(valeur()?)),
             // ── La file de réémission sortante ──────────────────────────────
             "--relay" => options.relay = true,
-            "--relay-spool" => options.relay_spool = Some(PathBuf::from(valeur()?)),
-            "--relay-retry-seconds" => {
-                options.relay_retry = pas_zero(
+            "--queue-spool" => options.queue_spool = Some(PathBuf::from(valeur()?)),
+            "--queue-retry-seconds" => {
+                options.queue_retry = pas_zero(
                     &valeur()?,
                     "une attente nulle ferait réessayer aussi vite que le disque tourne",
                 )?;
             }
-            "--relay-max-retry-seconds" => {
-                options.relay_max_retry = pas_zero(
+            "--queue-max-retry-seconds" => {
+                options.queue_max_retry = pas_zero(
                     &valeur()?,
                     "un plafond nul ramènerait toutes les attentes à rien",
                 )?;
             }
-            "--relay-expire-seconds" => {
-                options.relay_expire = pas_zero(
+            "--queue-expire-seconds" => {
+                options.queue_expire = pas_zero(
                     &valeur()?,
                     "une péremption nulle rendrait le message à son expéditeur sans avoir \
                      essayé une seule fois",
                 )?;
+            }
+            // **LES ANCIENS NOMS SE REFUSENT EN DISANT LE NOUVEAU.**
+            //
+            // La file n'appartient plus au relais : les rapports DMARC et TLS
+            // l'empruntent aussi. Les laisser passer sous leur ancien nom ferait
+            // croire qu'ils ne gouvernent que le relais ; les traiter comme des
+            // options inconnues laisserait chercher.
+            ancien @ ("--relay-spool"
+            | "--relay-retry-seconds"
+            | "--relay-max-retry-seconds"
+            | "--relay-expire-seconds") => {
+                let neuf = ancien.replacen("--relay-", "--queue-", 1);
+                return Err(ArgError::new(format!(
+                    "`{ancien}` s'appelle désormais `{neuf}` : la file n'est plus celle du \
+                     relais, les rapports DMARC et TLS l'empruntent aussi"
+                )));
             }
             // ── Les seuils du garde (C8) ────────────────────────────────────
             //
@@ -865,15 +895,20 @@ where
     // **UN RELAIS SANS DOSSIER PERDRAIT LE COURRIER EN SILENCE** : on aurait dit
     // `250` à un message qu'on n'a nulle part où poser. Le serveur le refuserait
     // aussi au démarrage ; le dire ici coûte une seconde plutôt qu'une astreinte.
-    if options.relay && options.relay_spool.is_none() {
+    // **TOUT CE QUI SORT PASSE PAR LA FILE**, et pas seulement le relais : les
+    // rapports DMARC et TLS l'empruntent aussi depuis qu'il n'y a plus qu'une
+    // politique de reprise.
+    let emet = options.relay || options.dmarc_send || options.tlsrpt_send;
+    if emet && options.queue_spool.is_none() {
         return Err(ArgError::new(
-            "`--relay` exige `--relay-spool` : un message accepté qu'on n'a nulle part où \
-             poser est un message perdu",
+            "il faut `--queue-spool` dès que quelque chose sort — `--relay`, `--dmarc-send` \
+             ou `--tlsrpt-send` : un message accepté qu'on n'a nulle part où poser est un \
+             message perdu",
         ));
     }
     // L'INVERSE N'EST PAS REFUSÉ, et c'est délibéré : nommer un dossier sans
-    // `--relay` ne promet rien à personne, et permet de le préparer avant
-    // d'ouvrir l'émission. Le serveur le dit au démarrage.
+    // rien émettre ne promet rien à personne, et permet de le préparer avant.
+    // Le serveur le dit au démarrage.
     // **LES DEUX VONT ENSEMBLE, OU AUCUNE.** Sans autorités, on ne saurait pas à
     // qui l'on parle en allant chercher la politique ; sans cache, un
     // redémarrage rouvrirait la fenêtre de déclassement que §5 de RFC 8461
@@ -1145,10 +1180,13 @@ mod tests {
             ),
             (&["--tracked-sources"], "attend une valeur"),
             // Les trois durées de la file : zéro n'y veut rien dire.
-            (&["--relay-retry-seconds", "0"], "aussi vite que le disque"),
-            (&["--relay-max-retry-seconds", "0"], "à rien"),
-            (&["--relay-expire-seconds", "0"], "sans avoir essayé"),
-            (&["--relay-spool"], "attend une valeur"),
+            (&["--queue-retry-seconds", "0"], "aussi vite que le disque"),
+            (&["--queue-max-retry-seconds", "0"], "à rien"),
+            (&["--queue-expire-seconds", "0"], "sans avoir essayé"),
+            (&["--queue-spool"], "attend une valeur"),
+            // Les anciens noms se refusent EN DISANT LE NOUVEAU.
+            (&["--relay-spool", "/x"], "--queue-spool"),
+            (&["--relay-expire-seconds", "1"], "--queue-expire-seconds"),
             (&["--mta-sts-anchors"], "attend une valeur"),
             (&["--mta-sts-cache"], "attend une valeur"),
             (&["--tlsrpt-dir"], "attend une valeur"),
@@ -1197,7 +1235,14 @@ mod tests {
         assert!(config.tlsrpt.compose());
         assert!(!config.tlsrpt.envoie(), "déposé n'est pas remis");
 
-        let remet = ecrire(&["--tlsrpt-dir", "/var/spool/ams/tlsrpt", "--tlsrpt-send"]);
+        // **REMETTRE EXIGE LA FILE** : tout ce qui sort y passe.
+        let remet = ecrire(&[
+            "--tlsrpt-dir",
+            "/var/spool/ams/tlsrpt",
+            "--tlsrpt-send",
+            "--queue-spool",
+            "/var/spool/ams/file",
+        ]);
         let config = remet.en_configuration();
         assert!(config.tlsrpt.compose() && config.tlsrpt.envoie());
         assert_eq!(config.tlsrpt.directory, "/var/spool/ams/tlsrpt");
@@ -1206,16 +1251,38 @@ mod tests {
         assert_eq!(ams_config::decode(&octets).expect("relisible"), config);
     }
 
-    /// **LE DRAPEAU SEUL EST LICITE, ET NE REMET RIEN.**
+    /// **LE DRAPEAU SANS DOSSIER DE RAPPORTS NE REMET RIEN.**
     ///
     /// Il n'est pas refusé — le refuser interdirait de préparer une
-    /// configuration —, mais il ne promet rien à personne : sans dossier, il n'y
-    /// a rien à remettre.
+    /// configuration —, mais il ne promet rien à personne : sans rapport
+    /// composé, il n'y a rien à remettre. La FILE, elle, est exigée : le
+    /// drapeau dit qu'on émettra, et tout ce qui sort passe par elle.
     #[test]
-    fn le_drapeau_seul_est_licite_et_ne_remet_rien() {
-        let options = ecrire(&["--tlsrpt-send"]);
+    fn le_drapeau_sans_dossier_de_rapports_ne_remet_rien() {
+        let options = ecrire(&["--tlsrpt-send", "--queue-spool", "/var/spool/ams/file"]);
         assert!(options.tlsrpt_send);
         assert!(!options.en_configuration().tlsrpt.envoie());
+
+        // Et sans file, il est refusé : c'est le contrôle qui compte.
+        let erreur = parse(["--tlsrpt-send"].as_slice()).expect_err("refusé");
+        assert!(
+            erreur.message.contains("--queue-spool"),
+            "« {} » ne dit pas ce qui manque",
+            erreur.message
+        );
+    }
+
+    /// **`--dmarc-send` AUSSI EXIGE LA FILE.** Un rapport n'est pas moins un
+    /// message qu'un autre.
+    #[test]
+    fn remettre_des_rapports_dmarc_exige_la_file() {
+        let erreur = parse(["--dmarc-send"].as_slice()).expect_err("refusé");
+        assert!(
+            erreur.message.contains("--queue-spool"),
+            "« {} » ne dit pas ce qui manque",
+            erreur.message
+        );
+        assert!(ecrire(&["--dmarc-send", "--queue-spool", "/var/spool/ams/file"]).dmarc_send);
     }
 
     // ── MTA-STS (RFC 8461) ──────────────────────────────────────────────────
@@ -1275,10 +1342,10 @@ mod tests {
     fn sans_option_rien_ne_sort() {
         let options = ecrire(&["--domain", "mail.example.com"]);
         assert!(!options.relay);
-        assert!(options.relay_spool.is_none());
+        assert!(options.queue_spool.is_none());
         let config = options.en_configuration();
         assert!(!config.relay.enabled);
-        assert_eq!(config.relay.backoff(), ams_queue::Backoff::DEFAULT);
+        assert_eq!(config.queue.backoff(), ams_queue::Backoff::DEFAULT);
     }
 
     /// Les cinq réglages traversent jusqu'au fichier.
@@ -1288,20 +1355,20 @@ mod tests {
             "--domain",
             "mail.example.com",
             "--relay",
-            "--relay-spool",
+            "--queue-spool",
             "/var/spool/ams/file",
-            "--relay-retry-seconds",
+            "--queue-retry-seconds",
             "60",
-            "--relay-max-retry-seconds",
+            "--queue-max-retry-seconds",
             "3600",
-            "--relay-expire-seconds",
+            "--queue-expire-seconds",
             "172800",
         ]);
         assert!(options.relay);
         let config = options.en_configuration();
         assert!(config.relay.enabled);
-        assert_eq!(config.relay.spool, "/var/spool/ams/file");
-        let reprise = config.relay.backoff();
+        assert_eq!(config.queue.spool, "/var/spool/ams/file");
+        let reprise = config.queue.backoff();
         assert_eq!(reprise.first, Duration::from_secs(60));
         assert_eq!(reprise.ceiling, Duration::from_secs(3_600));
         assert_eq!(reprise.expiry, Duration::from_secs(172_800));
@@ -1321,22 +1388,22 @@ mod tests {
     fn un_relais_sans_dossier_est_refuse() {
         let erreur = parse(["--relay"].as_slice()).expect_err("refusé");
         assert!(
-            erreur.message.contains("--relay-spool"),
+            erreur.message.contains("--queue-spool"),
             "« {} » ne dit pas ce qui manque",
             erreur.message
         );
     }
 
     /// **L'INVERSE N'EST PAS REFUSÉ**, et c'est délibéré : nommer un dossier
-    /// sans ouvrir l'émission ne promet rien à personne, et permet de le
-    /// préparer avant. Le serveur le dit au démarrage.
+    /// sans rien émettre ne promet rien à personne, et permet de le préparer
+    /// avant. Le serveur le dit au démarrage.
     #[test]
-    fn un_dossier_sans_relais_est_licite() {
-        let options = ecrire(&["--relay-spool", "/var/spool/ams/file"]);
+    fn un_dossier_sans_emission_est_licite() {
+        let options = ecrire(&["--queue-spool", "/var/spool/ams/file"]);
         assert!(!options.relay);
         assert!(!options.en_configuration().relay.enabled);
         assert_eq!(
-            options.en_configuration().relay.spool,
+            options.en_configuration().queue.spool,
             "/var/spool/ams/file"
         );
     }

@@ -55,7 +55,7 @@ COMMANDES
                         liste les noms de comptes. Jamais les empreintes.
     account remove <fichier> --login <nom>
                         retire un compte.
-    config write … --relay --relay-spool <chemin>
+    config write … --relay --queue-spool <chemin>
                         ouvre l'ÉMISSION pour les comptes authentifiés. Éteinte
                         par défaut : ce serveur reçoit, il n'émet pas.
     token <config> --login <nom> [--minutes <n>]
@@ -211,7 +211,7 @@ fn ecrire(fichier: &Path, arguments: &[&str]) -> ExitCode {
              compte AUTHENTIFIÉ. Sans certificat TLS, l'authentification n'est pas annoncée \
              et personne ne pourra s'en servir."
         );
-    } else if !config.relay.spool.is_empty() {
+    } else if !config.queue.spool.is_empty() {
         println!(
             "ATTENTION  dossier de file nommé SANS `--relay` : rien ne sera émis, et rien \
              n'y sera écrit."
@@ -322,10 +322,10 @@ fn afficher(config: &Configuration) {
     println!(
         "réémission         {}",
         if config.relay.enabled {
-            let reprise = config.relay.backoff();
+            let reprise = config.queue.backoff();
             format!(
                 "vers `{}` — 1er essai à {} s, plafond {} s, abandon à {} s",
-                config.relay.spool,
+                config.queue.spool,
                 reprise.first.as_secs(),
                 reprise.ceiling.as_secs(),
                 reprise.expiry.as_secs()

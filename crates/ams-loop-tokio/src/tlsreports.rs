@@ -41,7 +41,7 @@ use ams_tlsrpt::{
 };
 
 use crate::dkim::DkimSigner;
-use crate::relay::{Outgoing, Relay, RelayOutcome};
+
 use crate::resolver::{Resolver, Txt};
 
 /// Combien de domaines le journal retient à la fois.
@@ -55,9 +55,6 @@ const ECHECS_MAX: usize = 64;
 
 /// Ce qu'une taille de rapport peut atteindre.
 const RAPPORT_MAX: usize = 256 * 1024;
-
-/// Au-delà, un rapport ne vaut plus la peine d'être remis : sept jours.
-const PEREMPTION: u64 = 7 * 86_400;
 
 /// Ce qu'une remise apprend, et qu'on rapportera peut-être.
 #[derive(Debug, Clone)]
@@ -123,8 +120,12 @@ pub struct TlsReports {
     /// Le dossier où les rapports sont déposés.
     directory: PathBuf,
     resolveur: Resolver,
-    /// De quoi remettre par courrier, si l'exploitant l'a demandé.
-    relay: Option<Relay>,
+    /// La file d'attente du serveur, si l'exploitant a demandé la remise.
+    ///
+    /// **CE N'EST PLUS UN REMETTEUR.** Un rapport n'est pas moins un message
+    /// qu'un autre : il passe par la même file, la même attente qui double, la
+    /// même péremption, et le même rapport de non-remise quand on renonce.
+    file: Option<Arc<crate::queue::Spool>>,
     /// De quoi remettre par `https:`, si l'exploitant a nommé des autorités.
     https: Option<Arc<rustls::ClientConfig>>,
     /// De quoi signer ce qu'on émet.
@@ -169,7 +170,7 @@ impl TlsReports {
             // **ON NE REMET PAS, SAUF DEMANDE EXPRESSE**, et le constructeur ne
             // le prend pas : émettre du courrier vers des tiers ne se décide pas
             // à la place de qui exploite la machine.
-            relay: None,
+            file: None,
             https: None,
             signataire: None,
             delai,
@@ -178,10 +179,10 @@ impl TlsReports {
         }
     }
 
-    /// Lui donne de quoi remettre par courrier.
+    /// Lui donne la file par laquelle remettre.
     #[must_use]
-    pub fn with_relay(mut self, relay: Relay) -> Self {
-        self.relay = Some(relay);
+    pub fn with_queue(mut self, file: Arc<crate::queue::Spool>) -> Self {
+        self.file = Some(file);
         self
     }
 
@@ -465,7 +466,6 @@ impl TlsReports {
         let Ok(mut dossier) = tokio::fs::read_dir(&self.directory).await else {
             return compte;
         };
-        let maintenant = maintenant();
         let mut a_faire = Vec::new();
         while let Ok(Some(entree)) = dossier.next_entry().await {
             let nom = entree.file_name();
@@ -479,31 +479,25 @@ impl TlsReports {
             }
         }
         for nom in a_faire {
-            self.remettre(&nom, maintenant, &mut compte).await;
+            self.remettre(&nom, &mut compte).await;
         }
         compte
     }
 
     /// Remet UN rapport.
-    async fn remettre(&self, nom: &str, maintenant: u64, compte: &mut TlsSendTally) {
+    async fn remettre(&self, nom: &str, compte: &mut TlsSendTally) {
         let chemin = self.directory.join(nom);
         let mut voisin = chemin.clone().into_os_string();
         voisin.push(".destinations");
         let voisin = PathBuf::from(voisin);
 
         // §5.3 : `<émetteur>!<rapporté>!<début>!<fin>.json.gz`.
-        let Some((domaine, fin)) = decouper(nom) else {
+        let Some(domaine) = decouper(nom) else {
             compte.dropped = compte.dropped.saturating_add(1);
             let _ = tokio::fs::remove_file(&chemin).await;
             let _ = tokio::fs::remove_file(&voisin).await;
             return;
         };
-        if maintenant.saturating_sub(fin) > PEREMPTION {
-            let _ = tokio::fs::remove_file(&chemin).await;
-            let _ = tokio::fs::remove_file(&voisin).await;
-            compte.dropped = compte.dropped.saturating_add(1);
-            return;
-        }
         let (Ok(rapport), Ok(destinations)) = (
             tokio::fs::read(&chemin).await,
             tokio::fs::read_to_string(&voisin).await,
@@ -548,7 +542,11 @@ impl TlsReports {
         self.par_https(cible, rapport).await
     }
 
-    /// Remet un rapport par courrier (§5.3).
+    /// Compose le message, et le DÉPOSE EN FILE (§5.3).
+    ///
+    /// **IL NE PART PAS D'ICI.** La reprise, la péremption et le rapport de
+    /// non-remise appartiennent à `ams-queue` : un rapport TLS n'est pas moins
+    /// un message qu'un autre.
     async fn par_courrier(
         &self,
         adresse: &str,
@@ -556,8 +554,7 @@ impl TlsReports {
         nom: &str,
         rapport: &[u8],
     ) -> Option<bool> {
-        let relay = self.relay.as_ref()?;
-        let cible = adresse.rsplit_once('@').map(|(_, apres)| apres)?;
+        let file = self.file.as_ref()?;
 
         let identifiant = std::format!("{}.{}@{}", maintenant(), self.suivant(), self.org_name);
         let mut place = [0_u8; SUBJECT_MAX];
@@ -582,30 +579,18 @@ impl TlsReports {
             .ok()?
             .len();
         message.truncate(ecrit);
+        // **ON SIGNE UNE FOIS, ET LA FILE RÉÉMET LES MÊMES OCTETS.**
         let message = self.signer(message).await;
 
+        // L'expéditeur d'enveloppe est une VRAIE adresse : c'est par là qu'un
+        // refus nous reviendra, et c'est aussi là que la file déposera son
+        // rapport de non-remise si elle renonce.
         let destinataires = std::vec![String::from(adresse)];
-        let issue = relay
-            .send(
-                cible,
-                &Outgoing {
-                    // L'expéditeur d'enveloppe est une VRAIE adresse : c'est par
-                    // là qu'un refus nous reviendra, et un rapport dont on ignore
-                    // qu'il n'arrive jamais ne vaut pas mieux que pas de rapport.
-                    sender: &self.email,
-                    recipients: &destinataires,
-                    body: &message,
-                },
-            )
-            .await;
-        match issue {
-            RelayOutcome::Delivered { .. } => Some(true),
-            // Un refus définitif RETIRE le rapport : insister remplirait le
-            // dossier de messages que personne ne veut.
-            RelayOutcome::Rejected(_) | RelayOutcome::NullMx | RelayOutcome::Unsendable => {
-                Some(false)
-            }
-            _ => None,
+        match file.deposer(&self.email, &destinataires, &message, maintenant()) {
+            Ok(()) => Some(true),
+            // Une adresse qu'on refuse d'écrire ne s'écrira pas mieux demain.
+            Err(crate::delivery::DeliveryFailure::Permanent) => Some(false),
+            Err(crate::delivery::DeliveryFailure::Temporary) => None,
         }
     }
 
@@ -751,20 +736,23 @@ fn chiffre_hexa(quartet: u8) -> u8 {
     }
 }
 
-/// Le domaine rapporté et la fin de période, tirés d'un nom de fichier.
+/// Le domaine rapporté, tiré d'un nom de fichier.
 ///
 /// `<émetteur>!<rapporté>!<début>!<fin>.json.gz` (§5.3).
-fn decouper(nom: &str) -> Option<(String, u64)> {
+fn decouper(nom: &str) -> Option<String> {
     let corps = nom.strip_suffix(".json.gz")?;
     let mut parts = corps.split('!');
     let _emetteur = parts.next()?;
     let rapporte = parts.next()?;
     let _debut = parts.next()?;
-    let fin = parts.next()?.parse().ok()?;
+    // La fin de période se lit, mais ne sert plus : la péremption appartient à
+    // la file. On la vérifie tout de même, pour ne pas prendre un nom qui n'a
+    // pas cette forme.
+    let _fin: u64 = parts.next()?.parse().ok()?;
     if parts.next().is_some() || rapporte.is_empty() {
         return None;
     }
-    Some((String::from(rapporte), fin))
+    Some(String::from(rapporte))
 }
 
 /// Compresse en gzip.

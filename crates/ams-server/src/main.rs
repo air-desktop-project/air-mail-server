@@ -621,74 +621,6 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         }
     );
 
-    // ── LE JOURNAL DES RAPPORTS (RFC 7489 §7.2) ─────────────────────────────
-    //
-    // Il ne se compose que si DMARC est évalué : sans évaluation, il n'y aurait
-    // rien à rapporter. Et il ne s'ouvre que si un dossier est nommé — composer
-    // des rapports est un service qu'on rend à autrui, et il se demande.
-    let journal_rapports = match (verificateur.as_ref(), options.dmarc.rapporte()) {
-        (Some(checker), true) => {
-            let spool = ReportSpool::new(
-                if options.dmarc.report_org_name.is_empty() {
-                    options.domain.clone()
-                } else {
-                    options.dmarc.report_org_name.clone()
-                },
-                if options.dmarc.report_email.is_empty() {
-                    format!("postmaster@{}", options.domain)
-                } else {
-                    options.dmarc.report_email.clone()
-                },
-                PathBuf::from(&options.dmarc.report_directory),
-                checker.resolver().clone(),
-            );
-            // LE REMETTEUR N'EST LÀ QUE SI ON L'A DEMANDÉ. Émettre du courrier
-            // vers des tiers ne se décide pas à la place de celui qui exploite
-            // la machine.
-            let spool = if options.dmarc.rapporte_les_echecs() {
-                spool.with_failure_reports()
-            } else {
-                spool
-            };
-            // LA SIGNATURE N'EST LÀ QUE SI UNE CLÉ L'EST : pas de drapeau, et
-            // donc pas d'état où l'on croirait signer sans le faire.
-            let spool = match signature.clone() {
-                Some(cle) => spool.with_dkim(DkimSigner::new(options.dkim.selector.clone(), cle)),
-                None => spool,
-            };
-            let spool = if options.dmarc.envoie() {
-                spool.with_relay(Relay::new(
-                    checker.resolver().clone(),
-                    std::sync::Arc::new(ams_tls::relay_config()),
-                    options.domain.clone(),
-                    false,
-                    Duration::from_secs(u64::from(options.timeouts.command_seconds)),
-                ))
-            } else {
-                spool
-            };
-            Some(std::sync::Arc::new(spool))
-        }
-        _ => None,
-    };
-    // ON DIT SI L'ON SIGNE. Un serveur qui n'annonce rien laisse croire qu'il
-    // signe : c'est ce que l'on attend d'un serveur de courrier, et le
-    // découvrir chez le destinataire coûte une réputation.
-    eprintln!(
-        "air-mail-server : {}",
-        match &signature {
-            Some(_) => format!(
-                "ce qui est ÉMIS est signé (DKIM, RFC 6376) — sélecteur `{}`, à publier sous \
-                 `{}._domainkey.<domaine>`",
-                options.dkim.selector, options.dkim.selector
-            ),
-            None => String::from(
-                "ce qui est ÉMIS n'est PAS signé — aucune clé DKIM nommée \
-                 (`air-mail-admin config write … --dkim-selector … --dkim-key …`)"
-            ),
-        }
-    );
-
     // ── MTA-STS (RFC 8461) ──────────────────────────────────────────────────
     //
     // **PAS DE DRAPEAU** : l'absence d'autorités EST l'absence de service, comme
@@ -738,6 +670,90 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         None
     };
 
+    // ── LA FILE D'ATTENTE DU SERVEUR ────────────────────────────────────────
+    //
+    // **TOUT CE QUI SORT PASSE PAR ELLE**, et c'est le point de cette tranche :
+    // il y avait trois politiques de reprise dans ce produit — celle-ci, et deux
+    // écrites à la main pour les rapports DMARC et TLS, qui réessayaient à
+    // chaque tour quotidien et s'effaçaient en silence au bout de sept jours.
+    // Trois politiques, c'est trois vérités qui divergent, et deux d'entre elles
+    // n'avaient jamais été éprouvées.
+    //
+    // Deux refus AU DÉMARRAGE plutôt que du courrier perdu en silence :
+    //
+    //   - sans dossier, on accepterait un message qu'on n'a nulle part où poser ;
+    //   - sans résolveur, on ne saurait trouver AUCUN `MX`. Le message resterait
+    //     en file jusqu'à sa péremption, puis reviendrait à son expéditeur —
+    //     cinq jours pour apprendre que le serveur n'a jamais pu essayer.
+    //
+    // Refuser de démarrer se voit tout de suite ; l'autre se découvre une
+    // semaine plus tard, chez celui qui attendait la réponse.
+    let emet = options.relay.enabled || options.dmarc.envoie() || options.tlsrpt.envoie();
+    let mut resolveur_de_file = None;
+    let file = if emet {
+        if options.queue.spool.is_empty() {
+            return Err(String::from(
+                "quelque chose doit sortir — relais, rapports DMARC ou rapports TLS — et aucun \
+                 dossier de file n'est nommé : un message accepté qu'on n'a nulle part où poser \
+                 est un message perdu (`air-mail-admin config write … --queue-spool \
+                 /var/spool/ams/file`)",
+            ));
+        }
+        let Some(checker) = verificateur.as_ref() else {
+            return Err(String::from(
+                "quelque chose doit sortir, et aucun résolveur DNS n'est nommé : aucun `MX` ne \
+                 pourrait être trouvé, et tout message accepté reviendrait à son expéditeur \
+                 après la péremption (`air-mail-admin config write … --resolver 127.0.0.1:53`)",
+            ));
+        };
+        resolveur_de_file = Some(checker.resolver().clone());
+        let dossier = PathBuf::from(&options.queue.spool);
+        // ON CRÉE LE DOSSIER, MAIS ON NE CRÉE PAS SON PARENT. Poser un chemin
+        // entier au démarrage écrirait quelque part où l'exploitant ne
+        // l'attendait pas, sur une faute de frappe.
+        if let Err(erreur) = std::fs::create_dir(&dossier)
+            && erreur.kind() != std::io::ErrorKind::AlreadyExists
+        {
+            return Err(format!("`{}` : {erreur}", dossier.display()));
+        }
+        let reprise = options.queue.backoff();
+        eprintln!(
+            "air-mail-server : FILE D'ATTENTE `{}` — 1er essai à {} s, plafond {} s, abandon à \
+             {} s. TOUT ce qui sort y passe : le courrier des comptes, les rapports DMARC et les \
+             rapports TLS. Quand on renonce, un rapport de non-remise (RFC 3464) revient \
+             LOCALEMENT dans la boîte de l'expéditeur.",
+            options.queue.spool,
+            reprise.first.as_secs(),
+            reprise.ceiling.as_secs(),
+            reprise.expiry.as_secs()
+        );
+        if options.relay.enabled && !authentifie {
+            eprintln!(
+                "air-mail-server : ATTENTION — émission ouverte SANS CHIFFREMENT : `AUTH` n'est \
+                 pas annoncé, donc aucune session ne pourra s'authentifier, donc rien ne sortira \
+                 pour les comptes."
+            );
+        }
+        Some(std::sync::Arc::new(ams_loop_tokio::Spool::new(
+            dossier,
+            reprise,
+            options.domain.clone(),
+            format!("postmaster@{}", options.domain),
+        )))
+    } else {
+        if !options.queue.spool.is_empty() {
+            eprintln!(
+                "air-mail-server : dossier de file nommé, mais RIEN NE SORT — ni relais, ni \
+                 rapports remis. Rien n'y sera écrit."
+            );
+        }
+        eprintln!(
+            "air-mail-server : aucune émission — ce serveur REÇOIT, et ne remet rien à \
+             l'extérieur. Un destinataire qui n'est pas d'ici est refusé (550), même authentifié."
+        );
+        None
+    };
+
     // ── LES RAPPORTS TLS (RFC 8460) ─────────────────────────────────────────
     //
     // **PAS DE DRAPEAU POUR COMPOSER** : l'absence de dossier EST l'absence de
@@ -779,20 +795,14 @@ async fn servir(fichier: &Path) -> Result<(), String> {
             Some(cle) => journal.with_dkim(DkimSigner::new(options.dkim.selector.clone(), cle)),
             None => journal,
         };
-        // LE REMETTEUR N'EST LÀ QUE SI ON L'A DEMANDÉ.
+        // LA FILE N'EST LÀ QUE SI ON A DEMANDÉ LA REMISE.
         let journal = if options.tlsrpt.envoie() {
-            let remetteur = Relay::new(
-                checker.resolver().clone(),
-                std::sync::Arc::new(ams_tls::relay_config()),
-                options.domain.clone(),
-                false,
-                Duration::from_secs(u64::from(options.timeouts.command_seconds)),
-            );
-            let remetteur = match mtasts.clone() {
-                Some(sts) => remetteur.with_mtasts(sts),
-                None => remetteur,
+            let journal = match file.as_ref() {
+                Some(attente) => journal.with_queue(std::sync::Arc::clone(attente)),
+                // Sans file, `--tlsrpt-send` n'aurait pas passé le contrôle de
+                // démarrage : ce bras est la ceinture de cette bretelle.
+                None => journal,
             };
-            let journal = journal.with_relay(remetteur);
             // **LE TRANSPORT `https:` EMPRUNTE LES AUTORITÉS DE MTA-STS**, parce
             // qu'il n'y a aucune raison d'en avoir deux jeux. Sans elles, seul
             // `mailto:` fonctionne, et on le dit.
@@ -837,118 +847,99 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         None
     };
 
-    // ── LA FILE DE RÉÉMISSION SORTANTE ──────────────────────────────────────
+    // ── LE JOURNAL DES RAPPORTS (RFC 7489 §7.2) ─────────────────────────────
     //
-    // **ÉTEINTE PAR DÉFAUT.** Émettre du courrier vers des tiers ne se décide pas
-    // à la place de celui qui exploite la machine — la même règle que pour les
-    // rapports DMARC, et pour la même raison.
-    //
-    // Deux refus AU DÉMARRAGE plutôt que du courrier perdu en silence :
-    //
-    //   - sans dossier, on accepterait un message qu'on n'a nulle part où poser ;
-    //   - sans résolveur, on ne saurait trouver AUCUN `MX`. Le message resterait
-    //     en file jusqu'à sa péremption, puis reviendrait à son expéditeur — cinq
-    //     jours pour apprendre que le serveur n'a jamais pu essayer.
-    //
-    // Refuser de démarrer se voit tout de suite ; l'autre se découvre une semaine
-    // plus tard, chez celui qui attendait la réponse.
-    let file = if options.relay.enabled {
-        if options.relay.spool.is_empty() {
-            return Err(String::from(
-                "`relay` est activé sans dossier de file : un message accepté qu'on n'a nulle \
-                 part où poser est un message perdu (`air-mail-admin config write … --relay \
-                 --relay-spool /var/spool/ams/file`)",
-            ));
-        }
-        let Some(checker) = verificateur.as_ref() else {
-            return Err(String::from(
-                "`relay` est activé sans résolveur DNS : aucun `MX` ne pourrait être trouvé, et \
-                 tout message accepté reviendrait à son expéditeur après la péremption \
-                 (`air-mail-admin config write … --resolver 127.0.0.1:53`)",
-            ));
-        };
-        let dossier = PathBuf::from(&options.relay.spool);
-        // ON CRÉE LE DOSSIER, MAIS ON NE CRÉE PAS SON PARENT. Poser un chemin
-        // entier au démarrage écrirait quelque part où l'exploitant ne
-        // l'attendait pas, sur une faute de frappe.
-        if let Err(erreur) = std::fs::create_dir(&dossier)
-            && erreur.kind() != std::io::ErrorKind::AlreadyExists
-        {
-            return Err(format!("`{}` : {erreur}", dossier.display()));
-        }
-        let reprise = options.relay.backoff();
-        eprintln!(
-            "air-mail-server : ÉMISSION OUVERTE — file `{}`, 1er essai à {} s, plafond {} s, \
-             abandon à {} s. ON NE RELAIE QUE POUR UN COMPTE AUTHENTIFIÉ, et un rapport de \
-             non-remise (RFC 3464) revient LOCALEMENT dans sa boîte.",
-            options.relay.spool,
-            reprise.first.as_secs(),
-            reprise.ceiling.as_secs(),
-            reprise.expiry.as_secs()
-        );
-        if !authentifie {
-            // Le dire plutôt que de laisser un exploitant croire qu'il émet :
-            // l'authentification n'est annoncée que sous chiffrement, donc
-            // personne ne pourra jamais atteindre ce relais.
-            eprintln!(
-                "air-mail-server : ATTENTION — émission ouverte SANS CHIFFREMENT : `AUTH` n'est \
-                 pas annoncé, donc aucune session ne pourra s'authentifier, donc rien ne sortira."
+    // Il ne se compose que si DMARC est évalué : sans évaluation, il n'y aurait
+    // rien à rapporter. Et il ne s'ouvre que si un dossier est nommé — composer
+    // des rapports est un service qu'on rend à autrui, et il se demande.
+    let journal_rapports = match (verificateur.as_ref(), options.dmarc.rapporte()) {
+        (Some(checker), true) => {
+            let spool = ReportSpool::new(
+                if options.dmarc.report_org_name.is_empty() {
+                    options.domain.clone()
+                } else {
+                    options.dmarc.report_org_name.clone()
+                },
+                if options.dmarc.report_email.is_empty() {
+                    format!("postmaster@{}", options.domain)
+                } else {
+                    options.dmarc.report_email.clone()
+                },
+                PathBuf::from(&options.dmarc.report_directory),
+                checker.resolver().clone(),
             );
+            // LE REMETTEUR N'EST LÀ QUE SI ON L'A DEMANDÉ. Émettre du courrier
+            // vers des tiers ne se décide pas à la place de celui qui exploite
+            // la machine.
+            let spool = if options.dmarc.rapporte_les_echecs() {
+                spool.with_failure_reports()
+            } else {
+                spool
+            };
+            // LA SIGNATURE N'EST LÀ QUE SI UNE CLÉ L'EST : pas de drapeau, et
+            // donc pas d'état où l'on croirait signer sans le faire.
+            let spool = match signature.clone() {
+                Some(cle) => spool.with_dkim(DkimSigner::new(options.dkim.selector.clone(), cle)),
+                None => spool,
+            };
+            // **LA FILE, ET NON UN REMETTEUR À SOI.** Un rapport DMARC passe
+            // par la même attente et la même péremption que le reste du
+            // courrier, et il y a désormais UNE politique de reprise.
+            let spool = match (options.dmarc.envoie(), file.as_ref()) {
+                (true, Some(attente)) => spool.with_queue(std::sync::Arc::clone(attente)),
+                // Sans file, `--dmarc-send` n'aurait pas passé le contrôle de
+                // démarrage : ce bras est la ceinture de cette bretelle.
+                (true, None) | (false, _) => spool,
+            };
+            Some(std::sync::Arc::new(spool))
         }
-        // **DANE S'APPLIQUE SANS QU'ON LE DEMANDE, ET IL FAUT DIRE À QUELLE
-        // CONDITION.** Il n'y a pas de drapeau : un domaine qui publie un `TLSA`
-        // dans un DNS signé est authentifié, les autres sont servis en
-        // opportuniste. Mais tout repose sur le bit `AD` d'un résolveur
-        // VALIDEUR — un résolveur qui ne valide pas ne le pose jamais, et DANE
-        // ne s'appliquerait alors à personne, en silence.
-        eprintln!(
-            "air-mail-server : DANE (RFC 7672) actif pour les domaines qui publient un `TLSA` — \
-             À CONDITION QUE VOTRE RÉSOLVEUR VALIDE DNSSEC. Ce serveur ne valide pas les \
-             signatures lui-même : il croit le bit `AD`, donc le chemin jusqu'au résolveur. \
-             Un résolveur qui ne valide pas ne pose jamais ce bit, et tout retombe alors sur le \
-             chiffrement opportuniste, sans que rien d'autre ne le dise. L'arrêt du serveur \
-             compte les remises authentifiées."
-        );
-        Some((
-            ams_loop_tokio::Spool::new(
-                dossier,
-                reprise,
-                options.domain.clone(),
-                format!("postmaster@{}", options.domain),
-            ),
-            {
-                let remetteur = Relay::new(
-                    checker.resolver().clone(),
-                    std::sync::Arc::new(ams_tls::relay_config()),
-                    options.domain.clone(),
-                    false,
-                    Duration::from_secs(u64::from(options.timeouts.command_seconds)),
-                );
-                // **UNE LIGNE À LIRE**, plutôt qu'un argument de plus dans une
-                // liste qui en compte cinq : celui-ci décide de remises.
-                let remetteur = match mtasts.clone() {
-                    Some(sts) => remetteur.with_mtasts(sts),
-                    None => remetteur,
-                };
-                match rapports_tls.clone() {
-                    Some(journal) => remetteur.with_tls_reports(journal),
-                    None => remetteur,
-                }
-            },
-        ))
-    } else {
-        if !options.relay.spool.is_empty() {
-            eprintln!(
-                "air-mail-server : dossier de file nommé SANS `relay` — rien ne sera émis, et \
-                 rien n'y sera écrit."
-            );
-        }
-        eprintln!(
-            "air-mail-server : aucune émission — ce serveur REÇOIT, il n'émet pas pour ses \
-             comptes. Un destinataire qui n'est pas d'ici est refusé (550), même authentifié."
-        );
-        None
+        _ => None,
     };
+    // ON DIT SI L'ON SIGNE. Un serveur qui n'annonce rien laisse croire qu'il
+    // signe : c'est ce que l'on attend d'un serveur de courrier, et le
+    // découvrir chez le destinataire coûte une réputation.
+    eprintln!(
+        "air-mail-server : {}",
+        match &signature {
+            Some(_) => format!(
+                "ce qui est ÉMIS est signé (DKIM, RFC 6376) — sélecteur `{}`, à publier sous \
+                 `{}._domainkey.<domaine>`",
+                options.dkim.selector, options.dkim.selector
+            ),
+            None => String::from(
+                "ce qui est ÉMIS n'est PAS signé — aucune clé DKIM nommée \
+                 (`air-mail-admin config write … --dkim-selector … --dkim-key …`)"
+            ),
+        }
+    );
+
+    // ── LE REMETTEUR DU PARCOURS DE FILE ────────────────────────────────────
+    //
+    // Il se construit ICI, après les rapports TLS, parce qu'il les consigne :
+    // chaque essai qu'il fait — réussi comme manqué — nourrit le rapport qu'on
+    // rendra au domaine d'en face.
+    let remetteur_de_file = file.as_ref().map(|_| {
+        let remetteur = Relay::new(
+            resolveur_de_file
+                .as_ref()
+                .expect("la file exige un résolveur, et le démarrage l'a déjà refusé sans lui")
+                .clone(),
+            std::sync::Arc::new(ams_tls::relay_config()),
+            options.domain.clone(),
+            false,
+            Duration::from_secs(u64::from(options.timeouts.command_seconds)),
+        );
+        // **UNE LIGNE À LIRE** pour chaque chose qu'on lui ajoute : ce sont des
+        // décisions de remise, pas des réglages.
+        let remetteur = match mtasts.clone() {
+            Some(sts) => remetteur.with_mtasts(sts),
+            None => remetteur,
+        };
+        match rapports_tls.clone() {
+            Some(journal) => remetteur.with_tls_reports(journal),
+            None => remetteur,
+        }
+    });
 
     let intervalle_rapports =
         Duration::from_secs(u64::from(if options.dmarc.report_interval_seconds == 0 {
@@ -1106,7 +1097,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
 
     let pour_la_remise = Arc::clone(&boites);
     let comptes_pour_la_remise = Arc::clone(&comptes);
-    let file_pour_la_remise = file.as_ref().map(|(spool, _)| spool.clone());
+    let file_pour_la_remise = file.as_ref().map(|attente| attente.as_ref().clone());
     let message_max = usize::try_from(options.max_message_octets).unwrap_or(usize::MAX);
 
     let options_de_service = ServeOptions {
@@ -1267,7 +1258,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         Arc::clone(&garde),
         maildir.clone(),
         domaine.to_vec(),
-        file.as_ref().map(|(spool, _)| spool.clone()),
+        file.as_ref().map(|attente| attente.as_ref().clone()),
         message_max,
     )?;
     // **LA MÊME SESSION ET LA MÊME API POUR LES DEUX VERSIONS** : un jeton scellé
@@ -1391,37 +1382,40 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     // Le rythme est celui du plus court des deux — une minute, ou la première
     // attente. Chaque entrée porte son propre instant de reprise dans son nom :
     // un tour qui passe trop souvent ne fait que lire un répertoire.
-    let reprise = file.as_ref().map(|(spool, relay)| {
-        let spool = spool.clone();
-        let relay = relay.clone();
-        let rendre = RapportsLocaux {
-            boites: Arc::clone(&boites),
-            comptes: Arc::clone(&comptes),
-        };
-        let battement = spool_battement(spool.dossier(), &options.relay);
-        let attente = arret();
-        tokio::spawn(async move {
-            let mut horloge = tokio::time::interval(battement);
-            horloge.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            let mut total = ams_loop_tokio::QueueTally::default();
-            tokio::pin!(attente);
-            loop {
-                tokio::select! {
-                    () = &mut attente => break,
-                    _ = horloge.tick() => {
-                        let compte = spool.parcourir(&relay, &rendre, maintenant()).await;
-                        total.sent = total.sent.saturating_add(compte.sent);
-                        total.authenticated =
-                            total.authenticated.saturating_add(compte.authenticated);
-                        total.bounced = total.bounced.saturating_add(compte.bounced);
-                        total.deferred = total.deferred.saturating_add(compte.deferred);
-                        total.unreadable = total.unreadable.saturating_add(compte.unreadable);
+    let reprise = file
+        .as_ref()
+        .zip(remetteur_de_file.as_ref())
+        .map(|(spool, relay)| {
+            let spool = std::sync::Arc::clone(spool);
+            let relay = relay.clone();
+            let rendre = RapportsLocaux {
+                boites: Arc::clone(&boites),
+                comptes: Arc::clone(&comptes),
+            };
+            let battement = spool_battement(&options.queue);
+            let attente = arret();
+            tokio::spawn(async move {
+                let mut horloge = tokio::time::interval(battement);
+                horloge.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                let mut total = ams_loop_tokio::QueueTally::default();
+                tokio::pin!(attente);
+                loop {
+                    tokio::select! {
+                        () = &mut attente => break,
+                        _ = horloge.tick() => {
+                            let compte = spool.parcourir(&relay, &rendre, maintenant()).await;
+                            total.sent = total.sent.saturating_add(compte.sent);
+                            total.authenticated =
+                                total.authenticated.saturating_add(compte.authenticated);
+                            total.bounced = total.bounced.saturating_add(compte.bounced);
+                            total.deferred = total.deferred.saturating_add(compte.deferred);
+                            total.unreadable = total.unreadable.saturating_add(compte.unreadable);
+                        }
                     }
                 }
-            }
-            total
-        })
-    });
+                total
+            })
+        });
 
     let stats = serve(
         ecouteur,
@@ -1628,9 +1622,9 @@ fn maintenant() -> u64 {
 /// **LE PLUS COURT DES DEUX — une minute, ou la première attente.** Passer plus
 /// souvent ne ferait que relire un répertoire, puisque chaque entrée porte son
 /// propre instant de reprise ; passer moins souvent retarderait la plus pressée.
-fn spool_battement(_dossier: &std::path::Path, relay: &ams_config::Relay) -> Duration {
+fn spool_battement(attente: &ams_config::Queue) -> Duration {
     let minute = Duration::from_secs(60);
-    relay
+    attente
         .backoff()
         .first
         .min(minute)

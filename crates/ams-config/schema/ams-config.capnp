@@ -141,6 +141,15 @@ struct Configuration {
   # **UN CHAMP AJOUTÉ APRÈS COUP DÉCODE UNE CHAÎNE VIDE ET UN FAUX**, et cela
   # veut dire « aucun rapport n'est composé, et rien n'est remis ».
   tlsrpt @22 :Tlsrpt;
+
+  # La file d'attente du serveur — TOUT ce qui sort passe par elle.
+  #
+  # **UN FICHIER ÉCRIT AVANT CE CHAMP DÉCODE UN DOSSIER VIDE**, et le serveur
+  # refuse alors de démarrer dès que quelque chose doit sortir. C'est délibéré :
+  # les réglages ont déménagé de `Relay`, et reprendre l'ancienne valeur en
+  # silence ferait déposer des rapports dans un répertoire que l'exploitant
+  # croyait réservé au courrier.
+  queue @23 :Queue;
 }
 
 # TLSRPT (RFC 8460) : ce qu'on rend au domaine d'en face.
@@ -207,28 +216,68 @@ struct Relay {
   # un fichier écrit avant que ce champ n'existe décode faux.
   enabled @0 :Bool;
 
+  # ── CINQ CHAMPS RETIRÉS, ET QUI NE PEUVENT PAS DISPARAÎTRE ────────────────
+  #
+  # La file d'attente était celle du RELAIS. Elle est devenue celle du serveur —
+  # les rapports DMARC et TLS l'empruntent aussi — et ses réglages ont donc
+  # déménagé dans `Queue`, hors de cette structure.
+  #
+  # Cap'n Proto identifie un champ par son NUMÉRO, jamais par son nom : les
+  # retirer décalerait tout ce qui suit, et un fichier ancien se lirait de
+  # travers. Ils restent donc ici, sous un nom qui dit ce qu'ils sont, et
+  # **rien ne les lit**.
+  #
+  # Un fichier écrit avant ce déménagement décode donc `Queue.spool` À VIDE, et
+  # le serveur REFUSE DE DÉMARRER en le disant : la nouvelle file ne sert plus
+  # au seul relais, et laisser l'ancienne valeur en place ferait déposer des
+  # rapports dans un répertoire que l'exploitant croyait réservé au courrier.
+  spoolRetire @1 :Text;
+  retrySecondsRetire @2 :UInt32;
+  maxRetrySecondsRetire @3 :UInt32;
+  expireSecondsRetire @4 :UInt32;
+}
+
+# La file d'attente du serveur — TOUT ce qui sort passe par elle.
+#
+# # POURQUOI ELLE N'APPARTIENT PLUS AU RELAIS
+#
+# Il y avait TROIS politiques de reprise dans ce produit : celle-ci, et deux
+# écrites à la main pour les rapports DMARC et TLS — qui réessayaient à chaque
+# tour de leur intervalle quotidien et s'effaçaient en silence au bout de sept
+# jours. Trois politiques, c'est trois vérités qui divergent, et deux d'entre
+# elles n'avaient jamais été éprouvées.
+#
+# Il n'y en a plus qu'une, couverte à 100 % dans `ams-queue` : une attente qui
+# DOUBLE jusqu'à un plafond, une péremption, et un rapport de non-remise remis
+# localement quand on renonce.
+struct Queue {
   # Le dossier de la file, ou une chaîne vide.
   #
-  # Vide AVEC `enabled`, le serveur refuse de démarrer : accepter du courrier
-  # qu'on n'a nulle part où poser serait le perdre en silence. Il est distinct du
-  # Maildir — ce qui attend d'être émis n'est pas du courrier reçu, et les
-  # mélanger ferait apparaître dans une boîte ce qui n'y est jamais arrivé.
-  spool @1 :Text;
+  # VIDE ALORS QUE QUELQUE CHOSE SORT — le relais, les rapports DMARC, les
+  # rapports TLS —, le serveur refuse de démarrer : accepter un message qu'on
+  # n'a nulle part où poser serait le perdre en silence.
+  #
+  # Il est distinct du Maildir : ce qui attend d'être émis n'est pas du courrier
+  # reçu, et les mélanger ferait apparaître dans une boîte ce qui n'y est jamais
+  # arrivé.
+  spool @0 :Text;
 
   # L'attente après le PREMIER échec, en secondes.
   #
   # Elle DOUBLE ensuite, jusqu'à `maxRetrySeconds`. Zéro prend le défaut : une
   # attente nulle ferait réessayer aussi vite que le disque tourne.
-  retrySeconds @2 :UInt32;
+  retrySeconds @1 :UInt32;
 
   # Le plafond de l'attente, en secondes. Zéro prend le défaut.
-  maxRetrySeconds @3 :UInt32;
+  maxRetrySeconds @2 :UInt32;
 
   # Le temps accordé à un message depuis son dépôt, en secondes.
   #
   # §4.5.4.1 de RFC 5321 demande au moins quatre à cinq jours avant d'abandonner.
-  # Zéro prend le défaut.
-  expireSeconds @4 :UInt32;
+  # Zéro prend le défaut. **Elle vaut pour TOUT ce qui sort** : un rapport n'est
+  # pas moins un message qu'un autre, et lui accorder une durée à part
+  # redonnerait deux vérités.
+  expireSeconds @3 :UInt32;
 }
 
 # DKIM : SIGNER, et non vérifier.
@@ -335,10 +384,13 @@ struct Dmarc {
   # VIDE, AUCUN RAPPORT N'EST COMPOSÉ. C'est la même règle que partout ailleurs
   # ici : pas de drapeau, l'absence de valeur EST l'absence de service.
   #
-  # Les rapports sont déposés, jamais envoyés : envoyer demande un client SMTP
-  # sortant que ce serveur n'a pas encore. Chaque rapport est accompagné d'un
-  # fichier `.destinations` qui dit à qui il revient — après la vérification de
-  # §7.1, sans laquelle DMARC serait un amplificateur.
+  # Les rapports sont DÉPOSÉS ici ; `sendReports` décide s'ils partent. Chaque
+  # rapport est accompagné d'un fichier `.destinations` qui dit à qui il revient
+  # — après la vérification de §7.1, sans laquelle DMARC serait un amplificateur.
+  #
+  # Quand ils partent, ils passent par la FILE D'ATTENTE du serveur (`Queue`),
+  # comme n'importe quel message : un rapport n'est pas moins un message qu'un
+  # autre, et il n'y a qu'une politique de reprise dans ce produit.
   reportDirectory @2 :Text;
 
   # Le nom sous lequel ce receveur se présente dans ses rapports (`<org_name>`).

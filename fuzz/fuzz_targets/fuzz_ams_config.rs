@@ -95,7 +95,7 @@ struct Entree {
     suffixes: String,
     /// Oppose-t-on un `p=reject` ?
     aligne: bool,
-    /// Émet-on pour ses comptes, et les trois durées de la reprise.
+    /// Émet-on pour ses comptes, et les trois durées de la FILE.
     ///
     /// **ZÉRO COMPRIS**, et c'est justement la valeur qui veut dire « le
     /// défaut » : elle doit traverser le format comme les autres.
@@ -196,6 +196,8 @@ fuzz_target!(|entree: Entree| {
         },
         relay: ams_config::Relay {
             enabled: entree.emet,
+        },
+        queue: ams_config::Queue {
             spool: entree.file.clone(),
             retry_seconds: entree.reprises[0],
             max_retry_seconds: entree.reprises[1],

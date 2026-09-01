@@ -44,6 +44,21 @@ delivered` glissé ferait croire à une remise qui n'a pas eu lieu.
 La même leçon que les quatre précédentes : la propriété qu'on a envie d'écrire
 est souvent plus forte que celle qu'on tient.
 
+**La sixième, le 2026-09-02, sur `fuzz_ams_dane`.** La cible exigeait que deux
+certificats DIFFÉRENTS ne puissent pas satisfaire le même JEU de `TLSA` par un
+`DANE-EE(3)`. Le fuzz a trouvé le contre-exemple évident une fois qu'on le voit :
+un jeu qui porte DEUX `3 0 0`, un par certificat. Les deux sont alors satisfaits
+à bon droit — c'est même ainsi qu'un domaine renouvelle, en publiant l'ancien et
+le nouveau en même temps.
+
+La propriété vraie se pose **par enregistrement** : un même `TLSA` à sélecteur
+`0` ne désigne qu'un certificat, puisque sa donnée EST ce certificat ou son
+empreinte. Le sélecteur `1`, lui, porte sur la clef, et deux certificats peuvent
+légitimement partager la leur.
+
+Trois de ces six fois portaient sur le même malentendu — confondre ce qu'un JEU
+garantit avec ce qu'un de ses ÉLÉMENTS garantit.
+
 ## `scripts/check-fuzz.sh` — le contrôle se lance chez soi
 
 Cette crate vit hors du workspace : **`cargo build --workspace` ne la touche

@@ -1584,7 +1584,7 @@ chiffrement, et ce refus n'est pas réglable.
     --tls-cert /etc/ams/chaine.pem --tls-key /etc/ams/cle.pem \
     --accounts comptes.bin \
     --resolver 127.0.0.1:53 \
-    --relay --relay-spool /var/spool/ams/file
+    --relay --queue-spool /var/spool/ams/file
 ```
 
 **Sans `--relay`, rien ne sort**, et c'est le défaut. Un destinataire qui n'est
@@ -1602,18 +1602,20 @@ Les **deux portes de soumission** y mènent : `MAIL FROM:`/`RCPT TO:` après un
 `AUTH PLAIN`, et `POST /v1/submissions`. N'en ouvrir qu'une ferait deux règles
 pour un même geste.
 
-Le serveur **refuse de démarrer** dans deux cas, plutôt que de perdre du courrier
-en silence : `--relay` sans `--relay-spool` — on accepterait un message qu'on n'a
-nulle part où poser — et `--relay` sans `--resolver` — aucun `MX` ne pourrait être
-trouvé, et tout message reviendrait à son expéditeur cinq jours plus tard sans
-qu'un seul essai ait eu lieu.
+**Tout ce qui sort passe par la même file** : le courrier des comptes, les
+rapports DMARC et les rapports TLS. Il y avait trois politiques de reprise dans
+ce produit, dont deux écrites à la main pour les rapports — et trois politiques
+sont trois vérités qui divergent. `--queue-spool` est donc exigé dès que quelque
+chose sort, et le serveur **refuse de démarrer** sans lui, ou sans `--resolver` :
+on accepterait sinon un message qu'on n'a nulle part où poser, ou qu'on ne
+saurait jamais où envoyer.
 
 **L'attente double à chaque échec**, d'un quart d'heure à six heures, et l'on
 abandonne au bout de cinq jours (§4.5.4.1 de RFC 5321 en demande au moins quatre).
 Réessayer à intervalle fixe pendant cinq jours, c'est frapper des centaines de
 fois à une porte fermée ; et si mille messages attendent pour ce même domaine,
 c'est le marteler pendant qu'il se relève. Les trois durées se règlent :
-`--relay-retry-seconds`, `--relay-max-retry-seconds`, `--relay-expire-seconds`.
+`--queue-retry-seconds`, `--queue-max-retry-seconds`, `--queue-expire-seconds`.
 
 **Quand on renonce, un rapport de non-remise (RFC 3464) part — et il reste ici.**
 Il est déposé dans la boîte du compte qui avait écrit. Ce serveur n'envoie jamais
@@ -1752,6 +1754,9 @@ publie `mode: testing` publie précisément pour l'apprendre.
 **Deux crans, comme les rapports DMARC.** `--tlsrpt-dir` compose et *dépose* ;
 `--tlsrpt-send` *remet*. Sans le second, les rapports s'accumulent dans le
 dossier et vous les relevez — ce qui vous laisse lire ce que vous enverriez.
+Remettre passe par la **file d'attente du serveur**, comme le reste : même
+attente qui double, même péremption, et un avis dans la boîte du postmaster si
+l'on renonce.
 
 **On ne rapporte qu'à qui a demandé** (§3) : sans `_smtp._tls.<domaine>`, rien
 n'est composé. Et quand la destination `rua` est d'un **autre** domaine, ce tiers

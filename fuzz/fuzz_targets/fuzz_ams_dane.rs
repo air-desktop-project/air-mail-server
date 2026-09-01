@@ -26,12 +26,14 @@
 //!    qu'on ne sait pas traiter ne doit jamais devenir un laissez-passer.
 //! 4. **LA CLEF RENDUE VIENT DU CERTIFICAT**, et pas d'ailleurs : la tranche est
 //!    une sous-suite de ce qu'on a donné à lire.
-//! 5. **DEUX CERTIFICATS DIFFÉRENTS NE SATISFONT PAS LE MÊME `3 x 1`** — sauf
-//!    collision de SHA-256, ce qui n'arrive pas.
+//! 5. **UN MÊME ENREGISTREMENT À SÉLECTEUR `0` NE DÉSIGNE QU'UN CERTIFICAT** —
+//!    sa donnée EST le certificat, ou son empreinte. La propriété se pose par
+//!    enregistrement et non par jeu : un jeu peut en porter deux, un par
+//!    certificat, et c'est ainsi qu'un domaine renouvelle.
 
 #![no_main]
 
-use ams_dane::{Match, Set, Tlsa, subject_public_key_info};
+use ams_dane::{Set, Tlsa, subject_public_key_info};
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
@@ -108,20 +110,23 @@ fuzz_target!(|entree: Entree| {
     // réponse.
     let verdict = jeu.matching(&entree.certificat);
     if entree.certificat != entree.autre {
-        let autre = jeu.matching(&entree.autre);
-        // Un `Match::LeafOnly` désigne UN certificat précis : deux certificats
-        // différents ne peuvent pas l'obtenir tous les deux du même jeu, sauf
-        // collision de SHA-256 — que le fuzzer ne trouvera pas.
-        if verdict == Some(Match::LeafOnly) && autre == Some(Match::LeafOnly) {
-            let sur_le_certificat = jeu.usable().any(|record| record.selector().code() == 0);
-            let sur_la_clef = jeu.usable().any(|record| record.selector().code() == 1);
-            // Deux certificats différents peuvent porter la MÊME clef ; c'est
-            // même tout l'intérêt du sélecteur `1`, qui survit au
-            // renouvellement. Ce n'est donc une anomalie que sur le sélecteur
-            // `0`, et seulement s'il est seul.
+        // **LA PROPRIÉTÉ SE POSE PAR ENREGISTREMENT, ET NON PAR JEU.**
+        //
+        // Un jeu peut porter DEUX `3 0 0`, un par certificat, et les deux sont
+        // alors satisfaits à bon droit — un domaine qui renouvelle publie
+        // l'ancien et le nouveau. Ce qui ne peut pas arriver, c'est qu'UN MÊME
+        // enregistrement à sélecteur `0` désigne deux certificats différents :
+        // sa donnée est le certificat lui-même, ou son empreinte.
+        for record in jeu.usable() {
+            if record.selector().code() != 0 {
+                // Le sélecteur `1` porte sur la CLEF, et deux certificats
+                // peuvent légitimement partager la leur — c'est même tout
+                // l'intérêt de ce sélecteur, qui survit au renouvellement.
+                continue;
+            }
             assert!(
-                sur_la_clef || !sur_le_certificat,
-                "deux certificats différents ont satisfait la même empreinte de certificat"
+                !(record.matches(&entree.certificat) && record.matches(&entree.autre)),
+                "un même enregistrement a désigné deux certificats différents"
             );
         }
     }

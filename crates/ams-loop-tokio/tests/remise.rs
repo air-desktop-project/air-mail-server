@@ -50,6 +50,43 @@ impl Delivery for Cahier {
     }
 }
 
+/// Une file d'attente dans un dossier neuf.
+///
+/// **LES RAPPORTS PASSENT PAR LA FILE COMME LE RESTE.** Ces essais éprouvent
+/// donc le chemin ENTIER — composer, déposer, reprendre, remettre — et non plus
+/// une remise directe qui n'existe plus.
+fn file_d_essai(nom: &str) -> std::sync::Arc<ams_loop_tokio::Spool> {
+    let dossier = std::env::temp_dir().join(std::format!(
+        "ams-file-rapports-{nom}-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dossier);
+    std::fs::create_dir_all(&dossier).expect("dossier");
+    std::sync::Arc::new(ams_loop_tokio::Spool::new(
+        dossier,
+        ams_queue::Backoff::DEFAULT,
+        std::string::String::from("mail.nous.test"),
+        std::string::String::from("postmaster@mail.nous.test"),
+    ))
+}
+
+/// Un rendu d'avis qui accepte tout : ces essais n'éprouvent pas la
+/// non-remise, qui a ses propres essais dans `file.rs`.
+struct SansAvis;
+
+impl ams_loop_tokio::Bounced for SansAvis {
+    fn deliver(&self, _recipient: &str, _message: &[u8]) -> bool {
+        true
+    }
+}
+
+/// L'heure, en secondes depuis l'époque.
+fn maintenant() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |depuis| depuis.as_secs())
+}
+
 /// Un remetteur branché sur un résolveur qui ne sert à rien : ces tests
 /// s'adressent à une adresse connue, et n'ont donc rien à résoudre.
 fn remetteur(exige_tls: bool) -> Relay {
@@ -405,13 +442,14 @@ async fn un_rapport_observe_finit_dans_la_boite_d_en_face() {
     let dossier =
         std::env::temp_dir().join(std::format!("ams-remise-rapport-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dossier);
+    let file = file_d_essai("rapport");
     let spool = ReportSpool::new(
         std::string::String::from("mail.nous.test"),
         std::string::String::from("dmarc@nous.test"),
         dossier.clone(),
         Resolver::new(std::vec![dns], Duration::from_secs(2)).expect("résolveur"),
     )
-    .with_relay(remetteur_resolvant(dns, adresse.port()));
+    .with_queue(std::sync::Arc::clone(&file));
 
     spool.observer(Observation {
         domain: std::string::String::from("example.com"),
@@ -444,11 +482,14 @@ async fn un_rapport_observe_finit_dans_la_boite_d_en_face() {
     assert_eq!(compose.reports, 1);
     assert_eq!(compose.destinations, 1);
 
+    // **LE RAPPORT PASSE PAR LA FILE, COMME LE RESTE.** `envoyer` DÉPOSE ; c'est
+    // le parcours de la file qui remet, avec la même attente et la même
+    // péremption que n'importe quel message.
     let remis = spool.envoyer().await;
-    assert_eq!(remis.sent, 1, "le rapport devait partir : {remis:?}");
+    assert_eq!(remis.sent, 1, "le rapport devait être déposé : {remis:?}");
     assert_eq!(remis.deferred, 0);
 
-    // **Ce qui est remis est retiré.** Le dossier est vide.
+    // **Ce qui est déposé est retiré du dossier des rapports.**
     let restants: std::vec::Vec<_> = std::fs::read_dir(&dossier)
         .expect("dossier lisible")
         .filter_map(Result::ok)
@@ -457,6 +498,18 @@ async fn un_rapport_observe_finit_dans_la_boite_d_en_face() {
         restants.is_empty(),
         "{} fichier(s) restant(s)",
         restants.len()
+    );
+
+    let parcours = file
+        .parcourir(
+            &remetteur_resolvant(dns, adresse.port()),
+            &SansAvis,
+            maintenant(),
+        )
+        .await;
+    assert_eq!(
+        parcours.sent, 1,
+        "la file devait le remettre : {parcours:?}"
     );
 
     let recu = cahier.0.lock().expect("verrou").clone();
@@ -495,14 +548,14 @@ async fn un_serveur_injoignable_laisse_le_rapport_en_place() {
     let dossier =
         std::env::temp_dir().join(std::format!("ams-remise-differee-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dossier);
+    let file = file_d_essai("differee");
     let spool = ReportSpool::new(
         std::string::String::from("mail.nous.test"),
         std::string::String::from("dmarc@nous.test"),
         dossier.clone(),
         Resolver::new(std::vec![dns], Duration::from_secs(2)).expect("résolveur"),
     )
-    // Le port 1 sur la boucle locale : personne n'écoute.
-    .with_relay(remetteur_resolvant(dns, 1));
+    .with_queue(std::sync::Arc::clone(&file));
 
     spool.observer(Observation {
         domain: std::string::String::from("example.com"),
@@ -527,21 +580,32 @@ async fn un_serveur_injoignable_laisse_le_rapport_en_place() {
         },
     });
     spool.vider().await;
+    // Le dépôt en file réussit toujours : c'est une écriture sur un disque.
     let remis = spool.envoyer().await;
-    assert_eq!(remis.sent, 0);
-    assert_eq!(remis.deferred, 1);
+    assert_eq!(remis.sent, 1, "{remis:?}");
 
-    let restants = std::fs::read_dir(&dossier)
+    // **C'EST LA FILE QUI DIFFÈRE, MAINTENANT.** Le port 1 sur la boucle
+    // locale : personne n'écoute, et l'entrée reste pour la reprise suivante —
+    // avec l'attente qui double, ce que l'ancienne remise ad hoc ne faisait pas.
+    let parcours = file
+        .parcourir(&remetteur_resolvant(dns, 1), &SansAvis, maintenant())
+        .await;
+    assert_eq!(parcours.sent, 0);
+    assert_eq!(parcours.deferred, 1, "{parcours:?}");
+
+    let restants = std::fs::read_dir(file.dossier())
         .expect("dossier lisible")
         .filter_map(Result::ok)
         .count();
-    assert_eq!(restants, 2, "le rapport et ses destinations restent");
+    assert_eq!(restants, 2, "le message et son enveloppe restent en file");
     let _ = std::fs::remove_dir_all(&dossier);
+    let _ = std::fs::remove_dir_all(file.dossier());
 }
 
-/// Sans remetteur, on dépose et rien de plus — et c'est le défaut.
+/// Sans file, on dépose dans le dossier des rapports et rien de plus — et
+/// c'est le défaut : `--tlsrpt-send` et `--dmarc-send` sont deux crans.
 #[tokio::test]
-async fn sans_remetteur_rien_ne_part() {
+async fn sans_file_rien_ne_part() {
     use ams_loop_tokio::ReportSpool;
 
     let dossier = std::env::temp_dir().join(std::format!(
@@ -598,24 +662,30 @@ async fn journal_d_echec(
     port: u16,
     dns: std::net::SocketAddr,
     actif: bool,
-) -> (ams_loop_tokio::ReportSpool, std::path::PathBuf) {
+) -> (
+    ams_loop_tokio::ReportSpool,
+    std::path::PathBuf,
+    std::sync::Arc<ams_loop_tokio::Spool>,
+    Relay,
+) {
     use ams_loop_tokio::ReportSpool;
 
     let dossier = std::env::temp_dir().join(std::format!("ams-echec-{nom}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dossier);
+    let file = file_d_essai(nom);
     let spool = ReportSpool::new(
         std::string::String::from("mail.nous.test"),
         std::string::String::from("dmarc@nous.test"),
         dossier.clone(),
         Resolver::new(std::vec![dns], Duration::from_secs(2)).expect("résolveur"),
     )
-    .with_relay(remetteur_resolvant(dns, port));
+    .with_queue(std::sync::Arc::clone(&file));
     let spool = if actif {
         spool.with_failure_reports()
     } else {
         spool
     };
-    (spool, dossier)
+    (spool, dossier, file, remetteur_resolvant(dns, port))
 }
 
 /// **Ce qui sort d'ici est une liste blanche.** Le destinataire du message, les
@@ -625,13 +695,20 @@ async fn un_rapport_d_echec_ne_livre_ni_le_corps_ni_le_destinataire() {
     const TABLE: &[(&str, Enregistrement)] = &[("example.com", Enregistrement::A([127, 0, 0, 1]))];
     let dns = resolveur_courrier(TABLE).await;
     let (adresse, cahier) = serveur(None).await;
-    let (spool, dossier) = journal_d_echec("livre", adresse.port(), dns, true).await;
+    let (spool, dossier, file, remetteur) =
+        journal_d_echec("livre", adresse.port(), dns, true).await;
 
     spool.echec(&observation_d_echec()).await;
     let remis = spool.envoyer().await;
     assert_eq!(
         remis.sent, 1,
-        "le rapport d'échec devait partir : {remis:?}"
+        "le rapport d'échec devait être déposé : {remis:?}"
+    );
+    // **PUIS LA FILE LE REMET**, comme n'importe quel message.
+    let parcours = file.parcourir(&remetteur, &SansAvis, maintenant()).await;
+    assert_eq!(
+        parcours.sent, 1,
+        "la file devait le remettre : {parcours:?}"
     );
 
     let recu = cahier.0.lock().expect("verrou").clone();
@@ -671,7 +748,7 @@ async fn un_rapport_d_echec_ne_livre_ni_le_corps_ni_le_destinataire() {
 async fn sans_la_demande_aucun_rapport_d_echec_n_est_compose() {
     const TABLE: &[(&str, Enregistrement)] = &[("example.com", Enregistrement::A([127, 0, 0, 1]))];
     let dns = resolveur_courrier(TABLE).await;
-    let (spool, dossier) = journal_d_echec("muet", 1, dns, false).await;
+    let (spool, dossier, _file, _remetteur) = journal_d_echec("muet", 1, dns, false).await;
     spool.echec(&observation_d_echec()).await;
     assert!(
         !dossier.exists(),
@@ -686,7 +763,7 @@ async fn sans_la_demande_aucun_rapport_d_echec_n_est_compose() {
 async fn un_meme_domaine_ne_vaut_qu_un_nombre_borne_de_rapports() {
     const TABLE: &[(&str, Enregistrement)] = &[("example.com", Enregistrement::A([127, 0, 0, 1]))];
     let dns = resolveur_courrier(TABLE).await;
-    let (spool, dossier) = journal_d_echec("plafond", 1, dns, true).await;
+    let (spool, dossier, _file, _remetteur) = journal_d_echec("plafond", 1, dns, true).await;
 
     for _ in 0..120 {
         spool.echec(&observation_d_echec()).await;
@@ -711,7 +788,7 @@ async fn un_meme_domaine_ne_vaut_qu_un_nombre_borne_de_rapports() {
 async fn un_rapport_d_echec_ne_part_pas_vers_qui_n_a_pas_consenti() {
     const TABLE: &[(&str, Enregistrement)] = &[];
     let dns = resolveur_courrier(TABLE).await;
-    let (spool, dossier) = journal_d_echec("consentement", 1, dns, true).await;
+    let (spool, dossier, _file, _remetteur) = journal_d_echec("consentement", 1, dns, true).await;
     spool
         .echec(&ams_loop_tokio::FailureObservation {
             destinations: std::string::String::from("mailto:victime@banque.test"),
