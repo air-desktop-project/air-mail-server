@@ -1,0 +1,22 @@
+[package]
+name = "ams-h3"
+description = "Le conducteur HTTP/3 (RFC 9114), sans entrée-sortie"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# LA GRAMMAIRE : têtes de flux, trames, réglages, QPACK.
+ams-proto-h3 = { workspace = true }
+# La sémantique HTTP : une requête lue, un code d'état, des bornes de champs.
+ams-proto-http = { workspace = true }
+# Les entiers de §16, et les numéros de flux.
+ams-proto-quic = { workspace = true }
+# L'état de réception d'un flux (§3.2 de RFC 9000).
+ams-quic = { workspace = true }
+
+[lints]
+workspace = true

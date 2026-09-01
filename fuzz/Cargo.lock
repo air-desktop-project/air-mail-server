@@ -49,6 +49,7 @@ dependencies = [
  "ams-dns",
  "ams-field-codec",
  "ams-guard",
+ "ams-h3",
  "ams-index",
  "ams-mime",
  "ams-proto-h2",
@@ -120,6 +121,16 @@ version = "0.1.0"
 [[package]]
 name = "ams-guard"
 version = "0.1.0"
+
+[[package]]
+name = "ams-h3"
+version = "0.1.0"
+dependencies = [
+ "ams-proto-h3",
+ "ams-proto-http",
+ "ams-proto-quic",
+ "ams-quic",
+]
 
 [[package]]
 name = "ams-index"

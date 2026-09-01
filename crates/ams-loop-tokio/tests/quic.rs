@@ -807,6 +807,8 @@ struct Echo {
     recu: std::collections::HashMap<u64, Vec<u8>>,
     /// Combien de flux ont été servis.
     servis: usize,
+    /// Les sources qui ont parlé.
+    sources: Vec<ams_guard::Source>,
 }
 
 impl ams_loop_tokio::Application for Echo {
@@ -814,7 +816,13 @@ impl ams_loop_tokio::Application for Echo {
         &mut self,
         connexion: &mut ams_quic_tls::Connection,
         flux: ams_proto_quic::StreamId,
+        pair: ams_guard::Source,
     ) {
+        // **L'APPLICATION SAIT QUI PARLE** : c'est ce qui permet une politique
+        // par source, et l'écho s'en sert pour le prouver.
+        if !self.sources.contains(&pair) {
+            self.sources.push(pair);
+        }
         let mut vers = [0_u8; 256];
         let lus = connexion.read(flux, &mut vers);
         if lus > 0 {
@@ -866,7 +874,7 @@ async fn des_octets_d_application_font_l_aller_retour() {
             let _ = arret.await;
         })
         .await;
-        (stats, echo.servis)
+        (stats, echo.servis, echo.sources)
     });
 
     let mut client = Client::new(config_client(&autorite), adresse).await;
@@ -909,7 +917,273 @@ async fn des_octets_d_application_font_l_aller_retour() {
     assert!(client.fin_recue, "§19.8 : et le flux est terminé");
 
     let _ = fin.send(());
-    let (stats, servis) = ecoute.await.expect("la tâche d'écoute");
+    let (stats, servis, sources) = ecoute.await.expect("la tâche d'écoute");
     assert_eq!(servis, 1, "un flux servi, et un seul");
+    assert_eq!(
+        sources.len(),
+        1,
+        "et l'application a su de quelle source il venait"
+    );
+    assert!(
+        sources.contains(&ams_guard::Source::V4([127, 0, 0, 1])),
+        "celle du bouclage : {sources:?}"
+    );
     assert_eq!(stats.expect("l'écoute rend ses comptes").accepted, 1);
+}
+
+/// Une API d'essai, la même que celle d'HTTP/2 — c'est le but.
+struct ApiEssai;
+
+impl ams_loop_tokio::http::Api for ApiEssai {
+    fn serve<'o>(
+        &self,
+        resource: ams_api::Resource<'_>,
+        _method: ams_proto_http::Method,
+        _account: &str,
+        _body: &[u8],
+        sortie: &'o mut [u8],
+    ) -> ams_loop_tokio::http::Served<'o> {
+        let quoi: &[u8] = match resource {
+            ams_api::Resource::Health => b"{\"etat\":\"bien\"}",
+            _ => b"{\"etat\":\"autre\"}",
+        };
+        let combien = quoi.len().min(sortie.len());
+        sortie
+            .get_mut(..combien)
+            .expect("la borne vient d'être prise")
+            .copy_from_slice(quoi.get(..combien).expect("de même"));
+        ams_loop_tokio::http::Served {
+            status: ams_proto_http::StatusCode::OK,
+            media: ams_api::JSON_MEDIA_TYPE,
+            body: sortie.get(..combien).unwrap_or_default(),
+        }
+    }
+
+    fn authenticate(&self, login: &str, password: &[u8]) -> Option<ams_api::Scope> {
+        (login == "marc" && password == b"secret").then(|| {
+            ams_api::Scope::one(ams_api::Area::Mail, ams_api::Rights::Read)
+                .with(ams_api::Area::Observe, ams_api::Rights::Read)
+        })
+    }
+
+    fn nonce(&self) -> u64 {
+        7
+    }
+}
+
+/// Écrit un entier à préfixe (§5.1 de RFC 7541, repris par QPACK).
+///
+/// **C'EST LE MÊME CODAGE QUE HPACK**, et c'est voulu : §4.1.1 de RFC 9204 le
+/// reprend tel quel pour n'avoir pas deux façons d'écrire un nombre.
+fn poser_entier(valeur: usize, bits: u32, motif: u8, out: &mut Vec<u8>) {
+    let plafond = usize::from(u8::MAX >> 8_u32.saturating_sub(bits));
+    if valeur < plafond {
+        out.push(motif | u8::try_from(valeur).expect("sous le plafond"));
+        return;
+    }
+    out.push(motif | u8::try_from(plafond).expect("un octet"));
+    let mut reste = valeur.saturating_sub(plafond);
+    while reste >= 128 {
+        out.push(
+            u8::try_from(reste % 128)
+                .expect("sept bits")
+                .saturating_add(128),
+        );
+        reste /= 128;
+    }
+    out.push(u8::try_from(reste).expect("sept bits"));
+}
+
+/// Pose un champ dont le nom ET la valeur sont littéraux (§4.5.6 de RFC 9204).
+fn poser_champ(nom: &[u8], valeur: &[u8], out: &mut Vec<u8>) {
+    // `001NH` puis la longueur du nom sur trois bits.
+    poser_entier(nom.len(), 3, 0x20, out);
+    out.extend_from_slice(nom);
+    // `H` puis la longueur de la valeur sur sept bits.
+    poser_entier(valeur.len(), 7, 0x00, out);
+    out.extend_from_slice(valeur);
+}
+
+/// Compose une section de champs de requête avec la table statique de QPACK.
+///
+/// **À LA MAIN** : bâtir la requête avec notre propre encodeur ne prouverait
+/// rien du fil — si l'ordre des champs était faux des deux côtés, l'essai
+/// passerait quand même.
+fn une_section(methode: u8, chemin: &[u8], jeton: Option<&str>, avec_corps: bool) -> Vec<u8> {
+    let mut section = std::vec![0x00_u8, 0x00];
+    // §4.5.2 de RFC 9204 : `1Tiiiiii`, T=1 pour la table statique.
+    // Annexe A de RFC 9204 : 17 vaut `:method: GET`, 20 `:method: POST`, et 23
+    // `:scheme: https`. **PAS 22** : celui-là vaut `:scheme: http`, que ce
+    // serveur refuse (C4).
+    for index in [methode, 23] {
+        section.push(0xc0 | index);
+    }
+    // §4.5.4 : `01NTiiii` — nom indexé, valeur littérale.
+    for (index, valeur) in [(0_u8, &b"exemple.test"[..]), (1, chemin)] {
+        section.push(0x50 | index);
+        section.push(u8::try_from(valeur.len()).expect("court"));
+        section.extend_from_slice(valeur);
+    }
+    if avec_corps {
+        // §8.3 de RFC 9110 : sans lui, la session ne sait pas ce qu'elle lit, et
+        // refuse plutôt que de deviner.
+        poser_champ(b"content-type", b"application/json", &mut section);
+    }
+    if let Some(jeton) = jeton {
+        let mut valeur = std::string::String::from("Bearer ");
+        valeur.push_str(jeton);
+        poser_champ(b"authorization", valeur.as_bytes(), &mut section);
+    }
+    section
+}
+
+/// Envoie une requête complète sur ce flux : ses en-têtes, puis son corps.
+async fn envoyer_une_requete(
+    client: &mut Client,
+    flux: u64,
+    methode: u8,
+    chemin: &[u8],
+    jeton: Option<&str>,
+    corps: &[u8],
+) {
+    let section = une_section(methode, chemin, jeton, !corps.is_empty());
+    let mut entete = [0_u8; 16];
+    let mut charge = Vec::new();
+    let pose = ams_proto_h3::write_header(
+        ams_proto_h3::FrameKind::Headers,
+        u64::try_from(section.len()).expect("tient"),
+        &mut entete,
+    )
+    .expect("écrivable");
+    charge.extend_from_slice(&entete[..pose]);
+    charge.extend_from_slice(&section);
+    if !corps.is_empty() {
+        let pose = ams_proto_h3::write_header(
+            ams_proto_h3::FrameKind::Data,
+            u64::try_from(corps.len()).expect("tient"),
+            &mut entete,
+        )
+        .expect("écrivable");
+        charge.extend_from_slice(&entete[..pose]);
+        charge.extend_from_slice(corps);
+    }
+
+    let mut trames = std::vec![0_u8; charge.len().saturating_add(64)];
+    let ecrits = (Frame::Stream {
+        stream: flux,
+        offset: 0,
+        data: &charge,
+        fin: true,
+    })
+    .write(&mut trames)
+    .expect("écrivable");
+    client
+        .a_dire
+        .extend_from_slice(trames.get(..ecrits).expect("écrits"));
+    client.parler().await;
+}
+
+/// Attend la réponse, et rend le corps de sa trame `DATA`.
+async fn attendre_la_reponse(client: &mut Client) -> Vec<u8> {
+    for _ in 0..10 {
+        client.ecouter().await;
+        if client.fin_recue {
+            break;
+        }
+        client.parler().await;
+    }
+    // §4.1 : les en-têtes d'abord, le corps ensuite.
+    let Ok(entete) = ams_proto_h3::FrameHeader::parse(&client.recu) else {
+        return Vec::new();
+    };
+    let apres = usize::try_from(entete.total()).expect("tient");
+    let Some(reste) = client.recu.get(apres..) else {
+        return Vec::new();
+    };
+    let Ok(corps) = ams_proto_h3::FrameHeader::parse(reste) else {
+        return Vec::new();
+    };
+    reste.get(corps.header_len()..).unwrap_or_default().to_vec()
+}
+
+/// **UNE REQUÊTE HTTP/3 TRAVERSE TOUTE LA CHAÎNE**, sur une vraie socket UDP.
+///
+/// QUIC, TLS, ALPN `h3`, flux de contrôle, réglages, QPACK, session, API, et la
+/// réponse qui revient comprimée. C'est ce que chaque tranche depuis la
+/// grammaire sert à rendre possible.
+#[tokio::test(flavor = "current_thread")]
+async fn une_requete_h3_traverse_toute_la_chaine() {
+    let atelier = atelier("h3");
+    let (autorite, cert, cle) = materiel(&atelier.0).expect(SANS_OPENSSL);
+
+    let mut config = ams_tls::quic_server_config(&cert, &cle).expect("la paire est bonne");
+    config.alpn_protocols = ams_tls::alpn_h3();
+    let socket = UdpSocket::bind("127.0.0.1:0").await.expect("une socket");
+    let adresse = socket.local_addr().expect("une adresse");
+
+    let (fin, arret) = tokio::sync::oneshot::channel::<()>();
+    let ecoute = tokio::spawn(async move {
+        let session = ams_session::http::Http::new(
+            ams_api::Key::new(b"une clef de trente-deux octets!!").expect("trente-deux octets"),
+            3_600 * 1_000_000,
+        )
+        .expect("une durée licite");
+        let guard = ams_loop_tokio::SharedGuard::new(64, ams_guard::Thresholds::default());
+        let api = ApiEssai;
+        let mut application = ams_loop_tokio::h3::Http3Application::new(&session, &api, &guard);
+        let stats = ams_loop_tokio::serve_quic(socket, Arc::new(config), &mut application, async {
+            let _ = arret.await;
+        })
+        .await;
+        (stats, application.comptes())
+    });
+
+    let mut client = Client::new(config_client(&autorite), adresse).await;
+    for _ in 0..16 {
+        if !client.parler().await && !client.tls.is_handshaking() {
+            break;
+        }
+        if !client.ecouter().await && !client.tls.is_handshaking() {
+            break;
+        }
+    }
+    assert!(!client.tls.is_handshaking(), "la poignée de main aboutit");
+
+    // **PREMIÈRE REQUÊTE : le jeton**, comme l'essai HTTP/2 le fait.
+    let jeton = {
+        let corps = br#"{"login":"marc","password":"secret"}"#;
+        envoyer_une_requete(&mut client, 0, 20, b"/v1/tokens", None, corps).await;
+        let recu = attendre_la_reponse(&mut client).await;
+        let texte = std::string::String::from_utf8_lossy(&recu).to_string();
+        assert!(
+            texte.contains(r#"{"token":""#),
+            "l'échange d'identifiants doit rendre un jeton : {texte}"
+        );
+        let debut = texte.find(':').expect("un premier champ").saturating_add(2);
+        let fin = texte
+            .get(debut..)
+            .and_then(|reste| reste.find('"'))
+            .expect("une fin de chaîne")
+            .saturating_add(debut);
+        texte[debut..fin].to_string()
+    };
+
+    // **SECONDE REQUÊTE : la ressource**, avec le jeton qu'on vient d'obtenir.
+    client.recu.clear();
+    client.fin_recue = false;
+    envoyer_une_requete(&mut client, 4, 17, b"/v1/health", Some(&jeton), &[]).await;
+    let recu = attendre_la_reponse(&mut client).await;
+    let texte = std::string::String::from_utf8_lossy(&recu).to_string();
+
+    assert_eq!(client.ferme, None, "rien n'a fermé");
+    assert!(
+        texte.contains("\"etat\""),
+        "LA RÉPONSE DE L'API EST ARRIVÉE : {texte}"
+    );
+
+    let _ = fin.send(());
+    let (stats, (servies, refusees)) = ecoute.await.expect("la tâche d'écoute");
+    assert_eq!(stats.expect("l'écoute rend ses comptes").accepted, 1);
+    assert_eq!(servies, 2, "deux requêtes servies");
+    assert_eq!(refusees, 0, "et pas un refus");
 }

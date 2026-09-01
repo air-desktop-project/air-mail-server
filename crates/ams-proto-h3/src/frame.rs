@@ -218,5 +218,31 @@ pub enum Placement {
     Control,
 }
 
+/// Écrit l'en-tête d'une trame : son type, puis sa longueur (§7.1).
+///
+/// Rend combien d'octets ont été écrits.
+///
+/// # POURQUOI L'EN-TÊTE SEUL, ET NON LA TRAME ENTIÈRE
+///
+/// Une trame `DATA` porte un corps qui peut faire des mébioctets, et qu'on
+/// n'a aucune raison de recopier pour l'envoyer. L'appelant écrit donc l'en-tête
+/// ici, puis pousse sa charge derrière — c'est ce qui permet de servir un fichier
+/// sans le tenir deux fois en mémoire.
+///
+/// # Errors
+///
+/// [`Reason::BufferTooSmall`] si la place manque.
+pub fn write_header(kind: FrameKind, length: u64, out: &mut [u8]) -> Result<usize, Error> {
+    let ecrits =
+        varints::encode(kind.value(), out).map_err(|_| Error::new(Reason::BufferTooSmall))?;
+    // `encode` vient d'écrire `ecrits` octets dans `out` : la tranche existe,
+    // fût-elle vide. Un `?` ici serait une garde qu'aucun essai n'atteindrait —
+    // et si elle est vide, c'est l'écriture suivante qui dira que la place
+    // manque.
+    let reste = out.get_mut(ecrits..).unwrap_or_default();
+    let puis = varints::encode(length, reste).map_err(|_| Error::new(Reason::BufferTooSmall))?;
+    Ok(ecrits.saturating_add(puis))
+}
+
 #[cfg(test)]
 mod tests;

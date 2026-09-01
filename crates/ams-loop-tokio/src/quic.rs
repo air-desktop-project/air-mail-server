@@ -49,7 +49,10 @@ use ams_quic_tls::Connection;
 use rustls::ServerConfig;
 use tokio::net::UdpSocket;
 
+use ams_guard::Source;
+
 use crate::error::Error;
+use crate::server::source_de;
 
 /// Ce qu'un datagramme peut occuper au plus.
 ///
@@ -127,6 +130,14 @@ struct Vivante {
 /// [`Connection::read`], répond avec [`Connection::write`] et
 /// [`Connection::finish`], et c'est l'écoute qui décide quand ces octets partent
 /// et comment ils sont retransmis.
+///
+/// # ELLE SAIT QUI PARLE, ET C8 L'EXIGE
+///
+/// Chaque rendez-vous porte la [`Source`] du pair. **Sans elle, aucune politique
+/// par source n'est possible** : un refus d'identifiants ne pourrait pas compter
+/// contre l'adresse qui l'a tenté, et HTTP/3 servirait sans la protection contre
+/// les essais répétés que HTTP/2 a déjà. L'information existe — l'écoute la tient
+/// pour chaque connexion —, et la garder pour elle serait la perdre.
 pub trait Application {
     /// Une connexion vient de s'établir.
     ///
@@ -134,7 +145,7 @@ pub trait Application {
     /// limites du pair ne sont pas authentifiées (§7.4). HTTP/3 y ouvre ses trois
     /// unidirectionnels — contrôle et QPACK —, que le client attend sans les
     /// avoir demandés.
-    fn on_established(&mut self, _connexion: &mut Connection) {}
+    fn on_established(&mut self, _connexion: &mut Connection, _pair: Source) {}
 
     /// Ce flux a de quoi être lu, ou son pair vient d'en changer l'état.
     ///
@@ -142,10 +153,10 @@ pub trait Application {
     /// lit qu'une partie sera rappelée. **L'état de réception dit le reste** —
     /// [`Connection::recv_state`] distingue un flux terminé d'un flux annulé, et
     /// les confondre ferait servir une requête tronquée.
-    fn on_readable(&mut self, connexion: &mut Connection, flux: StreamId);
+    fn on_readable(&mut self, connexion: &mut Connection, flux: StreamId, pair: Source);
 
     /// Cette connexion s'éteint : ce qu'on tenait pour elle ne sert plus.
-    fn on_closed(&mut self, _connexion: &Connection) {}
+    fn on_closed(&mut self, _connexion: &Connection, _pair: Source) {}
 }
 
 /// Une application qui ne fait rien.
@@ -157,7 +168,7 @@ pub trait Application {
 pub struct SansApplication;
 
 impl Application for SansApplication {
-    fn on_readable(&mut self, _connexion: &mut Connection, _flux: StreamId) {}
+    fn on_readable(&mut self, _connexion: &mut Connection, _flux: StreamId, _pair: Source) {}
 }
 
 /// Sert QUIC sur cette socket, jusqu'à l'arrêt.
@@ -399,9 +410,10 @@ impl Ecoute {
             if !vivante.conduite.is_established() {
                 continue;
             }
+            let pair = source_de(vivante.pair);
             if !vivante.etablie_dite {
                 vivante.etablie_dite = true;
-                application.on_established(&mut vivante.conduite);
+                application.on_established(&mut vivante.conduite, pair);
             }
             let flux: Vec<StreamId> = vivante.conduite.streams_alive().collect();
             for un in flux {
@@ -415,7 +427,7 @@ impl Ecoute {
                     {
                         break;
                     }
-                    application.on_readable(&mut vivante.conduite, un);
+                    application.on_readable(&mut vivante.conduite, un, pair);
                     // **L'APPLICATION N'A RIEN PRIS NI RIEN CONCLU** : la
                     // rappeler ne donnerait que le même appel.
                     if vivante.conduite.readable(un) == avant
@@ -439,7 +451,7 @@ impl Ecoute {
             if vivante.conduite.is_closed() {
                 self.stats.closed = self.stats.closed.saturating_add(1);
                 // Ce que l'application tenait pour cette connexion ne sert plus.
-                application.on_closed(&vivante.conduite);
+                application.on_closed(&vivante.conduite, source_de(vivante.pair));
                 continue;
             }
             carte.insert(

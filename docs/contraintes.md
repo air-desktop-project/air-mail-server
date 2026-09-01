@@ -590,6 +590,185 @@ Toutes signalées par la couverture, dont une redondance introduite dans
 `Streams::can_send`, qui distingue « ce flux n'émet pas » de « son crédit est
 nul » — deux choses que confondre aurait fait refuser un flux simplement bloqué.
 
+### Les flux de requête d'HTTP/3
+
+Écrit le 2026-09-01. **Une requête fait désormais l'aller-retour** : des champs
+comprimés par QPACK arrivent, une application décide, et une réponse repart
+comprimée.
+
+#### `Service` : ce que le conducteur ne décide pas
+
+`ams-h3` sait découper un flux en trames, décomprimer une section de champs et
+réécrire une réponse. **Il ne sait pas ce qu'une requête veut dire**, et n'a ni
+compte, ni jeton, ni magasin. L'étage qui assemble branchera `ams-session::http`
+derrière cette interface, exactement comme il le fait pour HTTP/2.
+
+Le corps arrive entier : §4.1 fait qu'une requête est complète quand le client a
+fini d'écrire, et le conducteur n'appelle le service qu'à ce moment. **Une
+requête tronquée n'atteint donc jamais le service**, qui n'a pas à s'en défendre.
+
+#### Ce qui ne passe pas par le tampon
+
+Les octets d'une trame vont directement dans leur bac — la section de champs, le
+corps, ou rien pour une trame inconnue (§9). Un corps de soixante kibioctets n'a
+rien à faire dans un tampon de quatre-vingts octets, et l'y faire transiter
+n'apporterait qu'une recopie.
+
+Les deux bacs sont bornés : la section de champs au
+`SETTINGS_MAX_FIELD_SECTION_SIZE` qu'on annonce, le corps à soixante-quatre
+kibioctets. **Au-delà, c'est `H3_EXCESSIVE_LOAD`** — §8.1 nomme exactement cela,
+« the endpoint detected that its peer is exhibiting a behavior that might be
+generating excessive load », et le pair le SAIT puisque nos réglages le lui ont
+dit.
+
+Ce serveur n'est d'ailleurs pas un dépôt : son API administre des boîtes, et ce
+qui entre par une requête tient en quelques kibioctets. Un message de courrier
+entre par SMTP, où il s'écoule sans être retenu.
+
+#### Une réponse sans corps n'a pas de trame `DATA`
+
+Une trame de zéro octet ne dit rien de plus que son absence, et coûte deux octets
+à chaque réponse qui n'a rien à porter.
+
+#### Trois codes que j'avais devinés, et que la grammaire savait
+
+Un flux qui se termine sans section d'en-têtes rend `H3_REQUEST_INCOMPLETE` et
+non `H3_FRAME_UNEXPECTED` : il n'y a pas eu de requête du tout. Un champ de
+réponse que §4.2 interdit rend `H3_INTERNAL_ERROR` : **c'est notre service qui a
+demandé l'impossible**, et l'imputer au pair rendrait son journal mensonger. Et
+un flux de poussée venant d'un client rend `H3_ID_ERROR` : c'est l'emploi du
+flux qui est faux, non sa création.
+
+Les trois fois, l'essai que j'écrivais supposait un code, et les trois fois la
+grammaire — écrite plus tôt, contre la RFC — avait raison.
+
+#### Une cible de fuzz sur des octets, et non sur des types
+
+`fuzz_ams_h3_connection` éprouve la machine d'état sur une suite de TYPES de
+trames donnée à la main. `fuzz_ams_h3_driver` lui donne **des octets**, avec leur
+découpage : c'est là qu'un tampon mal borné ou un pas qui n'avance pas se
+verraient — non comme une réponse fausse, mais comme une boucle qui ne rend
+jamais la main.
+
+En l'ajoutant, j'ai d'abord écrasé la cible existante en réemployant son nom.
+Elle a été restaurée depuis git, et la nouvelle porte le sien.
+
+### HTTP/3 branché sur l'écoute (`ams-loop-tokio::h3`)
+
+Écrit le 2026-09-01. **Une requête HTTP/3 traverse désormais toute la chaîne sur
+une vraie socket UDP** : QUIC, TLS, ALPN `h3`, flux de contrôle, réglages, QPACK,
+session, jeton, API, et la réponse qui revient comprimée.
+
+C'est ici, et nulle part ailleurs, que les étages se touchent. `ams-h3` conduit
+HTTP/3 sans connaître QUIC autrement que par son interface `Transport` ;
+`ams-quic-tls` conduit une connexion sans savoir ce qu'un octet veut dire ;
+`ams-session::http` décide des requêtes sans rien émettre. **Aucun des trois ne
+connaît les deux autres.**
+
+Deux pièces, et rien de plus. Un pont — `Pont<'a>(&'a mut Connection)` — qui vit
+ici parce que ni le trait ni `Connection` ne nous appartiennent, et que la règle
+de l'orphelin interdit de les marier chez un tiers. Et un service qui reprend
+**exactement** l'enchaînement d'HTTP/2 : `session.request`, puis selon `Next`
+soit `api.authenticate` et `on_credentials`, soit `api.serve`. Une seconde façon
+de décider ferait diverger les deux versions du protocole sur des règles qui
+n'ont rien à voir avec le transport.
+
+#### La couture ne disait pas QUI parle, et C8 l'exige
+
+`Application` recevait une connexion et un flux, mais pas l'adresse du pair — que
+l'écoute tenait pourtant. Or le videur range ses comptes par source, et **un refus
+d'identifiants doit compter contre l'adresse qui l'a tenté**. Sans cela, HTTP/3
+aurait servi sans aucune protection contre les essais répétés, là où HTTP/2 en a
+une depuis toujours.
+
+Ce n'était pas contournable dans l'adaptateur : l'information n'existait pas de ce
+côté de la frontière. Les trois rendez-vous portent maintenant la `Source`, et
+elle se pose **à chaque requête** — un service sert plusieurs connexions, et la
+retenir à la construction ferait compter tous les refus contre la première adresse
+qui a parlé.
+
+#### Ce que l'essai de bout en bout a coûté à écrire, et pourquoi c'est bien
+
+Trois refus successifs de la session, chacun juste :
+
+- `/health` n'existe pas : les routes de cette API commencent par `/v1`.
+- **L'index 22 de la table statique de QPACK vaut `:scheme: http`**, et non
+  `https` — c'est 23. Ce serveur ne sert rien en clair (C4), et il l'a dit.
+- Un corps sans `content-type` est refusé : §8.3 de RFC 9110 fait que sans lui la
+  session ne sait pas ce qu'elle lit, et elle refuse plutôt que de deviner.
+
+Les trois fois, le refus est arrivé **comprimé par QPACK, sur une vraie socket**,
+avec son « problem detail » de RFC 9457 lisible dans le corps. Un essai qui aurait
+passé du premier coup aurait prouvé moins que ces trois échecs.
+
+La requête d'essai est composée à la main, préfixes de §5.1 de RFC 7541 compris :
+la bâtir avec notre propre encodeur ne prouverait rien du fil — si l'ordre des
+champs était faux des deux côtés, l'essai passerait quand même.
+
+### Le conducteur HTTP/3 : l'ouverture de connexion (`ams-h3`)
+
+Écrit le 2026-09-01. Un crate d'étage 2, sans entrée-sortie, dans le périmètre de
+couverture. **Toutes les pièces existaient** — `ams-proto-h3` lit une tête de
+flux, une trame, des réglages ; son module `qpack` lit et écrit une section de
+champs ; `ams-session::http` décide déjà des requêtes pour HTTP/2. Aucune ne
+savait quel flux ouvrir en premier, ce qu'il faut y écrire, ni à quoi rattacher
+les octets qui arrivent.
+
+Cette tranche fait l'ouverture : le flux de contrôle et ses `SETTINGS` (§6.2.1),
+la lecture des têtes de flux unidirectionnels (§6.2), et les trames de contrôle
+(§7.2). Les flux de requête viendront ensuite.
+
+#### `Transport` : ce que HTTP/3 demande à QUIC, et rien de plus
+
+Quatre choses : ouvrir un flux unidirectionnel, lire, écrire, savoir où en est la
+réception. **Tout le reste — les clés, les numéros, la congestion, les
+retransmissions — ne regarde pas HTTP/3**, et le lui laisser voir donnerait à un
+conducteur d'étage supérieur les moyens de défaire ce que l'étage du dessous a
+décidé.
+
+Le pont vers `ams-quic-tls::Connection` vit à l'étage qui les assemble, et non
+ici : c'est une pièce de montage, elle demande une vraie connexion pour être
+éprouvée, et `ams-h3` ne connaît donc pas `ams-quic-tls` du tout.
+
+Cela rend aussi les essais d'HTTP/3 indépendants de TLS : ils ne demandent ni
+certificat ni poignée de main, et chacun dit une chose sur HTTP/3 plutôt que sur
+TLS. **C'est une conséquence, et non le motif.**
+
+#### Ce que la couverture a trouvé : un tampon trop petit d'un en-tête
+
+`TAMPON_OCTETS_MAX` valait soixante-quatre, comme la charge de contrôle la plus
+grande qu'on accepte. **Un `SETTINGS` de cette taille exacte remplissait donc le
+tampon sans jamais tenir son en-tête**, et le flux de contrôle se figeait pour
+toujours — sans erreur, sans trace, et sans que le pair ait rien fait de mal.
+
+Rien ne l'aurait montré : aucun essai n'atteignait cette branche, et c'est la
+couverture qui l'a signalée. Le tampon vaut désormais la charge PLUS l'en-tête le
+plus long de §7.1, et un essai envoie une trame à la borne exacte — avec des
+entiers de §16 écrits sur huit octets, puisque §16 n'impose pas la forme la plus
+courte et qu'un pair conforme a le droit de le faire.
+
+#### Un type de flux inconnu n'est pas une faute de connexion
+
+§6.2 : « The recipient MUST NOT consider unknown stream types to be a connection
+error of any kind. » On abandonne CE flux et rien d'autre — c'est ce qui laisse
+une extension ouvrir les siens sans casser les pairs qui ne la connaissent pas.
+
+**Mais on le CONSOMME**, plutôt que de l'ignorer : les octets non lus ne
+rouvriraient jamais la fenêtre du flux (§4.1 de RFC 9000), et le pair finirait
+bloqué sans comprendre pourquoi. Même chose pour les flux QPACK, dont on ne
+traite rien tant qu'on annonce une table dynamique nulle.
+
+Une trame inconnue se saute de même **sans passer par le tampon** (§9) : elle peut
+faire des mébioctets, et l'y mettre donnerait au pair le moyen de choisir combien
+nous retenons.
+
+#### Un générique multiplie les régions à couvrir
+
+`on_established` est générique sur le transport, et chaque type qui le traverse
+en fait recopier le code. Deux faux transports dans les essais demandaient donc
+d'éprouver deux fois chaque branche pour n'en montrer aucune de plus. Il n'y en a
+qu'un, avec un drapeau pour ce qu'il refuse.
+
 ### La couture applicative (`ams-loop-tokio::quic::Application`)
 
 Écrite le 2026-09-01. C'est le point où une application reçoit les octets d'un

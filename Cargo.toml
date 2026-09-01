@@ -56,6 +56,7 @@ members = [
     "crates/ams-config",
     "crates/ams-index",
     "crates/ams-quic-tls",
+    "crates/ams-h3",
     "crates/ams-api",
     # Étage 3 — exécution
     "crates/ams-loop-tokio",
@@ -105,8 +106,10 @@ ams-proto-http = { path = "crates/ams-proto-http", version = "0.1.0" }
 ams-proto-h2 = { path = "crates/ams-proto-h2", version = "0.1.0" }
 ams-proto-quic = { path = "crates/ams-proto-quic", version = "0.1.0" }
 ams-quic-crypto = { path = "crates/ams-quic-crypto", version = "0.1.0" }
+ams-proto-h3 = { path = "crates/ams-proto-h3", version = "0.1.0" }
 ams-quic = { path = "crates/ams-quic", version = "0.1.0" }
 ams-quic-tls = { path = "crates/ams-quic-tls", version = "0.1.0" }
+ams-h3 = { path = "crates/ams-h3", version = "0.1.0" }
 ams-proto-smtp = { path = "crates/ams-proto-smtp", version = "0.1.0" }
 ams-api = { path = "crates/ams-api", version = "0.1.0" }
 ams-auth = { path = "crates/ams-auth", version = "0.1.0" }

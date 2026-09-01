@@ -6,7 +6,7 @@
 
 use ams_proto_quic::varints;
 
-use super::{FrameHeader, FrameKind, Placement};
+use super::{FrameHeader, FrameKind, Placement, write_header};
 use crate::error::{H3Error, Reason};
 
 /// Assemble un en-tête de trame.
@@ -157,4 +157,51 @@ fn un_entete_tronque_se_refuse() {
         assert_eq!(issue.code(), H3Error::FrameError);
     }
     assert!(FrameHeader::parse(&entiere).is_ok());
+}
+
+/// **UN EN-TÊTE DE TRAME S'ÉCRIT, ET SE RELIT** (§7.1).
+///
+/// C'est le contrôle qui compte : ce qu'on écrit doit se lire par le même code
+/// qui lit ce que le pair écrit, sans quoi une erreur d'un côté passerait
+/// inaperçue des deux.
+#[test]
+fn un_entete_de_trame_s_ecrit_et_se_relit() {
+    let mut octets = [0_u8; 32];
+    for (kind, longueur) in [
+        (FrameKind::Settings, 0_u64),
+        (FrameKind::Data, 1_200),
+        (FrameKind::Headers, 63),
+        (FrameKind::GoAway, 1),
+        (FrameKind::Unknown(0x21), 1 << 20),
+    ] {
+        let ecrits = write_header(kind, longueur, &mut octets).expect("écrivable");
+        let relu = FrameHeader::parse(&octets).expect("relisible");
+        assert_eq!(relu.kind(), kind);
+        assert_eq!(relu.length(), longueur);
+        assert_eq!(
+            relu.header_len(),
+            ecrits,
+            "et l'on sait où la charge commence"
+        );
+    }
+}
+
+/// **UNE PLACE QUI MANQUE SE DIT** (C3).
+///
+/// **C'EST NOTRE FAUTE, PAS CELLE DU PAIR** : un tampon trop court est un défaut
+/// de l'appelant, et le taire écrirait une trame tronquée que le pair lirait de
+/// travers.
+#[test]
+fn une_place_qui_manque_se_dit() {
+    // Rien du tout.
+    assert_eq!(
+        write_header(FrameKind::Settings, 0, &mut []).map_err(|e| e.reason()),
+        Err(Reason::BufferTooSmall)
+    );
+    // De quoi le type, mais pas la longueur.
+    let mut juste = [0_u8; 1];
+    assert_eq!(
+        write_header(FrameKind::Settings, 1 << 20, &mut juste).map_err(|e| e.reason()),
+        Err(Reason::BufferTooSmall)
+    );
 }

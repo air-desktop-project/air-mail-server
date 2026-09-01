@@ -24,6 +24,8 @@ ams-tls = { workspace = true }
 ams-proto-quic = { workspace = true }
 ams-quic = { workspace = true }
 ams-quic-tls = { workspace = true }
+# LE CONDUCTEUR HTTP/3, qu'on relie au transport et à la session.
+ams-h3 = { workspace = true }
 ams-proto-h2 = { workspace = true }
 ams-proto-http = { workspace = true }
 ams-session = { workspace = true }
@@ -54,6 +56,8 @@ rustls = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]
+ams-proto-h3 = { workspace = true }
+ams-guard = { workspace = true }
 rustls = { workspace = true }
 ams-quic = { workspace = true }
 ams-proto-quic = { workspace = true }

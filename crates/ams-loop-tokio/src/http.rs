@@ -743,7 +743,7 @@ where
 ///
 /// **C'EST LE SEUL ENDROIT DE LA CHAÎNE HTTP QUI LIT UNE HORLOGE.** Tout ce qui
 /// décide — la session, les jetons, l'API — le reçoit en paramètre (C1).
-fn maintenant() -> u64 {
+pub(crate) fn maintenant() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |depuis| {

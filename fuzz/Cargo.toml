@@ -45,6 +45,9 @@ path = "../crates/ams-api"
 [dependencies.ams-proto-quic]
 path = "../crates/ams-proto-quic"
 
+[dependencies.ams-h3]
+path = "../crates/ams-h3"
+
 [dependencies.ams-proto-h3]
 path = "../crates/ams-proto-h3"
 
@@ -436,6 +439,12 @@ bench = false
 [[bin]]
 name = "fuzz_ams_h3_connection"
 path = "fuzz_targets/fuzz_ams_h3_connection.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_ams_h3_driver"
+path = "fuzz_targets/fuzz_ams_h3_driver.rs"
 test = false
 doc = false
 bench = false
