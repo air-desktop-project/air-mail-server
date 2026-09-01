@@ -43,3 +43,9 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# LE CLIENT QUIC D'ESSAI, partagé avec `ams-loop-tokio` : le dupliquer en
+# ferait diverger les copies.
+ams-quic-client = { workspace = true }
+tokio = { workspace = true }

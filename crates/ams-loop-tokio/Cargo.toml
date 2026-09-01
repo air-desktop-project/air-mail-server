@@ -56,6 +56,7 @@ rustls = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]
+ams-quic-client = { workspace = true }
 ams-proto-h3 = { workspace = true }
 ams-guard = { workspace = true }
 rustls = { workspace = true }

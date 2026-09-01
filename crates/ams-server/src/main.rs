@@ -231,18 +231,17 @@ fn monter_l_api(
 /// surprise sur un port est un incident.
 fn monter_l_api_h3(
     options: &Configuration,
-    tls: Option<&Arc<ServerConfig>>,
 ) -> Result<Option<(std::net::UdpSocket, Arc<ServerConfig>)>, String> {
     if options.listen_h3.is_empty() {
         return Ok(None);
     }
-    let Some(tls) = tls else {
+    if !options.tls.est_configure() {
         eprintln!(
             "air-mail-server : API REST EN HTTP/3 NON SERVIE — aucun certificat. QUIC ne monte \
              pas sans lui (§4 de RFC 9001)."
         );
         return Ok(None);
-    };
+    }
     if options.token_key.is_empty() {
         eprintln!(
             "air-mail-server : API REST EN HTTP/3 NON SERVIE — aucun secret de scellement, comme \
@@ -263,10 +262,26 @@ fn monter_l_api_h3(
         .set_nonblocking(true)
         .map_err(|erreur| format!("écoute HTTP/3 sur {adresse} : {erreur}"))?;
 
-    // **LA CONFIGURATION TLS D'HTTP/3 N'EST PAS CELLE D'HTTP/2** : elle porte
-    // l'ALPN `h3`, et §3.1 de RFC 9114 en fait la condition de la connexion. La
-    // partager ferait annoncer `h2` sur un transport qui ne sait pas le porter.
-    let mut h3_tls = (**tls).clone();
+    // **ELLE SE BÂTIT DEPUIS LES CERTIFICATS, ET NE SE CLONE PAS.**
+    //
+    // Cloner celle d'HTTP/2 pour n'en changer que l'ALPN paraît suffisant, et ne
+    // l'est pas : `ams_tls::server_config` monte le fournisseur ORDINAIRE, et
+    // §5 de RFC 9001 demande un fournisseur qui sache dériver des clés de paquet.
+    // Une configuration QUIC bâtie sur le fournisseur ordinaire **se construit,
+    // démarre, et refuse toute poignée de main** — le port écoute, annonce `h3`,
+    // et ne sert rien. `ams-tls` le dit dans sa propre documentation ; je l'ai
+    // écrit quand même, et c'est l'essai contre le binaire qui l'a montré.
+    let chaine = std::fs::read(&options.tls.certificate_chain_path).map_err(|erreur| {
+        format!(
+            "certificat `{}` : {erreur}",
+            options.tls.certificate_chain_path
+        )
+    })?;
+    let cle = std::fs::read(&options.tls.private_key_path)
+        .map_err(|erreur| format!("clé privée `{}` : {erreur}", options.tls.private_key_path))?;
+    let mut h3_tls = ams_tls::quic_server_config(&chaine, &cle)
+        .map_err(|erreur| format!("matériel TLS pour HTTP/3 : {erreur}"))?;
+    // §3.1 de RFC 9114 : l'ALPN `h3` est la condition de la connexion.
     h3_tls.alpn_protocols = ams_tls::alpn_h3();
 
     eprintln!(
@@ -947,10 +962,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     // **LA MÊME SESSION ET LA MÊME API POUR LES DEUX VERSIONS** : un jeton scellé
     // par HTTP/2 doit ouvrir HTTP/3, et une ressource servie d'un côté doit être
     // la même de l'autre. Deux montages en donneraient deux, avec deux clés.
-    let h3 = match (
-        montage.as_ref(),
-        monter_l_api_h3(&options, options_de_service.tls.as_ref())?,
-    ) {
+    let h3 = match (montage.as_ref(), monter_l_api_h3(&options)?) {
         (Some((_, session, _, api)), Some((socket, tls))) => {
             let session = session.clone();
             let api = Arc::clone(api);

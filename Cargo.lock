@@ -141,6 +141,7 @@ dependencies = [
  "ams-proto-quic",
  "ams-proto-smtp",
  "ams-quic",
+ "ams-quic-client",
  "ams-quic-crypto",
  "ams-quic-tls",
  "ams-sasl",
@@ -204,6 +205,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ams-quic-client"
+version = "0.1.0"
+dependencies = [
+ "ams-proto-h3",
+ "ams-proto-quic",
+ "ams-quic",
+ "ams-quic-crypto",
+ "ams-quic-tls",
+ "ams-tls",
+ "rustls",
+ "tokio",
+]
+
+[[package]]
 name = "ams-quic-crypto"
 version = "0.1.0"
 dependencies = [
@@ -247,6 +262,7 @@ dependencies = [
  "ams-proto-imap",
  "ams-proto-pop3",
  "ams-proto-smtp",
+ "ams-quic-client",
  "ams-sasl",
  "ams-session",
  "ams-store",
