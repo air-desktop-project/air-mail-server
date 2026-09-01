@@ -2795,8 +2795,13 @@ Il n'y a toujours pas de **file d'attente générale** : `send` remet, ou dit
 pourquoi il n'a pas pu. Le dossier des rapports en tient lieu pour eux seuls — il
 sait différer et abandonner, ce qui suffit à des messages qu'on peut perdre sans
 que personne n'en souffre. Une vraie file demanderait des avis de non-remise et
-une politique de reprise, deux décisions qui ne se prennent pas en passant, et
-qu'un serveur qui n'accepte pas de soumission n'a pas encore à prendre.
+une politique de reprise, deux décisions qui ne se prennent pas en passant.
+
+**La soumission par l'API ne les fait pas prendre non plus**, et c'est délibéré :
+elle remet LOCALEMENT, par le chemin de SMTP. Un message qui sortirait vers
+l'extérieur, lui, aurait besoin de cette file — et c'est pourquoi la soumission
+refuse tout destinataire qui n'est pas d'ici plutôt que de promettre ce qu'elle ne
+tiendrait pas.
 
 ### DNSSEC n'est pas validé, et c'est écrit partout
 
@@ -3315,16 +3320,22 @@ Maildir), SMTP à l'émission (rapports DMARC), POP3, et IMAP — `SELECT`,
 `UID`. Chacun a été éprouvé de bout en bout contre le binaire, et pas
 seulement en tests.
 
-**HTTP est en cours** : `ams-proto-http` porte la sémantique de RFC 9110 — les
-méthodes, les codes d'état, ce qu'un champ a le droit d'être, et les règles de
-§8.3 qui disent si une liste de champs est recevable. Le CADRAGE — h2, h3 — n'y
-est pas encore, et aucun port HTTP n'est ouvert.
+**HTTP est servi, en h2 et en h3** : `ams-proto-http` porte la sémantique de
+RFC 9110, `ams-proto-h2` et `ams-proto-h3` le cadrage, et les deux ports
+s'ouvrent — sur TLS, et seulement sur TLS. L'API REST y sert le courrier, les
+jetons, la supervision, la soumission, et l'administration en lecture. HTTP/3
+traverse une pile QUIC écrite ici, et l'extinction se dit en deux temps.
+
+**Cette phrase disait « en cours, et aucun port HTTP n'est ouvert » longtemps
+après que ce fut faux.** C'est le défaut que ce registre existe pour empêcher, et
+il l'a commis sur lui-même : une section qui s'intitule « l'état réel » est celle
+qu'on relit le moins, parce qu'on croit la connaître.
 
 Sont outillées : C1 (les trois étages, et la couverture qui n'est exigible que
-parce qu'ils sont séparés), C2 (le gate mesure 23 578 régions sur 16 crates,
-toutes couvertes — et il compare désormais des comptes, non un pourcentage
-arrondi), C3 (les lints, l'absence d'allocation dans les décodeurs, et 28 cibles
-de fuzz dont la CI vérifie qu'elle les lance toutes), C4 (`ams-tls` n'offre que
+parce qu'ils sont séparés), C2 (le gate mesure 47 976 régions sur 25 crates,
+toutes couvertes — et il compare des comptes, non un pourcentage arrondi), C3
+(les lints, l'absence d'allocation dans les décodeurs, et 54 cibles de fuzz dont
+la CI vérifie qu'elle les lance toutes), C4 (`ams-tls` n'offre que
 TLS 1.3), C6 (les décodeurs refusent le CR et le LF isolés ; `AUTH`, `USER`/`PASS`
 et `LOGIN` sont refusés hors chiffrement, sans réglage pour le rétablir), C8
 (`ams-guard`, câblé sur les trois services), C9 (DKIM vérifié, SPF et DMARC
@@ -3337,8 +3348,14 @@ persistant, et lecture sans verrou côté IMAP), C14 (`X25519MLKEM768` en tête)
 `<CRLF>.<CRLF>`, refuse tout `CR` ou `LF` isolé, et le fuzz éprouve que le
 découpage des lectures ne change rien au verdict.
 
-Ce qui manque, et qu'aucune phrase ne doit laisser croire acquis : la file de
-réémission des messages sortants, et toute interface HTTP.
+Ce qui manque, et qu'aucune phrase ne doit laisser croire acquis : **la file de
+réémission des messages sortants**. Un message qu'on ne peut pas remettre tout de
+suite est perdu, et non retenu pour plus tard.
+
+L'interface HTTP, elle, N'EST PLUS DE CETTE LISTE : l'API REST se sert en HTTP/2
+et en HTTP/3, avec ses jetons, sa soumission et son administration en lecture.
+Ces deux phrases-ci disaient le contraire longtemps après que ce fut faux — et
+c'est exactement ce que ce registre existe pour empêcher.
 
 **Toutes les commandes de RFC 9051 répondent** — plus aucune ne reçoit un
 `NO [UNAVAILABLE]`, et la méthode qui l'écrivait a disparu du code —, et les
@@ -3359,8 +3376,7 @@ toujours pas. **Une liste complète d'une chose ne prouve rien d'une autre**, et
 la seule vérification qui vaille est la confrontation à l'ABNF de §9, mot par
 mot — pas à sa propre liste.
 
-Ce qui reste hors du serveur : la file de réémission des messages sortants, et
-toute interface HTTP.
+Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
 ## HTTP : h2 et h3, et pas HTTP/1.1
 
@@ -6115,15 +6131,20 @@ qu'il ne désigne pas. Y ajouter la lecture d'une enveloppe ferait ouvrir un
 fichier par message listé, et défairait cette promesse pour les deux protocoles à
 la fois.
 
-Les rendre demande donc une voie séparée, avec sa propre borne — et cette
-voie-là mérite sa propre tranche.
+Les rendre demande donc une voie séparée, avec sa propre borne. **Elle existe
+désormais** : voir « Le résumé d'un message, et pourquoi ce n'est pas une
+enveloppe ».
 
 ### Ce qui n'est pas encore servi le dit
 
-Les ressources d'administration et de soumission répondent `501`. §15.6.2 de
-RFC 9110 : « the server does not support the functionality required ». C'est la
-réponse honnête — un `404` ferait croire que la ressource n'existe pas, et un
-`500` qu'elle a échoué.
+La soumission est servie, et l'administration l'est EN LECTURE. Ce qui MODIFIE le
+magasin de comptes — créer, effacer, changer un mot de passe, changer des adresses
+— répond `501`. §15.6.2 de RFC 9110 : « the server does not support the
+functionality required ». C'est la réponse honnête — un `404` ferait croire que la
+ressource n'existe pas, et un `500` qu'elle a échoué.
+
+Pourquoi celles-là et pas les autres : voir « Ce qui MODIFIE le magasin de comptes
+n'est pas servi ».
 
 ### Trois conditions pour ouvrir le port, et aucune n'est facultative
 

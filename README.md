@@ -2,11 +2,20 @@
 
 Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 
-> ## État : trois protocoles servis, HTTP non
+> ## État : quatre protocoles servis
 >
 > Ce dépôt compile, il est linté, et il porte quatre gates de CI. Il sert
-> **SMTP**, **POP3** et **IMAP** ; `ams-proto-http` reste un emplacement réservé,
-> et son en-tête le dit.
+> **SMTP**, **POP3**, **IMAP** et **HTTP** — ce dernier en h2 et en h3, sur TLS
+> et seulement sur TLS.
+>
+> **Il sert une API REST** : jetons porteurs scellés, boîtes et messages en
+> lecture, dépôt d'un message, supervision, et administration en lecture. Ce qui
+> MODIFIE le magasin de comptes répond `501` — les comptes sont chargés une fois
+> au démarrage, et les rendre modifiables à chaud est une tranche à part.
+>
+> **HTTP/3 traverse une pile QUIC écrite ici** : poignée de main, chiffrement des
+> paquets, flux, contrôle de flux, QPACK, et une extinction qui se dit en deux
+> temps avant de fermer.
 >
 > **`air-mail-server` tourne.** Il écoute sur un port, reçoit du courrier en
 > clair pour les domaines qu'on lui nomme, le dépose dans une boîte Maildir, et
@@ -35,8 +44,7 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 > mémoire, les drapeaux s'écrivent dans les noms de fichiers Maildir, et un
 > effacement n'a jamais lieu sur une marque périmée.
 >
-> Dix-neuf crates sur vingt portent du code ; `ams-proto-http` est le seul
-> emplacement réservé, et il le dit dans sa documentation.
+> Trente crates, toutes portant du code : plus aucun emplacement réservé.
 >
 > Ce que ce dépôt affirme, il le tient. Rien de plus n'est promis ici.
 
@@ -1255,8 +1263,8 @@ sous chiffrement. Les attributs de SPECIAL-USE — `\Drafts`, `\Sent`, `\Trash` 
 ne sont pas rendus : ils désignent des boîtes que le serveur DÉSIGNE, et celui-ci
 n'en désigne aucune.
 
-Hors d'IMAP : la file de réémission des messages sortants, et toute interface
-HTTP.
+Hors d'IMAP : la file de réémission des messages sortants. L'interface HTTP, elle,
+est servie — voir plus bas.
 
 ## Émettre : le client SMTP sortant
 

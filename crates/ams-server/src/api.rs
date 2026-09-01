@@ -25,10 +25,23 @@
 //!
 //! # CE QUI N'EST PAS ENCORE SERVI LE DIT
 //!
-//! Les ressources d'administration et de soumission répondent `501`. §15.6.2 de
-//! RFC 9110 : « the server does not support the functionality required ». C'est
-//! la réponse honnête — un `404` ferait croire que la ressource n'existe pas, et
-//! un `500` qu'elle a échoué.
+//! La soumission est servie, et l'administration l'est EN LECTURE. Ce qui MODIFIE
+//! le magasin de comptes — créer, effacer, changer un mot de passe, changer des
+//! adresses — répond `501` : les comptes sont chargés une fois au démarrage et
+//! partagés par SMTP, IMAP, POP3 et l'API, et les rendre modifiables à chaud
+//! demande un remplacement atomique du fichier, un verrou, et une relecture par
+//! tous les services.
+//!
+//! §15.6.2 de RFC 9110 : « the server does not support the functionality
+//! required ». C'est la réponse honnête — un `404` ferait croire que la ressource
+//! n'existe pas, et un `500` qu'elle a échoué.
+//!
+//! # ET LE JETON D'ADMINISTRATION SE FRAPPE AILLEURS
+//!
+//! `air-mail-admin token` le scelle avec le secret que la configuration porte,
+//! donc depuis la machine du serveur. C'est la même autorité que celle qui peut
+//! arrêter le service ou lire les boîtes : on n'en ajoute aucune, et la phrase
+//! ci-dessus reste vraie mot pour mot.
 
 use std::sync::Arc;
 
