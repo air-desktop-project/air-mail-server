@@ -57,6 +57,13 @@ pub const CHAMPS_OCTETS_MAX: usize = 16 * 1024;
 /// entre par SMTP, où il s'écoule sans être retenu.
 pub const CORPS_OCTETS_MAX: usize = 64 * 1024;
 
+/// Le code applicatif d'une extinction qui s'est bien passée (§8.1).
+///
+/// **`H3_NO_ERROR` N'EST PAS UN DÉTAIL** : fermer avec autre chose ferait
+/// chercher au client une faute qui n'existe pas, et §5.2 dit exactement quand
+/// l'employer — quand on a fini de s'éteindre proprement.
+pub const NO_ERROR: u64 = ams_proto_h3::H3Error::NoError.value();
+
 /// Les bornes de la sémantique HTTP qu'on applique en décodant (§4.2.2).
 const LIMITES: ams_proto_http::Limits = ams_proto_http::Limits::DEFAULT;
 
@@ -105,12 +112,19 @@ enum Role {
     QpackDecodeur,
     /// Un flux de requête : bidirectionnel, ouvert par le client (§6.1).
     Requete,
-    /// Un type qu'on ne conduit pas.
+    /// Un flux qu'on ne conduit plus : on le consomme, et rien de plus.
+    ///
+    /// Deux chemins y mènent, et ils demandent la même chose.
     ///
     /// §6.2 : « The recipient MUST NOT consider unknown stream types to be a
     /// connection error of any kind. » On abandonne CE flux et rien d'autre —
     /// c'est ce qui laisse une extension ouvrir les siens sans casser les pairs
     /// qui ne la connaissent pas.
+    ///
+    /// §5.2 : une requête au-delà de ce qu'un `GOAWAY` a annoncé est refusée. On
+    /// lui a dit `H3_REQUEST_REJECTED`, et **le pair peut continuer d'écrire** —
+    /// un `RESET_STREAM` n'arrête que NOTRE sens (§3.3 de RFC 9000). Consommer
+    /// ce qui arrive est ce qui rouvre sa fenêtre.
     Abandonne,
 }
 
@@ -176,6 +190,12 @@ pub struct Http3 {
     decodeur: Option<StreamId>,
     /// Les réglages qu'on annonce.
     nos_reglages: Settings,
+    /// Le plus grand flux de requête qu'on ait servi, s'il y en a eu un.
+    ///
+    /// **C'EST CE QUI DONNE SON IDENTIFIANT AU `GOAWAY` PRÉCIS** (§5.2) : le
+    /// second temps de l'extinction doit dire jusqu'où l'on est allé, et rien
+    /// d'autre ne le sait. Le tenir à jour coûte une comparaison par réponse.
+    dernier_servi: Option<u64>,
 }
 
 impl Default for Http3 {
@@ -195,6 +215,7 @@ impl Http3 {
             encodeur: None,
             decodeur: None,
             nos_reglages: Settings::DEFAULT,
+            dernier_servi: None,
         }
     }
 
@@ -299,6 +320,97 @@ impl Http3 {
         Ok(())
     }
 
+    /// L'identifiant à mettre dans le `GOAWAY` du second temps (§5.2).
+    ///
+    /// « Requests or pushes with the indicated identifier or greater are rejected
+    /// by the sender of the GOAWAY. » On désigne donc le flux qui SUIT le dernier
+    /// qu'on ait servi — quatre de plus, puisque §2.1 de RFC 9000 numérote les
+    /// bidirectionnels du client de quatre en quatre.
+    ///
+    /// **RIEN DE SERVI DONNE ZÉRO**, et c'est juste : tout est alors à rejouer.
+    #[must_use]
+    pub fn goaway_id(&self) -> u64 {
+        self.dernier_servi
+            .map_or(0, |dernier| dernier.saturating_add(4))
+    }
+
+    /// Le `GOAWAY` qu'on a émis, s'il l'a été (§5.2).
+    #[must_use]
+    pub const fn goaway_sent(&self) -> Option<u64> {
+        self.h3.goaway_sent()
+    }
+
+    /// **PREMIER TEMPS DE L'EXTINCTION** : « n'ouvre plus rien » (§5.2).
+    ///
+    /// L'identifiant maximal ne condamne aucune requête en vol : il dit seulement
+    /// que le client ne doit plus en ouvrir. C'est ce qui laisse au délai de grâce
+    /// un sens — sans lui, on refuserait des requêtes qui allaient aboutir.
+    ///
+    /// # Errors
+    ///
+    /// [`Reason::Transport`] si le flux de contrôle n'accepte plus rien.
+    pub fn shutdown<T: Transport>(&mut self, quic: &mut T) -> Result<(), Error> {
+        self.goaway(quic, ams_proto_h3::GOAWAY_MAX)
+    }
+
+    /// **SECOND TEMPS** : le rang qui suit la dernière requête servie (§5.2).
+    ///
+    /// # Errors
+    ///
+    /// [`Reason::Transport`] si le flux de contrôle n'accepte plus rien.
+    pub fn drain<T: Transport>(&mut self, quic: &mut T) -> Result<(), Error> {
+        self.goaway(quic, self.goaway_id())
+    }
+
+    /// S'éteint : dit au pair jusqu'où l'on servira (§5.2).
+    ///
+    /// # L'EXTINCTION SE FAIT EN DEUX TEMPS, ET CETTE FONCTION EN FAIT UN
+    ///
+    /// §5.2 décrit exactement la manœuvre : d'abord un `GOAWAY` à l'identifiant
+    /// maximal, qui dit « n'ouvre plus rien » sans rien condamner de ce qui est
+    /// en vol ; puis, une fois les requêtes en vol arrivées, un second au rang
+    /// réel de ce qu'on aura servi. Les deux passent par ici — c'est l'appelant
+    /// qui tient le délai, parce que lui seul a une horloge (C1).
+    ///
+    /// **L'IDENTIFIANT NE PEUT QUE DESCENDRE**, et [`ams_proto_h3::Connection`]
+    /// le tient : « the identifier in each frame MUST NOT be greater than the
+    /// identifier in any previous frame ». Un client a pu rejouer ailleurs les
+    /// requêtes qu'un premier `GOAWAY` avait déclarées perdues ; les réaccepter
+    /// les ferait exécuter deux fois.
+    ///
+    /// **SANS FLUX DE CONTRÔLE, IL N'Y A RIEN À DIRE.** Ce n'est pas une faute :
+    /// une connexion dont la poignée de main n'a jamais abouti n'a pas de pair à
+    /// qui faire ses adieux.
+    ///
+    /// # Errors
+    ///
+    /// [`Reason::Transport`] si le flux de contrôle n'accepte plus rien.
+    fn goaway<T: Transport>(&mut self, quic: &mut T, identifiant: u64) -> Result<(), Error> {
+        let Some(controle) = self.controle else {
+            return Ok(());
+        };
+        let dit = self.h3.goaway(identifiant);
+
+        // **AUCUNE DE CES TROIS ÉCRITURES NE PEUT ÉCHOUER** : un identifiant de
+        // §16 tient sur huit octets, et l'en-tête de §7.1 sur seize.
+        let mut charge = [0_u8; ENTETE_OCTETS_MAX];
+        let combien =
+            varints::encode(dit, &mut charge).expect("un identifiant de §16 tient sur huit octets");
+        let mut entete = [0_u8; ENTETE_OCTETS_MAX];
+        let pose = ams_proto_h3::write_header(
+            FrameKind::GoAway,
+            u64::try_from(combien).unwrap_or(u64::MAX),
+            &mut entete,
+        )
+        .expect("un en-tête de §7.1 tient sur seize octets");
+
+        let mut sortie = Vec::with_capacity(pose.saturating_add(combien));
+        sortie.extend_from_slice(entete.get(..pose).unwrap_or_default());
+        sortie.extend_from_slice(charge.get(..combien).unwrap_or_default());
+        quic.write(controle, &sortie)?;
+        Ok(())
+    }
+
     /// Ouvre un flux unidirectionnel qui n'a que son type à annoncer (§6.2).
     fn ouvrir_un_flux<T: Transport>(quic: &mut T, kind: StreamKind) -> Result<StreamId, Error> {
         let flux = quic.open_uni()?;
@@ -330,6 +442,17 @@ impl Http3 {
         if matches!(flux.initiator(), Initiator::Server) {
             return Ok(());
         }
+        let rang = self.rang_de(flux);
+        // §5.2 : « Requests [...] with the indicated identifier or greater are
+        // rejected by the sender of the GOAWAY. » **ON REFUSE AVANT DE LIRE** :
+        // avaler les octets d'une requête qu'on ne servira pas retiendrait de la
+        // mémoire pour rien, et l'on veut justement s'éteindre.
+        //
+        // **LE RÔLE EST CE QUI REND CE REFUS UNIQUE** : `refuser` le fait passer à
+        // `Abandonne`, et un second `RESET_STREAM` ne dirait rien de plus.
+        if matches!(self.suivis[rang].role, Role::Requete) && !self.h3.accepts(flux.value()) {
+            self.refuser(quic, rang)?;
+        }
         self.avaler(quic, flux)?;
         let rang = self.rang_de(flux);
         if matches!(self.suivis[rang].role, Role::Requete) {
@@ -351,6 +474,22 @@ impl Http3 {
             ));
         }
         Ok(())
+    }
+
+    /// Refuse cette requête : rien n'a été fait, et le client peut rejouer.
+    ///
+    /// §8.1 : `H3_REQUEST_REJECTED` — « the request was not processed ». C'est
+    /// une PROMESSE, et c'est elle qui rend l'extinction propre : un client qui
+    /// la reçoit rejoue ailleurs sans risquer d'exécuter deux fois ce qu'il
+    /// demande. Un `H3_REQUEST_CANCELLED` ne dirait pas cela, et un flux qu'on
+    /// laisserait pendre ne dirait rien du tout.
+    fn refuser<T: Transport>(&mut self, quic: &mut T, rang: usize) -> Result<(), Error> {
+        let flux = self.suivis[rang].flux;
+        self.suivis[rang].role = Role::Abandonne;
+        // Ce qu'on avait commencé à retenir pour elle ne sert plus.
+        self.suivis[rang].requete = None;
+        self.suivis[rang].tampon = Vec::new();
+        quic.reset(flux, ams_proto_h3::H3Error::RequestRejected.value())
     }
 
     /// Sert la requête si elle est entière, et une seule fois.
@@ -396,6 +535,11 @@ impl Http3 {
         let reponse = service.serve(&tete, &corps, &mut sortie);
         self.ecrire_la_reponse(quic, flux, &reponse)?;
         self.suivis[rang].requete.as_mut().expect("état").repondu = true;
+        // §5.2 : le second temps de l'extinction dira jusqu'où l'on est allé.
+        self.dernier_servi = Some(
+            self.dernier_servi
+                .map_or(flux.value(), |avant| avant.max(flux.value())),
+        );
         Ok(())
     }
 

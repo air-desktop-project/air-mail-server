@@ -48,6 +48,8 @@ struct Faux {
     refuse_a_partir_de: Option<usize>,
     /// Combien d'écritures ont abouti.
     ecritures: usize,
+    /// Les flux qu'on a annulés, et avec quel code (§19.4 de RFC 9000).
+    annules: Vec<(u64, u64)>,
 }
 
 impl Faux {
@@ -114,6 +116,17 @@ impl Transport for Faux {
             .or_default()
             .extend_from_slice(octets);
         Ok(octets.len())
+    }
+
+    fn reset(&mut self, flux: StreamId, code: u64) -> Result<(), Error> {
+        if self
+            .refuse_a_partir_de
+            .is_some_and(|rang| self.ecritures >= rang)
+        {
+            return Err(Error::transport());
+        }
+        self.annules.push((flux.value(), code));
+        Ok(())
     }
 
     fn finish(&mut self, _flux: StreamId) -> Result<(), Error> {
@@ -1511,4 +1524,152 @@ fn un_corps_coupe_en_deux_se_recolle() {
         std::vec![(b"/boites".to_vec(), b"quatrere".to_vec())],
         "LE CORPS S'EST RECOLLÉ"
     );
+}
+
+/// La dernière trame écrite sur ce flux, après `depuis` octets.
+fn derniere_trame(faux: &Faux, flux: StreamId, depuis: usize) -> (FrameKind, u64) {
+    let dit = faux.ce_qu_on_a_dit(flux.value());
+    let suite = dit.get(depuis..).expect("ce qui vient d'être écrit");
+    let entete = ams_proto_h3::FrameHeader::parse(suite).expect("une trame entière");
+    let charge = suite.get(entete.header_len()..).unwrap_or_default();
+    let (identifiant, _) = varints::decode(charge).expect("un identifiant de §16");
+    (entete.kind(), identifiant)
+}
+
+/// **§5.2 : L'EXTINCTION SE DIT EN DEUX TEMPS, ET LE SECOND NE MONTE PAS.**
+///
+/// D'abord l'identifiant maximal — « n'ouvre plus rien », sans condamner ce qui
+/// est en vol. Puis, les requêtes en vol arrivées, le rang qui suit la dernière
+/// qu'on ait servie : « au-delà, rien n'a été fait, rejoue ailleurs ».
+#[test]
+fn l_extinction_se_dit_en_deux_temps() {
+    let mut faux = Faux::new();
+    let mut h3 = Http3::new();
+    let mut echo = Echo::default();
+    h3.on_established(&mut faux).expect("on peut ouvrir");
+    let controle = h3.control_stream().expect("il est ouvert");
+    assert_eq!(h3.goaway_sent(), None, "rien n'a encore été dit");
+
+    // Deux requêtes servies : c'est la PLUS GRANDE qui donne son rang au second
+    // temps, et non la dernière arrivée — les flux d'HTTP/3 n'arrivent pas dans
+    // l'ordre, c'est même tout l'intérêt du transport.
+    // `requete_du_client` prend un RANG, que §2.1 de RFC 9000 multiplie par
+    // quatre : les rangs 1 et 0 sont les flux 4 et 0.
+    for rang in [1, 0] {
+        let flux = requete_du_client(rang);
+        poser_une_requete(&mut faux, flux, b"/boites", b"");
+        h3.on_readable(&mut faux, &mut echo, flux).expect("servie");
+    }
+    assert_eq!(echo.servi.len(), 2, "elles ont bien été servies");
+
+    let avant = faux.ce_qu_on_a_dit(controle.value()).len();
+    h3.shutdown(&mut faux).expect("le premier temps");
+    assert_eq!(
+        derniere_trame(&faux, controle, avant),
+        (FrameKind::GoAway, ams_proto_h3::GOAWAY_MAX),
+        "§5.2 : « a value set to the maximum possible value »"
+    );
+
+    let avant = faux.ce_qu_on_a_dit(controle.value()).len();
+    h3.drain(&mut faux).expect("le second temps");
+    assert_eq!(
+        derniere_trame(&faux, controle, avant),
+        (FrameKind::GoAway, 8),
+        "§2.1 de RFC 9000 numérote de quatre en quatre : après le flux 4 vient le 8"
+    );
+    assert_eq!(h3.goaway_sent(), Some(8), "et c'est ce qu'on retient");
+}
+
+/// **SANS FLUX DE CONTRÔLE, IL N'Y A PERSONNE À QUI FAIRE SES ADIEUX.**
+///
+/// Une connexion dont la poignée de main n'a jamais abouti n'a pas de pair. Ce
+/// n'est pas une faute — c'est une extinction qui n'a rien à dire.
+#[test]
+fn une_extinction_sans_flux_de_controle_ne_dit_rien() {
+    let mut faux = Faux::new();
+    let mut h3 = Http3::new();
+    h3.shutdown(&mut faux)
+        .expect("rien à dire n'est pas une faute");
+    h3.drain(&mut faux).expect("de même");
+    assert_eq!(h3.goaway_sent(), None, "et rien n'a été retenu");
+    assert!(
+        faux.sortant.is_empty(),
+        "ni écrit : il n'y a pas de flux où écrire"
+    );
+}
+
+/// **UN `GOAWAY` QU'ON NE PEUT PAS ÉCRIRE NE SE TAIT PAS.**
+///
+/// Un transport qui refuse laisserait le pair croire qu'on sert encore ; le dire
+/// est ce qui permet à l'appelant de fermer plutôt que d'attendre.
+#[test]
+fn un_goaway_que_le_transport_refuse_ne_se_tait_pas() {
+    let mut faux = Faux::new();
+    let mut h3 = Http3::new();
+    h3.on_established(&mut faux).expect("on peut ouvrir");
+    faux.refuse_a_partir_de = Some(faux.ecritures);
+    let faute = h3.shutdown(&mut faux).expect_err("il refuse");
+    assert_eq!(faute.reason(), Reason::Transport);
+}
+
+/// **§5.2 : AU-DELÀ DE L'IDENTIFIANT, LA REQUÊTE EST REFUSÉE — ET NON LUE.**
+///
+/// « Requests [...] with the indicated identifier or greater are rejected by the
+/// sender of the GOAWAY. » Le refus est un `RESET_STREAM` portant
+/// `H3_REQUEST_REJECTED`, qui PROMET que rien n'a été fait : c'est cette promesse
+/// qui permet au client de rejouer ailleurs sans exécuter deux fois.
+///
+/// **ET L'ON N'AVALE PAS SES OCTETS** : retenir de la mémoire pour une requête
+/// qu'on ne servira pas, au moment même où l'on s'éteint, serait absurde.
+#[test]
+fn une_requete_au_dela_du_goaway_est_refusee() {
+    let mut faux = Faux::new();
+    let mut h3 = Http3::new();
+    let mut echo = Echo::default();
+    h3.on_established(&mut faux).expect("on peut ouvrir");
+    // Rien n'a été servi : le second temps désigne donc le flux zéro, et tout
+    // est à rejouer.
+    h3.drain(&mut faux).expect("le second temps");
+    assert_eq!(h3.goaway_sent(), Some(0));
+
+    let flux = requete_du_client(0);
+    poser_une_requete(&mut faux, flux, b"/boites", b"");
+    h3.on_readable(&mut faux, &mut echo, flux)
+        .expect("un refus n'est pas une faute de connexion");
+
+    assert!(echo.servi.is_empty(), "elle n'a PAS été servie");
+    assert_eq!(
+        faux.annules,
+        std::vec![(flux.value(), ams_proto_h3::H3Error::RequestRejected.value())],
+        "§8.1 : `H3_REQUEST_REJECTED`, et rien d'autre"
+    );
+
+    // **UNE FOIS, ET UNE SEULE** : un second `RESET_STREAM` ne dirait rien de
+    // plus, et le pair qui continue d'écrire se fait seulement consommer.
+    faux.le_pair_dit(flux.value(), b"la suite de ce qu'il disait");
+    h3.on_readable(&mut faux, &mut echo, flux)
+        .expect("on consomme, sans rien redire");
+    assert_eq!(faux.annules.len(), 1, "un seul refus");
+    assert_eq!(reste_a_lire(&faux, flux), 0, "et sa fenêtre se rouvre");
+}
+
+/// **UN REFUS QU'ON NE PEUT PAS ÉMETTRE NE SE TAIT PAS.**
+///
+/// Sans `RESET_STREAM`, le client attendrait une réponse qui ne viendra jamais —
+/// et ne saurait pas qu'il peut rejouer ailleurs. Le taire ferait pendre son
+/// flux jusqu'au délai d'inactivité de la connexion.
+#[test]
+fn un_refus_que_le_transport_n_emet_pas_ne_se_tait_pas() {
+    let mut faux = Faux::new();
+    let mut h3 = Http3::new();
+    h3.on_established(&mut faux).expect("on peut ouvrir");
+    h3.drain(&mut faux).expect("le second temps");
+
+    faux.refuse_a_partir_de = Some(faux.ecritures);
+    let flux = requete_du_client(0);
+    poser_une_requete(&mut faux, flux, b"/boites", b"");
+    let faute = h3
+        .on_readable(&mut faux, &mut Echo::default(), flux)
+        .expect_err("le transport refuse l'annulation");
+    assert_eq!(faute.reason(), Reason::Transport);
 }

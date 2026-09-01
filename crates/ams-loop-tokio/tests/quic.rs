@@ -305,11 +305,15 @@ async fn une_faute_de_flux_ferme_sur_la_vraie_socket() {
         .expect("la tâche d'écoute")
         .expect("l'écoute rend ses comptes");
     assert_eq!(stats.accepted, 1);
-    // **ELLE N'EST PAS ENCORE ÉTEINTE, ET C'EST §10.2** : après avoir dit sa
+    // **ELLE A EU LE TEMPS DE FINIR D'ATTENDRE.** §10.2 : après avoir dit sa
     // fermeture, une connexion reste en état de fermeture trois PTO durant, pour
     // pouvoir redire son `CONNECTION_CLOSE` au pair qui n'aurait pas entendu.
-    // `closed` ne compte que ce qui a fini d'attendre.
-    assert_eq!(stats.closed, 0);
+    // `closed` ne compte que ce qui a fini d'attendre — et l'extinction de §5.2
+    // continue de tourner jusqu'à ce que plus personne n'attende.
+    //
+    // Cet essai valait zéro tant que le signal d'arrêt rendait la main sur-le-
+    // champ : il mesurait alors la brusquerie du retour, et non §10.2.
+    assert_eq!(stats.closed, 1);
 }
 
 /// Une application qui renvoie ce qu'on lui dit, et termine.
@@ -566,4 +570,122 @@ async fn une_requete_h3_traverse_toute_la_chaine() {
     assert_eq!(stats.expect("l'écoute rend ses comptes").accepted, 1);
     assert_eq!(servies, 2, "deux requêtes servies");
     assert_eq!(refusees, 0, "et pas un refus");
+}
+
+/// **L'EXTINCTION SE DIT AVANT DE SE FAIRE** (§5.2 de RFC 9114).
+///
+/// Le signal d'arrêt ne lâche plus les connexions sans un mot : le serveur dit
+/// d'abord « n'ouvre plus rien », laisse passer le délai de grâce, puis dit
+/// jusqu'où il est allé et ferme en `H3_NO_ERROR`.
+///
+/// **CE QUE CET ESSAI PROUVE ET QUE LES ESSAIS D'`ams-h3` NE PEUVENT PAS** :
+/// là-bas, le conducteur écrit dans un transport de fer-blanc. Ici les deux
+/// `GOAWAY` traversent QUIC, TLS et une vraie socket, et c'est le client qui les
+/// lit sur le flux de contrôle du serveur.
+#[tokio::test(flavor = "current_thread")]
+async fn l_extinction_se_dit_au_client_avant_de_fermer() {
+    let atelier = atelier("h3-extinction");
+    let (autorite, cert, cle) = materiel(atelier.chemin()).expect(SANS_OPENSSL);
+
+    let mut config = ams_tls::quic_server_config(&cert, &cle).expect("la paire est bonne");
+    config.alpn_protocols = ams_tls::alpn_h3();
+    let socket = UdpSocket::bind("127.0.0.1:0").await.expect("une socket");
+    let adresse = socket.local_addr().expect("une adresse");
+
+    let (fin, arret) = tokio::sync::oneshot::channel::<()>();
+    let ecoute = tokio::spawn(async move {
+        let session = ams_session::http::Http::new(
+            ams_api::Key::new(b"une clef de trente-deux octets!!").expect("trente-deux octets"),
+            3_600 * 1_000_000,
+        )
+        .expect("une durée licite");
+        let guard = ams_loop_tokio::SharedGuard::new(64, ams_guard::Thresholds::default());
+        let api = ApiEssai;
+        let mut application = ams_loop_tokio::h3::Http3Application::new(&session, &api, &guard);
+        ams_loop_tokio::serve_quic(socket, Arc::new(config), &mut application, async {
+            let _ = arret.await;
+        })
+        .await
+    });
+
+    let mut client = Client::new(config_client(&autorite), adresse).await;
+    for _ in 0..16 {
+        if !client.parler().await && !client.tls().is_handshaking() {
+            break;
+        }
+        if !client.ecouter().await && !client.tls().is_handshaking() {
+            break;
+        }
+    }
+    assert!(!client.tls().is_handshaking(), "la poignée de main aboutit");
+
+    // Une requête servie : c'est elle qui donnera son rang au second `GOAWAY`.
+    envoyer_une_requete(&mut client, 0, 20, b"/v1/tokens", None, br#"{}"#).await;
+    let _ = attendre_la_reponse(&mut client, 0).await;
+
+    // **LE SIGNAL D'ARRÊT.** Ce qui suit doit arriver AVANT que la connexion ne
+    // se ferme, et c'est tout l'objet de §5.2.
+    let _ = fin.send(());
+    // **ON POMPE JUSQU'À LA FERMETURE**, et non un nombre de tours : le second
+    // temps n'arrive qu'après le délai de grâce, et compter des tours ferait
+    // dépendre l'essai de la vitesse de la machine.
+    let debut = std::time::Instant::now();
+    while debut.elapsed() < std::time::Duration::from_secs(20) {
+        client.parler().await;
+        client.ecouter().await;
+        if client.ferme().is_some() {
+            break;
+        }
+    }
+
+    // §6.2 : le flux de contrôle du serveur est son premier unidirectionnel.
+    let controle = 3_u64;
+    let dit = client.recu(controle);
+    // §6.2 : le premier entier d'un flux unidirectionnel dit ce qu'il est, une
+    // fois, en tête. Les trames ne commencent qu'après lui.
+    let (genre, tete) = ams_proto_quic::varints::decode(dit).expect("un type de flux");
+    assert_eq!(
+        genre,
+        ams_proto_h3::StreamKind::Control.value(),
+        "c'est bien le flux de contrôle du serveur"
+    );
+    let mut suite = dit.get(tete..).unwrap_or_default();
+    let mut goaways = std::vec::Vec::new();
+    while let Ok(entete) = ams_proto_h3::FrameHeader::parse(suite) {
+        let total = usize::try_from(entete.total()).expect("tient");
+        if suite.len() < total {
+            break;
+        }
+        if matches!(entete.kind(), ams_proto_h3::FrameKind::GoAway) {
+            let charge = suite.get(entete.header_len()..total).unwrap_or_default();
+            let (identifiant, _) =
+                ams_proto_quic::varints::decode(charge).expect("un identifiant de §16");
+            goaways.push(identifiant);
+        }
+        suite = suite.get(total..).unwrap_or_default();
+    }
+
+    assert_eq!(
+        goaways.len(),
+        2,
+        "§5.2 : deux temps, et non un — reçu {goaways:?}"
+    );
+    assert_eq!(
+        goaways.first().copied(),
+        Some(ams_proto_h3::GOAWAY_MAX),
+        "d'abord « n'ouvre plus rien »"
+    );
+    assert_eq!(
+        goaways.get(1).copied(),
+        Some(4),
+        "puis le rang qui suit la requête servie sur le flux 0"
+    );
+    assert_eq!(
+        client.ferme(),
+        Some(ams_proto_h3::H3Error::NoError.value()),
+        "§5.2 : et l'on ferme en `H3_NO_ERROR` — rien n'a mal tourné"
+    );
+
+    let stats = ecoute.await.expect("la tâche d'écoute");
+    assert!(stats.is_ok(), "l'écoute rend ses comptes");
 }

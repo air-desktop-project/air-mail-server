@@ -738,6 +738,28 @@ impl Streams {
             .reset()
     }
 
+    /// Le pair a acquitté l'annulation de ce flux (§3.1).
+    ///
+    /// **C'EST CE QUI TERMINE UN FLUX ANNULÉ**, et rien d'autre ne le fait : un
+    /// `RESET_STREAM` reste à retransmettre tant qu'il n'est pas acquitté, et un
+    /// flux qui ne finit jamais garde sa place dans une table qui n'en a que
+    /// trente-deux.
+    ///
+    /// Sur un flux qu'on ne connaît pas, ou qui n'émet pas, il n'y a rien à
+    /// terminer et rien à dire : c'est un acquittement qui arrive après que la
+    /// place a été rendue, et le refuser n'apprendrait rien à personne.
+    pub fn on_reset_acked(&mut self, flux: StreamId) {
+        let Some(rang) = self.slot(flux) else {
+            return;
+        };
+        let place = self.flux[rang]
+            .as_mut()
+            .expect("`slot` ne rend que le rang d'un flux vivant");
+        if let Some(envoi) = place.envoi.as_mut() {
+            envoi.on_reset_acked();
+        }
+    }
+
     /// La limite de connexion à annoncer pour laisser `voulu` octets d'avance à
     /// l'application, ou `None` si celle en vigueur suffit (§19.9).
     ///

@@ -66,6 +66,12 @@ impl Transport for Pont<'_> {
             .map_err(|_| ams_h3::Error::transport())
     }
 
+    fn reset(&mut self, flux: StreamId, code: u64) -> Result<(), ams_h3::Error> {
+        self.0
+            .reset(flux, code)
+            .map_err(|_| ams_h3::Error::transport())
+    }
+
     fn finish(&mut self, flux: StreamId) -> Result<(), ams_h3::Error> {
         self.0.finish(flux).map_err(|_| ams_h3::Error::transport())
     }
@@ -323,6 +329,36 @@ impl<A: Api> crate::quic::Application for Http3Application<'_, A> {
         if let Err(faute) = conducteur.on_readable(&mut Pont(connexion), &mut self.service, flux) {
             Self::condamner(connexion, &faute);
         }
+    }
+
+    fn on_shutdown(&mut self, connexion: &mut Connection, _pair: Source) {
+        let clef = connexion.local_id().as_bytes().to_vec();
+        let Some(conducteur) = self.conducteurs.get_mut(&clef) else {
+            return;
+        };
+        // §5.2, premier temps : l'identifiant maximal. Il dit « n'ouvre plus
+        // rien » sans condamner une seule requête déjà en vol.
+        if let Err(faute) = conducteur.shutdown(&mut Pont(connexion)) {
+            Self::condamner(connexion, &faute);
+        }
+    }
+
+    fn on_drained(&mut self, connexion: &mut Connection, _pair: Source) {
+        let clef = connexion.local_id().as_bytes().to_vec();
+        let Some(conducteur) = self.conducteurs.get_mut(&clef) else {
+            return;
+        };
+        // §5.2, second temps : le rang qui suit la dernière requête servie. Au-delà,
+        // le client sait que rien n'a été fait, et peut rejouer ailleurs.
+        if let Err(faute) = conducteur.drain(&mut Pont(connexion)) {
+            Self::condamner(connexion, &faute);
+        }
+    }
+
+    /// §5.2 : « H3_NO_ERROR » — on s'en va, et tout s'est bien passé. Fermer avec
+    /// autre chose ferait chercher au client une faute qui n'existe pas.
+    fn closing_code(&self) -> u64 {
+        ams_h3::NO_ERROR
     }
 
     fn on_closed(&mut self, connexion: &Connection, _pair: Source) {

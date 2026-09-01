@@ -97,6 +97,22 @@ pub struct QuicStats {
     pub closed: u64,
 }
 
+/// Combien de temps on continue de servir après le signal d'arrêt, en
+/// microsecondes.
+///
+/// # POURQUOI UN DÉLAI, ET POURQUOI CELUI-LÀ
+///
+/// §5.2 de RFC 9114 : « After allowing time for any in-flight requests or pushes
+/// to arrive, the endpoint can send another GOAWAY. » Sans ce délai, une requête
+/// déjà sur le fil au moment du signal serait refusée alors qu'elle aurait
+/// abouti — et le client la rejouerait pour rien.
+///
+/// Cinq secondes : de quoi laisser passer un aller-retour même sur un lien
+/// médiocre, sans faire attendre un exploitant qui vient de demander l'arrêt.
+/// **C'est un plafond, pas une attente** — dès que toutes les connexions se sont
+/// tues, on n'attend plus.
+pub const GRACE_EXTINCTION_US: u64 = 5_000_000;
+
 /// Une connexion vivante, et l'adresse d'où elle parle.
 struct Vivante {
     /// Ce qui décide, et qui ne touche à rien.
@@ -157,6 +173,38 @@ pub trait Application {
 
     /// Cette connexion s'éteint : ce qu'on tenait pour elle ne sert plus.
     fn on_closed(&mut self, _connexion: &Connection, _pair: Source) {}
+
+    /// **PREMIER TEMPS DE L'EXTINCTION** : le service s'arrête, dis-le au pair.
+    ///
+    /// §5.2 de RFC 9114 décrit exactement cette manœuvre en deux temps, et
+    /// l'écoute n'en tient que l'horloge : ce qu'on dit au pair appartient à
+    /// l'application, qui seule sait ce que ses octets veulent dire.
+    ///
+    /// Ici, on dit « n'ouvre plus rien » **sans rien condamner** de ce qui est en
+    /// vol. C'est ce qui distingue un arrêt propre d'une porte claquée : une
+    /// requête déjà partie sur le fil arrivera, et sera servie.
+    fn on_shutdown(&mut self, _connexion: &mut Connection, _pair: Source) {}
+
+    /// **SECOND TEMPS** : le délai de grâce est écoulé, dis jusqu'où tu es allé.
+    ///
+    /// Les requêtes en vol sont arrivées, ou ne viendront plus. L'application dit
+    /// alors ce qu'elle a servi — pour que le pair sache ce qu'il peut rejouer
+    /// ailleurs sans risquer de le faire exécuter deux fois — **et ferme**. C'est
+    /// **ELLE ÉCRIT, ELLE NE FERME PAS.** Une connexion en fermeture n'émet plus
+    /// un seul octet de flux — seulement son `CONNECTION_CLOSE` —, donc fermer
+    /// ici jetterait ce qu'on vient d'écrire. L'écoute émet d'abord, ferme
+    /// ensuite, et [`Application::closing_code`] dit avec quoi.
+    fn on_drained(&mut self, _connexion: &mut Connection, _pair: Source) {}
+
+    /// Le code applicatif dont on ferme une extinction réussie (§20.2).
+    ///
+    /// **LE TRANSPORT N'EN CONNAÎT PAS LE SENS**, et c'est exprès : §20.2 de
+    /// RFC 9000 garde l'espace des codes applicatifs pour le protocole qui roule
+    /// dessus. HTTP/3 y met `H3_NO_ERROR` ; une application qui n'a rien à dire
+    /// laisse zéro.
+    fn closing_code(&self) -> u64 {
+        0
+    }
 }
 
 /// Une application qui ne fait rien.
@@ -195,6 +243,7 @@ where
         carte: HashMap::new(),
         stats: QuicStats::default(),
         graine: amorce(),
+        ferme_aux_neufs: false,
     };
     let mut arret = core::pin::pin!(shutdown);
     let mut recu = alloc_datagramme();
@@ -212,7 +261,11 @@ where
             // dans cette crate. Un serveur qu'on ne peut pas arrêter sous charge
             // est un serveur qu'on finit par tuer.
             biased;
-            () = &mut arret => return Ok(ecoute.stats),
+            // **ON SORT, ON NE REND PAS LA MAIN** : ce qui suit la boucle est
+            // l'extinction de §5.2, et rendre ici lâcherait chaque connexion sans
+            // un mot — le client attendrait son délai d'inactivité pour
+            // découvrir qu'il n'y avait plus personne.
+            () = &mut arret => break,
             () = dormir(attente) => None,
             lu = ecoute.socket.recv_from(&mut recu) => Some(lu),
         };
@@ -238,6 +291,55 @@ where
         ecoute.emettre(&mut place, maintenant).await;
         ecoute.oublier_les_eteintes(application);
     }
+
+    // **PREMIER TEMPS** (§5.2) : « n'ouvre plus rien », et l'on continue de
+    // servir. Les octets partent tout de suite : un `GOAWAY` qui attendrait le
+    // prochain réveil raccourcirait d'autant le délai de grâce.
+    let debut = maintenant();
+    ecoute.commencer_l_extinction(application);
+    ecoute.emettre(&mut place, debut).await;
+
+    // Le délai de grâce, pendant lequel on sert ce qui était déjà en vol.
+    let echeance = debut.saturating_add(GRACE_EXTINCTION_US);
+    while maintenant() < echeance && ecoute.il_reste_du_monde() {
+        let avant = maintenant();
+        // **BORNÉE PAR L'ÉCHÉANCE** : un délai de retransmission plus lointain
+        // qu'elle nous ferait dormir au-delà de l'arrêt qu'on a demandé.
+        let attente = ecoute
+            .prochain_delai(avant)
+            .map_or(echeance.saturating_sub(avant), |delai| {
+                delai.min(echeance.saturating_sub(avant))
+            });
+        let arrivee = tokio::select! {
+            () = dormir(Some(attente)) => None,
+            lu = ecoute.socket.recv_from(&mut recu) => Some(lu),
+        };
+        let maintenant = maintenant();
+        match arrivee {
+            Some(Ok((combien, pair))) => {
+                let datagramme = recu.get_mut(..combien).unwrap_or_default();
+                ecoute.un_datagramme(datagramme, pair, maintenant);
+                ecoute.servir(application);
+            }
+            Some(Err(_)) => ecoute.stats.discarded = ecoute.stats.discarded.saturating_add(1),
+            None => {}
+        }
+        ecoute.les_delais(maintenant);
+        ecoute.emettre(&mut place, maintenant).await;
+        ecoute.oublier_les_eteintes(application);
+    }
+
+    // **SECOND TEMPS** : le rang réel de ce qu'on a servi. Il part AVANT la
+    // fermeture — une connexion en fermeture n'émet plus un octet de flux, et
+    // fermer d'abord jetterait le `GOAWAY` qu'on vient d'écrire. Le défaut a été
+    // écrit, puis vu par l'essai qui lit les deux temps sur une vraie socket.
+    let fin = maintenant();
+    ecoute.achever_l_extinction(application);
+    ecoute.emettre(&mut place, fin).await;
+    ecoute.fermer_tout(application, fin);
+    ecoute.emettre(&mut place, fin).await;
+    ecoute.oublier_les_eteintes(application);
+    Ok(ecoute.stats)
 }
 
 /// L'état d'une écoute.
@@ -258,6 +360,12 @@ struct Ecoute {
     stats: QuicStats,
     /// De quoi fabriquer des identifiants qui ne se devinent pas.
     graine: u64,
+    /// N'accepte-t-on plus de connexion neuve ?
+    ///
+    /// **PENDANT L'EXTINCTION, ACCEPTER SERAIT MENTIR** : la connexion qu'on
+    /// monterait recevrait un `GOAWAY` dans la seconde, après une poignée de main
+    /// complète. Le client la refera ailleurs, et plus vite.
+    ferme_aux_neufs: bool,
 }
 
 impl Ecoute {
@@ -275,6 +383,9 @@ impl Ecoute {
 
         match arrivee.route(connu) {
             Route::Connection(rang) => self.a_une_connexion(rang, datagramme, maintenant),
+            Route::New if self.ferme_aux_neufs => {
+                self.stats.discarded = self.stats.discarded.saturating_add(1);
+            }
             Route::New => self.un_client_neuf(&arrivee, datagramme, pair, maintenant),
             // §6.1 : négocier demanderait d'écrire un paquet de version, que ce
             // serveur ne sait pas fabriquer — il ne sert qu'une version. Le
@@ -439,6 +550,51 @@ impl Ecoute {
                 }
             }
         }
+    }
+
+    /// Dit à chaque connexion établie que le service s'arrête (§5.2).
+    ///
+    /// **SEULEMENT AUX ÉTABLIES** : une poignée de main en cours n'a pas de pair
+    /// à qui parler, et lui écrire sur un flux qui n'existe pas encore ne dirait
+    /// rien à personne.
+    fn commencer_l_extinction<App: Application>(&mut self, application: &mut App) {
+        self.ferme_aux_neufs = true;
+        for vivante in &mut self.connexions {
+            if !vivante.conduite.is_established() {
+                continue;
+            }
+            application.on_shutdown(&mut vivante.conduite, source_de(vivante.pair));
+        }
+    }
+
+    /// Le délai de grâce est écoulé : chaque connexion dit son dernier mot.
+    fn achever_l_extinction<App: Application>(&mut self, application: &mut App) {
+        for vivante in &mut self.connexions {
+            if !vivante.conduite.is_established() {
+                continue;
+            }
+            application.on_drained(&mut vivante.conduite, source_de(vivante.pair));
+        }
+    }
+
+    /// Ferme ce qui reste, avec le code que l'application donne.
+    ///
+    /// **APRÈS L'ÉMISSION DES `GOAWAY`, ET JAMAIS AVANT** : une connexion en
+    /// fermeture n'émet plus que son `CONNECTION_CLOSE`, et fermer plus tôt
+    /// jetterait ce que [`Application::on_drained`] vient d'écrire.
+    fn fermer_tout<App: Application>(&mut self, application: &App, maintenant: u64) {
+        let code = application.closing_code();
+        for vivante in &mut self.connexions {
+            if vivante.conduite.is_closed() {
+                continue;
+            }
+            vivante.conduite.close_with(code, maintenant);
+        }
+    }
+
+    /// Reste-t-il une connexion à qui l'on doive quelque chose ?
+    fn il_reste_du_monde(&self) -> bool {
+        self.connexions.iter().any(|v| !v.conduite.is_closed())
     }
 
     fn oublier_les_eteintes<App: Application>(&mut self, application: &mut App) {

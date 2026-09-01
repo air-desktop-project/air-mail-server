@@ -95,6 +95,10 @@ impl Transport for Faux {
         Ok(octets.len())
     }
 
+    fn reset(&mut self, _flux: StreamId, _code: u64) -> Result<(), Error> {
+        Ok(())
+    }
+
     fn finish(&mut self, _flux: StreamId) -> Result<(), Error> {
         Ok(())
     }

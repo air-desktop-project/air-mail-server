@@ -51,6 +51,18 @@ pub trait Transport {
     /// Ce que le transport rend quand ce flux n'émet plus (§3.1 de RFC 9000).
     fn write(&mut self, flux: StreamId, octets: &[u8]) -> Result<usize, Error>;
 
+    /// Annule ce flux : le pair recevra un `RESET_STREAM` (§19.4 de RFC 9000).
+    ///
+    /// **CE N'EST PAS `finish`**, et la différence porte tout §5.2 : `finish` dit
+    /// « j'ai tout dit », celui-ci dit « ne l'attends pas, rien n'a été fait ».
+    /// C'est ce qui permet à un client de rejouer sa requête ailleurs sans
+    /// craindre de la faire exécuter deux fois.
+    ///
+    /// # Errors
+    ///
+    /// Ce que le transport rend quand ce flux n'a plus rien à annuler.
+    fn reset(&mut self, flux: StreamId, code: u64) -> Result<(), Error>;
+
     /// Termine notre côté de ce flux (§19.8 de RFC 9000).
     ///
     /// # Errors

@@ -826,3 +826,53 @@ fn ce_qui_est_pret_n_est_pas_ce_qui_est_arrive() {
         "il n'a pas de moitié réception"
     );
 }
+
+/// **C'EST L'ACQUITTEMENT DU `RESET_STREAM` QUI TERMINE UN FLUX ANNULÉ** (§3.1).
+///
+/// Rien d'autre ne le fait : tant qu'il n'est pas acquitté, le `RESET_STREAM`
+/// reste à retransmettre, et un flux qui ne finit jamais garde sa place dans une
+/// table qui n'en a que trente-deux.
+#[test]
+fn un_flux_annule_ne_finit_qu_une_fois_l_annulation_acquittee() {
+    let mut flux_ = serveur();
+    // **UN UNIDIRECTIONNEL À NOUS** : il n'a qu'une moitié d'émission, donc son
+    // sort ne dépend que de l'annulation. Sur un bidirectionnel, la moitié de
+    // réception resterait ouverte tant que le pair n'a pas conclu, et c'est elle
+    // qui retiendrait la place — ce que cet essai-ci ne cherche pas à montrer.
+    let notre = flux_
+        .open(Directional::Unidirectional)
+        .expect("le crédit du pair le permet");
+    flux_.reset(notre).expect("on l'annule");
+    let rang = flux_.slot(notre).expect("il est vivant");
+    assert!(
+        !flux_.fini(rang),
+        "annulé n'est pas terminé : il reste à dire"
+    );
+
+    flux_.on_reset_acked(notre);
+    assert!(
+        flux_.oublier(rang).is_some(),
+        "acquitté, il rend enfin sa place"
+    );
+}
+
+/// **UN ACQUITTEMENT QUI ARRIVE APRÈS COUP N'APPREND RIEN À PERSONNE.**
+///
+/// La place a pu être rendue avant que le `RESET_STREAM` ne soit acquitté, et un
+/// flux unidirectionnel du pair n'a pas de moitié d'émission à terminer. Ni l'un
+/// ni l'autre n'est une faute : il n'y a simplement rien à faire.
+#[test]
+fn un_acquittement_d_annulation_sans_objet_ne_dit_rien() {
+    let mut flux_ = serveur();
+    // Un flux qu'on ne connaît pas.
+    flux_.on_reset_acked(flux(0));
+
+    // Un unidirectionnel du pair : il reçoit, il n'émet pas.
+    let sien = flux(2);
+    flux_.accueillir(sien).expect("le pair l'ouvre");
+    flux_.on_reset_acked(sien);
+    assert!(
+        flux_.slot(sien).is_some(),
+        "et il reste ce qu'il était : vivant, et sans moitié d'émission"
+    );
+}

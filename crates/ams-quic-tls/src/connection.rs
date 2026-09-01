@@ -139,6 +139,28 @@ struct Enveloppe {
     /// contrôle de congestion borne déjà. Le jour où cela comptera, c'est ce
     /// champ qui deviendra une liste, et rien d'autre.
     flux: Option<(StreamId, u64, u64)>,
+    /// Le flux dont il portait l'annulation (§19.4).
+    ///
+    /// **UN `RESET_STREAM` NE SE REFAIT PAS, IL SE REDIT.** Contrairement aux
+    /// octets d'un flux, qu'on retransmet en reculant un curseur, celui-ci porte
+    /// une taille finale qui ne changera plus : perdu, il repart identique
+    /// (§13.3 de RFC 9000).
+    annulation: Option<StreamId>,
+}
+
+/// Une annulation de flux qu'on doit dire au pair (§19.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Annulation {
+    /// Ce que l'application en dit — un code de §8.1 de RFC 9114, chez nous.
+    code: u64,
+    /// Où le flux s'arrête, définitivement.
+    taille_finale: u64,
+    /// Est-elle partie, et attend-elle son acquittement ?
+    ///
+    /// **ELLE NE S'EFFACE QU'À L'ACQUITTEMENT**, et non à l'émission : un paquet
+    /// perdu la remettrait sinon en silence, et le pair garderait un flux ouvert
+    /// que nous croirions clos.
+    emise: bool,
 }
 
 /// Ce qu'on a à émettre en `CRYPTO`, pour un niveau.
@@ -305,6 +327,8 @@ pub struct Connection {
     sorties: Vec<Sortie>,
     /// Le `FIN` que l'application a demandé et qu'on n'a pas encore émis.
     fins: Vec<bool>,
+    /// L'annulation en attente de chaque flux, s'il y en a une (§19.4).
+    annulations: Vec<Option<Annulation>>,
     /// Le prochain rang par lequel commencer le tour d'émission.
     ///
     /// **SANS LUI, LE PREMIER FLUX AFFAMERAIT TOUS LES AUTRES** : à chaque
@@ -415,6 +439,7 @@ impl Connection {
             fenetres: Vec::new(),
             sorties: Vec::new(),
             fins: Vec::new(),
+            annulations: Vec::new(),
             tour: 0,
             exposant: DEFAULT_ACK_DELAY_EXPONENT,
         })
@@ -876,6 +901,50 @@ impl Connection {
         Ok(())
     }
 
+    /// L'application annule ce flux : le pair recevra un `RESET_STREAM` (§19.4).
+    ///
+    /// # CE N'EST PAS UNE FERMETURE, C'EST UN RENONCEMENT
+    ///
+    /// `finish` dit « j'ai tout dit » ; celui-ci dit « ce que j'ai commencé à
+    /// dire ne vaut rien, ne l'attends pas ». §3.3 les rend exclusifs : après une
+    /// annulation, plus un octet ne part sur ce flux — ce qui restait à émettre
+    /// est donc jeté ici, et non gardé pour un paquet qui ne viendra pas.
+    ///
+    /// Le `code` appartient à l'application : HTTP/3 y met un code de §8.1 de
+    /// RFC 9114, et QUIC n'en connaît pas le sens (§20.2 de RFC 9000).
+    ///
+    /// # Errors
+    ///
+    /// [`Reason::PasEncoreDeFlux`] avant la fin de la poignée de main, et la
+    /// faute de §3.1 sur un flux qui n'émet plus — **un flux dont tout est
+    /// acquitté n'a plus rien à annuler**, et le dire au pair le ferait douter de
+    /// ce qu'il a déjà livré à son application.
+    pub fn reset(&mut self, flux: StreamId, code: u64) -> Result<(), Error> {
+        let collection = self
+            .flux
+            .as_mut()
+            .ok_or_else(|| Error::new(Reason::PasEncoreDeFlux))?;
+        let taille_finale = collection.reset(flux).map_err(Error::depuis_quic)?;
+        let rang = collection
+            .slot(flux)
+            .expect("`reset` vient de trouver ce flux");
+        // §3.3 : ce qui n'est pas parti ne partira plus, et le `FIN` qu'on avait
+        // promis n'a plus de sens — `RESET_STREAM` et `FIN` s'excluent.
+        self.sorties[rang] = Sortie::default();
+        self.fins[rang] = false;
+        // **LA PREMIÈRE ANNULATION EST CELLE QUI COMPTE.** La redire remettrait
+        // la trame en attente d'émission alors qu'elle est peut-être déjà partie,
+        // et le pair recevrait deux fois la même chose sans rien apprendre.
+        if self.annulations[rang].is_none() {
+            self.annulations[rang] = Some(Annulation {
+                code,
+                taille_finale,
+                emise: false,
+            });
+        }
+        Ok(())
+    }
+
     /// L'application lit ce qui est prêt sur ce flux, dans l'ordre.
     ///
     /// Rend combien d'octets ont été pris ; zéro si rien n'est prêt.
@@ -942,6 +1011,7 @@ impl Connection {
                 self.fenetres[rang] = Vec::new();
                 self.sorties[rang] = Sortie::default();
                 self.fins[rang] = false;
+                self.annulations[rang] = None;
             }
         }
     }
@@ -1091,6 +1161,17 @@ impl Connection {
                     .on_acked(id, decalage, longueur);
                 self.sorties[place].on_acked(decalage, longueur);
             }
+            // §3.1 : c'est l'acquittement du `RESET_STREAM` qui fait passer le
+            // flux à `Reset Recvd`, donc ce qui rend sa place à la table.
+            if let Some(id) = enveloppe.annulation
+                && let Some(place) = self.flux.as_ref().and_then(|flux| flux.slot(id))
+            {
+                self.flux
+                    .as_mut()
+                    .expect("`slot` vient d'en rendre un rang")
+                    .on_reset_acked(id);
+                self.annulations[place] = None;
+            }
         }
         self.enveloppes[rang] = restantes;
     }
@@ -1112,6 +1193,17 @@ impl Connection {
                         && let Some(place) = self.flux.as_ref().and_then(|flux| flux.slot(id))
                     {
                         self.sorties[place].on_lost(decalage);
+                    }
+                    // §13.3 : une annulation perdue se REDIT, à l'identique — sa
+                    // taille finale ne changera plus.
+                    if let Some(id) = enveloppe.annulation
+                        && let Some(place) = self.flux.as_ref().and_then(|flux| flux.slot(id))
+                        && let Some(annulation) = self.annulations[place]
+                    {
+                        self.annulations[place] = Some(Annulation {
+                            emise: false,
+                            ..annulation
+                        });
                     }
                 }
                 false => restantes.push(*enveloppe),
@@ -1153,6 +1245,7 @@ impl Connection {
             self.fenetres = (0..FLUX_MAX).map(|_| Vec::new()).collect();
             self.sorties = (0..FLUX_MAX).map(|_| Sortie::default()).collect();
             self.fins = vec![false; FLUX_MAX];
+            self.annulations = vec![None; FLUX_MAX];
             self.siens = Some(siens);
             self.etat.on_handshake_confirmed();
             self.confirmee = true;
@@ -1279,8 +1372,18 @@ impl Connection {
 
         // Les flux, à la place qui reste, et seulement en `1-RTT`.
         let mut emporte = None;
+        let mut annule = None;
         if self.fermeture.is_none() && espace == Space::Application {
             pose = self.annoncer_les_credits(&mut trames, pose, borne, &mut sollicite);
+            // **L'ANNULATION AVANT LES OCTETS**, et l'ordre a une raison : un
+            // flux annulé n'a plus d'octets à poser (§3.3), et le pair a tout
+            // intérêt à l'apprendre au plus tôt — c'est ce qui lui rend la
+            // mémoire qu'il gardait pour une requête qu'on ne servira pas.
+            if let Some((id, ecrits)) = self.poser_une_annulation(&mut trames, pose, borne) {
+                pose = pose.saturating_add(ecrits);
+                sollicite = true;
+                annule = Some(id);
+            }
             if let Some((porte_flux, ecrits)) = self.poser_un_flux(&mut trames, pose, borne) {
                 pose = pose.saturating_add(ecrits);
                 sollicite = true;
@@ -1344,6 +1447,7 @@ impl Connection {
             numero,
             crypto: porte,
             flux: emporte,
+            annulation: annule,
         });
         if let Some((_, longueur)) = porte {
             self.sortie[rang].on_sent(longueur);
@@ -1398,6 +1502,53 @@ impl Connection {
         pose
     }
 
+    /// Pose une annulation en attente, s'il y en a une (§19.4).
+    ///
+    /// Rend le flux annulé et ce que la trame a pris.
+    ///
+    /// **UNE PAR PAQUET, COMME POUR LES OCTETS D'UN FLUX** : l'enveloppe n'en
+    /// retient qu'une, et en poser deux en ferait oublier une au premier
+    /// acquittement.
+    fn poser_une_annulation(
+        &mut self,
+        trames: &mut [u8],
+        depart: usize,
+        borne: usize,
+    ) -> Option<(StreamId, usize)> {
+        for rang in 0..FLUX_MAX {
+            let Some(annulation) = self.annulations.get(rang).copied().flatten() else {
+                continue;
+            };
+            if annulation.emise {
+                continue;
+            }
+            // **UNE ANNULATION NE SURVIT PAS AU FLUX QU'ELLE ANNULE** :
+            // `recolter_les_flux` les efface ensemble, donc un rang qui en porte
+            // une porte encore son flux. Un `?` ici serait une garde qu'aucun
+            // essai ne pourrait atteindre.
+            let id = self
+                .flux
+                .as_ref()
+                .and_then(|flux| flux.occupant(rang))
+                .expect("une annulation vit avec le flux qu'elle annule");
+            let trame = Frame::ResetStream {
+                stream: id.value(),
+                code: annulation.code,
+                final_size: annulation.taille_finale,
+            };
+            let place = trames.get_mut(depart..borne).unwrap_or_default();
+            // **PAS DE PLACE, PAS DE TRAME** : elle repartira au paquet suivant,
+            // puisqu'elle reste marquée comme non émise.
+            let ecrits = trame.write(place).ok()?;
+            self.annulations[rang] = Some(Annulation {
+                emise: true,
+                ..annulation
+            });
+            return Some((id, ecrits));
+        }
+        None
+    }
+
     /// Pose les octets d'un flux, à tour de rôle.
     ///
     /// Rend ce que le paquet emporte et combien d'octets la trame a pris.
@@ -1424,6 +1575,12 @@ impl Connection {
             let Some(id) = self.flux.as_ref().and_then(|flux| flux.occupant(rang)) else {
                 continue;
             };
+            // §3.3 : après un `RESET_STREAM`, plus un octet ne part sur ce flux.
+            // **SANS CETTE GARDE, `on_sent` PANIQUERAIT** : il refuse un envoi sur
+            // un flux annulé, et l'assemblage tient son refus pour impossible.
+            if self.annulations.get(rang).copied().flatten().is_some() {
+                continue;
+            }
             let (decalage, attente) = self.sorties[rang].en_attente();
             // §4.1 : ni au-delà du crédit du flux, ni au-delà de celui de la
             // connexion — et `credit` rend déjà le plus bas des deux.

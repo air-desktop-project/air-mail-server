@@ -20,7 +20,8 @@
 use std::sync::Arc;
 
 use ams_proto_quic::{
-    ConnectionId, Frame, LongKind, Sender, Space, TransportError, TransportParameters, varints,
+    ConnectionId, Directional, Frame, LongKind, Sender, Space, StreamId, TransportError,
+    TransportParameters, varints,
 };
 use ams_quic::{Incoming, Level, PacketKind, Plan, open_packet, seal_packet};
 use ams_quic_crypto::{Keys, Role, Secret};
@@ -151,6 +152,11 @@ struct Client {
     en_attente: Vec<(Level, Vec<u8>)>,
     /// Les octets qu'un flux nous a apportés.
     recu: Vec<u8>,
+    /// Les annulations qu'on a reçues : le flux, le code, la taille finale.
+    ///
+    /// **ON LES EMPILE, ON NE LES DÉDUPLIQUE PAS** : une annulation retransmise
+    /// doit se voir, sans quoi l'essai de perte ne prouverait rien.
+    annulations_recues: Vec<(u64, u64, u64)>,
     /// Sur quel flux, et avec un `FIN` ou non.
     flux_recu: Option<u64>,
     fin_recue: bool,
@@ -195,6 +201,7 @@ impl Client {
             en_attente: Vec::new(),
             a_pose_un_initial: false,
             recu: Vec::new(),
+            annulations_recues: Vec::new(),
             flux_recu: None,
             fin_recue: false,
             plafond_recu: None,
@@ -382,6 +389,11 @@ impl Client {
                 suite = suite.get(lus..).unwrap_or_default();
                 sollicite |= !matches!(trame, Frame::Ack(_) | Frame::Padding { .. });
                 match trame {
+                    Frame::ResetStream {
+                        stream,
+                        code,
+                        final_size,
+                    } => self.annulations_recues.push((stream, code, final_size)),
                     Frame::Stream {
                         stream,
                         offset,
@@ -2467,5 +2479,227 @@ fn l_application_voit_ce_qui_est_pret() {
     assert_eq!(
         serveur.recv_state(zero),
         Some(ams_quic::RecvState::DataRead)
+    );
+}
+
+/// Un serveur qui a accepté, mais dont la poignée de main n'a pas abouti.
+fn accepte(nom: &str) -> (Atelier, Connection, u64) {
+    let atelier = atelier(nom);
+    let (autorite, cert, cle) = materiel(&atelier.0).expect(SANS_OPENSSL);
+    let horloge = 1_000_000_u64;
+    let mut client = Client::new(
+        config_client(&autorite, ams_tls::alpn_h3()),
+        &ses_parametres_avec_flux(),
+    );
+    let premier_datagramme = client.parler();
+    let arrivee = premier(&premier_datagramme);
+    let serveur = Connection::accept(
+        config_serveur(&cert, &cle),
+        &arrivee,
+        identifiant(&LOCAL),
+        identifiant(&CLIENT),
+        horloge,
+    )
+    .expect("constructible");
+    (atelier, serveur, horloge)
+}
+
+/// **AVANT LA POIGNÉE DE MAIN, IL N'Y A PAS DE FLUX À ANNULER** (§7.4).
+///
+/// Les limites du pair ne sont pas authentifiées tant qu'elle n'a pas abouti :
+/// il n'y a donc aucune table de flux, et rien à annuler dedans.
+#[test]
+fn une_annulation_avant_la_poignee_de_main_se_refuse() {
+    let (_atelier, mut serveur, _horloge) = accepte("annulation-trop-tot");
+    let issue = serveur
+        .reset(StreamId::new(3).expect("un numéro qui tient"), 0x0100)
+        .expect_err("il n'y a pas encore de flux");
+    assert_eq!(issue.reason(), Reason::PasEncoreDeFlux);
+}
+
+/// **UN FLUX QU'ON N'A PAS N'A RIEN À ANNULER** (§3.1).
+#[test]
+fn une_annulation_d_un_flux_inconnu_se_refuse() {
+    let (_atelier, mut serveur, _client, _horloge) = etabli("annulation-inconnue");
+    serveur
+        .reset(StreamId::new(3).expect("un numéro qui tient"), 0x0100)
+        .expect_err("ce flux n'existe pas");
+}
+
+/// **UNE ANNULATION PART AU PAIR, ET CE QUI RESTAIT À DIRE NE PART PAS** (§3.3).
+///
+/// `RESET_STREAM` et `FIN` s'excluent : après l'annulation, plus un octet ne
+/// quitte ce flux. Les garder pour un paquet qui ne viendra jamais retiendrait de
+/// la mémoire pour rien — et le pair, lui, attendrait des octets qu'on ne lui
+/// doit plus.
+#[test]
+fn une_annulation_part_et_ce_qui_restait_a_dire_ne_part_pas() {
+    let (_atelier, mut serveur, mut client, mut horloge) = etabli("annulation-part");
+    let flux = serveur
+        .open_stream(Directional::Unidirectional)
+        .expect("le crédit du client le permet");
+    serveur.write(flux, b"ce qu'on ne dira pas").expect("écrit");
+    serveur.reset(flux, 0x010b).expect("on l'annule");
+
+    conduire(&mut serveur, &mut client, &mut horloge);
+    assert_eq!(
+        client.annulations_recues,
+        std::vec![(flux.value(), 0x010b, 0)],
+        "§19.4 : le flux, le code, et une taille finale de zéro — rien n'était parti"
+    );
+    assert!(
+        client.recu.is_empty(),
+        "§3.3 : et pas un octet du flux annulé"
+    );
+}
+
+/// **UNE ANNULATION ACQUITTÉE REND SA PLACE** (§3.1).
+///
+/// C'est l'acquittement, et lui seul, qui fait passer le flux à `Reset Recvd`.
+/// Sans cela il resterait à retransmettre pour toujours, et sa place — une sur
+/// trente-deux — ne reviendrait jamais à la table.
+#[test]
+fn une_annulation_acquittee_rend_sa_place() {
+    let (_atelier, mut serveur, mut client, mut horloge) = etabli("annulation-acquittee");
+    let flux = serveur
+        .open_stream(Directional::Unidirectional)
+        .expect("le crédit du client le permet");
+    serveur.reset(flux, 0x010b).expect("on l'annule");
+    conduire(&mut serveur, &mut client, &mut horloge);
+
+    assert!(
+        serveur.annulations.iter().all(Option::is_none),
+        "acquittée, elle n'est plus en attente"
+    );
+    assert!(
+        !serveur.streams_alive().any(|vivant| vivant == flux),
+        "et le flux a rendu sa place"
+    );
+}
+
+/// **UNE ANNULATION PERDUE SE REDIT, À L'IDENTIQUE** (§13.3 de RFC 9000).
+///
+/// Contrairement aux octets d'un flux, qu'on retransmet en reculant un curseur,
+/// celle-ci porte une taille finale qui ne changera plus. **Ne pas la redire
+/// laisserait le pair tenir pour ouvert un flux que nous croirions clos**, et il
+/// attendrait des octets jusqu'à son délai d'inactivité.
+///
+/// # POURQUOI L'ESSAI DOIT FAIRE ACQUITTER UN PAQUET PLUS RÉCENT
+///
+/// §6.1 de RFC 9002 ne déclare rien perdu dans l'absolu : un paquet est perdu
+/// *par rapport au plus grand acquitté*. Sans acquittement plus récent, il n'y a
+/// pas de perte à détecter — seulement un sondage qui finira par en provoquer un.
+#[test]
+fn une_annulation_perdue_se_redit() {
+    let (_atelier, mut serveur, mut client, horloge) = etabli("annulation-perdue");
+    let flux = serveur
+        .open_stream(Directional::Unidirectional)
+        .expect("le crédit du client le permet");
+    serveur.reset(flux, 0x010b).expect("on l'annule");
+
+    let mut place = std::vec![0_u8; 1_500];
+    let mut vider = |serveur: &mut Connection, paquets: &mut Vec<Vec<u8>>| {
+        while let Ok(ecrit) = serveur.poll_transmit(&mut place, horloge) {
+            if ecrit == 0 {
+                break;
+            }
+            paquets.push(
+                place
+                    .get(..ecrit)
+                    .expect("ce qui vient d'être écrit")
+                    .to_vec(),
+            );
+        }
+    };
+
+    // Le paquet qui porte l'annulation part, et n'arrive jamais.
+    let mut paquets = Vec::new();
+    vider(&mut serveur, &mut paquets);
+    assert!(!paquets.is_empty(), "l'annulation est partie");
+    assert!(
+        client.annulations_recues.is_empty(),
+        "et le client ne l'a pas eue"
+    );
+
+    // Trois paquets plus loin, le pair n'acquitte que le dernier : §6.1.1 déclare
+    // alors perdu tout ce qui le précède de trois rangs.
+    let autre = serveur
+        .open_stream(Directional::Unidirectional)
+        .expect("il reste du crédit");
+    for _ in 0..3 {
+        serveur.write(autre, b"x").expect("écrit");
+        vider(&mut serveur, &mut paquets);
+    }
+    let dernier = paquets.last().expect("il y en a").clone();
+    client.ecouter(&dernier);
+    let mut acquittement = client.parler();
+    serveur
+        .on_datagram(&mut acquittement, horloge)
+        .expect("un ACK sain");
+
+    // Et l'annulation repart, identique à elle-même.
+    let mut apres = Vec::new();
+    vider(&mut serveur, &mut apres);
+    for paquet in &apres {
+        client.ecouter(paquet);
+    }
+    assert_eq!(
+        client.annulations_recues,
+        std::vec![(flux.value(), 0x010b, 0)],
+        "§13.3 : la même, à l'identique"
+    );
+}
+
+/// **UNE ANNULATION QUI NE TIENT PAS DANS LE PAQUET ATTEND LE SUIVANT.**
+///
+/// Elle reste marquée comme non émise, donc rien n'est perdu — c'est le seul
+/// comportement qui ne demande ni de tronquer une trame, ni de la jeter.
+#[test]
+fn une_annulation_sans_place_attend_le_paquet_suivant() {
+    let (_atelier, mut serveur, _client, _horloge) = etabli("annulation-sans-place");
+    let flux = serveur
+        .open_stream(Directional::Unidirectional)
+        .expect("le crédit du client le permet");
+    serveur.reset(flux, 0x010b).expect("on l'annule");
+
+    let mut trames = [0_u8; 64];
+    // Deux octets ne suffisent pas à un numéro de flux, un code et une taille.
+    assert!(
+        serveur.poser_une_annulation(&mut trames, 0, 2).is_none(),
+        "pas de place, pas de trame"
+    );
+    assert!(
+        serveur.poser_une_annulation(&mut trames, 0, 64).is_some(),
+        "et elle repart dès qu'il y a la place"
+    );
+    // **UNE FOIS ÉMISE, ELLE NE SE REDIT PAS** tant qu'elle n'est ni acquittée
+    // ni perdue : la redire à chaque paquet coûterait sans rien apprendre.
+    assert!(
+        serveur.poser_une_annulation(&mut trames, 0, 64).is_none(),
+        "elle attend son sort"
+    );
+}
+
+/// **LA PREMIÈRE ANNULATION EST CELLE QUI COMPTE.**
+///
+/// La redire remettrait la trame en attente d'émission alors qu'elle est
+/// peut-être déjà partie, et le pair recevrait deux fois la même chose sans rien
+/// apprendre.
+#[test]
+fn une_annulation_redite_ne_repart_pas() {
+    let (_atelier, mut serveur, mut client, mut horloge) = etabli("annulation-redite");
+    let flux = serveur
+        .open_stream(Directional::Unidirectional)
+        .expect("le crédit du client le permet");
+    serveur.reset(flux, 0x010b).expect("on l'annule");
+    serveur
+        .reset(flux, 0x0102)
+        .expect("§3.1 : redire une annulation n'est pas une faute");
+
+    conduire(&mut serveur, &mut client, &mut horloge);
+    assert_eq!(
+        client.annulations_recues,
+        std::vec![(flux.value(), 0x010b, 0)],
+        "une seule, et c'est le code du premier refus"
     );
 }

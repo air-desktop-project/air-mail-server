@@ -5159,6 +5159,77 @@ Les trames inconnues, elles, ne font pas avancer la séquence et ne la rompent p
 Un flux qui se termine sans en-têtes, en revanche, ne condamne que lui-même : un
 client qui abandonne sa requête en route n'a pas cassé la connexion.
 
+## L'extinction en deux temps (§5.2 de RFC 9114)
+
+Le signal d'arrêt lâchait chaque connexion sans un mot : le client attendait son
+délai d'inactivité pour découvrir qu'il n'y avait plus personne, et n'apprenait
+jamais lesquelles de ses requêtes n'avaient pas été traitées. §5.2 décrit
+exactement la manœuvre qui manquait.
+
+### D'abord l'identifiant maximal, puis le rang réel
+
+« An endpoint MAY send multiple GOAWAY frames indicating different identifiers,
+but the identifier in each frame MUST NOT be greater than the identifier in any
+previous frame. » Le premier `GOAWAY` porte donc le maximum : il dit « n'ouvre
+plus rien » **sans condamner une seule requête en vol**. Le second, après le délai
+de grâce, porte le rang qui suit la dernière requête servie.
+
+L'ordre inverse serait faux, et c'est la raison de la règle : un client a pu
+rejouer ailleurs ce qu'un premier `GOAWAY` avait déclaré perdu, et réaccepter ces
+requêtes les ferait exécuter deux fois.
+
+Le délai de grâce vaut cinq secondes — un plafond, pas une attente : dès que
+toutes les connexions se sont tues, on n'attend plus. Pendant ce temps on ne
+répond plus aux clients neufs : monter une poignée de main complète pour envoyer
+un `GOAWAY` dans la seconde ferait perdre du temps aux deux.
+
+### Le refus d'une requête est une PROMESSE
+
+§8.1 : `H3_REQUEST_REJECTED` dit que la requête n'a pas été traitée. C'est ce qui
+permet au client de la rejouer ailleurs sans risquer de la faire exécuter deux
+fois — un `H3_REQUEST_CANCELLED` ne dirait pas cela, et un flux qu'on laisserait
+pendre ne dirait rien du tout.
+
+Le refus arrive **avant la lecture** : retenir les octets d'une requête qu'on ne
+servira pas, au moment même où l'on s'éteint, serait absurde. Mais on continue de
+CONSOMMER ce que le pair écrit — un `RESET_STREAM` n'arrête que notre sens (§3.3
+de RFC 9000), et ne pas lire figerait sa fenêtre.
+
+### Ce qui a dû être construit dans le transport
+
+`ams-quic` savait annuler un flux — `Send::reset` existait, et sa taille finale
+comptait déjà pour le contrôle de flux —, mais **`ams-quic-tls` n'émettait jamais
+la trame**. Il a fallu la poser dans le paquet, la retenir dans l'enveloppe qui
+sert à la retransmission, et la terminer à l'acquittement.
+
+Trois choses s'y sont apprises :
+
+- **Une annulation ne se refait pas, elle se redit.** Les octets d'un flux se
+  retransmettent en reculant un curseur ; celle-ci porte une taille finale qui ne
+  changera plus, donc perdue elle repart identique (§13.3 de RFC 9000).
+- **Elle ne s'efface qu'à l'acquittement**, et non à l'émission. S'effacer plus
+  tôt laisserait un paquet perdu emporter l'annulation en silence, et le pair
+  tiendrait pour ouvert un flux que nous croirions clos.
+- **Un flux annulé n'émet plus un octet** (§3.3). Sans cette garde, l'assemblage
+  du paquet aurait paniqué : il tient pour impossible le refus que `on_sent`
+  oppose à un flux annulé.
+
+### Un défaut que seul l'essai sur socket pouvait montrer
+
+Le second `GOAWAY` était écrit, puis **jeté**. Une connexion en fermeture n'émet
+plus que son `CONNECTION_CLOSE` : fermer dans le même geste que l'écriture
+supprimait ce qu'on venait d'écrire. Les essais du conducteur ne pouvaient pas le
+voir — leur transport de fer-blanc retient tout ce qu'on lui donne.
+
+C'est l'essai qui lit les deux `GOAWAY` sur une vraie socket qui l'a montré, et
+c'est la même leçon que la configuration TLS d'HTTP/3 : ce qui n'est éprouvé
+qu'en pièces détachées laisse passer ce qui ne rate qu'à l'assemblage.
+
+L'écoute émet donc entre les deux : elle écrit les `GOAWAY`, les fait partir,
+ferme, puis fait partir les fermetures. Et le code de fermeture vient de
+l'application — §20.2 de RFC 9000 garde l'espace applicatif au protocole qui
+roule dessus, et le transport n'a pas à connaître `H3_NO_ERROR`.
+
 ## L'API REST : le routage (`ams-api`)
 
 ### C'est la première surface de ce serveur qu'aucune RFC ne décrit
