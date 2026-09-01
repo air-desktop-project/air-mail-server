@@ -24,8 +24,8 @@ use ams_config::{Configuration, Timeouts, Tls, encode};
 use ams_guard::Thresholds;
 use ams_proto_smtp::Limits;
 use ams_quic_client::{
-    Client, SANS_OPENSSL, atelier, attendre_la_reponse, config_client, envoyer_une_requete,
-    materiel,
+    Client, SANS_OPENSSL, atelier, attendre_la_reponse, config_client, envoyer_avec_media,
+    envoyer_une_requete, materiel,
 };
 
 /// Le secret de scellement des jetons, en hexadécimal.
@@ -74,6 +74,7 @@ fn configuration(
     h3: u16,
     cert: &Path,
     cle: &Path,
+    comptes: &Path,
 ) -> PathBuf {
     let config = Configuration {
         domain: String::from("mail.example.com"),
@@ -100,13 +101,33 @@ fn configuration(
         spf: ams_config::Spf::default(),
         dmarc: ams_config::Dmarc::default(),
         dkim: ams_config::Dkim::default(),
-        accounts: String::new(),
+        accounts: comptes.display().to_string(),
         listen_pop3: String::new(),
         listen_imap: String::new(),
     };
     let octets = encode(&config).expect("une configuration encodable");
     let chemin = repertoire.join("config.bin");
     std::fs::write(&chemin, &octets).expect("écriture de la configuration");
+    chemin
+}
+
+/// Écrit un magasin de comptes, **avec les permissions que le serveur exige**.
+///
+/// Il refuse de démarrer sur un fichier lisible par tout le monde, et il a
+/// raison : ce fichier porte des empreintes, et une empreinte se casse hors
+/// ligne à l'aise. `air-mail-admin` l'écrit en `0600` dès l'ouverture, et un
+/// essai qui ferait autrement n'éprouverait pas le serveur qu'on livre.
+fn ecrire_le_magasin(repertoire: &Path, comptes: &[ams_auth::Account]) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let chemin = repertoire.join("comptes.bin");
+    std::fs::write(
+        &chemin,
+        ams_config::encode_accounts(comptes).expect("encodable"),
+    )
+    .expect("écriture du magasin");
+    std::fs::set_permissions(&chemin, std::fs::Permissions::from_mode(0o600))
+        .expect("permissions du magasin");
     chemin
 }
 
@@ -169,8 +190,20 @@ async fn une_requete_h3_traverse_le_binaire() {
     std::fs::write(&chemin_cert, &cert).expect("le certificat s'écrit");
     std::fs::write(&chemin_cle, &cle).expect("la clé s'écrit");
 
+    // **PAS DE COMPTE** : c'est ce que cet essai-ci veut montrer — la chaîne
+    // traverse, et la session refuse faute d'identifiants.
+    let magasin = ecrire_le_magasin(atelier.chemin(), &[]);
+
     let (smtp, http, h3) = (port_libre(), port_libre(), port_libre());
-    let config = configuration(atelier.chemin(), smtp, http, h3, &chemin_cert, &chemin_cle);
+    let config = configuration(
+        atelier.chemin(),
+        smtp,
+        http,
+        h3,
+        &chemin_cert,
+        &chemin_cle,
+        &magasin,
+    );
     let serveur = lancer(&config, &format!("127.0.0.1:{h3}/udp"));
 
     let adresse = format!("127.0.0.1:{h3}").parse().expect("une adresse");
@@ -205,4 +238,170 @@ async fn une_requete_h3_traverse_le_binaire() {
         serveur.journal()
     );
     assert_eq!(client.ferme(), None, "et rien n'a fermé la connexion");
+}
+
+/// **UNE SOUMISSION TRAVERSE TOUTE LA CHAÎNE, ET LE MESSAGE ARRIVE.**
+///
+/// C'est le maillon que rien ne traversait : le jeton s'échange, le message se
+/// dépose en `message/rfc822`, la remise l'écrit dans la boîte, et la liste des
+/// messages le rend avec son sujet et son expéditeur.
+///
+/// **ET LE `Bcc` N'EST PLUS LÀ** (§3.6.3 de RFC 5322) : le destinataire caché
+/// reçoit bien son exemplaire, et n'y lit pas qui d'autre l'a reçu.
+#[tokio::test(flavor = "current_thread")]
+async fn une_soumission_traverse_le_binaire() {
+    let atelier = atelier("soumission-h3");
+    let Some((autorite, cert, cle)) = materiel(atelier.chemin()) else {
+        eprintln!("SAUTÉ : {SANS_OPENSSL}");
+        return;
+    };
+    let chemin_cert = atelier.chemin().join("srv.pem");
+    let chemin_cle = atelier.chemin().join("srv.key");
+    std::fs::write(&chemin_cert, &cert).expect("le certificat s'écrit");
+    std::fs::write(&chemin_cle, &cle).expect("la clé s'écrit");
+
+    // Deux comptes : celui qui dépose, et celui qu'on met en copie cachée.
+    let empreinte = ams_auth::hash_password(b"ouvre-toi", b"seize octets ici").expect("hachable");
+    let comptes =
+        [("jean", "jean@example.com"), ("marie", "marie@example.com")].map(|(login, adresse)| {
+            ams_auth::Account {
+                login: String::from(login),
+                hash: empreinte.clone(),
+                addresses: vec![String::from(adresse)],
+            }
+        });
+    let magasin = ecrire_le_magasin(atelier.chemin(), &comptes);
+
+    let (smtp, http, h3) = (port_libre(), port_libre(), port_libre());
+    let config = configuration(
+        atelier.chemin(),
+        smtp,
+        http,
+        h3,
+        &chemin_cert,
+        &chemin_cle,
+        &magasin,
+    );
+    let serveur = lancer(&config, &format!("127.0.0.1:{h3}/udp"));
+
+    let adresse = format!("127.0.0.1:{h3}").parse().expect("une adresse");
+    let mut client = Client::new(config_client(&autorite), adresse).await;
+    for _ in 0..16 {
+        if !client.parler().await && !client.tls().is_handshaking() {
+            break;
+        }
+        if !client.ecouter().await && !client.tls().is_handshaking() {
+            break;
+        }
+    }
+    assert!(
+        !client.tls().is_handshaking(),
+        "la poignée de main doit aboutir : {}",
+        serveur.journal()
+    );
+
+    // 1. Le jeton.
+    let identifiants = br#"{"login":"jean","password":"ouvre-toi"}"#;
+    envoyer_une_requete(&mut client, 0, 20, b"/v1/tokens", None, identifiants).await;
+    let recu = attendre_la_reponse(&mut client, 0).await;
+    let texte = String::from_utf8_lossy(&recu).to_string();
+    let debut = texte
+        .find("\"token\":\"")
+        .map(|rang| rang + 9)
+        .unwrap_or_else(|| panic!("un jeton attendu : {texte} — {}", serveur.journal()));
+    let fin = texte
+        .get(debut..)
+        .and_then(|reste| reste.find('"'))
+        .expect("une fin de chaîne")
+        + debut;
+    let jeton = texte[debut..fin].to_string();
+
+    // 2. Le dépôt, en `message/rfc822` — et non en JSON.
+    let message = concat!(
+        "From: jean@example.com\r\n",
+        "To: jean@example.com\r\n",
+        "Bcc: marie@example.com\r\n",
+        "Subject: =?utf-8?B?ZmFjdHVyZQ==?=\r\n",
+        "\r\n",
+        "le corps du message\r\n",
+    )
+    .as_bytes();
+    envoyer_avec_media(
+        &mut client,
+        4,
+        20,
+        b"/v1/submissions",
+        Some(&jeton),
+        message,
+        b"message/rfc822",
+    )
+    .await;
+    let recu = attendre_la_reponse(&mut client, 4).await;
+    let texte = String::from_utf8_lossy(&recu).to_string();
+    assert!(
+        texte.contains("\"delivered\":2"),
+        "le dépôt doit atteindre les deux boîtes : {texte} — {}",
+        serveur.journal()
+    );
+
+    // 3. Et le message est là, avec son sujet DÉCODÉ et son expéditeur.
+    envoyer_une_requete(
+        &mut client,
+        8,
+        17,
+        b"/v1/mailboxes/INBOX/messages",
+        Some(&jeton),
+        &[],
+    )
+    .await;
+    let recu = attendre_la_reponse(&mut client, 8).await;
+    let texte = String::from_utf8_lossy(&recu).to_string();
+    assert!(
+        texte.contains("\"subject\":\"facture\""),
+        "le sujet doit revenir décodé : {texte} — {}",
+        serveur.journal()
+    );
+    assert!(
+        texte.contains("\"from\":\"jean@example.com\""),
+        "et l'expéditeur avec : {texte}"
+    );
+
+    // 4. Le message écrit sur le disque n'a plus son `Bcc`.
+    let ecrit = un_message_de(atelier.chemin(), "jean");
+    let entete = ecrit
+        .split("\r\n\r\n")
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        !entete.contains("Bcc:"),
+        "§3.6.3 : la copie cachée reste cachée — {entete}"
+    );
+    assert!(
+        entete.contains("To: jean@example.com"),
+        "et le reste de l'en-tête est intact — {entete}"
+    );
+    assert!(
+        ecrit.contains("le corps du message"),
+        "le corps aussi — {ecrit}"
+    );
+}
+
+/// Le premier message trouvé dans la boîte de ce compte.
+fn un_message_de(repertoire: &Path, compte: &str) -> String {
+    // **`new/` D'ABORD** : un message remis et jamais lu y reste, et c'est là
+    // qu'un dépôt tout frais se trouve. `cur/` ne le reçoit qu'une fois qu'un
+    // client l'a vu.
+    let boite = repertoire.join("boite").join(compte);
+    for sous in ["new", "cur"] {
+        let Ok(entrees) = std::fs::read_dir(boite.join(sous)) else {
+            continue;
+        };
+        for entree in entrees.flatten() {
+            if let Ok(texte) = std::fs::read_to_string(entree.path()) {
+                return texte;
+            }
+        }
+    }
+    panic!("aucun message dans `{}`", boite.display())
 }

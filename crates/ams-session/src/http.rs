@@ -221,7 +221,12 @@ impl Http {
             Err(faute) => return Err((faute.reason(), place_de_la_reponse)),
         };
 
-        // 5. L'autorisation.
+        // 5. Le type du corps, maintenant qu'on sait ce qu'il alimente.
+        if let Err(raison) = verifier_le_type(tete, corps, resolu.resource) {
+            return Err((raison, place_de_la_reponse));
+        }
+
+        // 6. L'autorisation.
         let Some(voulue) = resolu.scope else {
             // **LA SEULE RESSOURCE QUI N'EXIGE AUCUNE PORTÉE** est celle où l'on
             // en obtient une.
@@ -371,10 +376,42 @@ fn verifier_le_corps(tete: &RequestHead<'_>, corps: &[u8]) -> Result<(), Reason>
     if corps.len() > BODY_OCTETS_MAX {
         return Err(Reason::BadJsonBody);
     }
-    // **UN CORPS DIT CE QU'IL EST, OU ON NE LE LIT PAS.** Le deviner, c'est se
-    // donner une lecture que l'intermédiaire d'à côté n'aura pas.
+    Ok(())
+}
+
+/// Ce corps dit-il ce qu'il est, et le sait-on lire ICI ?
+///
+/// # POURQUOI CE CONTRÔLE VIENT APRÈS LE ROUTAGE, ET L'AUTRE AVANT
+///
+/// Ce qu'un corps a le droit d'être dépend de la RESSOURCE, et la ressource n'est
+/// connue qu'une fois le chemin résolu. Ce qui ne dépend pas d'elle — un corps
+/// sur un `GET`, un corps trop long — se refuse **avant** : c'est de là que vient
+/// toute la famille de la contrebande de requête, et on ne la laisse pas entrer
+/// le temps de savoir où elle allait.
+///
+/// # UN CORPS DIT CE QU'IL EST, OU ON NE LE LIT PAS
+///
+/// Le deviner, c'est se donner une lecture que l'intermédiaire d'à côté n'aura
+/// pas. Une soumission porte un message (§5.2.1 de RFC 2046) ; tout le reste
+/// porte du JSON. **Et pas l'inverse** : accepter un message là où l'on attend du
+/// JSON ferait lire un message comme une représentation.
+fn verifier_le_type(
+    tete: &RequestHead<'_>,
+    corps: &[u8],
+    resource: Resource<'_>,
+) -> Result<(), Reason> {
+    // **PAS DE CORPS, PAS DE TYPE À VÉRIFIER.** Une ressource qui exige un corps
+    // le dira elle-même, en refusant ce qu'elle n'a pas reçu ; c'est elle qui
+    // sait ce qu'elle attend, et non ce contrôle-ci.
+    if corps.is_empty() {
+        return Ok(());
+    }
+    let attendu = match resource {
+        Resource::Submissions => ams_api::MESSAGE_MEDIA_TYPE,
+        _ => JSON_MEDIA_TYPE,
+    };
     match tete.field(EN_TETE_TYPE) {
-        Some(dit) if est_du_json(dit) => Ok(()),
+        Some(dit) if est_le_type(dit, attendu) => Ok(()),
         _ => Err(Reason::BadJsonBody),
     }
 }
@@ -385,13 +422,13 @@ fn verifier_le_corps(tete: &RequestHead<'_>, corps: &[u8]) -> Result<(), Reason>
 /// RFC 9110 permet `; charset=utf-8`, et le refuser écarterait des clients
 /// conformes. Ce qui précède le point-virgule, en revanche, doit être exactement
 /// le type qu'on sait lire — et sans égard à la casse, que §8.3.1 impose.
-fn est_du_json(dit: &[u8]) -> bool {
+fn est_le_type(dit: &[u8], attendu: &str) -> bool {
     let nu = dit
         .iter()
         .position(|octet| *octet == b';')
         .map_or(dit, |rang| dit.get(..rang).unwrap_or_default());
     let nu = rogner(nu);
-    nu.eq_ignore_ascii_case(JSON_MEDIA_TYPE.as_bytes())
+    nu.eq_ignore_ascii_case(attendu.as_bytes())
 }
 
 /// Ôte les blancs de tête et de queue.

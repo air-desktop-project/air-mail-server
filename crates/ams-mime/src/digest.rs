@@ -180,45 +180,11 @@ fn l_expediteur(message: &Message<'_>, out: &mut [u8]) -> Option<usize> {
     // **UN `From:` À PLUSIEURS ADRESSES NE REND RIEN.** §3.6.2 de RFC 5322
     // l'admet — un message écrit à plusieurs mains —, et il demande alors un
     // `Sender:`. En choisir une serait désigner un auteur que le message ne
-    // désigne pas.
-    let adresse = crate::address::sole_address(champ.raw_value()).ok()?;
-    let adresse = une_adresse_et_rien_d_autre(adresse)?;
+    // désigne pas ; `bare_address` refuse pour nous.
+    let adresse = crate::address::bare_address(champ.raw_value())?;
     let place = out.get_mut(..adresse.len())?;
     place.copy_from_slice(adresse);
     Some(adresse.len())
-}
-
-/// Ce qui reste après le blanc de bordure, si c'est bien une adresse.
-///
-/// # POURQUOI UN CONTRÔLE ICI, ALORS QUE `sole_address` A DÉJÀ DÉCIDÉ
-///
-/// `sole_address` sert d'abord à trouver un DOMAINE : sans chevrons, elle rend la
-/// valeur entière — blanc de bordure, plis et commentaires compris —, et le
-/// découpage du domaine écarte ensuite ce qui traîne. C'est juste pour ce qu'elle
-/// sert, et insuffisant pour ce qu'on rend.
-///
-/// **CE QU'ON REND EST AFFICHÉ TEL QUEL.** Un commentaire ou un pli qui
-/// subsisterait ferait lire au client autre chose qu'une adresse, et une valeur
-/// sans arobase ne désigne personne. On préfère ne rien rendre.
-fn une_adresse_et_rien_d_autre(adresse: &[u8]) -> Option<&[u8]> {
-    let blanc = |octet: &u8| matches!(*octet, b' ' | b'\t' | b'\r' | b'\n');
-    let debut = adresse.iter().position(|octet| !blanc(octet))?;
-    let fin = adresse
-        .iter()
-        .rposition(|octet| !blanc(octet))
-        .map_or(debut, |rang| rang.saturating_add(1));
-    let nu = adresse
-        .get(debut..fin)
-        .expect("deux rangs de cette tranche, dans l'ordre");
-    // Un blanc au MILIEU, un commentaire, un chevron ou une virgule : ce n'est
-    // plus une adresse, c'est ce qui l'entourait.
-    let propre = !nu
-        .iter()
-        .any(|octet| blanc(octet) || matches!(*octet, b'(' | b')' | b'<' | b'>' | b','));
-    match propre && nu.contains(&b'@') {
-        true => Some(nu),
-        false => None,
-    }
 }
 
 #[cfg(test)]

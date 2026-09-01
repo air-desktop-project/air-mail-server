@@ -5159,6 +5159,92 @@ Les trames inconnues, elles, ne font pas avancer la séquence et ne la rompent p
 Un flux qui se termine sans en-têtes, en revanche, ne condamne que lui-même : un
 client qui abandonne sa requête en route n'a pas cassé la connexion.
 
+## La soumission par l'API (`POST /v1/submissions`)
+
+La ressource répondait `501`. Elle remet désormais **localement**, par le même
+chemin que SMTP : `MaildirDelivery`, les mêmes écritures, le même magasin. Une
+seconde façon de remettre aurait fini par diverger, et deux messages identiques
+n'auraient pas eu le même sort selon la porte d'entrée.
+
+### Un compte n'écrit qu'en son nom
+
+Le `From:` doit être une adresse que le compte authentifié déclare. Sans ce
+contrôle, un compte ouvert suffirait à écrire au nom de n'importe qui d'autre sur
+ce serveur — et le destinataire n'aurait aucun moyen de le voir, puisque le
+message serait par ailleurs parfaitement authentique.
+
+**Les adresses de RÉCEPTION servent d'identités d'émission**, et c'est une
+équivalence qu'on pose : un compte peut écrire depuis ce qu'il peut recevoir. Elle
+est conventionnelle, et elle évite un second champ dans le magasin de comptes qui
+pourrait diverger du premier.
+
+### Ce serveur ne relaie pas, et le dit en refusant tout
+
+Un destinataire qui ne mène à aucun compte d'ici fait refuser le dépôt ENTIER.
+L'accepter à moitié laisserait l'expéditeur croire que son message est parti là où
+il ne partira jamais. Même chose pour un destinataire qu'on ne sait pas lire :
+l'écarter en silence remettrait le message à moins de monde que l'expéditeur ne
+l'a demandé, et rien dans la réponse ne le lui dirait.
+
+### Une seule réponse pour toutes les raisons de refus
+
+En-tête illisible, `From:` qui n'est pas à soi, destinataire illisible,
+destinataire d'ailleurs : la même. Les distinguer ferait de la soumission un moyen
+d'**énumérer les comptes locaux** — « celui-ci passe, celui-là non » —, et un seul
+compte ouvert suffirait alors à dresser la liste de tous les autres. C'est la même
+règle que pour un refus d'identifiants, et elle vaut pour la même raison.
+
+### Le `Bcc` ne part pas
+
+§3.6.3 de RFC 5322 : une copie cachée est cachée. Le message remis est écrit sans
+ce champ — **à tous**, y compris à celui qui y figure : il sait déjà qu'il l'a
+reçu, et lui montrer la liste révélerait les autres. Rien d'autre ne change :
+l'en-tête se réécrit champ par champ dans l'ordre où il est venu, et le corps se
+recopie tel quel. Un message qu'on remanierait davantage ne serait plus celui que
+l'expéditeur a signé.
+
+`Bcc` reste en revanche un champ de DESTINATAIRES : ce qui le distingue est qu'il
+ne figure pas dans le message remis, et non qu'il ne serait pas remis.
+
+### Le type du corps se vérifie APRÈS le routage, et l'autre contrôle avant
+
+Ce qu'un corps a le droit d'être dépend de la ressource, et la ressource n'est
+connue qu'une fois le chemin résolu. Une soumission porte un message (§5.2.1 de
+RFC 2046) ; tout le reste porte du JSON — et **pas l'inverse** : accepter un
+message là où l'on attend du JSON ferait lire un message comme une représentation.
+
+Ce qui ne dépend pas de la ressource — un corps sur un `GET`, un corps trop long —
+se refuse toujours **avant** le routage : c'est de là que vient toute la famille de
+la contrebande de requête, et on ne la laisse pas entrer le temps de savoir où elle
+allait.
+
+### Le découpage d'une liste d'adresses vit à un seul endroit
+
+Une liste se coupe sur les virgules — mais une virgule entre guillemets, dans un
+commentaire ou entre chevrons n'en est pas une. C'est la seule règle difficile, et
+elle tient dans trois lecteurs qui disent où s'arrête ce qui n'est pas une adresse.
+
+L'`ENVELOPE` d'IMAP et les destinataires d'une soumission coupent la même chose.
+**Deux copies de cette règle auraient fini par différer**, et deux vues d'un même
+message auraient alors désigné des destinataires différents. Les trois lecteurs ont
+donc déménagé dans `ams-mime::address` ; le squelette de boucle, lui, se réécrit
+sans danger — c'est ce qu'il parcourt qui est délicat, pas la façon de le
+parcourir.
+
+### Ce que l'essai de bout en bout a montré
+
+Un essai lance le binaire, échange un jeton en HTTP/3, dépose un message en
+`message/rfc822`, puis relit la boîte : le message est là, son sujet revient
+décodé, et le fichier écrit sur le disque n'a plus son `Bcc`. C'est le maillon que
+rien ne traversait.
+
+Il a aussi rappelé deux choses au passage. Le serveur refuse de démarrer sur un
+magasin de comptes lisible par tout le monde — un essai qui écrirait en `0644`
+n'éprouverait donc pas le serveur qu'on livre. Et `cargo fmt` recolle les lignes
+d'un littéral coupé par `\` : les espaces d'indentation deviennent alors un
+repliement, l'en-tête ne se termine plus, et l'essai n'éprouve plus ce qu'il croit.
+`concat!` ne se laisse pas faire.
+
 ## Le résumé d'un message, et pourquoi ce n'est pas une enveloppe
 
 La liste de messages de l'API rendait `null` pour le sujet et l'expéditeur, et un

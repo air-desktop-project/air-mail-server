@@ -623,7 +623,12 @@ pub fn poser_champ(nom: &[u8], valeur: &[u8], out: &mut Vec<u8>) {
 /// **À LA MAIN** : bâtir la requête avec notre propre encodeur ne prouverait
 /// rien du fil — si l'ordre des champs était faux des deux côtés, l'essai
 /// passerait quand même.
-pub fn une_section(methode: u8, chemin: &[u8], jeton: Option<&str>, avec_corps: bool) -> Vec<u8> {
+pub fn une_section(
+    methode: u8,
+    chemin: &[u8],
+    jeton: Option<&str>,
+    media: Option<&[u8]>,
+) -> Vec<u8> {
     let mut section = std::vec![0x00_u8, 0x00];
     // §4.5.2 de RFC 9204 : `1Tiiiiii`, T=1 pour la table statique.
     // Annexe A de RFC 9204 : 17 vaut `:method: GET`, 20 `:method: POST`, et 23
@@ -638,10 +643,14 @@ pub fn une_section(methode: u8, chemin: &[u8], jeton: Option<&str>, avec_corps: 
         section.push(u8::try_from(valeur.len()).expect("court"));
         section.extend_from_slice(valeur);
     }
-    if avec_corps {
+    if let Some(media) = media {
         // §8.3 de RFC 9110 : sans lui, la session ne sait pas ce qu'elle lit, et
         // refuse plutôt que de deviner.
-        poser_champ(b"content-type", b"application/json", &mut section);
+        //
+        // **ET CE N'EST PAS TOUJOURS DU JSON** : une soumission porte un message
+        // (§5.2.1 de RFC 2046), et l'emballer dans une chaîne JSON doublerait sa
+        // taille pour ne rien dire de plus.
+        poser_champ(b"content-type", media, &mut section);
     }
     if let Some(jeton) = jeton {
         let mut valeur = std::string::String::from("Bearer ");
@@ -660,7 +669,29 @@ pub async fn envoyer_une_requete(
     jeton: Option<&str>,
     corps: &[u8],
 ) {
-    let section = une_section(methode, chemin, jeton, !corps.is_empty());
+    envoyer_avec_media(
+        client,
+        flux,
+        methode,
+        chemin,
+        jeton,
+        corps,
+        b"application/json",
+    )
+    .await;
+}
+
+/// La même chose, en disant de quel type est le corps.
+pub async fn envoyer_avec_media(
+    client: &mut Client,
+    flux: u64,
+    methode: u8,
+    chemin: &[u8],
+    jeton: Option<&str>,
+    corps: &[u8],
+    media: &[u8],
+) {
+    let section = une_section(methode, chemin, jeton, (!corps.is_empty()).then_some(media));
     let mut entete = [0_u8; 16];
     let mut charge = Vec::new();
     let pose = ams_proto_h3::write_header(

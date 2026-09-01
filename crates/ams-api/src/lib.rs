@@ -76,7 +76,7 @@ mod token;
 pub use error::{Error, Reason};
 pub use json::{DEPTH_MAX, FIELDS_MAX as JSON_FIELDS_MAX, Json};
 pub use path::{SEGMENT_OCTETS_MAX, SEGMENTS_MAX, Segments, split_query};
-pub use problem::{JSON_MEDIA_TYPE, PROBLEM_MEDIA_TYPE, problem};
+pub use problem::{JSON_MEDIA_TYPE, MESSAGE_MEDIA_TYPE, PROBLEM_MEDIA_TYPE, problem};
 pub use reader::{BODY_DEPTH_MAX, Event, FIELDS_MAX, Number, Reader, Str};
 pub use route::{Resolved, Resource, resolve};
 pub use scope::{Area, Rights, Scope};

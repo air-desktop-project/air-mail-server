@@ -86,7 +86,7 @@ mod plume;
 mod select;
 mod structure;
 
-pub use address::{author_domain, sole_address};
+pub use address::{AddressElements, address_elements, author_domain, bare_address, sole_address};
 pub use base64::{BASE64_LINE, base64_max, encode_base64};
 pub use compose::{ReportMail, report_mail_max, write_report_mail};
 pub use date::{DATE_MAX, read_day, write_date};

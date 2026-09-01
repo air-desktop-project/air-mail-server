@@ -42,6 +42,7 @@
 //! - **Les commentaires** se traversent et ne se recopient pas : ils ne font
 //!   partie ni du nom ni de l'adresse.
 
+use crate::address::{fin_d_angle, fin_de_chaine, fin_de_commentaire};
 use crate::error::Error;
 use crate::limits::Limits;
 use crate::message::Message;
@@ -368,57 +369,6 @@ fn chaine_porte_du_texte(chaine: &[u8]) -> bool {
         j = j.saturating_add(saut);
     }
     false
-}
-
-/// Le rang qui suit la chaîne citée commençant en `debut`.
-fn fin_de_chaine(texte: &[u8], debut: usize) -> usize {
-    let mut i = debut.saturating_add(1);
-    while i < texte.len() {
-        match texte.get(i).copied().unwrap_or(0) {
-            b'\\' => i = i.saturating_add(2),
-            b'"' => return i.saturating_add(1),
-            _ => i = i.saturating_add(1),
-        }
-    }
-    texte.len()
-}
-
-/// Le rang qui suit le commentaire commençant en `debut`, imbrications
-/// comprises.
-fn fin_de_commentaire(texte: &[u8], debut: usize) -> usize {
-    let mut profondeur = 0_usize;
-    let mut i = debut;
-    while i < texte.len() {
-        match texte.get(i).copied().unwrap_or(0) {
-            b'\\' => i = i.saturating_add(2),
-            b'(' => {
-                profondeur = profondeur.saturating_add(1);
-                i = i.saturating_add(1);
-            }
-            b')' => {
-                profondeur = profondeur.saturating_sub(1);
-                i = i.saturating_add(1);
-                if profondeur == 0 {
-                    return i;
-                }
-            }
-            _ => i = i.saturating_add(1),
-        }
-    }
-    texte.len()
-}
-
-/// Le rang qui suit l'adresse entre chevrons commençant en `debut`.
-fn fin_d_angle(texte: &[u8], debut: usize) -> usize {
-    let mut i = debut.saturating_add(1);
-    while i < texte.len() {
-        match texte.get(i).copied().unwrap_or(0) {
-            b'"' => i = fin_de_chaine(texte, i),
-            b'>' => return i.saturating_add(1),
-            _ => i = i.saturating_add(1),
-        }
-    }
-    texte.len()
 }
 
 /// Le rang du chevron ouvrant, hors chaîne et hors commentaire.

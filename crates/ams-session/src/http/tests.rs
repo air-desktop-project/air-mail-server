@@ -300,6 +300,62 @@ fn le_type_se_lit_avec_ses_parametres() {
     }
 }
 
+/// **UNE SOUMISSION PORTE UN MESSAGE, ET LE RESTE PORTE DU JSON.**
+///
+/// §5.2.1 de RFC 2046 nomme le type d'un message de courrier. L'emballer dans une
+/// chaîne JSON doublerait sa taille pour ne rien dire de plus.
+///
+/// **ET PAS L'INVERSE** : accepter un message là où l'on attend du JSON ferait
+/// lire un message comme une représentation, et du JSON là où l'on attend un
+/// message ferait remettre une accolade à quelqu'un.
+#[test]
+fn une_soumission_porte_un_message_et_rien_d_autre() {
+    let porte = jeton("marc", Scope::one(Area::Submit, Rights::Write));
+    let message = b"From: marc@exemple.test\r\nTo: marc@exemple.test\r\n\r\nbonjour";
+
+    let mut champs = requete(b"POST", b"/v1/submissions", porte.as_bytes());
+    champs.push((b"content-type", b"message/rfc822"));
+    let tete = entete(&champs);
+    let mut place = [0_u8; PLACE];
+    let tour = session().request(&tete, message, MAINTENANT, &mut place);
+    assert_eq!(tour.status(), StatusCode::OK);
+    assert!(
+        en_ressource(tour.next()).is_some(),
+        "et le message va jusqu'à la ressource"
+    );
+
+    // Du JSON sur une soumission : refusé.
+    let mut champs = requete(b"POST", b"/v1/submissions", porte.as_bytes());
+    champs.push((b"content-type", b"application/json"));
+    let tete = entete(&champs);
+    let mut place = [0_u8; PLACE];
+    let tour = session().request(&tete, b"{}", MAINTENANT, &mut place);
+    assert_eq!(tour.status(), StatusCode::BAD_REQUEST);
+
+    // Un message là où l'on attend du JSON : refusé de même.
+    let porte = jeton("marc", Scope::one(Area::Mail, Rights::Write));
+    let mut champs = requete(b"POST", b"/v1/mailboxes/INBOX/messages", porte.as_bytes());
+    champs.push((b"content-type", b"message/rfc822"));
+    let tete = entete(&champs);
+    let mut place = [0_u8; PLACE];
+    let tour = session().request(&tete, message, MAINTENANT, &mut place);
+    assert_eq!(tour.status(), StatusCode::BAD_REQUEST);
+}
+
+/// **PAS DE CORPS, PAS DE TYPE À VÉRIFIER.**
+///
+/// Une ressource qui exige un corps le dira elle-même, en refusant ce qu'elle n'a
+/// pas reçu : c'est elle qui sait ce qu'elle attend.
+#[test]
+fn un_corps_vide_ne_demande_aucun_type() {
+    let porte = jeton("marc", Scope::one(Area::Submit, Rights::Write));
+    let champs = requete(b"POST", b"/v1/submissions", porte.as_bytes());
+    let tete = entete(&champs);
+    let mut place = [0_u8; PLACE];
+    let tour = session().request(&tete, b"", MAINTENANT, &mut place);
+    assert_eq!(tour.status(), StatusCode::OK);
+}
+
 /// Un corps plus gros que ce qu'on lit se refuse.
 #[test]
 fn un_corps_trop_gros_se_refuse() {

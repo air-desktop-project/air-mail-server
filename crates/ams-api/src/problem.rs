@@ -32,6 +32,13 @@ use crate::json::Json;
 /// Le type de média d'une représentation ordinaire.
 pub const JSON_MEDIA_TYPE: &str = "application/json";
 
+/// Le type de média d'un message de courrier (§5.2.1 de RFC 2046).
+///
+/// **UN MESSAGE N'EST PAS DU JSON**, et l'emballer dans une chaîne JSON
+/// doublerait sa taille pour ne rien dire de plus. C'est le seul autre type de
+/// corps que ce serveur sait lire, et il ne le lit qu'à la soumission.
+pub const MESSAGE_MEDIA_TYPE: &str = "message/rfc822";
+
 /// Le type de média d'un document d'erreur (§3 de RFC 9457).
 ///
 /// **CE N'EST PAS `application/json`**, et la différence sert : un

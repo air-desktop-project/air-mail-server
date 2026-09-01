@@ -150,6 +150,7 @@ fn monter_l_api(
     tls: Option<&Arc<ServerConfig>>,
     boites: Arc<BoitesImap>,
     comptes: Arc<Vec<Account>>,
+    remise: Boites,
 ) -> Result<Option<MontageApi>, String> {
     if options.listen_http.is_empty() {
         eprintln!("air-mail-server : API REST non servie — aucune adresse d'écoute configurée");
@@ -212,7 +213,7 @@ fn monter_l_api(
         ecouteur,
         session,
         Arc::new(http_tls),
-        Arc::new(crate::api::ApiMaildir::new(boites, comptes)),
+        Arc::new(crate::api::ApiMaildir::new(boites, comptes, remise)),
     )))
 }
 
@@ -958,6 +959,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         options_de_service.tls.as_ref(),
         Arc::clone(&boites_imap),
         Arc::clone(&comptes),
+        Arc::clone(&boites),
     )?;
     // **LA MÊME SESSION ET LA MÊME API POUR LES DEUX VERSIONS** : un jeton scellé
     // par HTTP/2 doit ouvrir HTTP/3, et une ressource servie d'un côté doit être

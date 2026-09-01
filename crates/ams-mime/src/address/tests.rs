@@ -169,3 +169,102 @@ fn une_contre_oblique_protege_la_parenthese_qui_suit() {
         Err(Error::NoAddress)
     );
 }
+
+/// Les éléments d'une liste, sous une forme qu'un essai lit.
+fn elements(valeur: &str) -> std::vec::Vec<std::string::String> {
+    super::address_elements(valeur.as_bytes())
+        .map(|element| std::string::String::from_utf8_lossy(element).into_owned())
+        .collect()
+}
+
+/// L'adresse nue, sous une forme qu'un essai lit.
+fn nue(valeur: &str) -> Option<std::string::String> {
+    super::bare_address(valeur.as_bytes())
+        .map(|adresse| std::string::String::from_utf8_lossy(adresse).into_owned())
+}
+
+/// **UNE VIRGULE N'EN EST UNE QU'AU PREMIER NIVEAU.**
+///
+/// Entre guillemets, dans un commentaire ou entre chevrons, elle appartient au
+/// texte. Couper dessus ferait deux destinataires d'un seul, et le message
+/// partirait à une adresse que personne n'a écrite.
+#[test]
+fn une_virgule_protegee_ne_coupe_pas() {
+    assert_eq!(
+        elements("\"Dupont, Jean\" <jean@example.test>, marie@example.test"),
+        ["\"Dupont, Jean\" <jean@example.test>", "marie@example.test"]
+    );
+    assert_eq!(
+        elements("jean@example.test (chez lui, le soir), marie@example.test"),
+        [
+            "jean@example.test (chez lui, le soir)",
+            "marie@example.test"
+        ]
+    );
+}
+
+/// **UN GROUPE SE TRAVERSE** (§3.4 de RFC 5322).
+///
+/// Son nom n'est pas une adresse et ne doit pas passer pour un destinataire ; ses
+/// membres, eux, en sont.
+#[test]
+fn un_groupe_rend_ses_membres_et_non_son_nom() {
+    let vus = elements("amis: jean@example.test, marie@example.test;");
+    assert_eq!(vus, ["amis", "jean@example.test", "marie@example.test"]);
+    // Le nom du groupe ne porte pas d'arobase : c'est `bare_address` qui
+    // l'écarte, et l'itérateur n'a pas à en décider.
+    assert_eq!(nue("amis"), None);
+}
+
+/// **UN ÉLÉMENT VIDE N'EST PAS UN DESTINATAIRE.**
+///
+/// Une virgule de trop est une faute de frappe ordinaire, et rendre un élément
+/// vide obligerait chaque appelant à s'en défendre.
+#[test]
+fn les_elements_vides_ne_se_rendent_pas() {
+    assert_eq!(elements(""), std::vec::Vec::<std::string::String>::new());
+    assert_eq!(
+        elements(" , ,\t"),
+        std::vec::Vec::<std::string::String>::new()
+    );
+    assert_eq!(
+        elements("jean@example.test,, marie@example.test"),
+        ["jean@example.test", "marie@example.test"]
+    );
+}
+
+/// **UN PLI NE COUPE PAS UNE LISTE**, il la traverse.
+///
+/// §2.2.3 : une liste tient sur plusieurs lignes, et chaque morceau appartient à
+/// la valeur. C'est `trim_ascii` qui retire ce que le pli laisse en bordure.
+#[test]
+fn un_pli_ne_coupe_pas_une_liste() {
+    assert_eq!(
+        elements("jean@example.test,\r\n marie@example.test"),
+        ["jean@example.test", "marie@example.test"]
+    );
+}
+
+/// **CE QU'ON REND NUE EST UNE ADRESSE, ET RIEN QUI NE FASSE QUE L'ENTOURER.**
+///
+/// `sole_address` sert d'abord à trouver un domaine : sans chevrons, elle rend la
+/// valeur entière. C'est juste pour ce qu'elle sert, et faux pour désigner une
+/// boîte ou pour afficher.
+#[test]
+fn une_adresse_nue_ne_porte_que_l_adresse() {
+    assert_eq!(
+        nue(" \"Jean Dupont\" <jean@example.test> "),
+        Some(std::string::String::from("jean@example.test"))
+    );
+    assert_eq!(nue(" jean@example.test "), Some("jean@example.test".into()));
+    for valeur in [
+        "jean @ example.test",
+        "jean@example.test (chez lui)",
+        "pas-d-arobase",
+        "   ",
+        "",
+        "jean@example.test, marie@example.test",
+    ] {
+        assert_eq!(nue(valeur), None, "« {valeur} »");
+    }
+}
