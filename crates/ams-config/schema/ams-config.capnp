@@ -121,6 +121,50 @@ struct Configuration {
   # QUIC chiffre toujours (§5 de RFC 9001) — il n'y a donc même pas de mode en
   # clair à refuser.
   listenH3 @19 :Text;
+
+  # La file de réémission sortante — ce que ce serveur émet POUR SES COMPTES.
+  #
+  # **UN CHAMP AJOUTÉ APRÈS COUP DÉCODE ZÉRO**, et `enabled` à faux est
+  # exactement ce qu'une configuration écrite avant lui doit signifier : rien ne
+  # sort, comme avant.
+  relay @20 :Relay;
+}
+
+# Ce que ce serveur émet pour ses comptes, et comment il insiste.
+struct Relay {
+  # Relaie-t-on, ou non ?
+  #
+  # **FAUX PAR DÉFAUT, ET C'EST UNE DÉCISION.** Émettre du courrier vers des
+  # tiers ne se décide pas à la place de celui qui exploite la machine — la même
+  # règle que pour les rapports DMARC. Sans ce drapeau, un destinataire qui n'est
+  # pas d'ici reste refusé par un 550, y compris pour un compte authentifié.
+  #
+  # C'est aussi ce qui fait qu'une mise à jour ne transforme personne en relais :
+  # un fichier écrit avant que ce champ n'existe décode faux.
+  enabled @0 :Bool;
+
+  # Le dossier de la file, ou une chaîne vide.
+  #
+  # Vide AVEC `enabled`, le serveur refuse de démarrer : accepter du courrier
+  # qu'on n'a nulle part où poser serait le perdre en silence. Il est distinct du
+  # Maildir — ce qui attend d'être émis n'est pas du courrier reçu, et les
+  # mélanger ferait apparaître dans une boîte ce qui n'y est jamais arrivé.
+  spool @1 :Text;
+
+  # L'attente après le PREMIER échec, en secondes.
+  #
+  # Elle DOUBLE ensuite, jusqu'à `maxRetrySeconds`. Zéro prend le défaut : une
+  # attente nulle ferait réessayer aussi vite que le disque tourne.
+  retrySeconds @2 :UInt32;
+
+  # Le plafond de l'attente, en secondes. Zéro prend le défaut.
+  maxRetrySeconds @3 :UInt32;
+
+  # Le temps accordé à un message depuis son dépôt, en secondes.
+  #
+  # §4.5.4.1 de RFC 5321 demande au moins quatre à cinq jours avant d'abandonner.
+  # Zéro prend le défaut.
+  expireSeconds @4 :UInt32;
 }
 
 # DKIM : SIGNER, et non vérifier.

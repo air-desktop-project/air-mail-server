@@ -10,6 +10,7 @@ repository.workspace = true
 
 [dependencies]
 ams-guard = { workspace = true }
+ams-queue = { workspace = true }
 ams-proto-smtp = { workspace = true }
 ams-auth = { workspace = true }
 ams-index = { workspace = true }

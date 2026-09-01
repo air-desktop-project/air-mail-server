@@ -163,6 +163,8 @@ fn monter_l_api(
     garde: Arc<ams_loop_tokio::SharedGuard>,
     racine: std::path::PathBuf,
     domaine: Vec<u8>,
+    file: Option<ams_loop_tokio::Spool>,
+    message_max: usize,
 ) -> Result<Option<MontageApi>, String> {
     if options.listen_http.is_empty() {
         eprintln!("air-mail-server : API REST non servie — aucune adresse d'écoute configurée");
@@ -218,9 +220,17 @@ fn monter_l_api(
         ecouteur,
         session,
         Arc::new(http_tls),
-        Arc::new(crate::api::ApiMaildir::new(
-            boites, comptes, remise, domaines, garde, racine, domaine,
-        )),
+        Arc::new({
+            let api = crate::api::ApiMaildir::new(
+                boites, comptes, remise, domaines, garde, racine, domaine,
+            );
+            // LA MÊME RÈGLE QUE SMTP : sans file, une soumission qui nomme un
+            // destinataire d'ailleurs est refusée. Deux portes, une seule règle.
+            match file {
+                Some(file) => api.avec_file(file, message_max),
+                None => api,
+            }
+        }),
     )))
 }
 
@@ -679,6 +689,93 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         }
     );
 
+    // ── LA FILE DE RÉÉMISSION SORTANTE ──────────────────────────────────────
+    //
+    // **ÉTEINTE PAR DÉFAUT.** Émettre du courrier vers des tiers ne se décide pas
+    // à la place de celui qui exploite la machine — la même règle que pour les
+    // rapports DMARC, et pour la même raison.
+    //
+    // Deux refus AU DÉMARRAGE plutôt que du courrier perdu en silence :
+    //
+    //   - sans dossier, on accepterait un message qu'on n'a nulle part où poser ;
+    //   - sans résolveur, on ne saurait trouver AUCUN `MX`. Le message resterait
+    //     en file jusqu'à sa péremption, puis reviendrait à son expéditeur — cinq
+    //     jours pour apprendre que le serveur n'a jamais pu essayer.
+    //
+    // Refuser de démarrer se voit tout de suite ; l'autre se découvre une semaine
+    // plus tard, chez celui qui attendait la réponse.
+    let file = if options.relay.enabled {
+        if options.relay.spool.is_empty() {
+            return Err(String::from(
+                "`relay` est activé sans dossier de file : un message accepté qu'on n'a nulle \
+                 part où poser est un message perdu (`air-mail-admin config write … --relay \
+                 --relay-spool /var/spool/ams/file`)",
+            ));
+        }
+        let Some(checker) = verificateur.as_ref() else {
+            return Err(String::from(
+                "`relay` est activé sans résolveur DNS : aucun `MX` ne pourrait être trouvé, et \
+                 tout message accepté reviendrait à son expéditeur après la péremption \
+                 (`air-mail-admin config write … --resolver 127.0.0.1:53`)",
+            ));
+        };
+        let dossier = PathBuf::from(&options.relay.spool);
+        // ON CRÉE LE DOSSIER, MAIS ON NE CRÉE PAS SON PARENT. Poser un chemin
+        // entier au démarrage écrirait quelque part où l'exploitant ne
+        // l'attendait pas, sur une faute de frappe.
+        if let Err(erreur) = std::fs::create_dir(&dossier)
+            && erreur.kind() != std::io::ErrorKind::AlreadyExists
+        {
+            return Err(format!("`{}` : {erreur}", dossier.display()));
+        }
+        let reprise = options.relay.backoff();
+        eprintln!(
+            "air-mail-server : ÉMISSION OUVERTE — file `{}`, 1er essai à {} s, plafond {} s, \
+             abandon à {} s. ON NE RELAIE QUE POUR UN COMPTE AUTHENTIFIÉ, et un rapport de \
+             non-remise (RFC 3464) revient LOCALEMENT dans sa boîte.",
+            options.relay.spool,
+            reprise.first.as_secs(),
+            reprise.ceiling.as_secs(),
+            reprise.expiry.as_secs()
+        );
+        if !authentifie {
+            // Le dire plutôt que de laisser un exploitant croire qu'il émet :
+            // l'authentification n'est annoncée que sous chiffrement, donc
+            // personne ne pourra jamais atteindre ce relais.
+            eprintln!(
+                "air-mail-server : ATTENTION — émission ouverte SANS CHIFFREMENT : `AUTH` n'est \
+                 pas annoncé, donc aucune session ne pourra s'authentifier, donc rien ne sortira."
+            );
+        }
+        Some((
+            ams_loop_tokio::Spool::new(
+                dossier,
+                reprise,
+                options.domain.clone(),
+                format!("postmaster@{}", options.domain),
+            ),
+            Relay::new(
+                checker.resolver().clone(),
+                std::sync::Arc::new(ams_tls::relay_config()),
+                options.domain.clone(),
+                false,
+                Duration::from_secs(u64::from(options.timeouts.command_seconds)),
+            ),
+        ))
+    } else {
+        if !options.relay.spool.is_empty() {
+            eprintln!(
+                "air-mail-server : dossier de file nommé SANS `relay` — rien ne sera émis, et \
+                 rien n'y sera écrit."
+            );
+        }
+        eprintln!(
+            "air-mail-server : aucune émission — ce serveur REÇOIT, il n'émet pas pour ses \
+             comptes. Un destinataire qui n'est pas d'ici est refusé (550), même authentifié."
+        );
+        None
+    };
+
     let intervalle_rapports =
         Duration::from_secs(u64::from(if options.dmarc.report_interval_seconds == 0 {
             86_400
@@ -793,7 +890,16 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     ));
     let comptes = Arc::new(comptes);
     let postmaster = format!("postmaster@{}", options.domain);
-    let politique = Arc::new(BoitesConnues::new(Arc::clone(&comptes), postmaster.clone()));
+    // **LES DEUX CONDITIONS SE REJOIGNENT ICI**, et sur une ligne qu'on lit : le
+    // drapeau de configuration d'un côté, l'authentification de la session de
+    // l'autre. Sans `qui_relaie`, la politique refuse tout ce qui n'est pas d'ici,
+    // quoi qu'un pair ait prouvé.
+    let politique = BoitesConnues::new(Arc::clone(&comptes), postmaster.clone());
+    let politique = Arc::new(if file.is_some() {
+        politique.qui_relaie()
+    } else {
+        politique
+    });
     eprintln!(
         "air-mail-server : {}",
         match (politique.a_des_comptes(), authentifie) {
@@ -826,6 +932,8 @@ async fn servir(fichier: &Path) -> Result<(), String> {
 
     let pour_la_remise = Arc::clone(&boites);
     let comptes_pour_la_remise = Arc::clone(&comptes);
+    let file_pour_la_remise = file.as_ref().map(|(spool, _)| spool.clone());
+    let message_max = usize::try_from(options.max_message_octets).unwrap_or(usize::MAX);
 
     let options_de_service = ServeOptions {
         max_connections: usize::try_from(options.max_connections).unwrap_or(usize::MAX),
@@ -985,6 +1093,8 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         Arc::clone(&garde),
         maildir.clone(),
         domaine.to_vec(),
+        file.as_ref().map(|(spool, _)| spool.clone()),
+        message_max,
     )?;
     // **LA MÊME SESSION ET LA MÊME API POUR LES DEUX VERSIONS** : un jeton scellé
     // par HTTP/2 doit ouvrir HTTP/3, et une ressource servie d'un côté doit être
@@ -1045,22 +1155,76 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         ))
     });
 
+    // ── LA TÂCHE DE REPRISE ─────────────────────────────────────────────────
+    //
+    // Elle tourne à côté des boucles de service, et le même signal l'arrête. Son
+    // premier tour a lieu TOUT DE SUITE : une file laissée par une exécution
+    // précédente ne doit pas attendre un intervalle pour repartir.
+    //
+    // Le rythme est celui du plus court des deux — une minute, ou la première
+    // attente. Chaque entrée porte son propre instant de reprise dans son nom :
+    // un tour qui passe trop souvent ne fait que lire un répertoire.
+    let reprise = file.as_ref().map(|(spool, relay)| {
+        let spool = spool.clone();
+        let relay = relay.clone();
+        let rendre = RapportsLocaux {
+            boites: Arc::clone(&boites),
+            comptes: Arc::clone(&comptes),
+        };
+        let battement = spool_battement(spool.dossier(), &options.relay);
+        let attente = arret();
+        tokio::spawn(async move {
+            let mut horloge = tokio::time::interval(battement);
+            horloge.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut total = ams_loop_tokio::QueueTally::default();
+            tokio::pin!(attente);
+            loop {
+                tokio::select! {
+                    () = &mut attente => break,
+                    _ = horloge.tick() => {
+                        let compte = spool.parcourir(&relay, &rendre, maintenant()).await;
+                        total.sent = total.sent.saturating_add(compte.sent);
+                        total.bounced = total.bounced.saturating_add(compte.bounced);
+                        total.deferred = total.deferred.saturating_add(compte.deferred);
+                        total.unreadable = total.unreadable.saturating_add(compte.unreadable);
+                    }
+                }
+            }
+            total
+        })
+    });
+
     let stats = serve(
         ecouteur,
         config,
         politique,
         garde,
         move || {
-            MaildirDelivery::new(
+            let remise = MaildirDelivery::new(
                 Arc::clone(&pour_la_remise),
                 Arc::clone(&comptes_pour_la_remise),
-            )
+            );
+            match file_pour_la_remise.clone() {
+                Some(file) => remise.avec_file(file, message_max),
+                None => remise,
+            }
         },
         options_de_service,
         arret(),
     )
     .await
     .map_err(|erreur| erreur.to_string())?;
+
+    if let Some(tache) = reprise {
+        match tache.await {
+            Ok(compte) => eprintln!(
+                "air-mail-server : émission ; {} message(s) remis, {} rendu(s) à leur \
+                 expéditeur, {} ajourné(s), {} illisible(s)",
+                compte.sent, compte.bounced, compte.deferred, compte.unreadable
+            ),
+            Err(erreur) => eprintln!("air-mail-server : émission : {erreur}"),
+        }
+    }
 
     if let Some(tache) = pop3 {
         // La boucle POP3 s'arrête sur le même signal ; on attend qu'elle ait
@@ -1168,6 +1332,62 @@ async fn servir(fichier: &Path) -> Result<(), String> {
 /// Les deux, et pas seulement `Ctrl-C` : un service arrêté par un gestionnaire
 /// reçoit `SIGTERM`, et l'ignorer le ferait tuer au bout du délai de grâce —
 /// c'est-à-dire au milieu d'une remise.
+/// Remet un rapport de non-remise DANS UNE BOÎTE D'ICI.
+///
+/// # AUCUN REBOND NE PART VERS UN INCONNU
+///
+/// Ce serveur ne relaie que pour ses propres comptes, si bien que le chemin de
+/// retour d'une entrée de file est toujours l'une de ses adresses. Le rapport se
+/// dépose donc localement, et jamais sur le réseau : c'est ce qui tient ce
+/// serveur hors de la rétro-diffusion — émettre un rebond vers une adresse qu'un
+/// tiers a écrite dans un `MAIL FROM:` usurpé ferait de nous l'instrument de son
+/// envoi.
+struct RapportsLocaux {
+    boites: Arc<Boites>,
+    comptes: Arc<crate::comptes::Comptes>,
+}
+
+impl ams_loop_tokio::Bounced for RapportsLocaux {
+    fn deliver(&self, recipient: &str, message: &[u8]) -> bool {
+        use ams_loop_tokio::Delivery as _;
+
+        // **LA MÊME REMISE QUE PARTOUT AILLEURS**, et sans file : un rapport ne
+        // se met pas en file. Sans cela, un rapport qu'on n'arriverait pas à
+        // déposer engendrerait un rapport, qui en engendrerait un autre.
+        let mut remise = MaildirDelivery::new(Arc::clone(&self.boites), Arc::clone(&self.comptes));
+        remise.begin(None);
+        if remise.add_recipient(recipient.as_bytes()).is_err() {
+            return false;
+        }
+        if remise.append(message).is_err() || remise.finish().is_err() {
+            remise.abort();
+            return false;
+        }
+        true
+    }
+}
+
+/// L'heure, en secondes depuis l'époque.
+fn maintenant() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |depuis| depuis.as_secs())
+}
+
+/// À quel rythme repasser sur la file.
+///
+/// **LE PLUS COURT DES DEUX — une minute, ou la première attente.** Passer plus
+/// souvent ne ferait que relire un répertoire, puisque chaque entrée porte son
+/// propre instant de reprise ; passer moins souvent retarderait la plus pressée.
+fn spool_battement(_dossier: &std::path::Path, relay: &ams_config::Relay) -> Duration {
+    let minute = Duration::from_secs(60);
+    relay
+        .backoff()
+        .first
+        .min(minute)
+        .max(Duration::from_secs(1))
+}
+
 async fn arret() {
     let interruption = tokio::signal::ctrl_c();
     let mut terminaison =

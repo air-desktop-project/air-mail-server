@@ -95,6 +95,15 @@ struct Entree {
     suffixes: String,
     /// Oppose-t-on un `p=reject` ?
     aligne: bool,
+    /// Émet-on pour ses comptes, et les trois durées de la reprise.
+    ///
+    /// **ZÉRO COMPRIS**, et c'est justement la valeur qui veut dire « le
+    /// défaut » : elle doit traverser le format comme les autres.
+    emet: bool,
+    /// Le dossier de la file — UNE CHAÎNE LIBRE, y compris vide. Le SERVEUR
+    /// refuse le cas « émettre sans dossier » ; cette crate le transporte.
+    file: String,
+    reprises: [u32; 3],
 }
 
 fuzz_target!(|entree: Entree| {
@@ -169,6 +178,13 @@ fuzz_target!(|entree: Entree| {
             report_interval_seconds: entree.intervalle,
             send_reports: entree.remet,
             failure_reports: entree.echecs,
+        },
+        relay: ams_config::Relay {
+            enabled: entree.emet,
+            spool: entree.file.clone(),
+            retry_seconds: entree.reprises[0],
+            max_retry_seconds: entree.reprises[1],
+            expire_seconds: entree.reprises[2],
         },
         accounts: entree.comptes.clone(),
         listen_pop3: entree.ecoute_pop3.clone(),

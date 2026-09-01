@@ -83,6 +83,19 @@ pub struct Options {
     /// fausse en pratique : personne ne pouvait desserrer un seuil qui se
     /// trompe, ni resserrer celui qui ne suffit plus.
     pub guard: Thresholds,
+    /// La file de réémission sortante — voir [`Options::relay_spool`].
+    ///
+    /// **ÉTEINTE PAR DÉFAUT.** Émettre du courrier vers des tiers ne se décide
+    /// pas à la place de celui qui exploite la machine.
+    pub relay: bool,
+    /// Le dossier de la file. **Exigé avec `--relay`.**
+    pub relay_spool: Option<PathBuf>,
+    /// L'attente après le premier échec, en secondes. Zéro prend le défaut.
+    pub relay_retry: u32,
+    /// Le plafond de l'attente, en secondes. Zéro prend le défaut.
+    pub relay_max_retry: u32,
+    /// Le temps accordé à un message depuis son dépôt. Zéro prend le défaut.
+    pub relay_expire: u32,
     /// Combien de sources la table du garde retient à la fois.
     ///
     /// C'est ce qui empêche la table d'être un épuisement de mémoire offert à
@@ -147,6 +160,16 @@ impl Default for Options {
             dmarc_send: false,
             // ILS PORTENT LE COURRIER DE QUELQU'UN. Le défaut n'en compose pas.
             dmarc_failures: false,
+            // PAS DE RELAIS PAR DÉFAUT. Un serveur qu'on met à jour ne devient
+            // pas un émetteur sans que personne l'ait décidé — la même règle que
+            // pour `--dmarc-send`, et pour la même raison.
+            relay: false,
+            relay_spool: None,
+            // ZÉRO PARTOUT, QUI VEUT DIRE « LE DÉFAUT DE `ams-queue` ». Recopier
+            // les durées ici ferait deux vérités pour une seule décision.
+            relay_retry: 0,
+            relay_max_retry: 0,
+            relay_expire: 0,
             // LES SEUILS DU GARDE VIENNENT DE `ams-guard`, et pas d'ici : les
             // recopier ferait deux vérités pour une seule décision, et la
             // seconde vieillirait en silence.
@@ -226,6 +249,13 @@ impl Options {
                 private_key_path: chemin(self.dkim_key.as_ref()),
             },
             accounts: chemin(self.accounts.as_ref()),
+            relay: ams_config::Relay {
+                enabled: self.relay,
+                spool: chemin(self.relay_spool.as_ref()),
+                retry_seconds: self.relay_retry,
+                max_retry_seconds: self.relay_max_retry,
+                expire_seconds: self.relay_expire,
+            },
             listen_pop3: self
                 .listen_pop3
                 .map(|adresse| adresse.to_string())
@@ -282,6 +312,13 @@ OPTIONS DE `config write`
     --accounts <chemin>    fichier de comptes (`air-mail-admin account add`)
     --listen-pop3 <adr>    où écouter en POP3 (défaut : pas de POP3)
     --listen-imap <adr>    où écouter en IMAP (défaut : pas d'IMAP)
+
+    LA FILE DE RÉÉMISSION SORTANTE
+    --relay                             émettre pour les comptes authentifiés
+    --relay-spool <chemin>              le dossier de la file (EXIGÉ avec --relay)
+    --relay-retry-seconds <n>           attente après le 1er échec  (défaut 900)
+    --relay-max-retry-seconds <n>       plafond de l'attente        (défaut 21600)
+    --relay-expire-seconds <n>          avant d'abandonner          (défaut 432000)
 
     LES SEUILS DU GARDE (C8)
     --connections-per-minute <n>        connexions par source   (défaut 60)
@@ -423,6 +460,37 @@ OPTIONS DE `config write`
     le nom annoncé), `--dmarc-report-email` l'adresse où le joindre (défaut :
     `postmaster@` suivi du nom annoncé), `--dmarc-report-interval` le nombre de
     secondes entre deux vidanges du journal (défaut : 86400, un jour).
+
+    SANS `--relay`, RIEN NE SORT, et c'est le défaut. Un destinataire qui n'est pas
+    d'ici est refusé par un `550`, même pour un compte authentifié : ce serveur
+    reçoit, il n'émet pas. Émettre du courrier vers des tiers ne se décide pas à
+    la place de celui qui exploite la machine — la même règle que
+    `--dmarc-send` — et une mise à jour ne transforme donc personne en relais.
+
+    AVEC `--relay`, ON NE RELAIE QUE POUR UN COMPTE AUTHENTIFIÉ. C'est la seule
+    chose qui sépare un relais d'un relais ouvert, et ce n'est pas réglable.
+    L'authentification n'étant annoncée que sous chiffrement, `--relay` sans
+    `--tls-cert` n'ouvre l'émission à personne ; le serveur le dit au démarrage.
+
+    `--relay-spool` EST EXIGÉ AVEC `--relay`, et il est DISTINCT du Maildir : ce
+    qui attend d'être émis n'est pas du courrier reçu, et les mélanger ferait
+    apparaître dans une boîte ce qui n'y est jamais arrivé. Accepter un message
+    qu'on n'a nulle part où poser serait le perdre en silence, et c'est pourquoi
+    l'un sans l'autre est refusé ici plutôt qu'au démarrage.
+
+    L'ATTENTE DOUBLE À CHAQUE ÉCHEC, jusqu'au plafond. Réessayer à intervalle fixe
+    pendant cinq jours, c'est frapper des centaines de fois à une porte fermée —
+    et si mille messages attendent pour ce même domaine, c'est le marteler pendant
+    qu'il se relève. La péremption par défaut est de cinq jours, ce que
+    §4.5.4.1 de RFC 5321 demande au moins.
+
+    QUAND ON RENONCE, UN RAPPORT DE NON-REMISE (RFC 3464) PART — et il est remis
+    LOCALEMENT, dans la boîte du compte qui avait déposé. Ce serveur n'envoie
+    jamais de rebond à un inconnu : le chemin de retour est toujours l'une de ses
+    propres adresses, puisqu'il ne relaie que pour ses comptes. C'est ce qui le
+    tient hors de la rétro-diffusion — émettre un rebond vers une adresse qu'un
+    tiers a écrite dans un `MAIL FROM:` usurpé ferait de nous l'instrument de son
+    envoi.
 
     LE GARDE SE RÈGLE ICI, ET NULLE PART AILLEURS. C8 demande que ce qui borne une
     source vienne de la configuration : un seuil gravé dans le code est un seuil
@@ -598,6 +666,28 @@ where
                     .parse()
                     .map_err(|_| ArgError::new(format!("`{brute}` n'est pas un nombre")))?;
             }
+            // ── La file de réémission sortante ──────────────────────────────
+            "--relay" => options.relay = true,
+            "--relay-spool" => options.relay_spool = Some(PathBuf::from(valeur()?)),
+            "--relay-retry-seconds" => {
+                options.relay_retry = pas_zero(
+                    &valeur()?,
+                    "une attente nulle ferait réessayer aussi vite que le disque tourne",
+                )?;
+            }
+            "--relay-max-retry-seconds" => {
+                options.relay_max_retry = pas_zero(
+                    &valeur()?,
+                    "un plafond nul ramènerait toutes les attentes à rien",
+                )?;
+            }
+            "--relay-expire-seconds" => {
+                options.relay_expire = pas_zero(
+                    &valeur()?,
+                    "une péremption nulle rendrait le message à son expéditeur sans avoir \
+                     essayé une seule fois",
+                )?;
+            }
             // ── Les seuils du garde (C8) ────────────────────────────────────
             //
             // **ZÉRO NE VEUT PAS DIRE LA MÊME CHOSE PARTOUT**, et c'est le piège
@@ -664,6 +754,18 @@ where
              « chiffre » ni « ne chiffre pas »",
         ));
     }
+    // **UN RELAIS SANS DOSSIER PERDRAIT LE COURRIER EN SILENCE** : on aurait dit
+    // `250` à un message qu'on n'a nulle part où poser. Le serveur le refuserait
+    // aussi au démarrage ; le dire ici coûte une seconde plutôt qu'une astreinte.
+    if options.relay && options.relay_spool.is_none() {
+        return Err(ArgError::new(
+            "`--relay` exige `--relay-spool` : un message accepté qu'on n'a nulle part où \
+             poser est un message perdu",
+        ));
+    }
+    // L'INVERSE N'EST PAS REFUSÉ, et c'est délibéré : nommer un dossier sans
+    // `--relay` ne promet rien à personne, et permet de le préparer avant
+    // d'ouvrir l'émission. Le serveur le dit au démarrage.
     if options.dkim_selector.is_some() != options.dkim_key.is_some() {
         return Err(ArgError::new(
             "`--dkim-selector` et `--dkim-key` vont ENSEMBLE : l'un sans l'autre ne veut dire ni \
@@ -923,6 +1025,11 @@ mod tests {
                 "n'est pas un nombre",
             ),
             (&["--tracked-sources"], "attend une valeur"),
+            // Les trois durées de la file : zéro n'y veut rien dire.
+            (&["--relay-retry-seconds", "0"], "aussi vite que le disque"),
+            (&["--relay-max-retry-seconds", "0"], "à rien"),
+            (&["--relay-expire-seconds", "0"], "sans avoir essayé"),
+            (&["--relay-spool"], "attend une valeur"),
         ] {
             let erreur = parse(arguments).expect_err("refusé");
             assert!(
@@ -945,6 +1052,79 @@ mod tests {
         // Et elle se relit à l'identique une fois écrite.
         let octets = ams_config::encode(&config).expect("encodable");
         assert_eq!(ams_config::decode(&octets).expect("relisible"), config);
+    }
+
+    // ── La file de réémission sortante ──────────────────────────────────────
+
+    /// **ÉTEINTE PAR DÉFAUT, ET LES DURÉES AU DÉFAUT DE `ams-queue`.**
+    #[test]
+    fn sans_option_rien_ne_sort() {
+        let options = ecrire(&["--domain", "mail.example.com"]);
+        assert!(!options.relay);
+        assert!(options.relay_spool.is_none());
+        let config = options.en_configuration();
+        assert!(!config.relay.enabled);
+        assert_eq!(config.relay.backoff(), ams_queue::Backoff::DEFAULT);
+    }
+
+    /// Les cinq réglages traversent jusqu'au fichier.
+    #[test]
+    fn les_reglages_de_la_file_traversent_jusqu_au_fichier() {
+        let options = ecrire(&[
+            "--domain",
+            "mail.example.com",
+            "--relay",
+            "--relay-spool",
+            "/var/spool/ams/file",
+            "--relay-retry-seconds",
+            "60",
+            "--relay-max-retry-seconds",
+            "3600",
+            "--relay-expire-seconds",
+            "172800",
+        ]);
+        assert!(options.relay);
+        let config = options.en_configuration();
+        assert!(config.relay.enabled);
+        assert_eq!(config.relay.spool, "/var/spool/ams/file");
+        let reprise = config.relay.backoff();
+        assert_eq!(reprise.first, Duration::from_secs(60));
+        assert_eq!(reprise.ceiling, Duration::from_secs(3_600));
+        assert_eq!(reprise.expiry, Duration::from_secs(172_800));
+        // AUCUNE N'EST LE DÉFAUT : un test qui passerait avec `DEFAULT` ne
+        // prouverait rien de la traversée.
+        assert_ne!(reprise, ams_queue::Backoff::DEFAULT);
+        // Et le tout se relit à l'identique.
+        let octets = ams_config::encode(&config).expect("encodable");
+        assert_eq!(ams_config::decode(&octets).expect("relisible"), config);
+    }
+
+    /// **UN RELAIS SANS DOSSIER PERDRAIT LE COURRIER EN SILENCE.**
+    ///
+    /// On aurait dit `250` à un message qu'on n'a nulle part où poser. Le refus
+    /// est devant le terminal, pas au démarrage.
+    #[test]
+    fn un_relais_sans_dossier_est_refuse() {
+        let erreur = parse(["--relay"].as_slice()).expect_err("refusé");
+        assert!(
+            erreur.message.contains("--relay-spool"),
+            "« {} » ne dit pas ce qui manque",
+            erreur.message
+        );
+    }
+
+    /// **L'INVERSE N'EST PAS REFUSÉ**, et c'est délibéré : nommer un dossier
+    /// sans ouvrir l'émission ne promet rien à personne, et permet de le
+    /// préparer avant. Le serveur le dit au démarrage.
+    #[test]
+    fn un_dossier_sans_relais_est_licite() {
+        let options = ecrire(&["--relay-spool", "/var/spool/ams/file"]);
+        assert!(!options.relay);
+        assert!(!options.en_configuration().relay.enabled);
+        assert_eq!(
+            options.en_configuration().relay.spool,
+            "/var/spool/ams/file"
+        );
     }
 
     // ── Les seuils du garde (C8) ────────────────────────────────────────────

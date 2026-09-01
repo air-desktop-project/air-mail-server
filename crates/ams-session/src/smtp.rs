@@ -260,6 +260,19 @@ pub struct SmtpSession<'a, P: Policy> {
     helo: Tampon<DOMAIN_MAX>,
     /// L'expéditeur de la transaction en cours, sous la forme `local@domaine`.
     expediteur: Tampon<SENDER_MAX>,
+    /// Le `MAIL FROM:` de la transaction, retenu QUOI QU'IL ARRIVE.
+    ///
+    /// # POURQUOI IL NE SE CONFOND PAS AVEC [`SmtpSession::expediteur`]
+    ///
+    /// Celui-là ne se remplit que lorsqu'une politique d'expéditeur est en
+    /// vigueur, et il porte l'identité que SPF doit VÉRIFIER — c'est-à-dire, pour
+    /// un chemin nul, `postmaster@` suivi du `HELO`, qui n'est pas ce que le pair
+    /// a écrit.
+    ///
+    /// Celui-ci porte ce que le pair a écrit, et rien d'autre. C'est l'adresse à
+    /// laquelle un rapport de non-remise reviendra, et l'inventer serait
+    /// l'envoyer à quelqu'un qui n'a rien demandé.
+    chemin_de_retour: Tampon<SENDER_MAX>,
     /// Le domaine dont SPF lira la politique.
     domaine_verifie: Tampon<DOMAIN_MAX>,
     /// Le verdict rendu par l'appelant pour cette transaction.
@@ -310,6 +323,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
             size_len: fin_size,
             helo: Tampon::vide(),
             expediteur: Tampon::vide(),
+            chemin_de_retour: Tampon::vide(),
             domaine_verifie: Tampon::vide(),
             verdict: None,
             identite_helo: false,
@@ -625,6 +639,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
             }
             _ => {
                 self.phase = Phase::Transaction { recipients: 0 };
+                self.retenir_le_chemin_de_retour(reverse_path);
                 if self.retenir_l_expediteur(reverse_path) {
                     // L'identité est vérifiable : on rend la main à l'appelant,
                     // SANS RÉPONDRE. C'est lui qui résout.
@@ -633,6 +648,37 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
                 self.simple(Code::OK, b"Sender ok", out)
             }
         }
+    }
+
+    /// Retient le `MAIL FROM:` tel que le pair l'a écrit.
+    ///
+    /// **UN CHEMIN NUL NE SE RETIENT PAS**, et c'est une décision : `<>` est
+    /// l'expéditeur des notifications, et une notification n'en engendre pas
+    /// une autre (§6.1 de RFC 5321). Un message déposé avec `<>` n'a donc
+    /// personne à qui rendre compte, et la remise le refusera plutôt que de
+    /// mettre en file ce qu'elle ne saurait pas rendre.
+    fn retenir_le_chemin_de_retour(&mut self, reverse_path: &Path<'_>) {
+        self.chemin_de_retour.vider();
+        let Path::Mailbox(boite) = reverse_path else {
+            return;
+        };
+        let ClientId::Domain(domaine) = boite.domain() else {
+            // UN LITTÉRAL D'ADRESSE NE SE RETIENT PAS NON PLUS : `jean@[192.0.2.1]`
+            // ne désigne aucune zone, et un rapport qu'on lui adresserait
+            // n'atteindrait rien qu'on puisse résoudre.
+            return;
+        };
+        self.chemin_de_retour
+            .poser(&[boite.local_part().as_bytes(), b"@", domaine]);
+    }
+
+    /// L'adresse à laquelle un rapport de non-remise reviendra.
+    ///
+    /// `None` hors transaction, et pour un chemin nul ou un littéral d'adresse —
+    /// voir [`SmtpSession::retenir_le_chemin_de_retour`].
+    #[must_use]
+    pub fn return_path(&self) -> Option<&[u8]> {
+        (!self.chemin_de_retour.est_vide()).then(|| self.chemin_de_retour.as_bytes())
     }
 
     /// Retient l'identité à vérifier, et dit si elle l'est.
@@ -841,7 +887,10 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         if recipients >= self.config.max_recipients() {
             return self.simple(Code::TOO_MANY_RECIPIENTS, b"Too many recipients", out);
         }
-        match self.policy.accepts_recipient(forward_path) {
+        match self
+            .policy
+            .accepts_recipient(forward_path, self.authenticated)
+        {
             RecipientVerdict::Accept => {
                 // ON RETIENT L'ADRESSE, ET SEULEMENT SI ELLE TIENT. La refuser
                 // ici plutôt que de la tronquer n'est pas une précaution : une
@@ -1098,6 +1147,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         // du précédent — ou pire, ferait croire à un verdict qu'on n'a pas
         // demandé. Le `HELO`, lui, survit : c'est la connexion qui le porte.
         self.expediteur.vider();
+        self.chemin_de_retour.vider();
         self.domaine_verifie.vider();
         self.verdict = None;
     }
@@ -1192,7 +1242,11 @@ mod tests {
     }
 
     impl Policy for Verdict {
-        fn accepts_recipient(&self, _forward_path: &Path<'_>) -> RecipientVerdict {
+        fn accepts_recipient(
+            &self,
+            _forward_path: &Path<'_>,
+            _submitter: bool,
+        ) -> RecipientVerdict {
             self.0
         }
     }
@@ -1782,6 +1836,122 @@ mod tests {
     /// **UN REFUS TEMPORAIRE N'EN EST PAS UN** : un `450` dit que NOUS ne pouvons
     /// pas, pas que l'adresse n'existe pas. Il n'apprend rien à qui récolte, et le
     /// compter punirait un pair pour nos propres embarras.
+    /// **LA SESSION DIT À LA POLITIQUE SI LE PAIR S'EST AUTHENTIFIÉ.**
+    ///
+    /// C'est la seule chose qui sépare un relais d'un relais ouvert, et la
+    /// politique ne peut pas la deviner : elle est PARTAGÉE par toutes les
+    /// connexions, et n'a aucun état propre à celle-ci. Le lui faire déduire
+    /// d'autre chose serait la façon d'ouvrir un relais sans s'en apercevoir.
+    #[test]
+    fn la_politique_apprend_si_le_pair_s_est_authentifie() {
+        use crate::{Authenticator, Policy};
+        use ams_sasl::Credentials;
+        use core::cell::Cell;
+
+        /// Retient ce que la session lui a dit, et accepte tout.
+        struct Espionne(Cell<Option<bool>>);
+        impl Authenticator for Espionne {
+            fn authenticate(&self, _credentials: &Credentials<'_>) -> bool {
+                true
+            }
+        }
+        impl Policy for Espionne {
+            fn accepts_recipient(
+                &self,
+                _forward_path: &Path<'_>,
+                submitter: bool,
+            ) -> RecipientVerdict {
+                self.0.set(Some(submitter));
+                RecipientVerdict::Accept
+            }
+        }
+
+        let config = Config::new(b"mail.example.com", 10, 10_485_760, Limits::DEFAULT)
+            .expect("configurable")
+            .with_capabilities(Capabilities {
+                starttls: false,
+                auth: true,
+            });
+        let espionne = Espionne(Cell::new(None));
+        let mut session = SmtpSession::new(config, &espionne);
+        let mut tampon = [0_u8; 512];
+        session.greeting(&mut tampon).expect("bannière");
+        // On force le chiffrement : `AUTH` est refusé sans lui, sans réglage.
+        session.on_tls_established();
+        let dire = |session: &mut SmtpSession<'_, &Espionne>, ligne: &[u8]| {
+            let mut place = [0_u8; 512];
+            session.handle(ligne, &mut place).expect("une réponse");
+        };
+        dire(&mut session, b"EHLO client.example\r\n");
+        dire(&mut session, b"MAIL FROM:<a@b.co>\r\n");
+        dire(&mut session, b"RCPT TO:<c@d.co>\r\n");
+        assert_eq!(espionne.0.get(), Some(false), "avant l'AUTH");
+
+        // `\0jean\0ouvre-toi` en base64.
+        dire(&mut session, b"AUTH PLAIN AGplYW4Ab3V2cmUtdG9p\r\n");
+        assert!(session.is_authenticated());
+        dire(&mut session, b"MAIL FROM:<a@b.co>\r\n");
+        dire(&mut session, b"RCPT TO:<c@d.co>\r\n");
+        assert_eq!(espionne.0.get(), Some(true), "après l'AUTH");
+    }
+
+    // ── Le chemin de retour ─────────────────────────────────────────────────
+
+    /// **CE QUE LE PAIR A ÉCRIT, ET RIEN D'AUTRE.**
+    ///
+    /// C'est l'adresse à laquelle un rapport de non-remise reviendra. Elle ne se
+    /// confond pas avec l'identité que SPF vérifie — celle-là vaut
+    /// `postmaster@<HELO>` pour un chemin nul, ce que le pair n'a pas écrit.
+    #[test]
+    fn le_chemin_de_retour_est_celui_que_le_pair_a_ecrit() {
+        let mut session = acceptante();
+        identifier(&mut session);
+        assert_eq!(session.return_path(), None, "hors transaction");
+        jouer(&mut session, b"MAIL FROM:<jean@example.com>\r\n");
+        assert_eq!(session.return_path(), Some(&b"jean@example.com"[..]));
+    }
+
+    /// **UN CHEMIN NUL NE SE RETIENT PAS**, et un littéral d'adresse non plus.
+    ///
+    /// `<>` est l'expéditeur des notifications, et §6.1 de RFC 5321 interdit
+    /// qu'une notification en engendre une autre : il n'y a personne à qui rendre
+    /// compte. `jean@[192.0.2.1]` ne désigne aucune zone.
+    #[test]
+    fn ni_le_chemin_nul_ni_un_litteral_ne_se_retiennent() {
+        for ligne in [
+            &b"MAIL FROM:<>\r\n"[..],
+            b"MAIL FROM:<jean@[192.0.2.1]>\r\n",
+        ] {
+            let mut session = acceptante();
+            identifier(&mut session);
+            jouer(&mut session, ligne);
+            // Le message se construit AVANT l'assertion : un argument de
+            // `assert!` n'est évalué qu'à l'échec, et C2 compterait sa région
+            // découverte à jamais.
+            let quoi = std::format!("« {} »", std::string::String::from_utf8_lossy(ligne));
+            assert_eq!(session.return_path(), None, "{quoi}");
+        }
+    }
+
+    /// **IL EST CELUI D'UNE TRANSACTION, PAS D'UNE CONNEXION.**
+    ///
+    /// Le laisser derrière ferait rendre compte du message suivant à
+    /// l'expéditeur du précédent.
+    #[test]
+    fn le_chemin_de_retour_s_oublie_avec_la_transaction() {
+        let mut session = acceptante();
+        identifier(&mut session);
+        jouer(&mut session, b"MAIL FROM:<jean@example.com>\r\n");
+        jouer(&mut session, b"RSET\r\n");
+        assert_eq!(session.return_path(), None, "après un RSET");
+
+        jouer(&mut session, b"MAIL FROM:<marie@example.com>\r\n");
+        assert_eq!(session.return_path(), Some(&b"marie@example.com"[..]));
+        // Et un second `EHLO` remet tout à zéro comme un `RSET`.
+        jouer(&mut session, b"EHLO client.example\r\n");
+        assert_eq!(session.return_path(), None, "après un second EHLO");
+    }
+
     #[test]
     fn seul_un_refus_definitif_signale_une_recolte() {
         for (verdict, signale) in [

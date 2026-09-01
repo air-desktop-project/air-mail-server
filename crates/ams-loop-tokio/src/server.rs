@@ -454,7 +454,11 @@ mod tests {
     impl ams_session::Authenticator for ToutAccepter {}
 
     impl Policy for ToutAccepter {
-        fn accepts_recipient(&self, _forward_path: &Path<'_>) -> RecipientVerdict {
+        fn accepts_recipient(
+            &self,
+            _forward_path: &Path<'_>,
+            _submitter: bool,
+        ) -> RecipientVerdict {
             RecipientVerdict::Accept
         }
     }

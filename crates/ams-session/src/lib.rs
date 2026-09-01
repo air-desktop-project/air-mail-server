@@ -65,11 +65,14 @@
 //! impl Authenticator for NotreDomaine {}
 //!
 //! impl Policy for NotreDomaine {
-//!     fn accepts_recipient(&self, forward_path: &Path<'_>) -> RecipientVerdict {
+//!     fn accepts_recipient(&self, forward_path: &Path<'_>, submitter: bool) -> RecipientVerdict {
 //!         match forward_path {
 //!             Path::Mailbox(boite) if boite.domain().as_bytes() == b"example.com" => {
 //!                 RecipientVerdict::Accept
 //!             }
+//!             // AILLEURS, IL FAUT S'ÊTRE AUTHENTIFIÉ : c'est la seule chose
+//!             // qui sépare un relais d'un relais ouvert.
+//!             Path::Mailbox(_) if submitter => RecipientVerdict::Accept,
 //!             _ => RecipientVerdict::RelayDenied,
 //!         }
 //!     }

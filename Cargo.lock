@@ -53,6 +53,7 @@ dependencies = [
  "ams-guard",
  "ams-index",
  "ams-proto-smtp",
+ "ams-queue",
  "ams-store",
  "libc",
 ]
@@ -81,6 +82,7 @@ dependencies = [
  "ams-guard",
  "ams-index",
  "ams-proto-smtp",
+ "ams-queue",
  "capnp",
 ]
 
@@ -141,6 +143,7 @@ dependencies = [
  "ams-proto-pop3",
  "ams-proto-quic",
  "ams-proto-smtp",
+ "ams-queue",
  "ams-quic",
  "ams-quic-client",
  "ams-quic-crypto",

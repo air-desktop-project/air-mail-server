@@ -65,6 +65,8 @@ fn configuration(repertoire: &Path, clef: &str) -> PathBuf {
         limits: Limits::DEFAULT,
         guard: Thresholds::DEFAULT,
         tracked_sources: 64,
+        // AUCUNE ÉMISSION : ces essais reçoivent, ils n'émettent pas.
+        relay: ams_config::Relay::default(),
         timeouts: Timeouts {
             command_seconds: 10,
             data_seconds: 10,

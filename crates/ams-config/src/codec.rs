@@ -3,9 +3,11 @@
 use alloc::string::{String, ToString as _};
 use alloc::vec::Vec;
 use core::fmt;
+use core::time::Duration;
 
 use ams_guard::Thresholds;
 use ams_proto_smtp::{ClientId, Limits};
+use ams_queue::Backoff;
 use capnp::message::ReaderOptions;
 use capnp::serialize;
 
@@ -289,6 +291,60 @@ pub struct Configuration {
     /// oui. Séparé de ce fichier-ci — voir `ams-accounts.capnp` pour les trois
     /// raisons.
     pub accounts: String,
+    /// La file de réémission sortante.
+    pub relay: Relay,
+}
+
+/// Ce que ce serveur émet POUR SES COMPTES, et comment il insiste.
+///
+/// # ÉTEINT PAR DÉFAUT, ET UN FICHIER ANCIEN DÉCODE ÉTEINT
+///
+/// Émettre du courrier vers des tiers ne se décide pas à la place de celui qui
+/// exploite la machine — la même règle que pour les rapports DMARC. Et parce que
+/// ce champ a été ajouté après coup, une configuration écrite avant lui décode
+/// `enabled: false` : une mise à jour ne transforme personne en relais.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Relay {
+    /// Relaie-t-on pour les comptes authentifiés ?
+    pub enabled: bool,
+    /// Le dossier de la file, ou une chaîne vide.
+    ///
+    /// **Distinct du Maildir** : ce qui attend d'être émis n'est pas du courrier
+    /// reçu, et les mélanger ferait apparaître dans une boîte ce qui n'y est
+    /// jamais arrivé.
+    pub spool: String,
+    /// L'attente après le premier échec, en secondes. Zéro prend le défaut.
+    pub retry_seconds: u32,
+    /// Le plafond de l'attente, en secondes. Zéro prend le défaut.
+    pub max_retry_seconds: u32,
+    /// Le temps accordé à un message depuis son dépôt. Zéro prend le défaut.
+    pub expire_seconds: u32,
+}
+
+impl Relay {
+    /// Les durées que cette configuration décrit.
+    ///
+    /// **ZÉRO PREND LE DÉFAUT**, à chaque champ séparément : c'est ce qui permet
+    /// d'ajouter ces durées sans qu'un fichier ancien ne fasse réessayer aussi
+    /// vite que le disque tourne, ni renoncer avant d'avoir essayé.
+    #[must_use]
+    pub fn backoff(&self) -> Backoff {
+        let defaut = Backoff::DEFAULT;
+        Backoff {
+            first: duree(self.retry_seconds, defaut.first),
+            ceiling: duree(self.max_retry_seconds, defaut.ceiling),
+            expiry: duree(self.expire_seconds, defaut.expiry),
+        }
+    }
+}
+
+/// `secondes`, ou `defaut` quand elle vaut zéro.
+fn duree(secondes: u32, defaut: Duration) -> Duration {
+    if secondes == 0 {
+        defaut
+    } else {
+        Duration::from_secs(u64::from(secondes))
+    }
 }
 
 /// Ce qui rend un fichier de configuration irrecevable.
@@ -434,6 +490,18 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
     let ecoute_h3 = texte(lu.get_listen_h3()?)?;
     let clef_de_jeton = texte(lu.get_token_key()?)?;
 
+    // **UN FICHIER ÉCRIT AVANT CE CHAMP DÉCODE `enabled: false`**, et un serveur
+    // qu'on met à jour ne devient donc pas un relais sans que personne l'ait
+    // décidé. C'est ce qui rend ce champ ajoutable.
+    let emission = lu.get_relay()?;
+    let relay = Relay {
+        enabled: emission.get_enabled(),
+        spool: texte(emission.get_spool()?)?,
+        retry_seconds: emission.get_retry_seconds(),
+        max_retry_seconds: emission.get_max_retry_seconds(),
+        expire_seconds: emission.get_expire_seconds(),
+    };
+
     let signature = lu.get_dkim()?;
     let dkim = Dkim {
         selector: texte(signature.get_selector()?)?,
@@ -525,6 +593,7 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
         listen_http: ecoute_http,
         listen_h3: ecoute_h3,
         token_key: clef_de_jeton,
+        relay,
     })
 }
 
@@ -623,6 +692,14 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
         ecrit.set_listen_http(&config.listen_http);
         ecrit.set_listen_h3(&config.listen_h3);
         ecrit.set_token_key(&config.token_key);
+        {
+            let mut emission = ecrit.reborrow().init_relay();
+            emission.set_enabled(config.relay.enabled);
+            emission.set_spool(&config.relay.spool);
+            emission.set_retry_seconds(config.relay.retry_seconds);
+            emission.set_max_retry_seconds(config.relay.max_retry_seconds);
+            emission.set_expire_seconds(config.relay.expire_seconds);
+        }
     }
     Ok(serialize::write_message_to_words(&message))
 }
@@ -649,6 +726,7 @@ fn depuis(valeur: usize) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use super::Relay;
     use super::{
         Configuration, Dkim, Dmarc, Enforcement, Error, Spf, TRAVERSAL_LIMIT_WORDS, Timeouts, Tls,
         decode, encode,
@@ -671,6 +749,9 @@ mod tests {
             limits: Limits::DEFAULT,
             guard: Thresholds::DEFAULT,
             tracked_sources: 4096,
+            // AUCUNE ÉMISSION dans l'exemple : c'est le défaut, et c'est aussi
+            // ce qu'un fichier écrit avant que ce champ n'existe décodera.
+            relay: Relay::default(),
             timeouts: Timeouts {
                 command_seconds: 300,
                 data_seconds: 600,
@@ -1139,5 +1220,133 @@ mod tests {
         let relue = decode(&octets).expect("relisible");
         assert!(!relue.dmarc.est_configure());
         assert_eq!(relue.dmarc.enforcement, Enforcement::Enforce);
+    }
+
+    // ── La file de réémission sortante ──────────────────────────────────────
+
+    /// **UN FICHIER ANCIEN DÉCODE « AUCUNE ÉMISSION ».**
+    ///
+    /// C'est ce qui rend ce champ ajoutable : un serveur qu'on met à jour ne
+    /// devient pas un relais sans que personne l'ait décidé. Le test l'éprouve
+    /// par le seul moyen honnête — le défaut de la structure, qui est ce que
+    /// Cap'n Proto rend d'un champ absent.
+    #[test]
+    fn sans_champ_de_relais_rien_ne_sort() {
+        let relais = Relay::default();
+        assert!(!relais.enabled);
+        assert!(relais.spool.is_empty());
+        // Et l'exemple, qui est le défaut, ne relaie pas davantage.
+        assert!(!exemple().relay.enabled);
+    }
+
+    /// Les cinq champs traversent l'encodage et la relecture.
+    #[test]
+    fn la_file_traverse_le_format() {
+        let voulu = Relay {
+            enabled: true,
+            spool: String::from("/var/spool/ams/file"),
+            retry_seconds: 60,
+            max_retry_seconds: 3_600,
+            expire_seconds: 172_800,
+        };
+        let config = Configuration {
+            relay: voulu.clone(),
+            ..exemple()
+        };
+        let octets = encode(&config).expect("encodable");
+        let relue = decode(&octets).expect("relisible");
+        assert_eq!(relue.relay, voulu);
+        assert_eq!(relue, config);
+    }
+
+    /// **ZÉRO PREND LE DÉFAUT, CHAMP PAR CHAMP.**
+    ///
+    /// Sans cela, un fichier écrit avant ces durées ferait réessayer aussi vite
+    /// que le disque tourne, et renoncerait avant d'avoir essayé une seule fois.
+    #[test]
+    fn un_zero_prend_le_defaut_champ_par_champ() {
+        let defaut = ams_queue::Backoff::DEFAULT;
+        assert_eq!(Relay::default().backoff(), defaut);
+
+        // Un seul champ nommé : les deux autres restent au défaut.
+        let partielle = Relay {
+            retry_seconds: 42,
+            ..Relay::default()
+        };
+        let reprise = partielle.backoff();
+        assert_eq!(reprise.first, Duration::from_secs(42));
+        assert_eq!(reprise.ceiling, defaut.ceiling);
+        assert_eq!(reprise.expiry, defaut.expiry);
+
+        // Et les trois nommés : plus rien du défaut.
+        let entiere = Relay {
+            retry_seconds: 1,
+            max_retry_seconds: 2,
+            expire_seconds: 3,
+            ..Relay::default()
+        };
+        assert_eq!(
+            entiere.backoff(),
+            ams_queue::Backoff {
+                first: Duration::from_secs(1),
+                ceiling: Duration::from_secs(2),
+                expiry: Duration::from_secs(3),
+            }
+        );
+    }
+
+    /// **UN DOSSIER DE FILE QUI N'EST PAS DE L'UTF-8 FAIT REFUSER LE FICHIER.**
+    ///
+    /// Le refus vaut pour tous les champs texte, mais celui-ci se décode EN
+    /// DERNIER : des octets au hasard échouent toujours plus tôt, et sa garde
+    /// n'était donc jamais éprouvée. On écrit le message à la main pour
+    /// l'atteindre — un chemin illisible ferait ouvrir un dossier qui n'est pas
+    /// celui que l'administrateur a nommé.
+    #[test]
+    fn un_dossier_de_file_illisible_fait_refuser() {
+        use crate::ams_config_capnp::configuration;
+
+        let bon = encode(&Configuration {
+            relay: Relay {
+                enabled: true,
+                spool: String::from("/var/spool/ams/file"),
+                ..Relay::default()
+            },
+            ..exemple()
+        })
+        .expect("encodable");
+        assert!(decode(&bon).is_ok(), "le témoin doit se relire");
+
+        // Le même, dont le seul dossier porte un octet qui n'est pas de l'UTF-8.
+        let mut message = capnp::message::Builder::new_default();
+        {
+            let lu = capnp::serialize::read_message(
+                &mut bon.as_slice(),
+                capnp::message::ReaderOptions::new(),
+            )
+            .expect("relisible");
+            message
+                .set_root(lu.get_root::<configuration::Reader<'_>>().expect("racine"))
+                .expect("recopiable");
+            let mut ecrit = message
+                .get_root::<configuration::Builder<'_>>()
+                .expect("racine");
+            let mut emission = ecrit.reborrow().init_relay();
+            emission.set_enabled(true);
+            emission.set_spool(capnp::text::Reader(b"/var/\xff/file"));
+        }
+        let octets = capnp::serialize::write_message_to_words(&message);
+        assert_eq!(decode(&octets), Err(Error::NotUtf8));
+    }
+
+    #[test]
+    fn la_file_se_debogue_et_se_compare() {
+        let relais = Relay {
+            enabled: true,
+            ..Relay::default()
+        };
+        assert!(!std::format!("{relais:?}").is_empty());
+        assert_ne!(relais, Relay::default());
+        assert_eq!(relais.clone(), relais);
     }
 }

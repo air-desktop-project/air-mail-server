@@ -1238,6 +1238,50 @@ sont écrites AVANT le code qui émet :
    un rebond vers une adresse qu'un tiers a écrite dans un `MAIL FROM:` usurpé
    ferait de nous l'instrument de son envoi.
 
+**Où les deux conditions se rejoignent** : `Policy::accepts_recipient` reçoit un
+second argument, `submitter`, que la SESSION renseigne — elle seule a conduit
+l'`AUTH`. La politique, elle, est partagée par toutes les connexions et n'a aucun
+état propre à l'une d'elles ; le lui faire déduire d'autre chose serait la façon
+d'ouvrir un relais sans s'en apercevoir. Le `&&` avec le drapeau de configuration
+est écrit à UN SEUL endroit, dans `BoitesConnues`.
+
+**Les deux portes de soumission appliquent la même règle**, et c'est délibéré :
+SMTP authentifié et `/v1/submissions` mènent tous deux à la même file. N'en
+ouvrir qu'une ferait deux règles pour un même geste, et l'utilisateur
+découvrirait laquelle relaie en essayant.
+
+**Quatre décisions de la file elle-même**, consignées parce qu'elles ne se lisent
+pas dans le code seul :
+
+1. **L'état de la reprise tient dans le NOM du fichier** —
+   `<prochain>!<dépôt>!<essais>!<identifiant>.eml`. Un index séparé serait un
+   second endroit à tenir cohérent avec le premier, et une panne au mauvais
+   moment les ferait diverger. Un `rename()` fait passer d'un état à l'autre en
+   une opération que le système de fichiers rend atomique.
+2. **L'enveloppe est un fichier voisin, nommé par le SEUL identifiant.** Les
+   en-têtes ne disent pas à qui remettre — `To:` peut nommer une liste, `Bcc:` a
+   disparu à la composition —, et c'est `MAIL FROM:` et `RCPT TO:` qui décident.
+   Le nom de l'enveloppe ne change jamais, si bien qu'une reprise n'a JAMAIS deux
+   renommages à réussir ensemble.
+3. **La péremption se juge APRÈS l'essai, à un seul endroit.** Un message qui a
+   dormi pendant une panne du serveur a droit à un dernier essai, plutôt qu'à un
+   rapport écrit sans avoir rien tenté. Et le dernier essai tombe SUR l'échéance :
+   renoncer dès que l'attente la dépasserait raccourcirait en silence les cinq
+   jours que §4.5.4.1 de RFC 5321 demande.
+4. **Un envoi par destinataire, et non par domaine.** `RelayOutcome::Delivered`
+   COMPTE les destinataires refusés ; il ne les NOMME pas. Grouper rendrait donc
+   un rapport qui devrait deviner qui a échoué, et un rapport qui devine se trompe
+   sur l'adresse d'un tiers. Le coût — une transaction par destinataire — se paie
+   en connexions ; l'autre se paierait en rapports faux.
+
+**Et un rapport qui ne se compose pas se compose SANS les en-têtes d'origine.**
+Ce sont les seules valeurs du rapport qui ne viennent pas de nous, donc les seules
+qui puissent le faire refuser ; renoncer alors ferait disparaître le message en
+silence, ce que cette file existe pour empêcher. Le cas s'est produit pendant
+l'écriture : un tiret cadratin dans le texte français du rapport, que le composeur
+refuse à juste titre, effaçait le message sans que son expéditeur l'apprenne. Le
+repli est là, et l'échec se journalise.
+
 **Le piège vaut d'être nommé** : les défauts de `tokio-rustls` sont
 `["logging", "tls12", "aws-lc-rs"]`. Les laisser ferait entrer TLS 1.2 **et** du
 C dans la boucle sans qu'une seule ligne du dépôt le demande — deux contraintes
@@ -2882,23 +2926,26 @@ refuse — la commande ou la poignée de main — ne nous fera pas parler en cla
 c'est exactement le levier d'une attaque par déclassement. Et TLS 1.3 reste le
 plancher (C6), fût-ce au prix de quelques remises manquées.
 
-### Ce qui n'a pas encore d'appelant
+### Ses deux appelants
 
 Le client est écrit, couvert à 100 %, fuzzé et **éprouvé contre notre propre
 serveur** — deux moitiés qui ne partagent aucun code, mises face à face. Son
 premier appelant est arrivé le même jour : la remise des rapports DMARC.
 
-Il n'y a toujours pas de **file d'attente générale** : `send` remet, ou dit
-pourquoi il n'a pas pu. Le dossier des rapports en tient lieu pour eux seuls — il
-sait différer et abandonner, ce qui suffit à des messages qu'on peut perdre sans
-que personne n'en souffre. Une vraie file demanderait des avis de non-remise et
-une politique de reprise, deux décisions qui ne se prennent pas en passant.
+**Le second est la file de réémission, le 2026-09-01** (voir C6). `send` lui-même
+n'attend ni ne réessaie — il remet, ou il dit pourquoi il n'a pas pu —, et c'est
+ce qui le garde éprouvable : la décision de recommencer vit ailleurs, dans
+`ams-queue`, où elle est couverte à 100 %.
 
-**La soumission par l'API ne les fait pas prendre non plus**, et c'est délibéré :
-elle remet LOCALEMENT, par le chemin de SMTP. Un message qui sortirait vers
-l'extérieur, lui, aurait besoin de cette file — et c'est pourquoi la soumission
-refuse tout destinataire qui n'est pas d'ici plutôt que de promettre ce qu'elle ne
-tiendrait pas.
+Les deux décisions qui manquaient — l'avis de non-remise et la politique de
+reprise — ont été prises : un DSN de RFC 3464 remis LOCALEMENT, et une attente
+qui double jusqu'à un plafond avec un abandon à cinq jours.
+
+**Les deux portes de soumission y mènent** : SMTP authentifié et
+`/v1/submissions`. La soumission par l'API remettait LOCALEMENT et refusait tout
+destinataire d'ailleurs ; elle accepte désormais les mêmes que SMTP, et pas
+d'autres. N'ouvrir qu'une des deux ferait deux règles pour un même geste, et
+l'utilisateur découvrirait laquelle relaie en essayant.
 
 ### DNSSEC n'est pas validé, et c'est écrit partout
 
@@ -3061,8 +3108,13 @@ partager. Le choix est fait dans ce sens et il coûte de la place.
 Enfin, une limite honnête : les `rename` sont atomiques **un par un, pas
 ensemble**. Un échec au milieu d'une remise à plusieurs laisse les premiers
 remis, et le pair réessaiera — il recevra alors le message en double dans ces
-boîtes-là. C'est le compromis de tout serveur sans file d'attente, et le doublon
-est moins grave que la perte.
+boîtes-là. Le doublon est moins grave que la perte.
+
+**La file de réémission ne change rien à cela, et ce n'est pas un oubli** : elle
+sert à ce qui SORT. Un `4yz` rendu au pair laisse la responsabilité du message
+chez lui, où elle est bien — c'est LUI qui a l'expéditeur au bout du fil. Prendre
+en charge un message pour ne le remettre qu'en partie ferait porter à ce serveur
+un échec que le pair sait mieux traiter.
 
 ### Le magasin d'identifiants est UN AUTRE fichier
 

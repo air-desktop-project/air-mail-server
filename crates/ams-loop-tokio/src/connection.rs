@@ -665,6 +665,12 @@ where
     // ne voit pas les `RCPT` — elle ne connaît aucun protocole — et ne les garde
     // pas : une liste tenue ici survivrait au `RSET` qu'elle ne voit pas non
     // plus, et livrerait le message suivant aux destinataires du précédent.
+    //
+    // LE CHEMIN DE RETOUR D'ABORD, parce qu'il vaut pour la transaction entière
+    // et non pour un destinataire : c'est à lui qu'un rapport de non-remise
+    // reviendra, et une remise qui l'apprendrait après coup aurait déjà écrit
+    // une entrée de file sans savoir à qui rendre compte.
+    delivery.begin(session.return_path());
     let mut echec: Option<DeliveryFailure> = None;
     for adresse in session.recipients() {
         if let Err(cause) = delivery.add_recipient(adresse) {
@@ -948,7 +954,7 @@ mod tests {
     impl ams_session::Authenticator for NotreDomaine {}
 
     impl Policy for NotreDomaine {
-        fn accepts_recipient(&self, forward_path: &Path<'_>) -> RecipientVerdict {
+        fn accepts_recipient(&self, forward_path: &Path<'_>, _submitter: bool) -> RecipientVerdict {
             match forward_path {
                 Path::Mailbox(boite) if boite.domain().as_bytes() == b"example.com" => {
                     RecipientVerdict::Accept

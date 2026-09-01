@@ -24,6 +24,24 @@ pub enum DeliveryFailure {
 /// ce qui arrive est le message, pas ce qui est passé sur le fil. Le ré-émettre
 /// demandera de le ré-échapper.
 pub trait Delivery {
+    /// Le message qui commence, et l'adresse à laquelle en rendre compte.
+    ///
+    /// Appelée **une fois par transaction**, avant le premier
+    /// [`Delivery::add_recipient`]. `return_path` est le `MAIL FROM:` tel que le
+    /// pair l'a écrit, ou `None` pour un chemin nul — une notification, qui n'en
+    /// engendre pas une autre.
+    ///
+    /// # LE DÉFAUT NE FAIT RIEN, ET IL NE PEUT QUE FERMER DES PORTES
+    ///
+    /// Une remise qui ne fait que déposer localement n'a que faire d'un chemin
+    /// de retour : c'est le pair d'en face qui rend compte, pas nous. Ne pas
+    /// l'implémenter revient donc à ne rien pouvoir mettre en file de
+    /// réémission — puisqu'on ne saurait à qui rendre compte d'un échec — et
+    /// c'est le bon sens du défaut.
+    fn begin(&mut self, return_path: Option<&[u8]>) {
+        let _ = return_path;
+    }
+
     /// Ouvre la remise vers **un** destinataire accepté.
     ///
     /// Appelée une fois par destinataire, juste avant le premier
@@ -43,9 +61,18 @@ pub trait Delivery {
     /// # Errors
     ///
     /// [`DeliveryFailure`] — par exemple une boîte qu'on ne peut pas ouvrir. La
-    /// boucle refuse alors le message entier : accepter un message qu'on ne
-    /// peut remettre qu'à une partie des destinataires obligerait à en avertir
-    /// l'expéditeur, ce qui demande une file d'attente qui n'existe pas.
+    /// boucle refuse alors le message ENTIER.
+    ///
+    /// # ET ELLE LE REFUSE ENCORE, MAINTENANT QUE LA FILE EXISTE
+    ///
+    /// L'argument était que rendre compte à l'expéditeur d'une remise partielle
+    /// demanderait une file d'attente. Elle existe depuis le 2026-09-01, et ce
+    /// n'est plus l'argument — mais la réponse ne change pas, pour une raison
+    /// meilleure : **la file sert à ce qui SORT**, et un `4yz` rendu au pair
+    /// laisse la responsabilité du message chez lui, où elle est bien. Prendre
+    /// le message en charge pour le rendre en partie ferait porter à ce serveur
+    /// un échec que le pair sait mieux traiter — c'est LUI qui a l'expéditeur au
+    /// bout du fil.
     fn add_recipient(&mut self, address: &[u8]) -> Result<(), DeliveryFailure>;
 
     /// Reçoit un morceau du message.

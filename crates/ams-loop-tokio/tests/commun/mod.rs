@@ -41,7 +41,7 @@ impl ams_session::Authenticator for NotreDomaine {
 }
 
 impl Policy for NotreDomaine {
-    fn accepts_recipient(&self, forward_path: &SmtpPath<'_>) -> RecipientVerdict {
+    fn accepts_recipient(&self, forward_path: &SmtpPath<'_>, _submitter: bool) -> RecipientVerdict {
         match forward_path {
             SmtpPath::Mailbox(boite) if boite.domain().as_bytes() == b"example.com" => {
                 RecipientVerdict::Accept

@@ -44,6 +44,7 @@ ams-dmarc = { workspace = true }
 # Le squelette d'un message : la boucle doit découper un bloc d'en-tête en
 # champs pour savoir lesquels une signature couvre.
 ams-mime = { workspace = true }
+ams-queue = { workspace = true }
 tokio = { workspace = true }
 # `gzip` pour les rapports DMARC (RFC 7489 §7.2.1) : un rapport agrégé remis par
 # courrier DOIT être compressé.

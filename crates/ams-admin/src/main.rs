@@ -55,6 +55,9 @@ COMMANDES
                         liste les noms de comptes. Jamais les empreintes.
     account remove <fichier> --login <nom>
                         retire un compte.
+    config write … --relay --relay-spool <chemin>
+                        ouvre l'ÉMISSION pour les comptes authentifiés. Éteinte
+                        par défaut : ce serveur reçoit, il n'émet pas.
     token <config> --login <nom> [--minutes <n>]
                         frappe un jeton d'ADMINISTRATION, et l'écrit sur la
                         sortie standard. Il se scelle avec le secret que la
@@ -202,6 +205,18 @@ fn ecrire(fichier: &Path, arguments: &[&str]) -> ExitCode {
              éteint ce compteur. Une rafale de destinataires refusés ne sera plus remarquée."
         );
     }
+    if config.relay.enabled {
+        println!(
+            "ATTENTION  ÉMISSION OUVERTE : ce serveur relaiera vers l'extérieur pour tout \
+             compte AUTHENTIFIÉ. Sans certificat TLS, l'authentification n'est pas annoncée \
+             et personne ne pourra s'en servir."
+        );
+    } else if !config.relay.spool.is_empty() {
+        println!(
+            "ATTENTION  dossier de file nommé SANS `--relay` : rien ne sera émis, et rien \
+             n'y sera écrit."
+        );
+    }
     if config.guard.ban_duration.as_secs() == 0 {
         println!(
             "ATTENTION  aucun bannissement : `--ban-seconds 0` fait AJOURNER au lieu de \
@@ -277,6 +292,21 @@ fn afficher(config: &Configuration) {
             // **UN COMPTEUR ÉTEINT SE DIT**, et ne se devine pas à un zéro.
             0 => String::from("compteur ÉTEINT — ce fichier est antérieur à ce seuil"),
             combien => format!("{combien} destinataires refusés/min avant bannissement"),
+        }
+    );
+    println!(
+        "réémission         {}",
+        if config.relay.enabled {
+            let reprise = config.relay.backoff();
+            format!(
+                "vers `{}` — 1er essai à {} s, plafond {} s, abandon à {} s",
+                config.relay.spool,
+                reprise.first.as_secs(),
+                reprise.ceiling.as_secs(),
+                reprise.expiry.as_secs()
+            )
+        } else {
+            String::from("AUCUNE — ce serveur reçoit, il n'émet pas pour ses comptes")
         }
     );
     println!(

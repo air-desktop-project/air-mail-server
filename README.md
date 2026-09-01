@@ -95,7 +95,7 @@ des octets **et des actions**. Elles n'attendent jamais.
 | --- | --- | --- |
 | `ams-session` | les sessions, serveur ET cliente | **SMTP, POP3 et IMAP en réception, SMTP à l'émission** |
 | `ams-guard` | flooding et bannissement par source | **implémenté** |
-| `ams-queue` | file de réémission : quand réessayer, quand renoncer | **l'arithmétique et les noms ; le câblage suit** |
+| `ams-queue` | file de réémission : quand réessayer, quand renoncer | **implémenté, et câblé** |
 | `ams-auth` | le magasin d'identifiants, vérification Argon2id | **implémenté** |
 | `ams-tls` | TLS 1.3 uniquement, échange de clés post-quantique | **implémenté, en entrant et en sortant** |
 | `ams-dkim` | RFC 6376 | **vérifiées, câblées, et posées** |
@@ -1305,9 +1305,12 @@ rien.
 Le client est éprouvé **contre notre propre serveur** : deux moitiés qui ne
 partagent aucun code, mises face à face. C'est là que se vérifie que le
 point-farcissage et sa défaite se répondent, et qu'un message contenant une ligne
-au seul point arrive intact. Il n'a pas encore d'appelant dans le binaire — son
-premier sera l'envoi des rapports — et il n'y a pas de file d'attente : `send`
-remet, ou dit pourquoi il n'a pas pu.
+au seul point arrive intact.
+
+`send` lui-même n'attend ni ne réessaie : **il remet, ou il dit pourquoi il n'a
+pas pu**. C'est ce qui le rend éprouvable, et c'est la file de réémission qui
+décide de la suite — voir « [Émettre pour ses comptes](#émettre-pour-ses-comptes)
+». Ses deux appelants sont la remise des rapports DMARC et cette file.
 
 **La quarantaine n'est pas encore un endroit.** `p=quarantine` demande de traiter
 le message comme suspect ; ce serveur n'a pas de dossier pour cela. Il le remet,
@@ -1569,6 +1572,68 @@ empreintes, mais c'est un dictionnaire de noms à essayer.
 
 `--accounts` sans `--tls-cert` est refusé : `AUTH` n'est **jamais** annoncé hors
 chiffrement, et ce refus n'est pas réglable.
+
+### Émettre pour ses comptes
+
+```sh
+./target/release/air-mail-admin config write air-mail.conf \
+    --domain mail.example.com --hosted example.com \
+    --tls-cert /etc/ams/chaine.pem --tls-key /etc/ams/cle.pem \
+    --accounts comptes.bin \
+    --resolver 127.0.0.1:53 \
+    --relay --relay-spool /var/spool/ams/file
+```
+
+**Sans `--relay`, rien ne sort**, et c'est le défaut. Un destinataire qui n'est
+pas d'ici est refusé par un `550`, même pour un compte authentifié : ce serveur
+reçoit, il n'émet pas. Émettre du courrier vers des tiers ne se décide pas à la
+place de celui qui exploite la machine — la même règle que `--dmarc-send` — et
+une mise à jour ne transforme donc personne en relais.
+
+**Avec `--relay`, on ne relaie que pour un compte authentifié.** C'est la seule
+chose qui sépare un relais d'un relais ouvert, et ce n'est pas réglable.
+L'authentification n'étant annoncée que sous chiffrement, `--relay` sans
+`--tls-cert` n'ouvre l'émission à personne ; le serveur le dit au démarrage.
+
+Les **deux portes de soumission** y mènent : `MAIL FROM:`/`RCPT TO:` après un
+`AUTH PLAIN`, et `POST /v1/submissions`. N'en ouvrir qu'une ferait deux règles
+pour un même geste.
+
+Le serveur **refuse de démarrer** dans deux cas, plutôt que de perdre du courrier
+en silence : `--relay` sans `--relay-spool` — on accepterait un message qu'on n'a
+nulle part où poser — et `--relay` sans `--resolver` — aucun `MX` ne pourrait être
+trouvé, et tout message reviendrait à son expéditeur cinq jours plus tard sans
+qu'un seul essai ait eu lieu.
+
+**L'attente double à chaque échec**, d'un quart d'heure à six heures, et l'on
+abandonne au bout de cinq jours (§4.5.4.1 de RFC 5321 en demande au moins quatre).
+Réessayer à intervalle fixe pendant cinq jours, c'est frapper des centaines de
+fois à une porte fermée ; et si mille messages attendent pour ce même domaine,
+c'est le marteler pendant qu'il se relève. Les trois durées se règlent :
+`--relay-retry-seconds`, `--relay-max-retry-seconds`, `--relay-expire-seconds`.
+
+**Quand on renonce, un rapport de non-remise (RFC 3464) part — et il reste ici.**
+Il est déposé dans la boîte du compte qui avait écrit. Ce serveur n'envoie jamais
+de rebond à un inconnu : le chemin de retour est toujours l'une de ses propres
+adresses, puisqu'il ne relaie que pour ses comptes. C'est ce qui le tient hors de
+la **rétro-diffusion** — émettre un rebond vers une adresse qu'un tiers a écrite
+dans un `MAIL FROM:` usurpé ferait de nous l'instrument de son envoi.
+
+Le rapport porte les **en-têtes** du message perdu, pas son corps : renvoyer le
+corps doublerait le volume d'un rapport écrit précisément parce qu'on n'arrivait
+pas à émettre, et un message de dix mégaoctets ne se remet pas mieux quand il
+revient.
+
+Deux limites, nommées plutôt que tues :
+
+- **Un envoi par destinataire, pas par domaine.** `RelayOutcome` compte les
+  destinataires refusés sans les nommer ; grouper ferait deviner au rapport qui a
+  échoué. Le coût se paie en connexions, ce qui vaut mieux qu'un rapport faux sur
+  l'adresse d'un tiers.
+- **Le chiffrement sortant est opportuniste et n'authentifie personne** : le `MX`
+  vient d'un DNS non validé. Un espion passif ne lit rien ; un actif, si. Le repli
+  en clair après un `STARTTLS` annoncé est en revanche refusé — c'est le levier
+  d'une attaque par déclassement.
 
 ### Régler le garde
 

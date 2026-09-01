@@ -34,6 +34,13 @@ const DOMAINE: &[u8] = b"mail.example.com";
 struct Politique {
     verdicts: Vec<u8>,
     curseur: Cell<usize>,
+    /// La session a-t-elle JAMAIS annoncé un déposant authentifié ?
+    ///
+    /// **C'EST LA PROPRIÉTÉ QUI GARDE LE RELAIS FERMÉ.** Cette politique
+    /// n'authentifie personne ; si un `true` arrivait ici, une politique réelle
+    /// accepterait un destinataire qui n'est pas d'ici — c'est-à-dire relaierait
+    /// pour un pair qui n'a rien prouvé.
+    depose: Cell<bool>,
 }
 
 /// Elle n'authentifie PERSONNE : le défaut du trait refuse, et c'est ce qui
@@ -41,7 +48,10 @@ struct Politique {
 impl ams_session::Authenticator for Politique {}
 
 impl Policy for Politique {
-    fn accepts_recipient(&self, _forward_path: &Path<'_>) -> RecipientVerdict {
+    fn accepts_recipient(&self, _forward_path: &Path<'_>, submitter: bool) -> RecipientVerdict {
+        if submitter {
+            self.depose.set(true);
+        }
         if self.verdicts.is_empty() {
             return RecipientVerdict::RejectPermanent;
         }
@@ -144,8 +154,9 @@ fuzz_target!(|entree: Entree| {
     let politique = Politique {
         verdicts: entree.verdicts,
         curseur: Cell::new(0),
+        depose: Cell::new(false),
     };
-    let mut session = SmtpSession::new(config, politique);
+    let mut session = SmtpSession::new(config, &politique);
     let mut tampon = [0_u8; 512];
 
     // La bannière aussi appartient au vocabulaire.
@@ -237,4 +248,16 @@ fuzz_target!(|entree: Entree| {
             }
         }
     }
+
+    // **AUCUNE SUITE D'OCTETS NE FAIT DE CE PAIR UN DÉPOSANT.**
+    //
+    // Cette politique n'authentifie personne — le défaut du trait refuse — et la
+    // session ne doit donc jamais lui annoncer un déposant authentifié. Un seul
+    // `true` ici, et une politique réelle accepterait un destinataire qui n'est
+    // pas d'ici : c'est-à-dire relaierait pour un pair qui n'a rien prouvé.
+    assert!(
+        !politique.depose.get(),
+        "la session a annoncé un déposant authentifié sans authentification"
+    );
+    assert!(!session.is_authenticated());
 });

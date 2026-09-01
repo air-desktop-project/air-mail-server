@@ -87,11 +87,25 @@ impl Places {
 /// pour tout ce qui n'est pas hébergé — **y compris quand la liste est vide**,
 /// auquel cas le serveur n'accepte de courrier pour personne. C'est le seul
 /// défaut qui ne relaie rien.
+///
+/// # ET LE RELAIS QUI S'OUVRE, LUI, EXIGE DEUX CHOSES
+///
+/// Depuis que la file de réémission existe, une adresse qui n'est pas d'ici peut
+/// être acceptée. Il faut pour cela que **l'exploitant l'ait demandé**
+/// ([`BoitesConnues::qui_relaie`]) ET que **ce pair-ci se soit authentifié**.
+///
+/// L'une sans l'autre est un relais ouvert : sans le drapeau, on émettrait sans
+/// que personne l'ait décidé ; sans l'authentification, on émettrait pour
+/// n'importe qui. La conjonction est écrite à UN SEUL endroit — deux
+/// vérifications à deux endroits finissent par ne plus dire la même chose.
 pub struct BoitesConnues {
     comptes: std::sync::Arc<crate::comptes::Comptes>,
     /// L'adresse du postmaster de ce serveur, composée une fois.
     postmaster: String,
     places: Places,
+    /// L'exploitant a-t-il demandé qu'on émette ? Voir
+    /// [`BoitesConnues::qui_relaie`].
+    relaie: bool,
 }
 
 impl BoitesConnues {
@@ -105,7 +119,28 @@ impl BoitesConnues {
             comptes,
             postmaster,
             places: Places::new(VERIFICATIONS_SIMULTANEES),
+            // ON N'ÉMET PAS, SAUF DEMANDE EXPRESSE. Le constructeur ne prend pas
+            // ce drapeau : un argument booléen de plus se passe à l'envers sans
+            // que le compilateur bronche, et celui-ci ouvre un relais.
+            relaie: false,
         }
+    }
+
+    /// Ouvre l'émission vers l'extérieur, POUR LES COMPTES AUTHENTIFIÉS.
+    ///
+    /// # C'EST LA SEULE FAÇON D'OUVRIR CE RELAIS, ET ELLE SE VOIT
+    ///
+    /// Une politique se construit fermée. L'ouvrir demande d'appeler ceci, ce qui
+    /// laisse une ligne à lire dans le démarrage du serveur — là où un champ posé
+    /// dans un constructeur à sept arguments se serait glissé sans qu'on le
+    /// remarque.
+    ///
+    /// **Elle n'ouvre rien à un pair anonyme** : `accepts_recipient` exige les
+    /// deux, le drapeau ET l'authentification.
+    #[must_use]
+    pub fn qui_relaie(mut self) -> Self {
+        self.relaie = true;
+        self
     }
 
     /// Y a-t-il des comptes ?
@@ -156,7 +191,7 @@ impl Policy for BoitesConnues {
     /// démarrage**, où chaque adresse de compte doit s'y rattacher. Ce qui était
     /// une seconde règle d'acceptation est devenu une déclaration contrôlée une
     /// fois, ce qui est exactement ce qu'elle voulait dire.
-    fn accepts_recipient(&self, forward_path: &Path<'_>) -> RecipientVerdict {
+    fn accepts_recipient(&self, forward_path: &Path<'_>, submitter: bool) -> RecipientVerdict {
         let adresse = match forward_path {
             // RFC 5321 §4.1.1.3 : `<Postmaster>` sans domaine désigne le
             // postmaster de CE serveur. L'adresse composée vient de l'appelant,
@@ -174,13 +209,23 @@ impl Policy for BoitesConnues {
         };
 
         if ams_auth::route(&self.comptes.vue(), adresse.as_bytes()).is_some() {
-            RecipientVerdict::Accept
-        } else {
-            // `RelayDenied` et non `RejectPermanent` : les deux rendent `550`,
-            // mais un expéditeur légitime qui se trompe de serveur doit pouvoir
-            // le comprendre sans lire les journaux d'en face.
-            RecipientVerdict::RelayDenied
+            return RecipientVerdict::Accept;
         }
+        // **LES DEUX CONDITIONS, ET PAS UNE SEULE.** Le drapeau dit que cet
+        // exploitant a demandé à émettre ; l'authentification dit que ce pair-ci
+        // en a le droit. L'une sans l'autre est un relais ouvert : sans le
+        // drapeau, on émettrait sans que personne l'ait décidé ; sans
+        // l'authentification, on émettrait pour n'importe qui.
+        //
+        // Le `&&` est écrit ici, à un seul endroit, et c'est voulu : deux
+        // vérifications à deux endroits finissent par ne plus dire la même chose.
+        if self.relaie && submitter {
+            return RecipientVerdict::Accept;
+        }
+        // `RelayDenied` et non `RejectPermanent` : les deux rendent `550`,
+        // mais un expéditeur légitime qui se trompe de serveur doit pouvoir
+        // le comprendre sans lire les journaux d'en face.
+        RecipientVerdict::RelayDenied
     }
 }
 
@@ -227,15 +272,17 @@ mod tests {
         // personne.
         let politique = politique(&["jean@example.com"]);
         assert_eq!(
-            politique.accepts_recipient(&destinataire(b"RCPT TO:<jean@example.com>\r\n")),
+            politique.accepts_recipient(&destinataire(b"RCPT TO:<jean@example.com>\r\n"), false),
             RecipientVerdict::Accept
         );
         assert_eq!(
-            politique.accepts_recipient(&destinataire(b"RCPT TO:<personne@example.com>\r\n")),
+            politique
+                .accepts_recipient(&destinataire(b"RCPT TO:<personne@example.com>\r\n"), false),
             RecipientVerdict::RelayDenied
         );
         assert_eq!(
-            politique.accepts_recipient(&destinataire(b"RCPT TO:<jean@ailleurs.example>\r\n")),
+            politique
+                .accepts_recipient(&destinataire(b"RCPT TO:<jean@ailleurs.example>\r\n"), false),
             RecipientVerdict::RelayDenied
         );
     }
@@ -244,7 +291,7 @@ mod tests {
     fn la_comparaison_ignore_la_casse_des_deux_cotes() {
         let politique = politique(&["Jean@Example.COM"]);
         assert_eq!(
-            politique.accepts_recipient(&destinataire(b"RCPT TO:<jean@example.com>\r\n")),
+            politique.accepts_recipient(&destinataire(b"RCPT TO:<jean@example.com>\r\n"), false),
             RecipientVerdict::Accept
         );
     }
@@ -257,18 +304,21 @@ mod tests {
         // avertit au démarrage plutôt que de mentir à chaque message.
         let sans = politique(&["jean@example.com"]);
         assert_eq!(
-            sans.accepts_recipient(&destinataire(b"RCPT TO:<Postmaster>\r\n")),
+            sans.accepts_recipient(&destinataire(b"RCPT TO:<Postmaster>\r\n"), false),
             RecipientVerdict::RelayDenied
         );
 
         let avec = politique(&["postmaster@mail.example.com"]);
         assert_eq!(
-            avec.accepts_recipient(&destinataire(b"RCPT TO:<Postmaster>\r\n")),
+            avec.accepts_recipient(&destinataire(b"RCPT TO:<Postmaster>\r\n"), false),
             RecipientVerdict::Accept
         );
         // Et sous sa forme complète, évidemment.
         assert_eq!(
-            avec.accepts_recipient(&destinataire(b"RCPT TO:<postmaster@mail.example.com>\r\n")),
+            avec.accepts_recipient(
+                &destinataire(b"RCPT TO:<postmaster@mail.example.com>\r\n"),
+                false
+            ),
             RecipientVerdict::Accept
         );
     }
@@ -278,7 +328,7 @@ mod tests {
         // Le seul défaut qui ne relaie rien — et qui ne remplit aucun disque.
         let politique = politique(&[]);
         assert_eq!(
-            politique.accepts_recipient(&destinataire(b"RCPT TO:<jean@example.com>\r\n")),
+            politique.accepts_recipient(&destinataire(b"RCPT TO:<jean@example.com>\r\n"), false),
             RecipientVerdict::RelayDenied
         );
         assert!(!politique.a_des_comptes());
@@ -288,7 +338,7 @@ mod tests {
     fn un_chemin_nul_n_est_pas_un_destinataire() {
         let politique = politique(&[]);
         assert_eq!(
-            politique.accepts_recipient(&Path::Null),
+            politique.accepts_recipient(&Path::Null, false),
             RecipientVerdict::RejectPermanent
         );
     }
@@ -301,5 +351,65 @@ mod tests {
         // un rapport d'incident, dans un ticket. Le plus sûr est qu'il n'y ait
         // rien à imprimer.
         assert!(politique(&["jean@example.com"]).a_des_comptes());
+    }
+
+    // ── Le relais, et les DEUX conditions qui l'ouvrent ─────────────────────
+
+    /// **NI L'UNE NI L'AUTRE SEULE.**
+    ///
+    /// Sans le drapeau, on émettrait sans que personne l'ait décidé ; sans
+    /// l'authentification, on émettrait pour n'importe qui. Ce test énumère les
+    /// quatre cas plutôt que les deux qui arrangent.
+    #[test]
+    fn le_relais_exige_le_drapeau_et_l_authentification() {
+        let ailleurs = destinataire(b"RCPT TO:<marie@ailleurs.example>\r\n");
+        for (relaie, authentifie, attendu) in [
+            (false, false, RecipientVerdict::RelayDenied),
+            (false, true, RecipientVerdict::RelayDenied),
+            (true, false, RecipientVerdict::RelayDenied),
+            (true, true, RecipientVerdict::Accept),
+        ] {
+            let politique = politique(&["jean@example.com"]);
+            let politique = if relaie {
+                politique.qui_relaie()
+            } else {
+                politique
+            };
+            assert_eq!(
+                politique.accepts_recipient(&ailleurs, authentifie),
+                attendu,
+                "drapeau {relaie}, authentifié {authentifie}"
+            );
+        }
+    }
+
+    /// **UNE ADRESSE D'ICI RESTE D'ICI**, relais ou non.
+    ///
+    /// Elle ne doit surtout pas partir sur le réseau parce qu'on a ouvert
+    /// l'émission : elle a une boîte, et c'est là qu'elle va.
+    #[test]
+    fn une_adresse_d_ici_ne_passe_pas_par_le_relais() {
+        let politique = politique(&["jean@example.com"]).qui_relaie();
+        assert_eq!(
+            politique.accepts_recipient(&destinataire(b"RCPT TO:<jean@example.com>\r\n"), true),
+            RecipientVerdict::Accept
+        );
+        // Et sans authentification non plus : recevoir n'a jamais demandé de
+        // s'authentifier, et l'exiger fermerait le courrier entrant.
+        assert_eq!(
+            politique.accepts_recipient(&destinataire(b"RCPT TO:<jean@example.com>\r\n"), false),
+            RecipientVerdict::Accept
+        );
+    }
+
+    /// **UN CHEMIN NUL N'EST PAS UN DESTINATAIRE**, même pour un déposant
+    /// authentifié sur un serveur qui relaie.
+    #[test]
+    fn le_relais_n_accepte_pas_un_chemin_nul() {
+        let politique = politique(&["jean@example.com"]).qui_relaie();
+        assert_eq!(
+            politique.accepts_recipient(&Path::Null, true),
+            RecipientVerdict::RejectPermanent
+        );
     }
 }

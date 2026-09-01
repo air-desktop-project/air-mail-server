@@ -85,7 +85,23 @@ pub trait Policy: Authenticator {
     ///
     /// Appelé une fois par `RCPT TO:`, avec le chemin **déjà validé**
     /// grammaticalement.
-    fn accepts_recipient(&self, forward_path: &Path<'_>) -> RecipientVerdict;
+    ///
+    /// # `submitter` EST CE QUI SÉPARE UN RELAIS D'UN RELAIS OUVERT
+    ///
+    /// Il vaut `true` quand la session s'est authentifiée, et lui seul autorise
+    /// une politique à accepter un destinataire qui n'est pas d'ici. La session
+    /// le sait — elle a conduit l'`AUTH` — et la politique ne peut pas le
+    /// deviner : elle est PARTAGÉE par toutes les connexions, et n'a aucun état
+    /// propre à celle-ci.
+    ///
+    /// Le lui faire déduire d'autre chose serait la façon d'ouvrir un relais
+    /// sans s'en apercevoir. C'est pourquoi il est un argument, et non un champ
+    /// que quelqu'un pourrait oublier de mettre à jour.
+    ///
+    /// **L'authentification n'est annoncée que sous chiffrement**, si bien qu'un
+    /// `true` implique une session chiffrée. Ce n'est pas vérifié ici : ce refus
+    /// est tenu par la session, à un seul endroit.
+    fn accepts_recipient(&self, forward_path: &Path<'_>, submitter: bool) -> RecipientVerdict;
 }
 
 /// Une référence partagée est une politique.
@@ -94,8 +110,8 @@ pub trait Policy: Authenticator {
 /// implémentation, chaque session en exigerait une copie, ou l'appelant devrait
 /// écrire ce même relais à la main.
 impl<T: Policy + ?Sized> Policy for &T {
-    fn accepts_recipient(&self, forward_path: &Path<'_>) -> RecipientVerdict {
-        (**self).accepts_recipient(forward_path)
+    fn accepts_recipient(&self, forward_path: &Path<'_>, submitter: bool) -> RecipientVerdict {
+        (**self).accepts_recipient(forward_path, submitter)
     }
 }
 
@@ -114,7 +130,11 @@ mod tests {
     impl Authenticator for Toujours {}
 
     impl Policy for Toujours {
-        fn accepts_recipient(&self, _forward_path: &Path<'_>) -> RecipientVerdict {
+        fn accepts_recipient(
+            &self,
+            _forward_path: &Path<'_>,
+            _submitter: bool,
+        ) -> RecipientVerdict {
             self.0
         }
     }
@@ -151,7 +171,11 @@ mod tests {
             }
         }
         impl Policy for Ouvre {
-            fn accepts_recipient(&self, _forward_path: &Path<'_>) -> RecipientVerdict {
+            fn accepts_recipient(
+                &self,
+                _forward_path: &Path<'_>,
+                _submitter: bool,
+            ) -> RecipientVerdict {
                 RecipientVerdict::Accept
             }
         }
@@ -169,7 +193,7 @@ mod tests {
     /// irait chercher l'implémentation concrète, et l'implémentation générique
     /// resterait morte. Il faut que `P` VAILLE `&Toujours` pour l'emprunter.
     fn interroger<P: Policy>(politique: P) -> RecipientVerdict {
-        politique.accepts_recipient(&Path::Null)
+        politique.accepts_recipient(&Path::Null, false)
     }
 
     #[test]

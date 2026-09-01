@@ -122,6 +122,14 @@ pub struct ApiMaildir {
     domaine: Vec<u8>,
     /// La borne sur les vérifications simultanées.
     places: Places,
+    /// La file de réémission, quand l'émission est ouverte.
+    ///
+    /// **`None` FERME LA PORTE**, exactement comme du côté SMTP : une soumission
+    /// qui nomme un destinataire d'ailleurs est refusée, et rien ne sort. C'est
+    /// aussi ce qui fait que les deux portes n'ont pas deux règles.
+    file: Option<ams_loop_tokio::Spool>,
+    /// Ce qu'un message peut peser, pour borner ce qu'on rassemble en file.
+    message_max: usize,
 }
 
 impl ApiMaildir {
@@ -145,7 +153,24 @@ impl ApiMaildir {
             racine,
             domaine,
             places: Places::new(VERIFICATIONS_SIMULTANEES),
+            // ON N'ÉMET PAS, SAUF DEMANDE EXPRESSE — et le constructeur ne prend
+            // pas ce champ : un argument de plus dans une liste qui en compte
+            // déjà sept se passe à l'envers sans que le compilateur bronche, et
+            // celui-ci ouvre un relais.
+            file: None,
+            message_max: 0,
         }
+    }
+
+    /// Lui donne de quoi mettre en file ce qui n'est pas d'ici.
+    ///
+    /// **C'est la seule façon d'ouvrir l'émission par l'API**, et elle laisse une
+    /// ligne à lire au démarrage du serveur.
+    #[must_use]
+    pub fn avec_file(mut self, file: ams_loop_tokio::Spool, message_max: usize) -> Self {
+        self.file = Some(file);
+        self.message_max = message_max;
+        self
     }
 
     /// La liste des comptes.
@@ -574,10 +599,10 @@ impl ApiMaildir {
             return refus_de_depot(sortie);
         };
         let vue = self.comptes.vue();
-        if !ecrit_bien_en_son_nom(&vue, compte, &message) {
+        let Some(expediteur) = ecrit_bien_en_son_nom(&vue, compte, &message) else {
             return refus_de_depot(sortie);
-        }
-        let Some(destinataires) = destinataires_de(&vue, &message) else {
+        };
+        let Some(destinataires) = destinataires_de(&vue, &message, self.file.is_some()) else {
             return refus_de_depot(sortie);
         };
 
@@ -589,7 +614,10 @@ impl ApiMaildir {
             std::sync::Arc::clone(&self.remise),
             std::sync::Arc::clone(&self.comptes),
         );
-        let issue = deposer(&mut remise, &destinataires, &remis);
+        if let Some(file) = self.file.clone() {
+            remise = remise.avec_file(file, self.message_max);
+        }
+        let issue = deposer(&mut remise, expediteur, &destinataires, &remis);
         if issue.is_err() {
             // **CE N'EST PAS LA FAUTE DU DÉPOSANT**, et ce n'est pas définitif :
             // plus d'UID, disque plein. §15.6.4 de RFC 9110 dit exactement cela,
@@ -1116,28 +1144,43 @@ fn absente(sortie: &mut [u8]) -> Served<'_> {
 }
 
 /// Le `From:` du message appartient-il à ce compte ?
-fn ecrit_bien_en_son_nom(
+fn ecrit_bien_en_son_nom<'m>(
     comptes: &[Account],
     compte: &str,
-    message: &ams_mime::Message<'_>,
-) -> bool {
-    let Some(champ) = message.fields().find(|champ| champ.name_is(b"from")) else {
-        return false;
-    };
-    let Some(adresse) = ams_mime::bare_address(champ.raw_value()) else {
-        return false;
-    };
-    ams_auth::route(comptes, adresse).is_some_and(|vu| vu.login == compte)
+    message: &ams_mime::Message<'m>,
+) -> Option<&'m [u8]> {
+    let champ = message.fields().find(|champ| champ.name_is(b"from"))?;
+    let adresse = ams_mime::bare_address(champ.raw_value())?;
+    // **L'ADRESSE EST RENDUE, ET NON SEULEMENT VÉRIFIÉE** : c'est elle qui
+    // devient le chemin de retour d'un message mis en file, donc l'adresse à
+    // laquelle un rapport de non-remise reviendra. La retrouver ailleurs
+    // reviendrait à la relire deux fois, et deux lectures d'un même champ
+    // finissent par ne plus dire la même chose.
+    ams_auth::route(comptes, adresse)
+        .is_some_and(|vu| vu.login == compte)
+        .then_some(adresse)
 }
 
-/// Les destinataires du message, s'ils sont tous lisibles et tous d'ici.
+/// Les destinataires du message, s'ils sont tous lisibles et tous servables.
 ///
 /// **UN SEUL QU'ON NE SAIT PAS LIRE FAIT TOUT REFUSER.** L'écarter en silence
 /// remettrait le message à moins de monde que l'expéditeur ne l'a demandé, et
 /// rien dans la réponse ne le lui dirait.
+///
+/// # `relaie` EST CE QUI SÉPARE UNE SOUMISSION D'UN RELAIS OUVERT
+///
+/// Faux, seules les adresses d'ici sont acceptées, et c'était le seul
+/// comportement avant que l'émission n'existe. Vrai, une adresse d'ailleurs
+/// passe aussi — et la remise la mettra en file.
+///
+/// **Le porteur du jeton est déjà authentifié** quand on arrive ici : cette
+/// ressource n'est servie qu'à un compte, avec la portée de soumission. C'est le
+/// pendant exact de ce que la session SMTP exige, et les deux portes appliquent
+/// donc la même règle.
 fn destinataires_de(
     comptes: &[Account],
     message: &ams_mime::Message<'_>,
+    relaie: bool,
 ) -> Option<std::vec::Vec<Vec<u8>>> {
     let mut vus: std::vec::Vec<Vec<u8>> = std::vec::Vec::new();
     for champ in message.fields() {
@@ -1149,7 +1192,9 @@ fn destinataires_de(
             // §3.6.3 : le nom d'un groupe n'est pas un destinataire, mais il
             // n'est pas non plus une faute — `bare_address` l'a déjà écarté
             // faute d'arobase, et l'on n'arrive donc jamais ici avec lui.
-            ams_auth::route(comptes, adresse)?;
+            if ams_auth::route(comptes, adresse).is_none() && !relaie {
+                return None;
+            }
             if vus.iter().any(|deja| deja == adresse) {
                 // **UN DESTINATAIRE NOMMÉ DEUX FOIS N'EST QU'UN.** Le remettre
                 // deux fois lui donnerait deux copies du même message, ce
@@ -1454,11 +1499,16 @@ const fn notre_faute<'o>() -> Served<'o> {
 /// Séparée pour que `?` serve : l'appelante doit annuler ce qui a commencé.
 fn deposer(
     remise: &mut crate::delivery::MaildirDelivery,
+    expediteur: &[u8],
     destinataires: &[Vec<u8>],
     message: &[u8],
 ) -> Result<(), ams_loop_tokio::DeliveryFailure> {
     use ams_loop_tokio::Delivery as _;
 
+    // **LE CHEMIN DE RETOUR D'ABORD**, comme la boucle SMTP le fait : c'est le
+    // `From:` VÉRIFIÉ du déposant, donc l'une des adresses de son compte, et
+    // c'est là qu'un rapport de non-remise reviendra.
+    remise.begin(Some(expediteur));
     for adresse in destinataires {
         remise.add_recipient(adresse)?;
     }
@@ -1535,14 +1585,20 @@ mod tests {
             .collect()
     }
 
-    /// Les destinataires de ce message, sous une forme qu'un essai lit.
+    /// Les destinataires de ce message, SANS ÉMISSION — le comportement d'avant
+    /// la file, et celui qui vaut encore quand personne n'a demandé à émettre.
     fn vers(entete: &str) -> Option<std::vec::Vec<std::string::String>> {
+        vers_avec(entete, false)
+    }
+
+    /// Les destinataires de ce message, l'émission étant ouverte ou non.
+    fn vers_avec(entete: &str, relaie: bool) -> Option<std::vec::Vec<std::string::String>> {
         // §2.1 : l'en-tête se termine par une ligne vide, et non par la
         // dernière ligne de champ.
         let brut = std::format!("{entete}\r\n\r\n");
         let bornes = ams_mime::Limits::DEFAULT;
         let message = ams_mime::Message::parse(brut.as_bytes(), &bornes).expect("lisible");
-        destinataires_de(&comptes(), &message).map(|vus| {
+        destinataires_de(&comptes(), &message, relaie).map(|vus| {
             vus.into_iter()
                 .map(|adresse| std::string::String::from_utf8_lossy(&adresse).into_owned())
                 .collect()
@@ -1556,7 +1612,7 @@ mod tests {
         let brut = std::format!("{entete}\r\n\r\n");
         let bornes = ams_mime::Limits::DEFAULT;
         let message = ams_mime::Message::parse(brut.as_bytes(), &bornes).expect("lisible");
-        ecrit_bien_en_son_nom(&comptes(), compte, &message)
+        ecrit_bien_en_son_nom(&comptes(), compte, &message).is_some()
     }
 
     /// **UN COMPTE N'ÉCRIT QU'EN SON NOM.**
