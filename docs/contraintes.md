@@ -1244,6 +1244,34 @@ Au-delà de *x* trames invalides par minute, la machine fautive n'est plus accep
 pendant *y* heures. `x` et `y` sont des **paramètres de configuration**, pas des
 constantes.
 
+**Et ils se règlent, depuis le 2026-09-01.** Jusque-là `air-mail-admin config
+write` posait `Thresholds::DEFAULT` sans jamais le dire : la contrainte était
+vraie dans le format et fausse en pratique, puisque personne ne pouvait écrire
+autre chose que le défaut. Huit options les portent désormais —
+`--connections-per-minute`, `--commands-per-minute`,
+`--invalid-frames-per-minute`, `--refused-recipients-per-minute`,
+`--ban-seconds`, `--ipv4-prefix-bits`, `--ipv6-prefix-bits` et
+`--tracked-sources` —, et un test les fait traverser la ligne de commande,
+l'encodage et la relecture pour qu'aucune ne puisse redevenir une constante par
+inadvertance.
+
+**Le refus est devant le terminal, pas au démarrage** — la même discipline que
+les paires TLS et DKIM. L'outil refuse un zéro qui ne veut rien dire (aucune
+connexion par minute ne sert personne ; aucune commande ne laisse même pas dire
+`QUIT` ; une table de zéro source ne retient rien donc ne reproche rien) et un
+préfixe hors bornes. `ams-guard`, lui, continue de **raboter** ce qui dépasse :
+c'est ce qu'une bibliothèque doit faire d'une entrée qu'elle ne choisit pas, mais
+un `/48` tapé pour de l'IPv4 et compté comme un `/32` serait une configuration
+qui dit autre chose que ce qui a été demandé.
+
+**Trois zéros restent licites, et ils ne veulent pas dire la même chose** — c'est
+le seul endroit du projet où deux options voisines donnent à zéro des sens
+opposés, et c'est pourquoi l'aide, le README et deux tests le disent :
+`--refused-recipients-per-minute 0` ÉTEINT le comptage (voir plus bas),
+`--invalid-frames-per-minute 0` bannit au PREMIER écart, et `--ban-seconds 0`
+fait ajourner au lieu de bannir. `config write` avertit sur les deux derniers
+plutôt que de les taire.
+
 Par C1, cette logique est une machine à états sans entrée-sortie (`ams-guard`) :
 elle reçoit `(source, événement, instant)` et rend un verdict. Elle est donc
 couverte à 100 % par C2, ce qui est le bon régime pour un composant dont un faux

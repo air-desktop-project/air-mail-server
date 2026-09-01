@@ -9,6 +9,7 @@
 //! Deux sources de configuration seraient une de trop — c'est ainsi qu'un serveur
 //! finit par tourner autrement que ce que son administrateur croit avoir demandé.
 
+use core::time::Duration;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -74,6 +75,20 @@ pub struct Options {
     pub dmarc_send: bool,
     /// Compose-t-on des rapports d'échec ?
     pub dmarc_failures: bool,
+    /// Les seuils du garde — le `x` et le `y` de C8, et le reste.
+    ///
+    /// **RIEN ICI N'EST UNE CONSTANTE**, dit C8 ; il fallait donc que l'outil
+    /// qui écrit la configuration sache les écrire. Tant qu'il posait
+    /// `Thresholds::DEFAULT`, la contrainte était vraie dans le format et
+    /// fausse en pratique : personne ne pouvait desserrer un seuil qui se
+    /// trompe, ni resserrer celui qui ne suffit plus.
+    pub guard: Thresholds,
+    /// Combien de sources la table du garde retient à la fois.
+    ///
+    /// C'est ce qui empêche la table d'être un épuisement de mémoire offert à
+    /// qui dispose d'un `/64` : elle est bornée, et une fois pleine de peines
+    /// en cours elle CESSE D'APPRENDRE plutôt que d'oublier un banni.
+    pub tracked_sources: u32,
 }
 
 impl Default for Options {
@@ -132,6 +147,13 @@ impl Default for Options {
             dmarc_send: false,
             // ILS PORTENT LE COURRIER DE QUELQU'UN. Le défaut n'en compose pas.
             dmarc_failures: false,
+            // LES SEUILS DU GARDE VIENNENT DE `ams-guard`, et pas d'ici : les
+            // recopier ferait deux vérités pour une seule décision, et la
+            // seconde vieillirait en silence.
+            guard: Thresholds::DEFAULT,
+            // Quatre mille sources : assez pour que la table apprenne, assez peu
+            // pour qu'elle tienne dans un budget qu'on peut dire à l'avance.
+            tracked_sources: 4096,
         }
     }
 }
@@ -139,9 +161,10 @@ impl Default for Options {
 impl Options {
     /// Compose la configuration que ces options décrivent.
     ///
-    /// Les bornes du décodeur et les seuils du garde prennent leurs valeurs par
-    /// défaut : les régler mérite ses propres options, et les inventer ici
-    /// donnerait un fichier qui dit autre chose que ce qui a été demandé.
+    /// Les bornes du décodeur prennent leurs valeurs par défaut : les régler
+    /// mérite ses propres options, et les inventer ici donnerait un fichier qui
+    /// dit autre chose que ce qui a été demandé. Les seuils du garde, eux, ont
+    /// désormais les leurs, parce que C8 l'exige.
     #[must_use]
     pub fn en_configuration(&self) -> Configuration {
         Configuration {
@@ -161,8 +184,8 @@ impl Options {
             max_message_octets: self.max_message_octets,
             max_connections: u32::try_from(self.max_connections).unwrap_or(u32::MAX),
             limits: Limits::DEFAULT,
-            guard: Thresholds::DEFAULT,
-            tracked_sources: 4096,
+            guard: self.guard,
+            tracked_sources: self.tracked_sources,
             timeouts: Timeouts {
                 command_seconds: 300,
                 data_seconds: 600,
@@ -259,6 +282,16 @@ OPTIONS DE `config write`
     --accounts <chemin>    fichier de comptes (`air-mail-admin account add`)
     --listen-pop3 <adr>    où écouter en POP3 (défaut : pas de POP3)
     --listen-imap <adr>    où écouter en IMAP (défaut : pas d'IMAP)
+
+    LES SEUILS DU GARDE (C8)
+    --connections-per-minute <n>        connexions par source   (défaut 60)
+    --commands-per-minute <n>           commandes par source    (défaut 600)
+    --invalid-frames-per-minute <n>     le `x` de C8            (défaut 20)
+    --refused-recipients-per-minute <n> récolte d'adresses      (défaut 50)
+    --ban-seconds <n>                   le `y` de C8            (défaut 3600)
+    --ipv4-prefix-bits <n>              1 à 32                  (défaut 32)
+    --ipv6-prefix-bits <n>              1 à 128                 (défaut 64)
+    --tracked-sources <n>               sources retenues        (défaut 4096)
 
     LES DEUX OPTIONS DKIM VONT ENSEMBLE, ou aucune. Avec elles, le serveur SIGNE ce
     qu'il émet — aujourd'hui les rapports DMARC. Sans elles, il émet non signé, ce
@@ -391,9 +424,59 @@ OPTIONS DE `config write`
     `postmaster@` suivi du nom annoncé), `--dmarc-report-interval` le nombre de
     secondes entre deux vidanges du journal (défaut : 86400, un jour).
 
-    Les bornes du décodeur et les seuils du garde prennent leurs valeurs par
-    défaut : les régler mérite ses propres options, et les inventer ici donnerait
-    un fichier qui dit autre chose que ce qui a été demandé.
+    LE GARDE SE RÈGLE ICI, ET NULLE PART AILLEURS. C8 demande que ce qui borne une
+    source vienne de la configuration : un seuil gravé dans le code est un seuil
+    qu'on ne peut pas desserrer le jour où il se trompe, ni resserrer le jour où
+    il ne suffit plus. Ces huit options sont ce qui rend cette exigence vraie
+    ailleurs que dans le format.
+
+    `--connections-per-minute` et `--commands-per-minute` AJOURNENT ; les deux
+    autres compteurs BANNISSENT. Ajourner ferme la connexion du moment ; bannir
+    ferme la porte à la source pour `--ban-seconds`, sans un mot — pas même une
+    bannière, parce que répondre confirmerait qu'il y a un serveur ici.
+
+    `--max-connections` N'EST PAS `--connections-per-minute` : le premier dit
+    combien de sessions le serveur mène EN MÊME TEMPS, toutes sources
+    confondues ; le second, combien de fois UNE MÊME SOURCE a le droit de se
+    présenter par minute.
+
+    ZÉRO NE VEUT PAS DIRE LA MÊME CHOSE PARTOUT, et c'est ce qu'il faut lire
+    avant de taper l'une de ces options :
+
+      - `--refused-recipients-per-minute 0` ÉTEINT le comptage de la récolte
+        d'adresses. C'est ce qui a permis d'ajouter ce seuil sans rien casser :
+        une configuration écrite avant qu'il n'existe décode zéro, et se
+        comporte comme avant. `config show` et le serveur au démarrage le disent
+        tous les deux, parce qu'un compteur éteint qu'on croit allumé est pire
+        qu'un compteur absent.
+      - `--invalid-frames-per-minute 0` fait L'INVERSE : il bannit au premier
+        écart. C'est une politique dure, mais elle se comprend d'elle-même, et
+        l'interdire reviendrait à décider à la place de qui exploite la machine.
+      - `--ban-seconds 0` dit « NE BANNIS PAS » : le garde ajourne au lieu de
+        bannir. Une peine qui finit à l'instant où elle commence n'en est pas
+        une, et le garde refuse de l'annoncer.
+      - PARTOUT AILLEURS, zéro est REFUSÉ, parce qu'il ne veut rien dire :
+        zéro connexion par minute ne sert personne, zéro commande ne laisse même
+        pas dire `QUIT`, et une table de zéro source ne retient rien donc ne
+        reproche rien.
+
+    LES PRÉFIXES DÉCIDENT DE QUI PAIE POUR QUI. On ne compte pas une adresse mais
+    un BLOC : bannir une IPv6 seule ne sert à rien, puisque le plus petit bloc
+    qu'un fournisseur attribue est un `/64` et que le pair banni revient à
+    l'adresse suivante. En IPv4 le défaut est `/32` — le bloc d'un abonné EST
+    souvent une adresse, et élargir y punirait des voisins. Un préfixe de zéro
+    bit est refusé : il mettrait tout l'Internet dans le même seau, et le premier
+    banni bannirait tout le monde.
+
+    `--tracked-sources` BORNE LA TABLE, et cette borne est ce qui l'empêche
+    d'être un épuisement de mémoire offert à qui dispose d'un `/64`. Une table
+    pleine de peines en cours CESSE D'APPRENDRE plutôt que d'oublier un banni :
+    évincer « le bannissement qui expire le plus tôt » suffisait à s'en libérer
+    en remplissant la table, et le fuzz l'a montré.
+
+    Les bornes du décodeur, elles, prennent toujours leurs valeurs par défaut :
+    les régler mérite ses propres options, et les inventer ici donnerait un
+    fichier qui dit autre chose que ce qui a été demandé.
 ";
 
 /// Lit une ligne de commande.
@@ -515,6 +598,58 @@ where
                     .parse()
                     .map_err(|_| ArgError::new(format!("`{brute}` n'est pas un nombre")))?;
             }
+            // ── Les seuils du garde (C8) ────────────────────────────────────
+            //
+            // **ZÉRO NE VEUT PAS DIRE LA MÊME CHOSE PARTOUT**, et c'est le piège
+            // de cette famille d'options. Pour les destinataires refusés il
+            // ÉTEINT le compteur ; pour les trames invalides il bannit au
+            // premier écart ; pour les connexions il n'accepterait plus
+            // personne. On refuse donc les zéros qui ne veulent rien dire, et on
+            // documente ceux qui en veulent un.
+            "--connections-per-minute" => {
+                options.guard.connections_per_minute = pas_zero(
+                    &valeur()?,
+                    "un serveur qui accepte zéro connexion par minute ne sert personne",
+                )?;
+            }
+            "--commands-per-minute" => {
+                options.guard.commands_per_minute = pas_zero(
+                    &valeur()?,
+                    "une session qui n'a droit à aucune commande ne peut même pas dire `QUIT`",
+                )?;
+            }
+            "--invalid-frames-per-minute" => {
+                // ZÉRO EST LICITE ICI : il dit « bannis au premier écart ». Le
+                // refuser interdirait une politique dure que quelqu'un peut
+                // vouloir tenir, et qui se comprend d'elle-même.
+                options.guard.invalid_frames_per_minute = nombre(&valeur()?)?;
+            }
+            "--refused-recipients-per-minute" => {
+                // ZÉRO EST LICITE ICI AUSSI, et il veut dire l'INVERSE : il
+                // éteint le comptage. C'est ce qui rend ce seuil ajoutable sans
+                // rien casser, puisqu'un fichier antérieur au champ décode zéro.
+                options.guard.refused_recipients_per_minute = nombre(&valeur()?)?;
+            }
+            "--ban-seconds" => {
+                // ZÉRO EST LICITE : il dit « ne bannis pas ». Le garde ajourne
+                // alors la source au lieu de la bannir — une peine qui finit à
+                // l'instant où elle commence n'en est pas une.
+                let secondes = nombre(&valeur()?)?;
+                options.guard.ban_duration = Duration::from_secs(u64::from(secondes));
+            }
+            "--ipv4-prefix-bits" => {
+                options.guard.ipv4_prefix_bits = prefixe(&valeur()?, 32)?;
+            }
+            "--ipv6-prefix-bits" => {
+                options.guard.ipv6_prefix_bits = prefixe(&valeur()?, 128)?;
+            }
+            "--tracked-sources" => {
+                options.tracked_sources = pas_zero(
+                    &valeur()?,
+                    "une table de capacité nulle ne retient rien, donc ne reproche rien : \
+                     le garde laisse alors tout passer",
+                )?;
+            }
             inconnu => {
                 return Err(ArgError::new(format!("option inconnue : `{inconnu}`")));
             }
@@ -538,6 +673,48 @@ where
     Ok(Demande::Ecrire(Box::new(options)))
 }
 
+/// Un nombre, ou ce qui n'en est pas un.
+fn nombre(brute: &str) -> Result<u32, ArgError> {
+    brute
+        .parse()
+        .map_err(|_| ArgError::new(format!("`{brute}` n'est pas un nombre")))
+}
+
+/// Un nombre dont zéro ne voudrait rien dire, et `pourquoi` le dit.
+fn pas_zero(brute: &str, pourquoi: &str) -> Result<u32, ArgError> {
+    match nombre(brute)? {
+        // ON REFUSE ICI, PAS AU DÉMARRAGE DU SERVEUR : l'administrateur est
+        // devant son terminal, et c'est le seul moment où le lui dire coûte une
+        // seconde plutôt qu'une astreinte.
+        0 => Err(ArgError::new(format!("`0` est refusé : {pourquoi}"))),
+        combien => Ok(combien),
+    }
+}
+
+/// Une longueur de préfixe, entre `1` et `maximum` bits.
+///
+/// **ZÉRO EST REFUSÉ, ET C'EST LE REFUS QUI COMPTE LE PLUS ICI** : un préfixe de
+/// zéro bit met tout l'Internet dans le même seau, et le premier pair banni
+/// bannirait alors tout le monde. `ams-guard` se contente de RABOTER ce qui
+/// dépasse — c'est ce qu'une bibliothèque doit faire d'une entrée qu'elle ne
+/// choisit pas —, mais un `/48` tapé pour de l'IPv4 et compté comme un `/32`
+/// serait une configuration qui dit autre chose que ce qui a été demandé.
+fn prefixe(brute: &str, maximum: u8) -> Result<u8, ArgError> {
+    let bits = nombre(brute)?;
+    if bits == 0 {
+        return Err(ArgError::new(
+            "`0` est refusé : un préfixe de zéro bit met toutes les adresses dans le même \
+             seau, et le premier banni bannirait tout le monde",
+        ));
+    }
+    if bits > u32::from(maximum) {
+        return Err(ArgError::new(format!(
+            "`{bits}` dépasse {maximum} bits : ce préfixe serait raboté en silence"
+        )));
+    }
+    u8::try_from(bits).map_err(|_| ArgError::new(format!("`{bits}` n'est pas une longueur")))
+}
+
 /// Un chemin, ou la chaîne vide qui dit « rien ».
 fn chemin(valeur: Option<&PathBuf>) -> String {
     valeur.map(|c| c.display().to_string()).unwrap_or_default()
@@ -545,7 +722,8 @@ fn chemin(valeur: Option<&PathBuf>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ArgError, Demande, Options, parse};
+    use super::{ArgError, Demande, Options, Thresholds, parse};
+    use core::time::Duration;
     use std::net::SocketAddr;
     use std::path::PathBuf;
 
@@ -720,6 +898,31 @@ mod tests {
             (&["--listen", "pas-une-adresse"], "n'est pas une adresse"),
             (&["--max-message", "beaucoup"], "n'est pas un nombre"),
             (&["--max-connections", "-1"], "n'est pas un nombre"),
+            // ── Les zéros qui ne veulent rien dire, et les préfixes absurdes ─
+            (&["--connections-per-minute", "0"], "ne sert personne"),
+            (
+                &["--commands-per-minute", "0"],
+                "ne peut même pas dire `QUIT`",
+            ),
+            (&["--tracked-sources", "0"], "ne retient rien"),
+            (&["--ipv4-prefix-bits", "0"], "le même seau"),
+            (&["--ipv6-prefix-bits", "0"], "le même seau"),
+            (&["--ipv4-prefix-bits", "33"], "dépasse 32 bits"),
+            (&["--ipv6-prefix-bits", "129"], "dépasse 128 bits"),
+            (&["--ban-seconds", "toujours"], "n'est pas un nombre"),
+            (
+                &["--invalid-frames-per-minute", "trop"],
+                "n'est pas un nombre",
+            ),
+            (
+                &["--refused-recipients-per-minute", "plein"],
+                "n'est pas un nombre",
+            ),
+            (
+                &["--connections-per-minute", "beaucoup"],
+                "n'est pas un nombre",
+            ),
+            (&["--tracked-sources"], "attend une valeur"),
         ] {
             let erreur = parse(arguments).expect_err("refusé");
             assert!(
@@ -742,6 +945,118 @@ mod tests {
         // Et elle se relit à l'identique une fois écrite.
         let octets = ams_config::encode(&config).expect("encodable");
         assert_eq!(ams_config::decode(&octets).expect("relisible"), config);
+    }
+
+    // ── Les seuils du garde (C8) ────────────────────────────────────────────
+
+    /// **C8 EXIGE QUE RIEN NE SOIT UNE CONSTANTE**, et c'est ce test qui rend
+    /// l'exigence vérifiable : chacun des huit réglages doit traverser la ligne
+    /// de commande, la structure, l'encodage, et se relire à l'identique. Tant
+    /// que `config write` posait `Thresholds::DEFAULT`, la contrainte était
+    /// vraie dans le format et fausse en pratique.
+    #[test]
+    fn les_huit_seuils_du_garde_traversent_jusqu_au_fichier() {
+        let options = ecrire(&[
+            "--domain",
+            "mail.example.com",
+            "--connections-per-minute",
+            "7",
+            "--commands-per-minute",
+            "70",
+            "--invalid-frames-per-minute",
+            "3",
+            "--refused-recipients-per-minute",
+            "11",
+            "--ban-seconds",
+            "1800",
+            "--ipv4-prefix-bits",
+            "24",
+            "--ipv6-prefix-bits",
+            "48",
+            "--tracked-sources",
+            "512",
+        ]);
+        let attendus = Thresholds {
+            connections_per_minute: 7,
+            commands_per_minute: 70,
+            invalid_frames_per_minute: 3,
+            refused_recipients_per_minute: 11,
+            ban_duration: Duration::from_secs(1800),
+            ipv4_prefix_bits: 24,
+            ipv6_prefix_bits: 48,
+        };
+        assert_eq!(options.guard, attendus);
+        assert_eq!(options.tracked_sources, 512);
+        // AUCUN N'EST LE DÉFAUT : un test qui passerait avec `DEFAULT` ne
+        // prouverait rien de la traversée.
+        assert_ne!(attendus, Thresholds::DEFAULT);
+
+        let config = options.en_configuration();
+        assert_eq!(config.guard, attendus);
+        assert_eq!(config.tracked_sources, 512);
+        let octets = ams_config::encode(&config).expect("encodable");
+        let relue = ams_config::decode(&octets).expect("relisible");
+        assert_eq!(relue.guard, attendus);
+        assert_eq!(relue.tracked_sources, 512);
+    }
+
+    /// **ZÉRO NE VEUT PAS DIRE LA MÊME CHOSE PARTOUT**, et c'est le seul endroit
+    /// du projet où deux options voisines lui donnent des sens opposés. Pour la
+    /// récolte d'adresses il ÉTEINT le comptage — sans quoi ce seuil n'aurait
+    /// pas pu s'ajouter sans bannir tout le monde chez ceux qui ne réécrivent
+    /// pas leur fichier. Pour les trames invalides il bannit au PREMIER écart.
+    /// Pour la peine, il dit « ajourne au lieu de bannir ». Les trois sont
+    /// licites, et il fallait un test pour que l'un ne devienne pas l'autre.
+    #[test]
+    fn les_trois_zeros_licites_le_restent() {
+        let options = ecrire(&[
+            "--refused-recipients-per-minute",
+            "0",
+            "--invalid-frames-per-minute",
+            "0",
+            "--ban-seconds",
+            "0",
+        ]);
+        assert_eq!(options.guard.refused_recipients_per_minute, 0);
+        assert_eq!(options.guard.invalid_frames_per_minute, 0);
+        assert_eq!(options.guard.ban_duration, Duration::ZERO);
+        // Et ils traversent le format : un zéro que l'encodage remplacerait par
+        // un défaut rallumerait en silence un compteur qu'on a éteint exprès.
+        let config = options.en_configuration();
+        let octets = ams_config::encode(&config).expect("encodable");
+        let relue = ams_config::decode(&octets).expect("relisible");
+        assert_eq!(relue.guard.refused_recipients_per_minute, 0);
+        assert_eq!(relue.guard.invalid_frames_per_minute, 0);
+        assert_eq!(relue.guard.ban_duration, Duration::ZERO);
+    }
+
+    /// Les bornes des préfixes sont ACCEPTÉES à leur maximum.
+    ///
+    /// `ams-guard` rabote ce qui dépasse, ce qu'une bibliothèque doit faire
+    /// d'une entrée qu'elle ne choisit pas ; l'outil, lui, refuse plutôt que de
+    /// raboter. Il ne fallait pas que ce refus morde la valeur maximale
+    /// elle-même — un `/32` en IPv4 est le DÉFAUT.
+    #[test]
+    fn le_maximum_d_un_prefixe_est_recevable() {
+        let options = ecrire(&["--ipv4-prefix-bits", "32", "--ipv6-prefix-bits", "128"]);
+        assert_eq!(options.guard.ipv4_prefix_bits, 32);
+        assert_eq!(options.guard.ipv6_prefix_bits, 128);
+        // Et un seul bit aussi : c'est absurde, mais c'est une décision, pas une
+        // faute de frappe qui ne veut rien dire.
+        let étroit = ecrire(&["--ipv4-prefix-bits", "1", "--ipv6-prefix-bits", "1"]);
+        assert_eq!(étroit.guard.ipv4_prefix_bits, 1);
+        assert_eq!(étroit.guard.ipv6_prefix_bits, 1);
+    }
+
+    /// Sans une seule option de garde, les seuils sont ceux de `ams-guard`.
+    ///
+    /// **ILS NE SONT PAS RECOPIÉS ICI** : les recopier ferait deux vérités pour
+    /// une seule décision, et la seconde vieillirait en silence.
+    #[test]
+    fn sans_option_de_garde_les_seuils_viennent_de_la_bibliotheque() {
+        let options = ecrire(&["--domain", "mail.example.com"]);
+        assert_eq!(options.guard, Thresholds::DEFAULT);
+        assert_eq!(options.tracked_sources, 4096);
     }
 
     #[test]

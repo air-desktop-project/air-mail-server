@@ -37,6 +37,9 @@ COMMANDES
                         écrit une configuration BINAIRE. C'est le seul moyen
                         d'en produire une : le format n'est pas éditable à la
                         main, et c'est délibéré.
+                        LES SEUILS DU GARDE S'Y RÈGLENT (C8) : `config write
+                        --help` les liste, et dit où zéro veut dire « jamais »
+                        et où il veut dire « tout de suite ».
     config show <fichier>
                         relit une configuration et l'affiche.
     account add <fichier> --login <nom> [--address <adresse>]...
@@ -173,10 +176,36 @@ fn ecrire(fichier: &Path, arguments: &[&str]) -> ExitCode {
         config.domain,
         config.listen
     );
+    println!(
+        "garde : {} conn./min, {} cmd./min, {} trames invalides/min, ban {} s, \
+         IPv4 /{}, IPv6 /{}, {} sources suivies",
+        config.guard.connections_per_minute,
+        config.guard.commands_per_minute,
+        config.guard.invalid_frames_per_minute,
+        config.guard.ban_duration.as_secs(),
+        config.guard.ipv4_prefix_bits,
+        config.guard.ipv6_prefix_bits,
+        config.tracked_sources
+    );
     if config.hosted.is_empty() {
         println!(
             "ATTENTION  aucun domaine hébergé : ce serveur n'acceptera de courrier \
              pour personne."
+        );
+    }
+    // **UN COMPTEUR ÉTEINT SE DIT AU MOMENT OÙ ON L'ÉTEINT.** Ailleurs, zéro
+    // veut dire « tout de suite » ; ici il veut dire « jamais », et c'est
+    // exactement l'endroit où quelqu'un peut s'être trompé de sens.
+    if config.guard.refused_recipients_per_minute == 0 {
+        println!(
+            "ATTENTION  récolte d'adresses NON COMPTÉE : `--refused-recipients-per-minute 0` \
+             éteint ce compteur. Une rafale de destinataires refusés ne sera plus remarquée."
+        );
+    }
+    if config.guard.ban_duration.as_secs() == 0 {
+        println!(
+            "ATTENTION  aucun bannissement : `--ban-seconds 0` fait AJOURNER au lieu de \
+             bannir. Une source fautive reviendra à la connexion suivante."
         );
     }
     ExitCode::SUCCESS

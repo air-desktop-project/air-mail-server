@@ -1569,6 +1569,67 @@ empreintes, mais c'est un dictionnaire de noms à essayer.
 `--accounts` sans `--tls-cert` est refusé : `AUTH` n'est **jamais** annoncé hors
 chiffrement, et ce refus n'est pas réglable.
 
+### Régler le garde
+
+```sh
+./target/release/air-mail-admin config write air-mail.conf \
+    --domain mail.example.com --hosted example.com \
+    --connections-per-minute 60 \
+    --commands-per-minute 600 \
+    --invalid-frames-per-minute 20 \
+    --refused-recipients-per-minute 50 \
+    --ban-seconds 3600 \
+    --ipv4-prefix-bits 32 --ipv6-prefix-bits 64 \
+    --tracked-sources 4096
+```
+
+Ce sont les valeurs par **défaut** : la commande ci-dessus ne change rien, et
+elle est là pour montrer ce qui se règle. C8 exige que **rien ici ne soit une
+constante** — un seuil gravé dans le code est un seuil qu'on ne peut ni
+desserrer le jour où il se trompe, ni resserrer le jour où il ne suffit plus.
+
+Les deux premiers compteurs **ajournent** ; les deux suivants **bannissent**.
+Ajourner ferme la connexion du moment ; bannir ferme la porte à la source pour
+`--ban-seconds`, **sans un mot** — pas même une bannière, parce que répondre
+confirmerait qu'il y a un serveur ici.
+
+`--max-connections` n'est pas `--connections-per-minute` : le premier dit combien
+de sessions le serveur mène **en même temps**, toutes sources confondues ; le
+second, combien de fois **une même source** a le droit de se présenter par
+minute.
+
+**Zéro ne veut pas dire la même chose partout**, et c'est à lire avant de taper
+l'une de ces options :
+
+| Option | `0` veut dire |
+| --- | --- |
+| `--refused-recipients-per-minute 0` | **éteint** le comptage de la récolte d'adresses |
+| `--invalid-frames-per-minute 0` | bannit au **premier** écart |
+| `--ban-seconds 0` | **ne bannit pas** — le garde ajourne |
+| les quatre autres | **refusé** : cela ne veut rien dire |
+
+L'asymétrie du premier n'est pas un caprice : ce seuil a été ajouté après coup,
+et un fichier écrit avant qu'il n'existe décode zéro. Zéro devait donc vouloir
+dire « comme avant », sans quoi la mise à jour aurait banni tout le monde chez
+ceux qui ne réécrivent pas leur configuration. `config write`, `config show` et
+le serveur au démarrage le disent tous les trois : un compteur éteint qu'on
+croit allumé est pire qu'un compteur absent.
+
+**Les préfixes décident de qui paie pour qui.** On ne compte pas une adresse mais
+un bloc : bannir une IPv6 seule ne sert à rien, puisque le plus petit bloc qu'un
+fournisseur attribue est un `/64` et que le pair banni revient à l'adresse
+suivante. En IPv4 le défaut est `/32` — le bloc d'un abonné *est* souvent une
+adresse, et élargir y punirait des voisins. Un préfixe de zéro bit est refusé, et
+un `/48` tapé pour de l'IPv4 aussi : `ams-guard` rabote ce qui dépasse, ce qu'une
+bibliothèque doit faire d'une entrée qu'elle ne choisit pas, mais une
+configuration rabotée en silence dirait autre chose que ce qui a été demandé.
+
+`--tracked-sources` **borne la table**, et cette borne est ce qui l'empêche
+d'être un épuisement de mémoire offert à qui dispose d'un `/64`. Une table pleine
+de peines en cours **cesse d'apprendre** plutôt que d'oublier un banni : évincer
+« le bannissement qui expire le plus tôt » suffisait à s'en libérer en
+remplissant la table, et le fuzz l'a montré.
+
 ## Construire
 
 La toolchain est épinglée dans `rust-toolchain.toml` (**Rust 1.98.0**, stable).
