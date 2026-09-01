@@ -502,6 +502,10 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
             connections_per_minute: garde.get_connections_per_minute(),
             commands_per_minute: garde.get_commands_per_minute(),
             invalid_frames_per_minute: garde.get_invalid_frames_per_minute(),
+            // **UN FICHIER ÉCRIT AVANT CE CHAMP DÉCODE ZÉRO**, et zéro éteint le
+            // compteur : une configuration existante se comporte exactement comme
+            // avant. C'est ce qui rend ce seuil ajoutable sans rien casser.
+            refused_recipients_per_minute: garde.get_refused_recipients_per_minute(),
             ban_duration: core::time::Duration::from_secs(u64::from(garde.get_ban_seconds())),
             ipv4_prefix_bits: garde.get_ipv4_prefix_bits(),
             ipv6_prefix_bits: garde.get_ipv6_prefix_bits(),
@@ -563,6 +567,7 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
             garde.set_connections_per_minute(config.guard.connections_per_minute);
             garde.set_commands_per_minute(config.guard.commands_per_minute);
             garde.set_invalid_frames_per_minute(config.guard.invalid_frames_per_minute);
+            garde.set_refused_recipients_per_minute(config.guard.refused_recipients_per_minute);
             garde.set_ban_seconds(
                 u32::try_from(config.guard.ban_duration.as_secs()).unwrap_or(u32::MAX),
             );
@@ -853,6 +858,7 @@ mod tests {
             connections_per_minute: 11,
             commands_per_minute: 12,
             invalid_frames_per_minute: 13,
+            refused_recipients_per_minute: 17,
             ban_duration: Duration::from_secs(14),
             ipv4_prefix_bits: 24,
             ipv6_prefix_bits: 48,

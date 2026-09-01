@@ -318,6 +318,16 @@ struct Guard {
   # par construction : une table qui grandit avec le nombre de sources est un
   # épuisement de mémoire offert à qui dispose d'un /64.
   trackedSources @6 :UInt32;
+
+  # Destinataires refusés DÉFINITIVEMENT, tolérés par minute et par source. Une
+  # rafale de refus est la signature d'une récolte d'adresses : le pair ne cherche
+  # pas à écrire, il cherche à savoir qui existe.
+  #
+  # ZÉRO ÉTEINT CE COMPTEUR, et ce n'est pas un oubli : ce champ a été AJOUTÉ, et
+  # un fichier écrit avant lui décode zéro. L'inverse aurait banni tout le monde
+  # chez tous ceux qui ne réécrivent pas leur configuration. Le serveur annonce au
+  # démarrage quand il vaut zéro.
+  refusedRecipientsPerMinute @7 :UInt32;
 }
 
 # Les délais appartiennent à la boucle : une machine à états qui n'attend jamais

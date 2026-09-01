@@ -162,6 +162,7 @@ pub struct Turn<'b> {
     reply: &'b [u8],
     action: Action,
     peer_fault: bool,
+    refused_recipient: bool,
 }
 
 impl<'b> Turn<'b> {
@@ -201,6 +202,28 @@ impl<'b> Turn<'b> {
     #[must_use]
     pub fn peer_fault(&self) -> bool {
         self.peer_fault
+    }
+
+    /// Cette réponse a-t-elle refusé un destinataire, DÉFINITIVEMENT ?
+    ///
+    /// # UN REFUS N'EST PAS UNE FAUTE, ET UNE RAFALE N'EST PAS UN REFUS
+    ///
+    /// Un expéditeur qui se trompe d'adresse n'est pas un attaquant :
+    /// [`Turn::peer_fault`] reste faux, et il doit le rester. Mais une RAFALE de
+    /// refus est la signature d'une récolte d'adresses — le pair ne cherche pas à
+    /// écrire, il cherche à savoir QUI EXISTE, et chaque refus est une réponse
+    /// qu'il note.
+    ///
+    /// La boucle a donc besoin des deux signaux, et la session est la seule à
+    /// pouvoir les distinguer : un `550` sanctionne une boîte inconnue, mais
+    /// aussi un verbe qu'on refuse, et le code ne dit pas lequel.
+    ///
+    /// **SEULS LES REFUS DÉFINITIFS COMPTENT.** Un `450` dit que NOUS ne pouvons
+    /// pas, pas que l'adresse n'existe pas : il n'apprend rien à qui récolte, et
+    /// le compter punirait un pair pour nos propres embarras.
+    #[must_use]
+    pub fn refused_recipient(&self) -> bool {
+        self.refused_recipient
     }
 }
 
@@ -564,6 +587,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
             reply,
             action: Action::Continue,
             peer_fault: false,
+            refused_recipient: false,
         })
     }
 
@@ -584,6 +608,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
             reply,
             action: Action::Continue,
             peer_fault: false,
+            refused_recipient: false,
         })
     }
 
@@ -674,6 +699,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
             reply: vide,
             action: Action::CheckSender,
             peer_fault: false,
+            refused_recipient: false,
         })
     }
 
@@ -829,13 +855,15 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
                 self.simple(Code::OK, b"Recipient ok", out)
             }
             RecipientVerdict::RejectPermanent => {
-                self.simple(Code::MAILBOX_UNAVAILABLE, b"Mailbox unavailable", out)
+                self.refus_de_destinataire(Code::MAILBOX_UNAVAILABLE, b"Mailbox unavailable", out)
             }
             RecipientVerdict::RejectTemporary => {
                 self.simple(Code::MAILBOX_BUSY, b"Mailbox busy, try again later", out)
             }
             RecipientVerdict::RelayDenied => {
-                self.simple(Code::MAILBOX_UNAVAILABLE, b"Relay access denied", out)
+                // **UN RELAIS NIÉ EST AUSSI UNE RÉPONSE À QUI RÉCOLTE** : il dit
+                // « pas ici », ce qui renseigne autant qu'un « pas cette boîte ».
+                self.refus_de_destinataire(Code::MAILBOX_UNAVAILABLE, b"Relay access denied", out)
             }
         }
     }
@@ -1110,7 +1138,22 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
             reply,
             action,
             peer_fault,
+            refused_recipient: false,
         })
+    }
+
+    /// Une réponse qui REFUSE UN DESTINATAIRE, définitivement.
+    ///
+    /// Ce n'est pas une faute du pair — voir [`Turn::refused_recipient`].
+    fn refus_de_destinataire<'b>(
+        &self,
+        code: Code,
+        texte: &[u8],
+        out: &'b mut [u8],
+    ) -> Result<Turn<'b>, Error> {
+        let mut tour = self.compose(code, texte, Action::Continue, false, out)?;
+        tour.refused_recipient = true;
+        Ok(tour)
     }
 }
 
@@ -1127,6 +1170,9 @@ mod tests {
     /// On assère la valeur EXACTE plutôt qu'un `matches!` : ce dernier engendre
     /// un bras `_ => false` que rien n'emprunte, et le 100 % de C2 le compterait
     /// à jamais découvert — exactement comme un `panic!` de destructuration.
+    /// La taille du refus permanent d'un destinataire : `550 ` + le texte + `\r\n`.
+    const REFUS_PERMANENT: usize = 25;
+
     fn tampon_trop_petit(needed: usize) -> Error {
         Error::Reply(SmtpError::BufferTooSmall { needed })
     }
@@ -1726,6 +1772,64 @@ mod tests {
         }
     }
 
+    /// **UN REFUS DE DESTINATAIRE SE SIGNALE, ET N'EST PAS UNE FAUTE.**
+    ///
+    /// Un expéditeur qui se trompe d'adresse n'est pas un attaquant : `peer_fault`
+    /// reste faux, et il doit le rester. Mais une rafale de refus est la signature
+    /// d'une récolte d'adresses — le pair cherche à savoir QUI EXISTE —, et la
+    /// boucle a besoin des deux signaux pour les compter séparément.
+    ///
+    /// **UN REFUS TEMPORAIRE N'EN EST PAS UN** : un `450` dit que NOUS ne pouvons
+    /// pas, pas que l'adresse n'existe pas. Il n'apprend rien à qui récolte, et le
+    /// compter punirait un pair pour nos propres embarras.
+    #[test]
+    fn seul_un_refus_definitif_signale_une_recolte() {
+        for (verdict, signale) in [
+            (RecipientVerdict::Accept, false),
+            (RecipientVerdict::RejectPermanent, true),
+            (RecipientVerdict::RelayDenied, true),
+            (RecipientVerdict::RejectTemporary, false),
+        ] {
+            let mut session = session(verdict);
+            identifier(&mut session);
+            jouer(&mut session, b"MAIL FROM:<a@b.co>\r\n");
+            let mut tampon = [0_u8; 512];
+            let tour = session
+                .handle(b"RCPT TO:<c@d.co>\r\n", &mut tampon)
+                .expect("une réponse");
+            assert_eq!(
+                tour.refused_recipient(),
+                signale,
+                "{verdict:?} : le signal de récolte"
+            );
+            assert!(
+                !tour.peer_fault(),
+                "{verdict:?} : un refus n'est JAMAIS une faute du pair"
+            );
+        }
+    }
+
+    /// **CE QUI N'EST PAS UN `RCPT` NE SIGNALE RIEN.**
+    ///
+    /// Une commande hors séquence est une faute ; une commande ordinaire n'est
+    /// rien. Ni l'une ni l'autre n'apprend une adresse à qui récolte.
+    #[test]
+    fn seul_un_rcpt_peut_signaler_une_recolte() {
+        let mut session = session(RecipientVerdict::RejectPermanent);
+        let mut tampon = [0_u8; 512];
+        for ligne in [&b"EHLO client.example\r\n"[..], b"NOOP\r\n", b"DATA\r\n"] {
+            let tour = session.handle(ligne, &mut tampon).expect("une réponse");
+            // Le message est construit AVANT l'assertion : un `format!` en
+            // argument d'`assert!` n'est évalué qu'à l'échec, et C2 compterait
+            // sa région à jamais découverte.
+            let quoi = std::format!(
+                "« {} » ne refuse aucun destinataire",
+                std::string::String::from_utf8_lossy(ligne)
+            );
+            assert!(!tour.refused_recipient(), "{quoi}");
+        }
+    }
+
     #[test]
     fn le_relais_refuse_se_distingue_de_la_boite_absente() {
         // Même code, textes différents : un expéditeur légitime qui se trompe de
@@ -2162,6 +2266,17 @@ mod tests {
         assert_eq!(
             session.handle(b"HELO client.example\r\n", &mut minuscule),
             Err(tampon_trop_petit(22))
+        );
+        // Et pour un REFUS DE DESTINATAIRE, qui emprunte un autre chemin de
+        // composition que les réponses ordinaires — c'est lui qui pose le
+        // signal de récolte, et il doit échouer comme les autres plutôt que de
+        // rendre un tour tronqué.
+        let mut refusante = super::tests::session(RecipientVerdict::RejectPermanent);
+        identifier(&mut refusante);
+        jouer(&mut refusante, b"MAIL FROM:<a@b.co>\r\n");
+        assert_eq!(
+            refusante.handle(b"RCPT TO:<c@d.co>\r\n", &mut minuscule),
+            Err(tampon_trop_petit(REFUS_PERMANENT))
         );
     }
 

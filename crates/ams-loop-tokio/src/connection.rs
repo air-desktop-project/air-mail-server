@@ -476,6 +476,7 @@ where
         // `502` sanctionne un verbe retiré — une faute — comme un `EXPN` qu'on
         // décline, qui n'en est pas une.
         let faute = tour.peer_fault();
+        let refus_de_destinataire = tour.refused_recipient();
 
         // Le pair a-t-il déjà envoyé autre chose derrière son `STARTTLS` ? Alors
         // il n'aura pas son `220` : voir `serve_connection`.
@@ -497,10 +498,15 @@ where
         etat.lecture.copy_within(fin_ligne..etat.rempli, 0);
         etat.rempli = etat.rempli.saturating_sub(fin_ligne);
 
-        let evenement = if faute {
-            GuardEvent::InvalidFrame
-        } else {
-            GuardEvent::Command
+        // **TROIS ÉVÉNEMENTS, ET LE PLUS GRAVE L'EMPORTE.** Un refus de
+        // destinataire est aussi une commande ; le compter comme telle SEULEMENT
+        // ferait qu'une récolte passerait sous le seuil des commandes, qui est
+        // dix fois plus haut. Une faute reste au-dessus de tout : c'est le seul
+        // des trois qui dise que le pair a mal parlé.
+        let evenement = match (faute, refus_de_destinataire) {
+            (true, _) => GuardEvent::InvalidFrame,
+            (false, true) => GuardEvent::RefusedRecipient,
+            (false, false) => GuardEvent::Command,
         };
         if matches!(
             service.guard.observe(source, evenement),

@@ -1236,7 +1236,9 @@ introduire une dont la sûreté n'est pas démontrée.
 Le serveur doit détecter :
 
 1. les **tentatives de flooding** (débit de connexions ou de commandes par source) ;
-2. les **trames invalides**, comptées **par source**.
+2. les **trames invalides**, comptées **par source** ;
+3. les **destinataires refusés définitivement**, comptés **par source** — la
+   signature d'une récolte d'adresses.
 
 Au-delà de *x* trames invalides par minute, la machine fautive n'est plus acceptée
 pendant *y* heures. `x` et `y` sont des **paramètres de configuration**, pas des
@@ -1260,7 +1262,32 @@ du protocole.
 destinataires. Un expéditeur qui se trompe d'adresse n'est pas un attaquant. Le
 revers est nommé : une rafale de destinataires refusés est la signature d'une
 récolte d'adresses, et cela mérite un compteur à soi, avec son propre seuil.
-**Ce n'est pas fait.**
+**C'est fait le 2026-09-01**, et quatre décisions le tiennent :
+
+1. **Un refus reste hors de `peer_fault`.** La session pose un SECOND signal,
+   `Turn::refused_recipient`, et la boucle en tire un troisième événement. Les
+   deux ne se confondent pas : `x` trames invalides par minute et `z`
+   destinataires refusés par minute sont deux seuils, avec deux justifications.
+   Quand les deux signaux sont levés, c'est la faute qui l'emporte — elle est
+   plus grave, et un pair ne doit pas diluer une faute en la maquillant en refus.
+2. **Seul un refus DÉFINITIF compte.** `550` boîte inconnue et `550` relais
+   refusé apprennent au pair que l'adresse n'existe pas ici ; `450` dit que NOUS
+   ne pouvons pas en ce moment, et n'apprend rien sur l'adresse. Compter un
+   temporaire punirait un pair pour nos propres embarras, et un expéditeur
+   légitime qui réessaie — ce que la RFC lui demande — serait banni pour cela.
+3. **Zéro éteint le compteur, et c'est ce qui rend le champ ajoutable.** Le
+   schéma Cap'n Proto gagne `refusedRecipientsPerMinute @7`, et un fichier de
+   configuration écrit avant que le champ n'existe décode zéro (§ C11). Zéro
+   devait donc signifier « comme avant », c'est-à-dire *aucun comptage* — et non
+   « tolérance nulle », qui bannirait au premier refus toute installation
+   existante à la première mise à jour. Le serveur l'ANNONCE au démarrage et
+   `air-mail-admin config show` le dit aussi : un compteur éteint en silence
+   serait pire qu'absent.
+4. **Le défaut est généreux : 50 par minute et par source.** Un faux positif
+   diffère du courrier légitime d'un serveur entier ; un faux négatif laisse
+   partir une liste d'adresses valides. Une passerelle qui relaie pour un site
+   peut légitimement se tromper plusieurs fois par minute ; personne n'a besoin
+   d'essayer cinquante adresses inconnues à la minute.
 
 **On ne dit pas un mot à un banni** : pas même une bannière. Répondre confirmerait
 qu'il y a un serveur ici, et le texte du refus lui apprendrait qu'il est banni

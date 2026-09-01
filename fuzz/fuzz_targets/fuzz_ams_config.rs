@@ -42,7 +42,7 @@ struct Entree {
     max_connections: u32,
     tracked_sources: u32,
     bornes: [u32; 7],
-    garde: [u32; 4],
+    garde: [u32; 5],
     prefixes: [u8; 2],
     delais: [u32; 2],
     /// Les deux écoutes de l'API — TCP et UDP — et le secret de scellement des
@@ -129,6 +129,7 @@ fuzz_target!(|entree: Entree| {
             connections_per_minute: entree.garde[0],
             commands_per_minute: entree.garde[1],
             invalid_frames_per_minute: entree.garde[2],
+            refused_recipients_per_minute: entree.garde[4],
             ban_duration: Duration::from_secs(u64::from(entree.garde[3])),
             ipv4_prefix_bits: entree.prefixes[0],
             ipv6_prefix_bits: entree.prefixes[1],

@@ -16,6 +16,17 @@ pub struct Thresholds {
     pub commands_per_minute: u32,
     /// Trames invalides tolérées par minute avant bannissement — le `x` de C8.
     pub invalid_frames_per_minute: u32,
+    /// Destinataires refusés DÉFINITIVEMENT, tolérés par minute et par source.
+    ///
+    /// **ZÉRO ÉTEINT LE COMPTEUR**, et ce n'est pas un défaut de conception :
+    /// c'est ce qui permet d'ajouter ce seuil sans rien casser. Une configuration
+    /// écrite avant qu'il n'existe décode zéro, et se comporte exactement comme
+    /// avant. L'inverse — zéro voulant dire « bannis au premier refus » — aurait
+    /// banni tout le monde chez tous ceux qui ne réécrivent pas leur fichier.
+    ///
+    /// Le serveur ANNONCE au démarrage quand il vaut zéro : un compteur éteint
+    /// qu'on croit allumé est pire qu'un compteur absent.
+    pub refused_recipients_per_minute: u32,
     /// Durée du bannissement — le `y` de C8.
     pub ban_duration: Duration,
     /// Longueur du préfixe sous lequel une source IPv4 est comptée.
@@ -42,6 +53,12 @@ impl Thresholds {
         connections_per_minute: 60,
         commands_per_minute: 600,
         invalid_frames_per_minute: 20,
+        // **CINQUANTE, ET C'EST GÉNÉREUX EXPRÈS.** Un expéditeur dont la liste a
+        // vieilli peut en accumuler quelques-uns ; un récolteur en a besoin de
+        // milliers, et cinquante par minute rendent la récolte inutile. Le coût
+        // d'un faux positif est du courrier différé, que le pair réémettra ; celui
+        // d'un faux négatif est une liste d'adresses qui part.
+        refused_recipients_per_minute: 50,
         ban_duration: Duration::from_secs(3600),
         ipv4_prefix_bits: 32,
         ipv6_prefix_bits: 64,

@@ -243,6 +243,14 @@ fn afficher(config: &Configuration) {
         config.guard.ban_duration.as_secs()
     );
     println!(
+        "récolte d'adresses {}",
+        match config.guard.refused_recipients_per_minute {
+            // **UN COMPTEUR ÉTEINT SE DIT**, et ne se devine pas à un zéro.
+            0 => String::from("compteur ÉTEINT — ce fichier est antérieur à ce seuil"),
+            combien => format!("{combien} destinataires refusés/min avant bannissement"),
+        }
+    );
+    println!(
         "préfixes comptés   IPv4 /{}, IPv6 /{}",
         config.guard.ipv4_prefix_bits, config.guard.ipv6_prefix_bits
     );

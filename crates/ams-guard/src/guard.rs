@@ -38,6 +38,23 @@ pub enum Event {
     /// Une trame invalide a été reçue — syntaxe refusée, fin de ligne ambiguë,
     /// authentification en échec.
     InvalidFrame,
+    /// Un destinataire a été refusé DÉFINITIVEMENT — boîte inconnue, relais nié.
+    ///
+    /// # CE N'EST PAS UNE FAUTE, ET C'EST TOUT LE PROBLÈME
+    ///
+    /// Un expéditeur qui se trompe d'adresse n'est pas un attaquant, et compter
+    /// son refus comme une trame invalide bannirait des correspondants
+    /// ordinaires. Une RAFALE de refus, en revanche, est la signature d'une
+    /// récolte d'adresses : le pair ne cherche pas à écrire, il cherche à savoir
+    /// QUI EXISTE — et chaque refus est une réponse qu'il note.
+    ///
+    /// D'où un compteur à soi, avec son propre seuil. Le confondre avec un autre
+    /// obligerait à choisir entre bannir des innocents et laisser énumérer.
+    ///
+    /// **UN REFUS TEMPORAIRE N'EN EST PAS UN** : il dit que NOUS ne pouvons pas,
+    /// pas que l'adresse n'existe pas. Il n'apprend donc rien à qui récolte, et
+    /// le compter punirait un pair pour nos propres embarras.
+    RefusedRecipient,
 }
 
 /// Ce que le garde répond.
@@ -68,6 +85,7 @@ pub struct Slot {
     connections: u32,
     commands: u32,
     invalid: u32,
+    refused: u32,
     banned_until: Option<u64>,
 }
 
@@ -81,6 +99,7 @@ impl Slot {
         connections: 0,
         commands: 0,
         invalid: 0,
+        refused: 0,
         banned_until: None,
     };
 }
@@ -248,6 +267,7 @@ impl<'a> Guard<'a> {
             case.connections = 0;
             case.commands = 0;
             case.invalid = 0;
+            case.refused = 0;
         }
         case.last_seen = now.as_millis();
 
@@ -262,6 +282,25 @@ impl<'a> Guard<'a> {
                 case.commands = case.commands.saturating_add(1);
                 if case.commands > seuils.commands_per_minute {
                     return Verdict::Throttled;
+                }
+            }
+            Event::RefusedRecipient => {
+                // **ZÉRO ÉTEINT CE COMPTEUR**, et c'est ce qui rend le champ
+                // ajoutable sans rien casser : une configuration écrite avant
+                // qu'il n'existe décode zéro, et se comporte comme avant.
+                if seuils.refused_recipients_per_minute == 0 {
+                    return Verdict::Allow;
+                }
+                case.refused = case.refused.saturating_add(1);
+                if case.refused > seuils.refused_recipients_per_minute {
+                    let until = now.as_millis().saturating_add(seuils.ban_millis());
+                    if until <= now.as_millis() {
+                        return Verdict::Throttled;
+                    }
+                    case.banned_until = Some(until);
+                    return Verdict::Banned {
+                        until: Instant::from_millis(until),
+                    };
                 }
             }
             Event::InvalidFrame => {
@@ -799,5 +838,127 @@ mod tests {
         garde.observe(PAIR, Event::Connection, t(0));
         assert!(garde.lift(PAIR));
         assert_eq!(garde.tracked(), 0);
+    }
+
+    // ── La récolte d'adresses ───────────────────────────────────────────────
+
+    /// **UNE RAFALE DE REFUS EST UNE RÉCOLTE, ET UN REFUS N'EN EST PAS UNE.**
+    ///
+    /// Un expéditeur qui se trompe d'adresse n'est pas un attaquant. Un pair qui
+    /// en essaie cinquante par minute ne cherche pas à écrire : il cherche à
+    /// savoir QUI EXISTE, et chaque refus est une réponse qu'il note.
+    #[test]
+    fn une_rafale_de_refus_finit_par_bannir() {
+        let mut table = [Slot::EMPTY; 8];
+        let seuils = Thresholds {
+            refused_recipients_per_minute: 3,
+            ..seuils_serres()
+        };
+        let mut garde = Guard::new(&mut table, seuils);
+        for _ in 0..3 {
+            assert_eq!(
+                garde.observe(PAIR, Event::RefusedRecipient, t(0)),
+                Verdict::Allow,
+                "sous le seuil, on sert"
+            );
+        }
+        assert!(
+            est_banni(garde.observe(PAIR, Event::RefusedRecipient, t(0))),
+            "au-delà, c'est une récolte"
+        );
+    }
+
+    /// **LE COMPTEUR EST À LUI**, et ne se mélange pas aux trames invalides.
+    ///
+    /// Les confondre obligerait à choisir entre bannir des innocents — un
+    /// correspondant qui se trompe d'adresse — et laisser énumérer.
+    #[test]
+    fn les_refus_ne_comptent_pas_comme_des_trames_invalides() {
+        let mut table = [Slot::EMPTY; 8];
+        let seuils = Thresholds {
+            refused_recipients_per_minute: 100,
+            invalid_frames_per_minute: 2,
+            ..seuils_serres()
+        };
+        let mut garde = Guard::new(&mut table, seuils);
+        for _ in 0..50 {
+            assert_eq!(
+                garde.observe(PAIR, Event::RefusedRecipient, t(0)),
+                Verdict::Allow
+            );
+        }
+        assert_eq!(
+            garde.verdict(PAIR, t(0)),
+            Verdict::Allow,
+            "cinquante refus ne font pas trois trames invalides"
+        );
+    }
+
+    /// **ZÉRO ÉTEINT LE COMPTEUR**, et c'est ce qui rend le seuil ajoutable.
+    ///
+    /// Une configuration écrite avant qu'il n'existe décode zéro. L'inverse aurait
+    /// banni tout le monde chez tous ceux qui ne réécrivent pas leur fichier.
+    #[test]
+    fn un_seuil_nul_eteint_le_compteur() {
+        let mut table = [Slot::EMPTY; 8];
+        let seuils = Thresholds {
+            refused_recipients_per_minute: 0,
+            ..seuils_serres()
+        };
+        let mut garde = Guard::new(&mut table, seuils);
+        for _ in 0..1_000 {
+            assert_eq!(
+                garde.observe(PAIR, Event::RefusedRecipient, t(0)),
+                Verdict::Allow
+            );
+        }
+        assert_eq!(
+            garde.tracked(),
+            1,
+            "la source est suivie, mais rien ne la punit"
+        );
+    }
+
+    /// **LA FENÊTRE LES OUBLIE COMME LE RESTE.**
+    ///
+    /// Une liste qui a vieilli produit quelques refus par jour, pas cinquante par
+    /// minute. Sans remise à zéro, ils s'accumuleraient jusqu'à bannir un
+    /// correspondant ordinaire au bout d'un mois.
+    #[test]
+    fn une_nouvelle_fenetre_oublie_les_refus() {
+        let mut table = [Slot::EMPTY; 8];
+        let seuils = Thresholds {
+            refused_recipients_per_minute: 3,
+            ..seuils_serres()
+        };
+        let mut garde = Guard::new(&mut table, seuils);
+        for _ in 0..3 {
+            garde.observe(PAIR, Event::RefusedRecipient, t(0));
+        }
+        // Une minute plus tard, le compte repart.
+        assert_eq!(
+            garde.observe(PAIR, Event::RefusedRecipient, t(60_000)),
+            Verdict::Allow
+        );
+    }
+
+    /// **UNE PEINE DE DURÉE NULLE N'EN EST PAS UNE**, ici comme pour les trames
+    /// invalides : elle annoncerait « banni jusqu'à maintenant », que
+    /// l'interrogation suivante démentirait aussitôt.
+    #[test]
+    fn une_peine_nulle_ne_bannit_pas_sur_un_refus() {
+        let mut table = [Slot::EMPTY; 8];
+        let seuils = Thresholds {
+            refused_recipients_per_minute: 1,
+            ban_duration: Duration::from_secs(0),
+            ..seuils_serres()
+        };
+        let mut garde = Guard::new(&mut table, seuils);
+        garde.observe(PAIR, Event::RefusedRecipient, t(0));
+        assert_eq!(
+            garde.observe(PAIR, Event::RefusedRecipient, t(0)),
+            Verdict::Throttled,
+            "on refuse l'événement, sans plus"
+        );
     }
 }

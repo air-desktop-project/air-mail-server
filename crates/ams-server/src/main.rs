@@ -535,6 +535,17 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         )
     };
     let config = config.with_sender_policy(politique_expediteur);
+    // **UN COMPTEUR ÉTEINT QU'ON CROIT ALLUMÉ EST PIRE QU'UN COMPTEUR ABSENT.**
+    // Ce seuil a été AJOUTÉ au schéma : une configuration écrite avant lui décode
+    // zéro, et zéro l'éteint. L'exploitant doit l'apprendre au démarrage, et non
+    // le jour où une récolte passe.
+    if options.guard.refused_recipients_per_minute == 0 {
+        eprintln!(
+            "air-mail-server : RÉCOLTE D'ADRESSES NON COMPTÉE — cette configuration est \
+             antérieure à ce seuil. Une rafale de destinataires refusés ne bannira personne. \
+             `air-mail-admin config write` la réécrit avec la valeur par défaut."
+        );
+    }
     eprintln!(
         "air-mail-server : {}",
         match politique_expediteur {

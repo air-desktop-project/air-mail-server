@@ -38,6 +38,7 @@ struct Coup {
 struct Entree {
     capacite: u8,
     invalid_frames_per_minute: u8,
+    refused_recipients_per_minute: u8,
     connections_per_minute: u8,
     commands_per_minute: u8,
     ban_secondes: u16,
@@ -47,10 +48,14 @@ struct Entree {
 }
 
 fn evenement(choix: u8) -> Event {
-    match choix % 3 {
+    match choix % 4 {
         0 => Event::Connection,
         1 => Event::Command,
-        _ => Event::InvalidFrame,
+        2 => Event::InvalidFrame,
+        // Un destinataire refusé n'est PAS une faute, mais il compte à part :
+        // le mélanger au flot vérifie que son compteur ne peut ni libérer un
+        // banni, ni rendre une peine déjà échue.
+        _ => Event::RefusedRecipient,
     }
 }
 
@@ -80,6 +85,7 @@ fuzz_target!(|entree: Entree| {
         connections_per_minute: u32::from(entree.connections_per_minute),
         commands_per_minute: u32::from(entree.commands_per_minute),
         invalid_frames_per_minute: u32::from(entree.invalid_frames_per_minute),
+        refused_recipients_per_minute: u32::from(entree.refused_recipients_per_minute),
         ban_duration: Duration::from_secs(u64::from(entree.ban_secondes)),
         ipv4_prefix_bits: entree.ipv4_prefix_bits,
         ipv6_prefix_bits: entree.ipv6_prefix_bits,
