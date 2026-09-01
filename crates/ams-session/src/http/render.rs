@@ -41,7 +41,7 @@
 //! trient plus pareil. Le client la met en forme, puisque c'est lui qui sait pour
 //! qui.
 
-use ams_api::{Error, Event, Json, Reader, Reason};
+use ams_api::{Error, Event, Json, Reader, Reason, Str};
 use ams_proto_imap::Flags;
 
 /// Ce qu'un nom de drapeau peut faire de long, une fois décodé.
@@ -390,6 +390,111 @@ pub fn write_metrics<'o>(
     }
     json.end_object()?;
     json.finish()
+}
+
+/// Ce qu'un corps de compte a dit.
+///
+/// # UNE SEULE LECTURE POUR QUATRE RESSOURCES
+///
+/// Créer un compte, le remplacer, changer son secret, changer ses adresses : ce
+/// sont quatre corps de même grammaire, dont chacun n'emploie qu'une partie.
+/// Quatre lecteurs auraient donné quatre façons de lire la même chose, et le
+/// jour où l'une changerait, les trois autres ne le sauraient pas.
+///
+/// **C'EST L'APPELANT QUI EXIGE**, et il doit refuser ce qu'il n'emploie pas :
+/// un `PUT` sur le secret qui accepterait un champ `addresses` en silence ferait
+/// croire au client qu'on a changé ses adresses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AccountBody<'c, 's> {
+    /// Le nom, s'il est donné.
+    pub login: Option<&'c str>,
+    /// Le secret, tel qu'il a été déséchappé dans le tampon prêté.
+    pub password: Option<&'s str>,
+    /// Combien d'adresses ont été écrites dans la tranche prêtée.
+    ///
+    /// **`None` EST L'ABSENCE DU CHAMP, `Some(0)` UNE LISTE VIDE** : l'un ne
+    /// touche pas aux adresses, l'autre les efface toutes. Les confondre ferait
+    /// perdre à un compte ses adresses parce qu'on changeait son mot de passe.
+    pub addresses: Option<usize>,
+}
+
+/// Lit un corps de compte.
+///
+/// `secret` reçoit le mot de passe déséchappé ; `vers` reçoit les adresses, qui
+/// pointent dans `corps`.
+///
+/// # POURQUOI LE SECRET SE DÉSÉCHAPPE ET PAS LES ADRESSES
+///
+/// Un mot de passe a le droit de porter un guillemet ou une barre oblique
+/// inverse — c'est même souhaitable —, et JSON les écrit alors échappés. Une
+/// adresse ou un nom de compte qui aurait besoin d'être échappé ne serait pas une
+/// adresse ni un nom que ce serveur accepte : les refuser ici est plus honnête
+/// que de les déséchapper pour les refuser deux lignes plus loin.
+///
+/// # Errors
+///
+/// [`Reason::BadJsonBody`] : un champ qu'on ne connaît pas, un champ répété, une
+/// valeur du mauvais type, une chaîne échappée là où l'on n'en accepte pas, ou
+/// plus d'adresses que la tranche n'en tient — **on refuse plutôt que de
+/// tronquer**.
+pub fn read_account_body<'c, 's>(
+    corps: &'c [u8],
+    secret: &'s mut [u8],
+    vers: &mut [&'c str],
+) -> Result<AccountBody<'c, 's>, Error> {
+    let mauvais = Error::new(Reason::BadJsonBody);
+    let mut lecteur = Reader::new(corps);
+    let mut login = None;
+    let mut adresses: Option<usize> = None;
+    // **LA CHAÎNE, ET NON SA LONGUEUR** : elle emprunte le corps, qui vit plus
+    // longtemps que la boucle. La déséchapper ici obligerait à prêter le tampon à
+    // chaque tour, puis à retrouver après coup ce qu'on y avait écrit — deux
+    // gardes qu'aucune entrée ne peut faire échouer.
+    let mut secret_dit: Option<Str<'c>> = None;
+    // Quel champ on est en train de lire : 1 login, 2 password, 3 addresses.
+    let mut quel = 0_u8;
+
+    loop {
+        match lecteur.read().map_err(|_| mauvais)? {
+            None => break,
+            Some(Event::Key(clef)) => {
+                quel = match (clef.is("login"), clef.is("password"), clef.is("addresses")) {
+                    (true, _, _) if login.is_none() => 1,
+                    (_, true, _) if secret_dit.is_none() => 2,
+                    (_, _, true) if adresses.is_none() => 3,
+                    // Un champ inconnu, ou répété. **RÉPÉTÉ EST AUSSI GRAVE** :
+                    // rien ne dit lequel des deux le client voulait.
+                    _ => return Err(mauvais),
+                };
+            }
+            Some(Event::ArrayStart) if quel == 3 => adresses = Some(0),
+            Some(Event::Text(texte)) => match quel {
+                1 => login = Some(texte.as_plain().ok_or(mauvais)?),
+                2 => secret_dit = Some(texte),
+                3 => {
+                    let combien = adresses.ok_or(mauvais)?;
+                    let place = vers.get_mut(combien).ok_or(mauvais)?;
+                    *place = texte.as_plain().ok_or(mauvais)?;
+                    adresses = Some(combien.saturating_add(1));
+                }
+                _ => return Err(mauvais),
+            },
+            Some(Event::ObjectStart | Event::ObjectEnd | Event::ArrayEnd) => {}
+            Some(_) => return Err(mauvais),
+        }
+    }
+
+    // **UNE SEULE FOIS, ET APRÈS LA BOUCLE** : un `password` répété est déjà
+    // refusé, donc il n'y a jamais deux chaînes à déséchapper.
+    let password = match secret_dit {
+        Some(texte) => Some(texte.unescape(secret).map_err(|_| mauvais)?),
+        None => None,
+    };
+    Ok(AccountBody {
+        login,
+        password,
+        addresses: adresses,
+    })
 }
 
 /// Ce qu'une modification de drapeaux demande.

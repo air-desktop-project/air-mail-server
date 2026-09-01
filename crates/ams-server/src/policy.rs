@@ -2,7 +2,6 @@
 
 use std::sync::{Condvar, Mutex};
 
-use ams_auth::Account;
 use ams_proto_smtp::Path;
 use ams_sasl::Credentials;
 use ams_session::{Authenticator, Policy, RecipientVerdict};
@@ -89,7 +88,7 @@ impl Places {
 /// auquel cas le serveur n'accepte de courrier pour personne. C'est le seul
 /// défaut qui ne relaie rien.
 pub struct BoitesConnues {
-    comptes: std::sync::Arc<Vec<Account>>,
+    comptes: std::sync::Arc<crate::comptes::Comptes>,
     /// L'adresse du postmaster de ce serveur, composée une fois.
     postmaster: String,
     places: Places,
@@ -101,7 +100,7 @@ impl BoitesConnues {
     /// `postmaster` est l'adresse que `<Postmaster>` désigne — composée par
     /// l'appelant, qui connaît le domaine annoncé.
     #[must_use]
-    pub fn new(comptes: std::sync::Arc<Vec<Account>>, postmaster: String) -> Self {
+    pub fn new(comptes: std::sync::Arc<crate::comptes::Comptes>, postmaster: String) -> Self {
         Self {
             comptes,
             postmaster,
@@ -117,7 +116,7 @@ impl BoitesConnues {
     /// offert` sur un serveur en clair qui ne l'offrait pas.
     #[must_use]
     pub fn a_des_comptes(&self) -> bool {
-        !self.comptes.is_empty()
+        !self.comptes.vue().is_empty()
     }
 }
 
@@ -139,7 +138,7 @@ impl Authenticator for BoitesConnues {
     fn authenticate(&self, credentials: &Credentials<'_>) -> bool {
         tokio::task::block_in_place(|| {
             self.places
-                .occuper(|| ams_auth::authenticate(&self.comptes, credentials))
+                .occuper(|| ams_auth::authenticate(&self.comptes.vue(), credentials))
         })
     }
 }
@@ -174,7 +173,7 @@ impl Policy for BoitesConnues {
             Path::Null => return RecipientVerdict::RejectPermanent,
         };
 
-        if ams_auth::route(&self.comptes, adresse.as_bytes()).is_some() {
+        if ams_auth::route(&self.comptes.vue(), adresse.as_bytes()).is_some() {
             RecipientVerdict::Accept
         } else {
             // `RelayDenied` et non `RejectPermanent` : les deux rendent `550`,
@@ -211,8 +210,12 @@ mod tests {
                 addresses: adresses.iter().map(|a| (*a).to_string()).collect(),
             }]
         };
+        // Le chemin ne sert pas : cet essai ne modifie rien, il interroge.
         BoitesConnues::new(
-            Arc::new(comptes),
+            Arc::new(crate::comptes::Comptes::new(
+                std::path::PathBuf::from("/nulle-part/comptes.bin"),
+                comptes,
+            )),
             String::from("postmaster@mail.example.com"),
         )
     }

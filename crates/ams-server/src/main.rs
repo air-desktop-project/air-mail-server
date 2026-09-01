@@ -30,6 +30,7 @@
 //! `air-mail-admin config write`.
 
 mod api;
+mod comptes;
 mod delivery;
 mod imap;
 mod policy;
@@ -145,14 +146,23 @@ type MontageApi = (
 ///
 /// Chaque refus se dit **au démarrage**, avec sa raison. Un port qu'on ouvrirait
 /// pour répondre 500 à chaque requête serait pire qu'un port fermé.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "monter l'API demande la configuration, le chiffrement, les boîtes, \
+              les comptes, la remise, les domaines, le videur, la racine du \
+              magasin et le domaine — chacun vient d'un endroit différent, et les \
+              grouper en une structure d'appel ne ferait que déplacer la liste."
+)]
 fn monter_l_api(
     options: &Configuration,
     tls: Option<&Arc<ServerConfig>>,
     boites: Arc<BoitesImap>,
-    comptes: Arc<Vec<Account>>,
-    remise: Boites,
+    comptes: Arc<crate::comptes::Comptes>,
+    remise: Arc<Boites>,
     domaines: Arc<Vec<String>>,
     garde: Arc<ams_loop_tokio::SharedGuard>,
+    racine: std::path::PathBuf,
+    domaine: Vec<u8>,
 ) -> Result<Option<MontageApi>, String> {
     if options.listen_http.is_empty() {
         eprintln!("air-mail-server : API REST non servie — aucune adresse d'écoute configurée");
@@ -209,7 +219,7 @@ fn monter_l_api(
         session,
         Arc::new(http_tls),
         Arc::new(crate::api::ApiMaildir::new(
-            boites, comptes, remise, domaines, garde,
+            boites, comptes, remise, domaines, garde, racine, domaine,
         )),
     )))
 }
@@ -475,12 +485,19 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     // peut pas marcher doit refuser de démarrer, et non le découvrir à la
     // première émission.
     let signature = charger_dkim(&options.dkim)?;
-    let comptes = charger_comptes(&options.accounts)?;
-    verifier_les_domaines(&comptes, &options.hosted)?;
+    let charges = charger_comptes(&options.accounts)?;
+    verifier_les_domaines(&charges, &options.hosted)?;
+    // **UN SEUL MAGASIN POUR LES QUATRE SERVICES**, et il est modifiable :
+    // ce qu'un administrateur change doit être vu par SMTP, IMAP, POP3 et l'API,
+    // tout de suite, sans arrêter le service.
+    let comptes = Arc::new(crate::comptes::Comptes::new(
+        std::path::PathBuf::from(&options.accounts),
+        charges,
+    ));
     // `AUTH` n'est annoncé QUE si les deux conditions tiennent : quelqu'un à qui
     // répondre oui, et de quoi chiffrer. La session refuse `AUTH` hors TLS de
     // toute façon ; l'annoncer sans chiffrement ne ferait que mentir plus tôt.
-    let authentifie = !comptes.is_empty() && chiffrement.is_some();
+    let authentifie = !comptes.vue().is_empty() && chiffrement.is_some();
     let config = if chiffrement.is_some() {
         config.with_capabilities(Capabilities {
             starttls: true,
@@ -718,7 +735,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     // qu'au démarrage.
     let mut boites: BTreeMap<String, Arc<Maildir>> = BTreeMap::new();
     let mut messages = 0_u32;
-    for compte in &comptes {
+    for compte in comptes.vue().iter() {
         let racine = maildir.join(&compte.login);
         let boite = Maildir::open(&racine, domaine, ams_store::fresh_uid_validity())
             .map_err(|erreur| format!("boîte de `{}` : {erreur}", compte.login))?;
@@ -728,7 +745,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         messages = messages.saturating_add(resume.numbered);
         boites.insert(compte.login.clone(), Arc::new(boite));
     }
-    let boites: Boites = Arc::new(boites);
+    let boites = Arc::new(Boites::new(boites));
 
     let ecouteur = TcpListener::bind(ecoute)
         .await
@@ -739,7 +756,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         env!("CARGO_PKG_VERSION"),
         options.domain,
         ecoute,
-        boites.len(),
+        comptes.vue().len(),
         options.maildir,
         messages
     );
@@ -789,7 +806,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     // que personne n'a demandée serait pire — mais on le DIT, parce qu'un
     // serveur qui refuse `postmaster` est un serveur dont personne ne peut
     // signaler qu'il va mal.
-    if ams_auth::route(&comptes, postmaster.as_bytes()).is_none() {
+    if ams_auth::route(&comptes.vue(), postmaster.as_bytes()).is_none() {
         eprintln!(
             "air-mail-server : ATTENTION — aucun compte ne reçoit `{postmaster}`. \
              La RFC 5321 §4.5.1 l'exige : `air-mail-admin account add … --address {postmaster}`."
@@ -955,6 +972,8 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         Arc::clone(&boites),
         Arc::new(options.hosted.clone()),
         Arc::clone(&garde),
+        maildir.clone(),
+        domaine.to_vec(),
     )?;
     // **LA MÊME SESSION ET LA MÊME API POUR LES DEUX VERSIONS** : un jeton scellé
     // par HTTP/2 doit ouvrir HTTP/3, et une ressource servie d'un côté doit être

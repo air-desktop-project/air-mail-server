@@ -27,6 +27,11 @@ fn chaque_raison_a_son_code_et_son_message() {
             StatusCode::BAD_REQUEST,
             "message déposé est refusé",
         ),
+        (
+            Reason::BadAccount,
+            StatusCode::BAD_REQUEST,
+            "compte n'est pas acceptable",
+        ),
         (Reason::PathTooLong, StatusCode::URI_TOO_LONG, "trop long"),
         (
             Reason::NoSuchResource,
@@ -136,6 +141,7 @@ fn le_message_ne_nomme_aucune_regle() {
         Reason::TokenExpired,
         Reason::BadJsonBody,
         Reason::BadMessage,
+        Reason::BadAccount,
     ] {
         let dit = raison.message();
         for indice in [

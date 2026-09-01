@@ -34,6 +34,12 @@ impl StatusCode {
     pub const FORBIDDEN: Self = Self(403);
     /// `404 Not Found`.
     pub const NOT_FOUND: Self = Self(404);
+    /// `409 Conflict` — §15.5.10 de RFC 9110.
+    ///
+    /// **CE N'EST PAS UN `400`** : la demande est parfaitement formée, et c'est
+    /// l'ÉTAT actuel de la ressource qui l'empêche. Un `400` enverrait le client
+    /// relire son corps, qui n'a rien à corriger.
+    pub const CONFLICT: Self = Self(409);
     /// `405 Method Not Allowed`.
     pub const METHOD_NOT_ALLOWED: Self = Self(405);
     /// `413 Content Too Large`.

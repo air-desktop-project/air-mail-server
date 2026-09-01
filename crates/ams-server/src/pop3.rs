@@ -1,13 +1,12 @@
 //! Les boîtes, vues par le service POP3.
 
-use std::collections::BTreeMap;
 use std::io::{Read as _, Seek as _, SeekFrom};
 use std::sync::{Arc, Mutex};
 
 use ams_loop_tokio::pop3::Mailboxes;
 use ams_proto_pop3::MessageNumber;
 use ams_session::pop3::Mailbox;
-use ams_store::{LockedMailbox, Maildir};
+use ams_store::LockedMailbox;
 
 /// Une boîte verrouillée, avec les marques d'effacement de la session.
 ///
@@ -76,7 +75,7 @@ impl Mailbox for BoiteOuverte {
 
 /// Les boîtes du serveur, telles que POP3 les ouvre.
 pub struct BoitesPop3 {
-    boites: Arc<BTreeMap<String, Arc<Maildir>>>,
+    boites: Arc<crate::delivery::Boites>,
     /// Les tampons de lecture, un par message en cours d'émission.
     ///
     /// Un `Mutex` parce que [`Mailboxes::read`] reçoit `&self` : elle est
@@ -88,7 +87,7 @@ pub struct BoitesPop3 {
 impl BoitesPop3 {
     /// Monte le service à partir des boîtes déjà ouvertes par le serveur.
     #[must_use]
-    pub fn new(boites: Arc<BTreeMap<String, Arc<Maildir>>>) -> Self {
+    pub fn new(boites: Arc<crate::delivery::Boites>) -> Self {
         Self {
             boites,
             lecteurs: Mutex::new(()),
@@ -106,7 +105,7 @@ impl Mailboxes for BoitesPop3 {
         // n'ouvre rien.
         let nom = core::str::from_utf8(user).ok()?;
         let boite = self.boites.get(nom)?;
-        let verrouillee = LockedMailbox::open(boite).ok().flatten()?;
+        let verrouillee = LockedMailbox::open(&boite).ok().flatten()?;
         let marques = vec![false; verrouillee.messages().len()];
         Some(BoiteOuverte {
             verrouillee,

@@ -25,16 +25,9 @@
 //!
 //! # CE QUI N'EST PAS ENCORE SERVI LE DIT
 //!
-//! La soumission est servie, et l'administration l'est EN LECTURE. Ce qui MODIFIE
-//! le magasin de comptes — créer, effacer, changer un mot de passe, changer des
-//! adresses — répond `501` : les comptes sont chargés une fois au démarrage et
-//! partagés par SMTP, IMAP, POP3 et l'API, et les rendre modifiables à chaud
-//! demande un remplacement atomique du fichier, un verrou, et une relecture par
-//! tous les services.
-//!
-//! §15.6.2 de RFC 9110 : « the server does not support the functionality
-//! required ». C'est la réponse honnête — un `404` ferait croire que la ressource
-//! n'existe pas, et un `500` qu'elle a échoué.
+//! Tout est servi : le courrier, les jetons, la supervision, la soumission et
+//! l'administration — **y compris ce qui modifie le magasin de comptes**. Celui-ci
+//! est modifiable pendant qu'on sert : voir `crate::comptes`.
 //!
 //! # ET LE JETON D'ADMINISTRATION SE FRAPPE AILLEURS
 //!
@@ -77,6 +70,18 @@ const BOITES_MAX: usize = 256;
 /// remise.
 const DESTINATAIRES: [&[u8]; 3] = [b"to", b"cc", b"bcc"];
 
+/// Ce qu'un mot de passe peut occuper, une fois déséchappé.
+///
+/// Deux cent cinquante-six octets. Ce n'est pas une politique de mot de passe —
+/// il n'y en a pas — c'est la taille du tampon qu'on prête au lecteur de JSON.
+const MOT_DE_PASSE_MAX: usize = 256;
+
+/// Combien d'adresses un compte peut déclarer.
+///
+/// Trente-deux. Aucune RFC ne le borne : c'est le nombre d'adresses qu'un seul
+/// corps de requête peut faire écrire dans le magasin.
+const ADRESSES_MAX: usize = 32;
+
 /// Combien de destinataires une soumission peut désigner.
 ///
 /// Soixante-quatre. Aucune RFC ne le borne — c'est le nombre de boîtes qu'un
@@ -95,14 +100,14 @@ pub struct ApiMaildir {
     /// Le même service de boîtes qu'IMAP.
     boites: Arc<BoitesImap>,
     /// Les comptes, pour vérifier un mot de passe et router un destinataire.
-    comptes: Arc<Vec<Account>>,
+    comptes: Arc<crate::comptes::Comptes>,
     /// Les mêmes boîtes que la remise SMTP, pour y déposer une soumission.
     ///
     /// **LE MÊME CHEMIN, ET NON UN SECOND** : un message déposé par l'API doit
     /// arriver comme celui qui entre par SMTP — même écriture, même validation,
     /// même magasin. Une seconde façon de remettre finirait par diverger, et deux
     /// messages identiques n'auraient pas le même sort selon la porte d'entrée.
-    remise: crate::delivery::Boites,
+    remise: Arc<crate::delivery::Boites>,
     /// Les domaines qu'on héberge, tels que la configuration les nomme.
     domaines: Arc<Vec<String>>,
     /// Le videur (C8), pour voir et lever ses bannissements.
@@ -111,6 +116,10 @@ pub struct ApiMaildir {
     /// lecture montrerait des peines que le garde n'applique pas, et en cacherait
     /// qu'il applique.
     guard: Arc<ams_loop_tokio::SharedGuard>,
+    /// La racine des boîtes, pour en ouvrir une à un compte neuf.
+    racine: std::path::PathBuf,
+    /// Le domaine, que le nom d'un message porte (§3.6.4 de RFC 5322).
+    domaine: Vec<u8>,
     /// La borne sur les vérifications simultanées.
     places: Places,
 }
@@ -120,10 +129,12 @@ impl ApiMaildir {
     #[must_use]
     pub fn new(
         boites: Arc<BoitesImap>,
-        comptes: Arc<Vec<Account>>,
-        remise: crate::delivery::Boites,
+        comptes: Arc<crate::comptes::Comptes>,
+        remise: Arc<crate::delivery::Boites>,
         domaines: Arc<Vec<String>>,
         guard: Arc<ams_loop_tokio::SharedGuard>,
+        racine: std::path::PathBuf,
+        domaine: Vec<u8>,
     ) -> Self {
         Self {
             boites,
@@ -131,6 +142,8 @@ impl ApiMaildir {
             remise,
             domaines,
             guard,
+            racine,
+            domaine,
             places: Places::new(VERIFICATIONS_SIMULTANEES),
         }
     }
@@ -140,13 +153,12 @@ impl ApiMaildir {
     /// **AUCUNE EMPREINTE N'EN SORT** : la représentation d'un compte n'en porte
     /// pas, et le mot de passe est une ressource à part qui ne se lit pas.
     fn accounts<'o>(&self, sortie: &'o mut [u8]) -> Served<'o> {
-        let adresses: std::vec::Vec<std::vec::Vec<&str>> = self
-            .comptes
+        let vue = self.comptes.vue();
+        let adresses: std::vec::Vec<std::vec::Vec<&str>> = vue
             .iter()
             .map(|compte| compte.addresses.iter().map(String::as_str).collect())
             .collect();
-        let lignes: std::vec::Vec<render::AccountRow<'_>> = self
-            .comptes
+        let lignes: std::vec::Vec<render::AccountRow<'_>> = vue
             .iter()
             .zip(&adresses)
             .map(|(compte, adresses)| render::AccountRow {
@@ -159,7 +171,8 @@ impl ApiMaildir {
 
     /// Un compte.
     fn account<'o>(&self, nom: &str, sortie: &'o mut [u8]) -> Served<'o> {
-        let Some(compte) = self.comptes.iter().find(|compte| compte.login == nom) else {
+        let vue = self.comptes.vue();
+        let Some(compte) = vue.iter().find(|compte| compte.login == nom) else {
             return absente(sortie);
         };
         let adresses: std::vec::Vec<&str> = compte.addresses.iter().map(String::as_str).collect();
@@ -170,6 +183,234 @@ impl ApiMaildir {
             },
             sortie,
         ))
+    }
+
+    /// Crée un compte, ou remplace celui qui portait ce nom.
+    ///
+    /// # POURQUOI LA BOÎTE S'OUVRE AVANT QUE LE COMPTE NE SOIT ÉCRIT
+    ///
+    /// Un compte sans boîte s'authentifierait et ne recevrait rien : un
+    /// demi-compte, que rien ne signale. Si la boîte ne peut pas s'ouvrir —
+    /// disque plein, permissions — le compte n'est pas écrit et rien n'a changé.
+    ///
+    /// L'ordre inverse laisserait un compte inscrit sans boîte, et il faudrait le
+    /// réparer à la main.
+    ///
+    /// **UN RÉPERTOIRE QUI SURVIT À UN ÉCHEC N'EST PAS UN PROBLÈME** : une boîte
+    /// vide ne se distingue pas d'une boîte neuve, et la tentative suivante la
+    /// réemploie.
+    fn poser_un_compte<'o>(
+        &self,
+        nom: &str,
+        corps: &[u8],
+        remplacer: bool,
+        sortie: &'o mut [u8],
+    ) -> Served<'o> {
+        let mut secret = [0_u8; MOT_DE_PASSE_MAX];
+        let mut place = [""; ADRESSES_MAX];
+        let Ok(lu) = render::read_account_body(corps, &mut secret, &mut place) else {
+            return refus_de_corps(sortie);
+        };
+        // §3.4 de RFC 9110 : l'identité d'une ressource est son URI. Un `login`
+        // dans le corps qui contredirait le chemin poserait la question de savoir
+        // lequel des deux nomme le compte, et il n'y a pas de bonne réponse.
+        if lu.login.is_some_and(|dit| dit != nom) {
+            return refus_de_compte(sortie);
+        }
+        let (Some(secret), Some(combien)) = (lu.password, lu.addresses) else {
+            // Créer un compte demande les deux : sans secret il ne s'authentifie
+            // pas, et une liste d'adresses absente n'est pas une liste vide.
+            return refus_de_corps(sortie);
+        };
+        let adresses: std::vec::Vec<String> = place
+            .get(..combien)
+            .unwrap_or_default()
+            .iter()
+            .map(|adresse| (*adresse).to_string())
+            .collect();
+
+        let existait = self.comptes.vue().iter().any(|vu| vu.login == nom);
+        if existait && !remplacer {
+            return conflit(sortie);
+        }
+        let Some(hash) = self.empreinte(secret.as_bytes()) else {
+            return notre_faute();
+        };
+        // **LA BOÎTE D'ABORD.**
+        if self.ouvrir_la_boite(nom).is_none() {
+            return indisponible(sortie);
+        }
+
+        let compte = Account {
+            login: nom.to_string(),
+            hash,
+            addresses: adresses,
+        };
+        if let Err(quoi) = self.comptes.modifier(|comptes| {
+            comptes.retain(|vu| vu.login != nom);
+            comptes.push(compte);
+            Ok(())
+        }) {
+            return dire_la_faute(&quoi, sortie);
+        }
+        let servi = self.account(nom, sortie);
+        Served {
+            status: match existait {
+                true => StatusCode::OK,
+                false => StatusCode::CREATED,
+            },
+            ..servi
+        }
+    }
+
+    /// Retire un compte.
+    ///
+    /// # LA BOÎTE RESTE SUR LE DISQUE, ET C'EST DÉLIBÉRÉ
+    ///
+    /// Effacer les messages d'un compte est irréversible, et rien dans « retirer
+    /// un compte » ne demande cela — un administrateur qui retire un compte par
+    /// erreur doit pouvoir le remettre. C'est aussi ce que fait déjà
+    /// `air-mail-admin account remove`, et deux outils qui feraient deux choses
+    /// différentes du même mot seraient un piège.
+    ///
+    /// Le répertoire se supprime à la main, quand on l'a décidé.
+    fn retirer_un_compte<'o>(&self, nom: &str, sortie: &'o mut [u8]) -> Served<'o> {
+        if !self.comptes.vue().iter().any(|vu| vu.login == nom) {
+            return absente(sortie);
+        }
+        if let Err(quoi) = self.comptes.modifier(|comptes| {
+            comptes.retain(|vu| vu.login != nom);
+            Ok(())
+        }) {
+            return dire_la_faute(&quoi, sortie);
+        }
+        // La carte des boîtes suit le magasin : une boîte qui resterait
+        // accessible sans compte serait servie à un nom que plus rien n'authentifie.
+        self.remise.retirer(nom);
+        Served {
+            status: StatusCode::NO_CONTENT,
+            media: JSON_MEDIA_TYPE,
+            body: &[],
+        }
+    }
+
+    /// Change le secret d'un compte.
+    fn poser_un_secret<'o>(&self, nom: &str, corps: &[u8], sortie: &'o mut [u8]) -> Served<'o> {
+        let mut secret = [0_u8; MOT_DE_PASSE_MAX];
+        let mut place = [""; ADRESSES_MAX];
+        let Ok(lu) = render::read_account_body(corps, &mut secret, &mut place) else {
+            return refus_de_corps(sortie);
+        };
+        // **CE QU'ON N'EMPLOIE PAS, ON LE REFUSE** : accepter `addresses` ici en
+        // silence ferait croire au client qu'on les a changées.
+        let (Some(secret), None, None) = (lu.password, lu.login, lu.addresses) else {
+            return refus_de_corps(sortie);
+        };
+        if !self.comptes.vue().iter().any(|vu| vu.login == nom) {
+            return absente(sortie);
+        }
+        let Some(hash) = self.empreinte(secret.as_bytes()) else {
+            return notre_faute();
+        };
+        match self.comptes.modifier(|comptes| {
+            let compte = comptes
+                .iter_mut()
+                .find(|vu| vu.login == nom)
+                .ok_or(crate::comptes::Faute::Introuvable)?;
+            compte.hash = hash;
+            Ok(())
+        }) {
+            Ok(()) => Served {
+                status: StatusCode::NO_CONTENT,
+                media: JSON_MEDIA_TYPE,
+                body: &[],
+            },
+            Err(quoi) => dire_la_faute(&quoi, sortie),
+        }
+    }
+
+    /// Remplace les adresses d'un compte.
+    fn poser_des_adresses<'o>(&self, nom: &str, corps: &[u8], sortie: &'o mut [u8]) -> Served<'o> {
+        let mut secret = [0_u8; MOT_DE_PASSE_MAX];
+        let mut place = [""; ADRESSES_MAX];
+        let Ok(lu) = render::read_account_body(corps, &mut secret, &mut place) else {
+            return refus_de_corps(sortie);
+        };
+        let (Some(combien), None, None) = (lu.addresses, lu.login, lu.password) else {
+            return refus_de_corps(sortie);
+        };
+        let adresses: std::vec::Vec<String> = place
+            .get(..combien)
+            .unwrap_or_default()
+            .iter()
+            .map(|adresse| (*adresse).to_string())
+            .collect();
+        if !self.comptes.vue().iter().any(|vu| vu.login == nom) {
+            return absente(sortie);
+        }
+        match self.comptes.modifier(|comptes| {
+            let compte = comptes
+                .iter_mut()
+                .find(|vu| vu.login == nom)
+                .ok_or(crate::comptes::Faute::Introuvable)?;
+            compte.addresses = adresses;
+            Ok(())
+        }) {
+            Ok(()) => self.account(nom, sortie),
+            Err(quoi) => dire_la_faute(&quoi, sortie),
+        }
+    }
+
+    /// Les adresses d'un compte, seules.
+    fn adresses_de<'o>(&self, nom: &str, sortie: &'o mut [u8]) -> Served<'o> {
+        let vue = self.comptes.vue();
+        let Some(compte) = vue.iter().find(|vu| vu.login == nom) else {
+            return absente(sortie);
+        };
+        let adresses: std::vec::Vec<&str> = compte.addresses.iter().map(String::as_str).collect();
+        rendre(render::write_domains(&adresses, sortie))
+    }
+
+    /// L'empreinte d'un secret, au sel du noyau.
+    ///
+    /// **LES MÊMES DEUX PRÉCAUTIONS QUE POUR LA VÉRIFICATION** : `block_in_place`,
+    /// parce qu'Argon2id est délibérément lent, et la borne sur les calculs
+    /// simultanés, parce que chacun réclame dix-neuf mébioctets.
+    fn empreinte(&self, secret: &[u8]) -> Option<String> {
+        let sel = self.sel()?;
+        tokio::task::block_in_place(|| {
+            self.places
+                .occuper(|| ams_auth::hash_password(secret, &sel).ok())
+        })
+    }
+
+    /// Seize octets d'aléa, tirés du noyau.
+    ///
+    /// **UN SEL PAR COMPTE, ET JAMAIS DEUX FOIS LE MÊME** : c'est ce qui empêche
+    /// de reconnaître deux comptes qui ont choisi le même mot de passe, et de
+    /// précalculer une table pour tous.
+    fn sel(&self) -> Option<[u8; 16]> {
+        use std::io::Read as _;
+        let mut graine = [0_u8; 16];
+        std::fs::File::open("/dev/urandom")
+            .and_then(|mut source| source.read_exact(&mut graine))
+            .ok()?;
+        Some(graine)
+    }
+
+    /// Ouvre la boîte de ce compte, et la pose dans la carte.
+    fn ouvrir_la_boite(&self, nom: &str) -> Option<()> {
+        if self.remise.get(nom).is_some() {
+            return Some(());
+        }
+        let racine = self.racine.join(nom);
+        let boite = tokio::task::block_in_place(|| {
+            ams_store::Maildir::open(&racine, &self.domaine, ams_store::fresh_uid_validity())
+        })
+        .ok()?;
+        self.remise
+            .poser(nom.to_string(), std::sync::Arc::new(boite));
+        Some(())
     }
 
     /// Les domaines qu'on héberge.
@@ -329,10 +570,11 @@ impl ApiMaildir {
         let Ok(message) = ams_mime::Message::parse(corps, &bornes) else {
             return refus_de_depot(sortie);
         };
-        if !ecrit_bien_en_son_nom(&self.comptes, compte, &message) {
+        let vue = self.comptes.vue();
+        if !ecrit_bien_en_son_nom(&vue, compte, &message) {
             return refus_de_depot(sortie);
         }
-        let Some(destinataires) = destinataires_de(&self.comptes, &message) else {
+        let Some(destinataires) = destinataires_de(&vue, &message) else {
             return refus_de_depot(sortie);
         };
 
@@ -400,20 +642,43 @@ impl Api for ApiMaildir {
             Resource::Messages { boite } => self.messages(account, boite, sortie),
             Resource::Message { boite, uid } => self.message(account, boite, uid, sortie),
             Resource::Submissions => self.submissions(account, body, sortie),
-            // **L'ADMINISTRATION, EN LECTURE.** Ce qui MODIFIE le magasin de
-            // comptes n'est pas ici : les comptes sont chargés une fois au
-            // démarrage et partagés par SMTP, IMAP, POP3 et l'API. Les rendre
-            // modifiables à chaud demande un remplacement atomique du fichier et
-            // une relecture par tous les services — c'est une tranche à part, et
-            // elle continue de répondre `501` en attendant.
+            // **L'ADMINISTRATION, EN LECTURE ET EN ÉCRITURE.** Le magasin est
+            // modifiable pendant qu'on sert : voir `crate::comptes`.
+            Resource::Accounts if matches!(method, Method::Post) => {
+                // **`POST` CRÉE, ET REFUSE DE REMPLACER** : le nom vient alors du
+                // corps, puisque le chemin ne le porte pas.
+                let mut secret = [0_u8; MOT_DE_PASSE_MAX];
+                let mut place = [""; ADRESSES_MAX];
+                match render::read_account_body(body, &mut secret, &mut place) {
+                    Ok(lu) => match lu.login {
+                        Some(nom) => self.poser_un_compte(nom, body, false, sortie),
+                        None => refus_de_corps(sortie),
+                    },
+                    Err(_) => refus_de_corps(sortie),
+                }
+            }
             Resource::Accounts => self.accounts(sortie),
+            // **`PUT` POSE UN ÉTAT** : il crée ou remplace, et redemander le même
+            // état deux fois donne le même résultat (§9.3.4 de RFC 9110).
+            Resource::Account { compte } if matches!(method, Method::Put) => {
+                self.poser_un_compte(compte, body, true, sortie)
+            }
+            Resource::Account { compte } if matches!(method, Method::Delete) => {
+                self.retirer_un_compte(compte, sortie)
+            }
             Resource::Account { compte } => self.account(compte, sortie),
+            Resource::AccountPassword { compte } => self.poser_un_secret(compte, body, sortie),
+            Resource::AccountAddresses { compte } if matches!(method, Method::Put) => {
+                self.poser_des_adresses(compte, body, sortie)
+            }
+            Resource::AccountAddresses { compte } => self.adresses_de(compte, sortie),
             Resource::Domains => self.domains(sortie),
             Resource::Bans => self.bans(sortie),
             Resource::Ban { source } if matches!(method, Method::Delete) => {
                 self.lift(source, sortie)
             }
-            // **CE QUI N'EST PAS ENCORE SERVI LE DIT** (§15.6.2 de RFC 9110).
+            // **CE QUI N'EST PAS ENCORE SERVI LE DIT** (§15.6.2 de RFC 9110) :
+            // le message brut, une partie MIME, et la recherche.
             _ => pas_encore(sortie),
         }
     }
@@ -434,7 +699,7 @@ impl Api for ApiMaildir {
         };
         let ouvre = tokio::task::block_in_place(|| {
             self.places
-                .occuper(|| ams_auth::authenticate(&self.comptes, &identifiants))
+                .occuper(|| ams_auth::authenticate(&self.comptes.vue(), &identifiants))
         });
         // **UN MOT DE PASSE N'OUVRE PAS L'ADMINISTRATION.** Voir l'en-tête du
         // module : la limite est dans le code, et non dans une configuration.
@@ -697,6 +962,60 @@ fn source_de(texte: &str) -> Option<ams_guard::Source> {
     match texte.parse::<std::net::IpAddr>().ok()? {
         std::net::IpAddr::V4(adresse) => Some(ams_guard::Source::V4(adresse.octets())),
         std::net::IpAddr::V6(adresse) => Some(ams_guard::Source::V6(adresse.octets())),
+    }
+}
+
+/// Traduit une faute du magasin, **et l'écrit au journal**.
+///
+/// Ce qu'on rend au client est volontairement pauvre — un code, une phrase.
+/// L'exploitant qui lit le journal du serveur, lui, a droit à la raison exacte :
+/// « ce compte n'est pas acceptable » sans la cause l'enverrait chercher au
+/// hasard, et c'est lui qui doit réparer.
+fn dire_la_faute<'o>(quoi: &crate::comptes::Faute, sortie: &'o mut [u8]) -> Served<'o> {
+    eprintln!("air-mail-server : magasin de comptes — {quoi}");
+    match *quoi {
+        crate::comptes::Faute::Ecriture(_) => indisponible(sortie),
+        crate::comptes::Faute::Introuvable => absente(sortie),
+        crate::comptes::Faute::Refuse(_) => refus_de_compte(sortie),
+    }
+}
+
+/// Un corps qu'on ne sait pas lire.
+fn refus_de_corps(sortie: &mut [u8]) -> Served<'_> {
+    probleme(
+        ams_api::Reason::BadJsonBody,
+        StatusCode::BAD_REQUEST,
+        sortie,
+    )
+}
+
+/// Un compte qu'on refuse.
+///
+/// **CELUI-CI SE DIT, ET C'EST L'INVERSE D'UN DÉPÔT REFUSÉ** : qui le lit tient
+/// un jeton d'administration, donc l'autorité qui peut déjà lire la liste des
+/// comptes. Lui cacher pourquoi son nom est refusé ne protégerait rien.
+fn refus_de_compte(sortie: &mut [u8]) -> Served<'_> {
+    probleme(ams_api::Reason::BadAccount, StatusCode::BAD_REQUEST, sortie)
+}
+
+/// Un compte qui existe déjà.
+///
+/// §15.5.10 de RFC 9110 : la demande est bien formée, et c'est l'ÉTAT de la
+/// ressource qui l'empêche. Un `400` enverrait le client relire son corps, qui
+/// n'a rien à corriger.
+fn conflit(sortie: &mut [u8]) -> Served<'_> {
+    probleme(ams_api::Reason::BadAccount, StatusCode::CONFLICT, sortie)
+}
+
+/// Un document de problème, avec le code qu'on a choisi.
+fn probleme(raison: ams_api::Reason, statut: StatusCode, sortie: &mut [u8]) -> Served<'_> {
+    match ams_api::problem(raison, sortie) {
+        Ok(corps) => Served {
+            status: statut,
+            media: ams_api::PROBLEM_MEDIA_TYPE,
+            body: corps,
+        },
+        Err(_) => notre_faute(),
     }
 }
 

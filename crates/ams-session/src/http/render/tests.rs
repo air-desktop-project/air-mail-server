@@ -10,9 +10,9 @@ use ams_api::Reason;
 use ams_proto_imap::Flags;
 
 use super::{
-    AccountRow, BanRow, FlagPatch, MailboxRow, MessageRow, read_flag_patch, write_account,
-    write_accounts, write_bans, write_domains, write_health, write_mailbox, write_mailboxes,
-    write_message, write_messages, write_metrics,
+    AccountRow, BanRow, FlagPatch, MailboxRow, MessageRow, read_account_body, read_flag_patch,
+    write_account, write_accounts, write_bans, write_domains, write_health, write_mailbox,
+    write_mailboxes, write_message, write_messages, write_metrics,
 };
 
 /// Un tampon confortable.
@@ -506,4 +506,151 @@ fn les_bannissements_se_rendent_en_temps_restant() {
         texte(write_bans(&bans, &mut place).expect("écrivable")),
         r#"{"bans":[{"source":"192.0.2.1","prefixBits":32,"secondsRemaining":3540},{"source":"2001:db8::","prefixBits":64,"secondsRemaining":12}]}"#
     );
+}
+
+/// Ce qu'un essai lit d'un corps de compte.
+type CorpsLu = (
+    Option<String>,
+    Option<String>,
+    Option<std::vec::Vec<String>>,
+);
+
+/// Lit un corps de compte, sous une forme qu'un essai lit.
+fn corps_de_compte(json: &str) -> Result<CorpsLu, Reason> {
+    let mut secret = [0_u8; 128];
+    let mut adresses = [""; 8];
+    let lu = read_account_body(json.as_bytes(), &mut secret, &mut adresses)
+        .map_err(|faute| faute.reason())?;
+    Ok((
+        lu.login.map(ToString::to_string),
+        lu.password.map(ToString::to_string),
+        lu.addresses.map(|combien| {
+            adresses
+                .get(..combien)
+                .unwrap_or_default()
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        }),
+    ))
+}
+
+/// **LES TROIS CHAMPS SE LISENT**, et un secret échappé se déséchappe.
+///
+/// Un mot de passe a le droit de porter un guillemet ou une barre oblique
+/// inverse — c'est même souhaitable —, et JSON les écrit alors échappés.
+#[test]
+fn un_corps_de_compte_se_lit() {
+    let lu = corps_de_compte(
+        r#"{"login":"marc","password":"a\"b\\c","addresses":["marc@exemple.test","m@exemple.test"]}"#,
+    )
+    .expect("lisible");
+    assert_eq!(lu.0.as_deref(), Some("marc"));
+    assert_eq!(lu.1.as_deref(), Some("a\"b\\c"));
+    assert_eq!(
+        lu.2,
+        Some(std::vec![
+            "marc@exemple.test".to_string(),
+            "m@exemple.test".to_string()
+        ])
+    );
+}
+
+/// **L'ABSENCE D'UN CHAMP ET UNE LISTE VIDE NE SONT PAS LA MÊME CHOSE.**
+///
+/// L'un ne touche pas aux adresses, l'autre les efface toutes. Les confondre
+/// ferait perdre à un compte ses adresses parce qu'on changeait son mot de passe.
+#[test]
+fn l_absence_d_un_champ_n_est_pas_une_liste_vide() {
+    let lu = corps_de_compte(r#"{"password":"x"}"#).expect("lisible");
+    assert_eq!(lu.2, None, "on ne touche pas aux adresses");
+
+    let lu = corps_de_compte(r#"{"addresses":[]}"#).expect("lisible");
+    assert_eq!(lu.2, Some(std::vec![]), "on les efface toutes");
+    assert_eq!(lu.1, None, "et on ne touche pas au secret");
+}
+
+/// **UN CHAMP QU'ON NE CONNAÎT PAS, OU RÉPÉTÉ, SE REFUSE.**
+///
+/// Sur une modification, ignorer un champ ferait croire au client qu'on a fait ce
+/// qu'il demandait. Répété est aussi grave : rien ne dit lequel des deux il
+/// voulait.
+#[test]
+fn un_champ_inconnu_ou_repete_se_refuse() {
+    for json in [
+        r#"{"login":"marc","admin":true}"#,
+        r#"{"login":"marc","login":"jeanne"}"#,
+        r#"{"password":"a","password":"b"}"#,
+        r#"{"addresses":[],"addresses":[]}"#,
+    ] {
+        assert_eq!(corps_de_compte(json), Err(Reason::BadJsonBody), "{json}");
+    }
+}
+
+/// **UNE ADRESSE OU UN NOM QUI A BESOIN D'ÊTRE ÉCHAPPÉ N'EN EST PAS UN.**
+///
+/// Les refuser ici est plus honnête que de les déséchapper pour les refuser deux
+/// lignes plus loin. `r` est un `r` ordinaire, écrit de la façon qu'un JSON
+/// permet et qu'un nom de compte n'a aucune raison d'employer.
+#[test]
+fn un_nom_ou_une_adresse_echappee_se_refuse() {
+    for json in [
+        r#"{"login":"ma\u0072c"}"#,
+        r#"{"addresses":["m\u0040e.test"]}"#,
+    ] {
+        assert_eq!(corps_de_compte(json), Err(Reason::BadJsonBody), "{json}");
+    }
+}
+
+/// **PLUS D'ADRESSES QUE LA TRANCHE N'EN TIENT SE REFUSE**, et ne se tronque pas.
+///
+/// Tronquer ferait perdre au compte des adresses que le client croyait avoir
+/// posées, et rien dans la réponse ne le dirait.
+#[test]
+fn trop_d_adresses_se_refuse_plutot_que_de_tronquer() {
+    let liste: std::vec::Vec<String> = (0..9)
+        .map(|rang| std::format!("\"a{rang}@exemple.test\""))
+        .collect();
+    let json = std::format!(r#"{{"addresses":[{}]}}"#, liste.join(","));
+    assert_eq!(corps_de_compte(&json), Err(Reason::BadJsonBody));
+}
+
+/// **UNE VALEUR DU MAUVAIS TYPE SE REFUSE**, et un corps qui n'est pas du JSON
+/// aussi.
+#[test]
+fn une_valeur_du_mauvais_type_se_refuse() {
+    for json in [
+        r#"{"login":3}"#,
+        r#"{"password":true}"#,
+        r#"{"addresses":"marc@exemple.test"}"#,
+        r#"{"login":null}"#,
+        // Une chaîne AVANT toute clef : elle ne répond à aucune question.
+        r#""marc""#,
+        "pas du json",
+    ] {
+        assert_eq!(corps_de_compte(json), Err(Reason::BadJsonBody), "{json}");
+    }
+}
+
+/// **UN CORPS VIDE NE DIT RIEN, ET CE N'EST PAS UNE FAUTE ICI.**
+///
+/// C'est l'appelant qui exige : lui seul sait quel champ sa ressource demande.
+#[test]
+fn un_corps_sans_champ_ne_dit_rien() {
+    let lu = corps_de_compte("{}").expect("lisible");
+    assert_eq!((lu.0, lu.1, lu.2), (None, None, None));
+}
+
+/// **UN SECRET PLUS LONG QUE LE TAMPON SE REFUSE**, et ne se tronque pas.
+///
+/// Tronquer un mot de passe le rendrait vérifiable par un préfixe : le compte
+/// s'ouvrirait avec moins que ce que son propriétaire a choisi, sans que rien ne
+/// le dise.
+#[test]
+fn un_secret_trop_long_se_refuse() {
+    let mut secret = [0_u8; 8];
+    let mut adresses = [""; 4];
+    let json = br#"{"password":"beaucoup trop long pour huit octets"}"#;
+    let faute = read_account_body(json, &mut secret, &mut adresses).expect_err("trop long");
+    assert_eq!(faute.reason(), Reason::BadJsonBody);
 }

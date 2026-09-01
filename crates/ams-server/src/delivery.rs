@@ -7,7 +7,67 @@ use ams_loop_tokio::{Delivery, DeliveryFailure};
 use ams_store::{Incoming, Maildir};
 
 /// Les boîtes du serveur, une par compte, partagées par toutes les connexions.
-pub type Boites = Arc<BTreeMap<String, Arc<Maildir>>>;
+///
+/// # ELLE EST MODIFIABLE, PARCE QUE LES COMPTES LE SONT
+///
+/// Un compte créé par l'administration n'a pas de boîte : la carte était lue une
+/// fois au démarrage, et un compte neuf aurait pu s'authentifier sans jamais rien
+/// recevoir. Un demi-compte est pire qu'un refus, parce que rien ne le dit.
+///
+/// # UN `Arc<Maildir>` SORT, PAS UNE RÉFÉRENCE
+///
+/// Chaque lecture clone le pointeur et relâche le verrou. Rendre une référence
+/// obligerait à tenir le verrou aussi longtemps qu'on s'en sert — c'est-à-dire
+/// pendant une session IMAP entière, pendant laquelle aucun compte ne pourrait
+/// être créé.
+#[derive(Default)]
+pub struct Boites {
+    /// Une boîte par compte, par son nom.
+    carte: std::sync::RwLock<BTreeMap<String, Arc<Maildir>>>,
+}
+
+impl Boites {
+    /// La carte telle qu'elle est au démarrage.
+    #[must_use]
+    pub fn new(carte: BTreeMap<String, Arc<Maildir>>) -> Self {
+        Self {
+            carte: std::sync::RwLock::new(carte),
+        }
+    }
+
+    /// La boîte de ce compte, s'il en a une.
+    #[must_use]
+    pub fn get(&self, nom: &str) -> Option<Arc<Maildir>> {
+        self.lire().get(nom).map(Arc::clone)
+    }
+
+    /// Ajoute cette boîte à la carte, ou remplace celle qui portait ce nom.
+    pub fn poser(&self, nom: String, boite: Arc<Maildir>) {
+        self.ecrire().insert(nom, boite);
+    }
+
+    /// Retire la boîte de ce compte de la carte.
+    ///
+    /// **LE RÉPERTOIRE RESTE SUR LE DISQUE**, et c'est délibéré : voir
+    /// `ApiMaildir::supprimer_un_compte`.
+    pub fn retirer(&self, nom: &str) {
+        self.ecrire().remove(nom);
+    }
+
+    /// Le verrou de lecture, empoisonnement compris.
+    fn lire(&self) -> std::sync::RwLockReadGuard<'_, BTreeMap<String, Arc<Maildir>>> {
+        self.carte
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Le verrou d'écriture, empoisonnement compris.
+    fn ecrire(&self) -> std::sync::RwLockWriteGuard<'_, BTreeMap<String, Arc<Maildir>>> {
+        self.carte
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
 
 /// Remet un message dans **les boîtes de ses destinataires**.
 ///
@@ -42,15 +102,15 @@ pub type Boites = Arc<BTreeMap<String, Arc<Maildir>>>;
 /// **Cela exige l'ordonnanceur multi-fils** : `block_in_place` panique sur le
 /// mono-fil. Le binaire le choisit, et c'est pour cela qu'il le choisit.
 pub struct MaildirDelivery {
-    boites: Boites,
-    comptes: Arc<Vec<ams_auth::Account>>,
+    boites: Arc<Boites>,
+    comptes: Arc<crate::comptes::Comptes>,
     arrivees: Vec<Incoming>,
 }
 
 impl MaildirDelivery {
     /// Ouvre une remise vers ce jeu de boîtes.
     #[must_use]
-    pub fn new(boites: Boites, comptes: Arc<Vec<ams_auth::Account>>) -> Self {
+    pub fn new(boites: Arc<Boites>, comptes: Arc<crate::comptes::Comptes>) -> Self {
         Self {
             boites,
             comptes,
@@ -64,7 +124,11 @@ impl Delivery for MaildirDelivery {
         // La politique a déjà accepté cette adresse au `RCPT` ; si elle ne mène
         // plus nulle part, c'est que le magasin a changé sous nos pieds. C'est
         // TEMPORAIRE : le pair a le droit de réessayer.
-        let compte = ams_auth::route(&self.comptes, address).ok_or(DeliveryFailure::Temporary)?;
+        // **UN INSTANTANÉ PAR DESTINATAIRE** : ce qu'un administrateur change
+        // pendant une transaction sera vu par la suivante, et non au milieu de
+        // celle-ci.
+        let comptes = self.comptes.vue();
+        let compte = ams_auth::route(&comptes, address).ok_or(DeliveryFailure::Temporary)?;
         let boite = self
             .boites
             .get(&compte.login)

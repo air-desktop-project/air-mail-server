@@ -5267,17 +5267,78 @@ est puni, et un exploitant croirait n'avoir banni qu'une machine. Cette longueur
 voyage dans un champ à part : une barre oblique dans un chemin ferait deux segments
 d'un seul (§3.3 de RFC 3986), et le routage y verrait une autre ressource.
 
-### Ce qui MODIFIE le magasin de comptes n'est pas servi
+### Le magasin de comptes est modifiable pendant qu'on sert
 
-**Outillé par : rien, et c'est écrit ici plutôt que découvert.** Les comptes sont
-chargés une fois au démarrage dans un `Arc<Vec<Account>>` partagé par SMTP, IMAP,
-POP3 et l'API. Créer un compte, en effacer un, changer un mot de passe ou modifier
-des adresses demanderait de rendre ce magasin modifiable à chaud : remplacement
-atomique du fichier, verrou, relecture par tous les services.
+Les comptes étaient un `Arc<Vec<Account>>` lu une fois au démarrage. C'était juste
+tant que rien ne les changeait ; ouvrir l'administration en écriture le rend faux.
 
-C'est une tranche d'architecture à part entière, avec du poids de sécurité — et non
-un détail d'implémentation. Ces ressources continuent donc de répondre `501`, ce qui
-est la réponse honnête : elles existent, et ce serveur ne les sert pas encore.
+**UN INSTANTANÉ PAR OPÉRATION, ET NON UN VERROU TENU.** La vue rend un `Arc` et
+relâche le verrou aussitôt. Une remise en cours garde donc la vue qu'elle avait au
+début — un `RCPT` accepté ne doit pas devenir un `RCPT` refusé au milieu du `DATA`
+parce qu'un administrateur passait par là. Tenir le verrou pendant une transaction
+ferait l'inverse : une écriture d'administration attendrait qu'un pair lent finisse
+de parler.
+
+**ON ÉCRIT D'ABORD, ON PUBLIE ENSUITE.** Si l'écriture échoue, la vue en mémoire
+n'a pas bougé et le serveur continue de servir la vérité qui est sur le disque.
+L'ordre inverse ferait servir un compte qui disparaîtrait au prochain démarrage,
+sans que rien ne l'ait dit.
+
+**ET CE QU'ON PUBLIE EST CE QU'ON A RELU.** Toute modification est réencodée puis
+relue par le décodeur du démarrage. S'il la refuse, la modification est refusée :
+il devient **impossible** d'écrire un magasin sur lequel le serveur refuserait de
+redémarrer. C'est aussi ce qui donne gratuitement toutes les invariantes — nom
+licite, pas de nom en double, empreinte au-dessus du plancher, pas d'adresse
+partagée entre deux comptes. Les redire ici en aurait fait une seconde liste, qui
+divergerait le jour où l'une changerait.
+
+Le remplacement du fichier passe par `rename`, avec deux `fsync` : le premier met
+les octets sur le disque avant que le nom ne les désigne, le second met le `rename`
+lui-même sur le disque. C'est la discipline du Maildir, pour la même raison.
+
+### La carte des boîtes a dû devenir modifiable aussi
+
+Conséquence qu'on ne voit qu'en écrivant : un compte créé n'a pas de boîte. La
+carte était lue une fois au démarrage, et un compte neuf aurait pu s'authentifier
+sans jamais rien recevoir. **Un demi-compte est pire qu'un refus, parce que rien ne
+le dit.**
+
+La boîte s'ouvre donc AVANT que le compte ne soit écrit : si elle ne peut pas
+s'ouvrir, le compte n'est pas écrit et rien n'a changé. L'ordre inverse laisserait
+un compte inscrit sans boîte, à réparer à la main. Un répertoire qui survit à un
+échec n'est pas un problème : une boîte vide ne se distingue pas d'une boîte neuve.
+
+**RETIRER UN COMPTE NE SUPPRIME PAS SA BOÎTE.** Effacer des messages est
+irréversible, et rien dans « retirer un compte » ne demande cela — un administrateur
+qui se trompe doit pouvoir revenir. C'est aussi ce que fait déjà
+`air-mail-admin account remove`, et deux outils qui feraient deux choses du même mot
+seraient un piège.
+
+### Ce qu'on refuse se dit ICI, contrairement à une soumission
+
+Un dépôt refusé rend toujours la même réponse, pour que la soumission ne serve pas à
+énumérer les comptes. Un compte refusé, lui, DIT pourquoi : qui le lit tient un jeton
+d'administration, donc l'autorité qui peut déjà lire la liste des comptes. Lui cacher
+la cause ne protégerait rien et l'enverrait chercher au hasard.
+
+C'est la même règle que pour le secret de scellement mal écrit, et le même critère :
+ce qui apprend à qui sonde ne se dit pas, ce qui aide qui répare se dit.
+
+### `POST` crée, `PUT` pose un état
+
+`POST /v1/accounts` refuse un compte qui existe déjà — `409`, parce que la demande
+est bien formée et que c'est l'ÉTAT qui l'empêche (§15.5.10 de RFC 9110) ; un `400`
+enverrait le client relire un corps qui n'a rien à corriger.
+
+`PUT /v1/accounts/{compte}` crée ou remplace, et redemander le même état deux fois
+donne le même résultat (§9.3.4). Un `login` dans le corps qui contredirait le chemin
+est refusé : §3.4 fait de l'URI l'identité de la ressource, et deux noms poseraient
+la question de savoir lequel nomme le compte.
+
+**CE QU'UNE RESSOURCE N'EMPLOIE PAS, ELLE LE REFUSE.** Un `PUT` sur le secret qui
+accepterait un champ `addresses` en silence ferait croire au client qu'on a changé
+ses adresses. Et l'absence d'un champ n'est pas une liste vide : l'un ne touche pas
+aux adresses, l'autre les efface toutes.
 
 ## La soumission par l'API (`POST /v1/submissions`)
 
@@ -6158,14 +6219,16 @@ enveloppe ».
 
 ### Ce qui n'est pas encore servi le dit
 
-La soumission est servie, et l'administration l'est EN LECTURE. Ce qui MODIFIE le
-magasin de comptes — créer, effacer, changer un mot de passe, changer des adresses
-— répond `501`. §15.6.2 de RFC 9110 : « the server does not support the
-functionality required ». C'est la réponse honnête — un `404` ferait croire que la
-ressource n'existe pas, et un `500` qu'elle a échoué.
+La soumission et l'administration sont servies, en lecture comme en écriture. Ce
+qui reste en `501` : le message BRUT, une partie MIME, et la recherche. §15.6.2 de
+RFC 9110 : « the server does not support the functionality required ». C'est la
+réponse honnête — un `404` ferait croire que la ressource n'existe pas, et un `500`
+qu'elle a échoué.
 
-Pourquoi celles-là et pas les autres : voir « Ce qui MODIFIE le magasin de comptes
-n'est pas servi ».
+Ces trois-là ont en commun de rendre des octets qui ne tiennent pas dans un tampon
+de réponse : un message entier, une partie de message, une liste de résultats. Il
+leur faut le même écoulement par morceaux que l'`ENVELOPE` d'IMAP, et cela ne
+s'ajoute pas en passant.
 
 ### Trois conditions pour ouvrir le port, et aucune n'est facultative
 

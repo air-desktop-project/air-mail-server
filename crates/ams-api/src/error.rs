@@ -47,6 +47,13 @@ pub enum Reason {
     /// La clé de scellement n'est pas acceptable. **Notre faute** : c'est la
     /// configuration du serveur qui la fournit.
     BadKey,
+    /// Le compte demandé n'est pas acceptable.
+    ///
+    /// **CELLE-CI SE DIT, ET C'EST L'INVERSE DE [`Self::BadMessage`]** : qui la
+    /// lit tient un jeton d'administration, donc l'autorité qui peut déjà lire la
+    /// liste des comptes. Lui cacher pourquoi son nom est refusé ne protégerait
+    /// rien et l'enverrait chercher au hasard.
+    BadAccount,
     /// Le message déposé n'est pas recevable.
     ///
     /// **UNE SEULE RAISON POUR TOUT** : un en-tête illisible, un `From:` qui
@@ -75,7 +82,9 @@ impl Reason {
     #[must_use]
     pub const fn status(self) -> StatusCode {
         match self {
-            Self::BadPath | Self::BadJsonBody | Self::BadMessage => StatusCode::BAD_REQUEST,
+            Self::BadPath | Self::BadJsonBody | Self::BadMessage | Self::BadAccount => {
+                StatusCode::BAD_REQUEST
+            }
             // §15.5.15 : celui-ci existe exactement pour un chemin trop long, et
             // le distinguer d'un 400 dit au client que c'est la LONGUEUR qui
             // gêne — donc qu'il peut réessayer plus court.
@@ -109,6 +118,7 @@ impl Reason {
             Self::BadPath => "le chemin est refusé",
             Self::BadJsonBody => "le corps de la requête est refusé",
             Self::BadMessage => "le message déposé est refusé",
+            Self::BadAccount => "ce compte n'est pas acceptable",
             Self::PathTooLong => "le chemin est trop long",
             Self::NoSuchResource | Self::Forbidden => "aucune ressource ici",
             Self::MethodNotAllowed => "cette méthode n'est pas servie ici",

@@ -1026,7 +1026,7 @@ fn fin_de_l_entete(chemin: &std::path::Path) -> Option<u64> {
 /// Les boîtes du serveur, telles qu'IMAP les ouvre.
 pub struct BoitesImap {
     /// La boîte d'arrivée de chaque compte, ouverte au démarrage.
-    boites: Arc<BTreeMap<String, Arc<Maildir>>>,
+    boites: Arc<crate::delivery::Boites>,
     /// Le nom d'hôte, qui entre dans les noms de fichiers Maildir.
     hote: Vec<u8>,
     /// Les dossiers déjà ouverts, par compte et par nom.
@@ -1070,7 +1070,7 @@ struct Abonnements {
 impl BoitesImap {
     /// Monte le service à partir des boîtes déjà ouvertes par le serveur.
     #[must_use]
-    pub fn new(boites: Arc<BTreeMap<String, Arc<Maildir>>>, hote: &[u8]) -> Self {
+    pub fn new(boites: Arc<crate::delivery::Boites>, hote: &[u8]) -> Self {
         Self {
             boites,
             hote: hote.to_vec(),
@@ -1118,7 +1118,7 @@ impl BoitesImap {
     fn maildir(&self, user: &[u8], name: &[u8]) -> Option<Arc<Maildir>> {
         if name.eq_ignore_ascii_case(INBOX) {
             let nom = core::str::from_utf8(user).ok()?;
-            return self.boites.get(nom).map(Arc::clone);
+            return self.boites.get(nom);
         }
         let name = ams_proto_imap::mailbox_name_trimmed(name);
         let clef = (

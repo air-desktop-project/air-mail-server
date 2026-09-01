@@ -520,3 +520,154 @@ fn frapper_un_jeton(portee: ams_api::Scope) -> String {
         .expect("scellable")
         .to_string()
 }
+
+/// **UN COMPTE CRÉÉ À CHAUD REÇOIT DU COURRIER, SANS REDÉMARRAGE.**
+///
+/// C'est ce que « modifiable à chaud » veut dire, et rien de moins : le compte
+/// est écrit, sa boîte est ouverte, il s'authentifie, il reçoit, et on le relit.
+/// Un compte qui s'authentifierait sans recevoir serait un demi-compte que rien
+/// ne signale.
+#[tokio::test(flavor = "current_thread")]
+async fn un_compte_cree_a_chaud_recoit_du_courrier() {
+    let atelier = atelier("compte-a-chaud");
+    let Some((autorite, cert, cle)) = materiel(atelier.chemin()) else {
+        eprintln!("SAUTÉ : {SANS_OPENSSL}");
+        return;
+    };
+    let chemin_cert = atelier.chemin().join("srv.pem");
+    let chemin_cle = atelier.chemin().join("srv.key");
+    std::fs::write(&chemin_cert, &cert).expect("le certificat s'écrit");
+    std::fs::write(&chemin_cle, &cle).expect("la clé s'écrit");
+
+    // Un seul compte au démarrage. Le second naîtra par l'API.
+    let empreinte = ams_auth::hash_password(b"ouvre-toi", b"seize octets ici").expect("hachable");
+    let comptes = [ams_auth::Account {
+        login: String::from("jean"),
+        hash: empreinte,
+        addresses: vec![String::from("jean@example.com")],
+    }];
+    let magasin = ecrire_le_magasin(atelier.chemin(), &comptes);
+
+    let (smtp, http, h3) = (port_libre(), port_libre(), port_libre());
+    let config = configuration(
+        atelier.chemin(),
+        smtp,
+        http,
+        h3,
+        &chemin_cert,
+        &chemin_cle,
+        &magasin,
+    );
+    let serveur = lancer(&config, &format!("127.0.0.1:{h3}/udp"));
+
+    let adresse = format!("127.0.0.1:{h3}").parse().expect("une adresse");
+    let mut client = Client::new(config_client(&autorite), adresse).await;
+    for _ in 0..16 {
+        if !client.parler().await && !client.tls().is_handshaking() {
+            break;
+        }
+        if !client.ecouter().await && !client.tls().is_handshaking() {
+            break;
+        }
+    }
+    assert!(!client.tls().is_handshaking(), "{}", serveur.journal());
+
+    let admin = frapper_un_jeton(ams_api::Scope::one(
+        ams_api::Area::Admin,
+        ams_api::Rights::Write,
+    ));
+
+    // 1. On crée « pierre ».
+    let creation =
+        br#"{"login":"pierre","password":"un-secret","addresses":["pierre@example.com"]}"#;
+    envoyer_une_requete(&mut client, 0, 20, b"/v1/accounts", Some(&admin), creation).await;
+    let texte = String::from_utf8_lossy(&attendre_la_reponse(&mut client, 0).await).to_string();
+    assert!(
+        texte.contains(r#""login":"pierre""#),
+        "le compte doit être créé : {texte} — {}",
+        serveur.journal()
+    );
+
+    // 2. Il s'authentifie — donc le magasin en mémoire l'a vu, pas seulement le
+    //    disque.
+    let identifiants = br#"{"login":"pierre","password":"un-secret"}"#;
+    envoyer_une_requete(&mut client, 4, 20, b"/v1/tokens", None, identifiants).await;
+    let texte = String::from_utf8_lossy(&attendre_la_reponse(&mut client, 4).await).to_string();
+    let debut = texte
+        .find("\"token\":\"")
+        .map(|rang| rang + 9)
+        .unwrap_or_else(|| panic!("un jeton pour pierre : {texte} — {}", serveur.journal()));
+    let fin = texte
+        .get(debut..)
+        .and_then(|reste| reste.find('"'))
+        .expect("une fin de chaîne")
+        + debut;
+    let sien = texte[debut..fin].to_string();
+
+    // 3. Il reçoit : la boîte a bien été ouverte à sa création.
+    let message = concat!(
+        "From: pierre@example.com\r\n",
+        "To: pierre@example.com\r\n",
+        "Subject: bienvenue\r\n",
+        "\r\n",
+        "le premier message\r\n",
+    )
+    .as_bytes();
+    envoyer_avec_media(
+        &mut client,
+        8,
+        20,
+        b"/v1/submissions",
+        Some(&sien),
+        message,
+        b"message/rfc822",
+    )
+    .await;
+    let texte = String::from_utf8_lossy(&attendre_la_reponse(&mut client, 8).await).to_string();
+    assert!(
+        texte.contains(r#""delivered":1"#),
+        "la remise doit aboutir : {texte} — {}",
+        serveur.journal()
+    );
+
+    envoyer_une_requete(
+        &mut client,
+        12,
+        17,
+        b"/v1/mailboxes/INBOX/messages",
+        Some(&sien),
+        &[],
+    )
+    .await;
+    let texte = String::from_utf8_lossy(&attendre_la_reponse(&mut client, 12).await).to_string();
+    assert!(
+        texte.contains(r#""subject":"bienvenue""#),
+        "et il relit son message : {texte}"
+    );
+
+    // 4. Le magasin sur le DISQUE porte la même chose : le serveur redémarrerait
+    //    sur ce qu'il vient d'écrire.
+    let octets = std::fs::read(&magasin).expect("lisible");
+    let relu = ams_config::decode_accounts(&octets).expect("le démarrage le relirait");
+    assert_eq!(relu.len(), 2, "deux comptes sur le disque");
+
+    // 5. On le retire, et il ne s'authentifie plus.
+    // Annexe A de RFC 9204 : 16 vaut `:method: DELETE`. **PAS 18**, qui vaut
+    // `:method: HEAD` — et un `HEAD` sur un compte ne le retire pas.
+    envoyer_une_requete(
+        &mut client,
+        16,
+        16,
+        b"/v1/accounts/pierre",
+        Some(&admin),
+        &[],
+    )
+    .await;
+    let _ = attendre_la_reponse(&mut client, 16).await;
+    envoyer_une_requete(&mut client, 20, 20, b"/v1/tokens", None, identifiants).await;
+    let texte = String::from_utf8_lossy(&attendre_la_reponse(&mut client, 20).await).to_string();
+    assert!(
+        !texte.contains("\"token\""),
+        "un compte retiré ne s'authentifie plus : {texte}"
+    );
+}
