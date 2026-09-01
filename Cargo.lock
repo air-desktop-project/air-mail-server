@@ -172,6 +172,10 @@ name = "ams-mime"
 version = "0.1.0"
 
 [[package]]
+name = "ams-mtasts"
+version = "0.1.0"
+
+[[package]]
 name = "ams-proto-h2"
 version = "0.1.0"
 dependencies = [

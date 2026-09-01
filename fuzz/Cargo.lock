@@ -53,6 +53,7 @@ dependencies = [
  "ams-h3",
  "ams-index",
  "ams-mime",
+ "ams-mtasts",
  "ams-proto-h2",
  "ams-proto-h3",
  "ams-proto-http",
@@ -148,6 +149,10 @@ version = "0.1.0"
 
 [[package]]
 name = "ams-mime"
+version = "0.1.0"
+
+[[package]]
+name = "ams-mtasts"
 version = "0.1.0"
 
 [[package]]

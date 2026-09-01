@@ -12,7 +12,8 @@
 #   1. GRAMMAIRES      `ams-proto-*`, `ams-mime` — des octets vers des commandes,
 #                      et retour. Aucune socket, aucun fichier, aucune horloge.
 #   2. DÉCISIONS       `ams-session`, `ams-guard`, `ams-queue`, `ams-dkim`,
-#                      `ams-spf`, `ams-dmarc`, `ams-dane`, `ams-tls` — des machines à
+#                      `ams-spf`, `ams-dmarc`, `ams-dane`, `ams-mtasts`, `ams-tls` —
+#                      des machines à
 #                      états. Elles
 #                      reçoivent des octets et l'heure ; elles rendent des octets
 #                      et des ACTIONS. Elles n'attendent jamais.
@@ -52,6 +53,7 @@ members = [
     "crates/ams-guard",
     "crates/ams-queue",
     "crates/ams-dane",
+    "crates/ams-mtasts",
     "crates/ams-tls",
     "crates/ams-dkim",
     "crates/ams-spf",
@@ -100,6 +102,7 @@ ams-config = { path = "crates/ams-config", version = "0.1.0" }
 ams-dane = { path = "crates/ams-dane", version = "0.1.0" }
 ams-dkim = { path = "crates/ams-dkim", version = "0.1.0" }
 ams-mime = { path = "crates/ams-mime", version = "0.1.0" }
+ams-mtasts = { path = "crates/ams-mtasts", version = "0.1.0" }
 ams-dmarc = { path = "crates/ams-dmarc", version = "0.1.0" }
 ams-dns = { path = "crates/ams-dns", version = "0.1.0" }
 ams-guard = { path = "crates/ams-guard", version = "0.1.0" }

@@ -63,6 +63,7 @@ CRATES_SANS_IO=(
     ams-dns
     ams-dmarc
     ams-dane
+    ams-mtasts
     ams-config
     ams-index
     ams-api

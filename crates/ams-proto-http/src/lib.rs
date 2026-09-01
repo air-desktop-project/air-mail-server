@@ -59,6 +59,7 @@ mod head;
 mod limits;
 mod method;
 mod range;
+mod response;
 mod status;
 
 pub use error::Error;
@@ -70,4 +71,5 @@ pub use head::{FIELDS_MAX, HeadBuilder, RequestHead};
 pub use limits::Limits;
 pub use method::Method;
 pub use range::{ByteRange, RangeFault, parse_range};
+pub use response::{Body, ResponseHead, parse_response};
 pub use status::StatusCode;
