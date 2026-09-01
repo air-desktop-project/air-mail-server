@@ -6239,19 +6239,50 @@ disparaît, et rendre des rangs ferait désigner au client, une seconde plus tar
 d'autres messages que ceux qu'il a trouvés. La réponse dit aussi si la liste est
 complète — un client qui croirait avoir tous les résultats agirait sur une moitié.
 
-### Ce qui n'est pas encore servi le dit
+### Le message brut et une partie MIME se lisent par PORTÉES
 
-Reste en `501` : le message BRUT et une partie MIME. §15.6.2 de RFC 9110 : « the
-server does not support the functionality required ».
+Un message fait la taille que son expéditeur a voulue ; une réponse de cette API
+rend une tranche d'un tampon que la boucle a alloué. Sans les portées de §14 de
+RFC 9110, un message entier ne se lirait pas du tout par HTTP — ce n'est pas un
+confort qui manquerait, c'est la ressource.
 
-Ces deux-là ont en commun de rendre des octets dont **la taille est choisie par
-l'expéditeur** : un message peut faire des mébioctets, et le contrat de l'API rend
-une tranche d'un tampon que la boucle a alloué. Les servir demande soit une borne
-qu'on assume et qu'on dit, soit les requêtes de portée de §14 de RFC 9110 — et
-celles-ci demandent des champs de réponse que `Served` ne sait pas porter.
+**LE CONTRAT GAGNE UN CONCEPT, ET NON DES EN-TÊTES.** Ouvrir `Served` à des champs
+de réponse quelconques laisserait une API poser ce qui contredit ce que la boucle
+garantit — `cache-control: no-store`, `nosniff`. Elle porte donc deux choses
+typées : la ressource se lit-elle par morceaux, et ce que ce corps couvre. Chaque
+boucle écrit `Accept-Ranges` et `Content-Range` à sa façon ; aucune n'apprend un
+en-tête nouveau.
 
-C'est une tranche à part, et elle n'est pas une commodité : c'est le seul moyen de
-lire un message entier par HTTP.
+**UNE SEULE PORTÉE, ET C'EST LA PREMIÈRE** (§14.2). Les servir toutes demanderait
+une réponse `multipart/byteranges`, c'est-à-dire un cadrage MIME que cette API ne
+produit nulle part ailleurs. Rendre la première est sans ambiguïté : `Content-Range`
+dit exactement quels octets partent.
+
+**CE QUI EST MAL FORMÉ S'IGNORE, CE QUI EST HORS BORNES SE REFUSE.** §14.2 :
+« An origin server MUST ignore a Range header field that contains a range unit it
+does not understand. » Un champ illisible n'est pas une faute du client — c'est un
+champ qu'on n'a pas compris, et la réponse est celle qu'on aurait donnée sans lui.
+Une portée qui commence au-delà, elle, a son propre code (§15.5.17), et la réponse
+porte la taille par un `Content-Range` en forme `*` : c'est ce qui permet de
+recommencer sans deviner.
+
+### Un écart assumé : `413` quand on ne peut pas envoyer d'un coup
+
+Sans `Range`, si la représentation ne tient pas dans une réponse, **il n'y a pas de
+réponse conforme**. Envoyer l'entier est impossible ; un `206` qu'on n'a pas demandé
+n'est pas conforme (§15.3.7) ; tronquer en silence serait mentir.
+
+On répond `413` avec `Accept-Ranges: bytes`, ce qui veut dire : « je ne peux pas te
+l'envoyer d'un coup, voici la porte ». C'est un écart, il est écrit ici, et sa cause
+est que ce serveur ne sait pas ÉCOULER une réponse — le jour où il le saura, cet
+écart disparaîtra.
+
+### Un début et une fin ne sont pas un début et une longueur
+
+`part_span` rend un intervalle. Les confondre faisait lire au-delà du fichier, la
+lecture échouait, et une partie parfaitement présente rendait `404`. Le défaut a été
+écrit, puis trouvé par l'essai qui demande la seconde partie d'un message à deux
+parties — pas par la compilation, qui voyait deux `u64`.
 
 ### Trois conditions pour ouvrir le port, et aucune n'est facultative
 

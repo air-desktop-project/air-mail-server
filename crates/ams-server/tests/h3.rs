@@ -25,7 +25,7 @@ use ams_guard::Thresholds;
 use ams_proto_smtp::Limits;
 use ams_quic_client::{
     Client, SANS_OPENSSL, atelier, attendre_la_reponse, config_client, envoyer_avec_media,
-    envoyer_une_requete, materiel,
+    envoyer_avec_portee, envoyer_une_requete, materiel,
 };
 
 /// Le secret de scellement des jetons, en hexadécimal.
@@ -701,5 +701,189 @@ async fn un_compte_cree_a_chaud_recoit_du_courrier() {
     assert!(
         !texte.contains("\"token\""),
         "un compte retiré ne s'authentifie plus : {texte}"
+    );
+}
+
+/// **UN MESSAGE ENTIER SE LIT PAR PORTÉES** (§14 de RFC 9110).
+///
+/// Sans elles, un message entier ne se lirait pas du tout par HTTP : une réponse
+/// de cette API rend une tranche d'un tampon, et un message fait la taille que son
+/// expéditeur a voulue. Ce n'est pas un confort qui manquerait — c'est la
+/// ressource.
+#[tokio::test(flavor = "current_thread")]
+async fn un_message_se_lit_par_portees() {
+    let atelier = atelier("portees-h3");
+    let Some((autorite, cert, cle)) = materiel(atelier.chemin()) else {
+        eprintln!("SAUTÉ : {SANS_OPENSSL}");
+        return;
+    };
+    let chemin_cert = atelier.chemin().join("srv.pem");
+    let chemin_cle = atelier.chemin().join("srv.key");
+    std::fs::write(&chemin_cert, &cert).expect("le certificat s'écrit");
+    std::fs::write(&chemin_cle, &cle).expect("la clé s'écrit");
+
+    let empreinte = ams_auth::hash_password(b"ouvre-toi", b"seize octets ici").expect("hachable");
+    let comptes = [ams_auth::Account {
+        login: String::from("jean"),
+        hash: empreinte,
+        addresses: vec![String::from("jean@example.com")],
+    }];
+    let magasin = ecrire_le_magasin(atelier.chemin(), &comptes);
+
+    let (smtp, http, h3) = (port_libre(), port_libre(), port_libre());
+    let config = configuration(
+        atelier.chemin(),
+        smtp,
+        http,
+        h3,
+        &chemin_cert,
+        &chemin_cle,
+        &magasin,
+    );
+    let serveur = lancer(&config, &format!("127.0.0.1:{h3}/udp"));
+
+    let adresse = format!("127.0.0.1:{h3}").parse().expect("une adresse");
+    let mut client = Client::new(config_client(&autorite), adresse).await;
+    for _ in 0..16 {
+        if !client.parler().await && !client.tls().is_handshaking() {
+            break;
+        }
+        if !client.ecouter().await && !client.tls().is_handshaking() {
+            break;
+        }
+    }
+    assert!(!client.tls().is_handshaking(), "{}", serveur.journal());
+
+    let identifiants = br#"{"login":"jean","password":"ouvre-toi"}"#;
+    envoyer_une_requete(&mut client, 0, 20, b"/v1/tokens", None, identifiants).await;
+    let texte = String::from_utf8_lossy(&attendre_la_reponse(&mut client, 0).await).to_string();
+    let debut = texte
+        .find("\"token\":\"")
+        .map(|rang| rang + 9)
+        .unwrap_or_else(|| panic!("un jeton : {texte} — {}", serveur.journal()));
+    let fin = texte
+        .get(debut..)
+        .and_then(|reste| reste.find('"'))
+        .expect("une fin de chaîne")
+        + debut;
+    let jeton = texte[debut..fin].to_string();
+
+    // Un message à deux parties, pour éprouver aussi `parts`.
+    let message = concat!(
+        "From: jean@example.com\r\n",
+        "To: jean@example.com\r\n",
+        "Subject: deux parties\r\n",
+        "MIME-Version: 1.0\r\n",
+        "Content-Type: multipart/mixed; boundary=\"FRONTIERE\"\r\n",
+        "\r\n",
+        "--FRONTIERE\r\n",
+        "Content-Type: text/plain\r\n",
+        "\r\n",
+        "la premiere partie\r\n",
+        "--FRONTIERE\r\n",
+        "Content-Type: text/plain\r\n",
+        "\r\n",
+        "la seconde partie\r\n",
+        "--FRONTIERE--\r\n",
+    );
+    envoyer_avec_media(
+        &mut client,
+        4,
+        20,
+        b"/v1/submissions",
+        Some(&jeton),
+        message.as_bytes(),
+        b"message/rfc822",
+    )
+    .await;
+    let texte = String::from_utf8_lossy(&attendre_la_reponse(&mut client, 4).await).to_string();
+    assert!(
+        texte.contains(r#""delivered":1"#),
+        "la remise doit aboutir : {texte} — {}",
+        serveur.journal()
+    );
+
+    // 1. Sans portée : le message tient, on le rend entier.
+    envoyer_une_requete(
+        &mut client,
+        8,
+        17,
+        b"/v1/mailboxes/INBOX/messages/1/raw",
+        Some(&jeton),
+        &[],
+    )
+    .await;
+    let entier = attendre_la_reponse(&mut client, 8).await;
+    let entier_texte = String::from_utf8_lossy(&entier).to_string();
+    assert!(
+        entier_texte.contains("Subject: deux parties")
+            && entier_texte.contains("la seconde partie"),
+        "le message entier doit revenir : {} octets — {}",
+        entier.len(),
+        serveur.journal()
+    );
+
+    // 2. Les dix premiers octets, bornes comprises (§14.1.1) — DIX, et non onze.
+    envoyer_avec_portee(
+        &mut client,
+        12,
+        b"/v1/mailboxes/INBOX/messages/1/raw",
+        Some(&jeton),
+        b"bytes=0-9",
+    )
+    .await;
+    let debut_du_message = attendre_la_reponse(&mut client, 12).await;
+    assert_eq!(
+        debut_du_message,
+        entier.get(..10).expect("dix octets"),
+        "les dix premiers, et pas un de plus"
+    );
+
+    // 3. Depuis le onzième, jusqu'au bout.
+    envoyer_avec_portee(
+        &mut client,
+        16,
+        b"/v1/mailboxes/INBOX/messages/1/raw",
+        Some(&jeton),
+        b"bytes=10-",
+    )
+    .await;
+    let suite = attendre_la_reponse(&mut client, 16).await;
+    assert_eq!(
+        suite,
+        entier.get(10..).expect("la suite"),
+        "et les deux moitiés se recollent"
+    );
+
+    // 4. Une portée hors bornes : on refuse, et l'on ne rend pas des octets.
+    envoyer_avec_portee(
+        &mut client,
+        20,
+        b"/v1/mailboxes/INBOX/messages/1/raw",
+        Some(&jeton),
+        b"bytes=999999-",
+    )
+    .await;
+    let refus = String::from_utf8_lossy(&attendre_la_reponse(&mut client, 20).await).to_string();
+    assert!(
+        !refus.contains("Subject:"),
+        "une portée hors bornes ne rend pas le message : {refus}"
+    );
+
+    // 5. Une partie MIME, par son rang de §6.4.5.
+    envoyer_une_requete(
+        &mut client,
+        24,
+        17,
+        b"/v1/mailboxes/INBOX/messages/1/parts/2",
+        Some(&jeton),
+        &[],
+    )
+    .await;
+    let partie = String::from_utf8_lossy(&attendre_la_reponse(&mut client, 24).await).to_string();
+    assert!(
+        partie.contains("la seconde partie") && !partie.contains("la premiere partie"),
+        "la seconde partie, et elle seule : {partie} — {}",
+        serveur.journal()
     );
 }

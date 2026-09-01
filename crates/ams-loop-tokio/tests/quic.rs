@@ -460,6 +460,7 @@ impl ams_loop_tokio::http::Api for ApiEssai {
         _method: ams_proto_http::Method,
         _account: &str,
         _body: &[u8],
+        _range: Option<&[u8]>,
         sortie: &'o mut [u8],
     ) -> ams_loop_tokio::http::Served<'o> {
         let quoi: &[u8] = match resource {
@@ -475,6 +476,7 @@ impl ams_loop_tokio::http::Api for ApiEssai {
             status: ams_proto_http::StatusCode::OK,
             media: ams_api::JSON_MEDIA_TYPE,
             body: sortie.get(..combien).unwrap_or_default(),
+            ..ams_loop_tokio::http::Served::default()
         }
     }
 

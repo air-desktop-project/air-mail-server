@@ -43,6 +43,7 @@ impl Api for ApiEssai {
         _method: Method,
         account: &str,
         _body: &[u8],
+        _range: Option<&[u8]>,
         sortie: &'o mut [u8],
     ) -> Served<'o> {
         let mut json = ams_api::Json::new(sortie);
@@ -64,6 +65,7 @@ impl Api for ApiEssai {
             status: StatusCode::OK,
             media: ams_api::JSON_MEDIA_TYPE,
             body: ecrit.unwrap_or_default(),
+            ..Served::default()
         }
     }
 

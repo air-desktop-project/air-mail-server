@@ -116,6 +116,96 @@ pub struct Served<'o> {
     pub media: &'static str,
     /// Le corps.
     pub body: &'o [u8],
+    /// Cette ressource se lit-elle par morceaux (§14.3 de RFC 9110) ?
+    ///
+    /// **C'EST UNE INVITATION, PAS UN ÉTAT** : elle fait écrire
+    /// `Accept-Ranges: bytes`, qui dit au client qu'il PEUT demander une portée.
+    /// Sans elle, un client devant une représentation trop grande n'aurait aucun
+    /// moyen de savoir qu'une porte existe.
+    pub ranges: bool,
+    /// Ce que ce corps couvre, s'il n'est qu'un morceau (§14.4).
+    ///
+    /// Sa présence fait écrire `Content-Range` — **et c'est ce champ, et lui
+    /// seul, qui dit quels octets partent**. Un `206` sans lui laisserait le
+    /// client deviner, et deviner faux d'un octet ne se voit qu'à la fin.
+    pub range: Option<ContentRange>,
+}
+
+/// Ce qu'un corps partiel couvre de la représentation (§14.4 de RFC 9110).
+///
+/// # POURQUOI C'EST TYPÉ, ET NON UN CHAMP DE PLUS À ÉCRIRE
+///
+/// Ouvrir cette interface à des champs de réponse quelconques laisserait une API
+/// poser ce qui contredit ce que la boucle garantit — `cache-control: no-store`,
+/// `nosniff`. Le contrat gagne donc le CONCEPT dont il a besoin, et chaque boucle
+/// l'écrit à sa façon : aucune n'apprend un en-tête nouveau.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContentRange {
+    /// Les octets que ce corps couvre, bornes comprises.
+    ///
+    /// **`None` EST LA FORME `*` DE §14.4**, et elle a son emploi : un `416` doit
+    /// dire la taille de la représentation SANS désigner de portée — c'est
+    /// exactement ce qui permet au client de recommencer sans deviner.
+    pub part: Option<(u64, u64)>,
+    /// La taille de la représentation entière.
+    pub complete: u64,
+}
+
+impl ContentRange {
+    /// Écrit `bytes <first>-<last>/<complete>`, ou `bytes */<complete>` (§14.4).
+    ///
+    /// Rend ce que cela occupe.
+    ///
+    /// # LES TROIS NOMBRES TIENNENT, ET LE TAMPON EST LE NÔTRE
+    ///
+    /// Trois entiers de soixante-quatre bits font au plus vingt chiffres chacun ;
+    /// avec `bytes `, deux séparateurs, cela tient dans [`CONTENT_RANGE_MAX`].
+    /// C'est notre tampon, pas celui d'un pair : un `expect` ici dirait une faute
+    /// de notre code, et il n'y en a pas.
+    #[must_use]
+    pub fn write(&self, out: &mut [u8; CONTENT_RANGE_MAX]) -> usize {
+        use core::fmt::Write as _;
+        let mut plume = Plume { out, ecrits: 0 };
+        let _ = match self.part {
+            Some((first, last)) => write!(plume, "bytes {first}-{last}/{}", self.complete),
+            None => write!(plume, "bytes */{}", self.complete),
+        };
+        plume.ecrits
+    }
+}
+
+/// Ce que `bytes <u64>-<u64>/<u64>` peut occuper.
+pub const CONTENT_RANGE_MAX: usize = 6 + 20 + 1 + 20 + 1 + 20;
+
+/// De quoi écrire dans un tableau de taille fixe.
+struct Plume<'a> {
+    /// Où l'on écrit.
+    out: &'a mut [u8; CONTENT_RANGE_MAX],
+    /// Combien on a écrit.
+    ecrits: usize,
+}
+
+impl core::fmt::Write for Plume<'_> {
+    fn write_str(&mut self, texte: &str) -> core::fmt::Result {
+        for octet in texte.as_bytes() {
+            let place = self.out.get_mut(self.ecrits).ok_or(core::fmt::Error)?;
+            *place = *octet;
+            self.ecrits = self.ecrits.saturating_add(1);
+        }
+        Ok(())
+    }
+}
+
+impl Default for Served<'_> {
+    fn default() -> Self {
+        Self {
+            status: StatusCode::OK,
+            media: JSON_MEDIA_TYPE,
+            body: &[],
+            ranges: false,
+            range: None,
+        }
+    }
 }
 
 /// Ce qui sait servir les ressources de l'API.
@@ -129,6 +219,11 @@ pub struct Served<'o> {
 pub trait Api {
     /// Sert cette ressource, et écrit la réponse dans `sortie`.
     ///
+    /// `range` porte le champ `Range` **tel que le client l'a écrit** (§14.2 de
+    /// RFC 9110), sans analyse : ce qu'une portée a le droit d'être dépend de la
+    /// RESSOURCE — de sa taille, et de si elle se lit par morceaux —, et la
+    /// boucle ne sait ni l'un ni l'autre.
+    ///
     /// L'autorisation est **déjà faite** : recevoir cet appel veut dire qu'un
     /// jeton scellé par notre clé, non expiré, ouvrait la portée que la route
     /// exige. Cette interface n'a donc rien à revérifier, et rien à décider sur
@@ -139,6 +234,7 @@ pub trait Api {
         method: Method,
         account: &str,
         body: &[u8],
+        range: Option<&[u8]>,
         sortie: &'o mut [u8],
     ) -> Served<'o>;
 
@@ -285,6 +381,10 @@ where
         let tour = service
             .session
             .request(&demande.tete, corps_lu, maintenant, &mut travail);
+        // Ce que la ressource dit de sa divisibilité (§14 de RFC 9110). Une
+        // ressource qui ne se lit pas par morceaux n'en dit rien, et c'est le cas
+        // de toutes sauf deux.
+        let mut portee: (bool, Option<ContentRange>) = (false, None);
         let (status, media, corps_a_ecrire) = match tour.next() {
             Next::Respond => (tour.status(), PROBLEM_MEDIA_TYPE, tour.body()),
             Next::CheckCredentials { login, password } => {
@@ -310,7 +410,15 @@ where
                 account,
                 body,
             } => {
-                let servi = api.serve(resource, method, account, body, &mut rendu);
+                let servi = api.serve(
+                    resource,
+                    method,
+                    account,
+                    body,
+                    demande.tete.field(b"range"),
+                    &mut rendu,
+                );
+                portee = (servi.ranges, servi.range);
                 (servi.status, servi.media, servi.body)
             }
         };
@@ -327,6 +435,7 @@ where
             flux,
             &mut connexion,
             service,
+            portee,
             demande.stream,
             status,
             media,
@@ -520,14 +629,15 @@ where
 /// Écrit une réponse.
 #[expect(
     clippy::too_many_arguments,
-    reason = "une réponse HTTP/2 demande le flux, la connexion, le service, le \
-              flux visé, le code, le type, le corps, et de savoir s'il faut \
-              l'écrire. Les regrouper masquerait ce que chacun décide."
+    reason = "une réponse HTTP/2 demande le flux, la connexion, le service, la \
+              portée, le flux visé, le code, le type, le corps, et de savoir s'il \
+              faut l'écrire. Les regrouper masquerait ce que chacun décide."
 )]
 async fn repondre<S>(
     flux: &mut S,
     connexion: &mut Connection,
     service: &HttpService<'_>,
+    portee: (bool, Option<ContentRange>),
     stream: u32,
     status: StatusCode,
     media: &str,
@@ -543,6 +653,17 @@ where
     champs.push((b"content-type", media.as_bytes()));
     champs.push((b"cache-control", b"no-store"));
     champs.push((b"x-content-type-options", b"nosniff"));
+    // §14.3 : l'invitation D'ABORD — un client qui reçoit un refus doit savoir
+    // qu'une porte existe, et c'est sur le refus qu'il en a le plus besoin.
+    let (divisible, morceau) = portee;
+    if divisible {
+        champs.push((b"accept-ranges", b"bytes"));
+    }
+    let mut dit = [0_u8; CONTENT_RANGE_MAX];
+    let dits = morceau.map_or(0, |quoi| quoi.write(&mut dit));
+    if morceau.is_some() {
+        champs.push((b"content-range", dit.get(..dits).unwrap_or_default()));
+    }
     if status == StatusCode::UNAUTHORIZED {
         champs.push((b"www-authenticate", b"Bearer"));
     }

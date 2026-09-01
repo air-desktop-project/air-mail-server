@@ -291,6 +291,7 @@ impl ApiMaildir {
             status: StatusCode::NO_CONTENT,
             media: JSON_MEDIA_TYPE,
             body: &[],
+            ..Served::default()
         }
     }
 
@@ -324,6 +325,7 @@ impl ApiMaildir {
                 status: StatusCode::NO_CONTENT,
                 media: JSON_MEDIA_TYPE,
                 body: &[],
+                ..Served::default()
             },
             Err(quoi) => dire_la_faute(&quoi, sortie),
         }
@@ -454,6 +456,7 @@ impl ApiMaildir {
             status: StatusCode::NO_CONTENT,
             media: JSON_MEDIA_TYPE,
             body: &[],
+            ..Served::default()
         }
     }
 
@@ -601,6 +604,156 @@ impl ApiMaildir {
         rendre(render::write_metrics(&[("delivered", combien)], sortie))
     }
 
+    /// Le message entier, tel qu'il est sur le disque.
+    ///
+    /// # POURQUOI CETTE RESSOURCE SE LIT PAR MORCEAUX, ET SEULE
+    ///
+    /// Un message fait la taille que son expéditeur a voulue. Une réponse de
+    /// cette API rend une tranche d'un tampon que la boucle a alloué. Sans les
+    /// portées de §14 de RFC 9110, un message entier ne se lirait pas du tout par
+    /// HTTP — ce n'est pas un confort qui manquerait, c'est la ressource.
+    fn message_brut<'o>(
+        &self,
+        compte: &str,
+        nom: &str,
+        uid: u64,
+        portee: Option<&[u8]>,
+        sortie: &'o mut [u8],
+    ) -> Served<'o> {
+        let Some((boite, sequence, info)) = self.trouver(compte, nom, uid) else {
+            return absente(sortie);
+        };
+        self.ecouler(&boite, sequence, 0, info.size, portee, sortie)
+    }
+
+    /// Une partie MIME d'un message, telle que §6.4.5 la numérote.
+    fn partie_de_message<'o>(
+        &self,
+        compte: &str,
+        nom: &str,
+        uid: u64,
+        chemin: &str,
+        portee: Option<&[u8]>,
+        sortie: &'o mut [u8],
+    ) -> Served<'o> {
+        let Some((boite, sequence, _info)) = self.trouver(compte, nom, uid) else {
+            return absente(sortie);
+        };
+        // §6.4.5 : `1`, `2.1`, `3.2.4`. Un segment qui n'est pas un nombre ne
+        // désigne aucune partie, et deviner ce qu'il voulait dire serait servir
+        // autre chose que ce qu'on a demandé.
+        let mut rangs: std::vec::Vec<u32> = std::vec::Vec::new();
+        for morceau in chemin.split('.') {
+            let Ok(rang) = morceau.parse::<u32>() else {
+                return absente(sortie);
+            };
+            if rang == 0 {
+                return absente(sortie);
+            }
+            rangs.push(rang);
+        }
+        // **UN DÉBUT ET UNE FIN, ET NON UNE LONGUEUR** : `part_span` rend un
+        // intervalle. Les confondre faisait lire au-delà du fichier, et la
+        // lecture échouait — une partie parfaitement présente rendait `404`.
+        let Some((debut, fin)) = boite.partie(sequence, &rangs) else {
+            return absente(sortie);
+        };
+        self.ecouler(
+            &boite,
+            sequence,
+            debut,
+            fin.saturating_sub(debut),
+            portee,
+            sortie,
+        )
+    }
+
+    /// La boîte, le rang et ce qu'on sait du message que cet UID désigne.
+    fn trouver(
+        &self,
+        compte: &str,
+        nom: &str,
+        uid: u64,
+    ) -> Option<(crate::imap::BoiteImap, u32, ams_session::imap::MessageInfo)> {
+        let boite = self.boites.open(compte.as_bytes(), nom.as_bytes())?;
+        let voulu = u32::try_from(uid).ok()?;
+        (1..=boite.exists())
+            .filter_map(|sequence| boite.info(sequence).map(|info| (sequence, info)))
+            .find(|(_, info)| info.uid == voulu)
+            .map(|(sequence, info)| (boite, sequence, info))
+    }
+
+    /// Écoule `complete` octets à partir de `origine`, selon ce que le client
+    /// demande.
+    ///
+    /// # SANS `Range`, ON NE MENT PAS
+    ///
+    /// Si tout tient, on rend tout, avec `Accept-Ranges` pour dire que la porte
+    /// existe. Si tout ne tient pas, il n'y a pas de réponse conforme : envoyer
+    /// l'entier est impossible, un `206` qu'on n'a pas demandé n'est pas conforme
+    /// (§15.3.7), et tronquer en silence serait mentir.
+    ///
+    /// On répond alors `413` avec `Accept-Ranges`, ce qui veut dire : « je ne
+    /// peux pas te l'envoyer d'un coup, voici la porte ». **C'est un écart, et il
+    /// est assumé** : ce serveur ne sait pas écouler une réponse, et le dire vaut
+    /// mieux que de rendre la moitié d'un message.
+    fn ecouler<'o>(
+        &self,
+        boite: &crate::imap::BoiteImap,
+        sequence: u32,
+        origine: u64,
+        complete: u64,
+        portee: Option<&[u8]>,
+        sortie: &'o mut [u8],
+    ) -> Served<'o> {
+        let fenetre = sortie.len().min(FENETRE_MAX);
+        let demandee = portee.map(|valeur| ams_proto_http::parse_range(valeur, complete));
+
+        let (debut, combien, partiel) = match demandee {
+            // §15.5.17 : ce qui commence au-delà ne peut pas être satisfait.
+            Some(Err(ams_proto_http::RangeFault::Unsatisfiable)) => {
+                return hors_bornes(complete, sortie);
+            }
+            Some(Ok(voulue)) => {
+                let combien = usize::try_from(voulue.octets())
+                    .unwrap_or(usize::MAX)
+                    .min(fenetre);
+                (voulue.first, combien, true)
+            }
+            // §14.2 : un champ qu'on ne comprend pas s'ignore, et l'on répond
+            // comme s'il n'était pas là.
+            Some(Err(ams_proto_http::RangeFault::Ignored)) | None => {
+                let entier = usize::try_from(complete).unwrap_or(usize::MAX);
+                if entier > fenetre {
+                    return trop_grand(sortie);
+                }
+                (0, entier, false)
+            }
+        };
+
+        let Some(octets) = boite.fenetre(sequence, origine.saturating_add(debut), combien) else {
+            return absente(sortie);
+        };
+        let place = sortie.get_mut(..octets.len()).unwrap_or_default();
+        place.copy_from_slice(&octets);
+        let rendu = sortie.get(..octets.len()).unwrap_or_default();
+
+        let dernier = debut.saturating_add(octets.len() as u64).saturating_sub(1);
+        Served {
+            status: match partiel {
+                true => StatusCode::PARTIAL_CONTENT,
+                false => StatusCode::OK,
+            },
+            media: ams_api::MESSAGE_MEDIA_TYPE,
+            body: rendu,
+            ranges: true,
+            range: partiel.then_some(ams_loop_tokio::http::ContentRange {
+                part: Some((debut, dernier)),
+                complete,
+            }),
+        }
+    }
+
     /// Cherche dans une boîte.
     ///
     /// # ON RÉEMPLOIE L'ÉVALUATEUR D'IMAP, ET ON NE LE RÉÉCRIT PAS
@@ -705,6 +858,7 @@ impl Api for ApiMaildir {
         method: Method,
         account: &str,
         body: &[u8],
+        portee: Option<&[u8]>,
         sortie: &'o mut [u8],
     ) -> Served<'o> {
         match resource {
@@ -717,6 +871,12 @@ impl Api for ApiMaildir {
             Resource::Mailbox { boite } => self.mailbox(account, boite, sortie),
             Resource::Messages { boite } => self.messages(account, boite, sortie),
             Resource::Message { boite, uid } => self.message(account, boite, uid, sortie),
+            Resource::MessageRaw { boite, uid } => {
+                self.message_brut(account, boite, uid, portee, sortie)
+            }
+            Resource::MessagePart { boite, uid, partie } => {
+                self.partie_de_message(account, boite, uid, partie, portee, sortie)
+            }
             Resource::Search { boite } => self.search(account, boite, body, sortie),
             Resource::Submissions => self.submissions(account, body, sortie),
             // **L'ADMINISTRATION, EN LECTURE ET EN ÉCRITURE.** Le magasin est
@@ -754,10 +914,11 @@ impl Api for ApiMaildir {
             Resource::Ban { source } if matches!(method, Method::Delete) => {
                 self.lift(source, sortie)
             }
-            // **CE QUI N'EST PAS ENCORE SERVI LE DIT** (§15.6.2 de RFC 9110) :
-            // le message brut et une partie MIME. Tous deux rendent des octets
-            // dont la taille est choisie par l'expéditeur, et le contrat de cette
-            // interface rend une tranche d'un tampon.
+            // **IL NE RESTE RIEN À SERVIR ICI** : `Tokens` et `CurrentToken` se
+            // décident dans la session, avant que cette interface ne soit
+            // appelée. Ce bras existe pour que le jour où une ressource
+            // s'ajoute au routage sans être servie, elle le DISE (§15.6.2) au
+            // lieu d'être servie de travers.
             _ => pas_encore(sortie),
         }
     }
@@ -919,6 +1080,7 @@ fn rendre(ecrit: Result<&[u8], ams_api::Error>) -> Served<'_> {
             status: StatusCode::OK,
             media: JSON_MEDIA_TYPE,
             body: corps,
+            ..Served::default()
         },
         // **LE TAMPON EST LE NÔTRE** : le client n'y peut rien, et le lui dire
         // précisément ne l'avancerait pas.
@@ -926,6 +1088,7 @@ fn rendre(ecrit: Result<&[u8], ams_api::Error>) -> Served<'_> {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             media: ams_api::PROBLEM_MEDIA_TYPE,
             body: &[],
+            ..Served::default()
         },
     }
 }
@@ -941,11 +1104,13 @@ fn absente(sortie: &mut [u8]) -> Served<'_> {
             status: StatusCode::NOT_FOUND,
             media: ams_api::PROBLEM_MEDIA_TYPE,
             body: corps,
+            ..Served::default()
         },
         Err(_) => Served {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             media: ams_api::PROBLEM_MEDIA_TYPE,
             body: &[],
+            ..Served::default()
         },
     }
 }
@@ -1041,6 +1206,52 @@ fn source_de(texte: &str) -> Option<ams_guard::Source> {
     match texte.parse::<std::net::IpAddr>().ok()? {
         std::net::IpAddr::V4(adresse) => Some(ams_guard::Source::V4(adresse.octets())),
         std::net::IpAddr::V6(adresse) => Some(ams_guard::Source::V6(adresse.octets())),
+    }
+}
+
+/// Ce qu'un morceau de message peut faire, en octets.
+///
+/// **C'EST NOTRE BORNE, PAS CELLE DU CLIENT** : il demande la portée qu'il veut,
+/// et §14.4 nous laisse en rendre moins — `Content-Range` dit alors exactement ce
+/// qui part, et le client redemande la suite.
+const FENETRE_MAX: usize = 64 * 1024;
+
+/// Une portée qu'on ne peut pas satisfaire (§15.5.17 de RFC 9110).
+///
+/// **ELLE DIT LA TAILLE**, par un `Content-Range` sans portée : c'est ce qui
+/// permet au client de recommencer sans deviner.
+fn hors_bornes(complete: u64, sortie: &mut [u8]) -> Served<'_> {
+    let servi = probleme(
+        ams_api::Reason::NoSuchResource,
+        StatusCode::RANGE_NOT_SATISFIABLE,
+        sortie,
+    );
+    Served {
+        ranges: true,
+        // §15.5.17 : la forme `*` dit la taille sans désigner de portée.
+        range: Some(ams_loop_tokio::http::ContentRange {
+            part: None,
+            complete,
+        }),
+        ..servi
+    }
+}
+
+/// Une représentation qu'on ne sait pas envoyer d'un coup.
+///
+/// **IL N'Y A PAS DE RÉPONSE CONFORME ICI**, et c'est écrit plutôt que caché :
+/// envoyer l'entier est impossible, un `206` qu'on n'a pas demandé n'est pas
+/// conforme (§15.3.7), et tronquer en silence serait mentir. `Accept-Ranges` dit
+/// au client par où passer.
+fn trop_grand(sortie: &mut [u8]) -> Served<'_> {
+    let servi = probleme(
+        ams_api::Reason::NoSuchResource,
+        StatusCode::CONTENT_TOO_LARGE,
+        sortie,
+    );
+    Served {
+        ranges: true,
+        ..servi
     }
 }
 
@@ -1178,6 +1389,7 @@ fn probleme(raison: ams_api::Reason, statut: StatusCode, sortie: &mut [u8]) -> S
             status: statut,
             media: ams_api::PROBLEM_MEDIA_TYPE,
             body: corps,
+            ..Served::default()
         },
         Err(_) => notre_faute(),
     }
@@ -1196,6 +1408,7 @@ fn refus_de_depot(sortie: &mut [u8]) -> Served<'_> {
             status: StatusCode::BAD_REQUEST,
             media: ams_api::PROBLEM_MEDIA_TYPE,
             body: corps,
+            ..Served::default()
         },
         Err(_) => notre_faute(),
     }
@@ -1212,6 +1425,7 @@ fn indisponible(sortie: &mut [u8]) -> Served<'_> {
             status: StatusCode::SERVICE_UNAVAILABLE,
             media: ams_api::PROBLEM_MEDIA_TYPE,
             body: corps,
+            ..Served::default()
         },
         Err(_) => notre_faute(),
     }
@@ -1227,6 +1441,11 @@ const fn notre_faute<'o>() -> Served<'o> {
         status: StatusCode::INTERNAL_SERVER_ERROR,
         media: ams_api::PROBLEM_MEDIA_TYPE,
         body: &[],
+        // **ÉCRITS À LA MAIN, ET NON `..Default::default()`** : cette fonction
+        // est `const`, et un `Default` ne l'est pas. C'est le seul endroit du
+        // fichier où la liste se répète, et elle tient sur deux lignes.
+        ranges: false,
+        range: None,
     }
 }
 
@@ -1284,11 +1503,13 @@ fn pas_encore(sortie: &mut [u8]) -> Served<'_> {
             status: StatusCode::NOT_IMPLEMENTED,
             media: ams_api::PROBLEM_MEDIA_TYPE,
             body: corps,
+            ..Served::default()
         },
         Err(_) => Served {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             media: ams_api::PROBLEM_MEDIA_TYPE,
             body: &[],
+            ..Served::default()
         },
     }
 }

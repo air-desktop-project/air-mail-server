@@ -692,6 +692,25 @@ pub async fn envoyer_avec_media(
     media: &[u8],
 ) {
     let section = une_section(methode, chemin, jeton, (!corps.is_empty()).then_some(media));
+    envoyer_la_section(client, flux, &section, corps).await;
+}
+
+/// Envoie une requête `GET` en demandant une portée (§14.2 de RFC 9110).
+pub async fn envoyer_avec_portee(
+    client: &mut Client,
+    flux: u64,
+    chemin: &[u8],
+    jeton: Option<&str>,
+    portee: &[u8],
+) {
+    // Annexe A de RFC 9204 : 17 vaut `:method: GET`.
+    let mut section = une_section(17, chemin, jeton, None);
+    poser_champ(b"range", portee, &mut section);
+    envoyer_la_section(client, flux, &section, &[]).await;
+}
+
+/// Écrit cette section de champs puis ce corps, et les fait partir.
+pub async fn envoyer_la_section(client: &mut Client, flux: u64, section: &[u8], corps: &[u8]) {
     let mut entete = [0_u8; 16];
     let mut charge = Vec::new();
     let pose = ams_proto_h3::write_header(
@@ -701,7 +720,7 @@ pub async fn envoyer_avec_media(
     )
     .expect("écrivable");
     charge.extend_from_slice(&entete[..pose]);
-    charge.extend_from_slice(&section);
+    charge.extend_from_slice(section);
     if !corps.is_empty() {
         let pose = ams_proto_h3::write_header(
             ams_proto_h3::FrameKind::Data,

@@ -409,6 +409,36 @@ impl BoiteImap {
     }
 }
 
+impl BoiteImap {
+    /// Un morceau du message de rang `sequence`, tel qu'il est sur le disque.
+    ///
+    /// Rend les octets lus, ou `None` si le message ne se lit pas.
+    ///
+    /// # POURQUOI PAR MORCEAUX, ET NON EN ENTIER
+    ///
+    /// Un message fait la taille que son expéditeur a voulue. Le rendre d'un
+    /// coup demanderait un tampon de cette taille-là, choisi par lui — c'est
+    /// exactement ce que C3 interdit. L'appelant demande donc une fenêtre, et
+    /// c'est le protocole (§14 de RFC 9110) qui dit laquelle.
+    pub fn fenetre(&self, sequence: u32, debut: u64, combien: usize) -> Option<Vec<u8>> {
+        let rang = self.rang(sequence)?;
+        let chemin = self.chemins.get(rang)?;
+        lire(chemin, debut, combien)
+    }
+
+    /// Où se trouve une partie MIME, et ce qu'elle occupe.
+    ///
+    /// **LE CONTENU SEUL**, sans l'en-tête de la partie : c'est ce qu'un client
+    /// demande quand il veut la pièce jointe, et non la façon dont elle est
+    /// emballée.
+    ///
+    /// Rend le DÉBUT et la FIN, et non un début et une longueur.
+    pub fn partie(&self, sequence: u32, chemin: &[u32]) -> Option<(u64, u64)> {
+        use ams_session::imap::Mailbox as _;
+        self.part_span(sequence, chemin, PartWhat::Content)
+    }
+}
+
 impl Mailbox for BoiteImap {
     fn exists(&self) -> u32 {
         u32::try_from(self.vue.messages().len()).unwrap_or(u32::MAX)

@@ -24,6 +24,12 @@ impl StatusCode {
     pub const CREATED: Self = Self(201);
     /// `204 No Content`.
     pub const NO_CONTENT: Self = Self(204);
+    /// `206 Partial Content` — §15.3.7 de RFC 9110.
+    ///
+    /// **IL NE S'ENVOIE QU'EN RÉPONSE À UNE PORTÉE DEMANDÉE.** L'envoyer sans
+    /// qu'on l'ait demandé ferait prendre une moitié de représentation pour une
+    /// représentation.
+    pub const PARTIAL_CONTENT: Self = Self(206);
     /// `304 Not Modified`.
     pub const NOT_MODIFIED: Self = Self(304);
     /// `400 Bad Request`.
@@ -46,6 +52,12 @@ impl StatusCode {
     pub const CONTENT_TOO_LARGE: Self = Self(413);
     /// `414 URI Too Long`.
     pub const URI_TOO_LONG: Self = Self(414);
+    /// `416 Range Not Satisfiable` — §15.5.17 de RFC 9110.
+    ///
+    /// **CE N'EST PAS UN `400`** : la requête est bien formée, et c'est la
+    /// représentation qui n'a pas ces octets-là. La réponse porte sa taille, ce
+    /// qui permet au client de recommencer sans deviner.
+    pub const RANGE_NOT_SATISFIABLE: Self = Self(416);
     /// `415 Unsupported Media Type`.
     pub const UNSUPPORTED_MEDIA_TYPE: Self = Self(415);
     /// `429 Too Many Requests`.

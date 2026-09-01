@@ -153,6 +153,8 @@ impl<A: Api> ams_h3::Service for ServiceH3<'_, A> {
         let tour = self
             .session
             .request(tete, corps, maintenant, &mut self.travail);
+        // Ce que la ressource dit de sa divisibilité (§14 de RFC 9110).
+        let mut portee: (bool, Option<crate::http::ContentRange>) = (false, None);
         let (status, media, a_ecrire) = match tour.next() {
             Next::Respond => (tour.status(), PROBLEM_MEDIA_TYPE, tour.body()),
             Next::CheckCredentials { login, password } => {
@@ -178,9 +180,15 @@ impl<A: Api> ams_h3::Service for ServiceH3<'_, A> {
                 account,
                 body,
             } => {
-                let servi = self
-                    .api
-                    .serve(resource, method, account, body, &mut self.rendu);
+                let servi = self.api.serve(
+                    resource,
+                    method,
+                    account,
+                    body,
+                    tete.field(b"range"),
+                    &mut self.rendu,
+                );
+                portee = (servi.ranges, servi.range);
                 (servi.status, servi.media, servi.body)
             }
         };
@@ -194,7 +202,7 @@ impl<A: Api> ams_h3::Service for ServiceH3<'_, A> {
         // RFC 9110). Le rendre plus court ferait deviner la taille de ce qu'on
         // refusait de rendre ; le rendre entier serait un envoi pour rien.
         let sans_corps = matches!(tete.method(), Method::Head);
-        composer(status, media, a_ecrire, sans_corps, sortie)
+        composer(status, media, portee, a_ecrire, sans_corps, sortie)
     }
 }
 
@@ -209,6 +217,7 @@ impl<A: Api> ams_h3::Service for ServiceH3<'_, A> {
 fn composer<'o>(
     status: StatusCode,
     media: &'static str,
+    portee: (bool, Option<crate::http::ContentRange>),
     corps: &[u8],
     sans_corps: bool,
     sortie: &'o mut [u8],
@@ -237,11 +246,35 @@ fn composer<'o>(
             .copy_from_slice(chiffres.get(..ecrits).unwrap_or_default());
     }
 
+    // **ET LA PORTÉE DERRIÈRE LA LONGUEUR**, dans le même tampon et pour la même
+    // raison : ces chiffres doivent vivre aussi longtemps que la réponse.
+    let (divisible, morceau) = portee;
+    let mut dit = [0_u8; crate::http::CONTENT_RANGE_MAX];
+    let dits = morceau.map_or(0, |quoi| quoi.write(&mut dit));
+    let apres_portee = apres.saturating_add(dits);
+    if apres_portee <= sortie.len() {
+        sortie
+            .get_mut(apres..apres_portee)
+            .unwrap_or_default()
+            .copy_from_slice(dit.get(..dits).unwrap_or_default());
+    }
+
     let (corps_rendu, reste) = sortie.split_at_mut(combien);
-    let longueur = reste.get(..ecrits).unwrap_or_default();
-    Reponse::new(status, corps_rendu)
+    let (longueur, suite) = reste.split_at_mut(ecrits.min(reste.len()));
+    let portee_dite = suite.get(..dits).unwrap_or_default();
+    let reponse = Reponse::new(status, corps_rendu)
         .avec_champ(b"content-type", media.as_bytes())
-        .avec_champ(b"content-length", longueur)
+        .avec_champ(b"content-length", longueur);
+    // §14.3 : l'invitation d'abord — un client qui reçoit un refus doit savoir
+    // qu'une porte existe, et c'est sur le refus qu'il en a le plus besoin.
+    let reponse = match divisible {
+        true => reponse.avec_champ(b"accept-ranges", b"bytes"),
+        false => reponse,
+    };
+    match morceau.is_some() {
+        true => reponse.avec_champ(b"content-range", portee_dite),
+        false => reponse,
+    }
 }
 
 /// Écrit ce nombre en chiffres décimaux, et rend combien.
