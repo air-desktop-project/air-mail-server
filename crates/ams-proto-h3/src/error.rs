@@ -120,6 +120,13 @@ pub enum Reason {
     BadEncoderInstruction,
     /// Une instruction de flux de décodeur qu'on ne peut pas écrire (§4.4).
     BadDecoderInstruction,
+    /// Un accusé de décodeur que ce qu'on a envoyé ne justifie pas (§4.4.1,
+    /// §4.4.3).
+    ///
+    /// **CE N'EST PAS UNE FAUTE DE FORME** : l'instruction se lit très bien.
+    /// Elle accuse réception de ce que nous n'avons jamais émis, et les deux
+    /// tables ne décrivent donc plus le même état.
+    UnexpectedDecoderInstruction,
     /// Une insertion dans une table dynamique qu'on a annoncée nulle (§3.2.3).
     DynamicTableRefused,
     /// Une section de champs qui ne fait pas une requête (§4.1.2 de RFC 9114).
@@ -175,7 +182,9 @@ impl Reason {
             Self::BadEncoderInstruction | Self::DynamicTableRefused => {
                 H3Error::QpackEncoderStreamError
             }
-            Self::BadDecoderInstruction => H3Error::QpackDecoderStreamError,
+            Self::BadDecoderInstruction | Self::UnexpectedDecoderInstruction => {
+                H3Error::QpackDecoderStreamError
+            }
             // §4.1.2 : une requête bien décomprimée qui ne fait pas un message
             // ne condamne que son flux. La connexion, elle, n'a rien perdu.
             Self::MalformedRequest => H3Error::MessageError,
@@ -239,6 +248,9 @@ impl core::fmt::Display for Error {
             Reason::BadIndex => "un index qui ne désigne aucune entrée",
             Reason::BadEncoderInstruction => "une instruction d'encodeur mal formée",
             Reason::BadDecoderInstruction => "une instruction de décodeur qu'on ne peut pas écrire",
+            Reason::UnexpectedDecoderInstruction => {
+                "un accusé de décodeur que ce qu'on a envoyé ne justifie pas"
+            }
             Reason::DynamicTableRefused => "une insertion dans une table qu'on a annoncée nulle",
             Reason::MalformedRequest => "une section de champs qui ne fait pas une requête",
             Reason::BadResponseField => "un champ de réponse qu'on refuse d'écrire",

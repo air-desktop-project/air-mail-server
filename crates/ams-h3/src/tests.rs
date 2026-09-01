@@ -35,12 +35,19 @@ struct Faux {
     prochain: u64,
     /// Le pair nous a-t-il ouvert de quoi ouvrir ?
     plafond: u64,
-    /// Refuse-t-il ce qu'on écrit ?
+    /// À partir de quelle écriture refuse-t-il ?
+    ///
+    /// **UN RANG PLUTÔT QU'UN FANION** : un transport peut laisser passer le flux
+    /// de contrôle et refuser le suivant, et c'est même le cas intéressant —
+    /// `on_established` en ouvre trois d'affilée. Un booléen ne saurait dire
+    /// « celui-là oui, celui-ci non ».
     ///
     /// **UN SEUL FAUX TRANSPORT, ET NON DEUX** : chaque type qui traverse un
     /// générique en fait recopier le code, et une seconde copie demanderait
     /// d'éprouver deux fois chaque branche pour n'en montrer aucune de plus.
-    refuse_ecriture: bool,
+    refuse_a_partir_de: Option<usize>,
+    /// Combien d'écritures ont abouti.
+    ecritures: usize,
 }
 
 impl Faux {
@@ -95,9 +102,13 @@ impl Transport for Faux {
     }
 
     fn write(&mut self, flux: StreamId, octets: &[u8]) -> Result<usize, Error> {
-        if self.refuse_ecriture {
+        if self
+            .refuse_a_partir_de
+            .is_some_and(|rang| self.ecritures >= rang)
+        {
             return Err(Error::transport());
         }
+        self.ecritures = self.ecritures.saturating_add(1);
         self.sortant
             .entry(flux.value())
             .or_default()
@@ -508,33 +519,315 @@ fn une_charge_de_controle_demesuree_est_mal_formee() {
     );
 }
 
-/// **UN FLUX QPACK SE LIT ET SE JETTE** (§4.2 de RFC 9204).
+/// Un flux QPACK du client, dont on a lu la tête.
+fn qpack_du_client(faux: &mut Faux, rang: u64, genre: StreamKind) -> StreamId {
+    let flux = du_client(rang);
+    let mut tampon = [0_u8; 32];
+    let ecrits = varints::encode(genre.value(), &mut tampon).expect("écrivable");
+    faux.le_pair_dit(flux.value(), &tampon[..ecrits]);
+    flux
+}
+
+/// Ce que le pair a dit et qu'on n'a pas encore consommé.
+fn reste_a_lire(faux: &Faux, flux: StreamId) -> usize {
+    faux.entrant.get(&flux.value()).map_or(0, Vec::len)
+}
+
+/// **§4.2 DE RFC 9204 : NOS DEUX FLUX QPACK S'OUVRENT, ET NE DISENT QUE LEUR
+/// TYPE.**
 ///
-/// Tant qu'on annonce une table dynamique nulle, il n'y a rien à y traiter. Mais
-/// il faut le CONSOMMER : les octets non lus ne rouvriraient jamais la fenêtre du
-/// flux (§4.1 de RFC 9000), et le pair finirait bloqué sans comprendre pourquoi.
+/// « Each endpoint MUST initiate, at most, one encoder stream and, at most, one
+/// decoder stream. » *At most*, donc les ouvrir n'est pas dû — mais un flux
+/// absent et un flux muet ne se distinguent pas d'un flux qui tarde, et un pair
+/// qui attend ceux de son vis-à-vis attendrait pour rien.
+///
+/// Ils ne portent rien d'autre : notre encodeur n'insère jamais (§3.2.3), et
+/// notre décodeur n'a aucun accusé à rendre (§4.4.1).
 #[test]
-fn un_flux_qpack_se_lit_et_se_jette() {
+fn on_ouvre_aussi_les_deux_flux_qpack() {
     let mut faux = Faux::new();
     let mut h3 = Http3::new();
     h3.on_established(&mut faux).expect("on peut ouvrir");
 
-    for (rang, genre) in [
-        (0_u64, StreamKind::QpackEncoder),
-        (1, StreamKind::QpackDecoder),
+    let encodeur = h3.qpack_encoder_stream().expect("il est ouvert");
+    let decodeur = h3.qpack_decoder_stream().expect("il est ouvert");
+    let controle = h3.control_stream().expect("il est ouvert");
+    assert_ne!(encodeur, decodeur, "§4.2 : deux flux, et non un");
+    assert_ne!(
+        encodeur, controle,
+        "et ni l'un ni l'autre n'est le contrôle"
+    );
+
+    for (flux, genre) in [
+        (encodeur, StreamKind::QpackEncoder),
+        (decodeur, StreamKind::QpackDecoder),
     ] {
-        let flux = du_client(rang);
-        let mut tampon = [0_u8; 32];
-        let ecrits = varints::encode(genre.value(), &mut tampon).expect("écrivable");
-        faux.le_pair_dit(flux.value(), &tampon[..ecrits]);
-        faux.le_pair_dit(flux.value(), b"des instructions qu'on ne traite pas");
-        h3.on_readable(&mut faux, &mut Echo::default(), flux)
-            .expect("on les consomme");
-        assert!(
-            faux.entrant.get(&flux.value()).is_none_or(Vec::is_empty),
-            "tout a été consommé"
+        assert_eq!(
+            flux.directional(),
+            Directional::Unidirectional,
+            "§4.2 : un flux QPACK est unidirectionnel"
+        );
+        assert_eq!(
+            faux.ce_qu_on_a_dit(flux.value()),
+            &[u8::try_from(genre.value()).expect("un type qui tient sur un octet")],
+            "SON TYPE, ET RIEN D'AUTRE"
         );
     }
+}
+
+/// **TROIS FLUX DEMANDENT TROIS CRÉDITS**, et un pair qui n'en donne pas assez
+/// ne verra pas la connexion s'ouvrir.
+///
+/// §6.2 de RFC 9114 demande justement d'en donner assez pour ces trois-là. On le
+/// dit par [`Reason::Transport`] plutôt que de servir à moitié.
+#[test]
+fn sans_credit_pour_trois_flux_on_ne_s_ouvre_pas() {
+    // Un crédit : le contrôle passe, l'encodeur non. Deux : le décodeur non.
+    for plafond in [1, 2] {
+        let mut faux = Faux::new();
+        faux.plafond = plafond;
+        let mut h3 = Http3::new();
+        let faute = h3.on_established(&mut faux).expect_err("il en manque un");
+        assert!(matches!(faute.reason(), Reason::Transport), "{plafond}");
+    }
+}
+
+/// **§3.2.3 : UNE INSERTION EST REFUSÉE SUR SON SEUL PREMIER OCTET.**
+///
+/// « When the maximum table capacity is zero, the encoder MUST NOT insert
+/// entries into the dynamic table [...] » Nous annonçons zéro.
+///
+/// **ET L'ON N'EN LIT PAS LA CHARGE** : c'est ce que montre l'octet unique. §4.3.3
+/// ne borne ni le nom ni la valeur d'une insertion ; attendre de les avoir pour
+/// refuser donnerait au pair le moyen de choisir combien nous retenons (C3).
+#[test]
+fn une_insertion_est_refusee_sans_lire_sa_charge() {
+    // §4.3.2 `1Txxxxxx`, §4.3.3 `01Hxxxxx`, §4.3.4 `000xxxxx` : les trois types
+    // qui insèrent, et rien de plus qu'un octet pour chacun.
+    for premier in [0b1100_0001_u8, 0b0100_0001, 0b0000_0001] {
+        let mut faux = Faux::new();
+        let mut h3 = Http3::new();
+        h3.on_established(&mut faux).expect("on peut ouvrir");
+        let flux = qpack_du_client(&mut faux, 0, StreamKind::QpackEncoder);
+        faux.le_pair_dit(flux.value(), &[premier]);
+
+        let faute = h3
+            .on_readable(&mut faux, &mut Echo::default(), flux)
+            .expect_err("§3.2.3 refuse toute insertion");
+        assert!(matches!(
+            faute.reason(),
+            Reason::H3(ams_proto_h3::Reason::DynamicTableRefused)
+        ));
+        assert_eq!(
+            faute.close_code(),
+            ams_proto_h3::H3Error::QpackEncoderStreamError.value(),
+            "§6 nomme un code PAR FLUX : le pair doit savoir lequel a fauté"
+        );
+    }
+}
+
+/// **UNE CAPACITÉ NULLE PASSE, UNE CAPACITÉ NON NULLE NON** (§4.3.1, §3.2.3).
+///
+/// §3.2.3 demande à la lettre de n'envoyer aucune instruction quand la table est
+/// nulle. Celle-ci ne demande pourtant rien qu'on refuse — et fermer la connexion
+/// d'un pair qui annonce renoncer à la table serait le punir de nous avoir obéi.
+#[test]
+fn une_capacite_se_juge_sur_sa_valeur() {
+    let mut faux = Faux::new();
+    let mut h3 = Http3::new();
+    h3.on_established(&mut faux).expect("on peut ouvrir");
+    let flux = qpack_du_client(&mut faux, 0, StreamKind::QpackEncoder);
+    // §4.3.1 : `001xxxxx`, préfixe de cinq bits, valeur nulle.
+    faux.le_pair_dit(flux.value(), &[0b0010_0000]);
+    h3.on_readable(&mut faux, &mut Echo::default(), flux)
+        .expect("une table nulle est celle qu'on a annoncée");
+    assert_eq!(reste_a_lire(&faux, flux), 0, "et elle a été consommée");
+
+    // Soixante-quatre : au-delà des trente et un du préfixe, donc deux octets.
+    faux.le_pair_dit(flux.value(), &[0b0011_1111, 0x21]);
+    let faute = h3
+        .on_readable(&mut faux, &mut Echo::default(), flux)
+        .expect_err("§3.2.3 borne la capacité par ce qu'on a annoncé");
+    assert_eq!(
+        faute.close_code(),
+        ams_proto_h3::H3Error::QpackEncoderStreamError.value()
+    );
+}
+
+/// **UNE INSTRUCTION D'ENCODEUR À CHEVAL ATTEND SA SUITE**, elle aussi.
+///
+/// Une capacité nulle tient sur un octet ; toute autre déborde le préfixe de cinq
+/// bits de §4.3.1 et s'étale. Celle-ci sera donc refusée une fois entière — mais
+/// pas avant d'être entière : refuser sur un tampon incomplet serait refuser un
+/// pair qui n'a rien fait de mal.
+#[test]
+fn une_instruction_d_encodeur_coupee_en_deux_se_recolle() {
+    let mut faux = Faux::new();
+    let mut h3 = Http3::new();
+    h3.on_established(&mut faux).expect("on peut ouvrir");
+    let flux = qpack_du_client(&mut faux, 0, StreamKind::QpackEncoder);
+
+    faux.le_pair_dit(flux.value(), &[0b0011_1111]);
+    h3.on_readable(&mut faux, &mut Echo::default(), flux)
+        .expect("il en manque, et c'est tout");
+
+    faux.le_pair_dit(flux.value(), &[0x00]);
+    let faute = h3
+        .on_readable(&mut faux, &mut Echo::default(), flux)
+        .expect_err("trente et un dépassent le zéro qu'on annonce");
+    assert_eq!(
+        faute.close_code(),
+        ams_proto_h3::H3Error::QpackEncoderStreamError.value()
+    );
+}
+
+/// **ET UNE CAPACITÉ NULLE REDITE SANS FIN EST UNE CHARGE EXCESSIVE.**
+///
+/// Elle est licite, et ne change rien : c'est exactement ce que le compteur de
+/// service existe pour voir. Le flux d'encodeur est critique au sens de §4.2, donc
+/// rien d'autre ne le borne.
+#[test]
+fn des_capacites_nulles_sans_fin_sont_une_charge_excessive() {
+    let mut faux = Faux::new();
+    let mut h3 = Http3::new();
+    h3.on_established(&mut faux).expect("on peut ouvrir");
+    let flux = qpack_du_client(&mut faux, 0, StreamKind::QpackEncoder);
+    let combien = usize::try_from(ams_proto_h3::SERVICE_FRAMES_MAX).expect("tient") + 1;
+    faux.le_pair_dit(flux.value(), &vec![0b0010_0000; combien]);
+
+    let faute = h3
+        .on_readable(&mut faux, &mut Echo::default(), flux)
+        .expect_err("le pair n'envoie plus que ce qui n'avance rien");
+    assert_eq!(
+        faute.close_code(),
+        ams_proto_h3::H3Error::ExcessiveLoad.value()
+    );
+}
+
+/// **§4.4.1 ET §4.4.3 : ACCUSER CE QU'ON N'A PAS ENVOYÉ EST UNE FAUTE.**
+///
+/// Notre encodeur n'insère rien : aucune section que nous émettons ne déclare un
+/// compte d'insertions non nul. Tout accusé de section, et tout incrément, porte
+/// donc sur ce qui n'existe pas — et un pair qui compte autrement que nous ne
+/// tient plus la même table.
+#[test]
+fn un_accuse_qui_ne_porte_sur_rien_est_une_faute() {
+    // §4.4.1 `1xxxxxxx` sur le flux 0 ; §4.4.3 `00xxxxxx` d'incrément nul, puis
+    // d'incrément non nul — les deux que §4.4.3 nomme.
+    for octet in [0b1000_0000_u8, 0b0000_0000, 0b0000_0001] {
+        let mut faux = Faux::new();
+        let mut h3 = Http3::new();
+        h3.on_established(&mut faux).expect("on peut ouvrir");
+        let flux = qpack_du_client(&mut faux, 0, StreamKind::QpackDecoder);
+        faux.le_pair_dit(flux.value(), &[octet]);
+
+        let faute = h3
+            .on_readable(&mut faux, &mut Echo::default(), flux)
+            .expect_err("il n'y a rien à accuser");
+        assert!(matches!(
+            faute.reason(),
+            Reason::H3(ams_proto_h3::Reason::UnexpectedDecoderInstruction)
+        ));
+        assert_eq!(
+            faute.close_code(),
+            ams_proto_h3::H3Error::QpackDecoderStreamError.value()
+        );
+    }
+}
+
+/// **§4.4.2 N'A PAS DE CONDITION D'ERREUR**, et une annulation de flux passe.
+///
+/// Elle dit qu'on peut relâcher ce qu'une section référençait. Sans table, il n'y
+/// a rien à relâcher — et rien à refuser non plus : un pair qui abandonne un flux
+/// n'a rien fait de mal.
+#[test]
+fn une_annulation_de_flux_ne_fait_rien_et_passe() {
+    let mut faux = Faux::new();
+    let mut h3 = Http3::new();
+    h3.on_established(&mut faux).expect("on peut ouvrir");
+    let flux = qpack_du_client(&mut faux, 0, StreamKind::QpackDecoder);
+    // §4.4.2 : `01xxxxxx`, le flux 4.
+    faux.le_pair_dit(flux.value(), &[0b0100_0100]);
+    h3.on_readable(&mut faux, &mut Echo::default(), flux)
+        .expect("§4.4.2 ne nomme aucune faute");
+    assert_eq!(reste_a_lire(&faux, flux), 0, "et elle a été consommée");
+}
+
+/// **UNE INSTRUCTION À CHEVAL ATTEND SA SUITE**, et ce n'est pas une faute.
+///
+/// Un entier à préfixe s'étale sur plusieurs octets, et un flux QUIC les livre
+/// par morceaux. Refuser ici serait refuser un pair qui n'a rien fait de mal.
+#[test]
+fn une_instruction_de_decodeur_coupee_en_deux_se_recolle() {
+    let mut faux = Faux::new();
+    let mut h3 = Http3::new();
+    h3.on_established(&mut faux).expect("on peut ouvrir");
+    let flux = qpack_du_client(&mut faux, 0, StreamKind::QpackDecoder);
+    // §4.4.2, le flux 64 : le préfixe de six bits déborde, et la suite est là.
+    faux.le_pair_dit(flux.value(), &[0b0111_1111]);
+    h3.on_readable(&mut faux, &mut Echo::default(), flux)
+        .expect("il en manque, et c'est tout");
+
+    faux.le_pair_dit(flux.value(), &[0x01]);
+    h3.on_readable(&mut faux, &mut Echo::default(), flux)
+        .expect("la voilà entière");
+    assert_eq!(reste_a_lire(&faux, flux), 0, "et elle a été consommée");
+}
+
+/// **UN ENTIER QUI NE SE RECONSTRUIRA JAMAIS NE FIGE PAS LE FLUX.**
+///
+/// La lecture rend la même chose — « il en manque » — pour un tampon incomplet et
+/// pour un entier qui déborde ce que la représentation porte. Sans la borne de
+/// §4.4, on attendrait pour toujours une suite qui ne vient pas : un flux figé,
+/// sans erreur et sans trace. C'est le défaut qu'avait eu le tampon de contrôle.
+#[test]
+fn un_entier_sans_fin_est_refuse_plutot_que_d_attendre() {
+    for (genre, code) in [
+        (
+            StreamKind::QpackDecoder,
+            ams_proto_h3::H3Error::QpackDecoderStreamError,
+        ),
+        (
+            StreamKind::QpackEncoder,
+            ams_proto_h3::H3Error::QpackEncoderStreamError,
+        ),
+    ] {
+        let mut faux = Faux::new();
+        let mut h3 = Http3::new();
+        h3.on_established(&mut faux).expect("on peut ouvrir");
+        let flux = qpack_du_client(&mut faux, 0, genre);
+        // Un préfixe plein, puis six octets de continuation : le multiplicateur
+        // déborde avant qu'un octet final n'arrive.
+        faux.le_pair_dit(flux.value(), &[0b0011_1111, 0xff, 0xff, 0xff, 0xff, 0xff]);
+        let faute = h3
+            .on_readable(&mut faux, &mut Echo::default(), flux)
+            .expect_err("cet entier-là n'aboutira pas");
+        assert_eq!(faute.close_code(), code.value());
+    }
+}
+
+/// **UN PAIR QUI N'ANNULE QUE DES FLUX FINIT PAR EN FAIRE TROP.**
+///
+/// §4.2 fait des flux QPACK des flux critiques : comme le flux de contrôle, ils
+/// doivent avoir de quoi ne jamais bloquer, et rien ne borne donc ce qu'on y
+/// reçoit. Une annulation de §4.4.2 est licite et ne fait rien avancer — c'est le
+/// même travail gratuit que *Rapid Reset*, par une autre porte.
+#[test]
+fn des_annulations_sans_fin_sont_une_charge_excessive() {
+    let mut faux = Faux::new();
+    let mut h3 = Http3::new();
+    h3.on_established(&mut faux).expect("on peut ouvrir");
+    let flux = qpack_du_client(&mut faux, 0, StreamKind::QpackDecoder);
+    let combien = usize::try_from(ams_proto_h3::SERVICE_FRAMES_MAX).expect("tient") + 1;
+    faux.le_pair_dit(flux.value(), &vec![0b0100_0000; combien]);
+
+    let faute = h3
+        .on_readable(&mut faux, &mut Echo::default(), flux)
+        .expect_err("le pair n'envoie plus que ce qui n'avance rien");
+    assert_eq!(
+        faute.close_code(),
+        ams_proto_h3::H3Error::ExcessiveLoad.value()
+    );
 }
 
 /// **UN FLUX SANS RIEN À DIRE N'AVANCE PAS**, et ce n'est pas une faute.
@@ -588,11 +881,27 @@ fn le_conducteur_par_defaut_est_neuf() {
 #[test]
 fn ce_qu_on_ne_peut_pas_ecrire_ne_se_tait_pas() {
     let mut faux = Faux::new();
-    faux.refuse_ecriture = true;
+    faux.refuse_a_partir_de = Some(0);
     let mut h3 = Http3::new();
     let faute = h3.on_established(&mut faux).expect_err("il refuse");
     assert_eq!(faute.reason(), Reason::Transport);
     assert_eq!(h3.control_stream(), None, "et rien n'est retenu à moitié");
+
+    // **ET UN FLUX QPACK QU'ON N'ÉCRIT PAS NE SE TAIT PAS DAVANTAGE** : le
+    // contrôle passe, le suivant non. Servir avec un flux QPACK que le pair n'a
+    // jamais vu s'ouvrir serait lui laisser attendre ce qui ne viendra pas.
+    let mut faux = Faux::new();
+    faux.refuse_a_partir_de = Some(1);
+    let mut h3 = Http3::new();
+    let faute = h3
+        .on_established(&mut faux)
+        .expect_err("il refuse le second");
+    assert_eq!(faute.reason(), Reason::Transport);
+    assert_eq!(
+        h3.qpack_encoder_stream(),
+        None,
+        "rien n'est retenu à moitié"
+    );
 }
 
 /// **UNE TRAME DE CONTRÔLE AUSSI GRANDE QU'ON L'ACCEPTE PASSE** (§7.2).
@@ -1135,7 +1444,7 @@ fn un_transport_qui_refuse_notre_reponse_ne_se_tait_pas() {
     let flux = requete_du_client(0);
     poser_une_requete(&mut faux, flux, b"/boites", b"");
     // Il a laissé ouvrir le flux de contrôle, puis il se ferme.
-    faux.refuse_ecriture = true;
+    faux.refuse_a_partir_de = Some(0);
     let faute = h3
         .on_readable(&mut faux, &mut echo, flux)
         .expect_err("il refuse");

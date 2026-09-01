@@ -17,9 +17,10 @@
 //!
 //! # CE SERVEUR ANNONCE UNE TABLE DE ZÉRO OCTET, ET C'EST UNE DÉCISION
 //!
-//! §3.2.3 : « An encoder MUST NOT insert entries into the dynamic table [...] if
-//! the decoder's maximum table capacity is zero. » Annoncer zéro veut donc dire
-//! qu'aucune insertion n'est licite, et cela ferme trois choses d'un coup :
+//! §3.2.3 : « When the maximum table capacity is zero, the encoder MUST NOT
+//! insert entries into the dynamic table and MUST NOT send any encoder
+//! instructions on the encoder stream. » Annoncer zéro ferme donc trois choses
+//! d'un coup :
 //!
 //! - **le blocage de compression**. Une section ne peut dépendre d'aucune
 //!   insertion, donc ne peut jamais attendre. Le blocage de tête de ligne qu'on
@@ -37,6 +38,15 @@
 //! **On lit quand même les instructions**, parce qu'un pair qui en envoie doit
 //! s'entendre dire pourquoi on refuse — et non voir sa connexion se fermer sans
 //! un mot.
+//!
+//! # LIRE ET JUGER SONT DEUX CHOSES, ET CE MODULE FAIT LES DEUX SÉPARÉMENT
+//!
+//! `read_*` dit ce que le pair a écrit ; `check_*` dit si nous l'acceptons. Les
+//! mêmes octets sont licites pour un serveur qui tient une table et fautifs pour
+//! celui-ci, et une lecture qui refuserait d'elle-même ne pourrait plus servir
+//! aux deux. C'est aussi ce qui permet au conducteur de refuser une insertion
+//! **sans en lire la charge** : [`encoder_instruction_kind`] classe l'instruction
+//! sur son seul premier octet.
 
 use ams_field_codec::{decode_integer, decode_string, encode_integer};
 
@@ -77,6 +87,65 @@ pub enum EncoderInstruction<'o> {
     },
 }
 
+/// Ce qu'une instruction d'encodeur est, **d'après son seul premier octet**.
+///
+/// # POURQUOI LE TYPE SE LIT À PART DU RESTE
+///
+/// §4.3 met le type dans les bits de tête du premier octet, et la charge
+/// derrière. Un lecteur qui a annoncé une table nulle sait donc **avant de lire
+/// la charge** qu'il va refuser l'instruction — et une insertion porte un nom et
+/// une valeur dont §4.3.3 ne borne pas la longueur.
+///
+/// Les lire pour les jeter donnerait au pair le moyen de choisir combien nous
+/// retenons (C3). Le type seul suffit à refuser, et il tient sur un octet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncoderInstructionKind {
+    /// §4.3.1 — `001xxxxx`.
+    SetCapacity,
+    /// §4.3.2 — `1Txxxxxx`.
+    InsertWithNameRef,
+    /// §4.3.3 — `01Hxxxxx`.
+    InsertWithLiteralName,
+    /// §4.3.4 — `000xxxxx`.
+    Duplicate,
+}
+
+impl EncoderInstructionKind {
+    /// Cette instruction insère-t-elle dans la table dynamique ?
+    ///
+    /// **`SetCapacity` N'INSÈRE RIEN** : elle dit la taille, et une taille nulle
+    /// est ce qu'un pair annonce quand il renonce à la table.
+    #[must_use]
+    pub const fn insere(self) -> bool {
+        matches!(
+            self,
+            Self::InsertWithNameRef | Self::InsertWithLiteralName | Self::Duplicate
+        )
+    }
+}
+
+/// Le type de l'instruction qui commence par cet octet (§4.3).
+///
+/// **CE CLASSEMENT EST TOTAL** : les quatre motifs de §4.3 couvrent les deux
+/// cent cinquante-six valeurs, et il n'y a pas de type inconnu à prévoir.
+#[must_use]
+pub const fn encoder_instruction_kind(premier: u8) -> EncoderInstructionKind {
+    // §4.3.2 : `1Txxxxxx`.
+    if premier & 0b1000_0000 != 0 {
+        return EncoderInstructionKind::InsertWithNameRef;
+    }
+    // §4.3.3 : `01Hxxxxx`.
+    if premier & 0b1100_0000 == 0b0100_0000 {
+        return EncoderInstructionKind::InsertWithLiteralName;
+    }
+    // §4.3.1 : `001xxxxx`.
+    if premier & 0b1110_0000 == 0b0010_0000 {
+        return EncoderInstructionKind::SetCapacity;
+    }
+    // **IL NE RESTE QUE `000xxxxx`** (§4.3.4).
+    EncoderInstructionKind::Duplicate
+}
+
 /// Ce qu'une instruction d'encodeur laisse derrière elle.
 #[derive(Debug)]
 pub struct DecodedInstruction<'o> {
@@ -101,9 +170,10 @@ pub fn read_encoder_instruction<'o>(
     let tronque = || Error::new(Reason::Truncated);
     let mauvaise = || Error::new(Reason::BadEncoderInstruction);
     let premier = *octets.first().ok_or_else(tronque)?;
+    let quoi = encoder_instruction_kind(premier);
 
     // §4.3.2 : `1Txxxxxx` — insertion avec un nom indexé.
-    if premier & 0b1000_0000 != 0 {
+    if matches!(quoi, EncoderInstructionKind::InsertWithNameRef) {
         let (index, lus) = decode_integer(octets, 6).map_err(|_| tronque())?;
         let suite = octets.get(lus..).unwrap_or_default();
         let (value, encore) = decode_string(suite, out).map_err(|_| mauvaise())?;
@@ -125,7 +195,7 @@ pub fn read_encoder_instruction<'o>(
 
     // §4.3.3 : `01Hxxxxx` — insertion avec un nom écrit. Comme en §4.5.6, le
     // fanion de Huffman du NOM partage le premier octet avec les bits de type.
-    if premier & 0b1100_0000 == 0b0100_0000 {
+    if matches!(quoi, EncoderInstructionKind::InsertWithLiteralName) {
         let (name, lus) =
             super::representation::decode_string_prefixe(octets, 5, out).map_err(|_| mauvaise())?;
         let nom_len = name.len();
@@ -143,7 +213,7 @@ pub fn read_encoder_instruction<'o>(
     }
 
     // §4.3.1 : `001xxxxx` — le pair change la taille de sa table.
-    if premier & 0b1110_0000 == 0b0010_0000 {
+    if matches!(quoi, EncoderInstructionKind::SetCapacity) {
         let (capacity, read) = decode_integer(octets, 5).map_err(|_| tronque())?;
         return Ok(DecodedInstruction {
             instruction: EncoderInstruction::SetCapacity {
@@ -154,8 +224,7 @@ pub fn read_encoder_instruction<'o>(
         });
     }
 
-    // **IL NE RESTE QUE `000xxxxx`** (§4.3.4) : les trois motifs précédents ont
-    // épuisé tout ce qui commence autrement.
+    // **IL NE RESTE QUE `Duplicate`** (§4.3.4) : le classement est total.
     let (index, read) = decode_integer(octets, 5).map_err(|_| tronque())?;
     Ok(DecodedInstruction {
         instruction: EncoderInstruction::Duplicate {
@@ -184,14 +253,51 @@ pub fn check_encoder_instruction(
     instruction: EncoderInstruction<'_>,
     capacite_annoncee: u64,
 ) -> Result<(), Error> {
-    let refus = || Err(Error::new(Reason::DynamicTableRefused));
-    match instruction {
-        // §3.2.3 : la capacité demandée ne peut pas dépasser ce qu'on a annoncé.
-        EncoderInstruction::SetCapacity { capacity } if capacity <= capacite_annoncee => Ok(()),
-        EncoderInstruction::SetCapacity { .. } => refus(),
-        // §3.2.3 : sans table, aucune insertion n'est licite.
-        _ if capacite_annoncee == 0 => refus(),
-        _ => Ok(()),
+    let quoi = match instruction {
+        EncoderInstruction::SetCapacity { capacity } => {
+            // §3.2.3 : la capacité demandée ne peut pas dépasser ce qu'on a
+            // annoncé. **ZÉRO PASSE MÊME QUAND ON A ANNONCÉ ZÉRO** : §3.2.3
+            // demande à la lettre de n'envoyer AUCUNE instruction dans ce cas,
+            // mais celle-ci ne demande rien qu'on refuse — et fermer la
+            // connexion d'un pair qui annonce renoncer à la table serait le
+            // punir de nous avoir obéi.
+            if capacity > capacite_annoncee {
+                return Err(Error::new(Reason::DynamicTableRefused));
+            }
+            EncoderInstructionKind::SetCapacity
+        }
+        EncoderInstruction::InsertWithNameRef { .. } => EncoderInstructionKind::InsertWithNameRef,
+        EncoderInstruction::InsertWithLiteralName { .. } => {
+            EncoderInstructionKind::InsertWithLiteralName
+        }
+        EncoderInstruction::Duplicate { .. } => EncoderInstructionKind::Duplicate,
+    };
+    check_encoder_instruction_kind(quoi, capacite_annoncee)
+}
+
+/// Ce TYPE d'instruction est-il recevable, sachant la table qu'on a annoncée ?
+///
+/// # POURQUOI UN JUGEMENT QUI NE VOIT QUE LE TYPE
+///
+/// Une insertion est refusée quelle que soit sa charge quand la table est nulle.
+/// Le lecteur n'a donc aucune raison de lire cette charge — et §4.3.3 ne borne ni
+/// le nom ni la valeur qu'elle porte. **La lire pour la jeter donnerait au pair le
+/// moyen de choisir combien nous retenons** (C3).
+///
+/// `SetCapacity` ne se juge pas ici : c'est sa VALEUR qui décide, et
+/// [`check_encoder_instruction`] la voit.
+///
+/// # Errors
+///
+/// [`Reason::DynamicTableRefused`] pour une insertion quand la capacité annoncée
+/// est nulle (§3.2.3).
+pub fn check_encoder_instruction_kind(
+    kind: EncoderInstructionKind,
+    capacite_annoncee: u64,
+) -> Result<(), Error> {
+    match kind.insere() && capacite_annoncee == 0 {
+        true => Err(Error::new(Reason::DynamicTableRefused)),
+        false => Ok(()),
     }
 }
 
@@ -254,6 +360,80 @@ pub fn read_decoder_instruction(octets: &[u8]) -> Result<(DecoderInstruction, us
         },
         read,
     ))
+}
+
+/// Ce qu'une instruction faite d'un type et d'un entier peut occuper, au plus.
+///
+/// Les trois instructions de §4.4 et le `Set Dynamic Table Capacity` de §4.3.1
+/// ont la même forme : un motif de bits, puis un entier à préfixe de RFC 7541,
+/// et rien d'autre. **Les insertions de §4.3.2 et §4.3.3 n'entrent PAS dans
+/// cette borne** — elles portent en plus un nom et une valeur, dont la longueur
+/// n'est bornée nulle part.
+///
+/// # CETTE BORNE VIENT DE LA REPRÉSENTATION, ET NON DE LA RFC
+///
+/// `decode_integer` s'arrête à 2^32-1 : son multiplicateur déborde après cinq
+/// octets de continuation, et l'entier est alors refusé. Un octet de tête plus
+/// cinq, donc, et jamais un de plus.
+///
+/// **ELLE SERT À DISTINGUER DEUX CHOSES QUE LA LECTURE CONFOND** : un tampon
+/// incomplet et un entier qui ne se reconstruira jamais rendent tous deux
+/// [`Reason::Truncated`]. Sans cette borne, un lecteur attendrait éternellement
+/// la suite d'une instruction que le pair n'achèvera pas — un flux figé, sans
+/// erreur et sans trace, exactement comme le tampon de contrôle qui valait
+/// soixante-quatre octets.
+pub const INSTRUCTION_OCTETS_MAX: usize = 6;
+
+/// Cette instruction de décodeur est-elle recevable, sachant ce que NOTRE
+/// encodeur a inséré ?
+///
+/// # LES DEUX FAUTES QUE §4.4 NOMME SONT DES FAUTES DE COMPTE
+///
+/// Un flux de décodeur ne porte que des accusés, et un accusé qui porte sur ce
+/// qu'on n'a jamais envoyé n'est pas un détail de forme : c'est la preuve que les
+/// deux tables ne décrivent plus le même état.
+///
+/// - §4.4.1 : « If an encoder receives a Section Acknowledgment instruction
+///   referring to a stream on which every encoded field section with a non-zero
+///   Required Insert Count has already been acknowledged, this MUST be treated
+///   as a connection error of type QPACK_DECODER_STREAM_ERROR. » Un encodeur qui
+///   n'a rien inséré n'a jamais émis de section au compte non nul ; la condition
+///   est donc vraie pour TOUT accusé qu'il reçoit.
+/// - §4.4.3 : « An encoder that receives an Increment field equal to zero, or
+///   one that increases the Known Received Count beyond what the encoder has
+///   sent, MUST treat this as a connection error of type
+///   QPACK_DECODER_STREAM_ERROR. » Un incrément nul est une faute en soi, quel
+///   que soit ce qu'on ait inséré.
+///
+/// **ET §4.4.2 N'A PAS DE CONDITION D'ERREUR** : une annulation de flux dit
+/// seulement qu'on peut relâcher ce qu'une section référençait. Sans table, il
+/// n'y a rien à relâcher — et rien à refuser non plus. Un pair qui abandonne un
+/// flux n'a rien fait de mal.
+///
+/// # Errors
+///
+/// [`Reason::UnexpectedDecoderInstruction`] pour un accusé ou un incrément que
+/// ce que nous avons envoyé ne justifie pas.
+pub fn check_decoder_instruction(
+    instruction: DecoderInstruction,
+    insertions_emises: u64,
+) -> Result<(), Error> {
+    let refus = || Err(Error::new(Reason::UnexpectedDecoderInstruction));
+    match instruction {
+        // §4.4.2 : rien à vérifier, et rien à faire.
+        DecoderInstruction::StreamCancellation { .. } => Ok(()),
+        // §4.4.1 : sans insertion, aucune section n'a pu déclarer un compte non
+        // nul, et il n'y a donc rien qu'un accusé puisse accuser.
+        DecoderInstruction::SectionAck { .. } if insertions_emises == 0 => refus(),
+        DecoderInstruction::SectionAck { .. } => Ok(()),
+        // §4.4.3 : « an Increment field equal to zero ».
+        DecoderInstruction::InsertCountIncrement { increment: 0 } => refus(),
+        // §4.4.3 : « beyond what the encoder has sent ».
+        DecoderInstruction::InsertCountIncrement { increment } if increment > insertions_emises => {
+            refus()
+        }
+        DecoderInstruction::InsertCountIncrement { .. } => Ok(()),
+    }
 }
 
 /// Écrit une instruction du flux de décodeur.

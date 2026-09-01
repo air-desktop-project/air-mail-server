@@ -97,6 +97,11 @@ fn chaque_raison_porte_son_code_et_se_dit() {
             "instruction de décodeur",
         ),
         (
+            Reason::UnexpectedDecoderInstruction,
+            H3Error::QpackDecoderStreamError,
+            "que ce qu'on a envoyé ne justifie pas",
+        ),
+        (
             Reason::DynamicTableRefused,
             H3Error::QpackEncoderStreamError,
             "table qu'on a annoncée nulle",

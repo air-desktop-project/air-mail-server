@@ -63,6 +63,15 @@ const LIMITES: ams_proto_http::Limits = ams_proto_http::Limits::DEFAULT;
 /// Le plus long en-tête de §7.1 : deux entiers de §16, à huit octets chacun.
 const ENTETE_OCTETS_MAX: usize = 16;
 
+/// Combien d'insertions NOTRE encodeur a poussées dans la table du pair.
+///
+/// **ZÉRO, ET CE N'EST PAS UN COMPTEUR QUI ATTEND SA PREMIÈRE VALEUR** : ce
+/// serveur n'emploie que la table statique de §3.1, donc n'ouvre jamais
+/// d'insertion, donc n'émet jamais de section dont le compte d'insertions soit
+/// non nul. C'est ce qui rend §4.4.1 et §4.4.3 applicables sans tenir d'état :
+/// il n'y a rien à accuser, et rien à incrémenter.
+const INSERTIONS_EMISES: u64 = 0;
+
 /// Ce qu'on garde d'un flux tant qu'il n'a pas formé une trame complète.
 ///
 /// # IL DOIT TENIR UNE TRAME ENTIÈRE, ET LA PLUS GRANDE
@@ -83,10 +92,17 @@ enum Role {
     Inconnu,
     /// Le flux de contrôle du pair (§6.2.1).
     Controle,
-    /// Un flux QPACK. **ON LE LIT SANS RIEN EN FAIRE** tant qu'on n'emploie que
-    /// la table statique : §2.1.2 de RFC 9204 n'oblige à traiter les insertions
-    /// que si l'on a annoncé une table dynamique, et l'on annonce zéro.
-    Qpack,
+    /// Le flux d'ENCODEUR du pair (§4.3 de RFC 9204).
+    ///
+    /// **IL NE PEUT PLUS RIEN PORTER QU'ON ACCEPTE**, et c'est notre propre
+    /// annonce qui le décide : §3.2.3 interdit toute insertion quand la table
+    /// vaut zéro. On le lit quand même, pour dire au pair ce qu'on refuse.
+    QpackEncodeur,
+    /// Le flux de DÉCODEUR du pair (§4.4 de RFC 9204).
+    ///
+    /// Il accuse réception de ce que NOTRE encodeur a inséré — c'est-à-dire de
+    /// rien. Seule l'annulation d'un flux de §4.4.2 y reste licite.
+    QpackDecodeur,
     /// Un flux de requête : bidirectionnel, ouvert par le client (§6.1).
     Requete,
     /// Un type qu'on ne conduit pas.
@@ -146,6 +162,18 @@ pub struct Http3 {
     suivis: Vec<Suivi>,
     /// Notre flux de contrôle, une fois ouvert.
     controle: Option<StreamId>,
+    /// Notre flux d'encodeur QPACK (§4.2 de RFC 9204).
+    ///
+    /// **IL NE PORTERA QUE SON TYPE**, et c'est entier : notre encodeur
+    /// n'emploie que la table statique, et §4.3 ne connaît pas d'instruction qui
+    /// dise « je n'insérerai rien ».
+    encodeur: Option<StreamId>,
+    /// Notre flux de décodeur QPACK (§4.2 de RFC 9204).
+    ///
+    /// **DE MÊME, ET POUR UNE AUTRE RAISON** : §4.4.1 ne demande un accusé que
+    /// pour une section dont le compte d'insertions n'est pas nul, et le client
+    /// ne peut pas en émettre puisqu'on lui a annoncé une table nulle.
+    decodeur: Option<StreamId>,
     /// Les réglages qu'on annonce.
     nos_reglages: Settings,
 }
@@ -164,6 +192,8 @@ impl Http3 {
             h3: H3Connection::new(),
             suivis: Vec::new(),
             controle: None,
+            encodeur: None,
+            decodeur: None,
             nos_reglages: Settings::DEFAULT,
         }
     }
@@ -174,15 +204,27 @@ impl Http3 {
         self.controle
     }
 
+    /// Notre flux d'encodeur QPACK, une fois ouvert (§4.2 de RFC 9204).
+    #[must_use]
+    pub const fn qpack_encoder_stream(&self) -> Option<StreamId> {
+        self.encodeur
+    }
+
+    /// Notre flux de décodeur QPACK, une fois ouvert (§4.2 de RFC 9204).
+    #[must_use]
+    pub const fn qpack_decoder_stream(&self) -> Option<StreamId> {
+        self.decodeur
+    }
+
     /// Les réglages que le pair a annoncés (§7.2.4).
     #[must_use]
     pub const fn peer_settings(&self) -> Option<Settings> {
         self.h3.peer_settings()
     }
 
-    /// La connexion QUIC est établie : on ouvre notre flux de contrôle.
+    /// La connexion QUIC est établie : on ouvre nos trois flux.
     ///
-    /// # C'EST LA PREMIÈRE CHOSE À FAIRE, ET §6.2.1 L'EXIGE
+    /// # LE FLUX DE CONTRÔLE D'ABORD, ET §6.2.1 L'EXIGE
     ///
     /// « Each side MUST initiate a single control stream at the beginning of the
     /// connection and send its SETTINGS frame as the first frame on this
@@ -190,10 +232,29 @@ impl Http3 {
     /// les valeurs par défaut, et refuserait des réponses que nous jugeons
     /// acceptables.
     ///
+    /// # PUIS LES DEUX FLUX QPACK, QUI NE PORTERONT QUE LEUR TYPE
+    ///
+    /// §4.2 de RFC 9204 dit « at most one » et non « exactly one » : les ouvrir
+    /// n'est pas une obligation, et l'on n'y écrira jamais rien — notre encodeur
+    /// n'emploie que la table statique, et notre décodeur n'a aucun accusé à
+    /// rendre puisqu'on a annoncé une table nulle.
+    ///
+    /// **On les ouvre quand même, et c'est un choix.** Un flux absent et un flux
+    /// muet ne se distinguent pas d'un flux qui tarde : un pair qui attend ceux
+    /// de son vis-à-vis pour commencer attendrait indéfiniment, et rien dans ce
+    /// qu'il verrait ne lui dirait qu'il attend pour rien. Deux octets à
+    /// l'ouverture d'une connexion suppriment la question.
+    ///
+    /// Le prix est **trois flux unidirectionnels de crédit** au lieu d'un. §6.2
+    /// de RFC 9114 demande justement au pair d'en donner assez pour ces trois-là ;
+    /// un pair qui n'en donne qu'un ne verra pas la connexion s'ouvrir, et c'est
+    /// ce que dit alors [`Reason::Transport`].
+    ///
     /// # Errors
     ///
-    /// [`Reason::Quic`] si le pair ne nous a ouvert aucun flux unidirectionnel,
-    /// [`Reason::H3`] si nos propres réglages ne s'écrivent pas.
+    /// [`Reason::Transport`] si le pair ne nous a pas ouvert de quoi ouvrir trois
+    /// flux unidirectionnels, [`Reason::H3`] si nos propres réglages ne
+    /// s'écrivent pas.
     pub fn on_established<T: Transport>(&mut self, quic: &mut T) -> Result<(), Error> {
         if self.controle.is_some() {
             return Ok(());
@@ -229,7 +290,25 @@ impl Http3 {
         sortie.extend_from_slice(charge.get(..combien).unwrap_or_default());
         quic.write(flux, &sortie)?;
         self.controle = Some(flux);
+
+        // §4.2 de RFC 9204 : et nos deux flux QPACK, qui n'ont que leur type à
+        // dire. L'ordre n'est pas imposé — seul le flux de contrôle doit venir
+        // en premier, et il vient d'être ouvert.
+        self.encodeur = Some(Self::ouvrir_un_flux(quic, StreamKind::QpackEncoder)?);
+        self.decodeur = Some(Self::ouvrir_un_flux(quic, StreamKind::QpackDecoder)?);
         Ok(())
+    }
+
+    /// Ouvre un flux unidirectionnel qui n'a que son type à annoncer (§6.2).
+    fn ouvrir_un_flux<T: Transport>(quic: &mut T, kind: StreamKind) -> Result<StreamId, Error> {
+        let flux = quic.open_uni()?;
+        let mut tete = [0_u8; ENTETE_OCTETS_MAX];
+        // **CELLE-CI NON PLUS NE PEUT PAS ÉCHOUER** : les types de §11.2.3
+        // tiennent sur un octet, et le tampon en fait seize.
+        let pose = varints::encode(kind.value(), &mut tete)
+            .expect("le type d'un flux QPACK tient sur un octet");
+        quic.write(flux, tete.get(..pose).unwrap_or_default())?;
+        Ok(flux)
     }
 }
 
@@ -258,12 +337,13 @@ impl Http3 {
         }
         // §6.2.1 et §4.2 de RFC 9204 : un flux critique qui se ferme est une
         // faute, et il n'y a pas de cas où c'est acceptable.
-        if matches!(self.suivis[rang].role, Role::Controle | Role::Qpack)
-            && matches!(
-                quic.recv_state(flux),
-                Some(RecvState::DataRecvd | RecvState::DataRead)
-            )
-        {
+        if matches!(
+            self.suivis[rang].role,
+            Role::Controle | Role::QpackEncodeur | Role::QpackDecodeur
+        ) && matches!(
+            quic.recv_state(flux),
+            Some(RecvState::DataRecvd | RecvState::DataRead)
+        ) {
             return Err(Error::depuis_h3(
                 self.h3
                     .on_critical_stream_closed()
@@ -432,15 +512,17 @@ impl Http3 {
     fn un_pas(&mut self, rang: usize) -> Result<bool, Error> {
         match self.suivis[rang].role {
             Role::Inconnu => self.une_tete(rang),
-            // §9 et §4.2 de RFC 9204 : ce qu'on ne conduit pas, on le consomme
-            // sans le lire. **CONSOMMER PLUTÔT QU'IGNORER** : les octets non lus
-            // ne rouvriraient jamais la fenêtre du flux (§4.1 de RFC 9000), et le
-            // pair finirait bloqué sans comprendre pourquoi.
-            Role::Abandonne | Role::Qpack => {
+            // §9 : ce qu'on ne conduit pas, on le consomme sans le lire.
+            // **CONSOMMER PLUTÔT QU'IGNORER** : les octets non lus ne rouvriraient
+            // jamais la fenêtre du flux (§4.1 de RFC 9000), et le pair finirait
+            // bloqué sans comprendre pourquoi.
+            Role::Abandonne => {
                 let vide = self.suivis[rang].tampon.is_empty();
                 self.suivis[rang].tampon.clear();
                 Ok(!vide)
             }
+            Role::QpackEncodeur => self.une_instruction_d_encodeur(rang),
+            Role::QpackDecodeur => self.une_instruction_de_decodeur(rang),
             Role::Controle => self.une_trame_de_controle(rang),
             Role::Requete => self.une_trame_de_requete(rang),
         }
@@ -522,6 +604,93 @@ impl Http3 {
         Ok(true)
     }
 
+    /// Lit une instruction du flux d'encodeur du pair (§4.3 de RFC 9204).
+    ///
+    /// # ON REFUSE SUR LE TYPE, AVANT DE LIRE LA CHARGE
+    ///
+    /// §3.2.3 : « When the maximum table capacity is zero, the encoder MUST NOT
+    /// insert entries into the dynamic table and MUST NOT send any encoder
+    /// instructions on the encoder stream. » Nous annonçons zéro, donc aucune
+    /// insertion n'est licite — **quelle que soit sa charge**.
+    ///
+    /// La lire pour la jeter serait pourtant coûteux : §4.3.3 ne borne ni le nom
+    /// ni la valeur d'une insertion, et le pair choisirait ainsi combien nous
+    /// retenons (C3). Le premier octet dit le type ; il suffit à refuser.
+    ///
+    /// **CE CHEMIN NE SAIT LIRE QUE LA TABLE NULLE.** Le jour où l'on annoncerait
+    /// une vraie table, il faudrait ici un tampon pour les littéraux de §4.3.3 et
+    /// une table à nourrir — c'est-à-dire un autre code, et non une constante
+    /// changée.
+    fn une_instruction_d_encodeur(&mut self, rang: usize) -> Result<bool, Error> {
+        let annoncee = self.nos_reglages.qpack_max_table_capacity;
+        let Some(&premier) = self.suivis[rang].tampon.first() else {
+            return Ok(false);
+        };
+        qpack::check_encoder_instruction_kind(qpack::encoder_instruction_kind(premier), annoncee)
+            .map_err(Error::depuis_h3)?;
+
+        // **IL NE RESTE QUE `Set Dynamic Table Capacity`** (§4.3.1), qui ne porte
+        // aucune chaîne : le contrôle ci-dessus a refusé les trois autres types.
+        let mut place = [0_u8; TAMPON_OCTETS_MAX];
+        let (instruction, lus) =
+            match qpack::read_encoder_instruction(&self.suivis[rang].tampon, &mut place) {
+                Ok(lue) => (lue.instruction, lue.read),
+                // Un entier à cheval n'est pas une faute : le pair écrira la suite.
+                Err(_) if self.suivis[rang].tampon.len() < qpack::INSTRUCTION_OCTETS_MAX => {
+                    return Ok(false);
+                }
+                // Au-delà de cette borne, il n'en manque plus : cet entier-là ne se
+                // reconstruira jamais. Attendre encore figerait le flux pour toujours.
+                Err(_) => {
+                    return Err(Error::depuis_h3(ams_proto_h3::Error::new(
+                        ams_proto_h3::Reason::BadEncoderInstruction,
+                    )));
+                }
+            };
+        qpack::check_encoder_instruction(instruction, annoncee).map_err(Error::depuis_h3)?;
+        self.suivis[rang].tampon.drain(..lus);
+        // Une capacité nulle redite ne change rien, et coûte un traitement.
+        self.h3.on_qpack_instruction().map_err(Error::depuis_h3)?;
+        Ok(true)
+    }
+
+    /// Lit une instruction du flux de décodeur du pair (§4.4 de RFC 9204).
+    ///
+    /// # CE FLUX ACCUSE RÉCEPTION DE CE QUE NOUS N'AVONS PAS ENVOYÉ
+    ///
+    /// Notre encodeur n'insère rien : aucune section que nous émettons ne déclare
+    /// un compte d'insertions non nul. §4.4.1 et §4.4.3 font alors de tout accusé
+    /// et de tout incrément une faute de connexion — non par formalisme, mais
+    /// parce qu'un pair qui accuse ce qui n'existe pas ne tient pas la même table
+    /// que nous, et que plus rien ne se lira ensuite.
+    ///
+    /// Reste §4.4.2, l'annulation d'un flux, que rien ne rend fautive.
+    fn une_instruction_de_decodeur(&mut self, rang: usize) -> Result<bool, Error> {
+        let (instruction, lus) = match qpack::read_decoder_instruction(&self.suivis[rang].tampon) {
+            Ok(lue) => lue,
+            // **LA SEULE FAUTE QUE §4.4 SAIT RENDRE EST `Truncated`** : ses trois
+            // instructions sont un motif de bits et un entier, et il n'y a rien
+            // d'autre à mal former. Reste à savoir s'il en manque, ou si l'entier
+            // ne se reconstruira jamais — et c'est la borne qui tranche.
+            Err(_) if self.suivis[rang].tampon.len() < qpack::INSTRUCTION_OCTETS_MAX => {
+                return Ok(false);
+            }
+            Err(_) => {
+                return Err(Error::depuis_h3(ams_proto_h3::Error::new(
+                    ams_proto_h3::Reason::BadDecoderInstruction,
+                )));
+            }
+        };
+        qpack::check_decoder_instruction(instruction, INSERTIONS_EMISES)
+            .map_err(Error::depuis_h3)?;
+        self.suivis[rang].tampon.drain(..lus);
+        // §4.4.2 : la seule qui passe ne demande rien. Elle coûte pourtant un
+        // traitement, et §4.2 fait de ce flux un flux qui ne doit jamais bloquer
+        // — donc que rien ne borne, sinon ce compteur.
+        self.h3.on_qpack_instruction().map_err(Error::depuis_h3)?;
+        Ok(true)
+    }
+
     /// Lit le type d'un flux unidirectionnel du pair (§6.2).
     fn une_tete(&mut self, rang: usize) -> Result<bool, Error> {
         let ams_proto_h3::StreamHead::Ready { kind, read } =
@@ -538,7 +707,10 @@ impl Http3 {
                 self.h3.on_peer_stream(kind).map_err(Error::depuis_h3)?;
                 self.suivis[rang].role = match kind {
                     StreamKind::Control => Role::Controle,
-                    _ => Role::Qpack,
+                    StreamKind::QpackEncoder => Role::QpackEncodeur,
+                    // **`accept_stream` N'A LAISSÉ PASSER QUE LES TROIS FLUX
+                    // CRITIQUES**, et les deux premiers viennent d'être nommés.
+                    _ => Role::QpackDecodeur,
                 };
             }
             // §6.2.2 : un flux de poussée vient d'un serveur. D'un client, c'est

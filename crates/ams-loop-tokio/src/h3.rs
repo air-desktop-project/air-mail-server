@@ -304,7 +304,8 @@ impl<A: Api> crate::quic::Application for Http3Application<'_, A> {
         let clef = connexion.local_id().as_bytes().to_vec();
         let conducteur = self.conducteurs.entry(clef).or_default();
         self.connexions = self.connexions.saturating_add(1);
-        // §6.2.1 : notre flux de contrôle et nos réglages, tout de suite.
+        // §6.2.1 : notre flux de contrôle et nos réglages, tout de suite — puis
+        // les deux flux QPACK de §4.2 de RFC 9204.
         if let Err(faute) = conducteur.on_established(&mut Pont(connexion)) {
             Self::condamner(connexion, &faute);
         }

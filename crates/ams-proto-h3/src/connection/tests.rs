@@ -404,3 +404,39 @@ fn un_flux_qui_finit_sans_en_tetes_ne_fait_pas_un_message() {
     assert_eq!(issue.reason(), Reason::IncompleteRequest);
     assert_eq!(issue.code(), H3Error::RequestIncomplete);
 }
+
+/// **UNE INSTRUCTION QPACK QUI N'AVANCE RIEN SE COMPTE COMME UNE TRAME DE
+/// SERVICE**, et sur le même compteur.
+///
+/// §4.2 de RFC 9204 fait des flux QPACK des flux critiques : ils doivent avoir de
+/// quoi ne jamais bloquer, donc rien ne borne ce qu'on y reçoit. Une annulation
+/// de §4.4.2 est licite et ne demande rien — c'est le travail gratuit de *Rapid
+/// Reset*, par une autre porte.
+#[test]
+fn des_instructions_qpack_sans_fin_finissent_par_etre_de_trop() {
+    let mut connexion = Connection::new();
+    for _ in 0..SERVICE_FRAMES_MAX {
+        connexion
+            .on_qpack_instruction()
+            .expect("jusqu'au plafond, elles passent");
+    }
+    let faute = connexion
+        .on_qpack_instruction()
+        .expect_err("au-delà, le pair en fait trop");
+    assert_eq!(faute.reason(), Reason::ServiceFlood);
+    assert_eq!(faute.code(), H3Error::ExcessiveLoad);
+}
+
+/// **ET UN PAIR QUI TRAVAILLE REMET CE COMPTEUR À ZÉRO**, quelle que soit la
+/// porte par laquelle il l'a fait monter.
+#[test]
+fn un_progres_efface_les_instructions_qpack_comptees() {
+    let mut connexion = Connection::new();
+    for _ in 0..SERVICE_FRAMES_MAX {
+        connexion.on_qpack_instruction().expect("elles passent");
+    }
+    connexion.progres();
+    connexion
+        .on_qpack_instruction()
+        .expect("le compteur est reparti de zéro");
+}

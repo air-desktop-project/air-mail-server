@@ -193,7 +193,7 @@ async fn une_requete_h3_traverse_le_binaire() {
     // Le jeton, puis la ressource — comme en HTTP/2.
     let corps = br#"{"login":"marc","password":"secret"}"#;
     envoyer_une_requete(&mut client, 0, 20, b"/v1/tokens", None, corps).await;
-    let recu = attendre_la_reponse(&mut client).await;
+    let recu = attendre_la_reponse(&mut client, 0).await;
     let texte = String::from_utf8_lossy(&recu).to_string();
 
     // **SANS FICHIER DE COMPTES, PERSONNE NE S'AUTHENTIFIE** — et c'est la

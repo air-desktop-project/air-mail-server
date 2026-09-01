@@ -805,8 +805,11 @@ une extension ouvrir les siens sans casser les pairs qui ne la connaissent pas.
 
 **Mais on le CONSOMME**, plutôt que de l'ignorer : les octets non lus ne
 rouvriraient jamais la fenêtre du flux (§4.1 de RFC 9000), et le pair finirait
-bloqué sans comprendre pourquoi. Même chose pour les flux QPACK, dont on ne
-traite rien tant qu'on annonce une table dynamique nulle.
+bloqué sans comprendre pourquoi.
+
+**Les flux QPACK, eux, ne se jettent plus.** Ils l'ont été tant que rien ne les
+lisait ; leurs instructions sont désormais lues et jugées, et ce qu'on refuse se
+dit. Voir « Une table dynamique QPACK de zéro octet » plus bas.
 
 Une trame inconnue se saute de même **sans passer par le tampon** (§9) : elle peut
 faire des mébioctets, et l'y mettre donnerait au pair le moyen de choisir combien
@@ -4461,9 +4464,9 @@ en relisant, et qu'on voit en écrivant le test.
 
 ## Une table dynamique QPACK de zéro octet, et ce que cela ferme
 
-§3.2.3 : « An encoder MUST NOT insert entries into the dynamic table […] if the
-decoder's maximum table capacity is zero. » Annoncer zéro veut donc dire
-qu'aucune insertion n'est licite, et cela ferme **trois choses d'un coup** :
+§3.2.3 : « When the maximum table capacity is zero, the encoder MUST NOT insert
+entries into the dynamic table and MUST NOT send any encoder instructions on the
+encoder stream. » Annoncer zéro ferme **trois choses d'un coup** :
 
 - **le blocage de compression.** Une section ne peut dépendre d'aucune
   insertion, donc ne peut jamais attendre. Le blocage de tête de ligne qu'on a
@@ -4482,6 +4485,72 @@ API REST n'envoie pas mille requêtes identiques par connexion.
 **On lit quand même les instructions.** Un pair qui en envoie doit s'entendre
 dire pourquoi on refuse — et non voir sa connexion se fermer sans un mot. C'est
 aussi ce qui permettra d'annoncer une table plus tard sans réécrire la lecture.
+
+### On refuse une insertion sur son TYPE, sans lire sa charge
+
+§4.3.3 ne borne ni le nom ni la valeur d'une insertion. Attendre de les avoir
+pour refuser une instruction qu'on refusera de toute façon donnerait au pair le
+moyen de choisir combien nous retenons — c'est-à-dire précisément ce que C3
+interdit.
+
+§4.3 met le type dans les bits de tête du premier octet. Il suffit :
+`encoder_instruction_kind` classe, `check_encoder_instruction_kind` juge, et
+aucune charge n'entre dans un tampon. Le classement est total — les quatre motifs
+couvrent les deux cent cinquante-six valeurs —, donc il n'y a pas de type inconnu
+à prévoir.
+
+**`Set Dynamic Table Capacity` à zéro fait exception, et c'est délibéré.** §3.2.3
+demande à la lettre de n'envoyer AUCUNE instruction quand la table est nulle.
+Celle-ci ne demande pourtant rien qu'on refuse, et fermer la connexion d'un pair
+qui annonce renoncer à la table serait le punir de nous avoir obéi.
+
+### Accuser ce qu'on n'a pas envoyé est une faute de compte
+
+Notre encodeur n'insère rien : aucune section que nous émettons ne déclare un
+compte d'insertions non nul. §4.4.1 fait alors de TOUT accusé de section une
+faute — « every encoded field section with a non-zero Required Insert Count has
+already been acknowledged » est vrai à vide —, et §4.4.3 de tout incrément, qu'il
+soit nul ou qu'il dépasse ce qu'on a envoyé.
+
+Ce n'est pas du formalisme : un pair qui accuse ce qui n'existe pas ne tient pas
+la même table que nous, et plus rien ne se lira ensuite.
+
+§4.4.2 en revanche **n'a aucune condition d'erreur**. Une annulation de flux dit
+qu'on peut relâcher ce qu'une section référençait ; sans table il n'y a rien à
+relâcher, et rien à refuser non plus. Elle passe donc — et se compte comme une
+trame de service, parce qu'un flux critique n'est borné par rien d'autre et
+qu'une annulation répétée sans fin est le travail gratuit de *Rapid Reset* par
+une autre porte.
+
+### Nos deux flux QPACK s'ouvrent, et ne portent que leur type
+
+§4.2 dit « at most one », et non « exactly one » : les ouvrir n'est pas dû. On le
+fait quand même, et l'on n'y écrira jamais rien — notre encodeur n'emploie que la
+table statique, notre décodeur n'a aucun accusé à rendre.
+
+**La raison est qu'un flux absent et un flux muet ne se distinguent pas d'un flux
+qui tarde.** Un pair qui attend ceux de son vis-à-vis pour commencer attendrait
+indéfiniment, et rien dans ce qu'il verrait ne le lui dirait. Deux octets à
+l'ouverture d'une connexion suppriment la question.
+
+Le prix est **trois flux unidirectionnels de crédit au lieu d'un**. §6.2 de
+RFC 9114 demande justement au pair d'en donner assez pour ces trois-là ; un pair
+plus avare ne verra pas la connexion s'ouvrir, et on le lui dit plutôt que de
+servir à moitié.
+
+### Une borne de représentation qui empêche un flux de se figer
+
+Les instructions de §4.4 et le `Set Dynamic Table Capacity` de §4.3.1 sont un
+motif de bits suivi d'un entier à préfixe, et rien d'autre. `decode_integer`
+s'arrête à 2^32-1 : son multiplicateur déborde après cinq octets de continuation.
+Six octets, donc, et jamais un de plus.
+
+**Cette borne tranche entre deux choses que la lecture confond** : « il en
+manque » et « cet entier ne se reconstruira jamais » rendent la même faute. Sans
+elle, on attendrait pour toujours la suite d'une instruction que le pair
+n'achèvera pas — un flux figé, sans erreur et sans trace. C'est exactement le
+défaut qu'avait eu le tampon du flux de contrôle, et c'est pourquoi il est nommé
+ici plutôt que découvert deux fois.
 
 ### Lire et juger sont deux choses
 

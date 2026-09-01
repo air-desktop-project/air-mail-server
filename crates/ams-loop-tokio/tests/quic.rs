@@ -418,18 +418,18 @@ async fn des_octets_d_application_font_l_aller_retour() {
     for _ in 0..8 {
         client.parler().await;
         client.ecouter().await;
-        if client.fin_recue() {
+        if client.fin_recue(0) {
             break;
         }
     }
 
     assert_eq!(client.ferme(), None, "rien n'a fermé");
     assert_eq!(
-        client.recu(),
+        client.recu(0),
         b"vous avez dit: bonjour",
         "LA RÉPONSE DE L'APPLICATION EST ARRIVÉE"
     );
-    assert!(client.fin_recue(), "§19.8 : et le flux est terminé");
+    assert!(client.fin_recue(0), "§19.8 : et le flux est terminé");
 
     let _ = fin.send(());
     let (stats, servis, sources) = ecoute.await.expect("la tâche d'écoute");
@@ -533,7 +533,7 @@ async fn une_requete_h3_traverse_toute_la_chaine() {
     let jeton = {
         let corps = br#"{"login":"marc","password":"secret"}"#;
         envoyer_une_requete(&mut client, 0, 20, b"/v1/tokens", None, corps).await;
-        let recu = attendre_la_reponse(&mut client).await;
+        let recu = attendre_la_reponse(&mut client, 0).await;
         let texte = std::string::String::from_utf8_lossy(&recu).to_string();
         assert!(
             texte.contains(r#"{"token":""#),
@@ -548,10 +548,11 @@ async fn une_requete_h3_traverse_toute_la_chaine() {
         texte[debut..fin].to_string()
     };
 
-    // **SECONDE REQUÊTE : la ressource**, avec le jeton qu'on vient d'obtenir.
-    client.oublier_ce_qui_est_recu();
+    // **SECONDE REQUÊTE : la ressource**, sur SON flux, avec le jeton qu'on vient
+    // d'obtenir. Rien n'est à oublier entre les deux : le client range désormais
+    // ce qu'il reçoit par flux, et celui-ci n'a encore rien porté.
     envoyer_une_requete(&mut client, 4, 17, b"/v1/health", Some(&jeton), &[]).await;
-    let recu = attendre_la_reponse(&mut client).await;
+    let recu = attendre_la_reponse(&mut client, 4).await;
     let texte = std::string::String::from_utf8_lossy(&recu).to_string();
 
     assert_eq!(client.ferme(), None, "rien n'a fermé");

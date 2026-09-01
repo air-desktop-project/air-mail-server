@@ -5,8 +5,10 @@
 //! Ce que les deux flux QPACK ont le droit de porter.
 
 use super::{
-    DecoderInstruction, EncoderInstruction, check_encoder_instruction, read_decoder_instruction,
-    read_encoder_instruction, write_decoder_instruction,
+    DecoderInstruction, EncoderInstruction, EncoderInstructionKind, INSTRUCTION_OCTETS_MAX,
+    check_decoder_instruction, check_encoder_instruction, check_encoder_instruction_kind,
+    encoder_instruction_kind, read_decoder_instruction, read_encoder_instruction,
+    write_decoder_instruction,
 };
 use crate::error::{H3Error, Reason};
 use crate::qpack::representation::Table;
@@ -279,4 +281,151 @@ fn une_instruction_de_decodeur_mal_formee_se_refuse() {
             .expect_err("pas la place");
     assert_eq!(issue.reason(), Reason::BufferTooSmall);
     assert_eq!(issue.code(), H3Error::InternalError);
+}
+
+/// **LE TYPE SE LIT DU SEUL PREMIER OCTET**, et le classement est total.
+///
+/// C'est ce qui permet à un lecteur qui a annoncé une table nulle de refuser une
+/// insertion sans en lire la charge — §4.3.3 ne borne ni le nom ni la valeur.
+#[test]
+fn le_type_d_une_instruction_se_lit_du_premier_octet() {
+    for (premier, attendu) in [
+        (0b1000_0000_u8, EncoderInstructionKind::InsertWithNameRef),
+        (0b1111_1111, EncoderInstructionKind::InsertWithNameRef),
+        (0b0100_0000, EncoderInstructionKind::InsertWithLiteralName),
+        (0b0111_1111, EncoderInstructionKind::InsertWithLiteralName),
+        (0b0010_0000, EncoderInstructionKind::SetCapacity),
+        (0b0011_1111, EncoderInstructionKind::SetCapacity),
+        (0b0000_0000, EncoderInstructionKind::Duplicate),
+        (0b0001_1111, EncoderInstructionKind::Duplicate),
+    ] {
+        assert_eq!(
+            encoder_instruction_kind(premier),
+            attendu,
+            "{premier:#010b}"
+        );
+    }
+
+    // **LE CLASSEMENT EST TOTAL** : les deux cent cinquante-six valeurs tombent
+    // dans l'un des quatre motifs, et celui que la lecture emploie est celui-ci.
+    for premier in 0..=u8::MAX {
+        let quoi = encoder_instruction_kind(premier);
+        assert_eq!(
+            quoi.insere(),
+            !matches!(quoi, EncoderInstructionKind::SetCapacity),
+            "seul §4.3.1 n'insère pas : {premier:#010b}"
+        );
+    }
+}
+
+/// **UN TYPE SUFFIT À REFUSER UNE INSERTION** (§3.2.3), et `SetCapacity` ne se
+/// juge pas sur son type : c'est sa valeur qui décide.
+#[test]
+fn le_type_seul_refuse_une_insertion_sans_table() {
+    for quoi in [
+        EncoderInstructionKind::InsertWithNameRef,
+        EncoderInstructionKind::InsertWithLiteralName,
+        EncoderInstructionKind::Duplicate,
+    ] {
+        let issue = check_encoder_instruction_kind(quoi, 0).expect_err("sans table");
+        assert_eq!(issue.reason(), Reason::DynamicTableRefused);
+        assert_eq!(issue.code(), H3Error::QpackEncoderStreamError);
+        assert!(
+            check_encoder_instruction_kind(quoi, 4_096).is_ok(),
+            "avec une table, elles redeviennent licites"
+        );
+    }
+    for capacite in [0, 4_096] {
+        assert!(
+            check_encoder_instruction_kind(EncoderInstructionKind::SetCapacity, capacite).is_ok(),
+            "§4.3.1 n'insère rien : seule sa VALEUR peut la refuser"
+        );
+    }
+}
+
+/// **§4.4.2 PASSE TOUJOURS, ET C'EST LA SEULE.**
+///
+/// « When a stream is reset or reading is abandoned, the decoder emits a Stream
+/// Cancellation instruction. » §4.4.2 n'y attache aucune condition d'erreur : un
+/// pair qui abandonne un flux n'a rien fait de mal.
+#[test]
+fn une_annulation_de_flux_est_toujours_recevable() {
+    for insertions in [0, 1, u64::MAX] {
+        assert!(
+            check_decoder_instruction(
+                DecoderInstruction::StreamCancellation { stream: 4 },
+                insertions
+            )
+            .is_ok()
+        );
+    }
+}
+
+/// **§4.4.1 : UN ACCUSÉ SANS INSERTION PORTE SUR CE QUI N'EXISTE PAS.**
+///
+/// « If an encoder receives a Section Acknowledgment instruction referring to a
+/// stream on which every encoded field section with a non-zero Required Insert
+/// Count has already been acknowledged, this MUST be treated as a connection
+/// error of type QPACK_DECODER_STREAM_ERROR. » Un encodeur qui n'a rien inséré
+/// n'a jamais émis de telle section : la condition vaut pour TOUT accusé.
+#[test]
+fn un_accuse_de_section_sans_insertion_se_refuse() {
+    let issue = check_decoder_instruction(DecoderInstruction::SectionAck { stream: 0 }, 0)
+        .expect_err("rien n'a été inséré");
+    assert_eq!(issue.reason(), Reason::UnexpectedDecoderInstruction);
+    assert_eq!(issue.code(), H3Error::QpackDecoderStreamError);
+    assert!(
+        check_decoder_instruction(DecoderInstruction::SectionAck { stream: 0 }, 1).is_ok(),
+        "un encodeur qui a inséré peut être accusé"
+    );
+}
+
+/// **§4.4.3 : L'INCRÉMENT NUL EST FAUTIF EN SOI, ET CELUI QUI DÉPASSE AUSSI.**
+///
+/// « An encoder that receives an Increment field equal to zero, or one that
+/// increases the Known Received Count beyond what the encoder has sent, MUST
+/// treat this as a connection error of type QPACK_DECODER_STREAM_ERROR. » Les
+/// deux moitiés de la phrase sont deux fautes distinctes, et la première ne
+/// dépend pas de ce qu'on a envoyé.
+#[test]
+fn un_increment_qui_depasse_ce_qu_on_a_envoye_se_refuse() {
+    for insertions in [0, 4] {
+        let issue = check_decoder_instruction(
+            DecoderInstruction::InsertCountIncrement { increment: 0 },
+            insertions,
+        )
+        .expect_err("« equal to zero »");
+        assert_eq!(issue.reason(), Reason::UnexpectedDecoderInstruction);
+    }
+    let issue =
+        check_decoder_instruction(DecoderInstruction::InsertCountIncrement { increment: 5 }, 4)
+            .expect_err("« beyond what the encoder has sent »");
+    assert_eq!(issue.code(), H3Error::QpackDecoderStreamError);
+    assert!(
+        check_decoder_instruction(DecoderInstruction::InsertCountIncrement { increment: 4 }, 4)
+            .is_ok(),
+        "jusqu'à ce qu'on a envoyé, il est licite"
+    );
+}
+
+/// **LA BORNE DE §4.4 EST CELLE DE LA REPRÉSENTATION**, et elle est atteignable.
+///
+/// Un octet de tête, puis cinq de continuation : au-delà, le multiplicateur de
+/// `decode_integer` déborde et l'entier est refusé. C'est ce qui permet de
+/// distinguer « il en manque » de « cet entier ne se reconstruira jamais ».
+#[test]
+fn la_borne_d_une_instruction_est_celle_de_l_entier() {
+    // Le plus long entier qui se lise encore : six octets en tout.
+    let long = [0b0011_1111_u8, 0xff, 0xff, 0xff, 0xff, 0x01];
+    let (instruction, lus) = read_decoder_instruction(&long).expect("lisible");
+    assert_eq!(lus, INSTRUCTION_OCTETS_MAX);
+    assert!(matches!(
+        instruction,
+        DecoderInstruction::InsertCountIncrement { .. }
+    ));
+
+    // Un de plus, et il n'y a plus d'entier à reconstruire.
+    let sans_fin = [0b0011_1111_u8, 0xff, 0xff, 0xff, 0xff, 0xff];
+    assert_eq!(sans_fin.len(), INSTRUCTION_OCTETS_MAX);
+    assert!(read_decoder_instruction(&sans_fin).is_err());
 }

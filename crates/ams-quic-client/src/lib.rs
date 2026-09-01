@@ -21,6 +21,7 @@
 //! dans les `[dev-dependencies]`. Il n'est donc pas dans le périmètre de
 //! couverture (C2) — ce n'est pas du code qu'on sert, c'est du code qui éprouve.
 
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::process::Command;
@@ -211,10 +212,17 @@ pub struct Client {
     a_dire: Vec<u8>,
     /// Le serveur a-t-il fermé, et avec quel code ?
     ferme: Option<u64>,
-    /// Ce qu'un flux nous a apporté, replacé à son décalage.
-    recu: Vec<u8>,
-    /// Le pair a-t-il terminé ce flux ?
-    fin_recue: bool,
+    /// Ce que chaque flux nous a apporté, replacé à son décalage.
+    ///
+    /// **PAR FLUX, ET NON EN UN SEUL TAMPON.** La première version fusionnait
+    /// tout : les décalages de deux flux distincts commencent tous deux à zéro,
+    /// et le dernier écrit effaçait le premier. Le serveur n'ouvrait alors qu'un
+    /// flux unidirectionnel, et la réponse arrivait après lui, plus longue que
+    /// lui — l'essai passait donc, mais par accident d'ordonnancement, et non
+    /// parce qu'il lisait ce qu'il croyait lire.
+    recu: HashMap<u64, Vec<u8>>,
+    /// Les flux que le pair a terminés.
+    fins_recues: HashSet<u64>,
     /// Ce datagramme-ci porte-t-il un `Initial` ?
     a_pose_un_initial: bool,
 }
@@ -237,16 +245,16 @@ impl Client {
         self.a_dire.extend_from_slice(octets);
     }
 
-    /// Ce qu'un flux nous a apporté, replacé à son décalage.
+    /// Ce que CE flux nous a apporté, replacé à son décalage.
     #[must_use]
-    pub fn recu(&self) -> &[u8] {
-        &self.recu
+    pub fn recu(&self, flux: u64) -> &[u8] {
+        self.recu.get(&flux).map_or(&[][..], Vec::as_slice)
     }
 
-    /// Le pair a-t-il terminé le flux ?
+    /// Le pair a-t-il terminé CE flux ?
     #[must_use]
-    pub const fn fin_recue(&self) -> bool {
-        self.fin_recue
+    pub fn fin_recue(&self, flux: u64) -> bool {
+        self.fins_recues.contains(&flux)
     }
 
     /// Le serveur a-t-il fermé, et avec quel code ?
@@ -262,12 +270,6 @@ impl Client {
     #[must_use]
     pub const fn distant(&self) -> ConnectionId {
         self.distant
-    }
-
-    /// Oublie ce qu'on a reçu, pour attendre la réponse suivante.
-    pub fn oublier_ce_qui_est_recu(&mut self) {
-        self.recu.clear();
-        self.fin_recue = false;
     }
 
     /// Un client neuf, sur une socket éphémère, qui parlera à ce serveur.
@@ -308,8 +310,8 @@ impl Client {
             en_attente: Vec::new(),
             a_dire: Vec::new(),
             ferme: None,
-            recu: Vec::new(),
-            fin_recue: false,
+            recu: HashMap::new(),
+            fins_recues: HashSet::new(),
             a_pose_un_initial: false,
         }
     }
@@ -536,19 +538,24 @@ impl Client {
                     self.ferme = Some(code);
                 }
                 if let Frame::Stream {
-                    offset, data, fin, ..
+                    stream,
+                    offset,
+                    data,
+                    fin,
                 } = trame
                 {
                     let debut = usize::try_from(offset).unwrap_or(usize::MAX);
                     let bout = debut.saturating_add(data.len());
-                    if self.recu.len() < bout {
-                        self.recu.resize(bout, 0);
+                    let bac = self.recu.entry(stream).or_default();
+                    if bac.len() < bout {
+                        bac.resize(bout, 0);
                     }
-                    self.recu
-                        .get_mut(debut..bout)
+                    bac.get_mut(debut..bout)
                         .expect("la place vient d'être faite")
                         .copy_from_slice(data);
-                    self.fin_recue |= fin;
+                    if fin {
+                        self.fins_recues.insert(stream);
+                    }
                 }
                 if let Frame::Crypto { offset, data } = trame {
                     self.reassemblage
@@ -690,21 +697,26 @@ pub async fn envoyer_une_requete(
     client.parler().await;
 }
 
-/// Attend la réponse, et rend le corps de sa trame `DATA`.
-pub async fn attendre_la_reponse(client: &mut Client) -> Vec<u8> {
+/// Attend la réponse SUR CE FLUX, et rend le corps de sa trame `DATA`.
+///
+/// **LE NUMÉRO DE FLUX N'EST PAS UN ORNEMENT** : le serveur écrit aussi sur ses
+/// trois flux unidirectionnels — le contrôle et les deux flux QPACK de §4.2 de
+/// RFC 9204 —, et leurs octets ne sont pas une réponse.
+pub async fn attendre_la_reponse(client: &mut Client, flux: u64) -> Vec<u8> {
     for _ in 0..10 {
         client.ecouter().await;
-        if client.fin_recue {
+        if client.fin_recue(flux) {
             break;
         }
         client.parler().await;
     }
+    let recu = client.recu(flux).to_vec();
     // §4.1 : les en-têtes d'abord, le corps ensuite.
-    let Ok(entete) = ams_proto_h3::FrameHeader::parse(&client.recu) else {
+    let Ok(entete) = ams_proto_h3::FrameHeader::parse(&recu) else {
         return Vec::new();
     };
     let apres = usize::try_from(entete.total()).expect("tient");
-    let Some(reste) = client.recu.get(apres..) else {
+    let Some(reste) = recu.get(apres..) else {
         return Vec::new();
     };
     let Ok(corps) = ams_proto_h3::FrameHeader::parse(reste) else {

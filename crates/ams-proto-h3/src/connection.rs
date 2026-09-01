@@ -258,6 +258,29 @@ impl Connection {
         }
     }
 
+    /// Une instruction QPACK licite qui ne fait rien avancer.
+    ///
+    /// # LE MÊME DÉFAUT QUE SUR LE FLUX DE CONTRÔLE, PAR UNE AUTRE PORTE
+    ///
+    /// §4.2 de RFC 9204 fait des deux flux QPACK des flux critiques : comme le
+    /// flux de contrôle, ils doivent avoir de quoi ne jamais bloquer. Un pair
+    /// peut donc y écrire sans fin des instructions que §4.4.2 rend parfaitement
+    /// licites — une annulation de flux ne s'accompagne d'aucune condition
+    /// d'erreur — et dont il n'y a **rien à faire** quand on ne tient pas de
+    /// table.
+    ///
+    /// Chacune coûte un traitement et n'avance rien. C'est [`SERVICE_FRAMES_MAX`]
+    /// qui compte, et c'est le même compteur que celui du flux de contrôle : un
+    /// pair qui travaille le remet à zéro, un pair qui ne fait que cela finit par
+    /// s'entendre dire qu'il en fait trop.
+    ///
+    /// # Errors
+    ///
+    /// [`Reason::ServiceFlood`] au-delà de [`SERVICE_FRAMES_MAX`].
+    pub fn on_qpack_instruction(&mut self) -> Result<(), Error> {
+        self.service()
+    }
+
     /// Le client relève son plafond de poussées (§7.2.7).
     ///
     /// # Errors

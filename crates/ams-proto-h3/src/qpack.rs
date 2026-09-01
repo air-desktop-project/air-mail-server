@@ -29,8 +29,10 @@ mod section;
 mod table_statique;
 
 pub use instruction::{
-    DecodedInstruction, DecoderInstruction, EncoderInstruction, check_encoder_instruction,
-    read_decoder_instruction, read_encoder_instruction, write_decoder_instruction,
+    DecodedInstruction, DecoderInstruction, EncoderInstruction, EncoderInstructionKind,
+    INSTRUCTION_OCTETS_MAX, check_decoder_instruction, check_encoder_instruction,
+    check_encoder_instruction_kind, encoder_instruction_kind, read_decoder_instruction,
+    read_encoder_instruction, write_decoder_instruction,
 };
 pub use prefix::{Prefix, max_entries, read_prefix};
 pub use representation::{Decoded, FieldLine, Table, read_field_line};
