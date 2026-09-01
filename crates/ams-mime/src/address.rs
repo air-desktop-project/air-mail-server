@@ -35,7 +35,7 @@ use crate::Error;
 /// [`Error::NoAddress`] s'il n'y a pas d'adresse lisible,
 /// [`Error::MultipleAddresses`] s'il y en a plusieurs.
 pub fn author_domain(value: &[u8]) -> Result<&[u8], Error> {
-    let adresse = seule_adresse(value)?;
+    let adresse = sole_address(value)?;
     let arobase = dernier_arobase(adresse).ok_or(Error::NoAddress)?;
 
     // UNE ADRESSE A UNE PARTIE LOCALE. `@example.com` n'en est pas une, et
@@ -93,7 +93,23 @@ fn sans_commentaires_est_vide(morceau: &[u8]) -> bool {
 /// L'adresse d'un champ qui n'en porte qu'une.
 ///
 /// Rend ce qui est entre chevrons s'il y en a, la valeur nettoyée sinon.
-fn seule_adresse(value: &[u8]) -> Result<&[u8], Error> {
+///
+/// `value` est la valeur brute du champ, **encore pliée** — c'est-à-dire ce que
+/// rend [`crate::Field::raw_value`].
+///
+/// # LE NOM D'AFFICHAGE NE FAIT PAS PARTIE DE L'ADRESSE
+///
+/// `"Votre banque" <pirate@example.test>` rend `pirate@example.test`. Le nom est
+/// choisi par celui qui écrit et ne prouve rien ; l'adresse est la seule partie
+/// qu'un lecteur peut recouper avec ce qu'il connaît.
+///
+/// # Errors
+///
+/// [`Error::NoAddress`] s'il n'y a pas d'adresse lisible,
+/// [`Error::MultipleAddresses`] s'il y en a plusieurs — §3.6.2 de RFC 5322
+/// l'admet pour un `From:`, et en choisir une désignerait alors un auteur que le
+/// message ne désigne pas.
+pub fn sole_address(value: &[u8]) -> Result<&[u8], Error> {
     let mut profondeur = 0_u32;
     let mut entre_guillemets = false;
     let mut echappe = false;

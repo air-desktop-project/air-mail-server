@@ -5159,6 +5159,84 @@ Les trames inconnues, elles, ne font pas avancer la séquence et ne la rompent p
 Un flux qui se termine sans en-têtes, en revanche, ne condamne que lui-même : un
 client qui abandonne sa requête en route n'a pas cassé la connexion.
 
+## Le résumé d'un message, et pourquoi ce n'est pas une enveloppe
+
+La liste de messages de l'API rendait `null` pour le sujet et l'expéditeur, et un
+commentaire disait pourquoi : `Mailbox::info` doit rester **bon marché**, car la
+session IMAP l'appelle pour chaque message qu'un ensemble pourrait désigner, y
+compris ceux qu'il ne désigne pas. Y mettre la lecture d'un en-tête aurait défait
+cette promesse pour les deux protocoles à la fois.
+
+### Deux besoins contraires sur les trois points qui comptent
+
+L'`ENVELOPE` de §7.5.2 de RFC 9051 et le résumé d'une liste REST ne demandent pas
+la même chose :
+
+- **le décodage.** L'une rend les octets tels quels — un client IMAP doit
+  recevoir ce que le message porte, et pouvoir le vérifier. L'autre rend le sens,
+  parce qu'un client REST affiche sans rien savoir de MIME.
+- **la longueur.** Une enveloppe porte tous les destinataires, donc elle est aussi
+  longue que son auteur l'a voulu — d'où l'écoulement par morceaux. Un résumé
+  tient dans deux tampons dont on connaît la taille avant de lire.
+- **le coût.** Une enveloppe se compose une fois par message affiché ; un résumé,
+  pour toute une page.
+
+Vouloir une seule fonction pour les deux donnerait à chacun les contraintes de
+l'autre. D'où deux chemins, et `ams_mime::write_digest` à côté de
+`write_envelope`.
+
+### Ce qui borne cette voie n'est pas ce qu'on croit
+
+La borne d'en-tête est **la même que celle de l'enveloppe**, et c'est délibéré :
+une borne plus courte ferait diverger deux vues d'un même message — un sujet
+visible en IMAP, absent de l'API, sans que rien ne dise pourquoi.
+
+Ce qui borne, c'est le NOMBRE d'appels — une page de cinquante, jamais une boîte
+entière — et la taille des tampons de sortie, qui viennent des RFC : §2.1.1 de
+RFC 5322 pour une ligne, §4.5.3.1.3 de RFC 5321 pour un chemin.
+
+### Le nom d'affichage n'est pas rendu, et c'est une décision
+
+`"Votre banque" <pirate@example.test>` est un message dont le nom ment, et rien
+dans la RFC 5322 ne l'interdit — c'est la forme ordinaire de l'hameçonnage.
+L'adresse est la seule partie qu'un lecteur peut recouper avec ce qu'il connaît.
+Un client qui veut le nom a l'`ENVELOPE` d'IMAP, ou le message lui-même.
+
+De même, `sole_address` sert d'abord à trouver un DOMAINE : sans chevrons, elle
+rend la valeur entière — blanc, plis et commentaires compris —, et le découpage du
+domaine écarte ensuite ce qui traîne. C'est juste pour ce qu'elle sert, et
+insuffisant pour ce qu'on affiche : ce qu'on rend doit porter une arobase et aucun
+des octets qui ne font que l'entourer.
+
+### Ce qui n'est pas rendu entier n'est pas rendu
+
+Un sujet trop long pour son tampon rend `null`, et non sa moitié : le tronquer
+ferait afficher un texte qui n'est pas celui du message — et, pire, un texte qu'on
+aurait choisi de couper là. Même chose pour ce qui n'est pas de l'UTF-8 : §6.2 de
+RFC 2047 laisse un mot encodé nommer un jeu qu'on ne sait pas convertir, et l'on
+recopie alors tel quel plutôt que d'inventer une conversion. Ces octets-là ne sont
+pas du texte JSON.
+
+**Mais l'absence et le vide restent distincts** : un message sans `Subject:` rend
+`null`, un `Subject:` vide rend `""`. Les confondre ferait mentir la liste dans
+les deux sens.
+
+### Un pli s'efface, il ne devient pas un blanc
+
+Le blanc qui suit un `CRLF` appartient déjà à la valeur (§2.2.3 de RFC 5322) :
+`Jean<CRLF> Dupont` vaut `Jean Dupont`, et remplacer le pli par une espace en
+mettrait deux. C'est la règle que suit déjà l'`ENVELOPE`, et deux règles pour un
+même pli donneraient deux textes pour un même message.
+
+L'espace qui suit le deux-points, lui, appartient à la syntaxe et non au sujet :
+`Subject: facture` a pour sujet « facture ». Le garder ferait trier et afficher de
+travers chez tous les clients à la fois.
+
+**Outillé par** : `fuzz_ams_mime_digest`, cinquante-quatrième cible. Elle éprouve
+qu'on n'écrit jamais au-delà des tampons, qu'un texte rendu ne porte pas de fin de
+ligne, qu'une adresse rendue en est une, et que le résultat ne dépend pas de la
+place qu'on laisse.
+
 ## L'extinction en deux temps (§5.2 de RFC 9114)
 
 Le signal d'arrêt lâchait chaque connexion sans un mot : le client attendait son

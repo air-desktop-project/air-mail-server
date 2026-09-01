@@ -59,6 +59,7 @@ CIBLES=$(cat <<'TABLE'
 fuzz_ams_mime_parse mime
 fuzz_ams_mime_limits mime
 fuzz_ams_mime_compose mime-compose
+fuzz_ams_mime_digest mime-digest
 fuzz_ams_mime_envelope mime-envelope
 fuzz_ams_mime_structure mime-structure
 fuzz_ams_mime_decode mime-decode

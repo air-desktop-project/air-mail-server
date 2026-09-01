@@ -367,6 +367,48 @@ impl BoiteImap {
     }
 }
 
+impl BoiteImap {
+    /// Le sujet et l'expéditeur du message de rang `sequence`, pour une liste.
+    ///
+    /// # POURQUOI CE N'EST NI `info`, NI `envelope`
+    ///
+    /// `info` doit rester **bon marché** : la session IMAP l'appelle pour chaque
+    /// message qu'un ensemble pourrait désigner, y compris ceux qu'il ne désigne
+    /// pas. Y mettre la lecture d'un en-tête ferait ouvrir un fichier par message
+    /// listé, et défairait cette promesse pour les deux protocoles à la fois.
+    ///
+    /// `envelope` rend dix champs, tels quels et par morceaux, parce qu'une
+    /// enveloppe est aussi longue que son auteur l'a voulu. Une liste REST veut
+    /// l'inverse : deux textes courts, décodés, qui tiennent dans des tampons dont
+    /// on connaît la taille avant de lire.
+    ///
+    /// # LA MÊME BORNE D'EN-TÊTE QUE L'ENVELOPPE, ET C'EST DÉLIBÉRÉ
+    ///
+    /// Une borne plus courte ici ferait diverger deux vues d'un même message : un
+    /// sujet visible en IMAP et absent de l'API REST, sans que rien ne dise
+    /// pourquoi. Ce qui borne cette voie-là, c'est le NOMBRE d'appels — une page,
+    /// et non une boîte entière —, et la taille des tampons de sortie.
+    pub fn digest(
+        &self,
+        sequence: u32,
+        sujet: &mut [u8],
+        expediteur: &mut [u8],
+    ) -> ams_mime::Digest {
+        let Some(rang) = self.rang(sequence) else {
+            return ams_mime::Digest::default();
+        };
+        let Some(chemin) = self.chemins.get(rang) else {
+            return ams_mime::Digest::default();
+        };
+        let fin = fin_de_l_entete(chemin).unwrap_or(0);
+        let combien = usize::try_from(fin).unwrap_or(usize::MAX).min(ENTETE_MAX);
+        let Some(entete) = lire(chemin, 0, combien) else {
+            return ams_mime::Digest::default();
+        };
+        ams_mime::write_digest(&entete, sujet, expediteur, &ams_mime::Limits::DEFAULT)
+    }
+}
+
 impl Mailbox for BoiteImap {
     fn exists(&self) -> u32 {
         u32::try_from(self.vue.messages().len()).unwrap_or(u32::MAX)

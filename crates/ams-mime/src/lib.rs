@@ -76,6 +76,7 @@ mod base64;
 mod compose;
 mod date;
 mod decode;
+mod digest;
 mod envelope;
 mod error;
 mod failure;
@@ -85,11 +86,12 @@ mod plume;
 mod select;
 mod structure;
 
-pub use address::author_domain;
+pub use address::{author_domain, sole_address};
 pub use base64::{BASE64_LINE, base64_max, encode_base64};
 pub use compose::{ReportMail, report_mail_max, write_report_mail};
 pub use date::{DATE_MAX, read_day, write_date};
 pub use decode::{decode_chunk, decode_encoded_words, decode_transfer, decoded_max};
+pub use digest::{DIGEST_FROM_MAX, DIGEST_SUBJECT_MAX, Digest, write_digest};
 pub use envelope::{ENVELOPE_ADDRESSES_MAX, write_envelope};
 pub use error::Error;
 pub use failure::{

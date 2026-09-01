@@ -137,6 +137,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_ams_mime_digest"
+path = "fuzz_targets/fuzz_ams_mime_digest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_ams_mime_envelope"
 path = "fuzz_targets/fuzz_ams_mime_envelope.rs"
 test = false

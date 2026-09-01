@@ -140,21 +140,25 @@ impl ApiMaildir {
         let Some(boite) = self.boites.open(compte.as_bytes(), nom.as_bytes()) else {
             return absente(sortie);
         };
-        let mut page = std::vec::Vec::with_capacity(PAGE_MAX);
+        let mut resumes = std::vec::Vec::with_capacity(PAGE_MAX);
         let mut suivant = None;
         for sequence in 1..=boite.exists() {
             let Some(info) = boite.info(sequence) else {
                 continue;
             };
-            if page.len() >= PAGE_MAX {
+            if resumes.len() >= PAGE_MAX {
                 // **LE CURSEUR EST L'UID DU PREMIER QU'ON NE REND PAS.** Un
                 // curseur sur le dernier rendu obligerait le client à savoir
                 // s'il est inclus ou non.
                 suivant = Some(info.uid);
                 break;
             }
-            page.push(ligne_de(&info));
+            // **C'EST ICI QUE LA PAGE COÛTE**, et c'est pourquoi elle est bornée :
+            // un fichier ouvert par message rendu, et pas un de plus. La boîte
+            // entière ne l'est jamais.
+            resumes.push(resumer(&boite, sequence, info));
         }
+        let page: std::vec::Vec<MessageRow<'_>> = resumes.iter().map(ligne_de).collect();
         rendre(render::write_messages(
             &page,
             boite.uid_validity(),
@@ -170,13 +174,14 @@ impl ApiMaildir {
         };
         let voulu = u32::try_from(uid).ok();
         let trouve = (1..=boite.exists())
-            .filter_map(|sequence| boite.info(sequence))
-            .find(|info| Some(info.uid) == voulu);
-        let Some(info) = trouve else {
+            .filter_map(|sequence| boite.info(sequence).map(|info| (sequence, info)))
+            .find(|(_, info)| Some(info.uid) == voulu);
+        let Some((sequence, info)) = trouve else {
             return absente(sortie);
         };
+        let resume = resumer(&boite, sequence, info);
         rendre(render::write_message(
-            &ligne_de(&info),
+            &ligne_de(&resume),
             boite.uid_validity(),
             sortie,
         ))
@@ -277,26 +282,73 @@ impl ApiMaildir {
     }
 }
 
-/// La ligne que rend une information de message.
+/// Ce qu'on retient d'un message le temps d'écrire la réponse.
 ///
-/// # LE SUJET ET L'EXPÉDITEUR NE SONT PAS ICI, ET C'EST DÉLIBÉRÉ
+/// # POURQUOI DEUX PASSES, ET NON UNE
 ///
-/// `Mailbox::info` est décrite comme devant être **bon marché** : la session
-/// IMAP l'appelle pour chaque message qu'un ensemble pourrait désigner, y compris
-/// ceux qu'il ne désigne pas. Y ajouter la lecture d'une enveloppe ferait ouvrir
-/// un fichier par message listé, et défairait cette promesse pour les deux
-/// protocoles à la fois.
+/// [`MessageRow`] EMPRUNTE son sujet et son expéditeur ; les octets doivent donc
+/// vivre plus longtemps que la ligne qui les désigne. On les rassemble d'abord,
+/// on construit les lignes ensuite. Une seule passe demanderait à chaque ligne de
+/// posséder ses textes, c'est-à-dire de les recopier pour rien.
+struct Resume {
+    /// Ce que la boîte sait du message sans ouvrir son fichier.
+    info: ams_session::imap::MessageInfo,
+    /// Son sujet, décodé — `None` s'il n'en porte pas, ou qu'on n'a pas su le
+    /// rendre entier.
+    sujet: Option<std::vec::Vec<u8>>,
+    /// L'adresse de son expéditeur.
+    expediteur: Option<std::vec::Vec<u8>>,
+}
+
+/// Ce qu'un sujet et un expéditeur occupent, dans les tampons qu'on prête.
 ///
-/// Les rendre demande donc une voie séparée, avec sa propre borne — et cette
-/// voie-là mérite sa propre tranche.
-fn ligne_de(info: &ams_session::imap::MessageInfo) -> MessageRow<'static> {
+/// Ce sont ceux d'`ams-mime`, et ils viennent des RFC : §2.1.1 de RFC 5322 pour
+/// la longueur d'une ligne, §4.5.3.1.3 de RFC 5321 pour celle d'un chemin.
+const SUJET_MAX: usize = ams_mime::DIGEST_SUBJECT_MAX;
+/// Voir [`SUJET_MAX`].
+const EXPEDITEUR_MAX: usize = ams_mime::DIGEST_FROM_MAX;
+
+/// Lit le sujet et l'expéditeur d'un message.
+fn resumer(
+    boite: &crate::imap::BoiteImap,
+    sequence: u32,
+    info: ams_session::imap::MessageInfo,
+) -> Resume {
+    let mut sujet = [0_u8; SUJET_MAX];
+    let mut expediteur = [0_u8; EXPEDITEUR_MAX];
+    let vu = boite.digest(sequence, &mut sujet, &mut expediteur);
+    let prendre = |octets: &[u8], combien: Option<usize>| {
+        combien.map(|n| octets.get(..n).unwrap_or_default().to_vec())
+    };
+    Resume {
+        info,
+        sujet: prendre(&sujet, vu.subject),
+        expediteur: prendre(&expediteur, vu.from),
+    }
+}
+
+/// La ligne que rend un résumé.
+///
+/// # CE QUI N'EST PAS DE L'UTF-8 N'EST PAS RENDU
+///
+/// §6.2 de RFC 2047 laisse un mot encodé nommer un jeu de caractères qu'on ne
+/// sait pas convertir, et `ams-mime` le recopie alors tel quel — c'est la vérité
+/// plutôt qu'une conversion inventée. Ces octets-là ne sont pas du texte JSON, et
+/// les y écrire ferait une réponse qu'aucun client ne lirait. On rend `null` :
+/// le message a un sujet, nous ne savons pas le dire.
+fn ligne_de(resume: &Resume) -> MessageRow<'_> {
+    fn texte(octets: &Option<std::vec::Vec<u8>>) -> Option<&str> {
+        octets
+            .as_deref()
+            .and_then(|octets| core::str::from_utf8(octets).ok())
+    }
     MessageRow {
-        uid: info.uid,
-        size: info.size,
-        flags: info.flags,
-        received: info.internal_date,
-        subject: None,
-        from: None,
+        uid: resume.info.uid,
+        size: resume.info.size,
+        flags: resume.info.flags,
+        received: resume.info.internal_date,
+        subject: texte(&resume.sujet),
+        from: texte(&resume.expediteur),
     }
 }
 
@@ -361,5 +413,62 @@ fn pas_encore(sortie: &mut [u8]) -> Served<'_> {
             media: ams_api::PROBLEM_MEDIA_TYPE,
             body: &[],
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ams_session::imap::MessageInfo;
+
+    use super::{Resume, ligne_de};
+
+    /// Un résumé porteur de ces deux textes.
+    fn resume(sujet: Option<&[u8]>, expediteur: Option<&[u8]>) -> Resume {
+        Resume {
+            info: MessageInfo {
+                uid: 7,
+                size: 42,
+                flags: ams_proto_imap::Flags::default(),
+                internal_date: 1_700_000_000,
+            },
+            sujet: sujet.map(<[u8]>::to_vec),
+            expediteur: expediteur.map(<[u8]>::to_vec),
+        }
+    }
+
+    /// **L'ABSENCE ET LE VIDE NE SE CONFONDENT PAS DANS LA LIGNE NON PLUS.**
+    ///
+    /// C'est la distinction que `write_digest` a établie ; la perdre ici la
+    /// rendrait inutile, et le client lirait `""` là où le message n'a rien.
+    #[test]
+    fn l_absence_et_le_vide_traversent_la_ligne() {
+        let vu = resume(Some(b""), None);
+        let ligne = ligne_de(&vu);
+        assert_eq!(ligne.subject, Some(""), "un sujet présent, et vide");
+        assert_eq!(ligne.from, None, "pas d'expéditeur du tout");
+
+        let vu = resume(None, Some(b"jean@example.test"));
+        let ligne = ligne_de(&vu);
+        assert_eq!(ligne.subject, None);
+        assert_eq!(ligne.from, Some("jean@example.test"));
+        assert_eq!(ligne.uid, 7, "et le reste de l'information passe");
+        assert_eq!(ligne.size, 42);
+    }
+
+    /// **CE QUI N'EST PAS DE L'UTF-8 N'EST PAS RENDU.**
+    ///
+    /// §6.2 de RFC 2047 laisse un mot encodé nommer un jeu qu'on ne sait pas
+    /// convertir, et `ams-mime` le recopie alors tel quel — la vérité plutôt
+    /// qu'une conversion inventée. Ces octets ne sont pas du texte JSON, et les y
+    /// écrire ferait une réponse qu'aucun client ne lirait.
+    #[test]
+    fn ce_qui_n_est_pas_de_l_utf8_ne_se_rend_pas() {
+        let vu = resume(Some(&[0xff, 0xfe]), Some(&[0xff]));
+        let ligne = ligne_de(&vu);
+        assert_eq!(
+            ligne.subject, None,
+            "on préfère `null` à une réponse cassée"
+        );
+        assert_eq!(ligne.from, None);
     }
 }
