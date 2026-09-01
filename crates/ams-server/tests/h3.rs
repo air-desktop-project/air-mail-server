@@ -405,3 +405,118 @@ fn un_message_de(repertoire: &Path, compte: &str) -> String {
     }
     panic!("aucun message dans `{}`", boite.display())
 }
+
+/// **L'ADMINISTRATION SE SERT, ET SEULEMENT AVEC UN JETON QUI LA PORTE.**
+///
+/// Aucun mot de passe n'ouvre l'administration : le jeton se frappe depuis la
+/// machine du serveur, par qui peut lire sa configuration. Cet essai frappe le
+/// sien comme `air-mail-admin token` le ferait, puis vérifie que les ressources
+/// répondent — et qu'un jeton ordinaire, lui, ne les ouvre pas.
+#[tokio::test(flavor = "current_thread")]
+async fn l_administration_se_sert_avec_le_bon_jeton() {
+    let atelier = atelier("admin-h3");
+    let Some((autorite, cert, cle)) = materiel(atelier.chemin()) else {
+        eprintln!("SAUTÉ : {SANS_OPENSSL}");
+        return;
+    };
+    let chemin_cert = atelier.chemin().join("srv.pem");
+    let chemin_cle = atelier.chemin().join("srv.key");
+    std::fs::write(&chemin_cert, &cert).expect("le certificat s'écrit");
+    std::fs::write(&chemin_cle, &cle).expect("la clé s'écrit");
+
+    let empreinte = ams_auth::hash_password(b"ouvre-toi", b"seize octets ici").expect("hachable");
+    let comptes = [ams_auth::Account {
+        login: String::from("jean"),
+        hash: empreinte,
+        addresses: vec![String::from("jean@example.com")],
+    }];
+    let magasin = ecrire_le_magasin(atelier.chemin(), &comptes);
+
+    let (smtp, http, h3) = (port_libre(), port_libre(), port_libre());
+    let config = configuration(
+        atelier.chemin(),
+        smtp,
+        http,
+        h3,
+        &chemin_cert,
+        &chemin_cle,
+        &magasin,
+    );
+    let serveur = lancer(&config, &format!("127.0.0.1:{h3}/udp"));
+
+    let adresse = format!("127.0.0.1:{h3}").parse().expect("une adresse");
+    let mut client = Client::new(config_client(&autorite), adresse).await;
+    for _ in 0..16 {
+        if !client.parler().await && !client.tls().is_handshaking() {
+            break;
+        }
+        if !client.ecouter().await && !client.tls().is_handshaking() {
+            break;
+        }
+    }
+    assert!(!client.tls().is_handshaking(), "{}", serveur.journal());
+
+    // Le jeton d'administration, frappé avec le secret de la configuration —
+    // c'est exactement ce que fait `air-mail-admin token`.
+    let admin = frapper_un_jeton(ams_api::Scope::one(
+        ams_api::Area::Admin,
+        ams_api::Rights::Write,
+    ));
+
+    // Les comptes — sans la moindre empreinte.
+    envoyer_une_requete(&mut client, 0, 17, b"/v1/accounts", Some(&admin), &[]).await;
+    let texte = String::from_utf8_lossy(&attendre_la_reponse(&mut client, 0).await).to_string();
+    assert!(
+        texte.contains(r#""login":"jean""#),
+        "les comptes se listent : {texte} — {}",
+        serveur.journal()
+    );
+    assert!(
+        !texte.contains("argon2") && !texte.contains("hash"),
+        "et AUCUNE empreinte n'en sort : {texte}"
+    );
+
+    // Les domaines hébergés.
+    envoyer_une_requete(&mut client, 4, 17, b"/v1/domains", Some(&admin), &[]).await;
+    let texte = String::from_utf8_lossy(&attendre_la_reponse(&mut client, 4).await).to_string();
+    assert!(texte.contains("example.com"), "{texte}");
+
+    // Les bannissements : aucun, et cela se dit.
+    envoyer_une_requete(&mut client, 8, 17, b"/v1/bans", Some(&admin), &[]).await;
+    let texte = String::from_utf8_lossy(&attendre_la_reponse(&mut client, 8).await).to_string();
+    assert!(texte.contains(r#""bans":[]"#), "{texte}");
+
+    // **ET UN JETON DE COURRIER N'OUVRE PAS L'ADMINISTRATION.** C'est la limite
+    // qui fait qu'un compte compromis ne devient jamais le serveur entier.
+    let ordinaire = frapper_un_jeton(
+        ams_api::Scope::one(ams_api::Area::Mail, ams_api::Rights::Write)
+            .with(ams_api::Area::Submit, ams_api::Rights::Write)
+            .with(ams_api::Area::Observe, ams_api::Rights::Read),
+    );
+    envoyer_une_requete(&mut client, 12, 17, b"/v1/accounts", Some(&ordinaire), &[]).await;
+    let texte = String::from_utf8_lossy(&attendre_la_reponse(&mut client, 12).await).to_string();
+    assert!(
+        !texte.contains(r#""login""#),
+        "un jeton de courrier ne doit rien lire ici : {texte}"
+    );
+}
+
+/// Frappe un jeton portant cette portée, comme `air-mail-admin token` le ferait.
+fn frapper_un_jeton(portee: ams_api::Scope) -> String {
+    let clef = ams_api::key_from_hex(CLEF).expect("le secret d'essai est licite");
+    let maintenant = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("après 1970")
+        .as_micros();
+    let maintenant = u64::try_from(maintenant).expect("tient");
+    let jeton = ams_api::Token {
+        login: "exploitant",
+        scope: portee,
+        expiry: maintenant.saturating_add(900_u64.saturating_mul(1_000_000)),
+        nonce: 1,
+    };
+    let mut place = [0_u8; ams_api::ENCODED_OCTETS_MAX];
+    ams_api::issue(&clef, &jeton, maintenant, &mut place)
+        .expect("scellable")
+        .to_string()
+}

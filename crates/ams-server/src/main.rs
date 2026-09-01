@@ -151,6 +151,8 @@ fn monter_l_api(
     boites: Arc<BoitesImap>,
     comptes: Arc<Vec<Account>>,
     remise: Boites,
+    domaines: Arc<Vec<String>>,
+    garde: Arc<ams_loop_tokio::SharedGuard>,
 ) -> Result<Option<MontageApi>, String> {
     if options.listen_http.is_empty() {
         eprintln!("air-mail-server : API REST non servie — aucune adresse d'écoute configurée");
@@ -172,14 +174,7 @@ fn monter_l_api(
         return Ok(None);
     }
 
-    let octets = octets_hexadecimaux(&options.token_key)?;
-    let clef = ams_api::Key::new(&octets).map_err(|_| {
-        String::from(
-            "le secret de scellement des jetons fait moins de trente-deux octets : une clé plus \
-             courte que le sceau qu'elle produit donnerait moins de sécurité que la taille du \
-             sceau ne le laisse croire",
-        )
-    })?;
+    let clef = ams_api::key_from_hex(&options.token_key).map_err(dire_la_clef)?;
     let session = ams_session::http::Http::new(clef, DUREE_DE_JETON_US).map_err(|_| {
         String::from("la durée de vie des jetons dépasse ce qu'un jeton peut vivre")
     })?;
@@ -213,7 +208,9 @@ fn monter_l_api(
         ecouteur,
         session,
         Arc::new(http_tls),
-        Arc::new(crate::api::ApiMaildir::new(boites, comptes, remise)),
+        Arc::new(crate::api::ApiMaildir::new(
+            boites, comptes, remise, domaines, garde,
+        )),
     )))
 }
 
@@ -292,30 +289,26 @@ fn monter_l_api_h3(
     Ok(Some((socket, Arc::new(h3_tls))))
 }
 
-/// Les octets que décrit cette écriture hexadécimale.
+/// Dit à l'exploitant ce qui cloche dans son secret de scellement.
 ///
-/// **PAS DE BASE64, ET PAS DE TEXTE BRUT** : l'hexadécimal a une seule écriture
-/// par octet, se relit à l'œil, et ne se confond pas avec une phrase de passe —
-/// ce qui évite qu'un secret de trente-deux octets soit renseigné avec huit
-/// caractères tapés au clavier.
-fn octets_hexadecimaux(texte: &str) -> Result<Vec<u8>, String> {
-    if !texte.len().is_multiple_of(2) {
-        return Err(String::from(
-            "le secret de scellement des jetons n'a pas un nombre pair de chiffres",
-        ));
-    }
-    texte
-        .as_bytes()
-        .chunks(2)
-        .map(|paire| {
-            core::str::from_utf8(paire)
-                .ok()
-                .and_then(|deux| u8::from_str_radix(deux, 16).ok())
-                .ok_or_else(|| {
-                    String::from("le secret de scellement des jetons n'est pas de l'hexadécimal")
-                })
-        })
-        .collect()
+/// **CELUI QUI LIT CECI A ÉCRIT LA CONFIGURATION**, et il a le droit de savoir ce
+/// qu'il doit corriger. C'est l'exact contraire de ce qu'on dit à un client de
+/// l'API, et pour la même raison : ce qui apprend à qui sonde ne doit pas se
+/// dire, ce qui aide qui répare doit se dire.
+fn dire_la_clef(quoi: ams_api::KeyProblem) -> String {
+    String::from(match quoi {
+        ams_api::KeyProblem::OddLength => {
+            "le secret de scellement des jetons n'a pas un nombre pair de chiffres"
+        }
+        ams_api::KeyProblem::NotHex => {
+            "le secret de scellement des jetons n'est pas de l'hexadécimal"
+        }
+        ams_api::KeyProblem::TooShort => {
+            "le secret de scellement des jetons fait moins de trente-deux octets : une clé plus \
+             courte que le sceau qu'elle produit donnerait moins de sécurité que la taille du \
+             sceau ne le laisse croire"
+        }
+    })
 }
 
 /// Charge le magasin de comptes que la configuration nomme, s'il en nomme.
@@ -960,6 +953,8 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         Arc::clone(&boites_imap),
         Arc::clone(&comptes),
         Arc::clone(&boites),
+        Arc::new(options.hosted.clone()),
+        Arc::clone(&garde),
     )?;
     // **LA MÊME SESSION ET LA MÊME API POUR LES DEUX VERSIONS** : un jeton scellé
     // par HTTP/2 doit ouvrir HTTP/3, et une ressource servie d'un côté doit être

@@ -5,8 +5,8 @@
 //! Ce qu'un jeton porteur a le droit d'être.
 
 use super::{
-    ENCODED_OCTETS_MAX, Key, LIFETIME_MAX_US, LOGIN_OCTETS_MAX, TOKEN_OCTETS_MAX, Token, VERSION,
-    authorize, bearer, issue, verify,
+    ENCODED_OCTETS_MAX, Key, KeyProblem, LIFETIME_MAX_US, LOGIN_OCTETS_MAX, TOKEN_OCTETS_MAX,
+    Token, VERSION, authorize, bearer, issue, key_from_hex, verify,
 };
 use crate::error::Reason;
 use crate::scope::{Area, Rights, Scope};
@@ -351,4 +351,72 @@ fn ce_qui_n_est_pas_porteur_se_refuse() {
         let faute = bearer(mauvais).expect_err("pas un jeton porteur");
         assert_eq!(faute.reason(), Reason::BadToken, "{mauvais:?}");
     }
+}
+
+/// **UN SECRET DE SCELLEMENT SE LIT À UN SEUL ENDROIT.**
+///
+/// Le serveur le lit pour vérifier les jetons, l'outil d'administration pour en
+/// frapper. Deux lectures de la même chaîne finiraient par différer, et un secret
+/// réputé bon d'un côté ne serait plus la même clé de l'autre.
+#[test]
+fn un_secret_hexadecimal_se_lit() {
+    let trente_deux = "ab".repeat(32);
+    let clef = key_from_hex(&trente_deux).expect("trente-deux octets");
+    let attendue = Key::new(&[0xab; 32]).expect("de même");
+    // Deux clés égales scellent le même jeton : c'est la seule égalité qui
+    // compte, et `Key` ne se compare pas autrement.
+    let jeton = Token {
+        login: "marc",
+        scope: Scope::one(Area::Admin, Rights::Write),
+        expiry: 1_000,
+        nonce: 7,
+    };
+    let (mut ici, mut la) = ([0_u8; ENCODED_OCTETS_MAX], [0_u8; ENCODED_OCTETS_MAX]);
+    assert_eq!(
+        issue(&clef, &jeton, 0, &mut ici).expect("scellable"),
+        issue(&attendue, &jeton, 0, &mut la).expect("scellable")
+    );
+}
+
+/// **TROIS CAS, ET NON UNE SEULE FAUTE.**
+///
+/// Celui qui lit ce refus a écrit la configuration, et il a le droit de savoir ce
+/// qu'il doit corriger. C'est l'exact contraire de ce qu'on dit à un client de
+/// l'API, et pour la même raison.
+#[test]
+fn un_secret_refuse_dit_lequel_des_trois_cas() {
+    let trente_deux = "ab".repeat(32);
+    assert_eq!(
+        key_from_hex(&trente_deux[..63]).expect_err("impair"),
+        KeyProblem::OddLength
+    );
+    let mut fautif = trente_deux.clone();
+    fautif.replace_range(0..2, "zz");
+    assert_eq!(
+        key_from_hex(&fautif).expect_err("pas de l'hexa"),
+        KeyProblem::NotHex
+    );
+    assert_eq!(
+        key_from_hex(&"ab".repeat(31)).expect_err("trop court"),
+        KeyProblem::TooShort
+    );
+    assert_eq!(key_from_hex("").expect_err("vide"), KeyProblem::TooShort);
+}
+
+/// **UN CHIFFRE FAUTIF AU-DELÀ DU TRENTE-DEUXIÈME OCTET SE VOIT QUAND MÊME.**
+///
+/// La clé n'en retient que trente-deux, mais le reste est une faute de
+/// configuration : la taire ferait accepter une chaîne que l'exploitant croit
+/// correcte, et il ne saurait pas laquelle de ses deux moitiés est bonne.
+#[test]
+fn un_chiffre_fautif_au_dela_de_la_cle_se_dit() {
+    let mut trop_long = "ab".repeat(40);
+    trop_long.replace_range(78..80, "zz");
+    assert_eq!(
+        key_from_hex(&trop_long).expect_err("pas de l'hexa"),
+        KeyProblem::NotHex
+    );
+    // Sans faute, une chaîne plus longue est acceptée : on n'en retient que le
+    // début, et c'est ce que `Key::new` fait déjà.
+    assert!(key_from_hex(&"ab".repeat(40)).is_ok());
 }

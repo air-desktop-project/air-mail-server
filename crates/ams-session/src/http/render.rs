@@ -136,6 +136,133 @@ fn ecrire_une_boite(json: &mut Json<'_>, boite: &MailboxRow<'_>) -> Result<(), E
     json.end_object()
 }
 
+/// Un compte, tel que l'administration le rend.
+///
+/// # L'EMPREINTE N'EST PAS ICI, ET NE PEUT PAS Y ÊTRE
+///
+/// §3.2 de RFC 9110 : une représentation dit l'état d'une ressource. Celle d'un
+/// compte ne porte donc **aucun secret** — le mot de passe est une ressource à
+/// part, qui ne se lit pas. La séparation n'est pas un choix de présentation :
+/// c'est ce qui rend impossible de fuir une empreinte en lisant un compte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AccountRow<'a> {
+    /// Son nom, tel qu'il s'authentifie.
+    pub login: &'a str,
+    /// Les adresses d'enveloppe qui lui arrivent.
+    ///
+    /// **VIDE EST LICITE** : un compte qui peut se connecter sans rien recevoir
+    /// est un compte de soumission, et c'est une situation réelle.
+    pub addresses: &'a [&'a str],
+}
+
+/// Un bannissement en cours (C8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BanRow<'a> {
+    /// L'adresse du préfixe puni, **sans sa longueur**.
+    ///
+    /// C'est aussi ce qu'on écrit pour le lever : une longueur dans le chemin
+    /// ferait deux segments d'un seul (§3.3 de RFC 3986), et le routage y verrait
+    /// une autre ressource.
+    pub source: &'a str,
+    /// Combien de bits le préfixe couvre (C8).
+    ///
+    /// **SANS ELLE, LA SOURCE EST UNE DEMI-VÉRITÉ** : « 2001:db8:: » ne dit pas
+    /// qu'un `/64` entier est puni, et un exploitant croirait n'avoir banni
+    /// qu'une machine.
+    pub prefix: u8,
+    /// Combien de secondes il reste à courir.
+    ///
+    /// **DU TEMPS RESTANT, ET NON UNE DATE** : l'horloge du garde compte depuis
+    /// l'ouverture du serveur et n'a de sens que pour lui. Un exploitant, lui,
+    /// veut savoir combien de temps il reste.
+    pub seconds: u64,
+}
+
+/// Écrit la liste des comptes.
+///
+/// # Errors
+///
+/// [`Reason::BufferTooSmall`] si `sortie` ne suffit pas.
+pub fn write_accounts<'o>(
+    comptes: &[AccountRow<'_>],
+    sortie: &'o mut [u8],
+) -> Result<&'o [u8], Error> {
+    let mut json = Json::new(sortie);
+    json.begin_object()?;
+    json.key("accounts")?;
+    json.begin_array()?;
+    for compte in comptes {
+        ecrire_un_compte(&mut json, compte)?;
+    }
+    json.end_array()?;
+    json.end_object()?;
+    json.finish()
+}
+
+/// Écrit un compte seul.
+///
+/// # Errors
+///
+/// [`Reason::BufferTooSmall`].
+pub fn write_account<'o>(compte: &AccountRow<'_>, sortie: &'o mut [u8]) -> Result<&'o [u8], Error> {
+    let mut json = Json::new(sortie);
+    ecrire_un_compte(&mut json, compte)?;
+    json.finish()
+}
+
+/// Le corps d'un compte.
+fn ecrire_un_compte(json: &mut Json<'_>, compte: &AccountRow<'_>) -> Result<(), Error> {
+    json.begin_object()?;
+    json.field_str("login", compte.login)?;
+    json.key("addresses")?;
+    json.begin_array()?;
+    for adresse in compte.addresses {
+        json.string(adresse)?;
+    }
+    json.end_array()?;
+    json.end_object()
+}
+
+/// Écrit les domaines qu'on héberge.
+///
+/// # Errors
+///
+/// [`Reason::BufferTooSmall`].
+pub fn write_domains<'o>(domaines: &[&str], sortie: &'o mut [u8]) -> Result<&'o [u8], Error> {
+    let mut json = Json::new(sortie);
+    json.begin_object()?;
+    json.key("domains")?;
+    json.begin_array()?;
+    for domaine in domaines {
+        json.string(domaine)?;
+    }
+    json.end_array()?;
+    json.end_object()?;
+    json.finish()
+}
+
+/// Écrit les bannissements en cours.
+///
+/// # Errors
+///
+/// [`Reason::BufferTooSmall`].
+pub fn write_bans<'o>(bans: &[BanRow<'_>], sortie: &'o mut [u8]) -> Result<&'o [u8], Error> {
+    let mut json = Json::new(sortie);
+    json.begin_object()?;
+    json.key("bans")?;
+    json.begin_array()?;
+    for ban in bans {
+        json.begin_object()?;
+        json.field_str("source", ban.source)?;
+        json.field_u64("prefixBits", u64::from(ban.prefix))?;
+        json.field_u64("secondsRemaining", ban.seconds)?;
+        json.end_object()?;
+    }
+    json.end_array()?;
+    json.end_object()?;
+    json.finish()
+}
+
 /// Écrit une page de messages.
 ///
 /// `suivant` est l'UID par lequel la page suivante commence, ou `None` quand il

@@ -3,7 +3,7 @@
 use std::sync::{Mutex, PoisonError};
 use std::time::Instant as SystemInstant;
 
-use ams_guard::{Event, Guard, Instant, Slot, Source, Thresholds, Verdict};
+use ams_guard::{Event, Guard, Instant, Key, Slot, Source, Thresholds, Verdict};
 
 /// L'état que les connexions se partagent.
 struct Etat {
@@ -65,6 +65,34 @@ impl SharedGuard {
         let mut etat = self.verrou();
         let thresholds = etat.thresholds;
         Guard::new(&mut etat.slots, thresholds).observe(source, event, maintenant)
+    }
+
+    /// Les sources bannies en ce moment, et pour combien de temps encore.
+    ///
+    /// **RENDU EN SECONDES RESTANTES, ET NON EN DATE** : l'instant du garde compte
+    /// depuis l'ouverture du serveur, et n'a de sens que pour lui. Un exploitant,
+    /// lui, veut savoir combien de temps il reste.
+    #[must_use]
+    pub fn banned(&self) -> Vec<(Key, u64)> {
+        let maintenant = self.maintenant();
+        let mut etat = self.verrou();
+        let thresholds = etat.thresholds;
+        Guard::new(&mut etat.slots, thresholds)
+            .banned(maintenant)
+            .map(|(cle, jusqu_a)| {
+                let reste = jusqu_a.as_millis().saturating_sub(maintenant.as_millis());
+                (cle, reste.saturating_div(1_000))
+            })
+            .collect()
+    }
+
+    /// Lève le bannissement d'une source, et oublie ce qu'elle a fait.
+    ///
+    /// Rend `true` s'il y avait quelque chose à lever.
+    pub fn lift(&self, source: Source) -> bool {
+        let mut etat = self.verrou();
+        let thresholds = etat.thresholds;
+        Guard::new(&mut etat.slots, thresholds).lift(source)
     }
 
     /// Le nombre de sources suivies.

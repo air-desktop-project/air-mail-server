@@ -10,8 +10,9 @@ use ams_api::Reason;
 use ams_proto_imap::Flags;
 
 use super::{
-    FlagPatch, MailboxRow, MessageRow, read_flag_patch, write_health, write_mailbox,
-    write_mailboxes, write_message, write_messages, write_metrics,
+    AccountRow, BanRow, FlagPatch, MailboxRow, MessageRow, read_flag_patch, write_account,
+    write_accounts, write_bans, write_domains, write_health, write_mailbox, write_mailboxes,
+    write_message, write_messages, write_metrics,
 };
 
 /// Un tampon confortable.
@@ -37,6 +38,31 @@ fn message() -> MessageRow<'static> {
         received: 1_699_999_000,
         subject: Some("Bonjour"),
         from: Some("Anne <anne@exemple.fr>"),
+    }
+}
+
+/// Un compte d'essai.
+fn compte() -> AccountRow<'static> {
+    AccountRow {
+        login: "marc",
+        addresses: &["marc@exemple.test", "postmaster@exemple.test"],
+    }
+}
+
+/// Un compte qui ne reçoit rien.
+fn sans_adresse() -> AccountRow<'static> {
+    AccountRow {
+        login: "depot",
+        addresses: &[],
+    }
+}
+
+/// Un bannissement d'essai.
+fn bannissement() -> BanRow<'static> {
+    BanRow {
+        source: "192.0.2.1",
+        prefix: 32,
+        seconds: 3_540,
     }
 }
 
@@ -324,7 +350,7 @@ fn un_corps_qui_n_est_pas_une_modification_se_refuse() {
 #[test]
 fn chaque_tampon_insuffisant_se_dit() {
     type Ecrivain = fn(&mut [u8]) -> Result<&[u8], ams_api::Error>;
-    let ecrivains: [(&str, Ecrivain); 7] = [
+    let ecrivains: [(&str, Ecrivain); 12] = [
         ("mailboxes", |place| write_mailboxes(&[boite()], place)),
         ("mailbox", |place| write_mailbox(&boite(), place)),
         ("messages", |place| {
@@ -340,6 +366,17 @@ fn chaque_tampon_insuffisant_se_dit() {
         ("metrics", |place| {
             write_metrics(&[("connexions", 12)], place)
         }),
+        ("accounts", |place| write_accounts(&[compte()], place)),
+        // Un compte SANS adresse écrit un tableau vide : c'est une suite
+        // d'écritures différente, donc d'autres places à manquer.
+        ("accounts-vide", |place| {
+            write_accounts(&[sans_adresse()], place)
+        }),
+        ("account", |place| write_account(&compte(), place)),
+        ("domains", |place| {
+            write_domains(&["exemple.test", "autre.test"], place)
+        }),
+        ("bans", |place| write_bans(&[bannissement()], place)),
     ];
     for (nom, ecrire) in ecrivains {
         let mut place = [0_u8; PLACE];
@@ -363,5 +400,110 @@ fn un_nom_de_drapeau_demesure_se_refuse() {
     assert_eq!(
         read_flag_patch(corps.as_bytes()).map_err(|e| e.reason()),
         Err(Reason::BadJsonBody)
+    );
+}
+
+/// **UNE REPRÉSENTATION DE COMPTE NE PORTE AUCUN SECRET.**
+///
+/// §3.2 de RFC 9110 : elle dit l'état d'une ressource. Le mot de passe est une
+/// ressource à part, qui ne se lit pas — et la séparation n'est pas une question
+/// de présentation : c'est ce qui rend impossible de fuir une empreinte en lisant
+/// un compte.
+#[test]
+fn un_compte_se_rend_sans_son_empreinte() {
+    let mut place = [0_u8; PLACE];
+    let compte = AccountRow {
+        login: "marc",
+        addresses: &["marc@exemple.test", "postmaster@exemple.test"],
+    };
+    let dit = texte(write_account(&compte, &mut place).expect("écrivable"));
+    assert_eq!(
+        dit,
+        r#"{"login":"marc","addresses":["marc@exemple.test","postmaster@exemple.test"]}"#
+    );
+    assert!(!dit.contains("argon2") && !dit.contains("hash"), "{dit}");
+}
+
+/// **VIDE EST LICITE**, et ce n'est pas la même chose qu'absent.
+///
+/// Un compte qui peut se connecter sans rien recevoir est un compte de
+/// soumission, et c'est une situation réelle.
+#[test]
+fn un_compte_sans_adresse_se_rend_quand_meme() {
+    let mut place = [0_u8; PLACE];
+    let compte = AccountRow {
+        login: "depot",
+        addresses: &[],
+    };
+    assert_eq!(
+        texte(write_account(&compte, &mut place).expect("écrivable")),
+        r#"{"login":"depot","addresses":[]}"#
+    );
+}
+
+/// La liste des comptes se rend, vide comme pleine.
+#[test]
+fn la_liste_des_comptes_se_rend() {
+    let mut place = [0_u8; PLACE];
+    assert_eq!(
+        texte(write_accounts(&[], &mut place).expect("écrivable")),
+        r#"{"accounts":[]}"#
+    );
+    let comptes = [
+        AccountRow {
+            login: "marc",
+            addresses: &["marc@exemple.test"],
+        },
+        AccountRow {
+            login: "jeanne",
+            addresses: &[],
+        },
+    ];
+    assert_eq!(
+        texte(write_accounts(&comptes, &mut place).expect("écrivable")),
+        r#"{"accounts":[{"login":"marc","addresses":["marc@exemple.test"]},{"login":"jeanne","addresses":[]}]}"#
+    );
+}
+
+/// Les domaines hébergés se rendent.
+#[test]
+fn les_domaines_se_rendent() {
+    let mut place = [0_u8; PLACE];
+    assert_eq!(
+        texte(write_domains(&[], &mut place).expect("écrivable")),
+        r#"{"domains":[]}"#
+    );
+    assert_eq!(
+        texte(write_domains(&["exemple.test", "autre.test"], &mut place).expect("écrivable")),
+        r#"{"domains":["exemple.test","autre.test"]}"#
+    );
+}
+
+/// **UN BANNISSEMENT SE DIT EN TEMPS RESTANT, ET NON EN DATE.**
+///
+/// L'horloge du garde compte depuis l'ouverture du serveur et n'a de sens que
+/// pour lui ; un exploitant veut savoir combien de temps il reste.
+#[test]
+fn les_bannissements_se_rendent_en_temps_restant() {
+    let mut place = [0_u8; PLACE];
+    assert_eq!(
+        texte(write_bans(&[], &mut place).expect("écrivable")),
+        r#"{"bans":[]}"#
+    );
+    let bans = [
+        BanRow {
+            source: "192.0.2.1",
+            prefix: 32,
+            seconds: 3_540,
+        },
+        BanRow {
+            source: "2001:db8::",
+            prefix: 64,
+            seconds: 12,
+        },
+    ];
+    assert_eq!(
+        texte(write_bans(&bans, &mut place).expect("écrivable")),
+        r#"{"bans":[{"source":"192.0.2.1","prefixBits":32,"secondsRemaining":3540},{"source":"2001:db8::","prefixBits":64,"secondsRemaining":12}]}"#
     );
 }

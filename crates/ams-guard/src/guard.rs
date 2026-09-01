@@ -175,6 +175,54 @@ impl<'a> Guard<'a> {
         }
     }
 
+    /// Les sources bannies à cet instant, et jusqu'à quand.
+    ///
+    /// # POURQUOI CETTE LISTE EXISTE
+    ///
+    /// C8 borne ce qu'une source peut coûter, et le fait **sans que personne ne
+    /// décide** — c'est tout l'intérêt. Mais un garde qui punit sans qu'on puisse
+    /// voir qui il punit est un garde qu'on ne peut pas corriger : un exploitant
+    /// dont le propre réseau se fait bannir n'aurait que le redémarrage pour
+    /// s'en sortir, et redémarrer effacerait aussi les peines méritées.
+    ///
+    /// **ELLE NE MONTRE QUE LES PEINES EN COURS.** Une peine échue n'est plus une
+    /// peine, et la montrer ferait lire comme un bannissement ce qui n'en est
+    /// plus un.
+    pub fn banned(&self, now: Instant) -> impl Iterator<Item = (Key, Instant)> + '_ {
+        self.slots.iter().filter_map(move |case| {
+            let jusqu_a = case.banned_until?;
+            (case.occupied && jusqu_a > now.as_millis())
+                .then(|| (case.key, Instant::from_millis(jusqu_a)))
+        })
+    }
+
+    /// Lève le bannissement d'une source, et oublie ce qu'elle a fait.
+    ///
+    /// Rend `true` s'il y avait quelque chose à lever.
+    ///
+    /// # LEVER, C'EST OUBLIER — ET NON RACCOURCIR LA PEINE
+    ///
+    /// Effacer la seule date de fin laisserait les compteurs qui l'ont
+    /// déclenchée : le premier événement suivant rebannirait la source, et
+    /// l'exploitant croirait sa levée sans effet. Ce qui est levé est donc la
+    /// case entière — la source redevient inconnue, et le garde recommence à
+    /// apprendre.
+    ///
+    /// **C'EST AUSSI CE QUI REND LA PLACE.** Une table pleine de peines cesse
+    /// d'apprendre (voir plus haut) ; lever en libère une.
+    pub fn lift(&mut self, source: Source) -> bool {
+        let cle = self.key(source);
+        let Some(case) = self
+            .slots
+            .iter_mut()
+            .find(|case| case.occupied && case.key == cle)
+        else {
+            return false;
+        };
+        *case = Slot::EMPTY;
+        true
+    }
+
     /// Enregistre un événement et rend le verdict.
     pub fn observe(&mut self, source: Source, event: Event, now: Instant) -> Verdict {
         let cle = self.key(source);
@@ -665,5 +713,91 @@ mod tests {
         let mut table = [Slot::EMPTY; 1];
         let garde = Guard::new(&mut table, Thresholds::DEFAULT);
         assert!(!std::format!("{garde:?}").is_empty());
+    }
+
+    // ── La levée d'un bannissement ──────────────────────────────────────────
+
+    /// Bannit cette source, et rend le garde prêt à être interrogé.
+    fn bannir(garde: &mut Guard<'_>, source: Source) {
+        for _ in 0..3 {
+            garde.observe(source, Event::InvalidFrame, t(0));
+        }
+        assert!(
+            est_banni(garde.verdict(source, t(0))),
+            "la source est bannie"
+        );
+    }
+
+    /// **UN GARDE QU'ON NE PEUT PAS VOIR EST UN GARDE QU'ON NE PEUT PAS
+    /// CORRIGER.**
+    ///
+    /// C8 punit sans que personne ne décide, et c'est tout l'intérêt. Encore
+    /// faut-il qu'un exploitant dont le propre réseau se fait bannir puisse le
+    /// constater autrement qu'en redémarrant — ce qui effacerait aussi les peines
+    /// méritées.
+    #[test]
+    fn les_bannissements_en_cours_se_listent() {
+        let mut table = [Slot::EMPTY; 8];
+        let mut garde = Guard::new(&mut table, seuils_serres());
+        assert_eq!(garde.banned(t(0)).count(), 0, "rien n'est banni au départ");
+
+        bannir(&mut garde, PAIR);
+        bannir(&mut garde, AUTRE);
+        let vus: std::vec::Vec<_> = garde.banned(t(0)).collect();
+        assert_eq!(vus.len(), 2, "les deux peines se voient");
+        assert!(
+            vus.iter()
+                .all(|(_, jusqu_a)| jusqu_a.as_millis() == 3_600_000),
+            "et chacune dit jusqu'à quand"
+        );
+    }
+
+    /// **UNE PEINE ÉCHUE N'EST PLUS UNE PEINE**, et ne se montre pas.
+    ///
+    /// La montrer ferait lire comme un bannissement ce qui n'en est plus un, et
+    /// un exploitant lèverait alors ce qui n'existe plus.
+    #[test]
+    fn une_peine_echue_ne_se_liste_plus() {
+        let mut table = [Slot::EMPTY; 8];
+        let mut garde = Guard::new(&mut table, seuils_serres());
+        bannir(&mut garde, PAIR);
+        assert_eq!(garde.banned(t(3_599_999)).count(), 1, "elle court encore");
+        assert_eq!(garde.banned(t(3_600_000)).count(), 0, "et elle échoit");
+    }
+
+    /// **LEVER, C'EST OUBLIER — ET NON RACCOURCIR LA PEINE.**
+    ///
+    /// Effacer la seule date de fin laisserait les compteurs qui l'ont
+    /// déclenchée : le premier événement suivant rebannirait la source, et
+    /// l'exploitant croirait sa levée sans effet.
+    #[test]
+    fn lever_une_peine_efface_ce_qui_l_avait_causee() {
+        let mut table = [Slot::EMPTY; 8];
+        let mut garde = Guard::new(&mut table, seuils_serres());
+        bannir(&mut garde, PAIR);
+
+        assert!(garde.lift(PAIR), "il y avait quelque chose à lever");
+        assert_eq!(garde.verdict(PAIR, t(0)), Verdict::Allow);
+        assert_eq!(garde.tracked(), 0, "la source redevient inconnue");
+        // **ET LE GARDE RECOMMENCE À APPRENDRE** : un seul événement de plus ne
+        // suffit pas à rebannir, puisque les compteurs sont repartis de zéro.
+        assert_eq!(
+            garde.observe(PAIR, Event::InvalidFrame, t(0)),
+            Verdict::Allow
+        );
+    }
+
+    /// **LEVER CE QUI N'EST PAS BANNI NE FAIT RIEN, ET LE DIT.**
+    #[test]
+    fn lever_ce_qui_n_est_pas_suivi_ne_dit_pas_le_contraire() {
+        let mut table = [Slot::EMPTY; 8];
+        let mut garde = Guard::new(&mut table, seuils_serres());
+        assert!(!garde.lift(PAIR), "rien à lever");
+
+        // Une source suivie mais NON bannie se lève quand même : c'est un oubli,
+        // et l'exploitant a le droit de faire oublier.
+        garde.observe(PAIR, Event::Connection, t(0));
+        assert!(garde.lift(PAIR));
+        assert_eq!(garde.tracked(), 0);
     }
 }

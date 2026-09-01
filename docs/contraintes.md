@@ -5159,6 +5159,89 @@ Les trames inconnues, elles, ne font pas avancer la séquence et ne la rompent p
 Un flux qui se termine sans en-têtes, en revanche, ne condamne que lui-même : un
 client qui abandonne sa requête en route n'a pas cassé la connexion.
 
+## L'administration par l'API, et le jeton qui l'ouvre
+
+Un mot de passe ouvre le courrier, la soumission et la supervision de SON compte.
+Il n'ouvre pas l'administration, et cette limite est dans le code, non dans une
+configuration : un réglage finirait par être basculé, et un compte compromis
+deviendrait alors le serveur entier.
+
+Restait une contradiction : les ressources d'administration existaient dans le
+routage, exigeaient une portée `Admin`, et **aucun jeton que ce serveur sait
+émettre ne la portait**. Elles étaient donc du code qu'aucune requête ne pouvait
+atteindre.
+
+### Le jeton se frappe là où vit déjà le secret
+
+`air-mail-admin token <config> --login <nom>` scelle un jeton `Admin` avec le
+secret que la configuration porte. C'est donc depuis la machine du serveur, par
+qui peut lire ce fichier — **la même autorité que celle qui peut arrêter le
+service ou lire les boîtes**. On n'en ajoute aucune, et l'affirmation de
+l'en-tête d'`api.rs` reste vraie mot pour mot.
+
+Un quart d'heure par défaut, douze heures au plus. C'est court, et c'est le
+point : ce jeton ouvre le serveur entier, et un jeton qui traîne dans un
+historique de terminal est un jeton volé. Le refrapper coûte une commande.
+
+Le nom de compte n'a pas besoin d'exister : il ne désigne pas une boîte, il dit
+QUI AGIT. Exiger un compte existant ferait croire que le jeton en ouvre la boîte.
+
+### Le secret hexadécimal se lit à un seul endroit
+
+Le serveur le lit pour vérifier les jetons, l'outil pour en frapper. Deux lectures
+de la même chaîne auraient fini par différer — l'une acceptant une longueur
+impaire, l'autre non — et un secret réputé bon d'un côté n'aurait plus été la même
+clé de l'autre. `ams_api::key_from_hex` est donc unique, et rend **trois cas
+distincts** : longueur impaire, caractère non hexadécimal, clé trop courte.
+
+Trois cas, et non une faute unique, parce que celui qui lit ce refus a écrit la
+configuration : il a le droit de savoir ce qu'il doit corriger. C'est l'exact
+contraire de ce qu'on dit à un client de l'API, et pour la même raison — ce qui
+apprend à qui sonde ne doit pas se dire, ce qui aide qui répare doit se dire.
+
+### Une représentation de compte ne porte aucun secret
+
+§3.2 de RFC 9110 : elle dit l'état d'une ressource. Le mot de passe est une
+ressource à part, qui ne se lit pas — et la séparation n'est pas une question de
+présentation : c'est ce qui rend **impossible** de fuir une empreinte en lisant un
+compte.
+
+### Voir et lever un bannissement
+
+C8 punit sans que personne ne décide, et c'est tout l'intérêt. Mais un garde qui
+punit sans qu'on puisse voir qui il punit est un garde qu'on ne peut pas corriger :
+un exploitant dont le propre réseau se fait bannir n'aurait que le redémarrage pour
+s'en sortir, et redémarrer effacerait aussi les peines méritées.
+
+**Lever, c'est oublier — et non raccourcir la peine.** Effacer la seule date de fin
+laisserait les compteurs qui l'ont déclenchée : le premier événement suivant
+rebannirait la source, et l'exploitant croirait sa levée sans effet. C'est aussi ce
+qui rend la place : une table pleine de peines cesse d'apprendre, et lever en
+libère une.
+
+La levée répond `204` qu'il y ait eu quelque chose à lever ou non. Une source non
+bannie EST dans l'état demandé, et répondre `404` ferait de cette ressource un
+moyen de SONDER qui est banni sans avoir à lister.
+
+Le bannissement se dit en **temps restant**, et non en date : l'horloge du garde
+compte depuis l'ouverture du serveur et n'a de sens que pour lui. Il dit aussi la
+longueur du préfixe — sans elle, « 2001:db8:: » ne dirait pas qu'un `/64` entier
+est puni, et un exploitant croirait n'avoir banni qu'une machine. Cette longueur
+voyage dans un champ à part : une barre oblique dans un chemin ferait deux segments
+d'un seul (§3.3 de RFC 3986), et le routage y verrait une autre ressource.
+
+### Ce qui MODIFIE le magasin de comptes n'est pas servi
+
+**Outillé par : rien, et c'est écrit ici plutôt que découvert.** Les comptes sont
+chargés une fois au démarrage dans un `Arc<Vec<Account>>` partagé par SMTP, IMAP,
+POP3 et l'API. Créer un compte, en effacer un, changer un mot de passe ou modifier
+des adresses demanderait de rendre ce magasin modifiable à chaud : remplacement
+atomique du fichier, verrou, relecture par tous les services.
+
+C'est une tranche d'architecture à part entière, avec du poids de sécurité — et non
+un détail d'implémentation. Ces ressources continuent donc de répondre `501`, ce qui
+est la réponse honnête : elles existent, et ce serveur ne les sert pas encore.
+
 ## La soumission par l'API (`POST /v1/submissions`)
 
 La ressource répondait `501`. Elle remet désormais **localement**, par le même

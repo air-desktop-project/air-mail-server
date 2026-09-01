@@ -127,6 +127,68 @@ pub struct Token<'o> {
 
 /// Écrit un jeton scellé, en base64url.
 ///
+/// Ce qui cloche dans un secret de scellement écrit en hexadécimal.
+///
+/// # POURQUOI TROIS CAS, ET NON UNE SEULE FAUTE
+///
+/// Celui qui lit ce refus est l'EXPLOITANT, et non un pair : il a écrit la
+/// configuration, et il a le droit de savoir ce qu'il doit corriger. « le secret
+/// est refusé » l'enverrait relire quarante caractères à la loupe.
+///
+/// C'est l'exact contraire de ce qu'on dit à un client de l'API, et pour la même
+/// raison : ce qui apprend à qui sonde ne doit pas se dire, ce qui aide qui
+/// répare doit se dire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyProblem {
+    /// Un nombre impair de chiffres : un octet s'écrit avec deux.
+    OddLength,
+    /// Un caractère qui n'est pas un chiffre hexadécimal.
+    NotHex,
+    /// Moins de [`KEY_OCTETS_MIN`] octets.
+    ///
+    /// **UNE CLÉ PLUS COURTE QUE LE SCEAU QU'ELLE PRODUIT** donnerait moins de
+    /// sécurité que la taille du sceau ne le laisse croire.
+    TooShort,
+}
+
+/// Lit un secret de scellement écrit en hexadécimal.
+///
+/// # IL VIT ICI PARCE QUE DEUX BINAIRES LE LISENT
+///
+/// Le serveur le lit pour vérifier les jetons, l'outil d'administration pour en
+/// frapper. **Deux lectures de la même chaîne finiraient par différer** — l'une
+/// acceptant une longueur impaire, l'autre non — et un secret réputé bon d'un
+/// côté ne serait plus la même clé de l'autre.
+///
+/// # Errors
+///
+/// [`KeyProblem`] dit lequel des trois cas.
+pub fn key_from_hex(texte: &str) -> Result<Key, KeyProblem> {
+    if !texte.len().is_multiple_of(2) {
+        return Err(KeyProblem::OddLength);
+    }
+    let mut octets = [0_u8; KEY_OCTETS_MIN];
+    let mut combien = 0_usize;
+    for paire in texte.as_bytes().chunks(2) {
+        let valeur = core::str::from_utf8(paire)
+            .ok()
+            .and_then(|deux| u8::from_str_radix(deux, 16).ok())
+            .ok_or(KeyProblem::NotHex)?;
+        // **ON NE RETIENT QUE CE QUE LA CLÉ PORTE**, et l'on continue de LIRE le
+        // reste : un chiffre fautif au-delà du trente-deuxième octet est une
+        // faute de configuration, et la taire ferait accepter une chaîne que
+        // l'exploitant croit correcte.
+        if let Some(place) = octets.get_mut(combien) {
+            *place = valeur;
+        }
+        combien = combien.saturating_add(1);
+    }
+    if combien < KEY_OCTETS_MIN {
+        return Err(KeyProblem::TooShort);
+    }
+    Key::new(&octets).map_err(|_| KeyProblem::TooShort)
+}
+
 /// Rend du texte : l'alphabet de §5 de RFC 4648 est de l'ASCII, et l'appelant
 /// n'a donc rien à convertir.
 ///

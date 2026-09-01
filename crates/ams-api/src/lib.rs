@@ -81,6 +81,7 @@ pub use reader::{BODY_DEPTH_MAX, Event, FIELDS_MAX, Number, Reader, Str};
 pub use route::{Resolved, Resource, resolve};
 pub use scope::{Area, Rights, Scope};
 pub use token::{
-    ENCODED_OCTETS_MAX, KEY_OCTETS_MIN, Key, LIFETIME_MAX_US, LOGIN_OCTETS_MAX, MAC_OCTETS,
-    TOKEN_OCTETS_MAX, Token, VERSION as TOKEN_VERSION, authorize, bearer, issue, verify,
+    ENCODED_OCTETS_MAX, KEY_OCTETS_MIN, Key, KeyProblem, LIFETIME_MAX_US, LOGIN_OCTETS_MAX,
+    MAC_OCTETS, TOKEN_OCTETS_MAX, Token, VERSION as TOKEN_VERSION, authorize, bearer, issue,
+    key_from_hex, verify,
 };

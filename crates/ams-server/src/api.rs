@@ -90,6 +90,14 @@ pub struct ApiMaildir {
     /// même magasin. Une seconde façon de remettre finirait par diverger, et deux
     /// messages identiques n'auraient pas le même sort selon la porte d'entrée.
     remise: crate::delivery::Boites,
+    /// Les domaines qu'on héberge, tels que la configuration les nomme.
+    domaines: Arc<Vec<String>>,
+    /// Le videur (C8), pour voir et lever ses bannissements.
+    ///
+    /// **LE MÊME QUE CELUI QUI PUNIT**, et non une copie : un état par voie de
+    /// lecture montrerait des peines que le garde n'applique pas, et en cacherait
+    /// qu'il applique.
+    guard: Arc<ams_loop_tokio::SharedGuard>,
     /// La borne sur les vérifications simultanées.
     places: Places,
 }
@@ -101,12 +109,97 @@ impl ApiMaildir {
         boites: Arc<BoitesImap>,
         comptes: Arc<Vec<Account>>,
         remise: crate::delivery::Boites,
+        domaines: Arc<Vec<String>>,
+        guard: Arc<ams_loop_tokio::SharedGuard>,
     ) -> Self {
         Self {
             boites,
             comptes,
             remise,
+            domaines,
+            guard,
             places: Places::new(VERIFICATIONS_SIMULTANEES),
+        }
+    }
+
+    /// La liste des comptes.
+    ///
+    /// **AUCUNE EMPREINTE N'EN SORT** : la représentation d'un compte n'en porte
+    /// pas, et le mot de passe est une ressource à part qui ne se lit pas.
+    fn accounts<'o>(&self, sortie: &'o mut [u8]) -> Served<'o> {
+        let adresses: std::vec::Vec<std::vec::Vec<&str>> = self
+            .comptes
+            .iter()
+            .map(|compte| compte.addresses.iter().map(String::as_str).collect())
+            .collect();
+        let lignes: std::vec::Vec<render::AccountRow<'_>> = self
+            .comptes
+            .iter()
+            .zip(&adresses)
+            .map(|(compte, adresses)| render::AccountRow {
+                login: &compte.login,
+                addresses: adresses,
+            })
+            .collect();
+        rendre(render::write_accounts(&lignes, sortie))
+    }
+
+    /// Un compte.
+    fn account<'o>(&self, nom: &str, sortie: &'o mut [u8]) -> Served<'o> {
+        let Some(compte) = self.comptes.iter().find(|compte| compte.login == nom) else {
+            return absente(sortie);
+        };
+        let adresses: std::vec::Vec<&str> = compte.addresses.iter().map(String::as_str).collect();
+        rendre(render::write_account(
+            &render::AccountRow {
+                login: &compte.login,
+                addresses: &adresses,
+            },
+            sortie,
+        ))
+    }
+
+    /// Les domaines qu'on héberge.
+    fn domains<'o>(&self, sortie: &'o mut [u8]) -> Served<'o> {
+        let noms: std::vec::Vec<&str> = self.domaines.iter().map(String::as_str).collect();
+        rendre(render::write_domains(&noms, sortie))
+    }
+
+    /// Les bannissements en cours (C8).
+    fn bans<'o>(&self, sortie: &'o mut [u8]) -> Served<'o> {
+        let vus = self.guard.banned();
+        let textes: std::vec::Vec<(std::string::String, u8, u64)> = vus
+            .iter()
+            .map(|(cle, reste)| (adresse_de(cle), bits_de(cle), *reste))
+            .collect();
+        let lignes: std::vec::Vec<render::BanRow<'_>> = textes
+            .iter()
+            .map(|(source, prefixe, reste)| render::BanRow {
+                source,
+                prefix: *prefixe,
+                seconds: *reste,
+            })
+            .collect();
+        rendre(render::write_bans(&lignes, sortie))
+    }
+
+    /// Lève un bannissement.
+    ///
+    /// # `204` QU'IL Y AIT EU QUELQUE CHOSE À LEVER OU NON
+    ///
+    /// §15.3.5 de RFC 9110 : `204` dit que la demande a abouti et qu'il n'y a rien
+    /// à rendre. Une source non bannie EST dans l'état demandé — « qu'elle ne soit
+    /// pas bannie » —, et répondre `404` ferait de cette ressource un moyen de
+    /// SONDER qui est banni sans avoir à lister.
+    fn lift<'o>(&self, source: &str, sortie: &'o mut [u8]) -> Served<'o> {
+        let Some(vue) = source_de(source) else {
+            return absente(sortie);
+        };
+        self.guard.lift(vue);
+        Served {
+            status: StatusCode::NO_CONTENT,
+            media: JSON_MEDIA_TYPE,
+            body: &[],
         }
     }
 
@@ -278,7 +371,7 @@ impl Api for ApiMaildir {
     fn serve<'o>(
         &self,
         resource: Resource<'_>,
-        _method: Method,
+        method: Method,
         account: &str,
         body: &[u8],
         sortie: &'o mut [u8],
@@ -294,6 +387,19 @@ impl Api for ApiMaildir {
             Resource::Messages { boite } => self.messages(account, boite, sortie),
             Resource::Message { boite, uid } => self.message(account, boite, uid, sortie),
             Resource::Submissions => self.submissions(account, body, sortie),
+            // **L'ADMINISTRATION, EN LECTURE.** Ce qui MODIFIE le magasin de
+            // comptes n'est pas ici : les comptes sont chargés une fois au
+            // démarrage et partagés par SMTP, IMAP, POP3 et l'API. Les rendre
+            // modifiables à chaud demande un remplacement atomique du fichier et
+            // une relecture par tous les services — c'est une tranche à part, et
+            // elle continue de répondre `501` en attendant.
+            Resource::Accounts => self.accounts(sortie),
+            Resource::Account { compte } => self.account(compte, sortie),
+            Resource::Domains => self.domains(sortie),
+            Resource::Bans => self.bans(sortie),
+            Resource::Ban { source } if matches!(method, Method::Delete) => {
+                self.lift(source, sortie)
+            }
             // **CE QUI N'EST PAS ENCORE SERVI LE DIT** (§15.6.2 de RFC 9110).
             _ => pas_encore(sortie),
         }
@@ -535,6 +641,50 @@ fn destinataires_de(
         }
     }
     (!vus.is_empty()).then_some(vus)
+}
+
+/// L'adresse d'un préfixe, telle qu'on la rend et telle qu'on la relit.
+///
+/// **SANS SA LONGUEUR** : une barre oblique dans un chemin fait deux segments
+/// d'un seul (§3.3 de RFC 3986), et le routage y verrait une autre ressource. La
+/// longueur voyage donc dans un champ à part.
+fn adresse_de(cle: &ams_guard::Key) -> std::string::String {
+    let octets = cle.octets();
+    if cle.is_v6() {
+        let mut adresse = [0_u16; 8];
+        for (rang, place) in adresse.iter_mut().enumerate() {
+            let haut = octets.get(rang.saturating_mul(2)).copied().unwrap_or(0);
+            let bas = octets.get(rang.saturating_mul(2).saturating_add(1));
+            *place = u16::from(haut)
+                .saturating_mul(256)
+                .saturating_add(u16::from(bas.copied().unwrap_or(0)));
+        }
+        return std::net::Ipv6Addr::from(adresse).to_string();
+    }
+    let mut quatre = [0_u8; 4];
+    quatre.copy_from_slice(octets.get(..4).unwrap_or(&[0; 4]));
+    std::net::Ipv4Addr::from(quatre).to_string()
+}
+
+/// Combien de bits le préfixe de cette clé couvre.
+///
+/// **ON LE DEMANDE AUX SEUILS, ET NON À LA CLÉ** : la clé porte des octets
+/// masqués, pas la longueur qui les a masqués. Deux sources d'une même vérité
+/// finiraient par différer.
+fn bits_de(cle: &ams_guard::Key) -> u8 {
+    let seuils = ams_guard::Thresholds::DEFAULT;
+    match cle.is_v6() {
+        true => seuils.ipv6_prefix_bits,
+        false => seuils.ipv4_prefix_bits,
+    }
+}
+
+/// La source que ce texte désigne, s'il en désigne une.
+fn source_de(texte: &str) -> Option<ams_guard::Source> {
+    match texte.parse::<std::net::IpAddr>().ok()? {
+        std::net::IpAddr::V4(adresse) => Some(ams_guard::Source::V4(adresse.octets())),
+        std::net::IpAddr::V6(adresse) => Some(ams_guard::Source::V6(adresse.octets())),
+    }
 }
 
 /// Un dépôt qu'on refuse.

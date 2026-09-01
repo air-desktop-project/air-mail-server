@@ -47,6 +47,7 @@ dependencies = [
 name = "ams-admin"
 version = "0.1.0"
 dependencies = [
+ "ams-api",
  "ams-auth",
  "ams-config",
  "ams-guard",

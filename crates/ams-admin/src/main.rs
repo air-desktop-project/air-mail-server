@@ -52,6 +52,15 @@ COMMANDES
                         liste les noms de comptes. Jamais les empreintes.
     account remove <fichier> --login <nom>
                         retire un compte.
+    token <config> --login <nom> [--minutes <n>]
+                        frappe un jeton d'ADMINISTRATION, et l'écrit sur la
+                        sortie standard. Il se scelle avec le secret que la
+                        configuration porte, donc depuis la machine du serveur
+                        et par qui peut lire ce fichier.
+                        AUCUN MOT DE PASSE N'OUVRE L'ADMINISTRATION : c'est ce
+                        qui fait qu'un compte compromis ne devient jamais le
+                        serveur entier, et c'est pourquoi ce jeton se frappe ici.
+                        `--minutes` vaut 15 par défaut, et douze heures au plus.
     summary <maildir>   relit une boîte et rend ce que ses noms de fichiers
                         portent : messages numérotés, messages à adopter, noms
                         illisibles, et le prochain UID.
@@ -103,6 +112,13 @@ fn main() -> ExitCode {
             }
         },
         ["account", "list", fichier] => lister(Path::new(fichier)),
+        ["token", fichier, reste @ ..] => match jeton_demande(reste) {
+            Ok((nom, minutes)) => frapper(Path::new(fichier), &nom, minutes),
+            Err(quoi) => {
+                eprintln!("air-mail-admin : {quoi}");
+                ExitCode::FAILURE
+            }
+        },
         ["account", "remove", fichier, "--login", nom] => retirer(Path::new(fichier), nom),
         autre => {
             eprintln!("air-mail-admin : commande inconnue : {autre:?}");
@@ -490,6 +506,140 @@ fn lister(fichier: &Path) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Combien de temps un jeton d'administration vit, par défaut.
+///
+/// Un quart d'heure. **C'EST COURT, ET C'EST LE POINT** : ce jeton ouvre le
+/// serveur entier, et un jeton qui traîne dans un historique de terminal ou dans
+/// un journal est un jeton volé. Le refrapper coûte une commande.
+const MINUTES_PAR_DEFAUT: u64 = 15;
+
+/// Le plus longtemps qu'un jeton puisse vivre, en minutes (§`LIFETIME_MAX_US`).
+const MINUTES_MAX: u64 = 12 * 60;
+
+/// Lit `--login` et `--minutes`.
+fn jeton_demande(arguments: &[&str]) -> Result<(String, u64), String> {
+    let mut nom: Option<String> = None;
+    let mut minutes = MINUTES_PAR_DEFAUT;
+    let mut reste = arguments.iter();
+    while let Some(argument) = reste.next() {
+        match *argument {
+            "--login" => {
+                let valeur = reste
+                    .next()
+                    .ok_or_else(|| String::from("`--login` attend un nom de compte"))?;
+                nom = Some((*valeur).to_string());
+            }
+            "--minutes" => {
+                let valeur = reste
+                    .next()
+                    .ok_or_else(|| String::from("`--minutes` attend un nombre"))?;
+                minutes = valeur
+                    .parse()
+                    .map_err(|_| format!("`{valeur}` n'est pas un nombre de minutes"))?;
+            }
+            autre => return Err(format!("argument inattendu : `{autre}`")),
+        }
+    }
+    let nom = nom.ok_or_else(|| String::from("`token` attend un `--login`"))?;
+    if minutes == 0 || minutes > MINUTES_MAX {
+        return Err(format!(
+            "une durée de {minutes} minutes est hors des bornes : de 1 à {MINUTES_MAX}"
+        ));
+    }
+    Ok((nom, minutes))
+}
+
+/// Frappe un jeton d'administration, et l'écrit sur la sortie standard.
+///
+/// # POURQUOI CE JETON SE FRAPPE ICI, ET NON PAR L'API
+///
+/// Un mot de passe ouvre le courrier, la soumission et la supervision de SON
+/// compte. Il n'ouvre pas l'administration — et cette limite est dans le code du
+/// serveur, non dans une configuration : un réglage finirait par être basculé, et
+/// un compte compromis deviendrait alors le serveur entier.
+///
+/// Il reste donc à frapper le jeton depuis l'endroit qui tient déjà le secret de
+/// scellement : **la machine du serveur, par qui peut lire sa configuration**.
+/// C'est la même autorité que celle qui peut arrêter le service ou lire les
+/// boîtes ; on n'en ajoute aucune.
+///
+/// # LE NOM DE COMPTE N'A PAS BESOIN D'EXISTER
+///
+/// Il ne désigne pas une boîte : il dit QUI AGIT, et se retrouve dans ce que le
+/// serveur journalise. Exiger un compte existant ferait croire que le jeton en
+/// ouvre la boîte — il n'ouvre que l'administration.
+fn frapper(fichier: &Path, nom: &str, minutes: u64) -> ExitCode {
+    match frapper_ou_dire(fichier, nom, minutes) {
+        Ok(jeton) => {
+            println!("{jeton}");
+            ExitCode::SUCCESS
+        }
+        Err(quoi) => {
+            eprintln!("air-mail-admin : {quoi}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Frappe le jeton, ou dit ce qui a manqué.
+fn frapper_ou_dire(fichier: &Path, nom: &str, minutes: u64) -> Result<String, String> {
+    let octets =
+        std::fs::read(fichier).map_err(|erreur| format!("`{}` : {erreur}", fichier.display()))?;
+    let config = ams_config::decode(&octets)
+        .map_err(|erreur| format!("`{}` : {erreur}", fichier.display()))?;
+    if config.token_key.is_empty() {
+        return Err(String::from(
+            "cette configuration ne porte aucun secret de scellement : sans clé, aucun jeton ne \
+             peut être scellé ni vérifié",
+        ));
+    }
+    let clef = ams_api::key_from_hex(&config.token_key).map_err(|quoi| {
+        String::from(match quoi {
+            ams_api::KeyProblem::OddLength => {
+                "le secret de scellement n'a pas un nombre pair de chiffres"
+            }
+            ams_api::KeyProblem::NotHex => "le secret de scellement n'est pas de l'hexadécimal",
+            ams_api::KeyProblem::TooShort => {
+                "le secret de scellement fait moins de trente-deux octets"
+            }
+        })
+    })?;
+
+    let maintenant = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| String::from("l'horloge de cette machine est avant 1970"))?
+        .as_micros();
+    let maintenant = u64::try_from(maintenant)
+        .map_err(|_| String::from("l'horloge de cette machine est hors de portée"))?;
+
+    let jeton = ams_api::Token {
+        login: nom,
+        // **L'ADMINISTRATION, ET RIEN D'AUTRE.** Y ajouter le courrier ferait de
+        // ce jeton un passe-partout, alors qu'il existe pour une tâche précise.
+        scope: ams_api::Scope::one(ams_api::Area::Admin, ams_api::Rights::Write),
+        expiry: maintenant.saturating_add(minutes.saturating_mul(60).saturating_mul(1_000_000)),
+        nonce: aléa()?,
+    };
+    let mut place = [0_u8; ams_api::ENCODED_OCTETS_MAX];
+    ams_api::issue(&clef, &jeton, maintenant, &mut place)
+        .map(ToString::to_string)
+        .map_err(|_| String::from("ce jeton ne se scelle pas : le nom de compte est-il licite ?"))
+}
+
+/// Un aléa de huit octets, tiré du noyau.
+///
+/// **IL DISTINGUE CE JETON DES AUTRES**, et c'est ce qui permettrait de le
+/// révoquer seul. Sans lui, deux jetons frappés dans la même seconde pour le même
+/// nom seraient le même jeton.
+fn aléa() -> Result<u64, String> {
+    use std::io::Read as _;
+    let mut graine = [0_u8; 8];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut source| source.read_exact(&mut graine))
+        .map_err(|erreur| format!("/dev/urandom : {erreur}"))?;
+    Ok(u64::from_ne_bytes(graine))
 }
 
 /// Retire un compte.
