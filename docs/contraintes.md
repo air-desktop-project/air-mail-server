@@ -653,6 +653,56 @@ jamais la main.
 En l'ajoutant, j'ai d'abord écrasé la cible existante en réemployant son nom.
 Elle a été restaurée depuis git, et la nouvelle porte le sien.
 
+### L'écoute HTTP/3 du serveur (`listenH3`)
+
+Écrite le 2026-09-01. Le serveur ouvre une socket UDP à côté de son port TCP, avec
+les mêmes certificats, la même session, la même API et le même videur.
+
+#### Une adresse à part, et non le même port qu'HTTP/2
+
+HTTP/3 se découvre par `Alt-Svc` et se sert conventionnellement sur le même
+numéro de port, en UDP. On pourrait donc l'ouvrir dès que `listenHttp` l'est.
+**Ce serait ouvrir un port derrière un pare-feu que l'exploitant n'a pas
+ouvert** — et une surprise sur un port est un incident. Le schéma porte donc
+`listenH3`, et le code Cap'n Proto a été régénéré pour lui.
+
+Les mêmes conditions que pour HTTP/2 s'appliquent : sans certificat ni secret de
+scellement, ce port ne s'ouvre pas. QUIC chiffre toujours (§5 de RFC 9001) — il
+n'y a même pas de mode en clair à refuser, seulement une configuration
+incomplète.
+
+#### La même session et la même API, ou rien
+
+Un jeton scellé par HTTP/2 doit ouvrir HTTP/3, et une ressource servie d'un côté
+doit être la même de l'autre. Les monter deux fois donnerait **deux clés de
+scellement**, donc des jetons qui ne s'ouvriraient pas d'un côté à l'autre.
+`listenH3` sans `listenHttp` n'est donc pas servi, et le serveur le dit plutôt
+que de le laisser découvrir à la première requête.
+
+La configuration TLS d'HTTP/3 n'est pas celle d'HTTP/2 : elle porte l'ALPN `h3`
+seul, dont §3.1 de RFC 9114 fait la condition de la connexion.
+
+#### Une course dans les essais, que ce travail a révélée
+
+`lancer` rend la main dès l'annonce de l'écoute SMTP, écrite juste après le
+`bind` — **donc avant que l'API, HTTP/3 et le reste ne se montent**. Lire le
+journal à cet instant, c'est le lire au hasard de l'ordonnancement : l'essai passe
+la plupart du temps et échoue sous charge sans rien apprendre.
+
+Le nouvel essai a échoué tout de suite, et `attendre_le_journal` le rend stable.
+**Les essais existants qui lisaient le journal de la même façon portaient la même
+course** : ils passaient pour la même raison que celui-ci passait deux fois sur
+trois. Ils ont été repris — deux lectures immédiates remplacées par l'attente, et
+une attente écrite à la main qui refaisait l'aide.
+
+Pour vérifier que l'attente n'a pas rendu ces essais complaisants, le message du
+serveur a été changé volontairement : l'essai a échoué, **et il a mis les cinq
+secondes de son délai à le faire**. Un essai qui attend sans jamais échouer ne
+vaut pas mieux qu'un essai qui lit trop tôt.
+
+`chiffrement.rs` ne lit le journal que dans sa propre attente de démarrage et dans
+ses messages d'échec : il n'y avait rien à y reprendre.
+
 ### HTTP/3 branché sur l'écoute (`ams-loop-tokio::h3`)
 
 Écrit le 2026-09-01. **Une requête HTTP/3 traverse désormais toute la chaîne sur

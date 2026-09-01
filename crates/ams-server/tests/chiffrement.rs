@@ -195,6 +195,7 @@ fn configuration_pop3(
         hosted: vec![String::from("example.com")],
         max_recipients: 100,
         listen_http: String::new(),
+        listen_h3: String::new(),
         token_key: String::new(),
         max_message_octets: 10_485_760,
         max_connections: 16,

@@ -156,6 +156,7 @@ impl Options {
             // qu'on n'a pas demandé. `air-mail-admin` gagnera ses options quand
             // on saura ce qu'elles doivent dire.
             listen_http: String::new(),
+            listen_h3: String::new(),
             token_key: String::new(),
             max_message_octets: self.max_message_octets,
             max_connections: u32::try_from(self.max_connections).unwrap_or(u32::MAX),

@@ -170,9 +170,25 @@ fn configuration_api(
     ecoute_http: &str,
     clef: &str,
 ) -> PathBuf {
-    configuration_complete(atelier, port, tls, "", "", ecoute_http, clef)
+    configuration_complete(atelier, port, tls, "", "", ecoute_http, "", clef)
 }
 
+/// La même, avec une écoute HTTP/3 en plus.
+fn configuration_avec_h3(
+    atelier: &Atelier,
+    port: u16,
+    tls: Tls,
+    ecoute_http: &str,
+    ecoute_h3: &str,
+    clef: &str,
+) -> PathBuf {
+    configuration_complete(atelier, port, tls, "", "", ecoute_http, ecoute_h3, clef)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "un montage d'essai décrit une configuration, et une configuration a des champs"
+)]
 fn configuration_complete(
     atelier: &Atelier,
     port: u16,
@@ -180,6 +196,7 @@ fn configuration_complete(
     comptes: &str,
     pop3: &str,
     ecoute_http: &str,
+    ecoute_h3: &str,
     clef: &str,
 ) -> PathBuf {
     let config = Configuration {
@@ -189,6 +206,7 @@ fn configuration_complete(
         hosted: vec![String::from("example.com")],
         max_recipients: 100,
         listen_http: String::from(ecoute_http),
+        listen_h3: String::from(ecoute_h3),
         token_key: String::from(clef),
         max_message_octets: 10_485_760,
         max_connections: 16,
@@ -315,7 +333,7 @@ fn sans_certificat_l_api_ne_s_ouvre_pas() {
         CLEF,
     );
     let serveur = lancer(&config, smtp);
-    let journal = serveur.journal();
+    let journal = attendre_le_journal(&serveur, "API REST NON SERVIE");
     assert!(
         journal.contains("API REST NON SERVIE") && journal.contains("aucun certificat"),
         "le serveur doit dire pourquoi il n'ouvre pas ce port : {journal}"
@@ -348,7 +366,7 @@ fn sans_secret_l_api_ne_s_ouvre_pas() {
         "",
     );
     let serveur = lancer(&config, smtp);
-    let journal = serveur.journal();
+    let journal = attendre_le_journal(&serveur, "API REST NON SERVIE");
     assert!(
         journal.contains("API REST NON SERVIE") && journal.contains("aucun secret"),
         "{journal}"
@@ -419,14 +437,7 @@ fn avec_certificat_et_secret_l_api_sert_h2() {
     );
     let serveur = lancer(&config, smtp);
     let annonce = format!("API REST sur 127.0.0.1:{http}");
-    let depart = Instant::now();
-    while depart.elapsed() < Duration::from_secs(10) {
-        if serveur.journal().contains(&annonce) {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    let journal = serveur.journal();
+    let journal = attendre_le_journal(&serveur, &annonce);
     assert!(journal.contains(&annonce), "{journal}");
     // **CE QUE LE DÉMARRAGE DIT DE LA PORTÉE** : un mot de passe n'ouvre pas
     // l'administration, et le serveur l'annonce plutôt que de le laisser
@@ -461,4 +472,132 @@ fn avec_certificat_et_secret_l_api_sert_h2() {
         !dit.contains("ALPN protocol: http/1.1"),
         "`http/1.1` ne doit jamais être négocié : {dit}"
     );
+}
+
+/// Attend que le serveur ait écrit cette ligne, et rend ce qu'il a dit.
+///
+/// # POURQUOI ATTENDRE PLUTÔT QUE DE LIRE
+///
+/// `lancer` rend la main dès l'annonce de l'écoute SMTP, qui est écrite juste
+/// après le `bind` — donc **avant** que l'API, HTTP/3 et le reste ne se montent.
+/// Lire le journal à cet instant, c'est le lire au hasard de l'ordonnancement :
+/// l'essai passe la plupart du temps, et échoue sous charge sans rien apprendre.
+fn attendre_le_journal(serveur: &Serveur, motif: &str) -> String {
+    let depart = Instant::now();
+    loop {
+        let journal = serveur.journal();
+        if journal.contains(motif) || depart.elapsed() >= Duration::from_secs(5) {
+            return journal;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Un port UDP est-il ouvert ?
+///
+/// **ON NE PEUT PAS SE CONNECTER À UDP** : il n'y a pas de poignée de main. On
+/// tente donc de s'y attacher soi-même — si cela réussit, personne n'écoutait.
+fn ecoute_udp_ouverte(port: u16) -> bool {
+    std::net::UdpSocket::bind(format!("127.0.0.1:{port}")).is_err()
+}
+
+/// **HTTP/3 NE S'OUVRE PAS TOUT SEUL.**
+///
+/// Il se sert conventionnellement sur le même numéro de port que HTTP/2, en UDP.
+/// L'ouvrir dès que HTTP/2 l'est serait ouvrir un port derrière un pare-feu que
+/// l'exploitant n'a pas ouvert — et une surprise sur un port est un incident.
+#[test]
+fn http3_ne_s_ouvre_pas_tout_seul() {
+    let atelier = atelier("h3-silencieux");
+    let Some((cert, cle)) = paire(&atelier.0) else {
+        eprintln!("SAUTÉ : {SANS_OPENSSL}");
+        return;
+    };
+    let smtp = port_libre();
+    let http = port_libre();
+    let config = configuration_api(
+        &atelier,
+        smtp,
+        Tls {
+            certificate_chain_path: cert.display().to_string(),
+            private_key_path: cle.display().to_string(),
+        },
+        &format!("127.0.0.1:{http}"),
+        CLEF,
+    );
+    let serveur = lancer(&config, smtp);
+    let journal = attendre_le_journal(&serveur, "API REST sur");
+    assert!(
+        journal.contains("API REST sur") && !journal.contains("HTTP/3"),
+        "HTTP/2 s'ouvre, HTTP/3 ne se mentionne même pas : {journal}"
+    );
+    assert!(
+        !ecoute_udp_ouverte(http),
+        "le port UDP {http} ne doit pas être ouvert"
+    );
+}
+
+/// **CONFIGURÉ, IL S'OUVRE — ET IL LE DIT.**
+#[test]
+fn http3_configure_s_ouvre() {
+    let atelier = atelier("h3-ouvert");
+    let Some((cert, cle)) = paire(&atelier.0) else {
+        eprintln!("SAUTÉ : {SANS_OPENSSL}");
+        return;
+    };
+    let smtp = port_libre();
+    let http = port_libre();
+    let h3 = port_libre();
+    let config = configuration_avec_h3(
+        &atelier,
+        smtp,
+        Tls {
+            certificate_chain_path: cert.display().to_string(),
+            private_key_path: cle.display().to_string(),
+        },
+        &format!("127.0.0.1:{http}"),
+        &format!("127.0.0.1:{h3}"),
+        CLEF,
+    );
+    let serveur = lancer(&config, smtp);
+    let journal = attendre_le_journal(&serveur, "/udp");
+    assert!(
+        journal.contains(&format!("127.0.0.1:{h3}/udp")) && journal.contains("ALPN `h3` seul"),
+        "le serveur doit dire ce qu'il ouvre : {journal}"
+    );
+    assert!(ecoute_udp_ouverte(h3), "le port UDP {h3} doit être ouvert");
+}
+
+/// **SANS `listenHttp`, HTTP/3 NE SE SERT PAS NON PLUS.**
+///
+/// La session et l'API se montent avec le port TCP. Les monter une seconde fois
+/// pour HTTP/3 donnerait deux clés de scellement — donc des jetons qui ne
+/// s'ouvriraient pas d'un côté à l'autre.
+#[test]
+fn sans_http2_http3_ne_se_sert_pas() {
+    let atelier = atelier("h3-orphelin");
+    let Some((cert, cle)) = paire(&atelier.0) else {
+        eprintln!("SAUTÉ : {SANS_OPENSSL}");
+        return;
+    };
+    let smtp = port_libre();
+    let h3 = port_libre();
+    let config = configuration_avec_h3(
+        &atelier,
+        smtp,
+        Tls {
+            certificate_chain_path: cert.display().to_string(),
+            private_key_path: cle.display().to_string(),
+        },
+        "",
+        &format!("127.0.0.1:{h3}"),
+        CLEF,
+    );
+    let serveur = lancer(&config, smtp);
+    let journal = attendre_le_journal(&serveur, "API REST EN HTTP/3 NON SERVIE");
+    assert!(
+        journal.contains("API REST EN HTTP/3 NON SERVIE"),
+        "le serveur doit dire pourquoi : {journal}"
+    );
+    assert!(!ecoute_udp_ouverte(h3), "et ne pas ouvrir le port {h3}");
 }

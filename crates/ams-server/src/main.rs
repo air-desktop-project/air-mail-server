@@ -216,6 +216,66 @@ fn monter_l_api(
     )))
 }
 
+/// Ouvre la socket UDP de l'API en HTTP/3, si elle est configurée.
+///
+/// # LES MÊMES CONDITIONS QUE HTTP/2, ET POUR LES MÊMES RAISONS
+///
+/// Sans certificat ni secret de scellement, ce port ne s'ouvre pas : il porte les
+/// mêmes jetons, et un jeton qui traverse un réseau en clair est un jeton volé
+/// (C4). QUIC chiffre toujours (§5 de RFC 9001) — il n'y a donc même pas de mode
+/// en clair à refuser, seulement une configuration incomplète.
+///
+/// **ET IL NE S'OUVRE PAS TOUT SEUL** : HTTP/3 se sert conventionnellement sur le
+/// même numéro de port que HTTP/2, en UDP, mais l'ouvrir sans qu'on l'ait dit
+/// serait ouvrir un port derrière un pare-feu que l'exploitant n'a pas ouvert. Une
+/// surprise sur un port est un incident.
+fn monter_l_api_h3(
+    options: &Configuration,
+    tls: Option<&Arc<ServerConfig>>,
+) -> Result<Option<(std::net::UdpSocket, Arc<ServerConfig>)>, String> {
+    if options.listen_h3.is_empty() {
+        return Ok(None);
+    }
+    let Some(tls) = tls else {
+        eprintln!(
+            "air-mail-server : API REST EN HTTP/3 NON SERVIE — aucun certificat. QUIC ne monte \
+             pas sans lui (§4 de RFC 9001)."
+        );
+        return Ok(None);
+    };
+    if options.token_key.is_empty() {
+        eprintln!(
+            "air-mail-server : API REST EN HTTP/3 NON SERVIE — aucun secret de scellement, comme \
+             pour HTTP/2."
+        );
+        return Ok(None);
+    }
+
+    let adresse: std::net::SocketAddr = options.listen_h3.parse().map_err(|_| {
+        format!(
+            "`{}` n'est pas une adresse d'écoute HTTP/3",
+            options.listen_h3
+        )
+    })?;
+    let socket = std::net::UdpSocket::bind(adresse)
+        .map_err(|erreur| format!("écoute HTTP/3 sur {adresse} : {erreur}"))?;
+    socket
+        .set_nonblocking(true)
+        .map_err(|erreur| format!("écoute HTTP/3 sur {adresse} : {erreur}"))?;
+
+    // **LA CONFIGURATION TLS D'HTTP/3 N'EST PAS CELLE D'HTTP/2** : elle porte
+    // l'ALPN `h3`, et §3.1 de RFC 9114 en fait la condition de la connexion. La
+    // partager ferait annoncer `h2` sur un transport qui ne sait pas le porter.
+    let mut h3_tls = (**tls).clone();
+    h3_tls.alpn_protocols = ams_tls::alpn_h3();
+
+    eprintln!(
+        "air-mail-server : API REST sur {adresse}/udp — HTTP/3 sur QUIC, ALPN `h3` seul. \
+         Les mêmes jetons, la même session, le même videur que HTTP/2."
+    );
+    Ok(Some((socket, Arc::new(h3_tls))))
+}
+
 /// Les octets que décrit cette écriture hexadécimale.
 ///
 /// **PAS DE BASE64, ET PAS DE TEXTE BRUT** : l'hexadécimal a une seule écriture
@@ -878,13 +938,62 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         )))
     };
 
-    let http = monter_l_api(
+    let montage = monter_l_api(
         &options,
         options_de_service.tls.as_ref(),
         Arc::clone(&boites_imap),
         Arc::clone(&comptes),
-    )?
-    .map(|(ecouteur, session, tls, api)| {
+    )?;
+    // **LA MÊME SESSION ET LA MÊME API POUR LES DEUX VERSIONS** : un jeton scellé
+    // par HTTP/2 doit ouvrir HTTP/3, et une ressource servie d'un côté doit être
+    // la même de l'autre. Deux montages en donneraient deux, avec deux clés.
+    let h3 = match (
+        montage.as_ref(),
+        monter_l_api_h3(&options, options_de_service.tls.as_ref())?,
+    ) {
+        (Some((_, session, _, api)), Some((socket, tls))) => {
+            let session = session.clone();
+            let api = Arc::clone(api);
+            let garde_h3 = Arc::clone(&garde);
+            let attente = arret();
+            Some(tokio::spawn(async move {
+                let socket = match tokio::net::UdpSocket::from_std(socket) {
+                    Ok(socket) => socket,
+                    Err(erreur) => {
+                        eprintln!("air-mail-server : HTTP/3 : {erreur}");
+                        return;
+                    }
+                };
+                let mut application =
+                    ams_loop_tokio::h3::Http3Application::new(&session, api.as_ref(), &garde_h3);
+                match ams_loop_tokio::serve_quic(socket, tls, &mut application, attente).await {
+                    Ok(stats) => {
+                        let (servies, refusees) = application.comptes();
+                        eprintln!(
+                            "air-mail-server : HTTP/3 ; {} connexion(s) acceptée(s), \
+                             {servies} requête(s) servie(s), {refusees} refusée(s)",
+                            stats.accepted
+                        );
+                    }
+                    Err(erreur) => eprintln!("air-mail-server : HTTP/3 : {erreur}"),
+                }
+            }))
+        }
+        // **HTTP/3 SANS HTTP/2 NE SE SERT PAS** : la session et l'API se montent
+        // avec le port TCP, et les monter deux fois donnerait deux clés de
+        // scellement — donc des jetons qui ne s'ouvriraient pas d'un côté à
+        // l'autre.
+        (None, Some(_)) => {
+            eprintln!(
+                "air-mail-server : API REST EN HTTP/3 NON SERVIE — `listenHttp` n'est pas \
+                 configurée, et la session comme l'API se montent avec elle."
+            );
+            None
+        }
+        _ => None,
+    };
+
+    let http = montage.map(|(ecouteur, session, tls, api)| {
         tokio::spawn(ams_loop_tokio::http::serve_http(
             ecouteur,
             ams_proto_http::Limits::DEFAULT,
@@ -945,6 +1054,14 @@ async fn servir(fichier: &Path) -> Result<(), String> {
             ),
             Ok(Err(erreur)) => eprintln!("air-mail-server : HTTP : {erreur}"),
             Err(erreur) => eprintln!("air-mail-server : HTTP : {erreur}"),
+        }
+    }
+    if let Some(tache) = h3 {
+        // **LA MÊME ATTENTE QUE LES AUTRES** : l'écoute HTTP/3 s'arrête sur le
+        // même signal, et lui laisser le temps de finir évite que le message
+        // d'arrêt parte pendant qu'elle sert encore.
+        if let Err(erreur) = tache.await {
+            eprintln!("air-mail-server : HTTP/3 : {erreur}");
         }
     }
 

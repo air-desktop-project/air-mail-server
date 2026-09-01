@@ -104,6 +104,23 @@ struct Configuration {
   # compte, c'est un secret de serveur. Le changer révoque tous les jetons en
   # cours d'un seul coup — ce qui est parfois exactement ce qu'on veut.
   tokenKey @18 :Text;
+
+  # L'adresse d'écoute de l'API en HTTP/3, sur UDP — vide pour ne pas la servir.
+  #
+  # # POURQUOI UNE ADRESSE À PART, ET NON LE MÊME PORT QUE `listenHttp`
+  #
+  # HTTP/3 se découvre par `Alt-Svc` et se sert conventionnellement sur le même
+  # numéro de port, en UDP. On pourrait donc l'ouvrir tout seul dès que
+  # `listenHttp` l'est — et ce serait ouvrir un port que l'exploitant n'a pas
+  # demandé, derrière un pare-feu qu'il n'a pas ouvert. **UN PORT QUI S'OUVRE
+  # SANS QU'ON L'AIT DIT EST UNE SURPRISE**, et une surprise sur un port est un
+  # incident.
+  #
+  # Les mêmes conditions que `listenHttp` s'appliquent, et pour les mêmes
+  # raisons : sans certificat ni secret de scellement, ce port ne s'ouvre pas.
+  # QUIC chiffre toujours (§5 de RFC 9001) — il n'y a donc même pas de mode en
+  # clair à refuser.
+  listenH3 @19 :Text;
 }
 
 # DKIM : SIGNER, et non vérifier.

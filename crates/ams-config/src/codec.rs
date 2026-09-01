@@ -277,6 +277,12 @@ pub struct Configuration {
     ///
     /// Vide, l'API n'est pas servie — sans clé, aucun jeton ne se scelle.
     pub token_key: String,
+    /// L'adresse d'écoute de l'API en HTTP/3, sur UDP.
+    ///
+    /// **UNE ADRESSE À PART, ET NON LE MÊME PORT QUE `listen_http`** : ouvrir un
+    /// port UDP que l'exploitant n'a pas demandé serait une surprise, et une
+    /// surprise sur un port est un incident.
+    pub listen_h3: String,
     /// Le fichier de comptes, ou une chaîne vide.
     ///
     /// Vide, le serveur n'annonce pas `AUTH` : il n'a personne à qui répondre
@@ -425,6 +431,7 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
     let ecoute_pop3 = texte(lu.get_listen_pop3()?)?;
     let ecoute_imap = texte(lu.get_listen_imap()?)?;
     let ecoute_http = texte(lu.get_listen_http()?)?;
+    let ecoute_h3 = texte(lu.get_listen_h3()?)?;
     let clef_de_jeton = texte(lu.get_token_key()?)?;
 
     let signature = lu.get_dkim()?;
@@ -512,6 +519,7 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
         listen_pop3: ecoute_pop3,
         listen_imap: ecoute_imap,
         listen_http: ecoute_http,
+        listen_h3: ecoute_h3,
         token_key: clef_de_jeton,
     })
 }
@@ -608,6 +616,7 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
         ecrit.set_listen_pop3(&config.listen_pop3);
         ecrit.set_listen_imap(&config.listen_imap);
         ecrit.set_listen_http(&config.listen_http);
+        ecrit.set_listen_h3(&config.listen_h3);
         ecrit.set_token_key(&config.token_key);
     }
     Ok(serialize::write_message_to_words(&message))
@@ -678,6 +687,7 @@ mod tests {
             listen_pop3: String::new(),
             listen_imap: String::new(),
             listen_http: String::new(),
+            listen_h3: String::new(),
             token_key: String::new(),
         }
     }
@@ -692,6 +702,7 @@ mod tests {
             listen_pop3: String::from("127.0.0.1:2110"),
             listen_imap: String::from("127.0.0.1:2143"),
             listen_http: String::from("127.0.0.1:2443"),
+            listen_h3: String::from("127.0.0.1:2443"),
             token_key: String::from(
                 "0000000000000000000000000000000000000000000000000000000000000000",
             ),
