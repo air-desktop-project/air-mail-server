@@ -91,7 +91,7 @@ pub use address::{AddressElements, address_elements, author_domain, bare_address
 pub use base64::{BASE64_LINE, base64_max, encode_base64};
 pub use bounce::{Bounce, Failure, bounce_max, write_bounce};
 pub use compose::{ReportMail, report_mail_max, write_report_mail};
-pub use date::{DATE_MAX, read_day, write_date};
+pub use date::{DATE_MAX, RFC3339_MAX, read_day, write_date, write_rfc3339};
 pub use decode::{decode_chunk, decode_encoded_words, decode_transfer, decoded_max};
 pub use digest::{DIGEST_FROM_MAX, DIGEST_SUBJECT_MAX, Digest, write_digest};
 pub use envelope::{ENVELOPE_ADDRESSES_MAX, write_envelope};

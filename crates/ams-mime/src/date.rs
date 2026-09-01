@@ -143,6 +143,45 @@ fn jours_depuis_l_epoque(annee: u64, mois: u64, jour: u64) -> u64 {
         .saturating_sub(719_468)
 }
 
+/// La longueur d'un horodatage RFC 3339 : `2026-08-29T09:08:31Z`.
+pub const RFC3339_MAX: usize = 24;
+
+/// Écrit un horodatage RFC 3339 depuis un nombre de secondes depuis l'époque.
+///
+/// # POURQUOI ICI, ET NON DANS LA CRATE QUI EN A BESOIN
+///
+/// §4.1 de RFC 8460 exige cette forme dans un rapport TLSRPT. La conversion en
+/// date civile, elle, est déjà écrite ici — et **deux crates qui compteraient
+/// les jours différemment finiraient par ne pas dater la même chose de la même
+/// façon**. Un seul calendrier dans ce dépôt, et c'est celui-là.
+///
+/// Le fuseau est `Z` pour la même raison qu'il est `+0000` plus haut : écrire
+/// une heure locale demanderait une base de fuseaux, et n'apprendrait que dans
+/// quel bureau se trouve la machine.
+///
+/// # Errors
+///
+/// [`Error::BufferTooSmall`] si `sortie` fait moins de [`RFC3339_MAX`].
+pub fn write_rfc3339(epoch_seconds: u64, sortie: &mut [u8]) -> Result<&[u8], Error> {
+    let jours = epoch_seconds / 86_400;
+    let dans_le_jour = epoch_seconds % 86_400;
+    let (annee, mois, jour) = civil(jours);
+
+    let mut ecrits = nombre(sortie, 0, annee, 4)?;
+    ecrits = pousser(sortie, ecrits, b"-")?;
+    ecrits = nombre(sortie, ecrits, mois, 2)?;
+    ecrits = pousser(sortie, ecrits, b"-")?;
+    ecrits = nombre(sortie, ecrits, jour, 2)?;
+    ecrits = pousser(sortie, ecrits, b"T")?;
+    ecrits = nombre(sortie, ecrits, dans_le_jour / 3_600, 2)?;
+    ecrits = pousser(sortie, ecrits, b":")?;
+    ecrits = nombre(sortie, ecrits, (dans_le_jour / 60) % 60, 2)?;
+    ecrits = pousser(sortie, ecrits, b":")?;
+    ecrits = nombre(sortie, ecrits, dans_le_jour % 60, 2)?;
+    ecrits = pousser(sortie, ecrits, b"Z")?;
+    sortie.get(..ecrits).ok_or(Error::BufferTooSmall)
+}
+
 /// Écrit une date RFC 5322 depuis un nombre de secondes depuis l'époque.
 ///
 /// # Errors

@@ -142,3 +142,40 @@ fn ce_qui_n_a_pas_la_forme_d_une_date_se_refuse() {
         assert_eq!(read_day(valeur), None, "{valeur:?}");
     }
 }
+
+/// **UN HORODATAGE RFC 3339 S'ÉCRIT AUSSI**, pour les rapports TLSRPT.
+///
+/// Le calendrier est le MÊME que celui des dates de message : deux crates qui
+/// compteraient les jours différemment finiraient par ne pas dater la même chose
+/// de la même façon.
+#[test]
+fn un_horodatage_rfc_3339_s_ecrit() {
+    for (secondes, attendu) in [
+        (0_u64, "1970-01-01T00:00:00Z"),
+        (951_782_400, "2000-02-29T00:00:00Z"),
+        (1_709_164_800, "2024-02-29T00:00:00Z"),
+        (1_756_458_511, "2025-08-29T09:08:31Z"),
+    ] {
+        let mut place = [0_u8; super::RFC3339_MAX];
+        let ecrit = super::write_rfc3339(secondes, &mut place).expect("écrivable");
+        assert_eq!(core::str::from_utf8(ecrit).expect("ASCII"), attendu);
+    }
+}
+
+/// **UN TAMPON TROP COURT EST UNE ERREUR, PAS UN HORODATAGE TRONQUÉ.**
+///
+/// Une date coupée en deux se lirait comme une autre date.
+#[test]
+fn un_horodatage_ne_se_tronque_pas() {
+    let entier = "2025-08-29T09:08:31Z";
+    for taille in 0..entier.len() {
+        let mut place = std::vec![0_u8; taille];
+        assert!(
+            super::write_rfc3339(1_756_458_511, &mut place).is_err(),
+            "à {taille} octets"
+        );
+    }
+    // Et la taille annoncée suffit, largement.
+    let mut place = [0_u8; super::RFC3339_MAX];
+    assert!(super::write_rfc3339(1_756_458_511, &mut place).is_ok());
+}

@@ -53,7 +53,7 @@ deux fois, les deux fois en changeant un trait que les cibles implémentent ; la
 première, la cible ne compilait plus depuis deux commits sans que rien ne le
 dise.
 
-    scripts/check-fuzz.sh            # la liste, et la compilation des 59 cibles
+    scripts/check-fuzz.sh            # la liste, et la compilation des 60 cibles
     scripts/check-fuzz.sh --smoke    # et vingt secondes chacune
     AMS_FUZZ_SECONDES=300 scripts/check-fuzz.sh --smoke   # une vraie campagne
 

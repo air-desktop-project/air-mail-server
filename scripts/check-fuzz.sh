@@ -64,6 +64,7 @@ fuzz_ams_mime_bounce mime-bounce
 fuzz_ams_queue queue
 fuzz_ams_dane dane
 fuzz_ams_mtasts mtasts
+fuzz_ams_tlsrpt tlsrpt
 fuzz_ams_http_response http-response
 fuzz_ams_mime_envelope mime-envelope
 fuzz_ams_mime_structure mime-structure

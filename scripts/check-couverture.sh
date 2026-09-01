@@ -64,6 +64,7 @@ CRATES_SANS_IO=(
     ams-dmarc
     ams-dane
     ams-mtasts
+    ams-tlsrpt
     ams-config
     ams-index
     ams-api

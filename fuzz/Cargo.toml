@@ -42,6 +42,9 @@ path = "../crates/ams-dane"
 [dependencies.ams-mtasts]
 path = "../crates/ams-mtasts"
 
+[dependencies.ams-tlsrpt]
+path = "../crates/ams-tlsrpt"
+
 [dependencies.ams-proto-imap]
 path = "../crates/ams-proto-imap"
 
@@ -148,6 +151,13 @@ bench = false
 [[bin]]
 name = "fuzz_ams_mime_bounce"
 path = "fuzz_targets/fuzz_ams_mime_bounce.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ams_tlsrpt"
+path = "fuzz_targets/fuzz_ams_tlsrpt.rs"
 test = false
 doc = false
 bench = false
