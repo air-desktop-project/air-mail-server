@@ -59,6 +59,7 @@ dependencies = [
  "ams-proto-pop3",
  "ams-proto-quic",
  "ams-proto-smtp",
+ "ams-queue",
  "ams-quic",
  "ams-quic-crypto",
  "ams-sasl",
@@ -175,6 +176,10 @@ version = "0.1.0"
 
 [[package]]
 name = "ams-proto-smtp"
+version = "0.1.0"
+
+[[package]]
+name = "ams-queue"
 version = "0.1.0"
 
 [[package]]

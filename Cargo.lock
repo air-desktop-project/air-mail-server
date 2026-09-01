@@ -198,6 +198,10 @@ name = "ams-proto-smtp"
 version = "0.1.0"
 
 [[package]]
+name = "ams-queue"
+version = "0.1.0"
+
+[[package]]
 name = "ams-quic"
 version = "0.1.0"
 dependencies = [

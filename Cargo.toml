@@ -11,8 +11,8 @@
 #
 #   1. GRAMMAIRES      `ams-proto-*`, `ams-mime` — des octets vers des commandes,
 #                      et retour. Aucune socket, aucun fichier, aucune horloge.
-#   2. DÉCISIONS       `ams-session`, `ams-guard`, `ams-dkim`, `ams-spf`,
-#                      `ams-dmarc`, `ams-tls` — des machines à états. Elles
+#   2. DÉCISIONS       `ams-session`, `ams-guard`, `ams-queue`, `ams-dkim`,
+#                      `ams-spf`, `ams-dmarc`, `ams-tls` — des machines à états. Elles
 #                      reçoivent des octets et l'heure ; elles rendent des octets
 #                      et des ACTIONS. Elles n'attendent jamais.
 #   3. EXÉCUTION       `ams-loop-tokio`, `ams-store` — les seules crates qui
@@ -49,6 +49,7 @@ members = [
     # Étage 2 — décisions, sans entrée-sortie
     "crates/ams-session",
     "crates/ams-guard",
+    "crates/ams-queue",
     "crates/ams-tls",
     "crates/ams-dkim",
     "crates/ams-spf",
@@ -113,6 +114,7 @@ ams-quic-tls = { path = "crates/ams-quic-tls", version = "0.1.0" }
 ams-h3 = { path = "crates/ams-h3", version = "0.1.0" }
 ams-quic-client = { path = "crates/ams-quic-client", version = "0.1.0" }
 ams-proto-smtp = { path = "crates/ams-proto-smtp", version = "0.1.0" }
+ams-queue = { path = "crates/ams-queue", version = "0.1.0" }
 ams-api = { path = "crates/ams-api", version = "0.1.0" }
 ams-auth = { path = "crates/ams-auth", version = "0.1.0" }
 ams-sasl = { path = "crates/ams-sasl", version = "0.1.0" }

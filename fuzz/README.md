@@ -24,6 +24,26 @@ Ce qu'il fallait exclure, ce sont **les états qui donnent accès au courrier** 
 propriété fausse plutôt qu'un défaut, et cela vaut d'être écrit : une cible qui
 échoue commence par mettre en cause ce qu'elle affirme.
 
+**La cinquième, le 2026-09-01, sur `fuzz_ams_mime_bounce`.** La cible exigeait
+que le délimiteur de parties ne figure QUE là où le composeur le pose : cinq
+fois, une pour l'en-tête et quatre aux bornes des trois parties. Le fuzz a rendu
+quinze, en une seconde, avec un délimiteur d'UN SEUL caractère — qui se retrouve
+alors dans `Content-Type`, dans `Return-Path`, dans n'importe quel mot qu'on
+écrit.
+
+Le code avait raison, et la propriété était trop large. Ce que `write_bounce`
+garantit est plus étroit : le délimiteur est absent des DEUX parties LIBRES — le
+texte et les en-têtes du message perdu —, c'est-à-dire des seules dont le contenu
+ne vient pas de nous. C'est éprouvé là où cela se prouve, dans les essais
+unitaires, et la cible a été réécrite autour de trois propriétés qui, elles,
+tiennent : tout ce qui sort est ÉMETTABLE (pas un `CR` ni un `LF` isolé), le
+chemin de retour est NUL, et **aucune valeur ne peut ajouter un champ de
+statut** — celle qui vise vraiment le diagnostic du pair, où un `Action:
+delivered` glissé ferait croire à une remise qui n'a pas eu lieu.
+
+La même leçon que les quatre précédentes : la propriété qu'on a envie d'écrire
+est souvent plus forte que celle qu'on tient.
+
 ## `scripts/check-fuzz.sh` — le contrôle se lance chez soi
 
 Cette crate vit hors du workspace : **`cargo build --workspace` ne la touche
@@ -33,7 +53,7 @@ deux fois, les deux fois en changeant un trait que les cibles implémentent ; la
 première, la cible ne compilait plus depuis deux commits sans que rien ne le
 dise.
 
-    scripts/check-fuzz.sh            # la liste, et la compilation des 28 cibles
+    scripts/check-fuzz.sh            # la liste, et la compilation des 56 cibles
     scripts/check-fuzz.sh --smoke    # et vingt secondes chacune
     AMS_FUZZ_SECONDES=300 scripts/check-fuzz.sh --smoke   # une vraie campagne
 

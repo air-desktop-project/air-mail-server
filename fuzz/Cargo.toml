@@ -33,6 +33,9 @@ arbitrary = { version = "1", features = ["derive"] }
 [dependencies.ams-mime]
 path = "../crates/ams-mime"
 
+[dependencies.ams-queue]
+path = "../crates/ams-queue"
+
 [dependencies.ams-proto-imap]
 path = "../crates/ams-proto-imap"
 
@@ -132,6 +135,20 @@ bench = false
 [[bin]]
 name = "fuzz_ams_mime_structure"
 path = "fuzz_targets/fuzz_ams_mime_structure.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ams_mime_bounce"
+path = "fuzz_targets/fuzz_ams_mime_bounce.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ams_queue"
+path = "fuzz_targets/fuzz_ams_queue.rs"
 test = false
 doc = false
 bench = false

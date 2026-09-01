@@ -95,6 +95,7 @@ des octets **et des actions**. Elles n'attendent jamais.
 | --- | --- | --- |
 | `ams-session` | les sessions, serveur ET cliente | **SMTP, POP3 et IMAP en réception, SMTP à l'émission** |
 | `ams-guard` | flooding et bannissement par source | **implémenté** |
+| `ams-queue` | file de réémission : quand réessayer, quand renoncer | **l'arithmétique et les noms ; le câblage suit** |
 | `ams-auth` | le magasin d'identifiants, vérification Argon2id | **implémenté** |
 | `ams-tls` | TLS 1.3 uniquement, échange de clés post-quantique | **implémenté, en entrant et en sortant** |
 | `ams-dkim` | RFC 6376 | **vérifiées, câblées, et posées** |
@@ -1657,10 +1658,11 @@ jobs indépendants : la vérification du code (les quatre commandes ci-dessus, s
 
 `fuzz/` est une crate `cargo-fuzz` **hors du workspace** : elle exige un nightly,
 que le pin exact du workspace n'admet pas — deux LLVM produisent des profils de
-couverture mutuellement illisibles. Dix cibles, quarante-six propriétés, dont un
-**aller-retour** sur l'encodeur de réponses, un **vocabulaire de sortie clos** sur
-la session, et l'**indépendance au découpage** sur la phase de données — celle qui
-vise directement la contrebande SMTP. **Six défauts réels** trouvés et
+couverture mutuellement illisibles. **Cinquante-six cibles**, et plus de deux
+cent soixante propriétés énoncées, dont un **aller-retour** sur l'encodeur de
+réponses, un **vocabulaire de sortie clos** sur la session, et l'**indépendance
+au découpage** sur la phase de données — celle qui vise directement la
+contrebande SMTP. **Six défauts réels** trouvés et
 corrigés, dont deux dans le garde. Voir
 [`fuzz/README.md`](fuzz/README.md).
 

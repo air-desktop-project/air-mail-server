@@ -73,6 +73,7 @@ extern crate std;
 
 mod address;
 mod base64;
+mod bounce;
 mod compose;
 mod date;
 mod decode;
@@ -88,6 +89,7 @@ mod structure;
 
 pub use address::{AddressElements, address_elements, author_domain, bare_address, sole_address};
 pub use base64::{BASE64_LINE, base64_max, encode_base64};
+pub use bounce::{Bounce, Failure, bounce_max, write_bounce};
 pub use compose::{ReportMail, report_mail_max, write_report_mail};
 pub use date::{DATE_MAX, read_day, write_date};
 pub use decode::{decode_chunk, decode_encoded_words, decode_transfer, decoded_max};

@@ -1217,6 +1217,27 @@ pair à qui l'on apprendrait qu'il est « reconnu mais désactivé » réessaier
 Le reste de la liste — IMAP4rev1, le relais ouvert — reste une décision : rien ne
 l'empêche mécaniquement, sinon que le code qui l'appliquerait n'est pas écrit.
 
+**Le relais fermé n'est plus seulement une décision, depuis le 2026-09-01.** Il
+l'était par défaut d'implémentation : `accepts_recipient` refusait toute adresse
+qui n'était pas celle d'un compte, si bien qu'aucun message ne pouvait sortir. Un
+relais fermé faute de savoir émettre n'est pas un relais fermé — c'est un serveur
+qui ne sait pas émettre, et le jour où il l'apprend la protection disparaît sans
+que personne l'ait décidé.
+
+La file de réémission sortante est ce jour-là. Trois règles la tiennent, et elles
+sont écrites AVANT le code qui émet :
+
+1. **On ne relaie que pour un compte AUTHENTIFIÉ**, et l'authentification n'est
+   annoncée que sous chiffrement. Un pair anonyme continue de recevoir un `550`.
+2. **L'émission s'ouvre SUR DEMANDE**, et le défaut est éteint. Émettre du
+   courrier vers des tiers ne se décide pas à la place de qui exploite la
+   machine — la même règle que pour les rapports DMARC.
+3. **Le rapport de non-remise se remet LOCALEMENT.** Puisque le chemin de retour
+   est toujours l'adresse d'un de nos comptes, ce serveur n'envoie jamais de
+   rebond à un inconnu. C'est ce qui le tient hors de la rétro-diffusion : émettre
+   un rebond vers une adresse qu'un tiers a écrite dans un `MAIL FROM:` usurpé
+   ferait de nous l'instrument de son envoi.
+
 **Le piège vaut d'être nommé** : les défauts de `tokio-rustls` sont
 `["logging", "tls12", "aws-lc-rs"]`. Les laisser ferait entrer TLS 1.2 **et** du
 C dans la boucle sans qu'une seule ligne du dépôt le demande — deux contraintes
@@ -3408,9 +3429,9 @@ il l'a commis sur lui-même : une section qui s'intitule « l'état réel » est
 qu'on relit le moins, parce qu'on croit la connaître.
 
 Sont outillées : C1 (les trois étages, et la couverture qui n'est exigible que
-parce qu'ils sont séparés), C2 (le gate mesure 47 976 régions sur 25 crates,
+parce qu'ils sont séparés), C2 (le gate mesure 49 260 régions sur 26 crates,
 toutes couvertes — et il compare des comptes, non un pourcentage arrondi), C3
-(les lints, l'absence d'allocation dans les décodeurs, et 54 cibles de fuzz dont
+(les lints, l'absence d'allocation dans les décodeurs, et 56 cibles de fuzz dont
 la CI vérifie qu'elle les lance toutes), C4 (`ams-tls` n'offre que
 TLS 1.3), C6 (les décodeurs refusent le CR et le LF isolés ; `AUTH`, `USER`/`PASS`
 et `LOGIN` sont refusés hors chiffrement, sans réglage pour le rétablir), C8

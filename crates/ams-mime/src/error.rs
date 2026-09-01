@@ -119,6 +119,13 @@ pub enum Error {
     /// tronquée, ou une partie de plus. On refuse de composer plutôt que
     /// d'émettre un message dont on ne sait pas ce qu'il sera lu.
     BoundaryInContent,
+
+    /// Un rapport de non-remise qui ne nomme AUCUN destinataire en échec.
+    ///
+    /// Il ne dirait rien à l'expéditeur, et une machine qui le lirait n'y
+    /// trouverait pas de quoi conclure. Mieux vaut refuser de composer que de
+    /// rendre un rapport vide.
+    EmptyReport,
 }
 
 impl fmt::Display for Error {
@@ -139,6 +146,9 @@ impl fmt::Display for Error {
             Error::BufferTooSmall => f.write_str("le tampon offert ne suffit pas"),
             Error::NotPrintable => {
                 f.write_str("une valeur porte un octet qu'on refuse d'écrire dans un message")
+            }
+            Error::EmptyReport => {
+                f.write_str("un rapport de non-remise ne nomme aucun destinataire en échec")
             }
             Error::BoundaryInContent => {
                 f.write_str("le délimiteur de parties figure dans une partie")
@@ -190,6 +200,7 @@ mod tests {
         Error::BufferTooSmall,
         Error::NotPrintable,
         Error::BoundaryInContent,
+        Error::EmptyReport,
     ];
 
     #[test]

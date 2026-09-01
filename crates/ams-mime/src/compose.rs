@@ -220,7 +220,7 @@ pub(crate) fn contient(botte: &[u8], aiguille: &[u8]) -> bool {
 }
 
 /// Recopie `morceau`, et rend le nouveau compte.
-fn pousser(sortie: &mut [u8], ecrits: usize, morceau: &[u8]) -> Result<usize, Error> {
+pub(crate) fn pousser(sortie: &mut [u8], ecrits: usize, morceau: &[u8]) -> Result<usize, Error> {
     let fin = ecrits.saturating_add(morceau.len());
     let place = sortie.get_mut(ecrits..fin).ok_or(Error::BufferTooSmall)?;
     place.copy_from_slice(morceau);

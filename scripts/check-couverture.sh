@@ -56,6 +56,7 @@ CRATES_SANS_IO=(
     ams-h3
     ams-session
     ams-guard
+    ams-queue
     ams-tls
     ams-dkim
     ams-spf
