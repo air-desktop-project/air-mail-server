@@ -83,6 +83,7 @@ mod reports;
 mod resolver;
 mod server;
 mod spf;
+mod tlsreports;
 
 pub use connection::{
     DkimTally, DmarcTally, Outcome, Service, Summary, Timeouts, serve_connection,
@@ -104,3 +105,4 @@ pub use reports::{
 pub use resolver::Resolver;
 pub use server::{DkimSums, DmarcSums, ServeOptions, Stats, serve, source_de};
 pub use spf::SenderChecker;
+pub use tlsreports::{DOMAINES_MAX, TlsObservation, TlsReports, TlsSendTally, TlsSpoolTally};

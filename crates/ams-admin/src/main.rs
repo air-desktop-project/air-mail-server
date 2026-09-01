@@ -295,6 +295,20 @@ fn afficher(config: &Configuration) {
         }
     );
     println!(
+        "rapports TLS       {}",
+        match (config.tlsrpt.compose(), config.tlsrpt.envoie()) {
+            (false, _) => String::from("AUCUN — aucun dossier nommé"),
+            (true, false) => format!(
+                "déposés dans `{}` — DÉPOSÉS, PAS REMIS",
+                config.tlsrpt.directory
+            ),
+            (true, true) => format!(
+                "déposés dans `{}` PUIS REMIS aux destinations qui ont consenti (§3)",
+                config.tlsrpt.directory
+            ),
+        }
+    );
+    println!(
         "MTA-STS            {}",
         if config.mtasts.est_configure() {
             format!(

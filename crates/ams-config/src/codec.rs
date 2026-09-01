@@ -295,6 +295,40 @@ pub struct Configuration {
     pub relay: Relay,
     /// MTA-STS (RFC 8461).
     pub mtasts: Mtasts,
+    /// TLSRPT (RFC 8460).
+    pub tlsrpt: Tlsrpt,
+}
+
+/// TLSRPT (RFC 8460) : ce qu'on rend au domaine d'en face.
+///
+/// # UNE CHAÎNE VIDE VEUT DIRE « AUCUN RAPPORT »
+///
+/// Pas de drapeau pour composer : l'absence de dossier EST l'absence de service,
+/// comme pour les rapports DMARC. Le drapeau, lui, ne gouverne que la REMISE —
+/// deux crans, pour qu'un exploitant puisse lire ce qu'il enverrait.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Tlsrpt {
+    /// Le dossier où déposer les rapports, ou une chaîne vide.
+    pub directory: String,
+    /// Remet-on les rapports, ou se contente-t-on de les déposer ?
+    pub send: bool,
+}
+
+impl Tlsrpt {
+    /// Compose-t-on des rapports ?
+    #[must_use]
+    pub fn compose(&self) -> bool {
+        !self.directory.is_empty()
+    }
+
+    /// Les remet-on ?
+    ///
+    /// **IL FAUT LES DEUX** : un drapeau sans dossier ne remettrait rien, faute
+    /// d'avoir composé quoi que ce soit.
+    #[must_use]
+    pub fn envoie(&self) -> bool {
+        self.compose() && self.send
+    }
 }
 
 /// MTA-STS (RFC 8461) : ce qu'un domaine exige de qui lui écrit.
@@ -524,6 +558,14 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
 
     // **UN FICHIER ÉCRIT AVANT CE CHAMP DÉCODE DEUX CHAÎNES VIDES**, et deux
     // chaînes vides veulent dire « MTA-STS n'est pas évalué ».
+    // **UN FICHIER ÉCRIT AVANT CE CHAMP DÉCODE UNE CHAÎNE VIDE ET UN FAUX**, et
+    // cela veut dire « aucun rapport n'est composé, et rien n'est remis ».
+    let rapports = lu.get_tlsrpt()?;
+    let tlsrpt = Tlsrpt {
+        directory: texte(rapports.get_directory()?)?,
+        send: rapports.get_send(),
+    };
+
     let sts = lu.get_mtasts()?;
     let mtasts = Mtasts {
         anchors: texte(sts.get_anchors()?)?,
@@ -635,6 +677,7 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
         token_key: clef_de_jeton,
         relay,
         mtasts,
+        tlsrpt,
     })
 }
 
@@ -746,6 +789,11 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
             sts.set_anchors(&config.mtasts.anchors);
             sts.set_cache(&config.mtasts.cache);
         }
+        {
+            let mut rapports = ecrit.reborrow().init_tlsrpt();
+            rapports.set_directory(&config.tlsrpt.directory);
+            rapports.set_send(config.tlsrpt.send);
+        }
     }
     Ok(serialize::write_message_to_words(&message))
 }
@@ -776,7 +824,7 @@ mod tests {
         Configuration, Dkim, Dmarc, Enforcement, Error, Spf, TRAVERSAL_LIMIT_WORDS, Timeouts, Tls,
         decode, encode,
     };
-    use super::{Mtasts, Relay};
+    use super::{Mtasts, Relay, Tlsrpt};
     use alloc::string::{String, ToString as _};
     use alloc::vec;
     use ams_guard::Thresholds;
@@ -801,6 +849,8 @@ mod tests {
             // MTA-STS NON ÉVALUÉ dans l'exemple : c'est le défaut, et c'est
             // aussi ce qu'un fichier antérieur à ce champ décodera.
             mtasts: Mtasts::default(),
+            // AUCUN RAPPORT TLS dans l'exemple : c'est le défaut.
+            tlsrpt: Tlsrpt::default(),
             timeouts: Timeouts {
                 command_seconds: 300,
                 data_seconds: 600,
@@ -1494,6 +1544,107 @@ mod tests {
             let octets = capnp::serialize::write_message_to_words(&message);
             assert_eq!(decode(&octets), Err(Error::NotUtf8), "champ {quel}");
         }
+    }
+
+    // ── TLSRPT (RFC 8460) ───────────────────────────────────────────────────
+
+    /// **UN FICHIER ANCIEN DÉCODE « AUCUN RAPPORT ».**
+    #[test]
+    fn sans_champ_tlsrpt_rien_n_est_compose() {
+        let rapports = Tlsrpt::default();
+        assert!(!rapports.compose());
+        assert!(!rapports.envoie());
+        assert!(!exemple().tlsrpt.compose());
+    }
+
+    /// **LE DRAPEAU NE GOUVERNE QUE LA REMISE**, et il faut les deux pour
+    /// qu'elle ait lieu : un drapeau sans dossier ne remettrait rien, faute
+    /// d'avoir composé quoi que ce soit.
+    #[test]
+    fn le_drapeau_seul_ne_remet_rien() {
+        let sans_dossier = Tlsrpt {
+            directory: String::new(),
+            send: true,
+        };
+        assert!(!sans_dossier.compose());
+        assert!(!sans_dossier.envoie());
+
+        let depose = Tlsrpt {
+            directory: String::from("/var/spool/ams/tlsrpt"),
+            send: false,
+        };
+        assert!(depose.compose());
+        assert!(!depose.envoie(), "déposé n'est pas remis");
+
+        let remet = Tlsrpt {
+            directory: String::from("/var/spool/ams/tlsrpt"),
+            send: true,
+        };
+        assert!(remet.compose() && remet.envoie());
+    }
+
+    #[test]
+    fn tlsrpt_traverse_le_format() {
+        let voulu = Tlsrpt {
+            directory: String::from("/var/spool/ams/tlsrpt"),
+            send: true,
+        };
+        let config = Configuration {
+            tlsrpt: voulu.clone(),
+            ..exemple()
+        };
+        let octets = encode(&config).expect("encodable");
+        let relue = decode(&octets).expect("relisible");
+        assert_eq!(relue.tlsrpt, voulu);
+        assert_eq!(relue, config);
+    }
+
+    /// **UN DOSSIER QUI N'EST PAS DE L'UTF-8 FAIT REFUSER LE FICHIER**, comme
+    /// les autres chemins — et celui-ci se décode parmi les derniers.
+    #[test]
+    fn un_dossier_tlsrpt_illisible_fait_refuser() {
+        use crate::ams_config_capnp::configuration;
+
+        let bon = encode(&Configuration {
+            tlsrpt: Tlsrpt {
+                directory: String::from("/var/spool/ams/tlsrpt"),
+                send: true,
+            },
+            ..exemple()
+        })
+        .expect("encodable");
+        assert!(decode(&bon).is_ok(), "le témoin doit se relire");
+
+        let mut message = capnp::message::Builder::new_default();
+        {
+            let lu = capnp::serialize::read_message(
+                &mut bon.as_slice(),
+                capnp::message::ReaderOptions::new(),
+            )
+            .expect("relisible");
+            message
+                .set_root(lu.get_root::<configuration::Reader<'_>>().expect("racine"))
+                .expect("recopiable");
+            let mut ecrit = message
+                .get_root::<configuration::Builder<'_>>()
+                .expect("racine");
+            let mut rapports = ecrit.reborrow().init_tlsrpt();
+            rapports.set_directory(capnp::text::Reader(b"/var/\xff/tlsrpt"));
+            rapports.set_send(true);
+        }
+        let octets = capnp::serialize::write_message_to_words(&message);
+        assert_eq!(decode(&octets), Err(Error::NotUtf8));
+    }
+
+    #[test]
+    fn tlsrpt_se_debogue_et_se_compare() {
+        let rapports = Tlsrpt {
+            directory: String::from("/x"),
+            send: false,
+        };
+        assert!(!std::format!("{rapports:?}").is_empty());
+        assert_ne!(rapports, Tlsrpt::default());
+        assert_eq!(rapports.clone(), rapports);
     }
 
     #[test]

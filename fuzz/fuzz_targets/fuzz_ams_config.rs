@@ -107,6 +107,10 @@ struct Entree {
     /// Les deux chemins de MTA-STS — DEUX CHAÎNES LIBRES, y compris l'une sans
     /// l'autre. Le SERVEUR refuse ce cas ; cette crate les transporte.
     mtasts: [String; 2],
+    /// Le dossier des rapports TLS, et le drapeau de remise — LIBRES tous les
+    /// deux, y compris incohérents entre eux.
+    tlsrpt: String,
+    remet_tls: bool,
 }
 
 fuzz_target!(|entree: Entree| {
@@ -181,6 +185,10 @@ fuzz_target!(|entree: Entree| {
             report_interval_seconds: entree.intervalle,
             send_reports: entree.remet,
             failure_reports: entree.echecs,
+        },
+        tlsrpt: ams_config::Tlsrpt {
+            directory: entree.tlsrpt.clone(),
+            send: entree.remet_tls,
         },
         mtasts: ams_config::Mtasts {
             anchors: entree.mtasts[0].clone(),

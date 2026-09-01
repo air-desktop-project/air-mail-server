@@ -135,6 +135,33 @@ struct Configuration {
   # vides veulent dire « pas évalué ». Une configuration existante se comporte
   # donc exactement comme avant.
   mtasts @21 :Mtasts;
+
+  # TLSRPT (RFC 8460) — ce qu'on rapporte du chiffrement sortant.
+  #
+  # **UN CHAMP AJOUTÉ APRÈS COUP DÉCODE UNE CHAÎNE VIDE ET UN FAUX**, et cela
+  # veut dire « aucun rapport n'est composé, et rien n'est remis ».
+  tlsrpt @22 :Tlsrpt;
+}
+
+# TLSRPT (RFC 8460) : ce qu'on rend au domaine d'en face.
+#
+# C'est le seul mécanisme de ce serveur dont le BÉNÉFICIAIRE EST QUELQU'UN
+# D'AUTRE : un domaine qui publie une politique MTA-STS en `testing`, ou des
+# `TLSA`, n'apprend qu'ainsi que ses remises échouent.
+struct Tlsrpt {
+  # Le dossier où DÉPOSER les rapports, ou une chaîne vide.
+  #
+  # VIDE, AUCUN RAPPORT N'EST COMPOSÉ. Pas de drapeau : l'absence de valeur EST
+  # l'absence de service, comme le dossier des rapports DMARC.
+  directory @0 :Text;
+
+  # Remet-on les rapports, ou se contente-t-on de les déposer ?
+  #
+  # **FAUX PAR DÉFAUT**, comme `sendReports` de DMARC : émettre du courrier vers
+  # des tiers ne se décide pas à la place de celui qui exploite la machine. Sans
+  # ce drapeau, les rapports s'accumulent dans le dossier et un opérateur les
+  # relève — ce qui lui permet aussi de lire ce qu'il enverrait.
+  send @1 :Bool;
 }
 
 # MTA-STS (RFC 8461) : ce qu'un domaine exige de qui lui écrit.

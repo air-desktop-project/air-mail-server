@@ -21,7 +21,7 @@
 use crate::Error;
 
 /// D'où venait la politique appliquée (§4.4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PolicyType {
     /// Un `TLSA` (DANE, RFC 7672).
     Tlsa,
@@ -47,7 +47,10 @@ impl PolicyType {
 ///
 /// **LES MOTS SONT CEUX DE LA RFC, PAS LES NÔTRES.** Un rapport se lit par une
 /// machine à l'autre bout, qui ne connaît que ceux-là.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Il se hache : l'appelant compte les sessions par type d'échec ET par serveur,
+/// ce qui demande une clé.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ResultType {
     /// Le pair n'a pas annoncé `STARTTLS`.
     StarttlsNotSupported,

@@ -206,6 +206,8 @@ fn configuration_pop3(
         relay: ams_config::Relay::default(),
         // MTA-STS NON ÉVALUÉ : ces essais ne joignent aucun hôte de politique.
         mtasts: ams_config::Mtasts::default(),
+        // AUCUN RAPPORT TLS : ces essais n'émettent vers personne.
+        tlsrpt: ams_config::Tlsrpt::default(),
         timeouts: Timeouts {
             command_seconds: 10,
             data_seconds: 10,

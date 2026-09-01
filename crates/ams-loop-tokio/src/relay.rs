@@ -128,6 +128,12 @@ pub struct Relay {
     exige_tls: bool,
     /// Le temps accordé à chaque lecture.
     delai: Duration,
+    /// Où consigner ce qu'on rapportera aux domaines qui le demandent.
+    ///
+    /// **`None` NE CHANGE AUCUNE REMISE** : un serveur qui ne rapporte pas remet
+    /// exactement comme avant. Il laisse simplement les domaines d'en face
+    /// découvrir leurs pannes de chiffrement à leur courrier qui n'arrive plus.
+    rapports: Option<Arc<crate::tlsreports::TlsReports>>,
     /// De quoi évaluer MTA-STS, si l'exploitant l'a demandé.
     ///
     /// **`None` NE REFUSE RIEN** : sans magasin de racines ni cache, MTA-STS
@@ -158,7 +164,15 @@ impl Relay {
             // qui en compte cinq se passe à l'envers sans que le compilateur
             // bronche, et celui-ci décide de remises.
             sts: None,
+            rapports: None,
         }
+    }
+
+    /// Lui donne de quoi consigner ce qu'il rapportera (RFC 8460).
+    #[must_use]
+    pub fn with_tls_reports(mut self, rapports: Arc<crate::tlsreports::TlsReports>) -> Self {
+        self.rapports = Some(rapports);
+        self
     }
 
     /// Lui donne de quoi évaluer MTA-STS (RFC 8461).
@@ -248,12 +262,70 @@ impl Relay {
                         exige,
                     )
                     .await;
+                // **ON CONSIGNE CHAQUE ESSAI, RÉUSSI COMME MANQUÉ.** §4.2 exige
+                // les DEUX comptes : un rapport qui ne dirait que les échecs ne
+                // permettrait pas de savoir s'ils sont l'exception ou la règle.
+                self.consigner(domaine, hote, dane.is_some(), politique.as_deref(), issue);
                 if issue != RelayOutcome::Unreachable {
                     return issue;
                 }
             }
         }
+        // Un serveur qu'aucune politique n'autorise n'a jamais été essayé : on
+        // le consigne ici, puisque la boucle ci-dessus ne l'a pas vu.
+        if issue == RelayOutcome::PolicyMismatch {
+            for hote in &serveurs {
+                self.consigner(domaine, hote, false, politique.as_deref(), issue);
+            }
+        }
         issue
+    }
+
+    /// Consigne ce qu'un essai a appris, pour le rapport TLS (RFC 8460).
+    ///
+    /// **RIEN NE SE FAIT SI PERSONNE NE RAPPORTE** : le journal n'existe que si
+    /// l'exploitant a nommé un dossier, et la question « ce domaine demande-t-il
+    /// un rapport ? » se pose au dépôt, pas ici — une résolution DNS de plus par
+    /// message doublerait le trafic pour une réponse qui ne change pas d'une
+    /// heure à l'autre.
+    fn consigner(
+        &self,
+        domaine: &str,
+        hote: &str,
+        dane: bool,
+        politique: Option<&str>,
+        issue: RelayOutcome,
+    ) {
+        let Some(rapports) = self.rapports.as_ref() else {
+            return;
+        };
+        let (genre, lignes, serveurs) = match (dane, politique) {
+            (true, _) => (ams_tlsrpt::PolicyType::Tlsa, Vec::new(), Vec::new()),
+            (false, Some(texte)) => {
+                let mut place = [""; ams_mtasts::MX_MAX];
+                let serveurs = ams_mtasts::parse_policy(texte, &mut place)
+                    .map(|lue| lue.mx().iter().map(|un| String::from(*un)).collect())
+                    .unwrap_or_default();
+                (
+                    ams_tlsrpt::PolicyType::Sts,
+                    texte.lines().map(String::from).collect(),
+                    serveurs,
+                )
+            }
+            (false, None) => (
+                ams_tlsrpt::PolicyType::NoPolicyFound,
+                Vec::new(),
+                Vec::new(),
+            ),
+        };
+        rapports.observer(&crate::tlsreports::TlsObservation {
+            domain: String::from(domaine),
+            mx_host: String::from(hote),
+            policy_type: genre,
+            policy_strings: lignes,
+            mx_hosts: serveurs,
+            failure: cause_de(issue, dane),
+        });
     }
 
     /// Ce que la politique MTA-STS du domaine dit de ce serveur.
@@ -586,6 +658,34 @@ enum Suite {
     Fini(RelayOutcome),
     /// Il faut monter en chiffrement, puis reprendre.
     Monter,
+}
+
+/// Pourquoi cet essai a échoué, dans les mots de §4.3 de RFC 8460.
+///
+/// `None` quand il a abouti — c'est alors une session réussie, qu'on compte
+/// aussi.
+///
+/// **ON NE DEVINE PAS PLUS QUE CE QU'ON SAIT.** Un pair injoignable n'est pas un
+/// échec de chiffrement : c'est une panne de réseau, et la rapporter comme un
+/// problème de certificat enverrait le domaine chercher au mauvais endroit.
+fn cause_de(issue: RelayOutcome, dane: bool) -> Option<ams_tlsrpt::ResultType> {
+    match issue {
+        RelayOutcome::Delivered { .. } => None,
+        RelayOutcome::NoEncryption if dane => Some(ams_tlsrpt::ResultType::ValidationFailureDane),
+        // La poignée de main a échoué, ou le pair n'a pas annoncé `STARTTLS`.
+        // Les deux se rendent par la même issue, et l'on nomme celle qui
+        // n'accuse personne à tort.
+        RelayOutcome::NoEncryption => Some(ams_tlsrpt::ResultType::ValidationFailure),
+        RelayOutcome::PolicyMismatch => Some(ams_tlsrpt::ResultType::StsPolicyInvalid),
+        // Un refus SMTP, une panne de réseau, un message qu'on ne sait pas
+        // émettre : rien de tout cela ne dit quoi que ce soit du chiffrement.
+        RelayOutcome::Rejected(_)
+        | RelayOutcome::Deferred(_)
+        | RelayOutcome::NullMx
+        | RelayOutcome::Unreachable
+        | RelayOutcome::Protocol
+        | RelayOutcome::Unsendable => None,
+    }
 }
 
 /// Ce que la politique MTA-STS d'un domaine dit d'un de ses serveurs.

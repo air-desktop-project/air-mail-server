@@ -100,6 +100,10 @@ pub struct Options {
     pub mtasts_anchors: Option<PathBuf>,
     /// Le dossier du cache des politiques MTA-STS. **Exigé avec le premier.**
     pub mtasts_cache: Option<PathBuf>,
+    /// Le dossier des rapports TLSRPT. Absent : aucun n'est composé.
+    pub tlsrpt_dir: Option<PathBuf>,
+    /// Remet-on les rapports TLSRPT ?
+    pub tlsrpt_send: bool,
     /// Combien de sources la table du garde retient à la fois.
     ///
     /// C'est ce qui empêche la table d'être un épuisement de mémoire offert à
@@ -178,6 +182,12 @@ impl Default for Options {
             // valeur EST l'absence de service. Embarquer des racines les ferait
             // vieillir avec le binaire ; lire celles du système sans qu'on l'ait
             // dit serait une confiance héritée en silence.
+            // PAS DE RAPPORT TLS PAR DÉFAUT, et pas de drapeau pour composer :
+            // l'absence de dossier EST l'absence de service, comme pour les
+            // rapports DMARC. Et PAS DE REMISE non plus : émettre du courrier
+            // vers des tiers ne se décide pas à la place de l'exploitant.
+            tlsrpt_dir: None,
+            tlsrpt_send: false,
             mtasts_anchors: None,
             mtasts_cache: None,
             // LES SEUILS DU GARDE VIENNENT DE `ams-guard`, et pas d'ici : les
@@ -259,6 +269,10 @@ impl Options {
                 private_key_path: chemin(self.dkim_key.as_ref()),
             },
             accounts: chemin(self.accounts.as_ref()),
+            tlsrpt: ams_config::Tlsrpt {
+                directory: chemin(self.tlsrpt_dir.as_ref()),
+                send: self.tlsrpt_send,
+            },
             mtasts: ams_config::Mtasts {
                 anchors: chemin(self.mtasts_anchors.as_ref()),
                 cache: chemin(self.mtasts_cache.as_ref()),
@@ -326,6 +340,10 @@ OPTIONS DE `config write`
     --accounts <chemin>    fichier de comptes (`air-mail-admin account add`)
     --listen-pop3 <adr>    où écouter en POP3 (défaut : pas de POP3)
     --listen-imap <adr>    où écouter en IMAP (défaut : pas d'IMAP)
+
+    TLSRPT (RFC 8460)
+    --tlsrpt-dir <chemin>               dossier des rapports (défaut : aucun)
+    --tlsrpt-send                       les REMETTRE, et pas seulement les déposer
 
     MTA-STS (RFC 8461)
     --mta-sts-anchors <chemin>          les autorités, en PEM (défaut : non évalué)
@@ -509,6 +527,35 @@ OPTIONS DE `config write`
     tient hors de la rétro-diffusion — émettre un rebond vers une adresse qu'un
     tiers a écrite dans un `MAIL FROM:` usurpé ferait de nous l'instrument de son
     envoi.
+
+    LES RAPPORTS TLS NE SONT COMPOSÉS QUE SI UN DOSSIER EST NOMMÉ, et ils sont
+    DÉPOSÉS, pas remis. `--tlsrpt-send` les envoie. Deux crans, exactement comme
+    les rapports DMARC : un exploitant peut lire ce qu'il enverrait avant de
+    l'envoyer, et émettre du courrier vers des tiers ne se décide pas à sa place.
+
+    C'EST LE SEUL MÉCANISME DE CE SERVEUR DONT LE BÉNÉFICIAIRE EST QUELQU'UN
+    D'AUTRE. DANE et MTA-STS protègent VOTRE courrier ; TLSRPT rend au domaine
+    d'en face ce que vous seul savez — que ses `TLSA` sont mal renouvelés, que sa
+    politique nomme un serveur disparu, que son certificat a expiré. Un domaine
+    qui publie `mode: testing` publie précisément pour l'apprendre.
+
+    ON NE RAPPORTE QU'À QUI A DEMANDÉ (§3) : sans `_smtp._tls.<domaine>`, rien
+    n'est composé pour lui. Et quand la destination `rua` est d'un AUTRE domaine,
+    ce tiers doit avoir dit qu'il l'accepte, en publiant
+    `<rapporté>._report._smtp._tls.<destination>` — sans quoi n'importe qui
+    publierait `rua=mailto:victime@banque.test` et ferait bombarder cette adresse
+    par tous les émetteurs du monde. C'est le même mécanisme que §7.1 de RFC 7489
+    pour DMARC, et il n'est pas plus facultatif ici.
+
+    LES DEUX TRANSPORTS DE §3 SONT SERVIS. `mailto:` passe par le client sortant,
+    donc par DANE et MTA-STS comme n'importe quel message ; `https:` POSTE le
+    rapport en `application/tlsrpt+gzip`, et VÉRIFIE LE CERTIFICAT contre les
+    autorités de `--mta-sts-anchors` — sans elles, seul `mailto:` fonctionne, et
+    le serveur le dit au démarrage.
+
+    LE RAPPORT DIT AUSSI NOTRE ADRESSE D'ÉMISSION (`sending-mta-ip`, facultatif
+    en §4.3). Elle est écrite : le destinataire la connaît déjà — c'est nous qui
+    l'avons appelé — et elle lui permet de corréler avec ses propres journaux.
 
     MTA-STS N'EST ÉVALUÉ QUE SI DES AUTORITÉS SONT NOMMÉES. Il n'y a pas d'option
     pour « activer » : `--mta-sts-anchors` suffit, et son absence dit l'inverse.
@@ -719,6 +766,9 @@ where
                     .parse()
                     .map_err(|_| ArgError::new(format!("`{brute}` n'est pas un nombre")))?;
             }
+            // ── TLSRPT (RFC 8460) ───────────────────────────────────────────
+            "--tlsrpt-dir" => options.tlsrpt_dir = Some(PathBuf::from(valeur()?)),
+            "--tlsrpt-send" => options.tlsrpt_send = true,
             // ── MTA-STS (RFC 8461) ──────────────────────────────────────────
             "--mta-sts-anchors" => {
                 options.mtasts_anchors = Some(PathBuf::from(valeur()?));
@@ -1101,6 +1151,7 @@ mod tests {
             (&["--relay-spool"], "attend une valeur"),
             (&["--mta-sts-anchors"], "attend une valeur"),
             (&["--mta-sts-cache"], "attend une valeur"),
+            (&["--tlsrpt-dir"], "attend une valeur"),
         ] {
             let erreur = parse(arguments).expect_err("refusé");
             assert!(
@@ -1123,6 +1174,48 @@ mod tests {
         // Et elle se relit à l'identique une fois écrite.
         let octets = ams_config::encode(&config).expect("encodable");
         assert_eq!(ams_config::decode(&octets).expect("relisible"), config);
+    }
+
+    // ── TLSRPT (RFC 8460) ───────────────────────────────────────────────────
+
+    /// **PAS DE DOSSIER, AUCUN RAPPORT ; PAS DE DRAPEAU, AUCUNE REMISE.**
+    #[test]
+    fn sans_dossier_aucun_rapport_tls() {
+        let options = ecrire(&["--domain", "mail.example.com"]);
+        assert!(options.tlsrpt_dir.is_none());
+        assert!(!options.tlsrpt_send);
+        let config = options.en_configuration();
+        assert!(!config.tlsrpt.compose());
+        assert!(!config.tlsrpt.envoie());
+    }
+
+    /// **DEUX CRANS, COMME LES RAPPORTS DMARC.**
+    #[test]
+    fn deposer_et_remettre_sont_deux_crans() {
+        let depose = ecrire(&["--tlsrpt-dir", "/var/spool/ams/tlsrpt"]);
+        let config = depose.en_configuration();
+        assert!(config.tlsrpt.compose());
+        assert!(!config.tlsrpt.envoie(), "déposé n'est pas remis");
+
+        let remet = ecrire(&["--tlsrpt-dir", "/var/spool/ams/tlsrpt", "--tlsrpt-send"]);
+        let config = remet.en_configuration();
+        assert!(config.tlsrpt.compose() && config.tlsrpt.envoie());
+        assert_eq!(config.tlsrpt.directory, "/var/spool/ams/tlsrpt");
+        // Et le tout se relit à l'identique.
+        let octets = ams_config::encode(&config).expect("encodable");
+        assert_eq!(ams_config::decode(&octets).expect("relisible"), config);
+    }
+
+    /// **LE DRAPEAU SEUL EST LICITE, ET NE REMET RIEN.**
+    ///
+    /// Il n'est pas refusé — le refuser interdirait de préparer une
+    /// configuration —, mais il ne promet rien à personne : sans dossier, il n'y
+    /// a rien à remettre.
+    #[test]
+    fn le_drapeau_seul_est_licite_et_ne_remet_rien() {
+        let options = ecrire(&["--tlsrpt-send"]);
+        assert!(options.tlsrpt_send);
+        assert!(!options.en_configuration().tlsrpt.envoie());
     }
 
     // ── MTA-STS (RFC 8461) ──────────────────────────────────────────────────

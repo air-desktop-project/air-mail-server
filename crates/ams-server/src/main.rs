@@ -738,6 +738,105 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         None
     };
 
+    // ── LES RAPPORTS TLS (RFC 8460) ─────────────────────────────────────────
+    //
+    // **PAS DE DRAPEAU POUR COMPOSER** : l'absence de dossier EST l'absence de
+    // service, comme pour les rapports DMARC. Le drapeau, lui, ne gouverne que
+    // la REMISE — deux crans, pour qu'un exploitant puisse lire ce qu'il
+    // enverrait.
+    let rapports_tls = if options.tlsrpt.compose() {
+        let Some(checker) = verificateur.as_ref() else {
+            return Err(String::from(
+                "les rapports TLS sont configurés sans résolveur DNS : `_smtp._tls` se lit dans \
+                 un `TXT`, et la vérification des destinations aussi \
+                 (`air-mail-admin config write … --resolver 127.0.0.1:53`)",
+            ));
+        };
+        let dossier = PathBuf::from(&options.tlsrpt.directory);
+        if let Err(erreur) = std::fs::create_dir(&dossier)
+            && erreur.kind() != std::io::ErrorKind::AlreadyExists
+        {
+            return Err(format!("`{}` : {erreur}", dossier.display()));
+        }
+        // **NOTRE ADRESSE D'ÉMISSION SE DÉDUIT DE L'ÉCOUTE**, faute de mieux :
+        // une machine peut sortir par une autre interface que celle où elle
+        // écoute, et ce champ est facultatif (§4.3). L'écrire faux serait pire
+        // que de l'omettre — mais le nom de l'écoute est ce que l'exploitant a
+        // choisi, donc ce qu'il reconnaîtra dans ses propres journaux.
+        let notre_adresse = options
+            .listen
+            .rsplit_once(':')
+            .map_or_else(|| options.listen.clone(), |(hote, _)| String::from(hote));
+        let journal = ams_loop_tokio::TlsReports::new(
+            options.domain.clone(),
+            format!("postmaster@{}", options.domain),
+            notre_adresse,
+            dossier,
+            checker.resolver().clone(),
+            Duration::from_secs(u64::from(options.timeouts.command_seconds)),
+        );
+        let journal = match signature.clone() {
+            Some(cle) => journal.with_dkim(DkimSigner::new(options.dkim.selector.clone(), cle)),
+            None => journal,
+        };
+        // LE REMETTEUR N'EST LÀ QUE SI ON L'A DEMANDÉ.
+        let journal = if options.tlsrpt.envoie() {
+            let remetteur = Relay::new(
+                checker.resolver().clone(),
+                std::sync::Arc::new(ams_tls::relay_config()),
+                options.domain.clone(),
+                false,
+                Duration::from_secs(u64::from(options.timeouts.command_seconds)),
+            );
+            let remetteur = match mtasts.clone() {
+                Some(sts) => remetteur.with_mtasts(sts),
+                None => remetteur,
+            };
+            let journal = journal.with_relay(remetteur);
+            // **LE TRANSPORT `https:` EMPRUNTE LES AUTORITÉS DE MTA-STS**, parce
+            // qu'il n'y a aucune raison d'en avoir deux jeux. Sans elles, seul
+            // `mailto:` fonctionne, et on le dit.
+            match mtasts.as_ref() {
+                Some(sts) => journal.with_https(std::sync::Arc::clone(sts.tls())),
+                None => {
+                    eprintln!(
+                        "air-mail-server : rapports TLS — le transport `https:` est INDISPONIBLE, \
+                         faute d'autorités (`--mta-sts-anchors`). Un domaine qui ne publie \
+                         qu'un `rua=https:` ne recevra rien."
+                    );
+                    journal
+                }
+            }
+        } else {
+            journal
+        };
+        eprintln!(
+            "air-mail-server : {}",
+            if options.tlsrpt.envoie() {
+                format!(
+                    "rapports TLS (RFC 8460) composés dans `{}` PUIS REMIS aux destinations qui \
+                     ont consenti (§3). On ne rapporte qu'aux domaines qui publient \
+                     `_smtp._tls`.",
+                    options.tlsrpt.directory
+                )
+            } else {
+                format!(
+                    "rapports TLS (RFC 8460) déposés dans `{}`. DÉPOSÉS, PAS REMIS : \
+                     `air-mail-admin config write … --tlsrpt-send` les enverrait.",
+                    options.tlsrpt.directory
+                )
+            }
+        );
+        Some(std::sync::Arc::new(journal))
+    } else {
+        eprintln!(
+            "air-mail-server : rapports TLS non composés — aucun dossier nommé. Les domaines \
+             qui publient `_smtp._tls` n'apprendront rien de ce serveur \
+             (`air-mail-admin config write … --tlsrpt-dir /var/spool/ams/tlsrpt`)."
+        );
+        None
+    };
+
     // ── LA FILE DE RÉÉMISSION SORTANTE ──────────────────────────────────────
     //
     // **ÉTEINTE PAR DÉFAUT.** Émettre du courrier vers des tiers ne se décide pas
@@ -827,8 +926,12 @@ async fn servir(fichier: &Path) -> Result<(), String> {
                 );
                 // **UNE LIGNE À LIRE**, plutôt qu'un argument de plus dans une
                 // liste qui en compte cinq : celui-ci décide de remises.
-                match mtasts.clone() {
+                let remetteur = match mtasts.clone() {
                     Some(sts) => remetteur.with_mtasts(sts),
+                    None => remetteur,
+                };
+                match rapports_tls.clone() {
+                    Some(journal) => remetteur.with_tls_reports(journal),
                     None => remetteur,
                 }
             },
@@ -1226,6 +1329,59 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         ))
     });
 
+    // ── LA TÂCHE DES RAPPORTS TLS ───────────────────────────────────────────
+    //
+    // §4 : une période de vingt-quatre heures. On réutilise l'intervalle des
+    // rapports DMARC, qui vaut un jour par défaut et se règle par la même
+    // option : deux réglages pour deux rapports quotidiens seraient deux fois la
+    // même décision.
+    let tache_tls = rapports_tls.as_ref().map(|journal| {
+        let journal = std::sync::Arc::clone(journal);
+        let envoie = options.tlsrpt.envoie();
+        let intervalle = intervalle_rapports;
+        let attente = arret();
+        tokio::spawn(async move {
+            let mut horloge = tokio::time::interval(intervalle);
+            horloge.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // **LE PREMIER TOUR NE DÉPOSE RIEN**, et c'est voulu : `interval`
+            // se déclenche tout de suite, et la période n'a pas encore
+            // commencé. Il ne fait donc que remettre ce qu'une exécution
+            // précédente aurait laissé.
+            let mut premier = true;
+            let mut depots = ams_loop_tokio::TlsSpoolTally::default();
+            let mut remises = ams_loop_tokio::TlsSendTally::default();
+            tokio::pin!(attente);
+            loop {
+                tokio::select! {
+                    () = &mut attente => break,
+                    _ = horloge.tick() => {
+                        if !premier {
+                            let compte = journal.vider().await;
+                            depots.reports = depots.reports.saturating_add(compte.reports);
+                            depots.unasked = depots.unasked.saturating_add(compte.unasked);
+                            depots.errors = depots.errors.saturating_add(compte.errors);
+                        }
+                        premier = false;
+                        if envoie {
+                            let compte = journal.envoyer().await;
+                            remises.sent = remises.sent.saturating_add(compte.sent);
+                            remises.deferred = remises.deferred.saturating_add(compte.deferred);
+                            remises.dropped = remises.dropped.saturating_add(compte.dropped);
+                        }
+                    }
+                }
+            }
+            // **CE QUI RESTE AU JOURNAL SE DÉPOSE À L'ARRÊT.** Le perdre
+            // reviendrait à ne rien rapporter d'une journée entière parce que le
+            // serveur a redémarré à vingt-trois heures.
+            let compte = journal.vider().await;
+            depots.reports = depots.reports.saturating_add(compte.reports);
+            depots.unasked = depots.unasked.saturating_add(compte.unasked);
+            depots.errors = depots.errors.saturating_add(compte.errors);
+            (depots, remises)
+        })
+    });
+
     // ── LA TÂCHE DE REPRISE ─────────────────────────────────────────────────
     //
     // Elle tourne à côté des boucles de service, et le même signal l'arrête. Son
@@ -1287,6 +1443,22 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     )
     .await
     .map_err(|erreur| erreur.to_string())?;
+
+    if let Some(tache) = tache_tls {
+        match tache.await {
+            Ok((depots, remises)) => eprintln!(
+                "air-mail-server : rapports TLS ; {} déposé(s), {} domaine(s) qui n'en \
+                 demandaient pas, {} en erreur ; {} remis, {} ajourné(s), {} abandonné(s)",
+                depots.reports,
+                depots.unasked,
+                depots.errors,
+                remises.sent,
+                remises.deferred,
+                remises.dropped
+            ),
+            Err(erreur) => eprintln!("air-mail-server : rapports TLS : {erreur}"),
+        }
+    }
 
     if let Some(tache) = reprise {
         match tache.await {

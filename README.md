@@ -97,7 +97,7 @@ des octets **et des actions**. Elles n'attendent jamais.
 | `ams-guard` | flooding et bannissement par source | **implémenté** |
 | `ams-dane` | DANE pour SMTP (RFC 7672) : ce qu'un `TLSA` autorise | **implémenté, et câblé** |
 | `ams-mtasts` | MTA-STS (RFC 8461) : la politique d'un domaine | **implémenté, et câblé** |
-| `ams-tlsrpt` | TLSRPT (RFC 8460) : ce qu'on rapporte du chiffrement sortant | **le rapport et sa vérification ; le câblage suit** |
+| `ams-tlsrpt` | TLSRPT (RFC 8460) : ce qu'on rapporte du chiffrement sortant | **implémenté, et câblé** |
 | `ams-queue` | file de réémission : quand réessayer, quand renoncer | **implémenté, et câblé** |
 | `ams-auth` | le magasin d'identifiants, vérification Argon2id | **implémenté** |
 | `ams-tls` | TLS 1.3 uniquement, échange de clés post-quantique | **implémenté, en entrant et en sortant** |
@@ -1733,8 +1733,53 @@ Trois limites, nommées plutôt que tues :
   un `mta-sts.txt` est un fichier statique de quelques centaines d'octets. Un
   serveur qui le découpe tout de même n'est pas lu.
 
-**TLSRPT (RFC 8460) n'est pas là** : un domaine en `testing` attend un rapport
-quotidien en JSON, et ce serveur se contente de son journal.
+### Rapporter le chiffrement (TLSRPT)
+
+```sh
+./target/release/air-mail-admin config write air-mail.conf \
+    --domain mail.example.com --hosted example.com \
+    --resolver 127.0.0.1:53 \
+    --tlsrpt-dir /var/spool/ams/tlsrpt \
+    --tlsrpt-send
+```
+
+**C'est le seul mécanisme de ce serveur dont le bénéficiaire est quelqu'un
+d'autre.** DANE et MTA-STS protègent *votre* courrier ; TLSRPT rend au domaine
+d'en face ce que vous seul savez — que ses `TLSA` sont mal renouvelés, que sa
+politique nomme un serveur disparu, que son certificat a expiré. Un domaine qui
+publie `mode: testing` publie précisément pour l'apprendre.
+
+**Deux crans, comme les rapports DMARC.** `--tlsrpt-dir` compose et *dépose* ;
+`--tlsrpt-send` *remet*. Sans le second, les rapports s'accumulent dans le
+dossier et vous les relevez — ce qui vous laisse lire ce que vous enverriez.
+
+**On ne rapporte qu'à qui a demandé** (§3) : sans `_smtp._tls.<domaine>`, rien
+n'est composé. Et quand la destination `rua` est d'un **autre** domaine, ce tiers
+doit avoir publié `<rapporté>._report._smtp._tls.<destination>` — sans quoi
+n'importe qui publierait `rua=mailto:victime@banque.test` et ferait bombarder
+cette adresse par tous les émetteurs du monde. C'est le même mécanisme que §7.1
+de RFC 7489 pour DMARC.
+
+Les **deux transports** de §3 sont servis :
+
+| `rua=` | Ce qui se passe |
+| --- | --- |
+| `mailto:` | Le rapport part par le client sortant — donc par DANE et MTA-STS comme n'importe quel message, et signé DKIM si une clé est nommée. |
+| `https:` | Le rapport est **POSTÉ** en `application/tlsrpt+gzip`, avec le certificat vérifié contre les autorités de `--mta-sts-anchors`. |
+
+Sans `--mta-sts-anchors`, seul `mailto:` fonctionne : un domaine qui ne publie
+qu'un `rua=https:` ne recevra rien, et le serveur le dit au démarrage.
+
+Le rapport porte le résumé **et** les détails d'échec de §4.3 — type, serveur
+visé, nombre de sessions —, ainsi que **notre adresse d'émission**
+(`sending-mta-ip`). Ce champ est facultatif ; il est écrit parce que le
+destinataire la connaît déjà, et qu'elle lui permet de corréler avec ses propres
+journaux.
+
+**On ne devine pas plus que ce qu'on sait** : un pair injoignable, un refus SMTP,
+un message illisible ne disent rien du chiffrement, et les rapporter enverrait le
+domaine chercher au mauvais endroit. Seuls l'échec de poignée de main, l'échec
+DANE et le serveur hors politique sont rapportés.
 
 ### Régler le garde
 

@@ -3077,10 +3077,70 @@ décodeur — la tête le reconnaît et le distingue — mais le corps n'est pas
 rassemblé, faute d'un chemin qu'on n'exercerait qu'ici. C'est nommé plutôt que
 tu ; la remise retombe alors sur ce qu'elle était.
 
-**TLSRPT (RFC 8460) n'est pas là.** Un domaine en `testing` attend un rapport
-quotidien en JSON, remis au `rua` qu'il publie ; ce serveur consigne dans son
-journal et n'émet rien. C'est une tranche à part, avec son agrégateur, son
-dossier et sa remise.
+### TLSRPT (RFC 8460), depuis le 2026-09-01
+
+**C'est le seul mécanisme de ce serveur dont le bénéficiaire est quelqu'un
+d'autre.** DANE et MTA-STS protègent NOTRE courrier ; TLSRPT rend au domaine d'en
+face ce que nous seuls savons : que ses `TLSA` sont mal renouvelés, que sa
+politique nomme un serveur disparu, que son certificat a expiré. Un domaine qui
+publie `mode: testing` publie précisément pour l'apprendre.
+
+**DEUX CRANS, COMME LES RAPPORTS DMARC.** `--tlsrpt-dir` compose et DÉPOSE ;
+`--tlsrpt-send` REMET. Un exploitant peut lire ce qu'il enverrait avant de
+l'envoyer, et émettre du courrier vers des tiers ne se décide pas à sa place. Pas
+de drapeau pour composer : l'absence de dossier EST l'absence de service.
+
+**ON NE RAPPORTE QU'À QUI A DEMANDÉ** (§3). Sans `_smtp._tls.<domaine>`, rien
+n'est composé pour lui : un rapport non sollicité est du courrier non sollicité.
+
+**ET UN RAPPORT QUI PART CHEZ UN TIERS SE VÉRIFIE.** Quand la destination `rua`
+est d'un autre domaine que celui qu'on rapporte, ce tiers doit avoir publié
+`<rapporté>._report._smtp._tls.<destination>`. Sans cela, n'importe qui
+publierait `rua=mailto:victime@banque.test` et ferait bombarder cette adresse par
+tous les émetteurs du monde. **C'est le même mécanisme que §7.1 de RFC 7489 pour
+DMARC, et il n'est pas plus facultatif ici.** Une panne de résolution n'est pas un
+consentement.
+
+La comparaison qui décide de la dispense porte sur les ÉTIQUETTES, pas sur les
+octets : `mauvaisexample.com` se termine par `example.com` sans en être un
+sous-domaine, et le lire ainsi laisserait n'importe qui se dispenser de la
+vérification en achetant le bon nom.
+
+**LES DEUX TRANSPORTS DE §3 SONT SERVIS.** `mailto:` passe par le client sortant,
+donc par DANE et MTA-STS comme n'importe quel message ; `https:` POSTE le rapport
+en `application/tlsrpt+gzip` et **vérifie le certificat** contre les autorités de
+`--mta-sts-anchors` — il n'y a aucune raison d'en avoir deux jeux. Sans elles,
+seul `mailto:` fonctionne, et le serveur le dit au démarrage. Une redirection est
+traitée comme un refus définitif : §3 n'en prévoit pas, et la suivre mènerait le
+rapport là où on ne l'a pas adressé.
+
+**ON REFUSE PLUTÔT QUE D'ÉCHAPPER.** Les valeurs d'un rapport viennent en partie
+de tiers — le nom d'un `MX`, les lignes d'une politique publiée — et un guillemet
+glissé dedans écrirait une structure JSON à notre place, dans un fichier qu'on
+compose et qu'on remet nous-mêmes.
+
+**LE JOURNAL EST BORNÉ**, et c'est une borne de C3 : il grandit avec le nombre de
+domaines à qui l'on écrit. Au-delà, on cesse d'observer plutôt que d'oublier —
+oublier laisserait choisir CE qu'on oublie à celui qui inonde. Ce qui reste au
+journal se dépose à l'arrêt : le perdre reviendrait à ne rien rapporter d'une
+journée entière parce que le serveur a redémarré à vingt-trois heures.
+
+**LE CALENDRIER EST CELUI DE `ams-mime`**, et il n'y en a qu'un. §4.1 exige des
+dates de RFC 3339 ; la conversion en date civile était déjà écrite pour les dates
+de message, et deux crates qui compteraient les jours différemment finiraient par
+ne pas dater la même chose de la même façon.
+
+**`sending-mta-ip` EST ÉCRIT, BIEN QUE FACULTATIF** (§4.3). Le destinataire le
+connaît déjà — c'est nous qui l'avons appelé — et il lui permet de corréler avec
+ses propres journaux, ce qu'il attend d'un diagnostic. Il se déduit de l'adresse
+d'écoute, faute de mieux : une machine peut sortir par une autre interface, et le
+champ est facultatif précisément parce que personne ne peut le garantir.
+
+**ON NE DEVINE PAS PLUS QUE CE QU'ON SAIT.** Un pair injoignable, un refus SMTP,
+un message qu'on ne sait pas émettre : rien de cela ne dit quoi que ce soit du
+chiffrement, et le rapporter comme un problème de certificat enverrait le domaine
+chercher au mauvais endroit. Seuls l'échec de poignée de main, l'échec DANE et le
+serveur hors politique sont rapportés.
 
 ### DNSSEC n'est pas validé, et c'est écrit partout
 
@@ -3628,7 +3688,7 @@ il l'a commis sur lui-même : une section qui s'intitule « l'état réel » est
 qu'on relit le moins, parce qu'on croit la connaître.
 
 Sont outillées : C1 (les trois étages, et la couverture qui n'est exigible que
-parce qu'ils sont séparés), C2 (le gate mesure 51 595 régions sur 29 crates,
+parce qu'ils sont séparés), C2 (le gate mesure 51 733 régions sur 29 crates,
 toutes couvertes — et il compare des comptes, non un pourcentage arrondi), C3
 (les lints, l'absence d'allocation dans les décodeurs, et 60 cibles de fuzz dont
 la CI vérifie qu'elle les lance toutes), C4 (`ams-tls` n'offre que
