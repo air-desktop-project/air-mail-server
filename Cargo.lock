@@ -87,6 +87,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ams-dane"
+version = "0.1.0"
+dependencies = [
+ "sha2",
+]
+
+[[package]]
 name = "ams-dkim"
 version = "0.1.0"
 dependencies = [
@@ -130,6 +137,7 @@ name = "ams-loop-tokio"
 version = "0.1.0"
 dependencies = [
  "ams-api",
+ "ams-dane",
  "ams-dkim",
  "ams-dmarc",
  "ams-dns",
@@ -309,10 +317,12 @@ dependencies = [
 name = "ams-tls"
 version = "0.1.0"
 dependencies = [
+ "ams-dane",
  "ams-quic-crypto",
  "ml-kem",
  "rustls",
  "rustls-rustcrypto",
+ "sha2",
  "x25519-dalek 2.0.1",
 ]
 

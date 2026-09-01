@@ -44,6 +44,7 @@ dependencies = [
  "ams-api",
  "ams-auth",
  "ams-config",
+ "ams-dane",
  "ams-dkim",
  "ams-dmarc",
  "ams-dns",
@@ -97,6 +98,13 @@ dependencies = [
  "ams-proto-smtp",
  "ams-queue",
  "capnp",
+]
+
+[[package]]
+name = "ams-dane"
+version = "0.1.0"
+dependencies = [
+ "sha2",
 ]
 
 [[package]]
@@ -229,6 +237,7 @@ version = "0.1.0"
 name = "ams-tls"
 version = "0.1.0"
 dependencies = [
+ "ams-dane",
  "ams-quic-crypto",
  "ml-kem",
  "rustls",

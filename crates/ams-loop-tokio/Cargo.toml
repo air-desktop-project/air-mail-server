@@ -43,6 +43,7 @@ ams-dkim = { workspace = true }
 ams-dmarc = { workspace = true }
 # Le squelette d'un message : la boucle doit découper un bloc d'en-tête en
 # champs pour savoir lesquels une signature couvre.
+ams-dane = { workspace = true }
 ams-mime = { workspace = true }
 ams-queue = { workspace = true }
 tokio = { workspace = true }

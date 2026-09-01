@@ -6,6 +6,9 @@ use crate::{Error, KIND_OPT};
 /// La taille de l'en-tête (RFC 1035 §4.1.1).
 const HEADER: usize = 12;
 
+/// Le bit `AD` des drapeaux (RFC 4035 §3.2.3).
+const AUTHENTIC: u16 = 0x0020;
+
 /// Ce que le serveur a répondu (RFC 1035 §4.1.1, code `RCODE`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -49,6 +52,8 @@ pub struct Message<'a> {
     /// Où commence la section des réponses, et combien elle en porte.
     reponses: usize,
     combien: u16,
+    /// Le résolveur dit-il avoir VALIDÉ cette réponse (bit `AD`) ?
+    authentifiee: bool,
 }
 
 impl<'a> Message<'a> {
@@ -93,7 +98,32 @@ impl<'a> Message<'a> {
             octets,
             reponses: debut_reponses,
             combien: reponses,
+            // Le bit `AD` (RFC 4035 §3.2.3), tel que le résolveur l'a posé.
+            authentifiee: drapeaux & AUTHENTIC != 0,
         })
+    }
+
+    /// Le résolveur dit-il avoir VALIDÉ cette réponse ?
+    ///
+    /// # CE QUE CE BIT VAUT, ET CE QU'IL NE VAUT PAS
+    ///
+    /// Il vaut ce que vaut le chemin jusqu'au résolveur, et **rien de plus**.
+    /// C'est un résolveur valideur qui le pose, et n'importe qui sur le trajet
+    /// peut le poser aussi. Il n'a donc de sens que pour un résolveur local, ou
+    /// joint par un lien qu'on maîtrise — exactement l'hypothèse que ce projet
+    /// fait déjà pour SPF, et qui est écrite partout.
+    ///
+    /// **Ce n'est pas une validation DNSSEC**, et cette crate n'en fait aucune :
+    /// elle ne demande même pas les signatures (`DO` n'est pas posé). Ce qu'elle
+    /// rend ici est ce que le résolveur A DIT, transporté sans être maquillé.
+    ///
+    /// Un résolveur qui ne valide pas ne pose jamais ce bit, et ce qui en dépend
+    /// — DANE (RFC 7672) — cesse alors simplement de s'appliquer. C'est la bonne
+    /// façon d'échouer : on retombe sur le chiffrement opportuniste, on ne
+    /// prétend rien.
+    #[must_use]
+    pub fn authentic_data(&self) -> bool {
+        self.authentifiee
     }
 
     /// L'identifiant, à confronter à celui de la question.

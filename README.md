@@ -95,6 +95,7 @@ des octets **et des actions**. Elles n'attendent jamais.
 | --- | --- | --- |
 | `ams-session` | les sessions, serveur ET cliente | **SMTP, POP3 et IMAP en réception, SMTP à l'émission** |
 | `ams-guard` | flooding et bannissement par source | **implémenté** |
+| `ams-dane` | DANE pour SMTP (RFC 7672) : ce qu'un `TLSA` autorise | **implémenté, et câblé** |
 | `ams-queue` | file de réémission : quand réessayer, quand renoncer | **implémenté, et câblé** |
 | `ams-auth` | le magasin d'identifiants, vérification Argon2id | **implémenté** |
 | `ams-tls` | TLS 1.3 uniquement, échange de clés post-quantique | **implémenté, en entrant et en sortant** |
@@ -1630,10 +1631,56 @@ Deux limites, nommées plutôt que tues :
   destinataires refusés sans les nommer ; grouper ferait deviner au rapport qui a
   échoué. Le coût se paie en connexions, ce qui vaut mieux qu'un rapport faux sur
   l'adresse d'un tiers.
-- **Le chiffrement sortant est opportuniste et n'authentifie personne** : le `MX`
-  vient d'un DNS non validé. Un espion passif ne lit rien ; un actif, si. Le repli
-  en clair après un `STARTTLS` annoncé est en revanche refusé — c'est le levier
+- **Le chiffrement sortant n'authentifie que les domaines qui publient un
+  `TLSA`** — voir « [Authentifier le
+  destinataire](#authentifier-le-destinataire-dane) ». Pour les autres il reste
+  opportuniste : un espion passif ne lit rien, un actif, si. Le repli en clair
+  après un `STARTTLS` annoncé est en revanche toujours refusé — c'est le levier
   d'une attaque par déclassement.
+
+### Authentifier le destinataire (DANE)
+
+**Rien à régler.** Un domaine qui publie un `TLSA` dans un DNS signé est
+authentifié ; les autres sont servis en chiffrement opportuniste. Il n'y a pas de
+drapeau, parce qu'il n'y a rien à décider : c'est le domaine d'en face qui dit
+s'il veut être authentifié.
+
+**Mais tout repose sur votre résolveur.** Ce serveur ne valide pas les signatures
+DNSSEC : il pose le bit `AD` dans la question et croit celui de la réponse.
+§2.1 de RFC 7672 l'autorise pour un résolveur valideur joint par un chemin sûr, et
+c'est **exactement l'hypothèse que ce serveur fait déjà pour SPF**. Un résolveur
+qui ne valide pas ne pose jamais ce bit, et DANE ne s'appliquera alors à
+personne — le serveur le dit au démarrage, et l'arrêt compte les remises
+authentifiées.
+
+Ce que DANE change, en une phrase : sans lui, le serveur qu'on joint est désigné
+par un `MX` que n'importe qui peut réécrire, et vérifier un certificat contre ce
+nom-là ne prouve rien. Avec lui, le domaine a publié **lui-même** l'empreinte de
+ce qu'il présentera. Il n'y a plus de tiers à croire.
+
+Deux usages sont reconnus, et ils ne se vérifient pas pareil :
+
+| Usage | Ce qu'on vérifie |
+| --- | --- |
+| `DANE-EE(3)` | L'empreinte du certificat, et **rien d'autre** — ni chaîne, ni nom, ni date. Le domaine a nommé ce certificat exactement. |
+| `DANE-TA(2)` | La chaîne remonte à cette autorité, **et** le nom correspond : elle a pu signer pour d'autres. |
+
+`PKIX-TA(0)` et `PKIX-EE(1)` sont **inutilisables pour SMTP** (§3.1.3) — ils
+demanderaient une validation WebPKI contre un nom qui vient du DNS, ce que DANE
+existe pour ne plus avoir à faire. Un jeu dont **aucun** enregistrement n'est
+utilisable se traite comme un jeu vide, et le courrier passe : un domaine qui
+publie un algorithme de demain ne doit pas voir son courrier s'arrêter
+aujourd'hui.
+
+**Quand un domaine engage et que le pair ne satisfait rien, on n'émet pas.** Le
+message reste en file et repartira. Il n'y a **aucun mode « observe »**,
+contrairement à SPF et DMARC — et ce n'est pas un oubli : ces deux-là décident du
+courrier de quelqu'un d'autre, où un faux positif refuse un message qu'on ne
+reverra pas. DANE décide de notre émission, et rien n'est perdu.
+
+**MTA-STS (RFC 8461) n'est pas là.** Il demande un client HTTPS sortant, un
+magasin de racines WebPKI et un cache de politiques — trois surfaces neuves —, et
+§2 de RFC 8461 dit que DANE l'emporte quand les deux existent.
 
 ### Régler le garde
 
@@ -1723,7 +1770,7 @@ jobs indépendants : la vérification du code (les quatre commandes ci-dessus, s
 
 `fuzz/` est une crate `cargo-fuzz` **hors du workspace** : elle exige un nightly,
 que le pin exact du workspace n'admet pas — deux LLVM produisent des profils de
-couverture mutuellement illisibles. **Cinquante-six cibles**, et plus de deux
+couverture mutuellement illisibles. **Cinquante-sept cibles**, et plus de deux
 cent soixante propriétés énoncées, dont un **aller-retour** sur l'encodeur de
 réponses, un **vocabulaire de sortie clos** sur la session, et l'**indépendance
 au découpage** sur la phase de données — celle qui vise directement la

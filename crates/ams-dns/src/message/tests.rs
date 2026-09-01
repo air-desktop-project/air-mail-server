@@ -403,3 +403,28 @@ fn un_enregistrement_reduit_a_son_nom_est_refuse() {
         );
     }
 }
+
+/// **LE BIT `AD` SE TRANSPORTE, IL NE S'INVENTE PAS.**
+///
+/// C'est lui qui décide si DANE s'applique. Le poser d'office ferait croire à
+/// une validation que personne n'a faite ; l'ignorer ferait retomber tout le
+/// monde sur le chiffrement opportuniste sans jamais le dire.
+#[test]
+fn le_bit_ad_se_transporte_tel_quel() {
+    for (drapeaux, attendu) in [(0x8180_u16, false), (0x81a0_u16, true)] {
+        let mut octets = entete(drapeaux, 1, 1, 0, 0);
+        octets.extend_from_slice(&question("example.com", Kind::Tlsa));
+        octets.extend_from_slice(&enregistrement(
+            "example.com",
+            Kind::Tlsa.code(),
+            CLASS_IN,
+            &[3, 1, 1, 0],
+        ));
+        let message = Message::parse(&octets).expect("lisible");
+        assert_eq!(
+            message.authentic_data(),
+            attendu,
+            "drapeaux {drapeaux:#06x}"
+        );
+    }
+}

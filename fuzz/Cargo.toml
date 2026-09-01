@@ -36,6 +36,9 @@ path = "../crates/ams-mime"
 [dependencies.ams-queue]
 path = "../crates/ams-queue"
 
+[dependencies.ams-dane]
+path = "../crates/ams-dane"
+
 [dependencies.ams-proto-imap]
 path = "../crates/ams-proto-imap"
 
@@ -142,6 +145,13 @@ bench = false
 [[bin]]
 name = "fuzz_ams_mime_bounce"
 path = "fuzz_targets/fuzz_ams_mime_bounce.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ams_dane"
+path = "fuzz_targets/fuzz_ams_dane.rs"
 test = false
 doc = false
 bench = false

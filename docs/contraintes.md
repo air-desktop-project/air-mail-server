@@ -2947,6 +2947,73 @@ destinataire d'ailleurs ; elle accepte désormais les mêmes que SMTP, et pas
 d'autres. N'ouvrir qu'une des deux ferait deux règles pour un même geste, et
 l'utilisateur découvrirait laquelle relaie en essayant.
 
+### DANE (RFC 7672), depuis le 2026-09-01
+
+Le chiffrement sortant n'authentifiait personne, et le registre disait pourquoi :
+le `MX` vient d'un DNS non validé, et vérifier un certificat contre un nom qu'un
+attaquant vient de choisir ne prouve rien. **DANE reprend la chaîne là où elle
+s'arrêtait** : le domaine publie lui-même, dans son DNS signé, l'empreinte du
+certificat qu'il présentera. Il n'y a plus de tiers à croire.
+
+**LA CHAÎNE S'ARRÊTE AU RÉSOLVEUR, ET C'EST DIT.** Ce serveur ne valide aucune
+signature DNSSEC : il pose le bit `AD` DANS LA QUESTION (§5.7 de RFC 6840) et
+croit celui de la réponse. §2.1 de RFC 7672 l'autorise expressément pour un
+résolveur valideur joint par un chemin sûr — et c'est **exactement l'hypothèse
+que ce projet fait déjà pour SPF**, ni plus ni moins. Un résolveur qui ne valide
+pas ne pose jamais ce bit, et DANE ne s'applique alors à personne ; le serveur
+l'annonce au démarrage plutôt que de le laisser découvrir.
+
+`DO` reste absent, et la distinction vaut d'être lue : `DO` demanderait les
+SIGNATURES, qu'on ne saurait pas vérifier et qui grossissent chaque réponse ;
+`AD` demande au résolveur de dire s'il a validé. On demande le verdict, pas de
+quoi le refaire.
+
+**DEUX USAGES SEULEMENT** (§3.1.3) : `DANE-TA(2)` et `DANE-EE(3)`. `PKIX-TA(0)`
+et `PKIX-EE(1)` ne s'appliquent pas à SMTP — ils demanderaient une validation
+WebPKI contre un nom qui vient du DNS, ce que DANE existe pour ne plus avoir à
+faire. Ils sont traités comme INUTILISABLES, et non comme des refus.
+
+Et les deux ne se vérifient pas pareil :
+
+- **`DANE-EE(3)` : ni chaîne, ni nom, ni date** (§3.1.1, et §5.1 de RFC 7671). Le
+  domaine a publié l'empreinte exacte de ce qu'il présente ; c'est plus fort que
+  tout ce qu'une autorité pourrait attester. Un serveur qui sert dix domaines n'a
+  pas à porter dix noms, et une horloge ne vaut pas mieux que le domaine.
+- **`DANE-TA(2)` : la chaîne ET le nom.** L'autorité a pu signer pour d'autres.
+  La chaîne se vérifie par `rustls`, avec l'autorité trouvée pour seule racine —
+  **on n'écrit pas de validation X.509 ici**, un second vérificateur de chaîne
+  dans ce dépôt finirait par diverger de celui qui sert partout ailleurs.
+
+**UN JEU ENTIÈREMENT INUTILISABLE N'EST PAS UN ÉCHEC** (§2.2) : on fait comme
+s'il n'y en avait aucun, et le courrier passe en opportuniste. C'est la bonne
+façon d'échouer — un domaine qui publie un algorithme de demain ne doit pas voir
+son courrier s'arrêter aujourd'hui. **Un jeu qui porte au moins un enregistrement
+utilisable, lui, ENGAGE** : la remise est authentifiée, ou elle n'a pas lieu.
+
+**L'ÉCHEC AJOURNE, ET RIEN NE L'AFFAIBLIT.** Pas de mode « observe », contrairement
+à SPF et à DMARC. La différence n'est pas un oubli : ces deux-là décident du
+courrier de QUELQU'UN D'AUTRE, et un faux positif y refuse un message légitime
+qu'on ne reverra pas. DANE décide de NOTRE émission, le message reste dans notre
+file, et il repartira quand le domaine aura réparé. Rien n'est perdu, donc rien
+n'excuse d'affaiblir.
+
+**LES DEUX RÉPONSES DOIVENT ÊTRE AUTHENTIQUES**, celle du `MX` comme celle du
+`TLSA` (§2.2). Un `MX` qu'un tiers a pu réécrire désignerait un serveur qu'il a
+choisi, dont le `TLSA` serait le sien. Et **l'absence de `MX` n'active pas DANE** :
+§2.2 demande que cette absence soit elle-même prouvée, ce que ce résolveur ne rend
+pas — le bit `AD` d'une réponse vide ne dit pas de quoi il parle. On retombe alors
+sur l'opportuniste, plutôt que de prétendre ce qu'on n'a pas.
+
+**LA PROTECTION SE COMPTE.** `RelayOutcome::Delivered` porte `authenticated`, et
+l'arrêt du serveur dit combien de remises ont été authentifiées. Chiffré sans
+authentifié écarte l'espion passif ; authentifié écarte l'attaquant actif. Une
+protection qu'on ne voit pas est une protection qu'on croit avoir.
+
+**MTA-STS (RFC 8461) reste à faire.** Il demande un client HTTPS sortant, un
+magasin de racines WebPKI et un cache de politiques sur disque — trois surfaces
+neuves —, et §2 de RFC 8461 dit que DANE l'emporte quand les deux existent. C'est
+pourquoi DANE est venu d'abord.
+
 ### DNSSEC n'est pas validé, et c'est écrit partout
 
 Le résolveur est cru sur parole. Un `pass` ne vaut donc que ce que vaut le chemin
@@ -2954,6 +3021,18 @@ jusqu'à lui, et c'est pourquoi le résolveur doit être **local, ou joint par u
 lien de confiance**. Trois endroits le disent plutôt qu'un : le schéma de
 configuration, l'aide d'`air-mail-admin`, et une ligne au démarrage du serveur.
 Une lacune qu'on nomme est une lacune ; une lacune qu'on tait est un mensonge.
+
+**DANE repose sur cette même hypothèse, et pas sur une plus forte** (voir
+plus haut). Le bit `AD` dit ce que le résolveur A VALIDÉ ; le croire, c'est croire
+le chemin jusqu'à lui, exactement comme pour SPF. La différence est que DANE
+DÉCIDE — il refuse une remise —, et c'est pourquoi le serveur annonce la
+condition au démarrage au lieu de la laisser dans un registre.
+
+**Valider DNSSEC nous-mêmes reste à faire**, et ce serait la seule façon de ne
+plus rien emprunter : RRSIG, DNSKEY, DS, une ancre de confiance, NSEC et NSEC3
+pour la négation. C'est une crate entière soumise au 100 % de C2, et elle
+remplacerait cette confiance sans rien changer d'autre — `Message::authentic_data`
+est le seul point par lequel elle entre.
 
 Deux défenses accompagnent tout de même chaque question, et elles ne coûtent
 rien : **un identifiant tiré de `/dev/urandom`** — pas un compteur, pas une
@@ -3481,9 +3560,9 @@ il l'a commis sur lui-même : une section qui s'intitule « l'état réel » est
 qu'on relit le moins, parce qu'on croit la connaître.
 
 Sont outillées : C1 (les trois étages, et la couverture qui n'est exigible que
-parce qu'ils sont séparés), C2 (le gate mesure 49 260 régions sur 26 crates,
+parce qu'ils sont séparés), C2 (le gate mesure 49 982 régions sur 27 crates,
 toutes couvertes — et il compare des comptes, non un pourcentage arrondi), C3
-(les lints, l'absence d'allocation dans les décodeurs, et 56 cibles de fuzz dont
+(les lints, l'absence d'allocation dans les décodeurs, et 57 cibles de fuzz dont
 la CI vérifie qu'elle les lance toutes), C4 (`ams-tls` n'offre que
 TLS 1.3), C6 (les décodeurs refusent le CR et le LF isolés ; `AUTH`, `USER`/`PASS`
 et `LOGIN` sont refusés hors chiffrement, sans réglage pour le rétablir), C8

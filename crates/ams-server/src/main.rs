@@ -747,6 +747,20 @@ async fn servir(fichier: &Path) -> Result<(), String> {
                  pas annoncé, donc aucune session ne pourra s'authentifier, donc rien ne sortira."
             );
         }
+        // **DANE S'APPLIQUE SANS QU'ON LE DEMANDE, ET IL FAUT DIRE À QUELLE
+        // CONDITION.** Il n'y a pas de drapeau : un domaine qui publie un `TLSA`
+        // dans un DNS signé est authentifié, les autres sont servis en
+        // opportuniste. Mais tout repose sur le bit `AD` d'un résolveur
+        // VALIDEUR — un résolveur qui ne valide pas ne le pose jamais, et DANE
+        // ne s'appliquerait alors à personne, en silence.
+        eprintln!(
+            "air-mail-server : DANE (RFC 7672) actif pour les domaines qui publient un `TLSA` — \
+             À CONDITION QUE VOTRE RÉSOLVEUR VALIDE DNSSEC. Ce serveur ne valide pas les \
+             signatures lui-même : il croit le bit `AD`, donc le chemin jusqu'au résolveur. \
+             Un résolveur qui ne valide pas ne pose jamais ce bit, et tout retombe alors sur le \
+             chiffrement opportuniste, sans que rien d'autre ne le dise. L'arrêt du serveur \
+             compte les remises authentifiées."
+        );
         Some((
             ams_loop_tokio::Spool::new(
                 dossier,
@@ -1184,6 +1198,8 @@ async fn servir(fichier: &Path) -> Result<(), String> {
                     _ = horloge.tick() => {
                         let compte = spool.parcourir(&relay, &rendre, maintenant()).await;
                         total.sent = total.sent.saturating_add(compte.sent);
+                        total.authenticated =
+                            total.authenticated.saturating_add(compte.authenticated);
                         total.bounced = total.bounced.saturating_add(compte.bounced);
                         total.deferred = total.deferred.saturating_add(compte.deferred);
                         total.unreadable = total.unreadable.saturating_add(compte.unreadable);
@@ -1218,9 +1234,13 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     if let Some(tache) = reprise {
         match tache.await {
             Ok(compte) => eprintln!(
-                "air-mail-server : émission ; {} message(s) remis, {} rendu(s) à leur \
-                 expéditeur, {} ajourné(s), {} illisible(s)",
-                compte.sent, compte.bounced, compte.deferred, compte.unreadable
+                "air-mail-server : émission ; {} message(s) remis dont {} AUTHENTIFIÉ(S) PAR \
+                 DANE, {} rendu(s) à leur expéditeur, {} ajourné(s), {} illisible(s)",
+                compte.sent,
+                compte.authenticated,
+                compte.bounced,
+                compte.deferred,
+                compte.unreadable
             ),
             Err(erreur) => eprintln!("air-mail-server : émission : {erreur}"),
         }

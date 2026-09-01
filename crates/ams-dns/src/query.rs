@@ -27,10 +27,28 @@ const EDNS_PAYLOAD: u16 = 1232;
 /// - **Une seule question**, parce qu'aucun serveur n'en traite deux.
 /// - **EDNS(0)** annonce 1232 octets, ce qui évite la reprise en TCP sur la
 ///   plupart des politiques SPF sans faire fragmenter.
-/// - **Pas de `DO`** : on ne demande pas les signatures DNSSEC, parce qu'on ne
-///   saurait pas les valider. Prétendre le contraire serait pire que de s'en
-///   passer.
+/// - **Pas de `DO`, mais `AD` OUI** (RFC 6840 §5.7). Ce sont deux choses
+///   différentes, et la distinction est tout l'intérêt : `DO` demande les
+///   SIGNATURES, qu'on ne saurait pas valider et qui grossissent la réponse ;
+///   `AD` posé dans la QUESTION demande au résolveur de dire s'il a validé,
+///   sans nous envoyer de quoi le refaire.
 ///
+///   Un résolveur qui ne valide pas ne pose jamais `AD`, et ce qui en dépend —
+///   DANE — ne s'applique alors simplement pas. **La chaîne de confiance
+///   s'arrête donc au résolveur**, et c'est écrit là où cela compte : la même
+///   hypothèse que SPF fait déjà, ni plus ni moins.
+///
+/// Le drapeau `RD` : on s'adresse à un résolveur récursif.
+const RECURSION: u16 = 0x0100;
+
+/// Le drapeau `AD` DANS LA QUESTION (RFC 6840 §5.7).
+///
+/// Il demande au résolveur de POSER `AD` dans sa réponse s'il a validé, sans
+/// demander les signatures elles-mêmes. Sans lui, un résolveur peut légitimement
+/// ne jamais poser `AD`, et tout ce qui en dépend — DANE — cesserait de
+/// s'appliquer sans que rien ne le dise.
+const AUTHENTIC: u16 = 0x0020;
+
 /// L'identifiant vient de l'appelant : il doit être **imprévisible**, et l'aléa
 /// appartient à l'étage qui en a une source. Un identifiant prévisible laisse un
 /// tiers répondre à notre place.
@@ -46,10 +64,10 @@ pub fn encode_query<'a>(
 ) -> Result<&'a [u8], Error> {
     let mut ecrits = 0_usize;
     // ── L'en-tête ───────────────────────────────────────────────────────────
-    // id, drapeaux (RD), une question, aucune réponse, aucune autorité, un
-    // enregistrement additionnel : l'`OPT`.
+    // id, drapeaux (`RD` et `AD`), une question, aucune réponse, aucune
+    // autorité, un enregistrement additionnel : l'`OPT`.
     ecrits = pousser(sortie, ecrits, &id.to_be_bytes())?;
-    ecrits = pousser(sortie, ecrits, &0x0100_u16.to_be_bytes())?;
+    ecrits = pousser(sortie, ecrits, &(RECURSION | AUTHENTIC).to_be_bytes())?;
     ecrits = pousser(sortie, ecrits, &1_u16.to_be_bytes())?;
     ecrits = pousser(sortie, ecrits, &0_u16.to_be_bytes())?;
     ecrits = pousser(sortie, ecrits, &0_u16.to_be_bytes())?;

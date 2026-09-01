@@ -12,7 +12,10 @@ fn une_question_se_lit_comme_un_message() {
     let question = encode_query(&mut tampon, 0x1234, b"example.com", Kind::Txt).expect("encodée");
 
     assert_eq!(&question[0..2], &[0x12, 0x34], "l'identifiant");
-    assert_eq!(&question[2..4], &[0x01, 0x00], "RD posé, et rien d'autre");
+    // **`RD` ET `AD`, ET RIEN D'AUTRE.** `AD` dans la QUESTION demande au
+    // résolveur de dire s'il a validé (RFC 6840 §5.7) ; `DO`, qui demanderait
+    // les signatures elles-mêmes, reste absent — on ne saurait pas les valider.
+    assert_eq!(&question[2..4], &[0x01, 0x20], "RD et AD, et rien d'autre");
     assert_eq!(&question[4..6], &[0x00, 0x01], "une question");
     assert_eq!(&question[6..8], &[0x00, 0x00], "aucune réponse");
     assert_eq!(&question[8..10], &[0x00, 0x00], "aucune autorité");
@@ -103,4 +106,25 @@ fn un_tampon_trop_petit_est_refuse_a_chaque_etape() {
     // Quarante octets : la question tient tout juste.
     let mut juste = [0_u8; 40];
     assert!(encode_query(&mut juste, 1, b"example.com", Kind::Txt).is_ok());
+}
+
+/// **`DO` N'EST PAS POSÉ**, et c'est ce qui distingue « dis-moi si tu as
+/// validé » de « envoie-moi de quoi valider ».
+///
+/// `DO` vit dans le TTL de l'enregistrement `OPT` (RFC 6891 §6.1.3), bit de
+/// poids fort. Le poser ferait grossir chaque réponse de ses signatures, que
+/// cette crate ne saurait pas vérifier.
+#[test]
+fn le_bit_do_reste_absent_de_l_opt() {
+    let mut tampon = [0_u8; QUERY_MAX];
+    let question = encode_query(&mut tampon, 1, b"example.com", Kind::Tlsa).expect("encodée");
+    // L'`OPT` : nom racine (1 octet), type (2), classe (2), puis le TTL (4).
+    let debut_ttl = question.len() - 4 - 2;
+    let ttl = &question[debut_ttl..debut_ttl + 4];
+    assert_eq!(ttl[0] & 0x80, 0, "le bit DO est posé : {ttl:?}");
+    assert_eq!(
+        ttl,
+        &[0, 0, 0, 0],
+        "aucun drapeau EDNS, et aucun rcode étendu"
+    );
 }

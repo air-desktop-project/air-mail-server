@@ -131,6 +131,34 @@ impl Resolver {
     /// absence de `MX` : c'est un refus, et il vaut un échec DÉFINITIF. Le
     /// confondre avec une panne ferait réessayer pendant des jours ce qu'un
     /// domaine a explicitement fermé.
+    /// Les `TLSA` d'un nom, et si la réponse était AUTHENTIFIÉE.
+    ///
+    /// # LE SECOND MEMBRE DÉCIDE DE TOUT
+    ///
+    /// Un `TLSA` lu dans une réponse non authentifiée ne vaut rien : un tiers
+    /// qui détourne la résolution le retire, et l'on retomberait sur le
+    /// chiffrement opportuniste en croyant être protégé. C'est le bit `AD` d'un
+    /// résolveur valideur qui le dit — voir `ams_dns::Message::authentic_data`,
+    /// qui dit aussi ce que ce bit vaut et ce qu'il ne vaut pas.
+    ///
+    /// **Une absence et une panne se rendent de la même façon** : un jeu vide et
+    /// non authentifié. Les distinguer ne servirait à rien — dans les deux cas,
+    /// DANE ne s'applique pas, et la remise est opportuniste.
+    pub(crate) async fn tlsa(&self, nom: &[u8]) -> (Vec<Vec<u8>>, bool) {
+        let Issue::Reponse(octets) = self.interroger(nom, Kind::Tlsa).await else {
+            return (Vec::new(), false);
+        };
+        let Ok(message) = Message::parse(&octets) else {
+            return (Vec::new(), false);
+        };
+        let records = message
+            .answers()
+            .filter(|enregistrement| enregistrement.kind() == Kind::Tlsa.code())
+            .map(|enregistrement| enregistrement.rdata().to_vec())
+            .collect();
+        (records, message.authentic_data())
+    }
+
     pub(crate) async fn mx(&self, domaine: &[u8]) -> Mx {
         let octets = match self.interroger(domaine, Kind::Mx).await {
             Issue::Reponse(octets) => octets,
@@ -140,6 +168,11 @@ impl Resolver {
         let Ok(message) = Message::parse(&octets) else {
             return Mx::Panne;
         };
+        // **L'AUTHENTICITÉ DU `MX` COMPTE AUTANT QUE CELLE DU `TLSA`** (§2.2 de
+        // RFC 7672) : un `MX` qu'un tiers a pu réécrire désignerait un serveur
+        // qu'il a choisi, dont le `TLSA` serait le sien. La chaîne doit être
+        // signée d'un bout à l'autre, ou elle ne vaut rien.
+        let authentique = message.authentic_data();
         let mut serveurs: Vec<(u16, Vec<u8>)> = message
             .answers()
             .filter(|enregistrement| enregistrement.kind() == Kind::Mx.code())
@@ -165,7 +198,10 @@ impl Resolver {
         // l'équilibrage d'un serveur qui n'émet que des rapports n'intéresse
         // personne.
         serveurs.sort_by_key(|(preference, _)| *preference);
-        Mx::Trouves(serveurs)
+        Mx::Trouves {
+            serveurs,
+            authentique,
+        }
     }
 
     /// Les adresses d'un nom, IPv4 puis IPv6.
@@ -323,7 +359,16 @@ pub(crate) enum Txt {
 /// Ce qu'une question `MX` a rendu.
 pub(crate) enum Mx {
     /// Des serveurs, du plus préféré au moins.
-    Trouves(Vec<(u16, Vec<u8>)>),
+    Trouves {
+        /// Les serveurs, par préférence croissante.
+        serveurs: Vec<(u16, Vec<u8>)>,
+        /// Le résolveur dit-il avoir VALIDÉ cette réponse ?
+        ///
+        /// **DANE en dépend** (§2.2 de RFC 7672) : un `MX` qu'un tiers a pu
+        /// réécrire désignerait un serveur qu'il a choisi, dont le `TLSA` serait
+        /// le sien.
+        authentique: bool,
+    },
     /// Le domaine ne publie pas de `MX` : c'est le nom lui-même qui reçoit
     /// (RFC 5321 §5.1, « `MX` implicite »).
     Absent,

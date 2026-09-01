@@ -12,7 +12,8 @@
 #   1. GRAMMAIRES      `ams-proto-*`, `ams-mime` — des octets vers des commandes,
 #                      et retour. Aucune socket, aucun fichier, aucune horloge.
 #   2. DÉCISIONS       `ams-session`, `ams-guard`, `ams-queue`, `ams-dkim`,
-#                      `ams-spf`, `ams-dmarc`, `ams-tls` — des machines à états. Elles
+#                      `ams-spf`, `ams-dmarc`, `ams-dane`, `ams-tls` — des machines à
+#                      états. Elles
 #                      reçoivent des octets et l'heure ; elles rendent des octets
 #                      et des ACTIONS. Elles n'attendent jamais.
 #   3. EXÉCUTION       `ams-loop-tokio`, `ams-store` — les seules crates qui
@@ -50,6 +51,7 @@ members = [
     "crates/ams-session",
     "crates/ams-guard",
     "crates/ams-queue",
+    "crates/ams-dane",
     "crates/ams-tls",
     "crates/ams-dkim",
     "crates/ams-spf",
@@ -95,6 +97,7 @@ repository = "https://github.com/air-desktop-project/air-mail-server"
 # Les arêtes INTERNES ne se déclarent qu'à mesure qu'elles servent : une
 # dépendance posée d'avance affirmerait un assemblage qui n'existe pas.
 ams-config = { path = "crates/ams-config", version = "0.1.0" }
+ams-dane = { path = "crates/ams-dane", version = "0.1.0" }
 ams-dkim = { path = "crates/ams-dkim", version = "0.1.0" }
 ams-mime = { path = "crates/ams-mime", version = "0.1.0" }
 ams-dmarc = { path = "crates/ams-dmarc", version = "0.1.0" }

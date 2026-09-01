@@ -64,6 +64,18 @@ pub enum RelayOutcome {
         refused: usize,
         /// La conversation était-elle chiffrée ?
         encrypted: bool,
+        /// Le pair a-t-il été AUTHENTIFIÉ par DANE (RFC 7672) ?
+        ///
+        /// # CE N'EST PAS LA MÊME CHOSE QUE `encrypted`, ET LA NUANCE EST TOUT
+        ///
+        /// Chiffré sans authentifié, c'est le chiffrement opportuniste : un
+        /// espion passif ne lit rien, un attaquant actif lit tout. Authentifié,
+        /// c'est le domaine lui-même qui a dit dans son DNS signé quel
+        /// certificat il présenterait — il n'y a plus de tiers à croire.
+        ///
+        /// **Il est rendu pour être COMPTÉ.** Une protection qu'on ne voit pas
+        /// est une protection qu'on croit avoir.
+        authenticated: bool,
     },
     /// Refus **définitif**. Ne pas réessayer.
     Rejected(u16),
@@ -148,22 +160,44 @@ impl Relay {
     /// n'est pas une invitation à demander au suivant s'il est plus complaisant.
     /// Seul ce qui n'a pas abouti — machine injoignable — fait passer au suivant.
     pub async fn send(&self, domaine: &str, message: &Outgoing<'_>) -> RelayOutcome {
-        let serveurs = match self.resolveur.mx(domaine.as_bytes()).await {
-            Mx::Trouves(serveurs) => serveurs
-                .into_iter()
-                .map(|(_, nom)| String::from_utf8_lossy(&nom).into_owned())
-                .collect(),
-            // RFC 5321 §5.1 : sans `MX`, c'est le nom lui-même qui reçoit.
-            Mx::Absent => std::vec![domaine.to_string()],
-            Mx::Nul => return RelayOutcome::NullMx,
-            Mx::Panne => return RelayOutcome::Unreachable,
-        };
+        let (serveurs, mx_authentique): (Vec<String>, bool) =
+            match self.resolveur.mx(domaine.as_bytes()).await {
+                Mx::Trouves {
+                    serveurs,
+                    authentique,
+                } => (
+                    serveurs
+                        .into_iter()
+                        .map(|(_, nom)| String::from_utf8_lossy(&nom).into_owned())
+                        .collect(),
+                    authentique,
+                ),
+                // RFC 5321 §5.1 : sans `MX`, c'est le nom lui-même qui reçoit.
+                //
+                // **ET DANE NE S'Y APPLIQUE PAS.** §2.2 de RFC 7672 demande que
+                // la ABSENCE de `MX` soit elle-même prouvée par DNSSEC, ce que
+                // ce résolveur ne rend pas : le bit `AD` d'une réponse vide ne
+                // dit pas de quoi il parle. Retomber sur l'opportuniste est le
+                // seul refus honnête — on ne prétend pas ce qu'on n'a pas.
+                Mx::Absent => (std::vec![domaine.to_string()], false),
+                Mx::Nul => return RelayOutcome::NullMx,
+                Mx::Panne => return RelayOutcome::Unreachable,
+            };
 
         let mut issue = RelayOutcome::Unreachable;
         for hote in &serveurs {
+            // **LE `TLSA` SE CHERCHE PAR SERVEUR, PAS PAR DOMAINE** (§3.1 de
+            // RFC 7672) : c'est le nom du `MX` qui publie, et deux serveurs d'un
+            // même domaine peuvent porter deux certificats.
+            let dane = self.dane_pour(hote, mx_authentique).await;
             for adresse in self.resolveur.addresses(hote.as_bytes()).await {
                 issue = self
-                    .send_to(hote, SocketAddr::new(adresse, self.port), message)
+                    .send_to_avec(
+                        hote,
+                        SocketAddr::new(adresse, self.port),
+                        message,
+                        dane.as_ref(),
+                    )
                     .await;
                 if issue != RelayOutcome::Unreachable {
                     return issue;
@@ -171,6 +205,39 @@ impl Relay {
             }
         }
         issue
+    }
+
+    /// Ce que DANE exige de ce serveur, s'il exige quelque chose.
+    ///
+    /// `None` veut dire « rien » : pas de `TLSA`, une réponse non authentifiée,
+    /// ou un jeu dont aucun enregistrement n'est utilisable (§2.2 de RFC 7672).
+    /// La remise est alors opportuniste, exactement comme avant.
+    ///
+    /// **LES DEUX RÉPONSES DOIVENT ÊTRE AUTHENTIQUES**, celle du `MX` comme
+    /// celle du `TLSA`. Un `MX` qu'un tiers a pu réécrire désignerait un serveur
+    /// qu'il a choisi, dont le `TLSA` serait le sien : la chaîne doit être signée
+    /// d'un bout à l'autre, ou elle ne vaut rien.
+    async fn dane_pour(
+        &self,
+        hote: &str,
+        mx_authentique: bool,
+    ) -> Option<Arc<rustls::ClientConfig>> {
+        if !mx_authentique {
+            return None;
+        }
+        let nom = std::format!("{}{hote}", ams_dane::SMTP_PREFIX);
+        let (rdata, authentique) = self.resolveur.tlsa(nom.as_bytes()).await;
+        if !authentique {
+            return None;
+        }
+        let records: Vec<ams_dane::Tlsa<'_>> = rdata
+            .iter()
+            .filter_map(|octets| ams_dane::Tlsa::parse(octets))
+            .collect();
+        if !ams_dane::Set::from_records(records, true).engage() {
+            return None;
+        }
+        Some(Arc::new(ams_tls::dane_config(rdata)))
     }
 
     /// Remet un message à un serveur nommé, à une adresse donnée.
@@ -184,6 +251,21 @@ impl Relay {
         adresse: SocketAddr,
         message: &Outgoing<'_>,
     ) -> RelayOutcome {
+        self.send_to_avec(hote, adresse, message, None).await
+    }
+
+    /// Le corps de [`Relay::send_to`], avec ce que DANE exige.
+    ///
+    /// `dane` porte la configuration TLS qui EXIGE un `TLSA` satisfait. Sa
+    /// présence rend le chiffrement obligatoire : §2.2 de RFC 7672 ne laisse pas
+    /// le choix, et il n'y a aucun réglage pour l'affaiblir.
+    async fn send_to_avec(
+        &self,
+        hote: &str,
+        adresse: SocketAddr,
+        message: &Outgoing<'_>,
+        dane: Option<&Arc<rustls::ClientConfig>>,
+    ) -> RelayOutcome {
         let Some(corps) = farcir(message.body) else {
             return RelayOutcome::Unsendable;
         };
@@ -196,7 +278,11 @@ impl Relay {
             name: self.nom.as_bytes(),
             sender: message.sender.as_bytes(),
             recipients: &destinataires,
-            require_tls: self.exige_tls,
+            // **UN DOMAINE QUI PUBLIE UN `TLSA` EXIGE LE CHIFFREMENT.** Un pair
+            // qui n'annonce pas `STARTTLS` alors que son domaine a publié est
+            // soit en panne, soit déclassé par un tiers ; dans les deux cas on
+            // n'émet pas.
+            require_tls: self.exige_tls || dane.is_some(),
         }) else {
             return RelayOutcome::Unsendable;
         };
@@ -205,12 +291,38 @@ impl Relay {
             return RelayOutcome::Unreachable;
         };
         let mut tampon = Vec::new();
-        match self
+        let issue = match self
             .dialoguer(&mut flux, &mut client, &corps, &mut tampon)
             .await
         {
             Suite::Fini(issue) => issue,
-            Suite::Monter => self.monter(flux, hote, &mut client, &corps, tampon).await,
+            Suite::Monter => {
+                self.monter(flux, hote, &mut client, &corps, tampon, dane)
+                    .await
+            }
+        };
+        // **LA POIGNÉE DE MAIN A RÉUSSI SOUS DANE, DONC LE PAIR EST AUTHENTIFIÉ.**
+        //
+        // Il n'y a pas d'autre chemin : la configuration DANE refuse tout
+        // certificat qu'aucun `TLSA` ne nomme, et un refus de poignée de main ne
+        // rend jamais `Delivered`. C'est ici qu'on le dit, parce que c'est ici
+        // qu'on sait sous quelle configuration on a parlé.
+        match (dane.is_some(), issue) {
+            (
+                true,
+                RelayOutcome::Delivered {
+                    accepted,
+                    refused,
+                    encrypted,
+                    ..
+                },
+            ) => RelayOutcome::Delivered {
+                accepted,
+                refused,
+                encrypted,
+                authenticated: true,
+            },
+            (_, issue) => issue,
         }
     }
 
@@ -222,17 +334,28 @@ impl Relay {
         client: &mut SmtpClient<'_>,
         corps: &[u8],
         mut tampon: Vec<u8>,
+        dane: Option<&Arc<rustls::ClientConfig>>,
     ) -> RelayOutcome {
         let Ok(nom) = ServerName::try_from(hote.to_string()) else {
             // Un `MX` qui n'est pas un nom de domaine ne se joint pas en TLS, et
             // l'on ne se rabat pas sur le clair pour autant.
             return RelayOutcome::NoEncryption;
         };
-        let connecteur = TlsConnector::from(Arc::clone(&self.tls));
+        // **LE VÉRIFICATEUR VIENT DU DNS.** Un domaine qui publie un `TLSA`
+        // authentique est joint avec la configuration qui l'EXIGE ; tous les
+        // autres, avec l'opportuniste. Il n'y a pas de troisième cas, et pas de
+        // réglage pour en fabriquer un.
+        let configuration = dane.map_or_else(|| Arc::clone(&self.tls), Arc::clone);
+        let connecteur = TlsConnector::from(configuration);
         let Ok(Ok(mut chiffre)) = timeout(self.delai, connecteur.connect(nom, flux)).await else {
             // LA POIGNÉE DE MAIN A ÉCHOUÉ APRÈS UN `STARTTLS` ACCEPTÉ. On ne
             // recommence pas en clair : un échec qu'un tiers peut provoquer
             // serait alors le levier d'un déclassement.
+            //
+            // **ET EN DANE, C'EST AUSSI LE REFUS D'AUTHENTIFICATION** : le pair
+            // n'a satisfait aucun `TLSA`. La remise est ajournée, le message
+            // reste en file, et il repartira quand le domaine aura réparé. C'est
+            // ce que §2.2 de RFC 7672 demande, et il n'y a rien pour l'affaiblir.
             return RelayOutcome::NoEncryption;
         };
 
@@ -356,10 +479,14 @@ enum Suite {
 /// Traduit l'issue de la session en issue de remise.
 fn issue_du_client(outcome: ClientOutcome, client: &SmtpClient<'_>) -> RelayOutcome {
     match outcome {
+        // **`authenticated` SE POSE PLUS HAUT**, dans `send_to_avec`, qui est le
+        // seul à savoir si la poignée de main s'est faite sous DANE. Ici on ne
+        // voit que la conversation SMTP, et elle est la même dans les deux cas.
         ClientOutcome::Delivered => RelayOutcome::Delivered {
             accepted: client.accepted(),
             refused: client.refused(),
             encrypted: client.is_encrypted(),
+            authenticated: false,
         },
         ClientOutcome::Rejected(code) => RelayOutcome::Rejected(code.value()),
         ClientOutcome::Deferred(code) => RelayOutcome::Deferred(code.value()),

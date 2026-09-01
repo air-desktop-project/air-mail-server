@@ -69,8 +69,9 @@ pub use query::{QUERY_MAX, encode_query};
 
 /// Les types d'enregistrement que ce projet interroge.
 ///
-/// Ce sont exactement ceux dont SPF a besoin (RFC 7208 §5) — et pas un de plus :
-/// un type qu'on n'interroge pas est un décodeur qu'on n'éprouve pas.
+/// Ceux dont SPF a besoin (RFC 7208 §5), plus `TLSA` pour DANE (RFC 7672) — et
+/// pas un de plus : un type qu'on n'interroge pas est un décodeur qu'on
+/// n'éprouve pas.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
 pub enum Kind {
@@ -87,6 +88,13 @@ pub enum Kind {
     Txt = 16,
     /// Une adresse IPv6.
     Aaaa = 28,
+    /// L'empreinte d'un certificat, publiée par le domaine lui-même (RFC 6698).
+    ///
+    /// **Elle ne vaut que si la réponse est authentifiée** : sans DNSSEC, un
+    /// tiers qui détourne la résolution retire simplement l'enregistrement, et
+    /// l'on retombe sur le chiffrement opportuniste sans s'en apercevoir. C'est
+    /// le bit `AD` qui tranche — voir [`crate::Message::authentic_data`].
+    Tlsa = 52,
 }
 
 impl Kind {

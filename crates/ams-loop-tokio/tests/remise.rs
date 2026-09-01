@@ -129,7 +129,10 @@ async fn un_message_traverse_notre_propre_serveur_intact() {
         RelayOutcome::Delivered {
             accepted: 1,
             refused: 0,
-            encrypted: false
+            encrypted: false,
+            // `send_to` n'a pas de `TLSA` : ces essais s'adressent à une
+            // adresse connue, sans passer par le DNS.
+            authenticated: false,
         }
     );
 
@@ -177,7 +180,10 @@ async fn un_destinataire_sur_deux_suffit_a_remettre() {
         RelayOutcome::Delivered {
             accepted: 1,
             refused: 1,
-            encrypted: false
+            encrypted: false,
+            // `send_to` n'a pas de `TLSA` : ces essais s'adressent à une
+            // adresse connue, sans passer par le DNS.
+            authenticated: false,
         }
     );
 }
@@ -200,7 +206,10 @@ async fn la_remise_chiffree_traverse_aussi() {
         RelayOutcome::Delivered {
             accepted: 1,
             refused: 0,
-            encrypted: true
+            encrypted: true,
+            // `send_to` n'a pas de `TLSA` : ces essais s'adressent à une
+            // adresse connue, sans passer par le DNS.
+            authenticated: false,
         },
         "la remise devait aboutir SOUS CHIFFREMENT"
     );
@@ -308,7 +317,10 @@ async fn le_mx_dit_ou_frapper() {
         RelayOutcome::Delivered {
             accepted: 1,
             refused: 0,
-            encrypted: false
+            encrypted: false,
+            // `send_to` n'a pas de `TLSA` : ces essais s'adressent à une
+            // adresse connue, sans passer par le DNS.
+            authenticated: false,
         }
     );
     assert!(!cahier.0.lock().expect("verrou").is_empty());

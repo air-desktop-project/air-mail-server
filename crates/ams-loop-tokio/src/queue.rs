@@ -64,6 +64,14 @@ const ENTETES_MAX: usize = 16 * 1024;
 pub struct QueueTally {
     /// Messages entièrement remis.
     pub sent: usize,
+    /// Remises dont le pair a été AUTHENTIFIÉ par DANE (RFC 7672).
+    ///
+    /// **Ce n'est pas « chiffrées ».** Le chiffrement opportuniste écarte
+    /// l'espion passif ; DANE écarte l'attaquant actif, parce que le domaine a
+    /// dit lui-même, dans son DNS signé, quel certificat il présenterait. Le
+    /// compte est rendu pour qu'on voie la différence — une protection qu'on ne
+    /// voit pas est une protection qu'on croit avoir.
+    pub authenticated: usize,
     /// Messages abandonnés, avec un rapport de non-remise.
     pub bounced: usize,
     /// Messages remis à plus tard.
@@ -279,7 +287,11 @@ impl Spool {
                 .remettre_a(relay, enveloppe.return_path, adresse, &message)
                 .await
             {
-                Issue::Remis => {}
+                Issue::Remis { authentifie } => {
+                    if authentifie {
+                        compte.authenticated = compte.authenticated.saturating_add(1);
+                    }
+                }
                 Issue::Definitif(statut, diagnostic) => {
                     echecs.push(((*adresse).to_string(), statut, diagnostic));
                 }
@@ -383,7 +395,9 @@ impl Spool {
         match issue {
             // `refused` ne peut valoir que zéro : il n'y avait qu'un destinataire,
             // et un refus l'aurait rendu par `Rejected`.
-            RelayOutcome::Delivered { .. } => Issue::Remis,
+            RelayOutcome::Delivered { authenticated, .. } => Issue::Remis {
+                authentifie: authenticated,
+            },
             RelayOutcome::Rejected(code) => Issue::Definitif(
                 statut_etendu(code, true),
                 std::format!("{code} rejected by remote server"),
@@ -538,8 +552,11 @@ impl Spool {
 
 /// Ce qu'un essai vers UN destinataire a donné.
 enum Issue {
-    /// Le pair l'a pris en charge.
-    Remis,
+    /// Le pair l'a pris en charge, et s'est ou non authentifié.
+    Remis {
+        /// Le pair a-t-il été authentifié par DANE ?
+        authentifie: bool,
+    },
     /// Refus définitif : le statut étendu, et ce que le pair a dit.
     Definitif(String, String),
     /// Refus temporaire, ou personne à qui parler.
