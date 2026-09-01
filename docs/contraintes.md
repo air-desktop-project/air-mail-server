@@ -47,9 +47,30 @@ que l'étage 3 doit décider — et elle ne se porterait pas telle quelle sur Ai
 `ams-dns` tient en quelques centaines de lignes parce qu'on n'écrit **qu'un
 client stub** : ce serveur pose des questions, il n'en répond aucune.
 
-**Outillé par** : rien d'automatique. Aucun gate ne vérifie qu'une crate `ams-proto-*`
-ou `ams-session` n'importe pas `std::net` ou `std::fs`. C'est faisable (un `grep`
-sur les `use`) et ce n'est pas fait.
+**Outillé par** : `scripts/check-etages.sh`, exécuté en CI avant même `clippy` —
+il ne compile rien, dure une seconde, et dit ce que la compilation ne dira jamais.
+
+Il refuse `std::net`, `std::fs`, `std::io`, `std::process`, `std::thread`,
+`std::time::Instant`, `std::time::SystemTime` et toute dépendance à `tokio`, dans
+les crates du périmètre. **`std::time::Duration` n'y est pas** : c'est un type, pas
+une horloge. `Instant` et `SystemTime`, eux, rendent deux réponses différentes au
+même appel — ce qu'une machine à états ne doit pas faire. C'est la distinction qui
+compte, et non le nom du module.
+
+**LA LISTE DES CRATES N'Y EST PAS ÉCRITE** : elle est lue dans
+`check-couverture.sh`, qui en a besoin pour la même raison — le périmètre de C2
+EST celui de C1. Deux listes auraient fini par différer, et une crate serait sortie
+de l'une sans sortir de l'autre : couverte à 100 % et libre de faire des
+entrées-sorties, ou l'inverse. Si l'extraction ne rend rien, le script ÉCHOUE
+plutôt que de conclure — un contrôle qui n'a rien examiné n'est pas un contrôle qui
+passe.
+
+**Et il a été éprouvé en le faisant échouer** : un `use std::fs::File` glissé dans
+un codec, puis une dépendance `tokio` déclarée sans être employée. Les deux sont
+vus. Un gate qu'on n'a jamais vu refuser est un gate dont on ne sait rien.
+
+*(Cette entrée disait « rien d'automatique […] c'est faisable et ce n'est pas
+fait » depuis l'ouverture du registre.)*
 
 ## C2 — 100 % de couverture sur les protocoles
 

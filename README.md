@@ -4,7 +4,7 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 
 > ## État : quatre protocoles servis
 >
-> Ce dépôt compile, il est linté, et il porte quatre gates de CI. Il sert
+> Ce dépôt compile, il est linté, et il porte cinq gates de CI. Il sert
 > **SMTP**, **POP3**, **IMAP** et **HTTP** — ce dernier en h2 et en h3, sur TLS
 > et seulement sur TLS.
 >

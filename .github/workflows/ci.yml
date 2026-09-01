@@ -90,6 +90,15 @@ jobs:
           cargo --version
           rustc --version
 
+      # ── LES ÉTAGES (C1) ───────────────────────────────────────────────
+      #
+      # EN PREMIER, et c'est délibéré : ce contrôle ne compile rien, dure une
+      # seconde, et dit une chose que la compilation ne dira jamais — qu'un codec
+      # a commencé à lire un fichier. Le mettre après ferait attendre trois
+      # minutes pour l'apprendre.
+      - name: check-etages
+        run: ./scripts/check-etages.sh
+
       # `--locked` sur chaque commande : le `Cargo.lock` est committé, et une CI
       # qui le laisserait bouger en silence ne vérifierait plus le build qu'elle
       # prétend vérifier.
