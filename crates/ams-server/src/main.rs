@@ -689,6 +689,55 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         }
     );
 
+    // ── MTA-STS (RFC 8461) ──────────────────────────────────────────────────
+    //
+    // **PAS DE DRAPEAU** : l'absence d'autorités EST l'absence de service, comme
+    // la liste des suffixes publics pour DMARC. Et il faut LES DEUX — sans
+    // cache, un redémarrage rouvrirait la fenêtre de déclassement que §5 ferme.
+    let mtasts = if options.mtasts.est_configure() {
+        let Some(checker) = verificateur.as_ref() else {
+            return Err(String::from(
+                "MTA-STS est configuré sans résolveur DNS : l'identifiant de politique se lit \
+                 dans un `TXT`, et l'hôte qui la sert se résout \
+                 (`air-mail-admin config write … --resolver 127.0.0.1:53`)",
+            ));
+        };
+        let pem = std::fs::read(&options.mtasts.anchors)
+            .map_err(|erreur| format!("`{}` : {erreur}", options.mtasts.anchors))?;
+        let racines = ams_tls::anchors(&pem)
+            .map_err(|erreur| format!("`{}` : {erreur}", options.mtasts.anchors))?;
+        let combien = racines.len();
+        let dossier = PathBuf::from(&options.mtasts.cache);
+        // ON CRÉE LE DOSSIER, MAIS PAS SON PARENT — la même règle que la file :
+        // poser un chemin entier écrirait quelque part où l'exploitant ne
+        // l'attendait pas, sur une faute de frappe.
+        if let Err(erreur) = std::fs::create_dir(&dossier)
+            && erreur.kind() != std::io::ErrorKind::AlreadyExists
+        {
+            return Err(format!("`{}` : {erreur}", dossier.display()));
+        }
+        eprintln!(
+            "air-mail-server : MTA-STS (RFC 8461) évalué — {combien} autorité(s) lue(s) dans \
+             `{}`, cache `{}`. DANE L'EMPORTE quand un domaine publie les deux. L'hôte de \
+             politique est joint en TLS 1.3 SEUL (C4) : un domaine dont il ne fait que TLS 1.2 \
+             ne sera pas lu, et sa remise restera opportuniste.",
+            options.mtasts.anchors, options.mtasts.cache
+        );
+        Some(std::sync::Arc::new(ams_loop_tokio::Sts::new(
+            checker.resolver().clone(),
+            std::sync::Arc::new(ams_tls::webpki_config(std::sync::Arc::new(racines))),
+            dossier,
+            Duration::from_secs(u64::from(options.timeouts.command_seconds)),
+        )))
+    } else {
+        eprintln!(
+            "air-mail-server : MTA-STS non évalué — aucune autorité nommée \
+             (`air-mail-admin config write … --mta-sts-anchors /etc/ssl/certs/ca-certificates.crt \
+             --mta-sts-cache /var/cache/ams/mtasts`)"
+        );
+        None
+    };
+
     // ── LA FILE DE RÉÉMISSION SORTANTE ──────────────────────────────────────
     //
     // **ÉTEINTE PAR DÉFAUT.** Émettre du courrier vers des tiers ne se décide pas
@@ -768,13 +817,21 @@ async fn servir(fichier: &Path) -> Result<(), String> {
                 options.domain.clone(),
                 format!("postmaster@{}", options.domain),
             ),
-            Relay::new(
-                checker.resolver().clone(),
-                std::sync::Arc::new(ams_tls::relay_config()),
-                options.domain.clone(),
-                false,
-                Duration::from_secs(u64::from(options.timeouts.command_seconds)),
-            ),
+            {
+                let remetteur = Relay::new(
+                    checker.resolver().clone(),
+                    std::sync::Arc::new(ams_tls::relay_config()),
+                    options.domain.clone(),
+                    false,
+                    Duration::from_secs(u64::from(options.timeouts.command_seconds)),
+                );
+                // **UNE LIGNE À LIRE**, plutôt qu'un argument de plus dans une
+                // liste qui en compte cinq : celui-ci décide de remises.
+                match mtasts.clone() {
+                    Some(sts) => remetteur.with_mtasts(sts),
+                    None => remetteur,
+                }
+            },
         ))
     } else {
         if !options.relay.spool.is_empty() {

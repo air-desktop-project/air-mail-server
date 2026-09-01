@@ -96,6 +96,10 @@ pub struct Options {
     pub relay_max_retry: u32,
     /// Le temps accordé à un message depuis son dépôt. Zéro prend le défaut.
     pub relay_expire: u32,
+    /// Le fichier PEM des autorités pour MTA-STS. Absent : non évalué.
+    pub mtasts_anchors: Option<PathBuf>,
+    /// Le dossier du cache des politiques MTA-STS. **Exigé avec le premier.**
+    pub mtasts_cache: Option<PathBuf>,
     /// Combien de sources la table du garde retient à la fois.
     ///
     /// C'est ce qui empêche la table d'être un épuisement de mémoire offert à
@@ -170,6 +174,12 @@ impl Default for Options {
             relay_retry: 0,
             relay_max_retry: 0,
             relay_expire: 0,
+            // PAS DE MTA-STS PAR DÉFAUT, et pas de drapeau : l'absence de
+            // valeur EST l'absence de service. Embarquer des racines les ferait
+            // vieillir avec le binaire ; lire celles du système sans qu'on l'ait
+            // dit serait une confiance héritée en silence.
+            mtasts_anchors: None,
+            mtasts_cache: None,
             // LES SEUILS DU GARDE VIENNENT DE `ams-guard`, et pas d'ici : les
             // recopier ferait deux vérités pour une seule décision, et la
             // seconde vieillirait en silence.
@@ -249,6 +259,10 @@ impl Options {
                 private_key_path: chemin(self.dkim_key.as_ref()),
             },
             accounts: chemin(self.accounts.as_ref()),
+            mtasts: ams_config::Mtasts {
+                anchors: chemin(self.mtasts_anchors.as_ref()),
+                cache: chemin(self.mtasts_cache.as_ref()),
+            },
             relay: ams_config::Relay {
                 enabled: self.relay,
                 spool: chemin(self.relay_spool.as_ref()),
@@ -312,6 +326,10 @@ OPTIONS DE `config write`
     --accounts <chemin>    fichier de comptes (`air-mail-admin account add`)
     --listen-pop3 <adr>    où écouter en POP3 (défaut : pas de POP3)
     --listen-imap <adr>    où écouter en IMAP (défaut : pas d'IMAP)
+
+    MTA-STS (RFC 8461)
+    --mta-sts-anchors <chemin>          les autorités, en PEM (défaut : non évalué)
+    --mta-sts-cache <chemin>            le dossier des politiques (EXIGÉ avec le premier)
 
     LA FILE DE RÉÉMISSION SORTANTE
     --relay                             émettre pour les comptes authentifiés
@@ -492,6 +510,41 @@ OPTIONS DE `config write`
     tiers a écrite dans un `MAIL FROM:` usurpé ferait de nous l'instrument de son
     envoi.
 
+    MTA-STS N'EST ÉVALUÉ QUE SI DES AUTORITÉS SONT NOMMÉES. Il n'y a pas d'option
+    pour « activer » : `--mta-sts-anchors` suffit, et son absence dit l'inverse.
+    Un domaine qui publie une politique sur `https://mta-sts.<domaine>/` dit quels
+    serveurs peuvent recevoir son courrier, et c'est la WebPKI qui atteste que la
+    politique vient bien de lui.
+
+    LES RACINES NE SONT PAS EMBARQUÉES, et ce n'est pas un oubli : embarquées,
+    elles vieilliraient avec le binaire et personne ne saurait de quand datent les
+    siennes — le même argument que pour la liste des suffixes publics. Les lire
+    dans `/etc/ssl/certs` sans qu'on l'ait dit serait pire : une confiance héritée
+    en silence, comme le `/etc/resolv.conf` que ce serveur refuse déjà de lire.
+    Nommez celui de votre distribution :
+    `--mta-sts-anchors /etc/ssl/certs/ca-certificates.crt`.
+
+    LE CACHE EST LA PROTECTION, PAS UNE OPTIMISATION. §5 de RFC 8461 : un
+    attaquant qui peut bloquer le `https://` obtiendrait, sans cache, une remise
+    sans politique — c'est-à-dire le déclassement que MTA-STS existe pour fermer.
+    Une politique en cache reste valable jusqu'à sa péremption, quoi qu'il arrive
+    au réseau, et un cache en mémoire seule rouvrirait cette fenêtre à chaque
+    redémarrage. C'est pourquoi les deux options vont ensemble.
+
+    DANE L'EMPORTE quand un domaine publie les deux (§2 de RFC 8461) : sa
+    confiance ne passe par aucun tiers, et MTA-STS n'est alors même pas consulté.
+
+    `testing` CONSIGNE ET REMET QUAND MÊME. Un domaine qui s'installe publie
+    `mode: testing` pour dire « ne refusez pas encore » ; on évalue, on écrit dans
+    le journal ce qui aurait échoué, et l'on remet. `enforce`, lui, ajourne : le
+    message reste en file et repartira.
+
+    UNE LIMITE ASSUMÉE : l'hôte de politique est joint en TLS 1.3, comme tout le
+    reste de ce serveur (C4, C6). Un domaine dont cet hôte ne sait faire que
+    TLS 1.2 ne sera donc pas lu, et sa remise retombera sur le chiffrement
+    opportuniste. Ce n'est pas une faille — on ne prétend rien qu'on n'a pas —
+    mais c'est une protection qu'on n'obtient pas.
+
     LE GARDE SE RÈGLE ICI, ET NULLE PART AILLEURS. C8 demande que ce qui borne une
     source vienne de la configuration : un seuil gravé dans le code est un seuil
     qu'on ne peut pas desserrer le jour où il se trompe, ni resserrer le jour où
@@ -666,6 +719,11 @@ where
                     .parse()
                     .map_err(|_| ArgError::new(format!("`{brute}` n'est pas un nombre")))?;
             }
+            // ── MTA-STS (RFC 8461) ──────────────────────────────────────────
+            "--mta-sts-anchors" => {
+                options.mtasts_anchors = Some(PathBuf::from(valeur()?));
+            }
+            "--mta-sts-cache" => options.mtasts_cache = Some(PathBuf::from(valeur()?)),
             // ── La file de réémission sortante ──────────────────────────────
             "--relay" => options.relay = true,
             "--relay-spool" => options.relay_spool = Some(PathBuf::from(valeur()?)),
@@ -766,6 +824,17 @@ where
     // L'INVERSE N'EST PAS REFUSÉ, et c'est délibéré : nommer un dossier sans
     // `--relay` ne promet rien à personne, et permet de le préparer avant
     // d'ouvrir l'émission. Le serveur le dit au démarrage.
+    // **LES DEUX VONT ENSEMBLE, OU AUCUNE.** Sans autorités, on ne saurait pas à
+    // qui l'on parle en allant chercher la politique ; sans cache, un
+    // redémarrage rouvrirait la fenêtre de déclassement que §5 de RFC 8461
+    // ferme. L'une sans l'autre ne veut dire ni « évalue » ni « n'évalue pas ».
+    if options.mtasts_anchors.is_some() != options.mtasts_cache.is_some() {
+        return Err(ArgError::new(
+            "`--mta-sts-anchors` et `--mta-sts-cache` vont ENSEMBLE : sans autorités on ne \
+             saurait pas à qui l'on parle, et sans cache un redémarrage rouvrirait la fenêtre \
+             de déclassement que le cache existe pour fermer",
+        ));
+    }
     if options.dkim_selector.is_some() != options.dkim_key.is_some() {
         return Err(ArgError::new(
             "`--dkim-selector` et `--dkim-key` vont ENSEMBLE : l'un sans l'autre ne veut dire ni \
@@ -1030,6 +1099,8 @@ mod tests {
             (&["--relay-max-retry-seconds", "0"], "à rien"),
             (&["--relay-expire-seconds", "0"], "sans avoir essayé"),
             (&["--relay-spool"], "attend une valeur"),
+            (&["--mta-sts-anchors"], "attend une valeur"),
+            (&["--mta-sts-cache"], "attend une valeur"),
         ] {
             let erreur = parse(arguments).expect_err("refusé");
             assert!(
@@ -1052,6 +1123,56 @@ mod tests {
         // Et elle se relit à l'identique une fois écrite.
         let octets = ams_config::encode(&config).expect("encodable");
         assert_eq!(ams_config::decode(&octets).expect("relisible"), config);
+    }
+
+    // ── MTA-STS (RFC 8461) ──────────────────────────────────────────────────
+
+    /// **PAS DE DRAPEAU : L'ABSENCE DE VALEUR EST L'ABSENCE DE SERVICE.**
+    #[test]
+    fn sans_autorites_mtasts_n_est_pas_evalue() {
+        let options = ecrire(&["--domain", "mail.example.com"]);
+        assert!(options.mtasts_anchors.is_none());
+        assert!(!options.en_configuration().mtasts.est_configure());
+    }
+
+    /// Les deux chemins traversent jusqu'au fichier.
+    #[test]
+    fn les_deux_chemins_mtasts_traversent_jusqu_au_fichier() {
+        let options = ecrire(&[
+            "--domain",
+            "mail.example.com",
+            "--mta-sts-anchors",
+            "/etc/ssl/certs/ca-certificates.crt",
+            "--mta-sts-cache",
+            "/var/cache/ams/mtasts",
+        ]);
+        let config = options.en_configuration();
+        assert!(config.mtasts.est_configure());
+        assert_eq!(config.mtasts.anchors, "/etc/ssl/certs/ca-certificates.crt");
+        assert_eq!(config.mtasts.cache, "/var/cache/ams/mtasts");
+        // Et le tout se relit à l'identique.
+        let octets = ams_config::encode(&config).expect("encodable");
+        assert_eq!(ams_config::decode(&octets).expect("relisible"), config);
+    }
+
+    /// **LES DEUX VONT ENSEMBLE, OU AUCUNE.**
+    ///
+    /// Sans autorités, on ne saurait pas à qui l'on parle en allant chercher la
+    /// politique ; sans cache, un redémarrage rouvrirait la fenêtre de
+    /// déclassement que §5 de RFC 8461 ferme.
+    #[test]
+    fn l_une_sans_l_autre_est_refusee() {
+        for arguments in [
+            ["--mta-sts-anchors", "/etc/ssl/certs/ca.crt"].as_slice(),
+            &["--mta-sts-cache", "/var/cache/ams/mtasts"],
+        ] {
+            let erreur = parse(arguments).expect_err("refusé");
+            assert!(
+                erreur.message.contains("ENSEMBLE"),
+                "« {} » ne dit pas qu'elles vont ensemble",
+                erreur.message
+            );
+        }
     }
 
     // ── La file de réémission sortante ──────────────────────────────────────

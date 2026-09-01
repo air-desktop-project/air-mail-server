@@ -376,3 +376,69 @@ fn le_verificateur_dane_verifie_la_signature_tls_1_3() {
     );
     assert!(verdict.is_err(), "une fausse signature a été acceptée");
 }
+
+// ── Le magasin de racines (MTA-STS) ─────────────────────────────────────────
+
+const AUTORITE_PEM: &[u8] = include_bytes!("../../vecteurs/ca.pem");
+
+#[test]
+fn un_magasin_se_lit_depuis_du_pem() {
+    let racines = super::anchors(AUTORITE_PEM).expect("lisible");
+    assert_eq!(racines.len(), 1);
+    // Et il assemble une configuration qui vérifie ORDINAIREMENT.
+    let configuration = super::webpki_config(Arc::new(racines));
+    assert!(!format!("{configuration:?}").is_empty());
+}
+
+/// **UN MAGASIN VIDE N'EST PAS UN MAGASIN.**
+///
+/// Il ferait échouer chaque vérification sans que rien ne dise pourquoi ; mieux
+/// vaut refuser sur un fichier qui ne porte aucune autorité.
+#[test]
+fn un_fichier_sans_autorite_est_refuse() {
+    for vide in [
+        &b""[..],
+        b"# rien que des commentaires
+",
+        b"pas du PEM du tout",
+    ] {
+        assert_eq!(
+            super::anchors(vide).err(),
+            Some(super::AnchorError::Empty),
+            "{vide:?}"
+        );
+    }
+}
+
+/// Un PEM tronqué ou corrompu se refuse, plutôt que d'être sauté en silence.
+#[test]
+fn un_pem_illisible_est_refuse() {
+    let mut tronque = alloc::vec::Vec::from(AUTORITE_PEM);
+    tronque.truncate(AUTORITE_PEM.len() / 2);
+    let issue = super::anchors(&tronque);
+    assert!(issue.is_err(), "un PEM tronqué a été accepté");
+
+    // Un bloc bien délimité dont le contenu n'est pas un certificat.
+    let faux = b"-----BEGIN CERTIFICATE-----
+Zm9v
+-----END CERTIFICATE-----
+";
+    assert_eq!(
+        super::anchors(faux).err(),
+        Some(super::AnchorError::Rejected)
+    );
+}
+
+#[test]
+fn les_erreurs_de_magasin_s_affichent() {
+    for erreur in [
+        super::AnchorError::Unreadable,
+        super::AnchorError::Rejected,
+        super::AnchorError::Empty,
+    ] {
+        let texte = format!("{erreur}");
+        assert!(!texte.is_empty(), "{erreur:?} s'affiche vide");
+        assert!(!format!("{erreur:?}").is_empty());
+    }
+    assert_ne!(super::AnchorError::Empty, super::AnchorError::Rejected);
+}

@@ -104,6 +104,9 @@ struct Entree {
     /// refuse le cas « émettre sans dossier » ; cette crate le transporte.
     file: String,
     reprises: [u32; 3],
+    /// Les deux chemins de MTA-STS — DEUX CHAÎNES LIBRES, y compris l'une sans
+    /// l'autre. Le SERVEUR refuse ce cas ; cette crate les transporte.
+    mtasts: [String; 2],
 }
 
 fuzz_target!(|entree: Entree| {
@@ -178,6 +181,10 @@ fuzz_target!(|entree: Entree| {
             report_interval_seconds: entree.intervalle,
             send_reports: entree.remet,
             failure_reports: entree.echecs,
+        },
+        mtasts: ams_config::Mtasts {
+            anchors: entree.mtasts[0].clone(),
+            cache: entree.mtasts[1].clone(),
         },
         relay: ams_config::Relay {
             enabled: entree.emet,

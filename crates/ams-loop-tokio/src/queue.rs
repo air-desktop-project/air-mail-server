@@ -417,7 +417,13 @@ impl Spool {
                 String::from("5.6.0"),
                 String::from("message cannot be transmitted as written"),
             ),
-            RelayOutcome::Deferred(_)
+            // **UNE POLITIQUE QUI NE NOMME PAS CE SERVEUR AJOURNE**, et ne
+            // refuse pas : c'est le domaine qui se trompe, ou qui vient de
+            // changer de `MX`, et il corrigera. Rendre le message à son
+            // expéditeur pour cela le punirait d'une faute qui n'est pas la
+            // sienne.
+            RelayOutcome::PolicyMismatch
+            | RelayOutcome::Deferred(_)
             | RelayOutcome::Unreachable
             | RelayOutcome::NoEncryption
             | RelayOutcome::Protocol => Issue::Ajourne,

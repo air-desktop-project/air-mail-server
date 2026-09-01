@@ -92,6 +92,8 @@ fn configuration(
         tracked_sources: 64,
         // AUCUNE ÉMISSION : ces essais reçoivent, ils n'émettent pas.
         relay: ams_config::Relay::default(),
+        // MTA-STS NON ÉVALUÉ : ces essais ne joignent aucun hôte de politique.
+        mtasts: ams_config::Mtasts::default(),
         timeouts: Timeouts {
             command_seconds: 10,
             data_seconds: 10,

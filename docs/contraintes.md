@@ -3009,10 +3009,78 @@ l'arrêt du serveur dit combien de remises ont été authentifiées. Chiffré sa
 authentifié écarte l'espion passif ; authentifié écarte l'attaquant actif. Une
 protection qu'on ne voit pas est une protection qu'on croit avoir.
 
-**MTA-STS (RFC 8461) reste à faire.** Il demande un client HTTPS sortant, un
-magasin de racines WebPKI et un cache de politiques sur disque — trois surfaces
-neuves —, et §2 de RFC 8461 dit que DANE l'emporte quand les deux existent. C'est
-pourquoi DANE est venu d'abord.
+### MTA-STS (RFC 8461), depuis le 2026-09-01
+
+DANE fait signer le DNS par le domaine ; MTA-STS déplace la question **hors du
+DNS**. Le domaine publie une politique sur `https://mta-sts.<domaine>/`, et c'est
+la WebPKI qui atteste qu'elle vient bien de lui. Le DNS n'y sert plus qu'à dire
+que la politique a CHANGÉ, par un identifiant dans un `TXT`.
+
+**DANE L'EMPORTE** (§2). Quand un domaine publie les deux, c'est celui dont la
+confiance ne passe par aucun tiers qui décide, et MTA-STS n'est même pas
+consulté. C'est pourquoi DANE est venu d'abord.
+
+**CET IDENTIFIANT N'A PAS BESOIN D'ÊTRE AUTHENTIQUE**, et c'est la différence
+avec DANE. Il ne dit pas ce qu'EST la politique — cela, c'est le `https://`
+vérifié qui le dit — il dit seulement qu'elle a changé. Un tiers qui le réécrit
+obtient au pire qu'on retélécharge une politique qu'on a déjà ; un tiers qui le
+supprime n'obtient rien, parce que le cache reste valable. **On ne demande donc
+pas le bit `AD` ici**, alors qu'on l'exige pour un `TLSA`.
+
+**LES RACINES SE NOMMENT, ET NE S'EMBARQUENT PAS.** MTA-STS fait reposer sa
+confiance sur la WebPKI, ce qui demande des autorités. Embarquées, elles
+vieilliraient avec le binaire et personne ne saurait de quand datent les siennes
+— c'est l'argument que ce registre oppose déjà à une liste de suffixes publics
+embarquée. Lues dans `/etc/ssl/certs` sans qu'on l'ait dit, ce serait une
+confiance héritée en silence, comme le `/etc/resolv.conf` que ce serveur refuse
+déjà de lire. `--mta-sts-anchors` les nomme, et son absence dit l'inverse.
+
+**LE CACHE EST LA PROTECTION, PAS UNE OPTIMISATION** (§5). Un attaquant qui peut
+bloquer le `https://` obtiendrait, sans cache, une remise sans politique —
+c'est-à-dire le déclassement que MTA-STS existe pour fermer. Une politique en
+cache reste donc valable jusqu'à sa péremption, **quoi qu'il arrive au réseau** :
+ni un `TXT` disparu, ni un `https://` injoignable ne la retirent. Un cache en
+mémoire seule rouvrirait cette fenêtre à chaque redémarrage, et c'est pourquoi
+`--mta-sts-cache` est exigé avec les autorités.
+
+Le nom de fichier porte tout l'état — quel domaine, quelle version, quand — la
+même discipline que la file de réémission et pour la même raison : ce que le nom
+ne dit pas, un redémarrage l'oublie. Et **une entrée venue du FUTUR est traitée
+comme périmée** : une horloge qu'on remet à l'heure ne prolonge pas un cache.
+
+**AUCUNE REDIRECTION N'EST SUIVIE** (§3.3). Un `301` vers un autre hôte ferait
+chercher la politique là où l'attaquant l'aura mise. Seul un `200` porte une
+politique.
+
+**`testing` CONSIGNE ET REMET QUAND MÊME** (§5.2). Un domaine qui s'installe dit
+« ne refusez pas encore » ; on évalue, on écrit dans le journal ce qui aurait
+échoué, et l'on remet. L'ignorer priverait l'exploitant de la seule trace qui lui
+dirait que ses remises échoueront une fois la politique durcie. `enforce`, lui,
+AJOURNE : le message reste en file, exactement comme pour DANE.
+
+**DEUX TOLÉRANCES SONT ASSUMÉES.** Une clef inconnue se saute, parce que §3.2
+réserve l'extension et qu'un champ de demain ne doit pas arrêter le courrier
+d'aujourd'hui. Une politique `none` n'a pas besoin de `mx`, parce que c'est la
+façon de dire « oubliez celle que vous aviez » et qu'exiger un serveur rendrait
+le retrait impossible.
+
+**UNE LIMITE ASSUMÉE : TLS 1.3 SEUL, ICI AUSSI** (C4, C6). L'hôte de politique
+est joint comme tout le reste. Un domaine dont cet hôte ne sait faire que TLS 1.2
+ne sera donc pas lu, et sa remise retombera sur le chiffrement opportuniste. Ce
+n'est pas une faille — on ne prétend rien qu'on n'a pas — mais c'est une
+protection qu'on n'obtient pas, et cela vaut d'être écrit plutôt que découvert.
+
+**ET LE DÉCOUPAGE `chunked` N'EST PAS DÉFAIT.** On demande `Connection: close`,
+et un `mta-sts.txt` est un fichier statique de quelques centaines d'octets : un
+serveur qui le découpe tout de même n'est pas lu. Le défaiseur existe dans le
+décodeur — la tête le reconnaît et le distingue — mais le corps n'est pas
+rassemblé, faute d'un chemin qu'on n'exercerait qu'ici. C'est nommé plutôt que
+tu ; la remise retombe alors sur ce qu'elle était.
+
+**TLSRPT (RFC 8460) n'est pas là.** Un domaine en `testing` attend un rapport
+quotidien en JSON, remis au `rua` qu'il publie ; ce serveur consigne dans son
+journal et n'émet rien. C'est une tranche à part, avec son agrégateur, son
+dossier et sa remise.
 
 ### DNSSEC n'est pas validé, et c'est écrit partout
 
@@ -3560,7 +3628,7 @@ il l'a commis sur lui-même : une section qui s'intitule « l'état réel » est
 qu'on relit le moins, parce qu'on croit la connaître.
 
 Sont outillées : C1 (les trois étages, et la couverture qui n'est exigible que
-parce qu'ils sont séparés), C2 (le gate mesure 50 599 régions sur 28 crates,
+parce qu'ils sont séparés), C2 (le gate mesure 50 789 régions sur 28 crates,
 toutes couvertes — et il compare des comptes, non un pourcentage arrondi), C3
 (les lints, l'absence d'allocation dans les décodeurs, et 59 cibles de fuzz dont
 la CI vérifie qu'elle les lance toutes), C4 (`ams-tls` n'offre que

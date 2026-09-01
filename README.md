@@ -96,7 +96,7 @@ des octets **et des actions**. Elles n'attendent jamais.
 | `ams-session` | les sessions, serveur ET cliente | **SMTP, POP3 et IMAP en réception, SMTP à l'émission** |
 | `ams-guard` | flooding et bannissement par source | **implémenté** |
 | `ams-dane` | DANE pour SMTP (RFC 7672) : ce qu'un `TLSA` autorise | **implémenté, et câblé** |
-| `ams-mtasts` | MTA-STS (RFC 8461) : la politique d'un domaine | **la politique et le cache ; le câblage suit** |
+| `ams-mtasts` | MTA-STS (RFC 8461) : la politique d'un domaine | **implémenté, et câblé** |
 | `ams-queue` | file de réémission : quand réessayer, quand renoncer | **implémenté, et câblé** |
 | `ams-auth` | le magasin d'identifiants, vérification Argon2id | **implémenté** |
 | `ams-tls` | TLS 1.3 uniquement, échange de clés post-quantique | **implémenté, en entrant et en sortant** |
@@ -1635,7 +1635,10 @@ Deux limites, nommées plutôt que tues :
 - **Le chiffrement sortant n'authentifie que les domaines qui publient un
   `TLSA`** — voir « [Authentifier le
   destinataire](#authentifier-le-destinataire-dane) ». Pour les autres il reste
-  opportuniste : un espion passif ne lit rien, un actif, si. Le repli en clair
+  opportuniste — ou vérifié par la WebPKI si le domaine publie une politique
+  MTA-STS, voir « [Authentifier le destinataire
+  (MTA-STS)](#authentifier-le-destinataire-mta-sts) ». Sans l'un ni l'autre, un
+  espion passif ne lit rien, un actif, si. Le repli en clair
   après un `STARTTLS` annoncé est en revanche toujours refusé — c'est le levier
   d'une attaque par déclassement.
 
@@ -1679,9 +1682,58 @@ contrairement à SPF et DMARC — et ce n'est pas un oubli : ces deux-là décid
 courrier de quelqu'un d'autre, où un faux positif refuse un message qu'on ne
 reverra pas. DANE décide de notre émission, et rien n'est perdu.
 
-**MTA-STS (RFC 8461) n'est pas là.** Il demande un client HTTPS sortant, un
-magasin de racines WebPKI et un cache de politiques — trois surfaces neuves —, et
-§2 de RFC 8461 dit que DANE l'emporte quand les deux existent.
+### Authentifier le destinataire (MTA-STS)
+
+```sh
+./target/release/air-mail-admin config write air-mail.conf \
+    --domain mail.example.com --hosted example.com \
+    --resolver 127.0.0.1:53 \
+    --mta-sts-anchors /etc/ssl/certs/ca-certificates.crt \
+    --mta-sts-cache /var/cache/ams/mtasts
+```
+
+DANE fait signer le DNS par le domaine ; **MTA-STS déplace la question hors du
+DNS**. Le domaine publie une politique sur `https://mta-sts.<domaine>/`, qui dit
+quels serveurs peuvent recevoir son courrier, et c'est la WebPKI qui atteste
+qu'elle vient bien de lui. Le DNS n'y sert plus qu'à dire que la politique a
+*changé*, par un identifiant dans un `TXT` — **qui n'a pas besoin d'être
+authentique**, contrairement à un `TLSA`.
+
+**DANE l'emporte** quand un domaine publie les deux (§2) : sa confiance ne passe
+par aucun tiers, et MTA-STS n'est alors même pas consulté.
+
+**Les racines se nomment, elles ne s'embarquent pas.** Embarquées, elles
+vieilliraient avec le binaire et personne ne saurait de quand datent les siennes
+— le même argument que pour la liste des suffixes publics. Lues dans
+`/etc/ssl/certs` sans qu'on l'ait dit, ce serait une confiance héritée en silence,
+comme le `/etc/resolv.conf` que ce serveur refuse déjà de lire.
+
+**Le cache est la protection, pas une optimisation.** §5 : un attaquant qui peut
+bloquer le `https://` obtiendrait, sans cache, une remise sans politique —
+c'est-à-dire le déclassement que MTA-STS existe pour fermer. Une politique en
+cache reste donc valable jusqu'à sa péremption **quoi qu'il arrive au réseau** :
+ni un `TXT` disparu, ni un `https://` injoignable ne la retirent. C'est pourquoi
+les deux options vont ensemble — un cache en mémoire seule rouvrirait la fenêtre
+à chaque redémarrage.
+
+| Mode publié | Ce qu'on fait |
+| --- | --- |
+| `enforce` | Le serveur doit être dans la politique et son certificat valider, sinon **on ajourne** : le message reste en file. |
+| `testing` | On évalue, on **consigne** ce qui aurait échoué, et l'on remet quand même. |
+| `none` | Le domaine retire sa politique. |
+
+Trois limites, nommées plutôt que tues :
+
+- **Aucune redirection n'est suivie** (§3.3) : un `301` ferait chercher la
+  politique là où l'attaquant l'aura mise. Seul un `200` en porte une.
+- **TLS 1.3 seul, ici aussi** (C4) : un domaine dont l'hôte de politique ne sait
+  faire que TLS 1.2 ne sera pas lu, et sa remise restera opportuniste.
+- **Le découpage `chunked` n'est pas défait** : on demande `Connection: close`, et
+  un `mta-sts.txt` est un fichier statique de quelques centaines d'octets. Un
+  serveur qui le découpe tout de même n'est pas lu.
+
+**TLSRPT (RFC 8460) n'est pas là** : un domaine en `testing` attend un rapport
+quotidien en JSON, et ce serveur se contente de son journal.
 
 ### Régler le garde
 

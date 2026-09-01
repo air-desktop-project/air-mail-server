@@ -19,6 +19,7 @@ Ils sont **fabriqués une fois et versionnés**, plutôt qu'engendrés par
 | Fichier | Ce que c'est |
 | --- | --- |
 | `ca.der` | Une autorité auto-signée, `CA:TRUE`, `CN=ams-dane-ca`. |
+| `ca.pem` | La même, en PEM — c'est sous cette forme qu'un magasin de racines se nomme. |
 | `leaf.der` | `CN=mx.example.test`, SAN `DNS:mx.example.test`, signé par `ca.der`. |
 | `solo.der` | Auto-signé, `CN=solo.example.test` — pour `DANE-EE(3)`, qui n'a besoin d'aucune chaîne. |
 

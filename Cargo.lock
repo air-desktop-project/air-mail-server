@@ -144,6 +144,7 @@ dependencies = [
  "ams-guard",
  "ams-h3",
  "ams-mime",
+ "ams-mtasts",
  "ams-proto-h2",
  "ams-proto-h3",
  "ams-proto-http",

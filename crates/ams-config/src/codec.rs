@@ -293,6 +293,38 @@ pub struct Configuration {
     pub accounts: String,
     /// La file de réémission sortante.
     pub relay: Relay,
+    /// MTA-STS (RFC 8461).
+    pub mtasts: Mtasts,
+}
+
+/// MTA-STS (RFC 8461) : ce qu'un domaine exige de qui lui écrit.
+///
+/// # DEUX CHAÎNES VIDES VEULENT DIRE « PAS ÉVALUÉ »
+///
+/// Pas de drapeau : l'absence de valeur EST l'absence de service, comme la liste
+/// des suffixes publics pour DMARC. Et parce que ce champ a été ajouté après
+/// coup, une configuration écrite avant lui décode deux chaînes vides — elle se
+/// comporte donc exactement comme avant.
+///
+/// **DANE L'EMPORTE** quand un domaine publie les deux (§2 de RFC 8461).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Mtasts {
+    /// Le fichier PEM des autorités, ou une chaîne vide.
+    pub anchors: String,
+    /// Le dossier du cache des politiques, ou une chaîne vide.
+    pub cache: String,
+}
+
+impl Mtasts {
+    /// MTA-STS est-il évalué ?
+    ///
+    /// **IL FAUT LES DEUX.** Sans autorités, on ne saurait pas à qui l'on parle
+    /// en allant chercher la politique ; sans cache, un redémarrage rouvrirait
+    /// la fenêtre de déclassement que §5 ferme.
+    #[must_use]
+    pub fn est_configure(&self) -> bool {
+        !self.anchors.is_empty() && !self.cache.is_empty()
+    }
 }
 
 /// Ce que ce serveur émet POUR SES COMPTES, et comment il insiste.
@@ -490,6 +522,14 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
     let ecoute_h3 = texte(lu.get_listen_h3()?)?;
     let clef_de_jeton = texte(lu.get_token_key()?)?;
 
+    // **UN FICHIER ÉCRIT AVANT CE CHAMP DÉCODE DEUX CHAÎNES VIDES**, et deux
+    // chaînes vides veulent dire « MTA-STS n'est pas évalué ».
+    let sts = lu.get_mtasts()?;
+    let mtasts = Mtasts {
+        anchors: texte(sts.get_anchors()?)?,
+        cache: texte(sts.get_cache()?)?,
+    };
+
     // **UN FICHIER ÉCRIT AVANT CE CHAMP DÉCODE `enabled: false`**, et un serveur
     // qu'on met à jour ne devient donc pas un relais sans que personne l'ait
     // décidé. C'est ce qui rend ce champ ajoutable.
@@ -594,6 +634,7 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
         listen_h3: ecoute_h3,
         token_key: clef_de_jeton,
         relay,
+        mtasts,
     })
 }
 
@@ -700,6 +741,11 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
             emission.set_max_retry_seconds(config.relay.max_retry_seconds);
             emission.set_expire_seconds(config.relay.expire_seconds);
         }
+        {
+            let mut sts = ecrit.reborrow().init_mtasts();
+            sts.set_anchors(&config.mtasts.anchors);
+            sts.set_cache(&config.mtasts.cache);
+        }
     }
     Ok(serialize::write_message_to_words(&message))
 }
@@ -726,11 +772,11 @@ fn depuis(valeur: usize) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::Relay;
     use super::{
         Configuration, Dkim, Dmarc, Enforcement, Error, Spf, TRAVERSAL_LIMIT_WORDS, Timeouts, Tls,
         decode, encode,
     };
+    use super::{Mtasts, Relay};
     use alloc::string::{String, ToString as _};
     use alloc::vec;
     use ams_guard::Thresholds;
@@ -752,6 +798,9 @@ mod tests {
             // AUCUNE ÉMISSION dans l'exemple : c'est le défaut, et c'est aussi
             // ce qu'un fichier écrit avant que ce champ n'existe décodera.
             relay: Relay::default(),
+            // MTA-STS NON ÉVALUÉ dans l'exemple : c'est le défaut, et c'est
+            // aussi ce qu'un fichier antérieur à ce champ décodera.
+            mtasts: Mtasts::default(),
             timeouts: Timeouts {
                 command_seconds: 300,
                 data_seconds: 600,
@@ -1348,5 +1397,113 @@ mod tests {
         assert!(!std::format!("{relais:?}").is_empty());
         assert_ne!(relais, Relay::default());
         assert_eq!(relais.clone(), relais);
+    }
+
+    // ── MTA-STS (RFC 8461) ──────────────────────────────────────────────────
+
+    /// **UN FICHIER ANCIEN DÉCODE « PAS ÉVALUÉ ».**
+    #[test]
+    fn sans_champ_mtasts_rien_n_est_evalue() {
+        let sts = Mtasts::default();
+        assert!(!sts.est_configure());
+        assert!(sts.anchors.is_empty() && sts.cache.is_empty());
+        assert!(!exemple().mtasts.est_configure());
+    }
+
+    /// **IL FAUT LES DEUX**, et l'un sans l'autre n'évalue rien.
+    #[test]
+    fn l_un_sans_l_autre_n_evalue_rien() {
+        let sans_cache = Mtasts {
+            anchors: String::from("/etc/ssl/certs/ca-certificates.crt"),
+            cache: String::new(),
+        };
+        assert!(!sans_cache.est_configure());
+        let sans_racines = Mtasts {
+            anchors: String::new(),
+            cache: String::from("/var/cache/ams/mtasts"),
+        };
+        assert!(!sans_racines.est_configure());
+        let les_deux = Mtasts {
+            anchors: String::from("/etc/ssl/certs/ca-certificates.crt"),
+            cache: String::from("/var/cache/ams/mtasts"),
+        };
+        assert!(les_deux.est_configure());
+    }
+
+    #[test]
+    fn mtasts_traverse_le_format() {
+        let voulu = Mtasts {
+            anchors: String::from("/etc/ssl/certs/ca-certificates.crt"),
+            cache: String::from("/var/cache/ams/mtasts"),
+        };
+        let config = Configuration {
+            mtasts: voulu.clone(),
+            ..exemple()
+        };
+        let octets = encode(&config).expect("encodable");
+        let relue = decode(&octets).expect("relisible");
+        assert_eq!(relue.mtasts, voulu);
+        assert_eq!(relue, config);
+    }
+
+    /// **UN CHEMIN QUI N'EST PAS DE L'UTF-8 FAIT REFUSER LE FICHIER.**
+    ///
+    /// Ces deux champs se décodent parmi les DERNIERS : des octets au hasard
+    /// échouent toujours plus tôt, et leurs gardes n'étaient donc jamais
+    /// éprouvées. On écrit le message à la main pour les atteindre — un chemin
+    /// illisible ferait ouvrir un fichier qui n'est pas celui qu'on a nommé,
+    /// et c'est un magasin d'autorités.
+    #[test]
+    fn un_chemin_mtasts_illisible_fait_refuser() {
+        use crate::ams_config_capnp::configuration;
+
+        let bon = encode(&Configuration {
+            mtasts: Mtasts {
+                anchors: String::from("/etc/ssl/certs/ca.crt"),
+                cache: String::from("/var/cache/ams/mtasts"),
+            },
+            ..exemple()
+        })
+        .expect("encodable");
+        assert!(decode(&bon).is_ok(), "le témoin doit se relire");
+
+        // Chacun des deux, à son tour.
+        for quel in [0_u8, 1] {
+            let mut message = capnp::message::Builder::new_default();
+            {
+                let lu = capnp::serialize::read_message(
+                    &mut bon.as_slice(),
+                    capnp::message::ReaderOptions::new(),
+                )
+                .expect("relisible");
+                message
+                    .set_root(lu.get_root::<configuration::Reader<'_>>().expect("racine"))
+                    .expect("recopiable");
+                let mut ecrit = message
+                    .get_root::<configuration::Builder<'_>>()
+                    .expect("racine");
+                let mut sts = ecrit.reborrow().init_mtasts();
+                if quel == 0 {
+                    sts.set_anchors(capnp::text::Reader(b"/etc/\xff/ca.crt"));
+                    sts.set_cache("/var/cache/ams/mtasts");
+                } else {
+                    sts.set_anchors("/etc/ssl/certs/ca.crt");
+                    sts.set_cache(capnp::text::Reader(b"/var/\xff/mtasts"));
+                }
+            }
+            let octets = capnp::serialize::write_message_to_words(&message);
+            assert_eq!(decode(&octets), Err(Error::NotUtf8), "champ {quel}");
+        }
+    }
+
+    #[test]
+    fn mtasts_se_debogue_et_se_compare() {
+        let sts = Mtasts {
+            anchors: String::from("/x"),
+            cache: String::new(),
+        };
+        assert!(!std::format!("{sts:?}").is_empty());
+        assert_ne!(sts, Mtasts::default());
+        assert_eq!(sts.clone(), sts);
     }
 }

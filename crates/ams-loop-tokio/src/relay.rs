@@ -90,6 +90,13 @@ pub enum RelayOutcome {
     NoEncryption,
     /// Ce que le pair a dit n'est pas du SMTP, ou pas à cet endroit.
     Protocol,
+    /// **Le serveur n'est pas dans la politique MTA-STS du domaine.**
+    ///
+    /// §5 de RFC 8461 : une politique `enforce` qui ne nomme pas ce serveur
+    /// interdit d'y remettre. C'est TEMPORAIRE — le domaine corrige sa politique
+    /// ou son `MX`, et le message repartira — et surtout, ce n'est **pas** un
+    /// refus du pair : on ne lui a rien demandé.
+    PolicyMismatch,
     /// Le message ou une adresse ne peut pas être émis tel quel.
     ///
     /// Un `LF` isolé dans le corps, un `CRLF` dans une adresse : ce sont des
@@ -121,6 +128,12 @@ pub struct Relay {
     exige_tls: bool,
     /// Le temps accordé à chaque lecture.
     delai: Duration,
+    /// De quoi évaluer MTA-STS, si l'exploitant l'a demandé.
+    ///
+    /// **`None` NE REFUSE RIEN** : sans magasin de racines ni cache, MTA-STS
+    /// n'est pas évalué, et la remise est ce qu'elle était — DANE si le domaine
+    /// publie un `TLSA`, opportuniste sinon.
+    sts: Option<Arc<crate::mtasts::Sts>>,
 }
 
 impl Relay {
@@ -140,7 +153,22 @@ impl Relay {
             port: SMTP_PORT,
             exige_tls,
             delai,
+            // **ON N'ÉVALUE PAS MTA-STS, SAUF DEMANDE EXPRESSE.** Le
+            // constructeur ne le prend pas : un argument de plus dans une liste
+            // qui en compte cinq se passe à l'envers sans que le compilateur
+            // bronche, et celui-ci décide de remises.
+            sts: None,
         }
+    }
+
+    /// Lui donne de quoi évaluer MTA-STS (RFC 8461).
+    ///
+    /// **C'est la seule façon de l'activer**, et elle laisse une ligne à lire au
+    /// démarrage du serveur.
+    #[must_use]
+    pub fn with_mtasts(mut self, sts: Arc<crate::mtasts::Sts>) -> Self {
+        self.sts = Some(sts);
+        self
     }
 
     /// Change le port. **Réservé aux tests** : en production c'est 25, et un
@@ -184,12 +212,32 @@ impl Relay {
                 Mx::Panne => return RelayOutcome::Unreachable,
             };
 
+        // **MTA-STS SE CHERCHE PAR DOMAINE, ET UNE SEULE FOIS** (§3.1 de
+        // RFC 8461) : c'est le domaine du destinataire qui publie, et sa
+        // politique vaut pour tous ses serveurs.
+        let politique = self.politique_pour(domaine).await;
+
         let mut issue = RelayOutcome::Unreachable;
         for hote in &serveurs {
             // **LE `TLSA` SE CHERCHE PAR SERVEUR, PAS PAR DOMAINE** (§3.1 de
             // RFC 7672) : c'est le nom du `MX` qui publie, et deux serveurs d'un
             // même domaine peuvent porter deux certificats.
             let dane = self.dane_pour(hote, mx_authentique).await;
+            // **DANE L'EMPORTE** (§2 de RFC 8461). Quand un domaine publie les
+            // deux, c'est celui dont la confiance ne passe par aucun tiers qui
+            // décide, et MTA-STS n'est même pas consulté.
+            let sts = match dane {
+                Some(_) => Consigne::Aucune,
+                None => self.consigne(politique.as_deref(), hote),
+            };
+            if sts == Consigne::Interdit {
+                // **CE SERVEUR N'EST PAS DANS LA POLITIQUE.** On n'y remet pas,
+                // et l'on essaie le suivant : le domaine a peut-être publié une
+                // liste dont celui-ci a été retiré.
+                issue = RelayOutcome::PolicyMismatch;
+                continue;
+            }
+            let exige = sts == Consigne::Exige;
             for adresse in self.resolveur.addresses(hote.as_bytes()).await {
                 issue = self
                     .send_to_avec(
@@ -197,6 +245,7 @@ impl Relay {
                         SocketAddr::new(adresse, self.port),
                         message,
                         dane.as_ref(),
+                        exige,
                     )
                     .await;
                 if issue != RelayOutcome::Unreachable {
@@ -205,6 +254,52 @@ impl Relay {
             }
         }
         issue
+    }
+
+    /// Ce que la politique MTA-STS du domaine dit de ce serveur.
+    ///
+    /// # `testing` CONSIGNE, ET REMET QUAND MÊME
+    ///
+    /// §5.2 : `testing` dit « je m'installe, ne refusez pas encore ». On évalue,
+    /// on écrit ce qui aurait échoué, et l'on remet. L'ignorer priverait
+    /// l'exploitant de la seule trace qui lui dirait que ses remises vers ce
+    /// domaine échoueront une fois la politique durcie.
+    fn consigne(&self, politique: Option<&str>, hote: &str) -> Consigne {
+        let Some(texte) = politique else {
+            return Consigne::Aucune;
+        };
+        let mut place = [""; ams_mtasts::MX_MAX];
+        let Ok(lue) = ams_mtasts::parse_policy(texte, &mut place) else {
+            // Une politique qu'on ne sait pas lire ne dit rien : §5 ne demande
+            // pas de refuser sur ce qu'on n'a pas compris.
+            return Consigne::Aucune;
+        };
+        let permis = lue.allows(hote);
+        match (lue.mode(), permis) {
+            (ams_mtasts::Mode::Enforce, true) => Consigne::Exige,
+            (ams_mtasts::Mode::Enforce, false) => Consigne::Interdit,
+            (ams_mtasts::Mode::Testing, permis) => {
+                if !permis {
+                    std::eprintln!(
+                        "air-mail-server : MTA-STS en `testing` — `{hote}` n'est pas dans la \
+                         politique de ce domaine, et la remise SERAIT REFUSÉE si elle passait \
+                         en `enforce`. On remet tout de même."
+                    );
+                }
+                Consigne::Aucune
+            }
+            // `none` : le domaine retire sa politique.
+            (ams_mtasts::Mode::None, _) => Consigne::Aucune,
+        }
+    }
+
+    /// La politique MTA-STS de ce domaine, si l'on sait l'évaluer.
+    async fn politique_pour(&self, domaine: &str) -> Option<String> {
+        let sts = self.sts.as_ref()?;
+        let maintenant = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |depuis| depuis.as_secs());
+        sts.policy_for(domaine, maintenant).await
     }
 
     /// Ce que DANE exige de ce serveur, s'il exige quelque chose.
@@ -251,7 +346,7 @@ impl Relay {
         adresse: SocketAddr,
         message: &Outgoing<'_>,
     ) -> RelayOutcome {
-        self.send_to_avec(hote, adresse, message, None).await
+        self.send_to_avec(hote, adresse, message, None, false).await
     }
 
     /// Le corps de [`Relay::send_to`], avec ce que DANE exige.
@@ -265,6 +360,7 @@ impl Relay {
         adresse: SocketAddr,
         message: &Outgoing<'_>,
         dane: Option<&Arc<rustls::ClientConfig>>,
+        sts: bool,
     ) -> RelayOutcome {
         let Some(corps) = farcir(message.body) else {
             return RelayOutcome::Unsendable;
@@ -282,7 +378,7 @@ impl Relay {
             // qui n'annonce pas `STARTTLS` alors que son domaine a publié est
             // soit en panne, soit déclassé par un tiers ; dans les deux cas on
             // n'émet pas.
-            require_tls: self.exige_tls || dane.is_some(),
+            require_tls: self.exige_tls || dane.is_some() || sts,
         }) else {
             return RelayOutcome::Unsendable;
         };
@@ -297,7 +393,7 @@ impl Relay {
         {
             Suite::Fini(issue) => issue,
             Suite::Monter => {
-                self.monter(flux, hote, &mut client, &corps, tampon, dane)
+                self.monter(flux, hote, &mut client, &corps, tampon, dane, sts)
                     .await
             }
         };
@@ -327,6 +423,12 @@ impl Relay {
     }
 
     /// Monte en chiffrement, puis reprend la conversation.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "les trois configurations TLS possibles — opportuniste, DANE et \
+                  MTA-STS — se décident ici, et les rassembler dans une structure \
+                  ne dirait rien de plus qu'un booléen et une option"
+    )]
     async fn monter(
         &self,
         flux: TcpStream,
@@ -335,6 +437,7 @@ impl Relay {
         corps: &[u8],
         mut tampon: Vec<u8>,
         dane: Option<&Arc<rustls::ClientConfig>>,
+        sts: bool,
     ) -> RelayOutcome {
         let Ok(nom) = ServerName::try_from(hote.to_string()) else {
             // Un `MX` qui n'est pas un nom de domaine ne se joint pas en TLS, et
@@ -345,7 +448,16 @@ impl Relay {
         // authentique est joint avec la configuration qui l'EXIGE ; tous les
         // autres, avec l'opportuniste. Il n'y a pas de troisième cas, et pas de
         // réglage pour en fabriquer un.
-        let configuration = dane.map_or_else(|| Arc::clone(&self.tls), Arc::clone);
+        //
+        // **ET MTA-STS EN EXIGE UNE TROISIÈME**, quand un domaine l'applique :
+        // la vérification ORDINAIRE de la WebPKI, contre les autorités que
+        // l'exploitant a nommées et pour le nom du `MX`. DANE passe avant.
+        let sous_politique = if sts { self.sts.as_ref() } else { None };
+        let configuration = match (dane, sous_politique) {
+            (Some(dane), _) => Arc::clone(dane),
+            (None, Some(sts)) => Arc::clone(sts.tls()),
+            (None, None) => Arc::clone(&self.tls),
+        };
         let connecteur = TlsConnector::from(configuration);
         let Ok(Ok(mut chiffre)) = timeout(self.delai, connecteur.connect(nom, flux)).await else {
             // LA POIGNÉE DE MAIN A ÉCHOUÉ APRÈS UN `STARTTLS` ACCEPTÉ. On ne
@@ -474,6 +586,17 @@ enum Suite {
     Fini(RelayOutcome),
     /// Il faut monter en chiffrement, puis reprendre.
     Monter,
+}
+
+/// Ce que la politique MTA-STS d'un domaine dit d'un de ses serveurs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Consigne {
+    /// Rien : pas de politique, `none`, `testing`, ou DANE qui l'emporte.
+    Aucune,
+    /// `enforce`, et ce serveur y figure : la remise doit être authentifiée.
+    Exige,
+    /// `enforce`, et ce serveur n'y figure PAS : on n'y remet pas.
+    Interdit,
 }
 
 /// Traduit l'issue de la session en issue de remise.

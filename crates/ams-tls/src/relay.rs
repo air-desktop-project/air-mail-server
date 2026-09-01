@@ -53,6 +53,7 @@ use ams_dane::{Match, Set, Tlsa};
 use rustls::client::WebPkiServerVerifier;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{CryptoProvider, verify_tls13_signature};
+use rustls::pki_types::pem::PemObject as _;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{CertificateError, ClientConfig, RootCertStore};
 use rustls::{DigitallySignedStruct, PeerIncompatible, SignatureScheme};
@@ -140,6 +141,91 @@ impl ServerCertVerifier for Opportuniste {
             .signature_verification_algorithms
             .supported_schemes()
     }
+}
+
+/// Lit un magasin de racines depuis du PEM.
+///
+/// # POURQUOI UN FICHIER NOMMÉ, ET NON DES RACINES EMBARQUÉES
+///
+/// MTA-STS (RFC 8461) fait reposer sa confiance sur la WebPKI, ce qui demande
+/// des autorités. Les embarquer dans le binaire les ferait **vieillir avec
+/// lui**, et personne ne saurait de quand date les siennes — c'est exactement
+/// l'argument que ce projet oppose déjà à une liste de suffixes publics
+/// embarquée. Les lire dans `/etc/ssl/certs` sans qu'on l'ait dit serait pire
+/// encore : une confiance héritée en silence, comme le `/etc/resolv.conf` que ce
+/// serveur refuse déjà de lire.
+///
+/// **Le fichier se nomme donc, et son absence EST l'absence de service.** Pas de
+/// drapeau : sans magasin, MTA-STS n'est pas évalué.
+///
+/// # Errors
+///
+/// [`AnchorError`] si aucun certificat n'est lisible, ou si `rustls` en refuse
+/// un.
+pub fn anchors(pem: &[u8]) -> Result<RootCertStore, AnchorError> {
+    let mut racines = RootCertStore::empty();
+    let mut combien = 0_usize;
+    for certificat in CertificateDer::pem_slice_iter(pem) {
+        let certificat = certificat.map_err(|_| AnchorError::Unreadable)?;
+        racines.add(certificat).map_err(|_| AnchorError::Rejected)?;
+        combien = combien.saturating_add(1);
+    }
+    // **UN MAGASIN VIDE N'EST PAS UN MAGASIN.** Il ferait échouer chaque
+    // vérification sans que rien ne dise pourquoi ; mieux vaut refuser de
+    // démarrer sur un fichier qui ne porte aucune autorité.
+    if combien == 0 {
+        return Err(AnchorError::Empty);
+    }
+    Ok(racines)
+}
+
+/// Ce qui rend un magasin de racines inutilisable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnchorError {
+    /// Le fichier ne porte aucun certificat lisible.
+    Unreadable,
+    /// `rustls` a refusé un certificat.
+    Rejected,
+    /// Le fichier est lisible, et ne porte AUCUNE autorité.
+    Empty,
+}
+
+impl core::fmt::Display for AnchorError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Unreadable => f.write_str("le fichier ne porte aucun certificat lisible"),
+            Self::Rejected => f.write_str("un certificat a été refusé"),
+            Self::Empty => f.write_str("le fichier ne porte aucune autorité"),
+        }
+    }
+}
+
+impl core::error::Error for AnchorError {}
+
+/// Assemble un `ClientConfig` qui vérifie le pair contre ces autorités.
+///
+/// C'est la vérification ORDINAIRE de la WebPKI — chaîne, nom, dates —, celle
+/// qu'un navigateur fait. Elle sert deux fois dans MTA-STS : pour aller chercher
+/// la politique sur `https://mta-sts.<domaine>/`, et pour remettre le courrier
+/// au serveur qu'elle désigne.
+///
+/// # TLS 1.3 SEUL, ICI AUSSI (C4, C6)
+///
+/// Et le prix est réel : **un domaine dont l'hôte de politique ne sait faire que
+/// TLS 1.2 ne sera pas lu**, et sa remise retombera sur le chiffrement
+/// opportuniste. Ce n'est pas une faille — on ne prétend rien qu'on n'a pas —
+/// mais c'est une protection qu'on n'obtient pas, et cela vaut d'être écrit
+/// plutôt que découvert.
+#[must_use]
+pub fn webpki_config(racines: Arc<RootCertStore>) -> ClientConfig {
+    let fournisseur = Arc::new(provider());
+    ClientConfig::builder_with_provider(Arc::clone(&fournisseur))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        // Le même `expect` que partout ici : un test de `provider` interdit
+        // qu'il n'offre aucune suite TLS 1.3.
+        .expect("le fournisseur n'offre que des suites TLS 1.3")
+        .with_root_certificates(racines)
+        .with_no_client_auth()
 }
 
 /// Assemble un `ClientConfig` qui EXIGE que le pair satisfasse ces `TLSA`.

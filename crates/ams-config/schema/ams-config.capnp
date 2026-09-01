@@ -128,6 +128,43 @@ struct Configuration {
   # exactement ce qu'une configuration écrite avant lui doit signifier : rien ne
   # sort, comme avant.
   relay @20 :Relay;
+
+  # MTA-STS (RFC 8461) — la politique qu'un domaine publie en HTTPS.
+  #
+  # **UN CHAMP AJOUTÉ APRÈS COUP DÉCODE DEUX CHAÎNES VIDES**, et deux chaînes
+  # vides veulent dire « pas évalué ». Une configuration existante se comporte
+  # donc exactement comme avant.
+  mtasts @21 :Mtasts;
+}
+
+# MTA-STS (RFC 8461) : ce qu'un domaine exige de qui lui écrit.
+#
+# **DANE L'EMPORTE** quand un domaine publie les deux (§2). MTA-STS n'est
+# consulté que lorsqu'aucun `TLSA` utilisable n'engage.
+struct Mtasts {
+  # Le fichier PEM des autorités, ou une chaîne vide.
+  #
+  # VIDE, MTA-STS N'EST PAS ÉVALUÉ. Pas de drapeau : l'absence de valeur EST
+  # l'absence de service, comme la liste des suffixes publics pour DMARC.
+  #
+  # POURQUOI UN FICHIER ET NON DES RACINES EMBARQUÉES. Embarquées, elles
+  # vieilliraient avec le binaire et personne ne saurait de quand datent les
+  # siennes. Lues dans `/etc/ssl/certs` sans qu'on l'ait dit, ce serait une
+  # confiance héritée en silence — ce que ce serveur refuse déjà pour
+  # `/etc/resolv.conf`. Nommez celui de votre distribution.
+  anchors @0 :Text;
+
+  # Le dossier où les politiques récupérées sont gardées, ou une chaîne vide.
+  #
+  # EXIGÉ AVEC `anchors` : §5 fait du cache la PROTECTION, pas une
+  # optimisation. Un attaquant qui peut bloquer le `https://` obtiendrait, sans
+  # cache, une remise sans politique — c'est-à-dire le déclassement que MTA-STS
+  # existe pour fermer. Un cache en mémoire seule rouvrirait cette fenêtre à
+  # chaque redémarrage.
+  #
+  # Il est distinct de la file : une politique n'est pas du courrier, et elle ne
+  # s'efface pas à la remise.
+  cache @1 :Text;
 }
 
 # Ce que ce serveur émet pour ses comptes, et comment il insiste.

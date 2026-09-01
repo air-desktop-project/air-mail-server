@@ -45,6 +45,7 @@ ams-dmarc = { workspace = true }
 # champs pour savoir lesquels une signature couvre.
 ams-dane = { workspace = true }
 ams-mime = { workspace = true }
+ams-mtasts = { workspace = true }
 ams-queue = { workspace = true }
 tokio = { workspace = true }
 # `gzip` pour les rapports DMARC (RFC 7489 §7.2.1) : un rapport agrégé remis par

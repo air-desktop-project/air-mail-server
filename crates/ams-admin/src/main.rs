@@ -295,6 +295,17 @@ fn afficher(config: &Configuration) {
         }
     );
     println!(
+        "MTA-STS            {}",
+        if config.mtasts.est_configure() {
+            format!(
+                "autorités `{}`, cache `{}`",
+                config.mtasts.anchors, config.mtasts.cache
+            )
+        } else {
+            String::from("NON ÉVALUÉ — aucune autorité nommée")
+        }
+    );
+    println!(
         "réémission         {}",
         if config.relay.enabled {
             let reprise = config.relay.backoff();
