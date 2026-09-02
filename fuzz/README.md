@@ -242,7 +242,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_api_route` | `seeds/api-route` | ce qu'une requête désigne — **aucun segment n'est `.`, `..` ou vide**, et la lecture ne donne jamais l'écriture |
 | `fuzz_ams_api_token` | `seeds/api-token` | les jetons porteurs — **rien ne se vérifie sans avoir été scellé avec la bonne clé**, et un jeton n'ouvre jamais plus que sa portée |
 | `fuzz_ams_api_json` | `seeds/api-json` | les représentations JSON — **ce qu'on écrit se relit**, aucune clé répétée, et toute troncature se refuse |
-| `fuzz_ams_session_http` | `seeds/session-http` | la session HTTP — **le compte servi est celui du jeton**, jamais celui que le chemin nomme, et rien ne sort en clair |
+| `fuzz_ams_session_http` | `seeds/session-http` | la session HTTP — **le compte servi est celui du jeton**, jamais celui que le chemin nomme, rien ne sort en clair, **aucun champ n'est écrit deux fois**, et `alt-svc` ne s'annonce que si HTTP/3 est servi |
 | `fuzz_ams_session_render` | `seeds/session-render` | ce que l'API rend — **rien n'échappe à l'échappement**, et l'`uidvalidity` est toujours là dès qu'un UID l'est |
 
 **Les briques communes** — ce que plusieurs protocoles partagent.

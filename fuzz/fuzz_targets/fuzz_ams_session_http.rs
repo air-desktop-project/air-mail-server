@@ -37,6 +37,19 @@
 //!    nomme le logiciel.
 //! 7. **UN CORPS N'EST LU QUE LÀ OÙ IL A UN SENS**, et seulement s'il dit ce
 //!    qu'il est.
+//! 8. **AUCUN CHAMP N'EST ÉCRIT DEUX FOIS**, et `alt-svc` n'apparaît que si
+//!    HTTP/3 est servi.
+//!
+//! # LA HUITIÈME EST NÉE D'UN DÉFAUT, ET DE DEUX
+//!
+//! `www-authenticate` s'écrivait à DEUX endroits — une fois comme champ de tout
+//! refus, une fois ajouté par le composeur d'un 401 —, et un client qui en lit
+//! deux ne sait pas lequel croire. Un simple compte l'aurait vu.
+//!
+//! Et `alt-svc` est ce qui rend le port HTTP/3 trouvable (RFC 7838, §3.1 de
+//! RFC 9114). L'annoncer quand il n'existe pas ferait perdre une connexion à
+//! chaque client qui le croit ; ne pas l'annoncer quand il existe rend toute la
+//! pile HTTP/3 introuvable. Les deux se vérifient d'un seul coup.
 
 #![no_main]
 
@@ -79,6 +92,9 @@ struct Entree<'a> {
     type_de_corps: Option<&'a [u8]>,
     /// L'instant présent.
     maintenant: u32,
+    /// Le port UDP d'HTTP/3. **Zéro veut dire « pas servi »** — c'est le seul
+    /// port qu'un socket lié ne rend jamais, puisque `:0` fait choisir le noyau.
+    port_h3: u16,
 }
 
 /// La méthode que désigne un octet.
@@ -98,6 +114,12 @@ fuzz_target!(|entree: Entree| {
     let clef = Key::new(CLEF).expect("trente-deux octets");
     let Ok(session) = Http::new(clef, HEURE) else {
         return;
+    };
+    // **HTTP/3 SERVI OU NON**, tiré de l'entrée : les deux moitiés de la
+    // huitième propriété se jouent dans la même campagne.
+    let session = match entree.port_h3 {
+        0 => session,
+        port => session.with_h3_port(port),
     };
     let maintenant = u64::from(entree.maintenant).saturating_add(HEURE);
 
@@ -175,6 +197,26 @@ fuzz_target!(|entree: Entree| {
     assert!(
         !champs_rendus.iter().any(|(nom, _)| *nom == b"server"),
         "une réponse nomme le logiciel"
+    );
+
+    // PROPRIÉTÉ 8 : aucun champ deux fois, et l'alternative dit la vérité.
+    for (rang, (nom, _)) in champs_rendus.iter().enumerate() {
+        let combien = champs_rendus
+            .iter()
+            .filter(|(autre, _)| autre == nom)
+            .count();
+        assert_eq!(
+            combien,
+            1,
+            "le champ {} est écrit {combien} fois (rang {rang})",
+            String::from_utf8_lossy(nom)
+        );
+    }
+    let annonce = champs_rendus.iter().any(|(nom, _)| *nom == b"alt-svc");
+    assert_eq!(
+        annonce,
+        entree.port_h3 != 0,
+        "l'alternative annoncée ne dit pas ce qui est servi"
     );
 
     match tour.next() {

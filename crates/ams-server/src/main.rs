@@ -165,6 +165,7 @@ fn monter_l_api(
     domaine: Vec<u8>,
     file: Option<ams_loop_tokio::Spool>,
     message_max: usize,
+    port_h3: Option<u16>,
 ) -> Result<Option<MontageApi>, String> {
     if options.listen_http.is_empty() {
         eprintln!("air-mail-server : API REST non servie — aucune adresse d'écoute configurée");
@@ -190,6 +191,15 @@ fn monter_l_api(
     let session = ams_session::http::Http::new(clef, DUREE_DE_JETON_US).map_err(|_| {
         String::from("la durée de vie des jetons dépasse ce qu'un jeton peut vivre")
     })?;
+    // **`Alt-Svc` EST LA SEULE CHOSE QUI RENDE LE PORT HTTP/3 TROUVABLE**
+    // (RFC 7838, §3.1 de RFC 9114) : sans elle, ce serveur ouvre un port UDP
+    // qu'aucun client conforme ne cherchera jamais. Elle n'est écrite que si ce
+    // port est RÉELLEMENT lié — annoncer une alternative absente ferait perdre
+    // une connexion à chaque client qui la croit.
+    let session = match port_h3 {
+        Some(port) => session.with_h3_port(port),
+        None => session,
+    };
 
     let adresse: std::net::SocketAddr = options.listen_http.parse().map_err(|_| {
         format!(
@@ -1285,6 +1295,16 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         )))
     };
 
+    // **LE PORT UDP SE LIE AVANT QUE LA SESSION NE SE MONTE**, et l'ordre n'est
+    // pas décoratif : ce que l'on annonce dans `Alt-Svc` est le port que le
+    // noyau a RÉELLEMENT donné. `listenH3` peut dire `:0`, et annoncer ce qui est
+    // écrit dans le fichier enverrait les clients là où personne n'écoute.
+    let h3_lie = monter_l_api_h3(&options)?;
+    let port_h3 = h3_lie
+        .as_ref()
+        .and_then(|(socket, _)| socket.local_addr().ok())
+        .map(|adresse| adresse.port());
+
     let montage = monter_l_api(
         &options,
         options_de_service.tls.as_ref(),
@@ -1297,11 +1317,12 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         domaine.to_vec(),
         file.as_ref().map(|attente| attente.as_ref().clone()),
         message_max,
+        port_h3,
     )?;
     // **LA MÊME SESSION ET LA MÊME API POUR LES DEUX VERSIONS** : un jeton scellé
     // par HTTP/2 doit ouvrir HTTP/3, et une ressource servie d'un côté doit être
     // la même de l'autre. Deux montages en donneraient deux, avec deux clés.
-    let h3 = match (montage.as_ref(), monter_l_api_h3(&options)?) {
+    let h3 = match (montage.as_ref(), h3_lie) {
         (Some((_, session, _, api)), Some((socket, tls))) => {
             let session = session.clone();
             let api = Arc::clone(api);

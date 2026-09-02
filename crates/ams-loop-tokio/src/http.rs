@@ -651,8 +651,14 @@ where
     let vide = corps.is_empty() || sans_corps;
     let mut champs: std::vec::Vec<(&[u8], &[u8])> = std::vec::Vec::with_capacity(CHAMPS_MAX);
     champs.push((b"content-type", media.as_bytes()));
-    champs.push((b"cache-control", b"no-store"));
-    champs.push((b"x-content-type-options", b"nosniff"));
+    // **CE QUE TOUTE RÉPONSE PORTE VIENT DE LA SESSION**, et non d'une liste
+    // écrite ici. Deux listes pour une même API en ont donné deux le jour où
+    // l'une a bougé : celle d'HTTP/3 ne portait ni `no-store` ni `nosniff`.
+    champs.extend(
+        ams_session::http::champs_de_toute_reponse(status, service.session.alt_svc())
+            .into_iter()
+            .flatten(),
+    );
     // §14.3 : l'invitation D'ABORD — un client qui reçoit un refus doit savoir
     // qu'une porte existe, et c'est sur le refus qu'il en a le plus besoin.
     let (divisible, morceau) = portee;
@@ -663,9 +669,6 @@ where
     let dits = morceau.map_or(0, |quoi| quoi.write(&mut dit));
     if morceau.is_some() {
         champs.push((b"content-range", dit.get(..dits).unwrap_or_default()));
-    }
-    if status == StatusCode::UNAUTHORIZED {
-        champs.push((b"www-authenticate", b"Bearer"));
     }
 
     let ecrits = connexion

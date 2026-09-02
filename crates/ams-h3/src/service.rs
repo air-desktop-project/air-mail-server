@@ -20,9 +20,20 @@ use ams_proto_http::{RequestHead, StatusCode};
 /// Combien de champs une réponse porte au plus.
 ///
 /// **C'EST UNE RÉPONSE DE SERVEUR DE COURRIER, PAS UNE PAGE** : un type de
-/// média, une longueur, une date, et de quoi refuser une authentification. Six
-/// suffisent, et la borne évite d'avoir à décider quoi jeter en écrivant.
-pub const CHAMPS_MAX: usize = 6;
+/// média, une longueur, ce que toute réponse de l'API porte, et de quoi décrire
+/// une portée. La borne évite d'avoir à décider quoi jeter en écrivant.
+///
+/// # POURQUOI HUIT, ET COMMENT LE SAVOIR
+///
+/// La plus chargée est un `206` refusé sur une ressource divisible, alors
+/// qu'HTTP/3 est annoncé : `content-type`, `content-length`, `cache-control`,
+/// `x-content-type-options`, `www-authenticate`, `alt-svc`, `accept-ranges`,
+/// `content-range`. Huit exactement.
+///
+/// **CETTE BORNE A DÉJÀ ÉTÉ TROP PETITE**, et personne ne l'aurait vu :
+/// [`Reponse::avec_champ`] perd en silence ce qui dépasse. C'est pourquoi
+/// l'appelant en pose une assertion de compilation plutôt que de s'y fier.
+pub const CHAMPS_MAX: usize = 8;
 
 /// Ce qu'un service rend pour une requête.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

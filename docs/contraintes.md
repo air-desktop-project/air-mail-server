@@ -272,11 +272,17 @@ essai d'`ams-quic-crypto` ne pouvait l'établir : là-bas, notre dérivation
 dialogue avec elle-même. La cible de fuzz `fuzz_ams_tls_quic` étend la même
 comparaison à tout ce qui n'est pas dans l'annexe.
 
-**Ce qui reste à faire** : le fournisseur est capable de QUIC, ce n'est pas la
-même chose que servir HTTP/3. Le pont de poignée de main, le tri des datagrammes,
-l'émission d'un paquet protégé, la détection de perte et le conducteur de
-connexion ont suivi le 2026-08-31 (voir ci-dessous) ; restent l'écoute UDP
-elle-même, les flux, puis le conducteur HTTP/3.
+**Ce qui restait à faire, et ne reste plus** : le pont de poignée de main, le
+tri des datagrammes, l'émission d'un paquet protégé, la détection de perte et le
+conducteur de connexion ont suivi le 2026-08-31 ; l'écoute UDP, les flux et le
+conducteur HTTP/3 depuis. `listenH3` ouvre un vrai port, `serve_quic` le sert, et
+un essai bout à bout fait traverser une requête à toute la chaîne.
+
+**Cette phrase-ci disait « restent l'écoute UDP, les flux, puis le conducteur »
+longtemps après que ce fut faux.** C'est le second paragraphe de ce registre à le
+commettre — voir « l'état réel » plus bas —, et le second à n'être corrigé que
+parce qu'on est venu y chercher autre chose. Une section qu'on croit connaître
+est une section qu'on ne relit pas.
 
 ### La poignée de main, et pourquoi elle occupe deux crates
 
@@ -3789,7 +3795,7 @@ il l'a commis sur lui-même : une section qui s'intitule « l'état réel » est
 qu'on relit le moins, parce qu'on croit la connaître.
 
 Sont outillées : C1 (les trois étages, et la couverture qui n'est exigible que
-parce qu'ils sont séparés), C2 (le gate mesure 54 699 régions sur 29 crates,
+parce qu'ils sont séparés), C2 (le gate mesure 54 766 régions sur 29 crates,
 toutes couvertes — et il compare des comptes, non un pourcentage arrondi), C3
 (les lints, l'absence d'allocation dans les décodeurs, et 65 cibles de fuzz dont
 la CI vérifie qu'elle les lance toutes), C4 (`ams-tls` n'offre que
@@ -3839,6 +3845,82 @@ la seule vérification qui vaille est la confrontation à l'ABNF de §9, mot par
 mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
+
+## Trois composeurs pour une réponse, et le troisième avait divergé
+
+### CE QU'ON CHERCHAIT, ET CE QU'ON A TROUVÉ
+
+On cherchait pourquoi le port HTTP/3 n'était annoncé nulle part. On a trouvé que
+la réponse servie sur ce port n'était pas la même que celle servie en HTTP/2.
+
+`ams-session::http` compose les champs d'un tour, `ams-loop-tokio::http` ceux
+d'une réponse HTTP/2, et `ams-loop-tokio::h3` ceux d'une réponse HTTP/3. Chacun
+écrivait sa propre liste. **Celle d'HTTP/3 ne portait ni `cache-control:
+no-store` (§5.2.2.5 de RFC 9111), ni `x-content-type-options: nosniff`, ni le
+`www-authenticate` d'un 401 (§3 de RFC 6750).**
+
+La même API, les mêmes données par compte, et deux niveaux de protection selon le
+transport que le client avait choisi. Un intermédiaire pouvait garder une réponse
+HTTP/3 et la servir au compte suivant ; un navigateur pouvait lire un JSON comme
+du HTML ; un client honnête recevait un 401 sans savoir comment s'authentifier.
+
+**Personne ne l'aurait vu en lisant l'un des trois** : chacun paraissait complet.
+C'est la faiblesse propre à la duplication — elle ne se voit qu'en comparant, et
+on ne compare pas ce qu'on lit séparément.
+
+Un seul endroit dit désormais ce que toute réponse porte, et les trois le lisent.
+
+### `Alt-Svc` : SERVIR N'EST PAS ÊTRE TROUVABLE
+
+C'est le miroir des trois tranches précédentes. Elles annonçaient ce qu'elles ne
+tenaient pas ; celle-ci tenait ce qu'elle n'annonçait pas.
+
+§3.1 de RFC 9114 ne connaît que deux voies pour découvrir un point d'accès
+HTTP/3 : `Alt-Svc` (RFC 7838), qui est le travail du serveur, et les
+enregistrements DNS `HTTPS` de RFC 9460, qui sont celui de l'exploitant. Nous
+n'assurions ni l'une ni l'autre — et le commentaire du champ `listenH3`, dans le
+schéma de configuration, nommait pourtant `Alt-Svc` comme LE mécanisme de
+découverte. Toute la pile HTTP/3, la plus grosse de ce dépôt, était du poids mort
+pour un navigateur.
+
+**Le port annoncé vient du socket LIÉ**, et non du texte de configuration :
+`listenH3` peut dire `:0`, et le noyau choisit alors. C'est pourquoi le port UDP
+se lie AVANT que la session ne se monte — l'ordre n'est pas décoratif.
+
+Et l'alternative ne s'annonce que si elle existe, comme `DSN` ne s'annonce pas
+sans file : un client qui essaie une alternative morte perd une connexion avant
+de se rabattre.
+
+### DEUX PIÈGES DE `zip`, DONT UN QUI PERDAIT UN CHAMP
+
+`places.by_ref().zip(une_option)` **consomme une place même quand l'option est
+vide** : `zip` tire d'abord du premier itérateur, puis découvre que le second est
+épuisé, et ce qu'il a tiré est perdu. Le champ suivant tombe alors dans le trou.
+
+C'est exactement ce qui est arrivé en écrivant cette tranche : `alt-svc` ne
+sortait pas sur un 401, parce que le `www-authenticate` qui le précédait avait
+mangé sa place. L'idiome était déjà là avant, et il ne marchait que par chance
+d'ordonnancement. Un tableau littéral l'a remplacé.
+
+### UN CHAMP ÉCRIT DEUX FOIS, ET LE COMPTE QUI LE VOIT
+
+`www-authenticate` s'écrivait à deux endroits une fois les composeurs unifiés —
+une fois comme champ de tout refus, une fois ajouté par le composeur d'un 401.
+Un client qui en lit deux ne sait pas lequel croire.
+
+La cible de fuzz compte désormais chaque nom de champ, et le contrôle par
+mutation confirme qu'elle attrape le doublon en quelques secondes. C'est une
+propriété qui ne coûte rien et qui vaut pour tout champ à venir.
+
+### LA BORNE QUI PERDAIT EN SILENCE
+
+`Reponse::avec_champ` jette ce qui dépasse `CHAMPS_MAX`, et son commentaire
+disait « une réponse de ce serveur n'a jamais six champs ». Elle en a huit
+maintenant. Un champ jeté ne se verrait que dans la réponse où il manque — c'est
+la même famille de faute que la divergence elle-même.
+
+La borne est donc dite à la compilation, du côté de l'appelant, plutôt que crue :
+`const _: () = assert!(CHAMPS_MAX >= 2 + COMMUNS_MAX + 2);`.
 
 ## DSN (RFC 3461) : ce qu'un déposant demande du sort de son message
 

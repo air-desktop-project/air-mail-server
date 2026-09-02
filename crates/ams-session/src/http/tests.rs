@@ -25,7 +25,7 @@ const HEURE: u64 = 3_600 * 1_000_000;
 const PLACE: usize = SCRATCH_OCTETS_MIN + 4_096;
 
 /// La session d'essai.
-fn session() -> Http {
+fn une_session() -> Http {
     Http::new(Key::new(CLEF).expect("trente-deux octets"), HEURE).expect("une durée licite")
 }
 
@@ -109,7 +109,8 @@ fn une_requete_autorisee_demande_a_servir() {
     let champs = requete(b"GET", b"/v1/mailboxes", porte.as_bytes());
     let tete = entete(&champs);
     let mut place = [0_u8; PLACE];
-    let tour = session().request(&tete, &[], MAINTENANT, &mut place);
+    let session = une_session();
+    let tour = session.request(&tete, &[], MAINTENANT, &mut place);
     assert_eq!(tour.status(), StatusCode::OK);
     let (resource, method, account) = en_ressource(tour.next()).expect("on sert");
     assert_eq!(resource, Resource::Mailboxes);
@@ -143,7 +144,8 @@ fn le_schema_doit_etre_https() {
     ];
     let tete = entete(&champs);
     let mut place = [0_u8; PLACE];
-    let tour = session().request(&tete, &[], MAINTENANT, &mut place);
+    let session = une_session();
+    let tour = session.request(&tete, &[], MAINTENANT, &mut place);
     assert_eq!(tour.status(), StatusCode::BAD_REQUEST);
     assert_eq!(tour.next(), Next::Respond);
 
@@ -152,9 +154,7 @@ fn le_schema_doit_etre_https() {
     let tete = entete(&champs);
     let mut place = [0_u8; PLACE];
     assert_eq!(
-        session()
-            .request(&tete, &[], MAINTENANT, &mut place)
-            .status(),
+        session.request(&tete, &[], MAINTENANT, &mut place).status(),
         StatusCode::OK
     );
 }
@@ -171,7 +171,8 @@ fn sans_jeton_on_refuse_et_l_on_dit_comment() {
     ];
     let tete = entete(&champs);
     let mut place = [0_u8; PLACE];
-    let tour = session().request(&tete, &[], MAINTENANT, &mut place);
+    let session = une_session();
+    let tour = session.request(&tete, &[], MAINTENANT, &mut place);
     assert_eq!(tour.status(), StatusCode::UNAUTHORIZED);
     let champs: Vec<_> = tour.fields().collect();
     assert!(
@@ -190,7 +191,8 @@ fn une_portee_insuffisante_repond_comme_une_absence() {
     let champs = requete(b"GET", b"/v1/accounts", porte.as_bytes());
     let tete = entete(&champs);
     let mut place = [0_u8; PLACE];
-    let tour = session().request(&tete, &[], MAINTENANT, &mut place);
+    let session = une_session();
+    let tour = session.request(&tete, &[], MAINTENANT, &mut place);
     assert_eq!(tour.status(), StatusCode::NOT_FOUND);
     assert!(texte(tour.body()).contains("/problems/not-found"));
 
@@ -198,7 +200,7 @@ fn une_portee_insuffisante_repond_comme_une_absence() {
     let champs = requete(b"GET", b"/v1/inconnu", porte.as_bytes());
     let tete = entete(&champs);
     let mut autre = [0_u8; PLACE];
-    let absent = session().request(&tete, &[], MAINTENANT, &mut autre);
+    let absent = session.request(&tete, &[], MAINTENANT, &mut autre);
     assert_eq!(absent.status(), tour.status());
     assert_eq!(texte(absent.body()), texte(tour.body()));
 }
@@ -210,7 +212,8 @@ fn un_jeton_de_lecture_n_ecrit_pas() {
     let champs = requete(b"POST", b"/v1/mailboxes/INBOX/messages", porte.as_bytes());
     let tete = entete(&champs);
     let mut place = [0_u8; PLACE];
-    let tour = session().request(&tete, &[], MAINTENANT, &mut place);
+    let session = une_session();
+    let tour = session.request(&tete, &[], MAINTENANT, &mut place);
     assert_eq!(tour.status(), StatusCode::NOT_FOUND);
 }
 
@@ -221,7 +224,8 @@ fn un_jeton_expire_se_dit() {
     let champs = requete(b"GET", b"/v1/mailboxes", porte.as_bytes());
     let tete = entete(&champs);
     let mut place = [0_u8; PLACE];
-    let tour = session().request(&tete, &[], MAINTENANT + HEURE, &mut place);
+    let session = une_session();
+    let tour = session.request(&tete, &[], MAINTENANT + HEURE, &mut place);
     assert_eq!(tour.status(), StatusCode::UNAUTHORIZED);
 }
 
@@ -232,7 +236,8 @@ fn un_mauvais_verbe_se_distingue_d_un_mauvais_chemin() {
     let champs = requete(b"DELETE", b"/v1/health", porte.as_bytes());
     let tete = entete(&champs);
     let mut place = [0_u8; PLACE];
-    let tour = session().request(&tete, &[], MAINTENANT, &mut place);
+    let session = une_session();
+    let tour = session.request(&tete, &[], MAINTENANT, &mut place);
     assert_eq!(tour.status(), StatusCode::METHOD_NOT_ALLOWED);
     assert!(texte(tour.body()).contains("/problems/method-not-allowed"));
 }
@@ -246,7 +251,8 @@ fn un_corps_la_ou_il_n_a_pas_de_sens_se_refuse() {
         let champs = requete(methode, b"/v1/mailboxes", porte.as_bytes());
         let tete = entete(&champs);
         let mut place = [0_u8; PLACE];
-        let tour = session().request(&tete, b"{}", MAINTENANT, &mut place);
+        let session = une_session();
+        let tour = session.request(&tete, b"{}", MAINTENANT, &mut place);
         assert_eq!(tour.status(), StatusCode::BAD_REQUEST, "{methode:?}");
     }
 }
@@ -259,7 +265,8 @@ fn un_corps_sans_type_se_refuse() {
     let champs = requete(b"POST", b"/v1/mailboxes/INBOX/messages", porte.as_bytes());
     let tete = entete(&champs);
     let mut place = [0_u8; PLACE];
-    let tour = session().request(&tete, b"{}", MAINTENANT, &mut place);
+    let session = une_session();
+    let tour = session.request(&tete, b"{}", MAINTENANT, &mut place);
     assert_eq!(tour.status(), StatusCode::BAD_REQUEST);
 
     // Avec un type qu'on ne lit pas.
@@ -273,7 +280,7 @@ fn un_corps_sans_type_se_refuse() {
         champs.push((b"content-type", dit));
         let tete = entete(&champs);
         let mut place = [0_u8; PLACE];
-        let tour = session().request(&tete, b"{}", MAINTENANT, &mut place);
+        let tour = session.request(&tete, b"{}", MAINTENANT, &mut place);
         assert_eq!(tour.status(), StatusCode::BAD_REQUEST, "{dit:?}");
     }
 }
@@ -294,7 +301,8 @@ fn le_type_se_lit_avec_ses_parametres() {
         champs.push((b"content-type", dit));
         let tete = entete(&champs);
         let mut place = [0_u8; PLACE];
-        let tour = session().request(&tete, b"{}", MAINTENANT, &mut place);
+        let session = une_session();
+        let tour = session.request(&tete, b"{}", MAINTENANT, &mut place);
         assert_eq!(tour.status(), StatusCode::OK, "{dit:?}");
         assert!(en_ressource(tour.next()).is_some(), "{dit:?}");
     }
@@ -317,7 +325,8 @@ fn une_soumission_porte_un_message_et_rien_d_autre() {
     champs.push((b"content-type", b"message/rfc822"));
     let tete = entete(&champs);
     let mut place = [0_u8; PLACE];
-    let tour = session().request(&tete, message, MAINTENANT, &mut place);
+    let session = une_session();
+    let tour = session.request(&tete, message, MAINTENANT, &mut place);
     assert_eq!(tour.status(), StatusCode::OK);
     assert!(
         en_ressource(tour.next()).is_some(),
@@ -329,7 +338,7 @@ fn une_soumission_porte_un_message_et_rien_d_autre() {
     champs.push((b"content-type", b"application/json"));
     let tete = entete(&champs);
     let mut place = [0_u8; PLACE];
-    let tour = session().request(&tete, b"{}", MAINTENANT, &mut place);
+    let tour = session.request(&tete, b"{}", MAINTENANT, &mut place);
     assert_eq!(tour.status(), StatusCode::BAD_REQUEST);
 
     // Un message là où l'on attend du JSON : refusé de même.
@@ -338,7 +347,7 @@ fn une_soumission_porte_un_message_et_rien_d_autre() {
     champs.push((b"content-type", b"message/rfc822"));
     let tete = entete(&champs);
     let mut place = [0_u8; PLACE];
-    let tour = session().request(&tete, message, MAINTENANT, &mut place);
+    let tour = session.request(&tete, message, MAINTENANT, &mut place);
     assert_eq!(tour.status(), StatusCode::BAD_REQUEST);
 }
 
@@ -352,7 +361,8 @@ fn un_corps_vide_ne_demande_aucun_type() {
     let champs = requete(b"POST", b"/v1/submissions", porte.as_bytes());
     let tete = entete(&champs);
     let mut place = [0_u8; PLACE];
-    let tour = session().request(&tete, b"", MAINTENANT, &mut place);
+    let session = une_session();
+    let tour = session.request(&tete, b"", MAINTENANT, &mut place);
     assert_eq!(tour.status(), StatusCode::OK);
 }
 
@@ -365,7 +375,8 @@ fn un_corps_trop_gros_se_refuse() {
     let tete = entete(&champs);
     let gros = std::vec![b'x'; BODY_OCTETS_MAX + 1];
     let mut place = [0_u8; PLACE];
-    let tour = session().request(&tete, &gros, MAINTENANT, &mut place);
+    let session = une_session();
+    let tour = session.request(&tete, &gros, MAINTENANT, &mut place);
     assert_eq!(tour.status(), StatusCode::BAD_REQUEST);
 }
 
@@ -382,7 +393,8 @@ fn toute_reponse_porte_ses_gardes() {
         let champs = requete(methode, chemin, porte.as_bytes());
         let tete = entete(&champs);
         let mut place = [0_u8; PLACE];
-        let tour = session().request(&tete, &[], MAINTENANT, &mut place);
+        let session = une_session();
+        let tour = session.request(&tete, &[], MAINTENANT, &mut place);
         let champs: Vec<_> = tour.fields().collect();
         assert!(
             champs.contains(&(&b"cache-control"[..], &b"no-store"[..])),
@@ -414,7 +426,8 @@ fn l_echange_d_identifiants_n_exige_pas_de_jeton() {
     ];
     let tete = entete(&champs);
     let mut place = [0_u8; PLACE];
-    let tour = session().request(
+    let session = une_session();
+    let tour = session.request(
         &tete,
         br#"{"login":"marc","password":"secret"}"#,
         MAINTENANT,
@@ -432,10 +445,10 @@ fn l_echange_d_identifiants_n_exige_pas_de_jeton() {
 /// Un corps d'échange mal formé se refuse comme un mauvais mot de passe.
 #[test]
 fn un_corps_d_echange_mal_forme_se_refuse_pareil() {
+    let session = une_session();
     let attendu = {
         let mut place = [0_u8; PLACE];
-        let tour =
-            session().on_credentials(false, "marc", Scope::none(), 1, MAINTENANT, &mut place);
+        let tour = session.on_credentials(false, "marc", Scope::none(), 1, MAINTENANT, &mut place);
         (tour.status(), texte(tour.body()))
     };
     for corps in [
@@ -456,7 +469,7 @@ fn un_corps_d_echange_mal_forme_se_refuse_pareil() {
         ];
         let tete = entete(&champs);
         let mut place = [0_u8; PLACE];
-        let tour = session().request(&tete, corps, MAINTENANT, &mut place);
+        let tour = session.request(&tete, corps, MAINTENANT, &mut place);
         assert_eq!(tour.status(), attendu.0, "{corps:?}");
         assert_eq!(texte(tour.body()), attendu.1, "{corps:?}");
     }
@@ -482,7 +495,8 @@ fn un_nom_de_compte_impossible_ne_fait_pas_de_jeton() {
     let long = "x".repeat(ams_api::LOGIN_OCTETS_MAX + 1);
     for login in ["", long.as_str()] {
         let mut place = [0_u8; PLACE];
-        let tour = session().on_credentials(
+        let session = une_session();
+        let tour = session.on_credentials(
             true,
             login,
             Scope::one(Area::Mail, Rights::Read),
@@ -508,7 +522,8 @@ fn un_corps_d_echange_bavard_se_lit_quand_meme() {
     let mut place = [0_u8; PLACE];
     // Des champs qu'on ne connaît pas, des valeurs qui ne sont pas des chaînes,
     // et un tableau : rien de tout cela ne change les deux qu'on cherche.
-    let tour = session().request(
+    let session = une_session();
+    let tour = session.request(
         &tete,
         br#"{"autre":"x","login":"marc","liste":[1,true,null],"password":"secret"}"#,
         MAINTENANT,
@@ -529,9 +544,10 @@ fn un_corps_d_echange_bavard_se_lit_quand_meme() {
 fn un_tampon_trop_court_pour_le_jeton_est_notre_faute() {
     // Toutes les tailles jusqu'à la bonne : c'est ce qui met en jeu chacune des
     // écritures du chemin, plutôt que la première qui échoue.
+    let session = une_session();
     let entier = {
         let mut place = [0_u8; PLACE];
-        session()
+        session
             .on_credentials(
                 true,
                 "marc",
@@ -546,7 +562,7 @@ fn un_tampon_trop_court_pour_le_jeton_est_notre_faute() {
     assert!(entier > 0, "l'échange doit écrire quelque chose");
     for taille in 0..entier {
         let mut petit = std::vec![0_u8; taille];
-        let tour = session().on_credentials(
+        let tour = session.on_credentials(
             true,
             "marc",
             Scope::one(Area::Mail, Rights::Read),
@@ -564,7 +580,8 @@ fn un_tampon_trop_court_pour_le_jeton_est_notre_faute() {
 fn un_echange_reussi_rend_un_jeton_utilisable() {
     let portee = Scope::one(Area::Mail, Rights::Write);
     let mut place = [0_u8; PLACE];
-    let tour = session().on_credentials(true, "marc", portee, 42, MAINTENANT, &mut place);
+    let session = une_session();
+    let tour = session.on_credentials(true, "marc", portee, 42, MAINTENANT, &mut place);
     assert_eq!(tour.status(), StatusCode::CREATED);
     assert_eq!(tour.next(), Next::Respond);
     let corps = texte(tour.body());
@@ -579,7 +596,7 @@ fn un_echange_reussi_rend_un_jeton_utilisable() {
     let champs = requete(b"POST", b"/v1/mailboxes/INBOX/search", valeur.as_bytes());
     let tete = entete(&champs);
     let mut autre = [0_u8; PLACE];
-    let suite = session().request(&tete, &[], MAINTENANT, &mut autre);
+    let suite = session.request(&tete, &[], MAINTENANT, &mut autre);
     assert_eq!(suite.status(), StatusCode::OK);
     assert!(matches!(
         suite.next(),
@@ -594,7 +611,8 @@ fn un_echange_reussi_rend_un_jeton_utilisable() {
 #[test]
 fn un_refus_d_identifiants_ne_dit_rien() {
     let mut place = [0_u8; PLACE];
-    let tour = session().on_credentials(false, "marc", Scope::none(), 1, MAINTENANT, &mut place);
+    let session = une_session();
+    let tour = session.on_credentials(false, "marc", Scope::none(), 1, MAINTENANT, &mut place);
     assert_eq!(tour.status(), StatusCode::UNAUTHORIZED);
     let dit = texte(tour.body());
     for indice in ["marc", "compte", "mot de passe", "inconnu"] {
@@ -610,7 +628,8 @@ fn aucune_reponse_ne_redit_la_requete() {
     let champs = requete(b"GET", chemin, porte.as_bytes());
     let tete = entete(&champs);
     let mut place = [0_u8; PLACE];
-    let tour = session().request(&tete, &[], MAINTENANT, &mut place);
+    let session = une_session();
+    let tour = session.request(&tete, &[], MAINTENANT, &mut place);
     let dit = texte(tour.body());
     assert!(!dit.contains("script"), "{dit}");
     assert!(!dit.contains("mailboxes"), "{dit}");
@@ -626,7 +645,8 @@ fn un_tampon_trop_court_est_notre_faute() {
     let tete = entete(&champs);
     for taille in [0_usize, 16, 256, 1_024] {
         let mut petit = std::vec![0_u8; taille];
-        let tour = session().request(&tete, &[], MAINTENANT, &mut petit);
+        let session = une_session();
+        let tour = session.request(&tete, &[], MAINTENANT, &mut petit);
         assert_eq!(tour.status().class(), 5, "{taille}");
         assert_eq!(tour.next(), Next::Respond);
     }
@@ -645,8 +665,122 @@ fn la_chaine_de_requete_ne_change_pas_la_ressource() {
         let champs = requete(b"GET", chemin, porte.as_bytes());
         let tete = entete(&champs);
         let mut place = [0_u8; PLACE];
-        let tour = session().request(&tete, &[], MAINTENANT, &mut place);
+        let session = une_session();
+        let tour = session.request(&tete, &[], MAINTENANT, &mut place);
         let (resource, _, _) = en_ressource(tour.next()).expect("on sert");
         assert_eq!(resource, Resource::Mailboxes, "{chemin:?}");
+    }
+}
+
+// ── CE QUE TOUTE RÉPONSE PORTE (un seul endroit le dit) ─────────────────────
+
+/// Les noms de champ d'un tour, dans l'ordre.
+fn noms(tour: &super::Turn<'_>) -> std::vec::Vec<std::string::String> {
+    tour.fields()
+        .map(|(nom, _)| std::string::String::from_utf8_lossy(nom).into_owned())
+        .collect()
+}
+
+/// **DEUX PROTECTIONS SUR TOUTE RÉPONSE**, quelle qu'elle soit.
+///
+/// `no-store` parce que ce qu'on rend dépend du jeton présenté (§5.2.2.5 de
+/// RFC 9111), et `nosniff` parce qu'un JSON deviné comme du HTML se lit comme du
+/// HTML. Elles ne dépendent ni du code, ni de la ressource, ni de la version
+/// d'HTTP — et c'est précisément ce qui avait cessé d'être vrai.
+#[test]
+fn toute_reponse_porte_les_memes_protections() {
+    let alt = &b"h3=\":443\"; ma=86400"[..];
+    for status in [
+        StatusCode::OK,
+        StatusCode::CREATED,
+        StatusCode::BAD_REQUEST,
+        StatusCode::UNAUTHORIZED,
+        StatusCode::INTERNAL_SERVER_ERROR,
+    ] {
+        let champs = super::champs_de_toute_reponse(status, alt);
+        let vus: std::vec::Vec<&[u8]> = champs.iter().flatten().map(|(nom, _)| *nom).collect();
+        assert!(vus.contains(&&b"cache-control"[..]), "{}", status.value());
+        assert!(
+            vus.contains(&&b"x-content-type-options"[..]),
+            "{}",
+            status.value()
+        );
+        // **`www-authenticate` NE SORT QUE SUR UN 401** (§3 de RFC 6750) :
+        // l'écrire ailleurs inviterait à s'authentifier là où ce n'est pas la
+        // question.
+        assert_eq!(
+            vus.contains(&&b"www-authenticate"[..]),
+            status == StatusCode::UNAUTHORIZED,
+            "{}",
+            status.value()
+        );
+    }
+}
+
+/// **ON N'ANNONCE PAS UNE ALTERNATIVE QU'ON NE SERT PAS.**
+///
+/// Sans HTTP/3, aucun `alt-svc` : un client qui croirait l'annonce perdrait une
+/// connexion sur un port muet avant de se rabattre. C'est la même règle que pour
+/// `DSN`, qui ne s'annonce pas sans file.
+#[test]
+fn sans_http3_aucune_alternative_n_est_annoncee() {
+    let champs = super::champs_de_toute_reponse(StatusCode::OK, &[]);
+    let vus: std::vec::Vec<&[u8]> = champs.iter().flatten().map(|(nom, _)| *nom).collect();
+    assert!(!vus.contains(&&b"alt-svc"[..]), "{vus:?}");
+
+    // Et une session qu'on n'a pas renseignée n'annonce rien non plus.
+    let session = une_session();
+    assert!(session.alt_svc().is_empty());
+    let champs = requete(b"GET", b"/v1/mailboxes", b"");
+    let tete = entete(&champs);
+    let mut place = [0_u8; PLACE];
+    let tour = session.request(&tete, &[], MAINTENANT, &mut place);
+    assert!(!noms(&tour).iter().any(|nom| nom == "alt-svc"));
+}
+
+/// **AVEC HTTP/3, `Alt-Svc` PART SUR TOUTE RÉPONSE** (RFC 7838).
+///
+/// C'est la seule chose qui rende le port UDP trouvable (§3.1 de RFC 9114) : un
+/// port qu'aucun client ne cherche est du code qui ne sert jamais.
+#[test]
+fn le_port_http3_se_fait_annoncer() {
+    let session = une_session().with_h3_port(443);
+    assert_eq!(session.alt_svc(), b"h3=\":443\"; ma=86400");
+
+    // Sur un refus AUSSI : c'est souvent la première réponse qu'un client voit.
+    let champs = requete(b"GET", b"/v1/mailboxes", b"");
+    let tete = entete(&champs);
+    let mut place = [0_u8; PLACE];
+    let tour = session.request(&tete, &[], MAINTENANT, &mut place);
+    assert_eq!(tour.status(), StatusCode::UNAUTHORIZED);
+    let vus = noms(&tour);
+    assert!(vus.iter().any(|nom| nom == "alt-svc"), "{vus:?}");
+    assert!(vus.iter().any(|nom| nom == "www-authenticate"), "{vus:?}");
+    assert!(vus.iter().any(|nom| nom == "cache-control"), "{vus:?}");
+    // **UNE SEULE FOIS** : `www-authenticate` était écrit à deux endroits, et un
+    // client qui en lit deux ne sait pas lequel croire.
+    assert_eq!(
+        vus.iter().filter(|nom| *nom == "www-authenticate").count(),
+        1,
+        "{vus:?}"
+    );
+}
+
+/// **UN PORT QUELCONQUE S'ÉCRIT JUSTE**, y compris aux bornes.
+///
+/// Le port vient du socket LIÉ, et `:0` fait choisir le noyau : la valeur
+/// annoncée peut donc être n'importe laquelle.
+#[test]
+fn tout_port_s_annonce_sans_se_tronquer() {
+    for (port, attendu) in [
+        (0_u16, &b"h3=\":0\"; ma=86400"[..]),
+        (443, b"h3=\":443\"; ma=86400"),
+        (8_443, b"h3=\":8443\"; ma=86400"),
+        (u16::MAX, b"h3=\":65535\"; ma=86400"),
+    ] {
+        let session = une_session().with_h3_port(port);
+        assert_eq!(session.alt_svc(), attendu, "port {port}");
+        // La borne annoncée couvre le pire cas.
+        assert!(session.alt_svc().len() <= super::ALT_SVC_MAX, "port {port}");
     }
 }

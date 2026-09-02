@@ -61,7 +61,82 @@ use ams_proto_http::{Method, RequestHead, StatusCode};
 pub const BODY_OCTETS_MAX: usize = 64 * 1024;
 
 /// Combien de champs une réponse porte au plus.
-pub const FIELDS_MAX: usize = 6;
+pub const FIELDS_MAX: usize = 8;
+
+/// Combien de champs [`champs_de_toute_reponse`] peut rendre.
+pub const COMMUNS_MAX: usize = 4;
+
+/// Ce qui ouvre une valeur d'`Alt-Svc` (RFC 7838 §3).
+const ALT_SVC_PREFIXE: &[u8] = b"h3=\":";
+
+/// Ce qui sépare le port de sa durée de validité.
+const ALT_SVC_MILIEU: &[u8] = b"\"; ma=";
+
+/// La plus longue valeur d'`Alt-Svc` que ce serveur écrive.
+///
+/// **LA SOMME EXACTE DES QUATRE MORCEAUX**, port le plus long compris —
+/// `h3=":65535"; ma=86400` — et non un arrondi généreux. C'est ce qui permet à
+/// [`Http::with_h3_port`] de n'avoir aucune garde de troncature : une borne
+/// approximative aurait laissé une branche que rien n'atteint, c'est-à-dire une
+/// garde qui n'en est pas une.
+pub const ALT_SVC_MAX: usize = ALT_SVC_PREFIXE.len() + 5 + ALT_SVC_MILIEU.len() + ALT_SVC_MA.len();
+
+/// Combien de temps un client peut se fier à l'alternative annoncée (RFC 7838
+/// §3, `ma`), en secondes.
+///
+/// # POURQUOI CE N'EST PAS UN RÉGLAGE
+///
+/// Les durées de la file se règlent parce qu'un exploitant décide combien de
+/// temps il garde du courrier. Celle-ci ne gouverne rien de tel : c'est le
+/// défaut de la RFC, et un client qui garde l'alternative trop longtemps ne perd
+/// qu'une connexion, qu'il rejoue aussitôt sur le port TCP.
+const ALT_SVC_MA: &[u8] = b"86400";
+
+/// Ce que TOUTE réponse de cette API porte, quelle que soit la version d'HTTP.
+///
+/// # UN SEUL ENDROIT LE DIT, ET CE N'EST PAS DE L'ÉLÉGANCE
+///
+/// Cette API se sert en HTTP/2 ET en HTTP/3, par deux composeurs qui n'ont pas
+/// une ligne en commun. Chacun écrivait sa propre liste — et **celle d'HTTP/3
+/// avait divergé** : elle ne portait ni `no-store`, ni `nosniff`, ni le
+/// `www-authenticate` d'un refus. La même API, les mêmes données par compte, et
+/// deux niveaux de protection selon le transport que le client avait choisi.
+///
+/// Personne ne l'aurait vu en lisant l'un des deux : chacun paraissait complet.
+///
+/// # CE QUE CHAQUE CHAMP EMPÊCHE
+///
+/// - `no-store` (§5.2.2.5 de RFC 9111) : ce qu'on rend dépend du jeton présenté,
+///   et un intermédiaire qui garderait la réponse la servirait au compte
+///   suivant.
+/// - `nosniff` : un JSON servi à un navigateur qui devine le type peut se faire
+///   lire comme du HTML, et ce qu'il porte vient d'ailleurs.
+/// - `www-authenticate` sur un 401 (§3 de RFC 6750) : il dit COMMENT
+///   s'authentifier, sans quoi un client honnête ne peut que deviner.
+/// - `alt-svc` (RFC 7838, §3.1 de RFC 9114) : **la seule chose qui rende le port
+///   HTTP/3 trouvable.** Sans elle, ce serveur ouvre un port UDP qu'aucun client
+///   conforme ne cherchera jamais.
+///
+/// `alt_svc` vide n'écrit rien : on n'annonce pas une alternative qu'on ne sert
+/// pas, comme `DSN` ne s'annonce pas sans file.
+#[must_use]
+pub fn champs_de_toute_reponse(
+    status: StatusCode,
+    alt_svc: &[u8],
+) -> [Option<(&'static [u8], &[u8])>; COMMUNS_MAX] {
+    // **UN TABLEAU LITTÉRAL, ET NON UN `zip` SUR DES PLACES.** L'idiome employé
+    // ailleurs dans ce fichier — `places.by_ref().zip(une_option)` — CONSOMME UNE
+    // PLACE quand l'option est vide : `zip` tire d'abord du premier itérateur,
+    // puis découvre que le second est épuisé, et ce qu'il a tiré est perdu. Le
+    // champ suivant tombe alors dans le vide. C'est arrivé ici même, et cela n'a
+    // été vu que parce qu'un essai comptait les champs d'un refus.
+    [
+        Some((&b"cache-control"[..], &b"no-store"[..])),
+        Some((&b"x-content-type-options"[..], &b"nosniff"[..])),
+        (status == StatusCode::UNAUTHORIZED).then_some((&b"www-authenticate"[..], &b"Bearer"[..])),
+        (!alt_svc.is_empty()).then_some((&b"alt-svc"[..], alt_svc)),
+    ]
+}
 
 /// Ce que la session demande à l'appelant de faire ensuite.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,6 +217,14 @@ pub struct Http {
     clef: Key,
     /// Combien de temps un jeton vaut, en microsecondes.
     duree: u64,
+    /// La valeur d'`Alt-Svc`, et sa longueur. Zéro : HTTP/3 n'est pas servi.
+    ///
+    /// **UN SEUL PROPRIÉTAIRE.** Les deux conducteurs — HTTP/2 et HTTP/3 —
+    /// tiennent déjà cette session ; la leur faire lire ici évite de porter la
+    /// même chaîne à deux endroits, c'est-à-dire d'en avoir deux le jour où l'un
+    /// change.
+    alt_svc: [u8; ALT_SVC_MAX],
+    alt_svc_len: usize,
 }
 
 impl Http {
@@ -163,7 +246,52 @@ impl Http {
         if duree == 0 || duree > ams_api::LIFETIME_MAX_US {
             return Err(Reason::BadKey);
         }
-        Ok(Self { clef, duree })
+        Ok(Self {
+            clef,
+            duree,
+            alt_svc: [0; ALT_SVC_MAX],
+            alt_svc_len: 0,
+        })
+    }
+
+    /// Annonce qu'HTTP/3 s'écoute sur ce port UDP (RFC 7838, §3.1 de RFC 9114).
+    ///
+    /// # LE PORT VIENT DU SOCKET LIÉ, PAS DU TEXTE DE CONFIGURATION
+    ///
+    /// `listenH3` peut dire `:0`, et le noyau choisit alors. Annoncer ce qui est
+    /// écrit dans le fichier ferait envoyer les clients sur un port que personne
+    /// n'écoute — et un client qui essaie une alternative morte perd une
+    /// connexion avant de se rabattre.
+    ///
+    /// **Sans cet appel, rien n'est annoncé**, ce qui est exactement ce qu'il
+    /// faut quand HTTP/3 n'est pas servi.
+    #[must_use]
+    pub fn with_h3_port(mut self, port: u16) -> Self {
+        let mut chiffres = [0_u8; 5];
+        let combien = decimales(port, &mut chiffres);
+        // **AUCUNE GARDE DE TRONCATURE**, parce qu'il n'y a rien à garder :
+        // `ALT_SVC_MAX` est la somme EXACTE des quatre morceaux, port le plus
+        // long compris, et une assertion de compilation le dit. Un `if` sur la
+        // place restante serait une branche que rien ne peut atteindre — donc
+        // pas une garde.
+        let voulu = ALT_SVC_PREFIXE
+            .iter()
+            .chain(chiffres.get(..combien).unwrap_or_default())
+            .chain(ALT_SVC_MILIEU)
+            .chain(ALT_SVC_MA);
+        let mut ecrits = 0_usize;
+        for (place, octet) in self.alt_svc.iter_mut().zip(voulu) {
+            *place = *octet;
+            ecrits = ecrits.saturating_add(1);
+        }
+        self.alt_svc_len = ecrits;
+        self
+    }
+
+    /// Ce qu'on annonce dans `Alt-Svc`, ou rien.
+    #[must_use]
+    pub fn alt_svc(&self) -> &[u8] {
+        self.alt_svc.get(..self.alt_svc_len).unwrap_or_default()
     }
 
     /// Décide ce qu'il advient d'une requête.
@@ -177,7 +305,7 @@ impl Http {
     /// visée : sinon, il existerait une ressource dont le chemin, à lui seul,
     /// ferait sauter une règle générale.
     pub fn request<'o>(
-        &self,
+        &'o self,
         tete: &RequestHead<'_>,
         corps: &'o [u8],
         maintenant: u64,
@@ -185,13 +313,13 @@ impl Http {
     ) -> Turn<'o> {
         match self.decider(tete, corps, maintenant, sortie) {
             Ok(tour) => tour,
-            Err((raison, place)) => refus(raison, place),
+            Err((raison, place)) => refus(self.alt_svc(), raison, place),
         }
     }
 
     /// Le corps de la décision, dont chaque refus remonte en faute.
     fn decider<'o>(
-        &self,
+        &'o self,
         tete: &RequestHead<'_>,
         corps: &'o [u8],
         maintenant: u64,
@@ -230,7 +358,7 @@ impl Http {
         let Some(voulue) = resolu.scope else {
             // **LA SEULE RESSOURCE QUI N'EXIGE AUCUNE PORTÉE** est celle où l'on
             // en obtient une.
-            return echanger_un_jeton(corps, place_de_la_reponse);
+            return echanger_un_jeton(self.alt_svc(), corps, place_de_la_reponse);
         };
         let jeton = match self.authentifier(tete, maintenant, voulue, place_du_jeton) {
             Ok(jeton) => jeton,
@@ -239,7 +367,7 @@ impl Http {
 
         Ok(Turn {
             status: StatusCode::OK,
-            fields: champs_ordinaires(&[]),
+            fields: champs_ordinaires(StatusCode::OK, self.alt_svc(), &[]),
             body: &[],
             next: Next::Serve {
                 resource: resolu.resource,
@@ -284,7 +412,7 @@ impl Http {
     /// énumérable sans en connaître un seul mot de passe. C'est la même règle
     /// que pour `AUTH` en SMTP, et elle vaut ici pour la même raison.
     pub fn on_credentials<'o>(
-        &self,
+        &'o self,
         accorde: bool,
         login: &str,
         scope: Scope,
@@ -293,7 +421,7 @@ impl Http {
         sortie: &'o mut [u8],
     ) -> Turn<'o> {
         if !accorde {
-            return refus(Reason::BadToken, sortie);
+            return refus(self.alt_svc(), Reason::BadToken, sortie);
         }
         let jeton = Token {
             login,
@@ -306,7 +434,7 @@ impl Http {
         // vide, ou plus long que ce qu'un jeton porte. La durée, elle, a été
         // vérifiée au montage.
         let Ok(texte) = ams_api::issue(&self.clef, &jeton, maintenant, &mut place) else {
-            return refus(Reason::BadKey, sortie);
+            return refus(self.alt_svc(), Reason::BadKey, sortie);
         };
         let mut json = Json::new(sortie);
         let ecrit = (|| {
@@ -319,7 +447,11 @@ impl Http {
         match ecrit {
             Ok(corps) => Turn {
                 status: StatusCode::CREATED,
-                fields: champs_ordinaires(&[(EN_TETE_TYPE, JSON_MEDIA_TYPE.as_bytes())]),
+                fields: champs_ordinaires(
+                    StatusCode::CREATED,
+                    self.alt_svc(),
+                    &[(EN_TETE_TYPE, JSON_MEDIA_TYPE.as_bytes())],
+                ),
                 body: corps,
                 next: Next::Respond,
             },
@@ -327,7 +459,7 @@ impl Http {
             // plus écrire le document qui le dirait dans le même tampon.
             Err(_) => Turn {
                 status: StatusCode::INTERNAL_SERVER_ERROR,
-                fields: champs_ordinaires(&[]),
+                fields: champs_ordinaires(StatusCode::INTERNAL_SERVER_ERROR, self.alt_svc(), &[]),
                 body: &[],
                 next: Next::Respond,
             },
@@ -341,6 +473,40 @@ impl Http {
 /// kibioctets laissent la place à des noms de boîte entiers sans jamais mordre
 /// sur ce que la réponse a besoin d'écrire.
 const CHEMIN_OCTETS: usize = 2 * 1024;
+
+/// Écrit `valeur` en chiffres décimaux, et rend combien.
+///
+/// **AUCUNE GARDE DE BORNE.** Un `u16` fait au plus cinq chiffres, et `out` en
+/// tient cinq : `zip` porte cette impossibilité dans la bibliothèque standard
+/// plutôt que dans un `if` que rien ne déclencherait.
+fn decimales(valeur: u16, out: &mut [u8; 5]) -> usize {
+    let mut envers = [0_u8; 5];
+    let mut combien = 0_usize;
+    let mut reste = valeur;
+    // **UNE FOIS AU MOINS**, pour que zéro s'écrive `0` plutôt que rien.
+    loop {
+        for (place, chiffre) in envers
+            .iter_mut()
+            .skip(combien)
+            .take(1)
+            .zip([b'0'.saturating_add(u8::try_from(reste % 10).unwrap_or(0))])
+        {
+            *place = chiffre;
+        }
+        combien = combien.saturating_add(1);
+        reste /= 10;
+        if reste == 0 {
+            break;
+        }
+    }
+    for (place, chiffre) in out
+        .iter_mut()
+        .zip(envers.iter().take(combien).rev().copied())
+    {
+        *place = chiffre;
+    }
+    combien
+}
 
 /// Le nom du champ qui porte le type d'un contenu.
 const EN_TETE_TYPE: &[u8] = b"content-type";
@@ -447,13 +613,14 @@ fn rogner(octets: &[u8]) -> &[u8] {
 
 /// L'échange d'identifiants contre un jeton.
 fn echanger_un_jeton<'o>(
+    alt_svc: &'o [u8],
     corps: &'o [u8],
     sortie: &'o mut [u8],
 ) -> Result<Turn<'o>, (Reason, &'o mut [u8])> {
     match lire_des_identifiants(corps) {
         Some((login, password)) => Ok(Turn {
             status: StatusCode::OK,
-            fields: champs_ordinaires(&[]),
+            fields: champs_ordinaires(StatusCode::OK, alt_svc, &[]),
             body: &[],
             next: Next::CheckCredentials { login, password },
         }),
@@ -510,70 +677,50 @@ fn lire_des_identifiants(corps: &[u8]) -> Option<(&str, &[u8])> {
 /// Pas de `server` : nommer le logiciel et sa version à qui demande, c'est
 /// répondre à la première question de tout balayage.
 fn champs_ordinaires<'o>(
+    status: StatusCode,
+    alt_svc: &'o [u8],
     ajouts: &[(&'static [u8], &'o [u8])],
 ) -> [Option<(&'static [u8], &'o [u8])>; FIELDS_MAX] {
     let mut champs = [None; FIELDS_MAX];
-    let mut places = champs.iter_mut();
-    // **`no-store`, ET SUR TOUTE RÉPONSE** : ce qu'on rend dépend du jeton
-    // présenté, et un intermédiaire qui garderait une réponse la servirait au
-    // compte suivant. §5.2.2.5 de RFC 9111 : « the response MUST NOT be stored ».
-    for (place, champ) in places
-        .by_ref()
-        .zip([(&b"cache-control"[..], &b"no-store"[..])])
-    {
-        *place = Some(champ);
-    }
-    // **`nosniff`** : un JSON servi à un navigateur qui devine le type peut se
-    // faire lire comme du HTML, et ce qu'il porte vient d'ailleurs.
-    for (place, champ) in places
-        .by_ref()
-        .zip([(&b"x-content-type-options"[..], &b"nosniff"[..])])
-    {
-        *place = Some(champ);
-    }
-    for (place, champ) in places.zip(ajouts.iter().copied()) {
+    // **CE QUE TOUTE RÉPONSE PORTE VIENT D'UN SEUL ENDROIT**, que les deux
+    // conducteurs lisent aussi : c'est ce qui empêche HTTP/2 et HTTP/3 de
+    // diverger une seconde fois.
+    //
+    // **UN SEUL `zip`, ET LES DEUX SOURCES ENCHAÎNÉES** : deux `zip` successifs
+    // sur `by_ref` perdent une place chaque fois que le premier s'épuise, et le
+    // champ suivant tombe dans le trou.
+    let voulus = champs_de_toute_reponse(status, alt_svc)
+        .into_iter()
+        .flatten()
+        .chain(ajouts.iter().copied());
+    for (place, champ) in champs.iter_mut().zip(voulus) {
         *place = Some(champ);
     }
     champs
 }
 
 /// La réponse qui va avec une faute.
-fn refus(raison: Reason, sortie: &mut [u8]) -> Turn<'_> {
+fn refus<'o>(alt_svc: &'o [u8], raison: Reason, sortie: &'o mut [u8]) -> Turn<'o> {
     let status = raison.status();
-    // §15.5.6 de RFC 9110 : un 405 DOIT porter un `Allow`. Sans lui, le client
-    // sait qu'il s'est trompé, mais pas de quoi.
-    //
-    // §3 de RFC 6750 : un 401 porte un `WWW-Authenticate`, qui dit COMMENT
-    // s'authentifier — sans quoi un client honnête ne peut que deviner.
-    let ajouts: &[(&'static [u8], &[u8])] = match status.value() {
-        401 => &[(b"www-authenticate", b"Bearer")],
-        _ => &[],
-    };
+    // **LE `www-authenticate` D'UN 401 N'EST PLUS ÉCRIT ICI** : il fait partie de
+    // ce que toute réponse porte, et l'ajouter une seconde fois donnerait deux
+    // fois le même champ à un client qui n'en attend qu'un.
     match problem(raison, sortie) {
-        Ok(corps) => {
-            let mut tous = [None; FIELDS_MAX];
-            let mut places = tous.iter_mut();
-            for (place, champ) in places
-                .by_ref()
-                .zip(champs_ordinaires(ajouts).iter().flatten())
-            {
-                *place = Some(*champ);
-            }
-            for (place, champ) in places.zip([(EN_TETE_TYPE, PROBLEM_MEDIA_TYPE.as_bytes())]) {
-                *place = Some(champ);
-            }
-            Turn {
+        Ok(corps) => Turn {
+            status,
+            fields: champs_ordinaires(
                 status,
-                fields: tous,
-                body: corps,
-                next: Next::Respond,
-            }
-        }
+                alt_svc,
+                &[(EN_TETE_TYPE, PROBLEM_MEDIA_TYPE.as_bytes())],
+            ),
+            body: corps,
+            next: Next::Respond,
+        },
         // Le tampon ne suffit même pas pour dire la faute : on rend le code seul,
         // ce qui reste vrai.
         Err(_) => Turn {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            fields: champs_ordinaires(&[]),
+            fields: champs_ordinaires(StatusCode::INTERNAL_SERVER_ERROR, alt_svc, &[]),
             body: &[],
             next: Next::Respond,
         },

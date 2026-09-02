@@ -202,9 +202,23 @@ impl<A: Api> ams_h3::Service for ServiceH3<'_, A> {
         // RFC 9110). Le rendre plus court ferait deviner la taille de ce qu'on
         // refusait de rendre ; le rendre entier serait un envoi pour rien.
         let sans_corps = matches!(tete.method(), Method::Head);
-        composer(status, media, portee, a_ecrire, sans_corps, sortie)
+        composer(
+            status,
+            media,
+            portee,
+            a_ecrire,
+            sans_corps,
+            self.session.alt_svc(),
+            sortie,
+        )
     }
 }
+
+// **CE QU'ON ÉCRIT TIENT DANS CE QUI EST ANNONCÉ**, et c'est dit à la
+// compilation plutôt que constaté en production : `avec_champ` perd en silence
+// ce qui dépasse, si bien qu'un champ de trop ne se verrait que dans une réponse
+// où il manque. Deux du composeur, quatre de la session, deux de la portée.
+const _: () = assert!(ams_h3::CHAMPS_MAX >= 2 + ams_session::http::COMMUNS_MAX + 2);
 
 /// Recopie la réponse dans le tampon de sortie, et la décrit.
 ///
@@ -220,6 +234,7 @@ fn composer<'o>(
     portee: (bool, Option<crate::http::ContentRange>),
     corps: &[u8],
     sans_corps: bool,
+    alt_svc: &[u8],
     sortie: &'o mut [u8],
 ) -> Reponse<'o> {
     // §8.6 de RFC 9110 : `content-length` décrit ce que le corps AURAIT, même
@@ -259,12 +274,35 @@ fn composer<'o>(
             .copy_from_slice(dit.get(..dits).unwrap_or_default());
     }
 
+    // **ET L'ALTERNATIVE DERRIÈRE LA PORTÉE**, pour la même raison encore : elle
+    // vit dans la session, dont la durée de vie ne se prouve pas plus longue que
+    // la réponse. La recopier est ce qui permet de la référencer.
+    let apres_alt = apres_portee.saturating_add(alt_svc.len());
+    if apres_alt <= sortie.len() {
+        sortie
+            .get_mut(apres_portee..apres_alt)
+            .unwrap_or_default()
+            .copy_from_slice(alt_svc);
+    }
+
     let (corps_rendu, reste) = sortie.split_at_mut(combien);
     let (longueur, suite) = reste.split_at_mut(ecrits.min(reste.len()));
-    let portee_dite = suite.get(..dits).unwrap_or_default();
-    let reponse = Reponse::new(status, corps_rendu)
+    let (portee_dite, apres) = suite.split_at(dits.min(suite.len()));
+    let alt_dite = apres.get(..alt_svc.len()).unwrap_or_default();
+    let mut reponse = Reponse::new(status, corps_rendu)
         .avec_champ(b"content-type", media.as_bytes())
         .avec_champ(b"content-length", longueur);
+    // **CE QUE TOUTE RÉPONSE PORTE VIENT DE LA SESSION.** Ce composeur écrivait
+    // sa propre liste, et elle avait divergé : ni `no-store` (§5.2.2.5 de
+    // RFC 9111), ni `nosniff`, ni le `www-authenticate` d'un refus (§3 de
+    // RFC 6750). La même API, les mêmes données par compte, et deux niveaux de
+    // protection selon le transport que le client avait choisi.
+    for (nom, valeur) in ams_session::http::champs_de_toute_reponse(status, alt_dite)
+        .into_iter()
+        .flatten()
+    {
+        reponse = reponse.avec_champ(nom, valeur);
+    }
     // §14.3 : l'invitation d'abord — un client qui reçoit un refus doit savoir
     // qu'une porte existe, et c'est sur le refus qu'il en a le plus besoin.
     let reponse = match divisible {
@@ -398,5 +436,106 @@ impl<A: Api> crate::quic::Application for Http3Application<'_, A> {
         // Ce qu'on tenait pour cette connexion ne sert plus : les tampons de ses
         // flux, et son état HTTP/3.
         self.conducteurs.remove(connexion.local_id().as_bytes());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ams_proto_http::StatusCode;
+
+    /// Les noms de champ que le composeur attache, dans l'ordre.
+    fn noms(status: StatusCode, alt_svc: &[u8]) -> std::vec::Vec<std::string::String> {
+        let mut sortie = [0_u8; 512];
+        let reponse = super::composer(
+            status,
+            "application/json",
+            (false, None),
+            b"{}",
+            false,
+            alt_svc,
+            &mut sortie,
+        );
+        reponse
+            .fields()
+            .map(|(nom, _)| std::string::String::from_utf8_lossy(nom).into_owned())
+            .collect()
+    }
+
+    /// **HTTP/3 REND LES MÊMES PROTECTIONS QU'HTTP/2**, et c'est le défaut que
+    /// cette tranche corrige.
+    ///
+    /// Ce composeur écrivait sa propre liste de champs, et elle avait divergé :
+    /// ni `no-store` (§5.2.2.5 de RFC 9111), ni `nosniff`. La même API, les mêmes
+    /// données par compte, et deux niveaux de protection selon le transport que
+    /// le client avait choisi. Personne ne l'aurait vu en lisant l'un des deux
+    /// composeurs : chacun paraissait complet.
+    #[test]
+    fn une_reponse_http3_porte_ce_que_toute_reponse_porte() {
+        let vus = noms(StatusCode::OK, &[]);
+        for exige in [
+            "content-type",
+            "content-length",
+            "cache-control",
+            "x-content-type-options",
+        ] {
+            assert!(
+                vus.iter().any(|nom| nom == exige),
+                "{exige} manque : {vus:?}"
+            );
+        }
+    }
+
+    /// **UN REFUS DIT COMMENT S'AUTHENTIFIER** (§3 de RFC 6750), en HTTP/3 aussi.
+    ///
+    /// Sans ce champ, un client honnête qui reçoit un 401 ne peut que deviner —
+    /// et il le recevait sur ce transport-là seulement.
+    #[test]
+    fn un_refus_http3_dit_comment_s_authentifier() {
+        let vus = noms(StatusCode::UNAUTHORIZED, &[]);
+        assert!(vus.iter().any(|nom| nom == "www-authenticate"), "{vus:?}");
+        // Et pas ailleurs : l'écrire sur un 200 inviterait à s'authentifier là
+        // où ce n'est pas la question.
+        let vus = noms(StatusCode::OK, &[]);
+        assert!(!vus.iter().any(|nom| nom == "www-authenticate"), "{vus:?}");
+    }
+
+    /// **L'ALTERNATIVE NE S'ANNONCE QUE SI ELLE EXISTE.**
+    ///
+    /// Un client déjà en HTTP/3 la reçoit aussi, et c'est voulu : `ma` rafraîchit
+    /// ce qu'il a retenu, sans quoi son entrée périmerait et il repasserait en
+    /// TCP à la connexion suivante.
+    #[test]
+    fn l_alternative_ne_s_annonce_que_si_elle_existe() {
+        let vus = noms(StatusCode::OK, &[]);
+        assert!(!vus.iter().any(|nom| nom == "alt-svc"), "{vus:?}");
+        let vus = noms(StatusCode::OK, b"h3=\":443\"; ma=86400");
+        assert!(vus.iter().any(|nom| nom == "alt-svc"), "{vus:?}");
+    }
+
+    /// **AUCUN CHAMP N'EST PERDU EN SILENCE.**
+    ///
+    /// `Reponse::avec_champ` jette ce qui dépasse de `CHAMPS_MAX`, et un champ
+    /// jeté ne se verrait que dans la réponse où il manque. La plus chargée est
+    /// un refus sur une ressource divisible, alors qu'HTTP/3 est annoncé.
+    #[test]
+    fn la_reponse_la_plus_chargee_tient_entiere() {
+        let mut sortie = [0_u8; 512];
+        let portee = (
+            true,
+            Some(crate::http::ContentRange {
+                part: Some((0, 1)),
+                complete: 2,
+            }),
+        );
+        let reponse = super::composer(
+            StatusCode::UNAUTHORIZED,
+            "application/json",
+            portee,
+            b"{}",
+            false,
+            b"h3=\":65535\"; ma=86400",
+            &mut sortie,
+        );
+        assert_eq!(reponse.fields().count(), 8, "un champ a été perdu");
     }
 }

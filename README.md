@@ -15,7 +15,15 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 >
 > **HTTP/3 traverse une pile QUIC écrite ici** : poignée de main, chiffrement des
 > paquets, flux, contrôle de flux, QPACK, et une extinction qui se dit en deux
-> temps avant de fermer.
+> temps avant de fermer. **Et il se fait trouver** : `Alt-Svc` (RFC 7838)
+> l'annonce sur toute réponse HTTP/2, avec le port que le socket a RÉELLEMENT
+> obtenu — sans quoi §3.1 de RFC 9114 ne laisse aucun moyen à un navigateur de
+> découvrir ce port, et toute cette pile serait du poids mort.
+>
+> **Les deux versions rendent les mêmes protections.** Un seul endroit dit ce que
+> toute réponse porte — `no-store`, `nosniff`, et le `www-authenticate` d'un
+> refus —, parce que trois composeurs séparés en avaient donné trois listes, et
+> que celle d'HTTP/3 avait divergé sans que rien ne le dise.
 >
 > **`air-mail-server` tourne.** Il écoute sur un port, reçoit du courrier en
 > clair pour les domaines qu'on lui nomme, le dépose dans une boîte Maildir, et
@@ -1979,7 +1987,7 @@ que `llvm-cov` n'instrumente pas sur Rust stable et dont le compteur reste à
 `0 / 0`. Les régions font le travail attendu : chaque bras d'un conditionnel en
 est une.
 
-Le gate mesure aujourd'hui **54 699 régions** et **31 465 lignes**, toutes
+Le gate mesure aujourd'hui **54 766 régions** et **31 512 lignes**, toutes
 couvertes. **Une seule dérogation, et elle est annoncée à chaque exécution** : le
 code *généré* du schéma Cap'n Proto en est exclu — il porte un accesseur par champ
 et par sens, dont la plupart ne seront jamais appelés, et les couvrir n'éprouverait
