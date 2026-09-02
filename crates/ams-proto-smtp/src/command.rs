@@ -59,6 +59,33 @@ pub enum Command<'a> {
     /// `DATA`
     Data,
 
+    /// `BDAT taille [LAST]` — un morceau de message COMPTÉ (RFC 3030 §2).
+    ///
+    /// # CE QUI CHANGE PAR RAPPORT À `DATA`, ET POURQUOI C'EST PLUS SÛR
+    ///
+    /// `DATA` fait chercher une fin dans le flux : `<CRLF>.<CRLF>`. C'est là que
+    /// vit la contrebande de 2023 — deux serveurs qui ne coupent pas au même
+    /// endroit. `BDAT` ne cherche rien : la longueur est ANNONCÉE, en clair, et
+    /// il n'y a rien à confondre. Le message n'a plus de délimiteur, donc plus
+    /// de délimiteur à fabriquer.
+    ///
+    /// # ET CE QUI NE CHANGE PAS
+    ///
+    /// Un `CR` ou un `LF` isolé reste refusé, comme en phase `DATA`. Ce n'est
+    /// pas la fin de CE message qu'on protège — elle est comptée — c'est celle
+    /// du PROCHAIN saut : ce qu'on dépose repart un jour vers un voisin qui, lui,
+    /// coupe sur `<CRLF>.<CRLF>`. Laisser passer un `LF` nu reviendrait à
+    /// blanchir la contrebande plutôt qu'à la commettre, et le résultat est le
+    /// même pour la victime.
+    ///
+    /// Voir [`ChunkReceiver`](crate::ChunkReceiver), qui lit les octets.
+    Bdat {
+        /// Le nombre d'octets qui suivent la ligne, **exactement**.
+        size: u64,
+        /// Ce morceau est-il le dernier (`LAST`) ?
+        last: bool,
+    },
+
     /// `RSET`
     Rset,
 
@@ -172,6 +199,10 @@ fn dispatch<'a>(verbe: &'a [u8], reste: &'a [u8], limits: &Limits) -> Result<Com
     if verbe.eq_ignore_ascii_case(b"DATA") {
         no_argument(reste)?;
         return Ok(Command::Data);
+    }
+    if verbe.eq_ignore_ascii_case(b"BDAT") {
+        let (size, last) = parse_chunk(argument(reste)?)?;
+        return Ok(Command::Bdat { size, last });
     }
     if verbe.eq_ignore_ascii_case(b"RSET") {
         no_argument(reste)?;
@@ -300,6 +331,46 @@ fn argument(reste: &[u8]) -> Result<&[u8], Error> {
     Ok(argument)
 }
 
+/// L'argument de `BDAT` : une taille, et au plus le mot `LAST`.
+///
+/// # UN SEUL ESPACE, ET RIEN QU'UN NOMBRE
+///
+/// L'ABNF de RFC 3030 §2 est `"BDAT" SP chunk-size [ SP end-marker ]`, avec
+/// `chunk-size = 1*DIGIT`. Tolérer un espace de plus, un signe, ou un mot
+/// inconnu après `LAST` ferait diverger deux lecteurs sur le nombre d'octets
+/// qui suivent — et ce nombre est ce qui sépare des données de commandes.
+///
+/// Un débordement de `u64` est un refus, et non une troncature : un morceau
+/// annoncé plus court qu'il ne l'est ferait lire sa queue comme des commandes.
+fn parse_chunk(argument: &[u8]) -> Result<(u64, bool), Error> {
+    let (chiffres, last) = match argument.iter().position(|octet| *octet == b' ') {
+        Some(espace) => {
+            let (chiffres, reste) = argument.split_at(espace);
+            // `split_at` garde l'espace en tête du reste ; le mot commence après.
+            let mot = reste.get(1..).unwrap_or_default();
+            if !mot.eq_ignore_ascii_case(b"LAST") {
+                return Err(Error::MalformedChunkSize);
+            }
+            (chiffres, true)
+        }
+        None => (argument, false),
+    };
+    if chiffres.is_empty() || !chiffres.iter().all(u8::is_ascii_digit) {
+        return Err(Error::MalformedChunkSize);
+    }
+    let mut taille = 0_u64;
+    for chiffre in chiffres {
+        // `wrapping_sub` sur un octet dont on vient de vérifier qu'il est un
+        // chiffre : la soustraction ne peut pas déborder, et l'écrire ainsi
+        // évite une garde que rien n'atteindrait.
+        taille = taille
+            .checked_mul(10)
+            .and_then(|dix| dix.checked_add(u64::from(chiffre.wrapping_sub(b'0'))))
+            .ok_or(Error::MalformedChunkSize)?;
+    }
+    Ok((taille, last))
+}
+
 /// Aucun argument attendu.
 fn no_argument(reste: &[u8]) -> Result<(), Error> {
     if reste.is_empty() {
@@ -379,6 +450,66 @@ mod tests {
         assert_eq!(
             Command::parse(b"NOOP \r\n", &bornes),
             Err(Error::LineTooLong { limit: 6 })
+        );
+    }
+
+    // ── `BDAT` (RFC 3030 §2) ────────────────────────────────────────────────
+
+    #[test]
+    fn bdat_se_decode_avec_et_sans_last() {
+        assert_eq!(
+            analyser(b"BDAT 1024\r\n"),
+            Ok(Command::Bdat {
+                size: 1024,
+                last: false
+            })
+        );
+        assert_eq!(
+            analyser(b"bdat 0 last\r\n"),
+            Ok(Command::Bdat {
+                size: 0,
+                last: true
+            }),
+            "le verbe ET le marqueur sont insensibles à la casse"
+        );
+    }
+
+    /// **UNE TAILLE ILLISIBLE N'EST PAS UNE TAILLE DE ZÉRO.** Si on rendait zéro
+    /// pour ce qu'on n'a pas su lire, le pair enverrait ses octets et nous les
+    /// lirions comme des commandes.
+    #[test]
+    fn un_argument_de_bdat_mal_forme_est_refuse() {
+        // Sans argument du tout, c'est le manque qu'on nomme, et non la forme.
+        for vide in [&b"BDAT\r\n"[..], b"BDAT \r\n"] {
+            assert_eq!(analyser(vide), Err(Error::MissingArgument), "{vide:?}");
+        }
+        for mauvais in [
+            &b"BDAT abc\r\n"[..],             // pas un nombre
+            b"BDAT -1\r\n",                   // pas de signe
+            b"BDAT 12x\r\n",                  // pas seulement des chiffres
+            b"BDAT 1 LAST EXTRA\r\n",         // un mot de trop
+            b"BDAT 1 FIRST\r\n",              // un marqueur qui n'existe pas
+            b"BDAT 1  LAST\r\n",              // deux espaces
+            b"BDAT  1\r\n",                   // un espace de trop devant
+            b"BDAT 18446744073709551616\r\n", // déborde `u64`
+        ] {
+            assert_eq!(
+                analyser(mauvais),
+                Err(Error::MalformedChunkSize),
+                "{mauvais:?}"
+            );
+        }
+    }
+
+    /// La plus grande taille que `u64` porte se décode ; celle d'après non.
+    #[test]
+    fn la_plus_grande_taille_se_decode() {
+        assert_eq!(
+            analyser(b"BDAT 18446744073709551615 LAST\r\n"),
+            Ok(Command::Bdat {
+                size: u64::MAX,
+                last: true
+            })
         );
     }
 

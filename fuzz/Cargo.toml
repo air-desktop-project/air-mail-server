@@ -254,6 +254,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_ams_smtp_chunk"
+path = "fuzz_targets/fuzz_ams_smtp_chunk.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_ams_guard"
 path = "fuzz_targets/fuzz_ams_guard.rs"
 test = false

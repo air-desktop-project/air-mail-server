@@ -9,11 +9,12 @@
 //! **Les commandes** — la ligne, le verbe, les chemins d'enveloppe, les
 //! paramètres ESMTP —, **l'encodage des réponses** multilignes, et **la phase de
 //! données** : `<CRLF>.<CRLF>`, le point échappé, et le refus de tout `CR` ou `LF`
-//! isolé (cf. [`DataReceiver`]).
+//! isolé (cf. [`DataReceiver`]) — **et `BDAT`**, la phase de données COMPTÉE de
+//! RFC 3030 (cf. [`ChunkReceiver`]), où il n'y a pas de délimiteur à chercher.
 //!
-//! Ne sont PAS écrits : `BDAT`/`CHUNKING`, l'échappement des points à l'ÉMISSION
-//! (le serveur ne relaie pas encore), et la validation complète d'une adresse
-//! IPv6 (seule sa forme est vérifiée, cf. `check_address_literal`).
+//! Ne sont PAS écrits : l'échappement des points à l'ÉMISSION (le client sortant
+//! le fait pour lui-même), et la validation complète d'une adresse IPv6 (seule
+//! sa forme est vérifiée, cf. `check_address_literal`).
 //!
 //! ```
 //! use ams_proto_smtp::{Command, Limits, Path};
@@ -90,6 +91,7 @@
 extern crate std;
 
 mod answer;
+mod chunk;
 mod command;
 mod data;
 mod domain;
@@ -101,6 +103,7 @@ mod reply;
 mod stuff;
 
 pub use answer::{REPLY_LINES_MAX, Reply, ReplyLines, reply_len};
+pub use chunk::{ChunkEvent, ChunkReceiver};
 pub use command::Command;
 pub use data::{DataFault, DataReceiver, Event as DataEvent};
 pub use domain::ClientId;

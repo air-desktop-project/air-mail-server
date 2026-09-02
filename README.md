@@ -21,6 +21,13 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 > clair pour les domaines qu'on lui nomme, le dépose dans une boîte Maildir, et
 > refuse les sources qui abusent.
 >
+> **Un message arrive de deux façons** : `DATA`, qui cherche `<CRLF>.<CRLF>` dans
+> le flux, et `BDAT` (RFC 3030), qui n'y cherche rien — la longueur est annoncée,
+> et il n'y a donc pas d'endroit où deux serveurs pourraient couper autrement.
+> `CHUNKING` est annoncé à l'`EHLO`. Un `CR` ou un `LF` isolé reste refusé dans
+> les deux, parce que ce qu'on dépose repart un jour chez un voisin qui, lui,
+> coupe sur le point.
+>
 > **Il relève** : POP3 sur un second port, `STLS` puis `USER`/`PASS`, la boîte
 > verrouillée le temps d'une session, et le `QUIT` qui efface — lui seul.
 >
@@ -79,7 +86,7 @@ horloge.
 | Crate | Périmètre | État |
 | --- | --- | --- |
 | `ams-mime` | RFC 5322 et MIME — le socle des quatre protocoles | **squelette du message, domaine d'un `From:`, composition d'un rapport, et `Authentication-Results`** |
-| `ams-proto-smtp` | RFC 5321 | **commandes, réponses écrites ET lues, phase de données, point-farcissage** |
+| `ams-proto-smtp` | RFC 5321, et `BDAT` de RFC 3030 | **commandes, réponses écrites ET lues, phase de données, point-farcissage, morceaux comptés** |
 | `ams-sasl` | RFC 4422/4616 : `PLAIN` et son base64 | **implémenté** |
 | `ams-proto-pop3` | RFC 1939 | **commandes et réponses** |
 | `ams-dns` | RFC 1035 : le codec d'un message | **question encodée, réponse décodée** |
@@ -139,7 +146,8 @@ ligne, le pliage, la séparation en-tête/corps, le découpage en champs. Les ch
 structurés, les adresses, les dates et MIME restent à écrire.
 `ams-proto-smtp` : les commandes, l'encodage des réponses multilignes, et **la
 phase de données** — `<CRLF>.<CRLF>`, le point échappé, et le refus de tout `CR`
-ou `LF` isolé. `BDAT`/`CHUNKING`, l'échappement à l'émission et la validation
+ou `LF` isolé — **et `BDAT`**, la phase de données COMPTÉE de RFC 3030, où il n'y
+a pas de délimiteur à chercher. L'échappement à l'émission et la validation
 complète d'une adresse IPv6 restent à écrire.
 
 `ams-proto-pop3` : les commandes de la RFC 1939 et leurs réponses. `APOP`
@@ -1919,7 +1927,7 @@ que `llvm-cov` n'instrumente pas sur Rust stable et dont le compteur reste à
 `0 / 0`. Les régions font le travail attendu : chaque bras d'un conditionnel en
 est une.
 
-Le gate mesure aujourd'hui **52 097 régions** et **29 934 lignes**, toutes
+Le gate mesure aujourd'hui **52 681 régions** et **30 272 lignes**, toutes
 couvertes. **Une seule dérogation, et elle est annoncée à chaque exécution** : le
 code *généré* du schéma Cap'n Proto en est exclu — il porte un accesseur par champ
 et par sens, dont la plupart ne seront jamais appelés, et les couvrir n'éprouverait

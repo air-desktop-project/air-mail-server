@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use ams_guard::{Event as GuardEvent, Source, Verdict};
 use ams_mime::AUTHRES_RESERVE;
-use ams_proto_smtp::DataEvent;
+use ams_proto_smtp::{ChunkEvent, DataEvent};
 use ams_session::{
     Action, Config, DataOutcome, Identity as SpfIdentity, Policy, RECEIVED_SPF_MAX, SenderPolicy,
     SmtpSession,
@@ -214,6 +214,30 @@ struct Etat {
     lecture: Vec<u8>,
     rempli: usize,
     sortie: Vec<u8>,
+    /// Le message qui arrive par morceaux, s'il y en a un.
+    ///
+    /// # POURQUOI IL VIT ICI ET NON DANS UNE VARIABLE LOCALE
+    ///
+    /// Un message de `DATA` tient dans un appel : on ouvre la remise, on lit
+    /// jusqu'au point, on conclut. Un message de `BDAT` traverse PLUSIEURS
+    /// commandes — un appel par morceau — et ce qui s'accumule entre eux (la
+    /// remise ouverte, le condensat DKIM en cours, un échec déjà survenu) ne
+    /// peut pas vivre sur la pile de l'un d'eux.
+    message: Option<EnCours>,
+}
+
+/// Ce qu'un message accumule pendant qu'il arrive.
+struct EnCours {
+    /// La remise a-t-elle échoué, et comment ?
+    ///
+    /// **Un échec n'arrête pas la lecture** : les octets sont annoncés, et ne
+    /// pas les consommer laisserait la queue du morceau se faire lire comme des
+    /// commandes.
+    echec: Option<DeliveryFailure>,
+    /// La grammaire a-t-elle refusé le message ?
+    refuse: bool,
+    /// Le suivi DKIM, quand il y a quelque chose à vérifier.
+    flux: Option<DkimStream>,
 }
 
 impl Etat {
@@ -228,6 +252,7 @@ impl Etat {
             resume: Summary::default(),
             lecture: vec![0_u8; capacite],
             rempli: 0,
+            message: None,
             sortie: vec![
                 0_u8;
                 config
@@ -547,7 +572,85 @@ where
                     etat.resume.messages = etat.resume.messages.saturating_add(1);
                 }
             }
+            Action::ReceiveChunk { size, last } => {
+                let remis =
+                    recevoir_morceau(stream, session, delivery, etat, service, source, size, last)
+                        .await?;
+                if remis {
+                    etat.resume.messages = etat.resume.messages.saturating_add(1);
+                }
+            }
         }
+    }
+}
+
+/// Ouvre la remise d'un message : les destinataires, la place réservée, la trace
+/// SPF.
+///
+/// # ELLE N'A LIEU QU'UNE FOIS PAR MESSAGE, ET NON PAR MORCEAU
+///
+/// Un message de `BDAT` arrive en plusieurs commandes. Refaire ceci à chaque
+/// morceau rouvrirait la remise — donc écrirait le message une fois par
+/// morceau — et poserait autant d'en-têtes `Received-SPF` que de morceaux.
+fn ouvrir_le_message<P, D>(
+    session: &mut SmtpSession<'_, P>,
+    delivery: &mut D,
+    service: &Service<'_>,
+    source: Source,
+) -> EnCours
+where
+    P: Policy,
+    D: Delivery,
+{
+    // LES DESTINATAIRES D'ABORD, et c'est la session qui les fournit. La boucle
+    // ne voit pas les `RCPT` — elle ne connaît aucun protocole — et ne les garde
+    // pas : une liste tenue ici survivrait au `RSET` qu'elle ne voit pas non
+    // plus, et livrerait le message suivant aux destinataires du précédent.
+    //
+    // LE CHEMIN DE RETOUR D'ABORD, parce qu'il vaut pour la transaction entière
+    // et non pour un destinataire : c'est à lui qu'un rapport de non-remise
+    // reviendra, et une remise qui l'apprendrait après coup aurait déjà écrit
+    // une entrée de file sans savoir à qui rendre compte.
+    delivery.begin(session.return_path());
+    // **LA PLACE DE L'EN-TÊTE `Authentication-Results` SE RÉSERVE ICI**, avant
+    // le premier octet. DKIM ne se juge qu'une fois le corps entier lu, et DMARC
+    // en dépend : le verdict arrivera bien après. Voir `Delivery::reserve_trace`,
+    // qui dit pourquoi on réserve plutôt que de rassembler le message.
+    delivery.reserve_trace(AUTHRES_RESERVE);
+    let mut echec: Option<DeliveryFailure> = None;
+    for adresse in session.recipients() {
+        if let Err(cause) = delivery.add_recipient(adresse) {
+            echec = Some(cause);
+            break;
+        }
+    }
+    // ── L'EN-TÊTE `Received-SPF` (RFC 7208 §9.1) ────────────────────────────
+    //
+    // AVANT le premier octet du message : un en-tête de trace se pose EN TÊTE,
+    // et l'écrire après les en-têtes du pair le mettrait dans le corps, où
+    // personne ne le lirait. La session le compose — la boucle ne fabrique
+    // aucun texte de protocole — et n'apporte ici que ce qu'elle seule sait :
+    // l'adresse du pair.
+    //
+    // Rien n'est écrit quand rien n'a été vérifié : un en-tête qui dirait
+    // `none` sans qu'aucune résolution ait eu lieu mentirait sur ce qu'on a
+    // fait.
+    let mut entete = [0_u8; RECEIVED_SPF_MAX];
+    if echec.is_none()
+        && let Some(trace) = session.received_spf(adresse_du_pair(source), &mut entete)
+        && let Err(cause) = delivery.append(trace)
+    {
+        echec = Some(cause);
+    }
+    // La vérification DKIM (C9) suit le message OCTET PAR OCTET : son condensat
+    // porte sur le corps entier, et rassembler celui-ci laisserait le pair
+    // choisir combien de mémoire on lui consacre. DMARC, lui, n'a besoin que du
+    // bloc d'en-tête — mais il en a besoin même quand DKIM n'est pas vérifié.
+    let suivre = service.dkim.is_some() || service.dmarc.is_some();
+    EnCours {
+        echec,
+        refuse: false,
+        flux: suivre.then(|| DkimStream::new(service.dkim.is_some())),
     }
 }
 
@@ -703,49 +806,8 @@ where
     // et non pour un destinataire : c'est à lui qu'un rapport de non-remise
     // reviendra, et une remise qui l'apprendrait après coup aurait déjà écrit
     // une entrée de file sans savoir à qui rendre compte.
-    delivery.begin(session.return_path());
-    // **LA PLACE DE L'EN-TÊTE `Authentication-Results` SE RÉSERVE ICI**, avant
-    // le premier octet. DKIM ne se juge qu'une fois le corps entier lu, et DMARC
-    // en dépend : le verdict arrivera bien après. Voir `Delivery::reserve_trace`,
-    // qui dit pourquoi on réserve plutôt que de rassembler le message.
-    delivery.reserve_trace(AUTHRES_RESERVE);
-    let mut echec: Option<DeliveryFailure> = None;
-    for adresse in session.recipients() {
-        if let Err(cause) = delivery.add_recipient(adresse) {
-            echec = Some(cause);
-            break;
-        }
-    }
-    // ── L'EN-TÊTE `Received-SPF` (RFC 7208 §9.1) ────────────────────────────
-    //
-    // AVANT le premier octet du message : un en-tête de trace se pose EN TÊTE,
-    // et l'écrire après les en-têtes du pair le mettrait dans le corps, où
-    // personne ne le lirait. La session le compose — la boucle ne fabrique
-    // aucun texte de protocole — et n'apporte ici que ce qu'elle seule sait :
-    // l'adresse du pair.
-    //
-    // Rien n'est écrit quand rien n'a été vérifié : un en-tête qui dirait
-    // `none` sans qu'aucune résolution ait eu lieu mentirait sur ce qu'on a
-    // fait.
-    let mut entete = [0_u8; RECEIVED_SPF_MAX];
-    if echec.is_none()
-        && let Some(trace) = session.received_spf(adresse_du_pair(source), &mut entete)
-        && let Err(cause) = delivery.append(trace)
-    {
-        echec = Some(cause);
-    }
-
-    // Un échec ici n'arrête PAS la lecture : le message est lu jusqu'au bout
-    // avant d'être refusé, sans quoi la connexion resterait désynchronisée et le
-    // corps serait lu comme des commandes.
-    let mut refuse = false;
+    let mut en_cours = ouvrir_le_message(session, delivery, service, source);
     let mut fini = false;
-    // La vérification DKIM (C9) suit le message OCTET PAR OCTET : son condensat
-    // porte sur le corps entier, et rassembler celui-ci laisserait le pair
-    // choisir combien de mémoire on lui consacre. DMARC, lui, n'a besoin que du
-    // bloc d'en-tête — mais il en a besoin même quand DKIM n'est pas vérifié.
-    let suivre = service.dkim.is_some() || service.dmarc.is_some();
-    let mut flux = suivre.then(|| DkimStream::new(service.dkim.is_some()));
 
     while !fini {
         if etat.rempli == 0 {
@@ -768,13 +830,13 @@ where
                         // `append` n'est plus appelé du tout. Un tuple
                         // `(echec, delivery.append(..))` l'appellerait encore,
                         // et continuerait d'écrire dans une remise abandonnée.
-                        if let Some(lecture) = flux.as_mut() {
+                        if let Some(lecture) = en_cours.flux.as_mut() {
                             lecture.update(morceau);
                         }
-                        if echec.is_none()
+                        if en_cours.echec.is_none()
                             && let Err(cause) = delivery.append(morceau)
                         {
-                            echec = Some(cause);
+                            en_cours.echec = Some(cause);
                         }
                     }
                     DataEvent::Complete => fini = true,
@@ -784,13 +846,140 @@ where
                 etat.rempli = etat.rempli.saturating_sub(consomme);
             }
             Err(ams_session::Error::DataRefused) => {
-                refuse = true;
+                en_cours.refuse = true;
                 fini = true;
             }
             Err(autre) => return Err(Error::Session(autre)),
         }
     }
 
+    conclure_le_message(stream, session, delivery, etat, service, source, en_cours).await
+}
+
+/// Lit **exactement** les octets qu'un `BDAT` a annoncés (RFC 3030 §2).
+///
+/// # ON LES LIT TOUS, MÊME QUAND ON N'EN VEUT PLUS
+///
+/// C'est la règle qui tient toute cette fonction. Les octets sont ANNONCÉS :
+/// ils arriveront, quoi qu'on décide de leur contenu. En cesser la lecture
+/// laisserait la queue du morceau dans la socket, et la commande suivante
+/// commencerait au milieu du message — c'est-à-dire que le pair choisirait ce
+/// que nous lisons comme des commandes. La contrebande, par l'autre porte.
+///
+/// Un refus se retient donc, et ne s'arrête pas.
+///
+/// # ET LA CONCLUSION N'A LIEU QU'AU DERNIER
+///
+/// Les morceaux précédents nourrissent le condensat DKIM et la remise, puis
+/// rendent un `250`. Seul celui qui porte `LAST` fait juger le message.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "chaque argument est une pièce distincte du service ; les grouper \
+              dans une structure n'ajouterait qu'un nom à retenir"
+)]
+async fn recevoir_morceau<S, P, D>(
+    stream: &mut S,
+    session: &mut SmtpSession<'_, P>,
+    delivery: &mut D,
+    etat: &mut Etat,
+    service: &Service<'_>,
+    source: Source,
+    size: u64,
+    last: bool,
+) -> Result<bool, Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    P: Policy,
+    D: Delivery,
+{
+    // **LE PREMIER MORCEAU OUVRE LE MESSAGE, LES SUIVANTS LE CONTINUENT.** Le
+    // rouvrir à chaque morceau écrirait le message une fois par morceau, et
+    // poserait autant d'en-têtes `Received-SPF`.
+    let mut en_cours = match etat.message.take() {
+        Some(deja) => deja,
+        None => ouvrir_le_message(session, delivery, service, source),
+    };
+    let mut reste = size;
+
+    while reste > 0 {
+        if etat.rempli == 0 {
+            let lus = lire(stream, &mut etat.lecture, service.timeouts.data).await?;
+            if lus == 0 {
+                // Le pair a raccroché en plein morceau : rien n'est remis, et il
+                // n'y a personne à qui répondre.
+                delivery.abort();
+                return Ok(false);
+            }
+            etat.rempli = lus;
+        }
+        // ON NE DONNE À LA SESSION QUE CE QUI APPARTIENT AU MORCEAU. Ce qui
+        // suit est une COMMANDE, et le lui donner reviendrait à la lui faire
+        // avaler comme des données.
+        let dispo = usize::try_from(reste)
+            .unwrap_or(usize::MAX)
+            .min(etat.rempli);
+        let (evenement, consomme) =
+            session.feed_chunk(etat.lecture.get(..dispo).unwrap_or_default())?;
+        if let ChunkEvent::Content(morceau) = evenement {
+            if let Some(lecture) = en_cours.flux.as_mut() {
+                lecture.update(morceau);
+            }
+            if en_cours.echec.is_none()
+                && let Err(cause) = delivery.append(morceau)
+            {
+                en_cours.echec = Some(cause);
+            }
+        }
+        reste = reste.saturating_sub(consomme as u64);
+        etat.lecture.copy_within(consomme..etat.rempli, 0);
+        etat.rempli = etat.rempli.saturating_sub(consomme);
+    }
+    // Le morceau est consommé jusqu'au dernier octet annoncé ; on le dit à la
+    // session, qui saura si la grammaire l'a refusé.
+    let (evenement, _) = session.feed_chunk(&[])?;
+    if evenement != ChunkEvent::Complete && last {
+        // Un dernier morceau qui ne conclut pas est un message refusé — un `CR`
+        // pendant, par exemple. La session le sait déjà.
+        en_cours.refuse = true;
+    }
+
+    if !last {
+        etat.message = Some(en_cours);
+        let tour = session.on_chunk_received(&mut etat.sortie)?;
+        stream.write_all(tour.reply()).await?;
+        stream.flush().await?;
+        return Ok(false);
+    }
+    conclure_le_message(stream, session, delivery, etat, service, source, en_cours).await
+}
+
+/// Conclut un message : les vérifications, l'en-tête de trace, la remise, et la
+/// réponse.
+///
+/// # ELLE N'A LIEU QU'UNE FOIS PAR MESSAGE, ET NON PAR MORCEAU
+///
+/// DKIM ne se juge qu'une fois le corps entier lu — son condensat porte
+/// dessus — et DMARC en dépend. Un message de `BDAT` n'est donc jugé qu'au
+/// morceau marqué `LAST`, et les précédents ne font que nourrir le condensat.
+async fn conclure_le_message<S, P, D>(
+    stream: &mut S,
+    session: &mut SmtpSession<'_, P>,
+    delivery: &mut D,
+    etat: &mut Etat,
+    service: &Service<'_>,
+    source: Source,
+    en_cours: EnCours,
+) -> Result<bool, Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    P: Policy,
+    D: Delivery,
+{
+    let EnCours {
+        echec,
+        refuse,
+        flux,
+    } = en_cours;
     // ON NE VÉRIFIE PAS CE QU'ON REFUSE. Chaque signature coûte une résolution
     // DNS et une exponentiation modulaire ; les dépenser pour un message qu'on
     // jette offrirait à un pair de faire travailler la machine sans rien livrer.

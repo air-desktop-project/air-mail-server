@@ -22,7 +22,7 @@
 
 use std::cell::Cell;
 
-use ams_proto_smtp::{Limits, Path};
+use ams_proto_smtp::{ChunkEvent, Limits, Path};
 use ams_session::{Action, Config, DataOutcome, Error, Policy, RecipientVerdict, SmtpSession};
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
@@ -136,6 +136,48 @@ fn vocabulaire() -> Vec<Vec<u8>> {
 }
 
 /// Vérifie qu'une réponse appartient au vocabulaire, et qu'elle est bien formée.
+/// Consomme un morceau annoncé, et rend la main comme la boucle le ferait.
+///
+/// **ON LIT EXACTEMENT CE QUI EST ANNONCÉ.** Ici les octets viennent d'un flux
+/// fabriqué à partir de la taille elle-même : ce qui compte n'est pas leur
+/// contenu, c'est que le récepteur s'arrête au bon endroit et que la session
+/// réponde ensuite dans son vocabulaire clos.
+fn avaler_le_morceau(
+    session: &mut SmtpSession<'_, &Politique>,
+    size: u64,
+    last: bool,
+    tampon: &mut [u8],
+    connu: &[Vec<u8>],
+) {
+    // Une taille arbitraire vient du pair ; on n'alloue pas d'après elle (C3).
+    let combien = usize::try_from(size).unwrap_or(usize::MAX).min(4096);
+    let flux = vec![b'x'; combien];
+    let mut reste: &[u8] = &flux;
+    loop {
+        let Ok((evenement, consomme)) = session.feed_chunk(reste) else {
+            return;
+        };
+        reste = reste.get(consomme..).unwrap_or_default();
+        match evenement {
+            ChunkEvent::Content(_) => {}
+            ChunkEvent::ChunkComplete | ChunkEvent::Complete => break,
+            // Le flux fabriqué est plus court que ce que le pair a annoncé :
+            // c'est le cas d'une connexion coupée en plein morceau.
+            ChunkEvent::NeedMore => return,
+        }
+    }
+    if last {
+        if let Ok(tour) = session.on_data_settled(DataOutcome::Accepted, tampon) {
+            verifier_reponse(tour.reply(), connu);
+        }
+        return;
+    }
+    if let Ok(tour) = session.on_chunk_received(tampon) {
+        verifier_reponse(tour.reply(), connu);
+        assert_eq!(tour.action(), Action::Continue);
+    }
+}
+
 fn verifier_reponse(reply: &[u8], connu: &[Vec<u8>]) {
     assert!(
         reply.ends_with(b"\r\n"),
@@ -228,6 +270,18 @@ fuzz_target!(|entree: Entree| {
                         assert!(reply.starts_with(b"220 "));
                     }
                     Action::ReceiveData => assert!(reply.starts_with(b"354 ")),
+                    // **UN `BDAT` NE RÉPOND QU'APRÈS LES OCTETS** (RFC 3030 §2).
+                    // Le moindre octet émis ici arriverait au milieu du morceau
+                    // que le pair est déjà en train d'envoyer, et il ne saurait
+                    // pas de quoi cette réponse parle.
+                    Action::ReceiveChunk { size, last } => {
+                        assert!(
+                            reply.is_empty(),
+                            "un BDAT a répondu avant ses octets : {}",
+                            String::from_utf8_lossy(reply)
+                        );
+                        avaler_le_morceau(&mut session, size, last, &mut tampon, &connu);
+                    }
                     Action::Close => assert!(reply.starts_with(b"221 ")),
                     // UN TOUR QUI DIFFÈRE NE RÉPOND PAS. Le moindre octet émis
                     // ici serait une réponse au `MAIL FROM:` composée AVANT de

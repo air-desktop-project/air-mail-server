@@ -116,6 +116,15 @@ pub enum Error {
         limit: usize,
     },
 
+    /// L'argument de `BDAT` n'est pas une taille suivie, au plus, de `LAST`
+    /// (RFC 3030 §2).
+    ///
+    /// **Une taille illisible n'est pas une taille de zéro.** Si l'on rendait
+    /// zéro pour ce qu'on n'a pas su lire, le pair enverrait ses octets et nous
+    /// les lirions comme des commandes — c'est-à-dire la contrebande, par
+    /// l'autre porte.
+    MalformedChunkSize,
+
     /// Le nom de mécanisme d'`AUTH` est mal formé (RFC 4422 §3.1).
     MalformedMechanism,
 
@@ -192,6 +201,7 @@ impl fmt::Display for Error {
             Error::PathTooLong { limit } => write!(f, "chemin de plus de {limit} octets"),
             Error::MalformedParameter => f.write_str("paramètre ESMTP mal formé"),
             Error::TooManyParameters { limit } => write!(f, "plus de {limit} paramètres ESMTP"),
+            Error::MalformedChunkSize => f.write_str("argument de BDAT mal formé"),
             Error::MalformedMechanism => f.write_str("nom de mécanisme SASL mal formé"),
             Error::MalformedInitialResponse => {
                 f.write_str("réponse initiale AUTH hors de l'alphabet base64")
@@ -235,6 +245,7 @@ mod tests {
         Error::PathTooLong { limit: 256 },
         Error::MalformedParameter,
         Error::TooManyParameters { limit: 16 },
+        Error::MalformedChunkSize,
         Error::MalformedMechanism,
         Error::MalformedInitialResponse,
         Error::EmptyReply,

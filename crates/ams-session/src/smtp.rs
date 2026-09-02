@@ -1,7 +1,8 @@
 //! La machine à états d'une session SMTP, **sans entrée-sortie**.
 
 use ams_proto_smtp::{
-    ClientId, Code, Command, DataEvent, DataFault, DataReceiver, Error as SmtpError, Path, encode,
+    ChunkEvent, ChunkReceiver, ClientId, Code, Command, DataEvent, DataFault, DataReceiver,
+    Error as SmtpError, Path, encode,
 };
 use ams_sasl::{decode_base64, parse_plain};
 use core::net::IpAddr;
@@ -24,8 +25,9 @@ const SIZE_LINE_MAX: usize = 5 + MAX_DIGITS;
 /// 5321 peut porter, dont le base64 ne rend que trois quarts.
 const SASL_DECODED_MAX: usize = 512;
 
-/// Le nombre maximal de lignes d'un `EHLO` : domaine, `SIZE`, `STARTTLS`, `AUTH`.
-const EHLO_LINES_MAX: usize = 4;
+/// Le nombre maximal de lignes d'un `EHLO` : domaine, `SIZE`, `CHUNKING`,
+/// `STARTTLS`, `AUTH`.
+const EHLO_LINES_MAX: usize = 5;
 
 /// Ce qu'un nom de domaine peut faire (RFC 1035 §2.3.4).
 const DOMAIN_MAX: usize = 255;
@@ -42,11 +44,32 @@ enum Phase {
     /// Le pair s'est nommé ; aucune transaction n'est ouverte.
     Identified,
     /// `MAIL FROM` accepté. `recipients` compte les `RCPT` acceptés.
-    Transaction { recipients: usize },
+    ///
+    /// `chunked` retient qu'un `BDAT` a déjà été servi dans CETTE transaction :
+    /// un `DATA` qui suivrait se disputerait le même message.
+    Transaction { recipients: usize, chunked: bool },
     /// Un `AUTH` a été accepté : l'appelant conduit l'échange SASL.
     Auth,
     /// Un `DATA` a été accepté : l'appelant lit le message.
     Data,
+    /// Un morceau a été refusé par la grammaire. L'appelant finit de consommer
+    /// les octets annoncés, puis rend la main ; **son verdict ne sera pas
+    /// consulté**.
+    ChunkFailed {
+        /// Les destinataires de la transaction, pour la réponse.
+        recipients: usize,
+        /// Ce morceau était-il le dernier ?
+        last: bool,
+        /// Ce qui l'a fait refuser.
+        cause: DataFault,
+    },
+    /// Un `BDAT` a été accepté : l'appelant lit **exactement** les octets
+    /// annoncés.
+    ///
+    /// `recipients` est retenu ici parce qu'il faut y revenir quand le morceau
+    /// n'est pas le dernier : la transaction continue, et le `RCPT` suivant —
+    /// s'il y en avait un — doit compter à partir du même nombre.
+    Chunk { recipients: usize, last: bool },
     /// Les données ont été refusées par la grammaire. La cause décide de la
     /// réponse, et **le verdict de l'appelant ne sera pas consulté**.
     DataFailed(DataFault),
@@ -97,6 +120,27 @@ pub enum Action {
     CheckSender,
     /// Lire le message jusqu'à `<CRLF>.<CRLF>`.
     ReceiveData,
+    /// Lire **exactement** `size` octets, puis rendre la main (RFC 3030 §2).
+    ///
+    /// # LE NOMBRE VIENT DE LA COMMANDE, ET IL N'Y A RIEN À CHERCHER
+    ///
+    /// C'est toute la différence avec [`Action::ReceiveData`] : il n'y a pas de
+    /// délimiteur à trouver dans le flux, donc pas d'endroit où deux serveurs
+    /// pourraient couper différemment. Ce qui suit ces octets est une COMMANDE,
+    /// et en lire un de plus la ferait passer pour des données.
+    ///
+    /// L'appelant lit ces octets **même s'il en refuse le contenu** : ils sont
+    /// annoncés, et ne pas les consommer laisserait la queue du morceau se faire
+    /// lire comme des commandes. Il rend ensuite la main par
+    /// [`SmtpSession::on_chunk_received`] si `last` est faux, et par
+    /// [`SmtpSession::on_data_settled`] s'il est vrai — c'est alors un message
+    /// entier, remis comme celui d'un `DATA`.
+    ReceiveChunk {
+        /// Le nombre d'octets à lire, exactement.
+        size: u64,
+        /// Ce morceau termine-t-il le message ?
+        last: bool,
+    },
     /// Fermer la connexion.
     Close,
 }
@@ -251,6 +295,12 @@ pub struct SmtpSession<'a, P: Policy> {
     /// Les destinataires acceptés de la transaction en cours.
     recipients: Recipients,
     data: DataReceiver,
+    /// Le récepteur de morceaux, quand le message arrive par `BDAT`.
+    ///
+    /// **Il vit le temps d'une TRANSACTION**, et non d'un morceau : c'est lui
+    /// qui compte les octets du message entier, et qui voit un `CRLF` coupé par
+    /// une frontière de `BDAT`.
+    chunk: ChunkReceiver,
     banner: [u8; BANNER_MAX],
     banner_len: usize,
     size_line: [u8; SIZE_LINE_MAX],
@@ -314,6 +364,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
             policy,
             phase: Phase::Greeted,
             data: DataReceiver::new(config.limits(), config.max_message_octets()),
+            chunk: ChunkReceiver::new(config.limits(), config.max_message_octets()),
             tls: false,
             authenticated: false,
             recipients: Recipients::new(),
@@ -389,8 +440,11 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         out: &'b mut [u8],
     ) -> Result<Turn<'b>, Error> {
         let refus = match self.phase {
-            Phase::Data => None,
-            Phase::DataFailed(cause) => Some(cause),
+            Phase::Data | Phase::Chunk { last: true, .. } => None,
+            Phase::DataFailed(cause)
+            | Phase::ChunkFailed {
+                last: true, cause, ..
+            } => Some(cause),
             _ => return Err(Error::NotInCommandPhase),
         };
         self.quitter_la_transaction();
@@ -458,10 +512,107 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         }
     }
 
+    /// Donne des octets du morceau en cours, et rend ce qu'ils contiennent.
+    ///
+    /// **L'appelant lit EXACTEMENT ce que `BDAT` a annoncé**, ni plus ni moins :
+    /// ce qui suit est une commande. Le récepteur le lui rappelle en ne
+    /// consommant jamais au-delà du morceau.
+    ///
+    /// # UNE FAUTE N'ARRÊTE PAS LA LECTURE, ELLE ARRÊTE LE MESSAGE
+    ///
+    /// C'est la différence avec [`Self::feed_data`], et elle tient à la forme de
+    /// `BDAT` : les octets sont annoncés, donc ils arrivent. Cesser de lire
+    /// laisserait la queue du morceau se faire lire comme des commandes — la
+    /// contrebande, par l'autre porte. L'appelant continue donc de consommer, et
+    /// **c'est la session qui retient que le message est perdu**.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotInDataPhase`] hors d'un morceau.
+    pub fn feed_chunk<'i>(&mut self, input: &'i [u8]) -> Result<(ChunkEvent<'i>, usize), Error> {
+        let Phase::Chunk { recipients, last } = self.phase else {
+            if let Phase::ChunkFailed { .. } = self.phase {
+                // On a déjà refusé ce message ; on aide seulement l'appelant à
+                // finir de consommer ce qui a été annoncé.
+                return Ok((ChunkEvent::NeedMore, input.len()));
+            }
+            return Err(Error::NotInDataPhase);
+        };
+        match self.chunk.next(input) {
+            Ok(progres) => Ok(progres),
+            Err(cause) => {
+                self.phase = Phase::ChunkFailed {
+                    recipients,
+                    last,
+                    cause,
+                };
+                Ok((ChunkEvent::NeedMore, input.len()))
+            }
+        }
+    }
+
+    /// Le morceau annoncé a été lu, et **ce n'était pas le dernier**.
+    ///
+    /// Rend le `250` de §2, ou le refus que la grammaire impose. Le dernier
+    /// morceau, lui, passe par [`Self::on_data_settled`] : c'est un message
+    /// entier, remis comme celui d'un `DATA`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotInCommandPhase`] hors d'un morceau non final.
+    pub fn on_chunk_received<'b>(&mut self, out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
+        match self.phase {
+            Phase::Chunk {
+                recipients,
+                last: false,
+            } => {
+                self.phase = Phase::Transaction {
+                    recipients,
+                    chunked: true,
+                };
+                self.simple(Code::OK, b"Chunk ok", out)
+            }
+            Phase::ChunkFailed { cause, .. } => {
+                self.quitter_la_transaction();
+                Self::refus_de_morceau(self, cause, out)
+            }
+            _ => Err(Error::NotInCommandPhase),
+        }
+    }
+
+    /// La réponse que chaque faute de morceau impose.
+    fn refus_de_morceau<'b>(
+        &mut self,
+        cause: DataFault,
+        out: &'b mut [u8],
+    ) -> Result<Turn<'b>, Error> {
+        match cause {
+            DataFault::BareLineEnding => self.refus(
+                Code::TRANSACTION_FAILED,
+                b"Bare CR or LF in message data",
+                out,
+            ),
+            DataFault::LineTooLong { .. } => self.refus(Code::SYNTAX_ERROR, b"Line too long", out),
+            DataFault::MessageTooLarge { .. } => self.refus(
+                Code::MESSAGE_TOO_LARGE,
+                b"Message exceeds maximum size",
+                out,
+            ),
+        }
+    }
+
     /// Le nombre d'octets de message reçus pour la transaction en cours.
+    ///
+    /// Les deux phases y répondent : `DATA` compte ses lignes dé-échappées,
+    /// `BDAT` ses morceaux. **Une seule question, une seule réponse** — une
+    /// transaction n'emprunte jamais les deux chemins, et quitter la transaction
+    /// remet les deux compteurs à zéro. La somme est donc toujours celle du
+    /// message en cours, et il n'y a pas de cas à distinguer.
     #[must_use]
     pub fn received_octets(&self) -> u64 {
-        self.data.content_octets()
+        self.data
+            .content_octets()
+            .saturating_add(self.chunk.content_octets())
     }
 
     /// La session est-elle chiffrée ?
@@ -490,6 +641,9 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
                 return Err(Error::NotInCommandPhase);
             }
             Phase::Greeted | Phase::Identified | Phase::Transaction { .. } => {}
+            Phase::Chunk { .. } | Phase::ChunkFailed { .. } => {
+                return Err(Error::NotInCommandPhase);
+            }
         }
 
         let commande = match Command::parse(line, self.config.limits()) {
@@ -503,6 +657,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
             Command::Mail { reverse_path, .. } => self.on_mail(&reverse_path, out),
             Command::Rcpt { forward_path, .. } => self.on_rcpt(&forward_path, out),
             Command::Data => self.on_data(out),
+            Command::Bdat { size, last } => self.on_bdat(size, last, out),
             Command::Rset => {
                 self.reset_transaction();
                 self.simple(Code::OK, b"Reset ok", out)
@@ -577,6 +732,13 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         posees = posees.saturating_add(1);
         lignes[posees] = self.size_line.get(..self.size_len).unwrap_or_default();
         posees = posees.saturating_add(1);
+        // **`CHUNKING` EST ANNONCÉ TOUJOURS**, et sans réglage : la session sait
+        // conduire `BDAT`, quel que soit l'appelant, et un service qu'on sert
+        // sans l'annoncer est un service que personne n'emploie — donc que rien
+        // n'éprouve. Il ne dépend pas du chiffrement : `BDAT` ne porte aucun
+        // secret, et ce serveur reçoit du courrier en clair de toute façon.
+        lignes[posees] = b"CHUNKING";
+        posees = posees.saturating_add(1);
         // On n'annonce QUE ce que l'appelant a declare savoir conduire, et
         // `AUTH` seulement sous chiffrement (C6) : annoncer un mecanisme qu'on
         // refusera ensuite ferait envoyer un mot de passe en clair a un client
@@ -638,7 +800,10 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
                 self.refus(Code::BAD_SEQUENCE, b"Nested MAIL command", out)
             }
             _ => {
-                self.phase = Phase::Transaction { recipients: 0 };
+                self.phase = Phase::Transaction {
+                    recipients: 0,
+                    chunked: false,
+                };
                 self.retenir_le_chemin_de_retour(reverse_path);
                 if self.retenir_l_expediteur(reverse_path) {
                     // L'identité est vérifiable : on rend la main à l'appelant,
@@ -881,7 +1046,11 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         forward_path: &Path<'_>,
         out: &'b mut [u8],
     ) -> Result<Turn<'b>, Error> {
-        let Phase::Transaction { recipients } = self.phase else {
+        let Phase::Transaction {
+            recipients,
+            chunked,
+        } = self.phase
+        else {
             return self.refus(Code::BAD_SEQUENCE, b"Need MAIL before RCPT", out);
         };
         if recipients >= self.config.max_recipients() {
@@ -900,6 +1069,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
                 }
                 self.phase = Phase::Transaction {
                     recipients: recipients.saturating_add(1),
+                    chunked,
                 };
                 self.simple(Code::OK, b"Recipient ok", out)
             }
@@ -920,7 +1090,15 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     /// `DATA` — exige au moins un destinataire accepte.
     fn on_data<'b>(&mut self, out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
         match self.phase {
-            Phase::Transaction { recipients } if recipients > 0 => {
+            // **`BDAT` ET `DATA` SE DISPUTENT LE MÊME MESSAGE** (RFC 3030 §2).
+            // Celui qui a commencé le finit ; l'autre est une faute de séquence,
+            // et non de syntaxe — le pair n'a rien à corriger dans son texte.
+            Phase::Transaction { chunked: true, .. } => self.refus(
+                Code::BAD_SEQUENCE,
+                b"BDAT already started; finish with BDAT LAST",
+                out,
+            ),
+            Phase::Transaction { recipients, .. } if recipients > 0 => {
                 self.phase = Phase::Data;
                 // Un récepteur NEUF par message : celui du message précédent
                 // porte ses compteurs, et les réutiliser ferait refuser le
@@ -936,6 +1114,57 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
             }
             _ => self.refus(Code::BAD_SEQUENCE, b"Need RCPT before DATA", out),
         }
+    }
+
+    /// `BDAT taille [LAST]` (RFC 3030 §2) — exige au moins un destinataire.
+    ///
+    /// # LA RÉPONSE NE PART QU'APRÈS LES OCTETS
+    ///
+    /// `DATA` répond `354` puis lit ; `BDAT` lit d'abord, et répond ensuite —
+    /// §2 le veut ainsi, et c'est cohérent : il n'y a rien à annoncer, la taille
+    /// est déjà connue des deux côtés. Le tour rend donc une réponse VIDE et
+    /// [`Action::ReceiveChunk`], comme [`Action::CheckSender`] rend une réponse
+    /// vide en attendant un verdict.
+    fn on_bdat<'b>(&mut self, size: u64, last: bool, out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
+        let Phase::Transaction {
+            recipients,
+            chunked,
+        } = self.phase
+        else {
+            return self.refus(Code::BAD_SEQUENCE, b"Need MAIL and RCPT before BDAT", out);
+        };
+        if recipients == 0 {
+            return self.refus(Code::BAD_SEQUENCE, b"Need RCPT before BDAT", out);
+        }
+        // Un récepteur NEUF au PREMIER morceau, et un seul : les suivants
+        // continuent le même message, et le remettre à zéro entre deux morceaux
+        // effacerait le compte des octets et l'état d'un `CRLF` coupé en deux.
+        if !chunked {
+            self.chunk = ChunkReceiver::new(self.config.limits(), self.config.max_message_octets());
+        }
+        // **LA TAILLE SE REFUSE AVANT D'ÊTRE LUE.** Elle est annoncée : lire un
+        // gibioctet pour le jeter ensuite ferait travailler la machine au
+        // rythme d'un pair qui n'a rien à livrer.
+        if let Err(cause) = self.chunk.begin(size, last) {
+            self.quitter_la_transaction();
+            // **UN SEUL ENDROIT DÉCIDE DE CE QU'UNE FAUTE RÉPOND.** Refaire ici
+            // le `match` de `refus_de_morceau` y ajouterait deux bras que rien
+            // ne peut atteindre — `begin` ne rend que la borne franchie — et une
+            // garde inatteignable n'est pas une garde.
+            return self.refus_de_morceau(cause, out);
+        }
+        self.phase = Phase::Chunk { recipients, last };
+        // **UN TOUR SANS RÉPONSE**, comme celui qui diffère un verdict SPF : §2
+        // veut que le `250` parte APRÈS les octets, et non avant. Écrire quoi
+        // que ce soit ici le ferait arriver au milieu du morceau que le pair est
+        // déjà en train d'envoyer.
+        let vide = out.get(..0).unwrap_or_default();
+        Ok(Turn {
+            reply: vide,
+            action: Action::ReceiveChunk { size, last },
+            peer_fault: false,
+            refused_recipient: false,
+        })
     }
 
     /// `STARTTLS` (RFC 3207 §4).
@@ -1142,6 +1371,11 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     fn quitter_la_transaction(&mut self) {
         self.phase = Phase::Identified;
         self.recipients.clear();
+        // **LES DEUX RÉCEPTEURS REPARTENT À ZÉRO**, et pas seulement celui qu'on
+        // vient d'employer : c'est ce qui rend `received_octets` sommable sans
+        // avoir à savoir par quel chemin le message est arrivé.
+        self.data = DataReceiver::new(self.config.limits(), self.config.max_message_octets());
+        self.chunk = ChunkReceiver::new(self.config.limits(), self.config.max_message_octets());
         // L'IDENTITÉ EST CELLE D'UNE TRANSACTION, pas d'une connexion. La
         // laisser derrière ferait vérifier le message suivant sur l'expéditeur
         // du précédent — ou pire, ferait croire à un verdict qu'on n'a pas
@@ -1209,7 +1443,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, DataOutcome, SmtpSession};
+    use super::{Action, ChunkEvent, DataFault, DataOutcome, SmtpSession};
     use crate::{Capabilities, Config, Error, Policy, RecipientVerdict, SenderPolicy};
     use ams_proto_smtp::{ClientId, DataEvent, Error as SmtpError, Limits, Path};
     use ams_spf::Verdict as SpfVerdict;
@@ -1268,6 +1502,17 @@ mod tests {
         session(RecipientVerdict::Accept)
     }
 
+    /// Une session acceptante qui ne prend qu'un message de `combien` octets.
+    fn session_bornee(combien: u64) -> SmtpSession<'static, Verdict> {
+        let config = Config::new(b"mail.example.com", 2, combien, Limits::DEFAULT)
+            .expect("configurable")
+            .with_capabilities(Capabilities {
+                starttls: true,
+                auth: true,
+            });
+        SmtpSession::new(config, Verdict(RecipientVerdict::Accept))
+    }
+
     /// Joue une ligne et rend la réponse sous forme de chaîne.
     fn jouer(session: &mut SmtpSession<'_, Verdict>, ligne: &[u8]) -> std::string::String {
         let mut tampon = [0_u8; 512];
@@ -1278,6 +1523,211 @@ mod tests {
     /// Amène une session jusqu'à l'état identifié.
     fn identifier(session: &mut SmtpSession<'_, Verdict>) {
         assert!(jouer(session, b"EHLO client.example\r\n").starts_with("250"));
+    }
+
+    /// Amène une session jusqu'au premier `RCPT` accepté.
+    fn transaction(session: &mut SmtpSession<'_, Verdict>) {
+        identifier(session);
+        assert!(jouer(session, b"MAIL FROM:<joe@example.net>\r\n").starts_with("250"));
+        assert!(jouer(session, b"RCPT TO:<marie@example.com>\r\n").starts_with("250"));
+    }
+
+    /// Donne un morceau entier à la session, et rend ce qu'elle en a fait.
+    fn morceau(session: &mut SmtpSession<'_, Verdict>, octets: &[u8]) -> std::vec::Vec<u8> {
+        let mut rendu = std::vec::Vec::new();
+        let mut reste = octets;
+        loop {
+            let (evenement, combien) = session.feed_chunk(reste).expect("morceau");
+            reste = reste.get(combien..).unwrap_or_default();
+            match evenement {
+                ChunkEvent::Content(vus) => rendu.extend_from_slice(vus),
+                ChunkEvent::NeedMore | ChunkEvent::ChunkComplete | ChunkEvent::Complete => {
+                    return rendu;
+                }
+            }
+        }
+    }
+
+    // ── `BDAT` (RFC 3030 §2) ────────────────────────────────────────────────
+
+    /// **LA RÉPONSE NE PART QU'APRÈS LES OCTETS** : le tour d'un `BDAT` est
+    /// muet, et c'est le morceau lu qui fait parler la session.
+    #[test]
+    fn un_bdat_rend_la_main_sans_repondre() {
+        let mut session = acceptante();
+        transaction(&mut session);
+        let mut tampon = [0_u8; 512];
+        let tour = session.handle(b"BDAT 5\r\n", &mut tampon).expect("tour");
+        assert!(tour.reply().is_empty(), "la session a parlé trop tôt");
+        assert_eq!(
+            tour.action(),
+            Action::ReceiveChunk {
+                size: 5,
+                last: false
+            }
+        );
+        assert_eq!(morceau(&mut session, b"salut"), b"salut");
+        assert_eq!(session.received_octets(), 5);
+        assert_eq!(jouer_apres_morceau(&mut session), "250 Chunk ok\r\n");
+    }
+
+    /// Rend la réponse d'un morceau non final.
+    fn jouer_apres_morceau(session: &mut SmtpSession<'_, Verdict>) -> std::string::String {
+        let mut tampon = [0_u8; 512];
+        let tour = session.on_chunk_received(&mut tampon).expect("réponse");
+        std::string::String::from_utf8(tour.reply().to_vec()).expect("ASCII")
+    }
+
+    /// **UN MESSAGE EN DEUX MORCEAUX SE CONCLUT COMME UN `DATA`.**
+    #[test]
+    fn un_dernier_morceau_se_conclut_comme_un_data() {
+        let mut session = acceptante();
+        transaction(&mut session);
+        assert!(jouer(&mut session, b"BDAT 4\r\n").is_empty());
+        assert_eq!(morceau(&mut session, b"abc\r"), b"abc\r");
+        assert_eq!(jouer_apres_morceau(&mut session), "250 Chunk ok\r\n");
+
+        // Le `LF` du `CRLF` arrive dans le morceau SUIVANT, et reste licite.
+        assert!(jouer(&mut session, b"BDAT 4 LAST\r\n").is_empty());
+        assert_eq!(morceau(&mut session, b"\ndef"), b"\ndef");
+        let mut tampon = [0_u8; 512];
+        let tour = session
+            .on_data_settled(DataOutcome::Accepted, &mut tampon)
+            .expect("réponse");
+        assert!(
+            std::string::String::from_utf8_lossy(tour.reply()).starts_with("250 Message accepted")
+        );
+        // La transaction est quittée : les compteurs repartent de zéro.
+        assert_eq!(session.received_octets(), 0);
+    }
+
+    /// **UN `CR` PENDANT À LA FIN D'UN MESSAGE EST UN `CR` ISOLÉ**, et le
+    /// verdict de l'appelant n'est pas consulté.
+    #[test]
+    fn un_message_qui_finit_sur_un_cr_est_refuse() {
+        let mut session = acceptante();
+        transaction(&mut session);
+        assert!(jouer(&mut session, b"BDAT 2 LAST\r\n").is_empty());
+        assert_eq!(morceau(&mut session, b"a\r"), b"a\r");
+        // La lecture du dernier octet ne conclut pas : c'est l'appel suivant qui
+        // découvre le `CR` pendant.
+        assert_eq!(
+            session.feed_chunk(&[]).expect("morceau").0,
+            ChunkEvent::NeedMore
+        );
+        let mut tampon = [0_u8; 512];
+        let tour = session
+            .on_data_settled(DataOutcome::Accepted, &mut tampon)
+            .expect("réponse");
+        assert!(
+            std::string::String::from_utf8_lossy(tour.reply()).contains("Bare CR or LF"),
+            "un message refusé a été accepté"
+        );
+    }
+
+    /// **UNE FAUTE N'ARRÊTE PAS LA LECTURE** : les octets sont annoncés, et ne
+    /// pas les consommer laisserait leur queue passer pour des commandes.
+    #[test]
+    fn une_faute_de_morceau_laisse_consommer_le_reste() {
+        let mut session = acceptante();
+        transaction(&mut session);
+        assert!(jouer(&mut session, b"BDAT 6\r\n").is_empty());
+        // Ce qui précède l'octet fautif est rendu…
+        assert_eq!(
+            session.feed_chunk(b"a\nbcde").expect("morceau"),
+            (ChunkEvent::Content(b"a"), 1)
+        );
+        // …puis le `LF` nu est refusé, et la session avale le reste sans le lire.
+        assert_eq!(
+            session.feed_chunk(b"\nbcde").expect("morceau"),
+            (ChunkEvent::NeedMore, 5)
+        );
+        assert_eq!(
+            session.feed_chunk(b"zzz").expect("morceau"),
+            (ChunkEvent::NeedMore, 3),
+            "ce qui reste s'avale sans être lu"
+        );
+        assert_eq!(
+            jouer_apres_morceau(&mut session),
+            "554 Bare CR or LF in message data\r\n"
+        );
+    }
+
+    /// **CHAQUE FAUTE A SA RÉPONSE**, et une transaction quittée les oublie.
+    #[test]
+    fn chaque_faute_de_morceau_a_sa_reponse() {
+        // Une ligne trop longue ne peut pas venir d'un `BDAT` — il n'a pas de
+        // lignes — mais la réponse existe, et un `_` la cacherait.
+        let mut session = acceptante();
+        transaction(&mut session);
+        let mut tampon = [0_u8; 512];
+        for (cause, attendu) in [
+            (DataFault::BareLineEnding, "554"),
+            (DataFault::LineTooLong { limit: 10 }, "500"),
+            (DataFault::MessageTooLarge { limit: 10 }, "552"),
+        ] {
+            let tour = session
+                .refus_de_morceau(cause, &mut tampon)
+                .expect("réponse");
+            assert!(
+                std::string::String::from_utf8_lossy(tour.reply()).starts_with(attendu),
+                "{cause:?} n'a pas rendu {attendu}"
+            );
+        }
+    }
+
+    /// **`BDAT` ET `DATA` SE DISPUTENT LE MÊME MESSAGE.**
+    #[test]
+    fn un_data_apres_un_bdat_est_une_faute_de_sequence() {
+        let mut session = acceptante();
+        transaction(&mut session);
+        assert!(jouer(&mut session, b"BDAT 5\r\n").is_empty());
+        assert_eq!(morceau(&mut session, b"salut"), b"salut");
+        assert_eq!(jouer_apres_morceau(&mut session), "250 Chunk ok\r\n");
+        assert!(
+            jouer(&mut session, b"DATA\r\n").starts_with("503 BDAT already started"),
+            "un DATA a été servi au milieu d'un BDAT"
+        );
+    }
+
+    /// **SANS `MAIL` NI `RCPT`, RIEN N'EST LU.**
+    #[test]
+    fn un_bdat_hors_transaction_est_refuse() {
+        let mut session = acceptante();
+        identifier(&mut session);
+        assert!(jouer(&mut session, b"BDAT 5\r\n").starts_with("503 Need MAIL and RCPT"));
+        assert!(jouer(&mut session, b"MAIL FROM:<joe@example.net>\r\n").starts_with("250"));
+        assert!(jouer(&mut session, b"BDAT 5\r\n").starts_with("503 Need RCPT"));
+    }
+
+    /// **LA TAILLE SE REFUSE À L'ANNONCE**, avant d'avoir lu un octet.
+    #[test]
+    fn un_morceau_plus_grand_que_le_message_permis_est_refuse() {
+        let mut session = session_bornee(16);
+        transaction(&mut session);
+        assert!(jouer(&mut session, b"BDAT 17 LAST\r\n").starts_with("552"));
+        // Et la transaction est quittée : le `BDAT` suivant n'a plus de
+        // destinataire.
+        assert!(jouer(&mut session, b"BDAT 1 LAST\r\n").starts_with("503"));
+    }
+
+    /// **HORS D'UN MORCEAU, ON NE DONNE PAS D'OCTETS.**
+    #[test]
+    fn nourrir_un_morceau_hors_phase_est_une_erreur() {
+        let mut session = acceptante();
+        transaction(&mut session);
+        assert_eq!(session.feed_chunk(b"x"), Err(Error::NotInDataPhase));
+        let mut tampon = [0_u8; 512];
+        assert_eq!(
+            session.on_chunk_received(&mut tampon).map(|_| ()),
+            Err(Error::NotInCommandPhase)
+        );
+        // Et pendant un morceau, aucune commande ne se sert.
+        assert!(jouer(&mut session, b"BDAT 2\r\n").is_empty());
+        assert_eq!(
+            session.handle(b"NOOP\r\n", &mut tampon).map(|_| ()),
+            Err(Error::NotInCommandPhase)
+        );
     }
 
     // ── L'ouverture ─────────────────────────────────────────────────────────
@@ -1325,7 +1775,7 @@ mod tests {
         let reponse = jouer(&mut session, b"EHLO client.example\r\n");
         assert_eq!(
             reponse,
-            "250-mail.example.com\r\n250-SIZE 10485760\r\n250 STARTTLS\r\n"
+            "250-mail.example.com\r\n250-SIZE 10485760\r\n250-CHUNKING\r\n250 STARTTLS\r\n"
         );
         assert!(!reponse.contains("AUTH"));
     }
@@ -1337,7 +1787,7 @@ mod tests {
         let reponse = jouer(&mut session, b"EHLO client.example\r\n");
         assert_eq!(
             reponse,
-            "250-mail.example.com\r\n250-SIZE 10485760\r\n250 AUTH PLAIN\r\n"
+            "250-mail.example.com\r\n250-SIZE 10485760\r\n250-CHUNKING\r\n250 AUTH PLAIN\r\n"
         );
         assert!(!reponse.contains("STARTTLS"));
     }
@@ -2328,7 +2778,10 @@ mod tests {
         let mut session = SmtpSession::new(nue, Verdict(RecipientVerdict::Accept));
 
         let annonce = jouer(&mut session, b"EHLO client.example\r\n");
-        assert_eq!(annonce, "250-mail.example.com\r\n250 SIZE 1024\r\n");
+        assert_eq!(
+            annonce,
+            "250-mail.example.com\r\n250-SIZE 1024\r\n250 CHUNKING\r\n"
+        );
         assert!(!annonce.contains("STARTTLS"));
         assert!(!annonce.contains("AUTH"));
 
@@ -2427,10 +2880,10 @@ mod tests {
             session.handle(b"NOOP\r\n", &mut minuscule),
             Err(tampon_trop_petit(8))
         );
-        // Y compris pour l'`EHLO`, qui est multiligne : 22 + 19 + 14.
+        // Y compris pour l'`EHLO`, qui est multiligne : 22 + 19 + 14 + 14.
         assert_eq!(
             session.handle(b"EHLO client.example\r\n", &mut minuscule),
-            Err(tampon_trop_petit(55))
+            Err(tampon_trop_petit(69))
         );
         // Et pour `HELO`, qui ne l'est pas.
         assert_eq!(

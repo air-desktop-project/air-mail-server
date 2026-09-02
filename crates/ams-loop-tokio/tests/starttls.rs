@@ -291,7 +291,9 @@ async fn openssl_monte_en_chiffrement_et_le_ehlo_suivant_change() {
     );
     // 2. Le second `EHLO`, chiffré, a été servi en entier.
     assert!(
-        chiffre.contains("250-mail.example.com") && chiffre.contains("250 SIZE"),
+        chiffre.contains("250-mail.example.com")
+            && chiffre.contains("SIZE ")
+            && chiffre.contains("CHUNKING"),
         "le second EHLO, chiffré, n'a pas reçu de réponse.\n{dit}"
     );
     // 3. Et il n'annonce PLUS `STARTTLS`, parce qu'il n'y a plus rien à démarrer.

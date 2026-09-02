@@ -3789,9 +3789,9 @@ il l'a commis sur lui-même : une section qui s'intitule « l'état réel » est
 qu'on relit le moins, parce qu'on croit la connaître.
 
 Sont outillées : C1 (les trois étages, et la couverture qui n'est exigible que
-parce qu'ils sont séparés), C2 (le gate mesure 52 097 régions sur 29 crates,
+parce qu'ils sont séparés), C2 (le gate mesure 52 681 régions sur 29 crates,
 toutes couvertes — et il compare des comptes, non un pourcentage arrondi), C3
-(les lints, l'absence d'allocation dans les décodeurs, et 61 cibles de fuzz dont
+(les lints, l'absence d'allocation dans les décodeurs, et 62 cibles de fuzz dont
 la CI vérifie qu'elle les lance toutes), C4 (`ams-tls` n'offre que
 TLS 1.3), C6 (les décodeurs refusent le CR et le LF isolés ; `AUTH`, `USER`/`PASS`
 et `LOGIN` sont refusés hors chiffrement, sans réglage pour le rétablir), C8
@@ -3803,11 +3803,16 @@ persistant, et lecture sans verrou côté IMAP), C14 (`X25519MLKEM768` en tête)
 
 **La contrebande SMTP est fermée** : la phase de données n'accepte que
 `<CRLF>.<CRLF>`, refuse tout `CR` ou `LF` isolé, et le fuzz éprouve que le
-découpage des lectures ne change rien au verdict.
+découpage des lectures ne change rien au verdict. **`BDAT` (RFC 3030) est servi
+depuis le 2026-09-02**, et il ferme la même porte autrement : la longueur est
+annoncée, il n'y a donc plus de délimiteur à chercher — donc plus d'endroit où
+deux serveurs pourraient couper différemment. Le `CR` et le `LF` isolés y restent
+refusés, parce que ce qu'on dépose repart un jour chez un voisin qui, lui, coupe
+sur le point.
 
-Ce qui manque, et qu'aucune phrase ne doit laisser croire acquis : **la file de
-réémission des messages sortants**. Un message qu'on ne peut pas remettre tout de
-suite est perdu, et non retenu pour plus tard.
+La file de réémission des messages sortants, elle, N'EST PLUS DE CETTE LISTE :
+`ams-queue` retient ce qu'on ne peut pas remettre tout de suite, réessaie en
+doublant l'attente, et rend compte au chemin de retour quand elle renonce.
 
 L'interface HTTP, elle, N'EST PLUS DE CETTE LISTE : l'API REST se sert en HTTP/2
 et en HTTP/3, avec ses jetons, sa soumission et son administration en lecture.
@@ -3834,6 +3839,86 @@ la seule vérification qui vaille est la confrontation à l'ABNF de §9, mot par
 mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
+
+## `BDAT` : la même porte, fermée autrement
+
+### CHERCHER UNE FIN, C'EST DÉCIDER OÙ COUPER
+
+La contrebande SMTP de 2023 ne tient pas à un débordement : elle tient à ce que
+deux serveurs ne coupent pas le même flux au même endroit. `DATA` cherche
+`<CRLF>.<CRLF>` ; chercher, c'est décider, et deux lecteurs qui décident
+différemment se contredisent.
+
+`BDAT` (RFC 3030 §2) ne cherche rien. Le pair ANNONCE combien d'octets suivent,
+en chiffres décimaux sur la ligne de commande, et le morceau fait exactement ce
+nombre d'octets. Il n'y a pas de délimiteur, donc pas de délimiteur à fabriquer,
+et **pas de point à échapper** : un `.` en début de ligne est un point.
+
+Ce qui remplace la recherche du délimiteur est une propriété de comptage : **on
+ne lit ni un octet de plus, ni un de moins**. Un de plus, et le début de la
+commande suivante est avalé comme du message ; un de moins, et la queue du
+message est servie comme des commandes — c'est-à-dire un `MAIL FROM` que le pair
+aura écrit lui-même. L'essai d'intégration met littéralement `RSET` et
+`MAIL FROM:` DANS un morceau, et vérifie qu'aucun n'est servi.
+
+### LE `CR` ET LE `LF` ISOLÉS RESTENT REFUSÉS, ET CE N'EST PAS POUR NOUS
+
+C'est la décision qui coûte quelque chose, et elle mérite d'être écrite. `BDAT`
+existe en partie pour transporter des octets quelconques ; refuser un `LF` nu lui
+ôte cet usage. On le refuse quand même.
+
+La raison n'est pas la fin de CE message — elle est comptée, et rien ne peut la
+confondre. C'est celle du PROCHAIN SAUT. Ce qu'on dépose ici repart un jour par
+la file de réémission, vers un voisin qui, lui, lit `<CRLF>.<CRLF>`. Un `LF` nu
+accepté ici et réémis là-bas y ouvrirait la faille qu'on vient de fermer chez
+nous : nous aurions blanchi la contrebande au lieu de la commettre, et la victime
+ne verrait pas la différence.
+
+**Une seule règle pour les deux phases**, donc, et un message stocké qui n'a
+qu'une seule façon de finir ses lignes.
+
+### UN `CRLF` PEUT ÊTRE COUPÉ EN DEUX PAR UNE FRONTIÈRE DE MORCEAU
+
+`BDAT 4` puis `BDAT 4 LAST` peuvent livrer `abc\r` puis `\ndef`. L'état de
+lecture vit donc dans le récepteur, qui traverse toute la transaction, et non
+dans le morceau — l'inverse refuserait un message parfaitement légal.
+
+Et un message qui se termine sur un `CR` pendant est refusé : plus rien ne
+viendra le suivre.
+
+### CE QUI PRÉCÈDE L'OCTET FAUTIF EST RENDU — TROUVÉ PAR LE FUZZ
+
+La première écriture refusait le morceau ENTIER dès qu'un octet clochait. Le fuzz
+l'a fait tomber sur trois octets, `T\nr` : lu d'un seul tenant, le récepteur ne
+rendait rien ; lu octet par octet, il rendait `T`. Le nombre d'octets comptés
+dépendait donc du découpage TCP, c'est-à-dire du réseau.
+
+Un message refusé n'est jamais remis, si bien que la différence n'était pas
+exploitable — mais `received_octets` est observable, et une valeur qui dépend de
+la segmentation est une valeur sur laquelle on ne peut pas raisonner. Le
+récepteur rend maintenant le préfixe valable, puis refuse à l'appel suivant :
+même flux, même compte.
+
+### ET LA RÉPONSE NE PART QU'APRÈS LES OCTETS
+
+`DATA` répond `354` puis lit. `BDAT` lit d'abord et répond ensuite, parce qu'il
+n'y a rien à annoncer — la taille est déjà connue des deux côtés. Le tour de la
+session est donc MUET, comme celui qui diffère un verdict SPF.
+
+**Une faute n'arrête pas la lecture**, elle arrête le message : les octets sont
+annoncés, donc ils arrivent, et cesser de lire laisserait leur queue passer pour
+des commandes. La session retient le refus et l'appelant continue d'avaler.
+
+### `BDAT` ET `DATA` SE DISPUTENT LE MÊME MESSAGE
+
+Celui qui a commencé le finit ; l'autre reçoit `503`. C'est une faute de
+SÉQUENCE, et non de syntaxe — le pair n'a rien à corriger dans son texte, et lui
+répondre `500` l'enverrait chercher au mauvais endroit.
+
+`CHUNKING` est annoncé à l'`EHLO`, toujours, et sans réglage : un service qu'on
+sert sans l'annoncer est un service que personne n'emploie, donc que rien
+n'éprouve. Il ne dépend pas du chiffrement — `BDAT` ne porte aucun secret, et ce
+serveur reçoit du courrier en clair de toute façon.
 
 ## HTTP : h2 et h3, et pas HTTP/1.1
 
