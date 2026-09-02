@@ -12,9 +12,12 @@
 //! isolé (cf. [`DataReceiver`]) — **et `BDAT`**, la phase de données COMPTÉE de
 //! RFC 3030 (cf. [`ChunkReceiver`]), où il n'y a pas de délimiteur à chercher.
 //!
-//! Ne sont PAS écrits : l'échappement des points à l'ÉMISSION (le client sortant
-//! le fait pour lui-même), et la validation complète d'une adresse IPv6 (seule
-//! sa forme est vérifiée, cf. `check_address_literal`).
+//! Les littéraux d'adresse sont validés ENTIÈREMENT, IPv6 compris : la grammaire
+//! de RFC 4291 §2.2, avec sa compression et sa forme mixte, et une cible de fuzz
+//! qui confronte chaque verdict à celui de `core::net`.
+//!
+//! N'est PAS écrit : l'échappement des points à l'ÉMISSION (le client sortant le
+//! fait pour lui-même).
 //!
 //! ```
 //! use ams_proto_smtp::{Command, Limits, Path};
@@ -106,7 +109,7 @@ pub use answer::{REPLY_LINES_MAX, Reply, ReplyLines, reply_len};
 pub use chunk::{ChunkEvent, ChunkReceiver};
 pub use command::Command;
 pub use data::{DataFault, DataReceiver, Event as DataEvent};
-pub use domain::ClientId;
+pub use domain::{ClientId, check_address_literal};
 pub use error::Error;
 pub use limits::Limits;
 pub use parameters::{Parameter, Parameters, ParametersIter};

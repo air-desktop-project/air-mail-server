@@ -147,8 +147,10 @@ structurés, les adresses, les dates et MIME restent à écrire.
 `ams-proto-smtp` : les commandes, l'encodage des réponses multilignes, et **la
 phase de données** — `<CRLF>.<CRLF>`, le point échappé, et le refus de tout `CR`
 ou `LF` isolé — **et `BDAT`**, la phase de données COMPTÉE de RFC 3030, où il n'y
-a pas de délimiteur à chercher. L'échappement à l'émission et la validation
-complète d'une adresse IPv6 restent à écrire.
+a pas de délimiteur à chercher. Les littéraux d'adresse sont validés
+ENTIÈREMENT, IPv6 compris — RFC 4291 §2.2, compression et forme mixte —, et une
+cible de fuzz confronte chaque verdict à celui de `core::net`. L'échappement à
+l'émission reste à écrire.
 
 `ams-proto-pop3` : les commandes de la RFC 1939 et leurs réponses. `APOP`
 n'existe pas ici — MD5, et surtout l'obligation de garder le mot de passe **en
@@ -1927,7 +1929,7 @@ que `llvm-cov` n'instrumente pas sur Rust stable et dont le compteur reste à
 `0 / 0`. Les régions font le travail attendu : chaque bras d'un conditionnel en
 est une.
 
-Le gate mesure aujourd'hui **52 681 régions** et **30 272 lignes**, toutes
+Le gate mesure aujourd'hui **52 838 régions** et **30 369 lignes**, toutes
 couvertes. **Une seule dérogation, et elle est annoncée à chaque exécution** : le
 code *généré* du schéma Cap'n Proto en est exclu — il porte un accesseur par champ
 et par sens, dont la plupart ne seront jamais appelés, et les couvrir n'éprouverait

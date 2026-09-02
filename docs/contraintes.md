@@ -3789,9 +3789,9 @@ il l'a commis sur lui-même : une section qui s'intitule « l'état réel » est
 qu'on relit le moins, parce qu'on croit la connaître.
 
 Sont outillées : C1 (les trois étages, et la couverture qui n'est exigible que
-parce qu'ils sont séparés), C2 (le gate mesure 52 681 régions sur 29 crates,
+parce qu'ils sont séparés), C2 (le gate mesure 52 838 régions sur 29 crates,
 toutes couvertes — et il compare des comptes, non un pourcentage arrondi), C3
-(les lints, l'absence d'allocation dans les décodeurs, et 62 cibles de fuzz dont
+(les lints, l'absence d'allocation dans les décodeurs, et 63 cibles de fuzz dont
 la CI vérifie qu'elle les lance toutes), C4 (`ams-tls` n'offre que
 TLS 1.3), C6 (les décodeurs refusent le CR et le LF isolés ; `AUTH`, `USER`/`PASS`
 et `LOGIN` sont refusés hors chiffrement, sans réglage pour le rétablir), C8
@@ -3919,6 +3919,63 @@ répondre `500` l'enverrait chercher au mauvais endroit.
 sert sans l'annoncer est un service que personne n'emploie, donc que rien
 n'éprouve. Il ne dépend pas du chiffrement — `BDAT` ne porte aucun secret, et ce
 serveur reçoit du courrier en clair de toute façon.
+
+## Le littéral d'adresse : ce qu'on recopie, on doit l'avoir compris
+
+### UNE FORME N'EST PAS UNE ADRESSE
+
+`check_address_literal` ne vérifiait d'IPv6 que la FORME : le préfixe `IPv6:`,
+puis des chiffres hexadécimaux, des deux-points et des points. Passaient donc
+`[IPv6:2001:db8:::1]`, `[IPv6::::]`, `[IPv6:1:2:3:4:5:6:7:8:9]` — et
+`[IPv6:192.0.2.1]`, une IPv4 qu'il aurait suffi de préfixer.
+
+Ce n'est pas une négligence sans conséquence. Un littéral est ce qu'un pair écrit
+dans son `EHLO` quand il n'a pas de nom, **avant toute authentification**, et il
+finit recopié dans l'en-tête `Received:` que nous composons. Ce qu'on n'a pas
+compris y est écrit tel quel — et le prochain lecteur, lui, le comprendra :
+journal, filtre, liste d'accès. Deux lecteurs qui tirent deux adresses
+différentes des mêmes octets, c'est exactement ce que le zéro de tête d'IPv4
+exploite depuis vingt ans, et c'est pourquoi celui-là était déjà refusé.
+
+### LA GRAMMAIRE, ET LA SEULE RÈGLE QUI LA TIENT
+
+Huit groupes de un à quatre chiffres hexadécimaux. Deux choses peuvent les
+remplacer : un `::`, **une fois au plus**, qui vaut autant de groupes de zéros
+qu'il en manque ; et une adresse IPv4 en queue, qui vaut les deux derniers.
+
+Deux `::` seraient ambigus — `1::2::3` ne désigne pas une adresse mais
+plusieurs — et c'est la seule raison pour laquelle il n'y en a qu'un.
+
+La queue IPv4 est vérifiée par LE MÊME CODE que `[192.0.2.1]`. Deux règles pour
+une même notation finiraient par ne plus dire la même chose, et l'une des deux
+accepterait le zéro de tête que l'autre refuse — soit exactement la divergence
+qu'on cherche à fermer, réintroduite par la porte de service.
+
+### UN ÉCART ASSUMÉ AVEC RFC 5321 §4.1.3
+
+Son ABNF `IPv6-comp` limite à six groupes autour du `::`, ce qui l'oblige à
+représenter au moins DEUX groupes de zéros : `1:2:3:4:5:6:7::` y serait interdit.
+RFC 4291 §2.2 l'autorise, toute pile IP le lit, et le refuser vaudrait un `501` à
+un pair dont l'adresse est parfaitement valable — sans qu'il puisse deviner
+pourquoi.
+
+Contrairement au zéro de tête, **un `::` ne se lit pas de deux façons** : le
+nombre de groupes manquants est déterminé par ce qui l'entoure. L'écart ne
+rouvre donc aucune divergence entre lecteurs, et c'est le seul critère qui
+compte ici.
+
+La zone de RFC 6874 (`fe80::1%25eth0`), elle, est refusée : elle ne veut rien
+dire hors de la machine qui l'écrit, et la recopier dans un `Received:` y
+mettrait le nom d'une interface d'ailleurs.
+
+### ET C'EST ÉPROUVÉ CONTRE UNE AUTRE IMPLÉMENTATION
+
+`fuzz_ams_smtp_literal` confronte chaque verdict à celui de `core::net` — deux
+moitiés qui ne partagent aucun code, mises face à face. Un désaccord, quel qu'il
+soit, fait échouer la cible : c'est la seule façon de savoir qu'on ne lit pas une
+adresse autrement que le reste du monde, plutôt que de l'espérer.
+
+Quinze millions d'exécutions à la première campagne, sans un seul désaccord.
 
 ## HTTP : h2 et h3, et pas HTTP/1.1
 
