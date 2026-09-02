@@ -122,8 +122,14 @@ async fn un_message_en_deux_morceaux_arrive_entier() {
     envoi.extend_from_slice(b"QUIT\r\n");
     let (dit, remis, combien) = session(&envoi).await;
 
-    assert!(dit.contains("250 Chunk ok"), "le premier morceau : {dit}");
-    assert!(dit.contains("250 Message accepted"), "le dernier : {dit}");
+    assert!(
+        dit.contains("250 2.0.0 Chunk ok"),
+        "le premier morceau : {dit}"
+    );
+    assert!(
+        dit.contains("250 2.0.0 Message accepted"),
+        "le dernier : {dit}"
+    );
     assert_eq!(combien, 1);
     assert!(
         remis.ends_with(b"From: joe\r\nSubject: x\r\n\r\nbonjour\r\n"),
@@ -141,7 +147,7 @@ async fn un_dernier_morceau_vide_conclut() {
     envoi.extend_from_slice(b"QUIT\r\n");
     let (dit, remis, combien) = session(&envoi).await;
 
-    assert!(dit.contains("250 Message accepted"), "{dit}");
+    assert!(dit.contains("250 2.0.0 Message accepted"), "{dit}");
     assert_eq!(combien, 1);
     assert!(remis.ends_with(b"From: joe\r\n\r\n"));
 }
@@ -166,7 +172,10 @@ async fn la_commande_qui_suit_un_morceau_est_lue_comme_une_commande() {
         "les octets du morceau ont été servis comme des commandes : {}",
         std::string::String::from_utf8_lossy(&remis)
     );
-    assert!(!dit.contains("250 Reset ok"), "un RSET a été servi : {dit}");
+    assert!(
+        !dit.contains("250 2.0.0 Reset ok"),
+        "un RSET a été servi : {dit}"
+    );
 }
 
 // ── ET CE QUI EST REFUSÉ ────────────────────────────────────────────────────

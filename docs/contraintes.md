@@ -3789,7 +3789,7 @@ il l'a commis sur lui-même : une section qui s'intitule « l'état réel » est
 qu'on relit le moins, parce qu'on croit la connaître.
 
 Sont outillées : C1 (les trois étages, et la couverture qui n'est exigible que
-parce qu'ils sont séparés), C2 (le gate mesure 53 214 régions sur 29 crates,
+parce qu'ils sont séparés), C2 (le gate mesure 53 515 régions sur 29 crates,
 toutes couvertes — et il compare des comptes, non un pourcentage arrondi), C3
 (les lints, l'absence d'allocation dans les décodeurs, et 64 cibles de fuzz dont
 la CI vérifie qu'elle les lance toutes), C4 (`ams-tls` n'offre que
@@ -3839,6 +3839,66 @@ la seule vérification qui vaille est la confrontation à l'ABNF de §9, mot par
 mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
+
+## `ENHANCEDSTATUSCODES` : un état que la machine sait trier
+
+### LE CODE À TROIS CHIFFRES NE DIT PAS ASSEZ
+
+Un `550` peut être une boîte inconnue ou un refus de politique. Ce sont deux
+choses différentes — l'une se corrige en changeant d'adresse, l'autre non — et
+c'est précisément pour les distinguer que RFC 3463 existe. Sans cet état, un
+lecteur automatique trie sur le TEXTE, c'est-à-dire sur une phrase en anglais que
+chaque serveur écrit autrement.
+
+Ce serveur en écrivait trois, à la main, dans le texte de ses réponses SPF et
+DMARC. Les trente autres n'en avaient pas.
+
+### UNE TABLE, ET UNE SEULE
+
+Un même refus doit rendre le même état partout. Le composer sur place, aux
+cinquante-cinq endroits qui répondent, aurait fini par donner deux états au même
+sens — et les trois réponses qui en portaient déjà un le montraient : elles
+l'écrivaient dans leur texte, hors de toute table, et personne n'aurait vu si
+elles avaient divergé.
+
+`statut_de` est donc le seul endroit qui décide, et les trois réponses de SPF et
+de DMARC y sont passées comme les autres.
+
+### CE QUI N'EST PAS NOMMÉ PREND LE SUJET « INDÉFINI »
+
+`x.0.0` veut dire « autre, ou indéfini » (§3.3) : ce n'est pas un défaut
+silencieux, c'est la réponse juste quand on n'a rien de plus précis à dire.
+
+**LA CLASSE, ELLE, N'EST JAMAIS DEVINÉE.** Elle vient du code à trois chiffres,
+et un état qui la contredirait est écarté : un `550 4.x.x` ferait réessayer un
+pair qu'on refuse définitivement, et un `250 5.x.x` n'a aucun sens. C'est §3.2,
+et c'est vérifié — par un essai, et par la cible de fuzz sur chaque réponse.
+
+### LES `3xx` N'EN PORTENT PAS, ET C'EST STRUCTUREL
+
+`334` et `354` sont des invitations à continuer, pas des verdicts, et RFC 3463
+ne définit aucune classe `3`. [`Status::new`] la refuse : l'oubli est impossible
+plutôt qu'improbable. La bannière non plus n'en porte pas — elle précède l'`EHLO`
+donc la négociation, et n'est la réponse à rien.
+
+### ON LES ÉCRIT MÊME POUR UN `HELO`
+
+§4 lie l'extension à l'`EHLO`. Un code étendu est pourtant un PRÉFIXE DE TEXTE :
+qui ne le comprend pas le lit comme le début du message, ce que §4 prévoit
+lui-même. Deux formes de réponse selon le salut, ce serait deux vocabulaires de
+sortie — et deux vocabulaires finissent par diverger, ce que la cible de fuzz
+existe précisément pour empêcher.
+
+### CE QUE LA CIBLE DE FUZZ A RÉVÉLÉ EN CHEMIN
+
+Sa liste du vocabulaire clos était périmée **de trois tranches** : ni `CHUNKING`,
+ni `PIPELINING`, ni les réponses de `BDAT`, ni celles de la garde anti-boucle.
+Rien ne le disait, parce que le fuzz ne composait pas d'`EHLO` valable assez
+souvent pour tomber dessus en vingt secondes.
+
+Les graines nommées écrites deux tranches plus tôt en portent un — et la faute
+est sortie au premier tour. Une graine qui dit ce qu'elle vise n'est pas une
+commodité.
 
 ## `Received:` : le seul en-tête que la norme oblige à ajouter
 

@@ -27,6 +27,11 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 > RFC 3848) et quand, **et ne nomme aucun destinataire**. Un message qui en porte
 > plus de trente tourne en boucle, et il est refusé (§6.3).
 >
+> **Chaque réponse porte son état étendu** (`ENHANCEDSTATUSCODES`, RFC 2034) :
+> un `550 5.1.1` — boîte inconnue — ne se trie pas comme un `550 5.7.1` — refus
+> de politique —, et une machine ne devrait pas avoir à lire l'anglais pour les
+> distinguer. La classe vient toujours du code à trois chiffres, jamais du texte.
+>
 > **Il groupe** : `PIPELINING` (RFC 2920) est annoncé, et un lot de commandes
 > arrivé en un seul segment est servi en entier, dans l'ordre. Ce qu'un pair
 > glisse derrière un `STARTTLS`, en revanche, est REFUSÉ — pas jeté : ces octets
@@ -1944,7 +1949,7 @@ que `llvm-cov` n'instrumente pas sur Rust stable et dont le compteur reste à
 `0 / 0`. Les régions font le travail attendu : chaque bras d'un conditionnel en
 est une.
 
-Le gate mesure aujourd'hui **53 214 régions** et **30 598 lignes**, toutes
+Le gate mesure aujourd'hui **53 515 régions** et **30 770 lignes**, toutes
 couvertes. **Une seule dérogation, et elle est annoncée à chaque exécution** : le
 code *généré* du schéma Cap'n Proto en est exclu — il porte un accesseur par champ
 et par sens, dont la plupart ne seront jamais appelés, et les couvrir n'éprouverait

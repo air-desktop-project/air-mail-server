@@ -148,11 +148,11 @@ async fn smtp_ne_sert_pas_ce_qui_a_ete_dit_avant_la_poignee_de_main() {
         "l'injection n'a pas été refusée : {clair}"
     );
     assert!(
-        !clair.contains("220 Ready to start TLS"),
+        !clair.contains("220 2.0.0 Ready to start TLS"),
         "le serveur a promis le chiffrement à un pair qui injectait : {clair}"
     );
     assert!(
-        !clair.contains("250 Reset ok"),
+        !clair.contains("250 2.0.0 Reset ok"),
         "le RSET injecté a été servi : {clair}"
     );
     drop(flux);
@@ -218,18 +218,21 @@ async fn un_lot_de_commandes_est_servi_en_entier_et_dans_l_ordre() {
         "réponses vues : {dit:?} ; le serveur a rendu {resume:?}"
     );
     for attendu in [
-        "250 Sender ok",
-        "250 Recipient ok",
+        "250 2.1.0 Sender ok",
+        "250 2.1.5 Recipient ok",
         "354 ",
-        "250 Message accepted",
-        "221 Bye",
+        "250 2.0.0 Message accepted",
+        "221 2.0.0 Bye",
     ] {
         assert!(dit.contains(attendu), "« {attendu} » manque : {dit}");
     }
     // **ET DANS L'ORDRE** : le `354` précède l'acceptation, qui précède l'adieu.
     let rang = |quoi: &str| dit.find(quoi).unwrap_or(usize::MAX);
-    assert!(rang("354 ") < rang("250 Message accepted"), "{dit}");
-    assert!(rang("250 Message accepted") < rang("221 Bye"), "{dit}");
+    assert!(rang("354 ") < rang("250 2.0.0 Message accepted"), "{dit}");
+    assert!(
+        rang("250 2.0.0 Message accepted") < rang("221 2.0.0 Bye"),
+        "{dit}"
+    );
 
     let resume = resume.unwrap_or_else(|cause| panic!("le serveur a rendu {cause:?}"));
     assert_eq!(resume.messages, 1, "le message groupé n'est pas arrivé");
@@ -342,7 +345,7 @@ async fn un_message_qui_a_beaucoup_voyage_passe_encore() {
     }
     let resume = serveur.await.expect("tâche").expect("servie");
 
-    assert!(dit.contains("250 Message accepted"), "{dit}");
+    assert!(dit.contains("250 2.0.0 Message accepted"), "{dit}");
     assert_eq!(resume.messages, 1);
 }
 

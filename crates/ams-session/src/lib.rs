@@ -99,11 +99,11 @@
 //! // Un destinataire hors du domaine hébergé n'est pas relayé.
 //! session.handle(b"MAIL FROM:<moi@ailleurs.example>\r\n", &mut out)?;
 //! let tour = session.handle(b"RCPT TO:<qui@ailleurs.example>\r\n", &mut out)?;
-//! assert_eq!(tour.reply(), b"550 Relay access denied\r\n");
+//! assert_eq!(tour.reply(), b"550 5.7.1 Relay access denied\r\n");
 //!
 //! // Celui-ci, si.
 //! let tour = session.handle(b"RCPT TO:<jean@example.com>\r\n", &mut out)?;
-//! assert_eq!(tour.reply(), b"250 Recipient ok\r\n");
+//! assert_eq!(tour.reply(), b"250 2.1.5 Recipient ok\r\n");
 //!
 //! let tour = session.handle(b"DATA\r\n", &mut out)?;
 //! assert_eq!(tour.action(), Action::ReceiveData);

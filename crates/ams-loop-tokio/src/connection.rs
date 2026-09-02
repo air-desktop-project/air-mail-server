@@ -1438,8 +1438,8 @@ mod tests {
         assert!(!boite.abandonne);
 
         assert!(dit.starts_with("220 mail.example.com ESMTP\r\n"));
-        assert!(dit.contains("250 Message accepted\r\n"));
-        assert!(dit.ends_with("221 Bye\r\n"));
+        assert!(dit.contains("250 2.0.0 Message accepted\r\n"));
+        assert!(dit.ends_with("221 2.0.0 Bye\r\n"));
         // Rien n'est annoncé que cette boucle ne sache conduire.
         assert!(!dit.contains("STARTTLS"));
         assert!(!dit.contains("AUTH"));
@@ -1457,7 +1457,7 @@ mod tests {
         )
         .await;
         assert_eq!(resume.expect("servie").messages, 0);
-        assert!(dit.contains("550 Relay access denied\r\n"));
+        assert!(dit.contains("550 5.7.1 Relay access denied\r\n"));
     }
 
     #[tokio::test]
@@ -1466,7 +1466,7 @@ mod tests {
         let mut boite = Boite::default();
         let (resume, dit) = conversation(b"NOOP\r\nNOOP\r\nNOOP\r\nQUIT\r\n", &mut boite).await;
         assert_eq!(resume.expect("servie").commands, 4);
-        assert_eq!(dit.matches("250 OK\r\n").count(), 3);
+        assert_eq!(dit.matches("250 2.0.0 OK\r\n").count(), 3);
     }
 
     #[tokio::test]
@@ -1501,9 +1501,9 @@ mod tests {
         ligne.extend_from_slice(b"\r\nNOOP\r\n");
         let (resume, dit) = conversation(&ligne, &mut boite).await;
         assert_eq!(resume.expect("servie").commands, 1);
-        assert!(dit.contains("500 Line too long\r\n"));
+        assert!(dit.contains("500 5.5.2 Line too long\r\n"));
         // La seconde commande n'a jamais été traitée.
-        assert!(!dit.contains("250 OK\r\n"));
+        assert!(!dit.contains("250 2.0.0 OK\r\n"));
     }
 
     #[tokio::test]
@@ -1521,7 +1521,7 @@ mod tests {
         )
         .await;
         assert_eq!(resume.expect("servie").messages, 0);
-        assert!(dit.contains("554 Bare CR or LF in message data\r\n"));
+        assert!(dit.contains("554 5.6.0 Bare CR or LF in message data\r\n"));
         assert!(boite.abandonne);
         assert!(boite.recu.is_empty());
     }
@@ -1547,10 +1547,10 @@ mod tests {
         .await;
         let resume = resume.expect("servie");
         assert_eq!(resume.messages, 0);
-        assert!(dit.contains("451 Message not accepted, try again later\r\n"));
+        assert!(dit.contains("451 4.3.2 Message not accepted, try again later\r\n"));
         // La connexion a suivi : le `NOOP` d'après le message a bien été traité.
-        assert!(dit.contains("250 OK\r\n"));
-        assert!(dit.ends_with("221 Bye\r\n"));
+        assert!(dit.contains("250 2.0.0 OK\r\n"));
+        assert!(dit.ends_with("221 2.0.0 Bye\r\n"));
         assert!(boite.abandonne);
     }
 
@@ -1634,7 +1634,7 @@ mod tests {
         assert_eq!(seconde.expect("servie").outcome, Outcome::Throttled);
         assert_eq!(
             dit,
-            "421 Service not available, closing transmission channel\r\n"
+            "421 4.3.2 Service not available, closing transmission channel\r\n"
         );
         assert!(!dit.contains("220 "), "aucune bannière n'a été envoyée");
     }
@@ -1659,10 +1659,13 @@ mod tests {
         let resume = resume.expect("servie");
         assert_eq!(resume.outcome, Outcome::Throttled);
         // Le pair a reçu ses trois réponses, PUIS la fermeture. L'ordre compte.
-        assert_eq!(dit.matches("500 Command not recognised\r\n").count(), 3);
-        assert!(dit.ends_with("421 Service not available, closing transmission channel\r\n"));
+        assert_eq!(
+            dit.matches("500 5.5.1 Command not recognised\r\n").count(),
+            3
+        );
+        assert!(dit.ends_with("421 4.3.2 Service not available, closing transmission channel\r\n"));
         // Le `NOOP` qui suivait n'a jamais été traité.
-        assert!(!dit.contains("250 OK\r\n"));
+        assert!(!dit.contains("250 2.0.0 OK\r\n"));
     }
 
     #[tokio::test]
@@ -1686,8 +1689,8 @@ mod tests {
         let mut boite = Boite::default();
         let (resume, dit) = conversation_gardee(config(), &envoi, &mut boite, &garde).await;
         assert_eq!(resume.expect("servie").outcome, Outcome::Served);
-        assert_eq!(dit.matches("550 Relay access denied\r\n").count(), 20);
-        assert!(dit.ends_with("221 Bye\r\n"));
+        assert_eq!(dit.matches("550 5.7.1 Relay access denied\r\n").count(), 20);
+        assert!(dit.ends_with("221 2.0.0 Bye\r\n"));
     }
 
     #[tokio::test]

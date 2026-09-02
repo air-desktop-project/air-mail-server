@@ -135,7 +135,7 @@ async fn une_reponse_initiale_ouvre_la_session_en_un_seul_aller() {
 
     // L'extension est annoncée — et elle ne l'est QUE sous chiffrement.
     assert!(dit.contains("250 AUTH PLAIN"), "{dit}");
-    assert!(dit.contains("235 Authentication successful"), "{dit}");
+    assert!(dit.contains("235 2.7.0 Authentication successful"), "{dit}");
     // Et AUCUN défi n'a été envoyé : la RFC 4954 §4 l'interdit quand une réponse
     // initiale est fournie. Un `334` de trop désynchroniserait la conversation.
     assert!(!dit.contains("334"), "un défi a été envoyé en trop.\n{dit}");
@@ -161,7 +161,7 @@ async fn sans_reponse_initiale_le_defi_puis_la_reponse_ouvrent_la_session() {
     };
 
     assert!(dit.contains("334"), "aucun défi n'a été posé.\n{dit}");
-    assert!(dit.contains("235 Authentication successful"), "{dit}");
+    assert!(dit.contains("235 2.7.0 Authentication successful"), "{dit}");
     assert!(dit.starts_with("[OK]"), "{dit}");
 }
 
@@ -182,14 +182,14 @@ async fn un_mot_de_passe_faux_est_refuse_et_la_session_continue() {
     };
 
     assert!(
-        dit.contains("535 Authentication credentials invalid"),
+        dit.contains("535 5.7.1 Authentication credentials invalid"),
         "{dit}"
     );
     // La connexion ne se ferme PAS : c'est au garde (C8) d'en décider, et non à
     // la grammaire. Fermer au premier échec ferait de chaque faute de frappe un
     // incident.
     assert!(
-        dit.contains("250 OK"),
+        dit.contains("250 2.0.0 OK"),
         "le `NOOP` n'a pas été servi.\n{dit}"
     );
     assert!(dit.starts_with("[KO]"), "{dit}");
@@ -212,8 +212,11 @@ async fn le_pair_peut_annuler_l_echange() {
         panic!("`openssl` est nécessaire à ce test");
     };
 
-    assert!(dit.contains("501 Authentication aborted"), "{dit}");
-    assert!(dit.contains("250 OK"), "la session n'a pas repris.\n{dit}");
+    assert!(dit.contains("501 5.7.0 Authentication aborted"), "{dit}");
+    assert!(
+        dit.contains("250 2.0.0 OK"),
+        "la session n'a pas repris.\n{dit}"
+    );
     assert!(dit.starts_with("[KO]"), "{dit}");
 }
 

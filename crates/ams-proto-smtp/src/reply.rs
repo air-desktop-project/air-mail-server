@@ -23,6 +23,247 @@ pub enum Class {
     PermanentFailure,
 }
 
+/// Le code d'état étendu d'une réponse (RFC 3463), tel que RFC 2034 le préfixe.
+///
+/// # POURQUOI IL NE SE DÉDUIT PAS DU CODE À TROIS CHIFFRES
+///
+/// Un `550` peut être une boîte inconnue (`5.1.1`) ou un refus de politique
+/// (`5.7.1`) : ce sont deux choses différentes, et c'est précisément pour les
+/// distinguer que RFC 3463 existe. Le déduire reviendrait à inventer une des
+/// deux réponses.
+///
+/// # CE QUE LA CLASSE DOIT AU CODE
+///
+/// §3.2 de RFC 3463 : la classe — le premier chiffre — dit la même chose que le
+/// premier chiffre du code à trois chiffres. Un `550 4.x.x` ferait réessayer un
+/// pair qu'on refuse définitivement, et un `250 5.x.x` n'a aucun sens. C'est une
+/// propriété qu'on peut vérifier, et [`Status::agrees_with`] la vérifie.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Status {
+    class: u8,
+    subject: u16,
+    detail: u16,
+}
+
+impl Status {
+    /// Construit un état.
+    ///
+    /// Rend `None` si la classe n'est pas `2`, `4` ou `5`, ou si le sujet ou le
+    /// détail dépasse trois chiffres (§3 de RFC 3463).
+    #[must_use]
+    pub const fn new(class: u8, subject: u16, detail: u16) -> Option<Self> {
+        if (class == 2 || class == 4 || class == 5) && subject <= 999 && detail <= 999 {
+            Some(Self {
+                class,
+                subject,
+                detail,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// La classe : `2`, `4` ou `5`.
+    #[must_use]
+    pub const fn class(self) -> u8 {
+        self.class
+    }
+
+    /// **Cet état dit-il la même chose que ce code ?** (§3.2)
+    ///
+    /// Un `550 4.x.x` ferait réessayer un pair qu'on refuse définitivement.
+    #[must_use]
+    pub const fn agrees_with(self, code: Code) -> bool {
+        // Le premier chiffre d'un code de trois : `550 / 100 == 5`.
+        self.class as u16 == code.value() / 100
+    }
+
+    /// Écrit `class.subject.detail`, sans espace ni fin de ligne.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::BufferTooSmall`] si `out` ne suffit pas.
+    pub fn write(self, out: &mut [u8]) -> Result<&[u8], Error> {
+        let mut ecrits = pousser_chiffres(out, 0, u16::from(self.class))?;
+        ecrits = pousser_octet(out, ecrits, b'.')?;
+        ecrits = pousser_chiffres(out, ecrits, self.subject)?;
+        ecrits = pousser_octet(out, ecrits, b'.')?;
+        ecrits = pousser_chiffres(out, ecrits, self.detail)?;
+        out.get(..ecrits)
+            .ok_or(Error::BufferTooSmall { needed: ecrits })
+    }
+
+    // ── Les états que ce serveur emploie ────────────────────────────────────
+    //
+    // Ils sont NOMMÉS plutôt qu'écrits sur place : un même refus doit rendre le
+    // même état partout, et deux écritures d'un même sens finiraient par ne plus
+    // dire la même chose.
+
+    /// `2.0.0` — succès sans précision.
+    pub const OK: Self = Self {
+        class: 2,
+        subject: 0,
+        detail: 0,
+    };
+    /// `2.1.0` — l'adresse de l'expéditeur est valable.
+    pub const SENDER_OK: Self = Self {
+        class: 2,
+        subject: 1,
+        detail: 0,
+    };
+    /// `2.1.5` — l'adresse du destinataire est valable.
+    pub const RECIPIENT_OK: Self = Self {
+        class: 2,
+        subject: 1,
+        detail: 5,
+    };
+    /// `2.7.0` — succès lié à la sécurité (authentification, chiffrement).
+    pub const SECURITY_OK: Self = Self {
+        class: 2,
+        subject: 7,
+        detail: 0,
+    };
+    /// `4.3.0` — panne du serveur, sans précision.
+    pub const LOCAL_ERROR: Self = Self {
+        class: 4,
+        subject: 3,
+        detail: 0,
+    };
+    /// `4.3.2` — le service n'accepte pas de message pour l'instant.
+    pub const NOT_ACCEPTING: Self = Self {
+        class: 4,
+        subject: 3,
+        detail: 2,
+    };
+    /// `4.2.1` — la boîte est momentanément indisponible.
+    pub const MAILBOX_BUSY: Self = Self {
+        class: 4,
+        subject: 2,
+        detail: 1,
+    };
+    /// `4.5.3` — trop de destinataires pour cette transaction.
+    pub const TOO_MANY_RECIPIENTS: Self = Self {
+        class: 4,
+        subject: 5,
+        detail: 3,
+    };
+    /// `4.7.0` — refus temporaire lié à la sécurité.
+    pub const SECURITY_TEMP: Self = Self {
+        class: 4,
+        subject: 7,
+        detail: 0,
+    };
+    /// `5.5.1` — commande inconnue.
+    pub const UNKNOWN_COMMAND: Self = Self {
+        class: 5,
+        subject: 5,
+        detail: 1,
+    };
+    /// `5.5.2` — erreur de syntaxe.
+    pub const SYNTAX_ERROR: Self = Self {
+        class: 5,
+        subject: 5,
+        detail: 2,
+    };
+    /// `5.5.4` — paramètre invalide.
+    pub const BAD_PARAMETER: Self = Self {
+        class: 5,
+        subject: 5,
+        detail: 4,
+    };
+    /// `5.5.0` — commande mal placée dans la séquence.
+    pub const BAD_SEQUENCE: Self = Self {
+        class: 5,
+        subject: 5,
+        detail: 0,
+    };
+    /// `5.1.1` — la boîte n'existe pas.
+    pub const MAILBOX_UNAVAILABLE: Self = Self {
+        class: 5,
+        subject: 1,
+        detail: 1,
+    };
+    /// `5.7.1` — refusé par la politique.
+    pub const POLICY: Self = Self {
+        class: 5,
+        subject: 7,
+        detail: 1,
+    };
+    /// `5.7.0` — refus permanent lié à la sécurité.
+    pub const SECURITY: Self = Self {
+        class: 5,
+        subject: 7,
+        detail: 0,
+    };
+    /// `5.3.4` — le message est plus grand que ce qu'on accepte.
+    pub const MESSAGE_TOO_LARGE: Self = Self {
+        class: 5,
+        subject: 3,
+        detail: 4,
+    };
+    /// `5.6.0` — le contenu du message est irrecevable.
+    pub const BAD_CONTENT: Self = Self {
+        class: 5,
+        subject: 6,
+        detail: 0,
+    };
+    /// `5.4.6` — trop de sauts : le message tourne en boucle.
+    pub const TOO_MANY_HOPS: Self = Self {
+        class: 5,
+        subject: 4,
+        detail: 6,
+    };
+    /// `5.0.0` — refus permanent, sujet indéfini (§3.3).
+    pub const POLICY_OTHER: Self = Self {
+        class: 5,
+        subject: 0,
+        detail: 0,
+    };
+    /// `5.7.23` — l'expéditeur n'est pas autorisé par SPF (RFC 7372 §3.2).
+    pub const SPF_REFUSED: Self = Self {
+        class: 5,
+        subject: 7,
+        detail: 23,
+    };
+    /// `4.4.3` — la résolution DNS n'a pas abouti.
+    pub const DNS_TEMP: Self = Self {
+        class: 4,
+        subject: 4,
+        detail: 3,
+    };
+}
+
+/// Écrit un nombre décimal, sans zéro de tête.
+fn pousser_chiffres(out: &mut [u8], depuis: usize, valeur: u16) -> Result<usize, Error> {
+    // Trois chiffres au plus : `Status::new` l'a vérifié.
+    let mut chiffres = [0_u8; 3];
+    let mut combien = 0_usize;
+    let mut reste = valeur;
+    loop {
+        chiffres[combien] = b'0'.saturating_add((reste % 10) as u8);
+        combien = combien.saturating_add(1);
+        reste /= 10;
+        if reste == 0 {
+            break;
+        }
+    }
+    let mut ecrits = depuis;
+    while combien > 0 {
+        combien = combien.saturating_sub(1);
+        ecrits = pousser_octet(out, ecrits, chiffres[combien])?;
+    }
+    Ok(ecrits)
+}
+
+/// Écrit un octet, ou dit que la place manque.
+fn pousser_octet(out: &mut [u8], depuis: usize, octet: u8) -> Result<usize, Error> {
+    let place = out.get_mut(depuis).ok_or(Error::BufferTooSmall {
+        needed: depuis.saturating_add(1),
+    })?;
+    *place = octet;
+    Ok(depuis.saturating_add(1))
+}
+
 impl Code {
     /// Construit un code.
     ///
@@ -265,6 +506,57 @@ fn check_text(texte: &[u8]) -> Result<(), Error> {
 
 #[cfg(test)]
 mod tests {
+    use super::Status;
+
+    /// **UN ÉTAT SE VALIDE À LA CONSTRUCTION**, comme un code : `Status::write`
+    /// n'a alors rien à vérifier.
+    #[test]
+    fn un_etat_se_valide_a_la_construction() {
+        let etat = Status::new(5, 7, 23).expect("valide");
+        assert_eq!(etat.class(), 5);
+        assert!(etat.agrees_with(Code::MAILBOX_UNAVAILABLE));
+        assert!(!etat.agrees_with(Code::OK));
+        assert_eq!(etat, Status::SPF_REFUSED);
+
+        // RFC 3463 §3 : la classe vaut 2, 4 ou 5, et rien d'autre. Une classe
+        // `3` n'existe pas — c'est ce qui rend impossible d'en écrire une sur
+        // une réponse `3xx`.
+        for classe in [0_u8, 1, 3, 6, 9] {
+            assert_eq!(Status::new(classe, 0, 0), None, "classe {classe}");
+        }
+        // Trois chiffres au plus, de chaque côté.
+        assert!(Status::new(5, 999, 999).is_some());
+        assert_eq!(Status::new(5, 1000, 0), None);
+        assert_eq!(Status::new(5, 0, 1000), None);
+        assert!(!std::format!("{:?}", Status::OK).is_empty());
+    }
+
+    /// **CE QUI EST ÉCRIT SE RELIT**, et un tampon trop court le dit.
+    #[test]
+    fn un_etat_s_ecrit_en_chiffres_et_en_points() {
+        let mut sortie = [0_u8; 16];
+        assert_eq!(
+            Status::SPF_REFUSED.write(&mut sortie).expect("écrit"),
+            b"5.7.23"
+        );
+        assert_eq!(Status::OK.write(&mut sortie).expect("écrit"), b"2.0.0");
+        assert_eq!(
+            Status::new(4, 999, 999)
+                .expect("valide")
+                .write(&mut sortie)
+                .expect("écrit"),
+            b"4.999.999"
+        );
+        // Toutes les tailles trop courtes, une par une. `2.0.0` en fait cinq.
+        for taille in 0..5 {
+            let mut court = std::vec![0_u8; taille];
+            assert!(
+                Status::OK.write(&mut court).is_err(),
+                "une taille de {taille} a suffi"
+            );
+        }
+    }
+
     use super::{Class, Code, encode, encoded_len};
     use crate::{Error, Limits};
 

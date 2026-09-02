@@ -89,46 +89,68 @@ struct Entree {
 fn vocabulaire() -> Vec<Vec<u8>> {
     let domaine = String::from_utf8(DOMAINE.to_vec()).expect("ASCII");
     let mut liste: Vec<Vec<u8>> = Vec::new();
-    // Les deux formes d'`EHLO`, avant et après chiffrement.
-    liste.push(format!("250-{domaine}\r\n250-SIZE 10485760\r\n250 STARTTLS\r\n").into_bytes());
-    liste.push(format!("250-{domaine}\r\n250-SIZE 10485760\r\n250 AUTH PLAIN\r\n").into_bytes());
+    // **LES FORMES D'`EHLO`, TOUTES**. Cette liste était périmée de trois
+    // tranches — ni `CHUNKING`, ni `PIPELINING`, ni `ENHANCEDSTATUSCODES` — et
+    // rien ne le disait : le fuzz ne composait pas d'`EHLO` valable assez
+    // souvent pour tomber dessus. Les graines écrites depuis en portent un, et
+    // la faute est sortie au premier tour.
+    let annonce = format!(
+        "250-{domaine}\r\n250-SIZE 10485760\r\n250-ENHANCEDSTATUSCODES\r\n250-PIPELINING\r\n"
+    );
+    liste.push(format!("{annonce}250-CHUNKING\r\n250 STARTTLS\r\n").into_bytes());
+    liste.push(format!("{annonce}250-CHUNKING\r\n250 AUTH PLAIN\r\n").into_bytes());
+    liste.push(format!("{annonce}250 CHUNKING\r\n").into_bytes());
     liste.push(format!("220 {domaine} ESMTP\r\n").into_bytes());
     liste.push(format!("250 {domaine}\r\n").into_bytes());
     for texte in [
-        "250 Sender ok",
-        "250 Recipient ok",
-        "250 Reset ok",
-        "250 OK",
-        "250 Message accepted",
-        "221 Bye",
-        "220 Ready to start TLS",
-        "235 Authentication successful",
+        "250 2.1.0 Sender ok",
+        "250 2.1.5 Recipient ok",
+        "250 2.0.0 Reset ok",
+        "250 2.0.0 OK",
+        "250 2.0.0 Message accepted",
+        "221 2.0.0 Bye",
+        "220 2.0.0 Ready to start TLS",
+        "235 2.7.0 Authentication successful",
         "334 ",
         "354 Start mail input; end with <CRLF>.<CRLF>",
-        "252 Cannot verify; message will be attempted",
-        "214 See RFC 5321",
-        "450 Mailbox busy, try again later",
-        "451 Message not accepted, try again later",
-        "452 Too many recipients",
-        "500 Line too long",
-        "500 Line must end with CRLF",
-        "500 Command not recognised",
-        "501 Syntax error in parameters or arguments",
-        "501 Authentication aborted",
-        "504 Unrecognized authentication type",
-        "502 Command not implemented",
-        "502 EXPN not available",
-        "503 Send EHLO first",
-        "503 Nested MAIL command",
-        "503 Need MAIL before RCPT",
-        "503 Need RCPT before DATA",
-        "503 TLS already active",
-        "503 Already authenticated",
-        "535 Authentication credentials invalid",
-        "538 Encryption required for authentication",
-        "550 Mailbox unavailable",
-        "550 Relay access denied",
-        "554 Message rejected",
+        "252 2.0.0 Cannot verify; message will be attempted",
+        "214 2.0.0 See RFC 5321",
+        "450 4.2.1 Mailbox busy, try again later",
+        "451 4.3.2 Message not accepted, try again later",
+        "452 4.5.3 Too many recipients",
+        "500 5.5.2 Line too long",
+        "500 5.5.2 Line must end with CRLF",
+        "500 5.5.1 Command not recognised",
+        "501 5.5.2 Syntax error in parameters or arguments",
+        "501 5.7.0 Authentication aborted",
+        "504 5.7.0 Unrecognized authentication type",
+        "502 5.5.4 Command not implemented",
+        "502 5.5.4 EXPN not available",
+        "503 5.5.0 Send EHLO first",
+        "503 5.5.0 Nested MAIL command",
+        "503 5.5.0 Need MAIL before RCPT",
+        "503 5.5.0 Need RCPT before DATA",
+        "503 5.5.0 TLS already active",
+        "503 5.5.0 Already authenticated",
+        "535 5.7.1 Authentication credentials invalid",
+        "538 5.7.1 Encryption required for authentication",
+        "550 5.1.1 Mailbox unavailable",
+        "550 5.7.1 Relay access denied",
+        "554 5.7.1 Message rejected",
+        // `BDAT` (RFC 3030), la garde anti-boucle (§6.3) et le refus de
+        // service : autant de réponses que cette liste ignorait.
+        "250 2.0.0 Chunk ok",
+        "503 5.5.0 Need MAIL and RCPT before BDAT",
+        "503 5.5.0 Need RCPT before BDAT",
+        "503 5.5.0 BDAT already started; finish with BDAT LAST",
+        "554 5.4.6 Too many hops; message is looping",
+        "554 5.6.0 Bare CR or LF in message data",
+        "552 5.3.4 Message exceeds maximum size",
+        "421 4.3.2 Service not available, closing transmission channel",
+        "451 4.3.0 Message not accepted, try again later",
+        "550 5.7.1 Message rejected: sender domain policy (DMARC)",
+        "550 5.7.23 Sender address rejected: not authorized by SPF",
+        "451 4.4.3 Temporary error while checking SPF, try again later",
     ] {
         liste.push(format!("{texte}\r\n").into_bytes());
     }
@@ -168,12 +190,12 @@ fn avaler_le_morceau(
     }
     if last {
         if let Ok(tour) = session.on_data_settled(DataOutcome::Accepted, tampon) {
-            verifier_reponse(tour.reply(), connu);
+            verifier_reponse_a_une_commande(tour.reply(), connu);
         }
         return;
     }
     if let Ok(tour) = session.on_chunk_received(tampon) {
-        verifier_reponse(tour.reply(), connu);
+        verifier_reponse_a_une_commande(tour.reply(), connu);
         assert_eq!(tour.action(), Action::Continue);
     }
 }
@@ -188,6 +210,80 @@ fn verifier_reponse(reply: &[u8], connu: &[Vec<u8>]) {
         "réponse hors du vocabulaire clos — écho probable : {:?}",
         String::from_utf8_lossy(reply)
     );
+}
+
+/// La même chose, **et l'état étendu** : c'est la réponse à une COMMANDE.
+///
+/// La bannière, elle, n'en porte pas : elle précède l'`EHLO`, donc la
+/// négociation de RFC 2034, et n'est la réponse à rien. Aucun serveur n'en met
+/// là, et un client qui lirait un état sur la bannière lirait un verdict là où
+/// il n'y a qu'une salutation.
+fn verifier_reponse_a_une_commande(reply: &[u8], connu: &[Vec<u8>]) {
+    verifier_reponse(reply, connu);
+    verifier_l_etat_etendu(reply);
+}
+
+/// **CHAQUE RÉPONSE PORTE UN ÉTAT ÉTENDU QUI S'ACCORDE AVEC SON CODE**
+/// (RFC 2034 §4, RFC 3463 §3.2).
+///
+/// Un `550 4.x.x` ferait réessayer un pair qu'on refuse définitivement ; un
+/// `250 5.x.x` n'a aucun sens. C'est la propriété que le typage seul ne peut pas
+/// tenir, puisque l'état et le code sont choisis séparément.
+///
+/// Les `3xx` n'en portent PAS : §4 ne les mentionne pas, et RFC 3463 ne définit
+/// aucune classe `3`. Ce sont des invitations à continuer, pas des verdicts.
+fn verifier_l_etat_etendu(reply: &[u8]) {
+    // Une réponse multiligne — l'`EHLO` — négocie l'extension : elle n'en porte
+    // pas, et c'est la seule exception.
+    if reply.get(3) == Some(&b'-') {
+        return;
+    }
+    let Some(classe) = reply.first().copied() else {
+        return;
+    };
+    let reste = reply.get(4..).unwrap_or_default();
+    if classe == b'3' {
+        assert!(
+            !ressemble_a_un_etat(reste),
+            "une `3xx` porte un état étendu : {:?}",
+            String::from_utf8_lossy(reply)
+        );
+        return;
+    }
+    assert!(
+        ressemble_a_un_etat(reste),
+        "une réponse sans état étendu : {:?}",
+        String::from_utf8_lossy(reply)
+    );
+    assert_eq!(
+        reste.first().copied(),
+        Some(classe),
+        "la classe de l'état contredit le code : {:?}",
+        String::from_utf8_lossy(reply)
+    );
+}
+
+/// Ces octets commencent-ils par `chiffre.chiffres.chiffres` suivi d'une espace ?
+fn ressemble_a_un_etat(reste: &[u8]) -> bool {
+    let mut morceaux = reste.splitn(2, |octet| *octet == b' ');
+    let Some(etat) = morceaux.next() else {
+        return false;
+    };
+    if morceaux.next().is_none() {
+        return false;
+    }
+    let mut nombres = etat.split(|octet| *octet == b'.');
+    let trois: Vec<&[u8]> = nombres.by_ref().take(3).collect();
+    if trois.len() != 3 || nombres.next().is_some() {
+        return false;
+    }
+    trois.iter().enumerate().all(|(rang, nombre)| {
+        !nombre.is_empty()
+            && nombre.len() <= 3
+            && nombre.iter().all(u8::is_ascii_digit)
+            // La classe est d'un seul chiffre, et vaut 2, 4 ou 5.
+            && (rang != 0 || matches!(nombre, [b'2' | b'4' | b'5']))
+    })
 }
 
 fuzz_target!(|entree: Entree| {
@@ -218,7 +314,7 @@ fuzz_target!(|entree: Entree| {
                 // formé ou non, annulation par `*`. La session doit rendre une
                 // réponse de son vocabulaire, et jamais paniquer.
                 if let Ok(tour) = session.feed_auth(&reponse, &mut tampon) {
-                    verifier_reponse(tour.reply(), &connu);
+                    verifier_reponse_a_une_commande(tour.reply(), &connu);
                     assert_eq!(tour.action(), Action::Continue);
                     // ON NE S'AUTHENTIFIE PAS PAR HASARD : la politique de ce
                     // harnais ne connaît AUCUN compte, donc aucune suite
@@ -237,7 +333,7 @@ fuzz_target!(|entree: Entree| {
                     _ => DataOutcome::RejectedTemporary,
                 };
                 if let Ok(tour) = session.on_data_settled(verdict, &mut tampon) {
-                    verifier_reponse(tour.reply(), &connu);
+                    verifier_reponse_a_une_commande(tour.reply(), &connu);
                     assert_eq!(tour.action(), Action::Continue);
                 }
             }
@@ -249,7 +345,7 @@ fuzz_target!(|entree: Entree| {
                     Err(autre) => panic!("le tampon de 512 octets suffit toujours : {autre:?}"),
                 };
                 let reply = tour.reply();
-                verifier_reponse(reply, &connu);
+                verifier_reponse_a_une_commande(reply, &connu);
 
                 match tour.action() {
                     // LE REFUS EMBLÉMATIQUE DE C6, ÉPROUVÉ : jamais d'échange

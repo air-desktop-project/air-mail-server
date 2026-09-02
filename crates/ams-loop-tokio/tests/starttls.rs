@@ -109,7 +109,7 @@ async fn une_commande_derriere_starttls_n_est_jamais_executee() {
     // Et le `220 Ready to start TLS` n'a JAMAIS été dit. C'est le point : le
     // pair n'obtient pas le tuyau dans lequel il comptait replacer ses octets.
     assert!(
-        !dit.contains("220 Ready to start TLS"),
+        !dit.contains("220 2.0.0 Ready to start TLS"),
         "le serveur a proposé de chiffrer malgré l'injection.\n{dit}"
     );
     assert!(dit.contains("421 "), "le refus n'a pas été dit.\n{dit}");
@@ -286,7 +286,7 @@ async fn openssl_monte_en_chiffrement_et_le_ehlo_suivant_change() {
     //    venir du dialogue en clair : avant la poignée de main, `STARTTLS`
     //    obtenait `220`. L'état a donc bien traversé le changement de tuyau.
     assert!(
-        chiffre.contains("503 TLS already active"),
+        chiffre.contains("503 5.5.0 TLS already active"),
         "la session ne se souvient pas d'être chiffrée.\n{dit}"
     );
     // 2. Le second `EHLO`, chiffré, a été servi en entier.

@@ -550,12 +550,12 @@ mod tests {
         )
         .await;
         assert!(dit.starts_with("220 mail.example.com ESMTP\r\n"));
-        assert!(dit.contains("250 Message accepted\r\n"));
-        assert!(dit.ends_with("221 Bye\r\n"));
+        assert!(dit.contains("250 2.0.0 Message accepted\r\n"));
+        assert!(dit.ends_with("221 2.0.0 Bye\r\n"));
 
         // Une seconde connexion : le service n'est pas à usage unique.
         let encore = cliente(adresse, b"QUIT\r\n").await;
-        assert!(encore.ends_with("221 Bye\r\n"));
+        assert!(encore.ends_with("221 2.0.0 Bye\r\n"));
 
         let _ = arret.send(());
         let stats = service.await.expect("tâche").expect("service");
@@ -579,7 +579,11 @@ mod tests {
             },
         ));
 
-        assert!(cliente(adresse, b"QUIT\r\n").await.ends_with("221 Bye\r\n"));
+        assert!(
+            cliente(adresse, b"QUIT\r\n")
+                .await
+                .ends_with("221 2.0.0 Bye\r\n")
+        );
         let _ = arret.send(());
         let stats = service.await.expect("tâche").expect("service");
         assert_eq!(stats.accepted, 1);
@@ -624,7 +628,7 @@ mod tests {
         let seconde = cliente(adresse, b"QUIT\r\n").await;
         assert_eq!(
             seconde,
-            "421 Service not available, closing transmission channel\r\n"
+            "421 4.3.2 Service not available, closing transmission channel\r\n"
         );
 
         let _ = arret.send(());

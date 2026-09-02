@@ -114,5 +114,5 @@ pub use error::Error;
 pub use limits::Limits;
 pub use parameters::{Parameter, Parameters, ParametersIter};
 pub use path::{LocalPart, Mailbox, Path, PathKind};
-pub use reply::{Class, Code, encode, encoded_len};
+pub use reply::{Class, Code, Status, encode, encoded_len};
 pub use stuff::{Stuffer, stuffed_max};

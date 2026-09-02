@@ -449,7 +449,7 @@ fn le_binaire_authentifie_un_compte_ecrit_par_l_administrateur() {
         "le serveur n'annonce pas AUTH.\n{chiffre}"
     );
     assert!(
-        chiffre.contains("235 Authentication successful"),
+        chiffre.contains("235 2.7.0 Authentication successful"),
         "le compte n'a pas été reconnu.\n{chiffre}"
     );
 }
@@ -630,8 +630,8 @@ fn chaque_destinataire_recoit_dans_sa_boite() {
 
     // Une adresse qu'aucun compte ne déclare est refusée — CE N'EST PLUS UN
     // FOURRE-TOUT, même dans un domaine hébergé.
-    assert!(dit.contains("550 Relay access denied"), "{dit}");
-    assert!(dit.contains("250 Message accepted"), "{dit}");
+    assert!(dit.contains("550 5.7.1 Relay access denied"), "{dit}");
+    assert!(dit.contains("250 2.0.0 Message accepted"), "{dit}");
 
     // Et sur le disque : un message dans chaque boîte, aucun ailleurs.
     for nom in ["jean", "paul"] {
@@ -726,7 +726,7 @@ fn un_client_pop3_releve_puis_efface_son_courrier() {
     .expect("écriture SMTP");
     let mut dit = String::new();
     std::io::Read::read_to_string(&mut flux, &mut dit).expect("lecture SMTP");
-    assert!(dit.contains("250 Message accepted"), "{dit}");
+    assert!(dit.contains("250 2.0.0 Message accepted"), "{dit}");
 
     // ── 2. Le client POP3 le relève ─────────────────────────────────────────
     let vu = pop3(

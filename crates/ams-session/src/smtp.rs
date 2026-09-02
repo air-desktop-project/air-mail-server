@@ -1,8 +1,8 @@
 //! La machine à états d'une session SMTP, **sans entrée-sortie**.
 
 use ams_proto_smtp::{
-    ChunkEvent, ChunkReceiver, ClientId, Code, Command, DataEvent, DataFault, DataReceiver,
-    Error as SmtpError, Path, encode,
+    ChunkEvent, ChunkReceiver, Class, ClientId, Code, Command, DataEvent, DataFault, DataReceiver,
+    Error as SmtpError, Path, Status, encode,
 };
 use ams_sasl::{decode_base64, parse_plain};
 use core::net::IpAddr;
@@ -27,6 +27,12 @@ const SIZE_LINE_MAX: usize = 5 + MAX_DIGITS;
 /// 5321 peut porter, dont le base64 ne rend que trois quarts.
 const SASL_DECODED_MAX: usize = 512;
 
+/// La place d'une ligne de réponse, état étendu compris.
+///
+/// Le plus long texte du vocabulaire tient largement dedans ; ce qui n'y
+/// tiendrait pas partirait sans son état, et non tronqué.
+const LIGNE_MAX: usize = 256;
+
 /// Combien de `Received:` un message a le droit de porter (RFC 5321 §6.3).
 ///
 /// §6.3 veut « a large number », sans en fixer un ; trente est celui de Postfix
@@ -35,9 +41,9 @@ const SASL_DECODED_MAX: usize = 512;
 /// s'arrêter ailleurs que dans un disque plein.
 pub const HOPS_MAX: u32 = 30;
 
-/// Le nombre maximal de lignes d'un `EHLO` : domaine, `SIZE`, `PIPELINING`,
-/// `CHUNKING`, `STARTTLS`, `AUTH`.
-const EHLO_LINES_MAX: usize = 6;
+/// Le nombre maximal de lignes d'un `EHLO` : domaine, `SIZE`,
+/// `ENHANCEDSTATUSCODES`, `PIPELINING`, `CHUNKING`, `STARTTLS`, `AUTH`.
+const EHLO_LINES_MAX: usize = 7;
 
 /// Ce qu'un nom de domaine peut faire (RFC 1035 §2.3.4).
 const DOMAIN_MAX: usize = 255;
@@ -156,6 +162,93 @@ pub enum Action {
     },
     /// Fermer la connexion.
     Close,
+}
+
+/// L'état étendu d'une réponse (RFC 3463), ou `None` pour une `3xx`.
+///
+/// # POURQUOI UNE TABLE, ET UNE SEULE
+///
+/// Un même refus doit rendre le même état partout. Le composer sur place, à
+/// chacun des cinquante-cinq endroits qui répondent, aurait fini par donner deux
+/// états au même sens — et c'est exactement ce qu'un lecteur automatique ne
+/// pardonne pas : il trie sur l'état, pas sur le texte.
+///
+/// # CE QUI N'EST PAS NOMMÉ PREND LE SUJET « INDÉFINI »
+///
+/// `x.0.0` veut dire « autre, ou indéfini » (§3.3 de RFC 3463) : ce n'est pas un
+/// défaut silencieux, c'est la réponse juste quand on n'a rien de plus précis à
+/// dire. La CLASSE, elle, n'est jamais devinée — elle vient du code à trois
+/// chiffres, et [`Status::agrees_with`] le vérifie.
+fn statut_de(code: Code, texte: &[u8]) -> Option<Status> {
+    let precis = match texte {
+        b"Sender ok" => Some(Status::SENDER_OK),
+        b"Recipient ok" => Some(Status::RECIPIENT_OK),
+        b"Authentication successful" => Some(Status::SECURITY_OK),
+        b"Mailbox unavailable" => Some(Status::MAILBOX_UNAVAILABLE),
+        b"Relay access denied"
+        | b"Message rejected"
+        | b"Encryption required for authentication"
+        | b"Authentication credentials invalid" => Some(Status::POLICY),
+        b"Unrecognized authentication type" | b"Authentication aborted" => Some(Status::SECURITY),
+        b"Mailbox busy, try again later" => Some(Status::MAILBOX_BUSY),
+        b"Too many recipients" => Some(Status::TOO_MANY_RECIPIENTS),
+        b"Message exceeds maximum size" => Some(Status::MESSAGE_TOO_LARGE),
+        b"Too many hops; message is looping" => Some(Status::TOO_MANY_HOPS),
+        b"Bare CR or LF in message data" => Some(Status::BAD_CONTENT),
+        b"Command not recognised" => Some(Status::UNKNOWN_COMMAND),
+        b"Line too long"
+        | b"Line must end with CRLF"
+        | b"Syntax error in parameters or arguments" => Some(Status::SYNTAX_ERROR),
+        b"Command not implemented" | b"EXPN not available" => Some(Status::BAD_PARAMETER),
+        b"Already authenticated"
+        | b"Nested MAIL command"
+        | b"Need MAIL before RCPT"
+        | b"Need RCPT before DATA"
+        | b"Need MAIL and RCPT before BDAT"
+        | b"Need RCPT before BDAT"
+        | b"BDAT already started; finish with BDAT LAST"
+        | b"Send EHLO first"
+        | b"TLS already active" => Some(Status::BAD_SEQUENCE),
+        b"Message not accepted, try again later" => Some(Status::NOT_ACCEPTING),
+        // Les trois réponses de SPF et de DMARC portaient leur code DANS leur
+        // texte, écrit à la main. Elles passent par la table comme les autres :
+        // deux endroits qui décident du même état finissent par en donner deux.
+        b"Message rejected: sender domain policy (DMARC)" => Some(Status::POLICY),
+        b"Sender address rejected: not authorized by SPF" => Some(Status::SPF_REFUSED),
+        b"Temporary error while checking SPF, try again later" => Some(Status::DNS_TEMP),
+        b"Service not available, closing transmission channel" => Some(Status::NOT_ACCEPTING),
+        _ => None,
+    };
+    if let Some(statut) = precis
+        && statut.agrees_with(code)
+    {
+        return Some(statut);
+    }
+    // **LA CLASSE VIENT DU CODE, JAMAIS DU TEXTE.** Un `550 4.x.x` ferait
+    // réessayer un pair qu'on refuse définitivement.
+    match code.class() {
+        Class::Positive => Some(Status::OK),
+        Class::TransientFailure => Some(Status::LOCAL_ERROR),
+        Class::PermanentFailure => Some(Status::POLICY_OTHER),
+        // §4 de RFC 2034 : les `3xx` n'en portent pas, et RFC 3463 ne définit
+        // aucune classe `3`. Ce sont des invitations à continuer, pas des
+        // verdicts.
+        Class::Intermediate => None,
+    }
+}
+
+/// Écrit `<état> <texte>` dans `ligne`, et le rend.
+///
+/// Rend `None` si la place manque — le texte part alors SANS son état, plutôt
+/// que tronqué : une réponse amputée serait pire qu'une réponse sans code
+/// étendu.
+fn prefixer<'l>(ligne: &'l mut [u8], statut: Status, texte: &[u8]) -> Option<&'l [u8]> {
+    let ecrits = statut.write(ligne).ok()?.len();
+    *ligne.get_mut(ecrits)? = b' ';
+    let apres = ecrits.saturating_add(1);
+    let fin = apres.saturating_add(texte.len());
+    ligne.get_mut(apres..fin)?.copy_from_slice(texte);
+    ligne.get(..fin)
 }
 
 /// L'identité que SPF vérifie (RFC 7208 §2.4).
@@ -427,13 +520,19 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     ///
     /// [`Error::Reply`] si `out` est trop petit.
     pub fn unavailable<'b>(&self, out: &'b mut [u8]) -> Result<&'b [u8], Error> {
-        encode(
-            out,
-            Code::SERVICE_CLOSING,
-            &[b"Service not available, closing transmission channel"],
-            self.config.limits(),
-        )
-        .map_err(Error::Reply)
+        // **ELLE PASSE PAR `compose`, COMME LES AUTRES.** Elle composait sa
+        // réponse à part, et repartait donc SANS code étendu le jour où toutes
+        // les autres en ont eu un — un refus de service est une réponse comme
+        // les autres, et un lecteur automatique trie sur l'état.
+        Ok(self
+            .compose(
+                Code::SERVICE_CLOSING,
+                b"Service not available, closing transmission channel",
+                Action::Close,
+                false,
+                out,
+            )?
+            .reply)
     }
 
     /// La poignée de main TLS a abouti.
@@ -508,7 +607,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
             // corrigera pas ce qu'il ne sait pas.
             DataOutcome::RejectedByPolicy => self.simple(
                 Code::MAILBOX_UNAVAILABLE,
-                b"5.7.1 Message rejected: sender domain policy (DMARC)",
+                b"Message rejected: sender domain policy (DMARC)",
                 out,
             ),
             DataOutcome::RejectedTemporary => self.simple(
@@ -788,6 +887,14 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         lignes[posees] = self.config.domain();
         posees = posees.saturating_add(1);
         lignes[posees] = self.size_line.get(..self.size_len).unwrap_or_default();
+        posees = posees.saturating_add(1);
+        // **`ENHANCEDSTATUSCODES` (RFC 2034) EST ANNONCÉ TOUJOURS**, et les
+        // codes partent de même — y compris vers un client qui n'a dit que
+        // `HELO`. Un code étendu est un PRÉFIXE DE TEXTE : qui ne le comprend
+        // pas le lit comme le début du message, ce que §4 prévoit qu'il fasse.
+        // Deux formes de réponse selon le salut, c'est deux vocabulaires de
+        // sortie — et deux vocabulaires finissent par diverger.
+        lignes[posees] = b"ENHANCEDSTATUSCODES";
         posees = posees.saturating_add(1);
         // **`PIPELINING` (RFC 2920) EST ANNONCÉ TOUJOURS.** Ce n'est pas une
         // capacité qu'on ajoute : la boucle prend UNE LIGNE À LA FOIS dans son
@@ -1129,7 +1236,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
                 self.quitter_la_transaction();
                 self.refus(
                     Code::MAILBOX_UNAVAILABLE,
-                    b"5.7.23 Sender address rejected: not authorized by SPF",
+                    b"Sender address rejected: not authorized by SPF",
                     out,
                 )
             }
@@ -1137,7 +1244,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
                 self.quitter_la_transaction();
                 self.simple(
                     Code::LOCAL_ERROR,
-                    b"4.4.3 Temporary error while checking SPF, try again later",
+                    b"Temporary error while checking SPF, try again later",
                     out,
                 )
             }
@@ -1522,7 +1629,19 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         self.compose(code, texte, action, false, out)
     }
 
-    /// Compose une reponse d'une ligne.
+    /// Compose une reponse d'une ligne, **code d'état étendu compris**.
+    ///
+    /// # RFC 2034 : LE CODE ÉTENDU PRÉFIXE LE TEXTE, ET RIEN D'AUTRE
+    ///
+    /// §4 veut qu'il soit écrit en tête du texte de TOUTES les réponses `2xx`,
+    /// `4xx` et `5xx`. Les `3xx`, elles, n'en portent pas : ce sont des
+    /// invitations à continuer — `334` et `354` —, pas des verdicts, et
+    /// RFC 3463 ne définit aucune classe `3`. [`Status::new`] le refuse, ce qui
+    /// rend l'oubli impossible plutôt qu'improbable.
+    ///
+    /// L'état vient d'une SEULE table ([`statut_de`]) : un même refus doit
+    /// rendre le même état partout, et le composer sur place en cinquante-cinq
+    /// endroits aurait fini par en donner deux au même sens.
     fn compose<'b>(
         &self,
         code: Code,
@@ -1531,6 +1650,11 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         peer_fault: bool,
         out: &'b mut [u8],
     ) -> Result<Turn<'b>, Error> {
+        let mut ligne = [0_u8; LIGNE_MAX];
+        let texte = match statut_de(code, texte) {
+            Some(statut) => prefixer(&mut ligne, statut, texte).unwrap_or(texte),
+            None => texte,
+        };
         let reply = encode(out, code, &[texte], self.config.limits()).map_err(Error::Reply)?;
         Ok(Turn {
             reply,
@@ -1557,7 +1681,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, ChunkEvent, DataFault, DataOutcome, HOPS_MAX, SmtpSession};
+    use super::{Action, ChunkEvent, Code, DataFault, DataOutcome, HOPS_MAX, SmtpSession, Status};
     use crate::{Capabilities, Config, Error, Policy, RecipientVerdict, SenderPolicy};
     use ams_proto_smtp::{ClientId, DataEvent, Error as SmtpError, Limits, Path};
     use ams_spf::Verdict as SpfVerdict;
@@ -1568,8 +1692,9 @@ mod tests {
     /// On assère la valeur EXACTE plutôt qu'un `matches!` : ce dernier engendre
     /// un bras `_ => false` que rien n'emprunte, et le 100 % de C2 le compterait
     /// à jamais découvert — exactement comme un `panic!` de destructuration.
-    /// La taille du refus permanent d'un destinataire : `550 ` + le texte + `\r\n`.
-    const REFUS_PERMANENT: usize = 25;
+    /// La taille du refus permanent d'un destinataire : `550 ` + l'état étendu,
+    /// puis le texte et le `\r\n`.
+    const REFUS_PERMANENT: usize = 31;
 
     fn tampon_trop_petit(needed: usize) -> Error {
         Error::Reply(SmtpError::BufferTooSmall { needed })
@@ -1659,6 +1784,65 @@ mod tests {
                     return rendu;
                 }
             }
+        }
+    }
+
+    // ── LES CODES D'ÉTAT ÉTENDUS (RFC 2034, RFC 3463) ───────────────────────
+
+    /// **LA CLASSE VIENT DU CODE, JAMAIS DU TEXTE**, et ce qui n'est pas nommé
+    /// prend le sujet « indéfini » (§3.3).
+    #[test]
+    fn un_texte_inconnu_prend_un_etat_de_la_bonne_classe() {
+        for (code, attendu) in [
+            (Code::OK, Status::OK),
+            (Code::LOCAL_ERROR, Status::LOCAL_ERROR),
+            (Code::TRANSACTION_FAILED, Status::POLICY_OTHER),
+        ] {
+            let vu = super::statut_de(code, b"un texte que la table ne nomme pas")
+                .expect("une classe qui en porte un");
+            assert_eq!(vu, attendu);
+            assert!(vu.agrees_with(code), "la classe contredit le code");
+        }
+        // **LES `3xx` N'EN PORTENT PAS** : ce sont des invitations à continuer,
+        // et RFC 3463 ne définit aucune classe `3`.
+        assert_eq!(
+            super::statut_de(Code::START_MAIL_INPUT, b"peu importe"),
+            None
+        );
+        assert_eq!(super::statut_de(Code::AUTH_CHALLENGE, b""), None);
+    }
+
+    /// **UN ÉTAT QUI CONTREDIRAIT SON CODE EST ÉCARTÉ** : la table peut se
+    /// tromper, le code à trois chiffres non.
+    #[test]
+    fn un_etat_qui_contredit_son_code_est_ecarte() {
+        // `Mailbox unavailable` est nommé `5.1.1` ; sous un code `4xx`, il ne
+        // peut pas s'appliquer, et c'est l'état générique de la classe qui sort.
+        let vu = super::statut_de(Code::MAILBOX_BUSY, b"Mailbox unavailable")
+            .expect("une classe qui en porte un");
+        assert_eq!(vu, Status::LOCAL_ERROR);
+        assert!(vu.agrees_with(Code::MAILBOX_BUSY));
+    }
+
+    /// **UNE RÉPONSE AMPUTÉE SERAIT PIRE QU'UNE RÉPONSE SANS CODE ÉTENDU.**
+    ///
+    /// `LIGNE_MAX` suffit largement au vocabulaire de ce serveur ; ce qui n'y
+    /// tiendrait pas part sans son état, et non coupé au milieu.
+    #[test]
+    fn un_etat_qui_ne_tient_pas_ne_tronque_rien() {
+        let mut juste = [0_u8; 8];
+        assert_eq!(
+            super::prefixer(&mut juste, Status::OK, b"OK"),
+            Some(&b"2.0.0 OK"[..])
+        );
+        // Une place qui ne suffit ni à l'état, ni à l'espace, ni au texte.
+        for taille in 0..8 {
+            let mut court = std::vec![0_u8; taille];
+            assert_eq!(
+                super::prefixer(&mut court, Status::OK, b"OK"),
+                None,
+                "une taille de {taille} a suffi"
+            );
         }
     }
 
@@ -1811,7 +1995,7 @@ mod tests {
         );
         assert_eq!(morceau(&mut session, b"salut"), b"salut");
         assert_eq!(session.received_octets(), 5);
-        assert_eq!(jouer_apres_morceau(&mut session), "250 Chunk ok\r\n");
+        assert_eq!(jouer_apres_morceau(&mut session), "250 2.0.0 Chunk ok\r\n");
     }
 
     /// Rend la réponse d'un morceau non final.
@@ -1828,7 +2012,7 @@ mod tests {
         transaction(&mut session);
         assert!(jouer(&mut session, b"BDAT 4\r\n").is_empty());
         assert_eq!(morceau(&mut session, b"abc\r"), b"abc\r");
-        assert_eq!(jouer_apres_morceau(&mut session), "250 Chunk ok\r\n");
+        assert_eq!(jouer_apres_morceau(&mut session), "250 2.0.0 Chunk ok\r\n");
 
         // Le `LF` du `CRLF` arrive dans le morceau SUIVANT, et reste licite.
         assert!(jouer(&mut session, b"BDAT 4 LAST\r\n").is_empty());
@@ -1838,7 +2022,8 @@ mod tests {
             .on_data_settled(DataOutcome::Accepted, &mut tampon)
             .expect("réponse");
         assert!(
-            std::string::String::from_utf8_lossy(tour.reply()).starts_with("250 Message accepted")
+            std::string::String::from_utf8_lossy(tour.reply())
+                .starts_with("250 2.0.0 Message accepted")
         );
         // La transaction est quittée : les compteurs repartent de zéro.
         assert_eq!(session.received_octets(), 0);
@@ -1892,7 +2077,7 @@ mod tests {
         );
         assert_eq!(
             jouer_apres_morceau(&mut session),
-            "554 Bare CR or LF in message data\r\n"
+            "554 5.6.0 Bare CR or LF in message data\r\n"
         );
     }
 
@@ -1926,9 +2111,9 @@ mod tests {
         transaction(&mut session);
         assert!(jouer(&mut session, b"BDAT 5\r\n").is_empty());
         assert_eq!(morceau(&mut session, b"salut"), b"salut");
-        assert_eq!(jouer_apres_morceau(&mut session), "250 Chunk ok\r\n");
+        assert_eq!(jouer_apres_morceau(&mut session), "250 2.0.0 Chunk ok\r\n");
         assert!(
-            jouer(&mut session, b"DATA\r\n").starts_with("503 BDAT already started"),
+            jouer(&mut session, b"DATA\r\n").starts_with("503 5.5.0 BDAT already started"),
             "un DATA a été servi au milieu d'un BDAT"
         );
     }
@@ -1938,9 +2123,9 @@ mod tests {
     fn un_bdat_hors_transaction_est_refuse() {
         let mut session = acceptante();
         identifier(&mut session);
-        assert!(jouer(&mut session, b"BDAT 5\r\n").starts_with("503 Need MAIL and RCPT"));
+        assert!(jouer(&mut session, b"BDAT 5\r\n").starts_with("503 5.5.0 Need MAIL and RCPT"));
         assert!(jouer(&mut session, b"MAIL FROM:<joe@example.net>\r\n").starts_with("250"));
-        assert!(jouer(&mut session, b"BDAT 5\r\n").starts_with("503 Need RCPT"));
+        assert!(jouer(&mut session, b"BDAT 5\r\n").starts_with("503 5.5.0 Need RCPT"));
     }
 
     /// **LA TAILLE SE REFUSE À L'ANNONCE**, avant d'avoir lu un octet.
@@ -1983,12 +2168,12 @@ mod tests {
         let mut tampon = [0_u8; 128];
         assert_eq!(
             session.unavailable(&mut tampon).expect("réponse"),
-            b"421 Service not available, closing transmission channel\r\n"
+            b"421 4.3.2 Service not available, closing transmission channel\r\n"
         );
         let mut minuscule = [0_u8; 4];
         assert_eq!(
             session.unavailable(&mut minuscule),
-            Err(tampon_trop_petit(57))
+            Err(tampon_trop_petit(63))
         );
     }
 
@@ -2018,7 +2203,7 @@ mod tests {
         let reponse = jouer(&mut session, b"EHLO client.example\r\n");
         assert_eq!(
             reponse,
-            "250-mail.example.com\r\n250-SIZE 10485760\r\n250-PIPELINING\r\n250-CHUNKING\r\n250 STARTTLS\r\n"
+            "250-mail.example.com\r\n250-SIZE 10485760\r\n250-ENHANCEDSTATUSCODES\r\n250-PIPELINING\r\n250-CHUNKING\r\n250 STARTTLS\r\n"
         );
         assert!(!reponse.contains("AUTH"));
     }
@@ -2030,7 +2215,7 @@ mod tests {
         let reponse = jouer(&mut session, b"EHLO client.example\r\n");
         assert_eq!(
             reponse,
-            "250-mail.example.com\r\n250-SIZE 10485760\r\n250-PIPELINING\r\n250-CHUNKING\r\n250 AUTH PLAIN\r\n"
+            "250-mail.example.com\r\n250-SIZE 10485760\r\n250-ENHANCEDSTATUSCODES\r\n250-PIPELINING\r\n250-CHUNKING\r\n250 AUTH PLAIN\r\n"
         );
         assert!(!reponse.contains("STARTTLS"));
     }
@@ -2092,7 +2277,7 @@ mod tests {
         let tour = session
             .on_data_settled(DataOutcome::Accepted, &mut tampon)
             .expect("verdict");
-        assert_eq!(tour.reply(), b"250 Message accepted\r\n");
+        assert_eq!(tour.reply(), b"250 2.0.0 Message accepted\r\n");
         // On reste identifié : un autre message peut suivre sans nouvel `EHLO`.
         assert!(jouer(&mut session, b"MAIL FROM:<a@b.co>\r\n").starts_with("250"));
     }
@@ -2143,7 +2328,7 @@ mod tests {
         let tour = session
             .on_data_settled(DataOutcome::Accepted, &mut tampon)
             .expect("verdict");
-        assert_eq!(tour.reply(), b"250 Message accepted\r\n");
+        assert_eq!(tour.reply(), b"250 2.0.0 Message accepted\r\n");
     }
 
     #[test]
@@ -2195,9 +2380,9 @@ mod tests {
         for (contrebande, attendu) in [
             (
                 b"corps\r\n\n.\r\nMAIL FROM:<usurpe@x.co>\r\n".as_slice(),
-                "554 Bare CR or LF in message data\r\n",
+                "554 5.6.0 Bare CR or LF in message data\r\n",
             ),
-            (b"a\r.\r\n", "554 Bare CR or LF in message data\r\n"),
+            (b"a\r.\r\n", "554 5.6.0 Bare CR or LF in message data\r\n"),
         ] {
             let mut session = acceptante();
             jusqu_aux_donnees(&mut session);
@@ -2232,10 +2417,10 @@ mod tests {
         .expect("configurable");
 
         for (flux, attendu) in [
-            (b"abcdef\r\n.\r\n".as_slice(), "500 Line too long\r\n"),
+            (b"abcdef\r\n.\r\n".as_slice(), "500 5.5.2 Line too long\r\n"),
             (
                 b"abcd\r\nabcd\r\n.\r\n",
-                "552 Message exceeds maximum size\r\n",
+                "552 5.3.4 Message exceeds maximum size\r\n",
             ),
         ] {
             let mut session = SmtpSession::new(etroite, Verdict(RecipientVerdict::Accept));
@@ -2293,11 +2478,14 @@ mod tests {
     #[test]
     fn chaque_verdict_de_message_a_sa_reponse() {
         for (verdict, attendu) in [
-            (DataOutcome::Accepted, "250 Message accepted\r\n"),
-            (DataOutcome::RejectedPermanent, "554 Message rejected\r\n"),
+            (DataOutcome::Accepted, "250 2.0.0 Message accepted\r\n"),
+            (
+                DataOutcome::RejectedPermanent,
+                "554 5.7.1 Message rejected\r\n",
+            ),
             (
                 DataOutcome::RejectedTemporary,
-                "451 Message not accepted, try again later\r\n",
+                "451 4.3.2 Message not accepted, try again later\r\n",
             ),
         ] {
             let mut session = acceptante();
@@ -2490,7 +2678,7 @@ mod tests {
         let mut session = acceptante();
         let mut tampon = [0_u8; 128];
         let tour = session.handle(b"QUIT\r\n", &mut tampon).expect("réponse");
-        assert_eq!(tour.reply(), b"221 Bye\r\n");
+        assert_eq!(tour.reply(), b"221 2.0.0 Bye\r\n");
         assert_eq!(tour.action(), Action::Close);
         assert_eq!(
             session.handle(b"NOOP\r\n", &mut tampon),
@@ -2732,7 +2920,7 @@ mod tests {
         let tour = session
             .handle(b"STARTTLS\r\n", &mut tampon)
             .expect("réponse");
-        assert_eq!(tour.reply(), b"220 Ready to start TLS\r\n");
+        assert_eq!(tour.reply(), b"220 2.0.0 Ready to start TLS\r\n");
         assert_eq!(tour.action(), Action::StartTls);
 
         session.on_tls_established();
@@ -2765,7 +2953,7 @@ mod tests {
         identifier(&mut session);
         assert_eq!(
             jouer(&mut session, b"AUTH PLAIN\r\n"),
-            "538 Encryption required for authentication\r\n"
+            "538 5.7.1 Encryption required for authentication\r\n"
         );
     }
 
@@ -2784,7 +2972,7 @@ mod tests {
         let tour = session
             .handle(b"AUTH PLAIN AGplYW4Ab3V2cmUtdG9p\r\n", &mut tampon)
             .expect("réponse");
-        assert_eq!(tour.reply(), b"235 Authentication successful\r\n");
+        assert_eq!(tour.reply(), b"235 2.7.0 Authentication successful\r\n");
         assert_eq!(tour.action(), Action::Continue);
         assert!(session.is_authenticated());
         // Et l'on ne s'authentifie pas deux fois.
@@ -2813,7 +3001,7 @@ mod tests {
         let tour = session
             .feed_auth(REPONSE_JUSTE, &mut tampon)
             .expect("verdict");
-        assert_eq!(tour.reply(), b"235 Authentication successful\r\n");
+        assert_eq!(tour.reply(), b"235 2.7.0 Authentication successful\r\n");
         assert!(session.is_authenticated());
     }
 
@@ -2832,7 +3020,10 @@ mod tests {
             .expect("verdict");
         // Le refus ne dit PAS ce qui a manqué : la différence entre « utilisateur
         // inconnu » et « mot de passe faux » est un annuaire pour qui la mesure.
-        assert_eq!(tour.reply(), b"535 Authentication credentials invalid\r\n");
+        assert_eq!(
+            tour.reply(),
+            b"535 5.7.1 Authentication credentials invalid\r\n"
+        );
         // ET c'est une faute au sens de C8 : mille essais par minute doivent
         // finir par fermer la porte. Une faute de frappe, elle, n'atteint aucun
         // seuil.
@@ -2856,7 +3047,10 @@ mod tests {
         let tour = session
             .feed_auth(b"AHBhdWwAb3V2cmUtdG9p", &mut tampon)
             .expect("verdict");
-        assert_eq!(tour.reply(), b"535 Authentication credentials invalid\r\n");
+        assert_eq!(
+            tour.reply(),
+            b"535 5.7.1 Authentication credentials invalid\r\n"
+        );
     }
 
     #[test]
@@ -2880,7 +3074,7 @@ mod tests {
             let tour = session.feed_auth(reponse, &mut tampon).expect("verdict");
             assert_eq!(
                 tour.reply(),
-                b"535 Authentication credentials invalid\r\n",
+                b"535 5.7.1 Authentication credentials invalid\r\n",
                 "{reponse:?}"
             );
             assert!(!session.is_authenticated());
@@ -2899,7 +3093,10 @@ mod tests {
         let tour = session
             .handle(b"AUTH PLAIN =\r\n", &mut tampon)
             .expect("réponse");
-        assert_eq!(tour.reply(), b"535 Authentication credentials invalid\r\n");
+        assert_eq!(
+            tour.reply(),
+            b"535 5.7.1 Authentication credentials invalid\r\n"
+        );
         assert_eq!(tour.action(), Action::Continue);
     }
 
@@ -2916,7 +3113,7 @@ mod tests {
             .handle(b"AUTH PLAIN\r\n", &mut tampon)
             .expect("défi");
         let tour = session.feed_auth(b"*", &mut tampon).expect("annulation");
-        assert_eq!(tour.reply(), b"501 Authentication aborted\r\n");
+        assert_eq!(tour.reply(), b"501 5.7.0 Authentication aborted\r\n");
         assert!(!tour.peer_fault());
         assert!(!session.is_authenticated());
         // Et la session reprend là où elle en était.
@@ -2937,7 +3134,7 @@ mod tests {
         ] {
             assert_eq!(
                 jouer(&mut session, ligne),
-                "504 Unrecognized authentication type\r\n",
+                "504 5.7.0 Unrecognized authentication type\r\n",
                 "{ligne:?}"
             );
         }
@@ -2953,7 +3150,7 @@ mod tests {
         session.on_tls_established();
         assert_eq!(
             jouer(&mut session, b"AUTH PLAIN\r\n"),
-            "503 Send EHLO first\r\n"
+            "503 5.5.0 Send EHLO first\r\n"
         );
     }
 
@@ -2962,30 +3159,36 @@ mod tests {
     #[test]
     fn noop_vrfy_expn_et_help_repondent_sans_rien_reveler() {
         let mut session = acceptante();
-        assert_eq!(jouer(&mut session, b"NOOP\r\n"), "250 OK\r\n");
+        assert_eq!(jouer(&mut session, b"NOOP\r\n"), "250 2.0.0 OK\r\n");
         // `VRFY` ne dit pas si la boîte existe (RFC 5321 §7.3).
         assert_eq!(
             jouer(&mut session, b"VRFY jean\r\n"),
-            "252 Cannot verify; message will be attempted\r\n"
+            "252 2.0.0 Cannot verify; message will be attempted\r\n"
         );
         // `EXPN` publierait les membres d'une liste.
         assert_eq!(
             jouer(&mut session, b"EXPN liste\r\n"),
-            "502 EXPN not available\r\n"
+            "502 5.5.4 EXPN not available\r\n"
         );
-        assert_eq!(jouer(&mut session, b"HELP\r\n"), "214 See RFC 5321\r\n");
+        assert_eq!(
+            jouer(&mut session, b"HELP\r\n"),
+            "214 2.0.0 See RFC 5321\r\n"
+        );
     }
 
     #[test]
     fn chaque_famille_d_erreur_d_analyse_a_son_code() {
         let mut session = acceptante();
         let bornes = [
-            (b"XYZZY\r\n".as_slice(), "500 Command not recognised\r\n"),
-            (b"TURN\r\n", "502 Command not implemented\r\n"),
-            (b"QUIT", "500 Line must end with CRLF\r\n"),
+            (
+                b"XYZZY\r\n".as_slice(),
+                "500 5.5.1 Command not recognised\r\n",
+            ),
+            (b"TURN\r\n", "502 5.5.4 Command not implemented\r\n"),
+            (b"QUIT", "500 5.5.2 Line must end with CRLF\r\n"),
             (
                 b"MAIL FROM:<pas-une-boite>\r\n",
-                "501 Syntax error in parameters or arguments\r\n",
+                "501 5.5.2 Syntax error in parameters or arguments\r\n",
             ),
         ];
         for (ligne, attendu) in bornes {
@@ -2996,7 +3199,7 @@ mod tests {
         let mut longue = std::vec::Vec::from(b"NOOP ".as_slice());
         longue.extend(std::iter::repeat_n(b'a', 600));
         longue.extend_from_slice(b"\r\n");
-        assert_eq!(jouer(&mut session, &longue), "500 Line too long\r\n");
+        assert_eq!(jouer(&mut session, &longue), "500 5.5.2 Line too long\r\n");
     }
 
     #[test]
@@ -3023,7 +3226,7 @@ mod tests {
         let annonce = jouer(&mut session, b"EHLO client.example\r\n");
         assert_eq!(
             annonce,
-            "250-mail.example.com\r\n250-SIZE 1024\r\n250-PIPELINING\r\n250 CHUNKING\r\n"
+            "250-mail.example.com\r\n250-SIZE 1024\r\n250-ENHANCEDSTATUSCODES\r\n250-PIPELINING\r\n250 CHUNKING\r\n"
         );
         assert!(!annonce.contains("STARTTLS"));
         assert!(!annonce.contains("AUTH"));
@@ -3031,11 +3234,11 @@ mod tests {
         // Et les commandes correspondantes sont refusées comme non servies.
         assert_eq!(
             jouer(&mut session, b"STARTTLS\r\n"),
-            "502 Command not implemented\r\n"
+            "502 5.5.4 Command not implemented\r\n"
         );
         assert_eq!(
             jouer(&mut session, b"AUTH PLAIN\r\n"),
-            "502 Command not implemented\r\n"
+            "502 5.5.4 Command not implemented\r\n"
         );
     }
 
@@ -3121,12 +3324,13 @@ mod tests {
         let mut minuscule = [0_u8; 4];
         assert_eq!(
             session.handle(b"NOOP\r\n", &mut minuscule),
-            Err(tampon_trop_petit(8))
+            Err(tampon_trop_petit(14))
         );
-        // Y compris pour l'`EHLO`, qui est multiligne : 22 + 19 + 16 + 14 + 14.
+        // Y compris pour l'`EHLO`, qui est multiligne : 22 + 19 + 25 + 16 + 14
+        // + 14. Il ne porte AUCUN code étendu — c'est lui qui les négocie.
         assert_eq!(
             session.handle(b"EHLO client.example\r\n", &mut minuscule),
-            Err(tampon_trop_petit(85))
+            Err(tampon_trop_petit(110))
         );
         // Et pour `HELO`, qui ne l'est pas.
         assert_eq!(
