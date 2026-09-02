@@ -35,7 +35,7 @@ use std::string::{String, ToString as _};
 use std::sync::Arc;
 use std::vec::Vec;
 
-use ams_proto_smtp::{Limits, Reply, Stuffer, reply_len, stuffed_max};
+use ams_proto_smtp::{Limits, Reply, Status, Stuffer, reply_len, stuffed_max};
 use ams_session::{
     CLIENT_COMMAND_MAX, ClientConfig, ClientDsn, ClientOutcome, ClientStep, SmtpClient,
 };
@@ -56,7 +56,28 @@ use crate::resolver::{Mx, Resolver};
 pub const SMTP_PORT: u16 = 25;
 
 /// Ce qu'une remise a donné.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Ce qu'un pair a dit en refusant.
+///
+/// # LE CODE NE SUFFIT PAS, ET C'EST TOUT L'OBJET DE CE TYPE
+///
+/// `550` couvre aussi bien une boîte inconnue qu'un refus de politique. Ce qui
+/// distingue les deux est l'ÉTAT ÉTENDU (RFC 3463) et le TEXTE — souvent la
+/// seule chose exploitable qu'un déposant recevra, l'adresse d'une page
+/// d'explication comprise. Les jeter pour n'en garder que le nombre obligeait à
+/// écrire une phrase à la place du pair.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refus {
+    /// Le code de trois chiffres.
+    pub code: u16,
+    /// L'état étendu que le pair a écrit, s'il s'accorde avec son code (§3.2).
+    pub status: Option<Status>,
+    /// Ce que le pair a dit, tel qu'il l'a dit. **Vide s'il n'a rien dit qu'on
+    /// puisse rendre** — le champ est alors omis, jamais inventé.
+    pub diagnostic: String,
+}
+
+/// Ce qu'une tentative de remise a donné.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RelayOutcome {
     /// Le message est parti, et le pair l'a pris en charge.
     Delivered {
@@ -86,9 +107,9 @@ pub enum RelayOutcome {
         dsn_forwarded: bool,
     },
     /// Refus **définitif**. Ne pas réessayer.
-    Rejected(u16),
+    Rejected(Refus),
     /// Refus **temporaire**. Réessayer plus tard.
-    Deferred(u16),
+    Deferred(Refus),
     /// Le domaine déclare ne recevoir aucun courrier (RFC 7505). Définitif.
     NullMx,
     /// Aucun serveur n'a pu être joint. **Temporaire** : une panne de réseau
@@ -280,7 +301,7 @@ impl Relay {
                 // **ON CONSIGNE CHAQUE ESSAI, RÉUSSI COMME MANQUÉ.** §4.2 exige
                 // les DEUX comptes : un rapport qui ne dirait que les échecs ne
                 // permettrait pas de savoir s'ils sont l'exception ou la règle.
-                self.consigner(domaine, hote, dane.is_some(), politique.as_deref(), issue);
+                self.consigner(domaine, hote, dane.is_some(), politique.as_deref(), &issue);
                 if issue != RelayOutcome::Unreachable {
                     return issue;
                 }
@@ -290,7 +311,7 @@ impl Relay {
         // le consigne ici, puisque la boucle ci-dessus ne l'a pas vu.
         if issue == RelayOutcome::PolicyMismatch {
             for hote in &serveurs {
-                self.consigner(domaine, hote, false, politique.as_deref(), issue);
+                self.consigner(domaine, hote, false, politique.as_deref(), &issue);
             }
         }
         issue
@@ -309,7 +330,7 @@ impl Relay {
         hote: &str,
         dane: bool,
         politique: Option<&str>,
-        issue: RelayOutcome,
+        issue: &RelayOutcome,
     ) {
         let Some(rapports) = self.rapports.as_ref() else {
             return;
@@ -686,7 +707,7 @@ enum Suite {
 /// **ON NE DEVINE PAS PLUS QUE CE QU'ON SAIT.** Un pair injoignable n'est pas un
 /// échec de chiffrement : c'est une panne de réseau, et la rapporter comme un
 /// problème de certificat enverrait le domaine chercher au mauvais endroit.
-fn cause_de(issue: RelayOutcome, dane: bool) -> Option<ams_tlsrpt::ResultType> {
+fn cause_de(issue: &RelayOutcome, dane: bool) -> Option<ams_tlsrpt::ResultType> {
     match issue {
         RelayOutcome::Delivered { .. } => None,
         RelayOutcome::NoEncryption if dane => Some(ams_tlsrpt::ResultType::ValidationFailureDane),
@@ -717,6 +738,18 @@ enum Consigne {
     Interdit,
 }
 
+/// Rassemble ce qu'un pair a dit en refusant.
+fn refus_du_client(code: ams_proto_smtp::Code, client: &SmtpClient<'_>) -> Refus {
+    Refus {
+        code: code.value(),
+        status: client.peer_status(),
+        // Le texte est déjà filtré par la session : seul de l'ASCII imprimable
+        // en sort, et une ligne qu'on ne pouvait pas rendre a été écartée
+        // ENTIÈRE plutôt que rafistolée.
+        diagnostic: String::from_utf8_lossy(client.diagnostic()).into_owned(),
+    }
+}
+
 /// Traduit l'issue de la session en issue de remise.
 fn issue_du_client(outcome: ClientOutcome, client: &SmtpClient<'_>) -> RelayOutcome {
     match outcome {
@@ -730,8 +763,11 @@ fn issue_du_client(outcome: ClientOutcome, client: &SmtpClient<'_>) -> RelayOutc
             authenticated: false,
             dsn_forwarded: client.dsn_forwarded(),
         },
-        ClientOutcome::Rejected(code) => RelayOutcome::Rejected(code.value()),
-        ClientOutcome::Deferred(code) => RelayOutcome::Deferred(code.value()),
+        // **CE QUE LE PAIR A DIT REMONTE AVEC SON CODE.** L'écarter ici obligeait
+        // la file à composer un diagnostic de toutes pièces, que le déposant
+        // lisait comme la parole du serveur distant.
+        ClientOutcome::Rejected(code) => RelayOutcome::Rejected(refus_du_client(code, client)),
+        ClientOutcome::Deferred(code) => RelayOutcome::Deferred(refus_du_client(code, client)),
         ClientOutcome::NoEncryption => RelayOutcome::NoEncryption,
         ClientOutcome::Unexpected(_) => RelayOutcome::Protocol,
     }

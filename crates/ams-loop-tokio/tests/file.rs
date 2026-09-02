@@ -264,6 +264,13 @@ async fn la_peremption_rend_le_message_a_son_expediteur() {
         "{rapport}"
     );
     assert!(rapport.contains("Action: failed\r\n"), "{rapport}");
+    // **LE PAIR N'A RIEN DIT** — le résolveur ne mène nulle part, et la
+    // péremption est NOTRE décision. Le champ réservé à sa parole est donc omis
+    // plutôt que rempli d'une phrase de notre cru, que le lecteur prendrait pour
+    // la sienne (§2.3.6 de RFC 3464).
+    assert!(!rapport.contains("Diagnostic-Code"), "{rapport}");
+    // Notre constat, lui, est bien là — dans le texte lisible, qui est le nôtre.
+    assert!(rapport.contains("delivery time expired"), "{rapport}");
     assert!(rapport.contains("Reporting-MTA: dns; mail.nous.test\r\n"));
     // LES EN-TÊTES DU MESSAGE PERDU, ET PAS SON CORPS.
     assert!(rapport.contains("Subject: bonjour\r\n"), "{rapport}");

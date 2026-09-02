@@ -30,6 +30,22 @@
 //!    n'importe où donne exactement le même résultat.
 //! 6. **AUCUNE COMMANDE ÉCRITE NE PORTE DE FIN DE LIGNE PRÉMATURÉE** : ce qu'on
 //!    met sur le fil est UNE ligne, close par un seul `CRLF` final.
+//! 7. **CE QU'ON RETIENT D'UN REFUS EST RENDABLE** : de l'ASCII imprimable, sans
+//!    fin de ligne, et borné. C'est ce qui protège le rapport que nous
+//!    composerons ensuite.
+//!
+//! # LA SEPTIÈME GARDE UN DOCUMENT QUE NOUS SIGNONS
+//!
+//! Le texte d'un refus vient d'un serveur qu'on n'a pas choisi — c'est le
+//! destinataire qui a désigné son `MX` — et il ressort dans le `Diagnostic-Code`
+//! d'un rapport que NOUS composons, que NOUS remettons, et que le client de
+//! notre utilisateur lira comme un document officiel. Un `CRLF` glissé dedans y
+//! écrirait un champ de statut à notre place.
+//!
+//! `Reply::parse` laisse d'ailleurs passer les octets HAUTS — des serveurs
+//! mettent des accents dans leur bannière —, que le composeur de rapport refuse.
+//! Sans filtre, un pair qui refuse en français ferait échouer la composition
+//! ENTIÈRE du rapport, et le déposant n'apprendrait alors plus rien.
 //!
 //! # LA SIXIÈME PROPRIÉTÉ EST NOUVELLE, ET ELLE VISE LE DÉPOSANT
 //!
@@ -184,6 +200,33 @@ fuzz_target!(|entree: Entree<'_>| {
         reste = &reste[longueur..];
     }
     let _ = conclu;
+
+    // ── 7. CE QU'ON RETIENT D'UN REFUS EST RENDABLE ─────────────────────────
+    //
+    // La règle est celle du composeur de rapport : de l'ASCII imprimable, et
+    // l'espace. Un octet de plus, et c'est le rapport entier qui ne se compose
+    // pas — donc un expéditeur qui n'apprend rien.
+    let dit = client.diagnostic();
+    assert!(
+        dit.iter()
+            .all(|octet| octet.is_ascii_graphic() || *octet == b' '),
+        "un octet que le rapport ne saura pas écrire : {dit:?}"
+    );
+    assert!(
+        dit.len() <= ams_session::DIAGNOSTIC_MAX,
+        "{} octets retenus",
+        dit.len()
+    );
+    // **L'ÉTAT RETENU S'ACCORDE TOUJOURS AVEC LE CODE** (§3.2 de RFC 3463) : un
+    // `550 4.x.x` ferait réessayer cinq jours ce qu'un pair a refusé pour de
+    // bon. La propriété ne s'exprime qu'ici, parce que c'est ici qu'on a les
+    // deux.
+    if let Some(statut) = client.peer_status() {
+        assert!(
+            matches!(statut.class(), 2 | 4 | 5),
+            "un état hors des trois classes de §3"
+        );
+    }
 
     // ── Le corps qu'on émet ─────────────────────────────────────────────────
     let mut entier = vec![0_u8; stuffed_max(entree.corps.len())];

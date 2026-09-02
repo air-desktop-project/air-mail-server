@@ -29,7 +29,9 @@
 //! ce serait le travail d'ailleurs — c'est la garantie que rien de ce qu'on
 //! écrit sur le fil ne vient d'être dicté par autrui.
 
-use ams_proto_smtp::{Class, Code, ENVID_MAX, ORCPT_MAX, Reply, XTEXT_GROWTH, encode_xtext};
+use ams_proto_smtp::{
+    Class, Code, ENVID_MAX, ORCPT_MAX, Reply, Status, XTEXT_GROWTH, encode_xtext,
+};
 
 use crate::Error;
 
@@ -47,6 +49,13 @@ use crate::Error;
 /// valeur que le déposant choisit. La borne est donc STRUCTURELLE : elle couvre
 /// le pire, et aucune garde n'a à rattraper le reste.
 pub const CLIENT_COMMAND_MAX: usize = 1536;
+
+/// Ce qu'on retient au plus du texte d'un refus.
+///
+/// Une réponse tient dans 512 octets (RFC 5321 §4.5.3.1.5) et peut porter
+/// plusieurs lignes ; on en garde de quoi rendre un motif et l'adresse d'une
+/// page qui l'explique, sans faire du rapport un dépotoir.
+pub const DIAGNOSTIC_MAX: usize = 512;
 
 /// Ce qu'une valeur de RFC 3461 occupe au plus, une fois ré-encodée en xtext.
 const XTEXT_PIRE: usize = ORCPT_MAX * XTEXT_GROWTH;
@@ -191,6 +200,19 @@ pub struct SmtpClient<'a> {
     /// **`None` tant que l'`EHLO` n'a rien dit** : c'est ce qui garantit qu'on
     /// n'écrit jamais un paramètre que le pair n'a pas annoncé.
     dsn: Option<ClientDsn<'a>>,
+    /// Ce que le pair a dit en refusant, tel qu'il l'a dit.
+    ///
+    /// # POURQUOI LE RETENIR PLUTÔT QUE D'ÉCRIRE UNE PHRASE À SA PLACE
+    ///
+    /// Un code de trois chiffres ne dit presque rien. C'est le TEXTE qui porte
+    /// le motif, et parfois l'adresse d'une page qui l'explique — la seule chose
+    /// exploitable qu'un déposant recevra. L'inventer reviendrait à faire passer
+    /// notre supposition pour la parole du pair, ce que le composeur de rapport
+    /// refuse en toutes lettres.
+    diagnostic: [u8; DIAGNOSTIC_MAX],
+    diagnostic_len: usize,
+    /// L'état étendu que le pair a écrit (RFC 3463 §2), s'il en a écrit un.
+    statut: Option<Status>,
 }
 
 impl<'a> SmtpClient<'a> {
@@ -231,6 +253,9 @@ impl<'a> SmtpClient<'a> {
             acceptes: 0,
             refuses: 0,
             dsn: None,
+            diagnostic: [0; DIAGNOSTIC_MAX],
+            diagnostic_len: 0,
+            statut: None,
         })
     }
 
@@ -534,10 +559,74 @@ impl<'a> SmtpClient<'a> {
     /// Renonce, en disant ce que le code veut dire.
     fn abandonner(&mut self, reply: &Reply<'_>, sent: usize) -> Result<ClientStep, Error> {
         self.etat = Etat::Fini;
+        self.retenir_le_refus(reply);
         Ok(ClientStep::Done {
             sent,
             outcome: issue_du_code(reply.code()),
         })
+    }
+
+    /// Retient ce que le pair a dit en refusant : son état étendu et son texte.
+    ///
+    /// # UNE LIGNE QU'ON NE PEUT PAS RENDRE TOMBE ENTIÈRE
+    ///
+    /// Ce texte ressortira dans un `Diagnostic-Code` que NOUS composons et que
+    /// le client de notre utilisateur lira. Un octet qu'on ne sait pas écrire —
+    /// de l'UTF-8, un caractère de contrôle — ne se remplace pas : le corriger
+    /// serait inventer, et une ligne rafistolée se lirait comme celle du pair.
+    /// Elle est donc écartée, et si tout l'est, le champ sera OMIS.
+    fn retenir_le_refus(&mut self, reply: &Reply<'_>) {
+        self.diagnostic_len = 0;
+        self.statut = None;
+        let mut ecrits = 0_usize;
+        for (rang, ligne) in reply.lines().enumerate() {
+            // **L'ÉTAT NE SE LIT QU'EN TÊTE DE LA PREMIÈRE LIGNE** (§2 de
+            // RFC 3463), et il en est retiré : le recopier dans le texte le
+            // ferait paraître deux fois dans le rapport.
+            let texte = match (rang, Status::parse(ligne)) {
+                (0, Some((statut, suite))) => {
+                    // §3.2 : un `550 4.x.x` ferait réessayer un refus définitif.
+                    // Un état qui contredit son code n'est pas une information,
+                    // c'est un piège.
+                    self.statut = statut.agrees_with(reply.code()).then_some(statut);
+                    suite
+                }
+                _ => ligne,
+            };
+            if !rendu_possible(texte) {
+                continue;
+            }
+            // Les lignes se joignent par un espace : un rapport n'a qu'un champ
+            // `Diagnostic-Code`, et le couper en deux le rendrait illisible.
+            let separateur: &[u8] = if ecrits == 0 { b"" } else { b" " };
+            for morceau in [separateur, texte] {
+                let fin = ecrits.saturating_add(morceau.len());
+                let Some(place) = self.diagnostic.get_mut(ecrits..fin) else {
+                    // **CE QUI NE TIENT PAS S'ARRÊTE ICI**, entier : une phrase
+                    // coupée au milieu changerait de sens.
+                    self.diagnostic_len = ecrits;
+                    return;
+                };
+                place.copy_from_slice(morceau);
+                ecrits = fin;
+            }
+        }
+        self.diagnostic_len = ecrits;
+    }
+
+    /// Ce que le pair a dit en refusant, ou rien.
+    #[must_use]
+    pub fn diagnostic(&self) -> &[u8] {
+        self.diagnostic
+            .get(..self.diagnostic_len)
+            .unwrap_or_default()
+    }
+
+    /// L'état étendu que le pair a écrit, s'il en a écrit un qui s'accorde avec
+    /// son code (RFC 3463 §3.2).
+    #[must_use]
+    pub const fn peer_status(&self) -> Option<Status> {
+        self.statut
     }
 }
 
@@ -586,6 +675,17 @@ fn dsn_recevable(dsn: &ClientDsn<'_>, destinataires: usize) -> bool {
     dsn.reports
         .iter()
         .all(|un| un.original.len() <= ORCPT_MAX && un.original.iter().all(u8::is_ascii_graphic))
+}
+
+/// Cette ligne peut-elle être rendue telle quelle dans un rapport ?
+///
+/// De l'ASCII imprimable, et rien d'autre — la même règle que le composeur du
+/// rapport applique. Une ligne vide n'apporte rien et n'est pas retenue.
+fn rendu_possible(ligne: &[u8]) -> bool {
+    !ligne.is_empty()
+        && ligne
+            .iter()
+            .all(|octet| octet.is_ascii_graphic() || *octet == b' ')
 }
 
 /// Cette valeur peut-elle être écrite dans une commande sans rien y ajouter ?

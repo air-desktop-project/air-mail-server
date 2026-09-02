@@ -1718,6 +1718,14 @@ adresses, puisqu'il ne relaie que pour ses comptes. C'est ce qui le tient hors d
 la **rétro-diffusion** — émettre un rebond vers une adresse qu'un tiers a écrite
 dans un `MAIL FROM:` usurpé ferait de nous l'instrument de son envoi.
 
+**Et ce rapport dit ce que le PAIR a dit, pas ce que nous aurions écrit à sa
+place.** Son état étendu (RFC 3463) est lu plutôt que deviné — un `550` couvre
+aussi bien une boîte inconnue qu'un refus de politique, et deviner faisait écrire
+« adresse erronée » sur un refus où l'adresse était juste. Son texte, souvent la
+seule chose exploitable, arrive entier dans `Diagnostic-Code` ; et quand il n'a
+rien dit — une panne, une péremption — ce champ est **omis**, notre propre
+constat allant dans le texte lisible, où personne ne le prend pour le sien.
+
 Le rapport porte les **en-têtes** du message perdu, pas son corps : renvoyer le
 corps doublerait le volume d'un rapport écrit précisément parce qu'on n'arrivait
 pas à émettre, et un message de dix mégaoctets ne se remet pas mieux quand il
@@ -1987,7 +1995,7 @@ que `llvm-cov` n'instrumente pas sur Rust stable et dont le compteur reste à
 `0 / 0`. Les régions font le travail attendu : chaque bras d'un conditionnel en
 est une.
 
-Le gate mesure aujourd'hui **54 766 régions** et **31 512 lignes**, toutes
+Le gate mesure aujourd'hui **54 988 régions** et **31 624 lignes**, toutes
 couvertes. **Une seule dérogation, et elle est annoncée à chaque exécution** : le
 code *généré* du schéma Cap'n Proto en est exclu — il porte un accesseur par champ
 et par sens, dont la plupart ne seront jamais appelés, et les couvrir n'éprouverait

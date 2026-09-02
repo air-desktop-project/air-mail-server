@@ -3795,7 +3795,7 @@ il l'a commis sur lui-même : une section qui s'intitule « l'état réel » est
 qu'on relit le moins, parce qu'on croit la connaître.
 
 Sont outillées : C1 (les trois étages, et la couverture qui n'est exigible que
-parce qu'ils sont séparés), C2 (le gate mesure 54 766 régions sur 29 crates,
+parce qu'ils sont séparés), C2 (le gate mesure 54 988 régions sur 29 crates,
 toutes couvertes — et il compare des comptes, non un pourcentage arrondi), C3
 (les lints, l'absence d'allocation dans les décodeurs, et 65 cibles de fuzz dont
 la CI vérifie qu'elle les lance toutes), C4 (`ams-tls` n'offre que
@@ -3845,6 +3845,81 @@ la seule vérification qui vaille est la confrontation à l'ABNF de §9, mot par
 mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
+
+## Le rapport disait ce que le pair n'avait pas dit
+
+### ON JETAIT SA PAROLE, ET L'ON ÉCRIVAIT UNE PHRASE À SA PLACE
+
+Quand un serveur distant refusait un message, sa réponse portait deux choses
+utiles : un **état étendu** (RFC 3463, dès qu'il annonce `ENHANCEDSTATUSCODES`)
+et un **texte** qui dit pourquoi. Les deux étaient perdus dès la session
+cliente — `ClientOutcome::Rejected(Code)` ne gardait que le nombre.
+
+La file composait alors `"{code} rejected by remote server"` et le posait dans
+`Diagnostic-Code`, puis DEVINAIT l'état à partir du code seul. Pour un refus
+`550 5.7.1 Message rejected: see https://exemple.fr/pourquoi`, le rapport rendu
+au déposant disait :
+
+| champ | ce qu'on écrivait | ce que le pair avait dit |
+|---|---|---|
+| `Status:` | `5.1.1` — « adresse de destination erronée » | `5.7.1` — refus de politique |
+| `Diagnostic-Code:` | `550 rejected by remote server` | le motif, et l'URL qui l'explique |
+
+On disait à l'utilisateur de corriger une adresse qui était **juste**, et l'on
+détruisait la seule information exploitable.
+
+**Ce n'était pas une omission discutable : c'était la documentation d'`ams-mime`
+prise en défaut par son propre appelant.** Le champ `Failure::diagnostic` porte
+écrit qu'il doit être « OMIS plutôt que rempli d'un texte inventé : un
+diagnostic qu'on aurait écrit soi-même se lirait comme celui du pair ». C'est
+exactement ce que la file faisait.
+
+### LA DÉFENSE GARDAIT UNE PORTE QUE PERSONNE N'EMPRUNTAIT
+
+`fuzz_ams_mime_bounce` existe depuis des tranches pour défendre le
+`Diagnostic-Code` contre « le texte de refus d'un serveur qu'on n'a pas choisi ».
+**Aucun texte de pair n'avait jamais franchi cette porte.** La cible éprouvait
+une entrée hostile qui, en production, n'existait pas.
+
+C'est une leçon en soi : une défense écrite pour un chemin qui n'est pas encore
+branché est juste, et invérifiable. Elle sert enfin.
+
+### CE QU'ON NE PEUT PAS RENDRE TOMBE ENTIER, ET N'EST PAS RAFISTOLÉ
+
+`Reply::parse` laisse passer les octets HAUTS — des serveurs mettent des accents
+dans leur bannière, et refuser une remise pour cela coûterait du courrier. Le
+composeur de rapport, lui, n'écrit que de l'ASCII imprimable.
+
+**Sans filtre, un pair qui refuse en français ferait échouer la composition
+ENTIÈRE du rapport**, et le déposant n'apprendrait alors plus rien du tout.
+Corriger l'octet reviendrait à faire passer notre réparation pour la parole du
+pair. La ligne est donc écartée, entière ; si tout tombe, le champ est omis. Le
+filtrage a lieu dans `ams-session`, sans entrée-sortie, donc couvert à 100 % — et
+`write_bounce` vérifie quand même.
+
+### UN ÉTAT QUI CONTREDIT SON CODE N'EST PAS UNE INFORMATION
+
+§3.2 de RFC 3463 : un `550 4.x.x` ferait réessayer cinq jours durant ce qu'un
+serveur a refusé pour de bon. `Status::agrees_with` existait déjà ; il fallait
+seulement lire l'état pour pouvoir s'en servir. Un état qui ment est écarté, et
+l'on retombe sur le code, qui est ce dont on est sûr.
+
+De même, `5.7.1bis` n'est **pas** un état : §2 veut un espace ou la fin de ligne
+derrière. Le lire quand même prêterait au pair un diagnostic qu'il n'a pas
+écrit.
+
+### NOTRE CONSTAT N'EST PAS SA PAROLE, ET LES DEUX ONT CHACUN LEUR PLACE
+
+Le corollaire, trouvé en corrigeant le premier défaut : pour une panne de réseau
+ou une péremption, **le pair n'a rien dit du tout**, et l'on écrivait pourtant
+notre propre constat dans `Diagnostic-Code`. La même mauvaise attribution, dans
+le cas le plus fréquent.
+
+§2.3.6 de RFC 3464 veut là « le code rendu par le transport » : la parole du
+pair, et rien d'autre. Notre constat a sa place — le texte LISIBLE du rapport,
+qui est le nôtre et que personne ne prend pour autre chose. Un type nommé porte
+désormais les deux séparément, parce qu'un quadruplet de chaînes ne dit pas
+laquelle est laquelle.
 
 ## Trois composeurs pour une réponse, et le troisième avait divergé
 

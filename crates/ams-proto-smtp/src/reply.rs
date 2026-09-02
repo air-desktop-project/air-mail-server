@@ -93,6 +93,42 @@ impl Status {
             .ok_or(Error::BufferTooSmall { needed: ecrits })
     }
 
+    /// Lit l'état étendu qu'une réponse de PAIR porte en tête (RFC 3463 §2).
+    ///
+    /// Rend l'état et **ce qui reste du texte**, l'espace qui les sépare retiré.
+    /// `None` quand la ligne n'en porte pas : c'est le cas ordinaire d'un
+    /// serveur qui n'annonce pas `ENHANCEDSTATUSCODES`.
+    ///
+    /// # POURQUOI LIRE CE QUE LE PAIR A ÉCRIT PLUTÔT QUE LE DEVINER
+    ///
+    /// Un code de trois chiffres ne dit presque rien : `550` couvre aussi bien
+    /// une boîte inconnue qu'un refus de politique. Le deviner à partir du
+    /// nombre revient à écrire dans un rapport une cause que le pair n'a pas
+    /// donnée — et un déposant qui lit « adresse erronée » corrigera une adresse
+    /// qui était juste.
+    ///
+    /// # CE QUI N'EST PAS UN ÉTAT NE LE DEVIENT PAS
+    ///
+    /// Trois nombres, deux points, puis un espace ou la fin de la ligne.
+    /// **Sans ce séparateur, ce n'est pas un état** : un texte qui commencerait
+    /// par `5.7.1bis` n'en est pas un, et le lire comme tel prêterait au pair un
+    /// diagnostic qu'il n'a pas écrit.
+    #[must_use]
+    pub fn parse(texte: &[u8]) -> Option<(Self, &[u8])> {
+        let (classe, reste) = nombre(texte)?;
+        let reste = reste.strip_prefix(b".")?;
+        let (sujet, reste) = nombre(reste)?;
+        let reste = reste.strip_prefix(b".")?;
+        let (detail, reste) = nombre(reste)?;
+        let suite = match reste {
+            [] => reste,
+            [b' ', apres @ ..] => apres,
+            _ => return None,
+        };
+        let classe = u8::try_from(classe).ok()?;
+        Some((Self::new(classe, sujet, detail)?, suite))
+    }
+
     // ── Les états que ce serveur emploie ────────────────────────────────────
     //
     // Ils sont NOMMÉS plutôt qu'écrits sur place : un même refus doit rendre le
@@ -501,6 +537,92 @@ fn check_text(texte: &[u8]) -> Result<(), Error> {
         Ok(())
     } else {
         Err(Error::ReplyTextNotPrintable)
+    }
+}
+
+/// Lit un nombre décimal en tête, et rend ce qui suit.
+///
+/// **AU PLUS TROIS CHIFFRES** (§3 de RFC 3463) : au-delà, ce n'est pas un état,
+/// et s'arrêter à trois ferait lire `5.1234` comme `5.123` suivi d'un `4`.
+fn nombre(texte: &[u8]) -> Option<(u16, &[u8])> {
+    let mut valeur = 0_u16;
+    let mut combien = 0_usize;
+    let mut reste = texte;
+    while let Some((premier, suite)) = reste.split_first() {
+        if !premier.is_ascii_digit() {
+            break;
+        }
+        combien = combien.saturating_add(1);
+        if combien > 3 {
+            return None;
+        }
+        valeur = valeur
+            .saturating_mul(10)
+            .saturating_add(u16::from(premier.wrapping_sub(b'0')));
+        reste = suite;
+    }
+    (combien > 0).then_some((valeur, reste))
+}
+
+#[cfg(test)]
+mod lecture {
+    use super::Status;
+    use crate::Code;
+
+    /// **CE QU'UN PAIR ÉCRIT SE RELIT**, et le texte qui suit reste entier.
+    #[test]
+    fn un_etat_en_tete_se_lit_et_se_retire() {
+        let (statut, reste) = Status::parse(b"5.7.1 Message rejected").expect("un état");
+        assert_eq!(statut.class(), 5);
+        let mut place = [0_u8; 16];
+        assert_eq!(statut.write(&mut place).expect("écrivable"), b"5.7.1");
+        assert_eq!(reste, b"Message rejected");
+        // Un état SEUL, sans texte derrière, en est un aussi.
+        let (statut, reste) = Status::parse(b"4.4.1").expect("un état");
+        assert_eq!(statut.class(), 4);
+        assert_eq!(reste, b"");
+        // Trois chiffres par nombre, c'est le maximum de §3.
+        let (statut, reste) = Status::parse(b"5.999.999 x").expect("un état");
+        assert_eq!(statut.write(&mut place).expect("écrivable"), b"5.999.999");
+        assert_eq!(reste, b"x");
+    }
+
+    /// **CE QUI N'EST PAS UN ÉTAT NE LE DEVIENT PAS.**
+    ///
+    /// Le lire quand même prêterait au pair un diagnostic qu'il n'a pas écrit.
+    #[test]
+    fn ce_qui_n_est_pas_un_etat_est_refuse() {
+        for mauvais in [
+            &b""[..],
+            b"texte simple",
+            b"5",
+            b"5.7",        // il manque le détail
+            b"5.7.",       // et là, ses chiffres
+            b"5..1 x",     // un nombre vide
+            b".7.1 x",     // pas de classe
+            b"5.7.1234 x", // quatre chiffres : §3 en veut trois au plus
+            b"5.7.1bis",   // pas de séparateur derrière
+            b"5.7.1	x",    // une tabulation n'est pas l'espace de §2
+            b"3.7.1 x",    // §3 ne connaît que 2, 4 et 5
+            b"999.1.1 x",  // trois chiffres, mais aucune classe n'en a trois
+            b"-5.7.1 x",
+        ] {
+            assert!(
+                Status::parse(mauvais).is_none(),
+                "{mauvais:?} est passé pour un état"
+            );
+        }
+    }
+
+    /// **UN ÉTAT QUI CONTREDIT SON CODE SE VOIT** (§3.2), et c'est à l'appelant
+    /// d'en décider — la lecture, elle, ne juge pas.
+    #[test]
+    fn l_accord_avec_le_code_se_verifie_a_part() {
+        let (statut, _) = Status::parse(b"4.2.2 Mailbox full").expect("un état");
+        let cinq_cents = Code::new(550).expect("un code");
+        let quatre_cents = Code::new(450).expect("un code");
+        assert!(!statut.agrees_with(cinq_cents));
+        assert!(statut.agrees_with(quatre_cents));
     }
 }
 

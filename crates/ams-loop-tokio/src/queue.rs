@@ -51,7 +51,7 @@ use ams_queue::{
 use ams_session::{ClientDsn, ClientReport};
 
 use crate::delivery::DeliveryFailure;
-use crate::relay::{Outgoing, Relay, RelayOutcome};
+use crate::relay::{Outgoing, Refus, Relay, RelayOutcome};
 
 /// Combien d'en-tête d'un message perdu part dans son rapport.
 ///
@@ -289,9 +289,9 @@ impl Spool {
         // ── L'essai, UN DESTINATAIRE À LA FOIS ──────────────────────────────
         let mut restants: Vec<String> = Vec::new();
         let mut rapports_restants: Vec<Report<'_>> = Vec::new();
-        let mut echecs: Vec<(String, String, String, String)> = Vec::new();
+        let mut echecs: Vec<Sort> = Vec::new();
         let mut succes: Vec<(String, String)> = Vec::new();
-        let mut retards: Vec<(String, String, String, String)> = Vec::new();
+        let mut retards: Vec<Sort> = Vec::new();
         // **UN SEUL APPEL À L'HORLOGE POUR TOUTE LA REPRISE.** Deux lectures
         // pourraient tomber de part et d'autre du seuil, et le même message
         // serait tantôt en retard, tantôt non, pour deux destinataires voisins.
@@ -333,21 +333,22 @@ impl Spool {
                         succes.push(((*adresse).to_string(), rapport.original.to_owned()));
                     }
                 }
-                Issue::Definitif(statut, diagnostic) => {
+                Issue::Definitif(statut, dit_par_le_pair, observe) => {
                     // **`NEVER` FAIT PERDRE LE RAPPORT, ET C'EST CE QU'ON A
                     // DEMANDÉ.** Un déposant qui l'écrit sait que l'échec lui
                     // échappera ; le lui envoyer quand même serait lui refuser
                     // ce qu'il a explicitement demandé.
                     if !rapport.never {
-                        echecs.push((
-                            (*adresse).to_string(),
+                        echecs.push(Sort {
+                            adresse: (*adresse).to_string(),
                             statut,
-                            diagnostic,
-                            rapport.original.to_owned(),
-                        ));
+                            dit_par_le_pair,
+                            observe,
+                            origine: rapport.original.to_owned(),
+                        });
                     }
                 }
-                Issue::Ajourne(statut, diagnostic) => {
+                Issue::Ajourne(statut, dit_par_le_pair, observe) => {
                     // **L'AVIS DE RETARD PART UNE FOIS, ET SEULEMENT SI ON L'A
                     // DEMANDÉ** (§4.1). `NEVER` l'emporte, comme partout, et le
                     // bit `delay_sent` — écrit dans l'enveloppe juste après —
@@ -357,12 +358,13 @@ impl Spool {
                     // authentifié.
                     let mut rapport = rapport;
                     if en_retard && rapport.on_delay && !rapport.never && !rapport.delay_sent {
-                        retards.push((
-                            (*adresse).to_string(),
+                        retards.push(Sort {
+                            adresse: (*adresse).to_string(),
                             statut,
-                            diagnostic,
-                            rapport.original.to_owned(),
-                        ));
+                            dit_par_le_pair,
+                            observe,
+                            origine: rapport.original.to_owned(),
+                        });
                         rapport.delay_sent = true;
                     }
                     restants.push((*adresse).to_string());
@@ -462,12 +464,15 @@ impl Spool {
                     if rapport.never {
                         continue;
                     }
-                    echecs.push((
-                        adresse.clone(),
-                        String::from("4.4.7"),
-                        String::from("delivery time expired"),
-                        rapport.original.to_owned(),
-                    ));
+                    echecs.push(Sort {
+                        adresse: adresse.clone(),
+                        statut: String::from("4.4.7"),
+                        // **LA PÉREMPTION EST NOTRE DÉCISION**, pas celle du
+                        // pair : il n'a rien dit qu'on puisse lui attribuer.
+                        dit_par_le_pair: String::new(),
+                        observe: String::from("delivery time expired"),
+                        origine: rapport.original.to_owned(),
+                    });
                 }
                 let _ = tokio::fs::remove_file(&chemin).await;
                 let _ = tokio::fs::remove_file(&voisin).await;
@@ -516,6 +521,8 @@ impl Spool {
             // Une adresse sans domaine n'a pas de serveur : rien ne l'arrangera.
             return Issue::Definitif(
                 String::from("5.1.3"),
+                // **LE PAIR N'A RIEN DIT** : on n'a même pas su à qui parler.
+                String::new(),
                 String::from("bad destination address"),
             );
         };
@@ -542,15 +549,17 @@ impl Spool {
                 authentifie: authenticated,
                 dsn_transmis: dsn_forwarded,
             },
-            RelayOutcome::Rejected(code) => Issue::Definitif(
-                statut_etendu(code, true),
-                std::format!("{code} rejected by remote server"),
-            ),
+            RelayOutcome::Rejected(refus) => {
+                let (statut, dit) = ce_qu_a_dit_le_pair(&refus, true);
+                let observe = std::format!("{} rejected by remote server", refus.code);
+                Issue::Definitif(statut, dit, observe)
+            }
             // §RFC 7505 : le domaine déclare ne recevoir AUCUN courrier. C'est un
             // refus publié à l'avance, et le confondre avec une panne ferait
             // réessayer des jours durant ce qu'un domaine a explicitement fermé.
             RelayOutcome::NullMx => Issue::Definitif(
                 String::from("5.1.2"),
+                String::new(),
                 String::from("destination domain accepts no mail (null MX)"),
             ),
             // **CE QUI VIENT DE NOUS EST DÉFINITIF.** Un message qu'on ne sait pas
@@ -559,6 +568,7 @@ impl Spool {
             // la nouvelle.
             RelayOutcome::Unsendable => Issue::Definitif(
                 String::from("5.6.0"),
+                String::new(),
                 String::from("message cannot be transmitted as written"),
             ),
             // **UNE POLITIQUE QUI NE NOMME PAS CE SERVEUR AJOURNE**, et ne
@@ -568,22 +578,27 @@ impl Spool {
             // sienne.
             RelayOutcome::PolicyMismatch => Issue::Ajourne(
                 String::from("4.7.0"),
+                String::new(),
                 String::from("destination policy does not list this server"),
             ),
-            RelayOutcome::Deferred(code) => Issue::Ajourne(
-                statut_etendu(code, false),
-                std::format!("{code} deferred by remote server"),
-            ),
+            RelayOutcome::Deferred(refus) => {
+                let (statut, dit) = ce_qu_a_dit_le_pair(&refus, false);
+                let observe = std::format!("{} deferred by remote server", refus.code);
+                Issue::Ajourne(statut, dit, observe)
+            }
             RelayOutcome::Unreachable => Issue::Ajourne(
                 String::from("4.4.1"),
+                String::new(),
                 String::from("no answer from destination server"),
             ),
             RelayOutcome::NoEncryption => Issue::Ajourne(
                 String::from("4.7.4"),
+                String::new(),
                 String::from("destination server offers no encryption, and it is required"),
             ),
             RelayOutcome::Protocol => Issue::Ajourne(
                 String::from("4.5.0"),
+                String::new(),
                 String::from("destination server did not follow the protocol"),
             ),
         }
@@ -683,7 +698,7 @@ impl Spool {
         rendre: &B,
         retour: &str,
         message: &[u8],
-        retards: &[(String, String, String, String)],
+        retards: &[Sort],
         envelope_id: &str,
         depot: u64,
         now: u64,
@@ -694,14 +709,14 @@ impl Spool {
         let echeance = self.reprise.deadline(depot);
         let attentes: Vec<Failure<'_>> = retards
             .iter()
-            .map(|(adresse, statut, diagnostic, origine)| Failure {
-                recipient: adresse.as_bytes(),
-                status: statut.as_bytes(),
-                diagnostic: diagnostic.as_bytes(),
+            .map(|sort| Failure {
+                recipient: sort.adresse.as_bytes(),
+                status: sort.statut.as_bytes(),
+                diagnostic: sort.dit_par_le_pair.as_bytes(),
                 action: MimeAction::Delayed {
                     retry_until: echeance,
                 },
-                original: origine.as_bytes(),
+                original: sort.origine.as_bytes(),
             })
             .collect();
         let identifiant = std::format!("delay-{}-{}@{}", now, self.suivant(), self.mta);
@@ -711,14 +726,19 @@ impl Spool {
              poursuivent. IL N'EST PAS PERDU : cet avis vous parvient parce\r\n\
              que vous aviez demande a etre prevenu d'un retard.\r\n\r\n",
         );
-        for (adresse, statut, diagnostic, _origine) in retards {
+        for sort in retards {
             texte.push_str("  ");
-            texte.push_str(adresse);
+            texte.push_str(&sort.adresse);
             texte.push_str(" : ");
-            texte.push_str(statut);
-            if !diagnostic.is_empty() {
+            texte.push_str(&sort.statut);
+            // Le nôtre puis le sien, dans cet ordre : le lecteur voit lequel est
+            // notre constat et lequel est la parole du serveur distant.
+            for dire in [&sort.observe, &sort.dit_par_le_pair] {
+                if dire.is_empty() {
+                    continue;
+                }
                 texte.push_str(" (");
-                texte.push_str(diagnostic);
+                texte.push_str(dire);
                 texte.push(')');
             }
             texte.push_str("\r\n");
@@ -755,19 +775,22 @@ impl Spool {
         rendre: &B,
         retour: &str,
         message: &[u8],
-        echecs: &[(String, String, String, String)],
+        echecs: &[Sort],
         envelope_id: &str,
         depot: u64,
         now: u64,
     ) -> bool {
         let pannes: Vec<Failure<'_>> = echecs
             .iter()
-            .map(|(adresse, statut, diagnostic, origine)| Failure {
-                recipient: adresse.as_bytes(),
-                status: statut.as_bytes(),
-                diagnostic: diagnostic.as_bytes(),
+            .map(|sort| Failure {
+                recipient: sort.adresse.as_bytes(),
+                status: sort.statut.as_bytes(),
+                // **SEULE LA PAROLE DU PAIR VA ICI** (§2.3.6 de RFC 3464). Notre
+                // propre constat part dans le texte lisible, où personne ne le
+                // prendra pour le sien.
+                diagnostic: sort.dit_par_le_pair.as_bytes(),
                 action: MimeAction::Failed,
-                original: origine.as_bytes(),
+                original: sort.origine.as_bytes(),
             })
             .collect();
         let identifiant = std::format!("bounce-{}-{}@{}", now, self.suivant(), self.mta);
@@ -893,6 +916,32 @@ impl Spool {
 }
 
 /// Ce qu'un essai vers UN destinataire a donné.
+/// Ce qu'un destinataire a subi, tel qu'on le rapportera.
+///
+/// # POURQUOI DEUX TEXTES ET NON UN
+///
+/// `Diagnostic-Code` veut **le code rendu par le transport** (§2.3.6 de
+/// RFC 3464) : c'est la parole du pair, et rien d'autre. Y écrire notre propre
+/// constat — « aucune réponse du serveur de destination » — le ferait passer
+/// pour la sienne, ce que le composeur de rapport interdit en toutes lettres.
+///
+/// Notre constat a sa place : le texte LISIBLE du rapport, qui est le nôtre et
+/// que personne ne prend pour autre chose. Les deux ne se mélangent pas.
+#[derive(Debug, Clone)]
+struct Sort {
+    /// L'adresse qui n'a pas été servie.
+    adresse: String,
+    /// L'état étendu — celui du pair s'il l'a écrit, le nôtre sinon.
+    statut: String,
+    /// Ce que le PAIR a dit. **Vide s'il n'a rien dit qu'on puisse rendre** : le
+    /// champ est alors OMIS.
+    dit_par_le_pair: String,
+    /// Ce que NOUS avons observé, pour le lecteur humain.
+    observe: String,
+    /// L'adresse d'origine que le déposant avait écrite (RFC 3461 §4.2).
+    origine: String,
+}
+
 enum Issue {
     /// Le pair l'a pris en charge, et s'est ou non authentifié.
     Remis {
@@ -903,14 +952,15 @@ enum Issue {
         /// Vrai, **c'est lui qui rendra compte**, et nous nous taisons.
         dsn_transmis: bool,
     },
-    /// Refus définitif : le statut étendu, et ce que le pair a dit.
-    Definitif(String, String),
+    /// Refus définitif : l'état étendu, ce que le PAIR a dit, et ce qu'on a
+    /// observé soi-même. Les deux textes ne se confondent pas.
+    Definitif(String, String, String),
     /// Refus temporaire, ou personne à qui parler.
     ///
     /// **ELLE PORTE LA RAISON**, comme le refus définitif : un avis de retard
     /// qui dirait un code inventé vaudrait moins que pas d'avis du tout, parce
     /// qu'on le croirait.
-    Ajourne(String, String),
+    Ajourne(String, String, String),
 }
 
 /// Y a-t-il quelque chose à passer au saut suivant (RFC 3461 §5.2.1) ?
@@ -984,6 +1034,34 @@ fn entetes(message: &[u8]) -> &[u8] {
 }
 
 /// Le statut étendu (RFC 3463) qu'un code de réponse porte.
+/// Ce qu'un rapport doit dire d'un refus : son état étendu, et son diagnostic.
+///
+/// # ON RECOPIE CE QUE LE PAIR A DIT, ET L'ON NE DEVINE QUE S'IL S'EST TU
+///
+/// Un serveur qui annonce `ENHANCEDSTATUSCODES` (RFC 2034) écrit son état en
+/// tête de sa réponse, et c'est LUI qui sait pourquoi il refuse. Le deviner à
+/// partir du code écrivait `5.1.1` — « adresse de destination erronée » — sur un
+/// `550 5.7.1` qui refusait pour une raison de politique : le déposant corrigeait
+/// alors une adresse qui était juste.
+///
+/// Le diagnostic suit la même règle. **Vide, il sera OMIS** : le composeur de
+/// rapport l'exige, parce qu'un texte qu'on aurait écrit soi-même se lirait
+/// comme celui du pair.
+fn ce_qu_a_dit_le_pair(refus: &Refus, definitif: bool) -> (String, String) {
+    let statut = match refus.status {
+        Some(dit) => {
+            let mut place = [0_u8; 16];
+            dit.write(&mut place).map_or_else(
+                |_| statut_etendu(refus.code, definitif),
+                |ecrit| String::from_utf8_lossy(ecrit).into_owned(),
+            )
+        }
+        None => statut_etendu(refus.code, definitif),
+    };
+    (statut, refus.diagnostic.clone())
+}
+
+/// L'état étendu qu'on DEVINE d'un code, faute que le pair l'ait écrit.
 fn statut_etendu(code: u16, definitif: bool) -> String {
     let classe = if definitif { '5' } else { '4' };
     // On ne prétend pas lire dans le code plus qu'il ne dit : `550` peut être
@@ -997,19 +1075,25 @@ fn statut_etendu(code: u16, definitif: bool) -> String {
 }
 
 /// Ce que lira l'humain qui ouvrira le rapport.
-fn texte_du_rapport(echecs: &[(String, String, String, String)]) -> String {
+fn texte_du_rapport(echecs: &[Sort]) -> String {
     let mut texte = String::from(
         "Ce message n'a pas pu etre remis a un ou plusieurs destinataires.\r\n\
          \r\n\
          Aucune autre tentative n'aura lieu ; les en-tetes du message d'origine\r\n\
          sont joints ci-dessous.\r\n\r\n",
     );
-    for (adresse, statut, diagnostic, _origine) in echecs {
+    for sort in echecs {
         texte.push_str("  ");
-        texte.push_str(adresse);
+        texte.push_str(&sort.adresse);
         texte.push_str(" : ");
-        texte.push_str(statut);
-        if !diagnostic.is_empty() {
+        texte.push_str(&sort.statut);
+        // **NOTRE CONSTAT D'ABORD, LA PAROLE DU PAIR ENSUITE**, et le lecteur
+        // voit laquelle est laquelle. C'est ici que va ce qu'on a observé
+        // soi-même : le champ `Diagnostic-Code`, lui, est réservé au pair.
+        for dire in [&sort.observe, &sort.dit_par_le_pair] {
+            if dire.is_empty() {
+                continue;
+            }
             // **DE L'ASCII, ET RIEN D'AUTRE.** Ce texte traverse
             // `write_bounce`, qui refuse tout octet hors de l'ASCII imprimable —
             // et il a raison : un rapport composé sans jeu de caractères déclaré
@@ -1017,7 +1101,7 @@ fn texte_du_rapport(echecs: &[(String, String, String, String)]) -> String {
             // cadratin écrit ici a fait refuser le rapport entier, donc perdre
             // la nouvelle que l'expéditeur attendait.
             texte.push_str(" - ");
-            texte.push_str(diagnostic);
+            texte.push_str(dire);
         }
         texte.push_str("\r\n");
     }

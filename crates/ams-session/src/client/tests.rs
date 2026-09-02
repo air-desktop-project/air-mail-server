@@ -829,3 +829,136 @@ fn une_commande_dsn_a_l_etroit_le_dit_a_chaque_morceau() {
         );
     }
 }
+
+// ── CE QUE LE PAIR A DIT EN REFUSANT ────────────────────────────────────────
+
+/// Conduit la session jusqu'au refus, et rend le client.
+fn refuse(reponse: &'static [u8]) -> SmtpClient<'static> {
+    let mut client = SmtpClient::new(config()).expect("configurable");
+    let _ = pas(&mut client, b"220 eux.test ESMTP\r\n");
+    let _ = pas(&mut client, b"250 eux.test\r\n");
+    let _ = pas(&mut client, reponse);
+    client
+}
+
+/// **UN CODE DE TROIS CHIFFRES NE DIT PRESQUE RIEN**, et le deviner coûte.
+///
+/// `550` couvre aussi bien une boîte inconnue qu'un refus de politique. En
+/// devinant, ce serveur écrivait `5.1.1` — « adresse de destination erronée » —
+/// sur un `550 5.7.1`, et le déposant corrigeait une adresse qui était juste.
+#[test]
+fn l_etat_etendu_du_pair_est_lu_plutot_que_devine() {
+    let client = refuse(b"550 5.7.1 Message rejected: see https://exemple.fr/pourquoi\r\n");
+    let statut = client.peer_status().expect("le pair a écrit un état");
+    assert_eq!(statut.class(), 5);
+    let mut place = [0_u8; 16];
+    assert_eq!(statut.write(&mut place).expect("écrivable"), b"5.7.1");
+    // **ET SON TEXTE ARRIVE ENTIER**, l'état retiré pour ne pas le dire deux
+    // fois. C'est la seule chose exploitable que le déposant recevra.
+    assert_eq!(
+        client.diagnostic(),
+        b"Message rejected: see https://exemple.fr/pourquoi"
+    );
+}
+
+/// **UN ÉTAT QUI CONTREDIT SON CODE N'EST PAS UNE INFORMATION** (§3.2 de
+/// RFC 3463).
+///
+/// Un `550 4.x.x` ferait réessayer cinq jours durant ce qu'un serveur a refusé
+/// définitivement. On garde alors le code, qui est ce dont on est sûr.
+#[test]
+fn un_etat_qui_contredit_son_code_est_ecarte() {
+    let client = refuse(b"550 4.2.2 Mailbox full\r\n");
+    assert_eq!(client.peer_status(), None);
+    // Le texte, lui, reste : c'est l'ÉTAT qui mentait, pas la phrase.
+    assert_eq!(client.diagnostic(), b"Mailbox full");
+}
+
+/// **CE QUI N'EST PAS UN ÉTAT NE LE DEVIENT PAS.**
+///
+/// Sans le séparateur qu'exige §2, un texte qui commence par des chiffres n'est
+/// pas un état — et le lire comme tel prêterait au pair un diagnostic qu'il n'a
+/// pas écrit.
+#[test]
+fn un_texte_qui_ressemble_a_un_etat_n_en_est_pas_un() {
+    for (reponse, texte) in [
+        (&b"550 5.7.1bis nothing\r\n"[..], &b"5.7.1bis nothing"[..]),
+        (b"550 5.7 incomplete\r\n", b"5.7 incomplete"),
+        (b"550 5.7.1234 too long\r\n", b"5.7.1234 too long"),
+        (b"550 no status at all\r\n", b"no status at all"),
+    ] {
+        let client = refuse(reponse);
+        assert_eq!(client.peer_status(), None, "{reponse:?}");
+        assert_eq!(client.diagnostic(), texte, "{reponse:?}");
+    }
+    // Un état SEUL, sans texte derrière, reste un état.
+    let client = refuse(b"550 5.7.1\r\n");
+    assert_eq!(client.peer_status().map(|dit| dit.class()), Some(5));
+    assert_eq!(client.diagnostic(), b"");
+}
+
+/// **UNE LIGNE QU'ON NE PEUT PAS RENDRE TOMBE ENTIÈRE**, et n'est pas rafistolée.
+///
+/// # CE N'EST PAS UN CAS DE LABORATOIRE
+///
+/// `Reply::parse` laisse passer les octets HAUTS — des serveurs mettent des
+/// accents dans leur bannière, et refuser une remise pour cela coûterait du
+/// courrier. Mais le composeur de rapport, lui, n'écrit que de l'ASCII
+/// imprimable : un pair qui refuse en français ferait échouer la COMPOSITION
+/// ENTIÈRE du rapport, et le déposant n'apprendrait alors plus rien du tout.
+///
+/// Corriger l'octet reviendrait à faire passer notre réparation pour la parole
+/// du pair. La ligne est donc écartée, entière.
+#[test]
+fn une_ligne_qu_on_ne_peut_pas_rendre_est_ecartee() {
+    // « Boîte inconnue » en UTF-8 : la ligne entière est écartée.
+    let client = refuse(b"550 5.7.1 Bo\xc3\xaete inconnue\r\n");
+    assert_eq!(client.diagnostic(), b"");
+    // L'état, lui, avait déjà été lu : il ne dépend pas du texte.
+    assert_eq!(client.peer_status().map(|dit| dit.class()), Some(5));
+
+    // Une tabulation aussi : le composeur ne l'écrit pas dans ce champ.
+    let client = refuse(b"550 5.7.1 refus\tici\r\n");
+    assert_eq!(client.diagnostic(), b"");
+
+    // Et dans une réponse à plusieurs lignes, SEULE la ligne fautive tombe.
+    let client = refuse(b"550-5.7.1 le motif\r\n550-boi\xc3\xaete pleine\r\n550 et la suite\r\n");
+    assert_eq!(client.diagnostic(), b"le motif et la suite");
+}
+
+/// **UN TEXTE DÉMESURÉ S'ARRÊTE SUR UNE LIGNE ENTIÈRE**, jamais au milieu.
+///
+/// Une phrase coupée changerait de sens, et c'est celle du pair qu'on rendrait
+/// fausse.
+#[test]
+fn un_texte_demesure_s_arrete_proprement() {
+    // Chaque ligne fait 200 octets utiles ; la troisième ne tiendrait pas.
+    let client = refuse(
+        b"550-5.7.1 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n\
+          550-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\r\n\
+          550 ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\r\n",
+    );
+    let dit = client.diagnostic();
+    assert!(dit.len() <= super::DIAGNOSTIC_MAX, "{}", dit.len());
+    // Ce qui tient est entier : aucune ligne n'est coupée au milieu.
+    assert!(dit.starts_with(b"aaaa"), "{}", dit.len());
+    assert!(
+        !dit.contains(&b'c'),
+        "une ligne a été coupée : {}",
+        dit.len()
+    );
+}
+
+/// **UN SUCCÈS NE LAISSE AUCUN DIAGNOSTIC.**
+///
+/// Ce qui n'est pas un refus n'a rien à faire dire au pair — et un diagnostic
+/// qui traînerait d'un échange précédent se lirait comme celui de celui-ci.
+#[test]
+fn un_succes_ne_laisse_aucun_diagnostic() {
+    let mut client = SmtpClient::new(config()).expect("configurable");
+    let _ = pas(&mut client, b"220 eux.test ESMTP\r\n");
+    let _ = pas(&mut client, b"250 eux.test\r\n");
+    let _ = pas(&mut client, b"250 ok\r\n");
+    assert_eq!(client.diagnostic(), b"");
+    assert_eq!(client.peer_status(), None);
+}

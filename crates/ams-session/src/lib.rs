@@ -146,7 +146,7 @@ mod tampon;
 pub use ams_spf::{Identity, RECEIVED_SPF_MAX};
 pub use client::{
     CLIENT_COMMAND_MAX, ClientConfig, ClientDsn, ClientOutcome, ClientReport, ClientStep,
-    SmtpClient,
+    DIAGNOSTIC_MAX, SmtpClient,
 };
 pub use config::{Capabilities, Config, SenderPolicy};
 pub use error::Error;

@@ -266,9 +266,22 @@ async fn un_destinataire_que_le_pair_refuse_fait_renoncer() {
         .with_port(adresse.port())
         .send_to("mail.eux.test", adresse, &message(&destinataires))
         .await;
+    let RelayOutcome::Rejected(refus) = &issue else {
+        panic!("le refus devait être définitif : {issue:?}");
+    };
+    assert!((500..600).contains(&refus.code), "{issue:?}");
+    // **CE QUE LE PAIR A DIT REMONTE**, et ce n'est pas une phrase de notre cru :
+    // c'est notre propre serveur qui refuse ici, et son texte est reconnaissable.
     assert!(
-        matches!(issue, RelayOutcome::Rejected(code) if (500..600).contains(&code)),
-        "{issue:?}"
+        refus.diagnostic.contains("Relay access denied"),
+        "le texte du pair s'est perdu : {refus:?}"
+    );
+    // Il annonce `ENHANCEDSTATUSCODES`, donc son état étendu est lu plutôt que
+    // deviné — et `5.7.1` n'est PAS ce que le code seul aurait fait écrire.
+    assert_eq!(
+        refus.status.map(|dit| dit.class()),
+        Some(5),
+        "l'état du pair s'est perdu : {refus:?}"
     );
     assert!(cahier.0.lock().expect("verrou").is_empty());
 }
