@@ -29,6 +29,8 @@ ams-proto-pop3 = { workspace = true }
 ams-proto-imap = { workspace = true }
 ams-proto-smtp = { workspace = true }
 ams-session = { workspace = true }
+# Les rapports de remise (RFC 3461) que la file porte pour chaque destinataire.
+ams-queue = { workspace = true }
 ams-store = { workspace = true }
 ams-auth = { workspace = true }
 ams-sasl = { workspace = true }

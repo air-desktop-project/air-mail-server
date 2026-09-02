@@ -7,6 +7,8 @@ const ECHEC: Failure<'static> = Failure {
     recipient: b"marie@ailleurs.test",
     status: b"5.1.1",
     diagnostic: b"550 5.1.1 <marie@ailleurs.test>: User unknown",
+    action: super::Action::Failed,
+    original: b"",
 };
 
 /// Un rapport bien formé, dont chaque essai modifie une pièce.
@@ -22,6 +24,7 @@ fn rapport<'a, 'f>(echecs: &'f [Failure<'a>]) -> Bounce<'a, 'f> {
         boundary: b"----ams-abcdef",
         text: b"Votre message n'a pas pu etre remis.\r\n",
         failures: echecs,
+        envelope_id: b"",
         original_headers: b"From: jean@example.com\r\nSubject: bonjour\r\n",
     }
 }
@@ -92,6 +95,8 @@ fn chaque_destinataire_a_son_groupe() {
         recipient: b"paul@encore.test",
         status: b"4.4.1",
         diagnostic: b"",
+        action: super::Action::Failed,
+        original: b"",
     };
     let texte = composer(&rapport(&[ECHEC, autre]));
     assert_eq!(texte.matches("Final-Recipient: rfc822; ").count(), 2);
@@ -369,4 +374,103 @@ fn les_types_se_copient_et_se_deboguent() {
     let bounce = rapport(&[ECHEC]);
     let jumelle = bounce;
     assert!(!std::format!("{jumelle:?}").is_empty());
+}
+
+/// **LE RAPPORT DE SUCCÈS EST LE MÊME DOCUMENT** (RFC 3464 §2), et seuls le mot
+/// de `Action:` et le code d'état le distinguent.
+#[test]
+fn un_rapport_de_succes_dit_delivered_et_nomme_l_adresse_d_origine() {
+    let remis = Failure {
+        recipient: b"marie@ailleurs.test",
+        status: b"2.0.0",
+        diagnostic: b"",
+        action: super::Action::Delivered,
+        original: b"marie+liste@ailleurs.test",
+    };
+    let echecs = [remis];
+    let rapport = Bounce {
+        envelope_id: b"envoi-42",
+        ..rapport(&echecs)
+    };
+    let texte = composer(&rapport);
+
+    assert!(
+        texte.contains("\r\nAction: delivered\r\nStatus: 2.0.0\r\n"),
+        "{texte}"
+    );
+    // **`Original-Recipient` VIENT AVANT `Final-Recipient`** (§2.3.2), et
+    // seulement quand le déposant l'a écrite.
+    let origine = texte.find("Original-Recipient: rfc822; marie+liste@ailleurs.test");
+    let finale = texte.find("Final-Recipient: rfc822; marie@ailleurs.test");
+    assert!(origine.is_some() && finale.is_some(), "{texte}");
+    assert!(origine < finale, "{texte}");
+    // L'identifiant d'enveloppe du déposant (§6.1).
+    assert!(
+        texte.contains("Original-Envelope-Id: envoi-42\r\n"),
+        "{texte}"
+    );
+    // **AUCUN DIAGNOSTIC** : le pair n'a rien dit d'autre que oui.
+    assert!(!texte.contains("Diagnostic-Code"), "{texte}");
+    assert_eq!(super::Action::Delivered.name(), "delivered");
+    assert_eq!(super::Action::Failed.name(), "failed");
+    assert_eq!(super::Action::default(), super::Action::Failed);
+    assert!(!std::format!("{:?}", super::Action::Delivered).is_empty());
+}
+
+/// **CE QUI NE TIENT PAS LE DIT**, y compris les champs que RFC 3461 ajoute.
+#[test]
+fn un_rapport_de_succes_qui_ne_tient_pas_est_une_erreur() {
+    let remis = Failure {
+        recipient: b"marie@ailleurs.test",
+        status: b"2.0.0",
+        diagnostic: b"",
+        action: super::Action::Delivered,
+        original: b"marie+liste@ailleurs.test",
+    };
+    let echecs = [remis];
+    let rapport = Bounce {
+        envelope_id: b"envoi-42",
+        ..rapport(&echecs)
+    };
+    let complet = composer(&rapport).len();
+    for taille in 0..complet {
+        let mut place = std::vec![0_u8; taille];
+        assert!(
+            write_bounce(&mut place, &rapport).is_err(),
+            "une taille de {taille} a suffi"
+        );
+    }
+}
+
+/// **CE QUI VIENT DU DÉPOSANT EST VÉRIFIÉ ICI**, et pas seulement à la session.
+///
+/// Ces deux valeurs ressortent dans des en-têtes du rapport : un `CRLF` glissé
+/// dedans y écrirait un champ entier sous notre nom. Le fuzz l'a rappelé, sur la
+/// cible même de ce rapport.
+#[test]
+fn une_valeur_de_rfc_3461_irrecevable_est_refusee() {
+    for mauvaise in [&b"a\r\nX-Faux: oui"[..], b"a\nb", b"a b", b"caf\xc3\xa9"] {
+        let echec = Failure {
+            original: mauvaise,
+            ..ECHEC
+        };
+        let echecs = [echec];
+        let mut place = std::vec![0_u8; 4096];
+        assert_eq!(
+            write_bounce(&mut place, &rapport(&echecs)).map(<[u8]>::len),
+            Err(Error::NotPrintable),
+            "{mauvaise:?} est passée en adresse d'origine"
+        );
+
+        let echecs = [ECHEC];
+        let rapport = Bounce {
+            envelope_id: mauvaise,
+            ..rapport(&echecs)
+        };
+        assert_eq!(
+            write_bounce(&mut place, &rapport).map(<[u8]>::len),
+            Err(Error::NotPrintable),
+            "{mauvaise:?} est passée en identifiant d'enveloppe"
+        );
+    }
 }

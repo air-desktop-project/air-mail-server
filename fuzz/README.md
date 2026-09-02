@@ -81,7 +81,7 @@ deux fois, les deux fois en changeant un trait que les cibles implémentent ; la
 première, la cible ne compilait plus depuis deux commits sans que rien ne le
 dise.
 
-    scripts/check-fuzz.sh            # la liste, et la compilation des 64 cibles
+    scripts/check-fuzz.sh            # la liste, et la compilation des 65 cibles
     scripts/check-fuzz.sh --smoke    # et vingt secondes chacune
     AMS_FUZZ_SECONDES=300 scripts/check-fuzz.sh --smoke   # une vraie campagne
 
@@ -169,6 +169,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_smtp_data` | `seeds/smtp-data` | la phase de données — **indépendance au découpage** |
 | `fuzz_ams_smtp_chunk` | `seeds/smtp-chunk` | les morceaux de `BDAT` — **on ne consomme jamais plus que ce qui est annoncé**, et le découpage ne change rien |
 | `fuzz_ams_smtp_literal` | `seeds/smtp-literal` | le littéral d'adresse d'un `EHLO` — **notre verdict est celui de `core::net`**, pour IPv4 comme pour IPv6 |
+| `fuzz_ams_smtp_dsn` | `seeds/smtp-dsn` | les paramètres de RFC 3461 — **un xtext décodé ne grandit jamais**, ce qui sort est de l'ASCII visible, et `NEVER` ne se combine avec rien |
 | `fuzz_ams_smtp_client` | `seeds/smtp-client` | réponses lues et corps émis — **le message ne se termine pas tout seul** |
 | `fuzz_ams_session_smtp` | `seeds/session` | la session — **vocabulaire de sortie clos** |
 | `fuzz_ams_queue` | `seeds/queue` | la file de réémission — **un nom écrit se relit et ne sort pas du répertoire**, une enveloppe ne s'invente pas de destinataire |

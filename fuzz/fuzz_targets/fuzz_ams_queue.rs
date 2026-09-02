@@ -35,7 +35,7 @@
 use core::time::Duration;
 
 use ams_queue::{
-    Backoff, Decision, Entry, Envelope, NAME_MAX, envelope_max, parse_envelope, parse_name,
+    Backoff, Decision, Entry, Envelope, NAME_MAX, Report, envelope_max, parse_envelope, parse_name,
     write_envelope, write_name,
 };
 use arbitrary::Arbitrary;
@@ -65,7 +65,8 @@ fuzz_target!(|entree: Entree| {
     // ── 1. Relire n'importe quoi ne panique jamais ──────────────────────────
     let _ = parse_name(&entree.nom);
     let mut cases = [""; 128];
-    let _ = parse_envelope(&entree.fichier, &mut cases);
+    let mut rapports = [Report::default(); 128];
+    let _ = parse_envelope(&entree.fichier, &mut cases, &mut rapports);
 
     // ── 2. UN NOM ÉCRIT SE RELIT À L'IDENTIQUE, ET NE SORT PAS ──────────────
     let voulu = Entry {
@@ -95,11 +96,15 @@ fuzz_target!(|entree: Entree| {
     let enveloppe = Envelope {
         return_path: &entree.retour,
         recipients: &destinataires,
+        envelope_id: "",
+        reports: &[],
     };
     let mut tampon = vec![0_u8; envelope_max(&enveloppe)];
     if let Ok(ecrite) = write_envelope(&enveloppe, &mut tampon) {
         let mut relues = vec![""; destinataires.len()];
-        let relue = parse_envelope(ecrite, &mut relues).expect("ce qu'on écrit se relit");
+        let mut rapports_relus = [Report::default(); 128];
+        let relue = parse_envelope(ecrite, &mut relues, &mut rapports_relus)
+            .expect("ce qu'on écrit se relit");
         assert_eq!(relue.return_path, entree.retour);
         assert_eq!(relue.recipients, destinataires.as_slice());
     }

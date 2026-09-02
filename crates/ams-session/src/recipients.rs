@@ -16,6 +16,8 @@
 //! l'autre est atteinte, la réponse est la même — `452`, que la RFC 5321
 //! §4.5.3.1.10 prévoit exactement pour cela.
 
+use ams_proto_smtp::Notify;
+
 /// Combien de destinataires une transaction peut retenir.
 ///
 /// Cent, qui est le MINIMUM que la RFC 5321 §4.5.3.1.8 impose d'accepter. En
@@ -39,8 +41,42 @@ pub const ARENA_OCTETS: usize = 8192;
 pub struct Recipients {
     arene: [u8; ARENA_OCTETS],
     fins: [usize; RECIPIENTS_MAX],
+    /// Ce que chaque destinataire a demandé du sort de son message (RFC 3461
+    /// §4.1), et son adresse d'origine (§4.2).
+    ///
+    /// # POURQUOI PAR DESTINATAIRE, ET NON PAR MESSAGE
+    ///
+    /// Deux `RCPT` d'une même transaction peuvent demander deux choses
+    /// différentes — l'un un rapport de succès, l'autre le silence — et c'est
+    /// tout l'objet de §4.1. Une seule valeur par transaction ferait honorer
+    /// celle du dernier `RCPT` pour tout le monde.
+    rapports: [Rapport; RECIPIENTS_MAX],
     combien: usize,
     utilise: usize,
+}
+
+/// Ce qu'un destinataire a demandé, et d'où il vient.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rapport {
+    /// Ce dont on doit rendre compte (§4.1).
+    pub notify: Notify,
+    /// La fin de l'adresse d'origine dans l'arène, et sa longueur.
+    ///
+    /// Zéro : le pair n'en a pas donné, et c'est le cas ordinaire.
+    orcpt_fin: usize,
+    orcpt_len: usize,
+}
+
+impl Rapport {
+    /// L'adresse d'origine, si le pair en a donné une.
+    #[must_use]
+    const fn vide() -> Self {
+        Self {
+            notify: Notify::DEFAUT,
+            orcpt_fin: 0,
+            orcpt_len: 0,
+        }
+    }
 }
 
 impl Recipients {
@@ -50,6 +86,7 @@ impl Recipients {
         Self {
             arene: [0; ARENA_OCTETS],
             fins: [0; RECIPIENTS_MAX],
+            rapports: [Rapport::vide(); RECIPIENTS_MAX],
             combien: 0,
             utilise: 0,
         }
@@ -121,6 +158,48 @@ impl Recipients {
         true
     }
 
+    /// Retient ce que le DERNIER destinataire accepté a demandé (RFC 3461).
+    ///
+    /// L'adresse d'origine va dans la même arène que les adresses : rien ne
+    /// croît, et la borne des huit kibioctets vaut pour les deux. Si elle n'y
+    /// tient pas, elle est OUBLIÉE plutôt que tronquée — un `Original-Recipient`
+    /// à moitié écrit désignerait quelqu'un d'autre.
+    pub fn poser_le_rapport(&mut self, notify: Notify, orcpt: &[u8]) {
+        let Some(dernier) = self.combien.checked_sub(1) else {
+            return;
+        };
+        let mut rapport = Rapport {
+            notify,
+            orcpt_fin: 0,
+            orcpt_len: 0,
+        };
+        if !orcpt.is_empty() {
+            let fin = self.utilise.saturating_add(orcpt.len());
+            if let Some(cible) = self.arene.get_mut(self.utilise..fin) {
+                cible.copy_from_slice(orcpt);
+                rapport.orcpt_fin = fin;
+                rapport.orcpt_len = orcpt.len();
+                self.utilise = fin;
+            }
+        }
+        // **PAS DE GARDE ICI** : `push` ne peut pas porter `combien` au-delà de
+        // `RECIPIENTS_MAX` — c'est sa case de `fins` qui l'en empêche —, donc
+        // `dernier` désigne toujours une case. Un `if let` y ouvrirait une
+        // branche que rien ne pourrait emprunter.
+        for place in self.rapports.iter_mut().skip(dernier).take(1) {
+            *place = rapport;
+        }
+    }
+
+    /// Ce que le destinataire de rang `rang` a demandé.
+    #[must_use]
+    pub fn rapport(&self, rang: usize) -> Option<(Notify, &[u8])> {
+        let rapport = self.rapports.get(rang).filter(|_| rang < self.combien)?;
+        let debut = rapport.orcpt_fin.saturating_sub(rapport.orcpt_len);
+        let orcpt = self.arene.get(debut..rapport.orcpt_fin).unwrap_or_default();
+        Some((rapport.notify, orcpt))
+    }
+
     /// Les adresses retenues, dans l'ordre où elles ont été acceptées.
     pub fn iter(&self) -> impl Iterator<Item = &[u8]> {
         // `fins` porte les fins ; le début d'une adresse est la fin de la
@@ -146,6 +225,7 @@ impl Default for Recipients {
 #[cfg(test)]
 mod tests {
     use super::{ARENA_OCTETS, RECIPIENTS_MAX, Recipients};
+    use ams_proto_smtp::Notify;
 
     fn liste(adresses: &[&[u8]]) -> Recipients {
         let mut retenus = Recipients::new();
@@ -230,5 +310,49 @@ mod tests {
         assert!(retenus.push(&[b"paul@example.org"]));
         let vus: std::vec::Vec<&[u8]> = retenus.iter().collect();
         assert_eq!(vus, std::vec![&b"paul@example.org"[..]]);
+    }
+
+    /// **UNE ADRESSE D'ORIGINE QUI NE TIENT PAS EST OUBLIÉE**, et non tronquée.
+    ///
+    /// Un `Original-Recipient` à moitié écrit désignerait quelqu'un d'autre —
+    /// et ce champ ressort dans un rapport que le déposant lira.
+    #[test]
+    fn une_adresse_d_origine_qui_ne_tient_pas_est_oubliee() {
+        let mut liste = Recipients::new();
+        // On remplit l'arène jusqu'à ce qu'il n'y reste plus la place.
+        let bourrage = [b'a'; 512];
+        while liste.push(&[&bourrage]) {}
+        assert!(
+            liste.rapport(0).is_some(),
+            "au moins une adresse est passée"
+        );
+
+        let dernier = (0..RECIPIENTS_MAX)
+            .take_while(|rang| liste.rapport(*rang).is_some())
+            .count()
+            .saturating_sub(1);
+        liste.poser_le_rapport(Notify::DEFAUT, &bourrage);
+        let (notify, orcpt) = liste.rapport(dernier).expect("un rapport");
+        assert!(notify.on_failure(), "ce qu'on demandait est retenu");
+        assert!(orcpt.is_empty(), "l'adresse d'origine a été oubliée");
+    }
+
+    /// **SANS DESTINATAIRE, IL N'Y A RIEN À QUOI RATTACHER UN RAPPORT.**
+    ///
+    /// L'appelant ne pose un rapport qu'après un `RCPT` accepté ; la garde tient
+    /// quand même, et le dire ici évite d'avoir à le supposer.
+    #[test]
+    fn un_rapport_sans_destinataire_ne_se_pose_pas() {
+        let mut liste = Recipients::new();
+        liste.poser_le_rapport(Notify::DEFAUT, b"marie@x.test");
+        assert_eq!(liste.rapport(0), None);
+
+        assert!(liste.push(&[b"marie@x.test"]));
+        liste.poser_le_rapport(Notify::DEFAUT, b"marie+liste@x.test");
+        let (notify, orcpt) = liste.rapport(0).expect("un rapport");
+        assert!(notify.on_failure() && !notify.never());
+        assert_eq!(orcpt, b"marie+liste@x.test");
+        // Au-delà de ce qui a été accepté, il n'y a rien.
+        assert_eq!(liste.rapport(1), None);
     }
 }

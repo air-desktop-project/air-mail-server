@@ -92,6 +92,36 @@ pub trait Delivery {
         false
     }
 
+    /// L'identifiant d'enveloppe que le déposant a donné (RFC 3461 §4.4).
+    ///
+    /// Appelée après [`Delivery::begin`], et seulement si le pair en a donné un.
+    /// Il ressort tel quel dans le rapport, en `Original-Envelope-Id` : c'est ce
+    /// qui permet au déposant de rattacher un rapport à son envoi sans lire le
+    /// message.
+    ///
+    /// **LE DÉFAUT L'OUBLIE**, et ne peut donc que priver d'un champ — jamais en
+    /// fabriquer un faux.
+    fn envelope_id(&mut self, id: &[u8]) {
+        let _ = id;
+    }
+
+    /// Ce que le DERNIER destinataire accepté a demandé (RFC 3461 §4.1, §4.2).
+    ///
+    /// Appelée juste après un [`Delivery::add_recipient`] qui a réussi.
+    ///
+    /// # POURQUOI PAR DESTINATAIRE
+    ///
+    /// Deux `RCPT` d'une même transaction peuvent demander deux choses
+    /// différentes — l'un le silence, l'autre un rapport de succès —, et c'est
+    /// tout l'objet de §4.1. Une seule valeur par transaction ferait honorer
+    /// celle du dernier `RCPT` pour tout le monde.
+    ///
+    /// **LE DÉFAUT NE RETIENT RIEN**, ce qui vaut le comportement de §4.1 en
+    /// l'absence du paramètre : un rapport en cas d'échec, et rien d'autre.
+    fn recipient_report(&mut self, never: bool, on_success: bool, original: &[u8]) {
+        let _ = (never, on_success, original);
+    }
+
     /// Ouvre la remise vers **un** destinataire accepté.
     ///
     /// Appelée une fois par destinataire, juste avant le premier

@@ -3789,9 +3789,9 @@ il l'a commis sur lui-même : une section qui s'intitule « l'état réel » est
 qu'on relit le moins, parce qu'on croit la connaître.
 
 Sont outillées : C1 (les trois étages, et la couverture qui n'est exigible que
-parce qu'ils sont séparés), C2 (le gate mesure 53 711 régions sur 29 crates,
+parce qu'ils sont séparés), C2 (le gate mesure 54 459 régions sur 29 crates,
 toutes couvertes — et il compare des comptes, non un pourcentage arrondi), C3
-(les lints, l'absence d'allocation dans les décodeurs, et 64 cibles de fuzz dont
+(les lints, l'absence d'allocation dans les décodeurs, et 65 cibles de fuzz dont
 la CI vérifie qu'elle les lance toutes), C4 (`ams-tls` n'offre que
 TLS 1.3), C6 (les décodeurs refusent le CR et le LF isolés ; `AUTH`, `USER`/`PASS`
 et `LOGIN` sont refusés hors chiffrement, sans réglage pour le rétablir), C8
@@ -3839,6 +3839,95 @@ la seule vérification qui vaille est la confrontation à l'ABNF de §9, mot par
 mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
+
+## DSN (RFC 3461) : ce qu'un déposant demande du sort de son message
+
+### ANNONCER `DSN` ENGAGE, ET C'EST POURQUOI IL NE S'ANNONCE PAS TOUJOURS
+
+§4.2 est net : un serveur qui annonce l'extension DOIT émettre un rapport de
+succès quand on lui en demande un. Émettre suppose la file — sans elle, ce
+serveur ne remet rien à personne. `DSN` ne s'annonce donc que si `--queue-spool`
+est réglé, comme `AUTH` ne s'annonce que sous chiffrement.
+
+Sans file, `NOTIFY=SUCCESS` reçoit le `504` de la tranche précédente : le pair
+sait à quoi s'en tenir, au lieu d'attendre un rapport qui ne viendrait jamais.
+
+### `NEVER` EST LE PLUS DANGEREUX DES QUATRE, ET C'EST CONTRE-INTUITIF
+
+Il ne demande rien : il demande qu'on se TAISE. Un serveur qui l'accepte sans
+l'honorer laisse un expéditeur croire qu'il n'aura pas de rapport ; un serveur
+qui l'honore sans le comprendre se tait quand il aurait dû parler. **Les deux
+erreurs sont silencieuses**, ce qui est exactement ce qui les rend coûteuses.
+
+§4.1 veut qu'il ne se combine avec aucun autre : « ne me dis rien, sauf en cas de
+succès » n'est pas une demande cohérente, et l'accepter reviendrait à choisir
+soi-même laquelle des deux moitiés honorer. Il est donc refusé.
+
+Il vaut jusqu'au bout, péremption comprise : un `NEVER` oublié au deuxième essai
+serait pire qu'un `NEVER` jamais lu.
+
+### CE QU'UN DESTINATAIRE DEMANDE LUI EST PROPRE
+
+`NOTIFY` et `ORCPT` sont PAR DESTINATAIRE (§4.1, §4.2) ; `RET` et `ENVID` sont
+par message (§4.3, §4.4). Une seule valeur par transaction ferait honorer celle
+du dernier `RCPT` pour tout le monde — et le premier destinataire, qui avait
+demandé le silence, recevrait le rapport du dernier.
+
+### LE FUZZ A TROUVÉ UNE INJECTION, À SA PREMIÈRE CAMPAGNE
+
+`ENVID` et `ORCPT` sont encodés en **xtext** (§4) : de l'ASCII visible, où tout
+le reste s'écrit `+XX` en hexadécimal. La première écriture décodait fidèlement
+ces échappées — et `+0D+0A` décode en `CRLF`.
+
+Ces valeurs ressortent dans un en-tête du rapport que NOUS composons —
+`Original-Envelope-Id`, `Original-Recipient` — et que le client du déposant lira
+comme un document officiel. Une fin de ligne y écrivait un champ entier à notre
+place, sous notre nom. C'est la faille du `Diagnostic-Code` d'un serveur inconnu,
+par une autre porte.
+
+**Une échappée qui décode autre chose que de l'ASCII visible est refusée.** §4.4
+l'exige d'ailleurs pour `ENVID` — la valeur décodée doit être imprimable — et
+l'on est plus strict d'un cran, sans espace, parce que la file écrit ces valeurs
+dans un fichier où l'espace sépare.
+
+La cible a trouvé cela sur `a+B2b`, en quelques secondes, à la première campagne.
+
+**ET UNE SECONDE FOIS, UN ÉTAGE PLUS HAUT.** Le composeur du rapport n'a pas à
+croire son appelant : la session vérifie ces valeurs, mais `ams-mime` ne suppose
+pas ce que son appelant a fait — c'est la même règle que pour le nom du `HELO`
+dans le `Received:`. `write_bounce` refuse donc un `Original-Recipient` ou un
+`Original-Envelope-Id` qui ne serait pas de l'ASCII visible, et la cible du
+rapport de non-remise l'a rappelé dès que ces deux champs y sont entrés.
+
+### L'ÉCART ASSUMÉ : `RET=FULL` NE REND QUE LES EN-TÊTES
+
+§5.2.2 permet de ne rendre que les en-têtes plutôt que le message entier, et
+c'est ce qu'on fait — `RET=FULL` est accepté, et n'est pas honoré à la lettre.
+
+Un rapport qui recopie le message est un amplificateur : l'adresse de retour
+n'est pas authentifiée, et renvoyer un mébioctet à qui n'a envoyé qu'une
+enveloppe est exactement la rétrodiffusion que ce dépôt évite partout ailleurs.
+
+### LE FICHIER DE FILE S'EST ÉTENDU SANS SE CASSER
+
+Une adresse est de l'ASCII VISIBLE : elle ne porte jamais de tabulation. Ce qui
+suit la première tabulation d'une ligne est donc, par construction, ce que cette
+tranche a ajouté — et son absence vaut le défaut de §4.1. **Une enveloppe écrite
+avant cette tranche se relit sans rien perdre.**
+
+Un tableau de rapports trop court, lui, est un REFUS et non un silence : rendre
+les destinataires sans leurs rapports ferait retomber chacun sur le défaut,
+c'est-à-dire enverrait un rapport de non-remise à qui avait demandé le silence.
+
+### LE RAPPORT DE SUCCÈS EST LE MÊME DOCUMENT
+
+§2 de RFC 3464 n'en connaît qu'un : seuls le mot de `Action:` et le code d'état
+distinguent un succès d'un échec. Deux composeurs pour un même format auraient
+fini par écrire deux formats.
+
+Il part AVANT toute décision de reprise : ceux qui sont remis le sont, quoi
+qu'il advienne des autres. Attendre la fin de la file ferait dépendre un rapport
+de succès de l'échec d'un voisin.
 
 ## Les paramètres ESMTP : ce qu'on annonce, on le tient
 

@@ -634,7 +634,7 @@ impl ReportSpool {
             return;
         };
         let destinataires = std::vec![String::from(adresse)];
-        match file.deposer(&self.email, &destinataires, &message, maintenant) {
+        match file.deposer(&self.email, &destinataires, &[], "", &message, maintenant) {
             Ok(()) => compte.sent = compte.sent.saturating_add(1),
             Err(DeliveryFailure::Permanent) => {
                 compte.unsendable = compte.unsendable.saturating_add(1);
@@ -703,7 +703,7 @@ impl ReportSpool {
         // nul : c'est par là qu'un refus nous reviendra, et c'est aussi là que
         // la file déposera son rapport de non-remise si elle renonce.
         let destinataires = std::vec![String::from(adresse)];
-        file.deposer(&self.email, &destinataires, &message, maintenant)
+        file.deposer(&self.email, &destinataires, &[], "", &message, maintenant)
     }
 
     /// Huit octets d'aléa, en hexadécimal.

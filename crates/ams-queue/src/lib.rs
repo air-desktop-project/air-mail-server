@@ -70,7 +70,9 @@ mod envelope;
 mod name;
 
 pub use backoff::{Backoff, Decision};
-pub use envelope::{Envelope, RECIPIENTS_MAX, envelope_max, parse_envelope, write_envelope};
+pub use envelope::{
+    Envelope, RECIPIENTS_MAX, Report, envelope_max, parse_envelope, write_envelope,
+};
 pub use name::{Entry, NAME_MAX, parse_name, write_name};
 
 /// Ce qui rend une entrée de file irrecevable.

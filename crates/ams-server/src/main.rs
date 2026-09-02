@@ -512,6 +512,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         config.with_capabilities(Capabilities {
             starttls: true,
             auth: authentifie,
+            dsn: false,
         })
     } else {
         config
@@ -1086,6 +1087,16 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     // l'autre. Sans `qui_relaie`, la politique refuse tout ce qui n'est pas d'ici,
     // quoi qu'un pair ait prouvé.
     let politique = BoitesConnues::new(Arc::clone(&comptes), postmaster.clone());
+    // **`DSN` NE S'ANNONCE QUE SI L'ON PEUT ÉMETTRE** (RFC 3461 §4.2). Un
+    // serveur qui l'annonce DOIT rendre compte d'un succès quand on lui en
+    // demande un, et rendre compte suppose la file. Sans elle, `NOTIFY=SUCCESS`
+    // reçoit un `504` : le pair sait à quoi s'en tenir, au lieu d'attendre un
+    // rapport qui ne viendrait jamais.
+    let capacites = Capabilities {
+        dsn: file.is_some(),
+        ..config.capabilities()
+    };
+    let config = config.with_capabilities(capacites);
     let politique = Arc::new(if file.is_some() {
         politique.qui_relaie()
     } else {

@@ -45,7 +45,7 @@
 
 #![no_main]
 
-use ams_mime::{Bounce, Failure, bounce_max, write_bounce};
+use ams_mime::{Action, Bounce, Failure, bounce_max, write_bounce};
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
@@ -57,6 +57,13 @@ struct Echec {
     destinataire: Vec<u8>,
     statut: Vec<u8>,
     diagnostic: Vec<u8>,
+    /// L'adresse d'origine que le déposant a écrite (RFC 3461 §4.2).
+    ///
+    /// **ELLE VIENT DE LUI**, et ressort dans un en-tête que nous composons :
+    /// c'est une entrée hostile au même titre que le diagnostic.
+    origine: Vec<u8>,
+    /// Remis, ou non remis (RFC 3464 §2.3.3).
+    remis: bool,
 }
 
 #[derive(Debug, Arbitrary)]
@@ -71,6 +78,8 @@ struct Entree {
     delimiteur: Vec<u8>,
     texte: Vec<u8>,
     entetes: Vec<u8>,
+    /// L'identifiant d'enveloppe du déposant (RFC 3461 §4.4), lui aussi.
+    envid: Vec<u8>,
     echecs: Vec<Echec>,
 }
 
@@ -82,6 +91,12 @@ fuzz_target!(|entree: Entree| {
             recipient: &un.destinataire,
             status: &un.statut,
             diagnostic: &un.diagnostic,
+            action: if un.remis {
+                Action::Delivered
+            } else {
+                Action::Failed
+            },
+            original: &un.origine,
         })
         .collect();
     let rapport = Bounce {
@@ -92,6 +107,7 @@ fuzz_target!(|entree: Entree| {
         message_id: &entree.identifiant,
         date: entree.date,
         arrival: entree.arrivee,
+        envelope_id: &entree.envid,
         boundary: &entree.delimiteur,
         text: &entree.texte,
         failures: &echecs,
@@ -130,17 +146,17 @@ fuzz_target!(|entree: Entree| {
         "un octet qu'on ne peut pas mettre sur le fil"
     );
 
-    // 4. AUCUNE VALEUR N'AJOUTE UN CHAMP DE STATUT.
+    // 4. AUCUNE VALEUR N'AJOUTE UN CHAMP DE STATUT, NI UN `Original-Recipient`.
     //
     // Les deux parties LIBRES — le texte et les en-têtes d'origine — ont le
     // droit de porter n'importe quoi, y compris ce qu'on cherche. On ne compte
     // donc que lorsqu'elles ne le portent pas : sinon on éprouverait la liberté
     // du déposant, pas la nôtre.
-    for aiguille in [
-        &b"\r\nFinal-Recipient: rfc822; "[..],
-        b"\r\nAction: failed\r\nStatus: ",
-        b"\r\nAction: ",
-    ] {
+    //
+    // `Action:` se compte SANS son mot : depuis RFC 3461, un rapport peut dire
+    // `delivered` aussi bien que `failed`, et compter le mot ferait dépendre la
+    // propriété de ce que le déposant avait demandé.
+    for aiguille in [&b"\r\nFinal-Recipient: rfc822; "[..], b"\r\nAction: "] {
         let libre = compter(&entree.texte, aiguille) > 0 || compter(&entree.entetes, aiguille) > 0;
         if !libre {
             assert_eq!(

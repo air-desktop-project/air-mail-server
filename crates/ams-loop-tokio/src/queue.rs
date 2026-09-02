@@ -42,10 +42,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::vec::Vec;
 
-use ams_mime::{Bounce, Failure, bounce_max, write_bounce};
+use ams_mime::{Action as MimeAction, Bounce, Failure, bounce_max, write_bounce};
 use ams_queue::{
-    Backoff, Decision, Entry, Envelope, NAME_MAX, RECIPIENTS_MAX, envelope_max, parse_envelope,
-    parse_name, write_envelope, write_name,
+    Backoff, Decision, Entry, Envelope, NAME_MAX, RECIPIENTS_MAX, Report, envelope_max,
+    parse_envelope, parse_name, write_envelope, write_name,
 };
 
 use crate::delivery::DeliveryFailure;
@@ -149,6 +149,8 @@ impl Spool {
         &self,
         return_path: &str,
         recipients: &[String],
+        reports: &[Report<'_>],
+        envelope_id: &str,
         message: &[u8],
         now: u64,
     ) -> Result<(), DeliveryFailure> {
@@ -160,6 +162,8 @@ impl Spool {
         let enveloppe = Envelope {
             return_path,
             recipients: &adresses,
+            envelope_id,
+            reports,
         };
         let mut tampon = std::vec![0_u8; envelope_max(&enveloppe)];
         // UNE ADRESSE QU'ON REFUSE D'ÉCRIRE EST UN REFUS DÉFINITIF : un `LF`
@@ -272,7 +276,8 @@ impl Spool {
             return;
         };
         let mut cases = [""; RECIPIENTS_MAX];
-        let Ok(enveloppe) = parse_envelope(&fichier, &mut cases) else {
+        let mut rapports = [Report::default(); RECIPIENTS_MAX];
+        let Ok(enveloppe) = parse_envelope(&fichier, &mut cases, &mut rapports) else {
             let _ = tokio::fs::remove_file(&chemin).await;
             let _ = tokio::fs::remove_file(&voisin).await;
             compte.unreadable = compte.unreadable.saturating_add(1);
@@ -281,8 +286,13 @@ impl Spool {
 
         // ── L'essai, UN DESTINATAIRE À LA FOIS ──────────────────────────────
         let mut restants: Vec<String> = Vec::new();
-        let mut echecs: Vec<(String, String, String)> = Vec::new();
-        for adresse in enveloppe.recipients {
+        let mut rapports_restants: Vec<Report<'_>> = Vec::new();
+        let mut echecs: Vec<(String, String, String, String)> = Vec::new();
+        let mut succes: Vec<(String, String)> = Vec::new();
+        for (rang, adresse) in enveloppe.recipients.iter().enumerate() {
+            // **CE QUE CE DESTINATAIRE-LÀ A DEMANDÉ**, et non ce que le premier
+            // a demandé pour tout le monde (RFC 3461 §4.1).
+            let rapport = enveloppe.reports.get(rang).copied().unwrap_or_default();
             match self
                 .remettre_a(relay, enveloppe.return_path, adresse, &message)
                 .await
@@ -291,12 +301,53 @@ impl Spool {
                     if authentifie {
                         compte.authenticated = compte.authenticated.saturating_add(1);
                     }
+                    // §4.1 : un rapport de SUCCÈS ne part que s'il est demandé.
+                    // `NEVER` l'emporte sur tout, y compris sur lui-même.
+                    if rapport.on_success && !rapport.never {
+                        succes.push(((*adresse).to_string(), rapport.original.to_owned()));
+                    }
                 }
                 Issue::Definitif(statut, diagnostic) => {
-                    echecs.push(((*adresse).to_string(), statut, diagnostic));
+                    // **`NEVER` FAIT PERDRE LE RAPPORT, ET C'EST CE QU'ON A
+                    // DEMANDÉ.** Un déposant qui l'écrit sait que l'échec lui
+                    // échappera ; le lui envoyer quand même serait lui refuser
+                    // ce qu'il a explicitement demandé.
+                    if !rapport.never {
+                        echecs.push((
+                            (*adresse).to_string(),
+                            statut,
+                            diagnostic,
+                            rapport.original.to_owned(),
+                        ));
+                    }
                 }
-                Issue::Ajourne => restants.push((*adresse).to_string()),
+                Issue::Ajourne => {
+                    restants.push((*adresse).to_string());
+                    rapports_restants.push(rapport);
+                }
             }
+        }
+
+        // **LE RAPPORT DE SUCCÈS PART AVANT TOUTE DÉCISION DE REPRISE.** Ceux
+        // qui sont remis le sont, quoi qu'il advienne des autres : attendre la
+        // fin de la file ferait dépendre un rapport de succès de l'échec d'un
+        // voisin.
+        if !succes.is_empty()
+            && !self.rendre_le_succes(
+                rendre,
+                enveloppe.return_path,
+                &message,
+                &succes,
+                enveloppe.envelope_id,
+                depot,
+                now,
+            )
+        {
+            std::eprintln!(
+                "air-mail-server : RAPPORT DE REMISE PERDU pour `{}` — le message est bien \
+                 parti, et son expéditeur ne le saura pas",
+                enveloppe.return_path
+            );
         }
 
         let essais = essais.saturating_add(1);
@@ -312,7 +363,13 @@ impl Spool {
                 // ON RÉÉCRIT L'ENVELOPPE AVANT DE RENOMMER : un destinataire déjà
                 // servi qui y resterait recevrait le message une seconde fois si
                 // la machine s'arrêtait entre les deux.
-                if !self.reecrire(&voisin, enveloppe.return_path, &restants) {
+                if !self.reecrire(
+                    &voisin,
+                    enveloppe.return_path,
+                    &restants,
+                    &rapports_restants,
+                    enveloppe.envelope_id,
+                ) {
                     compte.deferred = compte.deferred.saturating_add(1);
                     return;
                 }
@@ -330,11 +387,18 @@ impl Spool {
             }
             // Renoncer : ce qui restait à réessayer devient un échec définitif.
             Decision::Retry { .. } | Decision::GiveUp => {
-                for adresse in &restants {
+                for (rang, adresse) in restants.iter().enumerate() {
+                    // **CE QUE CE DESTINATAIRE-LÀ AVAIT DEMANDÉ**, jusqu'au
+                    // bout : un `NEVER` vaut aussi pour la péremption.
+                    let rapport = rapports_restants.get(rang).copied().unwrap_or_default();
+                    if rapport.never {
+                        continue;
+                    }
                     echecs.push((
                         adresse.clone(),
                         String::from("4.4.7"),
                         String::from("delivery time expired"),
+                        rapport.original.to_owned(),
                     ));
                 }
                 let _ = tokio::fs::remove_file(&chemin).await;
@@ -351,6 +415,7 @@ impl Spool {
                         enveloppe.return_path,
                         &message,
                         &echecs,
+                        enveloppe.envelope_id,
                         depot,
                         now,
                     ) {
@@ -430,22 +495,100 @@ impl Spool {
         }
     }
 
+    /// Compose le rapport de SUCCÈS, et le dépose LOCALEMENT (RFC 3461 §4.1).
+    ///
+    /// # UN RAPPORT DE SUCCÈS N'EST PAS UN REBOND À L'ENVERS
+    ///
+    /// C'est le MÊME document — §2 de RFC 3464 n'en connaît qu'un —, et seuls le
+    /// mot de `Action:` et le code d'état le distinguent. Deux composeurs pour un
+    /// même format auraient fini par écrire deux formats.
+    ///
+    /// **IL NE PART QUE S'IL A ÉTÉ DEMANDÉ**, et jamais autrement : §4.1 est
+    /// clair, et un rapport de succès qu'on n'a pas demandé est du courrier en
+    /// plus pour rien.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "chaque argument est une pièce distincte du rapport ; les \
+                  grouper dans une structure n'ajouterait qu'un nom à retenir"
+    )]
+    fn rendre_le_succes<B: Bounced>(
+        &self,
+        rendre: &B,
+        retour: &str,
+        message: &[u8],
+        succes: &[(String, String)],
+        envelope_id: &str,
+        depot: u64,
+        now: u64,
+    ) -> bool {
+        let remis: Vec<Failure<'_>> = succes
+            .iter()
+            .map(|(adresse, origine)| Failure {
+                recipient: adresse.as_bytes(),
+                // `2.0.0` : remis, sans autre précision (RFC 3463 §3.3).
+                status: b"2.0.0",
+                // **AUCUN DIAGNOSTIC** : le pair n'a rien dit d'autre que oui,
+                // et écrire un texte à sa place le ferait passer pour le sien.
+                diagnostic: b"",
+                action: MimeAction::Delivered,
+                original: origine.as_bytes(),
+            })
+            .collect();
+        let identifiant = std::format!("dsn-{}-{}@{}", now, self.suivant(), self.mta);
+        let delimiteur = std::format!("----ams-dsn-{}-{}", now, self.suivant());
+        let mut texte = String::from(
+            "Ce message a bien ete remis aux destinataires suivants, comme vous\r\n             l'aviez demande.\r\n\r\n",
+        );
+        for (adresse, _) in succes {
+            texte.push_str("  ");
+            texte.push_str(adresse);
+            texte.push_str("\r\n");
+        }
+        let rapport = Bounce {
+            from: self.postmaster.as_bytes(),
+            to: retour.as_bytes(),
+            reporting_mta: self.mta.as_bytes(),
+            subject: b"Successful Mail Delivery Report",
+            message_id: identifiant.as_bytes(),
+            date: now,
+            arrival: depot,
+            boundary: delimiteur.as_bytes(),
+            text: texte.as_bytes(),
+            failures: &remis,
+            envelope_id: envelope_id.as_bytes(),
+            original_headers: entetes(message),
+        };
+        let mut place = std::vec![0_u8; bounce_max(&rapport)];
+        let Ok(compose) = write_bounce(&mut place, &rapport) else {
+            return false;
+        };
+        rendre.deliver(retour, compose)
+    }
+
     /// Compose le rapport de non-remise, et le dépose LOCALEMENT.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "chaque argument est une pièce distincte du rapport ; les \
+                  grouper dans une structure n'ajouterait qu'un nom à retenir"
+    )]
     fn rendre_compte<B: Bounced>(
         &self,
         rendre: &B,
         retour: &str,
         message: &[u8],
-        echecs: &[(String, String, String)],
+        echecs: &[(String, String, String, String)],
+        envelope_id: &str,
         depot: u64,
         now: u64,
     ) -> bool {
         let pannes: Vec<Failure<'_>> = echecs
             .iter()
-            .map(|(adresse, statut, diagnostic)| Failure {
+            .map(|(adresse, statut, diagnostic, origine)| Failure {
                 recipient: adresse.as_bytes(),
                 status: statut.as_bytes(),
                 diagnostic: diagnostic.as_bytes(),
+                action: MimeAction::Failed,
+                original: origine.as_bytes(),
             })
             .collect();
         let identifiant = std::format!("bounce-{}-{}@{}", now, self.suivant(), self.mta);
@@ -462,6 +605,7 @@ impl Spool {
             boundary: delimiteur.as_bytes(),
             text: texte.as_bytes(),
             failures: &pannes,
+            envelope_id: envelope_id.as_bytes(),
             original_headers: entetes(message),
         };
         let mut place = std::vec![0_u8; bounce_max(&rapport)];
@@ -472,11 +616,24 @@ impl Spool {
     }
 
     /// Réécrit l'enveloppe avec les seuls destinataires qui restent.
-    fn reecrire(&self, voisin: &Path, retour: &str, restants: &[String]) -> bool {
+    fn reecrire(
+        &self,
+        voisin: &Path,
+        retour: &str,
+        restants: &[String],
+        rapports: &[Report<'_>],
+        envelope_id: &str,
+    ) -> bool {
         let adresses: Vec<&str> = restants.iter().map(String::as_str).collect();
         let enveloppe = Envelope {
             return_path: retour,
             recipients: &adresses,
+            envelope_id,
+            // **CE QU'UN DESTINATAIRE A DEMANDÉ LE SUIT.** L'oublier à la
+            // réécriture ferait rendre compte d'un échec à qui avait demandé le
+            // silence — au deuxième essai, pas au premier, ce qui est le pire
+            // des deux.
+            reports: rapports,
         };
         let mut tampon = std::vec![0_u8; envelope_max(&enveloppe)];
         let Ok(ecrite) = write_envelope(&enveloppe, &mut tampon) else {
@@ -629,14 +786,14 @@ fn statut_etendu(code: u16, definitif: bool) -> String {
 }
 
 /// Ce que lira l'humain qui ouvrira le rapport.
-fn texte_du_rapport(echecs: &[(String, String, String)]) -> String {
+fn texte_du_rapport(echecs: &[(String, String, String, String)]) -> String {
     let mut texte = String::from(
         "Ce message n'a pas pu etre remis a un ou plusieurs destinataires.\r\n\
          \r\n\
          Aucune autre tentative n'aura lieu ; les en-tetes du message d'origine\r\n\
          sont joints ci-dessous.\r\n\r\n",
     );
-    for (adresse, statut, diagnostic) in echecs {
+    for (adresse, statut, diagnostic, _origine) in echecs {
         texte.push_str("  ");
         texte.push_str(adresse);
         texte.push_str(" : ");

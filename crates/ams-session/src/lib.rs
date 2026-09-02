@@ -82,7 +82,11 @@
 //! // et conduire un échange SASL ; sans cette déclaration, ni `STARTTLS` ni
 //! // `AUTH` ne seraient annoncés, et tous deux seraient refusés en `502`.
 //! let config = Config::new(b"mail.example.com", 100, 10_485_760, Limits::DEFAULT)?
-//!     .with_capabilities(Capabilities { starttls: true, auth: true });
+//!     .with_capabilities(Capabilities {
+//!         starttls: true,
+//!         auth: true,
+//!         dsn: false,
+//!     });
 //! let mut session = SmtpSession::new(config, NotreDomaine);
 //! let mut out = [0_u8; 512];
 //!

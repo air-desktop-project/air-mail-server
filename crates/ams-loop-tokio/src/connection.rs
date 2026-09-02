@@ -617,11 +617,21 @@ where
     // en dépend : le verdict arrivera bien après. Voir `Delivery::reserve_trace`,
     // qui dit pourquoi on réserve plutôt que de rassembler le message.
     delivery.reserve_trace(AUTHRES_RESERVE);
+    // L'identifiant d'enveloppe du déposant (RFC 3461 §4.4), s'il en a donné un.
+    if let Some(envid) = session.envelope_id() {
+        delivery.envelope_id(envid);
+    }
     let mut echec: Option<DeliveryFailure> = None;
-    for adresse in session.recipients() {
+    // **`enumerate` PLUTÔT QU'UN COMPTEUR** : le rang sert à retrouver ce que CE
+    // destinataire-là a demandé, et un compteur tenu à part finirait par
+    // désigner le voisin.
+    for (rang, adresse) in session.recipients().enumerate() {
         if let Err(cause) = delivery.add_recipient(adresse) {
             echec = Some(cause);
             break;
+        }
+        if let Some((notify, orcpt)) = session.recipient_report(rang) {
+            delivery.recipient_report(notify.never(), notify.on_success(), orcpt);
         }
     }
     // ── L'EN-TÊTE `Received:` (RFC 5321 §4.4) ───────────────────────────────
@@ -1486,6 +1496,7 @@ mod tests {
         let menteuse = config().with_capabilities(Capabilities {
             starttls: true,
             auth: false,
+            dsn: false,
         });
         let mut boite = Boite::default();
         let (resultat, dit) = conversation_avec(menteuse, b"QUIT\r\n", &mut boite).await;

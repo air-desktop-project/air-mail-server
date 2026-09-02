@@ -140,6 +140,8 @@ async fn un_echec_repousse_l_entree_sans_la_perdre() {
         .deposer(
             "jean@nous.test",
             &[String::from("marie@ailleurs.test")],
+            &[],
+            "",
             MESSAGE,
             1_000,
         )
@@ -191,6 +193,8 @@ async fn rien_n_est_repris_avant_l_heure() {
         .deposer(
             "jean@nous.test",
             &[String::from("marie@ailleurs.test")],
+            &[],
+            "",
             MESSAGE,
             1_000,
         )
@@ -221,6 +225,8 @@ async fn la_peremption_rend_le_message_a_son_expediteur() {
         .deposer(
             "jean@nous.test",
             &[String::from("marie@ailleurs.test")],
+            &[],
+            "",
             MESSAGE,
             1_000,
         )
@@ -305,6 +311,8 @@ fn une_adresse_qui_injecterait_une_ligne_est_refusee() {
         spool.deposer(
             "jean@nous.test",
             &[String::from("marie@ailleurs.test\nvictime@banque.test")],
+            &[],
+            "",
             MESSAGE,
             1_000,
         ),
@@ -323,7 +331,7 @@ fn une_adresse_qui_injecterait_une_ligne_est_refusee() {
 fn un_depot_sans_destinataire_est_refuse() {
     let (spool, _dossier) = file(Backoff::DEFAULT);
     assert_eq!(
-        spool.deposer("jean@nous.test", &[], MESSAGE, 1_000),
+        spool.deposer("jean@nous.test", &[], &[], "", MESSAGE, 1_000),
         Err(ams_loop_tokio::DeliveryFailure::Permanent)
     );
 }
@@ -337,7 +345,14 @@ fn deux_depots_de_la_meme_seconde_coexistent() {
     let (spool, dossier) = file(Backoff::DEFAULT);
     for adresse in ["a@ailleurs.test", "b@ailleurs.test"] {
         spool
-            .deposer("jean@nous.test", &[String::from(adresse)], MESSAGE, 1_000)
+            .deposer(
+                "jean@nous.test",
+                &[String::from(adresse)],
+                &[],
+                "",
+                MESSAGE,
+                1_000,
+            )
             .expect("déposé");
     }
     let vus = noms(dossier.chemin());

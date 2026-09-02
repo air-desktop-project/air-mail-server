@@ -586,7 +586,7 @@ impl TlsReports {
         // refus nous reviendra, et c'est aussi là que la file déposera son
         // rapport de non-remise si elle renonce.
         let destinataires = std::vec![String::from(adresse)];
-        match file.deposer(&self.email, &destinataires, &message, maintenant()) {
+        match file.deposer(&self.email, &destinataires, &[], "", &message, maintenant()) {
             Ok(()) => Some(true),
             // Une adresse qu'on refuse d'écrire ne s'écrira pas mieux demain.
             Err(crate::delivery::DeliveryFailure::Permanent) => Some(false),

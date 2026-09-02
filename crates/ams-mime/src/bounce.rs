@@ -48,6 +48,42 @@ pub struct Failure<'a> {
     /// champ est alors **omis** plutôt que rempli d'un texte inventé : un
     /// diagnostic qu'on aurait écrit soi-même se lirait comme celui du pair.
     pub diagnostic: &'a [u8],
+    /// Ce que ce serveur a FAIT du message pour ce destinataire (§2.3.3).
+    ///
+    /// # POURQUOI CE CHAMP, ALORS QUE CE RAPPORT S'APPELAIT « NON-REMISE »
+    ///
+    /// RFC 3461 §4.1 permet au déposant de demander un rapport de SUCCÈS. C'est
+    /// le même document que celui d'un échec — §2 de RFC 3464 ne connaît qu'un
+    /// format — et seul ce mot le distingue. Deux composeurs pour un même
+    /// document auraient fini par écrire deux documents.
+    pub action: Action,
+    /// L'adresse d'origine, telle que le déposant l'a écrite (RFC 3461 §4.2).
+    ///
+    /// Vide : le champ `Original-Recipient` est **omis**. Le remplir avec
+    /// l'adresse finale ferait croire que le déposant l'avait écrite, alors que
+    /// c'est nous qui l'aurions devinée.
+    pub original: &'a [u8],
+}
+
+/// Ce qu'un serveur a fait d'un message, pour un destinataire (§2.3.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Action {
+    /// Il n'a pas été remis, et ne le sera pas.
+    #[default]
+    Failed,
+    /// Il a été remis.
+    Delivered,
+}
+
+impl Action {
+    /// Le mot que §2.3.3 emploie.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Failed => "failed",
+            Self::Delivered => "delivered",
+        }
+    }
 }
 
 /// Ce qu'un rapport de non-remise doit dire.
@@ -76,6 +112,8 @@ pub struct Bounce<'a, 'f> {
     pub text: &'a [u8],
     /// Ce qui a échoué, et pour qui.
     pub failures: &'f [Failure<'a>],
+    /// L'identifiant d'enveloppe du déposant (RFC 3461 §4.4), ou vide.
+    pub envelope_id: &'a [u8],
     /// Les en-têtes du message perdu, terminés par `CRLF`.
     ///
     /// **Le corps n'y est pas**, et c'est délibéré : voir l'en-tête du module.
@@ -96,6 +134,9 @@ pub fn bounce_max(bounce: &Bounce<'_, '_>) -> usize {
             .saturating_add(echec.recipient.len())
             .saturating_add(echec.status.len())
             .saturating_add(echec.diagnostic.len())
+            // `Original-Recipient: rfc822; ` et sa valeur, quand le déposant
+            // l'a écrite.
+            .saturating_add(echec.original.len())
     });
     ENVELOPPE
         .saturating_add(bounce.from.len())
@@ -106,6 +147,7 @@ pub fn bounce_max(bounce: &Bounce<'_, '_>) -> usize {
         .saturating_add(bounce.boundary.len().saturating_mul(4))
         .saturating_add(bounce.text.len())
         .saturating_add(bounce.original_headers.len())
+        .saturating_add(bounce.envelope_id.len())
         .saturating_add(echecs)
 }
 
@@ -140,8 +182,20 @@ pub fn write_bounce<'b>(sortie: &'b mut [u8], bounce: &Bounce<'_, '_>) -> Result
     if !texte_recevable(bounce.text) || !texte_recevable(bounce.original_headers) {
         return Err(Error::NotPrintable);
     }
+    // **L'IDENTIFIANT D'ENVELOPPE VIENT DU DÉPOSANT** (RFC 3461 §4.4), et il
+    // ressort ici dans un en-tête. Vide, il n'est pas écrit ; non vide, il doit
+    // pouvoir l'être — la session le vérifie déjà, et cette crate ne suppose pas
+    // ce que son appelant a fait. Le fuzz l'a rappelé.
+    if !bounce.envelope_id.is_empty() && !bounce.envelope_id.iter().all(u8::is_ascii_graphic) {
+        return Err(Error::NotPrintable);
+    }
     for echec in bounce.failures {
         if echec.recipient.is_empty() || !echec.recipient.iter().all(u8::is_ascii_graphic) {
+            return Err(Error::NotPrintable);
+        }
+        // **L'ADRESSE D'ORIGINE AUSSI VIENT DU DÉPOSANT** (§4.2), et l'écrire
+        // sans la vérifier ouvrirait un champ entier sous notre nom.
+        if !echec.original.is_empty() && !echec.original.iter().all(u8::is_ascii_graphic) {
             return Err(Error::NotPrintable);
         }
         // LE STATUT EST LU PAR UNE MACHINE : chiffres et points, et rien
@@ -212,13 +266,31 @@ pub fn write_bounce<'b>(sortie: &'b mut [u8], bounce: &Bounce<'_, '_>) -> Result
         b"\r\nContent-Type: message/delivery-status\r\n\r\nReporting-MTA: dns; ",
     )?;
     ecrits = pousser(sortie, ecrits, bounce.reporting_mta)?;
+    // **L'IDENTIFIANT D'ENVELOPPE DU DÉPOSANT** (RFC 3461 §6.1), s'il en a
+    // donné un : c'est ce qui lui permet de rattacher ce rapport à son envoi
+    // sans avoir à lire le message qu'il contient.
+    if !bounce.envelope_id.is_empty() {
+        ecrits = pousser(sortie, ecrits, b"\r\nOriginal-Envelope-Id: ")?;
+        ecrits = pousser(sortie, ecrits, bounce.envelope_id)?;
+    }
     ecrits = pousser(sortie, ecrits, b"\r\nArrival-Date: ")?;
     ecrits = date(sortie, ecrits, bounce.arrival)?;
     ecrits = pousser(sortie, ecrits, b"\r\n")?;
     for echec in bounce.failures {
-        ecrits = pousser(sortie, ecrits, b"\r\nFinal-Recipient: rfc822; ")?;
+        // **`Original-Recipient` VIENT EN PREMIER** (§2.3.2), et seulement si le
+        // déposant l'a écrit : c'est SON adresse, pas celle que nous avons
+        // résolue.
+        if !echec.original.is_empty() {
+            ecrits = pousser(sortie, ecrits, b"\r\nOriginal-Recipient: rfc822; ")?;
+            ecrits = pousser(sortie, ecrits, echec.original)?;
+            ecrits = pousser(sortie, ecrits, b"\r\nFinal-Recipient: rfc822; ")?;
+        } else {
+            ecrits = pousser(sortie, ecrits, b"\r\nFinal-Recipient: rfc822; ")?;
+        }
         ecrits = pousser(sortie, ecrits, echec.recipient)?;
-        ecrits = pousser(sortie, ecrits, b"\r\nAction: failed\r\nStatus: ")?;
+        ecrits = pousser(sortie, ecrits, b"\r\nAction: ")?;
+        ecrits = pousser(sortie, ecrits, echec.action.name().as_bytes())?;
+        ecrits = pousser(sortie, ecrits, b"\r\nStatus: ")?;
         ecrits = pousser(sortie, ecrits, echec.status)?;
         ecrits = pousser(sortie, ecrits, b"\r\n")?;
         if !echec.diagnostic.is_empty() {

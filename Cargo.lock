@@ -285,6 +285,7 @@ dependencies = [
  "ams-proto-imap",
  "ams-proto-pop3",
  "ams-proto-smtp",
+ "ams-queue",
  "ams-quic-client",
  "ams-sasl",
  "ams-session",

@@ -119,6 +119,7 @@ async fn serveur(chiffrement: Option<Arc<rustls::ServerConfig>>) -> (std::net::S
                 .with_capabilities(Capabilities {
                     starttls: chiffrement.is_some(),
                     auth: false,
+                    dsn: false,
                 }),
             guard: &garde,
             timeouts: Timeouts::default(),

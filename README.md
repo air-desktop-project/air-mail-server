@@ -27,6 +27,12 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 > RFC 3848) et quand, **et ne nomme aucun destinataire**. Un message qui en porte
 > plus de trente tourne en boucle, et il est refusé (§6.3).
 >
+> **Il rend compte de ce qu'on lui demande** (`DSN`, RFC 3461) : `NOTIFY=NEVER`
+> fait taire le rapport de non-remise, `NOTIFY=SUCCESS` en fait partir un quand
+> le message est remis, et `ENVID` comme `ORCPT` reviennent dans le rapport tels
+> que le déposant les a écrits. `DSN` ne s'annonce que si la file existe — sans
+> elle, la promesse serait vide.
+>
 > **Ce qu'il annonce, il le tient** : `SIZE` était offert à chaque `EHLO` et
 > jamais lu — un pair pouvait annoncer dix gibioctets et nous les faire lire.
 > Une taille au-delà de la borne est maintenant refusée avant le premier octet,
@@ -135,7 +141,7 @@ des octets **et des actions**. Elles n'attendent jamais.
 | `ams-dane` | DANE pour SMTP (RFC 7672) : ce qu'un `TLSA` autorise | **implémenté, et câblé** |
 | `ams-mtasts` | MTA-STS (RFC 8461) : la politique d'un domaine | **implémenté, et câblé** |
 | `ams-tlsrpt` | TLSRPT (RFC 8460) : ce qu'on rapporte du chiffrement sortant | **implémenté, et câblé** |
-| `ams-queue` | file de réémission : quand réessayer, quand renoncer | **implémenté, et câblé** |
+| `ams-queue` | file de réémission : quand réessayer, quand renoncer | **implémenté, câblé, et il porte les demandes de RFC 3461** |
 | `ams-auth` | le magasin d'identifiants, vérification Argon2id | **implémenté** |
 | `ams-tls` | TLS 1.3 uniquement, échange de clés post-quantique | **implémenté, en entrant et en sortant** |
 | `ams-dkim` | RFC 6376 | **vérifiées, câblées, et posées** |
@@ -1957,7 +1963,7 @@ que `llvm-cov` n'instrumente pas sur Rust stable et dont le compteur reste à
 `0 / 0`. Les régions font le travail attendu : chaque bras d'un conditionnel en
 est une.
 
-Le gate mesure aujourd'hui **53 711 régions** et **30 896 lignes**, toutes
+Le gate mesure aujourd'hui **54 459 régions** et **31 351 lignes**, toutes
 couvertes. **Une seule dérogation, et elle est annoncée à chaque exécution** : le
 code *généré* du schéma Cap'n Proto en est exclu — il porte un accesseur par champ
 et par sens, dont la plupart ne seront jamais appelés, et les couvrir n'éprouverait

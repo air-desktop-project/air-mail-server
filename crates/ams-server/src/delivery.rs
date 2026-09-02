@@ -211,6 +211,13 @@ pub struct MaildirDelivery {
     /// **Aucun : la quarantaine n'existe pas**, et le message va dans la boîte
     /// de réception comme n'importe quel autre.
     quarantaine: Option<String>,
+    /// L'identifiant d'enveloppe du déposant (RFC 3461 §4.4).
+    envid: String,
+    /// Ce que chaque destinataire SORTANT a demandé (§4.1, §4.2).
+    ///
+    /// Un par entrée de `sortants`, dans le même ordre : c'est ce qui suit le
+    /// message dans la file.
+    rapports: Vec<(bool, bool, String)>,
     /// Ce message-ci doit-il être mis de côté ?
     ///
     /// Remis à faux par [`Delivery::begin`] : un second message sur la même
@@ -233,6 +240,8 @@ impl MaildirDelivery {
             corps_max: 0,
             trace: 0,
             quarantaine: None,
+            envid: String::new(),
+            rapports: Vec::new(),
             ecarte: false,
         }
     }
@@ -276,11 +285,31 @@ impl Delivery for MaildirDelivery {
         self.retour = return_path.map(|octets| String::from_utf8_lossy(octets).into_owned());
         self.sortants.clear();
         self.corps.clear();
+        self.envid.clear();
+        self.rapports.clear();
         self.ecarte = false;
     }
 
     fn reserve_trace(&mut self, combien: usize) {
         self.trace = combien;
+    }
+
+    fn envelope_id(&mut self, id: &[u8]) {
+        self.envid = String::from_utf8_lossy(id).into_owned();
+    }
+
+    fn recipient_report(&mut self, never: bool, on_success: bool, original: &[u8]) {
+        // **SEULS LES SORTANTS EN ONT L'USAGE.** Un destinataire d'ici est remis
+        // tout de suite, et son sort est dit au pair par le code de retour du
+        // `DATA` — il n'y a pas de rapport à composer pour cela.
+        if self.sortants.len() != self.rapports.len().saturating_add(1) {
+            return;
+        }
+        self.rapports.push((
+            never,
+            on_success,
+            String::from_utf8_lossy(original).into_owned(),
+        ));
     }
 
     fn quarantine(&mut self) -> bool {
@@ -465,7 +494,26 @@ impl MaildirDelivery {
         };
         let sortants = core::mem::take(&mut self.sortants);
         let corps = core::mem::take(&mut self.corps);
-        tokio::task::block_in_place(|| file.deposer(retour, &sortants, &corps, Self::maintenant()))
+        let rapports: Vec<ams_queue::Report<'_>> = self
+            .rapports
+            .iter()
+            .map(|(never, on_success, original)| ams_queue::Report {
+                never: *never,
+                on_success: *on_success,
+                original,
+            })
+            .collect();
+        let envid = self.envid.clone();
+        tokio::task::block_in_place(|| {
+            file.deposer(
+                retour,
+                &sortants,
+                &rapports,
+                &envid,
+                &corps,
+                Self::maintenant(),
+            )
+        })
     }
 }
 

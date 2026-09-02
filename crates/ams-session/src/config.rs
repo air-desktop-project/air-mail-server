@@ -21,6 +21,18 @@ pub struct Capabilities {
     pub starttls: bool,
     /// L'appelant sait conduire un échange SASL.
     pub auth: bool,
+    /// L'appelant sait ÉMETTRE un rapport de remise (RFC 3461).
+    ///
+    /// # POURQUOI CETTE CAPACITÉ, ET PAS UN RÉGLAGE
+    ///
+    /// Annoncer `DSN` engage : §4.2 veut qu'un serveur qui l'annonce ÉMETTE un
+    /// rapport de succès si le pair en demande un. Émettre suppose une file —
+    /// sans elle, ce serveur ne remet rien à personne, et la promesse serait
+    /// vide.
+    ///
+    /// C'est la même règle que pour `AUTH`, qui ne s'annonce que sous
+    /// chiffrement : on n'annonce que ce que quelqu'un a déclaré savoir faire.
+    pub dsn: bool,
 }
 
 /// Ce que la session fait du verdict SPF.
@@ -197,6 +209,7 @@ mod tests {
             .with_capabilities(Capabilities {
                 starttls: true,
                 auth: false,
+                dsn: false,
             });
         assert!(config.capabilities().starttls);
         assert!(!config.capabilities().auth);
@@ -205,7 +218,8 @@ mod tests {
             config.capabilities(),
             Capabilities {
                 starttls: true,
-                auth: true
+                auth: true,
+                dsn: false,
             }
         );
     }

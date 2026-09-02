@@ -82,6 +82,7 @@ fuzz_ams_smtp_reply smtp-reply
 fuzz_ams_smtp_data smtp-data
 fuzz_ams_smtp_chunk smtp-chunk
 fuzz_ams_smtp_literal smtp-literal
+fuzz_ams_smtp_dsn smtp-dsn
 fuzz_ams_smtp_client smtp-client
 fuzz_ams_session_smtp session
 fuzz_ams_pop3 pop3

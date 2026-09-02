@@ -72,7 +72,11 @@ pub const PAIR: Source = Source::V4([127, 0, 0, 1]);
 pub fn config(starttls: bool, auth: bool) -> Config<'static> {
     Config::new(b"mail.example.com", 100, 10_485_760, Limits::DEFAULT)
         .expect("configurable")
-        .with_capabilities(Capabilities { starttls, auth })
+        .with_capabilities(Capabilities {
+            starttls,
+            auth,
+            dsn: false,
+        })
 }
 
 // ── Le certificat, fabriqué à la volée ──────────────────────────────────────

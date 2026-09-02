@@ -2,7 +2,8 @@
 
 use ams_proto_smtp::{
     ChunkEvent, ChunkReceiver, Class, ClientId, Code, Command, DataEvent, DataFault, DataReceiver,
-    Error as SmtpError, Parameter, Parameters, Path, Status, encode,
+    ENVID_MAX, Error as SmtpError, Notify, ORCPT_MAX, Parameter, Parameters, Path, Ret, Status,
+    decode_xtext, encode, parse_orcpt,
 };
 use ams_sasl::{decode_base64, parse_plain};
 use core::net::IpAddr;
@@ -42,8 +43,8 @@ const LIGNE_MAX: usize = 256;
 pub const HOPS_MAX: u32 = 30;
 
 /// Le nombre maximal de lignes d'un `EHLO` : domaine, `SIZE`, `8BITMIME`,
-/// `ENHANCEDSTATUSCODES`, `PIPELINING`, `CHUNKING`, `STARTTLS`, `AUTH`.
-const EHLO_LINES_MAX: usize = 8;
+/// `ENHANCEDSTATUSCODES`, `PIPELINING`, `CHUNKING`, `DSN`, `STARTTLS`, `AUTH`.
+const EHLO_LINES_MAX: usize = 9;
 
 /// Ce qu'un nom de domaine peut faire (RFC 1035 §2.3.4).
 const DOMAIN_MAX: usize = 255;
@@ -169,6 +170,11 @@ pub enum Action {
 enum Verdict7 {
     /// Compris, et rien de plus à faire.
     Compris,
+    /// Compris, et c'est l'identifiant d'enveloppe — sa longueur, DÉCODÉE.
+    ///
+    /// Le décoder une seconde fois chez l'appelant ouvrirait la porte à deux
+    /// lectures d'un même xtext.
+    Envid(usize),
     /// Compris, et le message annoncé dépasse ce qu'on accepte (RFC 1870 §6.2).
     TropGros,
     /// **On ne le connaît pas.** RFC 5321 §4.1.1.11 veut un `555`.
@@ -186,8 +192,36 @@ enum Verdict7 {
 ///
 /// `SIZE` est vérifié parce qu'il est ANNONCÉ. Un serveur qui offre `SIZE` et ne
 /// s'en sert pas fait lire au pair un mébioctet qu'il a déjà décidé de refuser.
-fn verdict_du_parametre_mail(parametre: &Parameter<'_>, max_message: u64) -> Verdict7 {
+fn verdict_du_parametre_mail(
+    parametre: &Parameter<'_>,
+    max_message: u64,
+    dsn: bool,
+    envid: &mut [u8; ENVID_MAX],
+) -> Verdict7 {
     let mot = parametre.keyword();
+    // ── RFC 3461, et seulement si on l'annonce ──────────────────────────────
+    //
+    // **UN PARAMÈTRE QU'ON N'ANNONCE PAS SE REFUSE.** Sans file, ce serveur ne
+    // peut émettre aucun rapport : accepter `RET=` reviendrait à promettre un
+    // rapport qui ne partira jamais.
+    if mot.eq_ignore_ascii_case(b"RET") {
+        return match parametre.value() {
+            Some(valeur) if dsn && Ret::parse(valeur).is_ok() => Verdict7::Compris,
+            _ => Verdict7::Inconnu,
+        };
+    }
+    if mot.eq_ignore_ascii_case(b"ENVID") {
+        // **IL RESSORT DANS UN RAPPORT QUE NOUS COMPOSONS.** Un `CRLF` glissé
+        // dedans écrirait des champs de statut à notre place ; le xtext de §4
+        // l'interdit, et on le vérifie ici plutôt que de le supposer.
+        let Some(valeur) = parametre.value() else {
+            return Verdict7::Inconnu;
+        };
+        return match decode_xtext(valeur, envid) {
+            Ok(decode) if dsn && !decode.is_empty() => Verdict7::Envid(decode.len()),
+            _ => Verdict7::Inconnu,
+        };
+    }
     if mot.eq_ignore_ascii_case(b"SIZE") {
         // **UNE TAILLE ILLISIBLE N'EST PAS UNE TAILLE DE ZÉRO.** Un pair qui
         // écrit `SIZE=abc` n'a pas annoncé une petite taille : il a écrit
@@ -480,6 +514,13 @@ pub struct SmtpSession<'a, P: Policy> {
     phase: Phase,
     tls: bool,
     authenticated: bool,
+    /// L'identifiant d'enveloppe du déposant (RFC 3461 §4.4), décodé.
+    ///
+    /// Il vaut pour la TRANSACTION, contrairement à `NOTIFY` et `ORCPT` qui
+    /// valent par destinataire — c'est §4.4 qui le dit, et cela se comprend :
+    /// il désigne l'envoi, pas un de ses destinataires.
+    envid: [u8; ENVID_MAX],
+    envid_len: usize,
     /// Les `Received:` du message en cours (RFC 5321 §6.3).
     sauts: Sauts,
     /// Le pair s'est-il nommé par `EHLO` plutôt que par `HELO` ?
@@ -563,6 +604,8 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
             chunk: ChunkReceiver::new(config.limits(), config.max_message_octets()),
             tls: false,
             authenticated: false,
+            envid: [0; ENVID_MAX],
+            envid_len: 0,
             sauts: Sauts::new(),
             esmtp: false,
             recipients: Recipients::new(),
@@ -1009,6 +1052,15 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         // secret, et ce serveur reçoit du courrier en clair de toute façon.
         lignes[posees] = b"CHUNKING";
         posees = posees.saturating_add(1);
+        // **`DSN` (RFC 3461) NE S'ANNONCE QUE SI L'ON PEUT ÉMETTRE.** §4.2 veut
+        // qu'un serveur qui l'annonce ÉMETTE un rapport de succès quand on lui
+        // en demande un — et émettre suppose la file. Sans elle, l'annonce
+        // serait une promesse vide, et `NOTIFY=SUCCESS` recevrait un `504` :
+        // le pair saurait au moins à quoi s'en tenir.
+        if self.config.capabilities().dsn {
+            lignes[posees] = b"DSN";
+            posees = posees.saturating_add(1);
+        }
         // On n'annonce QUE ce que l'appelant a declare savoir conduire, et
         // `AUTH` seulement sous chiffrement (C6) : annoncer un mecanisme qu'on
         // refusera ensuite ferait envoyer un mot de passe en clair a un client
@@ -1075,9 +1127,17 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
                 // **LES PARAMÈTRES SE TRIENT AVANT D'OUVRIR LA TRANSACTION** :
                 // refuser après l'avoir ouverte laisserait une transaction
                 // entamée que le pair croirait close.
+                let mut envid = [0_u8; ENVID_MAX];
+                let mut envid_len = 0_usize;
                 for parametre in *parameters {
-                    match verdict_du_parametre_mail(&parametre, self.config.max_message_octets()) {
+                    match verdict_du_parametre_mail(
+                        &parametre,
+                        self.config.max_message_octets(),
+                        self.config.capabilities().dsn,
+                        &mut envid,
+                    ) {
                         Verdict7::Compris => {}
+                        Verdict7::Envid(combien) => envid_len = combien,
                         Verdict7::TropGros => {
                             return self.refus(
                                 Code::MESSAGE_TOO_LARGE,
@@ -1098,6 +1158,8 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
                     recipients: 0,
                     chunked: false,
                 };
+                self.envid = envid;
+                self.envid_len = envid_len;
                 self.retenir_le_chemin_de_retour(reverse_path);
                 if self.retenir_l_expediteur(reverse_path) {
                     // L'identité est vérifiable : on rend la main à l'appelant,
@@ -1304,6 +1366,29 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         write_received(out, &champ).ok()
     }
 
+    /// L'identifiant d'enveloppe du déposant (RFC 3461 §4.4), s'il en a donné.
+    ///
+    /// **Il est rendu DÉCODÉ** : le xtext de §4 a été défait à l'acceptation,
+    /// une seule fois, et ce qui n'était pas un xtext valable n'est jamais
+    /// arrivé jusqu'ici.
+    #[must_use]
+    pub fn envelope_id(&self) -> Option<&[u8]> {
+        // `envid_len` vient de `decode_xtext`, qui n'écrit jamais au-delà du
+        // tampon : la tranche existe toujours. `unwrap_or_default` porte cette
+        // certitude plutôt qu'un `?` que rien n'emprunterait.
+        let vu = self.envid.get(..self.envid_len).unwrap_or_default();
+        (!vu.is_empty()).then_some(vu)
+    }
+
+    /// Ce que le destinataire de rang `rang` a demandé (RFC 3461).
+    ///
+    /// La boucle en a besoin pour la file : c'est elle qui écrit l'enveloppe, et
+    /// c'est la session qui sait ce que le pair a demandé.
+    #[must_use]
+    pub fn recipient_report(&self, rang: usize) -> Option<(Notify, &[u8])> {
+        self.recipients.rapport(rang)
+    }
+
     /// Le verdict retenu pour la transaction en cours, s'il y en a un.
     ///
     /// Il sert au journal et à l'en-tête `Received-SPF` : un verdict qu'on
@@ -1383,18 +1468,56 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         parameters: &Parameters<'_>,
         out: &'b mut [u8],
     ) -> Result<Turn<'b>, Error> {
-        // **AUCUN PARAMÈTRE DE `RCPT` N'EST SERVI ICI.** Les seuls que RFC 5321
-        // prévoit viennent de DSN (RFC 3461) — `NOTIFY=` et `ORCPT=` —, et ce
-        // serveur ne les honore pas. Les accepter en silence ferait croire à un
-        // expéditeur qu'il a supprimé ses rapports de non-remise ; il les
-        // recevrait quand même, et n'aurait aucun moyen de le savoir.
-        if parameters.into_iter().next().is_some() {
-            return self.refus(
-                Code::PARAMETER_NOT_IMPLEMENTED,
-                b"Parameter not recognised",
-                out,
-            );
+        // ── `NOTIFY` et `ORCPT` (RFC 3461 §4.1 et §4.2) ─────────────────────
+        //
+        // Ils sont PAR DESTINATAIRE : deux `RCPT` d'une même transaction peuvent
+        // demander deux choses différentes, et c'est tout l'objet de §4.1.
+        //
+        // **UN PARAMÈTRE QU'ON N'ANNONCE PAS SE REFUSE.** Sans file, `NOTIFY`
+        // ne veut rien dire — un `NEVER` qu'on honorerait sans pouvoir rien
+        // émettre serait vrai par accident, et un `SUCCESS` serait une promesse
+        // vide.
+        let mut notify = Notify::default();
+        let mut orcpt = [0_u8; ORCPT_MAX];
+        let mut orcpt_vu = 0_usize;
+        for parametre in *parameters {
+            let mot = parametre.keyword();
+            let servi = if mot.eq_ignore_ascii_case(b"NOTIFY") {
+                match parametre.value() {
+                    Some(valeur) if self.config.capabilities().dsn => match Notify::parse(valeur) {
+                        Ok(vu) => {
+                            notify = vu;
+                            true
+                        }
+                        Err(_) => false,
+                    },
+                    _ => false,
+                }
+            } else if mot.eq_ignore_ascii_case(b"ORCPT") {
+                match parametre.value() {
+                    Some(valeur) if self.config.capabilities().dsn => {
+                        match parse_orcpt(valeur, &mut orcpt) {
+                            Ok((_, adresse)) => {
+                                orcpt_vu = adresse.len();
+                                true
+                            }
+                            Err(_) => false,
+                        }
+                    }
+                    _ => false,
+                }
+            } else {
+                false
+            };
+            if !servi {
+                return self.refus(
+                    Code::PARAMETER_NOT_IMPLEMENTED,
+                    b"Parameter not recognised",
+                    out,
+                );
+            }
         }
+
         let Phase::Transaction {
             recipients,
             chunked,
@@ -1416,6 +1539,9 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
                 if !self.retenir(forward_path) {
                     return self.simple(Code::TOO_MANY_RECIPIENTS, b"Too many recipients", out);
                 }
+                // Ce que CE destinataire-là a demandé (RFC 3461 §4.1, §4.2).
+                self.recipients
+                    .poser_le_rapport(notify, orcpt.get(..orcpt_vu).unwrap_or_default());
                 self.phase = Phase::Transaction {
                     recipients: recipients.saturating_add(1),
                     chunked,
@@ -1723,6 +1849,9 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         // **LE COMPTE DES SAUTS EST CELUI D'UN MESSAGE**, pas d'une connexion :
         // le garder ferait refuser le second message pour les traces du premier.
         self.sauts = Sauts::new();
+        // L'identifiant d'enveloppe est celui d'une TRANSACTION : le garder
+        // ferait rattacher le rapport du message suivant à l'envoi précédent.
+        self.envid_len = 0;
         // **LES DEUX RÉCEPTEURS REPARTENT À ZÉRO**, et pas seulement celui qu'on
         // vient d'employer : c'est ce qui rend `received_octets` sommable sans
         // avoir à savoir par quel chemin le message est arrivé.
@@ -1861,6 +1990,7 @@ mod tests {
             .with_capabilities(Capabilities {
                 starttls: true,
                 auth: true,
+                dsn: false,
             })
     }
 
@@ -1879,6 +2009,7 @@ mod tests {
             .with_capabilities(Capabilities {
                 starttls: true,
                 auth: true,
+                dsn: false,
             });
         SmtpSession::new(config, Verdict(RecipientVerdict::Accept))
     }
@@ -2028,6 +2159,133 @@ mod tests {
         }
         // Sans paramètre, il passe.
         assert!(jouer(&mut session, b"RCPT TO:<marie@example.com>\r\n").starts_with("250"));
+    }
+
+    // ── DSN (RFC 3461) ──────────────────────────────────────────────────────
+
+    /// Une session qui sait émettre, donc qui annonce `DSN`.
+    fn dsn() -> SmtpSession<'static, Verdict> {
+        let config = Config::new(b"mail.example.com", 2, 10_485_760, Limits::DEFAULT)
+            .expect("configurable")
+            .with_capabilities(Capabilities {
+                starttls: true,
+                auth: true,
+                dsn: true,
+            });
+        SmtpSession::new(config, Verdict(RecipientVerdict::Accept))
+    }
+
+    /// **`DSN` NE S'ANNONCE QUE SI L'ON PEUT ÉMETTRE** (§4.2).
+    #[test]
+    fn dsn_ne_s_annonce_que_si_l_on_peut_emettre() {
+        let mut muette = acceptante();
+        assert!(!jouer(&mut muette, b"EHLO client.example\r\n").contains("DSN"));
+        let mut session = dsn();
+        assert!(jouer(&mut session, b"EHLO client.example\r\n").contains("250-DSN\r\n"));
+    }
+
+    /// **CE QU'ON N'ANNONCE PAS SE REFUSE**, y compris `NOTIFY`.
+    #[test]
+    fn sans_annonce_les_parametres_dsn_sont_refuses() {
+        let mut session = acceptante();
+        identifier(&mut session);
+        for mauvais in [
+            &b"MAIL FROM:<joe@example.net> RET=HDRS\r\n"[..],
+            b"MAIL FROM:<joe@example.net> ENVID=abc\r\n",
+        ] {
+            assert!(
+                jouer(&mut session, mauvais).starts_with("504"),
+                "{mauvais:?}"
+            );
+        }
+        assert!(jouer(&mut session, b"MAIL FROM:<joe@example.net>\r\n").starts_with("250"));
+        assert!(
+            jouer(
+                &mut session,
+                b"RCPT TO:<marie@example.com> NOTIFY=NEVER\r\n"
+            )
+            .starts_with("504")
+        );
+    }
+
+    /// **CE QUE CHAQUE DESTINATAIRE DEMANDE LUI EST PROPRE** (§4.1).
+    #[test]
+    fn chaque_destinataire_demande_ce_qu_il_veut() {
+        let mut session = dsn();
+        identifier(&mut session);
+        assert!(
+            jouer(
+                &mut session,
+                b"MAIL FROM:<joe@example.net> ENVID=a+2Bb RET=HDRS\r\n"
+            )
+            .starts_with("250")
+        );
+        // L'identifiant est rendu DÉCODÉ, une seule fois.
+        assert_eq!(session.envelope_id(), Some(&b"a+b"[..]));
+
+        assert!(
+            jouer(
+                &mut session,
+                b"RCPT TO:<marie@example.com> NOTIFY=NEVER\r\n"
+            )
+            .starts_with("250")
+        );
+        assert!(
+            jouer(
+                &mut session,
+                b"RCPT TO:<jean@example.com> NOTIFY=SUCCESS ORCPT=rfc822;jean+2Bliste@example.com\r\n"
+            )
+            .starts_with("250")
+        );
+
+        let (premier, orcpt) = session.recipient_report(0).expect("un rapport");
+        assert!(premier.never());
+        assert!(orcpt.is_empty(), "aucun `ORCPT` n'a été donné");
+        let (second, orcpt) = session.recipient_report(1).expect("un rapport");
+        assert!(second.on_success() && !second.never());
+        assert_eq!(orcpt, b"jean+liste@example.com");
+        // Au-delà des destinataires acceptés, il n'y a rien.
+        assert_eq!(session.recipient_report(2), None);
+
+        // Et une nouvelle transaction oublie tout.
+        assert!(jouer(&mut session, b"RSET\r\n").starts_with("250"));
+        assert_eq!(session.envelope_id(), None);
+    }
+
+    /// **UNE VALEUR IRRECEVABLE EST REFUSÉE**, et non corrigée.
+    #[test]
+    fn une_valeur_dsn_irrecevable_est_refusee() {
+        let mut session = dsn();
+        identifier(&mut session);
+        for mauvais in [
+            &b"MAIL FROM:<joe@example.net> RET=BODY\r\n"[..],
+            b"MAIL FROM:<joe@example.net> RET\r\n",
+            b"MAIL FROM:<joe@example.net> ENVID=a+2b\r\n", // minuscule hexadécimale
+            b"MAIL FROM:<joe@example.net> ENVID\r\n",
+        ] {
+            assert!(
+                jouer(&mut session, mauvais).starts_with("504"),
+                "{mauvais:?}"
+            );
+        }
+        assert!(jouer(&mut session, b"MAIL FROM:<joe@example.net>\r\n").starts_with("250"));
+        for mauvais in [
+            &b"RCPT TO:<marie@example.com> NOTIFY=NEVER,SUCCESS\r\n"[..],
+            b"RCPT TO:<marie@example.com> NOTIFY=MAYBE\r\n",
+            b"RCPT TO:<marie@example.com> NOTIFY\r\n",
+            b"RCPT TO:<marie@example.com> ORCPT=marie@example.com\r\n",
+            b"RCPT TO:<marie@example.com> ORCPT\r\n",
+            // **UN MOT-CLÉ QU'ON NE CONNAÎT PAS**, même quand `DSN` est
+            // annoncé : ce n'est pas parce qu'on sert deux paramètres qu'on
+            // sert tous ceux qui leur ressemblent.
+            b"RCPT TO:<marie@example.com> NOTIFYY=NEVER\r\n",
+            b"RCPT TO:<marie@example.com> RET=HDRS\r\n",
+        ] {
+            assert!(
+                jouer(&mut session, mauvais).starts_with("504"),
+                "{mauvais:?}"
+            );
+        }
     }
 
     // ── LES CODES D'ÉTAT ÉTENDUS (RFC 2034, RFC 3463) ───────────────────────
@@ -2995,6 +3253,7 @@ mod tests {
             .with_capabilities(Capabilities {
                 starttls: false,
                 auth: true,
+                dsn: false,
             });
         let espionne = Espionne(Cell::new(None));
         let mut session = SmtpSession::new(config, &espionne);
