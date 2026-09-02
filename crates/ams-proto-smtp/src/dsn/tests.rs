@@ -1,4 +1,6 @@
-use super::{ENVID_MAX, Notify, ORCPT_MAX, Ret, decode_xtext, parse_orcpt};
+use super::{
+    ENVID_MAX, Notify, ORCPT_MAX, Ret, XTEXT_GROWTH, decode_xtext, encode_xtext, parse_orcpt,
+};
 use crate::Error;
 
 // ── `NOTIFY` (§4.1) ─────────────────────────────────────────────────────────
@@ -190,4 +192,79 @@ fn un_orcpt_mal_forme_est_refuse() {
     let mut court = [0_u8; 4];
     assert!(parse_orcpt(b"rfc822;marie@example.com", &mut court).is_err());
     const { assert!(ENVID_MAX < ORCPT_MAX) };
+}
+
+// ── LE RETOUR SUR LE FIL (§4) ───────────────────────────────────────────────
+
+/// **UN `+` EN CLAIR SERAIT RELU COMME UNE ÉCHAPPÉE.**
+///
+/// `marie+liste@x.test` est une adresse ordinaire — l'adressage par étiquette
+/// est partout. Écrite telle quelle dans un `ORCPT`, le saut suivant y lirait
+/// l'échappée `+li`, qui n'est pas de l'hexadécimal : il refuserait le `RCPT`,
+/// et le message serait perdu pour un caractère.
+#[test]
+fn une_etiquette_repart_echappee() {
+    let mut sortie = [0_u8; 64];
+    let ecrit = encode_xtext(b"marie+liste@x.test", &mut sortie).expect("encodable");
+    assert_eq!(ecrit, b"marie+2Bliste@x.test");
+}
+
+/// §4 ne réserve que deux caractères : eux seuls s'échappent.
+#[test]
+fn seuls_le_plus_et_l_egal_s_echappent() {
+    let mut sortie = [0_u8; 256];
+    let ecrit = encode_xtext(b"a=b", &mut sortie).expect("encodable");
+    assert_eq!(ecrit, b"a+3Db");
+    // Tout le reste de l'ASCII visible passe TEL QUEL, ce qui garde les
+    // adresses lisibles dans une trace.
+    let clair: std::vec::Vec<u8> = (33_u8..=126)
+        .filter(|octet| !matches!(*octet, b'+' | b'='))
+        .collect();
+    let ecrit = encode_xtext(&clair, &mut sortie).expect("encodable");
+    assert_eq!(ecrit, clair.as_slice());
+}
+
+/// **CE QUI EST ÉCRIT SE RELIT À L'IDENTIQUE**, sur tout l'ASCII visible.
+#[test]
+fn l_aller_et_le_retour_se_repondent() {
+    let tout: std::vec::Vec<u8> = (33_u8..=126).collect();
+    let mut encode = [0_u8; 128 * XTEXT_GROWTH];
+    let ecrit = encode_xtext(&tout, &mut encode).expect("encodable");
+    let mut relu = [0_u8; 128 * XTEXT_GROWTH];
+    let decode = decode_xtext(ecrit, &mut relu).expect("relisible");
+    assert_eq!(decode, tout.as_slice(), "l'aller-retour a changé la valeur");
+}
+
+/// L'encodeur ne CROIT PAS son appelant, même quand celui-ci ne peut lui
+/// donner que le résultat d'un décodage.
+#[test]
+fn ce_qui_couperait_la_commande_est_refuse() {
+    let mut sortie = [0_u8; 64];
+    for mauvais in [&b"a b"[..], b"a\r\nb", b"a\tb", b"\xff"] {
+        assert_eq!(
+            encode_xtext(mauvais, &mut sortie),
+            Err(Error::MalformedParameter),
+            "{mauvais:?} est passé"
+        );
+    }
+}
+
+/// Un tampon trop court le dit, au lieu d'écrire une valeur tronquée qui
+/// désignerait quelqu'un d'autre.
+#[test]
+fn un_tampon_trop_court_se_refuse_au_lieu_de_tronquer() {
+    // Deux octets pour une échappée qui en demande trois.
+    let mut court = [0_u8; 2];
+    assert!(encode_xtext(b"=", &mut court).is_err());
+    // Et zéro octet pour un caractère qui passe en clair.
+    let mut rien = [0_u8; 0];
+    assert!(encode_xtext(b"a", &mut rien).is_err());
+    // Le pire gonflement est bien celui qu'on annonce.
+    let pire = b"=".repeat(ENVID_MAX);
+    let mut juste = [0_u8; ENVID_MAX * XTEXT_GROWTH];
+    assert_eq!(
+        encode_xtext(&pire, &mut juste).expect("encodable").len(),
+        ENVID_MAX * XTEXT_GROWTH
+    );
+    const { assert!(ORCPT_MAX * XTEXT_GROWTH > ORCPT_MAX) };
 }

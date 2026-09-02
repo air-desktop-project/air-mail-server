@@ -28,6 +28,21 @@
 //!    la propriété qui compte le plus ici.
 //! 5. **Le farcissage ne dépend pas du découpage** : couper le corps en deux
 //!    n'importe où donne exactement le même résultat.
+//! 6. **AUCUNE COMMANDE ÉCRITE NE PORTE DE FIN DE LIGNE PRÉMATURÉE** : ce qu'on
+//!    met sur le fil est UNE ligne, close par un seul `CRLF` final.
+//!
+//! # LA SIXIÈME PROPRIÉTÉ EST NOUVELLE, ET ELLE VISE LE DÉPOSANT
+//!
+//! Depuis RFC 3461, ce que le déposant a demandé du sort de son message — son
+//! `ENVID`, son `ORCPT` — repart dans NOS commandes vers le saut suivant. Ce
+//! sont des valeurs qu'il choisit, et un `CRLF` glissé dedans écrirait des
+//! commandes à notre place sur notre propre connexion sortante : le déposant
+//! commanderait en notre nom le serveur de quelqu'un d'autre.
+//!
+//! Elles sont donc soumises HOSTILES ici. Deux défenses les portent —
+//! `SmtpClient::new` refuse ce qui n'est pas de l'ASCII visible, et
+//! `encode_xtext` échappe ce que §4 réserve —, et la propriété ne sait pas
+//! laquelle a joué : elle ne regarde que le fil.
 
 #![no_main]
 
@@ -35,7 +50,9 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use ams_proto_smtp::{Limits, Reply, Stuffer, reply_len, stuffed_max};
-use ams_session::{CLIENT_COMMAND_MAX, ClientConfig, ClientStep, SmtpClient};
+use ams_session::{
+    CLIENT_COMMAND_MAX, ClientConfig, ClientDsn, ClientReport, ClientStep, SmtpClient,
+};
 
 /// Ce qu'on soumet.
 #[derive(Arbitrary, Debug)]
@@ -48,18 +65,72 @@ struct Entree<'a> {
     coupure: u16,
     /// Exige-t-on le chiffrement ?
     exige_tls: bool,
+    /// L'identifiant d'enveloppe du déposant (RFC 3461 §4.4). **VIENT DE LUI.**
+    envid: &'a [u8],
+    /// Ce que le premier destinataire avait demandé (§4.1, §4.2).
+    premier: Demande<'a>,
+    /// Ce que le second avait demandé — les deux peuvent différer.
+    second: Demande<'a>,
+}
+
+/// Ce qu'un destinataire demande du sort de son message.
+#[derive(Arbitrary, Debug)]
+struct Demande<'a> {
+    never: bool,
+    on_success: bool,
+    /// L'adresse d'origine, telle que le déposant l'a écrite. **VIENT DE LUI.**
+    original: &'a [u8],
+}
+
+impl<'a> Demande<'a> {
+    fn en_rapport(&self) -> ClientReport<'a> {
+        ClientReport {
+            never: self.never,
+            on_success: self.on_success,
+            original: self.original,
+        }
+    }
+}
+
+/// PROPRIÉTÉ 6 : ce qu'on vient d'écrire est UNE ligne, et une seule.
+///
+/// Un `CR` ou un `LF` ailleurs qu'à la toute fin ouvrirait une commande de plus
+/// sur notre propre connexion sortante.
+fn une_seule_ligne(ecrit: &[u8]) {
+    if ecrit.is_empty() {
+        return;
+    }
+    assert!(
+        ecrit.ends_with(b"\r\n"),
+        "une commande qui ne se termine pas : {:?}",
+        String::from_utf8_lossy(ecrit)
+    );
+    let corps = &ecrit[..ecrit.len() - 2];
+    assert!(
+        !corps.contains(&b'\r') && !corps.contains(&b'\n'),
+        "une fin de ligne PRÉMATURÉE : {:?}",
+        String::from_utf8_lossy(ecrit)
+    );
 }
 
 fuzz_target!(|entree: Entree<'_>| {
     // ── La session cliente, nourrie de ce qu'on lui répond ──────────────────
     let destinataires: &[&[u8]] = &[b"marie@eux.test", b"jean@eux.test"];
-    let mut client = SmtpClient::new(ClientConfig {
+    let rapports = [entree.premier.en_rapport(), entree.second.en_rapport()];
+    // **UNE CONFIGURATION REFUSÉE N'EST PAS UN ÉCHEC DE LA CIBLE** : c'est la
+    // première des deux défenses qui a joué, et il n'y a plus rien à éprouver.
+    let Ok(mut client) = SmtpClient::new(ClientConfig {
         name: b"mail.nous.test",
         sender: b"",
         recipients: destinataires,
         require_tls: entree.exige_tls,
-    })
-    .expect("cette configuration-là est toujours acceptable");
+        dsn: Some(ClientDsn {
+            envelope_id: entree.envid,
+            reports: &rapports,
+        }),
+    }) else {
+        return;
+    };
 
     let mut reste = entree.reponses;
     let mut conclu = false;
@@ -86,6 +157,13 @@ fuzz_target!(|entree: Entree<'_>| {
         let Ok(geste) = client.on_reply(&reponse, &mut sortie) else {
             break;
         };
+        // PROPRIÉTÉ 6 : ce qui part sur le fil est UNE ligne.
+        match geste {
+            ClientStep::Send(n) | ClientStep::Done { sent: n, .. } => {
+                une_seule_ligne(sortie.get(..n).unwrap_or_default());
+            }
+            ClientStep::Secure | ClientStep::SendBody => {}
+        }
         if let ClientStep::Done { .. } = geste {
             conclu = true;
             // PROPRIÉTÉ 3 : `Done` est terminal. Une session qui repartirait
@@ -99,7 +177,9 @@ fuzz_target!(|entree: Entree<'_>| {
         if let ClientStep::Secure = geste {
             // Après le chiffrement, on se represente — et pas avant.
             assert!(client.on_reply(&reponse, &mut sortie).is_err());
-            let _ = client.on_secured(&mut sortie);
+            if let Ok(ClientStep::Send(n)) = client.on_secured(&mut sortie) {
+                une_seule_ligne(sortie.get(..n).unwrap_or_default());
+            }
         }
         reste = &reste[longueur..];
     }

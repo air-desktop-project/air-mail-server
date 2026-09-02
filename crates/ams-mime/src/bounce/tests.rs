@@ -413,8 +413,33 @@ fn un_rapport_de_succes_dit_delivered_et_nomme_l_adresse_d_origine() {
     assert!(!texte.contains("Diagnostic-Code"), "{texte}");
     assert_eq!(super::Action::Delivered.name(), "delivered");
     assert_eq!(super::Action::Failed.name(), "failed");
+    // **`relayed` N'EST PAS `delivered`** (RFC 3464 §2.3.3) : seul un serveur
+    // de remise FINALE peut dire qu'un message est arrivé. Le nôtre l'a passé
+    // au saut suivant, ce qui n'est pas la même promesse.
+    assert_eq!(super::Action::Relayed.name(), "relayed");
     assert_eq!(super::Action::default(), super::Action::Failed);
     assert!(!std::format!("{:?}", super::Action::Delivered).is_empty());
+    assert!(!std::format!("{:?}", super::Action::Relayed).is_empty());
+}
+
+/// **UN RAPPORT DE RELAIS DIT `relayed`, ET RIEN D'AUTRE.**
+///
+/// Écrire `delivered` promettrait une remise que nous ne sommes pas en mesure
+/// de constater : nous avons passé le message, le saut suivant peut encore le
+/// perdre. Le déposant lirait « arrivé » là où il fallait lire « parti ».
+#[test]
+fn un_rapport_de_relais_ne_promet_pas_la_remise() {
+    let relaye = Failure {
+        recipient: b"marie@ailleurs.test",
+        status: b"2.0.0",
+        diagnostic: b"",
+        action: super::Action::Relayed,
+        original: b"",
+    };
+    let echecs = [relaye];
+    let texte = composer(&rapport(&echecs));
+    assert!(texte.contains("Action: relayed\r\n"), "{texte}");
+    assert!(!texte.contains("Action: delivered"), "{texte}");
 }
 
 /// **CE QUI NE TIENT PAS LE DIT**, y compris les champs que RFC 3461 ajoute.

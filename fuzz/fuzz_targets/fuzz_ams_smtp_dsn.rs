@@ -27,12 +27,26 @@
 //! 4. **RIEN N'EST ÉCRIT AU-DELÀ DU TAMPON** : ce qui borde ne bouge pas.
 //! 5. **`NEVER` NE SE COMBINE AVEC RIEN** (§4.1), et un `NOTIFY` accepté demande
 //!    toujours au moins une chose.
+//! 6. **CE QUI EST ÉCRIT SE RELIT À L'IDENTIQUE** : ré-encoder puis décoder rend
+//!    la valeur de départ, et ce qui sort de l'encodeur est un xtext valable.
+//!
+//! # LA SIXIÈME PROPRIÉTÉ TIENT UN MESSAGE ENTIER
+//!
+//! La file garde ces valeurs DÉCODÉES — c'est sous cette forme qu'elles
+//! s'écrivent dans un rapport — et le fil, lui, veut du xtext. Un aller-retour
+//! qui ne se referme pas ferait partir vers le saut suivant une adresse
+//! d'origine qui n'est plus celle du déposant, ou pire un `RCPT` refusé :
+//! `marie+liste@x.test` écrite en clair se relit comme l'échappée `+li`, qui
+//! n'est pas de l'hexadécimal. L'adressage par étiquette est partout, et le
+//! message serait perdu pour un caractère.
 //!
 //! Harnais **pur** : aucune entrée-sortie (C1).
 
 #![no_main]
 
-use ams_proto_smtp::{Notify, ORCPT_MAX, Ret, decode_xtext, parse_orcpt};
+use ams_proto_smtp::{
+    Notify, ORCPT_MAX, Ret, XTEXT_GROWTH, decode_xtext, encode_xtext, parse_orcpt,
+};
 use libfuzzer_sys::fuzz_target;
 
 /// Ce qui borde le tampon, pour voir si l'on écrit au-delà.
@@ -82,6 +96,42 @@ fuzz_target!(|entree: &[u8]| {
         assert!(
             decode.iter().all(u8::is_ascii_graphic),
             "un octet qui ouvrirait une seconde ligne dans le rapport"
+        );
+
+        // ── 6. L'ALLER ET LE RETOUR SE RÉPONDENT (§4) ───────────────────────
+        //
+        // Ce qui sort du décodeur est exactement ce que la file garde ; c'est
+        // donc exactement ce que l'encodeur devra remettre sur le fil.
+        let mut encode = vec![GARDE; combien.saturating_mul(XTEXT_GROWTH).saturating_add(64)];
+        let large = combien.saturating_mul(XTEXT_GROWTH);
+        let ecrit = {
+            let place = encode
+                .get_mut(..large)
+                .expect("le tampon fait au moins le pire gonflement");
+            encode_xtext(decode, place)
+                .expect("ce qui sort du décodeur est de l'ASCII visible")
+                .len()
+        };
+        // 4. RIEN N'EST ÉCRIT AU-DELÀ, ici non plus.
+        assert!(
+            encode
+                .get(large..)
+                .is_some_and(|bord| bord.iter().all(|octet| *octet == GARDE)),
+            "l'encodeur a écrit au-delà du pire gonflement annoncé"
+        );
+        let sur_le_fil = encode.get(..ecrit).unwrap_or_default();
+        let mut relu = vec![GARDE; ecrit.saturating_add(64)];
+        let retour = {
+            let place = relu
+                .get_mut(..ecrit)
+                .expect("le décodage ne grandit jamais");
+            decode_xtext(sur_le_fil, place).expect("un xtext qu'on vient d'écrire se relit")
+        };
+        assert_eq!(
+            retour,
+            decode,
+            "l'aller-retour a changé la valeur : {:?}",
+            String::from_utf8_lossy(decode)
         );
     }
 

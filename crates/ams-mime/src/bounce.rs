@@ -66,13 +66,29 @@ pub struct Failure<'a> {
 }
 
 /// Ce qu'un serveur a fait d'un message, pour un destinataire (§2.3.3).
+///
+/// # `delivered` ET `relayed` NE DISENT PAS LA MÊME CHOSE
+///
+/// `delivered` affirme que le message est ARRIVÉ — c'est le MTA de remise finale
+/// qui le dit, et lui seul. Un serveur qui a passé le message au saut suivant ne
+/// sait rien de plus : le saut suivant peut encore le refuser, le perdre, ou le
+/// remettre. Dire `delivered` à sa place serait affirmer ce qu'on ignore, et un
+/// expéditeur qui lit un rapport de succès cesse de s'inquiéter.
+///
+/// §2.3.3 a donc `relayed` : « remis à un environnement qui n'accepte pas la
+/// responsabilité d'émettre des rapports ». C'est ce que ce serveur écrit quand
+/// il relaie vers un saut qui n'annonce pas `DSN` — et quand le saut l'annonce,
+/// il n'écrit RIEN : les paramètres lui sont passés, et c'est lui qui rendra
+/// compte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Action {
     /// Il n'a pas été remis, et ne le sera pas.
     #[default]
     Failed,
-    /// Il a été remis.
+    /// Il a été remis. **Seul un MTA de remise finale peut le dire.**
     Delivered,
+    /// Il a été passé au saut suivant, qui ne rendra pas compte.
+    Relayed,
 }
 
 impl Action {
@@ -82,6 +98,7 @@ impl Action {
         match self {
             Self::Failed => "failed",
             Self::Delivered => "delivered",
+            Self::Relayed => "relayed",
         }
     }
 }

@@ -36,7 +36,9 @@ use std::sync::Arc;
 use std::vec::Vec;
 
 use ams_proto_smtp::{Limits, Reply, Stuffer, reply_len, stuffed_max};
-use ams_session::{CLIENT_COMMAND_MAX, ClientConfig, ClientOutcome, ClientStep, SmtpClient};
+use ams_session::{
+    CLIENT_COMMAND_MAX, ClientConfig, ClientDsn, ClientOutcome, ClientStep, SmtpClient,
+};
 use rustls::pki_types::ServerName;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
 use tokio::net::TcpStream;
@@ -76,6 +78,12 @@ pub enum RelayOutcome {
         /// **Il est rendu pour être COMPTÉ.** Une protection qu'on ne voit pas
         /// est une protection qu'on croit avoir.
         authenticated: bool,
+        /// Le pair a-t-il pris en charge les demandes de RFC 3461 ?
+        ///
+        /// Vrai, c'est LUI qui rendra compte, et nous n'émettons rien : deux
+        /// rapports pour un même envoi laisseraient le déposant sans savoir
+        /// lequel croire (§5.2.1).
+        dsn_forwarded: bool,
     },
     /// Refus **définitif**. Ne pas réessayer.
     Rejected(u16),
@@ -113,6 +121,13 @@ pub struct Outgoing<'a> {
     pub recipients: &'a [String],
     /// Le message, en-têtes compris, lignes terminées par `CRLF`.
     pub body: &'a [u8],
+    /// Ce que le déposant a demandé du sort de son message (RFC 3461 §5.2.1).
+    ///
+    /// **CE N'EST PAS À NOUS DE LE GARDER.** Un serveur intermédiaire qui lit
+    /// `NOTIFY=NEVER` et ne le transmet pas laisse le saut suivant émettre le
+    /// rapport que le déposant avait explicitement refusé. La demande suit le
+    /// message aussi loin que des serveurs savent la lire.
+    pub dsn: Option<ClientDsn<'a>>,
 }
 
 /// De quoi remettre du courrier à d'autres serveurs.
@@ -446,6 +461,7 @@ impl Relay {
             name: self.nom.as_bytes(),
             sender: message.sender.as_bytes(),
             recipients: &destinataires,
+            dsn: message.dsn,
             // **UN DOMAINE QUI PUBLIE UN `TLSA` EXIGE LE CHIFFREMENT.** Un pair
             // qui n'annonce pas `STARTTLS` alors que son domaine a publié est
             // soit en panne, soit déclassé par un tiers ; dans les deux cas on
@@ -482,6 +498,7 @@ impl Relay {
                     accepted,
                     refused,
                     encrypted,
+                    dsn_forwarded,
                     ..
                 },
             ) => RelayOutcome::Delivered {
@@ -489,6 +506,7 @@ impl Relay {
                 refused,
                 encrypted,
                 authenticated: true,
+                dsn_forwarded,
             },
             (_, issue) => issue,
         }
@@ -710,6 +728,7 @@ fn issue_du_client(outcome: ClientOutcome, client: &SmtpClient<'_>) -> RelayOutc
             refused: client.refused(),
             encrypted: client.is_encrypted(),
             authenticated: false,
+            dsn_forwarded: client.dsn_forwarded(),
         },
         ClientOutcome::Rejected(code) => RelayOutcome::Rejected(code.value()),
         ClientOutcome::Deferred(code) => RelayOutcome::Deferred(code.value()),

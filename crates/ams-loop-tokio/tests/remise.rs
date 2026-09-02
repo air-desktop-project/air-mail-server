@@ -103,6 +103,66 @@ fn remetteur(exige_tls: bool) -> Relay {
     )
 }
 
+/// Ce qu'un serveur a retenu d'une demande de RFC 3461.
+type DemandeVue = (std::vec::Vec<u8>, bool, bool, std::vec::Vec<u8>);
+
+/// Une remise qui retient ce que le déposant a demandé du sort de son message.
+#[derive(Clone, Default)]
+struct CahierDsn(Arc<Mutex<DemandeVue>>);
+
+impl Delivery for CahierDsn {
+    fn add_recipient(&mut self, _address: &[u8]) -> Result<(), DeliveryFailure> {
+        Ok(())
+    }
+    fn envelope_id(&mut self, id: &[u8]) {
+        self.0.lock().expect("verrou").0 = id.to_vec();
+    }
+    fn recipient_report(&mut self, never: bool, on_success: bool, original: &[u8]) {
+        let mut vu = self.0.lock().expect("verrou");
+        vu.1 = never;
+        vu.2 = on_success;
+        vu.3 = original.to_vec();
+    }
+    fn append(&mut self, _chunk: &[u8]) -> Result<(), DeliveryFailure> {
+        Ok(())
+    }
+    fn finish(&mut self) -> Result<(), DeliveryFailure> {
+        Ok(())
+    }
+    fn abort(&mut self) {}
+}
+
+/// Monte un serveur qui ANNONCE `DSN`, et rend ce qu'il a retenu de la demande.
+async fn serveur_dsn() -> (std::net::SocketAddr, CahierDsn) {
+    let ecouteur = TcpListener::bind("127.0.0.1:0").await.expect("écoute");
+    let adresse = ecouteur.local_addr().expect("adresse");
+    let cahier = CahierDsn::default();
+    let sien = cahier.clone();
+    tokio::spawn(async move {
+        let (mut flux, _) = ecouteur.accept().await.expect("connexion");
+        let garde = SharedGuard::new(4, Thresholds::DEFAULT);
+        let mut remise = sien;
+        let service = Service {
+            config: Config::new(b"mail.eux.test", 100, 10_485_760, Limits::DEFAULT)
+                .expect("configurable")
+                .with_capabilities(Capabilities {
+                    starttls: false,
+                    auth: false,
+                    dsn: true,
+                }),
+            guard: &garde,
+            timeouts: Timeouts::default(),
+            tls: None,
+            spf: None,
+            dkim: None,
+            dmarc: None,
+            reports: None,
+        };
+        let _ = serve_connection(&mut flux, &service, NotreDomaine, &mut remise, PAIR).await;
+    });
+    (adresse, cahier)
+}
+
 /// Monte notre propre serveur, et rend son adresse et le cahier qu'il remplit.
 async fn serveur(chiffrement: Option<Arc<rustls::ServerConfig>>) -> (std::net::SocketAddr, Cahier) {
     let ecouteur = TcpListener::bind("127.0.0.1:0").await.expect("écoute");
@@ -149,6 +209,7 @@ fn message<'a>(destinataires: &'a [std::string::String]) -> Outgoing<'a> {
         sender: "",
         recipients: destinataires,
         body: CORPS,
+        dsn: None,
     }
 }
 
@@ -171,6 +232,8 @@ async fn un_message_traverse_notre_propre_serveur_intact() {
             // `send_to` n'a pas de `TLSA` : ces essais s'adressent à une
             // adresse connue, sans passer par le DNS.
             authenticated: false,
+            // Rien n'a été demandé : il n'y avait rien à passer.
+            dsn_forwarded: false,
         }
     );
 
@@ -228,6 +291,8 @@ async fn un_destinataire_sur_deux_suffit_a_remettre() {
             // `send_to` n'a pas de `TLSA` : ces essais s'adressent à une
             // adresse connue, sans passer par le DNS.
             authenticated: false,
+            // Rien n'a été demandé : il n'y avait rien à passer.
+            dsn_forwarded: false,
         }
     );
 }
@@ -254,6 +319,8 @@ async fn la_remise_chiffree_traverse_aussi() {
             // `send_to` n'a pas de `TLSA` : ces essais s'adressent à une
             // adresse connue, sans passer par le DNS.
             authenticated: false,
+            // Rien n'a été demandé : il n'y avait rien à passer.
+            dsn_forwarded: false,
         },
         "la remise devait aboutir SOUS CHIFFREMENT"
     );
@@ -290,6 +357,7 @@ async fn un_corps_mal_termine_ne_part_pas() {
                 sender: "",
                 recipients: &destinataires,
                 body: b"Sujet: essai\nsans CR\n",
+                dsn: None,
             },
         )
         .await;
@@ -365,6 +433,8 @@ async fn le_mx_dit_ou_frapper() {
             // `send_to` n'a pas de `TLSA` : ces essais s'adressent à une
             // adresse connue, sans passer par le DNS.
             authenticated: false,
+            // Rien n'a été demandé : il n'y avait rien à passer.
+            dsn_forwarded: false,
         }
     );
     assert!(!cahier.0.lock().expect("verrou").is_empty());
@@ -803,4 +873,105 @@ async fn un_rapport_d_echec_ne_part_pas_vers_qui_n_a_pas_consenti() {
         })
         .await;
     assert!(!dossier.exists(), "un rapport est parti sans consentement");
+}
+
+// ── CE QUE LE DÉPOSANT A DEMANDÉ, D'UNE MOITIÉ À L'AUTRE (RFC 3461) ─────────
+
+/// **L'ENCODAGE ET LE DÉCODAGE SE RÉPONDENT, ET RIEN D'AUTRE NE LE PROUVE.**
+///
+/// L'écrivain et le lecteur du xtext (§4) ne partagent aucun code : l'un
+/// échappe, l'autre défait. Les faire dialoguer sur `marie+liste@x.test` —
+/// l'adressage par étiquette, qui est partout — est le seul essai où une erreur
+/// d'un côté ne peut pas être rattrapée par l'erreur inverse de l'autre.
+///
+/// Écrite en clair, cette adresse serait relue comme l'échappée `+li`, qui n'est
+/// pas de l'hexadécimal : le `RCPT` serait refusé, et le message perdu.
+#[tokio::test]
+async fn la_demande_du_deposant_traverse_intacte() {
+    let (adresse, vu) = serveur_dsn().await;
+    let destinataires = std::vec![std::string::String::from("marie@example.com")];
+    let rapports = [ams_loop_tokio::ClientReport {
+        never: false,
+        on_success: true,
+        original: b"marie+liste@x.test",
+    }];
+    let issue = remetteur(false)
+        .with_port(adresse.port())
+        .send_to(
+            "mail.eux.test",
+            adresse,
+            &Outgoing {
+                sender: "",
+                recipients: &destinataires,
+                body: CORPS,
+                dsn: Some(ams_loop_tokio::ClientDsn {
+                    // Un `+` dans l'identifiant AUSSI : c'est le caractère que
+                    // §4 réserve, et le seul dont l'oubli se voit.
+                    envelope_id: b"envoi+42",
+                    reports: &rapports,
+                }),
+            },
+        )
+        .await;
+    assert_eq!(
+        issue,
+        RelayOutcome::Delivered {
+            accepted: 1,
+            refused: 0,
+            encrypted: false,
+            authenticated: false,
+            // **LE SAUT SUIVANT A PRIS LA DEMANDE**, donc c'est LUI qui rendra
+            // compte, et la file se tait (§5.2.1).
+            dsn_forwarded: true,
+        }
+    );
+    let (identifiant, jamais, succes, origine) = vu.0.lock().expect("verrou").clone();
+    assert_eq!(identifiant, b"envoi+42", "l'identifiant a changé en route");
+    assert_eq!(
+        origine, b"marie+liste@x.test",
+        "l'adresse a changé en route"
+    );
+    assert!(succes, "le rapport de succès demandé s'est perdu");
+    assert!(!jamais);
+}
+
+/// **UN PAIR QUI N'ANNONCE PAS `DSN` NOUS LAISSE RENDRE COMPTE.**
+///
+/// C'est la moitié qui compte pour la file : sans ce faux, elle se tairait
+/// toujours, et un rapport de succès demandé ne partirait jamais.
+#[tokio::test]
+async fn un_pair_qui_ignore_le_dsn_le_dit() {
+    let (adresse, _cahier) = serveur(None).await;
+    let destinataires = std::vec![std::string::String::from("marie@example.com")];
+    let rapports = [ams_loop_tokio::ClientReport {
+        never: false,
+        on_success: true,
+        original: b"",
+    }];
+    let issue = remetteur(false)
+        .with_port(adresse.port())
+        .send_to(
+            "mail.eux.test",
+            adresse,
+            &Outgoing {
+                sender: "",
+                recipients: &destinataires,
+                body: CORPS,
+                dsn: Some(ams_loop_tokio::ClientDsn {
+                    envelope_id: b"envoi-42",
+                    reports: &rapports,
+                }),
+            },
+        )
+        .await;
+    assert_eq!(
+        issue,
+        RelayOutcome::Delivered {
+            accepted: 1,
+            refused: 0,
+            encrypted: false,
+            authenticated: false,
+            dsn_forwarded: false,
+        }
+    );
 }

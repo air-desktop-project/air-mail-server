@@ -29,9 +29,16 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 >
 > **Il rend compte de ce qu'on lui demande** (`DSN`, RFC 3461) : `NOTIFY=NEVER`
 > fait taire le rapport de non-remise, `NOTIFY=SUCCESS` en fait partir un quand
-> le message est remis, et `ENVID` comme `ORCPT` reviennent dans le rapport tels
+> le message est parti, et `ENVID` comme `ORCPT` reviennent dans le rapport tels
 > que le déposant les a écrits. `DSN` ne s'annonce que si la file existe — sans
 > elle, la promesse serait vide.
+>
+> **Et ce rapport dit `relayed`, pas `delivered`** : §2.3.3 de RFC 3464 réserve
+> le second au serveur de remise finale, et celui-ci n'est pas celui-là. La
+> demande du déposant est par ailleurs PASSÉE au saut suivant quand il annonce
+> `DSN` (§5.2.1) — un `NOTIFY=NEVER` gardé pour soi le laisserait émettre le
+> rapport qu'on avait refusé —, et ce serveur se tait alors : c'est lui qui
+> rendra compte.
 >
 > **Ce qu'il annonce, il le tient** : `SIZE` était offert à chaque `EHLO` et
 > jamais lu — un pair pouvait annoncer dix gibioctets et nous les faire lire.
@@ -1963,7 +1970,7 @@ que `llvm-cov` n'instrumente pas sur Rust stable et dont le compteur reste à
 `0 / 0`. Les régions font le travail attendu : chaque bras d'un conditionnel en
 est une.
 
-Le gate mesure aujourd'hui **54 459 régions** et **31 351 lignes**, toutes
+Le gate mesure aujourd'hui **54 638 régions** et **31 437 lignes**, toutes
 couvertes. **Une seule dérogation, et elle est annoncée à chaque exécution** : le
 code *généré* du schéma Cap'n Proto en est exclu — il porte un accesseur par champ
 et par sens, dont la plupart ne seront jamais appelés, et les couvrir n'éprouverait

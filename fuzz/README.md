@@ -169,8 +169,8 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_smtp_data` | `seeds/smtp-data` | la phase de données — **indépendance au découpage** |
 | `fuzz_ams_smtp_chunk` | `seeds/smtp-chunk` | les morceaux de `BDAT` — **on ne consomme jamais plus que ce qui est annoncé**, et le découpage ne change rien |
 | `fuzz_ams_smtp_literal` | `seeds/smtp-literal` | le littéral d'adresse d'un `EHLO` — **notre verdict est celui de `core::net`**, pour IPv4 comme pour IPv6 |
-| `fuzz_ams_smtp_dsn` | `seeds/smtp-dsn` | les paramètres de RFC 3461 — **un xtext décodé ne grandit jamais**, ce qui sort est de l'ASCII visible, et `NEVER` ne se combine avec rien |
-| `fuzz_ams_smtp_client` | `seeds/smtp-client` | réponses lues et corps émis — **le message ne se termine pas tout seul** |
+| `fuzz_ams_smtp_dsn` | `seeds/smtp-dsn` | les paramètres de RFC 3461 — **un xtext décodé ne grandit jamais**, ce qui sort est de l'ASCII visible, `NEVER` ne se combine avec rien, et **l'aller-retour de l'encodage rend la valeur de départ** |
+| `fuzz_ams_smtp_client` | `seeds/smtp-client` | réponses lues, corps émis et demandes de RFC 3461 passées au saut suivant — **le message ne se termine pas tout seul**, et **aucune commande écrite ne porte de fin de ligne prématurée** |
 | `fuzz_ams_session_smtp` | `seeds/session` | la session — **vocabulaire de sortie clos** |
 | `fuzz_ams_queue` | `seeds/queue` | la file de réémission — **un nom écrit se relit et ne sort pas du répertoire**, une enveloppe ne s'invente pas de destinataire |
 

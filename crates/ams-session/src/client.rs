@@ -29,15 +29,31 @@
 //! ce serait le travail d'ailleurs — c'est la garantie que rien de ce qu'on
 //! écrit sur le fil ne vient d'être dicté par autrui.
 
-use ams_proto_smtp::{Class, Code, Reply};
+use ams_proto_smtp::{Class, Code, ENVID_MAX, ORCPT_MAX, Reply, XTEXT_GROWTH, encode_xtext};
 
 use crate::Error;
 
 /// La taille de tampon que cette session demande pour une commande.
 ///
-/// La plus longue est `RCPT TO:<…>` : un chemin de 256 octets (RFC 5321 §4.5.3.1)
-/// et onze octets d'enveloppe. On arrondit largement au-dessus.
-pub const CLIENT_COMMAND_MAX: usize = 512;
+/// La plus longue est `RCPT TO:<…> NOTIFY=… ORCPT=rfc822;…` : un chemin de 256
+/// octets (RFC 5321 §4.5.3.1), onze octets d'enveloppe, et une adresse d'origine
+/// de RFC 3461 §4.2 **RÉ-ENCODÉE EN XTEXT**, qui peut tripler.
+///
+/// # LE TRIPLEMENT N'EST PAS THÉORIQUE
+///
+/// Une adresse d'origine faite de `=` — qui s'écrivent `+3D` — occupe trois
+/// fois sa longueur sur le fil. Dimensionner sur la valeur décodée laisserait
+/// une commande refusée faute de place, c'est-à-dire un message perdu pour une
+/// valeur que le déposant choisit. La borne est donc STRUCTURELLE : elle couvre
+/// le pire, et aucune garde n'a à rattraper le reste.
+pub const CLIENT_COMMAND_MAX: usize = 1536;
+
+/// Ce qu'une valeur de RFC 3461 occupe au plus, une fois ré-encodée en xtext.
+const XTEXT_PIRE: usize = ORCPT_MAX * XTEXT_GROWTH;
+
+// Le tampon d'une commande couvre le pire `RCPT TO:` : l'enveloppe, un chemin,
+// le `NOTIFY`, le mot-clé de l'`ORCPT`, et l'adresse d'origine triplée.
+const _: () = assert!(CLIENT_COMMAND_MAX >= XTEXT_PIRE + 256 + 64);
 
 /// Ce qu'une session cliente a besoin de savoir avant de parler.
 #[derive(Debug, Clone, Copy)]
@@ -57,6 +73,39 @@ pub struct ClientConfig<'a> {
     /// **Vrai, une remise en clair n'a pas lieu** : le pair qui n'annonce pas
     /// `STARTTLS` est laissé là, et l'issue est [`ClientOutcome::NoEncryption`].
     pub require_tls: bool,
+    /// Ce que le déposant a demandé du sort de son message (RFC 3461).
+    ///
+    /// # ON NE LE PASSE QUE SI LE PAIR L'ANNONCE
+    ///
+    /// §5.2.1 : un serveur qui relaie vers un saut annonçant `DSN` lui passe ces
+    /// paramètres, et c'est LUI qui rendra compte. Vers un saut qui ne les
+    /// annonce pas, les écrire ferait refuser la transaction — un paramètre
+    /// qu'on n'annonce pas se refuse, comme ce serveur le fait lui-même.
+    pub dsn: Option<ClientDsn<'a>>,
+}
+
+/// Ce qu'un déposant a demandé, tel qu'on le passe au saut suivant.
+///
+/// Les valeurs sont ÉCRITES TELLES QUELLES, en xtext : elles ont été décodées à
+/// l'arrivée, et les réencoder ici demanderait un second encodeur. C'est
+/// l'appelant qui les fournit sous la forme qui part sur le fil.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientDsn<'a> {
+    /// L'identifiant d'enveloppe du déposant (§4.4), ou vide.
+    pub envelope_id: &'a [u8],
+    /// Ce que chaque destinataire a demandé, dans l'ordre de `recipients`.
+    pub reports: &'a [ClientReport<'a>],
+}
+
+/// Ce qu'un destinataire a demandé (RFC 3461 §4.1, §4.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ClientReport<'a> {
+    /// Le déposant demande qu'on se taise, quoi qu'il arrive.
+    pub never: bool,
+    /// Un rapport est demandé en cas de succès.
+    pub on_success: bool,
+    /// L'adresse d'origine (§4.2), ou vide.
+    pub original: &'a [u8],
 }
 
 /// Ce qu'une remise a donné.
@@ -137,6 +186,11 @@ pub struct SmtpClient<'a> {
     acceptes: usize,
     /// Destinataires refusés.
     refuses: usize,
+    /// Ce qu'on passera au saut suivant, s'il annonce `DSN`.
+    ///
+    /// **`None` tant que l'`EHLO` n'a rien dit** : c'est ce qui garantit qu'on
+    /// n'écrit jamais un paramètre que le pair n'a pas annoncé.
+    dsn: Option<ClientDsn<'a>>,
 }
 
 impl<'a> SmtpClient<'a> {
@@ -164,6 +218,11 @@ impl<'a> SmtpClient<'a> {
                 return Err(Error::UnsafeAddress);
             }
         }
+        if let Some(dsn) = config.dsn
+            && !dsn_recevable(&dsn, config.recipients.len())
+        {
+            return Err(Error::UnsafeAddress);
+        }
         Ok(Self {
             config,
             etat: Etat::Banniere,
@@ -171,7 +230,21 @@ impl<'a> SmtpClient<'a> {
             esmtp_tente: false,
             acceptes: 0,
             refuses: 0,
+            dsn: None,
         })
+    }
+
+    /// Le pair a-t-il pris en charge les demandes de RFC 3461 ?
+    ///
+    /// # C'EST CE QUI DÉCIDE SI L'ON REND COMPTE SOI-MÊME
+    ///
+    /// §5.2.1 : quand le saut suivant annonce `DSN`, les paramètres lui sont
+    /// passés, et c'est LUI qui rendra compte. Émettre en plus un rapport de
+    /// relais ferait deux rapports pour un même envoi, et le déposant ne
+    /// saurait pas lequel croire.
+    #[must_use]
+    pub fn dsn_forwarded(&self) -> bool {
+        self.dsn.is_some()
     }
 
     /// Le nombre de destinataires que le pair a acceptés.
@@ -261,6 +334,14 @@ impl<'a> SmtpClient<'a> {
                 &[b"HELO ", self.config.name, b"\r\n"],
             )?));
         }
+        // **CE QUE LE PAIR ANNONCE DÉCIDE DE CE QU'ON LUI ÉCRIT** (§5.2.1). Un
+        // paramètre qu'il n'annonce pas ferait refuser la transaction entière,
+        // et le message serait perdu pour une demande facultative.
+        //
+        // La lecture a lieu à CHAQUE `EHLO`, y compris le second après
+        // `STARTTLS` : ce que le pair annonce en clair n'engage à rien, et §4.2
+        // de RFC 3207 veut qu'on oublie tout ce qui précède la poignée de main.
+        self.dsn = reply.offers(b"DSN").then_some(self.config.dsn).flatten();
         if !self.chiffre && reply.offers(b"STARTTLS") {
             self.etat = Etat::Tls;
             return Ok(ClientStep::Send(ecrire(out, &[b"STARTTLS\r\n"])?));
@@ -314,10 +395,25 @@ impl<'a> SmtpClient<'a> {
     /// Écrit `MAIL FROM:`.
     fn enveloppe(&mut self, out: &mut [u8]) -> Result<ClientStep, Error> {
         self.etat = Etat::Enveloppe;
-        Ok(ClientStep::Send(ecrire(
-            out,
-            &[b"MAIL FROM:<", self.config.sender, b">\r\n"],
-        )?))
+        // **`ENVID` NE PART QUE SI LE PAIR ANNONCE `DSN`** (§5.2.1). L'écrire à
+        // un serveur qui ne l'annonce pas ferait refuser la transaction entière,
+        // et le message serait perdu pour un paramètre facultatif.
+        let envid = self
+            .dsn
+            .and_then(|dsn| (!dsn.envelope_id.is_empty()).then_some(dsn.envelope_id));
+        let Some(identifiant) = envid else {
+            return Ok(ClientStep::Send(ecrire(
+                out,
+                &[b"MAIL FROM:<", self.config.sender, b">\r\n"],
+            )?));
+        };
+        // **L'IDENTIFIANT REPART EN XTEXT.** La file le garde décodé, parce que
+        // c'est sous cette forme qu'il s'écrit dans un rapport ; le fil, lui,
+        // veut du xtext, et l'y mettre en clair changerait sa valeur pour qui le
+        // relit (§4).
+        let ecrits = ecrire(out, &[b"MAIL FROM:<", self.config.sender, b"> ENVID="])?;
+        let ecrits = ajouter_xtext(out, ecrits, identifiant)?;
+        Ok(ClientStep::Send(ajouter(out, ecrits, &[b"\r\n"])?))
     }
 
     /// La réponse à `MAIL FROM:`.
@@ -342,6 +438,40 @@ impl<'a> SmtpClient<'a> {
             .copied()
             .unwrap_or_default();
         self.etat = Etat::Destinataire(rang);
+        // **`NOTIFY` ET `ORCPT` SONT PAR DESTINATAIRE** (§4.1, §4.2), et ne
+        // partent que si le pair annonce `DSN`.
+        //
+        // `get` ne peut pas manquer : [`SmtpClient::new`] a refusé la remise si
+        // les deux listes n'avaient pas la même longueur. Porter cette
+        // impossibilité dans `and_then` évite une garde que rien n'atteindrait.
+        if let Some(rapport) = self.dsn.and_then(|dsn| dsn.reports.get(rang).copied()) {
+            let notify: &[u8] = if rapport.never {
+                b" NOTIFY=NEVER"
+            } else if rapport.on_success {
+                // **`FAILURE` RESTE DEMANDÉ AVEC `SUCCESS`.** L'écrire seul
+                // ferait taire l'échec, que le déposant n'a pas renoncé à
+                // connaître : sans paramètre, §4.1 le lui promet.
+                b" NOTIFY=SUCCESS,FAILURE"
+            } else {
+                b""
+            };
+            let orcpt: &[u8] = if rapport.original.is_empty() {
+                b""
+            } else {
+                b" ORCPT=rfc822;"
+            };
+            if !notify.is_empty() || !orcpt.is_empty() {
+                let ecrits = ecrire(out, &[b"RCPT TO:<", adresse, b">", notify, orcpt])?;
+                // **L'ADRESSE D'ORIGINE REPART EN XTEXT**, et cela n'a rien
+                // d'anodin : `marie+liste@x.test` écrite en clair serait relue
+                // par le saut suivant comme l'échappée `+li`, qui n'est pas de
+                // l'hexadécimal. Il refuserait le `RCPT`, et le message serait
+                // perdu pour un `+` — c'est-à-dire pour l'adressage par
+                // étiquette, qui est partout.
+                let ecrits = ajouter_xtext(out, ecrits, rapport.original)?;
+                return Ok(ClientStep::Send(ajouter(out, ecrits, &[b"\r\n"])?));
+            }
+        }
         Ok(ClientStep::Send(ecrire(
             out,
             &[b"RCPT TO:<", adresse, b">\r\n"],
@@ -427,11 +557,65 @@ fn issue_du_code(code: Code) -> ClientOutcome {
     }
 }
 
+/// Ce que le déposant a demandé est-il recevable, et bordé ?
+///
+/// # POURQUOI LES DEUX LISTES DOIVENT AVOIR LA MÊME LONGUEUR
+///
+/// Un tableau de rapports plus court que la liste des destinataires ferait
+/// écrire les derniers `RCPT` SANS leur demande — donc sans le `NOTIFY=NEVER`
+/// que le déposant avait écrit, et le saut suivant émettrait le rapport qu'il
+/// avait explicitement refusé. Le manque serait silencieux ; le refus ne l'est
+/// pas.
+///
+/// # POURQUOI LES LONGUEURS SONT BORNÉES ICI
+///
+/// C'est ce qui rend [`CLIENT_COMMAND_MAX`] structurel : sans borne, une
+/// adresse d'origine assez longue ferait refuser la commande faute de place,
+/// c'est-à-dire perdre un message pour une valeur que le déposant choisit.
+fn dsn_recevable(dsn: &ClientDsn<'_>, destinataires: usize) -> bool {
+    if dsn.reports.len() != destinataires || dsn.envelope_id.len() > ENVID_MAX {
+        return false;
+    }
+    // **DE L'ASCII VISIBLE, ET NON `sur`** : ces valeurs sortent d'un décodage
+    // xtext, qui laisse passer `<` et `>` — les refuser ici rejetterait une
+    // adresse d'origine que la réception avait acceptée. Ce qui compte est
+    // qu'aucune espace ni fin de ligne ne coupe le paramètre en deux.
+    if !dsn.envelope_id.iter().all(u8::is_ascii_graphic) {
+        return false;
+    }
+    dsn.reports
+        .iter()
+        .all(|un| un.original.len() <= ORCPT_MAX && un.original.iter().all(u8::is_ascii_graphic))
+}
+
 /// Cette valeur peut-elle être écrite dans une commande sans rien y ajouter ?
 fn sur(valeur: &[u8]) -> bool {
     valeur
         .iter()
         .all(|octet| octet.is_ascii_graphic() && !matches!(*octet, b'<' | b'>'))
+}
+
+/// Écrit des morceaux à la SUITE de ce qui est déjà là, et rend le total.
+///
+/// **AUCUNE GARDE SUR `deja`** : il vient d'une écriture qui a réussi dans ce
+/// même tampon, donc il n'en dépasse pas la fin, et `unwrap_or_default` porte
+/// cette impossibilité dans la bibliothèque standard. Un tampon vide n'ouvre
+/// rien : `ecrire` refuse d'y mettre le moindre octet.
+fn ajouter(out: &mut [u8], deja: usize, morceaux: &[&[u8]]) -> Result<usize, Error> {
+    let place = out.get_mut(deja..).unwrap_or_default();
+    Ok(deja.saturating_add(ecrire(place, morceaux)?))
+}
+
+/// Ré-encode `valeur` en xtext (RFC 3461 §4) à la suite de ce qui est déjà là.
+fn ajouter_xtext(out: &mut [u8], deja: usize, valeur: &[u8]) -> Result<usize, Error> {
+    let place = out.get_mut(deja..).unwrap_or_default();
+    // **`encode_xtext` REFUSE CE QUI N'EST PAS DE L'ASCII VISIBLE**, et l'on ne
+    // s'en remet pas à cela seul : `SmtpClient::new` a déjà refusé la remise si
+    // une valeur en portait. Deux vérifications pour une, parce que celle-ci
+    // est faite dans une autre caisse, et qu'une vérification qu'on ne voit pas
+    // en lisant l'endroit qui en dépend n'en est pas une.
+    let ecrits = encode_xtext(valeur, place).map_err(Error::Reply)?.len();
+    Ok(deja.saturating_add(ecrits))
 }
 
 /// Écrit des morceaux à la suite, et rend le nombre d'octets écrits.

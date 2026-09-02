@@ -3789,7 +3789,7 @@ il l'a commis sur lui-même : une section qui s'intitule « l'état réel » est
 qu'on relit le moins, parce qu'on croit la connaître.
 
 Sont outillées : C1 (les trois étages, et la couverture qui n'est exigible que
-parce qu'ils sont séparés), C2 (le gate mesure 54 459 régions sur 29 crates,
+parce qu'ils sont séparés), C2 (le gate mesure 54 638 régions sur 29 crates,
 toutes couvertes — et il compare des comptes, non un pourcentage arrondi), C3
 (les lints, l'absence d'allocation dans les décodeurs, et 65 cibles de fuzz dont
 la CI vérifie qu'elle les lance toutes), C4 (`ams-tls` n'offre que
@@ -3928,6 +3928,70 @@ fini par écrire deux formats.
 Il part AVANT toute décision de reprise : ceux qui sont remis le sont, quoi
 qu'il advienne des autres. Attendre la fin de la file ferait dépendre un rapport
 de succès de l'échec d'un voisin.
+
+### `relayed` N'EST PAS `delivered`, ET LA NUANCE EST TOUT
+
+Ce rapport disait `Action: delivered`. C'était faux. §2.3.3 de RFC 3464 réserve
+ce mot au serveur de remise FINALE — celui qui dépose le message dans la boîte —
+et ce serveur-ci n'est pas celui-là : il a **passé** le message au saut suivant,
+qui peut encore le perdre.
+
+Le déposant lisait donc « arrivé » là où il fallait lire « parti ». Ce n'est pas
+une nuance de vocabulaire : c'est la différence entre une promesse qu'on peut
+tenir et une promesse qu'on n'est pas en mesure de constater. Le mot est
+désormais `relayed` (§6.2), et le rapport dit que le message a été transmis au
+serveur responsable du domaine, non qu'il a été distribué.
+
+### CE QUE LE DÉPOSANT A DEMANDÉ SUIT LE MESSAGE (§5.2.1)
+
+Un serveur intermédiaire qui lit `NOTIFY=NEVER` et ne le transmet pas laisse le
+saut suivant émettre le rapport que le déposant avait explicitement refusé —
+**et c'est lui qui le lui aura permis.** La demande est donc passée au saut
+suivant, aussi loin que des serveurs savent la lire.
+
+Elle n'est passée QUE s'il annonce `DSN` : l'écrire à un serveur qui ne l'annonce
+pas ferait refuser la transaction entière, et le message serait perdu pour une
+demande facultative.
+
+Et quand elle est passée, **nous nous taisons** : c'est lui qui rendra compte.
+Deux rapports pour un même envoi laisseraient le déposant sans savoir lequel
+croire, et le nôtre serait le moins informé des deux, puisque nous ne savons pas
+ce qu'il adviendra ensuite. Un rapport de relais ne part donc que vers un pair
+qui ne sait pas lire la demande — ce que §6.2 décrit exactement.
+
+**Ne rien demander n'est pas une demande.** Un déposant qui n'a écrit ni `ENVID`,
+ni `NOTIFY`, ni `ORCPT` n'a rien demandé ; lui inventer un `NOTIFY=FAILURE`
+explicite dirait la même chose sur le fil, mais ferait croire au reste du code
+qu'une demande a été transmise, donc qu'un rapport de relais est superflu. Or il
+n'y en avait aucun à faire. La distinction ne se voit que là où elle compte :
+dans ce qu'on décide de ne PAS émettre.
+
+### LE `+` D'UNE ÉTIQUETTE AURAIT PERDU DES MESSAGES
+
+La file garde `ENVID` et `ORCPT` **décodés** — c'est sous cette forme qu'ils
+s'écrivent dans un rapport. Le fil, lui, veut du xtext. Les réécrire tels quels
+au saut suivant aurait fait lire `marie+liste@x.test` comme l'échappée `+li`,
+qui n'est pas de l'hexadécimal : le pair aurait refusé le `RCPT`, et le message
+aurait été perdu.
+
+Pour un `+`. C'est-à-dire pour l'adressage par étiquette, qui est partout.
+
+`encode_xtext` referme donc l'aller-retour, et deux essais le prouvent là où
+cela ne peut pas se compenser : un aller-retour sur tout l'ASCII visible, et un
+échange BOUT À BOUT contre notre propre serveur, dont l'écrivain et le lecteur du
+xtext ne partagent aucun code. Le second échoue bien si l'on retire l'encodage —
+vérifié par mutation, plutôt que supposé.
+
+**La borne du tampon de commande est structurelle, pas rattrapée.** Une valeur
+faite de `=` triple en s'échappant ; `CLIENT_COMMAND_MAX` couvre ce pire cas, et
+une assertion `const` le dit à la compilation. Dimensionner sur la valeur décodée
+aurait laissé une commande refusée faute de place — c'est-à-dire un message perdu
+pour une valeur que le déposant choisit.
+
+Deux listes de longueurs différentes sont enfin un REFUS, et non un manque
+silencieux : les derniers `RCPT` partiraient sans le `NOTIFY=NEVER` qu'on leur
+avait écrit. C'est le même défaut que celui trouvé dans l'enveloppe une tranche
+plus tôt, à l'autre bout du même chemin.
 
 ## Les paramètres ESMTP : ce qu'on annonce, on le tient
 

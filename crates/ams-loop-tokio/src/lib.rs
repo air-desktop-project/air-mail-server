@@ -85,6 +85,10 @@ mod server;
 mod spf;
 mod tlsreports;
 
+// Les types de RFC 3461 traversent cette caisse SANS CHANGER DE FORME : ce que
+// la session écrit sur le fil est ce que la file a lu dans l'enveloppe, et un
+// type de plus n'ajouterait qu'une occasion de les traduire de travers.
+pub use ams_session::{ClientDsn, ClientReport};
 pub use connection::{
     DkimTally, DmarcTally, Outcome, Service, Summary, Timeouts, serve_connection,
 };

@@ -111,7 +111,9 @@ pub use chunk::{ChunkEvent, ChunkReceiver};
 pub use command::Command;
 pub use data::{DataFault, DataReceiver, Event as DataEvent};
 pub use domain::{ClientId, check_address_literal};
-pub use dsn::{ENVID_MAX, Notify, ORCPT_MAX, Ret, decode_xtext, parse_orcpt};
+pub use dsn::{
+    ENVID_MAX, Notify, ORCPT_MAX, Ret, XTEXT_GROWTH, decode_xtext, encode_xtext, parse_orcpt,
+};
 pub use error::Error;
 pub use limits::Limits;
 pub use parameters::{Parameter, Parameters, ParametersIter};

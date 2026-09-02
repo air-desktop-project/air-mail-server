@@ -254,6 +254,75 @@ pub fn decode_xtext<'b>(valeur: &[u8], sortie: &'b mut [u8]) -> Result<&'b [u8],
         .ok_or(Error::BufferTooSmall { needed: ecrits })
 }
 
+/// Ce qu'un octet peut occuper au plus, une fois encodé en xtext (§4).
+///
+/// `+3D` : trois octets pour un. C'est ce qui permet à l'appelant de
+/// dimensionner son tampon sans regarder la valeur.
+pub const XTEXT_GROWTH: usize = 3;
+
+/// Ré-encode une valeur en **xtext** (§4), et rend ce qui a été écrit.
+///
+/// # POURQUOI RÉ-ENCODER CE QU'ON AVAIT DÉCODÉ
+///
+/// La file garde ces valeurs décodées : c'est sous cette forme qu'elles
+/// s'écrivent dans un rapport. Mais le fil, lui, veut du xtext — et une adresse
+/// d'origine comme `marie+liste@x.test` écrite telle quelle serait relue par le
+/// saut suivant comme une échappée `+li`, qui n'est pas de l'hexadécimal. Il
+/// refuserait le `RCPT`, et le message serait perdu pour un `+` — c'est-à-dire
+/// pour l'adressage par étiquette, qui est partout.
+///
+/// # CE QUI EST ENCODÉ, ET RIEN D'AUTRE
+///
+/// §4 réserve `+` et `=` : eux seuls s'échappent. Le reste de l'ASCII visible
+/// passe tel quel, ce qui garde les adresses lisibles dans une trace.
+///
+/// # Errors
+///
+/// [`Error::MalformedParameter`] si `valeur` n'est pas de l'ASCII visible —
+/// cette fonction ne CROIT PAS son appelant, même quand il ne peut lui donner
+/// que le résultat d'un décodage ; [`Error::BufferTooSmall`] si `sortie` ne
+/// suffit pas.
+pub fn encode_xtext<'b>(valeur: &[u8], sortie: &'b mut [u8]) -> Result<&'b [u8], Error> {
+    let mut ecrits = 0_usize;
+    for octet in valeur {
+        if !octet.is_ascii_graphic() {
+            return Err(Error::MalformedParameter);
+        }
+        // §4 réserve `+` et `=` ; tout le reste de l'ASCII visible passe tel
+        // quel, ce qui garde les adresses lisibles dans une trace.
+        if matches!(*octet, b'+' | b'=') {
+            let fin = ecrits.saturating_add(XTEXT_GROWTH);
+            let place = sortie
+                .get_mut(ecrits..fin)
+                .ok_or(Error::BufferTooSmall { needed: fin })?;
+            place.copy_from_slice(&[b'+', chiffre(*octet >> 4_u32), chiffre(*octet & 0x0f_u8)]);
+            ecrits = fin;
+        } else {
+            let place = sortie.get_mut(ecrits).ok_or(Error::BufferTooSmall {
+                needed: ecrits.saturating_add(1),
+            })?;
+            *place = *octet;
+            ecrits = ecrits.saturating_add(1);
+        }
+    }
+    sortie
+        .get(..ecrits)
+        .ok_or(Error::BufferTooSmall { needed: ecrits })
+}
+
+/// Le chiffre hexadécimal MAJUSCULE d'un quartet — l'inverse de [`quartet`].
+///
+/// **La majuscule n'est pas une préférence** : §4 impose `2*HEXDIG` en
+/// majuscules, et deux écritures d'un même octet donneraient deux `ORCPT`
+/// différents pour une même adresse.
+const fn chiffre(quatre: u8) -> u8 {
+    if quatre < 10 {
+        b'0'.saturating_add(quatre)
+    } else {
+        b'A'.saturating_add(quatre.saturating_sub(10))
+    }
+}
+
 /// La valeur d'un chiffre hexadécimal MAJUSCULE (§4).
 ///
 /// **La minuscule est refusée**, et ce n'est pas du zèle : §4 impose

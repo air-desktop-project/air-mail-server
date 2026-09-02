@@ -48,6 +48,8 @@ use ams_queue::{
     parse_envelope, parse_name, write_envelope, write_name,
 };
 
+use ams_session::{ClientDsn, ClientReport};
+
 use crate::delivery::DeliveryFailure;
 use crate::relay::{Outgoing, Relay, RelayOutcome};
 
@@ -293,17 +295,36 @@ impl Spool {
             // **CE QUE CE DESTINATAIRE-LÀ A DEMANDÉ**, et non ce que le premier
             // a demandé pour tout le monde (RFC 3461 §4.1).
             let rapport = enveloppe.reports.get(rang).copied().unwrap_or_default();
+            let a_passer = [ClientReport {
+                never: rapport.never,
+                on_success: rapport.on_success,
+                original: rapport.original.as_bytes(),
+            }];
             match self
-                .remettre_a(relay, enveloppe.return_path, adresse, &message)
+                .remettre_a(
+                    relay,
+                    enveloppe.return_path,
+                    adresse,
+                    &message,
+                    demande_a_passer(enveloppe.envelope_id, &a_passer),
+                )
                 .await
             {
-                Issue::Remis { authentifie } => {
+                Issue::Remis {
+                    authentifie,
+                    dsn_transmis,
+                } => {
                     if authentifie {
                         compte.authenticated = compte.authenticated.saturating_add(1);
                     }
                     // §4.1 : un rapport de SUCCÈS ne part que s'il est demandé.
                     // `NEVER` l'emporte sur tout, y compris sur lui-même.
-                    if rapport.on_success && !rapport.never {
+                    //
+                    // **ET PAS SI LE SAUT SUIVANT S'EN CHARGE** (§5.2.1) : deux
+                    // rapports pour un même envoi laisseraient le déposant sans
+                    // savoir lequel croire, et le nôtre serait le moins informé
+                    // des deux — nous ne savons pas ce qu'il adviendra ensuite.
+                    if rapport.on_success && !rapport.never && !dsn_transmis {
                         succes.push(((*adresse).to_string(), rapport.original.to_owned()));
                     }
                 }
@@ -432,12 +453,17 @@ impl Spool {
     }
 
     /// Remet le message à UN destinataire, et classe ce qui s'est passé.
+    ///
+    /// `dsn` est ce que CE destinataire-là avait demandé (RFC 3461 §4.1) : la
+    /// demande est par destinataire, et en passer une seule pour toute la
+    /// transaction ferait honorer celle du dernier pour tout le monde.
     async fn remettre_a(
         &self,
         relay: &Relay,
         retour: &str,
         adresse: &str,
         message: &[u8],
+        dsn: Option<ClientDsn<'_>>,
     ) -> Issue {
         let Some((_, domaine)) = adresse.rsplit_once('@') else {
             // Une adresse sans domaine n'a pas de serveur : rien ne l'arrangera.
@@ -454,14 +480,20 @@ impl Spool {
                     sender: retour,
                     recipients: &destinataires,
                     body: message,
+                    dsn,
                 },
             )
             .await;
         match issue {
             // `refused` ne peut valoir que zéro : il n'y avait qu'un destinataire,
             // et un refus l'aurait rendu par `Rejected`.
-            RelayOutcome::Delivered { authenticated, .. } => Issue::Remis {
+            RelayOutcome::Delivered {
+                authenticated,
+                dsn_forwarded,
+                ..
+            } => Issue::Remis {
                 authentifie: authenticated,
+                dsn_transmis: dsn_forwarded,
             },
             RelayOutcome::Rejected(code) => Issue::Definitif(
                 statut_etendu(code, true),
@@ -495,7 +527,7 @@ impl Spool {
         }
     }
 
-    /// Compose le rapport de SUCCÈS, et le dépose LOCALEMENT (RFC 3461 §4.1).
+    /// Compose le rapport de RELAIS, et le dépose LOCALEMENT (RFC 3461 §6.2).
     ///
     /// # UN RAPPORT DE SUCCÈS N'EST PAS UN REBOND À L'ENVERS
     ///
@@ -530,14 +562,19 @@ impl Spool {
                 // **AUCUN DIAGNOSTIC** : le pair n'a rien dit d'autre que oui,
                 // et écrire un texte à sa place le ferait passer pour le sien.
                 diagnostic: b"",
-                action: MimeAction::Delivered,
+                // **`relayed`, ET NON `delivered`** (RFC 3464 §2.3.3). Cette
+                // file passe le message au saut suivant ; elle ne le remet pas.
+                // Dire « remis » affirmerait ce qu'on ignore — le saut suivant
+                // peut encore le refuser —, et un expéditeur qui lit un rapport
+                // de succès cesse de s'inquiéter.
+                action: MimeAction::Relayed,
                 original: origine.as_bytes(),
             })
             .collect();
         let identifiant = std::format!("dsn-{}-{}@{}", now, self.suivant(), self.mta);
         let delimiteur = std::format!("----ams-dsn-{}-{}", now, self.suivant());
         let mut texte = String::from(
-            "Ce message a bien ete remis aux destinataires suivants, comme vous\r\n             l'aviez demande.\r\n\r\n",
+            "Ce message a bien ete transmis au serveur charge des destinataires\r\n             suivants, comme vous l'aviez demande. Ce serveur ne rend pas compte\r\n             de ses propres remises : ceci dit qu'il l'a accepte, non qu'il l'a\r\n             distribue.\r\n\r\n",
         );
         for (adresse, _) in succes {
             texte.push_str("  ");
@@ -548,7 +585,7 @@ impl Spool {
             from: self.postmaster.as_bytes(),
             to: retour.as_bytes(),
             reporting_mta: self.mta.as_bytes(),
-            subject: b"Successful Mail Delivery Report",
+            subject: b"Mail Relayed Successfully",
             message_id: identifiant.as_bytes(),
             date: now,
             arrival: depot,
@@ -719,11 +756,39 @@ enum Issue {
     Remis {
         /// Le pair a-t-il été authentifié par DANE ?
         authentifie: bool,
+        /// Le pair a-t-il pris en charge les demandes de RFC 3461 ?
+        ///
+        /// Vrai, **c'est lui qui rendra compte**, et nous nous taisons.
+        dsn_transmis: bool,
     },
     /// Refus définitif : le statut étendu, et ce que le pair a dit.
     Definitif(String, String),
     /// Refus temporaire, ou personne à qui parler.
     Ajourne,
+}
+
+/// Y a-t-il quelque chose à passer au saut suivant (RFC 3461 §5.2.1) ?
+///
+/// # NE RIEN DEMANDER N'EST PAS UNE DEMANDE
+///
+/// Un déposant qui n'a écrit ni `ENVID`, ni `NOTIFY`, ni `ORCPT` n'a rien
+/// demandé : lui inventer un `NOTIFY=FAILURE` explicite dirait la même chose
+/// sur le fil, mais ferait croire au reste du code qu'une demande a été
+/// transmise, et donc qu'un rapport de relais est superflu. Or il n'y en avait
+/// aucun à faire. La distinction ne se voit que là où elle compte : dans ce que
+/// l'on décide de ne PAS émettre.
+fn demande_a_passer<'a>(
+    identifiant: &'a str,
+    rapports: &'a [ClientReport<'a>],
+) -> Option<ClientDsn<'a>> {
+    let quelque_chose = !identifiant.is_empty()
+        || rapports
+            .iter()
+            .any(|un| un.never || un.on_success || !un.original.is_empty());
+    quelque_chose.then_some(ClientDsn {
+        envelope_id: identifiant.as_bytes(),
+        reports: rapports,
+    })
 }
 
 /// Écrit `contenu` dans `chemin`, ATOMIQUEMENT.
