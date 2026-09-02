@@ -69,6 +69,18 @@ pub struct Report<'a> {
     pub never: bool,
     /// Un rapport est demandé en cas de SUCCÈS (§4.1).
     pub on_success: bool,
+    /// Un rapport est demandé quand la remise TARDE (§4.1).
+    pub on_delay: bool,
+    /// L'avis de retard a-t-il déjà été émis ?
+    ///
+    /// # CE BIT EST LA SEULE CHOSE QUI SURVIVE À UN REDÉMARRAGE
+    ///
+    /// Un avis de retard part quand le message traîne, et la file reprend
+    /// l'entrée toutes les quelques minutes ensuite. Sans trace écrite, chaque
+    /// reprise en émettrait un de plus — vers un chemin de retour que personne
+    /// n'a authentifié, c'est-à-dire exactement la rétrodiffusion que ce dépôt
+    /// évite partout ailleurs.
+    pub delay_sent: bool,
     /// L'adresse d'origine, telle que le déposant l'a écrite (§4.2), ou une
     /// chaîne vide.
     pub original: &'a str,
@@ -92,14 +104,16 @@ pub fn envelope_max(envelope: &Envelope<'_, '_>) -> usize {
         let Some(rapport) = envelope.reports.get(rang) else {
             continue;
         };
-        if !rapport.never && !rapport.on_success && rapport.original.is_empty() {
+        if rien_a_dire(rapport) {
             continue;
         }
-        // La tabulation, puis les deux lettres au plus.
+        // La tabulation, puis les quatre lettres au plus.
         total = total
             .saturating_add(1)
             .saturating_add(usize::from(rapport.never))
-            .saturating_add(usize::from(rapport.on_success));
+            .saturating_add(usize::from(rapport.on_success))
+            .saturating_add(usize::from(rapport.on_delay))
+            .saturating_add(usize::from(rapport.delay_sent));
         if !rapport.original.is_empty() {
             // L'espace, puis l'adresse d'origine.
             total = total
@@ -149,19 +163,26 @@ pub fn write_envelope<'b>(
         }
         ecrits = pousser(sortie, ecrits, adresse.as_bytes())?;
         if let Some(rapport) = envelope.reports.get(rang)
-            && (rapport.never || rapport.on_success || !rapport.original.is_empty())
+            && !rien_a_dire(rapport)
         {
             if !rapport.original.is_empty() && !adresse_recevable(rapport.original) {
                 return Err(Error::BadAddress);
             }
             ecrits = pousser(sortie, ecrits, b"\t")?;
-            // Deux lettres qui se lisent à l'œil : `N` pour le silence, `S`
-            // pour le succès. L'échec est le défaut, et ne s'écrit pas.
+            // Des lettres qui se lisent à l'œil : `N` pour le silence, `S` pour
+            // le succès, `D` pour le retard, `P` pour un retard déjà signalé.
+            // L'échec est le défaut, et ne s'écrit pas.
             if rapport.never {
                 ecrits = pousser(sortie, ecrits, b"N")?;
             }
             if rapport.on_success {
                 ecrits = pousser(sortie, ecrits, b"S")?;
+            }
+            if rapport.on_delay {
+                ecrits = pousser(sortie, ecrits, b"D")?;
+            }
+            if rapport.delay_sent {
+                ecrits = pousser(sortie, ecrits, b"P")?;
             }
             if !rapport.original.is_empty() {
                 ecrits = pousser(sortie, ecrits, b" ")?;
@@ -269,9 +290,8 @@ fn lire_le_rapport(suite: &str) -> Result<Report<'_>, Error> {
         None => (suite, ""),
     };
     let mut rapport = Report {
-        never: false,
-        on_success: false,
         original,
+        ..Report::default()
     };
     for lettre in lettres.bytes() {
         // **UNE LETTRE RÉPÉTÉE EST UNE FAUTE** : c'est un fichier qu'on a écrit
@@ -279,6 +299,8 @@ fn lire_le_rapport(suite: &str) -> Result<Report<'_>, Error> {
         let place = match lettre {
             b'N' => &mut rapport.never,
             b'S' => &mut rapport.on_success,
+            b'D' => &mut rapport.on_delay,
+            b'P' => &mut rapport.delay_sent,
             _ => return Err(Error::BadAddress),
         };
         if *place {
@@ -290,6 +312,19 @@ fn lire_le_rapport(suite: &str) -> Result<Report<'_>, Error> {
         return Err(Error::BadAddress);
     }
     Ok(rapport)
+}
+
+/// Ce rapport n'a-t-il RIEN à faire écrire ?
+///
+/// Le défaut de §4.1 — un rapport d'échec, et rien d'autre — ne s'écrit pas :
+/// c'est ce que l'absence de tabulation veut dire, et c'est ce qui permet à une
+/// enveloppe écrite avant cette extension de se relire sans rien perdre.
+const fn rien_a_dire(rapport: &Report<'_>) -> bool {
+    !rapport.never
+        && !rapport.on_success
+        && !rapport.on_delay
+        && !rapport.delay_sent
+        && rapport.original.is_empty()
 }
 
 /// Cette adresse peut-elle s'écrire, et se relire, ligne à ligne ?

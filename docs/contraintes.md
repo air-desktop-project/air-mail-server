@@ -3789,7 +3789,7 @@ il l'a commis sur lui-même : une section qui s'intitule « l'état réel » est
 qu'on relit le moins, parce qu'on croit la connaître.
 
 Sont outillées : C1 (les trois étages, et la couverture qui n'est exigible que
-parce qu'ils sont séparés), C2 (le gate mesure 54 638 régions sur 29 crates,
+parce qu'ils sont séparés), C2 (le gate mesure 54 699 régions sur 29 crates,
 toutes couvertes — et il compare des comptes, non un pourcentage arrondi), C3
 (les lints, l'absence d'allocation dans les décodeurs, et 65 cibles de fuzz dont
 la CI vérifie qu'elle les lance toutes), C4 (`ams-tls` n'offre que
@@ -3992,6 +3992,79 @@ Deux listes de longueurs différentes sont enfin un REFUS, et non un manque
 silencieux : les derniers `RCPT` partiraient sans le `NOTIFY=NEVER` qu'on leur
 avait écrit. C'est le même défaut que celui trouvé dans l'enveloppe une tranche
 plus tôt, à l'autre bout du même chemin.
+
+### `NOTIFY=DELAY` ÉTAIT ACCEPTÉ, ANALYSÉ, PUIS JETÉ
+
+Le quatrième mot-clé de §4.1 traversait le décodeur — `Notify::on_delay()`
+existait, et il était juste — puis s'arrêtait là. Le rapport que la file écrit
+dans l'enveloppe ne portait que `never` et `on_success` ; `DELAY` se perdait à
+l'écriture, sans erreur, sans trace, et sans qu'aucun essai ne le remarque.
+
+Le pair, lui, recevait un `250`. Il avait donc toutes les raisons de croire qu'on
+le préviendrait — c'est le même silence à double détente que `NOTIFY=NEVER`, et
+il est aussi coûteux : ni le déposant ni nous n'aurions appris que la promesse
+n'était pas tenue.
+
+C'est la troisième fois de suite que la question « ce serveur fait-il ce qu'il
+annonce ? » rend NON. Elle vaut mieux qu'une liste de fonctions à ajouter.
+
+### PRÉVENIR N'EST PAS RENONCER
+
+§4.5.4.1 de RFC 5321 recommande d'avertir l'expéditeur au bout de quelques
+heures, tout en continuant d'essayer pendant des jours. Les deux durées n'ont
+donc aucune raison d'être liées, et le seuil est un quatrième réglage plutôt
+qu'une fraction de la péremption : le rapport entre les deux dépend de ce qu'un
+exploitant veut annoncer, pas d'un nombre qu'on aurait choisi à sa place.
+
+Un fichier de configuration écrit avant ce champ garde les quatre heures de
+§4.5.4.1 — zéro prend le défaut, champ par champ, comme les trois autres.
+
+### L'AVIS PART UNE FOIS, ET C'EST LA PROPRIÉTÉ QUI COMPTE
+
+Un pair en panne une journée fait des dizaines de reprises. Un avis à chacune
+serait une bombe dirigée vers un chemin de retour que **personne n'a
+authentifié** — c'est-à-dire exactement la rétrodiffusion que ce dépôt évite
+partout ailleurs.
+
+La trace de l'avis émis est donc écrite dans l'enveloppe, seule chose qui
+survive à un redémarrage, par la même extension à tabulations que la tranche
+précédente. L'essai qui le vérifie repasse APRÈS le seuil comme le premier
+passage : ce qui distingue les deux n'est donc pas l'heure, c'est le fichier. Un
+contrôle par mutation le confirme — retirer la garde fait bien apparaître deux
+avis là où l'essai en attend un.
+
+**L'ordre entre l'émission et la réécriture est le seul qui perde peu.** Émettre
+puis écrire risque un avis envoyé deux fois si la machine s'arrête entre les
+deux ; écrire puis émettre risque un avis JAMAIS envoyé. Un doublon est une
+gêne ; un avis perdu est la promesse de §4.1 rompue, sans que personne
+l'apprenne.
+
+### `delayed` PORTE SON ÉCHÉANCE, ET C'EST LE TYPE QUI L'EXIGE
+
+§2.3.9 de RFC 3464 ne veut `Will-Retry-Until` que pour un retard : ailleurs, le
+champ dirait qu'on réessaiera un message dont on a fini de s'occuper. L'échéance
+vit donc DANS la variante `Action::Delayed`, ce qui rend la combinaison fautive
+inexprimable — plutôt qu'une garde qu'il faudrait écrire, lire, et se rappeler.
+
+Et l'avis dit la VRAIE raison du dernier ajournement : `Issue::Ajourne` porte
+désormais son statut et son diagnostic, comme le refus définitif le faisait déjà.
+Un code inventé vaudrait moins que pas d'avis du tout, parce qu'on le croirait.
+
+Le sujet, le texte et le mot d'`Action:` disent tous les trois la même chose, qui
+est « pas encore » : un expéditeur qui lirait « Undelivered » cesserait
+d'attendre et renverrait par un autre chemin — donc deux fois le même courrier.
+
+### UN CRLF LITTÉRAL DANS UN LITTÉRAL RUST N'EST PAS UN CRLF
+
+Le texte de l'avis a d'abord été écrit avec de vraies fins de ligne CR-LF dans le
+FICHIER SOURCE, et non avec les échappées `\r\n`. Rust normalise un CRLF littéral
+en LF, et le composeur — qui a raison — refuse un `LF` isolé : l'avis n'était pas
+composé, et le seul signe en était la ligne « AVIS DE RETARD PERDU » sur la
+sortie d'erreur.
+
+C'est le genre de faute qu'aucune relecture n'attrape, parce que le source a
+l'air juste. Ce qui l'a trouvée est l'essai bout-à-bout, qui compose le document
+pour de vrai plutôt que d'en vérifier les morceaux.
 
 ## Les paramètres ESMTP : ce qu'on annonce, on le tient
 

@@ -106,7 +106,7 @@ struct Entree {
     /// Le dossier de la file — UNE CHAÎNE LIBRE, y compris vide. Le SERVEUR
     /// refuse le cas « émettre sans dossier » ; cette crate le transporte.
     file: String,
-    reprises: [u32; 3],
+    reprises: [u32; 4],
     /// Les deux chemins de MTA-STS — DEUX CHAÎNES LIBRES, y compris l'une sans
     /// l'autre. Le SERVEUR refuse ce cas ; cette crate les transporte.
     mtasts: [String; 2],
@@ -206,6 +206,7 @@ fuzz_target!(|entree: Entree| {
             retry_seconds: entree.reprises[0],
             max_retry_seconds: entree.reprises[1],
             expire_seconds: entree.reprises[2],
+            warn_seconds: entree.reprises[3],
         },
         accounts: entree.comptes.clone(),
         listen_pop3: entree.ecoute_pop3.clone(),

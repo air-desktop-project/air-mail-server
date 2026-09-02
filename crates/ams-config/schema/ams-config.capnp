@@ -278,6 +278,14 @@ struct Queue {
   # pas moins un message qu'un autre, et lui accorder une durée à part
   # redonnerait deux vérités.
   expireSeconds @3 :UInt32;
+
+  # Le retard à partir duquel on PRÉVIENT le déposant, en secondes.
+  #
+  # Il ne sert qu'à ceux qui l'ont demandé par `NOTIFY=DELAY` (RFC 3461 §4.1).
+  # §4.5.4.1 de RFC 5321 recommande quelques heures, tout en continuant d'essayer
+  # pendant des jours : PRÉVENIR N'EST PAS RENONCER, et les deux durées n'ont
+  # aucune raison d'être liées. Zéro prend le défaut.
+  warnSeconds @4 :UInt32;
 }
 
 # DKIM : SIGNER, et non vérifier.

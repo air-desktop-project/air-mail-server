@@ -322,13 +322,18 @@ fn ce_que_chaque_destinataire_demande_traverse_le_fichier() {
     let rapports_ecrits = [
         super::Report {
             never: true,
-            on_success: false,
             original: "",
+            ..super::Report::default()
         },
         super::Report {
-            never: false,
             on_success: true,
+            // **LES QUATRE LETTRES SE RELISENT ENSEMBLE**, et non chacune de
+            // son côté : c'est la relecture d'une combinaison qui attrape une
+            // lettre écrite mais jamais lue.
+            on_delay: true,
+            delay_sent: true,
             original: "paul+liste@ailleurs.test",
+            ..super::Report::default()
         },
         super::Report::default(),
     ];
@@ -377,10 +382,9 @@ fn une_enveloppe_dsn_mal_formee_est_refusee() {
 #[test]
 fn une_valeur_dsn_irrecevable_ne_s_ecrit_pas() {
     let mauvais = [super::Report {
-        never: false,
-        on_success: false,
         // Un espace couperait la ligne en deux à la relecture.
         original: "a b",
+        ..super::Report::default()
     }];
     let enveloppe = Envelope {
         return_path: "jean@example.com",
@@ -412,6 +416,8 @@ fn la_borne_annoncee_suffit_exactement_avec_dsn() {
     let rapports = [super::Report {
         never: true,
         on_success: true,
+        on_delay: true,
+        delay_sent: true,
         original: "paul+liste@ailleurs.test",
     }];
     let enveloppe = Envelope {

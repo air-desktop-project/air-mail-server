@@ -417,6 +417,8 @@ pub struct Queue {
     pub max_retry_seconds: u32,
     /// Le temps accordé à un message depuis son dépôt. Zéro prend le défaut.
     pub expire_seconds: u32,
+    /// Le retard à partir duquel on PRÉVIENT le déposant. Zéro prend le défaut.
+    pub warn_seconds: u32,
 }
 
 impl Queue {
@@ -432,6 +434,7 @@ impl Queue {
             first: duree(self.retry_seconds, defaut.first),
             ceiling: duree(self.max_retry_seconds, defaut.ceiling),
             expiry: duree(self.expire_seconds, defaut.expiry),
+            warning: duree(self.warn_seconds, defaut.warning),
         }
     }
 }
@@ -622,6 +625,7 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
         spool: texte(attente.get_spool()?)?,
         retry_seconds: attente.get_retry_seconds(),
         max_retry_seconds: attente.get_max_retry_seconds(),
+        warn_seconds: attente.get_warn_seconds(),
         expire_seconds: attente.get_expire_seconds(),
     };
 
@@ -832,6 +836,7 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
             attente.set_spool(&config.queue.spool);
             attente.set_retry_seconds(config.queue.retry_seconds);
             attente.set_max_retry_seconds(config.queue.max_retry_seconds);
+            attente.set_warn_seconds(config.queue.warn_seconds);
             attente.set_expire_seconds(config.queue.expire_seconds);
         }
         {
@@ -1424,7 +1429,7 @@ mod tests {
         assert_eq!(attente.backoff(), ams_queue::Backoff::DEFAULT);
     }
 
-    /// Les cinq réglages traversent l'encodage et la relecture.
+    /// Les six réglages traversent l'encodage et la relecture.
     #[test]
     fn la_file_traverse_le_format() {
         let voulue = Queue {
@@ -1432,6 +1437,7 @@ mod tests {
             retry_seconds: 60,
             max_retry_seconds: 3_600,
             expire_seconds: 172_800,
+            warn_seconds: 7_200,
         };
         let config = Configuration {
             relay: Relay { enabled: true },
@@ -1451,7 +1457,7 @@ mod tests {
         let defaut = ams_queue::Backoff::DEFAULT;
         assert_eq!(Queue::default().backoff(), defaut);
 
-        // Un seul champ nommé : les deux autres restent au défaut.
+        // Un seul champ nommé : les trois autres restent au défaut.
         let partielle = Queue {
             retry_seconds: 42,
             ..Queue::default()
@@ -1460,12 +1466,16 @@ mod tests {
         assert_eq!(reprise.first, Duration::from_secs(42));
         assert_eq!(reprise.ceiling, defaut.ceiling);
         assert_eq!(reprise.expiry, defaut.expiry);
+        // **UN FICHIER ÉCRIT AVANT CE CHAMP GARDE LES QUATRE HEURES DE
+        // §4.5.4.1**, et n'avertit donc pas dès le premier essai.
+        assert_eq!(reprise.warning, defaut.warning);
 
-        // Et les trois nommés : plus rien du défaut.
+        // Et les quatre nommés : plus rien du défaut.
         let entiere = Queue {
             retry_seconds: 1,
             max_retry_seconds: 2,
             expire_seconds: 3,
+            warn_seconds: 4,
             ..Queue::default()
         };
         assert_eq!(
@@ -1474,6 +1484,7 @@ mod tests {
                 first: Duration::from_secs(1),
                 ceiling: Duration::from_secs(2),
                 expiry: Duration::from_secs(3),
+                warning: Duration::from_secs(4),
             }
         );
     }

@@ -291,6 +291,11 @@ impl Spool {
         let mut rapports_restants: Vec<Report<'_>> = Vec::new();
         let mut echecs: Vec<(String, String, String, String)> = Vec::new();
         let mut succes: Vec<(String, String)> = Vec::new();
+        let mut retards: Vec<(String, String, String, String)> = Vec::new();
+        // **UN SEUL APPEL À L'HORLOGE POUR TOUTE LA REPRISE.** Deux lectures
+        // pourraient tomber de part et d'autre du seuil, et le même message
+        // serait tantôt en retard, tantôt non, pour deux destinataires voisins.
+        let en_retard = self.reprise.is_late(depot, now);
         for (rang, adresse) in enveloppe.recipients.iter().enumerate() {
             // **CE QUE CE DESTINATAIRE-LÀ A DEMANDÉ**, et non ce que le premier
             // a demandé pour tout le monde (RFC 3461 §4.1).
@@ -342,11 +347,53 @@ impl Spool {
                         ));
                     }
                 }
-                Issue::Ajourne => {
+                Issue::Ajourne(statut, diagnostic) => {
+                    // **L'AVIS DE RETARD PART UNE FOIS, ET SEULEMENT SI ON L'A
+                    // DEMANDÉ** (§4.1). `NEVER` l'emporte, comme partout, et le
+                    // bit `delay_sent` — écrit dans l'enveloppe juste après —
+                    // est ce qui empêche la reprise suivante d'en envoyer un de
+                    // plus. Sans lui, un pair en panne une journée vaudrait
+                    // deux cents avis vers un chemin de retour que personne n'a
+                    // authentifié.
+                    let mut rapport = rapport;
+                    if en_retard && rapport.on_delay && !rapport.never && !rapport.delay_sent {
+                        retards.push((
+                            (*adresse).to_string(),
+                            statut,
+                            diagnostic,
+                            rapport.original.to_owned(),
+                        ));
+                        rapport.delay_sent = true;
+                    }
                     restants.push((*adresse).to_string());
                     rapports_restants.push(rapport);
                 }
             }
+        }
+
+        // **L'AVIS DE RETARD PART AVANT LA RÉÉCRITURE DE L'ENVELOPPE.**
+        //
+        // L'ordre est le seul qui perde peu. Émettre puis écrire risque un avis
+        // envoyé deux fois si la machine s'arrête entre les deux ; écrire puis
+        // émettre risque un avis JAMAIS envoyé. Un avis de retard en double est
+        // une gêne ; un avis perdu est la promesse de §4.1 rompue, sans que
+        // personne l'apprenne.
+        if !retards.is_empty()
+            && !self.rendre_le_retard(
+                rendre,
+                enveloppe.return_path,
+                &message,
+                &retards,
+                enveloppe.envelope_id,
+                depot,
+                now,
+            )
+        {
+            std::eprintln!(
+                "air-mail-server : AVIS DE RETARD PERDU pour `{}` — le message attend \
+                 toujours, et son expéditeur ne le saura pas",
+                enveloppe.return_path
+            );
         }
 
         // **LE RAPPORT DE SUCCÈS PART AVANT TOUTE DÉCISION DE REPRISE.** Ceux
@@ -519,11 +566,26 @@ impl Spool {
             // changer de `MX`, et il corrigera. Rendre le message à son
             // expéditeur pour cela le punirait d'une faute qui n'est pas la
             // sienne.
-            RelayOutcome::PolicyMismatch
-            | RelayOutcome::Deferred(_)
-            | RelayOutcome::Unreachable
-            | RelayOutcome::NoEncryption
-            | RelayOutcome::Protocol => Issue::Ajourne,
+            RelayOutcome::PolicyMismatch => Issue::Ajourne(
+                String::from("4.7.0"),
+                String::from("destination policy does not list this server"),
+            ),
+            RelayOutcome::Deferred(code) => Issue::Ajourne(
+                statut_etendu(code, false),
+                std::format!("{code} deferred by remote server"),
+            ),
+            RelayOutcome::Unreachable => Issue::Ajourne(
+                String::from("4.4.1"),
+                String::from("no answer from destination server"),
+            ),
+            RelayOutcome::NoEncryption => Issue::Ajourne(
+                String::from("4.7.4"),
+                String::from("destination server offers no encryption, and it is required"),
+            ),
+            RelayOutcome::Protocol => Issue::Ajourne(
+                String::from("4.5.0"),
+                String::from("destination server did not follow the protocol"),
+            ),
         }
     }
 
@@ -592,6 +654,86 @@ impl Spool {
             boundary: delimiteur.as_bytes(),
             text: texte.as_bytes(),
             failures: &remis,
+            envelope_id: envelope_id.as_bytes(),
+            original_headers: entetes(message),
+        };
+        let mut place = std::vec![0_u8; bounce_max(&rapport)];
+        let Ok(compose) = write_bounce(&mut place, &rapport) else {
+            return false;
+        };
+        rendre.deliver(retour, compose)
+    }
+
+    /// Compose l'AVIS DE RETARD, et le dépose LOCALEMENT (RFC 3461 §4.1).
+    ///
+    /// # CE N'EST PAS UN RAPPORT DE NON-REMISE
+    ///
+    /// Le message n'est pas perdu : il attend, et on essaie toujours. Un
+    /// expéditeur qui lirait « Undelivered » cesserait d'attendre et renverrait
+    /// par un autre chemin — donc deux fois le même courrier. Le sujet, le texte
+    /// et le mot d'`Action:` disent donc tous les trois la même chose, qui est
+    /// « pas encore ».
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "chaque argument est une pièce distincte du rapport ; les \
+                  grouper dans une structure n'ajouterait qu'un nom à retenir"
+    )]
+    fn rendre_le_retard<B: Bounced>(
+        &self,
+        rendre: &B,
+        retour: &str,
+        message: &[u8],
+        retards: &[(String, String, String, String)],
+        envelope_id: &str,
+        depot: u64,
+        now: u64,
+    ) -> bool {
+        // **JUSQU'À QUAND ON ESSAIE** (RFC 3464 §2.3.9), calculé là où la
+        // péremption est connue plutôt que recopié : deux vérités sur la même
+        // échéance finiraient par diverger.
+        let echeance = self.reprise.deadline(depot);
+        let attentes: Vec<Failure<'_>> = retards
+            .iter()
+            .map(|(adresse, statut, diagnostic, origine)| Failure {
+                recipient: adresse.as_bytes(),
+                status: statut.as_bytes(),
+                diagnostic: diagnostic.as_bytes(),
+                action: MimeAction::Delayed {
+                    retry_until: echeance,
+                },
+                original: origine.as_bytes(),
+            })
+            .collect();
+        let identifiant = std::format!("delay-{}-{}@{}", now, self.suivant(), self.mta);
+        let delimiteur = std::format!("----ams-delay-{}-{}", now, self.suivant());
+        let mut texte = String::from(
+            "Ce message n'a pas encore pu etre remis, et les tentatives se\r\n\
+             poursuivent. IL N'EST PAS PERDU : cet avis vous parvient parce\r\n\
+             que vous aviez demande a etre prevenu d'un retard.\r\n\r\n",
+        );
+        for (adresse, statut, diagnostic, _origine) in retards {
+            texte.push_str("  ");
+            texte.push_str(adresse);
+            texte.push_str(" : ");
+            texte.push_str(statut);
+            if !diagnostic.is_empty() {
+                texte.push_str(" (");
+                texte.push_str(diagnostic);
+                texte.push(')');
+            }
+            texte.push_str("\r\n");
+        }
+        let rapport = Bounce {
+            from: self.postmaster.as_bytes(),
+            to: retour.as_bytes(),
+            reporting_mta: self.mta.as_bytes(),
+            subject: b"Delivery Delayed - Message Still Being Retried",
+            message_id: identifiant.as_bytes(),
+            date: now,
+            arrival: depot,
+            boundary: delimiteur.as_bytes(),
+            text: texte.as_bytes(),
+            failures: &attentes,
             envelope_id: envelope_id.as_bytes(),
             original_headers: entetes(message),
         };
@@ -764,7 +906,11 @@ enum Issue {
     /// Refus définitif : le statut étendu, et ce que le pair a dit.
     Definitif(String, String),
     /// Refus temporaire, ou personne à qui parler.
-    Ajourne,
+    ///
+    /// **ELLE PORTE LA RAISON**, comme le refus définitif : un avis de retard
+    /// qui dirait un code inventé vaudrait moins que pas d'avis du tout, parce
+    /// qu'on le croirait.
+    Ajourne(String, String),
 }
 
 /// Y a-t-il quelque chose à passer au saut suivant (RFC 3461 §5.2.1) ?

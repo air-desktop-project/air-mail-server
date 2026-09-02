@@ -40,6 +40,13 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 > rapport qu'on avait refusé —, et ce serveur se tait alors : c'est lui qui
 > rendra compte.
 >
+> **`NOTIFY=DELAY` est honoré aussi** : un message qui traîne fait partir un avis
+> de retard, qui dit jusqu'à quand on essaie (`Will-Retry-Until`, §2.3.9) et
+> qu'il n'est PAS perdu. Il part **une fois** — un avis à chaque reprise serait
+> une bombe vers un chemin de retour que personne n'a authentifié — et le seuil
+> se règle par `--queue-warn-seconds`, quatre heures par défaut, ce que §4.5.4.1
+> de RFC 5321 recommande.
+>
 > **Ce qu'il annonce, il le tient** : `SIZE` était offert à chaque `EHLO` et
 > jamais lu — un pair pouvait annoncer dix gibioctets et nous les faire lire.
 > Une taille au-delà de la borne est maintenant refusée avant le premier octet,
@@ -1691,8 +1698,10 @@ saurait jamais où envoyer.
 abandonne au bout de cinq jours (§4.5.4.1 de RFC 5321 en demande au moins quatre).
 Réessayer à intervalle fixe pendant cinq jours, c'est frapper des centaines de
 fois à une porte fermée ; et si mille messages attendent pour ce même domaine,
-c'est le marteler pendant qu'il se relève. Les trois durées se règlent :
-`--queue-retry-seconds`, `--queue-max-retry-seconds`, `--queue-expire-seconds`.
+c'est le marteler pendant qu'il se relève. Les quatre durées se règlent :
+`--queue-retry-seconds`, `--queue-max-retry-seconds`, `--queue-expire-seconds`,
+et `--queue-warn-seconds`, qui dit au bout de combien de temps on PRÉVIENT d'un
+retard sans pour autant renoncer.
 
 **Quand on renonce, un rapport de non-remise (RFC 3464) part — et il reste ici.**
 Il est déposé dans la boîte du compte qui avait écrit. Ce serveur n'envoie jamais
@@ -1970,7 +1979,7 @@ que `llvm-cov` n'instrumente pas sur Rust stable et dont le compteur reste à
 `0 / 0`. Les régions font le travail attendu : chaque bras d'un conditionnel en
 est une.
 
-Le gate mesure aujourd'hui **54 638 régions** et **31 437 lignes**, toutes
+Le gate mesure aujourd'hui **54 699 régions** et **31 465 lignes**, toutes
 couvertes. **Une seule dérogation, et elle est annoncée à chaque exécution** : le
 code *généré* du schéma Cap'n Proto en est exclu — il porte un accesseur par champ
 et par sens, dont la plupart ne seront jamais appelés, et les couvrir n'éprouverait

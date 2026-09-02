@@ -101,6 +101,8 @@ pub struct Options {
     pub queue_max_retry: u32,
     /// Le temps accordé à un message depuis son dépôt. Zéro prend le défaut.
     pub queue_expire: u32,
+    /// Le retard à partir duquel on PRÉVIENT le déposant. Zéro prend le défaut.
+    pub queue_warn: u32,
     /// Le fichier PEM des autorités pour MTA-STS. Absent : non évalué.
     pub mtasts_anchors: Option<PathBuf>,
     /// Le dossier du cache des politiques MTA-STS. **Exigé avec le premier.**
@@ -184,6 +186,7 @@ impl Default for Options {
             queue_retry: 0,
             queue_max_retry: 0,
             queue_expire: 0,
+            queue_warn: 0,
             // PAS DE MTA-STS PAR DÉFAUT, et pas de drapeau : l'absence de
             // valeur EST l'absence de service. Embarquer des racines les ferait
             // vieillir avec le binaire ; lire celles du système sans qu'on l'ait
@@ -292,6 +295,7 @@ impl Options {
                 retry_seconds: self.queue_retry,
                 max_retry_seconds: self.queue_max_retry,
                 expire_seconds: self.queue_expire,
+                warn_seconds: self.queue_warn,
             },
             listen_pop3: self
                 .listen_pop3
@@ -389,6 +393,7 @@ OPTIONS DE `config write`
     --queue-retry-seconds <n>           attente après le 1er échec  (défaut 900)
     --queue-max-retry-seconds <n>       plafond de l'attente        (défaut 21600)
     --queue-expire-seconds <n>          avant d'abandonner          (défaut 432000)
+    --queue-warn-seconds <n>            avant de PRÉVENIR d'un retard (défaut 14400)
 
     LES SEUILS DU GARDE (C8)
     --connections-per-minute <n>        connexions par source   (défaut 60)
@@ -858,6 +863,13 @@ where
                     &valeur()?,
                     "une péremption nulle rendrait le message à son expéditeur sans avoir \
                      essayé une seule fois",
+                )?;
+            }
+            "--queue-warn-seconds" => {
+                options.queue_warn = pas_zero(
+                    &valeur()?,
+                    "un seuil nul avertirait d'un retard dès le premier essai, c'est-à-dire \
+                     pour chaque message qui n'est pas parti du premier coup",
                 )?;
             }
             // **LES ANCIENS NOMS SE REFUSENT EN DISANT LE NOUVEAU.**

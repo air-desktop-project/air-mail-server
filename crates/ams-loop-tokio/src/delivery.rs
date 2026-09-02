@@ -118,8 +118,8 @@ pub trait Delivery {
     ///
     /// **LE DÉFAUT NE RETIENT RIEN**, ce qui vaut le comportement de §4.1 en
     /// l'absence du paramètre : un rapport en cas d'échec, et rien d'autre.
-    fn recipient_report(&mut self, never: bool, on_success: bool, original: &[u8]) {
-        let _ = (never, on_success, original);
+    fn recipient_report(&mut self, never: bool, on_success: bool, on_delay: bool, original: &[u8]) {
+        let _ = (never, on_success, on_delay, original);
     }
 
     /// Ouvre la remise vers **un** destinataire accepté.

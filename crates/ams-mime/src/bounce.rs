@@ -30,7 +30,7 @@
 
 use crate::Error;
 use crate::compose::{contient, pousser, texte_recevable};
-use crate::date::write_date;
+use crate::date::{DATE_MAX, write_date};
 
 /// Ce qu'un destinataire en échec fait consigner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +80,14 @@ pub struct Failure<'a> {
 /// il relaie vers un saut qui n'annonce pas `DSN` — et quand le saut l'annonce,
 /// il n'écrit RIEN : les paramètres lui sont passés, et c'est lui qui rendra
 /// compte.
+///
+/// # `delayed` PORTE SON ÉCHÉANCE, ET C'EST LE TYPE QUI L'EXIGE
+///
+/// §2.3.9 ne veut `Will-Retry-Until` **que** pour `delayed` : ailleurs, le champ
+/// n'a pas de sens, et l'écrire dirait qu'on réessaiera un message dont on a
+/// fini de s'occuper. Mettre l'échéance DANS la variante rend cette faute
+/// inexprimable, au lieu de la confier à une garde qu'il faudrait écrire, lire,
+/// et se rappeler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Action {
     /// Il n'a pas été remis, et ne le sera pas.
@@ -89,6 +97,15 @@ pub enum Action {
     Delivered,
     /// Il a été passé au saut suivant, qui ne rendra pas compte.
     Relayed,
+    /// Il n'est pas encore parti, et on essaie toujours (§2.3.3).
+    ///
+    /// **CE N'EST PAS UN ÉCHEC**, et le confondre avec un `failed` ferait croire
+    /// à un expéditeur que son message est perdu alors qu'il est en route.
+    Delayed {
+        /// L'instant après lequel on renoncera, en secondes depuis l'époque
+        /// (§2.3.9).
+        retry_until: u64,
+    },
 }
 
 impl Action {
@@ -99,6 +116,7 @@ impl Action {
             Self::Failed => "failed",
             Self::Delivered => "delivered",
             Self::Relayed => "relayed",
+            Self::Delayed { .. } => "delayed",
         }
     }
 }
@@ -144,7 +162,13 @@ pub fn bounce_max(bounce: &Bounce<'_, '_>) -> usize {
     // quelques centaines d'octets suffisent, et l'on majore.
     const ENVELOPPE: usize = 768;
     // Ce qu'un groupe de destinataire occupe au plus, hors ses valeurs.
-    const PAR_ECHEC: usize = 80;
+    //
+    // Les noms de champ, le mot d'`Action:`, et — pour un retard —
+    // `Will-Retry-Until` avec sa date, qui occupe à elle seule jusqu'à
+    // [`DATE_MAX`]. **La borne d'avant ne les comptait pas** : le rapport d'un
+    // retard était refusé faute de place, c'est-à-dire que personne n'était
+    // averti au moment précis où l'on avait promis de l'être.
+    const PAR_ECHEC: usize = 128 + DATE_MAX;
     let echecs = bounce.failures.iter().fold(0_usize, |total, echec| {
         total
             .saturating_add(PAR_ECHEC)
@@ -313,6 +337,14 @@ pub fn write_bounce<'b>(sortie: &'b mut [u8], bounce: &Bounce<'_, '_>) -> Result
         if !echec.diagnostic.is_empty() {
             ecrits = pousser(sortie, ecrits, b"Diagnostic-Code: smtp; ")?;
             ecrits = pousser(sortie, ecrits, echec.diagnostic)?;
+            ecrits = pousser(sortie, ecrits, b"\r\n")?;
+        }
+        // **JUSQU'À QUAND ON ESSAIE** (§2.3.9). Un avis de retard qui ne le dit
+        // pas ne dit rien d'actionnable : l'expéditeur ne sait ni s'il doit
+        // attendre, ni s'il doit renvoyer par un autre chemin.
+        if let Action::Delayed { retry_until } = echec.action {
+            ecrits = pousser(sortie, ecrits, b"Will-Retry-Until: ")?;
+            ecrits = date(sortie, ecrits, retry_until)?;
             ecrits = pousser(sortie, ecrits, b"\r\n")?;
         }
     }

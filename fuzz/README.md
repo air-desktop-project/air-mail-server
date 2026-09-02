@@ -155,7 +155,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_mime_envelope` | `seeds/mime-envelope` | l'`ENVELOPE` d'un en-tête quelconque — **ce qui part sur le fil est bien formé** : dix champs, parenthèses équilibrées, et **aucune fin de ligne dans une chaîne** |
 | `fuzz_ams_mime_structure` | `seeds/mime-structure` | la `BODYSTRUCTURE` d'un message quelconque — **le découpage ne change pas le résultat**, ce qui part sur le fil est bien formé, et **une partie désignée ne sort jamais du message** |
 | `fuzz_ams_mime_compose` | `seeds/mime-compose` | les messages de rapport — **la pièce jointe se relit, la liste blanche tient** |
-| `fuzz_ams_mime_bounce` | `seeds/mime-bounce` | le rapport de non-remise — **aucune valeur n'ajoute un champ de statut**, et le chemin de retour est nul |
+| `fuzz_ams_mime_bounce` | `seeds/mime-bounce` | le rapport de non-remise, de remise, de relais ou de retard — **aucune valeur n'ajoute un champ de statut**, et le chemin de retour est nul |
 | `fuzz_ams_authres` | `seeds/authres` | l'en-tête `Authentication-Results` — **il n'y a qu'UN champ**, tout ce qui sort est émettable, et le rembourrage occupe exactement la place réservée |
 | `fuzz_ams_mime_received` | `seeds/mime-received` | l'en-tête `Received:` — **il n'y a qu'UN champ**, aucune ligne ne dépasse 998 octets, et **aucun destinataire n'y est nommé** |
 
@@ -172,7 +172,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_smtp_dsn` | `seeds/smtp-dsn` | les paramètres de RFC 3461 — **un xtext décodé ne grandit jamais**, ce qui sort est de l'ASCII visible, `NEVER` ne se combine avec rien, et **l'aller-retour de l'encodage rend la valeur de départ** |
 | `fuzz_ams_smtp_client` | `seeds/smtp-client` | réponses lues, corps émis et demandes de RFC 3461 passées au saut suivant — **le message ne se termine pas tout seul**, et **aucune commande écrite ne porte de fin de ligne prématurée** |
 | `fuzz_ams_session_smtp` | `seeds/session` | la session — **vocabulaire de sortie clos** |
-| `fuzz_ams_queue` | `seeds/queue` | la file de réémission — **un nom écrit se relit et ne sort pas du répertoire**, une enveloppe ne s'invente pas de destinataire |
+| `fuzz_ams_queue` | `seeds/queue` | la file de réémission — **un nom écrit se relit et ne sort pas du répertoire**, une enveloppe ne s'invente pas de destinataire, et **ce qu'un destinataire a demandé traverse le fichier intact** |
 
 **POP3 et IMAP** — les deux façons de relever son courrier.
 

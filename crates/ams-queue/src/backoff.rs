@@ -42,6 +42,16 @@ pub struct Backoff {
     pub ceiling: Duration,
     /// Le temps accordé à un message depuis son dépôt.
     pub expiry: Duration,
+    /// Le retard à partir duquel on PRÉVIENT, quand on l'a demandé (RFC 3461).
+    ///
+    /// # PRÉVENIR N'EST PAS RENONCER
+    ///
+    /// §4.5.4.1 de RFC 5321 recommande d'avertir l'expéditeur au bout de quelques
+    /// heures, tout en continuant d'essayer pendant des jours. Les deux durées
+    /// n'ont donc aucune raison d'être liées : le rapport entre « prévenir » et
+    /// « renoncer » dépend de ce qu'un exploitant veut annoncer, pas d'une
+    /// fraction que l'on aurait choisie à sa place.
+    pub warning: Duration,
 }
 
 impl Backoff {
@@ -56,10 +66,14 @@ impl Backoff {
     /// que l'expéditeur ait le temps de s'inquiéter, et **six heures de
     /// plafond** : au-delà, l'essai suivant tomberait après la péremption plus
     /// souvent qu'il ne servirait.
+    /// **Quatre heures d'avertissement**, ce que §4.5.4.1 recommande : assez
+    /// pour que les pannes brèves passent sans inquiéter personne, assez tôt
+    /// pour qu'un expéditeur pressé puisse encore choisir un autre chemin.
     pub const DEFAULT: Self = Self {
         first: Duration::from_secs(900),
         ceiling: Duration::from_secs(6 * 3600),
         expiry: Duration::from_secs(5 * 86_400),
+        warning: Duration::from_secs(4 * 3600),
     };
 
     /// L'attente après `attempts` échecs.
@@ -87,6 +101,14 @@ impl Backoff {
     #[must_use]
     pub fn deadline(&self, deposited: u64) -> u64 {
         deposited.saturating_add(self.expiry.as_secs())
+    }
+
+    /// Ce message traîne-t-il assez pour qu'on en avertisse le déposant ?
+    ///
+    /// `deposited` est l'instant du dépôt, `now` l'heure qu'il est.
+    #[must_use]
+    pub fn is_late(&self, deposited: u64, now: u64) -> bool {
+        now >= deposited.saturating_add(self.warning.as_secs())
     }
 
     /// Ce qu'il advient d'une entrée dont l'essai vient d'échouer

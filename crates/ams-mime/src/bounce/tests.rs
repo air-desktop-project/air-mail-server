@@ -417,6 +417,7 @@ fn un_rapport_de_succes_dit_delivered_et_nomme_l_adresse_d_origine() {
     // de remise FINALE peut dire qu'un message est arrivé. Le nôtre l'a passé
     // au saut suivant, ce qui n'est pas la même promesse.
     assert_eq!(super::Action::Relayed.name(), "relayed");
+    assert_eq!(super::Action::Delayed { retry_until: 0 }.name(), "delayed");
     assert_eq!(super::Action::default(), super::Action::Failed);
     assert!(!std::format!("{:?}", super::Action::Delivered).is_empty());
     assert!(!std::format!("{:?}", super::Action::Relayed).is_empty());
@@ -443,27 +444,40 @@ fn un_rapport_de_relais_ne_promet_pas_la_remise() {
 }
 
 /// **CE QUI NE TIENT PAS LE DIT**, y compris les champs que RFC 3461 ajoute.
+///
+/// Le balayage est refait pour un RETARD : ce document-là porte trois écritures
+/// de plus — `Will-Retry-Until` et sa date —, et chacune peut buter. Une seule
+/// forme de rapport n'éprouverait que les écritures qu'elle partage avec
+/// l'autre.
 #[test]
 fn un_rapport_de_succes_qui_ne_tient_pas_est_une_erreur() {
-    let remis = Failure {
-        recipient: b"marie@ailleurs.test",
-        status: b"2.0.0",
-        diagnostic: b"",
-        action: super::Action::Delivered,
-        original: b"marie+liste@ailleurs.test",
-    };
-    let echecs = [remis];
-    let rapport = Bounce {
-        envelope_id: b"envoi-42",
-        ..rapport(&echecs)
-    };
-    let complet = composer(&rapport).len();
-    for taille in 0..complet {
-        let mut place = std::vec![0_u8; taille];
-        assert!(
-            write_bounce(&mut place, &rapport).is_err(),
-            "une taille de {taille} a suffi"
-        );
+    for action in [
+        super::Action::Delivered,
+        super::Action::Delayed {
+            retry_until: 1_700_000_000,
+        },
+    ] {
+        let remis = Failure {
+            recipient: b"marie@ailleurs.test",
+            status: b"2.0.0",
+            diagnostic: b"",
+            action,
+            original: b"marie+liste@ailleurs.test",
+        };
+        let echecs = [remis];
+        let rapport = Bounce {
+            envelope_id: b"envoi-42",
+            ..rapport(&echecs)
+        };
+        let complet = composer(&rapport).len();
+        for taille in 0..complet {
+            let mut place = std::vec![0_u8; taille];
+            assert!(
+                write_bounce(&mut place, &rapport).is_err(),
+                "une taille de {taille} a suffi pour `{}`",
+                action.name()
+            );
+        }
     }
 }
 
@@ -496,6 +510,68 @@ fn une_valeur_de_rfc_3461_irrecevable_est_refusee() {
             write_bounce(&mut place, &rapport).map(<[u8]>::len),
             Err(Error::NotPrintable),
             "{mauvaise:?} est passée en identifiant d'enveloppe"
+        );
+    }
+}
+
+/// **UN AVIS DE RETARD DIT JUSQU'À QUAND ON ESSAIE** (§2.3.9).
+///
+/// Sans cette date, l'avis ne dit rien d'actionnable : l'expéditeur ne sait ni
+/// s'il doit attendre, ni s'il doit renvoyer par un autre chemin. Et le mot
+/// d'`Action:` doit rester `delayed` — `failed` lui ferait croire à une perte,
+/// donc renvoyer le même courrier une seconde fois.
+#[test]
+fn un_avis_de_retard_dit_jusqu_a_quand_on_essaie() {
+    let attente = Failure {
+        recipient: b"marie@ailleurs.test",
+        status: b"4.4.1",
+        diagnostic: b"no answer from destination server",
+        action: super::Action::Delayed {
+            retry_until: 1_700_000_000,
+        },
+        original: b"",
+    };
+    let echecs = [attente];
+    let texte = composer(&rapport(&echecs));
+    assert!(texte.contains("Action: delayed\r\n"), "{texte}");
+    assert!(!texte.contains("Action: failed"), "{texte}");
+    // La date est écrite au format de RFC 5322, comme les deux autres du
+    // rapport : un lecteur n'a pas à connaître trois écritures d'une date.
+    assert!(
+        texte.contains("Will-Retry-Until: Tue, 14 Nov 2023 22:13:20 +0000\r\n"),
+        "{texte}"
+    );
+    // **ELLE VIENT APRÈS LE DIAGNOSTIC**, où §2.3 la range.
+    let diagnostic = texte.find("Diagnostic-Code:");
+    let echeance = texte.find("Will-Retry-Until:");
+    assert!(diagnostic.is_some() && diagnostic < echeance, "{texte}");
+}
+
+/// **AUCUNE AUTRE ISSUE NE PORTE D'ÉCHÉANCE**, et c'est le TYPE qui l'exige.
+///
+/// §2.3.9 ne veut `Will-Retry-Until` que pour `delayed` : l'écrire ailleurs
+/// dirait qu'on réessaiera un message dont on a fini de s'occuper. L'échéance
+/// vit donc DANS la variante, et la combinaison fautive ne s'écrit pas.
+#[test]
+fn seul_un_retard_porte_une_echeance() {
+    for action in [
+        super::Action::Failed,
+        super::Action::Delivered,
+        super::Action::Relayed,
+    ] {
+        let un = Failure {
+            recipient: b"marie@ailleurs.test",
+            status: b"5.1.1",
+            diagnostic: b"",
+            action,
+            original: b"",
+        };
+        let echecs = [un];
+        let texte = composer(&rapport(&echecs));
+        assert!(
+            !texte.contains("Will-Retry-Until"),
+            "`{}` a promis un nouvel essai : {texte}",
+            action.name()
         );
     }
 }

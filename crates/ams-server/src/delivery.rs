@@ -179,6 +179,19 @@ impl Boites {
 /// configurée, une adresse sans boîte est refusée, et c'est tout ce qu'elle a
 /// besoin de vérifier. Deux endroits qui décideraient d'ouvrir un relais
 /// finiraient par ne plus dire la même chose.
+/// Ce qu'un destinataire sortant a demandé du sort de son message (RFC 3461).
+///
+/// Une structure nommée plutôt qu'un quadruplet : trois booléens de suite se
+/// permutent sans que rien ne le dise, et celui qui compte le plus fait TAIRE
+/// un rapport.
+#[derive(Debug, Clone)]
+struct Demande {
+    never: bool,
+    on_success: bool,
+    on_delay: bool,
+    original: String,
+}
+
 pub struct MaildirDelivery {
     boites: Arc<Boites>,
     comptes: Arc<crate::comptes::Comptes>,
@@ -217,7 +230,8 @@ pub struct MaildirDelivery {
     ///
     /// Un par entrée de `sortants`, dans le même ordre : c'est ce qui suit le
     /// message dans la file.
-    rapports: Vec<(bool, bool, String)>,
+    /// Ce que chaque sortant a demandé : silence, succès, retard, origine.
+    rapports: Vec<Demande>,
     /// Ce message-ci doit-il être mis de côté ?
     ///
     /// Remis à faux par [`Delivery::begin`] : un second message sur la même
@@ -298,18 +312,19 @@ impl Delivery for MaildirDelivery {
         self.envid = String::from_utf8_lossy(id).into_owned();
     }
 
-    fn recipient_report(&mut self, never: bool, on_success: bool, original: &[u8]) {
+    fn recipient_report(&mut self, never: bool, on_success: bool, on_delay: bool, original: &[u8]) {
         // **SEULS LES SORTANTS EN ONT L'USAGE.** Un destinataire d'ici est remis
         // tout de suite, et son sort est dit au pair par le code de retour du
         // `DATA` — il n'y a pas de rapport à composer pour cela.
         if self.sortants.len() != self.rapports.len().saturating_add(1) {
             return;
         }
-        self.rapports.push((
+        self.rapports.push(Demande {
             never,
             on_success,
-            String::from_utf8_lossy(original).into_owned(),
-        ));
+            on_delay,
+            original: String::from_utf8_lossy(original).into_owned(),
+        });
     }
 
     fn quarantine(&mut self) -> bool {
@@ -497,10 +512,15 @@ impl MaildirDelivery {
         let rapports: Vec<ams_queue::Report<'_>> = self
             .rapports
             .iter()
-            .map(|(never, on_success, original)| ams_queue::Report {
-                never: *never,
-                on_success: *on_success,
-                original,
+            .map(|demande| ams_queue::Report {
+                never: demande.never,
+                on_success: demande.on_success,
+                on_delay: demande.on_delay,
+                // **UN MESSAGE QUI VIENT D'ARRIVER N'A PAS ENCORE TARDÉ** :
+                // poser ce bit ici ferait taire l'avis de retard avant qu'il
+                // n'ait eu lieu de partir.
+                delay_sent: false,
+                original: &demande.original,
             })
             .collect();
         let envid = self.envid.clone();

@@ -134,6 +134,7 @@ async fn un_echec_repousse_l_entree_sans_la_perdre() {
         first: Duration::from_secs(100),
         ceiling: Duration::from_secs(1_000),
         expiry: Duration::from_secs(100_000),
+        warning: Duration::from_secs(10_000),
     };
     let (spool, dossier) = file(reprise);
     spool
@@ -187,6 +188,7 @@ async fn rien_n_est_repris_avant_l_heure() {
         first: Duration::from_secs(100),
         ceiling: Duration::from_secs(1_000),
         expiry: Duration::from_secs(100_000),
+        warning: Duration::from_secs(10_000),
     };
     let (spool, _dossier) = file(reprise);
     spool
@@ -219,6 +221,7 @@ async fn la_peremption_rend_le_message_a_son_expediteur() {
         first: Duration::from_secs(1),
         ceiling: Duration::from_secs(1),
         expiry: Duration::from_secs(10),
+        warning: Duration::from_secs(5),
     };
     let (spool, dossier) = file(reprise);
     spool
@@ -357,4 +360,144 @@ fn deux_depots_de_la_meme_seconde_coexistent() {
     }
     let vus = noms(dossier.chemin());
     assert_eq!(vus.len(), 4, "deux messages et deux enveloppes : {vus:?}");
+}
+
+// ── L'AVIS DE RETARD (RFC 3461 §4.1) ────────────────────────────────────────
+
+/// **IL PART UNE FOIS, ET UNE SEULE.**
+///
+/// C'est la propriété qui compte le plus de cette tranche. Un pair en panne une
+/// journée fait des dizaines de reprises ; un avis à chacune serait une bombe
+/// dirigée vers un chemin de retour que PERSONNE n'a authentifié — c'est-à-dire
+/// la rétrodiffusion que ce dépôt évite partout ailleurs.
+///
+/// Le second passage a lieu APRÈS le seuil comme le premier : ce qui distingue
+/// les deux n'est donc pas l'heure, c'est la trace écrite dans l'enveloppe.
+#[tokio::test(flavor = "multi_thread")]
+async fn l_avis_de_retard_ne_part_qu_une_fois() {
+    let reprise = Backoff {
+        first: Duration::from_secs(1),
+        ceiling: Duration::from_secs(1),
+        expiry: Duration::from_secs(100_000),
+        warning: Duration::from_secs(10),
+    };
+    let (spool, dossier) = file(reprise);
+    spool
+        .deposer(
+            "jean@nous.test",
+            &[String::from("marie@ailleurs.test")],
+            &[ams_queue::Report {
+                on_delay: true,
+                ..ams_queue::Report::default()
+            }],
+            "envoi-42",
+            MESSAGE,
+            1_000,
+        )
+        .expect("déposé");
+
+    let cahier = Cahier::default();
+    // AVANT LE SEUIL : rien. Un avis dès le premier échec avertirait pour
+    // chaque message qui n'est pas parti du premier coup.
+    let compte = spool.parcourir(&remetteur(), &cahier, 1_005).await;
+    assert_eq!(compte.deferred, 1, "{compte:?}");
+    assert!(cahier.rapports().is_empty(), "{:?}", cahier.rapports());
+
+    // APRÈS LE SEUIL : un avis, et un seul.
+    let compte = spool.parcourir(&remetteur(), &cahier, 1_020).await;
+    assert_eq!(compte.deferred, 1, "{compte:?}");
+    let rapports = cahier.rapports();
+    assert_eq!(rapports.len(), 1, "{rapports:?}");
+    let (destinataire, avis) = &rapports[0];
+    assert_eq!(destinataire, "jean@nous.test", "le chemin de retour");
+
+    // **`delayed`, ET NON `failed`** : le message attend, il n'est pas perdu.
+    assert!(avis.contains("Action: delayed\r\n"), "{avis}");
+    assert!(!avis.contains("Action: failed"), "{avis}");
+    // Jusqu'à quand on essaie (RFC 3464 §2.3.9), sans quoi l'avis ne dit rien
+    // d'actionnable.
+    assert!(avis.contains("Will-Retry-Until: "), "{avis}");
+    assert!(
+        avis.contains("Final-Recipient: rfc822; marie@ailleurs.test\r\n"),
+        "{avis}"
+    );
+    // La VRAIE raison du dernier ajournement, et non un code inventé.
+    assert!(avis.contains("Status: 4.4.1\r\n"), "{avis}");
+    assert!(
+        avis.contains("Original-Envelope-Id: envoi-42\r\n"),
+        "{avis}"
+    );
+    // Le sujet ne doit pas faire croire à une perte : l'expéditeur qui lirait
+    // « Undelivered » renverrait par un autre chemin, donc deux fois.
+    assert!(avis.contains("Subject: Delivery Delayed"), "{avis}");
+
+    // ENCORE APRÈS : toujours un seul. C'est le bit de l'enveloppe qui le dit.
+    let compte = spool.parcourir(&remetteur(), &cahier, 1_040).await;
+    assert_eq!(compte.deferred, 1, "{compte:?}");
+    assert_eq!(cahier.rapports().len(), 1, "{:?}", cahier.rapports());
+    assert!(!noms(dossier.chemin()).is_empty(), "le message a disparu");
+}
+
+/// **QUI N'A RIEN DEMANDÉ N'EST PAS AVERTI** (§4.1).
+///
+/// Le défaut de RFC 3461 est un rapport d'échec, et rien d'autre. Avertir tout
+/// le monde d'un retard ferait du courrier en plus pour personne — et le ferait
+/// vers des chemins de retour non authentifiés.
+#[tokio::test(flavor = "multi_thread")]
+async fn sans_demande_aucun_avis_de_retard() {
+    let reprise = Backoff {
+        first: Duration::from_secs(1),
+        ceiling: Duration::from_secs(1),
+        expiry: Duration::from_secs(100_000),
+        warning: Duration::from_secs(10),
+    };
+    let (spool, _dossier) = file(reprise);
+    spool
+        .deposer(
+            "jean@nous.test",
+            &[String::from("marie@ailleurs.test")],
+            &[],
+            "",
+            MESSAGE,
+            1_000,
+        )
+        .expect("déposé");
+    let cahier = Cahier::default();
+    let compte = spool.parcourir(&remetteur(), &cahier, 1_050).await;
+    assert_eq!(compte.deferred, 1, "{compte:?}");
+    assert!(cahier.rapports().is_empty(), "{:?}", cahier.rapports());
+}
+
+/// **`NEVER` L'EMPORTE SUR `DELAY`**, comme sur tout le reste (§4.1).
+///
+/// Un déposant qui demande le silence l'a demandé pour de bon. Le lui accorder
+/// pour l'échec et le lui refuser pour le retard reviendrait à choisir
+/// soi-même laquelle des deux moitiés honorer.
+#[tokio::test(flavor = "multi_thread")]
+async fn le_silence_demande_couvre_aussi_le_retard() {
+    let reprise = Backoff {
+        first: Duration::from_secs(1),
+        ceiling: Duration::from_secs(1),
+        expiry: Duration::from_secs(100_000),
+        warning: Duration::from_secs(10),
+    };
+    let (spool, _dossier) = file(reprise);
+    spool
+        .deposer(
+            "jean@nous.test",
+            &[String::from("marie@ailleurs.test")],
+            &[ams_queue::Report {
+                never: true,
+                on_delay: true,
+                ..ams_queue::Report::default()
+            }],
+            "",
+            MESSAGE,
+            1_000,
+        )
+        .expect("déposé");
+    let cahier = Cahier::default();
+    let compte = spool.parcourir(&remetteur(), &cahier, 1_050).await;
+    assert_eq!(compte.deferred, 1, "{compte:?}");
+    assert!(cahier.rapports().is_empty(), "{:?}", cahier.rapports());
 }

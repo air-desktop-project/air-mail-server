@@ -8,6 +8,7 @@ const REPRISE: Backoff = Backoff {
     first: Duration::from_secs(100),
     ceiling: Duration::from_secs(1_000),
     expiry: Duration::from_secs(100_000),
+    warning: Duration::from_secs(10_000),
 };
 
 #[test]
@@ -45,6 +46,7 @@ fn une_attente_absurde_sature_au_lieu_de_deborder() {
         first: Duration::from_secs(u64::MAX),
         ceiling: Duration::from_secs(u64::MAX),
         expiry: Duration::from_secs(u64::MAX),
+        warning: Duration::from_secs(u64::MAX),
     };
     assert_eq!(absurde.delay(31), Duration::from_secs(u64::MAX));
     assert_eq!(absurde.deadline(10), u64::MAX);
@@ -115,4 +117,39 @@ fn la_reprise_se_copie_et_se_debogue() {
     assert_ne!(Decision::GiveUp, Decision::Retry { at: 0 });
     let jumelle = Decision::Retry { at: 7 };
     assert_eq!(jumelle, Decision::Retry { at: 7 });
+}
+
+/// **PRÉVENIR N'EST PAS RENONCER** (RFC 5321 §4.5.4.1).
+///
+/// Les deux durées sont indépendantes : on avertit au bout de quelques heures
+/// et l'on continue d'essayer pendant des jours. Un seuil qui suivrait la
+/// péremption ferait dépendre l'avertissement d'un réglage qui ne le concerne
+/// pas.
+#[test]
+fn le_seuil_d_avertissement_ne_suit_pas_la_peremption() {
+    let depot = 1_000_u64;
+    assert!(!REPRISE.is_late(depot, depot));
+    // À la seconde qui précède, on n'avertit pas encore.
+    assert!(!REPRISE.is_late(depot, depot + 9_999));
+    // AU SEUIL EXACT, on avertit : un seuil qu'il faut dépasser d'une seconde
+    // n'est pas le seuil qu'on a annoncé.
+    assert!(REPRISE.is_late(depot, depot + 10_000));
+    assert!(REPRISE.is_late(depot, depot + 50_000));
+    // Et l'on essaie toujours, longtemps après avoir averti.
+    assert_eq!(
+        REPRISE.after_failure(depot, 1, depot + 50_000),
+        Decision::Retry { at: depot + 50_100 }
+    );
+    // **UNE CONFIGURATION ABSURDE SATURE, ELLE NE BOUCLE PAS.** Un seuil de
+    // l'ordre de l'âge de l'univers n'avertit à aucun instant qu'une horloge
+    // atteindra — et surtout, il n'avertit pas AUSSITÔT, ce qu'un débordement
+    // ferait.
+    let absurde = Backoff {
+        first: Duration::from_secs(1),
+        ceiling: Duration::from_secs(1),
+        expiry: Duration::from_secs(1),
+        warning: Duration::from_secs(u64::MAX),
+    };
+    assert!(!absurde.is_late(depot, depot));
+    assert!(!absurde.is_late(depot, u64::MAX - 1));
 }

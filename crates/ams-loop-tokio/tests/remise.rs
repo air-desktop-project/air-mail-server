@@ -103,8 +103,9 @@ fn remetteur(exige_tls: bool) -> Relay {
     )
 }
 
-/// Ce qu'un serveur a retenu d'une demande de RFC 3461.
-type DemandeVue = (std::vec::Vec<u8>, bool, bool, std::vec::Vec<u8>);
+/// Ce qu'un serveur a retenu d'une demande de RFC 3461 : l'identifiant
+/// d'enveloppe, puis le silence, le succès, le retard, et l'adresse d'origine.
+type DemandeVue = (std::vec::Vec<u8>, bool, bool, bool, std::vec::Vec<u8>);
 
 /// Une remise qui retient ce que le déposant a demandé du sort de son message.
 #[derive(Clone, Default)]
@@ -117,11 +118,12 @@ impl Delivery for CahierDsn {
     fn envelope_id(&mut self, id: &[u8]) {
         self.0.lock().expect("verrou").0 = id.to_vec();
     }
-    fn recipient_report(&mut self, never: bool, on_success: bool, original: &[u8]) {
+    fn recipient_report(&mut self, never: bool, on_success: bool, on_delay: bool, original: &[u8]) {
         let mut vu = self.0.lock().expect("verrou");
         vu.1 = never;
         vu.2 = on_success;
-        vu.3 = original.to_vec();
+        vu.3 = on_delay;
+        vu.4 = original.to_vec();
     }
     fn append(&mut self, _chunk: &[u8]) -> Result<(), DeliveryFailure> {
         Ok(())
@@ -925,7 +927,7 @@ async fn la_demande_du_deposant_traverse_intacte() {
             dsn_forwarded: true,
         }
     );
-    let (identifiant, jamais, succes, origine) = vu.0.lock().expect("verrou").clone();
+    let (identifiant, jamais, succes, retard, origine) = vu.0.lock().expect("verrou").clone();
     assert_eq!(identifiant, b"envoi+42", "l'identifiant a changé en route");
     assert_eq!(
         origine, b"marie+liste@x.test",
@@ -933,6 +935,7 @@ async fn la_demande_du_deposant_traverse_intacte() {
     );
     assert!(succes, "le rapport de succès demandé s'est perdu");
     assert!(!jamais);
+    assert!(!retard, "un retard qu'on n'avait pas demandé");
 }
 
 /// **UN PAIR QUI N'ANNONCE PAS `DSN` NOUS LAISSE RENDRE COMPTE.**

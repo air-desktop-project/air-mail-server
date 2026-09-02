@@ -62,8 +62,35 @@ struct Echec {
     /// **ELLE VIENT DE LUI**, et ressort dans un en-tête que nous composons :
     /// c'est une entrée hostile au même titre que le diagnostic.
     origine: Vec<u8>,
-    /// Remis, ou non remis (RFC 3464 §2.3.3).
-    remis: bool,
+    /// Ce que ce serveur a fait du message (RFC 3464 §2.3.3).
+    ///
+    /// Le retard porte SON ÉCHÉANCE : `Will-Retry-Until` (§2.3.9) n'a de sens
+    /// que là, et c'est le type qui l'exige. Une date arbitraire y passe, jusqu'à
+    /// la fin de l'époque — l'écriture d'une date ne doit pas déborder pour un
+    /// message qu'on aurait déposé loin dans l'avenir.
+    quoi: Sort,
+}
+
+/// Ce que le serveur a fait du message, tiré au sort.
+#[derive(Debug, Arbitrary)]
+enum Sort {
+    Echoue,
+    Remis,
+    Relaye,
+    Retarde { jusqu_a: u64 },
+}
+
+impl Sort {
+    fn en_action(&self) -> Action {
+        match *self {
+            Self::Echoue => Action::Failed,
+            Self::Remis => Action::Delivered,
+            Self::Relaye => Action::Relayed,
+            Self::Retarde { jusqu_a } => Action::Delayed {
+                retry_until: jusqu_a,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Arbitrary)]
@@ -91,11 +118,7 @@ fuzz_target!(|entree: Entree| {
             recipient: &un.destinataire,
             status: &un.statut,
             diagnostic: &un.diagnostic,
-            action: if un.remis {
-                Action::Delivered
-            } else {
-                Action::Failed
-            },
+            action: un.quoi.en_action(),
             original: &un.origine,
         })
         .collect();

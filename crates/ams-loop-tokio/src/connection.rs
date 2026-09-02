@@ -631,7 +631,12 @@ where
             break;
         }
         if let Some((notify, orcpt)) = session.recipient_report(rang) {
-            delivery.recipient_report(notify.never(), notify.on_success(), orcpt);
+            delivery.recipient_report(
+                notify.never(),
+                notify.on_success(),
+                notify.on_delay(),
+                orcpt,
+            );
         }
     }
     // ── L'EN-TÊTE `Received:` (RFC 5321 §4.4) ───────────────────────────────
