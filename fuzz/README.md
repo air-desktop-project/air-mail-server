@@ -92,6 +92,9 @@ de `Cargo.toml`, et l'écart échoue — une cible qu'on oublie d'y inscrire ne
 serait jamais lancée, et le gate resterait vert en ne l'ayant pas examinée. Un
 rapport vert qui n'a rien examiné est un mensonge poli.
 
+Elle est confrontée AUSSI au tableau de ce fichier, plus bas : une cible que
+rien ne décrit est une cible que personne ne sait lire.
+
 ## `seeds/` S'ÉCRIT À LA MAIN ; `corpus/` EST À LIBFUZZER
 
 Une graine porte un NOM qui dit ce qu'elle vise — `mime-bounce/refus`,
@@ -141,37 +144,117 @@ Un message est **la** donnée externe d'un serveur de courrier : n'importe qui p
 en composer un et l'envoyer. Une panique dans un décodeur y est un déni de service
 offert à qui sait écrire quinze octets.
 
+**Le message** — RFC 5322 et MIME, la donnée que n'importe qui peut composer.
+
 | Cible | Graines | Ce qu'elle éprouve |
 | --- | --- | --- |
 | `fuzz_ams_mime_parse` | `seeds/mime` | le découpage d'un message — la grammaire |
 | `fuzz_ams_mime_limits` | `seeds/mime` | le même, avec des **bornes arbitraires** |
+| `fuzz_ams_mime_decode` | `seeds/mime-decode` | défaire un mot encodé — **`decoded_max` majore sans lire l'entrée**, et un encodage inconnu est l'identité |
+| `fuzz_ams_mime_digest` | `seeds/mime-digest` | le résumé d'un message — **rien au-delà des deux tampons fixes**, et aucune fin de ligne dans ce qu'on rend |
+| `fuzz_ams_mime_envelope` | `seeds/mime-envelope` | l'`ENVELOPE` d'un en-tête quelconque — **ce qui part sur le fil est bien formé** : dix champs, parenthèses équilibrées, et **aucune fin de ligne dans une chaîne** |
+| `fuzz_ams_mime_structure` | `seeds/mime-structure` | la `BODYSTRUCTURE` d'un message quelconque — **le découpage ne change pas le résultat**, ce qui part sur le fil est bien formé, et **une partie désignée ne sort jamais du message** |
+| `fuzz_ams_mime_compose` | `seeds/mime-compose` | les messages de rapport — **la pièce jointe se relit, la liste blanche tient** |
+| `fuzz_ams_mime_bounce` | `seeds/mime-bounce` | le rapport de non-remise — **aucune valeur n'ajoute un champ de statut**, et le chemin de retour est nul |
+| `fuzz_ams_authres` | `seeds/authres` | l'en-tête `Authentication-Results` — **il n'y a qu'UN champ**, tout ce qui sort est émettable, et le rembourrage occupe exactement la place réservée |
+
+**SMTP** — ce qu'un serveur lit avant toute authentification.
+
+| Cible | Graines | Ce qu'elle éprouve |
+| --- | --- | --- |
 | `fuzz_ams_smtp_command` | `seeds/smtp` | le décodage d'une commande — la grammaire |
 | `fuzz_ams_smtp_limits` | `seeds/smtp` | le même, avec des **bornes arbitraires** |
 | `fuzz_ams_smtp_reply` | `seeds/smtp-reply` | l'encodage d'une réponse — **aller-retour** |
-| `fuzz_ams_session_smtp` | `seeds/session` | la session — **vocabulaire de sortie clos** |
 | `fuzz_ams_smtp_data` | `seeds/smtp-data` | la phase de données — **indépendance au découpage** |
-| `fuzz_ams_guard` | `seeds/guard` | le garde — **une peine ne s'évince pas** |
-| `fuzz_ams_index_name` | `seeds/index` | les noms Maildir — **aller-retour de l'UID** |
-| `fuzz_ams_config` | `seeds/config` | les trois formats binaires : configuration, comptes, index |
-| `fuzz_ams_tls_kx` | `seeds/tls` | la part de clé TLS du pair — **les deux rôles** |
-| `fuzz_ams_sasl` | `seeds/sasl` | la réponse SASL — **décodage canonique** |
+| `fuzz_ams_smtp_client` | `seeds/smtp-client` | réponses lues et corps émis — **le message ne se termine pas tout seul** |
+| `fuzz_ams_session_smtp` | `seeds/session` | la session — **vocabulaire de sortie clos** |
+| `fuzz_ams_queue` | `seeds/queue` | la file de réémission — **un nom écrit se relit et ne sort pas du répertoire**, une enveloppe ne s'invente pas de destinataire |
+
+**POP3 et IMAP** — les deux façons de relever son courrier.
+
+| Cible | Graines | Ce qu'elle éprouve |
+| --- | --- | --- |
 | `fuzz_ams_pop3` | `seeds/pop3` | la ligne POP3 — **et le doublement du point** |
 | `fuzz_ams_session_pop3` | `seeds/pop3-session` | la session POP3 — **vocabulaire clos, états tenus** |
+| `fuzz_ams_imap` | `seeds/imap` | découpage d'une commande IMAP — **le client ne choisit pas où l'on coupe**, et l'itérateur d'arguments s'arrête |
+| `fuzz_ams_imap_fetch` | `seeds/imap-fetch` | ce qu'un `FETCH`, un `STORE`, un `SEARCH` et un `APPEND` désignent — **les deux lectures d'un ensemble s'accordent**, un drapeau accepté se réécrit, une recherche décide sans boucler, et **ce qu'un `APPEND` annonce, on peut le tenir** ; **un nom de boîte accepté ne sort pas de sa racine** |
+| `fuzz_ams_session_imap` | `seeds/imap-session` | la session IMAP — **jamais authentifié sans chiffrement**, un intervalle de `FETCH` ne déborde pas du message, et **une émission conclut** |
+
+**L'authentification du courrier** — qui a le droit d'écrire sous ce nom.
+
+| Cible | Graines | Ce qu'elle éprouve |
+| --- | --- | --- |
 | `fuzz_ams_spf` | `seeds/spf` | l'enregistrement SPF — **validation d'un seul tenant** |
 | `fuzz_ams_spf_eval` | `seeds/spf-eval` | l'évaluation SPF, réponses DNS comprises — **elle conclut** |
-| `fuzz_ams_dns` | `seeds/dns` | la réponse d'un résolveur — **la compression ne boucle pas** |
 | `fuzz_ams_spf_header` | `seeds/spf-header` | l'en-tête `Received-SPF` — **aucune injection de ligne** |
 | `fuzz_ams_dkim` | `seeds/dkim` | signature, clé et canonicalisation — **le découpage ne change rien** |
 | `fuzz_ams_dmarc` | `seeds/dmarc` | politique et alignement — **l'alignement est symétrique** |
 | `fuzz_ams_dmarc_report` | `seeds/dmarc-report` | destinations et rapport agrégé — **le rapport ne s'injecte pas** |
-| `fuzz_ams_imap` | `seeds/imap` | découpage d'une commande IMAP — **le client ne choisit pas où l'on coupe**, et l'itérateur d'arguments s'arrête |
-| `fuzz_ams_imap_fetch` | `seeds/imap-fetch` | ce qu'un `FETCH`, un `STORE`, un `SEARCH` et un `APPEND` désignent — **les deux lectures d'un ensemble s'accordent**, un drapeau accepté se réécrit, une recherche décide sans boucler, et **ce qu'un `APPEND` annonce, on peut le tenir** ; **un nom de boîte accepté ne sort pas de sa racine** |
-| `fuzz_ams_session_imap` | `seeds/imap-session` | la session IMAP — **jamais authentifié sans chiffrement**, un intervalle de `FETCH` ne déborde pas du message, et **une émission conclut** |
-| `fuzz_ams_smtp_client` | `seeds/smtp-client` | réponses lues et corps émis — **le message ne se termine pas tout seul** |
-| `fuzz_ams_mime_compose` | `seeds/mime-compose` | les messages de rapport — **la pièce jointe se relit, la liste blanche tient** |
-| `fuzz_ams_mime_structure` | `seeds/mime-structure` | la `BODYSTRUCTURE` d'un message quelconque — **le découpage ne change pas le résultat**, ce qui part sur le fil est bien formé, et **une partie désignée ne sort jamais du message** |
-| `fuzz_ams_mime_envelope` | `seeds/mime-envelope` | l'`ENVELOPE` d'un en-tête quelconque — **ce qui part sur le fil est bien formé** : dix champs, parenthèses équilibrées, et **aucune fin de ligne dans une chaîne** |
-| `fuzz_ams_authres` | `seeds/authres` | l'en-tête `Authentication-Results` — **il n'y a qu'UN champ**, tout ce qui sort est émettable, et le rembourrage occupe exactement la place réservée |
+| `fuzz_ams_dns` | `seeds/dns` | la réponse d'un résolveur — **la compression ne boucle pas** |
+
+**Le transport chiffré** — à qui l'on parle, et sous quelle garantie.
+
+| Cible | Graines | Ce qu'elle éprouve |
+| --- | --- | --- |
+| `fuzz_ams_tls_kx` | `seeds/tls` | la part de clé TLS du pair — **les deux rôles** |
+| `fuzz_ams_tls_quic` | `seeds/tls-quic` | le pont entre `rustls::quic` et notre protection — **le pont chiffre comme la crate en dessous** |
+| `fuzz_ams_dane` | `seeds/dane` | ce qu'un `TLSA` autorise — **un jeu non authentifié n'engage jamais**, et un inutilisable ne satisfait rien |
+| `fuzz_ams_mtasts` | `seeds/mtasts` | une politique MTA-STS — **le joker couvre exactement une étiquette**, et ce qu'elle permet vient de ses `mx` |
+| `fuzz_ams_tlsrpt` | `seeds/tlsrpt` | un rapport TLS et ses destinations — **jamais plus que la borne**, et **un domaine ne s'autorise pas lui-même** |
+
+**HTTP, HTTP/2 et HTTP/3** — la façade d'administration.
+
+| Cible | Graines | Ce qu'elle éprouve |
+| --- | --- | --- |
+| `fuzz_ams_http_head` | `seeds/http-head` | la liste de champs d'une requête — **aucune valeur ne porte de `CR`, de `LF` ni de `NUL`**, et le nombre de champs est borné |
+| `fuzz_ams_http_response` | `seeds/http-response` | la réponse lue par le client — **la contrebande dans l'autre sens** : aucun `CR` ni `LF` isolé, et **`Content-Length` et `Transfer-Encoding` ne coexistent jamais** |
+| `fuzz_ams_h2_frame` | `seeds/h2-frame` | le cadrage HTTP/2 — **un cadre rendu entier tient dans ce qu'on a lu**, et se réécrit à l'identique |
+| `fuzz_ams_h2_hpack` | `seeds/h2-hpack` | les primitives HPACK — **une chaîne décodée ne déborde pas**, et Huffman est déterministe |
+| `fuzz_ams_h2_connection` | `seeds/h2-connection` | la machine de connexion HTTP/2 — **une faute fatale arrête tout**, et les fenêtres restent dans leurs bornes |
+| `fuzz_ams_h3_frame` | `seeds/h3-frame` | le cadrage HTTP/3 — **les types qu'HTTP/2 employait ne passent jamais** (§11.2.1) |
+| `fuzz_ams_h3_connection` | `seeds/h3-connection` | la machine de connexion HTTP/3 — **aucune trame avant les réglages**, un seul flux critique de chaque sorte, et un `GOAWAY` ne remonte pas |
+| `fuzz_ams_h3_driver` | `seeds/h3-driver` | le conducteur HTTP/3 sur des octets — **chaque appel rend la main**, et une faute est définitive |
+
+**QUIC** — le transport sous HTTP/3.
+
+| Cible | Graines | Ce qu'elle éprouve |
+| --- | --- | --- |
+| `fuzz_ams_quic_varint` | `seeds/quic-varint` | les entiers de §16 — **une écriture longue se lit comme la courte** |
+| `fuzz_ams_quic_packet` | `seeds/quic-packet` | les en-têtes de paquet de §17 — **un identifiant tient dans ses vingt octets** |
+| `fuzz_ams_quic_crypto` | `seeds/quic-crypto` | la protection des paquets — **deux numéros donnent deux nonces**, et ce qu'on abîme ne se déchiffre pas |
+| `fuzz_ams_quic_emit` | `seeds/quic-emit` | la fabrication d'un paquet protégé — **ce que `payload_capacity` promet, `seal_packet` le tient** |
+| `fuzz_ams_quic_receive` | `seeds/quic-receive` | l'ouverture d'un paquet — **ce qui ne s'authentifie pas se jette, et ne ferme rien** |
+| `fuzz_ams_quic_routing` | `seeds/quic-routing` | le tri des datagrammes (§5.2) — **un datagramme trop petit n'ouvre jamais de connexion**, et on ne lui répond pas |
+| `fuzz_ams_quic_handshake` | `seeds/quic-handshake` | les flux `CRYPTO` de §4 — **les trois flux sont étanches**, et rien ne recule |
+| `fuzz_ams_quic_stream` | `seeds/quic-stream` | un flux et son réassemblage — **ce qui est livré est ce qui a été envoyé, dans l'ordre** |
+| `fuzz_ams_quic_streams` | `seeds/quic-streams` | la collection de flux — **la table ne déborde jamais**, et un refus ne consomme rien |
+| `fuzz_ams_quic_connection` | `seeds/quic-connection` | la machine d'état d'une connexion — **le crédit ne dépasse jamais trois fois ce qu'on a reçu**, et un état ne remonte pas la pente |
+| `fuzz_ams_quic_sent` | `seeds/quic-sent` | le suivi des paquets émis (RFC 9002 §6) — **les octets en vol ne mentent pas**, et rien n'est perdu deux fois |
+
+**L'API REST** — ce qu'un jeton ouvre, et rien de plus.
+
+| Cible | Graines | Ce qu'elle éprouve |
+| --- | --- | --- |
+| `fuzz_ams_api_route` | `seeds/api-route` | ce qu'une requête désigne — **aucun segment n'est `.`, `..` ou vide**, et la lecture ne donne jamais l'écriture |
+| `fuzz_ams_api_token` | `seeds/api-token` | les jetons porteurs — **rien ne se vérifie sans avoir été scellé avec la bonne clé**, et un jeton n'ouvre jamais plus que sa portée |
+| `fuzz_ams_api_json` | `seeds/api-json` | les représentations JSON — **ce qu'on écrit se relit**, aucune clé répétée, et toute troncature se refuse |
+| `fuzz_ams_session_http` | `seeds/session-http` | la session HTTP — **le compte servi est celui du jeton**, jamais celui que le chemin nomme, et rien ne sort en clair |
+| `fuzz_ams_session_render` | `seeds/session-render` | ce que l'API rend — **rien n'échappe à l'échappement**, et l'`uidvalidity` est toujours là dès qu'un UID l'est |
+
+**Les briques communes** — ce que plusieurs protocoles partagent.
+
+| Cible | Graines | Ce qu'elle éprouve |
+| --- | --- | --- |
+| `fuzz_ams_guard` | `seeds/guard` | le garde — **une peine ne s'évince pas** |
+| `fuzz_ams_index_name` | `seeds/index` | les noms Maildir — **aller-retour de l'UID** |
+| `fuzz_ams_config` | `seeds/config` | les trois formats binaires : configuration, comptes, index |
+| `fuzz_ams_sasl` | `seeds/sasl` | la réponse SASL — **décodage canonique** |
+
+**Ce tableau est vérifié, et non tenu à la main** : `check-fuzz.sh` confronte ses
+lignes à la liste des cibles, et l'écart échoue. Une cible ajoutée sans y être
+décrite serait une cible que personne ne sait lire — et un tableau qui décrit la
+moitié des cibles laisse croire qu'il n'y en a que la moitié. C'est arrivé : il
+en nommait vingt-neuf sur soixante et une.
 
 Les variantes « bornes » existent parce que les bornes de C3 viennent de la
 configuration (C8), donc d'un administrateur : un zéro, un `usize::MAX`, ou toute

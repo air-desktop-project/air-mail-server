@@ -20,12 +20,14 @@
 #   1. La LISTE des cibles coïncide avec les `[[bin]]` de `fuzz/Cargo.toml`.
 #      Une cible ajoutée sans être inscrite ici ne serait jamais lancée, et le
 #      gate resterait vert en ne l'ayant pas examinée.
-#   2. Les GRAINES sont écrites à la main. Une trouvaille de libFuzzer qui s'y
+#   2. Le TABLEAU de `fuzz/README.md` décrit exactement ces cibles-là. Une
+#      cible qu'aucune ligne ne décrit est une cible que personne ne sait lire.
+#   3. Les GRAINES sont écrites à la main. Une trouvaille de libFuzzer qui s'y
 #      serait glissée — son nom est le SHA-1 de son contenu — fait échouer :
 #      sa place est `corpus/`, que git ignore.
-#   3. Elles sont FORMATÉES — `cargo fmt --all` à la racine ne les touche pas.
-#   4. TOUTES les cibles compilent.
-#   5. Avec `--smoke`, chacune tourne vingt secondes sur ses graines —
+#   4. Elles sont FORMATÉES — `cargo fmt --all` à la racine ne les touche pas.
+#   5. TOUTES les cibles compilent.
+#   6. Avec `--smoke`, chacune tourne vingt secondes sur ses graines —
 #      `AMS_FUZZ_SECONDES` en décide autrement, pour une campagne plus longue.
 #
 # La liste vit ICI et non dans le workflow : la CI appelle ce script, et l'on
@@ -125,7 +127,6 @@ TABLE
 
 listees=$(mktemp)
 declarees=$(mktemp)
-trap 'rm -f "$listees" "$declarees"' EXIT
 
 awk '{print $1}' <<< "$CIBLES" | sort > "$listees"
 grep -A1 '^\[\[bin\]\]' Cargo.toml | sed -n 's/^name = "\(.*\)"/\1/p' | sort > "$declarees"
@@ -138,7 +139,27 @@ if ! diff -u "$declarees" "$listees"; then
     exit 1
 fi
 
-echo "$(wc -l < "$listees") cible(s), et la liste coïncide avec \`Cargo.toml\`."
+# ── ET LE TABLEAU DU README LES DÉCRIT TOUTES ───────────────────────────────
+#
+# Une cible qu'aucune ligne ne décrit est une cible que personne ne sait lire :
+# ni ce qu'elle éprouve, ni pourquoi elle existe. Et un tableau qui n'en décrit
+# qu'une partie est pire qu'un tableau absent — il laisse croire qu'il n'y a que
+# ce qu'il montre. C'est arrivé : il en nommait vingt-neuf sur soixante et une,
+# et rien ne le disait.
+decrites=$(mktemp)
+trap 'rm -f "$listees" "$declarees" "$decrites"' EXIT
+grep -oE '^\| `fuzz_ams_[a-z0-9_]+`' README.md | tr -d '|` ' | sort > "$decrites"
+
+if ! diff -u "$decrites" "$listees"; then
+    echo >&2
+    echo "ÉCHEC : le tableau de \`fuzz/README.md\` et la liste des cibles diffèrent." >&2
+    echo "Une cible qu'aucune ligne ne décrit est une cible que personne ne sait" >&2
+    echo "lire ; une ligne sans cible décrit ce qui n'existe plus." >&2
+    exit 1
+fi
+
+echo "$(wc -l < "$listees") cible(s) : la liste coïncide avec \`Cargo.toml\`, et le"
+echo "tableau de \`README.md\` les décrit toutes."
 
 # ── LES GRAINES SONT ÉCRITES À LA MAIN, ET LEUR NOM DIT CE QU'ELLES VISENT ───
 #
