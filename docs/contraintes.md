@@ -3789,7 +3789,7 @@ il l'a commis sur lui-même : une section qui s'intitule « l'état réel » est
 qu'on relit le moins, parce qu'on croit la connaître.
 
 Sont outillées : C1 (les trois étages, et la couverture qui n'est exigible que
-parce qu'ils sont séparés), C2 (le gate mesure 53 515 régions sur 29 crates,
+parce qu'ils sont séparés), C2 (le gate mesure 53 711 régions sur 29 crates,
 toutes couvertes — et il compare des comptes, non un pourcentage arrondi), C3
 (les lints, l'absence d'allocation dans les décodeurs, et 64 cibles de fuzz dont
 la CI vérifie qu'elle les lance toutes), C4 (`ams-tls` n'offre que
@@ -3839,6 +3839,56 @@ la seule vérification qui vaille est la confrontation à l'ABNF de §9, mot par
 mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
+
+## Les paramètres ESMTP : ce qu'on annonce, on le tient
+
+### `SIZE` ÉTAIT ANNONCÉ, ET JAMAIS LU
+
+La session écartait les paramètres d'un `MAIL FROM:` — le motif disait
+littéralement `{ reverse_path, .. }`. Trois conséquences, dont deux comptent.
+
+**`SIZE` (RFC 1870) était annoncé à chaque `EHLO` et ignoré.** §6.2 veut qu'un
+serveur qui l'offre refuse par `552` une taille au-delà de sa borne. Ce serveur
+lisait donc le message jusqu'à ce que SA PROPRE borne se déclenche — de la bande
+passante, du disque et du temps dépensés pour un courrier déjà condamné, que le
+pair avait eu l'honnêteté d'annoncer.
+
+C'est la règle que ce dépôt s'applique partout ailleurs, prise en défaut : on
+n'annonce que ce qu'on tient.
+
+### UN PARAMÈTRE ACCEPTÉ EN SILENCE EST UNE PROMESSE QU'ON N'A PAS FAITE
+
+§4.1.1.11 de RFC 5321 veut qu'un paramètre inconnu soit refusé. Le laisser passer
+n'est pas de la tolérance : c'est laisser le pair croire qu'on a compris.
+
+`NOTIFY=NEVER` (RFC 3461) en est l'exemple qui coûte. Un expéditeur qui le pose
+demande qu'aucun rapport de non-remise ne lui revienne — pour une liste de
+diffusion, pour un envoi en masse. Accepté en silence, il croit avoir obtenu ce
+silence ; il recevra les rapports quand même, et n'aura aucun moyen de
+comprendre pourquoi. Un `504` franc lui dit la vérité tout de suite.
+
+Ce serveur ne sert donc AUCUN paramètre de `RCPT`, et le dit.
+
+### CE QU'ON COMPREND, ET POURQUOI
+
+- **`SIZE=n`** : vérifié contre la borne du message, avant d'avoir lu un octet.
+  Une taille illisible n'est pas une petite taille, et un débordement de `u64`
+  est un refus et non une troncature — une taille tronquée passerait la
+  vérification.
+- **`BODY=8BITMIME` et `BODY=7BIT`** (RFC 6152), et **`8BITMIME` est désormais
+  annoncé**. Il ne coûte rien : la phase de données ne touche à aucun octet, elle
+  refuse un `CR` ou un `LF` isolé et laisse passer le reste tel quel. Ce serveur
+  était DÉJÀ propre sur huit bits et ne le disait pas — les pairs recodaient en
+  quoted-printable ce qu'on aurait pris tel quel.
+- **`AUTH=`** (RFC 4954 §5) : accepté **sans qu'on s'y fie**. C'est l'identité que
+  le pair prétend avoir authentifiée en amont, et rien ne l'atteste ; §5 veut
+  qu'un serveur qui annonce `AUTH` l'accepte, et lui laisse le droit de ne pas la
+  croire. Ce serveur ne la croit pas.
+
+### LE TRI A LIEU AVANT D'OUVRIR LA TRANSACTION
+
+Refuser après l'avoir ouverte laisserait une transaction entamée que le pair
+croirait close — et le `RCPT` suivant s'y rattacherait.
 
 ## `ENHANCEDSTATUSCODES` : un état que la machine sait trier
 

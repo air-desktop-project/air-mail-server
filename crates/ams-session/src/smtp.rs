@@ -2,7 +2,7 @@
 
 use ams_proto_smtp::{
     ChunkEvent, ChunkReceiver, Class, ClientId, Code, Command, DataEvent, DataFault, DataReceiver,
-    Error as SmtpError, Path, Status, encode,
+    Error as SmtpError, Parameter, Parameters, Path, Status, encode,
 };
 use ams_sasl::{decode_base64, parse_plain};
 use core::net::IpAddr;
@@ -41,9 +41,9 @@ const LIGNE_MAX: usize = 256;
 /// s'arrêter ailleurs que dans un disque plein.
 pub const HOPS_MAX: u32 = 30;
 
-/// Le nombre maximal de lignes d'un `EHLO` : domaine, `SIZE`,
+/// Le nombre maximal de lignes d'un `EHLO` : domaine, `SIZE`, `8BITMIME`,
 /// `ENHANCEDSTATUSCODES`, `PIPELINING`, `CHUNKING`, `STARTTLS`, `AUTH`.
-const EHLO_LINES_MAX: usize = 7;
+const EHLO_LINES_MAX: usize = 8;
 
 /// Ce qu'un nom de domaine peut faire (RFC 1035 §2.3.4).
 const DOMAIN_MAX: usize = 255;
@@ -164,6 +164,86 @@ pub enum Action {
     Close,
 }
 
+/// Ce qu'un paramètre ESMTP vaut pour nous.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict7 {
+    /// Compris, et rien de plus à faire.
+    Compris,
+    /// Compris, et le message annoncé dépasse ce qu'on accepte (RFC 1870 §6.2).
+    TropGros,
+    /// **On ne le connaît pas.** RFC 5321 §4.1.1.11 veut un `555`.
+    Inconnu,
+}
+
+/// Ce que ce serveur fait des paramètres d'un `MAIL FROM:` (§4.1.1.11).
+///
+/// # ON N'ACCEPTE QUE CE QU'ON TIENT
+///
+/// Un paramètre accepté en silence est une promesse qu'on n'a pas faite et que
+/// le pair croit avoir reçue. `NOTIFY=NEVER` en est l'exemple qui coûte : un
+/// expéditeur qui le pose croit avoir supprimé ses rapports de non-remise, et
+/// les recevra quand même. Mieux vaut un refus franc.
+///
+/// `SIZE` est vérifié parce qu'il est ANNONCÉ. Un serveur qui offre `SIZE` et ne
+/// s'en sert pas fait lire au pair un mébioctet qu'il a déjà décidé de refuser.
+fn verdict_du_parametre_mail(parametre: &Parameter<'_>, max_message: u64) -> Verdict7 {
+    let mot = parametre.keyword();
+    if mot.eq_ignore_ascii_case(b"SIZE") {
+        // **UNE TAILLE ILLISIBLE N'EST PAS UNE TAILLE DE ZÉRO.** Un pair qui
+        // écrit `SIZE=abc` n'a pas annoncé une petite taille : il a écrit
+        // n'importe quoi, et §6.2 de RFC 1870 veut des chiffres.
+        let Some(valeur) = parametre.value() else {
+            return Verdict7::Inconnu;
+        };
+        let Some(taille) = decimal_u64(valeur) else {
+            return Verdict7::Inconnu;
+        };
+        if taille > max_message {
+            return Verdict7::TropGros;
+        }
+        return Verdict7::Compris;
+    }
+    if mot.eq_ignore_ascii_case(b"BODY") {
+        // RFC 6152 : `8BITMIME` ou `7BIT`, et rien d'autre. La phase de données
+        // est propre sur huit bits — elle n'y touche pas — donc les deux
+        // conviennent.
+        return match parametre.value() {
+            Some(valeur)
+                if valeur.eq_ignore_ascii_case(b"8BITMIME")
+                    || valeur.eq_ignore_ascii_case(b"7BIT") =>
+            {
+                Verdict7::Compris
+            }
+            _ => Verdict7::Inconnu,
+        };
+    }
+    if mot.eq_ignore_ascii_case(b"AUTH") {
+        // **ON L'ACCEPTE SANS S'Y FIER** (RFC 4954 §5). C'est l'identité que le
+        // pair PRÉTEND avoir authentifiée en amont, et rien ne l'atteste ; §5
+        // veut qu'un serveur qui annonce `AUTH` l'accepte, et lui laisse le
+        // droit de ne pas la croire. Ce serveur ne la croit pas.
+        return Verdict7::Compris;
+    }
+    Verdict7::Inconnu
+}
+
+/// Un entier décimal, ou `None` si ce n'en est pas un.
+///
+/// Un débordement est un refus, et non une troncature : une taille annoncée plus
+/// petite qu'elle ne l'est ferait passer la vérification de §6.2.
+fn decimal_u64(octets: &[u8]) -> Option<u64> {
+    if octets.is_empty() || !octets.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let mut valeur = 0_u64;
+    for chiffre in octets {
+        valeur = valeur
+            .checked_mul(10)?
+            .checked_add(u64::from(chiffre.wrapping_sub(b'0')))?;
+    }
+    Some(valeur)
+}
+
 /// L'état étendu d'une réponse (RFC 3463), ou `None` pour une `3xx`.
 ///
 /// # POURQUOI UNE TABLE, ET UNE SEULE
@@ -199,7 +279,9 @@ fn statut_de(code: Code, texte: &[u8]) -> Option<Status> {
         b"Line too long"
         | b"Line must end with CRLF"
         | b"Syntax error in parameters or arguments" => Some(Status::SYNTAX_ERROR),
-        b"Command not implemented" | b"EXPN not available" => Some(Status::BAD_PARAMETER),
+        b"Command not implemented" | b"EXPN not available" | b"Parameter not recognised" => {
+            Some(Status::BAD_PARAMETER)
+        }
         b"Already authenticated"
         | b"Nested MAIL command"
         | b"Need MAIL before RCPT"
@@ -809,8 +891,14 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         match commande {
             Command::Ehlo(client_id) => self.on_ehlo(&client_id, out),
             Command::Helo(nom) => self.on_helo(nom, out),
-            Command::Mail { reverse_path, .. } => self.on_mail(&reverse_path, out),
-            Command::Rcpt { forward_path, .. } => self.on_rcpt(&forward_path, out),
+            Command::Mail {
+                reverse_path,
+                parameters,
+            } => self.on_mail(&reverse_path, &parameters, out),
+            Command::Rcpt {
+                forward_path,
+                parameters,
+            } => self.on_rcpt(&forward_path, &parameters, out),
             Command::Data => self.on_data(out),
             Command::Bdat { size, last } => self.on_bdat(size, last, out),
             Command::Rset => {
@@ -887,6 +975,13 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         lignes[posees] = self.config.domain();
         posees = posees.saturating_add(1);
         lignes[posees] = self.size_line.get(..self.size_len).unwrap_or_default();
+        posees = posees.saturating_add(1);
+        // **`8BITMIME` (RFC 6152) EST ANNONCÉ TOUJOURS**, et il ne coûte rien :
+        // la phase de données ne touche à aucun octet — elle refuse un `CR` ou
+        // un `LF` isolé, et laisse passer le reste tel quel. Ce serveur était
+        // donc DÉJÀ propre sur huit bits, et ne le disait pas : les pairs
+        // recodaient en quoted-printable ce qu'on aurait pris tel quel.
+        lignes[posees] = b"8BITMIME";
         posees = posees.saturating_add(1);
         // **`ENHANCEDSTATUSCODES` (RFC 2034) EST ANNONCÉ TOUJOURS**, et les
         // codes partent de même — y compris vers un client qui n'a dit que
@@ -968,6 +1063,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     fn on_mail<'b>(
         &mut self,
         reverse_path: &Path<'_>,
+        parameters: &Parameters<'_>,
         out: &'b mut [u8],
     ) -> Result<Turn<'b>, Error> {
         match self.phase {
@@ -976,6 +1072,28 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
                 self.refus(Code::BAD_SEQUENCE, b"Nested MAIL command", out)
             }
             _ => {
+                // **LES PARAMÈTRES SE TRIENT AVANT D'OUVRIR LA TRANSACTION** :
+                // refuser après l'avoir ouverte laisserait une transaction
+                // entamée que le pair croirait close.
+                for parametre in *parameters {
+                    match verdict_du_parametre_mail(&parametre, self.config.max_message_octets()) {
+                        Verdict7::Compris => {}
+                        Verdict7::TropGros => {
+                            return self.refus(
+                                Code::MESSAGE_TOO_LARGE,
+                                b"Message exceeds maximum size",
+                                out,
+                            );
+                        }
+                        Verdict7::Inconnu => {
+                            return self.refus(
+                                Code::PARAMETER_NOT_IMPLEMENTED,
+                                b"Parameter not recognised",
+                                out,
+                            );
+                        }
+                    }
+                }
                 self.phase = Phase::Transaction {
                     recipients: 0,
                     chunked: false,
@@ -1262,8 +1380,21 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     fn on_rcpt<'b>(
         &mut self,
         forward_path: &Path<'_>,
+        parameters: &Parameters<'_>,
         out: &'b mut [u8],
     ) -> Result<Turn<'b>, Error> {
+        // **AUCUN PARAMÈTRE DE `RCPT` N'EST SERVI ICI.** Les seuls que RFC 5321
+        // prévoit viennent de DSN (RFC 3461) — `NOTIFY=` et `ORCPT=` —, et ce
+        // serveur ne les honore pas. Les accepter en silence ferait croire à un
+        // expéditeur qu'il a supprimé ses rapports de non-remise ; il les
+        // recevrait quand même, et n'aurait aucun moyen de le savoir.
+        if parameters.into_iter().next().is_some() {
+            return self.refus(
+                Code::PARAMETER_NOT_IMPLEMENTED,
+                b"Parameter not recognised",
+                out,
+            );
+        }
         let Phase::Transaction {
             recipients,
             chunked,
@@ -1787,6 +1918,118 @@ mod tests {
         }
     }
 
+    // ── LES PARAMÈTRES ESMTP (§4.1.1.11) ────────────────────────────────────
+
+    /// **`SIZE` EST ANNONCÉ, DONC IL EST TENU** (RFC 1870 §6.2).
+    ///
+    /// Un serveur qui l'offre et ne s'en sert pas fait lire au pair un
+    /// mébioctet qu'il a déjà décidé de refuser.
+    #[test]
+    fn une_taille_annoncee_au_dela_de_la_borne_est_refusee_tout_de_suite() {
+        let mut session = session_bornee(1024);
+        identifier(&mut session);
+        let dit = jouer(&mut session, b"MAIL FROM:<joe@example.net> SIZE=1025\r\n");
+        assert!(dit.starts_with("552 5.3.4"), "{dit}");
+        // Et la transaction n'est PAS ouverte : le `RCPT` qui suivrait n'aurait
+        // pas d'expéditeur.
+        assert!(jouer(&mut session, b"RCPT TO:<marie@example.com>\r\n").starts_with("503"));
+
+        // Ce qui tient passe, y compris la borne exacte.
+        assert!(
+            jouer(&mut session, b"MAIL FROM:<joe@example.net> SIZE=1024\r\n").starts_with("250")
+        );
+    }
+
+    /// **UNE TAILLE ILLISIBLE N'EST PAS UNE PETITE TAILLE.**
+    #[test]
+    fn une_taille_mal_ecrite_est_refusee() {
+        for mauvais in [
+            &b"MAIL FROM:<joe@example.net> SIZE=abc\r\n"[..],
+            b"MAIL FROM:<joe@example.net> SIZE\r\n",
+            b"MAIL FROM:<joe@example.net> SIZE=-1\r\n",
+            // Déborde `u64` : une taille tronquée passerait la vérification.
+            b"MAIL FROM:<joe@example.net> SIZE=18446744073709551616\r\n",
+        ] {
+            let mut session = acceptante();
+            identifier(&mut session);
+            let dit = jouer(&mut session, mauvais);
+            assert!(dit.starts_with("504 5.5.4"), "{mauvais:?} : {dit}");
+        }
+        // `SIZE=` sans valeur ne nous parvient même pas : la GRAMMAIRE l'a
+        // refusé, et c'est une erreur de syntaxe, pas de paramètre.
+        let mut session = acceptante();
+        identifier(&mut session);
+        let dit = jouer(&mut session, b"MAIL FROM:<joe@example.net> SIZE=\r\n");
+        assert!(dit.starts_with("501 5.5.2"), "{dit}");
+    }
+
+    /// **UN DÉBORDEMENT EST UN REFUS, ET NON UNE TRONCATURE.**
+    ///
+    /// Une taille annoncée plus petite qu'elle ne l'est passerait la
+    /// vérification de §6.2, et le message serait lu tout entier.
+    #[test]
+    fn une_taille_qui_deborde_n_est_pas_tronquee() {
+        assert_eq!(super::decimal_u64(b"0"), Some(0));
+        assert_eq!(
+            super::decimal_u64(b"18446744073709551615"),
+            Some(u64::MAX),
+            "la plus grande qui tienne"
+        );
+        // Celle d'après déborde à l'ADDITION du dernier chiffre…
+        assert_eq!(super::decimal_u64(b"18446744073709551616"), None);
+        // …et celle-là à la MULTIPLICATION, un chiffre plus tôt.
+        assert_eq!(super::decimal_u64(b"99999999999999999999999"), None);
+        assert_eq!(super::decimal_u64(b""), None);
+        assert_eq!(super::decimal_u64(b"12x"), None);
+    }
+
+    /// **`BODY=8BITMIME` ET `BODY=7BIT` SONT COMPRIS** (RFC 6152), et le reste
+    /// non.
+    #[test]
+    fn le_corps_sur_huit_bits_est_compris() {
+        for bon in [
+            &b"MAIL FROM:<joe@example.net> BODY=8BITMIME\r\n"[..],
+            b"MAIL FROM:<joe@example.net> BODY=7bit\r\n",
+            // `AUTH=` s'accepte sans qu'on s'y fie (RFC 4954 §5).
+            b"MAIL FROM:<joe@example.net> AUTH=<>\r\n",
+            b"MAIL FROM:<joe@example.net> SIZE=10 BODY=8BITMIME AUTH=<>\r\n",
+        ] {
+            let mut session = acceptante();
+            identifier(&mut session);
+            assert!(jouer(&mut session, bon).starts_with("250"), "{bon:?}");
+        }
+        for mauvais in [
+            &b"MAIL FROM:<joe@example.net> BODY=BINARYMIME\r\n"[..],
+            b"MAIL FROM:<joe@example.net> BODY\r\n",
+            b"MAIL FROM:<joe@example.net> SMTPUTF8\r\n",
+        ] {
+            let mut session = acceptante();
+            identifier(&mut session);
+            let dit = jouer(&mut session, mauvais);
+            assert!(dit.starts_with("504 5.5.4"), "{mauvais:?} : {dit}");
+        }
+    }
+
+    /// **UN PARAMÈTRE ACCEPTÉ EN SILENCE EST UNE PROMESSE QU'ON N'A PAS FAITE.**
+    ///
+    /// `NOTIFY=NEVER` en est l'exemple qui coûte : l'expéditeur croit avoir
+    /// supprimé ses rapports de non-remise, et les recevra quand même.
+    #[test]
+    fn un_parametre_de_rcpt_est_refuse() {
+        let mut session = acceptante();
+        transaction(&mut session);
+        // La transaction est ouverte ; un second `RCPT` avec paramètre échoue.
+        for mauvais in [
+            &b"RCPT TO:<marie@example.com> NOTIFY=NEVER\r\n"[..],
+            b"RCPT TO:<marie@example.com> ORCPT=rfc822;marie@example.com\r\n",
+        ] {
+            let dit = jouer(&mut session, mauvais);
+            assert!(dit.starts_with("504 5.5.4"), "{mauvais:?} : {dit}");
+        }
+        // Sans paramètre, il passe.
+        assert!(jouer(&mut session, b"RCPT TO:<marie@example.com>\r\n").starts_with("250"));
+    }
+
     // ── LES CODES D'ÉTAT ÉTENDUS (RFC 2034, RFC 3463) ───────────────────────
 
     /// **LA CLASSE VIENT DU CODE, JAMAIS DU TEXTE**, et ce qui n'est pas nommé
@@ -2203,7 +2446,7 @@ mod tests {
         let reponse = jouer(&mut session, b"EHLO client.example\r\n");
         assert_eq!(
             reponse,
-            "250-mail.example.com\r\n250-SIZE 10485760\r\n250-ENHANCEDSTATUSCODES\r\n250-PIPELINING\r\n250-CHUNKING\r\n250 STARTTLS\r\n"
+            "250-mail.example.com\r\n250-SIZE 10485760\r\n250-8BITMIME\r\n250-ENHANCEDSTATUSCODES\r\n250-PIPELINING\r\n250-CHUNKING\r\n250 STARTTLS\r\n"
         );
         assert!(!reponse.contains("AUTH"));
     }
@@ -2215,7 +2458,7 @@ mod tests {
         let reponse = jouer(&mut session, b"EHLO client.example\r\n");
         assert_eq!(
             reponse,
-            "250-mail.example.com\r\n250-SIZE 10485760\r\n250-ENHANCEDSTATUSCODES\r\n250-PIPELINING\r\n250-CHUNKING\r\n250 AUTH PLAIN\r\n"
+            "250-mail.example.com\r\n250-SIZE 10485760\r\n250-8BITMIME\r\n250-ENHANCEDSTATUSCODES\r\n250-PIPELINING\r\n250-CHUNKING\r\n250 AUTH PLAIN\r\n"
         );
         assert!(!reponse.contains("STARTTLS"));
     }
@@ -3226,7 +3469,7 @@ mod tests {
         let annonce = jouer(&mut session, b"EHLO client.example\r\n");
         assert_eq!(
             annonce,
-            "250-mail.example.com\r\n250-SIZE 1024\r\n250-ENHANCEDSTATUSCODES\r\n250-PIPELINING\r\n250 CHUNKING\r\n"
+            "250-mail.example.com\r\n250-SIZE 1024\r\n250-8BITMIME\r\n250-ENHANCEDSTATUSCODES\r\n250-PIPELINING\r\n250 CHUNKING\r\n"
         );
         assert!(!annonce.contains("STARTTLS"));
         assert!(!annonce.contains("AUTH"));
@@ -3326,11 +3569,11 @@ mod tests {
             session.handle(b"NOOP\r\n", &mut minuscule),
             Err(tampon_trop_petit(14))
         );
-        // Y compris pour l'`EHLO`, qui est multiligne : 22 + 19 + 25 + 16 + 14
-        // + 14. Il ne porte AUCUN code étendu — c'est lui qui les négocie.
+        // Y compris pour l'`EHLO`, qui est multiligne : 22 + 19 + 14 + 25 + 16
+        // + 14 + 14. Il ne porte AUCUN code étendu — c'est lui qui les négocie.
         assert_eq!(
             session.handle(b"EHLO client.example\r\n", &mut minuscule),
-            Err(tampon_trop_petit(110))
+            Err(tampon_trop_petit(124))
         );
         // Et pour `HELO`, qui ne l'est pas.
         assert_eq!(

@@ -95,7 +95,7 @@ fn vocabulaire() -> Vec<Vec<u8>> {
     // souvent pour tomber dessus. Les graines écrites depuis en portent un, et
     // la faute est sortie au premier tour.
     let annonce = format!(
-        "250-{domaine}\r\n250-SIZE 10485760\r\n250-ENHANCEDSTATUSCODES\r\n250-PIPELINING\r\n"
+        "250-{domaine}\r\n250-SIZE 10485760\r\n250-8BITMIME\r\n250-ENHANCEDSTATUSCODES\r\n250-PIPELINING\r\n"
     );
     liste.push(format!("{annonce}250-CHUNKING\r\n250 STARTTLS\r\n").into_bytes());
     liste.push(format!("{annonce}250-CHUNKING\r\n250 AUTH PLAIN\r\n").into_bytes());
@@ -151,6 +151,8 @@ fn vocabulaire() -> Vec<Vec<u8>> {
         "550 5.7.1 Message rejected: sender domain policy (DMARC)",
         "550 5.7.23 Sender address rejected: not authorized by SPF",
         "451 4.4.3 Temporary error while checking SPF, try again later",
+        // Les paramètres ESMTP qu'on ne sert pas (§4.1.1.11).
+        "504 5.5.4 Parameter not recognised",
     ] {
         liste.push(format!("{texte}\r\n").into_bytes());
     }
