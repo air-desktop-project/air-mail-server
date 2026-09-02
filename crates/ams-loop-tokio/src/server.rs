@@ -110,6 +110,21 @@ pub struct Stats {
     pub reports: SpoolTally,
     /// Ce que les tournées de remise ont produit.
     pub sends: SendTally,
+    /// Combien de pairs ont glissé une commande derrière leur `STARTTLS`.
+    ///
+    /// # UN COMPTE QUE PERSONNE NE LIT EST UN COMPTE QUI N'EXISTE PAS
+    ///
+    /// La boucle refuse ces connexions et compte une trame invalide au garde
+    /// (voir `connection::conduire`) — mais le garde ne distingue pas une
+    /// injection d'une ligne mal formée, et l'issue de la connexion s'en allait
+    /// avec la tâche qui la portait. Un exploitant ne pouvait donc pas savoir
+    /// qu'on essayait cela chez lui.
+    ///
+    /// C'est la règle qu'on s'est déjà donnée pour DKIM et DMARC : en attendant
+    /// `air-log`, ce compte-là est ce que le serveur peut dire, et il le dit à
+    /// l'arrêt. Une tentative d'injection le mérite plus qu'un verdict de
+    /// signature.
+    pub injections: u64,
 }
 
 /// Le compte des verdicts DMARC, sur toute la durée du service.
@@ -159,6 +174,7 @@ struct CompteurDkim {
     dmarc_panne: AtomicU64,
     dmarc_illisible: AtomicU64,
     dmarc_applique: AtomicU64,
+    injections: AtomicU64,
 }
 
 impl CompteurDkim {
@@ -353,6 +369,12 @@ where
             {
                 comptes.ajouter(resume.dkim);
                 comptes.ajouter_dmarc(resume.dmarc);
+                // **UNE TENTATIVE D'INJECTION SE DIT.** Le garde l'a comptée
+                // comme une trame invalide, ce qui la noie parmi les lignes mal
+                // formées ; ici elle est nommée.
+                if resume.outcome == crate::Outcome::Injected {
+                    comptes.injections.fetch_add(1, Ordering::Relaxed);
+                }
             }
             drop(place);
         });
@@ -421,6 +443,7 @@ fn avec_dkim(stats: Stats, comptes: &CompteurDkim, rapports: &CompteurRapports) 
         dmarc: comptes.sommes_dmarc(),
         reports: rapports.sommes(),
         sends: rapports.sommes_remises(),
+        injections: comptes.injections.load(Ordering::Relaxed),
         ..stats
     }
 }
@@ -437,7 +460,8 @@ pub fn source_de(adresse: SocketAddr) -> Source {
 #[cfg(test)]
 mod tests {
     use super::{
-        DkimSums, DmarcSums, SendTally, ServeOptions, SpoolTally, Stats, serve, source_de,
+        CompteurDkim, CompteurRapports, DkimSums, DmarcSums, SendTally, ServeOptions, SpoolTally,
+        Stats, avec_dkim, serve, source_de,
     };
     use crate::{Delivery, DeliveryFailure, Error, SharedGuard, Timeouts};
     use ams_guard::{Source, Thresholds};
@@ -634,9 +658,33 @@ mod tests {
                 dmarc: DmarcSums::default(),
                 reports: SpoolTally::default(),
                 sends: SendTally::default(),
+                injections: 0,
             }
         );
         assert!(!format!("{:?}", Stats::default()).is_empty());
+    }
+
+    /// **UNE TENTATIVE D'INJECTION REMONTE JUSQU'AUX STATISTIQUES.**
+    ///
+    /// Elle est comptée par connexion, dans une tâche qui ne rend son résumé à
+    /// personne : sans ce rassemblement, l'exploitant ne saurait jamais qu'on
+    /// essaie cela chez lui.
+    #[test]
+    fn les_injections_se_rassemblent_et_ressortent() {
+        let comptes = CompteurDkim::default();
+        let rapports = CompteurRapports::default();
+        assert_eq!(
+            avec_dkim(Stats::default(), &comptes, &rapports).injections,
+            0,
+            "rien ne s'est passé, et rien n'est compté"
+        );
+        comptes
+            .injections
+            .fetch_add(2, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            avec_dkim(Stats::default(), &comptes, &rapports).injections,
+            2
+        );
     }
 
     #[tokio::test]

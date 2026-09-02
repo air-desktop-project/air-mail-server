@@ -465,6 +465,10 @@ where
 {
     let places = std::sync::Arc::new(tokio::sync::Semaphore::new(options.max_connections));
     let mut stats = crate::Stats::default();
+    // **UN COMPTEUR PARTAGÉ**, comme celui des verdicts DKIM : chaque connexion
+    // vit dans sa tâche, et son résumé ne remonte à personne. Un entier atomique
+    // suffit — il n'y a rien à lire en cours de route, seulement à ajouter.
+    let injections = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let mut arret = core::pin::pin!(shutdown);
 
     loop {
@@ -486,6 +490,7 @@ where
             }
         };
         stats.accepted = stats.accepted.saturating_add(1);
+        stats.injections = injections.load(std::sync::atomic::Ordering::Relaxed);
 
         let Ok(place) = std::sync::Arc::clone(&places).acquire_owned().await else {
             return Ok(stats);
@@ -495,6 +500,7 @@ where
         let guard = std::sync::Arc::clone(&guard);
         let timeouts = options.timeouts;
         let tls = options.tls.clone();
+        let injections = std::sync::Arc::clone(&injections);
 
         tokio::spawn(async move {
             let mut flux = flux;
@@ -504,9 +510,11 @@ where
                 timeouts,
                 tls,
             };
-            // Le résultat n'est pas remonté : une connexion qui échoue ne regarde
-            // qu'elle. Le journal viendra avec `air-log`.
-            let _ = serve_pop3_connection(
+            // L'ÉCHEC d'une connexion ne regarde qu'elle — le journal viendra
+            // avec `air-log`. Une TENTATIVE D'INJECTION, en revanche, se
+            // rassemble : un compte que personne ne lit est un compte qui
+            // n'existe pas, et celle-là mérite d'être vue.
+            let issue = serve_pop3_connection(
                 &mut flux,
                 &service,
                 &*auth,
@@ -514,6 +522,9 @@ where
                 crate::source_de(pair),
             )
             .await;
+            if issue.is_ok_and(|resume| resume.injected) {
+                injections.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             drop(place);
         });
     }

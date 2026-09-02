@@ -149,8 +149,10 @@ vingt-quatre sur trente-quatre, et rien ne le disait ; toute la pile QUIC,
 HTTP/2 et HTTP/3 y manquait, ainsi que l'API REST.
 
 `ams-mime` : le squelette d'un message — la
-ligne, le pliage, la séparation en-tête/corps, le découpage en champs. Les champs
-structurés, les adresses, les dates et MIME restent à écrire.
+ligne, le pliage, la séparation en-tête/corps, le découpage en champs — **et ce
+qui s'appuie dessus** : les adresses, les dates, les mots encodés de RFC 2047, la
+structure MIME d'un message, son enveloppe et son résumé, la composition d'un
+rapport de non-remise, et l'en-tête `Authentication-Results`.
 `ams-proto-smtp` : les commandes, l'encodage des réponses multilignes, et **la
 phase de données** — `<CRLF>.<CRLF>`, le point échappé, et le refus de tout `CR`
 ou `LF` isolé — **et `BDAT`**, la phase de données COMPTÉE de RFC 3030, où il n'y

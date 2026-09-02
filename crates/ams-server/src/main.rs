@@ -1504,20 +1504,28 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         // fini d'accepter avant de rendre la main, sans quoi le message d'arrêt
         // partirait pendant qu'elle sert encore.
         match tache.await {
-            Ok(Ok(stats_pop3)) => eprintln!(
-                "air-mail-server : POP3 ; {} connexion(s) acceptée(s), {} refusée(s) par le noyau",
-                stats_pop3.accepted, stats_pop3.failed
-            ),
+            Ok(Ok(stats_pop3)) => {
+                eprintln!(
+                    "air-mail-server : POP3 ; {} connexion(s) acceptée(s), {} refusée(s) par le \
+                     noyau",
+                    stats_pop3.accepted, stats_pop3.failed
+                );
+                dire_les_injections("POP3", "STLS", stats_pop3.injections);
+            }
             Ok(Err(erreur)) => eprintln!("air-mail-server : POP3 : {erreur}"),
             Err(erreur) => eprintln!("air-mail-server : POP3 : {erreur}"),
         }
     }
     if let Some(tache) = imap {
         match tache.await {
-            Ok(Ok(stats_imap)) => eprintln!(
-                "air-mail-server : IMAP ; {} connexion(s) acceptée(s), {} refusée(s) par le noyau",
-                stats_imap.accepted, stats_imap.failed
-            ),
+            Ok(Ok(stats_imap)) => {
+                eprintln!(
+                    "air-mail-server : IMAP ; {} connexion(s) acceptée(s), {} refusée(s) par le \
+                     noyau",
+                    stats_imap.accepted, stats_imap.failed
+                );
+                dire_les_injections("IMAP", "STARTTLS", stats_imap.injections);
+            }
             Ok(Err(erreur)) => eprintln!("air-mail-server : IMAP : {erreur}"),
             Err(erreur) => eprintln!("air-mail-server : IMAP : {erreur}"),
         }
@@ -1545,6 +1553,19 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         "air-mail-server : arrêt ; {} connexion(s) acceptée(s), {} refusée(s) par le noyau",
         stats.accepted, stats.failed
     );
+    // **LES TENTATIVES D'INJECTION SE DISENT TOUJOURS**, et non seulement quand
+    // SPF ou DKIM sont réglés : elles ne dépendent d'aucune option, et un
+    // exploitant qui en voit passer veut le savoir. Zéro ne s'écrit pas — un
+    // journal qui répète « rien » chaque jour est un journal qu'on cesse de
+    // lire.
+    if stats.injections > 0 {
+        eprintln!(
+            "air-mail-server : SMTP ; {} pair(s) ont glissé une commande derrière leur \
+             `STARTTLS` — connexion REFUSÉE (RFC 3207 §4.2)",
+            stats.injections
+        );
+    }
+
     // ON DIT CE QU'ON A CONCLU. Un verdict qu'on ne rend nulle part ne sert à
     // rien : en attendant `air-log`, ce compte-là est ce que le serveur peut
     // dire des signatures qu'il a vérifiées.
@@ -1638,6 +1659,20 @@ impl ams_loop_tokio::Bounced for RapportsLocaux {
         }
         true
     }
+}
+
+/// Dit combien de pairs ont tenté d'injecter derrière la montée en chiffrement.
+///
+/// **ZÉRO NE S'ÉCRIT PAS.** Un journal qui répète « rien » à chaque arrêt est un
+/// journal qu'on cesse de lire, et c'est alors la ligne qui compte qu'on manque.
+fn dire_les_injections(protocole: &str, commande: &str, combien: u64) {
+    if combien == 0 {
+        return;
+    }
+    eprintln!(
+        "air-mail-server : {protocole} ; {combien} pair(s) ont glissé une commande derrière leur \
+         `{commande}` — connexion REFUSÉE"
+    );
 }
 
 /// L'heure, en secondes depuis l'époque.

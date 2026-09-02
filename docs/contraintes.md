@@ -3875,6 +3875,23 @@ Le garde compte donc une trame invalide, et le résumé de la connexion le dit
 lit ses compteurs voit la tentative ; avec un rejet silencieux, il n'aurait rien
 vu.
 
+### ET LA TENTATIVE SE COMPTE, PARCE QU'UN COMPTE QUE PERSONNE NE LIT N'EXISTE PAS
+
+Refuser ne suffisait pas encore. Le garde comptait une trame invalide — ce qui
+noie l'injection parmi les lignes mal formées —, et l'issue de la connexion
+s'en allait avec la tâche qui la portait : `server.rs` n'agrégeait que les
+verdicts DKIM et DMARC. Un exploitant ne pouvait donc pas savoir qu'on essayait
+cela chez lui.
+
+Les trois boucles rassemblent maintenant leurs tentatives dans un compteur
+partagé, comme les verdicts de signature, et le binaire les dit à l'arrêt. **Zéro
+ne s'écrit pas** : un journal qui répète « rien » à chaque arrêt est un journal
+qu'on cesse de lire, et c'est alors la ligne qui compte qu'on manque.
+
+C'est la règle que ce dépôt s'était déjà donnée pour SPF et pour DKIM, appliquée
+là où elle vaut le plus : une tentative d'injection le mérite plus qu'un verdict
+de signature.
+
 ### `PIPELINING` PEUT ALORS S'ANNONCER
 
 La boucle prend UNE LIGNE À LA FOIS dans son tampon : un lot arrivé en un seul
