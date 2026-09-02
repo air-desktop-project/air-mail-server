@@ -75,6 +75,11 @@ pub struct ImapSummary {
     pub authenticated: bool,
     /// Le pair était-il banni ? **Rien ne lui a alors été dit.**
     pub banned: bool,
+    /// Le pair a-t-il tenté de glisser une commande derrière son `STARTTLS` ?
+    ///
+    /// C'est une injection (§6.2.1), et la connexion est refusée sans que la
+    /// commande soit servie.
+    pub injected: bool,
 }
 
 /// Sert une connexion IMAP jusqu'à sa fin.
@@ -186,6 +191,7 @@ struct Etat {
     lecteur: CommandReader,
     commands: u64,
     tls: bool,
+    injected: bool,
 }
 
 impl Etat {
@@ -209,6 +215,7 @@ impl Etat {
             lecteur: CommandReader::new(),
             commands: 0,
             tls: false,
+            injected: false,
         }
     }
 }
@@ -217,6 +224,7 @@ impl ImapSummary {
     fn merge<A: Authenticator, M: Mailboxes>(&mut self, etat: &Etat, session: &Session<A, M>) {
         self.commands = etat.commands;
         self.tls = etat.tls;
+        self.injected = etat.injected;
         self.authenticated = session.state() != ams_session::imap::State::NotAuthenticated;
     }
 }
@@ -322,6 +330,27 @@ where
         let tour = session.handle(commande, &mut etat.sortie)?;
         let action = tour.action();
         let faute = tour.peer_fault();
+
+        // ── L'INJECTION PAR `STARTTLS` (§6.2.1) ─────────────────────────────
+        //
+        // Le pair a-t-il déjà envoyé autre chose derrière son `STARTTLS` ? Ces
+        // octets sont arrivés EN CLAIR, donc peut-être de quelqu'un d'autre.
+        //
+        // **ON REFUSE PLUTÔT QUE DE JETER.** Cette boucle les jetait en silence,
+        // ce que §6.2.1 demande — mais jeter laisse une attaque en cours passer
+        // pour un client bavard, et le garde n'en sait rien. SMTP refusait déjà ;
+        // les trois protocoles disent maintenant la même chose, et une règle de
+        // sûreté écrite trois fois différemment est une règle qui finira par ne
+        // plus être la même.
+        if action == Action::StartTls && etat.rempli > longueur {
+            service.guard.observe(source, GuardEvent::InvalidFrame);
+            let refus = session.unavailable(&mut etat.sortie)?;
+            stream.write_all(refus).await?;
+            stream.flush().await?;
+            etat.injected = true;
+            return Ok(Etape::Terminee);
+        }
+
         stream.write_all(tour.reply()).await?;
         stream.flush().await?;
         etat.commands = etat.commands.saturating_add(1);

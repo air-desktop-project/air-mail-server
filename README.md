@@ -21,6 +21,13 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 > clair pour les domaines qu'on lui nomme, le dépose dans une boîte Maildir, et
 > refuse les sources qui abusent.
 >
+> **Il groupe** : `PIPELINING` (RFC 2920) est annoncé, et un lot de commandes
+> arrivé en un seul segment est servi en entier, dans l'ordre. Ce qu'un pair
+> glisse derrière un `STARTTLS`, en revanche, est REFUSÉ — pas jeté : ces octets
+> sont arrivés en clair, et les servir sous chiffrement serait exécuter ce que le
+> fil a dicté. Les trois protocoles répondent la même chose, et le garde
+> l'apprend.
+>
 > **Un message arrive de deux façons** : `DATA`, qui cherche `<CRLF>.<CRLF>` dans
 > le flux, et `BDAT` (RFC 3030), qui n'y cherche rien — la longueur est annoncée,
 > et il n'y a donc pas d'endroit où deux serveurs pourraient couper autrement.
@@ -1929,7 +1936,7 @@ que `llvm-cov` n'instrumente pas sur Rust stable et dont le compteur reste à
 `0 / 0`. Les régions font le travail attendu : chaque bras d'un conditionnel en
 est une.
 
-Le gate mesure aujourd'hui **52 838 régions** et **30 369 lignes**, toutes
+Le gate mesure aujourd'hui **52 840 régions** et **30 371 lignes**, toutes
 couvertes. **Une seule dérogation, et elle est annoncée à chaque exécution** : le
 code *généré* du schéma Cap'n Proto en est exclu — il porte un accesseur par champ
 et par sens, dont la plupart ne seront jamais appelés, et les couvrir n'éprouverait

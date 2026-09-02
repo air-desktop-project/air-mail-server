@@ -3789,7 +3789,7 @@ il l'a commis sur lui-même : une section qui s'intitule « l'état réel » est
 qu'on relit le moins, parce qu'on croit la connaître.
 
 Sont outillées : C1 (les trois étages, et la couverture qui n'est exigible que
-parce qu'ils sont séparés), C2 (le gate mesure 52 838 régions sur 29 crates,
+parce qu'ils sont séparés), C2 (le gate mesure 52 840 régions sur 29 crates,
 toutes couvertes — et il compare des comptes, non un pourcentage arrondi), C3
 (les lints, l'absence d'allocation dans les décodeurs, et 63 cibles de fuzz dont
 la CI vérifie qu'elle les lance toutes), C4 (`ams-tls` n'offre que
@@ -3839,6 +3839,52 @@ la seule vérification qui vaille est la confrontation à l'ABNF de §9, mot par
 mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
+
+## L'injection par `STARTTLS`, et pourquoi on REFUSE plutôt que de jeter
+
+### LE DÉFAUT, EN UNE PHRASE
+
+Un pair envoie `STARTTLS` **et la commande suivante dans le même segment**. Le
+serveur répond, conduit la poignée de main, et trouve encore dans son tampon des
+octets arrivés EN CLAIR. S'il les sert, il exécute sous chiffrement ce que
+n'importe qui a pu écrire sur le fil : c'est la faille de RFC 3207 §4.2, celle
+qui a frappé plusieurs MTA en 2011 puis de nouveau en 2021.
+
+Le pipelining la rend banale plutôt qu'exotique : un client qui groupe ses
+commandes envoie exactement cette forme-là.
+
+### TROIS BOUCLES, TROIS RÉPONSES DIFFÉRENTES — CE QUI EST LA VRAIE FAUTE
+
+SMTP refusait déjà la connexion par un `421`, en comptant une trame invalide.
+**POP3 servait la commande injectée** : rien ne vidait son tampon, et l'essai le
+montre. IMAP la jetait en silence, ce que §6.2.1 demande.
+
+Trois écritures d'une même règle de sûreté, dont une fausse — et personne ne
+pouvait le voir, parce qu'il n'y avait rien à quoi les comparer. C'est le même
+défaut que les tableaux qui dérivent, appliqué à du code qui protège.
+
+### ON REFUSE, ET LE GARDE L'APPREND
+
+Jeter suffirait à fermer la faille. Refuser dit davantage : un client qui groupe
+par-dessus la montée en chiffrement est fautif dans les trois protocoles —
+RFC 2920 §3.1, RFC 2595 §4 et RFC 9051 §6.2.1 l'interdisent chacun —, et le
+laisser continuer ferait passer une attaque en cours pour un client bavard.
+
+Le garde compte donc une trame invalide, et le résumé de la connexion le dit
+(`Outcome::Injected` en SMTP, `injected` en POP3 et en IMAP). Un exploitant qui
+lit ses compteurs voit la tentative ; avec un rejet silencieux, il n'aurait rien
+vu.
+
+### `PIPELINING` PEUT ALORS S'ANNONCER
+
+La boucle prend UNE LIGNE À LA FOIS dans son tampon : un lot arrivé en un seul
+segment était déjà servi commande par commande, dans l'ordre. Ce qui manquait
+était l'annonce — et un service qu'on rend sans le dire est un service que
+personne n'emploie, donc que rien n'éprouve.
+
+L'essai envoie une transaction ENTIÈRE en une seule écriture, message compris, et
+vérifie qu'il revient une réponse par commande, dans l'ordre, et que le message
+est remis.
 
 ## `BDAT` : la même porte, fermée autrement
 

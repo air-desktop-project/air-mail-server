@@ -94,6 +94,11 @@ pub struct Pop3Summary {
     pub tls: bool,
     /// Le pair était-il banni ? **Rien ne lui a alors été dit.**
     pub banned: bool,
+    /// Le pair a-t-il tenté de glisser une commande derrière son `STLS` ?
+    ///
+    /// Voir la garde de `conduire` : c'est une injection, et la connexion est
+    /// refusée sans que la commande soit servie.
+    pub injected: bool,
 }
 
 /// Sert une connexion POP3 jusqu'à sa fin.
@@ -208,6 +213,7 @@ struct Etat {
     retrieved: u64,
     expunged: u64,
     tls: bool,
+    injected: bool,
 }
 
 impl Etat {
@@ -228,6 +234,7 @@ impl Etat {
             retrieved: 0,
             expunged: 0,
             tls: false,
+            injected: false,
         }
     }
 }
@@ -238,6 +245,7 @@ impl Pop3Summary {
         self.retrieved = etat.retrieved;
         self.expunged = etat.expunged;
         self.tls = etat.tls;
+        self.injected = etat.injected;
     }
 }
 
@@ -294,6 +302,27 @@ where
         let tour = session.handle(&etat.lecture[..fin_ligne], &mut etat.sortie)?;
         let action = tour.action();
         let faute = tour.peer_fault();
+
+        // ── L'INJECTION PAR `STLS` (RFC 2595 §4) ────────────────────────────
+        //
+        // Le pair a-t-il déjà envoyé autre chose derrière son `STLS` ? Alors il
+        // n'aura pas son `+OK` : ces octets-là sont arrivés EN CLAIR, donc
+        // peut-être de quelqu'un d'autre, et les servir après la poignée de main
+        // reviendrait à exécuter sous chiffrement ce que le fil a dicté.
+        //
+        // **ON REFUSE PLUTÔT QUE DE JETER**, comme SMTP : jeter en silence
+        // laisserait une attaque en cours passer pour un client bavard, et le
+        // garde n'en saurait rien. Voir `connection::conduire`, la même garde
+        // pour la même faille.
+        if action == Action::StartTls && etat.rempli > fin_ligne {
+            service.guard.observe(source, GuardEvent::InvalidFrame);
+            let refus = session.unavailable(&mut etat.sortie)?;
+            stream.write_all(refus).await?;
+            stream.flush().await?;
+            etat.injected = true;
+            return Ok(Etape::Terminee);
+        }
+
         stream.write_all(tour.reply()).await?;
         stream.flush().await?;
         etat.commands = etat.commands.saturating_add(1);

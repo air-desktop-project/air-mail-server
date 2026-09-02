@@ -25,9 +25,9 @@ const SIZE_LINE_MAX: usize = 5 + MAX_DIGITS;
 /// 5321 peut porter, dont le base64 ne rend que trois quarts.
 const SASL_DECODED_MAX: usize = 512;
 
-/// Le nombre maximal de lignes d'un `EHLO` : domaine, `SIZE`, `CHUNKING`,
-/// `STARTTLS`, `AUTH`.
-const EHLO_LINES_MAX: usize = 5;
+/// Le nombre maximal de lignes d'un `EHLO` : domaine, `SIZE`, `PIPELINING`,
+/// `CHUNKING`, `STARTTLS`, `AUTH`.
+const EHLO_LINES_MAX: usize = 6;
 
 /// Ce qu'un nom de domaine peut faire (RFC 1035 §2.3.4).
 const DOMAIN_MAX: usize = 255;
@@ -731,6 +731,17 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         lignes[posees] = self.config.domain();
         posees = posees.saturating_add(1);
         lignes[posees] = self.size_line.get(..self.size_len).unwrap_or_default();
+        posees = posees.saturating_add(1);
+        // **`PIPELINING` (RFC 2920) EST ANNONCÉ TOUJOURS.** Ce n'est pas une
+        // capacité qu'on ajoute : la boucle prend UNE LIGNE À LA FOIS dans son
+        // tampon, donc un lot arrivé en un seul segment est déjà servi commande
+        // par commande, dans l'ordre. Ce qui manquait était l'annonce — et un
+        // service qu'on rend sans le dire est un service que personne n'emploie.
+        //
+        // §3.1 interdit au client de grouper par-dessus `STARTTLS`, et la boucle
+        // ne se contente pas de l'espérer : elle refuse la connexion qui le
+        // fait. Voir `connection::conduire`.
+        lignes[posees] = b"PIPELINING";
         posees = posees.saturating_add(1);
         // **`CHUNKING` EST ANNONCÉ TOUJOURS**, et sans réglage : la session sait
         // conduire `BDAT`, quel que soit l'appelant, et un service qu'on sert
@@ -1775,7 +1786,7 @@ mod tests {
         let reponse = jouer(&mut session, b"EHLO client.example\r\n");
         assert_eq!(
             reponse,
-            "250-mail.example.com\r\n250-SIZE 10485760\r\n250-CHUNKING\r\n250 STARTTLS\r\n"
+            "250-mail.example.com\r\n250-SIZE 10485760\r\n250-PIPELINING\r\n250-CHUNKING\r\n250 STARTTLS\r\n"
         );
         assert!(!reponse.contains("AUTH"));
     }
@@ -1787,7 +1798,7 @@ mod tests {
         let reponse = jouer(&mut session, b"EHLO client.example\r\n");
         assert_eq!(
             reponse,
-            "250-mail.example.com\r\n250-SIZE 10485760\r\n250-CHUNKING\r\n250 AUTH PLAIN\r\n"
+            "250-mail.example.com\r\n250-SIZE 10485760\r\n250-PIPELINING\r\n250-CHUNKING\r\n250 AUTH PLAIN\r\n"
         );
         assert!(!reponse.contains("STARTTLS"));
     }
@@ -2780,7 +2791,7 @@ mod tests {
         let annonce = jouer(&mut session, b"EHLO client.example\r\n");
         assert_eq!(
             annonce,
-            "250-mail.example.com\r\n250-SIZE 1024\r\n250 CHUNKING\r\n"
+            "250-mail.example.com\r\n250-SIZE 1024\r\n250-PIPELINING\r\n250 CHUNKING\r\n"
         );
         assert!(!annonce.contains("STARTTLS"));
         assert!(!annonce.contains("AUTH"));
@@ -2880,10 +2891,10 @@ mod tests {
             session.handle(b"NOOP\r\n", &mut minuscule),
             Err(tampon_trop_petit(8))
         );
-        // Y compris pour l'`EHLO`, qui est multiligne : 22 + 19 + 14 + 14.
+        // Y compris pour l'`EHLO`, qui est multiligne : 22 + 19 + 16 + 14 + 14.
         assert_eq!(
             session.handle(b"EHLO client.example\r\n", &mut minuscule),
-            Err(tampon_trop_petit(69))
+            Err(tampon_trop_petit(85))
         );
         // Et pour `HELO`, qui ne l'est pas.
         assert_eq!(

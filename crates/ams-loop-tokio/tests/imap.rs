@@ -460,6 +460,40 @@ async fn ecrire(lecteur: &mut BufReader<TcpStream>, octets: &[u8]) {
     lecteur.get_mut().write_all(octets).await.expect("écriture");
 }
 
+/// **L'INJECTION PAR `STARTTLS` (§6.2.1) EST REFUSÉE, ET NON JETÉE.**
+///
+/// Les octets qui suivent un `STARTTLS` dans le même segment sont arrivés EN
+/// CLAIR : les servir après la poignée de main reviendrait à exécuter sous
+/// chiffrement ce que le fil a dicté. Cette boucle les jetait en silence — ce
+/// que §6.2.1 demande —, ce qui laissait une attaque en cours passer pour un
+/// client bavard. Les trois protocoles refusent maintenant, et le disent au
+/// garde.
+#[tokio::test]
+async fn une_commande_glissee_derriere_starttls_est_refusee() {
+    let Some(materiel) = materiel("imap-injection") else {
+        return;
+    };
+    let (adresse, _) = service(Some(Arc::clone(&materiel.tls))).await;
+    let flux = TcpStream::connect(adresse).await.expect("connexion");
+    let mut lecteur = BufReader::new(flux);
+    let _banniere = ligne(&mut lecteur).await;
+
+    // **TOUT DANS LE MÊME SEGMENT.**
+    ecrire(&mut lecteur, b"a1 STARTTLS\r\na2 NOOP\r\n").await;
+    let dit = ligne(&mut lecteur).await;
+    assert!(
+        dit.contains("BYE") && dit.contains("UNAVAILABLE"),
+        "l'injection n'a pas été refusée : {dit}"
+    );
+    // Et surtout : PAS de `a1 OK`, qui aurait promis le chiffrement, ni de
+    // réponse au `a2 NOOP` glissé derrière.
+    assert!(!dit.contains("a1 OK"), "{dit}");
+    assert!(
+        !dit.contains("a2"),
+        "la commande injectée a été servie : {dit}"
+    );
+}
+
 // ── LE CHEMIN ORDINAIRE ─────────────────────────────────────────────────────
 
 #[tokio::test]
