@@ -1,0 +1,7 @@
+MAIL FROM:<joe@example.net>
+DATA
+corps
+
+.
+MAIL FROM:<usurpe@example.com>
+RCPT TO:<marie@example.com>

@@ -92,6 +92,31 @@ de `Cargo.toml`, et l'écart échoue — une cible qu'on oublie d'y inscrire ne
 serait jamais lancée, et le gate resterait vert en ne l'ayant pas examinée. Un
 rapport vert qui n'a rien examiné est un mensonge poli.
 
+## `seeds/` S'ÉCRIT À LA MAIN ; `corpus/` EST À LIBFUZZER
+
+Une graine porte un NOM qui dit ce qu'elle vise — `mime-bounce/refus`,
+`session/contrebande`, `queue/nom-tordu` — et tient en quelques lignes qu'un
+lecteur ouvre et comprend. C'est ce qui fait d'un répertoire de graines une
+documentation de ce que la cible cherche, et non un tas d'octets.
+
+Les trouvailles de libFuzzer, elles, vont dans `corpus/`, que git ignore. Il les
+nomme par le SHA-1 de leur contenu, et **il écrit dans le PREMIER répertoire de
+corpus qu'on lui donne**. D'où le piège, quand on lance une seule cible à la
+main :
+
+    cargo +nightly fuzz run <cible> seeds/<graines>                 # ← NON
+    cargo +nightly fuzz run <cible> corpus/<cible> seeds/<graines>  # ← ainsi
+
+La première forme déverse des centaines de fichiers DANS les graines, et un
+`git add -A` les emporte. C'est arrivé : 656 fichiers dans un commit, retirés
+juste avant la poussée, et six autres, plus anciens, qui y dormaient depuis
+longtemps — dont les trois seules « graines » de `fuzz_ams_session_smtp`, qui
+n'en avait donc aucune d'écrite.
+
+`check-fuzz.sh` refuse désormais toute graine nommée comme une trouvaille, et
+le dit avec la ligne de commande à employer. Le contrôle est en tête du script,
+avant la compilation : il ne coûte rien, et il tombe avant qu'on ait attendu.
+
 ## UN ITÉRATEUR QUI N'AVANCE PAS TUE LA MACHINE
 
 `Args`, l'itérateur d'arguments IMAP, rendait sa faute **sans consommer d'octet**
@@ -146,6 +171,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_mime_compose` | `seeds/mime-compose` | les messages de rapport — **la pièce jointe se relit, la liste blanche tient** |
 | `fuzz_ams_mime_structure` | `seeds/mime-structure` | la `BODYSTRUCTURE` d'un message quelconque — **le découpage ne change pas le résultat**, ce qui part sur le fil est bien formé, et **une partie désignée ne sort jamais du message** |
 | `fuzz_ams_mime_envelope` | `seeds/mime-envelope` | l'`ENVELOPE` d'un en-tête quelconque — **ce qui part sur le fil est bien formé** : dix champs, parenthèses équilibrées, et **aucune fin de ligne dans une chaîne** |
+| `fuzz_ams_authres` | `seeds/authres` | l'en-tête `Authentication-Results` — **il n'y a qu'UN champ**, tout ce qui sort est émettable, et le rembourrage occupe exactement la place réservée |
 
 Les variantes « bornes » existent parce que les bornes de C3 viennent de la
 configuration (C8), donc d'un administrateur : un zéro, un `usize::MAX`, ou toute

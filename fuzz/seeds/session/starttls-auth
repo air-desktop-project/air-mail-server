@@ -1,0 +1,4 @@
+EHLO client.example.net
+STARTTLS
+AUTH PLAIN AGplYW4Ab3V2cmUtdG9p
+RSET

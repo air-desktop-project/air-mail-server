@@ -1,0 +1,3 @@
+EHLO client.example.net
+MAIL FROM:<joe@example.net>
+RCPT TO:<ailleurs@autre.test>

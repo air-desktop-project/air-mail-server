@@ -1,0 +1,9 @@
+EHLO client.example.net
+MAIL FROM:<joe@example.net>
+RCPT TO:<marie@example.com>
+DATA
+From: joe@example.net
+
+bonjour
+.
+QUIT

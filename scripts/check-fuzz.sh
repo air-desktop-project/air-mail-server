@@ -20,9 +20,12 @@
 #   1. La LISTE des cibles coïncide avec les `[[bin]]` de `fuzz/Cargo.toml`.
 #      Une cible ajoutée sans être inscrite ici ne serait jamais lancée, et le
 #      gate resterait vert en ne l'ayant pas examinée.
-#   2. Elles sont FORMATÉES — `cargo fmt --all` à la racine ne les touche pas.
-#   3. TOUTES les cibles compilent.
-#   4. Avec `--smoke`, chacune tourne vingt secondes sur ses graines —
+#   2. Les GRAINES sont écrites à la main. Une trouvaille de libFuzzer qui s'y
+#      serait glissée — son nom est le SHA-1 de son contenu — fait échouer :
+#      sa place est `corpus/`, que git ignore.
+#   3. Elles sont FORMATÉES — `cargo fmt --all` à la racine ne les touche pas.
+#   4. TOUTES les cibles compilent.
+#   5. Avec `--smoke`, chacune tourne vingt secondes sur ses graines —
 #      `AMS_FUZZ_SECONDES` en décide autrement, pour une campagne plus longue.
 #
 # La liste vit ICI et non dans le workflow : la CI appelle ce script, et l'on
@@ -136,6 +139,37 @@ if ! diff -u "$declarees" "$listees"; then
 fi
 
 echo "$(wc -l < "$listees") cible(s), et la liste coïncide avec \`Cargo.toml\`."
+
+# ── LES GRAINES SONT ÉCRITES À LA MAIN, ET LEUR NOM DIT CE QU'ELLES VISENT ───
+#
+# libFuzzer écrit ses trouvailles dans le PREMIER répertoire de corpus qu'on lui
+# donne, sous un nom qui est le SHA-1 de leur contenu. Ce script lui donne
+# `corpus/<cible>` en premier — ignoré par git, c'est sa place. Mais lancé à la
+# main en l'oubliant :
+#
+#     cargo +nightly fuzz run <cible> seeds/<graines>     # ← le piège
+#     cargo +nightly fuzz run <cible> corpus/<cible> seeds/<graines>   # ← ainsi
+#
+# il en déverse des centaines DANS les graines, et un `git add -A` les emporte.
+# C'est arrivé : 656 fichiers dans un commit, retirés juste avant la poussée, et
+# six autres, plus anciens, qui y dormaient depuis longtemps.
+#
+# Un répertoire de graines devient alors un dépotoir que personne ne relit,
+# alors que sa raison d'être est l'inverse : quelques entrées NOMMÉES, dont le
+# nom dit ce qu'elles visent, qu'un lecteur peut ouvrir et comprendre.
+egares=$(find seeds -type f -regextype posix-extended -regex '.*/[0-9a-f]{40}$' | sort)
+if [ -n "$egares" ]; then
+    echo >&2
+    echo "ÉCHEC : des trouvailles de libFuzzer se sont glissées dans \`seeds/\`." >&2
+    echo >&2
+    echo "$egares" >&2
+    echo >&2
+    echo "Un nom de quarante chiffres hexadécimaux est celui que libFuzzer donne" >&2
+    echo "à ce qu'il trouve. Sa place est \`corpus/\`, qui est ignoré par git." >&2
+    echo "Effacez-les, ou renommez celles qui méritent d'être des graines — une" >&2
+    echo "graine porte un nom qui dit ce qu'elle vise." >&2
+    exit 1
+fi
 
 # LE FORMATAGE AUSSI VIT HORS DU WORKSPACE. `cargo fmt --all` à la racine ne
 # touche pas cette crate : un `cargo fmt` lancé là-haut laisse celle-ci non
