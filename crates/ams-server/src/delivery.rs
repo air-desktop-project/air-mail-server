@@ -73,7 +73,7 @@ impl Boites {
     /// Retire la boîte de ce compte de la carte.
     ///
     /// **LE RÉPERTOIRE RESTE SUR LE DISQUE**, et c'est délibéré : voir
-    /// `ApiMaildir::supprimer_un_compte`.
+    /// `ApiMaildir::retirer_un_compte`.
     pub fn retirer(&self, nom: &str) {
         self.ecrire().remove(nom);
     }

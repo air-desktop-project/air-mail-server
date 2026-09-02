@@ -52,6 +52,32 @@ fi
 
 combien=$(wc -l <<< "$crates")
 echo "périmètre : $combien crates sans entrée-sortie (lu de check-couverture.sh)"
+
+# ── ET LE DÉCOUPAGE EST CELUI QUE LE README ANNONCE ─────────────────────────
+#
+# Les trois tableaux du README sont la seule description des étages qu'un
+# lecteur rencontre avant le code. Une crate qui n'y figure pas n'existe pas
+# pour lui : il la découvre en trébuchant dessus, sans savoir de quel étage elle
+# est ni ce qu'elle a le droit de faire.
+#
+# C'est arrivé, et largement : le tableau en décrivait vingt-quatre sur
+# trente-quatre. Toute la pile QUIC, HTTP/2 et HTTP/3 y manquait, ainsi que
+# l'API REST — c'est-à-dire dix crates dont rien ne disait l'étage. Un tableau
+# tenu à la main dérive à chaque tranche ; celui-ci est confronté.
+sur_disque=$(find crates -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort)
+au_tableau=$(grep -oE '^\| `ams-[a-z0-9-]+`' README.md | tr -d '|` ' | sort)
+
+if [ "$sur_disque" != "$au_tableau" ]; then
+    echo >&2
+    echo "ÉCHEC : les tableaux du README et le contenu de \`crates/\` diffèrent." >&2
+    diff -u <(echo "$au_tableau") <(echo "$sur_disque") >&2 || true
+    echo >&2
+    echo "Une crate absente des tableaux n'existe pas pour qui lit le README :" >&2
+    echo "il ignore son étage, donc ce qu'elle a le droit de faire." >&2
+    exit 1
+fi
+
+echo "découpage  : les tableaux du README nomment les $(wc -l <<< "$sur_disque") crates de \`crates/\`"
 echo
 
 # ── Ce qui est interdit, et pourquoi chaque entrée y est ────────────────────

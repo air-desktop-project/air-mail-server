@@ -6,7 +6,7 @@
 //!
 //! # UNE SEULE VUE DU MAGASIN POUR LES DEUX PROTOCOLES
 //!
-//! Ce module ne lit pas les Maildir : il interroge le MÊME [`Mailboxes`] qu'IMAP.
+//! Ce module ne lit pas les Maildir : il interroge le MÊME [`Mailboxes`](ams_session::imap::Mailboxes) qu'IMAP.
 //! Ce n'est pas une économie de lignes, c'est ce qui empêche les deux protocoles
 //! de se contredire.
 //!

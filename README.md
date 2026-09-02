@@ -9,9 +9,9 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 > et seulement sur TLS.
 >
 > **Il sert une API REST** : jetons porteurs scellés, boîtes et messages en
-> lecture, dépôt d'un message, supervision, et administration en lecture. Ce qui
-> MODIFIE le magasin de comptes répond `501` — les comptes sont chargés une fois
-> au démarrage, et les rendre modifiables à chaud est une tranche à part.
+> lecture, dépôt d'un message, supervision, et administration des comptes — les
+> créer, changer leur mot de passe, changer leurs adresses, les retirer —,
+> chacune sous une portée que le jeton doit porter.
 >
 > **HTTP/3 traverse une pile QUIC écrite ici** : poignée de main, chiffrement des
 > paquets, flux, contrôle de flux, QPACK, et une extinction qui se dit en deux
@@ -44,7 +44,7 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 > mémoire, les drapeaux s'écrivent dans les noms de fichiers Maildir, et un
 > effacement n'a jamais lieu sur une marque périmée.
 >
-> Trente crates, toutes portant du code : plus aucun emplacement réservé.
+> Trente-quatre crates, toutes portant du code : plus aucun emplacement réservé.
 >
 > Ce que ce dépôt affirme, il le tient. Rien de plus n'est promis ici.
 
@@ -84,7 +84,11 @@ horloge.
 | `ams-proto-pop3` | RFC 1939 | **commandes et réponses** |
 | `ams-dns` | RFC 1035 : le codec d'un message | **question encodée, réponse décodée** |
 | `ams-proto-imap` | RFC 9051 (IMAP4rev2) | **découpage, tag, littéraux, arguments, ensembles de séquences, éléments de `FETCH`, drapeaux de `STORE`, critères de `SEARCH`, ligne d'`APPEND`, date-heure, noms de boîtes, réponses** |
-| `ams-proto-http` | RFC 9110 / 9112 | vide |
+| `ams-proto-http` | RFC 9110 : la SÉMANTIQUE, qu'HTTP/2 et HTTP/3 partagent | **méthode, cible, champs, statut, plage, et la réponse lue par le client** |
+| `ams-field-codec` | le socle commun de HPACK (RFC 7541) et QPACK (RFC 9204) | **entier à préfixe, Huffman, chaîne littérale** |
+| `ams-proto-h2` | HTTP/2 (RFC 9113) : le cadrage et les réglages | **cadres, préambule, remplissage, réglages, et HPACK** |
+| `ams-proto-quic` | QUIC (RFC 9000) : la grammaire du transport | **entiers de §16, en-têtes de paquet, trames** |
+| `ams-proto-h3` | HTTP/3 (RFC 9114) : le cadrage et les flux | **trames, types de flux, réglages, et QPACK** |
 
 ### Étage 2 — décisions, sans entrée-sortie
 
@@ -93,7 +97,7 @@ des octets **et des actions**. Elles n'attendent jamais.
 
 | Crate | Périmètre | État |
 | --- | --- | --- |
-| `ams-session` | les sessions, serveur ET cliente | **SMTP, POP3 et IMAP en réception, SMTP à l'émission** |
+| `ams-session` | les sessions, serveur ET cliente | **SMTP, POP3, IMAP et HTTP en réception, SMTP à l'émission** |
 | `ams-guard` | flooding et bannissement par source | **implémenté** |
 | `ams-dane` | DANE pour SMTP (RFC 7672) : ce qu'un `TLSA` autorise | **implémenté, et câblé** |
 | `ams-mtasts` | MTA-STS (RFC 8461) : la politique d'un domaine | **implémenté, et câblé** |
@@ -106,6 +110,11 @@ des octets **et des actions**. Elles n'attendent jamais.
 | `ams-dmarc` | RFC 7489 | **alignement, politique, et câblé dans la boucle** |
 | `ams-config` | les trois formats binaires : configuration, comptes, index | **implémenté** |
 | `ams-index` | noms Maildir, drapeaux, reconstruction, `UIDVALIDITY` | **implémenté** |
+| `ams-quic-crypto` | la protection des paquets QUIC (RFC 9001) | **chiffrement, nonces, protection d'en-tête** |
+| `ams-quic-tls` | la poignée de main TLS d'une connexion QUIC (RFC 9001 §4) | **les trois niveaux de `CRYPTO`, étanches** |
+| `ams-quic` | la machine de connexion QUIC : la grammaire rencontre les clés | **paquets, flux, contrôle de flux, pertes, états** |
+| `ams-h3` | le conducteur HTTP/3 : dans quel ordre les pièces parlent | **flux critiques, réglages, requêtes, `GOAWAY`** |
+| `ams-api` | l'API REST : ce qu'une requête désigne, et le droit qu'elle demande | **routage, portées, jetons scellés, JSON** |
 
 ### Étage 3 — exécution
 
@@ -113,12 +122,19 @@ Les seules crates qui lisent, écrivent et attendent. Elles ne décident de rien
 
 | Crate | Périmètre | État |
 | --- | --- | --- |
-| `ams-loop-tokio` | les boucles Unix, sur tokio | **SMTP et POP3** |
+| `ams-loop-tokio` | les boucles Unix, sur tokio | **SMTP, POP3, IMAP, HTTP/2, HTTP/3 sur QUIC, la file, MTA-STS et les rapports** |
 | `ams-store` | Maildir : les fichiers, seule source de vérité | **implémenté** |
+| `ams-quic-client` | un client QUIC et HTTP/3 **pour les essais**, et pour eux seuls | **il parle à notre serveur** |
 | `ams-server` | le binaire `air-mail-server` | **il tourne** |
-| `ams-admin` | le binaire `air-mail-admin` | **`summary`** |
+| `ams-admin` | le binaire `air-mail-admin` | **`config write`, `config show`, `account add/list/remove`, `token`** |
 
-**Dix-huit crates portent du code.** `ams-mime` : le squelette d'un message — la
+**Trente-quatre crates portent du code**, et ce tableau les nomme toutes :
+`scripts/check-etages.sh` confronte ses lignes au contenu de `crates/`, et
+l'écart échoue. Un tableau tenu à la main dérive — celui-ci en décrivait
+vingt-quatre sur trente-quatre, et rien ne le disait ; toute la pile QUIC,
+HTTP/2 et HTTP/3 y manquait, ainsi que l'API REST.
+
+`ams-mime` : le squelette d'un message — la
 ligne, le pliage, la séparation en-tête/corps, le découpage en champs. Les champs
 structurés, les adresses, les dates et MIME restent à écrire.
 `ams-proto-smtp` : les commandes, l'encodage des réponses multilignes, et **la
