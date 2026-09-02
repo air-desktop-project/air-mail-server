@@ -344,7 +344,11 @@ async fn le_message_remis_porte_l_en_tete_received_spf() {
     // EN TÊTE, ET AVANT LES EN-TÊTES DU PAIR. Un en-tête de trace posé après se
     // retrouverait dans le corps, où personne ne le lit.
     let plat = remis.replace("\r\n ", " ");
-    assert!(plat.starts_with("Received-SPF: pass "), "{plat}");
+    assert!(plat.contains("\r\nReceived-SPF: pass "), "{plat}");
+    assert!(
+        plat.starts_with("Received: from "),
+        "la trace de §4.4 vient d'abord"
+    );
     assert!(plat.contains("client-ip=127.0.0.1"), "{plat}");
     assert!(
         plat.contains("envelope-from=\"jean@example.com\""),
@@ -371,7 +375,7 @@ async fn un_softfail_est_remis_avec_sa_trace() {
     )
     .await;
     let plat = remis.replace("\r\n ", " ");
-    assert!(plat.starts_with("Received-SPF: softfail "), "{plat}");
+    assert!(plat.contains("\r\nReceived-SPF: softfail "), "{plat}");
 }
 
 #[tokio::test]
@@ -380,5 +384,8 @@ async fn sans_verification_aucune_trace_n_est_ecrite() {
     // mentirait sur ce qu'on a fait.
     let remis = message_remis(SenderPolicy::Ignore, None, "Subject: bonjour\r\n\r\n.\r\n").await;
     assert!(!remis.contains("Received-SPF"), "{remis}");
-    assert!(remis.starts_with("Subject: bonjour"), "{remis}");
+    // La trace `Received:` de §4.4, elle, s'écrit TOUJOURS : elle ne dit pas ce
+    // qu'on a vérifié, elle dit par où le message est passé.
+    assert!(remis.starts_with("Received: from "), "{remis}");
+    assert!(remis.contains("\r\nSubject: bonjour"), "{remis}");
 }

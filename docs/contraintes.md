@@ -3789,9 +3789,9 @@ il l'a commis sur lui-même : une section qui s'intitule « l'état réel » est
 qu'on relit le moins, parce qu'on croit la connaître.
 
 Sont outillées : C1 (les trois étages, et la couverture qui n'est exigible que
-parce qu'ils sont séparés), C2 (le gate mesure 52 840 régions sur 29 crates,
+parce qu'ils sont séparés), C2 (le gate mesure 53 214 régions sur 29 crates,
 toutes couvertes — et il compare des comptes, non un pourcentage arrondi), C3
-(les lints, l'absence d'allocation dans les décodeurs, et 63 cibles de fuzz dont
+(les lints, l'absence d'allocation dans les décodeurs, et 64 cibles de fuzz dont
 la CI vérifie qu'elle les lance toutes), C4 (`ams-tls` n'offre que
 TLS 1.3), C6 (les décodeurs refusent le CR et le LF isolés ; `AUTH`, `USER`/`PASS`
 et `LOGIN` sont refusés hors chiffrement, sans réglage pour le rétablir), C8
@@ -3839,6 +3839,70 @@ la seule vérification qui vaille est la confrontation à l'ABNF de §9, mot par
 mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
+
+## `Received:` : le seul en-tête que la norme oblige à ajouter
+
+### IL MANQUAIT, ET C'EST CELUI-LÀ QUI MANQUAIT
+
+Ce serveur écrivait `Received-SPF` (RFC 7208 §9.1) et `Authentication-Results`
+(RFC 8601) — deux en-têtes que personne n'oblige — et pas `Received:`, dont §4.4
+de RFC 5321 dit qu'un serveur qui accepte un message **DOIT** le poser.
+
+Ce n'est pas une formalité. Sans lui, le chemin d'un message est intraçable —
+c'est la première chose qu'on regarde quand un courrier n'arrive pas —, la
+boucle de §6.3 ne se détecte plus, et un filtre en aval se méfie d'un message
+qui ne porte aucune trace.
+
+Il vient AVANT les deux autres : un lecteur remonte un chemin de haut en bas, la
+trace la plus récente d'abord, et c'est celle-ci qui date le saut.
+
+### PAS DE CLAUSE `for`, JAMAIS
+
+§4.4 la permet, et ce serveur ne l'écrit pas. Elle mettrait une adresse de
+destinataire dans un en-tête qui voyage avec le message : sur une transaction à
+plusieurs destinataires, chaque copie révélerait à son lecteur qu'il y en avait
+d'autres, et lesquels. La norme s'en méfie elle-même — « a single FOR clause » au
+plus — et ne jamais l'écrire évite d'avoir à s'en souvenir.
+
+### LE MOT DE `with` DIT CE QUI S'EST PASSÉ (RFC 3848)
+
+`SMTP` pour un `HELO`, `ESMTP` pour un `EHLO`, puis le `S` et le `A` quand le
+saut était chiffré puis authentifié. C'est ce qu'on veut savoir en relisant le
+chemin d'un message suspect, et ce serveur le sait sans rien deviner.
+
+**Il n'y a pas d'`ESMTPA`**, que RFC 3848 prévoit pourtant — authentifié mais en
+clair. Cette session refuse `AUTH` hors chiffrement (C6) : la variante serait une
+branche que rien ne pourrait construire, donc un trou de couverture permanent.
+
+### CE QUI VIENT DU PAIR EST VÉRIFIÉ UNE SECONDE FOIS
+
+Le nom du `HELO` est ce que le pair a bien voulu dire. Un `CRLF` glissé dedans
+écrirait un en-tête entier sous notre nom, **au-dessus de tous les autres**. La
+grammaire SMTP l'a déjà validé ; le composeur le revérifie, parce que c'est LUI
+qui écrit, et qu'une vérification faite ailleurs est une vérification qu'on ne
+voit pas en lisant l'endroit qui en dépend.
+
+### LA BOUCLE SE DÉTECTE EN COMPTANT (§6.3)
+
+Deux serveurs mal réglés qui se renvoient un message le multiplient à chaque
+tour, et chaque saut est licite. §6.3 donne la seule méthode qui marche sans
+mémoire partagée : compter les `Received:`, et refuser au-delà d'un seuil large.
+Trente, comme Postfix et Sendmail — la valeur exacte n'a jamais compté pour
+personne ; ce qui compte est qu'il y en ait une.
+
+**LE REFUS EST DÉFINITIF** (554). Réessayer ne fera pas disparaître les trente
+sauts déjà écrits, et un `4xx` ferait tourner la boucle plus longtemps — c'est-
+à-dire exactement ce qu'on cherche à arrêter.
+
+Le compte se fait AU FIL DE L'EAU, dans la session, et non sur le bloc d'en-têtes
+rassemblé : celui-ci n'existe que si DKIM ou DMARC sont réglés, et une garde de
+sûreté qui ne s'appliquerait qu'aux serveurs qui vérifient les signatures n'est
+pas une garde, c'est une option. Le compteur ne retient qu'une position dans une
+ligne — **rien ne croît avec le message** (C3) — et le fuzz du découpage montre
+que deux lectures d'un même flux donnent le même compte.
+
+Ce qui est dans le CORPS ne compte pas : sans cela, un pair ferait refuser
+n'importe quel message en écrivant trente lignes dans son texte.
 
 ## L'injection par `STARTTLS`, et pourquoi on REFUSE plutôt que de jeter
 

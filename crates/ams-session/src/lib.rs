@@ -131,6 +131,7 @@ pub mod imap;
 mod policy;
 pub mod pop3;
 mod recipients;
+mod sauts;
 mod smtp;
 mod tampon;
 

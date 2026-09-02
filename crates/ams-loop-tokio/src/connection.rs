@@ -4,7 +4,7 @@ use core::time::Duration;
 use std::sync::Arc;
 
 use ams_guard::{Event as GuardEvent, Source, Verdict};
-use ams_mime::AUTHRES_RESERVE;
+use ams_mime::{AUTHRES_RESERVE, RECEIVED_MAX};
 use ams_proto_smtp::{ChunkEvent, DataEvent};
 use ams_session::{
     Action, Config, DataOutcome, Identity as SpfIdentity, Policy, RECEIVED_SPF_MAX, SenderPolicy,
@@ -624,6 +624,24 @@ where
             break;
         }
     }
+    // ── L'EN-TÊTE `Received:` (RFC 5321 §4.4) ───────────────────────────────
+    //
+    // **C'EST LE SEUL EN-TÊTE QUE LA NORME EXIGE D'AJOUTER**, et il vient AVANT
+    // les deux autres : un lecteur qui remonte un chemin lit les traces de haut
+    // en bas, la plus récente d'abord, et c'est celle-ci qui date le saut.
+    //
+    // La session le compose — la boucle ne fabrique aucun texte de protocole —
+    // et n'apporte que ce qu'elle seule sait : l'adresse du pair, et l'heure.
+    // Une session ne lit pas d'horloge (C1).
+    let mut trace_recue = [0_u8; RECEIVED_MAX];
+    if echec.is_none()
+        && let Some(trace) =
+            session.received(adresse_du_pair(source), maintenant(), &mut trace_recue)
+        && let Err(cause) = delivery.append(trace)
+    {
+        echec = Some(cause);
+    }
+
     // ── L'EN-TÊTE `Received-SPF` (RFC 7208 §9.1) ────────────────────────────
     //
     // AVANT le premier octet du message : un en-tête de trace se pose EN TÊTE,
@@ -1398,7 +1416,24 @@ mod tests {
         // `EHLO`, `MAIL`, `RCPT`, `DATA`, `QUIT` : les lignes du message n'en
         // sont pas.
         assert_eq!(resume.commands, 5);
-        assert_eq!(boite.recu, b"From: moi\r\n\r\nbonjour\r\n");
+        // **LA TRACE VIENT EN TÊTE, ET LE MESSAGE SUIT INTACT** (RFC 5321
+        // §4.4). Un lecteur qui remonte un chemin lit la plus récente d'abord.
+        let recu = std::string::String::from_utf8_lossy(&boite.recu).into_owned();
+        assert!(
+            recu.starts_with(
+                "Received: from client.example ([192.0.2.1])\r\n\tby \
+                 mail.example.com with ESMTP;\r\n\t"
+            ),
+            "{recu:?}"
+        );
+        assert!(
+            recu.ends_with("\r\nFrom: moi\r\n\r\nbonjour\r\n"),
+            "{recu:?}"
+        );
+        assert!(
+            !recu.contains(" for "),
+            "aucun destinataire nommé : {recu:?}"
+        );
         assert!(boite.acheve);
         assert!(!boite.abandonne);
 

@@ -7,9 +7,11 @@ use ams_proto_smtp::{
 use ams_sasl::{decode_base64, parse_plain};
 use core::net::IpAddr;
 
+use ams_mime::{Received, Transport, write_received};
 use ams_spf::{Identity, ReceivedSpf, Verdict, write_received_spf};
 
 use crate::digits::{MAX_DIGITS, decimal};
+use crate::sauts::Sauts;
 use crate::tampon::Tampon;
 use crate::{Config, Error, Policy, RecipientVerdict, Recipients, SenderPolicy};
 
@@ -24,6 +26,14 @@ const SIZE_LINE_MAX: usize = 5 + MAX_DIGITS;
 /// mot de passe — et laissent passer tout ce qu'une ligne de commande de la RFC
 /// 5321 peut porter, dont le base64 ne rend que trois quarts.
 const SASL_DECODED_MAX: usize = 512;
+
+/// Combien de `Received:` un message a le droit de porter (RFC 5321 §6.3).
+///
+/// §6.3 veut « a large number », sans en fixer un ; trente est celui de Postfix
+/// et de Sendmail. La valeur exacte n'a jamais compté pour personne : ce qui
+/// compte est qu'il y en ait une, et qu'un message qui tourne finisse par
+/// s'arrêter ailleurs que dans un disque plein.
+pub const HOPS_MAX: u32 = 30;
 
 /// Le nombre maximal de lignes d'un `EHLO` : domaine, `SIZE`, `PIPELINING`,
 /// `CHUNKING`, `STARTTLS`, `AUTH`.
@@ -52,6 +62,9 @@ enum Phase {
     Auth,
     /// Un `DATA` a été accepté : l'appelant lit le message.
     Data,
+    /// Le message porte plus de traces que §6.3 n'en tolère : il tourne en
+    /// boucle. **Le verdict de l'appelant ne sera pas consulté.**
+    Looped,
     /// Un morceau a été refusé par la grammaire. L'appelant finit de consommer
     /// les octets annoncés, puis rend la main ; **son verdict ne sera pas
     /// consulté**.
@@ -292,6 +305,14 @@ pub struct SmtpSession<'a, P: Policy> {
     phase: Phase,
     tls: bool,
     authenticated: bool,
+    /// Les `Received:` du message en cours (RFC 5321 §6.3).
+    sauts: Sauts,
+    /// Le pair s'est-il nommé par `EHLO` plutôt que par `HELO` ?
+    ///
+    /// C'est ce que le mot de RFC 3848 distingue dans l'en-tête `Received:` :
+    /// `ESMTP` contre `SMTP`. La différence n'a l'air de rien, et c'est
+    /// pourtant la seule trace qu'un pair n'a pas su parler ESMTP.
+    esmtp: bool,
     /// Les destinataires acceptés de la transaction en cours.
     recipients: Recipients,
     data: DataReceiver,
@@ -367,6 +388,8 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
             chunk: ChunkReceiver::new(config.limits(), config.max_message_octets()),
             tls: false,
             authenticated: false,
+            sauts: Sauts::new(),
+            esmtp: false,
             recipients: Recipients::new(),
             banner,
             banner_len: fin_banniere,
@@ -440,6 +463,14 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         out: &'b mut [u8],
     ) -> Result<Turn<'b>, Error> {
         let refus = match self.phase {
+            Phase::Looped => {
+                self.quitter_la_transaction();
+                return self.refus(
+                    Code::TRANSACTION_FAILED,
+                    b"Too many hops; message is looping",
+                    out,
+                );
+            }
             Phase::Data | Phase::Chunk { last: true, .. } => None,
             Phase::DataFailed(cause)
             | Phase::ChunkFailed {
@@ -503,13 +534,38 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         if self.phase != Phase::Data {
             return Err(Error::NotInDataPhase);
         }
-        match self.data.next(input) {
-            Ok(progres) => Ok(progres),
+        let progres = match self.data.next(input) {
+            Ok(progres) => progres,
             Err(cause) => {
                 self.phase = Phase::DataFailed(cause);
-                Err(Error::DataRefused)
+                return Err(Error::DataRefused);
             }
+        };
+        self.compter_les_sauts(&progres.0)?;
+        Ok(progres)
+    }
+
+    /// Compte les `Received:` du message, et refuse au-delà du seuil (§6.3).
+    ///
+    /// # UNE BOUCLE NE S'ARRÊTE PAS TOUTE SEULE
+    ///
+    /// Deux serveurs mal réglés qui se renvoient un message le multiplient à
+    /// chaque tour, et chaque saut est licite. §6.3 donne la seule méthode qui
+    /// marche sans mémoire partagée : compter les traces, et refuser au-delà
+    /// d'un seuil large.
+    ///
+    /// **LE REFUS EST DÉFINITIF.** Réessayer ne fera pas disparaître les trente
+    /// sauts déjà écrits ; un `4xx` ferait tourner la boucle plus longtemps, ce
+    /// qui est exactement ce qu'on cherche à arrêter.
+    fn compter_les_sauts(&mut self, evenement: &DataEvent<'_>) -> Result<(), Error> {
+        if let DataEvent::Content(morceau) = *evenement {
+            self.sauts.update(morceau);
         }
+        if self.sauts.count() <= HOPS_MAX {
+            return Ok(());
+        }
+        self.phase = Phase::Looped;
+        Err(Error::DataRefused)
     }
 
     /// Donne des octets du morceau en cours, et rend ce qu'ils contiennent.
@@ -637,7 +693,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     pub fn handle<'b>(&mut self, line: &[u8], out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
         match self.phase {
             Phase::Closed => return Err(Error::SessionClosed),
-            Phase::Auth | Phase::Data | Phase::DataFailed(_) => {
+            Phase::Auth | Phase::Data | Phase::DataFailed(_) | Phase::Looped => {
                 return Err(Error::NotInCommandPhase);
             }
             Phase::Greeted | Phase::Identified | Phase::Transaction { .. } => {}
@@ -724,6 +780,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     ) -> Result<Turn<'b>, Error> {
         // RFC 5321 §4.1.4 : `EHLO` annule la transaction en cours.
         self.quitter_la_transaction();
+        self.esmtp = true;
         self.retenir_le_helo(client_id);
 
         let mut lignes: [&[u8]; EHLO_LINES_MAX] = [b""; EHLO_LINES_MAX];
@@ -786,6 +843,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     /// politique de relais, pas de cette couche.
     fn on_helo<'b>(&mut self, nom: &[u8], out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
         self.quitter_la_transaction();
+        self.esmtp = false;
         // `HELO` ne porte qu'un nom de domaine : la grammaire l'a déjà validé.
         self.retenir_le_helo(&ClientId::Domain(nom));
         let domaine = self.config.domain();
@@ -977,6 +1035,48 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         // hors de l'ASCII imprimable ; dans les deux cas, le message part sans
         // trace plutôt qu'avec une trace douteuse.
         write_received_spf(out, &champ).ok()
+    }
+
+    /// Compose l'en-tête `Received:` de ce saut (RFC 5321 §4.4).
+    ///
+    /// # C'EST LE SEUL EN-TÊTE QUE LA NORME EXIGE D'AJOUTER
+    ///
+    /// §4.4 ne le suggère pas : un serveur qui accepte un message **DOIT** y
+    /// poser sa trace. Sans elle, le chemin d'un message est intraçable, la
+    /// boucle de §6.3 ne se détecte plus, et les filtres en aval se méfient d'un
+    /// message qui n'en porte aucune.
+    ///
+    /// # L'HEURE VIENT DE L'APPELANT, ET C'EST C1
+    ///
+    /// Une session ne lit pas d'horloge : elle rendrait deux réponses
+    /// différentes au même appel, et cesserait d'être éprouvable. La boucle
+    /// apporte donc les deux choses qu'elle seule sait — l'adresse du pair et
+    /// l'instant — et reçoit des octets à écrire.
+    ///
+    /// # LE MOT DE `with` DIT CE QUI S'EST PASSÉ (RFC 3848)
+    ///
+    /// `SMTP` pour un `HELO`, `ESMTP` pour un `EHLO`, et le `S` puis le `A`
+    /// quand le saut était chiffré puis authentifié. Il n'y a pas d'`ESMTPA` :
+    /// cette session refuse `AUTH` hors chiffrement (C6), et la variante serait
+    /// une branche que rien ne pourrait construire.
+    #[must_use]
+    pub fn received<'b>(&self, client: IpAddr, date: u64, out: &'b mut [u8]) -> Option<&'b [u8]> {
+        let champ = Received {
+            helo: self.helo.as_bytes(),
+            client,
+            receiver: self.config.domain(),
+            with: match (self.esmtp, self.tls, self.authenticated) {
+                (false, _, _) => Transport::Smtp,
+                (true, false, _) => Transport::Esmtp,
+                (true, true, false) => Transport::Esmtps,
+                (true, true, true) => Transport::EsmtpsA,
+            },
+            date,
+        };
+        // UN EN-TÊTE QU'ON NE SAIT PAS ÉCRIRE NE S'ÉCRIT PAS, comme pour
+        // `Received-SPF` : le message part sans trace plutôt qu'avec une trace
+        // douteuse.
+        write_received(out, &champ).ok()
     }
 
     /// Le verdict retenu pour la transaction en cours, s'il y en a un.
@@ -1382,6 +1482,9 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     fn quitter_la_transaction(&mut self) {
         self.phase = Phase::Identified;
         self.recipients.clear();
+        // **LE COMPTE DES SAUTS EST CELUI D'UN MESSAGE**, pas d'une connexion :
+        // le garder ferait refuser le second message pour les traces du premier.
+        self.sauts = Sauts::new();
         // **LES DEUX RÉCEPTEURS REPARTENT À ZÉRO**, et pas seulement celui qu'on
         // vient d'employer : c'est ce qui rend `received_octets` sommable sans
         // avoir à savoir par quel chemin le message est arrivé.
@@ -1454,7 +1557,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, ChunkEvent, DataFault, DataOutcome, SmtpSession};
+    use super::{Action, ChunkEvent, DataFault, DataOutcome, HOPS_MAX, SmtpSession};
     use crate::{Capabilities, Config, Error, Policy, RecipientVerdict, SenderPolicy};
     use ams_proto_smtp::{ClientId, DataEvent, Error as SmtpError, Limits, Path};
     use ams_spf::Verdict as SpfVerdict;
@@ -1556,6 +1659,135 @@ mod tests {
                     return rendu;
                 }
             }
+        }
+    }
+
+    // ── L'EN-TÊTE `Received:` ET LES SAUTS ──────────────────────────────────
+
+    /// **LE MOT DE `with` DIT CE QUI S'EST PASSÉ** (RFC 3848).
+    #[test]
+    fn le_received_dit_par_ou_le_message_est_passe() {
+        let mut session = acceptante();
+        let mut trace = [0_u8; 700];
+        let client = core::net::IpAddr::V4(core::net::Ipv4Addr::new(192, 0, 2, 1));
+
+        // Sans `EHLO` ni `HELO`, il n'y a pas de nom à écrire.
+        assert!(
+            session
+                .received(client, 1_788_242_400, &mut trace)
+                .is_none()
+        );
+
+        assert!(jouer(&mut session, b"HELO client.example\r\n").starts_with("250"));
+        let vu = session
+            .received(client, 1_788_242_400, &mut trace)
+            .expect("composable");
+        let texte = std::string::String::from_utf8(vu.to_vec()).expect("ASCII");
+        assert!(
+            texte.starts_with(
+                "Received: from client.example ([192.0.2.1])\r\n\tby \
+                 mail.example.com with SMTP;\r\n\t"
+            ),
+            "{texte:?}"
+        );
+        // **AUCUN DESTINATAIRE N'Y EST NOMMÉ**, jamais.
+        assert!(!texte.contains(" for "), "{texte:?}");
+
+        // `EHLO` fait un `ESMTP`, et le chiffrement un `ESMTPS`.
+        assert!(jouer(&mut session, b"EHLO client.example\r\n").starts_with("250"));
+        let vu = session
+            .received(client, 1_788_242_400, &mut trace)
+            .expect("composable");
+        assert!(
+            std::string::String::from_utf8_lossy(vu).contains("with ESMTP;"),
+            "{vu:?}"
+        );
+        session.on_tls_established();
+        assert!(jouer(&mut session, b"EHLO client.example\r\n").starts_with("250"));
+        let vu = session
+            .received(client, 1_788_242_400, &mut trace)
+            .expect("composable");
+        assert!(
+            std::string::String::from_utf8_lossy(vu).contains("with ESMTPS;"),
+            "{vu:?}"
+        );
+        // Et l'authentification ajoute le `A`.
+        assert!(jouer(&mut session, b"AUTH PLAIN AGplYW4Ab3V2cmUtdG9p\r\n").starts_with("235"));
+        let vu = session
+            .received(client, 1_788_242_400, &mut trace)
+            .expect("composable");
+        assert!(
+            std::string::String::from_utf8_lossy(vu).contains("with ESMTPSA;"),
+            "{vu:?}"
+        );
+        // **UN EN-TÊTE QU'ON NE SAIT PAS ÉCRIRE NE S'ÉCRIT PAS.**
+        let mut minuscule = [0_u8; 8];
+        assert!(
+            session
+                .received(client, 1_788_242_400, &mut minuscule)
+                .is_none()
+        );
+    }
+
+    /// **UN MESSAGE QUI TOURNE EN BOUCLE FINIT PAR S'ARRÊTER** (§6.3), et le
+    /// verdict de l'appelant n'est pas consulté.
+    #[test]
+    fn un_message_qui_porte_trop_de_traces_est_refuse() {
+        let mut session = acceptante();
+        transaction(&mut session);
+        assert!(jouer(&mut session, b"DATA\r\n").starts_with("354"));
+
+        let mut refuse = false;
+        for rang in 0..=HOPS_MAX {
+            let ligne = std::format!("Received: par le saut {rang}\r\n");
+            if session.feed_data(ligne.as_bytes()).is_err() {
+                refuse = true;
+                break;
+            }
+        }
+        assert!(refuse, "trente et un sauts sont passés");
+
+        let mut tampon = [0_u8; 512];
+        let tour = session
+            .on_data_settled(DataOutcome::Accepted, &mut tampon)
+            .expect("réponse");
+        let dit = std::string::String::from_utf8_lossy(tour.reply()).into_owned();
+        assert!(dit.starts_with("554"), "{dit}");
+        assert!(dit.contains("Too many hops"), "{dit}");
+        // Hors de la phase de données, plus rien ne se sert.
+        assert_eq!(
+            session.feed_data(b"x").map(|_| ()),
+            Err(Error::NotInDataPhase)
+        );
+    }
+
+    /// **LE COMPTE EST CELUI D'UN MESSAGE**, pas d'une connexion : le second ne
+    /// se refuse pas pour les traces du premier.
+    #[test]
+    fn le_compte_des_sauts_repart_a_chaque_message() {
+        let mut session = acceptante();
+        transaction(&mut session);
+        assert!(jouer(&mut session, b"DATA\r\n").starts_with("354"));
+        for rang in 0..HOPS_MAX {
+            let ligne = std::format!("Received: par le saut {rang}\r\n");
+            session.feed_data(ligne.as_bytes()).expect("accepté");
+        }
+        session.feed_data(b"\r\n.\r\n").expect("fin");
+        let mut tampon = [0_u8; 512];
+        assert!(
+            session
+                .on_data_settled(DataOutcome::Accepted, &mut tampon)
+                .expect("réponse")
+                .reply()
+                .starts_with(b"250")
+        );
+
+        // Un second message, avec autant de traces, passe aussi.
+        transaction(&mut session);
+        assert!(jouer(&mut session, b"DATA\r\n").starts_with("354"));
+        for rang in 0..HOPS_MAX {
+            let ligne = std::format!("Received: par le saut {rang}\r\n");
+            session.feed_data(ligne.as_bytes()).expect("accepté");
         }
     }
 

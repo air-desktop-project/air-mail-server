@@ -12,6 +12,9 @@ repository.workspace = true
 # L'API REST (routage, portées, jetons, JSON) et la sémantique HTTP : la
 # session HTTP décide, et ne touche à rien.
 ams-api = { workspace = true }
+# L'en-tête `Received:` (RFC 5321 §4.4) et son calendrier : un seul composeur
+# de champs dans ce dépôt, et une seule façon d'écrire une date.
+ams-mime = { workspace = true }
 ams-proto-http = { workspace = true }
 ams-proto-pop3 = { workspace = true }
 # IMAP (RFC 9051) : la session tient les quatre états, la grammaire découpe.

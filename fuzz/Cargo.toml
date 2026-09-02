@@ -163,6 +163,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_ams_mime_received"
+path = "fuzz_targets/fuzz_ams_mime_received.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_ams_tlsrpt"
 path = "fuzz_targets/fuzz_ams_tlsrpt.rs"
 test = false

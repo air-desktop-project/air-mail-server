@@ -182,7 +182,13 @@ async fn un_message_traverse_notre_propre_serveur_intact() {
         texte.contains("Bonjour.\r\n.\r\nEt la suite"),
         "le message a été abîmé :\n{texte}"
     );
-    assert!(texte.starts_with("From: nous@nous.test\r\n"), "{texte}");
+    // **LE SERVEUR D'EN FACE POSE SA TRACE** (RFC 5321 §4.4) : le message
+    // arrive donc précédé d'un `Received:`, et intact derrière lui.
+    assert!(
+        texte.starts_with("Received: from mail.nous.test ([127.0.0.1])\r\n"),
+        "{texte}"
+    );
+    assert!(texte.contains("\r\nFrom: nous@nous.test\r\n"), "{texte}");
 }
 
 #[tokio::test]

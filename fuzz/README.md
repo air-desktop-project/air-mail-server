@@ -81,7 +81,7 @@ deux fois, les deux fois en changeant un trait que les cibles implémentent ; la
 première, la cible ne compilait plus depuis deux commits sans que rien ne le
 dise.
 
-    scripts/check-fuzz.sh            # la liste, et la compilation des 63 cibles
+    scripts/check-fuzz.sh            # la liste, et la compilation des 64 cibles
     scripts/check-fuzz.sh --smoke    # et vingt secondes chacune
     AMS_FUZZ_SECONDES=300 scripts/check-fuzz.sh --smoke   # une vraie campagne
 
@@ -157,6 +157,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_mime_compose` | `seeds/mime-compose` | les messages de rapport — **la pièce jointe se relit, la liste blanche tient** |
 | `fuzz_ams_mime_bounce` | `seeds/mime-bounce` | le rapport de non-remise — **aucune valeur n'ajoute un champ de statut**, et le chemin de retour est nul |
 | `fuzz_ams_authres` | `seeds/authres` | l'en-tête `Authentication-Results` — **il n'y a qu'UN champ**, tout ce qui sort est émettable, et le rembourrage occupe exactement la place réservée |
+| `fuzz_ams_mime_received` | `seeds/mime-received` | l'en-tête `Received:` — **il n'y a qu'UN champ**, aucune ligne ne dépasse 998 octets, et **aucun destinataire n'y est nommé** |
 
 **SMTP** — ce qu'un serveur lit avant toute authentification.
 

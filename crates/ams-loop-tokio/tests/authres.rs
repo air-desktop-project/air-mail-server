@@ -181,8 +181,18 @@ async fn l_en_tete_occupe_exactement_la_place_reservee() {
             .is_some_and(|fin| fin.bytes().all(|octet| octet == b' ')),
         "le remplissage n'est pas fait d'espaces : {trace:?}"
     );
-    // ET LE MESSAGE DU PAIR N'EST PAS TOUCHÉ.
-    assert!(temoin.corps.starts_with(b"From: Joe SixPack"));
+    // ET LE MESSAGE DU PAIR N'EST PAS TOUCHÉ — il suit la trace `Received:`,
+    // que la boucle pose avant lui (RFC 5321 §4.4).
+    assert!(
+        temoin
+            .corps
+            .starts_with(b"Received: from client.example.net ")
+    );
+    assert!(
+        temoin
+            .corps
+            .ends_with(b"From: Joe SixPack <joe@example.com>\r\nSubject: bonjour\r\n\r\nsalut\r\n")
+    );
 }
 
 /// **QUAND RIEN N'A ÉTÉ VÉRIFIÉ, ON ÉCRIT `none` (§2.2).**
@@ -217,7 +227,11 @@ async fn un_message_en_quarantaine_est_remis_et_ecarte() {
 
     assert!(reponse.starts_with("250"), "{reponse}");
     assert!(temoin.ecarte, "la boucle a demandé de le mettre de côté");
-    assert!(temoin.corps.starts_with(b"From: Joe SixPack"));
+    assert!(
+        temoin
+            .corps
+            .starts_with(b"Received: from client.example.net ")
+    );
 }
 
 /// **UN MESSAGE ALIGNÉ N'EST PAS MIS DE CÔTÉ**, même sous `p=quarantine`.
