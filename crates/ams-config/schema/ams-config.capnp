@@ -433,15 +433,33 @@ struct Dmarc {
   # décision anodine, et c'est pourquoi le défaut est FAUX.
   failureReports @7 :Bool;
 
+  # Le dossier où DÉPOSER un message que `p=quarantine` vise, ou une chaîne
+  # vide.
+  #
+  # VIDE, LA QUARANTAINE N'EXISTE PAS : le message va dans la boîte de
+  # réception, et le rapport dit `none` — parce que c'est la vérité. C'est la
+  # même règle que partout ailleurs ici : l'absence de valeur EST l'absence de
+  # service.
+  #
+  # Le nom est celui qu'un client IMAP montre (`Junk`, `Courrier-indesirable`) ; il
+  # devient un dossier Maildir++ à la racine du compte, créé à la première
+  # remise. Il obéit aux règles d'un nom de boîte IMAP, parce que c'est ce
+  # qu'il devient.
+  #
+  # IL NE DÉPEND PAS DE `enforcement`. `observe` et `enforce` gouvernent le
+  # REFUS d'un `p=reject` ; la quarantaine, elle, REMET — elle ne peut rien
+  # perdre, et il n'y a donc rien à découvrir avant de l'ouvrir.
+  quarantineFolder @8 :Text;
+
   enum Enforcement {
     # On évalue, on retient, on n'oppose rien. L'état où l'on découvre ce qu'une
     # politique refuserait AVANT de la laisser refuser — et il faut y rester
     # quelque temps : un domaine qui publie `p=reject` refuse aussi le courrier
     # de ses propres listes de diffusion.
     observe @0;
-    # Un `p=reject` est opposé (550). `p=quarantine` ne l'est pas : ce serveur
-    # n'a pas de dossier de quarantaine, et refuser à la place serait faire plus
-    # que ce que le domaine a demandé.
+    # Un `p=reject` est opposé (550). `p=quarantine` ne l'est pas, et n'a pas à
+    # l'être : refuser à la place ferait plus que ce que le domaine a demandé.
+    # C'est `quarantineFolder` qui l'honore, et il ne passe pas par ici.
     enforce @1;
   }
 }

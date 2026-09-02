@@ -4,6 +4,7 @@ use core::time::Duration;
 use std::sync::Arc;
 
 use ams_guard::{Event as GuardEvent, Source, Verdict};
+use ams_mime::AUTHRES_RESERVE;
 use ams_proto_smtp::DataEvent;
 use ams_session::{
     Action, Config, DataOutcome, Identity as SpfIdentity, Policy, RECEIVED_SPF_MAX, SenderPolicy,
@@ -560,6 +561,38 @@ fn maintenant() -> u64 {
         .map_or(0, |ecoule| ecoule.as_secs())
 }
 
+/// Le verdict SPF, dans les mots de RFC 8601.
+fn resultat_spf(verdict: SpfVerdict) -> ams_mime::SpfResult {
+    match verdict {
+        SpfVerdict::None => ams_mime::SpfResult::None,
+        SpfVerdict::Neutral => ams_mime::SpfResult::Neutral,
+        SpfVerdict::Pass => ams_mime::SpfResult::Pass,
+        SpfVerdict::Fail => ams_mime::SpfResult::Fail,
+        SpfVerdict::SoftFail => ams_mime::SpfResult::SoftFail,
+        SpfVerdict::TempError => ams_mime::SpfResult::TempError,
+        SpfVerdict::PermError => ams_mime::SpfResult::PermError,
+    }
+}
+
+/// Le verdict DMARC, dans les mots de RFC 8601.
+///
+/// **AUCUN FOURRE-TOUT** : chaque verdict a son mot. Un `_` qui rendrait `pass`
+/// écrirait, le jour où un verdict s'ajoute, que le message est aligné alors
+/// qu'on n'en sait rien — et c'est exactement le genre de mensonge que cet
+/// en-tête ne peut pas se permettre, puisqu'il est écrit sous notre nom.
+fn resultat_dmarc(verdict: DmarcVerdict) -> ams_mime::DmarcResult {
+    match verdict {
+        DmarcVerdict::Pass => ams_mime::DmarcResult::Pass,
+        DmarcVerdict::Fail => ams_mime::DmarcResult::Fail,
+        DmarcVerdict::TempError => ams_mime::DmarcResult::TempError,
+        // Pas de politique lisible : il n'y a rien à dire de ce domaine.
+        DmarcVerdict::NoPolicy => ams_mime::DmarcResult::None,
+        // Une politique qu'on a lue sans pouvoir s'en servir est un défaut
+        // PERMANENT de ce que le domaine publie, et non un aléa de réseau.
+        DmarcVerdict::Unusable => ams_mime::DmarcResult::PermError,
+    }
+}
+
 /// Ce qu'une signature DKIM devient dans un rapport (§7.2, `DKIMResultType`).
 fn resultat_dkim(verdict: DkimVerdict) -> DkimAuthResult {
     match verdict {
@@ -671,6 +704,11 @@ where
     // reviendra, et une remise qui l'apprendrait après coup aurait déjà écrit
     // une entrée de file sans savoir à qui rendre compte.
     delivery.begin(session.return_path());
+    // **LA PLACE DE L'EN-TÊTE `Authentication-Results` SE RÉSERVE ICI**, avant
+    // le premier octet. DKIM ne se juge qu'une fois le corps entier lu, et DMARC
+    // en dépend : le verdict arrivera bien après. Voir `Delivery::reserve_trace`,
+    // qui dit pourquoi on réserve plutôt que de rassembler le message.
+    delivery.reserve_trace(AUTHRES_RESERVE);
     let mut echec: Option<DeliveryFailure> = None;
     for adresse in session.recipients() {
         if let Err(cause) = delivery.add_recipient(adresse) {
@@ -757,6 +795,10 @@ where
     // DNS et une exponentiation modulaire ; les dépenser pour un message qu'on
     // jette offrirait à un pair de faire travailler la machine sans rien livrer.
     let mut usurpe = false;
+    // Ce que l'en-tête `Authentication-Results` dira. Les trois se remplissent
+    // au fil des vérifications, et rien n'est écrit qui n'ait été mesuré.
+    let mut dkim_vus: Vec<(ams_mime::DkimResult, String, String)> = Vec::new();
+    let mut dmarc_vu: Option<(ams_mime::DmarcResult, String)> = None;
     if !refuse
         && echec.is_none()
         && let Some(mut lecture) = flux
@@ -774,6 +816,16 @@ where
                     selector: resultat.selector.clone(),
                     result: resultat_dkim(resultat.verdict),
                 });
+                dkim_vus.push((
+                    match resultat.verdict {
+                        DkimVerdict::Pass => ams_mime::DkimResult::Pass,
+                        DkimVerdict::Fail => ams_mime::DkimResult::Fail,
+                        DkimVerdict::TempError => ams_mime::DkimResult::TempError,
+                        DkimVerdict::PermError => ams_mime::DkimResult::PermError,
+                    },
+                    resultat.domain.clone(),
+                    resultat.selector.clone(),
+                ));
                 let compte = &mut etat.resume.dkim;
                 match resultat.verdict {
                     DkimVerdict::Pass => {
@@ -802,17 +854,39 @@ where
             let resultat = verificateur.verdict(lecture.headers(), &authentifies).await;
             etat.resume.dmarc = compter_dmarc(etat.resume.dmarc, &resultat);
             // C'EST ICI, ET SEULEMENT ICI, QU'UN MESSAGE EST REFUSÉ POUR CE
-            // QU'IL PRÉTEND ÊTRE. La quarantaine, elle, n'est pas encore un
-            // endroit : le message est remis, et la demande consignée.
+            // QU'IL PRÉTEND ÊTRE. La quarantaine, elle, REMET : elle déplace le
+            // message, elle ne le jette pas.
             usurpe = resultat.applies && resultat.policy == DmarcPolicy::Reject;
+            // **LA QUARANTAINE NE DÉPEND PAS DE `enforce`**, qui gouverne le
+            // refus d'un `p=reject` — c'est-à-dire ce qui se perd si l'on se
+            // trompe. Mettre de côté ne perd rien : le message est remis, dans
+            // un dossier que son destinataire ouvre quand il veut.
+            //
+            // ET C'EST LA REMISE QUI DIT SI ELLE L'A FAIT : sans dossier
+            // configuré, elle rend `false`, et le rapport dira `none`.
+            let ecarte = resultat.designated
+                && resultat.policy == DmarcPolicy::Quarantine
+                && delivery.quarantine();
+            // **CE QU'ON ÉCRIT EST CE QU'ON A TROUVÉ**, et non ce que la
+            // politique demandait ni ce qu'on en a fait : `pass` quand le
+            // message est aligné, `fail` sinon, et rien du tout quand le domaine
+            // ne publie pas.
+            //
+            // C'est le VERDICT qu'on lit, et non `applies` : en observation,
+            // rien ne s'applique, et écrire `dmarc=pass` sur un message qui
+            // échoue en ferait un en-tête qui ment.
+            dmarc_vu = resultat
+                .report
+                .as_ref()
+                .map(|_| (resultat_dmarc(resultat.verdict), resultat.domain.clone()));
             // ── Ce qu'on en rapportera (RFC 7489 §7.2) ──────────────────────
             //
             // On rapporte CE QU'ON A FAIT, jamais ce qui était demandé : un
-            // message que `p=quarantine` visait et que ce serveur a remis se
-            // rapporte `none`, parce que c'est la vérité. Écrire `quarantine`
-            // ferait croire à un domaine qu'il est protégé là où il ne l'est
-            // pas, et c'est le seul mensonge qu'un rapport ne peut pas se
-            // permettre.
+            // message que `p=quarantine` visait et que ce serveur a remis dans
+            // la boîte de réception — faute de dossier configuré — se rapporte
+            // `none`, parce que c'est la vérité. Écrire `quarantine` ferait
+            // croire à un domaine qu'il est protégé là où il ne l'est pas, et
+            // c'est le seul mensonge qu'un rapport ne peut pas se permettre.
             if let Some(spool) = service.reports.as_ref()
                 && let Some(pour) = resultat.report.as_ref()
             {
@@ -868,6 +942,8 @@ where
                     source: adresse_du_pair(source),
                     disposition: if usurpe {
                         DmarcPolicy::Reject
+                    } else if ecarte {
+                        DmarcPolicy::Quarantine
                     } else {
                         DmarcPolicy::None
                     },
@@ -881,6 +957,50 @@ where
                 });
             }
         }
+    }
+
+    // ── L'EN-TÊTE `Authentication-Results` (RFC 8601) ───────────────────────
+    //
+    // Il occupe EXACTEMENT la place réservée : un octet de trop écraserait le
+    // premier en-tête du pair, un de moins laisserait un trou au milieu du
+    // message. Quand rien n'a été vérifié, §2.2 prévoit le mot `none`, et c'est
+    // celui-là qu'on écrit — un en-tête absent laisserait croire qu'un autre,
+    // fabriqué par le pair, vient de nous.
+    let signatures: Vec<ams_mime::DkimSeen<'_>> = dkim_vus
+        .iter()
+        .map(|(resultat, domaine, selecteur)| ams_mime::DkimSeen {
+            result: *resultat,
+            domain: domaine.as_bytes(),
+            selector: selecteur.as_bytes(),
+        })
+        .collect();
+    let identite = session.sender_identity();
+    let spf_vu = session.sender_verdict().and_then(|verdict| {
+        let vue = identite.as_ref()?;
+        Some((
+            resultat_spf(verdict),
+            match vue.scope {
+                SpfIdentity::Helo => ams_mime::SpfIdentity::Helo,
+                SpfIdentity::MailFrom => ams_mime::SpfIdentity::MailFrom,
+            },
+            vue.domain,
+        ))
+    });
+    let mut trace = [0_u8; AUTHRES_RESERVE];
+    if ams_mime::write_authres_padded(
+        &mut trace,
+        &ams_mime::Authentication {
+            serv_id: service.config.domain(),
+            spf: spf_vu,
+            dkim: &signatures,
+            dmarc: dmarc_vu
+                .as_ref()
+                .map(|(resultat, domaine)| (*resultat, domaine.as_bytes())),
+        },
+    )
+    .is_ok()
+    {
+        delivery.trace(&trace);
     }
 
     let verdict = if refuse || usurpe {

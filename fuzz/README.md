@@ -59,6 +59,19 @@ légitimement partager la leur.
 Trois de ces six fois portaient sur le même malentendu — confondre ce qu'un JEU
 garantit avec ce qu'un de ses ÉLÉMENTS garantit.
 
+**La septième, le 2026-09-02, sur `fuzz_ams_authres`.** La cible comptait les
+`;` de l'en-tête composé et exigeait qu'il y en eût autant que de résultats
+donnés en entrée. C'est vrai du champ NU ; c'est faux de sa forme REMBOURRÉE, qui
+occupe une place fixe réservée en tête du message et **abandonne les signatures
+DKIM qui n'y tiennent pas**. Leur nombre ne se déduit donc pas de l'entrée.
+
+La propriété a été restreinte au champ nu, où rien n'est abandonné. Les cinq
+autres — rien ne panique, rien n'est écrit au-delà, tout ce qui sort est
+émettable, il n'y a qu'UN champ, et le rembourrage occupe EXACTEMENT la place —
+valent pour les deux formes, et ce sont elles qui portent le sujet : cet en-tête
+est le seul que ce serveur écrive en tête du message d'un pair, et tout ce qui y
+entre vient d'en face.
+
 ## `scripts/check-fuzz.sh` — le contrôle se lance chez soi
 
 Cette crate vit hors du workspace : **`cargo build --workspace` ne la touche
@@ -68,7 +81,7 @@ deux fois, les deux fois en changeant un trait que les cibles implémentent ; la
 première, la cible ne compilait plus depuis deux commits sans que rien ne le
 dise.
 
-    scripts/check-fuzz.sh            # la liste, et la compilation des 60 cibles
+    scripts/check-fuzz.sh            # la liste, et la compilation des 61 cibles
     scripts/check-fuzz.sh --smoke    # et vingt secondes chacune
     AMS_FUZZ_SECONDES=300 scripts/check-fuzz.sh --smoke   # une vraie campagne
 

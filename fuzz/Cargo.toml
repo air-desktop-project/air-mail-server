@@ -156,6 +156,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_ams_authres"
+path = "fuzz_targets/fuzz_ams_authres.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_ams_tlsrpt"
 path = "fuzz_targets/fuzz_ams_tlsrpt.rs"
 test = false

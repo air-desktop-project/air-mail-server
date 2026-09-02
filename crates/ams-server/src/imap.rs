@@ -1059,16 +1059,6 @@ pub struct BoitesImap {
     boites: Arc<crate::delivery::Boites>,
     /// Le nom d'hôte, qui entre dans les noms de fichiers Maildir.
     hote: Vec<u8>,
-    /// Les dossiers déjà ouverts, par compte et par nom.
-    ///
-    /// # POURQUOI UN CACHE, ET POURQUOI IL EST BORNÉ PAR CE QUI EXISTE
-    ///
-    /// Ouvrir un Maildir relit son index, adopte les messages sans UID et
-    /// réécrit l'index : le refaire à chaque `LIST` ou chaque `SELECT`
-    /// coûterait un parcours de répertoire par commande. Le cache ne grandit
-    /// que d'une entrée par dossier RÉELLEMENT créé — un client ne peut donc
-    /// pas le faire enfler en nommant des boîtes au hasard.
-    dossiers: std::sync::Mutex<BTreeMap<(String, String), Arc<Maildir>>>,
     /// Les abonnements de chaque compte, tels qu'on les a lus.
     ///
     /// # POURQUOI UN CACHE, ET CE QU'IL COÛTE QUAND RIEN NE CHANGE
@@ -1104,7 +1094,6 @@ impl BoitesImap {
         Self {
             boites,
             hote: hote.to_vec(),
-            dossiers: std::sync::Mutex::new(BTreeMap::new()),
             abonnes: std::sync::Mutex::new(BTreeMap::new()),
         }
     }
@@ -1155,23 +1144,25 @@ impl BoitesImap {
             core::str::from_utf8(user).ok()?.to_owned(),
             core::str::from_utf8(name).ok()?.to_owned(),
         );
-        let mut ouverts = self.dossiers.lock().ok()?;
-        if let Some(deja) = ouverts.get(&clef) {
-            return Some(Arc::clone(deja));
-        }
         let chemin = self.chemin_du_dossier(user, name)?;
-        // ON N'OUVRE QUE CE QUI EXISTE. `Maildir::open` crée l'arborescence
-        // qu'on lui nomme : l'appeler sans regarder ferait de chaque `SELECT`
-        // sur une faute de frappe une boîte de plus.
-        // ON N'OUVRE QUE CE QUI EST UNE BOÎTE. Un répertoire sans `cur/` est un
-        // nom que §6.3.5 a laissé derrière un effacement : l'ouvrir le
-        // ressusciterait, puisque `Maildir::open` recrée ce qui manque.
-        if !chemin.is_dir() || !Self::selectionnable(&chemin) {
-            return None;
-        }
-        let boite = Arc::new(Maildir::open(&chemin, &self.hote, fresh_uid_validity()).ok()?);
-        ouverts.insert(clef, Arc::clone(&boite));
-        Some(boite)
+        // **LE REGISTRE EST CELUI DU SERVEUR, ET NON CELUI D'IMAP** : la remise
+        // ouvre elle aussi des dossiers depuis que la quarantaine DMARC existe,
+        // et deux `Maildir` sur le même répertoire serviraient le même UID à
+        // deux messages.
+        self.boites.dossier_ou(&clef.0, &clef.1, || {
+            // ON N'OUVRE QUE CE QUI EXISTE. `Maildir::open` crée l'arborescence
+            // qu'on lui nomme : l'appeler sans regarder ferait de chaque
+            // `SELECT` sur une faute de frappe une boîte de plus.
+            // ON N'OUVRE QUE CE QUI EST UNE BOÎTE. Un répertoire sans `cur/` est
+            // un nom que §6.3.5 a laissé derrière un effacement : l'ouvrir le
+            // ressusciterait, puisque `Maildir::open` recrée ce qui manque.
+            if !chemin.is_dir() || !Self::selectionnable(&chemin) {
+                return None;
+            }
+            Some(Arc::new(
+                Maildir::open(&chemin, &self.hote, fresh_uid_validity()).ok()?,
+            ))
+        })
     }
 
     /// Oublie les boîtes ouvertes d'un compte à partir d'un nom, filles
@@ -1181,11 +1172,9 @@ impl BoitesImap {
         else {
             return;
         };
-        if let Ok(mut ouverts) = self.dossiers.lock() {
-            ouverts.retain(|(c, boite), _| {
-                c != compte || (boite != nom && !boite.starts_with(&std::format!("{nom}/")))
-            });
-        }
+        self.boites.oublier_les_dossiers(|c, boite| {
+            c != compte || (boite != nom && !boite.starts_with(&std::format!("{nom}/")))
+        });
     }
 
     /// §6.3.6 : renommer `INBOX` DÉPLACE SON COURRIER et la laisse en place.
@@ -1641,11 +1630,9 @@ impl Mailboxes for BoitesImap {
         }
         // La boîte cesse d'être ouverte AVANT d'être effacée : un `Maildir`
         // gardé en cache écrirait son index dans un répertoire qui n'est plus.
-        if let Ok(mut ouverts) = self.dossiers.lock()
-            && let (Ok(compte), Ok(boite)) =
-                (core::str::from_utf8(user), core::str::from_utf8(name))
-        {
-            ouverts.remove(&(compte.to_owned(), boite.to_owned()));
+        if let (Ok(compte), Ok(boite)) = (core::str::from_utf8(user), core::str::from_utf8(name)) {
+            self.boites
+                .oublier_les_dossiers(|c, ouvert| c != compte || ouvert != boite);
         }
 
         // §6.3.5 : UNE BOÎTE QUI A DES FILLES NE DISPARAÎT PAS. Son courrier

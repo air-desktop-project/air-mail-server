@@ -246,7 +246,47 @@ impl Maildir {
             unique,
             uid,
             ecrits: 0,
+            reserve: 0,
         })
+    }
+
+    /// **Adopte** une remise ouverte sur une autre boîte, et la valide ici.
+    ///
+    /// # POURQUOI UNE REMISE PEUT CHANGER DE BOÎTE EN COURS DE ROUTE
+    ///
+    /// La quarantaine DMARC ne se sait qu'une fois le corps entier lu : le
+    /// verdict dépend de DKIM, dont la signature couvre le corps. Le message est
+    /// donc déjà écrit — dans le `tmp/` de la boîte de réception — quand on
+    /// apprend qu'il devait aller ailleurs.
+    ///
+    /// Le recopier coûterait une seconde écriture disque par message mis de
+    /// côté ; **l'adopter ne coûte qu'un `rename`**, celui-là même que la
+    /// validation faisait déjà. C'est licite parce qu'un `tmp/` est un endroit
+    /// où l'on écrit avant de nommer, et non un endroit qui appartient à une
+    /// boîte : personne ne le lit.
+    ///
+    /// L'UID vient d'ICI, et non de la boîte d'origine : c'est celle-ci qui
+    /// numérote ce qu'elle contient. Celui que l'origine avait réservé reste
+    /// inutilisé — une boîte a le droit d'avoir des trous, et son filigrane les
+    /// couvre déjà.
+    ///
+    /// # LES DEUX BOÎTES DOIVENT VIVRE SUR LE MÊME SYSTÈME DE FICHIERS
+    ///
+    /// Un `rename` ne traverse pas un point de montage. Ce n'est pas une
+    /// supposition gratuite : l'appelant nomme un dossier DANS la racine du
+    /// compte, donc sous le même montage que son `tmp/`. Si ce n'était pas le
+    /// cas, l'erreur remonte comme n'importe quelle erreur d'entrée-sortie, et
+    /// le message n'est pas perdu — il est refusé temporairement.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UidExhausted`], [`Error::Io`] ou [`Error::Name`].
+    pub fn adopt(&self, mut arrivee: Incoming) -> Result<Uid, Error> {
+        let uid = self.reserver_uid()?;
+        self.etendre_la_reserve(uid)?;
+        arrivee.racine = self.racine.clone();
+        arrivee.uid = uid;
+        arrivee.valider(None)
     }
 
     /// Le prochain UID que cette boîte servira.
@@ -261,6 +301,21 @@ impl Maildir {
     #[must_use]
     pub fn next_uid(&self) -> Uid {
         Uid::new(self.prochain_uid.load(Ordering::Relaxed)).unwrap_or(Uid::FIRST)
+    }
+
+    /// Le nom d'hôte qui entre dans les noms de fichiers de cette boîte.
+    ///
+    /// **Tel qu'il est UTILISÉ, et non tel qu'il a été donné** : Maildir
+    /// prescrit d'y remplacer `/` et `:`, et c'est fait à l'ouverture. Le
+    /// repasser à [`Maildir::open`] rend donc exactement la même boîte — il n'y
+    /// reste plus rien à remplacer.
+    ///
+    /// C'est ce dont un DOSSIER a besoin : il appartient au même compte que sa
+    /// boîte de réception, et deux noms d'hôte pour un même compte feraient deux
+    /// familles de noms de fichiers là où il n'y a qu'une machine.
+    #[must_use]
+    pub fn host(&self) -> &[u8] {
+        &self.hote
     }
 
     /// Le chemin de la boîte.
@@ -370,6 +425,9 @@ pub struct Incoming {
     unique: Vec<u8>,
     uid: Uid,
     ecrits: u64,
+    /// Combien d'octets sont réservés en tête — voir
+    /// [`Incoming::reserve_prologue`].
+    reserve: usize,
 }
 
 impl Incoming {
@@ -377,6 +435,58 @@ impl Incoming {
     #[must_use]
     pub fn uid(&self) -> Uid {
         self.uid
+    }
+
+    /// Réserve `combien` octets EN TÊTE du message, pour un en-tête de trace.
+    ///
+    /// # POURQUOI UNE PLACE RÉSERVÉE, ET NON UNE ÉCRITURE DANS L'ORDRE
+    ///
+    /// Un en-tête de trace doit précéder ce que le pair écrit. Certains verdicts
+    /// — DKIM, et DMARC qui en dépend — ne se savent qu'une fois le CORPS entier
+    /// lu : ils arrivent APRÈS que le message a été diffusé ici.
+    ///
+    /// Rassembler le message pour l'écrire ensuite dans le bon ordre coûterait
+    /// sa taille en mémoire, par connexion. Le recopier après coup coûterait une
+    /// seconde écriture disque par message. **Réserver coûte un `pwrite` d'une
+    /// taille fixe**, payé une fois.
+    ///
+    /// La place est remplie d'espaces : c'est à l'appelant d'y écrire quelque
+    /// chose de valable avec [`Incoming::set_prologue`], et **c'est lui qui sait
+    /// ce qui fait un en-tête**. Cette crate n'écrit aucun protocole.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`].
+    pub fn reserve_prologue(&mut self, combien: usize) -> Result<(), Error> {
+        self.reserve = combien;
+        let blancs = std::vec![b' '; combien];
+        self.write(&blancs)
+    }
+
+    /// Écrit le prologue dans la place réservée.
+    ///
+    /// **RIEN N'EST ÉCRIT SI LA TAILLE NE CORRESPOND PAS EXACTEMENT.** Un octet
+    /// de trop écraserait le premier en-tête du pair ; un de moins laisserait un
+    /// trou au milieu du message. Dans les deux cas, la place réservée reste des
+    /// espaces — ce qui n'est pas un en-tête valable, et c'est à l'appelant de
+    /// n'appeler qu'avec la taille qu'il a demandée.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`].
+    pub fn set_prologue(&mut self, octets: &[u8]) -> Result<(), Error> {
+        if octets.len() != self.reserve {
+            return Ok(());
+        }
+        if let Some(fichier) = self.fichier.as_mut() {
+            // `write_all_at` N'A PAS D'ÉTAT DE POSITION : il n'y a pas de
+            // `seek` à défaire, et l'écriture qui suivra reprendra là où elle
+            // en était. C'est ce qui permet d'écrire en tête d'un fichier qu'on
+            // est en train de remplir.
+            use std::os::unix::fs::FileExt as _;
+            fichier.write_all_at(octets, 0)?;
+        }
+        Ok(())
     }
 
     /// Ajoute des octets au message.
@@ -581,6 +691,102 @@ mod tests {
         let resume = boite.summary().expect("résumable");
         assert_eq!(resume.next_uid, Uid::FIRST);
         assert_eq!(resume.numbered, 0);
+    }
+
+    /// **LA PLACE RÉSERVÉE SE REMPLIT SANS DÉCALER LE MESSAGE.**
+    ///
+    /// Un octet de trop écraserait le premier en-tête du pair ; un de moins
+    /// laisserait un trou au milieu du message.
+    /// **UN MESSAGE ADOPTÉ ARRIVE ENTIER, AVEC UN UID DE SA NOUVELLE BOÎTE.**
+    ///
+    /// C'est ce dont la quarantaine DMARC a besoin : le verdict tombe après que
+    /// le message est écrit, et il doit alors changer de boîte sans être
+    /// recopié.
+    #[test]
+    fn un_message_adopte_change_de_boite_sans_etre_recopie() {
+        let temporaire = Ephemere::nouveau();
+        let boite = boite(&temporaire);
+        let ailleurs = Maildir::open(temporaire.0.join(".Junk"), b"mail.example.com", VALIDITE)
+            .expect("ouvrable");
+
+        // Deux remises dans la boîte d'arrivée : la seconde est adoptée, et son
+        // UID d'origine reste donc inutilisé.
+        let perdu = boite.deliver().expect("remise ouverte");
+        assert_eq!(perdu.uid(), Uid::FIRST);
+        perdu.abort();
+        let mut arrivee = boite.deliver().expect("remise ouverte");
+        assert_ne!(arrivee.uid(), Uid::FIRST, "l'origine en avait servi un");
+        arrivee
+            .write(b"From: moi\r\n\r\nbonjour\r\n")
+            .expect("écriture");
+        let uid = ailleurs.adopt(arrivee).expect("adoptée");
+
+        assert_eq!(uid, Uid::FIRST, "l'UID vient de la boîte qui adopte");
+        assert!(noms(&boite, "new").is_empty(), "rien dans l'arrivée");
+        assert!(noms(&boite, "tmp").is_empty(), "rien en attente");
+        let noms = noms(&ailleurs, "new");
+        let nom = noms.first().expect("un message");
+        let lu = fs::read(ailleurs.root().join("new").join(super::nom_de_fichier(nom)))
+            .expect("lisible");
+        assert_eq!(lu, b"From: moi\r\n\r\nbonjour\r\n");
+        // Et la boîte adoptante le compte comme le sien.
+        assert_eq!(ailleurs.summary().expect("résumable").numbered, 1);
+    }
+
+    #[test]
+    fn un_prologue_reserve_se_remplit_en_tete() {
+        let temporaire = Ephemere::nouveau();
+        let boite = boite(&temporaire);
+
+        const PROLOGUE: &[u8] = b"Authentication-Results: nous; none\r\n";
+        let mut arrivee = boite.deliver().expect("remise ouverte");
+        arrivee
+            .reserve_prologue(PROLOGUE.len())
+            .expect("place réservée");
+        arrivee.write(b"From: moi\r\n\r\n").expect("écriture");
+        arrivee.write(b"bonjour\r\n").expect("écriture");
+        arrivee.set_prologue(PROLOGUE).expect("prologue écrit");
+        arrivee.commit().expect("validé");
+
+        let noms = noms(&boite, "new");
+        let nom = noms.first().expect("un message");
+        let chemin = boite.root().join("new").join(super::nom_de_fichier(nom));
+        let lu = fs::read(chemin).expect("lisible");
+        let mut attendu = std::vec::Vec::from(PROLOGUE);
+        attendu.extend_from_slice(b"From: moi\r\n\r\nbonjour\r\n");
+        assert_eq!(lu, attendu);
+    }
+
+    /// **RIEN N'EST ÉCRIT SI LA TAILLE NE CORRESPOND PAS.**
+    ///
+    /// La place reste alors des espaces — ce qui n'est pas un en-tête valable,
+    /// et c'est à l'appelant de n'appeler qu'avec la taille qu'il a demandée.
+    #[test]
+    fn un_prologue_de_la_mauvaise_taille_ne_s_ecrit_pas() {
+        let temporaire = Ephemere::nouveau();
+        let boite = boite(&temporaire);
+
+        let mut arrivee = boite.deliver().expect("remise ouverte");
+        arrivee.reserve_prologue(8).expect("place réservée");
+        arrivee.write(b"corps\r\n").expect("écriture");
+        // Trop court, puis trop long : ni l'un ni l'autre n'écrit.
+        arrivee.set_prologue(b"court").expect("sans effet");
+        arrivee
+            .set_prologue(b"beaucoup trop long")
+            .expect("sans effet");
+        arrivee.commit().expect("validé");
+
+        let noms = noms(&boite, "new");
+        let nom = noms.first().expect("un message");
+        let chemin = boite.root().join("new").join(super::nom_de_fichier(nom));
+        let lu = fs::read(chemin).expect("lisible");
+        assert_eq!(lu, b"        corps\r\n");
+
+        // Et sans place réservée du tout, un prologue ne s'écrit pas non plus.
+        let mut autre = boite.deliver().expect("remise ouverte");
+        autre.write(b"corps\r\n").expect("écriture");
+        autre.set_prologue(b"x").expect("sans effet");
+        autre.commit().expect("validé");
     }
 
     #[test]

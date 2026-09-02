@@ -42,6 +42,56 @@ pub trait Delivery {
         let _ = return_path;
     }
 
+    /// Combien d'octets réserver en tête pour un en-tête de trace.
+    ///
+    /// Appelée **avant** le premier [`Delivery::add_recipient`], et suivie d'un
+    /// [`Delivery::trace`] avant [`Delivery::finish`].
+    ///
+    /// # POURQUOI RÉSERVER, PLUTÔT QU'ÉCRIRE DANS L'ORDRE
+    ///
+    /// Un en-tête de trace doit précéder ce que le pair écrit. Or DKIM ne se
+    /// juge qu'une fois le CORPS entier lu — son condensat porte dessus — et
+    /// DMARC en dépend : le verdict arrive APRÈS que le message a été diffusé.
+    ///
+    /// Rassembler le message coûterait sa taille en mémoire par connexion, ce
+    /// que C3 interdit ; le recopier coûterait une seconde écriture disque par
+    /// message. Réserver coûte une taille FIXE, une fois.
+    ///
+    /// **LE DÉFAUT NE RÉSERVE RIEN**, et ne peut donc que priver d'un en-tête —
+    /// jamais en fabriquer un faux.
+    fn reserve_trace(&mut self, combien: usize) {
+        let _ = combien;
+    }
+
+    /// L'en-tête de trace, une fois les verdicts connus.
+    ///
+    /// **IL DOIT FAIRE EXACTEMENT la taille réservée** : un octet de trop
+    /// écraserait le premier en-tête du pair, un de moins laisserait un trou au
+    /// milieu du message.
+    fn trace(&mut self, entete: &[u8]) {
+        let _ = entete;
+    }
+
+    /// **Met ce message de côté** : une politique DMARC le met en quarantaine.
+    ///
+    /// Appelée entre le dernier [`Delivery::append`] et [`Delivery::finish`] —
+    /// le verdict dépend de DKIM, dont la signature couvre le corps, et n'existe
+    /// donc pas plus tôt.
+    ///
+    /// # ELLE REND CE QU'ELLE A FAIT, ET NON CE QU'ON LUI A DEMANDÉ
+    ///
+    /// `true` seulement si la remise a bien un endroit où mettre ce message de
+    /// côté. C'est ce que le rapport agrégé écrira (RFC 7489 §7.2) : un message
+    /// que `p=quarantine` visait et que ce serveur a remis dans la boîte de
+    /// réception se rapporte `none`, parce que c'est la vérité. Écrire
+    /// `quarantine` ferait croire à un domaine qu'il est protégé là où il ne
+    /// l'est pas.
+    ///
+    /// **LE DÉFAUT NE MET RIEN DE CÔTÉ, ET LE DIT.**
+    fn quarantine(&mut self) -> bool {
+        false
+    }
+
     /// Ouvre la remise vers **un** destinataire accepté.
     ///
     /// Appelée une fois par destinataire, juste avant le premier

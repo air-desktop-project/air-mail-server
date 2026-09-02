@@ -181,6 +181,12 @@ pub struct Dmarc {
     ///
     /// **Ils portent le courrier de quelqu'un.** Le défaut est faux.
     pub failure_reports: bool,
+    /// Le dossier où déposer un message que `p=quarantine` vise, ou une chaîne
+    /// vide.
+    ///
+    /// **Vide, la quarantaine n'existe pas** : le message va dans la boîte de
+    /// réception, et le rapport dit `none`, parce que c'est la vérité.
+    pub quarantine_folder: String,
 }
 
 impl Dmarc {
@@ -207,6 +213,16 @@ impl Dmarc {
     #[must_use]
     pub fn rapporte_les_echecs(&self) -> bool {
         self.rapporte() && self.failure_reports
+    }
+
+    /// Ce service MET-IL DE CÔTÉ ce qu'une politique met en quarantaine ?
+    ///
+    /// **Cela ne dépend pas de [`Enforcement`]**, qui gouverne le refus d'un
+    /// `p=reject` : la quarantaine remet le message, elle ne peut rien perdre,
+    /// et il n'y a donc rien à découvrir avant de l'ouvrir.
+    #[must_use]
+    pub fn met_en_quarantaine(&self) -> bool {
+        self.est_configure() && !self.quarantine_folder.is_empty()
     }
 
     /// Ce service compose-t-il des rapports ?
@@ -644,6 +660,10 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
         report_interval_seconds: alignement.get_report_interval_seconds(),
         send_reports: alignement.get_send_reports(),
         failure_reports: alignement.get_failure_reports(),
+        // **UN FICHIER ÉCRIT AVANT CE CHAMP DÉCODE UNE CHAÎNE VIDE**, et vide
+        // vaut « pas de quarantaine » : une configuration existante se comporte
+        // exactement comme avant.
+        quarantine_folder: texte(alignement.get_quarantine_folder()?)?,
     };
 
     let chiffrement = lu.get_tls()?;
@@ -795,6 +815,7 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
             alignement.set_report_interval_seconds(config.dmarc.report_interval_seconds);
             alignement.set_send_reports(config.dmarc.send_reports);
             alignement.set_failure_reports(config.dmarc.failure_reports);
+            alignement.set_quarantine_folder(&config.dmarc.quarantine_folder);
         }
         ecrit.set_accounts(&config.accounts);
         ecrit.set_listen_pop3(&config.listen_pop3);
@@ -939,6 +960,7 @@ mod tests {
                 report_interval_seconds: 3_600,
                 send_reports: true,
                 failure_reports: false,
+                quarantine_folder: String::from("Junk"),
             },
             dkim: Dkim {
                 selector: String::from("mars2026"),
@@ -1282,12 +1304,14 @@ mod tests {
             report_interval_seconds: 3_600,
             send_reports: true,
             failure_reports: true,
+            quarantine_folder: String::from("Junk"),
         };
         let octets = encode(&original).expect("encodable");
         let relue = decode(&octets).expect("relisible");
         assert_eq!(relue.dmarc, original.dmarc);
         assert!(relue.dmarc.est_configure());
         assert!(relue.dmarc.rapporte());
+        assert!(relue.dmarc.met_en_quarantaine());
         assert!(!alloc::format!("{:?}", relue.dmarc).is_empty());
     }
 
@@ -1296,6 +1320,26 @@ mod tests {
     /// rapporter — et une liste sans dossier évalue sans rien écrire.
     /// **Composer et remettre sont deux services distincts** : le premier
     /// n'écrit que dans un dossier de la machine, le second parle à des tiers.
+    /// **LA QUARANTAINE NE DÉPEND PAS DE `enforcement`.**
+    ///
+    /// `observe` et `enforce` gouvernent le REFUS d'un `p=reject` ; la
+    /// quarantaine, elle, remet. Sans nom de dossier, elle n'existe pas — et
+    /// sans liste de suffixes non plus, puisque rien ne serait évalué.
+    #[test]
+    fn la_quarantaine_ne_tient_qu_au_dossier_et_a_l_evaluation() {
+        let mut config = exemple();
+        config.dmarc.quarantine_folder = String::from("Junk");
+        assert!(
+            !config.dmarc.met_en_quarantaine(),
+            "rien n'est évalué : rien n'est mis de côté"
+        );
+        config.dmarc.public_suffix_list = String::from("/etc/ams/psl.dat");
+        assert!(config.dmarc.met_en_quarantaine());
+        assert_eq!(config.dmarc.enforcement, Enforcement::Observe);
+        config.dmarc.quarantine_folder.clear();
+        assert!(!config.dmarc.met_en_quarantaine());
+    }
+
     #[test]
     fn remettre_se_demande_en_plus_de_composer() {
         let mut config = exemple();

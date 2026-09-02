@@ -75,6 +75,11 @@ pub struct Options {
     pub dmarc_send: bool,
     /// Compose-t-on des rapports d'échec ?
     pub dmarc_failures: bool,
+    /// Le dossier où mettre de côté ce que `p=quarantine` vise.
+    ///
+    /// **Vide, la quarantaine n'existe pas** : le message va dans la boîte de
+    /// réception, et le rapport dit `none`, parce que c'est la vérité.
+    pub dmarc_quarantine: Option<String>,
     /// Les seuils du garde — le `x` et le `y` de C8, et le reste.
     ///
     /// **RIEN ICI N'EST UNE CONSTANTE**, dit C8 ; il fallait donc que l'outil
@@ -168,6 +173,7 @@ impl Default for Options {
             dmarc_send: false,
             // ILS PORTENT LE COURRIER DE QUELQU'UN. Le défaut n'en compose pas.
             dmarc_failures: false,
+            dmarc_quarantine: None,
             // PAS DE RELAIS PAR DÉFAUT. Un serveur qu'on met à jour ne devient
             // pas un émetteur sans que personne l'ait décidé — la même règle que
             // pour `--dmarc-send`, et pour la même raison.
@@ -263,6 +269,7 @@ impl Options {
                 report_interval_seconds: self.dmarc_report_interval,
                 send_reports: self.dmarc_send,
                 failure_reports: self.dmarc_failures,
+                quarantine_folder: self.dmarc_quarantine.clone().unwrap_or_default(),
             },
             dkim: Dkim {
                 selector: self.dkim_selector.clone().unwrap_or_default(),
@@ -322,6 +329,29 @@ impl ArgError {
             message: message.into(),
         }
     }
+}
+
+/// Un nom de dossier, ou la raison pour laquelle ce n'en est pas un.
+///
+/// # LA RÈGLE EST CELLE D'IMAP, PARCE QUE LE DOSSIER EN EST UN
+///
+/// Ce nom deviendra un répertoire Maildir++ à la racine d'un compte et une
+/// boîte que `LIST` annonce. Écrire ici une seconde règle « à peu près
+/// équivalente » ferait accepter un nom que le serveur refuserait ensuite de
+/// montrer — et l'administrateur ne saurait pas lequel des deux a raison.
+fn nom_de_dossier(brut: &str) -> Result<String, ArgError> {
+    // Le `/` final est celui qu'IMAP tolère et ignore ; on l'ôte ICI plutôt que
+    // de l'écrire dans le fichier, où il ferait un répertoire dont le nom se
+    // termine par un point.
+    let brut = brut.strip_suffix('/').unwrap_or(brut);
+    if !ams_proto_imap::mailbox_name_is_safe(brut.as_bytes()) {
+        return Err(ArgError::new(format!(
+            "`{brut}` n'est pas un nom de boîte : chaque morceau séparé par `/` doit être en \
+             ASCII visible, sans espace en bordure, et sans `.` `\\` `%` `*` `\"` `:` — ce \
+             dossier devient une boîte IMAP"
+        )));
+    }
+    Ok(String::from(brut))
 }
 
 /// Le texte des options de `config write`.
@@ -495,6 +525,23 @@ OPTIONS DE `config write`
     de routage : seule une liste blanche d'en-têtes en sort, et un même domaine
     n'en vaut que cent par période. Cela ne rend pas la décision anodine, et
     c'est pourquoi ce n'est pas le défaut.
+
+    `--dmarc-quarantine-folder Junk` MET DE CÔTÉ ce qu'un `p=quarantine` vise, dans
+    un dossier de ce nom, créé au besoin à la remise. C'est un dossier IMAP
+    ordinaire, que tout client montre sans rien connaître de DMARC ; en POP3, où
+    il n'y a qu'une boîte, il ne se voit pas — le message y est simplement absent,
+    et l'en-tête `Authentication-Results` dit pourquoi.
+
+    SANS CETTE OPTION, RIEN NE CHANGE : le message va dans la boîte de réception,
+    et le rapport agrégé dit `none`, parce que c'est ce qui a été fait. Écrire
+    `quarantine` sans dossier ferait croire à un domaine qu'il est protégé là où
+    il ne l'est pas, et c'est le seul mensonge qu'un rapport ne peut pas se
+    permettre.
+
+    ELLE NE DÉPEND PAS DE `--dmarc enforce`. `observe` et `enforce` gouvernent le
+    REFUS d'un `p=reject` — ce qui se perd si l'on se trompe. La quarantaine, elle,
+    REMET : elle déplace, elle ne jette pas, et il n'y a donc rien à découvrir
+    avant de l'ouvrir.
 
     `--dmarc-org-name` est le nom sous lequel ce receveur se présente (défaut :
     le nom annoncé), `--dmarc-report-email` l'adresse où le joindre (défaut :
@@ -729,6 +776,9 @@ where
             }
             "--dmarc-send" => options.dmarc_send = true,
             "--dmarc-failure-reports" => options.dmarc_failures = true,
+            "--dmarc-quarantine-folder" => {
+                options.dmarc_quarantine = Some(nom_de_dossier(&valeur()?)?);
+            }
             "--dmarc-org-name" => options.dmarc_org_name = Some(valeur()?),
             "--dmarc-report-email" => options.dmarc_report_email = Some(valeur()?),
             "--dmarc-report-interval" => {
@@ -918,6 +968,15 @@ where
             "`--mta-sts-anchors` et `--mta-sts-cache` vont ENSEMBLE : sans autorités on ne \
              saurait pas à qui l'on parle, et sans cache un redémarrage rouvrirait la fenêtre \
              de déclassement que le cache existe pour fermer",
+        ));
+    }
+    // **UN DOSSIER DE QUARANTAINE SANS ÉVALUATION NE VERRAIT JAMAIS RIEN.** Le
+    // dossier ne se remplit que d'un verdict DMARC, et il n'y a pas de verdict
+    // sans liste de suffixes : nommer l'un sans l'autre demande une protection
+    // qui n'aura pas lieu, en silence.
+    if options.dmarc_quarantine.is_some() && options.public_suffix_list.is_none() {
+        return Err(ArgError::new(
+            "`--dmarc-quarantine-folder` demande `--public-suffix-list` : sans liste, DMARC              n'est pas évalué, et un dossier de quarantaine ne verrait jamais rien",
         ));
     }
     if options.dkim_selector.is_some() != options.dkim_key.is_some() {
@@ -1283,6 +1342,91 @@ mod tests {
             erreur.message
         );
         assert!(ecrire(&["--dmarc-send", "--queue-spool", "/var/spool/ams/file"]).dmarc_send);
+    }
+
+    // ── LA QUARANTAINE DMARC ────────────────────────────────────────────────
+
+    /// **SANS L'OPTION, RIEN NE CHANGE.**
+    #[test]
+    fn sans_dossier_la_quarantaine_n_existe_pas() {
+        let config = ecrire(&["--domain", "mail.example.com"]).en_configuration();
+        assert!(config.dmarc.quarantine_folder.is_empty());
+        assert!(!config.dmarc.met_en_quarantaine());
+    }
+
+    #[test]
+    fn un_dossier_de_quarantaine_traverse_jusqu_a_la_configuration() {
+        let config = ecrire(&[
+            "--public-suffix-list",
+            "/etc/ams/psl.dat",
+            "--dmarc-quarantine-folder",
+            "Junk",
+        ])
+        .en_configuration();
+        assert_eq!(config.dmarc.quarantine_folder, "Junk");
+        assert!(config.dmarc.met_en_quarantaine());
+        // ET SANS `--dmarc enforce` : la quarantaine remet, elle ne refuse pas.
+        assert_eq!(config.dmarc.enforcement, ams_config::Enforcement::Observe);
+    }
+
+    /// **UN DOSSIER SANS ÉVALUATION NE VERRAIT JAMAIS RIEN**, et le silence
+    /// serait pris pour une protection.
+    #[test]
+    fn un_dossier_de_quarantaine_sans_liste_est_refuse() {
+        let erreur = parse(["--dmarc-quarantine-folder", "Junk"].as_slice()).expect_err("refusé");
+        assert!(
+            erreur.message.contains("--public-suffix-list"),
+            "« {} » ne dit pas ce qui manque",
+            erreur.message
+        );
+    }
+
+    /// **LA RÈGLE EST CELLE D'IMAP, PARCE QUE LE DOSSIER EN EST UN.**
+    ///
+    /// Un nom que l'administration accepterait et que `LIST` refuserait de
+    /// montrer serait un dossier que personne ne pourrait ouvrir.
+    #[test]
+    fn un_nom_de_dossier_irrecevable_est_refuse() {
+        for mauvais in ["", "..", "/", "a.b", "Junk:1", " Junk", "Junk\\x"] {
+            let erreur = parse(
+                [
+                    "--public-suffix-list",
+                    "/etc/ams/psl.dat",
+                    "--dmarc-quarantine-folder",
+                    mauvais,
+                ]
+                .as_slice(),
+            )
+            .expect_err("refusé");
+            assert!(
+                erreur.message.contains("n'est pas un nom de boîte"),
+                "« {mauvais} » passe : {}",
+                erreur.message
+            );
+        }
+        // Le `/` final est celui qu'IMAP tolère : on l'ôte plutôt que d'en faire
+        // un répertoire dont le nom se termine par un point.
+        assert_eq!(
+            ecrire(&[
+                "--public-suffix-list",
+                "/etc/ams/psl.dat",
+                "--dmarc-quarantine-folder",
+                "Junk/",
+            ])
+            .en_configuration()
+            .dmarc
+            .quarantine_folder,
+            "Junk"
+        );
+        // Une hiérarchie, elle, est un nom de boîte recevable.
+        let config = ecrire(&[
+            "--public-suffix-list",
+            "/etc/ams/psl.dat",
+            "--dmarc-quarantine-folder",
+            "Courrier/Junk",
+        ])
+        .en_configuration();
+        assert_eq!(config.dmarc.quarantine_folder, "Courrier/Junk");
     }
 
     // ── MTA-STS (RFC 8461) ──────────────────────────────────────────────────

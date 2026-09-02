@@ -209,6 +209,44 @@ async fn un_from_illisible_ou_multiple_rend_le_message_inutilisable() {
     }
 }
 
+/// **`designated` DIT CE QUE LE DOMAINE DEMANDE ; `applies`, CE QU'ON OPPOSE.**
+///
+/// Les deux existent parce que les deux décisions ne coûtent pas la même chose.
+/// Refuser perd le message si l'on se trompe, et cela se découvre en
+/// observation. Mettre de côté ne perd rien — c'est pourquoi la quarantaine lit
+/// le premier et non le second.
+#[tokio::test]
+async fn en_observation_le_domaine_designe_toujours_sans_qu_on_oppose_rien() {
+    let table: &[(&str, &str)] = &[("_dmarc.example.com", "v=DMARC1; p=quarantine")];
+    let resolveur = resolveur_par_nom(table).await;
+
+    let observe = checker(resolveur, false)
+        .verdict(ENTETES, &authentifie(None, &[]))
+        .await;
+    assert_eq!(observe.verdict, DmarcVerdict::Fail);
+    assert!(observe.designated, "le domaine demande la quarantaine");
+    assert!(!observe.applies, "ce serveur, lui, n'oppose rien");
+
+    let applique = checker(resolveur, true)
+        .verdict(ENTETES, &authentifie(None, &[]))
+        .await;
+    assert!(applique.designated);
+    assert!(applique.applies);
+}
+
+/// **UN MESSAGE ALIGNÉ N'EST DÉSIGNÉ PAR PERSONNE**, quel que soit le réglage.
+#[tokio::test]
+async fn un_message_aligne_n_est_pas_designe() {
+    let table: &[(&str, &str)] = &[("_dmarc.example.com", "v=DMARC1; p=quarantine")];
+    let resolveur = resolveur_par_nom(table).await;
+    let resultat = checker(resolveur, true)
+        .verdict(ENTETES, &authentifie(None, &["example.com"]))
+        .await;
+    assert_eq!(resultat.verdict, DmarcVerdict::Pass);
+    assert!(!resultat.designated);
+    assert!(!resultat.applies);
+}
+
 // ── DANS LA BOUCLE ──────────────────────────────────────────────────────────
 
 /// Joue une transaction complète, et rend la réponse au point final.

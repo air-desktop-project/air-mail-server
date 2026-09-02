@@ -72,6 +72,7 @@
 extern crate std;
 
 mod address;
+mod authres;
 mod base64;
 mod bounce;
 mod compose;
@@ -88,6 +89,10 @@ mod select;
 mod structure;
 
 pub use address::{AddressElements, address_elements, author_domain, bare_address, sole_address};
+pub use authres::{
+    AUTHRES_RESERVE, Authentication, DKIM_MAX, DkimResult, DkimSeen, DmarcResult, SpfIdentity,
+    SpfResult, authres_max, write_authres, write_authres_padded,
+};
 pub use base64::{BASE64_LINE, base64_max, encode_base64};
 pub use bounce::{Bounce, Failure, bounce_max, write_bounce};
 pub use compose::{ReportMail, report_mail_max, write_report_mail};

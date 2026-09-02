@@ -1538,15 +1538,17 @@ connexion — que le serveur annonce à l'arrêt. Éprouvé de bout en bout, jus
 binaire : un message signé par OpenSSL, une clé servie par un vrai résolveur sur
 une socket locale, et « 1 signature vraie » au journal.
 
-### Le verdict n'arrive qu'après le corps, et rien n'est écrit dans le message
+### Le verdict n'arrive qu'après le corps — RÉSOLU le 2026-09-02
 
 SPF conclut au `MAIL FROM:` — avant que le message existe. DKIM signe le corps :
 son verdict ne peut pas être connu avant le dernier octet. Un en-tête de résultat
-se pose EN TÊTE ; l'écrire demanderait donc soit de garder tout le message, soit
-de le récrire. Les deux méritent leur propre décision, et c'est DMARC qui la
-portera — avec l'`Authentication-Results` (RFC 8601) qui rapportera les trois
-méthodes ensemble. En attendant, le verdict va au seul endroit qui existe : le
-compte que le serveur rend à l'arrêt.
+se pose EN TÊTE ; l'écrire demandait donc soit de garder tout le message en
+mémoire, soit de le récrire sur le disque.
+
+**Ni l'un ni l'autre : on RÉSERVE.** Mille vingt-quatre octets d'espaces sont
+écrits en tête du fichier `tmp/` avant le premier octet du pair, et écrasés d'un
+`pwrite` une fois les verdicts connus. Le coût est une taille FIXE, payée une
+fois. Voir « `Authentication-Results` » plus bas.
 
 ### DKIM ne refuse aucun message, et c'est voulu
 
@@ -1631,12 +1633,80 @@ endroit ne sert personne. Éprouvé jusqu'au binaire : un message dont le `From:
 dit `banque.test` et dont rien ne s'aligne reçoit son 550 et n'est pas remis ;
 le message aligné qui suit passe.
 
-### La quarantaine n'est pas encore un endroit
+### La quarantaine, depuis le 2026-09-02
 
-`p=quarantine` demande de traiter le message comme suspect. Ce serveur n'a pas de
-dossier pour cela : il le REMET, et consigne la demande. Le refuser serait faire
-plus que ce que le domaine a demandé ; le taire serait faire moins que ce qu'on
-sait.
+`p=quarantine` demande de traiter le message comme suspect. Il a maintenant un
+endroit : `air-mail-admin config write --dmarc-quarantine-folder Junk` met ces
+messages dans un dossier de ce nom, à la racine de chaque compte, créé à la
+première remise qui en a besoin. C'est un dossier IMAP ordinaire, que tout client
+montre sans rien connaître de DMARC.
+
+**SANS L'OPTION, RIEN NE CHANGE** : le message va dans la boîte de réception, et
+le rapport agrégé dit `none`. C'est la règle de tout le produit — l'absence de
+valeur EST l'absence de service — et c'est aussi ce qui garde le rapport
+véridique : la remise REND si elle a su mettre de côté, et c'est cette réponse-là
+que le rapport écrit, jamais la demande du domaine.
+
+ELLE NE DÉPEND PAS DE `--dmarc enforce`, et cette séparation est le cœur du
+sujet. `enforce` gouverne le REFUS d'un `p=reject` — c'est-à-dire ce qui se PERD
+si l'on se trompe, et c'est pourquoi on l'observe longtemps avant de l'opposer.
+La quarantaine, elle, REMET : elle déplace, elle ne jette pas, et il n'y a rien à
+découvrir avant de l'ouvrir. Le code porte les deux : `designated` dit ce que le
+DOMAINE demande, `applies` ce que ce SERVEUR oppose, et le tirage de `pct=` est
+fait une seule fois pour les deux — deux tirages feraient mettre de côté un
+message qu'on n'aurait pas refusé.
+
+Le message n'est pas RECOPIÉ dans le dossier. Le verdict n'existe qu'une fois le
+corps entier lu — DKIM signe le corps, DMARC dépend de DKIM — et le fichier est
+donc déjà écrit dans le `tmp/` de la boîte de réception quand on apprend qu'il
+devait aller ailleurs. Le dossier l'ADOPTE : un `rename`, celui-là même que la
+validation faisait déjà, et un UID pris chez lui. Celui que l'arrivée avait
+réservé reste inutilisé — une boîte a le droit d'avoir des trous, et son
+filigrane les couvre.
+
+UN SEUL `Maildir` PAR RÉPERTOIRE, DANS TOUT LE PROCESSUS. Ce n'est pas un cache
+d'optimisation, c'est une correction : chaque `Maildir` numérote ce qu'il remet à
+partir d'un compteur qui lui est propre, et deux instances ouvertes sur le même
+répertoire serviraient le même UID à deux messages différents. La boîte de
+réception l'évitait déjà, en n'existant qu'à un endroit ; les dossiers vivaient
+dans le service IMAP, jusqu'à ce que la quarantaine ait besoin d'en ouvrir un.
+Ils vivent maintenant dans le même registre, IMAP compris.
+
+### `Authentication-Results`, depuis le 2026-09-02
+
+Un verdict que personne ne voit ne protège personne. En IMAP, un dossier de
+quarantaine se voit ; en POP3, où il n'y a qu'une boîte, **rien** ne se voyait :
+le message arrivait, et ce qu'on en avait pensé restait dans le journal du
+serveur.
+
+Chaque message qui arrive porte donc maintenant un champ `Authentication-Results`
+(RFC 8601), écrit EN TÊTE, avec ce que SPF, DKIM et DMARC ont donné. Quand rien
+n'a été vérifié, §2.2 prévoit le mot `none`, et c'est celui-là qu'on écrit : un
+en-tête absent laisserait croire qu'un autre, fabriqué par le pair, vient de
+nous.
+
+ON ÉCRIT LE VERDICT, JAMAIS CE QU'ON EN A FAIT. `dmarc=fail` sur un message non
+aligné, même en observation, même quand rien n'est opposé. Confondre les deux
+ferait un en-tête qui ment à celui qui le lit.
+
+**LA PLACE EST RÉSERVÉE, PUIS REMPLIE.** Le verdict arrive après que le message a
+été diffusé sur le disque. Rassembler le message pour l'écrire ensuite dans le
+bon ordre coûterait sa taille en mémoire par connexion, ce que C3 interdit ; le
+recopier coûterait une seconde écriture disque par message. On réserve donc 1 024
+octets d'espaces en tête du fichier `tmp/`, et on les écrase d'un `pwrite` une
+fois les verdicts connus. Le remplissage est un pli RFC 5322 §3.2.2 : le champ
+reste UN champ valable, du premier octet au dernier. Les signatures DKIM qui ne
+tiennent pas dans cette place sont abandonnées — SPF et DMARC, eux, tiennent
+toujours, leurs domaines étant bornés à 253 octets.
+
+ÉCART ASSUMÉ AVEC §7.1 DE RFC 8601 : nous ne SUPPRIMONS pas les
+`Authentication-Results` que le message portait déjà en arrivant. Un pair peut
+donc en fabriquer un qui nous nomme. Ce que la RFC veut empêcher — qu'un lecteur
+prenne un champ étranger pour le nôtre — est atténué autrement : **le nôtre est
+toujours le premier**, puisqu'il est écrit dans une place réservée avant le
+premier octet du pair, et un lecteur qui prend le premier prend le bon. Supprimer
+les autres demanderait de réécrire le bloc d'en-têtes du pair, c'est-à-dire de
+récrire le message que sa propre signature DKIM couvre.
 
 ### Les rapports agrégés, depuis le 2026-08-29
 
@@ -3719,9 +3789,9 @@ il l'a commis sur lui-même : une section qui s'intitule « l'état réel » est
 qu'on relit le moins, parce qu'on croit la connaître.
 
 Sont outillées : C1 (les trois étages, et la couverture qui n'est exigible que
-parce qu'ils sont séparés), C2 (le gate mesure 51 760 régions sur 29 crates,
+parce qu'ils sont séparés), C2 (le gate mesure 52 097 régions sur 29 crates,
 toutes couvertes — et il compare des comptes, non un pourcentage arrondi), C3
-(les lints, l'absence d'allocation dans les décodeurs, et 60 cibles de fuzz dont
+(les lints, l'absence d'allocation dans les décodeurs, et 61 cibles de fuzz dont
 la CI vérifie qu'elle les lance toutes), C4 (`ams-tls` n'offre que
 TLS 1.3), C6 (les décodeurs refusent le CR et le LF isolés ; `AUTH`, `USER`/`PASS`
 et `LOGIN` sont refusés hors chiffrement, sans réglage pour le rétablir), C8

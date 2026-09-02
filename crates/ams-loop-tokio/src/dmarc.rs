@@ -13,12 +13,17 @@
 //! l'une manque, DMARC n'évalue rien — et le serveur le dit au démarrage plutôt
 //! que de laisser croire à une protection qui n'existe pas.
 //!
-//! # La quarantaine n'est pas encore un endroit
+//! # La quarantaine REMET, et c'est pourquoi elle n'attend pas `enforce`
 //!
-//! `p=quarantine` demande de traiter le message comme suspect. Ce serveur n'a
-//! pas de dossier pour cela : il le REMET, et consigne la demande. Le refuser
-//! serait faire plus que ce que le domaine a demandé ; le taire serait faire
-//! moins que ce qu'on sait.
+//! `p=quarantine` demande de traiter le message comme suspect : la remise le
+//! met dans un dossier nommé, s'il en a un. Le refuser serait faire plus que ce
+//! que le domaine a demandé.
+//!
+//! [`DmarcResult::designated`] dit ce que le DOMAINE demande ;
+//! [`DmarcResult::applies`], ce que ce SERVEUR oppose. Les deux existent parce
+//! que les deux décisions ne coûtent pas la même chose : refuser perd le message
+//! si l'on se trompe — cela se découvre en observation — tandis que mettre de
+//! côté ne perd rien.
 
 use std::string::String;
 use std::vec::Vec;
@@ -59,10 +64,28 @@ pub struct DmarcResult {
     pub verdict: DmarcVerdict,
     /// Ce que le domaine demande pour un message non aligné.
     pub policy: Policy,
-    /// La politique doit-elle s'appliquer à CE message ?
+    /// Le domaine DÉSIGNE-T-IL ce message ?
     ///
     /// Faux quand le verdict passe, quand le domaine ne demande rien, ou quand
     /// le tirage de `pct=` a désigné ce message pour être épargné.
+    ///
+    /// # CE N'EST PAS `applies`, ET LA DIFFÉRENCE EST TOUT LE SUJET
+    ///
+    /// Celui-ci dit ce que le DOMAINE demande ; `applies` dit ce que CE SERVEUR
+    /// oppose, c'est-à-dire la même chose plus le réglage `enforce`.
+    ///
+    /// Les deux existent parce que les deux décisions ne se prennent pas au même
+    /// prix. **Refuser perd le message** si l'on se trompe : cela se découvre en
+    /// observation, et c'est `applies`. **Mettre de côté ne perd rien** : le
+    /// message est remis, dans un dossier que son destinataire ouvre quand il
+    /// veut, et cela n'a donc pas à attendre `enforce`.
+    ///
+    /// Le tirage de `pct=` est fait UNE fois, et les deux le lisent : deux
+    /// tirages feraient mettre de côté un message qu'on n'aurait pas refusé.
+    pub designated: bool,
+    /// La politique doit-elle s'appliquer à CE message, ICI ?
+    ///
+    /// C'est [`DmarcResult::designated`] **et** `enforce`.
     pub applies: bool,
     /// De quoi rapporter ce message, quand il y avait une politique à lire.
     ///
@@ -131,6 +154,7 @@ impl DmarcChecker {
             domain: String::new(),
             verdict: DmarcVerdict::Unusable,
             policy: Policy::None,
+            designated: false,
             applies: false,
             report: None,
         };
@@ -217,10 +241,10 @@ impl DmarcChecker {
             Verdict::Pass => DmarcVerdict::Pass,
             Verdict::Fail => DmarcVerdict::Fail,
         };
-        resultat.applies = juge.verdict == Verdict::Fail
+        resultat.designated = juge.verdict == Verdict::Fail
             && juge.policy != Policy::None
-            && self.enforce
             && self.tire_au_sort(juge.percent).await;
+        resultat.applies = resultat.designated && self.enforce;
         resultat
     }
 

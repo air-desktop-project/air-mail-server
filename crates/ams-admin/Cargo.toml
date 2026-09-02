@@ -24,6 +24,7 @@ ams-config = { workspace = true }
 ams-guard = { workspace = true }
 ams-queue = { workspace = true }
 ams-index = { workspace = true }
+ams-proto-imap = { workspace = true }
 ams-proto-smtp = { workspace = true }
 ams-store = { workspace = true }
 

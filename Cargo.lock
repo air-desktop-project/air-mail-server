@@ -52,6 +52,7 @@ dependencies = [
  "ams-config",
  "ams-guard",
  "ams-index",
+ "ams-proto-imap",
  "ams-proto-smtp",
  "ams-queue",
  "ams-store",

@@ -61,6 +61,7 @@ fuzz_ams_mime_limits mime
 fuzz_ams_mime_compose mime-compose
 fuzz_ams_mime_digest mime-digest
 fuzz_ams_mime_bounce mime-bounce
+fuzz_ams_authres authres
 fuzz_ams_queue queue
 fuzz_ams_dane dane
 fuzz_ams_mtasts mtasts

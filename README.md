@@ -78,7 +78,7 @@ horloge.
 
 | Crate | Périmètre | État |
 | --- | --- | --- |
-| `ams-mime` | RFC 5322 et MIME — le socle des quatre protocoles | **squelette du message, domaine d'un `From:`, et composition d'un rapport** |
+| `ams-mime` | RFC 5322 et MIME — le socle des quatre protocoles | **squelette du message, domaine d'un `From:`, composition d'un rapport, et `Authentication-Results`** |
 | `ams-proto-smtp` | RFC 5321 | **commandes, réponses écrites ET lues, phase de données, point-farcissage** |
 | `ams-sasl` | RFC 4422/4616 : `PLAIN` et son base64 | **implémenté** |
 | `ams-proto-pop3` | RFC 1939 | **commandes et réponses** |
@@ -1315,10 +1315,20 @@ pas pu**. C'est ce qui le rend éprouvable, et c'est la file de réémission qui
 décide de la suite — voir « [Émettre pour ses comptes](#émettre-pour-ses-comptes)
 ». Ses deux appelants sont la remise des rapports DMARC et cette file.
 
-**La quarantaine n'est pas encore un endroit.** `p=quarantine` demande de traiter
-le message comme suspect ; ce serveur n'a pas de dossier pour cela. Il le remet,
-et consigne la demande. Le refuser serait faire plus que ce que le domaine a
-demandé ; le taire serait faire moins que ce qu'on sait.
+**La quarantaine a un endroit.** `p=quarantine` demande de traiter le message
+comme suspect : `--dmarc-quarantine-folder Junk` le met dans un dossier de ce nom
+à la racine du compte, créé à la première remise, et que tout client IMAP montre
+sans rien connaître de DMARC. Sans l'option, rien ne change — le message va dans
+la boîte de réception, et le rapport agrégé dit `none`, parce que c'est ce qui a
+été fait.
+
+Elle ne dépend pas de `--dmarc enforce` : celui-ci gouverne le REFUS d'un
+`p=reject`, c'est-à-dire ce qui se perd si l'on se trompe. La quarantaine remet.
+
+**Et tout ce qui arrive porte un `Authentication-Results`** (RFC 8601), écrit en
+tête : c'est la seule façon, en POP3, de voir ce que SPF, DKIM et DMARC ont
+donné. On y écrit le VERDICT, jamais ce qu'on en a fait — `dmarc=fail` même en
+observation, où rien n'est opposé.
 
 `ams-dns` : le codec d'un message DNS — une question encodée, une réponse
 décodée. **Un client stub, et rien de plus** : ce serveur pose des questions, il
@@ -1887,13 +1897,13 @@ régression, **pas une campagne**.
 
 ### Couverture (C2)
 
-`scripts/check-couverture.sh` exige **100 %** sur les treize crates des étages 1
-et 2. Le seuil porte sur les **régions** et les **lignes** — pas sur les branches,
+`scripts/check-couverture.sh` exige **100 %** sur les vingt-neuf crates des
+étages 1 et 2. Le seuil porte sur les **régions** et les **lignes** — pas sur les branches,
 que `llvm-cov` n'instrumente pas sur Rust stable et dont le compteur reste à
 `0 / 0`. Les régions font le travail attendu : chaque bras d'un conditionnel en
 est une.
 
-Le gate mesure aujourd'hui **6 891 régions** et **4 044 lignes**, toutes
+Le gate mesure aujourd'hui **52 097 régions** et **29 934 lignes**, toutes
 couvertes. **Une seule dérogation, et elle est annoncée à chaque exécution** : le
 code *généré* du schéma Cap'n Proto en est exclu — il porte un accesseur par champ
 et par sens, dont la plupart ne seront jamais appelés, et les couvrir n'éprouverait

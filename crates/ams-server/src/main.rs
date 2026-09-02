@@ -614,12 +614,38 @@ async fn servir(fichier: &Path) -> Result<(), String> {
                 options.dmarc.public_suffix_list
             ),
             (Some(_), true) => format!(
-                "DMARC APPLIQUÉ — un `p=reject` est opposé (550) ; suffixes publics `{}`. \
-                 La quarantaine, elle, n'est pas encore un endroit : ces messages sont remis.",
+                "DMARC APPLIQUÉ — un `p=reject` est opposé (550) ; suffixes publics `{}`",
                 options.dmarc.public_suffix_list
             ),
         }
     );
+    // **VIDE, LA QUARANTAINE N'EXISTE PAS** : un `p=quarantine` est remis dans la
+    // boîte de réception, et le rapport agrégé le dit. `met_en_quarantaine`
+    // exige aussi que DMARC soit évalué — un dossier que rien ne remplirait
+    // annoncerait une protection qui n'a pas lieu.
+    let quarantaine = options
+        .dmarc
+        .met_en_quarantaine()
+        .then(|| options.dmarc.quarantine_folder.clone());
+    if verificateur_dmarc.is_some() {
+        // **CE N'EST PAS LE MÊME RÉGLAGE QUE `--dmarc enforce`**, et le dire
+        // séparément évite qu'on croie l'un compris dans l'autre : `enforce`
+        // gouverne le REFUS d'un `p=reject`, la quarantaine REMET ailleurs.
+        eprintln!(
+            "air-mail-server : {}",
+            match &quarantaine {
+                Some(dossier) => format!(
+                    "quarantaine DMARC dans le dossier `{dossier}` de chaque compte, créé à la \
+                     première remise"
+                ),
+                None => String::from(
+                    "quarantaine DMARC AUCUNE — un `p=quarantine` est remis dans la boîte de \
+                     réception, et les rapports le disent (`air-mail-admin \
+                     --dmarc-quarantine-folder …`)"
+                ),
+            }
+        );
+    }
 
     // ── MTA-STS (RFC 8461) ──────────────────────────────────────────────────
     //
@@ -1427,6 +1453,10 @@ async fn servir(fichier: &Path) -> Result<(), String> {
                 Arc::clone(&pour_la_remise),
                 Arc::clone(&comptes_pour_la_remise),
             );
+            let remise = match quarantaine.clone() {
+                Some(dossier) => remise.avec_quarantaine(dossier),
+                None => remise,
+            };
             match file_pour_la_remise.clone() {
                 Some(file) => remise.avec_file(file, message_max),
                 None => remise,

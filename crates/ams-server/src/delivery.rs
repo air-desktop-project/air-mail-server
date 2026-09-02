@@ -1,6 +1,7 @@
 //! Le fil entre la boucle et les boîtes.
 
 use std::collections::BTreeMap;
+use std::os::unix::ffi::OsStringExt as _;
 use std::sync::Arc;
 
 use ams_loop_tokio::{Delivery, DeliveryFailure, Spool};
@@ -24,6 +25,28 @@ use ams_store::{Incoming, Maildir};
 pub struct Boites {
     /// Une boîte par compte, par son nom.
     carte: std::sync::RwLock<BTreeMap<String, Arc<Maildir>>>,
+    /// Les DOSSIERS déjà ouverts, par compte et par nom.
+    ///
+    /// # CE N'EST PAS QU'UNE ÉCONOMIE, MÊME SI C'EN EST UNE
+    ///
+    /// Ouvrir un Maildir relit son index, adopte les messages sans UID et
+    /// réécrit l'index : le refaire à chaque `LIST` ou chaque `SELECT` coûterait
+    /// un parcours de répertoire par commande. Le registre ne grandit que d'une
+    /// entrée par dossier RÉELLEMENT ouvrable — un client ne peut donc pas le
+    /// faire enfler en nommant des boîtes au hasard.
+    ///
+    /// # UN SEUL `Maildir` PAR RÉPERTOIRE, DANS TOUT LE PROCESSUS
+    ///
+    /// Et c'est surtout une CORRECTION, non une optimisation. Chaque
+    /// `Maildir` numérote ce qu'il remet à partir d'un compteur qui lui est
+    /// propre ; deux instances ouvertes sur le même répertoire serviraient le
+    /// même UID à deux messages différents, et un client IMAP qui a mis l'un en
+    /// cache montrerait l'autre.
+    ///
+    /// La boîte de réception l'évitait déjà, en n'existant qu'ici. Les dossiers
+    /// vivaient dans le service IMAP — jusqu'à ce que la quarantaine DMARC ait,
+    /// elle aussi, besoin d'en ouvrir un.
+    dossiers: std::sync::RwLock<BTreeMap<(String, String), Arc<Maildir>>>,
 }
 
 impl Boites {
@@ -32,6 +55,7 @@ impl Boites {
     pub fn new(carte: BTreeMap<String, Arc<Maildir>>) -> Self {
         Self {
             carte: std::sync::RwLock::new(carte),
+            dossiers: std::sync::RwLock::new(BTreeMap::new()),
         }
     }
 
@@ -52,6 +76,46 @@ impl Boites {
     /// `ApiMaildir::supprimer_un_compte`.
     pub fn retirer(&self, nom: &str) {
         self.ecrire().remove(nom);
+    }
+
+    /// Le dossier de ce compte, ouvert par `faire` s'il ne l'est pas déjà.
+    ///
+    /// **`faire` est appelée SOUS LE VERROU**, et c'est délibéré : deux
+    /// connexions qui ouvrent le même dossier en même temps en construiraient
+    /// deux instances, et c'est exactement ce que ce registre existe pour
+    /// empêcher. Elle rend `None` quand le dossier n'est pas ouvrable, et rien
+    /// n'est alors retenu.
+    pub fn dossier_ou(
+        &self,
+        compte: &str,
+        nom: &str,
+        faire: impl FnOnce() -> Option<Arc<Maildir>>,
+    ) -> Option<Arc<Maildir>> {
+        let clef = (compte.to_owned(), nom.to_owned());
+        let mut ouverts = self.ecrire_dossiers();
+        if let Some(deja) = ouverts.get(&clef) {
+            return Some(Arc::clone(deja));
+        }
+        let boite = faire()?;
+        ouverts.insert(clef, Arc::clone(&boite));
+        Some(boite)
+    }
+
+    /// Oublie les dossiers ouverts que `garder` ne retient pas.
+    ///
+    /// Le prédicat reçoit le compte et le nom du dossier.
+    pub fn oublier_les_dossiers(&self, mut garder: impl FnMut(&str, &str) -> bool) {
+        self.ecrire_dossiers()
+            .retain(|(compte, nom), _| garder(compte, nom));
+    }
+
+    /// Le verrou d'écriture des dossiers, empoisonnement compris.
+    fn ecrire_dossiers(
+        &self,
+    ) -> std::sync::RwLockWriteGuard<'_, BTreeMap<(String, String), Arc<Maildir>>> {
+        self.dossiers
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Le verrou de lecture, empoisonnement compris.
@@ -118,7 +182,12 @@ impl Boites {
 pub struct MaildirDelivery {
     boites: Arc<Boites>,
     comptes: Arc<crate::comptes::Comptes>,
-    arrivees: Vec<Incoming>,
+    /// Les remises ouvertes, chacune avec le COMPTE dont elle est la boîte.
+    ///
+    /// Le nom du compte y est retenu parce que la quarantaine en a besoin
+    /// APRÈS coup : le verdict tombe une fois le corps lu, et il faut alors
+    /// savoir chez qui ouvrir le dossier.
+    arrivees: Vec<(String, Incoming)>,
     /// La file, quand l'émission est ouverte.
     file: Option<Spool>,
     /// Le `MAIL FROM:` de cette transaction — voir [`Delivery::begin`].
@@ -133,6 +202,20 @@ pub struct MaildirDelivery {
     corps: Vec<u8>,
     /// Ce qu'un message peut peser, pour que `corps` ne croisse pas sans fin.
     corps_max: usize,
+    /// Combien d'octets réserver en tête pour l'en-tête de trace.
+    ///
+    /// Zéro : on n'en écrit pas, et rien n'est réservé.
+    trace: usize,
+    /// Le dossier où mettre de côté ce que `p=quarantine` vise.
+    ///
+    /// **Aucun : la quarantaine n'existe pas**, et le message va dans la boîte
+    /// de réception comme n'importe quel autre.
+    quarantaine: Option<String>,
+    /// Ce message-ci doit-il être mis de côté ?
+    ///
+    /// Remis à faux par [`Delivery::begin`] : un second message sur la même
+    /// connexion n'hérite pas du verdict du premier.
+    ecarte: bool,
 }
 
 impl MaildirDelivery {
@@ -148,7 +231,21 @@ impl MaildirDelivery {
             sortants: Vec::new(),
             corps: Vec::new(),
             corps_max: 0,
+            trace: 0,
+            quarantaine: None,
+            ecarte: false,
         }
+    }
+
+    /// Lui donne un dossier où mettre de côté ce que DMARC met en quarantaine.
+    ///
+    /// **C'est la seule façon d'ouvrir la quarantaine**, et elle se voit : sans
+    /// cet appel, un `p=quarantine` est remis dans la boîte de réception, et le
+    /// rapport agrégé le dit.
+    #[must_use]
+    pub fn avec_quarantaine(mut self, dossier: String) -> Self {
+        self.quarantaine = Some(dossier);
+        self
     }
 
     /// Lui donne de quoi mettre en file ce qui n'est pas d'ici.
@@ -179,6 +276,29 @@ impl Delivery for MaildirDelivery {
         self.retour = return_path.map(|octets| String::from_utf8_lossy(octets).into_owned());
         self.sortants.clear();
         self.corps.clear();
+        self.ecarte = false;
+    }
+
+    fn reserve_trace(&mut self, combien: usize) {
+        self.trace = combien;
+    }
+
+    fn quarantine(&mut self) -> bool {
+        // **ON REND CE QU'ON PEUT FAIRE, ET NON CE QU'ON NOUS DEMANDE.** Sans
+        // dossier configuré, le message est remis dans la boîte de réception,
+        // et le rapport agrégé doit dire `none`.
+        self.ecarte = self.quarantaine.is_some();
+        self.ecarte
+    }
+
+    fn trace(&mut self, entete: &[u8]) {
+        for (_, arrivee) in &mut self.arrivees {
+            // **UN EN-TÊTE QU'ON NE SAIT PAS POSER NE FAIT PAS ÉCHOUER LA
+            // REMISE.** Le message arrive alors avec une place réservée remplie
+            // d'espaces plutôt qu'avec un en-tête ; c'est laid, et c'est bien
+            // moins grave que de perdre le message.
+            let _ = arrivee.set_prologue(entete);
+        }
     }
 
     fn add_recipient(&mut self, address: &[u8]) -> Result<(), DeliveryFailure> {
@@ -196,13 +316,18 @@ impl Delivery for MaildirDelivery {
         // Un `deliver` qui échoue — plus d'UID, disque plein — est TEMPORAIRE :
         // lui répondre « définitivement non » ferait jeter au pair un message
         // qui pourrait passer dans une heure.
-        let arrivee = boite.deliver().map_err(|_| DeliveryFailure::Temporary)?;
-        self.arrivees.push(arrivee);
+        let mut arrivee = boite.deliver().map_err(|_| DeliveryFailure::Temporary)?;
+        if self.trace > 0 {
+            arrivee
+                .reserve_prologue(self.trace)
+                .map_err(|_| DeliveryFailure::Temporary)?;
+        }
+        self.arrivees.push((compte.login.clone(), arrivee));
         Ok(())
     }
 
     fn append(&mut self, chunk: &[u8]) -> Result<(), DeliveryFailure> {
-        for arrivee in &mut self.arrivees {
+        for (_, arrivee) in &mut self.arrivees {
             arrivee
                 .write(chunk)
                 .map_err(|_| DeliveryFailure::Temporary)?;
@@ -233,16 +358,26 @@ impl Delivery for MaildirDelivery {
         // le message arrive deux fois quelque part : dans cet ordre, ce
         // « quelque part » est une boîte d'ici. L'ordre inverse ferait partir un
         // doublon chez un tiers, que personne ne peut plus rattraper.
+        let ecarte = self.ecarte;
         tokio::task::block_in_place(|| {
-            for arrivee in arrivees {
+            for (compte, arrivee) in arrivees {
                 // TOUT OU RIEN N'EST PAS TENABLE ICI : les `rename` sont
                 // atomiques un par un, pas ensemble. Un échec au milieu laisse
                 // les premiers remis, et le pair réessaiera — il recevra alors
                 // le message en double dans ces boîtes-là. C'est le compromis
                 // que fait tout serveur sans file d'attente, et le doublon est
                 // moins grave que la perte.
-                arrivee
-                    .commit()
+                let ecrit = match ecarte
+                    .then(|| self.dossier_de_quarantaine(&compte))
+                    .flatten()
+                {
+                    // **LE DOSSIER ADOPTE LE MESSAGE, IL NE LE RECOPIE PAS** :
+                    // le fichier est déjà écrit dans le `tmp/` de la boîte de
+                    // réception, et un `rename` suffit à le nommer ailleurs.
+                    Some(dossier) => dossier.adopt(arrivee),
+                    None => arrivee.commit(),
+                };
+                ecrit
                     .map(|_uid| ())
                     .map_err(|_| DeliveryFailure::Temporary)?;
             }
@@ -252,7 +387,7 @@ impl Delivery for MaildirDelivery {
     }
 
     fn abort(&mut self) {
-        for arrivee in core::mem::take(&mut self.arrivees) {
+        for (_, arrivee) in core::mem::take(&mut self.arrivees) {
             arrivee.abort();
         }
         // RIEN N'EST ENCORE EN FILE : le dépôt n'a lieu qu'au `finish`. Il n'y a
@@ -263,6 +398,40 @@ impl Delivery for MaildirDelivery {
 }
 
 impl MaildirDelivery {
+    /// Le dossier de quarantaine de ce compte, ouvert ou créé.
+    ///
+    /// # C'EST ICI QUE LE DOSSIER NAÎT
+    ///
+    /// `Maildir::open` crée l'arborescence qu'on lui nomme : le dossier existe
+    /// donc à la première remise qui en a besoin, et pas avant. Un dossier vide
+    /// créé au démarrage dans chaque compte annoncerait à tous une protection
+    /// dont la plupart n'auront jamais l'usage.
+    ///
+    /// **Il passe par le registre du serveur** : un `Maildir` par répertoire
+    /// dans tout le processus, IMAP compris — voir [`Boites::dossier_ou`].
+    ///
+    /// Rend `None` si le dossier ne s'ouvre pas ; le message va alors dans la
+    /// boîte de réception, ce qui est la seule chose à faire de mieux que de le
+    /// perdre.
+    fn dossier_de_quarantaine(&self, compte: &str) -> Option<Arc<Maildir>> {
+        let nom = self.quarantaine.as_ref()?;
+        let arrivee = self.boites.get(compte)?;
+        let racine = arrivee.root().to_path_buf();
+        self.boites.dossier_ou(compte, nom, || {
+            // La transcription est celle de Maildir++, la même qu'IMAP :
+            // `Courrier/Junk` devient `.Courrier.Junk` à la racine du compte.
+            let mut repertoire = std::vec::Vec::with_capacity(nom.len().saturating_add(1));
+            repertoire.push(b'.');
+            for octet in nom.bytes() {
+                repertoire.push(if octet == b'/' { b'.' } else { octet });
+            }
+            let chemin = racine.join(std::ffi::OsString::from_vec(repertoire));
+            Some(Arc::new(
+                Maildir::open(chemin, arrivee.host(), ams_store::fresh_uid_validity()).ok()?,
+            ))
+        })
+    }
+
     /// Retient une adresse qui n'est pas d'ici, pour la file.
     fn mettre_en_file(&mut self, address: &[u8]) -> Result<(), DeliveryFailure> {
         // **SANS FILE, UNE ADRESSE SANS BOÎTE EST UN REFUS**, et il est
@@ -297,5 +466,157 @@ impl MaildirDelivery {
         let sortants = core::mem::take(&mut self.sortants);
         let corps = core::mem::take(&mut self.corps);
         tokio::task::block_in_place(|| file.deposer(retour, &sortants, &corps, Self::maintenant()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Boites, MaildirDelivery};
+    use ams_auth::Account;
+    use ams_loop_tokio::Delivery as _;
+    use ams_store::Maildir;
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    /// Un répertoire qui s'efface quand le test finit.
+    struct Ephemere(PathBuf);
+
+    impl Ephemere {
+        fn nouveau() -> Self {
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |depuis| depuis.as_nanos());
+            let chemin = std::env::temp_dir().join(format!(
+                "ams-remise-{unique}-{:?}",
+                std::thread::current().id()
+            ));
+            std::fs::create_dir_all(&chemin).expect("créable");
+            Self(chemin)
+        }
+    }
+
+    impl Drop for Ephemere {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Un compte `marie`, sa boîte, et la remise qui les sert.
+    fn remise(racine: &Path) -> (Arc<Boites>, MaildirDelivery) {
+        let boite = Maildir::open(
+            racine.join("marie"),
+            b"mail.example.com",
+            ams_store::fresh_uid_validity(),
+        )
+        .expect("ouvrable");
+        let mut carte = BTreeMap::new();
+        carte.insert(String::from("marie"), Arc::new(boite));
+        let boites = Arc::new(Boites::new(carte));
+        let comptes = Arc::new(crate::comptes::Comptes::new(
+            racine.join("comptes.bin"),
+            vec![Account {
+                login: String::from("marie"),
+                hash: String::new(),
+                addresses: vec![String::from("marie@example.com")],
+            }],
+        ));
+        let remise = MaildirDelivery::new(Arc::clone(&boites), comptes);
+        (boites, remise)
+    }
+
+    /// Les noms de fichiers d'un sous-répertoire, triés.
+    fn contenu(chemin: &Path) -> Vec<String> {
+        let mut trouves: Vec<String> = std::fs::read_dir(chemin)
+            .map(|entrees| {
+                entrees
+                    .filter_map(Result::ok)
+                    .map(|entree| entree.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        trouves.sort();
+        trouves
+    }
+
+    /// Remet un message, en disant si DMARC le met en quarantaine.
+    fn remettre(remise: &mut MaildirDelivery, ecarter: bool) -> bool {
+        remise.begin(Some(b"joe@example.net"));
+        remise
+            .add_recipient(b"marie@example.com")
+            .expect("destinataire");
+        remise
+            .append(b"From: joe\r\n\r\nbonjour\r\n")
+            .expect("corps");
+        let ecarte = ecarter && remise.quarantine();
+        remise.finish().expect("remis");
+        ecarte
+    }
+
+    /// **SANS DOSSIER, LA QUARANTAINE N'EXISTE PAS — ET LA REMISE LE DIT.**
+    ///
+    /// C'est ce que le rapport agrégé écrira : `none`, parce que c'est ce qui a
+    /// été fait.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sans_dossier_un_message_ecarte_va_dans_la_boite_de_reception() {
+        let temporaire = Ephemere::nouveau();
+        let (_boites, mut remise) = remise(&temporaire.0);
+
+        assert!(
+            !remettre(&mut remise, true),
+            "rien n'est mis de côté sans dossier"
+        );
+        assert_eq!(contenu(&temporaire.0.join("marie").join("new")).len(), 1);
+        assert!(!temporaire.0.join("marie").join(".Junk").exists());
+    }
+
+    /// **AVEC UN DOSSIER, LE MESSAGE Y VA — ET IL EST CRÉÉ À LA PREMIÈRE
+    /// REMISE.**
+    #[tokio::test(flavor = "multi_thread")]
+    async fn un_message_ecarte_va_dans_le_dossier_nomme() {
+        let temporaire = Ephemere::nouveau();
+        let (_boites, remise) = remise(&temporaire.0);
+        let mut remise = remise.avec_quarantaine(String::from("Junk"));
+
+        assert!(remettre(&mut remise, true), "mis de côté, et il le dit");
+        let compte = temporaire.0.join("marie");
+        assert!(
+            contenu(&compte.join("new")).is_empty(),
+            "rien dans la boîte de réception"
+        );
+        assert!(
+            contenu(&compte.join("tmp")).is_empty(),
+            "rien n'est resté en attente"
+        );
+        let ecartes = contenu(&compte.join(".Junk").join("new"));
+        assert_eq!(ecartes.len(), 1, "le message est dans le dossier");
+        let lu =
+            std::fs::read(compte.join(".Junk").join("new").join(&ecartes[0])).expect("lisible");
+        assert_eq!(lu, b"From: joe\r\n\r\nbonjour\r\n");
+
+        // ET LE MESSAGE SUIVANT N'HÉRITE PAS DU VERDICT DU PRÉCÉDENT.
+        assert!(!remettre(&mut remise, false));
+        assert_eq!(contenu(&compte.join("new")).len(), 1);
+        assert_eq!(contenu(&compte.join(".Junk").join("new")).len(), 1);
+    }
+
+    /// **UN SEUL `Maildir` PAR RÉPERTOIRE**, remise et IMAP confondus : deux
+    /// instances serviraient le même UID à deux messages différents.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn le_dossier_de_quarantaine_est_celui_du_registre() {
+        let temporaire = Ephemere::nouveau();
+        let (boites, remise) = remise(&temporaire.0);
+        let mut remise = remise.avec_quarantaine(String::from("Junk"));
+
+        assert!(remettre(&mut remise, true));
+        let depuis_le_registre = boites
+            .dossier_ou("marie", "Junk", || panic!("il est déjà ouvert"))
+            .expect("ouvert");
+        // Le second message y prend l'UID suivant, et non le même.
+        assert_ne!(
+            depuis_le_registre.next_uid(),
+            ams_index::Uid::FIRST,
+            "le registre rend l'instance qui a déjà remis"
+        );
     }
 }

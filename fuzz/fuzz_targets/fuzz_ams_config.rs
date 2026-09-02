@@ -80,6 +80,9 @@ struct Entree {
     /// Cette crate les transporte ; c'est ailleurs qu'on refuse ce qui n'est pas
     /// un nom, et le lui faire faire ici cacherait ce partage.
     rapports: [String; 3],
+    /// Le dossier de quarantaine DMARC, LIBRE lui aussi : c'est
+    /// `air-mail-admin` qui exige un nom de boîte recevable, pas le format.
+    quarantaine: String,
     /// L'intervalle entre deux vidanges, ZÉRO COMPRIS : c'est la valeur qui vaut
     /// « le défaut », et elle doit traverser le format comme les autres.
     intervalle: u32,
@@ -185,6 +188,7 @@ fuzz_target!(|entree: Entree| {
             report_interval_seconds: entree.intervalle,
             send_reports: entree.remet,
             failure_reports: entree.echecs,
+            quarantine_folder: entree.quarantaine.clone(),
         },
         tlsrpt: ams_config::Tlsrpt {
             directory: entree.tlsrpt.clone(),

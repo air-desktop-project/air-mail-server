@@ -380,6 +380,11 @@ fn afficher(config: &Configuration) {
             }
         );
         println!("  suffixes publics {}", config.dmarc.public_suffix_list);
+        if config.dmarc.met_en_quarantaine() {
+            println!("  quarantaine      {}", config.dmarc.quarantine_folder);
+        } else {
+            println!("  quarantaine      AUCUN DOSSIER — un `p=quarantine` est remis quand même");
+        }
         if config.dmarc.rapporte() {
             println!("  rapports         {}", config.dmarc.report_directory);
             println!(
