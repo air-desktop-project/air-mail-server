@@ -3846,6 +3846,40 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
+## Une vérification qu'on ne peut pas rejouer n'est pas une garde
+
+La tranche qui a ouvert l'API REST a été vérifiée À LA MAIN : neuf commandes
+tapées, neuf sorties lues. C'était ce qu'il fallait pour l'écrire, et cela ne
+gardait rien. Le lendemain, plus personne ne saurait que ces neuf choses ont été
+vraies un jour.
+
+### CE QUE `jeton.rs` N'ÉPROUVAIT PAS
+
+Il vérifie un jeton CRYPTOGRAPHIQUEMENT, mais contre une clé que l'essai a posée
+lui-même dans la configuration. Le chemin qui manquait était l'autre moitié : un
+secret TIRÉ PAR L'OUTIL scelle-t-il un jeton que la clé relue DANS LE FICHIER
+QU'IL A ÉCRIT sait vérifier ? C'est la boucle entière, et elle est désormais un
+essai.
+
+### CE QUE LE CONTRÔLE PAR MUTATION MONTRE
+
+Deux mutations, deux paires d'essais qui tombent :
+
+  - **Le secret n'est plus repris mais retiré à chaque écriture** : les deux
+    essais qui établissent qu'une réécriture ne révoque rien tombent.
+  - **Le secret fait un octet de moins** : celui de la boucle entière tombe, et
+    celui de la rotation avec lui. C'est exactement la rupture silencieuse pour
+    laquelle ces essais existent — `key_from_hex` refuse en deçà de trente-deux
+    octets, et rien d'autre ne l'aurait dit.
+
+### ET UN ESSAI QUI SE FAUSSAIT LUI-MÊME
+
+L'un d'eux vérifiait que l'outil ne parle PAS de scellement quand il n'y en a
+pas. Il cherchait le mot dans la sortie — or le répertoire d'essai s'appelait
+`ams-scellement-…`, et l'outil affiche le chemin du fichier écrit. L'assertion
+était donc vraie par construction de son propre décor. Elle cherche maintenant
+la LIGNE, et non le mot.
+
 ## L'API REST ne pouvait être activée par aucun chemin supporté
 
 ### TROIS CHAMPS CÂBLÉS À VIDE
