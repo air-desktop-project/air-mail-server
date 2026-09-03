@@ -1,0 +1,1 @@
+v=DMARC1; p=reject; srucpfp=reject; sruspf=r; pctuspf=rp=r

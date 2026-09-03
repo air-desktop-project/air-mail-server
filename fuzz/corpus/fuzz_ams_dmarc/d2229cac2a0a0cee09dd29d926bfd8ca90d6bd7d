@@ -1,0 +1,7 @@
+v=DMARC1; p=reject; s=100; ruq=m00; rur=eject p=reject; srur=eject p=re; ruq=m0`; rur=eject; s=101; ruq=m=m p=rejet; s=100; ruq==100; ruq=m0`; rur=eject; s=101; ruq=m00; rur=eject 00; rur=eject p=rejet; s=100; ruq==100; ruq=m0`; rur=eject; s=101; ruq=m00; rur=eject p=reject; s=100; ruq=m00; rur=eject; s=100; ruq=m00; Bua=m; 
+a=; s=100; ruq=m00; ruav=ma:00; rur=reject; s=100; ruq=m00; rus=100; ruq=m00; ruav=ma:00; rur=eject p=rejet; s=100; ruq==100; ruq=m0`; rur=eject; s=1; ruq=m00; rur=eject; s=100; ruq=m00; Bua=m; 
+a=; s=100; ruq=m01; ruavotdm
+
+
+
+ÿÅar„„„„100; ruexa

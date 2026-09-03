@@ -95,6 +95,35 @@ rapport vert qui n'a rien examiné est un mensonge poli.
 Elle est confrontée AUSSI au tableau de ce fichier, plus bas : une cible que
 rien ne décrit est une cible que personne ne sait lire.
 
+## POURQUOI `corpus/` EST VERSIONNÉ, ET CE QUE CELA COÛTE
+
+**Ce qu'une campagne longue produit n'est pas son verdict, c'est son corpus.**
+« Aucun plantage » se rejette en vingt secondes ; l'ensemble d'entrées qui
+atteignent des chemins qu'aucune graine écrite à la main n'atteint, lui, se paie
+en heures de calcul. Le jeter à chaque fois ferait repartir la campagne suivante
+des mêmes graines, aux mêmes endroits, sur le même terrain — on paierait le temps
+sans capitaliser la découverte.
+
+**IL SE MINIMISE AVANT D'ÊTRE VERSÉ.** libFuzzer garde toute entrée qui apporte
+un chemin, y compris des milliers de variantes qui couvrent le même : treize
+campagnes de vingt secondes avaient laissé 135 000 fichiers. `cargo fuzz cmin` ne
+garde qu'un représentant par ensemble de chemins couverts, et ramène cela à
+26 000 fichiers pour 5,4 Mo — moins d'un sixième.
+
+    for c in $(grep -oP '^name = "\Kfuzz_[a-z0-9_]+' Cargo.toml | sort -u); do
+        cargo +nightly fuzz cmin --target x86_64-unknown-linux-gnu "$c" "corpus/$c"
+    done
+
+**LE COÛT N'EST PAS LE VOLUME, C'EST LE NOMBRE.** 5,4 Mo ne pèsent rien dans un
+historique ; 26 000 objets ralentissent `status`, `checkout` et `clone` de façon
+perceptible. C'est le prix de ne pas refaire le même travail, et il se paie une
+fois.
+
+**ET `du -sh` NE RÉPOND PAS À LA QUESTION.** Un fichier de corpus fait quelques
+dizaines d'octets ; avec des blocs de 4 Kio, 135 000 d'entre eux occupaient
+536 Mo de disque pour 45 Mo de contenu. Git stocke le contenu. Mesurer en octets
+— `du -sb` — est la seule mesure qui décide.
+
 ## `seeds/` S'ÉCRIT À LA MAIN ; `corpus/` EST À LIBFUZZER
 
 Une graine porte un NOM qui dit ce qu'elle vise — `mime-bounce/refus`,
@@ -102,8 +131,9 @@ Une graine porte un NOM qui dit ce qu'elle vise — `mime-bounce/refus`,
 lecteur ouvre et comprend. C'est ce qui fait d'un répertoire de graines une
 documentation de ce que la cible cherche, et non un tas d'octets.
 
-Les trouvailles de libFuzzer, elles, vont dans `corpus/`, que git ignore. Il les
-nomme par le SHA-1 de leur contenu, et **il écrit dans le PREMIER répertoire de
+Les trouvailles de libFuzzer, elles, vont dans `corpus/`, **qui est versionné**.
+Il les nomme par le SHA-1 de leur contenu — deux campagnes qui trouvent la même
+entrée écrivent le même fichier —, et **il écrit dans le PREMIER répertoire de
 corpus qu'on lui donne**. D'où le piège, quand on lance une seule cible à la
 main :
 

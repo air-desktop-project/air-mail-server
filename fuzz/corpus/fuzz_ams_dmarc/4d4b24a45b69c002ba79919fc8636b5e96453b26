@@ -1,0 +1,1 @@
+v=DMARC1; p=reject; s=100; r=t; s=45xam.i; r=muaaiü

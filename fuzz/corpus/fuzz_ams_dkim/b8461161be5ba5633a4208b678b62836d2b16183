@@ -1,0 +1,4 @@
+v=1; a=rsa-sha256; c=relaxed/relaxed; d=example.com; s=brisbane; h=from:to:subject:date; bh=2jUSOH9NhtVGCQWNr9BrIA C 
+
+Ozv8=; b=AuUoFEQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ C 
+QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQPQQQQQQQQuUoF6eda7W3deTVFOk4yAUoqOB4 “ EG5

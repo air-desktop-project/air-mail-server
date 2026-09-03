@@ -1,0 +1,24 @@
+ elaxed/rbrisbane; h=from :t: oC
+D 	 E
+
+v=DKIM:to:  A0GCSqGSIb3DQEBAQUAddddddddddddddddddddddddddddddddddddddbane; h=from:to:  C
+D a=GfMrshas2a-56; c=relaxed/rbrisbane; h=from :t: oC
+D 	 E
+
+v=DKIM:to:  A0tdddddddddddddddddddddddddddddA4GNADddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddA4GNADCB
+=2jUSiQKIM1; k=rsa; p=MIGfMrshas2a-56; c=relaxeDQEBAQUAddddddddddddddddddddddddddddddddddddddbane; h=from:to:  C
+D a=GfMrshas2a-56; c=relaxed/rbrisbane; h=from :t: oC
+D 	 E
+
+v=DKIM:to:  A0GCSqGSIb3DQEBAQUAddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddvh==rsa;DKIMIGfM01GCSqGS—Š—ÂşC
+t=K h= i
+E: IM$0ddddddddddddddddddddddddddddddddA4GNADCB
+=2jUSiQKIM1; k=rsa; p=MIGfMrshas2a-56; c=relaxed/rbrisbane; h=from :t: oC
+D 	 E
+
+v=DKIM:to:  A0GCSqGSIb3DQEBAQUAddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddtdddddddddddddddddddddddddddddA4GNADddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddA4GNADCB
+=2jUSiQKIM1; k=rsa; p=MIGfMrshas2a-56; c=relaxed/rbrisbane; h=from :t: oC
+D 	 E
+
+v=DKIM:to:  A0GCSqGSIb3DQEBAQUAddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+L+

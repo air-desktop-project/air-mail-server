@@ -3846,6 +3846,78 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
+## Le corpus de fuzz était jeté à chaque campagne
+
+### CE QU'UNE CAMPAGNE PRODUIT N'EST PAS SON VERDICT
+
+« Aucun plantage » se rejette en vingt secondes. Ce qui se paie en heures de
+calcul, c'est le CORPUS : l'ensemble d'entrées qui atteignent des chemins
+qu'aucune graine écrite à la main n'atteint.
+
+`fuzz/.gitignore` l'ignorait. Une campagne longue — le point bloquant n° 3 de la
+liste V1 — aurait donc rendu un « OK » et tout jeté ; la suivante serait repartie
+des mêmes graines, aux mêmes endroits, sur le même terrain. **On aurait payé le
+temps sans capitaliser la découverte.**
+
+Le `fuzz/README.md` écrivait d'ailleurs déjà « en partant du corpus versionné ».
+La documentation avait pris de l'avance sur le fait — encore une affirmation qui
+n'était pas vraie, trouvée en la vérifiant.
+
+### IL SE MINIMISE, ET C'EST CE QUI LE REND VERSIONNABLE
+
+libFuzzer garde TOUTE entrée qui apporte un chemin, y compris des milliers de
+variantes qui couvrent le même. Treize campagnes de vingt secondes avaient laissé
+**135 074 fichiers**. `cargo fuzz cmin` ne garde qu'un représentant par ensemble
+de chemins couverts :
+
+| | contenu | fichiers |
+|---|---|---|
+| avant | 45,7 Mo | 135 074 |
+| après minimisation | 7,2 Mo | 31 241 |
+| après retrait des orphelins | **5,4 Mo** | **25 765** |
+
+`--minimiser` est désormais un mode du script, à passer AVANT de committer et
+jamais après : un corpus qui enfle sans être réduit finit par coûter plus de
+temps qu'il n'en fait gagner, et l'historique garde ce qu'on y met.
+
+### `du -sh` NE RÉPONDAIT PAS À LA QUESTION
+
+La première mesure annonçait **536 Mo**, et c'était l'occupation DISQUE. Un
+fichier de corpus fait quelques dizaines d'octets ; avec des blocs de 4 Kio,
+135 000 d'entre eux gonflaient 45 Mo de contenu en 536 Mo de blocs.
+
+Git stocke le contenu. La mesure qui décide est `du -sb`, en octets — et la
+première a failli faire renoncer à une décision que le vrai chiffre rendait
+évidente.
+
+### SIX RÉPERTOIRES QUI N'ÉTAIENT DES CIBLES DE RIEN
+
+La minimisation a laissé intacts `quic-packet`, `h3-frame`, `h2-connection` et
+trois autres : ce sont des noms de GRAINES, pas de cibles. Ils venaient d'une
+campagne lancée avec les arguments dans le mauvais ordre — le piège que ce
+script documente en tête, et qui s'était déjà produit ici.
+
+5 476 fichiers qu'aucune cible n'aurait jamais lus, puisque le script ne passe
+que `corpus/<nom-de-cible>`. Les verser dans l'historique aurait été y mettre du
+contenu mort. Ils ont été supprimés.
+
+### LE COÛT EST LE NOMBRE, PAS LE VOLUME
+
+5,4 Mo ne pèsent rien dans un historique ; 26 000 objets ralentissent `status`,
+`checkout` et `clone` de façon perceptible. C'est le prix de ne pas refaire le
+même travail, et il se paie une fois.
+
+### ET LE PIÈGE DE `pgrep`, RENCONTRÉ UNE SECONDE FOIS
+
+Le script d'attente écrit pour enchaîner minimisation et campagne bouclait
+indéfiniment : `pgrep -f "check-fuzz.sh --smoke"` matchait SA PROPRE ligne de
+commande, le texte du script se trouvant dans l'`argv` du shell parent.
+
+Ce registre consignait déjà exactement cela, pour l'avoir rencontré plus tôt dans
+la même session. **Une note qu'on ne relit pas au moment où elle sert ne sert
+pas** — et c'est un argument pour préférer une garde exécutable à une note, quand
+la chose s'y prête.
+
 ## Une perte sèche que seule la sortie d'erreur consignait
 
 ### LE PIRE CAS, ET IL N'ÉTAIT COMPTÉ NULLE PART

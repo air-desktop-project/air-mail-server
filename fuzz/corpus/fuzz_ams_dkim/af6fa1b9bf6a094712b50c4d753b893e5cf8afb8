@@ -1,0 +1,8 @@
+v=1; a=rshas2a-56; c=relaxed/rlxample.com; s=brisbane;`h=from:to:C
+D 	 E
+
+v=DKIM1; k=rsa;p=MA0GCSqGSIb3DQEBAQUAA4GNB s=brisbane; h=frorom:oHecta
+
+dn:
+::
+Dne; lQW

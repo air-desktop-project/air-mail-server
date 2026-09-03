@@ -1,0 +1,1 @@
+v=DMARC1; p=reject; srucpfp=reject,; sruspf=r; pctuspf=r p=reject; srucpfp=reject,; sruspf=r; pctuspf=rpfp; srucpfp=reject,; sruspf=r; pctuspf=r;t=`0z*MAucpf,; sruspf=r; pctuspf=r;t=`00DMAucpfp; srucpfp=reject,; sruspf=r; pctuspf=r;t=`00*MAucpf,; sruspf=r; pctuspf=r;t=`00*; ppfp=reии

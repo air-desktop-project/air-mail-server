@@ -1,0 +1,8 @@
+v=1; a=rshas2a-56; c=relaxed:Cela s=brisbane; h=f
+:
+rom:ot  C:
+D 	 E
+
+v=DKIM1; k=rsa; p=MIGfMrsha;s=GS ==DQAAQ4  B:
+:z:k:::::::a=::::6:GNADCB
+=2j/USiQOH9NhtVGCQW

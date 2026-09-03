@@ -1,0 +1,2 @@
+v=DMARC1; p=reject; nnnsp=ct; nnnsp=quarantreject; nnnsp=ct; nnnsp=qua=quark; p=reject;zp=quarkk
+eic

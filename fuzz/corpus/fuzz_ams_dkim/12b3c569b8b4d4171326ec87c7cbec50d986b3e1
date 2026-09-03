@@ -1,0 +1,3 @@
+elaxed; d=example.com; s=brisbE
+
+v=DKIM1; k=rsa; p=MIGfMA0GDKIM1; k=rsa; p=MIGfMGCSqGSIbe; h=from:oH@h=24[hÃŠF

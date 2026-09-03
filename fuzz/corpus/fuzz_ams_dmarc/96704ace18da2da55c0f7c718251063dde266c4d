@@ -1,0 +1,1 @@
+v=DMARC1; p=reject; sp=quarantine; ; aspf5r; pct=100{ rua=mailto:dmarc@example.czm%

@@ -1,0 +1,3 @@
+vh==rsa;DKIMIGfMA0GCSqGSIvh=		 E
+
+v=DKIM1; k=rsa; p=MIGfMrshas; h=from:toA  :0GCSqGk=rsa; 

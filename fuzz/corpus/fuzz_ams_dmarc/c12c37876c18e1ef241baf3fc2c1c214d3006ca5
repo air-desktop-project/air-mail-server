@@ -1,0 +1,8 @@
+v=DMARC1; P=reject; s=100;rur=ejcte p=reject; s=100; ruq=m00; rur==m00; Bua=m; 
+a=; s=100; ruq=m000; Bua=ma:; 
+a=100; ruq=m00; Bu1a=m; 
+a=; s=100; ruq=m00; ruav=; Bua=m; 
+a=; s=m00; rur=ejecect; s=100; ruq=0m0; Bua=m; 
+a=; s=100m00; rur=eject;ruq=m00; Bua=m; 
+a=; s=; Bua=ma:; 
+a=;

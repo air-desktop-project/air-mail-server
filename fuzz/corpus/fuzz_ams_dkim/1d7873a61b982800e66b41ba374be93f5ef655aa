@@ -1,0 +1,14 @@
+v=1; 
+
+
+
+
+
+
+
+
+
+a=rsa-sha256; c=relaxed/relaxed; d=example.com; s=brisbane; h=from:to:subject:date; bh=2jUSNHO9htVGCQWNr9BrIAPreKoo	oooooooooQjO6sn7XIkfJVOzv8=; b=AuUoFEQQQQQQQQQQQQQQQQQQQQQQQQ                         oF5e                             G	
+5
+
+

@@ -1,0 +1,6 @@
+v=1ÿÿÿ˜rshas2a-56; c=relaxed/relaxed; d=example.com@ s=brisbane; h=from:to :
+D C	 E
+
+v=DKIM1; k=rsa; p=MIc=relaxed/rbrisbane; h=from :t: oCE	 	
+
+27D,; kNtVGW

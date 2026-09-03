@@ -1,0 +1,2 @@
+v=1; a=rsa-sha256; c=relaxed/relaxed; d=example.com; s=brisbane; h=from:to:subject:date; bh=3jUSOH9NhtFGCQWNr9BrIAPr                                            =; b=AuUoFE%QQQQQQQQQQ   c=kO         =kO                 
+=D? C=YQQQ$QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQuUoF6eda7W3deTVÿÿÿA

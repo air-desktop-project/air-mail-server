@@ -24,11 +24,26 @@
 #      cible qu'aucune ligne ne décrit est une cible que personne ne sait lire.
 #   3. Les GRAINES sont écrites à la main. Une trouvaille de libFuzzer qui s'y
 #      serait glissée — son nom est le SHA-1 de son contenu — fait échouer :
-#      sa place est `corpus/`, que git ignore.
+#      sa place est `corpus/`, qui est VERSIONNÉ à part.
 #   4. Elles sont FORMATÉES — `cargo fmt --all` à la racine ne les touche pas.
 #   5. TOUTES les cibles compilent.
 #   6. Avec `--smoke`, chacune tourne vingt secondes sur ses graines —
 #      `AMS_FUZZ_SECONDES` en décide autrement, pour une campagne plus longue.
+#
+# # ET `--minimiser`, QUI EST CE QUI REND LE CORPUS VERSIONNABLE
+#
+# libFuzzer garde TOUTE entrée qui apporte un chemin, y compris des milliers de
+# variantes qui couvrent le même : treize campagnes de vingt secondes avaient
+# laissé 135 000 fichiers. `cargo fuzz cmin` ne garde qu'un représentant par
+# ensemble de chemins, et ramène cela à moins d'un sixième.
+#
+# **À PASSER AVANT DE COMMITTER**, jamais après : un corpus qui enfle sans être
+# réduit finit par coûter plus de temps qu'il n'en fait gagner, et l'historique
+# garde ce qu'on y met.
+#
+# La mesure est en OCTETS et non en blocs. Un fichier de corpus fait quelques
+# dizaines d'octets ; avec des blocs de 4 Kio, `du -sh` annonçait 536 Mo pour
+# 45 Mo de contenu. Git stocke le contenu.
 #
 # La liste vit ICI et non dans le workflow : la CI appelle ce script, et l'on
 # peut donc lancer en local exactement ce qu'elle lancera. Un contrôle qu'on ne
@@ -51,9 +66,16 @@ set -euo pipefail
 export RUSTFLAGS="${RUSTFLAGS:--D warnings}"
 
 smoke=0
-if [ "${1-}" = "--smoke" ]; then
-    smoke=1
-fi
+minimiser=0
+case "${1-}" in
+    --smoke) smoke=1 ;;
+    --minimiser) minimiser=1 ;;
+    "") ;;
+    *)
+        echo "usage : $(basename "$0") [--smoke | --minimiser]" >&2
+        exit 2
+        ;;
+esac
 secondes="${AMS_FUZZ_SECONDES-20}"
 
 racine=$(cd "$(dirname "$0")/.." && pwd)
@@ -190,7 +212,8 @@ if [ -n "$egares" ]; then
     echo "$egares" >&2
     echo >&2
     echo "Un nom de quarante chiffres hexadécimaux est celui que libFuzzer donne" >&2
-    echo "à ce qu'il trouve. Sa place est \`corpus/\`, qui est ignoré par git." >&2
+    echo "à ce qu'il trouve. Sa place est \`corpus/\`, qui est versionné à part —" >&2
+    echo "et minimisé avant de l'être (\`check-fuzz.sh --minimiser\`)." >&2
     echo "Effacez-les, ou renommez celles qui méritent d'être des graines — une" >&2
     echo "graine porte un nom qui dit ce qu'elle vise." >&2
     exit 1
@@ -202,6 +225,23 @@ fi
 # exactement le genre d'aller-retour que ce script existe pour éviter.
 echo "── formatage ────────────────────────────────────────────────────────────"
 cargo fmt -- --check
+
+# ── LA MINIMISATION, QUI NE COMPILE ET NE LANCE RIEN D'AUTRE ────────────────
+if [ "$minimiser" -eq 1 ]; then
+    avant_o=$(du -sb corpus 2>/dev/null | cut -f1 || echo 0)
+    avant_f=$(find corpus -type f 2>/dev/null | wc -l)
+    while read -r cible _; do
+        echo "── $cible ───────────────────────────────────────────────────────"
+        mkdir -p "corpus/$cible"
+        cargo +nightly fuzz cmin --target x86_64-unknown-linux-gnu \
+            "$cible" "corpus/$cible"
+    done <<< "$CIBLES"
+    apres_o=$(du -sb corpus | cut -f1)
+    apres_f=$(find corpus -type f | wc -l)
+    echo
+    echo "corpus : $avant_f fichiers ($avant_o octets) → $apres_f ($apres_o octets)"
+    exit 0
+fi
 
 # UN SEUL `cargo fuzz build` LES BÂTIT TOUTES, et c'est le contrôle qui manquait.
 echo "── compilation ──────────────────────────────────────────────────────────"

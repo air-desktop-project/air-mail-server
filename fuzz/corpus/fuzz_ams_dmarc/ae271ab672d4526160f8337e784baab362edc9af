@@ -1,0 +1,1 @@
+v=DMARC1; adkim=r; aspf=r;m=;aspf=r $

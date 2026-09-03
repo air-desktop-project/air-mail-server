@@ -1,0 +1,1 @@
+v=DMARC1; p=reject; s=099; ua=#########V=DMARm=s; asUf=r;m=; asUf=;m=; asUf=rrm=s2 asUf=; asUf=###~c
