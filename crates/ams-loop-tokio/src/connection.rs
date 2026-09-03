@@ -612,6 +612,11 @@ where
     // reviendra, et une remise qui l'apprendrait après coup aurait déjà écrit
     // une entrée de file sans savoir à qui rendre compte.
     delivery.begin(session.return_path());
+    // **QUI ÉCRIT, ET NON SEULEMENT « QUELQU'UN D'AUTORISÉ »** : la remise doit
+    // pouvoir refuser un `From:` que ce compte-là n'a pas le droit d'affirmer.
+    if let Some(compte) = session.submitter() {
+        delivery.submitter(compte);
+    }
     // **LA PLACE DE L'EN-TÊTE `Authentication-Results` SE RÉSERVE ICI**, avant
     // le premier octet. DKIM ne se juge qu'une fois le corps entier lu, et DMARC
     // en dépend : le verdict arrivera bien après. Voir `Delivery::reserve_trace`,

@@ -42,6 +42,26 @@ pub trait Delivery {
         let _ = return_path;
     }
 
+    /// Le compte qui s'est authentifié, quand il y en a un.
+    ///
+    /// Appelée juste après [`Delivery::begin`], et **seulement si un pair s'est
+    /// authentifié**. Une transaction anonyme n'appelle pas ceci — et une remise
+    /// qui ne l'a pas vue ne doit rien émettre au nom de personne.
+    ///
+    /// # POURQUOI LE NOM, ET NON UN BOOLÉEN
+    ///
+    /// « Authentifié » suffit à décider si l'on relaie. Il ne suffit pas à
+    /// décider au nom de QUI : un compte qui écrit `From: patron@example.com`
+    /// obtiendrait, sans cela, notre signature DKIM sur une adresse qui n'est
+    /// pas la sienne — c'est-à-dire un hameçonnage interne que nous aurions
+    /// authentifié.
+    ///
+    /// **LE DÉFAUT L'OUBLIE**, ce qui ne peut que refuser davantage : une remise
+    /// qui ne retient rien ne saura affirmer aucune identité.
+    fn submitter(&mut self, login: &[u8]) {
+        let _ = login;
+    }
+
     /// Combien d'octets réserver en tête pour un en-tête de trace.
     ///
     /// Appelée **avant** le premier [`Delivery::add_recipient`], et suivie d'un

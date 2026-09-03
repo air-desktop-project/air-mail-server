@@ -3795,7 +3795,7 @@ il l'a commis sur lui-même : une section qui s'intitule « l'état réel » est
 qu'on relit le moins, parce qu'on croit la connaître.
 
 Sont outillées : C1 (les trois étages, et la couverture qui n'est exigible que
-parce qu'ils sont séparés), C2 (le gate mesure 55 293 régions sur 29 crates,
+parce qu'ils sont séparés), C2 (le gate mesure 55 360 régions sur 29 crates,
 toutes couvertes — et il compare des comptes, non un pourcentage arrondi), C3
 (les lints, l'absence d'allocation dans les décodeurs, et 65 cibles de fuzz dont
 la CI vérifie qu'elle les lance toutes), C4 (`ams-tls` n'offre que
@@ -3845,6 +3845,64 @@ la seule vérification qui vaille est la confrontation à l'ABNF de §9, mot par
 mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
+
+## Un compte authentifié pouvait écrire au nom d'un autre — et on le signait
+
+### LA TRANCHE PRÉCÉDENTE A RENDU CELLE-CI URGENTE
+
+Le chemin SMTP ne vérifiait pas que le `From:` appartient au compte
+authentifié. La porte HTTP, elle, le faisait depuis toujours —
+`ecrit_bien_en_son_nom`, appelée d'un seul endroit : `api.rs`.
+
+Tant que rien n'était signé, une usurpation partait NUE : un destinataire
+attentif pouvait la voir. **Depuis que ce serveur signe ce qu'il émet, elle
+partirait avec notre signature** et passerait DMARC. Nous authentifierions un
+hameçonnage interne — un compte qui écrit `From: patron@example.com`, validé
+cryptographiquement par le serveur de l'entreprise.
+
+C'est la seule fois, dans cette série, où une tranche a **aggravé** un défaut
+existant avant qu'on ne le voie. Le commit de la signature dit d'ailleurs « les
+deux portes de soumission signent pareil » : elles signaient pareil, elles ne
+vérifiaient pas pareil.
+
+### LE BOOLÉEN OUVRE LA PORTE, LE NOM DIT CE QU'ON PEUT AFFIRMER
+
+La session ne retenait qu'`authenticated: bool`. C'est assez pour décider si l'on
+relaie ; ce n'est pas assez pour décider au nom de QUI. Le nom du compte est donc
+retenu — dans un tampon borné, comme le reste — et remonte à la remise par une
+méthode dédiée du trait `Delivery`, dont le défaut l'oublie : une remise qui ne
+l'a pas vue ne saura affirmer aucune identité, ce qui ne peut que refuser
+davantage.
+
+### CE QU'ON REFUSE N'EST NI COMPLÉTÉ NI SIGNÉ
+
+La vérification vient AVANT la complétion de RFC 6409 et avant la signature.
+L'ordre n'est pas décoratif : ce qu'on refuse d'émettre n'a pas à être complété,
+et surtout pas à être signé.
+
+Le refus est DÉFINITIF — aucune reprise ne donnera au déposant le droit d'écrire
+au nom d'un autre — et il vaut pour le message entier : il n'y a qu'un `From:`,
+et il est faux ou il ne l'est pas.
+
+### L'IDENTITÉ TOMBE AVEC LA TRANSACTION, ET AVEC LE CHIFFREMENT
+
+Sur une même connexion, un `AUTH` puis un `RSET` ne doivent pas laisser le
+message suivant partir au nom du compte du précédent. Et §4.2 de RFC 3207 veut
+qu'une montée en chiffrement oublie TOUT ce qui précède : ce qu'un pair a dit en
+clair a pu être dit par quelqu'un d'autre.
+
+Les deux sont éprouvés, et le contrôle par mutation confirme que les essais
+attrapent chacun des deux relâchements.
+
+### UNE GARDE DEVENUE SECONDE COUCHE, ET GARDÉE POUR CELA
+
+Le contrôle « on ne signe que pour un domaine dont on tient la zone » ne peut
+plus se déclencher en production : un `From:` doit router vers le compte
+authentifié, et le démarrage refuse déjà un compte dont l'adresse sort des
+domaines annoncés. Il reste néanmoins, et deux essais l'atteignent par le
+constructeur — parce que le jour où l'une des deux règles amont bougera, celle-ci
+tiendra encore. Une seconde couche qu'on peut éprouver n'est pas une garde
+inatteignable.
 
 ## Les devoirs de soumission : deux sur trois manquaient
 

@@ -207,6 +207,12 @@ pub struct MaildirDelivery {
     retour: Option<String>,
     /// Les destinataires qui ne sont pas d'ici.
     sortants: Vec<String>,
+    /// Le compte qui s'est authentifié — voir [`Delivery::submitter`].
+    ///
+    /// **`None` INTERDIT D'ÉMETTRE AU NOM DE QUI QUE CE SOIT.** Une transaction
+    /// anonyme ne met rien en file de toute façon ; ce champ dit, pour celles
+    /// qui le font, quelle adresse le déposant a le droit d'affirmer.
+    compte: Option<String>,
     /// De quoi signer ce qui sort (RFC 6376), quand une clé est nommée.
     dkim: Option<DkimSigner>,
     /// Les domaines dont on tient la zone, donc ceux pour lesquels on peut
@@ -255,6 +261,7 @@ impl MaildirDelivery {
             file: None,
             retour: None,
             sortants: Vec::new(),
+            compte: None,
             dkim: None,
             domaines: Arc::new(Vec::new()),
             corps: Vec::new(),
@@ -330,11 +337,20 @@ impl Delivery for MaildirDelivery {
         // chemin de retour, ni ses sortants, ni son corps. Sans cela, un second
         // message émis sur la même connexion partirait à qui l'avait précédé.
         self.retour = return_path.map(|octets| String::from_utf8_lossy(octets).into_owned());
+        // **L'IDENTITÉ AUSSI REPART DE RIEN**, et la boucle la repose juste
+        // après si le pair est authentifié. La garder ferait émettre le message
+        // suivant au nom du compte du précédent — sur la même connexion, un
+        // `AUTH` puis un `RSET` suffiraient.
+        self.compte = None;
         self.sortants.clear();
         self.corps.clear();
         self.envid.clear();
         self.rapports.clear();
         self.ecarte = false;
+    }
+
+    fn submitter(&mut self, login: &[u8]) {
+        self.compte = Some(String::from_utf8_lossy(login).into_owned());
     }
 
     fn reserve_trace(&mut self, combien: usize) {
@@ -524,6 +540,40 @@ impl MaildirDelivery {
         })
     }
 
+    /// Le déposant a-t-il le droit d'écrire au nom de ce `From:` ?
+    ///
+    /// # POURQUOI CETTE RÈGLE EXISTE, ET POURQUOI ELLE EST NOUVELLE
+    ///
+    /// Rien ne la vérifiait sur ce chemin — la porte HTTP, elle, refusait déjà.
+    /// Tant que rien n'était signé, une usurpation partait nue. Depuis que ce
+    /// serveur signe ce qu'il émet, elle partirait **avec notre signature**, et
+    /// passerait DMARC chez le destinataire : nous authentifierions un
+    /// hameçonnage interne.
+    ///
+    /// Un compte authentifié comme `marie` ne peut donc écrire `From:` qu'avec
+    /// une adresse qui lui route — ses alias compris, que `ams_auth::route`
+    /// résout.
+    ///
+    /// # `None` REFUSE, ET C'EST VOULU
+    ///
+    /// Sans compte retenu, sans `From:` lisible, ou avec une adresse qui ne
+    /// route vers personne : on ne sait pas au nom de qui ce message part, et
+    /// l'émettre reviendrait à signer une identité qu'on n'a pas vérifiée.
+    fn ecrit_bien_en_son_nom(&self, message: &ams_mime::Message<'_>) -> bool {
+        let Some(compte) = self.compte.as_deref() else {
+            return false;
+        };
+        let Some(champ) = message.fields().find(|champ| champ.name_is(b"from")) else {
+            return false;
+        };
+        let Some(adresse) = ams_mime::bare_address(champ.raw_value()) else {
+            return false;
+        };
+        // **LA MÊME LECTURE QUE LA PORTE HTTP**, et la même fonction de routage :
+        // deux règles à deux endroits finissent par ne plus dire la même chose.
+        ams_auth::route(&self.comptes.vue(), adresse).is_some_and(|vu| vu.login == compte)
+    }
+
     /// Retient une adresse qui n'est pas d'ici, pour la file.
     fn mettre_en_file(&mut self, address: &[u8]) -> Result<(), DeliveryFailure> {
         // **SANS FILE, UNE ADRESSE SANS BOÎTE EST UN REFUS**, et il est
@@ -706,11 +756,27 @@ impl MaildirDelivery {
             return Err(DeliveryFailure::Permanent);
         };
         let sortants = core::mem::take(&mut self.sortants);
+        let brut = core::mem::take(&mut self.corps);
+        // **ON N'ÉMET PAS AU NOM DE QUELQU'UN D'AUTRE** (RFC 6409 §6.1). La
+        // vérification vient AVANT la complétion et la signature : ce qu'on
+        // refuse d'émettre n'a pas à être complété, et surtout pas à être signé.
+        //
+        // Le refus est DÉFINITIF : aucune reprise ne donnera au déposant le
+        // droit d'écrire au nom d'un autre. Et il vaut pour le message entier —
+        // il n'y a qu'un `From:`, et il est faux ou il ne l'est pas.
+        {
+            let bornes = ams_mime::Limits::DEFAULT;
+            let Ok(message) = ams_mime::Message::parse(&brut, &bornes) else {
+                return Err(DeliveryFailure::Permanent);
+            };
+            if !self.ecrit_bien_en_son_nom(&message) {
+                return Err(DeliveryFailure::Permanent);
+            }
+        }
         // **COMPLÉTER PUIS SIGNER**, et pas l'inverse : la signature doit
         // couvrir ce qu'on ajoute. `h=` nomme `date` et `message-id` — les
         // signer absents laisserait un tiers les ajouter en route sans casser la
         // signature, ce qui est exactement ce que `h=` sert à empêcher.
-        let brut = core::mem::take(&mut self.corps);
         let brut = self.completer(brut);
         let corps = self.signer(brut);
         let rapports: Vec<ams_queue::Report<'_>> = self
@@ -987,6 +1053,10 @@ mod tests {
         message: &str,
     ) -> String {
         remise.begin(Some(de.as_bytes()));
+        // **UNE SOUMISSION EST AUTHENTIFIÉE**, et c'est ce qui dit au nom de qui
+        // elle écrit. Sans cela, la remise refuse — voir
+        // `ecrit_bien_en_son_nom`.
+        remise.submitter(b"marie");
         remise
             .add_recipient(b"ailleurs@autre.test")
             .expect("un sortant");
@@ -1003,10 +1073,17 @@ mod tests {
 
     /// Une remise dotée d'une file, pour éprouver ce qui SORT.
     fn remise_avec_file(racine: &Path) -> MaildirDelivery {
+        remise_pour(racine, &["example.com"])
+    }
+
+    /// La même, pour les domaines qu'on lui nomme.
+    fn remise_pour(racine: &Path, domaines: &[&str]) -> MaildirDelivery {
         std::fs::create_dir_all(racine.join("file")).expect("dossier");
         let (_boites, remise) = remise(racine);
         remise
-            .avec_domaines(Arc::new(std::vec![String::from("example.com")]))
+            .avec_domaines(Arc::new(
+                domaines.iter().map(|nom| (*nom).to_string()).collect(),
+            ))
             .avec_file(
                 ams_loop_tokio::Spool::new(
                     racine.join("file"),
@@ -1043,25 +1120,30 @@ mod tests {
         assert!(ecrit.contains("From: marie@example.com\r\n"), "{ecrit}");
     }
 
-    /// **ON NE SIGNE PAS POUR LE DOMAINE DES AUTRES**, et c'est la règle qui
-    /// protège quelqu'un d'autre que nous.
+    /// **ON NE SIGNE PAS POUR UN DOMAINE DONT ON NE TIENT PAS LA ZONE.**
     ///
     /// La clé publique se publie sous `<sélecteur>._domainkey.<domaine>` : signer
     /// pour un domaine dont on ne tient pas la zone produirait une signature qui
     /// échoue PARTOUT — et un échec DKIM se voit dans les rapports DMARC du
     /// domaine usurpé. C'est pire que pas de signature du tout.
+    ///
+    /// # C'EST UNE SECONDE COUCHE, ET ELLE RESTE UTILE
+    ///
+    /// Depuis qu'un `From:` doit router vers le compte authentifié, et que le
+    /// démarrage refuse un compte dont l'adresse sort des domaines annoncés, ce
+    /// cas ne se présente plus en production. Il se présente ici, parce que le
+    /// constructeur permet de ne nommer aucun domaine — et le jour où l'une des
+    /// deux règles amont bougera, celle-ci tiendra encore.
     #[tokio::test(flavor = "multi_thread")]
-    async fn on_ne_signe_pas_pour_le_domaine_des_autres() {
+    async fn on_ne_signe_pas_pour_un_domaine_qu_on_ne_tient_pas() {
         let temporaire = Ephemere::nouveau();
-        let (signataire, domaines) = signataire(&["example.com"]);
-        let mut remise = remise_avec_file(&temporaire.0)
-            .avec_domaines(domaines)
-            .avec_dkim(signataire);
+        let (signataire, _) = signataire(&["example.com"]);
+        let mut remise = remise_pour(&temporaire.0, &[]).avec_dkim(signataire);
 
-        let ecrit = depose(&mut remise, &temporaire.0, "marie@ailleurs.test");
+        let ecrit = depose(&mut remise, &temporaire.0, "marie@example.com");
         assert!(
             !ecrit.contains("DKIM-Signature"),
-            "on a signé pour un domaine qu'on n'héberge pas : {ecrit}"
+            "on a signé sans tenir la zone : {ecrit}"
         );
     }
 
@@ -1178,21 +1260,20 @@ mod tests {
         );
     }
 
-    /// **ON NE COMPLÈTE PAS POUR LE DOMAINE DES AUTRES.**
+    /// **SANS DOMAINE À NOUS, RIEN N'EST COMPLÉTÉ.**
     ///
-    /// Sans domaine à nous, on n'a rien d'unique à mettre à droite du
-    /// `Message-ID:` — et un identifiant qui n'est unique que par chance ne vaut
-    /// rien. Le message part alors tel quel.
+    /// On n'a alors rien d'unique à mettre à droite du `Message-ID:` — et un
+    /// identifiant qui n'est unique que par chance ne vaut rien.
     #[tokio::test(flavor = "multi_thread")]
     async fn sans_domaine_a_nous_rien_n_est_complete() {
         let temporaire = Ephemere::nouveau();
-        let mut remise = remise_avec_file(&temporaire.0);
+        let mut remise = remise_pour(&temporaire.0, &[]);
 
         let ecrit = depose_tel_quel(
             &mut remise,
             &temporaire.0,
-            "marie@ailleurs.test",
-            "From: marie@ailleurs.test\r\nTo: ailleurs@autre.test\r\n\r\nbonjour\r\n",
+            "marie@example.com",
+            "From: marie@example.com\r\nTo: ailleurs@autre.test\r\n\r\nbonjour\r\n",
         );
         assert!(!ecrit.contains("Date: "), "{ecrit}");
         assert!(!ecrit.contains("Message-ID: "), "{ecrit}");
@@ -1226,5 +1307,123 @@ mod tests {
             );
         }
         assert_eq!(identifiants.len(), 8);
+    }
+
+    // ── ON N'ÉMET PAS AU NOM DE QUELQU'UN D'AUTRE (RFC 6409 §6.1) ───────────
+
+    /// Tente un dépôt, et dit s'il a été accepté.
+    fn tente(remise: &mut MaildirDelivery, compte: &[u8], message: &str) -> bool {
+        remise.begin(Some(b"marie@example.com"));
+        remise.submitter(compte);
+        if remise.add_recipient(b"ailleurs@autre.test").is_err() {
+            return false;
+        }
+        if remise.append(message.as_bytes()).is_err() {
+            return false;
+        }
+        remise.finish().is_ok()
+    }
+
+    /// **UN COMPTE AUTHENTIFIÉ N'ÉCRIT PAS AU NOM D'UN AUTRE.**
+    ///
+    /// Rien ne le vérifiait sur ce chemin — la porte HTTP, elle, refusait déjà.
+    /// Tant que rien n'était signé, une usurpation partait nue ; depuis que ce
+    /// serveur signe ce qu'il émet, elle partirait AVEC NOTRE SIGNATURE et
+    /// passerait DMARC chez le destinataire. Nous authentifierions un
+    /// hameçonnage interne.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn un_compte_n_ecrit_pas_au_nom_d_un_autre() {
+        let temporaire = Ephemere::nouveau();
+        let mut remise = remise_avec_file(&temporaire.0);
+
+        assert!(
+            !tente(
+                &mut remise,
+                b"marie",
+                "From: patron@example.com\r\nTo: ailleurs@autre.test\r\n\r\nbonjour\r\n"
+            ),
+            "une usurpation interne est passée"
+        );
+        // Et rien n'a été mis en file : ce qu'on refuse ne part pas.
+        assert!(
+            !contenu(&temporaire.0.join("file"))
+                .iter()
+                .any(|nom| nom.ends_with(".eml")),
+            "le message refusé est parti quand même"
+        );
+    }
+
+    /// **SA PROPRE ADRESSE PASSE**, sans quoi cet essai ne dirait rien.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn son_adresse_a_soi_passe() {
+        let temporaire = Ephemere::nouveau();
+        let mut remise = remise_avec_file(&temporaire.0);
+
+        assert!(tente(
+            &mut remise,
+            b"marie",
+            "From: marie@example.com\r\nTo: ailleurs@autre.test\r\n\r\nbonjour\r\n"
+        ));
+    }
+
+    /// **SANS IDENTITÉ RETENUE, ON N'ÉMET RIEN.**
+    ///
+    /// Sans compte, sans `From:` lisible, ou avec une adresse qui ne route vers
+    /// personne : on ne sait pas au nom de qui ce message part, et l'émettre
+    /// reviendrait à signer une identité qu'on n'a pas vérifiée.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sans_identite_verifiable_rien_ne_part() {
+        let temporaire = Ephemere::nouveau();
+        let mut remise = remise_avec_file(&temporaire.0);
+
+        // Aucun `From:` du tout.
+        assert!(!tente(
+            &mut remise,
+            b"marie",
+            "To: ailleurs@autre.test\r\n\r\nbonjour\r\n"
+        ));
+        // Un `From:` qui ne route vers aucun compte.
+        assert!(!tente(
+            &mut remise,
+            b"marie",
+            "From: inconnu@ailleurs.test\r\n\r\nbonjour\r\n"
+        ));
+        // Et un compte qu'on n'a pas retenu : `begin` sans `submitter`.
+        remise.begin(Some(b"marie@example.com"));
+        assert!(remise.add_recipient(b"ailleurs@autre.test").is_ok());
+        assert!(
+            remise
+                .append(b"From: marie@example.com\r\n\r\nbonjour\r\n")
+                .is_ok()
+        );
+        assert!(remise.finish().is_err(), "une transaction anonyme a émis");
+    }
+
+    /// **L'IDENTITÉ NE SURVIT PAS À LA TRANSACTION.**
+    ///
+    /// Sur une même connexion, un `AUTH` puis un `RSET` ne doivent pas laisser le
+    /// message suivant partir au nom du compte du précédent.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn l_identite_ne_survit_pas_a_la_transaction() {
+        let temporaire = Ephemere::nouveau();
+        let mut remise = remise_avec_file(&temporaire.0);
+
+        assert!(tente(
+            &mut remise,
+            b"marie",
+            "From: marie@example.com\r\n\r\nun\r\n"
+        ));
+        // La transaction suivante ne repose pas `submitter` : elle est anonyme.
+        remise.begin(Some(b"marie@example.com"));
+        assert!(remise.add_recipient(b"ailleurs@autre.test").is_ok());
+        assert!(
+            remise
+                .append(b"From: marie@example.com\r\n\r\ndeux\r\n")
+                .is_ok()
+        );
+        assert!(
+            remise.finish().is_err(),
+            "l'identité du message précédent a servi"
+        );
     }
 }

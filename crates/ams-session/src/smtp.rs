@@ -28,6 +28,12 @@ const SIZE_LINE_MAX: usize = 5 + MAX_DIGITS;
 /// 5321 peut porter, dont le base64 ne rend que trois quarts.
 const SASL_DECODED_MAX: usize = 512;
 
+/// Ce qu'un nom de compte peut peser.
+///
+/// La borne d'une partie locale (RFC 5321 §4.5.3.1.1) : un compte se nomme comme
+/// une boîte, et ce qui ne tient pas dans une adresse n'a pas à tenir ici.
+const LOGIN_MAX: usize = 64;
+
 /// La place d'une ligne de réponse, état étendu compris.
 ///
 /// Le plus long texte du vocabulaire tient largement dedans ; ce qui n'y
@@ -560,6 +566,16 @@ pub struct SmtpSession<'a, P: Policy> {
     /// laquelle un rapport de non-remise reviendra, et l'inventer serait
     /// l'envoyer à quelqu'un qui n'a rien demandé.
     chemin_de_retour: Tampon<SENDER_MAX>,
+    /// Le compte qui s'est authentifié, s'il y en a un.
+    ///
+    /// # POURQUOI LE RETENIR, ET NON SEULEMENT UN BOOLÉEN
+    ///
+    /// « Authentifié » suffit à décider si l'on relaie. Il ne suffit PAS à
+    /// décider au nom de QUI l'on relaie : un compte authentifié qui écrit
+    /// `From: patron@example.com` obtiendrait, sans cela, notre signature DKIM
+    /// sur une adresse qui n'est pas la sienne. Le booléen ouvre la porte ; le
+    /// nom dit ce qu'on a le droit d'affirmer en la franchissant.
+    compte: Tampon<LOGIN_MAX>,
     /// Le chemin de retour TEL QU'IL A ÉTÉ ÉCRIT, pour le `Return-Path:`.
     ///
     /// # POURQUOI UN SECOND TAMPON, ET NON `chemin_de_retour`
@@ -634,6 +650,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
             size_len: fin_size,
             helo: Tampon::vide(),
             expediteur: Tampon::vide(),
+            compte: Tampon::vide(),
             chemin_de_retour: Tampon::vide(),
             depose: Tampon::vide(),
             depose_vu: false,
@@ -690,6 +707,10 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     pub fn on_tls_established(&mut self) {
         self.tls = true;
         self.authenticated = false;
+        // **L'IDENTITÉ TOMBE AVEC L'AUTHENTIFICATION.** La laisser derrière
+        // ferait écrire au nom du compte précédent après un `STARTTLS`, qui
+        // remet tout à zéro (§4.2 de RFC 3207).
+        self.compte.vider();
         self.quitter_la_transaction();
         self.phase = Phase::Greeted;
     }
@@ -926,6 +947,16 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     #[must_use]
     pub fn is_authenticated(&self) -> bool {
         self.authenticated
+    }
+
+    /// Le compte qui s'est authentifié, s'il y en a un.
+    ///
+    /// **`None` DIT DEUX CHOSES**, et l'appelant doit les traiter pareil :
+    /// personne ne s'est authentifié, ou le nom donné ne tenait pas. Dans les
+    /// deux cas, rien ne permet de dire au nom de qui ce pair écrit.
+    #[must_use]
+    pub fn submitter(&self) -> Option<&[u8]> {
+        (self.authenticated && !self.compte.est_vide()).then(|| self.compte.as_bytes())
     }
 
     /// Traite une ligne de commande, **CRLF compris**.
@@ -1881,7 +1912,18 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
             // un `get(..)` ouvrirait ici une branche qu'aucun test ne peut
             // atteindre — ce que C2 refuse.
             Ok(ecrits) => match parse_plain(&clair[..ecrits]) {
-                Ok(identifiants) => self.policy.authenticate(&identifiants),
+                Ok(identifiants) => {
+                    let accorde = self.policy.authenticate(&identifiants);
+                    if accorde {
+                        // **ON RETIENT QUI S'EST AUTHENTIFIÉ**, et pas seulement
+                        // QUE quelqu'un l'a fait. Un nom qui ne tient pas laisse
+                        // le tampon vide, et la remise refusera alors tout
+                        // `From:` : mieux vaut ne rien émettre que de signer une
+                        // adresse qu'on ne sait pas rattacher à un compte.
+                        self.compte.poser(&[identifiants.authentication_identity]);
+                    }
+                    accorde
+                }
                 Err(_) => false,
             },
             Err(_) => false,
@@ -4403,5 +4445,58 @@ mod tests {
         assert_eq!(ecrit.len(), 14 + 254 + 3);
         // Et il tient dans la borne annoncée, qui prévoit large.
         assert!(ecrit.len() <= ams_mime::RETURN_PATH_MAX);
+    }
+
+    // ── QUI S'EST AUTHENTIFIÉ, ET NON SEULEMENT QUE QUELQU'UN L'A FAIT ──────
+
+    /// **LE BOOLÉEN OUVRE LA PORTE, LE NOM DIT CE QU'ON PEUT AFFIRMER.**
+    ///
+    /// « Authentifié » suffit à décider si l'on relaie. Il ne suffit pas à
+    /// décider au nom de QUI : sans le nom, un compte qui écrit
+    /// `From: patron@example.com` obtiendrait notre signature DKIM sur une
+    /// adresse qui n'est pas la sienne.
+    /// Une session chiffrée et présentée, prête pour un `AUTH`.
+    fn session_authentifiable() -> SmtpSession<'static, Verdict> {
+        let mut session = session(RecipientVerdict::Accept);
+        session.on_tls_established();
+        assert!(jouer(&mut session, b"EHLO client.example\r\n").starts_with("250"));
+        session
+    }
+
+    #[test]
+    fn le_compte_authentifie_est_retenu() {
+        let mut session = session_authentifiable();
+        assert_eq!(session.submitter(), None, "personne ne s'est encore nommé");
+        // `AGplYW4Ab3V2cmUtdG9p` est `\0jean\0ouvre-toi`.
+        assert!(jouer(&mut session, b"AUTH PLAIN AGplYW4Ab3V2cmUtdG9p\r\n").starts_with("235"));
+        assert_eq!(session.submitter(), Some(&b"jean"[..]));
+    }
+
+    /// **UN REFUS NE NOMME PERSONNE**, et une authentification manquée ne laisse
+    /// pas le nom essayé derrière elle.
+    #[test]
+    fn une_authentification_refusee_ne_nomme_personne() {
+        let mut session = session_authentifiable();
+        // Le même nom, un autre mot de passe.
+        assert!(jouer(&mut session, b"AUTH PLAIN AGplYW4AZmF1eA==\r\n").starts_with("535"));
+        assert_eq!(session.submitter(), None);
+    }
+
+    /// **`STARTTLS` REMET TOUT À ZÉRO** (§4.2 de RFC 3207), l'identité comprise.
+    ///
+    /// Ce qu'un pair a dit en clair a pu être dit par quelqu'un d'autre. Garder
+    /// le nom ferait écrire au nom d'un compte qu'on n'a plus vérifié.
+    #[test]
+    fn le_chiffrement_oublie_l_identite() {
+        let mut session = session_authentifiable();
+        assert!(jouer(&mut session, b"AUTH PLAIN AGplYW4Ab3V2cmUtdG9p\r\n").starts_with("235"));
+        assert_eq!(session.submitter(), Some(&b"jean"[..]));
+        // Une seconde montée en chiffrement remet tout à zéro (§4.2 de RFC 3207).
+        session.on_tls_established();
+        assert_eq!(
+            session.submitter(),
+            None,
+            "l'identité a survécu au chiffrement"
+        );
     }
 }
