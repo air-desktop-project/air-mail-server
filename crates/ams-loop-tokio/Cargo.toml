@@ -9,6 +9,7 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+ams-fichier = { workspace = true }
 ams-proto-pop3 = { workspace = true }
 # IMAP (RFC 9051) : le découpage des commandes, que le pilote ne refait pas.
 ams-proto-imap = { workspace = true }

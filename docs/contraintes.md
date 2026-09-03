@@ -3846,6 +3846,74 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
+## `air-mail-admin` détruisait ce qu'il éditait s'il était interrompu
+
+### UNE LECTURE-MODIFICATION-ÉCRITURE TRONQUÉE SUR PLACE
+
+`account add` relit tous les comptes, en ajoute un, et réécrit le tout. La
+réécriture ouvrait le fichier avec `truncate(true)`, sans temporaire, sans
+renommage, sans `fsync`. Une coupure, un disque plein ou un `SIGTERM` entre la
+troncature et la fin de l'écriture laissait un magasin illisible — et au
+démarrage suivant, ce n'était pas le compte qu'on ajoutait qui manquait,
+**c'étaient tous les autres**.
+
+`config write` faisait de même par `std::fs::write`, qui vide le fichier avant
+d'écrire : être interrompu laissait un serveur qui ne redémarre plus, alors que
+l'ancienne configuration était parfaitement valable et qu'on n'avait rien
+demandé de tel.
+
+### ET UNE AFFIRMATION ABSOLUE QUI N'ÉTAIT PAS VRAIE
+
+`ecrire_magasin` était documentée « Écrit le magasin, en `0600` », avec un
+raisonnement soigné sur l'intervalle pendant lequel un fichier créé en `0644`
+serait lisible. Mais `OpenOptions::mode` ne s'applique qu'à la CRÉATION : sur un
+magasin déjà présent en `0644` — restauré d'une sauvegarde, ou créé par une
+version antérieure —, l'appel ne faisait rien, et les empreintes des mots de
+passe restaient lisibles pendant que le code affirmait le contraire.
+
+Les deux défauts se ferment du même geste, ce qui est le signe qu'ils ont une
+cause commune : en passant par un temporaire, le fichier qui survit est toujours
+le NEUF, donc toujours celui dont on a choisi le mode.
+
+### LA MÊME DÉCISION ÉTAIT PRISE CINQ FOIS, DE CINQ FAÇONS
+
+| écriture | temporaire | `0600` | `fsync` fichier | `fsync` répertoire |
+|---|---|---|---|---|
+| index Maildir (`ams-store`) | dans `tmp/` | non | oui | oui |
+| magasin des comptes (`ams-server`) | avec le PID | oui | oui | oui |
+| cache MTA-STS (`ams-loop-tokio`) | `.tmp` fixe | oui | oui | **cassé si chemin relatif** |
+| abonnements IMAP (`ams-server`) | `.tmp` fixe | **non** | **non** | **non** |
+| **comptes et configuration (`air-mail-admin`)** | **aucun** | partiel | **non** | **non** |
+
+La plus complète — celle du serveur — vit désormais dans `ams-fichier`, et les
+autres l'appellent. Deux défauts se sont fermés en chemin :
+
+- **Le cache MTA-STS était cassé pour tout chemin relatif.**
+  `chemin.parent()` rend `Some("")` pour un chemin nu, et ouvrir `""` échoue :
+  le renommage réussissait, la fonction rendait une erreur, l'appelant en
+  concluait qu'il n'avait rien posé — et le déclassement que §5 de RFC 8461
+  ferme se rouvrait à chaque démarrage. Son temporaire s'appelait aussi
+  `<chemin>.tmp`, sans rien qui distingue deux processus.
+- **Les abonnements IMAP n'avaient que le renommage** : aucune synchronisation,
+  aucun mode. Une coupure pouvait laisser le nom désigner un fichier vide,
+  c'est-à-dire une liste d'abonnements effacée.
+
+### LA SEULE ÉCRITURE QUI N'EMPRUNTE PAS CE CHEMIN, ET POURQUOI
+
+L'index d'une boîte garde son temporaire dans le `tmp/` du Maildir. Ce n'est pas
+un oubli : les sous-dossiers sont des répertoires `.Nom` à la racine, à la façon
+de Maildir++. Un temporaire nommé `.index.1234.0.tmp` y ressemblerait, le temps
+d'un renommage, à un dossier nommé `index.1234.0.tmp` — qu'un `LIST` IMAP
+concurrent pourrait montrer. `tmp/` est le répertoire que Maildir définit pour
+exactement cela.
+
+### CE QUI RESTE OUVERT
+
+Deux `account add` simultanés se perdent encore l'un l'autre : c'est une
+lecture-modification-écriture sans verrou, et l'outil dit « compte ajouté » aux
+deux. Le renommage empêche la CORRUPTION, pas la PERTE. Le projet emploie déjà
+`flock` pour les boîtes POP3 ; ce serait le même outil, et cela reste à faire.
+
 ## Le courrier de tout le monde naissait lisible par tout le monde
 
 ### RIEN NE POSAIT DE MASQUE DE CRÉATION

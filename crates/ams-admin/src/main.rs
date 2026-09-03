@@ -194,7 +194,11 @@ fn ecrire(fichier: &Path, arguments: &[&str]) -> ExitCode {
         eprintln!("air-mail-admin : la configuration écrite ne se relit pas : {erreur}");
         return ExitCode::FAILURE;
     }
-    if let Err(erreur) = std::fs::write(fichier, &octets) {
+    // **ET ON LA POSE SANS LA TRONQUER D'ABORD.** `std::fs::write` vide le
+    // fichier avant d'écrire : réécrire une configuration et être interrompu
+    // laissait un serveur qui ne redémarre plus, alors que l'ancienne était
+    // parfaitement valable et qu'on n'avait rien demandé de tel.
+    if let Err(erreur) = ams_fichier::poser(fichier, &octets) {
         eprintln!("air-mail-admin : `{}` : {erreur}", fichier.display());
         return ExitCode::FAILURE;
     }
@@ -478,30 +482,25 @@ fn lire_magasin(fichier: &Path, tolerer_absence: bool) -> Result<Vec<Account>, S
     }
 }
 
-/// Écrit le magasin, en `0600`.
+/// Écrit le magasin, sans laisser la place à une interruption.
 ///
-/// # Les permissions sont posées AVANT le contenu
+/// # Ce que la version d'avant faisait, et ce qu'elle coûtait
 ///
-/// Un fichier créé en `0644` puis resserré est lisible par tout le monde
-/// pendant l'intervalle. Court, mais réel — et il n'y a aucune raison de le
-/// laisser ouvert une seule instruction.
+/// Elle tronquait le fichier SUR PLACE avant d'écrire. Or `account add` est une
+/// lecture-modification-écriture : il relit tous les comptes, en ajoute un, et
+/// réécrit le tout. Une coupure, un disque plein ou un `SIGTERM` entre la
+/// troncature et la fin de l'écriture laissait un magasin illisible — et au
+/// démarrage suivant, ce n'était pas le compte qu'on ajoutait qui manquait,
+/// c'étaient TOUS les autres.
+///
+/// Elle posait aussi `.mode(0o600)` à l'ouverture, ce qui ne fait rien sur un
+/// fichier déjà là : un magasin restauré d'une sauvegarde en `0644` y restait,
+/// pendant que la documentation de cette fonction affirmait `0600`.
 fn ecrire_magasin(fichier: &Path, comptes: &[Account]) -> Result<(), String> {
-    use std::io::Write as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
-
     let octets =
         ams_config::encode_accounts(comptes).map_err(|erreur| format!("encodage : {erreur}"))?;
-    let mut sortie = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(fichier)
-        .map_err(|erreur| format!("`{}` : {erreur}", fichier.display()))?;
-    sortie
-        .write_all(&octets)
-        .map_err(|erreur| format!("`{}` : {erreur}", fichier.display()))?;
-    Ok(())
+    ams_fichier::poser(fichier, &octets)
+        .map_err(|erreur| format!("`{}` : {erreur}", fichier.display()))
 }
 
 /// Lit un mot de passe sur l'entrée standard.

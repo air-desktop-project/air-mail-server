@@ -66,6 +66,7 @@ members = [
     "crates/ams-quic-client",
     "crates/ams-api",
     # Étage 3 — exécution
+    "crates/ams-fichier",
     "crates/ams-loop-tokio",
     "crates/ams-store",
     # Binaires (C12)
@@ -113,6 +114,7 @@ ams-tlsrpt = { path = "crates/ams-tlsrpt", version = "0.1.0" }
 ams-dmarc = { path = "crates/ams-dmarc", version = "0.1.0" }
 ams-dns = { path = "crates/ams-dns", version = "0.1.0" }
 ams-guard = { path = "crates/ams-guard", version = "0.1.0" }
+ams-fichier = { path = "crates/ams-fichier", version = "0.1.0" }
 ams-admin-options = { path = "crates/ams-admin-options", version = "0.1.0" }
 ams-index = { path = "crates/ams-index", version = "0.1.0" }
 ams-loop-tokio = { path = "crates/ams-loop-tokio", version = "0.1.0" }

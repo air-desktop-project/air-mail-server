@@ -51,6 +51,7 @@ dependencies = [
  "ams-api",
  "ams-auth",
  "ams-config",
+ "ams-fichier",
  "ams-guard",
  "ams-index",
  "ams-proto-imap",
@@ -124,6 +125,10 @@ name = "ams-dns"
 version = "0.1.0"
 
 [[package]]
+name = "ams-fichier"
+version = "0.1.0"
+
+[[package]]
 name = "ams-field-codec"
 version = "0.1.0"
 
@@ -154,6 +159,7 @@ dependencies = [
  "ams-dkim",
  "ams-dmarc",
  "ams-dns",
+ "ams-fichier",
  "ams-guard",
  "ams-h3",
  "ams-mime",
@@ -289,6 +295,7 @@ dependencies = [
  "ams-auth",
  "ams-config",
  "ams-dkim",
+ "ams-fichier",
  "ams-guard",
  "ams-index",
  "ams-loop-tokio",

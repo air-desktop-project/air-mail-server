@@ -1280,14 +1280,11 @@ impl BoitesImap {
             texte.extend_from_slice(nom);
             texte.push(b'\n');
         }
-        let provisoire = chemin.with_extension("tmp");
-        if std::fs::write(&provisoire, &texte).is_err() {
-            return false;
-        }
-        if std::fs::rename(&provisoire, &chemin).is_err() {
-            // Ce qu'on n'a pas pu poser, on l'enlève : un fichier provisoire
-            // laissé là resterait à jamais.
-            let _ = std::fs::remove_file(&provisoire);
+        // CETTE POSE AVAIT LE RENOMMAGE, ET RIEN D'AUTRE : aucune
+        // synchronisation du fichier ni du répertoire, et aucun mode — donc
+        // `0644`. Une coupure pouvait laisser le nom désigner un fichier vide,
+        // c'est-à-dire une liste d'abonnements effacée.
+        if ams_fichier::poser(&chemin, &texte).is_err() {
             return false;
         }
         // LE CACHE DOIT SUIVRE, ET IMMÉDIATEMENT : la session qui vient

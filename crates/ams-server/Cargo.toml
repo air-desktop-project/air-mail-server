@@ -18,6 +18,7 @@ path = "src/main.rs"
 # L'API REST : ses types de ressource, ses portées, ses documents d'erreur.
 ams-api = { workspace = true }
 ams-proto-http = { workspace = true }
+ams-fichier = { workspace = true }
 ams-config = { workspace = true }
 ams-guard = { workspace = true }
 ams-index = { workspace = true }

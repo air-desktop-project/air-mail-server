@@ -167,59 +167,15 @@ impl Comptes {
     }
 }
 
-/// Écrit ces octets à cet endroit, **sans jamais laisser un fichier à moitié**.
+/// Pose les octets du magasin, atomiquement et durablement.
 ///
-/// # LE `rename` EST CE QUI REND L'ÉCRITURE ATOMIQUE
-///
-/// Écrire par-dessus le fichier laisserait, entre le début et la fin, un magasin
-/// tronqué — et un serveur qui redémarrerait à cet instant refuserait de partir.
-/// Le remplacement par `rename` n'a pas d'instant intermédiaire : c'est la même
-/// discipline que celle du Maildir, et pour la même raison.
-///
-/// # ET LES DEUX `fsync` NE SONT PAS FACULTATIFS
-///
-/// Le premier met les octets sur le disque AVANT que le `rename` ne les désigne ;
-/// sans lui, une coupure laisserait le nom pointer sur un fichier vide. Le second
-/// met le `rename` lui-même sur le disque : un répertoire non synchronisé peut
-/// perdre l'entrée qu'on vient d'y écrire.
+/// La discipline elle-même vit dans [`ams_fichier`] : elle était écrite ici, et
+/// quatre autres fois ailleurs, chacune un peu différemment. C'est ce qui avait
+/// laissé l'outil d'administration — qui écrit ce MÊME fichier — la perdre
+/// entièrement.
 fn poser(chemin: &Path, octets: &[u8]) -> Result<(), String> {
-    use std::io::Write as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
-
-    let repertoire = chemin
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let nom = chemin
-        .file_name()
-        .map(|nom| nom.to_string_lossy().into_owned())
-        .unwrap_or_else(|| String::from("comptes"));
-    // Dans LE MÊME RÉPERTOIRE : `rename` n'est atomique qu'au sein d'un système
-    // de fichiers, et deux répertoires peuvent être sur deux montages.
-    let provisoire = repertoire.join(format!(".{nom}.{}.tmp", std::process::id()));
-
-    let ecrire = || -> std::io::Result<()> {
-        let mut fichier = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            // **`0600` DÈS L'OUVERTURE** : un fichier créé en `0644` puis
-            // resserré est lisible par tout le monde pendant l'intervalle.
-            .mode(0o600)
-            .open(&provisoire)?;
-        fichier.write_all(octets)?;
-        fichier.sync_all()?;
-        drop(fichier);
-        std::fs::rename(&provisoire, chemin)?;
-        std::fs::File::open(repertoire)?.sync_all()
-    };
-
-    ecrire().map_err(|erreur| {
-        // Un provisoire qui traîne serait un fichier de comptes de plus, avec un
-        // nom que personne ne lit et un contenu que personne ne relit.
-        let _ = std::fs::remove_file(&provisoire);
-        format!("`{}` : {erreur}", chemin.display())
-    })
+    ams_fichier::poser(chemin, octets)
+        .map_err(|erreur| format!("`{}` : {erreur}", chemin.display()))
 }
 
 #[cfg(test)]

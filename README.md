@@ -228,6 +228,7 @@ Les seules crates qui lisent, écrivent et attendent. Elles ne décident de rien
 
 | Crate | Périmètre | État |
 | --- | --- | --- |
+| `ams-fichier` | poser un fichier : atomique pour qui le lit, durable pour la machine | **le seul chemin par lequel ce dépôt remplace un fichier** |
 | `ams-loop-tokio` | les boucles Unix, sur tokio | **SMTP, POP3, IMAP, HTTP/2, HTTP/3 sur QUIC, la file, MTA-STS et les rapports** |
 | `ams-store` | Maildir : les fichiers, seule source de vérité | **implémenté** |
 | `ams-quic-client` | un client QUIC et HTTP/3 **pour les essais**, et pour eux seuls | **il parle à notre serveur** |

@@ -342,35 +342,17 @@ impl Sts {
 
 /// Écrit `contenu` dans `chemin`, ATOMIQUEMENT.
 ///
-/// La même discipline que la file : un temporaire dans LE MÊME dossier, puis
-/// `sync_all`, puis le renommage. Un lecteur ne voit jamais un fichier à moitié
-/// écrit.
+/// # Deux défauts que la mise en commun a fermés
+///
+/// Le premier : `if let Some(parent) = chemin.parent()` rend `Some("")` pour un
+/// chemin nu, et ouvrir `""` échoue. Un cache nommé relativement — ce que rien
+/// n'interdit — voyait donc son renommage RÉUSSIR, puis cette fonction rendre
+/// une erreur ; l'appelant en concluait qu'il n'avait rien posé, et le
+/// déclassement que §5 de RFC 8461 ferme se rouvrait à chaque démarrage.
+///
+/// Le second : le temporaire s'appelait `<chemin>.tmp`, sans rien qui distingue
+/// deux processus. Deux serveurs partageant un cache se seraient écrasés au
+/// milieu de leurs écritures respectives.
 fn poser(chemin: &Path, contenu: &[u8]) -> Result<(), ()> {
-    use std::io::Write as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
-
-    let mut temporaire = chemin.to_path_buf().into_os_string();
-    temporaire.push(".tmp");
-    let temporaire = PathBuf::from(temporaire);
-    let ecriture = (|| -> std::io::Result<()> {
-        let mut fichier = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&temporaire)?;
-        fichier.write_all(contenu)?;
-        fichier.sync_all()?;
-        drop(fichier);
-        std::fs::rename(&temporaire, chemin)?;
-        if let Some(parent) = chemin.parent() {
-            std::fs::File::open(parent)?.sync_all()?;
-        }
-        Ok(())
-    })();
-    if ecriture.is_err() {
-        let _ = std::fs::remove_file(&temporaire);
-        return Err(());
-    }
-    Ok(())
+    ams_fichier::poser(chemin, contenu).map_err(|_| ())
 }

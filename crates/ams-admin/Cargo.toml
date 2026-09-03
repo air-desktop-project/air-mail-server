@@ -21,6 +21,7 @@ ams-auth = { workspace = true }
 # quand le lecteur ferme. Rust l'ignore au démarrage ; on rend le défaut d'Unix.
 libc = { workspace = true }
 ams-admin-options = { workspace = true }
+ams-fichier = { workspace = true }
 ams-config = { workspace = true }
 ams-guard = { workspace = true }
 ams-queue = { workspace = true }
