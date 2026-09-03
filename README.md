@@ -468,7 +468,15 @@ sert personne.
 Elle n'est pas embarquée : elle pèse quelques centaines de kibioctets, change
 toutes les semaines, et l'alignement relâché en dépend. Embarquée, elle
 vieillirait avec le binaire sans que personne ne sache de quand date la sienne.
-Sans elle, DMARC n'est pas évalué — et le serveur le dit au démarrage.
+
+**Évaluer DMARC demande DEUX choses, et pas une** : cette liste, pour savoir si
+deux domaines s'alignent, ET un résolveur, pour aller lire la politique du
+domaine de l'en-tête `From:`. À défaut de l'une des deux, aucun message n'est
+évalué — et tout ce qu'on aurait réglé par ailleurs, l'application d'un
+`p=reject` comme le dossier de quarantaine, ne s'appliquerait alors à rien.
+`air-mail-admin` refuse d'écrire une telle configuration, et le serveur le dit
+au démarrage. La liste seule, en revanche, est acceptée : elle ne promet rien à
+personne, et se prépare avant.
 
 **Les rapports agrégés (§7.2) sont composés, nommés, compressés et déposés.**
 Sans eux, un domaine durcit sa politique à l'aveugle : il découvre ses

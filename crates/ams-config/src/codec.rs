@@ -191,9 +191,28 @@ pub struct Dmarc {
 
 impl Dmarc {
     /// Ce service évalue-t-il DMARC ?
+    ///
+    /// # Pourquoi [`Spf`] EST UN ARGUMENT, et non quelque chose qu'on suppose
+    ///
+    /// Évaluer DMARC demande d'aller chercher le `_dmarc` du domaine de l'en-tête
+    /// `From:`, donc un résolveur — et les résolveurs vivent dans [`Spf`]. Cette
+    /// structure ne peut PAS répondre seule à la question que porte son nom :
+    /// elle n'a pas de quoi.
+    ///
+    /// Elle a pourtant essayé, et c'est ce qui a coûté. Le prédicat ne regardait
+    /// que la liste des suffixes ; chaque appelant devait se rappeler d'ajouter
+    /// `&& !resolveurs.is_empty()`. Le serveur y pensait à trois endroits et
+    /// l'oubliait au quatrième, et l'outil d'administration n'y pensait nulle
+    /// part : `config show` annonçait « DMARC APPLIQUÉ » sur la ligne qui suit
+    /// « SPF AUCUN RÉSOLVEUR ».
+    ///
+    /// En faire un ARGUMENT rend l'oubli inexprimable : on ne peut plus poser la
+    /// question sans avoir sous la main de quoi y répondre. C'est le même choix
+    /// que `submitter` dans `accepts_recipient`, et pour la même raison — un
+    /// champ, quelqu'un finit par oublier de le mettre à jour.
     #[must_use]
-    pub fn est_configure(&self) -> bool {
-        !self.public_suffix_list.is_empty()
+    pub fn est_configure(&self, spf: &Spf) -> bool {
+        !self.public_suffix_list.is_empty() && spf.est_configure()
     }
 
     /// Ce service REMET-il les rapports qu'il compose ?
@@ -201,8 +220,8 @@ impl Dmarc {
     /// Composer et remettre sont deux services distincts : le premier n'écrit
     /// que dans un dossier de la machine, le second parle à des tiers.
     #[must_use]
-    pub fn envoie(&self) -> bool {
-        self.rapporte() && self.send_reports
+    pub fn envoie(&self, spf: &Spf) -> bool {
+        self.rapporte(spf) && self.send_reports
     }
 
     /// Ce service compose-t-il des rapports d'ÉCHEC ?
@@ -211,8 +230,8 @@ impl Dmarc {
     /// plus** : un rapport d'échec parle d'un message précis, arrivé chez
     /// quelqu'un.
     #[must_use]
-    pub fn rapporte_les_echecs(&self) -> bool {
-        self.rapporte() && self.failure_reports
+    pub fn rapporte_les_echecs(&self, spf: &Spf) -> bool {
+        self.rapporte(spf) && self.failure_reports
     }
 
     /// Ce service MET-IL DE CÔTÉ ce qu'une politique met en quarantaine ?
@@ -221,8 +240,8 @@ impl Dmarc {
     /// `p=reject` : la quarantaine remet le message, elle ne peut rien perdre,
     /// et il n'y a donc rien à découvrir avant de l'ouvrir.
     #[must_use]
-    pub fn met_en_quarantaine(&self) -> bool {
-        self.est_configure() && !self.quarantine_folder.is_empty()
+    pub fn met_en_quarantaine(&self, spf: &Spf) -> bool {
+        self.est_configure(spf) && !self.quarantine_folder.is_empty()
     }
 
     /// Ce service compose-t-il des rapports ?
@@ -232,8 +251,8 @@ impl Dmarc {
     /// rapports sans évaluation — n'a rien à écrire, et c'est pourquoi les deux
     /// conditions sont exigées.
     #[must_use]
-    pub fn rapporte(&self) -> bool {
-        self.est_configure() && !self.report_directory.is_empty()
+    pub fn rapporte(&self, spf: &Spf) -> bool {
+        self.est_configure(spf) && !self.report_directory.is_empty()
     }
 }
 
@@ -1298,8 +1317,12 @@ mod tests {
     #[test]
     fn la_section_dmarc_traverse_le_format() {
         let mut original = exemple();
-        assert!(!original.dmarc.est_configure());
-        assert!(!original.dmarc.rapporte());
+        assert!(!original.dmarc.est_configure(&original.spf));
+        assert!(!original.dmarc.rapporte(&original.spf));
+        // LE RÉSOLVEUR FAIT PARTIE DE L'ÉVALUATION, et cette section ne le
+        // porte pas : sans lui, tout ce qu'on règle ci-dessous ne s'appliquerait
+        // à aucun message.
+        original.spf.resolvers = vec![String::from("127.0.0.1:53")];
         original.dmarc = Dmarc {
             public_suffix_list: String::from("/etc/ams/psl.dat"),
             enforcement: Enforcement::Enforce,
@@ -1314,9 +1337,9 @@ mod tests {
         let octets = encode(&original).expect("encodable");
         let relue = decode(&octets).expect("relisible");
         assert_eq!(relue.dmarc, original.dmarc);
-        assert!(relue.dmarc.est_configure());
-        assert!(relue.dmarc.rapporte());
-        assert!(relue.dmarc.met_en_quarantaine());
+        assert!(relue.dmarc.est_configure(&relue.spf));
+        assert!(relue.dmarc.rapporte(&relue.spf));
+        assert!(relue.dmarc.met_en_quarantaine(&relue.spf));
         assert!(!alloc::format!("{:?}", relue.dmarc).is_empty());
     }
 
@@ -1333,29 +1356,37 @@ mod tests {
     #[test]
     fn la_quarantaine_ne_tient_qu_au_dossier_et_a_l_evaluation() {
         let mut config = exemple();
+        config.spf.resolvers = vec![String::from("127.0.0.1:53")];
         config.dmarc.quarantine_folder = String::from("Junk");
         assert!(
-            !config.dmarc.met_en_quarantaine(),
+            !config.dmarc.met_en_quarantaine(&config.spf),
             "rien n'est évalué : rien n'est mis de côté"
         );
         config.dmarc.public_suffix_list = String::from("/etc/ams/psl.dat");
-        assert!(config.dmarc.met_en_quarantaine());
+        assert!(config.dmarc.met_en_quarantaine(&config.spf));
         assert_eq!(config.dmarc.enforcement, Enforcement::Observe);
         config.dmarc.quarantine_folder.clear();
-        assert!(!config.dmarc.met_en_quarantaine());
+        assert!(!config.dmarc.met_en_quarantaine(&config.spf));
     }
 
     #[test]
     fn remettre_se_demande_en_plus_de_composer() {
         let mut config = exemple();
+        config.spf.resolvers = vec![String::from("127.0.0.1:53")];
         config.dmarc.public_suffix_list = String::from("/etc/ams/psl.dat");
         config.dmarc.report_directory = String::from("/var/spool/ams/rapports");
-        assert!(config.dmarc.rapporte());
-        assert!(!config.dmarc.envoie(), "le défaut dépose et n'envoie rien");
+        assert!(config.dmarc.rapporte(&config.spf));
+        assert!(
+            !config.dmarc.envoie(&config.spf),
+            "le défaut dépose et n'envoie rien"
+        );
         config.dmarc.send_reports = true;
-        assert!(config.dmarc.envoie());
+        assert!(config.dmarc.envoie(&config.spf));
         config.dmarc.report_directory.clear();
-        assert!(!config.dmarc.envoie(), "rien à remettre sans dossier");
+        assert!(
+            !config.dmarc.envoie(&config.spf),
+            "rien à remettre sans dossier"
+        );
     }
 
     /// **Les rapports d'échec demandent une décision de plus** : ils parlent
@@ -1363,30 +1394,76 @@ mod tests {
     #[test]
     fn les_rapports_d_echec_se_demandent_a_part() {
         let mut config = exemple();
+        config.spf.resolvers = vec![String::from("127.0.0.1:53")];
         config.dmarc.public_suffix_list = String::from("/etc/ams/psl.dat");
         config.dmarc.report_directory = String::from("/var/spool/ams/rapports");
-        assert!(config.dmarc.rapporte());
+        assert!(config.dmarc.rapporte(&config.spf));
         assert!(
-            !config.dmarc.rapporte_les_echecs(),
+            !config.dmarc.rapporte_les_echecs(&config.spf),
             "le défaut n'en compose pas"
         );
         config.dmarc.failure_reports = true;
-        assert!(config.dmarc.rapporte_les_echecs());
+        assert!(config.dmarc.rapporte_les_echecs(&config.spf));
         config.dmarc.report_directory.clear();
-        assert!(!config.dmarc.rapporte_les_echecs(), "sans dossier, rien");
+        assert!(
+            !config.dmarc.rapporte_les_echecs(&config.spf),
+            "sans dossier, rien"
+        );
     }
 
     #[test]
     fn rapporter_demande_les_deux() {
         let mut config = exemple();
+        config.spf.resolvers = vec![String::from("127.0.0.1:53")];
         config.dmarc.report_directory = String::from("/var/spool/ams/rapports");
-        assert!(!config.dmarc.est_configure());
-        assert!(!config.dmarc.rapporte());
+        assert!(!config.dmarc.est_configure(&config.spf));
+        assert!(!config.dmarc.rapporte(&config.spf));
         config.dmarc.public_suffix_list = String::from("/etc/ams/psl.dat");
-        assert!(config.dmarc.rapporte());
+        assert!(config.dmarc.rapporte(&config.spf));
         config.dmarc.report_directory.clear();
-        assert!(config.dmarc.est_configure());
-        assert!(!config.dmarc.rapporte());
+        assert!(config.dmarc.est_configure(&config.spf));
+        assert!(!config.dmarc.rapporte(&config.spf));
+    }
+
+    /// **SANS RÉSOLVEUR, RIEN N'EST ÉVALUÉ — ET DONC RIEN N'EST FAIT.**
+    ///
+    /// C'est la moitié de la règle que ce prédicat ignorait. La documentation de
+    /// [`Dmarc`] l'écrivait déjà — « si et seulement si une liste est nommée ET
+    /// que des résolveurs le sont aussi » —, mais le code n'en appliquait que la
+    /// première partie, et chaque appelant devait se rappeler du reste.
+    ///
+    /// Les CINQ prédicats tombent ensemble, parce qu'ils reposent tous sur
+    /// l'évaluation : un dossier de quarantaine que rien ne remplit, des
+    /// rapports qui n'ont rien à dire, une remise qui n'a rien à remettre.
+    #[test]
+    fn sans_resolveur_aucun_service_dmarc_ne_tourne() {
+        let mut config = exemple();
+        config.dmarc = Dmarc {
+            public_suffix_list: String::from("/etc/ams/psl.dat"),
+            enforcement: Enforcement::Enforce,
+            report_directory: String::from("/var/spool/ams/rapports"),
+            report_org_name: String::new(),
+            report_email: String::new(),
+            report_interval_seconds: 3_600,
+            send_reports: true,
+            failure_reports: true,
+            quarantine_folder: String::from("Junk"),
+        };
+        // TOUT EST DEMANDÉ, et il ne manque QUE le résolveur.
+        assert!(config.spf.resolvers.is_empty());
+        assert!(!config.dmarc.est_configure(&config.spf));
+        assert!(!config.dmarc.met_en_quarantaine(&config.spf));
+        assert!(!config.dmarc.rapporte(&config.spf));
+        assert!(!config.dmarc.rapporte_les_echecs(&config.spf));
+        assert!(!config.dmarc.envoie(&config.spf));
+        // Et le résolveur seul les rallume tous les cinq : c'est bien LUI qui
+        // manquait, et non autre chose que ce test aurait réglé sans le dire.
+        config.spf.resolvers = vec![String::from("127.0.0.1:53")];
+        assert!(config.dmarc.est_configure(&config.spf));
+        assert!(config.dmarc.met_en_quarantaine(&config.spf));
+        assert!(config.dmarc.rapporte(&config.spf));
+        assert!(config.dmarc.rapporte_les_echecs(&config.spf));
+        assert!(config.dmarc.envoie(&config.spf));
     }
 
     #[test]
@@ -1398,7 +1475,7 @@ mod tests {
         original.dmarc.enforcement = Enforcement::Enforce;
         let octets = encode(&original).expect("encodable");
         let relue = decode(&octets).expect("relisible");
-        assert!(!relue.dmarc.est_configure());
+        assert!(!relue.dmarc.est_configure(&relue.spf));
         assert_eq!(relue.dmarc.enforcement, Enforcement::Enforce);
     }
 

@@ -679,8 +679,10 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     //
     // Comme le reste : PAS DE DRAPEAU. DMARC est évalué si et seulement si une
     // liste de suffixes publics est nommée ET qu'un résolveur l'est aussi — il
-    // faut aller chercher la politique du domaine de l'en-tête `From:`.
-    let alignement = if options.dmarc.est_configure() && !resolveurs.is_empty() {
+    // faut aller chercher la politique du domaine de l'en-tête `From:`. Les DEUX
+    // moitiés de cette règle tiennent désormais dans `est_configure` : les
+    // écrire ici obligeait chaque appelant à s'en souvenir, et un l'oubliait.
+    let alignement = if options.dmarc.est_configure(&options.spf) {
         let chemin = Path::new(&options.dmarc.public_suffix_list);
         let liste = std::fs::read(chemin).map_err(|erreur| {
             format!(
@@ -704,7 +706,11 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     eprintln!(
         "air-mail-server : {}",
         match (&verificateur_dmarc, dmarc_applique) {
-            (None, _) if options.dmarc.est_configure() => String::from(
+            // ON INTERROGE LE CHAMP, ET NON LE PRÉDICAT : celui-ci répond
+            // maintenant « non » dans ce cas précis, et le bras ne se
+            // déclencherait jamais. Ce qu'on cherche ici est justement la MOITIÉ
+            // de la règle qui est remplie, pour dire laquelle manque.
+            (None, _) if !options.dmarc.public_suffix_list.is_empty() => String::from(
                 "DMARC non évalué — une liste de suffixes est nommée, mais aucun résolveur"
             ),
             (None, _) => String::from(
@@ -727,7 +733,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     // annoncerait une protection qui n'a pas lieu.
     let quarantaine = options
         .dmarc
-        .met_en_quarantaine()
+        .met_en_quarantaine(&options.spf)
         .then(|| options.dmarc.quarantine_folder.clone());
     if verificateur_dmarc.is_some() {
         // **CE N'EST PAS LE MÊME RÉGLAGE QUE `--dmarc enforce`**, et le dire
@@ -816,7 +822,8 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     //
     // Refuser de démarrer se voit tout de suite ; l'autre se découvre une
     // semaine plus tard, chez celui qui attendait la réponse.
-    let emet = options.relay.enabled || options.dmarc.envoie() || options.tlsrpt.envoie();
+    let emet =
+        options.relay.enabled || options.dmarc.envoie(&options.spf) || options.tlsrpt.envoie();
     let mut resolveur_de_file = None;
     let file = if emet {
         if options.queue.spool.is_empty() {
@@ -980,7 +987,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     // Il ne se compose que si DMARC est évalué : sans évaluation, il n'y aurait
     // rien à rapporter. Et il ne s'ouvre que si un dossier est nommé — composer
     // des rapports est un service qu'on rend à autrui, et il se demande.
-    let journal_rapports = match (verificateur.as_ref(), options.dmarc.rapporte()) {
+    let journal_rapports = match (verificateur.as_ref(), options.dmarc.rapporte(&options.spf)) {
         (Some(checker), true) => {
             let spool = ReportSpool::new(
                 if options.dmarc.report_org_name.is_empty() {
@@ -999,7 +1006,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
             // LE REMETTEUR N'EST LÀ QUE SI ON L'A DEMANDÉ. Émettre du courrier
             // vers des tiers ne se décide pas à la place de celui qui exploite
             // la machine.
-            let spool = if options.dmarc.rapporte_les_echecs() {
+            let spool = if options.dmarc.rapporte_les_echecs(&options.spf) {
                 spool.with_failure_reports()
             } else {
                 spool
@@ -1013,7 +1020,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
             // **LA FILE, ET NON UN REMETTEUR À SOI.** Un rapport DMARC passe
             // par la même attente et la même péremption que le reste du
             // courrier, et il y a désormais UNE politique de reprise.
-            let spool = match (options.dmarc.envoie(), file.as_ref()) {
+            let spool = match (options.dmarc.envoie(&options.spf), file.as_ref()) {
                 (true, Some(attente)) => spool.with_queue(std::sync::Arc::clone(attente)),
                 // Sans file, `--dmarc-send` n'aurait pas passé le contrôle de
                 // démarrage : ce bras est la ceinture de cette bretelle.
@@ -1100,20 +1107,28 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     eprintln!(
         "air-mail-server : {}",
         match &journal_rapports {
-            None if options.dmarc.rapporte() => String::from(
+            // LE CHAMP, ET NON LE PRÉDICAT, pour la raison déjà donnée plus
+            // haut : `rapporte` exige maintenant que DMARC soit évalué, si bien
+            // que ce bras ne se déclencherait JAMAIS. Ce qu'on veut dire ici est
+            // précisément qu'un dossier est nommé et que l'évaluation manque.
+            None if !options.dmarc.report_directory.is_empty() => String::from(
                 "rapports DMARC non composés — un dossier est nommé, mais DMARC n'est pas évalué"
             ),
             None => String::from(
-                "rapports DMARC non composés — aucun dossier nommé (`air-mail-admin                  --dmarc-report-dir …`)"
+                "rapports DMARC non composés — aucun dossier nommé \
+                 (`air-mail-admin --dmarc-report-dir …`)"
             ),
-            Some(_) if options.dmarc.envoie() && options.dmarc.rapporte_les_echecs() => format!(
-                "rapports DMARC composés dans `{}` toutes les {} s, agrégés ET D'ÉCHEC, puis \
+            Some(_)
+                if options.dmarc.envoie(&options.spf)
+                    && options.dmarc.rapporte_les_echecs(&options.spf) =>
+                format!(
+                    "rapports DMARC composés dans `{}` toutes les {} s, agrégés ET D'ÉCHEC, puis \
                  remis aux destinations qui ont consenti (§7.1). Un rapport d'échec porte des \
                  en-têtes filtrés, jamais de corps ni de destinataire.",
-                options.dmarc.report_directory,
-                intervalle_rapports.as_secs()
-            ),
-            Some(_) if options.dmarc.envoie() => format!(
+                    options.dmarc.report_directory,
+                    intervalle_rapports.as_secs()
+                ),
+            Some(_) if options.dmarc.envoie(&options.spf) => format!(
                 "rapports DMARC composés dans `{}` toutes les {} s, PUIS REMIS aux destinations \
                  qui ont consenti (§7.1). Chiffrement opportuniste : il n'authentifie personne.",
                 options.dmarc.report_directory,

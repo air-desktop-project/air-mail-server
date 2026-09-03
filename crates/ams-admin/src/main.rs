@@ -371,7 +371,7 @@ fn afficher(config: &Configuration) {
     } else {
         println!("SPF                AUCUN RÉSOLVEUR — l'expéditeur n'est pas vérifié");
     }
-    if config.dmarc.est_configure() {
+    if config.dmarc.est_configure(&config.spf) {
         println!(
             "DMARC              {}",
             match config.dmarc.enforcement {
@@ -380,12 +380,12 @@ fn afficher(config: &Configuration) {
             }
         );
         println!("  suffixes publics {}", config.dmarc.public_suffix_list);
-        if config.dmarc.met_en_quarantaine() {
+        if config.dmarc.met_en_quarantaine(&config.spf) {
             println!("  quarantaine      {}", config.dmarc.quarantine_folder);
         } else {
             println!("  quarantaine      AUCUN DOSSIER — un `p=quarantine` est remis quand même");
         }
-        if config.dmarc.rapporte() {
+        if config.dmarc.rapporte(&config.spf) {
             println!("  rapports         {}", config.dmarc.report_directory);
             println!(
                 "  vidange          toutes les {} s",
@@ -395,12 +395,12 @@ fn afficher(config: &Configuration) {
                     config.dmarc.report_interval_seconds
                 }
             );
-            if config.dmarc.rapporte_les_echecs() {
+            if config.dmarc.rapporte_les_echecs(&config.spf) {
                 println!("  rapports d'échec OUI — en-têtes filtrés, corps jamais recopié");
             } else {
                 println!("  rapports d'échec NON — seuls les rapports agrégés sont composés");
             }
-            if config.dmarc.envoie() {
+            if config.dmarc.envoie(&config.spf) {
                 println!("  remise           OUI — vers les destinations qui ont consenti (§7.1)");
             } else {
                 println!("  remise           NON — les rapports sont déposés, pas envoyés");
@@ -408,8 +408,23 @@ fn afficher(config: &Configuration) {
         } else {
             println!("  rapports         AUCUN DOSSIER — rien n'est rapporté aux domaines");
         }
-    } else {
+    } else if config.dmarc.public_suffix_list.is_empty() {
         println!("DMARC              AUCUNE LISTE DE SUFFIXES — l'alignement n'est pas évalué");
+    } else {
+        // **LES DEUX MOITIÉS MANQUANTES NE SE DISENT PAS PAREIL.** Sans liste,
+        // il n'y a rien à corriger d'urgent : personne n'a rien demandé. Ici, au
+        // contraire, une liste EST nommée — quelqu'un a cru configurer DMARC —
+        // et il ne se passe rien. C'est le cas qui mérite des majuscules, et
+        // c'est celui que cette sortie annonçait naguère « APPLIQUÉ ».
+        println!(
+            "DMARC              NON ÉVALUÉ — une liste de suffixes est nommée, mais AUCUN \
+             RÉSOLVEUR ne l'est"
+        );
+        println!("  suffixes publics {}", config.dmarc.public_suffix_list);
+        println!(
+            "  ce qu'il manque  `--resolver <adresse:port>` : la politique du domaine se lit \
+             dans le DNS"
+        );
     }
     // Là encore, on DIT l'absence. Une ligne manquante se lit « rien à
     // signaler » ; or un serveur sans comptes n'authentifie personne, et c'est

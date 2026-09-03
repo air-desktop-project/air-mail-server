@@ -3846,6 +3846,92 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
+## DMARC s'annonçait appliqué alors qu'il n'était pas évalué
+
+### UN PRÉDICAT QUI RÉPONDAIT À UNE QUESTION QU'IL NE POUVAIT PAS TRANCHER
+
+`Dmarc::est_configure()` portait pour toute documentation « Ce service
+évalue-t-il DMARC ? », et rendait `!public_suffix_list.is_empty()`. Or l'évaluer
+demande DEUX choses : la liste des suffixes, pour savoir si deux domaines
+s'alignent, ET un résolveur, pour aller lire la politique du domaine de
+l'en-tête `From:`. Les résolveurs vivent dans la section `Spf` — cette structure
+ne pouvait donc **structurellement pas** répondre à la question que portait son
+nom.
+
+La documentation de la structure, elle, écrivait déjà la règle entière : « si et
+seulement si une liste est nommée ET que des résolveurs le sont aussi ». C'est
+le troisième défaut de cette série trouvé de la même façon : **la documentation
+avait raison et le code appliquait la moitié**. Le README l'écrivait aussi, en
+ne nommant que la liste.
+
+### LA RÈGLE ÉTAIT TENUE PAR RÉPÉTITION, ET DONC OUBLIÉE QUELQUE PART
+
+Chaque appelant devait se rappeler d'ajouter `&& !resolveurs.is_empty()`. Le
+serveur y pensait à trois endroits — et l'oubliait au quatrième, celui qui
+décide s'il faut une file de réémission. L'outil d'administration n'y pensait
+nulle part, et les quatre prédicats dérivés — quarantaine, rapports, rapports
+d'échec, remise — héritaient tous du même faux.
+
+Ce que voyait l'administrateur qui relisait sa configuration :
+
+    SPF                AUCUN RÉSOLVEUR — l'expéditeur n'est pas vérifié
+    DMARC              APPLIQUÉ — un `p=reject` est opposé (550)
+      quarantaine      Quarantaine
+
+Deux lignes consécutives qui se contredisent. La seconde est fausse : sans
+résolveur, aucun message n'est évalué, et tout ce qui prétend s'appliquer ne
+s'applique à rien. Quelqu'un qui durcit sa configuration et la relit pour s'en
+assurer y lisait exactement la protection qu'il n'avait pas.
+
+### CE QU'ON RÉPÈTE, ON L'OUBLIE ; CE QU'ON EXIGE, ON NE PEUT PAS
+
+Le prédicat prend désormais `&Spf` en ARGUMENT. On ne peut plus poser la
+question sans avoir sous la main de quoi y répondre, et les trois compensations
+manuelles du serveur ont disparu — celle qui manquait avec elles. C'est le même
+choix que `submitter` dans `accepts_recipient`, et pour la raison que ce
+registre y donne déjà : un champ, quelqu'un finit par oublier de le mettre à
+jour.
+
+### UN CAS PARTICULIER CORRIGÉ SEUL LAISSE SES FRÈRES
+
+Un contrôle existait déjà, et ne visait que la quarantaine : « un dossier sans
+évaluation ne verrait jamais rien ». Le raisonnement valait mot pour mot pour
+`--dmarc enforce`, `--dmarc-report-dir`, `--dmarc-send` et
+`--dmarc-failure-reports`, qu'il laissait passer. Il est remplacé par la règle
+dont il n'était qu'un cas : **toute option qui demande un travail à DMARC exige
+que DMARC soit évalué**, et le refus nomme laquelle des deux moitiés manque.
+
+Une liste seule reste acceptée : elle ne promet rien à personne, et se prépare
+avant — la même raison qui fait accepter un dossier de file sans rien qui
+émette.
+
+### ET CE REFUS PASSE AVANT CELUI DE LA FILE
+
+`--dmarc-send` seul manque des deux. Réclamer la file d'abord enverrait préparer
+un dossier pour des rapports qui n'existeraient jamais. L'objection la plus
+fondamentale — « cette option ne s'applique à rien » — se dit en premier.
+
+### CE QUE LA CORRECTION A RENDU INATTEIGNABLE
+
+Deux messages de démarrage testaient le prédicat pour dire « une moitié est là,
+l'autre manque ». Le prédicat répondant désormais « non » dans ce cas précis,
+ces bras ne se seraient plus jamais déclenchés. Ils interrogent maintenant le
+CHAMP, qui est ce qu'ils voulaient dire depuis le début. Une garde qui ne peut
+plus se déclencher n'est pas une garde qu'on garde.
+
+### COMMENT IL A ÉTÉ TROUVÉ
+
+Par le périmètre de C2, et non par la lecture du code DMARC. Cinq crates sont
+hors du 100 %, au motif qu'elles « lisent, écrivent et attendent » ; or
+`ams-admin/options.rs` — 1 689 lignes — n'utilise `std::net::SocketAddr` que
+comme TYPE, et ne fait aucune des trois. Une grammaire pure, exemptée par la
+crate qui l'héberge, mesurée à 89,77 %. Les régions non couvertes ont désigné
+l'endroit.
+
+**Cette exemption tient toujours**, et c'est ce que ce registre doit dire : le
+périmètre est énuméré par CRATE, et `options.rs` reste hors du 100 % après cette
+correction. La règle qui la fait respecter aujourd'hui est : rien.
+
 ## Le corpus de fuzz était jeté à chaque campagne
 
 ### CE QU'UNE CAMPAGNE PRODUIT N'EST PAS SON VERDICT

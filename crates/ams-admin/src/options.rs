@@ -954,6 +954,44 @@ where
              « chiffre » ni « ne chiffre pas »",
         ));
     }
+    // ── DMARC NE SE DEMANDE PAS À MOITIÉ ────────────────────────────────────
+    //
+    // L'évaluer exige DEUX choses, et pas une : une liste de suffixes publics,
+    // pour savoir si deux domaines s'alignent, ET un résolveur, pour aller lire
+    // la politique du domaine de l'en-tête `From:`. À défaut de l'une des deux,
+    // AUCUN message n'est évalué — et tout ce qu'on aurait réglé par ailleurs ne
+    // s'applique alors à rien, en silence.
+    //
+    // CE REFUS REMPLACE CELUI QUI NE VISAIT QUE LA QUARANTAINE, parce que le
+    // défaut n'était pas propre à elle : `--dmarc enforce` promettait un refus
+    // qui n'avait pas lieu, `--dmarc-report-dir` un dossier qui restait vide, et
+    // `config show` annonçait « DMARC APPLIQUÉ » sur la ligne qui suit « SPF
+    // AUCUN RÉSOLVEUR ». Un cas particulier corrigé seul laisse ses frères.
+    //
+    // UNE LISTE SEULE N'EST PAS REFUSÉE, pour la raison qui vaut déjà pour un
+    // dossier de file sans émission : elle ne promet rien à personne, et permet
+    // de la préparer avant.
+    let demande = [
+        (options.dmarc_enforce, "--dmarc enforce"),
+        (
+            options.dmarc_quarantine.is_some(),
+            "--dmarc-quarantine-folder",
+        ),
+        (options.dmarc_report_dir.is_some(), "--dmarc-report-dir"),
+        (options.dmarc_send, "--dmarc-send"),
+        (options.dmarc_failures, "--dmarc-failure-reports"),
+    ]
+    .into_iter()
+    .find_map(|(demandee, nom)| demandee.then_some(nom));
+    if let Some(option) = demande
+        && let Some(manque) = manque_pour_evaluer_dmarc(&options)
+    {
+        return Err(ArgError::new(format!(
+            "`{option}` demande que DMARC soit évalué, et il manque {manque} : sans cela aucun \
+             message n'est évalué, et cette option ne s'appliquerait à rien"
+        )));
+    }
+
     // **UN RELAIS SANS DOSSIER PERDRAIT LE COURRIER EN SILENCE** : on aurait dit
     // `250` à un message qu'on n'a nulle part où poser. Le serveur le refuserait
     // aussi au démarrage ; le dire ici coûte une seconde plutôt qu'une astreinte.
@@ -982,15 +1020,6 @@ where
              de déclassement que le cache existe pour fermer",
         ));
     }
-    // **UN DOSSIER DE QUARANTAINE SANS ÉVALUATION NE VERRAIT JAMAIS RIEN.** Le
-    // dossier ne se remplit que d'un verdict DMARC, et il n'y a pas de verdict
-    // sans liste de suffixes : nommer l'un sans l'autre demande une protection
-    // qui n'aura pas lieu, en silence.
-    if options.dmarc_quarantine.is_some() && options.public_suffix_list.is_none() {
-        return Err(ArgError::new(
-            "`--dmarc-quarantine-folder` demande `--public-suffix-list` : sans liste, DMARC              n'est pas évalué, et un dossier de quarantaine ne verrait jamais rien",
-        ));
-    }
     if options.dkim_selector.is_some() != options.dkim_key.is_some() {
         return Err(ArgError::new(
             "`--dkim-selector` et `--dkim-key` vont ENSEMBLE : l'un sans l'autre ne veut dire ni \
@@ -998,6 +1027,23 @@ where
         ));
     }
     Ok(Demande::Ecrire(Box::new(options)))
+}
+
+/// Ce qui manque pour que DMARC soit évalué, ou `None` s'il ne manque rien.
+///
+/// **LES DEUX MOITIÉS SE NOMMENT SÉPARÉMENT.** Dire « il manque quelque chose »
+/// obligerait l'administrateur à relire la documentation pour savoir quoi ; dire
+/// laquelle des deux manque lui coûte une seconde.
+fn manque_pour_evaluer_dmarc(options: &Options) -> Option<&'static str> {
+    match (
+        options.public_suffix_list.is_none(),
+        options.resolvers.is_empty(),
+    ) {
+        (true, true) => Some("`--public-suffix-list` ET `--resolver`"),
+        (true, false) => Some("`--public-suffix-list`"),
+        (false, true) => Some("`--resolver`"),
+        (false, false) => None,
+    }
 }
 
 /// Un nombre, ou ce qui n'en est pas un.
@@ -1347,13 +1393,37 @@ mod tests {
     /// message qu'un autre.
     #[test]
     fn remettre_des_rapports_dmarc_exige_la_file() {
-        let erreur = parse(["--dmarc-send"].as_slice()).expect_err("refusé");
+        // DMARC ÉVALUÉ D'ABORD, sans quoi le refus porterait sur la file — et
+        // l'on préparerait un dossier pour des rapports qui n'existeraient
+        // jamais. Cet essai isole donc bien l'exigence de file.
+        let erreur = parse(
+            [
+                "--dmarc-send",
+                "--public-suffix-list",
+                "/etc/ams/psl.dat",
+                "--resolver",
+                "127.0.0.1:53",
+            ]
+            .as_slice(),
+        )
+        .expect_err("refusé");
         assert!(
             erreur.message.contains("--queue-spool"),
             "« {} » ne dit pas ce qui manque",
             erreur.message
         );
-        assert!(ecrire(&["--dmarc-send", "--queue-spool", "/var/spool/ams/file"]).dmarc_send);
+        assert!(
+            ecrire(&[
+                "--dmarc-send",
+                "--queue-spool",
+                "/var/spool/ams/file",
+                "--public-suffix-list",
+                "/etc/ams/psl.dat",
+                "--resolver",
+                "127.0.0.1:53",
+            ])
+            .dmarc_send
+        );
     }
 
     // ── LA QUARANTAINE DMARC ────────────────────────────────────────────────
@@ -1363,7 +1433,7 @@ mod tests {
     fn sans_dossier_la_quarantaine_n_existe_pas() {
         let config = ecrire(&["--domain", "mail.example.com"]).en_configuration();
         assert!(config.dmarc.quarantine_folder.is_empty());
-        assert!(!config.dmarc.met_en_quarantaine());
+        assert!(!config.dmarc.met_en_quarantaine(&config.spf));
     }
 
     #[test]
@@ -1371,12 +1441,14 @@ mod tests {
         let config = ecrire(&[
             "--public-suffix-list",
             "/etc/ams/psl.dat",
+            "--resolver",
+            "127.0.0.1:53",
             "--dmarc-quarantine-folder",
             "Junk",
         ])
         .en_configuration();
         assert_eq!(config.dmarc.quarantine_folder, "Junk");
-        assert!(config.dmarc.met_en_quarantaine());
+        assert!(config.dmarc.met_en_quarantaine(&config.spf));
         // ET SANS `--dmarc enforce` : la quarantaine remet, elle ne refuse pas.
         assert_eq!(config.dmarc.enforcement, ams_config::Enforcement::Observe);
     }
@@ -1386,9 +1458,114 @@ mod tests {
     #[test]
     fn un_dossier_de_quarantaine_sans_liste_est_refuse() {
         let erreur = parse(["--dmarc-quarantine-folder", "Junk"].as_slice()).expect_err("refusé");
+        // LES DEUX MOITIÉS MANQUENT ICI, et le message les nomme toutes les
+        // deux : n'en dire qu'une ferait revenir l'administrateur deux fois.
+        assert!(
+            erreur.message.contains("--public-suffix-list")
+                && erreur.message.contains("--resolver"),
+            "« {} » ne dit pas ce qui manque",
+            erreur.message
+        );
+    }
+
+    /// **UNE LISTE SANS RÉSOLVEUR N'ÉVALUE RIEN**, et c'est la moitié de la
+    /// règle que ce contrôle ignorait.
+    ///
+    /// Le serveur n'évalue DMARC que s'il a les DEUX : la liste dit si deux
+    /// domaines s'alignent, le résolveur va chercher la politique. Sans l'un des
+    /// deux, tout ce qu'on règle par ailleurs ne s'applique à aucun message.
+    ///
+    /// **LES CINQ OPTIONS SONT REFUSÉES, ET NON LA SEULE QUARANTAINE.** C'est
+    /// tout l'objet de la correction : le contrôle précédent ne visait qu'elle,
+    /// pendant que `--dmarc enforce` promettait un refus qui n'avait pas lieu.
+    #[test]
+    fn tout_ce_qui_demande_dmarc_exige_liste_et_resolveur() {
+        for option in [
+            ["--dmarc", "enforce"].as_slice(),
+            &["--dmarc-quarantine-folder", "Junk"],
+            &["--dmarc-report-dir", "/var/spool/ams/rapports"],
+            &["--dmarc-send", "--queue-spool", "/var/spool/ams/file"],
+            &["--dmarc-failure-reports"],
+        ] {
+            // SANS RIEN : les deux moitiés manquent, et se nomment.
+            let erreur = parse(option).expect_err("refusé");
+            assert!(
+                erreur.message.contains("--public-suffix-list")
+                    && erreur.message.contains("--resolver"),
+                "« {} » ne dit pas les deux",
+                erreur.message
+            );
+            // AVEC LA SEULE LISTE : il ne manque plus que le résolveur, et le
+            // message ne réclame que lui — dire les deux enverrait chercher ce
+            // qui est déjà là.
+            let avec_liste: Vec<&str> = [option, &["--public-suffix-list", "/etc/ams/psl.dat"]]
+                .concat()
+                .to_vec();
+            let erreur = parse(avec_liste.as_slice()).expect_err("refusé");
+            assert!(
+                erreur.message.contains("--resolver")
+                    && !erreur.message.contains("--public-suffix-list"),
+                "« {} » réclame autre chose que le résolveur",
+                erreur.message
+            );
+            // AVEC LE SEUL RÉSOLVEUR : symétriquement.
+            let avec_resolveur: Vec<&str> =
+                [option, &["--resolver", "127.0.0.1:53"]].concat().to_vec();
+            let erreur = parse(avec_resolveur.as_slice()).expect_err("refusé");
+            assert!(
+                erreur.message.contains("--public-suffix-list")
+                    && !erreur.message.contains("--resolver`"),
+                "« {} » réclame autre chose que la liste",
+                erreur.message
+            );
+            // AVEC LES DEUX : plus rien à redire.
+            let complet: Vec<&str> = [
+                option,
+                &[
+                    "--public-suffix-list",
+                    "/etc/ams/psl.dat",
+                    "--resolver",
+                    "127.0.0.1:53",
+                ],
+            ]
+            .concat()
+            .to_vec();
+            parse(complet.as_slice()).expect("recevable");
+        }
+    }
+
+    /// **UNE LISTE SEULE N'EST PAS REFUSÉE**, et c'est délibéré.
+    ///
+    /// Elle ne promet rien à personne, et permet de la préparer avant — la même
+    /// raison qui fait accepter un dossier de file sans rien qui émette. C'est
+    /// `config show` qui dit alors que DMARC n'est pas évalué.
+    #[test]
+    fn une_liste_de_suffixes_seule_se_prepare_sans_etre_refusee() {
+        let options = ecrire(&["--public-suffix-list", "/etc/ams/psl.dat"]);
+        assert_eq!(
+            options.public_suffix_list.as_deref(),
+            Some(std::path::Path::new("/etc/ams/psl.dat"))
+        );
+        let config = options.en_configuration();
+        assert!(!config.dmarc.est_configure(&config.spf));
+    }
+
+    /// **LE REFUS D'ÉVALUATION PASSE AVANT CELUI DE LA FILE.**
+    ///
+    /// `--dmarc-send` sans rien d'autre manque des deux : d'une évaluation et
+    /// d'une file. Réclamer la file d'abord enverrait préparer un dossier pour
+    /// des rapports qui n'existeraient jamais.
+    #[test]
+    fn ce_qui_ne_s_applique_a_rien_se_dit_avant_ce_qui_manque_pour_le_poser() {
+        let erreur = parse(["--dmarc-send"].as_slice()).expect_err("refusé");
         assert!(
             erreur.message.contains("--public-suffix-list"),
-            "« {} » ne dit pas ce qui manque",
+            "« {} » parle d'autre chose",
+            erreur.message
+        );
+        assert!(
+            !erreur.message.contains("--queue-spool"),
+            "« {} » réclame la file trop tôt",
             erreur.message
         );
     }
@@ -1422,6 +1599,8 @@ mod tests {
             ecrire(&[
                 "--public-suffix-list",
                 "/etc/ams/psl.dat",
+                "--resolver",
+                "127.0.0.1:53",
                 "--dmarc-quarantine-folder",
                 "Junk/",
             ])
@@ -1434,6 +1613,8 @@ mod tests {
         let config = ecrire(&[
             "--public-suffix-list",
             "/etc/ams/psl.dat",
+            "--resolver",
+            "127.0.0.1:53",
             "--dmarc-quarantine-folder",
             "Courrier/Junk",
         ])

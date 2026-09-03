@@ -104,6 +104,25 @@ done
 journal=$(mktemp)
 trap 'rm -f "$journal"' EXIT
 
+# ── LES MESURES D'AVANT NE SE MÊLENT PAS À CELLE-CI ──────────────────────────
+#
+# `llvm-cov` FUSIONNE tous les fichiers `.profraw` qu'il trouve dans l'arbre de
+# compilation. Une mesure lancée à la main plus tôt — pour instruire un doute sur
+# une crate hors périmètre, par exemple — laisse les siens derrière elle. Si la
+# source a changé entre-temps, la fusion rapproche des compteurs d'une version
+# des lignes d'une AUTRE, et le rapport ne décrit alors aucun état du dépôt.
+#
+# C'est arrivé, et dans le sens le moins dangereux : un `ÉCHEC` à 71 % sur un
+# fichier réellement couvert, dont les « lignes non atteintes » étaient des
+# commentaires de documentation — ce qui a mis sur la voie. Le sens inverse est
+# celui qui coûte : des compteurs périmés couvrant des lignes qu'aucun essai
+# n'atteint plus rendraient un rapport VERT, et ce gate existe pour que ce vert
+# veuille dire quelque chose.
+#
+# `--profraw-only` n'efface que les compteurs, jamais les objets compilés : la
+# garantie ne coûte donc pas une reconstruction.
+cargo llvm-cov clean --workspace --profraw-only
+
 if ! rapport=$(cargo llvm-cov --json --summary-only --locked "${args[@]}" 2>"$journal"); then
     if grep -q "no coverage data found" "$journal"; then
         echo "périmètre : ${#CRATES_SANS_IO[@]} crates sans entrée-sortie"
