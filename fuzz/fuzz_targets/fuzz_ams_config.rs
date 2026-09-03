@@ -44,7 +44,9 @@ struct Entree {
     bornes: [u32; 7],
     garde: [u32; 5],
     prefixes: [u8; 2],
-    delais: [u32; 2],
+    /// Trois délais depuis que l'inactivité QUIC se règle : la fuzzer aussi,
+    /// sans quoi le champ neuf traverserait le format sans jamais être éprouvé.
+    delais: [u32; 3],
     /// Les deux écoutes de l'API — TCP et UDP — et le secret de scellement des
     /// jetons, eux aussi libres : l'un sans l'autre est un cas que le SERVEUR
     /// refuse, et le décodeur, lui, doit les rendre tels quels.
@@ -157,6 +159,7 @@ fuzz_target!(|entree: Entree| {
         timeouts: Timeouts {
             command_seconds: entree.delais[0],
             data_seconds: entree.delais[1],
+            quic_idle_seconds: entree.delais[2],
         },
         tls: Tls {
             certificate_chain_path: entree.tls[0].clone(),

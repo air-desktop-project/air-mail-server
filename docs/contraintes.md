@@ -3846,6 +3846,75 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
+## Le `From:` était vérifié, le chemin de retour ne l'était pas
+
+### UN MESSAGE PORTE DEUX IDENTITÉS
+
+Le `From:` dit qui a ÉCRIT ; le chemin de retour de l'enveloppe dit à qui
+l'échec REVIENDRA. `ecrit_bien_en_son_nom` confrontait le premier au compte
+authentifié — et rien ne confrontait le second.
+
+Un compte pouvait donc déposer `MAIL FROM:<victime@ailleurs.test>` sous un
+`From:` parfaitement légitime. C'est la sixième fois dans cette série qu'une
+règle existe pour une chose et pas pour sa jumelle.
+
+### CE QUI NE SE PERDAIT PAS, ET CE QUI SE PERDAIT
+
+**Rien ne partait vers l'inconnu**, et c'est structurel : la file DÉPOSE ses
+rapports dans une boîte, elle ne les émet jamais. La rétro-diffusion restait donc
+fermée.
+
+Deux choses se perdaient quand même, toutes deux en silence :
+
+  - **le rebond du déposant.** L'adresse étrangère ne mène à aucune boîte,
+    `deliver` rend `false`, et le rapport est compté perdu — depuis la tranche
+    `reports_lost`, au moins il est compté. Le déposant, lui, n'apprend jamais
+    que son message a échoué.
+  - **la conformité SPF du message**, chez tous ses destinataires : le domaine
+    de l'enveloppe n'autorise pas notre adresse. DMARC passait encore par DKIM ;
+    la réputation, elle, s'abîmait.
+
+### UNE AFFIRMATION QUI ÉTAIT UNE DÉDUCTION
+
+La file s'appuyait dessus par écrit : « ce serveur ne relaie que pour ses propres
+comptes, **si bien que** le chemin de retour est TOUJOURS l'une de ses
+adresses ». Le « si bien que » était le défaut : la conclusion ne suivait pas,
+faute du contrôle qui l'aurait rendue vraie. Elle l'est maintenant, et le
+commentaire renvoie au contrôle plutôt qu'au raisonnement.
+
+### LE CHEMIN DE RETOUR ARRIVE EN ARGUMENT
+
+L'appelant vient de l'extraire, et une transaction sans chemin de retour
+n'atteint jamais ce point — `mettre_en_file` l'a déjà refusée. Le relire depuis
+`self` aurait créé une branche `None` que nul essai ne pourrait éprouver. C'est
+le même choix que `submitter` dans `accepts_recipient` et que `&Spf` dans
+`est_configure`.
+
+## Un `git checkout --` a détruit du travail non commité, et je l'ai poussé
+
+### CE QUI S'EST PASSÉ
+
+Pour éprouver la correction de `check-couverture.sh`, j'avais ajouté une ligne
+sonde à `codec.rs`, puis je l'ai retirée par `git checkout -- codec.rs`. Ce
+fichier portait aussi, NON COMMITÉES, toutes les modifications de la tranche des
+délais : le champ `quic_idle_seconds`, sa substitution, son encodage et ses deux
+essais. La commande les a effacées avec la sonde.
+
+### POURQUOI AUCUNE BARRIÈRE NE L'A VU
+
+Parce qu'aucune de celles qui ont tourné ensuite ne COMPILE l'espace de travail :
+`cargo fmt --check` lit, `check-etages.sh` lit, et le fuzz est un workspace
+séparé. Le commit est parti avec un arbre où `ams-admin-options` référençait un
+champ que `ams-config` ne définissait plus — il ne compilait pas.
+
+### CE QU'IL FAUT EN RETENIR
+
+**Une sonde se retire comme elle s'est posée** : par une édition, jamais par
+`git checkout --`, qui ne distingue pas ce qu'on vient d'ajouter de ce qu'on
+avait écrit avant. Et **rien ne se commite sans une compilation entre la
+dernière modification et le commit** — l'ordre des barrières le supposait, et je
+l'avais rompu en éditant après elles.
+
 ## Trois délais du serveur ne se réglaient pas
 
 ### DEUX CHAMPS QUE PERSONNE NE POUVAIT ÉCRIRE, ET UNE CONSTANTE QUI SE DISAIT UN RÉGLAGE

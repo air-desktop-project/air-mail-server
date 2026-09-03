@@ -31,6 +31,38 @@ pub struct Timeouts {
     pub command_seconds: u32,
     /// Attente d'un morceau de message.
     pub data_seconds: u32,
+    /// L'inactivité annoncée aux pairs QUIC, en secondes.
+    ///
+    /// **ZÉRO PREND LE DÉFAUT** — [`Timeouts::QUIC_IDLE_DEFAUT_SECONDES`] —, et
+    /// c'est ce qui rend ce champ ajoutable sans rien casser : un fichier écrit
+    /// avant lui décode zéro, et se comporte donc exactement comme avant.
+    pub quic_idle_seconds: u32,
+}
+
+impl Timeouts {
+    /// L'inactivité QUIC quand la configuration n'en nomme aucune.
+    ///
+    /// **TRENTE SECONDES.** Une connexion qu'on garde ouverte est de la mémoire
+    /// qu'on prête, et §10.1 de RFC 9000 fait prendre le PLUS PETIT des deux
+    /// délais annoncés : un pair coopératif peut raccourcir le sien, jamais
+    /// l'allonger. Contre un attaquant, qui annonce ce qu'il veut, c'est notre
+    /// valeur qui plafonne.
+    pub const QUIC_IDLE_DEFAUT_SECONDES: u32 = 30;
+
+    /// L'inactivité QUIC à appliquer, zéro valant le défaut.
+    ///
+    /// **LA SUBSTITUTION VIT ICI, ET NON CHEZ CHAQUE APPELANT** : la recopier
+    /// ferait deux vérités pour une seule décision, et la seconde vieillirait en
+    /// silence — c'est exactement la forme de défaut que ce dépôt a corrigée
+    /// six fois.
+    #[must_use]
+    pub const fn quic_idle_secondes(&self) -> u32 {
+        if self.quic_idle_seconds == 0 {
+            Self::QUIC_IDLE_DEFAUT_SECONDES
+        } else {
+            self.quic_idle_seconds
+        }
+    }
 }
 
 /// DKIM : de quoi SIGNER ce que ce serveur émet.
@@ -732,6 +764,7 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
         timeouts: Timeouts {
             command_seconds: delais.get_command_seconds(),
             data_seconds: delais.get_data_seconds(),
+            quic_idle_seconds: delais.get_quic_idle_seconds(),
         },
         tls,
         spf,
@@ -801,6 +834,7 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
             let mut delais = ecrit.reborrow().init_timeouts();
             delais.set_command_seconds(config.timeouts.command_seconds);
             delais.set_data_seconds(config.timeouts.data_seconds);
+            delais.set_quic_idle_seconds(config.timeouts.quic_idle_seconds);
         }
         {
             let mut chiffrement = ecrit.reborrow().init_tls();
@@ -931,6 +965,7 @@ mod tests {
             timeouts: Timeouts {
                 command_seconds: 300,
                 data_seconds: 600,
+                quic_idle_seconds: 0,
             },
             // L'exemple ne chiffre PAS et n'a AUCUN compte : c'est le défaut, et
             // un défaut qui chiffrerait ou authentifierait nommerait des
@@ -1124,6 +1159,7 @@ mod tests {
         original.timeouts = Timeouts {
             command_seconds: 15,
             data_seconds: 16,
+            quic_idle_seconds: 17,
         };
         let relue = decode(&encode(&original).expect("encodable")).expect("relisible");
         assert_eq!(relue.limits, original.limits);
@@ -1312,6 +1348,45 @@ mod tests {
         );
         let dit = alloc::format!("{}", Error::UnknownEnforcement);
         assert!(dit.contains("enforcement"), "{dit}");
+    }
+
+    /// **ZÉRO PREND LE DÉFAUT, ET C'EST CE QUI REND LE CHAMP AJOUTABLE.**
+    ///
+    /// Un fichier écrit avant que `quicIdleSeconds` n'existe décode zéro. Sans
+    /// cette substitution, il annoncerait une inactivité NULLE, et chaque
+    /// connexion QUIC expirerait à l'instant où elle s'établit — une
+    /// configuration parfaitement valable deviendrait un serveur qui ne sert
+    /// plus rien en HTTP/3, à la seule faveur d'une mise à jour.
+    #[test]
+    fn une_inactivite_quic_nulle_prend_le_defaut() {
+        let mut delais = Timeouts {
+            command_seconds: 300,
+            data_seconds: 600,
+            quic_idle_seconds: 0,
+        };
+        assert_eq!(
+            delais.quic_idle_secondes(),
+            Timeouts::QUIC_IDLE_DEFAUT_SECONDES
+        );
+        // ET CE QUI EST NOMMÉ EST PRIS TEL QUEL : le défaut ne s'impose qu'à
+        // l'absence, jamais à un choix.
+        delais.quic_idle_seconds = 5;
+        assert_eq!(delais.quic_idle_secondes(), 5);
+    }
+
+    /// **LES TROIS DÉLAIS TRAVERSENT LE FORMAT.**
+    #[test]
+    fn les_trois_delais_traversent_le_format() {
+        let mut original = exemple();
+        original.timeouts = Timeouts {
+            command_seconds: 61,
+            data_seconds: 62,
+            quic_idle_seconds: 63,
+        };
+        let octets = encode(&original).expect("encodable");
+        let relue = decode(&octets).expect("relisible");
+        assert_eq!(relue.timeouts, original.timeouts);
+        assert_eq!(relue.timeouts.quic_idle_secondes(), 63);
     }
 
     #[test]

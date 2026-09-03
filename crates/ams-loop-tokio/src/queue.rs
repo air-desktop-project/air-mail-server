@@ -106,12 +106,26 @@ pub struct QueueTally {
 ///
 /// # POURQUOI CE N'EST PAS `Relay`
 ///
-/// Ce serveur ne relaie que pour ses propres comptes, si bien que le chemin de
-/// retour est TOUJOURS l'une de ses adresses. Le rapport se dépose donc dans une
-/// boîte, et **aucun rebond ne part vers un inconnu** : c'est ce qui tient ce
-/// serveur hors de la rétro-diffusion — émettre un rebond vers une adresse qu'un
-/// tiers a écrite dans un `MAIL FROM:` usurpé ferait de nous l'instrument de son
-/// envoi.
+/// Le rapport se dépose dans une boîte, et **aucun rebond ne part vers un
+/// inconnu** : c'est ce qui tient ce serveur hors de la rétro-diffusion —
+/// émettre un rebond vers une adresse qu'un tiers a écrite dans un `MAIL FROM:`
+/// usurpé ferait de nous l'instrument de son envoi. Cette propriété-là est
+/// STRUCTURELLE : ce trait dépose, il n'émet pas.
+///
+/// # ET LE CHEMIN DE RETOUR EST BIEN L'UNE DE NOS ADRESSES, PARCE QU'ON LE
+/// VÉRIFIE
+///
+/// Cette phrase était une DÉDUCTION — « ce serveur ne relaie que pour ses
+/// propres comptes, si bien que… » — et elle était fausse : seul l'en-tête
+/// `From:` était confronté au compte authentifié, jamais le chemin de retour de
+/// l'enveloppe. Un compte pouvait déposer `MAIL FROM:<victime@ailleurs.test>`
+/// sous un `From:` légitime, et son rebond se perdait alors en silence : cette
+/// adresse ne mène à aucune boîte, `deliver` rend `false`, et le déposant
+/// n'apprenait jamais que son message avait échoué.
+///
+/// `MaildirDelivery::ecrit_bien_en_son_nom` exige désormais les DEUX identités
+/// (RFC 6409 §6.1). La phrase est donc vraie parce qu'un contrôle la rend vraie,
+/// et non parce qu'on la déduit.
 ///
 /// Le routage vers une boîte appartient au serveur, pas à cette boucle : d'où le
 /// trait.

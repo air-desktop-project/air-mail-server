@@ -559,7 +559,34 @@ impl MaildirDelivery {
     /// Sans compte retenu, sans `From:` lisible, ou avec une adresse qui ne
     /// route vers personne : on ne sait pas au nom de qui ce message part, et
     /// l'émettre reviendrait à signer une identité qu'on n'a pas vérifiée.
-    fn ecrit_bien_en_son_nom(&self, message: &ams_mime::Message<'_>) -> bool {
+    /// # UN MESSAGE PORTE DEUX IDENTITÉS, ET LES DEUX DOIVENT ÊTRE LES SIENNES
+    ///
+    /// Le `From:` dit qui a ÉCRIT ; le chemin de retour de l'enveloppe dit à qui
+    /// l'échec REVIENDRA. Seul le premier était vérifié.
+    ///
+    /// Un compte pouvait donc déposer `MAIL FROM:<victime@ailleurs.test>` avec
+    /// un `From:` parfaitement légitime. Deux conséquences, toutes deux
+    /// silencieuses :
+    ///
+    ///   - **son rebond se perdait.** La file dépose les rapports dans une
+    ///     boîte — jamais sur le réseau —, et cette adresse-là ne route vers
+    ///     personne : `deliver` rend `false`, le rapport est compté perdu, et le
+    ///     déposant n'apprend jamais que son message a échoué.
+    ///   - **son courrier échouait en SPF** chez tous ses destinataires, le
+    ///     domaine de l'enveloppe n'autorisant pas notre adresse. DMARC passait
+    ///     encore par DKIM ; la réputation, elle, s'abîmait.
+    ///
+    /// La file s'appuyait par écrit sur ce qui n'était pas vérifié : « le chemin
+    /// de retour est TOUJOURS l'une de ses adresses ». C'est vrai désormais,
+    /// parce que c'est contrôlé ici — et non parce qu'on le déduit.
+    ///
+    /// # LE CHEMIN DE RETOUR ARRIVE EN ARGUMENT
+    ///
+    /// L'appelant vient de l'extraire, et une transaction sans chemin de retour
+    /// n'atteint jamais ce point : le relire depuis `self` créerait une branche
+    /// `None` que nul essai ne pourrait éprouver. C'est le même choix que
+    /// `submitter` dans `accepts_recipient`.
+    fn ecrit_bien_en_son_nom(&self, message: &ams_mime::Message<'_>, retour: &str) -> bool {
         let Some(compte) = self.compte.as_deref() else {
             return false;
         };
@@ -571,7 +598,10 @@ impl MaildirDelivery {
         };
         // **LA MÊME LECTURE QUE LA PORTE HTTP**, et la même fonction de routage :
         // deux règles à deux endroits finissent par ne plus dire la même chose.
-        ams_auth::route(&self.comptes.vue(), adresse).is_some_and(|vu| vu.login == compte)
+        let sien = |adresse: &[u8]| {
+            ams_auth::route(&self.comptes.vue(), adresse).is_some_and(|vu| vu.login == compte)
+        };
+        sien(adresse) && sien(retour.as_bytes())
     }
 
     /// Retient une adresse qui n'est pas d'ici, pour la file.
@@ -763,13 +793,14 @@ impl MaildirDelivery {
         //
         // Le refus est DÉFINITIF : aucune reprise ne donnera au déposant le
         // droit d'écrire au nom d'un autre. Et il vaut pour le message entier —
-        // il n'y a qu'un `From:`, et il est faux ou il ne l'est pas.
+        // il n'y a qu'un `From:` et qu'un chemin de retour, et ils sont faux ou
+        // ils ne le sont pas.
         {
             let bornes = ams_mime::Limits::DEFAULT;
             let Ok(message) = ams_mime::Message::parse(&brut, &bornes) else {
                 return Err(DeliveryFailure::Permanent);
             };
-            if !self.ecrit_bien_en_son_nom(&message) {
+            if !self.ecrit_bien_en_son_nom(&message, retour) {
                 return Err(DeliveryFailure::Permanent);
             }
         }
@@ -812,6 +843,7 @@ mod tests {
     use super::{Boites, MaildirDelivery};
     use ams_auth::Account;
     use ams_loop_tokio::Delivery as _;
+    use ams_loop_tokio::DeliveryFailure;
     use ams_store::Maildir;
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
@@ -1045,6 +1077,26 @@ mod tests {
         depose_tel_quel(remise, racine, de, &entete)
     }
 
+    /// Dépose en dissociant l'ENVELOPPE de l'en-tête, et rend ce qu'il advient.
+    ///
+    /// Les autres bancs emploient la même adresse pour les deux, si bien
+    /// qu'aucun n'éprouvait le cas où elles diffèrent — celui-là même que rien
+    /// ne refusait.
+    fn depose_avec_retour(
+        remise: &mut MaildirDelivery,
+        retour: &str,
+        de: &str,
+    ) -> Result<(), DeliveryFailure> {
+        let message = format!("From: {de}\r\nTo: ailleurs@autre.test\r\n\r\nbonjour\r\n");
+        remise.begin(Some(retour.as_bytes()));
+        remise.submitter(b"marie");
+        remise
+            .add_recipient(b"ailleurs@autre.test")
+            .expect("un sortant");
+        remise.append(message.as_bytes()).expect("corps");
+        remise.finish()
+    }
+
     /// Le même, avec un message écrit à la main.
     fn depose_tel_quel(
         remise: &mut MaildirDelivery,
@@ -1118,6 +1170,55 @@ mod tests {
         assert!(ecrit.contains("s=epreuve"), "{ecrit}");
         // Et le message suit, intact.
         assert!(ecrit.contains("From: marie@example.com\r\n"), "{ecrit}");
+    }
+
+    /// **UN MESSAGE PORTE DEUX IDENTITÉS, ET LES DEUX DOIVENT ÊTRE LES SIENNES.**
+    ///
+    /// Le `From:` était vérifié contre le compte authentifié ; le chemin de
+    /// retour de l'enveloppe ne l'était pas. Un compte pouvait donc déposer
+    /// `MAIL FROM:<victime@ailleurs.test>` avec un `From:` parfaitement
+    /// légitime.
+    ///
+    /// Rien ne partait vers l'inconnu — la file DÉPOSE ses rapports dans une
+    /// boîte, elle ne les émet jamais —, mais deux choses se perdaient en
+    /// silence : le rebond, que cette adresse-là ne pouvait pas recevoir, et la
+    /// conformité SPF du message chez tous ses destinataires.
+    ///
+    /// La file s'appuyait par écrit sur ce qui n'était pas vérifié : « le chemin
+    /// de retour est TOUJOURS l'une de ses adresses ».
+    #[tokio::test(flavor = "multi_thread")]
+    async fn un_chemin_de_retour_etranger_est_refuse() {
+        let temporaire = Ephemere::nouveau();
+        let mut remise = remise_avec_file(&temporaire.0);
+
+        let issue = depose_avec_retour(&mut remise, "victime@ailleurs.test", "marie@example.com");
+        assert!(
+            matches!(issue, Err(DeliveryFailure::Permanent)),
+            "un chemin de retour qui n'est pas le sien doit être refusé : {issue:?}"
+        );
+        // ET RIEN N'EST PARTI : le refus précède la mise en file, comme il
+        // précède la complétion et la signature.
+        let file = temporaire.0.join("file");
+        assert!(
+            !contenu(&file).into_iter().any(|nom| nom.ends_with(".eml")),
+            "un message refusé ne doit rien laisser en file"
+        );
+    }
+
+    /// **ET LE SIEN PASSE**, sans quoi le refus précédent ne prouverait rien
+    /// d'autre que l'existence d'un refus.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn son_propre_chemin_de_retour_passe() {
+        let temporaire = Ephemere::nouveau();
+        let mut remise = remise_avec_file(&temporaire.0);
+
+        depose_avec_retour(&mut remise, "marie@example.com", "marie@example.com")
+            .expect("son propre chemin de retour doit passer");
+        let file = temporaire.0.join("file");
+        assert!(
+            contenu(&file).into_iter().any(|nom| nom.ends_with(".eml")),
+            "le message aurait dû être mis en file"
+        );
     }
 
     /// **ON NE SIGNE PAS POUR UN DOMAINE DONT ON NE TIENT PAS LA ZONE.**
