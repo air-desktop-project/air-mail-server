@@ -29,6 +29,11 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 > clair pour les domaines qu'on lui nomme, le dépose dans une boîte Maildir, et
 > refuse les sources qui abusent.
 >
+> **Et un rapport qui ne part pas se compte comme une perte** : le message est
+> déjà effacé, son expéditeur croit avoir écrit, et personne ne le détrompera.
+> `bounced` comptait pourtant cet abandon comme rapporté — une supervision voyait
+> un serveur sain pendant qu'il perdait du courrier.
+>
 > **Et il vérifie que c'est publié** : au démarrage, il interroge
 > `<sélecteur>._domainkey.<domaine>` et compare aux octets de sa propre clé — pas
 > au texte, qu'un hébergeur reformate. Une clé différente veut dire que tout ce

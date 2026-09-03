@@ -80,6 +80,26 @@ pub struct QueueTally {
     pub deferred: usize,
     /// Entrées qu'on n'a pas su relire, et qui ont été retirées.
     pub unreadable: usize,
+    /// Rapports qu'on n'a PAS pu remettre à leur destinataire.
+    ///
+    /// # C'EST LE COMPTE QUI DIT UNE PERTE SÈCHE
+    ///
+    /// Les autres disent ce qu'on a fait ; celui-ci dit ce qu'on n'a pas su
+    /// faire savoir. Quand il monte, quelqu'un croit avoir écrit et personne ne
+    /// le détrompera : le message est déjà effacé, et le rapport qui devait
+    /// l'annoncer n'est pas arrivé.
+    ///
+    /// **IL EXISTE PARCE QUE `bounced` MENTAIT.** Ce dernier comptait un
+    /// abandon « avec un rapport de non-remise » — et il l'incrémentait aussi
+    /// quand le rapport s'était perdu. Une supervision branchée dessus voyait un
+    /// serveur en parfaite santé pendant qu'il perdait du courrier en silence,
+    /// et la seule trace était une ligne sur la sortie d'erreur qu'il fallait
+    /// lire au bon moment.
+    ///
+    /// Les trois rapports y sont comptés — non-remise, relais, retard —, parce
+    /// que les trois se perdent de la même façon et coûtent la même chose : une
+    /// nouvelle que son destinataire attendait.
+    pub reports_lost: usize,
 }
 
 /// Ce qui remet un rapport de non-remise, LOCALEMENT.
@@ -391,6 +411,7 @@ impl Spool {
                 now,
             )
         {
+            compte.reports_lost = compte.reports_lost.saturating_add(1);
             std::eprintln!(
                 "air-mail-server : AVIS DE RETARD PERDU pour `{}` — le message attend \
                  toujours, et son expéditeur ne le saura pas",
@@ -413,6 +434,7 @@ impl Spool {
                 now,
             )
         {
+            compte.reports_lost = compte.reports_lost.saturating_add(1);
             std::eprintln!(
                 "air-mail-server : RAPPORT DE REMISE PERDU pour `{}` — le message est bien \
                  parti, et son expéditeur ne le saura pas",
@@ -483,7 +505,7 @@ impl Spool {
                     // effacé ; si personne ne l'apprend, l'expéditeur croira
                     // avoir écrit. C'est la seule chose qu'il reste à faire — un
                     // rapport dont le rapport échouerait ne finirait jamais.
-                    if !self.rendre_compte(
+                    if self.rendre_compte(
                         rendre,
                         enveloppe.return_path,
                         &message,
@@ -492,13 +514,19 @@ impl Spool {
                         depot,
                         now,
                     ) {
+                        compte.bounced = compte.bounced.saturating_add(1);
+                    } else {
+                        // **`bounced` NE COMPTE QUE CE QUI A ÉTÉ ANNONCÉ.** Il
+                        // l'incrémentait aussi quand le rapport se perdait, si
+                        // bien qu'une supervision voyait un abandon proprement
+                        // rapporté là où personne n'avait rien reçu.
+                        compte.reports_lost = compte.reports_lost.saturating_add(1);
                         std::eprintln!(
                             "air-mail-server : RAPPORT DE NON-REMISE PERDU pour `{}` — le \
                              message est abandonné, et son expéditeur ne le saura pas",
                             enveloppe.return_path
                         );
                     }
-                    compte.bounced = compte.bounced.saturating_add(1);
                 }
             }
         }

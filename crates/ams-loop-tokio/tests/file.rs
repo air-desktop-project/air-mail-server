@@ -39,6 +39,19 @@ impl Bounced for Cahier {
     }
 }
 
+/// Un rendu d'avis qui ÉCHOUE toujours — un disque plein, une boîte disparue.
+///
+/// C'est le cas que rien ne comptait : le message est déjà effacé, et la seule
+/// trace de la perte était une ligne sur la sortie d'erreur.
+#[derive(Clone, Default)]
+struct Sourd;
+
+impl Bounced for Sourd {
+    fn deliver(&self, _recipient: &str, _message: &[u8]) -> bool {
+        false
+    }
+}
+
 impl Cahier {
     fn rapports(&self) -> Vec<(String, String)> {
         self.0
@@ -507,4 +520,109 @@ async fn le_silence_demande_couvre_aussi_le_retard() {
     let compte = spool.parcourir(&remetteur(), &cahier, 1_050).await;
     assert_eq!(compte.deferred, 1, "{compte:?}");
     assert!(cahier.rapports().is_empty(), "{:?}", cahier.rapports());
+}
+
+// ── UNE PERTE SÈCHE SE COMPTE (et `bounced` cesse de l'affirmer) ────────────
+
+/// **UN RAPPORT QUI NE PART PAS EST UNE PERTE, ET LE COMPTE LE DIT.**
+///
+/// Le message est déjà effacé ; si son rapport ne part pas, son expéditeur croit
+/// avoir écrit et personne ne le détrompera. `bounced` comptait pourtant cet
+/// abandon comme « rendu à son expéditeur » — une supervision branchée dessus
+/// voyait un serveur en parfaite santé pendant qu'il perdait du courrier.
+#[tokio::test(flavor = "multi_thread")]
+async fn un_rapport_qui_ne_part_pas_se_compte_comme_une_perte() {
+    let reprise = Backoff {
+        first: Duration::from_secs(1),
+        ceiling: Duration::from_secs(1),
+        expiry: Duration::from_secs(10),
+        warning: Duration::from_secs(5),
+    };
+    let (spool, dossier) = file(reprise);
+    spool
+        .deposer(
+            "jean@nous.test",
+            &[String::from("marie@ailleurs.test")],
+            &[],
+            "",
+            MESSAGE,
+            1_000,
+        )
+        .expect("déposé");
+
+    let compte = spool.parcourir(&remetteur(), &Sourd, 1_010).await;
+    assert_eq!(compte.reports_lost, 1, "{compte:?}");
+    // **ET `bounced` N'AFFIRME RIEN** : personne n'a été rendu à son expéditeur.
+    assert_eq!(compte.bounced, 0, "{compte:?}");
+    // Le message est bel et bien parti : il n'y a plus rien à réessayer, et
+    // c'est ce qui rend la perte sèche.
+    assert!(
+        noms(dossier.chemin()).is_empty(),
+        "{:?}",
+        noms(dossier.chemin())
+    );
+}
+
+/// **ET QUAND LE RAPPORT PART, RIEN N'EST PERDU.**
+///
+/// Sans quoi l'essai précédent ne dirait rien : il faut que le compteur puisse
+/// rester à zéro.
+#[tokio::test(flavor = "multi_thread")]
+async fn un_rapport_remis_ne_compte_aucune_perte() {
+    let reprise = Backoff {
+        first: Duration::from_secs(1),
+        ceiling: Duration::from_secs(1),
+        expiry: Duration::from_secs(10),
+        warning: Duration::from_secs(5),
+    };
+    let (spool, _dossier) = file(reprise);
+    spool
+        .deposer(
+            "jean@nous.test",
+            &[String::from("marie@ailleurs.test")],
+            &[],
+            "",
+            MESSAGE,
+            1_000,
+        )
+        .expect("déposé");
+
+    let compte = spool
+        .parcourir(&remetteur(), &Cahier::default(), 1_010)
+        .await;
+    assert_eq!(compte.reports_lost, 0, "{compte:?}");
+    assert_eq!(compte.bounced, 1, "{compte:?}");
+}
+
+/// **UN AVIS DE RETARD PERDU SE COMPTE AUSSI.**
+///
+/// Les trois rapports se perdent de la même façon et coûtent la même chose : une
+/// nouvelle que son destinataire attendait.
+#[tokio::test(flavor = "multi_thread")]
+async fn un_avis_de_retard_perdu_se_compte() {
+    let reprise = Backoff {
+        first: Duration::from_secs(1),
+        ceiling: Duration::from_secs(1),
+        expiry: Duration::from_secs(100_000),
+        warning: Duration::from_secs(10),
+    };
+    let (spool, _dossier) = file(reprise);
+    spool
+        .deposer(
+            "jean@nous.test",
+            &[String::from("marie@ailleurs.test")],
+            &[ams_queue::Report {
+                on_delay: true,
+                ..ams_queue::Report::default()
+            }],
+            "",
+            MESSAGE,
+            1_000,
+        )
+        .expect("déposé");
+
+    let compte = spool.parcourir(&remetteur(), &Sourd, 1_020).await;
+    assert_eq!(compte.reports_lost, 1, "{compte:?}");
+    // Le message, lui, attend toujours : la perte porte sur l'AVIS.
+    assert_eq!(compte.deferred, 1, "{compte:?}");
 }

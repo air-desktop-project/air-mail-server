@@ -1595,6 +1595,8 @@ async fn servir(fichier: &Path) -> Result<(), String> {
                             total.bounced = total.bounced.saturating_add(compte.bounced);
                             total.deferred = total.deferred.saturating_add(compte.deferred);
                             total.unreadable = total.unreadable.saturating_add(compte.unreadable);
+                            total.reports_lost =
+                                total.reports_lost.saturating_add(compte.reports_lost);
                         }
                     }
                 }
@@ -1654,15 +1656,32 @@ async fn servir(fichier: &Path) -> Result<(), String> {
 
     if let Some(tache) = reprise {
         match tache.await {
-            Ok(compte) => eprintln!(
-                "air-mail-server : émission ; {} message(s) remis dont {} AUTHENTIFIÉ(S) PAR \
-                 DANE, {} rendu(s) à leur expéditeur, {} ajourné(s), {} illisible(s)",
-                compte.sent,
-                compte.authenticated,
-                compte.bounced,
-                compte.deferred,
-                compte.unreadable
-            ),
+            Ok(compte) => {
+                eprintln!(
+                    "air-mail-server : émission ; {} message(s) remis dont {} AUTHENTIFIÉ(S) \
+                     PAR DANE, {} rendu(s) à leur expéditeur, {} ajourné(s), {} illisible(s)",
+                    compte.sent,
+                    compte.authenticated,
+                    compte.bounced,
+                    compte.deferred,
+                    compte.unreadable
+                );
+                // **UNE PERTE SÈCHE NE SE MÊLE PAS AU RESTE.** Les autres
+                // comptes disent ce qu'on a fait ; celui-ci dit ce qu'on n'a pas
+                // su faire savoir, et quelqu'un croit avoir écrit. Le noyer dans
+                // la même ligne le ferait lire comme une statistique de plus.
+                //
+                // ZÉRO NE S'ÉCRIT PAS : un journal qui répète « aucune perte »
+                // est un journal qu'on cesse de lire.
+                if compte.reports_lost > 0 {
+                    eprintln!(
+                        "air-mail-server : ATTENTION — {} rapport(s) n'ont PAS pu être remis à \
+                         leur destinataire. Autant d'expéditeurs qui croient avoir écrit, et \
+                         que personne ne détrompera : le message est déjà effacé.",
+                        compte.reports_lost
+                    );
+                }
+            }
             Err(erreur) => eprintln!("air-mail-server : émission : {erreur}"),
         }
     }

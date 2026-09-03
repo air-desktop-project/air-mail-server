@@ -3846,6 +3846,50 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
+## Une perte sèche que seule la sortie d'erreur consignait
+
+### LE PIRE CAS, ET IL N'ÉTAIT COMPTÉ NULLE PART
+
+Quand un message est abandonné, la file efface son fichier PUIS compose le
+rapport de non-remise. Si la remise du rapport échouait — un disque plein, une
+boîte disparue —, elle écrivait une ligne sur la sortie d'erreur et incrémentait
+`bounced` **quand même**.
+
+Trois conséquences qui se cumulent :
+
+- **Le message est déjà effacé.** Il n'y a plus rien à réessayer.
+- **Personne n'apprend rien.** Le déposant croit avoir écrit.
+- **Le compteur dit le contraire.** `bounced` veut dire « abandonné, avec un
+  rapport de non-remise » — et il comptait aussi les rapports que personne
+  n'avait reçus.
+
+Une supervision branchée sur ces comptes voyait un serveur en parfaite santé
+pendant qu'il perdait du courrier en silence. C'est la même faute que celles des
+tranches précédentes — un compte qui affirme plus que ce qui s'est passé — mais
+portée sur la donnée que l'exploitant regarde en premier.
+
+Les trois rapports étaient dans ce cas : non-remise, relais, avis de retard.
+Aucun n'était compté.
+
+### `bounced` NE COMPTE PLUS QUE CE QUI A ÉTÉ ANNONCÉ
+
+Le contrôle par mutation montre l'ancien état sans détour :
+`bounced: 1, reports_lost: 0` là où personne n'avait rien reçu.
+
+### UNE PERTE SÈCHE NE SE MÊLE PAS AU RESTE
+
+Les autres comptes disent ce qu'on a FAIT ; celui-ci dit ce qu'on n'a pas su
+faire SAVOIR. Le noyer dans la même ligne le ferait lire comme une statistique de
+plus ; il a donc sa ligne, et elle ne s'écrit que si le compte n'est pas nul —
+un journal qui répète « aucune perte » est un journal qu'on cesse de lire.
+
+### ON NE RÉESSAIE PAS, ET CE N'EST PAS CE QUI MANQUAIT
+
+Le commentaire du code avait raison : « un rapport dont le rapport échouerait ne
+finirait jamais ». Ajouter une reprise ouvrirait une récursion sans fond. Ce qui
+manquait n'était pas une reprise — c'était que la perte soit VISIBLE autrement
+qu'en lisant la sortie d'erreur au bon moment.
+
 ## Dire quoi publier ne dit pas si c'est publié
 
 ### LE SYMPTÔME EST SILENCIEUX ET DIFFÉRÉ
