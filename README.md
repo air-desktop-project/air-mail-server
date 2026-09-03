@@ -1665,6 +1665,14 @@ personne n'a besoin de le connaître, donc personne n'a à le garder.
 `--listen-h3` demande `--listen-http` : `Alt-Svc`, seul moyen par lequel un
 client découvre un port HTTP/3, s'annonce depuis les réponses HTTP/2.
 
+**Les trois délais se règlent** : `--command-timeout-seconds` et
+`--data-timeout-seconds` pour les sessions, `--quic-idle-seconds` pour
+l'inactivité annoncée aux pairs QUIC. Aucun n'accepte zéro — une attente nulle
+est échue à l'instant où elle commence. §10.1 de RFC 9000 fait prendre le plus
+petit des deux délais annoncés : un pair coopératif peut raccourcir le sien,
+jamais l'allonger, si bien que contre un attaquant c'est cette valeur qui
+plafonne le temps pendant lequel une connexion muette garde sa place.
+
 **`--max-connections` borne les cinq écoutes**, et non quatre : la borne de
 l'écoute QUIC était gravée à 1 024 pendant que les autres prenaient la valeur
 configurée. Elle vaut désormais ce qu'on lui demande, 256 par défaut comme

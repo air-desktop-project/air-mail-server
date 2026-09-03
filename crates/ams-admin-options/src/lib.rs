@@ -67,6 +67,12 @@ pub struct Options {
     /// HTTP/2. Sans elles, ce port UDP serait ouvert sans que personne ne le
     /// cherche jamais.
     pub listen_h3: Option<SocketAddr>,
+    /// L'attente d'une ligne de commande, en secondes.
+    pub command_timeout: u32,
+    /// L'attente d'un morceau de message, en secondes.
+    pub data_timeout: u32,
+    /// L'inactivité annoncée aux pairs QUIC, en secondes.
+    pub quic_idle: u32,
     /// Renouvelle le secret de scellement plutôt que de reprendre l'ancien.
     ///
     /// **CE N'EST PAS SANS CONSÉQUENCE** : les jetons frappés avant cessent de
@@ -165,6 +171,12 @@ impl Default for Options {
             listen_imap: None,
             listen_http: None,
             listen_h3: None,
+            // LES MÊMES VALEURS QU'AVANT, mais nommées ici plutôt que gravées
+            // dans la conversion : §4.5.3.2 de RFC 5321 veut au moins cinq
+            // minutes pour une commande et dix pour les données.
+            command_timeout: 300,
+            data_timeout: 600,
+            quic_idle: ams_config::Timeouts::QUIC_IDLE_DEFAUT_SECONDES,
             rotate_token_key: false,
             // PAS DE RÉSOLVEUR PAR DÉFAUT, et surtout pas celui du système : le
             // lire dans `/etc/resolv.conf` ferait interroger, sans que personne
@@ -264,8 +276,9 @@ impl Options {
             guard: self.guard,
             tracked_sources: self.tracked_sources,
             timeouts: Timeouts {
-                command_seconds: 300,
-                data_seconds: 600,
+                command_seconds: self.command_timeout,
+                data_seconds: self.data_timeout,
+                quic_idle_seconds: self.quic_idle,
             },
             tls: Tls {
                 certificate_chain_path: chemin(self.tls_cert.as_ref()),
@@ -393,7 +406,24 @@ OPTIONS DE `config write`
                            n'accepte de courrier pour personne — un serveur qui
                            accepterait tout serait un relais ouvert.
     --max-message <octets> taille maximale     (défaut 10485760)
-    --max-connections <n>  connexions simultanées (défaut 256)
+    --max-connections <n>  connexions simultanées (défaut 256). Elle borne les
+                           CINQ écoutes, HTTP/3 compris.
+
+    LES DÉLAIS
+    --command-timeout-seconds <n>  attente d'une commande (défaut 300).
+                           §4.5.3.2 de RFC 5321 en veut au moins 300.
+    --data-timeout-seconds <n>     attente d'un morceau de message (défaut 600).
+    --quic-idle-seconds <n>        inactivité annoncée aux pairs QUIC
+                           (défaut 30). §10.1 de RFC 9000 fait prendre le PLUS
+                           PETIT des deux délais annoncés : un pair peut
+                           raccourcir le sien, jamais l'allonger — contre un
+                           attaquant, c'est donc cette valeur qui plafonne le
+                           temps pendant lequel une connexion muette garde sa
+                           place.
+
+    AUCUN DES TROIS N'ACCEPTE ZÉRO : une attente nulle est échue à l'instant où
+    elle commence, et le serveur couperait toutes ses connexions sans qu'aucune
+    ait rien pu dire.
     --dkim-selector <s>    sélecteur DKIM publié dans le DNS
     --dkim-key <chemin>    clé privée DKIM, en PEM
     --tls-cert <chemin>    chaîne de certificats, en PEM
@@ -912,6 +942,33 @@ where
                 );
             }
             "--rotate-token-key" => options.rotate_token_key = true,
+            // ── LES DÉLAIS DE SESSION ──────────────────────────────────────
+            //
+            // **ZÉRO EXPIRE AVANT QUE LE PAIR AIT PU PARLER**, pour les trois :
+            // un délai nul rend chaque attente échue à l'instant où elle
+            // commence, et le serveur coupe alors toutes ses connexions sans
+            // qu'aucune ait rien pu dire.
+            "--command-timeout-seconds" => {
+                options.command_timeout = pas_zero(
+                    &valeur()?,
+                    "une attente nulle coupe la connexion avant que le pair ait pu écrire sa \
+                     première commande",
+                )?;
+            }
+            "--data-timeout-seconds" => {
+                options.data_timeout = pas_zero(
+                    &valeur()?,
+                    "une attente nulle coupe la remise avant que le premier octet du message \
+                     n'arrive",
+                )?;
+            }
+            "--quic-idle-seconds" => {
+                options.quic_idle = pas_zero(
+                    &valeur()?,
+                    "une inactivité nulle ferait expirer chaque connexion QUIC à l'instant où \
+                     elle s'établit",
+                )?;
+            }
             "--max-connections" => {
                 // **C'EST LE MÊME REFUS QUE `--connections-per-minute`**, en plus
                 // total : celui-là n'accepte personne pendant une minute,
@@ -1764,8 +1821,8 @@ mod tests {
     /// inscrite ici laisse sa région découverte, et le gate tombe. La liste ne
     /// peut donc pas dériver en silence.
     #[test]
-    fn les_quarante_et_une_options_a_valeur_refusent_de_se_taire() {
-        const A_VALEUR: [&str; 41] = [
+    fn les_quarante_quatre_options_a_valeur_refusent_de_se_taire() {
+        const A_VALEUR: [&str; 44] = [
             "--listen",
             "--maildir",
             "--domain",
@@ -1807,6 +1864,9 @@ mod tests {
             "--tracked-sources",
             "--listen-http",
             "--listen-h3",
+            "--command-timeout-seconds",
+            "--data-timeout-seconds",
+            "--quic-idle-seconds",
         ];
         for option in A_VALEUR {
             let erreur = parse([option].as_slice()).expect_err("refusé");
@@ -2041,6 +2101,70 @@ mod tests {
         let config = ecrire(&["--dkim-selector", "s1", "--dkim-key", "/etc/ams/dkim.pem"])
             .en_configuration();
         assert!(config.dkim.est_configure());
+    }
+
+    // ── LES DÉLAIS DE SESSION ───────────────────────────────────────────────
+
+    /// **TROIS DÉLAIS QUE PERSONNE NE POUVAIT RÉGLER.**
+    ///
+    /// `command_seconds` et `data_seconds` étaient des champs de configuration
+    /// que cette conversion écrivait TOUJOURS en dur, à 300 et 600 : le serveur
+    /// les lisait, et aucune option ne les atteignait. Le troisième,
+    /// l'inactivité QUIC, était pire — une constante qui se documentait « une
+    /// défense autant qu'un RÉGLAGE ».
+    ///
+    /// C'est la faute que C8 a déjà consignée pour les seuils du garde : « la
+    /// contrainte était vraie dans le format et fausse en pratique, puisque
+    /// personne ne pouvait écrire autre chose que le défaut ».
+    #[test]
+    fn les_trois_delais_se_reglent_et_traversent() {
+        let config = ecrire(&[
+            "--command-timeout-seconds",
+            "60",
+            "--data-timeout-seconds",
+            "120",
+            "--quic-idle-seconds",
+            "10",
+        ])
+        .en_configuration();
+        assert_eq!(config.timeouts.command_seconds, 60);
+        assert_eq!(config.timeouts.data_seconds, 120);
+        assert_eq!(config.timeouts.quic_idle_seconds, 10);
+    }
+
+    /// **LES DÉFAUTS SONT CEUX QUI ÉTAIENT GRAVÉS**, et rien n'a bougé pour qui
+    /// ne règle rien : §4.5.3.2 de RFC 5321 veut au moins cinq minutes pour une
+    /// commande, dix pour les données, et l'inactivité QUIC valait trente
+    /// secondes.
+    #[test]
+    fn sans_rien_regler_les_delais_ne_changent_pas() {
+        let config = ecrire(&["--domain", "mail.example.com"]).en_configuration();
+        assert_eq!(config.timeouts.command_seconds, 300);
+        assert_eq!(config.timeouts.data_seconds, 600);
+        assert_eq!(
+            config.timeouts.quic_idle_seconds,
+            ams_config::Timeouts::QUIC_IDLE_DEFAUT_SECONDES
+        );
+    }
+
+    /// **AUCUN DES TROIS N'ACCEPTE ZÉRO.**
+    ///
+    /// Une attente nulle est échue à l'instant où elle commence : le serveur
+    /// couperait toutes ses connexions sans qu'aucune ait rien pu dire.
+    #[test]
+    fn un_delai_nul_couperait_tout_avant_le_premier_mot() {
+        for (option, attendu) in [
+            ("--command-timeout-seconds", "première commande"),
+            ("--data-timeout-seconds", "premier octet"),
+            ("--quic-idle-seconds", "à l'instant où"),
+        ] {
+            let erreur = parse([option, "0"].as_slice()).expect_err("refusé");
+            assert!(
+                erreur.message.contains("`0` est refusé") && erreur.message.contains(attendu),
+                "« {} » ne dit pas ce que zéro casserait",
+                erreur.message
+            );
+        }
     }
 
     // ── L'API REST ──────────────────────────────────────────────────────────

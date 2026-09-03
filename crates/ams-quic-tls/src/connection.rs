@@ -92,12 +92,23 @@ pub const SORTIE_OCTETS_MAX: usize = 64 * 1_024;
 /// de §16 à huit octets — numéro, décalage, longueur.
 const ENTETE_STREAM_MAX: usize = 25;
 
-/// Le délai d'inactivité qu'on annonce, en microsecondes.
+/// Le délai d'inactivité par DÉFAUT, en microsecondes.
 ///
-/// **TRENTE SECONDES, ET C'EST UNE DÉFENSE AUTANT QU'UN RÉGLAGE** (C8) : une
-/// connexion qu'on garde ouverte est de la mémoire qu'on prête. §10.1 fait
-/// prendre le plus petit des deux délais annoncés, donc un pair ne peut que
-/// raccourcir celui-ci, jamais l'allonger.
+/// # C'EST UNE DÉFENSE, ET ELLE SE RÈGLE (C8)
+///
+/// Une connexion qu'on garde ouverte est de la mémoire qu'on prête, et elle
+/// occupe une des places que `--max-connections` compte. §10.1 fait prendre le
+/// plus petit des deux délais annoncés, donc un pair COOPÉRATIF ne peut que
+/// raccourcir celui-ci ; un attaquant, lui, annonce ce qu'il veut, et c'est
+/// alors notre valeur qui plafonne.
+///
+/// **ELLE ÉTAIT UNE CONSTANTE QUI SE DISAIT « UN RÉGLAGE ».** Une constante ne
+/// se règle pas : l'appeler ainsi laissait croire qu'un exploitant pouvait
+/// l'abaisser sous une attaque qui garde des places sans rien dire. Elle arrive
+/// désormais par [`Connection::accept`], et celle-ci n'a qu'UNE porte — une
+/// variante qui aurait gardé le défaut aurait laissé l'oubli se reproduire.
+///
+/// Trente secondes restent ce qu'on annonce quand la configuration ne dit rien.
 pub const INACTIVITE_US: u64 = 30_000_000;
 
 /// Le délai maximal qu'on s'accorde avant d'acquitter (§13.2.1), en
@@ -371,12 +382,13 @@ impl Connection {
         incoming: &Incoming,
         local: ConnectionId,
         distant: ConnectionId,
+        inactivite_us: u64,
         maintenant: u64,
     ) -> Result<Self, Error> {
         let origine = incoming.destination();
 
         let mut annonce = TransportParameters::DEFAULT;
-        annonce.max_idle_timeout_ms = INACTIVITE_US.saturating_div(1_000);
+        annonce.max_idle_timeout_ms = inactivite_us.saturating_div(1_000);
         annonce.max_ack_delay_ms = ACQUITTEMENT_MAX_MS;
         annonce.initial_source_connection_id = Some(local);
         // §4.1 et §4.6 : ce qu'on ouvre au pair. **CE QU'ON ANNONCE EST CE QU'ON
@@ -412,7 +424,7 @@ impl Connection {
                 .expect("§17.2 borne l'identifiant, et §5.2 dérive de lui")
         };
         Ok(Self {
-            etat: ams_quic::Connection::new(Role::Server, INACTIVITE_US, 0, maintenant),
+            etat: ams_quic::Connection::new(Role::Server, inactivite_us, 0, maintenant),
             poignee: Server::new(config, ecrits)?,
             sortie: Default::default(),
             emis: [Sent::new(); ESPACES],

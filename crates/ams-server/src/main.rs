@@ -1534,6 +1534,10 @@ async fn servir(fichier: &Path) -> Result<(), String> {
             // à 1 024 dans l'écoute QUIC, si bien qu'un serveur réglé à seize
             // connexions en tenait mille vingt-quatre sur cette porte-là.
             let connexions_max = usize::try_from(options.max_connections).unwrap_or(usize::MAX);
+            // **ZÉRO PREND LE DÉFAUT**, et la substitution vit dans `ams-config` :
+            // la recopier ici ferait deux vérités pour une seule décision.
+            let inactivite_us =
+                u64::from(options.timeouts.quic_idle_secondes()).saturating_mul(1_000_000);
             let attente = arret();
             Some(tokio::spawn(async move {
                 let socket = match tokio::net::UdpSocket::from_std(socket) {
@@ -1550,6 +1554,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
                     tls,
                     &garde_h3,
                     connexions_max,
+                    inactivite_us,
                     &mut application,
                     attente,
                 )

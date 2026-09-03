@@ -543,6 +543,7 @@ fn une_poignee_de_main_va_jusqu_au_bout() {
         &arrivee,
         identifiant(&LOCAL),
         identifiant(&CLIENT),
+        INACTIVITE_US,
         horloge,
     )
     .expect("le fournisseur sait chiffrer QUIC");
@@ -610,6 +611,7 @@ fn la_garde_d_amplification_tient() {
         &arrivee,
         identifiant(&LOCAL),
         identifiant(&CLIENT),
+        INACTIVITE_US,
         horloge,
     )
     .expect("constructible");
@@ -670,6 +672,7 @@ fn du_bruit_ne_condamne_pas() {
         &arrivee,
         identifiant(&LOCAL),
         identifiant(&CLIENT),
+        INACTIVITE_US,
         horloge,
     )
     .expect("constructible");
@@ -713,6 +716,7 @@ fn une_fermeture_se_dit() {
         &arrivee,
         identifiant(&LOCAL),
         identifiant(&CLIENT),
+        INACTIVITE_US,
         horloge,
     )
     .expect("constructible");
@@ -754,6 +758,7 @@ fn un_client_sans_h3_n_est_pas_servi() {
         &arrivee,
         identifiant(&LOCAL),
         identifiant(&CLIENT),
+        INACTIVITE_US,
         horloge,
     )
     .expect("constructible");
@@ -786,6 +791,7 @@ fn le_delai_d_inactivite_eteint() {
         &arrivee,
         identifiant(&LOCAL),
         identifiant(&CLIENT),
+        INACTIVITE_US,
         horloge,
     )
     .expect("constructible");
@@ -825,6 +831,7 @@ fn un_zero_rtt_ne_se_sert_pas() {
         &arrivee,
         identifiant(&LOCAL),
         identifiant(&CLIENT),
+        INACTIVITE_US,
         horloge,
     )
     .expect("constructible");
@@ -864,6 +871,7 @@ fn etabli(nom: &str) -> (Atelier, Connection, Client, u64) {
         &arrivee,
         identifiant(&LOCAL),
         identifiant(&CLIENT),
+        INACTIVITE_US,
         horloge,
     )
     .expect("constructible");
@@ -1083,6 +1091,7 @@ fn le_budget_epuise_fait_taire() {
         &arrivee,
         identifiant(&LOCAL),
         identifiant(&CLIENT),
+        INACTIVITE_US,
         horloge,
     )
     .expect("constructible");
@@ -1148,6 +1157,7 @@ fn une_fermeture_sans_clefs_part_en_initial() {
         &arrivee,
         identifiant(&LOCAL),
         identifiant(&CLIENT),
+        INACTIVITE_US,
         horloge,
     )
     .expect("constructible");
@@ -1241,6 +1251,7 @@ fn la_poignee_de_main_survit_a_un_datagramme_perdu() {
         &arrivee,
         identifiant(&LOCAL),
         identifiant(&CLIENT),
+        INACTIVITE_US,
         horloge,
     )
     .expect("constructible");
@@ -1453,6 +1464,7 @@ fn un_fournisseur_sans_quic_ne_donne_pas_de_connexion() {
         &arrivee,
         identifiant(&LOCAL),
         identifiant(&CLIENT),
+        INACTIVITE_US,
         horloge,
     )
     .expect_err("le fournisseur ordinaire ne sait pas chiffrer QUIC");
@@ -1502,6 +1514,7 @@ fn des_parametres_illisibles_condamnent() {
         &arrivee,
         identifiant(&LOCAL),
         identifiant(&CLIENT),
+        INACTIVITE_US,
         horloge,
     )
     .expect("constructible");
@@ -1638,6 +1651,7 @@ fn une_poignee_sans_alpn_n_est_pas_servie() {
         &arrivee,
         identifiant(&LOCAL),
         identifiant(&CLIENT),
+        INACTIVITE_US,
         horloge,
     )
     .expect("constructible");
@@ -1738,6 +1752,7 @@ fn un_crypto_qui_ne_tient_pas_attend_son_tour() {
         &arrivee,
         identifiant(&LOCAL),
         identifiant(&CLIENT),
+        INACTIVITE_US,
         horloge,
     )
     .expect("constructible");
@@ -1864,6 +1879,7 @@ fn avant_la_poignee_de_main_il_n_y_a_pas_de_flux() {
         &arrivee,
         identifiant(&LOCAL),
         identifiant(&CLIENT),
+        INACTIVITE_US,
         1_000_000,
     )
     .expect("constructible");
@@ -2108,6 +2124,7 @@ fn une_trame_hors_de_son_niveau_ferme_la_connexion() {
         &arrivee,
         identifiant(&LOCAL),
         identifiant(&CLIENT),
+        INACTIVITE_US,
         horloge,
     )
     .expect("constructible");
@@ -2498,6 +2515,7 @@ fn accepte(nom: &str) -> (Atelier, Connection, u64) {
         &arrivee,
         identifiant(&LOCAL),
         identifiant(&CLIENT),
+        INACTIVITE_US,
         horloge,
     )
     .expect("constructible");

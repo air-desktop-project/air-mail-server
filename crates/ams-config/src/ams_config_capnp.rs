@@ -4544,11 +4544,15 @@ pub mod timeouts {
         pub fn get_data_seconds(self) -> u32 {
             self.reader.get_data_field::<u32>(1)
         }
+        #[inline]
+        pub fn get_quic_idle_seconds(self) -> u32 {
+            self.reader.get_data_field::<u32>(2)
+        }
     }
 
     pub struct Builder<'a> { builder: ::capnp::private::layout::StructBuilder<'a> }
     impl <> ::capnp::traits::HasStructSize for Builder<'_,>  {
-        const STRUCT_SIZE: ::capnp::private::layout::StructSize = ::capnp::private::layout::StructSize { data: 1, pointers: 0 };
+        const STRUCT_SIZE: ::capnp::private::layout::StructSize = ::capnp::private::layout::StructSize { data: 2, pointers: 0 };
     }
     impl <> ::capnp::traits::HasTypeId for Builder<'_,>  {
         const TYPE_ID: u64 = _private::TYPE_ID;
@@ -4614,6 +4618,14 @@ pub mod timeouts {
         pub fn set_data_seconds(&mut self, value: u32)  {
             self.builder.set_data_field::<u32>(1, value);
         }
+        #[inline]
+        pub fn get_quic_idle_seconds(self) -> u32 {
+            self.builder.get_data_field::<u32>(2)
+        }
+        #[inline]
+        pub fn set_quic_idle_seconds(&mut self, value: u32)  {
+            self.builder.set_data_field::<u32>(2, value);
+        }
     }
 
     pub struct Pipeline { _typeless: ::capnp::any_pointer::Pipeline }
@@ -4625,18 +4637,18 @@ pub mod timeouts {
     impl Pipeline  {
     }
     mod _private {
-        pub(crate) static ENCODED_NODE: [::capnp::Word; 51] = [
+        pub(crate) static ENCODED_NODE: [::capnp::Word; 67] = [
             ::capnp::word(0, 0, 0, 0, 6, 0, 6, 0),
             ::capnp::word(48, 190, 113, 127, 208, 43, 63, 173),
-            ::capnp::word(17, 0, 0, 0, 1, 0, 1, 0),
+            ::capnp::word(17, 0, 0, 0, 1, 0, 2, 0),
             ::capnp::word(64, 247, 238, 246, 136, 98, 87, 212),
             ::capnp::word(0, 0, 7, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(214, 91, 0, 0, 32, 92, 0, 0),
+            ::capnp::word(214, 91, 0, 0, 136, 94, 0, 0),
             ::capnp::word(21, 0, 0, 0, 210, 0, 0, 0),
             ::capnp::word(33, 0, 0, 0, 7, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(29, 0, 0, 0, 119, 0, 0, 0),
+            ::capnp::word(29, 0, 0, 0, 175, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
             ::capnp::word(97, 109, 115, 45, 99, 111, 110, 102),
@@ -4644,21 +4656,28 @@ pub mod timeouts {
             ::capnp::word(58, 84, 105, 109, 101, 111, 117, 116),
             ::capnp::word(115, 0, 0, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 1, 0, 1, 0),
-            ::capnp::word(8, 0, 0, 0, 3, 0, 4, 0),
+            ::capnp::word(12, 0, 0, 0, 3, 0, 4, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 1, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(41, 0, 0, 0, 122, 0, 0, 0),
+            ::capnp::word(69, 0, 0, 0, 122, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(40, 0, 0, 0, 3, 0, 1, 0),
-            ::capnp::word(52, 0, 0, 0, 2, 0, 1, 0),
+            ::capnp::word(68, 0, 0, 0, 3, 0, 1, 0),
+            ::capnp::word(80, 0, 0, 0, 2, 0, 1, 0),
             ::capnp::word(1, 0, 0, 0, 1, 0, 0, 0),
             ::capnp::word(0, 0, 1, 0, 1, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(49, 0, 0, 0, 98, 0, 0, 0),
+            ::capnp::word(77, 0, 0, 0, 98, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(48, 0, 0, 0, 3, 0, 1, 0),
-            ::capnp::word(60, 0, 0, 0, 2, 0, 1, 0),
+            ::capnp::word(76, 0, 0, 0, 3, 0, 1, 0),
+            ::capnp::word(88, 0, 0, 0, 2, 0, 1, 0),
+            ::capnp::word(2, 0, 0, 0, 2, 0, 0, 0),
+            ::capnp::word(0, 0, 1, 0, 2, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(85, 0, 0, 0, 130, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(84, 0, 0, 0, 3, 0, 1, 0),
+            ::capnp::word(96, 0, 0, 0, 2, 0, 1, 0),
             ::capnp::word(99, 111, 109, 109, 97, 110, 100, 83),
             ::capnp::word(101, 99, 111, 110, 100, 115, 0, 0),
             ::capnp::word(8, 0, 0, 0, 0, 0, 0, 0),
@@ -4677,11 +4696,21 @@ pub mod timeouts {
             ::capnp::word(8, 0, 0, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(113, 117, 105, 99, 73, 100, 108, 101),
+            ::capnp::word(83, 101, 99, 111, 110, 100, 115, 0),
+            ::capnp::word(8, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(8, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
         ];
         pub(crate) fn get_field_types(index: u16) -> ::capnp::introspect::Type {
             match index {
                 0 => <u32 as ::capnp::introspect::Introspect>::introspect(),
                 1 => <u32 as ::capnp::introspect::Introspect>::introspect(),
+                2 => <u32 as ::capnp::introspect::Introspect>::introspect(),
                 _ => ::capnp::introspect::panic_invalid_field_index(index),
             }
         }
@@ -4695,9 +4724,9 @@ pub mod timeouts {
             MEMBERS_BY_DISCRIMINANT,
             MEMBERS_BY_NAME
         );
-        pub(crate) static NONUNION_MEMBERS : &[u16] = &[0,1];
+        pub(crate) static NONUNION_MEMBERS : &[u16] = &[0,1,2];
         pub(crate) static MEMBERS_BY_DISCRIMINANT : &[u16] = &[];
-        pub(crate) static MEMBERS_BY_NAME : &[u16] = &[0,1];
+        pub(crate) static MEMBERS_BY_NAME : &[u16] = &[0,1,2];
         pub(crate) const TYPE_ID: u64 = 0xad3f_2bd0_7f71_be30;
     }
 }

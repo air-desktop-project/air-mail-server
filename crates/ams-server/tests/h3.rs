@@ -101,6 +101,7 @@ fn configuration(
         timeouts: Timeouts {
             command_seconds: 10,
             data_seconds: 10,
+            quic_idle_seconds: 0,
         },
         tls: Tls {
             certificate_chain_path: cert.display().to_string(),

@@ -36,6 +36,13 @@ use tokio::net::UdpSocket;
 /// saturation — sauf le dernier, qui pose sa propre valeur.
 const PLACES: usize = 64;
 
+/// L'inactivité annoncée par ces essais, en microsecondes.
+///
+/// **ELLE VIENT DE L'APPELANT, ET NON D'UNE CONSTANTE DE LA CONNEXION** : elle
+/// était gravée à trente secondes tout en se documentant « un réglage », si bien
+/// qu'aucun exploitant ne pouvait l'abaisser. Ces essais reprennent le défaut.
+const INACTIVITE: u64 = 30_000_000;
+
 /// Un videur qui ne bannit personne.
 ///
 /// **IL EST OBLIGATOIRE, ET C'EST VOULU** : une écoute QUIC sans garde ne
@@ -71,6 +78,7 @@ async fn une_poignee_de_main_sur_une_vraie_socket() {
             Arc::new(config),
             &videur_permissif(),
             PLACES,
+            INACTIVITE,
             &mut ams_loop_tokio::SansApplication,
             async {
                 let _ = arret.await;
@@ -137,6 +145,7 @@ async fn du_bruit_sur_le_port_n_ouvre_rien() {
             Arc::new(config),
             &videur_permissif(),
             PLACES,
+            INACTIVITE,
             &mut ams_loop_tokio::SansApplication,
             async {
                 let _ = arret.await;
@@ -207,6 +216,7 @@ async fn un_flux_traverse_la_vraie_socket() {
             Arc::new(config),
             &videur_permissif(),
             PLACES,
+            INACTIVITE,
             &mut ams_loop_tokio::SansApplication,
             async {
                 let _ = arret.await;
@@ -282,6 +292,7 @@ async fn une_faute_de_flux_ferme_sur_la_vraie_socket() {
             Arc::new(config),
             &videur_permissif(),
             PLACES,
+            INACTIVITE,
             &mut ams_loop_tokio::SansApplication,
             async {
                 let _ = arret.await;
@@ -425,6 +436,7 @@ async fn des_octets_d_application_font_l_aller_retour() {
             Arc::new(config),
             &videur,
             PLACES,
+            INACTIVITE,
             &mut echo,
             async {
                 let _ = arret.await;
@@ -560,6 +572,7 @@ async fn une_requete_h3_traverse_toute_la_chaine() {
             Arc::new(config),
             &videur,
             PLACES,
+            INACTIVITE,
             &mut application,
             async {
                 let _ = arret.await;
@@ -655,6 +668,7 @@ async fn l_extinction_se_dit_au_client_avant_de_fermer() {
             Arc::new(config),
             &videur,
             PLACES,
+            INACTIVITE,
             &mut application,
             async {
                 let _ = arret.await;
@@ -796,6 +810,7 @@ async fn un_pair_banni_n_obtient_pas_de_poignee_de_main() {
             Arc::new(config),
             &videur,
             PLACES,
+            INACTIVITE,
             &mut ams_loop_tokio::SansApplication,
             async {
                 let _ = arret.await;
@@ -869,6 +884,7 @@ async fn la_borne_de_connexions_est_celle_qu_on_a_demandee() {
             &videur_permissif(),
             // UNE SEULE PLACE.
             1,
+            INACTIVITE,
             &mut ams_loop_tokio::SansApplication,
             async {
                 let _ = arret.await;

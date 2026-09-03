@@ -521,4 +521,16 @@ struct Guard {
 struct Timeouts {
   commandSeconds @0 :UInt32;
   dataSeconds @1 :UInt32;
+
+  # L'inactivité annoncée aux pairs QUIC, en secondes.
+  #
+  # ZÉRO PREND LE DÉFAUT — trente secondes —, et c'est ce qui rend ce champ
+  # ajoutable sans rien casser : un fichier écrit avant lui décode zéro, et se
+  # comporte donc exactement comme avant.
+  #
+  # §10.1 de RFC 9000 fait prendre le PLUS PETIT des deux délais annoncés : un
+  # pair peut donc raccourcir celui-ci pour sa propre connexion, jamais
+  # l'allonger. Contre un attaquant, qui annonce ce qu'il veut, c'est notre
+  # valeur qui plafonne — et c'est pourquoi l'exploitant doit pouvoir la baisser.
+  quicIdleSeconds @2 :UInt32;
 }

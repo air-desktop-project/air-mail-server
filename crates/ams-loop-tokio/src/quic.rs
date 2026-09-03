@@ -264,6 +264,7 @@ pub async fn serve_quic<App, Arret>(
     tls: Arc<ServerConfig>,
     garde: &SharedGuard,
     connexions_max: usize,
+    inactivite_us: u64,
     application: &mut App,
     shutdown: Arret,
 ) -> Result<QuicStats, Error>
@@ -276,6 +277,7 @@ where
         tls,
         garde,
         connexions_max,
+        inactivite_us,
         connexions: Vec::new(),
         carte: HashMap::new(),
         stats: QuicStats::default(),
@@ -389,6 +391,8 @@ struct Ecoute<'a> {
     garde: &'a SharedGuard,
     /// Combien de connexions vivent en même temps, au plus.
     connexions_max: usize,
+    /// L'inactivité qu'on annonce aux pairs, en microsecondes.
+    inactivite_us: u64,
     /// Les connexions vivantes, par rang.
     connexions: Vec<Vivante>,
     /// Les identifiants qu'on a distribués, vers ces rangs.
@@ -487,6 +491,7 @@ impl Ecoute<'_> {
             arrivee,
             local,
             arrivee.source(),
+            self.inactivite_us,
             maintenant,
         ) else {
             self.stats.discarded = self.stats.discarded.saturating_add(1);

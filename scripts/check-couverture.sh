@@ -126,9 +126,22 @@ trap 'rm -f "$journal"' EXIT
 # n'atteint plus rendraient un rapport VERT, et ce gate existe pour que ce vert
 # veuille dire quelque chose.
 #
-# `--profraw-only` n'efface que les compteurs, jamais les objets compilés : la
-# garantie ne coûte donc pas une reconstruction.
-cargo llvm-cov clean --workspace --profraw-only
+# ── ET `--profraw-only` NE SUFFISAIT PAS ────────────────────────────────────
+#
+# Première correction : effacer les COMPTEURS. Elle fermait la moitié de la
+# cause, et la moitié restante a remordu à la tranche suivante — même symptôme,
+# même fichier, même 71 %.
+#
+# Ce qui manquait : les OBJETS INSTRUMENTÉS. Chacun porte sa propre table de
+# régions. Quand la source change entre une mesure et la suivante, l'ancien objet
+# peut rester dans l'arbre et apporter SES régions, à compte nul, par-dessus
+# celles du neuf. Le compte total le dit : 57 723 régions au lieu de 57 021,
+# soit exactement les 702 « non couvertes » — une seconde copie du même fichier.
+#
+# On efface donc tout. Cela coûte une reconstruction instrumentée à chaque
+# passage, et ce prix est le bon : ce gate n'existe que pour être cru, et un
+# gate qui échoue au hasard cesse d'être lu bien avant de cesser d'avoir raison.
+cargo llvm-cov clean --workspace
 
 if ! rapport=$(cargo llvm-cov --json --summary-only --locked "${args[@]}" 2>"$journal"); then
     if grep -q "no coverage data found" "$journal"; then

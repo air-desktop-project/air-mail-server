@@ -3846,6 +3846,84 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
+## Trois délais du serveur ne se réglaient pas
+
+### DEUX CHAMPS QUE PERSONNE NE POUVAIT ÉCRIRE, ET UNE CONSTANTE QUI SE DISAIT UN RÉGLAGE
+
+`command_seconds` et `data_seconds` sont des champs de configuration que le
+serveur LIT — cinq endroits les consultent. `en_configuration` les écrivait
+toujours en dur, à 300 et 600, et aucune option ne les atteignait.
+
+C'est mot pour mot la faute que C8 consigne déjà pour les seuils du garde :
+« la contrainte était vraie dans le format et fausse en pratique, puisque
+personne ne pouvait écrire autre chose que le défaut ».
+
+Le troisième était pire. `INACTIVITE_US` — trente secondes — se documentait
+« **une défense AUTANT QU'UN RÉGLAGE** (C8) » en étant une `const`. Une
+constante ne se règle pas : l'appeler ainsi laissait croire qu'un exploitant
+pouvait l'abaisser sous une attaque qui garde des places sans rien dire.
+
+### POURQUOI CELUI-LÀ COMPTE PLUS QU'IL N'EN A L'AIR
+
+§10.1 de RFC 9000 fait prendre le PLUS PETIT des deux délais annoncés. Un pair
+COOPÉRATIF peut donc raccourcir le sien ; un attaquant annonce ce qu'il veut, et
+c'est alors notre valeur qui plafonne le temps pendant lequel une connexion
+muette garde une des places que `--max-connections` compte.
+
+### ZÉRO PREND LE DÉFAUT DANS LE FORMAT, ET SE REFUSE AU TERMINAL
+
+Le champ neuf décode zéro dans tout fichier écrit avant lui : la substitution le
+rend ajoutable sans rien casser. Sans elle, une mise à jour aurait fait annoncer
+une inactivité NULLE, et chaque connexion QUIC aurait expiré à l'instant où elle
+s'établit — une configuration parfaitement valable devenue un serveur qui ne
+sert plus rien en HTTP/3.
+
+La substitution vit dans `ams-config`, et non chez chaque appelant : la recopier
+ferait deux vérités pour une seule décision.
+
+L'outil, lui, refuse zéro pour les trois — c'est la même distinction que pour
+les durées de file : dans le format, zéro veut dire « je n'ai rien dit » ; au
+terminal, il veut dire zéro.
+
+### UNE SEULE PORTE POUR LE DÉLAI QUI DESCEND
+
+`Connection::accept` prend l'inactivité en argument. Une variante qui aurait
+gardé le défaut aurait laissé l'oubli se reproduire — c'est la sixième fois dans
+cette série qu'une règle tenue par répétition s'oublie quelque part. Dix-huit
+sites d'essai ont été mis à jour ; aucun ne peut plus prendre la constante sans
+le dire.
+
+## `check-couverture.sh` mentait encore, et ma correction n'en fermait que la moitié
+
+### MÊME SYMPTÔME, MÊME FICHIER, MÊME 71 %
+
+La tranche du prédicat DMARC avait vu ce gate échouer à 71 % sur `codec.rs`,
+pour cause de compteurs périmés ; il les efface depuis. Le symptôme est revenu à
+l'identique en écrivant celle-ci.
+
+### CE QUI MANQUAIT : LES OBJETS, PAS LES COMPTEURS
+
+`--profraw-only` efface les compteurs et laisse les OBJETS INSTRUMENTÉS. Chacun
+porte sa propre table de régions : quand la source change entre une mesure et la
+suivante, l'ancien objet peut rester dans l'arbre et apporter SES régions, à
+compte nul, par-dessus celles du neuf.
+
+**Le compte total le disait**, et c'est ce qui a tranché : 57 723 régions au lieu
+de 57 021, soit exactement les 702 « non couvertes ». Ce n'étaient pas des
+régions oubliées — c'était une seconde copie du même fichier.
+
+Une première tentative de reproduction a ÉCHOUÉ, et cela valait d'être noté : re-
+salir l'arbre avec la MÊME source ne reproduit rien, puisque l'ancien objet et le
+neuf sont identiques. Il faut éditer entre les deux — ce que j'avais fait les deux
+fois sans le voir.
+
+### CE QUE CELA COÛTE, ET POURQUOI ON LE PAIE
+
+Une reconstruction instrumentée à chaque passage. C'est le bon prix : ce gate
+n'existe que pour être cru, et un gate qui échoue au hasard cesse d'être lu bien
+avant de cesser d'avoir raison. Éprouvé dans le scénario exact — mesurer, éditer,
+mesurer — il tient.
+
 ## `--max-connections` gouvernait quatre écoutes sur cinq
 
 ### UNE CONSTANTE GRAVÉE LÀ OÙ C8 VEUT UN RÉGLAGE

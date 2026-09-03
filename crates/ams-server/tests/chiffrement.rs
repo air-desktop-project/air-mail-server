@@ -213,6 +213,7 @@ fn configuration_pop3(
         timeouts: Timeouts {
             command_seconds: 10,
             data_seconds: 10,
+            quic_idle_seconds: 0,
         },
         tls,
         spf: ams_config::Spf::default(),
