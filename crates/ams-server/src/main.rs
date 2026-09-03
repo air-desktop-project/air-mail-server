@@ -50,7 +50,7 @@ use ams_loop_tokio::imap::serve_imap;
 use ams_loop_tokio::pop3::serve_pop3;
 use ams_loop_tokio::{
     DkimChecker, DkimSigner, DmarcChecker, Relay, ReportSpool, SenderChecker, ServeOptions,
-    SharedGuard, Timeouts, refuse_root, serve,
+    SharedGuard, Timeouts, masque_trop_large, refuse_root, restreindre_le_masque, serve,
 };
 use ams_session::{Capabilities, Config, SenderPolicy};
 use ams_store::Maildir;
@@ -552,12 +552,64 @@ fn refuser_fichier_lisible_par_tous(chemin: &str, quoi: &str) -> Result<(), Stri
     Ok(())
 }
 
+/// Dit ce qui, DÉJÀ SUR LE DISQUE, se laisse lire par les autres comptes.
+///
+/// # Pourquoi le masque ne suffit pas
+///
+/// Il gouverne ce qu'on CRÉE, et rien d'autre. Une installation antérieure à ce
+/// resserrement garde ses `0755` et ses `0644` : le courrier déjà livré reste
+/// lisible, et rien ne le dirait jamais. Le corriger à la place de l'exploitant
+/// serait pire — changer les permissions de ses fichiers sans le lui demander —,
+/// mais se taire reviendrait à laisser croire que le resserrement a tout réglé.
+///
+/// # Ce qu'on regarde, et pourquoi c'est suffisant
+///
+/// La RACINE du Maildir décide de tout ce qu'elle contient : sans le bit `x`
+/// pour les autres, aucun chemin ne la traverse, quels que soient les modes en
+/// dessous. Parcourir chaque boîte coûterait un temps proportionnel au courrier
+/// stocké, pour une réponse que la racine donne déjà.
+fn dire_ce_qui_reste_ouvert(chemins: &[(&str, &Path)]) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    for (quoi, chemin) in chemins {
+        if chemin.as_os_str().is_empty() {
+            continue;
+        }
+        let Ok(etat) = std::fs::metadata(chemin) else {
+            continue;
+        };
+        let mode = etat.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            eprintln!(
+                "air-mail-server : {quoi} `{}` est en {mode:04o} — les autres comptes de \
+                 cette machine y ont accès. Le masque ne corrige que ce qui NAÎT APRÈS lui ; \
+                 pour le reste : `chmod -R go= {}`",
+                chemin.display(),
+                chemin.display()
+            );
+        }
+    }
+}
+
 /// Monte le serveur et le fait tourner jusqu'à l'arrêt.
 async fn servir(fichier: &Path) -> Result<(), String> {
     // LE REFUS DU SUPERUTILISATEUR VIENT AVANT TOUT LE RESTE (C10) — avant
     // d'ouvrir un port, avant de créer un répertoire. Rien de ce qui suit ne doit
     // s'exécuter avec ces privilèges, pas même une seconde.
     refuse_root().map_err(|erreur| erreur.to_string())?;
+
+    // **ET LE MASQUE AVANT LA PREMIÈRE CRÉATION**, pour la même raison : rien de
+    // ce qui suit ne doit naître lisible par les autres comptes de la machine,
+    // pas même une seconde. Le masque n'est PAS rétroactif ; c'est pourquoi les
+    // permissions déjà en place sont examinées plus bas, une fois le Maildir
+    // connu.
+    let ancien_masque = restreindre_le_masque();
+    if masque_trop_large(ancien_masque) {
+        eprintln!(
+            "air-mail-server : masque de création resserré de {ancien_masque:04o} à 0077 — ce \
+             qui suit naît lisible par son seul propriétaire"
+        );
+    }
 
     let octets =
         std::fs::read(fichier).map_err(|erreur| format!("`{}` : {erreur}", fichier.display()))?;
@@ -568,6 +620,15 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         .parse()
         .map_err(|_| format!("`{}` n'est pas une adresse d'écoute", options.listen))?;
     let maildir = PathBuf::from(&options.maildir);
+
+    // CE QUI EST DÉJÀ LÀ NE SE RESSERRE PAS TOUT SEUL. Les trois chemins que ce
+    // serveur n'a pas forcément créés lui-même, et dont l'ouverture coûterait le
+    // plus : le courrier, le secret de scellement, les empreintes.
+    dire_ce_qui_reste_ouvert(&[
+        ("le Maildir", &maildir),
+        ("la configuration", fichier),
+        ("le magasin des comptes", Path::new(&options.accounts)),
+    ]);
 
     if options.hosted.is_empty() {
         eprintln!(

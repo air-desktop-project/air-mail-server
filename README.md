@@ -1645,6 +1645,21 @@ redirection du pare-feu.
 Sans `--hosted`, il n'accepte de courrier pour personne — un serveur qui
 accepterait tout serait un relais ouvert.
 
+**Ce que ces deux programmes créent naît en `0600`, et leurs répertoires en
+`0700`.** Ils resserrent leur masque de création dès le démarrage plutôt que de
+poser un mode à chaque écriture : un mode s'oublie à l'appel suivant, un masque
+couvre aussi ce qu'on écrira sans y penser. Il n'y a pas d'option pour le
+desserrer — tout ce que ce serveur pose sur le disque est soit un secret, soit
+le courrier de quelqu'un.
+
+Un masque ne vaut que pour ce qui NAÎT après lui. Sur une installation
+antérieure, le serveur dit au démarrage ce qui reste ouvert — le Maildir, la
+configuration, le magasin des comptes — et la commande qui le referme :
+
+```sh
+chmod -R go= ./maildir air-mail.conf comptes.bin
+```
+
 ### Chiffrer
 
 ```sh

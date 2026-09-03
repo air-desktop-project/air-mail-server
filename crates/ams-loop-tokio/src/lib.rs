@@ -100,7 +100,7 @@ pub use dmarc::{Authenticated, DmarcChecker, DmarcResult, DmarcVerdict, PourRapp
 pub use error::Error;
 pub use guard::SharedGuard;
 pub use mtasts::Sts;
-pub use privileges::{is_root, refuse_root};
+pub use privileges::{is_root, masque_trop_large, refuse_root, restreindre_le_masque};
 pub use queue::{Bounced, QueueTally, Spool};
 pub use quic::{Application, QuicStats, SansApplication, serve_quic};
 pub use relay::{Outgoing, Relay, RelayOutcome, SMTP_PORT};

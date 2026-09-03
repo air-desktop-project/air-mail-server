@@ -3846,6 +3846,81 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
+## Le courrier de tout le monde naissait lisible par tout le monde
+
+### RIEN NE POSAIT DE MASQUE DE CRÉATION
+
+`File::create` crée en `0666` moins le masque hérité ; `create_dir_all` en
+`0777` moins le même. Aucun `umask` n'était posé nulle part — ni dans le code,
+ni dans une unité systemd, ni dans une documentation d'installation, dont ce
+dépôt n'a d'ailleurs aucune. Le serveur héritait donc du masque de qui le
+lançait, soit `0022` chez systemd et dans la plupart des shells.
+
+Ce que cela donnait, sur une machine où le serveur partage l'hôte avec d'autres
+comptes Unix :
+
+  - **chaque message livré en `0644`**, dans des `new/`, `cur/` et `tmp/` en
+    `0755` — donc traversables ;
+  - l'index de chaque boîte, les abonnements IMAP, la configuration écrite par
+    `air-mail-admin` ;
+  - les rapports DMARC agrégés, et les rapports d'ÉCHEC, qui portent les
+    en-têtes du courrier d'autrui (RFC 6591) ;
+  - la configuration, qui porte le secret de scellement des jetons — alors que
+    le modèle de sécurité du jeton repose mot pour mot sur « la machine du
+    serveur, PAR QUI PEUT LIRE CE FICHIER ». Écrite en `0644`, cette phrase
+    devient fausse.
+
+### LA RÈGLE ÉTAIT APPLIQUÉE À QUATRE ENDROITS, ET OUBLIÉE À DIX
+
+Le mode n'était posé qu'où quelqu'un y avait pensé : magasin des comptes (deux
+fois), cache MTA-STS, file de réémission. C'est la forme que prend, pour la
+troisième fois dans cette série, une règle tenue par répétition.
+
+**Le masque a donc été préféré au mode à chaque appel**, et pour cette
+raison-là : écrire le mode aux dix endroits restants le laisserait s'oublier au
+onzième. Le masque est une propriété du PROCESSUS — il couvre ce que ce code
+écrit aujourd'hui, et ce qu'il écrira sans y penser demain. Les modes explicites
+déjà en place restent : les deux se cumulent, le masque est un plancher et non
+une dispense.
+
+### IL N'EST PAS RÉTROACTIF, ET C'EST DIT
+
+Un masque ne touche pas aux fichiers déjà là. Une installation existante garde
+ses `0755` et ses `0644`, et le courrier déjà livré reste lisible. Les corriger
+à la place de l'exploitant serait pire — changer les permissions de ses fichiers
+sans le lui demander —, mais se taire laisserait croire que le resserrement a
+tout réglé. Le serveur examine donc, au démarrage, les trois chemins dont
+l'ouverture coûterait le plus — le Maildir, la configuration, le magasin des
+comptes — et dit lesquels restent ouverts, avec la commande qui les ferme.
+
+La RACINE du Maildir suffit à décider : sans le bit `x` pour les autres, aucun
+chemin ne la traverse, quels que soient les modes en dessous. Parcourir chaque
+boîte coûterait un temps proportionnel au courrier stocké pour une réponse que
+la racine donne déjà.
+
+### CE QUI L'ÉTABLIT
+
+Un essai d'INTÉGRATION, et non unitaire : `umask` est un état du processus, et
+le poser depuis un essai unitaire le poserait pour tous les essais du même
+binaire, qui tournent en parallèle. Il éprouve l'EFFET — un fichier créé avant
+naît en `0644`, le même appel après naît en `0600`, et un répertoire en `0700` —
+et non la valeur que l'appel système renvoie, qui ne dirait rien de ce qu'un
+`File::create` en fait.
+
+### ET LE PIÈGE DE L'ÉCRITURE PAR SCRIPT
+
+Le message d'avertissement est sorti avec dix-huit espaces au milieu d'une
+phrase. La continuation `\` d'un littéral Rust avait été mangée à l'écriture :
+le script Python qui posait le fichier avait interprété `\` suivi d'un saut de
+ligne comme SA PROPRE continuation, et l'indentation s'était retrouvée dans la
+chaîne.
+
+C'est la deuxième fois dans cette série qu'un littéral Rust est abîmé en passant
+par un autre langage — la première portait sur des `\r\n` devenus des sauts de
+ligne simples. **Un littéral qui contient des échappements ne se pose pas par
+script.** Un balayage du dépôt n'a trouvé aucune autre occurrence : les autres
+suites d'espaces sont des alignements de colonnes voulus.
+
 ## Trois zéros éteignaient le serveur sans que rien ne les refuse
 
 ### LA RÈGLE ÉTAIT ÉCRITE, ET APPLIQUÉE À DEUX BLOCS SUR TROIS

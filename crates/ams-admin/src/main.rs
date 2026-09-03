@@ -84,6 +84,33 @@ COMMANDES
 ///
 /// On rétablit donc le comportement d'Unix, celui que `head` et `grep`
 /// attendent de tout ce qu'ils lisent.
+/// Restreint le masque de création : **rien pour le groupe, rien pour les
+/// autres**.
+///
+/// # Pourquoi cet outil en a besoin autant que le serveur
+///
+/// Il écrit les deux fichiers les plus sensibles du service : la configuration,
+/// qui porte le secret de scellement des jetons d'administration, et le magasin
+/// des comptes, qui porte les empreintes des mots de passe. Le second posait
+/// déjà `0600` à l'ouverture ; le premier passait par `std::fs::write`, donc
+/// `0666` moins le masque hérité — `0644` avec celui que donne un shell
+/// ordinaire.
+///
+/// Le modèle de sécurité du jeton repose pourtant, mot pour mot, sur « la
+/// machine du serveur, PAR QUI PEUT LIRE CE FICHIER ». Écrit en `0644`, ce
+/// fichier se lit par tout le monde, et cette phrase devient fausse.
+///
+/// C'est le même choix que dans le serveur : un masque de processus plutôt qu'un
+/// mode à chaque appel, parce que le mode à chaque appel est ce qui a été oublié.
+fn restreindre_le_masque() {
+    // SAFETY : `umask` ne prend qu'un entier, ne touche à aucune mémoire de ce
+    // processus et ne peut pas échouer. Cet outil est monofil, et l'appel a lieu
+    // avant tout le reste.
+    unsafe {
+        libc::umask(0o077);
+    }
+}
+
 fn rendre_sigpipe_au_systeme() {
     // SAFETY: `signal` avec `SIG_DFL` sur `SIGPIPE` est l'appel que fait tout
     // programme C au démarrage ; il ne touche à aucune mémoire de ce processus.
@@ -94,6 +121,7 @@ fn rendre_sigpipe_au_systeme() {
 
 fn main() -> ExitCode {
     rendre_sigpipe_au_systeme();
+    restreindre_le_masque();
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let mots: Vec<&str> = arguments.iter().map(String::as_str).collect();
     match mots.as_slice() {
