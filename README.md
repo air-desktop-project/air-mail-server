@@ -29,6 +29,12 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 > clair pour les domaines qu'on lui nomme, le dépose dans une boîte Maildir, et
 > refuse les sources qui abusent.
 >
+> **Ce que ses comptes émettent est signé** (DKIM, RFC 6376), et pas seulement ses
+> rapports : sans cela, le courrier échoue en DMARC dès que SPF ne suffit plus —
+> un transfert, une liste. La signature n'est posée que pour les domaines dont ce
+> serveur tient la zone : signer ailleurs produirait un échec visible dans les
+> rapports DMARC du domaine usurpé, ce qui est pire que ne pas signer.
+>
 > **Il pose les deux en-têtes que §4.4 exige** : un `Return-Path:` en tête, qui
 > consigne l'expéditeur d'ENVELOPPE — `From:` ne le dit pas, et sans lui un
 > filtre ou un répondeur d'absence ne peut plus distinguer un rebond (`<>`) d'un

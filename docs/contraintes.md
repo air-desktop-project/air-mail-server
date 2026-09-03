@@ -3846,6 +3846,77 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
+## Le serveur annonçait qu'il signait ce qu'il émet, et il ne le faisait pas
+
+### LA LIGNE DE DÉMARRAGE ÉTAIT FAUSSE
+
+Au démarrage, avec une clé configurée :
+
+> `ce qui est ÉMIS est signé (DKIM, RFC 6376) — sélecteur « s1 », à publier sous
+> « s1._domainkey.<domaine> »`
+
+Seuls les **rapports** l'étaient — DMARC agrégés, TLSRPT. Le courrier des comptes
+partait nu. `grep -rn "DkimSigner"` ne rendait que `reports.rs` et
+`tlsreports.rs`.
+
+Le commentaire posé juste au-dessus de cette ligne dit pourquoi elle existe :
+
+> *ON DIT SI L'ON SIGNE. Un serveur qui n'annonce rien laisse croire qu'il
+> signe : c'est ce que l'on attend d'un serveur de courrier, et le découvrir chez
+> le destinataire coûte une réputation.*
+
+**C'est exactement la faute commise, et contre son propre exploitant.** Il publie
+la clé dans sa zone, lit cette ligne, et croit l'affaire réglée ; ce sont ses
+utilisateurs qui échouent en DMARC dès que SPF ne suffit plus — un transfert, une
+liste de diffusion — et personne ne le lui dit.
+
+### CE QUI RENDAIT LE MANQUE INVISIBLE
+
+Le signataire fonctionnait, était éprouvé, et couvert. Rien ne manquait dans
+`ams-dkim` ni dans `DkimSigner`. **Ce qui manquait était un appel** — et un appel
+absent ne laisse aucune trace : pas d'avertissement, pas de branche morte, pas de
+région non couverte. La couverture était à 100 % avant comme après.
+
+C'est la même famille que la porte que personne n'empruntait, une tranche plus
+tôt : là, une défense gardait un chemin non branché ; ici, un outil attendait un
+appelant. Dans les deux cas, la crate est irréprochable et le serveur ne fait pas
+ce qu'il dit.
+
+### ON NE SIGNE QUE POUR CE DONT ON TIENT LA ZONE
+
+`d=` vient du domaine du `From:`, et la clé publique se publie sous
+`<sélecteur>._domainkey.<domaine>`. Signer pour un domaine dont on ne tient pas
+la zone produirait une signature qui échoue PARTOUT — et un échec DKIM se voit
+dans les rapports DMARC **du domaine usurpé**. C'est pire que pas de signature du
+tout : on dégraderait la réputation de quelqu'un d'autre.
+
+La signature n'est donc posée que si le domaine du `From:` figure parmi les
+domaines hébergés. Le contrôle par mutation montre ce qu'on évite : sans cette
+règle, un `From: marie@ailleurs.test` ressortait avec `d=ailleurs.test`.
+
+### LA LIGNE DE DÉMARRAGE NOMME MAINTENANT LES DOMAINES
+
+« ce qui est émis » n'était pas vérifiable d'un coup d'œil ; la liste des
+domaines l'est. Un exploitant qui lit `pour chacun de : example.com` sait
+exactement ce qu'il doit publier, et voit tout de suite s'il en manque un.
+
+### ET UNE RÉGRESSION DE LA TRANCHE PRÉCÉDENTE, CORRIGÉE ICI
+
+Le `Return-Path:` ajouté la veille partait par `Delivery::append`, qui écrit **à
+la fois** dans la boîte locale et dans le tampon sortant. §4.4 le réserve pourtant
+au serveur de remise FINALE : un message relayé le portait de notre main, et le
+saut suivant posait le sien au-dessus — deux en-têtes, dont le nôtre périmé.
+
+Une méthode distincte, `append_final`, sépare désormais les deux, et son défaut
+délègue à `append` — ce qui vaut pour une remise purement locale, le cas le plus
+courant. La trace `Received:`, elle, va toujours aux deux : un relais doit poser
+la sienne.
+
+**La régression datait d'un commit.** Elle a été trouvée en préparant cette
+tranche-ci, parce que celle-ci demandait de savoir exactement ce que le message
+sortant porte. C'est un argument pour enchaîner les tranches sur un même chemin
+plutôt que de sauter d'un bout à l'autre du serveur.
+
 ## §4.4 exige deux en-têtes, et ce serveur n'en écrivait qu'un
 
 ### CE QUI MANQUAIT, ET CE QUE LE COMMENTAIRE AFFIRMAIT

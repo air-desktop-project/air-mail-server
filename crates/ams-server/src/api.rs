@@ -130,6 +130,11 @@ pub struct ApiMaildir {
     file: Option<ams_loop_tokio::Spool>,
     /// Ce qu'un message peut peser, pour borner ce qu'on rassemble en file.
     message_max: usize,
+    /// De quoi signer ce qui sort (RFC 6376), quand une clé est nommée.
+    ///
+    /// **LA MÊME QUE DU CÔTÉ SMTP** : les deux portes de soumission n'ont pas
+    /// deux règles, pas plus pour la signature que pour le relais.
+    dkim: Option<ams_loop_tokio::DkimSigner>,
 }
 
 impl ApiMaildir {
@@ -159,7 +164,18 @@ impl ApiMaildir {
             // celui-ci ouvre un relais.
             file: None,
             message_max: 0,
+            // ON NE SIGNE PAS SANS CLÉ, et le constructeur ne prend pas ce
+            // champ non plus : une signature qu'on produirait sans clé publiée
+            // échouerait partout, ce qui est pire que pas de signature.
+            dkim: None,
         }
+    }
+
+    /// Lui donne de quoi signer ce qu'elle met en file (RFC 6376).
+    #[must_use]
+    pub fn avec_dkim(mut self, signataire: ams_loop_tokio::DkimSigner) -> Self {
+        self.dkim = Some(signataire);
+        self
     }
 
     /// Lui donne de quoi mettre en file ce qui n'est pas d'ici.
@@ -616,6 +632,9 @@ impl ApiMaildir {
         );
         if let Some(file) = self.file.clone() {
             remise = remise.avec_file(file, self.message_max);
+        }
+        if let Some(signataire) = self.dkim.clone() {
+            remise = remise.avec_dkim(signataire, std::sync::Arc::clone(&self.domaines));
         }
         let issue = deposer(&mut remise, expediteur, &destinataires, &remis);
         if issue.is_err() {

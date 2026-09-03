@@ -651,10 +651,15 @@ where
     // confiance est « ce qui est au-dessus de ce que j'ai ajouté ». Le nôtre
     // étant le premier, une bibliothèque qui rend la première occurrence rend la
     // nôtre.
+    //
+    // **IL PART PAR `append_final`, ET NON PAR `append`** : §4.4 le réserve à
+    // qui fait la remise FINALE. Un message qu'on relaie ne doit pas en porter
+    // un de notre main — le saut suivant posera le sien au-dessus, et le nôtre
+    // serait un second, périmé.
     let mut chemin = [0_u8; RETURN_PATH_MAX];
     if echec.is_none()
         && let Some(trace) = session.received_return_path(&mut chemin)
-        && let Err(cause) = delivery.append(trace)
+        && let Err(cause) = delivery.append_final(trace)
     {
         echec = Some(cause);
     }

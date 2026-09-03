@@ -164,6 +164,30 @@ pub trait Delivery {
     /// désynchronisée, et le reste du message serait lu comme des commandes.
     fn append(&mut self, chunk: &[u8]) -> Result<(), DeliveryFailure>;
 
+    /// Reçoit un en-tête qui ne vaut QUE pour la remise finale.
+    ///
+    /// # POURQUOI CE N'EST PAS UN `append`
+    ///
+    /// Une transaction peut à la fois remettre ici et relayer ailleurs. Ce que
+    /// [`Delivery::append`] reçoit va aux DEUX — c'est ce qu'il faut pour la
+    /// trace `Received:`, qu'un relais doit poser aussi.
+    ///
+    /// Le `Return-Path:` de §4.4, lui, appartient au serveur qui fait la remise
+    /// FINALE. L'envoyer avec un message qu'on relaie ferait porter au saut
+    /// suivant un en-tête de notre main, au-dessus duquel il posera le sien : le
+    /// message arriverait avec deux, et le second serait périmé.
+    ///
+    /// **LE DÉFAUT L'ÉCRIT COMME LE RESTE**, ce qui vaut pour une remise qui
+    /// n'est que locale — le cas le plus courant, et celui où la distinction ne
+    /// change rien.
+    ///
+    /// # Errors
+    ///
+    /// [`DeliveryFailure`], comme [`Delivery::append`].
+    fn append_final(&mut self, chunk: &[u8]) -> Result<(), DeliveryFailure> {
+        self.append(chunk)
+    }
+
     /// Le message est complet et doit être pris en charge.
     ///
     /// # Errors

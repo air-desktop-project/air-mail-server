@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::os::unix::ffi::OsStringExt as _;
 use std::sync::Arc;
 
-use ams_loop_tokio::{Delivery, DeliveryFailure, Spool};
+use ams_loop_tokio::{Delivery, DeliveryFailure, DkimSigner, Spool};
 use ams_store::{Incoming, Maildir};
 
 /// Les boîtes du serveur, une par compte, partagées par toutes les connexions.
@@ -207,6 +207,11 @@ pub struct MaildirDelivery {
     retour: Option<String>,
     /// Les destinataires qui ne sont pas d'ici.
     sortants: Vec<String>,
+    /// De quoi signer ce qui sort (RFC 6376), quand une clé est nommée.
+    dkim: Option<DkimSigner>,
+    /// Les domaines dont on tient la zone, donc ceux pour lesquels on peut
+    /// signer. **Signer ailleurs produirait une signature qui échoue partout.**
+    domaines: Arc<Vec<String>>,
     /// Le message, RASSEMBLÉ, et seulement s'il y a un sortant.
     ///
     /// **On ne rassemble rien pour une remise purement locale** : une boîte
@@ -250,6 +255,8 @@ impl MaildirDelivery {
             file: None,
             retour: None,
             sortants: Vec::new(),
+            dkim: None,
+            domaines: Arc::new(Vec::new()),
             corps: Vec::new(),
             corps_max: 0,
             trace: 0,
@@ -277,6 +284,19 @@ impl MaildirDelivery {
     /// une remise se construit sans file, et l'appelant doit écrire une ligne
     /// pour la lui donner.
     #[must_use]
+    /// Le signataire DKIM et les domaines pour lesquels il vaut.
+    ///
+    /// # SANS CET APPEL, RIEN N'EST SIGNÉ
+    ///
+    /// C'est le défaut qui ne ment pas : un serveur qu'on n'a pas doté d'une clé
+    /// ne doit pas produire de signature, et surtout pas une signature que
+    /// personne ne pourrait vérifier.
+    pub fn avec_dkim(mut self, signataire: DkimSigner, domaines: Arc<Vec<String>>) -> Self {
+        self.dkim = Some(signataire);
+        self.domaines = domaines;
+        self
+    }
+
     pub fn avec_file(mut self, file: Spool, corps_max: usize) -> Self {
         self.file = Some(file);
         self.corps_max = corps_max;
@@ -389,6 +409,21 @@ impl Delivery for MaildirDelivery {
         Ok(())
     }
 
+    /// **LE `Return-Path:` NE SUIT PAS CE QU'ON RELAIE** (RFC 5321 §4.4).
+    ///
+    /// Il n'appartient qu'à la remise finale. L'écrire dans le tampon sortant
+    /// ferait porter au saut suivant un en-tête de notre main, au-dessus duquel
+    /// il posera le sien à la remise : le message arriverait avec deux, et le
+    /// nôtre serait le périmé des deux.
+    fn append_final(&mut self, chunk: &[u8]) -> Result<(), DeliveryFailure> {
+        for (_, arrivee) in &mut self.arrivees {
+            arrivee
+                .write(chunk)
+                .map_err(|_| DeliveryFailure::Temporary)?;
+        }
+        Ok(())
+    }
+
     fn finish(&mut self) -> Result<(), DeliveryFailure> {
         // AUCUN DESTINATAIRE, AUCUNE REMISE. La session n'accepte pas de `DATA`
         // sans `RCPT`, et accepter un message qui ne va nulle part reviendrait à
@@ -496,6 +531,63 @@ impl MaildirDelivery {
         Ok(())
     }
 
+    /// Signe le message sortant (DKIM, RFC 6376), quand on peut le faire.
+    ///
+    /// # POURQUOI ICI, ET UNE SEULE FOIS
+    ///
+    /// La signature couvre le message tel qu'il partira ; le composer une fois
+    /// au dépôt évite de le refaire à chaque tentative de remise — une
+    /// exponentiation RSA par essai, sur un pair en panne, serait payée des
+    /// dizaines de fois pour rien.
+    ///
+    /// # ON NE SIGNE QUE POUR UN DOMAINE QU'ON HÉBERGE
+    ///
+    /// `d=` vient du domaine du `From:`, et la clé publique se publie sous
+    /// `<sélecteur>._domainkey.<domaine>`. Signer pour un domaine dont on ne
+    /// tient pas la zone produirait une signature qui échoue PARTOUT — et un
+    /// échec DKIM se voit dans les rapports DMARC du domaine usurpé. C'est pire
+    /// que pas de signature du tout.
+    ///
+    /// # UN MESSAGE QU'ON NE SAIT PAS SIGNER PART QUAND MÊME
+    ///
+    /// La même règle que pour les rapports : le refuser serait une punition
+    /// qu'on infligerait au déposant pour une faute qui n'est pas la sienne.
+    fn signer(&self, corps: Vec<u8>) -> Vec<u8> {
+        let (Some(signataire), Some(retour)) = (self.dkim.as_ref(), self.retour.as_ref()) else {
+            return corps;
+        };
+        // **LE DOMAINE VIENT DU `From:`, PAS DU CHEMIN DE RETOUR** : c'est
+        // l'auteur que DKIM authentifie, et c'est sur lui que DMARC alignera.
+        let bornes = ams_mime::Limits::DEFAULT;
+        let auteur = {
+            let Ok(message) = ams_mime::Message::parse(&corps, &bornes) else {
+                return corps;
+            };
+            let Some(champ) = message.fields().find(|champ| champ.name_is(b"from")) else {
+                return corps;
+            };
+            // **LA MÊME LECTURE QU'À LA SOUMISSION HTTP**, et par la même
+            // fonction : deux lectures d'un même champ finissent par ne plus
+            // dire la même chose.
+            let Some(adresse) = ams_mime::bare_address(champ.raw_value()) else {
+                return corps;
+            };
+            String::from_utf8_lossy(adresse).into_owned()
+        };
+        let Some((_, domaine)) = auteur.rsplit_once('@') else {
+            return corps;
+        };
+        if !self
+            .domaines
+            .iter()
+            .any(|notre| notre.eq_ignore_ascii_case(domaine))
+        {
+            return corps;
+        }
+        let _ = retour;
+        signataire.sign(corps, &auteur, Self::maintenant())
+    }
+
     /// Dépose en file ce qui n'était pas d'ici.
     fn deposer_les_sortants(&mut self) -> Result<(), DeliveryFailure> {
         if self.sortants.is_empty() {
@@ -508,7 +600,8 @@ impl MaildirDelivery {
             return Err(DeliveryFailure::Permanent);
         };
         let sortants = core::mem::take(&mut self.sortants);
-        let corps = core::mem::take(&mut self.corps);
+        let brut = core::mem::take(&mut self.corps);
+        let corps = self.signer(brut);
         let rapports: Vec<ams_queue::Report<'_>> = self
             .rapports
             .iter()
@@ -686,5 +779,176 @@ mod tests {
             ams_index::Uid::FIRST,
             "le registre rend l'instance qui a déjà remis"
         );
+    }
+
+    // ── LES DEUX EN-TÊTES DE §4.4 NE VONT PAS AU MÊME ENDROIT ───────────────
+
+    /// **LE `Return-Path:` NE SUIT PAS CE QU'ON RELAIE** (RFC 5321 §4.4).
+    ///
+    /// Il n'appartient qu'à la remise FINALE. Le laisser partir avec un message
+    /// relayé ferait porter au saut suivant un en-tête de notre main, au-dessus
+    /// duquel il posera le sien à la remise : le message arriverait avec deux, et
+    /// le nôtre serait le périmé des deux.
+    ///
+    /// La trace `Received:`, elle, va aux DEUX : un relais doit poser la sienne.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn le_chemin_de_retour_ne_part_pas_avec_ce_qu_on_relaie() {
+        let temporaire = Ephemere::nouveau();
+        let (_boites, mut remise) = remise(&temporaire.0);
+
+        remise.begin(Some(b"marie@example.com"));
+        remise
+            .add_recipient(b"marie@example.com")
+            .expect("une adresse d'ici");
+        // Ce que la boucle écrit pour la remise finale, et pour tout le monde.
+        remise
+            .append_final(b"Return-Path: <marie@example.com>\r\n")
+            .expect("en-tête final");
+        remise
+            .append(b"Received: from client ([192.0.2.1])\r\n")
+            .expect("trace");
+        remise
+            .append(b"From: marie@example.com\r\n\r\nbonjour\r\n")
+            .expect("corps");
+        remise.finish().expect("remis");
+
+        let boite = temporaire.0.join("marie").join("new");
+        let noms = contenu(&boite);
+        assert_eq!(noms.len(), 1, "{noms:?}");
+        let ecrit = std::fs::read_to_string(boite.join(&noms[0])).expect("lisible");
+        // **LA BOÎTE LOCALE LES A LES DEUX**, dans l'ordre de §4.4.
+        assert!(
+            ecrit.starts_with("Return-Path: <marie@example.com>\r\nReceived: from client "),
+            "{ecrit:?}"
+        );
+    }
+
+    /// **CE QU'ON RELAIE NE PORTE QUE LA TRACE.**
+    ///
+    /// Le tampon sortant est l'autre moitié de la propriété précédente : ce qui
+    /// part vers le saut suivant ne doit pas porter notre `Return-Path:`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ce_qu_on_relaie_ne_porte_que_la_trace() {
+        let temporaire = Ephemere::nouveau();
+        let (_boites, mut remise) = remise(&temporaire.0);
+
+        remise.begin(Some(b"marie@example.com"));
+        // On force un sortant sans file : `mettre_en_file` refuserait, alors on
+        // écrit dans le tampon comme la boucle le fait, et l'on relit.
+        remise
+            .append_final(b"Return-Path: <marie@example.com>\r\n")
+            .expect("en-tête final");
+        remise
+            .append(b"Received: from client ([192.0.2.1])\r\n")
+            .expect("trace");
+        // Sans destinataire sortant, le tampon reste vide : c'est `append` qui
+        // décide, et c'est ce qu'on éprouve ici — l'en-tête final n'y va JAMAIS.
+        assert!(remise.corps.is_empty());
+    }
+
+    // ── LA SIGNATURE DE CE QUI SORT (DKIM, RFC 6376) ────────────────────────
+
+    /// Une clé Ed25519 d'épreuve, la même que celle d'`ams-loop-tokio`.
+    const CLE_PRIVEE: &str = "-----BEGIN PRIVATE KEY-----\n\
+         MC4CAQAwBQYDK2VwBCIEIPycWR71gsJjQjlyixhg1EFwd/RmkyoHfIBubnK3v8rE\n\
+         -----END PRIVATE KEY-----\n";
+
+    /// Un signataire d'épreuve, pour ces domaines.
+    fn signataire(domaines: &[&str]) -> (ams_loop_tokio::DkimSigner, Arc<Vec<String>>) {
+        let cle = ams_dkim::SigningKey::from_pem(CLE_PRIVEE.as_bytes()).expect("la clé se lit");
+        (
+            ams_loop_tokio::DkimSigner::new(String::from("epreuve"), Arc::new(cle)),
+            Arc::new(domaines.iter().map(|nom| (*nom).to_string()).collect()),
+        )
+    }
+
+    /// Met un message en file et rend ce qui y a été déposé.
+    fn depose(remise: &mut MaildirDelivery, racine: &Path, de: &str) -> String {
+        remise.begin(Some(de.as_bytes()));
+        remise
+            .add_recipient(b"ailleurs@autre.test")
+            .expect("un sortant");
+        let entete = format!("From: {de}\r\nTo: ailleurs@autre.test\r\n\r\nbonjour\r\n");
+        remise.append(entete.as_bytes()).expect("corps");
+        remise.finish().expect("déposé");
+        // Le message en file est le seul `.eml` du dossier.
+        let file = racine.join("file");
+        let nom = contenu(&file)
+            .into_iter()
+            .find(|nom| nom.ends_with(".eml"))
+            .expect("un message en file");
+        std::fs::read_to_string(file.join(nom)).expect("lisible")
+    }
+
+    /// Une remise dotée d'une file, pour éprouver ce qui SORT.
+    fn remise_avec_file(racine: &Path) -> MaildirDelivery {
+        std::fs::create_dir_all(racine.join("file")).expect("dossier");
+        let (_boites, remise) = remise(racine);
+        remise.avec_file(
+            ams_loop_tokio::Spool::new(
+                racine.join("file"),
+                ams_queue::Backoff::DEFAULT,
+                String::from("mail.example.com"),
+                String::from("postmaster@example.com"),
+            ),
+            1_048_576,
+        )
+    }
+
+    /// **CE QUE NOS COMPTES ÉMETTENT EST SIGNÉ** (RFC 6376).
+    ///
+    /// Le serveur l'annonçait au démarrage — « ce qui est ÉMIS est signé » —
+    /// alors que seuls les rapports l'étaient. L'exploitant publiait la clé,
+    /// croyait son courrier signé, et ses utilisateurs échouaient en DMARC dès
+    /// que SPF ne suffisait plus : un transfert, une liste de diffusion.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ce_que_nos_comptes_emettent_est_signe() {
+        let temporaire = Ephemere::nouveau();
+        let (signataire, domaines) = signataire(&["example.com"]);
+        let mut remise = remise_avec_file(&temporaire.0).avec_dkim(signataire, domaines);
+
+        let ecrit = depose(&mut remise, &temporaire.0, "marie@example.com");
+        // **EN TÊTE** : §3.5 veut que le champ précède ce qu'il couvre.
+        assert!(ecrit.starts_with("DKIM-Signature: "), "{ecrit}");
+        // `d=` vient du domaine du `From:` — c'est l'auteur que DKIM authentifie,
+        // et c'est sur lui que DMARC alignera.
+        assert!(ecrit.contains("d=example.com"), "{ecrit}");
+        assert!(ecrit.contains("s=epreuve"), "{ecrit}");
+        // Et le message suit, intact.
+        assert!(ecrit.contains("From: marie@example.com\r\n"), "{ecrit}");
+    }
+
+    /// **ON NE SIGNE PAS POUR LE DOMAINE DES AUTRES**, et c'est la règle qui
+    /// protège quelqu'un d'autre que nous.
+    ///
+    /// La clé publique se publie sous `<sélecteur>._domainkey.<domaine>` : signer
+    /// pour un domaine dont on ne tient pas la zone produirait une signature qui
+    /// échoue PARTOUT — et un échec DKIM se voit dans les rapports DMARC du
+    /// domaine usurpé. C'est pire que pas de signature du tout.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn on_ne_signe_pas_pour_le_domaine_des_autres() {
+        let temporaire = Ephemere::nouveau();
+        let (signataire, domaines) = signataire(&["example.com"]);
+        let mut remise = remise_avec_file(&temporaire.0).avec_dkim(signataire, domaines);
+
+        let ecrit = depose(&mut remise, &temporaire.0, "marie@ailleurs.test");
+        assert!(
+            !ecrit.contains("DKIM-Signature"),
+            "on a signé pour un domaine qu'on n'héberge pas : {ecrit}"
+        );
+    }
+
+    /// **SANS CLÉ, RIEN N'EST SIGNÉ** — et le message part quand même.
+    ///
+    /// Le refuser serait une punition qu'on infligerait au déposant pour une
+    /// faute qui n'est pas la sienne.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sans_cle_le_message_part_sans_signature() {
+        let temporaire = Ephemere::nouveau();
+        let mut remise = remise_avec_file(&temporaire.0);
+
+        let ecrit = depose(&mut remise, &temporaire.0, "marie@example.com");
+        assert!(!ecrit.contains("DKIM-Signature"), "{ecrit}");
+        assert!(ecrit.contains("From: marie@example.com\r\n"), "{ecrit}");
     }
 }

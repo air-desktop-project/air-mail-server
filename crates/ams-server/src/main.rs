@@ -156,6 +156,7 @@ type MontageApi = (
 fn monter_l_api(
     options: &Configuration,
     tls: Option<&Arc<ServerConfig>>,
+    dkim: Option<ams_loop_tokio::DkimSigner>,
     boites: Arc<BoitesImap>,
     comptes: Arc<crate::comptes::Comptes>,
     remise: Arc<Boites>,
@@ -236,8 +237,16 @@ fn monter_l_api(
             );
             // LA MÊME RÈGLE QUE SMTP : sans file, une soumission qui nomme un
             // destinataire d'ailleurs est refusée. Deux portes, une seule règle.
-            match file {
+            let api = match file {
                 Some(file) => api.avec_file(file, message_max),
+                None => api,
+            };
+            // **ET LA MÊME SIGNATURE.** Un message soumis par l'API n'est pas
+            // moins émis par ce serveur qu'un message soumis en SMTP : deux
+            // portes qui signeraient différemment donneraient à l'exploitant un
+            // courrier authentifié une fois sur deux, sans qu'il sache laquelle.
+            match dkim {
+                Some(signataire) => api.avec_dkim(signataire),
                 None => api,
             }
         }),
@@ -932,16 +941,28 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         }
         _ => None,
     };
-    // ON DIT SI L'ON SIGNE. Un serveur qui n'annonce rien laisse croire qu'il
-    // signe : c'est ce que l'on attend d'un serveur de courrier, et le
-    // découvrir chez le destinataire coûte une réputation.
+    // ON DIT SI L'ON SIGNE, ET POUR QUOI. Un serveur qui n'annonce rien laisse
+    // croire qu'il signe : c'est ce que l'on attend d'un serveur de courrier, et
+    // le découvrir chez le destinataire coûte une réputation.
+    //
+    // **CETTE LIGNE A DIT « ce qui est ÉMIS est signé » ALORS QUE SEULS LES
+    // RAPPORTS L'ÉTAIENT.** L'exploitant publiait la clé, croyait son courrier
+    // signé, et ce sont ses utilisateurs qui payaient — c'est exactement la
+    // faute que le commentaire ci-dessus décrit. Elle nomme donc désormais les
+    // domaines pour lesquels la signature vaut : c'est vérifiable d'un coup
+    // d'œil, là où « ce qui est émis » ne l'était pas.
     eprintln!(
         "air-mail-server : {}",
         match &signature {
             Some(_) => format!(
                 "ce qui est ÉMIS est signé (DKIM, RFC 6376) — sélecteur `{}`, à publier sous \
-                 `{}._domainkey.<domaine>`",
-                options.dkim.selector, options.dkim.selector
+                 `{}._domainkey.<domaine>` pour chacun de : {}",
+                options.dkim.selector,
+                options.dkim.selector,
+                match options.hosted.is_empty() {
+                    true => String::from("(aucun domaine hébergé — rien ne sera signé)"),
+                    false => options.hosted.join(", "),
+                }
             ),
             None => String::from(
                 "ce qui est ÉMIS n'est PAS signé — aucune clé DKIM nommée \
@@ -1305,9 +1326,23 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         .and_then(|(socket, _)| socket.local_addr().ok())
         .map(|adresse| adresse.port());
 
+    // **LES DOMAINES POUR LESQUELS ON PEUT SIGNER** sont ceux dont on tient la
+    // zone : c'est là, et là seulement, que la clé publique se publie sous
+    // `<sélecteur>._domainkey.<domaine>`. Signer ailleurs produirait une
+    // signature qui échoue partout, et un échec DKIM se voit dans les rapports
+    // DMARC du domaine usurpé.
+    let domaines_signables = Arc::new(options.hosted.clone());
+    let signature_de_la_remise = signature
+        .clone()
+        .map(|cle| ams_loop_tokio::DkimSigner::new(options.dkim.selector.clone(), cle));
+    // L'API reçoit déjà les domaines hébergés à son montage : c'est la même
+    // liste, et la lui passer deux fois en donnerait deux à tenir d'accord.
+    let signature_pour_l_api = signature_de_la_remise.clone();
+
     let montage = monter_l_api(
         &options,
         options_de_service.tls.as_ref(),
+        signature_pour_l_api,
         Arc::clone(&boites_imap),
         Arc::clone(&comptes),
         Arc::clone(&boites),
@@ -1487,6 +1522,14 @@ async fn servir(fichier: &Path) -> Result<(), String> {
             );
             let remise = match quarantaine.clone() {
                 Some(dossier) => remise.avec_quarantaine(dossier),
+                None => remise,
+            };
+            // **CE QUE NOS COMPTES ÉMETTENT EST SIGNÉ** (RFC 6376). Sans cela,
+            // le courrier de l'exploitant échoue en DMARC dès que SPF ne suffit
+            // plus — un transfert, une liste de diffusion — alors même que le
+            // serveur annonce au démarrage qu'il signe ce qu'il émet.
+            let remise = match signature_de_la_remise.clone() {
+                Some(signataire) => remise.avec_dkim(signataire, Arc::clone(&domaines_signables)),
                 None => remise,
             };
             match file_pour_la_remise.clone() {
