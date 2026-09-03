@@ -1541,12 +1541,23 @@ async fn servir(fichier: &Path) -> Result<(), String> {
                 };
                 let mut application =
                     ams_loop_tokio::h3::Http3Application::new(&session, api.as_ref(), &garde_h3);
-                match ams_loop_tokio::serve_quic(socket, tls, &mut application, attente).await {
+                match ams_loop_tokio::serve_quic(socket, tls, &garde_h3, &mut application, attente)
+                    .await
+                {
                     Ok(stats) => {
                         let (servies, refusees) = application.comptes();
+                        // **CE QUE LE GARDE A REFUSÉ SE DIT À PART**, et seulement
+                        // s'il y en a : un compte toujours nul est une ligne
+                        // qu'on cesse de lire, et c'est alors celle qui compte
+                        // qu'on manque.
+                        let banni = if stats.banned == 0 {
+                            String::new()
+                        } else {
+                            format!(", {} refusée(s) au videur", stats.banned)
+                        };
                         eprintln!(
                             "air-mail-server : HTTP/3 ; {} connexion(s) acceptée(s), \
-                             {servies} requête(s) servie(s), {refusees} refusée(s)",
+                             {servies} requête(s) servie(s), {refusees} refusée(s){banni}",
                             stats.accepted
                         );
                     }

@@ -3846,6 +3846,75 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
+## Un pair banni était refusé sur quatre portes et servi sur la cinquième
+
+### HTTP/3 COMPTAIT LES ÉCARTS SANS JAMAIS OPPOSER LE BANNISSEMENT
+
+SMTP, POP3, IMAP et HTTP/2 consultent tous `guard.verdict(source)` avant de
+servir. `h3.rs` ne contenait **aucun** `verdict` : il appelait bien `observe` —
+les commandes et les trames invalides étaient comptées contre la bonne
+adresse —, mais rien n'en tirait la conséquence. Une source bannie pour avoir
+inondé le SMTP restait servie sur le port HTTP/3, celui de l'API
+d'administration.
+
+Ce n'est pas une omission discutable : la couche QUIC porte la `Source` du pair
+EXPRESSÉMENT pour cela, et le dit —
+
+> « Chaque rendez-vous porte la [`Source`] du pair. **Sans elle, aucune politique
+> par source n'est possible** : un refus d'identifiants ne pourrait pas compter
+> contre l'adresse qui l'a tenté, et HTTP/3 servirait sans la protection contre
+> les essais répétés que HTTP/2 a déjà. »
+
+C'est la quatrième fois dans cette série que la documentation énonce la règle
+entière et que le code n'en applique que la moitié.
+
+### LE REFUS EST DANS L'ÉCOUTE, ET NON DANS L'APPLICATION
+
+En HTTP/2, il précède la poignée de main TLS, et le code dit pourquoi :
+« chiffrer pour une source bannie coûte un échange de clés, ce qu'un attaquant
+obtiendrait gratuitement ». En QUIC, cette poignée de main est DANS le
+transport — refuser à `on_established` serait refuser APRÈS l'avoir payée.
+
+Il vit donc dans `un_client_neuf`, à côté du refus qui existait déjà quand le
+service est plein, et qui portait le même raisonnement : « répondre coûterait
+autant que de servir, et c'est précisément ce qu'un attaquant cherche ».
+
+### LE GARDE EST OBLIGATOIRE, ET NON FACULTATIF
+
+`serve_quic` l'exige désormais en argument. Le rendre optionnel aurait laissé
+exister exactement l'écoute qu'on vient de corriger — celle qui sert sans
+consulter personne. C'est le choix qui vaut déjà pour la `Policy` d'une session :
+ce qu'on exige ne s'oublie pas.
+
+### ET UN SECOND COMPTEUR, PARCE QUE LE PREMIER DISAIT AUTRE CHOSE
+
+`refused` est documenté « `Initial` refusés **faute de place** ». Y ajouter les
+bannissements aurait rendu cette phrase fausse, et surtout aurait mêlé deux
+faits qui appellent des gestes opposés : l'un demande d'agrandir le service,
+l'autre dit qu'il fonctionne. Les additionner ferait lire une saturation là où
+le garde travaille — et cacherait une saturation le jour où elle arriverait
+vraiment. C'est la leçon de la tranche `bounced` / `reports_lost`.
+
+Le démarrage ne l'annonce que s'il est non nul : un compte toujours à zéro est
+une ligne qu'on cesse de lire.
+
+### ON NE COMPTE QUE CE QU'ON A ACCEPTÉ
+
+`observe(Connection)` n'a lieu qu'après l'admission. Compter une connexion qu'on
+vient de refuser ferait grandir le compte d'une source déjà bannie à chaque
+paquet qu'elle envoie, et repousserait indéfiniment la fin de sa peine — un
+bannissement qui s'auto-prolonge n'en est plus un.
+
+### CE QUE MESURE LA PREUVE
+
+Un essai bannit `127.0.0.1` par le chemin ordinaire — en dépassant le seuil de
+trames invalides, sans forcer le videur —, puis fait parler un vrai client QUIC
+sur une vraie socket. Sa poignée de main reste en suspens, `accepted` vaut zéro,
+`banned` vaut un, et `refused` reste à zéro : il restait de la place.
+
+Le contrôle par mutation est net : en ôtant le refus, **le banni achève sa
+poignée de main**.
+
 ## Une vérification qu'on ne peut pas rejouer n'est pas une garde
 
 La tranche qui a ouvert l'API REST a été vérifiée À LA MAIN : neuf commandes

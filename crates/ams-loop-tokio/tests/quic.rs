@@ -28,6 +28,19 @@ use ams_quic_client::{
 };
 use tokio::net::UdpSocket;
 
+/// Un videur qui ne bannit personne.
+///
+/// **IL EST OBLIGATOIRE, ET C'EST VOULU** : une écoute QUIC sans garde ne
+/// s'exprime plus depuis qu'un pair banni doit être refusé AVANT la poignée de
+/// main. Le rendre facultatif aurait laissé exactement l'oubli qu'on vient de
+/// corriger — HTTP/3 servait un banni que les quatre autres portes refusaient.
+///
+/// Ces essais-ci n'éprouvent pas le bannissement : ils éprouvent le transport,
+/// et un videur permissif les laisse dire ce qu'ils disaient déjà.
+fn videur_permissif() -> ams_loop_tokio::SharedGuard {
+    ams_loop_tokio::SharedGuard::new(64, ams_guard::Thresholds::DEFAULT)
+}
+
 /// **UNE POIGNÉE DE MAIN QUIC SUR UNE VRAIE SOCKET UDP.**
 ///
 /// C'est le premier essai où les datagrammes traversent la pile réseau du
@@ -48,6 +61,7 @@ async fn une_poignee_de_main_sur_une_vraie_socket() {
         ams_loop_tokio::serve_quic(
             socket,
             Arc::new(config),
+            &videur_permissif(),
             &mut ams_loop_tokio::SansApplication,
             async {
                 let _ = arret.await;
@@ -112,6 +126,7 @@ async fn du_bruit_sur_le_port_n_ouvre_rien() {
         ams_loop_tokio::serve_quic(
             socket,
             Arc::new(config),
+            &videur_permissif(),
             &mut ams_loop_tokio::SansApplication,
             async {
                 let _ = arret.await;
@@ -180,6 +195,7 @@ async fn un_flux_traverse_la_vraie_socket() {
         ams_loop_tokio::serve_quic(
             socket,
             Arc::new(config),
+            &videur_permissif(),
             &mut ams_loop_tokio::SansApplication,
             async {
                 let _ = arret.await;
@@ -253,6 +269,7 @@ async fn une_faute_de_flux_ferme_sur_la_vraie_socket() {
         ams_loop_tokio::serve_quic(
             socket,
             Arc::new(config),
+            &videur_permissif(),
             &mut ams_loop_tokio::SansApplication,
             async {
                 let _ = arret.await;
@@ -390,10 +407,12 @@ async fn des_octets_d_application_font_l_aller_retour() {
     let (fin, arret) = tokio::sync::oneshot::channel::<()>();
     let ecoute = tokio::spawn(async move {
         let mut echo = Echo::default();
-        let stats = ams_loop_tokio::serve_quic(socket, Arc::new(config), &mut echo, async {
-            let _ = arret.await;
-        })
-        .await;
+        let videur = videur_permissif();
+        let stats =
+            ams_loop_tokio::serve_quic(socket, Arc::new(config), &videur, &mut echo, async {
+                let _ = arret.await;
+            })
+            .await;
         (stats, echo.servis, echo.sources)
     });
 
@@ -517,9 +536,16 @@ async fn une_requete_h3_traverse_toute_la_chaine() {
         let guard = ams_loop_tokio::SharedGuard::new(64, ams_guard::Thresholds::default());
         let api = ApiEssai;
         let mut application = ams_loop_tokio::h3::Http3Application::new(&session, &api, &guard);
-        let stats = ams_loop_tokio::serve_quic(socket, Arc::new(config), &mut application, async {
-            let _ = arret.await;
-        })
+        let videur = videur_permissif();
+        let stats = ams_loop_tokio::serve_quic(
+            socket,
+            Arc::new(config),
+            &videur,
+            &mut application,
+            async {
+                let _ = arret.await;
+            },
+        )
         .await;
         (stats, application.comptes())
     });
@@ -604,7 +630,8 @@ async fn l_extinction_se_dit_au_client_avant_de_fermer() {
         let guard = ams_loop_tokio::SharedGuard::new(64, ams_guard::Thresholds::default());
         let api = ApiEssai;
         let mut application = ams_loop_tokio::h3::Http3Application::new(&session, &api, &guard);
-        ams_loop_tokio::serve_quic(socket, Arc::new(config), &mut application, async {
+        let videur = videur_permissif();
+        ams_loop_tokio::serve_quic(socket, Arc::new(config), &videur, &mut application, async {
             let _ = arret.await;
         })
         .await
@@ -690,4 +717,92 @@ async fn l_extinction_se_dit_au_client_avant_de_fermer() {
 
     let stats = ecoute.await.expect("la tâche d'écoute");
     assert!(stats.is_ok(), "l'écoute rend ses comptes");
+}
+
+/// **UN PAIR BANNI N'OBTIENT PAS DE POIGNÉE DE MAIN.**
+///
+/// # Le défaut que cet essai ferme
+///
+/// SMTP, POP3, IMAP et HTTP/2 consultaient tous le videur avant de servir.
+/// HTTP/3 ne le consultait JAMAIS : il comptait les écarts — `observe` était
+/// bien appelé — sans jamais opposer le bannissement. Un pair banni sur les
+/// quatre premières portes était servi sur la cinquième.
+///
+/// La couche QUIC porte pourtant la `Source` du pair EXPRESSÉMENT pour cela, et
+/// sa documentation le dit : « sans elle, aucune politique par source n'est
+/// possible […] et HTTP/3 servirait sans la protection contre les essais
+/// répétés que HTTP/2 a déjà ».
+///
+/// # Pourquoi le refus est ICI, et non dans l'application HTTP/3
+///
+/// En HTTP/2, le refus précède la poignée de main TLS : « chiffrer pour une
+/// source bannie coûte un échange de clés, ce qu'un attaquant obtiendrait
+/// gratuitement ». En QUIC, cette poignée de main est DANS le transport —
+/// refuser à `on_established` serait refuser après l'avoir payée.
+#[tokio::test(flavor = "current_thread")]
+async fn un_pair_banni_n_obtient_pas_de_poignee_de_main() {
+    let atelier = atelier("banni");
+    let (autorite, cert, cle) = materiel(atelier.chemin()).expect(SANS_OPENSSL);
+
+    let mut config = ams_tls::quic_server_config(&cert, &cle).expect("la paire est bonne");
+    config.alpn_protocols = ams_tls::alpn_h3();
+    let socket = UdpSocket::bind("127.0.0.1:0").await.expect("une socket");
+    let adresse = socket.local_addr().expect("une adresse");
+
+    // ON BANNIT L'ADRESSE D'OÙ LE CLIENT PARLERA, en dépassant le seuil de
+    // trames invalides. C'est le chemin ordinaire : le videur ne se force pas,
+    // il se mérite.
+    let videur = videur_permissif();
+    let source = ams_guard::Source::V4([127, 0, 0, 1]);
+    let seuil = ams_guard::Thresholds::DEFAULT.invalid_frames_per_minute;
+    for _ in 0..=seuil {
+        videur.observe(source, ams_guard::Event::InvalidFrame);
+    }
+    assert!(
+        matches!(videur.verdict(source), ams_guard::Verdict::Banned { .. }),
+        "l'essai doit partir d'une source réellement bannie"
+    );
+
+    let (fin, arret) = tokio::sync::oneshot::channel::<()>();
+    let ecoute = tokio::spawn(async move {
+        ams_loop_tokio::serve_quic(
+            socket,
+            Arc::new(config),
+            &videur,
+            &mut ams_loop_tokio::SansApplication,
+            async {
+                let _ = arret.await;
+            },
+        )
+        .await
+    });
+
+    let mut client = Client::new(config_client(&autorite), adresse).await;
+    for _ in 0..16 {
+        if !client.parler().await && !client.tls().is_handshaking() {
+            break;
+        }
+        if !client.ecouter().await && !client.tls().is_handshaking() {
+            break;
+        }
+    }
+
+    assert!(
+        client.tls().is_handshaking(),
+        "un banni ne doit RIEN obtenir : sa poignée de main reste en suspens"
+    );
+
+    let _ = fin.send(());
+    let stats = ecoute
+        .await
+        .expect("la tâche d'écoute")
+        .expect("l'écoute rend ses comptes");
+    assert_eq!(
+        stats.accepted, 0,
+        "aucune connexion ne s'ouvre pour un banni"
+    );
+    assert!(stats.banned >= 1, "et le refus est compté : {stats:?}");
+    // **LE COMPTE DU VIDEUR NE SE CONFOND PAS AVEC CELUI DE LA SATURATION.**
+    // Les additionner ferait lire un service plein là où le garde travaille.
+    assert_eq!(stats.refused, 0, "il restait de la place : {stats:?}");
 }

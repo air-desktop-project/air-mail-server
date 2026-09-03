@@ -49,9 +49,10 @@ use ams_quic_tls::Connection;
 use rustls::ServerConfig;
 use tokio::net::UdpSocket;
 
-use ams_guard::Source;
+use ams_guard::{Event as GuardEvent, Source, Verdict};
 
 use crate::error::Error;
+use crate::guard::SharedGuard;
 use crate::server::source_de;
 
 /// Ce qu'un datagramme peut occuper au plus.
@@ -87,6 +88,14 @@ pub struct QuicStats {
     pub accepted: u64,
     /// `Initial` refusés faute de place.
     pub refused: u64,
+    /// `Initial` refusés parce que la source est BANNIE.
+    ///
+    /// **IL NE SE CONFOND PAS AVEC `refused`**, qui dit « il n'y avait plus de
+    /// place ». Les deux appellent des gestes opposés : l'un demande d'agrandir
+    /// le service, l'autre dit qu'il fonctionne. Les additionner ferait lire une
+    /// saturation là où le garde travaille — et cacherait une saturation le jour
+    /// où elle arriverait vraiment.
+    pub banned: u64,
     /// Datagrammes jetés, toutes raisons confondues.
     ///
     /// **LES RAISONS SONT NOMMÉES DANS `ams_quic::Discard`**, et le jour où
@@ -229,6 +238,7 @@ impl Application for SansApplication {
 pub async fn serve_quic<App, Arret>(
     socket: UdpSocket,
     tls: Arc<ServerConfig>,
+    garde: &SharedGuard,
     application: &mut App,
     shutdown: Arret,
 ) -> Result<QuicStats, Error>
@@ -239,6 +249,7 @@ where
     let mut ecoute = Ecoute {
         socket,
         tls,
+        garde,
         connexions: Vec::new(),
         carte: HashMap::new(),
         stats: QuicStats::default(),
@@ -343,11 +354,13 @@ where
 }
 
 /// L'état d'une écoute.
-struct Ecoute {
+struct Ecoute<'a> {
     /// La socket, unique et partagée par toutes les connexions.
     socket: UdpSocket,
     /// De quoi monter une poignée de main.
     tls: Arc<ServerConfig>,
+    /// Le videur, consulté AVANT d'accepter une connexion neuve.
+    garde: &'a SharedGuard,
     /// Les connexions vivantes, par rang.
     connexions: Vec<Vivante>,
     /// Les identifiants qu'on a distribués, vers ces rangs.
@@ -368,7 +381,7 @@ struct Ecoute {
     ferme_aux_neufs: bool,
 }
 
-impl Ecoute {
+impl Ecoute<'_> {
     /// Un datagramme est arrivé.
     fn un_datagramme(&mut self, datagramme: &mut [u8], pair: SocketAddr, maintenant: u64) {
         let Ok(arrivee) = Incoming::read(datagramme, LOCAL_CONNECTION_ID_OCTETS) else {
@@ -418,6 +431,21 @@ impl Ecoute {
         pair: SocketAddr,
         maintenant: u64,
     ) {
+        // ── LE VIDEUR PARLE AVANT LA POIGNÉE DE MAIN (C8) ──────────────────
+        //
+        // C'est le même refus qu'en HTTP/2, et il doit avoir lieu au même
+        // moment : là-bas, la poignée de main TLS vient après l'acceptation de
+        // la connexion, et le refus la précède. Ici, elle est DANS le
+        // transport — accepter, c'est déjà avoir payé l'échange de clés que
+        // l'attaquant cherche à nous faire payer.
+        //
+        // C'est pourquoi ce refus vit ici, et non dans `on_established` de
+        // l'application HTTP/3 : à cet instant-là, il serait trop tard.
+        let source = source_de(pair);
+        if matches!(self.garde.verdict(source), Verdict::Banned { .. }) {
+            self.stats.banned = self.stats.banned.saturating_add(1);
+            return;
+        }
         if self.connexions.len() >= CONNEXIONS_MAX {
             // §5.2.2 permet un refus explicite ; on jette. Répondre coûterait
             // autant que de servir, et c'est précisément ce qu'un attaquant
@@ -448,6 +476,11 @@ impl Ecoute {
             etablie_dite: false,
         });
         self.stats.accepted = self.stats.accepted.saturating_add(1);
+        // **ON NE COMPTE QUE CE QU'ON A ACCEPTÉ.** Compter une connexion qu'on
+        // vient de refuser ferait grandir le compte d'une source déjà bannie à
+        // chaque paquet qu'elle envoie, et repousserait indéfiniment la fin de
+        // sa peine — un bannissement qui s'auto-prolonge n'en est plus un.
+        let _ = self.garde.observe(source, GuardEvent::Connection);
     }
 
     /// Le prochain délai à attendre, en microsecondes.

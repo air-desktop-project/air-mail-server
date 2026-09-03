@@ -1664,6 +1664,12 @@ personne n'a besoin de le connaître, donc personne n'a à le garder.
 
 `--listen-h3` demande `--listen-http` : `Alt-Svc`, seul moyen par lequel un
 client découvre un port HTTP/3, s'annonce depuis les réponses HTTP/2.
+
+**Le videur garde les cinq portes.** Une source bannie est refusée en SMTP, en
+POP3, en IMAP, en HTTP/2 — et en HTTP/3, où le refus a lieu à l'arrivée du
+premier paquet plutôt qu'après la poignée de main : celle-ci est dans le
+transport QUIC, et l'accorder à un banni reviendrait à lui offrir l'échange de
+clés qu'il cherche à nous faire payer.
 `--rotate-token-key` renouvelle le secret, et les jetons frappés avant cessent
 alors de valoir.
 
