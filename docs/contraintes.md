@@ -3846,6 +3846,73 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
+## Nos signatures n'interdisaient pas qu'on AJOUTE un champ
+
+### CE QUE §5.4.2 REND POSSIBLE QUAND `h=` NE NOMME QU'UNE FOIS
+
+Un vérificateur prend, pour chaque nom listé dans `h=`, l'instance la plus BASSE
+du message — celle d'origine. Un tiers qui **préfixe** un second `From:` laisse
+donc la signature valable, pendant que la plupart des clients affichent le
+PREMIER.
+
+Le message porte notre signature, s'aligne en DMARC sur notre domaine, et
+s'affiche au nom de l'attaquant. C'est l'usurpation par `From:` multiple, connue
+de longue date.
+
+### POURQUOI CELA N'EXISTAIT PAS AVANT-HIER
+
+Tant que ce serveur ne signait que **ses propres rapports** — qu'il compose
+lui-même, avec un seul de chaque champ —, le cas ne pouvait pas se présenter.
+Il est vivant depuis que le courrier des comptes est signé.
+
+C'est le troisième défaut de cette série que la signature DKIM a réveillé plutôt
+que créé : le `Return-Path:` qui fuyait vers le relais, le `From:` non vérifié, et
+maintenant l'ajout de champs. Une fonction qui commence à s'exercer met en
+lumière tout ce qui la bordait sans être éprouvé.
+
+### LA PARADE ÉTAIT DÉJÀ ÉCRITE, ET INEMPLOYÉE
+
+`hash_signed_headers` compte, pour chaque nom, combien de fois il a déjà été
+demandé, et prend la suivante EN PARTANT DU BAS — en sautant celles qui manquent.
+Nommer un champ deux fois scelle donc l'emplacement d'une seconde copie : elle
+n'existe pas, la seconde demande porte sur du vide, et **l'ajouter casse la
+signature**.
+
+La fonction sert à la fois à signer et à vérifier : la symétrie est
+structurelle, pas espérée. C'est ce qui rend le sur-scellement possible sans rien
+ajouter au décodeur.
+
+### TOUS, ET NON LE SEUL `from`
+
+`from` est le vecteur d'usurpation. Mais un second `Subject:` change ce qu'on
+lit, un second `Content-Type:` change comment on le lit, et un second `To:`
+change qui l'on croit destinataire. La règle uniforme — **tout ce qu'on signe, on
+le signe aussi contre l'ajout** — se tient sans décider cas par cas, et se garde
+vraie sans effort.
+
+### UN COMMENTAIRE QUI AFFIRMAIT LE CONTRAIRE
+
+`CHAMPS_SIGNES` portait écrit qu'« un champ nommé mais absent fait échouer la
+vérification chez le receveur ». C'était faux : §5.4.2 veut qu'un nom listé
+qu'aucun champ ne porte se condense comme du VIDE, des deux côtés. La phrase
+justifiait de ne nommer que ce qu'on écrit soi-même — un raisonnement qui ne
+tenait plus dès lors qu'on signe le courrier d'autrui, et qui interdisait
+justement la parade.
+
+Encore une affirmation absolue, encore fausse, et encore trouvée en la vérifiant
+plutôt qu'en la croyant.
+
+### SEPT DOMAINES AUDITÉS SANS RIEN TROUVER
+
+Cette tranche est sortie d'un audit qui, lui, n'a rien donné : application de
+DMARC, symétrie de `h=` entre signature et vérification, affirmations du
+démarrage, complétude du jeu de commandes IMAP4rev2, durabilité du magasin — deux
+`fsync`, fichier puis répertoire —, verrou `flock` de la boîte POP3, et le chemin
+sortant déjà épuisé par les trois tranches précédentes. Tout y était tenu.
+
+**Le rendement d'un audit à blanc n'est pas nul** : il dit où ne plus chercher, et
+c'est en vérifiant la dernière de ces sept affirmations que celle-ci est apparue.
+
 ## Un compte authentifié pouvait écrire au nom d'un autre — et on le signait
 
 ### LA TRANCHE PRÉCÉDENTE A RENDU CELLE-CI URGENTE

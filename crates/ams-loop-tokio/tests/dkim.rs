@@ -352,3 +352,73 @@ fn la_trace_du_signataire_ne_porte_pas_la_cle() {
     assert!(rendu.contains("epreuve"), "{rendu}");
     assert!(!rendu.contains("MC4CAQAw"), "{rendu}");
 }
+
+// ── LE SUR-SCELLEMENT : ON SIGNE AUSSI CONTRE L'AJOUT (§5.4.2) ──────────────
+
+/// Le condensat d'en-tête d'un message, tel qu'un vérificateur le calculerait.
+///
+/// C'est la moitié qui compte : si elle diffère, la signature ne vaut plus.
+fn condensat_des_entetes(message: &[u8]) -> [u8; ams_dkim::DIGEST_LEN] {
+    let bornes = ams_mime::Limits::DEFAULT;
+    let lu = ams_mime::Message::parse(message, &bornes).expect("lisible");
+    let champ = lu
+        .fields()
+        .find(|champ| champ.name_is(b"dkim-signature"))
+        .expect("signé");
+    let signature = ams_dkim::Signature::parse(champ.raw_value()).expect("une signature");
+    let champs: std::vec::Vec<(&[u8], &[u8])> = lu
+        .fields()
+        .map(|champ| (champ.name(), champ.raw_value()))
+        .collect();
+    let mut condensat = ams_dkim::HeaderHasher::new(ams_dkim::Canon::Relaxed);
+    ams_dkim::hash_signed_headers(&signature, &mut condensat, || champs.iter().copied());
+    condensat.written_signature_field(b"DKIM-Signature", champ.raw_value());
+    condensat.finish()
+}
+
+/// **AJOUTER UN SECOND `From:` CASSE LA SIGNATURE.**
+///
+/// C'est toute la raison du sur-scellement. §5.4.2 : un vérificateur prend, pour
+/// chaque nom listé, l'instance la plus BASSE — celle d'origine. Sans la seconde
+/// mention dans `h=`, un tiers qui PRÉFIXE un `From:` laisserait la signature
+/// valable, pendant que la plupart des clients affichent le PREMIER : le message
+/// porterait notre signature, s'alignerait en DMARC sur notre domaine, et
+/// s'afficherait au nom de l'attaquant.
+#[test]
+fn un_second_from_ajoute_casse_la_signature() {
+    let signe = signataire().sign(
+        std::vec::Vec::from(RAPPORT),
+        "postmaster@exemple.test",
+        1_788_000_000,
+    );
+    let avant = condensat_des_entetes(&signe);
+
+    // Le champ de signature reste en tête — il est PLIÉ, et le couper au premier
+    // `CRLF` le casserait — et le `From:` de l'attaquant se glisse juste après,
+    // où un client le lira le premier.
+    let fin = signe.len().saturating_sub(RAPPORT.len());
+    let mut force = std::vec::Vec::new();
+    force.extend_from_slice(&signe[..fin]);
+    force.extend_from_slice(b"From: attaquant@ailleurs.test\r\n");
+    force.extend_from_slice(&signe[fin..]);
+
+    let apres = condensat_des_entetes(&force);
+    assert_ne!(
+        avant, apres,
+        "un `From:` ajouté n'a pas changé ce que la signature couvre"
+    );
+}
+
+/// **ET LE MESSAGE INTACT, LUI, CONDENSE PAREIL.**
+///
+/// Sans quoi l'essai précédent ne dirait rien : il faut que la différence vienne
+/// de l'ajout, et non du calcul.
+#[test]
+fn un_message_intact_condense_toujours_pareil() {
+    let signe = signataire().sign(
+        std::vec::Vec::from(RAPPORT),
+        "postmaster@exemple.test",
+        1_788_000_000,
+    );
+    assert_eq!(condensat_des_entetes(&signe), condensat_des_entetes(&signe));
+}

@@ -29,6 +29,12 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 > clair pour les domaines qu'on lui nomme, le dépose dans une boîte Maildir, et
 > refuse les sources qui abusent.
 >
+> **Et la signature interdit qu'on AJOUTE un champ** : chaque nom figure deux fois
+> dans `h=` (§5.4.2), si bien qu'un second `From:` glissé en route casse la
+> signature. Sans cela, un tiers pouvait préfixer le sien — les vérificateurs
+> prennent le plus bas, les clients affichent le premier — et notre signature
+> aurait authentifié son nom.
+>
 > **Un compte n'écrit qu'en son nom** (RFC 6409 §6.1) : un `From:` qui ne route
 > pas vers le compte authentifié est refusé, sur les DEUX portes de soumission.
 > Sans cette règle, un utilisateur pourrait écrire au nom d'un collègue — et

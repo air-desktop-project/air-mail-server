@@ -1253,9 +1253,10 @@ mod tests {
         assert!(ecrit.starts_with("DKIM-Signature: "), "{ecrit}");
         assert!(ecrit.contains("\r\nDate: "), "{ecrit}");
         assert!(ecrit.contains("\r\nMessage-ID: <"), "{ecrit}");
-        // Les deux champs sont nommés dans ce que la signature couvre.
+        // **CHAQUE NOM DEUX FOIS** : la seconde demande scelle l'emplacement
+        // d'une copie qui n'existe pas, et l'ajouter casserait la signature.
         assert!(
-            ecrit.contains("h=from:to:subject:date:message-id"),
+            ecrit.contains("h=from:from:to:to:subject:subject:date:date:message-id:message-id"),
             "{ecrit}"
         );
     }

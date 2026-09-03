@@ -402,24 +402,59 @@ impl core::fmt::Debug for DkimSigner {
     }
 }
 
-/// Les champs qu'on couvre, dans l'ordre.
+/// Les champs qu'on couvre, dans l'ordre. **Chacun deux fois.**
 ///
 /// # POURQUOI CEUX-LÀ, ET PAS TOUS
 ///
-/// `h=` doit nommer ce qui identifie le message, et RIEN QUI PUISSE MANQUER : un
-/// champ nommé mais absent fait échouer la vérification chez le receveur. Ceux-ci
-/// sont exactement ceux que ce serveur écrit lui-même dans les rapports qu'il
-/// compose — il ne signe rien qu'il n'ait écrit.
+/// `h=` doit nommer ce qui identifie le message. Ceux-ci sont ceux qui disent de
+/// qui il vient, à qui il va, de quoi il parle et comment il se lit — c'est-à-dire
+/// tout ce qu'un lecteur regarde avant de décider s'il fait confiance.
 ///
 /// `from` en fait partie, et c'est la condition sans laquelle la signature ne
 /// dirait rien de l'auteur : le signataire refuse de l'omettre.
-const CHAMPS_SIGNES: [&[u8]; 7] = [
+///
+/// # POURQUOI CHACUN DEUX FOIS, ET C'EST LA MOITIÉ QUI COMPTE
+///
+/// §5.4.2 : un vérificateur prend, pour chaque nom listé, l'instance la plus
+/// BASSE — celle d'origine. Un tiers qui PRÉFIXE un second `From:` laisse donc la
+/// signature valable, pendant que la plupart des clients affichent le PREMIER.
+/// Le message porte notre signature, s'aligne en DMARC sur notre domaine, et
+/// s'affiche au nom de l'attaquant.
+///
+/// Nommer un champ deux fois scelle l'emplacement d'une seconde copie : elle
+/// n'existe pas, la seconde demande porte donc sur du vide, et **l'ajouter casse
+/// la signature**. C'est ce que §5.4.2 appelle « oversigning », et c'est la seule
+/// parade — refuser un message à plusieurs `From:` ne protégerait que les nôtres.
+///
+/// # POURQUOI TOUS, ET NON LE SEUL `from`
+///
+/// `from` est le vecteur d'usurpation. Mais un second `Subject:` change ce qu'on
+/// lit, un second `Content-Type:` change comment on le lit, et un second `To:`
+/// change qui l'on croit destinataire. La règle uniforme — **tout ce qu'on
+/// signe, on le signe aussi contre l'ajout** — se tient sans avoir à décider cas
+/// par cas, et se garde vraie sans effort.
+///
+/// # UN CHAMP ABSENT NE FAIT PAS ÉCHOUER LA VÉRIFICATION
+///
+/// Ce commentaire l'a longtemps affirmé, et c'était faux. §5.4.2 est explicite :
+/// un nom listé qu'aucun champ ne porte se condense comme du VIDE, des deux
+/// côtés. [`hash_signed_headers`] le fait, et il sert à la fois à signer et à
+/// vérifier — la symétrie est structurelle, pas espérée. C'est précisément ce
+/// qui rend le sur-scellement possible.
+const CHAMPS_SIGNES: [&[u8]; 14] = [
+    b"from",
     b"from",
     b"to",
+    b"to",
+    b"subject",
     b"subject",
     b"date",
+    b"date",
+    b"message-id",
     b"message-id",
     b"mime-version",
+    b"mime-version",
+    b"content-type",
     b"content-type",
 ];
 
