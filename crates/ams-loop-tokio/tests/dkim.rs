@@ -484,3 +484,84 @@ fn un_second_from_ajoute_est_refuse() {
         Err(ams_dkim::Error::SignatureMismatch)
     );
 }
+
+// ── LA ZONE PORTE-T-ELLE CE QU'ON SIGNE AVEC ? ─────────────────────────────
+
+/// La clé d'épreuve, et l'enregistrement qu'un exploitant en tirerait.
+fn cle_et_record() -> (SigningKey, std::string::String) {
+    let cle = SigningKey::from_pem(CLE_PRIVEE.as_bytes()).expect("la clé d'épreuve se lit");
+    let record = std::string::String::from_utf8(cle.public_record()).expect("ASCII");
+    (cle, record)
+}
+
+/// Ce qu'on conclut d'une zone qui rend ce texte.
+async fn publication(texte: &'static str) -> ams_loop_tokio::PublicationDkim {
+    let (cle, _) = cle_et_record();
+    let resolveur = ams_loop_tokio::Resolver::new(
+        std::vec![resolveur_txt(texte).await],
+        Duration::from_secs(2),
+    )
+    .expect("résolveur");
+    ams_loop_tokio::publication_dkim(&resolveur, "epreuve", "exemple.test", &cle).await
+}
+
+/// **CE QU'ON PUBLIE SE RETROUVE**, et le serveur le confirme tout seul.
+#[tokio::test]
+async fn une_zone_conforme_est_reconnue() {
+    let (_, record) = cle_et_record();
+    // `resolveur_txt` veut un `&'static str` : on le fuite, ce qui ne coûte rien
+    // dans un essai et évite un paramètre de durée de vie qui n'apprendrait
+    // rien.
+    let fixe: &'static str = std::boxed::Box::leak(record.into_boxed_str());
+    assert_eq!(
+        publication(fixe).await,
+        ams_loop_tokio::PublicationDkim::Conforme
+    );
+}
+
+/// **UNE AUTRE CLÉ SE VOIT**, et c'est l'issue qui coûte : tout ce qu'on émet
+/// échoue déjà chez les destinataires.
+#[tokio::test]
+async fn une_autre_cle_publiee_se_voit() {
+    assert_eq!(
+        publication("v=DKIM1; k=ed25519; p=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").await,
+        ams_loop_tokio::PublicationDkim::Differente
+    );
+    // Le bon type, la bonne longueur, mais pas notre clé : c'est exactement le
+    // cas qu'une comparaison de texte aurait pu manquer.
+}
+
+/// **ON COMPARE LES OCTETS, JAMAIS LE TEXTE.**
+///
+/// Un hébergeur DNS reformate volontiers un `TXT` : espaces après les
+/// points-virgules, ordre des étiquettes. Signaler « différente » sur un
+/// enregistrement CORRECT ferait ignorer l'avertissement — ce qui vaut moins que
+/// pas d'avertissement du tout.
+#[tokio::test]
+async fn un_enregistrement_reformate_reste_conforme() {
+    let (_, record) = cle_et_record();
+    let valeur = record.split("p=").nth(1).expect("une clé").to_string();
+    // Les mêmes étiquettes, dans un autre ordre et avec d'autres espaces.
+    let reformate = std::format!("k=ed25519;v=DKIM1;  p={valeur}");
+    let fixe: &'static str = std::boxed::Box::leak(reformate.into_boxed_str());
+    assert_eq!(
+        publication(fixe).await,
+        ams_loop_tokio::PublicationDkim::Conforme
+    );
+}
+
+/// **UN NOM SANS `TXT` N'EST PAS UNE ERREUR DE ZONE** : c'est un enregistrement
+/// pas encore publié, ou pas encore propagé.
+#[tokio::test]
+async fn une_zone_muette_se_distingue_d_une_zone_fausse() {
+    let (cle, _) = cle_et_record();
+    let resolveur =
+        ams_loop_tokio::Resolver::new(std::vec![nulle_part()], Duration::from_millis(200))
+            .expect("résolveur");
+    // Personne n'écoute : on ne conclut RIEN, et surtout pas que la zone est
+    // fausse — cela enverrait chercher au mauvais endroit.
+    assert_eq!(
+        ams_loop_tokio::publication_dkim(&resolveur, "epreuve", "exemple.test", &cle).await,
+        ams_loop_tokio::PublicationDkim::Injoignable
+    );
+}

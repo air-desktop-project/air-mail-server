@@ -486,6 +486,55 @@ fn a_publier(selecteur: &str, domaines: &[String], cle: &Arc<SigningKey>) -> Str
     dit
 }
 
+/// Interroge la zone pour chaque domaine, et dit ce qu'on y a trouvé.
+///
+/// # LES QUATRE ISSUES NE DEMANDENT PAS LA MÊME CHOSE
+///
+/// Une clé DIFFÉRENTE veut dire que tout ce qu'on émet échoue DÉJÀ : c'est la
+/// seule qui appelle une correction immédiate. Une clé ABSENTE veut dire qu'elle
+/// n'est pas encore publiée, ou pas encore propagée — attendre suffit peut-être.
+/// Un DNS INJOIGNABLE ne dit rien du tout, et le faire passer pour un problème
+/// de zone enverrait chercher au mauvais endroit.
+///
+/// **CE QUI VA BIEN NE S'ÉCRIT PAS.** Un journal qui répète « conforme » à chaque
+/// domaine et à chaque démarrage est un journal qu'on cesse de lire, et c'est
+/// alors la ligne qui compte qu'on manque. Seul le compte est rendu.
+async fn dire_la_publication(
+    resolveur: &ams_loop_tokio::Resolver,
+    selecteur: &str,
+    domaines: &[String],
+    cle: &Arc<SigningKey>,
+) {
+    use ams_loop_tokio::PublicationDkim;
+
+    let mut conformes = 0_usize;
+    for domaine in domaines {
+        match ams_loop_tokio::publication_dkim(resolveur, selecteur, domaine, cle).await {
+            PublicationDkim::Conforme => conformes = conformes.saturating_add(1),
+            PublicationDkim::Differente => eprintln!(
+                "air-mail-server : ATTENTION — `{selecteur}._domainkey.{domaine}` porte une \
+                 AUTRE clé que celle qui signe. Tout ce qui part pour `{domaine}` échoue déjà \
+                 en DKIM chez ses destinataires."
+            ),
+            PublicationDkim::Absente => eprintln!(
+                "air-mail-server : `{selecteur}._domainkey.{domaine}` est INTROUVABLE — pas \
+                 encore publié, ou pas encore propagé. Ce qui part pour `{domaine}` échoue en \
+                 DKIM tant qu'il l'est."
+            ),
+            PublicationDkim::Injoignable => eprintln!(
+                "air-mail-server : `{selecteur}._domainkey.{domaine}` n'a pas pu être \
+                 interrogé — on ne conclut RIEN de ce silence."
+            ),
+        }
+    }
+    if conformes > 0 {
+        eprintln!(
+            "air-mail-server : clé DKIM publiée et conforme pour {conformes} domaine(s) sur {}",
+            domaines.len()
+        );
+    }
+}
+
 /// Refuse un fichier secret que le reste du monde peut lire.
 fn refuser_fichier_lisible_par_tous(chemin: &str, quoi: &str) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt as _;
@@ -998,6 +1047,21 @@ async fn servir(fichier: &Path) -> Result<(), String> {
             ),
         }
     );
+
+    // ── LA ZONE PORTE-T-ELLE CE QU'ON VIENT DE DIRE D'Y METTRE ? ────────────
+    //
+    // Dire QUOI publier ne dit pas si c'est publié. Un copier-coller tronqué, un
+    // enregistrement posé sur le mauvais nom, une propagation qui n'a pas eu
+    // lieu : le symptôme est SILENCIEUX et DIFFÉRÉ — le courrier part signé,
+    // échoue en DKIM chez tous les destinataires, et l'exploitant ne l'apprend
+    // que par les rapports DMARC de son propre domaine, s'il les lit.
+    //
+    // **CELA NE FAIT JAMAIS ÉCHOUER LE DÉMARRAGE.** Un DNS pas encore joignable
+    // au démarrage de la machine est ordinaire ; refuser de démarrer pour cela
+    // transformerait une aide en panne.
+    if let (Some(cle), Some(resolveur)) = (signature.as_ref(), resolveur_de_file.as_ref()) {
+        dire_la_publication(resolveur, &options.dkim.selector, &options.hosted, cle).await;
+    }
 
     // ── LE REMETTEUR DU PARCOURS DE FILE ────────────────────────────────────
     //

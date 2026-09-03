@@ -29,6 +29,12 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 > clair pour les domaines qu'on lui nomme, le dépose dans une boîte Maildir, et
 > refuse les sources qui abusent.
 >
+> **Et il vérifie que c'est publié** : au démarrage, il interroge
+> `<sélecteur>._domainkey.<domaine>` et compare aux octets de sa propre clé — pas
+> au texte, qu'un hébergeur reformate. Une clé différente veut dire que tout ce
+> qu'on émet échoue déjà ; une clé absente, qu'elle n'est pas encore propagée ; un
+> DNS muet, qu'on ne conclut rien. Jamais un refus de démarrer.
+>
 > **Et il dit quoi publier, pas seulement où** : au démarrage, l'enregistrement
 > TXT complet, une ligne par domaine, prêt à coller. Le dériver à la main coûtait
 > quatre étapes, et une erreur y fait échouer TOUTES les signatures — ce qui est

@@ -3846,6 +3846,65 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
+## Dire quoi publier ne dit pas si c'est publié
+
+### LE SYMPTÔME EST SILENCIEUX ET DIFFÉRÉ
+
+La tranche précédente donne à l'exploitant l'enregistrement TXT prêt à coller.
+Rien ne lui dit s'il l'a effectivement publié, ni correctement. Or la faute que
+cette information cherchait à éviter reste entièrement possible : un
+copier-coller tronqué, un `p=` recollé de travers, un enregistrement posé sur le
+mauvais nom, une propagation qui n'a pas eu lieu.
+
+Et le symptôme ne se voit pas d'où l'on est : le courrier part signé, échoue en
+DKIM chez TOUS les destinataires, et l'exploitant ne l'apprend que par les
+rapports DMARC de son propre domaine — s'il les lit.
+
+### LE SERVEUR PEUT TRANCHER TOUT SEUL
+
+Il connaît sa clé privée, donc l'enregistrement attendu ; son sélecteur et ses
+domaines, donc le nom à interroger ; et il tient déjà un résolveur — **la file en
+exige un, et l'on ne signe que ce qui passe par elle**. Un serveur qui signe a
+donc toujours de quoi vérifier.
+
+### QUATRE ISSUES, PARCE QU'ELLES NE DEMANDENT PAS LA MÊME CHOSE
+
+Une clé DIFFÉRENTE veut dire que tout ce qu'on émet échoue déjà : c'est la seule
+qui appelle une correction immédiate. Une clé ABSENTE veut dire qu'elle n'est pas
+encore publiée, ou pas encore propagée — attendre suffit peut-être. Un DNS
+INJOIGNABLE ne dit RIEN, et le faire passer pour un problème de zone enverrait
+chercher au mauvais endroit.
+
+Les réduire à « bon » ou « mauvais » ferait perdre exactement ce qui distingue
+une action urgente d'une attente.
+
+### ON COMPARE LES OCTETS, JAMAIS LE TEXTE
+
+C'est le point qui décide si cet avertissement sert ou nuit. Un hébergeur DNS
+reformate volontiers un `TXT` : il replie une longue valeur en plusieurs chaînes,
+normalise les espaces après les points-virgules, réordonne les étiquettes.
+
+Comparer le texte signalerait « différente » sur un enregistrement PARFAITEMENT
+CORRECT — et l'exploitant apprendrait à ignorer l'avertissement, ce qui vaut
+moins que pas d'avertissement du tout. Ce qui compte est le couple `k=` et la clé
+une fois dépliée et décodée : exactement ce qu'un vérificateur distant compare.
+
+Le contrôle par mutation le montre : en comparant le texte, un enregistrement
+reformaté ressort `Differente`.
+
+### CELA NE FAIT JAMAIS ÉCHOUER LE DÉMARRAGE
+
+Un DNS pas encore joignable au démarrage de la machine est ordinaire — l'ordre
+des services, une interface qui monte. Refuser de démarrer pour cela
+transformerait une aide en panne.
+
+### ET CE QUI VA BIEN NE S'ÉCRIT PAS EN DÉTAIL
+
+Un journal qui répète « conforme » à chaque domaine et à chaque démarrage est un
+journal qu'on cesse de lire, et c'est alors la ligne qui compte qu'on manque.
+Seul le compte est rendu ; les trois autres issues, elles, se nomment une par
+une.
+
 ## Le serveur disait OÙ publier la clé, et pas QUOI
 
 ### CE N'ÉTAIT PAS UN MENSONGE, C'ÉTAIT UN SILENCE

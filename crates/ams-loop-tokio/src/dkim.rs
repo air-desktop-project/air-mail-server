@@ -124,6 +124,98 @@ impl DkimChecker {
     }
 }
 
+/// Ce qu'on trouve, ou non, à la place de la clé qu'on signe avec.
+///
+/// # POURQUOI QUATRE ISSUES, ET NON « BON » OU « MAUVAIS »
+///
+/// Les trois façons d'échouer ne demandent pas la même chose à l'exploitant. Une
+/// clé DIFFÉRENTE veut dire que tout ce qu'on émet échoue déjà, et qu'il faut
+/// corriger la zone. Une clé ABSENTE veut dire qu'il n'a pas encore publié, ou
+/// que la propagation n'a pas eu lieu — attendre suffit peut-être. Un DNS
+/// INJOIGNABLE ne dit rien du tout, et le faire passer pour un problème de zone
+/// enverrait chercher au mauvais endroit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicationDkim {
+    /// Publié, et c'est bien notre clé.
+    Conforme,
+    /// Publié, mais ce n'est PAS notre clé : tout ce qu'on émet échoue.
+    Differente,
+    /// Rien à ce nom : pas encore publié, ou pas encore propagé.
+    Absente,
+    /// On n'a pas su demander. **On ne conclut pas**, et on le dit.
+    Injoignable,
+}
+
+/// La clé publique qu'un enregistrement porte, décodée.
+///
+/// # ON COMPARE LES OCTETS, JAMAIS LE TEXTE
+///
+/// Un hébergeur DNS reformate volontiers un `TXT` : il replie une longue valeur
+/// en plusieurs chaînes, normalise les espaces après les points-virgules,
+/// réordonne parfois les étiquettes. Comparer le texte signalerait « différente »
+/// sur un enregistrement PARFAITEMENT CORRECT, et l'exploitant apprendrait à
+/// ignorer l'avertissement — ce qui vaut moins que pas d'avertissement du tout.
+///
+/// Ce qui compte est le couple `k=` et la clé une fois dépliée et décodée : c'est
+/// exactement ce qu'un vérificateur distant compare.
+fn cle_publiee(texte: &[u8]) -> Option<(ams_dkim::KeyType, Vec<u8>)> {
+    let enregistrement = ams_dkim::PublicKeyRecord::parse(texte).ok()?;
+    let mut sans_blancs = std::vec![0_u8; enregistrement.key.len()];
+    let deplie = enregistrement.key_base64(&mut sans_blancs).ok()?;
+    let mut octets = std::vec![0_u8; deplie.len()];
+    let combien = ams_dkim::decoder_base64(deplie, &mut octets).ok()?;
+    octets.truncate(combien);
+    Some((enregistrement.key_type, octets))
+}
+
+/// Ce que la zone porte, comparé à ce qu'on signe avec (RFC 6376 §3.6.2.1).
+///
+/// # POURQUOI LE SERVEUR PEUT TRANCHER TOUT SEUL
+///
+/// Il connaît sa clé privée, donc l'enregistrement attendu ; il connaît son
+/// sélecteur et ses domaines, donc le nom à interroger ; et il tient déjà un
+/// résolveur — la file en exige un, et l'on ne signe que ce qui passe par elle.
+///
+/// Sans cette question, une zone mal publiée ne se découvre que par les rapports
+/// DMARC du domaine, des jours plus tard, et seulement si quelqu'un les lit.
+pub async fn publication_dkim(
+    resolveur: &Resolver,
+    selecteur: &str,
+    domaine: &str,
+    cle: &ams_dkim::SigningKey,
+) -> PublicationDkim {
+    let mut nom = Vec::with_capacity(
+        selecteur
+            .len()
+            .saturating_add(domaine.len())
+            .saturating_add(13),
+    );
+    nom.extend_from_slice(selecteur.as_bytes());
+    nom.extend_from_slice(b"._domainkey.");
+    nom.extend_from_slice(domaine.as_bytes());
+
+    let textes = match resolveur.txt(&nom).await {
+        Txt::Trouves(textes) => textes,
+        Txt::Absent => return PublicationDkim::Absente,
+        Txt::Panne => return PublicationDkim::Injoignable,
+    };
+    let Some(attendue) = cle_publiee(&cle.public_record()) else {
+        // Ce qu'on vient de composer se relit : notre propre lecteur l'accepte,
+        // et un essai le vérifie. Cette branche dirait un défaut de ce code.
+        return PublicationDkim::Injoignable;
+    };
+    // **UN SEUL ENREGISTREMENT SUFFIT.** Un nom peut en porter plusieurs — une
+    // rotation de clé en cours, par exemple — et trouver le nôtre parmi eux est
+    // ce qui compte : les autres ne nous concernent pas.
+    match textes
+        .iter()
+        .any(|texte| cle_publiee(texte) == Some(attendue.clone()))
+    {
+        true => PublicationDkim::Conforme,
+        false => PublicationDkim::Differente,
+    }
+}
+
 /// Où en est la détection de la ligne vide qui sépare en-tête et corps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {

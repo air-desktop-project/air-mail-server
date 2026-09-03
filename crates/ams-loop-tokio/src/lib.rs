@@ -93,7 +93,9 @@ pub use connection::{
     DkimTally, DmarcTally, Outcome, Service, Summary, Timeouts, serve_connection,
 };
 pub use delivery::{Delivery, DeliveryFailure};
-pub use dkim::{DkimChecker, DkimResult, DkimSigner, DkimStream, DkimVerdict};
+pub use dkim::{
+    DkimChecker, DkimResult, DkimSigner, DkimStream, DkimVerdict, PublicationDkim, publication_dkim,
+};
 pub use dmarc::{Authenticated, DmarcChecker, DmarcResult, DmarcVerdict, PourRapport};
 pub use error::Error;
 pub use guard::SharedGuard;
