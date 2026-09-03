@@ -3846,6 +3846,51 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
+## `--max-connections` gouvernait quatre écoutes sur cinq
+
+### UNE CONSTANTE GRAVÉE LÀ OÙ C8 VEUT UN RÉGLAGE
+
+SMTP, POP3, IMAP et HTTP/2 bornent leurs sessions par un sémaphore construit sur
+`max_connections`. L'écoute QUIC employait `const CONNEXIONS_MAX: usize = 1_024`
+— et invoquait C8 pour la justifier, alors que C8 dit sans ambiguïté que ces
+seuils sont « des **paramètres de configuration**, pas des constantes ».
+
+L'option, elle, se documente comme disant « combien de sessions le serveur mène
+EN MÊME TEMPS, **toutes sources confondues** ». C'est une affirmation sur le
+serveur entier, et elle était fausse d'une porte.
+
+Un serveur réglé `--max-connections 16` pouvait donc tenir mille vingt-quatre
+connexions QUIC — chacune portant trois fenêtres de réassemblage, trois tables
+de paquets émis et une poignée de main TLS. **La borne de mémoire que
+l'exploitant croyait avoir posée valait soixante-quatre fois ce qu'il avait
+demandé.**
+
+C'est le cinquième défaut de cette forme dans la série, et le second dans ce
+fichier : la règle est écrite, appliquée à N endroits, oubliée au N+1.
+
+### CE QUI EST DEMANDÉ EST APPLIQUÉ TEL QUEL
+
+Pas de plafond `min(configuré, 1024)` qui viendrait raboter en silence une
+valeur plus grande. C'est la règle que ce dépôt applique déjà aux longueurs de
+préfixe — « ce préfixe serait raboté en silence » —, et pour la même raison : une
+valeur qu'on réduit sans le dire est une configuration qui dit autre chose que ce
+qui a été demandé.
+
+**Le défaut par défaut se resserre**, et il faut le dire : 1 024 devient 256, la
+valeur que `--max-connections` porte quand on ne la règle pas. Un exploitant qui
+tenait à mille vingt-quatre doit désormais l'écrire — ce qui est exactement ce
+que C8 demande.
+
+### CE QUE MESURE LA PREUVE
+
+Une seule place, deux clients : le premier entre, le second trouve porte close,
+`accepted` vaut un, `refused` vaut un, et `banned` reste à zéro — le service
+était plein, personne n'était banni, et les deux comptes le disent séparément.
+
+C'est le plus petit dispositif qui distingue « la borne s'applique » de « la
+borne est ignorée ». Le contrôle par mutation le confirme : en remettant la
+constante, **le second client entre malgré la place unique**.
+
 ## Un pair banni était refusé sur quatre portes et servi sur la cinquième
 
 ### HTTP/3 COMPTAIT LES ÉCARTS SANS JAMAIS OPPOSER LE BANNISSEMENT

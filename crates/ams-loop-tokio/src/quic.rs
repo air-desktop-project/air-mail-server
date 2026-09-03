@@ -37,6 +37,13 @@
 //! est **ignoré en silence** : lui répondre un refus coûterait autant que de le
 //! servir, et §5.2.2 permet de le jeter. Un pair honnête réessaiera ; un
 //! attaquant n'aura rien obtenu.
+//!
+//! **CE NOMBRE VIENT DE LA CONFIGURATION**, comme celui des quatre autres
+//! écoutes. Il était gravé ici, à 1 024, pendant que `--max-connections` se
+//! documentait comme disant « combien de sessions le serveur mène en même temps,
+//! toutes sources confondues » : un serveur réglé à seize en tenait mille
+//! vingt-quatre sur cette porte-là. C8 le dit sans ambiguïté — ces seuils sont
+//! des paramètres de configuration, pas des constantes.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -63,15 +70,12 @@ use crate::server::source_de;
 /// paquet — pour une raison qu'aucun des deux côtés ne saurait nommer.
 const RECEPTION_OCTETS_MAX: usize = 65_535;
 
-/// Combien de connexions QUIC vivent en même temps.
-///
-/// # C'EST UNE BORNE DE MÉMOIRE, ET DONC UNE DÉFENSE (C8)
-///
-/// Chaque connexion tient trois fenêtres de réassemblage, trois tables de
-/// paquets émis et une poignée de main TLS — quelques dizaines de kibioctets.
-/// Sans borne, **il suffirait d'envoyer des `Initial` pour épuiser la mémoire**,
-/// et ces paquets-là ne sont authentifiés par personne (§5.2 de RFC 9001).
-const CONNEXIONS_MAX: usize = 1_024;
+// **LA BORNE DE CONNEXIONS N'EST PLUS UNE CONSTANTE ICI**, et c'est le sujet de
+// la tranche qui l'a ôtée : elle valait 1 024, gravée, pendant que les quatre
+// autres écoutes prenaient `max_connections` de la configuration. Un serveur
+// réglé à seize connexions en tenait donc mille vingt-quatre en HTTP/3.
+//
+// Elle arrive maintenant par [`serve_quic`], et sa raison d'être est écrite là.
 
 /// Combien de fois on rappelle l'application sur un même flux, en un tour.
 ///
@@ -230,6 +234,26 @@ impl Application for SansApplication {
 
 /// Sert QUIC sur cette socket, jusqu'à l'arrêt.
 ///
+/// # `connexions_max` EST UNE BORNE DE MÉMOIRE, ET DONC UNE DÉFENSE (C8)
+///
+/// Chaque connexion tient trois fenêtres de réassemblage, trois tables de
+/// paquets émis et une poignée de main TLS — quelques dizaines de kibioctets.
+/// Sans borne, **il suffirait d'envoyer des `Initial` pour épuiser la mémoire**,
+/// et ces paquets-là ne sont authentifiés par personne (§5.2 de RFC 9001).
+///
+/// **ELLE VIENT DE L'APPELANT, ET NON D'UNE CONSTANTE.** Elle valait 1 024,
+/// gravée ici, pendant que les quatre autres écoutes prenaient
+/// `max_connections` de la configuration — et que cette option se documentait
+/// comme disant « combien de sessions le serveur mène en même temps, toutes
+/// sources confondues ». Un serveur réglé à seize en tenait mille vingt-quatre
+/// sur cette porte-là : la borne de mémoire que l'exploitant croyait avoir posée
+/// valait soixante-quatre fois ce qu'il avait demandé.
+///
+/// Ce qui est demandé est appliqué TEL QUEL, sans plafond qui viendrait le
+/// raboter en silence. C'est la règle que ce dépôt applique déjà aux longueurs
+/// de préfixe, et pour la même raison : une valeur qu'on réduit sans le dire est
+/// une configuration qui dit autre chose que ce qui a été demandé.
+///
 /// # Errors
 ///
 /// [`Error`] si la socket refuse de lire — c'est-à-dire si l'écoute elle-même
@@ -239,6 +263,7 @@ pub async fn serve_quic<App, Arret>(
     socket: UdpSocket,
     tls: Arc<ServerConfig>,
     garde: &SharedGuard,
+    connexions_max: usize,
     application: &mut App,
     shutdown: Arret,
 ) -> Result<QuicStats, Error>
@@ -250,6 +275,7 @@ where
         socket,
         tls,
         garde,
+        connexions_max,
         connexions: Vec::new(),
         carte: HashMap::new(),
         stats: QuicStats::default(),
@@ -361,6 +387,8 @@ struct Ecoute<'a> {
     tls: Arc<ServerConfig>,
     /// Le videur, consulté AVANT d'accepter une connexion neuve.
     garde: &'a SharedGuard,
+    /// Combien de connexions vivent en même temps, au plus.
+    connexions_max: usize,
     /// Les connexions vivantes, par rang.
     connexions: Vec<Vivante>,
     /// Les identifiants qu'on a distribués, vers ces rangs.
@@ -446,7 +474,7 @@ impl Ecoute<'_> {
             self.stats.banned = self.stats.banned.saturating_add(1);
             return;
         }
-        if self.connexions.len() >= CONNEXIONS_MAX {
+        if self.connexions.len() >= self.connexions_max {
             // §5.2.2 permet un refus explicite ; on jette. Répondre coûterait
             // autant que de servir, et c'est précisément ce qu'un attaquant
             // cherche.

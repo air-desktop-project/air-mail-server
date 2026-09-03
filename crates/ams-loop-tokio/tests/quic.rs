@@ -28,6 +28,14 @@ use ams_quic_client::{
 };
 use tokio::net::UdpSocket;
 
+/// Combien de connexions ces essais laissent vivre en même temps.
+///
+/// **LA BORNE VIENT DE L'APPELANT, ET NON D'UNE CONSTANTE DU MODULE** : elle
+/// était gravée à 1 024 pendant que les quatre autres écoutes prenaient
+/// `--max-connections` de la configuration. Ces essais-ci n'éprouvent pas la
+/// saturation — sauf le dernier, qui pose sa propre valeur.
+const PLACES: usize = 64;
+
 /// Un videur qui ne bannit personne.
 ///
 /// **IL EST OBLIGATOIRE, ET C'EST VOULU** : une écoute QUIC sans garde ne
@@ -62,6 +70,7 @@ async fn une_poignee_de_main_sur_une_vraie_socket() {
             socket,
             Arc::new(config),
             &videur_permissif(),
+            PLACES,
             &mut ams_loop_tokio::SansApplication,
             async {
                 let _ = arret.await;
@@ -127,6 +136,7 @@ async fn du_bruit_sur_le_port_n_ouvre_rien() {
             socket,
             Arc::new(config),
             &videur_permissif(),
+            PLACES,
             &mut ams_loop_tokio::SansApplication,
             async {
                 let _ = arret.await;
@@ -196,6 +206,7 @@ async fn un_flux_traverse_la_vraie_socket() {
             socket,
             Arc::new(config),
             &videur_permissif(),
+            PLACES,
             &mut ams_loop_tokio::SansApplication,
             async {
                 let _ = arret.await;
@@ -270,6 +281,7 @@ async fn une_faute_de_flux_ferme_sur_la_vraie_socket() {
             socket,
             Arc::new(config),
             &videur_permissif(),
+            PLACES,
             &mut ams_loop_tokio::SansApplication,
             async {
                 let _ = arret.await;
@@ -408,11 +420,17 @@ async fn des_octets_d_application_font_l_aller_retour() {
     let ecoute = tokio::spawn(async move {
         let mut echo = Echo::default();
         let videur = videur_permissif();
-        let stats =
-            ams_loop_tokio::serve_quic(socket, Arc::new(config), &videur, &mut echo, async {
+        let stats = ams_loop_tokio::serve_quic(
+            socket,
+            Arc::new(config),
+            &videur,
+            PLACES,
+            &mut echo,
+            async {
                 let _ = arret.await;
-            })
-            .await;
+            },
+        )
+        .await;
         (stats, echo.servis, echo.sources)
     });
 
@@ -541,6 +559,7 @@ async fn une_requete_h3_traverse_toute_la_chaine() {
             socket,
             Arc::new(config),
             &videur,
+            PLACES,
             &mut application,
             async {
                 let _ = arret.await;
@@ -631,9 +650,16 @@ async fn l_extinction_se_dit_au_client_avant_de_fermer() {
         let api = ApiEssai;
         let mut application = ams_loop_tokio::h3::Http3Application::new(&session, &api, &guard);
         let videur = videur_permissif();
-        ams_loop_tokio::serve_quic(socket, Arc::new(config), &videur, &mut application, async {
-            let _ = arret.await;
-        })
+        ams_loop_tokio::serve_quic(
+            socket,
+            Arc::new(config),
+            &videur,
+            PLACES,
+            &mut application,
+            async {
+                let _ = arret.await;
+            },
+        )
         .await
     });
 
@@ -769,6 +795,7 @@ async fn un_pair_banni_n_obtient_pas_de_poignee_de_main() {
             socket,
             Arc::new(config),
             &videur,
+            PLACES,
             &mut ams_loop_tokio::SansApplication,
             async {
                 let _ = arret.await;
@@ -805,4 +832,90 @@ async fn un_pair_banni_n_obtient_pas_de_poignee_de_main() {
     // **LE COMPTE DU VIDEUR NE SE CONFOND PAS AVEC CELUI DE LA SATURATION.**
     // Les additionner ferait lire un service plein là où le garde travaille.
     assert_eq!(stats.refused, 0, "il restait de la place : {stats:?}");
+}
+
+/// **LA BORNE DE CONNEXIONS EST CELLE QU'ON A DEMANDÉE.**
+///
+/// # Le défaut que cet essai ferme
+///
+/// Elle était gravée à 1 024 dans l'écoute QUIC, pendant que SMTP, POP3, IMAP et
+/// HTTP/2 prenaient tous `max_connections` de la configuration — et que
+/// `--max-connections` se documente comme disant « combien de sessions le
+/// serveur mène EN MÊME TEMPS, toutes sources confondues ».
+///
+/// Un serveur réglé à seize connexions en tenait donc mille vingt-quatre sur
+/// cette porte-là : la borne de mémoire que l'exploitant croyait avoir posée
+/// valait soixante-quatre fois ce qu'il avait demandé.
+///
+/// # Une seule place, et deux clients
+///
+/// C'est le plus petit dispositif qui distingue « la borne s'applique » de « la
+/// borne est ignorée ». Avec la constante d'avant, les DEUX seraient entrés.
+#[tokio::test(flavor = "current_thread")]
+async fn la_borne_de_connexions_est_celle_qu_on_a_demandee() {
+    let atelier = atelier("borne");
+    let (autorite, cert, cle) = materiel(atelier.chemin()).expect(SANS_OPENSSL);
+
+    let mut config = ams_tls::quic_server_config(&cert, &cle).expect("la paire est bonne");
+    config.alpn_protocols = ams_tls::alpn_h3();
+    let socket = UdpSocket::bind("127.0.0.1:0").await.expect("une socket");
+    let adresse = socket.local_addr().expect("une adresse");
+
+    let (fin, arret) = tokio::sync::oneshot::channel::<()>();
+    let ecoute = tokio::spawn(async move {
+        ams_loop_tokio::serve_quic(
+            socket,
+            Arc::new(config),
+            &videur_permissif(),
+            // UNE SEULE PLACE.
+            1,
+            &mut ams_loop_tokio::SansApplication,
+            async {
+                let _ = arret.await;
+            },
+        )
+        .await
+    });
+
+    // LE PREMIER ENTRE.
+    let mut premier = Client::new(config_client(&autorite), adresse).await;
+    for _ in 0..16 {
+        if !premier.parler().await && !premier.tls().is_handshaking() {
+            break;
+        }
+        if !premier.ecouter().await && !premier.tls().is_handshaking() {
+            break;
+        }
+    }
+    assert!(
+        !premier.tls().is_handshaking(),
+        "la place libre doit servir au premier"
+    );
+
+    // LE SECOND TROUVE PORTE CLOSE. §5.2.2 permet de jeter son `Initial` : lui
+    // répondre coûterait autant que de le servir.
+    let mut second = Client::new(config_client(&autorite), adresse).await;
+    for _ in 0..16 {
+        if !second.parler().await && !second.tls().is_handshaking() {
+            break;
+        }
+        if !second.ecouter().await && !second.tls().is_handshaking() {
+            break;
+        }
+    }
+    assert!(
+        second.tls().is_handshaking(),
+        "le second n'avait plus de place : sa poignée de main reste en suspens"
+    );
+
+    let _ = fin.send(());
+    let stats = ecoute
+        .await
+        .expect("la tâche d'écoute")
+        .expect("l'écoute rend ses comptes");
+    assert_eq!(stats.accepted, 1, "une seule place, une seule connexion");
+    assert!(stats.refused >= 1, "et le refus est compté : {stats:?}");
+    // **CE N'EST PAS LE VIDEUR QUI A PARLÉ**, et les deux comptes le disent
+    // séparément : ici le service était plein, personne n'était banni.
+    assert_eq!(stats.banned, 0, "{stats:?}");
 }

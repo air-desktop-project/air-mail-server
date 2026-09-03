@@ -1665,6 +1665,11 @@ personne n'a besoin de le connaître, donc personne n'a à le garder.
 `--listen-h3` demande `--listen-http` : `Alt-Svc`, seul moyen par lequel un
 client découvre un port HTTP/3, s'annonce depuis les réponses HTTP/2.
 
+**`--max-connections` borne les cinq écoutes**, et non quatre : la borne de
+l'écoute QUIC était gravée à 1 024 pendant que les autres prenaient la valeur
+configurée. Elle vaut désormais ce qu'on lui demande, 256 par défaut comme
+partout ailleurs.
+
 **Le videur garde les cinq portes.** Une source bannie est refusée en SMTP, en
 POP3, en IMAP, en HTTP/2 — et en HTTP/3, où le refus a lieu à l'arrivée du
 premier paquet plutôt qu'après la poignée de main : celle-ci est dans le

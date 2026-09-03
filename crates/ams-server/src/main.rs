@@ -1530,6 +1530,10 @@ async fn servir(fichier: &Path) -> Result<(), String> {
             let session = session.clone();
             let api = Arc::clone(api);
             let garde_h3 = Arc::clone(&garde);
+            // **LA MÊME BORNE QUE LES QUATRE AUTRES ÉCOUTES.** Elle était gravée
+            // à 1 024 dans l'écoute QUIC, si bien qu'un serveur réglé à seize
+            // connexions en tenait mille vingt-quatre sur cette porte-là.
+            let connexions_max = usize::try_from(options.max_connections).unwrap_or(usize::MAX);
             let attente = arret();
             Some(tokio::spawn(async move {
                 let socket = match tokio::net::UdpSocket::from_std(socket) {
@@ -1541,8 +1545,15 @@ async fn servir(fichier: &Path) -> Result<(), String> {
                 };
                 let mut application =
                     ams_loop_tokio::h3::Http3Application::new(&session, api.as_ref(), &garde_h3);
-                match ams_loop_tokio::serve_quic(socket, tls, &garde_h3, &mut application, attente)
-                    .await
+                match ams_loop_tokio::serve_quic(
+                    socket,
+                    tls,
+                    &garde_h3,
+                    connexions_max,
+                    &mut application,
+                    attente,
+                )
+                .await
                 {
                     Ok(stats) => {
                         let (servies, refusees) = application.comptes();
