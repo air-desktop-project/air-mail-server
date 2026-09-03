@@ -353,72 +353,134 @@ fn la_trace_du_signataire_ne_porte_pas_la_cle() {
     assert!(!rendu.contains("MC4CAQAw"), "{rendu}");
 }
 
-// ── LE SUR-SCELLEMENT : ON SIGNE AUSSI CONTRE L'AJOUT (§5.4.2) ──────────────
+// ── L'ALLER-RETOUR : CE QU'ON SIGNE SE VÉRIFIE ─────────────────────────────
+//
+// # CE QUE CET ESSAI PROUVE, ET QUE RIEN D'AUTRE NE PROUVAIT
+//
+// Jusqu'ici, les essais de signature regardaient la FORME du champ produit —
+// son domaine, son sélecteur, sa place en tête. Aucun ne calculait la
+// cryptographie, faute d'avoir la clé publique correspondante : elle n'existait
+// nulle part dans le dépôt.
+//
+// Deux tranches plus tôt, cela a coûté un essai. Il devait établir qu'on
+// complète AVANT de signer ; il comparait des positions, et les positions sont
+// les mêmes dans les deux ordres. Il a fallu le réécrire en disant franchement
+// qu'il ne prouvait pas ce qu'on aurait voulu.
+//
+// Depuis que `SigningKey::public_record` rend ce qu'un exploitant doit publier,
+// le vérificateur a de quoi travailler — et l'essai qui manquait devient
+// possible. Il assemble EXACTEMENT ce qu'un pair assemblerait : la clé lue de
+// l'enregistrement, le condensat du corps, celui des en-têtes signés, et la
+// signature dépliée.
 
-/// Le condensat d'en-tête d'un message, tel qu'un vérificateur le calculerait.
-///
-/// C'est la moitié qui compte : si elle diffère, la signature ne vaut plus.
-fn condensat_des_entetes(message: &[u8]) -> [u8; ams_dkim::DIGEST_LEN] {
+/// Vérifie la signature d'un message, comme un pair le ferait.
+fn verifier(message: &[u8], enregistrement: &[u8]) -> Result<(), ams_dkim::Error> {
     let bornes = ams_mime::Limits::DEFAULT;
     let lu = ams_mime::Message::parse(message, &bornes).expect("lisible");
     let champ = lu
         .fields()
         .find(|champ| champ.name_is(b"dkim-signature"))
         .expect("signé");
-    let signature = ams_dkim::Signature::parse(champ.raw_value()).expect("une signature");
-    let champs: std::vec::Vec<(&[u8], &[u8])> = lu
-        .fields()
-        .map(|champ| (champ.name(), champ.raw_value()))
-        .collect();
-    let mut condensat = ams_dkim::HeaderHasher::new(ams_dkim::Canon::Relaxed);
-    ams_dkim::hash_signed_headers(&signature, &mut condensat, || champs.iter().copied());
-    condensat.written_signature_field(b"DKIM-Signature", champ.raw_value());
-    condensat.finish()
+    let signature = ams_dkim::Signature::parse(champ.raw_value())?;
+    let record = ams_dkim::PublicKeyRecord::parse(enregistrement)?;
+
+    // Le corps, tel que la canonicalisation le voit.
+    let mut corps = ams_dkim::BodyHasher::new(signature.canonicalization.body, None);
+    corps.update(lu.body());
+    let (condensat_du_corps, _) = corps.finish();
+
+    // La clé publique, dépliée puis décodée.
+    let mut sans_blancs = std::vec![0_u8; record.key.len()];
+    let deplie = record.key_base64(&mut sans_blancs)?;
+    let mut cle = std::vec![0_u8; deplie.len()];
+    let combien = ams_dkim::decoder_base64(deplie, &mut cle)?;
+    cle.truncate(combien);
+
+    // La signature elle-même, de même.
+    let mut tampon = std::vec![0_u8; signature.signature.len()];
+    let deplie = signature.signature_base64(&mut tampon)?;
+    let mut scellee = std::vec![0_u8; deplie.len()];
+    let combien = ams_dkim::decoder_base64(deplie, &mut scellee)?;
+    scellee.truncate(combien);
+
+    // Et les en-têtes signés, le champ de signature compris — son `b=` retiré.
+    let mut condensat = ams_dkim::HeaderHasher::new(signature.canonicalization.header);
+    ams_dkim::hash_signed_headers(&signature, &mut condensat, || {
+        lu.fields().map(|champ| (champ.name(), champ.raw_value()))
+    });
+    condensat.signature_field(champ.name(), champ.raw_value())?;
+
+    ams_dkim::verify(
+        &signature,
+        &record,
+        &cle,
+        &condensat_du_corps,
+        &condensat.finish(),
+        &scellee,
+    )
 }
 
-/// **AJOUTER UN SECOND `From:` CASSE LA SIGNATURE.**
-///
-/// C'est toute la raison du sur-scellement. §5.4.2 : un vérificateur prend, pour
-/// chaque nom listé, l'instance la plus BASSE — celle d'origine. Sans la seconde
-/// mention dans `h=`, un tiers qui PRÉFIXE un `From:` laisserait la signature
-/// valable, pendant que la plupart des clients affichent le PREMIER : le message
-/// porterait notre signature, s'alignerait en DMARC sur notre domaine, et
-/// s'afficherait au nom de l'attaquant.
-#[test]
-fn un_second_from_ajoute_casse_la_signature() {
-    let signe = signataire().sign(
+/// Le message d'épreuve, signé.
+fn signe() -> std::vec::Vec<u8> {
+    signataire().sign(
         std::vec::Vec::from(RAPPORT),
         "postmaster@exemple.test",
         1_788_000_000,
-    );
-    let avant = condensat_des_entetes(&signe);
+    )
+}
 
-    // Le champ de signature reste en tête — il est PLIÉ, et le couper au premier
-    // `CRLF` le casserait — et le `From:` de l'attaquant se glisse juste après,
-    // où un client le lira le premier.
+/// L'enregistrement que l'exploitant publierait pour la clé d'épreuve.
+fn enregistrement() -> std::vec::Vec<u8> {
+    SigningKey::from_pem(CLE_PRIVEE.as_bytes())
+        .expect("la clé d'épreuve se lit")
+        .public_record()
+}
+
+/// **CE QU'ON SIGNE SE VÉRIFIE**, avec l'enregistrement qu'on dit de publier.
+///
+/// C'est l'essai qui relie les deux moitiés : si l'enregistrement composé pour
+/// l'exploitant ne correspondait pas à la clé qui signe, TOUTES nos signatures
+/// échoueraient chez le destinataire — et rien, dans ce dépôt, ne l'aurait dit.
+#[test]
+fn ce_qu_on_signe_se_verifie_avec_ce_qu_on_publie() {
+    assert_eq!(verifier(&signe(), &enregistrement()), Ok(()));
+}
+
+/// **UN CORPS MODIFIÉ EN ROUTE SE VOIT.**
+///
+/// Sans quoi l'essai précédent ne dirait rien : il faut que la vérification
+/// puisse échouer.
+#[test]
+fn un_corps_modifie_casse_la_signature() {
+    let mut abime = signe();
+    let dernier = abime.len().saturating_sub(4);
+    abime[dernier] = abime[dernier].wrapping_add(1);
+    assert_eq!(
+        verifier(&abime, &enregistrement()),
+        Err(ams_dkim::Error::BodyHashMismatch)
+    );
+}
+
+/// **UN SECOND `From:` AJOUTÉ CASSE LA SIGNATURE**, et c'est toute la raison du
+/// sur-scellement (§5.4.2).
+///
+/// Un vérificateur prend l'instance la plus BASSE de chaque nom listé — celle
+/// d'origine. Sans la seconde mention dans `h=`, un tiers qui préfixe un `From:`
+/// laisserait la signature VALABLE, pendant que la plupart des clients affichent
+/// le premier.
+#[test]
+fn un_second_from_ajoute_est_refuse() {
+    let signe = signe();
+    // Le champ de signature est PLIÉ : le couper au premier `CRLF` le casserait.
+    // Le message d'origine commence là où le champ finit.
     let fin = signe.len().saturating_sub(RAPPORT.len());
     let mut force = std::vec::Vec::new();
     force.extend_from_slice(&signe[..fin]);
     force.extend_from_slice(b"From: attaquant@ailleurs.test\r\n");
     force.extend_from_slice(&signe[fin..]);
 
-    let apres = condensat_des_entetes(&force);
-    assert_ne!(
-        avant, apres,
-        "un `From:` ajouté n'a pas changé ce que la signature couvre"
+    assert_eq!(
+        verifier(&force, &enregistrement()),
+        Err(ams_dkim::Error::SignatureMismatch)
     );
-}
-
-/// **ET LE MESSAGE INTACT, LUI, CONDENSE PAREIL.**
-///
-/// Sans quoi l'essai précédent ne dirait rien : il faut que la différence vienne
-/// de l'ajout, et non du calcul.
-#[test]
-fn un_message_intact_condense_toujours_pareil() {
-    let signe = signataire().sign(
-        std::vec::Vec::from(RAPPORT),
-        "postmaster@exemple.test",
-        1_788_000_000,
-    );
-    assert_eq!(condensat_des_entetes(&signe), condensat_des_entetes(&signe));
 }

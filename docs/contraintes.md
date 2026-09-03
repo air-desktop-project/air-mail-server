@@ -3795,7 +3795,7 @@ il l'a commis sur lui-même : une section qui s'intitule « l'état réel » est
 qu'on relit le moins, parce qu'on croit la connaître.
 
 Sont outillées : C1 (les trois étages, et la couverture qui n'est exigible que
-parce qu'ils sont séparés), C2 (le gate mesure 55 360 régions sur 29 crates,
+parce qu'ils sont séparés), C2 (le gate mesure 55 411 régions sur 29 crates,
 toutes couvertes — et il compare des comptes, non un pourcentage arrondi), C3
 (les lints, l'absence d'allocation dans les décodeurs, et 65 cibles de fuzz dont
 la CI vérifie qu'elle les lance toutes), C4 (`ams-tls` n'offre que
@@ -3845,6 +3845,72 @@ la seule vérification qui vaille est la confrontation à l'ABNF de §9, mot par
 mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
+
+## Le serveur disait OÙ publier la clé, et pas QUOI
+
+### CE N'ÉTAIT PAS UN MENSONGE, C'ÉTAIT UN SILENCE
+
+La ligne de démarrage donnait le sélecteur et le nom à publier —
+`<sélecteur>._domainkey.<domaine>` — et s'arrêtait là. À l'exploitant de dériver
+la clé publique : `openssl pkey -pubout`, retirer l'en-tête PEM, recoller les
+lignes, préfixer `v=DKIM1; k=…; p=`. Quatre étapes, quatre occasions de se
+tromper.
+
+**Et une erreur y est PIRE que l'absence de signature** : un enregistrement faux
+fait échouer TOUTES nos signatures, ce qui se lit dans les rapports DMARC du
+domaine comme un échec d'authentification. Le serveur détenait la seule
+information qui rend l'étape sûre, et il la gardait.
+
+C'est un genre de défaut nouveau dans cette série. Les précédents étaient des
+affirmations fausses ; celui-ci est une information vraie mais retenue — et son
+coût se paie chez quelqu'un qui n'a pas les moyens de le réduire.
+
+### LES DEUX TYPES DE CLÉ NE SE PUBLIENT PAS PAREIL
+
+§3.6.1 de RFC 6376 veut un `SubjectPublicKeyInfo` pour RSA : la clé ET son type,
+encodés en DER. §3 de RFC 8463 veut au contraire la clé **NUE** pour Ed25519,
+trente-deux octets et rien d'autre. Publier l'une à la façon de l'autre donne un
+enregistrement qu'aucun vérificateur ne lira.
+
+Le LECTEUR de clé publique de ce dépôt connaissait déjà la distinction — son
+commentaire la dit. L'écrivain ne l'aurait pas connue si on ne l'avait pas lue
+là. Les deux sont désormais côte à côte, et un essai les fait se répondre : ce
+qu'on publie se relit par notre propre lecteur, qui ne partage aucun code avec
+l'écrivain.
+
+### L'ALLER-RETOUR QUI MANQUAIT DEPUIS TOUJOURS
+
+Jusqu'ici, les essais de signature regardaient la FORME du champ produit — son
+domaine, son sélecteur, sa place en tête. **Aucun ne calculait la
+cryptographie**, faute d'avoir la clé publique correspondante : elle n'existait
+nulle part.
+
+Cela avait déjà coûté un essai, deux tranches plus tôt : celui qui devait établir
+qu'on complète avant de signer comparait des positions, et les positions sont les
+mêmes dans les deux ordres. Il a fallu le réécrire en disant franchement qu'il ne
+prouvait pas ce qu'on aurait voulu.
+
+Rendre la clé publique le débloque. L'essai assemble EXACTEMENT ce qu'un pair
+assemblerait — clé lue de l'enregistrement, condensat du corps, condensat des
+en-têtes signés, signature dépliée — et conclut. C'est la première preuve
+cryptographique du dépôt que ce qu'il signe se vérifie, et elle relie les deux
+moitiés : si l'enregistrement composé pour l'exploitant ne correspondait pas à la
+clé qui signe, toutes nos signatures échoueraient, et rien ne l'aurait dit.
+
+Le sur-scellement de la tranche précédente en profite : son essai comparait des
+condensats, il vérifie maintenant que la signature devient INVALIDE — avec
+l'erreur exacte.
+
+### UNE COMPOSITION QUI NE PEUT PAS ÉCHOUER N'EN A PAS L'AIR
+
+`public_record` rendait d'abord un `Result`. Ses deux branches d'erreur étaient
+inatteignables : une clé privée que `from_pem` a acceptée porte une partie
+publique qui s'encode, et le tampon de base64 est dimensionné par construction —
+quatre tiers suffisent, on en prend quatre.
+
+Elle rend donc directement sa valeur, avec deux `expect` qui portent la raison.
+Cela supprime aussi une branche chez l'appelant : un `Result` qu'on ne peut pas
+obtenir se propage en gardes que personne ne peut éprouver.
 
 ## Nos signatures n'interdisaient pas qu'on AJOUTE un champ
 

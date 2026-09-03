@@ -38,6 +38,7 @@ use rsa::RsaPrivateKey;
 use rsa::pkcs1::DecodeRsaPrivateKey as _;
 use rsa::pkcs1v15::Pkcs1v15Sign;
 use rsa::pkcs8::DecodePrivateKey as _;
+use rsa::pkcs8::EncodePublicKey as _;
 use rsa::rand_core::TryCryptoRng;
 use rsa::traits::SignatureScheme as _;
 use sha2::Sha256;
@@ -134,6 +135,69 @@ impl SigningKey {
     #[must_use]
     pub fn ed25519_from_seed(graine: &[u8; 32]) -> Self {
         Self::Ed25519(Box::new(ed25519_dalek::SigningKey::from_bytes(graine)))
+    }
+
+    /// L'enregistrement TXT à publier pour cette clé (RFC 6376 §3.6.1).
+    ///
+    /// Rend `v=DKIM1; k=…; p=…`, prêt à coller dans une zone.
+    ///
+    /// # POURQUOI CE SERVEUR LE COMPOSE, ET NE LAISSE PAS LE FAIRE
+    ///
+    /// Il disait à son exploitant OÙ publier — `<sélecteur>._domainkey.<domaine>`
+    /// — et pas QUOI. Il fallait donc dériver la clé publique à la main :
+    /// `openssl pkey -pubout`, retirer l'en-tête PEM, recoller les lignes,
+    /// préfixer les étiquettes. Quatre étapes, quatre occasions de se tromper.
+    ///
+    /// **Et une erreur y est PIRE que l'absence de signature** : un
+    /// enregistrement faux fait échouer TOUTES nos signatures, ce qui se lit
+    /// dans les rapports DMARC du domaine comme un échec d'authentification.
+    /// Ce serveur détient la seule information qui rend l'étape sûre ; la garder
+    /// serait faire porter le risque à celui qui n'a pas les moyens de le
+    /// réduire.
+    ///
+    /// # LES DEUX TYPES DE CLÉ NE SE PUBLIENT PAS PAREIL
+    ///
+    /// §3.6.1 veut un `SubjectPublicKeyInfo` pour RSA — la clé et son type,
+    /// encodés en DER. §3 de RFC 8463 veut au contraire la clé **NUE** pour
+    /// Ed25519, trente-deux octets et rien d'autre. Publier l'une à la façon de
+    /// l'autre donne un enregistrement qu'aucun vérificateur ne lira.
+    ///
+    /// Le lecteur de ce dépôt connaît déjà cette différence ; l'écrivain la
+    /// connaît désormais aussi, et les deux sont côte à côte.
+    ///
+    /// # CETTE COMPOSITION NE PEUT PAS ÉCHOUER
+    ///
+    /// Une clé privée que `from_pem` a acceptée porte une partie publique qui
+    /// s'encode, et le tampon de base64 est dimensionné par construction — quatre
+    /// tiers suffisent, on en prend quatre. Rendre un `Result` ouvrirait deux
+    /// branches que rien ne pourrait emprunter, chez nous comme chez l'appelant.
+    #[must_use]
+    pub fn public_record(&self) -> Vec<u8> {
+        let (genre, brut): (&[u8], Vec<u8>) = match self {
+            Self::Rsa(privee) => {
+                let publique = rsa::RsaPublicKey::from(privee.as_ref());
+                let der = publique
+                    .to_public_key_der()
+                    .expect("une clé privée lisible a une partie publique encodable");
+                (b"rsa", der.as_bytes().to_vec())
+            }
+            // **LA CLÉ NUE, ET NON UN `SubjectPublicKeyInfo`** (RFC 8463 §3).
+            Self::Ed25519(privee) => (b"ed25519", privee.verifying_key().to_bytes().to_vec()),
+        };
+        // Un enregistrement DNS ne se plie pas : `largeur` à zéro n'insère aucun
+        // repli, et c'est ce qu'il faut ici — le pliage de RFC 5322 vit dans un
+        // en-tête de message, pas dans une zone.
+        let mut place = alloc::vec![0_u8; brut.len().saturating_mul(4).saturating_add(64)];
+        let encodee = encoder_base64(&brut, 0, &mut place)
+            .expect("quatre fois la longueur majore quatre tiers")
+            .to_vec();
+
+        let mut record = Vec::with_capacity(encodee.len().saturating_add(32));
+        record.extend_from_slice(b"v=DKIM1; k=");
+        record.extend_from_slice(genre);
+        record.extend_from_slice(b"; p=");
+        record.extend_from_slice(&encodee);
+        record
     }
 
     /// L'algorithme que cette clé impose.

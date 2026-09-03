@@ -757,3 +757,80 @@ fn ce_qui_n_est_pas_une_cle_le_dit() {
     let enorme = pem("PRIVATE KEY", &"A".repeat(64 * 1024));
     assert!(SigningKey::from_pem(enorme.as_bytes()).is_err());
 }
+
+// ── CE QU'IL FAUT PUBLIER, ET QUE L'EXPLOITANT DEVAIT DÉRIVER ──────────────
+
+/// **LES DEUX TYPES DE CLÉ NE SE PUBLIENT PAS PAREIL**, et c'est l'écart qu'on
+/// ne voit qu'en le cherchant.
+///
+/// §3.6.1 veut un `SubjectPublicKeyInfo` pour RSA — la clé ET son type, en DER.
+/// §3 de RFC 8463 veut la clé NUE pour Ed25519, trente-deux octets et rien
+/// d'autre. Publier l'une à la façon de l'autre donne un enregistrement
+/// qu'aucun vérificateur ne lira.
+#[test]
+fn chaque_type_de_cle_se_publie_a_sa_facon() {
+    let rsa = cle().public_record();
+    let texte = std::string::String::from_utf8(rsa).expect("ASCII");
+    assert!(texte.starts_with("v=DKIM1; k=rsa; p="), "{texte}");
+    // Un `SubjectPublicKeyInfo` s'ouvre par une séquence DER : en base64, cela
+    // commence toujours par `MII` pour une clé de cette taille.
+    assert!(texte.contains("; p=MII"), "{texte}");
+
+    let ed = SigningKey::from_pem(pem("PRIVATE KEY", CLE_ED25519).as_bytes())
+        .expect("Ed25519")
+        .public_record();
+    let texte = std::string::String::from_utf8(ed).expect("ASCII");
+    assert!(texte.starts_with("v=DKIM1; k=ed25519; p="), "{texte}");
+    // La clé NUE : trente-deux octets font quarante-quatre caractères base64,
+    // remplissage compris.
+    let valeur = texte.split("p=").nth(1).expect("une valeur");
+    assert_eq!(valeur.len(), 44, "{texte}");
+}
+
+/// **CE QUI EST PUBLIÉ SE RELIT**, par le lecteur de ce dépôt même.
+///
+/// Le lecteur et l'écrivain d'une clé publique ne partagent aucun code : les
+/// faire se répondre est le seul essai qui prouve qu'ils parlent du même format.
+#[test]
+fn ce_qu_on_publie_se_relit() {
+    for cle_privee in [
+        cle(),
+        SigningKey::from_pem(pem("PRIVATE KEY", CLE_ED25519).as_bytes()).expect("Ed25519"),
+    ] {
+        let attendu = cle_privee.algorithm();
+        let record = cle_privee.public_record();
+        let lu = crate::PublicKeyRecord::parse(&record).expect("relisible");
+        assert!(
+            lu.matches(attendu),
+            "le type publié n'est pas celui de la clé"
+        );
+        assert!(!lu.key.is_empty(), "une clé vide est une révocation");
+    }
+}
+
+/// **UN ENREGISTREMENT NE SE PLIE PAS.**
+///
+/// Le repli de RFC 5322 vit dans un en-tête de message ; une zone DNS n'en veut
+/// pas, et un `CRLF` y couperait la valeur.
+#[test]
+fn un_enregistrement_ne_porte_aucun_repli() {
+    let record = cle().public_record();
+    assert!(!record.contains(&b'\r'), "un repli dans une zone");
+    assert!(!record.contains(&b'\n'), "un repli dans une zone");
+}
+
+/// **CE QUE L'EXPLOITANT VERRA**, écrit une fois pour qu'on puisse le lire.
+///
+/// Une valeur figée plutôt que recalculée : c'est la seule façon de voir, en
+/// relisant, que le format n'a pas bougé — et de s'apercevoir qu'il a bougé le
+/// jour où il bougera.
+#[test]
+fn l_enregistrement_est_pret_a_coller() {
+    let record = SigningKey::from_pem(pem("PRIVATE KEY", CLE_ED25519).as_bytes())
+        .expect("Ed25519")
+        .public_record();
+    assert_eq!(
+        std::string::String::from_utf8(record).expect("ASCII"),
+        "v=DKIM1; k=ed25519; p=IIzBe/kAz6nmQfKdjCbnGG0WFEscT00pRYx78hqxO+Q="
+    );
+}

@@ -453,6 +453,39 @@ fn charger_dkim(dkim: &ams_config::Dkim) -> Result<Option<Arc<SigningKey>>, Stri
     Ok(Some(Arc::new(cle)))
 }
 
+/// Ce que l'exploitant doit publier, prêt à coller dans sa zone.
+///
+/// # POURQUOI LE COMPOSER, ET NE PAS LAISSER LE FAIRE
+///
+/// Cette ligne disait OÙ publier — `<sélecteur>._domainkey.<domaine>` — et pas
+/// QUOI. Il fallait donc dériver la clé publique à la main : `openssl pkey
+/// -pubout`, retirer l'en-tête PEM, recoller les lignes, préfixer les étiquettes.
+/// Quatre étapes, quatre occasions de se tromper.
+///
+/// **Et une erreur y est PIRE que l'absence de signature** : un enregistrement
+/// faux fait échouer TOUTES nos signatures, ce qui se lit dans les rapports
+/// DMARC du domaine comme un échec d'authentification. Ce serveur détient la
+/// seule information qui rend l'étape sûre.
+///
+/// # UNE LIGNE PAR DOMAINE, AVEC SON NOM ENTIER
+///
+/// Le serveur connaît la liste ; la faire recopier serait lui faire refaire un
+/// travail qu'il a déjà fait, et c'est en recopiant qu'on se trompe.
+fn a_publier(selecteur: &str, domaines: &[String], cle: &Arc<SigningKey>) -> String {
+    if domaines.is_empty() {
+        return String::from(" — aucun domaine hébergé, rien ne sera signé");
+    }
+    let record = cle.public_record();
+    let valeur = String::from_utf8_lossy(&record);
+    let mut dit = String::from(" — À PUBLIER :");
+    for domaine in domaines {
+        dit.push_str(&format!(
+            "\n    {selecteur}._domainkey.{domaine}. IN TXT \"{valeur}\""
+        ));
+    }
+    dit
+}
+
 /// Refuse un fichier secret que le reste du monde peut lire.
 fn refuser_fichier_lisible_par_tous(chemin: &str, quoi: &str) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt as _;
@@ -954,15 +987,10 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     eprintln!(
         "air-mail-server : {}",
         match &signature {
-            Some(_) => format!(
-                "ce qui est ÉMIS est signé (DKIM, RFC 6376) — sélecteur `{}`, à publier sous \
-                 `{}._domainkey.<domaine>` pour chacun de : {}",
+            Some(cle) => format!(
+                "ce qui est ÉMIS est signé (DKIM, RFC 6376) — sélecteur `{}`{}",
                 options.dkim.selector,
-                options.dkim.selector,
-                match options.hosted.is_empty() {
-                    true => String::from("(aucun domaine hébergé — rien ne sera signé)"),
-                    false => options.hosted.join(", "),
-                }
+                a_publier(&options.dkim.selector, &options.hosted, cle)
             ),
             None => String::from(
                 "ce qui est ÉMIS n'est PAS signé — aucune clé DKIM nommée \

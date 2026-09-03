@@ -29,6 +29,11 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 > clair pour les domaines qu'on lui nomme, le dépose dans une boîte Maildir, et
 > refuse les sources qui abusent.
 >
+> **Et il dit quoi publier, pas seulement où** : au démarrage, l'enregistrement
+> TXT complet, une ligne par domaine, prêt à coller. Le dériver à la main coûtait
+> quatre étapes, et une erreur y fait échouer TOUTES les signatures — ce qui est
+> pire que ne pas signer.
+>
 > **Et la signature interdit qu'on AJOUTE un champ** : chaque nom figure deux fois
 > dans `h=` (§5.4.2), si bien qu'un second `From:` glissé en route casse la
 > signature. Sans cela, un tiers pouvait préfixer le sien — les vérificateurs
@@ -2023,7 +2028,7 @@ que `llvm-cov` n'instrumente pas sur Rust stable et dont le compteur reste à
 `0 / 0`. Les régions font le travail attendu : chaque bras d'un conditionnel en
 est une.
 
-Le gate mesure aujourd'hui **55 360 régions** et **31 824 lignes**, toutes
+Le gate mesure aujourd'hui **55 411 régions** et **31 844 lignes**, toutes
 couvertes. **Une seule dérogation, et elle est annoncée à chaque exécution** : le
 code *généré* du schéma Cap'n Proto en est exclu — il porte un accesseur par champ
 et par sens, dont la plupart ne seront jamais appelés, et les couvrir n'éprouverait
