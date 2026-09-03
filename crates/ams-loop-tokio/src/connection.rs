@@ -4,7 +4,7 @@ use core::time::Duration;
 use std::sync::Arc;
 
 use ams_guard::{Event as GuardEvent, Source, Verdict};
-use ams_mime::{AUTHRES_RESERVE, RECEIVED_MAX};
+use ams_mime::{AUTHRES_RESERVE, RECEIVED_MAX, RETURN_PATH_MAX};
 use ams_proto_smtp::{ChunkEvent, DataEvent};
 use ams_session::{
     Action, Config, DataOutcome, Identity as SpfIdentity, Policy, RECEIVED_SPF_MAX, SenderPolicy,
@@ -639,11 +639,31 @@ where
             );
         }
     }
+    // ── L'EN-TÊTE `Return-Path:` (RFC 5321 §4.4) ────────────────────────────
+    //
+    // **§4.4 EN EXIGE DEUX, ET CELUI-CI VIENT EN PREMIER** : « it inserts a
+    // return-path line at the beginning of the mail data ». Sans lui,
+    // l'expéditeur d'ENVELOPPE est perdu à la remise — `From:` ne le dit pas, et
+    // cet écart est toute la base de SPF, de DMARC et du traitement des rebonds.
+    //
+    // Un `Return-Path:` forgé plus bas dans le message n'est PAS retiré, et
+    // c'est le même choix que pour un `Received:` forgé : la frontière de
+    // confiance est « ce qui est au-dessus de ce que j'ai ajouté ». Le nôtre
+    // étant le premier, une bibliothèque qui rend la première occurrence rend la
+    // nôtre.
+    let mut chemin = [0_u8; RETURN_PATH_MAX];
+    if echec.is_none()
+        && let Some(trace) = session.received_return_path(&mut chemin)
+        && let Err(cause) = delivery.append(trace)
+    {
+        echec = Some(cause);
+    }
+
     // ── L'EN-TÊTE `Received:` (RFC 5321 §4.4) ───────────────────────────────
     //
-    // **C'EST LE SEUL EN-TÊTE QUE LA NORME EXIGE D'AJOUTER**, et il vient AVANT
-    // les deux autres : un lecteur qui remonte un chemin lit les traces de haut
-    // en bas, la plus récente d'abord, et c'est celle-ci qui date le saut.
+    // La trace vient JUSTE APRÈS : un lecteur qui remonte un chemin lit les
+    // traces de haut en bas, la plus récente d'abord, et c'est celle-ci qui date
+    // le saut.
     //
     // La session le compose — la boucle ne fabrique aucun texte de protocole —
     // et n'apporte que ce qu'elle seule sait : l'adresse du pair, et l'heure.
@@ -1431,12 +1451,15 @@ mod tests {
         // `EHLO`, `MAIL`, `RCPT`, `DATA`, `QUIT` : les lignes du message n'en
         // sont pas.
         assert_eq!(resume.commands, 5);
-        // **LA TRACE VIENT EN TÊTE, ET LE MESSAGE SUIT INTACT** (RFC 5321
-        // §4.4). Un lecteur qui remonte un chemin lit la plus récente d'abord.
+        // **LES DEUX EN-TÊTES DE §4.4 VIENNENT EN TÊTE, DANS CET ORDRE, ET LE
+        // MESSAGE SUIT INTACT.** Le `Return-Path:` d'abord — « at the beginning
+        // of the mail data » —, puis la trace, qu'un lecteur remontant le chemin
+        // lit la plus récente d'abord.
         let recu = std::string::String::from_utf8_lossy(&boite.recu).into_owned();
         assert!(
             recu.starts_with(
-                "Received: from client.example ([192.0.2.1])\r\n\tby \
+                "Return-Path: <moi@ailleurs.example>\r\n\
+                 Received: from client.example ([192.0.2.1])\r\n\tby \
                  mail.example.com with ESMTP;\r\n\t"
             ),
             "{recu:?}"

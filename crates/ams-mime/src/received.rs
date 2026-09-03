@@ -1,13 +1,24 @@
-//! L'en-tête `Received:` (RFC 5321 §4.4), et les mots de RFC 3848.
+//! Les deux en-têtes que §4.4 de RFC 5321 exige, et les mots de RFC 3848.
 //!
-//! # C'EST LE SEUL EN-TÊTE QUE LA NORME EXIGE D'AJOUTER
+//! # §4.4 EN EXIGE DEUX, ET NON UN
 //!
-//! §4.4 ne le suggère pas : « an SMTP server **MUST** insert trace information
-//! at the beginning of the message content ». Ce serveur écrivait déjà
-//! `Received-SPF` et `Authentication-Results` — deux en-têtes que personne
-//! n'oblige — et pas celui-là.
+//! Il les demande à deux moments différents, et ce serveur est aux deux :
 //!
-//! Ce n'est pas une formalité. Sans lui :
+//! - **la trace `Received:`**, de qui ACCEPTE un message — « an SMTP server
+//!   **MUST** insert trace information at the beginning of the message
+//!   content » ;
+//! - **le `Return-Path:`**, de qui le REMET pour de bon — « it inserts a
+//!   return-path line at the beginning of the mail data. This use of
+//!   return-path is required ».
+//!
+//! **Ce titre disait « le seul en-tête » et se trompait**, pendant que ce
+//! serveur écrivait déjà `Received-SPF` et `Authentication-Results` — deux
+//! en-têtes que personne n'oblige — et pas le second de ceux qu'on lui demande.
+//! Une phrase absolue est une phrase qu'on ne relit plus.
+//!
+//! # CE QUE LA TRACE EMPÊCHE
+//!
+//! Ce n'est pas une formalité. Sans elle :
 //!
 //! - **le chemin d'un message est intraçable.** C'est la première chose qu'on
 //!   regarde quand un courrier n'arrive pas, ou arrive de travers.
@@ -16,6 +27,17 @@
 //!   multiplie à chaque tour, et rien ne l'arrête.
 //! - **les filtres en aval s'en méfient.** Un message sans trace ressemble à un
 //!   message fabriqué.
+//!
+//! # CE QUE LE `Return-Path:` EMPÊCHE
+//!
+//! Sans lui, l'expéditeur d'ENVELOPPE est perdu à la remise. `From:` ne le dit
+//! pas — cet écart est toute la base de SPF, de DMARC et du traitement des
+//! rebonds — et un filtre, un répondeur d'absence ou un logiciel de liste n'a
+//! plus aucun moyen de le connaître.
+//!
+//! Le cas qui coûte le plus est `<>` : il dit « ceci est un rapport », et §2 de
+//! RFC 3834 veut qu'un répondeur automatique s'en abstienne. Sans cette ligne,
+//! un rebond reçu d'un tiers ne se distingue plus d'un message ordinaire.
 //!
 //! # PAS DE CLAUSE `for`, JAMAIS
 //!
@@ -28,11 +50,11 @@
 //!
 //! # CE QUE L'EN-TÊTE PORTE VIENT DU PAIR, ET N'EST DONC PAS CRU
 //!
-//! Le nom du `HELO` est ce que le pair a bien voulu dire. Un `CRLF` glissé
-//! dedans écrirait un en-tête à notre place, **en tête du message**, là où un
-//! lecteur croira que c'est nous qui parlons. Il est donc vérifié ici, et pas
-//! seulement à la grammaire : cette crate ne suppose pas ce que son appelant a
-//! fait.
+//! Le nom du `HELO` et le chemin de retour sont ce que le pair a bien voulu
+//! dire. Un `CRLF` glissé dans l'un ou l'autre écrirait un en-tête à notre
+//! place, **en tête du message**, là où un lecteur croira que c'est nous qui
+//! parlons. Ils sont donc vérifiés ici, et pas seulement à la grammaire : cette
+//! crate ne suppose pas ce que son appelant a fait.
 
 use crate::Error;
 use crate::date::{DATE_MAX, write_date};
@@ -49,6 +71,65 @@ pub const RECEIVED_MAX: usize = 700;
 
 /// Ce qu'un nom peut peser (RFC 1035 §2.3.4), littéral d'adresse compris.
 const NOM_MAX: usize = 255;
+
+/// La place qu'un `Return-Path:` peut demander.
+///
+/// `Return-Path: <` puis un chemin de 256 octets (RFC 5321 §4.5.3.1.3), `>` et
+/// la fin de ligne.
+pub const RETURN_PATH_MAX: usize = 14 + 256 + 3;
+
+/// Écrit le `Return-Path:` que le serveur de REMISE FINALE doit poser (§4.4).
+///
+/// `chemin` est l'expéditeur d'enveloppe sans ses chevrons. **Vide vaut `<>`**,
+/// et ce n'est pas un détail : §2 de RFC 3834 veut qu'un répondeur automatique
+/// se taise devant un chemin nul, et c'est cette ligne qui le lui apprend.
+///
+/// # POURQUOI CET EN-TÊTE, ET POURQUOI ICI
+///
+/// §4.4 en fait une exigence — « this use of return-path is required ». Sans
+/// lui, l'expéditeur d'ENVELOPPE est perdu à la remise : `From:` ne le dit pas,
+/// et cet écart est toute la base de SPF, de DMARC et du traitement des
+/// rebonds. Un filtre, un répondeur d'absence ou un logiciel de liste n'a plus
+/// aucun moyen de le connaître.
+///
+/// # UN `Return-Path:` FORGÉ PLUS BAS N'EST PAS RETIRÉ
+///
+/// C'est le même choix que pour un `Received:` forgé, et la même raison : la
+/// frontière de confiance est « ce qui est au-dessus de ce que j'ai ajouté ».
+/// Celui-ci s'écrivant en TÊTE, une bibliothèque qui rend la première occurrence
+/// rend la nôtre. Retirer un en-tête au fil de l'écoulement demanderait de
+/// réécrire le bloc pendant que DKIM le condense, pour une menace que la
+/// position règle déjà.
+///
+/// # Errors
+///
+/// [`Error::NotPrintable`] si le chemin porte autre chose que de l'ASCII
+/// visible, ou des chevrons — il ressort ici en tête du message, là où un octet
+/// de trop parle sous notre nom ; [`Error::BufferTooSmall`] si `sortie` ne
+/// suffit pas.
+pub fn write_return_path<'b>(sortie: &'b mut [u8], chemin: &[u8]) -> Result<&'b [u8], Error> {
+    // **CETTE CAISSE NE CROIT PAS SON APPELANT.** La session a déjà lu ce chemin
+    // avec la grammaire de RFC 5321 ; on ne le suppose pas, parce qu'une
+    // vérification faite ailleurs est une vérification qu'on ne voit pas en
+    // lisant l'endroit qui en dépend.
+    if chemin.len() > NOM_MAX
+        || !chemin
+            .iter()
+            .all(|octet| octet.is_ascii_graphic() && !matches!(*octet, b'<' | b'>'))
+    {
+        return Err(Error::NotPrintable);
+    }
+    let mut plume = Plume {
+        sortie,
+        ecrits: 0,
+        faute: None,
+    };
+    plume.pousser(b"Return-Path: <")?;
+    plume.pousser(chemin)?;
+    plume.pousser(b">\r\n")?;
+    let ecrits = plume.ecrits;
+    sortie.get(..ecrits).ok_or(Error::BufferTooSmall)
+}
 
 /// Comment le message est arrivé (RFC 3848).
 ///

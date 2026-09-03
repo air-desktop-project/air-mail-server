@@ -346,8 +346,8 @@ async fn le_message_remis_porte_l_en_tete_received_spf() {
     let plat = remis.replace("\r\n ", " ");
     assert!(plat.contains("\r\nReceived-SPF: pass "), "{plat}");
     assert!(
-        plat.starts_with("Received: from "),
-        "la trace de §4.4 vient d'abord"
+        plat.starts_with("Return-Path: <jean@example.com>\r\nReceived: from "),
+        "les deux en-têtes de §4.4 viennent d'abord, dans cet ordre : {plat}"
     );
     assert!(plat.contains("client-ip=127.0.0.1"), "{plat}");
     assert!(
@@ -384,8 +384,11 @@ async fn sans_verification_aucune_trace_n_est_ecrite() {
     // mentirait sur ce qu'on a fait.
     let remis = message_remis(SenderPolicy::Ignore, None, "Subject: bonjour\r\n\r\n.\r\n").await;
     assert!(!remis.contains("Received-SPF"), "{remis}");
-    // La trace `Received:` de §4.4, elle, s'écrit TOUJOURS : elle ne dit pas ce
-    // qu'on a vérifié, elle dit par où le message est passé.
-    assert!(remis.starts_with("Received: from "), "{remis}");
+    // Les deux en-têtes de §4.4, eux, s'écrivent TOUJOURS : ils ne disent pas ce
+    // qu'on a vérifié, ils disent d'où le message vient et par où il est passé.
+    assert!(
+        remis.starts_with("Return-Path: <jean@example.com>\r\nReceived: from "),
+        "{remis}"
+    );
     assert!(remis.contains("\r\nSubject: bonjour"), "{remis}");
 }

@@ -2,15 +2,20 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! **Cible : l'en-tête `Received:`** (RFC 5321 §4.4) — la trace que ce serveur
-//! pose EN TÊTE de chaque message qu'il accepte.
+//! **Cible : les deux en-têtes de §4.4** — la trace `Received:` que ce serveur
+//! pose sur chaque message qu'il accepte, et le `Return-Path:` que la remise
+//! finale pose au-dessus d'elle.
 //!
-//! # L'ENTRÉE HOSTILE EST LE NOM DU `HELO`
+//! # L'ENTRÉE HOSTILE EST CE QUE LE PAIR A DIT DE LUI-MÊME
 //!
-//! C'est ce que le pair a bien voulu dire de lui-même, avant toute
-//! authentification, et cela finit recopié en tête du message — là où un lecteur
-//! croira que c'est nous qui parlons. Un `CRLF` glissé dedans écrirait un
-//! en-tête entier sous notre nom, au-dessus de tous les autres.
+//! Le nom du `HELO` et le chemin de retour viennent tous deux du pair, avant
+//! toute authentification, et finissent recopiés EN TÊTE du message — là où un
+//! lecteur croira que c'est nous qui parlons. Un `CRLF` glissé dans l'un ou
+//! l'autre écrirait un en-tête entier sous notre nom, au-dessus de tous les
+//! autres.
+//!
+//! **Le chemin de retour est le plus exposé des deux** : il est écrit tout en
+//! haut, avant même la trace.
 //!
 //! # Les propriétés
 //!
@@ -26,12 +31,17 @@
 //!    ce qu'on a écrit.
 //! 6. **AUCUN DESTINATAIRE N'Y EST NOMMÉ** : ce serveur n'écrit jamais de clause
 //!    `for`, et l'en-tête voyage avec le message.
+//! 7. **LE `Return-Path:` EST UNE LIGNE, ET UNE SEULE**, close par un `CRLF`, et
+//!    ce qu'elle porte est exactement ce qu'on lui a donné — ni tronqué, ni
+//!    complété. Un chemin coupé désignerait quelqu'un d'autre.
 //!
 //! Harnais **pur** : aucune entrée-sortie (C1).
 
 #![no_main]
 
-use ams_mime::{RECEIVED_MAX, Received, Transport, write_received};
+use ams_mime::{
+    RECEIVED_MAX, RETURN_PATH_MAX, Received, Transport, write_received, write_return_path,
+};
 use arbitrary::Arbitrary;
 use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use libfuzzer_sys::fuzz_target;
@@ -48,6 +58,8 @@ struct Entree {
     adresse: [u8; 16],
     transport: u8,
     date: u64,
+    /// Le chemin de retour, tel que le pair l'a écrit. **VIENT DE LUI.**
+    chemin: Vec<u8>,
     /// La place qu'on donne, bornée par ce que le produit réserve.
     place: u16,
 }
@@ -118,6 +130,47 @@ fuzz_target!(|entree: Entree| {
     assert!(
         !contient(ecrit, b" for "),
         "une clause `for` est apparue : elle nommerait un destinataire"
+    );
+
+    // ── 7. LE `Return-Path:` DE LA REMISE FINALE ────────────────────────────
+    //
+    // Il s'écrit AU-DESSUS de la trace : c'est la première chose qu'un lecteur
+    // voit, et donc la plus exposée.
+    let mut chemin = vec![GARDE; RETURN_PATH_MAX.saturating_add(64)];
+    let issue = {
+        let dedans = chemin
+            .get_mut(..RETURN_PATH_MAX)
+            .expect("le tampon fait au moins la borne annoncée");
+        write_return_path(dedans, &entree.chemin).map(<[u8]>::len)
+    };
+    assert!(
+        chemin
+            .get(RETURN_PATH_MAX..)
+            .is_some_and(|bord| bord.iter().all(|octet| *octet == GARDE)),
+        "écrit au-delà de la place donnée"
+    );
+    let Ok(combien) = issue else {
+        return;
+    };
+    let ecrit = chemin.get(..combien).unwrap_or_default();
+    assert!(
+        emettable(ecrit),
+        "un octet qu'on ne peut pas mettre sur le fil"
+    );
+    // UNE LIGNE, ET UNE SEULE : un `CRLF` au milieu ouvrirait un en-tête que le
+    // pair aurait écrit à travers nous, tout en haut du message.
+    assert!(ecrit.ends_with(b"\r\n"), "la ligne ne se ferme pas");
+    let corps = ecrit.get(..combien.saturating_sub(2)).unwrap_or_default();
+    assert!(
+        !corps.contains(&b'\r') && !corps.contains(&b'\n'),
+        "une fin de ligne PRÉMATURÉE"
+    );
+    // **CE QUI SORT EST EXACTEMENT CE QU'ON A DONNÉ**, entre les chevrons : ni
+    // tronqué, ni complété. Un chemin coupé désignerait quelqu'un d'autre.
+    assert_eq!(
+        corps,
+        [&b"Return-Path: <"[..], &entree.chemin, b">"].concat(),
+        "le chemin a changé en route"
     );
 });
 

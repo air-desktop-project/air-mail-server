@@ -181,12 +181,15 @@ async fn l_en_tete_occupe_exactement_la_place_reservee() {
             .is_some_and(|fin| fin.bytes().all(|octet| octet == b' ')),
         "le remplissage n'est pas fait d'espaces : {trace:?}"
     );
-    // ET LE MESSAGE DU PAIR N'EST PAS TOUCHÉ — il suit la trace `Received:`,
-    // que la boucle pose avant lui (RFC 5321 §4.4).
+    // ET LE MESSAGE DU PAIR N'EST PAS TOUCHÉ — il suit les deux en-têtes que
+    // §4.4 exige, dans l'ordre où ce paragraphe les place : le `Return-Path:`
+    // de la remise finale, puis la trace.
     assert!(
-        temoin
-            .corps
-            .starts_with(b"Received: from client.example.net ")
+        temoin.corps.starts_with(
+            b"Return-Path: <personne@ailleurs.test>\r\nReceived: from client.example.net "
+        ),
+        "{:?}",
+        std::string::String::from_utf8_lossy(temoin.corps.get(..120).unwrap_or_default())
     );
     assert!(
         temoin
@@ -228,9 +231,11 @@ async fn un_message_en_quarantaine_est_remis_et_ecarte() {
     assert!(reponse.starts_with("250"), "{reponse}");
     assert!(temoin.ecarte, "la boucle a demandé de le mettre de côté");
     assert!(
-        temoin
-            .corps
-            .starts_with(b"Received: from client.example.net ")
+        temoin.corps.starts_with(
+            b"Return-Path: <personne@ailleurs.test>\r\nReceived: from client.example.net "
+        ),
+        "{:?}",
+        std::string::String::from_utf8_lossy(temoin.corps.get(..120).unwrap_or_default())
     );
 }
 

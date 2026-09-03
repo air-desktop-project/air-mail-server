@@ -8,7 +8,7 @@ use ams_proto_smtp::{
 use ams_sasl::{decode_base64, parse_plain};
 use core::net::IpAddr;
 
-use ams_mime::{Received, Transport, write_received};
+use ams_mime::{Received, Transport, write_received, write_return_path};
 use ams_spf::{Identity, ReceivedSpf, Verdict, write_received_spf};
 
 use crate::digits::{MAX_DIGITS, decimal};
@@ -560,6 +560,25 @@ pub struct SmtpSession<'a, P: Policy> {
     /// laquelle un rapport de non-remise reviendra, et l'inventer serait
     /// l'envoyer à quelqu'un qui n'a rien demandé.
     chemin_de_retour: Tampon<SENDER_MAX>,
+    /// Le chemin de retour TEL QU'IL A ÉTÉ ÉCRIT, pour le `Return-Path:`.
+    ///
+    /// # POURQUOI UN SECOND TAMPON, ET NON `chemin_de_retour`
+    ///
+    /// Celui-là ne retient que ce à quoi un rapport pourrait REVENIR : ni un
+    /// chemin nul, ni un littéral d'adresse. Le `Return-Path:` de §4.4, lui, ne
+    /// consigne pas où l'on répondrait, il consigne CE QUE LE PAIR A DIT — et
+    /// les deux ne coïncident pas.
+    ///
+    /// Les confondre écrirait `<>` pour `jean@[192.0.2.1]`, c'est-à-dire « ceci
+    /// est un rapport, ne me réponds pas » (§2 de RFC 3834) sur un message
+    /// ordinaire. Un mensonge silencieux, et de ceux qui font taire un
+    /// répondeur.
+    depose: Tampon<SENDER_MAX>,
+    /// Un `MAIL FROM:` a-t-il été accepté dans la transaction en cours ?
+    ///
+    /// **C'est ce qui distingue `<>` de « rien du tout »** : `depose` est vide
+    /// dans les deux cas, et seul l'un des deux mérite un en-tête.
+    depose_vu: bool,
     /// Le domaine dont SPF lira la politique.
     domaine_verifie: Tampon<DOMAIN_MAX>,
     /// Le verdict rendu par l'appelant pour cette transaction.
@@ -616,6 +635,8 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
             helo: Tampon::vide(),
             expediteur: Tampon::vide(),
             chemin_de_retour: Tampon::vide(),
+            depose: Tampon::vide(),
+            depose_vu: false,
             domaine_verifie: Tampon::vide(),
             verdict: None,
             identite_helo: false,
@@ -1180,6 +1201,30 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     /// mettre en file ce qu'elle ne saurait pas rendre.
     fn retenir_le_chemin_de_retour(&mut self, reverse_path: &Path<'_>) {
         self.chemin_de_retour.vider();
+        // **CE QUE LE PAIR A DIT SE RETIENT ENTIER**, littéral d'adresse
+        // compris : c'est ce que le `Return-Path:` de §4.4 doit consigner, et
+        // non l'adresse à laquelle un rapport reviendrait.
+        self.depose.vider();
+        self.depose_vu = true;
+        if let Path::Mailbox(boite) = reverse_path {
+            // **LE LITTÉRAL PORTE DÉJÀ SES CROCHETS** : les rajouter écrirait
+            // `jean@[[192.0.2.1]]`, une adresse qui ne désigne rien.
+            let domaine = match boite.domain() {
+                ClientId::Domain(nom) | ClientId::AddressLiteral(nom) => nom,
+            };
+            // **AUCUNE GARDE SUR LA PLACE, PARCE QU'IL N'Y A RIEN À GARDER.**
+            // `SENDER_MAX` est la somme EXACTE de ce qu'une partie locale (64,
+            // §4.5.3.1.1) et un domaine (`DOMAIN_MAX`) peuvent peser, plus
+            // l'arobase : ce dépôt ne peut pas ne pas tenir. Un `if` ici serait
+            // une branche que rien n'atteint — donc pas une garde.
+            //
+            // Ce qui compte est que la borne reste EXACTE : un tampon plus
+            // court laisserait `depose` vide, ce qui écrirait `<>` pour une
+            // vraie adresse — c'est-à-dire « ceci est un rapport ».
+            let _ = self
+                .depose
+                .poser(&[boite.local_part().as_bytes(), b"@", domaine]);
+        }
         let Path::Mailbox(boite) = reverse_path else {
             return;
         };
@@ -1326,10 +1371,11 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
 
     /// Compose l'en-tête `Received:` de ce saut (RFC 5321 §4.4).
     ///
-    /// # C'EST LE SEUL EN-TÊTE QUE LA NORME EXIGE D'AJOUTER
+    /// # §4.4 EN EXIGE DEUX, ET CELUI-CI EST LA TRACE
     ///
-    /// §4.4 ne le suggère pas : un serveur qui accepte un message **DOIT** y
-    /// poser sa trace. Sans elle, le chemin d'un message est intraçable, la
+    /// L'autre est le `Return-Path:` de la remise finale — voir
+    /// [`SmtpSession::received_return_path`]. §4.4 ne suggère ni l'un ni
+    /// l'autre : un serveur qui accepte un message **DOIT** y poser sa trace. Sans elle, le chemin d'un message est intraçable, la
     /// boucle de §6.3 ne se détecte plus, et les filtres en aval se méfient d'un
     /// message qui n'en porte aucune.
     ///
@@ -1364,6 +1410,38 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         // `Received-SPF` : le message part sans trace plutôt qu'avec une trace
         // douteuse.
         write_received(out, &champ).ok()
+    }
+
+    /// L'en-tête `Return-Path:` que la REMISE FINALE doit poser (§4.4).
+    ///
+    /// # LA NORME EN EXIGE DEUX, PAS UN
+    ///
+    /// §4.4 demande la trace `Received:` à qui accepte un message, ET cette
+    /// ligne-ci à qui le remet : « this use of return-path is required ». Sans
+    /// elle, l'expéditeur d'ENVELOPPE est perdu à la remise — `From:` ne le dit
+    /// pas, et cet écart est toute la base de SPF, de DMARC et du traitement des
+    /// rebonds.
+    ///
+    /// # `<>` N'EST PAS « RIEN », ET LA NUANCE FAIT TAIRE UN RÉPONDEUR
+    ///
+    /// Un chemin nul dit « ceci est un rapport » : §2 de RFC 3834 veut qu'un
+    /// répondeur automatique s'abstienne devant lui. C'est donc une valeur à
+    /// écrire, et non une absence — d'où `None` réservé au seul cas où aucun
+    /// `MAIL FROM:` n'a été accepté.
+    ///
+    /// # Pourquoi la session, et pas la boucle
+    ///
+    /// La boucle ne compose aucun texte de protocole. Elle n'apporte ici même
+    /// rien : tout ce qu'il faut a été dit par le pair.
+    #[must_use]
+    pub fn received_return_path<'b>(&self, out: &'b mut [u8]) -> Option<&'b [u8]> {
+        if !self.depose_vu {
+            return None;
+        }
+        // UN EN-TÊTE QU'ON NE SAIT PAS ÉCRIRE NE S'ÉCRIT PAS, comme pour les
+        // deux autres traces : le message arrive sans plutôt qu'avec une ligne
+        // douteuse.
+        write_return_path(out, self.depose.as_bytes()).ok()
     }
 
     /// L'identifiant d'enveloppe du déposant (RFC 3461 §4.4), s'il en a donné.
@@ -1863,6 +1941,12 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         // demandé. Le `HELO`, lui, survit : c'est la connexion qui le porte.
         self.expediteur.vider();
         self.chemin_de_retour.vider();
+        // **LE `Return-Path:` EST CELUI D'UNE TRANSACTION**, comme le reste : le
+        // laisser derrière ferait consigner sur le message suivant l'expéditeur
+        // d'enveloppe du précédent — et un `RSET` sert précisément à repartir de
+        // rien.
+        self.depose.vider();
+        self.depose_vu = false;
         self.domaine_verifie.vider();
         self.verdict = None;
     }
@@ -4205,5 +4289,119 @@ mod tests {
         assert!(reponse.contains("DMARC"), "{reponse}");
         // Ce n'est PAS une faute du pair : son message était bien formé.
         assert!(!tour.peer_fault(), "{reponse}");
+    }
+
+    // ── LE `Return-Path:` DE LA REMISE FINALE (RFC 5321 §4.4) ───────────────
+
+    /// Ce que la session écrirait comme `Return-Path:` après ce `MAIL FROM:`.
+    fn chemin_apres(mail_from: &[u8]) -> Option<std::string::String> {
+        let mut session = session(RecipientVerdict::Accept);
+        identifier(&mut session);
+        assert!(
+            jouer(&mut session, mail_from).starts_with("250"),
+            "{mail_from:?}"
+        );
+        let mut place = [0_u8; ams_mime::RETURN_PATH_MAX];
+        session
+            .received_return_path(&mut place)
+            .map(|ecrit| std::string::String::from_utf8_lossy(ecrit).into_owned())
+    }
+
+    /// **UN LITTÉRAL D'ADRESSE N'EST PAS UN CHEMIN NUL**, et les confondre
+    /// ferait taire un répondeur devant un message ordinaire.
+    ///
+    /// `chemin_de_retour` laisse tomber le littéral — aucun rapport ne pourrait
+    /// y revenir — mais le `Return-Path:` ne consigne pas où l'on répondrait, il
+    /// consigne CE QUE LE PAIR A DIT. Écrire `<>` reviendrait à annoncer « ceci
+    /// est un rapport » (§2 de RFC 3834) sur un message qui n'en est pas un.
+    #[test]
+    fn un_litteral_d_adresse_ne_devient_pas_un_chemin_nul() {
+        assert_eq!(
+            chemin_apres(b"MAIL FROM:<jean@[192.0.2.1]>\r\n").as_deref(),
+            Some("Return-Path: <jean@[192.0.2.1]>\r\n")
+        );
+        // Alors que l'adresse de RAPPORT, elle, reste absente : aucun rebond ne
+        // pourrait atteindre un littéral.
+        let mut session = session(RecipientVerdict::Accept);
+        identifier(&mut session);
+        assert!(jouer(&mut session, b"MAIL FROM:<jean@[192.0.2.1]>\r\n").starts_with("250"));
+        assert_eq!(session.return_path(), None);
+    }
+
+    /// **`<>` S'ÉCRIT, ET « RIEN » NE S'ÉCRIT PAS.**
+    ///
+    /// Les deux laissent le tampon vide ; seul l'un des deux mérite un en-tête.
+    #[test]
+    fn le_chemin_nul_s_ecrit_mais_pas_l_absence_de_transaction() {
+        assert_eq!(
+            chemin_apres(b"MAIL FROM:<>\r\n").as_deref(),
+            Some("Return-Path: <>\r\n")
+        );
+        assert_eq!(
+            chemin_apres(b"MAIL FROM:<jean@example.com>\r\n").as_deref(),
+            Some("Return-Path: <jean@example.com>\r\n")
+        );
+        // Avant tout `MAIL FROM:`, il n'y a rien à consigner.
+        let mut session = session(RecipientVerdict::Accept);
+        identifier(&mut session);
+        let mut place = [0_u8; ams_mime::RETURN_PATH_MAX];
+        assert_eq!(session.received_return_path(&mut place), None);
+    }
+
+    /// **UN `RSET` EFFACE LE CHEMIN**, comme le reste de la transaction.
+    ///
+    /// Le laisser derrière ferait consigner sur le message suivant l'expéditeur
+    /// d'enveloppe du précédent.
+    #[test]
+    fn un_rset_efface_le_chemin_de_retour() {
+        let mut session = session(RecipientVerdict::Accept);
+        identifier(&mut session);
+        assert!(jouer(&mut session, b"MAIL FROM:<jean@example.com>\r\n").starts_with("250"));
+        assert!(jouer(&mut session, b"RSET\r\n").starts_with("250"));
+        let mut place = [0_u8; ams_mime::RETURN_PATH_MAX];
+        assert_eq!(session.received_return_path(&mut place), None);
+    }
+
+    /// **LE PLUS LONG CHEMIN QUE LA GRAMMAIRE ACCEPTE TIENT ENCORE.**
+    ///
+    /// C'est ce qui rend la garde inutile : un tampon trop court laisserait
+    /// `depose` vide, donc écrirait `<>` pour une vraie adresse — « ceci est un
+    /// rapport » sur un message qui n'en est pas un. La borne est exacte, et cet
+    /// essai est ce qui le vérifie plutôt que de le supposer.
+    #[test]
+    fn le_plus_long_chemin_recevable_tient_encore() {
+        // **LA VRAIE BORNE EST CELLE DU CHEMIN ENTIER** : §4.5.3.1.3 le limite à
+        // 256 octets, chevrons compris — donc 254 pour `locale@domaine`. Elle
+        // est plus serrée que la somme des deux bornes de §4.5.3.1.1 et
+        // §4.5.3.1.2, et c'est elle qui décide.
+        let locale = std::vec![b'x'; 64];
+        let mut domaine = std::vec::Vec::new();
+        while domaine.len() + 12 <= 189 {
+            domaine.extend_from_slice(b"exemple-abc.");
+        }
+        domaine.extend(std::iter::repeat_n(b'z', 189 - domaine.len()));
+        assert_eq!(locale.len() + 1 + domaine.len(), 254);
+
+        let mut ligne = std::vec::Vec::from(&b"MAIL FROM:<"[..]);
+        ligne.extend_from_slice(&locale);
+        ligne.push(b'@');
+        ligne.extend_from_slice(&domaine);
+        ligne.extend_from_slice(b">\r\n");
+
+        let mut session = session(RecipientVerdict::Accept);
+        identifier(&mut session);
+        let reponse = jouer(&mut session, &ligne);
+        assert!(reponse.starts_with("250"), "{reponse}");
+        let mut place = [0_u8; ams_mime::RETURN_PATH_MAX];
+        let ecrit = session
+            .received_return_path(&mut place)
+            .expect("un `MAIL FROM:` accepté se consigne");
+        assert_ne!(
+            ecrit, b"Return-Path: <>",
+            "une adresse est devenue un chemin nul"
+        );
+        assert_eq!(ecrit.len(), 14 + 254 + 3);
+        // Et il tient dans la borne annoncée, qui prévoit large.
+        assert!(ecrit.len() <= ams_mime::RETURN_PATH_MAX);
     }
 }

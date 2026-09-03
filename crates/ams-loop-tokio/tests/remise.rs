@@ -248,10 +248,16 @@ async fn un_message_traverse_notre_propre_serveur_intact() {
         texte.contains("Bonjour.\r\n.\r\nEt la suite"),
         "le message a été abîmé :\n{texte}"
     );
-    // **LE SERVEUR D'EN FACE POSE SA TRACE** (RFC 5321 §4.4) : le message
-    // arrive donc précédé d'un `Received:`, et intact derrière lui.
+    // **LE SERVEUR D'EN FACE POSE LES DEUX EN-TÊTES DE §4.4**, dans l'ordre où
+    // ce paragraphe les place : le `Return-Path:` de la remise finale, puis la
+    // trace. Le message arrive intact derrière eux.
+    //
+    // **ET `<>` EST ICI LE CAS QUI COMPTE** : cet envoi part d'un chemin nul,
+    // et c'est cette ligne qui apprend au destinataire que le message est un
+    // rapport — donc qu'un répondeur automatique doit s'en abstenir (§2 de
+    // RFC 3834). Sans elle, rien ne le distinguait d'un message ordinaire.
     assert!(
-        texte.starts_with("Received: from mail.nous.test ([127.0.0.1])\r\n"),
+        texte.starts_with("Return-Path: <>\r\nReceived: from mail.nous.test ([127.0.0.1])\r\n"),
         "{texte}"
     );
     assert!(texte.contains("\r\nFrom: nous@nous.test\r\n"), "{texte}");

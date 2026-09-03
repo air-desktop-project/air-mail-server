@@ -3795,7 +3795,7 @@ il l'a commis sur lui-même : une section qui s'intitule « l'état réel » est
 qu'on relit le moins, parce qu'on croit la connaître.
 
 Sont outillées : C1 (les trois étages, et la couverture qui n'est exigible que
-parce qu'ils sont séparés), C2 (le gate mesure 54 988 régions sur 29 crates,
+parce qu'ils sont séparés), C2 (le gate mesure 55 177 régions sur 29 crates,
 toutes couvertes — et il compare des comptes, non un pourcentage arrondi), C3
 (les lints, l'absence d'allocation dans les décodeurs, et 65 cibles de fuzz dont
 la CI vérifie qu'elle les lance toutes), C4 (`ams-tls` n'offre que
@@ -3845,6 +3845,79 @@ la seule vérification qui vaille est la confrontation à l'ABNF de §9, mot par
 mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
+
+## §4.4 exige deux en-têtes, et ce serveur n'en écrivait qu'un
+
+### CE QUI MANQUAIT, ET CE QUE LE COMMENTAIRE AFFIRMAIT
+
+Le bloc de trace portait écrit : « **C'EST LE SEUL EN-TÊTE QUE LA NORME EXIGE
+D'AJOUTER** ». C'était faux. §4.4 de RFC 5321 en demande deux, et le second
+s'adresse au serveur de REMISE FINALE — ce que ce serveur est :
+
+**La phrase figurait à TROIS endroits** — le bloc de la boucle, la méthode de la
+session, et l'en-tête du module d'`ams-mime` —, et les deux premiers ont été
+corrigés avant que le troisième ne soit vu. Une affirmation absolue recopiée est
+une affirmation qu'on corrige à moitié : c'est en cherchant mécaniquement « le
+seul », « toujours », « jamais » dans les commentaires qu'on a trouvé le
+dernier.
+
+> *When the delivery SMTP server makes the « final delivery » of a message, it
+> inserts a return-path line at the beginning of the mail data. This use of
+> return-path is required.*
+
+`grep -rn "Return-Path"` sur les 34 crates ne rendait que deux choses : le
+`Return-Path: <>` que NOS PROPRES rapports portent — donc la convention était
+connue — et une entrée de la liste blanche des en-têtes recopiés dans un rapport
+d'échec. Aucun message remis dans une boîte n'en recevait.
+
+### CE QUE CELA COÛTAIT
+
+**L'expéditeur d'ENVELOPPE était perdu à la remise.** `From:` ne le dit pas, et
+cet écart est toute la base de SPF, de DMARC et du traitement des rebonds. Un
+filtre, un répondeur d'absence ou un logiciel de liste n'avait plus aucun moyen
+de le connaître.
+
+**Un rebond entrant devenait indistinguable d'un message ordinaire.** §2 de
+RFC 3834 veut qu'un répondeur automatique se taise devant `<>`. Nous écrivons
+`Return-Path: <>` sur nos propres rapports pour cette raison exacte — et un
+rapport reçu d'un tiers arrivait chez notre utilisateur sans cette marque.
+
+### LE PIÈGE : `chemin_de_retour` NE DIT PAS LA MÊME CHOSE
+
+La session gardait déjà un chemin de retour, et le réflexe était de s'en servir.
+**Il aurait menti.** Ce tampon-là ne retient que ce à quoi un rapport pourrait
+REVENIR : ni un chemin nul, ni un littéral d'adresse — un rebond ne peut
+atteindre ni l'un ni l'autre. Le `Return-Path:`, lui, ne consigne pas où l'on
+répondrait ; il consigne CE QUE LE PAIR A DIT.
+
+Les confondre aurait écrit `<>` pour `jean@[192.0.2.1]`, c'est-à-dire « ceci est
+un rapport, ne me réponds pas » sur un message ordinaire. Un mensonge silencieux,
+et de ceux qui font TAIRE un répondeur. Un second tampon consigne donc le chemin
+tel qu'il a été écrit, et un drapeau distingue `<>` de « aucun `MAIL FROM:` » —
+les deux laissent le tampon vide, et un seul mérite un en-tête.
+
+### UN `Return-Path:` FORGÉ PLUS BAS N'EST PAS RETIRÉ
+
+C'est le même choix que pour un `Received:` forgé, et la même raison : la
+frontière de confiance est « ce qui est au-dessus de ce que j'ai ajouté ». Le
+nôtre s'écrivant EN TÊTE, une bibliothèque qui rend la première occurrence rend
+la nôtre. Retirer un en-tête au fil de l'écoulement demanderait de réécrire le
+bloc pendant que DKIM le condense, pour une menace que la position règle déjà.
+
+C'est écrit ici plutôt que laissé implicite : une décision qu'on ne consigne pas
+est une décision qu'on reprend par accident.
+
+### UNE BORNE PLUS SERRÉE QU'ON NE LE CROYAIT
+
+L'essai qui vérifie que le plus long chemin tient encore a d'abord été écrit avec
+64 octets de partie locale (§4.5.3.1.1) et 255 de domaine (§4.5.3.1.2) : il a
+échoué. **§4.5.3.1.3 borne le CHEMIN ENTIER à 256 octets**, chevrons compris —
+donc 254 pour `locale@domaine`, et cette borne-là est plus serrée que la somme
+des deux autres. C'est elle qui décide, et l'essai la nomme désormais.
+
+La garde sur la place du tampon a été retirée en conséquence : `SENDER_MAX`
+dépasse largement ce que la grammaire accepte, et une branche que rien n'atteint
+n'est pas une garde.
 
 ## Le rapport disait ce que le pair n'avait pas dit
 

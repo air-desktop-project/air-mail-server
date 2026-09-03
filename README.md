@@ -29,6 +29,11 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 > clair pour les domaines qu'on lui nomme, le dépose dans une boîte Maildir, et
 > refuse les sources qui abusent.
 >
+> **Il pose les deux en-têtes que §4.4 exige** : un `Return-Path:` en tête, qui
+> consigne l'expéditeur d'ENVELOPPE — `From:` ne le dit pas, et sans lui un
+> filtre ou un répondeur d'absence ne peut plus distinguer un rebond (`<>`) d'un
+> message ordinaire (§2 de RFC 3834) — puis la trace.
+>
 > **Il laisse une trace** : chaque message accepté porte un `Received:`
 > (RFC 5321 §4.4) — le seul en-tête que la norme oblige à ajouter, et qui
 > manquait. Il dit d'où, par où, comment (`ESMTPS` quand le saut était chiffré,
@@ -1995,7 +2000,7 @@ que `llvm-cov` n'instrumente pas sur Rust stable et dont le compteur reste à
 `0 / 0`. Les régions font le travail attendu : chaque bras d'un conditionnel en
 est une.
 
-Le gate mesure aujourd'hui **54 988 régions** et **31 624 lignes**, toutes
+Le gate mesure aujourd'hui **55 177 régions** et **31 724 lignes**, toutes
 couvertes. **Une seule dérogation, et elle est annoncée à chaque exécution** : le
 code *généré* du schéma Cap'n Proto en est exclu — il porte un accesseur par champ
 et par sens, dont la plupart ne seront jamais appelés, et les couvrir n'éprouverait

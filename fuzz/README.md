@@ -157,7 +157,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_mime_compose` | `seeds/mime-compose` | les messages de rapport — **la pièce jointe se relit, la liste blanche tient** |
 | `fuzz_ams_mime_bounce` | `seeds/mime-bounce` | le rapport de non-remise, de remise, de relais ou de retard — **aucune valeur n'ajoute un champ de statut**, et le chemin de retour est nul |
 | `fuzz_ams_authres` | `seeds/authres` | l'en-tête `Authentication-Results` — **il n'y a qu'UN champ**, tout ce qui sort est émettable, et le rembourrage occupe exactement la place réservée |
-| `fuzz_ams_mime_received` | `seeds/mime-received` | l'en-tête `Received:` — **il n'y a qu'UN champ**, aucune ligne ne dépasse 998 octets, et **aucun destinataire n'y est nommé** |
+| `fuzz_ams_mime_received` | `seeds/mime-received` | les deux en-têtes de §4.4 — **il n'y a qu'UN champ**, aucune ligne ne dépasse 998 octets, **aucun destinataire n'y est nommé**, et **le chemin de retour ressort tel qu'il est entré** |
 
 **SMTP** — ce qu'un serveur lit avant toute authentification.
 

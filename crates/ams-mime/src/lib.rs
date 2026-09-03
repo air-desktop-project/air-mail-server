@@ -107,7 +107,9 @@ pub use failure::{
 };
 pub use limits::Limits;
 pub use message::{Field, Fields, Message, Unfolded};
-pub use received::{RECEIVED_MAX, Received, Transport, write_received};
+pub use received::{
+    RECEIVED_MAX, RETURN_PATH_MAX, Received, Transport, write_received, write_return_path,
+};
 pub use select::write_header_fields;
 pub use structure::{
     BodyPart, BodyScanner, BodySpan, STRUCTURE_DEPTH_MAX, STRUCTURE_PARTS_MAX, write_body_structure,
