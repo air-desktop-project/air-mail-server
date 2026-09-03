@@ -1,1 +1,0 @@
-v=DMARC1; p=reject; spu=qaqr17; pnp=rju= spu=qaqr42; pnp=rju=z10; pvp=rjv=DMARC2; pec=reject; s=qrp=rej3u= spu=qaqr42; pnp=rju; pvp=rjv=DMARC2; pec=reject; s=qrp=rej21; pvp=r1; pvp=rja10; pvp=rjv=DMARC1; pec=rrjv=DMARC2; pec=reject; s=qrj1u= spu=qaqr4 2;pnp=rju=z10; pvp=rjv=DMARC2; pec=reject; s=qrp=rej21; pvp=r1; pvp=rjavp=1ŉ¥

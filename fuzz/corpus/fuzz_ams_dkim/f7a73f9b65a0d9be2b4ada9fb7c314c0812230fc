@@ -1,7 +1,0 @@
-v=1; a=rshas2a-56; c=relaxed/relaxed; d=example.c´om; s=brisbane; h=from:ot  g:
-D 	 E
-
-v=DKIM1; k=rsa; p=MIGfMrsha;s= hfrom:toASK:C0q:GS ==DQEUBA:ot  C:
-D 	 E
-
-H9NhtVGCQW
