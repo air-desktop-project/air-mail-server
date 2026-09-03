@@ -59,8 +59,88 @@
 //! `tmp/` est le répertoire que Maildir définit pour exactement cela.
 
 use std::io;
-use std::path::Path;
+use std::os::fd::AsRawFd as _;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Le suffixe du fichier de verrou, à côté de ce qu'il protège.
+const SUFFIXE_VERROU: &str = ".verrou";
+
+/// Un verrou exclusif sur une lecture-modification-écriture.
+///
+/// # Pourquoi [`poser`] ne suffit pas
+///
+/// [`poser`] rend l'écriture indivisible : personne ne voit un fichier à moitié
+/// écrit. Il ne dit rien de ce qui se passe AUTOUR. Deux processus qui lisent le
+/// même magasin, y ajoutent chacun un compte et le reposent finissent avec un
+/// fichier parfaitement valable — auquel il manque l'un des deux comptes, et les
+/// deux processus ont dit « ajouté ».
+///
+/// Ce n'est pas une course théorique : le serveur et `air-mail-admin` écrivent
+/// le MÊME magasin, l'un depuis son API, l'autre depuis un terminal.
+///
+/// # C'est un `flock`, et pas un fichier témoin
+///
+/// La même raison qu'au verrou d'une boîte POP3 : un fichier témoin survivrait à
+/// un arrêt brutal, et il faudrait décider au bout de combien de temps un verrou
+/// devient « périmé ». Personne ne décide bien cela. `flock` est relâché par le
+/// noyau à la mort du processus — il n'y a pas de verrou périmé, donc pas de
+/// règle à se tromper.
+///
+/// # Il porte sur un fichier À CÔTÉ, et c'est obligatoire ici
+///
+/// [`poser`] REMPLACE le fichier par renommage : le nouvel inode n'est pas
+/// l'ancien. Un `flock` posé sur la cible ne protégerait donc rien — le second
+/// écrivain verrouillerait un inode que plus personne ne désigne. Le verrou vit
+/// à côté, sous le même nom suffixé, et n'est jamais effacé : le supprimer
+/// ouvrirait une course où deux processus verrouillent deux fichiers différents
+/// portant le même nom.
+///
+/// # Il ATTEND plutôt que d'échouer
+///
+/// Une boîte POP3 déjà tenue est une réponse que la RFC prévoit ; ici, non. Un
+/// `account add` qui échouerait parce que le serveur écrivait au même instant
+/// serait une panne que rien ne justifie. Les deux détenteurs ne tiennent le
+/// verrou que le temps d'une lecture et d'une écriture.
+#[derive(Debug)]
+pub struct Verrou {
+    /// **Il n'est jamais lu** : c'est son existence, et le `flock` qui le tient,
+    /// qui comptent. Le relâchement a lieu à la fermeture, donc ici.
+    _fichier: std::fs::File,
+}
+
+/// Prend le verrou qui protège `chemin`, et attend s'il est tenu.
+///
+/// # Errors
+///
+/// L'erreur du système si le fichier de verrou ne peut être ni créé ni
+/// verrouillé. **Un verrou qu'on n'a pas pris ne se contourne pas** : l'appelant
+/// doit renoncer à écrire plutôt que d'écrire sans lui.
+pub fn verrouiller(chemin: &Path) -> io::Result<Verrou> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let mut nom = PathBuf::from(chemin).into_os_string();
+    nom.push(SUFFIXE_VERROU);
+    let fichier = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        // **`0600` ICI AUSSI**, alors que ce fichier ne contient rien : un
+        // verrou que tout le monde peut ouvrir est un verrou que tout le monde
+        // peut TENIR, et une écriture d'administration attendrait alors
+        // indéfiniment. Le masque du processus le dit déjà ; le redire ici tient
+        // même chez un appelant qui ne l'aurait pas posé.
+        .mode(0o600)
+        .open(PathBuf::from(nom))?;
+
+    // SAFETY : `flock` reçoit un descripteur valide, emprunté à `fichier` qui
+    // vit plus longtemps que l'appel.
+    if unsafe { libc::flock(fichier.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(Verrou { _fichier: fichier })
+}
 
 /// Distingue deux poses simultanées du MÊME processus.
 ///

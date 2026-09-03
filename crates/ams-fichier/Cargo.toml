@@ -9,6 +9,10 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+# `flock` : le verrou d'une lecture-modification-écriture. Un fichier témoin le
+# ferait aussi, mais survivrait à un arrêt brutal — un verrou que le noyau
+# relâche tout seul n'a pas ce défaut.
+libc = { workspace = true }
 
 [lints]
 workspace = true

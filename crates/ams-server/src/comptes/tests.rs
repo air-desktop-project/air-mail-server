@@ -233,3 +233,142 @@ async fn aucun_fichier_provisoire_ne_traine() {
         .collect();
     assert!(restants.is_empty(), "il en reste : {restants:?}");
 }
+
+// ── LE DISQUE FAIT FOI ──────────────────────────────────────────────────────
+
+/// Écrit un magasin sur le disque comme le ferait `air-mail-admin`.
+fn poser_du_dehors(atelier: &Atelier, comptes: &[Account]) {
+    let octets = ams_config::encode_accounts(comptes).expect("encodable");
+    ams_fichier::poser(&atelier.0.join("comptes.bin"), &octets).expect("posé");
+}
+
+/// **UN COMPTE AJOUTÉ AU TERMINAL EST VU SANS REDÉMARRAGE.**
+///
+/// C'était le défaut : `Comptes` était chargé une fois au démarrage et ne
+/// relisait jamais. `air-mail-admin account add` disait « compte ajouté », et le
+/// compte ne pouvait ni s'authentifier ni recevoir jusqu'au redémarrage suivant.
+#[tokio::test(flavor = "multi_thread")]
+async fn ce_qu_un_autre_ecrit_finit_par_se_voir() {
+    let atelier = atelier("relecture");
+    let magasin = magasin(&atelier, std::vec![compte("marc", &["marc@exemple.test"])]);
+    poser_du_dehors(&atelier, &[compte("marc", &["marc@exemple.test"])]);
+
+    // QUELQU'UN D'AUTRE AJOUTE UN COMPTE.
+    poser_du_dehors(
+        &atelier,
+        &[
+            compte("marc", &["marc@exemple.test"]),
+            compte("jean", &["jean@exemple.test"]),
+        ],
+    );
+
+    // LE REGARD EST BRIDÉ À UNE SECONDE : sans cela, `vue()` ferait un appel
+    // système par destinataire. On rend donc la main au-delà de ce délai, ce que
+    // l'essai fait explicitement plutôt que d'espérer.
+    tokio::time::sleep(super::REGARD + core::time::Duration::from_millis(50)).await;
+    let vue = magasin.vue();
+    assert_eq!(vue.len(), 2, "le disque a bougé et n'a pas été relu");
+    assert!(vue.iter().any(|compte| compte.login == "jean"));
+}
+
+/// **MODIFIER REPART DU DISQUE, ET N'EFFACE DONC PLUS CE QU'UN AUTRE Y A MIS.**
+///
+/// C'est l'aggravation qui accompagnait le défaut précédent : une modification
+/// par l'API réécrivait le fichier ENTIER depuis l'instantané du démarrage. Un
+/// compte ajouté au terminal entre-temps disparaissait du disque, sans un mot.
+#[tokio::test(flavor = "multi_thread")]
+async fn modifier_n_efface_pas_ce_qu_un_autre_a_pose() {
+    let atelier = atelier("fusion");
+    let magasin = magasin(&atelier, std::vec![compte("marc", &["marc@exemple.test"])]);
+    poser_du_dehors(&atelier, &[compte("marc", &["marc@exemple.test"])]);
+
+    // `air-mail-admin` ajoute `jean`. Le serveur ne l'a pas encore regardé.
+    poser_du_dehors(
+        &atelier,
+        &[
+            compte("marc", &["marc@exemple.test"]),
+            compte("jean", &["jean@exemple.test"]),
+        ],
+    );
+    // ON NE CONSULTE PAS `vue()` ICI, ET C'EST VOULU : ce serait elle qui
+    // rafraîchirait l'instantané, et l'essai n'éprouverait plus rien. Affirmer
+    // au passage qu'il est encore périmé serait de surcroît fragile — le
+    // bridage est temporel, et hacher un mot de passe coûte des dizaines de
+    // millisecondes.
+
+    // L'API change les adresses de `marc`. AVANT, cette écriture emportait
+    // `jean` avec elle.
+    magasin
+        .modifier(|comptes| {
+            let marc = comptes
+                .iter_mut()
+                .find(|vu| vu.login == "marc")
+                .ok_or(Faute::Introuvable)?;
+            marc.addresses = std::vec![String::from("marc@ailleurs.test")];
+            Ok(())
+        })
+        .expect("modifiable");
+
+    let vue = magasin.vue();
+    assert_eq!(vue.len(), 2, "`jean` a été effacé par la modification");
+    assert!(vue.iter().any(|compte| compte.login == "jean"));
+    let marc = vue
+        .iter()
+        .find(|compte| compte.login == "marc")
+        .expect("marc");
+    assert_eq!(
+        marc.addresses,
+        std::vec![String::from("marc@ailleurs.test")]
+    );
+
+    // ET LE DISQUE PORTE LES DEUX : c'est lui qui fait foi.
+    let octets = std::fs::read(atelier.0.join("comptes.bin")).expect("relu");
+    let sur_disque = ams_config::decode_accounts(&octets).expect("décodable");
+    assert_eq!(sur_disque.len(), 2);
+}
+
+/// **UN MAGASIN ILLISIBLE FAIT RENONCER, IL NE FAIT PAS ÉCRASER.**
+///
+/// Repartir du disque suppose de savoir le lire. S'il est là mais illisible —
+/// un disque qui tousse, un fichier à moitié restauré —, écrire notre instantané
+/// par-dessus effacerait ce qu'il contenait. On refuse, ce qui ne perd rien.
+#[tokio::test(flavor = "multi_thread")]
+async fn un_magasin_illisible_fait_renoncer() {
+    let atelier = atelier("illisible");
+    let magasin = magasin(&atelier, std::vec![compte("marc", &["marc@exemple.test"])]);
+    std::fs::write(atelier.0.join("comptes.bin"), b"ceci n'est pas un magasin").expect("écrit");
+
+    let faute = magasin
+        .modifier(|comptes| {
+            comptes.push(compte("jean", &["jean@exemple.test"]));
+            Ok(())
+        })
+        .expect_err("refusé");
+    assert!(
+        std::format!("{faute}").contains("ne se relit pas"),
+        "{faute}"
+    );
+    // ET LE FICHIER N'A PAS BOUGÉ : on n'a rien écrasé.
+    assert_eq!(
+        std::fs::read(atelier.0.join("comptes.bin")).expect("relu"),
+        b"ceci n'est pas un magasin"
+    );
+}
+
+/// **UN MAGASIN ABSENT N'EST PAS UNE PANNE** : notre mémoire fait foi, et
+/// l'écriture le recrée. C'est le cas du tout premier `account add`.
+#[tokio::test(flavor = "multi_thread")]
+async fn un_magasin_absent_se_recree() {
+    let atelier = atelier("absent");
+    let magasin = magasin(&atelier, std::vec![compte("marc", &["marc@exemple.test"])]);
+    assert!(!atelier.0.join("comptes.bin").exists());
+
+    magasin
+        .modifier(|comptes| {
+            comptes.push(compte("jean", &["jean@exemple.test"]));
+            Ok(())
+        })
+        .expect("modifiable");
+    assert_eq!(magasin.vue().len(), 2);
+    assert!(atelier.0.join("comptes.bin").exists());
+}

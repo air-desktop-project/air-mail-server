@@ -84,6 +84,14 @@ COMMANDES
 ///
 /// On rétablit donc le comportement d'Unix, celui que `head` et `grep`
 /// attendent de tout ce qu'ils lisent.
+fn rendre_sigpipe_au_systeme() {
+    // SAFETY: `signal` avec `SIG_DFL` sur `SIGPIPE` est l'appel que fait tout
+    // programme C au démarrage ; il ne touche à aucune mémoire de ce processus.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
 /// Restreint le masque de création : **rien pour le groupe, rien pour les
 /// autres**.
 ///
@@ -108,14 +116,6 @@ fn restreindre_le_masque() {
     // avant tout le reste.
     unsafe {
         libc::umask(0o077);
-    }
-}
-
-fn rendre_sigpipe_au_systeme() {
-    // SAFETY: `signal` avec `SIG_DFL` sur `SIGPIPE` est l'appel que fait tout
-    // programme C au démarrage ; il ne touche à aucune mémoire de ce processus.
-    unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 }
 
@@ -597,6 +597,17 @@ fn ajouter_ou_dire(fichier: &Path, nom: &str, adresses: &[String]) -> Result<boo
     let empreinte = ams_auth::hash_password(&secret, &sel()?)
         .map_err(|erreur| format!("hachage : {erreur}"))?;
 
+    // **LE VERROU AVANT LA LECTURE, ET TENU JUSQU'À L'ÉCRITURE.** Ce qui suit
+    // est une lecture-modification-écriture, et le serveur écrit le MÊME
+    // fichier depuis son API. Sans lui, deux ajouts qui se croisent produisent
+    // un magasin parfaitement valable auquel il manque un compte — et les deux
+    // programmes disent « ajouté ».
+    //
+    // Le hachage du mot de passe a lieu AVANT : il coûte quelques dizaines de
+    // millisecondes, et les passer sous le verrou ferait attendre l'autre
+    // écrivain pour un calcul qui ne regarde pas le fichier.
+    let _verrou = ams_fichier::verrouiller(fichier)
+        .map_err(|erreur| format!("`{}` : {erreur}", fichier.display()))?;
     let mut comptes = lire_magasin(fichier, true)?;
     let remplace = comptes.iter().any(|compte| compte.login == nom);
     comptes.retain(|compte| compte.login != nom);
@@ -781,14 +792,24 @@ fn aléa() -> Result<u64, String> {
 
 /// Retire un compte.
 fn retirer(fichier: &Path, nom: &str) -> ExitCode {
-    let resultat = lire_magasin(fichier, false).and_then(|mut comptes| {
+    // MÊME VERROU QUE POUR L'AJOUT, et pour la même raison : retirer un compte
+    // réécrit tous les autres.
+    //
+    // **IL EST LIÉ À UNE VARIABLE, ET NON PASSÉ À UNE FERMETURE** : `and_then`
+    // rendrait le verrou à la fin de SA fermeture, c'est-à-dire avant la
+    // lecture-modification-écriture qu'il existe pour protéger. Un verrou qui ne
+    // couvre pas ce qu'il protège ne protège rien.
+    let resultat = (|| {
+        let _verrou = ams_fichier::verrouiller(fichier)
+            .map_err(|erreur| format!("`{}` : {erreur}", fichier.display()))?;
+        let mut comptes = lire_magasin(fichier, false)?;
         let avant = comptes.len();
         comptes.retain(|compte| compte.login != nom);
         if comptes.len() == avant {
             return Err(format!("aucun compte `{nom}` dans ce magasin"));
         }
         ecrire_magasin(fichier, &comptes)
-    });
+    })();
     match resultat {
         Ok(()) => {
             println!("{} : compte `{nom}` retiré", fichier.display());

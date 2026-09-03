@@ -3846,6 +3846,82 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
+## Un compte ajouté pendant que le serveur tourne n'existait pas pour lui
+
+### `Comptes` ÉTAIT UN INSTANTANÉ DU DÉMARRAGE, ET NE RELISAIT JAMAIS
+
+Il n'y a ni `SIGHUP` ni rechargement : `authenticate` et `route` lisaient la vue
+prise au lancement. `air-mail-admin account add jean` affichait « compte `jean`
+ajouté », et jean ne pouvait ni s'authentifier ni recevoir jusqu'au redémarrage
+suivant — sans que rien ne le dise, ni la sortie, ni l'aide, ni le README.
+
+### ET LA PROCHAINE ÉCRITURE DU SERVEUR L'EFFAÇAIT
+
+`modifier` clonait l'instantané mémoire, le mutait, et réécrivait le fichier
+ENTIER. Une modification passée par l'API — un mot de passe, des adresses —
+reposait donc l'état du démarrage : un compte ajouté au terminal entre-temps
+disparaissait du disque, sans un mot. Latent aujourd'hui, l'API REST ne pouvant
+pas être activée par un chemin supporté ; vivant le jour où elle le sera.
+
+### LE DISQUE FAIT FOI, ET NON NOTRE MÉMOIRE
+
+Trois gestes, qui vont ensemble :
+
+  - **`vue()` relit quand le fichier a changé.** L'empreinte est
+    `(inode, date, nanosecondes, taille)`. L'inode suffirait presque seul, et ce
+    n'est pas un hasard : toute écriture passe par `ams_fichier::poser`, qui
+    REMPLACE par renommage, si bien que chaque version porte un inode neuf. La
+    date seule ne suffirait pas — deux écritures dans la même granularité
+    d'horodatage porteraient la même.
+  - **`modifier` repart du disque**, jamais de l'instantané.
+  - **Un verrou sérialise la lecture-modification-écriture** entre les deux
+    programmes.
+
+### LE REGARD EST BRIDÉ, PARCE QUE `vue()` EST SUR LE CHEMIN CHAUD
+
+Elle est consultée à chaque `AUTH` et à chaque destinataire. Un appel système par
+destinataire serait un coût payé pour une réponse qui ne change presque jamais :
+une seconde entre deux regards, assez courte pour qu'un `account add` prenne
+effet le temps de rebasculer sur son client.
+
+Ce rechargement **n'échoue jamais et n'attend jamais**. Un fichier momentanément
+illisible laisse la vue en place — servir la dernière chose qu'on ait su lire
+vaut mieux que refuser toute authentification parce qu'un `stat` a échoué — et un
+`try_lock` fait passer son chemin à qui trouve la place occupée.
+
+### LE VERROU PORTE À CÔTÉ, ET C'EST OBLIGATOIRE
+
+`poser` remplace par renommage : le nouvel inode n'est pas l'ancien. Un `flock`
+posé sur la cible ne protégerait rien, le second écrivain verrouillant un inode
+que plus personne ne désigne. Le verrou vit donc dans `<chemin>.verrou`, n'est
+jamais effacé — le supprimer ouvrirait une course où deux processus verrouillent
+deux fichiers différents portant le même nom — et il ATTEND au lieu d'échouer :
+un `account add` qui renoncerait parce que le serveur écrivait au même instant
+serait une panne que rien ne justifie.
+
+### CE QUE MESURE LA PREUVE
+
+Dix `account add` simultanés : **huit comptes sur dix** survivaient sans verrou,
+dix sur dix avec. Le contrôle par mutation montre les deux autres moitiés — en
+faisant repartir `modifier` de la mémoire, l'essai qui vérifie qu'un compte posé
+par un tiers n'est pas effacé tombe ; en ôtant le rechargement de `vue()`, celui
+qui vérifie qu'une écriture extérieure finit par se voir tombe aussi.
+
+### ET UN PIÈGE D'ÉCRITURE, RENCONTRÉ UNE TROISIÈME FOIS
+
+En insérant `restreindre_le_masque` par script dans la tranche précédente, la
+fonction s'est glissée ENTRE le commentaire de documentation de
+`rendre_sigpipe_au_systeme` et sa signature. Résultat : la seconde perdait sa
+documentation, et la première héritait d'une explication sur `SIGPIPE` qui ne la
+concernait pas. Ni le compilateur ni clippy ne le voient — un commentaire mal
+placé reste un commentaire valable.
+
+C'est la troisième fois dans cette série qu'écrire du Rust par script l'abîme :
+d'abord des `\r\n` devenus des sauts de ligne simples, puis une continuation `\`
+mangée par le langage du script, maintenant un commentaire déplacé. **Le code se
+pose avec un outil d'édition, pas avec un script**, dès qu'il s'agit d'insérer
+près d'un commentaire ou de manipuler des échappements. Corrigé ici.
+
 ## `air-mail-admin` détruisait ce qu'il éditait s'il était interrompu
 
 ### UNE LECTURE-MODIFICATION-ÉCRITURE TRONQUÉE SUR PLACE

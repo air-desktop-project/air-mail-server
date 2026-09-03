@@ -1646,6 +1646,13 @@ redirection du pare-feu.
 Sans `--hosted`, il n'accepte de courrier pour personne — un serveur qui
 accepterait tout serait un relais ouvert.
 
+**Un compte ajouté pendant que le serveur tourne est vu sans redémarrage.** Le
+serveur relit le magasin quand le fichier change — au plus une fois par seconde,
+`vue()` étant consultée à chaque `AUTH` et à chaque destinataire. Les deux
+programmes écrivent ce même fichier, et un verrou `flock` posé à côté
+(`<magasin>.verrou`) sérialise leurs lectures-modifications-écritures : sans lui,
+dix `account add` simultanés n'en laissaient que huit.
+
 **Ce que ces deux programmes créent naît en `0600`, et leurs répertoires en
 `0700`.** Ils resserrent leur masque de création dès le démarrage plutôt que de
 poser un mode à chaque écriture : un mode s'oublie à l'appel suivant, un masque
