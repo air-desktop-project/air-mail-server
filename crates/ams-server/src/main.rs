@@ -1528,8 +1528,9 @@ async fn servir(fichier: &Path) -> Result<(), String> {
             // le courrier de l'exploitant échoue en DMARC dès que SPF ne suffit
             // plus — un transfert, une liste de diffusion — alors même que le
             // serveur annonce au démarrage qu'il signe ce qu'il émet.
+            let remise = remise.avec_domaines(Arc::clone(&domaines_signables));
             let remise = match signature_de_la_remise.clone() {
-                Some(signataire) => remise.avec_dkim(signataire, Arc::clone(&domaines_signables)),
+                Some(signataire) => remise.avec_dkim(signataire),
                 None => remise,
             };
             match file_pour_la_remise.clone() {

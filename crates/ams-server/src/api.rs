@@ -633,8 +633,9 @@ impl ApiMaildir {
         if let Some(file) = self.file.clone() {
             remise = remise.avec_file(file, self.message_max);
         }
+        remise = remise.avec_domaines(std::sync::Arc::clone(&self.domaines));
         if let Some(signataire) = self.dkim.clone() {
-            remise = remise.avec_dkim(signataire, std::sync::Arc::clone(&self.domaines));
+            remise = remise.avec_dkim(signataire);
         }
         let issue = deposer(&mut remise, expediteur, &destinataires, &remis);
         if issue.is_err() {

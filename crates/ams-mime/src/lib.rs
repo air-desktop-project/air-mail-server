@@ -88,6 +88,7 @@ mod plume;
 mod received;
 mod select;
 mod structure;
+mod submission;
 
 pub use address::{AddressElements, address_elements, author_domain, bare_address, sole_address};
 pub use authres::{
@@ -113,4 +114,7 @@ pub use received::{
 pub use select::write_header_fields;
 pub use structure::{
     BodyPart, BodyScanner, BodySpan, STRUCTURE_DEPTH_MAX, STRUCTURE_PARTS_MAX, write_body_structure,
+};
+pub use submission::{
+    Missing, SUBMISSION_FIELDS_MAX, UNIQUE_MAX, missing_submission_fields, write_submission_fields,
 };

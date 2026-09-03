@@ -3795,7 +3795,7 @@ il l'a commis sur lui-même : une section qui s'intitule « l'état réel » est
 qu'on relit le moins, parce qu'on croit la connaître.
 
 Sont outillées : C1 (les trois étages, et la couverture qui n'est exigible que
-parce qu'ils sont séparés), C2 (le gate mesure 55 177 régions sur 29 crates,
+parce qu'ils sont séparés), C2 (le gate mesure 55 293 régions sur 29 crates,
 toutes couvertes — et il compare des comptes, non un pourcentage arrondi), C3
 (les lints, l'absence d'allocation dans les décodeurs, et 65 cibles de fuzz dont
 la CI vérifie qu'elle les lance toutes), C4 (`ams-tls` n'offre que
@@ -3845,6 +3845,92 @@ la seule vérification qui vaille est la confrontation à l'ABNF de §9, mot par
 mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
+
+## Les devoirs de soumission : deux sur trois manquaient
+
+### CE QUI ÉTAIT DÉJÀ TENU, ET CE QUI NE L'ÉTAIT PAS
+
+RFC 6409 décrit ce qu'un serveur de soumission doit compléter dans un message
+qu'un client lui confie. Le dépôt en tenait **un** :
+
+| devoir | état avant |
+|---|---|
+| §8.6 — retirer `Bcc:` | **tenu**, sur le chemin HTTP |
+| §8.1 — `Date:` s'il manque | absent |
+| §8.3 — `Message-ID:` s'il manque | absent |
+
+L'asymétrie du premier est justifiée et non une divergence : en HTTP les
+destinataires sont DÉRIVÉS des en-têtes, donc laisser `Bcc:` révélerait la copie
+cachée à tout le monde ; en SMTP ils viennent du `RCPT TO:`, et le client s'en
+est chargé.
+
+`Date:` est l'un des **deux seuls** champs que §3.6 de RFC 5322 rend
+obligatoires, avec `From:`. Un message qui sort sans est malformé : les filtres
+en aval le pénalisent lourdement, certains le refusent d'emblée — et le déposant
+ne saura jamais pourquoi son message n'arrive pas. Sans `Message-ID:`, le fil de
+discussion se casse chez le destinataire, la détection de doublons ne fonctionne
+plus, et un rapport de non-remise ne se rattache à rien : c'est ce champ qu'un
+rapport recopie pour dire DE QUEL message il parle.
+
+### ON NE REGARDE QUE LA PRÉSENCE, JAMAIS LA VALEUR
+
+Une `Date:` que le déposant a écrite de travers reste la sienne. §8.1 ne demande
+que de combler une absence ; la corriger serait décider à sa place — la même
+faute que d'écrire un diagnostic à la place d'un pair, corrigée deux tranches
+plus tôt.
+
+### LES CHAMPS VONT À LA FIN DU BLOC D'EN-TÊTE, PAS EN TÊTE
+
+`Date:` et `Message-ID:` appartiennent à l'AUTEUR, pas au saut. Les poser en tête
+mettrait deux champs qui ne sont pas de la trace au-dessus de notre `Received:`,
+que §4.4 veut « at the beginning of the message content ».
+
+`Message::header_block()` porte le CRLF du dernier champ et s'arrête AVANT la
+ligne vide : la recomposition — bloc, nos champs, ligne vide, corps — est sans
+ambiguïté. C'est une propriété qu'il fallait vérifier avant d'écrire, pas après.
+
+### TROIS CARACTÈRES REFUSÉS DANS UN `Message-ID:`, DONT UN QUI N'EST PAS ÉVIDENT
+
+`<` et `>` fermeraient le champ avant la fin. **Et `@`** : un de trop ferait deux
+identifiants d'un seul champ, et un lecteur n'aurait aucun moyen de savoir lequel
+désigne le message. Ces valeurs viennent de nous, et `ams-mime` ne croit pas son
+appelant — c'est la règle qui a déjà attrapé deux injections dans ce dépôt.
+
+### COMPLÉTER PUIS SIGNER, ET L'ESSAI QUI NE LE PROUVAIT PAS
+
+`h=` nomme `date` et `message-id`. Signer AVANT de compléter laisserait un tiers
+les ajouter en route sans casser la signature — ce que `h=` sert précisément à
+empêcher.
+
+**Le premier essai écrit pour cela ne prouvait rien.** Il comparait les positions
+du champ de signature et de la `Date:` ; or la position est LA MÊME dans les deux
+ordres, puisque la signature se pose toujours en tête et la complétion toujours à
+la fin du bloc. Le contrôle par mutation l'a montré : en inversant les deux
+appels, l'essai passait toujours.
+
+Seule une vérification cryptographique distinguerait les deux, et la clé publique
+Ed25519 qui correspond à celle des essais n'existe pas dans le dépôt. L'essai a
+donc été réécrit pour ne prétendre que ce qu'il établit — les deux ont lieu, et
+la signature est posée sur un message qui porte déjà les champs — et l'ordre est
+tenu par CONSTRUCTION, à un seul endroit qui porte la raison. **Un essai qui
+prétend prouver ce qu'il ne prouve pas est pire qu'un essai absent** : il fait
+cesser de chercher.
+
+### UN COMPTEUR DE PROCESSUS, ET NON D'INSTANCE
+
+Une remise se construit par TRANSACTION : un compteur porté par elle repartirait
+de zéro à chaque message, et deux messages de la même seconde partageraient leur
+identifiant. Le compteur vit donc aussi longtemps que le processus, et les
+nanosecondes le complètent pour que deux processus ne se rencontrent pas non
+plus. Un essai dépose huit messages de suite et exige huit identifiants
+distincts.
+
+### UN COUPLAGE ACCIDENTEL, TROUVÉ PAR UN ESSAI QUI ÉCHOUAIT
+
+Les domaines hébergés n'étaient renseignés que par `avec_dkim` : sans clé de
+signature, la complétion ne trouvait aucun domaine à mettre à droite du
+`Message-ID:` et ne faisait rien. Deux devoirs sans rapport liés par une seule
+méthode. Ils ont chacun la leur désormais.
 
 ## Le serveur annonçait qu'il signait ce qu'il émet, et il ne le faisait pas
 

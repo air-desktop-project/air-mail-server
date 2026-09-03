@@ -915,7 +915,6 @@ impl Spool {
     }
 }
 
-/// Ce qu'un essai vers UN destinataire a donné.
 /// Ce qu'un destinataire a subi, tel qu'on le rapportera.
 ///
 /// # POURQUOI DEUX TEXTES ET NON UN
@@ -942,6 +941,7 @@ struct Sort {
     origine: String,
 }
 
+/// Ce qu'un essai vers UN destinataire a donné.
 enum Issue {
     /// Le pair l'a pris en charge, et s'est ou non authentifié.
     Remis {

@@ -29,6 +29,12 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 > clair pour les domaines qu'on lui nomme, le dépose dans une boîte Maildir, et
 > refuse les sources qui abusent.
 >
+> **Ce qu'une soumission oublie, il le complète** (RFC 6409 §8) : `Date:` — l'un
+> des deux seuls champs que RFC 5322 rend obligatoires — et `Message-ID:`, sans
+> lequel aucun rapport ne peut dire de quel message il parle. Ce qui est présent
+> n'est jamais touché, fût-il écrit de travers : combler une absence n'est pas
+> corriger l'auteur.
+>
 > **Ce que ses comptes émettent est signé** (DKIM, RFC 6376), et pas seulement ses
 > rapports : sans cela, le courrier échoue en DMARC dès que SPF ne suffit plus —
 > un transfert, une liste. La signature n'est posée que pour les domaines dont ce
@@ -2006,7 +2012,7 @@ que `llvm-cov` n'instrumente pas sur Rust stable et dont le compteur reste à
 `0 / 0`. Les régions font le travail attendu : chaque bras d'un conditionnel en
 est une.
 
-Le gate mesure aujourd'hui **55 177 régions** et **31 724 lignes**, toutes
+Le gate mesure aujourd'hui **55 293 régions** et **31 783 lignes**, toutes
 couvertes. **Une seule dérogation, et elle est annoncée à chaque exécution** : le
 code *généré* du schéma Cap'n Proto en est exclu — il porte un accesseur par champ
 et par sens, dont la plupart ne seront jamais appelés, et les couvrir n'éprouverait

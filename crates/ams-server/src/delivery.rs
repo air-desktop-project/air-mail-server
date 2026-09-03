@@ -291,8 +291,21 @@ impl MaildirDelivery {
     /// C'est le défaut qui ne ment pas : un serveur qu'on n'a pas doté d'une clé
     /// ne doit pas produire de signature, et surtout pas une signature que
     /// personne ne pourrait vérifier.
-    pub fn avec_dkim(mut self, signataire: DkimSigner, domaines: Arc<Vec<String>>) -> Self {
+    pub fn avec_dkim(mut self, signataire: DkimSigner) -> Self {
         self.dkim = Some(signataire);
+        self
+    }
+
+    /// Les domaines dont ce serveur tient la zone.
+    ///
+    /// # ILS NE SERVENT PAS QU'À SIGNER
+    ///
+    /// Ils disent aussi pour qui l'on peut fabriquer un `Message-ID:` (RFC 6409
+    /// §8.3) : un identifiant d'un domaine qu'on ne tient pas ne serait unique
+    /// que par chance. Les lier au signataire ferait dépendre la complétion de
+    /// la présence d'une clé, ce qui n'a aucune raison d'être.
+    #[must_use]
+    pub fn avec_domaines(mut self, domaines: Arc<Vec<String>>) -> Self {
         self.domaines = domaines;
         self
     }
@@ -531,6 +544,99 @@ impl MaildirDelivery {
         Ok(())
     }
 
+    /// Complète ce qu'un serveur de SOUMISSION doit compléter (RFC 6409 §8).
+    ///
+    /// # CE N'EST PAS LE TRAVAIL D'UN RELAIS
+    ///
+    /// §6.4 de RFC 5321 déconseille à un relais de toucher aux en-têtes d'un
+    /// message qui n'est pas le sien. Cette fonction ne s'applique qu'au tampon
+    /// SORTANT — et rien n'y entre qui ne soit une soumission, puisqu'un
+    /// destinataire d'ailleurs n'est accepté que d'un pair authentifié.
+    ///
+    /// # LES CHAMPS VONT À LA FIN DU BLOC D'EN-TÊTE
+    ///
+    /// `Date:` et `Message-ID:` appartiennent à l'AUTEUR, pas au saut. Les poser
+    /// en tête mettrait deux champs qui ne sont pas de la trace au-dessus de
+    /// notre `Received:`, que §4.4 veut « at the beginning of the message
+    /// content ».
+    ///
+    /// # UN MESSAGE QU'ON NE SAIT PAS LIRE PART TEL QUEL
+    ///
+    /// La même règle que pour la signature : le refuser serait une punition
+    /// qu'on infligerait au déposant, et un message malformé qu'on fait suivre
+    /// reste un message que quelqu'un attend.
+    fn completer(&self, corps: Vec<u8>) -> Vec<u8> {
+        let bornes = ams_mime::Limits::DEFAULT;
+        let Ok(message) = ams_mime::Message::parse(&corps, &bornes) else {
+            return corps;
+        };
+        let manquants = ams_mime::missing_submission_fields(&message);
+        if manquants.rien() {
+            return corps;
+        }
+        // **LE DOMAINE DE DROITE EST CELUI DU `From:`** : un `Message-ID` d'un
+        // domaine qu'on ne tient pas ne serait unique que par chance, et c'est
+        // l'unicité qui fait tout l'intérêt du champ (§3.6.4 de RFC 5322).
+        let Some(domaine) = self.domaine_de_l_auteur(&message) else {
+            return corps;
+        };
+        let unique = Self::unique();
+        let mut place = [0_u8; ams_mime::SUBMISSION_FIELDS_MAX];
+        let Ok(ecrits) = ams_mime::write_submission_fields(
+            &mut place,
+            manquants,
+            Self::maintenant(),
+            unique.as_bytes(),
+            domaine.as_bytes(),
+        ) else {
+            return corps;
+        };
+        // `header_block` porte le CRLF du dernier champ et s'arrête AVANT la
+        // ligne vide : la recomposition est sans ambiguïté.
+        let mut complet =
+            Vec::with_capacity(corps.len().saturating_add(ecrits.len()).saturating_add(2));
+        complet.extend_from_slice(message.header_block());
+        complet.extend_from_slice(ecrits);
+        complet.extend_from_slice(b"\r\n");
+        complet.extend_from_slice(message.body());
+        complet
+    }
+
+    /// Le domaine du `From:`, s'il est l'un des nôtres.
+    fn domaine_de_l_auteur(&self, message: &ams_mime::Message<'_>) -> Option<String> {
+        let champ = message.fields().find(|champ| champ.name_is(b"from"))?;
+        let adresse = ams_mime::bare_address(champ.raw_value())?;
+        let adresse = core::str::from_utf8(adresse).ok()?;
+        let (_, domaine) = adresse.rsplit_once('@')?;
+        self.domaines
+            .iter()
+            .find(|notre| notre.eq_ignore_ascii_case(domaine))
+            .cloned()
+    }
+
+    /// Une valeur qu'aucun autre message de ce serveur ne portera.
+    ///
+    /// # POURQUOI UN COMPTEUR DE PROCESSUS, ET NON D'INSTANCE
+    ///
+    /// Une remise se construit par TRANSACTION : un compteur porté par elle
+    /// repartirait de zéro à chaque message, et deux messages de la même
+    /// seconde partageraient leur identifiant. Le compteur vit donc aussi
+    /// longtemps que le processus, et les nanosecondes le complètent pour que
+    /// deux processus ne se rencontrent pas non plus.
+    fn unique() -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SUITE: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |depuis| u64::from(depuis.subsec_nanos()));
+        let rang = SUITE.fetch_add(1, Ordering::Relaxed);
+        format!(
+            "{:x}-{:x}",
+            nanos.rotate_left(24) ^ rang,
+            Self::maintenant()
+        )
+    }
+
     /// Signe le message sortant (DKIM, RFC 6376), quand on peut le faire.
     ///
     /// # POURQUOI ICI, ET UNE SEULE FOIS
@@ -600,7 +706,12 @@ impl MaildirDelivery {
             return Err(DeliveryFailure::Permanent);
         };
         let sortants = core::mem::take(&mut self.sortants);
+        // **COMPLÉTER PUIS SIGNER**, et pas l'inverse : la signature doit
+        // couvrir ce qu'on ajoute. `h=` nomme `date` et `message-id` — les
+        // signer absents laisserait un tiers les ajouter en route sans casser la
+        // signature, ce qui est exactement ce que `h=` sert à empêcher.
         let brut = core::mem::take(&mut self.corps);
+        let brut = self.completer(brut);
         let corps = self.signer(brut);
         let rapports: Vec<ams_queue::Report<'_>> = self
             .rapports
@@ -864,12 +975,22 @@ mod tests {
 
     /// Met un message en file et rend ce qui y a été déposé.
     fn depose(remise: &mut MaildirDelivery, racine: &Path, de: &str) -> String {
+        let entete = format!("From: {de}\r\nTo: ailleurs@autre.test\r\n\r\nbonjour\r\n");
+        depose_tel_quel(remise, racine, de, &entete)
+    }
+
+    /// Le même, avec un message écrit à la main.
+    fn depose_tel_quel(
+        remise: &mut MaildirDelivery,
+        racine: &Path,
+        de: &str,
+        message: &str,
+    ) -> String {
         remise.begin(Some(de.as_bytes()));
         remise
             .add_recipient(b"ailleurs@autre.test")
             .expect("un sortant");
-        let entete = format!("From: {de}\r\nTo: ailleurs@autre.test\r\n\r\nbonjour\r\n");
-        remise.append(entete.as_bytes()).expect("corps");
+        remise.append(message.as_bytes()).expect("corps");
         remise.finish().expect("déposé");
         // Le message en file est le seul `.eml` du dossier.
         let file = racine.join("file");
@@ -884,15 +1005,17 @@ mod tests {
     fn remise_avec_file(racine: &Path) -> MaildirDelivery {
         std::fs::create_dir_all(racine.join("file")).expect("dossier");
         let (_boites, remise) = remise(racine);
-        remise.avec_file(
-            ams_loop_tokio::Spool::new(
-                racine.join("file"),
-                ams_queue::Backoff::DEFAULT,
-                String::from("mail.example.com"),
-                String::from("postmaster@example.com"),
-            ),
-            1_048_576,
-        )
+        remise
+            .avec_domaines(Arc::new(std::vec![String::from("example.com")]))
+            .avec_file(
+                ams_loop_tokio::Spool::new(
+                    racine.join("file"),
+                    ams_queue::Backoff::DEFAULT,
+                    String::from("mail.example.com"),
+                    String::from("postmaster@example.com"),
+                ),
+                1_048_576,
+            )
     }
 
     /// **CE QUE NOS COMPTES ÉMETTENT EST SIGNÉ** (RFC 6376).
@@ -905,7 +1028,9 @@ mod tests {
     async fn ce_que_nos_comptes_emettent_est_signe() {
         let temporaire = Ephemere::nouveau();
         let (signataire, domaines) = signataire(&["example.com"]);
-        let mut remise = remise_avec_file(&temporaire.0).avec_dkim(signataire, domaines);
+        let mut remise = remise_avec_file(&temporaire.0)
+            .avec_domaines(domaines)
+            .avec_dkim(signataire);
 
         let ecrit = depose(&mut remise, &temporaire.0, "marie@example.com");
         // **EN TÊTE** : §3.5 veut que le champ précède ce qu'il couvre.
@@ -929,7 +1054,9 @@ mod tests {
     async fn on_ne_signe_pas_pour_le_domaine_des_autres() {
         let temporaire = Ephemere::nouveau();
         let (signataire, domaines) = signataire(&["example.com"]);
-        let mut remise = remise_avec_file(&temporaire.0).avec_dkim(signataire, domaines);
+        let mut remise = remise_avec_file(&temporaire.0)
+            .avec_domaines(domaines)
+            .avec_dkim(signataire);
 
         let ecrit = depose(&mut remise, &temporaire.0, "marie@ailleurs.test");
         assert!(
@@ -950,5 +1077,154 @@ mod tests {
         let ecrit = depose(&mut remise, &temporaire.0, "marie@example.com");
         assert!(!ecrit.contains("DKIM-Signature"), "{ecrit}");
         assert!(ecrit.contains("From: marie@example.com\r\n"), "{ecrit}");
+    }
+
+    // ── LES DEVOIRS DE SOUMISSION (RFC 6409 §8) ─────────────────────────────
+
+    /// **`Date:` EST L'UN DES DEUX SEULS CHAMPS OBLIGATOIRES** (§3.6 de
+    /// RFC 5322), et §8.1 de RFC 6409 en fait le devoir du serveur de
+    /// soumission.
+    ///
+    /// Un message qui sort sans est malformé : les filtres en aval le pénalisent
+    /// lourdement, certains le refusent d'emblée — et le déposant ne saura
+    /// jamais pourquoi son message n'arrive pas.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ce_qui_manque_a_une_soumission_est_complete() {
+        let temporaire = Ephemere::nouveau();
+        let mut remise = remise_avec_file(&temporaire.0);
+
+        let ecrit = depose_tel_quel(
+            &mut remise,
+            &temporaire.0,
+            "marie@example.com",
+            "From: marie@example.com\r\nTo: ailleurs@autre.test\r\n\r\nbonjour\r\n",
+        );
+        assert!(ecrit.contains("\r\nDate: "), "{ecrit}");
+        assert!(ecrit.contains("\r\nMessage-ID: <"), "{ecrit}");
+        // **LE DOMAINE DE DROITE EST LE NÔTRE** : un identifiant d'un domaine
+        // qu'on ne tient pas ne serait unique que par chance.
+        assert!(ecrit.contains("@example.com>\r\n"), "{ecrit}");
+        // **ET LES CHAMPS VONT À LA FIN DE L'EN-TÊTE**, pas au-dessus de la
+        // trace : `Date:` et `Message-ID:` sont à l'auteur, pas au saut.
+        let entete = ecrit.split("\r\n\r\n").next().expect("un en-tête");
+        assert!(entete.starts_with("From: marie@example.com"), "{entete}");
+        assert!(entete.contains("Date: "), "{entete}");
+        // Le corps n'a pas bougé.
+        assert!(ecrit.ends_with("\r\n\r\nbonjour\r\n"), "{ecrit}");
+    }
+
+    /// **CE QUI EST PRÉSENT N'EST PAS TOUCHÉ**, même écrit de travers.
+    ///
+    /// §8.1 ne demande que de combler une absence. Corriger une date douteuse
+    /// serait décider à la place du déposant — la même faute que d'écrire un
+    /// diagnostic à la place d'un pair.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ce_qui_est_present_n_est_pas_touche() {
+        let temporaire = Ephemere::nouveau();
+        let mut remise = remise_avec_file(&temporaire.0);
+
+        let ecrit = depose_tel_quel(
+            &mut remise,
+            &temporaire.0,
+            "marie@example.com",
+            "From: marie@example.com\r\nDate: hier\r\nMessage-ID: <sien@example.com>\r\n\r\nbonjour\r\n",
+        );
+        assert!(ecrit.contains("Date: hier\r\n"), "{ecrit}");
+        assert!(ecrit.contains("<sien@example.com>"), "{ecrit}");
+        // Un seul de chaque : on n'en a pas ajouté par-dessus.
+        assert_eq!(ecrit.matches("Date: ").count(), 1, "{ecrit}");
+        assert_eq!(ecrit.matches("Message-ID: ").count(), 1, "{ecrit}");
+    }
+
+    /// **LA SIGNATURE COUVRE CE QU'ON A AJOUTÉ**, et c'est l'ordre qui le fait.
+    ///
+    /// `h=` nomme `date` et `message-id`. Signer AVANT de compléter laisserait un
+    /// tiers les ajouter en route sans casser la signature — ce que `h=` sert
+    /// précisément à empêcher.
+    ///
+    /// # CE QUE CET ESSAI PROUVE, ET CE QU'IL NE PROUVE PAS
+    ///
+    /// Il prouve que les deux ont lieu, et que la signature est posée par-dessus
+    /// un message qui porte déjà les champs. **Il ne prouve PAS que la signature
+    /// est valable sur eux** : seule une vérification cryptographique le dirait,
+    /// et la clé publique Ed25519 qui correspond à celle-ci n'existe pas dans ces
+    /// essais.
+    ///
+    /// L'ordre est donc tenu par CONSTRUCTION : un seul endroit enchaîne les
+    /// deux, et il porte la raison. C'est écrit ici plutôt que laissé croire —
+    /// un essai qui prétendrait prouver l'ordre par la position se tromperait,
+    /// puisque la position est la même dans les deux ordres.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn la_signature_est_posee_sur_un_message_deja_complete() {
+        let temporaire = Ephemere::nouveau();
+        let (signataire, domaines) = signataire(&["example.com"]);
+        let mut remise = remise_avec_file(&temporaire.0)
+            .avec_domaines(domaines)
+            .avec_dkim(signataire);
+
+        let ecrit = depose_tel_quel(
+            &mut remise,
+            &temporaire.0,
+            "marie@example.com",
+            "From: marie@example.com\r\nTo: ailleurs@autre.test\r\n\r\nbonjour\r\n",
+        );
+        assert!(ecrit.starts_with("DKIM-Signature: "), "{ecrit}");
+        assert!(ecrit.contains("\r\nDate: "), "{ecrit}");
+        assert!(ecrit.contains("\r\nMessage-ID: <"), "{ecrit}");
+        // Les deux champs sont nommés dans ce que la signature couvre.
+        assert!(
+            ecrit.contains("h=from:to:subject:date:message-id"),
+            "{ecrit}"
+        );
+    }
+
+    /// **ON NE COMPLÈTE PAS POUR LE DOMAINE DES AUTRES.**
+    ///
+    /// Sans domaine à nous, on n'a rien d'unique à mettre à droite du
+    /// `Message-ID:` — et un identifiant qui n'est unique que par chance ne vaut
+    /// rien. Le message part alors tel quel.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sans_domaine_a_nous_rien_n_est_complete() {
+        let temporaire = Ephemere::nouveau();
+        let mut remise = remise_avec_file(&temporaire.0);
+
+        let ecrit = depose_tel_quel(
+            &mut remise,
+            &temporaire.0,
+            "marie@ailleurs.test",
+            "From: marie@ailleurs.test\r\nTo: ailleurs@autre.test\r\n\r\nbonjour\r\n",
+        );
+        assert!(!ecrit.contains("Date: "), "{ecrit}");
+        assert!(!ecrit.contains("Message-ID: "), "{ecrit}");
+    }
+
+    /// **DEUX MESSAGES N'ONT PAS LE MÊME IDENTIFIANT**, même dans la même
+    /// seconde.
+    ///
+    /// Une remise se construit par transaction : un compteur porté par elle
+    /// repartirait de zéro à chaque message, et c'est exactement le cas que cet
+    /// essai met en jeu.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deux_messages_n_ont_pas_le_meme_identifiant() {
+        let temporaire = Ephemere::nouveau();
+        let mut identifiants = std::collections::BTreeSet::new();
+        for rang in 0..8 {
+            let racine = temporaire.0.join(format!("envoi{rang}"));
+            std::fs::create_dir_all(&racine).expect("dossier");
+            let mut remise = remise_avec_file(&racine);
+            let ecrit = depose_tel_quel(
+                &mut remise,
+                &racine,
+                "marie@example.com",
+                "From: marie@example.com\r\n\r\nbonjour\r\n",
+            );
+            let debut = ecrit.find("Message-ID: <").expect("complété") + 13;
+            let fin = debut + ecrit[debut..].find('>').expect("fermé");
+            assert!(
+                identifiants.insert(ecrit[debut..fin].to_string()),
+                "{ecrit}"
+            );
+        }
+        assert_eq!(identifiants.len(), 8);
     }
 }

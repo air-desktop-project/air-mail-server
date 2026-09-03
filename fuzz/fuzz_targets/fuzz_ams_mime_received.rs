@@ -34,13 +34,17 @@
 //! 7. **LE `Return-Path:` EST UNE LIGNE, ET UNE SEULE**, close par un `CRLF`, et
 //!    ce qu'elle porte est exactement ce qu'on lui a donné — ni tronqué, ni
 //!    complété. Un chemin coupé désignerait quelqu'un d'autre.
+//! 8. **CE QU'UNE SOUMISSION FAIT COMPLÉTER SE COMPTE** (RFC 6409 §8) : autant
+//!    de champs écrits que de champs déclarés manquants, pas un de plus, et
+//!    chacun clos par son `CRLF`.
 //!
 //! Harnais **pur** : aucune entrée-sortie (C1).
 
 #![no_main]
 
 use ams_mime::{
-    RECEIVED_MAX, RETURN_PATH_MAX, Received, Transport, write_received, write_return_path,
+    Missing, RECEIVED_MAX, RETURN_PATH_MAX, Received, SUBMISSION_FIELDS_MAX, Transport,
+    write_received, write_return_path, write_submission_fields,
 };
 use arbitrary::Arbitrary;
 use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -60,6 +64,11 @@ struct Entree {
     date: u64,
     /// Le chemin de retour, tel que le pair l'a écrit. **VIENT DE LUI.**
     chemin: Vec<u8>,
+    /// Ce qui manque à une soumission (RFC 6409 §8), et de quoi le compléter.
+    sans_date: bool,
+    sans_identifiant: bool,
+    unique: Vec<u8>,
+    domaine_du_de: Vec<u8>,
     /// La place qu'on donne, bornée par ce que le produit réserve.
     place: u16,
 }
@@ -171,6 +180,54 @@ fuzz_target!(|entree: Entree| {
         corps,
         [&b"Return-Path: <"[..], &entree.chemin, b">"].concat(),
         "le chemin a changé en route"
+    );
+
+    // ── 8. LES CHAMPS D'UNE SOUMISSION (RFC 6409 §8) ────────────────────────
+    //
+    // Ils s'écrivent à la fin du bloc d'en-tête d'un message qu'un de nos
+    // comptes nous confie. Un `CRLF` de trop y ouvrirait un champ que personne
+    // n'a demandé, au milieu de l'en-tête de quelqu'un d'autre.
+    let manquants = Missing {
+        date: entree.sans_date,
+        message_id: entree.sans_identifiant,
+    };
+    let mut champs = vec![GARDE; SUBMISSION_FIELDS_MAX.saturating_add(64)];
+    let issue = {
+        let dedans = champs
+            .get_mut(..SUBMISSION_FIELDS_MAX)
+            .expect("le tampon fait au moins la borne annoncée");
+        write_submission_fields(
+            dedans,
+            manquants,
+            entree.date,
+            &entree.unique,
+            &entree.domaine_du_de,
+        )
+        .map(<[u8]>::len)
+    };
+    assert!(
+        champs
+            .get(SUBMISSION_FIELDS_MAX..)
+            .is_some_and(|bord| bord.iter().all(|octet| *octet == GARDE)),
+        "écrit au-delà de la place donnée"
+    );
+    let Ok(combien) = issue else {
+        return;
+    };
+    let ecrit = champs.get(..combien).unwrap_or_default();
+    assert!(
+        emettable(ecrit),
+        "un octet qu'on ne peut pas mettre sur le fil"
+    );
+    // **AUTANT DE LIGNES QUE DE CHAMPS DÉCLARÉS MANQUANTS**, pas une de plus :
+    // c'est ce qui interdit à une valeur d'ouvrir un champ à notre place.
+    let attendues = usize::from(manquants.date) + usize::from(manquants.message_id);
+    let lignes = ecrit.windows(2).filter(|paire| *paire == b"\r\n").count();
+    assert_eq!(lignes, attendues, "un champ est apparu ou a disparu");
+    // Et chacune se ferme : rien ne traîne sans son `CRLF`.
+    assert!(
+        ecrit.is_empty() || ecrit.ends_with(b"\r\n"),
+        "une ligne ouverte"
     );
 });
 
