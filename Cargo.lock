@@ -47,6 +47,7 @@ dependencies = [
 name = "ams-admin"
 version = "0.1.0"
 dependencies = [
+ "ams-admin-options",
  "ams-api",
  "ams-auth",
  "ams-config",
@@ -57,6 +58,17 @@ dependencies = [
  "ams-queue",
  "ams-store",
  "libc",
+]
+
+[[package]]
+name = "ams-admin-options"
+version = "0.1.0"
+dependencies = [
+ "ams-config",
+ "ams-guard",
+ "ams-proto-imap",
+ "ams-proto-smtp",
+ "ams-queue",
 ]
 
 [[package]]

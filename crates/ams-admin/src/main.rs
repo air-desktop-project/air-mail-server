@@ -14,8 +14,6 @@
 //! demande, celle qui prouve que les fichiers suffisent à retrouver ce que
 //! l'index dirait.
 
-mod options;
-
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -23,7 +21,7 @@ use ams_auth::Account;
 use ams_config::{Configuration, Enforcement};
 use ams_store::Maildir;
 
-use crate::options::{Demande, OPTIONS_AIDE};
+use ams_admin_options::{Demande, OPTIONS_AIDE};
 
 /// Le texte de `--help`.
 const AIDE: &str = "\
@@ -136,7 +134,7 @@ fn main() -> ExitCode {
 
 /// Écrit une configuration binaire.
 fn ecrire(fichier: &Path, arguments: &[&str]) -> ExitCode {
-    let options = match options::parse(arguments) {
+    let options = match ams_admin_options::parse(arguments) {
         Ok(Demande::Ecrire(options)) => *options,
         Ok(Demande::Aide) => {
             println!("{OPTIONS_AIDE}");

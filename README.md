@@ -220,6 +220,7 @@ des octets **et des actions**. Elles n'attendent jamais.
 | `ams-quic` | la machine de connexion QUIC : la grammaire rencontre les clés | **paquets, flux, contrôle de flux, pertes, états** |
 | `ams-h3` | le conducteur HTTP/3 : dans quel ordre les pièces parlent | **flux critiques, réglages, requêtes, `GOAWAY`** |
 | `ams-api` | l'API REST : ce qu'une requête désigne, et le droit qu'elle demande | **routage, portées, jetons scellés, JSON** |
+| `ams-admin-options` | la grammaire de la ligne de commande d'`air-mail-admin` | **options, valeurs refusées, cohérences entre options** |
 
 ### Étage 3 — exécution
 

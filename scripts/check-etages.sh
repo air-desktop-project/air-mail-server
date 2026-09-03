@@ -41,7 +41,13 @@ racine=$(cd "$(dirname "$0")/.." && pwd)
 cd "$racine"
 
 # ── Le périmètre, lu là où il vit ───────────────────────────────────────────
+# LES COMMENTAIRES DU TABLEAU NE SONT PAS DES CRATES. Ce qui suit un `#` est de
+# la prose, et la prose parle des crates par leur nom : sans cette coupe, écrire
+# « elle vivait dans `ams-admin` » AJOUTE `ams-admin` au périmètre. C'est arrivé
+# en documentant l'entrée d'une crate — le compte est passé de 30 à 31, et le
+# gate s'est mis à juger une crate que personne n'y avait mise.
 crates=$(sed -n '/^CRATES_SANS_IO=(/,/^)/p' scripts/check-couverture.sh \
+    | sed 's/#.*//' \
     | grep -oE 'ams-[a-z0-9-]+' || true)
 
 if [ -z "$crates" ]; then
@@ -89,7 +95,23 @@ echo
 #
 # `tokio` est nommé pour la même raison qu'il l'est dans C1 : une crate d'étage 2
 # qui en dépendrait aurait choisi un modèle d'exécution pour ses appelants.
-INTERDITS='std::net|std::fs|std::io|std::process|std::thread|std::time::Instant|std::time::SystemTime|(^|[^-a-z])tokio::|use tokio'
+#
+# `std::net` N'Y EST PLUS EN BLOC, et c'est la même distinction que ci-dessus. Ce
+# module porte deux choses de natures opposées : des TYPES D'ADRESSE —
+# `SocketAddr`, `IpAddr` — qui sont des valeurs, et des SOCKETS — `TcpListener`,
+# `TcpStream`, `UdpSocket` — qui ouvrent, lisent et attendent. Analyser
+# « 127.0.0.1:53 » n'ouvre rien ; c'est de la grammaire, et une grammaire a le
+# droit de refuser ce qui n'en est pas une.
+#
+# Ce sont donc les SOCKETS qui sont nommées, et par leur nom seul plutôt que par
+# leur chemin : `use std::net::{SocketAddr, TcpStream}` puis `TcpStream` tout
+# court se serait glissé sous un motif ancré sur `std::net::`. Nommer le type
+# attrape les deux formes.
+#
+# Ce que cela cède : une API de socket que ce motif ne nomme pas encore passerait.
+# C'est le prix d'une règle qui juge la capacité plutôt que le module, et il se
+# paie en revenant ici le jour où `std` en ajoute une.
+INTERDITS='std::fs|std::io|std::process|std::thread|std::time::Instant|std::time::SystemTime|(^|[^-a-z])tokio::|use tokio|\b(TcpListener|TcpStream|UdpSocket|ToSocketAddrs)\b'
 
 violations=0
 

@@ -68,6 +68,13 @@ CRATES_SANS_IO=(
     ams-config
     ams-index
     ams-api
+    # LA GRAMMAIRE DE LA LIGNE DE COMMANDE EN FAIT PARTIE, et elle n'y était pas.
+    # Elle vivait dans `ams-admin`, exemptée par le `main.rs` de cette crate — le
+    # seul fichier des deux qui lise et écrive. Une grammaire pure de 1 700
+    # lignes échappait ainsi au 100 %, et trois zéros destructeurs s'y étaient
+    # logés : un plafond de message qui refusait tout, un compte de connexions
+    # qui n'en servait aucune, un délai SPF qui ajournait chaque message.
+    ams-admin-options
 )
 
 # ── LA SEULE DÉROGATION, ET ELLE EST NOMMÉE ─────────────────────────────────

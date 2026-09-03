@@ -71,6 +71,11 @@ members = [
     # Binaires (C12)
     "crates/ams-server",
     "crates/ams-admin",
+    # La GRAMMAIRE de sa ligne de commande vit à part du binaire qui l'emploie :
+    # elle ne fait aucune entrée-sortie, et c'est ce qui la met sous le 100 % de
+    # C2. Logée dans `ams-admin`, elle en était exemptée par la crate qui
+    # l'hébergeait — et trois zéros destructeurs s'y étaient logés.
+    "crates/ams-admin-options",
 ]
 
 # `fuzz/` est une crate cargo-fuzz HORS de ce workspace, et pas par commodité :
@@ -108,6 +113,7 @@ ams-tlsrpt = { path = "crates/ams-tlsrpt", version = "0.1.0" }
 ams-dmarc = { path = "crates/ams-dmarc", version = "0.1.0" }
 ams-dns = { path = "crates/ams-dns", version = "0.1.0" }
 ams-guard = { path = "crates/ams-guard", version = "0.1.0" }
+ams-admin-options = { path = "crates/ams-admin-options", version = "0.1.0" }
 ams-index = { path = "crates/ams-index", version = "0.1.0" }
 ams-loop-tokio = { path = "crates/ams-loop-tokio", version = "0.1.0" }
 ams-proto-imap = { path = "crates/ams-proto-imap", version = "0.1.0" }

@@ -1,0 +1,23 @@
+[package]
+name = "ams-admin-options"
+description = "La grammaire de la ligne de commande d'air-mail-admin, sans entrée-sortie"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+ams-config = { workspace = true }
+ams-guard = { workspace = true }
+ams-proto-imap = { workspace = true }
+ams-proto-smtp = { workspace = true }
+
+[dev-dependencies]
+# Uniquement pour les essais : ils confrontent la reprise que ces options
+# décrivent à celle que la file emploie réellement.
+ams-queue = { workspace = true }
+
+[lints]
+workspace = true

@@ -747,10 +747,21 @@ where
             "--domain" => options.domain = valeur()?,
             "--hosted" => options.hosted.push(valeur()?),
             "--max-message" => {
-                let brute = valeur()?;
-                options.max_message_octets = brute
-                    .parse()
-                    .map_err(|_| ArgError::new(format!("`{brute}` n'est pas un nombre")))?;
+                // **ZÉRO ANNONCERAIT L'INVERSE DE CE QU'IL FAIT.** §3 de RFC 1870
+                // donne un sens à `SIZE 0` : « aucune taille maximale n'est en
+                // vigueur ». Or ce serveur compare `> max_message`, si bien
+                // qu'un plafond nul refuse TOUT message d'au moins un octet. Le
+                // pair lirait « pas de limite » et se verrait refuser sur un
+                // octet, sans rien à corriger chez lui.
+                //
+                // Et l'illimité n'est pas une option que ce serveur offre : C3
+                // veut des longueurs bornées. Il n'y a donc pas de sens à donner
+                // à ce zéro-là, seulement un refus.
+                options.max_message_octets = pas_zero(
+                    &valeur()?,
+                    "un plafond nul annonce `SIZE 0` — « aucune limite » au sens de RFC 1870 \
+                     §3 — et refuse pourtant tout message d'au moins un octet",
+                )?;
             }
             "--tls-cert" => options.tls_cert = Some(PathBuf::from(valeur()?)),
             "--dkim-selector" => options.dkim_selector = Some(valeur()?),
@@ -786,6 +797,9 @@ where
             }
             "--dmarc-org-name" => options.dmarc_org_name = Some(valeur()?),
             "--dmarc-report-email" => options.dmarc_report_email = Some(valeur()?),
+            // ZÉRO EST LICITE ICI, ET IL VEUT DIRE « UN JOUR ». C'est la valeur
+            // que la configuration substitue, et c'est ce qui rend ce champ
+            // ajoutable sans rien casser : un fichier antérieur décode zéro.
             "--dmarc-report-interval" => {
                 let brute = valeur()?;
                 options.dmarc_report_interval = brute
@@ -808,10 +822,16 @@ where
                 }
             }
             "--spf-timeout-ms" => {
-                let brute = valeur()?;
-                options.spf_timeout_millis = brute
-                    .parse()
-                    .map_err(|_| ArgError::new(format!("`{brute}` n'est pas un nombre")))?;
+                // **UN DÉLAI NUL EXPIRE AVANT QUE LA QUESTION PARTE.** Toute
+                // interrogation du résolveur échoue alors, et SPF ne rend plus
+                // que des pannes. Sous `--spf enforce`, une panne s'ajourne :
+                // CHAQUE message reçoit un `451`, et le serveur n'accepte plus
+                // rien — sans qu'aucune ligne ne dise pourquoi.
+                options.spf_timeout_millis = pas_zero(
+                    &valeur()?,
+                    "un délai nul fait expirer la question avant qu'elle parte : SPF ne rend \
+                     plus que des pannes, et `--spf enforce` ajourne alors chaque message",
+                )?;
             }
             "--listen-pop3" => {
                 let brute = valeur()?;
@@ -830,10 +850,17 @@ where
                 );
             }
             "--max-connections" => {
-                let brute = valeur()?;
-                options.max_connections = brute
-                    .parse()
-                    .map_err(|_| ArgError::new(format!("`{brute}` n'est pas un nombre")))?;
+                // **C'EST LE MÊME REFUS QUE `--connections-per-minute`**, en plus
+                // total : celui-là n'accepte personne pendant une minute,
+                // celui-ci jamais. Le nombre devient le compte de jetons d'un
+                // sémaphore, sur les quatre écoutes à la fois ; à zéro, aucune
+                // connexion n'est jamais servie. Le refuser là et pas ici serait
+                // garder la petite porte et laisser la grande.
+                options.max_connections = pas_zero(
+                    &valeur()?,
+                    "un serveur qui n'accepte aucune connexion ne sert personne, sur aucune \
+                     de ses écoutes",
+                )?;
             }
             // ── TLSRPT (RFC 8460) ───────────────────────────────────────────
             "--tlsrpt-dir" => options.tlsrpt_dir = Some(PathBuf::from(valeur()?)),
@@ -1054,14 +1081,27 @@ fn nombre(brute: &str) -> Result<u32, ArgError> {
 }
 
 /// Un nombre dont zéro ne voudrait rien dire, et `pourquoi` le dit.
-fn pas_zero(brute: &str, pourquoi: &str) -> Result<u32, ArgError> {
-    match nombre(brute)? {
+/// # Pourquoi elle est GÉNÉRIQUE
+///
+/// Les nombres qu'elle garde ne sont pas du même type : un plafond de message se
+/// compte en `u64`, un nombre de connexions en `usize`, un délai en `u32`. Trois
+/// copies auraient laissé la règle s'appliquer à deux d'entre eux — c'est
+/// exactement ce qui était arrivé, et le prix en a été trois zéros destructeurs
+/// qu'aucun refus n'arrêtait.
+fn pas_zero<T>(brute: &str, pourquoi: &str) -> Result<T, ArgError>
+where
+    T: core::str::FromStr + PartialEq + From<u8>,
+{
+    let combien: T = brute
+        .parse()
+        .map_err(|_| ArgError::new(format!("`{brute}` n'est pas un nombre")))?;
+    if combien == T::from(0) {
         // ON REFUSE ICI, PAS AU DÉMARRAGE DU SERVEUR : l'administrateur est
         // devant son terminal, et c'est le seul moment où le lui dire coûte une
         // seconde plutôt qu'une astreinte.
-        0 => Err(ArgError::new(format!("`0` est refusé : {pourquoi}"))),
-        combien => Ok(combien),
+        return Err(ArgError::new(format!("`0` est refusé : {pourquoi}")));
     }
+    Ok(combien)
 }
 
 /// Une longueur de préfixe, entre `1` et `maximum` bits.
@@ -1085,7 +1125,13 @@ fn prefixe(brute: &str, maximum: u8) -> Result<u8, ArgError> {
             "`{bits}` dépasse {maximum} bits : ce préfixe serait raboté en silence"
         )));
     }
-    u8::try_from(bits).map_err(|_| ArgError::new(format!("`{bits}` n'est pas une longueur")))
+    // **CETTE CONVERSION NE PEUT PAS ÉCHOUER, ET LE DIRE VAUT MIEUX QUE DE
+    // FAIRE SEMBLANT DE S'EN GARDER.** Le refus juste au-dessus établit
+    // `bits <= maximum`, et `maximum` est un `u8` — donc `bits` tient dans un
+    // `u8` par construction. Le `map_err` qui vivait ici rendait une erreur que
+    // rien ne pouvait produire : une garde qu'aucun essai ne peut éprouver n'est
+    // pas une garde, c'est une branche morte qui fait croire à une vérification.
+    Ok(u8::try_from(bits).expect("bits <= maximum, et maximum est un u8"))
 }
 
 /// Un chemin, ou la chaîne vide qui dit « rien ».
@@ -1100,11 +1146,35 @@ mod tests {
     use std::net::SocketAddr;
     use std::path::PathBuf;
 
+    /// **ON APPELLE `parse` SUR UNE TRANCHE, JAMAIS SUR UN TABLEAU.**
+    ///
+    /// `parse` est générique sur ce qu'on lui donne à parcourir, et un tableau de
+    /// taille fixe porte SA TAILLE dans son type : `parse(["--a"])` et
+    /// `parse(["--a", "b"])` sont deux fonctions différentes, chacune avec ses
+    /// propres fermetures. `llvm-cov` compte les régions de chaque
+    /// monomorphisation ; celles qu'un appel de taille 1 ne peut pas atteindre
+    /// restent découvertes à jamais, quel que soit le nombre d'essais.
+    ///
+    /// C'est ce qui a tenu cette crate à 99,77 % avec toutes ses lignes et toutes
+    /// ses fonctions à 100 % — trois régions introuvables, que la vue textuelle
+    /// FUSIONNE et que seul `--show-instantiations` montre. Une tranche n'a
+    /// qu'un type, donc qu'une instanciation.
     fn ecrire(arguments: &[&str]) -> Options {
         match parse(arguments).expect("recevable") {
             Demande::Ecrire(options) => *options,
             autre => panic!("attendu `Ecrire`, obtenu {autre:?}"),
         }
+    }
+
+    /// **CE `panic!` N'EST PAS DÉCORATIF**, et c'est pourquoi il est éprouvé.
+    ///
+    /// Un essai qui demanderait l'aide en croyant écrire une configuration
+    /// examinerait des options par défaut en pensant examiner les siennes, et
+    /// conclurait n'importe quoi sans rien signaler. Le bras s'arrête donc net.
+    #[test]
+    #[should_panic(expected = "attendu `Ecrire`")]
+    fn le_secours_des_essais_refuse_une_demande_qui_n_ecrit_pas() {
+        let _ = ecrire(&["--help"]);
     }
 
     #[test]
@@ -1162,7 +1232,7 @@ mod tests {
 
     #[test]
     fn une_adresse_imap_illisible_est_refusee() {
-        let erreur = parse(["--listen-imap", "pas-une-adresse"]).expect_err("refusé");
+        let erreur = parse(["--listen-imap", "pas-une-adresse"].as_slice()).expect_err("refusé");
         assert!(
             erreur.message.contains("n'est pas une adresse"),
             "{}",
@@ -1172,7 +1242,7 @@ mod tests {
 
     #[test]
     fn une_adresse_pop3_illisible_est_refusee() {
-        let erreur = parse(["--listen-pop3", "pas-une-adresse"]).expect_err("refusé");
+        let erreur = parse(["--listen-pop3", "pas-une-adresse"].as_slice()).expect_err("refusé");
         assert!(
             erreur.message.contains("n'est pas une adresse"),
             "{}",
@@ -1254,13 +1324,16 @@ mod tests {
     #[test]
     fn l_aide_et_la_version_court_circuitent() {
         for argument in ["--help", "-h"] {
-            assert_eq!(parse([argument]), Ok(Demande::Aide));
+            assert_eq!(parse([argument].as_slice()), Ok(Demande::Aide));
         }
         for argument in ["--version", "-V"] {
-            assert_eq!(parse([argument]), Ok(Demande::Version));
+            assert_eq!(parse([argument].as_slice()), Ok(Demande::Version));
         }
         // Même au milieu d'options qui suivraient.
-        assert_eq!(parse(["--domain", "x", "--help"]), Ok(Demande::Aide));
+        assert_eq!(
+            parse(["--domain", "x", "--help"].as_slice()),
+            Ok(Demande::Aide)
+        );
     }
 
     #[test]
@@ -1568,6 +1641,296 @@ mod tests {
             "« {} » réclame la file trop tôt",
             erreur.message
         );
+    }
+
+    /// **TOUTE OPTION QUI ATTEND UNE VALEUR LE DIT QUAND ELLE MANQUE.**
+    ///
+    /// Une option en fin de ligne dont la valeur manque est la faute de frappe la
+    /// plus ordinaire — un `\` oublié, un argument coupé par le shell. Ce qu'il
+    /// ne faut surtout pas, c'est qu'elle passe : une option muette laisserait
+    /// écrire une configuration qui ne dit pas ce qui a été demandé.
+    ///
+    /// **CE TABLEAU N'A PAS BESOIN D'ÊTRE TENU À JOUR À LA MAIN**, et c'est ce
+    /// qui le rend fiable : chaque `valeur()?` porte sa propre région de code, et
+    /// C2 exige qu'elles soient toutes atteintes. Une option ajoutée sans être
+    /// inscrite ici laisse sa région découverte, et le gate tombe. La liste ne
+    /// peut donc pas dériver en silence.
+    #[test]
+    fn les_trente_neuf_options_a_valeur_refusent_de_se_taire() {
+        const A_VALEUR: [&str; 39] = [
+            "--listen",
+            "--maildir",
+            "--domain",
+            "--hosted",
+            "--max-message",
+            "--tls-cert",
+            "--tls-key",
+            "--dkim-selector",
+            "--dkim-key",
+            "--accounts",
+            "--resolver",
+            "--spf",
+            "--spf-timeout-ms",
+            "--dmarc",
+            "--dmarc-report-dir",
+            "--dmarc-org-name",
+            "--dmarc-report-email",
+            "--dmarc-report-interval",
+            "--dmarc-quarantine-folder",
+            "--public-suffix-list",
+            "--listen-pop3",
+            "--listen-imap",
+            "--max-connections",
+            "--tlsrpt-dir",
+            "--mta-sts-anchors",
+            "--mta-sts-cache",
+            "--queue-spool",
+            "--queue-retry-seconds",
+            "--queue-max-retry-seconds",
+            "--queue-expire-seconds",
+            "--queue-warn-seconds",
+            "--connections-per-minute",
+            "--commands-per-minute",
+            "--invalid-frames-per-minute",
+            "--refused-recipients-per-minute",
+            "--ban-seconds",
+            "--ipv4-prefix-bits",
+            "--ipv6-prefix-bits",
+            "--tracked-sources",
+        ];
+        for option in A_VALEUR {
+            let erreur = parse([option].as_slice()).expect_err("refusé");
+            assert!(
+                erreur.message.contains("attend une valeur"),
+                "`{option}` se tait : {}",
+                erreur.message
+            );
+        }
+    }
+
+    /// **CE QUI N'EST PAS UN NOMBRE, UNE ADRESSE OU UNE LONGUEUR SE REFUSE.**
+    ///
+    /// Chaque conversion porte son propre message, et chacun nomme ce qu'il
+    /// attendait : « n'est pas une adresse » n'envoie pas chercher au même
+    /// endroit que « n'est pas un nombre ».
+    #[test]
+    fn chaque_conversion_dit_ce_qu_elle_attendait() {
+        for (arguments, extrait) in [
+            (
+                ["--resolver", "pas-une-adresse"].as_slice(),
+                "n'est pas une adresse",
+            ),
+            (&["--ban-seconds", "longtemps"], "n'est pas un nombre"),
+            (&["--ipv4-prefix-bits", "beaucoup"], "n'est pas un nombre"),
+            // LE RABOTAGE EN SILENCE EST CE QU'ON REFUSE : un `/48` tapé pour de
+            // l'IPv4 compterait comme un `/32`, et la configuration dirait autre
+            // chose que ce qui a été demandé.
+            (&["--ipv4-prefix-bits", "48"], "dépasse 32 bits"),
+            (&["--ipv6-prefix-bits", "129"], "dépasse 128 bits"),
+            (&["--ipv6-prefix-bits", "0"], "`0` est refusé"),
+        ] {
+            let erreur = parse(arguments).expect_err("refusé");
+            assert!(
+                erreur.message.contains(extrait),
+                "« {} » n'attendait pas cela",
+                erreur.message
+            );
+        }
+        // Et les longueurs recevables traversent, aux deux bornes.
+        assert_eq!(
+            ecrire(&["--ipv4-prefix-bits", "32"]).guard.ipv4_prefix_bits,
+            32
+        );
+        assert_eq!(
+            ecrire(&["--ipv6-prefix-bits", "128"])
+                .guard
+                .ipv6_prefix_bits,
+            128
+        );
+    }
+
+    /// **CE QU'ON MET DANS UN RAPPORT SE RÈGLE**, et les deux valeurs vides ont
+    /// chacune leur substitut : le nom annoncé du serveur, et `postmaster@`.
+    #[test]
+    fn le_nom_et_l_adresse_des_rapports_traversent() {
+        let config = ecrire(&[
+            "--domain",
+            "mail.example.com",
+            "--dmarc-org-name",
+            "Example",
+            "--dmarc-report-email",
+            "dmarc@example.com",
+        ])
+        .en_configuration();
+        assert_eq!(config.dmarc.report_org_name, "Example");
+        assert_eq!(config.dmarc.report_email, "dmarc@example.com");
+        // SANS EUX, LA CONFIGURATION PORTE DU VIDE, et c'est le serveur qui
+        // substitue — l'inventer ici ferait un fichier qui dit autre chose que
+        // ce qui a été demandé.
+        let sans = ecrire(&["--domain", "mail.example.com"]).en_configuration();
+        assert!(sans.dmarc.report_org_name.is_empty());
+        assert!(sans.dmarc.report_email.is_empty());
+    }
+
+    /// **`observe` RETIENT SANS RIEN OPPOSER**, et c'est le défaut de DMARC.
+    #[test]
+    fn dmarc_observe_se_demande_comme_enforce() {
+        let options = ecrire(&[
+            "--dmarc",
+            "observe",
+            "--public-suffix-list",
+            "/etc/ams/psl.dat",
+            "--resolver",
+            "127.0.0.1:53",
+        ]);
+        assert!(!options.dmarc_enforce);
+    }
+
+    // ── LES NOMBRES DONT ZÉRO NE VEUT RIEN DIRE ─────────────────────────────
+
+    /// **TROIS ZÉROS QUE RIEN N'ARRÊTAIT.**
+    ///
+    /// La règle est écrite dans ce fichier, au-dessus des seuils du garde : « on
+    /// refuse les zéros qui ne veulent rien dire, et on documente ceux qui en
+    /// veulent un ». Elle était tenue dans le bloc du garde et dans celui de la
+    /// file, et n'avait jamais été portée aux trois nombres qui vivent ailleurs.
+    ///
+    /// Chacun des trois éteint le serveur d'une façon différente, et aucun ne le
+    /// dit : un plafond nul refuse tout message, un compte de connexions nul n'en
+    /// sert aucune, un délai nul ajourne chaque message sous `--spf enforce`.
+    #[test]
+    fn les_zeros_qui_eteignent_le_serveur_sont_refuses() {
+        for (option, attendu) in [
+            ("--max-message", "SIZE 0"),
+            ("--max-connections", "ne sert personne"),
+            ("--spf-timeout-ms", "avant qu'elle parte"),
+        ] {
+            let erreur = parse([option, "0"].as_slice()).expect_err("refusé");
+            assert!(
+                erreur.message.contains("`0` est refusé") && erreur.message.contains(attendu),
+                "« {} » ne dit pas ce que zéro casserait",
+                erreur.message
+            );
+            // ET CE QUI N'EST PAS UN NOMBRE RESTE REFUSÉ COMME AVANT : rendre
+            // `pas_zero` générique ne devait pas perdre ce refus-là.
+            let erreur = parse([option, "beaucoup"].as_slice()).expect_err("refusé");
+            assert!(
+                erreur.message.contains("n'est pas un nombre"),
+                "« {} »",
+                erreur.message
+            );
+        }
+        // Et une valeur non nulle traverse, pour les trois.
+        let options = ecrire(&[
+            "--max-message",
+            "1000",
+            "--max-connections",
+            "4",
+            "--spf-timeout-ms",
+            "250",
+        ]);
+        assert_eq!(options.max_message_octets, 1000);
+        assert_eq!(options.max_connections, 4);
+        assert_eq!(options.spf_timeout_millis, 250);
+    }
+
+    /// **UN SEUIL D'AVERTISSEMENT NUL PRÉVIENDRAIT POUR TOUT.**
+    #[test]
+    fn un_seuil_d_avertissement_nul_est_refuse() {
+        let erreur = parse(["--queue-warn-seconds", "0"].as_slice()).expect_err("refusé");
+        assert!(
+            erreur.message.contains("dès le premier essai"),
+            "{}",
+            erreur.message
+        );
+        assert_eq!(ecrire(&["--queue-warn-seconds", "7200"]).queue_warn, 7_200);
+    }
+
+    // ── CE QU'ON FAIT D'UN VERDICT ──────────────────────────────────────────
+
+    /// **`observe` ET `enforce` NE SE DEVINENT PAS**, et tout autre mot se
+    /// refuse plutôt que de retomber en silence sur l'un des deux.
+    #[test]
+    fn spf_et_dmarc_n_acceptent_que_deux_mots() {
+        for option in ["--spf", "--dmarc"] {
+            let erreur = parse([option, "peut-etre"].as_slice()).expect_err("refusé");
+            assert!(
+                erreur.message.contains("n'est ni `observe` ni `enforce`"),
+                "« {} »",
+                erreur.message
+            );
+        }
+        assert!(!ecrire(&["--spf", "observe"]).spf_enforce);
+        assert!(ecrire(&["--spf", "enforce"]).spf_enforce);
+    }
+
+    /// **CE QUI EST DEMANDÉ SE RETROUVE DANS LE FICHIER**, et pas seulement dans
+    /// les options : c'est la conversion qui décide de ce que le serveur lira.
+    #[test]
+    fn appliquer_traverse_jusqu_a_la_configuration() {
+        let config = ecrire(&[
+            "--spf",
+            "enforce",
+            "--dmarc",
+            "enforce",
+            "--public-suffix-list",
+            "/etc/ams/psl.dat",
+            "--resolver",
+            "127.0.0.1:53",
+        ])
+        .en_configuration();
+        assert_eq!(config.spf.enforcement, ams_config::Enforcement::Enforce);
+        assert_eq!(config.dmarc.enforcement, ams_config::Enforcement::Enforce);
+        // Et le défaut RETIENT, sans rien opposer : appliquer se demande.
+        let defaut = ecrire(&["--domain", "mail.example.com"]).en_configuration();
+        assert_eq!(defaut.spf.enforcement, ams_config::Enforcement::Observe);
+        assert_eq!(defaut.dmarc.enforcement, ams_config::Enforcement::Observe);
+    }
+
+    /// **ZÉRO EST LICITE POUR L'INTERVALLE, ET VAUT UN JOUR** — c'est ce que la
+    /// configuration substitue, et ce qui rend le champ ajoutable sans rien
+    /// casser.
+    #[test]
+    fn l_intervalle_des_rapports_se_regle_et_zero_y_est_licite() {
+        assert_eq!(
+            ecrire(&["--dmarc-report-interval", "3600"]).dmarc_report_interval,
+            3_600
+        );
+        assert_eq!(
+            ecrire(&["--dmarc-report-interval", "0"]).dmarc_report_interval,
+            0
+        );
+        let erreur = parse(["--dmarc-report-interval", "souvent"].as_slice()).expect_err("refusé");
+        assert!(
+            erreur.message.contains("n'est pas un nombre"),
+            "{}",
+            erreur.message
+        );
+    }
+
+    // ── DKIM ────────────────────────────────────────────────────────────────
+
+    /// **L'UN SANS L'AUTRE NE VEUT DIRE NI « SIGNE » NI « NE SIGNE PAS ».**
+    ///
+    /// Un sélecteur sans clé ne peut rien signer ; une clé sans sélecteur ne
+    /// saurait pas sous quel nom publier. Les deux se refusent, et le refus dit
+    /// lequel manque en les nommant tous les deux.
+    #[test]
+    fn un_selecteur_dkim_sans_cle_est_refuse_et_reciproquement() {
+        for moitie in [
+            ["--dkim-selector", "s1"].as_slice(),
+            &["--dkim-key", "/etc/ams/dkim.pem"],
+        ] {
+            let erreur = parse(moitie).expect_err("refusé");
+            assert!(
+                erreur.message.contains("vont ENSEMBLE"),
+                "« {} »",
+                erreur.message
+            );
+        }
+        let config = ecrire(&["--dkim-selector", "s1", "--dkim-key", "/etc/ams/dkim.pem"])
+            .en_configuration();
+        assert!(config.dkim.est_configure());
     }
 
     /// **LA RÈGLE EST CELLE D'IMAP, PARCE QUE LE DOSSIER EN EST UN.**

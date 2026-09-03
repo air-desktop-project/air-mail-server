@@ -3846,6 +3846,94 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
+## Trois zéros éteignaient le serveur sans que rien ne les refuse
+
+### LA RÈGLE ÉTAIT ÉCRITE, ET APPLIQUÉE À DEUX BLOCS SUR TROIS
+
+Au-dessus des seuils du garde, ce fichier porte la règle en toutes lettres :
+« **On refuse donc les zéros qui ne veulent rien dire, et on documente ceux qui
+en veulent un.** » Elle est tenue scrupuleusement dans le bloc du garde — chaque
+zéro y est soit refusé avec sa raison, soit permis avec son sens — et dans celui
+de la file, dont les quatre durées la respectent.
+
+Trois nombres vivent ailleurs, et aucun n'y était passé :
+
+| option | ce que zéro donnait |
+|---|---|
+| `--max-connections 0` | `Semaphore::new(0)` sur les quatre écoutes : aucune connexion n'est jamais servie |
+| `--spf-timeout-ms 0` | toute question DNS expire ; sous `--spf enforce`, un `451` sur chaque message |
+| `--max-message 0` | annonce `SIZE 0` et refuse tout message d'au moins un octet |
+
+Le troisième est le pire, parce qu'il **annonce l'inverse de ce qu'il fait** : §3
+de RFC 1870 donne à `SIZE 0` le sens « aucune taille maximale n'est en vigueur ».
+Le pair lit « pas de limite » et se voit refuser sur un octet, sans rien à
+corriger chez lui. Et l'illimité n'est pas une option que ce serveur offre — C3
+veut des longueurs bornées —, si bien qu'il n'y avait aucun sens à donner à ce
+zéro, seulement un refus.
+
+`pas_zero` est devenue GÉNÉRIQUE pour cela. Les trois nombres n'ont pas le même
+type — `u64`, `usize`, `u32` — et c'est précisément ce qui avait laissé la règle
+s'arrêter aux `u32`.
+
+### CE QUI LES AVAIT LAISSÉS PASSER
+
+La grammaire vivait dans `ams-admin`, hors du périmètre de C2 : 1 689 lignes
+sans la moindre entrée-sortie, exemptées du 100 % par le `main.rs` de la crate
+qui les hébergeait — le seul fichier des deux qui lise et écrive. Elle est
+désormais la crate `ams-admin-options`, et le gate l'exige à 100 %.
+
+### CE QUE LE 100 % A TROUVÉ EN L'ATTEIGNANT
+
+- Trente-neuf options prennent une valeur, et une seule éprouvait le cas où elle
+  manque. Un essai les parcourt toutes ; **le tableau ne peut pas dériver**,
+  puisque chaque `valeur()?` porte sa région et qu'une option ajoutée sans essai
+  fait tomber le gate.
+- `u8::try_from(bits)` dans `prefixe` rendait une erreur que rien ne pouvait
+  produire : le refus juste au-dessus établit `bits <= maximum`, et `maximum`
+  est un `u8`. Une garde qu'aucun essai ne peut éprouver n'est pas une garde ;
+  elle est devenue un `expect` qui dit pourquoi.
+
+### C1 JUGE DÉSORMAIS LA CAPACITÉ, ET NON LE MODULE
+
+La grammaire emploie `std::net::SocketAddr` pour refuser une adresse au moment
+où l'administrateur la tape. `check-etages.sh` interdisait `std::net` en bloc.
+
+Or ce module porte deux choses de natures opposées : des TYPES D'ADRESSE, qui
+sont des valeurs, et des SOCKETS, qui ouvrent et attendent. C'est exactement la
+distinction que ce gate faisait DÉJÀ pour `std::time` — « `Duration` n'y est
+pas : c'est un type, pas une horloge » — et qu'il écrivait en principe : « c'est
+la distinction qui compte, et non le nom du module ».
+
+Ce sont donc les sockets qui sont nommées, **et par leur nom seul** plutôt que
+par leur chemin : `use std::net::{SocketAddr, TcpStream}` puis `TcpStream` tout
+court se serait glissé sous un motif ancré sur `std::net::`. Vérifié en posant
+une sonde qui fait exactement cela.
+
+Ce que cela cède : une API de socket que le motif ne nomme pas encore passerait.
+C'est le prix d'une règle qui juge la capacité, et il se paie en revenant ici le
+jour où `std` en ajoute une.
+
+### DEUX PIÈGES D'OUTILLAGE, RENCONTRÉS EN CHEMIN
+
+**Le périmètre se lisait dans de la prose.** `check-etages.sh` extrait la liste
+des crates par `grep -oE 'ams-[a-z0-9-]+'` sur le tableau de
+`check-couverture.sh`. Écrire « elle vivait dans `ams-admin` » dans un
+commentaire DU tableau y a ajouté `ams-admin` : le compte est passé de 30 à 31,
+et le gate s'est mis à juger une crate que personne n'y avait mise. Ce qui suit
+un `#` est désormais coupé avant l'extraction.
+
+**Une fonction générique se monomorphise par TAILLE DE TABLEAU.** `parse` est
+générique sur ce qu'elle parcourt, et un tableau de taille fixe porte sa taille
+dans son type : `parse(["--a"])` et `parse(["--a", "b"])` sont deux fonctions
+distinctes, chacune avec ses fermetures. `llvm-cov` compte les régions de chaque
+monomorphisation, et celles qu'un appel de taille 1 ne peut pas atteindre
+restent découvertes quel que soit le nombre d'essais.
+
+Cela a tenu cette crate à 99,77 % avec toutes ses LIGNES et toutes ses FONCTIONS
+à 100 % — trois régions introuvables, que la vue textuelle FUSIONNE et que seul
+`--show-instantiations` montre. Les essais appellent donc `parse` sur une
+tranche, qui n'a qu'un type.
+
 ## DMARC s'annonçait appliqué alors qu'il n'était pas évalué
 
 ### UN PRÉDICAT QUI RÉPONDAIT À UNE QUESTION QU'IL NE POUVAIT PAS TRANCHER
