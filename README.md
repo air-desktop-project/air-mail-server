@@ -1646,6 +1646,27 @@ redirection du pare-feu.
 Sans `--hosted`, il n'accepte de courrier pour personne — un serveur qui
 accepterait tout serait un relais ouvert.
 
+**L'API REST d'administration s'ouvre avec `--listen-http`**, et jamais en
+clair : elle porte des jetons porteurs, et un jeton qui traverse un réseau en
+clair est un jeton volé. Le secret qui les scelle est tiré du noyau à la
+première écriture qui ouvre l'API, puis repris à chaque écriture suivante —
+personne n'a besoin de le connaître, donc personne n'a à le garder.
+
+```sh
+./target/release/air-mail-admin config write air-mail.conf \
+    --domain mail.example.com --hosted example.com \
+    --tls-cert chaine.pem --tls-key cle.pem \
+    --listen-http 127.0.0.1:8443 --listen-h3 127.0.0.1:8443
+
+# Un jeton d'administration, quinze minutes par défaut.
+./target/release/air-mail-admin token air-mail.conf --login thierry
+```
+
+`--listen-h3` demande `--listen-http` : `Alt-Svc`, seul moyen par lequel un
+client découvre un port HTTP/3, s'annonce depuis les réponses HTTP/2.
+`--rotate-token-key` renouvelle le secret, et les jetons frappés avant cessent
+alors de valoir.
+
 **Un compte ajouté pendant que le serveur tourne est vu sans redémarrage.** Le
 serveur relit le magasin quand le fichier change — au plus une fois par seconde,
 `vue()` étant consultée à chaque `AUTH` et à chaque destinataire. Les deux

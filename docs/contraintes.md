@@ -3846,6 +3846,79 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
+## L'API REST ne pouvait être activée par aucun chemin supporté
+
+### TROIS CHAMPS CÂBLÉS À VIDE
+
+`listen_http`, `listen_h3` et `token_key` étaient écrits `String::new()` par
+`air-mail-admin`, avec un commentaire qui l'assumait : « `air-mail-admin`
+gagnera ses options quand on saura ce qu'elles doivent dire ». Or cet outil se
+documente comme **le seul moyen de produire une configuration**. L'API ne
+pouvait donc être servie par aucun chemin supporté, et la commande `token` ne
+pouvait aboutir avec aucun fichier que l'outil sache écrire — alors que l'aide
+la décrivait en détail, sans le dire.
+
+C'est un manque assumé qui était devenu une affirmation fausse : la
+documentation décrivait une commande utilisable, et elle ne l'était pas.
+
+### CE QUE LE SERVEUR EXIGE, L'OUTIL LE REFLÈTE MAINTENANT
+
+Le serveur refuse déjà ces trois choses au démarrage ; les refuser au terminal
+coûte une seconde plutôt qu'une astreinte, et c'est la règle de ce fichier.
+
+  - `--listen-http` DEMANDE un certificat. L'API porte des jetons PORTEURS :
+    qui lit le jeton devient administrateur, et un jeton qui traverse un réseau
+    en clair est un jeton volé (C4).
+  - `--listen-h3` DEMANDE `--listen-http`. `Alt-Svc` est le seul moyen par
+    lequel un client découvre un port HTTP/3 (RFC 7838, §3.1 de RFC 9114), et
+    il s'annonce depuis les réponses HTTP/2 : un port H3 seul serait un port UDP
+    que personne ne cherche — la même faute qu'annoncer une alternative absente,
+    dans l'autre sens.
+  - `--rotate-token-key` DEMANDE une API. Sans elle, aucun jeton n'est scellé :
+    renouveler le secret ne révoquerait rien, tout en le laissant croire.
+
+Un essai note au passage que **la moitié d'un certificat n'arrive jamais
+jusqu'à ce refus** : la règle qui veut `--tls-cert` et `--tls-key` ensemble se
+déclenche d'abord. Ce refus-ci n'a donc qu'un seul cas à connaître.
+
+### LE SECRET NE SE DONNE PAS, NE SE LIT PAS, ET NE SE GARDE PAS
+
+Il est TIRÉ du noyau à la première écriture qui ouvre l'API, puis REPRIS du
+fichier qu'on remplace. `--rotate-token-key` le renouvelle explicitement, et dit
+alors que les jetons frappés avant cessent de valoir.
+
+Les deux autres façons de faire ont été écartées :
+
+  - **En argument** : `ps` l'afficherait à tous les comptes de la machine, et
+    l'historique du shell le garderait. C'est la règle que ce dépôt applique
+    déjà au mot de passe d'un compte.
+  - **Sur l'entrée standard** : il faudrait alors le CONSERVER quelque part pour
+    le refournir à chaque écriture. Un secret que personne n'a besoin de
+    connaître est un secret que personne ne doit avoir à garder.
+
+C'est la seule valeur d'une configuration qui ne vienne pas des options, et
+`en_configuration` ne peut pas la produire : la tirer demande `/dev/urandom`, la
+reprendre demande de lire le fichier, et C1 interdit les deux à cette crate.
+C'est donc le binaire qui la pose, juste après — un essai vérifie qu'elle sort
+vide de la grammaire.
+
+### CE QUE LA LECTURE DE LA CIBLE A DONNÉ EN PLUS
+
+Puisque `config write` relit désormais le fichier qu'il va remplacer, il peut
+**refuser d'écraser ce qu'il ne reconnaît pas**. Un chemin tapé de travers
+désigne le fichier de quelqu'un d'autre, et `config write` l'écrasait sans un
+mot. Le refus nomme le fichier, dit qu'il n'est pas une configuration, et se
+lève en l'effaçant soi-même — ce qui demande de l'avoir regardé.
+
+Vérifié sur un faux `/etc/passwd` : refusé, contenu intact.
+
+### CE QUI RESTE DEHORS
+
+Aucune option ne desserre le masque, ne choisit le mode des fichiers, ni ne
+règle la durée de vie des jetons — quinze minutes par défaut, douze heures au
+plus, gravées dans `token`. Ce sont des décisions que personne n'a encore eu
+besoin de prendre autrement.
+
 ## Un compte ajouté pendant que le serveur tourne n'existait pas pour lui
 
 ### `Comptes` ÉTAIT UN INSTANTANÉ DU DÉMARRAGE, ET NE RELISAIT JAMAIS

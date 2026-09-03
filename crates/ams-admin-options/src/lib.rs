@@ -53,6 +53,26 @@ pub struct Options {
     pub listen_pop3: Option<SocketAddr>,
     /// Où écouter en IMAP. Absente : IMAP n'est pas servi.
     pub listen_imap: Option<SocketAddr>,
+    /// Où servir l'API REST en HTTP/2. Absente : elle n'est pas servie.
+    ///
+    /// **ELLE EXIGE UN CERTIFICAT**, et le serveur le refuse sans : l'API porte
+    /// des jetons porteurs, et un jeton qui traverse un réseau en clair est un
+    /// jeton volé (C4).
+    pub listen_http: Option<SocketAddr>,
+    /// Où servir la même API en HTTP/3. Absente : seul HTTP/2 la sert.
+    ///
+    /// **ELLE EXIGE `--listen-http`**, et pas seulement un certificat :
+    /// `Alt-Svc` est le seul moyen par lequel un client découvre un port
+    /// HTTP/3 (RFC 7838, §3.1 de RFC 9114), et il s'annonce depuis les réponses
+    /// HTTP/2. Sans elles, ce port UDP serait ouvert sans que personne ne le
+    /// cherche jamais.
+    pub listen_h3: Option<SocketAddr>,
+    /// Renouvelle le secret de scellement plutôt que de reprendre l'ancien.
+    ///
+    /// **CE N'EST PAS SANS CONSÉQUENCE** : les jetons frappés avant cessent de
+    /// valoir. C'est ce qu'on veut d'une rotation, et c'est pourquoi elle se
+    /// demande explicitement au lieu d'arriver à chaque écriture.
+    pub rotate_token_key: bool,
     /// Les résolveurs DNS. Vide : SPF n'est pas vérifié.
     pub resolvers: Vec<SocketAddr>,
     /// Refuse-t-on un `fail`, ou se contente-t-on de le retenir ?
@@ -143,6 +163,9 @@ impl Default for Options {
             // une surface de plus, et celui-ci ne sert personne sans certificat.
             listen_pop3: None,
             listen_imap: None,
+            listen_http: None,
+            listen_h3: None,
+            rotate_token_key: false,
             // PAS DE RÉSOLVEUR PAR DÉFAUT, et surtout pas celui du système : le
             // lire dans `/etc/resolv.conf` ferait interroger, sans que personne
             // l'ait demandé, un serveur qui n'est peut-être pas de confiance —
@@ -225,13 +248,15 @@ impl Options {
             maildir: self.maildir.display().to_string(),
             hosted: self.hosted.clone(),
             max_recipients: 100,
-            // **L'API REST N'EST PAS SERVIE PAR DÉFAUT**, et ce n'est pas un
-            // oubli : elle demande un certificat ET un secret de scellement, et
-            // inventer l'un des deux ici donnerait un fichier qui promet ce
-            // qu'on n'a pas demandé. `air-mail-admin` gagnera ses options quand
-            // on saura ce qu'elles doivent dire.
-            listen_http: String::new(),
-            listen_h3: String::new(),
+            // **L'API REST N'EST PAS SERVIE PAR DÉFAUT** : l'absence d'adresse
+            // EST l'absence de service, comme partout ailleurs ici.
+            listen_http: adresse(self.listen_http.as_ref()),
+            listen_h3: adresse(self.listen_h3.as_ref()),
+            // **LE SECRET DE SCELLEMENT NE SE DÉCIDE PAS ICI**, et c'est la
+            // seule valeur de cette structure dans ce cas. Il se TIRE du noyau,
+            // ou se REPREND du fichier qu'on remplace — deux choses que cette
+            // fonction ne peut pas faire, C1 lui interdisant toute
+            // entrée-sortie. C'est `air-mail-admin` qui le pose, juste après.
             token_key: String::new(),
             max_message_octets: self.max_message_octets,
             max_connections: u32::try_from(self.max_connections).unwrap_or(u32::MAX),
@@ -376,6 +401,26 @@ OPTIONS DE `config write`
     --accounts <chemin>    fichier de comptes (`air-mail-admin account add`)
     --listen-pop3 <adr>    où écouter en POP3 (défaut : pas de POP3)
     --listen-imap <adr>    où écouter en IMAP (défaut : pas d'IMAP)
+
+    L'API REST
+    --listen-http <adr>    où la servir en HTTP/2. EXIGE `--tls-cert` et
+                           `--tls-key` : elle porte des jetons porteurs, et un
+                           jeton qui traverse un réseau en clair est un jeton
+                           volé (C4). Défaut : pas d'API.
+    --listen-h3 <adr>      la même, en HTTP/3 sur QUIC. EXIGE `--listen-http` :
+                           `Alt-Svc` est le seul moyen par lequel un client
+                           découvre un port HTTP/3, et il s'annonce depuis les
+                           réponses HTTP/2.
+    --rotate-token-key     renouvelle le secret de scellement. LES JETONS
+                           FRAPPÉS AVANT CESSENT DE VALOIR. Sans cette option,
+                           le secret d'un fichier existant est REPRIS, et les
+                           jetons en cours restent valables.
+
+    LE SECRET DE SCELLEMENT NE SE DONNE PAS SUR LA LIGNE DE COMMANDE, et ne se
+    lit nulle part : il est tiré du noyau à la première écriture qui ouvre
+    l'API, puis repris tel quel à chaque écriture suivante. Ce que `ps` affiche,
+    tout le monde le lit — et un secret que personne n'a besoin de connaître est
+    un secret que personne ne doit avoir à garder.
 
     TLSRPT (RFC 8460)
     --tlsrpt-dir <chemin>               dossier des rapports (défaut : aucun)
@@ -849,6 +894,24 @@ where
                         .map_err(|_| ArgError::new(format!("`{brute}` n'est pas une adresse")))?,
                 );
             }
+            // ── L'API REST ─────────────────────────────────────────────────
+            "--listen-http" => {
+                let brute = valeur()?;
+                options.listen_http = Some(
+                    brute
+                        .parse()
+                        .map_err(|_| ArgError::new(format!("`{brute}` n'est pas une adresse")))?,
+                );
+            }
+            "--listen-h3" => {
+                let brute = valeur()?;
+                options.listen_h3 = Some(
+                    brute
+                        .parse()
+                        .map_err(|_| ArgError::new(format!("`{brute}` n'est pas une adresse")))?,
+                );
+            }
+            "--rotate-token-key" => options.rotate_token_key = true,
             "--max-connections" => {
                 // **C'EST LE MÊME REFUS QUE `--connections-per-minute`**, en plus
                 // total : celui-là n'accepte personne pendant une minute,
@@ -981,6 +1044,38 @@ where
              « chiffre » ni « ne chiffre pas »",
         ));
     }
+    // ── L'API REST NE S'OUVRE PAS EN CLAIR ──────────────────────────────────
+    //
+    // Elle porte des jetons PORTEURS : qui lit le jeton devient administrateur.
+    // Un jeton qui traverse un réseau en clair est un jeton volé, et C4 ferme ce
+    // port sans certificat. Le serveur le refuse déjà au démarrage ; le dire ici
+    // coûte une seconde plutôt qu'une astreinte.
+    if options.listen_http.is_some() && !(options.tls_cert.is_some() && options.tls_key.is_some()) {
+        return Err(ArgError::new(
+            "`--listen-http` demande `--tls-cert` et `--tls-key` : cette API porte des jetons \
+             porteurs, et un jeton qui traverse un réseau en clair est un jeton volé",
+        ));
+    }
+    // **`Alt-Svc` EST LE SEUL MOYEN DE TROUVER UN PORT HTTP/3** (RFC 7838, §3.1
+    // de RFC 9114), et il s'annonce depuis les réponses HTTP/2. Un port H3 sans
+    // port HTTP/2 est donc un port UDP que personne ne cherchera jamais : la
+    // même faute que d'annoncer une alternative absente, dans l'autre sens.
+    if options.listen_h3.is_some() && options.listen_http.is_none() {
+        return Err(ArgError::new(
+            "`--listen-h3` demande `--listen-http` : `Alt-Svc` est le seul moyen par lequel un \
+             client découvre un port HTTP/3, et il s'annonce depuis les réponses HTTP/2",
+        ));
+    }
+    // UNE ROTATION QUI NE ROTATIONNE RIEN. Sans API, aucun jeton n'est scellé ni
+    // vérifié : renouveler le secret ne changerait rien à rien, et laisserait
+    // croire qu'on vient de révoquer quelque chose.
+    if options.rotate_token_key && options.listen_http.is_none() {
+        return Err(ArgError::new(
+            "`--rotate-token-key` demande `--listen-http` : sans API, aucun jeton n'est scellé, \
+             et renouveler le secret ne révoquerait rien",
+        ));
+    }
+
     // ── DMARC NE SE DEMANDE PAS À MOITIÉ ────────────────────────────────────
     //
     // L'évaluer exige DEUX choses, et pas une : une liste de suffixes publics,
@@ -1137,6 +1232,11 @@ fn prefixe(brute: &str, maximum: u8) -> Result<u8, ArgError> {
 /// Un chemin, ou la chaîne vide qui dit « rien ».
 fn chemin(valeur: Option<&PathBuf>) -> String {
     valeur.map(|c| c.display().to_string()).unwrap_or_default()
+}
+
+/// Une adresse d'écoute, ou la chaîne vide qui dit « ce service n'est pas rendu ».
+fn adresse(valeur: Option<&SocketAddr>) -> String {
+    valeur.map(SocketAddr::to_string).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -1342,6 +1442,14 @@ mod tests {
             (["--inconnue"].as_slice(), "option inconnue"),
             (&["--listen"], "attend une valeur"),
             (&["--listen", "pas-une-adresse"], "n'est pas une adresse"),
+            // LES DEUX ADRESSES DE L'API AUSSI : une adresse illisible se
+            // refuse avant que la cohérence ne se prononce, si bien que le
+            // certificat manquant n'a pas encore à être signalé.
+            (
+                &["--listen-http", "pas-une-adresse"],
+                "n'est pas une adresse",
+            ),
+            (&["--listen-h3", "pas-une-adresse"], "n'est pas une adresse"),
             (&["--max-message", "beaucoup"], "n'est pas un nombre"),
             (&["--max-connections", "-1"], "n'est pas un nombre"),
             // ── Les zéros qui ne veulent rien dire, et les préfixes absurdes ─
@@ -1656,8 +1764,8 @@ mod tests {
     /// inscrite ici laisse sa région découverte, et le gate tombe. La liste ne
     /// peut donc pas dériver en silence.
     #[test]
-    fn les_trente_neuf_options_a_valeur_refusent_de_se_taire() {
-        const A_VALEUR: [&str; 39] = [
+    fn les_quarante_et_une_options_a_valeur_refusent_de_se_taire() {
+        const A_VALEUR: [&str; 41] = [
             "--listen",
             "--maildir",
             "--domain",
@@ -1697,6 +1805,8 @@ mod tests {
             "--ipv4-prefix-bits",
             "--ipv6-prefix-bits",
             "--tracked-sources",
+            "--listen-http",
+            "--listen-h3",
         ];
         for option in A_VALEUR {
             let erreur = parse([option].as_slice()).expect_err("refusé");
@@ -1931,6 +2041,137 @@ mod tests {
         let config = ecrire(&["--dkim-selector", "s1", "--dkim-key", "/etc/ams/dkim.pem"])
             .en_configuration();
         assert!(config.dkim.est_configure());
+    }
+
+    // ── L'API REST ──────────────────────────────────────────────────────────
+
+    /// **ELLE NE S'OUVRE PAS EN CLAIR**, et le refus le dit en toutes lettres.
+    ///
+    /// C'est le refus le plus important de cette crate : l'API porte des jetons
+    /// PORTEURS, et qui lit un jeton devient administrateur. Le serveur ferme
+    /// déjà ce port sans certificat ; le dire au terminal évite de découvrir au
+    /// démarrage qu'on n'a pas ouvert ce qu'on croyait ouvrir.
+    #[test]
+    fn l_api_ne_s_ouvre_pas_sans_certificat() {
+        let erreur = parse(["--listen-http", "127.0.0.1:8443"].as_slice()).expect_err("refusé");
+        assert!(
+            erreur.message.contains("jeton volé"),
+            "« {} » ne dit pas ce qu'on risque",
+            erreur.message
+        );
+
+        // **LA MOITIÉ D'UN CERTIFICAT N'ARRIVE JAMAIS JUSQU'ICI**, et c'est une
+        // bonne nouvelle : la règle qui veut `--tls-cert` et `--tls-key`
+        // ENSEMBLE se déclenche d'abord. Ce refus-ci n'a donc à connaître qu'un
+        // seul cas — le certificat entièrement absent —, et l'on ne peut pas
+        // atteindre l'API avec un chiffrement à moitié réglé.
+        for moitie in [
+            ["--listen-http", "127.0.0.1:8443", "--tls-cert", "/c.pem"].as_slice(),
+            &["--listen-http", "127.0.0.1:8443", "--tls-key", "/k.pem"],
+        ] {
+            let erreur = parse(moitie).expect_err("refusé");
+            assert!(
+                erreur.message.contains("vont ENSEMBLE"),
+                "« {} » : ce n'est plus la règle du certificat qui tranche",
+                erreur.message
+            );
+        }
+        let config = ecrire(&[
+            "--listen-http",
+            "127.0.0.1:8443",
+            "--tls-cert",
+            "/c.pem",
+            "--tls-key",
+            "/k.pem",
+        ])
+        .en_configuration();
+        assert_eq!(config.listen_http, "127.0.0.1:8443");
+    }
+
+    /// **UN PORT HTTP/3 SANS HTTP/2 EST UN PORT QUE PERSONNE NE CHERCHE.**
+    ///
+    /// `Alt-Svc` est le seul moyen par lequel un client découvre un port HTTP/3
+    /// (RFC 7838, §3.1 de RFC 9114), et il s'annonce depuis les réponses
+    /// HTTP/2. L'ouvrir seul serait la même faute qu'annoncer une alternative
+    /// absente, dans l'autre sens.
+    #[test]
+    fn http3_seul_serait_introuvable() {
+        let erreur = parse(
+            [
+                "--listen-h3",
+                "127.0.0.1:8443",
+                "--tls-cert",
+                "/c.pem",
+                "--tls-key",
+                "/k.pem",
+            ]
+            .as_slice(),
+        )
+        .expect_err("refusé");
+        assert!(erreur.message.contains("Alt-Svc"), "{}", erreur.message);
+
+        let config = ecrire(&[
+            "--listen-http",
+            "127.0.0.1:8443",
+            "--listen-h3",
+            "127.0.0.1:8443",
+            "--tls-cert",
+            "/c.pem",
+            "--tls-key",
+            "/k.pem",
+        ])
+        .en_configuration();
+        assert_eq!(config.listen_h3, "127.0.0.1:8443");
+    }
+
+    /// **UNE ROTATION QUI NE RÉVOQUE RIEN NE SE DEMANDE PAS.**
+    #[test]
+    fn renouveler_un_secret_que_rien_n_emploie_est_refuse() {
+        let erreur = parse(["--rotate-token-key"].as_slice()).expect_err("refusé");
+        assert!(
+            erreur.message.contains("ne révoquerait rien"),
+            "{}",
+            erreur.message
+        );
+        assert!(
+            ecrire(&[
+                "--listen-http",
+                "127.0.0.1:8443",
+                "--tls-cert",
+                "/c.pem",
+                "--tls-key",
+                "/k.pem",
+                "--rotate-token-key",
+            ])
+            .rotate_token_key
+        );
+    }
+
+    /// **LE SECRET NE VIENT PAS DES OPTIONS**, et cette structure ne peut pas
+    /// l'inventer : le tirer demanderait `/dev/urandom`, le reprendre
+    /// demanderait de lire le fichier, et C1 interdit les deux ici. C'est
+    /// `air-mail-admin` qui le pose, juste après.
+    #[test]
+    fn la_configuration_sort_d_ici_sans_secret_de_scellement() {
+        let config = ecrire(&[
+            "--listen-http",
+            "127.0.0.1:8443",
+            "--tls-cert",
+            "/c.pem",
+            "--tls-key",
+            "/k.pem",
+        ])
+        .en_configuration();
+        assert!(config.token_key.is_empty());
+    }
+
+    /// **SANS OPTION, PAS D'API** : l'absence de valeur est l'absence de
+    /// service, comme partout ailleurs ici.
+    #[test]
+    fn sans_adresse_l_api_n_est_pas_servie() {
+        let config = ecrire(&["--domain", "mail.example.com"]).en_configuration();
+        assert!(config.listen_http.is_empty());
+        assert!(config.listen_h3.is_empty());
     }
 
     /// **LA RÈGLE EST CELLE D'IMAP, PARCE QUE LE DOSSIER EN EST UN.**

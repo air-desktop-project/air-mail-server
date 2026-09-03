@@ -56,6 +56,13 @@ COMMANDES
     config write … --relay --queue-spool <chemin>
                         ouvre l'ÉMISSION pour les comptes authentifiés. Éteinte
                         par défaut : ce serveur reçoit, il n'émet pas.
+    config write … --listen-http <adr> --tls-cert … --tls-key …
+                        ouvre l'API REST d'administration. Éteinte par défaut.
+                        LE SECRET DE SCELLEMENT EST TIRÉ DU NOYAU à la première
+                        écriture qui l'ouvre, puis REPRIS à chaque écriture
+                        suivante — les jetons en cours restent donc valables
+                        quand on change autre chose. Personne n'a besoin de le
+                        connaître, et personne n'a donc à le garder.
     token <config> --login <nom> [--minutes <n>]
                         frappe un jeton d'ADMINISTRATION, et l'écrit sur la
                         sortie standard. Il se scelle avec le secret que la
@@ -160,6 +167,118 @@ fn main() -> ExitCode {
     }
 }
 
+/// Ce qu'on a décidé du secret de scellement, et ce qu'on en dit.
+struct Scellement {
+    /// La clé à écrire — hexadécimale, ou vide s'il n'y a pas d'API.
+    clef: String,
+    /// La ligne à afficher, ou `None` s'il n'y a rien à dire.
+    ///
+    /// **CE QUI NE CHANGE PAS NE SE DIT PAS** : une ligne « secret repris » à
+    /// chaque écriture d'un serveur sans API est une ligne qu'on cesse de lire,
+    /// et c'est alors la ligne qui compte qu'on manque.
+    dire: Option<String>,
+}
+
+/// Décide du secret de scellement : le REPRENDRE, le TIRER, ou rien.
+///
+/// # Pourquoi cet outil lit le fichier qu'il va remplacer
+///
+/// C'est la seule valeur d'une configuration qui ne vienne pas des options, et
+/// ce n'est pas une inconséquence. Un secret de scellement ne doit être connu de
+/// personne : ni de celui qui tape la commande, ni de son historique de shell,
+/// ni de `ps`. Le donner en argument serait le publier ; le lire sur l'entrée
+/// standard obligerait à le CONSERVER quelque part pour le refournir à chaque
+/// écriture, c'est-à-dire à en faire un secret de plus à garder.
+///
+/// Il est donc tiré du noyau la première fois que l'API est demandée, puis
+/// repris tel quel — ce qui laisse valables les jetons en cours quand on change
+/// autre chose dans la configuration. `--rotate-token-key` le renouvelle
+/// explicitement, et dit alors ce que cela coûte.
+///
+/// # ON REFUSE D'ÉCRASER CE QU'ON NE RECONNAÎT PAS
+///
+/// Un fichier présent qui ne se décode pas n'est peut-être pas le nôtre : un
+/// chemin tapé de travers désigne un fichier de quelqu'un d'autre, et
+/// `config write` l'écraserait sans un mot. Le refus protège donc bien au-delà
+/// du secret — et il se lève en effaçant le fichier soi-même, ce qui demande de
+/// l'avoir regardé.
+///
+/// # Errors
+///
+/// Le message à afficher : fichier illisible, ou illisible EN TANT QUE
+/// configuration.
+fn sceller(fichier: &Path, config: &Configuration, renouveler: bool) -> Result<Scellement, String> {
+    let ancienne = match std::fs::read(fichier) {
+        Ok(octets) => match ams_config::decode(&octets) {
+            Ok(ancienne) => Some(ancienne),
+            Err(erreur) => {
+                return Err(format!(
+                    "`{}` existe mais n'est pas une configuration ({erreur}) — ce n'est \
+                     peut-être pas le fichier que vous croyez. Effacez-le si c'en est bien un \
+                     que vous voulez remplacer.",
+                    fichier.display()
+                ));
+            }
+        },
+        Err(erreur) if erreur.kind() == std::io::ErrorKind::NotFound => None,
+        Err(erreur) => {
+            return Err(format!("`{}` : {erreur}", fichier.display()));
+        }
+    };
+    let ancien = ancienne.map(|config| config.token_key).unwrap_or_default();
+    let sert_l_api = !config.listen_http.is_empty() || !config.listen_h3.is_empty();
+
+    if renouveler {
+        return Ok(Scellement {
+            clef: secret_de_scellement()?,
+            dire: Some(String::from(
+                "secret RENOUVELÉ — les jetons frappés avant cet instant ne valent plus",
+            )),
+        });
+    }
+    if !ancien.is_empty() {
+        return Ok(Scellement {
+            clef: ancien,
+            // On ne le dit que si quelqu'un s'en sert : sinon, c'est du bruit.
+            dire: sert_l_api.then(|| {
+                String::from(
+                    "secret REPRIS du fichier existant — les jetons en cours valent \
+                              toujours",
+                )
+            }),
+        });
+    }
+    if sert_l_api {
+        return Ok(Scellement {
+            clef: secret_de_scellement()?,
+            dire: Some(String::from(
+                "secret TIRÉ (32 octets) — les jetons se frappent avec `air-mail-admin token`",
+            )),
+        });
+    }
+    // PAS D'API, PAS DE SECRET. L'absence de valeur EST l'absence de service :
+    // en inventer un ici mettrait dans le fichier une clé que rien n'emploie.
+    Ok(Scellement {
+        clef: String::new(),
+        dire: None,
+    })
+}
+
+/// Trente-deux octets du noyau, en hexadécimal.
+///
+/// **C'EST LA LONGUEUR QUE `key_from_hex` EXIGE**, et non un choix de confort :
+/// en deçà, elle refuse la clé. La redire ici en chiffres la ferait diverger le
+/// jour où l'autre changerait ; c'est pourquoi le tableau est dimensionné par la
+/// constante de cette crate-là.
+fn secret_de_scellement() -> Result<String, String> {
+    use std::io::Read as _;
+    let mut graine = [0_u8; ams_api::KEY_OCTETS_MIN];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut source| source.read_exact(&mut graine))
+        .map_err(|erreur| format!("/dev/urandom : {erreur}"))?;
+    Ok(graine.iter().map(|octet| format!("{octet:02x}")).collect())
+}
+
 /// Écrit une configuration binaire.
 fn ecrire(fichier: &Path, arguments: &[&str]) -> ExitCode {
     let options = match ams_admin_options::parse(arguments) {
@@ -178,7 +297,15 @@ fn ecrire(fichier: &Path, arguments: &[&str]) -> ExitCode {
         }
     };
 
-    let config = options.en_configuration();
+    let mut config = options.en_configuration();
+    let scellement = match sceller(fichier, &config, options.rotate_token_key) {
+        Ok(quoi) => quoi,
+        Err(message) => {
+            eprintln!("air-mail-admin : {message}");
+            return ExitCode::FAILURE;
+        }
+    };
+    config.token_key = scellement.clef;
     let octets = match ams_config::encode(&config) {
         Ok(octets) => octets,
         Err(erreur) => {
@@ -209,6 +336,9 @@ fn ecrire(fichier: &Path, arguments: &[&str]) -> ExitCode {
         config.domain,
         config.listen
     );
+    if let Some(dit) = scellement.dire {
+        println!("scellement : {dit}");
+    }
     println!(
         "garde : {} conn./min, {} cmd./min, {} trames invalides/min, ban {} s, \
          IPv4 /{}, IPv6 /{}, {} sources suivies",
@@ -381,6 +511,29 @@ fn afficher(config: &Configuration) {
         println!("  clé privée       {}", config.tls.private_key_path);
     } else {
         println!("TLS                AUCUN — le serveur sert EN CLAIR");
+    }
+    // ON DIT L'API MÊME ABSENTE, pour la raison qui vaut pour TLS : une ligne
+    // manquante se lit « rien à signaler », or une API d'administration ouverte
+    // est ce qu'il y a de plus sensible dans ce fichier.
+    if config.listen_http.is_empty() {
+        println!("API REST           AUCUNE — l'administration ne s'ouvre pas par le réseau");
+    } else {
+        println!("API REST           {}", config.listen_http);
+        if config.listen_h3.is_empty() {
+            println!("  HTTP/3           AUCUN — seul HTTP/2 la sert");
+        } else {
+            println!("  HTTP/3           {}", config.listen_h3);
+        }
+        // **JAMAIS LE SECRET, JAMAIS SA LONGUEUR UTILE** : on dit qu'il est là,
+        // comme `account list` dit les noms sans jamais les empreintes.
+        println!(
+            "  scellement       {}",
+            if config.token_key.is_empty() {
+                "AUCUN — aucun jeton ne peut être scellé ni vérifié"
+            } else {
+                "présent — `air-mail-admin token` frappe les jetons"
+            }
+        );
     }
     // Et de même pour SPF : ne rien afficher se lirait « rien à signaler », or
     // un serveur qui ne vérifie pas l'expéditeur accepte du courrier au nom de
