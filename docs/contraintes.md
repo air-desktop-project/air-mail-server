@@ -3846,6 +3846,53 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
+## Les octets d'un vrai MTA, figés dans une barrière
+
+### CE QUE DEUX SÉANCES ONT ÉTABLI
+
+Deux défauts graves n'ont été trouvés qu'en installant Postfix et en lui parlant :
+le refus de tout courrier multi-destinataires (`ORCPT`), et un panic sur trame
+retardataire. Aucune barrière ne pouvait les voir — ils ne vivaient pas dans une
+fonction, mais dans des **combinaisons qu'aucun essai n'avait formées**, et qu'un
+pair réel forme sans y penser.
+
+Cette découverte était manuelle. **Rien n'empêchait le défaut de revenir.**
+
+### LA CONVERSATION EST DÉSORMAIS DANS LES BARRIÈRES
+
+Les octets exacts d'un Postfix remettant un message à deux destinataires sont
+rejoués par un essai d'intégration : `EHLO`, puis `MAIL`, deux `RCPT` et `DATA`
+**pipelinés en un seul envoi** (RFC 2920), avec `SIZE=` sur l'enveloppe et
+`ORCPT=` sur chaque destinataire.
+
+Il ne demande pas que Postfix soit installé : ce sont ses octets, figés. Il tourne
+dans les barrières ordinaires, sur toute machine.
+
+### CE QU'IL VÉRIFIE N'EST PAS LE CODE DE RETOUR
+
+**Ce sont les ADRESSES QUE LA REMISE REÇOIT.** Un `250` n'aurait rien prouvé : le
+défaut se voyait à ce que la seconde adresse arrivait avec l'`ORCPT` de la
+première collé devant. La remise d'essai les retient, et l'essai les compare une à
+une.
+
+Un second essai place l'`ORCPT` sur le premier ET le dernier de trois
+destinataires : il ne doit déteindre sur aucun voisin.
+
+### ET IL ANNONCE `DSN`, COMME LE VRAI SERVEUR
+
+C'est ce qui fait qu'un pair conforme envoie `ORCPT` — sans cette annonce, le banc
+refuse le paramètre par `504` et n'éprouve rien. Un essai fidèle doit annoncer ce
+que le serveur annonce.
+
+Passé contre le code d'avant, en rétablissant l'ancien découpage : les deux
+tombent.
+
+### CE QUI RESTE
+
+Un seul MTA a été confronté, sur un seul scénario. Exim, OpenSMTPD et les envois
+en masse forment d'autres combinaisons, et rien ne les rejoue. Le registre le dit
+plutôt que de le taire.
+
 ## Une trame retardataire faisait tomber un fil de travail
 
 ### CE QUE LE FUZZ A TROUVÉ, EN VALIDANT UNE AUTRE TRANCHE
