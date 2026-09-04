@@ -3846,6 +3846,64 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
+## Une barrière qui affirmait une propriété fausse
+
+### LE FUZZ A TROUVÉ UN DÉFAUT DANS LE FUZZ
+
+La campagne s'est arrêtée à 41 cibles sur 65, avec un artefact. Le panic n'était
+pas dans le serveur : il était **dans le banc**, sur cette assertion.
+
+```rust
+assert_ne!(portee, Scope::none(), "une portée vide n'ouvre aucune ressource servie");
+```
+
+L'entrée qui l'a mise en défaut : **`OPTIONS /v1/tokens/current`**, avec un jeton
+valide et sans aucun droit.
+
+### LE SERVEUR AVAIT RAISON
+
+La table des portées dit exactement le contraire, et à dessein :
+
+> `Self::CurrentToken => return Some(Scope::none())`
+> — « Révoquer son propre jeton ne demande que de l'avoir. »
+
+Une portée vide OUVRE donc une ressource, et c'est voulu. L'assertion niait une
+règle documentée.
+
+### LA PROSE DU BANC ÉNONÇAIT POURTANT LA BONNE PROPRIÉTÉ
+
+En tête du même fichier :
+
+> 2. **ON N'ATTEINT LE MAGASIN QU'AVEC UN JETON QUI OUVRE LA PORTÉE VOULUE.** […]
+>    et sa portée **contenait celle que la route exige**.
+
+« Contenait celle que la route exige » et « n'est pas vide » ne sont pas la même
+chose. C'est la même forme que le panic QUIC de la tranche précédente : **ce qui
+est écrit sait, ce qui s'exécute se trompe.**
+
+### L'ASSERTION DIT MAINTENANT CE QUE LE MODULE ANNONCE
+
+Elle demande la portée exigée **au routeur lui-même**, plutôt que de refaire son
+travail : une seconde table des portées, écrite dans le banc, finirait par ne plus
+dire la même chose que la vraie. Elle est aussi plus FORTE que celle qu'elle
+remplace — un jeton de portée `Mail` sur une route `Admin` la déclenche, ce que
+« non vide » laissait passer.
+
+Un repli silencieux a été durci au passage : un `Serve` implique que la route s'est
+résolue, et le taire masquerait une session qui sert ce que le routeur refuse.
+
+### CE QUE CELA DIT DES BARRIÈRES
+
+Ce registre écrit en tête qu'« une règle qui se croit outillée et ne l'est pas est
+pire qu'une règle absente ». Une ASSERTION fausse est le même mal d'un cran plus
+bas : elle a fait échouer une campagne pour un comportement correct, et elle aurait
+pu, à l'inverse, endormir sur un comportement qui ne l'est pas.
+
+Rien ne confronte les assertions d'un banc à la conception qu'elles prétendent
+vérifier. Les quatre bancs les plus chargés en propriétés ont été relus à cette
+occasion — celui de la session SMTP notamment, dont les assertions tiennent parce
+que sa politique n'authentifie personne. Le reste ne l'a pas été.
+
 ## Une copie cachée ne l'était que par une porte sur deux
 
 ### LE MÊME MESSAGE, LE MÊME COMPTE, DEUX RÉSULTATS OPPOSÉS

@@ -56,7 +56,7 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-use ams_api::{Key, Scope, Token, issue};
+use ams_api::{Key, Scope, Token, issue, resolve, split_query};
 use ams_proto_http::{HeadBuilder, Limits, Method, StatusCode};
 use ams_session::http::{Http, Next};
 
@@ -234,12 +234,33 @@ fuzz_target!(|entree: Entree| {
                 account, entree.compte,
                 "le compte servi n'est pas celui du jeton"
             );
-            // La portée du jeton contient celle que la route exige : on le
-            // revérifie en refaisant le chemin avec une portée vide.
-            assert_ne!(
-                portee,
-                Scope::none(),
-                "une portée vide n'ouvre aucune ressource servie"
+            // **LA PORTÉE DU JETON CONTIENT CELLE QUE LA ROUTE EXIGE.**
+            //
+            // C'est la propriété que ce module annonce, et ce banc en affirmait
+            // une autre : « la portée n'est pas vide ». Elle est FAUSSE.
+            // `/v1/tokens/current` n'exige aucune portée — révoquer son propre
+            // jeton ne demande que de l'avoir —, et un jeton sans droit l'ouvre
+            // donc légitimement. Le fuzz a fini par trouver l'entrée qui le
+            // montre : `OPTIONS /v1/tokens/current`.
+            //
+            // **ON REDEMANDE AU ROUTEUR PLUTÔT QUE DE REFAIRE SON TRAVAIL** : une
+            // seconde table des portées, écrite ici, finirait par ne plus dire la
+            // même chose que la vraie.
+            //
+            // Le tampon fait deux kibioctets, comme celui que la session découpe
+            // pour le chemin. La chaîne de requête ne participe pas au routage
+            // (§3.4 de RFC 3986), et se retire donc comme là-bas.
+            let mut place_du_chemin = [0_u8; 2 * 1024];
+            let (chemin, _requete) = split_query(tete.path());
+            // **UN `Serve` IMPLIQUE QUE LA ROUTE S'EST RÉSOLUE** : le taire par
+            // un repli masquerait une session qui sert ce que le routeur refuse.
+            let resolu = resolve(tete.method(), chemin, &mut place_du_chemin)
+                .expect("la session a servi : cette route se résout");
+            // `None` veut dire « rien n'est exigé », et non « aucune portée ».
+            let exigee = resolu.scope.unwrap_or_else(Scope::none);
+            assert!(
+                portee.contains(exigee),
+                "la portée du jeton n'ouvre pas ce que la route exige"
             );
             assert_eq!(tour.status(), StatusCode::OK);
             // PROPRIÉTÉ 7 : un corps n'accompagne qu'une méthode qui en attend.
