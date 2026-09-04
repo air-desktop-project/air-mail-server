@@ -1280,9 +1280,10 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
 
     /// Retient l'identité à vérifier, et dit si elle l'est.
     ///
-    /// Rend `false` — donc « accepte sans vérifier » — dans quatre cas, et
+    /// Rend `false` — donc « accepte sans vérifier » — dans cinq cas, et
     /// aucun n'est un échec :
     ///
+    /// - **le pair s'est AUTHENTIFIÉ** : voir ci-dessous ;
     /// - la politique d'expéditeur ne le demande pas ;
     /// - l'expéditeur est nul ET le `HELO` n'était pas un domaine, si bien qu'il
     ///   n'y a rien à interroger (RFC 7208 §2.4) ;
@@ -1291,6 +1292,25 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     /// - l'identité ne tient pas dans les tampons, ce qui veut dire qu'elle est
     ///   plus longue qu'un nom de domaine.
     fn retenir_l_expediteur(&mut self, reverse_path: &Path<'_>) -> bool {
+        // ── UNE SOUMISSION AUTHENTIFIÉE NE SE VÉRIFIE PAS PAR SPF ───────────
+        //
+        // SPF demande si l'ADRESSE QUI SE CONNECTE a le droit d'écrire pour ce
+        // domaine. Or celui qui soumet le fait depuis un portable, un téléphone,
+        // un hôtel : jamais depuis une machine que sa propre politique nomme.
+        // **`fail` est donc le résultat NORMAL d'une soumission légitime**, et
+        // non une anomalie.
+        //
+        // Le vérifier tout de même coûtait une interrogation DNS par
+        // transaction, et surtout apposait `Received-SPF: fail` sur le message —
+        // qui PARTAIT AVEC LUI vers le destinataire. Un filtre d'en face lisait
+        // alors un échec que NOUS avions écrit à propos de NOTRE PROPRE
+        // utilisateur.
+        //
+        // Ce qui autorise un déposant, c'est `AUTH` ; et le `From:` qu'il a le
+        // droit d'affirmer est déjà borné ailleurs (RFC 6409 §6.1).
+        if self.authenticated {
+            return false;
+        }
         if self.config.sender_policy() == SenderPolicy::Ignore {
             return false;
         }
@@ -4124,6 +4144,70 @@ mod tests {
         assert!(!tour.peer_fault(), "une panne chez nous n'est pas sa faute");
     }
 
+    /// **UNE SOUMISSION AUTHENTIFIÉE NE SE VÉRIFIE PAS PAR SPF.**
+    ///
+    /// SPF demande si l'adresse QUI SE CONNECTE a le droit d'écrire pour ce
+    /// domaine. Celui qui soumet le fait depuis un portable ou un téléphone,
+    /// jamais depuis une machine que sa propre politique nomme : `fail` est donc
+    /// le résultat NORMAL d'une soumission légitime.
+    ///
+    /// La vérifier tout de même apposait `Received-SPF: fail` sur le message —
+    /// qui partait AVEC LUI vers le destinataire, lequel lisait un échec que
+    /// nous avions écrit à propos de notre propre utilisateur.
+    #[test]
+    fn un_pair_authentifie_ne_fait_pas_interroger_spf() {
+        // **LA MÊME POLITIQUE QUE LES AUTRES ÉPREUVES SPF.** Elle authentifie
+        // déjà `jean` ; en écrire une seconde n'apprendrait rien et ferait une
+        // instanciation de plus.
+        let config = Config::new(b"mail.example.com", 2, 10_485_760, Limits::DEFAULT)
+            .expect("configurable")
+            .with_sender_policy(SenderPolicy::Enforce)
+            .with_capabilities(Capabilities {
+                starttls: false,
+                auth: true,
+                dsn: false,
+            });
+        let mut session = SmtpSession::new(config, Verdict(RecipientVerdict::Accept));
+        let mut tampon = [0_u8; 512];
+        session.greeting(&mut tampon).expect("bannière");
+        // `AUTH` est refusé sans chiffrement, et sans réglage.
+        session.on_tls_established();
+        let dire = |session: &mut SmtpSession<'_, Verdict>, ligne: &[u8]| -> Action {
+            let mut place = [0_u8; 512];
+            session
+                .handle(ligne, &mut place)
+                .expect("une réponse")
+                .action()
+        };
+        dire(&mut session, b"EHLO portable.example\r\n");
+
+        // **AVANT L'AUTHENTIFICATION**, la session demande la vérification.
+        assert_eq!(
+            dire(&mut session, b"MAIL FROM:<jean@example.com>\r\n"),
+            Action::CheckSender,
+            "un pair anonyme se vérifie : c'est tout l'objet de SPF"
+        );
+        dire(&mut session, b"RSET\r\n");
+
+        // `\0jean\0ouvre-toi` en base64.
+        dire(&mut session, b"AUTH PLAIN AGplYW4Ab3V2cmUtdG9p\r\n");
+        assert!(session.is_authenticated());
+
+        // **APRÈS**, il n'y a plus rien à demander.
+        assert_ne!(
+            dire(&mut session, b"MAIL FROM:<jean@example.com>\r\n"),
+            Action::CheckSender,
+            "un déposant authentifié ne se vérifie pas par SPF"
+        );
+        // La transaction se joue jusqu'au bout : ce qu'on éprouve est une
+        // soumission, et non un `MAIL FROM:` resté en l'air.
+        dire(&mut session, b"RCPT TO:<marie@example.com>\r\n");
+        assert_eq!(
+            session.sender_verdict(),
+            None,
+            "aucun verdict, donc aucun `Received-SPF` à écrire"
+        );
+    }
     #[test]
     fn les_autres_verdicts_laissent_passer() {
         // `softfail` dit « probablement pas » et la RFC 7208 §8.5 veut qu'on n'en

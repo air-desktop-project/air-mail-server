@@ -3846,6 +3846,62 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
+## Nous écrivions `Received-SPF: fail` sur le courrier de nos propres utilisateurs
+
+### CE QUE L'ÉMISSION A RÉVÉLÉ
+
+La file d'attente n'avait jamais été exercée. En la faisant tourner — soumission
+authentifiée vers un domaine en `.invalid`, reprises, péremption, rapport de
+non-remise —, le message mis en file portait ceci :
+
+```
+Received: from essai ([127.0.0.1]) by mail.example.com with ESMTPSA;
+Received-SPF: fail (mail.example.com: domain of jean@example.com does not
+              designate 127.0.0.1 as permitted sender);
+```
+
+`ESMTPSA` : c'est **notre propre compte authentifié**. Et cet en-tête PART AVEC LE
+MESSAGE vers le destinataire.
+
+### `fail` EST LE RÉSULTAT NORMAL D'UNE SOUMISSION LÉGITIME
+
+SPF demande si l'adresse **qui se connecte** a le droit d'écrire pour ce domaine.
+Celui qui soumet le fait depuis un portable, un téléphone, un hôtel — jamais
+depuis une machine que sa propre politique nomme. Un `fail` n'y est donc pas une
+anomalie : **c'est la règle**, pour tout utilisateur nomade.
+
+Le résultat était que le serveur apposait, sur le courrier de ses propres
+utilisateurs, un verdict d'échec **qu'il avait lui-même écrit**, et qu'un filtre
+d'en face lit comme un signal contre eux. La vérification coûtait en outre une
+interrogation DNS par transaction, pour un verdict connu d'avance.
+
+Vérifié sur les deux portes avant de corriger : la copie remise LOCALEMENT le
+portait aussi, entre deux comptes de la maison.
+
+### CE QUI AUTORISE UN DÉPOSANT, C'EST `AUTH`
+
+Et le `From:` qu'il a le droit d'affirmer est déjà borné ailleurs (RFC 6409 §6.1,
+`ecrit_bien_en_son_nom`). SPF n'apportait rien qui ne fût déjà établi.
+
+La garde s'ajoute donc **dans la fonction qui décide de vérifier**, et non au site
+d'appel : elle porte déjà une liste documentée de « cas où l'on accepte sans
+vérifier », qui en compte maintenant cinq au lieu de quatre. C'est là que ce
+raisonnement se lit.
+
+### CE QUI NE CHANGE PAS, ET QUI COMPTE AUTANT
+
+**Le courrier en TRANSIT reste vérifié.** Vérifié en exécutant : un message
+d'un `gmail.com` non authentifié arrive toujours avec `Received-SPF: softfail`.
+C'est là que SPF sert, et rien n'y touche.
+
+### L'ESSAI A DÛ ÊTRE ÉCRIT DEUX FOIS, ET C'EST INSTRUCTIF
+
+Le premier montait sa propre politique d'essai. Il passait — mais la couverture
+tombait à 99,98 % : une SECONDE INSTANCIATION de `SmtpSession` était née, et la
+branche neuve restait vide dans celle des autres épreuves SPF. Réécrit sur la
+politique existante, qui authentifie déjà `jean`, il couvre la branche là où elle
+doit l'être. Un essai qui apporte son propre décor mesure son décor.
+
 ## Un avertissement qui reprochait une absence à qui n'en avait pas
 
 ### LA PHRASE, ET CE QUE LA CONFIGURATION DISAIT AU MÊME MOMENT
