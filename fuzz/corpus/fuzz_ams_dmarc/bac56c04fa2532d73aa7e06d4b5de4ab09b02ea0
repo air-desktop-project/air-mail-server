@@ -1,0 +1,6 @@
+v=DMARC1; p=reject; s=100; ruc= rua=######################05xamplne
+.ne
+'com########00; ruc=a#######
+
+
+;;
