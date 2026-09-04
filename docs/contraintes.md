@@ -3846,6 +3846,71 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
+## Une copie cachée ne l'était que par une porte sur deux
+
+### LE MÊME MESSAGE, LE MÊME COMPTE, DEUX RÉSULTATS OPPOSÉS
+
+| porte | `Bcc:` dans le message livré |
+|---|---|
+| `POST /v1/submissions` | **retiré** |
+| soumission SMTP authentifiée | **conservé, et livré** |
+
+Le destinataire visible apprenait donc qui avait reçu une copie cachée — selon la
+porte que son correspondant avait employée. C'est une propriété de discrétion qui
+dépendait du client, ce qu'aucun utilisateur ne peut deviner.
+
+### LA RAISON DE L'ASYMÉTRIE ÉTAIT STRUCTURELLE, ET C'EST CE QUI LA RENDAIT INVISIBLE
+
+Les deux portes ne tirent pas leurs destinataires du même endroit. L'API les lit
+dans les EN-TÊTES — `To`, `Cc`, `Bcc` —, elle tient donc le message entier en
+mémoire et doit retirer le champ avant de remettre. SMTP les tient de
+l'ENVELOPPE : l'en-tête n'a jamais eu besoin d'être lu, et il s'écrivait au fil de
+l'eau, tel qu'il venait.
+
+Ce n'était donc pas un oubli, mais une conséquence. C'est aussi pourquoi rien ne
+la signalait : chaque porte était cohérente avec elle-même.
+
+§8.3 de RFC 6409 n'en fait qu'un **MAY**, et tout client courant retire le champ
+lui-même. Ce qui tranche ici n'est pas la RFC, c'est la règle que ce dépôt se
+donne : *deux portes, une seule règle*.
+
+### ON TAMPONNE LE BLOC D'EN-TÊTE, ET LUI SEUL
+
+Retirer un champ demande d'avoir vu l'en-tête ENTIER — il peut être n'importe où.
+Tamponner le message coûterait sa taille par connexion, ce que C3 interdit et que
+la réserve de `Authentication-Results` évite déjà. **Tamponner le seul bloc
+d'en-tête** coûte au plus `max_header_octets`, tient en une passe, et n'ajoute
+aucune écriture disque. Au-delà de la borne, on renonce à retoucher et l'on écrit
+ce qu'on a : un en-tête sans fin n'est pas un en-tête.
+
+### C'EST `submitter` QUI DÉCIDE, ET C'EST STRUCTUREL
+
+La rétention ne s'ouvre que dans `Delivery::submitter`, que la boucle n'appelle que
+pour un pair **authentifié** — le `SA` d'`ESMTPSA` dans la trace. Un message en
+TRANSIT ne passe pas par là, et son en-tête n'est ni retenu ni retouché.
+
+Cela compte autant que le retrait : retirer un champ de l'en-tête d'un message
+qu'on n'a pas soumis casserait la signature DKIM de son expéditeur. **Ce `Bcc:`-là
+n'est pas notre affaire.**
+
+### CE QUE LES QUATRE ESSAIS TIENNENT
+
+Le retrait sur soumission ; la préservation en transit ; un `Bcc:` écrit dans le
+CORPS qui survit — l'en-tête s'arrête à la ligne vide ; et un `Bcc:` coupé entre
+deux `append`, qui est tout l'intérêt de la rétention.
+
+Les deux premiers ont été passés contre le code d'avant, en désactivant le
+correctif par édition : les deux essais de soumission tombent, les deux essais « ne
+pas toucher » restent verts. Une sensibilité exacte au correctif, et rien d'autre.
+
+Vérifié aussi sur le serveur réel, par les deux portes et dans les deux sens.
+
+### CE QUI RESTE
+
+Un en-tête que `write_header_fields` ne sait pas relire passe **tel quel** : c'est
+le seul choix qui ne perde pas de message, mais rien ne garantit alors qu'un `Bcc:`
+illisible soit retiré. Le registre le dit plutôt que de le taire.
+
 ## La porte HTTP refusait l'usurpation sans le dire
 
 ### LA TRANCHE PRÉCÉDENTE AVAIT LAISSÉ UNE PORTE, ET C'EST DIT

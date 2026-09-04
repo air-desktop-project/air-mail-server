@@ -342,6 +342,22 @@ pub struct MaildirDelivery {
     /// Remis à faux par [`Delivery::begin`] : un second message sur la même
     /// connexion n'hérite pas du verdict du premier.
     ecarte: bool,
+    /// Le bloc d'en-tête du DÉPOSANT, retenu tant qu'il n'est pas complet.
+    ///
+    /// # POURQUOI ON LE RETIENT, ALORS QUE TOUT LE RESTE S'ÉCRIT AU FIL DE L'EAU
+    ///
+    /// Le `Bcc:` d'une soumission doit disparaître du message remis (§3.6.3 de
+    /// RFC 5322), et l'on ne peut retirer un champ qu'après avoir vu l'en-tête
+    /// ENTIER — le champ peut être n'importe où. Tamponner le message entier
+    /// coûterait sa taille par connexion, ce que C3 interdit ; tamponner le seul
+    /// BLOC D'EN-TÊTE coûte au plus `max_header_octets`, et n'ajoute aucune
+    /// écriture disque.
+    ///
+    /// **`None` VEUT DIRE « ON N'Y TOUCHE PAS »**, et c'est le cas le plus
+    /// courant : un message en TRANSIT s'écrit tel qu'il est venu. Retoucher
+    /// l'en-tête d'un message qu'on n'a pas soumis casserait la signature DKIM de
+    /// son expéditeur, et ce n'est pas notre affaire.
+    entetes: Option<Vec<u8>>,
     /// Ce qui rate, compté et dit — PARTAGÉ par toutes les connexions.
     ///
     /// Voir [`crate::incidents`] : une remise qui échouait rendait un `451` et
@@ -374,6 +390,7 @@ impl MaildirDelivery {
             envid: String::new(),
             rapports: Vec::new(),
             ecarte: false,
+            entetes: None,
             incidents,
         }
     }
@@ -446,6 +463,9 @@ impl MaildirDelivery {
 
 impl Delivery for MaildirDelivery {
     fn begin(&mut self, return_path: Option<&[u8]>) {
+        // Une transaction n'hérite RIEN de la précédente, pas même un en-tête à
+        // moitié lu : `submitter` rouvrira la rétention si celle-ci en est une.
+        self.entetes = None;
         // Une nouvelle transaction n'hérite RIEN de la précédente : ni son
         // chemin de retour, ni ses sortants, ni son corps. Sans cela, un second
         // message émis sur la même connexion partirait à qui l'avait précédé.
@@ -464,6 +484,11 @@ impl Delivery for MaildirDelivery {
 
     fn submitter(&mut self, login: &[u8]) {
         self.compte = Some(String::from_utf8_lossy(login).into_owned());
+        // **C'EST ICI, ET NULLE PART AILLEURS, QU'UNE SOUMISSION SE RECONNAÎT.**
+        // La boucle n'appelle ceci que pour un pair AUTHENTIFIÉ — c'est le `SA`
+        // d'`ESMTPSA` dans la trace. Un message en transit ne passe pas par là, et
+        // son en-tête ne sera donc pas retenu ni retouché.
+        self.entetes = Some(Vec::new());
     }
 
     fn reserve_trace(&mut self, combien: usize) {
@@ -537,28 +562,30 @@ impl Delivery for MaildirDelivery {
     }
 
     fn append(&mut self, chunk: &[u8]) -> Result<(), DeliveryFailure> {
-        // **LE CONSTAT D'ABORD, LA PAROLE ENSUITE** : la boucle emprunte
-        // `self.arrivees`, et `self.incident` demande `&self` tout entier. Un
-        // drapeau les sépare.
-        if self
-            .arrivees
-            .iter_mut()
-            .any(|(_, arrivee)| arrivee.write(chunk).is_err())
-        {
-            self.incident(crate::incidents::Cause::Ecriture);
-            return Err(DeliveryFailure::Temporary);
-        }
-        if !self.sortants.is_empty() {
-            // LA BORNE EST CELLE DU MESSAGE, et elle est vérifiée ici aussi
-            // plutôt que supposée : la session la tient déjà, mais un tampon qui
-            // croît en mémoire au rythme d'un pair est exactement ce que C3
-            // interdit de laisser sans garde.
-            if self.corps.len().saturating_add(chunk.len()) > self.corps_max {
-                return Err(DeliveryFailure::Permanent);
+        let Some(mut retenus) = self.entetes.take() else {
+            return self.ecrire(chunk);
+        };
+        retenus.extend_from_slice(chunk);
+        let Some(fin) = fin_de_l_entete(&retenus) else {
+            // **UN EN-TÊTE QUI NE FINIT PAS N'EST PAS RETENU SANS FIN** (C3). Au
+            // delà de la borne, on renonce à le retoucher et l'on écrit ce qu'on
+            // a : le message est de toute façon illisible pour un analyseur, et
+            // le refuser ici priverait le déposant d'une réponse claire — la
+            // session la lui donnera.
+            if retenus.len() > ams_mime::Limits::DEFAULT.max_header_octets {
+                return self.ecrire(&retenus);
             }
-            self.corps.extend_from_slice(chunk);
-        }
-        Ok(())
+            self.entetes = Some(retenus);
+            return Ok(());
+        };
+        // Ce qui suit la ligne vide est le corps : il se recopie tel quel. Un
+        // message qu'on remanierait davantage ne serait plus celui que
+        // l'expéditeur a signé.
+        let (entete, corps) = retenus.split_at(fin);
+        let sans_bcc = sans_le_bcc(entete);
+        let corps = corps.to_vec();
+        self.ecrire(&sans_bcc)?;
+        self.ecrire(&corps)
     }
 
     /// **LE `Return-Path:` NE SUIT PAS CE QU'ON RELAIE** (RFC 5321 §4.4).
@@ -580,6 +607,12 @@ impl Delivery for MaildirDelivery {
     }
 
     fn finish(&mut self) -> Result<(), DeliveryFailure> {
+        // **CE QU'ON RETIENT ENCORE DOIT PARTIR.** Un message sans ligne vide
+        // n'a pas d'en-tête au sens de §2.1, donc rien qu'on sache retirer sans
+        // risque : on l'écrit tel qu'il est venu plutôt que de le perdre.
+        if let Some(retenus) = self.entetes.take() {
+            self.ecrire(&retenus)?;
+        }
         // AUCUN DESTINATAIRE, AUCUNE REMISE. La session n'accepte pas de `DATA`
         // sans `RCPT`, et accepter un message qui ne va nulle part reviendrait à
         // répondre `250` pour une boîte qui n'existe pas.
@@ -633,10 +666,77 @@ impl Delivery for MaildirDelivery {
         // donc qu'à oublier ce qu'on avait rassemblé.
         self.sortants.clear();
         self.corps.clear();
+        self.entetes = None;
+    }
+}
+
+/// Où finit le bloc d'en-tête, ligne vide COMPRISE.
+///
+/// §2.1 de RFC 5322 : l'en-tête se termine par une ligne vide. On rend l'indice
+/// du premier octet du corps — ou `None` tant qu'elle n'est pas venue.
+fn fin_de_l_entete(octets: &[u8]) -> Option<usize> {
+    octets
+        .windows(4)
+        .position(|f| f == b"\r\n\r\n")
+        .map(|rang| rang.saturating_add(4))
+}
+
+/// Le même bloc d'en-tête, sans son `Bcc:`.
+///
+/// # UNE COPIE CACHÉE EST CACHÉE (§3.6.3 de RFC 5322)
+///
+/// Le champ disparaît du message remis À TOUS, y compris à celui qui y figure :
+/// il sait déjà qu'il l'a reçu, et lui montrer la liste révélerait les autres.
+/// C'est mot pour mot ce que fait la porte HTTP, et les deux portes doivent dire
+/// la même chose.
+///
+/// # UN EN-TÊTE QU'ON NE SAIT PAS RELIRE PASSE TEL QUEL
+///
+/// `write_header_fields` le réécrit champ par champ, et refuse ce qu'il ne sait
+/// pas lire. Un refus rend alors l'original : c'est le seul choix qui ne PERDE
+/// pas de message. Rien ne garantit qu'un `Bcc:` illisible soit retiré, et c'est
+/// dit plutôt que tu.
+fn sans_le_bcc(entete: &[u8]) -> Vec<u8> {
+    let bornes = ams_mime::Limits::DEFAULT;
+    // On retire un champ et l'on réécrit les autres tels quels : le résultat ne
+    // grandit pas. La marge ne coûte rien, et ce tampon meurt avec le message.
+    let mut sortie = vec![0_u8; entete.len().saturating_add(64)];
+    match ams_mime::write_header_fields(entete, b"bcc", true, &mut sortie, &bornes) {
+        Ok(ecrits) => {
+            sortie.truncate(ecrits);
+            sortie
+        }
+        Err(_) => entete.to_vec(),
     }
 }
 
 impl MaildirDelivery {
+    /// Écrit ces octets aux arrivées, et au message qu'on relaiera s'il y en a un.
+    fn ecrire(&mut self, chunk: &[u8]) -> Result<(), DeliveryFailure> {
+        // **LE CONSTAT D'ABORD, LA PAROLE ENSUITE** : la boucle emprunte
+        // `self.arrivees`, et `self.incident` demande `&self` tout entier. Un
+        // drapeau les sépare.
+        if self
+            .arrivees
+            .iter_mut()
+            .any(|(_, arrivee)| arrivee.write(chunk).is_err())
+        {
+            self.incident(crate::incidents::Cause::Ecriture);
+            return Err(DeliveryFailure::Temporary);
+        }
+        if !self.sortants.is_empty() {
+            // LA BORNE EST CELLE DU MESSAGE, et elle est vérifiée ici aussi
+            // plutôt que supposée : la session la tient déjà, mais un tampon qui
+            // croît en mémoire au rythme d'un pair est exactement ce que C3
+            // interdit de laisser sans garde.
+            if self.corps.len().saturating_add(chunk.len()) > self.corps_max {
+                return Err(DeliveryFailure::Permanent);
+            }
+            self.corps.extend_from_slice(chunk);
+        }
+        Ok(())
+    }
+
     /// Le dossier de quarantaine de ce compte, ouvert ou créé.
     ///
     /// # C'EST ICI QUE LE DOSSIER NAÎT
@@ -990,10 +1090,10 @@ mod tests {
     use std::sync::Arc;
 
     /// Un répertoire qui s'efface quand le test finit.
-    struct Ephemere(PathBuf);
+    pub(super) struct Ephemere(pub(super) PathBuf);
 
     impl Ephemere {
-        fn nouveau() -> Self {
+        pub(super) fn nouveau() -> Self {
             let unique = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |depuis| depuis.as_nanos());
@@ -1013,7 +1113,7 @@ mod tests {
     }
 
     /// Un compte `marie`, sa boîte, et la remise qui les sert.
-    fn remise(racine: &Path) -> (Arc<Boites>, MaildirDelivery) {
+    pub(super) fn remise(racine: &Path) -> (Arc<Boites>, MaildirDelivery) {
         let boite = Maildir::open(
             racine.join("marie"),
             b"mail.example.com",
@@ -1097,7 +1197,7 @@ mod tests {
     }
 
     /// Les noms de fichiers d'un sous-répertoire, triés.
-    fn contenu(chemin: &Path) -> Vec<String> {
+    pub(super) fn contenu(chemin: &Path) -> Vec<String> {
         let mut trouves: Vec<String> = std::fs::read_dir(chemin)
             .map(|entrees| {
                 entrees
@@ -1869,5 +1969,122 @@ mod tests {
             !temporaire.0.join("a").exists(),
             "un `/` n'a pas ouvert de sous-répertoire"
         );
+    }
+}
+
+#[cfg(test)]
+mod copie_cachee {
+    use ams_loop_tokio::Delivery as _;
+
+    use super::tests::{Ephemere, contenu, remise};
+
+    /// Ce que `marie` reçoit quand on lui remet ce message-là.
+    fn remis(entete: &str, corps: &str, soumission: bool) -> String {
+        let temporaire = Ephemere::nouveau();
+        let (_boites, mut remise) = remise(&temporaire.0);
+        remise.begin(Some(b"marie@example.com"));
+        if soumission {
+            // **C'EST CE SEUL APPEL QUI FAIT LA DIFFÉRENCE** : la boucle ne le
+            // fait que pour un pair authentifié — le `SA` d'`ESMTPSA`.
+            remise.submitter(b"marie");
+        }
+        remise
+            .add_recipient(b"marie@example.com")
+            .expect("une arrivée");
+        remise
+            .append(std::format!("{entete}\r\n{corps}").as_bytes())
+            .expect("corps");
+        remise.finish().expect("remis");
+        let boite = temporaire.0.join("marie").join("new");
+        let nom = contenu(&boite).into_iter().next().expect("un message");
+        std::fs::read_to_string(boite.join(nom)).expect("lisible")
+    }
+
+    /// **UNE COPIE CACHÉE EST CACHÉE** (§3.6.3 de RFC 5322).
+    ///
+    /// La porte HTTP retirait déjà le champ ; celle-ci le laissait passer. Le
+    /// destinataire visible apprenait donc qui d'autre avait reçu le message —
+    /// et selon la porte que son correspondant avait employée.
+    #[test]
+    fn le_bcc_d_une_soumission_ne_part_pas() {
+        let recu = remis(
+            "From: marie@example.com\r\nTo: marie@example.com\r\n\
+             Bcc: cache@example.com\r\nSubject: essai\r\n",
+            "Le corps.\r\n",
+            true,
+        );
+
+        assert!(!recu.contains("Bcc:"), "le champ a disparu : {recu}");
+        assert!(
+            !recu.contains("cache@example.com"),
+            "et l'adresse avec lui : {recu}"
+        );
+        assert!(recu.contains("Subject: essai"), "le reste est intact");
+        assert!(recu.ends_with("Le corps.\r\n"), "et le corps aussi");
+    }
+
+    /// **UN MESSAGE EN TRANSIT N'EST PAS RETOUCHÉ**, et c'est aussi important.
+    ///
+    /// Retirer un champ de l'en-tête d'un message qu'on n'a pas soumis casserait
+    /// la signature DKIM de son expéditeur. Ce `Bcc:`-là n'est pas notre affaire.
+    #[test]
+    fn le_bcc_d_un_message_en_transit_reste() {
+        let recu = remis(
+            "From: dehors@autre.test\r\nTo: marie@example.com\r\n\
+             Bcc: cache@autre.test\r\nSubject: essai\r\n",
+            "Le corps.\r\n",
+            false,
+        );
+
+        assert!(
+            recu.contains("Bcc: cache@autre.test"),
+            "on n'y touche pas : {recu}"
+        );
+    }
+
+    /// **LE CORPS N'EST PAS DE L'EN-TÊTE**, et un `Bcc:` écrit dedans y reste.
+    #[test]
+    fn un_bcc_ecrit_dans_le_corps_survit() {
+        let recu = remis(
+            "From: marie@example.com\r\nTo: marie@example.com\r\nSubject: essai\r\n",
+            "On y parle de Bcc: sans que ce soit un champ.\r\n",
+            true,
+        );
+
+        assert!(
+            recu.ends_with("On y parle de Bcc: sans que ce soit un champ.\r\n"),
+            "le corps est recopié tel quel : {recu}"
+        );
+    }
+
+    /// **L'EN-TÊTE ARRIVE EN MORCEAUX**, et le `Bcc:` peut être coupé en deux.
+    ///
+    /// C'est tout l'intérêt de le retenir : un `append` ne voit qu'un fragment,
+    /// et la décision ne peut se prendre qu'une fois la ligne vide venue.
+    #[test]
+    fn un_bcc_coupe_entre_deux_morceaux_disparait_aussi() {
+        let temporaire = Ephemere::nouveau();
+        let (_boites, mut remise) = remise(&temporaire.0);
+        remise.begin(Some(b"marie@example.com"));
+        remise.submitter(b"marie");
+        remise
+            .add_recipient(b"marie@example.com")
+            .expect("une arrivée");
+        for morceau in [
+            "From: marie@example.com\r\nTo: marie@exa",
+            "mple.com\r\nBc",
+            "c: cache@example.com\r\nSubject: essai\r\n",
+            "\r\nLe corps.\r\n",
+        ] {
+            remise.append(morceau.as_bytes()).expect("morceau");
+        }
+        remise.finish().expect("remis");
+
+        let boite = temporaire.0.join("marie").join("new");
+        let nom = contenu(&boite).into_iter().next().expect("un message");
+        let recu = std::fs::read_to_string(boite.join(nom)).expect("lisible");
+
+        assert!(!recu.contains("cache@example.com"), "coupé, mais retiré : {recu}");
+        assert!(recu.ends_with("Le corps.\r\n"), "et le corps est entier");
     }
 }
