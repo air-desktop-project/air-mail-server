@@ -2907,3 +2907,87 @@ fn un_paquet_sans_clefs_pour_son_espace_se_jette() {
         "rien à dire : le paquet n'a même pas été ouvert"
     );
 }
+
+/// **UNE TRAME POUR UN FLUX OUBLIÉ NE FERME PAS LA CONNEXION** (§3.3).
+///
+/// Un flux fini puis récolté n'a plus de place dans la table, et son rang reste
+/// sous le plafond — que la récolte a justement relevé. Le pair peut donc parler
+/// d'un flux que nous avons oublié, sans faute de sa part : la seule conduite
+/// juste est de JETER la trame.
+///
+/// Le code faisait pire que la condamner : il PANIQUAIT, faute de place libre.
+#[test]
+fn une_trame_pour_un_flux_oublie_ne_condamne_pas() {
+    let (_atelier, mut serveur, mut client, mut horloge) = etabli("flux-oublie");
+
+    /// Le `k`-ième flux unidirectionnel d'un client : §2.1 les numérote `4k + 2`.
+    fn uni(k: u64) -> u64 {
+        k.saturating_mul(4).saturating_add(2)
+    }
+
+    let donner = |serveur: &mut Connection, client: &mut Client, numero: u64, horloge: u64| {
+        let mut trames = [0_u8; 64];
+        let ecrits = Frame::Stream {
+            stream: numero,
+            offset: 0,
+            data: b"bonjour",
+            fin: true,
+        }
+        .write(&mut trames)
+        .expect("écrivable");
+        let mut datagramme =
+            un_paquet_du_client(client, trames.get(..ecrits).expect("écrites"));
+        serveur.on_datagram(&mut datagramme, horloge)
+    };
+
+    // ── Huit flux, lus jusqu'au bout, puis récoltés ─────────────────────────
+    for k in 0..8_u64 {
+        donner(&mut serveur, &mut client, uni(k), horloge).expect("accueilli");
+        let id = StreamId::new(uni(k)).expect("un numéro");
+        let mut lu = [0_u8; 32];
+        while serveur.read(id, &mut lu) > 0 {}
+    }
+    // La récolte a lieu à l'émission, et c'est elle qui relève le plafond.
+    let mut place = std::vec![0_u8; 1_500];
+    while serveur.poll_transmit(&mut place, horloge).expect("avance") > 0 {
+        horloge = horloge.saturating_add(1_000);
+    }
+
+    // ── Huit de plus, qui reprennent toutes les places ──────────────────────
+    let mut remplies = 0_usize;
+    for k in 8..16_u64 {
+        if donner(&mut serveur, &mut client, uni(k), horloge).is_ok() {
+            remplies = remplies.saturating_add(1);
+        }
+    }
+    assert!(remplies > 0, "le plafond relevé a laissé passer des flux neufs");
+
+    // ── Et une trame pour le tout premier, oublié depuis longtemps ──────────
+    donner(&mut serveur, &mut client, uni(0), horloge).expect("jetée, et non fatale");
+
+    assert!(
+        !serveur.is_closed(),
+        "une trame retardataire ne ferme pas la connexion"
+    );
+
+    // ── Et la même règle pour une trame qui n'en porte pas les octets ───────
+    //
+    // `MAX_STREAM_DATA` parle d'un flux sans rien y écrire : elle passe par un
+    // autre chemin, et un flux oublié doit s'y taire de la même façon.
+    let mut trames = [0_u8; 32];
+    let ecrits = Frame::MaxStreamData {
+        stream: uni(1),
+        maximum: 100_000,
+    }
+    .write(&mut trames)
+    .expect("écrivable");
+    let mut datagramme = un_paquet_du_client(&mut client, trames.get(..ecrits).expect("écrites"));
+    serveur
+        .on_datagram(&mut datagramme, horloge)
+        .expect("jetée, et non fatale");
+
+    assert!(
+        !serveur.is_closed(),
+        "un flux oublié se tait, quelle que soit la trame"
+    );
+}

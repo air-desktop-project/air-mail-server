@@ -876,3 +876,42 @@ fn un_acquittement_d_annulation_sans_objet_ne_dit_rien() {
         "et il reste ce qu'il était : vivant, et sans moitié d'émission"
     );
 }
+
+/// **UNE TRAME POUR UN FLUX QU'ON A OUBLIÉ NE FAIT PAS TOMBER LE SERVEUR.**
+///
+/// Le code disait ici « la place existe forcément » : le plafond ne monte jamais
+/// au-delà de ce que la famille a rendu plus ses huit places, donc un rang admis
+/// trouve toujours une case. Le raisonnement tient si TOUT indice compté comme
+/// ouvert consomme une place — et §2.1 le défait, puisqu'ouvrir le rang N ouvre
+/// aussi tous ceux d'avant, qui avancent le compteur sans rien prendre.
+///
+/// Le fuzz a fini par composer la suite qui l'exhibe. On la reproduit ici sous sa
+/// forme la plus courte : un plafond plus large que la table, la table pleine, et
+/// un rang de plus. Le `expect` faisait alors tomber le fil de travail sur une
+/// trame qu'un pair irréprochable a le droit d'envoyer.
+#[test]
+fn un_rang_admis_sans_place_ne_panique_pas() {
+    let mut flux_ = serveur();
+    // Le plafond est plus large que la table : c'est exactement ce que
+    // l'ouverture implicite de §2.1 peut produire.
+    flux_.set_max_streams(Directional::Unidirectional, 32);
+
+    // Les huit places de la famille entrante unidirectionnelle : le pair est
+    // client, ses flux unidirectionnels portent `4k + 2`.
+    for k in 0..8_u64 {
+        flux_
+            .accueillir(flux(k.saturating_mul(4).saturating_add(2)))
+            .expect("les huit premières places existent");
+    }
+
+    // Le neuvième rang est SOUS le plafond, et la table est pleine.
+    let issue = flux_
+        .accueillir(flux(8 * 4 + 2))
+        .expect_err("aucune place ne reste");
+
+    assert_eq!(
+        issue.reason(),
+        Reason::SendClosed,
+        "c'est ce que la documentation de `trouver_ou_ouvrir` annonçait déjà"
+    );
+}

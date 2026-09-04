@@ -340,13 +340,26 @@ impl Streams {
         // §4.6 : le plafond ensuite. Le refuser avant de prendre une place est
         // ce qui borne la table.
         self.concurrences.seen(flux)?;
-        // **LA PLACE EXISTE FORCÉMENT** : le plafond de cette famille ne monte
-        // jamais au-delà de ce qu'elle a rendu plus ses huit places, et
-        // `seen` vient de le faire respecter. Un `?` ici serait une garde
-        // qu'aucun essai ne pourrait atteindre.
-        let rang = self
-            .place_libre(self.famille(flux))
-            .expect("une famille a toujours une place sous son plafond");
+        // **LA PLACE N'EXISTE PAS FORCÉMENT**, et ce fut longtemps écrit ici.
+        //
+        // Le raisonnement disait : le plafond ne monte jamais au-delà de ce que
+        // la famille a rendu plus ses huit places, donc `seen` garantit une
+        // place. Il tient si TOUT indice compté comme ouvert consomme une place
+        // — et §2.1 le défait : ouvrir le rang N ouvre AUSSI tous ceux d'avant,
+        // qui avancent le compteur sans rien prendre dans la table.
+        //
+        // Le fuzz a fini par composer la suite qui l'exhibe : ouvrir un flux, le
+        // laisser finir et le RÉCOLTER — ce qui relève le plafond —, remplir la
+        // table avec d'autres, puis renvoyer une trame pour le premier. Son rang
+        // est toujours sous le plafond, sa place n'est plus là, et le `expect`
+        // faisait tomber le fil de travail sur une trame RETARDATAIRE.
+        //
+        // C'est le cas que la documentation de cette fonction décrivait déjà :
+        // « `SendClosed` si le flux est déjà fini et oublié […] une trame
+        // retardataire ne doit pas fermer la connexion ». Le code, lui, paniquait.
+        let Some(rang) = self.place_libre(self.famille(flux)) else {
+            return Err(Error::new(Reason::SendClosed));
+        };
         let reception = flux
             .peer_can_send(self.nous)
             .then(|| Recv::new(self.notre_limite(flux)));

@@ -3846,6 +3846,61 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
+## Une trame retardataire faisait tomber un fil de travail
+
+### CE QUE LE FUZZ A TROUVÉ, EN VALIDANT UNE AUTRE TRANCHE
+
+La campagne s'est arrêtée à 46 cibles sur 65 :
+
+```
+panicked at crates/ams-quic/src/streams.rs:349
+une famille a toujours une place sous son plafond
+```
+
+La sonde a dit l'état exact : famille entrante unidirectionnelle, rang 5, une
+place rendue, plafond à neuf. Le rang était donc **sous** le plafond, et les huit
+places étaient prises.
+
+### LE RAISONNEMENT DE L'`expect` ÉTAIT ÉCRIT, ET FAUX
+
+> **LA PLACE EXISTE FORCÉMENT** : le plafond de cette famille ne monte jamais
+> au-delà de ce qu'elle a rendu plus ses huit places, et `seen` vient de le faire
+> respecter. Un `?` ici serait une garde qu'aucun essai ne pourrait atteindre.
+
+Il tient si **tout indice compté comme ouvert consomme une place**. §2.1 le défait :
+ouvrir le rang N ouvre AUSSI tous ceux d'avant, qui avancent le compteur sans rien
+prendre dans la table.
+
+La suite qui l'exhibe : ouvrir un flux, le laisser finir et le RÉCOLTER — ce qui
+relève le plafond —, remplir la table avec d'autres, puis renvoyer une trame pour
+le premier. Un pair irréprochable peut le faire, et le fil de travail tombait.
+
+### LA DOCUMENTATION DE LA FONCTION DISAIT DÉJÀ QUOI FAIRE
+
+Quinze lignes plus haut, dans sa propre section `# Errors` :
+
+> [`Reason::SendClosed`] si le flux est déjà fini et oublié — celui-là, §3.3 le
+> range parmi les fautes seulement pour ce qu'on n'a jamais ouvert, et **une trame
+> retardataire ne doit pas fermer la connexion**.
+
+La prose savait. Le code paniquait. C'est la **troisième** fois que cette forme
+exacte apparaît — après le panic QUIC de la poignée de main et l'assertion fausse
+du banc de fuzz.
+
+### LE CORRECTIF SUIT CETTE PROSE, DES DEUX CÔTÉS
+
+`trouver_ou_ouvrir` rend `SendClosed` au lieu de paniquer ; et la couche
+au-dessus **jette la trame** au lieu d'en faire une faute de connexion — sans quoi
+le panic aurait seulement cédé la place à une condamnation injuste.
+
+### CE QUI RESTE, ET QUI EST DIT PLUTÔT QUE TU
+
+On ne distingue pas un flux **récolté** d'un flux **implicitement ouvert et jamais
+employé** : les deux sont « sous le plafond et absents de la table ». Le premier
+mérite le silence, le second aussi tant qu'il n'y a pas de place. Une table pleine
+fait donc jeter une trame qu'on aurait pu servir si une place s'était libérée —
+c'est une perte possible, préférable à un panic, et le pair réémettra.
+
 ## La porte HTTP ne comptait pas la première faute d'un hostile
 
 ### LES CINQ ÉCOUTES, MISES CÔTE À CÔTE

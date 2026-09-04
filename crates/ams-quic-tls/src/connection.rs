@@ -1106,7 +1106,18 @@ impl Connection {
             .expect("`un_paquet` jette un paquet `1-RTT` tant que les flux manquent");
         // Le numéro vient d'un entier de §16, et `StreamId` a le même espace.
         let id = StreamId::new(stream).expect("un numéro de flux tient dans l'espace de §16");
-        let rang = flux.accueillir(id).map_err(Error::depuis_quic)?;
+        // **UNE TRAME RETARDATAIRE NE FERME PAS LA CONNEXION** (§3.3).
+        //
+        // Un flux fini puis récolté n'a plus de place dans la table, et son rang
+        // reste sous le plafond : le pair peut donc parler d'un flux que nous
+        // avons oublié, sans faute de sa part. `accueillir` le dit par
+        // `SendClosed`, et la seule conduite juste est de JETER la trame — la
+        // compter pour une faute condamnerait un pair irréprochable.
+        let rang = match flux.accueillir(id) {
+            Ok(rang) => rang,
+            Err(faute) if faute.reason() == ams_quic::Reason::SendClosed => return Ok(()),
+            Err(faute) => return Err(Error::depuis_quic(faute)),
+        };
         let fenetre = &mut self.fenetres[rang];
         if fenetre.is_empty() {
             fenetre.resize(FLUX_FENETRE, 0);
@@ -1137,8 +1148,13 @@ impl Connection {
             .as_mut()
             .expect("`un_paquet` jette un paquet `1-RTT` tant que les flux manquent");
         let id = StreamId::new(stream).expect("un numéro de flux tient dans l'espace de §16");
-        quoi_faire(flux, id).map_err(Error::depuis_quic)?;
-        Ok(())
+        // La même règle que pour `STREAM` : un flux oublié se tait, il ne
+        // condamne pas.
+        match quoi_faire(flux, id) {
+            Ok(()) => Ok(()),
+            Err(faute) if faute.reason() == ams_quic::Reason::SendClosed => Ok(()),
+            Err(faute) => Err(Error::depuis_quic(faute)),
+        }
     }
 
     /// Un `ACK` est arrivé : on en tire le trajet, la congestion et les pertes.
