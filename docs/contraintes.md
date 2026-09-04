@@ -3846,6 +3846,67 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
+## `RET=FULL` est accepté, et n'est pas honoré
+
+### LE FAIT, MESURÉ
+
+`MAIL FROM:<…> RET=FULL` reçoit un `250`. Le message part en file, échoue,
+expire — et le rapport de non-remise rendu à l'expéditeur porte
+`Content-Type: text/rfc822-headers`. Le corps du message d'origine n'y est pas :
+vérifié en y glissant un témoin, absent du rapport.
+
+`RET=HDRS` et `RET=FULL` donnent donc **le même résultat**, et le rapport ne dit
+nulle part ce qui avait été demandé.
+
+Dans le code, la valeur est analysée, validée, puis **jetée** : elle ne quitte pas
+la session, et ni la remise ni la file ne la voient.
+
+### LE REPLI SUR LES EN-TÊTES EST UN CHOIX, PAS UN OUBLI
+
+Le composeur de rapports le dit :
+
+> RFC 3462 permet les deux. Renvoyer le corps doublerait le volume d'un rapport
+> écrit précisément parce qu'on n'arrivait pas à émettre — et un message de dix
+> mégaoctets qu'on ne pouvait pas remettre ne se remet pas mieux quand il revient.
+
+L'argument tient. Ce qui manquait n'est pas la décision : c'est qu'elle ne soit
+écrite **nulle part du côté de `RET=`**, où le paramètre est accepté comme s'il
+allait être suivi.
+
+### CE QUE CETTE ENTRÉE COÛTE, ET POURQUOI ELLE EXISTE QUAND MÊME
+
+Trois lignes au-dessus de l'endroit où `RET=` est accepté, ce serveur écrit :
+
+> **UN PARAMÈTRE QU'ON N'ANNONCE PAS SE REFUSE.** Sans file, ce serveur ne peut
+> émettre aucun rapport : accepter `RET=` reviendrait à promettre un rapport qui ne
+> partira jamais.
+
+Le même raisonnement vaudrait pour `RET=FULL` : l'accepter promet un retour entier
+qui ne viendra pas. Trois issues étaient possibles, et **l'auteur du projet a
+tranché pour la troisième** :
+
+| | |
+|---|---|
+| honorer `FULL` | la file a le message entier sur disque, et le rebond est remis LOCALEMENT — rien ne fuirait. Mais cela contredit le choix ci-dessus, et double le volume d'un rapport d'échec |
+| refuser `FULL` | conforme à la règle citée, mais un serveur qui annonce DSN et refuse `RET=FULL` casse des clients légitimes |
+| **l'écrire** | le comportement ne change pas, et cesse d'être tu |
+
+**Ce registre ne certifie pas que §4.3 de RFC 3461 autorise ce repli.** Elle le
+permet dans certains cas — un message trop grand, notamment —, et la lecture n'a
+pas été faite jusqu'au bout. C'est dit ainsi plutôt qu'affirmé dans un sens ou dans
+l'autre.
+
+### CE QUI RESTE
+
+Rien ne relie `RET=` à ce que le rapport contient. Si le jour vient où l'on veut
+honorer `FULL`, il faudra retenir la valeur de la session jusqu'à l'enveloppe de
+file — elle ne s'y rend pas aujourd'hui.
+
+Le reste de la machinerie d'émission, lui, a été exercé de bout en bout à cette
+occasion et n'a rien montré : dépôt, reprises, avis de retard (`Action: delayed`,
+`Status: 4.4.1`, `Will-Retry-Until`, conforme à §2.3.9 de RFC 3464), péremption, et
+rapport final remis à l'expéditeur.
+
 ## Nous écrivions `Received-SPF: fail` sur le courrier de nos propres utilisateurs
 
 ### CE QUE L'ÉMISSION A RÉVÉLÉ

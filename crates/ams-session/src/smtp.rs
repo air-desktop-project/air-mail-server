@@ -210,6 +210,17 @@ fn verdict_du_parametre_mail(
     // **UN PARAMÈTRE QU'ON N'ANNONCE PAS SE REFUSE.** Sans file, ce serveur ne
     // peut émettre aucun rapport : accepter `RET=` reviendrait à promettre un
     // rapport qui ne partira jamais.
+    // **`RET=FULL` EST ACCEPTÉ, ET N'EST PAS HONORÉ**, et cela se lit ici plutôt
+    // que de se découvrir dans un rapport.
+    //
+    // La valeur est vérifiée puis JETÉE : elle ne quitte pas la session, et le
+    // composeur de rapports rend toujours `text/rfc822-headers`. C'est un choix
+    // écrit — voir `ams_mime::bounce` : renvoyer le corps doublerait le volume
+    // d'un rapport composé précisément parce qu'on n'arrivait pas à émettre.
+    //
+    // Le refuser casserait des clients légitimes, qui l'envoient sans y penser ;
+    // l'honorer contredirait ce choix. Il est donc accepté et ramené aux
+    // en-têtes, et le registre dit pourquoi plutôt que de le taire.
     if mot.eq_ignore_ascii_case(b"RET") {
         return match parametre.value() {
             Some(valeur) if dsn && Ret::parse(valeur).is_ok() => Verdict7::Compris,
