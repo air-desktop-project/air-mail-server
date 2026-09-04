@@ -99,11 +99,68 @@ pub fn fresh_uid_validity() -> UidValidity {
 const NOM_INDEX: &str = "ams-index.bin";
 
 impl Maildir {
-    /// Ouvre — ou crée — une boîte, et adopte ce qu'elle contient déjà.
+    /// Ouvre une boîte qui EXISTE DÉJÀ, sans jamais en créer une.
+    ///
+    /// # Ce que [`Maildir::open`] fait, et pourquoi ce n'est pas toujours voulu
+    ///
+    /// `open` crée `tmp/`, `new/` et `cur/` — c'est ce qu'une REMISE demande :
+    /// un dossier doit naître à la première remise qui en a besoin. Mais pour
+    /// qui LIT, c'est l'inverse de ce qu'il faut.
+    ///
+    /// `air-mail-admin summary` en a fait les frais. Sa documentation dit
+    /// « relit une boîte » ; sur un chemin tapé de travers, elle créait le
+    /// répertoire, ses trois sous-dossiers et un index, PUIS annonçait « 0
+    /// message » avec un code de retour nul. L'exploitant en concluait que la
+    /// boîte était vide alors qu'elle n'existait pas — et un `UIDVALIDITY` neuf
+    /// était né au passage, prêt à entrer en conflit avec la vraie boîte si
+    /// celle-ci n'était qu'absente momentanément.
+    ///
+    /// # La règle était déjà écrite, à un seul endroit
+    ///
+    /// La session IMAP la porte : « ON N'OUVRE QUE CE QUI EXISTE. `Maildir::open`
+    /// crée l'arborescence qu'on lui nomme : l'appeler sans regarder ferait de
+    /// chaque `SELECT` sur une faute de frappe une boîte de plus. » Elle vit
+    /// désormais ici, où les deux appelants la trouvent.
+    ///
+    /// # `cur/` EST CE QUI FAIT UNE BOÎTE
+    ///
+    /// C'est le test que ce dépôt applique déjà. Un répertoire sans `cur/` est
+    /// un nom que §6.3.5 de RFC 9051 a laissé derrière un effacement : l'ouvrir
+    /// le ressusciterait.
+    ///
+    /// # Ce que cette porte NE promet PAS
+    ///
+    /// Elle ne rend pas la lecture sans écriture. Sur une boîte qui existe,
+    /// `open` parcourt les fichiers puis réécrit l'index — c'est la
+    /// réconciliation de C13, et c'est justement ce que `summary` vient
+    /// demander. Ce qui est fermé ici, c'est la CRÉATION d'une boîte qui n'était
+    /// pas là.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotAMailbox`] si `racine` ne porte pas de `cur/`, et ce que
+    /// [`Maildir::open`] rend ensuite.
+    pub fn open_existing(
+        racine: impl Into<PathBuf>,
+        hote: &[u8],
+        validite: UidValidity,
+    ) -> Result<Self, Error> {
+        let racine = racine.into();
+        if !racine.join("cur").is_dir() {
+            return Err(Error::NotAMailbox);
+        }
+        Self::open(racine, hote, validite)
+    }
+
+    /// Ouvre — ou CRÉE — une boîte, et adopte ce qu'elle contient déjà.
     ///
     /// `hote` entre dans les noms de fichiers pour qu'ils restent uniques entre
-    /// machines. Il vient de l'appelant plutôt que d'un appel système : c'est une
-    /// valeur de configuration, et le serveur en connaît déjà une.
+    /// machines. Il vient de l'appelant plutôt que d'un appel système : c'est
+    /// une valeur de configuration, et le serveur en connaît déjà une.
+    ///
+    /// **Elle crée `tmp/`, `new/` et `cur/`**, ce qu'une REMISE demande : un
+    /// dossier doit naître à la première qui en a besoin. Pour qui LIT, c'est
+    /// l'inverse de ce qu'il faut — voir [`Maildir::open_existing`].
     ///
     /// # Errors
     ///
@@ -1024,5 +1081,60 @@ mod tests {
         assert!(format!("{io}").len() > 10);
         assert!(std::error::Error::source(&io).is_some());
         assert!(std::error::Error::source(&erreur).is_none());
+    }
+
+    /// **OUVRIR POUR LIRE NE CRÉE RIEN.**
+    ///
+    /// `Maildir::open` crée l'arborescence qu'on lui nomme — ce qu'une remise
+    /// demande, et ce qu'une lecture ne doit surtout pas faire.
+    /// `air-mail-admin summary` en a fait les frais : sur un chemin tapé de
+    /// travers, elle fabriquait un répertoire, ses trois sous-dossiers et un
+    /// index, puis annonçait « 0 message » avec un code de retour nul.
+    #[test]
+    fn ouvrir_une_boite_absente_ne_la_cree_pas() {
+        let temporaire = Ephemere::nouveau();
+        let chemin = temporaire.0.join("jamais-vue");
+        assert!(!chemin.exists());
+
+        let issue = Maildir::open_existing(&chemin, b"mail.example.com", VALIDITE);
+        assert!(
+            matches!(issue, Err(Error::NotAMailbox)),
+            "un chemin absent doit être refusé, et nommé pour ce qu'il est"
+        );
+        // **C'EST LA CONSÉQUENCE QUI COMPTE**, et non le message : rien ne doit
+        // être né de cette tentative.
+        assert!(!chemin.exists(), "la boîte a été créée en voulant la lire");
+    }
+
+    /// **UN RÉPERTOIRE SANS `cur/` N'EST PAS UNE BOÎTE.**
+    ///
+    /// §6.3.5 de RFC 9051 : une boîte effacée qui avait des filles garde son nom
+    /// sans son courrier. L'ouvrir la ressusciterait.
+    #[test]
+    fn un_repertoire_sans_cur_est_refuse_et_reste_tel_quel() {
+        let temporaire = Ephemere::nouveau();
+        let chemin = temporaire.0.join("effacee");
+        fs::create_dir_all(chemin.join("new")).expect("créé");
+
+        let issue = Maildir::open_existing(&chemin, b"mail.example.com", VALIDITE);
+        assert!(matches!(issue, Err(Error::NotAMailbox)));
+        assert!(
+            !chemin.join("cur").exists(),
+            "le `cur/` manquant a été recréé : la boîte effacée est ressuscitée"
+        );
+    }
+
+    /// **ET UNE VRAIE BOÎTE S'OUVRE**, sans quoi le refus précédent ne prouverait
+    /// que l'existence d'un refus.
+    #[test]
+    fn une_boite_existante_s_ouvre_pour_la_lecture() {
+        let temporaire = Ephemere::nouveau();
+        let creee = boite(&temporaire);
+        let racine = creee.root().to_path_buf();
+        drop(creee);
+
+        let relue = Maildir::open_existing(&racine, b"mail.example.com", VALIDITE)
+            .expect("une boîte qui existe s'ouvre");
+        assert_eq!(relue.root(), racine);
     }
 }

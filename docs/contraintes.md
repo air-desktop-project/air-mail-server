@@ -3846,6 +3846,75 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
+## `summary` créait une boîte en croyant la lire
+
+### UNE COMMANDE D'INSPECTION QUI ÉCRIT
+
+L'aide dit « relit une boîte et rend ce que ses noms de fichiers portent ». Sur
+un chemin qui n'existe pas, `air-mail-admin summary` :
+
+  - créait le répertoire, plus `new/`, `cur/` et `tmp/` ;
+  - y écrivait un `ams-index.bin` ;
+  - **réussissait** — code de retour nul ;
+  - affichait `messages 0`, comme une boîte vide légitime.
+
+Qui tape un chemin de travers conclut donc que la boîte est VIDE alors qu'elle
+n'existe pas. Le rapport affirme davantage que ce qui s'est passé.
+
+Et un `UIDVALIDITY` naissait au passage. Si le chemin visé était le bon mais
+momentanément absent — un montage pas encore monté —, la vraie boîte
+réapparaîtrait ensuite à côté d'un index neuf portant une autre validité, ce que
+§5.3.1 de RFC 9051 interdit précisément.
+
+### LA RÈGLE ÉTAIT DÉJÀ ÉCRITE, À UN SEUL ENDROIT
+
+La session IMAP la portait : « ON N'OUVRE QUE CE QUI EXISTE. `Maildir::open`
+crée l'arborescence qu'on lui nomme : l'appeler sans regarder ferait de chaque
+`SELECT` sur une faute de frappe une boîte de plus. » Elle vérifiait donc avant
+d'ouvrir. L'outil, lui, ne le savait pas. Septième fois qu'une règle vaut à un
+endroit et pas à l'autre.
+
+### LA PORTE, ET NON L'APPELANT
+
+`Maildir::open_existing` refuse un répertoire sans `cur/` — le test que ce dépôt
+applique déjà pour `\Noselect` — avec une erreur NOMMÉE, `NotAMailbox`.
+« Le fichier manque » et « ce n'est pas une boîte » n'appellent pas la même
+réponse : un répertoire peut exister sans `cur/`, et un chemin tapé de travers
+désigne souvent un répertoire bien réel.
+
+Le contournement d'IMAP disparaît : il appelle la porte plutôt que de vérifier
+avant elle.
+
+### CE QUE CETTE CORRECTION NE FAIT PAS
+
+Elle ne rend pas `summary` sans écriture. Sur une boîte qui EXISTE, l'ouverture
+parcourt les fichiers puis réécrit l'index — c'est la réconciliation de C13, et
+c'est justement ce que cette commande vient demander. Ce qui est fermé, c'est la
+CRÉATION d'une boîte qui n'était pas là.
+
+### LES 24 APPELS DE `open` RESTENT INTACTS
+
+L'inversion — rendre `open` non créateur et nommer `open_or_create` — serait plus
+fidèle au « ce qu'on exige, on ne peut pas oublier ». Elle n'est pas retenue : la
+plupart des vingt-quatre veulent légitimement créer, et `delivery.rs` en fait son
+sujet — « C'EST ICI QUE LE DOSSIER NAÎT ». Vingt-quatre modifications mécaniques
+pour renommer le cas majoritaire coûteraient plus de relecture qu'elles n'en
+épargnent.
+
+### ET UN PIÈGE D'ÉDITION, RENCONTRÉ UNE TROISIÈME FOIS
+
+L'insertion de `open_existing` a coupé en deux le commentaire de documentation de
+`open` : la nouvelle fonction s'est glissée entre son `# Errors` et sa
+signature. Le registre notait déjà ce piège pour les scripts ; il vaut AUSSI pour
+un outil d'édition, et la règle exacte est plus large que celle qui y était
+écrite :
+
+**une insertion s'ancre sur une frontière d'élément, jamais sur une ligne INTÉRIEURE
+à un bloc de documentation.**
+
+Ni le compilateur ni clippy ne le voient — un commentaire mal placé reste un
+commentaire valable.
+
 ## `--help` était pris pour un nom de fichier
 
 ### SEPT COMMANDES, SEPT RÉPONSES FAUSSES

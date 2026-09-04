@@ -1017,7 +1017,13 @@ fn retirer(fichier: &Path, nom: &str) -> ExitCode {
 fn resumer(racine: &Path) -> ExitCode {
     // Le nom d'hôte ne sert qu'à composer de NOUVEAUX noms ; relire n'en a pas
     // besoin, mais l'ouverture ADOPTE ce qui traîne, et l'adoption en compose.
-    let boite = match Maildir::open(
+    // **ON N'EN CRÉE PAS UNE EN VOULANT LA LIRE.** `Maildir::open` crée
+    // l'arborescence qu'on lui nomme : cette commande, dont l'aide dit
+    // « relit une boîte », fabriquait un répertoire, ses trois sous-dossiers et
+    // un index sur un chemin tapé de travers — puis annonçait « 0 message » et
+    // rendait un code nul. Qui l'a tapé conclut que la boîte est vide alors
+    // qu'elle n'existe pas.
+    let boite = match Maildir::open_existing(
         PathBuf::from(racine),
         b"air-mail-admin",
         // Une boîte SANS index en reçoit un, avec cette validité-ci. C'est une

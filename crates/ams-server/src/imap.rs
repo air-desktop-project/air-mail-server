@@ -1150,17 +1150,14 @@ impl BoitesImap {
         // et deux `Maildir` sur le même répertoire serviraient le même UID à
         // deux messages.
         self.boites.dossier_ou(&clef.0, &clef.1, || {
-            // ON N'OUVRE QUE CE QUI EXISTE. `Maildir::open` crée l'arborescence
-            // qu'on lui nomme : l'appeler sans regarder ferait de chaque
-            // `SELECT` sur une faute de frappe une boîte de plus.
-            // ON N'OUVRE QUE CE QUI EST UNE BOÎTE. Un répertoire sans `cur/` est
-            // un nom que §6.3.5 a laissé derrière un effacement : l'ouvrir le
-            // ressusciterait, puisque `Maildir::open` recrée ce qui manque.
-            if !chemin.is_dir() || !Self::selectionnable(&chemin) {
-                return None;
-            }
+            // ON N'OUVRE QUE CE QUI EST DÉJÀ UNE BOÎTE, et c'est la porte
+            // elle-même qui le tient désormais : `open_existing` refuse un
+            // répertoire sans `cur/` — un nom que §6.3.5 a laissé derrière un
+            // effacement, ou une faute de frappe. Le vérifier ici puis ouvrir
+            // laissait la règle à deux endroits ; `air-mail-admin summary`, qui
+            // ne l'avait pas, créait une boîte en croyant la lire.
             Some(Arc::new(
-                Maildir::open(&chemin, &self.hote, fresh_uid_validity()).ok()?,
+                Maildir::open_existing(&chemin, &self.hote, fresh_uid_validity()).ok()?,
             ))
         })
     }

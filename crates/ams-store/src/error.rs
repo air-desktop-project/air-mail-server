@@ -26,6 +26,18 @@ pub enum Error {
     /// changer — et réattribuer un numéro déjà servi montrerait à un client un
     /// message pour un autre.
     UidExhausted,
+
+    /// Ce chemin n'est pas une boîte, et [`crate::Maildir::open_existing`] a
+    /// refusé de la créer.
+    ///
+    /// # Pourquoi ce n'est pas un `Io(NotFound)`
+    ///
+    /// « Le fichier manque » et « ce n'est pas une boîte » n'appellent pas la
+    /// même réponse. Un répertoire peut exister sans `cur/` — §6.3.5 de RFC 9051
+    /// en laisse derrière un effacement —, et un chemin tapé de travers désigne
+    /// souvent un répertoire bien réel. Les confondre enverrait chercher au
+    /// mauvais endroit.
+    NotAMailbox,
 }
 
 impl fmt::Display for Error {
@@ -34,6 +46,9 @@ impl fmt::Display for Error {
             Error::Io(cause) => write!(f, "système de fichiers : {cause}"),
             Error::Name(cause) => write!(f, "nom de fichier : {cause}"),
             Error::IndexUnwritable => f.write_str("l'index de la boîte n'a pas pu être encodé"),
+            Error::NotAMailbox => {
+                f.write_str("ce chemin n'est pas une boîte : aucun `cur/` ne s'y trouve")
+            }
             Error::UidExhausted => {
                 f.write_str("la boîte n'a plus d'UID à attribuer ; son `UIDVALIDITY` doit changer")
             }
