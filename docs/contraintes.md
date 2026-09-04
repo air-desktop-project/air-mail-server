@@ -3901,6 +3901,80 @@ mérite le silence, le second aussi tant qu'il n'y a pas de place. Une table ple
 fait donc jeter une trame qu'on aurait pu servir si une place s'était libérée —
 c'est une perte possible, préférable à un panic, et le pair réémettra.
 
+## Tout courrier d'un vrai MTA à deux destinataires était refusé
+
+### CE QUE LE PREMIER ESSAI D'INTEROPÉRABILITÉ A TROUVÉ
+
+Postfix installé, en « local seulement » — `default_transport = error`, rien ne
+peut sortir. Un message de Postfix vers ce serveur, à **deux destinataires
+locaux** :
+
+```
+554 5.7.1 Message rejected (in reply to end of DATA command)
+```
+
+Les deux `RCPT` avaient pourtant été acceptés. Postfix a rendu le message à son
+expéditeur.
+
+### LA FORME EXACTE, ISOLÉE PAR SIX ÉPREUVES
+
+| `ORCPT` sur | résultat |
+|---|---|
+| un seul destinataire | accepté |
+| aucun, deux destinataires | accepté |
+| **le premier de deux** | **refusé** |
+| le second seulement | accepté |
+| **les deux** | **refusé** |
+
+Un destinataire porteur d'`ORCPT` **suivi d'un autre** perdait la transaction
+entière. Postfix envoie `ORCPT` dès qu'on annonce `DSN` — c'est-à-dire toujours.
+
+### LA CAUSE : UNE ARÈNE PARTAGÉE, ET UN DÉBUT QU'ON DEVINAIT
+
+Les adresses vivent dans une arène sans allocation, avec `fins[i]` pour marquer la
+fin de chacune. Le DÉBUT ne se stockait pas : il se déduisait de la fin de la
+précédente.
+
+C'était vrai tant que l'arène ne portait que des adresses. Elle porte aussi les
+`ORCPT` (§4.2 de RFC 3461), écrits par `poser_le_rapport` **entre l'adresse qui
+l'a demandé et la suivante**. L'adresse suivante ressortait donc avec l'`ORCPT`
+collé devant.
+
+Elle ne routait plus vers personne, partait en file comme une adresse d'ailleurs,
+et le pair anonyme se voyait refuser pour « usurpation » — un diagnostic qui, cette
+fois, décrivait une situation que le serveur avait lui-même fabriquée.
+
+Le correctif garde l'arène partagée, comme la conception le voulait, et **cesse de
+deviner** : chaque destinataire porte son début et sa fin.
+
+### CE QUE LES BARRIÈRES NE POUVAIENT PAS VOIR
+
+Ce défaut a survécu à 100 % de couverture, à 65 cibles de fuzz et à cinq cent vingt
+essais de cette crate. Il ne vit pas dans une fonction : il vit dans l'ACCORD entre
+deux écritures dans une même arène, et il ne se manifeste qu'avec **un `ORCPT`, puis
+un second destinataire**. Aucun essai ne combinait les deux ; aucun ne pouvait y
+penser sans un pair réel pour l'imposer.
+
+C'est précisément ce que l'essai d'interopérabilité existait pour trouver, et il l'a
+trouvé au premier message à deux destinataires.
+
+### CE QUE L'INTEROPÉRABILITÉ A PAR AILLEURS ÉTABLI
+
+Les deux sens fonctionnent, et sont chiffrés :
+
+- **Postfix → nous** : `status=sent (250 2.0.0 Message accepted)`, et notre trace
+  porte `with ESMTPS` — Postfix a monté STARTTLS.
+- **Nous → Postfix** : `status=sent`, et la trace de Postfix porte `with ESMTPS`
+  avec `starttls=1` dans son journal. Notre client chiffre donc en sortant, et
+  notre signature DKIM arrive intacte.
+
+Contenu accentué, sujet encodé, message de 270 kibioctets : tous remis sans
+altération.
+
+Le second sens a demandé un résolveur DNS minuscule, écrit pour l'occasion, qui ne
+répond que pour un domaine d'essai et rend `NOERROR` sans réponse pour tout le
+reste — jamais une adresse inventée.
+
 ## La porte HTTP ne comptait pas la première faute d'un hostile
 
 ### LES CINQ ÉCOUTES, MISES CÔTE À CÔTE

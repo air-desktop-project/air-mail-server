@@ -40,6 +40,21 @@ pub const ARENA_OCTETS: usize = 8192;
 /// à se tromper.
 pub struct Recipients {
     arene: [u8; ARENA_OCTETS],
+    /// Où commence l'adresse de chaque destinataire, dans l'arène.
+    ///
+    /// # ON L'ÉCRIT, ON NE LE DEVINE PLUS
+    ///
+    /// Le début se déduisait de la fin du destinataire précédent. C'était vrai
+    /// tant que l'arène ne portait QUE des adresses — et elle porte aussi les
+    /// `ORCPT` (§4.2 de RFC 3461), écrits entre deux adresses par
+    /// [`Recipients::poser_le_rapport`].
+    ///
+    /// L'adresse qui SUIVAIT un `ORCPT` était donc rendue avec celui-ci collé
+    /// devant. Elle ne routait plus vers personne, partait en file comme une
+    /// adresse d'ailleurs, et la transaction entière finissait refusée. Tout
+    /// message d'un MTA qui parle DSN — c'est-à-dire Postfix, et les autres — à
+    /// DEUX destinataires ou plus était perdu de cette façon.
+    debuts: [usize; RECIPIENTS_MAX],
     fins: [usize; RECIPIENTS_MAX],
     /// Ce que chaque destinataire a demandé du sort de son message (RFC 3461
     /// §4.1), et son adresse d'origine (§4.2).
@@ -85,6 +100,7 @@ impl Recipients {
     pub const fn new() -> Self {
         Self {
             arene: [0; ARENA_OCTETS],
+            debuts: [0; RECIPIENTS_MAX],
             fins: [0; RECIPIENTS_MAX],
             rapports: [Rapport::vide(); RECIPIENTS_MAX],
             combien: 0,
@@ -139,6 +155,7 @@ impl Recipients {
         let Some(case) = self.fins.get_mut(self.combien) else {
             return false;
         };
+        let debut = self.utilise;
         let Some(cible) = self.arene.get_mut(self.utilise..fin) else {
             return false;
         };
@@ -153,6 +170,12 @@ impl Recipients {
         }
 
         *case = fin;
+        // `fins` et `debuts` ont la même taille : la case existe puisque celle
+        // de `fins` existait. La dire par un `if let` ouvrirait une branche que
+        // rien ne peut emprunter.
+        for place in self.debuts.iter_mut().skip(self.combien).take(1) {
+            *place = debut;
+        }
         self.combien = self.combien.saturating_add(1);
         self.utilise = fin;
         true
@@ -202,17 +225,14 @@ impl Recipients {
 
     /// Les adresses retenues, dans l'ordre où elles ont été acceptées.
     pub fn iter(&self) -> impl Iterator<Item = &[u8]> {
-        // `fins` porte les fins ; le début d'une adresse est la fin de la
-        // précédente, et zéro pour la première. `windows` ne convient pas — il
-        // faut aussi la première.
-        self.fins
+        // **CHAQUE ADRESSE PORTE SON DÉBUT ET SA FIN**, et le début ne se déduit
+        // plus de la fin de la précédente : un `ORCPT` peut s'être écrit entre
+        // les deux, et il n'appartient à aucune des deux.
+        self.debuts
             .iter()
+            .zip(self.fins.iter())
             .take(self.combien)
-            .scan(0_usize, |debut, &fin| {
-                let morceau = self.arene.get(*debut..fin);
-                *debut = fin;
-                morceau
-            })
+            .filter_map(|(&debut, &fin)| self.arene.get(debut..fin))
     }
 }
 
@@ -233,6 +253,44 @@ mod tests {
             assert!(retenus.push(&[adresse]));
         }
         retenus
+    }
+
+    /// **LE DÉFAUT QUE SEUL UN VRAI MTA POUVAIT MONTRER.**
+    ///
+    /// L'`ORCPT` (§4.2 de RFC 3461) s'écrit dans la MÊME arène que les adresses,
+    /// entre celle du destinataire qui l'a demandé et celle du suivant. Le début
+    /// d'une adresse se déduisait de la fin de la précédente : celle qui suivait
+    /// un `ORCPT` ressortait donc avec lui collé devant.
+    ///
+    /// Elle ne routait plus vers personne, partait en file comme une adresse
+    /// d'ailleurs, et la transaction ENTIÈRE finissait refusée par `554`. Tout
+    /// message d'un MTA qui parle DSN — Postfix en tête — à deux destinataires ou
+    /// plus était perdu ainsi.
+    #[test]
+    fn une_adresse_qui_suit_un_orcpt_ressort_entiere() {
+        let mut retenus = Recipients::new();
+        assert!(retenus.push(&[&b"jean@example.com"[..]]));
+        retenus.poser_le_rapport(Notify::DEFAUT, b"rfc822;origine@ailleurs.test");
+        assert!(retenus.push(&[&b"marie@example.com"[..]]));
+
+        let vus: std::vec::Vec<&[u8]> = retenus.iter().collect();
+        assert_eq!(
+            vus,
+            std::vec![&b"jean@example.com"[..], b"marie@example.com"],
+            "l'adresse suivante ne porte pas l'`ORCPT` du précédent"
+        );
+    }
+
+    /// Et l'`ORCPT` lui-même se relit toujours, à sa place.
+    #[test]
+    fn l_orcpt_se_relit_apres_l_adresse_suivante() {
+        let mut retenus = Recipients::new();
+        assert!(retenus.push(&[&b"jean@example.com"[..]]));
+        retenus.poser_le_rapport(Notify::DEFAUT, b"rfc822;origine@ailleurs.test");
+        assert!(retenus.push(&[&b"marie@example.com"[..]]));
+
+        let (_, orcpt) = retenus.rapport(0).expect("un rapport au premier");
+        assert_eq!(orcpt, b"rfc822;origine@ailleurs.test");
     }
 
     #[test]
