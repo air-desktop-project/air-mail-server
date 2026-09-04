@@ -5,10 +5,22 @@
 # Rien de tel ici — stable, zéro dépendance externe, aucune cible exotique. La
 # contrainte la plus faible qui suffit.
 #
-# PAS DE CACHE CARGO, et c'est un choix : le workspace n'a AUCUNE dépendance
-# externe. Il n'y a donc rien à mettre en cache que la compilation de nos huit
-# crates, qui prend moins de temps que restaurer et sauver l'archive. Ce sera à
-# reconsidérer le jour où le premier crate tiers entrera.
+# PAS DE CACHE CARGO — ET LA RAISON QUI L'EXPLIQUAIT N'EST PLUS VRAIE.
+#
+# Ce commentaire disait : « le workspace n'a AUCUNE dépendance externe. Il n'y a
+# donc rien à mettre en cache que la compilation de nos huit crates […]. Ce sera
+# à reconsidérer le jour où le premier crate tiers entrera. »
+#
+# Ce jour est venu, et personne ne l'a reconsidéré : le graphe compte
+# aujourd'hui 95 crates tierces — `tokio`, `rustls`, `capnp`, `argon2` et leurs
+# dépendances — pour 36 crates à nous. La condition que ce commentaire s'était
+# lui-même donnée s'est réalisée sans que rien ne le dise.
+#
+# Le cache N'EST PAS AJOUTÉ ICI, et ce n'est pas un oubli : c'est un choix de
+# temps de construction, avec ses propres écueils — une archive qui vieillit, une
+# clef mal composée qui sert un cache d'une autre toolchain — et il appartient à
+# qui tient ce dépôt, pas à qui corrige un commentaire. Ce qui est corrigé, c'est
+# la PRÉMISSE : elle était fausse, et elle justifiait le choix.
 
 name: ci
 
@@ -110,6 +122,14 @@ jobs:
 
       - name: cargo build
         run: cargo build --workspace --locked
+
+      # APRÈS LA COMPILATION, ET C'EST CE QUI LE REND COMPLET. Ses deux premiers
+      # contrôles lisent le graphe et pourraient tomber plus tôt ; le troisième
+      # regarde ce que la compilation a RÉELLEMENT produit, et ne dirait rien
+      # d'un `target/` vide. Une crate qui lierait du C sans porter `-sys` dans
+      # son nom n'est attrapée que par celui-là.
+      - name: check-sans-c
+        run: ./scripts/check-sans-c.sh
 
       - name: cargo test
         run: cargo test --workspace --locked

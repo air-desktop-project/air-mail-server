@@ -183,11 +183,17 @@ TLS 1.2 par la porte de derrière.
 Vérifié le 2026-08-28 sur cette configuration exacte, par compilation et
 exécution réelles :
 
-- **Aucun C.** 74 crates compilées ; ni `ring`, ni `cc`, ni la moindre crate
-  `*-sys`. Ces trois-là figurent bien au `Cargo.lock` — un lock enregistre les
-  dépendances optionnelles même inactives — mais `cargo tree --target all -i ring`
-  ne les trouve pas dans le graphe, et aucune ne passe par `rustc` à la
-  compilation.
+- **Aucun C.** Ni `ring`, ni `cc`, ni la moindre crate `*-sys` sur la cible qu'on
+  compile. Ces trois-là figurent bien au `Cargo.lock` — un lock enregistre les
+  dépendances optionnelles même inactives — mais `cargo tree -i ring` ne les
+  trouve pas dans le graphe, et aucune ne passe par `rustc` à la compilation.
+
+  **Cette ligne annonçait « 74 crates compilées », et elles sont 131.** Le
+  nombre datait du 2026-08-28 et rien ne le revérifiait ; il est retiré plutôt
+  que corrigé, parce qu'un nombre qui change à chaque dépendance ajoutée ne se
+  tient pas à jour dans un document. Ce qui se tient, c'est
+  [`scripts/check-sans-c.sh`](../scripts/check-sans-c.sh), écrit à cette
+  occasion : il le RÉCLAME à `cargo` et le rend, sans jamais l'opposer.
 - **TLS 1.3 seulement.** Le fournisseur offre exactement trois suites :
   `TLS13_AES_128_GCM_SHA256`, `TLS13_AES_256_GCM_SHA384`,
   `TLS13_CHACHA20_POLY1305_SHA256`. **Aucune suite TLS 1.2**, C6 est donc tenue
@@ -3845,6 +3851,71 @@ la seule vérification qui vaille est la confrontation à l'ABNF de §9, mot par
 mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
+
+## Deux commentaires qui avaient posé eux-mêmes leur date de péremption
+
+### « AUCUN C » ÉTAIT MESURÉ, NON TENU
+
+Le registre l'écrit sous le titre « Ce qui a été mesuré, et non supposé », daté du
+2026-08-28. C'était honnête — et c'était tout. Rien ne le revérifiait : un
+`cargo add` suffisait à faire entrer `ring` ou une crate `*-sys`, et la propriété
+serait tombée sans un mot, dans un document que personne ne relit à chaque commit.
+
+Une dépendance en C n'est pas une dépendance comme une autre : elle échappe aux
+garanties du compilateur, exige un `cc` sur la machine de qui construit, et rouvre
+une classe de fautes — dépassements, doubles libérations — que ce dépôt s'est donné
+du mal pour rendre impossible.
+
+[`scripts/check-sans-c.sh`](../scripts/check-sans-c.sh) la tient désormais, et il
+est câblé à la CI. Il vérifie trois choses sur la cible qu'on compile : que `ring`
+et `cc` sont absents du graphe, qu'aucune crate `*-sys` n'y figure, et **qu'aucun
+objet C n'a été produit** — pas un `.o`, pas un `.a`. Les deux premiers contrôles
+lisent des NOMS ; le troisième regarde le disque, et c'est le seul qu'un nom bien
+choisi ne contourne pas. Il tourne donc APRÈS la compilation.
+
+**Il a été éprouvé dans les deux sens** : un `.o` posé à la main sous `target/` le
+fait échouer, et son retrait le fait repasser. Une barrière qui ne peut pas
+échouer ne garde rien.
+
+Le nombre de crates, lui, est RENDU et jamais opposé : il change à chaque
+dépendance ajoutée, et en faire un seuil ferait échouer la barrière pour une raison
+qui n'est pas celle qu'elle garde.
+
+### ET LA CI JUSTIFIAIT UN CHOIX PAR UNE PRÉMISSE DEVENUE FAUSSE
+
+En tête de `ci.yml` :
+
+> PAS DE CACHE CARGO, et c'est un choix : le workspace n'a **AUCUNE dépendance
+> externe**. Il n'y a donc rien à mettre en cache que la compilation de nos **huit
+> crates** […]. **Ce sera à reconsidérer le jour où le premier crate tiers
+> entrera.**
+
+Ce commentaire avait posé lui-même sa condition de péremption. Elle s'est
+réalisée : **95 crates tierces** aujourd'hui, pour **36** crates à nous. Personne
+ne l'a reconsidéré, parce que rien ne prévient quand une condition qu'on s'est
+donnée se réalise.
+
+La prémisse est corrigée. **Le cache n'est pas ajouté** : c'est un choix de temps
+de construction, avec ses propres écueils, et il appartient à qui tient ce dépôt —
+pas à qui corrige un commentaire. Ce qui est corrigé, c'est ce qui était faux.
+
+### CE QUE CES DEUX-LÀ ONT EN COMMUN
+
+Aucun n'est un défaut de code. Ce sont des affirmations qui ont cessé d'être vraies
+sans que rien ne le signale — la cinquième et la sixième de cette série. Les quatre
+précédentes vivaient dans des commentaires de code, une assertion de banc et une
+unité systemd ; celles-ci, dans un document et une CI.
+
+**La leçon se répète** : ce qui n'est pas vérifié par une machine finit par mentir,
+et le plus dangereux n'est pas ce qui est faux dès l'écriture — c'est ce qui était
+vrai.
+
+### CE QUI RESTE
+
+`check-sans-c.sh` attrape une crate `*-sys` par son NOM, et un objet C par sa
+PRÉSENCE. Une crate qui lierait une bibliothèque système déjà compilée, sans nom
+en `-sys` et sans produire d'objet, passerait entre les deux. C'est étroit, et ce
+n'est pas nul.
 
 ## Une unité qui affirmait un privilège nul sans le faire respecter
 
