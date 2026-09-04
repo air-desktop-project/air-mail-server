@@ -3846,6 +3846,62 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
+## Un second MTA, et un chemin que le premier ne touchait pas
+
+### CE QU'EXIM FAIT, ET QUE POSTFIX NE FAIT PAS
+
+L'entrée précédente nommait son propre manque : « un seul MTA a été confronté, sur
+un seul scénario ». Exim a été installé à la place de Postfix, en configuration
+LOCALE — `dc_eximconfig_configtype='local'`, écoute bornée à `127.0.0.1` —, donc
+sans pouvoir rien émettre vers le monde.
+
+Il s'est comporté autrement, et sur le point qui compte :
+
+| | Postfix | Exim |
+|---|---|---|
+| remise du corps | `DATA` | **`BDAT … LAST`** (CHUNKING, RFC 3030) |
+| `ORCPT` | dès que `DSN` est annoncé | non, dans cette configuration |
+| pipelining | tout d'un tenant | tout d'un tenant |
+
+`BDAT` est **un autre chemin de code**, et Postfix ne l'avait jamais emprunté. Le
+confronter à deux destinataires est exactement ce qu'un second MTA apporte.
+
+### CE QUE L'ÉPREUVE A DONNÉ
+
+Les deux sens fonctionnent, et les deux sont chiffrés :
+
+- **Exim → nous** : `X=TLS1.3:ECDHE…AES_256`, deux destinataires servis par
+  `BDAT`, et un message de 410 kibioctets arrivé **identique octet pour octet**
+  dans les deux boîtes.
+- **Nous → Exim** : `P=esmtps X=TLS1.3:ECDHE_X25519…`, deux destinataires remis, et
+  notre signature DKIM intacte à l'arrivée.
+
+**Aucun défaut.** Ce serveur interopère avec deux implémentations indépendantes.
+
+### LA CONVERSATION D'EXIM EST FIGÉE, ELLE AUSSI
+
+Comme celle de Postfix : ses octets, dans un essai qui n'exige pas qu'Exim soit
+installé. Le manque que l'entrée précédente s'était reproché est comblé pour ce
+MTA-là.
+
+### UNE LEÇON DE MÉTHODE, PAYÉE UNE FOIS DE PLUS
+
+Ce registre porte déjà la règle : **les littéraux à échappements ne s'écrivent pas
+par script.** Elle a été enfreinte ici, et l'essai a échoué aussitôt : une
+continuation de ligne avait absorbé l'indentation dans le littéral, si bien que le
+serveur recevait `\r\n          MAIL FROM:` et répondait `500`. Réécrit à la main,
+l'essai passe. La règle tient parce qu'on la vérifie, pas parce qu'on la cite.
+
+### CE QUI RESTE
+
+**Un échec d'essai NON REPRODUIT a été observé**, une fois sur six passages de la
+suite complète, sans nom de test capturé — plusieurs serveurs d'épreuve tournaient
+alors sur la machine. Cinq passages propres ont suivi, environnement nettoyé. Il
+est consigné ici plutôt que tu : un essai qui échoue une fois sur six n'a pas été
+expliqué, et cela reste vrai tant que personne ne l'explique.
+
+OpenSMTPD et les envois en masse n'ont toujours pas été confrontés.
+
 ## Les octets d'un vrai MTA, figés dans une barrière
 
 ### CE QUE DEUX SÉANCES ONT ÉTABLI

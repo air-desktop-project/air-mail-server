@@ -154,6 +154,44 @@ async fn la_conversation_d_un_vrai_mta_est_servie() {
     );
 }
 
+/// **UN AUTRE MTA, UN AUTRE CHEMIN : EXIM EMPLOIE `BDAT`.**
+///
+/// Là où Postfix envoie `DATA`, Exim prend `CHUNKING` (RFC 3030) dès qu'on
+/// l'annonce, et pousse tout — enveloppe, destinataires, `BDAT … LAST` et le
+/// corps — d'un seul tenant. C'est un chemin de code DISTINCT, et le confronter
+/// à deux destinataires est exactement ce qu'un second MTA apporte.
+///
+/// Cette suite a été capturée d'un Exim 4.97 remettant chez nous.
+#[tokio::test]
+async fn la_conversation_d_exim_par_bdat_est_servie() {
+    // Le corps, tel qu'il part : c'est sa longueur que `BDAT` annonce, et un
+    // octet d'écart ferait lire le reste comme des commandes.
+    let morceau: &[u8] = b"From: tester@essai.local\r\nTo: jean@example.com,marie@example.com\r\nSubject: exim\r\n\r\nDeux.\r\n";
+    let mut envoi = std::vec::Vec::new();
+    envoi.extend_from_slice(b"EHLO speedy.home\r\n");
+    envoi.extend_from_slice(b"MAIL FROM:<tester@essai.local> SIZE=1461\r\n");
+    envoi.extend_from_slice(b"RCPT TO:<jean@example.com>\r\n");
+    envoi.extend_from_slice(b"RCPT TO:<marie@example.com>\r\n");
+    envoi.extend_from_slice(std::format!("BDAT {} LAST\r\n", morceau.len()).as_bytes());
+    envoi.extend_from_slice(morceau);
+    envoi.extend_from_slice(b"QUIT\r\n");
+
+    let (dit, vus) = session(&envoi).await;
+
+    assert!(
+        dit.contains("250 2.0.0 Message accepted"),
+        "le message d'Exim est accepté : {dit}"
+    );
+    assert_eq!(
+        vus,
+        std::vec![
+            std::vec::Vec::from(&b"jean@example.com"[..]),
+            std::vec::Vec::from(&b"marie@example.com"[..]),
+        ],
+        "les deux adresses arrivent entières par le chemin `BDAT` aussi"
+    );
+}
+
 /// **ET L'`ORCPT` NE DOIT PAS DÉTEINDRE SUR CE QUI SUIT**, quel que soit le rang
 /// où il se trouve. Trois destinataires, l'`ORCPT` sur le premier et le dernier.
 #[tokio::test]
