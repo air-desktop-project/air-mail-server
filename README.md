@@ -153,6 +153,16 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 >
 > Ce que ce dépôt affirme, il le tient. Rien de plus n'est promis ici.
 
+## Installer
+
+[`docs/installation.md`](docs/installation.md) dit comment mettre ce serveur en
+service, dans l'ordre où les décisions se prennent — le compte Unix, les
+permissions, les ports privilégiés que C10 rend indirects, l'unité systemd, puis
+ce qui s'ajoute ensuite : SPF, DMARC, DKIM, l'émission et l'API.
+
+Chaque commande y a été **exécutée** avant d'être écrite, et ce qui n'a pas été
+éprouvé y est nommé comme tel.
+
 ## Les contraintes
 
 Le projet est gouverné par un **registre de contraintes** :
