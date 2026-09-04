@@ -487,13 +487,16 @@ fn a_publier(selecteur: &str, domaines: &[String], cle: &Arc<SigningKey>) -> Str
 
 /// Interroge la zone pour chaque domaine, et dit ce qu'on y a trouvé.
 ///
-/// # LES QUATRE ISSUES NE DEMANDENT PAS LA MÊME CHOSE
+/// # LES CINQ ISSUES NE DEMANDENT PAS LA MÊME CHOSE
 ///
 /// Une clé DIFFÉRENTE veut dire que tout ce qu'on émet échoue DÉJÀ : c'est la
-/// seule qui appelle une correction immédiate. Une clé ABSENTE veut dire qu'elle
-/// n'est pas encore publiée, ou pas encore propagée — attendre suffit peut-être.
-/// Un DNS INJOIGNABLE ne dit rien du tout, et le faire passer pour un problème
-/// de zone enverrait chercher au mauvais endroit.
+/// seule qui appelle une correction immédiate. Une clé RÉVOQUÉE échoue tout
+/// autant, mais n'appelle PAS la même correction : ce n'est pas une erreur de
+/// publication, c'est une déclaration du détenteur du domaine, et lui parler
+/// d'une « autre clé » l'enverrait chercher ce qui n'existe pas. Une clé ABSENTE
+/// veut dire qu'elle n'est pas encore publiée, ou pas encore propagée — attendre
+/// suffit peut-être. Un DNS INJOIGNABLE ne dit rien du tout, et le faire passer
+/// pour un problème de zone enverrait chercher au mauvais endroit.
 ///
 /// **CE QUI VA BIEN NE S'ÉCRIT PAS.** Un journal qui répète « conforme » à chaque
 /// domaine et à chaque démarrage est un journal qu'on cesse de lire, et c'est
@@ -514,6 +517,13 @@ async fn dire_la_publication(
                 "air-mail-server : ATTENTION — `{selecteur}._domainkey.{domaine}` porte une \
                  AUTRE clé que celle qui signe. Tout ce qui part pour `{domaine}` échoue déjà \
                  en DKIM chez ses destinataires."
+            ),
+            PublicationDkim::Revoquee => eprintln!(
+                "air-mail-server : ATTENTION — `{selecteur}._domainkey.{domaine}` publie une \
+                 clé RÉVOQUÉE (`p=` vide, §3.6.1 de RFC 6376), et non une autre clé. Tout ce \
+                 qui part pour `{domaine}` échoue déjà en DKIM. Ce sélecteur a été RETIRÉ : \
+                 signer avec un autre, ou republier celui-ci si la révocation était une \
+                 erreur."
             ),
             PublicationDkim::Absente => eprintln!(
                 "air-mail-server : `{selecteur}._domainkey.{domaine}` est INTROUVABLE — pas \

@@ -128,18 +128,29 @@ impl DkimChecker {
 ///
 /// # POURQUOI QUATRE ISSUES, ET NON « BON » OU « MAUVAIS »
 ///
-/// Les trois façons d'échouer ne demandent pas la même chose à l'exploitant. Une
+/// Les quatre façons d'échouer ne demandent pas la même chose à l'exploitant. Une
 /// clé DIFFÉRENTE veut dire que tout ce qu'on émet échoue déjà, et qu'il faut
-/// corriger la zone. Une clé ABSENTE veut dire qu'il n'a pas encore publié, ou
-/// que la propagation n'a pas eu lieu — attendre suffit peut-être. Un DNS
-/// INJOIGNABLE ne dit rien du tout, et le faire passer pour un problème de zone
-/// enverrait chercher au mauvais endroit.
+/// corriger la zone. Une clé RÉVOQUÉE veut dire autre chose encore : ce n'est pas
+/// une erreur de publication, c'est une DÉCLARATION du détenteur du domaine, et
+/// l'envoyer chercher « une autre clé » le ferait chercher ce qui n'existe pas.
+/// Une clé ABSENTE veut dire qu'il n'a pas encore publié, ou que la propagation
+/// n'a pas eu lieu — attendre suffit peut-être. Un DNS INJOIGNABLE ne dit rien du
+/// tout, et le faire passer pour un problème de zone enverrait chercher au mauvais
+/// endroit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PublicationDkim {
     /// Publié, et c'est bien notre clé.
     Conforme,
     /// Publié, mais ce n'est PAS notre clé : tout ce qu'on émet échoue.
     Differente,
+    /// Publié avec un `p=` VIDE : §3.6.1 en fait une clé RÉVOQUÉE.
+    ///
+    /// **CE N'EST PAS UN ENREGISTREMENT ILLISIBLE**, et `ams-dkim` le dit déjà —
+    /// « la traiter comme un enregistrement illisible reviendrait à ignorer une
+    /// révocation ». Le détenteur du domaine a déclaré que ce sélecteur ne doit
+    /// plus rien signer ; ce qu'on signe avec échoue, et republier la même clé
+    /// sous le même sélecteur irait contre cette déclaration.
+    Revoquee,
     /// Rien à ce nom : pas encore publié, ou pas encore propagé.
     Absente,
     /// On n'a pas su demander. **On ne conclut pas**, et on le dit.
@@ -204,15 +215,51 @@ pub async fn publication_dkim(
         // et un essai le vérifie. Cette branche dirait un défaut de ce code.
         return PublicationDkim::Injoignable;
     };
-    // **UN SEUL ENREGISTREMENT SUFFIT.** Un nom peut en porter plusieurs — une
-    // rotation de clé en cours, par exemple — et trouver le nôtre parmi eux est
-    // ce qui compte : les autres ne nous concernent pas.
-    match textes
-        .iter()
-        .any(|texte| cle_publiee(texte) == Some(attendue.clone()))
-    {
-        true => PublicationDkim::Conforme,
-        false => PublicationDkim::Differente,
+    juger_les_enregistrements(&textes, &attendue)
+}
+
+/// Ce que ces enregistrements disent de notre clé.
+///
+/// # ELLE NE DEMANDE RIEN AU RÉSEAU, ET C'EST TOUT L'INTÉRÊT
+///
+/// [`publication_dkim`] interroge un résolveur : elle ne s'éprouve qu'avec un
+/// serveur DNS sous la main, c'est-à-dire pas du tout — ce module n'avait aucun
+/// essai. Le JUGEMENT, lui, est une fonction des octets qu'on a reçus, et il se
+/// vérifie. C'est là que vit la règle, donc c'est là qu'on l'éprouve.
+///
+/// # UN SEUL ENREGISTREMENT SUFFIT À CONFORMER
+///
+/// Un nom peut en porter plusieurs — une rotation de clé en cours, par exemple —
+/// et trouver le nôtre parmi eux est ce qui compte : les autres ne nous
+/// concernent pas.
+///
+/// # ET « DIFFÉRENTE » L'EMPORTE SUR « RÉVOQUÉE »
+///
+/// Un nom peut porter une révocation À CÔTÉ d'une clé étrangère bien réelle.
+/// Dire « révoquée » ferait alors manquer la clé qui, elle, est là et n'est pas
+/// la nôtre. On ne conclut à la révocation que si RIEN d'autre n'est publié.
+fn juger_les_enregistrements(
+    textes: &[Vec<u8>],
+    attendue: &(ams_dkim::KeyType, Vec<u8>),
+) -> PublicationDkim {
+    let mut revoques = 0_usize;
+    let mut lisibles = 0_usize;
+    for texte in textes {
+        if cle_publiee(texte).as_ref() == Some(attendue) {
+            return PublicationDkim::Conforme;
+        }
+        match ams_dkim::PublicKeyRecord::parse(texte) {
+            Err(ams_dkim::Error::RevokedKey) => revoques = revoques.saturating_add(1),
+            Ok(_) => lisibles = lisibles.saturating_add(1),
+            // Un enregistrement qu'on ne sait pas lire n'est ni une révocation ni
+            // une clé : il ne fait pencher ni d'un côté ni de l'autre.
+            Err(_) => {}
+        }
+    }
+    match (revoques, lisibles) {
+        (0, _) => PublicationDkim::Differente,
+        (_, 0) => PublicationDkim::Revoquee,
+        _ => PublicationDkim::Differente,
     }
 }
 
@@ -665,3 +712,93 @@ impl TryRng for Urandom {
 }
 
 impl TryCryptoRng for Urandom {}
+
+#[cfg(test)]
+mod publication {
+    use super::{PublicationDkim, cle_publiee, juger_les_enregistrements};
+
+    /// Un enregistrement de clé publique portant cette clé.
+    fn enregistrement(cle: &str) -> std::vec::Vec<u8> {
+        std::format!("v=DKIM1; k=rsa; p={cle}").into_bytes()
+    }
+
+    /// Ce qu'on cherche dans la zone.
+    fn attendue(cle: &str) -> (ams_dkim::KeyType, std::vec::Vec<u8>) {
+        cle_publiee(&enregistrement(cle)).expect("notre propre enregistrement se relit")
+    }
+
+    #[test]
+    fn notre_cle_publiee_est_conforme() {
+        let nous = attendue("QUJDRA==");
+        let zone = std::vec![enregistrement("QUJDRA==")];
+
+        assert_eq!(
+            juger_les_enregistrements(&zone, &nous),
+            PublicationDkim::Conforme
+        );
+    }
+
+    /// **UN SEUL ENREGISTREMENT SUFFIT**, et les autres ne nous concernent pas :
+    /// une rotation de clé en cours en publie deux.
+    #[test]
+    fn notre_cle_parmi_d_autres_est_conforme() {
+        let nous = attendue("QUJDRA==");
+        let zone = std::vec![enregistrement("WllYVw=="), enregistrement("QUJDRA==")];
+
+        assert_eq!(
+            juger_les_enregistrements(&zone, &nous),
+            PublicationDkim::Conforme
+        );
+    }
+
+    #[test]
+    fn une_autre_cle_est_differente() {
+        let nous = attendue("QUJDRA==");
+        let zone = std::vec![enregistrement("WllYVw==")];
+
+        assert_eq!(
+            juger_les_enregistrements(&zone, &nous),
+            PublicationDkim::Differente
+        );
+    }
+
+    /// **LE DÉFAUT LUI-MÊME** : un `p=` vide est une RÉVOCATION (§3.6.1), et non
+    /// une autre clé. Dire « une autre clé » envoie l'exploitant chercher ce qui
+    /// n'existe pas.
+    #[test]
+    fn un_p_vide_est_une_revocation_et_non_une_autre_cle() {
+        let nous = attendue("QUJDRA==");
+        let zone = std::vec![enregistrement("")];
+
+        assert_eq!(
+            juger_les_enregistrements(&zone, &nous),
+            PublicationDkim::Revoquee
+        );
+    }
+
+    /// **ET « DIFFÉRENTE » L'EMPORTE.** Une révocation à côté d'une clé étrangère
+    /// bien réelle : dire « révoquée » ferait manquer celle qui est là.
+    #[test]
+    fn une_revocation_a_cote_d_une_autre_cle_reste_differente() {
+        let nous = attendue("QUJDRA==");
+        let zone = std::vec![enregistrement(""), enregistrement("WllYVw==")];
+
+        assert_eq!(
+            juger_les_enregistrements(&zone, &nous),
+            PublicationDkim::Differente
+        );
+    }
+
+    /// Un enregistrement illisible n'est ni une révocation ni une clé : il ne
+    /// fait pencher ni d'un côté ni de l'autre.
+    #[test]
+    fn un_enregistrement_illisible_ne_conclut_pas_a_la_revocation() {
+        let nous = attendue("QUJDRA==");
+        let zone = std::vec![std::vec::Vec::from(&b"v=DKIM9; p=QUJDRA=="[..])];
+
+        assert_eq!(
+            juger_les_enregistrements(&zone, &nous),
+            PublicationDkim::Differente
+        );
+    }
+}

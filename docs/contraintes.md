@@ -3846,6 +3846,74 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
+## Une clé révoquée était annoncée comme « une autre clé »
+
+### QUATRE ISSUES SOIGNEUSEMENT DISTINGUÉES, ET UNE CINQUIÈME QUI TOMBAIT DANS LA MAUVAISE
+
+Au démarrage, ce serveur interroge la zone pour son sélecteur DKIM et distingue
+quatre réponses — conforme, différente, absente, injoignable — avec, pour chacune,
+la raison qu'elle appelle une action différente. C'est de l'ouvrage soigné.
+
+Il en manquait une. Un enregistrement `v=DKIM1; p=` — **`p=` vide** — est, par
+§3.6.1 de RFC 6376, une clé **RÉVOQUÉE** : le détenteur du domaine déclare que ce
+sélecteur ne doit plus rien signer. Elle tombait dans « différente », et le serveur
+annonçait :
+
+> ATTENTION — `essai._domainkey.example.com` porte une **AUTRE clé** que celle qui
+> signe.
+
+La conséquence était juste — tout échoue en DKIM —, **le diagnostic était faux**.
+Il n'y a pas d'autre clé : il n'y en a aucune. L'exploitant part chercher une clé
+périmée à remplacer, et la correction n'est pas celle-là : ce sélecteur est retiré,
+il faut en employer un autre, ou republier celui-ci si la révocation était une
+erreur.
+
+### LA COUCHE INFÉRIEURE SAVAIT, ET LE DISAIT
+
+`ams-dkim` rend `Error::RevokedKey` — « clé RÉVOQUÉE : `p=` est vide (§3.6.1) » —
+et sa documentation avertit **contre exactement ce qui se passait un étage plus
+haut** :
+
+> La traiter comme un enregistrement illisible reviendrait à ignorer une
+> révocation.
+
+`cle_publiee` ramenait pourtant toute erreur d'analyse à `None`, et l'appelant en
+concluait « autre clé ». L'information existait, au bon endroit, correctement
+nommée — et se perdait à la frontière.
+
+### « DIFFÉRENTE » L'EMPORTE SUR « RÉVOQUÉE »
+
+Un nom peut porter une révocation **à côté** d'une clé étrangère bien réelle — une
+rotation à demi faite. Conclure à la révocation ferait alors manquer la clé qui,
+elle, est là et n'est pas la nôtre. On ne conclut à la révocation que si RIEN
+d'autre n'est publié. Un enregistrement illisible, lui, ne fait pencher ni d'un
+côté ni de l'autre.
+
+### LE JUGEMENT EST DEVENU PUR, PARCE QU'IL N'ÉTAIT ÉPROUVÉ PAR RIEN
+
+`publication_dkim` interroge un résolveur : elle ne s'éprouve qu'avec un serveur
+DNS sous la main, c'est-à-dire pas du tout — **ce module n'avait aucun essai**. Le
+jugement, lui, est une fonction des octets reçus. Il a été extrait, et il en a six.
+
+C'est le même geste que pour `Incidents::survenu` et pour les avertissements de
+`air-mail-admin` : ce qui décide se sépare de ce qui écrit ou interroge, et devient
+vérifiable.
+
+### CE QUE L'AUDIT A PAR AILLEURS ÉTABLI
+
+Cette tranche vient d'une vérification plus large qui n'a **rien trouvé d'autre** :
+
+- **IMAP** : toutes les promesses de la ligne de démarrage tiennent, y compris les
+  deux subtiles — `BINARY[…]` refuse par `NO [UNKNOWN-CTE]` ce qu'il ne sait pas
+  défaire tandis que `BODY[…]` rend les octets bruts ; et la recherche défait les
+  mots encodés (`SEARCH TEXT "=?utf-8?B?"` ne trouve rien, `SEARCH SUBJECT` sur le
+  texte décodé trouve). Les noms de boîtes hostiles — `../evade`, `..`, `/absolu`,
+  `a/../../b` — sont tous refusés, et rien n'apparaît hors de la racine du compte.
+- **La signature DKIM se vérifie** : condensat du corps identique et signature RSA
+  valide, contre une canonicalisation `relaxed/relaxed` écrite d'après la RFC pour
+  l'occasion, indépendante de celle du serveur. Le sur-signage (`from:from:to:to`)
+  est le procédé de §5.4.2 contre l'ajout d'un second `From:`.
+
 ## `RET=FULL` est accepté, et n'est pas honoré
 
 ### LE FAIT, MESURÉ
