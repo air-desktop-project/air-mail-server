@@ -1374,9 +1374,56 @@ fn nos_reglages_se_relisent() {
     let mut relus = Settings::DEFAULT;
     crate::settings::SettingsReader::apply_all(charge, &mut relus).expect("relisibles");
     assert_eq!(relus, nos_reglages());
-    // `ENABLE_PUSH` à zéro : ce serveur ne pousse pas, et le dit.
-    assert!(!relus.enable_push);
+    // **CET ESSAI-CI NE PROUVE RIEN D'`ENABLE_PUSH`**, et c'est écrit pour qu'on
+    // ne s'y trompe plus : `nos_reglages()` le pose déjà à faux, si bien que le
+    // relire à faux ne dit que la fidélité de l'aller-retour. Ce qui compte est
+    // ci-dessous, où l'on part de valeurs qui l'ont à VRAI.
     assert_eq!(Setting::EnablePush.value(), 0x2);
+}
+
+/// **UN SERVEUR N'ANNONCE PAS LA POUSSÉE, MÊME SI ON LE LUI DEMANDE.**
+///
+/// §6.5.2 : « A server MUST NOT explicitly set this value to 1 », et « A client
+/// MUST treat receipt of a SETTINGS frame with SETTINGS_ENABLE_PUSH set to 1 as
+/// a connection error of type PROTOCOL_ERROR ». Un serveur qui l'annonce à un ne
+/// parle à personne.
+///
+/// L'épreuve part de [`Settings::DEFAULT`], qui l'a à VRAI — c'est la valeur
+/// initiale d'un client, et c'est exactement le piège dans lequel l'écoute réelle
+/// était tombée. Elle lit ensuite les OCTETS, et non une structure relue : ce sont
+/// eux que le pair reçoit.
+#[test]
+fn un_serveur_n_annonce_jamais_la_poussee() {
+    // Le piège est là : le défaut du protocole l'a à VRAI, parce que c'est la
+    // valeur initiale d'un client.
+    const { assert!(Settings::DEFAULT.enable_push) };
+
+    let mut sortie = [0_u8; 256];
+    let (_, poses) = Handshake::new(Settings::DEFAULT)
+        .open(PREFACE, &mut sortie)
+        .expect("ouvert");
+    let charge = sortie
+        .get(FRAME_HEADER_OCTETS..poses)
+        .expect("la charge suit l'en-tête");
+
+    // Les réglages sont des couples : deux octets d'identifiant, quatre de
+    // valeur. On cherche le nôtre à la main plutôt que par le relecteur, dont un
+    // défaut cacherait justement ce qu'on veut voir.
+    let mut vu = None;
+    for couple in charge.as_chunks::<6>().0 {
+        let identifiant = u16::from_be_bytes([couple[0], couple[1]]);
+        if identifiant == Setting::EnablePush.value() {
+            vu = Some(u32::from_be_bytes([
+                couple[2], couple[3], couple[4], couple[5],
+            ]));
+        }
+    }
+
+    assert_eq!(
+        vu,
+        Some(0),
+        "sur le fil, `ENABLE_PUSH` vaut zéro — ou bien aucun client ne nous parle"
+    );
 }
 
 /// **UNE RECHARGE DE ZÉRO NE S'ÉCRIT PAS.** §6.9 fait d'un `WINDOW_UPDATE` nul

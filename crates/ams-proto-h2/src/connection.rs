@@ -151,9 +151,25 @@ pub struct Handshake {
 
 impl Handshake {
     /// Une connexion à ouvrir, avec les réglages qu'on annoncera.
+    ///
+    /// # ELLE REFUSE D'ANNONCER LA POUSSÉE, QUOI QU'ON LUI DONNE
+    ///
+    /// Ce type est le côté SERVEUR : il lit le préambule du client et écrit nos
+    /// `SETTINGS`. §6.5.2 interdit à un serveur d'annoncer
+    /// `SETTINGS_ENABLE_PUSH` à un, et ORDONNE au client de raccrocher s'il le
+    /// reçoit — un serveur qui s'y trompe ne parle à personne.
+    ///
+    /// **La garde est ici plutôt que chez l'appelant**, et c'est le fond de
+    /// l'affaire : elle y était écrite dans trois commentaires et vérifiée par un
+    /// essai, et l'écoute réelle annonçait un tout de même, parce qu'elle partait
+    /// de [`Settings::DEFAULT`] — dont le vrai est celui d'un CLIENT. Une règle
+    /// que chaque appelant doit se rappeler finit par être oubliée une fois ; un
+    /// type qui ne sait pas la briser ne l'oublie jamais.
     #[must_use]
     pub const fn new(nous: Settings) -> Self {
-        Self { nous }
+        Self {
+            nous: nous.pour_un_serveur(),
+        }
     }
 
     /// Lit le préambule, et écrit nos `SETTINGS` quand il est complet.

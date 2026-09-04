@@ -137,6 +137,31 @@ impl Settings {
         max_header_list_size: None,
     };
 
+    /// Les mêmes, mais tels qu'un SERVEUR a le droit de les annoncer.
+    ///
+    /// # `enable_push` À VRAI EST LE DÉFAUT DU PROTOCOLE, ET UNE FAUTE POUR NOUS
+    ///
+    /// [`Settings::DEFAULT`] dit ce qui vaut AVANT tout `SETTINGS` — et §6.5.2
+    /// donne bien un à `SETTINGS_ENABLE_PUSH`, parce que c'est la valeur initiale
+    /// d'un CLIENT, qui accepte les poussées tant qu'il n'a rien dit. Ces
+    /// valeurs-là servent à juger le pair, et elles sont justes.
+    ///
+    /// **Les reprendre pour ce qu'on annonce SOI-MÊME est une faute** : §6.5.2
+    /// écrit « A server MUST NOT explicitly set this value to 1 », et, du côté
+    /// d'en face, « A client MUST treat receipt of a SETTINGS frame with
+    /// SETTINGS_ENABLE_PUSH set to 1 as a connection error of type
+    /// PROTOCOL_ERROR ». Un serveur qui l'annonce à un ne parle donc à PERSONNE :
+    /// tout client conforme raccroche avant la première réponse.
+    ///
+    /// Cette méthode existe pour que les deux jeux de valeurs ne se confondent
+    /// plus. [`crate::Handshake::new`] l'applique de toute façon — c'est la
+    /// garde, celle-ci n'est que la façon de le DIRE là où on choisit.
+    #[must_use]
+    pub const fn pour_un_serveur(mut self) -> Self {
+        self.enable_push = false;
+        self
+    }
+
     /// Ce qu'un `SETTINGS` complet occupe : six réglages de six octets.
     pub const OCTETS_MAX: usize = 6 * SETTINGS_ENTRY_OCTETS;
 

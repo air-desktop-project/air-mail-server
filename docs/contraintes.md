@@ -3846,6 +3846,100 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
+## L'API REST ne parlait à personne
+
+### UN RÉGLAGE, ET TOUTE UNE FONCTIONNALITÉ MORTE
+
+`curl` sur l'API rendait ceci, et rien d'autre :
+
+```
+* ALPN: server accepted h2
+* nghttp2 recv error -902: The user callback function failed
+```
+
+Le serveur annonçait `SETTINGS_ENABLE_PUSH = 1`. §6.5.2 de RFC 9113 est catégorique
+dans les deux sens :
+
+> A server MUST NOT explicitly set this value to 1. […] A client MUST treat receipt
+> of a SETTINGS frame with SETTINGS_ENABLE_PUSH set to 1 as a connection error
+> (Section 5.4.1) of type PROTOCOL_ERROR.
+
+Tout client conforme raccroche donc avant la première réponse : `curl`, les
+navigateurs, tout ce qui repose sur nghttp2 ou sur la bibliothèque de Go. **L'API
+REST — administration, soumission, supervision — n'était joignable par aucun.**
+
+Que le reste fonctionnait a été établi avant de toucher au code : un client HTTP/2
+écrit à la main pour l'occasion, qui n'applique pas cette règle-là, obtenait
+`{"domains":["example.com"]}` sans difficulté. Le seul obstacle était ce réglage.
+
+### LA CAUSE TIENT EN TROIS LIGNES
+
+```rust
+fn reglages() -> H2Settings {
+    let mut nous = H2Settings::DEFAULT;      // enable_push: true
+    nous.max_concurrent_streams = Some(1);
+    nous
+}
+```
+
+`Settings::DEFAULT` dit ce qui vaut **avant tout `SETTINGS`**, et §6.5.2 y donne
+bien un à `ENABLE_PUSH` : c'est la valeur initiale d'un **client**. Ces valeurs
+servent à juger le pair, et elles sont justes pour cela. Les reprendre pour ce
+qu'on annonce SOI-MÊME était la faute — et elle ne se voit pas, puisque la ligne
+qui la commet est celle qu'on n'a pas écrite.
+
+### LA RÈGLE ÉTAIT ÉCRITE QUATRE FOIS, ET L'ESSAI INTERROGEAIT SON PROPRE DÉCOR
+
+`frame.rs`, `connection.rs` et `stream.rs` affirment tous trois que « ce serveur
+annonce `ENABLE_PUSH` à zéro ». Un essai le vérifiait :
+
+```rust
+assert_eq!(relus, nos_reglages());
+// `ENABLE_PUSH` à zéro : ce serveur ne pousse pas, et le dit.
+assert!(!relus.enable_push);
+```
+
+`relus` vient de `nos_reglages()` — **les réglages que l'essai a lui-même
+fabriqués**, avec `enable_push: false`. Il prouvait la fidélité de l'aller-retour ;
+il ne touchait jamais `ams_loop_tokio::http::reglages()`, la fonction qui alimente
+la vraie écoute. Un essai qui affirme sur son propre décor, travers que ce registre
+avait déjà consigné, et qu'on retrouve ici en train de couvrir un défaut.
+
+C'est la **dixième** occurrence de la forme — une règle appliquée à N endroits,
+oubliée au N+1ᵉ — et la première dont la conséquence est qu'une fonctionnalité
+entière est morte.
+
+### LA GARDE EST DANS LE TYPE, PAS DANS LA CONSIGNE
+
+`Handshake` est le côté SERVEUR : il lit le préambule du client et écrit nos
+`SETTINGS`. C'est donc lui qui possède l'invariant, et `Handshake::new` applique
+désormais `Settings::pour_un_serveur()` **quoi qu'on lui donne**. Une règle que
+chaque appelant doit se rappeler finit par être oubliée une fois ; un type qui ne
+sait pas la briser ne l'oublie jamais.
+
+`reglages()` part de `pour_un_serveur()` elle aussi — non par redondance, mais
+pour que l'intention se LISE là où le choix se fait.
+
+### LES DEUX ESSAIS NEUFS LISENT CE QUI PART SUR LE FIL
+
+Le premier donne à `Handshake::new` des réglages qui ont `enable_push` à **vrai** —
+exactement le piège — puis cherche l'identifiant `0x02` dans les OCTETS émis, à la
+main plutôt que par le relecteur, dont un défaut cacherait ce qu'on veut voir. Le
+second interroge `reglages()`, la vraie.
+
+Vérifié pour de bon : `curl --http2` rend `401` sans jeton et
+`{"domains":["example.com"]}` avec, en `http=2`.
+
+### CE QUI RESTE
+
+HTTP/3 est indemne, et pas par chance : son module de réglages traite les quatre
+identifiants d'HTTP/2 — dont `0x02` — comme une faute de protocole, parce qu'ils
+sont réservés par §11.2.2 de RFC 9114.
+
+Rien ne confronte ce serveur à un client HTTP/2 réel dans les barrières. Ce défaut
+n'est apparu qu'en lançant `curl` à la main, et il aurait survécu à n'importe quel
+nombre d'essais internes.
+
 ## Le journal muet : une remise qui échouait ne disait rien
 
 ### CE QUE CE SERVEUR DISAIT UNE FOIS DÉMARRÉ : PRESQUE RIEN

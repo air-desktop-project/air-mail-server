@@ -729,8 +729,14 @@ fn consommer(tampon: &mut [u8], remplis: &mut usize, combien: usize) {
 /// Nos réglages : ce qu'on annonce au pair.
 ///
 /// **UN SEUL FLUX À LA FOIS** : voir la documentation du module.
+///
+/// **ET L'ON PART DE CE QU'UN SERVEUR A LE DROIT D'ANNONCER**, non des valeurs
+/// par défaut du protocole : celles-ci donnent un à `SETTINGS_ENABLE_PUSH`, qui
+/// est la valeur initiale d'un CLIENT. Les reprendre telles quelles faisait
+/// annoncer la poussée par ce serveur, ce que §6.5.2 interdit et qu'un client
+/// conforme traite en `PROTOCOL_ERROR` — l'API n'était joignable par aucun.
 fn reglages() -> H2Settings {
-    let mut nous = H2Settings::DEFAULT;
+    let mut nous = H2Settings::DEFAULT.pour_un_serveur();
     nous.max_concurrent_streams = Some(1);
     nous
 }
@@ -873,4 +879,31 @@ pub(crate) fn maintenant() -> u64 {
         .map_or(0, |depuis| {
             u64::try_from(depuis.as_micros()).unwrap_or(u64::MAX)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    /// **CE QUE CETTE ÉCOUTE-CI MET SUR LE FIL**, et non ce qu'un décor d'essai
+    /// lui souffle.
+    ///
+    /// L'essai qui existait pour cela vivait dans `ams-proto-h2` et relisait des
+    /// réglages qu'il avait lui-même fabriqués avec `enable_push` à faux : il
+    /// prouvait la fidélité de l'aller-retour, jamais la valeur que ce serveur
+    /// annonce. Celle-ci était à UN, et §6.5.2 ordonne alors au client de
+    /// raccrocher — l'API REST n'était joignable par aucun client conforme.
+    #[test]
+    fn nos_reglages_n_annoncent_pas_la_poussee() {
+        let nous = super::reglages();
+
+        assert!(
+            !nous.enable_push,
+            "§6.5.2 : un serveur ne dit jamais un, et tout client conforme \
+             raccrocherait s'il l'entendait"
+        );
+        assert_eq!(
+            nous.max_concurrent_streams,
+            Some(1),
+            "et l'on continue de n'accepter qu'un flux à la fois"
+        );
+    }
 }
