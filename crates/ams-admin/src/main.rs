@@ -126,13 +126,51 @@ fn restreindre_le_masque() {
     }
 }
 
+/// L'aide à écrire si l'un des arguments la demande, ou `None`.
+///
+/// # `--help` N'EST JAMAIS UN CHEMIN
+///
+/// Chaque commande prend un chemin en PREMIÈRE position, et le dispatch le
+/// prenait tel quel. `config write --help` écrivait donc une configuration dans
+/// un fichier NOMMÉ `--help` — en annonçant son succès —, et les six autres
+/// commandes rendaient une erreur de lecture sur un fichier de ce nom, ou un
+/// « commande inconnue ».
+///
+/// L'aide de cet outil promettait pourtant, mot pour mot : « `config write
+/// --help` les liste ». Sept commandes, sept réponses fausses, dont une qui
+/// crée un fichier difficile à effacer sans savoir que `rm -- ./--help` est
+/// nécessaire.
+///
+/// # UNE SEULE RÈGLE, ET NON SEPT BRAS
+///
+/// Sept bras se maintiennent mal : la huitième commande oublierait le sien, et
+/// c'est exactement la forme de défaut que ce dépôt a corrigée six fois. La
+/// règle est donc unique et vient AVANT le dispatch — `--help` demande l'aide,
+/// où qu'il se trouve, et ne peut plus être pris pour autre chose.
+///
+/// `config write` montre ses propres options : ce sont les seules qu'il y ait,
+/// et c'est ce que l'aide générale renvoie chercher.
+fn aide_demandee(mots: &[&str]) -> Option<&'static str> {
+    if !mots.iter().any(|mot| matches!(*mot, "--help" | "-h")) {
+        return None;
+    }
+    if matches!(mots.first(), Some(&"config")) && matches!(mots.get(1), Some(&"write")) {
+        return Some(OPTIONS_AIDE);
+    }
+    Some(AIDE)
+}
+
 fn main() -> ExitCode {
     rendre_sigpipe_au_systeme();
     restreindre_le_masque();
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let mots: Vec<&str> = arguments.iter().map(String::as_str).collect();
+    if let Some(texte) = aide_demandee(&mots) {
+        println!("{texte}");
+        return ExitCode::SUCCESS;
+    }
     match mots.as_slice() {
-        [] | ["--help" | "-h"] => {
+        [] => {
             println!("{AIDE}\n{OPTIONS_AIDE}");
             ExitCode::SUCCESS
         }

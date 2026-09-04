@@ -3846,6 +3846,53 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
+## `--help` était pris pour un nom de fichier
+
+### SEPT COMMANDES, SEPT RÉPONSES FAUSSES
+
+Chaque commande de `air-mail-admin` prend un chemin en PREMIÈRE position, et le
+dispatch le prenait tel quel :
+
+| commande | ce que `--help` devenait | conséquence |
+|---|---|---|
+| `config write --help` | le nom du fichier | **écrivait une configuration dans `--help`** |
+| `config show --help` | le nom du fichier | erreur de lecture |
+| `summary --help` | la racine du Maildir | erreur de lecture |
+| `token --help` | le nom du fichier | « `token` attend un `--login` » |
+| `account list --help` | le nom du fichier | erreur de lecture |
+| `account add --help` | ne correspondait à rien | « commande inconnue » |
+| `account remove --help` | ne correspondait à rien | « commande inconnue » |
+
+L'aide de l'outil promettait pourtant, mot pour mot : « `config write --help`
+les liste ». Septième affirmation de cette série que le code ne tenait pas.
+
+### CE QUI DISTINGUE CE DÉFAUT D'UN MESSAGE MALADROIT
+
+Le fichier créé. `config write --help` annonçait son succès —
+`écrit : --help (648 octets)` — et laissait derrière lui un fichier qu'on
+n'efface pas sans savoir que `rm -- ./--help` est nécessaire : le tiret le fait
+passer pour une option de `rm`.
+
+Il passait aussi outre le refus d'écraser un fichier qu'on ne reconnaît pas,
+posé à la tranche de l'API : celui-ci ne garde que les fichiers EXISTANTS, et
+`--help` était créé de toutes pièces.
+
+### UNE SEULE RÈGLE, ET NON SEPT BRAS
+
+Sept bras se maintiennent mal : la huitième commande oublierait le sien, et
+c'est exactement la forme de défaut que ce registre consigne six fois. La règle
+est donc unique et vient AVANT le dispatch — `--help` demande l'aide, où qu'il
+se trouve, et ne peut plus être pris pour autre chose.
+
+### COMMENT IL A ÉTÉ TROUVÉ
+
+En TAPANT la commande, pour rédiger un manuel d'installation — après cinq
+audits à blanc consécutifs menés par lecture. C'est la leçon de méthode : lire
+le code dit ce qu'il fait, l'exécuter dit ce qu'il fait VRAIMENT, et les deux ne
+coïncident pas toujours là où l'on regarde le moins — la ligne de commande.
+
+Le manuel d'installation, lui, reste à écrire.
+
 ## Un plantage trouvé une fois s'oubliait dès la fin du passage
 
 ### `artifacts/` N'ÉTAIT REGARDÉ PAR PERSONNE
