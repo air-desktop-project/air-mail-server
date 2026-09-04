@@ -3846,6 +3846,63 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
+## Une unité qui affirmait un privilège nul sans le faire respecter
+
+### CE QUE LE MANUEL DISAIT DE LUI-MÊME
+
+Deux sections y portaient l'aveu **« n'a pas été éprouvée par ce projet »** : la
+table `nftables` et l'unité systemd. C'était honnête, et c'était une dette.
+
+L'unité a été installée **telle qu'elle était écrite** — compte système
+`air-mail`, racine en `0700`, binaires sous `/usr/local/bin` — puis retirée. Tout
+ce qu'elle annonce est vrai : le service démarre sous un utilisateur non-root, sert
+le SMTP et l'IMAP sous `STARTTLS`, écrit son Maildir sous `ReadWritePaths`, et
+`systemctl` le relance après un `kill -9`.
+
+### MAIS ELLE AFFIRMAIT CE QU'ELLE N'APPLIQUAIT PAS
+
+En commentaire, dans l'unité elle-même :
+
+> Ce serveur n'a besoin d'aucun privilège : il refuse même de démarrer en root.
+
+Et pourtant : **aucune capacité n'était retirée** — `CapabilityBoundingSet` absent
+— et **aucun appel système n'était filtré**. `systemd-analyze security` la notait
+**5.6 (MEDIUM)**.
+
+C'est la forme que ce registre rencontre pour la quatrième fois : *la prose sait,
+ce qui s'exécute ne le fait pas.* Ici, ce qui s'exécute est un fichier de
+configuration, et la prose est son propre commentaire.
+
+### ONZE DIRECTIVES, CONFORMES À CETTE INTENTION MÊME
+
+Capacités vidées, `RestrictSUIDSGID`, `RemoveIPC`, `ProtectClock`,
+`ProtectHostname`, `ProtectProc=invisible`, `ProcSubset=pid`, et le filtre
+`@system-service` moins `@privileged @resources @obsolete`. La note passe à
+**1.5 (OK)**.
+
+**Le filtre a été éprouvé AVEC le reste**, et c'est le point : un durcissement qui
+empêcherait le serveur de servir ne vaudrait rien. La remise, la lecture et les
+deux `STARTTLS` fonctionnent sous ce filtre — le chiffrement compris, qui demande
+de l'entropie au noyau.
+
+### CE QUI A ÉTÉ CORRIGÉ AU PASSAGE, ET QUI COMPTE AUTANT
+
+Le §9 du manuel affirmait encore : « **Aucun essai d'interopérabilité contre un
+autre MTA n'a été mené** […] jamais contre Postfix, Exim ou un service commercial.
+C'est le dernier point bloquant connu avant une V1, et il n'est pas levé. »
+
+Cette phrase était devenue **fausse** deux tranches plus tôt, et personne ne l'avait
+relue. C'est exactement ce que ce registre pourchasse : une affirmation qui cesse
+d'être vraie et que nul ne revisite. Elle dit désormais ce qui a été éprouvé — et
+ce qui ne l'a pas été : aucun service commercial, ni OpenSMTPD, ni envoi en masse,
+et la première remise de production reste à faire.
+
+### CE QUI RESTE
+
+**La table `nftables` garde son avertissement**, et elle seule. Elle n'a pas été
+éprouvée, parce qu'éprouver un pare-feu sur la machine de quelqu'un peut le couper
+de ce dont il dépend. Ce n'est pas une négligence : c'est un refus, et il est écrit.
+
 ## Un second MTA, et un chemin que le premier ne touchait pas
 
 ### CE QU'EXIM FAIT, ET QUE POSTFIX NE FAIT PAS

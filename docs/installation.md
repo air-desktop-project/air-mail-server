@@ -249,14 +249,42 @@ SystemCallArchitectures=native
 
 ReadWritePaths=/var/lib/air-mail
 
+# Ce serveur n'a besoin d'AUCUNE capacité, et l'unité le DIT au noyau plutôt
+# que de l'affirmer en commentaire.
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=yes
+RemoveIPC=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+
+# Les appels système d'un service ordinaire, et rien de plus.
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete
+SystemCallErrorNumber=EPERM
+
 [Install]
 WantedBy=multi-user.target
 ```
 
-> **Cette unité n'a pas été éprouvée par ce projet non plus.** Elle est cohérente
-> avec ce que le serveur fait — il n'ouvre que des sockets IP, n'écrit que sous
-> sa racine, et n'a jamais besoin d'élever ses privilèges — mais personne ne l'a
-> encore fait tourner sous systemd. Traitez-la comme une proposition.
+> **Cette unité a été éprouvée, et voici comment.** Elle a été installée telle
+> qu'elle est écrite ci-dessus, avec un compte `air-mail` système, une racine en
+> `0700` et les binaires sous `/usr/local/bin`. Le service démarre, sert le SMTP
+> et l'IMAP sous `STARTTLS`, écrit son Maildir sous `ReadWritePaths`, et
+> `systemctl` le relance après un `kill -9` — `Restart=on-failure` fait ce qu'il
+> annonce. `systemd-analyze security` la note **1.5 (OK)**.
+>
+> **Les onze dernières directives ont été ajoutées à cette occasion**, parce que
+> l'unité d'avant AFFIRMAIT en commentaire que « ce serveur n'a besoin d'aucun
+> privilège » sans le faire respecter : ni capacités vidées, ni filtre d'appels
+> système. Sa note était 5.6 (MEDIUM). Une intention écrite qu'aucun réglage
+> n'applique n'est pas une intention.
+>
+> Le filtre d'appels système a été éprouvé AVEC le reste : un durcissement qui
+> empêcherait le serveur de servir ne vaudrait rien. La remise, la lecture et les
+> deux `STARTTLS` fonctionnent sous `@system-service`.
 
 ---
 
@@ -356,13 +384,19 @@ air-mail-admin summary /var/lib/air-mail/maildir/jean
 
 ## Ce que ce document ne couvre pas
 
-- **Aucun essai d'interopérabilité contre un autre MTA n'a été mené.** Ce
-  serveur est éprouvé contre lui-même et contre ses propres essais, jamais
-  contre Postfix, Exim ou un service commercial. C'est le dernier point
-  bloquant connu avant une V1, et il n'est pas levé.
-- **La table `nftables` et l'unité systemd ci-dessus ne sont pas éprouvées.**
-  Elles sont cohérentes avec ce que fait le serveur ; personne ne les a fait
-  tourner.
+- **L'interopérabilité a été éprouvée contre Postfix et contre Exim**, dans les
+  deux sens et sous `STARTTLS` de part et d'autre : ils remettent chez nous, nous
+  remettons chez eux, la signature DKIM arrive intacte et un message de plusieurs
+  centaines de kibioctets revient identique octet pour octet. Les deux n'ont pas
+  emprunté le même chemin — Postfix envoie `DATA`, Exim prend `BDAT` —, et leurs
+  conversations sont désormais rejouées par les essais, sans qu'aucun des deux
+  n'ait à être installé.
+
+  **Ce que cela ne dit pas** : aucun service commercial n'a été confronté, ni
+  OpenSMTPD, ni un envoi en masse. Et la première remise de production reste à
+  faire.
+- **La table `nftables` ci-dessus n'est pas éprouvée**, et elle seule : personne
+  ne l'a fait tourner. L'unité systemd, elle, l'a été — voir le §7.
 - **Il n'y a pas de paquet**, ni de script d'installation. Ce document décrit
   des gestes à faire, pas une commande à lancer.
 - **La durée de vie des jetons ne se règle pas** : quinze minutes par défaut,
