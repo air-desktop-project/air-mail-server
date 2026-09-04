@@ -3846,6 +3846,68 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
+## Un avertissement qui reprochait une absence à qui n'en avait pas
+
+### LA PHRASE, ET CE QUE LA CONFIGURATION DISAIT AU MÊME MOMENT
+
+```
+$ air-mail-admin config write … --relay --tls-cert ./cert.pem --tls-key ./cle.pem
+ATTENTION  ÉMISSION OUVERTE : … Sans certificat TLS, l'authentification n'est pas
+           annoncée et personne ne pourra s'en servir.
+
+$ air-mail-admin config show …
+TLS                STARTTLS offert
+  certificat       ./cert.pem
+```
+
+La clause était **inconditionnelle** : elle s'imprimait dès que `--relay` était
+posé, certificat ou non.
+
+### LE PRÉJUDICE VA DANS LES DEUX SENS
+
+Celui qui a fourni un certificat doute du sien et va chercher un problème qu'il n'a
+pas. Et surtout, **l'avertissement qui compte se noyait** : sans certificat,
+l'authentification n'est pas annoncée, donc `--relay` ouvre une émission dont aucun
+compte ne peut se servir. Cela méritait sa propre ligne, et ne l'avait pas.
+
+Les quatre avertissements voisins sont tous proprement conditionnels — aucun
+domaine hébergé, compteur de récolte éteint, file sans `--relay`, bannissement nul.
+**C'était un cas isolé, et cela a été vérifié avant de corriger** : pas une famille,
+donc un correctif local.
+
+### LA RÈGLE VAUT JUSQU'À L'INTÉRIEUR D'UNE PHRASE
+
+Un avertissement ne parle que si sa condition tient. Une clause qui s'imprime quoi
+qu'il arrive s'adresse aussi à ceux qu'elle ne concerne pas — et un outil qui
+avertit toujours n'avertit jamais.
+
+Le prédicat existait déjà : `Tls::est_configure()`. Il n'en a pas été écrit un
+second, qui aurait fini par ne plus dire la même chose que le premier.
+
+### POURQUOI PERSONNE NE L'AVAIT VU : RIEN NE LES ÉPROUVAIT
+
+`ams-admin` n'avait **aucun essai**, et n'est pas dans le périmètre de couverture.
+Ces cinq messages — la seule chose qu'un exploitant lit au moment où il décide
+d'ouvrir une émission vers l'extérieur — n'étaient vérifiés par rien.
+
+Les avertissements sont donc devenus une fonction **pure** : elle REND les lignes,
+l'appelant les imprime. C'est le même choix que `Incidents::survenu` du côté
+serveur, et pour la même raison — une fonction qui écrit ne se vérifie qu'en lisant
+sa sortie, c'est-à-dire jamais.
+
+Six essais suivent, les premiers de cette crate. Ils passent par l'ANALYSEUR RÉEL :
+ce qu'ils éprouvent est ce qu'un exploitant obtient en tapant la ligne. Le dernier
+vérifie qu'une configuration saine ne dit **rien** — c'est ce qui rend les autres
+lisibles.
+
+L'essai du certificat a été passé contre le code d'avant, en rendant la clause
+inconditionnelle par édition : lui seul tombe.
+
+### CE QUI RESTE
+
+`ams-admin` reste hors du périmètre de couverture : ces six essais couvrent les
+avertissements, et rien n'oblige les prochains à l'être.
+
 ## Une barrière qui affirmait une propriété fausse
 
 ### LE FUZZ A TROUVÉ UN DÉFAUT DANS LE FUZZ

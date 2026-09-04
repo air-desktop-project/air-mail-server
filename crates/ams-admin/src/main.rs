@@ -388,40 +388,79 @@ fn ecrire(fichier: &Path, arguments: &[&str]) -> ExitCode {
         config.guard.ipv6_prefix_bits,
         config.tracked_sources
     );
+    for dit in avertissements(&config) {
+        println!("{dit}");
+    }
+    ExitCode::SUCCESS
+}
+
+/// Ce qu'il y a à dire d'inquiétant dans cette configuration.
+///
+/// # ELLE REND LES LIGNES, ELLE NE LES ÉCRIT PAS
+///
+/// Ces cinq avertissements ont vécu jusqu'ici dans le corps de `config write`,
+/// mêlés aux `println!` qui rendent compte de l'écriture. Aucun essai ne les
+/// touchait — cette crate n'en avait AUCUN, et n'est pas dans le périmètre de
+/// couverture. C'est ce qui a permis à l'un d'eux d'annoncer pendant longtemps
+/// une absence de certificat à qui venait d'en fournir un.
+///
+/// Une fonction qui REND ce qu'elle a à dire se vérifie ; une fonction qui écrit
+/// ne se vérifie qu'en lisant sa sortie, c'est-à-dire jamais. C'est le même choix
+/// que pour `Incidents::survenu` du côté serveur.
+///
+/// # CHACUN NE PARLE QUE SI SA CONDITION TIENT
+///
+/// C'est la règle de ce bloc, et elle vaut jusqu'à l'intérieur d'une phrase : une
+/// clause qui s'imprime quoi qu'il arrive s'adresse aussi à ceux qu'elle ne
+/// concerne pas, et leur fait chercher un problème qu'ils n'ont pas.
+fn avertissements(config: &Configuration) -> std::vec::Vec<String> {
+    let mut dits = std::vec::Vec::new();
     if config.hosted.is_empty() {
-        println!(
+        dits.push(String::from(
             "ATTENTION  aucun domaine hébergé : ce serveur n'acceptera de courrier \
-             pour personne."
-        );
+             pour personne.",
+        ));
     }
     // **UN COMPTEUR ÉTEINT SE DIT AU MOMENT OÙ ON L'ÉTEINT.** Ailleurs, zéro
     // veut dire « tout de suite » ; ici il veut dire « jamais », et c'est
     // exactement l'endroit où quelqu'un peut s'être trompé de sens.
     if config.guard.refused_recipients_per_minute == 0 {
-        println!(
+        dits.push(String::from(
             "ATTENTION  récolte d'adresses NON COMPTÉE : `--refused-recipients-per-minute 0` \
-             éteint ce compteur. Une rafale de destinataires refusés ne sera plus remarquée."
-        );
+             éteint ce compteur. Une rafale de destinataires refusés ne sera plus remarquée.",
+        ));
     }
     if config.relay.enabled {
-        println!(
+        dits.push(String::from(
             "ATTENTION  ÉMISSION OUVERTE : ce serveur relaiera vers l'extérieur pour tout \
-             compte AUTHENTIFIÉ. Sans certificat TLS, l'authentification n'est pas annoncée \
-             et personne ne pourra s'en servir."
-        );
+             compte AUTHENTIFIÉ.",
+        ));
+        // **ET SANS CERTIFICAT, ELLE EST OUVERTE POUR PERSONNE.**
+        //
+        // L'authentification n'est annoncée que sous chiffrement : `--relay` sans
+        // `--tls-cert` ouvre une émission dont aucun compte ne peut se servir.
+        // C'est l'avertissement qui COMPTE — et il se disait jusqu'ici dans la
+        // même phrase que le précédent, donc aussi à qui avait fourni un
+        // certificat. Il s'y noyait, et faisait douter les autres du leur.
+        if !config.tls.est_configure() {
+            dits.push(String::from(
+                "ATTENTION  … et INUTILISABLE : sans `--tls-cert`, l'authentification n'est \
+                 pas annoncée, et aucun compte ne pourra donc émettre.",
+            ));
+        }
     } else if !config.queue.spool.is_empty() {
-        println!(
+        dits.push(String::from(
             "ATTENTION  dossier de file nommé SANS `--relay` : rien ne sera émis, et rien \
-             n'y sera écrit."
-        );
+             n'y sera écrit.",
+        ));
     }
     if config.guard.ban_duration.as_secs() == 0 {
-        println!(
+        dits.push(String::from(
             "ATTENTION  aucun bannissement : `--ban-seconds 0` fait AJOURNER au lieu de \
-             bannir. Une source fautive reviendra à la connexion suivante."
-        );
+             bannir. Une source fautive reviendra à la connexion suivante.",
+        ));
     }
-    ExitCode::SUCCESS
+    dits
 }
 
 /// Relit une configuration et l'affiche.
@@ -1063,4 +1102,133 @@ fn resumer(racine: &Path) -> ExitCode {
         println!("ATTENTION         la boîte a épuisé ses UID ; son `UIDVALIDITY` doit changer");
     }
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::avertissements;
+
+    /// La configuration que cette ligne de commande produit.
+    ///
+    /// **ON PASSE PAR L'ANALYSEUR RÉEL**, et non par une structure montée à la
+    /// main : ce qu'on éprouve est ce qu'un exploitant obtient en tapant ceci.
+    fn config_de(arguments: &[&str]) -> ams_config::Configuration {
+        // `parse` ne reçoit QUE les options : le nom du fichier est traité à
+        // part par `ecrire`.
+        let mut ligne = std::vec![
+            "--domain",
+            "mail.example.com",
+            "--listen",
+            "127.0.0.1:2525",
+            "--maildir",
+            "/tmp/boites",
+            "--accounts",
+            "/tmp/comptes.bin",
+            "--hosted",
+            "example.com",
+        ];
+        ligne.extend_from_slice(arguments);
+        match ams_admin_options::parse(ligne).expect("ligne recevable") {
+            ams_admin_options::Demande::Ecrire(options) => options.en_configuration(),
+            autre => std::panic!("attendu une écriture, obtenu {autre:?}"),
+        }
+    }
+
+    /// Y a-t-il un avertissement qui porte ce fragment ?
+    fn dit(config: &ams_config::Configuration, fragment: &str) -> bool {
+        avertissements(config)
+            .iter()
+            .any(|ligne| ligne.contains(fragment))
+    }
+
+    /// **LE DÉFAUT LUI-MÊME.**
+    ///
+    /// « Sans certificat TLS, l'authentification n'est pas annoncée » s'imprimait
+    /// dès que `--relay` était posé — donc AUSSI à qui venait de fournir un
+    /// certificat, qui se demandait alors si le sien avait été pris.
+    #[test]
+    fn le_certificat_fourni_ne_se_fait_pas_reprocher() {
+        let config = config_de(&[
+            "--relay",
+            "--queue-spool",
+            "/tmp/file",
+            "--tls-cert",
+            "/tmp/cert.pem",
+            "--tls-key",
+            "/tmp/cle.pem",
+        ]);
+
+        assert!(
+            dit(&config, "ÉMISSION OUVERTE"),
+            "l'émission ouverte se dit toujours : c'est une décision lourde"
+        );
+        assert!(
+            !dit(&config, "INUTILISABLE"),
+            "mais on ne reproche pas une absence à qui a fourni ce qu'il fallait"
+        );
+    }
+
+    /// **ET L'AVERTISSEMENT QUI COMPTE SE DIT QUAND IL COMPTE.**
+    ///
+    /// Sans certificat, l'authentification n'est pas annoncée : l'émission est
+    /// ouverte pour personne. C'est ce que l'exploitant doit lire, et cela se
+    /// noyait jusqu'ici dans une phrase adressée à tous.
+    #[test]
+    fn une_emission_sans_certificat_est_dite_inutilisable() {
+        let config = config_de(&["--relay", "--queue-spool", "/tmp/file"]);
+
+        assert!(dit(&config, "ÉMISSION OUVERTE"));
+        assert!(
+            dit(&config, "INUTILISABLE"),
+            "sans certificat, aucun compte ne peut s'authentifier pour émettre"
+        );
+    }
+
+    /// Une file nommée sans émission n'écrit rien, et le dit.
+    #[test]
+    fn une_file_sans_relais_se_dit() {
+        let config = config_de(&["--queue-spool", "/tmp/file"]);
+
+        assert!(dit(&config, "SANS `--relay`"));
+        assert!(
+            !dit(&config, "ÉMISSION OUVERTE"),
+            "rien n'est ouvert : ce serait le contraire de la vérité"
+        );
+    }
+
+    /// Un compteur éteint se dit au moment où on l'éteint.
+    #[test]
+    fn un_compteur_de_recolte_eteint_se_dit() {
+        assert!(dit(
+            &config_de(&["--refused-recipients-per-minute", "0"]),
+            "récolte d'adresses NON COMPTÉE"
+        ));
+        assert!(!dit(
+            &config_de(&["--refused-recipients-per-minute", "50"]),
+            "récolte d'adresses NON COMPTÉE"
+        ));
+    }
+
+    /// Un bannissement de zéro seconde AJOURNE au lieu de bannir.
+    #[test]
+    fn un_bannissement_nul_se_dit() {
+        assert!(dit(&config_de(&["--ban-seconds", "0"]), "aucun bannissement"));
+        assert!(!dit(
+            &config_de(&["--ban-seconds", "3600"]),
+            "aucun bannissement"
+        ));
+    }
+
+    /// **UNE CONFIGURATION SAINE NE DIT RIEN**, et c'est ce qui rend les autres
+    /// lisibles : un outil qui avertit toujours n'avertit jamais.
+    #[test]
+    fn une_configuration_saine_se_tait() {
+        let config = config_de(&["--tls-cert", "/tmp/cert.pem", "--tls-key", "/tmp/cle.pem"]);
+
+        assert_eq!(
+            avertissements(&config),
+            std::vec::Vec::<std::string::String>::new(),
+            "rien d'inquiétant, donc rien à dire"
+        );
+    }
 }
