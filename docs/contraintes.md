@@ -3846,6 +3846,59 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
+## La porte HTTP refusait l'usurpation sans le dire
+
+### LA TRANCHE PRÉCÉDENTE AVAIT LAISSÉ UNE PORTE, ET C'EST DIT
+
+« Le journal muet » a donné à ce serveur un compteur d'incidents et cinq causes,
+dont `Usurpation` : un compte authentifié qui tente d'écrire au nom d'un autre
+(RFC 6409 §6.1). Elle avait été posée **sur le chemin de la remise seulement**.
+
+L'API a sa propre vérification de la même règle. Une usurpation déposée par
+`POST /v1/submissions` partait donc en `400` **sans un mot** : pas de ligne, pas
+de compteur, rien au bilan d'arrêt. L'exploitant n'apprenait pas qu'un compte
+qu'il connaît — et qu'il peut suspendre — avait tenté d'écrire au nom d'un autre.
+
+C'est la **onzième** occurrence de la forme dans ce dépôt, et la première dont
+l'auteur est le correctif précédent. Une tranche qui ferme N portes en laisse une
+douzième ouverte si elle ne les compte pas.
+
+### LA RÈGLE EST ÉCRITE DEUX FOIS, ET CE REGISTRE MET EN GARDE CONTRE CELA
+
+`ecrit_bien_en_son_nom` existe en deux exemplaires : `api.rs` et `delivery.rs`.
+Le registre écrit ailleurs, à propos d'une autre règle : « deux vérifications à
+deux endroits finissent par ne plus dire la même chose ». Ici elles disent encore
+la même chose — mais une seule le disait à voix haute.
+
+Les deux ne sont pas fusionnées, et c'est délibéré : celle de la remise vérifie
+AUSSI le chemin de retour d'enveloppe, que l'API n'a pas. Ce qui pouvait être
+unifié l'a été : **l'écriture du journal**.
+
+### IL N'Y A PLUS QU'UN SEUL ENDROIT QUI ÉCRIVE UN INCIDENT
+
+`incidents::dire` est désormais la seule fonction de ce serveur qui écrive un
+incident. La remise avait la sienne ; la porte HTTP n'en avait pas, et lui en
+donner une seconde aurait reproduit le défaut d'un cran plus loin. L'horloge s'y
+lit, ce qui garde `Incidents::survenu` pure — donc la règle du silence vérifiable
+par un essai plutôt que par la lecture d'un journal.
+
+### VÉRIFIÉ SUR LE SERVEUR RÉEL, ET PAS SEULEMENT PAR DES ESSAIS
+
+Deux usurpations déposées par `POST /v1/submissions` en HTTP/3 : deux `400`, **une
+seule** ligne dans le journal — l'étranglement fait son office —, puis à l'arrêt
+« 2 tentative(s) d'écrire au nom d'un autre, refusées ». Avant cette tranche, les
+mêmes deux tentatives ne laissaient rien.
+
+L'essai de non-régression a été passé contre le code d'avant, en désactivant le
+correctif par édition : il tombe sur un bilan vide.
+
+### CE QUE CETTE TRANCHE A OUVERT AU PASSAGE
+
+Les essais de l'API ne montaient jusqu'ici que des fonctions libres ; aucun ne
+construisait un `ApiMaildir`. C'est maintenant fait, et la porte HTTP peut donc
+être éprouvée comme les autres. C'était le vrai motif de son silence : rien ne
+l'exerçait.
+
 ## Un pair non authentifié faisait tomber un fil de travail
 
 ### `curl` EN HTTP/3, ET LE SERVEUR PANIQUE

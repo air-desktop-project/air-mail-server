@@ -241,6 +241,26 @@ impl Incidents {
     }
 }
 
+/// Compte cet échec, et le DIT s'il est temps.
+///
+/// # C'EST LE SEUL ENDROIT DE CE SERVEUR QUI ÉCRIVE UN INCIDENT
+///
+/// La remise avait le sien, et la porte HTTP n'en avait pas : une usurpation
+/// refusée par l'API partait donc en `400` sans un mot, alors que la même
+/// usurpation refusée à la remise était dite. Deux endroits qui écrivent
+/// finissent par n'écrire qu'à moitié ; il n'y en a plus qu'un.
+///
+/// L'horloge se lit ici, et non dans [`Incidents::survenu`] : c'est ce qui garde
+/// la règle du silence vérifiable par un essai.
+pub fn dire(incidents: &Incidents, cause: Cause) {
+    let maintenant = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |depuis| depuis.as_secs());
+    if let Some(dit) = incidents.survenu(cause, maintenant) {
+        std::eprintln!("air-mail-server : {dit}");
+    }
+}
+
 /// « une fois », « 3 fois » — parce que « 1 fois » se lit mal.
 fn fois(combien: u64) -> String {
     if combien == 1 {

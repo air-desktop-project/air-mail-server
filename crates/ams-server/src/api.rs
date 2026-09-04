@@ -613,6 +613,11 @@ impl ApiMaildir {
         };
         let vue = self.comptes.vue();
         let Some(expediteur) = ecrit_bien_en_son_nom(&vue, compte, &message) else {
+            // **LA MÊME RÈGLE QUE SMTP, ET DÉSORMAIS LE MÊME AVEU.** Cette porte
+            // refusait l'usurpation en silence : le `400` partait au déposant, et
+            // l'exploitant n'apprenait rien d'un compte authentifié qui tente
+            // d'écrire au nom d'un autre. C'est précisément ce qu'il veut voir.
+            crate::incidents::dire(&self.incidents, crate::incidents::Cause::Usurpation);
             return refus_de_depot(sortie);
         };
         let Some(destinataires) = destinataires_de(&vue, &message, self.file.is_some()) else {
@@ -1857,5 +1862,107 @@ mod tests {
             "on préfère `null` à une réponse cassée"
         );
         assert_eq!(ligne.from, None);
+    }
+}
+
+#[cfg(test)]
+mod porte_http {
+    use std::sync::Arc;
+
+    use super::{ApiMaildir, Account};
+    use crate::incidents::{Cause, Incidents};
+
+    /// Un répertoire qui s'efface quand l'essai finit.
+    struct Ephemere(std::path::PathBuf);
+
+    impl Drop for Ephemere {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Une API montée sur deux comptes, et le compteur qu'elle partage.
+    fn api(nom: &str) -> (Ephemere, ApiMaildir, Arc<Incidents>) {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |depuis| depuis.as_nanos());
+        let racine = std::env::temp_dir().join(std::format!("ams-api-{nom}-{unique}"));
+        std::fs::create_dir_all(&racine).expect("créable");
+
+        let nomme = |login: &str| Account {
+            login: login.to_string(),
+            hash: std::string::String::new(),
+            addresses: std::vec![std::format!("{login}@example.com")],
+        };
+        let comptes = Arc::new(crate::comptes::Comptes::new(
+            racine.join("comptes.bin"),
+            std::vec![nomme("jean"), nomme("marie")],
+        ));
+        let boites = Arc::new(crate::delivery::Boites::new(
+            std::collections::BTreeMap::new(),
+            racine.clone(),
+            b"mail.example.com".to_vec(),
+            Arc::clone(&comptes),
+        ));
+        let incidents = Arc::new(Incidents::new());
+        let api = ApiMaildir::new(
+            Arc::new(crate::imap::BoitesImap::new(
+                Arc::clone(&boites),
+                b"mail.example.com",
+            )),
+            Arc::clone(&comptes),
+            boites,
+            Arc::new(std::vec![std::string::String::from("example.com")]),
+            Arc::new(ams_loop_tokio::SharedGuard::new(
+                16,
+                ams_guard::Thresholds::default(),
+            )),
+            Arc::clone(&incidents),
+        );
+        (Ephemere(racine), api, incidents)
+    }
+
+    /// **UNE USURPATION REFUSÉE PAR L'API SE DIT, COMME CELLE DE SMTP.**
+    ///
+    /// Les deux portes appliquent la même règle (RFC 6409 §6.1) par deux
+    /// fonctions distinctes, et une seule la comptait : le `400` partait au
+    /// déposant, et l'exploitant n'apprenait rien d'un compte authentifié qui
+    /// tente d'écrire au nom d'un autre. C'est pourtant exactement ce qu'il veut
+    /// voir — il connaît ce compte, et peut le suspendre.
+    #[test]
+    fn une_usurpation_par_l_api_est_comptee() {
+        let (_ephemere, api, incidents) = api("usurpation");
+        let faux = b"From: marie@example.com\r\nTo: jean@example.com\r\n\r\nnon.\r\n";
+        let mut sortie = std::vec![0_u8; 4096];
+
+        // `jean` dépose un message qui se dit de `marie`.
+        let rendu = api.submissions("jean", faux, &mut sortie);
+
+        assert_eq!(
+            rendu.status,
+            ams_proto_http::StatusCode::BAD_REQUEST,
+            "le dépôt est refusé"
+        );
+        assert_eq!(
+            incidents.bilan(),
+            std::vec![(Cause::Usurpation, 1)],
+            "et le refus est COMPTÉ : sans cela, il ne laissait aucune trace"
+        );
+    }
+
+    /// Et un dépôt en son propre nom ne compte rien : un journal qui crie à
+    /// chaque message est un journal qu'on cesse de lire.
+    #[test]
+    fn un_depot_en_son_nom_ne_compte_rien() {
+        let (_ephemere, api, incidents) = api("legitime");
+        let bon = b"From: jean@example.com\r\nTo: jean@example.com\r\n\r\noui.\r\n";
+        let mut sortie = std::vec![0_u8; 4096];
+
+        let _ = api.submissions("jean", bon, &mut sortie);
+
+        assert!(
+            incidents.bilan().is_empty(),
+            "rien d'anormal, donc rien à dire"
+        );
     }
 }

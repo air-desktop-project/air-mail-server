@@ -384,9 +384,7 @@ impl MaildirDelivery {
     /// du silence — quand redire, et ce qu'on dit alors — vit dans
     /// [`crate::incidents`], où un test la vérifie.
     fn incident(&self, cause: crate::incidents::Cause) {
-        if let Some(dit) = self.incidents.survenu(cause, Self::maintenant()) {
-            std::eprintln!("air-mail-server : {dit}");
-        }
+        crate::incidents::dire(&self.incidents, cause);
     }
 
     /// Lui donne un dossier où mettre de côté ce que DMARC met en quarantaine.
