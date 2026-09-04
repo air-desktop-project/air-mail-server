@@ -1439,34 +1439,58 @@ async fn servir(fichier: &Path) -> Result<(), String> {
             .map_err(|erreur| format!("écoute IMAP sur {adresse} : {erreur}"))?;
         // ON DIT CE QU'ON SERT, ET COMMENT. Un port IMAP ouvert laisse croire à
         // beaucoup de choses ; celles-ci sont vraies, et bornées.
-        eprintln!(
-            "air-mail-server : IMAP écoute sur {adresse} — IMAP4rev2 EST SERVI EN ENTIER : \
-             `SELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`, `EXPUNGE`, `SEARCH`, `COPY` et \
-             `MOVE`, `APPEND`, `CREATE`, `DELETE` et `RENAME` répondent, et `FETCH` sait \
-             rendre une `ENVELOPE`, une `BODYSTRUCTURE`, une PARTIE désignée — `BODY[1]`, \
-             `BODY[1.MIME]` — et un CHOIX de champs — `BODY[HEADER.FIELDS (FROM)]`. \
-             UN NOM DE BOÎTE \
-             DEVIENT UN RÉPERTOIRE : seuls les noms qu'on sait transcrire sans risque sont \
-             acceptés, et jamais transformés. UN `EXPUNGE` EFFACE POUR DE BON, et un `CLOSE` \
-             aussi. ON CHERCHE DANS LE TEXTE, PAS DANS LES OCTETS : les mots encodés se \
-             défont, les corps se transfert-décodent, et l'on ne cherche que dans du texte — \
-             au plus un mébioctet par partie, et seulement en `us-ascii`, `utf-8` ou \
-             `iso-8859-1`. `BINARY[…]` REND CE QUE LES OCTETS VEULENT DIRE, transfert-décodé, et \
-             refuse par `NO [UNKNOWN-CTE]` un encodage qu'il ne sait pas défaire. \
-             `NAMESPACE`, `ENABLE`, `IDLE`, `SUBSCRIBE` et `UNSUBSCRIBE` RÉPONDENT, et les \
-             options que RFC 9051 §E dit absorbées dans le protocole de base le sont aussi : \
-             `STATUS` rend CE QU'ON LUI DEMANDE — `UNSEEN`, `DELETED` et `SIZE` compris —, \
-             `LIST … RETURN (STATUS (…))` en rend un par boîte, \
-             `SEARCH RETURN (MIN MAX ALL COUNT SAVE)` répond de quatre façons, et `$` désigne \
-             ce que la dernière recherche a retenu — en UID, pour qu'un message effacé en \
-             sorte de lui-même. Les abonnements s'écrivent dans la racine du compte, sous \
-             `ams-abonnements`. `SENTBEFORE`, `SENTON` et `SENTSINCE` comparent le champ \
-             `Date:` du message, là où `BEFORE`, `ON` et `SINCE` comparent sa date d'arrivée. \
-             LES CINQ MOTS-CLEFS DE §E.15 SONT SERVIS — `$MDNSent`, `$Forwarded`, `$Junk`, \
-             `$NonJunk`, `$Phishing` —, avec `KEYWORD` et `UNKEYWORD` ; Maildir les porte dans \
-             le nom du fichier. L'ENSEMBLE EST FERMÉ, et `PERMANENTFLAGS` n'annonce donc pas \
-             `\\*` : ce serait promettre qu'on accepte tout mot-clef nouveau."
-        );
+        //
+        // **UNE AFFIRMATION PAR LIGNE.** Tout ceci tenait sur UNE ligne de mille
+        // neuf cent soixante-dix-huit caractères — la suivante, dans le même
+        // démarrage, en faisait deux cent quatorze. Un terminal la repliait en
+        // pavé, `journalctl` la tronquait selon la vue, et ce que ce registre
+        // reproche ailleurs à un journal répétitif — qu'on cesse de le lire —
+        // lui arrivait par excès. Sept lignes qu'on peut lire valent mieux
+        // qu'une qu'on saute.
+        for dit in [
+            std::format!("IMAP écoute sur {adresse} — IMAP4rev2 est servi EN ENTIER"),
+            String::from(
+                "  commandes  `SELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`, `EXPUNGE`, \
+                 `SEARCH`, `COPY`, `MOVE`, `APPEND`, `CREATE`, `DELETE`, `RENAME`, \
+                 `NAMESPACE`, `ENABLE`, `IDLE`, `SUBSCRIBE` et `UNSUBSCRIBE`",
+            ),
+            String::from(
+                "  `FETCH`    rend une `ENVELOPE`, une `BODYSTRUCTURE`, une PARTIE désignée \
+                 — `BODY[1]`, `BODY[1.MIME]` — et un CHOIX de champs — \
+                 `BODY[HEADER.FIELDS (FROM)]`. `BINARY[…]` rend ce que les octets VEULENT \
+                 DIRE, transfert-décodé, et refuse par `NO [UNKNOWN-CTE]` ce qu'il ne sait \
+                 pas défaire",
+            ),
+            String::from(
+                "  `SEARCH`   cherche DANS LE TEXTE et non dans les octets : les mots encodés \
+                 se défont, les corps se transfert-décodent — au plus un mébioctet par \
+                 partie, en `us-ascii`, `utf-8` ou `iso-8859-1`. `SENTBEFORE`, `SENTON` et \
+                 `SENTSINCE` lisent le champ `Date:` ; `BEFORE`, `ON` et `SINCE` la date \
+                 d'arrivée",
+            ),
+            String::from(
+                "  §E         les options absorbées dans le protocole de base le sont aussi : \
+                 `STATUS` rend ce qu'on lui demande — `UNSEEN`, `DELETED`, `SIZE` —, \
+                 `LIST … RETURN (STATUS (…))` en rend un par boîte, \
+                 `SEARCH RETURN (MIN MAX ALL COUNT SAVE)` répond de quatre façons, et `$` \
+                 désigne la dernière recherche — en UID, pour qu'un message effacé en sorte \
+                 de lui-même",
+            ),
+            String::from(
+                "  mots-clefs les cinq de §E.15 — `$MDNSent`, `$Forwarded`, `$Junk`, \
+                 `$NonJunk`, `$Phishing` —, avec `KEYWORD` et `UNKEYWORD` ; Maildir les porte \
+                 dans le nom du fichier. L'ENSEMBLE EST FERMÉ, et `PERMANENTFLAGS` n'annonce \
+                 donc pas `\\*` : ce serait promettre qu'on accepte tout mot-clef nouveau",
+            ),
+            String::from(
+                "  sur disque un nom de boîte devient un RÉPERTOIRE : seuls les noms qu'on \
+                 sait transcrire sans risque sont acceptés, et jamais transformés. Un \
+                 `EXPUNGE` efface POUR DE BON, un `CLOSE` aussi, et les abonnements \
+                 s'écrivent dans la racine du compte sous `ams-abonnements`",
+            ),
+        ] {
+            eprintln!("air-mail-server : {dit}");
+        }
         Some(tokio::spawn(serve_imap(
             ecouteur,
             // LA BORNE D'UN `APPEND` EST CELLE D'UN MESSAGE, et c'est la même

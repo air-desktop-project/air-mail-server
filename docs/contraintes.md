@@ -3846,6 +3846,40 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
+## Une ligne de démarrage qu'on ne pouvait pas lire
+
+### MILLE NEUF CENT SOIXANTE-DIX-HUIT CARACTÈRES, SUR UNE LIGNE
+
+La ligne d'IMAP énumérait tout IMAP4rev2 — de `SELECT` aux cinq mots-clefs de
+§E.15 — d'un seul tenant. La plus longue AUTRE ligne du même démarrage en faisait
+deux cent quatorze.
+
+Un terminal la repliait en pavé ; `journalctl` la tronque selon la vue. Ce que ce
+registre reproche ailleurs à un journal répétitif — qu'on cesse de le lire, et
+qu'on manque alors la ligne qui compte — lui arrivait par EXCÈS plutôt que par
+répétition.
+
+### SEPT LIGNES QU'ON PEUT LIRE
+
+Une affirmation par ligne, chacune préfixée d'une étiquette alignée qui dit de
+quoi elle parle : `commandes`, `FETCH`, `SEARCH`, `§E`, `mots-clefs`,
+`sur disque`. La plus longue tombe à 392 caractères.
+
+**Rien n'a été retiré**, et c'est vérifié plutôt qu'affirmé : quatorze
+affirmations repérables — `UNKNOWN-CTE`, `SENTBEFORE`,
+`RETURN (MIN MAX ALL COUNT SAVE)`, `PERMANENTFLAGS`, `ams-abonnements`, le
+mébioctet par partie… — sont présentes avant comme après.
+
+### CE N'ÉTAIT PAS UN DÉFAUT, ET C'EST POURQUOI IL A DURÉ
+
+Le compilateur ne mesure pas une ligne de journal, aucune barrière ne la lit, et
+personne ne la relit après l'avoir écrite. Elle n'a été vue qu'en démarrant le
+serveur pour éprouver le manuel d'installation — la même façon dont `--help` et
+`summary` sont sortis de l'ombre.
+
+C'est un outillage qui manque, et le registre le dit plutôt que de le taire : rien
+ne borne la longueur d'une ligne de démarrage aujourd'hui.
+
 ## `summary` créait une boîte en croyant la lire
 
 ### UNE COMMANDE D'INSPECTION QUI ÉCRIT
