@@ -355,7 +355,15 @@ where
     let mut echange = std::vec![0_u8; TRAVAIL_OCTETS];
     let mut rendu = std::vec![0_u8; RENDU_OCTETS];
 
-    let mut connexion = ouvrir(flux, service, &mut lecture, &mut remplis, &mut ecriture).await?;
+    let mut connexion = ouvrir(
+        flux,
+        service,
+        source,
+        &mut lecture,
+        &mut remplis,
+        &mut ecriture,
+    )
+    .await?;
 
     loop {
         let lue = lire_une_requete(
@@ -461,6 +469,7 @@ struct Demande<'t> {
 async fn ouvrir<S>(
     flux: &mut S,
     service: &HttpService<'_>,
+    source: Source,
     lecture: &mut [u8],
     remplis: &mut usize,
     ecriture: &mut [u8],
@@ -470,9 +479,26 @@ where
 {
     let poignee = Handshake::new(reglages());
     loop {
+        // **UN PRÉAMBULE QUI N'EN EST PAS UN EST UNE TRAME INVALIDE.**
+        //
+        // C'était la seule faute du pair que cette écoute ne comptait pas, et
+        // c'est la PREMIÈRE qu'un hostile peut commettre : l'ALPN, les cadres
+        // malformés, les identifiants refusés et un en-tête illisible sont tous
+        // rapportés au videur, celle-ci ne l'était pas. Une source pouvait donc
+        // ouvrir des connexions et envoyer n'importe quoi sans jamais franchir le
+        // seuil — alors que chacune coûte une poignée de main TLS, ce que le
+        // videur existe précisément pour ne pas offrir.
+        //
+        // **LA SOURCE EST VÉRIFIÉE ICI**, et c'est ce qui rend le décompte sûr :
+        // le pair a terminé un `TCP` en trois temps puis un `TLS`. Sur QUIC,
+        // compter avant la validation d'adresse laisserait usurper une source
+        // pour faire bannir un tiers.
         let (peut_etre, ecrits) = poignee
             .open(lecture.get(..*remplis).unwrap_or_default(), ecriture)
-            .map_err(|_| Error::Http)?;
+            .map_err(|_| {
+                service.guard.observe(source, GuardEvent::InvalidFrame);
+                Error::Http
+            })?;
         if let Some(connexion) = peut_etre {
             let sortie = ecriture.get(..ecrits).unwrap_or_default().to_vec();
             ecrire(flux, &sortie, service).await?;

@@ -3846,6 +3846,65 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
+## La porte HTTP ne comptait pas la première faute d'un hostile
+
+### LES CINQ ÉCOUTES, MISES CÔTE À CÔTE
+
+Le videur (C8) a été éprouvé sur chaque porte, avec un seuil abaissé à dix trames
+invalides :
+
+| porte | coupure | connexion suivante |
+|---|---|---|
+| SMTP | 13ᵉ trame | fermée sans un mot |
+| POP3 | 13ᵉ trame | fermée sans un mot |
+| IMAP | 13ᵉ trame | fermée sans un mot |
+| **HTTP/2** | **jamais** | **servie normalement** |
+
+Vingt préambules invalides d'affilée ne faisaient franchir aucun seuil.
+
+### L'ÉCOUTE COMPTAIT QUATRE FAUTES SUR CINQ
+
+`ams-loop-tokio::http` rapporte `InvalidFrame` pour un ALPN qui n'est pas `h2`,
+pour un cadre malformé, pour des identifiants refusés et pour un en-tête illisible.
+Le **préambule**, lui, faisait `map_err(|_| Error::Http)` sans rien dire au videur.
+
+C'est la première chose qu'un pair hostile peut envoyer, et la seule qui n'était
+pas comptée. Or le commentaire d'à côté dit exactement ce que cela coûte :
+
+> **LE VIDEUR PARLE AVANT LA POIGNÉE DE MAIN** (C8) : chiffrer pour une source
+> bannie coûte un échange de clés, ce qu'un attaquant obtiendrait gratuitement.
+
+Le videur refusait donc les sources DÉJÀ bannies, mais rien ne pouvait bannir
+celle qui se contentait d'ouvrir des connexions TLS pour y déverser n'importe quoi.
+
+### POURQUOI COMPTER ICI EST SÛR, ET NE LE SERAIT PAS SUR QUIC
+
+La source est **vérifiée** à ce point : le pair a terminé un `TCP` en trois temps
+puis une poignée de main `TLS`. Sur QUIC, compter avant la validation d'adresse
+laisserait usurper une source pour faire bannir un tiers — et c'est pourquoi
+`quic.rs` ne compte rien à ce stade, ce qui est juste et n'a pas été touché.
+
+### CE QUI N'A PAS ÉTÉ COMPTÉ, ET POURQUOI
+
+Trois autres `Error::Http` de ce fichier restent muets pour le videur, et c'est
+correct : ce sont **nos propres** échecs d'écriture, pas des fautes du pair. Punir
+un pair pour un embarras qui nous appartient serait le contraire du but.
+
+Le pair qui cesse d'envoyer avant que le préambule soit complet n'est pas compté
+non plus : une connexion abandonnée n'est pas une faute de protocole, et elle est
+déjà comptée comme connexion.
+
+### CE QUE L'ESSAI TIENT
+
+Un essai d'intégration, avec un seuil de trois : huit connexions portant un
+préambule fautif, et la source finit refusée. Le banc d'essai a gagné au passage
+une écoute à seuils choisis — sans quoi il aurait fallu des dizaines de connexions
+pour franchir le défaut.
+
+Passé contre le code d'avant, en retirant le décompte par édition : lui seul tombe.
+Vérifié aussi sur le serveur réel — refus dès la douzième tentative, et un client
+légitime toujours servi en HTTP/2 comme en HTTP/3.
+
 ## Une clé révoquée était annoncée comme « une autre clé »
 
 ### QUATRE ISSUES SOIGNEUSEMENT DISTINGUÉES, ET UNE CINQUIÈME QUI TOMBAIT DANS LA MAUVAISE

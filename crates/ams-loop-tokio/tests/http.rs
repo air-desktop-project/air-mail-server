@@ -257,6 +257,20 @@ async fn ecoute(
     tokio::sync::oneshot::Sender<()>,
     tokio::task::JoinHandle<()>,
 ) {
+    ecoute_avec(cert, cle, ams_guard::Thresholds::default()).await
+}
+
+/// La même, avec des seuils choisis : c'est ce qui permet d'éprouver le videur
+/// sans envoyer des dizaines de connexions.
+async fn ecoute_avec(
+    cert: &[u8],
+    cle: &[u8],
+    seuils: ams_guard::Thresholds,
+) -> (
+    std::net::SocketAddr,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
     let tls = Arc::new(
         ams_loop_tokio::http::http_server_config(cert, cle).expect("configuration assemblée"),
     );
@@ -270,10 +284,7 @@ async fn ecoute(
         3_600 * 1_000_000,
     )
     .expect("une durée licite");
-    let guard = Arc::new(ams_loop_tokio::SharedGuard::new(
-        64,
-        ams_guard::Thresholds::default(),
-    ));
+    let guard = Arc::new(ams_loop_tokio::SharedGuard::new(64, seuils));
     let tache = tokio::spawn(async move {
         let _ = ams_loop_tokio::http::serve_http(
             listener,
@@ -418,6 +429,63 @@ async fn un_client_sans_h2_ne_passe_pas_la_poignee_de_main() {
     assert!(
         issue.is_err(),
         "un client qui n'offre que `http/1.1` doit voir sa poignée de main échouer"
+    );
+
+    let _ = arret.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&repertoire);
+}
+
+/// **UN PRÉAMBULE QUI N'EN EST PAS UN COMPTE POUR LE VIDEUR** (C8).
+///
+/// C'était la seule faute du pair que cette écoute ne comptait pas — l'ALPN, les
+/// cadres malformés, les identifiants refusés et un en-tête illisible l'étaient
+/// tous — et c'est la PREMIÈRE qu'un hostile peut commettre. Une source pouvait
+/// donc ouvrir des connexions et envoyer n'importe quoi sans jamais franchir le
+/// seuil, alors que chacune coûte une poignée de main TLS.
+#[tokio::test]
+async fn un_preambule_invalide_compte_pour_le_videur() {
+    let repertoire = std::env::temp_dir().join(format!("ams-http-videur-{}", std::process::id()));
+    std::fs::create_dir_all(&repertoire).expect("répertoire temporaire");
+    let Some((cert, cle)) = certificat_pem(&repertoire) else {
+        let _ = std::fs::remove_dir_all(&repertoire);
+        eprintln!("SAUTÉ : `openssl` n'a pas su fabriquer de certificat.");
+        return;
+    };
+    // Un seuil bas : trois préambules fautifs suffisent, et le quatrième trouve
+    // porte close.
+    let seuils = ams_guard::Thresholds {
+        invalid_frames_per_minute: 3,
+        ..ams_guard::Thresholds::default()
+    };
+    let (adresse, arret, tache) = ecoute_avec(&cert, &cle, seuils).await;
+
+    let connecteur = tokio_rustls::TlsConnector::from(client_tls(&[b"h2"]));
+    let nom = rustls::pki_types::ServerName::try_from("localhost").expect("un nom");
+    let mut refuses = 0_usize;
+    for _ in 0..8 {
+        let Ok(brut) = tokio::net::TcpStream::connect(adresse).await else {
+            refuses += 1;
+            continue;
+        };
+        let Ok(mut chiffre) = connecteur.connect(nom.clone(), brut).await else {
+            refuses += 1;
+            continue;
+        };
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        if chiffre.write_all(b"CE N'EST PAS UN PREAMBULE\r\n\r\n").await.is_err() {
+            refuses += 1;
+            continue;
+        }
+        let mut poubelle = [0_u8; 64];
+        if chiffre.read(&mut poubelle).await.unwrap_or(0) == 0 {
+            // Le serveur a coupé : c'est ce qu'on attend d'un préambule fautif.
+        }
+    }
+
+    assert!(
+        refuses > 0,
+        "au-delà du seuil, la source doit être refusée : aucune ne l'a été"
     );
 
     let _ = arret.send(());
