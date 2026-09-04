@@ -3846,6 +3846,84 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
+## Un compte ajouté à chaud n'avait pas de boîte
+
+### DEUX SOURCES QUI DÉCRIVENT LE MÊME MONDE, L'UNE VIVANTE ET L'AUTRE MORTE
+
+Le magasin de comptes est **relu quand le fichier change** — c'est le `veille` de
+`ams-server::comptes`, un `stat` par seconde au plus. La carte des boîtes, elle,
+était lue **une seule fois, au démarrage**. Les deux décrivent la même chose : qui
+a un compte sur ce serveur.
+
+Ce qui s'ensuivait, sur un serveur qui tourne :
+
+| étape | ce qui répondait | ce qu'il disait |
+|---|---|---|
+| `air-mail-admin account add … --login paul` | le magasin | compte ajouté |
+| `RCPT TO:<paul@example.com>` | la politique, qui lit le magasin **vivant** | `250 Recipient ok` |
+| le point final du `DATA` | la remise, qui lit la carte **figée** | `451 4.3.2` |
+
+`add_recipient` n'est appelée qu'au `DATA` : l'expéditeur transmettait donc le
+message ENTIER avant d'apprendre qu'on n'en voulait pas. Un pair conforme réessaie
+des jours durant, puis rend le message. Le compte de `paul` ne recevrait rien
+jusqu'à un redémarrage du serveur.
+
+### LA RÈGLE ÉTAIT ÉCRITE, ET APPLIQUÉE À UNE PORTE SUR DEUX
+
+La documentation de `Boites` la porte déjà, mot pour mot :
+
+> **ELLE EST MODIFIABLE, PARCE QUE LES COMPTES LE SONT.** Un compte créé par
+> l'administration n'a pas de boîte […] **Un demi-compte est pire qu'un refus,
+> parce que rien ne le dit.**
+
+Elle avait été appliquée à la porte de l'API, qui ouvre la boîte avant d'inscrire
+le compte. Elle ne l'a pas été à la seconde porte — la relecture du disque —, qui
+est arrivée après. C'est la **huitième** occurrence dans ce dépôt de la même forme :
+*une règle écrite quelque part, appliquée à N endroits, oubliée au N+1ᵉ*.
+
+Et le commentaire de POP3 énonçait l'invariant que la relecture avait brisé :
+« c'est donc un compte connu, **et sa boîte a été ouverte au démarrage** ».
+
+### LE CORRECTIF EST STRUCTUREL, PAS UN APPEL DE PLUS
+
+Ajouter « ouvre la boîte » au chemin de la relecture aurait créé un N+2ᵉ endroit.
+`Boites::get` ouvre désormais elle-même la boîte qui manque, et **c'est le seul
+endroit où une boîte naît** : l'API délègue à `Boites::ouvrir`, dont `get` est la
+version qui demande d'abord au magasin. Les trois portes — SMTP, IMAP, POP3 —
+passent toutes par `get` et sont réparées d'un seul geste, parce qu'elles
+partagent le même `Arc<Boites>`.
+
+La garde ne repose sur aucune promesse en commentaire : une boîte ne naît que pour
+un nom que le magasin **vivant** porte, et que `ams_auth::check_login` accepte comme
+nom de répertoire. Ce second contrôle double celui du magasin à dessein — c'est ici
+qu'un nom devient un CHEMIN, et un `comptes.bin` peut arriver autrement que par
+notre outil.
+
+La consolidation a rendu trois choses mortes, qui ont été retirées : `Boites::poser`,
+et les champs `racine` et `domaine` d'`ApiMaildir` — deux arguments adjacents dont le
+constructeur redoutait justement qu'ils « se passent à l'envers sans que le
+compilateur bronche ».
+
+### CE QUI L'A TROUVÉ, ET CE QU'AUCUNE BARRIÈRE NE VOYAIT
+
+Aucune. Les cinq barrières étaient vertes, la couverture à 100 %, les 65 cibles de
+fuzz muettes. Le défaut vit dans l'ACCORD entre deux structures que rien ne
+confronte : chacune était correcte seule, et les essais de chacune passaient.
+
+Il est apparu en ajoutant un compte à un serveur en marche — en EXÉCUTANT, comme
+`--help`, `summary` et la ligne de démarrage illisible avant lui.
+
+### CE QUI RESTE, ET QUI N'EST PAS CORRIGÉ ICI
+
+**Une remise qui échoue n'écrit rien dans le journal.** Le `451` partait vers le
+pair et le serveur n'en disait pas un mot : l'exploitant n'avait aucun moyen
+d'apprendre que le courrier d'un compte n'arrivait pas, ni pourquoi. C'est ce qui a
+rendu ce défaut invisible, et c'est un manque distinct — il n'est pas comblé par
+cette tranche.
+
+Rien ne vérifie non plus qu'une structure relue à chaud et une structure figée
+décrivent le même monde. Le registre le dit plutôt que de le taire.
+
 ## Une ligne de démarrage qu'on ne pouvait pas lire
 
 ### MILLE NEUF CENT SOIXANTE-DIX-HUIT CARACTÈRES, SUR UNE LIGNE

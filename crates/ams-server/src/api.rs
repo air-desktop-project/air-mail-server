@@ -116,10 +116,6 @@ pub struct ApiMaildir {
     /// lecture montrerait des peines que le garde n'applique pas, et en cacherait
     /// qu'il applique.
     guard: Arc<ams_loop_tokio::SharedGuard>,
-    /// La racine des boîtes, pour en ouvrir une à un compte neuf.
-    racine: std::path::PathBuf,
-    /// Le domaine, que le nom d'un message porte (§3.6.4 de RFC 5322).
-    domaine: Vec<u8>,
     /// La borne sur les vérifications simultanées.
     places: Places,
     /// La file de réémission, quand l'émission est ouverte.
@@ -146,8 +142,6 @@ impl ApiMaildir {
         remise: Arc<crate::delivery::Boites>,
         domaines: Arc<Vec<String>>,
         guard: Arc<ams_loop_tokio::SharedGuard>,
-        racine: std::path::PathBuf,
-        domaine: Vec<u8>,
     ) -> Self {
         Self {
             boites,
@@ -155,8 +149,6 @@ impl ApiMaildir {
             remise,
             domaines,
             guard,
-            racine,
-            domaine,
             places: Places::new(VERIFICATIONS_SIMULTANEES),
             // ON N'ÉMET PAS, SAUF DEMANDE EXPRESSE — et le constructeur ne prend
             // pas ce champ : un argument de plus dans une liste qui en compte
@@ -442,18 +434,16 @@ impl ApiMaildir {
     }
 
     /// Ouvre la boîte de ce compte, et la pose dans la carte.
+    ///
+    /// **AVANT QUE LE COMPTE N'EXISTE**, donc par [`Boites::ouvrir`] et non par
+    /// `get` : le magasin ne peut pas encore répondre pour un compte qu'on est en
+    /// train de créer. La mécanique, elle, est celle de la carte — une boîte ne
+    /// naît qu'à un seul endroit.
+    ///
+    /// `block_in_place` parce qu'ouvrir un Maildir relit son index : c'est une
+    /// attente sur le disque, et cette tâche-ci sert une requête HTTP.
     fn ouvrir_la_boite(&self, nom: &str) -> Option<()> {
-        if self.remise.get(nom).is_some() {
-            return Some(());
-        }
-        let racine = self.racine.join(nom);
-        let boite = tokio::task::block_in_place(|| {
-            ams_store::Maildir::open(&racine, &self.domaine, ams_store::fresh_uid_validity())
-        })
-        .ok()?;
-        self.remise
-            .poser(nom.to_string(), std::sync::Arc::new(boite));
-        Some(())
+        tokio::task::block_in_place(|| self.remise.ouvrir(nom)).map(|_| ())
     }
 
     /// Les domaines qu'on héberge.

@@ -21,7 +21,6 @@ use ams_store::{Incoming, Maildir};
 /// obligerait à tenir le verrou aussi longtemps qu'on s'en sert — c'est-à-dire
 /// pendant une session IMAP entière, pendant laquelle aucun compte ne pourrait
 /// être créé.
-#[derive(Default)]
 pub struct Boites {
     /// Une boîte par compte, par son nom.
     carte: std::sync::RwLock<BTreeMap<String, Arc<Maildir>>>,
@@ -47,27 +46,122 @@ pub struct Boites {
     /// vivaient dans le service IMAP — jusqu'à ce que la quarantaine DMARC ait,
     /// elle aussi, besoin d'en ouvrir un.
     dossiers: std::sync::RwLock<BTreeMap<(String, String), Arc<Maildir>>>,
+    /// Sous quoi les boîtes vivent, pour en ouvrir une qui manque.
+    racine: std::path::PathBuf,
+    /// Le nom d'hôte, qui entre dans les noms de fichiers Maildir.
+    hote: Vec<u8>,
+    /// Le magasin de comptes, TEL QU'IL EST SUR LE DISQUE.
+    ///
+    /// # C'EST LUI QUI AUTORISE, ET RIEN D'AUTRE
+    ///
+    /// Sans cette vérification, [`Boites::get`] ferait naître un répertoire pour
+    /// n'importe quel nom qu'on lui passe. Le magasin est la seule chose qui
+    /// sache si un compte existe, et il est relu quand le disque bouge : une
+    /// boîte ne s'ouvre donc que pour un compte qui existe À CET INSTANT.
+    comptes: Arc<crate::comptes::Comptes>,
 }
 
 impl Boites {
     /// La carte telle qu'elle est au démarrage.
+    ///
+    /// `racine` et `hote` sont ce qu'il faut pour en ouvrir une de plus, et
+    /// `comptes` ce qui dit si on en a le droit.
     #[must_use]
-    pub fn new(carte: BTreeMap<String, Arc<Maildir>>) -> Self {
+    pub fn new(
+        carte: BTreeMap<String, Arc<Maildir>>,
+        racine: std::path::PathBuf,
+        hote: Vec<u8>,
+        comptes: Arc<crate::comptes::Comptes>,
+    ) -> Self {
         Self {
             carte: std::sync::RwLock::new(carte),
             dossiers: std::sync::RwLock::new(BTreeMap::new()),
+            racine,
+            hote,
+            comptes,
         }
     }
 
-    /// La boîte de ce compte, s'il en a une.
+    /// La boîte de ce compte, ouverte si elle ne l'était pas encore.
+    ///
+    /// # POURQUOI ELLE PEUT NAÎTRE ICI
+    ///
+    /// Les boîtes sont ouvertes au démarrage, une par compte. Ce serait suffisant
+    /// si la liste des comptes ne bougeait pas — mais elle bouge : le magasin est
+    /// RELU quand le fichier change, et un compte ajouté par `air-mail-admin` sur
+    /// un serveur qui tourne apparaît donc sans que personne n'ouvre sa boîte.
+    ///
+    /// Ce qui s'ensuivait : `RCPT` acceptait le destinataire — la politique lit le
+    /// magasin vivant —, puis la remise ne trouvait pas de boîte et rendait un
+    /// `451`. Le pair réessayait des jours durant avant de rendre le message à son
+    /// expéditeur, ET LE JOURNAL N'EN DISAIT RIEN. C'est le « demi-compte » que
+    /// cette carte existe pour empêcher, arrivé par l'autre porte : l'API en
+    /// ouvrait une, la relecture du disque n'en ouvrait pas.
+    ///
+    /// # LA GARDE EST STRUCTURELLE
+    ///
+    /// Une boîte ne naît que pour un nom que le magasin VIVANT porte, et dont
+    /// [`ams_auth::check_login`] dit qu'il fait un nom de répertoire sûr. La
+    /// seconde vérification double celle du magasin à dessein : c'est ici qu'un
+    /// nom devient un CHEMIN, et un `comptes.bin` peut arriver autrement que par
+    /// notre outil.
     #[must_use]
     pub fn get(&self, nom: &str) -> Option<Arc<Maildir>> {
-        self.lire().get(nom).map(Arc::clone)
+        if let Some(boite) = self.lire().get(nom).map(Arc::clone) {
+            return Some(boite);
+        }
+        self.ouvrir_pour_un_compte_connu(nom)
     }
 
-    /// Ajoute cette boîte à la carte, ou remplace celle qui portait ce nom.
-    pub fn poser(&self, nom: String, boite: Arc<Maildir>) {
-        self.ecrire().insert(nom, boite);
+    /// Ouvre la boîte de ce compte, s'il en est bien un.
+    fn ouvrir_pour_un_compte_connu(&self, nom: &str) -> Option<Arc<Maildir>> {
+        if !self.comptes.vue().iter().any(|compte| compte.login == nom) {
+            return None;
+        }
+        self.ouvrir(nom)
+    }
+
+    /// Ouvre la boîte de ce compte si elle ne l'est pas, SANS demander au magasin.
+    ///
+    /// # QUI A LE DROIT DE SAUTER LA QUESTION
+    ///
+    /// L'API, et elle seule : elle ouvre la boîte AVANT d'inscrire le compte,
+    /// parce qu'un compte inscrit sans boîte est le demi-compte que cette carte
+    /// existe pour empêcher. Le magasin ne peut donc pas encore répondre pour lui.
+    /// Partout ailleurs, c'est [`Boites::get`] qu'on veut.
+    ///
+    /// **C'EST LE SEUL ENDROIT OÙ UNE BOÎTE NAÎT**, et c'est délibéré : la même
+    /// mécanique écrite à deux endroits est exactement ce qui a laissé la
+    /// relecture du magasin sans boîtes pendant que l'API en ouvrait.
+    ///
+    /// **L'OUVERTURE A LIEU SOUS LE VERROU D'ÉCRITURE**, pour la raison qui vaut
+    /// aussi pour [`Boites::dossier_ou`] : deux remises simultanées au même compte
+    /// neuf en construiraient deux `Maildir`, qui serviraient le même UID à deux
+    /// messages différents.
+    ///
+    /// [`ams_auth::check_login`] est redemandé ici, après le magasin : c'est ici
+    /// qu'un nom devient un CHEMIN, et un `comptes.bin` peut arriver autrement que
+    /// par notre outil.
+    pub(crate) fn ouvrir(&self, nom: &str) -> Option<Arc<Maildir>> {
+        if ams_auth::check_login(nom).is_err() {
+            return None;
+        }
+        let mut carte = self.ecrire();
+        // Quelqu'un a pu l'ouvrir entre le relâchement du verrou de lecture et la
+        // prise de celui-ci.
+        if let Some(boite) = carte.get(nom) {
+            return Some(Arc::clone(boite));
+        }
+        let boite = Arc::new(
+            Maildir::open(
+                self.racine.join(nom),
+                &self.hote,
+                ams_store::fresh_uid_validity(),
+            )
+            .ok()?,
+        );
+        carte.insert(nom.to_owned(), Arc::clone(&boite));
+        Some(boite)
     }
 
     /// Retire la boîte de ce compte de la carte.
@@ -882,7 +976,6 @@ mod tests {
         .expect("ouvrable");
         let mut carte = BTreeMap::new();
         carte.insert(String::from("marie"), Arc::new(boite));
-        let boites = Arc::new(Boites::new(carte));
         let comptes = Arc::new(crate::comptes::Comptes::new(
             racine.join("comptes.bin"),
             vec![Account {
@@ -891,7 +984,37 @@ mod tests {
                 addresses: vec![String::from("marie@example.com")],
             }],
         ));
+        let boites = Arc::new(Boites::new(
+            carte,
+            racine.to_path_buf(),
+            b"mail.example.com".to_vec(),
+            Arc::clone(&comptes),
+        ));
         let remise = MaildirDelivery::new(Arc::clone(&boites), comptes);
+        (boites, remise)
+    }
+
+    /// La même, mais AUCUNE boîte n'est ouverte : c'est l'état d'un serveur
+    /// auquel on vient d'ajouter des comptes pendant qu'il tourne.
+    fn remise_a_carte_vide(racine: &Path, logins: &[&str]) -> (Arc<Boites>, MaildirDelivery) {
+        let comptes = Arc::new(crate::comptes::Comptes::new(
+            racine.join("comptes.bin"),
+            logins
+                .iter()
+                .map(|login| Account {
+                    login: (*login).to_string(),
+                    hash: String::new(),
+                    addresses: vec![format!("{login}@example.com")],
+                })
+                .collect(),
+        ));
+        let boites = Arc::new(Boites::new(
+            BTreeMap::new(),
+            racine.to_path_buf(),
+            b"mail.example.com".to_vec(),
+            Arc::clone(&comptes),
+        ));
+        let remise = MaildirDelivery::new(Arc::clone(&boites), Arc::clone(&comptes));
         (boites, remise)
     }
 
@@ -1526,6 +1649,83 @@ mod tests {
         assert!(
             remise.finish().is_err(),
             "l'identité du message précédent a servi"
+        );
+    }
+
+    /// Le défaut lui-même : le magasin de comptes est relu quand le disque
+    /// bouge, la carte des boîtes l'était au démarrage. `RCPT` acceptait donc un
+    /// compte ajouté à chaud, et la remise rendait un `451` sans rien dire.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn un_compte_ajoute_pendant_qu_on_tourne_recoit_son_courrier() {
+        let temporaire = Ephemere::nouveau();
+        let (_boites, mut remise) = remise_a_carte_vide(&temporaire.0, &["marie"]);
+
+        remise.begin(Some(b"dehors@autre.test"));
+        remise
+            .add_recipient(b"marie@example.com")
+            .expect("la boîte s'ouvre à la demande");
+        remise
+            .append(b"From: dehors@autre.test\r\nTo: marie@example.com\r\n\r\nbonjour\r\n")
+            .expect("corps");
+        remise.finish().expect("remis");
+
+        assert_eq!(
+            contenu(&temporaire.0.join("marie").join("new")).len(),
+            1,
+            "le message est dans la boîte que personne n'avait ouverte"
+        );
+    }
+
+    /// Deux `Maildir` sur le même répertoire serviraient le même UID à deux
+    /// messages : la boîte ouverte à la demande doit être RETENUE.
+    #[test]
+    fn la_boite_ouverte_a_la_demande_est_la_meme_ensuite() {
+        let temporaire = Ephemere::nouveau();
+        let (boites, _remise) = remise_a_carte_vide(&temporaire.0, &["marie"]);
+
+        let premiere = boites.get("marie").expect("ouverte à la demande");
+        let seconde = boites.get("marie").expect("déjà là");
+
+        assert!(
+            Arc::ptr_eq(&premiere, &seconde),
+            "la carte l'a retenue, et n'en a pas construit une seconde"
+        );
+    }
+
+    /// La garde : c'est le magasin VIVANT qui autorise, et lui seul.
+    #[test]
+    fn aucune_boite_ne_nait_pour_un_nom_que_le_magasin_ignore() {
+        let temporaire = Ephemere::nouveau();
+        let (boites, _remise) = remise_a_carte_vide(&temporaire.0, &["marie"]);
+
+        assert!(boites.get("inconnu").is_none(), "aucun compte de ce nom");
+        assert!(
+            !temporaire.0.join("inconnu").exists(),
+            "et surtout : rien n'a été créé sur le disque"
+        );
+    }
+
+    /// Un `comptes.bin` peut arriver autrement que par notre outil. C'est ici
+    /// qu'un nom devient un CHEMIN, donc c'est ici qu'on le revérifie.
+    #[test]
+    fn un_login_qui_ferait_un_mauvais_chemin_n_ouvre_rien() {
+        let temporaire = Ephemere::nouveau();
+        let mauvais = ["..", ".", ".cache", "a/b", ""];
+        let (boites, _remise) = remise_a_carte_vide(&temporaire.0, &mauvais);
+
+        for nom in mauvais {
+            assert!(
+                boites.get(nom).is_none(),
+                "`{nom}` ne fait pas un nom de répertoire sûr"
+            );
+        }
+        assert!(
+            !temporaire.0.join(".cache").exists(),
+            "et rien n'a été créé"
+        );
+        assert!(
+            !temporaire.0.join("a").exists(),
+            "un `/` n'a pas ouvert de sous-répertoire"
         );
     }
 }

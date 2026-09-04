@@ -149,9 +149,9 @@ type MontageApi = (
 #[expect(
     clippy::too_many_arguments,
     reason = "monter l'API demande la configuration, le chiffrement, les boîtes, \
-              les comptes, la remise, les domaines, le videur, la racine du \
-              magasin et le domaine — chacun vient d'un endroit différent, et les \
-              grouper en une structure d'appel ne ferait que déplacer la liste."
+              les comptes, la remise, les domaines et le videur — chacun vient \
+              d'un endroit différent, et les grouper en une structure d'appel ne \
+              ferait que déplacer la liste."
 )]
 fn monter_l_api(
     options: &Configuration,
@@ -162,8 +162,6 @@ fn monter_l_api(
     remise: Arc<Boites>,
     domaines: Arc<Vec<String>>,
     garde: Arc<ams_loop_tokio::SharedGuard>,
-    racine: std::path::PathBuf,
-    domaine: Vec<u8>,
     file: Option<ams_loop_tokio::Spool>,
     message_max: usize,
     port_h3: Option<u16>,
@@ -232,9 +230,7 @@ fn monter_l_api(
         session,
         Arc::new(http_tls),
         Arc::new({
-            let api = crate::api::ApiMaildir::new(
-                boites, comptes, remise, domaines, garde, racine, domaine,
-            );
+            let api = crate::api::ApiMaildir::new(boites, comptes, remise, domaines, garde);
             // LA MÊME RÈGLE QUE SMTP : sans file, une soumission qui nomme un
             // destinataire d'ailleurs est refusée. Deux portes, une seule règle.
             let api = match file {
@@ -1244,7 +1240,14 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         messages = messages.saturating_add(resume.numbered);
         boites.insert(compte.login.clone(), Arc::new(boite));
     }
-    let boites = Arc::new(Boites::new(boites));
+    // La carte n'est PAS close : voir [`Boites::get`]. Un compte ajouté pendant
+    // que le serveur tourne fait ouvrir la sienne à la première remise.
+    let boites = Arc::new(Boites::new(
+        boites,
+        maildir.clone(),
+        domaine.to_vec(),
+        Arc::clone(&comptes),
+    ));
 
     let ecouteur = TcpListener::bind(ecoute)
         .await
@@ -1540,8 +1543,6 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         Arc::clone(&boites),
         Arc::new(options.hosted.clone()),
         Arc::clone(&garde),
-        maildir.clone(),
-        domaine.to_vec(),
         file.as_ref().map(|attente| attente.as_ref().clone()),
         message_max,
         port_h3,
