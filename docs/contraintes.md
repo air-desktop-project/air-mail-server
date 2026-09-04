@@ -3846,6 +3846,91 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
+## Un pair non authentifié faisait tomber un fil de travail
+
+### `curl` EN HTTP/3, ET LE SERVEUR PANIQUE
+
+```
+thread 'tokio-rt-worker' panicked at crates/ams-quic-tls/src/connection.rs:1070:14:
+§12.4 a refusé cette trame avant que les flux existent
+```
+
+Première poignée de main, client conforme, aucune malveillance. C'est un **déni de
+service déclenchable par n'importe qui**, avant toute authentification — et le
+videur (C8) n'y peut rien, puisque cela se produit dans la poignée de main
+elle-même.
+
+### CE QUE FAIT TOUT CLIENT RÉEL, ET QUE CE SERVEUR NE SUPPORTAIT PAS
+
+Un client **coalesce** son `Finished` et sa première requête : un paquet
+`Handshake` et un paquet `1-RTT` dans le même datagramme. Le serveur les traitait
+dans l'ordre :
+
+| paquet | ce qui arrivait |
+|---|---|
+| `Handshake` (`Finished`) | nourrit TLS — mais **ne bâtit pas les flux** |
+| `1-RTT` (`STREAM`) | se déchiffre, §12.4 l'autorise, et trouve `self.flux` à `None` → **panic** |
+
+Les flux ne naissaient que dans `avancer_la_poignee`, appelée **uniquement par
+`poll_transmit`** — c'est-à-dire à l'ÉMISSION suivante, qui n'a pas encore eu lieu.
+
+### LA JUSTIFICATION DE L'`expect` ÉTAIT FAUSSE, ET RÉPÉTÉE QUATRE FOIS
+
+> « §12.4 a refusé cette trame avant que les flux existent »
+
+§12.4 garantit le NIVEAU d'une trame, pas l'existence de la collection de flux.
+Quatre sites portaient cette phrase. Et la documentation de
+`sur_une_trame_de_flux` décrivait, elle, le bon traitement :
+
+> **AVANT LA POIGNÉE DE MAIN, ON N'A PAS DE FLUX ET L'ON N'EN INVENTE PAS** : […]
+> si les paramètres du pair ne sont pas encore lus, il n'y a rien à quoi les
+> appliquer.
+
+La prose savait. Le code paniquait.
+
+### LE CORRECTIF TIENT EN DEUX GESTES
+
+**La poignée avance là où les données arrivent.** `avancer_la_poignee` est appelée
+après chaque paquet d'un datagramme, et **retirée de `poll_transmit`** : l'état de
+TLS ne change qu'à la réception, et l'avancer aussi à l'émission laissait une
+branche d'erreur que plus rien ne pouvait emprunter — une garde inatteignable
+n'est pas une garde.
+
+**Un paquet `1-RTT` qui devance vraiment la poignée se jette, et ne s'acquitte
+pas.** §5.7 de RFC 9001 : le serveur PEUT le déchiffrer et ne doit pas le traiter.
+L'acquitter reviendrait à dire « reçu » de ce qu'on jette ; sans acquittement, le
+pair réémet. Cette garde est au niveau du PAQUET, en un seul endroit — ce qui rend
+enfin vraies les quatre justifications, désormais réécrites.
+
+### CE QUE LES ESSAIS PROUVENT, ET COMMENT ON LE SAIT
+
+Trois essais neufs : une requête qui suit le `Finished` sans émission entre les
+deux, un paquet `1-RTT` qui le devance, et un paquet d'un espace dont on n'a pas
+les clés. Les deux premiers ont été **passés contre le code d'avant**, en
+désactivant les correctifs par édition : tous deux paniquent, à la ligne exacte.
+Un essai de non-régression qui ne tombe pas sur l'ancien code ne vaut rien.
+
+Le `PING` sert de témoin dans deux d'entre eux : §19.2 en fait une trame qui
+sollicite un acquittement, si bien que le silence du serveur se mesure.
+
+Vérifié pour de bon : `curl --http3-only` rend `200`, cinq fois de suite, sans un
+panic — et HTTP/2, SMTP et IMAP tiennent toujours.
+
+### TROIS ESSAIS ONT DÛ CHANGER, ET C'EST DIT
+
+Le refus d'une poignée de main a lieu un aller-retour plus tôt : `on_datagram` le
+rend là où `poll_transmit` le rendait. La boucle de service traite les deux de la
+même façon — `close_with(issue.close_code())` —, si bien que le pair reçoit le même
+`CONNECTION_CLOSE`. Les trois essais concernés affirment désormais la RAISON sans
+présumer de l'appel qui la rend.
+
+### CE QUI RESTE
+
+Rien ne confronte ce serveur à un client QUIC réel dans les barrières. Ce défaut a
+survécu à 100 % de couverture, à 65 cibles de fuzz et à quatre-vingts essais de ce
+fichier : il ne vivait pas dans une fonction, mais dans l'ORDRE de deux appels que
+seul un vrai client met dans cet ordre-là.
+
 ## L'API REST ne parlait à personne
 
 ### UN RÉGLAGE, ET TOUTE UNE FONCTIONNALITÉ MORTE

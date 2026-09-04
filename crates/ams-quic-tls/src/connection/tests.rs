@@ -762,13 +762,14 @@ fn un_client_sans_h3_n_est_pas_servi() {
         horloge,
     )
     .expect("constructible");
-    serveur
-        .on_datagram(&mut premier_datagramme, horloge)
-        .expect("le ClientHello se range comme un autre");
-
-    let mut place = std::vec![0_u8; 1_500];
+    // **LE REFUS A LIEU DÈS LE DATAGRAMME**, et non à l'émission qui suit :
+    // `on_datagram` fait avancer la poignée de main depuis qu'un `Finished`
+    // coalescé avec la première requête doit pouvoir bâtir les flux avant le
+    // paquet suivant. La boucle traite les deux fautes de la même façon —
+    // `close_with(issue.close_code())` —, si bien que le pair reçoit le même
+    // `CONNECTION_CLOSE`, un aller-retour plus tôt.
     let issue = serveur
-        .poll_transmit(&mut place, horloge)
+        .on_datagram(&mut premier_datagramme, horloge)
         .expect_err("un client qui ne parle pas h3 n'est pas servi");
     // §6.2 de RFC 8446 : `no_application_protocol` vaut 120 ; §4.8 de RFC 9001
     // en fait 0x0178.
@@ -1522,22 +1523,30 @@ fn des_parametres_illisibles_condamnent() {
         .on_datagram(&mut premier_datagramme, horloge)
         .expect("accepté");
 
+    // La faute peut venir de l'une ou de l'autre : voir
+    // `une_poignee_sans_alpn_n_est_pas_servie`. Ce qui compte est la RAISON.
     let mut place = std::vec![0_u8; 1_500];
     let issue = loop {
+        let donner = |serveur: &mut Connection, client: &mut Client| {
+            let mut suite = client.parler();
+            match suite.is_empty() {
+                true => Ok(false),
+                false => serveur.on_datagram(&mut suite, horloge).map(|()| true),
+            }
+        };
         match serveur.poll_transmit(&mut place, horloge) {
             Ok(0) => {
-                let mut suite = client.parler();
-                if suite.is_empty() {
-                    panic!("le serveur aurait dû refuser");
+                match donner(&mut serveur, &mut client) {
+                    Ok(true) => {}
+                    Ok(false) => panic!("le serveur aurait dû refuser"),
+                    Err(issue) => break issue,
                 }
-                serveur.on_datagram(&mut suite, horloge).expect("accepté");
                 horloge = horloge.saturating_add(1_000);
             }
             Ok(ecrit) => {
                 client.ecouter(place.get(..ecrit).expect("écrit"));
-                let mut suite = client.parler();
-                if !suite.is_empty() {
-                    serveur.on_datagram(&mut suite, horloge).expect("accepté");
+                if let Err(issue) = donner(&mut serveur, &mut client) {
+                    break issue;
                 }
             }
             Err(issue) => break issue,
@@ -1659,20 +1668,33 @@ fn une_poignee_sans_alpn_n_est_pas_servie() {
         .on_datagram(&mut premier_datagramme, horloge)
         .expect("accepté");
 
+    // **LA FAUTE PEUT VENIR DE L'UNE OU DE L'AUTRE** : depuis que `on_datagram`
+    // fait avancer la poignée de main — pour qu'un `Finished` coalescé bâtisse
+    // les flux avant le paquet qui suit —, c'est lui qui la voit le premier.
+    // La boucle de service les traite de la même façon, et cet essai aussi : ce
+    // qui compte est la RAISON, non l'appel qui la rend.
     let mut place = std::vec![0_u8; 1_500];
     let issue = loop {
+        let donner = |serveur: &mut Connection, client: &mut Client| {
+            let mut suite = client.parler();
+            match suite.is_empty() {
+                true => Ok(false),
+                false => serveur.on_datagram(&mut suite, horloge).map(|()| true),
+            }
+        };
         match serveur.poll_transmit(&mut place, horloge) {
             Ok(0) => {
-                let mut suite = client.parler();
-                assert!(!suite.is_empty(), "le serveur aurait dû refuser");
-                serveur.on_datagram(&mut suite, horloge).expect("accepté");
+                match donner(&mut serveur, &mut client) {
+                    Ok(true) => {}
+                    Ok(false) => panic!("le serveur aurait dû refuser"),
+                    Err(issue) => break issue,
+                }
                 horloge = horloge.saturating_add(1_000);
             }
             Ok(ecrit) => {
                 client.ecouter(place.get(..ecrit).expect("écrit"));
-                let mut suite = client.parler();
-                if !suite.is_empty() {
-                    serveur.on_datagram(&mut suite, horloge).expect("accepté");
+                if let Err(issue) = donner(&mut serveur, &mut client) {
+                    break issue;
                 }
             }
             Err(issue) => break issue,
@@ -2719,5 +2741,169 @@ fn une_annulation_redite_ne_repart_pas() {
         client.annulations_recues,
         std::vec![(flux.value(), 0x010b, 0)],
         "une seule, et c'est le code du premier refus"
+    );
+}
+
+/// Le serveur a dit tout son vol, le client en a tiré ses clés `1-RTT` — et son
+/// `Finished` n'est PAS encore arrivé.
+///
+/// C'est la fenêtre exacte du défaut : les clés de lecture `1-RTT` sont
+/// installées, donc un paquet applicatif se déchiffre, mais les paramètres du
+/// pair ne sont pas authentifiés et la collection de flux n'existe pas.
+fn avant_le_finished(nom: &str) -> (Atelier, Connection, Client, u64) {
+    let atelier = atelier(nom);
+    let (autorite, cert, cle) = materiel(&atelier.0).expect(SANS_OPENSSL);
+    let horloge = 1_000_000_u64;
+    let mut client = Client::new(
+        config_client(&autorite, ams_tls::alpn_h3()),
+        &ses_parametres_avec_flux(),
+    );
+    let mut bonjour = client.parler();
+    let arrivee = premier(&bonjour);
+    let mut serveur = Connection::accept(
+        config_serveur(&cert, &cle),
+        &arrivee,
+        identifiant(&LOCAL),
+        identifiant(&CLIENT),
+        INACTIVITE_US,
+        horloge,
+    )
+    .expect("constructible");
+    serveur.on_datagram(&mut bonjour, horloge).expect("accepté");
+    // Le vol du serveur part au client, qui en tire ses clés `1-RTT`. **On ne
+    // lui redonne pas son `Finished`** : c'est ce silence qui fait la fenêtre.
+    loop {
+        let mut place = std::vec![0_u8; 1_500];
+        let ecrit = serveur.poll_transmit(&mut place, horloge).expect("avance");
+        if ecrit == 0 {
+            break;
+        }
+        client.ecouter(place.get(..ecrit).expect("écrit"));
+    }
+    (atelier, serveur, client, horloge)
+}
+
+/// Une trame `STREAM` de cinq octets sur le flux zéro, et un `PING`.
+fn une_requete(trames: &mut [u8]) -> usize {
+    let mut pose = 0_usize;
+    for trame in [
+        Frame::Stream {
+            stream: 0,
+            offset: 0,
+            data: b"salut",
+            fin: false,
+        },
+        // **LE `PING` EST LE TÉMOIN** : §19.2 en fait une trame qui SOLLICITE un
+        // acquittement. Si le paquet est traité, le serveur en doit un ; s'il est
+        // jeté, il ne doit rien. C'est ce qui rend le silence observable.
+        Frame::Ping,
+    ] {
+        let place = trames.get_mut(pose..).expect("de la place");
+        pose = pose.saturating_add(trame.write(place).expect("écrivable"));
+    }
+    pose
+}
+
+/// **LE DÉFAUT LUI-MÊME** : une requête qui suit le `Finished` sans que le
+/// serveur ait émis entre les deux.
+///
+/// Les flux ne se bâtissaient que dans `poll_transmit`. Un pair qui coalesce son
+/// `Finished` et sa première requête — c'est-à-dire TOUT client réel, `curl`
+/// compris — atteignait donc `sur_un_flux` avec une collection absente, et
+/// faisait PANIQUER le fil de travail. Un pair non authentifié éteignait ainsi
+/// l'écoute HTTP/3 au premier échange.
+#[test]
+fn une_requete_qui_suit_le_finished_est_servie() {
+    let (_atelier, mut serveur, mut client, horloge) = avant_le_finished("apres-finished");
+    let mut trames = [0_u8; 64];
+    let ecrits = une_requete(&mut trames);
+
+    // Le `Finished`, puis la requête — et RIEN entre les deux.
+    let mut fini = client.parler();
+    assert!(!fini.is_empty(), "le client doit son `Finished`");
+    serveur.on_datagram(&mut fini, horloge).expect("le `Finished` se lit");
+    let mut requete = un_paquet_du_client(&mut client, trames.get(..ecrits).expect("écrites"));
+    serveur.on_datagram(&mut requete, horloge).expect("servie");
+
+    assert!(!serveur.is_closed(), "rien n'a fermé la connexion");
+    let flux = StreamId::new(0).expect("un numéro de flux");
+    assert_eq!(
+        serveur.readable(flux),
+        5,
+        "la requête est lisible : les flux existaient quand elle est arrivée"
+    );
+}
+
+/// **ET CELUI QUI DEVANCE VRAIMENT LA POIGNÉE SE JETTE, SANS S'ACQUITTER.**
+///
+/// Le réseau réordonne : un paquet `1-RTT` peut précéder le `Finished`. §5.7 de
+/// RFC 9001 interdit alors de le TRAITER — les paramètres du pair ne sont pas
+/// authentifiés —, et l'acquitter reviendrait à dire « reçu » de ce qu'on jette.
+/// Le pair le réémettra.
+#[test]
+fn un_paquet_1_rtt_qui_devance_le_finished_se_jette() {
+    let (_atelier, mut serveur, mut client, horloge) = avant_le_finished("avant-finished");
+    let mut trames = [0_u8; 64];
+    let ecrits = une_requete(&mut trames);
+
+    let mut requete = un_paquet_du_client(&mut client, trames.get(..ecrits).expect("écrites"));
+    serveur
+        .on_datagram(&mut requete, horloge)
+        .expect("jeté, et non fatal");
+
+    assert!(!serveur.is_closed(), "le jeter ne condamne pas le pair");
+    let mut place = std::vec![0_u8; 1_500];
+    assert_eq!(
+        serveur.poll_transmit(&mut place, horloge).expect("avance"),
+        0,
+        "le `PING` n'a pas été acquitté : le paquet n'a pas été traité"
+    );
+}
+
+/// **UN PAQUET D'UN ESPACE DONT ON N'A PAS LES CLÉS SE JETTE, SANS UN MOT.**
+///
+/// §5.7 de RFC 9001 permet de RETENIR de tels paquets. Retenir est de la mémoire
+/// offerte à qui en demande, et le pair réémettra : on s'arrête là.
+///
+/// Le paquet est ici de forme courte — donc de l'espace applicatif —, présenté à
+/// une connexion qui vient d'accepter le premier datagramme et n'a que ses clés
+/// `Initial`. Rien ne se déchiffre, rien ne se ferme, rien ne s'acquitte.
+#[test]
+fn un_paquet_sans_clefs_pour_son_espace_se_jette() {
+    let atelier = atelier("sans-clefs");
+    let (autorite, cert, cle) = materiel(&atelier.0).expect(SANS_OPENSSL);
+    let horloge = 1_000_000_u64;
+    let mut client = Client::new(
+        config_client(&autorite, ams_tls::alpn_h3()),
+        &ses_parametres_avec_flux(),
+    );
+    let bonjour = client.parler();
+    let arrivee = premier(&bonjour);
+    // **ON N'AVANCE PAS LA POIGNÉE** : le serveur n'a que ses clés `Initial`.
+    let mut serveur = Connection::accept(
+        config_serveur(&cert, &cle),
+        &arrivee,
+        identifiant(&LOCAL),
+        identifiant(&CLIENT),
+        INACTIVITE_US,
+        horloge,
+    )
+    .expect("constructible");
+
+    // §17.3 : forme courte, bit fixe posé, puis l'identifiant qu'on s'est donné.
+    let mut court = std::vec::Vec::new();
+    court.push(0x40_u8);
+    court.extend_from_slice(&LOCAL);
+    court.extend_from_slice(&[0_u8; 32]);
+    serveur
+        .on_datagram(&mut court, horloge)
+        .expect("jeté, et non fatal");
+
+    assert!(!serveur.is_closed(), "le jeter ne condamne pas le pair");
+    let mut place = std::vec![0_u8; 1_500];
+    assert_eq!(
+        serveur.poll_transmit(&mut place, horloge).expect("avance"),
+        0,
+        "rien à dire : le paquet n'a même pas été ouvert"
     );
 }

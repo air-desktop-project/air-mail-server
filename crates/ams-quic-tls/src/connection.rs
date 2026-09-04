@@ -563,6 +563,19 @@ impl Connection {
             // son en-tête, et §17 n'en connaît pas de vide. Une garde ici
             // rendrait une branche que rien ne peut emprunter.
             rang = rang.saturating_add(avance);
+            // **LA POIGNÉE AVANCE ENTRE DEUX PAQUETS DU MÊME DATAGRAMME.**
+            //
+            // Tout client réel COALESCE son `Finished` et sa première requête :
+            // un paquet `Handshake` et un paquet `1-RTT` dans le même
+            // datagramme. Attendre la prochaine émission pour bâtir les flux —
+            // ce que faisait cette connexion, puisque `avancer_la_poignee` ne
+            // vivait que dans `poll_transmit` — laissait le second paquet
+            // arriver sur une collection de flux qui n'existait pas encore.
+            //
+            // C'est ici, et non à l'émission, que la poignée doit avancer : le
+            // `Finished` vient d'être lu, les paramètres du pair sont
+            // authentifiés, et le paquet suivant a le droit d'être servi.
+            self.avancer_la_poignee()?;
         }
         // Ce qui s'est terminé pendant ce datagramme rend sa place tout de
         // suite : la garder jusqu'au prochain refuserait une ouverture que le
@@ -588,7 +601,10 @@ impl Connection {
         // compose : c'est ce qui met le `MAX_STREAMS` dans CE paquet-ci plutôt
         // que dans le suivant.
         self.recolter_les_flux();
-        self.avancer_la_poignee(maintenant)?;
+        // **LA POIGNÉE N'AVANCE PLUS ICI**, et c'est délibéré : l'état de TLS ne
+        // change qu'à l'arrivée de données, donc dans `on_datagram`. L'avancer
+        // aussi à l'émission ajoutait une branche d'erreur que RIEN ne pouvait
+        // plus emprunter — une garde inatteignable n'est pas une garde.
 
         // §8.1 : trois fois ce qu'on a reçu, tant que l'adresse n'est pas
         // validée. §7 de RFC 9002 : et jamais plus que la fenêtre de congestion
@@ -746,6 +762,26 @@ impl Connection {
             .get(ouvert.payload_at..ouvert.payload_at.saturating_add(ouvert.payload_len))
             .unwrap_or_default()
             .to_vec();
+
+        // **UN PAQUET `1-RTT` QUI DEVANCE LA POIGNÉE DE MAIN SE JETTE, ET NE
+        // S'ACQUITTE PAS.**
+        //
+        // §5.7 de RFC 9001 : un serveur installe ses clés de lecture `1-RTT`
+        // avant que la poignée ne soit terminée, si bien qu'il PEUT déchiffrer
+        // un tel paquet — et ne doit pas le traiter pour autant, puisque les
+        // paramètres de transport du pair ne sont pas encore authentifiés. Il
+        // n'y a alors rien à quoi appliquer une trame de flux.
+        //
+        // On ne l'acquitte pas non plus, et c'est le point : le pair le
+        // réémettra, et il sera servi quand il y aura de quoi le servir.
+        // L'acquitter reviendrait à dire « reçu » d'une requête qu'on a jetée.
+        //
+        // **C'EST LA GARDE QUI REND LES `expect` DE `une_trame` VRAIS** : toute
+        // trame que §12.4 réserve au niveau applicatif passe forcément par ici.
+        if matches!(niveau, Level::OneRtt) && self.flux.is_none() {
+            return Ok(Some(ouvert.total));
+        }
+
         let sollicite = self.les_trames(&charge, niveau, maintenant)?;
 
         // **CE REFUS EST LE NÔTRE, PAS CELUI DU PAIR.** `Received` refuse quand
@@ -838,7 +874,7 @@ impl Connection {
             Frame::MaxData { maximum } => self
                 .flux
                 .as_mut()
-                .expect("§12.4 a refusé cette trame avant que les flux existent")
+                .expect("`un_paquet` jette un paquet `1-RTT` tant que les flux manquent")
                 .on_max_data(maximum),
             Frame::MaxStreams {
                 directional,
@@ -846,7 +882,7 @@ impl Connection {
             } => self
                 .flux
                 .as_mut()
-                .expect("§12.4 a refusé cette trame avant que les flux existent")
+                .expect("`un_paquet` jette un paquet `1-RTT` tant que les flux manquent")
                 .on_max_streams(directional, maximum),
             // Le reste ne concerne pas encore cette portée. **ON L'IGNORE
             // PLUTÔT QUE DE FERMER** : ce sont des trames que §19 définit, et
@@ -1067,7 +1103,7 @@ impl Connection {
         let flux = self
             .flux
             .as_mut()
-            .expect("§12.4 a refusé cette trame avant que les flux existent");
+            .expect("`un_paquet` jette un paquet `1-RTT` tant que les flux manquent");
         // Le numéro vient d'un entier de §16, et `StreamId` a le même espace.
         let id = StreamId::new(stream).expect("un numéro de flux tient dans l'espace de §16");
         let rang = flux.accueillir(id).map_err(Error::depuis_quic)?;
@@ -1085,6 +1121,12 @@ impl Connection {
     /// **AVANT LA POIGNÉE DE MAIN, ON N'A PAS DE FLUX ET L'ON N'EN INVENTE PAS**
     /// : ces trames ne peuvent arriver qu'en `1-RTT`, et si les paramètres du
     /// pair ne sont pas encore lus, il n'y a rien à quoi les appliquer.
+    ///
+    /// **ET CE N'EST PAS ICI QUE CELA SE DÉCIDE**, mais dans [`Connection::un_paquet`],
+    /// qui jette un paquet `1-RTT` tant que les flux manquent. Cette prose-là
+    /// disait déjà le bon traitement, et le code au-dessous PANIQUAIT : un pair
+    /// qui coalesce son `Finished` et sa première requête — c'est-à-dire tout
+    /// client réel — faisait tomber le fil de travail.
     fn sur_une_trame_de_flux(
         &mut self,
         stream: u64,
@@ -1093,7 +1135,7 @@ impl Connection {
         let flux = self
             .flux
             .as_mut()
-            .expect("§12.4 a refusé cette trame avant que les flux existent");
+            .expect("`un_paquet` jette un paquet `1-RTT` tant que les flux manquent");
         let id = StreamId::new(stream).expect("un numéro de flux tient dans l'espace de §16");
         quoi_faire(flux, id).map_err(Error::depuis_quic)?;
         Ok(())
@@ -1226,7 +1268,7 @@ impl Connection {
     }
 
     /// Tire de TLS ce qu'il a à dire, et installe les clés qu'il donne.
-    fn avancer_la_poignee(&mut self, maintenant: u64) -> Result<(), Error> {
+    fn avancer_la_poignee(&mut self) -> Result<(), Error> {
         while let Some(mut vol) = self.poignee.next_flight()? {
             let rang = rang_de(vol.level().space());
             self.sortie[rang].octets.extend_from_slice(vol.bytes());
@@ -1234,6 +1276,29 @@ impl Connection {
                 self.installer(change);
             }
         }
+        self.confirmer_si_complete()?;
+        Ok(())
+    }
+
+    /// Bâtit les flux dès que la poignée de main est terminée.
+    ///
+    /// # ELLE EST APPELÉE DEPUIS LES DEUX CÔTÉS, ET C'EST LE CORRECTIF
+    ///
+    /// Elle vivait dans [`Connection::avancer_la_poignee`], que seule
+    /// `poll_transmit` appelait : les flux ne naissaient donc qu'à l'ÉMISSION
+    /// suivante. Un pair qui coalesce son `Finished` et sa première requête —
+    /// c'est-à-dire tout client réel — voyait son second paquet arriver sur une
+    /// collection absente, et faisait paniquer le fil de travail.
+    ///
+    /// [`Connection::on_datagram`] l'appelle maintenant après chaque paquet :
+    /// quand le `Finished` vient d'être lu, le paquet suivant du MÊME datagramme
+    /// trouve de quoi être servi.
+    ///
+    /// # Errors
+    ///
+    /// [`Reason::Tls`] si l'ALPN n'a rien retenu ; [`Reason::BadParameters`] si
+    /// les paramètres du pair ne se lisent pas.
+    fn confirmer_si_complete(&mut self) -> Result<(), Error> {
         // §4.1.2 de RFC 9001 : côté serveur, terminer c'est confirmer — et §19.20
         // demande de le DIRE au client, qui ne peut pas le deviner.
         if self.poignee.is_complete() && !self.confirmee {
@@ -1261,7 +1326,6 @@ impl Connection {
             self.siens = Some(siens);
             self.etat.on_handshake_confirmed();
             self.confirmee = true;
-            let _ = maintenant;
         }
         Ok(())
     }
