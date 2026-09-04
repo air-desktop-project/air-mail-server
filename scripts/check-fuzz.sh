@@ -253,6 +253,60 @@ if [ "$smoke" -eq 0 ]; then
     exit 0
 fi
 
+# ── UN PLANTAGE TROUVÉ UNE FOIS NE S'OUBLIE PAS ─────────────────────────────
+#
+# libFuzzer écrit l'entrée fautive dans `artifacts/<cible>/` puis S'ARRÊTE. Il ne
+# l'ajoute PAS au corpus : la campagne suivante ne la rejoue donc jamais, et ce
+# script ne regardait pas ce répertoire. Un plantage y restait sans que rien ne le
+# redise, pendant que le gate repassait au vert.
+#
+# Ce n'est pas une hypothèse : deux fichiers y dormaient depuis la veille,
+# découverts par hasard en regardant l'avancement d'une campagne. Ils ne se
+# reproduisaient plus — mais le mécanisme qui les a tus fonctionne aussi bien
+# pour un plantage qui, lui, tiendrait.
+#
+# ON LES REJOUE DONC, ET AVANT LA CAMPAGNE : une campagne verte par-dessus un
+# plantage tu est exactement ce qu'on veut rendre impossible.
+#
+# CE QUI NE PLANTE PLUS PART AU CORPUS, ET N'EST PAS EFFACÉ. Une entrée qui a
+# fait tomber ce code un jour est la meilleure graine de non-régression qui
+# soit : sa place est `corpus/`, qui est versionné. La jeter perdrait ce qu'elle
+# a coûté à trouver ; la laisser dans `artifacts/` la ferait rejouer à chaque
+# passage, pour une réponse qu'on a déjà.
+if [ -d artifacts ]; then
+    reproduits=""
+    adoptes=0
+    for artefact in $(find artifacts -type f | sort); do
+        cible=$(basename "$(dirname "$artefact")")
+        # `|| vrai` : un plantage doit se DIRE, pas faire sortir le script au
+        # milieu de la boucle sous `set -e` — le message vaut mieux que le code.
+        if cargo +nightly fuzz run --target x86_64-unknown-linux-gnu \
+            "$cible" "$artefact" >/dev/null 2>&1; then
+            mkdir -p "corpus/$cible"
+            mv "$artefact" "corpus/$cible/"
+            adoptes=$((adoptes + 1))
+        else
+            reproduits="$reproduits$cible $artefact"$'\n'
+        fi
+    done
+    if [ -n "$reproduits" ]; then
+        echo >&2
+        echo "ÉCHEC : un plantage déjà trouvé se reproduit encore." >&2
+        echo >&2
+        printf '%s' "$reproduits" >&2
+        echo >&2
+        echo "Rejouez-le à la main pour le voir :" >&2
+        echo "    cd fuzz && cargo +nightly fuzz run <cible> <artefact>" >&2
+        echo >&2
+        echo "Tant qu'il tient, aucune campagne ne doit passer au vert par-dessus." >&2
+        exit 1
+    fi
+    if [ "$adoptes" -gt 0 ]; then
+        echo "$adoptes plantage(s) d'avant ne se reproduisent plus : versés au corpus,"
+        echo "où ils deviennent des graines de non-régression."
+    fi
+fi
+
 while read -r cible graines; do
     echo "::group::$cible"
     # libFuzzer EXIGE que le premier répertoire de corpus existe : il n'y écrit

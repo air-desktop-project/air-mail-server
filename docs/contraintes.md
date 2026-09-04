@@ -3846,6 +3846,51 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
+## Un plantage trouvé une fois s'oubliait dès la fin du passage
+
+### `artifacts/` N'ÉTAIT REGARDÉ PAR PERSONNE
+
+libFuzzer écrit l'entrée fautive dans `artifacts/<cible>/` puis S'ARRÊTE. Il ne
+l'ajoute PAS au corpus : la campagne suivante ne la rejoue donc jamais. Et le mot
+`artifacts` n'apparaissait nulle part dans `check-fuzz.sh` — qui vérifie
+pourtant que des trouvailles ne se sont pas glissées dans `seeds/`.
+
+Un plantage y restait donc sans que rien ne le redise, pendant que le gate
+repassait au vert au passage suivant.
+
+### CE N'EST PAS UNE HYPOTHÈSE
+
+Deux fichiers y dormaient depuis la veille — `fuzz_ams_session_http` et
+`fuzz_ams_smtp_client` —, découverts PAR HASARD en regardant l'avancement d'une
+campagne longue. Entre leur écriture et cette découverte, le gate était passé au
+vert plusieurs fois.
+
+Rejoués, ils ne se reproduisaient plus : ils dataient d'avant une correction.
+Mais le mécanisme qui les a tus fonctionne aussi bien pour un plantage qui, lui,
+tiendrait — et c'est cela qu'on ferme, pas ces deux-là.
+
+### ON LES REJOUE AVANT LA CAMPAGNE, ET NON APRÈS
+
+Une campagne verte par-dessus un plantage tu est exactement ce qu'on veut rendre
+impossible. Le contrôle vient donc entre la compilation — les cibles y sont
+bâties — et la première cible qui tourne.
+
+### CE QUI NE PLANTE PLUS PART AU CORPUS, ET N'EST PAS EFFACÉ
+
+Une entrée qui a fait tomber ce code un jour est la meilleure graine de
+non-régression qui soit. La jeter perdrait ce qu'elle a coûté à trouver ; la
+laisser dans `artifacts/` la ferait rejouer à chaque passage, pour une réponse
+qu'on a déjà. Sa place est `corpus/`, qui est versionné — et le message le dit,
+une ligne, seulement s'il y en a.
+
+### CE QUE MESURE LA PREUVE
+
+Les deux branches sont éprouvées. Pour celle qui compte, une sonde temporaire a
+été posée dans une cible et **libFuzzer a produit lui-même** un plantage
+reproductible — le fabriquer à la main n'aurait pas garanti qu'il décode. Le
+gate refuse alors, nomme la cible et le fichier, et sort en erreur AVANT la
+campagne.
+
 ## Le `From:` était vérifié, le chemin de retour ne l'était pas
 
 ### UN MESSAGE PORTE DEUX IDENTITÉS

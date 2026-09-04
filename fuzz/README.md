@@ -124,6 +124,20 @@ dizaines d'octets ; avec des blocs de 4 Kio, 135 000 d'entre eux occupaient
 536 Mo de disque pour 45 Mo de contenu. Git stocke le contenu. Mesurer en octets
 — `du -sb` — est la seule mesure qui décide.
 
+## UN PLANTAGE TROUVÉ UNE FOIS NE S'OUBLIE PAS
+
+libFuzzer écrit l'entrée fautive dans `artifacts/<cible>/` puis **s'arrête**. Il
+ne l'ajoute pas au corpus : sans rien de plus, la campagne suivante ne la rejoue
+jamais, et le gate repasse au vert.
+
+`check-fuzz.sh --smoke` rejoue donc chaque artefact **avant** la campagne :
+
+- **il plante encore** — le gate refuse, nomme la cible et le fichier, et sort.
+  Aucune campagne ne doit passer au vert par-dessus ;
+- **il ne plante plus** — l'entrée part au `corpus/`, où elle devient une graine
+  de non-régression. Elle a fait tomber ce code un jour ; la jeter perdrait ce
+  qu'elle a coûté à trouver.
+
 ## `seeds/` S'ÉCRIT À LA MAIN ; `corpus/` EST À LIBFUZZER
 
 Une graine porte un NOM qui dit ce qu'elle vise — `mime-bounce/refus`,
