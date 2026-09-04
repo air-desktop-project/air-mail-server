@@ -116,6 +116,11 @@ pub struct ApiMaildir {
     /// lecture montrerait des peines que le garde n'applique pas, et en cacherait
     /// qu'il applique.
     guard: Arc<ams_loop_tokio::SharedGuard>,
+    /// Ce qui rate à la remise, compté et dit — LE MÊME que celui de SMTP.
+    ///
+    /// Deux compteurs diraient deux fois la première ligne, et donneraient à
+    /// l'exploitant deux bilans qu'il devrait additionner lui-même.
+    incidents: Arc<crate::incidents::Incidents>,
     /// La borne sur les vérifications simultanées.
     places: Places,
     /// La file de réémission, quand l'émission est ouverte.
@@ -142,6 +147,7 @@ impl ApiMaildir {
         remise: Arc<crate::delivery::Boites>,
         domaines: Arc<Vec<String>>,
         guard: Arc<ams_loop_tokio::SharedGuard>,
+        incidents: Arc<crate::incidents::Incidents>,
     ) -> Self {
         Self {
             boites,
@@ -149,6 +155,7 @@ impl ApiMaildir {
             remise,
             domaines,
             guard,
+            incidents,
             places: Places::new(VERIFICATIONS_SIMULTANEES),
             // ON N'ÉMET PAS, SAUF DEMANDE EXPRESSE — et le constructeur ne prend
             // pas ce champ : un argument de plus dans une liste qui en compte
@@ -619,6 +626,7 @@ impl ApiMaildir {
         let mut remise = crate::delivery::MaildirDelivery::new(
             std::sync::Arc::clone(&self.remise),
             std::sync::Arc::clone(&self.comptes),
+            std::sync::Arc::clone(&self.incidents),
         );
         if let Some(file) = self.file.clone() {
             remise = remise.avec_file(file, self.message_max);

@@ -33,6 +33,7 @@ mod api;
 mod comptes;
 mod delivery;
 mod imap;
+mod incidents;
 mod policy;
 mod pop3;
 
@@ -149,9 +150,9 @@ type MontageApi = (
 #[expect(
     clippy::too_many_arguments,
     reason = "monter l'API demande la configuration, le chiffrement, les boîtes, \
-              les comptes, la remise, les domaines et le videur — chacun vient \
-              d'un endroit différent, et les grouper en une structure d'appel ne \
-              ferait que déplacer la liste."
+              les comptes, la remise, les domaines, le videur et le compteur \
+              d'incidents — chacun vient d'un endroit différent, et les grouper \
+              en une structure d'appel ne ferait que déplacer la liste."
 )]
 fn monter_l_api(
     options: &Configuration,
@@ -162,6 +163,7 @@ fn monter_l_api(
     remise: Arc<Boites>,
     domaines: Arc<Vec<String>>,
     garde: Arc<ams_loop_tokio::SharedGuard>,
+    incidents: Arc<crate::incidents::Incidents>,
     file: Option<ams_loop_tokio::Spool>,
     message_max: usize,
     port_h3: Option<u16>,
@@ -230,7 +232,8 @@ fn monter_l_api(
         session,
         Arc::new(http_tls),
         Arc::new({
-            let api = crate::api::ApiMaildir::new(boites, comptes, remise, domaines, garde);
+            let api =
+                crate::api::ApiMaildir::new(boites, comptes, remise, domaines, garde, incidents);
             // LA MÊME RÈGLE QUE SMTP : sans file, une soumission qui nomme un
             // destinataire d'ailleurs est refusée. Deux portes, une seule règle.
             let api = match file {
@@ -1334,8 +1337,15 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         );
     }
 
+    // CE QUI RATE À LA REMISE SE COMPTE ICI, et pour tout le processus : la
+    // remise naît par connexion, donc un compteur qui vivrait dedans redirait sa
+    // première ligne à chaque connexion et ne compterait jamais rien.
+    let incidents = Arc::new(crate::incidents::Incidents::new());
     let pour_la_remise = Arc::clone(&boites);
     let comptes_pour_la_remise = Arc::clone(&comptes);
+    let incidents_pour_la_remise = Arc::clone(&incidents);
+    let incidents_pour_les_rapports = Arc::clone(&incidents);
+    let incidents_pour_l_api = Arc::clone(&incidents);
     let file_pour_la_remise = file.as_ref().map(|attente| attente.as_ref().clone());
     let message_max = usize::try_from(options.max_message_octets).unwrap_or(usize::MAX);
 
@@ -1543,6 +1553,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         Arc::clone(&boites),
         Arc::new(options.hosted.clone()),
         Arc::clone(&garde),
+        incidents_pour_l_api,
         file.as_ref().map(|attente| attente.as_ref().clone()),
         message_max,
         port_h3,
@@ -1704,6 +1715,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
             let rendre = RapportsLocaux {
                 boites: Arc::clone(&boites),
                 comptes: Arc::clone(&comptes),
+                incidents: Arc::clone(&incidents_pour_les_rapports),
             };
             let battement = spool_battement(&options.queue);
             let attente = arret();
@@ -1741,6 +1753,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
             let remise = MaildirDelivery::new(
                 Arc::clone(&pour_la_remise),
                 Arc::clone(&comptes_pour_la_remise),
+                Arc::clone(&incidents_pour_la_remise),
             );
             let remise = match quarantaine.clone() {
                 Some(dossier) => remise.avec_quarantaine(dossier),
@@ -1881,6 +1894,19 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         );
     }
 
+    // **CE QUI A RATÉ À LA REMISE**, cause par cause. Chacune a déjà été dite au
+    // moment où elle est survenue ; ce bilan-ci donne le TOTAL, que personne ne
+    // pourrait reconstituer en relisant des lignes espacées de cinq minutes.
+    //
+    // ZÉRO NE S'ÉCRIT PAS, comme pour les autres compteurs : un journal qui
+    // répète « rien n'a raté » est un journal qu'on cesse de lire.
+    for (cause, combien) in incidents.bilan() {
+        eprintln!(
+            "air-mail-server : ATTENTION — {combien} {}",
+            cause.bilan()
+        );
+    }
+
     // ON DIT CE QU'ON A CONCLU. Un verdict qu'on ne rend nulle part ne sert à
     // rien : en attendant `air-log`, ce compte-là est ce que le serveur peut
     // dire des signatures qu'il a vérifiées.
@@ -1954,6 +1980,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
 struct RapportsLocaux {
     boites: Arc<Boites>,
     comptes: Arc<crate::comptes::Comptes>,
+    incidents: Arc<crate::incidents::Incidents>,
 }
 
 impl ams_loop_tokio::Bounced for RapportsLocaux {
@@ -1963,7 +1990,11 @@ impl ams_loop_tokio::Bounced for RapportsLocaux {
         // **LA MÊME REMISE QUE PARTOUT AILLEURS**, et sans file : un rapport ne
         // se met pas en file. Sans cela, un rapport qu'on n'arriverait pas à
         // déposer engendrerait un rapport, qui en engendrerait un autre.
-        let mut remise = MaildirDelivery::new(Arc::clone(&self.boites), Arc::clone(&self.comptes));
+        let mut remise = MaildirDelivery::new(
+            Arc::clone(&self.boites),
+            Arc::clone(&self.comptes),
+            Arc::clone(&self.incidents),
+        );
         remise.begin(None);
         if remise.add_recipient(recipient.as_bytes()).is_err() {
             return false;

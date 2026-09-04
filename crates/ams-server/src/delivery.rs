@@ -342,12 +342,21 @@ pub struct MaildirDelivery {
     /// Remis à faux par [`Delivery::begin`] : un second message sur la même
     /// connexion n'hérite pas du verdict du premier.
     ecarte: bool,
+    /// Ce qui rate, compté et dit — PARTAGÉ par toutes les connexions.
+    ///
+    /// Voir [`crate::incidents`] : une remise qui échouait rendait un `451` et
+    /// n'écrivait rien.
+    incidents: Arc<crate::incidents::Incidents>,
 }
 
 impl MaildirDelivery {
     /// Ouvre une remise vers ce jeu de boîtes. **Elle n'émet pas.**
     #[must_use]
-    pub fn new(boites: Arc<Boites>, comptes: Arc<crate::comptes::Comptes>) -> Self {
+    pub fn new(
+        boites: Arc<Boites>,
+        comptes: Arc<crate::comptes::Comptes>,
+        incidents: Arc<crate::incidents::Incidents>,
+    ) -> Self {
         Self {
             boites,
             comptes,
@@ -365,6 +374,18 @@ impl MaildirDelivery {
             envid: String::new(),
             rapports: Vec::new(),
             ecarte: false,
+            incidents,
+        }
+    }
+
+    /// Retient cet échec, et le dit s'il est temps.
+    ///
+    /// **C'EST LE SEUL ENDROIT QUI ÉCRIT**, et il est mince à dessein : la règle
+    /// du silence — quand redire, et ce qu'on dit alors — vit dans
+    /// [`crate::incidents`], où un test la vérifie.
+    fn incident(&self, cause: crate::incidents::Cause) {
+        if let Some(dit) = self.incidents.survenu(cause, Self::maintenant()) {
+            std::eprintln!("air-mail-server : {dit}");
         }
     }
 
@@ -496,28 +517,38 @@ impl Delivery for MaildirDelivery {
         let Some(compte) = ams_auth::route(&comptes, address) else {
             return self.mettre_en_file(address);
         };
-        let boite = self
-            .boites
-            .get(&compte.login)
-            .ok_or(DeliveryFailure::Temporary)?;
+        let Some(boite) = self.boites.get(&compte.login) else {
+            // Le magasin connaît ce compte et sa boîte ne s'ouvre pas : c'est
+            // l'exploitant, et lui seul, qui peut y faire quelque chose.
+            self.incident(crate::incidents::Cause::BoiteIntrouvable);
+            return Err(DeliveryFailure::Temporary);
+        };
         // Un `deliver` qui échoue — plus d'UID, disque plein — est TEMPORAIRE :
         // lui répondre « définitivement non » ferait jeter au pair un message
         // qui pourrait passer dans une heure.
-        let mut arrivee = boite.deliver().map_err(|_| DeliveryFailure::Temporary)?;
-        if self.trace > 0 {
-            arrivee
-                .reserve_prologue(self.trace)
-                .map_err(|_| DeliveryFailure::Temporary)?;
+        let Ok(mut arrivee) = boite.deliver() else {
+            self.incident(crate::incidents::Cause::Ecriture);
+            return Err(DeliveryFailure::Temporary);
+        };
+        if self.trace > 0 && arrivee.reserve_prologue(self.trace).is_err() {
+            self.incident(crate::incidents::Cause::Ecriture);
+            return Err(DeliveryFailure::Temporary);
         }
         self.arrivees.push((compte.login.clone(), arrivee));
         Ok(())
     }
 
     fn append(&mut self, chunk: &[u8]) -> Result<(), DeliveryFailure> {
-        for (_, arrivee) in &mut self.arrivees {
-            arrivee
-                .write(chunk)
-                .map_err(|_| DeliveryFailure::Temporary)?;
+        // **LE CONSTAT D'ABORD, LA PAROLE ENSUITE** : la boucle emprunte
+        // `self.arrivees`, et `self.incident` demande `&self` tout entier. Un
+        // drapeau les sépare.
+        if self
+            .arrivees
+            .iter_mut()
+            .any(|(_, arrivee)| arrivee.write(chunk).is_err())
+        {
+            self.incident(crate::incidents::Cause::Ecriture);
+            return Err(DeliveryFailure::Temporary);
         }
         if !self.sortants.is_empty() {
             // LA BORNE EST CELLE DU MESSAGE, et elle est vérifiée ici aussi
@@ -539,10 +570,13 @@ impl Delivery for MaildirDelivery {
     /// il posera le sien à la remise : le message arriverait avec deux, et le
     /// nôtre serait le périmé des deux.
     fn append_final(&mut self, chunk: &[u8]) -> Result<(), DeliveryFailure> {
-        for (_, arrivee) in &mut self.arrivees {
-            arrivee
-                .write(chunk)
-                .map_err(|_| DeliveryFailure::Temporary)?;
+        if self
+            .arrivees
+            .iter_mut()
+            .any(|(_, arrivee)| arrivee.write(chunk).is_err())
+        {
+            self.incident(crate::incidents::Cause::Ecriture);
+            return Err(DeliveryFailure::Temporary);
         }
         Ok(())
     }
@@ -579,9 +613,14 @@ impl Delivery for MaildirDelivery {
                     Some(dossier) => dossier.adopt(arrivee),
                     None => arrivee.commit(),
                 };
-                ecrit
-                    .map(|_uid| ())
-                    .map_err(|_| DeliveryFailure::Temporary)?;
+                if ecrit.is_err() {
+                    // **LE PIRE DES ÉCHECS DE CE FICHIER** : le message était
+                    // ENTIÈREMENT reçu. Son expéditeur l'a transmis en entier
+                    // pour s'entendre refuser, et il ne le saura que par un
+                    // `451`.
+                    self.incident(crate::incidents::Cause::Validation);
+                    return Err(DeliveryFailure::Temporary);
+                }
             }
             Ok(())
         })?;
@@ -704,6 +743,10 @@ impl MaildirDelivery {
         // TEMPORAIRE : la politique l'avait acceptée, donc le magasin a changé
         // sous nos pieds, et le pair a le droit de réessayer.
         let Some(_) = self.file.as_ref() else {
+            // La politique et la remise ne voient plus le même magasin : c'est
+            // un désaccord entre deux structures, et l'exploitant est le seul à
+            // pouvoir en chercher la cause.
+            self.incident(crate::incidents::Cause::SansFile);
             return Err(DeliveryFailure::Temporary);
         };
         // **SANS CHEMIN DE RETOUR, ON NE MET RIEN EN FILE.** Un `MAIL FROM:<>`
@@ -895,6 +938,11 @@ impl MaildirDelivery {
                 return Err(DeliveryFailure::Permanent);
             };
             if !self.ecrit_bien_en_son_nom(&message, retour) {
+                // **LE SEUL ÉCHEC VENU DU PAIR QU'ON DISE**, et c'est parce que
+                // ce pair-là s'est AUTHENTIFIÉ : l'exploitant connaît le compte,
+                // et peut le suspendre. Les refus anonymes, eux, donneraient la
+                // plume du journal à qui la demande.
+                self.incident(crate::incidents::Cause::Usurpation);
                 return Err(DeliveryFailure::Permanent);
             }
         }
@@ -990,8 +1038,13 @@ mod tests {
             b"mail.example.com".to_vec(),
             Arc::clone(&comptes),
         ));
-        let remise = MaildirDelivery::new(Arc::clone(&boites), comptes);
+        let remise = MaildirDelivery::new(Arc::clone(&boites), comptes, incidents_neufs());
         (boites, remise)
+    }
+
+    /// Un compteur d'incidents qui n'a encore rien vu.
+    fn incidents_neufs() -> Arc<crate::incidents::Incidents> {
+        Arc::new(crate::incidents::Incidents::new())
     }
 
     /// La même, mais AUCUNE boîte n'est ouverte : c'est l'état d'un serveur
@@ -1014,8 +1067,35 @@ mod tests {
             b"mail.example.com".to_vec(),
             Arc::clone(&comptes),
         ));
-        let remise = MaildirDelivery::new(Arc::clone(&boites), Arc::clone(&comptes));
+        let remise =
+            MaildirDelivery::new(Arc::clone(&boites), Arc::clone(&comptes), incidents_neufs());
         (boites, remise)
+    }
+
+    /// Une remise à carte vide qui partage CE compteur-ci.
+    fn remise_comptant(
+        racine: &Path,
+        logins: &[&str],
+        incidents: &Arc<crate::incidents::Incidents>,
+    ) -> MaildirDelivery {
+        let comptes = Arc::new(crate::comptes::Comptes::new(
+            racine.join("comptes.bin"),
+            logins
+                .iter()
+                .map(|login| Account {
+                    login: (*login).to_string(),
+                    hash: String::new(),
+                    addresses: vec![format!("{login}@example.com")],
+                })
+                .collect(),
+        ));
+        let boites = Arc::new(Boites::new(
+            BTreeMap::new(),
+            racine.to_path_buf(),
+            b"mail.example.com".to_vec(),
+            Arc::clone(&comptes),
+        ));
+        MaildirDelivery::new(boites, comptes, Arc::clone(incidents))
     }
 
     /// Les noms de fichiers d'un sous-répertoire, triés.
@@ -1702,6 +1782,70 @@ mod tests {
         assert!(
             !temporaire.0.join("inconnu").exists(),
             "et surtout : rien n'a été créé sur le disque"
+        );
+    }
+
+    /// Un destinataire accepté par la politique puis refusé faute de file : le
+    /// pair reçoit un `451`, et l'exploitant doit l'apprendre.
+    #[test]
+    fn un_destinataire_refuse_faute_de_file_se_compte() {
+        let temporaire = Ephemere::nouveau();
+        let incidents = incidents_neufs();
+        let mut remise = remise_comptant(&temporaire.0, &["marie"], &incidents);
+
+        remise.begin(Some(b"marie@example.com"));
+        assert!(
+            remise.add_recipient(b"ailleurs@autre.test").is_err(),
+            "sans file, une adresse d'ailleurs est refusée"
+        );
+
+        assert_eq!(
+            incidents.bilan(),
+            vec![(crate::incidents::Cause::SansFile, 1)],
+            "et le refus est compté"
+        );
+    }
+
+    /// Une boîte qui ne s'ouvre pas — ici parce que le magasin porte un login
+    /// dont `check_login` ne veut pas, ce qu'un `comptes.bin` venu d'ailleurs
+    /// peut fort bien contenir.
+    #[test]
+    fn une_boite_qui_ne_s_ouvre_pas_se_compte() {
+        let temporaire = Ephemere::nouveau();
+        let incidents = incidents_neufs();
+        let mut remise = remise_comptant(&temporaire.0, &[".."], &incidents);
+
+        remise.begin(Some(b"dehors@autre.test"));
+        assert!(
+            remise.add_recipient(b"..@example.com").is_err(),
+            "la boîte ne s'ouvre pas"
+        );
+
+        assert_eq!(
+            incidents.bilan(),
+            vec![(crate::incidents::Cause::BoiteIntrouvable, 1)],
+            "et l'exploitant l'apprendra"
+        );
+    }
+
+    /// **LE POINT DE TOUTE LA CONCEPTION** : la remise naît par connexion, le
+    /// compteur non. Deux connexions qui butent sur la même cause la comptent
+    /// deux fois, et ne la disent qu'une.
+    #[test]
+    fn deux_remises_partagent_un_seul_compteur() {
+        let temporaire = Ephemere::nouveau();
+        let incidents = incidents_neufs();
+
+        for _ in 0..2 {
+            let mut remise = remise_comptant(&temporaire.0, &["marie"], &incidents);
+            remise.begin(Some(b"marie@example.com"));
+            assert!(remise.add_recipient(b"ailleurs@autre.test").is_err());
+        }
+
+        assert_eq!(
+            incidents.bilan(),
+            vec![(crate::incidents::Cause::SansFile, 2)],
+            "un compteur par connexion en aurait compté un, deux fois"
         );
     }
 

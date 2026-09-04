@@ -3846,6 +3846,99 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
+## Le journal muet : une remise qui échouait ne disait rien
+
+### CE QUE CE SERVEUR DISAIT UNE FOIS DÉMARRÉ : PRESQUE RIEN
+
+Soixante-quinze lignes au démarrage, puis cinq sites de journal dans tout le
+serveur — tous dans la file sortante et le relais. Le chemin **entrant** n'en
+avait aucun.
+
+Treize échecs de remise s'y produisaient en silence. Classés par ce qui les
+provoque :
+
+| classe | sites | qui les déclenche |
+|---|---|---|
+| **environnement** — disque, droits, boîte absente | 7 | la machine |
+| **pair** — message trop gros, illisible, `From:` usurpé | 4 | un attaquant, à volonté |
+| **structurel** — documentés comme inatteignables | 2 | — |
+
+Le pire est celui de `finish` : le message est reçu **en entier**, puis échoue à
+être validé sur le disque. Son expéditeur l'a transmis tout entier pour s'entendre
+répondre `451`. Un disque plein ou des droits changés sur le maildir, et ce serveur
+refuse **tout** le courrier, indéfiniment, avec un journal vide — l'exploitant voit
+un service en parfaite santé.
+
+### LA LEÇON ÉTAIT DÉJÀ APPRISE, AILLEURS
+
+Le compteur de rapports perdus de la file sortante la porte dans sa
+documentation :
+
+> un serveur en parfaite santé pendant qu'il perdait du courrier en silence, et la
+> seule trace était une ligne sur la sortie d'erreur qu'il fallait lire au bon
+> moment.
+
+Elle y avait été apprise, et appliquée **là seulement** : la file a une ligne ET un
+compteur ; le chemin entrant n'avait ni l'un ni l'autre. **Neuvième** occurrence de
+la forme dans ce dépôt — une règle appliquée à N endroits, oubliée au N+1ᵉ.
+
+### LA RÈGLE DU SILENCE EST UNE VALEUR DE RETOUR, PAS UN `eprintln!`
+
+`Incidents::survenu` **compte et rend la phrase à dire**, ou `None` s'il est trop
+tôt. C'est l'appelant qui écrit. Ce n'est pas une coquetterie : c'est ce qui rend
+la règle — quand redire, et ce qu'on dit alors — vérifiable par un test plutôt que
+par la lecture d'un journal. Huit essais l'éprouvent, dont celui de l'horloge qui
+recule : `checked_sub` fait alors **taire**, jamais bavarder.
+
+`#[must_use]` y est structurel et non décoratif : jeter ce que rend `survenu`,
+c'est compter l'échec et le taire — précisément le défaut qu'elle corrige. Le
+compilateur le refuse, et il a **effectivement** attrapé cette faute dans un essai
+écrit pour cette tranche.
+
+### CE QU'ON DIT, ET CE QU'ON REFUSE DE DIRE
+
+**La première occurrence de chaque cause se dit toujours**, sans attendre : c'est
+elle qui avertit. Les suivantes se taisent pendant cinq minutes, puis une redite
+dit que cela DURE et nomme le nombre de celles qu'on a tues. Dire chaque échec
+ferait, sur un disque plein, une ligne par message — le journal qu'on cesse de
+lire, que ce registre reproche ailleurs. Ne le dire qu'une fois ferait pire : une
+panne de trois jours n'aurait qu'une ligne, au tout début.
+
+À l'arrêt, le total par cause. **Zéro ne s'écrit pas**, comme pour les autres
+compteurs de ce serveur.
+
+**LES ÉCHECS VENUS DU PAIR NE SONT PAS COMPTÉS**, et c'est délibéré : un message
+au-delà de la borne, un message illisible ne disent rien de l'état du serveur, et
+un attaquant les déclenche à volonté. Les journaliser reviendrait à lui donner la
+plume. `Usurpation` fait exception parce qu'elle vient d'un compte **authentifié** :
+l'exploitant connaît cette identité et peut la suspendre, et un hameçonnage interne
+refusé est exactement ce qu'il veut voir.
+
+### LE COMPTEUR EST PARTAGÉ, PARCE QUE LA REMISE NE L'EST PAS
+
+`MaildirDelivery` naît **par connexion**. Un compteur qui vivrait dedans redirait sa
+première ligne à chaque connexion et ne compterait jamais rien. Celui-ci se partage
+par `Arc`, comme la carte des boîtes, entre SMTP, l'API et les rapports locaux — un
+seul compteur, un seul bilan, que l'exploitant n'a pas à additionner lui-même.
+
+### VÉRIFIÉ EN PROVOQUANT LA PANNE
+
+Droits retirés sur le `tmp/` d'une boîte, trois livraisons : trois `451`, **une
+seule** ligne dans le journal, puis à l'arrêt « 3 message(s) qui n'ont pas pu être
+écrits sous le maildir ». Un démarrage sans le moindre incident n'écrit aucune ligne
+de bilan. Avant cette tranche, les mêmes trois échecs ne laissaient rien du tout.
+
+### CE QUI RESTE
+
+L'intervalle de redite est une **constante**, non un réglage.
+[C8](#c8--détection-de-flooding-et-bannissement-par-source) fait des seuils
+du garde des paramètres de configuration parce qu'ils dépendent du trafic ; celui-ci
+en dépend beaucoup moins, puisque ce qui avertit est la première ligne, qui part
+toujours. Le registre le dit plutôt que de le taire.
+
+Rien ne vérifie qu'un nouvel échec de remise ajouté demain sera compté : la liste
+des causes est tenue à la main.
+
 ## Un compte ajouté à chaud n'avait pas de boîte
 
 ### DEUX SOURCES QUI DÉCRIVENT LE MÊME MONDE, L'UNE VIVANTE ET L'AUTRE MORTE
