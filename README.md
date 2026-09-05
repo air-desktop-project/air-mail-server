@@ -1758,10 +1758,19 @@ Le serveur **refuse de démarrer si la clé est lisible par tout le monde** —
 `chmod o-r` la répare. Le partage par groupe (`0640`, groupe `ssl-cert`) reste
 permis : c'est la bonne pratique, pas la mauvaise.
 
-Une mise en garde, mesurée et non supposée : **une paire dépareillée n'est pas
-détectée au démarrage**. Le fournisseur pur Rust ne sait pas comparer la clé au
-certificat, si bien qu'un renouvellement qui ne remplace qu'un des deux fichiers
-donne un serveur qui démarre et dont toutes les poignées de main échouent.
+**Une paire dépareillée est refusée**, au démarrage comme au rechargement. Le
+fournisseur pur Rust ne sait pas rendre la clé publique d'une clé privée, si bien
+que la comparaison de `rustls` est silencieusement sautée : ce serveur signe donc
+quelques octets et vérifie la signature CONTRE le certificat, ce qu'une poignée
+de main TLS 1.3 fait de toute façon. Sans ce contrôle, un renouvellement qui ne
+remplace qu'un des deux fichiers donnait un serveur qui démarre et dont toutes
+les poignées de main échouent — un symptôme très loin de sa cause.
+
+**Et le certificat se relit tout seul quand il change.** Un certificat Let's
+Encrypt vit trois mois ; sans cette veille, le TLS cesserait quatre-vingt-dix
+jours après l'installation, silencieusement. Rien à câbler : les dates des deux
+fichiers sont regardées toutes les cinq minutes, et un renouvellement surpris à
+mi-chemin **garde l'ancien matériel** en le disant.
 
 ### Des comptes, des boîtes
 

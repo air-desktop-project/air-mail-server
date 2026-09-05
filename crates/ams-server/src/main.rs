@@ -50,8 +50,9 @@ use ams_dkim::SigningKey;
 use ams_loop_tokio::imap::serve_imap;
 use ams_loop_tokio::pop3::serve_pop3;
 use ams_loop_tokio::{
-    DkimChecker, DkimSigner, DmarcChecker, Relay, ReportSpool, SenderChecker, ServeOptions,
-    SharedGuard, Timeouts, masque_trop_large, refuse_root, restreindre_le_masque, serve,
+    Certificat, DkimChecker, DkimSigner, DmarcChecker, Relay, ReportSpool, SenderChecker,
+    ServeOptions, SharedGuard, Timeouts, masque_trop_large, refuse_root, restreindre_le_masque,
+    serve,
 };
 use ams_session::{Capabilities, Config, SenderPolicy};
 use ams_store::Maildir;
@@ -456,20 +457,126 @@ fn lire_les_ecoutes(
 /// exactement ainsi que les certificats se partagent sur un système bien tenu
 /// (le groupe `ssl-cert` de Debian, par exemple, avec des clés en `0640`).
 /// Refuser cela punirait la bonne pratique au lieu de la mauvaise.
-fn charger_tls(tls: &Tls) -> Result<Option<Arc<ServerConfig>>, String> {
+fn charger_tls(tls: &Tls) -> Result<Option<MaterielTls>, String> {
     if !tls.est_configure() {
         return Ok(None);
     }
+    let materiel = lire_le_materiel(tls)?;
+    // **LA CONFIGURATION NE PORTE PLUS LE CERTIFICAT : ELLE PORTE OÙ LE
+    // DEMANDER.** C'est ce qui permet de le remplacer sans reconstruire la
+    // configuration — laquelle est immuable une fois bâtie, et que chaque
+    // écoute, chaque connexion en cours et chaque tampon devrait sinon voir
+    // changer.
+    let vivant = Arc::new(Certificat::neuf(materiel));
+    let config = ams_tls::server_config_resolving(Arc::clone(&vivant) as Arc<_>);
+    Ok(Some((Arc::new(config), vivant)))
+}
 
+/// Ce que le chiffrement demande : la configuration qu'on donne aux écoutes, et
+/// le porteur qu'on remplace au renouvellement.
+///
+/// **LES DEUX, ET NON L'UNE** : la configuration est immuable, et c'est le
+/// porteur qui rend le certificat courant à chaque poignée de main.
+type MaterielTls = (Arc<ServerConfig>, Arc<Certificat>);
+
+/// Lit la chaîne et la clé, avec les refus du démarrage.
+///
+/// **LES MÊMES REFUS AU RECHARGEMENT QU'AU DÉMARRAGE**, la permission du fichier
+/// comprise : une clé qui deviendrait lisible par tout le monde entre deux
+/// renouvellements ne doit pas entrer par la porte de derrière.
+fn lire_le_materiel(tls: &Tls) -> Result<rustls::sign::CertifiedKey, String> {
     let chaine = std::fs::read(&tls.certificate_chain_path)
         .map_err(|erreur| format!("certificat `{}` : {erreur}", tls.certificate_chain_path))?;
     let cle = std::fs::read(&tls.private_key_path)
         .map_err(|erreur| format!("clé privée `{}` : {erreur}", tls.private_key_path))?;
     refuser_fichier_lisible_par_tous(&tls.private_key_path, "clé privée")?;
+    ams_tls::certified_key(&chaine, &cle).map_err(|erreur| format!("matériel TLS : {erreur}"))
+}
 
-    let config = ams_tls::server_config(&chaine, &cle)
-        .map_err(|erreur| format!("matériel TLS : {erreur}"))?;
-    Ok(Some(Arc::new(config)))
+/// À quelle fréquence on regarde si le certificat a changé.
+///
+/// # POURQUOI CINQ MINUTES, ET NON CINQ SECONDES NI UNE HEURE
+///
+/// Ce n'est pas une course : un renouvellement a lieu tous les deux mois, et
+/// `certbot` le fait des semaines avant l'expiration. Cinq minutes de retard sur
+/// un certificat qui en a encore trente jours ne coûtent rien.
+///
+/// Ce qu'on achète en échange, c'est **deux `stat` toutes les cinq minutes** —
+/// et rien d'autre tant que les dates ne bougent pas. Interroger chaque seconde
+/// ferait cent fois ce travail pour la même réponse ; une fois par heure
+/// laisserait un serveur redémarré juste après un renouvellement servir l'ancien
+/// certificat pendant une heure, sans raison.
+const VEILLE_DU_CERTIFICAT: Duration = Duration::from_secs(300);
+
+/// Relit le certificat quand ses fichiers changent, jusqu'à l'arrêt.
+///
+/// # UN RECHARGEMENT QUI RATE NE CASSE RIEN
+///
+/// C'est la règle de cette veille. `certbot` écrit la chaîne et la clé l'une
+/// après l'autre, et un renouvellement surpris à mi-chemin donne une chaîne
+/// neuve avec une clé ancienne — qui ne correspondent pas.
+///
+/// **On garde alors l'ancien matériel, on le dit, et l'on retient les dates
+/// vues.** Retenir est ce qui évite de répéter la même plainte toutes les cinq
+/// minutes ; le battement suivant retrouvera la paire complète, et les dates
+/// auront encore changé.
+///
+/// Servir un certificat périmé quelques minutes de plus est sans commune mesure
+/// avec ne plus rien servir du tout.
+async fn veiller_le_certificat(tls: &Tls, vivant: &Certificat, arret: impl Future<Output = ()>) {
+    let mut vues = dates_du_materiel(tls);
+    let mut horloge = tokio::time::interval(VEILLE_DU_CERTIFICAT);
+    // Le premier `tick` est immédiat : on le consomme, sans quoi on relirait au
+    // démarrage ce qu'on vient de lire.
+    horloge.tick().await;
+    let mut arret = core::pin::pin!(arret);
+    loop {
+        tokio::select! {
+            biased;
+            () = &mut arret => return,
+            _ = horloge.tick() => {}
+        }
+        let maintenant = dates_du_materiel(tls);
+        if maintenant == vues {
+            continue;
+        }
+        // **ON RETIENT AVANT DE TENTER**, et non après : une paire incohérente
+        // ferait sinon replaindre à chaque battement, et un journal qui répète
+        // la même ligne cesse d'être lu.
+        vues = maintenant;
+        match lire_le_materiel(tls) {
+            Ok(materiel) => {
+                vivant.remplacer(materiel);
+                eprintln!(
+                    "air-mail-server : certificat rechargé depuis `{}`",
+                    tls.certificate_chain_path
+                );
+            }
+            Err(erreur) => eprintln!(
+                "air-mail-server : ATTENTION — le certificat a changé et n'a PAS pu être \
+                 rechargé : {erreur}. L'ANCIEN RESTE EN SERVICE, et il finira par expirer. \
+                 Une paire écrite à moitié se corrige d'elle-même au prochain regard ; tout \
+                 le reste demande votre attention."
+            ),
+        }
+    }
+}
+
+/// La date de modification des deux fichiers, ou `None` si l'un manque.
+///
+/// **LES DEUX ENSEMBLE, ET NON L'UNE PUIS L'AUTRE** : `certbot` les réécrit à
+/// quelques millisecondes d'intervalle, et ne regarder que la chaîne ferait
+/// recharger avec l'ancienne clé.
+fn dates_du_materiel(tls: &Tls) -> Option<(std::time::SystemTime, std::time::SystemTime)> {
+    let chaine = std::fs::metadata(&tls.certificate_chain_path)
+        .ok()?
+        .modified()
+        .ok()?;
+    let cle = std::fs::metadata(&tls.private_key_path)
+        .ok()?
+        .modified()
+        .ok()?;
+    Some((chaine, cle))
 }
 
 /// Charge la clé DKIM que la configuration nomme, s'il y en a une.
@@ -707,7 +814,10 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     // donc `STARTTLS` est annoncé. Deux valeurs qui pourraient se contredire —
     // « annoncer » d'un côté, « savoir chiffrer » de l'autre — n'existent pas :
     // c'est la même.
-    let chiffrement = charger_tls(&options.tls)?;
+    let (chiffrement, certificat_vivant) = match charger_tls(&options.tls)? {
+        Some((config, vivant)) => (Some(config), Some(vivant)),
+        None => (None, None),
+    };
     // LA CLÉ DE SIGNATURE SE LIT AVANT D'OUVRIR QUOI QUE CE SOIT : ce qui ne
     // peut pas marcher doit refuser de démarrer, et non le découvrir à la
     // première émission.
@@ -1307,6 +1417,20 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         domaine.to_vec(),
         Arc::clone(&comptes),
     ));
+
+    // ── LE CERTIFICAT SE RELIT QUAND IL CHANGE ──────────────────────────────
+    //
+    // Un certificat Let's Encrypt vit trois mois, et se renouvelle tous les
+    // deux. Sans cette veille, ce serveur cesserait de servir le TLS
+    // quatre-vingt-dix jours après son installation — et SILENCIEUSEMENT : rien
+    // dans son fonctionnement ne change jusqu'à l'expiration.
+    let veille_du_certificat = certificat_vivant.map(|vivant| {
+        let tls = options.tls.clone();
+        let attente = arret();
+        tokio::spawn(async move {
+            veiller_le_certificat(&tls, &vivant, attente).await;
+        })
+    });
 
     // **TOUTES LES ÉCOUTES SE LIENT AVANT QUE LA PREMIÈRE NE SERVE.** Lier au
     // fur et à mesure ferait démarrer un serveur qui accepte du courrier sur le
@@ -1971,6 +2095,15 @@ async fn servir(fichier: &Path) -> Result<(), String> {
             }
             Err(erreur) => eprintln!("air-mail-server : émission : {erreur}"),
         }
+    }
+
+    // LA VEILLE DU CERTIFICAT S'ARRÊTE SUR LE MÊME SIGNAL, et on l'attend comme
+    // les autres : une tâche qu'on abandonne sans la joindre laisse un fil qui
+    // tient encore un `Arc` pendant qu'on annonce l'arrêt.
+    if let Some(tache) = veille_du_certificat
+        && let Err(erreur) = tache.await
+    {
+        eprintln!("air-mail-server : veille du certificat : {erreur}");
     }
 
     if let Some(tache) = pop3 {

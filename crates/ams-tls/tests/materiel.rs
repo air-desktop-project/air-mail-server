@@ -95,35 +95,164 @@ fn une_vraie_paire_donne_un_serveur_tls_13() {
     );
 }
 
-/// **Ce test consigne une FAIBLESSE, pas une garantie.**
+/// **CE TEST CONSIGNAIT UNE FAIBLESSE ; IL CONSIGNE DÉSORMAIS SA FERMETURE.**
 ///
-/// `rustls` documente que `with_single_cert` échoue quand la clé ne correspond
-/// pas au certificat de tête. Avec `rustls-rustcrypto`, ce n'est pas le cas : la
-/// clé de signature ne sait pas rendre sa clé publique, et la comparaison est
-/// sautée en silence. Ce test le MESURE au lieu de le supposer.
+/// Il assertait `is_ok()` — c'est-à-dire qu'une paire dépareillée PASSAIT — et
+/// disait, en cas d'échec : « l'amont sait désormais comparer, très bien, mais
+/// la documentation dit encore le contraire, à corriger ».
 ///
-/// Le cas est celui d'un renouvellement où l'un des deux fichiers a été remplacé
-/// et pas l'autre. Le serveur démarre, et toutes ses poignées de main échouent —
-/// un symptôme très loin de sa cause.
+/// Ce n'est pas l'amont qui a appris : `rustls-rustcrypto` n'implémente toujours
+/// pas `SigningKey::public_key`, et `keys_match` rend toujours `Unknown`. C'est
+/// NOUS qui vérifions maintenant, en signant quelques octets et en vérifiant la
+/// signature contre le certificat — voir `materiel::accorder`.
 ///
-/// Le jour où l'amont saura comparer, ce test échouera. C'est voulu : il faudra
-/// alors retirer la mise en garde du registre des contraintes, et la joie sera
-/// entière.
+/// **Ce que la faiblesse coûtait, mesuré et non supposé** : un renouvellement où
+/// l'un des deux fichiers est remplacé et pas l'autre donnait un serveur qui
+/// DÉMARRE, et dont toutes les poignées de main échouent sur « bad signature ».
+/// Le symptôme était très loin de sa cause — et la veille du certificat, qui
+/// relit ces fichiers toute seule, aurait transformé cette faiblesse en panne
+/// périodique.
 #[test]
-fn une_paire_depareillee_n_est_pas_detectee_par_ce_fournisseur() {
+fn une_paire_depareillee_est_refusee() {
     let atelier = atelier("paire-depareillee");
-    let (cert, _) = paire(&atelier.0, "premier").expect(SANS_OPENSSL);
-    let (_, cle) = paire(&atelier.0, "second").expect(SANS_OPENSSL);
+    let (cert, cle_du_cert) = paire(&atelier.0, "premier").expect(SANS_OPENSSL);
+    let (_, autre_cle) = paire(&atelier.0, "second").expect(SANS_OPENSSL);
+    let chaine = std::fs::read(&cert).expect("certificat lisible");
 
-    let resultat = ams_tls::server_config(
+    // LA PAIRE ACCORDÉE PASSE — sans quoi ce test dirait « tout est refusé »,
+    // ce qui n'est pas la même chose que « le dépareillage est refusé ».
+    assert!(
+        ams_tls::server_config(&chaine, &std::fs::read(&cle_du_cert).expect("clé lisible")).is_ok(),
+        "une paire accordée doit passer"
+    );
+
+    // ET LA DÉPAREILLÉE EST REFUSÉE, aux DEUX portes : celle du démarrage et
+    // celle du rechargement. Une seule des deux laisserait l'autre ouverte.
+    let etrangere = std::fs::read(&autre_cle).expect("clé lisible");
+    for (nom, refus) in [
+        (
+            "démarrage",
+            ams_tls::server_config(&chaine, &etrangere).err(),
+        ),
+        (
+            "rechargement",
+            ams_tls::certified_key(&chaine, &etrangere).err(),
+        ),
+    ] {
+        // `expect` ET NON `unwrap_or_else(|| panic!(...))` : la seconde forme
+        // crée une FERMETURE que rien n'appelle quand tout va bien, et une
+        // fermeture jamais appelée est un trou de couverture né du banc d'essai.
+        let refus = refus.expect("une paire dépareillée a passé");
+        assert!(
+            format!("{refus}").contains("n'est PAS celle de ce certificat"),
+            "{nom} : le refus doit dire LEQUEL — {refus}"
+        );
+    }
+
+    // ET LA PAIRE ACCORDÉE PASSE AUSSI PAR LA PORTE DU RECHARGEMENT.
+    assert!(
+        ams_tls::certified_key(&chaine, &std::fs::read(&cle_du_cert).expect("clé lisible")).is_ok(),
+        "une paire accordée doit se recharger"
+    );
+}
+
+/// **UN CERTIFICAT QUI N'EN EST PAS UN NE PASSE PAS L'ACCORD.**
+///
+/// C'est un chemin qu'on n'atteint qu'ici, et il faut le savoir : un bloc PEM
+/// bien formé dont le contenu n'est pas un certificat traverse `from_der` SANS
+/// ÊTRE ANALYSÉ. `keys_match` rend `Unknown` avant même de regarder le
+/// certificat — puisque la clé ne sait pas rendre sa partie publique — et rend
+/// donc la main sans avoir rien lu.
+///
+/// C'est notre vérification qui l'attrape, en essayant de vérifier une signature
+/// contre lui.
+#[test]
+fn un_certificat_illisible_ne_passe_pas_l_accord() {
+    let atelier = atelier("certificat-illisible");
+    let (_, cle) = paire(&atelier.0, "vraie").expect(SANS_OPENSSL);
+    /// Un bloc PEM bien formé qui ne contient pas ce qu'il annonce.
+    const FAUX: &[u8] = b"-----BEGIN CERTIFICATE-----\naGVsbG8=\n-----END CERTIFICATE-----\n";
+
+    let cle = std::fs::read(&cle).expect("clé lisible");
+    for (nom, refus) in [
+        ("démarrage", ams_tls::server_config(FAUX, &cle).err()),
+        ("rechargement", ams_tls::certified_key(FAUX, &cle).err()),
+    ] {
+        let refus = refus.expect("un faux certificat a passé");
+        assert!(
+            format!("{refus}").contains("n'est PAS celle de ce certificat"),
+            "{nom} : {refus}"
+        );
+    }
+}
+
+/// **UNE VRAIE POIGNÉE DE MAIN À TRAVERS UN RÉSOLVEUR**, celui qui rend le
+/// rechargement possible.
+///
+/// `server_config_resolving` monte une configuration dont le certificat n'est
+/// PAS figé : elle le demande à chaque poignée de main. Ce test-ci prouve que ce
+/// chemin-là aboutit — et que la garantie de C4 ne se perd pas en route, puisque
+/// le client n'accepte que TLS 1.3.
+#[test]
+fn une_poignee_de_main_traverse_le_resolveur() {
+    use std::sync::Arc;
+
+    /// Un résolveur qui rend toujours le même matériel : c'est ce que fait le
+    /// porteur de la boucle, en plus simple.
+    #[derive(Debug)]
+    struct Fixe(Arc<rustls::sign::CertifiedKey>);
+
+    impl rustls::server::ResolvesServerCert for Fixe {
+        fn resolve(
+            &self,
+            _client_hello: rustls::server::ClientHello<'_>,
+        ) -> Option<Arc<rustls::sign::CertifiedKey>> {
+            Some(Arc::clone(&self.0))
+        }
+    }
+
+    let atelier = atelier("poignee-resolveur");
+    let (cert, cle) = paire(&atelier.0, "mx.eux.test").expect(SANS_OPENSSL);
+    let materiel = ams_tls::certified_key(
         &std::fs::read(&cert).expect("certificat lisible"),
         &std::fs::read(&cle).expect("clé lisible"),
-    );
-    assert!(
-        resultat.is_ok(),
-        "l'amont sait désormais comparer clé et certificat : très bien, mais la \
-         documentation de `MaterialError::Rejected` et le registre des contraintes \
-         disent encore le contraire. À corriger."
+    )
+    .expect("la paire devrait être acceptée");
+
+    let serveur = ams_tls::server_config_resolving(Arc::new(Fixe(Arc::new(materiel))));
+    let mut client = rustls::ClientConnection::new(
+        Arc::new(ams_tls::relay_config()),
+        "mx.eux.test".try_into().expect("nom de serveur"),
+    )
+    .expect("connexion cliente");
+    let mut hote = rustls::ServerConnection::new(Arc::new(serveur)).expect("connexion serveur");
+
+    for _ in 0..20 {
+        if !client.is_handshaking() && !hote.is_handshaking() {
+            break;
+        }
+        let mut fil = Vec::new();
+        client.write_tls(&mut fil).expect("le client écrit");
+        if !fil.is_empty() {
+            hote.read_tls(&mut fil.as_slice()).expect("le serveur lit");
+            hote.process_new_packets().expect("le serveur traite");
+        }
+        let mut retour = Vec::new();
+        hote.write_tls(&mut retour).expect("le serveur écrit");
+        if !retour.is_empty() {
+            client
+                .read_tls(&mut retour.as_slice())
+                .expect("le client lit");
+            client.process_new_packets().expect("le client traite");
+        }
+    }
+
+    assert!(!client.is_handshaking(), "le client n'a pas fini");
+    assert!(!hote.is_handshaking(), "le serveur n'a pas fini");
+    assert_eq!(
+        client.protocol_version(),
+        Some(rustls::ProtocolVersion::TLSv1_3),
+        "C4 : rien en dessous de TLS 1.3"
     );
 }
 

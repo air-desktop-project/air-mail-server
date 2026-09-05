@@ -3760,13 +3760,15 @@ le serveur servait pourtant en clair. Seul un test qui monte tout l'assemblage
 pouvait voir la différence — et son jumeau vérifie l'autre moitié, à savoir
 qu'un serveur SANS certificat n'annonce pas `STARTTLS`.
 
-Ce qui reste non outillé, et qui doit être su : **une paire dépareillée n'est pas
-détectée au démarrage**. `rustls` documente que `with_single_cert` refuse une clé
-qui ne correspond pas au certificat ; avec `rustls-rustcrypto`, la clé de
-signature ne sait pas rendre sa clé publique et la comparaison est sautée en
-silence. Mesuré, et consigné par un test qui échouera le jour où l'amont saura
-faire. En attendant, un renouvellement qui remplace un seul des deux fichiers
-donne un serveur qui démarre et dont toutes les poignées de main échouent.
+**Une paire dépareillée est refusée depuis le 2026-09-05**, au démarrage comme au
+rechargement. Elle ne l'était pas : `rustls` documente que `with_single_cert`
+refuse une clé qui ne correspond pas au certificat, mais avec
+`rustls-rustcrypto` la clé de signature ne sait pas rendre sa clé publique, et
+`keys_match` rend `Unknown` — que `from_der` traite comme un succès.
+
+Ce n'est pas l'amont qui a appris : c'est ce serveur qui vérifie désormais
+lui-même, en signant quelques octets et en vérifiant la signature CONTRE le
+certificat. Voir [la tranche qui l'a fermée](#un-certificat-lu-une-fois-et-jamais-relu).
 
 ---
 
@@ -3855,6 +3857,132 @@ mot — pas à sa propre liste.
 Ce qui reste hors du serveur : **rien de connu**. Cette ligne annonçait « la file
 de réémission des messages sortants », et c'était faux — elle existe, elle est
 câblée, et [la liste v1](v1.md) le mesure plutôt que de le croire.
+
+## Un certificat lu une fois et jamais relu
+
+Un certificat Let's Encrypt vit **trois mois**, et se renouvelle tous les deux.
+Ce serveur lisait le sien au démarrage et jamais plus : il aurait donc cessé de
+servir le TLS **quatre-vingt-dix jours après son installation**, et
+silencieusement — rien dans son fonctionnement ne change jusqu'à l'expiration,
+où tout s'arrête d'un coup.
+
+C'est le genre de panne qui se produit une nuit, trois mois après que la personne
+qui a installé le serveur a cessé d'y penser.
+
+### CE QUI CHANGE SOUS LA CONFIGURATION, ET NON LA CONFIGURATION
+
+`ServerConfig` est immuable une fois bâtie. La remplacer obligerait chaque
+écoute, chaque connexion en cours et chaque tampon à voir le changement —
+c'est-à-dire à porter un verrou sur ce qui est aujourd'hui un `Arc` partagé sans
+frais.
+
+`ResolvesServerCert` résout cela : **la configuration reste UN objet, et ce
+qu'elle présente change dessous.** Une poignée de main demande le matériel
+courant ; une poignée de main EN COURS garde le sien, puisqu'elle en tient un
+`Arc`. Une connexion ne change donc pas de certificat au milieu.
+
+Le partage suit les étages : `ams-tls` — sans entrée-sortie, `no_std` — RÉSOUT le
+matériel depuis du PEM ; `ams-loop-tokio` le TIENT, dans un `RwLock` qu'une
+poignée de main lit et qu'un rechargement écrit deux fois par trimestre.
+
+### PAS DE SIGNAL : LA DATE DES FICHIERS
+
+`SIGHUP` est la convention, et elle se câble en une ligne dans un
+`--deploy-hook` de certbot. **C'est justement le problème** : une ligne qu'il
+faut penser à écrire, dont l'oubli ne se voit pas, et dont le prix se paie
+quatre-vingt-dix jours plus tard.
+
+Regarder la date des deux fichiers ne demande rien à personne. Deux `stat`
+toutes les cinq minutes, et rien d'autre tant que les dates ne bougent pas.
+
+Cinq minutes, et non cinq secondes : ce n'est pas une course. Un renouvellement a
+lieu tous les deux mois, et `certbot` le fait des semaines avant l'expiration.
+Cinq minutes de retard sur un certificat qui en a encore trente jours ne coûtent
+rien ; interroger chaque seconde ferait cent fois ce travail pour la même
+réponse.
+
+### UN RECHARGEMENT QUI RATE NE CASSE RIEN — ET C'ÉTAIT FAUX
+
+C'est la règle que ce module s'était donnée, et la mesure l'a démentie.
+
+`certbot` écrit la chaîne et la clé l'une après l'autre. Un renouvellement
+surpris à mi-chemin donne une chaîne neuve avec une clé ancienne. Mesuré le
+2026-09-05, sur le serveur vivant :
+
+1. la paire dépareillée était **acceptée** ;
+2. elle était **installée** ;
+3. et **toutes** les poignées de main échouaient ensuite, sur
+   « bad signature ».
+
+Autrement dit, la veille qu'on venait d'écrire pour éviter une panne
+trimestrielle en aurait créé une autre — et le commentaire qui promettait le
+contraire était, à ce moment-là, un mensonge de plus.
+
+### POURQUOI RUSTLS NE LE VOYAIT PAS, ET CE QUE LE DÉPÔT EN SAVAIT DÉJÀ
+
+`CertifiedKey::from_der` appelle `keys_match`, qui compare la clé publique de la
+clé privée à celle du certificat. **Mais il n'échoue que s'il PEUT comparer** :
+
+```rust
+let Some(key_spki) = self.key.public_key() else {
+    return Err(InconsistentKeys::Unknown.into());
+};
+```
+
+et `from_der` traite `Unknown` comme un succès. `rustls-rustcrypto`
+n'implémentant pas `public_key`, **toute paire dépareillée passait** — au
+démarrage comme au rechargement.
+
+**Ce dépôt le savait.** La documentation de `MaterialError::Rejected` le
+décrivait, le registre le consignait, et un essai le MESURAIT — en assertant
+`is_ok()`, avec pour message : « l'amont sait désormais comparer : très bien,
+mais la documentation dit encore le contraire, à corriger ».
+
+Cet essai a échoué pendant cette tranche. Ce n'est pas l'amont qui a appris :
+c'est nous.
+
+### ON SIGNE, ET ON VÉRIFIE
+
+Comparer des clés publiques est impossible ici ; signer ne l'est pas. On signe
+donc quelques octets avec la clé privée, et l'on vérifie la signature **contre le
+certificat** — ce que fait exactement une poignée de main TLS 1.3 (§4.4.3 de
+RFC 8446), avec les mêmes algorithmes.
+
+C'est plus lent qu'une comparaison, et c'est payé **une fois par chargement** :
+au démarrage, et à chaque renouvellement. Deux fois en trois mois.
+
+`webpki` est déclarée pour cela. Elle était DÉJÀ dans l'arbre — `rustls` la tire
+— et cette déclaration ne fait que la nommer là où on s'en sert.
+
+Vérifié sur le serveur vivant : une chaîne neuve arrivée sans sa clé est
+**refusée**, l'ancien certificat **reste en service**, le journal le dit en une
+ligne qui distingue ce qui se corrigera tout seul de ce qui demande une
+attention — et la paire complète est reprise au battement suivant.
+
+### CE QUE LA COUVERTURE A COÛTÉ, ET CE QU'ELLE A APPRIS
+
+Le 100 % de C2 a résisté longtemps sur ce fichier, et la cause vaut d'être
+écrite : **une crate est compilée DEUX FOIS** — une fois pour ses essais
+unitaires, une fois comme dépendance — et la couverture compte les deux
+séparément.
+
+Un chemin qu'un essai d'INTÉGRATION seul exerce laisse donc l'autre compilation à
+découvert, et aucune quantité d'essais d'intégration n'y change rien.
+
+Deux conséquences, désormais écrites :
+
+- **`ams-tls` a son propre matériel d'essai**, versé dans le dépôt : une paire
+  accordée, et une clé étrangère. Sans elles, ses essais unitaires ne pouvaient
+  éprouver que des refus, jamais le chemin nominal. La clé privée y est publique
+  et sans conséquence — le certificat nomme un domaine que RFC 2606 §2 réserve
+  pour qu'il n'existe jamais, et aucune autorité ne l'a signé ;
+- **`accorder` n'emploie aucune fermeture.** Les fermetures ne s'instancient pas
+  de la même façon dans les deux compilations, et l'une présente d'un côté,
+  absente de l'autre, ne peut pas être appariée : elle compte comme non couverte
+  À JAMAIS, quoi qu'on éprouve. Des boucles explicites n'ont pas ce défaut.
+
+Et une troisième, plus banale : `unwrap_or_else(|| panic!(…))` crée une fermeture
+que rien n'appelle quand tout va bien. `expect` n'en crée pas.
 
 ## Une seule écoute, et pas de TLS implicite
 

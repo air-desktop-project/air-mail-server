@@ -16,6 +16,8 @@ ams-quic-crypto = { workspace = true }
 ml-kem = { workspace = true }
 rustls = { workspace = true }
 rustls-rustcrypto = { workspace = true }
+# Vérifier une signature CONTRE un certificat : voir `materiel::accorder`.
+webpki = { workspace = true }
 x25519-dalek = { workspace = true }
 
 

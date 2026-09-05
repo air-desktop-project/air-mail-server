@@ -57,7 +57,10 @@ mod quic;
 mod relay;
 
 pub use kx::{CLIENT_SHARE, SERVER_SHARE, SHARED_SECRET, X25519MlKem768};
-pub use materiel::{ALPN_H2, Error as MaterialError, alpn, quic_server_config, server_config};
+pub use materiel::{
+    ALPN_H2, Error as MaterialError, alpn, certified_key, quic_server_config, server_config,
+    server_config_resolving,
+};
 pub use provider::provider;
 pub use quic::{ALPN_H3, alpn_h3, provider_quic};
 pub use relay::{AnchorError, anchors, dane_config, relay_config, webpki_config};

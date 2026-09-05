@@ -197,6 +197,18 @@ rustls = { version = "0.23", default-features = false, features = ["std"] }
 # qui préserve la reproductibilité — et ce qui doit être revu à chaque
 # changement, puisqu'une dépendance `git` échappe à `cargo audit`.
 rustls-rustcrypto = { git = "https://github.com/RustCrypto/rustls-rustcrypto", rev = "cb967bd6427865f72e5619326c16080cbfd98e53", default-features = false, features = ["std"] }
+# webpki — VÉRIFIER UNE SIGNATURE CONTRE UN CERTIFICAT, et rien d'autre.
+#
+# DÉJÀ DANS L'ARBRE : `rustls` la tire, et cette ligne ne fait que la DÉCLARER
+# là où on s'en sert. Aucune crate n'entre dans le graphe à cause d'elle.
+#
+# POURQUOI ON EN A BESOIN : `rustls-rustcrypto` n'implémente pas
+# `SigningKey::public_key`, si bien que `keys_match` ne peut RIEN comparer et
+# qu'une paire clé/certificat dépareillée passe. On la vérifie donc en signant
+# et en vérifiant — et vérifier contre un certificat, c'est ce que cette crate
+# sait faire.
+webpki = { package = "rustls-webpki", version = "0.103", default-features = false, features = ["std"] }
+
 # ML-KEM-768 (FIPS 203) — la moitié post-quantique du KEX hybride de C14. Pur
 # Rust, `no_std`, sans dépendance C. EXACTEMENT la version qu'Air épingle et a
 # validée contre les vecteurs FIPS 203.

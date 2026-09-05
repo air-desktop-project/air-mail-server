@@ -64,6 +64,7 @@
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+mod certificat;
 mod connection;
 mod delivery;
 mod dkim;
@@ -89,6 +90,7 @@ mod tlsreports;
 // la session écrit sur le fil est ce que la file a lu dans l'enveloppe, et un
 // type de plus n'ajouterait qu'une occasion de les traduire de travers.
 pub use ams_session::{ClientDsn, ClientReport};
+pub use certificat::Certificat;
 pub use connection::{
     DkimTally, DmarcTally, Outcome, Service, Summary, Timeouts, TlsMode, serve_connection,
     serve_connection_with,

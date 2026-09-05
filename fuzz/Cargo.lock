@@ -249,6 +249,7 @@ dependencies = [
  "ml-kem",
  "rustls",
  "rustls-rustcrypto",
+ "rustls-webpki",
  "x25519-dalek 2.0.1",
 ]
 
