@@ -2084,7 +2084,10 @@ mod copie_cachee {
         let nom = contenu(&boite).into_iter().next().expect("un message");
         let recu = std::fs::read_to_string(boite.join(nom)).expect("lisible");
 
-        assert!(!recu.contains("cache@example.com"), "coupé, mais retiré : {recu}");
+        assert!(
+            !recu.contains("cache@example.com"),
+            "coupé, mais retiré : {recu}"
+        );
         assert!(recu.ends_with("Le corps.\r\n"), "et le corps est entier");
     }
 }

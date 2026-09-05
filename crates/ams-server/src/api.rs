@@ -1869,7 +1869,7 @@ mod tests {
 mod porte_http {
     use std::sync::Arc;
 
-    use super::{ApiMaildir, Account};
+    use super::{Account, ApiMaildir};
     use crate::incidents::{Cause, Incidents};
 
     /// Un répertoire qui s'efface quand l'essai finit.

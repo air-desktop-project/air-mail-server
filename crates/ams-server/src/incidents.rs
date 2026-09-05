@@ -193,9 +193,11 @@ impl Incidents {
         // **L'HORLOGE PEUT RECULER** — un `settimeofday`, un serveur de temps qui
         // corrige. `checked_sub` rend alors `None`, qu'on lit comme « pas encore
         // l'heure » : reculer le temps fait taire, jamais bavarder.
-        let assez_attendu = etat
-            .dernier_dit
-            .is_none_or(|alors| maintenant.checked_sub(alors).is_some_and(|ecart| ecart >= REDIRE));
+        let assez_attendu = etat.dernier_dit.is_none_or(|alors| {
+            maintenant
+                .checked_sub(alors)
+                .is_some_and(|ecart| ecart >= REDIRE)
+        });
         if !assez_attendu {
             return None;
         }
@@ -292,11 +294,15 @@ mod tests {
     #[test]
     fn les_suivantes_se_taisent_jusqu_a_la_redite() {
         let incidents = Incidents::new();
-        incidents.survenu(Cause::Ecriture, 1_000).expect("la première");
+        incidents
+            .survenu(Cause::Ecriture, 1_000)
+            .expect("la première");
 
         for seconde in 1..REDIRE {
             assert!(
-                incidents.survenu(Cause::Ecriture, 1_000 + seconde).is_none(),
+                incidents
+                    .survenu(Cause::Ecriture, 1_000 + seconde)
+                    .is_none(),
                 "à +{seconde} s, on se tait encore"
             );
         }
@@ -329,14 +335,19 @@ mod tests {
     #[test]
     fn une_seule_fois_tue_se_dit_en_toutes_lettres() {
         let incidents = Incidents::new();
-        incidents.survenu(Cause::Validation, 0).expect("la première");
+        incidents
+            .survenu(Cause::Validation, 0)
+            .expect("la première");
         assert!(incidents.survenu(Cause::Validation, 1).is_none());
 
         let dit = incidents
             .survenu(Cause::Validation, REDIRE)
             .expect("il est temps");
 
-        assert!(dit.contains("une fois depuis"), "« 1 fois » se lit mal : {dit}");
+        assert!(
+            dit.contains("une fois depuis"),
+            "« 1 fois » se lit mal : {dit}"
+        );
     }
 
     #[test]
@@ -357,7 +368,9 @@ mod tests {
     #[test]
     fn une_horloge_qui_recule_fait_taire_et_non_bavarder() {
         let incidents = Incidents::new();
-        incidents.survenu(Cause::SansFile, 10_000).expect("la première");
+        incidents
+            .survenu(Cause::SansFile, 10_000)
+            .expect("la première");
 
         assert!(
             incidents.survenu(Cause::SansFile, 1).is_none(),
@@ -368,7 +381,10 @@ mod tests {
     #[test]
     fn le_bilan_ne_dit_pas_zero() {
         let incidents = Incidents::new();
-        assert!(incidents.bilan().is_empty(), "rien n'a raté, rien ne se dit");
+        assert!(
+            incidents.bilan().is_empty(),
+            "rien n'a raté, rien ne se dit"
+        );
 
         assert!(
             incidents.survenu(Cause::Usurpation, 0).is_some(),

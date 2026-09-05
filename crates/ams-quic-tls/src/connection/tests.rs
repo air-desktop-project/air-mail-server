@@ -2821,7 +2821,9 @@ fn une_requete_qui_suit_le_finished_est_servie() {
     // Le `Finished`, puis la requête — et RIEN entre les deux.
     let mut fini = client.parler();
     assert!(!fini.is_empty(), "le client doit son `Finished`");
-    serveur.on_datagram(&mut fini, horloge).expect("le `Finished` se lit");
+    serveur
+        .on_datagram(&mut fini, horloge)
+        .expect("le `Finished` se lit");
     let mut requete = un_paquet_du_client(&mut client, trames.get(..ecrits).expect("écrites"));
     serveur.on_datagram(&mut requete, horloge).expect("servie");
 
@@ -2935,8 +2937,7 @@ fn une_trame_pour_un_flux_oublie_ne_condamne_pas() {
         }
         .write(&mut trames)
         .expect("écrivable");
-        let mut datagramme =
-            un_paquet_du_client(client, trames.get(..ecrits).expect("écrites"));
+        let mut datagramme = un_paquet_du_client(client, trames.get(..ecrits).expect("écrites"));
         serveur.on_datagram(&mut datagramme, horloge)
     };
 
@@ -2960,7 +2961,10 @@ fn une_trame_pour_un_flux_oublie_ne_condamne_pas() {
             remplies = remplies.saturating_add(1);
         }
     }
-    assert!(remplies > 0, "le plafond relevé a laissé passer des flux neufs");
+    assert!(
+        remplies > 0,
+        "le plafond relevé a laissé passer des flux neufs"
+    );
 
     // ── Et une trame pour le tout premier, oublié depuis longtemps ──────────
     donner(&mut serveur, &mut client, uni(0), horloge).expect("jetée, et non fatale");

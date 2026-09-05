@@ -1212,7 +1212,10 @@ mod tests {
     /// Un bannissement de zéro seconde AJOURNE au lieu de bannir.
     #[test]
     fn un_bannissement_nul_se_dit() {
-        assert!(dit(&config_de(&["--ban-seconds", "0"]), "aucun bannissement"));
+        assert!(dit(
+            &config_de(&["--ban-seconds", "0"]),
+            "aucun bannissement"
+        ));
         assert!(!dit(
             &config_de(&["--ban-seconds", "3600"]),
             "aucun bannissement"

@@ -473,7 +473,11 @@ async fn un_preambule_invalide_compte_pour_le_videur() {
             continue;
         };
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-        if chiffre.write_all(b"CE N'EST PAS UN PREAMBULE\r\n\r\n").await.is_err() {
+        if chiffre
+            .write_all(b"CE N'EST PAS UN PREAMBULE\r\n\r\n")
+            .await
+            .is_err()
+        {
             refuses += 1;
             continue;
         }
