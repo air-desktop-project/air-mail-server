@@ -1193,12 +1193,21 @@ ouverte :
   connexion non chiffrée, `USER`/`PASS` POP3 idem ;
 - `APOP` (MD5, exige le mot de passe en clair côté serveur) ;
 - `CRAM-MD5` ;
-- IMAP4rev1 **en tant que cible** : la référence est la RFC 9051 (IMAP4rev2). La
-  compatibilité rev1 sera examinée pour ce qu'elle coûte, jamais accordée par
-  défaut. **Ce qu'elle coûte est mesuré depuis le 2026-09-05** : `imaplib`
-  refuse la connexion faute de voir `IMAP4rev1` dans les capacités, `curl` sert
-  la boîte sans rien remarquer. La décision, elle, reste entière ;
 - le relais ouvert, sous toutes ses formes.
+
+**IMAP4rev1 A CESSÉ D'ÊTRE EXCLU LE 2026-09-05**, et cette liste le portait à
+tort. La référence reste la RFC 9051, et rev1 était écarté « en tant que cible,
+jamais accordé par défaut » ; ce que la mesure a dit ce jour-là a renversé la
+décision : `imaplib` refusait la connexion faute de voir `IMAP4rev1` dans les
+capacités, et **Dovecot, sur la machine que ce serveur doit remplacer, n'annonce
+lui non plus que `IMAP4rev1`** — tous les clients qui y relèvent leur courrier
+parlent donc rev1. Servir rev2 seul, c'était ne servir personne.
+
+Les deux versions sont désormais annoncées, et §6.3.1 dit comment les tenir
+ensemble : **le comportement rev2 ne s'allume pas tout seul**, il attend
+`ENABLE IMAP4rev2`. Ce qui change entre les deux se compte sur une main —
+`RECENT`, la forme de `* SEARCH`, `LSUB` et `CHECK` — et chacun de ces quatre
+points a son essai.
 
 **Outillé par** : pour TLS, deux `default-features = false` — sur
 `rustls-rustcrypto` et sur `tokio-rustls` — retirent la feature `tls12` du
@@ -1228,8 +1237,8 @@ conserver le mot de passe en clair** pour calculer le condensat. `ams-proto-pop3
 ne le reconnaît pas — il n'est même pas distingué d'un verbe inconnu, parce qu'un
 pair à qui l'on apprendrait qu'il est « reconnu mais désactivé » réessaierait.
 
-Le reste de la liste — IMAP4rev1, le relais ouvert — reste une décision : rien ne
-l'empêche mécaniquement, sinon que le code qui l'appliquerait n'est pas écrit.
+Le reste de la liste — le relais ouvert — reste une décision : rien ne l'empêche
+mécaniquement, sinon que le code qui l'appliquerait n'est pas écrit.
 
 **Le relais fermé n'est plus seulement une décision, depuis le 2026-09-01.** Il
 l'était par défaut d'implémentation : `accepts_recipient` refusait toute adresse
@@ -3857,6 +3866,131 @@ mot — pas à sa propre liste.
 Ce qui reste hors du serveur : **rien de connu**. Cette ligne annonçait « la file
 de réémission des messages sortants », et c'était faux — elle existe, elle est
 câblée, et [la liste v1](v1.md) le mesure plutôt que de le croire.
+
+## « Ce n'est qu'une ligne de capacités » — et c'était faux
+
+Ce dépôt n'annonçait qu'`IMAP4rev2`, et sa propre documentation expliquait
+pourquoi ce n'était pas grave : « le clivage ne tient pas à ce que ce serveur
+SAIT faire, mais à une ligne de capacités ». La phrase était rassurante, elle
+était datée, elle était fausse.
+
+### CE QUE LE PAIR A DIT, ET CE QUE LA MACHINE VISÉE A CONFIRMÉ
+
+`imaplib`, de la bibliothèque standard de Python, refuse la connexion **avant
+d'envoyer une seule commande** — `error: server not IMAP4 compliant` — parce
+qu'il n'admet que `IMAP4REV1` et `IMAP4`.
+
+Puis la machine que ce serveur doit remplacer a tranché :
+
+```
+* OK [CAPABILITY IMAP4rev1 SASL-IR LOGIN-REFERRALS ID ENABLE IDLE LITERAL+
+      AUTH=PLAIN AUTH=LOGIN] Dovecot (Ubuntu) ready.
+```
+
+**Dovecot n'annonce que `IMAP4rev1`.** Tous les clients qui relèvent ce courrier
+aujourd'hui parlent donc rev1, et rien d'autre. Servir rev2 seul, ce n'était pas
+servir les clients modernes : c'était ne servir personne.
+
+### AJOUTER LA LIGNE NE SUFFISAIT PAS
+
+C'est le cœur de l'affaire. Une fois `IMAP4rev1` annoncé, `imaplib` se connecte —
+et quatre choses manquaient encore, dont trois qu'un client rev1 emploie à
+chaque session :
+
+| ce que rev1 exige | ce que ce serveur faisait |
+|---|---|
+| `SELECT` rend `* n RECENT` (§6.3.1 : « MUST send ») | rien |
+| `SEARCH` rend `* SEARCH 2 4 5` | `* ESEARCH (TAG "a") ALL 2,4:5` |
+| `STATUS` admet `RECENT` (§6.3.10) | `BAD` sur toute la commande |
+| `LSUB` et `CHECK` répondent | `BAD Command removed in IMAP4rev2` |
+
+Le troisième est le plus vicieux : demander `RECENT` **en même temps que**
+`MESSAGES` faisait refuser la commande ENTIÈRE. Le client ne perdait pas un
+renseignement, il perdait la réponse.
+
+Le quatrième aussi : `LSUB` est ce dont un client déployé se sert pour peupler
+son panneau de dossiers. Sans lui, il n'en voit aucun.
+
+### ON COMMENCE EN rev1, ET `ENABLE` BASCULE
+
+§6.3.1 le prescrit pour un serveur qui annonce les deux, et la raison est
+mécanique : **rev2 a RETIRÉ des réponses que rev1 rend obligatoires.** Un serveur
+qui parlerait rev2 d'emblée supprimerait à un client ce qu'il n'a pas demandé de
+perdre.
+
+Rester en rev1 par défaut n'ôte rien à personne : qui veut rev2 le dit, et
+l'obtient dans la même session.
+
+Il fallait pour cela qu'`ENABLE` fasse quelque chose. Il répondait `* ENABLED`
+tout nu, quoi qu'on lui demande — une réponse qui ne dit rien à qui doit savoir
+s'il parle rev1 ou rev2, alors que la forme de `SEARCH` en dépend.
+
+### `RETURN` DÉCIDE AUSSI, ET LA GRAMMAIRE NE SAVAIT PAS LE DIRE
+
+`SEARCH ALL` et `SEARCH RETURN (ALL) ALL` demandent la même chose — §6.4.4 : sans
+option, `ALL` est supposé — et **ne se répondent pas pareil**. Écrire `RETURN`,
+c'est employer l'extension de RFC 4731, dont `ESEARCH` EST la réponse ; ne rien
+écrire, c'est le `SEARCH` de RFC 3501.
+
+Or `SearchReturn::parse` rendait le même `TOUT` dans les deux cas : la
+distinction n'était pas dicible. Elle l'est, par un champ — et non par une
+recherche de `RETURN` refaite dans la session, qui aurait dupliqué, moins bien,
+le contrôle qui distingue `RETURN` de `RETURNED`.
+
+### LA COMPRESSION EST UN PIÈGE QUAND ON CHANGE DE FORME
+
+La machinerie d'`ESEARCH` comprime `5 6 7` en `5:7`, en avançant, sans rien
+retenir. Écrire une plage à la façon de rev1 n'aurait rendu que son début : **les
+résultats du milieu auraient disparu sans que rien ne le dise** — un résultat de
+recherche perdu ne se voit pas, le client croit simplement que le message ne
+correspondait pas.
+
+La compression est donc coupée en rev1, à sa source : une plage ne s'ouvre
+jamais. Un essai éprouve exactement cela sur trois UID contigus, et un autre
+découpe la réponse en morceaux de vingt-trois à trente-quatre octets pour
+vérifier qu'aucun résultat ne tombe entre deux.
+
+### `RECENT` DIT QUELQUE CHOSE DE VRAI, ET RIEN DE PLUS
+
+Un message naît dans `new/` et passe dans `cur/` à la première écriture de
+drapeau — mesuré : poser `\Seen` déplace le fichier. Le compte de `new/` décroît
+donc à mesure qu'on lit la boîte, ce qui est exactement ce qu'un client attend de
+`RECENT`.
+
+**Ce n'est pas tout à fait le `\Recent` de §2.3.2**, qui parle de la PREMIÈRE
+SESSION à voir le message : le suivre demanderait un état par session écrit sur
+le disque, et §2.3.2 admet lui-même qu'on puisse ne pas savoir. Ce qui est
+rapporté est vrai, dit ce qu'il dit, et ne prétend pas davantage.
+
+Rien de nouveau n'a été écrit pour le savoir : le relevé parcourt déjà `new/`
+puis `cur/`, et il lui suffisait de retenir DE LAQUELLE des deux venait chaque
+message — la vérité vient du répertoire parcouru, non d'une relecture du chemin.
+
+### LES ESSAIS QUI GRAVAIENT rev2
+
+Vingt-trois essais de session et trois de grammaire ont échoué. Aucun ne
+signalait un défaut : ils affirmaient le comportement rev2, qui était le seul
+existant. La plupart éprouvent la MÉCANIQUE — la compression des ensembles, le
+découpage d'une réponse trop longue, l'épuisement du tampon — et non le choix de
+version : ils disent maintenant `ENABLE IMAP4rev2` une fois, dans l'aide
+partagée, et gardent leur objet intact.
+
+C'est le pendant exact du travers que ce registre nomme depuis dix tranches. Ici,
+la correction ne consiste pas à réécrire ce qu'ils affirment, mais à **nommer la
+condition sous laquelle ils l'affirmaient sans le savoir**.
+
+### CE QUI RESTE, ET QUI EST DIT
+
+`FETCH (RFC822)` rend toujours `NO [CANNOT]`. RFC 3501 §6.4.5 le définit dans le
+protocole de BASE, avec `RFC822.HEADER` et `RFC822.TEXT`. Leurs équivalents
+exacts — `BODY[]`, `BODY.PEEK[HEADER]`, `BODY[TEXT]` — sont servis, et c'est par
+eux que les clients modernes rapatrient ; `imaplib` a relevé toute la boîte par
+là. Ce qui manque est la mécanique du NOM : une réponse doit se dire `RFC822`,
+sinon le client n'apparie pas ce qu'il reçoit à ce qu'il a demandé.
+
+Ce refus PRÉEXISTE à cette tranche — la grammaire les reconnaît et les refuse
+depuis toujours. Il est désormais nommé dans la liste des bloquants, au lieu de
+dormir dans un commentaire.
 
 ## Un pare-feu qu'on documentait sans l'avoir fait tourner
 

@@ -40,13 +40,23 @@ pub enum StatusAtt {
     Deleted,
     /// La somme des tailles, en octets.
     Size,
+    /// Combien de messages sont RÉCENTS (RFC 3501 §6.3.10).
+    ///
+    /// **RETIRÉ PAR IMAP4rev2** (§A) avec le drapeau `\Recent` qu'il comptait.
+    /// La GRAMMAIRE l'admet quand même : ce serveur annonce `IMAP4rev1`, et un
+    /// client qui n'a pas activé rev2 a le droit de le demander. C'est la
+    /// SESSION qui refuse ce mot une fois rev2 activé — la grammaire ne sait pas
+    /// ce qui a été activé, et prétendre le savoir ici mettrait la décision à
+    /// deux endroits.
+    Recent,
 }
 
 /// Combien d'éléments un `STATUS` peut demander.
 ///
-/// Six : c'est le nombre de mots que §6.3.11 définit, et les doublons se
+/// Sept : les six mots que §6.3.11 définit, plus le `RECENT` de RFC 3501
+/// §6.3.10 que ce serveur admet tant que rev2 n'est pas activé. Les doublons se
 /// réduisent — `(MESSAGES MESSAGES)` ne demande qu'une chose.
-pub const STATUS_ATTS_MAX: usize = 6;
+pub const STATUS_ATTS_MAX: usize = 7;
 
 /// Les éléments d'un `STATUS`, dans l'ordre où ils ont été demandés.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,15 +133,14 @@ fn un_element(mot: &[u8]) -> Result<StatusAtt, Error> {
         (b"UNSEEN", StatusAtt::Unseen),
         (b"DELETED", StatusAtt::Deleted),
         (b"SIZE", StatusAtt::Size),
+        (b"RECENT", StatusAtt::Recent),
     ] {
         if mot.eq_ignore_ascii_case(nom) {
             return Ok(att);
         }
     }
-    // `RECENT` A DISPARU DE rev2 (§A) avec le drapeau `\Recent` qu'il comptait.
-    // Il tombe donc ici, comme tout ce qu'on ne connaît pas : le refuser dit au
-    // client que ce mot n'a plus cours, là où rendre zéro lui ferait croire que
-    // la boîte n'a rien reçu.
+    // Tout autre mot tombe ici. Le refuser dit au client qu'on ne le connaît
+    // pas, là où rendre zéro lui ferait croire à une réponse.
     Err(Error::MalformedStatus)
 }
 

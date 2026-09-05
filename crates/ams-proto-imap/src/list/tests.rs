@@ -235,9 +235,12 @@ fn le_status_de_chaque_boite_se_demande_avec_la_liste() {
         &b"\"\" * RETURN (STATUS (MESSAGES)"[..],
         b"\"\" * RETURN (STATUS (MESSAGES",
         // Un élément qui n'en est pas un.
-        b"\"\" * RETURN (STATUS (RECENT))",
+        b"\"\" * RETURN (STATUS (INVENTE))",
         // Une liste vide.
         b"\"\" * RETURN (STATUS ())",
+        // `RETURN (STATUS (RECENT))` N'EST PLUS ICI : `RECENT` se lit depuis que
+        // ce serveur annonce `IMAP4rev1`, et c'est la session qui le refuse une
+        // fois rev2 activé.
         // `STATUS` sans sa liste.
         b"\"\" * RETURN (STATUS)",
         b"\"\" * RETURN (STATUS SUBSCRIBED)",

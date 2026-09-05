@@ -24,6 +24,22 @@ pub struct Message {
     pub uid: Uid,
     /// Sa taille en octets.
     pub size: u64,
+    /// Vit-il encore dans `new/` ?
+    ///
+    /// # C'EST CE QUE MAILDIR APPELLE « RÉCENT », ET RIEN D'AUTRE
+    ///
+    /// Un message naît dans `new/` et passe dans `cur/` à la PREMIÈRE écriture
+    /// de drapeau — poser `\Seen` le déplace, parce que le nom du fichier porte
+    /// les drapeaux et que Maildir veut les porteurs dans `cur/`. Le compte
+    /// décroît donc à mesure qu'on lit la boîte, ce qui est exactement ce qu'un
+    /// client IMAP4rev1 attend de `RECENT`.
+    ///
+    /// **Ce n'est pas tout à fait le `\Recent` de RFC 3501 §2.3.2**, qui parle
+    /// de la PREMIÈRE SESSION à voir le message. Le suivre demanderait un état
+    /// par session, écrit sur le disque, et §2.3.2 admet lui-même qu'on ne
+    /// puisse pas le déterminer. Ce que ce serveur rapporte est vrai, dit ce
+    /// qu'il dit, et ne prétend pas davantage.
+    pub recent: bool,
 }
 
 /// Une boîte **verrouillée**, avec la liste de ses messages.
@@ -243,6 +259,10 @@ fn relever(racine: &Path) -> Result<Vec<Message>, Error> {
                 path: chemin,
                 uid,
                 size,
+                // LA VÉRITÉ VIENT DU RÉPERTOIRE QU'ON PARCOURT, et non d'une
+                // relecture du chemin : c'est la même donnée, mais celle-ci ne
+                // peut pas se tromper de séparateur ni d'encodage.
+                recent: sous == "new",
             });
         }
     }

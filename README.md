@@ -789,11 +789,19 @@ machine, 6 Gio en quelques secondes.
 
 ## `SEARCH` : un arbre sans allocation, et un ensemble sans liste
 
-**IMAP4rev2 a remplacé `* SEARCH` par `* ESEARCH`** (§7.3.4). L'ancienne réponse
-`* SEARCH 2 4 5 6 7` a disparu ; la nouvelle rend `* ESEARCH (TAG "a001") ALL
-2,4:7`, où les résultats sont un **ensemble** et non une liste. Ce serveur
-n'annonce que `IMAP4rev2`, et rendre l'ancienne forme à un client qui a lu
-l'annonce serait le tromper.
+**IMAP4rev2 a remplacé `* SEARCH` par `* ESEARCH`** (§7.3.4) : `* SEARCH 2 4 5 6
+7` d'un côté, `* ESEARCH (TAG "a001") ALL 2,4:7` de l'autre, où les résultats
+sont un **ensemble** et non une liste.
+
+**CE SERVEUR REND LES DEUX**, parce qu'il annonce les deux versions. Laquelle
+dépend de deux choses, et de rien d'autre : le client a-t-il dit
+`ENABLE IMAP4rev2`, et a-t-il écrit une clause `RETURN` ? Écrire `RETURN`, c'est
+employer l'extension de RFC 4731, dont `ESEARCH` EST la réponse — même en rev1.
+Un `SEARCH` nu, dans une session qui n'a rien activé, retrouve la forme de
+RFC 3501.
+
+La forme de rev1 **ne comprime rien** : elle n'a pas de plages, et en écrire une
+perdrait tous les résultats du milieu sans que rien ne le dise.
 
 **On comprime en avançant, sans rien retenir.** Comprimer demande de savoir si le
 résultat suivant prolonge le précédent, ce qui tient dans deux entiers : la plage

@@ -213,6 +213,13 @@ pub trait Mailbox {
     fn uid_validity(&self) -> u32;
     /// L'UID que portera le prochain message déposé.
     fn uid_next(&self) -> u32;
+    /// Combien de messages sont RÉCENTS, au sens d'IMAP4rev1 §6.3.1.
+    ///
+    /// **IMAP4rev2 A SUPPRIMÉ CETTE NOTION** (§A), et un client qui a activé
+    /// rev2 ne verra jamais ce nombre. Il n'est demandé que pour les clients qui
+    /// n'ont pas activé rev2 — c'est-à-dire, aujourd'hui, la quasi-totalité de
+    /// ceux qui sont déployés.
+    fn recent(&self) -> u32;
     /// Ce qu'on sait du message de rang `sequence`, à partir de un.
     ///
     /// **Ce doit être bon marché** : la session l'appelle pour chaque message
@@ -882,6 +889,16 @@ struct Emission {
     /// voit pas : le client croit simplement que le message ne correspondait
     /// pas.
     a_ecrire: Option<(u32, u32)>,
+    /// Rend-on la forme de RFC 3501 — `* SEARCH 2 4 5` — plutôt qu'`ESEARCH` ?
+    ///
+    /// # LE FORMAT SE FIGE AU DÉPART DE LA COMMANDE
+    ///
+    /// Il est décidé une fois, quand la recherche commence, et non relu à
+    /// chaque morceau : `ENABLE` ne peut pas arriver au milieu — §6.3.1 le
+    /// réserve à l'état authentifié, hors sélection — mais figer la décision
+    /// vaut mieux que de compter là-dessus. Une réponse dont l'en-tête serait
+    /// d'une forme et la suite d'une autre serait illisible.
+    rev1: bool,
     /// A-t-on déjà écrit l'en-tête `* ESEARCH (TAG "…")` ?
     entame: bool,
     /// A-t-on déjà écrit au moins un résultat ?
@@ -1162,6 +1179,19 @@ pub struct Session<A: Authenticator, M: Mailboxes> {
     starttls_offered: bool,
     /// L'est-il déjà ?
     chiffre: bool,
+    /// Le client a-t-il activé IMAP4rev2 par `ENABLE` (§6.3.1) ?
+    ///
+    /// # CE SERVEUR ANNONCE LES DEUX, ET COMMENCE EN rev1
+    ///
+    /// C'est ce que RFC 9051 §6.3.1 prescrit à un serveur qui annonce
+    /// `IMAP4rev1` et `IMAP4rev2` : **le comportement rev2 ne s'allume pas
+    /// tout seul**, parce que rev2 a RETIRÉ des réponses que rev1 rend
+    /// obligatoires — `RECENT`, `* SEARCH`, `LSUB`. Un serveur qui les
+    /// supprimerait d'office casserait tout client qui n'a rien demandé.
+    ///
+    /// Rester en rev1 par défaut n'ôte rien à personne : un client qui veut
+    /// rev2 le dit, et l'obtient dans la même session.
+    rev2: bool,
     etat: State,
     policy: A,
     /// Le tag de la commande dont on attend la suite.
@@ -1236,6 +1266,7 @@ impl Emission {
         ecriture: None,
         silencieux: false,
         genre: Genre::Fetch,
+        rev1: false,
         plage: None,
         a_ecrire: None,
         entame: false,
@@ -1381,6 +1412,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
                 ..limits
             },
             starttls_offered,
+            rev2: false,
             chiffre: false,
             etat: State::NotAuthenticated,
             policy,
@@ -1466,7 +1498,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
     ///
     /// [`Error::Reply`] si `out` ne suffit pas.
     pub fn greeting<'b>(&self, out: &'b mut [u8]) -> Result<&'b [u8], Error> {
-        let morceaux = self.capacites(b"OK [CAPABILITY ", b"] IMAP4rev2 service ready");
+        let morceaux = self.capacites(b"OK [CAPABILITY ", b"] IMAP4rev1 IMAP4rev2 service ready");
         encode_untagged_parts(out, &morceaux, &self.limits).map_err(Error::Reply)
     }
 
@@ -1569,7 +1601,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             // ── Authentifié, ou sélectionné (§6.3) ──────────────────────────
             Command::Select => self.select(lue.arguments, false, out),
             Command::Examine => self.select(lue.arguments, true, out),
-            Command::List => self.list(lue.arguments, out),
+            Command::List => self.list(lue.arguments, false, out),
             Command::Status => self.status(lue.arguments, out),
             Command::Create => self.create(lue.arguments, out),
             Command::Delete => self.delete(lue.arguments, out),
@@ -1598,7 +1630,20 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             Command::Fetch => self.fetch(lue.arguments, false, out),
             Command::Store => self.store(lue.arguments, false, out),
             Command::Uid => self.uid(lue.arguments, out),
-            // ── Retirés par IMAP4rev2 (§A) ──────────────────────────────────
+            // ── Retirés par IMAP4rev2 (§A), servis tant qu'il n'est pas activé ─
+            //
+            // **CE SERVEUR ANNONCE `IMAP4rev1`**, et ces deux commandes en font
+            // partie. Les refuser à un client qui n'a pas activé rev2, c'est
+            // refuser ce qu'on vient de lui annoncer — `LSUB` est ce que les
+            // clients déployés emploient pour peupler leur panneau de dossiers,
+            // et sans lui ils n'en voient aucun.
+            Command::Lsub if !self.rev2 => self.list(lue.arguments, true, out),
+            // §6.4.1 : `CHECK` demande un point de reprise, et « OK » est une
+            // réponse conforme pour un serveur qui n'en a pas besoin. Ce magasin
+            // écrit à chaque geste ; il n'y a rien à forcer sur le disque.
+            Command::Check if !self.rev2 => {
+                self.termine(Status::Ok, b"CHECK completed", Action::Continue, out)
+            }
             Command::Lsub | Command::Check => self.termine(
                 Status::Bad,
                 b"Command removed in IMAP4rev2",
@@ -1666,7 +1711,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
 
     /// `LOGOUT` : un adieu non sollicité, puis la conclusion (§6.1.3).
     fn logout<'b>(&mut self, out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
-        let adieu = encode_untagged(out, b"BYE IMAP4rev2 server logging out", &self.limits)
+        let adieu = encode_untagged(out, b"BYE IMAP server logging out", &self.limits)
             .map_err(Error::Reply)?
             .len();
         let suite = out.get_mut(adieu..).unwrap_or_default();
@@ -2098,11 +2143,28 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         if arguments.trim_ascii().is_empty() {
             return self.faute(b"ENABLE expects at least one capability", out);
         }
+        // **CE QU'ON ACTIVE, ON LE NOMME EN RETOUR.** §6.3.1 : la réponse
+        // `ENABLED` liste ce qui a PRIS EFFET, et rien d'autre. Un serveur qui
+        // renverrait la liste reçue dirait avoir activé ce qu'il ignore ; un
+        // serveur qui renverrait toujours la liste vide — ce que celui-ci
+        // faisait — laisserait le client incapable de savoir s'il parle rev1 ou
+        // rev2, alors que la réponse à `SEARCH` en dépend.
+        let demande_rev2 = arguments
+            .split(|octet| *octet == b' ')
+            .any(|mot| mot.eq_ignore_ascii_case(b"IMAP4rev2"));
         let ecrits = {
             let mut plume = Plume::neuve(out);
-            plume.pousser(b"* ENABLED\r\n")?;
+            plume.pousser(match demande_rev2 {
+                true => b"* ENABLED IMAP4rev2\r\n".as_slice(),
+                false => b"* ENABLED\r\n",
+            })?;
             plume.ecrits()
         };
+        // L'ÉTAT NE CHANGE QU'APRÈS L'ÉCRITURE. Si le tampon manquait, la
+        // session dirait rev1 au client et penserait rev2.
+        if demande_rev2 {
+            self.rev2 = true;
+        }
         self.apres(ecrits, b"ENABLE completed", out)
     }
 
@@ -2154,7 +2216,13 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         // capacité pour les deux ne saurait pas laquelle.
         [
             prefixe,
-            b"IMAP4rev2 LITERAL- IDLE SPECIAL-USE CREATE-SPECIAL-USE",
+            // **`IMAP4rev1` VIENT EN PREMIER, ET CE N'EST PAS UN DÉTAIL.**
+            // RFC 3501 §7.2.1 veut que la première capacité annoncée soit la
+            // version du protocole, et `imaplib` — comme d'autres clients
+            // déployés — refuse la connexion sans en trouver une qu'il
+            // connaisse. Les deux sont annoncées : ce serveur sait rendre les
+            // deux formes, et c'est `ENABLE` qui décide laquelle.
+            b"IMAP4rev1 IMAP4rev2 LITERAL- IDLE SPECIAL-USE CREATE-SPECIAL-USE",
             troisieme,
             quatrieme,
             suffixe,
@@ -2327,6 +2395,14 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         // suivrait ne doit pas redire le même compte.
         self.exists_vus = combien;
         plume.nombre_non_sollicite(combien, b"EXISTS")?;
+        // **`RECENT` EST OBLIGATOIRE EN rev1** (RFC 3501 §6.3.1 : « the server
+        // MUST send … RECENT »), et INTERDIT en rev2 (§A l'a retiré). Ce n'est
+        // donc pas une réponse qu'on ajoute par prudence : c'est celle des deux
+        // protocoles que le client a choisie qui décide, et l'omettre pour un
+        // client rev1 était une non-conformité pure.
+        if !self.rev2 {
+            plume.nombre_non_sollicite(boite.recent(), b"RECENT")?;
+        }
         plume.crochet(b"UIDVALIDITY", boite.uid_validity())?;
         plume.crochet(b"UIDNEXT", boite.uid_next())?;
         // `FLAGS` dit ce qu'un message PEUT PORTER — un autre outil a pu en
@@ -2978,6 +3054,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             ecriture: None,
             silencieux: false,
             genre: Genre::Move,
+            rev1: false,
             plage: None,
             a_ecrire: None,
             entame: false,
@@ -3123,6 +3200,10 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             ecriture: None,
             silencieux: false,
             genre: Genre::Search,
+            // **UNE CLAUSE `RETURN` DEMANDE `ESEARCH`, MÊME EN rev1.** L'écrire,
+            // c'est employer l'extension de RFC 4731, dont `ESEARCH` EST la
+            // réponse. Seul un `SEARCH` nu retrouve la forme de RFC 3501.
+            rev1: !self.rev2 && !retour.explicite,
             plage: None,
             a_ecrire: None,
             entame: false,
@@ -3212,6 +3293,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             ecriture: None,
             silencieux: false,
             genre: Genre::Expunge,
+            rev1: false,
             plage: None,
             a_ecrire: None,
             entame: false,
@@ -3231,13 +3313,46 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         })
     }
 
-    /// `LIST` (§6.3.9), dans sa forme la plus simple.
-    fn list<'b>(&mut self, arguments: &[u8], out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
+    /// `LIST` (§6.3.9), dans sa forme la plus simple — et `LSUB` de RFC 3501.
+    ///
+    /// # POURQUOI LES DEUX PARTAGENT UN CORPS
+    ///
+    /// `LSUB "" "*"` est exactement `LIST (SUBSCRIBED) "" "*"`, au nom de la
+    /// réponse près. En écrire deux ferait deux parcours, deux filtres et deux
+    /// façons de nommer une boîte — qui finiraient par diverger sur le cas qui
+    /// compte, celui de l'abonnement dont la boîte a disparu.
+    fn list<'b>(
+        &mut self,
+        arguments: &[u8],
+        lsub: bool,
+        out: &'b mut [u8],
+    ) -> Result<Turn<'b>, Error> {
         if self.etat == State::NotAuthenticated {
             return self.faute(b"Command is not allowed before authentication", out);
         }
         let Ok(demande) = ams_proto_imap::List::parse(arguments) else {
-            return self.faute(b"LIST arguments are not well formed", out);
+            return self.faute(
+                match lsub {
+                    true => b"LSUB arguments are not well formed".as_slice(),
+                    false => b"LIST arguments are not well formed",
+                },
+                out,
+            );
+        };
+        // `LSUB` NE REND QUE LES ABONNEMENTS : c'est sa définition, et non une
+        // option qu'on lui passerait.
+        let abonnes_seuls = lsub || demande.subscribed_only();
+        let (tete, tete_orpheline, conclusion): (&[u8], &[u8], &[u8]) = match lsub {
+            true => (
+                b"* LSUB (",
+                b"* LSUB (\\Noselect \\HasNoChildren) \"/\" ",
+                b"LSUB completed",
+            ),
+            false => (
+                b"* LIST (",
+                b"* LIST (\\Subscribed \\NonExistent \\HasNoChildren) \"/\" ",
+                b"LIST completed",
+            ),
         };
         let mut plume = Plume::neuve(out);
         // **UN MOTIF VIDE NE DEMANDE PAS DE BOÎTE** (§6.3.9) : c'est la façon
@@ -3246,7 +3361,10 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         // comment écrire les noms qu'il composera ensuite.
         for motif in demande.patterns() {
             if motif.is_empty() {
-                plume.pousser(b"* LIST (\\Noselect) \"/\" \"\"\r\n")?;
+                plume.pousser(match lsub {
+                    true => b"* LSUB (\\Noselect) \"/\" \"\"\r\n".as_slice(),
+                    false => b"* LIST (\\Noselect) \"/\" \"\"\r\n",
+                })?;
             }
         }
         let mut index = 0_usize;
@@ -3266,7 +3384,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             let abonnee = self.boites.is_subscribed(self.user(), boite.name);
             // Le FILTRE de `LIST (SUBSCRIBED)` : ce à quoi l'on n'est pas abonné
             // n'a pas été demandé.
-            if demande.subscribed_only() && !abonnee {
+            if abonnes_seuls && !abonnee {
                 continue;
             }
             // Le FILTRE de `LIST (SPECIAL-USE)` (RFC 6154 §5.2). LES DEUX
@@ -3285,14 +3403,17 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
                 (false, true) => b"\\Noselect \\HasChildren",
                 (false, false) => b"\\Noselect \\HasNoChildren",
             };
-            plume.pousser(b"* LIST (")?;
+            plume.pousser(tete)?;
             // §6.3.9.6 : `\Subscribed` va DEVANT, et l'ordre des attributs n'a
             // rien de contraignant — mais un ordre stable est ce qui rend une
             // réponse comparable d'une fois sur l'autre.
             // Le RENSEIGNEMENT s'écrit quand le client l'a demandé, ou quand il
             // a demandé le filtre : dans ce dernier cas, tout ce qu'on rend est
             // abonné, et le taire serait taire la seule chose qu'il a dite.
-            if abonnee && (demande.report_subscribed() || demande.subscribed_only()) {
+            // **`\Subscribed` N'EXISTE PAS EN rev1** : RFC 3501 §7.2.2 ne
+            // définit pas cet attribut, et tout ce qu'un `LSUB` rend est abonné
+            // par construction — le dire serait redire.
+            if !lsub && abonnee && (demande.report_subscribed() || demande.subscribed_only()) {
                 plume.pousser(b"\\Subscribed ")?;
             }
             // RFC 6154 §2 : LES USAGES S'ÉCRIVENT TOUJOURS, comme
@@ -3327,7 +3448,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         // disparu, et §6.3.9.6 veut que le filtre le rende quand même. C'est le
         // seul endroit où l'on nomme une boîte qui n'existe pas — et c'est le
         // client qui l'a nommée avant nous.
-        if demande.subscribed_only() {
+        if abonnes_seuls {
             let mut orphelin = 0_usize;
             while let Some(nom) = self.boites.orphan(self.user(), orphelin, &mut place) {
                 orphelin = orphelin.saturating_add(1);
@@ -3336,25 +3457,15 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
                     .iter()
                     .any(|motif| !motif.is_empty() && correspond(motif, nom))
                 {
-                    plume.nom_de_boite(
-                        b"* LIST (\\Subscribed \\NonExistent \\HasNoChildren) \"/\" ",
-                        nom,
-                        b"\r\n",
-                    )?;
+                    plume.nom_de_boite(tete_orpheline, nom, b"\r\n")?;
                 }
             }
         }
         let ecrits = plume.ecrits();
         let suite = out.get_mut(ecrits..).unwrap_or_default();
-        let conclusion = encode_tagged(
-            suite,
-            self.tag_lu(),
-            Status::Ok,
-            b"LIST completed",
-            &self.limits,
-        )
-        .map_err(Error::Reply)?
-        .len();
+        let conclusion = encode_tagged(suite, self.tag_lu(), Status::Ok, conclusion, &self.limits)
+            .map_err(Error::Reply)?
+            .len();
         Ok(Turn {
             reply: out
                 .get(..ecrits.saturating_add(conclusion))
@@ -3445,6 +3556,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             ecriture: Some((demande.mode(), demande.flags())),
             silencieux: demande.silent(),
             genre: Genre::Store,
+            rev1: false,
             plage: None,
             a_ecrire: None,
             entame: false,
@@ -3795,6 +3907,14 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         else {
             return self.faute(b"STATUS expects a mailbox name and items", out);
         };
+        // **`RECENT` NE SURVIT PAS À rev2**, et la grammaire ne peut pas le
+        // savoir : elle ne connaît que les mots, pas ce que la session a
+        // activé. Un client qui a demandé rev2 et redemande `RECENT` se
+        // contredit, et le lui dire vaut mieux que de rendre un nombre dont
+        // rev2 nie l'existence.
+        if self.rev2 && demande.wants(StatusAtt::Recent) {
+            return self.faute(b"RECENT was removed by IMAP4rev2", out);
+        }
         // ON N'INTERROGE PAS DEUX FOIS CE QU'ON TIENT DÉJÀ. RFC 9051 §6.3.11
         // déconseille `STATUS` sur la boîte sélectionnée, mais ne l'interdit
         // pas, et un client le fait. La rouvrir pour l'interroger, c'est
@@ -3948,6 +4068,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             ecriture: None,
             silencieux: false,
             genre: Genre::Fetch,
+            rev1: false,
             plage: None,
             a_ecrire: None,
             entame: false,
@@ -4278,7 +4399,13 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
                         self.resultat_len = longueur;
                     }
                 }
-                let ecrits = entete_esearch(&mut petit, tag, emission.par_uid, &emission.retour);
+                let ecrits = entete_esearch(
+                    &mut petit,
+                    tag,
+                    emission.par_uid,
+                    &emission.retour,
+                    emission.rev1,
+                );
                 plume.pousser(petit.get(..ecrits).unwrap_or_default())?;
                 emission.entame = true;
                 // **`SAVE` SEUL NE FAIT RIEN ÉCRIRE**, et la liste non demandée
@@ -4302,7 +4429,8 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             loop {
                 // 1. Une plage close attend-elle d'être écrite ?
                 if let Some((debut, fin)) = emission.a_ecrire {
-                    let ecrits = plage_esearch(&mut petit, emission.trouve, debut, fin);
+                    let ecrits =
+                        plage_esearch(&mut petit, emission.trouve, debut, fin, emission.rev1);
                     if plume
                         .pousser(petit.get(..ecrits).unwrap_or_default())
                         .is_err()
@@ -4327,8 +4455,12 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
                     break;
                 };
                 match emission.plage {
-                    // Le résultat prolonge la plage ouverte.
-                    Some((debut, fin)) if clef == fin.saturating_add(1) => {
+                    // Le résultat prolonge la plage ouverte. **PAS EN rev1** :
+                    // sans plages, chaque résultat est le sien, et une plage
+                    // qu'on ouvrirait s'écrirait comme un seul nombre — les
+                    // résultats du milieu seraient perdus, sans que rien ne le
+                    // dise.
+                    Some((debut, fin)) if !emission.rev1 && clef == fin.saturating_add(1) => {
                         emission.plage = Some((debut, clef));
                     }
                     // Il ouvre une plage, et ferme la précédente.
@@ -4886,6 +5018,8 @@ struct Recensement {
     deleted: u32,
     /// La somme des tailles.
     size: u64,
+    /// Combien sont RÉCENTS (RFC 3501 §6.3.10).
+    recent: u32,
 }
 
 /// Compte ce qu'un `STATUS` demande, et rien de plus.
@@ -4903,6 +5037,9 @@ fn recenser<M: Mailbox + ?Sized>(boite: &M, demande: &ams_proto_imap::StatusItem
         exists,
         uid_next: boite.uid_next(),
         uid_validity: boite.uid_validity(),
+        // COMME LES TROIS PREMIERS : la boîte le sait sans parcourir ses
+        // messages, puisqu'elle sait d'où chacun a été relevé.
+        recent: boite.recent(),
         ..Recensement::default()
     };
     let compte = demande.wants(StatusAtt::Unseen)
@@ -4950,6 +5087,7 @@ fn ecrire_le_recensement(
             StatusAtt::Unseen => (b"UNSEEN ", u64::from(recense.unseen)),
             StatusAtt::Deleted => (b"DELETED ", u64::from(recense.deleted)),
             StatusAtt::Size => (b"SIZE ", recense.size),
+            StatusAtt::Recent => (b"RECENT ", u64::from(recense.recent)),
         };
         plume.pousser(mot)?;
         plume.nombre(valeur)?;
@@ -5417,7 +5555,20 @@ fn recopier(out: &mut [u8], ecrits: usize, morceau: &[u8]) -> usize {
 }
 
 /// Compose `* ESEARCH (TAG "…")` et, si la recherche porte sur des UID, ` UID`.
-fn entete_esearch(out: &mut [u8], tag: &[u8], par_uid: bool, retour: &RetourDeRecherche) -> usize {
+fn entete_esearch(
+    out: &mut [u8],
+    tag: &[u8],
+    par_uid: bool,
+    retour: &RetourDeRecherche,
+    rev1: bool,
+) -> usize {
+    // **LA FORME DE RFC 3501 N'A NI TAG, NI `UID`, NI OPTIONS.** `* SEARCH`,
+    // puis les numéros. Elle ne peut donc rien porter de ce qui suit : `MIN`,
+    // `MAX` et `COUNT` sont des options de RFC 4731, et une commande qui les
+    // demande a écrit `RETURN` — donc n'est pas ici.
+    if rev1 {
+        return recopier(out, 0, b"* SEARCH");
+    }
     let mut ecrits = recopier(out, 0, b"* ESEARCH (TAG \"");
     ecrits = recopier(out, ecrits, tag);
     ecrits = recopier(out, ecrits, b"\")");
@@ -5453,7 +5604,18 @@ fn entete_esearch(out: &mut [u8], tag: &[u8], par_uid: bool, retour: &RetourDeRe
 }
 
 /// Compose une plage de résultats : ` ALL 1:3` la première, `,7` les suivantes.
-fn plage_esearch(out: &mut [u8], deja: bool, debut: u32, fin: u32) -> usize {
+fn plage_esearch(out: &mut [u8], deja: bool, debut: u32, fin: u32, rev1: bool) -> usize {
+    // **RFC 3501 NE CONNAÎT PAS LES PLAGES** : `* SEARCH 2 4 5 6 7`, un nombre
+    // par résultat, séparés par une espace. L'appelant ne lui en donne donc
+    // jamais d'ouvertes — voir la compression, qui ne s'applique pas en rev1 —
+    // et `fin` vaut toujours `debut` ici.
+    if rev1 {
+        let ecrits = recopier(out, 0, b" ");
+        return ecrits.saturating_add(nombre_en_octets(
+            out.get_mut(ecrits..).unwrap_or_default(),
+            debut,
+        ));
+    }
     let mut ecrits = recopier(out, 0, if deja { b"," } else { b" ALL " });
     ecrits = ecrits.saturating_add(nombre_en_octets(
         out.get_mut(ecrits..).unwrap_or_default(),

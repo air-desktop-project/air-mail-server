@@ -47,12 +47,35 @@ fn un_doublon_ne_demande_rien_de_plus() {
     assert!(repete.items().len() <= STATUS_ATTS_MAX);
 }
 
-/// **`RECENT` A DISPARU DE rev2**, et se refuse plutôt que de rendre zéro.
+/// **`RECENT` SE LIT, PARCE QUE CE SERVEUR ANNONCE `IMAP4rev1`.**
+///
+/// RFC 3501 §6.3.10 le définit, rev2 l'a retiré (§A). La GRAMMAIRE ne sait pas
+/// quelle version la session a activée — et prétendre le savoir ici mettrait la
+/// décision à deux endroits. C'est donc la session qui refuse ce mot une fois
+/// `ENABLE IMAP4rev2` passé.
 #[test]
-fn recent_a_disparu_et_se_refuse() {
-    assert_eq!(StatusItems::parse(b"(RECENT)"), Err(Error::MalformedStatus));
+fn recent_se_lit_et_ne_deloge_rien() {
     assert_eq!(
-        StatusItems::parse(b"(MESSAGES RECENT)"),
+        StatusItems::parse(b"(RECENT)").expect("lisible").items(),
+        [StatusAtt::Recent]
+    );
+    assert_eq!(
+        StatusItems::parse(b"(MESSAGES RECENT)")
+            .expect("lisible")
+            .items(),
+        [StatusAtt::Messages, StatusAtt::Recent]
+    );
+    // LES SEPT TIENNENT ENSEMBLE : `STATUS_ATTS_MAX` les compte tous.
+    let tous = StatusItems::parse(b"(MESSAGES UIDNEXT UIDVALIDITY UNSEEN DELETED SIZE RECENT)")
+        .expect("lisible");
+    assert_eq!(tous.items().len(), STATUS_ATTS_MAX);
+}
+
+/// Un mot qui n'est d'aucune des deux versions se refuse.
+#[test]
+fn un_element_inconnu_se_refuse() {
+    assert_eq!(
+        StatusItems::parse(b"(MESSAGES INVENTE)"),
         Err(Error::MalformedStatus)
     );
 }

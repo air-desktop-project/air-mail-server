@@ -449,10 +449,31 @@ fn une_clef_de_contenu_sans_texte_est_une_faute() {
 fn sans_option_de_retour_c_est_la_liste_entiere() {
     for arguments in [&b"ALL"[..], b"RETURN () ALL", b"  ALL"] {
         let (demande, reste) = SearchReturn::parse(arguments).expect("lisible");
-        assert_eq!(demande, SearchReturn::TOUT, "{arguments:?}");
+        assert_eq!(demande.ecrit(), SearchReturn::TOUT.ecrit(), "{arguments:?}");
+        assert!(demande.all && !demande.min && !demande.max, "{arguments:?}");
         assert_eq!(reste.trim_ascii(), b"ALL", "{arguments:?}");
-        assert!(demande.ecrit());
     }
+}
+
+/// **`RETURN ()` N'EST PAS « RIEN ÉCRIT ».**
+///
+/// Les deux demandent la même chose — §6.4.4 : sans option, `ALL` est supposé —
+/// et ne se répondent pas pareil. Écrire `RETURN`, c'est employer l'extension de
+/// RFC 4731, dont `ESEARCH` est la réponse ; ne rien écrire, c'est le `SEARCH`
+/// de RFC 3501, dont un client rev1 attend `* SEARCH 2 4 5`.
+#[test]
+fn une_clause_return_ecrite_se_distingue_de_son_absence() {
+    let (nue, _) = SearchReturn::parse(b"ALL").expect("lisible");
+    let (vide, _) = SearchReturn::parse(b"RETURN () ALL").expect("lisible");
+    let (nommee, _) = SearchReturn::parse(b"RETURN (ALL) UNSEEN").expect("lisible");
+
+    assert!(!nue.explicite, "aucune clause n'a été écrite");
+    assert!(vide.explicite, "`RETURN ()` est une clause écrite");
+    assert!(nommee.explicite);
+
+    // `RETURNED` N'EST PAS `RETURN` : ce critère-là n'écrit aucune clause.
+    let (critere, _) = SearchReturn::parse(b"RETURNED").expect("lisible");
+    assert!(!critere.explicite);
 }
 
 /// Les cinq options se lisent, dans n'importe quel ordre et n'importe quelle
@@ -469,6 +490,7 @@ fn les_cinq_options_se_lisent() {
             all: true,
             count: true,
             save: true,
+            explicite: true,
         }
     );
     assert_eq!(reste.trim_ascii(), b"UNSEEN");

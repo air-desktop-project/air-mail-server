@@ -70,6 +70,10 @@ impl Mailbox for Boite {
         // arriver le courrier.
         2
     }
+    fn recent(&self) -> u32 {
+        // Un des deux n'a jamais été lu : de quoi distinguer `RECENT` d'`EXISTS`.
+        1
+    }
     fn uid_validity(&self) -> u32 {
         7
     }
@@ -513,15 +517,20 @@ async fn la_banniere_annonce_puis_la_session_repond() {
     let banniere = ligne(&mut lecteur).await;
     assert!(
         banniere.starts_with(
-            "* OK [CAPABILITY IMAP4rev2 LITERAL- IDLE SPECIAL-USE CREATE-SPECIAL-USE \
-             LOGINDISABLED]"
+            "* OK [CAPABILITY IMAP4rev1 IMAP4rev2 LITERAL- IDLE SPECIAL-USE \
+             CREATE-SPECIAL-USE LOGINDISABLED]"
         ),
+        // **`IMAP4rev1` D'ABORD** : RFC 3501 §7.2.1 veut la version en tête, et
+        // c'est ce qu'un client déployé cherche avant d'envoyer quoi que ce soit.
         "{banniere}"
     );
 
     ecrire(&mut lecteur, b"a001 CAPABILITY\r\n").await;
     let annonce = ligne(&mut lecteur).await;
-    assert!(annonce.starts_with("* CAPABILITY IMAP4rev2"), "{annonce}");
+    assert!(
+        annonce.starts_with("* CAPABILITY IMAP4rev1 IMAP4rev2"),
+        "{annonce}"
+    );
     let conclusion = ligne(&mut lecteur).await;
     assert_eq!(conclusion, "a001 OK CAPABILITY completed\r\n");
 
@@ -1011,7 +1020,11 @@ async fn un_expunge_traverse_la_socket() {
     assert_eq!(referme, "a005 OK UNSELECT completed\r\n");
 }
 
-/// **`SEARCH` traverse la socket**, et rend un `ESEARCH` en une ligne.
+/// **`SEARCH` traverse la socket**, et rend la forme de la version en cours.
+///
+/// Cette session n'a pas dit `ENABLE IMAP4rev2` : elle est donc en rev1, et
+/// reçoit `* SEARCH 1 2` — la forme de RFC 3501 §7.2.5. La forme `ESEARCH` a son
+/// propre essai, plus bas.
 #[tokio::test]
 async fn une_recherche_traverse_la_socket() {
     let Some(materiel) = materiel("imap-search") else {
@@ -1031,10 +1044,7 @@ async fn une_recherche_traverse_la_socket() {
         .await
         .expect("écriture");
     let tout = jusqu_a(&mut lecteur, "a004 ").await;
-    assert_eq!(
-        tout,
-        "* ESEARCH (TAG \"a004\") ALL 1:2\r\na004 OK SEARCH completed\r\n"
-    );
+    assert_eq!(tout, "* SEARCH 1 2\r\na004 OK SEARCH completed\r\n");
 
     lecteur
         .get_mut()
@@ -1042,10 +1052,7 @@ async fn une_recherche_traverse_la_socket() {
         .await
         .expect("écriture");
     let grands = jusqu_a(&mut lecteur, "a005 ").await;
-    assert_eq!(
-        grands,
-        "* ESEARCH (TAG \"a005\") UID ALL 1:2\r\na005 OK UID SEARCH completed\r\n"
-    );
+    assert_eq!(grands, "* SEARCH 1 2\r\na005 OK UID SEARCH completed\r\n");
 
     // **CHERCHER DANS LE MESSAGE TRAVERSE LA SOCKET** : le sujet du premier
     // message d'épreuve est « un ».
@@ -1055,10 +1062,7 @@ async fn une_recherche_traverse_la_socket() {
         .await
         .expect("écriture");
     let sujet = jusqu_a(&mut lecteur, "a006 ").await;
-    assert_eq!(
-        sujet,
-        "* ESEARCH (TAG \"a006\") ALL 1\r\na006 OK SEARCH completed\r\n"
-    );
+    assert_eq!(sujet, "* SEARCH 1\r\na006 OK SEARCH completed\r\n");
 
     // Le corps est un autre endroit que l'en-tête.
     lecteur
@@ -1067,10 +1071,7 @@ async fn une_recherche_traverse_la_socket() {
         .await
         .expect("écriture");
     let corps = jusqu_a(&mut lecteur, "a007 ").await;
-    assert_eq!(
-        corps,
-        "* ESEARCH (TAG \"a007\") ALL 2\r\na007 OK SEARCH completed\r\n"
-    );
+    assert_eq!(corps, "* SEARCH 2\r\na007 OK SEARCH completed\r\n");
 
     // Un critère qu'on ne sert pas est refusé, pas rendu faux.
     lecteur

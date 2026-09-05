@@ -234,6 +234,20 @@ pub struct SearchReturn {
     pub count: bool,
     /// Retenir le résultat pour que `$` le désigne (§6.4.4.1).
     pub save: bool,
+    /// Le client a-t-il ÉCRIT une clause `RETURN` ?
+    ///
+    /// # POURQUOI CE N'EST PAS DÉDUCTIBLE DU RESTE
+    ///
+    /// `RETURN (ALL)` et une commande sans options donnent le même `TOUT` :
+    /// §6.4.4 dit qu'en l'absence d'options, `ALL` est supposé. Les deux
+    /// demandent donc la même chose, et pourtant elles ne se répondent pas
+    /// pareil — écrire `RETURN`, c'est employer l'extension de RFC 4731, donc
+    /// demander un `ESEARCH` ; ne rien écrire, c'est le `SEARCH` de RFC 3501,
+    /// dont un client rev1 attend `* SEARCH 2 4 5`.
+    ///
+    /// Sans ce champ, la session devrait rechercher `RETURN` elle-même — et
+    /// refaire, moins bien, le contrôle qui distingue `RETURN` de `RETURNED`.
+    pub explicite: bool,
 }
 
 impl SearchReturn {
@@ -244,6 +258,7 @@ impl SearchReturn {
         all: true,
         count: false,
         save: false,
+        explicite: false,
     };
 
     /// Y a-t-il quelque chose à ÉCRIRE ?
@@ -307,6 +322,7 @@ impl SearchReturn {
         if demande == Self::default() {
             demande = Self::TOUT;
         }
+        demande.explicite = true;
         Ok((
             demande,
             corps.get(fin.saturating_add(1)..).unwrap_or_default(),

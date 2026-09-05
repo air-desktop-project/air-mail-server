@@ -499,6 +499,13 @@ impl Mailbox for BoiteImap {
         self.uid_validity
     }
 
+    fn recent(&self) -> u32 {
+        // ON COMPTE CE QUI EST ENCORE DANS `new/`. Le relevé le sait déjà :
+        // c'est le répertoire d'où chaque message a été lu.
+        let combien = self.vue.messages().iter().filter(|m| m.recent).count();
+        u32::try_from(combien).unwrap_or(u32::MAX)
+    }
+
     fn uid_next(&self) -> u32 {
         // ON DEMANDE À LA BOÎTE, PAS À L'INSTANTANÉ. Le dernier message plus un
         // serait faux dès qu'un message a été effacé : `UIDNEXT` redescendrait,

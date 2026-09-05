@@ -82,6 +82,12 @@ impl Mailbox for Boite {
     fn exists(&self) -> u32 {
         u32::try_from(self.messages.borrow().len()).unwrap_or(u32::MAX)
     }
+    fn recent(&self) -> u32 {
+        // LA MOITIÉ, ET JAMAIS ZÉRO NI LE TOUT : un `RECENT` qui vaudrait
+        // toujours l'un des deux ne distinguerait rien de ce que l'entrée fait
+        // varier.
+        self.exists() / 2
+    }
     fn sent_day(&self, sequence: u32) -> Option<u64> {
         // UN MESSAGE SUR DEUX PORTE UNE DATE : les deux chemins des critères
         // `SENT…` — la comparaison et l'absence — se prennent donc tous les

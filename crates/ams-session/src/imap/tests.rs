@@ -42,6 +42,8 @@ pub struct Boite {
     grandit: bool,
     /// Combien de messages cette boîte a effacés, vu du dehors.
     efface: std::rc::Rc<std::cell::Cell<u32>>,
+    /// Combien de messages sont RÉCENTS, ce que `RECENT` rapporte en rev1.
+    recents: u32,
     /// L'UID d'un message qui REFUSE de s'effacer.
     ///
     /// C'est le cas qu'un magasin réel rencontre : entre l'instantané et
@@ -53,6 +55,9 @@ pub struct Boite {
 impl Mailbox for Boite {
     fn exists(&self) -> u32 {
         u32::try_from(self.messages.len()).unwrap_or(u32::MAX)
+    }
+    fn recent(&self) -> u32 {
+        self.recents
     }
     fn uid_validity(&self) -> u32 {
         42
@@ -681,6 +686,13 @@ impl Mailboxes for Boites {
                 message(u32::MAX.saturating_sub(1), 10, Flags::NONE, 0),
                 message(u32::MAX, 10, Flags::NONE, 0),
             ],
+            // Trois messages, dont deux qu'aucune session n'a encore lus : de
+            // quoi éprouver un `RECENT` qui ne vaut ni zéro ni le total.
+            b"Recente" => std::vec![
+                message(1, 100, Flags::SEEN, 0),
+                message(2, 100, Flags::NONE, 0),
+                message(3, 100, Flags::NONE, 0),
+            ],
             b"Archives" | b"Archives/2026" => std::vec::Vec::new(),
             _ => return None,
         };
@@ -695,6 +707,8 @@ impl Mailboxes for Boites {
             efface: std::rc::Rc::clone(&self.efface),
             // Dans la boîte têtue, le message d'UID 20 refuse de s'effacer.
             tetu: if name == b"Tetue" { 20 } else { 0 },
+            // `Recente` porte deux messages jamais lus ; les autres, aucun.
+            recents: if name == b"Recente" { 2 } else { 0 },
         })
     }
 }
@@ -725,9 +739,12 @@ fn la_banniere_annonce_ce_qu_on_sait_faire() {
     let mut sortie = [0_u8; 256];
     let banniere = nouvelle(false).greeting(&mut sortie).expect("composable");
     let texte = std::string::String::from_utf8_lossy(banniere).into_owned();
+    // **LES DEUX VERSIONS S'ANNONCENT, rev1 EN TÊTE.** RFC 3501 §7.2.1 veut la
+    // version du protocole en premier, et un client déployé la cherche là avant
+    // d'envoyer quoi que ce soit.
     assert!(texte.starts_with(
-        "* OK [CAPABILITY IMAP4rev2 LITERAL- IDLE SPECIAL-USE CREATE-SPECIAL-USE STARTTLS \
-         LOGINDISABLED]"
+        "* OK [CAPABILITY IMAP4rev1 IMAP4rev2 LITERAL- IDLE SPECIAL-USE CREATE-SPECIAL-USE \
+         STARTTLS LOGINDISABLED]"
     ));
     assert!(texte.ends_with("service ready\r\n"), "{texte}");
 }
@@ -1074,8 +1091,26 @@ fn des_identifiants_demesures_sont_refuses_comme_les_autres() {
 
 // ── LES BOÎTES ──────────────────────────────────────────────────────────────
 
-/// Ouvre une session authentifiée avec `INBOX` sélectionnée.
+/// Ouvre une session authentifiée EN IMAP4rev2, avec `INBOX` sélectionnée.
+///
+/// # POURQUOI `ENABLE` EST ICI, ET NON DANS CHAQUE ESSAI
+///
+/// Ce serveur annonce les deux versions et **commence en rev1** : c'est ce que
+/// RFC 9051 §6.3.1 prescrit, et ce qu'un client déployé attend. La plupart des
+/// essais qui suivent éprouvent la MÉCANIQUE de rev2 — la compression des
+/// ensembles, le découpage d'une réponse trop longue, l'épuisement du tampon —
+/// et non le choix de version. Les faire parler rev2 une fois pour toutes
+/// garde leur objet ; la version, elle, a ses propres essais.
 fn selectionnee() -> Session<UnCompte, Boites> {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut session, b"a000 ENABLE IMAP4rev2\r\n");
+    dire(&mut session, b"a002 SELECT INBOX\r\n");
+    session
+}
+
+/// La même, restée en IMAP4rev1 — c'est-à-dire sans rien demander.
+fn selectionnee_rev1() -> Session<UnCompte, Boites> {
     let mut session = nouvelle(true);
     dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
     dire(&mut session, b"a002 SELECT INBOX\r\n");
@@ -1407,7 +1442,10 @@ fn les_commandes_de_tous_les_etats_passent_partout() {
         assert!(texte.starts_with("a001 OK NOOP completed"), "{texte}");
         assert_eq!(action, Action::Continue);
         let (texte, _) = dire(&mut session, b"a002 CAPABILITY\r\n");
-        assert!(texte.contains("* CAPABILITY IMAP4rev2"), "{texte}");
+        assert!(
+            texte.contains("* CAPABILITY IMAP4rev1 IMAP4rev2"),
+            "{texte}"
+        );
     }
 }
 
@@ -1417,7 +1455,7 @@ fn logout_dit_adieu_puis_conclut() {
     let (texte, action) = dire(&mut session, b"a001 LOGOUT\r\n");
     assert_eq!(
         texte,
-        "* BYE IMAP4rev2 server logging out\r\na001 OK LOGOUT completed\r\n"
+        "* BYE IMAP server logging out\r\na001 OK LOGOUT completed\r\n"
     );
     assert_eq!(action, Action::Close);
     assert_eq!(session.state(), State::Logout);
@@ -1434,6 +1472,10 @@ fn logout_dit_adieu_puis_conclut() {
 #[test]
 fn les_verbes_retires_par_rev2_sont_refuses_en_le_disant() {
     let mut session = nouvelle(true);
+    dire(&mut session, b"a000 LOGIN jean ouvre-toi\r\n");
+    // **C'EST `ENABLE` QUI LES RETIRE**, et non l'existence de rev2 : tant que
+    // le client n'a rien demandé, ce serveur est en rev1 et les sert.
+    dire(&mut session, b"a000 ENABLE IMAP4rev2\r\n");
     for commande in [&b"a001 LSUB \"\" *\r\n"[..], b"a002 CHECK\r\n"] {
         let (texte, _) = dire(&mut session, commande);
         assert!(
@@ -3267,6 +3309,221 @@ fn un_expunge_sans_boite_ouverte_est_hors_d_etat() {
 
 // ── `SEARCH` ────────────────────────────────────────────────────────────────
 
+// ── LES DEUX VERSIONS ───────────────────────────────────────────────────────
+
+/// **CE SERVEUR COMMENCE EN IMAP4rev1**, et c'est ce qui le rend joignable.
+///
+/// # LE DÉFAUT LUI-MÊME
+///
+/// `CAPABILITY` n'annonçait qu'`IMAP4rev2`. `imaplib`, de la bibliothèque
+/// standard de Python, REFUSE alors la connexion — « server not IMAP4
+/// compliant » — avant d'avoir envoyé une seule commande, parce qu'il n'admet
+/// que `IMAP4REV1` et `IMAP4`. Dovecot, sur la machine que ce serveur doit
+/// remplacer, n'annonce lui aussi que `IMAP4rev1` : tous les clients qui y
+/// relèvent leur courrier parlent donc rev1.
+#[test]
+fn les_deux_versions_s_annoncent_et_rev1_vient_en_tete() {
+    let mut session = nouvelle(true);
+    let (texte, _) = dire(&mut session, b"a001 CAPABILITY\r\n");
+    let annonce = texte.split("\r\n").next().unwrap_or_default();
+
+    // §7.2.1 : LA VERSION EN PREMIER. Un client la cherche là.
+    assert!(
+        annonce.starts_with("* CAPABILITY IMAP4rev1 IMAP4rev2"),
+        "{annonce}"
+    );
+}
+
+/// **`ENABLE` NOMME CE QU'IL A ACTIVÉ** (§6.3.1), et rien d'autre.
+///
+/// La réponse était `* ENABLED` toute nue, quoi qu'on demande : le client ne
+/// pouvait pas savoir s'il parlait rev1 ou rev2, alors que la réponse à
+/// `SEARCH` en dépend.
+#[test]
+fn enable_nomme_ce_qu_il_active() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+
+    let (texte, _) = dire(&mut session, b"a002 ENABLE IMAP4rev2\r\n");
+    assert!(texte.starts_with("* ENABLED IMAP4rev2\r\n"), "{texte}");
+
+    // Ce qu'on ne sait pas activer ne se nomme pas.
+    let mut autre = nouvelle(true);
+    dire(&mut autre, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (rien, _) = dire(&mut autre, b"a002 ENABLE INVENTEE\r\n");
+    assert!(rien.starts_with("* ENABLED\r\n"), "{rien}");
+}
+
+/// **`SELECT` REND `RECENT` EN rev1, ET JAMAIS EN rev2.**
+///
+/// RFC 3501 §6.3.1 : « the server MUST send … RECENT ». §A de RFC 9051 l'a
+/// retiré. L'omettre pour un client rev1 était une non-conformité pure.
+#[test]
+fn select_rend_recent_en_rev1_et_pas_en_rev2() {
+    let mut rev1 = nouvelle(true);
+    dire(&mut rev1, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (en_rev1, _) = dire(&mut rev1, b"a002 SELECT Recente\r\n");
+    // La boîte porte trois messages, dont DEUX que personne n'a lus.
+    assert!(en_rev1.contains("* 3 EXISTS\r\n"), "{en_rev1}");
+    assert!(en_rev1.contains("* 2 RECENT\r\n"), "{en_rev1}");
+
+    let mut rev2 = nouvelle(true);
+    dire(&mut rev2, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut rev2, b"a002 ENABLE IMAP4rev2\r\n");
+    let (en_rev2, _) = dire(&mut rev2, b"a003 SELECT Recente\r\n");
+    assert!(en_rev2.contains("* 3 EXISTS\r\n"), "{en_rev2}");
+    assert!(!en_rev2.contains("RECENT"), "{en_rev2}");
+}
+
+/// **`STATUS (RECENT)` répond en rev1**, et se refuse une fois rev2 activé.
+#[test]
+fn recent_ne_se_demande_plus_une_fois_rev2_active() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (repond, _) = dire(&mut session, b"a002 STATUS Recente (MESSAGES RECENT)\r\n");
+    assert!(repond.contains("(MESSAGES 3 RECENT 2)"), "{repond}");
+
+    dire(&mut session, b"a003 ENABLE IMAP4rev2\r\n");
+    let (refuse, _) = dire(&mut session, b"a004 STATUS Recente (MESSAGES RECENT)\r\n");
+    assert!(
+        refuse.contains("BAD RECENT was removed by IMAP4rev2"),
+        "{refuse}"
+    );
+    // Et le reste continue de répondre : c'est le MOT qu'on refuse, pas la
+    // commande.
+    let (encore, _) = dire(&mut session, b"a005 STATUS Recente (MESSAGES)\r\n");
+    assert!(encore.contains("(MESSAGES 3)"), "{encore}");
+}
+
+/// **`LSUB` ET `CHECK` SONT SERVIS EN rev1.**
+///
+/// `LSUB` est ce qu'un client déployé emploie pour peupler son panneau de
+/// dossiers ; sans lui, il n'en voit aucun. Les refuser à qui n'a pas activé
+/// rev2, c'est refuser ce qu'on vient de lui annoncer.
+#[test]
+fn lsub_et_check_sont_servis_tant_que_rev2_n_est_pas_active() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+
+    let (check, _) = dire(&mut session, b"a002 CHECK\r\n");
+    assert_eq!(check, "a002 OK CHECK completed\r\n");
+
+    // Rien n'est abonné : la liste est vide, et la commande réussit.
+    let (vide, _) = dire(&mut session, b"a003 LSUB \"\" *\r\n");
+    assert_eq!(vide, "a003 OK LSUB completed\r\n");
+
+    dire(&mut session, b"a004 SUBSCRIBE INBOX\r\n");
+    let (une, _) = dire(&mut session, b"a005 LSUB \"\" *\r\n");
+    // **LA RÉPONSE SE NOMME `LSUB`**, et non `LIST` : un client rev1 apparie
+    // les réponses non sollicitées au verbe qu'il a écrit.
+    assert!(une.starts_with("* LSUB ("), "{une}");
+    assert!(une.contains("\"INBOX\"\r\n"), "{une}");
+    // §7.2.2 ne définit pas `\\Subscribed` : tout ce qu'un `LSUB` rend l'est.
+    assert!(!une.contains("\\Subscribed"), "{une}");
+    assert!(une.ends_with("a005 OK LSUB completed\r\n"), "{une}");
+
+    // Un motif vide demande le séparateur, et se nomme pareil.
+    let (separateur, _) = dire(&mut session, b"a006 LSUB \"\" \"\"\r\n");
+    assert!(
+        separateur.starts_with("* LSUB (\\Noselect) \"/\" \"\"\r\n"),
+        "{separateur}"
+    );
+
+    // **UNE FAUTE DE FORME SE NOMME `LSUB`**, et non `LIST` : un client qui lit
+    // « LIST arguments are not well formed » après avoir écrit `LSUB` cherche
+    // la faute dans une commande qu'il n'a pas envoyée.
+    let (faute, _) = dire(&mut session, b"a007 LSUB (SUBSCRIBED (REMOTE)) \"\" *\r\n");
+    assert!(
+        faute.contains("BAD LSUB arguments are not well formed"),
+        "{faute}"
+    );
+}
+
+/// **UN `SEARCH` NU REND LA FORME DE RFC 3501** — et un `RETURN` écrit, celle
+/// de RFC 4731, même sans avoir activé rev2.
+#[test]
+fn la_forme_de_search_suit_la_version_et_la_clause_return() {
+    let mut rev1 = selectionnee_rev1();
+    // §7.2.5 : `* SEARCH` puis les numéros, un par un. **AUCUNE PLAGE** : rev1
+    // n'en connaît pas, et en écrire une perdrait les résultats du milieu.
+    let nu = ecouler(&mut rev1, b"a003 SEARCH ALL\r\n");
+    assert_eq!(nu, "* SEARCH 1 2 3\r\na003 OK SEARCH completed\r\n");
+
+    // Écrire `RETURN`, c'est employer l'extension dont `ESEARCH` EST la
+    // réponse — le client l'a demandée, il l'obtient.
+    let avec_retour = ecouler(&mut rev1, b"a004 SEARCH RETURN (COUNT) ALL\r\n");
+    assert_eq!(
+        avec_retour,
+        "* ESEARCH (TAG \"a004\") COUNT 3\r\na004 OK SEARCH completed\r\n"
+    );
+
+    // Sans résultat, rev1 rend `* SEARCH` tout court : c'est une liste vide,
+    // et non une absence de réponse.
+    let rien = ecouler(&mut rev1, b"a005 SEARCH ANSWERED DELETED\r\n");
+    assert_eq!(rien, "* SEARCH\r\na005 OK SEARCH completed\r\n");
+
+    // `UID SEARCH` rend des UID, sans le dire : rev1 n'a pas de mot pour cela.
+    let par_uid = ecouler(&mut rev1, b"a006 UID SEARCH ALL\r\n");
+    assert_eq!(
+        par_uid,
+        "* SEARCH 10 20 30\r\na006 OK UID SEARCH completed\r\n"
+    );
+}
+
+/// **LES RÉSULTATS CONTIGUS NE SE COMPRIMENT PAS EN rev1.**
+///
+/// C'est le piège de cette forme : la machinerie de rev2 comprime `5 6 7` en
+/// `5:7`, et une plage écrite à la façon de rev1 ne rendrait que son début —
+/// les résultats du milieu disparaîtraient sans que rien ne le dise.
+#[test]
+fn une_suite_contigue_s_ecrit_nombre_par_nombre_en_rev1() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut session, b"a002 SELECT Suite\r\n");
+
+    let fil = ecouler(&mut session, b"a003 UID SEARCH ALL\r\n");
+    assert_eq!(
+        fil, "* SEARCH 5 6 7\r\na003 OK UID SEARCH completed\r\n",
+        "les trois UID sont contigus, et doivent rester trois nombres"
+    );
+}
+
+/// **UN TAMPON ÉTROIT NE PERD PAS UN RÉSULTAT DE rev1.**
+///
+/// La forme de rev1 traverse la même machinerie que celle de rev2 : elle
+/// s'écoule en morceaux, et reprend là où elle s'est arrêtée.
+#[test]
+fn la_forme_de_rev1_se_decoupe_sans_perdre_de_resultat() {
+    // `Eparse` porte soixante messages : la ligne de résultats fait bien plus
+    // qu'un tampon, et doit donc se reprendre plusieurs fois. La borne basse est
+    // celle de la CONCLUSION étiquetée — `c OK SEARCH completed\r\n`, vingt-trois
+    // octets —, qui s'écrit d'un seul geste comme partout ailleurs.
+    let mut attendu = std::string::String::from("* SEARCH");
+    for rang in 1..=60 {
+        attendu.push_str(&std::format!(" {rang}"));
+    }
+    attendu.push_str("\r\nc OK SEARCH completed\r\n");
+
+    for taille in 23..=34_usize {
+        let mut session = nouvelle(true);
+        dire(&mut session, b"a LOGIN jean ouvre-toi\r\n");
+        dire(&mut session, b"b SELECT Eparse\r\n");
+        let mut grand = [0_u8; 512];
+        session
+            .handle(b"c SEARCH ALL\r\n", &mut grand)
+            .expect("traitable");
+
+        let mut fil = std::string::String::new();
+        let mut petit = std::vec![0_u8; taille];
+        while let Some(morceau) = session.next_fetch(&mut petit).expect("émettable") {
+            if let super::FetchChunk::Bytes(octets) = morceau {
+                fil.push_str(&std::string::String::from_utf8_lossy(octets));
+            }
+        }
+        assert_eq!(fil, attendu, "taille {taille}");
+    }
+}
+
 /// **IMAP4rev2 a remplacé `* SEARCH` par `* ESEARCH`** (§7.3.4), et les
 /// résultats y sont un ENSEMBLE, pas une liste.
 #[test]
@@ -3494,6 +3751,7 @@ fn un_search_sans_boite_ouverte_est_hors_d_etat() {
 fn un_trou_dans_la_boite_n_arrete_pas_la_recherche() {
     let mut session = nouvelle(true);
     dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut session, b"a000 ENABLE IMAP4rev2\r\n");
     dire(&mut session, b"a002 SELECT Trouee\r\n");
     let fil = ecouler(&mut session, b"a003 SEARCH ALL\r\n");
     assert_eq!(
@@ -3575,6 +3833,9 @@ fn un_tampon_qui_suffit_a_l_entete_et_pas_a_la_plage_le_dit() {
     for taille in 23..=25_usize {
         let mut session = nouvelle(true);
         dire(&mut session, b"a LOGIN jean ouvre-toi\r\n");
+        // L'en-tête dont on mesure la longueur est celui de rev2 : la forme de
+        // rev1, `* SEARCH`, tient en huit octets et n'aurait pas ce cas.
+        dire(&mut session, b"c ENABLE IMAP4rev2\r\n");
         dire(&mut session, b"b SELECT Grande\r\n");
         let mut grand = [0_u8; 512];
         session
@@ -3595,6 +3856,7 @@ fn un_tampon_qui_suffit_a_l_entete_et_pas_a_la_plage_le_dit() {
     // en demande vingt-sept, et c'est un morceau comme les autres.
     let mut session = nouvelle(true);
     dire(&mut session, b"a LOGIN jean ouvre-toi\r\n");
+    dire(&mut session, b"c ENABLE IMAP4rev2\r\n");
     dire(&mut session, b"b SELECT Grande\r\n");
     let mut grand = [0_u8; 512];
     session
@@ -3865,6 +4127,8 @@ fn un_move_qui_ne_designe_rien_reussit() {
 fn un_move_dont_l_ensemble_est_trop_morcele_se_refuse() {
     let mut session = nouvelle(true);
     dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    // La vérification finale lit une PLAGE : c'est la forme de rev2.
+    dire(&mut session, b"a000 ENABLE IMAP4rev2\r\n");
     dire(&mut session, b"a002 SELECT Eparse\r\n");
     let (texte, _) = dire(&mut session, b"a003 MOVE 1:* INBOX\r\n");
     assert!(
@@ -5011,7 +5275,7 @@ fn une_option_de_list_qu_on_ne_sert_pas_est_une_faute() {
     dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
     for commande in [
         &b"a002 LIST (RECURSIVEMATCH) \"\" *\r\n"[..],
-        b"a003 LIST \"\" * RETURN (STATUS (RECENT))\r\n",
+        b"a003 LIST \"\" * RETURN (STATUS (INVENTE))\r\n",
     ] {
         let (texte, _) = dire(&mut session, commande);
         assert!(
@@ -5091,8 +5355,10 @@ fn une_liste_de_status_mal_formee_est_une_faute() {
         &b"a002 STATUS INBOX\r\n"[..],
         // Une liste vide : §9 en veut au moins un élément.
         b"a003 STATUS INBOX ()\r\n",
-        // Un mot qui n'est pas un élément — `RECENT` a disparu de rev2.
-        b"a004 STATUS INBOX (RECENT)\r\n",
+        // Un mot qui n'est d'aucune des deux versions. **`RECENT` N'EST PLUS
+        // ICI** : RFC 3501 §6.3.10 le définit, ce serveur annonce `IMAP4rev1`,
+        // et c'est la session qui le refuse une fois rev2 activé — voir
+        // `recent_ne_se_demande_plus_une_fois_rev2_active`.
         b"a005 STATUS INBOX (TAILLE)\r\n",
         // Une parenthèse qui ne se ferme pas.
         b"a006 STATUS INBOX (MESSAGES\r\n",

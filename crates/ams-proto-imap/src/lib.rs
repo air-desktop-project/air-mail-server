@@ -1,21 +1,30 @@
 //! Grammaire IMAP : décodage et encodage, **sans entrée-sortie**.
 //!
-//! Périmètre : RFC 9051 (IMAP4rev2), et RIEN D'AUTRE.
+//! Périmètre : RFC 9051 (IMAP4rev2), et ce que RFC 3501 exige EN PLUS.
 //!
-//! # CE N'EST PAS L'INTEROPÉRABILITÉ RFC 3501, ET CETTE LIGNE L'A PRÉTENDU
+//! # LES DEUX VERSIONS, ET CE QUI LES SÉPARE VRAIMENT
 //!
-//! Elle annonçait « l'interopérabilité RFC 3501 (IMAP4rev1) que les clients
-//! déployés exigent encore ». Rien de tel n'est écrit : `CAPABILITY` n'annonce
-//! qu'`IMAP4rev2`, et le contraire est une décision que C6 laisse ouverte —
-//! « la compatibilité rev1 sera examinée pour ce qu'elle coûte, jamais accordée
-//! par défaut ».
+//! Ce serveur annonçait `IMAP4rev2` seul, et cette page a longtemps affirmé
+//! « le clivage ne tient pas à ce que ce serveur SAIT faire, mais à une ligne
+//! de capacités ». **C'était faux, et la mesure du 2026-09-05 l'a montré** :
+//! ajouter la ligne ne suffisait pas. Quatre choses manquaient, dont trois
+//! qu'un client rev1 emploie à chaque session :
 //!
-//! **Ce que cela coûte, mesuré le 2026-09-05** : `imaplib`, de la bibliothèque
-//! standard de Python, REFUSE LA CONNEXION — « server not IMAP4 compliant » —
-//! parce qu'il exige `IMAP4rev1` ou `IMAP4` dans les capacités, et il le fait
-//! avant d'avoir envoyé une seule commande. `curl`, lui, ne l'exige pas et sert
-//! la boîte sans rien remarquer. Le clivage ne tient donc pas à ce que ce
-//! serveur SAIT faire, mais à une ligne de capacités.
+//! - `SELECT` doit rendre `* n RECENT` (RFC 3501 §6.3.1 : « the server MUST
+//!   send ») ; rev2 l'a retiré (§A) ;
+//! - `SEARCH` doit rendre `* SEARCH 2 4 5`, une LISTE, là où rev2 rend un
+//!   ENSEMBLE comprimé — `* ESEARCH (TAG "a") ALL 2,4:5` ;
+//! - `STATUS` doit admettre l'élément `RECENT` (§6.3.10) ;
+//! - `LSUB` et `CHECK` doivent répondre (§6.3.9, §6.4.1).
+//!
+//! Ce qui a rendu la mesure possible est un pair extérieur : `imaplib`, de la
+//! bibliothèque standard de Python, refusait la connexion avant d'envoyer une
+//! seule commande — « server not IMAP4 compliant ». Et Dovecot, sur la machine
+//! que ce serveur doit remplacer, n'annonce lui non plus que `IMAP4rev1`.
+//!
+//! **Les deux versions cohabitent comme §6.3.1 le prescrit** : on commence en
+//! rev1, et `ENABLE IMAP4rev2` bascule. Un serveur qui basculerait tout seul
+//! retirerait à un client ce qu'il n'a pas demandé de perdre.
 //!
 //! IMAP est de loin la plus grosse des quatre grammaires : littéraux comptés,
 //! réponses non sollicitées, séquences et UID, `FETCH` structuré. C'est aussi
