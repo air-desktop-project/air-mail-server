@@ -184,8 +184,19 @@ réglage : « annoncer sans pouvoir » ferait mentir la bannière.
 
 ## 6. Les ports privilégiés
 
-Le serveur écoute sur des ports hauts ; le pare-feu y redirige les ports
-attendus. Avec `nftables` :
+Le serveur **refuse de s'exécuter en superutilisateur** (C10), et ne peut donc
+pas lier un port sous 1024. Les deux moitiés se mesurent :
+
+```
+# ip netns exec ams-srv air-mail-server --config … 
+air-mail-server : le serveur refuse de s'exécuter en tant que superutilisateur
+(C10) ; les ports privilégiés s'atteignent par une redirection de pare-feu
+
+$ air-mail-server --config …   # avec `--listen 0.0.0.0:25`
+air-mail-server : écoute sur 0.0.0.0:25 : Permission denied (os error 13)
+```
+
+La redirection n'est donc pas un confort : c'est le seul chemin.
 
 ```
 table inet mail {
@@ -193,22 +204,86 @@ table inet mail {
         type nat hook prerouting priority dstnat;
         tcp dport 25  redirect to :2525
         tcp dport 587 redirect to :2525
-        tcp dport 143 redirect to :1143
-        tcp dport 993 redirect to :1143
+        tcp dport 465 redirect to :4465
+        tcp dport 993 redirect to :9993
         tcp dport 110 redirect to :1110
-        tcp dport 995 redirect to :1110
     }
 }
 ```
 
-> **Cette table n'a pas été éprouvée par ce projet.** Elle est donnée comme point
-> de départ ; c'est le seul endroit de ce document qui ne soit pas vérifié contre
-> le binaire. Vérifiez-la sur votre machine avant de vous y fier.
->
-> Deux remarques qui valent quand même : `redirect` ne s'applique qu'au trafic
-> ARRIVANT, et le serveur voit alors le port haut — c'est normal. Et 465, 993 et
-> 995 sont des ports « TLS implicite » : ce serveur ne sert que le `STARTTLS`
-> explicite, donc les y rediriger ne fera pas ce que leurs clients attendent.
+avec la configuration qui lui répond :
+
+```
+air-mail-admin config write /var/lib/air-mail/air-mail.conf \
+    --listen 0.0.0.0:2525 --listen-smtps 0.0.0.0:4465 \
+    --listen-imaps 0.0.0.0:9993 --listen-pop3 0.0.0.0:1110 \
+    --tls-cert … --tls-key … …
+```
+
+**Cette table a été éprouvée**, dans deux espaces de noms réseau reliés par un
+`veth` — l'un portant le serveur et la table, l'autre jouant le client. Ce qui
+suit est ce qui en est sorti, et non ce qu'on en attendait.
+
+| port | redirigé vers | mesuré |
+|---|---|---|
+| 25 | 2525 | `220 mail.essai.test ESMTP`, `STARTTLS` accepté |
+| 587 | 2525 | `220 mail.essai.test ESMTP` |
+| 465 | 4465 | poignée de main **TLS 1.3**, puis la bannière |
+| 993 | 9993 | poignée de main **TLS 1.3**, puis `* OK [CAPABILITY IMAP4rev2 …]` |
+| 110 | 1110 | `+OK POP3 server ready` |
+
+Un message remis par le **465** a été relu par le **993**, sujet et corps
+intacts, à travers la redirection.
+
+### L'adresse du client survit à la redirection
+
+C'est ce qui compte pour le garde et pour la trace, et cela se vérifie dans
+l'en-tête déposé :
+
+```
+Received: from client.essai.test ([10.99.0.2])
+	by mail.essai.test with ESMTPS;
+```
+
+`redirect` change la DESTINATION, jamais la source.
+
+### Ce que cette table ne peut pas servir
+
+- **Le 995 (POP3S) n'est pas servable.** Ce serveur n'a qu'un mode POP3, le
+  `STARTTLS` explicite ; il n'y a pas de `--listen-pop3s`. Y rediriger le 995
+  donnerait un port qui répond en clair à un client qui attend déjà une poignée
+  de main : mesuré, `WRONG_VERSION_NUMBER`.
+- **Le 143 et le 993 ne peuvent pas être servis ENSEMBLE.** Il n'y a qu'une
+  écoute IMAP et qu'un mode : `--listen-imap` ou `--listen-imaps`, pas les deux.
+  Le SMTP, lui, accepte plusieurs écoutes de modes différents — c'est pourquoi
+  25, 587 et 465 tiennent ensemble.
+
+### N'ajoutez PAS de chaîne `output`
+
+Un port redirigé n'est joignable que **depuis l'extérieur**. Depuis la machine
+elle-même, `127.0.0.1:25` ET son adresse publique sur le 25 sont refusés : le
+trafic local ne passe pas par `prerouting`. Un contrôle local doit donc viser
+le port haut — `127.0.0.1:2525`.
+
+La correction qui vient à l'esprit est une chaîne `output`. **Elle est un
+piège**, et voici la mesure. Avant :
+
+```
+srv → 10.99.0.2:25   '220 MTA-EXTERIEUR'
+```
+
+après avoir ajouté `chain output { type nat hook output priority dstnat; }`
+avec `tcp dport 25 redirect to :2525` :
+
+```
+srv → 127.0.0.1:25   '220 mail.essai.test ESMTP'    ← ce qu'on voulait
+srv → 10.99.0.2:25   '220 mail.essai.test ESMTP'    ← le MTA extérieur a disparu
+```
+
+La règle ne distingue pas « le 25 de cette machine » du « 25 de n'importe qui » :
+**toute** connexion locale vers un port 25, où qu'il soit, revient au serveur
+lui-même. Une sonde qui croit interroger un MTA distant s'interroge elle-même,
+et n'a aucun moyen de s'en apercevoir.
 
 ---
 
@@ -394,8 +469,12 @@ air-mail-admin summary /var/lib/air-mail/maildir/jean
 
   **Ce que cela ne dit pas** : aucun service commercial n'a été confronté, ni un
   envoi en masse. Et la première remise de production reste à faire.
-- **La table `nftables` ci-dessus n'est pas éprouvée**, et elle seule : personne
-  ne l'a fait tourner. L'unité systemd, elle, l'a été — voir le §7.
+- **La table `nftables` du §6 a été éprouvée**, dans deux espaces de noms réseau,
+  et le §6 dit ce qui en est sorti. Ce qui n'a PAS été éprouvé : la même table
+  sur une machine qui porte déjà d'autres règles, où l'ordre des priorités
+  compte.
+- **Le 995 ne peut pas être servi**, et le 143 ne peut pas l'être en même temps
+  que le 993 : voir le §6.
 - **Il n'y a pas de paquet**, ni de script d'installation. Ce document décrit
   des gestes à faire, pas une commande à lancer.
 - **La durée de vie des jetons ne se règle pas** : quinze minutes par défaut,

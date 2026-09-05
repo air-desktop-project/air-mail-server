@@ -1681,7 +1681,17 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         // lui arrivait par excès. Sept lignes qu'on peut lire valent mieux
         // qu'une qu'on saute.
         for dit in [
-            std::format!("IMAP écoute sur {adresse} — IMAP4rev2 est servi EN ENTIER"),
+            std::format!(
+                // **LE MODE TLS SE DIT ICI AUSSI.** La ligne SMTP le disait
+                // déjà ; celle-ci se taisait, et le 993 est justement le port
+                // où le mode ne se devine pas — les deux se servent au même
+                // endroit, et seul le client sait qu'il s'est trompé.
+                "IMAP écoute sur {adresse} en {} — IMAP4rev2 est servi EN ENTIER",
+                match options.imap_implicit_tls {
+                    true => "TLS implicite",
+                    false => "STARTTLS",
+                }
+            ),
             String::from(
                 "  commandes  `SELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`, `EXPUNGE`, \
                  `SEARCH`, `COPY`, `MOVE`, `APPEND`, `CREATE`, `DELETE`, `RENAME`, \

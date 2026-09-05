@@ -3858,6 +3858,108 @@ Ce qui reste hors du serveur : **rien de connu**. Cette ligne annonçait « la f
 de réémission des messages sortants », et c'était faux — elle existe, elle est
 câblée, et [la liste v1](v1.md) le mesure plutôt que de le croire.
 
+## Un pare-feu qu'on documentait sans l'avoir fait tourner
+
+La table `nftables` de `docs/installation.md` portait un aveu : « **cette table
+n'a pas été éprouvée par ce projet** ». Il était honnête, et il était le seul
+endroit du document à l'être par défaut plutôt que par vérification.
+
+Ce registre l'avait rangée « hors mandat », au motif qu'éprouver un pare-feu sur
+la machine de quelqu'un peut le couper de ce dont il dépend. **Le raisonnement
+confondait deux choses** : éprouver UN pare-feu, et éprouver LE pare-feu de
+quelqu'un. Deux espaces de noms réseau reliés par un `veth` donnent le premier
+sans jamais toucher au second — l'hôte est resté à zéro règle du début à la fin.
+
+### CE QUE LA TABLE FAISAIT, ET NE FAISAIT PAS
+
+Elle tenait pour le 25, le 587, le 143 et le 110. Elle échouait ailleurs :
+
+| port | ce qui était écrit | ce qui a été mesuré |
+|---|---|---|
+| 465 | *absent de la table* | connexion refusée |
+| 993 | redirigé vers l'écoute `STARTTLS` | `WRONG_VERSION_NUMBER` |
+| 995 | redirigé vers le POP3 en clair | `WRONG_VERSION_NUMBER` |
+
+Le document AVERTISSAIT pour le 993 et le 995 — « ce serveur ne sert que le
+`STARTTLS` explicite » —, et cet avertissement était devenu faux la veille : la
+tranche précédente avait ajouté le TLS implicite. **La prose ne mentait plus sur
+le code, elle mentait sur elle-même**, en retard d'une tranche.
+
+La table mesurée sert désormais 25, 587, 465, 993 et 110. Un message remis par
+le 465 a été relu par le 993, sujet et corps intacts, à travers la redirection.
+
+### DEUX LIMITES QUI N'ÉTAIENT ÉCRITES NULLE PART
+
+- **Le 995 n'est pas servable** : il n'existe pas de `--listen-pop3s`.
+- **Le 143 et le 993 ne peuvent pas tenir ensemble** : `listenImap` est UN champ
+  et `imapImplicitTls` UN booléen. Le SMTP, lui, porte une LISTE d'écoutes, et
+  c'est pourquoi 25, 587 et 465 cohabitent.
+
+Cette asymétrie n'était pas une décision : c'est ce qui est sorti de la tranche
+précédente, où seul le SMTP avait besoin de plusieurs écoutes. Elle ne gêne pas
+la reprise de la machine visée — qui ne sert ni 143, ni 110, ni 995 — et serait
+bloquante pour quelqu'un d'autre.
+
+### L'ADRESSE DU CLIENT SURVIT
+
+`redirect` change la destination, jamais la source, et l'en-tête déposé le
+montre : `Received: from client.essai.test ([10.99.0.2])`. C'est ce qui compte
+pour le garde, qui bannit par adresse, et pour la trace.
+
+### LA CHAÎNE `output` EST UN PIÈGE, ET LA MESURE LE MONTRE
+
+Un port redirigé n'est joignable que du dehors. Depuis la machine elle-même,
+`127.0.0.1:25` est refusé — et **son adresse publique sur le 25 aussi** : le
+trafic local ne passe pas par `prerouting`. La correction évidente est une
+chaîne `output`. Avant de l'ajouter :
+
+```
+srv → 10.99.0.2:25   '220 MTA-EXTERIEUR'
+```
+
+après :
+
+```
+srv → 127.0.0.1:25   '220 mail.essai.test ESMTP'   ← ce qu'on voulait
+srv → 10.99.0.2:25   '220 mail.essai.test ESMTP'   ← le MTA extérieur a disparu
+```
+
+La règle ne distingue pas « le 25 d'ici » du « 25 de n'importe qui » : toute
+connexion locale vers un port 25 revient au serveur. Une sonde qui croit
+interroger un MTA distant s'interroge elle-même, **et n'a aucun moyen de s'en
+apercevoir**. Le document dit donc de viser le port haut.
+
+### CE QUE LE LABORATOIRE A TROUVÉ CHEZ NOUS, EN PASSANT
+
+Pour écrire la configuration d'essai, il a fallu la relire — et `config show`
+était **aveugle à toute la tranche précédente** :
+
+- la seconde écoute SMTP, le 465, n'apparaissait nulle part ;
+- `--listen-imap` et `--listen-imaps` produisaient deux fichiers DIFFÉRENTS et
+  un affichage IDENTIQUE, au caractère près.
+
+Un exploitant ne pouvait donc pas relire ce qu'il avait écrit, sur le port même
+où se tromper de mode ne se voit qu'au moment où un client refuse de se
+connecter. La ligne de démarrage du serveur avait le même trou : elle disait le
+mode pour le SMTP, et se taisait pour l'IMAP.
+
+C'est la onzième fois que ce registre trouve un écart entre ce qui est fait et ce
+qui est dit — et cette espèce-ci est neuve : **le code était juste, et c'est
+l'outil qui sert à le VÉRIFIER qui était muet.** Un défaut qui ne se voit que
+lorsqu'on cherche à s'assurer de quelque chose.
+
+### `IMAP4rev2` SEUL : UN CLIENT COURANT REFUSE LA CONNEXION
+
+Mesuré au passage, en confrontant `imaplib` : il n'ouvre PAS de session —
+`error: server not IMAP4 compliant` —, parce qu'il n'admet que `IMAP4REV1` et
+`IMAP4`. Le même écart se voit sur `SEARCH`, que RFC 9051 fait répondre en
+`ESEARCH` : un client rev1 en conclut « aucun message ».
+
+**Ce n'est pas une découverte** — `ams-proto-imap` le dit dans sa propre
+documentation, et ce registre le rangeait déjà parmi les décisions. Mais la
+décision n'était pas portée dans la liste des bloquants de la v1, alors qu'elle
+décide de qui pourra relever son courrier. Elle y est désormais.
+
 ## Un certificat lu une fois et jamais relu
 
 Un certificat Let's Encrypt vit **trois mois**, et se renouvelle tous les deux.

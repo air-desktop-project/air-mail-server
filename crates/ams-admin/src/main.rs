@@ -483,10 +483,72 @@ fn montrer(fichier: &Path) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Comment le TLS se pose sur une écoute, en toutes lettres.
+///
+/// **LES DEUX MODES OCCUPENT LA MÊME LIGNE**, et rien d'autre ne les distingue :
+/// une écoute IMAP sur le 993 en `STARTTLS` et la même en TLS implicite ne
+/// diffèrent que par ce mot. Sans lui, un exploitant ne peut pas relire ce qu'il
+/// a écrit — et c'est précisément le port où se tromper ne se voit qu'au moment
+/// où un client refuse de se connecter.
+const fn mode_tls(implicite: bool) -> &'static str {
+    match implicite {
+        true => "TLS implicite (RFC 8314 §3)",
+        false => "STARTTLS",
+    }
+}
+
+/// L'écoute IMAP, AVEC SON MODE.
+///
+/// Le mode ne se déduit pas du port : le 993 se sert dans les deux, et c'est
+/// tout ce qui les distingue dans un fichier de configuration.
+fn ligne_de_l_ecoute_imap(config: &Configuration) -> String {
+    if config.listen_imap.is_empty() {
+        return String::from("(aucune — IMAP n'est pas servi)");
+    }
+    std::format!(
+        "{} — {}",
+        config.listen_imap,
+        mode_tls(config.imap_implicit_tls)
+    )
+}
+
+/// Les écoutes SMTP, qui peuvent être PLUSIEURS et de modes différents.
+///
+/// `listen` porte l'adresse de la première ; la liste, quand elle n'est pas
+/// vide, EST la liste. Ne montrer que `listen` — ce que cette commande faisait —
+/// cachait toutes les autres, et le 465 avec elles.
+fn lignes_des_ecoutes_smtp(config: &Configuration) -> Vec<String> {
+    if config.smtp_listeners.is_empty() {
+        return std::vec![std::format!(
+            "écoute             {} — {}",
+            config.listen,
+            mode_tls(false)
+        )];
+    }
+    config
+        .smtp_listeners
+        .iter()
+        .enumerate()
+        .map(|(rang, ecoute)| {
+            let etiquette = match rang {
+                0 => "écoute            ",
+                _ => "                  ",
+            };
+            std::format!(
+                "{etiquette} {} — {}",
+                ecoute.address,
+                mode_tls(ecoute.implicit_tls)
+            )
+        })
+        .collect()
+}
+
 /// Rend une configuration lisible par un humain.
 fn afficher(config: &Configuration) {
     println!("domaine            {}", config.domain);
-    println!("écoute             {}", config.listen);
+    for ligne in lignes_des_ecoutes_smtp(config) {
+        println!("{ligne}");
+    }
     println!(
         "écoute POP3        {}",
         if config.listen_pop3.is_empty() {
@@ -495,14 +557,7 @@ fn afficher(config: &Configuration) {
             &config.listen_pop3
         }
     );
-    println!(
-        "écoute IMAP        {}",
-        if config.listen_imap.is_empty() {
-            "(aucune — IMAP n'est pas servi)"
-        } else {
-            &config.listen_imap
-        }
-    );
+    println!("écoute IMAP        {}", ligne_de_l_ecoute_imap(config));
     println!("boîte              {}", config.maildir);
     println!(
         "domaines hébergés  {}",
@@ -1106,7 +1161,7 @@ fn resumer(racine: &Path) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::avertissements;
+    use super::{avertissements, ligne_de_l_ecoute_imap, lignes_des_ecoutes_smtp};
 
     /// La configuration que cette ligne de commande produit.
     ///
@@ -1139,6 +1194,64 @@ mod tests {
         avertissements(config)
             .iter()
             .any(|ligne| ligne.contains(fragment))
+    }
+
+    /// **LE DÉFAUT LUI-MÊME, DEUXIÈME ESPÈCE.**
+    ///
+    /// `--listen-imap` et `--listen-imaps` écrivaient DEUX fichiers différents et
+    /// s'affichaient à l'identique. Un exploitant ne pouvait donc pas relire ce
+    /// qu'il avait écrit — sur le port même où se tromper de mode ne se voit
+    /// qu'au moment où un client refuse de se connecter.
+    #[test]
+    fn les_deux_modes_imap_ne_s_affichent_pas_pareil() {
+        let explicite = config_de(&["--listen-imap", "0.0.0.0:9993"]);
+        let implicite = config_de(&["--listen-imaps", "0.0.0.0:9993"]);
+
+        // LA MÊME ADRESSE : c'est bien le mode, et lui seul, qui diffère.
+        assert_eq!(explicite.listen_imap, implicite.listen_imap);
+        assert_ne!(
+            ligne_de_l_ecoute_imap(&explicite),
+            ligne_de_l_ecoute_imap(&implicite),
+            "les deux modes s'affichaient à l'identique"
+        );
+    }
+
+    /// Une écoute IMAP absente le dit, plutôt que de laisser une ligne vide.
+    #[test]
+    fn une_ecoute_imap_absente_se_dit() {
+        let config = config_de(&[]);
+        assert!(ligne_de_l_ecoute_imap(&config).contains("n'est pas servi"));
+    }
+
+    /// **LA SECONDE ÉCOUTE SMTP NE DOIT PAS DISPARAÎTRE.**
+    ///
+    /// L'affichage ne montrait que `listen`, et le 465 n'apparaissait nulle part.
+    #[test]
+    fn toutes_les_ecoutes_smtp_s_affichent_avec_leur_mode() {
+        let config = config_de(&["--listen-smtps", "127.0.0.1:4465"]);
+        let lignes = lignes_des_ecoutes_smtp(&config).join("\n");
+
+        assert!(
+            lignes.contains("127.0.0.1:2525") && lignes.contains("STARTTLS"),
+            "l'écoute `STARTTLS` manque : {lignes}"
+        );
+        assert!(
+            lignes.contains("127.0.0.1:4465") && lignes.contains("implicite"),
+            "l'écoute en TLS implicite manque : {lignes}"
+        );
+    }
+
+    /// Une configuration écrite avant la liste n'a qu'une écoute, en `STARTTLS`.
+    #[test]
+    fn sans_liste_l_ecoute_unique_se_dit_en_starttls() {
+        let mut config = config_de(&[]);
+        config.smtp_listeners.clear();
+        let lignes = lignes_des_ecoutes_smtp(&config).join("\n");
+
+        assert!(
+            lignes.contains("127.0.0.1:2525") && lignes.contains("STARTTLS"),
+            "{lignes}"
+        );
     }
 
     /// **LE DÉFAUT LUI-MÊME.**
