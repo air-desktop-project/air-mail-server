@@ -747,30 +747,80 @@ pub async fn envoyer_la_section(client: &mut Client, flux: u64, section: &[u8], 
     client.parler().await;
 }
 
+/// Combien de temps on laisse à une réponse pour arriver EN ENTIER.
+///
+/// # DU TEMPS, ET NON DES TOURS — C'ÉTAIT LE DÉFAUT
+///
+/// Cette attente comptait DIX TOURS de boucle. Chaque tour attend au plus une
+/// demi-seconde un datagramme ; mais le serveur ouvre d'abord ses trois flux
+/// unidirectionnels — le contrôle et les deux flux QPACK de §4.2 de RFC 9204 —,
+/// et **leurs datagrammes consomment des tours sans faire avancer la réponse**.
+/// Selon l'ordre d'arrivée, les dix tours pouvaient donc être épuisés en
+/// quelques millisecondes, avant que la réponse ne soit complète.
+///
+/// C'est ce qui rendait l'échec si difficile à reproduire : il ne dépendait pas
+/// de la lenteur de la machine, mais de l'ORDRE dans lequel le serveur émet.
+const ATTENTE_DE_LA_REPONSE: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Attend la réponse SUR CE FLUX, et rend le corps de sa trame `DATA`.
 ///
 /// **LE NUMÉRO DE FLUX N'EST PAS UN ORNEMENT** : le serveur écrit aussi sur ses
 /// trois flux unidirectionnels — le contrôle et les deux flux QPACK de §4.2 de
 /// RFC 9204 —, et leurs octets ne sont pas une réponse.
+///
+/// # CETTE AIDE RENDAIT UN VECTEUR VIDE DANS QUATRE CAS, ET ON NE POUVAIT PAS
+/// # LES DISTINGUER D'UNE RÉPONSE AU CORPS VIDE
+///
+/// La boucle épuisée, l'en-tête illisible, la trame tronquée, le corps
+/// introuvable : les quatre rendaient `Vec::new()`. L'appelant assertait alors
+/// sur une chaîne vide, et son message — « la session doit avoir décidé :  » —
+/// ne nommait pas la cause. Le registre de ce dépôt a porté pendant des semaines
+/// un « essai instable jamais reproduit » qui était exactement cela.
+///
+/// Elle DIT désormais lequel des quatre, et ce qu'elle avait reçu.
+///
+/// # Panics
+///
+/// Si la réponse n'arrive pas en entier, ou si ce qui arrive n'a pas la forme
+/// d'une réponse HTTP/3 — en disant lequel des deux, et en montrant les octets.
 pub async fn attendre_la_reponse(client: &mut Client, flux: u64) -> Vec<u8> {
-    for _ in 0..10 {
-        client.ecouter().await;
-        if client.fin_recue(flux) {
-            break;
+    let depart = std::time::Instant::now();
+    while !client.fin_recue(flux) {
+        if depart.elapsed() >= ATTENTE_DE_LA_REPONSE {
+            panic!(
+                "le flux {flux} n'a pas fini en {} secondes.\n\
+                 CE N'EST PAS FORCÉMENT UN DÉFAUT DU SERVEUR : sous forte charge,\n\
+                 ce délai peut être trop court. Reçu jusqu'ici ({} octets) : {:?}",
+                ATTENTE_DE_LA_REPONSE.as_secs(),
+                client.recu(flux).len(),
+                client.recu(flux),
+            );
         }
+        client.ecouter().await;
         client.parler().await;
     }
     let recu = client.recu(flux).to_vec();
     // §4.1 : les en-têtes d'abord, le corps ensuite.
     let Ok(entete) = ams_proto_h3::FrameHeader::parse(&recu) else {
-        return Vec::new();
+        panic!("le flux {flux} ne commence pas par une trame HTTP/3 : {recu:?}");
     };
     let apres = usize::try_from(entete.total()).expect("tient");
     let Some(reste) = recu.get(apres..) else {
-        return Vec::new();
+        panic!(
+            "la trame d'en-tête du flux {flux} annonce {apres} octets, et il n'en est \
+             arrivé que {} : {recu:?}",
+            recu.len()
+        );
     };
-    let Ok(corps) = ams_proto_h3::FrameHeader::parse(reste) else {
+    // **DES EN-TÊTES SANS TRAME `DATA` SONT UNE RÉPONSE AU CORPS VIDE**, et §4.1
+    // de RFC 9114 l'autorise : une réponse est faite d'en-têtes puis de ZÉRO ou
+    // plusieurs `DATA`. C'est le seul des quatre anciens retours vides qui était
+    // JUSTE — et c'est ce qui le rendait indistinguable des trois autres.
+    if reste.is_empty() {
         return Vec::new();
+    }
+    let Ok(corps) = ams_proto_h3::FrameHeader::parse(reste) else {
+        panic!("ce qui suit les en-têtes du flux {flux} n'est pas une trame HTTP/3 : {reste:?}");
     };
     reste.get(corps.header_len()..).unwrap_or_default().to_vec()
 }

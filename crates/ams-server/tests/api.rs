@@ -346,10 +346,13 @@ fn sans_certificat_l_api_ne_s_ouvre_pas() {
         CLEF,
     );
     let serveur = lancer(&config, smtp);
+    // `attendre_le_journal` GARANTIT la première moitié : il panique en le
+    // disant si la ligne ne vient pas. Ce qui reste à vérifier ici est la
+    // RAISON qu'elle donne, et l'échec ne parle donc plus que d'elle.
     let journal = attendre_le_journal(&serveur, "API REST NON SERVIE");
     assert!(
-        journal.contains("API REST NON SERVIE") && journal.contains("aucun certificat"),
-        "le serveur doit dire pourquoi il n'ouvre pas ce port : {journal}"
+        journal.contains("aucun certificat"),
+        "le serveur doit dire POURQUOI il n'ouvre pas ce port : {journal}"
     );
     assert!(
         !ecoute_ouverte(http),
@@ -381,8 +384,8 @@ fn sans_secret_l_api_ne_s_ouvre_pas() {
     let serveur = lancer(&config, smtp);
     let journal = attendre_le_journal(&serveur, "API REST NON SERVIE");
     assert!(
-        journal.contains("API REST NON SERVIE") && journal.contains("aucun secret"),
-        "{journal}"
+        journal.contains("aucun secret"),
+        "le serveur doit dire POURQUOI il n'ouvre pas ce port : {journal}"
     );
     assert!(!ecoute_ouverte(http), "le port {http} ne doit pas s'ouvrir");
 }
@@ -450,8 +453,10 @@ fn avec_certificat_et_secret_l_api_sert_h2() {
     );
     let serveur = lancer(&config, smtp);
     let annonce = format!("API REST sur 127.0.0.1:{http}");
+    // L'annonce elle-même est garantie par l'attente : la réasserter ici ne
+    // pourrait plus échouer, et une assertion qui ne peut pas échouer se lit
+    // comme une garantie qu'elle ne donne pas.
     let journal = attendre_le_journal(&serveur, &annonce);
-    assert!(journal.contains(&annonce), "{journal}");
     // **CE QUE LE DÉMARRAGE DIT DE LA PORTÉE** : un mot de passe n'ouvre pas
     // l'administration, et le serveur l'annonce plutôt que de le laisser
     // découvrir.
@@ -487,6 +492,19 @@ fn avec_certificat_et_secret_l_api_sert_h2() {
     );
 }
 
+/// Combien de temps on laisse au serveur pour écrire une ligne de démarrage.
+///
+/// # DIX SECONDES, ET C'EST LA MÊME BORNE QUE POUR L'ÉCOUTE
+///
+/// Elle valait cinq, là où l'attente de l'écoute en accordait dix. Deux bornes
+/// différentes pour la même chose — « le serveur a-t-il fini de monter ? » —
+/// n'ont pas de raison d'être, et la plus courte cédait la première.
+///
+/// Généreuse, parce qu'elle **ne coûte rien quand tout va bien** : on ne
+/// l'atteint que lorsqu'il y a un défaut à voir. La resserrer ne rendrait la
+/// suite plus rapide que dans les cas où elle échoue.
+const ATTENTE_DU_JOURNAL: Duration = Duration::from_secs(10);
+
 /// Attend que le serveur ait écrit cette ligne, et rend ce qu'il a dit.
 ///
 /// # POURQUOI ATTENDRE PLUTÔT QUE DE LIRE
@@ -495,12 +513,38 @@ fn avec_certificat_et_secret_l_api_sert_h2() {
 /// après le `bind` — donc **avant** que l'API, HTTP/3 et le reste ne se montent.
 /// Lire le journal à cet instant, c'est le lire au hasard de l'ordonnancement :
 /// l'essai passe la plupart du temps, et échoue sous charge sans rien apprendre.
+///
+/// # CETTE AIDE RENONÇAIT EN SILENCE, ET C'EST CE QU'ELLE PRÉTENDAIT ÉVITER
+///
+/// Elle rendait le journal au bout du délai **que le motif y soit ou non**, et
+/// les trois essais qui l'appellent assertent aussitôt derrière. Sous charge,
+/// l'échec ne disait donc pas « j'ai attendu dix secondes et cette ligne n'est
+/// jamais venue » : il disait « le journal ne contient pas X », en montrant un
+/// journal d'apparence normale.
+///
+/// **C'est très exactement la forme d'un défaut qu'on ne reproduit pas.** Un
+/// échec dont le message ne nomme pas sa cause envoie chercher ailleurs — et le
+/// registre de ce dépôt porte un essai instable qu'une vingtaine d'exécutions
+/// n'ont pas su expliquer.
+///
+/// # Panics
+///
+/// Si la ligne n'est jamais venue, en le DISANT — avec ce qu'on attendait,
+/// combien de temps, et tout ce que le serveur a écrit pendant ce temps.
 fn attendre_le_journal(serveur: &Serveur, motif: &str) -> String {
     let depart = Instant::now();
     loop {
         let journal = serveur.journal();
-        if journal.contains(motif) || depart.elapsed() >= Duration::from_secs(5) {
+        if journal.contains(motif) {
             return journal;
+        }
+        if depart.elapsed() >= ATTENTE_DU_JOURNAL {
+            std::panic!(
+                "le serveur n'a jamais écrit `{motif}` en {} secondes.\n\
+                 CE N'EST PAS FORCÉMENT UN DÉFAUT DU SERVEUR : sous forte charge,\n\
+                 ce délai peut être trop court. Ce qu'il a dit :\n{journal}",
+                ATTENTE_DU_JOURNAL.as_secs()
+            );
         }
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -573,9 +617,9 @@ fn http3_configure_s_ouvre() {
         CLEF,
     );
     let serveur = lancer(&config, smtp);
-    let journal = attendre_le_journal(&serveur, "/udp");
+    let journal = attendre_le_journal(&serveur, &format!("127.0.0.1:{h3}/udp"));
     assert!(
-        journal.contains(&format!("127.0.0.1:{h3}/udp")) && journal.contains("ALPN `h3` seul"),
+        journal.contains("ALPN `h3` seul"),
         "le serveur doit dire ce qu'il ouvre : {journal}"
     );
     assert!(ecoute_udp_ouverte(h3), "le port UDP {h3} doit être ouvert");

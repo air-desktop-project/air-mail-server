@@ -3867,6 +3867,107 @@ Ce qui reste hors du serveur : **rien de connu**. Cette ligne annonçait « la f
 de réémission des messages sortants », et c'était faux — elle existe, elle est
 câblée, et [la liste v1](v1.md) le mesure plutôt que de le croire.
 
+## L'essai instable, et pourquoi vingt exécutions n'ont rien appris
+
+Le registre portait depuis des semaines un aveu : « une exécution de la suite a
+rendu 2 543 essais et un échec, une fois sur environ six, jamais reproduite
+depuis en plus de vingt exécutions — dont trois sous charge de fuzz ».
+
+Il a été reproduit au seizième passage d'une chasse de quarante, et la cause
+explique aussi pourquoi on la cherchait au mauvais endroit.
+
+### CE QUE L'ÉCHEC DISAIT, ET CE QU'IL NE DISAIT PAS
+
+Deux essais HTTP/3 échouaient ensemble :
+
+```
+la session doit avoir décidé :  — journal : …
+un jeton :  — …
+```
+
+Du VIDE, aux deux endroits. Le journal du serveur, imprimé sur des lignes et des
+lignes, montrait un démarrage parfaitement ordinaire — et c'est lui qu'on
+relisait, puisque c'est lui que le message montrait.
+
+### `attendre_la_reponse` COMPTAIT DES TOURS, PAS DU TEMPS
+
+```rust
+for _ in 0..10 {
+    client.ecouter().await;
+    if client.fin_recue(flux) { break; }
+    client.parler().await;
+}
+```
+
+`ecouter()` attend au plus une demi-seconde **un datagramme**. On lit donc
+volontiers « dix tours, donc cinq secondes au pire ». C'est faux : un tour se
+consomme dès qu'un datagramme arrive, quel qu'il soit.
+
+Or le serveur ouvre d'abord ses **trois flux unidirectionnels** — le contrôle et
+les deux flux QPACK de §4.2 de RFC 9204 —, et leurs datagrammes consomment des
+tours sans faire avancer la réponse. Selon l'ordre d'émission, les dix tours
+pouvaient être épuisés en quelques millisecondes.
+
+**L'échec ne dépendait donc pas de la lenteur de la machine, mais de l'ORDRE
+dans lequel le serveur émet.** C'est ce qui a fait échouer vingt tentatives de
+reproduction : elles cherchaient sous charge, c'est-à-dire là où la cause n'est
+pas. Cette tranche a commencé par faire la même erreur — le diagnostic annoncé
+était « un délai de cinq secondes qui cède sous charge », et il portait sur une
+autre fonction.
+
+### QUATRE RENONCEMENTS, UN SEUL SYMPTÔME
+
+La boucle épuisée rendait `Vec::new()`. L'en-tête illisible aussi. La trame
+tronquée aussi. Le corps introuvable aussi.
+
+**Quatre chemins d'échec, un seul résultat, et il était indistinguable d'une
+réponse au corps vide.** L'appelant assertait alors sur une chaîne vide, et son
+message n'avait aucune raison de nommer le client d'essai : il accusait la
+session du serveur.
+
+L'attente budgète désormais du TEMPS, et chacun des quatre cas dit lequel il est,
+avec ce qui était arrivé jusque-là.
+
+### LE QUATRIÈME ÉTAIT JUSTE, ET C'EST CE QUI CACHAIT LES TROIS AUTRES
+
+En rendant les quatre bruyants d'un coup, un essai a échoué aussitôt :
+
+```
+le flux 16 n'a pas de trame `DATA` après ses en-têtes : []
+```
+
+Des en-têtes sans `DATA` sont une réponse au **corps vide**, et §4.1 de RFC 9114
+l'autorise : une réponse est faite d'en-têtes puis de zéro ou plusieurs `DATA`.
+Ce retour vide-là était donc correct — et c'est précisément ce qui rendait les
+trois autres invisibles. Un cas légitime qui partage sa forme avec trois cas
+fautifs les couvre tous les trois.
+
+### CE QUE LA MESURE ÉTABLIT, ET CE QU'ELLE N'ÉTABLIT PAS
+
+Douze passages des deux suites QUIC **en parallèle** — les conditions où elle
+avait cédé — sans un échec. Avec l'explication mécanique, la cause est comprise
+et retirée.
+
+Ce que cela n'établit pas : qu'aucun autre essai ne soit instable. Un échec
+qu'on ne sait pas reproduire n'est pas un échec qu'on a compris ; celui-ci l'est
+désormais, et c'est tout ce qui est affirmé.
+
+### L'AUTRE AIDE, CORRIGÉE EN CHEMIN
+
+`attendre_le_journal`, dans les essais de l'API, rendait le journal au bout de
+son délai **que le motif y soit ou non**, et trois essais assertaient aussitôt
+derrière. Ce n'était pas la cause de celui-ci, mais c'est la même faute : sous
+charge, l'échec aurait dit « le journal ne contient pas X » en montrant un
+journal d'apparence normale.
+
+Son propre commentaire décrivait le piège — « l'essai passe la plupart du temps,
+et échoue sous charge sans rien apprendre » — sans l'avoir refermé. Elle panique
+désormais en disant combien de temps elle a attendu, et écarte elle-même la
+fausse piste : « ce n'est pas forcément un défaut du serveur ».
+
+Ses deux aides sœurs, dans `chiffrement.rs` et `h3.rs`, ont été relues : elles
+paniquaient déjà en le disant.
+
 ## Une suite de gestes n'est pas une installation
 
 `docs/installation.md` le disait de lui-même, dans sa liste d'aveux : « il n'y a
