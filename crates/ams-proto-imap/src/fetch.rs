@@ -20,9 +20,17 @@
 //! `BINARY[…]` et `BINARY.SIZE[…]` s'y ajoutent : ce que les octets VEULENT
 //! DIRE, transfert-décodé.
 //!
-//! Ce qui reste **reconnu et refusé** — `RFC822`, un nom de champ cité — n'est
-//! pas une erreur de syntaxe : le client sait alors qu'il doit demander
-//! autrement, au lieu de chercher la faute dans ce qu'il a écrit.
+//! **LES TROIS FORMES DE RFC 3501 §6.4.5 S'Y AJOUTENT AUSSI** : `RFC822`,
+//! `RFC822.HEADER` et `RFC822.TEXT`, par les équivalences que la RFC pose
+//! elle-même — `BODY[]`, `BODY.PEEK[HEADER]`, `BODY[TEXT]`. Elles ne font PAS
+//! d'éléments de plus : elles désignent exactement les mêmes choses, et seule
+//! leur ORTHOGRAPHE est retenue, parce que §7.4.2 veut que la réponse porte le
+//! nom de la demande.
+//!
+//! Ce qui reste **reconnu et refusé** — `BODY` sans crochets, `BINARY` sans
+//! crochets, un nom de champ cité — n'est pas une erreur de syntaxe : le client
+//! sait alors qu'il doit demander autrement, au lieu de chercher la faute dans
+//! ce qu'il a écrit.
 //!
 //! # LA DEMANDE PARTIELLE EST UNE SURFACE
 //!
@@ -196,6 +204,24 @@ pub struct Fetch<'a> {
     /// demanderait — soixante-quatre fois, pour une liste qu'un seul élément
     /// porte d'ordinaire.
     noms: [&'a [u8]; FETCH_ITEMS_MAX],
+    /// Quels éléments ont été écrits À LA FAÇON DE RFC 3501, un bit par rang.
+    ///
+    /// # POURQUOI À CÔTÉ, ET NON DANS L'ÉLÉMENT
+    ///
+    /// `RFC822` désigne EXACTEMENT ce que `BODY[]` désigne — §6.4.5 le dit en
+    /// ces termes —, et de même `RFC822.HEADER` pour `BODY.PEEK[HEADER]` et
+    /// `RFC822.TEXT` pour `BODY[TEXT]`. Deux orthographes, une seule chose
+    /// demandée : en faire deux éléments obligerait tout ce qui les traite à
+    /// les traiter deux fois, et à diverger un jour sur l'un des deux.
+    ///
+    /// Ce qui diffère est la RÉPONSE : §7.4.2 la fait se nommer `RFC822`, et un
+    /// client n'apparie pas `BODY[]` à ce qu'il a écrit. C'est donc une
+    /// propriété du TEXTE de la commande, comme la liste de noms d'un choix de
+    /// champs — et elle vit au même endroit, pour la même raison.
+    ///
+    /// Soixante-quatre bits pour soixante-quatre éléments : [`FETCH_ITEMS_MAX`]
+    /// vaut exactement cela, et le masque ne peut donc pas manquer de place.
+    rfc822: u64,
 }
 
 impl<'a> Fetch<'a> {
@@ -221,6 +247,21 @@ impl<'a> Fetch<'a> {
     #[must_use]
     pub fn set_text(&self) -> &'a [u8] {
         self.set.as_bytes()
+    }
+
+    /// L'élément de rang `rang` a-t-il été écrit à la façon de RFC 3501 ?
+    #[must_use]
+    pub fn rfc822(&self, rang: usize) -> bool {
+        // AU-DELÀ DE SOIXANTE-TROIS, LA RÉPONSE EST NON, et sans garde : il n'y
+        // a pas d'élément de rang soixante-quatre, `count` ne dépassant jamais
+        // `FETCH_ITEMS_MAX`.
+        u32::try_from(rang).is_ok_and(|rang| rang < 64 && self.rfc822 >> rang & 1 == 1)
+    }
+
+    /// Le masque entier, pour qui doit le recopier d'un geste.
+    #[must_use]
+    pub fn rfc822_mask(&self) -> u64 {
+        self.rfc822
     }
 
     /// Ce qui est demandé de chacun.
@@ -277,6 +318,7 @@ impl<'a> Fetch<'a> {
         // « et si le tableau était plein ? » — donc une garde qu'aucune entrée
         // ne pourrait faire céder.
         let mut noms: [&[u8]; FETCH_ITEMS_MAX] = [b""; FETCH_ITEMS_MAX];
+        let mut rfc822 = 0_u64;
         let mut mots = Mots::new(liste);
         for ((place, ou), mot) in items
             .iter_mut()
@@ -284,9 +326,14 @@ impl<'a> Fetch<'a> {
             .take(plafond)
             .zip(mots.by_ref())
         {
-            let (item, choisis) = lire_un(mot)?;
+            let (item, choisis, ancienne_forme) = lire_un(mot)?;
             *place = item;
             *ou = choisis;
+            // LE DÉCALAGE NE PEUT PAS DÉBORDER : `count` est le rang dans un
+            // tableau de soixante-quatre, et le masque en porte soixante-quatre.
+            if ancienne_forme {
+                rfc822 |= 1_u64 << (count % 64);
+            }
             count = count.saturating_add(1);
         }
         // S'il en reste, c'est qu'il y en avait trop.
@@ -301,38 +348,65 @@ impl<'a> Fetch<'a> {
             items,
             count,
             noms,
+            rfc822,
         })
     }
 }
 
-/// Lit un élément.
-fn lire_un(mot: &[u8]) -> Result<(FetchItem, &[u8]), Error> {
+/// Lit un élément, et dit s'il a été écrit à la façon de RFC 3501.
+///
+/// Le booléen ne se déduit PAS du mot par l'appelant : il faudrait y recopier
+/// la liste des orthographes de rev1, et deux listes finissent par différer.
+fn lire_un(mot: &[u8]) -> Result<(FetchItem, &[u8], bool), Error> {
     if mot.eq_ignore_ascii_case(b"UID") {
-        return Ok((FetchItem::Uid, b""));
+        return Ok((FetchItem::Uid, b"", false));
     }
     if mot.eq_ignore_ascii_case(b"FLAGS") {
-        return Ok((FetchItem::Flags, b""));
+        return Ok((FetchItem::Flags, b"", false));
     }
     if mot.eq_ignore_ascii_case(b"INTERNALDATE") {
-        return Ok((FetchItem::InternalDate, b""));
+        return Ok((FetchItem::InternalDate, b"", false));
     }
     if mot.eq_ignore_ascii_case(b"RFC822.SIZE") {
-        return Ok((FetchItem::Rfc822Size, b""));
+        return Ok((FetchItem::Rfc822Size, b"", false));
     }
     if mot.eq_ignore_ascii_case(b"ENVELOPE") {
-        return Ok((FetchItem::Envelope, b""));
+        return Ok((FetchItem::Envelope, b"", false));
     }
     if mot.eq_ignore_ascii_case(b"BODYSTRUCTURE") {
-        return Ok((FetchItem::BodyStructure, b""));
+        return Ok((FetchItem::BodyStructure, b"", false));
     }
     // Reconnus, et refusés : le client sait alors qu'il doit demander
     // autrement, au lieu de chercher la faute dans ce qu'il a écrit.
-    if mot.eq_ignore_ascii_case(b"BODY")
-        || mot.eq_ignore_ascii_case(b"RFC822")
-        || mot.eq_ignore_ascii_case(b"RFC822.HEADER")
-        || mot.eq_ignore_ascii_case(b"RFC822.TEXT")
-        || mot.eq_ignore_ascii_case(b"BINARY")
-    {
+    // §6.4.5 : LES TROIS FORMES DE RFC 3501, ET CE QU'ELLES VALENT.
+    //
+    // `RFC822` est `BODY[]`, `RFC822.HEADER` est `BODY.PEEK[HEADER]` — il ne
+    // pose PAS `\Seen`, et c'est le seul piège du lot —, `RFC822.TEXT` est
+    // `BODY[TEXT]`. La RFC les définit par cette équivalence ; on la suit à la
+    // lettre plutôt que d'en faire trois éléments qui divergeraient.
+    //
+    // Aucune ne prend de demande partielle : `<0.100>` est une extension de
+    // rev2, et l'écrire derrière `RFC822` n'est pas cette orthographe-ci.
+    for (nom, section, peek) in [
+        (&b"RFC822"[..], Section::Full, false),
+        (b"RFC822.HEADER", Section::Header, true),
+        (b"RFC822.TEXT", Section::Text, false),
+    ] {
+        if mot.eq_ignore_ascii_case(nom) {
+            return Ok((
+                FetchItem::Body {
+                    section,
+                    peek,
+                    partial: None,
+                },
+                b"",
+                true,
+            ));
+        }
+    }
+    // Reconnu, et refusé : `BODY` sans crochets ne désigne rien, et `BINARY`
+    // non plus.
+    if mot.eq_ignore_ascii_case(b"BODY") || mot.eq_ignore_ascii_case(b"BINARY") {
         return Err(Error::UnsupportedFetchItem);
     }
     if mot.len() >= 6
@@ -341,9 +415,11 @@ fn lire_un(mot: &[u8]) -> Result<(FetchItem, &[u8]), Error> {
             .unwrap_or_default()
             .eq_ignore_ascii_case(b"BINARY")
     {
-        return lire_un_binaire(mot.get(6..).unwrap_or_default());
+        let (item, choisis) = lire_un_binaire(mot.get(6..).unwrap_or_default())?;
+        return Ok((item, choisis, false));
     }
-    lire_un_corps(mot)
+    let (item, choisis) = lire_un_corps(mot)?;
+    Ok((item, choisis, false))
 }
 
 /// Lit ce qui suit `BINARY` : `.PEEK[…]`, `.SIZE[…]`, ou `[…]`.

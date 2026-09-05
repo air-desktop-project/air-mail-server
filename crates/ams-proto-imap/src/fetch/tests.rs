@@ -480,10 +480,10 @@ fn l_enveloppe_se_lit() {
 #[test]
 fn ce_qui_est_reconnu_sans_etre_servi_se_dit_comme_tel() {
     for mot in [
+        // `BODY` sans crochets ne désigne rien, et `BINARY` non plus. **LES
+        // TROIS `RFC822` NE SONT PLUS ICI** : §6.4.5 les définit dans le
+        // protocole de base de RFC 3501, et ce serveur annonce `IMAP4rev1`.
         &b"1 BODY"[..],
-        b"1 RFC822",
-        b"1 RFC822.HEADER",
-        b"1 RFC822.TEXT",
         b"1 BINARY",
         // Une section dont la forme est correcte mais qu'on ne sait pas
         // découper.
@@ -497,6 +497,66 @@ fn ce_qui_est_reconnu_sans_etre_servi_se_dit_comme_tel() {
             "{mot:?}"
         );
     }
+}
+
+/// **LES TROIS FORMES DE RFC 3501 §6.4.5 VALENT LEURS ÉQUIVALENTS EN SECTIONS.**
+///
+/// La RFC les définit par cette équivalence, et l'on s'y tient : en faire trois
+/// éléments à part obligerait tout ce qui les traite à les traiter deux fois.
+#[test]
+fn les_trois_formes_de_rfc822_valent_leurs_sections() {
+    for (mot, section, peek) in [
+        (&b"1 RFC822"[..], Section::Full, false),
+        // **`RFC822.HEADER` NE POSE PAS `\Seen`** : §6.4.5 l'équivaut à
+        // `BODY.PEEK[HEADER]`, et c'est le seul des trois qui soit un `PEEK`.
+        (b"1 RFC822.HEADER", Section::Header, true),
+        (b"1 RFC822.TEXT", Section::Text, false),
+    ] {
+        let lue = Fetch::parse(mot, &BORNES).expect("lisible");
+        assert_eq!(
+            lue.items(),
+            [FetchItem::Body {
+                section,
+                peek,
+                partial: None,
+            }],
+            "{mot:?}"
+        );
+        // ET L'ORTHOGRAPHE EST RETENUE : c'est elle qui décide du nom de la
+        // réponse, §7.4.2 la voulant identique à celle de la demande.
+        assert!(lue.rfc822(0), "{mot:?}");
+        assert_eq!(lue.rfc822_mask(), 1, "{mot:?}");
+    }
+}
+
+/// **L'ORTHOGRAPHE SE RETIENT PAR RANG**, et non pour toute la commande.
+#[test]
+fn le_masque_designe_le_bon_element() {
+    let lue =
+        Fetch::parse(b"1 (UID BODY.PEEK[] RFC822 FLAGS RFC822.TEXT)", &BORNES).expect("lisible");
+    assert_eq!(lue.items().len(), 5);
+    // `BODY.PEEK[]` demande la même chose que `RFC822`, et ne se nomme pas
+    // pareil : c'est exactement ce que le masque distingue.
+    for (rang, attendu) in [(0, false), (1, false), (2, true), (3, false), (4, true)] {
+        assert_eq!(lue.rfc822(rang), attendu, "rang {rang}");
+    }
+    // Au-delà des éléments lus, la réponse est non. Les trois façons d'être
+    // « au-delà » se prennent : un rang qui existe dans le masque mais pas dans
+    // la commande, un rang que le masque ne peut pas porter, et un rang qui
+    // n'est même pas un `u32`.
+    assert!(!lue.rfc822(5));
+    assert!(!lue.rfc822(100));
+    assert!(!lue.rfc822(usize::MAX));
+}
+
+/// Une demande partielle derrière `RFC822` n'est PAS cette orthographe-là.
+///
+/// `<0.10>` est une extension de rev2, qui s'écrit derrière une section. Le mot
+/// entier ne correspond alors à aucune des trois formes, et retombe sur la
+/// grammaire ordinaire — qui n'y voit pas de section, et refuse.
+#[test]
+fn rfc822_ne_prend_pas_de_demande_partielle() {
+    assert!(Fetch::parse(b"1 RFC822<0.10>", &BORNES).is_err());
 }
 
 #[test]

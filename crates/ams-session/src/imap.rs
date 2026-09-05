@@ -820,6 +820,13 @@ struct Emission {
     noms: [u8; NOMS_MAX],
     /// Où chaque élément trouve les siens, dans la réserve.
     noms_par_item: [(u16, u16); ams_proto_imap::FETCH_ITEMS_MAX],
+    /// Quels éléments ont été écrits à la façon de RFC 3501, un bit par rang.
+    ///
+    /// Cela ne change PAS ce qu'on rend — `RFC822` désigne exactement ce que
+    /// `BODY[]` désigne (§6.4.5) — mais comment la réponse se NOMME : §7.4.2 la
+    /// fait se nommer comme la demande, et un client n'apparie pas `BODY[]` à
+    /// ce qu'il a écrit.
+    rfc822: u64,
     /// La COMMANDE portait-elle sur des UID ? Cela ne décide que du nom qu'on
     /// donne à la conclusion.
     par_uid: bool,
@@ -1005,6 +1012,20 @@ impl Genre {
 
 impl Emission {
     /// Les noms que l'élément de rang `item` choisit.
+    /// L'élément de rang `item` a-t-il été écrit à la façon de RFC 3501 ?
+    ///
+    /// # PAS DE GARDE SUR LA BORNE, PARCE QU'ELLE NE PEUT PAS CÉDER
+    ///
+    /// `item` est un rang d'élément, et `FETCH_ITEMS_MAX` vaut soixante-quatre :
+    /// il ne dépasse donc jamais soixante-trois. Un `item < 64` serait une garde
+    /// qu'aucune commande ne peut emprunter, donc qu'aucun essai ne pourrait
+    /// atteindre. Le reste modulo soixante-quatre donne un sens à tout entier
+    /// sans prétendre protéger de rien — c'est ce que fait déjà le décalage qui
+    /// POSE ce bit, dans la grammaire.
+    fn rfc822_de(&self, item: usize) -> bool {
+        self.rfc822 >> (item % 64) & 1 == 1
+    }
+
     fn noms_de(&self, item: usize) -> &[u8] {
         let (debut, fin) = self.noms_par_item.get(item).copied().unwrap_or((0, 0));
         let debut = usize::from(debut);
@@ -1254,6 +1275,7 @@ impl Emission {
         cte_inconnu: false,
         noms: [0; NOMS_MAX],
         noms_par_item: [(0, 0); ams_proto_imap::FETCH_ITEMS_MAX],
+        rfc822: 0,
         par_uid: false,
         cles_uid: false,
         retour: RetourDeRecherche::DEFAUT,
@@ -3042,6 +3064,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             cte_inconnu: false,
             noms: [0; NOMS_MAX],
             noms_par_item: [(0, 0); ams_proto_imap::FETCH_ITEMS_MAX],
+            rfc822: 0,
             par_uid,
             cles_uid: true,
             retour: RetourDeRecherche::DEFAUT,
@@ -3185,6 +3208,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             cte_inconnu: false,
             noms: [0; NOMS_MAX],
             noms_par_item: [(0, 0); ams_proto_imap::FETCH_ITEMS_MAX],
+            rfc822: 0,
             par_uid,
             cles_uid: par_uid,
             retour: RetourDeRecherche {
@@ -3281,6 +3305,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             cte_inconnu: false,
             noms: [0; NOMS_MAX],
             noms_par_item: [(0, 0); ams_proto_imap::FETCH_ITEMS_MAX],
+            rfc822: 0,
             par_uid,
             cles_uid,
             retour: RetourDeRecherche::DEFAUT,
@@ -3544,6 +3569,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             cte_inconnu: false,
             noms: [0; NOMS_MAX],
             noms_par_item: [(0, 0); ams_proto_imap::FETCH_ITEMS_MAX],
+            rfc822: 0,
             par_uid,
             cles_uid,
             retour: RetourDeRecherche::DEFAUT,
@@ -4022,6 +4048,15 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             }
             Err(_) => return self.faute(b"FETCH arguments are malformed", out),
         };
+        // **LES TROIS FORMES DE RFC 3501 NE SURVIVENT PAS À rev2** (§A), et la
+        // grammaire ne peut pas le savoir : elle ne connaît que les mots, pas
+        // ce que la session a activé. Un client qui a demandé rev2 et écrit
+        // `RFC822` se contredit ; le lui dire vaut mieux que de rendre une
+        // réponse dont rev2 nie le nom. C'est le pendant exact du `RECENT` de
+        // `STATUS`.
+        if self.rev2 && demande.rfc822_mask() != 0 {
+            return self.faute(b"RFC822 items were removed by IMAP4rev2", out);
+        }
         // §6.4.4.1 : `$` désigne ce que la dernière recherche a retenu.
         let (texte, par_le_marqueur) = self.resoudre(&demande.set());
         let cles_uid = par_uid || par_le_marqueur;
@@ -4050,6 +4085,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             items: [FetchItem::Uid; ams_proto_imap::FETCH_ITEMS_MAX],
             noms: [0; NOMS_MAX],
             noms_par_item: [(0, 0); ams_proto_imap::FETCH_ITEMS_MAX],
+            rfc822: demande.rfc822_mask(),
             items_len: demande.items().len(),
             cte_inconnu: false,
             par_uid,
@@ -4644,13 +4680,36 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
                     peek: _,
                 } => {
                     let rang_item = emission.items_faits.saturating_sub(1);
-                    plume.pousser(b"BODY[")?;
-                    ecrire_la_section(&mut plume, *section, emission.noms_de(rang_item))?;
-                    plume.pousser(b"]")?;
-                    if let Some(partie) = partial {
-                        plume.pousser(b"<")?;
-                        plume.nombre(u64::from(partie.offset))?;
-                        plume.pousser(b">")?;
+                    // §7.4.2 : **LA RÉPONSE SE NOMME COMME LA DEMANDE.** Les
+                    // trois formes de RFC 3501 §6.4.5 désignent exactement ce
+                    // que désignent `BODY[]`, `BODY.PEEK[HEADER]` et
+                    // `BODY[TEXT]` — mais un client qui a écrit `RFC822`
+                    // n'apparie pas `BODY[]` à sa demande, et croit n'avoir
+                    // rien reçu.
+                    //
+                    // Aucune autre section ne s'écrit de cette façon : la
+                    // correspondance est TOTALE, et ce qui n'y figure pas
+                    // retombe sur `BODY[…]` sans qu'il y ait de bras
+                    // inatteignable à écrire.
+                    let ancienne_forme: Option<&[u8]> =
+                        match (emission.rfc822_de(rang_item), section) {
+                            (true, Section::Full) => Some(b"RFC822"),
+                            (true, Section::Header) => Some(b"RFC822.HEADER"),
+                            (true, Section::Text) => Some(b"RFC822.TEXT"),
+                            _ => None,
+                        };
+                    match ancienne_forme {
+                        Some(nom) => plume.pousser(nom)?,
+                        None => {
+                            plume.pousser(b"BODY[")?;
+                            ecrire_la_section(&mut plume, *section, emission.noms_de(rang_item))?;
+                            plume.pousser(b"]")?;
+                            if let Some(partie) = partial {
+                                plume.pousser(b"<")?;
+                                plume.nombre(u64::from(partie.offset))?;
+                                plume.pousser(b">")?;
+                            }
+                        }
                     }
                     let ou = match section {
                         Section::HeaderFields { .. } | Section::Part { .. } => portee,

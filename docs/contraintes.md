@@ -3867,6 +3867,88 @@ Ce qui reste hors du serveur : **rien de connu**. Cette ligne annonçait « la f
 de réémission des messages sortants », et c'était faux — elle existe, elle est
 câblée, et [la liste v1](v1.md) le mesure plutôt que de le croire.
 
+## Servir n'est pas nommer : les trois `RFC822`
+
+`FETCH 1 (RFC822)` rendait `NO [CANNOT] This FETCH item is not served yet`, et
+la documentation de la crate le rangeait posément parmi « ce qui reste reconnu et
+refusé ». Or §6.4.5 de RFC 3501 le définit dans le protocole de **base** — celui
+que la tranche précédente venait d'annoncer. Annoncer `IMAP4rev1` et refuser
+`RFC822`, c'était le péché même qu'on venait de corriger, à une commande près.
+
+### CE QUE LA RFC DIT, ET QU'ON A SUIVI À LA LETTRE
+
+§6.4.5 ne décrit pas ces trois éléments : il les DÉFINIT par équivalence.
+
+| écrit | vaut |
+|---|---|
+| `RFC822` | `BODY[]` |
+| `RFC822.HEADER` | `BODY.PEEK[HEADER]` |
+| `RFC822.TEXT` | `BODY[TEXT]` |
+
+Les traiter comme trois éléments de plus aurait obligé tout ce qui les traverse
+— le choix de la portée, le découpage, la marque `\Seen`, l'écoulement — à les
+traiter deux fois, et à diverger un jour sur l'un des deux chemins. Ils sont donc
+LES MÊMES éléments.
+
+**Le piège tient en un mot** : `RFC822.HEADER` est un `PEEK`, les deux autres non.
+Le premier ne pose pas `\Seen`, les seconds le posent — et c'est mesuré, pas
+supposé.
+
+### CE QUI DIFFÈRE N'EST PAS CE QU'ON REND, C'EST LE NOM
+
+§7.4.2 : la réponse porte le nom de la demande. Rendre `BODY[]` à qui a écrit
+`RFC822`, c'est lui donner un élément qu'il n'a pas demandé — **il n'a rien à
+apparier, et conclut qu'il n'a rien reçu**. Le message serait passé sur le fil
+pour rien.
+
+L'orthographe est donc une propriété du TEXTE de la commande, pas de ce qu'elle
+désigne. Elle vit à côté des éléments, dans un masque de bits — au même endroit
+et pour la même raison que la liste de noms d'un choix de champs, que ce fichier
+range déjà « à côté, et non dans l'élément ».
+
+Soixante-quatre bits pour soixante-quatre éléments : `FETCH_ITEMS_MAX` vaut
+exactement cela, et le masque ne peut donc pas manquer de place. Un essai
+éprouve la commande `(UID BODY.PEEK[] RFC822 FLAGS RFC822.TEXT)`, où les deux
+orthographes cohabitent et où chacune se nomme comme elle a été écrite.
+
+### LE MASQUE PLUTÔT QU'UN CHAMP, ET POURQUOI
+
+Ajouter un booléen à `FetchItem::Body` était l'autre voie. Elle demandait de
+toucher les **vingt** endroits qui construisent cette variante — onze dans les
+essais de grammaire, sept dans la session, un dans une cible de fuzz — pour une
+propriété qui ne dit rien de l'élément.
+
+Le masque n'en touche aucun. Et il dit ce qu'il est : non pas « cet élément est
+différent », mais « le client a écrit ceci autrement ».
+
+### UNE GARDE QUI NE POUVAIT PAS CÉDER, ET LA COUVERTURE L'A DIT
+
+L'accesseur de la session portait `item < 64 && …`. `item` est un rang
+d'élément, et `FETCH_ITEMS_MAX` vaut soixante-quatre : la garde ne pouvait
+jamais se déclencher, donc aucun essai ne pouvait l'atteindre. C'est la règle de
+ce dépôt — une garde inatteignable n'est pas une garde —, et la mesure de
+couverture l'a signalée avant qu'on ne la relise.
+
+Le reste modulo soixante-quatre donne un sens à tout entier sans prétendre
+protéger de rien, et c'est exactement ce que fait déjà le décalage qui POSE ce
+bit, dans la grammaire.
+
+L'accesseur PUBLIC de la grammaire, lui, garde sa borne : il est appelable avec
+n'importe quel rang, et les trois façons d'être « au-delà » ont chacune leur
+essai — un rang qui existe dans le masque mais pas dans la commande, un rang que
+le masque ne peut pas porter, et un rang qui n'est même pas un `u32`.
+
+### CE QUE rev2 EN FAIT
+
+§A les a retirés. Une session qui a dit `ENABLE IMAP4rev2` et écrit `RFC822` se
+contredit ; la session le lui dit, plutôt que de rendre une réponse dont rev2 nie
+le nom. **`RFC822.SIZE`, lui, a survécu** et continue de répondre : c'est le mot
+qu'on refuse, pas tout ce qui commence par ces sept lettres.
+
+C'est le pendant exact du `RECENT` de `STATUS`, et la même répartition : la
+grammaire lit, la session tranche — parce que la grammaire ne sait pas ce qui a
+été activé, et prétendre le savoir mettrait la décision à deux endroits.
+
 ## « Ce n'est qu'une ligne de capacités » — et c'était faux
 
 Ce dépôt n'annonçait qu'`IMAP4rev2`, et sa propre documentation expliquait

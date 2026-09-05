@@ -2153,7 +2153,9 @@ fn ecouler_le_texte(texte: &[u8], offset: u64, out: &mut [u8]) -> usize {
 #[test]
 fn un_element_reconnu_mais_non_servi_se_dit_sans_accuser_le_client() {
     let mut session = selectionnee();
-    let (texte, _) = dire(&mut session, b"a003 FETCH 1 RFC822\r\n");
+    // `BODY` SANS CROCHETS ne désigne rien. **CE N'EST PLUS `RFC822`** : §6.4.5
+    // le définit, et ce serveur le sert depuis qu'il annonce `IMAP4rev1`.
+    let (texte, _) = dire(&mut session, b"a003 FETCH 1 BODY\r\n");
     assert!(
         texte.contains("NO [CANNOT] This FETCH item is not served yet"),
         "{texte}"
@@ -3308,6 +3310,113 @@ fn un_expunge_sans_boite_ouverte_est_hors_d_etat() {
 }
 
 // ── `SEARCH` ────────────────────────────────────────────────────────────────
+
+// ── LES TROIS FORMES DE RFC 3501 §6.4.5 ─────────────────────────────────────
+
+/// **LA RÉPONSE SE NOMME COMME LA DEMANDE** (§7.4.2).
+///
+/// # LE DÉFAUT LUI-MÊME
+///
+/// `FETCH 1 (RFC822)` rendait `NO [CANNOT] This FETCH item is not served yet`,
+/// alors que §6.4.5 le définit dans le protocole de BASE de RFC 3501 — que ce
+/// serveur annonce. Et le servir ne suffit pas : rendre `BODY[]` à qui a écrit
+/// `RFC822` laisse le client sans rien à apparier, donc croyant n'avoir rien
+/// reçu.
+#[test]
+fn les_trois_formes_de_rfc822_se_nomment_comme_on_les_a_demandees() {
+    let mut session = selectionnee_rev1();
+    for (demande, nom) in [
+        (&b"a003 FETCH 1 (RFC822)\r\n"[..], "RFC822 {"),
+        (b"a004 FETCH 1 (RFC822.HEADER)\r\n", "RFC822.HEADER {"),
+        (b"a005 FETCH 1 (RFC822.TEXT)\r\n", "RFC822.TEXT {"),
+    ] {
+        let fil = ecouler(&mut session, demande);
+        assert!(fil.contains(nom), "{demande:?} : {fil}");
+        // **ET JAMAIS `BODY[`** : les deux noms dans la même réponse feraient
+        // deux éléments là où le client n'en a demandé qu'un.
+        assert!(!fil.contains("BODY["), "{demande:?} : {fil}");
+    }
+}
+
+/// **`BODY[]` ET `RFC822` DANS LA MÊME COMMANDE SE NOMMENT CHACUN.**
+///
+/// Ils demandent exactement la même chose (§6.4.5) : c'est l'orthographe, et
+/// elle seule, qui décide du nom rendu. Un masque par rang, et non par commande.
+#[test]
+fn les_deux_orthographes_cohabitent_dans_une_commande() {
+    let mut session = selectionnee_rev1();
+    let fil = ecouler(
+        &mut session,
+        b"a003 FETCH 1 (UID BODY.PEEK[TEXT] RFC822.TEXT)\r\n",
+    );
+    assert!(fil.contains("BODY[TEXT] {"), "{fil}");
+    assert!(fil.contains("RFC822.TEXT {"), "{fil}");
+}
+
+/// **`RFC822.HEADER` NE POSE PAS `\Seen`, `RFC822` SI.**
+///
+/// §6.4.5 : le premier vaut `BODY.PEEK[HEADER]`, les deux autres ne sont pas des
+/// `PEEK`. C'est le seul piège du lot, et il se voit sur les drapeaux.
+#[test]
+fn seul_rfc822_header_ne_marque_pas_le_message() {
+    let mut session = selectionnee_rev1();
+    // Le PREMIER message part sans aucun drapeau.
+    let avant = ecouler(&mut session, b"a003 FETCH 1 (FLAGS)\r\n");
+    assert!(avant.contains("FLAGS ()"), "{avant}");
+
+    ecouler(&mut session, b"a004 FETCH 1 (RFC822.HEADER)\r\n");
+    let apres_entete = ecouler(&mut session, b"a005 FETCH 1 (FLAGS)\r\n");
+    assert!(
+        apres_entete.contains("FLAGS ()"),
+        "un `PEEK` ne marque rien : {apres_entete}"
+    );
+
+    ecouler(&mut session, b"a006 FETCH 1 (RFC822)\r\n");
+    let apres_tout = ecouler(&mut session, b"a007 FETCH 1 (FLAGS)\r\n");
+    assert!(
+        apres_tout.contains("FLAGS (\\Seen)"),
+        "`RFC822` marque : {apres_tout}"
+    );
+}
+
+/// **UN TAMPON TROP COURT POUR LE NOM LE DIT**, plutôt que d'écrire un nom
+/// tronqué — qui ferait lire au client un élément qu'il n'a pas demandé.
+#[test]
+fn un_tampon_trop_court_pour_le_nom_de_rfc822_le_dit() {
+    // `* 1 FETCH (` fait onze octets ; `RFC822` en demande six de plus. Entre
+    // les deux, la place manque exactement là où le nom s'écrit.
+    for taille in 11..=16_usize {
+        let mut session = selectionnee_rev1();
+        let mut grand = [0_u8; 512];
+        session
+            .handle(b"a003 FETCH 1 (RFC822)\r\n", &mut grand)
+            .expect("traitable");
+        let mut petit = std::vec![0_u8; taille];
+        let rendu = session.next_fetch(&mut petit);
+        assert!(
+            matches!(rendu, Err(super::Error::Reply(_))),
+            "taille {taille} : {rendu:?}"
+        );
+    }
+}
+
+/// **rev2 LES A RETIRÉS** (§A), et la session le dit.
+///
+/// La grammaire, elle, les lit : elle ne connaît que les mots, pas ce que la
+/// session a activé. C'est le pendant exact du `RECENT` de `STATUS`.
+#[test]
+fn les_formes_de_rfc822_se_refusent_une_fois_rev2_active() {
+    let mut session = selectionnee();
+    let (refuse, _) = dire(&mut session, b"a003 FETCH 1 (RFC822)\r\n");
+    assert!(
+        refuse.contains("BAD RFC822 items were removed by IMAP4rev2"),
+        "{refuse}"
+    );
+    // Et `RFC822.SIZE`, qui a SURVÉCU à rev2, continue de répondre : c'est le
+    // mot qu'on refuse, et non tout ce qui commence par ces sept lettres.
+    let fil = ecouler(&mut session, b"a004 FETCH 1 (RFC822.SIZE)\r\n");
+    assert!(fil.contains("RFC822.SIZE "), "{fil}");
+}
 
 // ── LES DEUX VERSIONS ───────────────────────────────────────────────────────
 
