@@ -102,6 +102,20 @@ pub struct BoitesConnues {
     comptes: std::sync::Arc<crate::comptes::Comptes>,
     /// L'adresse du postmaster de ce serveur, composée une fois.
     postmaster: String,
+    /// Les domaines que ce serveur DÉCLARE servir, en minuscules.
+    ///
+    /// # CE N'EST PAS UNE LISTE D'ACCEPTATION, C'EST UNE LISTE DE RESPONSABILITÉ
+    ///
+    /// Ce qui accepte reste le magasin de comptes, adresse par adresse. Cette
+    /// liste-ci ne sert qu'à savoir COMMENT REFUSER : une adresse d'un domaine
+    /// qu'on héberge et qui ne route nulle part est une boîte qui n'existe pas
+    /// (`5.1.1`) ; une adresse d'ailleurs est un relais qu'on nie (`5.7.1`).
+    ///
+    /// La différence n'est pas cosmétique. Le rebond qui remonte à un être
+    /// humain porte l'un ou l'autre : « cette personne n'est pas ici », qui
+    /// invite à vérifier l'adresse, ou « vous n'avez pas le droit d'envoyer
+    /// ici », qui envoie chercher une autorisation qui n'a jamais manqué.
+    heberges: std::vec::Vec<String>,
     places: Places,
     /// L'exploitant a-t-il demandé qu'on émette ? Voir
     /// [`BoitesConnues::qui_relaie`].
@@ -114,10 +128,19 @@ impl BoitesConnues {
     /// `postmaster` est l'adresse que `<Postmaster>` désigne — composée par
     /// l'appelant, qui connaît le domaine annoncé.
     #[must_use]
-    pub fn new(comptes: std::sync::Arc<crate::comptes::Comptes>, postmaster: String) -> Self {
+    pub fn new(
+        comptes: std::sync::Arc<crate::comptes::Comptes>,
+        postmaster: String,
+        heberges: &[String],
+    ) -> Self {
         Self {
             comptes,
             postmaster,
+            // **EN MINUSCULES UNE FOIS**, plutôt qu'à chaque `RCPT` : un nom de
+            // domaine se compare sans égard à la casse (RFC 5321 §2.4), et le
+            // faire à la volée referait le même travail pour chaque
+            // destinataire de chaque message.
+            heberges: heberges.iter().map(|nom| nom.to_lowercase()).collect(),
             places: Places::new(VERIFICATIONS_SIMULTANEES),
             // ON N'ÉMET PAS, SAUF DEMANDE EXPRESSE. Le constructeur ne prend pas
             // ce drapeau : un argument booléen de plus se passe à l'envers sans
@@ -141,6 +164,21 @@ impl BoitesConnues {
     pub fn qui_relaie(mut self) -> Self {
         self.relaie = true;
         self
+    }
+
+    /// Ce serveur se déclare-t-il responsable de ce domaine ?
+    ///
+    /// **La comparaison porte sur le domaine SEUL**, celui qui suit la dernière
+    /// arobase. Une adresse sans arobase n'a pas de domaine, et n'est donc
+    /// hébergée nulle part — la session l'a déjà refusée, et ce chemin est la
+    /// ceinture de cette bretelle.
+    fn est_heberge(&self, adresse: &str) -> bool {
+        let Some((_, domaine)) = adresse.rsplit_once('@') else {
+            return false;
+        };
+        self.heberges
+            .iter()
+            .any(|connu| connu.eq_ignore_ascii_case(domaine))
     }
 
     /// Y a-t-il des comptes ?
@@ -222,10 +260,20 @@ impl Policy for BoitesConnues {
         if self.relaie && submitter {
             return RecipientVerdict::Accept;
         }
-        // `RelayDenied` et non `RejectPermanent` : les deux rendent `550`,
-        // mais un expéditeur légitime qui se trompe de serveur doit pouvoir
-        // le comprendre sans lire les journaux d'en face.
-        RecipientVerdict::RelayDenied
+        // **DEUX REFUS, ET ILS NE DISENT PAS LA MÊME CHOSE.** Les deux rendent
+        // `550`, mais l'état étendu diffère — et c'est lui que le rapport de
+        // non-remise porte jusqu'à un être humain.
+        //
+        // Ce bras rendait `RelayDenied` pour TOUT, y compris pour une adresse
+        // d'un domaine qu'on héberge. Le pair recevait alors « Relay access
+        // denied » (`5.7.1`) pour `inconnu@essai.test` : « vous n'avez pas le
+        // droit d'envoyer ici », quand la vérité est « cette personne n'est pas
+        // ici ». L'expéditeur cherchait une autorisation qui ne lui a jamais
+        // manqué, au lieu de relire l'adresse.
+        match self.est_heberge(&adresse) {
+            true => RecipientVerdict::RejectPermanent,
+            false => RecipientVerdict::RelayDenied,
+        }
     }
 }
 
@@ -262,6 +310,12 @@ mod tests {
                 comptes,
             )),
             String::from("postmaster@mail.example.com"),
+            // Les deux domaines que ce serveur déclare servir. `ailleurs.example`
+            // n'en est PAS, et c'est ce qui distingue les deux refus.
+            &[
+                String::from("example.com"),
+                String::from("mail.example.com"),
+            ],
         )
     }
 
@@ -275,10 +329,14 @@ mod tests {
             politique.accepts_recipient(&destinataire(b"RCPT TO:<jean@example.com>\r\n"), false),
             RecipientVerdict::Accept
         );
+        // **UN DOMAINE QU'ON HÉBERGE : LA BOÎTE N'EXISTE PAS** (`5.1.1`), et
+        // non un relais nié (`5.7.1`). Le rebond qui remonte à un humain porte
+        // l'un ou l'autre, et « vous n'avez pas le droit d'envoyer ici » est
+        // faux quand la vérité est « cette personne n'est pas ici ».
         assert_eq!(
             politique
                 .accepts_recipient(&destinataire(b"RCPT TO:<personne@example.com>\r\n"), false),
-            RecipientVerdict::RelayDenied
+            RecipientVerdict::RejectPermanent
         );
         assert_eq!(
             politique
@@ -302,10 +360,14 @@ mod tests {
         // signale qu'un serveur va mal. Mais l'accepter sans boîte reviendrait à
         // dire `250` pour un message qu'on n'a nulle part où mettre : le serveur
         // avertit au démarrage plutôt que de mentir à chaque message.
+        // Et le refus dit LA BOÎTE, non le relais : `<Postmaster>` désigne le
+        // postmaster de CE serveur, dont le domaine est évidemment le nôtre.
+        // Répondre « Relay access denied » à qui écrit à notre propre postmaster
+        // serait absurde.
         let sans = politique(&["jean@example.com"]);
         assert_eq!(
             sans.accepts_recipient(&destinataire(b"RCPT TO:<Postmaster>\r\n"), false),
-            RecipientVerdict::RelayDenied
+            RecipientVerdict::RejectPermanent
         );
 
         let avec = politique(&["postmaster@mail.example.com"]);
@@ -329,6 +391,12 @@ mod tests {
         let politique = politique(&[]);
         assert_eq!(
             politique.accepts_recipient(&destinataire(b"RCPT TO:<jean@example.com>\r\n"), false),
+            RecipientVerdict::RejectPermanent
+        );
+        // Et hors de nos domaines, c'est bien un relais qu'on nie.
+        assert_eq!(
+            politique
+                .accepts_recipient(&destinataire(b"RCPT TO:<jean@ailleurs.example>\r\n"), false),
             RecipientVerdict::RelayDenied
         );
         assert!(!politique.a_des_comptes());

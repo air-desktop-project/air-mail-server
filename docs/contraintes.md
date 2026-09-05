@@ -3856,6 +3856,109 @@ Ce qui reste hors du serveur : **rien de connu**. Cette ligne annonçait « la f
 de réémission des messages sortants », et c'était faux — elle existe, elle est
 câblée, et [la liste v1](v1.md) le mesure plutôt que de le croire.
 
+## Un inconnu chez nous recevait « vous n'avez pas le droit d'envoyer ici »
+
+OpenSMTPD est le troisième MTA confronté à ce serveur. **Il n'a apporté aucun
+chemin de code neuf** : ni `ORCPT` comme Postfix, ni `BDAT` comme Exim. `EHLO`,
+`MAIL FROM` sans paramètre, ses `RCPT` un par un, puis `DATA` — la forme la plus
+dépouillée des trois. Sous `STARTTLS`, sa trace porte `ESMTPS`, et le message
+arrive intact.
+
+**Ce qu'il a montré est ailleurs.** En lui soumettant trois destinataires dont
+un inconnu, sa conversation portait :
+
+```
+C> RCPT TO:<inconnu@essai.test>
+S> 550 5.7.1 Relay access denied
+```
+
+`essai.test` est un domaine que ce serveur HÉBERGE. Le pair n'a pas été refusé
+comme relais : la personne n'existe pas. Les deux refus rendent `550`, mais
+**l'état étendu diffère, et c'est lui que le rapport de non-remise porte jusqu'à
+un être humain** :
+
+- `5.1.1` dit « cette adresse n'existe pas ici » — relisez-la ;
+- `5.7.1` dit « vous n'avez pas le droit d'envoyer ici » — trouvez une
+  autorisation.
+
+Le second envoyait chercher une permission qui n'avait jamais manqué.
+
+### Toute la machinerie était là, sauf une ligne
+
+C'est le trait le plus instructif de ce défaut. Le type `RecipientVerdict`
+distingue depuis toujours `RejectPermanent` (« la boîte n'existe pas ») de
+`RelayDenied`, et sa documentation dit POURQUOI :
+
+> Distinct de `RejectPermanent` alors que les deux rendent `550` : un expéditeur
+> légitime qui se trompe de serveur doit pouvoir le comprendre sans lire les
+> journaux d'en face.
+
+La table `statut_de` associe déjà `"Mailbox unavailable"` à `5.1.1` et
+`"Relay access denied"` à `5.7.1`. Les deux bras de la session écrivent chacun
+le bon texte.
+
+**Seule la politique ne rendait jamais `RejectPermanent`.** Son dernier bras
+rendait `RelayDenied` pour tout ce qui ne route pas — et recopiait, juste
+au-dessus, le commentaire qui explique la distinction, sans voir que le cas le
+plus fréquent qui atteint cette ligne est précisément l'autre.
+
+C'est la dixième fois que ce registre trouve une prose qui sait ce que le code ne
+fait pas. Celle-ci est d'une espèce particulière : **le commentaire n'était pas
+périmé, il était au mauvais endroit.** Il justifiait une distinction à l'endroit
+même où on ne la faisait pas.
+
+### Ce qui a été fait
+
+La politique reçoit désormais **les domaines dont ce serveur répond**. Ce n'est
+pas une liste d'acceptation — c'est le magasin de comptes qui accepte, adresse
+par adresse — c'est une liste de RESPONSABILITÉ, qui ne sert qu'à savoir COMMENT
+refuser.
+
+**Le nom annoncé (`--domain`) en fait partie, en plus de `--hosted`.** Il n'y
+était pas d'office : `--hosted` nomme les domaines dont on reçoit le courrier,
+`--domain` le nom sous lequel on se présente. Mais §4.5.1 de RFC 5321 rend ce
+serveur responsable de `postmaster@<son nom>` — et répondre « Relay access
+denied » à qui écrit à NOTRE PROPRE postmaster était absurde : il n'y a pas de
+relais à nier, on est déjà arrivé.
+
+Vérifié contre le serveur vivant :
+
+| destinataire | avant | après |
+|---|---|---|
+| `jean@essai.test` | `250` | `250` |
+| `inconnu@essai.test` | `550 5.7.1` | **`550 5.1.1`** |
+| `quelquun@ailleurs.test` | `550 5.7.1` | `550 5.7.1` |
+| `postmaster@mail.essai.test` | `550 5.7.1` | **`550 5.1.1`** |
+| `<Postmaster>` | `550 5.7.1` | **`550 5.1.1`** |
+
+### Un essai affirmait le défaut, pour la troisième fois
+
+`seule_une_adresse_declaree_est_acceptee` assertait `RelayDenied` pour
+`personne@example.com`, et l'essai de bout en bout cherchait
+`550 5.7.1 Relay access denied` dans la trace. Après
+`le_mauvais_verbe_se_distingue_du_mauvais_chemin` et la propriété 4 de
+`fuzz_ams_api_route`, c'est le troisième contrôle de cette série qui gravait le
+comportement fautif.
+
+**Ce n'est pas un hasard, et cela mérite d'être nommé.** Un essai écrit en même
+temps que le code qu'il éprouve ne teste pas ce que le code DEVRAIT faire : il
+teste ce qu'il FAIT. La seule chose qui rompt ce cercle est un pair extérieur —
+un vrai MTA, un vrai client — qui n'a pas lu notre code.
+
+### La politique d'essai partagée modélise maintenant les trois réponses
+
+`tests/commun/mod.rs` rendait `Accept` pour tout `@example.com` et `RelayDenied`
+pour le reste. Elle ne pouvait donc pas montrer ce qu'un vrai serveur distingue.
+`inconnu@` y est désormais le nom réservé au cas « dans un domaine servi, et
+connu de personne ».
+
+### Ce qui a été fait à la machine, et défait
+
+OpenSMTPD a été installé pour cette confrontation. Debian l'a activé et a
+désactivé exim4 — un seul MTA peut tenir le port 25. **Tout a été remis en
+place** : configuration d'origine restaurée, service arrêté et désactivé, exim4
+réactivé et relancé, et rien du laboratoire ne tourne plus.
+
 ## `fuzz/` ne se compilait qu'au bout de vingt-cinq minutes
 
 `fuzz/` vit hors du workspace, et pour une raison écrite dans son propre

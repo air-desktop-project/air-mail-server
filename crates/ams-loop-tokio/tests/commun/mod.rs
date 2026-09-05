@@ -40,11 +40,26 @@ impl ams_session::Authenticator for NotreDomaine {
     }
 }
 
+/// **LES TROIS RÉPONSES, ET NON DEUX.**
+///
+/// Cette politique d'essai rendait `Accept` pour tout `@example.com` et
+/// `RelayDenied` pour le reste. Elle ne pouvait donc pas montrer ce qu'un vrai
+/// serveur distingue : un domaine dont on RÉPOND, où l'adresse n'existe pas.
+///
+/// La différence n'est pas cosmétique — c'est l'état étendu que le rapport de
+/// non-remise porte jusqu'à un être humain. `5.1.1` lui dit de relire l'adresse,
+/// `5.7.1` l'envoie chercher une autorisation qui ne lui a jamais manqué.
+///
+/// `inconnu@` est le nom réservé à ce cas : dans un domaine servi, et connu de
+/// personne.
 impl Policy for NotreDomaine {
     fn accepts_recipient(&self, forward_path: &SmtpPath<'_>, _submitter: bool) -> RecipientVerdict {
         match forward_path {
             SmtpPath::Mailbox(boite) if boite.domain().as_bytes() == b"example.com" => {
-                RecipientVerdict::Accept
+                match boite.local_part().as_bytes() {
+                    b"inconnu" => RecipientVerdict::RejectPermanent,
+                    _ => RecipientVerdict::Accept,
+                }
             }
             _ => RecipientVerdict::RelayDenied,
         }

@@ -1315,7 +1315,19 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     // drapeau de configuration d'un côté, l'authentification de la session de
     // l'autre. Sans `qui_relaie`, la politique refuse tout ce qui n'est pas d'ici,
     // quoi qu'un pair ait prouvé.
-    let politique = BoitesConnues::new(Arc::clone(&comptes), postmaster.clone());
+    // **LE NOM ANNONCÉ COMPTE PARMI LES DOMAINES DONT ON RÉPOND**, en plus de
+    // ceux que `--hosted` déclare. Il n'y est pas d'office : `--hosted` nomme les
+    // domaines dont on reçoit le courrier, `--domain` le nom sous lequel on se
+    // présente. Mais §4.5.1 de RFC 5321 rend ce serveur responsable de
+    // `postmaster@<son nom>` — et répondre « Relay access denied » à qui écrit à
+    // NOTRE PROPRE postmaster serait absurde : il n'y a pas de relais à nier, on
+    // est déjà arrivé.
+    //
+    // La conséquence vaut pour toute adresse de ce domaine-là, et elle est
+    // juste : un inconnu chez nous est un inconnu (`5.1.1`), pas un relais nié.
+    let mut responsables = options.hosted.clone();
+    responsables.push(options.domain.clone());
+    let politique = BoitesConnues::new(Arc::clone(&comptes), postmaster.clone(), &responsables);
     // **`DSN` NE S'ANNONCE QUE SI L'ON PEUT ÉMETTRE** (RFC 3461 §4.2). Un
     // serveur qui l'annonce DOIT rendre compte d'un succès quand on lui en
     // demande un, et rendre compte suppose la file. Sans elle, `NOTIFY=SUCCESS`

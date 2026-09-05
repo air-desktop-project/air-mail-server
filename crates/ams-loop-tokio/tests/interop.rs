@@ -223,3 +223,74 @@ async fn un_orcpt_ne_deteint_sur_aucun_voisin() {
         "les trois adresses arrivent entières"
     );
 }
+
+/// **UN TROISIÈME MTA, ET C'EST LE REFUS QU'IL ÉCLAIRE.**
+///
+/// OpenSMTPD n'apporte pas de chemin de code neuf : ni `ORCPT` comme Postfix, ni
+/// `BDAT` comme Exim. Il envoie `EHLO`, `MAIL FROM` sans paramètre, ses `RCPT`
+/// un par un, puis `DATA` — la forme la plus dépouillée des trois.
+///
+/// **Ce qu'il a montré est ailleurs** : en lui soumettant trois destinataires
+/// dont un inconnu, on a lu dans sa trace `550 5.7.1 Relay access denied` pour
+/// une adresse d'un domaine que ce serveur HÉBERGE. « Vous n'avez pas le droit
+/// d'envoyer ici », là où la vérité est « cette personne n'est pas ici ».
+///
+/// Cet essai fige donc la conversation ET les deux refus, qui ne se disent plus
+/// pareil.
+///
+/// Capturée d'un OpenSMTPD 7.4.0 remettant chez nous.
+#[tokio::test]
+async fn la_conversation_d_opensmtpd_distingue_les_deux_refus() {
+    let (dit, vus) = session(
+        b"EHLO essai.local\r\n\
+          MAIL FROM:<tester@essai.local>\r\n\
+          RCPT TO:<jean@example.com>\r\n\
+          RCPT TO:<inconnu@example.com>\r\n\
+          RCPT TO:<quelquun@ailleurs.example>\r\n\
+          RCPT TO:<marie@example.com>\r\n\
+          DATA\r\n\
+          Received: from localhost (essai.local [local])\r\n\
+          \tby essai.local (OpenSMTPD) with ESMTPA id 9d0a04f7\r\n\
+          \tfor <jean@example.com>;\r\n\
+          \tSat, 5 Sep 2026 06:32:56 +0000 (UTC)\r\n\
+          From: tester@essai.local\r\n\
+          To: jean@example.com\r\n\
+          Subject: Par OpenSMTPD\r\n\
+          \r\n\
+          Un corps ordinaire.\r\n\
+          .\r\n\
+          QUIT\r\n",
+    )
+    .await;
+
+    assert!(
+        dit.contains("250 2.0.0 Message accepted"),
+        "le message est accepté malgré les deux refus : {dit}"
+    );
+
+    // **UN INCONNU CHEZ NOUS N'EST PAS UN RELAIS NIÉ.** C'est l'état étendu que
+    // le rapport de non-remise portera jusqu'à un être humain : `5.1.1` lui dit
+    // de relire l'adresse, `5.7.1` l'enverrait chercher une autorisation qui ne
+    // lui a jamais manqué.
+    assert!(
+        dit.contains("550 5.1.1 Mailbox unavailable"),
+        "`inconnu@example.com` est d'un domaine qu'on héberge : {dit}"
+    );
+    assert!(
+        dit.contains("550 5.7.1 Relay access denied"),
+        "`quelquun@ailleurs.example` n'est pas d'ici : {dit}"
+    );
+    // Et ON LES COMPTE : un seul de chaque, sans quoi « les deux sont présents »
+    // serait vrai même si les deux adresses recevaient le même refus.
+    assert_eq!(dit.matches("5.1.1").count(), 1, "{dit}");
+    assert_eq!(dit.matches("5.7.1").count(), 1, "{dit}");
+
+    assert_eq!(
+        vus,
+        std::vec![
+            std::vec::Vec::from(&b"jean@example.com"[..]),
+            std::vec::Vec::from(&b"marie@example.com"[..]),
+        ],
+        "la remise ne reçoit que les deux adresses acceptées"
+    );
+}

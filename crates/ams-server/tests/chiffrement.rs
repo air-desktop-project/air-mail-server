@@ -631,7 +631,16 @@ fn chaque_destinataire_recoit_dans_sa_boite() {
 
     // Une adresse qu'aucun compte ne déclare est refusée — CE N'EST PLUS UN
     // FOURRE-TOUT, même dans un domaine hébergé.
-    assert!(dit.contains("550 5.7.1 Relay access denied"), "{dit}");
+    //
+    // **ET LE REFUS DIT LEQUEL** : `example.com` est un domaine dont ce serveur
+    // répond, donc `personne@example.com` est une BOÎTE QUI N'EXISTE PAS
+    // (`5.1.1`), et non un relais qu'on nie (`5.7.1`). C'est cet état étendu-là
+    // que le rapport de non-remise portera jusqu'à l'expéditeur.
+    assert!(dit.contains("550 5.1.1 Mailbox unavailable"), "{dit}");
+    assert!(
+        !dit.contains("5.7.1"),
+        "aucun relais n'est en cause ici : {dit}"
+    );
     assert!(dit.contains("250 2.0.0 Message accepted"), "{dit}");
 
     // Et sur le disque : un message dans chaque boîte, aucun ailleurs.

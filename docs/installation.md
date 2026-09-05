@@ -384,17 +384,16 @@ air-mail-admin summary /var/lib/air-mail/maildir/jean
 
 ## Ce que ce document ne couvre pas
 
-- **L'interopérabilité a été éprouvée contre Postfix et contre Exim**, dans les
-  deux sens et sous `STARTTLS` de part et d'autre : ils remettent chez nous, nous
+- **L'interopérabilité a été éprouvée contre Postfix, Exim et OpenSMTPD**, dans
+  les deux sens et sous `STARTTLS` de part et d'autre : ils remettent chez nous, nous
   remettons chez eux, la signature DKIM arrive intacte et un message de plusieurs
   centaines de kibioctets revient identique octet pour octet. Les deux n'ont pas
   emprunté le même chemin — Postfix envoie `DATA`, Exim prend `BDAT` —, et leurs
   conversations sont désormais rejouées par les essais, sans qu'aucun des deux
   n'ait à être installé.
 
-  **Ce que cela ne dit pas** : aucun service commercial n'a été confronté, ni
-  OpenSMTPD, ni un envoi en masse. Et la première remise de production reste à
-  faire.
+  **Ce que cela ne dit pas** : aucun service commercial n'a été confronté, ni un
+  envoi en masse. Et la première remise de production reste à faire.
 - **La table `nftables` ci-dessus n'est pas éprouvée**, et elle seule : personne
   ne l'a fait tourner. L'unité systemd, elle, l'a été — voir le §7.
 - **Il n'y a pas de paquet**, ni de script d'installation. Ce document décrit
