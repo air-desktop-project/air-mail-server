@@ -375,6 +375,7 @@ impl Mailboxes for Boites {
             *place = *octet;
         }
         Some(ams_session::imap::Listing {
+            special: ams_proto_imap::SpecialUse::NONE,
             name: out.get(..nom.len().min(out.len()))?,
             selectable: true,
             // Une seule boîte : elle n'a pas de fille.
@@ -392,7 +393,12 @@ impl Mailboxes for Boites {
         ams_session::imap::Deletion::Absente
     }
 
-    fn create(&self, _user: &[u8], _name: &[u8]) -> ams_session::imap::Creation {
+    fn create(
+        &self,
+        _user: &[u8],
+        _name: &[u8],
+        _usage: ams_proto_imap::SpecialUse,
+    ) -> ams_session::imap::Creation {
         // La boîte d'épreuve ne crée rien : ce qu'on éprouve est la session.
         ams_session::imap::Creation::Refusee
     }

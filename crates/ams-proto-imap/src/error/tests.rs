@@ -23,6 +23,7 @@ const TOUTES: &[Error] = &[
     Error::TooManyFetchItems { limit: 64 },
     Error::MalformedStore,
     Error::UnknownFlag,
+    Error::UnsupportedUse,
     Error::MalformedAppend,
     Error::MalformedSearch,
     Error::UnsupportedSearchKey,

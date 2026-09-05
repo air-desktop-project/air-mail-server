@@ -18,7 +18,7 @@
 
 use super::{BoitesImap, INBOX};
 use ams_auth::Account;
-use ams_proto_imap::Flags;
+use ams_proto_imap::{Flags, SpecialUse};
 use ams_session::imap::{Creation, Deposit as _, Mailbox as _, Mailboxes as _};
 use ams_store::Maildir;
 use std::collections::BTreeMap;
@@ -102,7 +102,10 @@ fn une_copie_vers_un_dossier_y_arrive() {
     let atelier = Ephemere::nouveau("copie-dossier");
     let service = service(&atelier.0);
     deposer(&service, INBOX, b"From: a@b.test\r\n\r\nun\r\n");
-    assert_eq!(service.create(COMPTE, b"Archives"), Creation::Faite);
+    assert_eq!(
+        service.create(COMPTE, b"Archives", SpecialUse::NONE),
+        Creation::Faite
+    );
 
     let mut ouverte = service.open(COMPTE, INBOX).expect("INBOX ouvrable");
     assert_eq!(ouverte.exists(), 1);
@@ -130,7 +133,10 @@ fn une_copie_vers_un_dossier_y_arrive() {
 fn une_copie_vers_inbox_depuis_un_dossier_arrive_dans_inbox() {
     let atelier = Ephemere::nouveau("copie-inbox");
     let service = service(&atelier.0);
-    assert_eq!(service.create(COMPTE, b"Brouillons"), Creation::Faite);
+    assert_eq!(
+        service.create(COMPTE, b"Brouillons", SpecialUse::NONE),
+        Creation::Faite
+    );
     deposer(&service, b"Brouillons", b"From: a@b.test\r\n\r\nun\r\n");
 
     let mut ouverte = service
@@ -160,7 +166,10 @@ fn une_copie_vers_inbox_depuis_un_dossier_arrive_dans_inbox() {
 fn un_deplacement_ne_perd_pas_le_message() {
     let atelier = Ephemere::nouveau("deplacement");
     let service = service(&atelier.0);
-    assert_eq!(service.create(COMPTE, b"Rangees"), Creation::Faite);
+    assert_eq!(
+        service.create(COMPTE, b"Rangees", SpecialUse::NONE),
+        Creation::Faite
+    );
     deposer(&service, b"Rangees", b"From: a@b.test\r\n\r\nun\r\n");
 
     let mut ouverte = service.open(COMPTE, b"Rangees").expect("dossier ouvrable");
@@ -224,7 +233,10 @@ fn defaire_retire_de_la_destination() {
     let atelier = Ephemere::nouveau("defaire");
     let service = service(&atelier.0);
     deposer(&service, INBOX, b"From: a@b.test\r\n\r\nun\r\n");
-    assert_eq!(service.create(COMPTE, b"Corbeille"), Creation::Faite);
+    assert_eq!(
+        service.create(COMPTE, b"Corbeille", SpecialUse::NONE),
+        Creation::Faite
+    );
 
     let mut ouverte = service.open(COMPTE, INBOX).expect("INBOX ouvrable");
     let uid = ouverte.copy_to(1, b"Corbeille").expect("copie faite");
@@ -237,4 +249,115 @@ fn defaire_retire_de_la_destination() {
         "la copie est retirée de la destination"
     );
     assert_eq!(combien(&atelier.0, None), 1, "et l'original est intact");
+}
+
+// ── LES ATTRIBUTS D'USAGE, SUR LE DISQUE (RFC 6154) ─────────────────────────
+
+/// **UN USAGE SURVIT AU REDÉMARRAGE**, et c'est tout ce qui compte ici.
+///
+/// La session ne sait pas si le magasin retient : elle rend ce qu'on lui donne.
+/// Ce que cet essai vérifie, c'est le fichier — un second service monté sur la
+/// même racine doit lire ce que le premier a écrit.
+#[test]
+fn un_usage_designe_survit_au_redemarrage() {
+    let atelier = Ephemere::nouveau("usage-survit");
+    {
+        let service = service(&atelier.0);
+        assert_eq!(
+            service.create(COMPTE, b"Brouillons", SpecialUse::DRAFTS),
+            Creation::Faite
+        );
+    }
+    // UN SECOND SERVICE, sur la même racine : c'est le redémarrage.
+    let apres = service(&atelier.0);
+    let mut place = [0_u8; 256];
+    let mut vues: std::vec::Vec<(std::string::String, bool)> = std::vec::Vec::new();
+    for rang in 0..8 {
+        let Some(listing) = apres.name(COMPTE, rang, &mut place) else {
+            break;
+        };
+        vues.push((
+            std::string::String::from_utf8_lossy(listing.name).into_owned(),
+            listing.special.contains(SpecialUse::DRAFTS),
+        ));
+    }
+    assert!(
+        vues.contains(&(std::string::String::from("Brouillons"), true)),
+        "l'usage n'a pas survécu : {vues:?}"
+    );
+    assert!(
+        vues.contains(&(std::string::String::from("INBOX"), false)),
+        "et il ne déteint pas sur les voisines : {vues:?}"
+    );
+}
+
+/// **UN USAGE NE VAUT QUE POUR UNE BOÎTE, ET RIEN N'EST CRÉÉ EN CHEMIN** (§3).
+///
+/// Le refus doit tomber AVANT le répertoire : créer d'abord et refuser ensuite
+/// laisserait une boîte que le client n'a pas demandée, et qu'il ne saurait pas
+/// devoir effacer.
+#[test]
+fn un_usage_deja_pris_ne_cree_rien() {
+    let atelier = Ephemere::nouveau("usage-pris");
+    let service = service(&atelier.0);
+    assert_eq!(
+        service.create(COMPTE, b"Brouillons", SpecialUse::DRAFTS),
+        Creation::Faite
+    );
+    assert_eq!(
+        service.create(COMPTE, b"Autre", SpecialUse::DRAFTS),
+        Creation::UsageDejaPris
+    );
+    assert!(
+        !atelier.0.join("marie").join(".Autre").exists(),
+        "un répertoire est né d'une création refusée"
+    );
+    // Le même nom SANS l'usage passe : c'est ce que `[USEATTR]` promet.
+    assert_eq!(
+        service.create(COMPTE, b"Autre", SpecialUse::NONE),
+        Creation::Faite
+    );
+}
+
+/// **CE QU'ON NE COMPREND PAS DANS LE FICHIER EST SAUTÉ, PAS DEVINÉ.**
+///
+/// Ce fichier vit dans la racine du compte, où un administrateur peut l'ouvrir.
+/// Une ligne sans tabulation, un usage qu'on ne sert pas, un nom qui remonte :
+/// on passe. Et un usage réclamé deux fois va à la PREMIÈRE ligne — arbitraire,
+/// mais déterministe : deux serveurs sur le même magasin doivent lire pareil.
+#[test]
+fn un_fichier_d_usages_abime_ne_fait_pas_deviner() {
+    let atelier = Ephemere::nouveau("usage-abime");
+    let service = service(&atelier.0);
+    assert_eq!(
+        service.create(COMPTE, b"Bonne", SpecialUse::NONE),
+        Creation::Faite
+    );
+    assert_eq!(
+        service.create(COMPTE, b"Seconde", SpecialUse::NONE),
+        Creation::Faite
+    );
+    std::fs::write(
+        atelier.0.join("marie").join("ams-usages"),
+        // Une ligne sans tabulation, un attribut virtuel, un nom qui remonte,
+        // puis deux prétendants au même usage.
+        "pas de tabulation ici\n\\All\tTout\n\\Sent\t../evade\n\\Drafts\tBonne\n\\Drafts\tSeconde\n",
+    )
+    .expect("écriture");
+
+    let mut place = [0_u8; 256];
+    let mut porteuses = std::vec::Vec::new();
+    for rang in 0..16 {
+        let Some(listing) = service.name(COMPTE, rang, &mut place) else {
+            break;
+        };
+        if listing.special.any() {
+            porteuses.push(std::string::String::from_utf8_lossy(listing.name).into_owned());
+        }
+    }
+    assert_eq!(
+        porteuses,
+        std::vec![std::string::String::from("Bonne")],
+        "seule la première ligne bien formée et non conflictuelle doit valoir"
+    );
 }

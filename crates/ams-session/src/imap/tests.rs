@@ -343,6 +343,10 @@ type Valide = std::rc::Rc<std::cell::Cell<Option<(u32, Flags, Option<u64>)>>>;
 /// Ce qu'un dépôt a reçu, vu du test.
 type Ecrit = std::rc::Rc<std::cell::RefCell<std::vec::Vec<u8>>>;
 
+/// Ce que `CREATE … (USE (…))` a fait retenir au magasin : un usage par boîte.
+type Designes =
+    std::rc::Rc<std::cell::RefCell<std::vec::Vec<(std::vec::Vec<u8>, ams_proto_imap::SpecialUse)>>>;
+
 /// Un dépôt d'épreuve : il retient ce qu'on lui écrit, et le partage.
 #[derive(Debug, Default)]
 pub struct Depot {
@@ -408,6 +412,8 @@ pub struct Boites {
     effacees: std::rc::Rc<std::cell::RefCell<std::vec::Vec<std::vec::Vec<u8>>>>,
     /// Les abonnements du compte, comme un magasin réel les retiendrait.
     abonnees: std::rc::Rc<std::cell::RefCell<std::vec::Vec<std::vec::Vec<u8>>>>,
+    /// Les usages désignés, comme le magasin réel les retient (RFC 6154).
+    usages: Designes,
 }
 
 impl Mailboxes for Boites {
@@ -437,10 +443,17 @@ impl Mailboxes for Boites {
         }
         // Seule `Archives` a une fille, `Archives/2026`.
         let has_children = nom == b"Archives";
+        let special = self
+            .usages
+            .borrow()
+            .iter()
+            .find(|(connu, _)| connu.as_slice() == nom)
+            .map_or(ams_proto_imap::SpecialUse::NONE, |(_, usage)| *usage);
         Some(super::Listing {
             name: out.get(..longueur)?,
             selectable: !effacees.iter().any(|vide| vide == nom),
             has_children,
+            special,
         })
     }
 
@@ -501,10 +514,25 @@ impl Mailboxes for Boites {
         super::Deletion::Faite
     }
 
-    fn create(&self, _user: &[u8], name: &[u8]) -> super::Creation {
+    fn create(
+        &self,
+        _user: &[u8],
+        name: &[u8],
+        usage: ams_proto_imap::SpecialUse,
+    ) -> super::Creation {
         // La boîte d'épreuve refuse ce qui la fâche, comme un magasin réel.
         if name.starts_with(b"Impossible") {
             return super::Creation::Refusee;
+        }
+        // RFC 6154 §3 : un usage ne vaut que pour une boîte.
+        if usage.any()
+            && self
+                .usages
+                .borrow()
+                .iter()
+                .any(|(autre, pris)| autre.as_slice() != name && pris.contains(usage))
+        {
+            return super::Creation::UsageDejaPris;
         }
         let deja = matches!(name, b"Archives" | b"Archives/2026" | b"Trouee" | b"Tetue")
             || self.creees.borrow().iter().any(|connu| connu == name);
@@ -522,6 +550,10 @@ impl Mailboxes for Boites {
             if !creees.contains(&parcouru) {
                 creees.push(parcouru.clone());
             }
+        }
+        // L'usage se RETIENT, comme le magasin réel l'écrit dans `ams-usages`.
+        if usage.any() {
+            self.usages.borrow_mut().push((name.to_vec(), usage));
         }
         super::Creation::Faite
     }
@@ -693,7 +725,10 @@ fn la_banniere_annonce_ce_qu_on_sait_faire() {
     let mut sortie = [0_u8; 256];
     let banniere = nouvelle(false).greeting(&mut sortie).expect("composable");
     let texte = std::string::String::from_utf8_lossy(banniere).into_owned();
-    assert!(texte.starts_with("* OK [CAPABILITY IMAP4rev2 LITERAL- IDLE STARTTLS LOGINDISABLED]"));
+    assert!(texte.starts_with(
+        "* OK [CAPABILITY IMAP4rev2 LITERAL- IDLE SPECIAL-USE CREATE-SPECIAL-USE STARTTLS \
+         LOGINDISABLED]"
+    ));
     assert!(texte.ends_with("service ready\r\n"), "{texte}");
 }
 
@@ -1605,6 +1640,24 @@ fn un_tampon_trop_court_le_dit_ou_qu_il_cede() {
         b"a000 DELETE Passagere\r\n",
     ];
     court(APRES_ORPHELIN, b"a001 LIST (SUBSCRIBED) \"\" *\r\n", true);
+    // RFC 6154 : une ligne qui porte des USAGES est plus longue, et le tampon
+    // peut donc céder à un endroit de plus — entre les attributs et le nom.
+    court(
+        &[
+            b"a000 LOGIN jean ouvre-toi\r\n",
+            b"a000 CREATE Brouillons (USE (\\Drafts))\r\n",
+        ],
+        b"a001 LIST \"\" *\r\n",
+        true,
+    );
+    court(
+        &[
+            b"a000 LOGIN jean ouvre-toi\r\n",
+            b"a000 CREATE Brouillons (USE (\\Drafts))\r\n",
+        ],
+        b"a001 LIST (SPECIAL-USE) \"\" *\r\n",
+        true,
+    );
     court(APRES_LOGIN, b"a001 LIST \"\"\r\n", true);
     court(APRES_LOGIN, b"a001 STATUS INBOX (MESSAGES)\r\n", true);
     court(APRES_LOGIN, b"a001 STATUS Inconnue (MESSAGES)\r\n", true);
@@ -2769,7 +2822,12 @@ fn un_magasin_partage_se_passe_par_reference() {
     assert!(Mailboxes::append(&partage, b"jean", b"INBOX").is_some());
     assert!(Mailboxes::append(&partage, b"jean", b"Inconnue").is_none());
     assert_eq!(
-        Mailboxes::create(&partage, b"jean", b"Archives"),
+        Mailboxes::create(
+            &partage,
+            b"jean",
+            b"Archives",
+            ams_proto_imap::SpecialUse::NONE
+        ),
         super::Creation::DejaLa
     );
     assert_eq!(
@@ -5541,4 +5599,153 @@ fn les_mots_clefs_survivent_mais_l_ensemble_est_ferme() {
         "{texte}"
     );
     assert!(!texte.contains("\\*"), "{texte}");
+}
+
+// ── LES ATTRIBUTS D'USAGE (RFC 6154) ────────────────────────────────────────
+
+/// **UN `CREATE` DÉSIGNE, ET LE `LIST` LE RAPPORTE.**
+///
+/// Ce serveur ne désigne aucune boîte de son cru : c'est le client qui dit à
+/// quoi la sienne servira, et le magasin qui retient. Sans cet aller-retour, un
+/// client qui range un brouillon ne sait pas où le mettre — « Drafts »,
+/// « Brouillons » et « Entwürfe » ne se devinent pas.
+#[test]
+fn un_usage_designe_se_rapporte_dans_le_list() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (fait, _) = dire(&mut session, b"a002 CREATE Brouillons (USE (\\Drafts))\r\n");
+    assert!(fait.contains("a002 OK"), "{fait}");
+
+    let (tout, _) = dire(&mut session, b"a003 LIST \"\" *\r\n");
+    assert!(
+        tout.contains("* LIST (\\Drafts \\HasNoChildren) \"/\" \"Brouillons\"\r\n"),
+        "l'usage doit être écrit sur la ligne de la boîte : {tout}"
+    );
+    // **ET SUR ELLE SEULE** : une boîte ordinaire n'en porte aucun.
+    assert!(
+        tout.contains("* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n"),
+        "{tout}"
+    );
+}
+
+/// **LES USAGES S'ÉCRIVENT TOUJOURS, ET NON SUR DEMANDE.**
+///
+/// §5.2 de RFC 6154 ne définit qu'une option de SÉLECTION — il n'y a pas de
+/// `RETURN (SPECIAL-USE)`. Un client qui devrait redemander ce qu'il reçoit déjà
+/// ferait un aller-retour pour rien.
+#[test]
+fn le_filtre_special_use_ne_rend_que_les_boites_designees() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut session, b"a002 CREATE Brouillons (USE (\\Drafts))\r\n");
+    dire(&mut session, b"a003 CREATE Ordinaire\r\n");
+
+    let (filtre, _) = dire(&mut session, b"a004 LIST (SPECIAL-USE) \"\" *\r\n");
+    assert!(filtre.contains("\"Brouillons\""), "{filtre}");
+    assert!(
+        !filtre.contains("\"Ordinaire\"") && !filtre.contains("\"INBOX\""),
+        "le filtre doit écarter ce qui ne porte aucun usage : {filtre}"
+    );
+    assert_eq!(filtre.matches("* LIST").count(), 1, "{filtre}");
+}
+
+/// **LES DEUX FILTRES SE CUMULENT** (§5.2) : demander les deux demande les
+/// boîtes qui sont l'une ET l'autre, et non leur réunion.
+#[test]
+fn les_deux_filtres_de_list_se_cumulent() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut session, b"a002 CREATE Brouillons (USE (\\Drafts))\r\n");
+    dire(&mut session, b"a003 CREATE Envoyes (USE (\\Sent))\r\n");
+    dire(&mut session, b"a004 SUBSCRIBE Brouillons\r\n");
+
+    let (deux, _) = dire(
+        &mut session,
+        b"a005 LIST (SUBSCRIBED SPECIAL-USE) \"\" *\r\n",
+    );
+    assert!(
+        deux.contains("* LIST (\\Subscribed \\Drafts \\HasNoChildren) \"/\" \"Brouillons\"\r\n"),
+        "{deux}"
+    );
+    assert_eq!(
+        deux.matches("* LIST").count(),
+        1,
+        "`Envoyes` porte un usage mais n'est pas abonnée : {deux}"
+    );
+}
+
+/// **UN USAGE NE VAUT QUE POUR UNE BOÎTE** (§3), et le refus dit que c'est
+/// l'USAGE qu'on refuse — pas le nom.
+#[test]
+fn un_usage_deja_pris_se_refuse_par_useattr() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut session, b"a002 CREATE Brouillons (USE (\\Drafts))\r\n");
+
+    let (refus, _) = dire(&mut session, b"a003 CREATE Autre (USE (\\Drafts))\r\n");
+    assert!(refus.contains("a003 NO [USEATTR]"), "{refus}");
+
+    // **ET LE MÊME NOM SANS L'USAGE PASSE** : c'est ce que `[USEATTR]` promet
+    // au client, et il faut que ce soit vrai.
+    let (sans, _) = dire(&mut session, b"a004 CREATE Autre\r\n");
+    assert!(sans.contains("a004 OK"), "{sans}");
+}
+
+/// **UN ATTRIBUT BIEN ÉCRIT QU'ON NE SERT PAS SE DIT `NO [USEATTR]`**, et une
+/// faute de grammaire se dit `BAD`. Les confondre enverrait relire sa syntaxe
+/// un client qui l'a bien écrite.
+#[test]
+fn un_attribut_non_servi_ne_se_dit_pas_comme_une_faute() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+
+    for (tag, commande) in [
+        (b"a002", &b"a002 CREATE Tout (USE (\\All))\r\n"[..]),
+        (b"a003", b"a003 CREATE Marques (USE (\\Flagged))\r\n"),
+    ] {
+        let (refus, _) = dire(&mut session, commande);
+        assert!(
+            refus.contains(&std::format!(
+                "{} NO [USEATTR]",
+                std::string::String::from_utf8_lossy(tag)
+            )),
+            "{refus}"
+        );
+    }
+
+    for (tag, commande) in [
+        (b"a004", &b"a004 CREATE X (USE (Drafts))\r\n"[..]),
+        (b"a005", b"a005 CREATE Y (USAGE (\\Drafts))\r\n"),
+        (b"a006", b"a006 CREATE Z (USE ())\r\n"),
+        (b"a007", b"a007 CREATE W (USE (\\Drafts)) (X (1))\r\n"),
+    ] {
+        let (faute, _) = dire(&mut session, commande);
+        assert!(
+            faute.contains(&std::format!(
+                "{} BAD",
+                std::string::String::from_utf8_lossy(tag)
+            )),
+            "{faute}"
+        );
+    }
+}
+
+/// **UN NOM DE BOÎTE A LE DROIT DE PORTER UNE PARENTHÈSE**, et le paramètre se
+/// lit quand même : c'est le lecteur d'arguments qui dit où le nom finit, et non
+/// une recherche de la première parenthèse.
+#[test]
+fn un_nom_a_parenthese_ne_trompe_pas_le_parametre() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (fait, _) = dire(
+        &mut session,
+        b"a002 CREATE \"Compte (perso)\" (USE (\\Sent))\r\n",
+    );
+    assert!(fait.contains("a002 OK"), "{fait}");
+
+    let (tout, _) = dire(&mut session, b"a003 LIST (SPECIAL-USE) \"\" *\r\n");
+    assert!(
+        tout.contains("* LIST (\\Sent \\HasNoChildren) \"/\" \"Compte (perso)\"\r\n"),
+        "{tout}"
+    );
 }

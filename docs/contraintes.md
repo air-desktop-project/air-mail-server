@@ -3856,6 +3856,120 @@ Ce qui reste hors du serveur : **rien de connu**. Cette ligne annonçait « la f
 de réémission des messages sortants », et c'était faux — elle existe, elle est
 câblée, et [la liste v1](v1.md) le mesure plutôt que de le croire.
 
+## SPECIAL-USE : le client désigne, le serveur retient
+
+Sans les attributs d'usage de RFC 6154, un client qui range un brouillon ne sait
+pas OÙ. Il n'a que le nom — et « Drafts », « Brouillons », « Entwürfe » ne se
+devinent pas. Chaque client invente alors sa boîte : deux clients du même compte
+rangent au même endroit sans le savoir, ou à deux endroits en le croyant.
+
+C'était le blocage **B8** de la liste v1. Il est levé.
+
+### LA DÉCISION QUI COMMANDE TOUT LE RESTE : QUI DÉSIGNE ?
+
+§3 laisse le choix. Un serveur peut désigner ses boîtes lui-même, ou laisser le
+client le faire par `CREATE … (USE (\Drafts))`.
+
+Ce serveur ne crée aucune boîte de son cru — un compte neuf n'a qu'`INBOX` — et
+**deviner un usage d'après un nom serait une heuristique qui ment** : une boîte
+nommée « Sent » peut être un dossier d'archive, et rien dans le nom ne le dit.
+
+Le client désigne donc, et le serveur **retient**, dans `ams-usages` à la racine
+du compte. C'est exactement ce que la capacité `CREATE-SPECIAL-USE` annonce, et
+c'est pourquoi il en faut DEUX : `SPECIAL-USE` dit qu'on rapporte les usages et
+qu'on sait filtrer dessus ; `CREATE-SPECIAL-USE`, qu'un `CREATE` peut en
+demander un. Un client qui ne verrait qu'une capacité pour les deux ne saurait
+pas laquelle.
+
+### CINQ ATTRIBUTS, ET L'ENSEMBLE EST FERMÉ
+
+§2 en définit sept. Ce serveur en sert cinq : `\Archive`, `\Drafts`, `\Junk`,
+`\Sent`, `\Trash`.
+
+**`\All` et `\Flagged` sont écartés, et c'est une question d'honnêteté.** Tous
+deux désignent une boîte VIRTUELLE — « tous les messages du compte », « ceux qui
+portent `\Flagged` » —, c'est-à-dire une vue que le serveur CALCULE. Ce serveur
+n'a pas de boîte virtuelle : il n'a que des Maildir. Les annoncer promettrait une
+boîte qui n'existerait qu'à l'instant où quelqu'un l'ouvre, et qui ne s'ouvrirait
+pas.
+
+C'est le même choix que pour les mots-clefs de `Flags`, et pour la même raison :
+on refuse ce qu'on ne sait pas tenir, plutôt que d'accepter et de décevoir.
+
+### DEUX REFUS, ET ILS NE SE DISENT PAS PAREIL
+
+C'est le point que la première écriture avait manqué, et qu'une session contre le
+serveur vivant a révélé : `CREATE Tout (USE (\All))` répondait `BAD`.
+
+Or `\All` est un `use-attr` **bien écrit** de §2. Le client ne s'est pas trompé —
+il a demandé quelque chose qu'on ne sait pas donner. §3 veut donc `NO [USEATTR]`.
+`BAD` enverrait relire sa grammaire quelqu'un qui l'a bien lue.
+
+La distinction est désormais portée par la grammaire elle-même :
+
+| ce que le client écrit | réponse | ce que cela veut dire |
+|---|---|---|
+| `(USE (\Drafts))` sur un usage déjà pris | `NO [USEATTR]` | c'est l'USAGE qu'on refuse, pas le nom |
+| `(USE (\All))` | `NO [USEATTR]` | bien écrit, pas servi |
+| `(USE (Drafts))` | `BAD` | ce n'est pas un `use-attr` |
+| `(USAGE (\Drafts))` | `BAD` | ce n'est pas l'item de §3 |
+| `(USE ())` | `BAD` | ne demande rien en ayant l'air de demander |
+
+**Et un usage déjà pris se refuse AVANT que rien ne soit créé.** Créer d'abord et
+refuser ensuite laisserait un répertoire que le client n'a pas demandé, et qu'il
+ne saurait pas devoir effacer.
+
+### UNE FINESSE D'ANALYSE QUI A COÛTÉ UN ESSAI
+
+`(USE (\Drafts)) (X (1))` — deux items, que ce serveur ne sert pas — répondait
+`NO [USEATTR]` au lieu de `BAD`. La cause : l'analyse retirait la parenthèse de
+tête et celle de queue par simple préfixe/suffixe, si bien que le premier mot de
+la liste devenait `\Drafts))`. Sa barre oblique inverse en tête le faisait
+prendre pour un attribut bien écrit qu'on ne sert pas.
+
+Le client aurait alors cherché un autre USAGE, là où il fallait corriger la
+SYNTAXE. La liste d'usages ne porte donc plus aucune parenthèse, et c'est
+vérifié.
+
+### CE QUI TIENT LA FONCTION
+
+Le fichier `ams-usages` suit la discipline des abonnements — deux fichiers plutôt
+qu'un, parce qu'ils ne changent pas ensemble et qu'une coupure au mauvais moment
+perdrait les deux au lieu d'un —, avec un cache sur la date du fichier : un
+`LIST` pose la question une fois par boîte, et la poser en relisant ferait une
+lecture par boîte pour une réponse identique.
+
+**UNE TABULATION SÉPARE**, et c'est le seul octet qui le peut : les usages sont
+séparés par des espaces, et un nom de boîte a le droit d'en porter — « Sent
+Messages » est des plus ordinaires.
+
+**CE QU'ON NE COMPREND PAS DANS CE FICHIER EST SAUTÉ, PAS DEVINÉ** : il vit dans
+la racine du compte, où un administrateur peut l'ouvrir. Une ligne sans
+tabulation, un usage qu'on ne sert pas, un nom qui remonte — on passe. Un usage
+réclamé deux fois va à la première ligne : arbitraire, et c'est le seul choix
+DÉTERMINISTE, puisque deux serveurs sur le même magasin doivent lire la même
+chose.
+
+### UNE GARDE INATTEIGNABLE, ÉCARTÉE PLUTÔT QUE TOLÉRÉE
+
+La première écriture composait les usages dans un tampon local de 48 octets, puis
+les recopiait. La branche « tampon trop court » ne pouvait jamais se déclencher —
+cinq noms tiennent toujours — et la couverture l'a dit.
+
+Elle a été rendue STRUCTURELLE, comme `Flags` juste à côté : on écrit
+directement dans la sortie, et la seule borne qui puisse échouer est celle du
+tampon de l'appelant — que l'essai exhaustif des tailles éprouve déjà.
+
+### CE QUI EST ÉPROUVÉ
+
+À trois étages. La grammaire : les cinq attributs, la casse, les deux refus, la
+liste vide, les parenthèses. La session : le `LIST` qui rapporte, le filtre, le
+cumul des deux filtres, `[USEATTR]`, et **un nom de boîte qui porte une
+parenthèse** — `CREATE "Compte (perso)" (USE (\Sent))` —, parce que c'est le
+lecteur d'arguments qui dit où le nom finit, et non une recherche de la première
+parenthèse. Le magasin : l'usage SURVIT AU REDÉMARRAGE, un usage déjà pris ne
+crée aucun répertoire, et un fichier abîmé ne fait rien deviner.
+
 ## Deux « ce qui reste » qui ne restaient plus
 
 En dressant la liste de ce qui bloque une v1, la première rédaction a repris les

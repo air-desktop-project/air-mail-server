@@ -113,6 +113,18 @@ pub enum Error {
     /// croirait filtrée.
     MalformedList,
 
+    /// Un attribut d'usage BIEN ÉCRIT que ce serveur ne sert pas (RFC 6154).
+    ///
+    /// # POURQUOI CE N'EST PAS [`Self::MalformedList`]
+    ///
+    /// `\All` et `\Flagged` sont de vrais attributs de §2 : le client ne s'est
+    /// pas trompé en les écrivant. §3 veut donc un `NO [USEATTR]` — « je ne
+    /// peux pas donner cet usage » — et non un `BAD`, qui dirait « votre
+    /// commande est mal écrite » à quelqu'un qui l'a bien écrite. Le premier
+    /// laisse le client réessayer autrement ; le second l'envoie relire sa
+    /// grammaire.
+    UnsupportedUse,
+
     /// Les éléments d'un `STATUS` n'ont pas la forme de §6.3.11.
     ///
     /// **Un élément qu'on ne connaît pas tombe ici** — `RECENT` compris, que
@@ -214,6 +226,9 @@ impl fmt::Display for Error {
             }
             Error::MalformedList => {
                 f.write_str("les arguments d'un `LIST` n'ont pas la forme attendue")
+            }
+            Error::UnsupportedUse => {
+                f.write_str("cet attribut d'usage est reconnu, mais ce serveur ne le sert pas")
             }
             Error::MalformedStatus => {
                 f.write_str("les éléments d'un `STATUS` n'ont pas la forme attendue")

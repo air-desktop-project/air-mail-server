@@ -51,6 +51,8 @@ pub const LIST_PATTERNS_MAX: usize = 16;
 pub struct List<'a> {
     /// Ne rendre que les boîtes abonnées ?
     subscribed_only: bool,
+    /// Ne rendre que les boîtes qui portent un attribut d'usage ?
+    special_use_only: bool,
     /// Marquer `\Subscribed` sur ce qu'on rend ?
     report_subscribed: bool,
     /// Le `STATUS` de chaque boîte rendue, si le client l'a demandé.
@@ -66,6 +68,19 @@ impl<'a> List<'a> {
     #[must_use]
     pub fn subscribed_only(&self) -> bool {
         self.subscribed_only
+    }
+
+    /// `(SPECIAL-USE)` était-il devant ? — le FILTRE de RFC 6154 §5.2.
+    ///
+    /// # IL N'Y A PAS DE `RETURN (SPECIAL-USE)` CORRESPONDANT, ET C'EST VOULU
+    ///
+    /// §5.2 ne définit qu'une option de SÉLECTION. Les attributs d'usage, eux,
+    /// sont écrits sur CHAQUE ligne d'un `LIST`, que le client les ait demandés
+    /// ou non — comme `\HasChildren`. Un client qui doit demander ce qu'il
+    /// reçoit déjà ferait un aller-retour pour rien.
+    #[must_use]
+    pub fn special_use_only(&self) -> bool {
+        self.special_use_only
     }
 
     /// `RETURN (SUBSCRIBED)` était-il derrière ? — le RENSEIGNEMENT.
@@ -110,12 +125,12 @@ impl<'a> List<'a> {
         // 1. L'option de sélection, si elle est là. UNE PARENTHÈSE EN TÊTE NE
         //    PEUT ÊTRE QUE CELA : un nom de boîte n'en porte pas (§5.1), et un
         //    motif non plus.
-        let (subscribed_only, reste) = match reste.first() {
+        let ((subscribed_only, special_use_only), reste) = match reste.first() {
             Some(b'(') => {
                 let (dedans, suite) = entre_parentheses(reste)?;
                 (options_de_selection(dedans)?, suite)
             }
-            _ => (false, reste),
+            _ => ((false, false), reste),
         };
 
         // 2. La référence, qu'on lit pour la jeter.
@@ -155,6 +170,7 @@ impl<'a> List<'a> {
 
         Ok(Self {
             subscribed_only,
+            special_use_only,
             report_subscribed: report_subscribed.0,
             status: report_subscribed.1,
             motifs,
@@ -259,19 +275,30 @@ fn plusieurs_motifs(reste: &[u8]) -> Result<Motifs<'_>, Error> {
     Ok((motifs, combien, suite))
 }
 
-/// Lit les options de sélection, et rend `true` si `SUBSCRIBED` y est.
-fn options_de_selection(dedans: &[u8]) -> Result<bool, Error> {
+/// Lit les options de sélection : `SUBSCRIBED` et `SPECIAL-USE`.
+///
+/// Rend `(abonnées seulement, à usage seulement)`. **Les deux sont des FILTRES**,
+/// et les cumuler restreint : `LIST (SUBSCRIBED SPECIAL-USE) "" *` demande les
+/// boîtes qui sont l'un ET l'autre, ce que §5.2 de RFC 6154 dit en toutes
+/// lettres.
+fn options_de_selection(dedans: &[u8]) -> Result<(bool, bool), Error> {
     let mut abonnees = false;
+    let mut a_usage = false;
     for mot in dedans.split(|octet| *octet == b' ') {
         if mot.is_empty() {
             continue;
         }
-        if !mot.eq_ignore_ascii_case(b"SUBSCRIBED") {
-            return Err(Error::MalformedList);
+        if mot.eq_ignore_ascii_case(b"SUBSCRIBED") {
+            abonnees = true;
+            continue;
         }
-        abonnees = true;
+        if mot.eq_ignore_ascii_case(b"SPECIAL-USE") {
+            a_usage = true;
+            continue;
+        }
+        return Err(Error::MalformedList);
     }
-    Ok(abonnees)
+    Ok((abonnees, a_usage))
 }
 
 /// Lit les options de retour : `SUBSCRIBED`, et le `STATUS` s'il y est.

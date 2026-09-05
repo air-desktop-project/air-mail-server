@@ -51,7 +51,7 @@ use std::sync::Arc;
 
 use ams_index::{MessageName, Uid};
 use ams_mime::BodySpan;
-use ams_proto_imap::{Flags, PartWhat, SearchScope, StoreMode};
+use ams_proto_imap::{Flags, PartWhat, SearchScope, SpecialUse, StoreMode};
 use ams_session::imap::{
     BinarySize, Creation, Deletion, Deposit, Listing, Mailbox, Mailboxes, MessageInfo, Renaming,
     Subscription,
@@ -103,6 +103,40 @@ const INBOX: &[u8] = b"INBOX";
 /// serveur le restreint). Une ligne par nom est donc une écriture qui ne peut
 /// pas être ambiguë, et que l'administrateur peut lire sans outil.
 const ABONNEMENTS: &str = "ams-abonnements";
+
+/// Où les ATTRIBUTS D'USAGE d'un compte s'écrivent (RFC 6154).
+///
+/// # POURQUOI UN SECOND FICHIER, ET NON UNE COLONNE DANS LE PREMIER
+///
+/// Les abonnements et les usages ne changent pas ensemble, ne se lisent pas
+/// ensemble, et n'ont pas la même durée de vie : un client se désabonne
+/// souvent, il ne redésigne jamais sa boîte de brouillons. Les mêler ferait
+/// réécrire l'un chaque fois qu'on touche l'autre — et une coupure au mauvais
+/// moment perdrait les deux au lieu d'un.
+///
+/// # UNE TABULATION SÉPARE, ET C'EST LE SEUL OCTET QUI LE PEUT
+///
+/// Une ligne s'écrit `<usages>\t<nom>`. Les usages sont séparés par des espaces
+/// (§2), et **un nom de boîte a le droit d'en porter** — « Sent Messages » est
+/// des plus ordinaires. L'espace ne peut donc pas séparer les deux champs. La
+/// tabulation, elle, est exclue d'un nom : la session n'y laisse que de l'ASCII
+/// imprimable et l'espace.
+const USAGES: &str = "ams-usages";
+
+/// Combien de boîtes d'un compte peuvent porter un usage.
+///
+/// **CINQ, PARCE QU'IL Y A CINQ USAGES** et qu'un usage ne vaut que pour une
+/// boîte. Ce n'est pas une borne de confort : c'est la règle elle-même, écrite
+/// une seconde fois là où le fichier est relu — un fichier que quelqu'un aurait
+/// édité à la main ne doit pas faire croire à six boîtes de brouillons.
+const USAGES_MAX: usize = 5;
+
+/// Ce que le fichier des usages peut peser, au plus.
+///
+/// [`USAGES_MAX`] lignes d'un nom de boîte, de ses usages et de leurs
+/// séparateurs. **On lit une borne, pas un fichier** : celui-ci vit dans la
+/// racine du compte, et rien ne garantit que personne n'y a écrit autre chose.
+const USAGES_OCTETS_MAX: u64 = 8 * 1024;
 
 /// Combien d'abonnements un compte peut porter.
 ///
@@ -1111,6 +1145,23 @@ pub struct BoitesImap {
     /// rien de DEUX SERVEURS sur le même magasin — mais deux serveurs sur le
     /// même magasin se disputent bien davantage que ce fichier.
     abonnes: std::sync::Mutex<BTreeMap<String, Abonnements>>,
+    /// Les usages de chaque compte, tels qu'on les a lus.
+    ///
+    /// **MÊME DISCIPLINE QUE LES ABONNEMENTS, ET POUR LA MÊME RAISON** : un
+    /// `LIST` pose la question « quel est l'usage de cette boîte ? » une fois
+    /// par boîte, et la poser en relisant le fichier ferait une lecture par
+    /// boîte listée pour une réponse identique à chaque fois.
+    usages: std::sync::Mutex<BTreeMap<String, Usages>>,
+}
+
+/// Les usages d'un compte, et la date du fichier qui les porte.
+#[derive(Debug, Clone, Default)]
+struct Usages {
+    /// Ce que le fichier portait au dernier regard, ou `None` s'il n'y en avait
+    /// pas — un compte qui n'a rien désigné n'a pas de fichier.
+    vu: Option<std::time::SystemTime>,
+    /// Les paires `(nom, usages)`, triées par nom et sans doublon.
+    boites: Arc<Vec<(Vec<u8>, SpecialUse)>>,
 }
 
 impl Magasin {
@@ -1199,6 +1250,7 @@ impl BoitesImap {
                 hote: hote.to_vec(),
             }),
             abonnes: std::sync::Mutex::new(BTreeMap::new()),
+            usages: std::sync::Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -1239,7 +1291,7 @@ impl BoitesImap {
         let Some(arrivee) = self.racine(user) else {
             return Renaming::Absente;
         };
-        if self.create(user, to) == Creation::Refusee {
+        if self.create(user, to, SpecialUse::NONE) == Creation::Refusee {
             return Renaming::Refusee;
         }
         for sous in ["cur", "new"] {
@@ -1279,6 +1331,89 @@ impl BoitesImap {
     /// Le fichier d'abonnements d'un compte.
     fn fichier_des_abonnements(&self, user: &[u8]) -> Option<PathBuf> {
         Some(self.racine(user)?.join(ABONNEMENTS))
+    }
+
+    /// Où les usages d'un compte s'écrivent.
+    fn fichier_des_usages(&self, user: &[u8]) -> Option<PathBuf> {
+        Some(self.racine(user)?.join(USAGES))
+    }
+
+    /// Les usages d'un compte, relus seulement si le fichier a bougé.
+    fn usages(&self, user: &[u8]) -> Arc<Vec<(Vec<u8>, SpecialUse)>> {
+        let vide = || Arc::new(std::vec::Vec::new());
+        let (Some(chemin), Ok(compte)) =
+            (self.fichier_des_usages(user), core::str::from_utf8(user))
+        else {
+            return vide();
+        };
+        // LA DATE D'ABORD : c'est la réponse dans l'immense majorité des cas, et
+        // elle ne lit rien.
+        let date = std::fs::metadata(&chemin)
+            .ok()
+            .and_then(|etat| etat.modified().ok());
+        let Ok(mut cache) = self.usages.lock() else {
+            return vide();
+        };
+        if let Some(connu) = cache.get(compte).filter(|connu| connu.vu == date) {
+            return Arc::clone(&connu.boites);
+        }
+        let boites = Arc::new(lire_les_usages(&chemin));
+        cache.insert(
+            compte.to_string(),
+            Usages {
+                vu: date,
+                boites: Arc::clone(&boites),
+            },
+        );
+        boites
+    }
+
+    /// L'usage d'une boîte nommée, ou [`SpecialUse::NONE`].
+    fn usage_de(&self, user: &[u8], nom: &[u8]) -> SpecialUse {
+        self.usages(user)
+            .iter()
+            .find(|(connu, _)| connu.as_slice() == nom)
+            .map_or(SpecialUse::NONE, |(_, usage)| *usage)
+    }
+
+    /// Écrit les usages d'un compte, et rafraîchit le cache.
+    ///
+    /// **LE CACHE SUIT IMMÉDIATEMENT**, et pour la raison écrite à propos des
+    /// abonnements : deux écritures dans la même seconde peuvent porter la même
+    /// date sur un système de fichiers qui ne compte pas plus fin.
+    fn ecrire_les_usages(&self, user: &[u8], boites: &[(Vec<u8>, SpecialUse)]) -> bool {
+        let (Some(chemin), Ok(compte)) =
+            (self.fichier_des_usages(user), core::str::from_utf8(user))
+        else {
+            return false;
+        };
+        let mut texte = std::vec::Vec::new();
+        let mut place = [0_u8; 64];
+        for (nom, usage) in boites {
+            let Ok(ecrits) = usage.write(&mut place) else {
+                return false;
+            };
+            texte.extend_from_slice(ecrits);
+            texte.push(b'\t');
+            texte.extend_from_slice(nom);
+            texte.push(b'\n');
+        }
+        if ams_fichier::poser(&chemin, &texte).is_err() {
+            return false;
+        }
+        if let Ok(mut cache) = self.usages.lock() {
+            let date = std::fs::metadata(&chemin)
+                .ok()
+                .and_then(|etat| etat.modified().ok());
+            cache.insert(
+                compte.to_string(),
+                Usages {
+                    vu: date,
+                    boites: Arc::new(boites.to_vec()),
+                },
+            );
+        }
+        true
     }
 
     /// Les abonnements d'un compte, relus seulement si le fichier a bougé.
@@ -1412,6 +1547,69 @@ impl BoitesImap {
 /// et rien ne garantit que personne n'y a écrit autre chose. Ce qui dépasse est
 /// ignoré, et ce qui n'est pas un nom de boîte servable aussi — un nom qu'on ne
 /// saurait pas ouvrir n'a rien à faire dans la liste qu'on rend au client.
+/// Lit le fichier des usages : une ligne `<usages>\t<nom>`.
+///
+/// **CE QU'ON NE COMPREND PAS EST SAUTÉ, PAS DEVINÉ.** Ce fichier vit dans la
+/// racine du compte, où un administrateur peut l'ouvrir. Une ligne mal formée,
+/// un usage qu'on ne sert pas, un nom qui ne serait pas sûr : on passe. Le
+/// deviner ferait porter un usage à une boîte que personne n'a désignée.
+///
+/// **UN USAGE NE SE GARDE QU'UNE FOIS** (RFC 6154 §3). Si deux lignes le
+/// réclament, la première l'emporte — c'est arbitraire, et c'est le seul choix
+/// qui rende la lecture DÉTERMINISTE : deux serveurs sur le même magasin
+/// doivent lire la même chose.
+fn lire_les_usages(chemin: &Path) -> Vec<(Vec<u8>, SpecialUse)> {
+    let mut boites: Vec<(Vec<u8>, SpecialUse)> = std::vec::Vec::new();
+    let Ok(fichier) = std::fs::File::open(chemin) else {
+        return boites;
+    };
+    let mut texte = std::vec::Vec::new();
+    if std::io::Read::read_to_end(
+        &mut std::io::Read::take(fichier, USAGES_OCTETS_MAX),
+        &mut texte,
+    )
+    .is_err()
+    {
+        return boites;
+    }
+    let mut pris = SpecialUse::NONE;
+    for ligne in texte.split(|octet| *octet == b'\n') {
+        if boites.len() >= USAGES_MAX {
+            break;
+        }
+        let Some(rang) = ligne.iter().position(|octet| *octet == b'\t') else {
+            continue;
+        };
+        let (dits, nom) = ligne.split_at(rang);
+        let nom = nom.get(1..).unwrap_or_default().trim_ascii();
+        let Ok(usage) = SpecialUse::parse_list(dits.trim_ascii()) else {
+            continue;
+        };
+        let connu = nom.eq_ignore_ascii_case(INBOX) || ams_proto_imap::mailbox_name_is_safe(nom);
+        let deja_nomme = boites.iter().any(|(vu, _)| vu.as_slice() == nom);
+        // Un usage que la ligne précédente a déjà pris : la première l'emporte.
+        let deja_pris = USAGES_CONNUS
+            .into_iter()
+            .any(|un| usage.contains(un) && pris.contains(un));
+        if !connu || deja_nomme || deja_pris {
+            continue;
+        }
+        pris = pris.with(usage);
+        boites.push((nom.to_vec(), usage));
+    }
+    boites.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+    boites
+}
+
+/// Les cinq usages, un par un — pour vérifier qu'aucun n'est pris deux fois.
+const USAGES_CONNUS: [SpecialUse; 5] = [
+    SpecialUse::ARCHIVE,
+    SpecialUse::DRAFTS,
+    SpecialUse::JUNK,
+    SpecialUse::SENT,
+    SpecialUse::TRASH,
+];
+
 fn lire_les_abonnements(chemin: &Path) -> Vec<Vec<u8>> {
     let mut noms = std::vec::Vec::new();
     let Ok(fichier) = std::fs::File::open(chemin) else {
@@ -1591,6 +1789,7 @@ impl Mailboxes for BoitesImap {
             name: out.get(..longueur)?,
             selectable,
             has_children,
+            special: self.usage_de(user, nom),
         })
     }
 
@@ -1712,8 +1911,22 @@ impl Mailboxes for BoitesImap {
         Deletion::Faite
     }
 
-    fn create(&self, user: &[u8], name: &[u8]) -> Creation {
+    fn create(&self, user: &[u8], name: &[u8], usage: SpecialUse) -> Creation {
         let name = ams_proto_imap::mailbox_name_trimmed(name);
+        // RFC 6154 §3 : UN USAGE DÉJÀ PRIS SE REFUSE AVANT DE CRÉER QUOI QUE CE
+        // SOIT. Créer d'abord et refuser ensuite laisserait un répertoire que le
+        // client n'a pas demandé, et qu'il ne saurait pas devoir effacer.
+        let deja = self.usages(user);
+        if usage.any()
+            && deja.iter().any(|(autre, pris)| {
+                autre.as_slice() != name
+                    && USAGES_CONNUS
+                        .into_iter()
+                        .any(|un| usage.contains(un) && pris.contains(un))
+            })
+        {
+            return Creation::UsageDejaPris;
+        }
         // §6.3.4 : `INBOX` existe toujours. La session le dit déjà ; on ne s'y
         // fie pas, puisque c'est ici qu'un répertoire naîtrait.
         if name.eq_ignore_ascii_case(INBOX) {
@@ -1745,6 +1958,20 @@ impl Mailboxes for BoitesImap {
                 continue;
             }
             if Maildir::open(&chemin, &self.magasin.hote, fresh_uid_validity()).is_err() {
+                return Creation::Refusee;
+            }
+        }
+        // L'USAGE S'ÉCRIT APRÈS LA BOÎTE, et c'est le bon ordre : un usage posé
+        // sur une boîte qui n'aurait pas été créée désignerait un nom que `LIST`
+        // ne rendrait jamais. L'inverse — une boîte sans son usage, après une
+        // coupure entre les deux — est une boîte ordinaire, que le client peut
+        // redésigner.
+        if usage.any() {
+            let mut toutes = (*deja).clone();
+            toutes.retain(|(autre, _)| autre.as_slice() != name);
+            toutes.push((name.to_vec(), usage));
+            toutes.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+            if !self.ecrire_les_usages(user, &toutes) {
                 return Creation::Refusee;
             }
         }

@@ -115,6 +115,22 @@ impl<'a> Args<'a> {
     pub fn new(arguments: &'a [u8]) -> Self {
         Self { reste: arguments }
     }
+
+    /// Ce qui n'a pas encore été lu.
+    ///
+    /// # POURQUOI CETTE FENÊTRE EXISTE
+    ///
+    /// `CREATE Brouillons (USE (\Drafts))` de RFC 6154 §3 met une LISTE derrière
+    /// un nom de boîte, et un nom de boîte a le droit de porter une parenthèse.
+    /// Chercher la première `(` dans les arguments bruts couperait donc au
+    /// mauvais endroit sur `CREATE "Compte (perso)"`.
+    ///
+    /// **Seul ce lecteur-ci sait où un argument finit** : le lui demander est la
+    /// seule façon de découper qui ne redevine pas la grammaire.
+    #[must_use]
+    pub const fn rest(&self) -> &'a [u8] {
+        self.reste
+    }
 }
 
 impl<'a> Iterator for Args<'a> {

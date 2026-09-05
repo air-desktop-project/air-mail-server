@@ -1417,12 +1417,19 @@ perdrait cette troisième réponse, qui est la plus fréquente.
 **Toute la grammaire de §9 est servie** : chaque commande, chaque option de
 retour, chaque `search-key`, chaque `status-att`, chaque `fetch-att`.
 
-Restent des `SHOULD`, qui se nomment aussi. §6.2.2 recommande d'offrir un
-mécanisme SASL qui ne transporte pas le mot de passe en clair —
-SCRAM-SHA-256, GSSAPI, EXTERNAL ; ce serveur n'offre que `PLAIN`, et seulement
-sous chiffrement. Les attributs de SPECIAL-USE — `\Drafts`, `\Sent`, `\Trash` —
-ne sont pas rendus : ils désignent des boîtes que le serveur DÉSIGNE, et celui-ci
-n'en désigne aucune.
+**SPECIAL-USE (RFC 6154) est servi**, et la capacité `CREATE-SPECIAL-USE` avec.
+Ce serveur ne désigne aucune boîte de son cru — deviner un usage d'après un nom
+serait une heuristique qui ment, « Sent » pouvant être un dossier d'archive.
+C'est donc le client qui désigne, par `CREATE Brouillons (USE (\Drafts))`, et le
+serveur qui **retient**, dans `ams-usages` à la racine du compte. Cinq attributs :
+`\Archive`, `\Drafts`, `\Junk`, `\Sent`, `\Trash`. `\All` et `\Flagged` sont
+écartés — ils désignent une boîte VIRTUELLE, que ce serveur n'a pas — et se
+refusent par `NO [USEATTR]`, jamais par un `BAD` qui dirait à tort au client
+qu'il a mal écrit sa commande.
+
+Reste un `SHOULD`, qui se nomme aussi. §6.2.2 recommande d'offrir un mécanisme
+SASL qui ne transporte pas le mot de passe en clair — SCRAM-SHA-256, GSSAPI,
+EXTERNAL ; ce serveur n'offre que `PLAIN`, et seulement sous chiffrement.
 
 Hors d'IMAP : rien de connu. **La file de réémission des messages sortants
 existe**, contrairement à ce que cette ligne a longtemps dit — `ams-queue` décide

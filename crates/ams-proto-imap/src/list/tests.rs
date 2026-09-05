@@ -47,6 +47,35 @@ fn le_meme_mot_ne_dit_pas_la_meme_chose_aux_deux_places() {
     assert!(!casse.report_subscribed());
 }
 
+/// **`SPECIAL-USE` EST UN FILTRE, ET IL N'A PAS DE PENDANT DERRIÈRE.**
+///
+/// §5.2 de RFC 6154 ne définit qu'une option de SÉLECTION : les attributs
+/// d'usage s'écrivent sur chaque ligne, comme `\HasChildren`, et il n'y a donc
+/// rien à demander en `RETURN`. Le lui accepter ferait croire à un
+/// renseignement qui n'existe pas.
+#[test]
+fn le_filtre_special_use_se_lit_et_n_a_pas_de_pendant() {
+    let ordinaire = List::parse(b"\"\" *").expect("lisible");
+    assert!(!ordinaire.special_use_only());
+
+    let filtre = List::parse(b"(SPECIAL-USE) \"\" *").expect("lisible");
+    assert!(filtre.special_use_only());
+    assert!(!filtre.subscribed_only());
+
+    // La casse ne compte pas davantage ici.
+    let casse = List::parse(b"(special-use) \"\" *").expect("lisible");
+    assert!(casse.special_use_only());
+
+    // **LES DEUX FILTRES SE CUMULENT** : c'est ce que §5.2 dit en toutes
+    // lettres, et ils restreignent l'un et l'autre.
+    let deux = List::parse(b"(SUBSCRIBED SPECIAL-USE) \"\" *").expect("lisible");
+    assert!(deux.special_use_only());
+    assert!(deux.subscribed_only());
+
+    // Et il n'y a pas de `RETURN (SPECIAL-USE)`.
+    assert!(List::parse(b"\"\" * RETURN (SPECIAL-USE)").is_err());
+}
+
 /// **UNE OPTION QU'ON NE SERT PAS SE REFUSE** : l'ignorer rendrait une liste que
 /// le client croirait filtrée.
 #[test]

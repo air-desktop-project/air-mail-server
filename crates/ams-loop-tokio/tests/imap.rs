@@ -352,6 +352,7 @@ impl Mailboxes for Boites {
             *place = *octet;
         }
         Some(ams_session::imap::Listing {
+            special: ams_proto_imap::SpecialUse::NONE,
             name: out.get(..longueur)?,
             selectable,
             // La boîte d'épreuve n'a pas d'arborescence.
@@ -375,7 +376,12 @@ impl Mailboxes for Boites {
         }
     }
 
-    fn create(&self, _user: &[u8], name: &[u8]) -> ams_session::imap::Creation {
+    fn create(
+        &self,
+        _user: &[u8],
+        name: &[u8],
+        _usage: ams_proto_imap::SpecialUse,
+    ) -> ams_session::imap::Creation {
         // La boîte d'épreuve ne crée rien : elle dit ce qui existe, et refuse
         // le reste. C'est le passage sur le fil qu'on éprouve ici.
         if name == b"Brouillons" {
@@ -504,7 +510,10 @@ async fn la_banniere_annonce_puis_la_session_repond() {
 
     let banniere = ligne(&mut lecteur).await;
     assert!(
-        banniere.starts_with("* OK [CAPABILITY IMAP4rev2 LITERAL- IDLE LOGINDISABLED]"),
+        banniere.starts_with(
+            "* OK [CAPABILITY IMAP4rev2 LITERAL- IDLE SPECIAL-USE CREATE-SPECIAL-USE \
+             LOGINDISABLED]"
+        ),
         "{banniere}"
     );
 

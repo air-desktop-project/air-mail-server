@@ -65,8 +65,8 @@
 
 use ams_proto_imap::{
     Args, Candidate, Command, Error as ImapError, Fetch, FetchItem, Flags, Limits, Line, PartPath,
-    PartWhat, Search, SearchScope, Section, SequenceSet, Status, StatusAtt, Store, StoreMode, Tag,
-    encode_continuation, encode_tagged, encode_untagged, encode_untagged_parts,
+    PartWhat, Search, SearchScope, Section, SequenceSet, SpecialUse, Status, StatusAtt, Store,
+    StoreMode, Tag, encode_continuation, encode_tagged, encode_untagged, encode_untagged_parts,
     write_internal_date,
 };
 use ams_sasl::{decode_base64, parse_plain};
@@ -493,7 +493,11 @@ pub trait Mailboxes {
     /// lui qui touche le système de fichiers, et qu'une vérification faite
     /// ailleurs est une vérification qu'on ne voit pas en lisant l'endroit qui
     /// en dépend.
-    fn create(&self, user: &[u8], name: &[u8]) -> Creation;
+    /// `usage` porte ce que `CREATE … (USE (…))` a demandé, ou
+    /// [`SpecialUse::NONE`]. **Le magasin le RETIENT** : ce serveur ne désigne
+    /// aucune boîte de son cru, et c'est donc le client qui dit à quoi la
+    /// sienne servira.
+    fn create(&self, user: &[u8], name: &[u8], usage: SpecialUse) -> Creation;
 
     /// Efface une boîte (§6.3.5).
     ///
@@ -578,6 +582,14 @@ pub struct Listing<'n> {
     /// boîte pour savoir s'il faut afficher un triangle d'ouverture — c'est-à-dire
     /// une commande par boîte, là où une seule suffit.
     pub has_children: bool,
+    /// Les attributs d'usage de RFC 6154, ou [`SpecialUse::NONE`].
+    ///
+    /// # LE MAGASIN LES SAIT, LA SESSION LES ÉCRIT
+    ///
+    /// Ce serveur ne désigne aucune boîte de son cru : c'est le client qui
+    /// désigne, par `CREATE … (USE (…))`, et le magasin qui retient. La session
+    /// n'a donc rien à décider ici — elle rend ce qu'on lui donne.
+    pub special: SpecialUse,
 }
 
 /// Ce qu'un effacement de boîte a donné.
@@ -639,6 +651,13 @@ pub enum Creation {
     DejaLa,
     /// Le magasin n'en a pas voulu.
     Refusee,
+    /// **L'usage demandé est déjà celui d'une autre boîte** (RFC 6154 §3).
+    ///
+    /// Il se dit `NO [USEATTR]`, et non `Refusee` : le client apprend ainsi que
+    /// c'est l'USAGE qu'on refuse, pas le nom — donc qu'un second `CREATE` sans
+    /// `USE` réussirait. Les confondre l'enverrait chercher un nom libre pour
+    /// une raison qui n'a rien à voir avec le nom.
+    UsageDejaPris,
 }
 
 /// Un message en cours de dépôt.
@@ -676,8 +695,8 @@ impl<T: Mailboxes> Mailboxes for &T {
         (**self).name(user, index, out)
     }
 
-    fn create(&self, user: &[u8], name: &[u8]) -> Creation {
-        (**self).create(user, name)
+    fn create(&self, user: &[u8], name: &[u8], usage: SpecialUse) -> Creation {
+        (**self).create(user, name, usage)
     }
 
     fn delete(&self, user: &[u8], name: &[u8]) -> Deletion {
@@ -2127,9 +2146,15 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             (false, true) => (b" STARTTLS", b" LOGINDISABLED"),
             (false, false) => (b" LOGINDISABLED", b""),
         };
+        // `SPECIAL-USE` ET `CREATE-SPECIAL-USE` SONT DEUX CAPACITÉS, ET IL EN
+        // FAUT DEUX (RFC 6154 §5). La première dit qu'on RAPPORTE les usages et
+        // qu'on sait filtrer dessus ; la seconde, qu'un `CREATE` peut en
+        // DEMANDER un. Un serveur peut tenir la première sans la seconde — s'il
+        // désigne ses boîtes lui-même —, et un client qui ne verrait qu'une
+        // capacité pour les deux ne saurait pas laquelle.
         [
             prefixe,
-            b"IMAP4rev2 LITERAL- IDLE",
+            b"IMAP4rev2 LITERAL- IDLE SPECIAL-USE CREATE-SPECIAL-USE",
             troisieme,
             quatrieme,
             suffixe,
@@ -3244,6 +3269,12 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             if demande.subscribed_only() && !abonnee {
                 continue;
             }
+            // Le FILTRE de `LIST (SPECIAL-USE)` (RFC 6154 §5.2). LES DEUX
+            // FILTRES SE CUMULENT : demander les deux demande les boîtes qui
+            // sont l'une ET l'autre.
+            if demande.special_use_only() && !boite.special.any() {
+                continue;
+            }
             // §6.3.5 : une boîte effacée qui avait des filles garde son nom
             // sans son courrier, et le dit.
             // §7.3.1 : `\HasChildren` ou `\HasNoChildren`, TOUJOURS l'un
@@ -3263,6 +3294,14 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             // abonné, et le taire serait taire la seule chose qu'il a dite.
             if abonnee && (demande.report_subscribed() || demande.subscribed_only()) {
                 plume.pousser(b"\\Subscribed ")?;
+            }
+            // RFC 6154 §2 : LES USAGES S'ÉCRIVENT TOUJOURS, comme
+            // `\HasChildren`, et non sur demande. Il n'existe pas d'option de
+            // retour pour eux — §5.2 n'en définit qu'une de sélection — et un
+            // client qui devrait redemander ce qu'il reçoit déjà ferait un
+            // aller-retour pour rien.
+            if boite.special.any() {
+                plume.usages(boite.special)?;
             }
             plume.pousser(attributs)?;
             plume.nom_de_boite(b") \"/\" ", boite.name, b"\r\n")?;
@@ -3506,6 +3545,28 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         let Some(nom) = self.un_nom(arguments, &mut place) else {
             return self.faute(b"CREATE expects a mailbox name", out);
         };
+        // RFC 6154 §3 : ce qui SUIT le nom peut demander un usage. On redemande
+        // au lecteur d'arguments où le nom finit — un nom de boîte a le droit de
+        // porter une parenthèse, et couper sur la première mentirait.
+        let mut lus = Args::new(arguments);
+        let _ = lus.next();
+        let usage = match ams_proto_imap::parse_create_params(lus.rest()) {
+            Ok(usage) => usage,
+            // RFC 6154 §3 : UN ATTRIBUT BIEN ÉCRIT QU'ON NE SERT PAS N'EST PAS
+            // UNE FAUTE DU CLIENT. `\All` et `\Flagged` sont de vrais attributs
+            // de §2 ; répondre `BAD` enverrait relire sa grammaire quelqu'un qui
+            // l'a bien lue. `NO [USEATTR]` lui dit ce qui est vrai : cet
+            // usage-là, ce serveur ne sait pas le donner.
+            Err(ImapError::UnsupportedUse) => {
+                return self.termine(
+                    Status::No,
+                    b"[USEATTR] This special use is not served here",
+                    Action::Continue,
+                    out,
+                );
+            }
+            Err(_) => return self.faute(b"CREATE expects (USE (\\Drafts)) or nothing", out),
+        };
         // §6.3.4 : un `/` final ne change pas la boîte désignée.
         let nom = ams_proto_imap::mailbox_name_trimmed(nom);
         // §6.3.4 : `INBOX` existe toujours, et ne se crée donc pas.
@@ -3525,11 +3586,19 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
                 out,
             );
         }
-        match self.boites.create(self.user(), nom) {
+        match self.boites.create(self.user(), nom, usage) {
             Creation::Faite => self.termine(Status::Ok, b"CREATE completed", Action::Continue, out),
             Creation::DejaLa => self.termine(
                 Status::No,
                 b"[ALREADYEXISTS] Mailbox already exists",
+                Action::Continue,
+                out,
+            ),
+            // RFC 6154 §3 : c'est l'USAGE qu'on refuse, et le dire évite au
+            // client de chercher un nom libre pour rien.
+            Creation::UsageDejaPris => self.termine(
+                Status::No,
+                b"[USEATTR] Another mailbox already has this special use",
                 Action::Continue,
                 out,
             ),
@@ -5482,6 +5551,16 @@ impl<'a> Plume<'a> {
         self.pousser(b"] ")?;
         self.pousser(mot)?;
         self.pousser(b"\r\n")
+    }
+
+    /// Les usages d'une boîte (RFC 6154), suivis d'une espace.
+    ///
+    /// **DIRECTEMENT DANS LA SORTIE**, pour la raison écrite juste en dessous.
+    fn usages(&mut self, usages: SpecialUse) -> Result<(), Error> {
+        let place = self.out.get_mut(self.ecrits..).unwrap_or_default();
+        let ecrit = usages.write(place).map_err(Error::Reply)?.len();
+        self.ecrits = self.ecrits.saturating_add(ecrit);
+        self.pousser(b" ")
     }
 
     /// Les deux suivantes écrivent DIRECTEMENT dans la sortie.

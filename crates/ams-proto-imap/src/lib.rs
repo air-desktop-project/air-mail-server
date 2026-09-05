@@ -54,6 +54,7 @@ mod mailbox;
 mod response;
 mod search;
 mod sequence;
+mod special;
 mod status;
 mod store;
 mod tag;
@@ -82,6 +83,7 @@ pub use search::{
     SearchSource, write_quoted,
 };
 pub use sequence::{Ranges, SequenceSet};
+pub use special::{SpecialUse, parse_create_params};
 pub use status::{STATUS_ATTS_MAX, StatusAtt, StatusItems};
 pub use store::{Store, StoreMode};
 pub use tag::Tag;
