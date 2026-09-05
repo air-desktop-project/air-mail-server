@@ -1195,7 +1195,9 @@ ouverte :
 - `CRAM-MD5` ;
 - IMAP4rev1 **en tant que cible** : la référence est la RFC 9051 (IMAP4rev2). La
   compatibilité rev1 sera examinée pour ce qu'elle coûte, jamais accordée par
-  défaut ;
+  défaut. **Ce qu'elle coûte est mesuré depuis le 2026-09-05** : `imaplib`
+  refuse la connexion faute de voir `IMAP4rev1` dans les capacités, `curl` sert
+  la boîte sans rien remarquer. La décision, elle, reste entière ;
 - le relais ouvert, sous toutes ses formes.
 
 **Outillé par** : pour TLS, deux `default-features = false` — sur
@@ -3851,6 +3853,109 @@ la seule vérification qui vaille est la confrontation à l'ABNF de §9, mot par
 mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
+
+## Un `COPY` qui déposait dans la boîte qu'on venait de quitter
+
+Le 2026-09-05, `crates/ams-server/src/imap.rs` portait ceci en tête :
+
+> **Ce serveur en a une par compte, et elle s'appelle `INBOX`** […] Créer des
+> dossiers demanderait `CREATE`, un endroit où les mettre, et une règle pour ce
+> qu'un nom de dossier a le droit d'être ; rien de tout cela n'est écrit […]
+> Un nom qui n'est pas `INBOX` n'ouvre rien — il ne devient jamais un morceau de
+> chemin, et il n'y a donc aucune traversée de répertoire à empêcher.
+
+Les trois affirmations étaient fausses. Le même fichier, mille lignes plus bas,
+portait `chemin_du_dossier`, `mailbox_name_is_safe`, `create`, `rename` et
+`delete` : les dossiers existaient, la règle était écrite, et un nom de client
+devenait bel et bien un chemin.
+
+**Mais ce n'est pas le commentaire qui coûtait — ce sont les deux commandes
+restées sur sa prémisse.** `copy_to` et `undo_copies` comparaient encore le nom
+de la destination à la constante `INBOX`, puis écrivaient dans la boîte
+**ouverte**. Ce qui donnait, sur un serveur qui annonce `COPY` et `MOVE` à
+chaque démarrage :
+
+- destination autre qu'`INBOX` : `NO Copy failed; no messages were copied`,
+  **après** que le serveur ait vérifié que la destination existe. Un client ne
+  pouvait rien conclure de ce refus ;
+- destination `INBOX` depuis un DOSSIER sélectionné : la comparaison réussissait,
+  et le message était déposé **dans le dossier source**. Le serveur répondait
+  `OK [COPYUID …]` en nommant l'`UIDVALIDITY` d'`INBOX` — c'est-à-dire une boîte
+  que le message n'avait jamais atteinte ;
+- le même cas en `MOVE` : la copie manquait sa destination, le retrait de la
+  source réussissait, et **le message disparaissait**. Il restait sur le disque,
+  dans le dossier d'origine, sous un UID neuf qu'aucune vue ne montrait au client
+  qui venait de le voir partir ;
+- ensemble vide : `OK COPY completed`, sans que rien n'ait été copié — le seul
+  cas où l'ancienne version répondait juste, et pour la mauvaise raison.
+
+### Comment on l'a trouvé, et pourquoi les barrières ne l'avaient pas vu
+
+En confrontant IMAP à un client qui n'a rien à voir avec ce projet : `imaplib`,
+de la bibliothèque standard de Python. Il n'a pas trouvé le défaut lui-même —
+il a rendu `NO` sur un `COPY` que rien ne justifiait, et c'est cette réponse
+inexplicable qui a fait ouvrir le code.
+
+Les cinq barrières ne pouvaient pas le voir, et c'est instructif :
+
+- **C2 ne couvre pas ce code.** `ams-server` fait des entrées-sorties ; les 100 %
+  portent sur les trente crates qui n'en font pas. La session, elle, est couverte
+  — mais elle ne voit qu'un `Option<u32>`, et un UID lui revenait bel et bien ;
+- **les essais du protocole emploient un magasin d'essai**, qui recopie le
+  contrat sans recopier le défaut ;
+- **`ams-server/src/imap.rs` n'avait aucun essai unitaire**, alors que quatre
+  autres modules du même binaire en ont.
+
+**Ce qui manquait n'était pas une barrière de plus, mais un essai qui regarde le
+DISQUE.** Les six ajoutés ne lisent aucune réponse : ils comptent les fichiers
+dans `new/` et `cur/` de la destination et de la source. Quatre échouent sur
+l'ancien code, dont celui qui constate qu'`INBOX` porte zéro message là où elle
+devrait en porter un.
+
+### Ce qui a été fait
+
+`Magasin` — les boîtes ouvertes par leur nom — est extrait de `BoitesImap` et
+**partagé avec chaque boîte ouverte**. `copy_to` et `undo_copies` y résolvent la
+destination par le même chemin que `SELECT`, `APPEND`, `CREATE`, `DELETE` et
+`RENAME` : une seule transcription d'un nom en chemin, un seul endroit où
+`mailbox_name_is_safe` s'applique, et le registre du serveur qui rend le
+`Maildir` déjà ouvert plutôt qu'un second sur le même répertoire — deux
+compteurs d'UID sur une boîte donneraient le même UID à deux messages.
+
+Vérifié contre le serveur vivant : `COPY` vers un dossier y arrive, `MOVE` y
+déplace vraiment, `COPY` vers `INBOX` depuis un dossier arrive dans `INBOX`,
+`COPY 1 Absente` et `COPY 1 ../../evade` rendent tous deux
+`NO [TRYCREATE]` sans rien écrire.
+
+### Deux autres affirmations périmées, relevées au passage
+
+**Le `--help` du serveur.** Il portait « TLS et l'authentification ne sont pas
+implémentés, donc ni STARTTLS ni AUTH ne sont annoncés. Le courrier reçu va dans
+UNE SEULE boîte ». Les trois sont là depuis longtemps. Un `--help` se lit AVANT
+d'essayer : celui-ci était le mieux placé pour décourager un usage que le serveur
+rendait déjà. Il ne liste plus ce qui manque — **le démarrage le fait, et cette
+liste-là est relevée à l'exécution.**
+
+**Le périmètre d'`ams-proto-imap`.** Il annonçait « l'interopérabilité RFC 3501
+(IMAP4rev1) que les clients déployés exigent encore ». Rien de tel n'est écrit,
+et C6 dit exactement l'inverse. Ce que cela coûte est désormais MESURÉ plutôt que
+supposé : `imaplib` refuse la connexion — « server not IMAP4 compliant » — avant
+d'envoyer une seule commande, parce qu'il exige `IMAP4rev1` ou `IMAP4` dans les
+capacités ; `curl` ne l'exige pas et sert la boîte sans rien remarquer. Le
+clivage ne tient donc pas à ce que ce serveur sait faire, mais à une ligne de
+capacités. **La décision reste ouverte** : C6 la réserve, et elle n'est pas prise
+ici.
+
+### La forme, pour la septième fois
+
+C'est le septième cas où une prose sait ce que le code ne fait pas. Les six
+premiers trompaient un lecteur. **Celui-ci a fait davantage : il a figé deux
+commandes.** Le reste du fichier a évolué autour de lui, et personne n'est
+retourné voir ce que son en-tête promettait encore.
+
+Un commentaire qui décrit une LIMITE est plus dangereux qu'un commentaire qui
+décrit un mécanisme : le mécanisme, on le relit en le modifiant ; la limite, on la
+croit sur parole et on n'y touche jamais.
 
 ## Deux commentaires qui avaient posé eux-mêmes leur date de péremption
 

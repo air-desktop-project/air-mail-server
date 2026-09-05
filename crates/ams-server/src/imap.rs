@@ -3,22 +3,28 @@
 //! # Ce que ce module ajoute à ce que POP3 savait déjà
 //!
 //! POP3 ouvre UNE boîte, celle du compte, et n'en sort pas. IMAP en nomme
-//! plusieurs, et il faut donc décider ce qu'un nom de boîte désigne. **Ce
-//! serveur en a une par compte, et elle s'appelle `INBOX`** — le nom que la
-//! RFC 9051 §5.1 réserve précisément pour cela.
+//! plusieurs, et il faut donc décider ce qu'un nom de boîte désigne. `INBOX`
+//! est celle où le courrier arrive — le nom que la RFC 9051 §5.1 réserve
+//! précisément pour cela — et `CREATE` en ajoute d'autres, à la façon de
+//! Maildir++ : un dossier `.Archives` dans la racine du compte, sur UN SEUL
+//! niveau.
 //!
-//! Créer des dossiers demanderait `CREATE`, un endroit où les mettre, et une
-//! règle pour ce qu'un nom de dossier a le droit d'être ; rien de tout cela
-//! n'est écrit, et prétendre en avoir plusieurs en attendant ferait mentir
-//! `LIST`.
+//! # UN NOM DE BOÎTE DEVIENT UN CHEMIN, ET C'EST À UN SEUL ENDROIT
 //!
-//! # AUCUN CHEMIN N'EST CONSTRUIT À PARTIR D'UN NOM DE BOÎTE
+//! Le nom vient du client, et il faut donc l'écarter avant qu'il ne touche le
+//! système de fichiers : `mailbox_name_is_safe` refuse ce qui deviendrait une
+//! traversée, et [`Magasin::chemin_du_dossier`] est le SEUL endroit qui
+//! compose. Tout ce qui ouvre une boîte y passe — `SELECT`, `APPEND`,
+//! `CREATE`, `DELETE`, `RENAME`, et la destination d'un `COPY`.
 //!
-//! Le nom vient du client. `INBOX` est comparé à une constante, et la boîte
-//! qu'il désigne est celle que la table des comptes a déjà ouverte au
-//! démarrage. Un nom qui n'est pas `INBOX` n'ouvre rien — il ne devient jamais
-//! un morceau de chemin, et il n'y a donc aucune traversée de répertoire à
-//! empêcher.
+//! **Ce paragraphe disait le contraire, et il a coûté deux commandes.** Il
+//! affirmait qu'aucun chemin n'était construit à partir d'un nom, parce que
+//! c'était vrai du jour où `INBOX` était la seule boîte. Les dossiers sont
+//! arrivés, la règle a été écrite pour eux — mais `copy_to` et `undo_copies`
+//! sont restés sur l'ancienne prémisse, à comparer le nom à la constante
+//! `INBOX`. Ils déposaient donc dans la boîte OUVERTE ce que le client
+//! demandait de copier AILLEURS ; un `MOVE` retirait ensuite l'original, et le
+//! message n'était plus nulle part où le client puisse le voir.
 //!
 //! # IMAP NE VERROUILLE PAS, ET C'EST LE NOM DU FICHIER QUI FAIT FOI
 //!
@@ -288,9 +294,20 @@ pub struct BoiteImap {
     /// dates de `new/` et `cur/` disent en deux appels qu'il n'y a rien de neuf,
     /// et c'est la réponse dans l'immense majorité des cas.
     vu: Empreinte,
-    /// La boîte elle-même, pour ce qui s'écrit : une COPIE y dépose un message
-    /// neuf, et l'UID vient de son compteur.
+    /// La boîte elle-même, pour ce qui s'écrit hors d'une copie.
     maildir: Arc<Maildir>,
+    /// De quoi ouvrir la DESTINATION d'un `COPY`, qui n'est pas celle-ci.
+    ///
+    /// # POURQUOI LA BOÎTE OUVERTE NE SUFFIT PAS
+    ///
+    /// `COPY` et `MOVE` nomment leur destination, et ce nom désigne une AUTRE
+    /// boîte que celle qu'on tient. Y déposer par `self.maildir` reviendrait à
+    /// écrire dans la source en disant qu'on a écrit ailleurs — et un `MOVE`,
+    /// qui retire ensuite l'original, ferait disparaître le message pour le
+    /// client qui l'a demandé.
+    magasin: Arc<Magasin>,
+    /// Le compte, dont la racine porte les dossiers.
+    compte: Vec<u8>,
     uid_validity: u32,
     /// Les drapeaux, un par message, lus à l'ouverture depuis les noms de
     /// fichiers. Les relire à chaque `FETCH` rouvrirait le répertoire.
@@ -785,12 +802,13 @@ impl Mailbox for BoiteImap {
     }
 
     fn copy_to(&mut self, sequence: u32, mailbox: &[u8]) -> Option<u32> {
-        // AUCUN CHEMIN N'EST CONSTRUIT À PARTIR D'UN NOM DE BOÎTE, ici non plus :
-        // le nom est comparé à une constante, et la seule destination possible
-        // est la boîte qu'on tient déjà.
-        if !mailbox.eq_ignore_ascii_case(INBOX) {
-            return None;
-        }
+        // LA DESTINATION EST CELLE QUE LE CLIENT A NOMMÉE, et elle est ouverte
+        // par le MÊME chemin que partout ailleurs : `mailbox_name_is_safe` y
+        // écarte ce qui deviendrait une traversée, et le registre du serveur
+        // rend le `Maildir` déjà ouvert plutôt qu'un second sur le même
+        // répertoire — deux compteurs d'UID sur une seule boîte donneraient le
+        // même UID à deux messages.
+        let destination = self.magasin.maildir(&self.compte, mailbox)?;
         let rang = self.rang(sequence)?;
         let chemin = self.chemins.get(rang)?.clone();
         let drapeaux = self.drapeaux.get(rang).copied().unwrap_or_default();
@@ -799,7 +817,7 @@ impl Mailbox for BoiteImap {
         // impose, et `Incoming` la connaît : tant que le message n'est pas
         // validé, personne ne le voit.
         let mut source = std::fs::File::open(&chemin).ok()?;
-        let mut entrant = self.maildir.deliver().ok()?;
+        let mut entrant = destination.deliver().ok()?;
         let mut tampon = [0_u8; 8192];
         loop {
             let lus = source.read(&mut tampon).ok()?;
@@ -825,13 +843,16 @@ impl Mailbox for BoiteImap {
     }
 
     fn undo_copies(&mut self, mailbox: &[u8], premier: u32, dernier: u32) {
-        if !mailbox.eq_ignore_ascii_case(INBOX) {
+        // ON DÉFAIT LÀ OÙ L'ON A FAIT : la même boîte que `copy_to` a ouverte,
+        // et donc résolue de la même façon. Défaire ailleurs ne retirerait rien
+        // et laisserait la destination avec des messages à moitié copiés.
+        let Some(destination) = self.magasin.maildir(&self.compte, mailbox) else {
             return;
-        }
+        };
         // On ne défait QUE ce qu'on vient de faire : les UID de la plage sont
         // ceux que `deliver` vient d'attribuer, et personne d'autre ne les a.
         for sous in ["new", "cur"] {
-            let Ok(entrees) = std::fs::read_dir(self.maildir.root().join(sous)) else {
+            let Ok(entrees) = std::fs::read_dir(destination.root().join(sous)) else {
                 continue;
             };
             for entree in entrees.flatten() {
@@ -1053,12 +1074,27 @@ fn fin_de_l_entete(chemin: &std::path::Path) -> Option<u64> {
     }
 }
 
-/// Les boîtes du serveur, telles qu'IMAP les ouvre.
-pub struct BoitesImap {
+/// Ce qui transforme un NOM DE BOÎTE en une boîte, et rien d'autre.
+///
+/// # POURQUOI CE N'EST PAS RESTÉ DANS [`BoitesImap`]
+///
+/// Une boîte OUVERTE en a besoin, elle aussi : un `COPY` nomme sa destination,
+/// et la destination n'est pas la boîte qu'on tient. Recopier la règle dans
+/// [`BoiteImap`] aurait fait deux endroits où un nom de client devient un
+/// chemin — c'est-à-dire deux endroits à corriger le jour où la règle change,
+/// et un seul qu'on penserait à relire.
+struct Magasin {
     /// La boîte d'arrivée de chaque compte, ouverte au démarrage.
     boites: Arc<crate::delivery::Boites>,
     /// Le nom d'hôte, qui entre dans les noms de fichiers Maildir.
     hote: Vec<u8>,
+}
+
+/// Les boîtes du serveur, telles qu'IMAP les ouvre.
+pub struct BoitesImap {
+    /// De quoi ouvrir une boîte par son nom. **Partagé avec chaque boîte
+    /// ouverte**, qui s'en sert pour atteindre la destination d'un `COPY`.
+    magasin: Arc<Magasin>,
     /// Les abonnements de chaque compte, tels qu'on les a lus.
     ///
     /// # POURQUOI UN CACHE, ET CE QU'IL COÛTE QUAND RIEN NE CHANGE
@@ -1077,27 +1113,7 @@ pub struct BoitesImap {
     abonnes: std::sync::Mutex<BTreeMap<String, Abonnements>>,
 }
 
-/// Les abonnements d'un compte, et la date du fichier qui les porte.
-#[derive(Debug, Clone, Default)]
-struct Abonnements {
-    /// Ce que le fichier portait au dernier regard, ou `None` s'il n'y en avait
-    /// pas — un compte qui ne s'est jamais abonné n'a pas de fichier.
-    vu: Option<std::time::SystemTime>,
-    /// Les noms, triés et sans doublon.
-    noms: Arc<Vec<Vec<u8>>>,
-}
-
-impl BoitesImap {
-    /// Monte le service à partir des boîtes déjà ouvertes par le serveur.
-    #[must_use]
-    pub fn new(boites: Arc<crate::delivery::Boites>, hote: &[u8]) -> Self {
-        Self {
-            boites,
-            hote: hote.to_vec(),
-            abonnes: std::sync::Mutex::new(BTreeMap::new()),
-        }
-    }
-
+impl Magasin {
     /// La racine de la boîte d'arrivée d'un compte.
     fn racine(&self, user: &[u8]) -> Option<PathBuf> {
         let nom = core::str::from_utf8(user).ok()?;
@@ -1161,6 +1177,45 @@ impl BoitesImap {
             ))
         })
     }
+}
+
+/// Les abonnements d'un compte, et la date du fichier qui les porte.
+#[derive(Debug, Clone, Default)]
+struct Abonnements {
+    /// Ce que le fichier portait au dernier regard, ou `None` s'il n'y en avait
+    /// pas — un compte qui ne s'est jamais abonné n'a pas de fichier.
+    vu: Option<std::time::SystemTime>,
+    /// Les noms, triés et sans doublon.
+    noms: Arc<Vec<Vec<u8>>>,
+}
+
+impl BoitesImap {
+    /// Monte le service à partir des boîtes déjà ouvertes par le serveur.
+    #[must_use]
+    pub fn new(boites: Arc<crate::delivery::Boites>, hote: &[u8]) -> Self {
+        Self {
+            magasin: Arc::new(Magasin {
+                boites,
+                hote: hote.to_vec(),
+            }),
+            abonnes: std::sync::Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    /// La racine de la boîte d'arrivée d'un compte.
+    fn racine(&self, user: &[u8]) -> Option<PathBuf> {
+        self.magasin.racine(user)
+    }
+
+    /// Le répertoire d'un dossier, à la façon de Maildir++.
+    fn chemin_du_dossier(&self, user: &[u8], name: &[u8]) -> Option<PathBuf> {
+        self.magasin.chemin_du_dossier(user, name)
+    }
+
+    /// La boîte d'un compte : `INBOX`, ou un dossier qui existe déjà.
+    fn maildir(&self, user: &[u8], name: &[u8]) -> Option<Arc<Maildir>> {
+        self.magasin.maildir(user, name)
+    }
 
     /// Oublie les boîtes ouvertes d'un compte à partir d'un nom, filles
     /// comprises.
@@ -1169,7 +1224,7 @@ impl BoitesImap {
         else {
             return;
         };
-        self.boites.oublier_les_dossiers(|c, boite| {
+        self.magasin.boites.oublier_les_dossiers(|c, boite| {
             c != compte || (boite != nom && !boite.starts_with(&std::format!("{nom}/")))
         });
     }
@@ -1511,7 +1566,7 @@ impl Mailboxes for BoitesImap {
     fn name<'n>(&self, user: &[u8], index: usize, out: &'n mut [u8]) -> Option<Listing<'n>> {
         // Le compte d'abord : sans lui, il n'y a pas de boîte à nommer.
         let compte = core::str::from_utf8(user).ok()?;
-        self.boites.get(compte)?;
+        self.magasin.boites.get(compte)?;
         let noms = self.dossiers_de(user);
         let nom = noms.get(index)?;
         let selectable = nom.as_slice() == INBOX
@@ -1625,7 +1680,8 @@ impl Mailboxes for BoitesImap {
         // La boîte cesse d'être ouverte AVANT d'être effacée : un `Maildir`
         // gardé en cache écrirait son index dans un répertoire qui n'est plus.
         if let (Ok(compte), Ok(boite)) = (core::str::from_utf8(user), core::str::from_utf8(name)) {
-            self.boites
+            self.magasin
+                .boites
                 .oublier_les_dossiers(|c, ouvert| c != compte || ouvert != boite);
         }
 
@@ -1688,7 +1744,7 @@ impl Mailboxes for BoitesImap {
             if chemin.is_dir() && Self::selectionnable(&chemin) {
                 continue;
             }
-            if Maildir::open(&chemin, &self.hote, fresh_uid_validity()).is_err() {
+            if Maildir::open(&chemin, &self.magasin.hote, fresh_uid_validity()).is_err() {
                 return Creation::Refusee;
             }
         }
@@ -1711,6 +1767,8 @@ impl Mailboxes for BoitesImap {
         Some(BoiteImap {
             vue,
             maildir: Arc::clone(&maildir),
+            magasin: Arc::clone(&self.magasin),
+            compte: user.to_vec(),
             uid_validity: maildir.uid_validity().value(),
             drapeaux,
             dates,
@@ -1904,3 +1962,7 @@ fn date_de(chemin: &std::path::Path) -> u64 {
         .and_then(|instant| instant.duration_since(std::time::UNIX_EPOCH).ok())
         .map_or(0, |ecoule| ecoule.as_secs())
 }
+
+#[cfg(test)]
+#[path = "imap/tests.rs"]
+mod tests;

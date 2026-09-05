@@ -65,8 +65,21 @@ use crate::policy::BoitesConnues;
 use crate::pop3::BoitesPop3;
 
 /// Le texte de `--help`.
+///
+/// # IL NE DIT PLUS CE QUI MANQUE, ET C'EST DÉLIBÉRÉ
+///
+/// Il l'a dit — « TLS et l'authentification ne sont pas implémentés […] le
+/// courrier reçu va dans UNE SEULE boîte » — et il a continué de le dire
+/// longtemps après que les trois soient arrivés. Un `--help` est ce qu'on lit
+/// AVANT d'essayer : il était donc le mieux placé pour décourager un usage que
+/// le serveur rendait déjà.
+///
+/// Ce que ce serveur sert dépend de sa CONFIGURATION, et le démarrage l'annonce
+/// ligne par ligne — ce qui est offert comme ce qui ne l'est pas, faute de
+/// certificat ou de résolveur. Cette liste-là ne peut pas vieillir : elle est
+/// relevée à l'exécution.
 const AIDE: &str = "\
-air-mail-server — serveur de courrier SMTP
+air-mail-server — serveur de courrier SMTP, POP3, IMAP et HTTP
 
 USAGE
     air-mail-server --config <fichier>
@@ -79,10 +92,11 @@ deux sources de configuration seraient une de trop.
     --help              ce texte
     --version           la version
 
-CE QUI N'EST PAS ENCORE LÀ
-    TLS et l'authentification ne sont pas implémentés, donc ni STARTTLS ni AUTH
-    ne sont annoncés. Le courrier reçu va dans UNE SEULE boîte : répartir par
-    destinataire demande un modèle de comptes qui n'existe pas.
+CE QU'IL SERT, IL LE DIT AU DÉMARRAGE
+    Les protocoles ouverts, les domaines servis, le chiffrement, les comptes —
+    et ce qui MANQUE : « EN CLAIR », « AUTH non annoncé », « aucun résolveur ».
+    Cette liste-là est relevée à l'exécution ; celle qu'on écrirait ici
+    vieillirait sans que personne ne s'en aperçoive.
 ";
 
 /// L'ordonnanceur est MULTI-FILS, et ce n'est pas un défaut de configuration :
@@ -1911,10 +1925,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     // ZÉRO NE S'ÉCRIT PAS, comme pour les autres compteurs : un journal qui
     // répète « rien n'a raté » est un journal qu'on cesse de lire.
     for (cause, combien) in incidents.bilan() {
-        eprintln!(
-            "air-mail-server : ATTENTION — {combien} {}",
-            cause.bilan()
-        );
+        eprintln!("air-mail-server : ATTENTION — {combien} {}", cause.bilan());
     }
 
     // ON DIT CE QU'ON A CONCLU. Un verdict qu'on ne rend nulle part ne sert à

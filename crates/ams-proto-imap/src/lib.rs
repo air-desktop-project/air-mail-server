@@ -1,7 +1,21 @@
 //! Grammaire IMAP : décodage et encodage, **sans entrée-sortie**.
 //!
-//! Périmètre visé : RFC 9051 (IMAP4rev2), avec l'interopérabilité RFC 3501
-//! (IMAP4rev1) que les clients déployés exigent encore.
+//! Périmètre : RFC 9051 (IMAP4rev2), et RIEN D'AUTRE.
+//!
+//! # CE N'EST PAS L'INTEROPÉRABILITÉ RFC 3501, ET CETTE LIGNE L'A PRÉTENDU
+//!
+//! Elle annonçait « l'interopérabilité RFC 3501 (IMAP4rev1) que les clients
+//! déployés exigent encore ». Rien de tel n'est écrit : `CAPABILITY` n'annonce
+//! qu'`IMAP4rev2`, et le contraire est une décision que C6 laisse ouverte —
+//! « la compatibilité rev1 sera examinée pour ce qu'elle coûte, jamais accordée
+//! par défaut ».
+//!
+//! **Ce que cela coûte, mesuré le 2026-09-05** : `imaplib`, de la bibliothèque
+//! standard de Python, REFUSE LA CONNEXION — « server not IMAP4 compliant » —
+//! parce qu'il exige `IMAP4rev1` ou `IMAP4` dans les capacités, et il le fait
+//! avant d'avoir envoyé une seule commande. `curl`, lui, ne l'exige pas et sert
+//! la boîte sans rien remarquer. Le clivage ne tient donc pas à ce que ce
+//! serveur SAIT faire, mais à une ligne de capacités.
 //!
 //! IMAP est de loin la plus grosse des quatre grammaires : littéraux comptés,
 //! réponses non sollicitées, séquences et UID, `FETCH` structuré. C'est aussi
