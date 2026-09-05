@@ -29,9 +29,12 @@
 //!   répertoire — et c'est aussi le séparateur que Maildir++ emploie sur le
 //!   disque : un point dans un nom y fabriquerait un niveau de hiérarchie que
 //!   personne n'a demandé.
-//! - **Que de l'ASCII imprimable, espace compris**, sans `\`, `%`, `*`, `"`, ni
-//!   `:`. Les deux premiers sont les jokers de `LIST` ; les autres cassent soit
-//!   le protocole, soit le nom de fichier Maildir.
+//! - **Pas de contrôle ni de `DEL`**, et pas de `\`, `%`, `*`, `"`, ni `:`. Les
+//!   premiers feraient écrire au client une réponse de notre part ; `%` et `*`
+//!   sont les jokers de `LIST` ; les autres cassent soit le protocole, soit le
+//!   nom de fichier Maildir.
+//! - **De l'UTF-8 VALIDE**, vérifié sur le nom entier : une suite mal formée
+//!   deviendrait un répertoire qu'on ne saurait ni relire ni rendre.
 //! - **Une profondeur bornée.** Sans quoi un client choisirait la longueur des
 //!   chemins que le serveur fabrique.
 
@@ -55,6 +58,12 @@ pub const MAILBOX_SEPARATOR: u8 = b'/';
 pub fn mailbox_name_is_safe(nom: &[u8]) -> bool {
     let nom = nom.strip_suffix(&[MAILBOX_SEPARATOR]).unwrap_or(nom);
     if nom.is_empty() || nom.len() > MAILBOX_NAME_MAX {
+        return false;
+    }
+    // **DE L'UTF-8 VALIDE, ET SUR LE NOM ENTIER** : §5.1 de RFC 9051 le veut, et
+    // une suite d'octets mal formée deviendrait un nom de répertoire qu'on ne
+    // saurait pas relire — ni rendre au client dans une réponse.
+    if core::str::from_utf8(nom).is_err() {
         return false;
     }
     let mut composants = 0_usize;
@@ -83,8 +92,22 @@ pub fn mailbox_name_trimmed(nom: &[u8]) -> &[u8] {
 }
 
 /// Cet octet a-t-il le droit de figurer dans un composant ?
+///
+/// # L'UTF-8 PASSE, ET C'EST §5.1 QUI L'EXIGE
+///
+/// Cette règle refusait tout octet au-delà de `0x7E`, au motif qu'un nom finit
+/// dans une réponse. **Le motif était juste, sa portée trop large** : un octet
+/// d'UTF-8 n'est pas un vecteur d'injection — ce qui l'est, ce sont les
+/// contrôles, le guillemet et la barre oblique inverse, qui ferment une chaîne
+/// citée. Refuser l'UTF-8, c'était annoncer `IMAP4rev2` et refuser ce que §5.1
+/// de RFC 9051 rend obligatoire.
+///
+/// La VALIDITÉ de l'UTF-8, elle, ne se vérifie pas octet par octet : c'est
+/// [`mailbox_name_is_safe`] qui l'examine sur le nom entier.
 fn octet_admis(octet: u8) -> bool {
-    if !octet.is_ascii_graphic() && octet != b' ' {
+    // Les contrôles C0 et `DEL` : ce sont eux qui feraient écrire au client une
+    // réponse de notre part.
+    if octet < 0x20 || octet == 0x7F {
         return false;
     }
     !matches!(octet, b'.' | b'\\' | b'%' | b'*' | b'"' | b':' | b'/')

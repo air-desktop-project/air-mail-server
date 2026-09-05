@@ -766,6 +766,26 @@ pub const SEQUENCE_TEXT_MAX: usize = 1024;
 /// accepté serait tronqué — donc un autre nom.
 pub const MAILBOX_NAME_MAX: usize = ams_proto_imap::MAILBOX_NAME_MAX;
 
+/// La place que demande un nom TRANSCRIT en UTF-7 modifié.
+///
+/// # POURQUOI TROIS FOIS, ET POURQUOI C'EST UNE BORNE ET NON UN PARI
+///
+/// Le pire cas alterne un caractère direct et un caractère qui ne l'est pas :
+/// chacun des seconds ouvre sa propre séquence, et coûte `&`, trois caractères
+/// de base64 et `-` — cinq octets de sortie pour les DEUX octets d'UTF-8 qu'un
+/// caractère latin accentué occupe. Avec le caractère direct qui suit, cela
+/// fait six octets pour trois : **deux fois**, et pas davantage.
+///
+/// Un caractère non direct plus court que deux octets n'existe pas ici :
+/// au-dessous, il n'y a que les contrôles et `DEL`, que
+/// [`ams_proto_imap::mailbox_name_is_safe`] refuse. Une longue suite de
+/// caractères non directs partage au contraire UNE séquence, et coûte moins.
+///
+/// Trois majore donc deux, et l'encodage ne peut pas manquer de place. C'est
+/// pourquoi son refus s'écrit `expect` là où on l'appelle : une garde qu'aucun
+/// nom ne peut faire céder n'est pas une garde.
+const NOM_TRANSCRIT_MAX: usize = MAILBOX_NAME_MAX * 3;
+
 /// Ce qu'une réponse SASL peut faire au plus, une fois décodée.
 ///
 /// `PLAIN` porte trois champs séparés par des octets nuls ; mille vingt-quatre
@@ -2438,6 +2458,9 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             boite.permanent_flags()
         };
         let lecture_seule = permanents == Flags::NONE;
+        // LA VERSION SE LIT AVANT D'EMPRUNTER LA SORTIE : la plume écrit dans
+        // `out`, et relire `self` pendant qu'elle vit fâcherait le compilateur.
+        let rev2 = self.rev2;
         let mut plume = Plume::neuve(out);
         if fermait {
             plume.pousser(b"* OK [CLOSED] Previous mailbox is now closed\r\n")?;
@@ -2482,6 +2505,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             },
             nom,
             b"\r\n",
+            rev2,
         )?;
         let ecrits = plume.ecrits();
 
@@ -3396,6 +3420,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         };
         // `LSUB` NE REND QUE LES ABONNEMENTS : c'est sa définition, et non une
         // option qu'on lui passerait.
+        let rev2 = self.rev2;
         let abonnes_seuls = lsub || demande.subscribed_only();
         let (tete, tete_orpheline, conclusion): (&[u8], &[u8], &[u8]) = match lsub {
             true => (
@@ -3480,7 +3505,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
                 plume.usages(boite.special)?;
             }
             plume.pousser(attributs)?;
-            plume.nom_de_boite(b") \"/\" ", boite.name, b"\r\n")?;
+            plume.nom_de_boite(b") \"/\" ", boite.name, b"\r\n", rev2)?;
             // §6.3.9.7 : `RETURN (STATUS (…))` rend un `* STATUS` PAR BOÎTE,
             // juste après sa ligne de liste. C'est ce qu'un client envoie pour
             // peupler son panneau en une commande au lieu de vingt — la latence
@@ -3494,7 +3519,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
                 .filter(|_| boite.selectable)
                 .and_then(|items| Some((items, self.recensement(boite.name, &items)?)))
             {
-                plume.nom_de_boite(b"* STATUS ", boite.name, b" (")?;
+                plume.nom_de_boite(b"* STATUS ", boite.name, b" (", rev2)?;
                 ecrire_le_recensement(&mut plume, &items, &recense)?;
                 plume.pousser(b")\r\n")?;
             }
@@ -3512,7 +3537,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
                     .iter()
                     .any(|motif| !motif.is_empty() && correspond(motif, nom))
                 {
-                    plume.nom_de_boite(tete_orpheline, nom, b"\r\n")?;
+                    plume.nom_de_boite(tete_orpheline, nom, b"\r\n", rev2)?;
                 }
             }
         }
@@ -3990,7 +4015,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         // client qui demande `UNSEEN` ne le trouverait pas, et ne saurait pas si
         // la boîte n'en a aucun ou si le serveur ne sait pas compter.
         let mut plume = Plume::neuve(out);
-        plume.nom_de_boite(b"* STATUS ", nom, b" (")?;
+        plume.nom_de_boite(b"* STATUS ", nom, b" (", self.rev2)?;
         ecrire_le_recensement(&mut plume, &demande, &recense)?;
         plume.pousser(b")\r\n")?;
         let ecrits = plume.ecrits();
@@ -4923,26 +4948,65 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         )))
     }
 
-    /// Lit le premier argument comme un nom de boîte.
+    /// Lit le premier argument comme un nom de boîte, EN UTF-8.
+    ///
+    /// # LES DEUX VERSIONS N'ÉCRIVENT PAS LES NOMS PAREIL
+    ///
+    /// RFC 9051 §5.1 les veut en UTF-8 ; RFC 3501 §5.1.3 les veut en UTF-7
+    /// modifié. Ce serveur annonce les deux, et **c'est ici que la différence se
+    /// résorbe** : tout ce qui descend vers le magasin est de l'UTF-8, quelle
+    /// que soit la version qui l'a écrit.
+    ///
+    /// La transcription se fait AU BORD, en un seul endroit, plutôt que de
+    /// laisser chaque commande deviner ce qu'elle tient.
     fn un_nom<'n>(&self, arguments: &[u8], place: &'n mut [u8]) -> Option<&'n [u8]> {
         let mut lus = Args::new(arguments);
         let premier = lus.next()?.ok()?;
-        let ecrit = premier.value(place).ok()?;
-        // LE NOM VA DANS UNE RÉPONSE, et il vient du client. On n'y laisse que
-        // de l'ASCII imprimable — espace compris, parce que « Sent Messages »
-        // est un nom de dossier des plus ordinaires, et que la réponse le CITE
-        // entre guillemets. Ce qui est exclu, ce sont les octets qui feraient
-        // écrire au client une réponse de notre part.
-        if ecrit.is_empty()
-            || !ecrit
+        let mut brut = [0_u8; MAILBOX_NAME_MAX];
+        let ecrit = premier.value(&mut brut).ok()?;
+        // **UN NOM VIDE EST REFUSÉ PLUS BAS**, une seule fois : le transcrire
+        // rend zéro octet, le recopier aussi, et le contrôle final les attrape
+        // tous les deux. Le vérifier ici EN PLUS ferait une garde que la
+        // seconde rendrait inatteignable.
+        // LE NOM VA DANS UNE RÉPONSE, et il vient du client. Ce qui est exclu,
+        // ce sont les octets qui feraient écrire au client une réponse de notre
+        // part : les contrôles — `CR` et `LF` en tête —, le guillemet et la
+        // barre oblique inverse, qui ferment la chaîne citée.
+        //
+        // **CE N'EST PLUS « DE L'ASCII SEULEMENT ».** Un octet au-delà de `0x7E`
+        // n'est pas un vecteur d'injection : c'est de l'UTF-8, et §5.1 le rend
+        // obligatoire en rev2.
+        let longueur = match self.rev2 {
+            true => {
+                // De l'UTF-8, tel quel — mais VALIDE : un nom mal formé
+                // deviendrait un nom de répertoire qu'on ne saurait pas relire.
+                if core::str::from_utf8(ecrit).is_err() {
+                    return None;
+                }
+                // **LA PLACE SUFFIT PAR CONSTRUCTION** : `ecrit` a été lu dans
+                // un tampon de `MAILBOX_NAME_MAX` octets, et `place` en fait
+                // autant chez tous les appelants. Un `?` porterait ici un refus
+                // qu'aucune commande ne peut provoquer.
+                let combien = ecrit.len();
+                place
+                    .get_mut(..combien)
+                    .expect("un nom lu tient dans un tampon de sa taille")
+                    .copy_from_slice(ecrit);
+                combien
+            }
+            false => ams_proto_imap::utf7_decode(ecrit, place).ok()?,
+        };
+        let pose = place
+            .get(..longueur)
+            .expect("ce qui vient d'être écrit se relit");
+        if pose.is_empty()
+            || pose
                 .iter()
-                .all(|octet| octet.is_ascii_graphic() || *octet == b' ')
-            || ecrit.iter().any(|octet| matches!(*octet, b'"' | b'\\'))
+                .any(|octet| *octet < 0x20 || matches!(*octet, 0x7F | b'"' | b'\\'))
         {
             return None;
         }
-        let longueur = ecrit.len();
-        place.get(..longueur)
+        Some(pose)
     }
 }
 
@@ -5757,10 +5821,32 @@ impl<'a> Plume<'a> {
     /// ont besoin demanderait une condition de plus, qu'il faudrait avoir juste
     /// à chaque endroit ; citer toujours n'en demande aucune, et la grammaire
     /// admet la forme citée partout où un nom paraît.
-    fn nom_de_boite(&mut self, avant: &[u8], nom: &[u8], apres: &[u8]) -> Result<(), Error> {
+    /// # LE NOM SORT DANS L'ÉCRITURE DE LA VERSION QUI L'A DEMANDÉ
+    ///
+    /// Le magasin ne connaît que l'UTF-8. Un client rev1 n'attend que de
+    /// l'ASCII : lui rendre les octets bruts lui ferait afficher du charabia,
+    /// et lui ferait redemander un nom qu'il ne saurait plus écrire.
+    fn nom_de_boite(
+        &mut self,
+        avant: &[u8],
+        nom: &[u8],
+        apres: &[u8],
+        rev2: bool,
+    ) -> Result<(), Error> {
         self.pousser(avant)?;
         self.pousser(b"\"")?;
-        self.pousser(nom)?;
+        match rev2 {
+            true => self.pousser(nom)?,
+            false => {
+                let mut place = [0_u8; NOM_TRANSCRIT_MAX];
+                // **LA PLACE SUFFIT PAR CONSTRUCTION** : voir `NOM_TRANSCRIT_MAX`.
+                // Un `?` porterait ici un refus qu'aucun nom ne peut provoquer,
+                // donc une garde qu'aucun essai ne pourrait atteindre.
+                let ecrits = ams_proto_imap::utf7_encode(nom, &mut place)
+                    .expect("un nom transcrit tient dans trois fois sa longueur");
+                self.pousser(place.get(..ecrits).unwrap_or_default())?;
+            }
+        }
         self.pousser(b"\"")?;
         self.pousser(apres)
     }

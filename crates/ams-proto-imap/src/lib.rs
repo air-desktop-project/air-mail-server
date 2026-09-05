@@ -67,6 +67,7 @@ mod special;
 mod status;
 mod store;
 mod tag;
+mod utf7;
 
 pub use append::Append;
 pub use arguments::{Args, Argument, argument_max};
@@ -96,3 +97,4 @@ pub use special::{SpecialUse, parse_create_params};
 pub use status::{STATUS_ATTS_MAX, StatusAtt, StatusItems};
 pub use store::{Store, StoreMode};
 pub use tag::Tag;
+pub use utf7::{decode as utf7_decode, encode as utf7_encode};

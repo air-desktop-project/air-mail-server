@@ -110,6 +110,7 @@ fuzz_ams_session_smtp session
 fuzz_ams_pop3 pop3
 fuzz_ams_session_pop3 pop3-session
 fuzz_ams_imap imap
+fuzz_ams_imap_utf7 imap-utf7
 fuzz_ams_imap_fetch imap-fetch
 fuzz_ams_session_imap imap-session
 fuzz_ams_http_head http-head

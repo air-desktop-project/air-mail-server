@@ -1224,6 +1224,18 @@ fn selectionnee() -> Session<UnCompte, Boites> {
     session
 }
 
+/// Une session qui partage SON MAGASIN avec une autre.
+///
+/// `Boites` porte ses `Rc` : la cloner, c'est voir les mêmes boîtes. C'est ce
+/// qu'il faut pour éprouver qu'un nom créé par un client d'une version se lit
+/// par un client de l'autre — la propriété qui compte, puisque c'est LA MÊME
+/// boîte qu'ils désignent.
+fn nouvelle_partagee(boites: &Boites) -> Session<UnCompte, Boites> {
+    let mut session = Session::new(BORNES, true, UnCompte, boites.clone());
+    session.on_tls_established();
+    session
+}
+
 /// La même, restée en IMAP4rev1 — c'est-à-dire sans rien demander.
 fn selectionnee_rev1() -> Session<UnCompte, Boites> {
     let mut session = nouvelle(true);
@@ -3425,6 +3437,139 @@ fn un_expunge_sans_boite_ouverte_est_hors_d_etat() {
 }
 
 // ── `SEARCH` ────────────────────────────────────────────────────────────────
+
+// ── LES NOMS DE BOÎTES, ET LEURS DEUX ÉCRITURES ─────────────────────────────
+
+/// **UN NOM ACCENTUÉ TRAVERSE LES DEUX VERSIONS, ET DÉSIGNE LA MÊME BOÎTE.**
+///
+/// # LE DÉFAUT LUI-MÊME
+///
+/// `CREATE "Créations"` rendait `BAD`, alors que RFC 9051 §5.1 rend l'UTF-8
+/// OBLIGATOIRE en IMAP4rev2 — que ce serveur annonce. La règle refusait tout
+/// octet au-delà de `0x7E` au motif qu'un nom finit dans une réponse : le motif
+/// était juste, sa portée trop large. Un octet d'UTF-8 n'est pas un vecteur
+/// d'injection ; ce qui l'est, ce sont les contrôles et le guillemet.
+#[test]
+fn un_nom_accentue_traverse_les_deux_versions() {
+    let magasin = Boites::default();
+
+    // Un client rev2 crée en UTF-8.
+    let mut rev2 = nouvelle_partagee(&magasin);
+    dire(&mut rev2, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut rev2, b"a002 ENABLE IMAP4rev2\r\n");
+    let (cree, _) = dire(&mut rev2, "a003 CREATE \"Créations\"\r\n".as_bytes());
+    assert!(cree.contains("OK CREATE completed"), "{cree}");
+    let (vu, _) = dire(&mut rev2, b"a004 LIST \"\" *\r\n");
+    assert!(vu.contains("\"Créations\""), "rev2 lit l'UTF-8 : {vu}");
+
+    // **UN CLIENT rev1 VOIT LA MÊME BOÎTE, EN UTF-7 MODIFIÉ** (§5.1.3).
+    let mut rev1 = nouvelle_partagee(&magasin);
+    dire(&mut rev1, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (transcrit, _) = dire(&mut rev1, b"a002 LIST \"\" *\r\n");
+    assert!(
+        transcrit.contains("\"Cr&AOk-ations\""),
+        "rev1 doit recevoir de l'UTF-7 modifié : {transcrit}"
+    );
+    assert!(
+        !transcrit.contains("Créations"),
+        "et jamais les octets bruts : {transcrit}"
+    );
+}
+
+/// **UN CLIENT rev1 CRÉE EN UTF-7, ET LE MAGASIN REÇOIT DE L'UTF-8.**
+///
+/// C'est l'autre sens, et c'est lui qui décide de ce que porte le disque : le
+/// nom retenu est celui de rev2, et la transcription se fait AU BORD.
+#[test]
+fn un_nom_ecrit_en_utf7_descend_en_utf8() {
+    let magasin = Boites::default();
+
+    let mut rev1 = nouvelle_partagee(&magasin);
+    dire(&mut rev1, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (cree, _) = dire(&mut rev1, b"a002 CREATE \"Brouillons &AOk-t&AOk-\"\r\n");
+    assert!(cree.contains("OK CREATE completed"), "{cree}");
+    // Il le relit dans SA propre écriture.
+    let (relu, _) = dire(&mut rev1, b"a003 LIST \"\" *\r\n");
+    assert!(relu.contains("\"Brouillons &AOk-t&AOk-\""), "{relu}");
+
+    // ET LE MAGASIN A REÇU DE L'UTF-8 : c'est ce qu'un client rev2 y voit.
+    let mut rev2 = nouvelle_partagee(&magasin);
+    dire(&mut rev2, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut rev2, b"a002 ENABLE IMAP4rev2\r\n");
+    let (vu, _) = dire(&mut rev2, b"a003 LIST \"\" *\r\n");
+    assert!(vu.contains("\"Brouillons été\""), "{vu}");
+}
+
+/// **UN TAMPON TROP COURT POUR UN NOM LE DIT**, dans les deux versions.
+///
+/// Un nom tronqué serait un AUTRE nom : le client ouvrirait une boîte qui
+/// n'existe pas, ou pire, une autre que la sienne.
+#[test]
+fn un_tampon_trop_court_pour_un_nom_le_dit() {
+    let magasin = Boites::default();
+    let mut poseur = nouvelle_partagee(&magasin);
+    dire(&mut poseur, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut poseur, b"a002 ENABLE IMAP4rev2\r\n");
+    dire(&mut poseur, "a003 CREATE \"Créations\"\r\n".as_bytes());
+
+    // La transcription en UTF-7 est PLUS LONGUE que l'UTF-8 : les deux versions
+    // n'échouent donc pas à la même taille, et il faut balayer.
+    for rev2 in [false, true] {
+        for taille in 20..70_usize {
+            let mut session = nouvelle_partagee(&magasin);
+            let mut grand = [0_u8; 1024];
+            session
+                .handle(b"a001 LOGIN jean ouvre-toi\r\n", &mut grand)
+                .expect("traitable");
+            if rev2 {
+                session
+                    .handle(b"a002 ENABLE IMAP4rev2\r\n", &mut grand)
+                    .expect("traitable");
+            }
+            let mut petit = std::vec![0_u8; taille];
+            // **CE QUI COMPTE EST QU'IL NE MENTE PAS** : ou bien la liste tient,
+            // ou bien il dit que la place manque. Jamais un nom coupé.
+            // **UNE ERREUR EST UNE RÉPONSE ACCEPTABLE ICI** : le tampon est trop
+            // court, et le dire est ce qu'on attend. Ce qu'on interdit, c'est
+            // qu'il rende un nom COUPÉ, qui désignerait une autre boîte.
+            if let Ok(tour) = session.handle(b"a003 LIST \"\" *\r\n", &mut petit) {
+                let dit = std::string::String::from_utf8_lossy(tour.reply()).into_owned();
+                assert!(
+                    !dit.contains("\"Cr\"") && !dit.contains("\"Cr&\""),
+                    "rev2={rev2}, taille {taille} : un nom coupé — {dit}"
+                );
+            }
+        }
+    }
+}
+
+/// **CE QUI N'EST PAS DE L'UTF-7 BIEN FORMÉ SE REFUSE À UN CLIENT rev1.**
+///
+/// Et notamment les octets bruts d'UTF-8 : deux écritures pour un même nom
+/// feraient deux boîtes que le client croirait une seule.
+#[test]
+fn un_nom_mal_forme_se_refuse_selon_la_version() {
+    let mut rev1 = nouvelle(true);
+    dire(&mut rev1, b"a001 LOGIN jean ouvre-toi\r\n");
+    for commande in [
+        // De l'UTF-8 brut, qu'un client rev1 n'a pas le droit d'écrire.
+        "a002 CREATE \"Créations\"\r\n".as_bytes(),
+        // Une séquence qui ne se ferme pas.
+        b"a003 CREATE \"Cr&AOk\"\r\n",
+        // Des bits de remplissage non nuls.
+        b"a004 CREATE \"Cr&AOl-ations\"\r\n",
+    ] {
+        let (refus, _) = dire(&mut rev1, commande);
+        assert!(refus.contains("BAD"), "{commande:?} : {refus}");
+    }
+
+    // Et un client rev2 refuse ce qui n'est pas de l'UTF-8 valide.
+    let mut rev2 = nouvelle(true);
+    dire(&mut rev2, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut rev2, b"a002 ENABLE IMAP4rev2\r\n");
+    let (refus, _) = dire(&mut rev2, b"a003 CREATE \"Cr\xe9ations\"\r\n");
+    assert!(refus.contains("BAD"), "{refus}");
+}
 
 // ── LES TROIS FORMES DE RFC 3501 §6.4.5 ─────────────────────────────────────
 

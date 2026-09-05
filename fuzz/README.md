@@ -225,6 +225,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_pop3` | `seeds/pop3` | la ligne POP3 — **et le doublement du point** |
 | `fuzz_ams_session_pop3` | `seeds/pop3-session` | la session POP3 — **vocabulaire clos, états tenus** |
 | `fuzz_ams_imap` | `seeds/imap` | découpage d'une commande IMAP — **le client ne choisit pas où l'on coupe**, et l'itérateur d'arguments s'arrête |
+| `fuzz_ams_imap_utf7` | `seeds/imap-utf7` | l'UTF-7 modifié de RFC 3501 §5.1.3 — **l'aller-retour est l'identité**, un décodage rend de l'UTF-8 valide, et une place insuffisante se dit plutôt que de tronquer |
 | `fuzz_ams_imap_fetch` | `seeds/imap-fetch` | ce qu'un `FETCH`, un `STORE`, un `SEARCH` et un `APPEND` désignent — **les deux lectures d'un ensemble s'accordent**, un drapeau accepté se réécrit, une recherche décide sans boucler, et **ce qu'un `APPEND` annonce, on peut le tenir** ; **un nom de boîte accepté ne sort pas de sa racine** |
 | `fuzz_ams_session_imap` | `seeds/imap-session` | la session IMAP — **jamais authentifié sans chiffrement**, un intervalle de `FETCH` ne déborde pas du message, et **une émission conclut** |
 

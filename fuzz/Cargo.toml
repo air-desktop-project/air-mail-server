@@ -408,6 +408,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_ams_imap_utf7"
+path = "fuzz_targets/fuzz_ams_imap_utf7.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_ams_imap_fetch"
 path = "fuzz_targets/fuzz_ams_imap_fetch.rs"
 test = false

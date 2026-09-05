@@ -132,6 +132,19 @@ pub enum Error {
     /// qu'il comptait.
     MalformedStatus,
 
+    /// Un nom de boîte n'a pas la forme attendue de sa VERSION.
+    ///
+    /// # LES DEUX VERSIONS N'ÉCRIVENT PAS LES NOMS PAREIL
+    ///
+    /// RFC 9051 §5.1 les veut en UTF-8 ; RFC 3501 §5.1.3 les veut en UTF-7
+    /// modifié. Ce qui tombe ici : de l'UTF-8 invalide, une séquence `&…-` qui
+    /// ne se ferme pas, des bits de remplissage non nuls, un demi-substitut
+    /// isolé, ou une séquence qui code ce qui aurait dû s'écrire directement.
+    ///
+    /// **Les trois derniers donneraient DEUX ÉCRITURES pour un même nom** —
+    /// donc deux boîtes que le client croirait une seule.
+    MalformedMailbox,
+
     /// Les arguments d'un `STORE` n'ont pas la forme de §6.4.6.
     MalformedStore,
 
@@ -232,6 +245,9 @@ impl fmt::Display for Error {
             }
             Error::MalformedStatus => {
                 f.write_str("les éléments d'un `STATUS` n'ont pas la forme attendue")
+            }
+            Error::MalformedMailbox => {
+                f.write_str("ce nom de boîte n'a pas la forme attendue de sa version d'IMAP")
             }
             Error::MalformedStore => {
                 f.write_str("les arguments d'un `STORE` n'ont pas la forme attendue")

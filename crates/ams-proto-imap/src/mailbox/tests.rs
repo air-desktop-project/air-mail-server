@@ -79,8 +79,34 @@ fn les_octets_dangereux_sont_refuses() {
             "l'octet {mauvais:#04x} aurait dû être refusé"
         );
     }
-    // L'UTF-8 est refusé faute de savoir le transcrire sans risque.
-    assert!(!mailbox_name_is_safe("Éléments".as_bytes()));
+    // **L'UTF-8 VALIDE PASSE**, et §5.1 de RFC 9051 l'exige. Ce qui est refusé,
+    // ce sont les contrôles et les caractères qui casseraient une réponse ou un
+    // nom de fichier — pas les octets d'un alphabet.
+    for bon in [
+        "Éléments envoyés",
+        "Корзина",
+        "垃圾桶",
+        "Dossier/Sous-dossier",
+        "brouillons 😀",
+    ] {
+        assert!(mailbox_name_is_safe(bon.as_bytes()), "{bon} devrait passer");
+    }
+    // **DE L'UTF-8 INVALIDE NE PASSE PAS** : un nom mal formé deviendrait un
+    // répertoire qu'on ne saurait ni relire ni rendre au client.
+    for mauvais in [
+        &b"Cr\xe9ations"[..],
+        // Une suite tronquée en fin de nom.
+        b"a\xc3",
+        // Un octet de continuation orphelin.
+        b"a\xa9b",
+        // Un demi-substitut encodé en UTF-8, que RFC 3629 §3 interdit.
+        b"a\xed\xa0\x80b",
+    ] {
+        assert!(
+            !mailbox_name_is_safe(mauvais),
+            "{mauvais:?} n'est pas de l'UTF-8 valide"
+        );
+    }
 }
 
 #[test]

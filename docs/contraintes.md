@@ -3867,6 +3867,104 @@ Ce qui reste hors du serveur : **rien de connu**. Cette ligne annonçait « la f
 de réémission des messages sortants », et c'était faux — elle existe, elle est
 câblée, et [la liste v1](v1.md) le mesure plutôt que de le croire.
 
+## Deux versions, deux écritures d'un même nom
+
+`CREATE "Créations"` rendait `BAD CREATE expects a mailbox name`, alors que §5.1
+de RFC 9051 rend l'UTF-8 **obligatoire** en IMAP4rev2 — que ce serveur annonce.
+C'est le quatrième défaut de la même espèce en autant de tranches : annoncer ce
+qu'on ne sert pas.
+
+### LE MOTIF ÉTAIT JUSTE, SA PORTÉE TROP LARGE
+
+La règle refusait tout octet au-delà de `0x7E`, et son commentaire disait
+pourquoi : « le nom va dans une réponse, et il vient du client ». C'est vrai. Mais
+**un octet d'UTF-8 n'est pas un vecteur d'injection** : ce qui l'est, ce sont les
+contrôles — `CR` et `LF` en tête —, le guillemet et la barre oblique inverse, qui
+ferment la chaîne citée. Ceux-là restent exclus ; l'alphabet, non.
+
+### LA CORRECTION NAÏVE AURAIT ÉCHANGÉ UN DÉFAUT CONTRE UN AUTRE
+
+C'est ce qui rend cette tranche différente des trois précédentes. Élargir la
+règle et s'arrêter là aurait cassé les clients rev1.
+
+RFC 3501 §5.1.3 veut que leurs noms soient en **UTF-7 modifié** : de l'ASCII
+seulement, où `Créations` s'écrit `Cr&AOk-ations`. Leur envoyer des octets bruts
+d'UTF-8, c'est leur faire afficher du charabia — et leur faire redemander un nom
+qu'ils ne sauraient plus écrire.
+
+Or, aujourd'hui, **tous les clients déployés sont des clients rev1** : le Dovecot
+de la machine à reprendre n'annonce que `IMAP4rev1`. On aurait donc échangé une
+non-conformité que personne ne rencontre contre une régression que tout le monde
+rencontrerait.
+
+### LE CODEC, ET LE BORD
+
+Un codec UTF-7 modifié transcrit dans les deux sens, **au bord du protocole** :
+tout ce qui descend vers le magasin est de l'UTF-8, quelle que soit la version
+qui l'a écrit ; tout ce qui remonte sort dans l'écriture de la version qui l'a
+demandé.
+
+Vérifié contre le serveur vivant :
+
+| qui écrit | ce qu'il envoie | sur le disque | ce que l'autre voit |
+|---|---|---|---|
+| rev2 | `Créations` | `.Créations` | `Cr&AOk-ations` |
+| rev1 | `Brouillons &AOk-t&AOk-` | `.Brouillons été` | `Brouillons été` |
+
+**C'est la même boîte.** C'est toute la propriété.
+
+### LE DISQUE, ET LE DERNIER MOMENT POUR EN DÉCIDER
+
+Le nom retenu est celui de rev2. Ce choix n'est pas gratuit : un serveur DÉJÀ EN
+SERVICE dont un client rev1 aurait créé `Créations` porterait sur son disque
+`.Cr&AOk-ations`, et ne le retrouverait plus après cette tranche.
+
+Aucune installation de production n'existe — la première remise reste à faire.
+**C'est donc le dernier moment où ce choix ne coûte rien**, et c'est l'argument
+qui a décidé de le faire maintenant plutôt que de le repousser.
+
+### CE QU'UN CODEC DE NOMS DOIT REFUSER, ET POURQUOI
+
+Un nom vient du réseau et finit dans un nom de répertoire. Quatre choses sont
+donc des ERREURS, et non des approximations qu'on corrigerait en silence :
+
+- une séquence `&…` qui ne se ferme pas — deviner sa fin, c'est inventer un nom ;
+- des bits de remplissage non nuls ;
+- un demi-substitut isolé, qui ne désigne aucun caractère ;
+- une séquence qui code de l'ASCII imprimable, que §5.1.3 veut écrit
+  directement.
+
+**Les trois derniers ont la même raison** : ils donneraient DEUX ÉCRITURES pour
+un même nom, donc deux boîtes que le client croirait une seule — et il ne s'en
+apercevrait qu'en perdant du courrier.
+
+### CE QUE LA COUVERTURE A REDRESSÉ
+
+Six régions non couvertes, et deux natures qu'il fallait distinguer.
+
+Les unes étaient des chemins d'épuisement de tampon, bien atteignables : ils ont
+leurs essais, dont un qui balaie toutes les tailles de zéro à treize et vérifie
+qu'aucune ne rend un nom coupé.
+
+Les autres étaient des **gardes inatteignables**, et le registre les nomme
+depuis longtemps : un `u16::try_from` sur une valeur déjà masquée, un
+`char::from_u32` sur une paire de substituts déjà vérifiée, un `get_mut` sur un
+rang qu'on vient d'écrire, une transcription qui ne peut pas déborder un tampon
+de trois fois la longueur du nom. La première est devenue structurelle — les
+quatre octets d'un `u32` se destructurent, et l'on ne garde que les deux du
+bas ; les autres disent `expect` avec la raison pour laquelle elles ne peuvent
+pas se déclencher.
+
+### CE QUI A ÉTÉ ÉPROUVÉ CONTRE LA RFC ELLE-MÊME
+
+L'exemple littéral de §5.1.3 — `~peter/mail/&U,BTFw-/&ZeVnLIqe-` pour
+`~peter/mail/台北/日本語` — est un essai. C'est le seul contrôle qu'on ne puisse
+pas se donner à soi-même : les autres éprouvent ce que ce code fait, celui-ci
+éprouve ce que la RFC dit.
+
+Une cible de fuzz s'y ajoute, dont la propriété centrale est l'aller-retour : un
+nom qui reviendrait différent désignerait une autre boîte.
+
 ## L'essai instable, et pourquoi vingt exécutions n'ont rien appris
 
 Le registre portait depuis des semaines un aveu : « une exécution de la suite a
