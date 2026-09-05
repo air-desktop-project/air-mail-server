@@ -3852,7 +3852,64 @@ toujours pas. **Une liste complète d'une chose ne prouve rien d'une autre**, et
 la seule vérification qui vaille est la confrontation à l'ABNF de §9, mot par
 mot — pas à sa propre liste.
 
-Ce qui reste hors du serveur : la file de réémission des messages sortants.
+Ce qui reste hors du serveur : **rien de connu**. Cette ligne annonçait « la file
+de réémission des messages sortants », et c'était faux — elle existe, elle est
+câblée, et [la liste v1](v1.md) le mesure plutôt que de le croire.
+
+## Deux « ce qui reste » qui ne restaient plus
+
+En dressant la liste de ce qui bloque une v1, la première rédaction a repris les
+aveux du `README` et de ce registre. **Deux d'entre eux étaient faux.**
+
+### La file de réémission « restait hors du serveur »
+
+Le `README` écrivait « Hors d'IMAP : la file de réémission des messages
+sortants », et ce registre « Ce qui reste hors du serveur : la file de réémission
+des messages sortants ».
+
+Elle existe depuis longtemps, et entière :
+
+- `ams-queue` décide quand réessayer — une attente qui double — et quand
+  renoncer ; couverte à 100 % au titre de C2, parce qu'une arithmétique qui se
+  trompe là **perd du courrier** ;
+- `ams_loop_tokio::Spool` — 1 151 lignes — écrit, relit, renomme et efface, en
+  portant tout l'état de la reprise DANS LE NOM DU FICHIER, comme Maildir ;
+- `ams-server/src/main.rs` la parcourt à chaque battement, et compte ce qu'elle
+  a émis, rendu, différé ou perdu.
+
+### L'échappement à l'émission « restait à écrire »
+
+`ams_proto_smtp::Stuffer` double tout point en début de ligne (§4.5.2 de
+RFC 5321), il vit dans le même module que son inverse — délibérément, « pour
+qu'un jour, en corrigeant l'une, on ne casse pas l'autre » —, et
+`ams-loop-tokio/src/relay.rs` l'emploie pour chaque message sortant.
+
+### Ce que cette erreur enseigne
+
+C'est la neuvième fois que ce registre trouve une prose qui ne dit pas ce que le
+code fait. **C'est la première où elle SOUS-ESTIME.**
+
+Les huit précédentes promettaient plus que le code ne tenait, et le danger était
+évident : on croit protégé ce qui ne l'est pas. Celle-ci est l'inverse, et le
+danger est moins visible mais du même ordre : **qui décide si ce serveur est prêt
+lit ces lignes-là**. Une liste de manques qui invente deux manques fait remettre
+un travail qui est fait, et détourne l'effort de ce qui manque vraiment.
+
+*Une prose périmée ne trompe pas dans un sens. Elle trompe.*
+
+### Ce qui a été fait
+
+Les deux lignes sont corrigées, et disent en outre qu'elles ont menti — un aveu
+qui coûte trois mots et qui évite qu'on les relise avec confiance.
+
+`docs/v1.md` porte désormais la liste des blocages, et **chaque entrée dit
+comment elle a été mesurée** : un fichier qui n'existe pas, une capacité que le
+serveur n'annonce pas, un client qui refuse. C'est la règle qui empêche cette
+liste-là de devenir à son tour une opinion vieillissante.
+
+Huit blocages y figurent, dont **deux hors de portée** — la première remise de
+production et la table `nftables` engagent un domaine et une machine qui ne sont
+pas les nôtres à éprouver.
 
 ## Un `405` rendait ce qu'un `404` était là pour cacher
 

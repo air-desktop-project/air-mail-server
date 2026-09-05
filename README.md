@@ -163,6 +163,14 @@ ce qui s'ajoute ensuite : SPF, DMARC, DKIM, l'émission et l'API.
 Chaque commande y a été **exécutée** avant d'être écrite, et ce qui n'a pas été
 éprouvé y est nommé comme tel.
 
+## Ce qui reste avant la v1.0
+
+[`docs/v1.md`](docs/v1.md) tient la liste des **blocages**, et rien d'autre.
+Chaque entrée dit ce qui a été MESURÉ — un fichier qui n'existe pas, une capacité
+que le serveur n'annonce pas, un client qui refuse — parce que la première
+rédaction de cette liste reprenait des « ce qui reste » écrits ici même, dont
+deux avaient cessé d'être vrais.
+
 ## Les contraintes
 
 Le projet est gouverné par un **registre de contraintes** :
@@ -261,8 +269,11 @@ phase de données** — `<CRLF>.<CRLF>`, le point échappé, et le refus de tout
 ou `LF` isolé — **et `BDAT`**, la phase de données COMPTÉE de RFC 3030, où il n'y
 a pas de délimiteur à chercher. Les littéraux d'adresse sont validés
 ENTIÈREMENT, IPv6 compris — RFC 4291 §2.2, compression et forme mixte —, et une
-cible de fuzz confronte chaque verdict à celui de `core::net`. L'échappement à
-l'émission reste à écrire.
+cible de fuzz confronte chaque verdict à celui de `core::net`. **L'échappement à
+l'émission est là**, dans le même module que son inverse : `Stuffer` double tout
+point en début de ligne (§4.5.2), et le relais l'emploie pour chaque message
+sortant. Les deux moitiés d'une même règle vivent ensemble, pour qu'on ne casse
+pas l'une en corrigeant l'autre.
 
 `ams-proto-pop3` : les commandes de la RFC 1939 et leurs réponses. `APOP`
 n'existe pas ici — MD5, et surtout l'obligation de garder le mot de passe **en
@@ -1413,8 +1424,11 @@ sous chiffrement. Les attributs de SPECIAL-USE — `\Drafts`, `\Sent`, `\Trash` 
 ne sont pas rendus : ils désignent des boîtes que le serveur DÉSIGNE, et celui-ci
 n'en désigne aucune.
 
-Hors d'IMAP : la file de réémission des messages sortants. L'interface HTTP, elle,
-est servie — voir plus bas.
+Hors d'IMAP : rien de connu. **La file de réémission des messages sortants
+existe**, contrairement à ce que cette ligne a longtemps dit — `ams-queue` décide
+quand réessayer et quand renoncer, `ams-loop-tokio::Spool` écrit, relit, renomme
+et efface, et le binaire la parcourt à chaque battement. L'interface HTTP est
+servie elle aussi — voir plus bas.
 
 ## Émettre : le client SMTP sortant
 
