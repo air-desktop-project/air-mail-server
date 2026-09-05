@@ -17,15 +17,42 @@ use ams_config::{Configuration, Dkim, Dmarc, Enforcement, Spf, Timeouts, Tls};
 use ams_guard::Thresholds;
 use ams_proto_smtp::Limits;
 
+/// Une écoute SMTP : une adresse, et le mode TLS de ce port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ecoute {
+    /// Où écouter.
+    pub adresse: SocketAddr,
+    /// Le TLS est-il implicite ici (RFC 8314 §3) ?
+    ///
+    /// **VRAI EXIGE UN CERTIFICAT** : un port qui promet le chiffrement avant le
+    /// premier octet et n'en a pas ne peut pas se rabattre en clair — le client
+    /// attend déjà une poignée de main, et n'obtiendra qu'un silence.
+    pub tls_implicite: bool,
+}
+
 /// Ce dont le serveur a besoin pour démarrer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
-    /// Où écouter.
+    /// Les écoutes SMTP, chacune avec son mode TLS.
     ///
-    /// Par défaut `127.0.0.1:2525`, et **jamais un port privilégié** : C10
-    /// interdit d'exécuter le serveur en superutilisateur, et les ports sous 1024
-    /// s'atteignent par une règle de redirection du pare-feu.
-    pub listen: SocketAddr,
+    /// Par défaut une seule, `127.0.0.1:2525` en `STARTTLS`, et **jamais un port
+    /// privilégié** : C10 interdit d'exécuter le serveur en superutilisateur, et
+    /// les ports sous 1024 s'atteignent par une règle de redirection du
+    /// pare-feu.
+    ///
+    /// # POURQUOI PLUSIEURS, ET UN MODE PAR ÉCOUTE
+    ///
+    /// Un serveur de courrier réel en sert trois — le `25` où le monde remet, le
+    /// `587` où les clients du domaine soumettent, le `465` où le TLS est
+    /// IMPLICITE (RFC 8314 §3). Les deux premiers parlent le même dialogue ; le
+    /// troisième fait sa poignée de main AVANT le premier octet de protocole, et
+    /// n'a donc ni `STARTTLS` à annoncer ni à attendre.
+    ///
+    /// **Le mode ne se devine pas du numéro de port** : le déduire graverait
+    /// `465` dans le code, et un exploitant qui déplace ce service derrière une
+    /// redirection — ce que C10 lui impose — obtiendrait un port muet dont
+    /// personne ne dirait pourquoi.
+    pub listen: Vec<Ecoute>,
     /// La racine de la boîte Maildir.
     pub maildir: PathBuf,
     /// Le nom que le serveur annonce.
@@ -53,6 +80,11 @@ pub struct Options {
     pub listen_pop3: Option<SocketAddr>,
     /// Où écouter en IMAP. Absente : IMAP n'est pas servi.
     pub listen_imap: Option<SocketAddr>,
+    /// Le TLS est-il IMPLICITE sur l'écoute IMAP (RFC 8314 §3) ?
+    ///
+    /// Le `993` l'exige, et c'est le seul port IMAP que la plupart des serveurs
+    /// déployés servent encore — le `143` y est souvent éteint.
+    pub imap_implicit_tls: bool,
     /// Où servir l'API REST en HTTP/2. Absente : elle n'est pas servie.
     ///
     /// **ELLE EXIGE UN CERTIFICAT**, et le serveur le refuse sans : l'API porte
@@ -148,7 +180,10 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
-            listen: SocketAddr::from(([127, 0, 0, 1], 2525)),
+            listen: std::vec![Ecoute {
+                adresse: SocketAddr::from(([127, 0, 0, 1], 2525)),
+                tls_implicite: false,
+            }],
             maildir: PathBuf::from("maildir"),
             domain: String::from("localhost"),
             hosted: Vec::new(),
@@ -169,6 +204,7 @@ impl Default for Options {
             // une surface de plus, et celui-ci ne sert personne sans certificat.
             listen_pop3: None,
             listen_imap: None,
+            imap_implicit_tls: false,
             listen_http: None,
             listen_h3: None,
             // LES MÊMES VALEURS QU'AVANT, mais nommées ici plutôt que gravées
@@ -256,7 +292,23 @@ impl Options {
     pub fn en_configuration(&self) -> Configuration {
         Configuration {
             domain: self.domain.clone(),
-            listen: self.listen.to_string(),
+            // **`listen` PORTE LA PREMIÈRE, ET LA LISTE PORTE TOUT.** Un outil
+            // qui ne lirait que `listen` y trouve encore quelque chose de vrai ;
+            // le serveur, lui, lit la liste, qui seule dit les modes.
+            listen: self
+                .listen
+                .first()
+                .map(|ecoute| ecoute.adresse.to_string())
+                .unwrap_or_default(),
+            smtp_listeners: self
+                .listen
+                .iter()
+                .map(|ecoute| ams_config::Listener {
+                    address: ecoute.adresse.to_string(),
+                    implicit_tls: ecoute.tls_implicite,
+                })
+                .collect(),
+            imap_implicit_tls: self.imap_implicit_tls,
             maildir: self.maildir.display().to_string(),
             hosted: self.hosted.clone(),
             max_recipients: 100,
@@ -399,7 +451,24 @@ fn nom_de_dossier(brut: &str) -> Result<String, ArgError> {
 /// Le texte des options de `config write`.
 pub const OPTIONS_AIDE: &str = "\
 OPTIONS DE `config write`
-    --listen <adresse>     où écouter          (défaut 127.0.0.1:2525)
+    --listen <adresse>     où écouter en SMTP, avec `STARTTLS`. RÉPÉTABLE, et la
+                           PREMIÈRE remplace le défaut (127.0.0.1:2525) au lieu
+                           de s'y ajouter — un port qu'on n'a pas demandé est une
+                           surprise, et une surprise sur un port est un incident.
+    --listen-smtps <adr>   où écouter en SMTP avec TLS IMPLICITE (RFC 8314 §3) :
+                           la poignée de main a lieu AVANT le premier octet, et
+                           il n'y a ni `STARTTLS` à annoncer ni à attendre. C'est
+                           le mode du 465. RÉPÉTABLE. EXIGE UN CERTIFICAT — un
+                           port qui promet le chiffrement d'emblée ne peut pas se
+                           rabattre en clair, et le serveur refuse de démarrer
+                           plutôt que d'ouvrir un port muet.
+
+                           UN SERVEUR RÉEL EN SERT TROIS : le 25 où le monde
+                           remet, le 587 où les clients soumettent, le 465 en
+                           implicite. Le mode ne se devine PAS du numéro de port :
+                           le déduire graverait 465 dans le code, et C10 oblige
+                           justement à déplacer ces services derrière une
+                           redirection.
     --maildir <chemin>     racine de la boîte  (défaut ./maildir)
     --domain <nom>         nom annoncé         (défaut localhost)
     --hosted <domaine>     domaine servi ; répétable. SANS AUCUN, le serveur
@@ -430,7 +499,12 @@ OPTIONS DE `config write`
     --tls-key <chemin>     clé privée, en PEM
     --accounts <chemin>    fichier de comptes (`air-mail-admin account add`)
     --listen-pop3 <adr>    où écouter en POP3 (défaut : pas de POP3)
-    --listen-imap <adr>    où écouter en IMAP (défaut : pas d'IMAP)
+    --listen-imap <adr>    où écouter en IMAP avec `STARTTLS` — le 143
+                           (défaut : pas d'IMAP)
+    --listen-imaps <adr>   LE MÊME PORT AVEC UN AUTRE MODE : TLS implicite, le
+                           993. Ce n'est pas une seconde écoute — aucun serveur
+                           déployé ne sert 143 et 993 à la fois, le premier y est
+                           éteint. La dernière des deux options écrites l'emporte.
 
     L'API REST
     --listen-http <adr>    où la servir en HTTP/2. EXIGE `--tls-cert` et
@@ -790,6 +864,39 @@ OPTIONS DE `config write`
 
 /// Lit une ligne de commande.
 ///
+/// Ajoute une écoute SMTP, en écartant le défaut à la première nommée.
+fn ajouter_une_ecoute(
+    options: &mut Options,
+    premiere: &mut bool,
+    brute: String,
+    tls_implicite: bool,
+) -> Result<(), ArgError> {
+    let adresse: SocketAddr = brute
+        .parse()
+        .map_err(|_| ArgError::new(format!("`{brute}` n'est pas une adresse")))?;
+    // **DEUX ÉCOUTES SUR LA MÊME ADRESSE NE S'OUVRIRAIENT PAS.** La seconde
+    // échouerait au démarrage, sur un message du noyau qui ne dit pas laquelle.
+    // On le refuse ici, où l'on sait encore les nommer.
+    if options
+        .listen
+        .iter()
+        .any(|deja| !*premiere && deja.adresse == adresse)
+    {
+        return Err(ArgError::new(format!(
+            "`{adresse}` est demandée deux fois : une adresse ne s'écoute qu'une"
+        )));
+    }
+    if *premiere {
+        options.listen.clear();
+        *premiere = false;
+    }
+    options.listen.push(Ecoute {
+        adresse,
+        tls_implicite,
+    });
+    Ok(())
+}
+
 /// # Errors
 ///
 /// [`ArgError`] pour une option inconnue, ou une valeur manquante ou illisible.
@@ -799,6 +906,11 @@ where
     S: AsRef<str>,
 {
     let mut options = Options::default();
+    // **LA PREMIÈRE ÉCOUTE NOMMÉE REMPLACE LE DÉFAUT ; LES SUIVANTES S'AJOUTENT.**
+    // Sans ce drapeau, `--listen 0.0.0.0:25` ouvrirait AUSSI `127.0.0.1:2525` —
+    // un port que personne n'a demandé, et une surprise sur un port est un
+    // incident.
+    let mut premiere = true;
     let mut arguments = arguments.into_iter();
 
     while let Some(argument) = arguments.next() {
@@ -812,12 +924,13 @@ where
         match argument {
             "--help" | "-h" => return Ok(Demande::Aide),
             "--version" | "-V" => return Ok(Demande::Version),
-            "--listen" => {
-                let brute = valeur()?;
-                options.listen = brute
-                    .parse()
-                    .map_err(|_| ArgError::new(format!("`{brute}` n'est pas une adresse")))?;
-            }
+            // **RÉPÉTABLE, ET LE PREMIER REMPLACE LE DÉFAUT.** Sans cela, un
+            // `--listen 0.0.0.0:25` s'AJOUTERAIT à `127.0.0.1:2525`, et le
+            // serveur ouvrirait un port que personne n'a demandé — la surprise
+            // exacte que C10 cherche à éviter.
+            "--listen" => ajouter_une_ecoute(&mut options, &mut premiere, valeur()?, false)?,
+            // Le `465` : la poignée de main AVANT le premier octet (RFC 8314 §3).
+            "--listen-smtps" => ajouter_une_ecoute(&mut options, &mut premiere, valeur()?, true)?,
             "--maildir" => options.maildir = PathBuf::from(valeur()?),
             "--domain" => options.domain = valeur()?,
             "--hosted" => options.hosted.push(valeur()?),
@@ -916,8 +1029,14 @@ where
                         .map_err(|_| ArgError::new(format!("`{brute}` n'est pas une adresse")))?,
                 );
             }
-            "--listen-imap" => {
+            // Le `143` : `STARTTLS`, comme le `25`.
+            "--listen-imap" | "--listen-imaps" => {
                 let brute = valeur()?;
+                // **`imaps` EST LE MÊME PORT AVEC UN AUTRE MODE**, et non une
+                // seconde écoute : servir les deux demanderait une liste, et
+                // aucun serveur déployé ne sert `143` et `993` à la fois — le
+                // premier y est éteint (`port = 0`).
+                options.imap_implicit_tls = argument == "--listen-imaps";
                 options.listen_imap = Some(
                     brute
                         .parse()
@@ -1298,7 +1417,7 @@ fn adresse(valeur: Option<&SocketAddr>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ArgError, Demande, Options, Thresholds, parse};
+    use super::{ArgError, Demande, Ecoute, Options, Thresholds, parse};
     use core::time::Duration;
     use std::net::SocketAddr;
     use std::path::PathBuf;
@@ -1443,7 +1562,9 @@ mod tests {
         assert_eq!(options, Options::default());
         // LE PORT PAR DÉFAUT N'EST PAS PRIVILÉGIÉ : le serveur refuse de
         // s'exécuter en superutilisateur (C10).
-        assert_eq!(options.listen.port(), 2525);
+        assert_eq!(options.listen.len(), 1);
+        assert_eq!(options.listen[0].adresse.port(), 2525);
+        assert!(!options.listen[0].tls_implicite);
         // ET IL N'HÉBERGE RIEN : un serveur qui accepterait tout serait un
         // relais ouvert.
         assert!(options.hosted.is_empty());
@@ -1469,7 +1590,10 @@ mod tests {
         ]);
         assert_eq!(
             options.listen,
-            "0.0.0.0:2626".parse::<SocketAddr>().expect("adresse")
+            [Ecoute {
+                adresse: "0.0.0.0:2626".parse::<SocketAddr>().expect("adresse"),
+                tls_implicite: false,
+            }]
         );
         assert_eq!(options.maildir, PathBuf::from("/var/mail/spool"));
         assert_eq!(options.domain, "mail.example.com");
@@ -2594,5 +2718,125 @@ mod tests {
         assert!(!format!("{options:?}").is_empty());
         assert_eq!(options.clone(), options);
         assert_ne!(Demande::Aide, Demande::Version);
+    }
+
+    // ── LES ÉCOUTES SMTP, ET LEUR MODE TLS ──────────────────────────────────
+
+    /// **LA PREMIÈRE ÉCOUTE NOMMÉE REMPLACE LE DÉFAUT.**
+    ///
+    /// Sans cela, `--listen 0.0.0.0:25` ouvrirait AUSSI `127.0.0.1:2525` — un
+    /// port que personne n'a demandé, et une surprise sur un port est un
+    /// incident.
+    #[test]
+    fn la_premiere_ecoute_remplace_le_defaut_et_les_suivantes_s_ajoutent() {
+        let une = ecrire(&["--listen", "0.0.0.0:2626"]);
+        assert_eq!(une.listen.len(), 1);
+        assert_eq!(une.listen[0].adresse.port(), 2626);
+
+        let trois = ecrire(&[
+            "--listen",
+            "0.0.0.0:2525",
+            "--listen",
+            "0.0.0.0:2587",
+            "--listen-smtps",
+            "0.0.0.0:2465",
+        ]);
+        assert_eq!(trois.listen.len(), 3);
+        assert_eq!(
+            trois
+                .listen
+                .iter()
+                .map(|e| e.adresse.port())
+                .collect::<Vec<_>>(),
+            [2525, 2587, 2465]
+        );
+        // **LE MODE SUIT L'OPTION, ET NON LE NUMÉRO DE PORT.**
+        assert_eq!(
+            trois
+                .listen
+                .iter()
+                .map(|e| e.tls_implicite)
+                .collect::<Vec<_>>(),
+            [false, false, true]
+        );
+    }
+
+    /// **`--listen-smtps` SEUL SE SUFFIT** : un serveur qui ne servirait que le
+    /// `465` doit pouvoir s'écrire, et c'est pourquoi la liste remplace
+    /// `listen` au lieu de s'y ajouter.
+    #[test]
+    fn une_seule_ecoute_implicite_se_suffit() {
+        let options = ecrire(&["--listen-smtps", "0.0.0.0:2465"]);
+        assert_eq!(options.listen.len(), 1);
+        assert!(options.listen[0].tls_implicite);
+
+        let config = options.en_configuration();
+        assert_eq!(config.smtp_listeners.len(), 1);
+        assert!(config.smtp_listeners[0].implicit_tls);
+        // `listen` PORTE LA PREMIÈRE : un outil qui ne lirait que lui y trouve
+        // encore quelque chose de vrai.
+        assert_eq!(config.listen, "0.0.0.0:2465");
+    }
+
+    /// **DEUX ÉCOUTES SUR LA MÊME ADRESSE NE S'OUVRIRAIENT PAS.** La seconde
+    /// échouerait au démarrage sur un message du noyau qui ne dit pas laquelle ;
+    /// on refuse ici, où on sait encore les nommer.
+    #[test]
+    fn une_adresse_demandee_deux_fois_se_refuse() {
+        let faute = parse(["--listen", "0.0.0.0:2525", "--listen", "0.0.0.0:2525"])
+            .expect_err("une adresse ne s'écoute qu'une");
+        assert!(faute.message.contains("deux fois"), "{}", faute.message);
+
+        // **ET LE MODE N'Y CHANGE RIEN** : c'est l'adresse qui ne peut pas se
+        // lier deux fois, pas le dialogue qu'on y tient.
+        //
+        // ON PASSE UNE TRANCHE, ET NON UN TABLEAU, et ce n'est pas un détail de
+        // style : `parse` est générique sur ce qu'on lui donne, et chaque forme
+        // d'argument en produit une instanciation DISTINCTE. Le refus emprunté
+        // par un tableau ne dit rien de celui qu'emprunte une tranche — et
+        // c'est la tranche que le binaire lui passe.
+        let arguments: &[&str] = &["--listen", "0.0.0.0:2525", "--listen-smtps", "0.0.0.0:2525"];
+        let faute = parse(arguments).expect_err("une adresse ne s'écoute qu'une");
+        assert!(faute.message.contains("deux fois"), "{}", faute.message);
+    }
+
+    #[test]
+    fn une_adresse_illisible_se_refuse() {
+        for option in ["--listen", "--listen-smtps"] {
+            assert!(parse([option, "pas une adresse"]).is_err(), "{option}");
+            // **ET UNE OPTION SANS VALEUR**, qui n'est pas la même faute : la
+            // première dit « je n'ai pas su lire », la seconde « il manque un
+            // mot ». Les confondre enverrait relire ce qui n'a pas été écrit.
+            assert!(parse([option]).is_err(), "{option} sans valeur");
+            // Sous forme de TRANCHE aussi — voir l'essai voisin : c'est une
+            // instanciation distincte, et c'est celle que le binaire emploie.
+            let seule: &[&str] = &[option];
+            assert!(parse(seule).is_err(), "{option} sans valeur, en tranche");
+        }
+    }
+
+    /// **`--listen-imaps` EST LE MÊME PORT AVEC UN AUTRE MODE**, et non une
+    /// seconde écoute : aucun serveur déployé ne sert `143` et `993` à la fois.
+    #[test]
+    fn l_imap_choisit_son_mode_par_l_option() {
+        let clair = ecrire(&["--listen-imap", "0.0.0.0:2143"]);
+        assert_eq!(clair.listen_imap.map(|a| a.port()), Some(2143));
+        assert!(!clair.imap_implicit_tls);
+        assert!(!clair.en_configuration().imap_implicit_tls);
+
+        let implicite = ecrire(&["--listen-imaps", "0.0.0.0:2993"]);
+        assert_eq!(implicite.listen_imap.map(|a| a.port()), Some(2993));
+        assert!(implicite.imap_implicit_tls);
+        assert!(implicite.en_configuration().imap_implicit_tls);
+
+        // LE DERNIER MOT COMPTE : deux options pour un port, et c'est la
+        // dernière écrite qui dit le mode.
+        let repris = ecrire(&[
+            "--listen-imaps",
+            "0.0.0.0:2993",
+            "--listen-imap",
+            "0.0.0.0:2143",
+        ]);
+        assert!(!repris.imap_implicit_tls);
     }
 }

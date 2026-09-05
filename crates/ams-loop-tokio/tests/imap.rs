@@ -443,6 +443,8 @@ async fn service(
         let (mut flux, _) = ecouteur.accept().await.expect("connexion");
         let garde = SharedGuard::new(4, Thresholds::DEFAULT);
         let service = ImapService {
+            // `STARTTLS` : ces essais montent le chiffrement par la commande.
+            tls_mode: ams_loop_tokio::TlsMode::StartTls,
             limits: Limits::DEFAULT,
             guard: &garde,
             timeouts: ams_loop_tokio::Timeouts::default(),
@@ -717,6 +719,8 @@ async fn un_pair_banni_n_obtient_pas_de_banniere() {
             garde.observe(PAIR, ams_guard::Event::InvalidFrame);
         }
         let service = ImapService {
+            // `STARTTLS` : ces essais montent le chiffrement par la commande.
+            tls_mode: ams_loop_tokio::TlsMode::StartTls,
             limits: Limits::DEFAULT,
             guard: &garde,
             timeouts: ams_loop_tokio::Timeouts::default(),
@@ -742,6 +746,8 @@ async fn un_pair_muet_est_abandonne() {
         let (mut flux, _) = ecouteur.accept().await.expect("connexion");
         let garde = SharedGuard::new(4, Thresholds::DEFAULT);
         let service = ImapService {
+            // `STARTTLS` : ces essais montent le chiffrement par la commande.
+            tls_mode: ams_loop_tokio::TlsMode::StartTls,
             limits: Limits::DEFAULT,
             guard: &garde,
             timeouts: ams_loop_tokio::Timeouts {

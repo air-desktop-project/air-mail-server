@@ -90,7 +90,8 @@ mod tlsreports;
 // type de plus n'ajouterait qu'une occasion de les traduire de travers.
 pub use ams_session::{ClientDsn, ClientReport};
 pub use connection::{
-    DkimTally, DmarcTally, Outcome, Service, Summary, Timeouts, serve_connection,
+    DkimTally, DmarcTally, Outcome, Service, Summary, Timeouts, TlsMode, serve_connection,
+    serve_connection_with,
 };
 pub use delivery::{Delivery, DeliveryFailure};
 pub use dkim::{

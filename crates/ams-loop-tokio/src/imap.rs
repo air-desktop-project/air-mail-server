@@ -62,6 +62,11 @@ pub struct ImapService<'a> {
     /// qu'une connexion RETIENT, celle-ci ce qu'un message pèse. Voir
     /// `Limits::max_append_octets`.
     pub max_append_octets: u64,
+    /// Le mode TLS de cette écoute (RFC 8314 §3).
+    ///
+    /// Le `993` est en TLS IMPLICITE, et c'est le seul port IMAP que la plupart
+    /// des serveurs déployés servent encore — le `143` y est souvent éteint.
+    pub tls_mode: crate::TlsMode,
 }
 
 /// Ce qu'une connexion IMAP a fait.
@@ -113,8 +118,66 @@ where
         .tls
         .as_ref()
         .map(|configuration| tokio_rustls::TlsAcceptor::from(std::sync::Arc::clone(configuration)));
-    let mut session = Session::new(service.limits, accepteur.is_some(), auth, boites);
+    let implicite = service.tls_mode == crate::TlsMode::Implicit;
+    // **UN PORT IMPLICITE N'OFFRE PAS `STARTTLS`** : il est déjà chiffré, et
+    // l'annoncer inviterait le client à demander une bascule qui n'a pas de sens.
+    let mut session = Session::new(
+        service.limits,
+        accepteur.is_some() && !implicite,
+        auth,
+        boites,
+    );
     let mut etat = Etat::neuf(&service.limits);
+
+    if implicite {
+        // **PAS UN OCTET EN CLAIR SUR CE PORT** : ni bannière, ni refus du
+        // garde. Le client attend une poignée de main, et tout ce qu'on
+        // écrirait avant elle serait lu comme un enregistrement TLS mal formé.
+        let Some(accepteur) = accepteur else {
+            return Err(Error::CapabilityNotSupported);
+        };
+        let mut chiffre =
+            match tokio::time::timeout(service.timeouts.handshake, accepteur.accept(&mut *stream))
+                .await
+            {
+                Ok(Ok(flux)) => flux,
+                Ok(Err(cause)) => {
+                    service.guard.observe(source, GuardEvent::InvalidFrame);
+                    return Err(Error::Io(cause));
+                }
+                Err(_) => {
+                    service.guard.observe(source, GuardEvent::InvalidFrame);
+                    return Err(Error::Timeout);
+                }
+            };
+        session.on_tls_established();
+        etat.tls = true;
+
+        if matches!(
+            service.guard.observe(source, GuardEvent::Connection),
+            Verdict::Throttled | Verdict::Banned { .. }
+        ) {
+            let refus = session.unavailable(&mut etat.sortie)?;
+            chiffre.write_all(refus).await?;
+            chiffre.flush().await?;
+            let _ = chiffre.shutdown().await;
+            return Ok(resume);
+        }
+
+        let banniere = session.greeting(&mut etat.sortie)?;
+        chiffre.write_all(banniere).await?;
+        chiffre.flush().await?;
+
+        let etape = conduire(&mut chiffre, &mut session, &mut etat, service, source).await?;
+        debug_assert_eq!(
+            etape,
+            Etape::Terminee,
+            "un `STARTTLS` sur un port implicite"
+        );
+        let _ = chiffre.shutdown().await;
+        resume.merge(&etat, &session);
+        return Ok(resume);
+    }
 
     if matches!(
         service.guard.observe(source, GuardEvent::Connection),
@@ -777,6 +840,7 @@ where
                 timeouts,
                 tls,
                 max_append_octets: limits.max_append_octets,
+                tls_mode: options.tls_mode,
             };
             // L'ÉCHEC d'une connexion ne regarde qu'elle — le journal viendra
             // avec `air-log`. Une TENTATIVE D'INJECTION, en revanche, se

@@ -52,6 +52,10 @@ fn atelier(nom: &str) -> Atelier {
 /// Écrit une configuration portant ce secret de scellement.
 fn configuration(repertoire: &Path, clef: &str) -> PathBuf {
     let config = Configuration {
+        // Une seule écoute, en `STARTTLS` : la liste vide dirait la même
+        // chose, et l'écrire ici la rend lisible.
+        smtp_listeners: Vec::new(),
+        imap_implicit_tls: false,
         domain: String::from("mail.example.com"),
         listen: String::from("127.0.0.1:0"),
         maildir: repertoire.join("boite").display().to_string(),

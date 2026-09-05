@@ -224,6 +224,16 @@ struct Etat {
     /// remise ouverte, le condensat DKIM en cours, un échec déjà survenu) ne
     /// peut pas vivre sur la pile de l'un d'eux.
     message: Option<EnCours>,
+    /// La bannière reste-t-elle à écrire ?
+    ///
+    /// **VRAI SUR UN PORT À TLS IMPLICITE, ET LÀ SEULEMENT.** En `STARTTLS`, la
+    /// bannière part en clair avant toute poignée de main ; en implicite, il n'y
+    /// a pas d'« avant », et elle attend le chiffrement.
+    ///
+    /// Un drapeau plutôt qu'une déduction : lire l'état de la session pour
+    /// savoir si l'on a déjà parlé ferait dépendre d'un détail interne une
+    /// décision qui appartient à l'ÉCOUTE.
+    banniere_due: bool,
 }
 
 /// Ce qu'un message accumule pendant qu'il arrive.
@@ -253,6 +263,9 @@ impl Etat {
             lecture: vec![0_u8; capacite],
             rempli: 0,
             message: None,
+            // FAUX PAR DÉFAUT : le mode `STARTTLS` écrit sa bannière en clair,
+            // avant tout. Seul le mode implicite la doit encore.
+            banniere_due: false,
             sortie: vec![
                 0_u8;
                 config
@@ -333,6 +346,57 @@ where
     P: Policy,
     D: Delivery,
 {
+    serve_connection_with(stream, service, policy, delivery, source, TlsMode::StartTls).await
+}
+
+/// Le mode TLS d'une écoute.
+///
+/// # DEUX PORTS, DEUX FAÇONS D'ARRIVER AU MÊME CHIFFREMENT
+///
+/// RFC 8314 §3 les nomme et les compare. `STARTTLS` parle en clair, annonce
+/// l'extension, et le pair demande la bascule ; le TLS implicite fait la
+/// poignée de main **avant le premier octet de protocole**, si bien qu'il n'y a
+/// ni annonce ni bascule.
+///
+/// **CE N'EST PAS UN DÉTAIL DE TRANSPORT.** Sur un port implicite, écrire une
+/// bannière en clair enverrait au client des octets qu'il lit comme le début
+/// d'une poignée de main — il ne verrait pas un serveur poli, il verrait une
+/// erreur de protocole.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TlsMode {
+    /// On parle en clair, et le pair demande le chiffrement (RFC 3207).
+    ///
+    /// C'est le mode du `25`, où un pair qui ne sait pas chiffrer doit pouvoir
+    /// remettre quand même — et du `587`, où l'authentification est de toute
+    /// façon refusée hors chiffrement (C6).
+    StartTls,
+    /// La poignée de main a lieu AVANT le premier octet (RFC 8314 §3).
+    ///
+    /// C'est le mode du `465`. **Il exige un certificat** : un port qui promet
+    /// le chiffrement d'emblée ne peut pas se rabattre en clair, puisque le
+    /// client attend déjà une poignée de main.
+    Implicit,
+}
+
+/// Sert une connexion SMTP, dans le mode TLS de son écoute.
+///
+/// # Errors
+///
+/// Comme [`serve_connection`], plus [`Error::CapabilityNotSupported`] si le mode
+/// implicite est demandé sans matériel TLS.
+pub async fn serve_connection_with<S, P, D>(
+    stream: &mut S,
+    service: &Service<'_>,
+    policy: P,
+    delivery: &mut D,
+    source: Source,
+    mode: TlsMode,
+) -> Result<Summary, Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    P: Policy,
+    D: Delivery,
+{
     // ON REFUSE AVANT DE PARLER, pas au milieu de la conversation. Annoncer une
     // extension qu'on ne sait pas conduire reviendrait à mentir au pair dès la
     // bannière — et un serveur qui annonce `STARTTLS` puis ne chiffre pas est
@@ -357,9 +421,31 @@ where
 
     // ON NE PARLE PAS À UN BANNI. Interroger le garde ne compte pas comme un
     // événement : demander son avis ne doit pas nourrir ses compteurs.
+    //
+    // **AVANT LA POIGNÉE DE MAIN, y compris en mode implicite** : une poignée de
+    // main coûte du calcul asymétrique, et l'offrir à qui est déjà banni ferait
+    // du bannissement une dépense plutôt qu'une économie.
     if matches!(service.guard.verdict(source), Verdict::Banned { .. }) {
         etat.resume.outcome = Outcome::Banned;
         return Ok(etat.resume);
+    }
+
+    if mode == TlsMode::Implicit {
+        // **PAS UN OCTET EN CLAIR SUR CE PORT.** Ni bannière, ni `421` : le
+        // client attend une poignée de main, et tout ce qu'on écrirait avant
+        // elle serait lu comme un enregistrement TLS mal formé.
+        let Some(accepteur) = accepteur else {
+            return Err(Error::CapabilityNotSupported);
+        };
+        let mut chiffre = poignee_de_main(stream, &accepteur, service, source).await?;
+        // §4.2 de RFC 3207 n'a rien à défaire ici — rien n'a été dit avant —,
+        // mais c'est la MÊME entrée : la session apprend qu'elle est chiffrée,
+        // cesse d'annoncer `STARTTLS`, et attend un `EHLO`. Sa phase de départ
+        // est déjà « la bannière est partie », qui est exactement où l'on est.
+        session.on_tls_established();
+        etat.resume.tls = true;
+        etat.banniere_due = true;
+        return servir_chiffre(&mut chiffre, session, etat, service, delivery, source).await;
     }
 
     if matches!(
@@ -394,36 +480,82 @@ where
         return Err(Error::CapabilityNotSupported);
     };
 
-    let mut chiffre =
-        match timeout(service.timeouts.handshake, accepteur.accept(&mut *stream)).await {
-            Ok(Ok(flux)) => flux,
-            // Une poignée de main qui échoue APRÈS un `220` est une trame invalide au
-            // sens de C8 : le pair a demandé le chiffrement, puis n'a pas su le
-            // conduire. Un client mal configuré s'en remet ; un scanner, non.
-            Ok(Err(cause)) => {
-                service.guard.observe(source, GuardEvent::InvalidFrame);
-                return Err(Error::Io(cause));
-            }
-            Err(_) => {
-                service.guard.observe(source, GuardEvent::InvalidFrame);
-                return Err(Error::Timeout);
-            }
-        };
+    let mut chiffre = poignee_de_main(stream, &accepteur, service, source).await?;
 
     // RFC 3207 §4.2 : le serveur DOIT oublier tout ce que le pair a dit en clair.
     // C'est la session qui le fait, pas la boucle.
     session.on_tls_established();
     etat.resume.tls = true;
 
-    let etape = conduire(
-        &mut chiffre,
-        &mut session,
-        &mut etat,
-        service,
-        delivery,
-        source,
-    )
-    .await?;
+    servir_chiffre(&mut chiffre, session, etat, service, delivery, source).await
+}
+
+/// La poignée de main, et ce qu'un échec vaut au garde.
+///
+/// **UN ÉCHEC EST UNE TRAME INVALIDE AU SENS DE C8** : le pair a demandé le
+/// chiffrement — explicitement par `STARTTLS`, ou implicitement en se
+/// connectant à ce port-là — puis n'a pas su le conduire. Un client mal
+/// configuré s'en remet ; un scanner, non.
+async fn poignee_de_main<'s, S>(
+    stream: &'s mut S,
+    accepteur: &TlsAcceptor,
+    service: &Service<'_>,
+    source: Source,
+) -> Result<tokio_rustls::server::TlsStream<&'s mut S>, Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    match timeout(service.timeouts.handshake, accepteur.accept(&mut *stream)).await {
+        Ok(Ok(flux)) => Ok(flux),
+        Ok(Err(cause)) => {
+            service.guard.observe(source, GuardEvent::InvalidFrame);
+            Err(Error::Io(cause))
+        }
+        Err(_) => {
+            service.guard.observe(source, GuardEvent::InvalidFrame);
+            Err(Error::Timeout)
+        }
+    }
+}
+
+/// La conversation, une fois le chiffrement monté — par l'une ou l'autre voie.
+async fn servir_chiffre<S, P, D>(
+    chiffre: &mut S,
+    mut session: SmtpSession<'_, P>,
+    mut etat: Etat,
+    service: &Service<'_>,
+    delivery: &mut D,
+    source: Source,
+) -> Result<Summary, Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    P: Policy,
+    D: Delivery,
+{
+    // LA BANNIÈRE PART ICI EN MODE IMPLICITE, et elle est déjà partie en clair
+    // en mode `STARTTLS`. Ce qui distingue les deux, c'est `banniere_due`, que
+    // l'appelant a posé — la deviner d'après l'état de la session ferait dépendre
+    // d'un détail interne une décision qui appartient à l'écoute.
+    if etat.banniere_due {
+        let banniere = session.greeting(&mut etat.sortie)?;
+        chiffre.write_all(banniere).await?;
+        chiffre.flush().await?;
+        // LE GARDE PARLE MAINTENANT, et pas avant : son `421` est du protocole,
+        // et sur un port implicite il n'y a pas d'avant.
+        if matches!(
+            service.guard.observe(source, GuardEvent::Connection),
+            Verdict::Throttled | Verdict::Banned { .. }
+        ) {
+            let refus = session.unavailable(&mut etat.sortie)?;
+            chiffre.write_all(refus).await?;
+            chiffre.flush().await?;
+            etat.resume.outcome = Outcome::Throttled;
+            let _ = chiffre.shutdown().await;
+            return Ok(etat.resume);
+        }
+    }
+
+    let etape = conduire(chiffre, &mut session, &mut etat, service, delivery, source).await?;
     // La session refuse un second `STARTTLS` (`503 TLS already active`) : ce
     // second passage ne peut plus demander de chiffrement. L'affirmation est
     // vérifiée en débogage plutôt que supposée en silence.

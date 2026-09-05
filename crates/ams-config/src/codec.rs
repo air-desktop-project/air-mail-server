@@ -366,6 +366,42 @@ pub struct Configuration {
     pub mtasts: Mtasts,
     /// TLSRPT (RFC 8460).
     pub tlsrpt: Tlsrpt,
+    /// Les écoutes SMTP, chacune avec son mode TLS.
+    ///
+    /// **NON VIDE, C'EST LA LISTE** : [`Configuration::listen`] n'y ajoute rien.
+    /// Vide, il n'y a qu'une écoute — celle de `listen`, en `STARTTLS`.
+    ///
+    /// C'est ce qui permet à la PREMIÈRE écoute d'être en TLS implicite : si
+    /// `listen` avait gardé son rang, une écoute sans champ de mode serait
+    /// toujours venue en tête, et un serveur qui ne servirait que le 465
+    /// n'aurait pas pu s'écrire.
+    ///
+    /// Comme les autres adresses, cette crate ne les interprète pas : `core` ne
+    /// sait pas lire une adresse de socket.
+    pub smtp_listeners: Vec<Listener>,
+    /// Le TLS est-il IMPLICITE sur l'écoute IMAP (RFC 8314 §3) ?
+    ///
+    /// Faux par défaut : un ancien fichier garde `STARTTLS`.
+    pub imap_implicit_tls: bool,
+}
+
+/// Une écoute, et le mode TLS de ce port.
+///
+/// # LE MODE NE SE DEVINE PAS DU NUMÉRO DE PORT
+///
+/// Le déduire ferait de `465` une constante gravée dans le code, et un
+/// exploitant qui déplace ce service ailleurs — derrière une redirection, ce que
+/// C10 lui impose — obtiendrait un port muet dont personne ne dirait pourquoi.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Listener {
+    /// « adresse:port ».
+    pub address: String,
+    /// Le TLS est-il implicite ici (RFC 8314 §3) ?
+    ///
+    /// **VRAI EXIGE UN CERTIFICAT** : un port qui promet le chiffrement avant le
+    /// premier octet et n'en a pas ne peut pas se rabattre en clair — le client
+    /// attend déjà une poignée de main.
+    pub implicit_tls: bool,
 }
 
 /// TLSRPT (RFC 8460) : ce qu'on rend au domaine d'en face.
@@ -631,6 +667,21 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
         hosted.push(texte(domaine?)?);
     }
 
+    // **UNE ÉCOUTE SANS ADRESSE N'EST PAS UNE ÉCOUTE.** Elle se refuse ici
+    // plutôt que de laisser l'appelant lire une chaîne vide et ouvrir on ne sait
+    // quoi — ou rien, sans le dire.
+    let mut smtp_listeners = Vec::new();
+    for ecoute in lu.get_smtp_listeners()?.iter() {
+        let address = texte(ecoute.get_address()?)?;
+        if address.is_empty() {
+            return Err(Error::Empty("smtpListeners"));
+        }
+        smtp_listeners.push(Listener {
+            address,
+            implicit_tls: ecoute.get_implicit_tls(),
+        });
+    }
+
     let bornes = lu.get_limits()?;
     let garde = lu.get_guard()?;
     let delais = lu.get_timeouts()?;
@@ -780,6 +831,8 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
         queue,
         mtasts,
         tlsrpt,
+        smtp_listeners,
+        imap_implicit_tls: lu.get_imap_implicit_tls(),
     })
 }
 
@@ -875,6 +928,26 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
             alignement.set_quarantine_folder(&config.dmarc.quarantine_folder);
         }
         ecrit.set_accounts(&config.accounts);
+        // LA LISTE S'ÉCRIT AVANT LES CHAMPS SIMPLES QUI SUIVENT, parce que
+        // `init_smtp_listeners` emprunte le constructeur : le faire au milieu
+        // obligerait à le reprendre, et `reborrow` sur un constructeur de liste
+        // est exactement le genre de couture qu'on relit mal.
+        {
+            let combien = u32::try_from(config.smtp_listeners.len()).unwrap_or(u32::MAX);
+            let mut liste = ecrit.reborrow().init_smtp_listeners(combien);
+            // **UN `zip` PLUTÔT QU'UN `enumerate` ET UNE CONVERSION.** Le rang
+            // que `get` demande est un `u32` ; le tirer d'un `enumerate` obligeait
+            // à convertir, donc à écrire une garde pour un débordement qu'aucune
+            // configuration ne peut produire — quatre milliards d'écoutes. Le
+            // `zip` s'arrête sur la plus courte des deux, et il n'y a plus rien
+            // à garder.
+            for (rang, ecoute) in (0..combien).zip(&config.smtp_listeners) {
+                let mut place = liste.reborrow().get(rang);
+                place.set_address(&ecoute.address);
+                place.set_implicit_tls(ecoute.implicit_tls);
+            }
+        }
+        ecrit.set_imap_implicit_tls(config.imap_implicit_tls);
         ecrit.set_listen_pop3(&config.listen_pop3);
         ecrit.set_listen_imap(&config.listen_imap);
         ecrit.set_listen_http(&config.listen_http);
@@ -932,7 +1005,7 @@ mod tests {
         Configuration, Dkim, Dmarc, Enforcement, Error, Spf, TRAVERSAL_LIMIT_WORDS, Timeouts, Tls,
         decode, encode,
     };
-    use super::{Mtasts, Queue, Relay, Tlsrpt};
+    use super::{Listener, Mtasts, Queue, Relay, Tlsrpt};
     use alloc::string::{String, ToString as _};
     use alloc::vec;
     use ams_guard::Thresholds;
@@ -943,6 +1016,23 @@ mod tests {
         Configuration {
             domain: String::from("mail.example.com"),
             listen: String::from("127.0.0.1:2525"),
+            // Les trois écoutes d'un serveur réel : le `25` et le `587` en
+            // `STARTTLS`, le `465` en TLS implicite.
+            smtp_listeners: vec![
+                Listener {
+                    address: String::from("127.0.0.1:2525"),
+                    implicit_tls: false,
+                },
+                Listener {
+                    address: String::from("127.0.0.1:2587"),
+                    implicit_tls: false,
+                },
+                Listener {
+                    address: String::from("127.0.0.1:2465"),
+                    implicit_tls: true,
+                },
+            ],
+            imap_implicit_tls: true,
             maildir: String::from("/var/mail/spool"),
             hosted: vec![String::from("example.com"), String::from("example.org")],
             max_recipients: 100,
@@ -1204,6 +1294,40 @@ mod tests {
             let octets = encode(&original).expect("encodable");
             assert_eq!(decode(&octets), Err(Error::Empty(champ)), "sur `{champ}`");
         }
+    }
+
+    /// **UNE ÉCOUTE SANS ADRESSE N'EST PAS UNE ÉCOUTE.**
+    ///
+    /// Elle se refuse au décodage plutôt que de laisser l'appelant lire une
+    /// chaîne vide et ouvrir on ne sait quoi — ou rien, sans le dire.
+    #[test]
+    fn une_ecoute_sans_adresse_se_refuse() {
+        let mut original = exemple();
+        original.smtp_listeners[1].address.clear();
+        let octets = encode(&original).expect("encodable");
+        assert_eq!(decode(&octets), Err(Error::Empty("smtpListeners")));
+    }
+
+    /// **LA LISTE TRAVERSE LE FORMAT, MODES COMPRIS.**
+    ///
+    /// Un aller-retour qui perdrait un `implicit_tls` ferait servir en clair un
+    /// port que l'exploitant a demandé chiffré — et le client, lui, attendrait
+    /// une poignée de main.
+    #[test]
+    fn les_ecoutes_et_leurs_modes_font_l_aller_retour() {
+        let original = exemple();
+        let relu = decode(&encode(&original).expect("encodable")).expect("relisible");
+        assert_eq!(relu.smtp_listeners, original.smtp_listeners);
+        assert_eq!(relu.imap_implicit_tls, original.imap_implicit_tls);
+
+        // ET UNE LISTE VIDE RESTE VIDE : c'est ce qui rend le champ ajoutable
+        // sans rien casser — un fichier écrit avant lui décode une seule écoute.
+        let mut sans = exemple();
+        sans.smtp_listeners.clear();
+        sans.imap_implicit_tls = false;
+        let relu = decode(&encode(&sans).expect("encodable")).expect("relisible");
+        assert!(relu.smtp_listeners.is_empty());
+        assert!(!relu.imap_implicit_tls);
     }
 
     #[test]

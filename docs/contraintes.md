@@ -3856,6 +3856,109 @@ Ce qui reste hors du serveur : **rien de connu**. Cette ligne annonçait « la f
 de réémission des messages sortants », et c'était faux — elle existe, elle est
 câblée, et [la liste v1](v1.md) le mesure plutôt que de le croire.
 
+## Une seule écoute, et pas de TLS implicite
+
+L'inventaire d'un serveur de production réel — celui qui doit accueillir
+air-mail-server — a montré ce qui manquait, et ce n'était pas ce qu'on croyait :
+
+| port | rôle | TLS |
+|---|---|---|
+| 25 | le monde remet | `STARTTLS` facultatif |
+| 465 | soumission | **implicite** |
+| 587 | soumission | `STARTTLS` exigé |
+| 993 | IMAP | **implicite** |
+
+Ce serveur n'avait **qu'une écoute SMTP** — `listen` était un `SocketAddr`, pas
+une liste — et **ne savait pas le TLS implicite**, ni en SMTP ni en IMAP. Deux
+bloquants, dont le second n'avait pas été vu au premier examen.
+
+### LE MODE NE SE DEVINE PAS DU NUMÉRO DE PORT
+
+C'est la décision qui gouverne tout le reste. On aurait pu écrire « si le port
+vaut 465, alors implicite » — c'est court, et c'est faux.
+
+**C10 interdit à ce serveur de tourner en superutilisateur**, donc de lier un
+port sous 1024. Le 465 réel se rejoint par une redirection du pare-feu vers un
+port haut. Déduire le mode du numéro rendrait donc muet précisément le
+déploiement que ce projet impose : un exploitant obtiendrait un port qui ne
+répond pas, sans que rien ne dise pourquoi.
+
+Le mode appartient à l'ÉCOUTE, et il s'écrit : `--listen` pour `STARTTLS`,
+`--listen-smtps` pour l'implicite, et de même `--listen-imap` / `--listen-imaps`.
+Ce sont les noms d'`/etc/services`, ceux que Postfix et Dovecot emploient dans
+leur propre configuration — un exploitant les lit sans les apprendre.
+
+### LA LISTE REMPLACE, ELLE NE COMPLÈTE PAS
+
+Deux choix se présentaient, et le premier était un piège.
+
+`listen` existait déjà, et Cap'n Proto interdit d'ôter un champ. On pouvait donc
+garder `listen` comme PREMIÈRE écoute et ajouter les autres. Mais `listen` n'a
+pas de champ de mode : la première écoute aurait toujours été en `STARTTLS`, et
+**un serveur qui ne servirait que le 465 n'aurait pas pu s'écrire.**
+
+La liste, quand elle existe, est donc LA liste. `listen` continue d'être écrit et
+porte l'adresse de la première — un outil qui ne lirait que lui y trouve encore
+quelque chose de vrai —, et une liste vide veut dire « une seule écoute, en
+`STARTTLS` », ce qui est exactement le comportement d'un fichier écrit avant ce
+champ.
+
+### PAS UN OCTET EN CLAIR SUR UN PORT IMPLICITE
+
+La bannière `220` part APRÈS la poignée de main, et le `421` du garde aussi. Un
+octet écrit avant serait lu par le client comme un enregistrement TLS mal formé :
+il ne verrait pas un serveur poli, il verrait une erreur de protocole.
+
+L'ordre est donc : bannissement (avant la poignée de main — l'offrir à un banni
+ferait du bannissement une dépense), poignée de main, `on_tls_established`,
+bannière, débit, conversation.
+
+**`on_tls_established` convient tel quel**, et c'est heureux : sa phase de
+départ est `Greeted` — « la bannière est partie, on attend `EHLO` » —, qui est
+exactement où l'on se trouve sur un port implicite. Rien à inventer.
+
+### UN PORT IMPLICITE SANS CERTIFICAT NE DÉMARRE PAS
+
+Le serveur refuse, avec la raison écrite. Un port qui promet le chiffrement avant
+le premier octet **ne peut pas se rabattre en clair** : le client attend déjà une
+poignée de main. Ouvrir ce port sans certificat produirait un service muet, et
+personne ne dirait pourquoi.
+
+C'est la différence avec `STARTTLS`, qui se dégrade proprement : sans certificat,
+on ne l'annonce pas, et le pair remet en clair.
+
+### CE QUE LA NOUVELLE BARRIÈRE A RATTRAPÉ, EN QUELQUES SECONDES
+
+Le champ `Listing::special` de la tranche précédente et la signature de
+`Mailboxes::create` avaient chacun coûté une campagne de fuzz de vingt-cinq
+minutes. Cette fois, `check-compile.sh` a signalé `fuzz_ams_config.rs` **avant
+même que la première cible ne soit bâtie** — et la cible a gagné les deux
+nouveaux champs, si bien que l'aller-retour du format les éprouve désormais.
+
+### CE QU'ON A TROUVÉ CHEZ SOI EN CHEMIN
+
+Deux gardes inatteignables, écartées plutôt que tolérées :
+
+- l'écriture de la liste tirait son rang d'un `enumerate` et le convertissait en
+  `u32`, donc portait une garde pour un débordement qu'aucune configuration ne
+  peut produire — quatre milliards d'écoutes. Un `zip` sur `0..combien` s'arrête
+  sur la plus courte des deux, et il n'y a plus rien à garder ;
+- l'option `--listen-imaps` avait été ajoutée aux options ET au format, **et
+  personne ne la lisait**. Le serveur ouvrait le 993 en `STARTTLS`. C'est la
+  couverture qui l'a dit — une option qui existe et que rien ne consomme est
+  exactement le genre de mensonge que ce registre pourchasse.
+
+### UNE LEÇON SUR LA COUVERTURE DES GÉNÉRIQUES
+
+`parse` est générique sur ce qu'on lui donne, et **chaque forme d'argument en
+produit une instanciation distincte**, avec ses propres compteurs. Un refus
+éprouvé sur un tableau laissait la même ligne non couverte pour une TRANCHE — et
+c'est la tranche que le binaire emploie.
+
+Ce n'est pas un défaut de la mesure : c'est que le code compilé pour l'un n'est
+pas celui compilé pour l'autre. Les essais nomment donc la forme, et disent
+pourquoi.
+
 ## Un inconnu chez nous recevait « vous n'avez pas le droit d'envoyer ici »
 
 OpenSMTPD est le troisième MTA confronté à ce serveur. **Il n'a apporté aucun

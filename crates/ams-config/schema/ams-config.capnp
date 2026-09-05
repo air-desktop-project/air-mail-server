@@ -26,6 +26,11 @@ struct Configuration {
   # Où écouter, sous la forme « adresse:port ». JAMAIS un port privilégié : C10
   # interdit d'exécuter le serveur en superutilisateur, et les ports sous 1024
   # s'atteignent par une règle de redirection du pare-feu.
+  #
+  # LA PREMIÈRE ÉCOUTE, ET LA SEULE QU'UN ANCIEN FICHIER PORTE. Les suivantes
+  # vivent dans `smtpListeners`, qui dit aussi leur mode TLS. Ce champ-ci reste
+  # parce qu'on n'en retire jamais un — et il désigne toujours une écoute en
+  # STARTTLS, mode qu'il a toujours eu.
   listen @1 :Text;
 
   # La racine de la boîte Maildir.
@@ -150,6 +155,67 @@ struct Configuration {
   # silence ferait déposer des rapports dans un répertoire que l'exploitant
   # croyait réservé au courrier.
   queue @23 :Queue;
+
+  # LES ÉCOUTES SMTP, chacune avec son mode TLS.
+  #
+  # # POURQUOI PLUSIEURS, ET POURQUOI UN MODE PAR ÉCOUTE
+  #
+  # Un serveur de courrier réel en sert trois, et elles ne se ressemblent pas :
+  #
+  #   — le **25**, où le monde remet. Le chiffrement y est OPPORTUNISTE : un pair
+  #     qui ne sait pas faire `STARTTLS` doit pouvoir remettre quand même, sans
+  #     quoi on perd du courrier légitime pour une raison qui ne regarde que le
+  #     transport ;
+  #   — le **587**, où les clients du domaine SOUMETTENT. Même dialogue que le 25,
+  #     mais l'authentification y est exigée — et elle est déjà refusée hors
+  #     chiffrement (C6) ;
+  #   — le **465**, où le TLS est IMPLICITE (RFC 8314 §3) : la poignée de main a
+  #     lieu AVANT le premier octet de protocole, et il n'y a pas de `STARTTLS` à
+  #     annoncer ni à attendre.
+  #
+  # **Le mode ne se devine pas du numéro de port.** Le déduire ferait de `465`
+  # une constante gravée dans le code, et un exploitant qui déplace ce service
+  # ailleurs — derrière une redirection, C10 l'y oblige — obtiendrait un port
+  # muet dont personne ne dirait pourquoi.
+  #
+  # NON VIDE, CETTE LISTE EST LA LISTE — `listen` n'y ajoute rien. Vide, il n'y
+  # a qu'une écoute, celle de `listen`, en `STARTTLS`.
+  #
+  # **C'est ce qui permet à la PREMIÈRE écoute d'être en TLS implicite.** Si
+  # `listen` avait gardé son rang, il aurait fallu qu'une écoute sans champ de
+  # mode vienne toujours en tête — et un serveur qui ne servirait QUE le 465
+  # n'aurait pas pu s'écrire.
+  #
+  # `listen` continue d'être ÉCRIT, et porte l'adresse de la première : un outil
+  # qui ne lirait que lui y trouve encore quelque chose de vrai.
+  #
+  # Et c'est ajoutable sans rien casser : un fichier écrit avant ce champ décode
+  # une liste vide, donc une seule écoute en `STARTTLS` — exactement son
+  # comportement d'alors.
+  smtpListeners @24 :List(Listener);
+
+  # Le TLS est-il IMPLICITE sur l'écoute IMAP ?
+  #
+  # Le **993** l'exige (RFC 8314 §3), et c'est le seul port IMAP que la plupart
+  # des serveurs déployés servent encore — le 143 y est souvent éteint. Sans ce
+  # champ, on ne pourrait servir que le 143.
+  #
+  # FAUX PAR DÉFAUT, donc un ancien fichier garde `STARTTLS` sur son écoute IMAP.
+  imapImplicitTls @25 :Bool;
+}
+
+# Une écoute, et le mode TLS de ce port.
+struct Listener {
+  # « adresse:port ».
+  address @0 :Text;
+
+  # Le TLS est-il IMPLICITE ici (RFC 8314 §3) ?
+  #
+  # **VRAI EXIGE UN CERTIFICAT.** Un port qui promet le chiffrement avant le
+  # premier octet et n'en a pas ne sert personne : il ne peut pas se rabattre en
+  # clair, puisque le client attend déjà une poignée de main. Le serveur refuse
+  # donc de démarrer plutôt que d'ouvrir un port muet.
+  implicitTls @1 :Bool;
 }
 
 # TLSRPT (RFC 8460) : ce qu'on rend au domaine d'en face.

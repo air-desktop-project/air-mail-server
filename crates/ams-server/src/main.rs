@@ -412,6 +412,37 @@ fn verifier_les_domaines(comptes: &[Account], heberges: &[String]) -> Result<(),
     Ok(())
 }
 
+/// Les écoutes SMTP de la configuration, et le mode TLS de chacune.
+///
+/// # Errors
+///
+/// Une adresse illisible, ou aucune écoute du tout.
+fn lire_les_ecoutes(
+    options: &Configuration,
+) -> Result<std::vec::Vec<(std::net::SocketAddr, ams_loop_tokio::TlsMode)>, String> {
+    let mut ecoutes = std::vec::Vec::new();
+    if options.smtp_listeners.is_empty() {
+        let adresse: std::net::SocketAddr = options
+            .listen
+            .parse()
+            .map_err(|_| format!("`{}` n'est pas une adresse d'écoute", options.listen))?;
+        ecoutes.push((adresse, ams_loop_tokio::TlsMode::StartTls));
+        return Ok(ecoutes);
+    }
+    for ecoute in &options.smtp_listeners {
+        let adresse: std::net::SocketAddr = ecoute
+            .address
+            .parse()
+            .map_err(|_| format!("`{}` n'est pas une adresse d'écoute", ecoute.address))?;
+        let mode = match ecoute.implicit_tls {
+            true => ams_loop_tokio::TlsMode::Implicit,
+            false => ams_loop_tokio::TlsMode::StartTls,
+        };
+        ecoutes.push((adresse, mode));
+    }
+    Ok(ecoutes)
+}
+
 /// Charge le matériel TLS que la configuration nomme, s'il en nomme.
 ///
 /// # Le refus d'une clé lisible par tout le monde
@@ -638,10 +669,11 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         std::fs::read(fichier).map_err(|erreur| format!("`{}` : {erreur}", fichier.display()))?;
     let options: Configuration = ams_config::decode(&octets)
         .map_err(|erreur| format!("`{}` : {erreur}", fichier.display()))?;
-    let ecoute: std::net::SocketAddr = options
-        .listen
-        .parse()
-        .map_err(|_| format!("`{}` n'est pas une adresse d'écoute", options.listen))?;
+    // **LA LISTE, SI ELLE EXISTE ; SINON `listen` SEUL, EN `STARTTLS`.** C'est
+    // ce qui rend le champ ajoutable sans rien casser : un fichier écrit avant
+    // lui décode une liste vide, donc une seule écoute — exactement son
+    // comportement d'alors.
+    let ecoutes = lire_les_ecoutes(&options)?;
     let maildir = PathBuf::from(&options.maildir);
 
     // CE QUI EST DÉJÀ LÀ NE SE RESSERRE PAS TOUT SEUL. Les trois chemins que ce
@@ -1276,15 +1308,40 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         Arc::clone(&comptes),
     ));
 
-    let ecouteur = TcpListener::bind(ecoute)
-        .await
-        .map_err(|erreur| format!("écoute sur {ecoute} : {erreur}"))?;
+    // **TOUTES LES ÉCOUTES SE LIENT AVANT QUE LA PREMIÈRE NE SERVE.** Lier au
+    // fur et à mesure ferait démarrer un serveur qui accepte du courrier sur le
+    // `25` et découvre ensuite que le `465` est pris — un serveur à moitié en
+    // service, dont personne ne saurait dire s'il faut le laisser tourner.
+    let mut ecouteurs = std::vec::Vec::new();
+    for (adresse, mode) in &ecoutes {
+        // UN PORT À TLS IMPLICITE SANS CERTIFICAT NE SERT PERSONNE, et ne peut
+        // pas se rabattre en clair : le client attend déjà une poignée de main.
+        // On refuse de démarrer plutôt que d'ouvrir un port muet.
+        if *mode == ams_loop_tokio::TlsMode::Implicit && chiffrement.is_none() {
+            return Err(format!(
+                "`{adresse}` est demandée en TLS implicite, et aucun certificat n'est \
+                 configuré. Ce port ne pourrait rien servir : le client attend une poignée \
+                 de main avant le premier octet, et il n'y a pas de repli en clair."
+            ));
+        }
+        let ecouteur = TcpListener::bind(adresse)
+            .await
+            .map_err(|erreur| format!("écoute sur {adresse} : {erreur}"))?;
+        ecouteurs.push((ecouteur, *adresse, *mode));
+    }
 
     eprintln!(
         "air-mail-server {} : {} écoute sur {}, {} boîte(s) sous `{}` ({} message(s))",
         env!("CARGO_PKG_VERSION"),
         options.domain,
-        ecoute,
+        ecoutes
+            .iter()
+            .map(|(adresse, mode)| match mode {
+                ams_loop_tokio::TlsMode::Implicit => format!("{adresse} (TLS implicite)"),
+                ams_loop_tokio::TlsMode::StartTls => format!("{adresse}"),
+            })
+            .collect::<std::vec::Vec<_>>()
+            .join(", "),
         comptes.vue().len(),
         options.maildir,
         messages
@@ -1397,7 +1454,10 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         // `None` quand la configuration ne nomme pas de certificat : la session
         // n'annonce alors pas `STARTTLS`, et le serveur sert en clair sans
         // mentir à personne.
-        tls: chiffrement,
+        tls: chiffrement.clone(),
+        // **POSÉ PAR ÉCOUTE**, juste avant de servir : ces options-ci sont le
+        // patron commun, et chaque port y met son mode.
+        tls_mode: ams_loop_tokio::TlsMode::StartTls,
         // DKIM VÉRIFIE DÈS QU'IL Y A UN RÉSOLVEUR, sans réglage de plus : il ne
         // décide d'aucun message — c'est DMARC qui décidera — donc il n'y a rien
         // à activer ni à opposer. Ce sont les mêmes serveurs que SPF, la même
@@ -1540,6 +1600,19 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         ] {
             eprintln!("air-mail-server : {dit}");
         }
+        let mut options_imap = options_de_service.clone();
+        options_imap.tls_mode = match options.imap_implicit_tls {
+            true => ams_loop_tokio::TlsMode::Implicit,
+            false => ams_loop_tokio::TlsMode::StartTls,
+        };
+        // **LE MODE DE CETTE ÉCOUTE-CI**, et non celui du SMTP : le `993` est en
+        // TLS implicite là où le `25` est en `STARTTLS`, et rien n'oblige les
+        // deux à s'accorder.
+        let mut options_imap = options_de_service.clone();
+        options_imap.tls_mode = match options.imap_implicit_tls {
+            true => ams_loop_tokio::TlsMode::Implicit,
+            false => ams_loop_tokio::TlsMode::StartTls,
+        };
         Some(tokio::spawn(serve_imap(
             ecouteur,
             // LA BORNE D'UN `APPEND` EST CELLE D'UN MESSAGE, et c'est la même
@@ -1552,7 +1625,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
             Arc::clone(&politique),
             Arc::clone(&boites_imap),
             Arc::clone(&garde),
-            options_de_service.clone(),
+            options_imap,
             arret(),
         )))
     };
@@ -1780,40 +1853,77 @@ async fn servir(fichier: &Path) -> Result<(), String> {
             })
         });
 
-    let stats = serve(
-        ecouteur,
-        config,
-        politique,
-        garde,
-        move || {
-            let remise = MaildirDelivery::new(
-                Arc::clone(&pour_la_remise),
-                Arc::clone(&comptes_pour_la_remise),
-                Arc::clone(&incidents_pour_la_remise),
-            );
-            let remise = match quarantaine.clone() {
-                Some(dossier) => remise.avec_quarantaine(dossier),
-                None => remise,
-            };
-            // **CE QUE NOS COMPTES ÉMETTENT EST SIGNÉ** (RFC 6376). Sans cela,
-            // le courrier de l'exploitant échoue en DMARC dès que SPF ne suffit
-            // plus — un transfert, une liste de diffusion — alors même que le
-            // serveur annonce au démarrage qu'il signe ce qu'il émet.
-            let remise = remise.avec_domaines(Arc::clone(&domaines_signables));
-            let remise = match signature_de_la_remise.clone() {
-                Some(signataire) => remise.avec_dkim(signataire),
-                None => remise,
-            };
-            match file_pour_la_remise.clone() {
-                Some(file) => remise.avec_file(file, message_max),
-                None => remise,
+    // **UNE TÂCHE PAR ÉCOUTE**, chacune avec son mode TLS. Elles écoutent le même
+    // signal d'arrêt et se referment ensemble ; leurs comptes se rassemblent, un
+    // serveur ne rendant qu'un bilan.
+    let mut taches = std::vec::Vec::new();
+    for (ecouteur, adresse, mode) in ecouteurs {
+        let politique = Arc::clone(&politique);
+        let garde = Arc::clone(&garde);
+        let mut options_de_cette_ecoute = options_de_service.clone();
+        options_de_cette_ecoute.tls_mode = mode;
+        // Les fabriques de remise partagent tout par `Arc` : une écoute de plus
+        // ne recopie ni les boîtes, ni les comptes, ni la clé de signature.
+        let pour_la_remise = Arc::clone(&pour_la_remise);
+        let comptes_pour_la_remise = Arc::clone(&comptes_pour_la_remise);
+        let incidents_pour_la_remise = Arc::clone(&incidents_pour_la_remise);
+        let domaines_signables = Arc::clone(&domaines_signables);
+        let quarantaine = quarantaine.clone();
+        let signature_de_la_remise = signature_de_la_remise.clone();
+        let file_pour_la_remise = file_pour_la_remise.clone();
+        let attente = arret();
+        taches.push(tokio::spawn(async move {
+            let issue = serve(
+                ecouteur,
+                config,
+                politique,
+                garde,
+                move || {
+                    let remise = MaildirDelivery::new(
+                        Arc::clone(&pour_la_remise),
+                        Arc::clone(&comptes_pour_la_remise),
+                        Arc::clone(&incidents_pour_la_remise),
+                    );
+                    let remise = match quarantaine.clone() {
+                        Some(dossier) => remise.avec_quarantaine(dossier),
+                        None => remise,
+                    };
+                    // **CE QUE NOS COMPTES ÉMETTENT EST SIGNÉ** (RFC 6376). Sans
+                    // cela, le courrier de l'exploitant échoue en DMARC dès que
+                    // SPF ne suffit plus — un transfert, une liste de diffusion —
+                    // alors même que le serveur annonce au démarrage qu'il signe
+                    // ce qu'il émet.
+                    let remise = remise.avec_domaines(Arc::clone(&domaines_signables));
+                    let remise = match signature_de_la_remise.clone() {
+                        Some(signataire) => remise.avec_dkim(signataire),
+                        None => remise,
+                    };
+                    match file_pour_la_remise.clone() {
+                        Some(file) => remise.avec_file(file, message_max),
+                        None => remise,
+                    }
+                },
+                options_de_cette_ecoute,
+                attente,
+            )
+            .await;
+            (adresse, issue)
+        }));
+    }
+
+    let mut stats = ams_loop_tokio::Stats::default();
+    for tache in taches {
+        match tache.await {
+            Ok((adresse, Ok(compte))) => {
+                let _ = adresse;
+                stats = stats.plus(compte);
             }
-        },
-        options_de_service,
-        arret(),
-    )
-    .await
-    .map_err(|erreur| erreur.to_string())?;
+            // **UNE ÉCOUTE QUI TOMBE SE NOMME.** « écoute : erreur » sans dire
+            // laquelle enverrait chercher dans trois ports.
+            Ok((adresse, Err(erreur))) => return Err(format!("écoute {adresse} : {erreur}")),
+            Err(erreur) => return Err(format!("écoute : {erreur}")),
+        }
+    }
 
     if let Some(tache) = tache_tls {
         match tache.await {

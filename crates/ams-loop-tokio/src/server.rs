@@ -14,7 +14,7 @@ use tokio::sync::Semaphore;
 
 use crate::{
     Delivery, DkimChecker, DmarcChecker, Error, ReportSpool, SendTally, SenderChecker, Service,
-    SharedGuard, SpoolTally, Timeouts, serve_connection,
+    SharedGuard, SpoolTally, Timeouts,
 };
 
 /// Ce qui borne le service.
@@ -43,6 +43,15 @@ pub struct ServeOptions {
     /// service refuse de démarrer une connexion qui annoncerait `STARTTLS` sans
     /// elle.
     pub tls: Option<Arc<ServerConfig>>,
+    /// Le mode TLS de CETTE écoute (RFC 8314 §3).
+    ///
+    /// # POURQUOI DANS LES OPTIONS D'ÉCOUTE, ET NON DANS LA CONFIGURATION
+    ///
+    /// Un serveur sert plusieurs ports, et ils n'ont pas le même mode : le `25`
+    /// et le `587` en `STARTTLS`, le `465` en implicite. Le mode appartient donc
+    /// à l'écoute, pas au service — le mettre dans la configuration obligerait
+    /// tous les ports à s'accorder, ce qu'aucun serveur réel ne fait.
+    pub tls_mode: crate::connection::TlsMode,
     /// De quoi vérifier l'expéditeur (C9), si le service sait le faire.
     ///
     /// Voir [`Service::spf`] : mêmes règles. Une politique d'expéditeur qui
@@ -78,6 +87,9 @@ impl Default for ServeOptions {
             max_connections: 256,
             timeouts: Timeouts::default(),
             tls: None,
+            // `STARTTLS` PAR DÉFAUT : c'est le mode du `25`, celui qu'un serveur
+            // sert forcément. L'implicite se demande.
+            tls_mode: crate::connection::TlsMode::StartTls,
             spf: None,
             dkim: None,
             dmarc: None,
@@ -89,6 +101,13 @@ impl Default for ServeOptions {
 }
 
 /// Ce que le service a fait.
+///
+/// # LES ÉCOUTES S'ADDITIONNENT, PARCE QU'IL N'Y A QU'UN SERVEUR
+///
+/// Un serveur sert plusieurs ports — le `25`, le `465`, le `587` — et chacun
+/// rend son bilan. Les rendre séparément ferait lire trois lignes pour une
+/// question qui n'en a qu'une : « qu'a fait ce serveur ? ». Voir
+/// [`Stats::plus`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Stats {
     /// Connexions acceptées.
@@ -125,6 +144,53 @@ pub struct Stats {
     /// l'arrêt. Une tentative d'injection le mérite plus qu'un verdict de
     /// signature.
     pub injections: u64,
+}
+
+impl Stats {
+    /// Les deux bilans réunis — celui d'une écoute, et celui des précédentes.
+    ///
+    /// **`saturating_add` PARTOUT** : un compteur qui déborde en silence
+    /// rendrait un bilan plus petit que la réalité, ce qui est la seule façon
+    /// dont un compte peut mentir dans le mauvais sens.
+    #[must_use]
+    pub const fn plus(self, autre: Self) -> Self {
+        Self {
+            accepted: self.accepted.saturating_add(autre.accepted),
+            failed: self.failed.saturating_add(autre.failed),
+            dkim: DkimSums {
+                pass: self.dkim.pass.saturating_add(autre.dkim.pass),
+                fail: self.dkim.fail.saturating_add(autre.dkim.fail),
+                temp_error: self.dkim.temp_error.saturating_add(autre.dkim.temp_error),
+                perm_error: self.dkim.perm_error.saturating_add(autre.dkim.perm_error),
+            },
+            dmarc: DmarcSums {
+                pass: self.dmarc.pass.saturating_add(autre.dmarc.pass),
+                fail: self.dmarc.fail.saturating_add(autre.dmarc.fail),
+                no_policy: self.dmarc.no_policy.saturating_add(autre.dmarc.no_policy),
+                temp_error: self.dmarc.temp_error.saturating_add(autre.dmarc.temp_error),
+                unusable: self.dmarc.unusable.saturating_add(autre.dmarc.unusable),
+                applied: self.dmarc.applied.saturating_add(autre.dmarc.applied),
+            },
+            reports: SpoolTally {
+                reports: self.reports.reports.saturating_add(autre.reports.reports),
+                rows: self.reports.rows.saturating_add(autre.reports.rows),
+                destinations: self
+                    .reports
+                    .destinations
+                    .saturating_add(autre.reports.destinations),
+                refused: self.reports.refused.saturating_add(autre.reports.refused),
+                errors: self.reports.errors.saturating_add(autre.reports.errors),
+            },
+            sends: SendTally {
+                sent: self.sends.sent.saturating_add(autre.sends.sent),
+                rejected: self.sends.rejected.saturating_add(autre.sends.rejected),
+                deferred: self.sends.deferred.saturating_add(autre.sends.deferred),
+                expired: self.sends.expired.saturating_add(autre.sends.expired),
+                unsendable: self.sends.unsendable.saturating_add(autre.sends.unsendable),
+            },
+            injections: self.injections.saturating_add(autre.injections),
+        }
+    }
 }
 
 /// Le compte des verdicts DMARC, sur toute la durée du service.
@@ -347,6 +413,7 @@ where
         let dkim = options.dkim.clone();
         let dmarc = options.dmarc.clone();
         let rapports = options.reports.clone();
+        let mode = options.tls_mode;
 
         tokio::spawn(async move {
             let mut flux = flux;
@@ -364,8 +431,15 @@ where
             // L'ÉCHEC d'une connexion ne regarde qu'elle — le journal viendra
             // avec `air-log`. Ce qu'elle a CONCLU des signatures, en revanche,
             // se rassemble : un verdict qu'on ne rend nulle part ne sert à rien.
-            if let Ok(resume) =
-                serve_connection(&mut flux, &service, &*policy, &mut remise, source_de(pair)).await
+            if let Ok(resume) = crate::connection::serve_connection_with(
+                &mut flux,
+                &service,
+                &*policy,
+                &mut remise,
+                source_de(pair),
+                mode,
+            )
+            .await
             {
                 comptes.ajouter(resume.dkim);
                 comptes.ajouter_dmarc(resume.dmarc);

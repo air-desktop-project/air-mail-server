@@ -87,7 +87,7 @@ mod index;
 
 pub use accounts::{decode_accounts, encode_accounts};
 pub use codec::{
-    Configuration, Dkim, Dmarc, Enforcement, Error, Mtasts, Queue, Relay, Spf,
+    Configuration, Dkim, Dmarc, Enforcement, Error, Listener, Mtasts, Queue, Relay, Spf,
     TRAVERSAL_LIMIT_WORDS, Timeouts, Tls, Tlsrpt, decode, encode,
 };
 pub use index::{decode_index, encode_index};

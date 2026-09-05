@@ -116,6 +116,15 @@ struct Entree {
     /// deux, y compris incohérents entre eux.
     tlsrpt: String,
     remet_tls: bool,
+    /// Les écoutes SMTP et leur mode TLS — DES CHAÎNES LIBRES, y compris vides.
+    ///
+    /// **Une adresse vide fait REFUSER le décodage**, et c'est une propriété
+    /// qu'on éprouve plutôt qu'on suppose : une écoute sans adresse n'est pas
+    /// une écoute, et laisser passer une chaîne vide ferait ouvrir on ne sait
+    /// quoi — ou rien, sans le dire.
+    ecoutes: Vec<(String, bool)>,
+    /// Le TLS est-il implicite sur l'écoute IMAP ?
+    imap_implicite: bool,
 }
 
 fuzz_target!(|entree: Entree| {
@@ -129,6 +138,15 @@ fuzz_target!(|entree: Entree| {
     let original = Configuration {
         domain: entree.domain.clone(),
         listen: entree.listen.clone(),
+        smtp_listeners: entree
+            .ecoutes
+            .iter()
+            .map(|(adresse, implicite)| ams_config::Listener {
+                address: adresse.clone(),
+                implicit_tls: *implicite,
+            })
+            .collect(),
+        imap_implicit_tls: entree.imap_implicite,
         maildir: entree.maildir.clone(),
         hosted: entree.hosted.clone(),
         max_recipients: entree.max_recipients,
