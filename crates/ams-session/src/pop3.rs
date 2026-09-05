@@ -614,7 +614,12 @@ impl<A: Authenticator, M: Mailbox> Session<A, M> {
         };
         if self.auth.authenticate(&identifiants) {
             self.phase = Phase::OpeningMailbox;
-            return self.repondre(Status::Ok, b"", Action::OpenMailbox, false, out);
+            // **RIEN N'EST RÉPONDU ICI**, et c'est tout le correctif : le sort
+            // du `PASS` n'est pas encore connu. La boîte peut être verrouillée
+            // par une autre session, et §4 veut alors un `-ERR` — que
+            // `on_mailbox_opened` écrira. Répondre `+OK` d'avance en ferait DEUX
+            // pour une commande, et RFC 1939 §3 n'en prévoit qu'une.
+            return Ok(self.differer(Action::OpenMailbox));
         }
         // LE REFUS NE DIT PAS CE QUI A MANQUÉ, et le nom est oublié : le pair
         // recommence par `USER`. « Compte inconnu » et « mot de passe faux »
@@ -846,6 +851,29 @@ impl<A: Authenticator, M: Mailbox> Session<A, M> {
             action,
             peer_fault,
         })
+    }
+
+    /// N'émet RIEN, et confie la réponse à l'étape que l'action déclenche.
+    ///
+    /// # UNE COMMANDE, UNE RÉPONSE (RFC 1939 §3)
+    ///
+    /// Les autres actions répondent d'abord et poursuivent ensuite : un `RETR`
+    /// dit `+OK Message follows` PUIS émet le corps, et les deux ne font qu'une
+    /// réponse multiligne. `OpenMailbox` n'est pas de cette sorte — ce qui suit
+    /// n'est pas la suite d'une réponse, c'EST la réponse, et elle peut être un
+    /// refus. Émettre une ligne avant elle en ferait deux.
+    ///
+    /// **Ce que cela coûtait** : tout client conforme lit UNE réponse par
+    /// commande. Le `+OK` de trop le laissait décalé d'un cran pour le reste de
+    /// la session — `poplib` lisait la réponse du `PASS` en guise de `STAT` et
+    /// s'arrêtait sur « non-numeric values ». Autrement dit : POP3 ne servait
+    /// aucun client qui respecte la RFC.
+    const fn differer<'b>(&self, action: Action) -> Turn<'b> {
+        Turn {
+            reply: &[],
+            action,
+            peer_fault: false,
+        }
     }
 
     /// Un refus, qui compte comme une faute du pair (C8).

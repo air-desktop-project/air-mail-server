@@ -3854,6 +3854,94 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
+## POP3 répondait deux fois au `PASS`, et ne servait donc aucun client conforme
+
+Le 2026-09-05, `poplib` — le client POP3 de la bibliothèque standard de Python —
+a été branché sur ce serveur. Sa première commande après l'authentification a
+échoué :
+
+```
+FAUTE STAT -> error_proto: Invalid STAT response data: non-numeric values
+```
+
+`STAT` n'avait rien reçu de mal formé. Il avait reçu **la réponse de la commande
+précédente**. En drainant le tuyau, le compte est net :
+
+```
+USER jean     -> 1 ligne : [b'+OK Send PASS']
+PASS <bon>    -> 2 lignes : [b'+OK', b'+OK Mailbox open']
+```
+
+RFC 1939 §3 : une commande, une réponse. Un client conforme lit une ligne et
+passe à la suivante ; le `+OK` de trop le laissait **décalé d'un cran pour tout
+le reste de la session**. Chaque réponse qu'il croyait lire était celle de la
+commande d'avant. Autrement dit : **POP3 ne servait aucun client qui respecte la
+RFC** — seuls des clients qui drainent le tampon avant chaque commande auraient
+tenu.
+
+### D'où venait la seconde réponse
+
+`on_pass` répondait `+OK` ET demandait l'ouverture :
+
+```rust
+self.phase = Phase::OpeningMailbox;
+return self.repondre(Status::Ok, b"", Action::OpenMailbox, false, out);
+```
+
+La boucle écrit `tour.reply()`, puis exécute l'action — qui appelle
+`on_mailbox_opened`, lequel écrit `+OK Mailbox open`. Deux lignes.
+
+Le `b""` trahit l'intention : on voulait n'émettre rien. Mais `repondre` compose
+toujours une ligne d'état complète, et `+OK` sans texte reste `+OK\r\n`.
+
+**Les autres actions différées, elles, sont justes.** Un `RETR` dit `+OK Message
+follows` PUIS émet le corps : c'est une réponse MULTILIGNE, dont la première
+ligne est l'état. `OpenMailbox` n'est pas de cette sorte — ce qui suit n'est pas
+la suite d'une réponse, c'EST la réponse, et elle peut être un refus (`-ERR
+Mailbox unavailable` quand une autre session tient le verrou). La distinction
+n'avait pas été faite.
+
+### Pourquoi ni la couverture ni l'essai de bout en bout ne l'ont vu
+
+**L'essai unitaire regardait l'action, jamais la réponse.** Il écrivait
+`assert_eq!(tour.action(), Action::OpenMailbox);` et rien sur `tour.reply()`. La
+ligne fautive était donc EXÉCUTÉE — comptée dans les 100 % de C2 — et observée
+par personne. *La couverture mesure ce qui s'exécute, pas ce qu'on observe.*
+
+**L'essai de bout en bout n'employait que `contains`.** Il relève un vrai message
+par POP3 sur TLS, avec `openssl s_client`, et vérifie que la trace contient
+`+OK Mailbox open`, `+OK 1 `, le corps, le terminateur. Tout cela était bien
+présent. Rien n'était aligné. **`contains` ne peut pas voir une réponse de
+trop** : il cherche des présences, et une présence de plus lui ressemble à une
+présence.
+
+### Ce qui a été fait
+
+`on_pass` rend désormais un tour SANS réponse — un `differer(Action)` explicite,
+documenté par ce qu'il évite — et `on_mailbox_opened` écrit l'unique réponse,
+`+OK` ou `-ERR` selon que la boîte s'ouvre.
+
+Deux essais, à deux niveaux, et **tous deux échouent sur l'ancien code** :
+
+1. `un_pass_ne_repond_qu_une_fois` (session) : `PASS` rend une réponse VIDE, et
+   la réponse suivante est celle de l'ouverture — vérifié dans les deux cas,
+   boîte ouvrable et boîte indisponible ;
+2. `un_client_pop3_releve_puis_efface_son_courrier` (bout en bout) **COMPTE
+   désormais** les lignes d'état de la trace : six commandes, six réponses. Sept
+   avant le correctif.
+
+Vérifié contre le serveur vivant : `poplib` déroule maintenant `STAT`, `LIST`,
+`UIDL`, `TOP`, `RETR`, `NOOP`, `RSET`, `DELE` et `QUIT` sans une seule
+désynchronisation.
+
+### La leçon
+
+Les deux barrières qui auraient dû voir ce défaut regardaient à côté, chacune à
+sa manière. L'une a exécuté la ligne sans lire ce qu'elle produisait ; l'autre a
+lu ce qu'elle produisait sans compter. **Un protocole se juge sur un compte, pas
+sur une présence** — et la seule façon fiable de le savoir reste de brancher un
+pair qui ne sait rien de nous.
+
 ## La CI était rouge depuis seize poussées, et on la déclarait verte
 
 Le 2026-09-05, en préparant un commit, six fichiers modifiés sont apparus que

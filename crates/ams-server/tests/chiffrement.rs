@@ -742,6 +742,29 @@ fn un_client_pop3_releve_puis_efface_son_courrier() {
         ),
     );
     assert!(vu.contains("+OK Mailbox open"), "connexion refusée.\n{vu}");
+
+    // ── UNE COMMANDE, UNE RÉPONSE (RFC 1939 §3) ─────────────────────────────
+    //
+    // ON COMPTE, PARCE QUE `contains` NE VOIT PAS UNE RÉPONSE DE TROP. Les
+    // assertions de cet essai cherchaient toutes une PRÉSENCE, et le serveur
+    // émettait deux réponses au `PASS` — un `+OK` avant d'ouvrir la boîte, puis
+    // `+OK Mailbox open`. Tout était présent, rien n'était aligné, et tout
+    // client conforme se retrouvait décalé d'un cran dès l'authentification.
+    //
+    // Six commandes sont envoyées ; `RETR` et `UIDL` sont MULTILIGNES et leur
+    // corps ne commence pas par un indicateur d'état en début de ligne, si bien
+    // que compter les lignes qui commencent par `+OK` ou `-ERR` compte
+    // exactement les réponses. La bannière et le `+OK` du `STLS`, eux, ne sont
+    // pas comptés : `openssl s_client -starttls pop3` les consomme lui-même
+    // pour monter le chiffrement, et ils n'atteignent pas sa sortie.
+    let reponses = vu
+        .lines()
+        .filter(|ligne| ligne.starts_with("+OK") || ligne.starts_with("-ERR"))
+        .count();
+    assert_eq!(
+        reponses, 6,
+        "six réponses attendues, une par commande.\n{vu}"
+    );
     assert!(
         vu.contains("+OK 1 "),
         "STAT n'a pas compté le message.\n{vu}"

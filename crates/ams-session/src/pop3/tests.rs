@@ -168,6 +168,50 @@ fn stls_puis_user_et_pass_ouvrent_la_session() {
     assert!(session.is_open());
 }
 
+/// UN `PASS` NE RÉPOND QU'UNE FOIS (RFC 1939 §3).
+///
+/// # Ce que cet essai regarde, et que les autres ne regardaient pas
+///
+/// L'essai voisin vérifiait `tour.action()` après un `PASS`, jamais
+/// `tour.reply()`. Le `+OK` que la session émettait AVANT d'ouvrir la boîte
+/// était donc exécuté, compté dans la couverture, et observé par personne :
+/// deux réponses partaient pour une commande.
+///
+/// Un client conforme lit UNE réponse par commande. Le décalage le suivait
+/// jusqu'à la fin de la session — `poplib` lisait la réponse du `PASS` en guise
+/// de `STAT` et s'arrêtait sur « non-numeric values ». **La couverture mesure ce
+/// qui s'exécute, pas ce qu'on observe.**
+#[test]
+fn un_pass_ne_repond_qu_une_fois() {
+    for (ouvrable, attendue) in [
+        (true, "+OK Mailbox open\r\n"),
+        // §4 : une boîte que l'on ne peut pas ouvrir laisse le pair en
+        // AUTHORIZATION, et c'est CE refus-là qui est la réponse au `PASS`.
+        (false, "-ERR Mailbox unavailable\r\n"),
+    ] {
+        let mut session = session();
+        session.on_tls_established();
+        let mut tampon = [0_u8; 512];
+        jouer(&mut session, b"USER jean\r\n");
+
+        let tour = session
+            .handle(b"PASS ouvre-toi\r\n", &mut tampon)
+            .expect("réponse");
+        assert_eq!(tour.action(), Action::OpenMailbox);
+        assert!(
+            tour.reply().is_empty(),
+            "`PASS` a émis {:?} avant que le sort de la boîte soit connu",
+            std::string::String::from_utf8_lossy(tour.reply())
+        );
+
+        let boite = ouvrable.then(|| Boite::nouvelle(&[10]));
+        let tour = session
+            .on_mailbox_opened(boite, &mut tampon)
+            .expect("ouverture");
+        assert_eq!(std::string::String::from_utf8_lossy(tour.reply()), attendue);
+    }
+}
+
 #[test]
 fn la_poignee_de_main_efface_ce_qui_a_ete_dit_en_clair() {
     // RFC 2595 §4 : un `USER` d'avant le chiffrement a pu être dit par
