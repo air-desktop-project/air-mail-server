@@ -238,7 +238,19 @@ pub struct Resolved<'o> {
     /// Ce qu'elle en fait.
     pub method: Method,
     /// Ce qu'il faut pour y avoir droit, ou `None` si rien n'est exigé.
+    ///
+    /// **QUAND LA MÉTHODE N'EST PAS SERVIE, C'EST LA PORTÉE DE LECTURE.** Un
+    /// `405` nomme la ressource et énumère ses méthodes dans `Allow` : c'est une
+    /// confidence sur la ressource, et le droit d'y avoir part est celui de la
+    /// lire. Exiger la portée de la méthode DEMANDÉE — écrire, pour un `PATCH` —
+    /// rendrait `404` à un lecteur légitime qui s'est trompé de verbe, alors
+    /// qu'il peut déjà lire la ressource.
     pub scope: Option<Scope>,
+    /// Cette ressource sert-elle cette méthode ?
+    ///
+    /// **C'EST L'APPELANT QUI EN TIRE LE `405`, ET APRÈS L'AUTORISATION.** Voir
+    /// [`resolve`] : le rendre ici le rendait avant, et c'était une fuite.
+    pub serves: bool,
 }
 
 /// Résout une requête.
@@ -249,12 +261,28 @@ pub struct Resolved<'o> {
 ///
 /// [`split_query`]: crate::split_query
 ///
+/// # LE VERBE NE SE JUGE PAS ICI, ET C'EST UN CORRECTIF
+///
+/// Cette fonction rendait `MethodNotAllowed` — donc un `405` — avant que
+/// personne n'ait vérifié le moindre jeton. [`Reason::status`] déclare pourtant,
+/// onze lignes plus bas dans le même `match`, que « cela n'existe pas » et
+/// « vous n'avez pas le droit de savoir » se répondent PAREIL, « la différence
+/// entre les deux serait l'information elle-même ».
+///
+/// Le `405` rendait cette différence, et à qui n'avait rien présenté :
+/// `PATCH /v1/bans` répondait `405` avec un `Allow`, `PATCH /v1/inconnu`
+/// répondait `404`. L'arbre entier des ressources s'énumérait ainsi, verbe par
+/// verbe, sans jeton — et un jeton de courrier y lisait la surface
+/// d'administration qu'il n'ouvre pas.
+///
+/// On rend donc [`Resolved::serves`], et **c'est l'appelant qui en tire le `405`
+/// une fois l'autorisation acquise**.
+///
 /// # Errors
 ///
 /// [`Reason::BadPath`] et [`Reason::PathTooLong`] pour ce que le chemin ne peut
 /// pas être ; [`Reason::NoSuchResource`] pour un chemin bien formé qui ne
-/// désigne rien ; [`Reason::MethodNotAllowed`] pour une ressource qui existe
-/// mais pas avec ce verbe.
+/// désigne rien.
 pub fn resolve<'o>(
     method: Method,
     chemin: &[u8],
@@ -267,13 +295,14 @@ pub fn resolve<'o>(
         return Err(Error::new(Reason::NoSuchResource));
     }
     let resource = designer(&segments)?;
-    if !resource.serves(method) {
-        return Err(Error::new(Reason::MethodNotAllowed));
-    }
+    let serves = resource.serves(method);
     Ok(Resolved {
         resource,
         method,
-        scope: resource.scope(method),
+        // Voir [`Resolved::scope`] : ce qu'il faut pour APPRENDRE qu'un verbe
+        // n'est pas servi, c'est ce qu'il faut pour lire la ressource.
+        scope: resource.scope(if serves { method } else { Method::Get }),
+        serves,
     })
 }
 

@@ -13,14 +13,17 @@ use crate::scope::{Area, Rights, Scope};
 /// Un tampon confortable.
 const PLACE: usize = 1_024;
 
-/// Résout, et rend la ressource.
-fn ou(method: Method, chemin: &[u8]) -> Result<Resource<'static>, Reason> {
+/// Résout, et rend tout ce que le routage a décidé.
+fn resolu(method: Method, chemin: &[u8]) -> Result<super::Resolved<'static>, Reason> {
     // La sortie survit à l'appel : on la fuit exprès, pour que les emprunts
     // rendus vivent aussi longtemps que le test.
     let place = std::boxed::Box::leak(std::boxed::Box::new([0_u8; PLACE]));
-    resolve(method, chemin, place)
-        .map(|resolu| resolu.resource)
-        .map_err(|e| e.reason())
+    resolve(method, chemin, place).map_err(|e| e.reason())
+}
+
+/// Résout, et rend la ressource.
+fn ou(method: Method, chemin: &[u8]) -> Result<Resource<'static>, Reason> {
+    resolu(method, chemin).map(|resolu| resolu.resource)
 }
 
 /// Chaque ressource se désigne par son chemin.
@@ -135,18 +138,33 @@ fn la_version_est_obligatoire() {
     }
 }
 
-/// **UNE RESSOURCE QUI EXISTE MAIS PAS AVEC CE VERBE REND 405, ET NON 404**
-/// (§15.5.6) : sinon le client réessaie les deux, et double le trafic pour rien.
+/// **LE MAUVAIS VERBE SE DIT, MAIS CE N'EST PLUS ICI QU'ON LE DIT.**
+///
+/// §15.5.6 veut qu'une ressource qui existe sans servir ce verbe rende 405 et
+/// non 404 — sinon le client réessaie les deux et double le trafic pour rien.
+/// Mais rendre ce 405 DEPUIS LE ROUTAGE le rendait avant toute autorisation, et
+/// `Reason::status` déclare que « cela n'existe pas » et « vous n'avez pas le
+/// droit de savoir » se répondent PAREIL. Le 405 rendait cette différence à qui
+/// n'avait rien présenté.
+///
+/// Le routage rend donc `serves`, et la session en tire le 405 UNE FOIS LE JETON
+/// VÉRIFIÉ — c'est éprouvé dans `ams-session`, sur le fil.
 #[test]
-fn le_mauvais_verbe_se_distingue_du_mauvais_chemin() {
-    assert_eq!(
-        ou(Method::Delete, b"/v1/health"),
-        Err(Reason::MethodNotAllowed)
-    );
-    assert_eq!(
-        ou(Method::Get, b"/v1/submissions"),
-        Err(Reason::MethodNotAllowed)
-    );
+fn le_mauvais_verbe_se_dit_sans_faire_echouer_le_routage() {
+    for (verbe, chemin) in [
+        (Method::Delete, &b"/v1/health"[..]),
+        (Method::Get, b"/v1/submissions"),
+    ] {
+        let resolu = resolu(verbe, chemin).expect("le chemin désigne une ressource");
+        assert!(!resolu.serves, "{chemin:?} ne sert pas {verbe:?}");
+        // **ET LA PORTÉE EXIGÉE EST CELLE DE LA LECTURE** : apprendre qu'un
+        // verbe n'est pas servi, c'est apprendre quelque chose de la ressource.
+        assert_eq!(
+            resolu.scope,
+            resolu.resource.scope(Method::Get),
+            "{chemin:?} n'exige pas la portée de lecture"
+        );
+    }
     // Et un chemin qui ne désigne rien reste un 404, quel que soit le verbe.
     assert_eq!(
         ou(Method::Delete, b"/v1/inconnu"),
@@ -159,13 +177,11 @@ fn le_mauvais_verbe_se_distingue_du_mauvais_chemin() {
 #[test]
 fn un_secret_ne_se_lit_jamais() {
     for lecture in [Method::Get, Method::Head] {
-        assert_eq!(
-            ou(lecture, b"/v1/accounts/marc/password"),
-            Err(Reason::MethodNotAllowed),
-            "{lecture:?}"
-        );
+        let resolu = resolu(lecture, b"/v1/accounts/marc/password").expect("désignée");
+        assert!(!resolu.serves, "{lecture:?} ne rend jamais une empreinte");
     }
-    assert!(ou(Method::Put, b"/v1/accounts/marc/password").is_ok());
+    let pose = resolu(Method::Put, b"/v1/accounts/marc/password").expect("désignée");
+    assert!(pose.serves, "`PUT` pose le secret");
 }
 
 /// **`OPTIONS` S'APPLIQUE À TOUTE RESSOURCE QUI EXISTE** (§9.3.7) : c'est le

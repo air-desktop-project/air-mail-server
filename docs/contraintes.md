@@ -3854,6 +3854,99 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
+## Un `405` rendait ce qu'un `404` était là pour cacher
+
+`crates/ams-api/src/error.rs`, dans la table qui traduit une raison en code
+d'état :
+
+```rust
+// **LA MÊME RÉPONSE POUR « CELA N'EXISTE PAS » ET « VOUS N'AVEZ PAS
+// LE DROIT DE SAVOIR »** : la différence entre les deux serait
+// l'information elle-même.
+Self::NoSuchResource | Self::Forbidden => StatusCode::NOT_FOUND,
+MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
+```
+
+**Les deux lignes sont voisines, et la seconde défait la première.**
+`MethodNotAllowed` était rendu par `resolve()` — le routage — c'est-à-dire
+**avant que personne n'ait vérifié le moindre jeton**. Mesuré sur le serveur
+vivant, avec un jeton qui n'ouvre que le courrier et la supervision :
+
+| requête | avant | ce que cela apprend |
+|---|---|---|
+| `GET /v1/bans` | 404 | rien — la règle tient |
+| `PATCH /v1/bans` | **405** + `Allow` | la ressource EXISTE, et voici ses verbes |
+| `GET /v1/inconnu` | 404 | rien |
+| `PATCH /v1/inconnu` | 404 | rien |
+
+Un porteur de jeton de courrier lisait ainsi toute la surface d'administration
+qu'il n'ouvre pas — et sans aucun jeton, `DELETE /v1/health` rendait `405` là où
+`DELETE /v1/inconnu` rendait `404`. **L'arbre entier des ressources
+s'énumérait, verbe par verbe.** `Allow` nommait par-dessus le marché les
+méthodes servies.
+
+### Un essai affirmait la fuite
+
+Le plus instructif est le nom du contrôle qui a échoué quand la correction est
+tombée :
+
+```
+le_mauvais_verbe_se_distingue_du_mauvais_chemin
+```
+
+Il assertait que `resolve()` rend `MethodNotAllowed` — c'est-à-dire, en toutes
+lettres, la distinction que `Reason::status` s'interdit onze lignes plus bas. Son
+intention était bonne et reste servie : §15.5.6 veut qu'un client apprenne qu'il
+s'est trompé de verbe, sinon il réessaie les deux et double le trafic. **Ce qui
+manquait, c'est de dire À QUI on l'apprend.** Une règle écrite sans son
+bénéficiaire est une règle qui s'applique à tout le monde, l'attaquant compris.
+
+### Ce qui a été fait
+
+`resolve()` ne rend plus `MethodNotAllowed` : il rend `Resolved::serves`, et
+**c'est la session qui en tire le `405`, une fois le jeton vérifié**. Ce qui
+dépend de la ressource passe désormais après l'autorisation — le verbe, puis le
+type du corps, qui distinguait lui aussi `/v1/submissions` du néant par un `400`.
+
+**La portée exigée pour apprendre qu'un verbe n'est pas servi est celle de la
+LECTURE**, et non celle du verbe demandé. Exiger la portée d'écriture pour un
+`PATCH` rendrait `404` à un lecteur légitime qui s'est trompé de verbe, alors
+qu'il peut déjà lire la ressource : ce serait cacher à quelqu'un ce qu'il voit
+déjà.
+
+`/v1/tokens` est le seul cas particulier, et il est traité comme tel : son
+autorisation ne peut rien retarder puisqu'elle n'existe pas. Son verbe et le
+type de son corps s'y vérifient donc immédiatement — **son existence n'est pas
+le secret que le reste de cette fonction protège**, c'est la porte publique.
+
+Après correction, le même tableau ne distingue plus rien : `PATCH /v1/bans` et
+`PATCH /v1/inconnu` rendent le MÊME document, octet pour octet. Et le `405`
+légitime demeure : sur une ressource que le jeton peut lire, `DELETE /v1/health`
+rend bien `405`.
+
+### Ce qui reste, et qui est dit plutôt que tu
+
+**Sans aucun jeton, `401` distingue encore une ressource qui existe d'un chemin
+qui n'existe pas** — `GET /v1/health` rend `401`, `GET /v1/inconnu` rend `404`.
+Ce n'est pas la propriété que ce code déclare : celle-ci porte sur
+`NoSuchResource` contre `Forbidden`, c'est-à-dire sur ce qu'un jeton VALIDE
+apprend hors de sa portée. Répondre `404` à un client anonyme lui retirerait le
+`WWW-Authenticate` par lequel il apprend comment s'authentifier, pour cacher des
+chemins que le code source publie. **C'est une décision, et elle est écrite ici
+plutôt que laissée à deviner.**
+
+### La forme, pour la huitième fois
+
+Une prose qui sait ce que le code ne fait pas. Mais celle-ci bat les sept
+précédentes sur un point : **la règle et sa violation sont dans le même `match`,
+à onze lignes l'une de l'autre.** Ce n'est pas un commentaire qui a vieilli loin
+de son code — c'est une règle qu'on lit en écrivant la ligne qui la casse.
+
+Ce que cela dit d'une revue : la proximité ne suffit pas. Une propriété de
+sécurité tient à l'ORDRE des contrôles, et l'ordre ne se lit pas dans la table
+qui les nomme — il se lit dans la fonction qui les appelle, ailleurs, dans une
+autre crate.
+
 ## POP3 répondait deux fois au `PASS`, et ne servait donc aucun client conforme
 
 Le 2026-09-05, `poplib` — le client POP3 de la bibliothèque standard de Python —

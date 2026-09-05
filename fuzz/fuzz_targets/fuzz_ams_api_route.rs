@@ -31,13 +31,24 @@
 //!    décodé doit redonner la même ressource. Sans elle, il existerait un nom
 //!    que le serveur accepte mais ne sait pas désigner, et les deux moitiés du
 //!    serveur ne parleraient plus du même objet.
-//! 4. **UNE RESSOURCE SERT CE QU'ELLE ANNONCE, ET RIEN D'AUTRE** : `resolve` ne
-//!    réussit que pour une méthode que `allowed` nomme, ou `OPTIONS`.
+//! 4. **UNE RESSOURCE SERT CE QU'ELLE ANNONCE, ET RIEN D'AUTRE** : `serves` dit
+//!    exactement ce que `allowed` nomme, plus `OPTIONS`.
+//!
+//!    **LE ROUTAGE N'ÉCHOUE PLUS SUR LE VERBE**, et c'est une propriété de
+//!    sécurité : rendre `405` depuis ici le rendait AVANT toute vérification de
+//!    jeton, ce qui distinguait une ressource qui existe d'un chemin qui n'existe
+//!    pas — la distinction même que `Reason::status` s'interdit. C'est la session
+//!    qui en tire le `405`, une fois l'autorisation acquise.
 //! 5. **TOUTE RESSOURCE EXIGE UNE PORTÉE, SAUF L'ÉCHANGE DE JETON** — c'est là
 //!    qu'on en obtient une, et c'est la seule.
 //! 6. **LA LECTURE NE DONNE JAMAIS L'ÉCRITURE** : une méthode sûre n'exige
-//!    jamais un droit d'écriture, et une méthode qui modifie l'exige toujours.
+//!    jamais un droit d'écriture, et une méthode servie qui modifie l'exige
+//!    toujours.
 //! 7. **LE SECRET D'UN COMPTE NE SE LIT PAR AUCUNE MÉTHODE.**
+//! 9. **UN VERBE NON SERVI N'EXIGE JAMAIS PLUS QUE LA LECTURE** : apprendre
+//!    qu'une ressource ne sert pas ce verbe, c'est apprendre quelque chose
+//!    d'elle, et le droit d'y avoir part est celui de la lire — jamais celui de
+//!    l'écrire, qu'un lecteur légitime n'a pas.
 //! 8. **LA CHAÎNE DE REQUÊTE NE CHANGE JAMAIS LA RESSOURCE** : ce qui suit le
 //!    `?` est hors du chemin, et l'y laisser entrer ferait d'un paramètre un
 //!    nom de boîte.
@@ -101,12 +112,22 @@ fuzz_target!(|entree: Entree| {
     let resource = resolu.resource;
 
     // PROPRIÉTÉ 4 : la ressource sert ce qu'elle annonce, et rien d'autre.
-    assert!(
-        resource.allowed().contains(&method) || matches!(method, Method::Options),
-        "{resource:?} a servi {method:?} sans l'annoncer"
+    let annonce = resource.allowed().contains(&method) || matches!(method, Method::Options);
+    assert_eq!(
+        resolu.serves, annonce,
+        "{resource:?} et {method:?} : `serves` ne dit pas ce qu'`allowed` annonce"
     );
-    assert!(resource.serves(method));
+    assert_eq!(resolu.serves, resource.serves(method));
     assert_eq!(resolu.method, method);
+
+    // PROPRIÉTÉ 9 : un verbe non servi n'exige jamais plus que la lecture.
+    if !resolu.serves {
+        assert_eq!(
+            resolu.scope,
+            resource.scope(Method::Get),
+            "{resource:?} et {method:?} : un verbe non servi exige autre chose que la lecture"
+        );
+    }
 
     // PROPRIÉTÉ 5 : toute ressource exige une portée, sauf l'échange de jeton.
     match resolu.scope {
@@ -126,9 +147,16 @@ fuzz_target!(|entree: Entree| {
             // La révocation de son propre jeton n'exige rien de plus que de
             // l'avoir : c'est la seule portée vide qui soit légitime.
             let vide = portee == Scope::none();
+            // **LE VERBE NE COMMANDE LE DROIT QUE S'IL EST SERVI.** Sinon la
+            // portée est celle de la LECTURE, et c'est la propriété 9 qui la
+            // juge — un `PATCH` qu'on ne sert pas n'exige pas d'écrire.
             assert!(
-                vide || ecrit == modifie(method),
+                vide || !resolu.serves || ecrit == modifie(method),
                 "{resource:?} et {method:?} : le droit ne suit pas le verbe"
+            );
+            assert!(
+                resolu.serves || !ecrit,
+                "{resource:?} et {method:?} : un verbe non servi exige d'écrire"
             );
             // Une portée n'ouvre jamais deux domaines à la fois.
             let domaines = Area::TOUS
@@ -142,7 +170,7 @@ fuzz_target!(|entree: Entree| {
     // PROPRIÉTÉ 7 : le secret d'un compte ne se lit par aucune méthode.
     if matches!(resource, Resource::AccountPassword { .. }) {
         assert!(
-            !matches!(method, Method::Get | Method::Head),
+            !resolu.serves || !matches!(method, Method::Get | Method::Head),
             "une empreinte s'est laissé lire"
         );
     }
@@ -188,10 +216,11 @@ fuzz_target!(|entree: Entree| {
         assert!(
             matches!(
                 faute.reason(),
+                // `MethodNotAllowed` N'EN EST PLUS : le routage ne juge plus le
+                // verbe, et c'est la session qui le fait après l'autorisation.
                 Reason::BadPath
                     | Reason::PathTooLong
                     | Reason::NoSuchResource
-                    | Reason::MethodNotAllowed
                     | Reason::BufferTooSmall
             ),
             "une faute inattendue : {faute:?}"

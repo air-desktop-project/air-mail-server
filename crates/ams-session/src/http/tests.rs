@@ -442,6 +442,52 @@ fn l_echange_d_identifiants_n_exige_pas_de_jeton() {
     );
 }
 
+/// **LA PORTE PUBLIQUE GARDE SON VERBE ET SON TYPE**, bien qu'elle n'exige
+/// aucune portée.
+///
+/// `/v1/tokens` est la seule ressource que l'on atteigne sans rien présenter :
+/// son autorisation ne peut donc rien retarder. Les deux contrôles que les
+/// autres ressources font APRÈS le jeton — le verbe, puis le type du corps —
+/// doivent y être faits quand même, et sans rien divulguer : l'existence de
+/// cette porte-là n'est pas un secret.
+///
+/// **SANS LE PREMIER, UN `GET /v1/tokens` ENTRERAIT DANS L'ÉCHANGE** au lieu
+/// d'être refusé.
+#[test]
+fn la_porte_publique_garde_son_verbe_et_son_type() {
+    let session = une_session();
+
+    // Un verbe que cette ressource ne sert pas.
+    let champs = std::vec![
+        (&b":method"[..], &b"GET"[..]),
+        (&b":scheme"[..], &b"https"[..]),
+        (&b":authority"[..], &b"exemple.fr"[..]),
+        (&b":path"[..], &b"/v1/tokens"[..]),
+    ];
+    let tete = entete(&champs);
+    let mut place = [0_u8; PLACE];
+    let tour = session.request(&tete, &[], MAINTENANT, &mut place);
+    assert_eq!(tour.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+    // Un corps qui ne dit pas ce que cette ressource sait lire.
+    let champs = std::vec![
+        (&b":method"[..], &b"POST"[..]),
+        (&b":scheme"[..], &b"https"[..]),
+        (&b":authority"[..], &b"exemple.fr"[..]),
+        (&b":path"[..], &b"/v1/tokens"[..]),
+        (&b"content-type"[..], &b"message/rfc822"[..]),
+    ];
+    let tete = entete(&champs);
+    let mut place = [0_u8; PLACE];
+    let tour = session.request(
+        &tete,
+        br#"{"login":"marc","password":"secret"}"#,
+        MAINTENANT,
+        &mut place,
+    );
+    assert_eq!(tour.status(), StatusCode::BAD_REQUEST);
+}
+
 /// Un corps d'échange mal formé se refuse comme un mauvais mot de passe.
 #[test]
 fn un_corps_d_echange_mal_forme_se_refuse_pareil() {

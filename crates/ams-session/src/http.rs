@@ -349,21 +349,44 @@ impl Http {
             Err(faute) => return Err((faute.reason(), place_de_la_reponse)),
         };
 
-        // 5. Le type du corps, maintenant qu'on sait ce qu'il alimente.
-        if let Err(raison) = verifier_le_type(tete, corps, resolu.resource) {
-            return Err((raison, place_de_la_reponse));
-        }
-
-        // 6. L'autorisation.
+        // 5. L'AUTORISATION, ET ELLE PASSE AVANT TOUT CE QUI DÉPEND DE LA
+        //    RESSOURCE. Un `405` nomme la ressource et énumère ses méthodes ; un
+        //    `400` sur le type d'un corps dit qu'on a reconnu le chemin. Les
+        //    rendre avant le jeton donnait à n'importe qui de quoi énumérer
+        //    l'arbre entier, verbe par verbe — alors que `Reason::status`
+        //    répond exprès la MÊME chose à « cela n'existe pas » et à « vous
+        //    n'avez pas le droit de savoir ». Tout ce qui distingue les deux
+        //    attend donc ici.
         let Some(voulue) = resolu.scope else {
             // **LA SEULE RESSOURCE QUI N'EXIGE AUCUNE PORTÉE** est celle où l'on
-            // en obtient une.
+            // en obtient une. Son verbe se juge quand même : sans cela, un
+            // `GET /v1/tokens` entrerait dans l'échange de jeton.
+            if !resolu.serves {
+                return Err((Reason::MethodNotAllowed, place_de_la_reponse));
+            }
+            // **LE TYPE DU CORPS SE VÉRIFIE ICI AUSSI**, et il n'y a rien à
+            // cacher en le faisant : cette ressource-ci est la porte publique,
+            // celle qu'on atteint sans rien présenter. Son existence n'est pas
+            // le secret que le reste de cette fonction protège.
+            if let Err(raison) = verifier_le_type(tete, corps, resolu.resource) {
+                return Err((raison, place_de_la_reponse));
+            }
             return echanger_un_jeton(self.alt_svc(), corps, place_de_la_reponse);
         };
         let jeton = match self.authentifier(tete, maintenant, voulue, place_du_jeton) {
             Ok(jeton) => jeton,
             Err(raison) => return Err((raison, place_de_la_reponse)),
         };
+
+        // 6. Le verbe, maintenant qu'on a le droit d'apprendre qu'il ne va pas.
+        if !resolu.serves {
+            return Err((Reason::MethodNotAllowed, place_de_la_reponse));
+        }
+
+        // 7. Le type du corps, maintenant qu'on sait ce qu'il alimente.
+        if let Err(raison) = verifier_le_type(tete, corps, resolu.resource) {
+            return Err((raison, place_de_la_reponse));
+        }
 
         Ok(Turn {
             status: StatusCode::OK,

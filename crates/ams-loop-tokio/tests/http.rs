@@ -496,3 +496,106 @@ async fn un_preambule_invalide_compte_pour_le_videur() {
     let _ = tache.await;
     let _ = std::fs::remove_dir_all(&repertoire);
 }
+
+/// **UN JETON N'APPREND RIEN DES RESSOURCES QU'IL N'OUVRE PAS.**
+///
+/// # Ce que ce contrôle garde, et ce qu'il a coûté de ne pas l'avoir
+///
+/// `Reason::status` répond exprès la MÊME chose à « cela n'existe pas » et à
+/// « vous n'avez pas le droit de savoir » : « la différence entre les deux
+/// serait l'information elle-même ». Onze lignes plus bas dans le même `match`,
+/// `MethodNotAllowed` rendait un `405` — et le routage le rendait AVANT toute
+/// vérification de jeton.
+///
+/// Un porteur de jeton de courrier lisait donc la surface d'administration
+/// qu'il n'ouvre pas : `PATCH /v1/bans` rendait `405` avec un `Allow`, quand
+/// `PATCH /v1/inconnu` rendait `404`. L'arbre entier s'énumérait verbe par
+/// verbe.
+///
+/// **ET LE `405` LÉGITIME EST GARDÉ** : sur une ressource que ce jeton PEUT
+/// lire, §15.5.6 veut qu'un mauvais verbe se distingue d'un mauvais chemin,
+/// sinon le client réessaie les deux.
+#[tokio::test]
+async fn un_jeton_n_apprend_rien_des_ressources_hors_de_sa_portee() {
+    let repertoire = std::env::temp_dir().join(format!("ams-http-portee-{}", std::process::id()));
+    std::fs::create_dir_all(&repertoire).expect("répertoire temporaire");
+    let Some((cert, cle)) = certificat_pem(&repertoire) else {
+        let _ = std::fs::remove_dir_all(&repertoire);
+        eprintln!("SAUTÉ : `openssl` n'a pas su fabriquer de certificat.");
+        return;
+    };
+    let (adresse, arret, tache) = ecoute(&cert, &cle).await;
+
+    let connecteur = tokio_rustls::TlsConnector::from(client_tls(&[b"h2"]));
+    let brut = tokio::net::TcpStream::connect(adresse)
+        .await
+        .expect("connexion");
+    let nom = rustls::pki_types::ServerName::try_from("localhost").expect("un nom");
+    let mut flux = connecteur
+        .connect(nom, brut)
+        .await
+        .expect("poignée de main");
+
+    let mut sortie = Vec::from(PREAMBULE);
+    sortie.extend_from_slice(&entete(0, 0x04, 0x00, 0));
+    sortie.extend_from_slice(&requete(
+        1,
+        b"POST",
+        b"/v1/tokens",
+        None,
+        br#"{"login":"marc","password":"secret"}"#,
+    ));
+    flux.write_all(&sortie).await.expect("écriture");
+    let corps = attendre_un_corps(&mut flux).await.expect("une réponse");
+    let texte = String::from_utf8(corps).expect("de l'UTF-8");
+    let debut = texte.find(':').expect("un premier champ").saturating_add(2);
+    let fin = texte
+        .get(debut..)
+        .and_then(|reste| reste.find('"'))
+        .expect("une fin de chaîne")
+        .saturating_add(debut);
+    // Ce jeton n'ouvre que le courrier et la supervision — jamais
+    // l'administration. Voir l'authentificateur d'essai en tête de ce fichier.
+    let jeton = texte[debut..fin].to_string();
+
+    let dire = |rang: u32, methode: &[u8], chemin: &[u8]| {
+        requete(rang, methode, chemin, Some(&jeton), &[])
+    };
+
+    // ── UNE RESSOURCE D'ADMINISTRATION, ET UN CHEMIN QUI N'EXISTE PAS ───────
+    flux.write_all(&dire(3, b"PATCH", b"/v1/bans"))
+        .await
+        .expect("écriture");
+    let hors_portee = attendre_un_corps(&mut flux).await.expect("une réponse");
+    flux.write_all(&dire(5, b"PATCH", b"/v1/inconnu"))
+        .await
+        .expect("écriture");
+    let inexistant = attendre_un_corps(&mut flux).await.expect("une réponse");
+
+    assert_eq!(
+        String::from_utf8_lossy(&hors_portee),
+        String::from_utf8_lossy(&inexistant),
+        "une ressource hors portée doit répondre EXACTEMENT comme un chemin qui \
+         n'existe pas — sinon la différence est l'information"
+    );
+    assert!(
+        String::from_utf8_lossy(&hors_portee).contains(r#""status":404"#),
+        "{}",
+        String::from_utf8_lossy(&hors_portee)
+    );
+
+    // ── ET LE `405` LÉGITIME, SUR CE QUE CE JETON PEUT LIRE ─────────────────
+    flux.write_all(&dire(7, b"DELETE", b"/v1/health"))
+        .await
+        .expect("écriture");
+    let mauvais_verbe = attendre_un_corps(&mut flux).await.expect("une réponse");
+    let texte = String::from_utf8_lossy(&mauvais_verbe);
+    assert!(
+        texte.contains(r#""status":405"#),
+        "un lecteur légitime doit apprendre que le verbe ne va pas : {texte}"
+    );
+
+    let _ = arret.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&repertoire);
+}
