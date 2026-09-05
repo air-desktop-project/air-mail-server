@@ -32,6 +32,41 @@ chose à lire**, et elles disent ce qui manque plutôt que de le taire.
 
 ---
 
+## En un geste, si vous préférez
+
+```sh
+git clone https://github.com/air-desktop-project/air-mail-server
+cd air-mail-server
+sudo ./scripts/installer.sh
+```
+
+Il fait les gestes MÉCANIQUES des sections 1, 2, 6 et 7 : construire, le compte
+Unix, l'arborescence et ses permissions, les binaires, l'unité systemd, et la
+table du pare-feu ÉCRITE dans un fichier.
+
+**Il n'écrit pas la configuration et n'ajoute aucun compte** — ces deux-là
+demandent un domaine et des mots de passe, c'est-à-dire des décisions. Il
+imprime les commandes exactes en terminant.
+
+**Il n'applique aucune règle de pare-feu.** Poser des règles sur une machine
+distante est précisément ce qui peut vous couper de la session par laquelle vous
+lui parlez. Il écrit la table, vous la relisez, vous la chargez.
+
+Pour voir ce qu'il ferait sans qu'il touche à rien :
+
+```sh
+./scripts/installer.sh --racine /tmp/essai
+```
+
+`--racine` préfixe TOUT chemin écrit, à la façon d'un `DESTDIR`. C'est ainsi que
+`scripts/check-installation.sh` le fait tourner à chaque poussée — arborescence,
+permissions, validité de l'unité, idempotence — plutôt que de le relire.
+
+Les sections qui suivent décrivent les mêmes gestes à la main, et disent
+pourquoi chacun.
+
+---
+
 ## 1. Construire
 
 La chaîne d'outils est épinglée à une version exacte (`rust-toolchain.toml`), et
@@ -289,6 +324,10 @@ et n'a aucun moyen de s'en apercevoir.
 
 ## 7. L'unité systemd
 
+**Elle est écrite par `scripts/installer.sh`**, et la voici telle qu'il la pose.
+Les deux textes sont identiques, et c'est le script qui fait foi : deux copies
+d'un même fichier finissent par diverger, et celle qui TOURNE doit gagner.
+
 ```ini
 [Unit]
 Description=air-mail-server
@@ -475,7 +514,9 @@ air-mail-admin summary /var/lib/air-mail/maildir/jean
   compte.
 - **Le 995 ne peut pas être servi**, et le 143 ne peut pas l'être en même temps
   que le 993 : voir le §6.
-- **Il n'y a pas de paquet**, ni de script d'installation. Ce document décrit
-  des gestes à faire, pas une commande à lancer.
+- **Il n'y a pas de PAQUET** — ni `.deb`, ni `.rpm`. Il y a un script
+  d'installation, `scripts/installer.sh`, qui tourne à chaque poussée dans un
+  arbre jetable. Ce qu'un paquet ferait de plus : les dépendances, la mise à
+  jour, la désinstallation.
 - **La durée de vie des jetons ne se règle pas** : quinze minutes par défaut,
   douze heures au plus, gravées dans le code.

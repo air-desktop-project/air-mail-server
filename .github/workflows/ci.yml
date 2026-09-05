@@ -147,6 +147,21 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --locked
 
+      # ── L'INSTALLATEUR TOURNE ICI, DANS UN ARBRE JETABLE ──────────────────
+      #
+      # Ce dépôt a reproché à sa propre table `nftables` d'avoir été documentée
+      # pendant des mois sans jamais tourner. Un script d'installation qu'on ne
+      # lancerait qu'en production serait la même faute, en pire : on ne le
+      # découvrirait pas en relisant, mais un soir, sur la machine de quelqu'un,
+      # à mi-chemin.
+      #
+      # `--racine` le rend exécutable sans superutilisateur et sans rien
+      # toucher. Il n'y a donc aucune raison de ne pas le lancer à chaque
+      # poussée. Il vient APRÈS `cargo test` parce qu'il a besoin des binaires
+      # `release`, et qu'une faute de code doit se voir avant une faute de pose.
+      - name: check-installation
+        run: ./scripts/check-installation.sh
+
       # ── LE FORMATAGE, EN DERNIER, ET C'EST UNE LEÇON PAYÉE ────────────────
       #
       # Il était en PREMIER. Il a échoué le 2026-09-04, et il est resté rouge

@@ -3867,6 +3867,92 @@ Ce qui reste hors du serveur : **rien de connu**. Cette ligne annonçait « la f
 de réémission des messages sortants », et c'était faux — elle existe, elle est
 câblée, et [la liste v1](v1.md) le mesure plutôt que de le croire.
 
+## Une suite de gestes n'est pas une installation
+
+`docs/installation.md` le disait de lui-même, dans sa liste d'aveux : « il n'y a
+pas de paquet, ni de script d'installation. Ce document décrit des gestes à
+faire, pas une commande à lancer ».
+
+Une suite de gestes qu'on recopie à la main est une suite de gestes qu'on rate
+une fois sur dix, et dont personne ne sait, trois mois plus tard, lesquels ont
+été faits. Elle a un autre défaut, plus grave pour ce dépôt : **elle ne tourne
+jamais**. Elle vieillit comme la table `nftables` a vieilli — exacte le jour où
+elle a été écrite, fausse le lendemain d'une tranche.
+
+### CE QU'IL FAIT, ET CE QU'IL NE DÉCIDERA PAS
+
+Il fait les gestes MÉCANIQUES : le compte Unix système, l'arborescence et ses
+permissions, les deux binaires, l'unité systemd.
+
+**Il n'écrit pas la configuration et n'ajoute aucun compte.** Ces deux-là
+demandent un domaine et des mots de passe, c'est-à-dire des décisions ; un script
+qui les inventerait poserait un serveur qui ne sert pas ce qu'on croit. Il
+imprime les commandes exactes en terminant — et un contrôle vérifie que chaque
+option qu'il imprime existe encore dans `config write --help`, parce que ce qu'un
+script imprime est ce que l'exploitant recopie.
+
+### IL N'APPLIQUE AUCUNE RÈGLE DE PARE-FEU
+
+Il écrit la table dans un fichier, en `0600`, et donne la commande qui la charge.
+
+Ce n'est pas de la prudence de façade : poser des règles sur une machine
+distante est **précisément ce qui peut couper l'exploitant de la session par
+laquelle il vous parle**. La tranche du pare-feu a montré qu'une chaîne `output`
+ajoutée de bonne foi détourne aussi le courrier destiné à un MTA extérieur. Une
+table se relit avant de se charger, et personne ne relit ce qu'un script a déjà
+posé.
+
+Un contrôle s'en assure autrement qu'en regardant `nft list ruleset` — ce qui
+demanderait le superutilisateur : il vérifie que le script **n'appelle jamais
+`nft`**, sauf dans le texte qu'il imprime.
+
+### `--racine` : CE QUI REND UN INSTALLATEUR ÉPROUVABLE
+
+Tout chemin écrit est préfixé, à la façon d'un `DESTDIR`. Avec
+`--racine /tmp/essai`, le script pose l'arborescence entière dans un répertoire
+jetable, **sans superutilisateur et sans toucher à la machine**.
+
+C'est ce qui permet de le FAIRE TOURNER à chaque poussée plutôt que de le
+relire. Sans cela, il aurait rejoint la table `nftables` d'avant : un texte juste
+le jour de son écriture, que personne n'exécute jamais, et dont on découvre les
+fautes un soir, sur la machine de quelqu'un, à mi-chemin.
+
+### NEUF CONTRÔLES, ET CELUI QUI COMPTE
+
+`check-installation.sh` l'exerce et vérifie :
+
+1. qu'il s'analyse ;
+2. qu'il REFUSE d'installer sur la machine sans privilège, plutôt que de poser
+   la moitié d'une installation avant de buter ;
+3. **les permissions** — c'est le contrôle qui compte. Tout ce que ce serveur
+   pose sur le disque est soit un secret, soit le courrier de quelqu'un, et un
+   `maildir` en `0755` est le défaut le plus coûteux que cette tranche pouvait
+   introduire. Vérifié en le cassant : la barrière le nomme ;
+4. que l'unité est valide, **selon systemd lui-même** ;
+5. qu'elle porte ce que C10 exige — `User=`, `NoNewPrivileges`, un
+   `CapabilityBoundingSet` VIDE ;
+6. qu'il est IDEMPOTENT : on relance après une mise à jour ou un échec, et le
+   second passage ne change rien ;
+7. que la table est écrite et pas chargée ;
+8. que le §7 du document et le script posent **la même unité, au caractère
+   près** ;
+9. que les options imprimées existent.
+
+### LE HUITIÈME EST CELUI QUI ÉTAIT LE PLUS FACILE À OUBLIER
+
+Deux copies d'un même texte divergent, et celle qu'on relit n'est jamais celle
+qui tourne. Le document montre l'unité, le script l'écrit : les comparer est le
+seul moyen que la première reste vraie.
+
+Vérifié en changeant un `RestartSec` dans le document : la barrière échoue, et
+**montre l'écart ligne à ligne** plutôt que d'annoncer qu'il y en a un.
+
+### CE QUI RESTE, ET QU'UN PAQUET FERAIT
+
+Il n'y a toujours ni `.deb` ni `.rpm`. Ce qu'un paquet ferait de plus : les
+dépendances, la mise à jour, la désinstallation. C'est écrit dans les aveux du
+document, à la place de celui qu'on vient de retirer.
+
 ## Douze extensions servies, aucune annoncée
 
 La tranche précédente avait fait annoncer `IMAP4rev1`. Elle avait raison, et elle
