@@ -1335,6 +1335,17 @@ attributs de SPECIAL-USE. **Ce ne sont pas des extensions optionnelles** : un
 client de rev2 les emploie sans les négocier, parce que le serveur a annoncé
 `IMAP4rev2`. Elles sont servies.
 
+**ET ELLES SONT TOUTES ANNONCÉES, UNE PAR UNE.** Un client de rev1, lui,
+n'emploie que ce qu'il voit : les taire — ce que ce serveur a fait tant qu'il
+n'annonçait que rev2 — le condamnait à déplacer un message en trois commandes
+faute de `MOVE`, à fermer une boîte par `CLOSE` faute d'`UNSELECT` (et `CLOSE`
+EFFACE), et à interroger ses dossiers un par un faute de `LIST-STATUS`.
+
+La règle qui gouverne cette liste tient en une phrase : **ce qui n'y est pas
+n'est pas servi**. Un essai l'oblige dans les deux sens — chaque capacité
+annoncée est exercée par la commande qui la définit, et toute capacité qui ne
+l'est nulle part fait échouer le contrôle.
+
 **`STATUS` rend ce qui est demandé**, dans l'ordre demandé (§7.3.3) : `MESSAGES`,
 `UIDNEXT`, `UIDVALIDITY`, `UNSEEN`, `DELETED` et `SIZE`. Rendre toujours les mêmes
 trois est commode et faux — un client qui demande `UNSEEN` pour afficher un

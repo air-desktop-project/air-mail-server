@@ -2244,7 +2244,37 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             // déployés — refuse la connexion sans en trouver une qu'il
             // connaisse. Les deux sont annoncées : ce serveur sait rendre les
             // deux formes, et c'est `ENABLE` qui décide laquelle.
-            b"IMAP4rev1 IMAP4rev2 LITERAL- IDLE SPECIAL-USE CREATE-SPECIAL-USE",
+            //
+            // # POURQUOI TOUTES CES EXTENSIONS SONT NOMMÉES
+            //
+            // **RFC 9051 §E les ABSORBE dans le protocole de base de rev2** :
+            // un client rev2 sait qu'elles sont là sans qu'on le lui dise, et
+            // les taire était donc juste tant que ce serveur n'annonçait que
+            // rev2. Depuis qu'il annonce aussi `IMAP4rev1`, cela ne l'est plus :
+            // un client rev1 **n'emploie que ce qu'il voit**, et ce serveur les
+            // servait toutes sans qu'aucune ne soit annoncée.
+            //
+            // Ce que cela coûtait n'est pas cosmétique. Sans `MOVE`, un client
+            // déplace par `COPY`, `STORE \Deleted` et `EXPUNGE` — trois
+            // commandes, et un intervalle où le message existe deux fois. Sans
+            // `UNSELECT`, il ferme par `CLOSE`, **qui efface**. Sans
+            // `LIST-STATUS`, il fait un `STATUS` par dossier, c'est-à-dire la
+            // latence d'Internet multipliée par leur nombre — ce que le code de
+            // `LIST` déplore lui-même, en servant l'option qui l'évite. Sans
+            // `SASL-IR`, un aller-retour de plus à chaque connexion.
+            //
+            // Les redire à un client rev2 est REDONDANT, jamais faux : ce
+            // serveur les sert, qu'on les lui demande sous un nom ou sous
+            // l'autre. Et la liste est lue AVANT tout `ENABLE` — au moment où
+            // l'on ne sait pas encore à qui l'on parle.
+            //
+            // **CE QUI N'Y EST PAS N'EST PAS SERVI**, et c'est la règle qui
+            // gouverne cette liste. `ID` (RFC 2971) manque à dessein : ce
+            // serveur ne le sert pas, et §3.3 rappelle qu'il donne à qui le
+            // demande de quoi reconnaître la version d'en face.
+            b"IMAP4rev1 IMAP4rev2 LITERAL- SASL-IR ENABLE IDLE NAMESPACE UNSELECT \
+              MOVE UIDPLUS ESEARCH SEARCHRES LIST-EXTENDED LIST-STATUS STATUS=SIZE \
+              BINARY SPECIAL-USE CREATE-SPECIAL-USE",
             troisieme,
             quatrieme,
             suffixe,

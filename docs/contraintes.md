@@ -3867,6 +3867,97 @@ Ce qui reste hors du serveur : **rien de connu**. Cette ligne annonçait « la f
 de réémission des messages sortants », et c'était faux — elle existe, elle est
 câblée, et [la liste v1](v1.md) le mesure plutôt que de le croire.
 
+## Douze extensions servies, aucune annoncée
+
+La tranche précédente avait fait annoncer `IMAP4rev1`. Elle avait raison, et elle
+était incomplète — d'une façon qui ne se voyait qu'en regardant la liste des
+capacités à côté de ce que le serveur sait faire.
+
+| extension | servie | annoncée |
+|---|---|---|
+| `SASL-IR` (4959) | oui | **non** |
+| `ENABLE` (5161) | oui | **non** |
+| `NAMESPACE` (2342) | oui | **non** |
+| `UNSELECT` (3691) | oui | **non** |
+| `MOVE` (6851) | oui | **non** |
+| `UIDPLUS` (4315) | oui | **non** |
+| `ESEARCH` (4731) | oui | **non** |
+| `SEARCHRES` (5182) | oui | **non** |
+| `LIST-EXTENDED` (5258) | oui | **non** |
+| `LIST-STATUS` (5819) | oui | **non** |
+| `STATUS=SIZE` (8438) | oui | **non** |
+| `BINARY` (3516) | oui | **non** |
+
+### C'ÉTAIT JUSTE HIER, ET FAUX AUJOURD'HUI
+
+§E de RFC 9051 **absorbe ces extensions dans le protocole de base de rev2** : un
+client rev2 sait qu'elles sont là sans qu'on le lui dise. Tant que ce serveur
+n'annonçait qu'`IMAP4rev2`, les taire était donc exact.
+
+Annoncer `IMAP4rev1` a renversé cela d'un coup, sans que rien dans le code ne
+change : **un client rev1 n'emploie que ce qu'il voit**. Le défaut n'a pas été
+introduit par une ligne fautive ; il est né de ce qu'une autre ligne, ailleurs,
+est devenue vraie.
+
+C'est une espèce que ce registre n'avait pas encore rencontrée. Les dix
+précédentes opposaient une prose et un code qui ne disaient pas la même chose.
+Ici, **les deux disaient vrai, et leur conjonction ne l'était plus**.
+
+### CE QUE LE SILENCE COÛTAIT
+
+Rien de cosmétique.
+
+- Sans `MOVE`, un client déplace par `COPY`, `STORE \Deleted`, `EXPUNGE` : trois
+  allers-retours, et un intervalle où le message existe **deux fois**.
+- Sans `UNSELECT`, il ferme la boîte par `CLOSE` — **qui efface les messages
+  marqués**. C'est la seule des douze dont l'absence puisse détruire du courrier.
+- Sans `LIST-STATUS`, il interroge un dossier à la fois : la latence d'Internet
+  multipliée par leur nombre. Le code de `LIST` déplore lui-même ce coût, dans
+  le commentaire qui justifie l'option — celle que personne ne pouvait demander.
+- Sans `UIDPLUS`, il ne sait pas quel UID son `APPEND` vient de créer, et doit
+  rechercher son propre message pour le retrouver.
+- Sans `SASL-IR`, un aller-retour de plus à chaque connexion. Il fonctionnait
+  déjà : `AUTHENTICATE PLAIN <réponse>` était accepté sur une seule ligne, et
+  RFC 4959 §3 veut qu'un serveur qui le sait faire l'annonce.
+
+### `ID` MANQUE À DESSEIN
+
+Dovecot l'annonce, ce serveur ne le sert pas, et c'est la règle qui gouverne
+cette liste : **ce qui n'y est pas n'est pas servi**. RFC 2971 §3.3 rappelle par
+ailleurs qu'`ID` donne à qui le demande de quoi reconnaître la version d'en
+face — une surface qu'on n'ouvre pas pour une politesse.
+
+### REDIRE À UN CLIENT rev2 N'EST PAS MENTIR
+
+La liste est lue AVANT tout `ENABLE`, au moment où l'on ne sait pas encore à qui
+l'on parle. La faire varier ensuite demanderait deux listes ; la garder unique
+est redondant pour un client rev2, et jamais faux : ce serveur sert bien ces
+douze choses, qu'on les lui demande sous un nom ou sous l'autre.
+
+### L'ESSAI QUI FERME LA PORTE, DANS LES DEUX SENS
+
+Le vrai livrable de cette tranche n'est pas la liste : c'est l'essai qui
+l'oblige.
+
+Pour **chaque** capacité annoncée, il envoie la commande qui la définit et exige
+un `OK`. Et réciproquement : toute capacité annoncée qui n'est éprouvée ni là ni
+dans un essai nommé fait échouer le contrôle. Une liste qui dérive d'un côté ou
+de l'autre ne peut plus passer.
+
+Vérifié en remettant l'ancienne liste : l'essai échoue, et **nomme** la capacité
+manquante.
+
+### CE QU'ON A TROUVÉ SANS LE CORRIGER
+
+`CREATE "Créations"` en UTF-8 direct est refusé, alors que §5.1 de RFC 9051 le
+rend obligatoire en rev2. Ce n'est pas un oubli : le magasin fait d'un nom de
+boîte un RÉPERTOIRE, et n'accepte que ce qu'il sait transcrire sans risque.
+
+L'UTF-7 modifié de rev1, lui, traverse : le serveur le tient pour une chaîne
+opaque, la rend telle quelle, et le client la décode. Un dossier accentué
+fonctionne donc pour un client rev1, et pas pour un client rev2 — ce qui mérite
+d'être écrit plutôt que découvert.
+
 ## Servir n'est pas nommer : les trois `RFC822`
 
 `FETCH 1 (RFC822)` rendait `NO [CANNOT] This FETCH item is not served yet`, et

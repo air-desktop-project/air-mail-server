@@ -736,17 +736,132 @@ fn dire(session: &mut Session<UnCompte, Boites>, commande: &[u8]) -> (std::strin
 
 #[test]
 fn la_banniere_annonce_ce_qu_on_sait_faire() {
-    let mut sortie = [0_u8; 256];
+    let mut sortie = [0_u8; 512];
     let banniere = nouvelle(false).greeting(&mut sortie).expect("composable");
     let texte = std::string::String::from_utf8_lossy(banniere).into_owned();
     // **LES DEUX VERSIONS S'ANNONCENT, rev1 EN TÊTE.** RFC 3501 §7.2.1 veut la
     // version du protocole en premier, et un client déployé la cherche là avant
     // d'envoyer quoi que ce soit.
-    assert!(texte.starts_with(
-        "* OK [CAPABILITY IMAP4rev1 IMAP4rev2 LITERAL- IDLE SPECIAL-USE CREATE-SPECIAL-USE \
-         STARTTLS LOGINDISABLED]"
-    ));
+    assert!(
+        texte.starts_with("* OK [CAPABILITY IMAP4rev1 IMAP4rev2 LITERAL- SASL-IR"),
+        "{texte}"
+    );
+    // §6.2.3 : tant que la connexion n'est pas protégée, on le dit.
+    assert!(texte.contains(" STARTTLS LOGINDISABLED]"), "{texte}");
     assert!(texte.ends_with("service ready\r\n"), "{texte}");
+}
+
+/// La liste des capacités annoncées, telle qu'un client la lit.
+fn capacites_annoncees(
+    session: &mut Session<UnCompte, Boites>,
+) -> std::vec::Vec<std::string::String> {
+    let (texte, _) = dire(session, b"a000 CAPABILITY\r\n");
+    texte
+        .lines()
+        .find_map(|ligne| ligne.strip_prefix("* CAPABILITY "))
+        .unwrap_or_default()
+        .split(' ')
+        .map(std::string::String::from)
+        .collect()
+}
+
+/// **CHAQUE CAPACITÉ ANNONCÉE EST EXERCÉE ICI**, par la commande qui la définit.
+///
+/// # LE DÉFAUT QUE CET ESSAI EXISTE POUR EMPÊCHER
+///
+/// Ce serveur SERVAIT douze extensions et n'en annonçait aucune. C'était juste
+/// tant qu'il ne disait qu'`IMAP4rev2` — §E de RFC 9051 les absorbe dans sa base
+/// —, et faux dès qu'il a annoncé `IMAP4rev1` : **un client rev1 n'emploie que
+/// ce qu'il voit**. Sans `MOVE`, il déplace en trois commandes ; sans
+/// `UNSELECT`, il ferme par `CLOSE`, qui EFFACE ; sans `LIST-STATUS`, il
+/// interroge un dossier à la fois.
+///
+/// L'essai va dans les deux sens : ce qui est annoncé répond, et ce qui répond
+/// est annoncé. Une liste qui dérive d'un côté ou de l'autre le fait échouer.
+#[test]
+fn tout_ce_qui_est_annonce_repond() {
+    let mut session = nouvelle(true);
+    let annoncees = capacites_annoncees(&mut session);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+
+    // La commande qui éprouve chaque extension, et l'état qu'elle demande.
+    // `true` : il faut une boîte ouverte.
+    let epreuves: &[(&str, &[u8], bool)] = &[
+        ("NAMESPACE", b"a NAMESPACE\r\n", false),
+        ("UNSELECT", b"a UNSELECT\r\n", true),
+        ("MOVE", b"a MOVE 1 INBOX\r\n", true),
+        ("UIDPLUS", b"a UID EXPUNGE 1\r\n", true),
+        ("ESEARCH", b"a SEARCH RETURN (COUNT) ALL\r\n", true),
+        ("SEARCHRES", b"a SEARCH RETURN (SAVE) ALL\r\n", true),
+        ("LIST-EXTENDED", b"a LIST (SUBSCRIBED) \"\" *\r\n", false),
+        (
+            "LIST-STATUS",
+            b"a LIST \"\" * RETURN (STATUS (MESSAGES))\r\n",
+            false,
+        ),
+        ("STATUS=SIZE", b"a STATUS INBOX (SIZE)\r\n", false),
+        ("BINARY", b"a FETCH 1 (BINARY.SIZE[1])\r\n", true),
+        ("SPECIAL-USE", b"a LIST (SPECIAL-USE) \"\" *\r\n", false),
+        (
+            "CREATE-SPECIAL-USE",
+            b"a CREATE Brouillons (USE (\\Drafts))\r\n",
+            false,
+        ),
+    ];
+
+    for (nom, commande, ouverte) in epreuves {
+        assert!(
+            annoncees.iter().any(|dite| dite == nom),
+            "`{nom}` est exercée ici et n'est pas annoncée : {annoncees:?}"
+        );
+        let mut session = nouvelle(true);
+        dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+        if *ouverte {
+            dire(&mut session, b"a002 SELECT INBOX\r\n");
+        }
+        // CERTAINES S'ÉCOULENT, D'AUTRES RÉPONDENT D'UN COUP : on prend ce que
+        // le tour rend, et l'on écoule s'il y a de quoi.
+        let mut sortie = [0_u8; 2048];
+        let tour = session.handle(commande, &mut sortie).expect("traitable");
+        let mut fil = std::string::String::from_utf8_lossy(tour.reply()).into_owned();
+        if tour.action() == Action::SendFetch {
+            let mut morceaux = [0_u8; 2048];
+            while let Some(morceau) = session.next_fetch(&mut morceaux).expect("émettable") {
+                if let super::FetchChunk::Bytes(octets) = morceau {
+                    fil.push_str(&std::string::String::from_utf8_lossy(octets));
+                }
+            }
+        }
+        assert!(
+            fil.contains(" OK "),
+            "`{nom}` est annoncée et ne répond pas : {fil}"
+        );
+    }
+
+    // ── ET DANS L'AUTRE SENS ────────────────────────────────────────────────
+    //
+    // Ce qui est annoncé sans être éprouvé ci-dessus doit l'être ailleurs, et se
+    // nomme ici pour qu'on ne puisse pas ajouter un mot à la liste sans y
+    // penser.
+    let ailleurs = [
+        // Les deux versions, `ENABLE` et la forme des littéraux : essais dédiés.
+        "IMAP4rev1",
+        "IMAP4rev2",
+        "LITERAL-",
+        "SASL-IR",
+        "ENABLE",
+        "IDLE",
+        // Celles que l'état de la connexion fait paraître et disparaître.
+        "AUTH=PLAIN",
+        "STARTTLS",
+        "LOGINDISABLED",
+    ];
+    for dite in &annoncees {
+        assert!(
+            epreuves.iter().any(|(nom, _, _)| nom == dite) || ailleurs.contains(&dite.as_str()),
+            "`{dite}` est annoncée et n'est éprouvée nulle part"
+        );
+    }
 }
 
 /// **§6.2.3 : tant que la connexion n'est pas protégée, on l'annonce.** Et une

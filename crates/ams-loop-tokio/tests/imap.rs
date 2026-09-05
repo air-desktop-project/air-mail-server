@@ -516,10 +516,7 @@ async fn la_banniere_annonce_puis_la_session_repond() {
 
     let banniere = ligne(&mut lecteur).await;
     assert!(
-        banniere.starts_with(
-            "* OK [CAPABILITY IMAP4rev1 IMAP4rev2 LITERAL- IDLE SPECIAL-USE \
-             CREATE-SPECIAL-USE LOGINDISABLED]"
-        ),
+        banniere.starts_with("* OK [CAPABILITY IMAP4rev1 IMAP4rev2 LITERAL- SASL-IR"),
         // **`IMAP4rev1` D'ABORD** : RFC 3501 §7.2.1 veut la version en tête, et
         // c'est ce qu'un client déployé cherche avant d'envoyer quoi que ce soit.
         "{banniere}"
@@ -531,6 +528,15 @@ async fn la_banniere_annonce_puis_la_session_repond() {
         annonce.starts_with("* CAPABILITY IMAP4rev1 IMAP4rev2"),
         "{annonce}"
     );
+    // **CE QUI EST ANNONCÉ TRAVERSE LA SOCKET EN ENTIER.** La liste a triplé de
+    // longueur le jour où l'on a cessé de taire les extensions ; une bannière
+    // tronquée par un tampon trop court ne se verrait pas autrement qu'ici.
+    for extension in ["SASL-IR", "MOVE", "UIDPLUS", "UNSELECT", "LIST-STATUS"] {
+        assert!(
+            annonce.contains(extension),
+            "{extension} manque : {annonce}"
+        );
+    }
     let conclusion = ligne(&mut lecteur).await;
     assert_eq!(conclusion, "a001 OK CAPABILITY completed\r\n");
 
