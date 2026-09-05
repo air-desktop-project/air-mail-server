@@ -3854,6 +3854,64 @@ mot — pas à sa propre liste.
 
 Ce qui reste hors du serveur : la file de réémission des messages sortants.
 
+## La CI était rouge depuis seize poussées, et on la déclarait verte
+
+Le 2026-09-05, en préparant un commit, six fichiers modifiés sont apparus que
+personne n'avait édités : `cargo fmt --all` venait de les reformater. L'état
+**committé** ne passait donc pas `cargo fmt --check`. En remontant la piste :
+
+- la CI échouait à **seize exécutions de suite**, du 2026-09-04 08:58 au
+  2026-09-05, la dernière verte étant celle de 08:18 ;
+- le défaut était entré par six commits distincts, tous des tranches de correction
+  qui annonçaient chacune « les cinq barrières passent ».
+
+**CE QUE CET ÉCHEC EMPORTAIT AVEC LUI EST PIRE QUE LE FORMATAGE.** `cargo fmt`
+était la PREMIÈRE étape du job de vérification. Une étape qui échoue arrête celles
+qui la suivent : `clippy`, `build`, `check-sans-c` et `cargo test` n'ont pas
+tourné une seule fois pendant ces seize poussées. La barrière `check-sans-c`,
+écrite et câblée la veille pour tenir « aucun C », **n'a jamais rendu de verdict
+en CI**. Elle a été livrée, annoncée, et elle ne gardait rien là-bas.
+
+### Les deux fautes, qui ne sont pas la même
+
+**La première est une liste incomplète.** Les cinq barrières passées avant chaque
+commit — `clippy`, `cargo test`, `check-couverture`, `check-etages`,
+`check-fuzz` — ne contenaient pas `cargo fmt`. Celui-ci ne vivait QUE dans la CI.
+Rien ne l'empêchait de tourner en local : c'est deux secondes. Il n'était
+simplement pas dans la liste, et une liste ne se relit pas toute seule.
+
+**La seconde est de n'avoir jamais lu le verdict.** Seize poussées, seize
+rapports « les cinq barrières passent », et pas un regard sur ce que la machine
+propre en disait. Les cinq barrières PASSAIENT VRAIMENT — l'affirmation n'était
+pas fausse. Elle était incomplète, et présentée comme suffisante. *Dire vrai sur
+ce qu'on a vérifié ne dit rien de ce qu'on n'a pas regardé.*
+
+### Ce qui a été fait
+
+`scripts/check-format.sh` couvre les **deux** portées : le workspace, et `fuzz/`
+qui vit en dehors et que `cargo fmt --all` n'atteint pas. La CI en avait deux
+étapes dans deux jobs différents ; une barrière locale qui n'en aurait couvert
+qu'une aurait laissé l'autre se découvrir en intégration continue. Éprouvée dans
+les deux sens, portée par portée.
+
+**Le formatage passe EN DERNIER dans le job de vérification.** Il échoue toujours
+le job — c'est une barrière, pas un avis — mais tout ce qui juge le CODE a déjà
+parlé quand il le fait. `check-etages` reste en tête : son échec DIT quelque
+chose, et le savoir en une seconde vaut l'arrêt. C'est la différence entre une
+étape qui rapporte un fait et une étape qui rapporte une forme.
+
+**Et le verdict de la CI se lit après chaque poussée**, sur consigne de l'auteur
+du projet du 2026-09-05.
+
+### La leçon, qui vaut au-delà du formatage
+
+Une barrière ajoutée n'est pas une barrière qui tourne. `check-sans-c` a été
+écrite avec soin, éprouvée dans les deux sens en local, câblée à la CI et
+annoncée — et elle n'y a jamais tourné, parce qu'une étape morte trois lignes
+plus haut l'en empêchait. **Rien, dans le fait d'ajouter un contrôle, ne prouve
+qu'il s'exécute là où on l'a mis.** La seule preuve est le verdict, et il faut
+aller le lire.
+
 ## Un `COPY` qui déposait dans la boîte qu'on venait de quitter
 
 Le 2026-09-05, `crates/ams-server/src/imap.rs` portait ceci en tête :

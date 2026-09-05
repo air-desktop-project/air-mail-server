@@ -114,9 +114,6 @@ jobs:
       # `--locked` sur chaque commande : le `Cargo.lock` est committé, et une CI
       # qui le laisserait bouger en silence ne vérifierait plus le build qu'elle
       # prétend vérifier.
-      - name: cargo fmt
-        run: cargo fmt --all -- --check
-
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
@@ -133,6 +130,28 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace --locked
+
+      # ── LE FORMATAGE, EN DERNIER, ET C'EST UNE LEÇON PAYÉE ────────────────
+      #
+      # Il était en PREMIER. Il a échoué le 2026-09-04, et il est resté rouge
+      # SEIZE POUSSÉES — pendant lesquelles `clippy`, `build`, `check-sans-c` et
+      # `cargo test` N'ONT PAS TOURNÉ UNE SEULE FOIS, puisqu'une étape qui échoue
+      # arrête celles qui la suivent. `check-sans-c`, câblé la veille, n'a donc
+      # jamais rendu de verdict ici.
+      #
+      # UNE FAUTE DE FORME NE DOIT PAS CACHER UNE FAUTE DE FOND. Le job échoue
+      # toujours si le formatage cloche — c'est une barrière, pas un avis — mais
+      # tout ce qui juge le CODE a déjà parlé quand il le fait.
+      #
+      # `check-etages`, lui, reste en tête : son échec DIT quelque chose (un codec
+      # qui lit un fichier), et le savoir en une seconde vaut l'arrêt.
+      #
+      # LE SCRIPT PLUTÔT QUE LA COMMANDE, et pour la raison déjà écrite plus bas
+      # à propos du fuzz : ce qu'on ne peut pas rejouer chez soi, on le découvre
+      # ici. Il couvre AUSSI `fuzz/`, qui vit hors du workspace — c'est pourquoi
+      # le job de fuzz n'a plus d'étape de formatage à lui.
+      - name: check-format
+        run: ./scripts/check-format.sh
 
   # ── Le 100 % de couverture sur ce qui ne fait pas d'entrée-sortie (C2) ─────
   #
@@ -181,13 +200,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # `fuzz/` est hors du workspace, donc `cargo fmt --all` du job de
-      # vérification ne l'atteint pas. Le pin du dépôt s'y applique quand même —
-      # rustup remonte l'arborescence — donc un seul rustfmt pour tout le dépôt.
-      - name: cargo fmt (fuzz)
-        working-directory: fuzz
-        run: cargo fmt -- --check
-
+      # LE FORMATAGE DE `fuzz/` N'EST PLUS VÉRIFIÉ ICI, et ce n'est pas un oubli :
+      # `scripts/check-format.sh` couvre les DEUX portées, et le job de
+      # vérification l'appelle. Le laisser ici aussi ferait deux endroits qui
+      # disent la même chose — et c'est le second, celui qu'on oublie, qui finit
+      # par diverger.
       - name: Nightly, pour cargo-fuzz seulement
         run: rustup toolchain install nightly --profile minimal
 
