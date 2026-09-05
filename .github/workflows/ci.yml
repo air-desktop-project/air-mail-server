@@ -111,6 +111,22 @@ jobs:
       - name: check-etages
         run: ./scripts/check-etages.sh
 
+      # ── LES DEUX PORTÉES COMPILENT-ELLES ? ────────────────────────────
+      #
+      # AVANT CLIPPY, et pour la même raison qui met `check-etages` en tête : ce
+      # qui répond vite doit répondre tôt. Une erreur de type se lit en une
+      # seconde ; l'apprendre après trois minutes de lints ne l'apprend pas
+      # mieux.
+      #
+      # **ET IL COUVRE `fuzz/`, QUE RIEN D'AUTRE ICI NE COMPILE.** Cette
+      # crate-là vit hors du workspace : ni `clippy --workspace`, ni
+      # `cargo build --workspace`, ni `cargo test --workspace` n'y entrent. Son
+      # seul contrôle était le job de fuzz, vingt-cinq minutes plus loin — et
+      # deux tranches de suite y ont perdu une campagne pour une signature de
+      # trait non répercutée.
+      - name: check-compile
+        run: ./scripts/check-compile.sh
+
       # `--locked` sur chaque commande : le `Cargo.lock` est committé, et une CI
       # qui le laisserait bouger en silence ne vérifierait plus le build qu'elle
       # prétend vérifier.

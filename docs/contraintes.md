@@ -3856,6 +3856,78 @@ Ce qui reste hors du serveur : **rien de connu**. Cette ligne annonçait « la f
 de réémission des messages sortants », et c'était faux — elle existe, elle est
 câblée, et [la liste v1](v1.md) le mesure plutôt que de le croire.
 
+## `fuzz/` ne se compilait qu'au bout de vingt-cinq minutes
+
+`fuzz/` vit hors du workspace, et pour une raison écrite dans son propre
+`Cargo.toml` : `cargo-fuzz` exige un nightly, le workspace est épinglé sur
+stable, et deux LLVM dans une même mesure de couverture ne se relisent pas.
+
+**La conséquence n'était écrite nulle part : aucune commande ordinaire ne le
+compile.** Ni `cargo build --workspace`, ni `cargo clippy --workspace
+--all-targets`, ni `cargo test --workspace`. Le seul contrôle qui bâtissait ces
+soixante-cinq binaires était `check-fuzz.sh` — le DERNIER de la liste, et celui
+qui dure vingt-cinq minutes.
+
+### Ce que ce trou a coûté, deux fois le même jour
+
+**Tranche du `405`.** La propriété 4 de `fuzz_ams_api_route` affirmait que
+`resolve` ne réussit que pour une méthode servie — le contrat qu'on venait
+précisément de changer. Campagne perdue.
+
+**Tranche SPECIAL-USE.** La signature de `Mailboxes::create` et le champ
+`Listing::special` avaient été portés dans les quatre implémenteurs du workspace,
+et pas dans `fuzz_ams_session_imap.rs`. Campagne perdue.
+
+Les deux fois, c'était une erreur de COMPILATION, que `cargo check` rend en une
+seconde. Les deux fois, on l'a apprise vingt-cinq minutes plus tard.
+
+### Pourquoi c'est structurel et non de la distraction
+
+**Une erreur qu'on ne peut apprendre qu'en payant vingt-cinq minutes finit par se
+payer plusieurs fois** : on relance, on attend, on découvre la suivante. Et la
+seule chose qui la rattrapait — la campagne — est aussi celle qu'on lance en
+dernier, quand tout le reste est vert et qu'on se croit prêt à committer.
+
+Deux occurrences en un jour ne sont pas deux inattentions. C'est un contrôle
+qui manquait à l'endroit où il aurait servi.
+
+### Ce qui a été fait
+
+`scripts/check-compile.sh` vérifie que **les deux portées compilent** — le
+workspace et `fuzz/` — et se place AVANT clippy, pour la même raison qui met
+`check-etages` en tête : ce qui répond vite doit répondre tôt. Une erreur de type
+se lit en une seconde ; l'apprendre après trois minutes de lints ne l'apprend pas
+mieux.
+
+Éprouvé dans les deux sens, **portée par portée** : une constante mal typée sous
+`crates/` fait échouer le workspace, la même sous `fuzz/fuzz_targets/` fait
+échouer `fuzz/`, et le retrait des deux fait repasser.
+
+**`cargo check` ET NON `clippy`, et c'est délibéré.** `fuzz/` n'hérite pas des
+lints du workspace — hors du workspace, il n'a pas de `[lints] workspace = true`,
+et l'y ajouter ferait entrer les règles du produit dans du code qui n'est jamais
+livré. Ce qui manquait n'était pas du style, c'était la compilation. On vérifie ce
+qui manquait, et rien de plus.
+
+**Et cela ne demande ni nightly ni `cargo-fuzz`** : leur nécessité tient à
+l'INSTRUMENTATION, pas au typage. `cargo check` tourne sur la toolchain épinglée,
+en une seconde, et cette barrière peut donc vivre dans le job de vérification
+ordinaire plutôt que dans celui du fuzz.
+
+La liste passe de sept barrières à huit.
+
+### Ce que cet épisode dit des barrières en général
+
+`check-format.sh` avait déjà rencontré la même frontière, et pour la même raison :
+`cargo fmt --all` n'atteint pas `fuzz/`. La CI avait alors DEUX étapes de
+formatage, dans deux jobs différents, et l'on a fait une barrière qui couvre les
+deux portées.
+
+**Le motif se répète, et il vaut d'être nommé** : chaque fois qu'un outil dit
+« tout » — `--workspace`, `--all`, `--all-targets` —, il faut demander *tout de
+quoi ?* Ce dépôt a deux racines de code, et aucun de ces mots-là n'en couvre plus
+d'une.
+
 ## SPECIAL-USE : le client désigne, le serveur retient
 
 Sans les attributs d'usage de RFC 6154, un client qui range un brouillon ne sait
