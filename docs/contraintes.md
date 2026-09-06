@@ -2228,6 +2228,16 @@ ligne — et les deux refus.
 existe, donc la seule destination possible ; toute autre reçoit `NO [TRYCREATE]`,
 le code qui apprend au client qu'un `CREATE` suivi du même `COPY` marcherait.
 
+> **CETTE PHRASE A CESSÉ D'ÊTRE VRAIE LE JOUR MÊME.** `CREATE` est arrivé dans
+> une tranche ultérieure du 2026-08-29 (voir plus bas), et toute boîte existante
+> est depuis une destination valable. Le `NO [TRYCREATE]` ne vise plus que les
+> boîtes ABSENTES. Mesuré le 2026-09-06, et corrigé dans le `README` — qui
+> portait la même phrase, au présent, pendant huit jours.
+>
+> On ne réécrit pas l'entrée : elle dit ce qui était vrai quand elle a été
+> écrite. On dit qu'elle a été dépassée, ce qu'aucune relecture n'aurait fait
+> toute seule.
+
 §6.4.7 : UN `COPY` N'EST PAS PARTIELLEMENT RÉUSSI. « If the server can't copy all
 the messages, it should restore the destination mailbox to its state before the
 COPY and return a tagged error. » Ce qui a été copié avant l'échec est donc

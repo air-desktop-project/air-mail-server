@@ -871,10 +871,20 @@ l'eau.
 
 ## `COPY` : tout ou rien, et dire où
 
-`COPY` et `UID COPY` copient dans la boîte nommée. **`INBOX` est la seule qui
-existe**, donc la seule destination possible ; toute autre reçoit
-`NO [TRYCREATE]`, le code qui apprend au client qu'un `CREATE` suivi du même
-`COPY` marcherait — le lui refuser sèchement le laisserait deviner.
+`COPY` et `UID COPY` copient dans la boîte nommée — **n'importe laquelle, du
+moment qu'elle existe**. Une destination absente reçoit `NO [TRYCREATE]`, le code
+qui apprend au client qu'un `CREATE` suivi du même `COPY` marcherait — le lui
+refuser sèchement le laisserait deviner.
+
+Ce paragraphe a longtemps dit qu'`INBOX` était « la seule qui existe, donc la
+seule destination possible ». C'était vrai le matin du 2026-08-29 ; `CREATE` est
+arrivé le même jour, dans une tranche ultérieure, et la phrase est devenue fausse
+sans que personne la reprenne. Mesuré le 2026-09-06 :
+
+```
+d004 OK [COPYUID 1788703589 2817 257] COPY completed   (vers une boîte créée)
+d005 NO [TRYCREATE] Destination mailbox does not exist (vers une absente)
+```
 
 **§6.4.7 : un `COPY` n'est pas partiellement réussi.** Si un message ne peut pas
 être copié, ce qui l'a été avant lui est **défait**, et la commande répond `NO`.
