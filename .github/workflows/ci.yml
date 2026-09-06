@@ -32,8 +32,28 @@ on:
 # Une nouvelle poussée sur une PR annule la vérification de la précédente : c'est
 # le résultat du dernier état qui compte. `main` est exclu de l'annulation — on ne
 # veut pas perdre le verdict d'un commit intégré.
+#
+# ── CETTE INTENTION N'ÉTAIT PAS TENUE, ET C'EST MESURÉ ──────────────────────
+#
+# `cancel-in-progress: false` protège la course QUI TOURNE. Il ne protège pas
+# celle QUI ATTEND : dans un même groupe, GitHub ne garde qu'une seule course en
+# file, et l'arrivée d'une troisième poussée annule la deuxième AVANT QUE LE
+# MOINDRE TRAVAIL NE DÉMARRE.
+#
+# Le 2026-09-06, le commit `1e99bcd1` a ainsi perdu son verdict : trois poussées
+# rapprochées, la première en cours, la deuxième en file, et la troisième l'a
+# évincée. `gh run view` ne montrait aucun job — juste `cancelled`. Il a fallu
+# relancer la course à la main pour l'obtenir.
+#
+# **UN COMMIT INTÉGRÉ SANS VERDICT EST EXACTEMENT CE QUE LE COMMENTAIRE
+# CI-DESSUS PROMETTAIT D'ÉVITER**, et la consigne « lire la CI après chaque
+# poussée » n'y pouvait rien : le verdict n'existait pas.
+#
+# La correction ne change rien aux PR — elles gardent un groupe par branche, et
+# l'annulation qui va avec. Sur `main`, chaque commit a désormais SON groupe :
+# rien ne fait la queue, donc rien ne s'évince.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'push' && github.sha || 'partage' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:

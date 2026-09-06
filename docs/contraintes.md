@@ -3902,6 +3902,53 @@ Ce qui reste hors du serveur : **rien de connu**. Cette ligne annonçait « la f
 de réémission des messages sortants », et c'était faux — elle existe, elle est
 câblée, et [la liste v1](v1.md) le mesure plutôt que de le croire.
 
+## Le commentaire disait l'intention ; la configuration ne la tenait pas
+
+`ci.yml` portait ceci, au-dessus de son groupe de concurrence :
+
+> `main` est exclu de l'annulation — on ne veut pas perdre le verdict d'un
+> commit intégré.
+
+L'intention est juste. **Le réglage ne l'atteignait pas.**
+
+`cancel-in-progress: false` protège la course QUI TOURNE. Il ne protège pas
+celle QUI ATTEND : dans un même groupe, GitHub ne garde qu'une course en file, et
+l'arrivée d'une troisième poussée annule la deuxième **avant que le moindre
+travail ne démarre**.
+
+### CE QUE CELA A COÛTÉ, ET QUAND ON S'EN EST APERÇU
+
+Le 2026-09-06, `1e99bcd1` — la tranche qui cesse de croire le bit `AD` — a perdu
+son verdict. Trois poussées rapprochées : la première tournait, la deuxième
+attendait, la troisième l'a évincée. `gh run view` ne montrait aucun job, juste
+`cancelled`.
+
+**La consigne « lire la CI après chaque poussée » n'y pouvait rien** : elle
+suppose qu'un verdict existe. Ici il n'y en avait pas, et c'est en le cherchant
+qu'on a compris pourquoi.
+
+Il a fallu relancer la course à la main. Puis, trois fois dans la même journée,
+retenir une poussée en attendant que la file se vide — une contrainte de travail
+née d'un réglage, pas d'une nécessité.
+
+### LA CORRECTION, ET SON IRONIE
+
+Sur `main`, chaque commit a désormais son propre groupe : rien ne fait la queue,
+donc rien ne s'évince. Les PR ne changent pas — un groupe par branche, et
+l'annulation qui va avec, puisque c'est le dernier état qui y compte.
+
+**Le correctif lui-même n'a pas pu être poussé tout de suite** : une course
+attendait, et le pousser l'aurait évincée. Il a fallu subir le défaut une
+dernière fois pour le corriger.
+
+### LA FORME, ENCORE
+
+C'est la même que celle qui traverse toute cette journée : une prose exacte sur
+ce qu'on VEUT, et un mécanisme qui fait autre chose. Elle s'est logée
+successivement dans le code, dans la documentation, dans les scripts de contrôle
+— et ici dans la configuration d'intégration continue, c'est-à-dire dans l'outil
+censé attraper les autres.
+
 ## L'indice était écrit dans ce registre, et personne ne l'a lu comme tel
 
 « La porte HTTP refusait l'usurpation sans le dire » disait ceci, en passant :
