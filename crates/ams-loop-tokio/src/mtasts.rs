@@ -85,6 +85,16 @@ pub struct Sts {
     cache: PathBuf,
     /// Le temps accordé à chaque lecture.
     delai: Duration,
+    /// Le port où l'on va chercher la politique. Toujours 443, sauf sous test.
+    ///
+    /// **CE CHAMP EXISTE POUR QU'IL Y AIT DES ESSAIS.** §3.3 de RFC 8461 fixe le
+    /// port à 443, et un autre ne joindrait personne en production. Mais un
+    /// essai ne peut pas ouvrir le 443 sans privilège, et c'est très
+    /// exactement ce qui a fait que ce fichier — la récupération de politique,
+    /// son cache, et la vérification de certificat dont TOUTE la confiance
+    /// dépend — n'était exercé par AUCUN essai jusqu'au 2026-09-06. Le
+    /// remetteur porte le même champ, pour la même raison.
+    port: u16,
 }
 
 impl Sts {
@@ -101,7 +111,16 @@ impl Sts {
             tls,
             cache,
             delai,
+            port: HTTPS_PORT,
         }
+    }
+
+    /// Change le port où la politique se cherche. **Réservé aux tests** : §3.3
+    /// de RFC 8461 dit 443, et un autre port ne joindrait personne.
+    #[must_use]
+    pub fn with_port(mut self, port: u16) -> Self {
+        self.port = port;
+        self
     }
 
     /// La configuration TLS qui vérifie ORDINAIREMENT le pair.
@@ -187,7 +206,7 @@ impl Sts {
 
         let flux = timeout(
             self.delai,
-            TcpStream::connect(std::net::SocketAddr::new(adresse, HTTPS_PORT)),
+            TcpStream::connect(std::net::SocketAddr::new(adresse, self.port)),
         )
         .await
         .ok()?

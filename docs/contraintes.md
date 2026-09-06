@@ -13288,3 +13288,103 @@ n'a rien changé : la signature était écartée bien plus tôt. Le second appel
 peut pas échouer, puisque seules les signatures déjà lues arrivent jusqu'à lui.
 Sans la reprise de l'épreuve en conditions réelles, la correction serait partie
 avec ses essais verts et son défaut intact.
+
+
+### `check-tout.sh` a servi le jour même où il est né
+
+La première tranche passée sous lui a échoué : un `use commun::materiel` devenu
+inutile à force de réécritures, refusé par `-D warnings`. `cargo test` ne dit
+rien d'un import inutilisé — il compile en mode test avec les avertissements
+ordinaires — et les six épreuves passaient.
+
+C'est exactement le défaut qui était parti en CI la veille, à un fichier près.
+Cette fois il a été connu AVANT la poussée, et les onze autres barrières ont
+tourné quand même : le tableau montrait d'un coup que seule celle-là refusait.
+
+**La correction ne dispense pas de tout relancer.** Retirer un import inutilisé
+d'un fichier d'essai ne peut affecter ni le fuzz, ni le paquet, ni la couverture
+— et se le dire est déjà commencer à choisir ses barrières. Les vingt-six minutes
+sont le prix du script ; les payer une seconde fois est ce qui le rend crédible.
+
+## Le fichier dont toute la confiance MTA-STS dépend n'était exercé par rien
+
+`ams-mtasts` — l'analyse d'une politique, la lecture d'un `id`, le nom de son
+fichier de cache — est couvert à 100 %, et c'est la crate qu'on remarque. Ce qui
+va CHERCHER la politique vit ailleurs, dans `ams-loop-tokio/src/mtasts.rs`, hors
+du périmètre couvert parce qu'il fait des entrées-sorties. Et rien ne l'appelait :
+
+    $ grep -rn 'policy_for' --include=*.rs crates/
+    crates/ams-loop-tokio/src/relay.rs:410
+    crates/ams-server/src/main.rs (par `with_mtasts`)
+
+Deux appelants, aucun essai. Ni le `TXT` interrogé, ni la connexion `https`, ni
+le cache, ni **la vérification du certificat**.
+
+**Ce dernier point est le seul qui compte vraiment.** Une politique en `enforce`
+est ce qui empêche un attaquant en coupure de faire retomber une remise en clair.
+Elle ne devient digne de foi qu'au moment où le certificat de
+`mta-sts.<domaine>` est vérifié, contre les autorités que l'exploitant a nommées
+et POUR CE NOM-LÀ. Si ce contrôle cédait, la politique ne serait plus qu'un texte
+que n'importe qui aurait écrit — et un attaquant y écrirait `mode: none`.
+
+### Pourquoi il n'y avait pas d'essai, et ce que ça dit
+
+§3.3 de RFC 8461 fixe le port à 443. Un essai ne peut pas l'ouvrir sans
+privilège, et le port était en dur. `Sts::with_port` existe désormais, avec la
+même mention « réservé aux tests » que `Relay::with_port`, qui existe pour
+exactement la même raison et depuis plus longtemps.
+
+**La leçon n'est pas « il manquait des essais »** — cela se voit sans rien
+mesurer. Elle est qu'une constante en dur avait rendu un fichier INÉPROUVABLE, et
+que personne ne s'en était aperçu parce que le vide ne se signale pas. La crate
+voisine affichait 100 % ; c'est le chiffre qu'on regardait.
+
+### Sept épreuves, et ce que chacune a coûté à vérifier
+
+Une autorité fabriquée à la volée par `openssl`, un certificat qu'elle signe avec
+le nom en `subjectAltName`, un hôte TLS qui sert une réponse choisie, et un
+résolveur qui répond `TXT` **et** `A` — le seul montage du dépôt qui ait besoin
+des deux genres à la fois, d'où une variante `Enregistrement::Txt` plutôt qu'un
+troisième résolveur d'essai.
+
+Trois défauts ont été injectés dans le produit pour voir si les épreuves les
+voient :
+
+- vérifier le certificat pour un AUTRE nom : quatre épreuves tombent ;
+- ne plus interroger le `TXT` : celle du rechargement tombe ;
+- accepter autre chose qu'un `200` : celle des redirections tombe.
+
+La quatrième — l'autorité inconnue — ne se confronte pas en cassant le produit
+mais en retournant l'épreuve : si le client croit l'autorité de l'USURPATEUR, la
+politique passe. Le verdict dépend donc bien de l'autorité, et non d'une poignée
+de main qui aurait échoué pour une autre raison.
+
+### L'épreuve qui affirmait une règle inexistante
+
+J'en avais écrit une huitième : « sans `TXT`, on ne va même pas chercher ». Le
+raisonnement paraissait solide — §3.1 fait du `TXT` la DÉCLARATION qu'un domaine
+implémente MTA-STS, et chercher quand même coûterait une connexion par domaine et
+par message. Elle a échoué, et j'ai failli écrire un défaut.
+
+§5.1 dit autre chose :
+
+> Check for a cached policy whose time-since-fetch has not exceeded its
+> "max_age".  If none exists, attempt to fetch a new policy (perhaps
+> asynchronously, so as not to block message delivery).  **Optionally, Sending
+> MTAs may unconditionally check for a new policy at this step.**
+
+La récupération n'est pas conditionnée au `TXT`, et §6 le confirme à l'envers en
+ne rendant rapportables que « HTTPS policy fetch failures **when a valid TXT
+record is present** » — ce qui n'aurait aucun sens si l'absence de `TXT`
+interdisait de chercher.
+
+**Et le coût redouté n'était pas celui que je croyais.** Quand
+`mta-sts.<domaine>` n'existe pas — le cas de la quasi-totalité du courrier — la
+récupération s'arrête à la résolution du nom : une question DNS, pas une
+connexion. Une épreuve le mesure, en pointant le port vers rien et en vérifiant
+que la réponse revient en moins d'un quart du délai monté.
+
+C'est la deuxième fois de la séance qu'une lecture de RFC empêche d'écrire un
+défaut qui n'en est pas un. La première portait sur `NOTIFY=DELAY` ; celle-ci sur
+§5.1. Dans les deux cas le produit avait raison, et c'est l'épreuve qu'il a fallu
+corriger.

@@ -352,6 +352,13 @@ pub enum Enregistrement {
     Mx(u16, &'static str),
     /// Un `A`.
     A([u8; 4]),
+    /// Un `TXT`, en une seule chaîne.
+    ///
+    /// MTA-STS en pose un — `_mta-sts.<domaine>` — ET demande un `A` pour
+    /// `mta-sts.<domaine>` : c'est le seul montage qui ait besoin des trois
+    /// genres à la fois, d'où cette variante ici plutôt qu'un troisième
+    /// résolveur d'essai.
+    Txt(&'static str),
 }
 
 /// Monte un résolveur qui répond des `MX` et des `A`.
@@ -383,6 +390,7 @@ pub async fn resolveur_courrier(
                 .filter(|valeur| match valeur {
                     Enregistrement::Mx(_, _) => genre == 15,
                     Enregistrement::A(_) => genre == 1,
+                    Enregistrement::Txt(_) => genre == 16,
                 })
                 .collect();
 
@@ -403,6 +411,13 @@ pub async fn resolveur_courrier(
                         (15_u16, rdata)
                     }
                     Enregistrement::A(octets) => (1_u16, Vec::from(&octets[..])),
+                    Enregistrement::Txt(texte) => {
+                        // Une chaîne de caractères DNS porte sa longueur devant.
+                        let mut rdata = Vec::new();
+                        rdata.push(u8::try_from(texte.len()).expect("chaîne courte"));
+                        rdata.extend_from_slice(texte.as_bytes());
+                        (16_u16, rdata)
+                    }
                 };
                 reponse.extend_from_slice(&[0xC0, 0x0C]);
                 reponse.extend_from_slice(&kind.to_be_bytes());
