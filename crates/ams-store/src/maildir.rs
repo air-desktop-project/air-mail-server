@@ -933,6 +933,46 @@ mod tests {
         assert_eq!(arrivee.commit().expect("validation").value(), prochain);
     }
 
+    /// **DEUX APPELS NE RENDENT JAMAIS LA MÊME VALEUR**, même dans la seconde.
+    ///
+    /// # CE QUE CETTE INVARIANTE ÉVITE
+    ///
+    /// L'horloge a une seconde de résolution. Effacer une boîte puis la recréer
+    /// dans la même seconde lui rendrait la MÊME validité, avec des UID repartis
+    /// de un : un client qui a gardé ses UID croirait sa vue encore bonne, et
+    /// montrerait à son porteur des messages qui ne sont pas ceux qu'il désigne.
+    /// §5.3.1 de RFC 9051 l'interdit explicitement pour une boîte recréée.
+    ///
+    /// # POURQUOI CET ESSAI NE DÉPEND D'AUCUNE HORLOGE
+    ///
+    /// Il n'attend pas, ne dort pas, et ne regarde pas l'heure : mille appels
+    /// d'affilée tiennent de toute façon dans la même seconde, et c'est
+    /// précisément le cas que le compteur existe pour couvrir. Un essai qui
+    /// aurait mesuré le temps aurait été instable — voir B10.
+    ///
+    /// **RIEN NE GARDAIT CETTE PROPRIÉTÉ** avant le 2026-09-06. Elle était
+    /// écrite, expliquée, mesurée contre le serveur vivant — six cycles dans une
+    /// seule seconde, six validités distinctes — et aucun essai ne l'aurait vue
+    /// disparaître.
+    #[test]
+    fn deux_validites_ne_se_repetent_jamais() {
+        let mut vues = std::collections::BTreeSet::new();
+        let mut precedente = 0_u32;
+        for tour in 0..1_000 {
+            let valeur = super::fresh_uid_validity().value();
+            assert!(
+                valeur > precedente,
+                "la validité doit croître STRICTEMENT : tour {tour}, {precedente} puis {valeur}"
+            );
+            assert!(
+                vues.insert(valeur),
+                "la validité {valeur} est rendue deux fois (tour {tour})"
+            );
+            precedente = valeur;
+        }
+        assert_eq!(vues.len(), 1_000, "mille appels, mille valeurs");
+    }
+
     #[test]
     fn l_uidvalidity_survit_a_une_reouverture() {
         // C'EST TOUTE LA RAISON D'ÊTRE DE L'INDEX. Si elle changeait à chaque
