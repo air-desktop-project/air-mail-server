@@ -4038,7 +4038,15 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         })
     }
 
-    /// `UID FETCH` (§6.4.9) — et rien d'autre pour l'instant.
+    /// Les commandes préfixées par `UID` (§6.4.9).
+    ///
+    /// **SIX, ET NON UNE.** Ce commentaire disait « `UID FETCH` — et rien d'autre
+    /// pour l'instant » jusqu'au 2026-09-06, alors que la fonction sert
+    /// `FETCH`, `SEARCH`, `STORE`, `COPY`, `MOVE` et `EXPUNGE` depuis longtemps.
+    /// Vérifié contre le serveur vivant : les six rendent `OK`.
+    ///
+    /// « Pour l'instant » est la formule qui vieillit le plus mal : elle décrit
+    /// un état transitoire, et rien ne signale qu'il a cessé.
     fn uid<'b>(&mut self, arguments: &[u8], out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
         if self.etat != State::Selected {
             return self.faute(b"Command is not allowed unless a mailbox is selected", out);
