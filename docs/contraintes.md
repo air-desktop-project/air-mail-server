@@ -3946,6 +3946,54 @@ Ce qui reste hors du serveur : **rien de connu**. Cette ligne annonçait « la f
 de réémission des messages sortants », et c'était faux — elle existe, elle est
 câblée, et [la liste v1](v1.md) le mesure plutôt que de le croire.
 
+## Les quatorze contraintes, confrontées au serveur qui tourne
+
+Ce registre promet, dans son préambule, de dire « ce qui la fait respecter
+aujourd'hui ». Le 2026-09-06, chacune a été confrontée non à son code mais au
+**serveur en marche**, ou au binaire livré.
+
+| | ce qui a été mesuré | verdict |
+|---|---|---|
+| C1 | `check-etages` contre un `use std::fs` glissé dans un codec | tenue |
+| C2 | deux régions inatteignables, refusées par le seuil | tenue |
+| C3 | 66 cibles de fuzz, un `panic!` injecté, artefact écrit | tenue |
+| C4 | TLS 1.2 reçoit l'alerte `protocol version` (70) ; 1.3 seul passe | tenue |
+| C6 | `AUTH` non annoncé en clair, `AUTH PLAIN` → `538 5.7.1` ; ni `APOP` ni `CRAM-MD5` dans le code | tenue |
+| C8 | 600 commandes par minute : la 200ᵉ remise est coupée net | tenue |
+| C9 | le bit `AD` d'un résolveur non déclaré est effacé | tenue depuis ce jour |
+| C11 | un fichier texte et un fichier tronqué, chacun refusé avec son diagnostic | tenue |
+| C12 | `air-mail-admin` et `air-mail-server`, deux noms | tenue |
+| C13 | `new/`, `cur/`, `tmp/`, et un message lisible tel quel | tenue |
+| C14 | `X25519MLKEM768` négocié ; **mais la liste des groupes était sous-décrite** | corrigée |
+
+### CE QUE C8 A DIT SANS QU'ON LE LUI DEMANDE
+
+Un banc de mesure de débit s'est arrêté à **exactement 199 messages**. Trois
+commandes par message, six cents commandes par minute : le garde avait fait son
+travail, et le banc mesurait la protection au lieu du serveur.
+
+C'est la meilleure façon de vérifier une limite — la rencontrer sans la chercher.
+
+### CE QUE CETTE REVUE N'A PAS COUVERT
+
+**C10** — le refus de démarrer en superutilisateur — n'a pas été éprouvé
+directement : le faire demanderait de lancer ce serveur en root, ce qu'aucune
+mesure ne justifie. Le code appelle `geteuid` et refuse ; c'est vérifié par ses
+essais, pas par une exécution.
+
+**C5** et **C7** ne se mesurent pas : la première dit quel moteur d'entrées-sorties
+s'emploie par cible, la seconde arbitre entre sécurité et performance. Ce sont des
+règles de conception, et ce qui les fait respecter est la revue.
+
+### CE QUE LA REVUE A CHANGÉ
+
+Une seule entrée sur quatorze était en écart, et l'écart était de PRÉCISION, non
+de fond : C14 décrivait deux groupes de clés là où le serveur en offre quatre.
+L'obligation — offrir et préférer le post-quantique — était tenue.
+
+Onze contraintes confrontées au serveur vivant, une corrigée, deux hors de portée
+d'une mesure et dites comme telles.
+
 ## Le `PIPELINING` qu'on annonçait coûtait quarante millisecondes par message
 
 Ce serveur annonce `PIPELINING` dans son `EHLO` (RFC 2920) : le pair peut envoyer
