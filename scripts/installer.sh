@@ -268,8 +268,10 @@ table inet mail {
         tcp dport 25  redirect to :2525
         tcp dport 587 redirect to :2525
         tcp dport 465 redirect to :4465
+        tcp dport 143 redirect to :1143
         tcp dport 993 redirect to :9993
         tcp dport 110 redirect to :1110
+        tcp dport 995 redirect to :9995
     }
 }
 TABLE

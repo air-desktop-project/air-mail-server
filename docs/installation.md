@@ -240,8 +240,10 @@ table inet mail {
         tcp dport 25  redirect to :2525
         tcp dport 587 redirect to :2525
         tcp dport 465 redirect to :4465
+        tcp dport 143 redirect to :1143
         tcp dport 993 redirect to :9993
         tcp dport 110 redirect to :1110
+        tcp dport 995 redirect to :9995
     }
 }
 ```
@@ -251,7 +253,8 @@ avec la configuration qui lui répond :
 ```
 air-mail-admin config write /var/lib/air-mail/air-mail.conf \
     --listen 0.0.0.0:2525 --listen-smtps 0.0.0.0:4465 \
-    --listen-imaps 0.0.0.0:9993 --listen-pop3 0.0.0.0:1110 \
+    --listen-imap 0.0.0.0:1143 --listen-imaps 0.0.0.0:9993 \
+    --listen-pop3 0.0.0.0:1110 --listen-pop3s 0.0.0.0:9995 \
     --tls-cert … --tls-key … …
 ```
 
@@ -266,9 +269,20 @@ suit est ce qui en est sorti, et non ce qu'on en attendait.
 | 465 | 4465 | poignée de main **TLS 1.3**, puis la bannière |
 | 993 | 9993 | poignée de main **TLS 1.3**, puis `* OK [CAPABILITY IMAP4rev2 …]` |
 | 110 | 1110 | `+OK POP3 server ready` |
+| 143 | 1143 | **redirection NON éprouvée** — le port 1143 l'a été, directement |
+| 995 | 9995 | **redirection NON éprouvée** — le port 9995 l'a été, directement |
 
 Un message remis par le **465** a été relu par le **993**, sujet et corps
 intacts, à travers la redirection.
+
+**LES DEUX DERNIÈRES LIGNES DISENT MOINS QUE LES CINQ AUTRES**, et c'est
+délibéré. Les ports 1143 et 9995 ont été éprouvés le 2026-09-06 — le premier
+répond `* OK [CAPABILITY …]` en `STARTTLS`, le second une poignée de main
+TLS 1.3 puis `+OK POP3 server ready` —, mais **pas à travers la table** : la
+mesure `veth` demande des privilèges que la séance qui les a ajoutés n'avait
+pas. Leur règle a la forme exacte des cinq autres, et rien ne distingue une
+redirection de port d'une autre ; ce n'est pas une raison pour écrire qu'on l'a
+vue marcher.
 
 ### L'adresse du client survit à la redirection
 
@@ -282,26 +296,13 @@ Received: from client.essai.test ([10.99.0.2])
 
 `redirect` change la DESTINATION, jamais la source.
 
-### Les six ports se servent ensemble
+### Les sept redirections, et deux qui sont récentes
 
-Depuis le 2026-09-06, les trois protocoles portent chacun une LISTE d'écoutes.
-La table peut donc rediriger les six :
-
-```
-        tcp dport 25  redirect to :2525
-        tcp dport 587 redirect to :2525
-        tcp dport 465 redirect to :4465
-        tcp dport 143 redirect to :1143
-        tcp dport 993 redirect to :9993
-        tcp dport 110 redirect to :1110
-        tcp dport 995 redirect to :9995
-```
-
-avec `--listen-imap` ET `--listen-imaps`, `--listen-pop3` ET `--listen-pop3s`.
-Chaque option est répétable, et chaque écoute garde son mode.
-
-**Avant cela, deux d'entre eux étaient hors d'atteinte** : le 995 n'était pas
-servable du tout, et le 143 ne pouvait pas l'être en même temps que le 993.
+Le 143 et le 995 ont été ajoutés le 2026-09-06 : avant cette date, le 995
+n'était pas servable du tout, et le 143 ne pouvait pas l'être en même temps que
+le 993. Chaque protocole porte désormais une LISTE d'écoutes, et chacune garde
+son mode — d'où `--listen-imap` ET `--listen-imaps`, `--listen-pop3` ET
+`--listen-pop3s` dans la commande ci-dessus.
 
 ### N'ajoutez PAS de chaîne `output`
 

@@ -162,8 +162,15 @@ echo
 echo "── 8. le document et le script posent LA MÊME unité ─────────────────────"
 # **DEUX COPIES D'UN MÊME TEXTE DIVERGENT**, et celle qu'on relit n'est pas celle
 # qui tourne. `docs/installation.md` §7 montre l'unité ; le script l'écrit. Les
-# comparer ici est le seul moyen que la première reste vraie — sans quoi elle
-# rejoint la table `nftables` d'avant, exacte le jour où elle a été écrite.
+# comparer ici est le seul moyen que la première reste vraie.
+#
+# **LA TABLE `nftables` ÉTAIT CITÉE ICI COMME L'EXEMPLE À NE PAS SUIVRE** —
+# « exacte le jour où elle a été écrite » — et elle n'était pas contrôlée. Elle
+# a donc redérivé, le 2026-09-06 : le serveur s'est mis à servir le 143 et le
+# 995, le document a gagné une SECONDE table qui les redirigeait, et
+# l'installateur a continué d'en écrire cinq. Un document qui se contredit
+# lui-même est pire qu'un document qui vieillit. Le contrôle 8bis existe pour
+# cela.
 sed -n '/^## 7. L.unité systemd/,/^```$/p' docs/installation.md \
     | sed -n '/^\[Unit\]/,$p' | head -n -1 > "$essai/unite-doc"
 if [ ! -s "$essai/unite-doc" ]; then
@@ -173,6 +180,26 @@ elif ! diff -u "$essai/unite-doc" "$unite" > "$essai/ecart" 2>&1; then
 $(cat "$essai/ecart")"
 else
     echo "OK — au caractère près"
+fi
+
+echo
+echo "── 8bis. le document et le script posent LA MÊME table ──────────────────"
+# **UNE SEULE TABLE DANS LE DOCUMENT**, et c'est celle que le script écrit. Deux
+# tables dans un même document se contredisent dès que l'une bouge, et le
+# lecteur n'a aucun moyen de savoir laquelle est vraie.
+regles_doc=$(grep -cE '^ *tcp dport [0-9]+ +redirect to :[0-9]+$' docs/installation.md)
+grep -E '^ *tcp dport [0-9]+ +redirect to :[0-9]+$' docs/installation.md \
+    | sed 's/^ *//' > "$essai/table-doc"
+grep -E '^ *tcp dport [0-9]+ +redirect to :[0-9]+$' scripts/installer.sh \
+    | sed 's/^ *//' > "$essai/table-script"
+if [ ! -s "$essai/table-doc" ]; then
+    rate "docs/installation.md ne montre plus de redirection"
+elif [ "$regles_doc" -ne "$(wc -l < "$essai/table-script")" ] \
+    || ! diff -u "$essai/table-doc" "$essai/table-script" > "$essai/ecart" 2>&1; then
+    rate "le document et le script ne redirigent pas les mêmes ports :
+$(cat "$essai/ecart" 2>/dev/null)"
+else
+    echo "OK — $regles_doc redirections, les mêmes des deux côtés"
 fi
 
 echo
