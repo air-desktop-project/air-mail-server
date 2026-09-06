@@ -3902,6 +3902,55 @@ Ce qui reste hors du serveur : **rien de connu**. Cette ligne annonçait « la f
 de réémission des messages sortants », et c'était faux — elle existe, elle est
 câblée, et [la liste v1](v1.md) le mesure plutôt que de le croire.
 
+## Ce que valent les dix barrières, éprouvé une à une
+
+Le 2026-09-06, chaque barrière a été confrontée à un défaut qu'elle prétend
+voir. **C'est la seule mesure qui dise quelque chose** : une barrière verte
+depuis des mois prouve seulement qu'elle ne dit pas non.
+
+| barrière | défaut injecté | verdict |
+|---|---|---|
+| `check-format` | une fonction mal indentée | attrapé |
+| `check-etages` | `use std::fs` dans un codec | attrapé |
+| `check-etages` | **une crate retirée du périmètre** | **PASSÉ** — corrigé |
+| `check-compile` | un champ manquant dans une cible de fuzz | attrapé |
+| `check-sans-c` | un `.o` déposé dans `target/debug/build` | attrapé |
+| `check-couverture` | deux régions inatteignables | attrapé |
+| `check-installation` | **un binaire `release` périmé** | **PASSÉ** — corrigé |
+| `check-installation` | une option imprimée qui n'existe pas | attrapé |
+| `check-paquet` | un `postrm` qui efface le courrier | attrapé |
+| `check-paquet` | un `postinst` qui allume le service | attrapé |
+| `check-paquet` | une racine de paquet en `0700` | attrapé |
+| `check-paquet` | un `postinst` qui se répète à chaque montée | attrapé |
+| `check-fuzz` | un `panic!` injecté dans une cible | attrapé |
+| `check-dco` | pas de `Signed-off-by` | attrapé |
+| `check-dco` | une attribution à un outil | attrapé |
+| `check-dco` | un commit non signé | attrapé |
+
+### LES DEUX QUI ONT LAISSÉ PASSER
+
+Toutes deux portaient sur la DÉFINITION de ce qu'elles examinaient, jamais sur
+l'examen lui-même :
+
+- `check-etages` lisait son périmètre dans un tableau que rien n'épinglait ;
+- `check-installation` éprouvait un binaire présent, sans regarder s'il était à
+  jour.
+
+**Une barrière a deux moitiés, et la seconde ne se garde pas toute seule.** Elle
+n'échoue jamais — elle ne fait qu'imprimer un nombre, ou supposer un fichier.
+
+### UNE VACUITÉ QUI SE DIT, ET QU'ON LAISSE
+
+`check-dco` cherche sa base dans `origin/main`. Lancé APRÈS une poussée, la
+plage est vide : il ne vérifie rien et sort à zéro.
+
+Il le dit — « Aucun commit dans `origin/main..HEAD` — RIEN n'a été vérifié » —
+et l'intégration continue lui passe une base explicite, si bien que le cas ne s'y
+présente pas. **On le laisse tel quel** : une barrière qui annonce n'avoir rien
+examiné ne ment pas. Ce qui mentirait serait un vert silencieux.
+
+La consigne, elle, ne change pas : on le lance AVANT de pousser, jamais après.
+
 ## Le périmètre n'était épinglé par rien
 
 `check-etages.sh` lit sa liste de crates dans `check-couverture.sh`. Mesuré le
