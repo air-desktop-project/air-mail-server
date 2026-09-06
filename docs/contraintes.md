@@ -3902,6 +3902,56 @@ Ce qui reste hors du serveur : **rien de connu**. Cette ligne annonçait « la f
 de réémission des messages sortants », et c'était faux — elle existe, elle est
 câblée, et [la liste v1](v1.md) le mesure plutôt que de le croire.
 
+## Le périmètre n'était épinglé par rien
+
+`check-etages.sh` lit sa liste de crates dans `check-couverture.sh`. Mesuré le
+2026-09-06 : **retirer une crate de cette liste est accepté en silence.**
+
+Elle perd d'un coup son contrôle d'étage (C1) et son 100 % de couverture (C2).
+Les dix barrières restent vertes. Le contrôle imprime seulement
+« périmètre : 29 crates » au lieu de trente — une ligne que personne ne compare
+à rien.
+
+### CE N'EST PAS UNE FAILLE THÉORIQUE
+
+C'est la manière la plus économique de faire taire les deux contraintes qui
+gouvernent tout le dépôt. Pas en les contournant : en cessant de les appliquer,
+sur une crate, par une ligne retirée d'un tableau.
+
+Et l'oubli avait le même effet que la malveillance : une crate NEUVE, absente
+des deux listes, échappait aux deux contraintes sans que quiconque l'ait décidé.
+
+### CE QUI L'A TROUVÉ
+
+La discipline appliquée aux contrôles NEUFS — les éprouver contre les défauts
+qu'ils prétendent voir — n'avait jamais été appliquée aux ANCIENS. En la leur
+appliquant, `check-etages` a passé la première épreuve (un `use std::fs` glissé
+dans un codec : attrapé) et échoué à la seconde.
+
+**Un contrôle peut avoir des dents pour ce qu'il examine, et aucune sur la
+définition de ce qu'il examine.**
+
+### DEUX CAMPS, ET RIEN ENTRE LES DEUX
+
+Toute crate est désormais ou bien DANS le périmètre, ou bien nommée dans
+`HORS_PERIMETRE` avec sa raison — les boucles, le magasin Maildir, l'écriture
+atomique, les deux binaires, le client QUIC des essais. Il n'y a pas de
+troisième cas.
+
+Trois évasions ont été éprouvées :
+
+| ce qu'on tente | ce qui l'attrape |
+|---|---|
+| retirer une crate du périmètre | le nouveau contrôle des camps |
+| ajouter une crate sans la déclarer | le contrôle des tableaux du README, plus ancien |
+| nommer une crate disparue | le nouveau contrôle des fantômes |
+
+### CE QUE CELA DIT DES BARRIÈRES EN GÉNÉRAL
+
+Une barrière a deux moitiés : ce qu'elle examine, et **la définition de ce
+qu'elle examine**. La seconde ne se garde pas toute seule, et c'est la moins
+regardée — elle n'échoue jamais, puisqu'elle ne fait qu'imprimer un nombre.
+
 ## « Présent » n'est pas « à jour » : une barrière qui interrogeait un fantôme
 
 `check-installation.sh` ne construisait les binaires `release` que s'ils

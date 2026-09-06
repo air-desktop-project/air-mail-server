@@ -84,6 +84,54 @@ if [ "$sur_disque" != "$au_tableau" ]; then
 fi
 
 echo "découpage  : les tableaux du README nomment les $(wc -l <<< "$sur_disque") crates de \`crates/\`"
+
+# ── CHAQUE CRATE EST DANS UN CAMP, ET C'EST ÉCRIT ───────────────────────────
+#
+# **LE PÉRIMÈTRE N'ÉTAIT ÉPINGLÉ PAR RIEN.** Mesuré le 2026-09-06 : retirer une
+# crate de `CRATES_SANS_IO` était accepté EN SILENCE. Elle perdait d'un coup son
+# contrôle d'étage (C1) et son 100 % de couverture (C2), et les dix barrières
+# restaient vertes — ce contrôle-ci imprimait seulement « 29 crates » au lieu de
+# trente, ligne que personne ne compare à rien.
+#
+# Une crate neuve avait le même sort : oubliée des deux listes, elle échappait
+# aux deux contraintes sans que quiconque l'ait décidé.
+#
+# Désormais, toute crate est ou bien DANS le périmètre, ou bien NOMMÉE ici avec
+# sa raison. Il n'y a pas de troisième cas, et l'oubli n'en est plus un.
+HORS_PERIMETRE=(
+    # Les boucles : c'est leur métier de lire, d'écrire et d'attendre (C1).
+    ams-loop-tokio
+    # Le magasin Maildir : il TOUCHE le disque, c'est sa raison d'être.
+    ams-store
+    # L'écriture atomique par renommage : du fichier, rien que du fichier.
+    ams-fichier
+    # Les deux binaires : ils ouvrent des sockets et lisent des fichiers.
+    ams-server
+    ams-admin
+    # Le client QUIC des essais d'interopérabilité : il parle au réseau.
+    ams-quic-client
+)
+oubliees=$(comm -23 <(echo "$sur_disque") \
+    <(printf '%s\n' $crates "${HORS_PERIMETRE[@]}" | sort -u))
+if [ -n "$oubliees" ]; then
+    echo >&2
+    echo "ÉCHEC : ces crates ne sont ni dans le périmètre, ni déclarées hors de lui :" >&2
+    sed 's/^/    /' >&2 <<< "$oubliees"
+    echo >&2
+    echo "Une crate qu'aucune des deux listes ne nomme échappe à C1 ET à C2 sans" >&2
+    echo "que personne l'ait décidé. Ajoutez-la au périmètre de" >&2
+    echo "\`check-couverture.sh\`, ou à \`HORS_PERIMETRE\` avec sa raison." >&2
+    exit 1
+fi
+fantomes=$(comm -13 <(echo "$sur_disque") \
+    <(printf '%s\n' "${HORS_PERIMETRE[@]}" | sort -u))
+if [ -n "$fantomes" ]; then
+    echo >&2
+    echo "ÉCHEC : \`HORS_PERIMETRE\` nomme des crates qui n'existent plus :" >&2
+    sed 's/^/    /' >&2 <<< "$fantomes"
+    exit 1
+fi
+echo "camps      : $combien dans le périmètre, ${#HORS_PERIMETRE[@]} déclarées hors — et rien entre les deux"
 echo
 
 # ── Ce qui est interdit, et pourquoi chaque entrée y est ────────────────────
