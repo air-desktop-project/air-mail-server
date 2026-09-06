@@ -31,13 +31,16 @@ static HYBRIDE: X25519MlKem768 = X25519MlKem768::new(&rustls_rustcrypto::Provide
 /// - **Pas une ligne de C.** `aws-lc-rs` et `ring` en embarquent ; le portage
 ///   vers Air ne peut pas payer ce prix (C4).
 /// - **`X25519MLKEM768` EN PREMIER.** rustls essaie les groupes dans l'ordre :
-///   le placer en tête, c'est le faire préférer. `X25519` reste derrière, pour
-///   les pairs dont la pile ne sait pas encore faire de post-quantique (C14).
+///   le placer en tête, c'est le faire préférer. **La liste amont reste derrière,
+///   entière** — `X25519`, `secp256r1`, `secp384r1` —, pour les pairs dont la
+///   pile ne sait pas encore faire de post-quantique (C14). Ce commentaire ne
+///   nommait que `X25519` : vrai du deuxième, muet sur les deux suivants.
 ///
 /// # Le résidu, nommé
 ///
-/// Un pair sans post-quantique obtient `X25519`, et **cette connexion-là n'est
-/// pas protégée** contre « intercepter aujourd'hui, déchiffrer demain ». C'est
+/// Un pair sans post-quantique obtient l'un des trois groupes classiques, et
+/// **cette connexion-là n'est pas protégée** contre « intercepter aujourd'hui,
+/// déchiffrer demain ». C'est
 /// le prix de l'interopérabilité ; on ne dira donc jamais que ce serveur est
 /// post-quantique sans ajouter « quand le pair le veut bien ».
 #[must_use]
@@ -101,15 +104,21 @@ mod tests {
             .iter()
             .map(|groupe| groupe.name())
             .collect();
-        assert_eq!(noms.first(), Some(&NamedGroup::X25519MLKEM768));
-        // `X25519` reste offert derrière, pour les pairs sans post-quantique.
-        assert!(
-            noms.contains(&NamedGroup::X25519),
-            "X25519 devrait rester offert : {noms:?}"
-        );
-        assert!(
-            noms.len() >= 4,
-            "les groupes classiques ont disparu : {noms:?}"
+        // **LA LISTE EXACTE, ET NON UN MINIMUM.** Elle était éprouvée par
+        // `len() >= 4`, ce qui laissait l'amont en ajouter ou en retirer sans
+        // qu'on le sache — alors que C14 DÉCRIT cette liste, et qu'une entrée
+        // qui décrit sans épingler vieillit. Un changement de
+        // `rustls-rustcrypto` doit faire échouer cet essai, pour que la
+        // contrainte soit relue plutôt que dépassée en silence.
+        assert_eq!(
+            noms,
+            std::vec![
+                NamedGroup::X25519MLKEM768,
+                NamedGroup::X25519,
+                NamedGroup::secp256r1,
+                NamedGroup::secp384r1,
+            ],
+            "la liste des groupes a changé : C14 la décrit, et doit être relue"
         );
     }
 

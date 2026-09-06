@@ -3707,16 +3707,30 @@ passer par `spawn_blocking`.
 ## C14 — Échange de clés post-quantique obligatoire
 
 Le serveur **doit toujours offrir `X25519MLKEM768`** (point de code `0x11ec`), et
-le préférer à tout autre groupe. `X25519` reste offert **en second**, pour les
-pairs dont la pile TLS ne sait pas encore faire de post-quantique.
+le préférer à tout autre groupe. Des groupes classiques restent offerts derrière
+lui, pour les pairs dont la pile TLS ne sait pas encore faire de post-quantique.
+
+**QUATRE GROUPES, ET NON DEUX** — énumérés le 2026-09-06 depuis le fournisseur
+lui-même, dans l'ordre où rustls les essaie :
+
+    0. X25519MLKEM768     ← préféré, et c'est l'obligation
+    1. X25519
+    2. secp256r1
+    3. secp384r1
+
+Les trois derniers viennent de `rustls-rustcrypto` : ce dépôt place l'hybride en
+tête et **garde la liste amont derrière**. Cette entrée disait « `X25519` reste
+offert en second » et s'arrêtait là — vrai du second, muet sur les deux
+suivants.
 
 L'obligation porte sur le **serveur**, pas sur le client : ce groupe doit être
 présent et préféré dans toute configuration ; aucune n'a le droit de le retirer.
 
 ### Le résidu accepté, et il est nommé
 
-Un pair sans post-quantique obtient `X25519`, et cette connexion-là **n'est pas
-protégée** contre « intercepter aujourd'hui, déchiffrer demain ». C'est le prix
+Un pair sans post-quantique obtient l'un des trois groupes classiques — celui
+qu'il offre et que rustls rencontre en premier —, et cette connexion-là **n'est
+pas protégée** contre « intercepter aujourd'hui, déchiffrer demain ». C'est le prix
 de l'interopérabilité, il est payé les yeux ouverts, et il ne doit pas être
 présenté autrement — notamment pas dans une documentation qui annoncerait « le
 serveur est post-quantique » sans dire « quand le pair le veut bien ».
