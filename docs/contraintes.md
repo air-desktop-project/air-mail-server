@@ -3990,6 +3990,38 @@ message.
     SEARCH SUBJECT "…"                  83 ms
     FETCH <un message> BODY[]           42 ms
 
+### LE MÊME PIÈGE À DIX FOIS L'ÉCHELLE, ET LE CORRECTIF NE SUFFISAIT PAS
+
+Sur une boîte de **50 000** messages, `FETCH 1:* FLAGS` — 1,3 Mio de réponse —
+prenait 4,4 secondes de temps de mur avec le banc CORRIGÉ. La même vérification
+tranche encore :
+
+    1:1000    mur   76 ms | serveur 10 ms | client   16 ms
+    1:10000   mur  325 ms | serveur 20 ms | client  189 ms
+    1:50000   mur 4409 ms | serveur 80 ms | client 4209 ms
+
+**Quatre-vingts millisecondes de serveur pour cinquante mille messages** — 1,6 µs
+par message. Les 95 % restants sont le client : borner la recherche d'expression
+régulière ne suffisait pas, la concaténation `tampon += morceau` recopiant elle
+aussi tout le tampon à chaque lecture.
+
+Un banc a donc plusieurs façons d'être quadratique, et en corriger une ne prouve
+rien sur les autres. Ce qui prouve, c'est de mesurer le CALCUL DU SUJET — et
+cette mesure-là, elle, a dit deux fois la même chose.
+
+### CE QUE LE SERVEUR TIENT, À 50 000 MESSAGES
+
+    démarrage (index compris)        1 295 ms
+    LOGIN (argon2id)                    38 ms
+    SELECT INBOX                       195 ms
+    STATUS INBOX (MESSAGES)              0 ms
+    SEARCH ALL                          50 ms
+    FETCH 1:* FLAGS                     80 ms de calcul
+    FETCH <un message> BODY[]           42 ms
+
+Le démarrage et `SELECT` croissent linéairement — dix fois plus de messages,
+six à onze fois plus de temps. `STATUS` et `SEARCH ALL` ne bougent presque pas.
+
 ### LA LEÇON, ET C'EST LA SECONDE DE LA JOURNÉE
 
 Le registre porte déjà « un banc de mesure mal synchronisé invente des
