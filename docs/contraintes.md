@@ -2000,6 +2000,26 @@ synchronisant avec sa demande de continuation, `LOGOUT`.
 FETCH` servent maintenant la boîte du compte. Une par compte, nommée `INBOX` — le
 nom que la RFC 9051 §5.1 réserve pour cela.
 
+> **CETTE ENTRÉE A ÉTÉ DÉPASSÉE LE JOUR MÊME.** `CREATE` est arrivé dans une
+> tranche ultérieure du 2026-08-29 — son entrée s'intitule d'ailleurs « là où un
+> nom de client DEVIENT UN CHEMIN » —, et un nom de boîte devient bel et bien un
+> répertoire Maildir++ depuis. Mesuré le 2026-09-06 :
+>
+> ```
+> maildir/jean/.Archive
+> maildir/jean/.Travail
+> maildir/jean/.Travail.Sous
+> ```
+>
+> Ce qui suit décrit donc l'état d'un serveur qui n'avait qu'`INBOX`. La règle de
+> fond, elle, n'a pas changé : un nom de client ne se concatène jamais tel quel à
+> un chemin, il est VÉRIFIÉ puis transcrit — voir `mailbox_name_is_safe` et
+> l'entrée sur l'UTF-7 modifié.
+>
+> **C'est la deuxième entrée de ce registre dont la prémisse est morte quelques
+> heures après sa rédaction, et dont la conclusion restait juste.** On ne la
+> réécrit pas : on dit qu'elle a été dépassée, et par quoi.
+
 AUCUN CHEMIN N'EST CONSTRUIT À PARTIR D'UN NOM DE BOÎTE. Le nom vient du client.
 `INBOX` est comparé à une constante, et la boîte qu'il désigne est celle que la
 table des comptes a déjà ouverte au démarrage. Un nom qui n'est pas `INBOX`
