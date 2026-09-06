@@ -442,6 +442,9 @@ struct Spf {
   # ne vaut que ce que vaut le chemin jusqu'au résolveur. Un résolveur local, ou
   # joint par un lien qu'on maîtrise, est ce que cette absence suppose.
   #
+  # **CE N'EST PLUS UNE SIMPLE SUPPOSITION** depuis le 2026-09-06 : voir
+  # `resolversTrusted`, qui décide si le bit `AD` d'une réponse est cru.
+  #
   # Ils sont interrogés DANS L'ORDRE, et le premier qui répond décide : deux
   # résolveurs qui ne disent pas la même chose ne se départagent pas en prenant
   # celui qui plaît.
@@ -456,6 +459,32 @@ struct Spf {
   # Le produit des deux borne ce qu'un domaine hostile peut faire attendre un
   # `MAIL FROM:`, et c'est ce produit-là qu'il faut regarder.
   timeoutMillis @2 :UInt32;
+
+  # Le lien jusqu'aux résolveurs est-il DÉCLARÉ de confiance ?
+  #
+  # # CE QUE CE CHAMP GOUVERNE : LE BIT `AD`, DONC DANE
+  #
+  # §2.1 de RFC 7672 laisse DEUX branches : ou bien l'agent valide DNSSEC
+  # lui-même, ou bien il s'appuie sur un résolveur valideur joint par un CANAL
+  # DE CONFIANCE. Ce serveur prend la seconde — et jusqu'ici il la prenait sans
+  # jamais vérifier qu'elle tenait.
+  #
+  # **CROIRE LE BIT `AD` D'UN RÉSOLVEUR LOINTAIN EST PIRE QUE DE L'IGNORER.**
+  # Quand DANE s'engage, MTA-STS n'est plus consulté (§2 de RFC 8461). Un tiers
+  # placé sur le chemin d'un résolveur distant peut donc forger un `MX` et un
+  # `TLSA` avec `AD=1`, faire s'engager DANE contre SON PROPRE certificat, et
+  # désarmer ainsi la protection qui l'aurait arrêté — MTA-STS, dont la
+  # politique se récupère en HTTPS, hors du chemin DNS.
+  #
+  # # CE QUI EST DE CONFIANCE SANS RIEN DÉCLARER
+  #
+  # La boucle locale. Un résolveur sur `127.0.0.0/8` ou `::1` ne se joint par
+  # aucun réseau, et rien ne peut se placer entre lui et nous.
+  #
+  # FAUX PAR DÉFAUT, donc un fichier écrit avant ce champ cesse d'appliquer DANE
+  # si ses résolveurs sont distants — et RETOMBE SUR MTA-STS, qui est
+  # exactement le comportement sûr.
+  resolversTrusted @3 :Bool;
 
   enum Enforcement {
     # On vérifie, on retient, on n'oppose rien. L'état où l'on découvre ce

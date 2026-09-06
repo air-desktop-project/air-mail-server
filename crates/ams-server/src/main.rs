@@ -918,9 +918,51 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         let delai = Duration::from_millis(u64::from(options.spf.timeout_millis));
         Some(
             SenderChecker::new(resolveurs.clone(), delai)
-                .map_err(|erreur| format!("SPF : {erreur}"))?,
+                .map_err(|erreur| format!("SPF : {erreur}"))?
+                .avec_lien_de_confiance(options.spf.resolvers_trusted),
         )
     };
+    // ── LE CANAL JUSQU'AUX RÉSOLVEURS (§2.1 de RFC 7672) ────────────────────
+    //
+    // **ON DIT CE QU'ON CROIT, ET CE QU'ON NE CROIT PAS.** Le bit `AD` décide
+    // si DANE s'engage, et DANE qui s'engage écarte MTA-STS : un exploitant qui
+    // ignore que son bit est jeté croirait DANE actif, et un exploitant qui
+    // ignore qu'il est cru ne saurait pas ce qu'il a déclaré.
+    let distants: Vec<&String> = options
+        .spf
+        .resolvers
+        .iter()
+        .zip(&resolveurs)
+        .filter(|(_, adresse)| !adresse.ip().is_loopback())
+        .map(|(brute, _)| brute)
+        .collect();
+    if !resolveurs.is_empty() {
+        let dit = match (distants.as_slice(), options.spf.resolvers_trusted) {
+            ([], _) => String::from(
+                "résolveurs sur la boucle locale — le bit `AD` est cru, et DANE peut s'engager",
+            ),
+            (loin, true) => format!(
+                "LIEN DÉCLARÉ DE CONFIANCE jusqu'à {} — le bit `AD` est cru, et DANE peut \
+                 s'engager. Cette déclaration engage l'exploitant : un tiers capable de \
+                 s'y placer peut faire remettre le courrier chez lui.",
+                loin.iter()
+                    .map(|nom| nom.as_str())
+                    .collect::<std::vec::Vec<_>>()
+                    .join(", ")
+            ),
+            (loin, false) => format!(
+                "résolveurs DISTANTS non déclarés ({}) — le bit `AD` est JETÉ et DANE ne \
+                 s'engagera pas ; MTA-STS décide. C'est le comportement sûr : croire ce bit \
+                 sur un lien qu'on ne maîtrise pas écarterait MTA-STS au profit d'un `TLSA` \
+                 qu'un tiers aurait pu écrire. `--resolver-trusted` le déclare.",
+                loin.iter()
+                    .map(|nom| nom.as_str())
+                    .collect::<std::vec::Vec<_>>()
+                    .join(", ")
+            ),
+        };
+        eprintln!("air-mail-server : {dit}");
+    }
     let config = config.with_sender_policy(politique_expediteur);
     // **UN COMPTEUR ÉTEINT QU'ON CROIT ALLUMÉ EST PIRE QU'UN COMPTEUR ABSENT.**
     // Ce seuil a été AJOUTÉ au schéma : une configuration écrite avant lui décode

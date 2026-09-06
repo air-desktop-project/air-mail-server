@@ -123,6 +123,10 @@ struct Entree {
     /// une écoute, et laisser passer une chaîne vide ferait ouvrir on ne sait
     /// quoi — ou rien, sans le dire.
     ecoutes: Vec<(String, bool)>,
+    /// Le lien jusqu'aux résolveurs est-il déclaré de confiance ? **Il décide
+    /// si le bit `AD` est cru** : un aller-retour qui le perdrait ferait croire
+    /// DANE actif là où il ne l'est pas, ou l'inverse.
+    lien_declare: bool,
     /// Les écoutes IMAP, chacune avec son mode. **LES TROIS PROTOCOLES ONT
     /// DÉSORMAIS LEUR LISTE**, et l'aller-retour doit les rendre toutes les
     /// trois : une liste qu'on relirait vide serait un port qui ne s'ouvre pas.
@@ -207,6 +211,7 @@ fuzz_target!(|entree: Entree| {
                 Enforcement::Observe
             },
             timeout_millis: entree.delai_dns,
+            resolvers_trusted: entree.lien_declare,
         },
         dmarc: Dmarc {
             public_suffix_list: entree.suffixes.clone(),

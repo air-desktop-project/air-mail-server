@@ -126,6 +126,11 @@ pub struct Options {
     pub spf_enforce: bool,
     /// Le temps accordé à une question DNS.
     pub spf_timeout_millis: u32,
+    /// Le lien jusqu'aux résolveurs DISTANTS est-il déclaré de confiance ?
+    ///
+    /// **Il décide si le bit `AD` est cru, donc si DANE s'engage.** La boucle
+    /// locale n'en a pas besoin. Voir `--resolver-trusted`.
+    pub resolvers_trusted: bool,
     /// La liste des suffixes publics. Vide : DMARC n'est pas évalué.
     pub public_suffix_list: Option<PathBuf>,
     /// Oppose-t-on un `p=reject`, ou se contente-t-on de le retenir ?
@@ -235,6 +240,9 @@ impl Default for Options {
             // découvrir dans un journal que dans un appel téléphonique.
             spf_enforce: false,
             spf_timeout_millis: 5_000,
+            // **NON DÉCLARÉ PAR DÉFAUT.** Le défaut va dans le sens sûr : on
+            // perd DANE sur un résolveur distant, on n'ouvre pas de brèche.
+            resolvers_trusted: false,
             // PAS DE LISTE PAR DÉFAUT : sans elle, DMARC n'est pas évalué. En
             // embarquer une la ferait vieillir avec le binaire, et personne ne
             // saurait de quand date la sienne.
@@ -352,6 +360,7 @@ impl Options {
                     Enforcement::Observe
                 },
                 timeout_millis: self.spf_timeout_millis,
+                resolvers_trusted: self.resolvers_trusted,
             },
             dmarc: Dmarc {
                 public_suffix_list: chemin(self.public_suffix_list.as_ref()),
@@ -646,6 +655,24 @@ OPTIONS DE `config write`
     et hériter en silence de celui du système serait hériter d'une confiance que
     personne n'a accordée. Nommez-en un local, ou joint par un lien que vous
     maîtrisez.
+
+    --resolver-trusted     DÉCLARE que le lien jusqu'aux résolveurs DISTANTS est
+                           de confiance. Sans cette déclaration, le bit `AD`
+                           d'une réponse venue d'ailleurs que de la boucle
+                           locale est JETÉ, et DANE ne s'engage pas.
+
+    CE QUE CETTE DÉCLARATION ENGAGE. Le bit `AD` dit « j'ai validé DNSSEC ».
+    Venant d'un résolveur qu'un tiers peut atteindre, il dit seulement
+    « quelqu'un a écrit que quelqu'un a validé ». Le croire fait s'engager DANE,
+    et DANE qui s'engage ÉCARTE MTA-STS (§2 de RFC 8461) : un tiers placé sur ce
+    chemin peut donc forger un `MX` et un `TLSA`, faire remettre le courrier
+    chez lui, et désarmer au passage la protection qui l'aurait arrêté. Croire
+    ce bit à tort est PIRE que de l'ignorer.
+
+    §2.1 de RFC 7672 laisse deux branches : valider DNSSEC soi-même, ou
+    s'appuyer sur un résolveur valideur joint par un canal de confiance. Ce
+    serveur prend la seconde, et cette option est l'endroit où vous dites que le
+    canal en est un. La boucle locale n'a rien à déclarer.
 
     `--spf observe` (le défaut) vérifie et RETIENT sans rien opposer ; `--spf
     enforce` refuse un `fail` par un 550 et ajourne une panne de résolution par
@@ -1023,6 +1050,10 @@ where
                     .map_err(|_| ArgError::new(format!("`{brute}` n'est pas une adresse")))?;
                 options.resolvers.push(adresse);
             }
+            // **UNE DÉCLARATION, PAS UN RÉGLAGE DE CONFORT.** Elle décide si le
+            // bit `AD` d'une réponse est cru, donc si DANE s'engage — et DANE
+            // qui s'engage écarte MTA-STS.
+            "--resolver-trusted" => options.resolvers_trusted = true,
             "--spf" => {
                 let mot = valeur()?;
                 match mot.as_str() {
@@ -2932,6 +2963,30 @@ mod tests {
         // qu'eux.
         assert_eq!(config.listen_imap, "0.0.0.0:2143");
         assert!(!config.imap_implicit_tls);
+    }
+
+    /// **LA DÉCLARATION DE CONFIANCE SE DIT, ET NE SE DEVINE PAS.**
+    ///
+    /// Elle décide si le bit `AD` d'une réponse est cru, donc si DANE s'engage
+    /// — et DANE qui s'engage écarte MTA-STS. Son défaut va donc dans le sens
+    /// sûr : sans elle, on perd DANE sur un résolveur distant, on n'ouvre pas
+    /// de brèche.
+    #[test]
+    fn le_lien_de_confiance_se_declare_et_ne_se_devine_pas() {
+        // Sans rien dire : non déclaré, jusque dans la configuration écrite.
+        let muet = ecrire(&["--resolver", "192.0.2.53:53"]);
+        assert!(!muet.resolvers_trusted);
+        assert!(!muet.en_configuration().spf.resolvers_trusted);
+
+        // Et une boucle locale ne le déclare pas non plus : elle n'en a pas
+        // besoin, c'est le résolveur qui le sait.
+        let local = ecrire(&["--resolver", "127.0.0.1:53"]);
+        assert!(!local.resolvers_trusted);
+
+        // Déclaré : l'exploitant l'engage.
+        let dit = ecrire(&["--resolver", "192.0.2.53:53", "--resolver-trusted"]);
+        assert!(dit.resolvers_trusted);
+        assert!(dit.en_configuration().spf.resolvers_trusted);
     }
 
     /// **LE 110 ET LE 995 AUSSI**, et le 995 n'était pas servable du tout.

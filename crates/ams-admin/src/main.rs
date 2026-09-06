@@ -695,7 +695,43 @@ fn afficher(config: &Configuration) {
         );
         println!("  résolveurs       {}", config.spf.resolvers.join(", "));
         println!("  délai par requête {} ms", config.spf.timeout_millis);
-        println!("  DNSSEC           NON VALIDÉ — ces résolveurs sont crus sur parole");
+        // **CE QUE LE BIT `AD` VAUT ICI, ET RIEN DE PLUS.** Cette ligne disait
+        // « ces résolveurs sont crus sur parole », ce qui n'est plus vrai : ils
+        // ne le sont que sur la boucle locale, ou sur déclaration.
+        let distants: Vec<&String> = config
+            .spf
+            .resolvers
+            .iter()
+            .filter(|brute| {
+                brute
+                    .parse::<std::net::SocketAddr>()
+                    .is_ok_and(|adresse| !adresse.ip().is_loopback())
+            })
+            .collect();
+        println!("  DNSSEC           NON VALIDÉ en propre (RFC 7672 §2.1)");
+        println!(
+            "  bit `AD`         {}",
+            match (distants.is_empty(), config.spf.resolvers_trusted) {
+                (true, _) => String::from("CRU — boucle locale ; DANE peut s'engager"),
+                (false, true) => std::format!(
+                    "CRU — lien DÉCLARÉ de confiance jusqu'à {} ; DANE peut s'engager",
+                    distants
+                        .iter()
+                        .map(|nom| nom.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                (false, false) => std::format!(
+                    "JETÉ — {} hors de la boucle locale, sans `--resolver-trusted` ; \
+                     DANE ne s'engage pas, MTA-STS décide",
+                    distants
+                        .iter()
+                        .map(|nom| nom.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            }
+        );
     } else {
         println!("SPF                AUCUN RÉSOLVEUR — l'expéditeur n'est pas vérifié");
     }

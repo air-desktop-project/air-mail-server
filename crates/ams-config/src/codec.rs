@@ -158,6 +158,14 @@ pub struct Spf {
     pub enforcement: Enforcement,
     /// Le temps accordé à UNE question, en millisecondes.
     pub timeout_millis: u32,
+    /// Le lien jusqu'aux résolveurs est-il DÉCLARÉ de confiance ?
+    ///
+    /// **Il gouverne le bit `AD`, donc DANE.** §2.1 de RFC 7672 permet de
+    /// s'appuyer sur un résolveur valideur joint par un canal de confiance ;
+    /// encore faut-il que le canal en soit un. La boucle locale l'est sans rien
+    /// déclarer — voir le schéma, qui dit pourquoi croire ce bit à tort est
+    /// PIRE que de l'ignorer.
+    pub resolvers_trusted: bool,
 }
 
 impl Spf {
@@ -752,6 +760,7 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
             Err(_) => return Err(Error::UnknownEnforcement),
         },
         timeout_millis: verification.get_timeout_millis(),
+        resolvers_trusted: verification.get_resolvers_trusted(),
     };
 
     let alignement = lu.get_dmarc()?;
@@ -910,6 +919,7 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
                 Enforcement::Enforce => crate::ams_config_capnp::spf::Enforcement::Enforce,
             });
             verification.set_timeout_millis(config.spf.timeout_millis);
+            verification.set_resolvers_trusted(config.spf.resolvers_trusted);
             let combien = u32::try_from(config.spf.resolvers.len()).unwrap_or(u32::MAX);
             let mut liste = verification.init_resolvers(combien);
             for (rang, resolveur) in config.spf.resolvers.iter().enumerate() {
@@ -1184,6 +1194,7 @@ mod tests {
                 resolvers: vec![String::from("127.0.0.1:53")],
                 enforcement: Enforcement::Enforce,
                 timeout_millis: 5_000,
+                resolvers_trusted: false,
             },
             dmarc: Dmarc {
                 public_suffix_list: String::from("/etc/ams/public_suffix_list.dat"),
@@ -1502,6 +1513,7 @@ mod tests {
             resolvers: vec![String::from("127.0.0.1:53"), String::from("[::1]:53")],
             enforcement: Enforcement::Enforce,
             timeout_millis: 3_000,
+            resolvers_trusted: true,
         };
         let octets = encode(&original).expect("encodable");
         let relue = decode(&octets).expect("relisible");

@@ -3281,19 +3281,39 @@ chiffrement, et le rapporter comme un problème de certificat enverrait le domai
 chercher au mauvais endroit. Seuls l'échec de poignée de main, l'échec DANE et le
 serveur hors politique sont rapportés.
 
-### DNSSEC n'est pas validé, et c'est écrit partout
+### DNSSEC n'est pas validé, et depuis le 2026-09-06 la condition est CONTRÔLÉE
 
 Le résolveur est cru sur parole. Un `pass` ne vaut donc que ce que vaut le chemin
 jusqu'à lui, et c'est pourquoi le résolveur doit être **local, ou joint par un
-lien de confiance**. Trois endroits le disent plutôt qu'un : le schéma de
+lien de confiance**. Trois endroits le disaient plutôt qu'un : le schéma de
 configuration, l'aide d'`air-mail-admin`, et une ligne au démarrage du serveur.
 Une lacune qu'on nomme est une lacune ; une lacune qu'on tait est un mensonge.
+
+**MAIS TROIS ENDROITS QUI LE DISENT NE VALENT PAS UN QUI LE VÉRIFIE**, et
+pendant longtemps aucun ne le vérifiait. C'est la leçon de cette tranche : une
+condition écrite partout et contrôlée nulle part se lit comme une garantie.
 
 **DANE repose sur cette même hypothèse, et pas sur une plus forte** (voir
 plus haut). Le bit `AD` dit ce que le résolveur A VALIDÉ ; le croire, c'est croire
 le chemin jusqu'à lui, exactement comme pour SPF. La différence est que DANE
 DÉCIDE — il refuse une remise —, et c'est pourquoi le serveur annonce la
 condition au démarrage au lieu de la laisser dans un registre.
+
+**ET IL FAIT PIRE QUE DÉCIDER : IL ÉCARTE MTA-STS** (§2 de RFC 8461). Un tiers
+placé sur le chemin d'un résolveur distant pouvait donc forger un `MX` et un
+`TLSA` avec `AD=1`, faire s'engager DANE contre son propre certificat, et
+désarmer ainsi la protection qui l'aurait arrêté — MTA-STS, dont la politique se
+récupère en HTTPS, hors du chemin DNS. **Croire ce bit à tort était donc pire que
+de l'ignorer** : ce n'était pas une garantie manquante, c'était une garantie qui
+en désarmait une autre.
+
+Le bit est désormais EFFACÉ à l'entrée quand la réponse vient d'un résolveur hors
+de la boucle locale que l'exploitant n'a pas déclaré (`--resolver-trusted`).
+L'effacement a lieu au SEUL endroit qui sache de quel serveur une réponse vient :
+`txt`, `mx`, `tlsa` et tout type qu'on ajoutera lisent un bit déjà dépouillé,
+sans avoir à y penser. §2.1 de RFC 7672 laisse exactement ces deux branches —
+valider soi-même, ou s'appuyer sur un canal de confiance —, et ce champ est
+l'endroit où la seconde se déclare au lieu de se supposer.
 
 **Valider DNSSEC nous-mêmes reste à faire**, et ce serait la seule façon de ne
 plus rien emprunter : RRSIG, DNSKEY, DS, une ancre de confiance, NSEC et NSEC3
@@ -3881,6 +3901,79 @@ mot — pas à sa propre liste.
 Ce qui reste hors du serveur : **rien de connu**. Cette ligne annonçait « la file
 de réémission des messages sortants », et c'était faux — elle existe, elle est
 câblée, et [la liste v1](v1.md) le mesure plutôt que de le croire.
+
+## Trois endroits qui le disent ne valent pas un qui le vérifie
+
+Le dépôt affirmait, en trois endroits, que le résolveur devait être « local, ou
+joint par un lien de confiance » : le schéma de configuration,
+`ams-loop-tokio/src/resolver.rs`, et C9 ici même. Le registre s'en félicitait :
+« une lacune qu'on nomme est une lacune ; une lacune qu'on tait est un
+mensonge ».
+
+**Aucun des trois ne la contrôlait.** Le bit `AD` était cru quelle que soit la
+distance du résolveur.
+
+### CE QUE CETTE CRÉDULITÉ COÛTAIT, ET POURQUOI C'EST PIRE QU'UNE LACUNE
+
+`relay.rs` fait ce que §2 de RFC 8461 demande : quand DANE s'engage, MTA-STS
+n'est **même pas consulté**. C'est juste, et c'est ce qui rend le défaut grave.
+
+Un tiers placé sur le chemin d'un résolveur distant pouvait :
+
+1. forger la réponse `MX` avec `AD=1` — son propre serveur ;
+2. forger la réponse `TLSA` avec `AD=1` — son propre certificat ;
+3. faire s'engager DANE, qui ne regardait que le bit ;
+4. **et faire taire MTA-STS**, qui l'aurait arrêté.
+
+MTA-STS récupère sa politique en HTTPS, validée par la WebPKI, hors du chemin
+DNS : c'était exactement la protection qui tenait contre un attaquant du DNS. La
+faire écarter par une réponse DNS forgée retourne la défense contre elle-même.
+
+**Croire ce bit à tort n'était donc pas une garantie manquante : c'était une
+garantie qui en désarmait une autre.** C'est la première fois que ce registre
+note un défaut de cette forme.
+
+### LE BLOCAGE NE DISAIT PAS CE QU'IL FALLAIT CRAINDRE
+
+Il s'appelait « DNSSEC n'est pas validé », et se lisait comme une fonction
+manquante — de celles qu'on ajoute un jour. Or §2.1 de RFC 7672 laisse DEUX
+branches : valider DNSSEC soi-même, **ou** s'appuyer sur un résolveur valideur
+joint par un canal de confiance. Ce serveur prenait la seconde, ce qui est
+permis. Ce qui manquait n'était pas la validation : c'était la vérification que
+la branche choisie tenait.
+
+Un blocage mal nommé se traite mal — celui-ci appelait une crate entière quand
+il fallait vingt lignes au bon endroit.
+
+### LE BON ENDROIT, JUSTEMENT
+
+Le bit s'efface dans `interroger_un`, **le seul endroit qui sache de quel serveur
+une réponse vient** : plus haut, `interroger` ne rend que des octets. `txt`,
+`mx`, `tlsa` — et tout type qu'on ajoutera un jour — lisent donc un bit déjà
+dépouillé, sans avoir à y penser.
+
+L'autre découpage possible aurait rendu la confiance à côté des octets et laissé
+chaque appelant la combiner. Trois appelants aujourd'hui, un quatrième demain, et
+c'est le quatrième qui aurait oublié.
+
+### CE QUE LA BOUCLE LOCALE N'A PAS À DÉCLARER
+
+Un résolveur sur `127.0.0.0/8` ou `::1` ne se joint par aucun réseau : il n'y a
+pas de chemin où se placer. Le reste demande une déclaration explicite, et
+`--resolver-trusted` est l'endroit où l'exploitant l'engage — le texte d'aide dit
+ce qu'il engage, plutôt que de décrire un réglage.
+
+**Le défaut va dans le sens sûr** : un exploitant qui oublie la déclaration PERD
+DANE et retombe sur MTA-STS ; il n'ouvre pas de brèche. L'oubli inverse en
+ouvrirait une.
+
+### ÉPROUVÉ CONTRE UN RÉSOLVEUR QUI MENT
+
+Un faux résolveur qui pose `AD` sur tout, joint par une adresse **non locale
+réelle** de la machine — trouvée en demandant au noyau par où il sortirait, sans
+qu'aucun paquet ne parte. Non déclaré, le bit tombe ; déclaré, il passe. L'essai
+s'abstient là où la machine n'a que la boucle locale, et ce qu'il éprouve alors
+est éprouvé par les essais unitaires.
 
 ## Une limitation présentée comme une observation
 

@@ -44,6 +44,11 @@ pub struct Resolver {
     serveurs: Arc<[SocketAddr]>,
     delai: Duration,
     alea: Arc<Alea>,
+    /// Le lien jusqu'aux résolveurs DISTANTS est-il déclaré de confiance ?
+    ///
+    /// La boucle locale n'a pas besoin de ce champ : rien ne peut se placer
+    /// entre elle et nous.
+    lien_declare: bool,
 }
 
 impl Resolver {
@@ -65,7 +70,39 @@ impl Resolver {
             serveurs: serveurs.into(),
             delai,
             alea: Arc::new(Alea::ouvrir()?),
+            // **NON DÉCLARÉ PAR DÉFAUT**, et le défaut va dans le sens sûr :
+            // un appelant qui oublie de le dire PERD DANE sur un résolveur
+            // distant, il n'ouvre pas une brèche. L'oubli inverse en ouvrirait
+            // une.
+            lien_declare: false,
         })
+    }
+
+    /// Déclare que le lien jusqu'aux résolveurs distants est de confiance.
+    ///
+    /// # CE QUE L'EXPLOITANT DÉCLARE ICI
+    ///
+    /// Qu'aucun tiers ne peut se placer entre ce serveur et ses résolveurs :
+    /// un réseau privé, un tunnel, une machine voisine sur un lien qu'il
+    /// maîtrise. §2.1 de RFC 7672 permet cette branche — c'est la seule autre
+    /// que la validation DNSSEC en propre.
+    ///
+    /// **CE N'EST PAS UN RÉGLAGE DE CONFORT.** Il décide si le bit `AD` est
+    /// cru, donc si DANE s'engage ; et DANE qui s'engage ÉCARTE MTA-STS.
+    #[must_use]
+    pub fn avec_lien_de_confiance(mut self, declare: bool) -> Self {
+        self.lien_declare = declare;
+        self
+    }
+
+    /// Ce résolveur-ci est-il joint par un canal de confiance ?
+    ///
+    /// **LA BOUCLE LOCALE L'EST SANS RIEN DÉCLARER.** Un résolveur sur
+    /// `127.0.0.0/8` ou `::1` ne se joint par aucun réseau : il n'y a pas de
+    /// chemin où se placer. Tout le reste demande une déclaration.
+    #[must_use]
+    fn de_confiance(&self, serveur: SocketAddr) -> bool {
+        serveur.ip().is_loopback() || self.lien_declare
     }
 
     /// Les résolveurs interrogés, dans l'ordre.
@@ -269,9 +306,42 @@ impl Resolver {
             let Ok(Ok(octets)) = reprise.await else {
                 return Issue::Panne;
             };
-            return issue_du_message(octets);
+            return issue_du_message(self.depouiller(serveur, octets));
         }
-        issue_du_message(octets)
+        issue_du_message(self.depouiller(serveur, octets))
+    }
+
+    /// Efface le bit `AD` d'une réponse venue d'un canal qu'on n'a pas déclaré.
+    ///
+    /// # POURQUOI ICI, ET NULLE PART AILLEURS
+    ///
+    /// C'est le SEUL endroit qui sache de quel serveur une réponse vient : plus
+    /// haut, `interroger` ne rend que des octets. Le faire ici rend impossible
+    /// d'oublier — `txt`, `mx`, `tlsa` et tout type qu'on ajoutera un jour
+    /// lisent un bit déjà dépouillé, sans avoir à y penser.
+    ///
+    /// # CE QU'ON EFFACE EST UNE AFFIRMATION QU'ON NE PEUT PAS PORTER
+    ///
+    /// Le bit dit « j'ai validé ». Venant d'un résolveur qu'un tiers peut
+    /// atteindre, il dit seulement « quelqu'un a écrit que quelqu'un a validé ».
+    /// Le transporter tel quel ferait s'engager DANE sur la parole d'un
+    /// inconnu — et DANE qui s'engage ÉCARTE MTA-STS (§2 de RFC 8461), donc
+    /// désarme la protection qui aurait arrêté ce même inconnu.
+    ///
+    /// **Croire ce bit à tort est donc PIRE que de l'ignorer**, et c'est
+    /// pourquoi l'effacer est le comportement sûr : on retombe sur MTA-STS, qui
+    /// ne passe pas par le DNS.
+    fn depouiller(&self, serveur: SocketAddr, mut octets: Vec<u8>) -> Vec<u8> {
+        if self.de_confiance(serveur) {
+            return octets;
+        }
+        // Le bit `AD` est le sixième du second octet de drapeaux (RFC 4035
+        // §3.2.3) — `0x0020` dans le `u16` lu à l'offset 2, donc `0x20` dans
+        // l'octet 3. Une réponse trop courte pour en avoir un n'en a pas.
+        if let Some(drapeaux) = octets.get_mut(3) {
+            *drapeaux &= !0x20;
+        }
+        octets
     }
 
     /// Un aller-retour UDP, avec une socket neuve — donc un port source neuf.
@@ -434,3 +504,157 @@ impl Alea {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod confiance {
+    use super::*;
+
+    fn resolveur(serveur: &str) -> Resolver {
+        Resolver::new(
+            std::vec![serveur.parse().expect("adresse")],
+            Duration::from_secs(1),
+        )
+        .expect("résolveur")
+    }
+
+    /// Une réponse qui porte `AD`, réduite à son en-tête.
+    fn reponse_authentifiee() -> Vec<u8> {
+        // ID, puis les drapeaux : réponse, récursion, `AD` (0x20) posé — et des
+        // sections VIDES, car ce qu'on éprouve ici est l'en-tête, pas le corps.
+        std::vec![0x12, 0x34, 0x81, 0xa0, 0, 0, 0, 0, 0, 0, 0, 0]
+    }
+
+    /// **LA BOUCLE LOCALE GARDE SON BIT** : rien ne peut se placer entre elle
+    /// et nous.
+    #[test]
+    fn la_boucle_locale_garde_le_bit() {
+        for local in ["127.0.0.1:53", "[::1]:53", "127.0.0.53:53"] {
+            let garde = resolveur(local)
+                .depouiller(local.parse().expect("adresse"), reponse_authentifiee());
+            let message = Message::parse(&garde).expect("lisible");
+            assert!(message.authentic_data(), "{local} : le bit a été jeté");
+        }
+    }
+
+    /// **UN RÉSOLVEUR DISTANT NON DÉCLARÉ PERD LE SIEN.** C'est tout l'objet de
+    /// cette tranche : le bit dirait « j'ai validé » sur la parole d'un
+    /// inconnu, et DANE écarterait MTA-STS sur cette parole.
+    #[test]
+    fn un_resolveur_distant_non_declare_perd_le_bit() {
+        let loin: SocketAddr = "8.8.8.8:53".parse().expect("adresse");
+        let jete = resolveur("8.8.8.8:53").depouiller(loin, reponse_authentifiee());
+        let message = Message::parse(&jete).expect("lisible");
+        assert!(!message.authentic_data(), "le bit d'un inconnu a été cru");
+    }
+
+    /// **DÉCLARÉ, IL EST CRU** : §2.1 de RFC 7672 laisse cette branche, et
+    /// c'est l'exploitant qui l'engage.
+    #[test]
+    fn un_lien_declare_garde_le_bit() {
+        let loin: SocketAddr = "10.0.0.53:53".parse().expect("adresse");
+        let garde = resolveur("10.0.0.53:53")
+            .avec_lien_de_confiance(true)
+            .depouiller(loin, reponse_authentifiee());
+        let message = Message::parse(&garde).expect("lisible");
+        assert!(message.authentic_data(), "une déclaration n'a pas suffi");
+    }
+
+    /// **ON N'EFFACE QUE CE BIT-LÀ.** Le reste de la réponse doit traverser
+    /// intact : un dépouillement qui abîmerait un autre drapeau ferait lire
+    /// autre chose que ce que le résolveur a dit.
+    #[test]
+    fn le_reste_de_la_reponse_traverse_intact() {
+        let loin: SocketAddr = "8.8.8.8:53".parse().expect("adresse");
+        let avant = reponse_authentifiee();
+        let apres = resolveur("8.8.8.8:53").depouiller(loin, avant.clone());
+        assert_eq!(apres.len(), avant.len(), "la longueur a changé");
+        for (rang, (a, b)) in avant.iter().zip(&apres).enumerate() {
+            // Seul l'octet 3 change, et seulement de son bit 0x20.
+            if rang == 3 {
+                assert_eq!(*a ^ *b, 0x20, "l'octet de drapeaux a bougé d'autre chose");
+            } else {
+                assert_eq!(a, b, "l'octet {rang} a changé");
+            }
+        }
+    }
+
+    /// L'adresse NON LOCALE de cette machine, s'il y en a une.
+    ///
+    /// **AUCUN PAQUET NE PART** : `connect` sur une socket UDP ne fait que fixer
+    /// la destination, et le noyau choisit alors l'adresse source qu'il aurait
+    /// prise. C'est le moyen le plus court de savoir par où l'on sortirait.
+    fn adresse_non_locale() -> Option<std::net::IpAddr> {
+        let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+        socket.connect("203.0.113.1:53").ok()?;
+        let adresse = socket.local_addr().ok()?.ip();
+        (!adresse.is_loopback()).then_some(adresse)
+    }
+
+    /// Un faux résolveur qui pose `AD` sur tout, à l'adresse qu'on lui donne.
+    async fn resolveur_qui_ment(sur: std::net::IpAddr) -> Option<SocketAddr> {
+        let socket = tokio::net::UdpSocket::bind(SocketAddr::new(sur, 0))
+            .await
+            .ok()?;
+        let adresse = socket.local_addr().ok()?;
+        tokio::spawn(async move {
+            let mut recu = std::vec![0_u8; 2048];
+            while let Ok((lus, pair)) = socket.recv_from(&mut recu).await {
+                let question = recu.get(..lus).unwrap_or_default().to_vec();
+                let mut reponse = Vec::new();
+                reponse.extend_from_slice(question.get(..2).unwrap_or_default());
+                // Réponse, récursion disponible, **et `AD` posé** (0x0020).
+                reponse.extend_from_slice(&0x81a0_u16.to_be_bytes());
+                for compte in [1_u16, 0, 0, 0] {
+                    reponse.extend_from_slice(&compte.to_be_bytes());
+                }
+                reponse.extend_from_slice(question.get(12..).unwrap_or_default());
+                let _ = socket.send_to(&reponse, pair).await;
+            }
+        });
+        Some(adresse)
+    }
+
+    /// **LA CHAÎNE ENTIÈRE**, contre un résolveur qui pose `AD` sur tout.
+    ///
+    /// Cet essai s'abstient là où la machine n'a que la boucle locale — une
+    /// machine de construction cloisonnée, par exemple. Ce qu'il éprouve alors
+    /// est éprouvé par les essais unitaires au-dessus ; ce qu'il ajoute, c'est
+    /// que le dépouillement a bien lieu SUR LE CHEMIN RÉEL, et pas seulement
+    /// dans une fonction qu'on appellerait à la main.
+    #[tokio::test]
+    async fn un_resolveur_menteur_est_depouille_de_bout_en_bout() {
+        let Some(non_locale) = adresse_non_locale() else {
+            return;
+        };
+        let Some(adresse) = resolveur_qui_ment(non_locale).await else {
+            return;
+        };
+
+        // Non déclaré : le bit tombe, et DANE ne s'engagera pas.
+        let strict = Resolver::new(std::vec![adresse], Duration::from_secs(2)).expect("résolveur");
+        let (_, authentique) = strict.tlsa(b"_25._tcp.exemple.test").await;
+        assert!(
+            !authentique,
+            "le bit `AD` d'un résolveur distant non déclaré a été cru"
+        );
+
+        // Déclaré : l'exploitant l'engage, et le bit est cru.
+        let declare = Resolver::new(std::vec![adresse], Duration::from_secs(2))
+            .expect("résolveur")
+            .avec_lien_de_confiance(true);
+        let (_, authentique) = declare.tlsa(b"_25._tcp.exemple.test").await;
+        assert!(authentique, "une déclaration explicite n'a pas suffi");
+    }
+
+    /// **UNE RÉPONSE TROP COURTE NE PANIQUE PAS.** Elle n'a pas de bit à
+    /// effacer, et `get_mut` le dit sans indexer.
+    #[test]
+    fn une_reponse_trop_courte_ne_panique_pas() {
+        let loin: SocketAddr = "8.8.8.8:53".parse().expect("adresse");
+        for taille in 0..4_usize {
+            let courte = std::vec![0_u8; taille];
+            let rendue = resolveur("8.8.8.8:53").depouiller(loin, courte);
+            assert_eq!(rendue.len(), taille);
+        }
+    }
+}

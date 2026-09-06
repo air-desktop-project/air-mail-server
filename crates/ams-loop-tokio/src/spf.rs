@@ -60,6 +60,16 @@ impl SenderChecker {
         })
     }
 
+    /// Déclare que le lien jusqu'aux résolveurs distants est de confiance.
+    ///
+    /// Voir [`Resolver::avec_lien_de_confiance`] : c'est la même déclaration,
+    /// et elle décide si le bit `AD` est cru — donc si DANE s'engage.
+    #[must_use]
+    pub fn avec_lien_de_confiance(mut self, declare: bool) -> Self {
+        self.resolveur = self.resolveur.avec_lien_de_confiance(declare);
+        self
+    }
+
     /// Le résolveur, que DKIM emprunte pour ses propres questions.
     #[must_use]
     pub fn resolver(&self) -> &Resolver {
