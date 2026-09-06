@@ -692,6 +692,104 @@ fn un_client_curl_releve_le_courrier() {
     );
 }
 
+/// **LE MÊME CLIENT TIERS, MAIS QUI ÉMET.**
+///
+/// # CE QUE LES AUTRES ESSAIS D'INTEROPÉRABILITÉ NE FONT PAS
+///
+/// `interop.rs` rejoue des conversations ENREGISTRÉES de Postfix, d'Exim et
+/// d'OpenSMTPD : d'excellentes données, mais figées. Rien dans ce dépôt ne fait
+/// parler un client tiers VIVANT, qui décide lui-même de ce qu'il envoie et
+/// quand.
+///
+/// `curl` le fait, et il ne se contente pas du minimum : il monte `STARTTLS`,
+/// s'authentifie, puis écrit `MAIL FROM:<…> SIZE=72` — **il emploie l'extension
+/// `SIZE` que nous annonçons**, ce qu'aucun de nos essais ne lui demandait.
+/// Annoncer une extension qu'on ne saurait pas lire se paierait ici.
+#[test]
+fn un_client_curl_soumet_un_message() {
+    let atelier = atelier("interop-curl-smtp");
+    let Some((cert, cle)) = paire(&atelier.0) else {
+        panic!("{SANS_OPENSSL}");
+    };
+    if Command::new("curl").arg("--version").output().is_err() {
+        eprintln!("IGNORÉ : `curl` est absent — cet essai n'a RIEN éprouvé.");
+        return;
+    }
+
+    let magasin = atelier.0.join("comptes.bin");
+    let empreinte = ams_auth::hash_password(b"ouvre-toi", b"seize octets ici").expect("hachable");
+    let comptes = vec![ams_auth::Account {
+        login: String::from("jean"),
+        hash: empreinte,
+        addresses: vec![String::from("jean@example.com")],
+    }];
+    std::fs::write(
+        &magasin,
+        ams_config::encode_accounts(&comptes).expect("encodable"),
+    )
+    .expect("écriture");
+    std::fs::set_permissions(&magasin, std::fs::Permissions::from_mode(0o600))
+        .expect("permissions");
+
+    let port_smtp = port_libre();
+    let config = configuration_pop3(
+        &atelier,
+        port_smtp,
+        Tls {
+            certificate_chain_path: cert.display().to_string(),
+            private_key_path: cle.display().to_string(),
+        },
+        &magasin.display().to_string(),
+        "",
+    );
+    let _serveur = lancer(&config, port_smtp);
+
+    let lettre = atelier.0.join("lettre.eml");
+    std::fs::write(
+        &lettre,
+        "From: <jean@example.com>\r\nSubject: envoi par curl\r\n\r\nle corps venu de curl\r\n",
+    )
+    .expect("écriture");
+
+    // `--ssl-reqd` : `curl` REFUSE de continuer en clair. C'est ce qui fait de
+    // cet essai une vérification du `STARTTLS` autant que de la soumission.
+    let sortie = Command::new("curl")
+        .arg("-s")
+        .arg("--insecure")
+        .arg("--ssl-reqd")
+        .args(["-u", "jean:ouvre-toi"])
+        .args(["--mail-from", "jean@example.com"])
+        .args(["--mail-rcpt", "jean@example.com"])
+        .arg("-T")
+        .arg(&lettre)
+        .arg(format!("smtp://127.0.0.1:{port_smtp}"))
+        .output()
+        .expect("curl s'exécute");
+    assert!(
+        sortie.status.success(),
+        "curl doit aboutir : {}",
+        String::from_utf8_lossy(&sortie.stderr)
+    );
+
+    // ── ET LE MESSAGE EST DANS LA BOÎTE ────────────────────────────────────
+    //
+    // Un `250` ne prouve rien tout seul : c'est le disque qui dit si le message
+    // a été remis.
+    let boite = atelier.0.join("boite").join("jean");
+    let trouve = ["new", "cur"].iter().any(|dossier| {
+        std::fs::read_dir(boite.join(dossier))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|entree| {
+                std::fs::read_to_string(entree.path())
+                    .unwrap_or_default()
+                    .contains("le corps venu de curl")
+            })
+    });
+    assert!(trouve, "le message soumis par curl doit être dans la boîte");
+}
+
 /// **LE MÊME CLIENT TIERS, SUR L'AUTRE PORTE.**
 ///
 /// `libcurl` parle POP3 comme il parle IMAP, et avec les mêmes idées venues
