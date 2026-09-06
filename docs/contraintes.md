@@ -3902,6 +3902,96 @@ Ce qui reste hors du serveur : **rien de connu**. Cette ligne annonçait « la f
 de réémission des messages sortants », et c'était faux — elle existe, elle est
 câblée, et [la liste v1](v1.md) le mesure plutôt que de le croire.
 
+## Le seul code de ce dépôt qui s'exécute en root chez un inconnu
+
+`installer.sh` posait ; il ne savait pas défaire. C'est ce qui manquait le plus —
+un exploitant qui voulait retirer ce serveur devait effacer des fichiers à la
+main, en espérant n'en oublier aucun, et deviner qu'un compte système restait.
+
+Un `.deb` apporte les trois choses nommées en B6 : les dépendances, la mise à
+jour, la désinstallation. Mais il apporte aussi un risque que rien d'autre dans
+ce dépôt ne porte.
+
+### CE QUI REND UN PAQUET DIFFÉRENT DU RESTE
+
+Ses scripts de mainteneur tournent **en root, sur la machine de quelqu'un
+d'autre, sans que personne les relise**. Tout le reste de ce dépôt s'exécute
+sous un compte sans privilège, ou sous les yeux de celui qui l'a lancé.
+
+Le plus coûteux des défauts possibles n'est donc pas un service qui ne démarre
+pas : c'est un `postrm` qui efface `/var/lib/air-mail` sur un `dpkg --purge`.
+Ce répertoire porte **les boîtes aux lettres** en plus de la configuration, et
+`purge` veut dire « retire la configuration », pas « perds le courrier ».
+
+Le paquet ne l'efface donc jamais — il dit à l'exploitant comment le faire
+lui-même, en sachant ce qu'il efface.
+
+### DIRE AU LIEU DE FAIRE, ET UN CONTRÔLE QUI SAIT LES DISTINGUER
+
+Le `postrm` CITE `rm -rf /var/lib/air-mail` dans le texte qu'il imprime. Un
+contrôle naïf qui chercherait cette commande condamnerait donc **exactement la
+bonne conduite**.
+
+Il faut dénuder les « here-documents » avant de chercher : ce qu'un script
+imprime n'est pas ce qu'il fait. Le même dénudage sert au contrôle qui vérifie
+que le `postinst` n'allume pas le service — il imprime `systemctl enable --now`
+comme marche à suivre, et ne l'exécute pas.
+
+### UNE SEULE UNITÉ, ET ON SAIT POURQUOI
+
+`paquet.sh` n'écrit pas d'unité systemd : il APPELLE `installer.sh` pour poser
+l'arborescence, puis l'empaquette. La tentation d'en écrire une seconde copie
+était réelle — le paquet range ses fichiers ailleurs, et une copie « adaptée »
+paraissait plus simple.
+
+La leçon de la table `nftables` avait quelques heures : deux copies d'un même
+texte divergent, et celle qu'on relit n'est pas celle qui tourne. Le contrôle 4
+vérifie d'ailleurs que le paquet et l'installateur posent la MÊME unité, au
+caractère près — c'est le §8 de `check-installation.sh`, appliqué un cran plus
+loin.
+
+### CE QU'UN `sh -n` NE DIT PAS
+
+Que le script marche. Il dit que sa grammaire est bonne.
+
+Le `postinst` s'exécute donc pour de vrai, chaque commande qui touche au système
+étant remplacée par une doublure qui note son passage. Ce qu'on éprouve est le
+cheminement : l'ordre des étapes, le code de sortie, et le fait que la marche à
+suivre s'imprime à l'INSTALLATION sans se répéter à chaque mise à jour — un
+paquet qui redonne ses quatre étapes à chaque montée de version apprend à ne
+plus lire ce qu'il imprime.
+
+### UNE RACINE À 0700
+
+Trouvé en relisant `dpkg-deb --contents` : l'entrée `./` du premier paquet était
+en `drwx------`. `installer.sh` crée son répertoire jetable ainsi, ce qui est
+juste pour un répertoire jetable — et **ce mode se serait appliqué à `/`**.
+
+C'est le genre de défaut qu'aucun essai de code ne trouve, parce qu'il ne vit
+pas dans le code : il vit dans ce que le code EMPAQUETTE. Le contrôle 3 le
+regarde maintenant.
+
+### LES DIX CONTRÔLES ONT ÉTÉ ÉPROUVÉS CONTRE LES DÉFAUTS QU'ILS PRÉTENDENT VOIR
+
+Un `postrm` qui efface vraiment, un `postinst` qui allume le service, une racine
+à `0700`, un `postinst` qui répète sa marche à suivre. Les quatre sont attrapés,
+et le contrôle repasse au vert une fois le défaut retiré.
+
+**Un contrôle qui n'a jamais rien attrapé ne prouve rien** — il prouve seulement
+qu'il ne dit pas non.
+
+### ET LE `.rpm` EST REFUSÉ
+
+`rpmbuild` n'est ni sur la machine de développement ni sur le coureur
+d'intégration. `apt` peut l'y installer ; cela ne suffit pas. Un paquet construit
+sur Debian et **jamais installé sur la distribution qu'il vise** est une promesse
+qu'on ne peut pas tenir, et ses scriptlets ne sont pas ceux d'un `.deb` : la
+propriété qui compte — le purge qui ne perd pas de courrier — devrait être
+réécrite et rééprouvée sur un système que personne ici ne fait tourner.
+
+Livrer un paquet que personne n'a installé serait pire que de n'en pas livrer :
+le premier exploitant à s'y fier découvrirait seul ce qu'il vaut.
+
 ## Trois endroits qui le disent ne valent pas un qui le vérifie
 
 Le dépôt affirmait, en trois endroits, que le résolveur devait être « local, ou

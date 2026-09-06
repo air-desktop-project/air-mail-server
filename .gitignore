@@ -41,3 +41,8 @@ scratchpad/
 ._*
 Thumbs.db
 desktop.ini
+
+# Les paquets construits par `scripts/paquet.sh`, si on lui laisse sa
+# sortie par défaut. Un binaire de vingt-quatre mébioctets dans un commit se
+# remarque tard, et ne se retire jamais vraiment d'un historique.
+*.deb

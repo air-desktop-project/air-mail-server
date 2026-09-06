@@ -162,6 +162,21 @@ jobs:
       - name: check-installation
         run: ./scripts/check-installation.sh
 
+      # ── LE PAQUET, ET POURQUOI IL MÉRITE SON PROPRE CONTRÔLE ──────────────
+      #
+      # Les scripts de mainteneur d'un `.deb` tournent EN ROOT sur la machine de
+      # quelqu'un d'autre, sans que personne les relise. C'est la seule chose de
+      # ce dépôt dont un défaut s'exécute avec tous les privilèges chez un
+      # inconnu — et le plus coûteux de ces défauts serait un `postrm` qui
+      # efface les boîtes aux lettres sur un `dpkg --purge`.
+      #
+      # `check-paquet.sh` le construit, le déballe, et exécute son `postinst`
+      # sous des doublures. Il vient après `check-installation` : le paquet fait
+      # poser son arborescence PAR l'installateur, et une faute de pose doit se
+      # voir là où elle est.
+      - name: check-paquet
+        run: ./scripts/check-paquet.sh
+
       # ── LE FORMATAGE, EN DERNIER, ET C'EST UNE LEÇON PAYÉE ────────────────
       #
       # Il était en PREMIER. Il a échoué le 2026-09-04, et il est resté rouge

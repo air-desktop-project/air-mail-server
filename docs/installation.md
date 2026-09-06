@@ -48,6 +48,37 @@ table du pare-feu ÉCRITE dans un fichier.
 demandent un domaine et des mots de passe, c'est-à-dire des décisions. Il
 imprime les commandes exactes en terminant.
 
+### Ou par un paquet Debian
+
+```sh
+./scripts/paquet.sh                       # produit air-mail-server_<version>_<arch>.deb
+sudo dpkg -i air-mail-server_*.deb
+```
+
+Le paquet fait poser son arborescence **par `installer.sh` lui-même** : il n'y a
+pas deux textes qui décrivent la même unité systemd, et donc pas deux textes qui
+peuvent diverger.
+
+Ce qu'il ajoute au script, et qui manquait :
+
+| | `installer.sh` | le paquet |
+|---|---|---|
+| dépendances | supposées | calculées par `dpkg-shlibdeps` |
+| mise à jour | à refaire à la main | `dpkg -i` de la version suivante |
+| **désinstallation** | **impossible** | `dpkg -r`, et le service s'arrête d'abord |
+
+**`dpkg --purge` N'EFFACE PAS VOTRE COURRIER.** `/var/lib/air-mail` porte les
+boîtes en plus de la configuration, et un purge n'est pas une raison de perdre
+du courrier. Le paquet le laisse en place et vous dit comment l'effacer
+vous-même, si c'est ce que vous voulez.
+
+Il n'active ni ne démarre le service : le serveur refuse de démarrer sans
+configuration, et l'allumer ferait échouer le service à chaque démarrage de la
+machine — ce qui apprendrait à le voir échouer sans s'en inquiéter.
+
+**Il n'y a pas de `.rpm`**, et c'est une décision plutôt qu'un retard : voir
+`docs/v1.md`, B6.
+
 **Il n'applique aucune règle de pare-feu.** Poser des règles sur une machine
 distante est précisément ce qui peut vous couper de la session par laquelle vous
 lui parlez. Il écrit la table, vous la relisez, vous la chargez.
