@@ -541,6 +541,146 @@ fn une_cle_dkim_lisible_par_tous_empeche_le_demarrage() {
     assert!(dit.contains("220 "), "{dit}");
 }
 
+/// Réécrit une configuration en y posant une écoute IMAP en TLS implicite.
+fn reecrire_avec_imap(config: &PathBuf, port: u16) {
+    let brut = std::fs::read(config).expect("lecture");
+    let mut lue = ams_config::decode(&brut).expect("configuration lisible");
+    lue.imap_listeners = vec![ams_config::Listener {
+        address: format!("127.0.0.1:{port}"),
+        implicit_tls: true,
+    }];
+    std::fs::write(config, ams_config::encode(&lue).expect("encodable")).expect("écriture");
+}
+
+/// **UN CLIENT QUI NE SAIT RIEN DE NOUS**, et qui n'est pas de notre main.
+///
+/// # POURQUOI `curl` PLUTÔT QU'UN CLIENT ÉCRIT ICI
+///
+/// Tous les autres essais IMAP de ce dépôt parlent le protocole tel que NOUS le
+/// comprenons : ils sont écrits par la même main que le serveur, et une erreur
+/// de lecture de la RFC s'y retrouverait des deux côtés. `libcurl` n'a jamais
+/// entendu parler de nous — il a ses propres idées sur ce qu'une réponse doit
+/// contenir, et il les a formées contre d'autres serveurs.
+///
+/// Ce qu'il exerce ici : `LIST` avec ses drapeaux de hiérarchie, `SELECT`,
+/// `SEARCH`, `STATUS`, et un `FETCH` par UID qui rend le message ENTIER.
+///
+/// **Il s'abstient là où `curl` manque**, plutôt que de rendre un vert qui ne
+/// prouverait rien.
+#[test]
+fn un_client_curl_releve_le_courrier() {
+    let atelier = atelier("interop-curl");
+    let Some((cert, cle)) = paire(&atelier.0) else {
+        panic!("{SANS_OPENSSL}");
+    };
+    if Command::new("curl").arg("--version").output().is_err() {
+        eprintln!("IGNORÉ : `curl` est absent — cet essai n'a RIEN éprouvé.");
+        return;
+    }
+
+    let magasin = atelier.0.join("comptes.bin");
+    let empreinte = ams_auth::hash_password(b"ouvre-toi", b"seize octets ici").expect("hachable");
+    let comptes = vec![ams_auth::Account {
+        login: String::from("jean"),
+        hash: empreinte,
+        addresses: vec![String::from("jean@example.com")],
+    }];
+    std::fs::write(
+        &magasin,
+        ams_config::encode_accounts(&comptes).expect("encodable"),
+    )
+    .expect("écriture");
+    std::fs::set_permissions(&magasin, std::fs::Permissions::from_mode(0o600))
+        .expect("permissions");
+
+    let port_smtp = port_libre();
+    let port_imap = port_libre();
+    let config = configuration_pop3(
+        &atelier,
+        port_smtp,
+        Tls {
+            certificate_chain_path: cert.display().to_string(),
+            private_key_path: cle.display().to_string(),
+        },
+        &magasin.display().to_string(),
+        "",
+    );
+    reecrire_avec_imap(&config, port_imap);
+    let mut serveur = lancer(&config, port_smtp);
+
+    // ── Un message arrive par SMTP ──────────────────────────────────────────
+    let mut flux = joindre(&mut serveur, port_smtp);
+    flux.set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("délai");
+    flux.write_all(
+        concat!(
+            "EHLO client.example\r\n",
+            "MAIL FROM:<expediteur@ailleurs.example>\r\n",
+            "RCPT TO:<jean@example.com>\r\n",
+            "DATA\r\n",
+            "Subject: pour curl\r\n\r\nle corps que curl doit relire\r\n.\r\n",
+            "QUIT\r\n"
+        )
+        .as_bytes(),
+    )
+    .expect("écriture");
+    let dit = lire_jusqu_au_conge(&mut flux, &mut serveur);
+    assert!(
+        dit.contains("250 2.0.0"),
+        "le message doit être accepté : {dit}"
+    );
+
+    let appeler = |url: &str, commande: Option<&str>| -> String {
+        let mut curl = Command::new("curl");
+        curl.arg("-s")
+            .arg("--insecure")
+            .args(["-u", "jean:ouvre-toi"])
+            .arg(url);
+        if let Some(brute) = commande {
+            curl.args(["-X", brute]);
+        }
+        let sortie = curl.output().expect("curl s'exécute");
+        String::from_utf8_lossy(&sortie.stdout).into_owned()
+    };
+    let racine = format!("imaps://127.0.0.1:{port_imap}/");
+
+    // ── `LIST`, et ses drapeaux de hiérarchie ───────────────────────────────
+    let liste = appeler(&racine, None);
+    assert!(
+        liste.contains("\"INBOX\""),
+        "curl doit voir la boîte : {liste}"
+    );
+
+    // ── `STATUS`, qui compte le message qu'on vient de remettre ─────────────
+    let etat = appeler(&racine, Some("STATUS INBOX (MESSAGES)"));
+    assert!(
+        etat.contains("MESSAGES 1"),
+        "curl doit compter un message : {etat}"
+    );
+
+    // ── `SEARCH`, puis le `FETCH` par UID qui rend le message ENTIER ────────
+    let boite = format!("imaps://127.0.0.1:{port_imap}/INBOX");
+    let uid = appeler(&boite, Some("FETCH 1 UID"));
+    let numero: String = uid
+        .split("UID ")
+        .nth(1)
+        .unwrap_or_default()
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    assert!(!numero.is_empty(), "curl doit lire un UID : {uid}");
+
+    let message = appeler(&format!("{boite};UID={numero}"), None);
+    assert!(
+        message.contains("Subject: pour curl"),
+        "curl doit relire le sujet : {message}"
+    );
+    assert!(
+        message.contains("le corps que curl doit relire"),
+        "curl doit relire le corps : {message}"
+    );
+}
+
 /// Réécrit une configuration en y posant DEUX écoutes POP3, de modes opposés.
 fn reecrire_avec_deux_pop3(config: &mut PathBuf, explicite: u16, implicite: u16) {
     let brut = std::fs::read(&config).expect("lecture");
