@@ -282,16 +282,26 @@ Received: from client.essai.test ([10.99.0.2])
 
 `redirect` change la DESTINATION, jamais la source.
 
-### Ce que cette table ne peut pas servir
+### Les six ports se servent ensemble
 
-- **Le 995 (POP3S) n'est pas servable.** Ce serveur n'a qu'un mode POP3, le
-  `STARTTLS` explicite ; il n'y a pas de `--listen-pop3s`. Y rediriger le 995
-  donnerait un port qui répond en clair à un client qui attend déjà une poignée
-  de main : mesuré, `WRONG_VERSION_NUMBER`.
-- **Le 143 et le 993 ne peuvent pas être servis ENSEMBLE.** Il n'y a qu'une
-  écoute IMAP et qu'un mode : `--listen-imap` ou `--listen-imaps`, pas les deux.
-  Le SMTP, lui, accepte plusieurs écoutes de modes différents — c'est pourquoi
-  25, 587 et 465 tiennent ensemble.
+Depuis le 2026-09-06, les trois protocoles portent chacun une LISTE d'écoutes.
+La table peut donc rediriger les six :
+
+```
+        tcp dport 25  redirect to :2525
+        tcp dport 587 redirect to :2525
+        tcp dport 465 redirect to :4465
+        tcp dport 143 redirect to :1143
+        tcp dport 993 redirect to :9993
+        tcp dport 110 redirect to :1110
+        tcp dport 995 redirect to :9995
+```
+
+avec `--listen-imap` ET `--listen-imaps`, `--listen-pop3` ET `--listen-pop3s`.
+Chaque option est répétable, et chaque écoute garde son mode.
+
+**Avant cela, deux d'entre eux étaient hors d'atteinte** : le 995 n'était pas
+servable du tout, et le 143 ne pouvait pas l'être en même temps que le 993.
 
 ### N'ajoutez PAS de chaîne `output`
 
@@ -512,8 +522,8 @@ air-mail-admin summary /var/lib/air-mail/maildir/jean
   et le §6 dit ce qui en est sorti. Ce qui n'a PAS été éprouvé : la même table
   sur une machine qui porte déjà d'autres règles, où l'ordre des priorités
   compte.
-- **Le 995 ne peut pas être servi**, et le 143 ne peut pas l'être en même temps
-  que le 993 : voir le §6.
+- **Les six ports se servent ensemble** depuis le 2026-09-06 : 25, 587 et 465 en
+  SMTP, 143 et 993 en IMAP, 110 et 995 en POP3. Chaque écoute porte son mode.
 - **Il n'y a pas de PAQUET** — ni `.deb`, ni `.rpm`. Il y a un script
   d'installation, `scripts/installer.sh`, qui tourne à chaque poussée dans un
   arbre jetable. Ce qu'un paquet ferait de plus : les dépendances, la mise à

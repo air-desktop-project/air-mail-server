@@ -413,6 +413,55 @@ fn verifier_les_domaines(comptes: &[Account], heberges: &[String]) -> Result<(),
     Ok(())
 }
 
+/// Les écoutes d'un protocole, et le mode TLS de chacune.
+///
+/// # LA LISTE, OU L'ADRESSE SIMPLE — JAMAIS LES DEUX
+///
+/// Non vide, la liste EST la liste. Vide, il n'y a que `simple`, en `STARTTLS`
+/// — ce qui est exactement le comportement d'un fichier écrit avant que la
+/// liste n'existe. Une adresse vide et une liste vide veulent dire « ce
+/// protocole n'est pas servi ».
+///
+/// **UNE SEULE COPIE POUR L'IMAP ET LE POP3.** Le SMTP a la sienne, plus
+/// ancienne et plus bavarde ; ces deux-ci se ressemblaient assez pour diverger.
+///
+/// # Errors
+///
+/// Une adresse illisible, en le nommant.
+fn ecoutes_du_protocole(
+    liste: &[ams_config::Listener],
+    simple: &str,
+    protocole: &str,
+) -> Result<std::vec::Vec<(std::net::SocketAddr, ams_loop_tokio::TlsMode)>, String> {
+    let mut ecoutes = std::vec::Vec::new();
+    if liste.is_empty() {
+        if simple.is_empty() {
+            return Ok(ecoutes);
+        }
+        let adresse: std::net::SocketAddr = simple
+            .parse()
+            .map_err(|_| format!("`{simple}` n'est pas une adresse d'écoute {protocole}"))?;
+        ecoutes.push((adresse, ams_loop_tokio::TlsMode::StartTls));
+        return Ok(ecoutes);
+    }
+    for ecoute in liste {
+        let adresse: std::net::SocketAddr = ecoute.address.parse().map_err(|_| {
+            format!(
+                "`{}` n'est pas une adresse d'écoute {protocole}",
+                ecoute.address
+            )
+        })?;
+        ecoutes.push((
+            adresse,
+            match ecoute.implicit_tls {
+                true => ams_loop_tokio::TlsMode::Implicit,
+                false => ams_loop_tokio::TlsMode::StartTls,
+            },
+        ));
+    }
+    Ok(ecoutes)
+}
+
 /// Les écoutes SMTP de la configuration, et le mode TLS de chacune.
 ///
 /// # Errors
@@ -1607,20 +1656,28 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     // Les deux boucles tournent EN MÊME TEMPS, et le même signal les arrête. Un
     // seul `arret()` ne peut pas être attendu deux fois : on en fabrique un
     // second, et les deux écoutent le même `SIGTERM`.
-    let pop3 = if options.listen_pop3.is_empty() {
+    // **UNE TÂCHE PAR ÉCOUTE.** Le 110 et le 995 n'ont pas le même mode TLS, et
+    // un serveur déployé sert les deux. Les faire tenir dans une seule écoute
+    // demandait de choisir, et ce choix n'appartenait pas à ce code.
+    let ecoutes_pop3 = ecoutes_du_protocole(&options.pop3_listeners, &options.listen_pop3, "POP3")?;
+    let mut pop3 = std::vec::Vec::new();
+    if ecoutes_pop3.is_empty() {
         eprintln!("air-mail-server : POP3 non servi — aucune adresse d'écoute configurée");
-        None
-    } else {
-        let adresse: std::net::SocketAddr = options.listen_pop3.parse().map_err(|_| {
-            format!(
-                "`{}` n'est pas une adresse d'écoute POP3",
-                options.listen_pop3
-            )
-        })?;
+    }
+    for (adresse, mode) in ecoutes_pop3 {
         // SANS CERTIFICAT, CE PORT NE SERT PERSONNE : la session POP3 refuse
         // `USER`/`PASS` hors chiffrement, sans réglage possible (C6). On le dit
         // plutôt que de laisser le découvrir un client à la fois.
         if options_de_service.tls.is_none() {
+            // **ET UN PORT IMPLICITE NE DÉMARRE MÊME PAS** : il ne peut pas se
+            // rabattre en clair, le client ayant déjà commencé sa poignée de
+            // main. Ouvrir un tel port produirait un service muet.
+            if mode == ams_loop_tokio::TlsMode::Implicit {
+                return Err(format!(
+                    "`{adresse}` est demandée en TLS implicite, et aucun certificat n'est \
+                     configuré : ce port ne pourrait servir personne"
+                ));
+            }
             eprintln!(
                 "air-mail-server : ATTENTION — POP3 écoute sur {adresse} SANS certificat. \
                  `USER`/`PASS` y seront refusés (C6), donc personne ne pourra relever son \
@@ -1630,17 +1687,25 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         let ecouteur = TcpListener::bind(adresse)
             .await
             .map_err(|erreur| format!("écoute POP3 sur {adresse} : {erreur}"))?;
-        eprintln!("air-mail-server : POP3 écoute sur {adresse}");
-        Some(tokio::spawn(serve_pop3(
+        eprintln!(
+            "air-mail-server : POP3 écoute sur {adresse} en {}",
+            match mode {
+                ams_loop_tokio::TlsMode::Implicit => "TLS implicite",
+                ams_loop_tokio::TlsMode::StartTls => "STARTTLS",
+            }
+        );
+        let mut options_pop3 = options_de_service.clone();
+        options_pop3.tls_mode = mode;
+        pop3.push(tokio::spawn(serve_pop3(
             ecouteur,
             ams_proto_pop3::Limits::DEFAULT,
             Arc::clone(&politique),
             Arc::new(BoitesPop3::new(Arc::clone(&boites))),
             Arc::clone(&garde),
-            options_de_service.clone(),
+            options_pop3,
             arret(),
-        )))
-    };
+        )));
+    }
 
     // ── LE SERVICE IMAP, S'IL EST DEMANDÉ ───────────────────────────────────
     // **UN SEUL SERVICE DE BOÎTES POUR IMAP ET POUR L'API** : deux voies de
@@ -1648,19 +1713,76 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     // saurait laquelle croire.
     let boites_imap = Arc::new(BoitesImap::new(Arc::clone(&boites), domaine));
 
-    let imap = if options.listen_imap.is_empty() {
+    // **UNE TÂCHE PAR ÉCOUTE**, comme pour le SMTP et le POP3. Le 143 et le 993
+    // n'ont pas le même mode, et un serveur déployé sert les deux.
+    let ecoutes_imap = ecoutes_du_protocole(&options.imap_listeners, &options.listen_imap, "IMAP")?;
+    let mut imap = std::vec::Vec::new();
+    if ecoutes_imap.is_empty() {
         eprintln!("air-mail-server : IMAP non servi — aucune adresse d'écoute configurée");
-        None
     } else {
-        let adresse: std::net::SocketAddr = options.listen_imap.parse().map_err(|_| {
-            format!(
-                "`{}` n'est pas une adresse d'écoute IMAP",
-                options.listen_imap
-            )
-        })?;
+        // ON DIT CE QU'ON SERT, ET COMMENT — UNE FOIS. Un port IMAP ouvert
+        // laisse croire à beaucoup de choses ; celles-ci sont vraies, et
+        // bornées. Le redire par écoute ferait deux fois le même pavé.
+        //
+        // **UNE AFFIRMATION PAR LIGNE.** Tout ceci tenait sur UNE ligne de mille
+        // neuf cent soixante-dix-huit caractères. Un terminal la repliait en
+        // pavé, `journalctl` la tronquait selon la vue, et ce que ce registre
+        // reproche ailleurs à un journal répétitif — qu'on cesse de le lire —
+        // lui arrivait par excès.
+        for dit in [
+            String::from(
+                "  commandes  `SELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`, `EXPUNGE`, \
+             `SEARCH`, `COPY`, `MOVE`, `APPEND`, `CREATE`, `DELETE`, `RENAME`, \
+             `NAMESPACE`, `ENABLE`, `IDLE`, `SUBSCRIBE` et `UNSUBSCRIBE`",
+            ),
+            String::from(
+                "  `FETCH`    rend une `ENVELOPE`, une `BODYSTRUCTURE`, une PARTIE désignée \
+             — `BODY[1]`, `BODY[1.MIME]` — et un CHOIX de champs — \
+             `BODY[HEADER.FIELDS (FROM)]`. `BINARY[…]` rend ce que les octets VEULENT \
+             DIRE, transfert-décodé, et refuse par `NO [UNKNOWN-CTE]` ce qu'il ne sait \
+             pas défaire",
+            ),
+            String::from(
+                "  `SEARCH`   cherche DANS LE TEXTE et non dans les octets : les mots encodés \
+             se défont, les corps se transfert-décodent — au plus un mébioctet par \
+             partie, en `us-ascii`, `utf-8` ou `iso-8859-1`. `SENTBEFORE`, `SENTON` et \
+             `SENTSINCE` lisent le champ `Date:` ; `BEFORE`, `ON` et `SINCE` la date \
+             d'arrivée",
+            ),
+            String::from(
+                "  §E         les options absorbées dans le protocole de base le sont aussi : \
+             `STATUS` rend ce qu'on lui demande — `UNSEEN`, `DELETED`, `SIZE` —, \
+             `LIST … RETURN (STATUS (…))` en rend un par boîte, \
+             `SEARCH RETURN (MIN MAX ALL COUNT SAVE)` répond de quatre façons, et `$` \
+             désigne la dernière recherche — en UID, pour qu'un message effacé en sorte \
+             de lui-même",
+            ),
+            String::from(
+                "  mots-clefs les cinq de §E.15 — `$MDNSent`, `$Forwarded`, `$Junk`, \
+             `$NonJunk`, `$Phishing` —, avec `KEYWORD` et `UNKEYWORD` ; Maildir les porte \
+             dans le nom du fichier. L'ENSEMBLE EST FERMÉ, et `PERMANENTFLAGS` n'annonce \
+             donc pas `\\*` : ce serait promettre qu'on accepte tout mot-clef nouveau",
+            ),
+            String::from(
+                "  sur disque un nom de boîte devient un RÉPERTOIRE : seuls les noms qu'on \
+             sait transcrire sans risque sont acceptés, et jamais transformés. Un \
+             `EXPUNGE` efface POUR DE BON, un `CLOSE` aussi, et les abonnements \
+             s'écrivent dans la racine du compte sous `ams-abonnements`",
+            ),
+        ] {
+            eprintln!("air-mail-server : {dit}");
+        }
+    }
+    for (adresse, mode) in ecoutes_imap {
         // SANS CERTIFICAT, CE PORT NE SERT PERSONNE : la session IMAP refuse
         // `LOGIN` et `AUTHENTICATE` hors chiffrement, sans réglage possible (C6).
         if options_de_service.tls.is_none() {
+            if mode == ams_loop_tokio::TlsMode::Implicit {
+                return Err(format!(
+                    "`{adresse}` est demandée en TLS implicite, et aucun certificat n'est \
+                     configuré : ce port ne pourrait servir personne"
+                ));
+            }
             eprintln!(
                 "air-mail-server : ATTENTION — IMAP écoute sur {adresse} SANS certificat. \
                  `LOGIN` et `AUTHENTICATE` y seront refusés (C6), donc personne ne pourra s'y \
@@ -1670,84 +1792,20 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         let ecouteur = TcpListener::bind(adresse)
             .await
             .map_err(|erreur| format!("écoute IMAP sur {adresse} : {erreur}"))?;
-        // ON DIT CE QU'ON SERT, ET COMMENT. Un port IMAP ouvert laisse croire à
-        // beaucoup de choses ; celles-ci sont vraies, et bornées.
-        //
-        // **UNE AFFIRMATION PAR LIGNE.** Tout ceci tenait sur UNE ligne de mille
-        // neuf cent soixante-dix-huit caractères — la suivante, dans le même
-        // démarrage, en faisait deux cent quatorze. Un terminal la repliait en
-        // pavé, `journalctl` la tronquait selon la vue, et ce que ce registre
-        // reproche ailleurs à un journal répétitif — qu'on cesse de le lire —
-        // lui arrivait par excès. Sept lignes qu'on peut lire valent mieux
-        // qu'une qu'on saute.
-        for dit in [
-            std::format!(
-                // **LE MODE TLS SE DIT ICI AUSSI.** La ligne SMTP le disait
-                // déjà ; celle-ci se taisait, et le 993 est justement le port
-                // où le mode ne se devine pas — les deux se servent au même
-                // endroit, et seul le client sait qu'il s'est trompé.
-                "IMAP écoute sur {adresse} en {} — IMAP4rev2 est servi EN ENTIER",
-                match options.imap_implicit_tls {
-                    true => "TLS implicite",
-                    false => "STARTTLS",
-                }
-            ),
-            String::from(
-                "  commandes  `SELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`, `EXPUNGE`, \
-                 `SEARCH`, `COPY`, `MOVE`, `APPEND`, `CREATE`, `DELETE`, `RENAME`, \
-                 `NAMESPACE`, `ENABLE`, `IDLE`, `SUBSCRIBE` et `UNSUBSCRIBE`",
-            ),
-            String::from(
-                "  `FETCH`    rend une `ENVELOPE`, une `BODYSTRUCTURE`, une PARTIE désignée \
-                 — `BODY[1]`, `BODY[1.MIME]` — et un CHOIX de champs — \
-                 `BODY[HEADER.FIELDS (FROM)]`. `BINARY[…]` rend ce que les octets VEULENT \
-                 DIRE, transfert-décodé, et refuse par `NO [UNKNOWN-CTE]` ce qu'il ne sait \
-                 pas défaire",
-            ),
-            String::from(
-                "  `SEARCH`   cherche DANS LE TEXTE et non dans les octets : les mots encodés \
-                 se défont, les corps se transfert-décodent — au plus un mébioctet par \
-                 partie, en `us-ascii`, `utf-8` ou `iso-8859-1`. `SENTBEFORE`, `SENTON` et \
-                 `SENTSINCE` lisent le champ `Date:` ; `BEFORE`, `ON` et `SINCE` la date \
-                 d'arrivée",
-            ),
-            String::from(
-                "  §E         les options absorbées dans le protocole de base le sont aussi : \
-                 `STATUS` rend ce qu'on lui demande — `UNSEEN`, `DELETED`, `SIZE` —, \
-                 `LIST … RETURN (STATUS (…))` en rend un par boîte, \
-                 `SEARCH RETURN (MIN MAX ALL COUNT SAVE)` répond de quatre façons, et `$` \
-                 désigne la dernière recherche — en UID, pour qu'un message effacé en sorte \
-                 de lui-même",
-            ),
-            String::from(
-                "  mots-clefs les cinq de §E.15 — `$MDNSent`, `$Forwarded`, `$Junk`, \
-                 `$NonJunk`, `$Phishing` —, avec `KEYWORD` et `UNKEYWORD` ; Maildir les porte \
-                 dans le nom du fichier. L'ENSEMBLE EST FERMÉ, et `PERMANENTFLAGS` n'annonce \
-                 donc pas `\\*` : ce serait promettre qu'on accepte tout mot-clef nouveau",
-            ),
-            String::from(
-                "  sur disque un nom de boîte devient un RÉPERTOIRE : seuls les noms qu'on \
-                 sait transcrire sans risque sont acceptés, et jamais transformés. Un \
-                 `EXPUNGE` efface POUR DE BON, un `CLOSE` aussi, et les abonnements \
-                 s'écrivent dans la racine du compte sous `ams-abonnements`",
-            ),
-        ] {
-            eprintln!("air-mail-server : {dit}");
-        }
+        // **LE MODE TLS SE DIT ICI AUSSI.** La ligne SMTP le disait déjà ;
+        // celle-ci se taisait, et le 993 est justement le port où le mode ne se
+        // devine pas — les deux se servent au même endroit, et seul le client
+        // sait qu'il s'est trompé.
+        eprintln!(
+            "air-mail-server : IMAP écoute sur {adresse} en {}",
+            match mode {
+                ams_loop_tokio::TlsMode::Implicit => "TLS implicite",
+                ams_loop_tokio::TlsMode::StartTls => "STARTTLS",
+            }
+        );
         let mut options_imap = options_de_service.clone();
-        options_imap.tls_mode = match options.imap_implicit_tls {
-            true => ams_loop_tokio::TlsMode::Implicit,
-            false => ams_loop_tokio::TlsMode::StartTls,
-        };
-        // **LE MODE DE CETTE ÉCOUTE-CI**, et non celui du SMTP : le `993` est en
-        // TLS implicite là où le `25` est en `STARTTLS`, et rien n'oblige les
-        // deux à s'accorder.
-        let mut options_imap = options_de_service.clone();
-        options_imap.tls_mode = match options.imap_implicit_tls {
-            true => ams_loop_tokio::TlsMode::Implicit,
-            false => ams_loop_tokio::TlsMode::StartTls,
-        };
-        Some(tokio::spawn(serve_imap(
+        options_imap.tls_mode = mode;
+        imap.push(tokio::spawn(serve_imap(
             ecouteur,
             // LA BORNE D'UN `APPEND` EST CELLE D'UN MESSAGE, et c'est la même
             // que celle de SMTP : un message qu'on refuserait de recevoir par un
@@ -1761,8 +1819,8 @@ async fn servir(fichier: &Path) -> Result<(), String> {
             Arc::clone(&garde),
             options_imap,
             arret(),
-        )))
-    };
+        )));
+    }
 
     // **LE PORT UDP SE LIE AVANT QUE LA SESSION NE SE MONTE**, et l'ordre n'est
     // pas décoratif : ce que l'on annonce dans `Alt-Svc` est le port que le
@@ -2116,10 +2174,10 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         eprintln!("air-mail-server : veille du certificat : {erreur}");
     }
 
-    if let Some(tache) = pop3 {
-        // La boucle POP3 s'arrête sur le même signal ; on attend qu'elle ait
-        // fini d'accepter avant de rendre la main, sans quoi le message d'arrêt
-        // partirait pendant qu'elle sert encore.
+    // **ON ATTEND CHAQUE ÉCOUTE.** Elles s'arrêtent sur le même signal ; on
+    // attend qu'elles aient fini d'accepter avant de rendre la main, sans quoi
+    // le message d'arrêt partirait pendant qu'elles servent encore.
+    for tache in pop3 {
         match tache.await {
             Ok(Ok(stats_pop3)) => {
                 eprintln!(
@@ -2133,7 +2191,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
             Err(erreur) => eprintln!("air-mail-server : POP3 : {erreur}"),
         }
     }
-    if let Some(tache) = imap {
+    for tache in imap {
         match tache.await {
             Ok(Ok(stats_imap)) => {
                 eprintln!(

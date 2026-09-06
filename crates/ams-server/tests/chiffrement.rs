@@ -192,6 +192,8 @@ fn configuration_pop3(
         // Une seule écoute, en `STARTTLS` : la liste vide dirait la même
         // chose, et l'écrire ici la rend lisible.
         smtp_listeners: Vec::new(),
+        imap_listeners: Vec::new(),
+        pop3_listeners: Vec::new(),
         imap_implicit_tls: false,
         domain: String::from("mail.example.com"),
         listen: format!("127.0.0.1:{port}"),
@@ -539,6 +541,23 @@ fn une_cle_dkim_lisible_par_tous_empeche_le_demarrage() {
     assert!(dit.contains("220 "), "{dit}");
 }
 
+/// Réécrit une configuration en y posant DEUX écoutes POP3, de modes opposés.
+fn reecrire_avec_deux_pop3(config: &mut PathBuf, explicite: u16, implicite: u16) {
+    let brut = std::fs::read(&config).expect("lecture");
+    let mut lue = ams_config::decode(&brut).expect("configuration lisible");
+    lue.pop3_listeners = vec![
+        ams_config::Listener {
+            address: format!("127.0.0.1:{explicite}"),
+            implicit_tls: false,
+        },
+        ams_config::Listener {
+            address: format!("127.0.0.1:{implicite}"),
+            implicit_tls: true,
+        },
+    ];
+    std::fs::write(&config, ams_config::encode(&lue).expect("encodable")).expect("écriture");
+}
+
 /// Réécrit une configuration en y ajoutant un signataire DKIM.
 fn reecrire_avec_dkim(config: &mut PathBuf, cle: &Path) {
     let brut = std::fs::read(&config).expect("lecture");
@@ -682,6 +701,107 @@ fn pop3(port: u16, dialogue: &str) -> String {
         .expect("écriture");
     let sortie = processus.wait_with_output().expect("openssl s_client");
     String::from_utf8_lossy(&sortie.stdout).into_owned()
+}
+
+/// Dialogue POP3 sur un port dont le TLS est IMPLICITE : pas de `-starttls`.
+fn pop3_implicite(port: u16, dialogue: &str) -> String {
+    let mut processus = Command::new("openssl")
+        .args(["s_client", "-connect"])
+        .arg(format!("127.0.0.1:{port}"))
+        .args(["-ign_eof", "-quiet"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect(SANS_OPENSSL);
+    processus
+        .stdin
+        .as_mut()
+        .expect("entrée standard")
+        .write_all(dialogue.as_bytes())
+        .expect("écriture");
+    let sortie = processus.wait_with_output().expect("openssl s_client");
+    String::from_utf8_lossy(&sortie.stdout).into_owned()
+}
+
+/// **LE 110 ET LE 995 SE SERVENT ENSEMBLE**, chacun dans son mode.
+///
+/// # CE QUI N'ÉTAIT PAS SERVABLE DU TOUT
+///
+/// `listenPop3` n'avait pas de champ de mode, là où l'IMAP en avait un : le 995
+/// ne pouvait donc pas s'ouvrir. Un exploitant qui l'y redirigeait obtenait un
+/// port qui répond EN CLAIR à un client ayant déjà commencé sa poignée de main,
+/// et le client y lit `WRONG_VERSION_NUMBER`.
+#[test]
+fn le_pop3_sert_ses_deux_ports_chacun_dans_son_mode() {
+    let atelier = atelier("pop3-deux-ports");
+    let Some((cert, cle)) = paire(&atelier.0) else {
+        panic!("{SANS_OPENSSL}");
+    };
+
+    let magasin = atelier.0.join("comptes.bin");
+    let empreinte = ams_auth::hash_password(b"ouvre-toi", b"seize octets ici").expect("hachable");
+    let comptes = vec![ams_auth::Account {
+        login: String::from("jean"),
+        hash: empreinte,
+        addresses: vec![String::from("jean@example.com")],
+    }];
+    std::fs::write(
+        &magasin,
+        ams_config::encode_accounts(&comptes).expect("encodable"),
+    )
+    .expect("écriture");
+    std::fs::set_permissions(&magasin, std::fs::Permissions::from_mode(0o600))
+        .expect("permissions");
+
+    let port_smtp = port_libre();
+    let explicite = port_libre();
+    let implicite = port_libre();
+    let mut config = configuration_pop3(
+        &atelier,
+        port_smtp,
+        Tls {
+            certificate_chain_path: cert.display().to_string(),
+            private_key_path: cle.display().to_string(),
+        },
+        &magasin.display().to_string(),
+        &format!("127.0.0.1:{explicite}"),
+    );
+    // LES DEUX ÉCOUTES, chacune avec son mode.
+    reecrire_avec_deux_pop3(&mut config, explicite, implicite);
+    let serveur = lancer(&config, port_smtp);
+
+    // Le 110 : `STLS` d'abord, puis la conversation.
+    let clair = pop3(explicite, "USER jean\r\nPASS ouvre-toi\r\nSTAT\r\nQUIT\r\n");
+    assert!(clair.contains("+OK"), "port explicite : {clair}");
+
+    // **LE 995 : LA POIGNÉE DE MAIN AVANT LE PREMIER OCTET.** `openssl` y va
+    // sans `-starttls`, et c'est tout ce qui change.
+    let chiffre = pop3_implicite(implicite, "USER jean\r\nPASS ouvre-toi\r\nSTAT\r\nQUIT\r\n");
+    assert!(
+        chiffre.contains("+OK POP3 server ready"),
+        "port implicite : {chiffre}"
+    );
+    // ET IL N'ANNONCE PAS `STLS` : il est déjà chiffré.
+    let capa = pop3_implicite(implicite, "CAPA\r\nQUIT\r\n");
+    assert!(
+        !capa.contains("STLS"),
+        "un port implicite n'offre pas STLS : {capa}"
+    );
+
+    let journal = serveur.journal();
+    assert!(
+        journal.contains(&format!(
+            "POP3 écoute sur 127.0.0.1:{explicite} en STARTTLS"
+        )),
+        "{journal}"
+    );
+    assert!(
+        journal.contains(&format!(
+            "POP3 écoute sur 127.0.0.1:{implicite} en TLS implicite"
+        )),
+        "{journal}"
+    );
 }
 
 #[test]

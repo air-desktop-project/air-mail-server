@@ -367,6 +367,9 @@ async fn pop3_ne_sert_pas_ce_qui_a_ete_dit_avant_la_poignee_de_main() {
             guard: &garde,
             timeouts: Timeouts::default(),
             tls: Some(tls),
+            // Cet essai éprouve l'injection dans un `STLS`, qui n'existe que
+            // sur un port explicite.
+            tls_mode: ams_loop_tokio::TlsMode::StartTls,
         };
         serve_pop3_connection(&mut flux, &service, NotreDomaine, &SansBoite, PAIR).await
     });

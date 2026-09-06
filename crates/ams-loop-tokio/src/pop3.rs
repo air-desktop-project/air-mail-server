@@ -38,6 +38,13 @@ pub struct Pop3Service<'a> {
     /// sans TLS n'est pas un POP3 dégradé, c'est un POP3 inutile — et le dire
     /// ici évite de le découvrir en production.
     pub tls: Option<std::sync::Arc<rustls::ServerConfig>>,
+    /// Le TLS est-il IMPLICITE sur cette écoute (RFC 8314 §3) ?
+    ///
+    /// Le **995** l'exige. Sans ce champ, ce service ne savait ouvrir que le
+    /// 110, et rediriger le 995 vers lui donnait un port qui répond EN CLAIR à
+    /// un client ayant déjà commencé sa poignée de main — mesuré, et le client
+    /// y lit `WRONG_VERSION_NUMBER`.
+    pub tls_mode: crate::TlsMode,
 }
 
 /// Ce qu'il faut savoir ouvrir pour servir une session.
@@ -132,9 +139,27 @@ where
         .tls
         .as_ref()
         .map(|configuration| tokio_rustls::TlsAcceptor::from(std::sync::Arc::clone(configuration)));
-    let mut session: Session<A, B::Open> = Session::new(service.limits, accepteur.is_some(), auth);
+    // **UN PORT IMPLICITE N'OFFRE PAS `STLS`** : il est déjà chiffré, et
+    // l'annoncer inviterait le client à demander une bascule qui n'a pas de sens.
+    let implicite = service.tls_mode == crate::TlsMode::Implicit;
+    let mut session: Session<A, B::Open> =
+        Session::new(service.limits, accepteur.is_some() && !implicite, auth);
 
     let mut etat = Etat::neuf(&service.limits);
+
+    if implicite {
+        return servir_chiffre(
+            stream,
+            service,
+            &mut session,
+            &mut etat,
+            boites,
+            source,
+            resume,
+        )
+        .await;
+    }
+
     if matches!(
         service.guard.observe(source, GuardEvent::Connection),
         Verdict::Throttled | Verdict::Banned { .. }
@@ -247,6 +272,83 @@ impl Pop3Summary {
         self.tls = etat.tls;
         self.injected = etat.injected;
     }
+}
+
+/// Sert une connexion dont le TLS est IMPLICITE (RFC 8314 §3).
+///
+/// # PAS UN OCTET EN CLAIR SUR CE PORT
+///
+/// Ni bannière, ni refus du garde. Le client attend une poignée de main, et tout
+/// ce qu'on écrirait avant elle serait lu comme un enregistrement TLS mal formé :
+/// il ne verrait pas un serveur poli, il verrait une erreur de protocole.
+///
+/// L'ordre est donc : bannissement (déjà fait par l'appelant — l'offrir à un
+/// banni ferait du bannissement une dépense), poignée de main, puis seulement le
+/// garde, la bannière et la conversation.
+async fn servir_chiffre<S, A, B>(
+    stream: &mut S,
+    service: &Pop3Service<'_>,
+    session: &mut Session<A, B::Open>,
+    etat: &mut Etat,
+    boites: &B,
+    source: Source,
+    mut resume: Pop3Summary,
+) -> Result<Pop3Summary, Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    A: Authenticator,
+    B: Mailboxes,
+{
+    // **UN PORT IMPLICITE SANS CERTIFICAT NE SERT PERSONNE**, et ne peut pas se
+    // rabattre en clair : le client a déjà commencé sa poignée de main. Le
+    // serveur refuse d'ouvrir un tel port au démarrage ; si l'on arrive ici,
+    // c'est un appelant qui a monté le service à la main.
+    let Some(configuration) = service.tls.as_ref() else {
+        return Err(Error::CapabilityNotSupported);
+    };
+    let accepteur = tokio_rustls::TlsAcceptor::from(std::sync::Arc::clone(configuration));
+    let mut chiffre = match tokio::time::timeout(
+        service.timeouts.handshake,
+        accepteur.accept(&mut *stream),
+    )
+    .await
+    {
+        Ok(Ok(flux)) => flux,
+        Ok(Err(cause)) => {
+            service.guard.observe(source, GuardEvent::InvalidFrame);
+            return Err(Error::Io(cause));
+        }
+        Err(_) => {
+            service.guard.observe(source, GuardEvent::InvalidFrame);
+            return Err(Error::Timeout);
+        }
+    };
+    session.on_tls_established();
+    etat.tls = true;
+
+    if matches!(
+        service.guard.observe(source, GuardEvent::Connection),
+        Verdict::Throttled | Verdict::Banned { .. }
+    ) {
+        let refus = session.unavailable(&mut etat.sortie)?;
+        chiffre.write_all(refus).await?;
+        chiffre.flush().await?;
+        let _ = chiffre.shutdown().await;
+        return Ok(resume);
+    }
+
+    let banniere = session.greeting(&mut etat.sortie)?;
+    chiffre.write_all(banniere).await?;
+    chiffre.flush().await?;
+
+    let etape = conduire(&mut chiffre, session, etat, service, boites, source).await?;
+    debug_assert_eq!(
+        etape,
+        Etape::Terminee,
+        "un `STLS` sur un port implicite : la session ne l'annonce pas"
+    );
+    resume.merge(etat);
+    Ok(resume)
 }
 
 /// Pourquoi le pilote a rendu la main.
@@ -500,6 +602,7 @@ where
         let guard = std::sync::Arc::clone(&guard);
         let timeouts = options.timeouts;
         let tls = options.tls.clone();
+        let tls_mode = options.tls_mode;
         let injections = std::sync::Arc::clone(&injections);
 
         tokio::spawn(async move {
@@ -509,6 +612,7 @@ where
                 guard: &guard,
                 timeouts,
                 tls,
+                tls_mode,
             };
             // L'ÉCHEC d'une connexion ne regarde qu'elle — le journal viendra
             // avec `air-log`. Une TENTATIVE D'INJECTION, en revanche, se

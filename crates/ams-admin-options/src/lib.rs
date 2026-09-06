@@ -78,8 +78,17 @@ pub struct Options {
     pub accounts: Option<PathBuf>,
     /// Où écouter en POP3. Vide : POP3 n'est pas servi.
     pub listen_pop3: Option<SocketAddr>,
+    /// Les écoutes POP3, chacune avec son mode TLS.
+    ///
+    /// Vide, il n'y en a pas. `listen_pop3` porte l'adresse de la première.
+    pub pop3: Vec<Ecoute>,
     /// Où écouter en IMAP. Absente : IMAP n'est pas servi.
     pub listen_imap: Option<SocketAddr>,
+    /// Les écoutes IMAP, chacune avec son mode TLS.
+    ///
+    /// **LE 143 ET LE 993 SE SERVENT ENSEMBLE**, depuis celle-ci. `listen_imap`
+    /// porte l'adresse de la première, et `imap_implicit_tls` son mode.
+    pub imap: Vec<Ecoute>,
     /// Le TLS est-il IMPLICITE sur l'écoute IMAP (RFC 8314 §3) ?
     ///
     /// Le `993` l'exige, et c'est le seul port IMAP que la plupart des serveurs
@@ -203,7 +212,9 @@ impl Default for Options {
             // PAS DE POP3 PAR DÉFAUT : un port ouvert qu'on n'a pas demandé est
             // une surface de plus, et celui-ci ne sert personne sans certificat.
             listen_pop3: None,
+            pop3: Vec::new(),
             listen_imap: None,
+            imap: Vec::new(),
             imap_implicit_tls: false,
             listen_http: None,
             listen_h3: None,
@@ -300,14 +311,7 @@ impl Options {
                 .first()
                 .map(|ecoute| ecoute.adresse.to_string())
                 .unwrap_or_default(),
-            smtp_listeners: self
-                .listen
-                .iter()
-                .map(|ecoute| ams_config::Listener {
-                    address: ecoute.adresse.to_string(),
-                    implicit_tls: ecoute.tls_implicite,
-                })
-                .collect(),
+            smtp_listeners: en_ecoutes(&self.listen),
             imap_implicit_tls: self.imap_implicit_tls,
             maildir: self.maildir.display().to_string(),
             hosted: self.hosted.clone(),
@@ -395,6 +399,11 @@ impl Options {
                 .listen_imap
                 .map(|adresse| adresse.to_string())
                 .unwrap_or_default(),
+            // **LES DEUX LISTES PORTENT TOUT**, comme celle du SMTP : les champs
+            // simples au-dessus ne gardent que la première, pour un outil qui ne
+            // lirait qu'eux.
+            imap_listeners: en_ecoutes(&self.imap),
+            pop3_listeners: en_ecoutes(&self.pop3),
         }
     }
 }
@@ -498,13 +507,18 @@ OPTIONS DE `config write`
     --tls-cert <chemin>    chaîne de certificats, en PEM
     --tls-key <chemin>     clé privée, en PEM
     --accounts <chemin>    fichier de comptes (`air-mail-admin account add`)
-    --listen-pop3 <adr>    où écouter en POP3 (défaut : pas de POP3)
-    --listen-imap <adr>    où écouter en IMAP avec `STARTTLS` — le 143
-                           (défaut : pas d'IMAP)
-    --listen-imaps <adr>   LE MÊME PORT AVEC UN AUTRE MODE : TLS implicite, le
-                           993. Ce n'est pas une seconde écoute — aucun serveur
-                           déployé ne sert 143 et 993 à la fois, le premier y est
-                           éteint. La dernière des deux options écrites l'emporte.
+    --listen-pop3 <adr>    où écouter en POP3 avec `STLS` — le 110. RÉPÉTABLE
+                           (défaut : pas de POP3)
+    --listen-pop3s <adr>   où écouter en POP3 avec TLS IMPLICITE — le 995.
+                           RÉPÉTABLE, et cumulable avec la précédente.
+    --listen-imap <adr>    où écouter en IMAP avec `STARTTLS` — le 143.
+                           RÉPÉTABLE (défaut : pas d'IMAP)
+    --listen-imaps <adr>   où écouter en IMAP avec TLS IMPLICITE — le 993.
+                           RÉPÉTABLE, et cumulable avec la précédente.
+
+    LES QUATRE SE CUMULENT, et c'est nouveau : `--listen-imap` et
+    `--listen-imaps` étaient auparavant DEUX MODES D'UN MÊME PORT, la dernière
+    écrite l'emportant. On ne pouvait donc servir que le 143 OU le 993.
 
     L'API REST
     --listen-http <adr>    où la servir en HTTP/2. EXIGE `--tls-cert` et
@@ -865,6 +879,52 @@ OPTIONS DE `config write`
 /// Lit une ligne de commande.
 ///
 /// Ajoute une écoute SMTP, en écartant le défaut à la première nommée.
+/// Lit une adresse, ou dit que ce n'en est pas une.
+fn une_adresse(brute: String) -> Result<SocketAddr, ArgError> {
+    brute
+        .parse()
+        .map_err(|_| ArgError::new(format!("`{brute}` n'est pas une adresse")))
+}
+
+/// Ajoute une écoute à une liste, en refusant les doublons.
+///
+/// **DEUX ÉCOUTES SUR LA MÊME ADRESSE NE S'OUVRIRAIENT PAS.** La seconde
+/// échouerait au démarrage, sur un message du noyau qui ne dit pas laquelle. On
+/// le refuse ici, où l'on sait encore les nommer — et où l'on peut dire DE QUEL
+/// protocole il s'agit, ce que le noyau ne dira jamais.
+fn ajouter_a(
+    liste: &mut Vec<Ecoute>,
+    adresse: SocketAddr,
+    tls_implicite: bool,
+    protocole: &str,
+) -> Result<(), ArgError> {
+    if liste.iter().any(|deja| deja.adresse == adresse) {
+        return Err(ArgError::new(format!(
+            "`{adresse}` est demandée deux fois en {protocole} : une adresse ne s'écoute qu'une"
+        )));
+    }
+    liste.push(Ecoute {
+        adresse,
+        tls_implicite,
+    });
+    Ok(())
+}
+
+/// Traduit des écoutes en ce que la configuration retient.
+///
+/// **UNE SEULE COPIE POUR LES TROIS PROTOCOLES.** Trois copies de trois lignes
+/// se ressemblent assez pour qu'on n'en relise aucune, et divergent sur celle
+/// qu'on relit le moins.
+fn en_ecoutes(ecoutes: &[Ecoute]) -> Vec<ams_config::Listener> {
+    ecoutes
+        .iter()
+        .map(|ecoute| ams_config::Listener {
+            address: ecoute.adresse.to_string(),
+            implicit_tls: ecoute.tls_implicite,
+        })
+        .collect()
+}
+
 fn ajouter_une_ecoute(
     options: &mut Options,
     premiere: &mut bool,
@@ -1021,27 +1081,45 @@ where
                      plus que des pannes, et `--spf enforce` ajourne alors chaque message",
                 )?;
             }
-            "--listen-pop3" => {
-                let brute = valeur()?;
-                options.listen_pop3 = Some(
-                    brute
-                        .parse()
-                        .map_err(|_| ArgError::new(format!("`{brute}` n'est pas une adresse")))?,
-                );
+            // Le `110` : `STARTTLS`. Le `995` : implicite (RFC 8314 §3).
+            "--listen-pop3" | "--listen-pop3s" => {
+                let adresse = une_adresse(valeur()?)?;
+                ajouter_a(
+                    &mut options.pop3,
+                    adresse,
+                    argument == "--listen-pop3s",
+                    "POP3",
+                )?;
+                options.listen_pop3 = options.pop3.first().map(|ecoute| ecoute.adresse);
             }
-            // Le `143` : `STARTTLS`, comme le `25`.
+            // Le `143` : `STARTTLS`, comme le `25`. Le `993` : implicite.
+            //
+            // # LES DEUX SE SERVENT ENSEMBLE, DEPUIS LE 2026-09-06
+            //
+            // `imaps` était « le même port avec un autre mode », et non une
+            // seconde écoute. Le commentaire qui le justifiait affirmait
+            // qu'« aucun serveur déployé ne sert `143` et `993` à la fois ».
+            //
+            // **C'était vrai d'UNE machine, pas du monde** : celle qu'on a
+            // regardée porte bien `port = 0` sur son `143`, mais c'est un choix
+            // que son exploitant a fait — Dovecot sert les deux par défaut.
+            // Éteindre l'un pour servir l'autre était une limitation de ce
+            // serveur, présentée comme une observation.
             "--listen-imap" | "--listen-imaps" => {
-                let brute = valeur()?;
-                // **`imaps` EST LE MÊME PORT AVEC UN AUTRE MODE**, et non une
-                // seconde écoute : servir les deux demanderait une liste, et
-                // aucun serveur déployé ne sert `143` et `993` à la fois — le
-                // premier y est éteint (`port = 0`).
-                options.imap_implicit_tls = argument == "--listen-imaps";
-                options.listen_imap = Some(
-                    brute
-                        .parse()
-                        .map_err(|_| ArgError::new(format!("`{brute}` n'est pas une adresse")))?,
-                );
+                let adresse = une_adresse(valeur()?)?;
+                ajouter_a(
+                    &mut options.imap,
+                    adresse,
+                    argument == "--listen-imaps",
+                    "IMAP",
+                )?;
+                // `listen_imap` et `imap_implicit_tls` portent LA PREMIÈRE, pour
+                // un outil qui ne lirait qu'eux.
+                options.listen_imap = options.imap.first().map(|ecoute| ecoute.adresse);
+                options.imap_implicit_tls = options
+                    .imap
+                    .first()
+                    .is_some_and(|ecoute| ecoute.tls_implicite);
             }
             // ── L'API REST ─────────────────────────────────────────────────
             "--listen-http" => {
@@ -2815,10 +2893,18 @@ mod tests {
         }
     }
 
-    /// **`--listen-imaps` EST LE MÊME PORT AVEC UN AUTRE MODE**, et non une
-    /// seconde écoute : aucun serveur déployé ne sert `143` et `993` à la fois.
+    /// **LE 143 ET LE 993 SE SERVENT ENSEMBLE**, depuis le 2026-09-06.
+    ///
+    /// # CE QUE CET ESSAI AFFIRMAIT AVANT
+    ///
+    /// Que `--listen-imaps` était « le même port avec un autre mode, et non une
+    /// seconde écoute : aucun serveur déployé ne sert 143 et 993 à la fois ».
+    /// **C'était vrai d'UNE machine, pas du monde** : celle qu'on a regardée
+    /// porte bien `port = 0` sur son 143, mais c'est un choix que son exploitant
+    /// a fait — Dovecot sert les deux par défaut. Une limitation de ce serveur
+    /// était présentée comme une observation.
     #[test]
-    fn l_imap_choisit_son_mode_par_l_option() {
+    fn l_imap_choisit_son_mode_par_option_et_les_deux_se_cumulent() {
         let clair = ecrire(&["--listen-imap", "0.0.0.0:2143"]);
         assert_eq!(clair.listen_imap.map(|a| a.port()), Some(2143));
         assert!(!clair.imap_implicit_tls);
@@ -2829,14 +2915,71 @@ mod tests {
         assert!(implicite.imap_implicit_tls);
         assert!(implicite.en_configuration().imap_implicit_tls);
 
-        // LE DERNIER MOT COMPTE : deux options pour un port, et c'est la
-        // dernière écrite qui dit le mode.
-        let repris = ecrire(&[
-            "--listen-imaps",
-            "0.0.0.0:2993",
+        // **LES DEUX ENSEMBLE**, et chacune garde son mode.
+        let deux = ecrire(&[
             "--listen-imap",
             "0.0.0.0:2143",
+            "--listen-imaps",
+            "0.0.0.0:2993",
         ]);
-        assert!(!repris.imap_implicit_tls);
+        let config = deux.en_configuration();
+        assert_eq!(config.imap_listeners.len(), 2);
+        assert_eq!(config.imap_listeners[0].address, "0.0.0.0:2143");
+        assert!(!config.imap_listeners[0].implicit_tls);
+        assert_eq!(config.imap_listeners[1].address, "0.0.0.0:2993");
+        assert!(config.imap_listeners[1].implicit_tls);
+        // Les champs simples portent LA PREMIÈRE, pour un outil qui ne lirait
+        // qu'eux.
+        assert_eq!(config.listen_imap, "0.0.0.0:2143");
+        assert!(!config.imap_implicit_tls);
+    }
+
+    /// **LE 110 ET LE 995 AUSSI**, et le 995 n'était pas servable du tout.
+    #[test]
+    fn le_pop3_sert_ses_deux_ports() {
+        let deux = ecrire(&[
+            "--listen-pop3",
+            "0.0.0.0:2110",
+            "--listen-pop3s",
+            "0.0.0.0:2995",
+        ]);
+        let config = deux.en_configuration();
+        assert_eq!(config.pop3_listeners.len(), 2);
+        assert!(!config.pop3_listeners[0].implicit_tls);
+        assert!(config.pop3_listeners[1].implicit_tls);
+        assert_eq!(config.listen_pop3, "0.0.0.0:2110");
+    }
+
+    /// **UNE ADRESSE NE S'ÉCOUTE QU'UNE**, et le refus NOMME le protocole.
+    ///
+    /// Le noyau, lui, dirait « adresse déjà utilisée » sans dire laquelle ni
+    /// pour quoi — et il le dirait au démarrage, pas à l'écriture.
+    #[test]
+    fn une_adresse_demandee_deux_fois_se_refuse_en_nommant_le_protocole() {
+        for (options, protocole) in [
+            (
+                [
+                    "--listen-imap",
+                    "0.0.0.0:2143",
+                    "--listen-imaps",
+                    "0.0.0.0:2143",
+                ],
+                "IMAP",
+            ),
+            (
+                [
+                    "--listen-pop3",
+                    "0.0.0.0:2110",
+                    "--listen-pop3s",
+                    "0.0.0.0:2110",
+                ],
+                "POP3",
+            ),
+        ] {
+            let erreur = parse(options.as_slice()).expect_err("refusé");
+            let dit = erreur.message;
+            assert!(dit.contains(protocole), "{dit}");
+            assert!(dit.contains("deux fois"), "{dit}");
+        }
     }
 }

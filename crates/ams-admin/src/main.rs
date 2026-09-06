@@ -497,42 +497,35 @@ const fn mode_tls(implicite: bool) -> &'static str {
     }
 }
 
-/// L'écoute IMAP, AVEC SON MODE.
+/// Les écoutes d'un protocole, qui peuvent être PLUSIEURS et de modes différents.
 ///
-/// Le mode ne se déduit pas du port : le 993 se sert dans les deux, et c'est
-/// tout ce qui les distingue dans un fichier de configuration.
-fn ligne_de_l_ecoute_imap(config: &Configuration) -> String {
-    if config.listen_imap.is_empty() {
-        return String::from("(aucune — IMAP n'est pas servi)");
-    }
-    std::format!(
-        "{} — {}",
-        config.listen_imap,
-        mode_tls(config.imap_implicit_tls)
-    )
-}
-
-/// Les écoutes SMTP, qui peuvent être PLUSIEURS et de modes différents.
+/// L'adresse simple porte celle de la première ; la liste, quand elle n'est pas
+/// vide, EST la liste. Ne montrer que la simple — ce que cette commande faisait
+/// — cachait toutes les autres, et le 465 avec elles.
 ///
-/// `listen` porte l'adresse de la première ; la liste, quand elle n'est pas
-/// vide, EST la liste. Ne montrer que `listen` — ce que cette commande faisait —
-/// cachait toutes les autres, et le 465 avec elles.
-fn lignes_des_ecoutes_smtp(config: &Configuration) -> Vec<String> {
-    if config.smtp_listeners.is_empty() {
-        return std::vec![std::format!(
-            "écoute             {} — {}",
-            config.listen,
-            mode_tls(false)
-        )];
+/// **UNE SEULE COPIE POUR LES TROIS PROTOCOLES.** Trois copies de cette
+/// vingtaine de lignes se ressembleraient assez pour qu'on n'en relise aucune.
+fn lignes_des_ecoutes(
+    titre: &str,
+    liste: &[ams_config::Listener],
+    simple: &str,
+    implicite: bool,
+) -> Vec<String> {
+    // Le titre occupe dix-huit colonnes, et les suivantes s'alignent dessous.
+    let creux = " ".repeat(titre.chars().count());
+    if liste.is_empty() {
+        if simple.is_empty() {
+            return Vec::new();
+        }
+        return std::vec![std::format!("{titre} {simple} — {}", mode_tls(implicite))];
     }
-    config
-        .smtp_listeners
+    liste
         .iter()
         .enumerate()
         .map(|(rang, ecoute)| {
             let etiquette = match rang {
-                0 => "écoute            ",
-                _ => "                  ",
+                0 => titre,
+                _ => &creux,
             };
             std::format!(
                 "{etiquette} {} — {}",
@@ -546,18 +539,38 @@ fn lignes_des_ecoutes_smtp(config: &Configuration) -> Vec<String> {
 /// Rend une configuration lisible par un humain.
 fn afficher(config: &Configuration) {
     println!("domaine            {}", config.domain);
-    for ligne in lignes_des_ecoutes_smtp(config) {
-        println!("{ligne}");
-    }
-    println!(
-        "écoute POP3        {}",
-        if config.listen_pop3.is_empty() {
-            "(aucune — POP3 n'est pas servi)"
-        } else {
-            &config.listen_pop3
+    for (titre, liste, simple, implicite, absente) in [
+        (
+            "écoute            ",
+            &config.smtp_listeners,
+            &config.listen,
+            false,
+            "(aucune — le serveur ne reçoit rien)",
+        ),
+        (
+            "écoute POP3       ",
+            &config.pop3_listeners,
+            &config.listen_pop3,
+            false,
+            "(aucune — POP3 n'est pas servi)",
+        ),
+        (
+            "écoute IMAP       ",
+            &config.imap_listeners,
+            &config.listen_imap,
+            config.imap_implicit_tls,
+            "(aucune — IMAP n'est pas servi)",
+        ),
+    ] {
+        let lignes = lignes_des_ecoutes(titre, liste, simple, implicite);
+        if lignes.is_empty() {
+            println!("{titre} {absente}");
+            continue;
         }
-    );
-    println!("écoute IMAP        {}", ligne_de_l_ecoute_imap(config));
+        for ligne in lignes {
+            println!("{ligne}");
+        }
+    }
     println!("boîte              {}", config.maildir);
     println!(
         "domaines hébergés  {}",
@@ -1161,7 +1174,7 @@ fn resumer(racine: &Path) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{avertissements, ligne_de_l_ecoute_imap, lignes_des_ecoutes_smtp};
+    use super::{avertissements, lignes_des_ecoutes};
 
     /// La configuration que cette ligne de commande produit.
     ///
@@ -1209,18 +1222,37 @@ mod tests {
 
         // LA MÊME ADRESSE : c'est bien le mode, et lui seul, qui diffère.
         assert_eq!(explicite.listen_imap, implicite.listen_imap);
+        let dire = |config: &ams_config::Configuration| {
+            lignes_des_ecoutes(
+                "écoute IMAP       ",
+                &config.imap_listeners,
+                &config.listen_imap,
+                config.imap_implicit_tls,
+            )
+            .join("\n")
+        };
         assert_ne!(
-            ligne_de_l_ecoute_imap(&explicite),
-            ligne_de_l_ecoute_imap(&implicite),
+            dire(&explicite),
+            dire(&implicite),
             "les deux modes s'affichaient à l'identique"
         );
     }
 
     /// Une écoute IMAP absente le dit, plutôt que de laisser une ligne vide.
+    /// Une écoute absente rend une liste VIDE, et c'est l'appelant qui le dit —
+    /// une seule fois, pour les trois protocoles.
     #[test]
-    fn une_ecoute_imap_absente_se_dit() {
+    fn une_ecoute_imap_absente_rend_une_liste_vide() {
         let config = config_de(&[]);
-        assert!(ligne_de_l_ecoute_imap(&config).contains("n'est pas servi"));
+        assert!(
+            lignes_des_ecoutes(
+                "écoute IMAP       ",
+                &config.imap_listeners,
+                &config.listen_imap,
+                false
+            )
+            .is_empty()
+        );
     }
 
     /// **LA SECONDE ÉCOUTE SMTP NE DOIT PAS DISPARAÎTRE.**
@@ -1229,7 +1261,13 @@ mod tests {
     #[test]
     fn toutes_les_ecoutes_smtp_s_affichent_avec_leur_mode() {
         let config = config_de(&["--listen-smtps", "127.0.0.1:4465"]);
-        let lignes = lignes_des_ecoutes_smtp(&config).join("\n");
+        let lignes = lignes_des_ecoutes(
+            "écoute            ",
+            &config.smtp_listeners,
+            &config.listen,
+            false,
+        )
+        .join("\n");
 
         assert!(
             lignes.contains("127.0.0.1:2525") && lignes.contains("STARTTLS"),
@@ -1246,7 +1284,13 @@ mod tests {
     fn sans_liste_l_ecoute_unique_se_dit_en_starttls() {
         let mut config = config_de(&[]);
         config.smtp_listeners.clear();
-        let lignes = lignes_des_ecoutes_smtp(&config).join("\n");
+        let lignes = lignes_des_ecoutes(
+            "écoute            ",
+            &config.smtp_listeners,
+            &config.listen,
+            false,
+        )
+        .join("\n");
 
         assert!(
             lignes.contains("127.0.0.1:2525") && lignes.contains("STARTTLS"),

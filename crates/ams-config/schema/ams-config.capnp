@@ -201,7 +201,39 @@ struct Configuration {
   # champ, on ne pourrait servir que le 143.
   #
   # FAUX PAR DÉFAUT, donc un ancien fichier garde `STARTTLS` sur son écoute IMAP.
+  #
+  # **CE CHAMP NE DÉCRIT QUE LA PREMIÈRE ÉCOUTE**, depuis qu'`imapListeners`
+  # existe : il porte le mode de `listenImap`, comme `listen` porte l'adresse de
+  # la première écoute SMTP.
   imapImplicitTls @25 :Bool;
+
+  # Les écoutes IMAP, chacune avec son mode TLS.
+  #
+  # # LE 143 ET LE 993 NE SE SERVAIENT PAS ENSEMBLE
+  #
+  # `listenImap` est UNE adresse et `imapImplicitTls` UN booléen : on servait
+  # donc le 143 OU le 993, jamais les deux. Le SMTP, lui, portait déjà une liste
+  # et tenait ses trois ports. Cette asymétrie n'était pas une décision — c'est
+  # ce qui était sorti de la tranche qui n'avait besoin que du SMTP.
+  #
+  # Un serveur déployé sert les deux : le 993 pour les clients d'aujourd'hui, le
+  # 143 pour ceux d'un réseau interne qui montent le chiffrement par `STARTTLS`.
+  # Éteindre l'un pour servir l'autre était une limitation, pas un choix.
+  #
+  # NON VIDE, CETTE LISTE EST LA LISTE, comme pour le SMTP et pour les mêmes
+  # raisons — dont celle-ci, qui décide : sans elle, la PREMIÈRE écoute ne
+  # pourrait pas être en TLS implicite.
+  imapListeners @26 :List(Listener);
+
+  # Les écoutes POP3, chacune avec son mode TLS.
+  #
+  # **LE 995 N'ÉTAIT PAS SERVABLE DU TOUT** : `listenPop3` n'avait même pas de
+  # champ de mode, là où l'IMAP en avait un. Un exploitant qui redirigeait le 995
+  # obtenait un port qui répond EN CLAIR à un client ayant déjà commencé sa
+  # poignée de main — mesuré, et le client y lit `WRONG_VERSION_NUMBER`.
+  #
+  # Vide, il n'y a qu'une écoute, celle de `listenPop3`, en `STARTTLS`.
+  pop3Listeners @27 :List(Listener);
 }
 
 # Une écoute, et le mode TLS de ce port.

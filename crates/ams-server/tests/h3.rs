@@ -80,6 +80,8 @@ fn configuration(
         // Une seule écoute, en `STARTTLS` : la liste vide dirait la même
         // chose, et l'écrire ici la rend lisible.
         smtp_listeners: Vec::new(),
+        imap_listeners: Vec::new(),
+        pop3_listeners: Vec::new(),
         imap_implicit_tls: false,
         domain: String::from("mail.example.com"),
         listen: format!("127.0.0.1:{smtp}"),

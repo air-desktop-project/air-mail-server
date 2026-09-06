@@ -123,8 +123,25 @@ struct Entree {
     /// une écoute, et laisser passer une chaîne vide ferait ouvrir on ne sait
     /// quoi — ou rien, sans le dire.
     ecoutes: Vec<(String, bool)>,
+    /// Les écoutes IMAP, chacune avec son mode. **LES TROIS PROTOCOLES ONT
+    /// DÉSORMAIS LEUR LISTE**, et l'aller-retour doit les rendre toutes les
+    /// trois : une liste qu'on relirait vide serait un port qui ne s'ouvre pas.
+    ecoutes_imap: Vec<(String, bool)>,
+    /// Les écoutes POP3, idem.
+    ecoutes_pop3: Vec<(String, bool)>,
     /// Le TLS est-il implicite sur l'écoute IMAP ?
     imap_implicite: bool,
+}
+
+/// Traduit des écoutes tirées de l'entrée en ce que la configuration retient.
+fn en_ecoutes(brutes: &[(String, bool)]) -> Vec<ams_config::Listener> {
+    brutes
+        .iter()
+        .map(|(adresse, implicite)| ams_config::Listener {
+            address: adresse.clone(),
+            implicit_tls: *implicite,
+        })
+        .collect()
 }
 
 fuzz_target!(|entree: Entree| {
@@ -138,14 +155,9 @@ fuzz_target!(|entree: Entree| {
     let original = Configuration {
         domain: entree.domain.clone(),
         listen: entree.listen.clone(),
-        smtp_listeners: entree
-            .ecoutes
-            .iter()
-            .map(|(adresse, implicite)| ams_config::Listener {
-                address: adresse.clone(),
-                implicit_tls: *implicite,
-            })
-            .collect(),
+        smtp_listeners: en_ecoutes(&entree.ecoutes),
+        imap_listeners: en_ecoutes(&entree.ecoutes_imap),
+        pop3_listeners: en_ecoutes(&entree.ecoutes_pop3),
         imap_implicit_tls: entree.imap_implicite,
         maildir: entree.maildir.clone(),
         hosted: entree.hosted.clone(),

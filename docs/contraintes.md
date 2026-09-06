@@ -3882,6 +3882,89 @@ Ce qui reste hors du serveur : **rien de connu**. Cette ligne annonçait « la f
 de réémission des messages sortants », et c'était faux — elle existe, elle est
 câblée, et [la liste v1](v1.md) le mesure plutôt que de le croire.
 
+## Une limitation présentée comme une observation
+
+`--listen-imaps` n'était pas une seconde écoute : c'était **le même port avec un
+autre mode**, la dernière des deux options écrites l'emportant. On servait donc
+le 143 OU le 993, jamais les deux. Et le POP3 n'avait même pas de champ de mode :
+le 995 n'était pas servable du tout.
+
+Le commentaire qui justifiait cela disait :
+
+> aucun serveur déployé ne sert `143` et `993` à la fois — le premier y est
+> éteint (`port = 0`)
+
+### C'ÉTAIT VRAI D'UNE MACHINE, PAS DU MONDE
+
+Vérifié sur celle qu'on avait regardée :
+
+```
+inet_listener imap  { port = 0 }
+inet_listener imaps { port = 993 }
+```
+
+Le 143 y est bien éteint. **Mais c'est un choix que son exploitant a fait** :
+Dovecot sert les deux par défaut, et il a fallu écrire `port = 0` pour n'en
+servir qu'un.
+
+Une limitation de ce serveur était donc présentée comme une observation du
+monde — et l'observation avait un échantillon d'une seule machine. C'est une
+espèce que ce registre n'avait pas encore nommée : non pas une prose qui ment
+sur le code, mais une prose qui **généralise une mesure juste**.
+
+### CE QUI EN DÉCOULAIT
+
+Le SMTP portait déjà une liste, et tenait ses trois ports. L'asymétrie n'était
+pas une décision : c'est ce qui était sorti de la tranche qui n'avait besoin que
+du SMTP. Les deux autres protocoles ont désormais la leur, avec la même règle —
+non vide, la liste EST la liste ; vide, il n'y a que l'adresse simple, en
+`STARTTLS`.
+
+Six écoutes se servent maintenant ensemble, et c'est éprouvé contre le serveur
+vivant :
+
+| port | protocole | mode |
+|---|---|---|
+| 2525 | SMTP | `STARTTLS` |
+| 4465 | SMTP | implicite |
+| 1143 | IMAP | `STARTTLS` |
+| 9993 | IMAP | implicite |
+| 1110 | POP3 | `STLS` |
+| 9995 | POP3 | implicite |
+
+Et un port implicite n'annonce ni `STARTTLS` ni `STLS` : il est déjà chiffré, et
+l'annoncer inviterait le client à demander une bascule qui n'a pas de sens.
+
+### CE QUE LA FACTORISATION A ÉVITÉ
+
+Trois protocoles, trois listes, et à chaque étage la tentation d'écrire trois
+fois la même chose. Quatre endroits l'ont refusée : la lecture du format,
+l'écriture du format, la traduction des options, et l'affichage de
+`config show`. **Trois copies de vingt lignes se ressemblent assez pour qu'on
+n'en relise aucune**, et la divergence tomberait sur le protocole qu'on relit le
+moins — c'est-à-dire le POP3.
+
+L'affichage en est le meilleur exemple : il montrait la liste SMTP en entier, et
+les deux autres réduites à leur première adresse. Le défaut qu'on avait corrigé
+pour un protocole était resté intact pour les deux autres, parce qu'ils avaient
+chacun leur code.
+
+### UN REFUS QUI NOMME LE PROTOCOLE
+
+Deux écoutes sur la même adresse ne s'ouvriraient pas : la seconde échouerait au
+DÉMARRAGE, sur un message du noyau qui ne dit ni laquelle ni pour quoi. Le refus
+se fait donc à l'écriture de la configuration, où l'on sait encore nommer les
+deux — et où l'on peut dire de quel protocole il s'agit, ce que le noyau ne dira
+jamais.
+
+### CE QUE LE POP3 A DEMANDÉ EN PLUS
+
+Son pilote écrivait sa bannière aussitôt, sans savoir ce qu'était un port
+implicite. Il a fallu lui donner le même chemin qu'à l'IMAP : bannissement,
+poignée de main, garde, bannière, conversation — dans cet ordre, et **pas un
+octet en clair avant la poignée de main**. Ce qu'on écrirait avant elle serait lu
+par le client comme un enregistrement TLS mal formé.
+
 ## Deux versions, deux écritures d'un même nom
 
 `CREATE "Créations"` rendait `BAD CREATE expects a mailbox name`, alors que §5.1

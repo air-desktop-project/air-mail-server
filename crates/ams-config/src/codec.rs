@@ -379,6 +379,16 @@ pub struct Configuration {
     /// Comme les autres adresses, cette crate ne les interprète pas : `core` ne
     /// sait pas lire une adresse de socket.
     pub smtp_listeners: Vec<Listener>,
+    /// Les écoutes IMAP, chacune avec son mode TLS.
+    ///
+    /// **NON VIDE, C'EST LA LISTE** — `listen_imap` et `imap_implicit_tls` n'y
+    /// ajoutent rien. Vide, il n'y a que celle-là, dans son mode.
+    pub imap_listeners: Vec<Listener>,
+    /// Les écoutes POP3, chacune avec son mode TLS.
+    ///
+    /// Même règle. Vide, il n'y a que `listen_pop3`, en `STARTTLS` — le POP3
+    /// n'ayant jamais eu de champ de mode avant celle-ci.
+    pub pop3_listeners: Vec<Listener>,
     /// Le TLS est-il IMPLICITE sur l'écoute IMAP (RFC 8314 §3) ?
     ///
     /// Faux par défaut : un ancien fichier garde `STARTTLS`.
@@ -670,17 +680,9 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
     // **UNE ÉCOUTE SANS ADRESSE N'EST PAS UNE ÉCOUTE.** Elle se refuse ici
     // plutôt que de laisser l'appelant lire une chaîne vide et ouvrir on ne sait
     // quoi — ou rien, sans le dire.
-    let mut smtp_listeners = Vec::new();
-    for ecoute in lu.get_smtp_listeners()?.iter() {
-        let address = texte(ecoute.get_address()?)?;
-        if address.is_empty() {
-            return Err(Error::Empty("smtpListeners"));
-        }
-        smtp_listeners.push(Listener {
-            address,
-            implicit_tls: ecoute.get_implicit_tls(),
-        });
-    }
+    let smtp_listeners = lire_les_ecoutes(lu.get_smtp_listeners()?, "smtpListeners")?;
+    let imap_listeners = lire_les_ecoutes(lu.get_imap_listeners()?, "imapListeners")?;
+    let pop3_listeners = lire_les_ecoutes(lu.get_pop3_listeners()?, "pop3Listeners")?;
 
     let bornes = lu.get_limits()?;
     let garde = lu.get_guard()?;
@@ -832,6 +834,8 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
         mtasts,
         tlsrpt,
         smtp_listeners,
+        imap_listeners,
+        pop3_listeners,
         imap_implicit_tls: lu.get_imap_implicit_tls(),
     })
 }
@@ -934,18 +938,27 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
         // est exactement le genre de couture qu'on relit mal.
         {
             let combien = u32::try_from(config.smtp_listeners.len()).unwrap_or(u32::MAX);
-            let mut liste = ecrit.reborrow().init_smtp_listeners(combien);
-            // **UN `zip` PLUTÔT QU'UN `enumerate` ET UNE CONVERSION.** Le rang
-            // que `get` demande est un `u32` ; le tirer d'un `enumerate` obligeait
-            // à convertir, donc à écrire une garde pour un débordement qu'aucune
-            // configuration ne peut produire — quatre milliards d'écoutes. Le
-            // `zip` s'arrête sur la plus courte des deux, et il n'y a plus rien
-            // à garder.
-            for (rang, ecoute) in (0..combien).zip(&config.smtp_listeners) {
-                let mut place = liste.reborrow().get(rang);
-                place.set_address(&ecoute.address);
-                place.set_implicit_tls(ecoute.implicit_tls);
-            }
+            ecrire_les_ecoutes(
+                ecrit.reborrow().init_smtp_listeners(combien),
+                combien,
+                &config.smtp_listeners,
+            );
+        }
+        {
+            let combien = u32::try_from(config.imap_listeners.len()).unwrap_or(u32::MAX);
+            ecrire_les_ecoutes(
+                ecrit.reborrow().init_imap_listeners(combien),
+                combien,
+                &config.imap_listeners,
+            );
+        }
+        {
+            let combien = u32::try_from(config.pop3_listeners.len()).unwrap_or(u32::MAX);
+            ecrire_les_ecoutes(
+                ecrit.reborrow().init_pop3_listeners(combien),
+                combien,
+                &config.pop3_listeners,
+            );
         }
         ecrit.set_imap_implicit_tls(config.imap_implicit_tls);
         ecrit.set_listen_pop3(&config.listen_pop3);
@@ -980,6 +993,55 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
 }
 
 /// Une chaîne du message, copiée.
+/// Écrit une liste d'écoutes dans le constructeur qu'on lui donne.
+///
+/// # UN `zip` PLUTÔT QU'UN `enumerate` ET UNE CONVERSION
+///
+/// Le rang que `get` demande est un `u32` ; le tirer d'un `enumerate` obligeait
+/// à convertir, donc à écrire une garde pour un débordement qu'aucune
+/// configuration ne peut produire — quatre milliards d'écoutes. Le `zip`
+/// s'arrête sur la plus courte des deux, et il n'y a plus rien à garder.
+fn ecrire_les_ecoutes(
+    mut liste: capnp::struct_list::Builder<'_, crate::ams_config_capnp::listener::Owned>,
+    combien: u32,
+    ecoutes: &[Listener],
+) {
+    for (rang, ecoute) in (0..combien).zip(ecoutes) {
+        let mut place = liste.reborrow().get(rang);
+        place.set_address(&ecoute.address);
+        place.set_implicit_tls(ecoute.implicit_tls);
+    }
+}
+
+/// Relit une liste d'écoutes, et refuse celle qui n'a pas d'adresse.
+///
+/// # UNE SEULE COPIE POUR LES TROIS PROTOCOLES
+///
+/// SMTP, IMAP et POP3 portent la même liste, avec la même règle. En écrire trois
+/// copies, c'est se donner trois occasions de diverger — et la divergence
+/// tomberait sur le protocole qu'on relit le moins.
+///
+/// **UNE ÉCOUTE SANS ADRESSE N'EST PAS UNE ÉCOUTE.** Elle se refuse ici plutôt
+/// que de laisser l'appelant lire une chaîne vide et ouvrir on ne sait quoi — ou
+/// rien, sans le dire.
+fn lire_les_ecoutes(
+    liste: capnp::struct_list::Reader<'_, crate::ams_config_capnp::listener::Owned>,
+    champ: &'static str,
+) -> Result<Vec<Listener>, Error> {
+    let mut ecoutes = Vec::new();
+    for ecoute in liste.iter() {
+        let address = texte(ecoute.get_address()?)?;
+        if address.is_empty() {
+            return Err(Error::Empty(champ));
+        }
+        ecoutes.push(Listener {
+            address,
+            implicit_tls: ecoute.get_implicit_tls(),
+        });
+    }
+    Ok(ecoutes)
+}
+
 pub(crate) fn texte(brut: capnp::text::Reader<'_>) -> Result<String, Error> {
     brut.to_string().map_err(|_| Error::NotUtf8)
 }
@@ -1029,6 +1091,29 @@ mod tests {
                 },
                 Listener {
                     address: String::from("127.0.0.1:2465"),
+                    implicit_tls: true,
+                },
+            ],
+            // Les deux écoutes IMAP d'un serveur réel : le `143` en `STARTTLS`,
+            // le `993` en TLS implicite — et un serveur déployé sert les deux.
+            imap_listeners: vec![
+                Listener {
+                    address: String::from("127.0.0.1:2143"),
+                    implicit_tls: false,
+                },
+                Listener {
+                    address: String::from("127.0.0.1:2993"),
+                    implicit_tls: true,
+                },
+            ],
+            // Et les deux du POP3 : le `110` et le `995`.
+            pop3_listeners: vec![
+                Listener {
+                    address: String::from("127.0.0.1:2110"),
+                    implicit_tls: false,
+                },
+                Listener {
+                    address: String::from("127.0.0.1:2995"),
                     implicit_tls: true,
                 },
             ],
