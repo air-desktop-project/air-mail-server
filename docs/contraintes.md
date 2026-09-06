@@ -3946,6 +3946,48 @@ Ce qui reste hors du serveur : **rien de connu**. Cette ligne annonçait « la f
 de réémission des messages sortants », et c'était faux — elle existe, elle est
 câblée, et [la liste v1](v1.md) le mesure plutôt que de le croire.
 
+## Un magasin qui n'accepte plus d'écriture, et ce que le pair en apprend
+
+Tout exploitant de serveur de courrier finit par poser la même question : **que
+se passe-t-il quand le disque est plein ?** La réponse a été mesurée le
+2026-09-06, en rendant le maildir inécrivable — ce qu'un disque plein fait subir
+au serveur, sans avoir à remplir un disque.
+
+| état du magasin | ce que le pair reçoit |
+|---|---|
+| normal | `250 2.0.0 Message accepted` |
+| **inécrivable** | **`451 4.3.2 Message not accepted, try again later`** |
+| rétabli | `250` — le service repart seul |
+
+### POURQUOI `451` EST LA SEULE BONNE RÉPONSE
+
+Un `250` suivi d'une perte serait le pire : le pair efface sa copie, croit avoir
+remis, et personne ne détrompe l'expéditeur.
+
+Un `5xx` serait presque aussi mauvais : il est DÉFINITIF, et rejetterait du
+courrier parfaitement légitime pour une panne de disque qui durera une heure. Le
+pair renverrait un rapport de non-remise à un expéditeur qui n'y peut rien.
+
+`451` dit « pas maintenant ». Le pair garde le message et réessaie — c'est
+exactement ce que la file d'un MTA sert à faire.
+
+### ET L'EXPLOITANT L'APPREND
+
+    REMISE IMPOSSIBLE — le message ne s'écrit pas sous le maildir. Un disque
+    plein ou des droits changés font ce refus, et il vaut pour TOUT le courrier
+    entrant tant qu'il dure
+
+Puis, à l'arrêt : « 1 message(s) qui n'ont pas pu être écrits sous le maildir ».
+La ligne nomme les deux causes possibles sans se tromper de coupable — ce n'est
+ni le pair, ni le message.
+
+### CE QUE CETTE MESURE VAUT
+
+Elle éprouve la propriété la plus coûteuse à découvrir en production : un serveur
+qui perd du courrier en silence ne se remarque qu'après. Ici le refus est
+temporaire, il est dit, il est compté, et le service repart de lui-même dès que
+l'écriture redevient possible.
+
 ## Les quatorze contraintes, confrontées au serveur qui tourne
 
 Ce registre promet, dans son préambule, de dire « ce qui la fait respecter
