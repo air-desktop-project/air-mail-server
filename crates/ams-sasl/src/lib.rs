@@ -17,12 +17,28 @@
 //!   et surtout l'obligation de conserver le mot de passe en clair côté serveur
 //!   pour pouvoir calculer le condensat. Un mécanisme qui interdit de stocker
 //!   une empreinte est un mécanisme qui aggrave la fuite qu'il prétend éviter.
-//! - **`SCRAM-SHA-256`** (RFC 7677) serait le bon successeur : le serveur n'y
-//!   voit jamais le mot de passe. Il exige en revanche un vérificateur stocké
-//!   (sel, itérations, deux clés dérivées), c'est-à-dire un magasin
-//!   d'identifiants — qui n'existe pas encore dans ce dépôt. L'écrire d'avance
-//!   ferait supposer la forme de ce magasin ; il attendra donc qu'elle soit
-//!   décidée.
+//! - **`SCRAM-SHA-256`** (RFC 7677) a longtemps figuré ici comme « le bon
+//!   successeur », en attendant qu'un magasin d'identifiants existe. Il existe
+//!   depuis, et **la décision est prise : ce sera non**, le 2026-09-06.
+//!
+//!   Il exige un vérificateur stocké — sel, itérations, `StoredKey`,
+//!   `ServerKey` —, et `ams_auth` écrit sa raison d'être en une phrase : « une
+//!   fuite du fichier de comptes ne doit pas être une fuite des mots de passe ».
+//!   Ce vérificateur la contredit deux fois.
+//!
+//!   **Il est dérivé par PBKDF2**, que §2.2 de RFC 5802 impose : on ne peut pas
+//!   y substituer l'`argon2id` du magasin sans cesser d'interopérer, puisque
+//!   c'est le CLIENT qui calcule le sien. Un magasin portant les deux serait
+//!   attaquable par le plus faible.
+//!
+//!   **Il est directement exploitable**, là où une empreinte demande d'abord
+//!   d'être cassée : §9 dit que `ServerKey` permet d'usurper le serveur, et
+//!   qu'une seule conversation écoutée suffit alors à reconstituer `ClientKey`.
+//!
+//!   Ce qu'il apporterait est mince en regard : sous TLS 1.3, `PLAIN` ne fait
+//!   jamais traverser le mot de passe, et le certificat authentifie déjà le
+//!   serveur. Voir `docs/v1.md` pour les trois conditions qui renverseraient ce
+//!   choix.
 //!
 //! `PLAIN` transmet le mot de passe en clair dans le tuyau : il n'est acceptable
 //! que **sous TLS**, et c'est [`ams_session`] qui l'impose, sans réglage possible.

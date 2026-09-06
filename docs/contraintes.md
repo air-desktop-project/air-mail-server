@@ -1227,6 +1227,21 @@ serveur à conserver le mot de passe en clair** pour calculer le condensat. Un
 mécanisme qui interdit de stocker une empreinte aggrave la fuite qu'il prétend
 éviter.
 
+**`SCRAM-SHA-256` est refusé depuis le 2026-09-06, et pour une raison voisine.**
+Il ne fait pas conserver le mot de passe, mais il fait conserver quelque chose
+qui, en cas de fuite, vaut presque autant. §2.2 de RFC 5802 impose PBKDF2 pour
+dériver son vérificateur : on ne peut pas y mettre l'`argon2id` du magasin sans
+cesser d'interopérer, puisque c'est le CLIENT qui calcule le sien — et un magasin
+qui porterait les deux serait attaquable par le plus faible. Pire, §9 dit que
+`ServerKey` permet d'usurper le SERVEUR auprès des clients, et qu'une
+conversation écoutée suffit alors à reconstituer `ClientKey`. Une empreinte
+`argon2id`, elle, doit d'abord être cassée.
+
+Ce que SCRAM apporterait est mince en regard : sous TLS 1.3, `PLAIN` ne fait
+jamais traverser le mot de passe, et le certificat authentifie déjà le serveur.
+**Le `SHOULD` de §6.2.2 de RFC 9051 n'est donc pas tenu, et c'est assumé** —
+`docs/v1.md` porte les trois conditions qui renverseraient ce choix.
+
 **`USER`/`PASS` hors chiffrement sont refusés depuis le 2026-08-29**, par la
 session POP3 et sans réglage possible : le mot de passe y traverse le fil tel
 quel. C'est le pendant exact du `538` d'`AUTH` en SMTP.
