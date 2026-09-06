@@ -324,6 +324,135 @@ fn lancer(config: &Path, port: u16) -> Serveur {
 /// Une clé de scellement d'essai, en hexadécimal.
 const CLEF: &str = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
 
+/// Frappe un jeton d'ADMINISTRATION, comme `air-mail-admin token` le fait.
+fn jeton_d_administration() -> String {
+    let clef = ams_api::key_from_hex(CLEF).expect("la clé d'essai est lisible");
+    let maintenant = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("après 1970")
+            .as_micros(),
+    )
+    .expect("l'horloge tient dans un u64");
+    let jeton = ams_api::Token {
+        login: "jean",
+        // **LA MÊME PORTÉE QUE L'OUTIL**, et pas une de plus : un essai qui se
+        // donnerait le courrier en plus n'éprouverait pas ce qu'un exploitant a
+        // réellement entre les mains.
+        scope: ams_api::Scope::one(ams_api::Area::Admin, ams_api::Rights::Write),
+        expiry: maintenant.saturating_add(900_000_000),
+        nonce: 42,
+    };
+    let mut place = [0_u8; ams_api::ENCODED_OCTETS_MAX];
+    ams_api::issue(&clef, &jeton, maintenant, &mut place)
+        .expect("le jeton se scelle")
+        .to_string()
+}
+
+/// **L'API EST SERVIE À UN CLIENT QUI N'EST PAS DE NOTRE MAIN.**
+///
+/// # CE QUE LES AUTRES ESSAIS DE CE FICHIER NE FONT PAS
+///
+/// Ils jouent le client avec `openssl` et des requêtes écrites ici. HTTP/2 n'est
+/// pourtant pas un protocole qu'on improvise : HPACK, le cadrage, les fenêtres.
+/// Un malentendu sur l'un des trois se retrouverait des DEUX côtés, écrit par la
+/// même main, et aucun de ces essais ne le verrait.
+///
+/// `libcurl` en a sa propre implémentation, éprouvée contre le reste du monde.
+///
+/// # ET IL VÉRIFIE AUSSI CE QU'ON REFUSE
+///
+/// Un jeton d'administration ouvre `/v1/accounts` et `/v1/domains`, et **ne doit
+/// pas** ouvrir `/v1/mailboxes` : `air-mail-admin token` ne frappe que la portée
+/// `Admin`. Le refus se lit `404` et non `403`, délibérément — voir
+/// `ams_api::problem` : « `NoSuchResource` et `Forbidden` répondent toutes deux
+/// 404, précisément pour que "cette ressource existe" ne se lise pas dans la
+/// réponse ».
+#[test]
+fn un_client_curl_parle_a_l_api_en_http2() {
+    let atelier = atelier("interop-curl-api");
+    let Some((cert, cle)) = paire(&atelier.0) else {
+        panic!("{SANS_OPENSSL}");
+    };
+    if std::process::Command::new("curl")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("IGNORÉ : `curl` est absent — cet essai n'a RIEN éprouvé.");
+        return;
+    }
+
+    let port_smtp = port_libre();
+    let port_http = port_libre();
+    let config = configuration_api(
+        &atelier,
+        port_smtp,
+        Tls {
+            certificate_chain_path: cert.display().to_string(),
+            private_key_path: cle.display().to_string(),
+        },
+        &format!("127.0.0.1:{port_http}"),
+        CLEF,
+    );
+    let _serveur = lancer(&config, port_smtp);
+
+    let jeton = jeton_d_administration();
+    let appeler = |chemin: &str| -> (String, String) {
+        let sortie = std::process::Command::new("curl")
+            .arg("-s")
+            .arg("--insecure")
+            .arg("--http2")
+            .args(["-H", &format!("Authorization: Bearer {jeton}")])
+            .args(["-w", "\n%{http_code} %{http_version}"])
+            .arg(format!("https://127.0.0.1:{port_http}{chemin}"))
+            .output()
+            .expect("curl s'exécute");
+        let tout = String::from_utf8_lossy(&sortie.stdout).into_owned();
+        let (corps, fin) = tout.rsplit_once('\n').unwrap_or(("", ""));
+        (corps.to_string(), fin.to_string())
+    };
+
+    // ── CE QUE LA PORTÉE OUVRE ──────────────────────────────────────────────
+    let (corps, fin) = appeler("/v1/accounts");
+    assert_eq!(
+        fin, "200 2",
+        "curl doit lire les comptes en HTTP/2 : {corps}"
+    );
+    assert!(
+        corps.contains('{') || corps.contains('['),
+        "la réponse doit être du JSON : {corps}"
+    );
+    let (_, fin) = appeler("/v1/domains");
+    assert_eq!(fin, "200 2", "curl doit lire les domaines");
+
+    // ── CE QU'ELLE N'OUVRE PAS, ET QUI NE DIT PAS QU'IL EXISTE ─────────────
+    let (corps, fin) = appeler("/v1/mailboxes");
+    assert_eq!(
+        fin, "404 2",
+        "un jeton d'administration ne doit pas ouvrir le courrier"
+    );
+    assert!(
+        corps.contains("not-found"),
+        "le refus doit être indiscernable d'une route inconnue : {corps}"
+    );
+
+    // ── ET SANS JETON, RIEN ────────────────────────────────────────────────
+    let sortie = std::process::Command::new("curl")
+        .arg("-s")
+        .arg("--insecure")
+        .arg("--http2")
+        .args(["-o", "/dev/null", "-w", "%{http_code}"])
+        .arg(format!("https://127.0.0.1:{port_http}/v1/accounts"))
+        .output()
+        .expect("curl s'exécute");
+    assert_eq!(
+        String::from_utf8_lossy(&sortie.stdout),
+        "401",
+        "sans jeton, l'API doit refuser"
+    );
+}
+
 /// Ce port accepte-t-il une connexion ?
 fn ecoute_ouverte(port: u16) -> bool {
     let adresse: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().expect("une adresse");
