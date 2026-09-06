@@ -56,6 +56,28 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 > Sans cette règle, un utilisateur pourrait écrire au nom d'un collègue — et
 > depuis que ce serveur signe, notre signature l'authentifierait.
 >
+> **LES DEUX PORTES NE COUVRENT PAS LA MÊME CHOSE**, et c'est mesuré le
+> 2026-09-06. La porte HTTP vérifie DÈS L'ENTRÉE de `submissions`, avant même de
+> savoir si le message sort ; la porte SMTP ne vérifie que dans
+> `deposer_les_sortants`. Un message soumis en SMTP qui reste ICI — d'un compte
+> vers une boîte locale — passe donc avec un `From:` d'autrui :
+>
+> ```
+> AUTH PLAIN (jean)              235 2.7.0 Authentication successful
+> RCPT TO:<destinataire@ailleurs.test>  … From: <collegue@…>  554 5.7.1 Message rejected
+> RCPT TO:<jean@essai.test>             … From: <collegue@…>  250 2.0.0 Message accepted
+> ```
+>
+> Le motif du refus, tel qu'il est écrit, est la SIGNATURE — « ce qu'on refuse
+> d'émettre n'a pas à être complété, et surtout pas signé » —, et un message qui
+> ne sort pas n'est pas signé. Mais la règle énoncée est plus large que cela, et
+> `delivery.rs` prévient lui-même : « deux règles à deux endroits finissent par ne
+> plus dire la même chose ». C'est arrivé — même lecture, portées différentes.
+>
+> **Étendre la règle SMTP à la remise locale changerait ce que le serveur
+> accepte**, et cela ne se décide pas en passant : c'est une question posée à
+> l'exploitant, pas une correction de prose.
+>
 > **Ce qu'une soumission oublie, il le complète** (RFC 6409 §8) : `Date:` — l'un
 > des deux seuls champs que RFC 5322 rend obligatoires — et `Message-ID:`, sans
 > lequel aucun rapport ne peut dire de quel message il parle. Ce qui est présent
