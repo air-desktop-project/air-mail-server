@@ -48,12 +48,22 @@ table du pare-feu ÉCRITE dans un fichier.
 demandent un domaine et des mots de passe, c'est-à-dire des décisions. Il
 imprime les commandes exactes en terminant.
 
-### Ou par un paquet Debian
+### Ou par un paquet Debian, sur Ubuntu
+
+**LA CIBLE DE DÉPLOIEMENT EST UBUNTU**, et c'est ce qui décide du format : un
+`.deb`, et rien d'autre. Debian et Ubuntu partagent `dpkg`, la charte, et
+l'emplacement des unités systemd ; le paquet vaut donc pour les deux, mais c'est
+la seconde qu'il vise.
 
 ```sh
 ./scripts/paquet.sh                       # produit air-mail-server_<version>_<arch>.deb
 sudo dpkg -i air-mail-server_*.deb
 ```
+
+**IL EST ÉPROUVÉ SUR LA DISTRIBUTION QU'IL VISE**, et pas seulement sur la
+machine de développement : l'intégration continue tourne sur `ubuntu-latest`, où
+`scripts/check-paquet.sh` construit le paquet, le déballe, et **exécute son
+`postinst`** sous des doublures — onze contrôles, à chaque poussée.
 
 Le paquet fait poser son arborescence **par `installer.sh` lui-même** : il n'y a
 pas deux textes qui décrivent la même unité systemd, et donc pas deux textes qui

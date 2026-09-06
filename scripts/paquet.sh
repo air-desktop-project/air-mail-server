@@ -5,6 +5,12 @@
 #
 # Construit le paquet Debian d'air-mail-server.
 #
+# **LA CIBLE DE DÉPLOIEMENT EST UBUNTU**, et c'est elle qui décide du format.
+# Debian et Ubuntu partagent `dpkg`, la charte et l'emplacement des unités
+# systemd ; ce paquet vaut donc pour les deux, mais c'est la seconde qu'il vise —
+# et c'est sur elle qu'il est éprouvé, l'intégration continue tournant sur
+# `ubuntu-latest`.
+#
 # ── CE QU'UN PAQUET FAIT QUE `installer.sh` NE FAIT PAS ─────────────────────
 #
 # Trois choses, et la troisième est celle qui manquait vraiment :
