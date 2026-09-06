@@ -629,10 +629,12 @@ fn afficher(config: &Configuration) {
         if config.relay.enabled {
             let reprise = config.queue.backoff();
             format!(
-                "vers `{}` — 1er essai à {} s, plafond {} s, abandon à {} s",
+                "vers `{}` — 1er essai à {} s, plafond {} s, retard dit à {} s, \
+                 abandon à {} s",
                 config.queue.spool,
                 reprise.first.as_secs(),
                 reprise.ceiling.as_secs(),
+                reprise.warning.as_secs(),
                 reprise.expiry.as_secs()
             )
         } else {

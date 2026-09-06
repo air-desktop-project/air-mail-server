@@ -12933,3 +12933,80 @@ tenues, était le seul document à le taire.
 Sans elle, le lecteur suppose l'instantané, et la première vérification qu'il fera
 ressemblera à une panne. C'est la même exigence que la ligne voisine sur
 `--max-connections`, corrigée pour dire « par service » plutôt que « par écoute ».
+
+## La file de réémission, chronométrée contre le serveur qui tourne
+
+`v1.md` promet « une file de réémission avec attente qui double et péremption »
+et « des rapports de non-remise ». Les essais d'unité la couvrent ; personne
+n'avait regardé un vrai message attendre.
+
+**Comment on comprime cinq jours en quarante secondes.** Les quatre molettes se
+règlent : `--queue-retry-seconds 2`, `--queue-max-retry-seconds 8`,
+`--queue-warn-seconds 10`, `--queue-expire-seconds 40`. Un résolveur pointé sur
+un port fermé (`--resolver 127.0.0.1:9`) rend toute remise impossible sans faire
+attendre le moindre délai réseau. Le nom du fichier dans la file porte à lui seul
+ce qu'on veut observer — `<prochain essai>!<première vue>!<essais>!<id>.eml` —
+si bien qu'un `ls` toutes les trois dixièmes de seconde suffit, sans instrumenter
+le serveur.
+
+    t+9 s   essais=3  prochain=+15 s
+    t+15 s  essais=4  prochain=+23 s
+    t+23 s  essais=5  prochain=+31 s
+    t+31 s  essais=6  prochain=+39 s
+    t+39 s  essais=7  prochain=+40 s      ← l'échéance, pas +47 s
+    t+41 s  file vide
+
+**LE DERNIER ESSAI TOMBE SUR LA PÉREMPTION.** L'attente aurait porté l'essai
+suivant à +47 s, au-delà de l'abandon ; elle est ramenée à +40 s. Le commentaire
+de `backoff.rs` le dit et l'explique — renoncer plus tôt raccourcirait en silence
+les cinq jours annoncés — et c'est la mesure qui l'a fait remarquer.
+
+Le rapport de non-remise arrive à t+41 s dans la boîte de l'expéditeur, en
+`multipart/report; report-type=delivery-status` (RFC 3464), avec
+`Action: failed`, `Status: 4.4.7` et les en-têtes d'origine joints. La promesse
+tient.
+
+### Ce que l'avis de RETARD m'a coûté avant de tenir aussi
+
+Au premier passage, aucun avis de retard n'est arrivé, seuil à 10 s et péremption
+à 40 s. J'ai commencé à écrire un défaut. Le mécanisme existe pourtant :
+`Backoff::is_late` est appelé dans `queue.rs`, et la branche `Issue::Ajourne`
+compose l'avis — mais SOUS CONDITION que le déposant ait écrit `NOTIFY=DELAY`
+(RFC 3461 §4.1, dont le défaut est `FAILURE` seul). Mon client n'avait rien
+demandé. Reprise avec `rcpt_options=["NOTIFY=DELAY,FAILURE"]` : l'avis arrive au
+premier essai qui échoue après le seuil, en `Action: delayed`, `Status: 4.4.1`,
+et une seule fois — le bit `delay_sent` de l'enveloppe empêche les suivants.
+
+Un détour de plus, en chemin : j'ai lu `"DSN" in s.esmtp_features` et conclu que
+l'extension n'était pas annoncée. `smtplib` range ses clés en minuscules ; un
+`EHLO` lu à la main la montre bien. C'est le dixième instrument de mesure fautif
+de cette séance, et le même réflexe l'a arrêté : ne pas croire un instrument qui
+accuse le sujet avant de l'avoir vérifié lui-même.
+
+### L'écart réel : une molette qui ne laissait aucune trace
+
+`config show` affichait « 1er essai à 2 s, plafond 8 s, abandon à 40 s », et la
+ligne de démarrage du serveur les mêmes trois. `--queue-warn-seconds` se réglait
+donc SANS APPARAÎTRE NULLE PART.
+
+**Pourquoi cet oubli-là coûte plus cher que ses voisins.** Les trois autres
+molettes se constatent en attendant : l'attente se chronomètre, la péremption
+se voit arriver. Le seuil de retard, lui, ne produit rien d'observable tant que
+personne n'écrit `NOTIFY=DELAY` — son silence est AMBIGU. Ne rien recevoir peut
+vouloir dire « le seuil n'est pas atteint », « le seuil n'a pas été pris en
+compte », ou « personne ne l'a demandé », et rien dans le produit ne permettait
+de distinguer les trois. C'est exactement le raisonnement où je me suis perdu.
+
+Les deux affichages la disent désormais, et celui du serveur ajoute la condition
+qui manquait le plus : l'avis ne part QUE si `NOTIFY=DELAY` a été demandé.
+
+**Deux essais le gardent, et aucun ne recopie la liste.**
+`config_show_rend_compte_de_chaque_molette_de_la_file` lit les `--queue-…-seconds`
+dans la source qui les ACCEPTE — pas dans le texte de l'aide, pour qu'une molette
+retirée mais encore documentée ne soit pas exigée — donne à chacune une valeur
+qui n'appartient qu'à elle, et exige de les retrouver.
+`les_deux_affichages_de_la_file_disent_la_politique_entiere` lit les champs
+`Duration` de `Backoff` et exige que la ligne de démarrage du serveur les cite
+tous. Une cinquième molette ajoutée demain sans être affichée fera échouer les
+deux. Chacun a été confronté au défaut qu'il prétend voir, en remettant
+l'affichage dans son état d'origine.

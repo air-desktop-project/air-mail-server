@@ -1170,13 +1170,15 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         }
         let reprise = options.queue.backoff();
         eprintln!(
-            "air-mail-server : FILE D'ATTENTE `{}` — 1er essai à {} s, plafond {} s, abandon à \
-             {} s. TOUT ce qui sort y passe : le courrier des comptes, les rapports DMARC et les \
-             rapports TLS. Quand on renonce, un rapport de non-remise (RFC 3464) revient \
-             LOCALEMENT dans la boîte de l'expéditeur.",
+            "air-mail-server : FILE D'ATTENTE `{}` — 1er essai à {} s, plafond {} s, retard dit \
+             à {} s, abandon à {} s. TOUT ce qui sort y passe : le courrier des comptes, les \
+             rapports DMARC et les rapports TLS. Quand on renonce, un rapport de non-remise \
+             (RFC 3464) revient LOCALEMENT dans la boîte de l'expéditeur ; l'avis de RETARD, lui, \
+             ne part QUE si le déposant l'a demandé par `NOTIFY=DELAY` (RFC 3461 §4.1).",
             options.queue.spool,
             reprise.first.as_secs(),
             reprise.ceiling.as_secs(),
+            reprise.warning.as_secs(),
             reprise.expiry.as_secs()
         );
         if options.relay.enabled && !authentifie {
