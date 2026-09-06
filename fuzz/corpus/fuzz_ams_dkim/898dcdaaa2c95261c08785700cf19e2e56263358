@@ -1,0 +1,2 @@
+vh==rsa;DKIM0; k=rsa; pMIGvMA0GCSqGSIvh=DKIv=1; a=rsa-sha512; c=relaxed/relaxed; d=example.com; s=brisbaM0;vh=ne; h=fso~:to:su
+ect:date; bh=2jUSOH9Nhtg:IM0; k=rsa; pVqqqqqqqqqqqqqqqGCQWNr9BrIAPreKQjO6sn7XIkfJVOzv8=; b=AuEoFEQQQQQQQQQQQQQQQQQQQQQQQQQQQQ=M 									QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQuUoF6eda7W3deTVFOk4yAUoqOB4 	 										k=rsa; EG5

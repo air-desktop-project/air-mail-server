@@ -1,0 +1,2 @@
+v=1; a=rsa-sha512; c=relaxed/relaxed; d=example.com; s=brisbane; h=fso~:to:su
+ect:date; bh=2jUSOH9NhtVqqqqqqqqqqqqqqqGCQWNr9BrIAPreKQjO6sn7XIkfJVOzv8=; b=AuEoFEQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQuUoF6eda7W3deTVFOk4yAUoqOB4 	 EG5

@@ -1,0 +1,1 @@
+v=DMARC1; p=reject;pvp=rju=10; pvp=rjv=MD5; pvp=rC0; pec=v:
