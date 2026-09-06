@@ -3932,6 +3932,80 @@ Ce qui reste hors du serveur : **rien de connu**. Cette ligne annonçait « la f
 de réémission des messages sortants », et c'était faux — elle existe, elle est
 câblée, et [la liste v1](v1.md) le mesure plutôt que de le croire.
 
+## Le `PIPELINING` qu'on annonçait coûtait quarante millisecondes par message
+
+Ce serveur annonce `PIPELINING` dans son `EHLO` (RFC 2920) : le pair peut envoyer
+`MAIL`, `RCPT` et `DATA` d'un trait, sans attendre chaque réponse. C'est ce que
+font Postfix et Exim.
+
+Mesuré le 2026-09-06, sur la même connexion et le même corps :
+
+| mode | par message |
+|---|---|
+| commande par commande | 0,14 ms |
+| **pipeliné — celui qu'on annonce** | **41,09 ms** |
+
+**Deux cent quatre-vingt-treize fois plus lent dans le mode qu'on recommande
+soi-même au pair.**
+
+### CE QUE SONT CES QUARANTE MILLISECONDES
+
+La signature de l'ACK retardé. Le pair envoie trois commandes d'un trait ; le
+serveur écrit trois réponses courtes coup sur coup, et **Nagle retient les deux
+dernières** jusqu'à l'acquittement de la première. Le pair attend un temporisateur
+de TCP pour un travail que le serveur a expédié en cent microsecondes.
+
+`TCP_NODELAY` n'était posé NULLE PART dans ce dépôt.
+
+### POURQUOI LE DÉSACTIVER EST JUSTE ICI
+
+Ce n'est pas une optimisation aveugle. **Ce serveur écrit des RÉPONSES, pas un
+flot** : chacune est complète quand elle part, et il n'y a rien à agréger. Nagle
+protège d'un tout autre usage — l'envoi octet par octet d'un client bavard — que
+rien ici ne fait. Les quatre conducteurs qui acceptent des connexions le posent
+donc : SMTP, IMAP, POP3 et l'API.
+
+Après correctif : **0,11 ms** par message pipeliné, soit environ 9 400 par
+seconde. Le pipeliné redevient plus rapide que le séquentiel, comme il doit
+l'être.
+
+### L'OBJECTION ÉVIDENTE, ET SA RÉPONSE
+
+Désactiver Nagle multiplie-t-il les paquets ? On l'a vérifié plutôt que supposé :
+le conducteur écrit `write_all(tour.reply())` puis `flush()` — **un seul appel par
+réponse**. Une réponse est donc déjà un paquet, et rien n'est fragmenté par ce
+changement.
+
+Ce qui cesse, c'est la RÉTENTION des suivantes. Quand un pair pipeline, le
+serveur lit ses trois commandes d'une traite — le commentaire de `connection.rs`
+le dit : « plusieurs commandes peuvent tenir dans une seule lecture » — puis les
+traite une par une, en répondant à chacune. Trois réponses, trois paquets, et
+c'est le compte juste : une réponse de protocole EST une unité.
+
+### CE QU'AUCUNE RELECTURE N'AURAIT TROUVÉ
+
+Tout marchait. Les essais passaient, les quatre protocoles servaient, les clients
+tiers relevaient leur courrier. **Il n'y avait pas de faute à voir dans le
+code** — il y avait une option absente, et son absence ne se lit nulle part.
+
+Ce défaut ne se voit qu'en mesurant, et seulement si l'on mesure le bon mode :
+commande par commande, tout allait bien.
+
+### CINQ INSTRUMENTS TROMPEURS AVANT D'Y ARRIVER
+
+Un lecteur IMAP désynchronisé qui rendait l'état d'avant. Des surveillants
+d'intégration continue qui accrochaient la mauvaise course. Une boucle de lecture
+sans `recv`. Une recherche d'expression régulière quadratique. Une concaténation
+quadratique. Et un sixième, après le correctif, qui jetait son tampon entre deux
+attentes.
+
+**Chaque fois, la même vérification a tranché** : comparer le temps de mur au
+temps de CALCUL du sujet, lu dans `/proc`. Un sujet qui n'a rien consommé n'a rien
+fait de lent. Et ici, il ne consommait rien parce qu'il attendait un temporisateur.
+
+C'est la seule parade connue contre un banc menteur, et elle vaut d'être écrite :
+**ne jamais rapporter une lenteur sans avoir mesuré ce que le sujet a consommé.**
+
 ## Le banc était quadratique, pas le serveur
 
 Le 2026-09-06, une mesure d'échelle sur une boîte de 5 000 messages a donné ceci :

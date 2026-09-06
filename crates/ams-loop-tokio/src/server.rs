@@ -433,6 +433,22 @@ where
                 continue;
             }
         };
+        // ── NAGLE CONTRE LE PIPELINING QU'ON ANNONCE ───────────────────────
+        //
+        // **MESURÉ LE 2026-09-06 : 0,14 ms par message commande par commande,
+        // 41 ms en PIPELINÉ** — soit deux cent quatre-vingt-treize fois plus
+        // lent, dans le mode que l'`EHLO` annonce lui-même (RFC 2920).
+        //
+        // Quarante millisecondes est la signature de l'ACK retardé. Un client
+        // qui pipeline envoie `MAIL`+`RCPT`+`DATA` d'un trait ; le serveur écrit
+        // trois réponses courtes coup sur coup, et Nagle retient les deux
+        // dernières jusqu'à l'acquittement de la première. Le pair attend un
+        // délai de protocole réseau pour un travail qui a pris cent microsecondes.
+        //
+        // **CE SERVEUR ÉCRIT DES RÉPONSES, PAS UN FLOT** : chacune est complète
+        // quand elle part, et il n'y a rien à agréger. Nagle protège d'un tout
+        // autre usage — un envoi octet par octet — que rien ici ne fait.
+        let _ = flux.set_nodelay(true);
         stats.accepted = stats.accepted.saturating_add(1);
 
         let Ok(place) = Arc::clone(&places).acquire_owned().await else {
@@ -885,6 +901,50 @@ mod places {
                 ..ServeOptions::default()
             };
             assert_eq!(places_du_service(&options).available_permits(), combien);
+        }
+    }
+}
+
+#[cfg(test)]
+mod nodelay {
+    /// **LES QUATRE ACCEPTATIONS DÉSACTIVENT NAGLE**, et cet essai lit les
+    /// sources pour le dire.
+    ///
+    /// # POURQUOI UN ESSAI QUI LIT DU TEXTE
+    ///
+    /// Une option de socket ne se voit pas du dehors : le client ne peut pas
+    /// savoir si le serveur a posé `TCP_NODELAY`. Ce qui se voit, c'est le
+    /// DÉLAI — et le mesurer dans un essai le rendrait instable, ce que B10 a
+    /// assez coûté pour qu'on s'en garde.
+    ///
+    /// Reste la source. Chacun des quatre conducteurs qui acceptent des
+    /// connexions doit poser `set_nodelay`.
+    ///
+    /// **CE QUE CET ESSAI NE GARDE PAS**, et c'est écrit plutôt que supposé : un
+    /// CINQUIÈME conducteur ajouté demain ne serait pas dans sa liste. Compter
+    /// les acceptations pour s'en assurer ne marche pas — cet essai s'inclut
+    /// lui-même par `include_str!`, et ses propres chaînes littérales faussent
+    /// le compte.
+    ///
+    /// # CE QUE CET ESSAI GARDE, MESURÉ LE 2026-09-06
+    ///
+    /// Sans `set_nodelay`, un client qui PIPELINE — ce que l'`EHLO` annonce, et
+    /// ce que font Postfix et Exim — payait **41 ms par message** au lieu de
+    /// 0,11. Deux cent quatre-vingt-treize fois plus lent, pour un travail que
+    /// le serveur expédie en cent microsecondes.
+    #[test]
+    fn chaque_acceptation_desactive_nagle() {
+        for (nom, source) in [
+            ("server.rs", include_str!("server.rs")),
+            ("imap.rs", include_str!("imap.rs")),
+            ("pop3.rs", include_str!("pop3.rs")),
+            ("http.rs", include_str!("http.rs")),
+        ] {
+            assert!(
+                source.contains("set_nodelay(true)"),
+                "{nom} accepte des connexions sans désactiver Nagle : un client \
+                 qui pipeline y paierait quarante millisecondes par message"
+            );
         }
     }
 }

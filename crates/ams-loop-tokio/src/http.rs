@@ -866,6 +866,10 @@ where
                 continue;
             }
         };
+        // **NAGLE CONTRE LE PIPELINING** : voir `server.rs`, qui porte la
+        // mesure et la raison. Ce protocole-ci écrit lui aussi des réponses
+        // complètes, jamais un flot.
+        let _ = flux.set_nodelay(true);
         stats.accepted = stats.accepted.saturating_add(1);
 
         let Ok(place) = Arc::clone(&places).acquire_owned().await else {
