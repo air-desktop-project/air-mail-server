@@ -1808,6 +1808,27 @@ mod tests {
     /// Sans compte, sans `From:` lisible, ou avec une adresse qui ne route vers
     /// personne : on ne sait pas au nom de qui ce message part, et l'émettre
     /// reviendrait à signer une identité qu'on n'a pas vérifiée.
+    ///
+    /// # CET ESSAI GARDE LA SECONDE BARRIÈRE, PAS LA PREMIÈRE
+    ///
+    /// Son message — « une transaction anonyme a émis » — se lit comme un relais
+    /// ouvert. Il ne l'est pas, et le savoir évite une frayeur : **un pair
+    /// anonyme n'atteint même pas cette remise**. La politique le refuse dès le
+    /// `RCPT TO:` d'un tiers, par un `550 5.7.1 Relay access denied` — mesuré
+    /// contre le serveur vivant le 2026-09-06, et gardé par
+    /// `policy::tests::le_relais_exige_le_drapeau_et_l_authentification`, qui
+    /// éprouve les quatre combinaisons du drapeau et de l'authentification.
+    ///
+    /// Ce que cet essai garde est la SECONDE ligne : que la remise refuse elle
+    /// aussi, si jamais un appelant l'atteignait sans compte. Le 2026-09-06,
+    /// c'est arrivé — en remontant la règle « un compte n'écrit qu'en son nom »
+    /// dans `append`, on a emporté cette garde-ci, et l'essai l'a dit en sept
+    /// secondes.
+    ///
+    /// **DEUX BARRIÈRES INDÉPENDANTES, ET C'EST VOULU** : la première décide qui
+    /// a le droit de faire relayer, la seconde refuse d'émettre ce dont on ne
+    /// sait pas au nom de qui il part. Les confondre ferait croire qu'en perdre
+    /// une n'est rien.
     #[tokio::test(flavor = "multi_thread")]
     async fn sans_identite_verifiable_rien_ne_part() {
         let temporaire = Ephemere::nouveau();
