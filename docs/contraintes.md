@@ -3932,6 +3932,79 @@ Ce qui reste hors du serveur : **rien de connu**. Cette ligne annonçait « la f
 de réémission des messages sortants », et c'était faux — elle existe, elle est
 câblée, et [la liste v1](v1.md) le mesure plutôt que de le croire.
 
+## Le banc était quadratique, pas le serveur
+
+Le 2026-09-06, une mesure d'échelle sur une boîte de 5 000 messages a donné ceci :
+
+| plage | temps |
+|---|---|
+| `FETCH 1:1000 FLAGS` | 115 ms |
+| `FETCH 1:2000 FLAGS` | 434 ms |
+| `FETCH 1:4000 FLAGS` | 1 639 ms |
+| `FETCH 1:5000 FLAGS` | 2 592 ms |
+
+**Doubler le nombre de messages quadruplait le temps.** Médianes sur cinq
+mesures, après chauffe, avec des écarts serrés : la donnée était propre, et le
+diagnostic évident. Un `O(n²)` dans le cœur du `FETCH` — pour une boîte de
+50 000 messages, la synchronisation initiale d'un client aurait pris des minutes.
+
+### CE QUI A ÉVITÉ DE LE RAPPORTER
+
+Une dernière vérification avant d'ouvrir la chasse : **le serveur CALCULE-T-IL,
+ou attend-il ?** Le temps processeur du processus, lu dans `/proc`, pendant
+chaque commande :
+
+    1:1000   mur   114 ms   calcul serveur    0 ms   (0 %)
+    1:2500   mur   669 ms   calcul serveur   10 ms   (1 %)
+    1:5000   mur  2612 ms   calcul serveur    0 ms   (0 %)
+
+**Zéro.** Le serveur ne faisait rien pendant ces 2,6 secondes : il attendait.
+
+### CE QU'IL ATTENDAIT
+
+Le banc. Le client d'essai relançait une recherche d'expression régulière sur
+**tout le tampon accumulé** à chaque `recv` — un tampon qui grossit jusqu'à
+124 Kio. La recherche coûtait donc `O(k × N)`, et c'est elle qui était
+quadratique.
+
+En bornant la recherche à la queue du tampon :
+
+| plage | avant | après |
+|---|---|---|
+| `1:1000` | 115 ms | 77 ms |
+| `1:2000` | 434 ms | 55 ms |
+| `1:4000` | 1 639 ms | 105 ms |
+| `1:5000` | **2 592 ms** | **154 ms** |
+
+Un facteur dix-sept, et le comportement est LINÉAIRE — environ 30 µs par
+message.
+
+### CE QUE LE SERVEUR FAIT VRAIMENT, À 5 000 MESSAGES
+
+    démarrage (index compris)          210 ms
+    LOGIN (argon2id, 19 Mio)            39 ms
+    SELECT INBOX                        17 ms
+    STATUS INBOX (MESSAGES)              0 ms
+    SEARCH ALL                          42 ms
+    FETCH 1:* FLAGS                    187 ms
+    SEARCH SUBJECT "…"                  83 ms
+    FETCH <un message> BODY[]           42 ms
+
+### LA LEÇON, ET C'EST LA SECONDE DE LA JOURNÉE
+
+Le registre porte déjà « un banc de mesure mal synchronisé invente des
+défauts » — un lecteur à `sleep` fixe qui rendait l'état d'avant. Voici l'autre
+moitié : **un banc peut être correct et rester trop lent pour ce qu'il mesure.**
+
+La première espèce ment sur le CONTENU, la seconde sur le TEMPS. Contre la
+seconde, une seule parade tient : comparer le temps de mur au temps de CALCUL du
+sujet. Un sujet qui n'a rien consommé n'a rien fait de lent.
+
+**Quatre instruments m'ont trompé le 2026-09-06** — un lecteur IMAP désynchronisé,
+des surveillants d'intégration continue qui accrochaient la mauvaise course, une
+boucle de lecture sans `recv`, et ce banc quadratique. Aucun n'a produit de
+défaut rapporté à tort, mais le quatrième en était à une vérification près.
+
 ## Un banc de mesure mal synchronisé invente des défauts
 
 Le 2026-09-06, en vérifiant que `STORE` fait bien ce que le `README` annonce —
