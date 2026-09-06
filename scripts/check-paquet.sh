@@ -60,7 +60,12 @@ essai=$(mktemp -d)
 trap 'rm -rf "$essai"' EXIT
 
 titre "1. le paquet se construit"
-if ! ./scripts/paquet.sh --sans-construire --sortie "$essai" > "$essai/journal" 2>&1; then
+# **PAS DE `--sans-construire` ICI.** Ce contrôle empaquette `target/release` ;
+# s'y fier sans le rebâtir, c'est éprouver un paquet qui porte un binaire vieux
+# de plusieurs heures — ce qui est arrivé à `check-installation.sh` jusqu'au
+# 2026-09-06. `cargo` est incrémental : quand rien n'a changé, cela ne coûte
+# qu'une seconde.
+if ! ./scripts/paquet.sh --sortie "$essai" > "$essai/journal" 2>&1; then
     cat "$essai/journal" >&2
     rate "paquet.sh n'a pas abouti"
     exit 1
@@ -179,6 +184,36 @@ for binaire in air-mail-server air-mail-admin; do
     fi
 done
 conclure "les deux binaires répondent à \`--version\`"
+
+titre "8bis. le binaire EMPAQUETÉ connaît les options de la SOURCE"
+commencer
+# **CE QUI COMPTE N'EST PAS QU'IL SOIT IDENTIQUE À `target/release`** — il l'est
+# par construction, et une comparaison octet à octet ne dirait donc rien. Ce qui
+# compte est qu'il corresponde à la SOURCE : un binaire vieux de quelques heures
+# est parfaitement valide, s'exécute, répond à `--version`, et ignore les options
+# ajoutées depuis.
+#
+# C'est exactement ce qui est arrivé à `check-installation.sh` jusqu'au
+# 2026-09-06 : il interrogeait un `release` qui ne connaissait pas
+# `--resolver-trusted`, ajoutée et poussée le jour même.
+#
+# On confronte donc les bras de `match` de l'analyseur à l'aide que le binaire
+# EMPAQUETÉ imprime.
+inconnues=0
+for option in $(grep -ohE '^\s+"--[a-z][a-z0-9-]*"' crates/ams-admin-options/src/lib.rs \
+        | tr -d ' "' | sort -u); do
+    # `--help` et `--version` sont les options de la commande, pas de
+    # `config write` : son aide ne les décrit pas.
+    case " --help --version " in *" $option "*) continue ;; esac
+    "$essai/deballe/usr/bin/air-mail-admin" config write --help 2>&1 \
+        | grep -q -- "$option" || {
+            rate "le binaire empaqueté ignore \`$option\`, que la source accepte : \
+il ne vient pas de cette source"
+            inconnues=$((inconnues + 1))
+            [ "$inconnues" -ge 3 ] && break
+        }
+done
+conclure "il connaît toutes les options que la source accepte"
 
 titre "9. la marche à suivre imprimée existe vraiment"
 commencer

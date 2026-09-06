@@ -3902,6 +3902,62 @@ Ce qui reste hors du serveur : **rien de connu**. Cette ligne annonçait « la f
 de réémission des messages sortants », et c'était faux — elle existe, elle est
 câblée, et [la liste v1](v1.md) le mesure plutôt que de le croire.
 
+## « Présent » n'est pas « à jour » : une barrière qui interrogeait un fantôme
+
+`check-installation.sh` ne construisait les binaires `release` que s'ils
+**manquaient** :
+
+    if [ ! -x target/release/air-mail-server ] || [ ! -x target/release/air-mail-admin ]; then
+        cargo build --release --locked
+    fi
+
+Le 2026-09-06, on a découvert qu'il éprouvait depuis plusieurs tranches un
+binaire vieux de plusieurs heures. `--resolver-trusted` avait été ajoutée,
+documentée, éprouvée et poussée dans la journée — et le contrôle interrogeait un
+`air-mail-admin` qui ne l'avait jamais connue.
+
+**C'est pire qu'un contrôle absent.** Un contrôle absent ne dit rien ; celui-ci
+rendait un verdict, sur autre chose que ce qu'on lui demandait.
+
+### CE QUE CELA CONTAMINAIT
+
+`check-paquet.sh` empaquette ce même `target/release`, et lui passait
+`--sans-construire`. Un paquet pouvait donc être bâti, éprouvé en dix points, et
+déclaré bon **en portant un binaire qui ne correspondait à aucune source**.
+
+L'intégration continue, elle, partait d'un arbre neuf : ses binaires étaient
+toujours frais. Le défaut ne vivait que sur la machine où l'on travaille — c'est
+-à-dire là où l'on regarde le verdict avant de pousser.
+
+### COMMENT IL S'EST TROUVÉ
+
+En câblant un contrôle NEUF, sans rapport : celui qui vérifie que les options
+imprimées par le SERVEUR existent dans `config write`. Il a échoué sur
+`--resolver-trusted`, que la source documentait pourtant. Ce n'est qu'en
+cherchant pourquoi qu'on a regardé la date du binaire.
+
+**Un contrôle neuf trouve autant de défauts dans les anciens que dans le code.**
+
+### LA CORRECTION, ET SON COÛT
+
+`cargo build --release --locked`, sans condition. `cargo` est incrémental :
+quand rien n'a changé, cela coûte une seconde. La condition ne faisait
+économiser que ce qui n'était pas à économiser.
+
+### UN CONTRÔLE QUE J'AI ÉCRIT, PUIS RETIRÉ
+
+La première réponse fut de comparer le binaire empaqueté à `target/release`,
+octet par octet. En l'éprouvant contre un défaut délibéré, il n'a rien vu — et
+pour cause : `paquet.sh` COPIE depuis `target/release`, si bien que les deux
+côtés viennent du même fichier. Abîmer l'un abîme l'autre.
+
+**Une comparaison tautologique passe toujours, et rassure toujours.** Elle a été
+remplacée par la seule qui dise quelque chose : le binaire empaqueté doit
+connaître toutes les options que la SOURCE accepte. Un binaire périmé est
+parfaitement valide, s'exécute, répond à `--version` — et ignore ce qui a été
+ajouté depuis. Éprouvé en ajoutant une option à la source sans reconstruire :
+attrapé.
+
 ## Une option que personne ne pouvait découvrir
 
 `--spf-timeout-ms` était accepté depuis longtemps. Son code porte un

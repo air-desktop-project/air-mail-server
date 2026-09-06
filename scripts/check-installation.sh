@@ -65,12 +65,22 @@ else
 fi
 
 echo
-echo "── 3. les binaires doivent être là avant de poser quoi que ce soit ──────"
-if [ ! -x target/release/air-mail-server ] || [ ! -x target/release/air-mail-admin ]; then
-    echo "les binaires `release` sont absents : on les construit."
-    cargo build --release --locked
-fi
-echo "OK"
+echo "── 3. les binaires doivent être là, ET À JOUR ───────────────────────────"
+# **« PRÉSENT » N'EST PAS « À JOUR ».** Ce contrôle ne construisait que si les
+# binaires MANQUAIENT. Le 2026-09-06, on a découvert qu'il éprouvait depuis
+# plusieurs tranches un `release` vieux de plusieurs heures : `--resolver-trusted`
+# avait été ajoutée, documentée, poussée — et le contrôle interrogeait un binaire
+# qui ne la connaissait pas.
+#
+# C'est pire qu'un contrôle absent : celui-ci rendait un verdict, sur autre chose
+# que ce qu'on lui demandait. `cargo` est incrémental — quand rien n'a changé,
+# cette ligne ne coûte qu'une seconde.
+#
+# **`check-paquet.sh` EMPAQUETTE CE MÊME `target/release`**, et son
+# `--sans-construire` s'y fiait : un paquet pouvait donc être bâti, éprouvé et
+# déclaré bon en portant un binaire qui ne correspondait à aucune source.
+cargo build --release --locked
+echo "OK — construits, et à jour"
 
 echo
 echo "── 4. l'installation dans un arbre jetable ──────────────────────────────"
@@ -214,6 +224,31 @@ for option in --domain --hosted --maildir --accounts --listen --listen-smtps \
 done
 grep -q 'account add' "$essai/pose" || rate "la marche à suivre n'ajoute aucun compte"
 echo "OK — neuf options imprimées, et toutes reconnues par \`config write --help\`"
+
+echo
+echo "── 10. les options que LE SERVEUR imprime existent aussi ────────────────"
+# **LE SERVEUR EN CITE BIEN PLUS QUE L'INSTALLATEUR.** Chacune de ses lignes de
+# démarrage qui dit ce qui MANQUE nomme l'option qui le fournirait — `--resolver`
+# pour SPF, `--public-suffix-list` pour DMARC, `--queue-spool` pour la file. Ce
+# sont ces commandes-là que l'exploitant recopie, et une seule qui aurait changé
+# de nom se découvrirait sur sa machine.
+#
+# On les tire de la SOURCE plutôt que d'une exécution : le serveur n'imprime que
+# les manques de SA configuration, si bien qu'un seul démarrage n'en montrerait
+# qu'une poignée.
+# `--address` appartient à `account add` ; `--config`, `--help` et `--version`
+# sont les options du SERVEUR lui-même, pas de `config write`.
+ailleurs=" --address --config --help --version "
+manquantes=0
+for option in $(grep -ohE '\-\-[a-z][a-z0-9-]+' crates/ams-server/src/main.rs | sort -u); do
+    case "$ailleurs" in *" $option "*) continue ;; esac
+    "$racine/target/release/air-mail-admin" config write --help 2>&1 \
+        | grep -q -- "$option" || {
+            rate "le serveur imprime \`$option\`, que \`config write\` ne connaît pas"
+            manquantes=$((manquantes + 1))
+        }
+done
+[ "$manquantes" -eq 0 ] && echo "OK — toutes reconnues par \`config write --help\`"
 
 echo
 if [ "$echec" -ne 0 ]; then
