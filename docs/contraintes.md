@@ -13208,3 +13208,83 @@ faire. On la lance, et on fait autre chose pendant qu'elle tourne.
 Ces durées supposent un `target/` déjà rempli. À froid, `cargo test` et
 `check-couverture` recompilent le monde, et les deux minutes et demie en font
 plutôt dix.
+
+## Une signature illisible n'est pas une absence de signature
+
+§6.1.1 de RFC 6376, mot pour mot :
+
+> Implementers MUST meticulously validate the format and values in the
+> DKIM-Signature header field; any inconsistency or unexpected values MUST cause
+> the header field to be completely ignored and the Verifier to return PERMFAIL
+> (signature syntax error).
+
+**Deux obligations, et ce serveur ne tenait que la première.** Une signature dont
+la syntaxe est invalide était sautée en silence, et le message ressortait comme
+s'il n'en portait aucune — pas de ligne `dkim=` du tout.
+
+### Ce que cela cachait, et ce que cela ne cachait pas
+
+Rien du côté de la REMISE : DMARC ne compte que les signatures qui passent, et
+une signature illisible n'en est pas une. Le message était traité exactement
+comme il devait l'être.
+
+Tout du côté du DIAGNOSTIC. Un domaine dont le prestataire émet des signatures
+malformées — un `h=` séparé par des espaces au lieu de deux-points, par exemple —
+lisait `Authentication-Results` et ses rapports DMARC sans y voir la moindre
+différence avec du courrier non signé. Il chercherait sa panne du côté de sa
+publication DNS, ou de son alignement, et jamais du côté de son signeur.
+
+C'est exactement ce que ce dépôt reproche ailleurs, dans `connection.rs` : « un
+rapport qui ne nommerait que les signatures réussies cacherait au domaine le
+prestataire dont la clé a expiré — c'est-à-dire exactement ce qu'il cherche à
+apprendre. » La règle était écrite ; ce cas-là y échappait.
+
+### Comment le défaut s'est montré
+
+En signant un message à la main pour éprouver la promesse « DKIM est évalué ».
+Mon `h=` portait des espaces — c'était MA faute, pas celle du serveur, et
+RFC 6376 §3.5 veut des deux-points. Le serveur n'a alors même pas interrogé le
+DNS, ce que le journal du résolveur d'épreuve a montré : la signature n'était pas
+devenue candidate.
+
+**Ce n'est donc pas le défaut que je cherchais qui est apparu, mais un autre**,
+révélé par ma propre erreur de signeur. Une signature malformée est justement ce
+qu'un signeur défaillant produit en production.
+
+### Le correctif, et pourquoi il ne coûte rien
+
+`DkimStream` compte désormais les signatures illisibles au lieu de les jeter, et
+`finish` rend un `permerror` pour chacune. Le compte ne coûte NI résolution DNS,
+NI condensat, NI exponentiation modulaire — c'est-à-dire rien de ce que la borne
+`SIGNATURES_MAX` existe pour éviter. Une illisible ne prend donc pas la place
+d'une bonne, et un essai le vérifie : vingt champs malformés suivis d'une
+signature valable laissent bien passer le `pass`.
+
+Le verdict n'a ni `d=` ni `s=` : ils n'ont pas pu être lus. §2.2 de RFC 8601 le
+prévoit — « The "propspec" may be omitted if, for example, the method was unable
+to extract any properties to do its evaluation yet still has a result to
+report. » Le composeur écrit donc `dkim=permerror` seul, et REFUSE une moitié de
+paire : `header.s` sans `header.d` ne désigne aucune clé, un sélecteur ne valant
+que dans le DNS d'un domaine.
+
+**Un second compte, borné à trois.** Chaque illisible coûte une ligne dans
+l'en-tête de trace, dont la place est réservée et finie. Trois suffisent à dire
+« ce domaine a un problème de signature », qui est tout ce que ce compte veut
+faire savoir ; au-delà, les lignes seraient de toute façon retirées à la
+composition, et un pair choisirait la taille d'un `Vec`.
+
+### L'essai qui affirmait le défaut
+
+`une_signature_illisible_ne_coute_aucune_resolution` asserait `is_empty()` — la
+première obligation seule, prise pour la règle entière. Sa chute a été la
+première preuve que la correction changeait quelque chose d'observable. Il
+s'appelle désormais `une_signature_illisible_se_rapporte_sans_rien_couter`, et
+dit les deux moitiés : aucune résolution, ET un verdict rendu.
+
+**Une correction posée au mauvais endroit, d'abord.** `Signature::parse` est
+appelé DEUX fois — une fois dans `demarrer`, qui retient les candidates, une fois
+dans `finish`. J'ai corrigé la seconde, et l'épreuve contre le serveur qui tourne
+n'a rien changé : la signature était écartée bien plus tôt. Le second appel ne
+peut pas échouer, puisque seules les signatures déjà lues arrivent jusqu'à lui.
+Sans la reprise de l'épreuve en conditions réelles, la correction serait partie
+avec ses essais verts et son défaut intact.

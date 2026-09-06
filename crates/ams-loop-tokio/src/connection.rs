@@ -1307,7 +1307,14 @@ where
                             envelope_from: session.sender_identity().map(|identite| {
                                 String::from_utf8_lossy(identite.sender).into_owned()
                             }),
-                            dkim_domain: signature_fautive.map(|vue| vue.domain.clone()),
+                            // Vide quand la signature était illisible : on la
+                            // rapporte en `permerror` sans propriétés, et un
+                            // `d=` vide dans un rapport d'échec ne nommerait
+                            // rien. Même raison que pour le sélecteur, juste
+                            // dessous.
+                            dkim_domain: signature_fautive
+                                .map(|vue| vue.domain.clone())
+                                .filter(|domaine| !domaine.is_empty()),
                             dkim_selector: signature_fautive
                                 .map(|vue| vue.selector.clone())
                                 .filter(|selecteur| !selecteur.is_empty()),

@@ -53,6 +53,18 @@ const ENTETES_MAX: usize = 256 * 1024;
 /// portent une ou deux ; trois relais qui signent chacun font cinq au pire.
 const SIGNATURES_MAX: usize = 5;
 
+/// Le nombre de signatures ILLISIBLES dont on rend compte.
+///
+/// Chacune ne coûte qu'une ligne dans l'en-tête de trace — ni DNS, ni condensat,
+/// ni exponentiation — mais cette ligne occupe la place RÉSERVÉE, qui est finie
+/// (`ams_mime::AUTHRES_RESERVE`). Au-delà, les signatures en trop seraient de
+/// toute façon retirées à la composition ; les compter plus loin ne dirait rien
+/// de plus, et un pair pourrait faire allouer un `Vec` à sa guise.
+///
+/// Trois suffisent à dire « ce domaine a un problème de signature », qui est
+/// tout ce que ce compte veut faire savoir.
+const ILLISIBLES_MAX: usize = 3;
+
 /// Ce qu'on a conclu d'une signature (RFC 8601 §2.7.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DkimVerdict {
@@ -292,6 +304,15 @@ pub struct DkimStream {
     entetes: Vec<u8>,
     phase: Phase,
     candidats: Vec<Candidate>,
+    /// Les signatures présentes et ILLISIBLES.
+    ///
+    /// On en compte le nombre, et rien de plus : §6.1.1 de RFC 6376 veut qu'on
+    /// en rende compte, pas qu'on les vérifie. Un compteur ne coûte ni
+    /// résolution DNS, ni condensat, ni exponentiation — c'est-à-dire rien de
+    /// ce que la borne `SIGNATURES_MAX` existe pour éviter. Il est borné lui
+    /// aussi : un pair qui empilerait mille champs illisibles ferait écrire
+    /// mille lignes dans l'en-tête de trace, dont la place est réservée.
+    illisibles: usize,
     condenser: bool,
 }
 
@@ -307,6 +328,7 @@ impl DkimStream {
             entetes: Vec::new(),
             phase: Phase::Entetes,
             candidats: Vec::new(),
+            illisibles: 0,
             condenser,
         }
     }
@@ -334,6 +356,10 @@ impl DkimStream {
             self.phase = Phase::Deborde;
             self.entetes = Vec::new();
             self.candidats = Vec::new();
+            // Zéro à ce stade — `demarrer` n'a pas encore tourné — mais un bloc
+            // qui déborde ne doit rien laisser derrière lui, pas même un compte
+            // qu'une lecture ultérieure croirait sien.
+            self.illisibles = 0;
             return;
         }
         // La ligne vide peut être coupée entre deux morceaux : on cherche donc à
@@ -372,8 +398,19 @@ impl DkimStream {
                 continue;
             }
             let Ok(signature) = Signature::parse(champ.raw_value()) else {
-                // Une signature illisible ne se vérifie pas, et n'occupe pas une
-                // des places : elle ne coûtera ni résolution ni exponentiation.
+                // **ELLE NE SE VÉRIFIE PAS, MAIS ELLE SE RAPPORTE.** §6.1.1 de
+                // RFC 6376 pose DEUX obligations : « any inconsistency or
+                // unexpected values MUST cause the header field to be completely
+                // ignored AND the Verifier to return PERMFAIL (signature syntax
+                // error) ». Ce code ne tenait que la première, et un message
+                // portant une signature malformée ressortait comme s'il n'en
+                // portait AUCUNE.
+                //
+                // Elle n'occupe toujours pas une des `SIGNATURES_MAX` places :
+                // cette borne existe pour le coût — une résolution DNS et une
+                // exponentiation modulaire par signature — et compter ne coûte
+                // rien de tout cela.
+                self.illisibles = self.illisibles.saturating_add(1).min(ILLISIBLES_MAX);
                 continue;
             };
             self.candidats.push(Candidate {
@@ -391,8 +428,33 @@ impl DkimStream {
 
     /// Termine, et rend un verdict par signature.
     ///
-    /// Un message sans signature lisible rend une liste vide — c'est le `none`
+    /// Un message SANS AUCUNE signature rend une liste vide — c'est le `none`
     /// de la RFC 8601, et c'est la moitié du courrier.
+    ///
+    /// # UNE SIGNATURE ILLISIBLE N'EST PAS UNE ABSENCE DE SIGNATURE
+    ///
+    /// §6.1.1 de RFC 6376 : « any inconsistency or unexpected values MUST cause
+    /// the header field to be completely ignored **and the Verifier to return
+    /// PERMFAIL (signature syntax error)** ». Deux obligations, pas une. Ce code
+    /// ne tenait que la première : la signature était sautée, et le message
+    /// ressortait comme s'il n'en portait aucune.
+    ///
+    /// **CE QUE CELA CACHAIT.** Rien, du côté de la remise : DMARC ne compte que
+    /// les signatures qui PASSENT, et une signature illisible n'en est pas une.
+    /// Tout, du côté du diagnostic — un domaine dont le prestataire émet des
+    /// signatures malformées lisait `Authentication-Results` et ses rapports
+    /// DMARC sans y voir la moindre différence avec du courrier non signé. C'est
+    /// exactement ce que ce dépôt reproche ailleurs à un rapport qui ne nommerait
+    /// que les signatures réussies.
+    ///
+    /// Le verdict rendu n'a alors ni `d=` ni `s=` : ils n'ont pas pu être lus.
+    /// §2.2 de RFC 8601 le prévoit — « The "propspec" may be omitted if, for
+    /// example, the method was unable to extract any properties to do its
+    /// evaluation yet still has a result to report. »
+    ///
+    /// Mesuré le 2026-09-06, en signant un message à la main avec un `h=` séparé
+    /// par des espaces au lieu de deux-points : le serveur n'a même pas demandé
+    /// la clé au DNS, et l'en-tête ne portait aucune ligne `dkim=`.
     pub async fn finish(&mut self, checker: &DkimChecker) -> Vec<DkimResult> {
         let Ok(message) = Message::parse(&self.entetes, &MimeLimits::DEFAULT) else {
             return Vec::new();
@@ -402,11 +464,28 @@ impl DkimStream {
             let Some(champ) = message.fields().nth(candidat.rang) else {
                 continue;
             };
+            // Cette seconde lecture ne peut pas échouer : seules les
+            // signatures que `demarrer` a su lire sont devenues candidates. Les
+            // illisibles, elles, ont été comptées là-bas et sont rendues plus
+            // bas.
             let Ok(signature) = Signature::parse(champ.raw_value()) else {
                 continue;
             };
             let verdict = conclure(checker, &message, champ, &signature, candidat.corps).await;
             verdicts.push(verdict);
+        }
+        // **LES ILLISIBLES, EN DERNIER ET SANS PROPRIÉTÉS.** On n'a lu ni `d=`
+        // ni `s=` — c'est tout le problème. §2.2 de RFC 8601 le prévoit : « The
+        // "propspec" may be omitted if, for example, the method was unable to
+        // extract any properties to do its evaluation yet still has a result to
+        // report. »
+        for _ in 0..core::mem::take(&mut self.illisibles) {
+            verdicts.push(DkimResult {
+                domain: String::new(),
+                selector: String::new(),
+                verdict: DkimVerdict::PermError,
+                testing: false,
+            });
         }
         verdicts
     }

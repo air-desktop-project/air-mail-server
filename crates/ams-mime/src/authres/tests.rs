@@ -679,3 +679,114 @@ fn aucune_ligne_ne_depasse_la_borne_quelle_que_soit_la_reserve() {
         }
     }
 }
+
+/// **UN RÉSULTAT SANS PROPRIÉTÉS S'ÉCRIT, ET SEUL.**
+///
+/// §2.2 de RFC 8601 : « The "propspec" may be omitted if, for example, the
+/// method was unable to extract any properties to do its evaluation yet still
+/// has a result to report. »
+///
+/// C'est le cas d'une signature dont la SYNTAXE est invalide : §6.1.1 de
+/// RFC 6376 exige d'en rendre compte en `permerror`, et l'on n'a alors lu ni
+/// `d=` ni `s=` — c'est tout le problème.
+#[test]
+fn une_signature_sans_proprietes_s_ecrit_sans_elles() {
+    let sans = [DkimSeen {
+        result: DkimResult::PermError,
+        domain: b"",
+        selector: b"",
+    }];
+    let mut place = [0_u8; 256];
+    let ecrit = write_authres(
+        &mut place,
+        &Authentication {
+            serv_id: NOUS,
+            spf: None,
+            dkim: &sans,
+            dmarc: None,
+        },
+    )
+    .expect("composable");
+    let texte = std::str::from_utf8(ecrit).expect("de l'ASCII");
+    assert!(texte.contains("dkim=permerror"), "{texte}");
+    // NI L'UNE NI L'AUTRE : `header.d=` vide serait une propriété illisible, et
+    // `header.s=` seul ne désignerait aucune clé.
+    assert!(!texte.contains("header.d="), "{texte}");
+    assert!(!texte.contains("header.s="), "{texte}");
+}
+
+/// **ET ELLE COHABITE AVEC UNE SIGNATURE QUI, ELLE, A DES PROPRIÉTÉS.**
+///
+/// Un message peut porter les deux : une signature lisible et une malformée. Le
+/// cas mérite son essai parce que la boucle qui compose écrit les deux formes,
+/// et qu'une erreur d'ordre y ferait perdre le `;` qui les sépare.
+#[test]
+fn les_deux_formes_de_signature_se_composent_ensemble() {
+    let deux = [
+        DkimSeen {
+            result: DkimResult::Pass,
+            domain: b"example.net",
+            selector: b"sel",
+        },
+        DkimSeen {
+            result: DkimResult::PermError,
+            domain: b"",
+            selector: b"",
+        },
+    ];
+    let mut place = [0_u8; 512];
+    let ecrit = write_authres(
+        &mut place,
+        &Authentication {
+            serv_id: NOUS,
+            spf: None,
+            dkim: &deux,
+            dmarc: None,
+        },
+    )
+    .expect("composable");
+    let texte = std::str::from_utf8(ecrit).expect("de l'ASCII");
+    assert!(
+        texte.contains("dkim=pass header.d=example.net header.s=sel"),
+        "{texte}"
+    );
+    assert!(texte.contains("dkim=permerror\r\n"), "{texte}");
+    // Chaque ligne sauf la première ouvre par un blanc : le champ reste UN champ.
+    for (rang, ligne) in texte.trim_end_matches("\r\n").split("\r\n").enumerate() {
+        assert!(
+            rang == 0 || ligne.starts_with([' ', '\t']),
+            "ligne {rang} : {ligne:.40}"
+        );
+    }
+}
+
+/// **UNE MOITIÉ DE PAIRE EST REFUSÉE**, et ce n'est pas de la pédanterie.
+///
+/// `header.s` sans `header.d` ne désigne aucune clé : un sélecteur ne vaut que
+/// dans le DNS d'un domaine. L'écrire donnerait à un lecteur en aval une
+/// propriété qu'il ne pourrait pas résoudre, et la faire disparaître en silence
+/// cacherait une erreur d'appelant.
+#[test]
+fn une_moitie_de_paire_est_refusee() {
+    for (domaine, selecteur) in [(b"" as &[u8], b"sel" as &[u8]), (b"example.net", b"")] {
+        let bancale = [DkimSeen {
+            result: DkimResult::Pass,
+            domain: domaine,
+            selector: selecteur,
+        }];
+        let mut place = [0_u8; 256];
+        assert!(
+            write_authres(
+                &mut place,
+                &Authentication {
+                    serv_id: NOUS,
+                    spf: None,
+                    dkim: &bancale,
+                    dmarc: None,
+                },
+            )
+            .is_err(),
+            "`d={domaine:?}` `s={selecteur:?}` aurait dû être refusé"
+        );
+    }
+}

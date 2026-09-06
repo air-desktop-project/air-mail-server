@@ -165,11 +165,65 @@ async fn un_message_sans_signature_ne_rend_aucun_verdict() {
 }
 
 #[tokio::test]
-async fn une_signature_illisible_ne_coute_aucune_resolution() {
-    // Elle n'occupe pas une des places : ni résolution, ni exponentiation.
+async fn une_signature_illisible_se_rapporte_sans_rien_couter() {
+    // **DEUX OBLIGATIONS, ET NON UNE.** §6.1.1 de RFC 6376 : « any inconsistency
+    // or unexpected values MUST cause the header field to be completely ignored
+    // AND the Verifier to return PERMFAIL (signature syntax error) ».
+    //
+    // Cet essai affirmait `is_empty()` — c'est-à-dire la première obligation
+    // seule — et un message portant une signature malformée ressortait comme
+    // s'il n'en portait AUCUNE. Rien n'y paraissait à la remise, puisque DMARC
+    // ne compte que les signatures qui PASSENT ; tout y paraissait au
+    // diagnostic, puisqu'un domaine dont le prestataire signe mal lisait
+    // `Authentication-Results` sans y voir la moindre différence avec du
+    // courrier non signé.
+    //
+    // Ce qui reste vrai de l'ancien essai : elle ne coûte NI résolution DNS ni
+    // exponentiation, et n'occupe pas une des `SIGNATURES_MAX` places. C'est
+    // pourquoi le résolveur de cette épreuve ne sert à rien ici — et c'est
+    // volontaire : s'il était interrogé, le verdict serait un `temperror` de
+    // clé absente, pas le `permerror` de syntaxe qu'on attend.
     let resolveur = resolveur_txt(CLE).await;
     let mechante = "DKIM-Signature: v=42; oups\r\nFrom: jean@example.com\r\n\r\nBonjour.\r\n";
-    assert!(verdicts(mechante, resolveur, 4096).await.is_empty());
+    assert_eq!(
+        verdicts(mechante, resolveur, 4096).await,
+        std::vec![DkimVerdict::PermError]
+    );
+}
+
+#[tokio::test]
+async fn les_signatures_illisibles_se_rapportent_en_nombre_borne() {
+    // Trois suffisent à dire « ce domaine a un problème de signature ». Au-delà,
+    // les lignes seraient de toute façon retirées de l'en-tête de trace, dont la
+    // place est réservée et finie — et un pair choisirait la taille d'un `Vec`.
+    let resolveur = resolveur_txt(CLE).await;
+    let mut mechante = String::new();
+    for _ in 0..20 {
+        mechante.push_str("DKIM-Signature: v=42; oups\r\n");
+    }
+    mechante.push_str("From: jean@example.com\r\n\r\nBonjour.\r\n");
+    let rendus = verdicts(&mechante, resolveur, 4096).await;
+    assert_eq!(rendus.len(), 3, "vingt illisibles, trois rapportées");
+    assert!(rendus.iter().all(|v| *v == DkimVerdict::PermError));
+}
+
+#[tokio::test]
+async fn une_illisible_ne_prend_pas_la_place_d_une_bonne() {
+    // La borne des illisibles et celle des signatures vérifiées sont deux
+    // comptes séparés : une signature valable posée APRÈS vingt illisibles doit
+    // être vérifiée quand même. Les confondre ferait d'un champ malformé un
+    // moyen de faire ignorer la signature qui suit.
+    let resolveur = resolveur_txt(CLE).await;
+    let mut melange = String::new();
+    for _ in 0..20 {
+        melange.push_str("DKIM-Signature: v=42; oups\r\n");
+    }
+    melange.push_str(&message());
+    let rendus = verdicts(&melange, resolveur, 4096).await;
+    assert!(
+        rendus.contains(&DkimVerdict::Pass),
+        "la signature valable a été perdue : {rendus:?}"
+    );
 }
 
 // ── DANS LA BOUCLE ──────────────────────────────────────────────────────────

@@ -234,6 +234,20 @@ pub fn write_authres<'b>(
         return Err(Error::NotPrintable);
     }
     for vue in authentication.dkim {
+        // **UNE SIGNATURE SANS PROPRIÉTÉS EST UN CAS PRÉVU, PAS UNE ERREUR.**
+        // §2.2 de RFC 8601 : « The "propspec" may be omitted if, for example,
+        // the method was unable to extract any properties to do its evaluation
+        // yet still has a result to report. » C'est exactement ce qui arrive à
+        // une signature dont la SYNTAXE est invalide : §6.1.1 de RFC 6376 exige
+        // d'en rendre compte en `permerror`, et l'on n'a alors ni `d=` ni `s=`
+        // à nommer.
+        if vue.domain.is_empty() && vue.selector.is_empty() {
+            continue;
+        }
+        // **UNE MOITIÉ DE PAIRE EST UNE ERREUR D'APPELANT.** `header.s` sans
+        // `header.d` ne désigne aucune clé : un sélecteur ne vaut que dans le
+        // DNS d'un domaine. On refuse plutôt que d'écrire une propriété qu'un
+        // lecteur ne pourrait pas résoudre.
         if !jeton_recevable(vue.domain) || !jeton_recevable(vue.selector) {
             return Err(Error::NotPrintable);
         }
@@ -276,6 +290,10 @@ pub fn write_authres<'b>(
     for vue in authentication.dkim {
         ecrits = pousser(sortie, ecrits, b";\r\n\tdkim=")?;
         ecrits = pousser(sortie, ecrits, vue.result.name().as_bytes())?;
+        // Le résultat seul, quand il n'y avait rien à extraire — voir plus haut.
+        if vue.domain.is_empty() {
+            continue;
+        }
         ecrits = pousser(sortie, ecrits, b" header.d=")?;
         ecrits = pousser(sortie, ecrits, vue.domain)?;
         ecrits = pousser(sortie, ecrits, b" header.s=")?;
