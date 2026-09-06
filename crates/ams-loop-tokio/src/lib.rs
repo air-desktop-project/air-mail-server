@@ -56,11 +56,26 @@
 //! `ams-sasl` et `ams-session`, c'est-à-dire dans le périmètre couvert à 100 %,
 //! et n'aura pas à être réécrit pour Air.
 //!
-//! # Ce qui n'est pas écrit
+//! # Ce qui n'était pas écrit, et qui l'est
 //!
-//! Le magasin d'identifiants. La boucle et la session savent conduire un échange
-//! SASL, mais rien dans ce dépôt ne sait dire si un mot de passe est le bon : le
-//! binaire livré n'annonce donc pas `AUTH`.
+//! **CE PARAGRAPHE DISAIT LE CONTRAIRE JUSQU'AU 2026-09-06** : « le magasin
+//! d'identifiants […] rien dans ce dépôt ne sait dire si un mot de passe est le
+//! bon : le binaire livré n'annonce donc pas `AUTH` ».
+//!
+//! C'était vrai le jour où on l'a écrit. `ams_auth` est arrivé depuis :
+//! `authenticate` compare une empreinte `argon2id`, `air-mail-admin account add`
+//! frappe les comptes, et le serveur annonce `AUTH PLAIN` dès qu'un magasin est
+//! nommé ET que le chiffrement est là. Mesuré contre le serveur vivant :
+//!
+//! ```text
+//! 250 AUTH PLAIN
+//! 235 2.7.0 Authentication successful
+//! ```
+//!
+//! **Une prémisse morte survit longtemps quand sa conclusion reste plausible.**
+//! Celle-ci vivait dans la documentation PUBLIQUE d'une crate — donc dans ce que
+//! `cargo doc` rend — et affirmait à qui la lisait que ce serveur ne sait pas
+//! authentifier.
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 

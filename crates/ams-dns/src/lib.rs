@@ -47,6 +47,11 @@
 //! DNSSEC, un SPF `pass` ne vaut que ce que vaut le chemin jusqu'au résolveur, et
 //! c'est pourquoi le résolveur doit être local ou joint par un lien de
 //! confiance. Le dire ici vaut mieux que de le laisser croire.
+//!
+//! **ET CE N'EST PLUS UNE SIMPLE SUPPOSITION** depuis le 2026-09-06 : la boucle
+//! EFFACE le bit `AD` d'une réponse venue d'un résolveur hors de la boucle
+//! locale que l'exploitant n'a pas déclaré — voir `Resolver::de_confiance`.
+//! Cette phrase-ci disait la condition ; quelque chose la contrôle désormais.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
