@@ -4083,6 +4083,24 @@ Un banc a donc plusieurs façons d'être quadratique, et en corriger une ne prou
 rien sur les autres. Ce qui prouve, c'est de mesurer le CALCUL DU SUJET — et
 cette mesure-là, elle, a dit deux fois la même chose.
 
+### LA CONTRE-PRESSION EST RÉELLE, ET MESURÉE
+
+`ServeOptions::max_connections` promet ceci : « Au-delà, l'acceptation attend
+qu'une place se libère : le noyau garde les connexions en file, et le pair
+patiente au lieu d'être refusé. C'est de la contre-pression, pas un refus. »
+
+Éprouvé le 2026-09-06 avec un plafond de QUATRE :
+
+    connexions 1 à 4   220 mail.essai.test ESMTP
+    connexions 5 à 8   acceptées par le noyau, AUCUNE bannière — elles attendent
+
+Et la moitié qui rend cette contre-pression correcte plutôt qu'un blocage : en
+libérant une place, **la cinquième reçoit sa bannière en 0 ms**.
+
+Les deux moitiés comptent. Sans la première, un pic de charge ferait refuser du
+courrier légitime ; sans la seconde, le plafond serait un piège dont on ne sort
+pas.
+
 ### CE QUE LE SERVEUR TIENT, À 50 000 MESSAGES
 
     démarrage (index compris)        1 295 ms
