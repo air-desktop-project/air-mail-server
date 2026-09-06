@@ -12906,3 +12906,30 @@ les jetons en cours d'un seul coup — ce qui est parfois exactement ce qu'on ve
 
 Elle porte l'ALPN `h2`, et rien d'autre. La partager telle quelle ferait annoncer
 `h2` sur le port SMTP, où il ne veut rien dire.
+
+## Une promesse qui ne dit pas son délai se lit comme une promesse d'immédiateté
+
+`v1.md` annonçait « **le certificat se relit tout seul** quand ses fichiers
+changent ». Rien n'y est faux : il se relit, et seul. Mais la formule décrit une
+*réaction*, alors que le mécanisme est une *interrogation périodique* — `main.rs`
+tient `VEILLE_DU_CERTIFICAT = 300 s`, et la veille ne sait rien du changement
+avant de regarder.
+
+L'écart n'est pas théorique : en éprouvant la ligne, j'ai remplacé les deux
+fichiers, attendu trois secondes, constaté l'ancien sujet, et commencé à écrire un
+défaut. Mon attente était cent fois trop courte. Un exploitant qui renouvelle son
+certificat un vendredi soir ferait le même raisonnement, avec moins de patience et
+un serveur en production : il conclurait à une panne du rechargement et irait
+redémarrer le service — geste inutile, et coupure de service à la clé.
+
+La correction n'est donc pas de changer le mécanisme, qui marche. Une reprise avec
+320 secondes d'attente sert bien `CN=SECOND.essai.test` et journalise
+`certificat rechargé`. La correction est de **dire le délai à l'endroit où la
+promesse est faite**. Le README le disait déjà — « les dates des deux fichiers
+sont regardées toutes les cinq minutes » ; `v1.md`, qui est la liste des promesses
+tenues, était le seul document à le taire.
+
+**La règle qu'on en tire** : une garantie automatique s'énonce avec sa latence.
+Sans elle, le lecteur suppose l'instantané, et la première vérification qu'il fera
+ressemblera à une panne. C'est la même exigence que la ligne voisine sur
+`--max-connections`, corrigée pour dire « par service » plutôt que « par écoute ».
