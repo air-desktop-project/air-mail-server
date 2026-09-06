@@ -200,13 +200,16 @@ commencer
 # On confronte donc les bras de `match` de l'analyseur à l'aide que le binaire
 # EMPAQUETÉ imprime.
 inconnues=0
+# **L'AIDE SE LIT UNE FOIS.** Voir `check-installation.sh`, contrôle 9 : un
+# `… --help | grep -q` par option est une course au `SIGPIPE`, qui rend un faux
+# échec sous charge.
+"$essai/deballe/usr/bin/air-mail-admin" config write --help > "$essai/aide" 2>&1
 for option in $(grep -ohE '^\s+"--[a-z][a-z0-9-]*"' crates/ams-admin-options/src/lib.rs \
         | tr -d ' "' | sort -u); do
     # `--help` et `--version` sont les options de la commande, pas de
     # `config write` : son aide ne les décrit pas.
     case " --help --version " in *" $option "*) continue ;; esac
-    "$essai/deballe/usr/bin/air-mail-admin" config write --help 2>&1 \
-        | grep -q -- "$option" || {
+    grep -q -- "$option" "$essai/aide" || {
             rate "le binaire empaqueté ignore \`$option\`, que la source accepte : \
 il ne vient pas de cette source"
             inconnues=$((inconnues + 1))
@@ -221,8 +224,7 @@ commencer
 for option in --domain --hosted --tls-cert --tls-key; do
     grep -q -- "$option" "$essai/CONTROLE/postinst" \
         || rate "le \`postinst\` ne montre pas \`$option\`"
-    "$essai/deballe/usr/bin/air-mail-admin" config write --help 2>&1 \
-        | grep -q -- "$option" || rate "\`$option\` n'existe pas dans \`config write\`"
+    grep -q -- "$option" "$essai/aide" || rate "\`$option\` n'existe pas dans \`config write\`"
 done
 conclure "les options imprimées sont reconnues"
 

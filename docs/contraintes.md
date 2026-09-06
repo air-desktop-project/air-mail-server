@@ -13306,6 +13306,69 @@ d'un fichier d'essai ne peut affecter ni le fuzz, ni le paquet, ni la couverture
 — et se le dire est déjà commencer à choisir ses barrières. Les vingt-six minutes
 sont le prix du script ; les payer une seconde fois est ce qui le rend crédible.
 
+
+## Un faux échec intermittent, que seul le fait de tout lancer ensemble a montré
+
+`check-tout.sh` a refusé une seconde fois, sur `check-installation` cette fois :
+
+    ÉCHEC : `--tls-key` est imprimée et n'existe pas
+
+`--tls-key` existe, et l'aide la décrit ligne 60. Lancée seule, la barrière
+passait. C'était donc une barrière INTERMITTENTE — et c'est pire qu'une barrière
+absente, parce qu'elle apprend à relancer jusqu'au vert.
+
+### La cause, mesurée et non supposée
+
+Le patron fautif tient en une ligne, et il est utilisé cinq fois dans deux
+barrières :
+
+    "$binaire" config write --help 2>&1 | grep -q -- "$option" || rate "…"
+
+`grep -q` SORT dès qu'il a trouvé. L'aide fait vingt-huit kibioctets et
+`--tls-key` s'y trouve à 3 824 : il reste vingt-cinq kibioctets à écrire quand le
+tuyau se ferme. L'écrivain reçoit alors un `SIGPIPE` et meurt en **141** — ce qui
+a été relevé, et non déduit :
+
+    statut de l'écrivain : 141
+
+Sous `set -o pipefail`, 141 devient le statut du pipeline. Le `||` part donc
+alors que la recherche avait RÉUSSI.
+
+**Pourquoi il ne se montrait pas.** Machine au repos, l'écrivain finit ses quatre
+écritures avant que `grep` ne soit ordonnancé : zéro échec sur quatre cents
+essais. Sous charge, l'ordonnancement change : **treize échecs sur trente**. La
+condition est un poste occupé.
+
+### Ce que cela dit de `check-tout.sh`
+
+Le défaut n'est pas né avec lui. Il dormait depuis que ce patron a été écrit, et
+personne ne l'avait vu parce que les barrières se lançaient UNE À UNE, à la main,
+sur une machine par ailleurs oisive. Les enchaîner toutes les douze occupe les
+quatre cœurs pendant vingt-six minutes, et c'est cet état-là qui le réveille.
+
+**Un outil qui change les conditions d'exécution découvre des défauts qui n'ont
+rien à voir avec lui.** Celui-ci aurait fini par frapper en CI, où la machine est
+toujours chargée, et il y aurait été pris pour une panne de l'agent.
+
+### Les deux corrections
+
+L'aide se lit désormais **une fois**, dans un fichier, et les dix-huit
+recherches lisent ce fichier. Plus de tuyau, plus de course — et dix-sept
+lancements de processus en moins par barrière. Vérifié sous la charge qui
+produisait treize échecs : zéro sur trente pour `check-installation`, zéro sur
+dix pour `check-paquet`.
+
+Le journal de l'échec portait un second défaut, plus petit et plus vicieux :
+
+    ÉCHEC : `--tls-key` est imprimée et n'existe pas
+    OK — neuf options imprimées, et toutes reconnues par `config write --help`
+
+Le « OK » était **inconditionnel**. Le contrôle voisin comptait déjà ses manques ;
+celui-ci ne le faisait pas. Un lecteur pressé aurait cru à une trace parasite.
+Le compteur ajouté est LOCAL, et pas le `$echec` global : s'appuyer sur ce
+dernier ferait taire ce « OK » à cause d'un contrôle PRÉCÉDENT, ce qui serait le
+même mensonge à l'envers.
+
 ## Le fichier dont toute la confiance MTA-STS dépend n'était exercé par rien
 
 `ams-mtasts` — l'analyse d'une politique, la lecture d'un `id`, le nom de son

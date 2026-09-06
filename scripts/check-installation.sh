@@ -216,14 +216,42 @@ echo
 echo "── 9. les commandes imprimées à la fin sont celles qui existent ─────────"
 # CE QU'UN SCRIPT IMPRIME EST CE QUE L'EXPLOITANT RECOPIE. Une option qui aurait
 # changé de nom se découvrirait sur sa machine, pas ici.
+#
+# **L'AIDE SE LIT UNE FOIS, DANS UN FICHIER.** Elle était relue par un
+# `… --help | grep -q` à chaque option, et ce patron est UNE COURSE : `grep -q`
+# sort dès qu'il a trouvé, l'écrivain reçoit un `SIGPIPE` sur ce qu'il lui reste
+# à écrire — vingt-cinq des vingt-huit kibioctets de cette aide — et meurt en
+# 141. Sous `pipefail`, c'est le statut du pipeline : le `||` part alors que la
+# recherche avait RÉUSSI.
+#
+# Mesuré le 2026-09-07 : zéro échec sur quatre cents essais machine au repos,
+# TREIZE sur trente sous charge. C'est pourquoi il ne s'est montré qu'en lançant
+# les douze barrières à la suite — un poste chargé est la condition, et c'était
+# la première fois qu'elles tournaient ensemble.
+#
+# **ET LE « OK » NE S'IMPRIME PLUS APRÈS UN REFUS.** Il était inconditionnel : le
+# journal du 2026-09-07 porte un « ÉCHEC : `--tls-key` est imprimée et n'existe
+# pas » suivi, ligne suivante, de « OK — neuf options imprimées, et toutes
+# reconnues ». Le contrôle voisin comptait déjà ses manques ; celui-ci ne le
+# faisait pas. Le compteur est LOCAL — s'appuyer sur `$echec`, qui est global,
+# ferait taire ce « OK » à cause d'un contrôle précédent.
+"$racine/target/release/air-mail-admin" config write --help > "$essai/aide" 2>&1
+inconnues=0
 for option in --domain --hosted --maildir --accounts --listen --listen-smtps \
               --listen-imaps --tls-cert --tls-key; do
-    grep -q -- "$option" "$essai/pose" || rate "la marche à suivre ne montre pas \`$option\`"
-    "$racine/target/release/air-mail-admin" config write --help 2>&1 \
-        | grep -q -- "$option" || rate "\`$option\` est imprimée et n'existe pas"
+    grep -q -- "$option" "$essai/pose" || {
+        rate "la marche à suivre ne montre pas \`$option\`"
+        inconnues=$((inconnues + 1))
+    }
+    grep -q -- "$option" "$essai/aide" || {
+        rate "\`$option\` est imprimée et n'existe pas"
+        inconnues=$((inconnues + 1))
+    }
 done
 grep -q 'account add' "$essai/pose" || rate "la marche à suivre n'ajoute aucun compte"
-echo "OK — neuf options imprimées, et toutes reconnues par \`config write --help\`"
+if [ "$inconnues" -eq 0 ]; then
+    echo "OK — neuf options imprimées, et toutes reconnues par \`config write --help\`"
+fi
 
 echo
 echo "── 10. les options que LE SERVEUR imprime existent aussi ────────────────"
@@ -242,11 +270,10 @@ ailleurs=" --address --config --help --version "
 manquantes=0
 for option in $(grep -ohE '\-\-[a-z][a-z0-9-]+' crates/ams-server/src/main.rs | sort -u); do
     case "$ailleurs" in *" $option "*) continue ;; esac
-    "$racine/target/release/air-mail-admin" config write --help 2>&1 \
-        | grep -q -- "$option" || {
-            rate "le serveur imprime \`$option\`, que \`config write\` ne connaît pas"
-            manquantes=$((manquantes + 1))
-        }
+    grep -q -- "$option" "$essai/aide" || {
+        rate "le serveur imprime \`$option\`, que \`config write\` ne connaît pas"
+        manquantes=$((manquantes + 1))
+    }
 done
 [ "$manquantes" -eq 0 ] && echo "OK — toutes reconnues par \`config write --help\`"
 
