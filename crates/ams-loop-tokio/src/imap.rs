@@ -796,7 +796,7 @@ where
     B::Open: Send,
     S: core::future::Future<Output = ()>,
 {
-    let places = std::sync::Arc::new(tokio::sync::Semaphore::new(options.max_connections));
+    let places = crate::server::places_du_service(&options);
     let mut stats = crate::Stats::default();
     // **UN COMPTEUR PARTAGÉ**, comme celui des verdicts DKIM : chaque connexion
     // vit dans sa tâche, et son résumé ne remonte à personne. Un entier atomique

@@ -1659,6 +1659,10 @@ async fn servir(fichier: &Path) -> Result<(), String> {
 
     let options_de_service = ServeOptions {
         max_connections: usize::try_from(options.max_connections).unwrap_or(usize::MAX),
+        // **CHAQUE SERVICE POSE LES SIENNES**, plus bas : ce modèle-ci ne sait
+        // pas de quel protocole il parle, et des places partagées entre les
+        // quatre laisseraient une rafale sur le 25 affamer les clients IMAP.
+        places: None,
         timeouts: Timeouts {
             command: Duration::from_secs(u64::from(options.timeouts.command_seconds)),
             data: Duration::from_secs(u64::from(options.timeouts.data_seconds)),
@@ -1702,6 +1706,12 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     // un serveur déployé sert les deux. Les faire tenir dans une seule écoute
     // demandait de choisir, et ce choix n'appartenait pas à ce code.
     let ecoutes_pop3 = ecoutes_du_protocole(&options.pop3_listeners, &options.listen_pop3, "POP3")?;
+    // **UN SERVICE, UN PLAFOND.** `--max-connections` borne un SERVICE, et non
+    // chacun de ses ports : le 110 et le 995 servent les mêmes clients, et un
+    // plafond posé par écoute se multiplierait par leur nombre.
+    let places_pop3 = std::sync::Arc::new(tokio::sync::Semaphore::new(
+        options_de_service.max_connections,
+    ));
     let mut pop3 = std::vec::Vec::new();
     if ecoutes_pop3.is_empty() {
         eprintln!("air-mail-server : POP3 non servi — aucune adresse d'écoute configurée");
@@ -1738,6 +1748,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         );
         let mut options_pop3 = options_de_service.clone();
         options_pop3.tls_mode = mode;
+        options_pop3.places = Some(std::sync::Arc::clone(&places_pop3));
         pop3.push(tokio::spawn(serve_pop3(
             ecouteur,
             ams_proto_pop3::Limits::DEFAULT,
@@ -1758,6 +1769,10 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     // **UNE TÂCHE PAR ÉCOUTE**, comme pour le SMTP et le POP3. Le 143 et le 993
     // n'ont pas le même mode, et un serveur déployé sert les deux.
     let ecoutes_imap = ecoutes_du_protocole(&options.imap_listeners, &options.listen_imap, "IMAP")?;
+    // Le 143 et le 993 servent les mêmes clients : un seul plafond pour les deux.
+    let places_imap = std::sync::Arc::new(tokio::sync::Semaphore::new(
+        options_de_service.max_connections,
+    ));
     let mut imap = std::vec::Vec::new();
     if ecoutes_imap.is_empty() {
         eprintln!("air-mail-server : IMAP non servi — aucune adresse d'écoute configurée");
@@ -1847,6 +1862,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         );
         let mut options_imap = options_de_service.clone();
         options_imap.tls_mode = mode;
+        options_imap.places = Some(std::sync::Arc::clone(&places_imap));
         imap.push(tokio::spawn(serve_imap(
             ecouteur,
             // LA BORNE D'UN `APPEND` EST CELLE D'UN MESSAGE, et c'est la même
@@ -2091,11 +2107,19 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     // signal d'arrêt et se referment ensemble ; leurs comptes se rassemblent, un
     // serveur ne rendant qu'un bilan.
     let mut taches = std::vec::Vec::new();
+    // **LE 25, LE 587 ET LE 465 REMETTENT LE MÊME COURRIER** : un seul plafond
+    // pour les trois. C'était déjà faux avant que l'IMAP et le POP3 ne portent
+    // plusieurs écoutes — le SMTP en avait trois depuis plus longtemps, et
+    // `--max-connections 256` en autorisait 768.
+    let places_smtp = std::sync::Arc::new(tokio::sync::Semaphore::new(
+        options_de_service.max_connections,
+    ));
     for (ecouteur, adresse, mode) in ecouteurs {
         let politique = Arc::clone(&politique);
         let garde = Arc::clone(&garde);
         let mut options_de_cette_ecoute = options_de_service.clone();
         options_de_cette_ecoute.tls_mode = mode;
+        options_de_cette_ecoute.places = Some(std::sync::Arc::clone(&places_smtp));
         // Les fabriques de remise partagent tout par `Arc` : une écoute de plus
         // ne recopie ni les boîtes, ni les comptes, ni la clé de signature.
         let pour_la_remise = Arc::clone(&pour_la_remise);

@@ -17,6 +17,19 @@ use crate::{
     SharedGuard, SpoolTally, Timeouts,
 };
 
+/// Les places où puise une écoute : celles de son service, ou les siennes.
+///
+/// **UNE SEULE COPIE POUR LES TROIS PROTOCOLES.** SMTP, IMAP et POP3 posaient
+/// chacun `Semaphore::new(options.max_connections)` ; trois copies de la même
+/// ligne, et c'est la ligne elle-même qui était fausse dès qu'un service portait
+/// deux écoutes.
+pub(crate) fn places_du_service(options: &ServeOptions) -> Arc<Semaphore> {
+    match &options.places {
+        Some(partagees) => Arc::clone(partagees),
+        None => Arc::new(Semaphore::new(options.max_connections)),
+    }
+}
+
 /// Ce qui borne le service.
 ///
 /// Ni `Copy` ni `Eq` depuis que [`ServeOptions::tls`] existe : une configuration
@@ -35,6 +48,28 @@ pub struct ServeOptions {
     /// la durée d'une place, et le garde qui borne le débit d'ouverture. Aucun
     /// des deux ne rend l'autre inutile.
     pub max_connections: usize,
+    /// Les places PARTAGÉES entre les écoutes d'un même service, s'il y en a.
+    ///
+    /// # POURQUOI CE CHAMP EXISTE
+    ///
+    /// [`Self::max_connections`] borne UNE écoute. Tant qu'un service n'en avait
+    /// qu'une, les deux se confondaient ; depuis qu'un même protocole en porte
+    /// plusieurs — le 143 et le 993, le 110 et le 995 —, un plafond posé par
+    /// écoute se MULTIPLIE par leur nombre.
+    ///
+    /// **MESURÉ le 2026-09-06** : avec `--max-connections 1` et deux écoutes
+    /// IMAP, deux sessions étaient servies en même temps. L'exploitant écrivait
+    /// un nombre et en obtenait un autre — et ce nombre borne de la mémoire et
+    /// des descripteurs, pas un confort.
+    ///
+    /// Rempli, toutes les écoutes d'un service puisent dans les MÊMES places.
+    /// Vide, l'écoute fabrique les siennes : c'est ce que fait un appelant qui
+    /// n'a qu'une écoute, et c'est le comportement d'avant.
+    ///
+    /// **LES SERVICES, EUX, NE PARTAGENT PAS.** Une rafale sur le 25 ne doit pas
+    /// affamer les clients IMAP : l'isolement entre protocoles est une propriété
+    /// qu'on garde, et c'est pourquoi ce champ ne porte pas des places globales.
+    pub places: Option<Arc<Semaphore>>,
     /// Les délais appliqués à chaque connexion.
     pub timeouts: Timeouts,
     /// De quoi chiffrer, si le service sait le faire.
@@ -85,6 +120,10 @@ impl Default for ServeOptions {
     fn default() -> Self {
         Self {
             max_connections: 256,
+            // **AUCUNE PLACE PARTAGÉE PAR DÉFAUT** : un appelant qui n'a qu'une
+            // écoute n'a rien à partager, et le défaut ne doit pas l'obliger à
+            // fabriquer un sémaphore pour dire « je suis seul ».
+            places: None,
             timeouts: Timeouts::default(),
             tls: None,
             // `STARTTLS` PAR DÉFAUT : c'est le mode du `25`, celui qu'un serveur
@@ -325,7 +364,7 @@ where
 {
     crate::refuse_root()?;
 
-    let places = Arc::new(Semaphore::new(options.max_connections));
+    let places = places_du_service(&options);
     let fabrique = Arc::new(make_delivery);
     let comptes_dkim = Arc::new(CompteurDkim::default());
     let comptes_rapports = Arc::new(CompteurRapports::default());
@@ -783,6 +822,69 @@ mod tests {
             Ok(_) => {}
             Err(Error::RunningAsRoot) => panic!("les tests tournent en root, ce que C10 proscrit"),
             Err(autre) => panic!("erreur inattendue : {autre}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod places {
+    use super::*;
+
+    /// **SANS PLACES PARTAGÉES, CHACUN LES SIENNES** — le comportement d'un
+    /// appelant qui n'a qu'une écoute, et celui d'avant le 2026-09-06.
+    #[test]
+    fn une_ecoute_seule_fabrique_ses_places() {
+        let options = ServeOptions {
+            max_connections: 7,
+            ..ServeOptions::default()
+        };
+        let unes = places_du_service(&options);
+        let autres = places_du_service(&options);
+        assert_eq!(unes.available_permits(), 7);
+        assert_eq!(autres.available_permits(), 7);
+        // DEUX SÉMAPHORES DISTINCTS : en prendre une ici n'en retire pas là-bas.
+        let _prise = unes.try_acquire().expect("une place");
+        assert_eq!(unes.available_permits(), 6);
+        assert_eq!(
+            autres.available_permits(),
+            7,
+            "deux appels sans partage doivent rendre deux sémaphores"
+        );
+    }
+
+    /// **AVEC DES PLACES PARTAGÉES, C'EST LE MÊME COMPTE POUR TOUS.**
+    ///
+    /// C'est la propriété qui manquait : `--max-connections 1` avec deux écoutes
+    /// IMAP servait DEUX sessions à la fois, mesuré le 2026-09-06. Le plafond
+    /// borne de la mémoire et des descripteurs — un exploitant qui écrit un
+    /// nombre doit obtenir celui-là.
+    #[test]
+    fn les_ecoutes_d_un_service_puisent_au_meme_endroit() {
+        let partagees = Arc::new(Semaphore::new(1));
+        let options = ServeOptions {
+            max_connections: 1,
+            places: Some(Arc::clone(&partagees)),
+            ..ServeOptions::default()
+        };
+        let ecoute_143 = places_du_service(&options);
+        let ecoute_993 = places_du_service(&options);
+
+        let _seule = ecoute_143.try_acquire().expect("la première passe");
+        assert!(
+            ecoute_993.try_acquire().is_err(),
+            "la seconde écoute a servi une session que le plafond interdisait"
+        );
+    }
+
+    /// **LE PLAFOND SUIT `max_connections`**, et non une valeur gravée.
+    #[test]
+    fn le_plafond_est_celui_qu_on_demande() {
+        for combien in [1_usize, 16, 256] {
+            let options = ServeOptions {
+                max_connections: combien,
+                ..ServeOptions::default()
+            };
+            assert_eq!(places_du_service(&options).available_permits(), combien);
         }
     }
 }

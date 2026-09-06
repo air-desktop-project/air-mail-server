@@ -1723,10 +1723,16 @@ petit des deux délais annoncés : un pair coopératif peut raccourcir le sien,
 jamais l'allonger, si bien que contre un attaquant c'est cette valeur qui
 plafonne le temps pendant lequel une connexion muette garde sa place.
 
-**`--max-connections` borne les cinq écoutes**, et non quatre : la borne de
+**`--max-connections` borne les cinq SERVICES**, et non quatre : la borne de
 l'écoute QUIC était gravée à 1 024 pendant que les autres prenaient la valeur
 configurée. Elle vaut désormais ce qu'on lui demande, 256 par défaut comme
 partout ailleurs.
+
+Et **par service, non par port**, depuis le 2026-09-06 : les ports d'un même
+protocole puisent dans les mêmes places. Le mot « écoutes » était juste tant
+qu'un service n'en avait qu'une ; le SMTP en portait trois depuis longtemps, si
+bien que `--max-connections 256` en autorisait 768 — mesuré avec un plafond de
+un et deux écoutes IMAP, qui servaient deux sessions à la fois.
 
 **Le videur garde les cinq portes.** Une source bannie est refusée en SMTP, en
 POP3, en IMAP, en HTTP/2 — et en HTTP/3, où le refus a lieu à l'arrivée du

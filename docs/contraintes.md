@@ -3902,6 +3902,66 @@ Ce qui reste hors du serveur : **rien de connu**. Cette ligne annonçait « la f
 de réémission des messages sortants », et c'était faux — elle existe, elle est
 câblée, et [la liste v1](v1.md) le mesure plutôt que de le croire.
 
+## Un plafond qui se multipliait par le nombre de portes
+
+`--max-connections 256` n'autorisait pas 256 connexions. Il en autorisait 256
+**par écoute** — donc 768 dès que le SMTP servait ses trois ports, et 1 792 avec
+la table à sept redirections du 2026-09-06.
+
+Mesuré plutôt que déduit : un serveur à `--max-connections 1`, deux écoutes IMAP,
+et **deux sessions servies en même temps**.
+
+### CE QUI L'A RENDU VISIBLE
+
+Rien dans le code. C'est en balayant la prose après une autre correction qu'une
+ligne d'aide a accroché :
+
+> `--max-connections <n>` connexions simultanées (défaut 256). Elle borne les
+> CINQ écoutes, HTTP/3 compris.
+
+« Les cinq écoutes » : le compte était devenu faux — il y en avait sept —, et
+c'est en vérifiant ce compte qu'on a regardé ce que la borne bornait vraiment.
+**Un nombre périmé dans une phrase a servi de fil.**
+
+### LE DÉFAUT N'ÉTAIT PAS NEUF
+
+Il n'est pas né avec les écoutes multiples d'IMAP et de POP3 : le SMTP portait
+trois ports depuis bien plus longtemps, chacun avec son propre sémaphore. Les
+tranches suivantes n'ont fait que l'aggraver, en ajoutant des portes.
+
+C'est la marque de cette famille de défauts : ils ne cassent rien, ne font
+échouer aucun essai, et grandissent à chaque fonctionnalité qu'on ajoute.
+
+### PAR SERVICE, ET NON GLOBALEMENT
+
+La correction évidente — un seul sémaphore pour tout le serveur — aurait été
+mauvaise : une rafale sur le 25 aurait affamé les clients IMAP. **L'isolement
+entre protocoles est une propriété qu'on veut garder.**
+
+Ce qui n'a pas de sens, c'est de l'isolement entre les DEUX PORTES D'UN MÊME
+SERVICE : le 143 et le 993 servent les mêmes clients, avec les mêmes boîtes. Le
+plafond vaut donc par service, et les écoutes d'un protocole puisent aux mêmes
+places.
+
+### CE QUI SE PASSE AU-DELÀ DU PLAFOND
+
+L'acceptation ATTEND. Le noyau garde les connexions en file, et le pair patiente
+au lieu d'être refusé — c'est de la contre-pression, pas un refus, et c'était
+déjà écrit. Vérifié après correction : la seconde session attend, puis passe dès
+que la première rend sa place.
+
+### CE QU'ON N'A PAS ÉPROUVÉ PAR UN ESSAI, ET POURQUOI
+
+Le partage se prouve par trois essais unitaires déterministes : deux appels sans
+partage rendent deux sémaphores, deux appels avec partage rendent le même, et le
+plafond vaut ce qu'on demande.
+
+Le comportement de bout en bout — « la seconde session attend » — est mesuré
+CONTRE LE SERVEUR VIVANT, et non figé dans un essai. Un essai qui affirme qu'une
+connexion attend dépend d'un temps, et **B10 a coûté assez cher** pour qu'on ne
+rajoute pas un essai instable de plus. Ce qui se prouve sans horloge est prouvé
+sans horloge ; le reste est mesuré et daté.
+
 ## Le seul code de ce dépôt qui s'exécute en root chez un inconnu
 
 `installer.sh` posait ; il ne savait pas défaire. C'est ce qui manquait le plus —

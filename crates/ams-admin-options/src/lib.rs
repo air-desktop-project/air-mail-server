@@ -493,8 +493,21 @@ OPTIONS DE `config write`
                            n'accepte de courrier pour personne — un serveur qui
                            accepterait tout serait un relais ouvert.
     --max-message <octets> taille maximale     (défaut 10485760)
-    --max-connections <n>  connexions simultanées (défaut 256). Elle borne les
-                           CINQ écoutes, HTTP/3 compris.
+    --max-connections <n>  connexions simultanées PAR SERVICE (défaut 256) :
+                           SMTP, IMAP, POP3, HTTP/2 et HTTP/3 ont chacun ce
+                           plafond, HTTP/3 compris.
+
+    PAR SERVICE, ET NON PAR PORT. Les ports d'un même protocole — le 25, le 587
+    et le 465 ; le 143 et le 993 ; le 110 et le 995 — puisent dans les MÊMES
+    places : ils servent les mêmes clients, et un plafond posé par port se
+    multiplierait par leur nombre. Cette ligne disait « les CINQ écoutes »
+    jusqu'au 2026-09-06, alors qu'il y en avait sept et que chacune prenait le
+    plafond pour elle : `--max-connections 1` servait deux sessions IMAP à la
+    fois — mesuré.
+
+    LES SERVICES, EUX, NE PARTAGENT PAS : une rafale sur le 25 ne doit pas
+    affamer les clients IMAP. Au-delà du plafond, l'acceptation ATTEND qu'une
+    place se libère — c'est de la contre-pression, pas un refus.
 
     LES DÉLAIS
     --command-timeout-seconds <n>  attente d'une commande (défaut 300).
