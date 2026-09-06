@@ -13010,3 +13010,106 @@ qui n'appartient qu'à elle, et exige de les retrouver.
 tous. Une cinquième molette ajoutée demain sans être affichée fera échouer les
 deux. Chacun a été confronté au défaut qu'il prétend voir, en remettant
 l'affichage dans son état d'origine.
+
+## SPF et DMARC, éprouvés contre le serveur qui tourne — et ce que l'en-tête a révélé
+
+`v1.md` promet « SPF, DKIM, DMARC, MTA-STS, DANE et TLSRPT évalués et composés ».
+Les essais d'unité les couvrent ; personne n'avait lu l'en-tête qu'un vrai message
+reçoit.
+
+**Le montage.** Un résolveur DNS de cinquante lignes, en Python, qui ne répond
+qu'à ce qu'on lui a dit — délibérément écrit HORS de ce dépôt, pour ne pas
+éprouver le serveur avec le code du serveur. Il publie deux domaines : un
+`essai-emetteur.test` dont le SPF autorise `127.0.0.1`, et un
+`essai-menteur.test` dont le SPF n'autorise que `203.0.113.7`. Les deux publient
+`_dmarc` en `p=reject`. Une liste de suffixes réduite à `test` suffit à faire du
+domaine organisationnel ce qu'on veut.
+
+Les deux verdicts sont justes, et l'en-tête les dit :
+
+    Authentication-Results: mail.essai.test;
+        spf=pass smtp.mailfrom=essai-emetteur.test;
+        dmarc=pass header.from=essai-emetteur.test
+
+    Authentication-Results: mail.essai.test;
+        spf=fail smtp.mailfrom=essai-menteur.test;
+        dmarc=fail header.from=essai-menteur.test
+
+avec le `Received-SPF` détaillé de RFC 7208 §9.1 en prime. La promesse tient pour
+ces deux-là.
+
+### La quatrième ligne, et pourquoi elle n'est pas un défaut
+
+Sous ces trois lignes vient une ligne de 890 espaces. Ce n'est pas une négligence
+mais une RÉSERVATION : le verdict DKIM n'existe qu'une fois le corps entier lu —
+son condensat porte dessus — et DMARC en dépend, si bien que le verdict arrive
+APRÈS que le message a été diffusé sur le disque. Rassembler le message pour
+l'écrire dans l'ordre coûterait sa taille en mémoire par connexion, ce que C3
+interdit ; le recopier coûterait une seconde écriture. On réserve donc 1 024
+octets en tête, et l'on remplit ce qui reste. `authres.rs` le dit et l'explique.
+
+### L'écart réel : une validité qui tenait à la valeur d'une constante
+
+Le bourrage se repliait UNE fois, puis occupait toute la place d'un trait.
+§2.1.1 de RFC 5322 borne une ligne à 998 caractères — c'est un `MUST`. Mesuré :
+
+    réserve  512 : ligne la plus longue  394 octets
+    réserve 1024 : ligne la plus longue  906 octets
+    réserve 1200 : ligne la plus longue 1082 octets   ← invalide
+    réserve 4096 : ligne la plus longue 3978 octets
+
+À 1 024, le produit est correct. À 1 200 il ne l'est plus, et **rien ne disait
+que 1 024 était le maximum** : le commentaire qui cite 998 dans ce fichier
+concerne les lignes de CONTENU, pas le bourrage. Un jour où l'on voudrait
+rapporter une signature de plus, la constante monterait et tous les messages
+sortiraient invalides — sans qu'aucune barrière le dise.
+
+**Ce qui rendait l'angle mort possible.** Deux essais existaient, et chacun
+regardait la moitié que l'autre voyait. `l_entete_rempli_occupe_exactement_la_place`
+exerce DÉJÀ 4 096 octets, mais ne vérifie que la taille totale.
+`le_remplissage_est_une_continuation_valide` vérifie bien la longueur des lignes,
+mais à la seule réserve d'aujourd'hui. Aucun des deux ne pouvait le dire.
+
+`remplir` pose désormais autant de plis que la place l'exige, et le nombre s'en
+déduit plutôt que de dépendre d'une constante. On replie au `MUST` de 998 et non
+au `SHOULD` de 78 : découper mille octets d'espaces en treize lignes vides ne
+ferait gagner aucun lecteur, alors que la validité, elle, est en jeu.
+`aucune_ligne_ne_depasse_la_borne_quelle_que_soit_la_reserve` l'éprouve de 64 à
+9 999 octets, sur le cas le plus long comme sur le plus court — celui qui laisse
+le plus à bourrer. Confronté au défaut : l'ancien remplissage lui rend une ligne
+de 1 035 octets.
+
+## Une barrière qui n'existe que dans une liste est un rappel, et un rappel se saute
+
+Le 2026-09-06, la tranche `9e48e31c` est partie avec deux erreurs de lint dans un
+essai neuf — `fin + 1` sous `arithmetic_side_effects`, `rang as u32` sous
+`cast_possible_truncation` — et la CI l'a dit vingt-cinq minutes plus tard.
+
+**Ce n'est pas de la distraction.** J'avais déroulé les barrières comme
+d'habitude : `check-format`, `check-etages`, `check-sans-c`, `check-compile`,
+`check-couverture`, `check-installation`, `check-paquet`, `check-dco`,
+`check-fuzz`. Neuf scripts. La dixième, clippy, n'en avait pas : elle vivait dans
+une liste et dans une étape de `ci.yml`, et se lançait en se souvenant d'une
+commande. Ce qui se déroule et ce qui se rappelle ne sont pas de la même nature.
+
+**Pourquoi `check-compile` ne pouvait pas la remplacer.** Les deux règles qui ont
+manqué sont déclarées `deny` dans le `[lints]` du workspace, mais ce sont des
+lints CLIPPY : `cargo check` ne les voit pas, et ne peut pas les voir. La
+barrière qui compile et celle qui lint regardent deux choses différentes.
+
+**Ce que ça répète.** `check-compile.sh` porte déjà cet argument, mot pour mot :
+« une erreur qu'on ne peut apprendre qu'en payant vingt-cinq minutes finit par se
+payer plusieurs fois ». Il avait été écrit pour `fuzz/`, qu'aucune commande du
+job ordinaire ne compilait. Le même trou s'était rouvert un cran plus loin.
+
+`scripts/check-clippy.sh` porte désormais la commande, **et `ci.yml` l'appelle
+lui** plutôt que de la recopier. Une barrière locale plus indulgente que la CI ne
+ferait que déplacer l'attente ; deux copies de la même commande finiraient par
+diverger un jour où l'une seule serait modifiée. `fuzz/` en reste dehors pour la
+raison déjà écrite : hors du workspace, il n'hérite pas de `[lints]`, et l'y
+soumettre ferait entrer les règles du produit dans du code qui n'est pas livré.
+
+**Ce que cela ne corrige pas.** Rien ne vérifie encore que les dix barrières ont
+toutes tourné avant un commit. Le geste reste manuel, et cette séance montre
+qu'un geste manuel de dix pas en oublie un. C'est le prochain trou, et il est
+consigné ici plutôt que tenu pour comblé.

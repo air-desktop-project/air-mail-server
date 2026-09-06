@@ -88,7 +88,8 @@ fn molettes_de_la_file() -> Vec<String> {
             continue;
         }
         // La branche qui la TRAITE porte `=>` juste après le guillemet fermant.
-        if !morceau[fin + 1..].trim_start().starts_with("=>") {
+        let apres = morceau.get(fin.saturating_add(1)..).unwrap_or_default();
+        if !apres.trim_start().starts_with("=>") {
             continue;
         }
         let complet = format!("--queue-{nom}");
@@ -116,7 +117,7 @@ fn config_show_rend_compte_de_chaque_molette_de_la_file() {
     // Des valeurs distinctes, et qu'aucune autre ligne n'affiche : les tailles
     // et les seuils du garde sont ronds, ceux-ci ne le sont pas.
     let valeurs: Vec<String> = (0..molettes.len())
-        .map(|rang| (7_001 + rang as u32 * 13).to_string())
+        .map(|rang| (7_001_usize.saturating_add(rang.saturating_mul(13))).to_string())
         .collect();
 
     let mut arguments: Vec<&str> = vec![

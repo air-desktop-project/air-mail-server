@@ -597,3 +597,85 @@ fn un_refus_de_valeur_traverse_le_remplissage() {
         Err(Error::TooManyFields { limit: DKIM_MAX })
     );
 }
+
+/// **AUCUNE LIGNE NE DÉPASSE 998 OCTETS, QUELLE QUE SOIT LA RÉSERVE.**
+///
+/// # Le défaut que cet essai ferme
+///
+/// Le bourrage se repliait UNE fois, et occupait ensuite toute la place d'un
+/// trait. Cela tenait tant que [`AUTHRES_RESERVE`] valait 1 024 — la plus longue
+/// ligne mesurait 906 octets. La validité du message dépendait donc de la valeur
+/// d'une constante que rien n'empêchait de monter :
+///
+/// ```text
+/// réserve  512 : ligne la plus longue  394 octets
+/// réserve 1024 : ligne la plus longue  906 octets
+/// réserve 1200 : ligne la plus longue 1082 octets   ← §2.1.1 dit 998 au plus
+/// réserve 4096 : ligne la plus longue 3978 octets
+/// ```
+///
+/// # Pourquoi les essais existants ne le voyaient pas
+///
+/// `l_entete_rempli_occupe_exactement_la_place` exerce DÉJÀ 4 096 octets, mais
+/// ne vérifie que la taille TOTALE ; `le_remplissage_est_une_continuation_valide`
+/// vérifie bien la longueur des lignes, mais à la seule réserve d'aujourd'hui.
+/// Aucun des deux ne pouvait donc dire ce que l'autre regardait.
+#[test]
+fn aucune_ligne_ne_depasse_la_borne_quelle_que_soit_la_reserve() {
+    let signatures = [DkimSeen {
+        result: DkimResult::Pass,
+        domain: b"example.net",
+        selector: b"sel",
+    }];
+    for authentication in [
+        Authentication {
+            serv_id: NOUS,
+            spf: Some((SpfResult::Pass, SpfIdentity::MailFrom, b"example.net")),
+            dkim: &signatures,
+            dmarc: Some((DmarcResult::Pass, b"example.com")),
+        },
+        // Le cas le plus court : rien n'a été vérifié. C'est lui qui laisse le
+        // plus de place à bourrer, donc le plus long bourrage.
+        Authentication {
+            serv_id: b"a",
+            spf: None,
+            dkim: &[],
+            dmarc: None,
+        },
+    ] {
+        for taille in [
+            64_usize,
+            128,
+            512,
+            AUTHRES_RESERVE,
+            1_200,
+            2_048,
+            4_096,
+            9_999,
+        ] {
+            let mut place = std::vec![0_u8; taille];
+            let Ok(ecrit) = write_authres_padded(&mut place, &authentication) else {
+                continue;
+            };
+            assert_eq!(ecrit.len(), taille, "à {taille} octets");
+            let texte = std::str::from_utf8(ecrit).expect("de l'ASCII");
+            // Le champ se termine par un `CRLF` : le dernier morceau du découpage
+            // est vide, et ne compte pas pour une ligne.
+            for ligne in texte.trim_end_matches("\r\n").split("\r\n") {
+                assert!(
+                    ligne.len() <= 998,
+                    "réserve {taille} : une ligne de {} octets",
+                    ligne.len()
+                );
+            }
+            // ET LE CHAMP RESTE UN CHAMP : chaque ligne sauf la première ouvre
+            // par un blanc. Un pli mal posé ferait lire un second en-tête.
+            for (rang, ligne) in texte.trim_end_matches("\r\n").split("\r\n").enumerate() {
+                assert!(
+                    rang == 0 || ligne.starts_with([' ', '\t']),
+                    "réserve {taille}, ligne {rang} n'ouvre pas par un blanc : {ligne:.40}"
+                );
+            }
+        }
+    }
+}

@@ -150,8 +150,15 @@ jobs:
       # `--locked` sur chaque commande : le `Cargo.lock` est committé, et une CI
       # qui le laisserait bouger en silence ne vérifierait plus le build qu'elle
       # prétend vérifier.
-      - name: cargo clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      #
+      # **PAR LE SCRIPT, ET NON PAR LA COMMANDE.** Clippy comptait parmi les dix
+      # barrières sans en avoir l'outil : il fallait se souvenir de le taper à la
+      # main, et le 2026-09-06 une tranche est partie avec deux erreurs de lint
+      # qu'on a apprises ici, vingt-cinq minutes plus tard. Passer par le script
+      # rend la barrière locale et celle d'ici LA MÊME, plutôt que deux copies
+      # qu'un jour séparera.
+      - name: check-clippy
+        run: ./scripts/check-clippy.sh
 
       - name: cargo build
         run: cargo build --workspace --locked

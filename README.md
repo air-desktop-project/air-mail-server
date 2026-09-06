@@ -2182,9 +2182,15 @@ La toolchain est épinglée dans `rust-toolchain.toml` (**Rust 1.98.0**, stable)
 ```sh
 cargo build --workspace
 cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+./scripts/check-clippy.sh          # `cargo clippy … -- -D warnings`, comme la CI
 cargo fmt --all -- --check
 ```
+
+**Clippy passe par un script, et pas par la commande.** Il compte parmi les dix
+barrières depuis toujours, mais il était le seul à n'avoir aucun
+`scripts/check-*.sh` : il fallait se souvenir de le taper. Le 2026-09-06, une
+tranche est partie avec deux erreurs de lint, apprises en CI vingt-cinq minutes
+plus tard. Le script porte la commande une fois, et la CI l'appelle lui.
 
 Le pin est une **version exacte**, pas le canal `stable` : un canal roulant
 désigne une version différente toutes les six semaines, et deux mesures prises à

@@ -370,12 +370,36 @@ fn mesurer(sortie: &mut [u8], authentication: &Authentication<'_, '_>) -> Result
     Ok(ecrit.saturating_sub(2))
 }
 
+/// La plus longue ligne qu'un message ait le droit de porter.
+///
+/// §2.1.1 de RFC 5322 : 998 caractères, `CRLF` non compris. C'est un `MUST`, et
+/// non la recommandation de 78 qui l'accompagne — voir [`remplir`] pour ce qui
+/// distingue les deux ici.
+const LIGNE_MAX: usize = 998;
+
 /// Replie le champ jusqu'à occuper toute la place.
 ///
 /// **AUCUNE GARDE ICI**, et ce n'est pas une négligence : l'appelant a vérifié
 /// qu'il reste au moins cinq octets — de quoi ouvrir la continuation et fermer
-/// le champ. Les trois écritures ci-dessous ne peuvent donc pas manquer, et une
-/// garde qui le dirait serait une garde que rien n'atteindrait.
+/// le champ. Les écritures ci-dessous ne peuvent donc pas manquer, et une garde
+/// qui le dirait serait une garde que rien n'atteindrait.
+///
+/// # LE BOURRAGE SE REPLIE AUTANT DE FOIS QU'IL LE FAUT
+///
+/// Un seul pli suffisait tant que [`AUTHRES_RESERVE`] valait 1 024 : la plus
+/// longue ligne produite mesurait alors 906 octets, sous les 998 de §2.1.1. À
+/// 1 200 elle en mesurerait 1 082, et le message deviendrait invalide — sans
+/// qu'aucun essai le dise, puisqu'ils vérifiaient que le champ occupe EXACTEMENT
+/// la place, jamais qu'il tienne dans des lignes légales.
+///
+/// La correction ne conserve pas cette dépendance à la valeur d'une constante :
+/// le nombre de plis se déduit de la place à remplir. Mesuré le 2026-09-06.
+///
+/// **ON REPLIE AU `MUST`, ET NON AU `SHOULD`.** §2.1.1 recommande aussi de s'en
+/// tenir à 78 caractères. Le respecter ici découperait le bourrage d'une réserve
+/// de mille octets en treize lignes vides, sans qu'aucun lecteur y gagne : ces
+/// espaces ne portent rien. C'est la validité du message qui est en jeu, pas sa
+/// lisibilité.
 fn remplir(sortie: &mut [u8], ecrits: usize) -> &[u8] {
     let voulu = sortie.len();
     // D'abord des espaces partout où il reste de la place…
@@ -383,13 +407,16 @@ fn remplir(sortie: &mut [u8], ecrits: usize) -> &[u8] {
         *octet = b' ';
     }
     // …puis le pli qui ouvre la continuation…
-    for (place, octet) in sortie
-        .get_mut(ecrits..)
-        .unwrap_or_default()
-        .iter_mut()
-        .zip(b"\r\n ")
-    {
-        *place = *octet;
+    plier(sortie, ecrits);
+    // …puis autant de plis que la longueur d'une ligne l'exige. `debut` est
+    // l'octet où commence le contenu de la ligne courante : le blanc du pli.
+    let mut debut = ecrits.saturating_add(2);
+    while voulu.saturating_sub(2).saturating_sub(debut) > LIGNE_MAX {
+        // Au plus loin que la ligne le permette, et jamais si loin qu'il ne
+        // resterait pas la place du pli lui-même et du terminateur.
+        let ou = debut.saturating_add(LIGNE_MAX).min(voulu.saturating_sub(5));
+        plier(sortie, ou);
+        debut = ou.saturating_add(2);
     }
     // …et le terminateur du champ, tout au bout.
     for (place, octet) in sortie
@@ -401,6 +428,18 @@ fn remplir(sortie: &mut [u8], ecrits: usize) -> &[u8] {
         *place = *octet;
     }
     sortie
+}
+
+/// Écrit un pli — `CRLF` et le blanc de continuation — à `position`.
+fn plier(sortie: &mut [u8], position: usize) {
+    for (place, octet) in sortie
+        .get_mut(position..)
+        .unwrap_or_default()
+        .iter_mut()
+        .zip(b"\r\n ")
+    {
+        *place = *octet;
+    }
 }
 
 /// Cette valeur peut-elle s'écrire dans un en-tête ?
