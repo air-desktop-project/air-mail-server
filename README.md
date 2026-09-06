@@ -186,8 +186,23 @@ Proto, stockage Maildir, DKIM/SPF/DMARC, et détection de flooding avec
 bannissement par source.
 
 La cryptographie est **pure Rust, sans une ligne de C** : `rustls` sur
-`rustls-rustcrypto`, et un échange de clés hybride que le projet devra écrire
-lui-même — aucun fournisseur pur Rust ne l'offre.
+`rustls-rustcrypto`, et un échange de clés hybride **que le projet a écrit
+lui-même**, aucun fournisseur pur Rust ne l'offrant — `ml-kem` et
+`x25519-dalek`, composés dans `ams-tls`.
+
+Cette phrase disait « devra écrire », au futur, longtemps après que ce fut fait.
+Mesuré le 2026-09-06 contre le serveur vivant :
+
+```
+$ openssl s_client -connect …:9993 -brief
+Protocol version: TLSv1.3
+Ciphersuite: TLS_AES_256_GCM_SHA384
+Negotiated TLS1.3 group: X25519MLKEM768
+```
+
+**Une prose qui vieillit ne trompe pas que dans un sens** : celle-ci
+sous-estimait le serveur, ce qui est tout aussi grave pour qui décide s'il est
+prêt.
 
 ## Le découpage
 
@@ -2157,8 +2172,10 @@ jobs indépendants : la vérification du code (les quatre commandes ci-dessus, s
 
 `fuzz/` est une crate `cargo-fuzz` **hors du workspace** : elle exige un nightly,
 que le pin exact du workspace n'admet pas — deux LLVM produisent des profils de
-couverture mutuellement illisibles. **Soixante cibles**, et plus de deux
-cent soixante propriétés énoncées, dont un **aller-retour** sur l'encodeur de
+couverture mutuellement illisibles. **Soixante-six cibles** — le compte se lit
+dans `fuzz/Cargo.toml`, et `check-fuzz.sh` refuse de tourner si sa liste, celle
+du manifeste et le tableau de `fuzz/README.md` ne coïncident pas. **Trois cent cinquante-deux propriétés énoncées** — `grep -hE '^//! [0-9]+\.'
+fuzz/fuzz_targets/*.rs | wc -l` —, dont un **aller-retour** sur l'encodeur de
 réponses, un **vocabulaire de sortie clos** sur la session, et l'**indépendance
 au découpage** sur la phase de données — celle qui vise directement la
 contrebande SMTP. **Six défauts réels** trouvés et
@@ -2170,17 +2187,22 @@ régression, **pas une campagne**.
 
 ### Couverture (C2)
 
-`scripts/check-couverture.sh` exige **100 %** sur les vingt-neuf crates des
-étages 1 et 2. Le seuil porte sur les **régions** et les **lignes** — pas sur les branches,
+`scripts/check-couverture.sh` exige **100 %** sur les trente crates des
+étages 1 et 2. **Ce périmètre est épinglé depuis le 2026-09-06** : toute crate
+est ou bien dedans, ou bien nommée dans `HORS_PERIMETRE` de
+`scripts/check-etages.sh` avec sa raison — auparavant, en retirer une du tableau
+la faisait échapper à C1 ET à C2 sans que rien ne bronche. Le seuil porte sur les **régions** et les **lignes** — pas sur les branches,
 que `llvm-cov` n'instrumente pas sur Rust stable et dont le compteur reste à
 `0 / 0`. Les régions font le travail attendu : chaque bras d'un conditionnel en
 est une.
 
-Le gate mesure aujourd'hui **55 411 régions** et **31 844 lignes**, toutes
-couvertes. **Une seule dérogation, et elle est annoncée à chaque exécution** : le
-code *généré* du schéma Cap'n Proto en est exclu — il porte un accesseur par champ
-et par sens, dont la plupart ne seront jamais appelés, et les couvrir n'éprouverait
-aucune de nos décisions. L'exclusion nomme **un fichier**, pas une crate. `ams-loop-tokio` en est **hors** : elle lit, écrit et attend, et y
+Le gate mesure au 2026-09-06 **58 677 régions**, **34 256 lignes** et
+**3 597 fonctions**, toutes couvertes. **Une seule dérogation, et elle est
+annoncée à chaque exécution** : le code *généré* du schéma Cap'n Proto en est
+exclu — il porte un accesseur par champ et par sens, dont la plupart ne seront
+jamais appelés, et les couvrir n'éprouverait aucune de nos décisions. L'exclusion
+est un motif, `/ams_[a-z]+_capnp\.rs$`, qui nomme **trois fichiers générés** —
+pas une crate, et pas une ligne écrite à la main. `ams-loop-tokio` en est **hors** : elle lit, écrit et attend, et y
 atteindre 100 % exigerait de simuler les pannes du noyau — on mesurerait alors la
 fidélité de la simulation. Il naissait à zéro dette et n'en a pas pris.
 
@@ -2218,16 +2240,37 @@ Le script tourne aussi en local :
 
 ## Dépendances
 
-**Deux dépendances externes** : `tokio` pour la boucle d'entrées-sorties (C5), et
-`capnp` pour la configuration binaire (C11) — cette dernière **pure Rust, sans
-aucune dépendance transitive**, et compatible `no_std`.
-Le graphe de build réel, sur Linux et avec les seules features qui servent, compte
-**douze crates transitives, dont sept seulement à l'exécution** — `bytes`,
-`errno`, `libc`, `mio`, `pin-project-lite`, `signal-hook-registry`, `socket2`.
-Les cinq autres (`tokio-macros` et son outillage proc-macro) compilent pour l'hôte
-et n'entrent dans aucun binaire. Le
-registre tablait sur vingt-cinq ; `default-features = false` fait toute la
-différence, et l'estimation y a été corrigée.
+**Dix-neuf dépendances externes en direct**, et **quatre-vingt-quatorze crates
+dans le graphe** d'`air-mail-server`. Mesuré le 2026-09-06 :
+
+```sh
+cargo tree -p ams-server --edges normal --prefix none | awk '{print $1}' \
+    | sort -u | grep -cv '^ams-'
+```
+
+**CE PARAGRAPHE A LONGTEMPS DIT « DEUX ».** C'était vrai du serveur qui ne
+parlait que SMTP en clair : `tokio` pour la boucle (C5) et `capnp` pour la
+configuration binaire (C11). Puis sont arrivés TLS 1.3, QUIC, l'échange
+post-quantique, DKIM, DANE et `argon2` — et chacun a apporté sa cryptographie.
+La phrase, elle, n'a pas bougé : elle promettait un projet plus petit que celui
+qu'on a écrit.
+
+**CE QUI N'A PAS CHANGÉ, ET QUI EST LA VRAIE PROPRIÉTÉ** : aucune de ces
+quatre-vingt-quatorze crates n'est en C, ni ne compile de C. Ni `ring`, ni `cc`,
+ni la moindre crate `*-sys` — `scripts/check-sans-c.sh` le vérifie à chaque
+poussée, et il a été éprouvé contre un faux objet `.o` déposé dans
+`target/debug/build`. C'est cette propriété-là qui rend le portage vers Air
+concevable, pas un décompte.
+
+Les directes, hors crates du dépôt : `tokio` et `libc` pour la boucle ; `capnp`
+pour la configuration ; `rustls`, `rustls-rustcrypto`, `tokio-rustls` et `webpki`
+pour TLS ; `ml-kem` et `x25519-dalek` pour l'échange post-quantique ; `aes`,
+`aes-gcm`, `chacha20`, `chacha20poly1305`, `hkdf` et `sha2` pour QUIC et les
+condensats ; `rsa` et `ed25519-dalek` pour DKIM ; `argon2` pour les mots de
+passe ; `flate2` pour les rapports TLSRPT.
+
+`libc` est déclarée en direct bien que tokio la tire déjà : `refuse_root` (C10)
+appelle `geteuid` elle-même, et une dépendance qu'on utilise se déclare.
 
 `libc` est déclarée en direct bien que tokio la tire déjà : `refuse_root` (C10)
 appelle `geteuid` elle-même, et une dépendance qu'on utilise se déclare.
