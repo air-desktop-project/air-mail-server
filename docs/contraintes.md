@@ -3912,6 +3912,49 @@ Ce qui reste hors du serveur : **rien de connu**. Cette ligne annonçait « la f
 de réémission des messages sortants », et c'était faux — elle existe, elle est
 câblée, et [la liste v1](v1.md) le mesure plutôt que de le croire.
 
+## Un banc de mesure mal synchronisé invente des défauts
+
+Le 2026-09-06, en vérifiant que `STORE` fait bien ce que le `README` annonce —
+« `+`/`-` fusionnent, `FLAGS` remplace » —, un banc d'essai a rendu ceci :
+
+    STORE 1 FLAGS (\Seen)       puis FETCH →  (\Seen)
+    STORE 1 +FLAGS (\Flagged)   puis FETCH →  (\Seen)        ← manquant
+    STORE 1 FLAGS (\Answered)   puis FETCH →  (\Seen \Flagged)
+
+Un décalage d'un cran, parfaitement régulier. **Cela ressemblait à un défaut
+sérieux** : un drapeau posé qu'une lecture suivante ne voit pas.
+
+### CE N'EN ÉTAIT PAS UN
+
+Le banc lisait la socket après un `sleep` fixe, en prenant ce qui venait. Or
+`STORE` répond lui-même par une ligne NON ÉTIQUETÉE — `* 1 FETCH (FLAGS …)` —
+avant sa conclusion. Chaque lecture emportait donc un morceau de la réponse
+précédente, et rendait l'état d'avant.
+
+Avec un lecteur qui attend l'ÉTIQUETTE de la commande envoyée, la sémantique est
+exactement celle qu'on annonce :
+
+    FLAGS (\Seen)      →  (\Seen)
+    +FLAGS (\Flagged)  →  (\Seen \Flagged)
+    -FLAGS (\Seen)     →  (\Flagged)
+    FLAGS (\Answered)  →  (\Answered)
+
+### CE QUE CELA APPREND SUR LA MÉTHODE
+
+Toute cette journée a consisté à MESURER plutôt qu'à relire — et c'est ce qui a
+trouvé les défauts que la relecture ne voyait pas. Mais une mesure est un
+instrument, et **un instrument mal réglé invente ce qu'il prétend constater**.
+
+La règle qui en sort tient en une phrase : sur IMAP, un banc d'essai lit
+jusqu'à l'étiquette, jamais pendant une durée. Les réponses non sollicitées
+s'intercalent — c'est la conception du protocole, et §7 l'exige —, si bien qu'un
+`sleep` ne délimite rien.
+
+**Et la règle générale, elle, vaut au-delà d'IMAP** : avant de rapporter un
+défaut mesuré, vérifier que c'est le sujet qu'on a mesuré et non l'instrument.
+Ici, une seconde mesure a suffi ; sans elle, on aurait ouvert une chasse dans du
+code correct.
+
 ## Le commentaire disait l'intention ; la configuration ne la tenait pas
 
 `ci.yml` portait ceci, au-dessus de son groupe de concurrence :
