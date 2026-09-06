@@ -3902,6 +3902,65 @@ Ce qui reste hors du serveur : **rien de connu**. Cette ligne annonçait « la f
 de réémission des messages sortants », et c'était faux — elle existe, elle est
 câblée, et [la liste v1](v1.md) le mesure plutôt que de le croire.
 
+## L'indice était écrit dans ce registre, et personne ne l'a lu comme tel
+
+« La porte HTTP refusait l'usurpation sans le dire » disait ceci, en passant :
+
+> `Usurpation` : un compte authentifié qui tente d'écrire au nom d'un autre
+> (RFC 6409 §6.1). Elle avait été posée **sur le chemin de la remise seulement**.
+
+La phrase était exacte. Elle servait à expliquer pourquoi la porte HTTP ne
+comptait pas ses refus — et de là, on a corrigé le COMPTEUR.
+
+**Personne n'a demandé ce que « sur le chemin de la remise seulement » laissait
+dehors.** Mesuré le 2026-09-06 : un compte authentifié écrivait au nom d'un
+collègue tant que le message restait dans une boîte d'ici. `250` en SMTP ; `400`
+en HTTP pour le même message.
+
+### CE QUE LES DEUX PORTES DISAIENT
+
+| | porte HTTP | porte SMTP |
+|---|---|---|
+| où | entrée de `submissions` | `deposer_les_sortants` |
+| quand | toujours | seulement si le message sort |
+| local usurpé | `400` | **`250`** |
+
+`ecrit_bien_en_son_nom` portait pourtant l'avertissement : « deux règles à deux
+endroits finissent par ne plus dire la même chose ». C'est arrivé **un cran plus
+loin que ce qu'il visait** : la LECTURE était bien la même — même fonction, même
+routage —, c'est la PORTÉE qui a divergé. Une garde contre la duplication ne
+protège pas d'une différence de placement.
+
+### OÙ LA VÉRIFICATION POUVAIT ALLER, ET OÙ ELLE NE POUVAIT PAS
+
+**Pas dans `finish`.** `self.corps` ne s'y remplit que pour les sortants, et
+c'est délibéré : retenir en mémoire tout message entrant est ce que C3 interdit.
+La première tentative l'y a posée et **refusait les soumissions légitimes**,
+faute de corps à relire — le seul essai qui l'a dit fut le serveur vivant.
+
+Elle vit dans `append`, là où l'EN-TÊTE se termine. Il est déjà retenu pour la
+complétion de RFC 6409 §8, le `From:` n'est nulle part ailleurs, et c'est le plus
+tôt possible : avant la remise, avant la file, avant la signature.
+
+### UNE GARDE QUI EN FAISAIT DEUX, ET LA SECONDE A FAILLI PARTIR
+
+En remontant l'appel, on a retiré celui du chemin sortant. Il portait DEUX
+propriétés :
+
+1. le `From:` doit router vers le compte ;
+2. **il faut un compte.**
+
+`ecrit_bien_en_son_nom` rend `false` faute de compte, et c'est ce `false`-là qui
+interdisait à un pair NON AUTHENTIFIÉ de faire relayer son courrier. Le retirer
+ouvrait un relais.
+
+`sans_identite_verifiable_rien_ne_part` l'a dit en sept secondes : « une
+transaction anonyme a émis ». C'est le meilleur argument de la journée pour cette
+suite d'essais — elle a rattrapé une ouverture de relais écrite dans la minute.
+
+**UNE GARDE QUI EN FAIT DEUX SE SÉPARE EN DEUX**, et chacune dit son nom. Sans
+quoi la seconde disparaît avec la première, en silence, et rien ne la pleure.
+
 ## Ce que valent les dix barrières, éprouvé une à une
 
 Le 2026-09-06, chaque barrière a été confrontée à un défaut qu'elle prétend
