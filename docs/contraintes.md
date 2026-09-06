@@ -3902,6 +3902,61 @@ Ce qui reste hors du serveur : **rien de connu**. Cette ligne annonçait « la f
 de réémission des messages sortants », et c'était faux — elle existe, elle est
 câblée, et [la liste v1](v1.md) le mesure plutôt que de le croire.
 
+## Une option que personne ne pouvait découvrir
+
+`--spf-timeout-ms` était accepté depuis longtemps. Son code porte un
+raisonnement soigneux sur la valeur zéro — un délai nul expire avant que la
+question ne parte, SPF ne rend plus que des pannes, et sous `--spf enforce`
+chaque message reçoit un `451` sans qu'aucune ligne ne dise pourquoi.
+
+**Il n'apparaissait nulle part dans l'aide.** L'exploitant qu'il protège ne
+pouvait pas le connaître.
+
+### CE QUI L'A TROUVÉ
+
+Le même fil que la fois d'avant : un compte périmé. En vérifiant que l'aide
+disait vrai sur le nombre d'écoutes, on a comparé la LISTE des options acceptées
+à celle des options citées. Deux écarts sont sortis.
+
+### L'UN DES DEUX N'EN ÉTAIT PAS UN
+
+`--relay-spool` est cité par l'aide et refusé par l'analyseur. Cela ressemble à
+une dérive, et c'en est l'inverse : l'option a été renommée `--queue-spool`, et
+le serveur refuse l'ancien nom **en nommant le nouveau** plutôt qu'en disant
+« option inconnue ». L'aide le cite pour le dire.
+
+Un contrôle naïf aurait condamné ce service rendu. C'est la deuxième fois de la
+journée qu'un contrôle doit apprendre à distinguer **dire** de **faire** — après
+le `postrm` qui cite `rm -rf` sans l'exécuter.
+
+### UN ESSAI QUI LIT SA PROPRE SOURCE
+
+Ajouter une option, c'est écrire un bras de `match`. Écrire son paragraphe
+d'aide est un SECOND geste, que rien n'obligeait. L'essai confronte donc les deux
+listes : les bras de `match` extraits de `lib.rs` par `include_str!`, et le texte
+d'`OPTIONS_AIDE`.
+
+Les deux sens comptent. Une option acceptée mais non documentée est invisible ;
+une option documentée mais refusée fait recopier une commande qui échoue. Le
+second sens tolère une exception, et une seule : que le refus nomme le
+remplaçant.
+
+### DEUX RÉGIONS QUE LA COUVERTURE A REFUSÉES, ET ELLE AVAIT RAISON
+
+L'essai a d'abord fait tomber C2 de deux lignes.
+
+La première était un `continue` dans un `let … else` sur `split("=>").next()` —
+qui ne rend **jamais** `None` sur une chaîne. Une garde qu'aucune source ne peut
+atteindre. `split_once` la remplace, et son `else` est pris par toutes les lignes
+sans `=>`.
+
+La seconde était l'argument d'un message d'assertion : `{}` ne s'évalue qu'à
+l'échec. Un message qui porte une valeur laisse donc une région que rien
+n'exerce tant que l'essai passe. Le message est devenu littéral.
+
+**C2 ne demande pas de la couverture, elle demande du code atteignable.** Les
+deux corrections ont retiré des branches, pas ajouté des essais.
+
 ## Un plafond qui se multipliait par le nombre de portes
 
 `--max-connections 256` n'autorisait pas 256 connexions. Il en autorisait 256

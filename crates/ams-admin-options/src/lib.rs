@@ -687,6 +687,18 @@ OPTIONS DE `config write`
     serveur prend la seconde, et cette option est l'endroit où vous dites que le
     canal en est un. La boucle locale n'a rien à déclarer.
 
+    --spf-timeout-ms <n>   le temps accordé à UNE question DNS (défaut 5000).
+
+    CE N'EST PAS LE TEMPS D'UNE ÉVALUATION : une politique SPF peut demander
+    jusqu'à dix questions (§4.6.4 de RFC 7208). C'est le PRODUIT des deux qui
+    borne ce qu'un domaine hostile peut faire attendre à un `MAIL FROM:`, et
+    c'est ce produit-là qu'il faut regarder.
+
+    ZÉRO EST REFUSÉ : un délai nul expire avant que la question ne parte. Toute
+    interrogation échouerait, SPF ne rendrait plus que des pannes, et sous
+    `--spf enforce` une panne s'ajourne — chaque message recevrait un `451`,
+    sans qu'aucune ligne ne dise pourquoi.
+
     `--spf observe` (le défaut) vérifie et RETIENT sans rien opposer ; `--spf
     enforce` refuse un `fail` par un 550 et ajourne une panne de résolution par
     un 451. Commencez par `observe` : une politique mal écrite chez un
@@ -2976,6 +2988,124 @@ mod tests {
         // qu'eux.
         assert_eq!(config.listen_imap, "0.0.0.0:2143");
         assert!(!config.imap_implicit_tls);
+    }
+
+    /// Les options qu'un texte CITE, dans l'ordre où il les cite.
+    ///
+    /// On découpe sur tout ce qui n'appartient pas à un nom d'option, puis on ne
+    /// garde que les morceaux qui commencent par deux tirets. **Un `--` seul
+    /// n'est pas une option** : il apparaît dans de la prose, et le pousser
+    /// ferait chercher à l'analyseur une option qui n'a pas de nom.
+    fn options_citees(texte: &str) -> Vec<&str> {
+        texte
+            .split(|c: char| !c.is_ascii_lowercase() && !c.is_ascii_digit() && c != '-')
+            .filter(|mot| mot.starts_with("--") && mot.len() > 2)
+            .collect()
+    }
+
+    /// **UN `--` SEUL NE SE PREND PAS POUR UNE OPTION.**
+    ///
+    /// Cette garde n'est pas atteignable par le texte d'aide d'aujourd'hui ; elle
+    /// l'est par celui de demain, et une garde qu'aucun essai n'exerce est une
+    /// garde dont on ne sait rien.
+    #[test]
+    fn l_extraction_ne_prend_pas_un_double_tiret_pour_une_option() {
+        assert_eq!(
+            options_citees("voir `--listen`, et un -- tout seul, puis --spf-timeout-ms."),
+            std::vec!["--listen", "--spf-timeout-ms"]
+        );
+        assert!(options_citees("aucune option ici").is_empty());
+    }
+
+    /// **TOUTE OPTION ACCEPTÉE EST DOCUMENTÉE, ET RÉCIPROQUEMENT.**
+    ///
+    /// # POURQUOI CET ESSAI LIT SA PROPRE SOURCE
+    ///
+    /// Une option s'ajoute en écrivant un bras de `match`. Écrire ensuite son
+    /// paragraphe d'aide est un second geste, que rien n'obligeait — et le
+    /// 2026-09-06 on a trouvé `--spf-timeout-ms` accepté depuis longtemps,
+    /// soigneusement gardé contre la valeur zéro dans son code, et **absent de
+    /// l'aide**. Personne ne pouvait le découvrir.
+    ///
+    /// L'inverse coûte autant : une option citée par l'aide et refusée par
+    /// l'analyseur fait recopier à l'exploitant une commande qui échoue.
+    ///
+    /// Les deux sens se vérifient donc ici, en confrontant les bras de `match`
+    /// de ce fichier — lu par [`include_str!`] — au texte d'[`OPTIONS_AIDE`].
+    ///
+    /// # L'EXCEPTION, ET ELLE EST LÉGITIME
+    ///
+    /// L'aide CITE des options qu'elle dit refusées : `--relay-spool` et ses
+    /// voisins ont été renommés, et le serveur les refuse en nommant leur
+    /// remplaçant plutôt qu'en disant « option inconnue ». Une citation pareille
+    /// est un service rendu, pas une dérive — on exige seulement que le refus
+    /// nomme bien le nouveau nom.
+    #[test]
+    fn toute_option_acceptee_est_documentee_et_reciproquement() {
+        let source = include_str!("lib.rs");
+
+        // Les bras de `match` : `"--x" =>` et `"--x" | "--y" =>`.
+        let mut acceptees: Vec<&str> = Vec::new();
+        for ligne in source.lines() {
+            // **`split_once` PLUTÔT QU'UN `contains` PUIS UN `split`** : le
+            // second ne rend jamais `None` sur une chaîne, si bien que sa garde
+            // était une branche qu'aucune source ne pouvait atteindre.
+            let Some((bras, _)) = ligne.split_once("=>") else {
+                continue;
+            };
+            if !bras.trim_start().starts_with('"') {
+                continue;
+            }
+            for morceau in bras.split('|') {
+                let nom = morceau.trim().trim_matches('"');
+                if nom.starts_with("--") && nom.len() > 2 {
+                    acceptees.push(nom);
+                }
+            }
+        }
+        acceptees.sort_unstable();
+        acceptees.dedup();
+        // **UN MESSAGE SANS ARGUMENT** : un `{}` ne s'évalue qu'à l'échec, ce qui
+        // laisse une région que rien n'exerce tant que l'essai passe.
+        assert!(
+            acceptees.len() > 30,
+            "l'extraction des bras de `match` n'a presque rien trouvé : la forme \
+             du fichier a changé, et cet essai ne garde plus rien"
+        );
+
+        // **`--help` ET `--version` NE SONT PAS DES OPTIONS DE `config write`** :
+        // elles appartiennent à la commande elle-même, et l'aide qu'on inspecte
+        // ici ne décrit que `config write`.
+        for option in &acceptees {
+            if matches!(*option, "--help" | "--version" | "-h" | "-V") {
+                continue;
+            }
+            assert!(
+                crate::OPTIONS_AIDE.contains(option),
+                "`{option}` est acceptée mais n'apparaît nulle part dans l'aide : \
+                 personne ne peut la découvrir"
+            );
+        }
+
+        // L'autre sens : ce que l'aide cite doit être accepté, ou refusé EN
+        // NOMMANT son remplaçant.
+        let mut citees = options_citees(crate::OPTIONS_AIDE);
+        citees.sort_unstable();
+        citees.dedup();
+
+        for option in citees {
+            if acceptees.contains(&option) {
+                continue;
+            }
+            let erreur = parse([option, "peu-importe"].as_slice())
+                .expect_err("une option que l'analyseur ne connaît pas doit être refusée");
+            assert!(
+                erreur.message.contains("désormais"),
+                "l'aide cite `{option}`, que l'analyseur refuse sans nommer de \
+                 remplaçant : « {} »",
+                erreur.message
+            );
+        }
     }
 
     /// **LA DÉCLARATION DE CONFIANCE SE DIT, ET NE SE DEVINE PAS.**
