@@ -13113,3 +13113,98 @@ soumettre ferait entrer les règles du produit dans du code qui n'est pas livré
 toutes tourné avant un commit. Le geste reste manuel, et cette séance montre
 qu'un geste manuel de dix pas en oublie un. C'est le prochain trou, et il est
 consigné ici plutôt que tenu pour comblé.
+
+## Le trou consigné au commit précédent, et comblé au suivant
+
+Le commit `5ed8ac16` finissait par une phrase : « rien ne vérifie encore que les
+dix barrières ont toutes tourné avant un commit. Le geste reste manuel, et cette
+séance montre qu'un geste manuel de dix pas en oublie un. C'est le prochain trou,
+et il est consigné ici plutôt que tenu pour comblé. » Voici le suivant.
+
+`scripts/check-tout.sh` les lance toutes, dans un ordre choisi — le plus rapide
+d'abord, pour qu'un échec se sache en une seconde plutôt qu'en quarante minutes —
+et rend un tableau. Il ne s'arrête PAS au premier refus : voir les dix verdicts
+d'un coup vaut mieux que les découvrir un par un, en relançant.
+
+### La liste ne se recopie pas, elle se dérive — et de trois côtés
+
+`check-fuzz` et `check-paquet` s'étaient ajoutées au dépôt sans que la ligne qui
+les compte bouge dans `v1.md`. Une liste écrite en dur ici aurait le même sort :
+elle vieillirait en silence, et le script dirait « les dix » en en lançant huit.
+
+Il lit donc le répertoire, et **arrête tout** si l'un des trois accords manque :
+
+- une barrière présente que son ORDRE ne cite pas ;
+- une barrière présente que `ci.yml` ne lance jamais — elle ne protégerait alors
+  que la machine de qui la lance ;
+- une barrière que `ci.yml` lance et que `scripts/` ne porte pas.
+
+Les trois ont été confrontés au défaut qu'ils prétendent voir, en ajoutant un
+`check-onzieme.sh`, en débranchant `check-paquet` de la CI, et en citant un
+`check-fantome` dans l'ORDRE. Les trois refusent, sans rien lancer.
+
+### Le mensonge que la première écriture allait dire
+
+Elle lançait `check-fuzz.sh` NU. La CI lui passe `--smoke` — sans quoi la
+barrière COMPILE les soixante-six cibles sans les faire tourner. Le runner aurait
+donc annoncé « les dix passent » en en passant une plus faible que la CI, c'est
+à-dire exactement le mensonge qu'il existe pour empêcher.
+
+Les arguments viennent désormais de la ligne `run:` de `ci.yml`, expressions
+`${{ … }}` retirées — elles n'ont de sens que chez GitHub, et leur absence fait
+prendre à `check-dco` son défaut, `origin/main`, qui est ce qu'on veut en local.
+
+**Et la première version de cette extraction lisait le fichier ENTIER**, si bien
+qu'elle attrapait un commentaire citant `scripts/check-fuzz.sh` et en tirait
+l'argument « ` fait ». Un fichier qui s'explique abondamment est une chance ; le
+lire comme s'il ne contenait que des commandes est une faute. On ne lit plus que
+les lignes `run:`.
+
+### Ce que ce script ne peut pas dire, et le dit
+
+`check-dco` examine `base..HEAD` : les commits qui EXISTENT DÉJÀ. Lancé avant de
+commiter, il ne voit pas la tranche qu'on s'apprête à écrire. Il tourne quand
+même — il coûte une seconde et rattrape un commit précédent mal formé — mais le
+rappel est imprimé sous le tableau, plutôt que laissé à croire.
+
+### Aucune option pour en sauter une
+
+Un `--sans-fuzz` serait la première chose qu'on taperait un soir de hâte, et le
+geste manuel qu'on remplace avait exactement cette forme. Ce qui est long l'est ;
+on le lance et on fait autre chose.
+
+### Un nom de variable qui a failli passer
+
+`echec_de_cohérence=0` n'est pas une affectation en bash : un identifiant ne
+porte pas d'accent, et le shell a lu la ligne comme une COMMANDE introuvable.
+Le script continuait, et son compteur d'écarts restait vide — il aurait dit
+« ARRÊT » sans arrêter, ou l'inverse. Ce n'est pas la relecture qui l'a trouvé,
+c'est d'avoir lancé les trois confrontations : elles ont fait apparaître le
+message d'erreur au milieu des verdicts attendus.
+
+### Ce que les dix coûtent, mesuré
+
+    check-format             2 s
+    check-etages             0 s
+    check-dco                0 s
+    check-compile            1 s
+    check-clippy             1 s
+    check-sans-c             0 s
+    cargo build              1 s
+    cargo test              58 s
+    check-couverture        69 s
+    check-installation       0 s
+    check-paquet            15 s
+    check-fuzz --smoke   1 422 s
+    ─────────────────────────────
+    total               ~26 min
+
+**Neuf barrières sur dix tiennent en deux minutes et demie**, caches chauds. La
+dixième en coûte vingt-quatre à elle seule. Le chiffre dit deux choses : qu'il
+n'y a aucune raison de sauter les neuf premières, et que la dixième est
+exactement celle qu'on aurait envie de sauter — d'où l'absence d'option pour le
+faire. On la lance, et on fait autre chose pendant qu'elle tourne.
+
+Ces durées supposent un `target/` déjà rempli. À froid, `cargo test` et
+`check-couverture` recompilent le monde, et les deux minutes et demie en font
+plutôt dix.

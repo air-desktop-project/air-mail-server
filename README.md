@@ -2192,6 +2192,27 @@ barrières depuis toujours, mais il était le seul à n'avoir aucun
 tranche est partie avec deux erreurs de lint, apprises en CI vingt-cinq minutes
 plus tard. Le script porte la commande une fois, et la CI l'appelle lui.
 
+**Et avant de commiter, une seule commande les lance toutes :**
+
+```sh
+./scripts/check-tout.sh
+```
+
+Elle déroule les dix barrières du plus rapide au plus lent, ajoute les deux
+étapes de la CI qui n'ont pas de script (`cargo build` et `cargo test`), et rend
+un tableau — sans s'arrêter au premier refus, parce que voir les dix verdicts
+d'un coup vaut mieux que les découvrir un par un.
+
+Sa liste ne se recopie pas : elle se **dérive** du contenu de `scripts/`, et se
+confronte à `ci.yml` dans les deux sens. Une barrière qui existerait sans être
+lancée par la CI, ou que la CI lancerait sans qu'elle existe ici, ARRÊTE le
+script avant qu'il ne lance quoi que ce soit. Les arguments viennent de `ci.yml`
+eux aussi : sa première écriture passait `check-fuzz` nu là où la CI lui donne
+`--smoke`, et aurait annoncé « les dix passent » en en passant une plus faible.
+
+Il n'y a **aucune option pour en sauter une** : ce serait la première chose qu'on
+taperait un soir de hâte, et c'est précisément le geste qu'on remplace.
+
 Le pin est une **version exacte**, pas le canal `stable` : un canal roulant
 désigne une version différente toutes les six semaines, et deux mesures prises à
 deux mois d'écart ne sont alors plus comparables.
