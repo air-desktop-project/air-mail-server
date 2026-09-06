@@ -97,7 +97,8 @@ impl Cause {
             }
             Self::Usurpation => {
                 "USURPATION REFUSÉE — un compte AUTHENTIFIÉ a voulu écrire au nom d'un autre \
-                 (RFC 6409 §6.1). Le message n'est pas parti, et n'a pas été signé"
+                 (RFC 6409 §6.1). Le message n'a été ni remis, ni mis en file, ni signé — la \
+                 vérification a lieu dès que l'en-tête est complet, avant toute écriture"
             }
         }
     }

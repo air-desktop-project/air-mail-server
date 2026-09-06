@@ -582,6 +582,40 @@ impl Delivery for MaildirDelivery {
         // message qu'on remanierait davantage ne serait plus celui que
         // l'expéditeur a signé.
         let (entete, corps) = retenus.split_at(fin);
+        // ── UN COMPTE N'ÉCRIT QU'EN SON NOM, MÊME SANS SORTIR (RFC 6409 §6.1) ─
+        //
+        // **ICI, ET NON DANS `deposer_les_sortants`.** Cette vérification y
+        // vivait, et n'y voyait donc que ce qui part : mesuré le 2026-09-06, un
+        // compte authentifié écrivait au nom d'un collègue tant que le message
+        // restait dans une boîte d'ici — `250` en SMTP là où la porte HTTP
+        // rendait `400` pour le même message.
+        //
+        // **ET NON DANS `finish` NON PLUS** : `self.corps` ne se remplit que
+        // pour les sortants, précisément parce que retenir en mémoire tout
+        // message entrant est ce que C3 interdit. L'en-tête, lui, est déjà
+        // retenu — il est là, complet, et le `From:` n'est nulle part ailleurs.
+        //
+        // **ELLE NE VAUT QUE POUR UN DÉPOSANT AUTHENTIFIÉ** : sans ce garde-fou,
+        // tout courrier venu du monde serait refusé, `ecrit_bien_en_son_nom`
+        // rendant `false` faute de compte.
+        if self.compte.is_some() {
+            let bornes = ams_mime::Limits::DEFAULT;
+            // L'en-tête se relit seul : c'est un message dont le corps est vide.
+            let Ok(entier) = ams_mime::Message::parse(entete, &bornes) else {
+                return Err(DeliveryFailure::Permanent);
+            };
+            // Un `MAIL FROM:<>` authentifié ne route vers personne, et se refuse
+            // comme n'importe quelle autre adresse d'autrui.
+            let retour = self.retour.clone().unwrap_or_default();
+            if !self.ecrit_bien_en_son_nom(&entier, &retour) {
+                // **LE SEUL ÉCHEC VENU DU PAIR QU'ON DISE**, et c'est parce que
+                // ce pair-là s'est AUTHENTIFIÉ : l'exploitant connaît le compte,
+                // et peut le suspendre. Les refus anonymes, eux, donneraient la
+                // plume du journal à qui la demande.
+                self.incident(crate::incidents::Cause::Usurpation);
+                return Err(DeliveryFailure::Permanent);
+            }
+        }
         let sans_bcc = sans_le_bcc(entete);
         let corps = corps.to_vec();
         self.ecrire(&sans_bcc)?;
@@ -1022,27 +1056,22 @@ impl MaildirDelivery {
         };
         let sortants = core::mem::take(&mut self.sortants);
         let brut = core::mem::take(&mut self.corps);
-        // **ON N'ÉMET PAS AU NOM DE QUELQU'UN D'AUTRE** (RFC 6409 §6.1). La
-        // vérification vient AVANT la complétion et la signature : ce qu'on
-        // refuse d'émettre n'a pas à être complété, et surtout pas à être signé.
+        // **UNE TRANSACTION ANONYME N'ÉMET JAMAIS.** C'est une propriété
+        // DISTINCTE de « un compte n'écrit qu'en son nom », que `append` vérifie
+        // désormais dès que l'en-tête est complet : celle-ci dit qu'il faut un
+        // compte, celle-là que le `From:` doit être le sien.
         //
-        // Le refus est DÉFINITIF : aucune reprise ne donnera au déposant le
-        // droit d'écrire au nom d'un autre. Et il vaut pour le message entier —
-        // il n'y a qu'un `From:` et qu'un chemin de retour, et ils sont faux ou
-        // ils ne le sont pas.
-        {
-            let bornes = ams_mime::Limits::DEFAULT;
-            let Ok(message) = ams_mime::Message::parse(&brut, &bornes) else {
-                return Err(DeliveryFailure::Permanent);
-            };
-            if !self.ecrit_bien_en_son_nom(&message, retour) {
-                // **LE SEUL ÉCHEC VENU DU PAIR QU'ON DISE**, et c'est parce que
-                // ce pair-là s'est AUTHENTIFIÉ : l'exploitant connaît le compte,
-                // et peut le suspendre. Les refus anonymes, eux, donneraient la
-                // plume du journal à qui la demande.
-                self.incident(crate::incidents::Cause::Usurpation);
-                return Err(DeliveryFailure::Permanent);
-            }
+        // Les deux tenaient autrefois dans le même appel, ici. En le remontant
+        // dans `append` — pour que la remise LOCALE soit couverte elle aussi —
+        // on a bien failli emporter celle-ci : `ecrit_bien_en_son_nom` rendait
+        // `false` faute de compte, et c'est ce `false`-là qui interdisait à un
+        // pair non authentifié de faire relayer son courrier. Un essai l'a dit
+        // tout de suite — « une transaction anonyme a émis ».
+        //
+        // **UNE GARDE QUI EN FAISAIT DEUX SE SÉPARE EN DEUX**, sans quoi la
+        // seconde disparaît avec la première.
+        if self.compte.is_none() {
+            return Err(DeliveryFailure::Permanent);
         }
         // **COMPLÉTER PUIS SIGNER**, et pas l'inverse : la signature doit
         // couvrir ce qu'on ajoute. `h=` nomme `date` et `message-id` — les
@@ -1394,7 +1423,12 @@ mod tests {
         remise
             .add_recipient(b"ailleurs@autre.test")
             .expect("un sortant");
-        remise.append(message.as_bytes()).expect("corps");
+        // **LE REFUS PEUT VENIR D'`append`**, depuis que la règle « un compte
+        // n'écrit qu'en son nom » y est vérifiée dès que l'en-tête est complet.
+        // L'aide exigeait ici que `append` réussisse ; elle propage désormais,
+        // et ce que l'essai éprouve — un refus DÉFINITIF, et rien en file — ne
+        // change pas.
+        remise.append(message.as_bytes())?;
         remise.finish()
     }
 
@@ -1800,6 +1834,70 @@ mod tests {
                 .is_ok()
         );
         assert!(remise.finish().is_err(), "une transaction anonyme a émis");
+    }
+
+    /// **UNE USURPATION QUI NE SORT PAS EST UNE USURPATION QUAND MÊME.**
+    ///
+    /// # CE QUE CET ESSAI GARDE
+    ///
+    /// La règle vivait dans `deposer_les_sortants`, et n'y voyait que ce qui
+    /// part. Mesuré le 2026-09-06 contre le serveur vivant : un compte
+    /// authentifié écrivait au nom d'un collègue tant que le message restait
+    /// dans une boîte d'ici — `250` en SMTP, là où la porte HTTP rendait `400`
+    /// pour le même message.
+    ///
+    /// Le motif écrit du refus était la SIGNATURE, et un message qui ne sort pas
+    /// n'est pas signé. Mais le destinataire local, lui, voit bien un message
+    /// qui semble venir d'un autre.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn une_usurpation_locale_est_refusee() {
+        let temporaire = Ephemere::nouveau();
+        let (_boites, mut remise) = remise(&temporaire.0);
+
+        // Le compte écrit en SON nom, vers une boîte d'ici : cela passe.
+        remise.begin(Some(b"marie@example.com"));
+        remise.submitter(b"marie");
+        assert!(remise.add_recipient(b"marie@example.com").is_ok());
+        assert!(
+            remise
+                .append(b"From: marie@example.com\r\n\r\nbonjour\r\n")
+                .is_ok()
+        );
+        assert!(remise.finish().is_ok(), "son propre nom doit passer");
+
+        // Le même compte, au nom d'un autre, vers la MÊME boîte d'ici.
+        remise.begin(Some(b"marie@example.com"));
+        remise.submitter(b"marie");
+        assert!(remise.add_recipient(b"marie@example.com").is_ok());
+        let issue = remise.append(b"From: collegue@example.com\r\n\r\nbonjour\r\n");
+        assert!(
+            matches!(issue, Err(DeliveryFailure::Permanent)),
+            "une usurpation vers une boîte locale doit être refusée : {issue:?}"
+        );
+    }
+
+    /// **ET UN ENTRANT ANONYME N'EST PAS CONCERNÉ.**
+    ///
+    /// Sans ce garde-fou, tout courrier venu du monde serait refusé :
+    /// `ecrit_bien_en_son_nom` rend `false` faute de compte, et c'est ce qu'on
+    /// veut d'une transaction qui prétend ÉMETTRE — pas de celle qui reçoit.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn un_entrant_anonyme_ecrit_le_from_qu_il_veut() {
+        let temporaire = Ephemere::nouveau();
+        let (_boites, mut remise) = remise(&temporaire.0);
+
+        // Aucun `submitter` : c'est le monde qui écrit à `marie`.
+        remise.begin(Some(b"quiconque@ailleurs.test"));
+        assert!(remise.add_recipient(b"marie@example.com").is_ok());
+        assert!(
+            remise
+                .append(b"From: quiconque@ailleurs.test\r\n\r\nbonjour\r\n")
+                .is_ok()
+        );
+        assert!(
+            remise.finish().is_ok(),
+            "un entrant anonyme doit être remis, quel que soit son `From:`"
+        );
     }
 
     /// **L'IDENTITÉ NE SURVIT PAS À LA TRANSACTION.**

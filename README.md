@@ -56,27 +56,24 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 > Sans cette règle, un utilisateur pourrait écrire au nom d'un collègue — et
 > depuis que ce serveur signe, notre signature l'authentifierait.
 >
-> **LES DEUX PORTES NE COUVRENT PAS LA MÊME CHOSE**, et c'est mesuré le
-> 2026-09-06. La porte HTTP vérifie DÈS L'ENTRÉE de `submissions`, avant même de
-> savoir si le message sort ; la porte SMTP ne vérifie que dans
-> `deposer_les_sortants`. Un message soumis en SMTP qui reste ICI — d'un compte
-> vers une boîte locale — passe donc avec un `From:` d'autrui :
+> **LES DEUX PORTES DISENT ENFIN LA MÊME CHOSE**, depuis le 2026-09-06. Elles ne
+> la disaient pas : la porte HTTP vérifiait dès l'entrée de `submissions`, la
+> porte SMTP seulement dans `deposer_les_sortants`. Un message soumis en SMTP qui
+> restait ICI passait donc avec un `From:` d'autrui — `250`, là où la même
+> tentative en HTTP rendait `400`.
 >
-> ```
-> AUTH PLAIN (jean)              235 2.7.0 Authentication successful
-> RCPT TO:<destinataire@ailleurs.test>  … From: <collegue@…>  554 5.7.1 Message rejected
-> RCPT TO:<jean@essai.test>             … From: <collegue@…>  250 2.0.0 Message accepted
-> ```
+> La vérification a été remontée là où l'EN-TÊTE est complet, avant toute
+> écriture. Pas dans `finish` : le corps brut ne s'y accumule que pour les
+> sortants, parce que retenir en mémoire tout message entrant est ce que C3
+> interdit. L'en-tête, lui, est déjà retenu — et le `From:` n'est nulle part
+> ailleurs.
 >
-> Le motif du refus, tel qu'il est écrit, est la SIGNATURE — « ce qu'on refuse
-> d'émettre n'a pas à être complété, et surtout pas signé » —, et un message qui
-> ne sort pas n'est pas signé. Mais la règle énoncée est plus large que cela, et
-> `delivery.rs` prévient lui-même : « deux règles à deux endroits finissent par ne
-> plus dire la même chose ». C'est arrivé — même lecture, portées différentes.
->
-> **Étendre la règle SMTP à la remise locale changerait ce que le serveur
-> accepte**, et cela ne se décide pas en passant : c'est une question posée à
-> l'exploitant, pas une correction de prose.
+> **UNE GARDE QUI EN FAISAIT DEUX A DÛ ÊTRE SÉPARÉE EN DEUX.** Le même appel
+> interdisait aussi à une transaction ANONYME d'émettre : `ecrit_bien_en_son_nom`
+> rend `false` faute de compte, et c'est ce `false`-là qui empêchait un pair non
+> authentifié de faire relayer son courrier. En remontant l'appel, on l'a
+> emporté — un essai l'a dit aussitôt : « une transaction anonyme a émis ». Les
+> deux propriétés vivent désormais séparément, et disent chacune son nom.
 >
 > **Ce qu'une soumission oublie, il le complète** (RFC 6409 §8) : `Date:` — l'un
 > des deux seuls champs que RFC 5322 rend obligatoires — et `Message-ID:`, sans
