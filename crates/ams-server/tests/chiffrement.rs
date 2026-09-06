@@ -541,6 +541,17 @@ fn une_cle_dkim_lisible_par_tous_empeche_le_demarrage() {
     assert!(dit.contains("220 "), "{dit}");
 }
 
+/// Réécrit une configuration en y posant une écoute POP3 en TLS implicite.
+fn reecrire_avec_pop3_implicite(config: &PathBuf, port: u16) {
+    let brut = std::fs::read(config).expect("lecture");
+    let mut lue = ams_config::decode(&brut).expect("configuration lisible");
+    lue.pop3_listeners = vec![ams_config::Listener {
+        address: format!("127.0.0.1:{port}"),
+        implicit_tls: true,
+    }];
+    std::fs::write(config, ams_config::encode(&lue).expect("encodable")).expect("écriture");
+}
+
 /// Réécrit une configuration en y posant une écoute IMAP en TLS implicite.
 fn reecrire_avec_imap(config: &PathBuf, port: u16) {
     let brut = std::fs::read(config).expect("lecture");
@@ -678,6 +689,124 @@ fn un_client_curl_releve_le_courrier() {
     assert!(
         message.contains("le corps que curl doit relire"),
         "curl doit relire le corps : {message}"
+    );
+}
+
+/// **LE MÊME CLIENT TIERS, SUR L'AUTRE PORTE.**
+///
+/// `libcurl` parle POP3 comme il parle IMAP, et avec les mêmes idées venues
+/// d'ailleurs. Ce qu'il exerce ici : `LIST`, qui rend un numéro et une TAILLE
+/// par message, et `RETR`, qui rend le message entier.
+///
+/// La taille compte : c'est la seule réponse de ce protocole que le client peut
+/// confronter à ce qu'il reçoit ensuite. Un serveur qui annoncerait autre chose
+/// que ce qu'il livre ferait échouer les clients qui préallouent.
+#[test]
+fn un_client_curl_releve_le_courrier_en_pop3() {
+    let atelier = atelier("interop-curl-pop3");
+    let Some((cert, cle)) = paire(&atelier.0) else {
+        panic!("{SANS_OPENSSL}");
+    };
+    if Command::new("curl").arg("--version").output().is_err() {
+        eprintln!("IGNORÉ : `curl` est absent — cet essai n'a RIEN éprouvé.");
+        return;
+    }
+
+    let magasin = atelier.0.join("comptes.bin");
+    let empreinte = ams_auth::hash_password(b"ouvre-toi", b"seize octets ici").expect("hachable");
+    let comptes = vec![ams_auth::Account {
+        login: String::from("jean"),
+        hash: empreinte,
+        addresses: vec![String::from("jean@example.com")],
+    }];
+    std::fs::write(
+        &magasin,
+        ams_config::encode_accounts(&comptes).expect("encodable"),
+    )
+    .expect("écriture");
+    std::fs::set_permissions(&magasin, std::fs::Permissions::from_mode(0o600))
+        .expect("permissions");
+
+    let port_smtp = port_libre();
+    let port_pop3 = port_libre();
+    let config = configuration_pop3(
+        &atelier,
+        port_smtp,
+        Tls {
+            certificate_chain_path: cert.display().to_string(),
+            private_key_path: cle.display().to_string(),
+        },
+        &magasin.display().to_string(),
+        &format!("127.0.0.1:{port_pop3}"),
+    );
+    // Le 995 : la poignée de main AVANT le premier octet, comme `curl` l'attend
+    // d'une URL `pop3s`.
+    reecrire_avec_pop3_implicite(&config, port_pop3);
+    let mut serveur = lancer(&config, port_smtp);
+
+    let mut flux = joindre(&mut serveur, port_smtp);
+    flux.set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("délai");
+    flux.write_all(
+        concat!(
+            "EHLO client.example\r\n",
+            "MAIL FROM:<expediteur@ailleurs.example>\r\n",
+            "RCPT TO:<jean@example.com>\r\n",
+            "DATA\r\n",
+            "Subject: pour curl en pop3\r\n\r\nle corps que curl doit relever\r\n.\r\n",
+            "QUIT\r\n"
+        )
+        .as_bytes(),
+    )
+    .expect("écriture");
+    let dit = lire_jusqu_au_conge(&mut flux, &mut serveur);
+    assert!(
+        dit.contains("250 2.0.0"),
+        "le message doit être accepté : {dit}"
+    );
+
+    let appeler = |chemin: &str| -> String {
+        let sortie = Command::new("curl")
+            .arg("-s")
+            .arg("--insecure")
+            .args(["-u", "jean:ouvre-toi"])
+            .arg(format!("pop3s://127.0.0.1:{port_pop3}/{chemin}"))
+            .output()
+            .expect("curl s'exécute");
+        String::from_utf8_lossy(&sortie.stdout).into_owned()
+    };
+
+    // ── `LIST` : un numéro et une taille ────────────────────────────────────
+    let liste = appeler("");
+    let premiere = liste.lines().next().unwrap_or_default().to_string();
+    let taille: usize = premiere
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or_default()
+        .parse()
+        .unwrap_or(0);
+    assert!(
+        premiere.starts_with("1 ") && taille > 0,
+        "curl doit lire un numéro et une taille : {liste}"
+    );
+
+    // ── `RETR` : le message entier, et la taille annoncée était la bonne ────
+    let message = appeler("1");
+    assert!(
+        message.contains("Subject: pour curl en pop3"),
+        "curl doit relever le sujet : {message}"
+    );
+    assert!(
+        message.contains("le corps que curl doit relever"),
+        "curl doit relever le corps : {message}"
+    );
+    // **LA TAILLE ANNONCÉE EST CELLE DU MESSAGE**, aux fins de ligne près : un
+    // client qui préalloue sur cette valeur ne doit pas se retrouver court.
+    assert!(
+        message.len() <= taille,
+        "`LIST` annonce {taille} octets et `RETR` en rend {} : un client qui \
+         préalloue serait pris de court",
+        message.len()
     );
 }
 
