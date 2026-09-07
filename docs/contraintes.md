@@ -13738,3 +13738,81 @@ ambiguïté. Il imprime désormais « 12 au total », puis l'INBOX séparément.
 **Une procédure écrite n'est pas une procédure éprouvée.** Celle-ci l'a été sur
 un banc de dix-huit messages ; elle aurait échoué sur des milliers, et personne
 ne l'aurait compris le jour même.
+
+
+## Deux serveurs qui rangent en Maildir++ ne nomment pas leurs dossiers pareil
+
+Le banc de la répétition portait des dossiers `Sent`, `Drafts`, `Trash` — tous
+en ASCII. Une vraie boîte n'a pas cette politesse. J'en ai donc monté une comme
+Dovecot la laisse : des espaces, des dossiers imbriqués, ses fichiers de service,
+et des accents.
+
+**Ce qui passe sans rien faire**, et c'est la bonne nouvelle : les noms à espaces
+(`Mon Dossier`), la hiérarchie Maildir++ (`.Sent.2024` devient `Sent/2024`, avec
+`\HasChildren` sur le parent), et les fichiers que Dovecot laisse traîner —
+`dovecot-uidlist`, `dovecot.index.cache`, `maildirfolder` — qui ne gênent rien.
+
+**Ce qui ne passe pas** : les accents.
+
+    Dovecot          .&AMk-t&AOk--2025      UTF-7 modifié (RFC 3501 §5.1.3)
+    air-mail-server  .Été-2025              UTF-8
+
+Les deux conventions sont défendables, et l'IMAP des deux serveurs est juste :
+c'est le STOCKAGE qui diffère. Copié tel quel, le dossier ressort chez le client
+sous `&-AMk-t&-AOk--2025` — l'esperluette de Dovecot ayant été échappée une
+seconde fois. Le courrier est là, le dossier est là, et l'utilisateur ne retrouve
+plus ses affaires.
+
+**Pour un domaine francophone, ce n'est pas un cas limite.** « Éléments
+envoyés », « Reçus », « Archivé », « Indésirables » : la moitié des dossiers d'une
+boîte réelle.
+
+Mesuré des deux côtés, et pas déduit d'un seul : on a demandé au serveur de
+CRÉER `&AMk-t&AOk--2025bis` par IMAP, et regardé ce qu'il écrivait — `.Été-2025bis`.
+
+### Et les abonnements, qui se perdaient aussi
+
+Même format — un nom par ligne — mais `subscriptions` chez Dovecot et
+`ams-abonnements` ici, avec `.` comme séparateur d'un côté et `/` de l'autre.
+Sans conversion, `LSUB` ne rend rien. Les clients réglés pour n'afficher QUE les
+dossiers abonnés — c'est le défaut de plusieurs — les montrent tous disparus.
+
+`docs/migration/renommer-dossiers.py` fait les deux. Son décodeur d'UTF-7 modifié
+a été éprouvé contre un ENCODEUR écrit séparément, sur neuf noms dont
+l'esperluette littérale (`&-`) : l'aller-retour tient. Éprouver un décodeur avec
+son propre encodeur ne dirait rien — les deux se tromperaient ensemble.
+
+**Un attendu de mon banc était faux**, et c'est le décodeur qui avait raison :
+j'avais écrit que `Re&AME-us` donnait `Reçus`, alors que `&AME-` est `Á` et que
+`ç` s'écrit `&AOc-`. C'est en calculant les cas plutôt qu'en les devinant que
+l'épreuve est devenue une épreuve.
+
+### Le piège d'ordonnancement que cela crée
+
+`bascule.md` faisait, en phase 1 :
+
+    rsync -aH --delete /var/vmail/ /var/vmail-ams/
+
+Ce `--delete` EFFACE les répertoires renommés en UTF-8 et remet ceux de Dovecot.
+Les traductions de la phase 0 sont défaites, et cela ne se voit qu'une fois les
+clients reconnectés — c'est-à-dire trop tard.
+
+La séquence porte donc une étape 3bis qui retraduit, et le script est fait pour
+être relancé : il ne touche que ce qui reste à traduire. Un outil idempotent est
+ce qui permet d'en remettre un appel « au cas où » sans y réfléchir.
+
+### Et `pkill -f` a tué mon shell une TROISIÈME fois
+
+Dans la commande même où je consignais que la leçon n'était « pas outillée ».
+Le motif `-f` compare la LIGNE DE COMMANDE, et la ligne qui lance `pkill` porte
+le motif : le shell se tue lui-même, la commande suivante ne s'exécute jamais, et
+l'on croit avoir fait ce qu'on n'a pas fait.
+
+`ps -C air-mail-server` compare le NOM DU PROCESSUS, qui est `air-mail-server`
+pour le serveur et `bash` pour le shell. Il ne peut pas se prendre lui-même.
+
+Trois occurrences, deux consignations, et la troisième pendant que j'écrivais la
+deuxième. **Ce qu'il fallait, ce n'était pas une note de plus** : c'était cesser
+d'employer la forme dangereuse. La règle tient en une ligne — pour arrêter un
+processus qu'on a lancé, on le désigne par son NOM ou par le PID qu'on a gardé,
+jamais par un motif qui décrit aussi la commande qui l'arrête.

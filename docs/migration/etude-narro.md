@@ -263,6 +263,13 @@ Ce qu'il faut en tirer :
 - `bascule.md` — la marche à suivre, et le retour en arrière.
 - `pour-les-utilisateurs.md` — ce qui change pour eux, à leur transmettre.
 - `verifier.sh` — l'audit qui décide si l'on bascule ou non.
+- `renommer-dossiers.py` — **les noms de dossiers ne se copient pas tels
+  quels**. Dovecot les écrit en UTF-7 modifié sur le disque (`.&AMk-t&AOk--2025`),
+  air-mail-server en UTF-8 (`.Été-2025`). Sans traduction, « Éléments envoyés »
+  devient « &AMk-l&AOk-ments envoy&AOk-s » chez le client — pour un domaine
+  francophone, ce n'est pas un cas limite. Il traduit aussi `subscriptions` en
+  `ams-abonnements`, sans quoi `LSUB` ne rend rien et les clients réglés pour
+  n'afficher que les dossiers abonnés les montrent tous disparus.
 - `rapatrier.sh` — le retour en arrière du courrier, **sans doublon**. La
   commande `rsync --ignore-existing` que `bascule.md` prescrivait d'abord
   dupliquait tout message dont un drapeau avait bougé pendant la fenêtre : lire

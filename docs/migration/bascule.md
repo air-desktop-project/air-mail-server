@@ -91,6 +91,29 @@ créent selon la décision de §5 :
 Le mot de passe se lit sur l'entrée standard, **jamais sur la ligne de
 commande** : ce que `ps` affiche, tout le monde le lit.
 
+### 0.4bis Traduire les noms de dossiers, et les abonnements
+
+**Les deux serveurs ne nomment pas leurs dossiers de la même façon sur le
+disque.** Dovecot écrit `.&AMk-t&AOk--2025` (UTF-7 modifié, RFC 3501 §5.1.3) ;
+air-mail-server écrit `.Été-2025` (UTF-8). Copié tel quel, un dossier accentué
+ressort chez le client sous son nom ENCODÉ : le courrier est là, le dossier est
+là, et l'utilisateur ne retrouve plus ses affaires.
+
+Pour un domaine francophone — « Éléments envoyés », « Reçus », « Archivé » — ce
+n'est pas un cas limite, c'est le cas courant.
+
+Les abonnements se perdent de la même manière : Dovecot les écrit dans
+`subscriptions` avec `.` comme séparateur, air-mail-server dans
+`ams-abonnements` avec `/`. Sans conversion, `LSUB` ne rend rien, et les clients
+réglés pour n'afficher que les dossiers abonnés — c'est le défaut de plusieurs —
+les montrent tous disparus.
+
+    python3 renommer-dossiers.py /var/vmail-ams              # à blanc
+    python3 renommer-dossiers.py /var/vmail-ams --pour-de-vrai
+
+Il ne touche pas aux noms purement ASCII, et refuse de renommer si la cible
+existe déjà.
+
 ### 0.5 L'audit qui décide
 
     bash verifier.sh /var/vmail-ams /var/vmail
@@ -154,6 +177,15 @@ décidera si l'on recommence un autre jour.
 
     # 3. Le delta : ce qui est arrivé depuis la copie de 0.4.
     sudo rsync -aH --delete /var/vmail/ /var/vmail-ams/
+    sudo chown -R ams:ams /var/vmail-ams
+
+    # 3bis. **LE `--delete` VIENT DE DÉFAIRE LES RENOMMAGES DE 0.4bis.**
+    #       Il a effacé les répertoires en UTF-8 et remis ceux de Dovecot. On
+    #       retraduit donc, et le script est fait pour être relancé : il ne
+    #       touche que ce qui reste à traduire.
+    #       OUBLIER CETTE LIGNE rend tous les dossiers accentués illisibles,
+    #       et cela ne se verra qu'une fois les clients reconnectés.
+    python3 renommer-dossiers.py /var/vmail-ams --pour-de-vrai
     sudo chown -R ams:ams /var/vmail-ams
 
     # 4. L'audit, une dernière fois. S'il refuse : ON REMONTE (voir plus bas).
