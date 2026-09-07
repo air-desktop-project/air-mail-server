@@ -147,6 +147,8 @@ struct Entree {
     expediteur_qualifie: bool,
     /// Exige-t-on un destinataire pleinement qualifié ?
     destinataire_qualifie: bool,
+    /// Exige-t-on que le domaine de l'expéditeur existe ?
+    domaine_expediteur: bool,
 }
 
 /// Traduit des écoutes tirées de l'entrée en ce que la configuration retient.
@@ -178,6 +180,7 @@ fuzz_target!(|entree: Entree| {
         require_fqdn_helo: entree.helo_qualifie,
         require_fqdn_sender: entree.expediteur_qualifie,
         require_fqdn_recipient: entree.destinataire_qualifie,
+        require_sender_domain: entree.domaine_expediteur,
         maildir: entree.maildir.clone(),
         hosted: entree.hosted.clone(),
         max_recipients: entree.max_recipients,

@@ -381,6 +381,8 @@ pub struct Configuration {
     pub require_fqdn_sender: bool,
     /// Exige-t-on un domaine de DESTINATAIRE pleinement qualifié ?
     pub require_fqdn_recipient: bool,
+    /// Exige-t-on que le domaine de l'EXPÉDITEUR existe dans le DNS ?
+    pub require_sender_domain: bool,
     /// La file d'attente du serveur.
     pub queue: Queue,
     /// MTA-STS (RFC 8461).
@@ -883,6 +885,7 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
         require_fqdn_helo: lu.get_require_fqdn_helo(),
         require_fqdn_sender: lu.get_require_fqdn_sender(),
         require_fqdn_recipient: lu.get_require_fqdn_recipient(),
+        require_sender_domain: lu.get_require_sender_domain(),
         queue,
         mtasts,
         tlsrpt,
@@ -1023,6 +1026,7 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
         ecrit.set_require_fqdn_helo(config.require_fqdn_helo);
         ecrit.set_require_fqdn_sender(config.require_fqdn_sender);
         ecrit.set_require_fqdn_recipient(config.require_fqdn_recipient);
+        ecrit.set_require_sender_domain(config.require_sender_domain);
         {
             let mut emission = ecrit.reborrow().init_relay();
             emission.set_enabled(config.relay.enabled);
@@ -1229,6 +1233,7 @@ mod tests {
             require_fqdn_helo: false,
             require_fqdn_sender: false,
             require_fqdn_recipient: false,
+            require_sender_domain: false,
             // Les trois écoutes d'un serveur réel : le `25` et le `587` en
             // `STARTTLS`, le `465` en TLS implicite.
             smtp_listeners: vec![
@@ -2124,6 +2129,22 @@ mod tests {
     /// Une seule des deux posée doit se relire seule : chez Postfix elles vivent
     /// dans deux listes distinctes, et un exploitant qui n'en pose qu'une doit
     /// obtenir exactement celle-là.
+    /// L'exigence d'existence du domaine traverse le format, et se relit faux
+    /// quand elle est absente.
+    #[test]
+    fn l_exigence_de_domaine_expediteur_traverse_le_format() {
+        let config = Configuration {
+            require_sender_domain: true,
+            ..exemple()
+        };
+        let relue = decode(&encode(&config).expect("encodable")).expect("relisible");
+        assert!(relue.require_sender_domain);
+        assert_eq!(relue, config);
+
+        let muette = decode(&encode(&exemple()).expect("encodable")).expect("relisible");
+        assert!(!muette.require_sender_domain);
+    }
+
     #[test]
     fn les_exigences_d_enveloppe_traversent_le_format() {
         for (expediteur, destinataire) in [(true, true), (true, false), (false, true)] {

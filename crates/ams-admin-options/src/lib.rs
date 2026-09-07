@@ -171,6 +171,8 @@ pub struct Options {
     pub require_fqdn_sender: bool,
     /// Refuser un `RCPT TO:` dont le domaine n'est pas pleinement qualifié.
     pub require_fqdn_recipient: bool,
+    /// Refuser un `MAIL FROM:` dont le domaine n'existe pas dans le DNS.
+    pub require_sender_domain: bool,
     /// Le RELAIS DE SORTIE, sous la forme `hôte:port`.
     ///
     /// Vide veut dire « remise directe », et c'est le défaut.
@@ -296,6 +298,7 @@ impl Default for Options {
             require_fqdn_helo: false,
             require_fqdn_sender: false,
             require_fqdn_recipient: false,
+            require_sender_domain: false,
             relayhost: None,
             relayhost_implicit_tls: false,
             relayhost_user: None,
@@ -423,6 +426,7 @@ impl Options {
             require_fqdn_helo: self.require_fqdn_helo,
             require_fqdn_sender: self.require_fqdn_sender,
             require_fqdn_recipient: self.require_fqdn_recipient,
+            require_sender_domain: self.require_sender_domain,
             relay: ams_config::Relay {
                 enabled: self.relay,
                 relayhost: relais.0,
@@ -654,6 +658,34 @@ OPTIONS DE `config write`
 
     Un littéral d'adresse est qualifié, ici comme au `HELO`. FAUX PAR DÉFAUT,
     toutes les deux.
+
+    --require-sender-domain             REFUSER un `MAIL FROM:` dont le domaine
+                                        N'EXISTE PAS dans le DNS
+
+    `reject_unknown_sender_domain` chez Postfix. §5.1 de RFC 5321 dit où
+    chercher : un `MX` d'abord, et à défaut le nom lui-même — « an implicit MX
+    RR [...] pointing to that host ». Un domaine qui n'a ni l'un ni l'autre ne
+    peut recevoir ni réponse ni rapport de non-remise.
+
+    CE CONTRÔLE EST INDÉPENDANT DE SPF. Les deux voyagent par la même
+    interrogation DNS, au même moment, mais ne se commandent pas : éteindre SPF
+    n'éteint pas celui-ci.
+
+    QUATRE RÉPONSES, ET ELLES NE SE REPLIENT PAS SUR DEUX :
+      - un `MX`, ou à défaut un `A`/`AAAA` : le courrier passe ;
+      - ni l'un ni l'autre : `550 5.1.8`, permanent ;
+      - un `MX` NUL (RFC 7505) : `550 5.7.27`. Le domaine EXISTE et déclare ne
+        rien recevoir ; cette RFC a enregistré ce code pour ce refus-là ;
+      - une PANNE de résolution : `451 4.4.3`, temporaire. C'est NOTRE incident,
+        pas celui de l'émetteur — refuser pour de bon perdrait du courrier
+        légitime, quand ajourner le fait revenir.
+
+    Les mêmes exemptions que ci-dessus : `<>` n'a pas de domaine d'expéditeur —
+    son `HELO` n'en tient pas lieu —, un littéral d'adresse EST le système et ne
+    se cherche pas, et un pair authentifié n'est pas concerné.
+
+    IL FAUT UN RÉSOLVEUR : sans `--resolver`, la vérification ne peut pas avoir
+    lieu, et tout message est AJOURNÉ plutôt qu'accepté sans contrôle.
 
     LA FILE DE RÉÉMISSION SORTANTE
     --relay                             émettre pour les comptes authentifiés
@@ -1376,6 +1408,7 @@ where
             "--require-fqdn-helo" => options.require_fqdn_helo = true,
             "--require-fqdn-sender" => options.require_fqdn_sender = true,
             "--require-fqdn-recipient" => options.require_fqdn_recipient = true,
+            "--require-sender-domain" => options.require_sender_domain = true,
             "--relayhost" => options.relayhost = Some(valeur()?),
             "--relayhost-implicit-tls" => options.relayhost_implicit_tls = true,
             "--relayhost-user" => options.relayhost_user = Some(valeur()?),
@@ -1573,6 +1606,7 @@ where
         ));
     }
     valider_le_relais(&options)?;
+    valider_les_controles_dns(&options)?;
 
     // L'INVERSE N'EST PAS REFUSÉ, et c'est délibéré : nommer un dossier sans
     // rien émettre ne promet rien à personne, et permet de le préparer avant.
@@ -1640,6 +1674,33 @@ fn nombre(brute: &str) -> Result<u32, ArgError> {
 /// # Errors
 ///
 /// [`ArgError`] pour chacune des cinq configurations qui n'ont pas de sens.
+/// Un contrôle qui ne peut pas AVOIR LIEU est une panne de courrier.
+///
+/// # POURQUOI CE REFUS, ET POURQUOI ICI
+///
+/// `--require-sender-domain` interroge le DNS à chaque `MAIL FROM:`. Sans
+/// résolveur, l'interrogation n'a jamais lieu — et le produit AJOURNE plutôt que
+/// d'accepter sans contrôle, ce qui est la bonne décision au détail près qu'elle
+/// s'appliquerait alors à TOUT LE COURRIER.
+///
+/// Un serveur qui ajourne tout n'est pas un serveur durci, c'est un serveur en
+/// panne, et rien dans son journal ne dirait qu'il manque une option. On refuse
+/// donc ici, à l'écriture de la configuration, où le message peut encore nommer
+/// ce qui manque.
+///
+/// # Errors
+///
+/// [`ArgError`] si l'exigence est posée sans résolveur.
+fn valider_les_controles_dns(options: &Options) -> Result<(), ArgError> {
+    if options.require_sender_domain && options.resolvers.is_empty() {
+        return Err(ArgError::new(
+            "`--require-sender-domain` demande `--resolver` : sans résolveur, l'existence du \
+             domaine ne peut pas être vérifiée, et TOUT message serait ajourné (451)",
+        ));
+    }
+    Ok(())
+}
+
 fn valider_le_relais(options: &Options) -> Result<(), ArgError> {
     // ── LE RELAIS DE SORTIE ─────────────────────────────────────────────────
     //
@@ -3392,6 +3453,40 @@ mod tests {
     /// serveur ne doit se mettre à en refuser que parce que quelqu'un l'a
     /// écrit. L'essai tient donc les deux moitiés : posé, il vaut vrai ; absent,
     /// il vaut faux, et la configuration écrite le porte jusqu'au fichier.
+    /// **`--require-sender-domain` SANS `--resolver` EST REFUSÉ.**
+    ///
+    /// Sans résolveur, l'existence du domaine ne peut pas être vérifiée, et le
+    /// produit ajourne plutôt que d'accepter sans contrôle. C'est la bonne
+    /// décision — au détail près qu'elle s'appliquerait à TOUT le courrier.
+    ///
+    /// Un serveur qui ajourne tout n'est pas durci, il est en panne, et rien
+    /// dans son journal ne dirait qu'il manque une option. Le refus a lieu ici,
+    /// où le message peut encore nommer ce qui manque.
+    #[test]
+    fn le_controle_de_domaine_exige_un_resolveur() {
+        // **UNE TRANCHE, ET NON UN TABLEAU LITTÉRAL.** `parse` est générique :
+        // `parse(["…"])` l'instancierait sur `[&str; 1]`, une monomorphisation
+        // NEUVE dont tout le corps compterait comme non couvert. Le 100 % de C2
+        // tomberait, et pour une raison qui n'a rien à voir avec ce qu'on
+        // éprouve ici. Les autres essais passent tous par `&[&str]`.
+        let arguments: &[&str] = &["--require-sender-domain"];
+        let faute = parse(arguments).expect_err("refusé");
+        assert!(faute.message.contains("--resolver"), "{}", faute.message);
+        assert!(
+            faute.message.contains("ajourné"),
+            "le message doit dire CE QUI ARRIVERAIT : {}",
+            faute.message
+        );
+
+        // Avec un résolveur, il passe.
+        let bon = ecrire(&["--require-sender-domain", "--resolver", "127.0.0.53:53"]);
+        assert!(bon.require_sender_domain);
+        assert!(bon.en_configuration().require_sender_domain);
+
+        // Et sans l'exigence, l'absence de résolveur ne gêne personne.
+        assert!(!ecrire(&[]).require_sender_domain);
+    }
+
     /// Les deux exigences d'enveloppe se posent, séparément, et ne s'inventent
     /// pas.
     ///

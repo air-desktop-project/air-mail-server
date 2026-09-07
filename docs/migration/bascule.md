@@ -121,6 +121,7 @@ Le paquet **n'active ni ne démarre le service** — c'est délibéré, et
         --queue-expire-seconds 86400 \
         --require-fqdn-helo \
         --require-fqdn-sender --require-fqdn-recipient \
+        --require-sender-domain \
         --listen-http 0.0.0.0:8443 \
         --dkim-selector mail --dkim-key /var/lib/rspamd/dkim/narro.ch.mail.key \
         --resolver 127.0.0.53 \
@@ -187,9 +188,14 @@ domaine reste joignable — c'est le compte `contact`, qui porte `postmaster@`.
 Les cinq comptes, eux, sont AUTHENTIFIÉS quand ils émettent, donc exemptés :
 rien de ce qu'ils envoient aujourd'hui ne se met à être refusé.
 
-Il reste un contrôle que Postfix applique et que le produit ne sait pas encore
-rendre — `reject_unknown_sender_domain`, qui demande un aller-retour DNS.
-`docs/plan-anti-abus.md` le porte, avec les listes noires.
+`--require-sender-domain` est le quatrième, et c'est
+`reject_unknown_sender_domain`. Il exige un résolveur — `--resolver 127.0.0.53`
+est déjà là, l'inventaire l'ayant relevé — et `config write` REFUSE la
+configuration s'il manque, plutôt que d'ajourner tout le courrier en silence.
+
+Les six contrôles d'enveloppe de Postfix sont donc tenus. Ce qui reste au plan —
+les listes noires DNS — ne restaure rien : c'est la seule pièce qui change
+vraiment le comportement du site, et elle attendra APRÈS la bascule.
 
 | | |
 |---|---|

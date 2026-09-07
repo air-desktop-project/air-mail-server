@@ -14361,3 +14361,78 @@ La première écriture ne faisait varier que le sujet, et donnait « un EXPÉDIT
 et un DESTINATAIRE non qualifié EST refusé ». C'est la proposition ENTIÈRE qui
 varie désormais. Un message que l'exploitant doit relire pour s'assurer de ce
 qu'il dit est un message qui a échoué.
+
+
+## Deux politiques qui voyagent ensemble sans se commander
+
+SPF et l'existence du domaine de l'expéditeur demandent le MÊME aller-retour DNS
+au MÊME moment, celui du `MAIL FROM:`. Elles partagent donc une action —
+`Action::CheckSender` —, et c'est tout ce qu'elles partagent.
+
+**Le piège était déjà posé.** `retenir_l_expediteur` rendait `false` dès que la
+politique SPF valait `SenderPolicy::Ignore`. Comme cette fonction décide seule si
+l'action part, éteindre SPF aurait éteint le contrôle de domaine **en silence** :
+l'exploitant aurait posé `--require-sender-domain`, lu sa configuration, vu son
+message au démarrage — et rien n'aurait jamais été vérifié.
+
+C'est le pire des états. Un contrôle absent se remarque le jour où l'on en a
+besoin ; un contrôle qu'on croit posé fait cesser de chercher.
+
+Il a été trouvé en LISANT la fonction avant de l'étendre, et non en éprouvant
+quoi que ce soit — aucun essai existant ne pouvait le montrer, puisque le
+contrôle n'existait pas encore.
+
+### Deux champs, et non un seul
+
+`domaine_verifie` porte l'identité SPF. Pour un chemin nul, elle vaut le `HELO`
+(RFC 7208 §2.4) — ce qui est juste pour SPF, et faux pour l'existence : `<>` n'a
+pas de domaine d'expéditeur, et son `HELO` n'en tient pas lieu.
+
+Un seul champ pour les deux aurait donc fait vérifier l'existence du `HELO` d'un
+avis de non-remise, et l'aurait refusé pour une faute qui n'est pas la sienne —
+alors que c'est précisément le message qu'on ne doit jamais perdre. D'où
+`verifier_le_domaine`, et `sender_domain()` à côté de `sender_identity()`.
+
+### Quatre réponses, et elles ne se replient pas sur deux
+
+    un `MX`, ou à défaut un `A`/`AAAA`  →  passe
+    ni l'un ni l'autre                  →  550 5.1.8
+    un `MX` NUL (RFC 7505)              →  550 5.7.27
+    une PANNE de résolution             →  451 4.4.3
+
+Le repli sur `A`/`AAAA` n'est pas facultatif : §5.1 de RFC 5321 le prescrit, et
+la plupart des petits domaines n'ont pas de `MX`. Refuser sans avoir regardé
+écarterait un courrier parfaitement remettable.
+
+Le `MX` nul n'est ni une absence ni une panne : le domaine EXISTE et déclare ne
+rien recevoir. RFC 7505 a enregistré `X.7.27` pour ce refus-là, avec son texte
+d'exemple — « Sender address has null MX » —, et §4.2 avertit que publier un `MX`
+nul sur un domaine qu'on emploie en `MAIL FROM:` « risks having its mail
+rejected ».
+
+Et confondre la panne avec l'un des deux coûterait cher dans les deux sens :
+replier sur l'absence perdrait du courrier le jour où le résolveur bronche,
+replier sur l'existence laisserait passer ce qu'on voulait refuser.
+
+### Un contrôle qui ne peut pas avoir lieu est une panne de courrier
+
+Sans résolveur, l'interrogation n'a jamais lieu, et le produit ajourne plutôt que
+d'accepter sans contrôle. C'est la bonne décision, au détail près qu'elle
+s'appliquerait à **tout le courrier**.
+
+`config write` refuse donc `--require-sender-domain` sans `--resolver`, là où le
+message peut encore nommer ce qui manque. Le contrôle vit dans sa propre
+fonction : le poser dans `valider_le_relais` aurait fait valider à cette
+fonction autre chose que ce que son nom annonce, ce qui est le début exact de la
+dérive que ce document passe son temps à défaire.
+
+### Et l'essai faussait sa propre mesure
+
+`parse(["--require-sender-domain"])` instancie la fonction générique sur
+`[&str; 1]` : une monomorphisation NEUVE, dont tout le corps compte comme non
+couvert. La couverture est tombée à 99,99 % pour une raison sans aucun rapport
+avec ce que l'essai éprouve.
+
+C'est la deuxième fois que ce piège se referme sur nous — la première avait
+demandé de réécrire une table d'essai de `Vec<&str>` en `&[&str]`. La règle tient
+en une ligne : **dans ce fichier, on appelle `parse` avec une tranche**.

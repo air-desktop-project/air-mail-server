@@ -204,6 +204,7 @@ fn configuration_complete(
         require_fqdn_helo: false,
         require_fqdn_sender: false,
         require_fqdn_recipient: false,
+        require_sender_domain: false,
         // Une seule écoute, en `STARTTLS` : la liste vide dirait la même
         // chose, et l'écrire ici la rend lisible.
         smtp_listeners: Vec::new(),

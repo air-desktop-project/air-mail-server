@@ -7,8 +7,8 @@ use ams_guard::{Event as GuardEvent, Source, Verdict};
 use ams_mime::{AUTHRES_RESERVE, RECEIVED_MAX, RETURN_PATH_MAX};
 use ams_proto_smtp::{ChunkEvent, DataEvent};
 use ams_session::{
-    Action, Config, DataOutcome, Identity as SpfIdentity, Policy, RECEIVED_SPF_MAX, SenderPolicy,
-    SmtpSession,
+    Action, Config, DataOutcome, Identity as SpfIdentity, Policy, RECEIVED_SPF_MAX, SenderDomain,
+    SenderPolicy, SmtpSession,
 };
 use ams_spf::Verdict as SpfVerdict;
 use rustls::ServerConfig;
@@ -687,7 +687,8 @@ where
             // compose la réponse — le vocabulaire de sortie reste clos.
             Action::CheckSender => {
                 let verdict = verifier_l_expediteur(service, session, source).await;
-                let tour = session.sender_checked(verdict, &mut etat.sortie)?;
+                let domaine = verifier_le_domaine(service, session).await;
+                let tour = session.sender_checked(verdict, domaine, &mut etat.sortie)?;
                 stream.write_all(tour.reply()).await?;
                 stream.flush().await?;
                 if tour.action() == Action::Close {
@@ -962,6 +963,32 @@ async fn verifier_l_expediteur<P: Policy>(
         // AJOURNE : un message ajourné revient, un message accepté en silence
         // aurait franchi une vérification qui n'a pas eu lieu.
         _ => SpfVerdict::TempError,
+    }
+}
+
+/// Le domaine de l'expéditeur existe-t-il ?
+///
+/// **DEUX POLITIQUES, UNE SEULE ACTION.** SPF et l'existence du domaine
+/// demandent le même aller-retour DNS au même moment, et la session ne rend
+/// qu'une action pour les deux. Elle dit LAQUELLE elle veut en rendant, ou non,
+/// un domaine à vérifier.
+///
+/// `NotChecked` quand elle n'en rend aucun : le contrôle n'était pas exigé, le
+/// pair est authentifié, le chemin est nul, ou le domaine est un littéral
+/// d'adresse. Affirmer « existe » dans ces cas-là serait affirmer ce qu'on n'a
+/// pas regardé.
+async fn verifier_le_domaine<P: Policy>(
+    service: &Service<'_>,
+    session: &SmtpSession<'_, P>,
+) -> SenderDomain {
+    match (service.spf.as_ref(), session.sender_domain()) {
+        (Some(verificateur), Some(domaine)) => verificateur.domaine_existe(domaine).await,
+        // La session réclame un contrôle que personne ne sait conduire — le
+        // serveur a été monté sans résolveur. **ON AJOURNE**, comme pour SPF :
+        // un message ajourné revient, un message accepté en silence aurait
+        // franchi une vérification qui n'a pas eu lieu.
+        (None, Some(_)) => SenderDomain::Unknown,
+        (_, None) => SenderDomain::NotChecked,
     }
 }
 

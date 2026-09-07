@@ -2304,9 +2304,51 @@ avant l'ouverture de la transaction, celui du destinataire avant le compte de
 destinataires — « trop de destinataires » invite à recommencer, quand une adresse
 non qualifiée ne le sera jamais.
 
-`docs/plan-anti-abus.md` dit ce qui reste, et dans quel ordre : l'existence du
-domaine de l'expéditeur, puis les listes noires DNS. Il dit aussi ce que ces
-contrôles valent honnêtement, et ce qu'ils n'attrapent pas.
+### Refuser un expéditeur dont le domaine n'existe pas
+
+```sh
+./target/release/air-mail-admin config write air-mail.conf \
+    --domain mail.example.com --hosted example.com \
+    --resolver 127.0.0.53:53 --require-sender-domain
+```
+
+`reject_unknown_sender_domain` chez Postfix. §5.1 de RFC 5321 dit où chercher :
+un `MX` d'abord, et à défaut le nom lui-même — « an implicit MX RR […] pointing
+to that host ». Un domaine qui n'a ni l'un ni l'autre ne peut recevoir ni la
+réponse du destinataire, ni le rapport de non-remise.
+
+**QUATRE RÉPONSES, ET ELLES NE SE REPLIENT PAS SUR DEUX :**
+
+| Ce que le DNS dit | Ce qu'on répond |
+| --- | --- |
+| un `MX`, ou à défaut un `A`/`AAAA` | le courrier passe |
+| ni l'un ni l'autre | `550 5.1.8` — permanent |
+| un `MX` **nul** (RFC 7505) | `550 5.7.27` — le domaine existe et ne reçoit rien |
+| une **panne** de résolution | `451 4.4.3` — temporaire |
+
+Le repli sur `A`/`AAAA` n'est pas facultatif : la plupart des petits domaines
+n'ont pas de `MX` et reçoivent sur leur `A`. Et confondre la panne avec l'absence
+coûterait cher dans les deux sens — perdre du courrier le jour où le résolveur
+bronche, ou laisser passer ce qu'on voulait refuser.
+
+**Ce contrôle est indépendant de SPF.** Les deux voyagent par la même
+interrogation DNS, au même moment, mais ne se commandent pas : éteindre SPF
+n'éteint pas celui-ci. C'était un piège réel — l'action qui les porte ne partait
+que si SPF était actif, si bien que le contrôle aurait été silencieusement inerte.
+
+**Le chemin nul est exempté, et son `HELO` n'en tient pas lieu.** SPF, lui, se
+rabat dessus (RFC 7208 §2.4). Confondre les deux ferait vérifier l'existence du
+`HELO` d'un avis de non-remise, et le refuserait pour une faute qui n'est pas la
+sienne — alors que c'est le message qu'on ne doit jamais perdre.
+
+**Sans `--resolver`, la configuration est REFUSÉE.** L'interrogation n'aurait
+jamais lieu, et le produit ajourne plutôt que d'accepter sans contrôle : tout le
+courrier serait ajourné. Un serveur qui ajourne tout n'est pas durci, il est en
+panne — et rien dans son journal ne dirait qu'il manque une option.
+
+`docs/plan-anti-abus.md` dit ce qui reste : les listes noires DNS, la seule pièce
+qui ne restaure rien et change vraiment le comportement d'un site. Il dit aussi
+ce que ces contrôles valent honnêtement, et ce qu'ils n'attrapent pas.
 
 ## Construire
 

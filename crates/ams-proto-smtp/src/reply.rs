@@ -288,6 +288,22 @@ impl Status {
         subject: 7,
         detail: 23,
     };
+    /// `5.7.27` — l'expéditeur publie un `MX` NUL (RFC 7505).
+    ///
+    /// Le domaine EXISTE, et déclare ne recevoir aucun courrier. Ce n'est donc
+    /// pas un `1.8` : rien n'est faux dans son système, il annonce simplement
+    /// qu'aucun rapport ne pourra lui revenir.
+    ///
+    /// RFC 7505 §4.2 le dit sans détour : « mail systems SHOULD NOT publish a
+    /// null MX record for domains that they use in RFC5321.MailFrom [...]
+    /// addresses. If a system nonetheless does so, it risks having its mail
+    /// rejected. » Et elle enregistre CE code pour ce refus-là, avec son texte :
+    /// « Sender address has null MX ».
+    pub const SENDER_NULL_MX: Self = Self {
+        class: 5,
+        subject: 7,
+        detail: 27,
+    };
     /// `4.4.3` — la résolution DNS n'a pas abouti.
     pub const DNS_TEMP: Self = Self {
         class: 4,

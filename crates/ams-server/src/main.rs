@@ -975,6 +975,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     let config = config
         .with_fqdn_sender(options.require_fqdn_sender)
         .with_fqdn_recipient(options.require_fqdn_recipient);
+    let config = config.with_sender_domain(options.require_sender_domain);
     if options.require_fqdn_sender || options.require_fqdn_recipient {
         // **LA PROPOSITION ENTIÈRE VARIE, ET PAS SEULEMENT LE SUJET.** Un
         // gabarit qui ne changeait que le nom donnait « un EXPÉDITEUR et un

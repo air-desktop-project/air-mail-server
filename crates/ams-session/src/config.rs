@@ -106,6 +106,8 @@ pub struct Config<'a> {
     require_fqdn_sender: bool,
     /// Exige-t-on un domaine de DESTINATAIRE pleinement qualifié ?
     require_fqdn_recipient: bool,
+    /// Exige-t-on que le domaine de l'expéditeur EXISTE dans le DNS ?
+    require_sender_domain: bool,
 }
 
 impl<'a> Config<'a> {
@@ -147,6 +149,7 @@ impl<'a> Config<'a> {
             require_fqdn_helo: false,
             require_fqdn_sender: false,
             require_fqdn_recipient: false,
+            require_sender_domain: false,
         })
     }
 
@@ -233,6 +236,29 @@ impl<'a> Config<'a> {
     #[must_use]
     pub fn require_fqdn_recipient(&self) -> bool {
         self.require_fqdn_recipient
+    }
+
+    /// Exige que le domaine de l'expéditeur EXISTE dans le DNS.
+    ///
+    /// `reject_unknown_sender_domain` chez Postfix. Un domaine sans `MX` ni
+    /// `A`/`AAAA` ne peut recevoir ni la réponse du destinataire, ni le rapport
+    /// de non-remise — et un expéditeur à qui l'on ne peut pas répondre est
+    /// presque toujours un expéditeur inventé.
+    ///
+    /// **CE CONTRÔLE EST INDÉPENDANT DE SPF.** Les deux voyagent par la même
+    /// action, parce qu'ils demandent le même aller-retour DNS au même moment ;
+    /// ils ne se commandent pas l'un l'autre. Éteindre SPF ne doit pas éteindre
+    /// celui-ci en silence.
+    #[must_use]
+    pub fn with_sender_domain(mut self, exige: bool) -> Self {
+        self.require_sender_domain = exige;
+        self
+    }
+
+    /// Le domaine de l'expéditeur doit-il exister ?
+    #[must_use]
+    pub fn require_sender_domain(&self) -> bool {
+        self.require_sender_domain
     }
 
     /// Le nom que le serveur annonce.

@@ -62,6 +62,7 @@ fn configuration(repertoire: &Path, clef: &str) -> PathBuf {
         require_fqdn_helo: false,
         require_fqdn_sender: false,
         require_fqdn_recipient: false,
+        require_sender_domain: false,
         domain: String::from("mail.example.com"),
         listen: String::from("127.0.0.1:0"),
         maildir: repertoire.join("boite").display().to_string(),

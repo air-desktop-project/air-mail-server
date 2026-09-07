@@ -31,7 +31,7 @@ Six, et voici ce que chacun devient :
 | `reject_non_fqdn_helo_hostname` | **fait** — `--require-fqdn-helo` |
 | `reject_non_fqdn_sender` | **fait** — `--require-fqdn-sender` |
 | `reject_non_fqdn_recipient` | **fait** — `--require-fqdn-recipient` |
-| `reject_unknown_sender_domain` | à écrire, demande le DNS (§3) |
+| `reject_unknown_sender_domain` | **fait** — `--require-sender-domain` |
 | `reject_unknown_recipient_domain` | **sans objet** — le serveur connaît ses domaines hébergés, et refuse déjà ce qui n'en est pas |
 
 Les deux autres lignes des mêmes restrictions ne sont pas des contrôles
@@ -71,8 +71,8 @@ qu'il ferait de mieux peut attendre le lendemain.
 
 1. Le `HELO`/`EHLO` qualifié — **fait**. Pur, aucune entrée-sortie.
 2. L'expéditeur et le destinataire qualifiés — **faits**, même prédicat.
-3. L'existence du domaine de l'expéditeur — un aller-retour DNS, sur une action
-   qui existe déjà.
+3. L'existence du domaine de l'expéditeur — **fait**. Un aller-retour DNS, sur
+   l'action qui existait déjà.
 4. Les listes noires DNS — la seule pièce qui n'est pas une restauration, et la
    seule qui introduise un point de panne extérieur. **Après la bascule.**
 
@@ -185,7 +185,7 @@ Les deux contrôles n'inventent donc rien : ils ajoutent un champ de verdict ou
 une action de la même famille, résolue au même endroit,
 `crates/ams-loop-tokio/src/connection.rs`.
 
-## 3. L'existence du domaine de l'expéditeur
+## 3. L'existence du domaine de l'expéditeur — FAIT
 
 L'équivalent de `reject_unknown_sender_domain`. Le domaine de la partie droite
 du `MAIL FROM:` doit avoir un `MX` ou, à défaut, un `A`/`AAAA` — RFC 5321 §5.1
@@ -196,14 +196,70 @@ Ce contrôle se greffe sur `Action::CheckSender`, **qui existe déjà et se
 déclenche déjà au bon moment**, celui du `MAIL FROM:`. C'est un champ de plus
 dans le verdict que la boucle rend, pas une action de plus.
 
-Trois règles :
+### UN PIÈGE, TROUVÉ EN LISANT `retenir_l_expediteur`
 
-- **`NXDOMAIN` refuse en `550 5.1.8`** — permanent : le domaine n'existe pas.
-- **`SERVFAIL` ou le silence ajournent en `451 4.4.3`** — temporaire : on ne
-  sait pas. Refuser définitivement sur une panne de résolution ferait perdre du
-  courrier légitime pour de bon.
-- **Le chemin nul est exempté**, comme au contrôle précédent et pour la même
-  raison.
+**L'action ne part PAS si `sender_policy == Ignore`.** Or c'est la politique
+SPF, et c'est aujourd'hui le seul déclencheur qui existe. Un exploitant qui
+éteindrait SPF tout en exigeant l'existence du domaine n'obtiendrait donc
+**rien** : l'action ne partirait jamais, et le contrôle serait silencieusement
+inerte — le pire des états, un refus qu'on croit posé et qui ne refuse pas.
+
+La garde doit devenir « SPF activé **OU** existence du domaine exigée ». Deux
+politiques distinctes ne se commandent pas l'une l'autre, exactement comme
+`--require-fqdn-sender` et `--require-fqdn-recipient` ne se commandent pas — et
+c'est déjà gardé par un essai pour celles-là.
+
+Les autres conditions de cette fonction se recoupent proprement, et n'ont pas à
+changer :
+
+- **le pair authentifié** est exempté des deux, et c'est le
+  `permit_sasl_authenticated` de Postfix ;
+- **un littéral d'adresse** n'a rien à résoudre : le littéral EST le système ;
+- **le chemin nul** est exempté des deux.
+
+### Le verdict devient une structure
+
+`sender_checked` reçoit aujourd'hui un `Verdict` SPF nu. Il recevra
+`{ spf, domaine }` : deux questions posées au même aller-retour, deux réponses
+distinctes, et c'est la session qui compose — la boucle ne dit toujours pas un
+mot de protocole.
+
+### Quatre réponses, et elles ne se replient pas sur deux
+
+- **un `MX`, ou à défaut un `A`/`AAAA`** : le courrier passe. Le repli n'est pas
+  facultatif — la plupart des petits domaines n'ont pas de `MX` et reçoivent sur
+  leur `A`, et refuser sans avoir regardé écarterait un courrier remettable ;
+- **ni l'un ni l'autre** : `550 5.1.8`, permanent ;
+- **un `MX` NUL** (RFC 7505) : `550 5.7.27`. Le domaine EXISTE et déclare ne
+  rien recevoir. Cette RFC a enregistré ce code pour ce refus-là, avec son
+  texte d'exemple — « Sender address has null MX » —, et §4.2 avertit : « mail
+  systems SHOULD NOT publish a null MX record for domains that they use in
+  RFC5321.MailFrom [...] addresses. If a system nonetheless does so, it risks
+  having its mail rejected » ;
+- **une PANNE de résolution** : `451 4.4.3`, temporaire. C'est NOTRE incident,
+  pas celui de l'émetteur — refuser pour de bon perdrait du courrier légitime,
+  quand ajourner le fait revenir.
+
+Les confondre coûterait cher dans les deux sens : replier la panne sur l'absence
+perdrait du courrier le jour où le résolveur bronche, et la replier sur
+l'existence laisserait passer ce qu'on voulait refuser.
+
+### Le chemin nul est exempté, et son `HELO` n'en tient pas lieu
+
+SPF, lui, se rabat sur le `HELO` (RFC 7208 §2.4). Confondre les deux ferait
+vérifier l'existence du `HELO` d'un avis de non-remise, et le refuserait pour
+une faute qui n'est pas la sienne — alors que c'est précisément le message
+qu'on ne doit jamais perdre. Le code porte donc DEUX champs distincts, et un
+essai le garde.
+
+### Et sans résolveur, la configuration est REFUSÉE
+
+Sans `--resolver`, l'interrogation n'a jamais lieu, et le produit ajourne plutôt
+que d'accepter sans contrôle. C'est la bonne décision au détail près qu'elle
+s'appliquerait à **tout le courrier** : un serveur qui ajourne tout n'est pas
+durci, il est en panne, et rien dans son journal ne dirait qu'il manque une
+option. `config write` refuse donc, là où le message peut encore nommer ce qui
+manque.
 
 ## 4. Les listes noires DNS sur l'adresse du pair
 

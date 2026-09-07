@@ -661,6 +661,13 @@ fn afficher(config: &Configuration) {
         }
     );
     println!(
+        "domaine expéditeur {}",
+        match config.require_sender_domain {
+            true => "doit EXISTER dans le DNS (550 s'il est absent, 451 sur panne)",
+            false => "non vérifié",
+        }
+    );
+    println!(
         "rapports TLS       {}",
         match (config.tlsrpt.compose(), config.tlsrpt.envoie()) {
             (false, _) => String::from("AUCUN — aucun dossier nommé"),

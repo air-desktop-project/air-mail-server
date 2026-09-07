@@ -29,10 +29,10 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use ams_dns::{Kind, Message, Name};
-use ams_session::SenderIdentity;
+use ams_session::{SenderDomain, SenderIdentity};
 use ams_spf::{Answer, Context, Evaluator, Limits, Query, Step, Verdict};
 
-use crate::resolver::{Issue, Resolver, Txt};
+use crate::resolver::{Issue, Mx, Resolver, Txt};
 
 /// Le nombre d'enregistrements `MX` qu'on déplie (RFC 7208 §4.6.4).
 const MX_MAX: usize = 10;
@@ -169,6 +169,39 @@ impl SenderChecker {
     }
 
     /// Les adresses des serveurs de courrier d'un nom.
+    /// Ce domaine EXISTE-T-IL, au sens où l'on saurait lui répondre ?
+    ///
+    /// `reject_unknown_sender_domain` chez Postfix. §5.1 de RFC 5321 dit où
+    /// chercher : un `MX` d'abord, et à défaut le nom lui-même, traité comme
+    /// « an implicit MX RR [...] pointing to that host ». Un domaine qui n'a ni
+    /// l'un ni l'autre ne peut recevoir ni réponse ni rapport de non-remise.
+    ///
+    /// # LES QUATRE RÉPONSES NE SE REPLIENT PAS SUR DEUX
+    ///
+    /// Une panne de résolution n'est pas une absence : la confondre avec elle
+    /// ferait refuser DÉFINITIVEMENT du courrier légitime le jour où le
+    /// résolveur bronche. Elle rend donc [`SenderDomain::Unknown`], que la
+    /// session ajourne.
+    ///
+    /// Le `MX` nul (RFC 7505) n'est pas une absence non plus : le domaine
+    /// existe et déclare ne rien recevoir. Il a son propre code, `5.7.27`, que
+    /// cette même RFC a enregistré pour ce refus-là.
+    pub async fn domaine_existe(&self, domaine: &[u8]) -> SenderDomain {
+        match self.resolveur.mx(domaine).await {
+            Mx::Trouves { .. } => SenderDomain::Exists,
+            Mx::Nul => SenderDomain::NullMx,
+            // **LE REPLI DE §5.1, ET IL N'EST PAS FACULTATIF** : la plupart des
+            // petits domaines n'ont pas de `MX` et reçoivent sur leur `A`.
+            // Refuser sans avoir regardé écarterait un courrier parfaitement
+            // remettable.
+            Mx::Absent => match self.resolveur.addresses(domaine).await.is_empty() {
+                true => SenderDomain::Absent,
+                false => SenderDomain::Exists,
+            },
+            Mx::Panne => SenderDomain::Unknown,
+        }
+    }
+
     async fn adresses_des_mx(&self, nom: &[u8]) -> Reponse {
         let octets = match self.resolveur.interroger(nom, Kind::Mx).await {
             Issue::Reponse(octets) => octets,

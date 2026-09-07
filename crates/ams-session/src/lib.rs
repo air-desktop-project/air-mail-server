@@ -152,4 +152,4 @@ pub use config::{Capabilities, Config, SenderPolicy};
 pub use error::Error;
 pub use policy::{Authenticator, Policy, RecipientVerdict};
 pub use recipients::{ARENA_OCTETS, RECIPIENTS_MAX, Recipients};
-pub use smtp::{Action, DataOutcome, SenderIdentity, SmtpSession, Turn};
+pub use smtp::{Action, DataOutcome, SenderDomain, SenderIdentity, SmtpSession, Turn};

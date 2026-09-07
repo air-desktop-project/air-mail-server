@@ -310,6 +310,35 @@ fn decimal_u64(octets: &[u8]) -> Option<u64> {
 /// défaut silencieux, c'est la réponse juste quand on n'a rien de plus précis à
 /// dire. La CLASSE, elle, n'est jamais devinée — elle vient du code à trois
 /// chiffres, et [`Status::agrees_with`] le vérifie.
+/// Ce que la boucle a appris du domaine de l'expéditeur.
+///
+/// # POURQUOI CINQ ÉTATS ET NON UN BOOLÉEN
+///
+/// « Existe » et « n'existe pas » ne suffisent pas : une panne de résolution
+/// n'est ni l'un ni l'autre, et la confondre avec l'un des deux perd du courrier
+/// (si on refuse) ou laisse passer ce qu'on voulait refuser (si on accepte).
+/// Le `MX` nul, lui, est un domaine qui EXISTE et déclare ne rien recevoir —
+/// autre chose encore, et RFC 7505 lui donne son propre code.
+///
+/// `NotChecked` est le cinquième, et il est nécessaire : la boucle rend ce
+/// verdict à CHAQUE `Action::CheckSender`, y compris quand seul SPF l'a
+/// déclenchée. Sans lui, il faudrait dire « existe » d'un domaine qu'on n'a pas
+/// regardé, et l'affirmation serait fausse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SenderDomain {
+    /// On ne l'a pas regardé — le contrôle n'était pas exigé.
+    #[default]
+    NotChecked,
+    /// Il a un `MX`, ou à défaut un `A`/`AAAA` (RFC 5321 §5.1 autorise le repli).
+    Exists,
+    /// Il n'a ni l'un ni l'autre : rien ne peut lui revenir.
+    Absent,
+    /// Il publie un `MX` NUL (RFC 7505) : il existe, et ne reçoit rien.
+    NullMx,
+    /// La résolution n'a pas abouti. **NOTRE incident, pas celui de l'émetteur.**
+    Unknown,
+}
+
 /// Ce nom est-il PLEINEMENT QUALIFIÉ ?
 ///
 /// **UN LITTÉRAL D'ADRESSE L'EST TOUJOURS.** §4.1.4 de RFC 5321 le RECOMMANDE à
@@ -381,6 +410,14 @@ fn statut_de(code: Code, texte: &[u8]) -> Option<Status> {
         b"Message rejected: sender domain policy (DMARC)" => Some(Status::POLICY),
         b"Sender address rejected: not authorized by SPF" => Some(Status::SPF_REFUSED),
         b"Temporary error while checking SPF, try again later" => Some(Status::DNS_TEMP),
+        b"Temporary error while checking sender domain, try again later" => Some(Status::DNS_TEMP),
+        // `1.8` — « Bad sender's system address » : le domaine ne peut rien
+        // recevoir, donc aucun rapport ne reviendra.
+        b"Sender address rejected: domain not found" => Some(Status::SENDER_SYSTEM),
+        // `7.27` — RFC 7505 enregistre CE code pour ce refus-là, et son texte
+        // d'exemple est « Sender address has null MX ». Le domaine EXISTE : il
+        // déclare seulement ne recevoir aucun courrier.
+        b"Sender address rejected: domain publishes a null MX" => Some(Status::SENDER_NULL_MX),
         b"Service not available, closing transmission channel" => Some(Status::NOT_ACCEPTING),
         _ => None,
     };
@@ -648,6 +685,14 @@ pub struct SmtpSession<'a, P: Policy> {
     /// `Received-SPF` doit le DIRE : ne pas le dire ferait croire que l'adresse
     /// de l'enveloppe a été vérifiée.
     identite_helo: bool,
+    /// Faut-il vérifier que le domaine de l'expéditeur EXISTE ?
+    ///
+    /// **DISTINCT DE `domaine_verifie`**, qui porte l'identité SPF : pour un
+    /// chemin nul, celle-ci vaut le `HELO`, qui n'est PAS le domaine dont on
+    /// vérifie l'existence. Un seul champ pour les deux ferait vérifier
+    /// l'existence du `HELO` d'un avis de non-remise, et le refuserait pour une
+    /// faute qui n'est pas la sienne.
+    verifier_le_domaine: bool,
 }
 
 impl<'a, P: Policy> SmtpSession<'a, P> {
@@ -698,6 +743,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
             depose: Tampon::vide(),
             depose_vu: false,
             domaine_verifie: Tampon::vide(),
+            verifier_le_domaine: false,
             verdict: None,
             identite_helo: false,
         }
@@ -1435,23 +1481,45 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         if self.authenticated {
             return false;
         }
-        if self.config.sender_policy() == SenderPolicy::Ignore {
+        // ── DEUX POLITIQUES, UNE SEULE ACTION ───────────────────────────────
+        //
+        // SPF et l'existence du domaine demandent le MÊME aller-retour DNS au
+        // MÊME moment, et voyagent donc ensemble. Mais elles NE SE COMMANDENT
+        // PAS l'une l'autre : une version antérieure rendait `false` dès que la
+        // politique SPF valait `Ignore`, si bien qu'éteindre SPF aurait éteint
+        // le contrôle de domaine EN SILENCE — un refus qu'on croit posé et qui
+        // ne refuse rien, ce qui est pire que pas de refus du tout.
+        let spf_actif = self.config.sender_policy() != SenderPolicy::Ignore;
+        let domaine_exige = self.config.require_sender_domain();
+        self.verifier_le_domaine = false;
+        if !spf_actif && !domaine_exige {
             return false;
         }
         match reverse_path {
             Path::Mailbox(boite) => match boite.domain() {
                 ClientId::Domain(domaine) => {
                     self.identite_helo = false;
-                    self.domaine_verifie.poser(&[domaine])
+                    let pose = self.domaine_verifie.poser(&[domaine])
                         && self
                             .expediteur
-                            .poser(&[boite.local_part().as_bytes(), b"@", domaine])
+                            .poser(&[boite.local_part().as_bytes(), b"@", domaine]);
+                    self.verifier_le_domaine = pose && domaine_exige;
+                    pose
                 }
-                // Un littéral d'adresse ne désigne aucune zone.
+                // Un littéral d'adresse ne désigne aucune zone. Il n'y a donc ni
+                // politique SPF à lire, ni existence à vérifier : le littéral
+                // EST le système, et il ne se cherche pas dans le DNS.
                 ClientId::AddressLiteral(_) => false,
             },
             // RFC 7208 §2.4 : l'expéditeur nul se vérifie sur le `HELO`.
+            //
+            // **ET LE CONTRÔLE D'EXISTENCE NE S'Y APPLIQUE PAS** : `<>` n'a pas
+            // de domaine d'expéditeur. Vérifier le `HELO` à sa place refuserait
+            // un avis de non-remise pour une faute qui n'est pas la sienne.
             Path::Null => {
+                if !spf_actif {
+                    return false;
+                }
                 self.identite_helo = true;
                 !self.helo.est_vide()
                     && self.domaine_verifie.poser(&[self.helo.as_bytes()])
@@ -1495,7 +1563,11 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     /// Rend `None` hors du tour qui a demandé [`Action::CheckSender`].
     #[must_use]
     pub fn sender_identity(&self) -> Option<SenderIdentity<'_>> {
-        if self.domaine_verifie.est_vide() {
+        // **SANS POLITIQUE SPF, PAS D'IDENTITÉ SPF.** Le domaine peut être posé
+        // pour le seul contrôle d'existence : le rendre ici ferait conduire à
+        // l'appelant une vérification que personne n'a demandée, et apposer un
+        // `Received-SPF` sur un message qu'on n'a pas vérifié par SPF.
+        if self.config.sender_policy() == SenderPolicy::Ignore || self.domaine_verifie.est_vide() {
             return None;
         }
         Some(SenderIdentity {
@@ -1508,6 +1580,22 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
                 Identity::MailFrom
             },
         })
+    }
+
+    /// Le domaine dont il faut vérifier l'EXISTENCE, s'il y en a un.
+    ///
+    /// **CE N'EST PAS L'IDENTITÉ SPF.** Pour un chemin nul, celle-ci vaut le
+    /// `HELO` ; ici, il n'y a rien à vérifier — `<>` n'a pas de domaine
+    /// d'expéditeur, et lui en inventer un ferait refuser des avis de
+    /// non-remise.
+    ///
+    /// Rend `None` quand le contrôle n'est pas exigé, quand le pair est
+    /// authentifié, quand le chemin est nul, ou quand le domaine est un littéral
+    /// d'adresse — qui EST le système, et ne se cherche pas dans le DNS.
+    #[must_use]
+    pub fn sender_domain(&self) -> Option<&[u8]> {
+        self.verifier_le_domaine
+            .then(|| self.domaine_verifie.as_bytes())
     }
 
     /// L'en-tête `Received-SPF` de la transaction en cours (RFC 7208 §9.1).
@@ -1677,8 +1765,49 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     pub fn sender_checked<'b>(
         &mut self,
         verdict: Verdict,
+        domaine: SenderDomain,
         out: &'b mut [u8],
     ) -> Result<Turn<'b>, Error> {
+        // ── LE DOMAINE D'ABORD, ET C'EST L'ORDRE UTILE ──────────────────────
+        //
+        // Son absence explique tout le reste : SPF interrogé sur un domaine qui
+        // n'existe pas ne rend jamais qu'un `none`, qui ne dit rien à personne.
+        // Répondre « votre domaine n'existe pas » est le seul message sur lequel
+        // l'émetteur puisse agir.
+        //
+        // **ET IL SE JUGE MÊME QUAND SPF N'EST PAS APPLIQUÉ** : les deux
+        // politiques ne se commandent pas. La garde qui suit ne concerne donc
+        // que SPF.
+        match domaine {
+            SenderDomain::Absent => {
+                self.quitter_la_transaction();
+                return self.refus(
+                    Code::MAILBOX_UNAVAILABLE,
+                    b"Sender address rejected: domain not found",
+                    out,
+                );
+            }
+            SenderDomain::NullMx => {
+                self.quitter_la_transaction();
+                return self.refus(
+                    Code::MAILBOX_UNAVAILABLE,
+                    b"Sender address rejected: domain publishes a null MX",
+                    out,
+                );
+            }
+            // **ON AJOURNE, ON NE REFUSE PAS.** Une panne de résolution est
+            // NOTRE incident, pas celui de l'émetteur : refuser pour de bon
+            // ferait perdre du courrier légitime, quand ajourner le fait revenir.
+            SenderDomain::Unknown => {
+                self.quitter_la_transaction();
+                return self.simple(
+                    Code::LOCAL_ERROR,
+                    b"Temporary error while checking sender domain, try again later",
+                    out,
+                );
+            }
+            SenderDomain::Exists | SenderDomain::NotChecked => {}
+        }
         if self.config.sender_policy() != SenderPolicy::Enforce {
             self.verdict = Some(verdict);
             return self.simple(Code::OK, b"Sender ok", out);
@@ -2222,7 +2351,10 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, ChunkEvent, Code, DataFault, DataOutcome, HOPS_MAX, SmtpSession, Status};
+    use super::{
+        Action, ChunkEvent, Code, DataFault, DataOutcome, HOPS_MAX, SenderDomain, SmtpSession,
+        Status,
+    };
     use crate::{Capabilities, Config, Error, Policy, RecipientVerdict, SenderPolicy};
     use ams_proto_smtp::{ClientId, DataEvent, Error as SmtpError, Limits, Path};
     use ams_spf::Verdict as SpfVerdict;
@@ -4246,7 +4378,7 @@ mod tests {
         jusqu_au_mail(&mut session, b"client.example.net", b"<jean@example.com>");
         let mut tampon = [0_u8; 512];
         let tour = session
-            .sender_checked(SpfVerdict::Fail, &mut tampon)
+            .sender_checked(SpfVerdict::Fail, SenderDomain::NotChecked, &mut tampon)
             .expect("réponse");
         let reponse = std::string::String::from_utf8(tour.reply().to_vec()).expect("ASCII");
         assert!(reponse.starts_with("550 5.7.23"), "{reponse}");
@@ -4272,7 +4404,7 @@ mod tests {
         jusqu_au_mail(&mut session, b"client.example.net", b"<jean@example.com>");
         let mut tampon = [0_u8; 512];
         let tour = session
-            .sender_checked(SpfVerdict::TempError, &mut tampon)
+            .sender_checked(SpfVerdict::TempError, SenderDomain::NotChecked, &mut tampon)
             .expect("réponse");
         let reponse = std::string::String::from_utf8(tour.reply().to_vec()).expect("ASCII");
         assert!(reponse.starts_with("451 4.4.3"), "{reponse}");
@@ -4359,7 +4491,7 @@ mod tests {
             jusqu_au_mail(&mut session, b"client.example.net", b"<jean@example.com>");
             let mut tampon = [0_u8; 512];
             let tour = session
-                .sender_checked(verdict, &mut tampon)
+                .sender_checked(verdict, SenderDomain::NotChecked, &mut tampon)
                 .expect("réponse");
             let reponse = std::string::String::from_utf8(tour.reply().to_vec()).expect("ASCII");
             assert!(reponse.starts_with("250"), "{verdict:?} : {reponse}");
@@ -4374,7 +4506,7 @@ mod tests {
         assert_eq!(action, Action::CheckSender);
         let mut tampon = [0_u8; 512];
         let tour = session
-            .sender_checked(SpfVerdict::Fail, &mut tampon)
+            .sender_checked(SpfVerdict::Fail, SenderDomain::NotChecked, &mut tampon)
             .expect("réponse");
         let reponse = std::string::String::from_utf8(tour.reply().to_vec()).expect("ASCII");
         assert!(reponse.starts_with("250"), "{reponse}");
@@ -4463,7 +4595,7 @@ mod tests {
         jusqu_au_mail(&mut session, b"client.example.net", b"<jean@example.com>");
         let mut tampon = [0_u8; 512];
         session
-            .sender_checked(SpfVerdict::Fail, &mut tampon)
+            .sender_checked(SpfVerdict::Fail, SenderDomain::NotChecked, &mut tampon)
             .expect("réponse");
         let ecrit = trace(&session).expect("trace");
         assert!(ecrit.starts_with("Received-SPF: fail "), "{ecrit}");
@@ -4485,7 +4617,7 @@ mod tests {
         jusqu_au_mail(&mut session, b"client.example.net", b"<>");
         let mut tampon = [0_u8; 512];
         session
-            .sender_checked(SpfVerdict::Pass, &mut tampon)
+            .sender_checked(SpfVerdict::Pass, SenderDomain::NotChecked, &mut tampon)
             .expect("réponse");
         let ecrit = trace(&session).expect("trace");
         assert!(ecrit.contains("identity=helo"), "{ecrit}");
@@ -4504,7 +4636,7 @@ mod tests {
         jusqu_au_mail(&mut session, b"client.example.net", b"<jean@example.com>");
         let mut tampon = [0_u8; 512];
         session
-            .sender_checked(SpfVerdict::Pass, &mut tampon)
+            .sender_checked(SpfVerdict::Pass, SenderDomain::NotChecked, &mut tampon)
             .expect("réponse");
         assert!(trace(&session).is_some());
         jouer(&mut session, b"RSET\r\n");
@@ -4521,7 +4653,7 @@ mod tests {
         jusqu_au_mail(&mut session, b"client.example.net", b"<jean@example.com>");
         let mut tampon = [0_u8; 512];
         session
-            .sender_checked(SpfVerdict::Pass, &mut tampon)
+            .sender_checked(SpfVerdict::Pass, SenderDomain::NotChecked, &mut tampon)
             .expect("réponse");
         let mut minuscule = [0_u8; 8];
         assert!(session.received_spf(pair(), &mut minuscule).is_none());
@@ -5006,5 +5138,173 @@ mod tests {
         identifiee(&mut session);
         assert!(jouer(&mut session, b"MAIL FROM:<jean@localhost>\r\n").starts_with("250"));
         assert!(jouer(&mut session, b"RCPT TO:<paul@srv>\r\n").starts_with("550"));
+    }
+
+    // ── L'existence du domaine de l'expéditeur ──────────────────────────────
+
+    /// Une session qui exige l'existence du domaine, avec la politique SPF
+    /// donnée — c'est le croisement des deux qui compte.
+    fn session_domaine(politique: SenderPolicy) -> SmtpSession<'static, Verdict> {
+        let config = Config::new(b"mail.example.com", 2, 10_485_760, Limits::DEFAULT)
+            .expect("configurable")
+            .with_sender_policy(politique)
+            .with_sender_domain(true);
+        SmtpSession::new(config, Verdict(RecipientVerdict::Accept))
+    }
+
+    /// Rend le verdict à la session et lit sa réponse.
+    fn rendre(
+        session: &mut SmtpSession<'_, Verdict>,
+        domaine: SenderDomain,
+    ) -> std::string::String {
+        let mut tampon = [0_u8; 512];
+        let tour = session
+            .sender_checked(SpfVerdict::Pass, domaine, &mut tampon)
+            .expect("réponse");
+        std::string::String::from_utf8(tour.reply().to_vec()).expect("ASCII")
+    }
+
+    /// **LE PIÈGE QUE CET ESSAI GARDE.**
+    ///
+    /// Une version antérieure de `retenir_l_expediteur` rendait `false` dès que
+    /// la politique SPF valait `Ignore`. Éteindre SPF aurait donc éteint le
+    /// contrôle d'existence EN SILENCE : l'action ne serait jamais partie, et
+    /// l'exploitant aurait cru poser un refus qui ne refusait rien.
+    ///
+    /// C'est le pire des états — pire que pas de refus du tout, parce qu'on
+    /// cesse de chercher.
+    #[test]
+    fn eteindre_spf_n_eteint_pas_le_controle_de_domaine() {
+        let mut session = session_domaine(SenderPolicy::Ignore);
+        let (reponse, action) =
+            jusqu_au_mail(&mut session, b"client.example.net", b"<jean@example.com>");
+        assert_eq!(action, Action::CheckSender, "L'ACTION DOIT PARTIR");
+        assert_eq!(reponse, "", "un tour qui diffère ne répond pas");
+        assert_eq!(
+            session.sender_domain(),
+            Some(&b"example.com"[..]),
+            "et la session doit dire QUEL domaine vérifier"
+        );
+        // Mais SANS identité SPF : personne n'a demandé de vérification SPF, et
+        // en conduire une apposerait un `Received-SPF` sur un message qu'on n'a
+        // pas vérifié ainsi.
+        assert!(session.sender_identity().is_none(), "pas d'identité SPF");
+
+        assert!(rendre(&mut session, SenderDomain::Absent).starts_with("550 5.1.8 "));
+    }
+
+    /// Sans l'exigence, aucun domaine n'est rendu à vérifier.
+    #[test]
+    fn sans_l_exigence_aucun_domaine_n_est_a_verifier() {
+        let mut session = session_spf(SenderPolicy::Enforce);
+        jusqu_au_mail(&mut session, b"client.example.net", b"<jean@example.com>");
+        assert!(session.sender_domain().is_none());
+
+        // Et si les deux sont éteints, l'action ne part pas du tout.
+        let mut muette = session_spf(SenderPolicy::Ignore);
+        let (_, action) = jusqu_au_mail(&mut muette, b"client.example.net", b"<jean@example.com>");
+        assert_eq!(action, Action::Continue);
+        assert!(muette.sender_domain().is_none());
+    }
+
+    /// **`<>` N'A PAS DE DOMAINE D'EXPÉDITEUR**, et son `HELO` n'en tient pas
+    /// lieu.
+    ///
+    /// SPF, lui, se rabat sur le `HELO` (RFC 7208 §2.4). Confondre les deux
+    /// ferait vérifier l'existence du `HELO` d'un avis de non-remise, et le
+    /// refuserait pour une faute qui n'est pas la sienne — alors que c'est
+    /// précisément le message qu'on ne doit jamais perdre.
+    #[test]
+    fn le_chemin_nul_n_a_aucun_domaine_a_verifier() {
+        let mut session = session_domaine(SenderPolicy::Enforce);
+        let (_, action) = jusqu_au_mail(&mut session, b"client.example.net", b"<>");
+        assert_eq!(action, Action::CheckSender, "SPF se vérifie encore");
+        assert_eq!(
+            session.sender_identity().map(|vu| vu.domain),
+            Some(&b"client.example.net"[..]),
+            "SPF se rabat sur le `HELO`"
+        );
+        assert!(
+            session.sender_domain().is_none(),
+            "MAIS RIEN À VÉRIFIER : `<>` n'a pas de domaine d'expéditeur"
+        );
+    }
+
+    /// **AVEC LE SEUL CONTRÔLE DE DOMAINE, `<>` NE DÉCLENCHE RIEN.**
+    ///
+    /// C'est la conséquence des deux règles réunies : `<>` n'a pas de domaine
+    /// d'expéditeur à vérifier, et SPF — qui aurait su quoi faire de son `HELO`
+    /// — est éteint. Il ne reste donc rien à demander, et la session répond
+    /// elle-même.
+    ///
+    /// Le vérifier compte : un avis de non-remise est le message qu'on ne doit
+    /// jamais perdre, et le faire attendre un verdict que personne ne rendra
+    /// serait le perdre.
+    #[test]
+    fn avec_le_seul_controle_de_domaine_le_chemin_nul_ne_demande_rien() {
+        let mut session = session_domaine(SenderPolicy::Ignore);
+        let (reponse, action) = jusqu_au_mail(&mut session, b"client.example.net", b"<>");
+        assert_eq!(action, Action::Continue, "rien à demander");
+        assert!(reponse.starts_with("250"), "{reponse}");
+        assert!(session.sender_domain().is_none());
+        assert!(session.sender_identity().is_none());
+    }
+
+    /// Un littéral d'adresse ne se cherche pas dans le DNS : il EST le système.
+    #[test]
+    fn un_litteral_d_adresse_n_a_aucun_domaine_a_verifier() {
+        let mut session = session_domaine(SenderPolicy::Ignore);
+        let (_, action) = jusqu_au_mail(&mut session, b"client.example.net", b"<jean@[192.0.2.1]>");
+        assert_eq!(action, Action::Continue);
+        assert!(session.sender_domain().is_none());
+    }
+
+    /// **LES QUATRE VERDICTS NE SE REPLIENT PAS SUR DEUX**, et chacun compose
+    /// une réponse différente.
+    #[test]
+    fn chaque_verdict_de_domaine_compose_sa_reponse() {
+        for (verdict, attendu) in [
+            (SenderDomain::Absent, "550 5.1.8 Sender address rejected"),
+            (SenderDomain::NullMx, "550 5.7.27 Sender address rejected"),
+            (
+                SenderDomain::Unknown,
+                "451 4.4.3 Temporary error while checking sender domain",
+            ),
+        ] {
+            let mut session = session_domaine(SenderPolicy::Enforce);
+            jusqu_au_mail(&mut session, b"client.example.net", b"<jean@example.com>");
+            let reponse = rendre(&mut session, verdict);
+            assert!(reponse.starts_with(attendu), "{verdict:?} : {reponse}");
+            // ET LA TRANSACTION EST ABANDONNÉE dans les trois cas : un `RCPT`
+            // doit réclamer un nouveau `MAIL`.
+            assert!(
+                jouer(&mut session, b"RCPT TO:<paul@example.com>\r\n")
+                    .starts_with("503 5.5.0 Need MAIL before RCPT"),
+                "{verdict:?}"
+            );
+        }
+
+        // Et les deux qui passent laissent la transaction ouverte.
+        for verdict in [SenderDomain::Exists, SenderDomain::NotChecked] {
+            let mut session = session_domaine(SenderPolicy::Enforce);
+            jusqu_au_mail(&mut session, b"client.example.net", b"<jean@example.com>");
+            assert!(
+                rendre(&mut session, verdict).starts_with("250"),
+                "{verdict:?}"
+            );
+            assert!(jouer(&mut session, b"RCPT TO:<paul@example.com>\r\n").starts_with("250"));
+        }
+    }
+
+    /// **UN DOMAINE ABSENT REFUSE MÊME QUAND SPF N'EST PAS APPLIQUÉ.**
+    ///
+    /// `SenderPolicy::Observe` n'oppose rien à un `fail` SPF : elle retient le
+    /// verdict et le laisse passer. Cela ne doit pas désarmer le contrôle de
+    /// domaine, qui est une autre politique.
+    #[test]
+    fn le_domaine_refuse_meme_sans_application_de_spf() {
+        let mut session = session_domaine(SenderPolicy::Observe);
+        jusqu_au_mail(&mut session, b"client.example.net", b"<jean@example.com>");
+        assert!(rendre(&mut session, SenderDomain::Absent).starts_with("550 5.1.8 "));
     }
 }

@@ -148,6 +148,10 @@ struct Configuration {
   # `reject_non_fqdn_recipient` chez Postfix. Faux par défaut.
   requireFqdnRecipient @30 :Bool;
 
+  # Exige-t-on que le domaine de l'EXPÉDITEUR existe dans le DNS ?
+  # `reject_unknown_sender_domain` chez Postfix. Faux par défaut.
+  requireSenderDomain @31 :Bool;
+
   # MTA-STS (RFC 8461) — la politique qu'un domaine publie en HTTPS.
   #
   # **UN CHAMP AJOUTÉ APRÈS COUP DÉCODE DEUX CHAÎNES VIDES**, et deux chaînes
