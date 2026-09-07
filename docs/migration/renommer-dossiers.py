@@ -186,6 +186,22 @@ def essais() -> int:
 def main() -> int:
     if "--essais" in sys.argv[1:]:
         return 1 if essais() else 0
+
+    # ── LE MODE FILTRE ──────────────────────────────────────────────────────
+    #
+    # **UNE SEULE DÉFINITION DE « LE MÊME DOSSIER ».** Après le renommage, les
+    # deux magasins nomment le même dossier différemment : `.&AMk-t&AOk--2025`
+    # d'un côté, `.Été-2025` de l'autre. `verifier.sh` et `rapatrier.sh` les
+    # comparent — et sans traduction, l'un croit qu'un dossier a DISPARU et
+    # l'autre recopie son contenu dans un dossier neuf, ce qui le duplique aux
+    # yeux de l'utilisateur.
+    #
+    # Ils passent donc leurs noms par ici. Deux décodeurs finiraient par ne plus
+    # dire la même chose, et la divergence serait invisible.
+    if "--traduire" in sys.argv[1:]:
+        for ligne in sys.stdin:
+            print(depuis_utf7_modifie(ligne.rstrip("\n")))
+        return 0
     if len(sys.argv) < 2:
         print(__doc__)
         return 2

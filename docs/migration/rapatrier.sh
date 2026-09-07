@@ -198,12 +198,53 @@ copies=0
 sautes=0
 boites=0
 
+# ── LES DEUX MAGASINS N'ÉCRIVENT PAS LE MÊME DOSSIER PAREIL ─────────────────
+#
+# Après `renommer-dossiers.py`, le neuf porte `.Été-2025` là où l'ancien garde
+# `.&AMk-t&AOk--2025`. C'est le MÊME dossier.
+#
+# Sans cette table, le rapatriement ne trouve pas la destination, CRÉE un
+# `.Été-2025` neuf dans l'ancien magasin, et y recopie des messages qui s'y
+# trouvent déjà sous l'autre nom. L'utilisateur voit alors deux dossiers et son
+# courrier en double — pendant un RETOUR EN ARRIÈRE, c'est-à-dire au moment où
+# il a le moins besoin d'une surprise.
+#
+# **ON DÉCODE LES DEUX CÔTÉS, ON N'ENCODE PAS.** L'UTF-7 modifié n'a pas de
+# forme canonique : deux encodages différents peuvent désigner le même nom, et
+# ré-encoder ce que Dovecot a écrit ne redonnerait pas forcément ses octets.
+declare -A reel_de=()
+decodeur="$(dirname "$0")/renommer-dossiers.py"
+while IFS= read -r -d '' cur_destination; do
+    boite=$(dirname "$cur_destination")
+    chemin=${boite#"$destination"}
+    chemin=${chemin#/}
+    # `find` sur un lien résolu rend le chemin RÉEL : on remet celui de la vue,
+    # qui est le seul que l'appelant connaisse.
+    chemin=${chemin#"$(basename "$destination")/"}
+    [ -n "$chemin" ] || continue
+    decode=$(printf '%s\n' "$chemin" | python3 "$decodeur" --traduire)
+    reel_de["$decode"]=$chemin
+done < <(
+    # **ON DESCEND COMPTE PAR COMPTE, AVEC LA BARRE FINALE.** `bascule.md` donne
+    # de l'ancien magasin une VUE faite de liens symboliques, et `find` ne suit
+    # pas un lien qu'il rencontre en chemin. Un `find "$destination"` rendait
+    # donc RIEN, la table restait vide, et le rapatriement recréait les dossiers
+    # au lieu de les retrouver — c'est-à-dire qu'il dupliquait.
+    for compte in "$destination"/*; do
+        [ -e "$compte" ] || continue
+        find "$compte/" -type d -name cur -print0 2>/dev/null
+    done
+)
+
 # Chaque boîte est un répertoire qui porte `cur` et `new`.
 while IFS= read -r -d '' cur_source; do
     boite_source=$(dirname "$cur_source")
     relatif=${boite_source#"$source"}
     relatif=${relatif#/}
-    boite_destination="$destination/$relatif"
+    # Le neuf est déjà en UTF-8 ; on le décode tout de même, pour le cas où le
+    # renommage n'aurait pas eu lieu — le décodeur laisse l'ASCII intact.
+    cherche=$(printf '%s\n' "$relatif" | python3 "$decodeur" --traduire)
+    boite_destination="$destination/${reel_de["$cherche"]-$relatif}"
     boites=$((boites + 1))
 
     # Ce que la destination porte DÉJÀ, quels que soient le dossier et les

@@ -1,8 +1,16 @@
 # Remplacer Postfix + Dovecot par air-mail-server sur `mail.narro.ch`
 
-**État : ÉTUDE. Rien n'a été touché sur la machine de production.**
-Établi le 2026-09-07, par observation EXTERNE uniquement — aucune connexion
-n'a été ouverte sur le serveur.
+**État : ÉTUDE CLOSE, DÉCISIONS PRISES. Rien n'a été MODIFIÉ sur la machine de
+production.** Établi le 2026-09-07.
+
+Les §1 à §5 ont été écrits par observation EXTERNE, avant tout accès. Le §6 les
+corrige et les complète : `inventaire.sh` a tourné SUR la machine le même jour —
+en lecture seule, sans rien modifier, sans lire une seule empreinte de mot de
+passe ni une clé privée. **Quand les deux divergent, c'est le §6 qui dit vrai.**
+
+Les trois décisions qu'il posait sont tranchées : les mots de passe (§5), le
+chemin de sortie (§6), et l'ouverture de l'API. La fenêtre est fixée au samedi
+19 septembre — voir `bascule.md`.
 
 ---
 
@@ -92,7 +100,7 @@ Ce compte ne couvre que l'INBOX — les sous-dossiers sont ouverts à la demande
 C'est `verifier.sh` qui fait l'audit complet, dossier par dossier, et c'est lui
 qui décide si l'on bascule.
 
-### 2.3 — Les mots de passe NE SE MIGRENT PAS — **décision à prendre**
+### 2.3 — Les mots de passe NE SE MIGRENT PAS — **TRANCHÉ le 2026-09-07**
 
 `air-mail-admin account add` lit un mot de passe **en clair** sur l'entrée
 standard et le hache lui-même en argon2id. Il n'existe aucun moyen d'importer
@@ -102,8 +110,14 @@ Or Dovecot stocke des empreintes dans un schéma à lui (`{SHA512-CRYPT}`,
 `{BLF-CRYPT}`, `{ARGON2ID}`…), et une empreinte ne se convertit pas : c'est
 tout l'objet d'une fonction de hachage.
 
-**Il n'y a donc que trois issues, et c'est à vous de choisir.** Elles sont
-présentées en §5.
+**Trois issues étaient possibles ; la première est retenue** — voir §5. Cinq
+secrets initiaux distincts, tirés au hasard et distribués hors bande le vendredi
+18, puis chacun pose le sien.
+
+Cela a demandé deux ajouts au produit, tous deux faits le même jour :
+`account passwd`, parce que `account add` effaçait les adresses du compte, et
+`PUT /v1/me/password`, parce qu'un mot de passe n'ouvre jamais la portée
+`Admin`.
 
 ---
 
@@ -232,12 +246,17 @@ Deux détails utiles au jour J :
   pouvoir LIRE `privkey.pem`.
 - **Le DNS.** Ni le `MX`, ni le `SPF`, ni le `DMARC`, ni le `PTR` ne changent.
   C'est ce qui rend le retour en arrière possible sans attendre une propagation.
-- **La clé DKIM.** Le sélecteur `mail` reste publié, et la même clé privée sert.
+- **La clé DKIM — PLUS DEPUIS LE 2026-09-07.** Un sélecteur `ams202609` en 2048
+  bits est publié le mardi 8, et rspamd signe avec dès ce jour-là : la clé
+  s'éprouve UNE SEMAINE sous Postfix, si bien que le jour J ne change plus que le
+  serveur. L'ancien sélecteur `mail` reste publié tant que le nouveau n'a pas
+  fait ses preuves — deux sélecteurs qui cohabitent ne gênent personne, un seul
+  qui ne vérifie pas fait tomber tout le sortant dans les indésirables.
 - **L'adresse IP.** Le remplacement se fait sur la même machine.
 
 ---
 
-## 5. La seule décision qui vous revient : les mots de passe
+## 5. Les mots de passe — TRANCHÉ le 2026-09-07 : l'issue A
 
 | | Ce que ça coûte | Ce que ça risque |
 |---|---|---|
@@ -245,18 +264,31 @@ Deux détails utiles au jour J :
 | **B. Demander à chaque utilisateur de choisir son mot de passe avant la bascule** | un formulaire ou un échange par utilisateur | ceux qui ne répondent pas restent bloqués le jour J |
 | **C. Faire accepter à air-mail-server les empreintes Dovecot** | du développement : lire `{SHA512-CRYPT}` et `{BLF-CRYPT}` | affaiblit une propriété affichée du produit — « argon2id, et rien d'autre » |
 
-**Ce que je recommande : A, avec la fenêtre de bascule pour l'appliquer.** C'est
-le seul des trois qui ne demande ni développement ni coopération préalable, et
-il a un mérite qu'on oublie : il fait tourner tous les mots de passe d'un coup,
-ce qu'aucun de vous n'a probablement fait depuis l'installation.
+**L'ISSUE A EST RETENUE**, avec une précision qui compte : **cinq secrets
+DISTINCTS**, et non une valeur commune. Un secret partagé laisserait, entre la
+bascule et le moment où chacun l'aura changé, n'importe lequel des cinq ouvrir la
+boîte des quatre autres — et cette fenêtre dure aussi longtemps que la personne
+la plus lente à lire son courrier.
 
-Si le nombre de boîtes est élevé (l'inventaire le dira), B devient plus
-raisonnable.
+C'est le seul des trois qui ne demande ni coopération préalable ni développement
+du produit, et il fait tourner tous les mots de passe d'un coup, ce qu'aucun de
+vous n'a probablement fait depuis l'installation.
 
-**C mérite d'être posé si et seulement si la coupure est inacceptable.** Ce
-serait un ajout au produit, pas un réglage, et il faudrait décider s'il est
-temporaire (le temps que chacun se reconnecte, puis re-haché en argon2id) ou
-définitif. Le temporaire est défendable ; le définitif ne l'est pas.
+**Ce que la décision a tout de même coûté au produit**, et qui n'était pas prévu :
+
+- `account passwd`, parce que le seul chemin qui existait — `account add` —
+  EFFAÇAIT les adresses du compte sans le dire ;
+- `PUT /v1/me/password`, parce qu'un mot de passe n'ouvre jamais la portée
+  `Admin` : sans elle, chaque secret choisi aurait transité par l'administrateur.
+
+L'issue B aurait été plus raisonnable si les boîtes avaient été nombreuses.
+L'inventaire en a compté cinq.
+
+**C reste la porte de secours**, si quelqu'un ne peut pas supporter d'être
+déconnecté : ce serait un ajout au produit, pas un réglage, et il faudrait
+décider s'il est temporaire — le temps que chacun se reconnecte, puis re-haché en
+argon2id — ou définitif. Le temporaire est défendable ; le définitif ne l'est
+pas. Personne ne l'a demandé.
 
 ---
 
@@ -285,7 +317,7 @@ de ce document. Voici ce qu'elle change.
 l'affaire d'un après-midi. Les empreintes sont en `{SHA512-CRYPT}`, donc
 non importables — mais avec cinq personnes, l'option A est sans discussion.
 
-### CE QUI DEMANDE UNE DÉCISION : le courrier ne part pas d'ici
+### LE COURRIER NE PART PAS D'ICI — TRANCHÉ : on garde le relais
 
     relayhost = [smtp.resend.com]:465
     smtp_sasl_auth_enable = yes
@@ -315,7 +347,8 @@ certificat du relais est VÉRIFIÉ — Postfix, lui, expédie aujourd'hui sous
 `smtp_tls_security_level = encrypt`, qui chiffre sans vérifier ; on présente un
 mot de passe, et cela ne suffit pas.
 
-Trois issues, et le choix vous revient :
+**L'ISSUE 2 EST RETENUE** (2026-09-07) : on garde le relais Resend pour la
+bascule. Les trois qui étaient possibles, et pourquoi celle-là :
 
 1. **Remettre en direct depuis l'IP OVH.** C'est techniquement prêt — le 25
    sortant passe, le `PTR` est cohérent en IPv4 ET IPv6, le SPF autorise déjà
@@ -328,10 +361,15 @@ Trois issues, et le choix vous revient :
 3. **Garder Postfix en sortie seulement**, devant air-mail-server. Cela ferait
    cohabiter deux MTA sur une machine, ce qui complique tout.
 
-**Je recommande 2 si vous voulez basculer sans rien changer d'autre**, et 1 si
-vous acceptez de surveiller la délivrabilité pendant quelques semaines. Ne
-mélangez pas les deux décisions : basculer de serveur ET de chemin de sortie le
-même jour rendrait tout diagnostic impossible.
+**Ne pas mélanger les deux décisions** : basculer de serveur ET de chemin de
+sortie le même jour rendrait tout diagnostic impossible. C'est la raison du
+choix — le jour J ne change QUE le serveur.
+
+**Ce que ce choix implique, et qu'il faut savoir** : au jour 1, narro.ch hérite
+de la réputation que Resend porte pour lui. C'est un avantage immédiat, et cela
+veut dire que la « vraie » réputation de narro.ch n'existe pas encore. Passer en
+direct plus tard reste possible, et c'est ce qui lèvera B4 — mais après la
+bascule, jamais pendant.
 
 ### Ce qu'air-mail-server ne reprendra pas, et qui est EN SERVICE
 
@@ -366,6 +404,10 @@ serveur le même jour rendrait tout diagnostic impossible.
 
 - `bascule.md` — la marche à suivre, et le retour en arrière.
 - `pour-les-utilisateurs.md` — ce qui change pour eux, à leur transmettre.
+- `repetition-generale.sh` — **la séquence ENTIÈRE, jouée d'un bout à l'autre**
+  sur un magasin de forme Dovecot : copie, traduction des noms, audit, service
+  IMAP réel, fenêtre, retour en arrière. Chaque pièce avait son banc ; leur
+  enchaînement, non — et c'est là que les défauts se logeaient.
 - `verifier.sh --essais` — **le banc de l'audit lui-même**. Cinq écarts montés de
   toutes pièces doivent tous le faire ÉCHOUER : un dossier vide perdu, un
   dossier non vide perdu, un message manquant, un nom illisible, et le magasin

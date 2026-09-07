@@ -1,8 +1,12 @@
 # La bascule, et le retour en arrière
 
 Ce document se lit AVANT le jour J, en entier, et se suit ligne à ligne le jour
-même. Il suppose que `etude-narro.md` a été lu et que la décision de §5 (les
-mots de passe) est prise.
+même. Il suppose que `etude-narro.md` a été lu.
+
+**Les décisions qu'il posait sont prises**, et datées du 2026-09-07 : cinq
+secrets initiaux distincts (§5 de l'étude), le relais Resend gardé pour la
+bascule, le sélecteur DKIM `ams202609` en 2048 bits publié une semaine avant, et
+l'API REST ouverte pour que chacun pose son propre mot de passe.
 
 **Le principe qui gouverne tout : on ne remplace rien tant que la copie n'a pas
 été éprouvée, et on garde l'ancien intact jusqu'à ce qu'on décide de ne plus en
@@ -16,7 +20,7 @@ Décidée le 2026-09-07. Le chemin qui y mène, et pourquoi chaque étape est l�
 
 | Quand | Quoi | Pourquoi cette date |
 |---|---|---|
-| **mardi 8 septembre** | nouveau sélecteur DKIM **2048 bits** publié, et **rspamd signe avec** | la clé s'éprouve sous Postfix, en production. Le jour J ne changera plus que le serveur |
+| **mardi 8 septembre** | sélecteur **`ams202609`**, clé **2048 bits**, publié — et **rspamd signe avec** | la clé s'éprouve sous Postfix, en production. Le jour J ne changera plus que le serveur |
 | 9 → 17 septembre | on vérifie que les signatures se valident chez Gmail et Outlook | une semaine de vrai courrier vaut mieux qu'un essai |
 | **vendredi 12** | `pour-les-utilisateurs.md` envoyé aux cinq | une semaine de préavis, et ce document PORTE la date |
 | **jeudi 17** | `deploy-hook` certbot pour `privkey.pem` ; première sauvegarde complète ; copie et `verifier.sh` à blanc | le blanc trouve les surprises pendant qu'on a le temps |
@@ -70,6 +74,51 @@ Relisez-le : il nomme vos comptes. Les points d'arrêt :
   suffit sans eux.
 - **L'espace libre est inférieur au double du courrier** → il faut de la place
   pour la copie.
+
+### 0.1bis La clé DKIM 2048, UNE SEMAINE AVANT — mardi 8
+
+**Sélecteur `ams202609`, décidé le 2026-09-07.** Une date dans le nom rend la
+rotation suivante lisible dans le DNS ; réutiliser `mail` empêcherait l'ancienne
+et la nouvelle clé de cohabiter pendant la semaine d'épreuve.
+
+    # 1. La clé, chez rspamd, à côté de l'ancienne.
+    sudo -u _rspamd openssl genrsa -out \
+        /var/lib/rspamd/dkim/narro.ch.ams202609.key 2048
+    sudo chmod 600 /var/lib/rspamd/dkim/narro.ch.ams202609.key
+
+    # 2. Ce qu'il faut publier.
+    sudo openssl rsa -in /var/lib/rspamd/dkim/narro.ch.ams202609.key \
+        -pubout -outform PEM | grep -v '^-----' | tr -d '\n'
+
+**LA PARTIE PUBLIQUE NE TIENT PAS DANS UNE CHAÎNE DNS.** Une clé 2048 fait
+environ 392 caractères en base64, au-delà des 255 octets d'une chaîne de
+caractères DNS. L'enregistrement TXT doit donc être **découpé en plusieurs
+chaînes qui se concatènent** :
+
+    ams202609._domainkey.narro.ch. IN TXT (
+        "v=DKIM1; k=rsa; p=MIIBIjANBgkq…"   ← premier morceau, ≤ 255 caractères
+        "…le reste de la clé" )
+
+Certains panneaux le font seuls, d'autres non. **Un découpage mal fait casse
+TOUTES les signatures sans rien dire** : la clé publique reconstituée est
+différente, et le destinataire lit `dkim=permerror` ou `dkim=fail` sans qu'aucun
+journal local ne s'en émeuve.
+
+    # 3. On vérifie ce que le DNS rend VRAIMENT, une fois publié.
+    dig +short TXT ams202609._domainkey.narro.ch | tr -d '" ' | head -c 80
+
+    # 4. rspamd signe avec, EN GARDANT L'ANCIENNE en place.
+    #    `selector = "ams202609";` dans /etc/rspamd/local.d/dkim_signing.conf
+    sudo systemctl reload rspamd
+
+**PUIS ON REGARDE PENDANT UNE SEMAINE.** Envoyez-vous un message vers Gmail et
+vers Outlook, et lisez l'en-tête `Authentication-Results` du destinataire : il
+doit dire `dkim=pass header.d=narro.ch`. C'est le seul contrôle qui compte —
+tout le reste se vérifie chez soi, celui-là se vérifie chez les autres.
+
+**L'ANCIENNE CLÉ RESTE PUBLIÉE** tant que la nouvelle n'a pas fait ses preuves.
+Deux sélecteurs qui cohabitent ne gênent personne ; un seul qui ne vérifie pas
+fait tomber tout le courrier sortant dans les indésirables.
 
 ### 0.2 Sauvegarde, et vérification de la sauvegarde
 
@@ -140,7 +189,8 @@ commande, et elle a été trouvée en la jouant, pas en la relisant.
         --require-fqdn-sender --require-fqdn-recipient \
         --require-sender-domain \
         --listen-http 0.0.0.0:8443 \
-        --dkim-selector mail --dkim-key /var/lib/rspamd/dkim/narro.ch.mail.key \
+        --dkim-selector ams202609 \
+        --dkim-key /var/lib/rspamd/dkim/narro.ch.ams202609.key \
         --resolver 127.0.0.53:53 \
         --public-suffix-list /usr/share/publicsuffix/public_suffix_list.dat \
         --relayhost smtp.resend.com:465 --relayhost-implicit-tls \
@@ -168,9 +218,13 @@ utilisateurs ne peuvent pas poser leur propre mot de passe.
   qui n'a pas frappé un jeton avec `air-mail-admin token`. Les essais par
   martèlement sont comptés par le videur, qui ferme la porte au bout de vingt
   par minute, **y compris sur un mot de passe actuel faux**.
-- **Si vous préférez fermer** : ôtez la ligne, et les mots de passe se posent
-  alors par `account passwd` en §0.4ter. Les utilisateurs perdent le
-  libre-service, vous gardez la main.
+**LA DÉCISION EST PRISE : ON L'OUVRE** (2026-09-07). Sans elle, la moitié de ce
+qui a été écrit pour les mots de passe ne sert à rien : chaque secret choisi
+devrait transiter par l'administrateur, ce qu'un changement de mot de passe
+existe précisément pour éviter.
+
+La fermer resterait tenable — ôter la ligne, et poser les cinq secrets par
+`account passwd` en §0.4ter — mais c'est un repli, pas le plan.
 
 **LE PARE-FEU N'A PAS ÉTÉ MESURÉ.** `inventaire.sh` ne le regarde pas, et le 8443
 n'est aujourd'hui ouvert par rien. À vérifier DEPUIS L'EXTÉRIEUR pendant la
@@ -218,7 +272,8 @@ vraiment le comportement du site, et elle attendra APRÈS la bascule.
 |---|---|
 | `--max-message 52428800` | `message_size_limit` de Postfix. **Sans elle, le défaut est 10 Mio** — un cinquième — et des pièces jointes qui passent depuis des années seraient refusées. |
 | `--queue-expire-seconds 86400` | `maximal_queue_lifetime = 1d`. Le défaut du produit est de CINQ jours. |
-| `--dkim-key /var/lib/rspamd/...` | c'est **rspamd** qui signe aujourd'hui, pas opendkim. La clé publique dérivée de ce fichier est identique à celle que le DNS publie — vérifié. |
+| `--dkim-selector ams202609` | **le nouveau sélecteur**, décidé le 2026-09-07. Une date dans le nom rend la rotation suivante lisible dans le DNS. Réutiliser `mail` aurait empêché l'ancienne et la nouvelle clé de cohabiter pendant la semaine d'épreuve. |
+| `--dkim-key /var/lib/rspamd/...` | c'est **rspamd** qui signe, pas opendkim. Le fichier est celui de la clé 2048 posée le mardi 8, et non l'ancienne clé 1024 du sélecteur `mail`. |
 | `--relayhost smtp.resend.com:465` | `relayhost = [smtp.resend.com]:465` avec `smtp_tls_wrappermode = yes`. Le compte et le secret sont dans `/etc/postfix/sasl_passwd`. |
 | `--mta-sts-anchors` | **exigé par `--relayhost`** : on présente un mot de passe, et sans autorités on ne saurait pas à qui. |
 | `--resolver 127.0.0.53:53` | `systemd-resolved` écoute là. **`--relay` sans résolveur fait REFUSER le démarrage**, et c'est heureux. |
@@ -328,6 +383,23 @@ francophone porte réellement — contre un encodeur écrit séparément, vérif
 l'exemple littéral de RFC 3501 §5.1.3 et celui que Dovecot écrit sur cette
 machine, et s'assurent qu'une séquence illisible est rendue TELLE QUELLE plutôt
 que devinée : renommer sur une supposition ferait perdre le dossier.
+
+### 0.4quater La répétition générale, sur un banc
+
+**AVANT DE TOUCHER À LA MACHINE**, depuis un dépôt de développement :
+
+    cargo build --release
+    bash docs/migration/repetition-generale.sh
+
+Elle monte un magasin de forme DOVECOT — celle que l'inventaire a relevée —,
+déroule les phases 0.4 à 1 de ce document, vérifie que le serveur SERT ce que
+Dovecot rangeait, puis joue le retour en arrière. Elle ne touche à rien d'autre
+qu'un répertoire jetable.
+
+**Chaque pièce avait déjà son banc ; leur ENCHAÎNEMENT, non.** Or c'est là que
+les défauts se logeaient — aucun ne vivait DANS une pièce, tous vivaient entre
+deux. La première exécution en a trouvé deux de plus, tous deux dans cette
+étape-ci et la suivante.
 
 ### 0.5 L'audit qui décide
 

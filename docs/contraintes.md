@@ -14828,3 +14828,65 @@ désactivée.
 
 La correction coûte de retirer deux accents graves d'un message destiné à un
 humain, qui se lit aussi bien sans.
+
+
+## La répétition générale, et les deux défauts qu'elle a trouvés d'emblée
+
+Chaque pièce de la migration avait son banc : la commande du manuel, le décodeur
+de noms de dossiers, le retour en arrière, l'audit. **Leur ENCHAÎNEMENT, lui,
+n'avait jamais été joué.**
+
+Or c'est là que les quatre défauts précédents du manuel se logeaient : le `rsync`
+de racine à racine, le retour en arrière qui dupliquait, le vérificateur à quatre
+minutes, le résolveur sans port. Aucun ne vivait DANS une pièce ; tous vivaient
+entre deux.
+
+`docs/migration/repetition-generale.sh` monte un magasin de forme Dovecot,
+déroule les phases 0.4 à 1, vérifie **par une vraie session IMAP** que le serveur
+sert ce que Dovecot rangeait — boîtes, sous-dossiers, comptes, drapeaux `\Seen`
+et `\Answered` —, puis joue le retour en arrière.
+
+Elle a trouvé deux défauts à sa PREMIÈRE exécution.
+
+### `find` ne suit pas un lien symbolique
+
+`bascule.md` donne de l'ancien magasin une VUE faite de liens symboliques, pour
+que l'audit compare deux arborescences de même forme. Mais `find "$chemin"` sur
+un lien SANS barre finale rend le lien lui-même, qui n'est pas un `-type f` :
+
+    TOTAL nouveau : 30 message(s)
+    TOTAL ancien  : 0 message(s)
+    ÉCHEC : NE BASCULEZ PAS.
+
+**L'audit aurait refusé la bascule le 19 au matin**, en donnant à croire que la
+copie avait tout perdu. Il refusait dans le bon sens, pour une raison fausse — et
+l'on aurait cherché la panne du mauvais côté, Postfix déjà arrêté.
+
+La même faute dormait dans `rapatrier.sh`, où elle vidait la table de
+correspondance des dossiers.
+
+### Après le renommage, les deux magasins n'écrivent plus le même dossier pareil
+
+`.&AMk-t&AOk--2025` d'un côté, `.Été-2025` de l'autre. C'est le même dossier, que
+`renommer-dossiers.py` a traduit en 0.4bis.
+
+Deux outils les comparent, et ni l'un ni l'autre ne le savait :
+
+- **l'audit** annonçait « CE DOSSIER DISPARAÎT » d'un dossier parfaitement
+  présent, et refusait une bascule saine ;
+- **le retour en arrière** ne trouvait pas la destination, CRÉAIT un `.Été-2025`
+  neuf dans l'ancien magasin, et y recopiait des messages qui s'y trouvaient déjà
+  sous l'autre nom. L'utilisateur aurait vu deux dossiers et son courrier en
+  double — pendant un retour en arrière.
+
+**Une seule définition de « le même dossier ».** `renommer-dossiers.py` gagne un
+mode `--traduire`, filtre de noms sur l'entrée standard, et les deux scripts y
+passent les leurs. Deux décodeurs finiraient par ne plus dire la même chose, et
+la divergence serait invisible.
+
+### On DÉCODE les deux côtés, on n'encode pas
+
+L'UTF-7 modifié n'a pas de forme canonique : deux encodages différents peuvent
+désigner le même nom. Ré-encoder `Été-2025` ne redonnerait donc pas forcément les
+octets que Dovecot a écrits, et la correspondance raterait sur un dossier dont le
+nom se groupe autrement. On décode les deux côtés et on compare le résultat.

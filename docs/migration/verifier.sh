@@ -80,7 +80,16 @@ compter() {
             douteux=$((douteux + 1))
             printf '      ILLISIBLE : %s\n' "${fichier#"$ou"}" >&2
         }
-    done < <(find "$ou" \( -path '*/cur/*' -o -path '*/new/*' \) -type f -print0 2>/dev/null)
+    # **LA BARRE FINALE N'EST PAS UNE COQUETTERIE.** `bascule.md` donne de
+    # l'ancien magasin une VUE faite de liens symboliques, et `find` sur un lien
+    # SANS barre finale ne le suit pas : il rend le lien lui-même, qui n'est pas
+    # un `-type f`, donc RIEN.
+    #
+    # L'audit annonçait alors « TOTAL ancien : 0 message » et refusait la
+    # bascule, en donnant à croire que la copie avait tout perdu. Il refusait
+    # dans le bon sens — mais pour une raison fausse, et le jour J on aurait
+    # cherché la panne du mauvais côté.
+    done < <(find "$ou/" \( -path '*/cur/*' -o -path '*/new/*' \) -type f -print0 2>/dev/null)
     printf '%s %s' "$total" "$douteux"
 }
 
@@ -227,15 +236,45 @@ for boite in "$racine"/*/; do
     # qu'il avait créé, et l'outil dont le métier est de RENDRE CONFIANT lui
     # avait dit que tout allait bien. Un dossier non vide, lui, était déjà
     # attrapé par le total du compte.
+    # **LA CORRESPONDANCE ENTRE LES DEUX ÉCRITURES D'UN MÊME DOSSIER.**
+    #
+    # Traduire la LISTE ne suffit pas : il faut ensuite RETROUVER le dossier
+    # ancien, qui est toujours sur le disque sous son nom encodé. Sans cette
+    # table, la comparaison est simplement sautée — et un dossier dont le compte
+    # aurait changé passerait sans un mot.
+    declare -A ancien_de=()
+    if [ -n "$ancienne" ] && [ -d "$ancienne/$compte" ]; then
+        while IFS= read -r reel; do
+            [ -n "$reel" ] || continue
+            traduit=$(printf '%s\n' "$reel" \
+                | python3 "$(dirname "$0")/renommer-dossiers.py" --traduire)
+            ancien_de["$traduit"]=$reel
+        done < <(
+            for sous in "$ancienne/$compte"/.*/; do
+                [ -d "$sous" ] && basename "$sous"
+            done
+        )
+    fi
+
     dossiers=$(
         {
             for sous in "$boite".*/; do
                 [ -d "$sous" ] && basename "$sous"
             done
             if [ -n "$ancienne" ] && [ -d "$ancienne/$compte" ]; then
+                # **LES NOMS DE L'ANCIEN SE TRADUISENT AVANT D'ÊTRE COMPARÉS.**
+                #
+                # Dovecot écrit `.&AMk-t&AOk--2025`, air-mail-server `.Été-2025`
+                # — c'est le MÊME dossier, que `renommer-dossiers.py` a traduit
+                # en 0.4bis. Sans cette traduction, l'audit annonce « CE DOSSIER
+                # DISPARAÎT » d'un dossier qui est là, et refuse une bascule
+                # parfaitement saine.
+                #
+                # On passe par le décodeur du renommeur, et non par une copie :
+                # deux décodeurs finiraient par ne plus dire la même chose.
                 for sous in "$ancienne/$compte"/.*/; do
                     [ -d "$sous" ] && basename "$sous"
-                done
+                done | python3 "$(dirname "$0")/renommer-dossiers.py" --traduire
             fi
         } 2>/dev/null | grep -vxE '\.|\.\.' | sort -u
     )
@@ -258,8 +297,9 @@ for boite in "$racine"/*/; do
             printf '      %-20s %6d' "$nom" "$sn"
         fi
         [ "$sd" -gt 0 ] && printf ' — %d ILLISIBLE(S)' "$sd"
-        if [ -n "$ancienne" ] && [ -d "$ancienne/$compte/.$nom" ]; then
-            read -r sa _ <<< "$(compter "$ancienne/$compte/.$nom")"
+        reel_ancien=${ancien_de[".$nom"]-}
+        if [ -n "$ancienne" ] && [ -n "$reel_ancien" ]; then
+            read -r sa _ <<< "$(compter "$ancienne/$compte/$reel_ancien")"
             if [ "$sn" -lt 0 ]; then
                 printf '   ≠ ANCIEN : %d — CE DOSSIER DISPARAÎT' "$sa"
             elif [ "$sn" -ne "$sa" ]; then
