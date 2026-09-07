@@ -346,6 +346,7 @@ fn nom_genre_et_fin(message: &[u8]) -> Option<(String, u16, usize)> {
 }
 
 /// Ce qu'un résolveur de test sait répondre pour la remise sortante.
+#[derive(Clone)]
 pub enum Enregistrement {
     /// Un `MX` : préférence et cible. **Une cible vide est le `MX` nul**
     /// (RFC 7505), qui déclare que le domaine ne reçoit aucun courrier.
@@ -359,6 +360,23 @@ pub enum Enregistrement {
     /// genres à la fois, d'où cette variante ici plutôt qu'un troisième
     /// résolveur d'essai.
     Txt(&'static str),
+    /// Un `TLSA` (genre 52), rdata déjà assemblé.
+    ///
+    /// Il ne peut pas être `&'static` : son condensat se calcule à partir du
+    /// certificat fabriqué à la volée, et ne peut donc pas vivre dans une
+    /// constante.
+    Tlsa(std::vec::Vec<u8>),
+    /// Le même, mais dont la RÉPONSE ne portera JAMAIS le bit `AD`.
+    ///
+    /// **C'EST LE CAS QUE RIEN N'ÉPROUVAIT.** §2.1 de RFC 7672 exige que le
+    /// `MX` ET le `TLSA` soient authentiques. Une table entièrement signée ou
+    /// entièrement non signée ne distingue pas les deux contrôles : retirer
+    /// celui du `TLSA` ne faisait alors tomber aucune épreuve, ce qu'une
+    /// confrontation a montré le 2026-09-07.
+    ///
+    /// C'est aussi l'attaque : un pair capable de forger la réponse `TLSA`
+    /// seule — sans toucher au `MX` — retirerait la protection.
+    TlsaNonSigne(std::vec::Vec<u8>),
 }
 
 /// Monte un résolveur qui répond des `MX` et des `A`.
@@ -368,6 +386,27 @@ pub enum Enregistrement {
 /// que le DNS a dit — ou n'a pas dit.
 pub async fn resolveur_courrier(
     table: &'static [(&'static str, Enregistrement)],
+) -> std::net::SocketAddr {
+    resolveur_courrier_signe(
+        std::vec::Vec::from_iter(
+            table
+                .iter()
+                .map(|(nom, valeur)| ((*nom).to_owned(), valeur.clone())),
+        ),
+        false,
+    )
+    .await
+}
+
+/// Le même, mais dont la table se possède ET dont les réponses peuvent porter
+/// le bit `AD`.
+///
+/// **DANE EXIGE LES DEUX** : un `MX` authentique et un `TLSA` authentique
+/// (§2.1 de RFC 7672). Un résolveur d'essai qui ne saurait pas poser ce bit ne
+/// pourrait éprouver que la moitié de la décision — celle qui refuse.
+pub async fn resolveur_courrier_signe(
+    table: std::vec::Vec<(std::string::String, Enregistrement)>,
+    authentique: bool,
 ) -> std::net::SocketAddr {
     let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
         .await
@@ -391,12 +430,25 @@ pub async fn resolveur_courrier(
                     Enregistrement::Mx(_, _) => genre == 15,
                     Enregistrement::A(_) => genre == 1,
                     Enregistrement::Txt(_) => genre == 16,
+                    Enregistrement::Tlsa(_) | Enregistrement::TlsaNonSigne(_) => genre == 52,
                 })
                 .collect();
 
             let mut reponse = Vec::new();
             reponse.extend_from_slice(question.get(..2).unwrap_or_default());
-            let drapeaux: u16 = if trouves.is_empty() { 0x8183 } else { 0x8180 };
+            // Le bit `AD` est le 0x0020 des drapeaux (§3.2.3 de RFC 4035).
+            //
+            // **UN SEUL ENREGISTREMENT SUFFIT À LE RETIRER.** Une réponse porte
+            // `AD` ou ne le porte pas ; elle ne le porte pas à moitié.
+            let non_signe = trouves
+                .iter()
+                .any(|valeur| matches!(valeur, Enregistrement::TlsaNonSigne(_)));
+            let signe: u16 = if authentique && !non_signe { 0x0020 } else { 0 };
+            let drapeaux: u16 = if trouves.is_empty() {
+                0x8183 | signe
+            } else {
+                0x8180 | signe
+            };
             reponse.extend_from_slice(&drapeaux.to_be_bytes());
             reponse.extend_from_slice(&1_u16.to_be_bytes());
             reponse.extend_from_slice(&u16::try_from(trouves.len()).unwrap_or(0).to_be_bytes());
@@ -417,6 +469,9 @@ pub async fn resolveur_courrier(
                         rdata.push(u8::try_from(texte.len()).expect("chaîne courte"));
                         rdata.extend_from_slice(texte.as_bytes());
                         (16_u16, rdata)
+                    }
+                    Enregistrement::Tlsa(rdata) | Enregistrement::TlsaNonSigne(rdata) => {
+                        (52_u16, rdata.clone())
                     }
                 };
                 reponse.extend_from_slice(&[0xC0, 0x0C]);

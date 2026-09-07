@@ -13451,3 +13451,72 @@ C'est la deuxième fois de la séance qu'une lecture de RFC empêche d'écrire u
 défaut qui n'en est pas un. La première portait sur `NOTIFY=DELAY` ; celle-ci sur
 §5.1. Dans les deux cas le produit avait raison, et c'est l'épreuve qu'il a fallu
 corriger.
+
+## DANE, de la question DNS jusqu'à la poignée de main
+
+Même forme que MTA-STS, et trouvée en posant la même question. `ams-dane` —
+l'analyse d'un `TLSA`, le choix d'un ensemble, l'extraction du
+`SubjectPublicKeyInfo` — est couvert à 100 %, et `ams-tls` éprouve le
+vérificateur en vingt et un essais. Ce qui DÉCIDE d'engager DANE, lui, n'était
+exercé par rien : `Relay::dane_pour` interroge `_25._tcp.<hôte>`, exige que la
+réponse ET le `MX` soient authentiques, puis n'engage que si l'ensemble le
+permet.
+
+Le résolveur d'épreuve ne savait pas même répondre un `TLSA`, ni poser le bit
+`AD`. Il sait les deux depuis le 2026-09-07.
+
+### Le condensat est calculé HORS de ce dépôt
+
+Le `TLSA` publié porte un condensat du `SubjectPublicKeyInfo`, obtenu par
+`openssl` seul :
+
+    openssl x509 -inform DER -pubkey -noout | openssl pkey -pubin -outform DER \
+        | openssl dgst -sha256 -binary
+
+Le fabriquer avec NOTRE extraction de `SPKI` ferait une épreuve circulaire :
+elle passerait aussi bien si cette extraction était fausse, du moment qu'elle
+l'est deux fois.
+
+### L'épreuve positive était faible, et le rapport TLSRPT l'a sauvée
+
+« Le courrier passe avec un `TLSA` qui correspond » ne prouve rien : il
+passerait tout autant si DANE ne s'était pas engagé et que le chiffrement était
+redevenu opportuniste. Il fallait un signal de l'ENGAGEMENT lui-même.
+
+`Relay::consigner` en fournit un : le rapport TLSRPT porte
+`"policy-type": "tlsa"`, et il ne le porte que si `dane.is_some()`. L'épreuve
+attache donc un journal, vide, décomprime, et lit ce champ. Son pendant — sans
+`TLSA` — lit `no-policy-found` au même endroit.
+
+Deux détours pour y arriver, tous deux dans l'épreuve et non dans le produit :
+le journal restait vide tant que la zone ne publiait pas `_smtp._tls` (§3 de
+RFC 8460 interdit de rapporter à qui n'a rien demandé), et le rapport déposé est
+GZIPPÉ — lu tel quel, il rendait « mailto:tls@eux.test », ce qui n'est pas faux
+mais ne dit rien du genre de politique.
+
+### Le trou que seule la confrontation a montré
+
+Quatre épreuves écrites, quatre vertes. Deux défauts injectés dans le produit :
+
+- **DANE ne s'engage jamais** : deux épreuves tombent, dont la positive, et le
+  rapport qu'elle imprime dit `no-policy-found` là où il devrait dire `tlsa`.
+- **On n'exige plus que la réponse `TLSA` soit authentique** : AUCUNE ne tombe.
+
+Le second est le plus intéressant. Mes quatre montages posaient une zone
+ENTIÈREMENT signée ou ENTIÈREMENT non signée, si bien qu'ils ne distinguaient
+pas les DEUX contrôles de `dane_pour` — celui du `MX` et celui du `TLSA`. Quand
+rien n'est signé, la fonction sort au premier, et le second n'est jamais
+atteint.
+
+§2.1 de RFC 7672 exige pourtant les deux, et c'est une attaque réelle : un pair
+capable de forger la réponse `TLSA` SEULE — sans toucher au `MX` — publierait un
+condensat à lui, ou la retirerait.
+
+`Enregistrement::TlsaNonSigne` permet désormais à une réponse de ne pas porter
+`AD` alors que le reste de la zone l'a. La cinquième épreuve monte ce cas : le
+`TLSA` ne correspond pas ET n'est pas authentique, donc la remise doit PASSER —
+DANE ne s'engage pas. Retirer le contrôle la fait tomber, et elle seule.
+
+**Ce n'est pas la relecture qui l'a trouvé.** Les quatre épreuves étaient
+lisibles, motivées, et vertes. Il a fallu casser le produit pour découvrir
+qu'elles ne regardaient qu'un des deux contrôles.
