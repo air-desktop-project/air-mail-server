@@ -2174,6 +2174,51 @@ de peines en cours **cesse d'apprendre** plutôt que d'oublier un banni : évinc
 « le bannissement qui expire le plus tôt » suffisait à s'en libérer en
 remplissant la table, et le fuzz l'a montré.
 
+### Refuser un `HELO` non qualifié
+
+```sh
+./target/release/air-mail-admin config write air-mail.conf \
+    --domain mail.example.com --hosted example.com \
+    --require-fqdn-helo
+```
+
+Un nom sans point — `localhost`, `mail`, `pc-de-jean` — n'est pas le nom primaire
+que §4.1.4 de RFC 5321 demande, et c'est très exactement ce que les robots
+annoncent. Posé, ce drapeau les refuse en `550`.
+
+La même section permet ce refus — « If the EHLO command is not acceptable to the
+SMTP server, 501, 500, 502, or 550 failure replies MUST be returned as
+appropriate » — et lui pose deux bornes que le code tient :
+
+- **un littéral d'adresse passe toujours**, parce que §4.1.4 le RECOMMANDE à qui
+  n'a pas de nom : « an address literal SHOULD be substituted for the domain
+  name ». Refuser ce que la RFC conseille reviendrait à refuser les émetteurs
+  les mieux intentionnés. Seul `EHLO` le prend, du reste : la grammaire de
+  §4.1.1.1 ne l'autorise pas après `HELO`, et un littéral y fait un `501` de
+  syntaxe, que le drapeau soit posé ou non ;
+- **le nom n'est JAMAIS comparé à l'adresse du pair.** La même section
+  l'interdit : « if the verification fails, the server MUST NOT refuse to accept
+  a message on that basis. » Le contrôle est de forme, pas de véracité.
+
+**Et le refus ne change rien à la session.** §4.1.4 : « The SMTP server MUST stay
+in the same state after transmitting these replies that it was in before the
+EHLO was received. » Un `EHLO` accepté annule la transaction en cours ; un `EHLO`
+refusé doit la laisser entière. La garde précède donc tout effet, et un essai
+vérifie qu'une transaction garde ses destinataires après un refus.
+
+**Le défaut est de ne rien exiger.** Un serveur ne se met à refuser du courrier
+qu'il acceptait hier que parce que quelqu'un l'a écrit — et un fichier de
+configuration écrit avant que ce champ n'existe le relit faux, puisque Cap'n
+Proto rend zéro pour un champ absent.
+
+La grammaire des étiquettes, elle, était déjà tenue par `check_domain`
+(§4.1.2) : l'équivalent de `reject_invalid_helo_hostname` n'a demandé aucun code.
+
+`docs/plan-anti-abus.md` dit ce qui suit, et dans quel ordre : l'expéditeur et le
+destinataire pleinement qualifiés — purs, comme celui-ci —, puis l'existence du
+domaine de l'expéditeur, puis les listes noires DNS. Il dit aussi ce que ces
+contrôles valent honnêtement, et ce qu'ils n'attrapent pas.
+
 ## Construire
 
 La toolchain est épinglée dans `rust-toolchain.toml` (**Rust 1.98.0**, stable).

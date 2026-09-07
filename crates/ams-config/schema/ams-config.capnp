@@ -134,6 +134,12 @@ struct Configuration {
   # sort, comme avant.
   relay @20 :Relay;
 
+  # Exige-t-on un `HELO`/`EHLO` PLEINEMENT QUALIFIÉ (RFC 5321 §4.1.4) ?
+  #
+  # **UN CHAMP AJOUTÉ APRÈS COUP DÉCODE FAUX**, et faux veut dire « on accepte
+  # comme avant ». Une mise à jour ne se met donc à refuser personne.
+  requireFqdnHelo @28 :Bool;
+
   # MTA-STS (RFC 8461) — la politique qu'un domaine publie en HTTPS.
   #
   # **UN CHAMP AJOUTÉ APRÈS COUP DÉCODE DEUX CHAÎNES VIDES**, et deux chaînes

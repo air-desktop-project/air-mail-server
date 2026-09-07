@@ -189,6 +189,8 @@ fn configuration_pop3(
     pop3: &str,
 ) -> PathBuf {
     let config = Configuration {
+        // Ces essais portent sur le transport, pas sur l'enveloppe.
+        require_fqdn_helo: false,
         // Une seule écoute, en `STARTTLS` : la liste vide dirait la même
         // chose, et l'écrire ici la rend lisible.
         smtp_listeners: Vec::new(),

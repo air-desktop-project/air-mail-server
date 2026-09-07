@@ -626,6 +626,16 @@ fn afficher(config: &Configuration) {
         }
     );
     println!(
+        "`HELO` qualifié    {}",
+        match config.require_fqdn_helo {
+            // **UN REFUS SE DIT.** Un exploitant qui pose ce drapeau refuse du
+            // courrier ; ne pas le relire ici, c'est la même faute que le
+            // compteur éteint ci-dessus.
+            true => "EXIGÉ — un nom sans point est refusé (550) ; un littéral d'adresse passe",
+            false => "non exigé — tout nom de la grammaire est accepté",
+        }
+    );
+    println!(
         "rapports TLS       {}",
         match (config.tlsrpt.compose(), config.tlsrpt.envoie()) {
             (false, _) => String::from("AUCUN — aucun dossier nommé"),

@@ -80,6 +80,28 @@ pub struct Config<'a> {
     limits: Limits,
     capabilities: Capabilities,
     sender_policy: SenderPolicy,
+    /// Exige-t-on un `HELO`/`EHLO` PLEINEMENT QUALIFIÉ ?
+    ///
+    /// # CE QUE CELA REFUSE, ET CE QUE CELA NE REFUSE PAS
+    ///
+    /// Un nom sans point — `localhost`, `mail`, `pc-de-jean` — n'est pas le nom
+    /// primaire que §4.1.4 de RFC 5321 demande au client de donner. Le refuser
+    /// est permis : « If the EHLO command is not acceptable to the SMTP server,
+    /// 501, 500, 502, or 550 failure replies MUST be returned as appropriate. »
+    ///
+    /// **UN LITTÉRAL D'ADRESSE N'EST JAMAIS REFUSÉ**, et c'est essentiel : la
+    /// même section le RECOMMANDE à qui n'a pas de nom — « an address literal
+    /// SHOULD be substituted for the domain name ». Refuser ce que la RFC
+    /// conseille serait refuser les émetteurs les mieux intentionnés.
+    ///
+    /// **ET L'ON NE VÉRIFIE PAS QUE LE NOM CORRESPOND À L'IP.** La même section
+    /// l'interdit : « if the verification fails, the server MUST NOT refuse to
+    /// accept a message on that basis. » Ce contrôle-ci est de GRAMMAIRE, pas
+    /// de correspondance.
+    ///
+    /// Faux par défaut : un serveur qui se met à refuser ce qu'il acceptait
+    /// hier doit le faire parce que quelqu'un l'a décidé.
+    require_fqdn_helo: bool,
 }
 
 impl<'a> Config<'a> {
@@ -118,6 +140,7 @@ impl<'a> Config<'a> {
             limits,
             capabilities: Capabilities::default(),
             sender_policy: SenderPolicy::default(),
+            require_fqdn_helo: false,
         })
     }
 
@@ -151,6 +174,19 @@ impl<'a> Config<'a> {
     #[must_use]
     pub fn sender_policy(&self) -> SenderPolicy {
         self.sender_policy
+    }
+
+    /// Exige un `HELO`/`EHLO` pleinement qualifié.
+    #[must_use]
+    pub fn with_fqdn_helo(mut self, exige: bool) -> Self {
+        self.require_fqdn_helo = exige;
+        self
+    }
+
+    /// Le `HELO` doit-il être pleinement qualifié ?
+    #[must_use]
+    pub fn require_fqdn_helo(&self) -> bool {
+        self.require_fqdn_helo
     }
 
     /// Le nom que le serveur annonce.

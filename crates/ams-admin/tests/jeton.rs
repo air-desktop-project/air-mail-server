@@ -58,6 +58,8 @@ fn configuration(repertoire: &Path, clef: &str) -> PathBuf {
         imap_listeners: Vec::new(),
         pop3_listeners: Vec::new(),
         imap_implicit_tls: false,
+        // Cet essai porte sur le scellement du jeton, pas sur l'enveloppe.
+        require_fqdn_helo: false,
         domain: String::from("mail.example.com"),
         listen: String::from("127.0.0.1:0"),
         maildir: repertoire.join("boite").display().to_string(),

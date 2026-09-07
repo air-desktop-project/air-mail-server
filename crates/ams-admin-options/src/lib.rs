@@ -165,6 +165,8 @@ pub struct Options {
     /// **ÉTEINTE PAR DÉFAUT.** Émettre du courrier vers des tiers ne se décide
     /// pas à la place de celui qui exploite la machine.
     pub relay: bool,
+    /// Exige-t-on un `HELO`/`EHLO` pleinement qualifié ?
+    pub require_fqdn_helo: bool,
     /// Le RELAIS DE SORTIE, sous la forme `hôte:port`.
     ///
     /// Vide veut dire « remise directe », et c'est le défaut.
@@ -287,6 +289,7 @@ impl Default for Options {
             queue_max_retry: 0,
             queue_expire: 0,
             queue_warn: 0,
+            require_fqdn_helo: false,
             relayhost: None,
             relayhost_implicit_tls: false,
             relayhost_user: None,
@@ -411,6 +414,7 @@ impl Options {
                 anchors: chemin(self.mtasts_anchors.as_ref()),
                 cache: chemin(self.mtasts_cache.as_ref()),
             },
+            require_fqdn_helo: self.require_fqdn_helo,
             relay: ams_config::Relay {
                 enabled: self.relay,
                 relayhost: relais.0,
@@ -597,6 +601,26 @@ OPTIONS DE `config write`
     --mta-sts-cache <chemin>            le dossier des politiques (EXIGÉ avec le premier)
 
     LA FILE DE RÉÉMISSION SORTANTE
+    --require-fqdn-helo                 REFUSER un `HELO`/`EHLO` qui n'est pas
+                                        pleinement qualifié
+
+    §4.1.4 de RFC 5321 demande au client d'annoncer son nom PRIMAIRE, et permet
+    de refuser ce qui n'est pas acceptable : « If the EHLO command is not
+    acceptable to the SMTP server, 501, 500, 502, or 550 failure replies MUST be
+    returned as appropriate. » Un nom sans point — `localhost`, `mail` — n'est
+    pas un nom primaire, et c'est ce que les robots annoncent.
+
+    UN LITTÉRAL D'ADRESSE PASSE TOUJOURS. La même section le RECOMMANDE à qui
+    n'a pas de nom : « an address literal SHOULD be substituted ». Refuser ce
+    que la RFC conseille serait refuser les émetteurs les mieux intentionnés.
+
+    ET L'ON NE COMPARE PAS LE NOM À L'IP. La même section l'INTERDIT : « if the
+    verification fails, the server MUST NOT refuse to accept a message on that
+    basis. » Ce contrôle est de forme, jamais de véracité.
+
+    FAUX PAR DÉFAUT : un serveur qui se met à refuser ce qu'il acceptait hier
+    doit le faire parce que quelqu'un l'a décidé.
+
     --relay                             émettre pour les comptes authentifiés
 
 
@@ -1314,6 +1338,7 @@ where
             "--mta-sts-cache" => options.mtasts_cache = Some(PathBuf::from(valeur()?)),
             // ── La file de réémission sortante ──────────────────────────────
             "--relay" => options.relay = true,
+            "--require-fqdn-helo" => options.require_fqdn_helo = true,
             "--relayhost" => options.relayhost = Some(valeur()?),
             "--relayhost-implicit-tls" => options.relayhost_implicit_tls = true,
             "--relayhost-user" => options.relayhost_user = Some(valeur()?),
@@ -3322,6 +3347,23 @@ mod tests {
                 "{arguments:?} : attendu « {attendu} », obtenu « {dit} »"
             );
         }
+    }
+
+    /// `--require-fqdn-helo` se pose, et n'est pas posé par défaut.
+    ///
+    /// **LE DÉFAUT EST LE SILENCE.** Ce drapeau fait refuser du courrier ; un
+    /// serveur ne doit se mettre à en refuser que parce que quelqu'un l'a
+    /// écrit. L'essai tient donc les deux moitiés : posé, il vaut vrai ; absent,
+    /// il vaut faux, et la configuration écrite le porte jusqu'au fichier.
+    #[test]
+    fn l_exigence_de_helo_qualifie_se_pose_et_ne_s_invente_pas() {
+        let pose = ecrire(&["--require-fqdn-helo"]);
+        assert!(pose.require_fqdn_helo);
+        assert!(pose.en_configuration().require_fqdn_helo);
+
+        let tu = ecrire(&[]);
+        assert!(!tu.require_fqdn_helo, "le défaut n'exige rien");
+        assert!(!tu.en_configuration().require_fqdn_helo);
     }
 
     /// **ET IL ACCEPTE LA CONFIGURATION COMPLÈTE**, port par défaut compris.

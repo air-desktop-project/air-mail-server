@@ -964,6 +964,14 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         eprintln!("air-mail-server : {dit}");
     }
     let config = config.with_sender_policy(politique_expediteur);
+    let config = config.with_fqdn_helo(options.require_fqdn_helo);
+    if options.require_fqdn_helo {
+        eprintln!(
+            "air-mail-server : un `HELO`/`EHLO` NON QUALIFIÉ est refusé (550) — c'est ce que \
+             les robots annoncent. Un littéral d'adresse passe toujours, et le nom n'est JAMAIS \
+             comparé à l'adresse du pair : §4.1.4 de RFC 5321 l'interdit."
+        );
+    }
     // **UN COMPTEUR ÉTEINT QU'ON CROIT ALLUMÉ EST PIRE QU'UN COMPTEUR ABSENT.**
     // Ce seuil a été AJOUTÉ au schéma : une configuration écrite avant lui décode
     // zéro, et zéro l'éteint. L'exploitant doit l'apprendre au démarrage, et non

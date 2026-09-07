@@ -317,6 +317,7 @@ fn statut_de(code: Code, texte: &[u8]) -> Option<Status> {
         b"Authentication successful" => Some(Status::SECURITY_OK),
         b"Mailbox unavailable" => Some(Status::MAILBOX_UNAVAILABLE),
         b"Relay access denied"
+        | b"Helo command requires a fully-qualified hostname"
         | b"Message rejected"
         | b"Encryption required for authentication"
         | b"Authentication credentials invalid" => Some(Status::POLICY),
@@ -1071,6 +1072,10 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         client_id: &ClientId<'_>,
         out: &'b mut [u8],
     ) -> Result<Turn<'b>, Error> {
+        // Le refus précède tout effet — voir `on_helo`.
+        if !self.helo_recevable(client_id) {
+            return self.helo_refuse(out);
+        }
         // RFC 5321 §4.1.4 : `EHLO` annule la transaction en cours.
         self.quitter_la_transaction();
         self.esmtp = true;
@@ -1152,6 +1157,42 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         })
     }
 
+    /// Le nom annoncé est-il PLEINEMENT QUALIFIÉ, quand on l'exige ?
+    ///
+    /// # CE QUE CETTE GARDE REFUSE, ET CE QU'ELLE LAISSE PASSER
+    ///
+    /// Un nom sans point — `localhost`, `mail`, `pc-de-jean` — n'est pas le nom
+    /// primaire que §4.1.4 de RFC 5321 demande. Le refuser est permis : « If the
+    /// EHLO command is not acceptable to the SMTP server, 501, 500, 502, or 550
+    /// failure replies MUST be returned as appropriate. »
+    ///
+    /// **UN LITTÉRAL D'ADRESSE PASSE TOUJOURS.** La même section le RECOMMANDE
+    /// à qui n'a pas de nom : « an address literal SHOULD be substituted for the
+    /// domain name ». Refuser ce que la RFC conseille serait refuser les
+    /// émetteurs les mieux intentionnés — et ce serait le contraire du but.
+    ///
+    /// **ET L'ON NE COMPARE PAS LE NOM À L'IP.** La même section l'interdit :
+    /// « if the verification fails, the server MUST NOT refuse to accept a
+    /// message on that basis. » Ce contrôle est de forme, pas de véracité.
+    fn helo_recevable(&self, client_id: &ClientId<'_>) -> bool {
+        if !self.config.require_fqdn_helo() {
+            return true;
+        }
+        match client_id {
+            ClientId::AddressLiteral(_) => true,
+            ClientId::Domain(nom) => nom.contains(&b'.'),
+        }
+    }
+
+    /// Le refus d'un `HELO` non qualifié.
+    fn helo_refuse<'b>(&self, out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
+        self.refus(
+            Code::MAILBOX_UNAVAILABLE,
+            b"Helo command requires a fully-qualified hostname",
+            out,
+        )
+    }
+
     /// `HELO` — accepte, mais n'annonce rien.
     ///
     /// Une session `HELO` n'a donc ni `STARTTLS` ni `AUTH` : elle ne peut que
@@ -1159,6 +1200,14 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     /// `HELO` ; ce qu'une telle session a le droit de faire releve de la
     /// politique de relais, pas de cette couche.
     fn on_helo<'b>(&mut self, nom: &[u8], out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
+        // **LE REFUS PRÉCÈDE TOUT EFFET.** §4.1.4 : « The SMTP server MUST stay
+        // in the same state after transmitting these replies that it was in
+        // before the EHLO was received. » Annuler la transaction d'abord et
+        // refuser ensuite laisserait la session dans un état qu'elle n'aurait
+        // pas dû quitter.
+        if !self.helo_recevable(&ClientId::Domain(nom)) {
+            return self.helo_refuse(out);
+        }
         self.quitter_la_transaction();
         self.esmtp = false;
         // `HELO` ne porte qu'un nom de domaine : la grammaire l'a déjà validé.
@@ -4592,6 +4641,118 @@ mod tests {
             session.submitter(),
             None,
             "l'identité a survécu au chiffrement"
+        );
+    }
+
+    // ── Le `HELO` pleinement qualifié (RFC 5321 §4.1.4) ─────────────────────
+
+    /// Une session qui EXIGE un nom pleinement qualifié.
+    fn exigeante() -> SmtpSession<'static, Verdict> {
+        SmtpSession::new(
+            config().with_fqdn_helo(true),
+            Verdict(RecipientVerdict::Accept),
+        )
+    }
+
+    #[test]
+    fn un_helo_nu_est_refuse_quand_on_exige_la_qualification() {
+        let mut session = exigeante();
+        // C'est très exactement ce que les robots annoncent.
+        for nu in [&b"localhost"[..], b"mail", b"pc-de-jean"] {
+            let mut ligne = std::vec::Vec::from(&b"HELO "[..]);
+            ligne.extend_from_slice(nu);
+            ligne.extend_from_slice(b"\r\n");
+            let reponse = jouer(&mut session, &ligne);
+            assert!(
+                reponse.starts_with("550 5.7.1 Helo command requires"),
+                "{nu:?} : {reponse}"
+            );
+        }
+        // Et `EHLO` refuse pareillement.
+        assert!(
+            jouer(&mut session, b"EHLO localhost\r\n").starts_with("550 5.7.1 "),
+            "EHLO"
+        );
+    }
+
+    #[test]
+    fn un_nom_qualifie_passe_l_exigence() {
+        let mut session = exigeante();
+        assert!(jouer(&mut session, b"HELO client.example\r\n").starts_with("250"));
+        assert!(jouer(&mut session, b"EHLO client.example\r\n").starts_with("250"));
+    }
+
+    /// §4.1.4 RECOMMANDE le littéral d'adresse à qui n'a pas de nom : « an
+    /// address literal SHOULD be substituted for the domain name ». Le refuser
+    /// serait refuser ce que la RFC conseille.
+    ///
+    /// **ET SEUL `EHLO` LE PREND.** La grammaire de §4.1.1.1 dit `helo = "HELO"
+    /// SP Domain CRLF` mais `ehlo = "EHLO" SP ( Domain / address-literal )` : un
+    /// littéral au `HELO` est une faute de syntaxe, pas une faute de politique.
+    /// L'essai le montre en le comparant à la session qui n'exige rien : la
+    /// réponse est la MÊME des deux côtés, donc l'exigence n'y est pour rien.
+    #[test]
+    fn un_litteral_d_adresse_passe_toujours_l_exigence() {
+        let mut exigeante = exigeante();
+        assert!(
+            jouer(&mut exigeante, b"EHLO [IPv6:2001:db8::1]\r\n").starts_with("250"),
+            "EHLO littéral sous exigence"
+        );
+        assert!(
+            jouer(&mut exigeante, b"EHLO [192.0.2.1]\r\n").starts_with("250"),
+            "EHLO littéral IPv4 sous exigence"
+        );
+
+        // `HELO [192.0.2.1]` : 501 de grammaire, et non 550 de politique.
+        let mut permissive = acceptante();
+        let faute = jouer(&mut permissive, b"HELO [192.0.2.1]\r\n");
+        assert!(faute.starts_with("501 5.5.2 "), "{faute}");
+        assert_eq!(jouer(&mut exigeante, b"HELO [192.0.2.1]\r\n"), faute);
+    }
+
+    /// L'exigence est un CHOIX : par défaut, le nom nu passe. Un serveur qui
+    /// n'a rien demandé ne doit pas se mettre à refuser du courrier.
+    #[test]
+    fn sans_l_exigence_le_nom_nu_passe() {
+        let mut session = acceptante();
+        assert!(jouer(&mut session, b"HELO localhost\r\n").starts_with("250"));
+        assert!(jouer(&mut session, b"EHLO localhost\r\n").starts_with("250"));
+    }
+
+    /// **LE REFUS NE DOIT RIEN CHANGER.** §4.1.4 : « The SMTP server MUST stay
+    /// in the same state after transmitting these replies that it was in before
+    /// the EHLO was received. » Un `EHLO` accepté annule la transaction ; un
+    /// `EHLO` REFUSÉ doit la laisser entière, destinataires compris.
+    #[test]
+    fn un_helo_refuse_laisse_la_transaction_entiere() {
+        let mut session = exigeante();
+        jouer(&mut session, b"EHLO client.example\r\n");
+        jouer(&mut session, b"MAIL FROM:<jean@client.example>\r\n");
+        jouer(&mut session, b"RCPT TO:<paul@example.com>\r\n");
+        assert_eq!(destinataires(&session).len(), 1, "avant le refus");
+
+        assert!(jouer(&mut session, b"EHLO localhost\r\n").starts_with("550"));
+        assert_eq!(
+            destinataires(&session),
+            ["paul@example.com"],
+            "après le refus"
+        );
+        assert!(jouer(&mut session, b"HELO localhost\r\n").starts_with("550"));
+        assert_eq!(destinataires(&session), ["paul@example.com"], "après HELO");
+
+        // La transaction est donc toujours remettable.
+        assert!(jouer(&mut session, b"DATA\r\n").starts_with("354"));
+    }
+
+    /// Le refus est PERMANENT : qui annonce `localhost` ne doit pas revenir.
+    #[test]
+    fn le_refus_du_helo_nu_est_une_politique() {
+        assert_eq!(
+            super::statut_de(
+                Code::MAILBOX_UNAVAILABLE,
+                b"Helo command requires a fully-qualified hostname"
+            ),
+            Some(Status::POLICY)
         );
     }
 }

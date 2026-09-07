@@ -141,6 +141,8 @@ struct Entree {
     ecoutes_pop3: Vec<(String, bool)>,
     /// Le TLS est-il implicite sur l'écoute IMAP ?
     imap_implicite: bool,
+    /// Exige-t-on un `HELO` pleinement qualifié ?
+    helo_qualifie: bool,
 }
 
 /// Traduit des écoutes tirées de l'entrée en ce que la configuration retient.
@@ -169,6 +171,7 @@ fuzz_target!(|entree: Entree| {
         imap_listeners: en_ecoutes(&entree.ecoutes_imap),
         pop3_listeners: en_ecoutes(&entree.ecoutes_pop3),
         imap_implicit_tls: entree.imap_implicite,
+        require_fqdn_helo: entree.helo_qualifie,
         maildir: entree.maildir.clone(),
         hosted: entree.hosted.clone(),
         max_recipients: entree.max_recipients,

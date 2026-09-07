@@ -91,6 +91,7 @@ Le paquet **n'active ni ne démarre le service** — c'est délibéré, et
         --tls-key  /etc/letsencrypt/live/mail.narro.ch/privkey.pem \
         --relay --queue-spool /var/spool/ams/file \
         --queue-expire-seconds 86400 \
+        --require-fqdn-helo \
         --dkim-selector mail --dkim-key /var/lib/rspamd/dkim/narro.ch.mail.key \
         --resolver 127.0.0.53 \
         --public-suffix-list /usr/share/publicsuffix/public_suffix_list.dat \
@@ -101,6 +102,13 @@ Le paquet **n'active ni ne démarre le service** — c'est délibéré, et
 
 **CETTE COMMANDE VIENT DE L'INVENTAIRE**, valeur par valeur, et chacune a une
 raison :
+
+**`--require-fqdn-helo` N'EST PAS UN DURCISSEMENT**, c'est une restauration :
+l'inventaire montre `reject_non_fqdn_helo_hostname` dans les
+`smtpd_helo_restrictions` de Postfix. L'omettre rendrait le remplaçant PLUS
+PERMISSIF que le remplacé le jour de la bascule, et un serveur plus permissif
+n'alerte personne — il encaisse. `docs/plan-anti-abus.md` porte les trois autres
+contrôles que Postfix applique et que le produit ne sait pas encore rendre.
 
 | | |
 |---|---|

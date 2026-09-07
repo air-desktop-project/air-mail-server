@@ -368,6 +368,11 @@ pub struct Configuration {
     pub accounts: String,
     /// La file de réémission sortante.
     pub relay: Relay,
+    /// Exige-t-on un `HELO`/`EHLO` pleinement qualifié ?
+    ///
+    /// **Faux par défaut** : un serveur qui se met à refuser ce qu'il acceptait
+    /// hier doit le faire parce que quelqu'un l'a décidé.
+    pub require_fqdn_helo: bool,
     /// La file d'attente du serveur.
     pub queue: Queue,
     /// MTA-STS (RFC 8461).
@@ -865,6 +870,9 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
         listen_h3: ecoute_h3,
         token_key: clef_de_jeton,
         relay,
+        // **UN FICHIER ÉCRIT AVANT CE CHAMP DÉCODE FAUX**, et faux veut dire
+        // « on accepte comme avant » : une mise à jour ne refuse personne.
+        require_fqdn_helo: lu.get_require_fqdn_helo(),
         queue,
         mtasts,
         tlsrpt,
@@ -1002,6 +1010,7 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
         ecrit.set_listen_http(&config.listen_http);
         ecrit.set_listen_h3(&config.listen_h3);
         ecrit.set_token_key(&config.token_key);
+        ecrit.set_require_fqdn_helo(config.require_fqdn_helo);
         {
             let mut emission = ecrit.reborrow().init_relay();
             emission.set_enabled(config.relay.enabled);
@@ -1204,6 +1213,8 @@ mod tests {
         Configuration {
             domain: String::from("mail.example.com"),
             listen: String::from("127.0.0.1:2525"),
+            // Le témoin n'exige rien : c'est le défaut du produit.
+            require_fqdn_helo: false,
             // Les trois écoutes d'un serveur réel : le `25` et le `587` en
             // `STARTTLS`, le `465` en TLS implicite.
             smtp_listeners: vec![
@@ -2086,6 +2097,27 @@ mod tests {
         let relue = decode(&octets).expect("relisible");
         assert_eq!(relue.mtasts, voulu);
         assert_eq!(relue, config);
+    }
+
+    /// L'exigence de `HELO` qualifié traverse le format binaire.
+    ///
+    /// **ET UN FICHIER ÉCRIT AVANT CE CHAMP LA REND FAUSSE.** Cap'n Proto rend
+    /// zéro pour un champ absent, et zéro vaut `false` : une configuration
+    /// d'hier continue d'accepter ce qu'elle acceptait hier. C'est la seule
+    /// valeur par défaut acceptable pour un refus.
+    #[test]
+    fn l_exigence_de_helo_qualifie_traverse_le_format() {
+        let config = Configuration {
+            require_fqdn_helo: true,
+            ..exemple()
+        };
+        let relue = decode(&encode(&config).expect("encodable")).expect("relisible");
+        assert!(relue.require_fqdn_helo);
+        assert_eq!(relue, config);
+
+        // Et le défaut se relit faux.
+        let muette = decode(&encode(&exemple()).expect("encodable")).expect("relisible");
+        assert!(!muette.require_fqdn_helo);
     }
 
     /// **UN CHEMIN QUI N'EST PAS DE L'UTF-8 FAIT REFUSER LE FICHIER.**
