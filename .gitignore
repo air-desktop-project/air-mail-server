@@ -46,3 +46,7 @@ desktop.ini
 # sortie par défaut. Un binaire de vingt-quatre mébioctets dans un commit se
 # remarque tard, et ne se retire jamais vraiment d'un historique.
 *.deb
+
+# Python compile ce qu'il importe ; rien de cela n'appartient au dépôt.
+__pycache__/
+*.pyc
