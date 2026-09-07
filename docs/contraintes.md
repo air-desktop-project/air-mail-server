@@ -13520,3 +13520,111 @@ DANE ne s'engage pas. Retirer le contrôle la fait tomber, et elle seule.
 **Ce n'est pas la relecture qui l'a trouvé.** Les quatre épreuves étaient
 lisibles, motivées, et vertes. Il a fallu casser le produit pour découvrir
 qu'elles ne regardaient qu'un des deux contrôles.
+
+
+## B3 : un blocage qu'on croyait logistique, et qui était technique
+
+Le blocage B3 — « la première remise de production » — était classé HORS MANDAT
+parce qu'il « engage un domaine et une machine ». C'était vrai, et c'était aussi
+une façon de ne pas regarder.
+
+La cible nommée le 2026-09-07 est `mail.narro.ch` : un VPS OVH qui sert Postfix
+sur 25, 587 et 465, et Dovecot sur 993 seulement. Tout cela s'est établi **de
+l'extérieur**, sans ouvrir une seule connexion sur la machine : des bannières,
+des `EHLO`, et le DNS.
+
+### Les deux défauts que personne n'aurait vus sans monter le montage
+
+Je n'ai pas raisonné sur la faisabilité. J'ai fabriqué un Maildir aux noms que
+Dovecot écrit RÉELLEMENT — `,S=<taille>` sur chaque message, `,W=<vtaille>`
+souvent — et je l'ai servi.
+
+**1. Le serveur refusait de démarrer.**
+
+    air-mail-server : boîte de `alice` : nom de fichier :
+                      la partie unique porte déjà un champ `U=` ou `S=`
+
+`compose` se réserve `U=` et `S=`, et refuse une partie unique qui en porte déjà
+— à juste titre : le nom en aurait deux, et si celui de l'autre est mal formé, la
+relecture échouerait alors que le nôtre est parfait. Ce refus a été trouvé par
+`fuzz_ams_index_name`, et il est BON.
+
+Ce qui était faux, c'est qu'`adopter` lui passait la partie unique telle quelle.
+Or l'adoption est précisément le chemin par lequel une boîte VENUE D'AILLEURS
+entre. **La fonction qui existe pour reprendre le magasin d'un autre serveur
+était la seule à ne pas pouvoir le faire.**
+
+`sans_champs_reserves` dépouille `U=` et `S=` — dont ce serveur récrit la valeur
+juste après, et dont le sens est le même partout — et PRÉSERVE le reste. Le `W=`
+de Dovecot survit ; un champ qu'un outil futur poserait survivrait aussi. Un
+essai le vérifie avec une taille déclarée FAUSSE : le nom composé porte la vraie,
+relue sur le disque, et une seule.
+
+**2. Un message au nom illisible disparaissait en silence.**
+
+Les drapeaux Maildir se rangent dans l'ordre ASCII. Un `:2,RSF` — au lieu de
+`:2,FRS` — n'est ni servi, ni adopté, ni effacé : le fichier reste sur le disque,
+et `IMAP` répond `EXISTS 2` là où il y a trois messages. Le journal ne disait
+rien.
+
+`MailboxSummary.unreadable` comptait pourtant déjà ces noms. Personne ne les
+imprimait. **Un compteur qu'on n'imprime pas ne compte pour personne.**
+
+En fonctionnement normal cela n'arrive jamais : ce serveur écrit lui-même ses
+noms. À une MIGRATION, c'est autre chose — le courrier vient d'un magasin qu'un
+autre outil a rempli. Le défaut ne pouvait donc apparaître qu'ici, et il aurait
+fait perdre du courrier sans que rien ne le dise.
+
+### Ce que le compteur du démarrage ne dit pas, et qui le dit
+
+Il ne porte que sur l'INBOX : les sous-dossiers sont des `Maildir` à eux, ouverts
+à la première demande, et les parcourir tous à chaque démarrage coûterait un
+`readdir` par dossier et par compte pour un contrôle qui n'a de sens qu'une fois.
+
+C'est `docs/migration/verifier.sh` qui fait l'audit complet, dossier par dossier,
+et qui compare l'ancien magasin au neuf. **Il refuse la bascule** sur un écart de
+décompte comme sur un seul nom illisible.
+
+Sa première écriture imprimait « OK : aucun écart » après avoir signalé un nom
+illisible — le défaut exact que `check-installation.sh` portait le matin même. Un
+« OK » inconditionnel y coûterait plus cher : on basculerait en croyant n'avoir
+rien perdu.
+
+### Ce qui reste, et qui n'est pas technique
+
+Les empreintes de mots de passe ne se migrent pas. `account add` lit un mot de
+passe en clair et le hache en argon2id ; il n'importe rien. Une empreinte Dovecot
+ne se convertit pas — c'est tout l'objet d'une fonction de hachage.
+
+Trois issues, et le choix revient à l'exploitant : réinitialiser, faire choisir
+d'avance, ou apprendre au produit à lire les empreintes Dovecot. La troisième
+serait un ajout, pas un réglage, et affaiblirait une propriété affichée.
+
+### Deux régressions de compatibilité, mesurées et dites
+
+Postfix annonce `AUTH LOGIN` et `SMTPUTF8` ; air-mail-server n'offre ni l'un ni
+l'autre. Un client réglé explicitement sur `LOGIN` échouera, et une adresse
+d'enveloppe non-ASCII sera refusée. Les deux sont dans le document destiné aux
+utilisateurs, à l'endroit où ils se manifesteront.
+
+En échange, `VRFY` est DÉCLINÉ là où Postfix l'offre : c'est un gain, `VRFY`
+servant à moissonner des adresses.
+
+### `pkill -f` a de nouveau tué mon propre shell
+
+Déjà arrivé dans cette séance, déjà consigné, et refait quand même : le motif
+`-f` correspond à la ligne de commande du shell qui l'invoque. `ps -C
+air-mail-server` nomme le PROCESSUS et non la ligne, et ne peut pas se prendre
+lui-même. **Une leçon consignée mais non outillée est une leçon à moitié
+apprise** — c'est le même constat que pour clippy, qui comptait parmi les dix
+barrières sans avoir de script.
+
+### B4 s'appelait mal
+
+« Les services commerciaux » ne désignait rien d'utile — le mot laissait croire à
+une question de licence. Il s'agit des **grands hébergeurs** : Gmail,
+Microsoft 365, Proton, Fastmail. Ce qu'ils exigent en plus n'est pas du
+protocole, c'est de la réputation, et cela ne s'éprouve pas sans émettre.
+
+B3 le lèvera donc, et c'est pourquoi les deux allaient ensemble sans qu'on l'ait
+remarqué.

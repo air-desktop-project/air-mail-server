@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use ams_index::{
     Flags, MailboxState, MailboxSummary, MessageName, Uid, UidValidity, compose, reconcile,
-    reserved_watermark, summarise,
+    reserved_watermark, sans_champs_reserves, summarise,
 };
 
 use crate::Error;
@@ -463,7 +463,15 @@ impl Maildir {
                     .map_or(0, |donnees| donnees.len());
                 let mut tampon = [0_u8; NOM_MAX];
                 let flags = lu.has_info().then(|| lu.flags());
-                let ecrits = compose(&mut tampon, lu.unique(), uid, taille, flags)?;
+                // **ON RETIRE `S=` AVANT DE RECOMPOSER**, sans quoi le nom en
+                // porterait deux et `compose` refuserait. Dovecot en écrit un
+                // sur CHAQUE message ; sans cette ligne, pointer ce serveur sur
+                // une boîte venue d'ailleurs le faisait REFUSER DE DÉMARRER, et
+                // aucune migration n'était possible. Le `W=` de Dovecot, lui,
+                // est préservé : il ne nous appartient pas.
+                let mut propre = [0_u8; NOM_MAX];
+                let net = sans_champs_reserves(&mut propre, lu.unique())?;
+                let ecrits = compose(&mut tampon, &propre[..net], uid, taille, flags)?;
                 let nouveau = repertoire.join(nom_de_fichier(&tampon[..ecrits]));
                 let _ = fs::rename(repertoire.join(nom_de_fichier(&ancien)), nouveau);
             }
@@ -694,6 +702,120 @@ mod tests {
     use super::{Maildir, flags_of};
     use crate::Error;
     use ams_index::{Flags, MessageName, Uid, UidValidity};
+
+    /// **UNE BOÎTE ÉCRITE PAR DOVECOT S'OUVRE, ET GARDE SES DRAPEAUX.**
+    ///
+    /// # Le défaut que cet essai ferme
+    ///
+    /// Dovecot écrit `,S=<taille>` sur CHAQUE message, et souvent `,W=<vtaille>`.
+    /// `compose` refuse une partie unique qui porte déjà `S=` — à juste titre,
+    /// le nom composé en aurait deux — et `adopter` lui passait la partie unique
+    /// TELLE QUELLE. Ouvrir une boîte venue de Dovecot rendait donc une erreur,
+    /// et le binaire REFUSAIT DE DÉMARRER :
+    ///
+    /// ```text
+    /// air-mail-server : boîte de `alice` : nom de fichier :
+    ///                   la partie unique porte déjà un champ `U=` ou `S=`
+    /// ```
+    ///
+    /// Aucune migration depuis Postfix + Dovecot n'était possible. Mesuré le
+    /// 2026-09-07, en montant un Maildir aux noms que Dovecot écrit vraiment.
+    #[test]
+    fn une_boite_ecrite_par_dovecot_s_adopte() {
+        let temporaire = Ephemere::nouveau();
+        for sous in ["cur", "new", "tmp"] {
+            std::fs::create_dir_all(temporaire.0.join(sous)).expect("créé");
+        }
+        // Les noms que Dovecot écrit : `,S=` toujours, `,W=` souvent, et les
+        // drapeaux dans l'ordre ASCII.
+        let lu = "1725000000.M123456P789.mail.narro.ch,S=999,W=13:2,S";
+        let neuf = "1725000001.M223456P790.mail.narro.ch,S=999,W=13";
+        let marque = "1725000002.M323456P791.mail.narro.ch,S=999,W=13:2,FRS";
+        std::fs::write(temporaire.0.join("cur").join(lu), b"Bonjour.\r\n\r\n").expect("écrit");
+        std::fs::write(temporaire.0.join("new").join(neuf), b"Bonjour.\r\n\r\n").expect("écrit");
+        std::fs::write(temporaire.0.join("cur").join(marque), b"Bonjour.\r\n\r\n").expect("écrit");
+
+        let boite = Maildir::open(&temporaire.0, b"mail.narro.ch", VALIDITE).expect("ouvrable");
+        let resume = boite.summary().expect("résumé");
+
+        // LES TROIS SONT LÀ, ET AUCUN N'EST ILLISIBLE.
+        assert_eq!(resume.numbered, 3, "trois messages adoptés");
+        assert_eq!(resume.unnumbered, 0, "aucun ne reste sans UID");
+        assert_eq!(resume.unreadable, 0, "aucun nom refusé");
+
+        // LES DRAPEAUX ONT SURVÉCU, et le `W=` de Dovecot aussi.
+        let mut vus = std::vec::Vec::new();
+        for sous in ["cur", "new"] {
+            for entree in std::fs::read_dir(temporaire.0.join(sous)).expect("lu") {
+                let nom = entree.expect("entrée").file_name();
+                let nom = nom.to_string_lossy().into_owned();
+                let drapeaux = {
+                    let lu = MessageName::parse(nom.as_bytes()).expect("lisible");
+                    assert!(lu.uid().is_some(), "sans UID après adoption : {nom}");
+                    lu.flags()
+                };
+                assert!(
+                    nom.contains("W=13"),
+                    "le `W=` de Dovecot a été jeté : {nom}"
+                );
+                // **UN SEUL `S=`, ET C'EST LE NÔTRE.** Le fichier fait douze
+                // octets ; Dovecot en annonçait neuf cent quatre-vingt-dix-neuf.
+                // Garder le sien ferait un nom à deux tailles, dont la fausse.
+                assert_eq!(
+                    nom.matches(",S=").count(),
+                    1,
+                    "le nom porte deux tailles : {nom}"
+                );
+                assert!(
+                    nom.contains(",S=12"),
+                    "la taille n'est pas la vraie : {nom}"
+                );
+                assert!(
+                    !nom.contains("S=999"),
+                    "la taille annoncée par Dovecot a été crue : {nom}"
+                );
+                vus.push((nom, drapeaux));
+            }
+        }
+        vus.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(vus.len(), 3);
+        assert!(vus[0].1.contains(Flags::SEEN), "le lu a perdu son `\\Seen`");
+        assert_eq!(vus[1].1, Flags::NONE, "le neuf a gagné un drapeau");
+        assert!(
+            vus[2].1.contains(Flags::SEEN)
+                && vus[2].1.contains(Flags::REPLIED)
+                && vus[2].1.contains(Flags::FLAGGED),
+            "les trois drapeaux du troisième n'ont pas survécu : {:?}",
+            vus[2].1
+        );
+    }
+
+    /// **UN NOM QUE LA GRAMMAIRE REFUSE SE COMPTE**, et ne devient pas un
+    /// message.
+    ///
+    /// Les drapeaux Maildir se lisent dans l'ordre ASCII. `:2,RSF` n'y est pas,
+    /// et le fichier n'est alors ni servi, ni adopté, ni effacé — il reste sur
+    /// le disque, INVISIBLE. Le binaire l'ANNONCE désormais au démarrage ; c'est
+    /// ce compteur-ci qui le lui dit.
+    #[test]
+    fn un_nom_hors_grammaire_se_compte_et_ne_se_sert_pas() {
+        let temporaire = Ephemere::nouveau();
+        for sous in ["cur", "new", "tmp"] {
+            std::fs::create_dir_all(temporaire.0.join(sous)).expect("créé");
+        }
+        let bon = "1725000000.M1P2.mail.narro.ch,S=12,W=13:2,FRS";
+        let mauvais = "1725000001.M2P3.mail.narro.ch,S=12,W=13:2,RSF";
+        std::fs::write(temporaire.0.join("cur").join(bon), b"Bonjour.\r\n\r\n").expect("écrit");
+        std::fs::write(temporaire.0.join("cur").join(mauvais), b"Bonjour.\r\n\r\n").expect("écrit");
+
+        let boite = Maildir::open(&temporaire.0, b"mail.narro.ch", VALIDITE).expect("ouvrable");
+        let resume = boite.summary().expect("résumé");
+        assert_eq!(resume.numbered, 1, "un seul message servi");
+        assert_eq!(resume.unreadable, 1, "l'autre doit être COMPTÉ");
+        // ET IL EST TOUJOURS LÀ : on ne l'efface pas, on ne le renomme pas.
+        assert!(temporaire.0.join("cur").join(mauvais).exists());
+    }
+
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};

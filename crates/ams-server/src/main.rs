@@ -1500,6 +1500,37 @@ async fn servir(fichier: &Path) -> Result<(), String> {
             .summary()
             .map_err(|erreur| format!("boîte de `{}` : {erreur}", compte.login))?;
         messages = messages.saturating_add(resume.numbered);
+        // **UN FICHIER QU'ON NE SAIT PAS LIRE NE SE SERT PAS — ET SE DIT.**
+        //
+        // `MailboxSummary` comptait déjà ces noms-là ; personne ne les
+        // imprimait. Un message dont le nom ne se lit pas n'est ni servi, ni
+        // adopté, ni effacé : il reste sur le disque, INVISIBLE. En
+        // fonctionnement normal cela n'arrive pas, puisque ce serveur écrit
+        // lui-même ces noms. À une MIGRATION, c'est autre chose : le courrier
+        // vient d'un magasin qu'un autre outil a rempli, et un nom qu'il aurait
+        // écrit autrement ferait disparaître le message SANS RIEN DIRE.
+        //
+        // Éprouvé le 2026-09-07 : un fichier dont les drapeaux ne sont pas dans
+        // l'ordre ASCII (`:2,RSF` au lieu de `:2,FRS`) rendait `EXISTS 2` là où
+        // le disque portait trois messages, et le journal restait muet.
+        //
+        // **CE COMPTE NE PORTE QUE SUR L'INBOX**, et le dire vaut mieux que de
+        // laisser croire l'inverse : les sous-dossiers sont des `Maildir` à eux,
+        // ouverts à la première demande. Les parcourir tous à chaque démarrage
+        // coûterait un `readdir` par dossier et par compte, pour un contrôle qui
+        // n'a de sens qu'une fois — le jour de la migration. C'est
+        // `docs/migration/verifier.sh` qui l'y fait, dossier par dossier.
+        if resume.unreadable != 0 {
+            eprintln!(
+                "air-mail-server : ATTENTION — boîte de `{}` : {} fichier(s) dont le NOM ne se \
+                 lit pas. Ils ne sont ni servis, ni adoptés, ni effacés : le message est sur le \
+                 disque et INVISIBLE. Un nom Maildir veut ses drapeaux dans l'ordre ASCII \
+                 (`:2,FRS`, pas `:2,RSF`) ; `find {} -type f` les montre.",
+                compte.login,
+                resume.unreadable,
+                racine.display()
+            );
+        }
         boites.insert(compte.login.clone(), Arc::new(boite));
     }
     // La carte n'est PAS close : voir [`Boites::get`]. Un compte ajouté pendant

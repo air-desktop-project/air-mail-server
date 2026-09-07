@@ -163,6 +163,52 @@ impl<'a> MessageName<'a> {
     }
 }
 
+/// Récrit une partie unique SANS les champs qui nous appartiennent.
+///
+/// # POURQUOI CETTE FONCTION EXISTE
+///
+/// Un Maildir écrit par un autre serveur porte presque toujours un `,S=` :
+/// Dovecot l'écrit sur CHAQUE message, Courier aussi. [`compose`] refuse une
+/// partie unique qui en porte un — à juste titre, car le nom composé en aurait
+/// alors deux — si bien qu'une boîte venue d'ailleurs ne pouvait pas être
+/// ADOPTÉE. Le 2026-09-07, pointer ce serveur sur un Maildir Dovecot le faisait
+/// REFUSER DE DÉMARRER :
+///
+/// ```text
+/// air-mail-server : boîte de `alice` : nom de fichier :
+///                   la partie unique porte déjà un champ `U=` ou `S=`
+/// ```
+///
+/// # CE QU'ELLE JETTE, ET CE QU'ELLE GARDE
+///
+/// Elle ne jette que `U=` et `S=`, dont ce serveur récrit la valeur juste après
+/// et dont le sens est le MÊME partout : l'identifiant et la taille. Tout le
+/// reste est préservé — le `W=` de Dovecot (la taille en `CRLF`), et n'importe
+/// quel champ qu'un outil futur aurait posé. Les jeter serait faire perdre à cet
+/// outil ce qu'il y avait mis, ce que la boucle de [`MessageName::parse`]
+/// s'interdit déjà explicitement.
+///
+/// La base — ce qui précède le premier `,` — n'est jamais touchée : c'est elle
+/// qui rend le nom unique, et deux messages qui la partageraient se
+/// confondraient.
+///
+/// # Errors
+///
+/// [`NameError::BufferTooSmall`] si `out` ne suffit pas.
+pub fn sans_champs_reserves(out: &mut [u8], unique: &[u8]) -> Result<usize, NameError> {
+    let mut curseur = Curseur::new(out);
+    let mut champs = unique.split(|&octet| octet == b',');
+    curseur.pousser(champs.next().unwrap_or_default())?;
+    for champ in champs {
+        if champ.starts_with(b"U=") || champ.starts_with(b"S=") {
+            continue;
+        }
+        curseur.pousser(b",")?;
+        curseur.pousser(champ)?;
+    }
+    Ok(curseur.ecrits())
+}
+
 /// Compose un nom de fichier, et rend le nombre d'octets écrits.
 ///
 /// `flags` à `None` compose un nom pour `new/` — sans information de drapeaux,
@@ -352,8 +398,92 @@ fn lire_u32(octets: &[u8]) -> Result<u32, NameError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MessageName, NameError, Uid, compose};
+    use super::{MessageName, NameError, Uid, compose, sans_champs_reserves};
     use crate::{FlagError, Flags};
+
+    /// **UN MAILDIR VENU D'AILLEURS S'ADOPTE.**
+    ///
+    /// Dovecot écrit `,S=<taille>` sur CHAQUE message, et souvent `,W=<vtaille>`.
+    /// `compose` refuse le premier — à juste titre — si bien qu'aucune boîte
+    /// étrangère ne pouvait être reprise : le serveur REFUSAIT DE DÉMARRER.
+    #[test]
+    fn un_nom_dovecot_se_depouille_de_ce_qui_nous_appartient() {
+        let mut place = [0_u8; 256];
+        let ecrits = sans_champs_reserves(&mut place, b"1725000000.M1P2.mail.narro.ch,S=89,W=92")
+            .expect("dépouillable");
+        assert_eq!(&place[..ecrits], b"1725000000.M1P2.mail.narro.ch,W=92");
+        // ET LE NOM DÉPOUILLÉ SE COMPOSE, ce qui est tout l'objet.
+        let mut nom = [0_u8; 256];
+        let ecrits = compose(
+            &mut nom,
+            &place[..ecrits],
+            Uid::new(7).expect("non nul"),
+            89,
+            Some(Flags::NONE),
+        )
+        .expect("composable");
+        assert_eq!(
+            &nom[..ecrits],
+            b"1725000000.M1P2.mail.narro.ch,W=92,U=7,S=89:2,"
+        );
+    }
+
+    /// **CE QUI NE NOUS APPARTIENT PAS EST GARDÉ**, et dans l'ordre.
+    ///
+    /// Jeter le champ d'un autre outil lui ferait perdre ce qu'il y avait mis —
+    /// ce que la boucle de `parse` s'interdit déjà explicitement.
+    #[test]
+    fn les_champs_des_autres_sont_preserves_dans_l_ordre() {
+        let mut place = [0_u8; 256];
+        let ecrits =
+            sans_champs_reserves(&mut place, b"base,W=1,U=2,X=3,S=4,Y=5").expect("dépouillable");
+        assert_eq!(&place[..ecrits], b"base,W=1,X=3,Y=5");
+    }
+
+    /// **UN NOM QUI N'A RIEN À JETER RESSORT INTACT.**
+    #[test]
+    fn un_nom_sans_champ_reserve_ne_change_pas() {
+        for nom in [
+            &b"1725000000.M1P2.mail.narro.ch"[..],
+            b"base,W=92",
+            b"base,",
+        ] {
+            let mut place = [0_u8; 256];
+            let ecrits = sans_champs_reserves(&mut place, nom).expect("dépouillable");
+            assert_eq!(&place[..ecrits], nom, "{nom:?}");
+        }
+    }
+
+    /// **UN TAMPON TROP COURT EST UNE ERREUR, PAS UNE TRONCATURE.**
+    ///
+    /// Un nom tronqué serait accepté par `parse` et désignerait un AUTRE
+    /// message : la base ne serait plus unique.
+    ///
+    /// Les TROIS endroits où la place peut manquer sont éprouvés : la base, la
+    /// virgule qui sépare, et le champ qu'on préserve. Un seul d'entre eux
+    /// suffisait à faire passer la couverture, et les deux autres seraient
+    /// restés des chemins que rien n'emprunte.
+    #[test]
+    fn un_tampon_trop_court_refuse() {
+        // La base fait 29 octets ; avec `,W=13` il en faut 34.
+        const NOM: &[u8] = b"1725000000.M1P2.mail.narro.ch,S=89,W=13";
+        for taille in [
+            4,  // la base ne tient pas
+            29, // la base tient EXACTEMENT, la virgule non
+            30, // la virgule tient, le champ non
+        ] {
+            let mut place = std::vec![0_u8; taille];
+            assert_eq!(
+                sans_champs_reserves(&mut place, NOM),
+                Err(NameError::BufferTooSmall),
+                "à {taille} octets"
+            );
+        }
+        // Et à 34, il tient tout juste.
+        let mut place = [0_u8; 34];
+        let ecrits = sans_champs_reserves(&mut place, NOM).expect("34 suffisent");
+        assert_eq!(&place[..ecrits], b"1725000000.M1P2.mail.narro.ch,W=13");
+    }
 
     fn compose_dans(tampon: &mut [u8], flags: Option<Flags>) -> Result<usize, NameError> {
         compose(

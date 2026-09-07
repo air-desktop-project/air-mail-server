@@ -79,7 +79,7 @@ mod state;
 mod summary;
 
 pub use flags::{FlagError, Flags};
-pub use name::{MessageName, NameError, Uid, compose};
+pub use name::{MessageName, NameError, Uid, compose, sans_champs_reserves};
 pub use state::{
     MailboxState, Reconciliation, UID_RESERVATION, UidValidity, reconcile, reserved_watermark,
 };
