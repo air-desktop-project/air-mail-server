@@ -326,11 +326,21 @@ journalisé.
 
 **C'est un piège de déploiement pour narro.ch en particulier.** La machine
 résout par `127.0.0.53` — `systemd-resolved`, qui suit vers l'amont configuré
-par l'hébergeur. Si cet amont est un résolveur public, Spamhaus refusera
-chaque question, et le serveur croira n'avoir rien à refuser. La sonde de
-démarrage l'attrape : `2.0.0.127.<zone>` ne répondra pas `127.0.0.2`, et la
-zone sera désarmée avec un message plutôt que d'être silencieusement inutile.
-**À vérifier sur la machine avant d'armer la zone.**
+par l'hébergeur.
+
+Et la règle de Spamhaus, vérifiée à la source, est PLUS STRICTE qu'une
+interdiction : elle EXIGE que les requêtes viennent d'un résolveur récursif
+qu'on fait tourner soi-même, ou d'un résolveur public **supportant ECS**. Un
+amont qui ne remplit ni l'une ni l'autre condition fera refuser chaque question,
+et le serveur croira n'avoir rien à refuser.
+
+La sonde de démarrage l'attrape : `2.0.0.127.<zone>` ne répondra pas
+`127.0.0.2`, et la zone sera désarmée avec un message plutôt que d'être
+silencieusement inutile. **À vérifier sur la machine avant d'armer la zone**, et
+c'est peut-être un résolveur récursif à installer sur box2 plutôt qu'un réglage.
+
+Le code exact du refus de quota est `127.255.255.255` — dans l'intervalle qu'on
+écarte déjà, mais il valait mieux le lire que le supposer.
 
 ### Le reste
 
@@ -348,6 +358,75 @@ zone sera désarmée avec un message plutôt que d'être silencieusement inutile
   produit n'envoie pas de requêtes chez un tiers que l'exploitant n'a pas nommé.
   Pour narro.ch ce sera `zen.spamhaus.org`, la zone qui attrape le plus pour ce
   qu'elle coûte.
+
+## Qui exploite ces listes — recherche du 2026-09-07
+
+La question a été posée : existe-t-il des listes noires DNS tenues par des
+**organismes publics de sécurité informatique** ? La réponse cherchée auprès des
+agences française, britannique, américaine et suisse est **non**, et elle mérite
+d'être écrite ici parce qu'elle ferme une option qu'on aurait pu croire ouverte.
+
+### Aucune agence publique n'opère de DNSBL pour le courrier
+
+Ni l'ANSSI, ni le NCSC britannique, ni la CISA, ni le BACS suisse. Les
+opérateurs de DNSBL sont tous privés ou associatifs. L'ANSSI **recommande** de
+déployer un anti-spam et cite la DNSBL parmi les mécanismes, mais n'en publie
+aucune.
+
+### Ce que les agences font à la place est AUTRE CHOSE
+
+Le « Protective DNS ». Le NCSC britannique le dit sans ambiguïté : « PDNS is a
+recursive resolver » — un résolveur qui refuse de résoudre les domaines
+malveillants. Il protège **la navigation de leurs propres agents**, et non la
+réception du courrier venu d'un tiers.
+
+Le service britannique est créé par le NCSC et **opéré par Cloudflare et
+Accenture** ; obligatoire pour l'administration centrale, ouvert à d'autres
+organismes. Ses règles viennent de « sources commerciales, internes et
+ouvertes », et **sa cadence de mise à jour n'est pas publiée**.
+
+Côté suisse, le NCSC est devenu le **BACS** en janvier 2024, office fédéral
+rattaché au DDPS ; on n'y trouve ni DNSBL ni PDNS public.
+
+### `abuse.ch` ressemble à du public suisse, et n'en est pas
+
+Fondé en 2008 par un chercheur indépendant, et **Spamhaus en est le licencié
+principal depuis août 2022**. Ses plateformes — URLhaus, Feodo Tracker, SSLBL,
+ThreatFox — sont des flux de renseignement sur les menaces, **pas une DNSBL
+SMTP**. Ses statistiques sont rafraîchies toutes les 24 heures.
+
+### La cadence de Spamhaus, elle, est publiée
+
+**La zone DNS de la SBL est reconstruite et rechargée toutes les cinq minutes,
+24 h/24.** C'est un argument dans LES DEUX SENS : une adresse listée à tort
+est écartée cinq minutes après son délistage — y compris la nôtre, le jour où
+narro.ch se retrouverait listé.
+
+Les ajouts suivent des critères publiés. **Les retraits relèvent « de la seule
+décision du Spamhaus Project »**, sur demande du fournisseur d'accès.
+
+### La règle du résolveur est plus stricte que ce document ne le disait
+
+Spamhaus exige que les requêtes viennent **de son propre résolveur récursif**,
+ou d'un résolveur public **supportant ECS**. Ce n'est pas « éviter les
+résolveurs publics » : c'est une exigence positive. Et `127.255.255.255`
+signifie « quota dépassé », non « listé » — ce que l'intervalle de verdict
+`127.0.0.0/24` écarte déjà, mais qu'il fallait vérifier plutôt que supposer.
+
+L'usage gratuit n'a **aucun seuil chiffré publié** : « un volume raisonnable en
+usage non commercial », les grands hébergements partagés étant exclus. À cinq
+boîtes, c'est sans objet.
+
+### L'objection qui reste, et qui n'est pas technique
+
+Il n'existe aucune alternative publique. Armer une liste noire, c'est donc
+**déléguer une décision de refus à un tiers privé, dont les retraits relèvent
+de sa seule discrétion, sans recours.** C'est exactement ce qu'on reprocherait
+à une administration.
+
+Cela ne rend pas le choix mauvais — Postfix le fait chez des millions de gens —
+mais cela le rend politique autant que technique. C'est pourquoi il revient à
+l'exploitant, et pourquoi cette pièce vient APRÈS la bascule, jamais pendant.
 
 ## Ce que cela vaut, honnêtement
 

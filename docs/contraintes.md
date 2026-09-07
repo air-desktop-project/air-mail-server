@@ -14436,3 +14436,50 @@ avec ce que l'essai éprouve.
 C'est la deuxième fois que ce piège se referme sur nous — la première avait
 demandé de réécrire une table d'essai de `Vec<&str>` en `&[&str]`. La règle tient
 en une ligne : **dans ce fichier, on appelle `parse` avec une tranche**.
+
+
+## La marche à suivre était fausse pour la QUATRIÈME fois
+
+`--resolver 127.0.0.53`, sans port. L'option exige une adresse ET un port, et
+`config write` aurait répondu « `127.0.0.53` n'est pas une adresse » le matin du
+19 septembre, Postfix déjà arrêté.
+
+Les trois précédentes : le `rsync` de racine à racine qui n'aurait laissé aucune
+boîte, le retour en arrière qui dupliquait tout message dont un drapeau avait
+bougé, le vérificateur qui coûtait quatre minutes de coupure. Chacune n'aurait
+été visible que le jour J.
+
+**Celle-ci a été trouvée en JOUANT la commande, pas en la relisant.** Je l'avais
+relue quatre fois dans la journée en y ajoutant des options ; le port manquant y
+était depuis le début.
+
+### Le script EXTRAIT la commande, il ne la recopie pas
+
+`docs/migration/repeter-la-configuration.sh` lit `bascule.md`, en tire le bloc
+`config write`, remplace les chemins de production par un arbre jetable, joue la
+commande, puis RELIT la configuration écrite pour vérifier qu'elle porte ce que
+le manuel promet.
+
+L'extraction est tout ce qui le rend utile. Une copie de la commande dériverait
+du manuel sans que rien ne le dise, et l'on éprouverait alors une commande que
+personne ne tapera — c'est le même défaut que le tableau de `README.md` qui
+décrit les cibles de fuzz, et qui est confronté à la liste réelle pour cette
+raison.
+
+**Et il relit, parce qu'une commande acceptée n'est pas une commande qui fait ce
+qu'on croit.** Une option retirée du produit deviendrait « option inconnue » ;
+une option RENOMMÉE qui ne s'appliquerait plus passerait sans un mot.
+
+### Il a été confronté à quatre défauts, dont le vrai
+
+Le port retiré, une exigence supprimée du manuel, la commande renommée, et la
+ligne vidée plutôt que supprimée — qui casse la continuation et tronque la
+commande. Les quatre sont attrapés, et les deux moitiés du script servent : deux
+défauts sont pris à l'exécution, un à l'extraction, un à la relecture.
+
+### Où il vit, et pourquoi pas dans les barrières
+
+Avec `inventaire.sh`, `verifier.sh` et `rapatrier.sh` : c'est un outil de
+MIGRATION, qu'on lance en phase 0, et non une propriété du produit. La phase 0.4
+du manuel le prescrit maintenant en toutes lettres — un contrôle que rien
+n'appelle est un rappel, et un rappel se saute.

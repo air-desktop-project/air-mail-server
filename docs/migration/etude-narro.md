@@ -367,6 +367,10 @@ serveur le même jour rendrait tout diagnostic impossible.
 - `bascule.md` — la marche à suivre, et le retour en arrière.
 - `pour-les-utilisateurs.md` — ce qui change pour eux, à leur transmettre.
 - `verifier.sh` — l'audit qui décide si l'on bascule ou non.
+- `repeter-la-configuration.sh` — **la commande du manuel est-elle encore
+  valable ?** Il l'EXTRAIT de `bascule.md` plutôt que de la recopier — une copie
+  dériverait sans que rien ne le dise — la joue sur un arbre jetable, et relit ce
+  qu'elle a écrit. À lancer avant chaque relecture du manuel.
 - `renommer-dossiers.py` — **les noms de dossiers ne se copient pas tels
   quels**. Dovecot les écrit en UTF-7 modifié sur le disque (`.&AMk-t&AOk--2025`),
   air-mail-server en UTF-8 (`.Été-2025`). Sans traduction, « Éléments envoyés »

@@ -94,6 +94,22 @@ Le paquet **n'active ni ne démarre le service** — c'est délibéré, et
 
 ### 0.4 Une configuration en PORTS HAUTS, sur une COPIE du courrier
 
+**AVANT DE TAPER QUOI QUE CE SOIT, REJOUEZ LA COMMANDE.** Depuis un dépôt de
+développement, et non depuis la machine :
+
+    cargo build --release
+    bash docs/migration/repeter-la-configuration.sh
+
+Il EXTRAIT de ce document la commande ci-dessous, remplace les chemins de
+production par un arbre jetable, la joue, puis relit la configuration écrite pour
+vérifier qu'elle porte bien ce que ce document promet. Il ne touche à rien.
+
+Ce n'est pas une précaution de style. Ce manuel a été faux **quatre fois**, et
+chaque fois d'une façon qui ne se serait vue que le jour J, Postfix déjà arrêté.
+La quatrième — `--resolver 127.0.0.53` sans port — aurait fait REFUSER la
+commande, et elle a été trouvée en la jouant, pas en la relisant.
+
+
     # **LES DEUX SERVEURS NE RANGENT PAS AU MÊME ENDROIT.** Dovecot pose
     #     /var/vmail/narro.ch/<compte>/Maildir
     # là où air-mail-server attend
@@ -124,7 +140,7 @@ Le paquet **n'active ni ne démarre le service** — c'est délibéré, et
         --require-sender-domain \
         --listen-http 0.0.0.0:8443 \
         --dkim-selector mail --dkim-key /var/lib/rspamd/dkim/narro.ch.mail.key \
-        --resolver 127.0.0.53 \
+        --resolver 127.0.0.53:53 \
         --public-suffix-list /usr/share/publicsuffix/public_suffix_list.dat \
         --relayhost smtp.resend.com:465 --relayhost-implicit-tls \
         --relayhost-user «le compte Resend, dans /etc/postfix/sasl_passwd» \
@@ -189,7 +205,7 @@ Les cinq comptes, eux, sont AUTHENTIFIÉS quand ils émettent, donc exemptés :
 rien de ce qu'ils envoient aujourd'hui ne se met à être refusé.
 
 `--require-sender-domain` est le quatrième, et c'est
-`reject_unknown_sender_domain`. Il exige un résolveur — `--resolver 127.0.0.53`
+`reject_unknown_sender_domain`. Il exige un résolveur — `--resolver 127.0.0.53:53`
 est déjà là, l'inventaire l'ayant relevé — et `config write` REFUSE la
 configuration s'il manque, plutôt que d'ajourner tout le courrier en silence.
 
@@ -204,7 +220,7 @@ vraiment le comportement du site, et elle attendra APRÈS la bascule.
 | `--dkim-key /var/lib/rspamd/...` | c'est **rspamd** qui signe aujourd'hui, pas opendkim. La clé publique dérivée de ce fichier est identique à celle que le DNS publie — vérifié. |
 | `--relayhost smtp.resend.com:465` | `relayhost = [smtp.resend.com]:465` avec `smtp_tls_wrappermode = yes`. Le compte et le secret sont dans `/etc/postfix/sasl_passwd`. |
 | `--mta-sts-anchors` | **exigé par `--relayhost`** : on présente un mot de passe, et sans autorités on ne saurait pas à qui. |
-| `--resolver 127.0.0.53` | `systemd-resolved` écoute là. **`--relay` sans résolveur fait REFUSER le démarrage**, et c'est heureux. |
+| `--resolver 127.0.0.53:53` | `systemd-resolved` écoute là. **`--relay` sans résolveur fait REFUSER le démarrage**, et c'est heureux. |
 
 **Le compte sous lequel tourne le serveur doit lire deux fichiers que root seul
 possède** : `privkey.pem` et la clé DKIM de rspamd. Un groupe, ou un
