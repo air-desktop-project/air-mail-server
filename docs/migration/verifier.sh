@@ -73,7 +73,11 @@ for boite in "$racine"/*/; do
     read -r n d <<< "$(compter "$boite")"
     total_neuf=$((total_neuf + n))
     illisibles=$((illisibles + d))
-    ligne=$(printf '  %-24s %6d message(s)' "$compte" "$n")
+    # **LE TOTAL DU COMPTE INCLUT LES SOUS-DOSSIERS**, et le dire évite de les
+    # additionner. La première écriture affichait « alice 12 » puis « Sent 3,
+    # Trash 1 » : on comptait seize. Un outil dont le métier est de rendre
+    # confiant avant une bascule ne peut pas laisser cette ambiguïté.
+    ligne=$(printf '  %-24s %6d au total' "$compte" "$n")
     [ "$d" -gt 0 ] && ligne="$ligne — $d ILLISIBLE(S)"
 
     if [ -n "$ancienne" ] && [ -d "$ancienne/$compte" ]; then
@@ -87,6 +91,14 @@ for boite in "$racine"/*/; do
         fi
     fi
     echo "$ligne"
+
+    # L'INBOX seule : ce que le compte porte hors de ses sous-dossiers.
+    inbox=0
+    for d in cur new; do
+        [ -d "$boite$d" ] || continue
+        inbox=$((inbox + $(find "$boite$d" -maxdepth 1 -type f 2>/dev/null | wc -l)))
+    done
+    printf '      %-20s %6d\n' "INBOX" "$inbox"
 
     # Le détail par dossier IMAP, qui est là où un `.Sent` oublié se voit.
     for sous in "$boite".*/; do

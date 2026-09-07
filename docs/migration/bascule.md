@@ -213,9 +213,20 @@ mot de passe oublié, un client réglé sur `AUTH LOGIN` (il se reconfigure).
 
     # 2. RAPATRIER LE COURRIER ARRIVÉ DEPUIS LA BASCULE.
     #    C'est l'étape qu'on oublie, et la seule qui perde quelque chose.
-    #    `--ignore-existing` ne recopie QUE ce qui est neuf : les messages que
-    #    l'ancien magasin porte déjà gardent leurs drapeaux d'origine.
-    sudo rsync -aH --ignore-existing /var/vmail-ams/ /var/vmail/
+    #
+    #    **PAS AVEC `rsync --ignore-existing`.** Cette page l'a prescrit, et la
+    #    répétition sur banc a montré que c'était faux : `--ignore-existing`
+    #    compare des CHEMINS, or lire un message change son nom ET son dossier
+    #    (`new/1725…` devient `cur/1725…:2,S`). Chaque message dont un drapeau a
+    #    bougé pendant la fenêtre se retrouvait DEUX FOIS dans l'ancien magasin,
+    #    une fois lu et une fois non lu. Un doublon visible par l'utilisateur,
+    #    pendant un retour en arrière.
+    #
+    #    `rapatrier.sh` compare la PARTIE UNIQUE du nom Maildir, qui ne change
+    #    ni quand on lit, ni quand on étiquette, ni quand un serveur donne un
+    #    UID. Sans `--pour-de-vrai`, il n'écrit rien et dit ce qu'il ferait.
+    bash rapatrier.sh /var/vmail-ams /var/vmail            # à blanc, d'abord
+    bash rapatrier.sh /var/vmail-ams /var/vmail --pour-de-vrai
     sudo chown -R vmail:vmail /var/vmail
 
     # 3. Remettre l'ancien en marche.
@@ -234,7 +245,9 @@ Il faut le savoir avant, pas après :
 - **Un drapeau posé pendant la fenêtre est perdu** pour les messages qui
   existaient déjà des deux côtés : on garde ceux de l'ancien magasin. C'est
   délibéré — l'inverse écraserait des drapeaux justes par des drapeaux d'une
-  fenêtre de deux heures.
+  fenêtre de deux heures. **Ce n'est PAS un doublon** : c'est précisément ce que
+  `rapatrier.sh` existe pour éviter, et ce que la commande `rsync` prescrite
+  auparavant provoquait.
 - **Les mots de passe redeviennent les anciens.** Si vous les aviez tous
   réinitialisés (option A), il faut le dire aux utilisateurs, et vite.
 

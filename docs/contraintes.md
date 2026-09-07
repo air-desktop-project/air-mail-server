@@ -13675,3 +13675,66 @@ Et le serveur **imprime au démarrage l'enregistrement TXT à publier**, en enti
 C'est ce qui permet, le jour de la bascule, de comparer la clé reprise à celle
 que le DNS publie déjà : si elles diffèrent, rien ne se vérifiera, et on l'aurait
 appris par les plaintes des destinataires.
+
+
+## Un retour en arrière qui dupliquait le courrier — trouvé en le répétant
+
+`bascule.md` était écrit, relu, et n'avait jamais été exécuté. C'est exactement
+ce que ce dépôt reproche ailleurs à une table `nftables` documentée pendant des
+mois sans jamais tourner. J'ai donc monté un banc — deux comptes, quatre
+sous-dossiers, dix-huit messages aux noms que Dovecot écrit — et j'ai répété la
+manœuvre.
+
+### Le compte tombe faux
+
+Dix-huit messages avant la bascule. Pendant la fenêtre : deux arrivent, alice en
+LIT un, alice en EFFACE un. Le nouveau magasin en porte donc dix-neuf. Après le
+retour en arrière prescrit :
+
+    rsync -aH --ignore-existing /var/vmail-ams/ /var/vmail/
+
+l'ancien magasin en portait **vingt et un**. Attendu : vingt.
+
+### La cause
+
+`--ignore-existing` compare des CHEMINS. Or **lire un message change son nom ET
+son dossier** : `new/1725000007.M7P100…,S=73,W=75` devient
+`cur/1725000007.M7P100…,S=73,W=75:2,S`. Ce chemin-là n'existe pas dans l'ancien
+magasin, donc `rsync` le copie — et le message s'y trouve deux fois :
+
+    ancien/alice/new/1725000007.M7P100.mail.narro.ch,S=73,W=75
+    ancien/alice/cur/1725000007.M7P100.mail.narro.ch,S=73,W=75:2,S
+
+Une fois non lu, une fois lu. **Chaque message dont un drapeau a bougé pendant la
+fenêtre était dupliqué.**
+
+Et ma documentation annonçait autre chose : « un drapeau posé pendant la fenêtre
+est perdu ». Ce n'était pas un drapeau perdu, c'était un DOUBLON visible par
+l'utilisateur — pendant un retour en arrière, c'est-à-dire au pire moment, quand
+personne n'a la tête à compter des messages.
+
+### Le correctif
+
+`docs/migration/rapatrier.sh` compare la **partie unique** du nom Maildir — ce
+qui précède le premier `,` ou le premier `:`. Elle ne change ni quand on lit un
+message, ni quand on l'étiquette, ni quand un serveur lui donne un UID : c'est la
+seule chose qui identifie le message, et c'est pour cela que Maildir la réserve.
+
+La comparaison se fait boîte par boîte, et non globalement : le même message peut
+légitimement vivre dans `INBOX` et dans `Sent`.
+
+Résultat sur le même banc : **vingt messages, et le message lu n'y figure
+qu'une fois**. Le script est de plus IDEMPOTENT — relancé, il ne trouve plus rien
+à faire —, ce qui compte pour un outil qu'on exécute sous pression et qu'on
+relancera « pour être sûr ». Et il n'écrit RIEN sans `--pour-de-vrai`.
+
+### Ce que la répétition a corrigé d'autre
+
+`verifier.sh` affichait « alice 12 » puis « Sent 3, Trash 1 ». Les trois chiffres
+étaient justes, mais le premier INCLUT les autres : on lisait seize. Un outil dont
+le métier est de rendre confiant avant une bascule ne peut pas laisser cette
+ambiguïté. Il imprime désormais « 12 au total », puis l'INBOX séparément.
+
+**Une procédure écrite n'est pas une procédure éprouvée.** Celle-ci l'a été sur
+un banc de dix-huit messages ; elle aurait échoué sur des milliers, et personne
+ne l'aurait compris le jour même.

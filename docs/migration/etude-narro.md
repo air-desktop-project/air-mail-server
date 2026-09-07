@@ -263,3 +263,8 @@ Ce qu'il faut en tirer :
 - `bascule.md` — la marche à suivre, et le retour en arrière.
 - `pour-les-utilisateurs.md` — ce qui change pour eux, à leur transmettre.
 - `verifier.sh` — l'audit qui décide si l'on bascule ou non.
+- `rapatrier.sh` — le retour en arrière du courrier, **sans doublon**. La
+  commande `rsync --ignore-existing` que `bascule.md` prescrivait d'abord
+  dupliquait tout message dont un drapeau avait bougé pendant la fenêtre : lire
+  un message change son nom ET son dossier, et `rsync` compare des chemins.
+  Trouvé en RÉPÉTANT la manœuvre sur un banc, pas en la relisant.
