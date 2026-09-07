@@ -66,10 +66,23 @@ Le paquet **n'active ni ne démarre le service** — c'est délibéré, et
 
 ### 0.4 Une configuration en PORTS HAUTS, sur une COPIE du courrier
 
-    sudo rsync -aH --delete /var/vmail/ /var/vmail-ams/
+    # **LES DEUX SERVEURS NE RANGENT PAS AU MÊME ENDROIT.** Dovecot pose
+    #     /var/vmail/narro.ch/<compte>/Maildir
+    # là où air-mail-server attend
+    #     /var/vmail-ams/<compte>
+    # Un `rsync` de racine à racine donnerait une arborescence où le serveur ne
+    # trouverait AUCUNE boîte — et il démarrerait sans rien dire, un compte sans
+    # boîte étant un compte dont la boîte se créera à la première remise. On
+    # copie donc COMPTE PAR COMPTE.
+    sudo mkdir -p /var/vmail-ams
+    for compte in contact thierry.delhaise vincent.delhaise support kelly.garro; do
+        sudo rsync -aH --delete \
+            "/var/vmail/narro.ch/$compte/Maildir/" "/var/vmail-ams/$compte/"
+    done
     sudo chown -R ams:ams /var/vmail-ams
 
-    sudo -u ams air-mail-admin config write /etc/ams/essai.conf \
+    printf %s "$SECRET_RESEND" | sudo -u ams air-mail-admin config write \
+        /etc/ams/essai.conf \
         --domain mail.narro.ch --hosted narro.ch \
         --maildir /var/vmail-ams --accounts /etc/ams/comptes.bin \
         --listen 127.0.0.1:2525 --listen-imaps 127.0.0.1:9993 \
@@ -77,19 +90,59 @@ Le paquet **n'active ni ne démarre le service** — c'est délibéré, et
         --tls-cert /etc/letsencrypt/live/mail.narro.ch/fullchain.pem \
         --tls-key  /etc/letsencrypt/live/mail.narro.ch/privkey.pem \
         --relay --queue-spool /var/spool/ams/file \
-        --dkim-selector mail --dkim-key /etc/opendkim/keys/narro.ch/mail.private \
+        --queue-expire-seconds 86400 \
+        --dkim-selector mail --dkim-key /var/lib/rspamd/dkim/narro.ch.mail.key \
         --resolver 127.0.0.53 \
-        --public-suffix-list /usr/share/publicsuffix/public_suffix_list.dat
+        --public-suffix-list /usr/share/publicsuffix/public_suffix_list.dat \
+        --relayhost smtp.resend.com:465 --relayhost-implicit-tls \
+        --relayhost-user «le compte Resend, dans /etc/postfix/sasl_passwd» \
+        --mta-sts-anchors /etc/ssl/certs/ca-certificates.crt \
+        --mta-sts-cache /var/cache/ams/mtasts
 
-Les chemins viennent de l'inventaire ; ceux-ci sont des exemples. Les comptes se
-créent selon la décision de §5 :
+**CETTE COMMANDE VIENT DE L'INVENTAIRE**, valeur par valeur, et chacune a une
+raison :
 
-    printf %s "$MOT_DE_PASSE" | sudo -u ams air-mail-admin account add \
-        /etc/ams/comptes.bin --login jean --address jean@narro.ch \
-        --address j.dupont@narro.ch
+| | |
+|---|---|
+| `--max-message 52428800` | `message_size_limit` de Postfix. **Sans elle, le défaut est 10 Mio** — un cinquième — et des pièces jointes qui passent depuis des années seraient refusées. |
+| `--queue-expire-seconds 86400` | `maximal_queue_lifetime = 1d`. Le défaut du produit est de CINQ jours. |
+| `--dkim-key /var/lib/rspamd/...` | c'est **rspamd** qui signe aujourd'hui, pas opendkim. La clé publique dérivée de ce fichier est identique à celle que le DNS publie — vérifié. |
+| `--relayhost smtp.resend.com:465` | `relayhost = [smtp.resend.com]:465` avec `smtp_tls_wrappermode = yes`. Le compte et le secret sont dans `/etc/postfix/sasl_passwd`. |
+| `--mta-sts-anchors` | **exigé par `--relayhost`** : on présente un mot de passe, et sans autorités on ne saurait pas à qui. |
+| `--resolver 127.0.0.53` | `systemd-resolved` écoute là. **`--relay` sans résolveur fait REFUSER le démarrage**, et c'est heureux. |
 
-Le mot de passe se lit sur l'entrée standard, **jamais sur la ligne de
-commande** : ce que `ps` affiche, tout le monde le lit.
+**Le compte sous lequel tourne le serveur doit lire deux fichiers que root seul
+possède** : `privkey.pem` et la clé DKIM de rspamd. Un groupe, ou un
+`deploy-hook` de `certbot` qui recopie, ou les deux.
+
+Les cinq comptes, avec les alias que `valiases` porte. Le mot de passe se lit sur
+l'entrée standard, **jamais sur la ligne de commande** : ce que `ps` affiche,
+tout le monde le lit.
+
+Avec cinq boîtes, l'option A de §5 de l'étude — tout réinitialiser — est la plus
+simple. **Gardez chaque mot de passe au moment où vous le tirez** : il ne se relit
+pas, et il n'y a pas de « mot de passe oublié » ici.
+
+    # Un secret de vingt-quatre octets, sans dépendre d'un outil qui pourrait
+    # ne pas être là.
+    secret() { head -c 18 /dev/urandom | base64; }
+
+    for compte in thierry.delhaise vincent.delhaise support kelly.garro; do
+        mot=$(secret)
+        printf '%s : %s\n' "$compte" "$mot"          # À NOTER MAINTENANT.
+        printf %s "$mot" | sudo -u ams air-mail-admin account add \
+            /etc/ams/comptes.bin --login "$compte" --address "$compte@narro.ch"
+    done
+
+    # `contact` porte en plus les trois alias de `/etc/postfix/valiases`.
+    mot=$(secret); printf 'contact : %s\n' "$mot"
+    printf %s "$mot" | sudo -u ams air-mail-admin account add \
+        /etc/ams/comptes.bin --login contact \
+        --address contact@narro.ch --address postmaster@narro.ch \
+        --address abuse@narro.ch --address root@narro.ch
+
+`postmaster@` est ici une exigence, pas une commodité : §4.5.1 de RFC 5321 la
+pose, et le serveur AVERTIT au démarrage si personne ne la reçoit.
 
 ### 0.4bis Traduire les noms de dossiers, et les abonnements
 
@@ -116,7 +169,13 @@ existe déjà.
 
 ### 0.5 L'audit qui décide
 
-    bash verifier.sh /var/vmail-ams /var/vmail
+    # `verifier.sh` compare compte par compte : on lui donne de l'ancien magasin
+    # une vue qui a la MÊME forme que le neuf.
+    sudo mkdir -p /var/vmail-vue
+    for compte in contact thierry.delhaise vincent.delhaise support kelly.garro; do
+        sudo ln -sfn "/var/vmail/narro.ch/$compte/Maildir" "/var/vmail-vue/$compte"
+    done
+    bash verifier.sh /var/vmail-ams /var/vmail-vue
 
 **S'il refuse, on ne bascule pas.** Il refuse pour deux raisons, et les deux
 comptent :
@@ -214,7 +273,10 @@ décidera si l'on recommence un autre jour.
     #    et le retour en arrière les retrouvera.
 
     # 3. Le delta : ce qui est arrivé depuis la copie de 0.4.
-    sudo rsync -aH --delete /var/vmail/ /var/vmail-ams/
+    for compte in contact thierry.delhaise vincent.delhaise support kelly.garro; do
+        sudo rsync -aH --delete \
+            "/var/vmail/narro.ch/$compte/Maildir/" "/var/vmail-ams/$compte/"
+    done
     sudo chown -R ams:ams /var/vmail-ams
 
     # 3bis. **LE `--delete` VIENT DE DÉFAIRE LES RENOMMAGES DE 0.4bis.**
@@ -227,7 +289,13 @@ décidera si l'on recommence un autre jour.
     sudo chown -R ams:ams /var/vmail-ams
 
     # 4. L'audit, une dernière fois. S'il refuse : ON REMONTE (voir plus bas).
-    bash verifier.sh /var/vmail-ams /var/vmail
+    # `verifier.sh` compare compte par compte : on lui donne de l'ancien magasin
+    # une vue qui a la MÊME forme que le neuf.
+    sudo mkdir -p /var/vmail-vue
+    for compte in contact thierry.delhaise vincent.delhaise support kelly.garro; do
+        sudo ln -sfn "/var/vmail/narro.ch/$compte/Maildir" "/var/vmail-vue/$compte"
+    done
+    bash verifier.sh /var/vmail-ams /var/vmail-vue
 
     # 5. L'instantané OVH. C'est ici qu'il vaut le plus cher.
 
@@ -295,8 +363,8 @@ mot de passe oublié, un client réglé sur `AUTH LOGIN` (il se reconfigure).
     #    `rapatrier.sh` compare la PARTIE UNIQUE du nom Maildir, qui ne change
     #    ni quand on lit, ni quand on étiquette, ni quand un serveur donne un
     #    UID. Sans `--pour-de-vrai`, il n'écrit rien et dit ce qu'il ferait.
-    bash rapatrier.sh /var/vmail-ams /var/vmail            # à blanc, d'abord
-    bash rapatrier.sh /var/vmail-ams /var/vmail --pour-de-vrai
+    bash rapatrier.sh /var/vmail-ams /var/vmail-vue            # à blanc
+    bash rapatrier.sh /var/vmail-ams /var/vmail-vue --pour-de-vrai
     sudo chown -R vmail:vmail /var/vmail
 
     # 3. Remettre l'ancien en marche.

@@ -14035,3 +14035,40 @@ propriété trop large produit, et elles garderont la troisième version honnêt
 
 **Une propriété qui crie au loup ne se lit plus.** Il valait mieux le découvrir
 en deux minutes de fuzz qu'en production, où l'on aurait fini par la désactiver.
+
+
+## Une marche à suivre qui aurait copié le courrier au mauvais endroit
+
+`bascule.md` prescrivait, pour la copie :
+
+    rsync -aH --delete /var/vmail/ /var/vmail-ams/
+
+L'inventaire a montré ce que Dovecot range réellement :
+
+    mail_location : maildir:/var/vmail/%d/%n/Maildir
+
+C'est-à-dire `/var/vmail/narro.ch/<compte>/Maildir`. Or air-mail-server attend
+`<racine>/<compte>`. La copie de racine à racine aurait donné
+`/var/vmail-ams/narro.ch/<compte>/Maildir`, où le serveur n'aurait trouvé AUCUNE
+boîte.
+
+**Et il n'aurait rien dit.** Un compte sans boîte n'est pas une erreur : sa boîte
+se crée à la première remise. Le serveur aurait donc démarré normalement, avec
+cinq boîtes vides, et l'on ne s'en serait aperçu qu'au premier client qui se
+connecte — pendant la fenêtre de bascule, avec Postfix déjà arrêté.
+
+La copie se fait désormais COMPTE PAR COMPTE, aux trois endroits qui la font : la
+copie initiale, le delta de la fenêtre, et le rapatriement du retour en arrière.
+`verifier.sh`, lui, reçoit de l'ancien magasin une VUE — des liens symboliques —
+qui a la même forme que le neuf, sans quoi il comparerait deux arborescences
+différentes et trouverait zéro partout des deux côtés.
+
+**Ce défaut ne pouvait pas apparaître sur mon banc** : je l'avais monté avec la
+forme que le produit attend, parce que c'est celle que je connaissais. Il a fallu
+l'inventaire d'une machine réelle pour que les deux formes se rencontrent.
+
+C'est la troisième fois que cette marche à suivre est fausse d'une façon qui ne
+se serait vue que le jour J : le retour en arrière qui dupliquait, le
+vérificateur à quatre minutes de coupure, et maintenant la copie au mauvais
+endroit. **Une procédure écrite n'est pas une procédure éprouvée**, et un
+inventaire n'est pas un détail d'intendance.
