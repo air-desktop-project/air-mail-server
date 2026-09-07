@@ -14722,3 +14722,53 @@ messages par `UID FETCH` avec une liste de quinze champs d'en-tête et un
 Il crée aussi `Trash` s'il ne le trouve pas, et le serveur refuse le second essai
 d'une connexion concurrente par `NO [ALREADYEXISTS]` — ce qui est exactement ce
 qu'il faut.
+
+
+## Le banc qui fait parler un vrai client, et ce que la machine lui demande
+
+`scripts/capture-client.sh` monte une boîte d'essai, lance le serveur, met un
+mandataire qui note tout, et fait parler THUNDERBIRD au serveur.
+
+**Ce n'est pas un raffinement.** `imaplib`, avec lequel B5ter avait été levé,
+n'emploie aucune des dix-huit capacités que ce serveur annonce — et c'est
+exactement là qu'était le défaut `SPECIAL-USE`.
+
+### Le compte des commandes est le signal
+
+Avec le défaut : **18 commandes, 1 refus**. Sans : **44 commandes, 0 refus**. Un
+client qui ne sait pas qu'un dossier existe ne le sélectionne pas, ne le relève
+pas, ne l'affiche pas — et fait donc moitié moins de travail. Le nombre suffit à
+voir qu'il manque quelque chose, avant même de lire le refus.
+
+### Quatre détours, tous imposés par le confinement du snap
+
+1. **un compte Unix à part** — le snap ne lit pas `/tmp`, et son profil doit
+   vivre dans un répertoire personnel. Celui de l'exploitant porte douze
+   gigaoctets de courrier réel, auquel ce banc ne touche jamais ;
+2. **`loginctl enable-linger`** — sans session, snap refuse de démarrer ;
+3. **`systemd-run --uid`** avec `XDG_RUNTIME_DIR` et `DBUS_SESSION_BUS_ADDRESS`
+   — snap exige un cgroup à lui, et `sudo -u` seul ne le lui donne pas ;
+4. **`xdotool`** pour saisir le mot de passe UNE fois sous `Xvfb`. Thunderbird le
+   garde ensuite, mais `--headless` seul ne sait pas le relire.
+
+### Le mandataire est en clair d'un côté, en TLS de l'autre
+
+Cela évite de faire accepter un certificat auto-signé à un client qui a de bonnes
+raisons de le refuser, et ne change rien à ce qu'on mesure : le serveur voit une
+vraie session TLS, et les commandes sont bien celles de Thunderbird.
+
+### Et le serveur a corrigé le banc
+
+La première écriture faisait `chmod -R o+rX` sur la boîte d'essai, « pour que le
+compte jetable puisse lire ». Le serveur a REFUSÉ de démarrer :
+
+    le Maildir est en 0775 — les autres comptes de cette machine y ont accès
+
+Il avait raison, et le banc avait tort : le compte jetable n'a rien à lire, il ne
+joint qu'un port. Une garde du produit a attrapé une faute de son propre banc.
+
+### Ce que le script MONTRE, et ne juge pas
+
+Il imprime les refus au lieu d'échouer dessus. `NO [ALREADYEXISTS]` sur un
+`CREATE "Trash"` que deux connexions demandent en même temps est la BONNE
+réponse. C'est à qui lit de juger — mais il faut qu'il les voie.
