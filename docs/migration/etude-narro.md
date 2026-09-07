@@ -366,6 +366,10 @@ serveur le même jour rendrait tout diagnostic impossible.
 
 - `bascule.md` — la marche à suivre, et le retour en arrière.
 - `pour-les-utilisateurs.md` — ce qui change pour eux, à leur transmettre.
+- `verifier.sh --essais` — **le banc de l'audit lui-même**. Cinq écarts montés de
+  toutes pièces doivent tous le faire ÉCHOUER : un dossier vide perdu, un
+  dossier non vide perdu, un message manquant, un nom illisible, et le magasin
+  sain qui doit passer.
 - `verifier.sh` — l'audit qui décide si l'on bascule ou non.
 - `repeter-la-configuration.sh` — **la commande du manuel est-elle encore
   valable ?** Il l'EXTRAIT de `bascule.md` plutôt que de la recopier — une copie

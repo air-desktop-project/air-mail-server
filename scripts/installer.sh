@@ -147,12 +147,12 @@ titre "compte Unix"
 
 if [ "$sur_la_machine" -eq 1 ]; then
     if id "$compte" >/dev/null 2>&1; then
-        dit "`$compte` existe déjà — inchangé"
+        dit "\`$compte\` existe déjà — inchangé"
     else
         # SANS INTERPRÉTEUR ET SANS MOT DE PASSE : ce compte n'est pas fait pour
         # qu'on s'y connecte, seulement pour porter un service.
         useradd --system --home-dir "$etat" --shell /usr/sbin/nologin "$compte"
-        dit "`$compte` créé (système, sans interpréteur)"
+        dit "\`$compte\` créé (système, sans interpréteur)"
     fi
 else
     dit "ignoré : une racine jetable n'a pas de compte système"

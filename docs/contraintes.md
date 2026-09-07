@@ -14581,3 +14581,73 @@ rien ne s'est produit — mais elle ne l'est justement que le jour où le script
 C'est la deuxième fois de la journée : la première avait fait échouer
 `repeter-la-configuration.sh` à sa première exécution. **Dans une chaîne entre
 guillemets doubles, un accent grave n'est pas une décoration.**
+
+
+## L'audit qui décide de la bascule ne voyait pas un dossier vide perdu
+
+`verifier.sh` parcourait les dossiers du NOUVEAU magasin seulement. Un dossier
+présent dans l'ancien, absent du neuf et VIDE ne se voyait donc nulle part : le
+total du compte ne bougeait pas — il est vide —, et le script annonçait « OK :
+aucun écart ».
+
+Aucun courrier n'est perdu dans ce cas. Mais l'utilisateur perd un dossier qu'il
+avait créé, et l'outil dont le métier est de RENDRE CONFIANT lui avait dit que
+tout allait bien. Un dossier NON vide, lui, était déjà attrapé par le total du
+compte — ce qui rendait l'angle mort d'autant plus facile à ne pas voir.
+
+La boucle parcourt désormais l'UNION des deux magasins, et un dossier absent du
+neuf s'imprime `ABSENT` avec la mention « CE DOSSIER DISPARAÎT ».
+
+### Et le banc, parce que ce script décide
+
+`--essais` monte cinq situations : deux magasins identiques qui doivent passer,
+un dossier vide perdu, un dossier non vide perdu, un message manquant dans un
+dossier partagé, et un nom illisible. Les quatre derniers doivent tous faire
+ÉCHOUER. Le dernier tient l'AUTRE défaut d'origine de ce script — « OK : aucun
+écart » imprimé sous un avertissement.
+
+
+## Un accent grave dans l'installateur, que rien ne pouvait voir
+
+    dit "`$compte` existe déjà — inchangé"
+
+Le shell exécute ce qui est entre accents graves. L'installateur aurait donc
+imprimé, sur une machine réelle :
+
+    ams : commande introuvable
+     existe déjà — inchangé
+
+Le nom du compte disparu, et une erreur qui accuse l'installateur de rien.
+
+**AUCUNE BARRIÈRE NE POUVAIT LE VOIR**, et pour deux raisons qui se cumulent :
+`bash -n` ne dit rien — la syntaxe est valide —, et les deux lignes sont dans la
+branche « sur la machine réelle », que `check-installation.sh` n'emprunte jamais
+puisqu'il installe dans un arbre jetable.
+
+Il serait donc apparu le jour où quelqu'un installe pour de bon. C'est-à-dire le
+19 septembre.
+
+### La garde, et ce qu'elle ne couvre pas
+
+`check-installation.sh` cherche désormais tout `` ` `` NON précédé d'une barre
+oblique inverse à l'intérieur d'une chaîne entre guillemets doubles, dans
+`scripts/*.sh` et `docs/migration/*.sh`, commentaires écartés.
+
+**Ce fichier-là est exclu du balayage**, et c'est inévitable : il PORTE le motif,
+donc il se signalerait lui-même. La contrepartie est dite plutôt que cachée — un
+accent grave mal échappé dans le vérificateur ne serait pas vu.
+
+### Le « OK » est dans le `else`
+
+Sa première écriture imprimait « OK — et aucun accent grave » juste après avoir
+imprimé « ÉCHEC ». C'est la TROISIÈME fois que ce dépôt produit un « OK »
+inconditionnel sous un avertissement : dans `check-installation` un matin, dans
+`verifier.sh`, et ici. Un rapport qui dit « OK » après avoir dit « ÉCHEC » se lit
+en diagonale, et c'est le « OK » qu'on retient.
+
+### Cinq occurrences dans la journée, dont trois de moi
+
+Trois écrites aujourd'hui — dans `repeter-la-configuration.sh`, dans le banc de
+`rapatrier.sh`, dans celui de `verifier.sh` — et deux qui dormaient dans
+l'installateur. Les scripts existants du dépôt, eux, échappent correctement :
+c'est la convention, elle était juste, et rien ne la tenait.

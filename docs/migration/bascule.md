@@ -18,6 +18,7 @@ Décidée le 2026-09-07. Le chemin qui y mène, et pourquoi chaque étape est l�
 |---|---|---|
 | **mardi 8 septembre** | nouveau sélecteur DKIM **2048 bits** publié, et **rspamd signe avec** | la clé s'éprouve sous Postfix, en production. Le jour J ne changera plus que le serveur |
 | 9 → 17 septembre | on vérifie que les signatures se valident chez Gmail et Outlook | une semaine de vrai courrier vaut mieux qu'un essai |
+| **vendredi 12** | `pour-les-utilisateurs.md` envoyé aux cinq | une semaine de préavis, et ce document PORTE la date |
 | **jeudi 17** | `deploy-hook` certbot pour `privkey.pem` ; première sauvegarde complète ; copie et `verifier.sh` à blanc | le blanc trouve les surprises pendant qu'on a le temps |
 | **vendredi 18** | distribution des **cinq secrets initiaux, tous distincts** | un secret commun laisserait chacun ouvrir la boîte des autres |
 | **samedi 19, 09:00** | la fenêtre | volume entrant au plus bas, utilisateurs joignables, deux jours de marge |
@@ -336,6 +337,7 @@ que devinée : renommer sur une supposition ferait perdre le dossier.
     for compte in contact thierry.delhaise vincent.delhaise support kelly.garro; do
         sudo ln -sfn "/var/vmail/narro.ch/$compte/Maildir" "/var/vmail-vue/$compte"
     done
+    bash verifier.sh --essais                     # le banc d'abord
     bash verifier.sh /var/vmail-ams /var/vmail-vue
 
 **S'il refuse, on ne bascule pas.** Il refuse pour deux raisons, et les deux
@@ -377,8 +379,14 @@ que vous étiez venu vérifier.
 
 ### 0.7 Prévenir
 
-`pour-les-utilisateurs.md` est fait pour être envoyé tel quel. Comptez au moins
-une semaine, et rappelez la veille.
+`pour-les-utilisateurs.md` est fait pour être envoyé tel quel. **Il porte la
+date**, la durée de coupure et le moment où les secrets arrivent — il faut donc
+le relire si l'un des trois change, sans quoi cinq personnes liront une date
+fausse.
+
+La fenêtre étant fixée au samedi 19, envoyez-le **au plus tard le vendredi 12**
+— une semaine — et rappelez le vendredi 18, en même temps que les secrets
+initiaux de §0.4.
 
 ---
 

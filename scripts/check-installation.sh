@@ -48,7 +48,44 @@ rate() {
 
 echo "── 1. le script s'analyse ───────────────────────────────────────────────"
 bash -n scripts/installer.sh || rate "scripts/installer.sh ne s'analyse pas"
-echo "OK"
+
+# ── ET AUCUN ACCENT GRAVE NON ÉCHAPPÉ DANS UNE CHAÎNE ───────────────────────
+#
+# **`bash -n` NE VOIT RIEN ICI** : `"`$compte` existe"` est syntaxiquement
+# valide. Le shell exécute simplement `$compte` comme une commande, et la chaîne
+# perd le nom qu'elle devait porter.
+#
+# CE DÉFAUT ÉTAIT DANS L'INSTALLATEUR, sur DEUX lignes, et aucune barrière ne le
+# voyait — parce qu'elles sont dans la branche « sur la machine réelle », que ce
+# script n'emprunte jamais : il installe dans un arbre jetable. Un exploitant
+# aurait donc lu, le jour de son installation :
+#
+#     ams : commande introuvable
+#      existe déjà — inchangé
+#
+# Le nom du compte disparu, et une erreur qui accuse l'installateur de rien.
+#
+# Le motif cherche un `` ` `` NON précédé d'une barre oblique inverse, à
+# l'intérieur d'une chaîne entre guillemets doubles. Les commentaires sont
+# écartés : ils citent souvent du code.
+#
+# **CE FICHIER-CI EST ÉCARTÉ DU BALAYAGE**, et c'est inévitable : il PORTE le
+# motif, donc il se signalerait lui-même. La contrepartie est dite plutôt que
+# cachée — un accent grave mal échappé DANS CE SCRIPT ne serait pas vu.
+accents=$(grep -nP '"(?:[^"\\`]|\\.)*`' scripts/*.sh docs/migration/*.sh 2>/dev/null \
+    | grep -vP ':\s*#' \
+    | grep -v '^scripts/check-installation\.sh:' || true)
+# **LE « OK » EST DANS LE `else`**, et ce n'est pas une coquetterie : ce dépôt a
+# déjà imprimé trois fois un « OK » inconditionnel sous un avertissement — dans
+# ce script même, dans `verifier.sh`, et dans `check-installation` un matin. Un
+# rapport qui dit « OK » après avoir dit « ÉCHEC » se lit en diagonale, et c'est
+# le « OK » qu'on retient.
+if [ -n "$accents" ]; then
+    echo "$accents" >&2
+    rate "un accent grave NON ÉCHAPPÉ dans une chaîne : le shell l'exécutera"
+else
+    echo "OK — et aucun accent grave non échappé dans les scripts"
+fi
 
 echo
 echo "── 2. sans racine et sans privilège, il refuse ──────────────────────────"
