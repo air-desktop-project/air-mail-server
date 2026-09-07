@@ -159,6 +159,41 @@ d'aller plus loin.
 
 ---
 
+## 3bis. Le courrier sortant sera-t-il accepté ? — MESURÉ, ET OUI
+
+C'est la question qui décide de tout le reste : un serveur de courrier qui émet
+sans être authentifié voit ses messages classés en indésirable, ou refusés.
+
+Éprouvé le 2026-09-07 de bout en bout, sur un montage complet :
+
+1. un compte authentifié dépose un message par `587` sous `STARTTLS` ;
+2. le message part en file, et **il est signé** — `d=narro.ch; s=mail`,
+   `rsa-sha256`, canonicalisation `relaxed/relaxed`, avec **sur-signature** des
+   en-têtes (`from:from:to:to:…`), qui interdit à un intermédiaire d'en ajouter
+   un second exemplaire ;
+3. réinjecté tel quel dans un serveur qui vérifie, contre un DNS qui publie la
+   clé sous `mail._domainkey.narro.ch` :
+
+       Authentication-Results: mx.ailleurs.test;
+           spf=pass smtp.mailfrom=narro.ch;
+           dkim=pass header.d=narro.ch header.s=mail;
+           dmarc=pass header.from=narro.ch
+
+**Les trois passent.** C'est exactement ce que Gmail, Microsoft 365 ou Proton
+regardent — et c'est ce qui lève le blocage B4 le jour où cette machine émet.
+
+Deux détails utiles au jour J :
+
+- **Le serveur imprime au démarrage l'enregistrement TXT à publier**, en entier.
+  Comparez-le à ce que `mail._domainkey.narro.ch` publie déjà : s'ils diffèrent,
+  c'est que la clé privée reprise n'est pas celle de la clé publiée, et rien ne
+  se vérifiera.
+- **`--relay` sans `--resolver` fait REFUSER le démarrage**, et c'est heureux :
+  sans résolveur, aucun `MX` ne serait trouvé et tout message accepté reviendrait
+  à son expéditeur après péremption.
+
+---
+
 ## 4. Ce que la bascule ne touche pas
 
 - **Les certificats TLS.** air-mail-server lit une chaîne et une clé en PEM :

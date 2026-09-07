@@ -590,10 +590,15 @@ OPTIONS DE `config write`
     --ipv6-prefix-bits <n>              1 à 128                 (défaut 64)
     --tracked-sources <n>               sources retenues        (défaut 4096)
 
-    LES DEUX OPTIONS DKIM VONT ENSEMBLE, ou aucune. Avec elles, le serveur SIGNE ce
-    qu'il émet — aujourd'hui les rapports DMARC. Sans elles, il émet non signé, ce
-    qui reste recevable. Il n'y a pas de troisième réglage : un sélecteur sans clé
-    ne veut dire ni « signe » ni « ne signe pas ».
+    LES DEUX OPTIONS DKIM VONT ENSEMBLE, ou aucune. Avec elles, le serveur SIGNE
+    TOUT CE QU'IL ÉMET : le courrier des comptes authentifiés d'abord, et aussi les
+    rapports DMARC et TLS. Cette page a longtemps dit « aujourd'hui les rapports
+    DMARC », ce qui sous-estimait de beaucoup — corrigé le 2026-09-07, après avoir
+    déposé un message par un compte et lu la signature dans la file.
+
+    Sans elles, il émet non signé, ce qui reste recevable — mais un domaine qui
+    publie DMARC ne s'aligne plus alors que par SPF. Il n'y a pas de troisième
+    réglage : un sélecteur sans clé ne veut dire ni « signe » ni « ne signe pas ».
 
     La clé se publie dans le DNS sous `<sélecteur>._domainkey.<domaine>`, et le
     serveur refuse de démarrer si elle est lisible par tout le monde. Les formats

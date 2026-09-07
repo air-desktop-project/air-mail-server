@@ -13628,3 +13628,50 @@ protocole, c'est de la réputation, et cela ne s'éprouve pas sans émettre.
 
 B3 le lèvera donc, et c'est pourquoi les deux allaient ensemble sans qu'on l'ait
 remarqué.
+
+
+## Le courrier sortant de narro.ch sera-t-il accepté ? Mesuré, et oui
+
+C'est la question qui décide de la migration : un serveur qui émet sans être
+authentifié voit ses messages classés en indésirable, ou refusés. Éprouvé de bout
+en bout le 2026-09-07 :
+
+1. un compte authentifié dépose par `587` sous `STARTTLS` ;
+2. le message part en file, **signé** — `d=narro.ch; s=mail`, `rsa-sha256`,
+   `relaxed/relaxed`, avec **sur-signature** des en-têtes (`from:from:to:to:…`),
+   qui interdit à un intermédiaire d'en ajouter un second exemplaire ;
+3. réinjecté tel quel dans un serveur qui vérifie, contre un DNS publiant la clé
+   sous `mail._domainkey.narro.ch` :
+
+       Authentication-Results: mx.ailleurs.test;
+           spf=pass smtp.mailfrom=narro.ch;
+           dkim=pass header.d=narro.ch header.s=mail;
+           dmarc=pass header.from=narro.ch
+
+**« Signer » et « signer valablement » sont deux affirmations**, et seule la
+seconde compte. La première se lit dans le code ; la seconde demande un
+vérificateur qui ne soit pas le signataire.
+
+### Une page d'aide qui sous-estimait de beaucoup
+
+    LES DEUX OPTIONS DKIM VONT ENSEMBLE, ou aucune. Avec elles, le serveur SIGNE
+    ce qu'il émet — aujourd'hui les rapports DMARC.
+
+« Aujourd'hui les rapports DMARC » : la phrase datait d'un temps où c'était vrai.
+Le courrier des comptes est signé depuis, et cette page ne l'avait pas suivi. Un
+exploitant qui l'aurait lue aurait pu croire inutile de reprendre sa clé DKIM —
+et son domaine, qui publie DMARC, ne se serait plus aligné que par SPF.
+
+**Ce n'est pas la relecture qui l'a trouvé** : c'est d'avoir voulu vérifier une
+affirmation avant de s'en servir dans une étude de migration.
+
+### Deux refus salutaires, découverts en montant le banc
+
+`--relay` SANS `--resolver` fait refuser le démarrage : sans résolveur aucun `MX`
+ne serait trouvé, et tout message accepté reviendrait à son expéditeur après la
+péremption. Accepter puis perdre serait pire que refuser tout de suite.
+
+Et le serveur **imprime au démarrage l'enregistrement TXT à publier**, en entier.
+C'est ce qui permet, le jour de la bascule, de comparer la clé reprise à celle
+que le DNS publie déjà : si elles diffèrent, rien ne se vérifiera, et on l'aurait
+appris par les plaintes des destinataires.
