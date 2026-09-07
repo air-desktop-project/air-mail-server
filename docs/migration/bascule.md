@@ -20,7 +20,7 @@ Décidée le 2026-09-07. Le chemin qui y mène, et pourquoi chaque étape est l�
 
 | Quand | Quoi | Pourquoi cette date |
 |---|---|---|
-| **mardi 8 septembre** | sélecteur **`ams202609`**, clé **2048 bits**, publié — et **rspamd signe avec** | la clé s'éprouve sous Postfix, en production. Le jour J ne changera plus que le serveur |
+| ~~**mardi 8 septembre**~~ **FAIT** | sélecteur **`ams202609`**, clé **2048 bits**, publié — et **rspamd signe avec** | la clé s'éprouve sous Postfix, en production. Le jour J ne changera plus que le serveur |
 | 9 → 17 septembre | on vérifie que les signatures se valident chez Gmail et Outlook | une semaine de vrai courrier vaut mieux qu'un essai |
 | **vendredi 12** | `pour-les-utilisateurs.md` envoyé aux cinq | une semaine de préavis, et ce document PORTE la date |
 | **jeudi 17** | `deploy-hook` certbot pour `privkey.pem` ; première sauvegarde complète ; copie et `verifier.sh` à blanc | le blanc trouve les surprises pendant qu'on a le temps |
@@ -76,6 +76,40 @@ Relisez-le : il nomme vos comptes. Les points d'arrêt :
   pour la copie.
 
 ### 0.1bis La clé DKIM 2048, UNE SEMAINE AVANT — mardi 8
+
+> **FAIT LE 2026-09-08.** Ce qui suit décrit une procédure qui a été exécutée,
+> et non un projet. Ce qui a été posé, sur `box2` / `vps-9d275e3a.vps.ovh.net` :
+>
+> | | |
+> |---|---|
+> | Clé | 2048 bits, `/var/lib/rspamd/dkim/narro.ch.ams202609.key`, `_rspamd:_rspamd` 0600 |
+> | Empreinte SHA-256 du DER public | `505f5e3014988b97be544c9588f5f8bde8d94e040727d4e0a6cabbe81099fc10` |
+> | DNS | **une** ressource TXT chez Gandi, TTL 3600, vérifiée sur les trois serveurs faisant autorité |
+> | rspamd | `selector = "ams202609"` ; `configtest` OK ; rechargé sans erreur |
+> | Sélecteur `mail` | **toujours publié**, intact — c'est le filet de la semaine |
+>
+> **La clé a été engendrée SUR LA MACHINE**, et sa partie publique est allée
+> jusqu'à l'API de Gandi sans qu'aucun octet passe par un presse-papier. Une
+> première clé, engendrée sur le poste faute d'accès, a été détruite avec son
+> enregistrement avant d'avoir signé quoi que ce soit — remplacer coûtait alors
+> zéro, ce qui n'aurait plus été vrai une heure plus tard.
+>
+> **La boucle a été fermée** : `rspamc` signe (`DKIM_SIGNED [narro.ch:s=ams202609]`),
+> et le message signé, relu comme un courrier entrant, donne **`R_DKIM_ALLOW`**.
+> La clé privée du serveur signe ce que la clé publique du DNS vérifie.
+>
+> **Le retour en arrière tient en deux lignes**, la sauvegarde étant déjà posée :
+>
+>     sudo cp /etc/rspamd/local.d/dkim_signing.conf.avant-ams202609 \
+>             /etc/rspamd/local.d/dkim_signing.conf
+>     sudo systemctl reload rspamd
+>
+> **`sign_local = false` n'a pas été touché** : le courrier émis depuis la
+> machine elle-même n'est pas signé, seules les soumissions authentifiées sur le
+> 587 le sont. Un essai lancé en `ssh` avec `sendmail` ne prouverait donc rien.
+>
+> Reste le seul contrôle qui ne se fait pas d'ici : lire
+> `Authentication-Results` chez Gmail et chez Outlook.
 
 **Sélecteur `ams202609`, décidé le 2026-09-07.** Une date dans le nom rend la
 rotation suivante lisible dans le DNS ; réutiliser `mail` empêcherait l'ancienne

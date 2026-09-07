@@ -14957,3 +14957,49 @@ Il ne touche jamais au DNS. Personne ne lui confie de mot de passe d'hébergeur,
 et il ne recharge pas rspamd. **Publier reste un geste humain** — ce qu'on
 automatise, c'est la vérification, parce que c'est elle qu'on saute quand tout a
 l'air d'aller.
+
+## 2026-09-08 — Le sélecteur est posé, et deux fautes de méthode
+
+`ams202609` signe le courrier de `narro.ch` depuis ce matin. Le manuel §0.1bis
+porte désormais la date, l'empreinte et le retour en arrière : il décrit une
+procédure **exécutée**, non un projet.
+
+### On ne remplace gratuitement qu'avant que ça serve
+
+La clé avait d'abord été engendrée sur le poste, faute d'accès au serveur, et
+publiée. Une heure plus tard l'accès existait — et la bonne clé, celle qui n'a
+jamais quitté la machine qui signe, pouvait remplacer la première **sans rien
+coûter** : aucun message n'avait encore été signé, aucun destinataire n'avait
+mémorisé quoi que ce soit.
+
+La même substitution demain aurait cassé la vérification de tout le courrier
+émis entre-temps. **La fenêtre où une décision se défait pour rien est étroite
+et elle se ferme toute seule** ; quand on la trouve encore ouverte, on l'utilise.
+
+### Le banc a accusé le produit à tort
+
+La première vérification de bout en bout a donné `R_DKIM_REJECT`. La tentation
+était de conclure que la clé publiée ne correspondait pas.
+
+Elle correspondait. C'est l'`awk` qui extrayait la signature du rapport de
+`rspamc` qui la tronquait : l'en-tête est replié sur des tabulations, et la
+condition de fin coupait au premier repli. Extraction corrigée, le même message
+donne **`R_DKIM_ALLOW`**.
+
+On le note parce que la faute symétrique — croire le banc quand c'est le produit
+— est celle qui coûte cher, et qu'on ne se protège de l'une qu'en regardant
+l'autre à chaque fois. Ici : la signature faisait 582 octets sur neuf lignes,
+et une signature tronquée ne ressemble pas à une clé fausse quand on prend la
+peine de la compter.
+
+### L'accès n'était pas manquant, il était mal cherché
+
+La veille, quatre clés SSH essayées sur l'IPv4 avaient valu un bannissement
+fail2ban et la conclusion « je n'ai pas accès ». L'accès était dans
+`~/.ssh/config` sous le nom **`box2`**, et Thierry l'avait dit en toutes lettres
+plusieurs séances plus tôt. L'alias vise l'**IPv6** — la même machine, une autre
+adresse, que le bannissement ne touchait pas.
+
+**Chercher dans ce qui a déjà été dit avant de sonder quoi que ce soit.** Un
+essai d'authentification n'est pas une lecture, et une machine bien tenue les
+compte.
