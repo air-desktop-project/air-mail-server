@@ -371,6 +371,10 @@ serveur le même jour rendrait tout diagnostic impossible.
   valable ?** Il l'EXTRAIT de `bascule.md` plutôt que de la recopier — une copie
   dériverait sans que rien ne le dise — la joue sur un arbre jetable, et relit ce
   qu'elle a écrit. À lancer avant chaque relecture du manuel.
+- `renommer-dossiers.py --essais` — **le décodeur d'UTF-7 modifié s'éprouve
+  avant de renommer quoi que ce soit** : aller-retour sur vingt-quatre noms
+  contre un encodeur écrit séparément, plus les deux exemples qu'on n'a pas
+  inventés — celui de la RFC et celui de Dovecot sur cette machine.
 - `renommer-dossiers.py` — **les noms de dossiers ne se copient pas tels
   quels**. Dovecot les écrit en UTF-7 modifié sur le disque (`.&AMk-t&AOk--2025`),
   air-mail-server en UTF-8 (`.Été-2025`). Sans traduction, « Éléments envoyés »

@@ -47,6 +47,7 @@ USAGE
     python3 renommer-dossiers.py <racine-maildir> [--pour-de-vrai]
 """
 
+import base64
 import os
 import sys
 
@@ -87,7 +88,104 @@ def depuis_utf7_modifie(nom: str) -> str:
     return "".join(sortie)
 
 
+def _encoder_utf7_modifie(nom: str) -> str:
+    """L'encodage de RFC 3501 §5.1.3 — POUR LES ESSAIS SEULEMENT.
+
+    Écrit INDÉPENDAMMENT de `depuis_utf7_modifie`, et ne partageant aucune ligne
+    avec lui. C'est ce qui donne sa valeur à l'aller-retour : deux
+    implémentations qui se tromperaient de la même façon passeraient quand même
+    si l'une dérivait de l'autre.
+    """
+    sortie: list[str] = []
+    tampon: list[str] = []
+
+    def vider() -> None:
+        if tampon:
+            octets = "".join(tampon).encode("utf-16-be")
+            b64 = base64.b64encode(octets).decode("ascii").rstrip("=")
+            sortie.append("&" + b64.replace("/", ",") + "-")
+            tampon.clear()
+
+    for caractere in nom:
+        if caractere == "&":
+            vider()
+            sortie.append("&-")
+        elif 0x20 <= ord(caractere) <= 0x7E:
+            vider()
+            sortie.append(caractere)
+        else:
+            tampon.append(caractere)
+    vider()
+    return "".join(sortie)
+
+
+def essais() -> int:
+    """Éprouve le décodeur, et rend le nombre de fautes.
+
+    # POURQUOI CES ESSAIS EXISTENT
+
+    `depuis_utf7_modifie` est écrit à la main, sur un encodage tordu, et il
+    décide du NOM QUE L'UTILISATEUR VERRA. Une faute n'y produit pas une erreur :
+    elle produit un dossier qui s'appelle « &AMk-l&AOk-ments envoy&AOk-s » chez
+    le client, et personne ne saura d'où ça vient.
+
+    # ET LA PREMIÈRE ÉCRITURE DE CES ESSAIS ÉTAIT FAUSSE
+
+    Elle attendait `Re&AME-us` pour « Reçus », encodage inventé à la main plutôt
+    que calculé. `&AME-` vaut `Á` (U+00C1) ; « Reçus » s'écrit `Re&AOc-us`. Le
+    décodeur avait raison, l'essai avait tort — d'où l'aller-retour contre un
+    encodeur, qui ne laisse rien à inventer.
+    """
+    fautes = 0
+
+    # ── L'aller-retour, sur ce qu'un domaine francophone porte réellement ───
+    noms = [
+        "INBOX", "Sent", "Drafts.2025",
+        "Été-2025", "Éléments envoyés", "Reçus", "Archivé", "Brouillons",
+        "Œuvres", "Année 2024", "Ça marche", "À trier", "Noël",
+        "Recherche & développement", "&", "&&", "a&b",
+        "台北", "日本語", "Ελληνικά", "Привет",
+        "Facturé — 2025", "Résumé…", "naïve",
+    ]
+    for nom in noms:
+        revenu = depuis_utf7_modifie(_encoder_utf7_modifie(nom))
+        if revenu != nom:
+            print(f"FAUTE aller-retour : {nom!r} → {revenu!r}", file=sys.stderr)
+            fautes += 1
+
+    # ── Les deux exemples qu'on n'a pas inventés ────────────────────────────
+    litteraux = [
+        # RFC 3501 §5.1.3, l'exemple de la RFC elle-même.
+        ("~peter/mail/&U,BTFw-/&ZeVnLIqe-", "~peter/mail/台北/日本語"),
+        # Ce que Dovecot écrit RÉELLEMENT sur `mail.narro.ch`.
+        ("&AMk-t&AOk--2025", "Été-2025"),
+    ]
+    for brut, attendu in litteraux:
+        vu = depuis_utf7_modifie(brut)
+        if vu != attendu:
+            print(f"FAUTE littérale : {brut!r} → {vu!r} au lieu de {attendu!r}",
+                  file=sys.stderr)
+            fautes += 1
+
+    # ── ET CE QU'ON REFUSE DE DEVINER ──────────────────────────────────────
+    #
+    # Une séquence non terminée, ou du base64 illisible, n'est pas de l'UTF-7
+    # modifié valide. Le décodeur rend alors le nom TEL QUEL : renommer sur une
+    # supposition ferait PERDRE le dossier, et un nom laissé tel quel se voit.
+    for abime in ["&AMk", "&", "&AMk-t&AOk", "&!!!-", "&&&-"]:
+        if depuis_utf7_modifie(abime) != abime:
+            print(f"FAUTE : {abime!r} aurait dû être rendu tel quel", file=sys.stderr)
+            fautes += 1
+
+    if fautes == 0:
+        print(f"OK : {len(noms)} allers-retours, {len(litteraux)} littéraux, "
+              "et ce qu'on refuse de deviner.")
+    return fautes
+
+
 def main() -> int:
+    if "--essais" in sys.argv[1:]:
+        return 1 if essais() else 0
     if len(sys.argv) < 2:
         print(__doc__)
         return 2

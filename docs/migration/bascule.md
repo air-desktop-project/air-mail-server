@@ -309,11 +309,24 @@ Les abonnements se perdent de la même manière : Dovecot les écrit dans
 réglés pour n'afficher que les dossiers abonnés — c'est le défaut de plusieurs —
 les montrent tous disparus.
 
+    python3 renommer-dossiers.py --essais                    # le décodeur d'abord
     python3 renommer-dossiers.py /var/vmail-ams              # à blanc
     python3 renommer-dossiers.py /var/vmail-ams --pour-de-vrai
 
 Il ne touche pas aux noms purement ASCII, et refuse de renommer si la cible
 existe déjà.
+
+**`--essais` D'ABORD, ET CE N'EST PAS DU ZÈLE.** Le décodeur d'UTF-7 modifié est
+écrit à la main, sur un encodage tordu, et il décide du NOM QUE L'UTILISATEUR
+VERRA. Une faute n'y produit aucune erreur : elle produit un dossier qui
+s'appelle « &AMk-l&AOk-ments envoy&AOk-s » chez le client, et personne ne saura
+d'où ça vient.
+
+Les essais font l'aller-retour sur vingt-quatre noms — dont ceux qu'un domaine
+francophone porte réellement — contre un encodeur écrit séparément, vérifient
+l'exemple littéral de RFC 3501 §5.1.3 et celui que Dovecot écrit sur cette
+machine, et s'assurent qu'une séquence illisible est rendue TELLE QUELLE plutôt
+que devinée : renommer sur une supposition ferait perdre le dossier.
 
 ### 0.5 L'audit qui décide
 

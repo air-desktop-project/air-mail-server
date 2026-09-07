@@ -14483,3 +14483,54 @@ Avec `inventaire.sh`, `verifier.sh` et `rapatrier.sh` : c'est un outil de
 MIGRATION, qu'on lance en phase 0, et non une propriété du produit. La phase 0.4
 du manuel le prescrit maintenant en toutes lettres — un contrôle que rien
 n'appelle est un rappel, et un rappel se saute.
+
+
+## Le décodeur qui décide du nom que l'utilisateur verra
+
+`renommer-dossiers.py` traduit l'UTF-7 modifié de RFC 3501 §5.1.3, que Dovecot
+écrit sur le disque, vers l'UTF-8 qu'air-mail-server écrit. Il était **écrit à la
+main, sur un encodage tordu, et sans un seul essai**.
+
+Une faute n'y produit aucune erreur : elle produit un dossier qui s'appelle
+« &AMk-l&AOk-ments envoy&AOk-s » chez le client, et personne ne saura d'où ça
+vient. Pour un domaine francophone — « Éléments envoyés », « Reçus », « Archivé »
+— ce n'est pas un cas limite, c'est le cas courant.
+
+**Le décodeur est juste.** Ce qui suit ne raconte donc pas un défaut du produit,
+mais ce qu'il a fallu pour l'établir.
+
+### La première écriture des essais était fausse, et elle accusait le bon code
+
+Elle attendait `Re&AME-us` pour « Reçus » — un encodage écrit À LA MAIN plutôt
+que calculé. `&AME-` vaut `Á` (U+00C1) ; « Reçus » s'écrit `Re&AOc-us`. Le
+décodeur avait raison, l'essai avait tort, et l'essai disait « FAUX ».
+
+C'est la même faute d'instrument que la journée a déjà produite plusieurs fois :
+`smtplib` qui met les capacités en minuscules, un `h=` DKIM séparé par des
+espaces au lieu de deux-points, `ls` sans `-a` qui cache les dossiers Maildir.
+**Vérifier l'instrument avant d'accuser le produit** est une règle qui se paie à
+chaque fois qu'on l'oublie.
+
+### D'où l'aller-retour contre un encodeur écrit SÉPARÉMENT
+
+Les essais n'écrivent plus aucun encodage à la main. Ils encodent vingt-quatre
+noms — dont ceux qu'un domaine francophone porte réellement — et vérifient que
+le décodeur rend l'original.
+
+L'encodeur ne partage AUCUNE ligne avec le décodeur, et c'est ce qui donne sa
+valeur à l'aller-retour : deux implémentations qui se tromperaient de la même
+façon passeraient quand même si l'une dérivait de l'autre.
+
+S'y ajoutent les deux exemples qu'on n'a PAS inventés — celui de la RFC
+elle-même, et celui que Dovecot écrit réellement sur `mail.narro.ch` — et le
+refus de deviner : une séquence non terminée ou du base64 illisible doit être
+rendue TELLE QUELLE. Renommer sur une supposition ferait perdre le dossier ; un
+nom laissé tel quel se voit.
+
+### Trois mutations, trois essais qui tombent
+
+Le `,` de l'alphabet base64 non traduit — attrapé par l'exemple de la RFC, et par
+lui seul, ce qui justifie d'avoir mis du chinois à côté du français. Le `&-`
+littéral cassé. Et une séquence illisible DEVINÉE au lieu d'être laissée.
+
+`--essais` est prescrit par la phase 0.4bis du manuel, avant le passage à blanc.
