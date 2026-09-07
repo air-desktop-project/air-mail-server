@@ -162,6 +162,44 @@ une semaine, et rappelez la veille.
 
 ---
 
+## Ce que chaque étape coûte — mesuré sur 50 000 messages
+
+Chiffres relevés le 2026-09-07, sur une boîte de 50 000 messages / 200 Mo,
+disque SSD. **Le vôtre différera** ; ce qui ne différera pas, ce sont les ORDRES
+DE GRANDEUR et lequel domine.
+
+| Étape | Durée |
+|---|---|
+| Copie initiale (`rsync`, 200 Mo, 50 000 fichiers) | **3,0 s** |
+| Le delta de la fenêtre, quand rien n'a changé | **0,5 s** |
+| Traduction des noms de dossiers | instantanée (elle porte sur les dossiers, pas les messages) |
+| `verifier.sh` | **9,8 s** |
+| Premier démarrage : **adoption des 50 000 messages** | **1,26 s** (1,07 s de CPU) |
+| Démarrages suivants, boîte déjà adoptée | **0,22 s** |
+| `SELECT INBOX` sur 50 000 messages | 0,27 s |
+| `SEARCH ALL` | 0,01 s |
+
+**L'adoption ne coûte rien**, et c'est la bonne surprise : renommer cinquante
+mille fichiers pour leur donner un UID prend une seconde. Ce qui domine est la
+COPIE, donc votre disque.
+
+**Extrapolez linéairement, et prévoyez large.** Un demi-million de messages
+donnerait une trentaine de secondes de copie, une centaine de secondes d'audit et
+douze secondes d'adoption : la fenêtre reste sous les cinq minutes. La demi-heure
+annoncée aux utilisateurs est donc confortable, et c'est délibéré — mieux vaut
+rouvrir en avance qu'expliquer un retard.
+
+### Ce qui est préservé, et qui a été vérifié
+
+- **Les drapeaux** : `\Seen`, `\Answered`, `\Flagged`, `\Draft`, `\Deleted`.
+- **La date d'arrivée** : l'`INTERNALDATE` que le client affiche vient de la date
+  du fichier, que le renommage conserve. Un message de février 2023 reste daté de
+  février 2023 — sans quoi toutes les boîtes paraîtraient reçues le jour de la
+  bascule.
+- **Le `W=` de Dovecot**, et tout champ qu'un autre outil aurait posé.
+
+---
+
 ## Phase 1 — la bascule (la coupure commence)
 
 Chronométrez chaque étape la première fois : la fenêtre réelle est ce qui

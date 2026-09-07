@@ -17,6 +17,15 @@
 
 set -uo pipefail
 
+# **L'ORDRE EST CELUI DES OCTETS, ET NON CELUI DU DICTIONNAIRE.**
+#
+# Les drapeaux Maildir se rangent dans l'ordre ASCII. Or `[[ a < b ]]` emploie la
+# COLLATION DE LA LOCALE : sous `fr_FR.UTF-8`, « a » précède « B », ce qui est
+# l'ordre du dictionnaire et non celui des octets (B vaut 66, a vaut 97). Ce
+# script accepterait alors des noms que le serveur refuse, et refuserait des noms
+# qu'il accepte — sur la machine de l'exploitant, jamais sur la nôtre.
+export LC_ALL=C
+
 racine=${1:?usage : verifier.sh <racine-maildir> [ancienne-racine]}
 ancienne=${2-}
 
@@ -25,6 +34,23 @@ ancienne=${2-}
 # Un nom Maildir est `<unique>[:2,<drapeaux>]`. Les drapeaux sont des lettres de
 # `PRSTDF` et les mots-clefs de ce serveur, DANS L'ORDRE ASCII — c'est ce point
 # qui a fait disparaître un message en silence pendant l'étude.
+# **AUCUN SOUS-PROCESSUS PAR FICHIER**, et c'est une correction, pas une
+# élégance.
+#
+# La première écriture appelait `basename` une fois par fichier, et
+# `grep -o . | sort | tr` trois fois de plus pour vérifier que les drapeaux
+# étaient triés. Quatre processus par message. Mesuré le 2026-09-07 :
+#
+#     50 000 messages → 229 secondes
+#
+# Or ce script tourne PENDANT LA COUPURE (phase 1, étape 4). Quatre minutes par
+# tranche de cinquante mille messages, c'est quarante minutes d'indisponibilité
+# sur une boîte d'un demi-million — pour un contrôle que la copie elle-même fait
+# en trois secondes.
+#
+# Tout se fait donc par expansion de paramètres, et le tri se vérifie en un seul
+# parcours : une chaîne est triée si chaque caractère est inférieur ou égal au
+# suivant. On n'a pas besoin de la trier pour le savoir.
 lisible() {
     local nom=$1 info
     case "$nom" in
@@ -33,18 +59,24 @@ lisible() {
         *) return 0 ;;                       # sans information : `new/`
     esac
     case "$info" in 2,*) ;; *) return 1 ;; esac
-    local lettres=${info#2,}
-    # Trié ? On compare la chaîne à sa version triée, caractère par caractère.
-    local trie
-    trie=$(printf '%s' "$lettres" | grep -o . | LC_ALL=C sort | tr -d '\n')
-    [ "$lettres" = "$trie" ]
+    local lettres=${info#2,} i precedent courant
+    precedent=""
+    for ((i = 0; i < ${#lettres}; i++)); do
+        courant=${lettres:i:1}
+        if [ -n "$precedent" ] && [[ "$courant" < "$precedent" ]]; then
+            return 1
+        fi
+        precedent=$courant
+    done
+    return 0
 }
 
 compter() {
-    local ou=$1 total=0 douteux=0
+    local ou=$1 total=0 douteux=0 fichier nom
     while IFS= read -r -d '' fichier; do
         total=$((total + 1))
-        lisible "$(basename "$fichier")" || {
+        nom=${fichier##*/}
+        lisible "$nom" || {
             douteux=$((douteux + 1))
             printf '      ILLISIBLE : %s\n' "${fichier#"$ou"}" >&2
         }

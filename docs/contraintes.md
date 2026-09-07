@@ -13816,3 +13816,63 @@ deuxième. **Ce qu'il fallait, ce n'était pas une note de plus** : c'était ces
 d'employer la forme dangereuse. La règle tient en une ligne — pour arrêter un
 processus qu'on a lancé, on le désigne par son NOM ou par le PID qu'on a gardé,
 jamais par un motif qui décrit aussi la commande qui l'arrête.
+
+
+## Ce que la migration coûte, et un vérificateur qui coûtait cinquante fois trop
+
+Le banc de la répétition portait dix-huit messages. Une vraie boîte en porte
+cinquante mille. J'en ai monté une — 200 Mo, noms Dovecot — et chronométré chaque
+étape de `bascule.md`.
+
+    copie initiale (rsync, 50 000 fichiers)      3,0 s
+    delta de la fenêtre, rien n'a changé         0,5 s
+    ADOPTION des 50 000 messages au démarrage    1,26 s   (1,07 s de CPU)
+    démarrages suivants                          0,22 s
+    SELECT INBOX / SEARCH ALL                    0,27 s / 0,01 s
+    verifier.sh                                  228,9 s  ← ?!
+
+**L'adoption ne coûte rien**, et c'était la question ouverte : renommer cinquante
+mille fichiers pour leur donner un UID prend une seconde, et le `W=` de Dovecot
+survit à chacun. La copie domine, donc le disque de l'exploitant.
+
+### Le vérificateur, lui, coûtait quatre minutes
+
+Et il tourne PENDANT LA COUPURE — phase 1, étape 4. Quatre minutes par tranche de
+cinquante mille messages, c'est quarante minutes d'indisponibilité sur une boîte
+d'un demi-million, pour un contrôle que la copie fait en trois secondes.
+
+La cause : **quatre sous-processus par fichier**. Un `basename`, puis
+`grep -o . | sort | tr` pour vérifier que les drapeaux étaient triés. Deux cent
+mille processus lancés pour lire des noms de fichiers.
+
+Tout se fait désormais par expansion de paramètres, et le tri se vérifie en un
+seul parcours : une chaîne est triée si chaque caractère est inférieur ou égal au
+suivant — on n'a pas besoin de la trier pour le savoir.
+
+    228,9 s → 9,8 s
+
+**Ce défaut n'existait pas sur le banc de dix-huit messages.** Il ne pouvait
+apparaître qu'à l'échelle, et il serait apparu le jour J, sur la machine de
+quelqu'un d'autre, pendant une coupure annoncée.
+
+### Et une locale qui aurait faussé le verdict
+
+`[[ a < b ]]` en bash emploie la COLLATION DE LA LOCALE. Sous `fr_FR.UTF-8`,
+« a » précède « B » — c'est l'ordre du dictionnaire, pas celui des octets, où
+« B » vaut 66 et « a » vaut 97. Or les drapeaux Maildir se rangent en ordre
+ASCII.
+
+Le script aurait donc accepté des noms que le serveur refuse, et refusé des noms
+qu'il accepte — **sur la machine de l'exploitant, jamais sur la nôtre**. C'est la
+pire forme de défaut : celle qui ne se reproduit pas chez soi.
+
+`export LC_ALL=C` en tête du script, et la détection a été éprouvée en lançant le
+vérificateur DEPUIS une locale française : il refuse toujours le `:2,RSF`.
+
+### La date d'arrivée survit, et il fallait le vérifier
+
+L'`INTERNALDATE` que le client affiche vient de la date du fichier. Le renommage
+de l'adoption la conserve : un message de février 2023 reste daté de février
+2023. Sans cela, toutes les boîtes auraient paru reçues le jour de la bascule, et
+le tri chronologique de chaque client aurait été détruit — un désagrément que
+personne n'aurait pu réparer après coup.
