@@ -13876,3 +13876,42 @@ de l'adoption la conserve : un message de février 2023 reste daté de février
 2023. Sans cela, toutes les boîtes auraient paru reçues le jour de la bascule, et
 le tri chronologique de chaque client aurait été détruit — un désagrément que
 personne n'aurait pu réparer après coup.
+
+
+## La taille tient, la longueur des lignes est plus stricte
+
+`bascule.md` prescrivait `--max-message 52428800` — la valeur que Postfix annonce
+aujourd'hui — sans que personne l'eût vérifiée. C'est fait : `SIZE 52428800`
+s'annonce, 30 Mio passent, 55 Mio sont refusés par `552 5.3.4 Message exceeds
+maximum size`. Le défaut du produit est de 10 Mio, soit un cinquième : **oublier
+cette option refuserait des pièces jointes qui passent depuis des années**, et
+personne ne comprendrait pourquoi.
+
+### Le premier essai a chuté, et ce n'était pas le serveur
+
+Mon message de 30 Mio était fait de 31 millions de `X` SANS UN SEUL RETOUR À LA
+LIGNE. La connexion est tombée, et j'ai commencé à écrire que le serveur tombait
+sur les gros messages. Il n'en était rien : un vrai courrier a des lignes.
+
+Repris avec des lignes de 76 octets — ce qu'un encodage base64 produit —, les
+30 Mio passent. **Onzième instrument de mesure fautif de cette séance**, et le
+même réflexe l'a arrêté : ne pas accuser le sujet avant d'avoir vérifié l'outil.
+
+### Ce que la mesure a révélé pour de bon
+
+    ligne de   998 octets : ACCEPTÉ
+    ligne de   999 octets : 500 5.5.2 Line too long
+
+C'est exactement la borne de §4.5.3.1.6 de RFC 5321, le refus est propre, et la
+connexion ne tombe pas. Rien à redire sur la lettre.
+
+Mais la même section dit que les receveurs DEVRAIENT savoir traiter plus long, et
+Postfix le fait : son `line_length_limit` vaut 2048 par défaut, et il REPLIE au
+lieu de refuser. Un émetteur qui produit des lignes de 1 500 octets — cela existe,
+chez de vieux logiciels et dans du courrier non-MIME — est accepté par
+`mail.narro.ch` aujourd'hui et ne le sera plus après la bascule.
+
+C'est la troisième régression de compatibilité de cette migration, après
+`AUTH LOGIN` et `SMTPUTF8`. Toutes trois sont dans l'étude, à l'endroit où elles
+se manifesteront — c'est-à-dire chez un correspondant précis, quelques jours
+après, quand plus personne ne fera le lien avec la bascule.

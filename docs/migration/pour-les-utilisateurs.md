@@ -82,6 +82,10 @@ Conservé aussi, ainsi que tous les dossiers que vous avez créés.
 **Mon téléphone va-t-il tout retélécharger aussi ?**
 Oui. Faites-le de préférence en Wi-Fi.
 
+**Vais-je pouvoir continuer d'envoyer de grosses pièces jointes ?**
+Oui : la limite reste la même qu'aujourd'hui, 50 Mo. Rappelez-vous seulement que
+beaucoup de destinataires en acceptent moins.
+
 **Mes règles de tri automatique ?**
 Celles de votre logiciel continuent de fonctionner : elles sont chez vous. Si
 des règles avaient été posées **sur le serveur**, elles ne seront pas reprises —

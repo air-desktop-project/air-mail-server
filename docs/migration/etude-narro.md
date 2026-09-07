@@ -134,6 +134,7 @@ présentées en §5.
 |---|---|---|---|
 | `AUTH LOGIN` | offert | **non offert** | un client réglé sur « LOGIN » explicitement échouera ; `PLAIN` reste |
 | `SMTPUTF8` | offert | **non offert** | une adresse d'enveloppe non-ASCII serait refusée |
+| Ligne de texte | Postfix wrappe jusqu'à `line_length_limit` (2048 par défaut) | **refusée dès 999 octets**, par `500 5.5.2 Line too long` | un émetteur qui produit des lignes longues passe aujourd'hui et ne passera plus |
 | `VRFY` | offert | **décliné** | c'est un gain : `VRFY` sert à moissonner des adresses |
 | `ETRN` | offert | absent | obsolète, aucun usage moderne |
 | `UIDVALIDITY` | celle de Dovecot | **nouvelle** | chaque client RETÉLÉCHARGE toute la boîte une fois |
@@ -156,6 +157,32 @@ de plusieurs gibioctets, c'est long, et cela se dit AVANT.
 **`inventaire.sh` dira lesquelles sont réellement en service.** Si Sieve ou les
 quotas le sont, ce sont des blocages à part entière, et il faut en décider avant
 d'aller plus loin.
+
+---
+
+### Sur la longueur des lignes, et sur la taille des messages
+
+**La taille tient, et elle a été vérifiée.** `--max-message 52428800` s'annonce
+en `SIZE 52428800` et se respecte : une pièce jointe de 30 Mio passe, un message
+de 55 Mio est refusé par `552 5.3.4 Message exceeds maximum size` — le code
+juste. Sans cette option, le défaut est de 10 Mio, soit un cinquième de ce que
+`mail.narro.ch` accepte aujourd'hui : **l'oublier refuserait des pièces jointes
+qui passent depuis des années.**
+
+**La longueur des LIGNES, en revanche, est plus stricte qu'aujourd'hui.** Mesuré :
+998 octets passent, 999 sont refusés par `500 5.5.2 Line too long`. C'est
+exactement la borne de §4.5.3.1.6 de RFC 5321, et le refus est propre et
+diagnostiqué — la connexion ne tombe pas.
+
+Mais la même RFC dit que les receveurs DEVRAIENT savoir traiter plus long, et
+Postfix le fait : son `line_length_limit` vaut 2048 par défaut, et il REPLIE au
+lieu de refuser. Un émetteur qui produit des lignes de 1 500 octets — cela existe,
+chez de vieux logiciels et dans du courrier non-MIME — est accepté aujourd'hui et
+ne le sera plus.
+
+Rien ne permet de savoir, sans lire les journaux de Postfix, si cela vous arrive.
+C'est le genre de chose qui se voit après la bascule, sur un correspondant
+précis, et il vaut mieux l'avoir lu ici avant.
 
 ---
 
