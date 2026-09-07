@@ -14890,3 +14890,70 @@ L'UTF-7 modifié n'a pas de forme canonique : deux encodages différents peuvent
 désigner le même nom. Ré-encoder `Été-2025` ne redonnerait donc pas forcément les
 octets que Dovecot a écrits, et la correspondance raterait sur un dossier dont le
 nom se groupe autrement. On décode les deux côtés et on compare le résultat.
+
+## 2026-09-08 — Publier une clé DKIM, et le seul contrôle qui la vérifie
+
+Le manuel disait, en §0.1bis : « un découpage mal fait casse TOUTES les
+signatures sans rien dire ». C'était vrai, et c'était insuffisant : **un
+avertissement dans un document ne vérifie rien.** Il portait en outre deux
+défauts de ma main.
+
+### La faute que la liste de valeurs de l'hébergeur invite à commettre
+
+La zone de `narro.ch` est chez Gandi. Son panneau et son API prennent une LISTE
+de valeurs pour un nom donné, et cette liste veut dire « plusieurs ressources »,
+jamais « plusieurs morceaux d'une seule ». Une clé de 2048 bits fait 392
+caractères en base64 ; elle ne tient pas dans les 255 octets d'une chaîne DNS ;
+et la façon la plus naturelle de la saisir dans un tel panneau — un morceau par
+entrée — publie **deux ressources TXT au même nom**.
+
+La zone se charge. Le panneau affiche deux lignes vertes. `dig` répond. Et tout
+vérificateur DKIM abandonne : la RFC 6376 §3.6.2 lui interdit de choisir entre
+deux clés. Le courrier part, il est accepté, il tombe dans les indésirables —
+chez les autres, une semaine plus tard. **Aucun journal local ne s'en émeut.**
+
+C'est le défaut le plus coûteux de toute la bascule, parce qu'il est le seul qui
+soit à la fois silencieux, distant et différé.
+
+### `tr -d '" '` cachait précisément la faute qu'on cherchait
+
+Le manuel proposait `dig +short TXT … | tr -d '" '` pour relire la clé publiée.
+Ce raccourci retire aussi les espaces INTÉRIEURS aux chaînes ; il donne la bonne
+réponse sur `p=`, dont le base64 n'en contient jamais, et la mauvaise sur tout
+le reste. Surtout, `+short` imprimant **une ligne par ressource**, il écrase
+deux ressources en une seule chaîne d'apparence saine. Le contrôle recommandé
+était donc aveugle au défaut qu'il aurait dû voir.
+
+`publier-dkim.sh` retire exactement les frontières `" "`, et rien d'autre.
+
+### Le banc vérifiait la bonne chose pour la mauvaise raison
+
+Le banc est passé du premier coup, ce qui est toujours suspect. Six mutants lui
+ont été présentés ; **deux ont survécu** — la suppression du comptage des
+ressources, et celle du contrôle de taille.
+
+Ils survivaient parce que chaque cas n'exigeait qu'un REFUS. Le cas « deux
+ressources » refusait bien, mais en aval : la recomposition ne gardant que la
+dernière ligne, la clé obtenue était tronquée et l'empreinte ne concordait pas.
+Le cas « 1024 bits » refusait sur l'empreinte, jamais sur la taille. Les deux
+contrôles pour lesquels ce script existe n'étaient donc éprouvés par rien.
+
+**Un code de retour ne suffit pas : chaque cas nomme le motif qu'il attend dans
+le rapport.** Et deux cas sont montés pour qu'aucun autre contrôle ne puisse les
+rattraper — les deux ressources sont COMPLÈTES et JUSTES, et la clé courte est
+vérifiée contre sa propre empreinte. Les six mutants meurent maintenant.
+
+### Ce qu'on imprime doit être ce qu'on accepte
+
+Un dernier essai part de la sortie RÉELLE de `--engendrer` et la fait relire par
+`--verifier`. Sans lui, les deux moitiés pourraient diverger en se tenant
+chacune pour juste, le banc restant vert. Il a trouvé son défaut à la première
+exécution : le corps JSON de la section Gandi échappait les guillemets **deux
+fois** (`\\"` au lieu de `\"`), et n'était pas du JSON.
+
+### Ce que le script ne fait pas
+
+Il ne touche jamais au DNS. Personne ne lui confie de mot de passe d'hébergeur,
+et il ne recharge pas rspamd. **Publier reste un geste humain** — ce qu'on
+automatise, c'est la vérification, parce que c'est elle qu'on saute quand tout a
+l'air d'aller.

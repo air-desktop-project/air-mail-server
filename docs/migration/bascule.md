@@ -81,34 +81,64 @@ Relisez-le : il nomme vos comptes. Les points d'arrêt :
 rotation suivante lisible dans le DNS ; réutiliser `mail` empêcherait l'ancienne
 et la nouvelle clé de cohabiter pendant la semaine d'épreuve.
 
-    # 1. La clé, chez rspamd, à côté de l'ancienne.
-    sudo -u _rspamd openssl genrsa -out \
-        /var/lib/rspamd/dkim/narro.ch.ams202609.key 2048
-    sudo chmod 600 /var/lib/rspamd/dkim/narro.ch.ams202609.key
+**CE QUI EST PUBLIÉ AUJOURD'HUI TIENT SUR 1024 BITS.** Relevé le 2026-09-08 :
+`mail._domainkey.narro.ch` rend une clé dont le DER commence par `MIGf`, la
+signature d'un module de 1024 bits. C'est la raison de fond de la rotation, et
+non le seul changement de serveur.
 
-    # 2. Ce qu'il faut publier.
-    sudo openssl rsa -in /var/lib/rspamd/dkim/narro.ch.ams202609.key \
-        -pubout -outform PEM | grep -v '^-----' | tr -d '\n'
+**LA ZONE EST CHEZ GANDI** — `ns-{34-b,65-a,133-c}.gandi.net`. Le panneau et
+l'API acceptent une LISTE de valeurs, et cette liste veut dire « plusieurs
+ressources », jamais « plusieurs morceaux d'une seule ». C'est exactement le
+piège décrit plus bas.
+
+    # 1. La clé, chez rspamd, à côté de l'ancienne — et TOUT ce qu'il faut
+    #    publier, imprimé aux trois formes qu'un panneau peut demander.
+    sudo bash docs/migration/publier-dkim.sh --engendrer
+
+    # 2. On publie chez Gandi ce que l'étape 1 a imprimé.
+
+    # 3. ON VÉRIFIE CE QUE LE DNS SERT VRAIMENT.
+    sudo bash docs/migration/publier-dkim.sh --verifier
+
+    # ... ou, depuis n'importe quelle machine, avec la seule empreinte que
+    #     l'étape 1 a imprimée — elle ne porte aucun secret :
+    bash docs/migration/publier-dkim.sh --verifier --empreinte <sha256>
+
+    # Si vous venez de publier, interrogez la source plutôt qu'un cache :
+    bash docs/migration/publier-dkim.sh --verifier --serveur ns-133-c.gandi.net
 
 **LA PARTIE PUBLIQUE NE TIENT PAS DANS UNE CHAÎNE DNS.** Une clé 2048 fait
 environ 392 caractères en base64, au-delà des 255 octets d'une chaîne de
 caractères DNS. L'enregistrement TXT doit donc être **découpé en plusieurs
-chaînes qui se concatènent** :
+chaînes qui se concatènent, À L'INTÉRIEUR D'UNE SEULE RESSOURCE** :
 
     ams202609._domainkey.narro.ch. IN TXT (
         "v=DKIM1; k=rsa; p=MIIBIjANBgkq…"   ← premier morceau, ≤ 255 caractères
         "…le reste de la clé" )
 
-Certains panneaux le font seuls, d'autres non. **Un découpage mal fait casse
-TOUTES les signatures sans rien dire** : la clé publique reconstituée est
-différente, et le destinataire lit `dkim=permerror` ou `dkim=fail` sans qu'aucun
-journal local ne s'en émeuve.
+**DEUX RESSOURCES AU LIEU D'UNE EST LA FAUTE LA PLUS COÛTEUSE DE LA BASCULE**,
+et c'est celle que la liste de valeurs de l'hébergeur invite à commettre. La
+zone se charge, le panneau affiche deux lignes vertes, `dig` répond — et tout
+vérificateur abandonne : la RFC 6376 §3.6.2 lui interdit de choisir entre deux
+clés. Le courrier part, il est accepté, il tombe dans les indésirables. Chez les
+autres. Une semaine plus tard. **Aucun journal local ne s'en émeut.**
 
-    # 3. On vérifie ce que le DNS rend VRAIMENT, une fois publié.
-    dig +short TXT ams202609._domainkey.narro.ch | tr -d '" ' | head -c 80
+C'est pourquoi l'étape 3 n'est pas un conseil. `publier-dkim.sh --verifier`
+compte les ressources, recompose les chaînes, décode la clé, mesure sa taille,
+et **compare son empreinte à celle de la clé privée qui signera** — parce qu'un
+enregistrement irréprochable portant la clé d'un autre sélecteur passerait tous
+les autres contrôles.
+
+> **`dig +short TXT … | tr -d '" '` EST FAUX, ET CETTE PAGE L'A CONSEILLÉ.**
+> Ce raccourci retire aussi les espaces INTÉRIEURS aux chaînes. Il donne la
+> bonne réponse sur `p=`, dont le base64 n'en contient jamais, et la mauvaise
+> sur tout le reste — et surtout, `+short` imprimant une ligne par ressource, il
+> écrase les deux en une et **cache précisément la faute qu'on cherche**. Le
+> banc du script tient ce cas (essai K).
 
     # 4. rspamd signe avec, EN GARDANT L'ANCIENNE en place.
     #    `selector = "ams202609";` dans /etc/rspamd/local.d/dkim_signing.conf
+    #    `path = "/var/lib/rspamd/dkim/$domain.$selector.key";`
     sudo systemctl reload rspamd
 
 **PUIS ON REGARDE PENDANT UNE SEMAINE.** Envoyez-vous un message vers Gmail et
@@ -117,8 +147,9 @@ doit dire `dkim=pass header.d=narro.ch`. C'est le seul contrôle qui compte —
 tout le reste se vérifie chez soi, celui-là se vérifie chez les autres.
 
 **L'ANCIENNE CLÉ RESTE PUBLIÉE** tant que la nouvelle n'a pas fait ses preuves.
-Deux sélecteurs qui cohabitent ne gênent personne ; un seul qui ne vérifie pas
-fait tomber tout le courrier sortant dans les indésirables.
+Deux sélecteurs qui cohabitent ne gênent personne — ce sont deux NOMS
+différents, et non deux ressources au même nom ; un seul qui ne vérifie pas fait
+tomber tout le courrier sortant dans les indésirables.
 
 ### 0.2 Sauvegarde, et vérification de la sauvegarde
 
