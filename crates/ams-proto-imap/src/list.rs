@@ -72,12 +72,21 @@ impl<'a> List<'a> {
 
     /// `(SPECIAL-USE)` était-il devant ? — le FILTRE de RFC 6154 §5.2.
     ///
-    /// # IL N'Y A PAS DE `RETURN (SPECIAL-USE)` CORRESPONDANT, ET C'EST VOULU
+    /// # LE `RETURN (SPECIAL-USE)` EST ACCEPTÉ, ET NE CHANGE RIEN
     ///
-    /// §5.2 ne définit qu'une option de SÉLECTION. Les attributs d'usage, eux,
+    /// Ce commentaire disait « il n'y a pas de `RETURN (SPECIAL-USE)`
+    /// correspondant, et c'est voulu ». C'était faux : §2 de RFC 6154 ajoute
+    /// « a new selection option, AND A NEW RETURN OPTION, all called
+    /// "SPECIAL-USE" », et §8.5 enregistre cette option de retour.
+    ///
+    /// Le raisonnement qui suivait, lui, était juste : les attributs d'usage
     /// sont écrits sur CHAQUE ligne d'un `LIST`, que le client les ait demandés
-    /// ou non — comme `\HasChildren`. Un client qui doit demander ce qu'il
-    /// reçoit déjà ferait un aller-retour pour rien.
+    /// ou non — comme `\HasChildren` —, et la même section l'AUTORISE. Mais
+    /// cette permission porte sur ce qu'on RÉPOND, jamais sur le droit du
+    /// client de DEMANDER.
+    ///
+    /// L'option de retour est donc lue et ignorée, ce qui est conforme et ne
+    /// coûte rien. Il n'y a pas d'accesseur pour elle : elle ne décide de rien.
     #[must_use]
     pub fn special_use_only(&self) -> bool {
         self.special_use_only
@@ -334,6 +343,29 @@ fn options_de_retour(dedans: &[u8]) -> Result<(bool, Option<StatusItems>), Error
             continue;
         }
         if mot.eq_ignore_ascii_case(b"CHILDREN") {
+            continue;
+        }
+        // **`SPECIAL-USE` EST UNE OPTION DE RETOUR, ET ON L'ACCEPTE SANS RIEN
+        // FAIRE DE PLUS.**
+        //
+        // §2 de RFC 6154 : « this extension adds a new capability string, a new
+        // selection option, and a NEW RETURN OPTION, all called "SPECIAL-USE" »,
+        // et §8.5 s'intitule « Registration of SPECIAL-USE Return Option ». La
+        // refuser en annonçant la capacité était une non-conformité.
+        //
+        // Elle ne change RIEN à ce qu'on rend : les attributs d'usage sont déjà
+        // écrits sur chaque ligne, que le client les demande ou non — ce que la
+        // même section AUTORISE explicitement : « The extended LIST command MAY
+        // return SPECIAL-USE attributes even if the client does not specify the
+        // return option. »
+        //
+        // Mais cette permission-là porte sur ce qu'on RÉPOND, jamais sur le
+        // droit du client de DEMANDER. Thunderbird ouvre chacune de ses
+        // connexions par `LIST (SUBSCRIBED) "" "*" RETURN (SPECIAL-USE)` ; sur
+        // un `BAD`, il n'a plus listé que `INBOX` et `Trash`, et les dossiers de
+        // l'utilisateur — `Sent`, `Drafts`, ceux qu'il a créés — n'apparaissaient
+        // nulle part.
+        if mot.eq_ignore_ascii_case(b"SPECIAL-USE") {
             continue;
         }
         if !mot.eq_ignore_ascii_case(b"STATUS") {

@@ -72,19 +72,35 @@ fn le_filtre_special_use_se_lit_et_n_a_pas_de_pendant() {
     assert!(deux.special_use_only());
     assert!(deux.subscribed_only());
 
-    // Et il n'y a pas de `RETURN (SPECIAL-USE)`.
-    assert!(List::parse(b"\"\" * RETURN (SPECIAL-USE)").is_err());
+    // **ET `RETURN (SPECIAL-USE)` EST UNE AUTRE CHOSE, QUI SE LIT AUSSI.**
+    //
+    // Cet essai affirmait le contraire — « il n'y a pas de
+    // `RETURN (SPECIAL-USE)` » — et gardait ainsi une non-conformité : §2 de
+    // RFC 6154 ajoute « a new selection option, AND A NEW RETURN OPTION, all
+    // called "SPECIAL-USE" », et §8.5 enregistre la seconde.
+    //
+    // Le retour ne FILTRE pas : c'est tout ce qui le distingue du premier.
+    let retour = List::parse(b"\"\" * RETURN (SPECIAL-USE)").expect("lisible");
+    assert!(!retour.special_use_only(), "le RETOUR ne filtre pas");
 }
 
 /// **UNE OPTION QU'ON NE SERT PAS SE REFUSE** : l'ignorer rendrait une liste que
 /// le client croirait filtrée.
+///
+/// La difficulté est de savoir laquelle on sert. Une option qu'on ANNONCE par
+/// sa capacité et qu'on refuse ensuite n'est pas une prudence, c'est une
+/// promesse rompue — et le client, lui, ne redemande pas autrement.
 #[test]
 fn une_option_qu_on_ne_sert_pas_se_refuse() {
     for arguments in [
         &b"(REMOTE) \"\" *"[..],
         b"(RECURSIVEMATCH) \"\" *",
         b"(SUBSCRIBED REMOTE) \"\" *",
-        b"\"\" * RETURN (SPECIAL-USE)",
+        // `RETURN (SPECIAL-USE)` FIGURAIT ICI, et n'y a pas sa place : c'est
+        // une option de retour ENREGISTRÉE (§8.5 de RFC 6154), que ce module
+        // annonce par sa capacité. La refuser était la non-conformité que
+        // Thunderbird rencontre à chacune de ses connexions.
+        b"\"\" * RETURN (INCONNUE)",
     ] {
         assert_eq!(
             List::parse(arguments),
@@ -275,4 +291,64 @@ fn ce_qui_est_lu_se_montre() {
 fn la_faute_se_dit() {
     let texte = std::format!("{}", Error::MalformedList);
     assert!(texte.contains("`LIST`"), "{texte}");
+}
+
+/// **CE QUE THUNDERBIRD ENVOIE, OCTET POUR OCTET.**
+///
+/// # Ce que cet essai garde
+///
+/// Le serveur annonçait `SPECIAL-USE` dans sa `CAPABILITY` et REFUSAIT
+/// `RETURN (SPECIAL-USE)` — « BAD LIST arguments are not well formed ». §2 de
+/// RFC 6154 ajoute pourtant « a new selection option, AND A NEW RETURN OPTION,
+/// all called "SPECIAL-USE" », et §8.5 l'enregistre.
+///
+/// Ce n'est pas une subtilité de conformité. Thunderbird ouvre CHACUNE de ses
+/// connexions par cette commande-là. Sur un `BAD`, la capture d'une session
+/// réelle montre qu'il n'a plus listé que `INBOX` et `Trash` : les dossiers de
+/// l'utilisateur — `Sent`, `Drafts`, ceux qu'il a créés — n'apparaissaient
+/// nulle part.
+///
+/// Les octets sont ceux d'un Thunderbird 155 authentique, capturés au travers
+/// d'un mandataire, minuscules comprises.
+#[test]
+fn la_commande_de_thunderbird_est_lisible() {
+    let vu = List::parse(b"(subscribed) \"\" \"*\" return (special-use)").expect("lisible");
+    assert!(vu.subscribed_only(), "le FILTRE des abonnées");
+    assert!(
+        !vu.special_use_only(),
+        "pas un filtre d'usage : c'est le RETOUR"
+    );
+    assert!(
+        !vu.report_subscribed(),
+        "`RETURN (SPECIAL-USE)` ne demande pas `\\Subscribed`"
+    );
+    assert_eq!(vu.patterns(), [&b"*"[..]]);
+}
+
+/// L'option de retour se lit seule, et se cumule avec les autres.
+///
+/// **ELLE NE CHANGE RIEN À CE QU'ON REND**, et c'est conforme : les attributs
+/// d'usage sont déjà écrits sur chaque ligne, ce que §2 autorise — « MAY return
+/// SPECIAL-USE attributes even if the client does not specify the return
+/// option ». Cette permission porte sur ce qu'on RÉPOND, jamais sur le droit du
+/// client de DEMANDER.
+#[test]
+fn le_retour_special_use_se_lit_et_ne_decide_de_rien() {
+    for arguments in [
+        &b"\"\" * RETURN (SPECIAL-USE)"[..],
+        b"\"\" * RETURN (SPECIAL-USE SUBSCRIBED)",
+        b"\"\" * RETURN (SUBSCRIBED SPECIAL-USE)",
+        b"\"\" * RETURN (SPECIAL-USE CHILDREN)",
+    ] {
+        let vu = List::parse(arguments).expect("lisible");
+        assert!(!vu.special_use_only(), "{arguments:?} n'est pas un filtre");
+    }
+
+    // Et le `SUBSCRIBED` qui l'accompagne garde son sens.
+    let deux = List::parse(b"\"\" * RETURN (SPECIAL-USE SUBSCRIBED)").expect("lisible");
+    assert!(deux.report_subscribed());
+
+    // L'option de SÉLECTION, elle, filtre toujours.
+    let filtre = List::parse(b"(SPECIAL-USE) \"\" *").expect("lisible");
+    assert!(filtre.special_use_only());
 }

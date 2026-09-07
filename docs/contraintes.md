@@ -14651,3 +14651,74 @@ Trois écrites aujourd'hui — dans `repeter-la-configuration.sh`, dans le banc 
 `rapatrier.sh`, dans celui de `verifier.sh` — et deux qui dormaient dans
 l'installateur. Les scripts existants du dépôt, eux, échappent correctement :
 c'est la convention, elle était juste, et rien ne la tenait.
+
+
+## Le serveur annonçait `SPECIAL-USE` et refusait ce qu'il promettait
+
+    C> 75 list (subscribed) "" "*" return (special-use)
+    S> 75 BAD LIST arguments are not well formed
+
+C'est la PREMIÈRE commande de liste que Thunderbird envoie, sur CHACUNE de ses
+connexions. Et la capture d'une session réelle montre ce qu'il fait ensuite :
+plus rien. Il n'a listé que `INBOX` et `Trash`. Les dossiers de l'utilisateur —
+`Sent`, `Drafts`, ceux qu'il a créés — n'apparaissaient **nulle part**.
+
+Cinq personnes auraient ouvert leur logiciel le 19 septembre au matin et n'y
+auraient vu que deux dossiers.
+
+### Le commentaire qui gardait le défaut
+
+    /// # IL N'Y A PAS DE `RETURN (SPECIAL-USE)` CORRESPONDANT, ET C'EST VOULU
+    ///
+    /// §5.2 ne définit qu'une option de SÉLECTION.
+
+La prémisse était fausse. §2 de RFC 6154 : « this extension adds a new
+capability string, a new selection option, and A NEW RETURN OPTION, all called
+"SPECIAL-USE" », et §8.5 s'intitule « Registration of SPECIAL-USE Return
+Option ».
+
+Le raisonnement qui suivait, lui, était juste : les attributs d'usage sont écrits
+sur chaque ligne d'un `LIST`, que le client les demande ou non — ce que la même
+section AUTORISE. **Mais cette permission porte sur ce qu'on RÉPOND, jamais sur
+le droit du client de DEMANDER.** Un raisonnement juste posé sur une prémisse
+fausse donne une conclusion fausse, et il se relit sans qu'on le voie.
+
+L'option est désormais lue et ignorée : conforme, et sans rien changer à la
+réponse.
+
+### Deux essais gardaient le mauvais comportement
+
+`le_filtre_special_use_se_lit_et_n_a_pas_de_pendant` affirmait
+`List::parse(b"\"\" * RETURN (SPECIAL-USE)").is_err()`, et
+`une_option_qu_on_ne_sert_pas_se_refuse` la comptait parmi les options
+inconnues. Les deux sont réécrits, avec la raison — un essai qui garde une faute
+la rend plus difficile à corriger que s'il n'existait pas.
+
+**Une option qu'on ANNONCE par sa capacité et qu'on refuse ensuite n'est pas une
+prudence, c'est une promesse rompue** — et le client, lui, ne redemande pas
+autrement.
+
+### Ce qu'il a fallu pour le trouver
+
+`imaplib` ne l'aurait jamais vu : il n'emploie aucune des dix-huit capacités que
+ce serveur annonce. Il a fallu un VRAI client, et cela a demandé un détour :
+Thunderbird est un snap, donc confiné — il ne lit pas `/tmp`, et son profil vit
+dans le répertoire personnel, à côté de douze gigaoctets de courrier réel.
+
+La voie retenue : un compte Unix jetable, `loginctl enable-linger` pour lui
+donner une session, `systemd-run --uid` pour satisfaire le cgroup que snap
+exige, un mandataire en clair d'un côté et en TLS de l'autre pour capturer sans
+démêler du chiffrement, et `xdotool` pour saisir le mot de passe UNE fois — le
+magasin de Thunderbird le garde ensuite.
+
+### Ce que la capture a montré d'autre, et qui va bien
+
+Trente-six réponses `OK`, zéro refus après correction. Thunderbird a listé les
+quatre dossiers dont `&AMk-t&AOk--2025` — c'est `Été-2025`, encodé en UTF-7
+modifié comme RFC 3501 §5.1.3 l'exige —, sélectionné chacun, rapatrié les
+messages par `UID FETCH` avec une liste de quinze champs d'en-tête et un
+`BODY.PEEK[]`, et ouvert plusieurs `IDLE`.
+
+Il crée aussi `Trash` s'il ne le trouve pas, et le serveur refuse le second essai
+d'une connexion concurrente par `NO [ALREADYEXISTS]` — ce qui est exactement ce
+qu'il faut.
