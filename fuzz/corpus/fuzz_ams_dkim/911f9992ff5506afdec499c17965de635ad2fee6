@@ -1,0 +1,3 @@
+v=1; a=rsa-sha256; c=relaxed/relaxed; d=exmaple.com; s=brisbane; h=from:t; bh=2jUSOH9NhtVGCQWNr9BrIAPreKQjO6sn7XIkfJVOzv8=; b=AuUoFEQQQQQQQQQQQQQQQQQfrom:to:  C
+D 	 EDx
+v=DKI kq=q=> C =rsa; p=MIGfMrshafrom:toQQQQQQQQQQQQQQQQQQQQQÿÿQQQQQQQQQQQQQQQQQQQQQQQ	
