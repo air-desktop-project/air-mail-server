@@ -14772,3 +14772,59 @@ joint qu'un port. Une garde du produit a attrapé une faute de son propre banc.
 Il imprime les refus au lieu d'échouer dessus. `NO [ALREADYEXISTS]` sur un
 `CREATE "Trash"` que deux connexions demandent en même temps est la BONNE
 réponse. C'est à qui lit de juger — mais il faut qu'il les voie.
+
+
+## Le banc client vérifie maintenant, au lieu de seulement montrer
+
+La première écriture imprimait les commandes et comptait les refus. C'était une
+capture, pas un contrôle : elle n'aurait rien dit d'un serveur qui répond `OK` à
+tout et ne pousse jamais rien.
+
+Le scénario ajouté est celui de la PRODUCTION, et le seul qui traverse la chaîne
+entière : un message déposé par SMTP pendant que le client attend en `IDLE`,
+écrit dans le Maildir, poussé par un `* EXISTS`, puis rapatrié.
+
+    C> 89 IDLE
+    S> * 3 EXISTS
+    C> DONE
+    S> 39 OK IDLE terminated
+    C> 41 UID fetch 3:* (FLAGS)
+    C> 42 UID fetch 3 (UID RFC822.SIZE FLAGS BODY.PEEK[HEADER.FIELDS (…)])
+    C> 43 UID fetch 3 (UID RFC822.SIZE BODY.PEEK[])
+    C> 44 UID fetch 3 (… BODY.PEEK[TEXT]<0.2048>)
+
+Cette dernière — une portée d'octets sur une partie — est de celles qu'`imaplib`
+ne forme jamais.
+
+### Et le défaut qu'il attrape ne produit AUCUNE erreur
+
+En portant l'intervalle de veille de cinq secondes à une heure, le banc rend :
+
+    commandes du client : 44        (au lieu de 51)
+    refus (BAD ou NO)   : 0
+    arrivée poussée     : NON
+
+Zéro refus. Aucune erreur nulle part. Le courrier n'arrive simplement jamais, et
+le client ne s'en plaint pas — il attend, c'est son métier. C'est très exactement
+le genre de panne qu'aucune barrière ne peut voir et qu'aucun journal ne dit.
+
+### Trois assertions, et elles disent la conséquence
+
+Le client a-t-il envoyé des commandes ; le serveur a-t-il poussé ; le client a-t-il
+rapatrié. Chaque échec nomme ce qui arriverait à l'utilisateur — « un client qui
+attend ne verra jamais son courrier » — plutôt que ce qui manque au protocole.
+
+### Et la garde des accents graves a attrapé son auteur
+
+Le message d'échec de ce banc portait `` `IDLE` `` entre guillemets doubles, dans
+un texte Python à l'intérieur d'un « here-document ». Le shell ne l'y interprète
+pas — le heredoc est CITÉ —, donc c'était un faux positif au sens strict.
+
+**Mais dans le bon sens.** Un `<<'FIN'` est littéral, un `<<FIN` nu ne l'est pas,
+et distinguer les deux demanderait de suivre l'état du script ligne à ligne. La
+garde signale donc les deux, et sa limite est écrite dans son propre commentaire
+plutôt que laissée à deviner : une garde dont on ne comprend pas le refus finit
+désactivée.
+
+La correction coûte de retirer deux accents graves d'un message destiné à un
+humain, qui se lit aussi bien sans.

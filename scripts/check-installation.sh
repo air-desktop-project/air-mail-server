@@ -69,6 +69,13 @@ bash -n scripts/installer.sh || rate "scripts/installer.sh ne s'analyse pas"
 # l'intérieur d'une chaîne entre guillemets doubles. Les commentaires sont
 # écartés : ils citent souvent du code.
 #
+# **IL NE COMPREND PAS LES « HERE-DOCUMENTS », ET C'EST VOULU.** Un `<<'FIN'`
+# cité est littéral, un `<<FIN` nu ne l'est pas — et distinguer les deux
+# demanderait de suivre l'état du script ligne à ligne. Ce contrôle signale donc
+# les DEUX, ce qui est le bon sens de l'erreur : la correction coûte de retirer
+# deux accents graves d'un message destiné à un humain, qui se lit aussi bien
+# sans.
+#
 # **CE FICHIER-CI EST ÉCARTÉ DU BALAYAGE**, et c'est inévitable : il PORTE le
 # motif, donc il se signalerait lui-même. La contrepartie est dite plutôt que
 # cachée — un accent grave mal échappé DANS CE SCRIPT ne serait pas vu.

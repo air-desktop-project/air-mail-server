@@ -43,6 +43,7 @@ banc=${TMPDIR:-/tmp}/capture-client-$$
 compte=banc-ams
 port_serveur=9994
 port_mandataire=9995
+port_smtp=2526
 
 nettoyer() {
     [ -n "${pid_serveur-}" ] && kill "$pid_serveur" 2>/dev/null
@@ -122,7 +123,7 @@ chmod 600 "$banc/comptes.bin"
 "$racine/target/release/air-mail-admin" config write "$banc/ams.conf" \
     --domain mail.example.com --hosted example.com \
     --maildir "$banc/vmail" --accounts "$banc/comptes.bin" \
-    --listen 127.0.0.1:2526 --listen-imaps "127.0.0.1:$port_serveur" \
+    --listen "127.0.0.1:$port_smtp" --listen-imaps "127.0.0.1:$port_serveur" \
     --tls-cert "$banc/cert.pem" --tls-key "$banc/cle.pem" >/dev/null || exit 1
 # **PAS DE `chmod o+rX` ICI**, et le serveur l'a rappelé : il REFUSE de démarrer
 # sur un magasin lisible par les autres comptes de la machine. Une première
@@ -179,6 +180,32 @@ for essai in $(seq 1 12); do
 done
 sleep 30
 
+# ── UN MESSAGE ARRIVE PENDANT QUE LE CLIENT ATTEND ──────────────────────────
+#
+# **C'EST LE SCÉNARIO DE PRODUCTION**, et le seul qui traverse toute la chaîne :
+# SMTP, écriture Maildir, notification IMAP pendant un `IDLE`, rapatriement par
+# le client. La synchronisation initiale, elle, ne dit rien de ce qui se passe
+# APRÈS — c'est-à-dire de la vie normale du serveur.
+python3 - "$port_smtp" <<'ARRIVEE'
+import email.message, smtplib, sys
+
+message = email.message.EmailMessage()
+message["From"] = "Anne <anne@exemple.test>"
+message["To"] = "jean@example.com"
+message["Subject"] = "Arrivé pendant l'IDLE"
+message["Message-ID"] = "<idle.banc@exemple.test>"
+message.set_content("Ce message arrive alors que le client attend.")
+with smtplib.SMTP("127.0.0.1", int(sys.argv[1]), timeout=10) as session:
+    session.ehlo("client.example.net")
+    session.send_message(message)
+ARRIVEE
+if [ $? -ne 0 ]; then
+    echo "ÉCHEC : le dépôt SMTP n'a pas abouti." >&2
+    exit 1
+fi
+# Le temps que le serveur pousse, et que le client rapatrie.
+sleep 25
+
 # ── CE QU'ON EN TIRE ────────────────────────────────────────────────────────
 python3 - "$banc/conversation.log" "${1-}" <<'PY'
 import sys
@@ -209,6 +236,16 @@ for ligne in open(chemin, encoding="utf-8", errors="replace"):
             elif texte[:1].isdigit() and " OK " in texte:
                 oks += 1
 
+# **LE MESSAGE POUSSÉ A-T-IL ÉTÉ RAPATRIÉ ?**
+#
+# C'est la seule assertion de ce script, et elle porte sur la chaîne ENTIÈRE :
+# SMTP, écriture Maildir, `* EXISTS` poussé pendant l'`IDLE`, `DONE`, puis le
+# `UID FETCH` du client. Un maillon qui casse au milieu ne se voit pas dans un
+# décompte de commandes — il se voit ici.
+octets = open(chemin, encoding="utf-8", errors="replace").read()
+pousse = "* 3 EXISTS" in octets
+rapatrie = "idle.banc@exemple.test" in octets
+
 print()
 print(f"commandes du client : {len(commandes)}")
 print(f"réponses OK         : {oks}")
@@ -216,10 +253,23 @@ print(f"refus (BAD ou NO)   : {len(refus)}")
 for r in refus:
     print("   ", r[:120])
 
+print(f"arrivée poussée     : {'oui' if pousse else 'NON'}")
+print(f"arrivée rapatriée   : {'oui' if rapatrie else 'NON'}")
+
 if not commandes:
     print()
     print("ÉCHEC : le client n'a envoyé AUCUNE commande — il attend sans doute")
     print("        son mot de passe. Relancez : la saisie n'a lieu qu'une fois.")
+    sys.exit(1)
+if not pousse:
+    print()
+    print("ÉCHEC : le serveur n'a pas poussé l'arrivée pendant l'attente IDLE.")
+    print("        Un client qui attend ne verra jamais son courrier.")
+    sys.exit(1)
+if not rapatrie:
+    print()
+    print("ÉCHEC : le client n'a pas rapatrié le message poussé.")
+    print("        La notification part, et le message n'arrive pas.")
     sys.exit(1)
 # **UN REFUS N'EST PAS FORCÉMENT UNE FAUTE**, et c'est pourquoi ce script les
 # MONTRE au lieu d'échouer : `NO [ALREADYEXISTS]` sur un `CREATE "Trash"` que
