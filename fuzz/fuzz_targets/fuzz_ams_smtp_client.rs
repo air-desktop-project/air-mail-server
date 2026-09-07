@@ -67,7 +67,8 @@ use libfuzzer_sys::fuzz_target;
 
 use ams_proto_smtp::{Limits, Reply, Stuffer, reply_len, stuffed_max};
 use ams_session::{
-    CLIENT_COMMAND_MAX, ClientConfig, ClientDsn, ClientReport, ClientStep, SmtpClient,
+    CLIENT_COMMAND_MAX, ClientConfig, ClientCredentials, ClientDsn, ClientReport, ClientStep,
+    SmtpClient,
 };
 
 /// Ce qu'on soumet.
@@ -81,6 +82,11 @@ struct Entree<'a> {
     coupure: u16,
     /// Exige-t-on le chiffrement ?
     exige_tls: bool,
+    /// La connexion est-elle déjà chiffrée quand la session commence ?
+    tls_implicite: bool,
+    /// De quoi s'authentifier, ou rien — DEUX TRANCHES LIBRES, y compris vides
+    /// ou démesurées : c'est `SmtpClient::new` qui doit les refuser.
+    identifiants: Option<(&'a [u8], &'a [u8])>,
     /// L'identifiant d'enveloppe du déposant (RFC 3461 §4.4). **VIENT DE LUI.**
     envid: &'a [u8],
     /// Ce que le premier destinataire avait demandé (§4.1, §4.2).
@@ -140,6 +146,13 @@ fuzz_target!(|entree: Entree<'_>| {
         sender: b"",
         recipients: destinataires,
         require_tls: entree.exige_tls,
+        // **LE SECRET VIENT DU FUZZ**, et c'est ce qui compte : la session doit
+        // le refuser quand il est vide ou démesuré, et ne JAMAIS l'écrire sans
+        // chiffrement. Le second point est vérifié plus bas, sur ce qui sort.
+        credentials: entree
+            .identifiants
+            .map(|(user, password)| ClientCredentials { user, password }),
+        implicit_tls: entree.tls_implicite,
         dsn: Some(ClientDsn {
             envelope_id: entree.envid,
             reports: &rapports,
@@ -176,7 +189,44 @@ fuzz_target!(|entree: Entree<'_>| {
         // PROPRIÉTÉ 6 : ce qui part sur le fil est UNE ligne.
         match geste {
             ClientStep::Send(n) | ClientStep::Done { sent: n, .. } => {
-                une_seule_ligne(sortie.get(..n).unwrap_or_default());
+                let ecrit = sortie.get(..n).unwrap_or_default();
+                une_seule_ligne(ecrit);
+                // **PROPRIÉTÉ 7 : AUCUNE COMMANDE `AUTH` AVANT LE CHIFFREMENT.**
+                //
+                // §4 de RFC 4954 interdit `PLAIN` en clair. Le secret ne peut
+                // atteindre le fil QUE dans une commande `AUTH PLAIN` : en
+                // interdire l'écriture tant que la session ne se sait pas
+                // chiffrée suffit, et c'est vérifiable sans ambiguïté.
+                //
+                // **CHERCHER LE SECRET LUI-MÊME NE MARCHE PAS**, et la première
+                // écriture de cette propriété l'a appris en une minute de fuzz :
+                //
+                //     le secret est sorti EN CLAIR : "EHLO mail.nous.test\r\n"
+                //
+                // Le fuzz avait choisi un mot de passe qui est par hasard une
+                // sous-chaîne de ce que nous écrivons de toute façon. Il choisit
+                // AUSSI l'identifiant d'enveloppe et les adresses d'origine, qui
+                // partent sur le fil : un secret égal à l'un d'eux y
+                // apparaîtrait légitimement. La recherche par sous-chaîne a donc
+                // des faux positifs PAR CONSTRUCTION, et une propriété qui crie
+                // au loup ne se lit plus.
+                //
+                // **ET LA CHERCHER PARTOUT NE MARCHE PAS NON PLUS.** Deuxième
+                // écriture, deuxième minute de fuzz :
+                //
+                //     une commande AUTH est sortie sans chiffrement :
+                //     "MAIL FROM:<> ENVID=vvvvvAUTHvvvv"
+                //
+                // Le fuzz avait glissé `AUTH` dans un identifiant d'enveloppe,
+                // qui part sur le fil comme le déposant l'a écrit. Une COMMANDE
+                // se reconnaît à son DÉBUT, et nulle part ailleurs.
+                if !client.is_encrypted() {
+                    assert!(
+                        !ecrit.starts_with(b"AUTH "),
+                        "une commande AUTH est sortie sans chiffrement : {:?}",
+                        String::from_utf8_lossy(ecrit)
+                    );
+                }
             }
             ClientStep::Secure | ClientStep::SendBody => {}
         }

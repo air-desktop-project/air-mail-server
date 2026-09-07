@@ -333,6 +333,20 @@ struct Relay {
   retrySecondsRetire @2 :UInt32;
   maxRetrySecondsRetire @3 :UInt32;
   expireSecondsRetire @4 :UInt32;
+  # ── LE RELAIS DE SORTIE (RFC 4954) ────────────────────────────────────────
+  #
+  # **UN CHAMP AJOUTÉ APRÈS COUP DÉCODE DES CHAÎNES VIDES**, et un hôte vide veut
+  # dire « pas de relais ». Une configuration écrite avant que ces champs
+  # n'existent remet donc en direct, exactement comme avant.
+  #
+  # Le mot de passe vit ICI, dans un fichier binaire que l'exploitant protège.
+  # Il ne passe jamais par la ligne de commande — ce que `ps` affiche, tout le
+  # monde le lit — et l'outil le demande sur l'entrée standard.
+  relayhost @5 :Text;
+  relayhostPort @6 :UInt16;
+  relayhostImplicitTls @7 :Bool;
+  relayhostUser @8 :Text;
+  relayhostPassword @9 :Text;
 }
 
 # La file d'attente du serveur — TOUT ce qui sort passe par elle.

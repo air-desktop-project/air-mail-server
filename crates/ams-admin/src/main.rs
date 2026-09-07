@@ -336,6 +336,32 @@ fn ecrire(fichier: &Path, arguments: &[&str]) -> ExitCode {
     };
 
     let mut config = options.en_configuration();
+
+    // **LE SECRET DU RELAIS SE LIT SUR L'ENTRÉE STANDARD**, comme celui d'un
+    // compte, et pour la même raison : ce que `ps` affiche, tout le monde le
+    // lit — y compris les autres comptes de la machine, et les journaux du
+    // shell.
+    //
+    // On ne le demande QUE si un relais est nommé, et l'on RÉÉCRIT alors la
+    // configuration : le mot de passe n'a jamais transité par `parse`.
+    if !config.relay.relayhost.is_empty() {
+        match lire_mot_de_passe() {
+            Ok(secret) => match std::string::String::from_utf8(secret) {
+                Ok(texte) => config.relay.relayhost_password = texte,
+                Err(_) => {
+                    eprintln!(
+                        "air-mail-admin : le mot de passe du relais n'est pas de l'UTF-8 valide"
+                    );
+                    return ExitCode::from(2);
+                }
+            },
+            Err(message) => {
+                eprintln!("air-mail-admin : {message}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+
     let scellement = match sceller(fichier, &config, options.rotate_token_key) {
         Ok(quoi) => quoi,
         Err(message) => {
@@ -630,12 +656,33 @@ fn afficher(config: &Configuration) {
             let reprise = config.queue.backoff();
             format!(
                 "vers `{}` — 1er essai à {} s, plafond {} s, retard dit à {} s, \
-                 abandon à {} s",
+                 abandon à {} s{}",
                 config.queue.spool,
                 reprise.first.as_secs(),
                 reprise.ceiling.as_secs(),
                 reprise.warning.as_secs(),
-                reprise.expiry.as_secs()
+                reprise.expiry.as_secs(),
+                // **UN RELAIS DE SORTIE SE VOIT ICI, OU NULLE PART.** C'est le
+                // même défaut que `--queue-warn-seconds`, corrigé le matin même :
+                // une molette qu'on règle et qui ne laisse aucune trace ne
+                // permet pas de savoir si elle a été prise. Celle-ci change TOUT
+                // le chemin du courrier sortant.
+                if config.relay.relayhost.is_empty() {
+                    String::from(" — remise DIRECTE, sans relais")
+                } else {
+                    format!(
+                        " — PAR LE RELAIS `{}:{}` ({}), compte `{}`. DANE et MTA-STS \
+                         ne s'appliquent plus.",
+                        config.relay.relayhost,
+                        config.relay.relayhost_port,
+                        if config.relay.relayhost_implicit_tls {
+                            "TLS implicite"
+                        } else {
+                            "STARTTLS"
+                        },
+                        config.relay.relayhost_user
+                    )
+                }
             )
         } else {
             String::from("AUCUNE — ce serveur reçoit, il n'émet pas pour ses comptes")

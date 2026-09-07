@@ -1121,6 +1121,42 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         None
     };
 
+    // ── LE RELAIS DE SORTIE (RFC 4954) ──────────────────────────────────────
+    //
+    // **CE QU'ON PERD SE DIT AU DÉMARRAGE**, en toutes lettres : avec un relais,
+    // DANE et MTA-STS cessent de s'appliquer, parce que le chemin jusqu'au
+    // destinataire n'est plus le nôtre. Un exploitant qui a configuré les deux
+    // doit apprendre ici que l'un annule l'autre, et non par un rapport TLSRPT
+    // vide trois semaines plus tard.
+    let relais = if options.relay.relayhost.is_empty() {
+        None
+    } else {
+        let vers = (
+            options.relay.relayhost.clone(),
+            options.relay.relayhost_port,
+        );
+        eprintln!(
+            "air-mail-server : RELAIS DE SORTIE `{}:{}` — TOUT ce qui part passe par lui, \
+             quel que soit le destinataire. Son certificat est VÉRIFIÉ contre `{}`, et le \
+             mot de passe ne sort qu'une fois le chiffrement monté ({}).",
+            vers.0,
+            vers.1,
+            options.mtasts.anchors,
+            if options.relay.relayhost_implicit_tls {
+                "TLS implicite, RFC 8314 §3"
+            } else {
+                "`STARTTLS`"
+            }
+        );
+        eprintln!(
+            "air-mail-server : ATTENTION — avec un relais, DANE et MTA-STS NE S'APPLIQUENT PLUS : \
+             ils protègent le chemin jusqu'au serveur du destinataire, et ce chemin est \
+             désormais parcouru par `{}`. Le `MX` du domaine visé n'est même plus interrogé.",
+            vers.0
+        );
+        Some(vers)
+    };
+
     // ── LA FILE D'ATTENTE DU SERVEUR ────────────────────────────────────────
     //
     // **TOUT CE QUI SORT PASSE PAR ELLE**, et c'est le point de cette tranche :
@@ -1410,6 +1446,25 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         let remetteur = match mtasts.clone() {
             Some(sts) => remetteur.with_mtasts(sts),
             None => remetteur,
+        };
+        // **LE RELAIS DE SORTIE COURT-CIRCUITE TOUT LE RESTE**, et c'est ce
+        // qu'on a demandé en le nommant. Sa configuration TLS est celle de
+        // MTA-STS — elle VÉRIFIE, contre les autorités que l'exploitant a
+        // nommées —, et non l'opportuniste : on présente un mot de passe.
+        let remetteur = match (relais.clone(), mtasts.clone()) {
+            (Some(vers), Some(sts)) => {
+                remetteur.with_relayhost(std::sync::Arc::new(ams_loop_tokio::Relayhost {
+                    host: vers.0,
+                    port: vers.1,
+                    implicit_tls: options.relay.relayhost_implicit_tls,
+                    user: options.relay.relayhost_user.clone(),
+                    password: options.relay.relayhost_password.clone(),
+                    tls: std::sync::Arc::clone(sts.tls()),
+                }))
+            }
+            // Sans autorités, il n'y a pas de relais : l'analyse des options le
+            // refuse déjà, et cette branche ne s'atteint pas.
+            _ => remetteur,
         };
         match rapports_tls.clone() {
             Some(journal) => remetteur.with_tls_reports(journal),

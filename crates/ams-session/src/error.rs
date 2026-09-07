@@ -33,6 +33,13 @@ pub enum Error {
     /// Une remise a été demandée sans personne à qui écrire.
     NoRecipient,
 
+    /// Les identifiants d'un relais de sortie sont vides ou démesurés.
+    ///
+    /// **C'est une faute de CONFIGURATION**, refusée avant qu'aucune connexion
+    /// ne s'ouvre : la découvrir au milieu d'une conversation ferait payer à
+    /// chaque message le prix d'une erreur qui ne changera pas toute seule.
+    UnsafeCredentials,
+
     /// Une commande a été soumise alors que la session n'attend pas de commande.
     ///
     /// Après `354`, elle attend le message ; après un `AUTH` accepté, elle attend
@@ -85,6 +92,9 @@ impl fmt::Display for Error {
             Error::NoRecipient => {
                 f.write_str("une remise a été demandée sans personne à qui écrire")
             }
+            Error::UnsafeCredentials => f.write_str(
+                "les identifiants du relais de sortie sont vides ou trop longs (256 octets au plus)",
+            ),
             Error::NotInCommandPhase => {
                 f.write_str("la session n'attend pas de commande à cet instant")
             }

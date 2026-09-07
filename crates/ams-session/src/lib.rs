@@ -145,8 +145,8 @@ mod tampon;
 /// pour dimensionner un tableau.
 pub use ams_spf::{Identity, RECEIVED_SPF_MAX};
 pub use client::{
-    CLIENT_COMMAND_MAX, ClientConfig, ClientDsn, ClientOutcome, ClientReport, ClientStep,
-    DIAGNOSTIC_MAX, SmtpClient,
+    CLIENT_COMMAND_MAX, ClientConfig, ClientCredentials, ClientDsn, ClientOutcome, ClientReport,
+    ClientStep, DIAGNOSTIC_MAX, SmtpClient,
 };
 pub use config::{Capabilities, Config, SenderPolicy};
 pub use error::Error;

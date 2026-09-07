@@ -260,30 +260,107 @@ définitif. Le temporaire est défendable ; le définitif ne l'est pas.
 
 ---
 
-## 6. Ce que je ne sais pas encore, et comment le savoir
+## 6. L'INVENTAIRE, LANCÉ LE 2026-09-07 — ce que la machine porte
 
-`docs/migration/inventaire.sh` répond à tout ce qui suit. Il est **strictement
-en lecture**, ne divulgue **aucune empreinte** ni **aucune clé privée**, et
-s'exécute en une commande :
+`inventaire.sh` a tourné sur `box2` (`2001:41d0:305:2100::b711`, le `Hostname`
+qui correspond à l'`AAAA` de `mail.narro.ch`). Sa sortie entière est versée à côté
+de ce document. Voici ce qu'elle change.
 
-    sudo bash inventaire.sh > inventaire-$(hostname)-$(date +%F).txt
+### Ce qui rend la migration FACILE
 
-Ce qu'il faut en tirer :
+| | |
+|---|---|
+| Format des boîtes | **Maildir** — `maildir:/var/vmail/%d/%n/Maildir`. Rien à convertir. |
+| Volumétrie | **20 Mo, 713 fichiers, 5 boîtes.** La copie prendra une seconde. |
+| Sieve | **`mail_plugins` est VIDE** — aucun filtre serveur à reprendre. |
+| Quotas | aucun. |
+| Comptes | `contact`, `thierry.delhaise`, `vincent.delhaise`, `support`, `kelly.garro` |
+| Alias | `postmaster@`, `abuse@`, `root@` → `contact@`. Trois `--address` de plus sur un compte. |
+| Domaines | `narro.ch`, un seul. Une seule clé DKIM suffit donc. |
+| Certificats | `/etc/letsencrypt/live/mail.narro.ch/{fullchain,privkey}.pem`, valides au 11 novembre, `certbot.timer` actif. |
+| Clé DKIM | `/var/lib/rspamd/dkim/narro.ch.mail.key`, PKCS#1 — un format que ce serveur lit. **Sa clé publique dérivée est IDENTIQUE à celle que le DNS publie** : vérifié. |
+| Port 25 sortant | **il passe** — `220 mx.google.com` depuis la machine. OVH ne le bloque pas. |
 
-1. **Le format des boîtes.** Maildir, ou `mdbox`/`sdbox` ? S'il ne s'agit pas de
-   Maildir, il faut d'abord CONVERTIR avec `doveadm sync`, et cela change tout
-   le calendrier.
-2. **La liste des comptes**, de leurs alias et des domaines servis.
-3. **Le schéma des empreintes** — pour trancher §5.
-4. **Sieve, quotas, antispam, attrape-tout** : en service, ou non ?
-5. **Les chemins des certificats** et le compte qui les lit.
-6. **La clé DKIM** : son chemin, et sous quel compte elle est lisible.
-7. **La volumétrie** : combien de messages, combien d'octets, par compte.
-   C'est ce qui dimensionne la fenêtre de bascule.
-8. **L'espace disque libre** : il en faut le double du courrier, puisqu'on
-   travaille sur une COPIE.
+**Cinq boîtes change la décision de §5** : réinitialiser cinq mots de passe est
+l'affaire d'un après-midi. Les empreintes sont en `{SHA512-CRYPT}`, donc
+non importables — mais avec cinq personnes, l'option A est sans discussion.
 
----
+### CE QUI DEMANDE UNE DÉCISION : le courrier ne part pas d'ici
+
+    relayhost = [smtp.resend.com]:465
+    smtp_sasl_auth_enable = yes
+    smtp_sasl_password_maps = hash:/etc/postfix/sasl_passwd
+    smtp_tls_wrappermode = yes
+
+**Tout le courrier sortant transite aujourd'hui par Resend**, avec
+authentification. C'est pourquoi le SPF porte `include:_spf.resend.com`.
+
+**air-mail-server n'avait PAS de relais de sortie** au moment de l'étude : il
+résolvait le `MX` et remettait en direct, sans option pour passer par un tiers.
+`--relayhost` a été ajouté depuis — voir plus bas.
+
+**L'option 2 EXISTE DÉSORMAIS** : `--relayhost` a été ajouté au produit le
+2026-09-07, et éprouvé de bout en bout — un compte authentifié dépose, le message
+part chez le relais après `AUTH PLAIN` sous TLS, et le relais le reçoit.
+
+    printf %s $SECRET | air-mail-admin config write serveur.conf \
+        --relay --queue-spool /var/spool/ams/file \
+        --relayhost smtp.resend.com:465 --relayhost-implicit-tls \
+        --relayhost-user «votre compte Resend» \
+        --mta-sts-anchors /etc/ssl/certs/ca-certificates.crt \
+        --mta-sts-cache /var/cache/ams/mtasts
+
+Le mot de passe se lit sur l'entrée standard, jamais sur la ligne de commande. Le
+certificat du relais est VÉRIFIÉ — Postfix, lui, expédie aujourd'hui sous
+`smtp_tls_security_level = encrypt`, qui chiffre sans vérifier ; on présente un
+mot de passe, et cela ne suffit pas.
+
+Trois issues, et le choix vous revient :
+
+1. **Remettre en direct depuis l'IP OVH.** C'est techniquement prêt — le 25
+   sortant passe, le `PTR` est cohérent en IPv4 ET IPv6, le SPF autorise déjà
+   `mx`, et DKIM signera. Le risque est la RÉPUTATION : cette adresse n'a
+   probablement jamais émis, et les grands hébergeurs s'en méfient au début.
+   C'est aussi la seule façon de lever B4.
+2. **Ajouter un relais de sortie au produit.** Un `--relayhost` avec SASL et TLS
+   implicite. Ce n'est pas un réglage, c'est une fonction — mais elle est
+   modeste, et elle préserve exactement le comportement actuel.
+3. **Garder Postfix en sortie seulement**, devant air-mail-server. Cela ferait
+   cohabiter deux MTA sur une machine, ce qui complique tout.
+
+**Je recommande 2 si vous voulez basculer sans rien changer d'autre**, et 1 si
+vous acceptez de surveiller la délivrabilité pendant quelques semaines. Ne
+mélangez pas les deux décisions : basculer de serveur ET de chemin de sortie le
+même jour rendrait tout diagnostic impossible.
+
+### Ce qu'air-mail-server ne reprendra pas, et qui est EN SERVICE
+
+| | |
+|---|---|
+| **rspamd** | `smtpd_milters = inet:localhost:11332`. Filtrage de contenu à l'entrée. Aucun équivalent : SPF, DKIM et DMARC resteront, le reste disparaît. |
+| **`recipient_delimiter = +`** | `contact+facture@narro.ch` arrive aujourd'hui dans `contact`. Mesuré : ce serveur répond `550 5.1.1 Mailbox unavailable`. |
+| **TLS 1.2 en réception** | Postfix accepte `>=TLSv1.2` ; ce serveur ne fait QUE du TLS 1.3. Un pair qui n'a pas 1.3 ne pourra plus chiffrer avec nous. |
+| **Péremption de la file** | `maximal_queue_lifetime = 1d` ici, cinq jours par défaut là-bas. Pour la parité : `--queue-expire-seconds 86400`. |
+
+### Deux détails d'exploitation
+
+- **`privkey.pem` est `root:root` en 0600.** Un serveur qui tourne sous un compte
+  dédié ne pourra pas la lire. Il faut un groupe, un `deploy-hook` de `certbot`
+  qui recopie, ou accepter que le serveur démarre en root et abandonne ses
+  privilèges — ce que celui-ci ne sait pas encore faire.
+- **Aucune sauvegarde du courrier n'est programmée.** Les seuls minuteurs sont
+  ceux d'Ubuntu. La phase 0.2 de `bascule.md` n'est donc pas une formalité :
+  c'est la PREMIÈRE sauvegarde de ces boîtes.
+- **nginx sert le 80 et le 443** sur la même machine. Rien à faire pour la
+  bascule, mais à savoir si l'on publie un jour MTA-STS, qui a besoin du 443
+  sous `mta-sts.narro.ch`.
+
+### Ce que la clé DKIM a de particulier
+
+Elle fait **1024 bits**. Ce n'est pas une régression — on la reprend telle
+quelle — mais c'est court pour 2026, et les grands hébergeurs le remarquent. À
+faire tourner un jour, APRÈS la bascule et pas pendant : changer de clé et de
+serveur le même jour rendrait tout diagnostic impossible.
 
 ## 7. Suite
 

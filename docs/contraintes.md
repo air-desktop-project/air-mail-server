@@ -13915,3 +13915,123 @@ C'est la troisième régression de compatibilité de cette migration, après
 `AUTH LOGIN` et `SMTPUTF8`. Toutes trois sont dans l'étude, à l'endroit où elles
 se manifesteront — c'est-à-dire chez un correspondant précis, quelques jours
 après, quand plus personne ne fera le lien avec la bascule.
+
+
+## `--relayhost` : ce qu'il a fallu ajouter, et ce que la couverture a trouvé
+
+L'inventaire de `mail.narro.ch` a montré que tout le courrier sortant transite
+par Resend :
+
+    relayhost = [smtp.resend.com]:465
+    smtp_sasl_auth_enable = yes
+
+air-mail-server n'avait pas de relais de sortie. La fonction traverse cinq
+crates : un encodeur base64 sans repli, `AUTH PLAIN` dans le client SMTP, cinq
+champs de configuration, quatre options, et la route qui court-circuite le `MX`.
+
+### Trois décisions, et leurs raisons
+
+**Le mot de passe ne sort jamais en clair, et ce n'est pas un réglage.** §4 de
+RFC 4954 l'interdit pour `PLAIN`. Il n'existe aucune branche qui l'écrive sans
+chiffrement — pas même derrière une option —, et l'épreuve
+`sans_chiffrement_le_secret_ne_part_pas` vérifie qu'aucun octet du secret, ni son
+base64, n'apparaît dans ce qui a été écrit.
+
+**Le certificat du relais est VÉRIFIÉ.** Postfix expédie par défaut sous
+`smtp_tls_security_level = encrypt`, qui chiffre SANS vérifier. C'est défendable
+entre MTA — mieux vaut du chiffre non vérifié que du clair — et ce ne l'est pas
+quand on tend un secret : un pair qu'on n'a pas identifié peut être n'importe
+qui. `--mta-sts-anchors` devient donc obligatoire avec `--relayhost`, et il n'y a
+pas de mode dégradé, parce qu'un mode dégradé serait celui qu'on emploierait.
+
+**Un refus d'authentification AJOURNE.** Le message n'y est pour rien : c'est
+notre configuration, ou notre compte chez le relais. Rendre ces messages à leurs
+expéditeurs ferait payer aux utilisateurs une faute qu'ils ne peuvent pas
+corriger — et une fois rendus, ils ne reviennent pas.
+
+### Ce que le base64 de MIME ne savait pas faire
+
+`encode_base64` replie à 76 colonnes et termine par un `CRLF` : c'est ce qu'un
+corps MIME veut. Un jeton SASL vit à l'intérieur d'une COMMANDE, où un `CRLF` la
+terminerait au milieu et où le repli la couperait en deux commandes dont la
+seconde n'aurait aucun sens.
+
+**Cela ne se voit pas sur un identifiant court** — seize octets de secret tiennent
+sous soixante-seize caractères. C'est un mot de passe LONG qui casserait,
+c'est-à-dire un bon mot de passe, et le jour où quelqu'un en choisit un.
+
+### La couverture a trouvé un défaut que la relecture n'aurait pas trouvé
+
+`check-couverture` a refusé, et il a fallu longtemps pour comprendre où. Les
+rapports détaillés de `llvm-cov` — texte, HTML, JSON, lcov — affirmaient tous
+qu'aucune ligne ne manquait, tandis que le résumé en comptait vingt et une. Ce
+sont les INSTANCIATIONS qui expliquent l'écart : `parse` est générique, chaque
+forme d'argument en produit une, et le résumé agrège ce que les vues détaillées
+montrent séparément.
+
+Trois choses en sont sorties :
+
+1. **Un bloc de validation en ligne dans une fonction longue était mal mesuré.**
+   L'extraire dans `valider_le_relais` a rendu quatre régions et vingt lignes —
+   et le code est plus lisible.
+2. **`hote_du_relais` était appelé deux fois sur la même valeur**, une fois pour
+   l'hôte et une fois pour le port. Un seul appel suffit.
+3. **`--relayhost :465` et `--relayhost ""` étaient ACCEPTÉS**, avec un nom vide
+   qui ne se résout pas : la remise aurait échoué à chaque message sans que rien
+   ne dise pourquoi. La garde qui rejette ce cas n'était empruntée par aucun
+   essai — parce qu'aucun essai ne fournissait un tel hôte, et que le produit
+   l'acceptait donc. C'est un vrai défaut, trouvé par une barrière et non par une
+   idée.
+
+Et une leçon de méthode : **mes épreuves employaient un `Vec` là où tout le
+fichier emploie des tranches**. `parse(&vec)` et `parse(&["--x"])` sont deux
+instanciations, avec chacune sa couverture. La propagation
+`valider_le_relais(&options)?` n'avait donc aucun essai dans celle que le reste
+du fichier emprunte — cinq refus écrits, et pas un seul là où il fallait.
+
+### Ce que le relais fait perdre, et qui se dit trois fois
+
+DANE et MTA-STS protègent le chemin jusqu'au serveur du DESTINATAIRE. Avec un
+relais, ce chemin n'est plus le nôtre : les deux cessent de s'appliquer, et le
+`MX` du domaine visé n'est même plus interrogé.
+
+Ce n'est pas un oubli, c'est ce qu'on accepte en confiant le courrier à un tiers.
+Le serveur le dit au démarrage en toutes lettres, `config show` le dit, et l'aide
+de `config write` le dit. Un exploitant qui a configuré MTA-STS doit apprendre
+que le relais l'annule — et non par un rapport TLSRPT vide, trois semaines plus
+tard.
+
+
+### Une propriété de fuzz écrite trois fois avant d'être juste
+
+La cible du client SMTP porte désormais : « aucune commande `AUTH` avant le
+chiffrement ». C'est la seule propriété de cette cible dont la violation serait
+une FUITE et non un défaut de protocole. Elle a mis trois écritures.
+
+**Première : chercher le secret lui-même.** Une minute de fuzz :
+
+    le secret est sorti EN CLAIR : "EHLO mail.nous.test\r\n"
+
+Le fuzz avait choisi un mot de passe qui est par hasard une sous-chaîne de ce que
+nous écrivons de toute façon. Et il choisit AUSSI l'identifiant d'enveloppe et
+les adresses d'origine, qui partent sur le fil : un secret égal à l'un d'eux y
+apparaîtrait légitimement. La recherche par sous-chaîne a donc des faux positifs
+PAR CONSTRUCTION.
+
+**Deuxième : chercher `AUTH` n'importe où.** Deuxième minute :
+
+    une commande AUTH est sortie sans chiffrement :
+    "MAIL FROM:<> ENVID=vvvvvAUTHvvvv"
+
+Le fuzz avait glissé `AUTH` dans un identifiant d'enveloppe, qui part sur le fil
+tel que le déposant l'a écrit.
+
+**Troisième : la commande se reconnaît à son DÉBUT.** Huit millions
+d'exécutions, rien.
+
+Les deux entrées qui ont fait tomber les deux premières versions sont versées au
+CORPUS plutôt que jetées : elles décrivent exactement les collisions qu'une
+propriété trop large produit, et elles garderont la troisième version honnête.
+
+**Une propriété qui crie au loup ne se lit plus.** Il valait mieux le découvrir
+en deux minutes de fuzz qu'en production, où l'on aurait fini par la désactiver.

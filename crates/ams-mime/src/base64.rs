@@ -46,6 +46,36 @@ pub fn base64_max(octets: usize) -> usize {
 ///
 /// [`Error::BufferTooSmall`] si `sortie` ne suffit pas ; voir [`base64_max`].
 pub fn encode_base64<'b>(valeur: &[u8], sortie: &'b mut [u8]) -> Result<&'b [u8], Error> {
+    encoder(valeur, sortie, Some(BASE64_LINE))
+}
+
+/// Encode en base64 **sur une seule ligne**, sans `CRLF` final.
+///
+/// # POURQUOI CETTE VARIANTE EXISTE
+///
+/// SASL n'est pas MIME. Un jeton `AUTH PLAIN` voyage dans une COMMANDE SMTP, où
+/// un `CRLF` la terminerait au milieu — et où le repli à 76 colonnes de RFC 2045
+/// couperait le jeton en deux commandes dont la seconde n'a aucun sens.
+///
+/// Cela ne se voit pas sur un identifiant court : les seize premiers octets d'un
+/// mot de passe tiennent sous soixante-seize caractères. C'est un mot de passe
+/// LONG qui casserait — c'est-à-dire un bon mot de passe, et le jour où
+/// quelqu'un en choisit un.
+///
+/// # Errors
+///
+/// [`Error::BufferTooSmall`] si `sortie` ne suffit pas : il faut quatre
+/// caractères par groupe de trois octets, sans plus.
+pub fn encode_base64_line<'b>(valeur: &[u8], sortie: &'b mut [u8]) -> Result<&'b [u8], Error> {
+    encoder(valeur, sortie, None)
+}
+
+/// Le cœur des deux, `colonnes` disant où replier — ou `None` pour ne pas.
+fn encoder<'b>(
+    valeur: &[u8],
+    sortie: &'b mut [u8],
+    colonnes: Option<usize>,
+) -> Result<&'b [u8], Error> {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut ecrits = 0_usize;
     let mut colonne = 0_usize;
@@ -69,7 +99,7 @@ pub fn encode_base64<'b>(valeur: &[u8], sortie: &'b mut [u8]) -> Result<&'b [u8]
             };
             ecrits = poser(sortie, ecrits, lettre)?;
             colonne = colonne.saturating_add(1);
-            if colonne == BASE64_LINE {
+            if colonnes == Some(colonne) {
                 ecrits = poser(sortie, ecrits, b'\r')?;
                 ecrits = poser(sortie, ecrits, b'\n')?;
                 colonne = 0;
@@ -79,7 +109,10 @@ pub fn encode_base64<'b>(valeur: &[u8], sortie: &'b mut [u8]) -> Result<&'b [u8]
     // La dernière ligne a sa fin, même incomplète — et le corps vide en a une
     // aussi : une partie MIME sans ligne n'est pas une partie sans contenu,
     // c'est une partie qu'on a oublié de terminer.
-    if colonne > 0 || ecrits == 0 {
+    //
+    // **SANS REPLI, PAS DE FIN DE LIGNE NON PLUS** : un jeton SASL vit à
+    // l'intérieur d'une commande, et la terminer ici la couperait en deux.
+    if colonnes.is_some() && (colonne > 0 || ecrits == 0) {
         ecrits = poser(sortie, ecrits, b'\r')?;
         ecrits = poser(sortie, ecrits, b'\n')?;
     }

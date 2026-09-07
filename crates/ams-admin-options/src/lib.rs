@@ -165,6 +165,16 @@ pub struct Options {
     /// **ÉTEINTE PAR DÉFAUT.** Émettre du courrier vers des tiers ne se décide
     /// pas à la place de celui qui exploite la machine.
     pub relay: bool,
+    /// Le RELAIS DE SORTIE, sous la forme `hôte:port`.
+    ///
+    /// Vide veut dire « remise directe », et c'est le défaut.
+    pub relayhost: Option<String>,
+    /// Le TLS monte-t-il d'emblée (le 465) plutôt que par `STARTTLS` (le 587) ?
+    pub relayhost_implicit_tls: bool,
+    /// L'identité du compte qu'on a chez le relais.
+    pub relayhost_user: Option<String>,
+    /// Le secret, LU SUR L'ENTRÉE STANDARD et jamais sur la ligne de commande.
+    pub relayhost_password: Option<String>,
     /// Le dossier de la file. **Exigé dès que quelque chose sort.**
     pub queue_spool: Option<PathBuf>,
     /// L'attente après le premier échec, en secondes. Zéro prend le défaut.
@@ -277,6 +287,10 @@ impl Default for Options {
             queue_max_retry: 0,
             queue_expire: 0,
             queue_warn: 0,
+            relayhost: None,
+            relayhost_implicit_tls: false,
+            relayhost_user: None,
+            relayhost_password: None,
             // PAS DE MTA-STS PAR DÉFAUT, et pas de drapeau : l'absence de
             // valeur EST l'absence de service. Embarquer des racines les ferait
             // vieillir avec le binaire ; lire celles du système sans qu'on l'ait
@@ -309,6 +323,13 @@ impl Options {
     /// désormais les leurs, parce que C8 l'exige.
     #[must_use]
     pub fn en_configuration(&self) -> Configuration {
+        // `hôte:port`, découpé UNE FOIS. L'écrire deux fois — une pour l'hôte,
+        // une pour le port — appelait la même fonction deux fois sur la même
+        // valeur, et laissait une région qu'aucun essai n'atteignait.
+        let relais = match self.relayhost.as_deref() {
+            Some(adresse) => hote_du_relais(adresse),
+            None => (String::new(), 0),
+        };
         Configuration {
             domain: self.domain.clone(),
             // **`listen` PORTE LA PREMIÈRE, ET LA LISTE PORTE TOUT.** Un outil
@@ -392,6 +413,11 @@ impl Options {
             },
             relay: ams_config::Relay {
                 enabled: self.relay,
+                relayhost: relais.0,
+                relayhost_port: relais.1,
+                relayhost_implicit_tls: self.relayhost_implicit_tls,
+                relayhost_user: self.relayhost_user.clone().unwrap_or_default(),
+                relayhost_password: self.relayhost_password.clone().unwrap_or_default(),
             },
             queue: ams_config::Queue {
                 spool: chemin(self.queue_spool.as_ref()),
@@ -572,6 +598,44 @@ OPTIONS DE `config write`
 
     LA FILE DE RÉÉMISSION SORTANTE
     --relay                             émettre pour les comptes authentifiés
+
+
+    LE RELAIS DE SORTIE (RFC 4954) — tout ce qui part passe par lui
+    --relayhost <hôte[:port]>           le relais. SANS PORT, c'est le 465.
+    --relayhost-user <nom>              le compte qu'on a chez lui
+    --relayhost-implicit-tls            le TLS monte D'EMBLÉE (le 465). Sans
+                                        cette option, on monte par `STARTTLS`
+                                        (le 587).
+
+    LE MOT DE PASSE SE LIT SUR L'ENTRÉE STANDARD, comme celui d'un compte, et
+    jamais sur la ligne de commande : ce que `ps` affiche, tout le monde le lit.
+    Il n'est demandé QUE si un relais est nommé.
+
+        printf %s $SECRET | air-mail-admin config write serveur.conf
+            --relay --queue-spool /var/spool/ams/file
+            --relayhost smtp.example.com:465 --relayhost-implicit-tls
+            --relayhost-user nous@example.com
+            --mta-sts-anchors /etc/ssl/certs/ca-certificates.crt
+            --mta-sts-cache /var/cache/ams/mtasts
+
+    CE QU'UN RELAIS FAIT PERDRE, ET QUI SE DIT. DANE et MTA-STS protègent le
+    chemin jusqu'au serveur du DESTINATAIRE. Avec un relais, ce chemin n'est plus
+    parcouru par nous : les deux cessent de s'appliquer, et le `MX` du domaine
+    visé n'est même plus interrogé. C'est le prix de la fonction — on troque une
+    protection qu'on vérifie soi-même contre la réputation d'un tiers.
+
+    CE QU'IL NE FAIT PAS PERDRE. Le chiffrement jusqu'au relais est EXIGÉ, sans
+    réglage pour l'affaiblir : §4 de RFC 4954 interdit `PLAIN` en clair. Le
+    certificat du relais est VÉRIFIÉ — chaîne, nom et dates — contre les
+    autorités de `--mta-sts-anchors`, qui devient donc obligatoire. Postfix
+    expédie par défaut sous `smtp_tls_security_level = encrypt`, qui chiffre sans
+    vérifier ; c'est défendable entre MTA et pas quand on tend un secret. Et la
+    signature DKIM est apposée AVANT : le relais reçoit un message déjà signé.
+
+    LES REFUS. `--relayhost` sans `--relay` ne veut rien dire ; sans
+    `--relayhost-user` non plus ; sans `--mta-sts-anchors` on ne saurait pas à
+    qui l'on parle. Et `--relayhost-user` seul, sans relais, ne serait présenté à
+    personne.
 
     LA FILE D'ATTENTE — tout ce qui sort passe par elle
     --queue-spool <chemin>              le dossier de la file (EXIGÉ dès qu'on émet)
@@ -1250,6 +1314,9 @@ where
             "--mta-sts-cache" => options.mtasts_cache = Some(PathBuf::from(valeur()?)),
             // ── La file de réémission sortante ──────────────────────────────
             "--relay" => options.relay = true,
+            "--relayhost" => options.relayhost = Some(valeur()?),
+            "--relayhost-implicit-tls" => options.relayhost_implicit_tls = true,
+            "--relayhost-user" => options.relayhost_user = Some(valeur()?),
             "--queue-spool" => options.queue_spool = Some(PathBuf::from(valeur()?)),
             "--queue-retry-seconds" => {
                 options.queue_retry = pas_zero(
@@ -1443,6 +1510,8 @@ where
              message perdu",
         ));
     }
+    valider_le_relais(&options)?;
+
     // L'INVERSE N'EST PAS REFUSÉ, et c'est délibéré : nommer un dossier sans
     // rien émettre ne promet rien à personne, et permet de le préparer avant.
     // Le serveur le dit au démarrage.
@@ -1498,6 +1567,113 @@ fn nombre(brute: &str) -> Result<u32, ArgError> {
 /// copies auraient laissé la règle s'appliquer à deux d'entre eux — c'est
 /// exactement ce qui était arrivé, et le prix en a été trois zéros destructeurs
 /// qu'aucun refus n'arrêtait.
+/// Les quatre refus du relais de sortie.
+///
+/// # POURQUOI UNE FONCTION À PART
+///
+/// Chacun ferme une façon de se croire protégé sans l'être, et le troisième est
+/// le plus important : sans autorités, on présenterait un mot de passe à un pair
+/// qu'on n'a pas identifié.
+///
+/// # Errors
+///
+/// [`ArgError`] pour chacune des cinq configurations qui n'ont pas de sens.
+fn valider_le_relais(options: &Options) -> Result<(), ArgError> {
+    // ── LE RELAIS DE SORTIE ─────────────────────────────────────────────────
+    //
+    // Quatre refus, et chacun ferme une façon de se croire protégé sans l'être.
+    if options.relayhost.is_some() {
+        // **SANS `--relay`, RIEN NE SORT**, et un relais nommé ne servirait à
+        // rien : c'est une configuration qui dit deux choses contraires.
+        if !options.relay {
+            return Err(ArgError::new(
+                "`--relayhost` sans `--relay` ne veut rien dire : ce serveur n'émet pas, et le \
+             relais ne verrait jamais un message",
+            ));
+        }
+        // **UN RELAIS SE PRÉSENTE**, sans quoi il refusera tout — ou pire,
+        // acceptera du courrier sous une identité que personne n'a vérifiée.
+        if options.relayhost_user.is_none() {
+            return Err(ArgError::new(
+                "`--relayhost` demande `--relayhost-user` : un relais de sortie n'accepte du \
+             courrier que d'un compte qu'il connaît",
+            ));
+        }
+        // **ET IL SE VÉRIFIE.** On lui présente un mot de passe ; un pair qu'on
+        // n'a pas identifié peut être n'importe qui. Postfix expédie par défaut
+        // sous `smtp_tls_security_level = encrypt`, qui chiffre SANS vérifier —
+        // défendable entre MTA, et pas quand on tend un secret. Il n'y a pas de
+        // mode dégradé, parce qu'un mode dégradé serait celui qu'on emploierait.
+        if options.mtasts_anchors.is_none() {
+            return Err(ArgError::new(
+                "`--relayhost` demande `--mta-sts-anchors` : on présente un mot de passe à ce \
+             relais, et sans autorités on ne saurait pas à qui. `--mta-sts-anchors \
+             /etc/ssl/certs/ca-certificates.crt` convient",
+            ));
+        }
+        // **UN HÔTE VIDE N'EST PAS UN HÔTE.** `--relayhost :465` se découpe en un
+        // nom vide et un port ; le nom vide ne se résout pas, et la remise
+        // échouerait à chaque message sans que rien ne dise pourquoi. Trouvé en
+        // cherchant pourquoi la couverture ne retombait pas à 100 % : la garde qui
+        // rejette ce cas n'était empruntée par aucun essai, parce qu'aucun essai ne
+        // fournissait un tel hôte — et le produit l'acceptait donc.
+        if options.relayhost.as_deref().is_some_and(|adresse| {
+            let hote = hote_du_relais(adresse).0;
+            hote.is_empty() || hote.starts_with(':')
+        }) {
+            return Err(ArgError::new(
+                "`--relayhost` : le nom du relais est vide. Écrivez `relais.example.com:465`",
+            ));
+        }
+        // Un port de zéro vient d'un `hôte:port` dont le port ne se lit pas.
+        if options
+            .relayhost
+            .as_deref()
+            .is_some_and(|adresse| hote_du_relais(adresse).1 == 0)
+        {
+            return Err(ArgError::new(
+                "`--relayhost` : le port ne se lit pas. Écrivez `relais.example.com:465`, ou \
+             omettez le port — c'est alors le 465, celui du TLS implicite",
+            ));
+        }
+    }
+    // **L'INVERSE AUSSI EST UN NON-SENS** : des identifiants sans relais ne
+    // seraient présentés à personne, et resteraient dans la configuration.
+    if options.relayhost.is_none()
+        && (options.relayhost_user.is_some() || options.relayhost_implicit_tls)
+    {
+        return Err(ArgError::new(
+            "`--relayhost-user` et `--relayhost-implicit-tls` ne veulent rien dire sans \
+         `--relayhost`",
+        ));
+    }
+    Ok(())
+}
+
+/// Découpe `hôte:port` en ses deux moitiés.
+///
+/// # SANS PORT, C'EST LE 465
+///
+/// Un relais de sortie qui s'authentifie parle presque toujours en TLS
+/// implicite, et le 465 est son port (RFC 8314 §3). C'est le défaut qui expose
+/// le moins : le 587 demande un `STARTTLS` qu'un intermédiaire peut effacer de
+/// l'annonce, et le mot de passe ne partirait alors pas — mais l'exploitant
+/// croirait que tout va bien.
+///
+/// Un port illisible vaut ZÉRO, et zéro fait refuser la configuration plus loin :
+/// mieux vaut un refus au démarrage qu'un port silencieusement remplacé.
+fn hote_du_relais(adresse: &str) -> (String, u16) {
+    match adresse.rsplit_once(':') {
+        // Une adresse IPv6 littérale porte des `:` partout ; on ne la coupe que
+        // si ce qui suit le dernier est un nombre.
+        Some((hote, port)) if !hote.is_empty() => match port.parse::<u16>() {
+            Ok(numero) => (String::from(hote), numero),
+            Err(_) => (String::from(adresse), 0),
+        },
+        _ => (String::from(adresse), 465),
+    }
+}
+
 fn pas_zero<T>(brute: &str, pourquoi: &str) -> Result<T, ArgError>
 where
     T: core::str::FromStr + PartialEq + From<u8>,
@@ -1802,6 +1978,8 @@ mod tests {
             (&["--queue-max-retry-seconds", "0"], "à rien"),
             (&["--queue-expire-seconds", "0"], "sans avoir essayé"),
             (&["--queue-spool"], "attend une valeur"),
+            (&["--relayhost"], "attend une valeur"),
+            (&["--relayhost-user"], "attend une valeur"),
             // Les anciens noms se refusent EN DISANT LE NOUVEAU.
             (&["--relay-spool", "/x"], "--queue-spool"),
             (&["--relay-expire-seconds", "1"], "--queue-expire-seconds"),
@@ -3045,6 +3223,158 @@ mod tests {
     /// remplaçant plutôt qu'en disant « option inconnue ». Une citation pareille
     /// est un service rendu, pas une dérive — on exige seulement que le refus
     /// nomme bien le nouveau nom.
+    /// **`--relayhost` REFUSE QUATRE CONFIGURATIONS QUI SE CROIRAIENT SÛRES.**
+    ///
+    /// Chacune ferme une façon de se tromper, et la troisième est la plus
+    /// importante : sans autorités, on présenterait un mot de passe à un pair
+    /// qu'on n'a pas identifié.
+    #[test]
+    fn le_relais_de_sortie_refuse_ce_qui_n_a_pas_de_sens() {
+        // **DES TRANCHES, ET NON DES `Vec`.** `parse` est générique : chaque
+        // forme d'argument produit une INSTANCIATION à elle, avec sa propre
+        // couverture. Éprouver ces refus avec un `Vec` laissait la propagation
+        // `valider_le_relais(&options)?` sans aucun essai dans l'instanciation
+        // `&[&str]`, qui est celle que tout le reste de ce fichier emprunte.
+        // La couverture l'a dit ; la relecture ne l'aurait pas dit.
+        let cas: &[(&[&str], &str)] = &[
+            (&["--relayhost", "relais.test:465"], "sans `--relay`"),
+            (
+                &[
+                    "--relay",
+                    "--queue-spool",
+                    "/f",
+                    "--relayhost",
+                    "relais.test:465",
+                ],
+                "demande `--relayhost-user`",
+            ),
+            (
+                &[
+                    "--relay",
+                    "--queue-spool",
+                    "/f",
+                    "--relayhost",
+                    "relais.test:465",
+                    "--relayhost-user",
+                    "nous",
+                ],
+                "demande `--mta-sts-anchors`",
+            ),
+            (
+                &[
+                    "--relay",
+                    "--queue-spool",
+                    "/f",
+                    "--relayhost",
+                    "relais.test:pas-un-port",
+                    "--relayhost-user",
+                    "nous",
+                    "--mta-sts-anchors",
+                    "/a",
+                    "--mta-sts-cache",
+                    "/c",
+                ],
+                "le port ne se lit pas",
+            ),
+            (&["--relayhost-user", "nous"], "ne veulent rien dire sans"),
+            // **LES DEUX MOITIÉS DU `||`.** Un `||` court-circuite : n'éprouver
+            // que `--relayhost-user` laissait la seconde condition sans essai.
+            (&["--relayhost-implicit-tls"], "ne veulent rien dire sans"),
+            // Un hôte vide, sous ses deux formes : `:465` et la chaîne vide.
+            (
+                &[
+                    "--relay",
+                    "--queue-spool",
+                    "/f",
+                    "--relayhost",
+                    ":465",
+                    "--relayhost-user",
+                    "nous",
+                    "--mta-sts-anchors",
+                    "/a",
+                    "--mta-sts-cache",
+                    "/c",
+                ],
+                "le nom du relais est vide",
+            ),
+            (
+                &[
+                    "--relay",
+                    "--queue-spool",
+                    "/f",
+                    "--relayhost",
+                    "",
+                    "--relayhost-user",
+                    "nous",
+                    "--mta-sts-anchors",
+                    "/a",
+                    "--mta-sts-cache",
+                    "/c",
+                ],
+                "le nom du relais est vide",
+            ),
+        ];
+        for (arguments, attendu) in cas {
+            let erreur = parse(*arguments).expect_err("doit refuser");
+            let dit = &erreur.message;
+            assert!(
+                erreur.message.contains(attendu),
+                "{arguments:?} : attendu « {attendu} », obtenu « {dit} »"
+            );
+        }
+    }
+
+    /// **ET IL ACCEPTE LA CONFIGURATION COMPLÈTE**, port par défaut compris.
+    ///
+    /// Sans port, c'est le 465 — celui du TLS implicite, où le mot de passe ne
+    /// peut pas partir en clair parce qu'il n'y a pas de phase en clair.
+    #[test]
+    fn le_relais_de_sortie_se_configure_et_prend_le_465_par_defaut() {
+        let config = ecrire(&[
+            "--relay",
+            "--queue-spool",
+            "/f",
+            "--relayhost",
+            "relais.test",
+            "--relayhost-user",
+            "nous@example.com",
+            "--relayhost-implicit-tls",
+            "--mta-sts-anchors",
+            "/a",
+            "--mta-sts-cache",
+            "/c",
+        ])
+        .en_configuration();
+        assert_eq!(config.relay.relayhost, "relais.test");
+        assert_eq!(config.relay.relayhost_port, 465, "sans port, c'est le 465");
+        assert!(config.relay.relayhost_implicit_tls);
+        assert_eq!(config.relay.relayhost_user, "nous@example.com");
+        // **LE MOT DE PASSE N'EST PAS ICI**, et c'est le point : il se lit sur
+        // l'entrée standard, dans `ams-admin`, et n'a jamais traversé `parse`.
+        assert!(config.relay.relayhost_password.is_empty());
+
+        // Un port explicite est repris tel quel.
+        let autre = ecrire(&[
+            "--relay",
+            "--queue-spool",
+            "/f",
+            "--relayhost",
+            "relais.test:587",
+            "--relayhost-user",
+            "nous",
+            "--mta-sts-anchors",
+            "/a",
+            "--mta-sts-cache",
+            "/c",
+        ])
+        .en_configuration();
+        assert_eq!(autre.relay.relayhost_port, 587);
+        assert!(
+            !autre.relay.relayhost_implicit_tls,
+            "587 monte par STARTTLS"
+        );
+    }
+
     #[test]
     fn toute_option_acceptee_est_documentee_et_reciproquement() {
         let source = include_str!("lib.rs");

@@ -3,8 +3,8 @@
 use ams_proto_smtp::{Limits, Reply};
 
 use super::{
-    CLIENT_COMMAND_MAX, ClientConfig, ClientDsn, ClientOutcome, ClientReport, ClientStep,
-    SmtpClient,
+    CLIENT_COMMAND_MAX, ClientConfig, ClientCredentials, ClientDsn, ClientOutcome, ClientReport,
+    ClientStep, SmtpClient,
 };
 use crate::Error;
 
@@ -21,6 +21,8 @@ fn config() -> ClientConfig<'static> {
         recipients: &[b"collecte@eux.test"],
         require_tls: false,
         dsn: None,
+        credentials: None,
+        implicit_tls: false,
     }
 }
 
@@ -961,4 +963,261 @@ fn un_succes_ne_laisse_aucun_diagnostic() {
     let _ = pas(&mut client, b"250 ok\r\n");
     assert_eq!(client.diagnostic(), b"");
     assert_eq!(client.peer_status(), None);
+}
+
+// ── LE RELAIS DE SORTIE (RFC 4954) ──────────────────────────────────────────
+
+/// Une configuration qui s'authentifie.
+fn config_avec_identifiants() -> ClientConfig<'static> {
+    ClientConfig {
+        credentials: Some(ClientCredentials {
+            user: b"jean",
+            password: b"secret",
+        }),
+        ..config()
+    }
+}
+
+/// **LE MOT DE PASSE NE SORT JAMAIS EN CLAIR**, et il n'y a pas de réglage.
+///
+/// C'est l'épreuve qui compte le plus de ce fichier. §4 de RFC 4954 l'interdit
+/// pour `PLAIN` ; ici, il n'existe aucune branche qui l'écrive sans chiffrement,
+/// pas même derrière une option.
+#[test]
+fn sans_chiffrement_le_secret_ne_part_pas() {
+    let mut client = SmtpClient::new(config_avec_identifiants()).expect("configurable");
+    let (_, _) = pas(&mut client, b"220 relais.test ESMTP\r\n");
+    // Le pair n'annonce NI `STARTTLS` NI rien : on s'en va.
+    let (geste, ecrit) = pas(&mut client, b"250-relais.test\r\n250 AUTH PLAIN\r\n");
+
+    assert!(
+        matches!(
+            geste,
+            ClientStep::Done {
+                outcome: ClientOutcome::NoEncryption,
+                ..
+            }
+        ),
+        "{geste:?}"
+    );
+    // ET RIEN DU SECRET N'A ÉTÉ ÉCRIT, sous aucune forme.
+    let texte = std::string::String::from_utf8_lossy(&ecrit).into_owned();
+    assert!(!texte.contains("secret"), "le secret est sorti : {texte}");
+    assert!(
+        !texte.contains("AUTH"),
+        "une commande AUTH est sortie : {texte}"
+    );
+    // `AGplYW4Ac2VjcmV0` est le base64 de `\0jean\0secret`.
+    assert!(!texte.contains("AGplYW4"), "le jeton est sorti : {texte}");
+}
+
+/// **SOUS CHIFFREMENT, `AUTH PLAIN` PART AVEC LE JETON DE RFC 4616.**
+#[test]
+fn sous_chiffrement_le_jeton_part() {
+    let mut client = SmtpClient::new(ClientConfig {
+        implicit_tls: true,
+        ..config_avec_identifiants()
+    })
+    .expect("configurable");
+    let (_, _) = pas(&mut client, b"220 relais.test ESMTP\r\n");
+    let (geste, ecrit) = pas(&mut client, b"250-relais.test\r\n250 AUTH PLAIN LOGIN\r\n");
+
+    assert!(matches!(geste, ClientStep::Send(_)), "{geste:?}");
+    assert_eq!(ecrit, b"AUTH PLAIN AGplYW4Ac2VjcmV0\r\n");
+
+    // Un `235` ouvre l'enveloppe ; c'est la suite ordinaire.
+    let (geste, ecrit) = pas(&mut client, b"235 2.7.0 Authentication successful\r\n");
+    assert!(matches!(geste, ClientStep::Send(_)), "{geste:?}");
+    assert!(
+        std::string::String::from_utf8_lossy(&ecrit).starts_with("MAIL FROM:"),
+        "{ecrit:?}"
+    );
+}
+
+/// **UN REFUS D'AUTHENTIFICATION S'ARRÊTE LÀ**, et le dit avec son code.
+#[test]
+fn un_refus_d_authentification_arrete_la_session() {
+    let mut client = SmtpClient::new(ClientConfig {
+        implicit_tls: true,
+        ..config_avec_identifiants()
+    })
+    .expect("configurable");
+    let (_, _) = pas(&mut client, b"220 relais.test ESMTP\r\n");
+    let (_, _) = pas(&mut client, b"250-relais.test\r\n250 AUTH PLAIN\r\n");
+    let (geste, ecrit) = pas(
+        &mut client,
+        b"535 5.7.8 Authentication credentials invalid\r\n",
+    );
+
+    match geste {
+        ClientStep::Done {
+            outcome: ClientOutcome::AuthRefused(code),
+            ..
+        } => assert_eq!(code.value(), 535),
+        autre => panic!("{autre:?}"),
+    }
+    assert_eq!(ecrit, b"QUIT\r\n");
+}
+
+/// **UN PAIR QUI N'OFFRE PAS `PLAIN` NE REÇOIT RIEN**, et l'on ne se rabat sur
+/// rien.
+///
+/// Ni sur `LOGIN`, ni sur une remise anonyme : ce serait lui confier du courrier
+/// sous une identité que personne n'a vérifiée.
+#[test]
+fn un_pair_sans_plain_ne_recoit_rien() {
+    for annonce in [
+        &b"250-relais.test\r\n250 SIZE 10240000\r\n"[..],
+        b"250-relais.test\r\n250 AUTH LOGIN CRAM-MD5\r\n",
+    ] {
+        let mut client = SmtpClient::new(ClientConfig {
+            implicit_tls: true,
+            ..config_avec_identifiants()
+        })
+        .expect("configurable");
+        let (_, _) = pas(&mut client, b"220 relais.test ESMTP\r\n");
+        let (geste, ecrit) = pas(&mut client, annonce);
+        assert!(
+            matches!(
+                geste,
+                ClientStep::Done {
+                    outcome: ClientOutcome::NoAuthOffered,
+                    ..
+                }
+            ),
+            "{annonce:?} : {geste:?}"
+        );
+        assert_eq!(ecrit, b"QUIT\r\n");
+    }
+}
+
+/// **DES IDENTIFIANTS VIDES OU DÉMESURÉS SONT REFUSÉS À LA CONSTRUCTION.**
+///
+/// Une faute de configuration ne se découvre pas au milieu d'une conversation :
+/// elle ferait payer à chaque message le prix d'une erreur qui ne changera pas
+/// toute seule.
+#[test]
+fn des_identifiants_impossibles_sont_refuses_avant_toute_connexion() {
+    let long = std::vec![b'x'; 257];
+    for (user, password) in [
+        (&b""[..], &b"secret"[..]),
+        (b"jean", b""),
+        (&long, b"secret"),
+        (b"jean", &long),
+    ] {
+        let erreur = SmtpClient::new(ClientConfig {
+            credentials: Some(ClientCredentials { user, password }),
+            ..config()
+        })
+        .expect_err("doit refuser");
+        assert!(matches!(erreur, Error::UnsafeCredentials), "{erreur:?}");
+    }
+    // Et la borne exacte passe : 256 octets, pas un de moins.
+    let juste = std::vec![b'x'; 256];
+    assert!(
+        SmtpClient::new(ClientConfig {
+            credentials: Some(ClientCredentials {
+                user: &juste,
+                password: &juste,
+            }),
+            ..config()
+        })
+        .is_ok()
+    );
+}
+
+/// **UN TAMPON TROP COURT POUR `AUTH PLAIN` EST UNE ERREUR**, et non une
+/// commande tronquée.
+///
+/// Le tampon d'une session est dimensionné pour couvrir le pire — une assertion
+/// de compilation le garantit —, si bien que ce cas ne s'atteint pas en
+/// fonctionnement. Il s'atteint depuis l'API, et une commande `AUTH` coupée en
+/// deux enverrait la moitié d'un jeton sur le fil.
+#[test]
+fn un_tampon_trop_court_pour_auth_est_une_erreur() {
+    let mut client = SmtpClient::new(ClientConfig {
+        implicit_tls: true,
+        ..config_avec_identifiants()
+    })
+    .expect("configurable");
+    let mut grand = [0_u8; CLIENT_COMMAND_MAX];
+    client
+        .on_reply(&reponse(b"220 relais.test ESMTP\r\n"), &mut grand)
+        .expect("bannière");
+    let mut minuscule = [0_u8; 8];
+    assert!(
+        client
+            .on_reply(
+                &reponse(b"250-relais.test\r\n250 AUTH PLAIN\r\n"),
+                &mut minuscule
+            )
+            .is_err()
+    );
+}
+
+/// **LES DEUX RENONCEMENTS ONT BESOIN DE PLACE POUR LEUR `QUIT`**, et le disent
+/// quand elle manque.
+///
+/// On s'en va poliment dans deux cas — pas de chiffrement, pas de `PLAIN` — et
+/// les deux écrivent un `QUIT`. Un tampon d'un octet ne le porte pas.
+#[test]
+fn les_renoncements_ont_besoin_de_place_pour_leur_quit() {
+    for (chiffre, annonce) in [
+        // Pas de chiffrement : on renonce avant même de regarder les mécanismes.
+        (false, &b"250-relais.test\r\n250 AUTH PLAIN\r\n"[..]),
+        // Chiffré, mais le pair n'offre pas `PLAIN`.
+        (true, b"250-relais.test\r\n250 SIZE 1024\r\n"),
+    ] {
+        let mut client = SmtpClient::new(ClientConfig {
+            implicit_tls: chiffre,
+            ..config_avec_identifiants()
+        })
+        .expect("configurable");
+        let mut grand = [0_u8; CLIENT_COMMAND_MAX];
+        client
+            .on_reply(&reponse(b"220 relais.test ESMTP\r\n"), &mut grand)
+            .expect("bannière");
+        let mut minuscule = [0_u8; 1];
+        assert!(
+            client.on_reply(&reponse(annonce), &mut minuscule).is_err(),
+            "chiffré={chiffre}"
+        );
+    }
+
+    // ET LE TROISIÈME RENONCEMENT : le pair a REFUSÉ nos identifiants. Il
+    // s'atteint une commande plus loin, et son `QUIT` a besoin de place lui
+    // aussi.
+    let mut client = SmtpClient::new(ClientConfig {
+        implicit_tls: true,
+        ..config_avec_identifiants()
+    })
+    .expect("configurable");
+    let mut grand = [0_u8; CLIENT_COMMAND_MAX];
+    client
+        .on_reply(&reponse(b"220 relais.test ESMTP\r\n"), &mut grand)
+        .expect("bannière");
+    client
+        .on_reply(
+            &reponse(b"250-relais.test\r\n250 AUTH PLAIN\r\n"),
+            &mut grand,
+        )
+        .expect("AUTH écrit");
+    let mut minuscule = [0_u8; 1];
+    assert!(
+        client
+            .on_reply(&reponse(b"535 5.7.8 nope\r\n"), &mut minuscule)
+            .is_err()
+    );
+}
+
+/// **CHAQUE ERREUR DE SESSION SE DIT EN FRANÇAIS**, celle des identifiants
+/// comprise.
+///
+/// Un message d'erreur qu'aucun essai ne lit est un message qu'on découvre le
+/// jour où il compte.
+#[test]
+fn l_erreur_d_identifiants_se_lit() {
+    let texte = std::format!("{}", Error::UnsafeCredentials);
+    assert!(texte.contains("relais de sortie"), "{texte}");
+    assert!(texte.contains("256"), "{texte}");
 }

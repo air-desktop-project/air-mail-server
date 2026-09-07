@@ -502,6 +502,24 @@ impl Mtasts {
 pub struct Relay {
     /// Relaie-t-on pour les comptes authentifiés ?
     pub enabled: bool,
+    /// Le nom du RELAIS DE SORTIE, s'il y en a un.
+    ///
+    /// **Vide veut dire « remise directe »**, et c'est le défaut : le serveur
+    /// résout le `MX` du destinataire et lui parle lui-même. Avec un relais,
+    /// tout part chez lui — et DANE comme MTA-STS cessent de s'appliquer,
+    /// puisque ce n'est plus nous qui parcourons le chemin.
+    pub relayhost: String,
+    /// Son port : 465 pour un TLS implicite, 587 pour un `STARTTLS`.
+    pub relayhost_port: u16,
+    /// Le TLS monte-t-il d'emblée, sans `STARTTLS` (RFC 8314 §3) ?
+    pub relayhost_implicit_tls: bool,
+    /// L'identité du compte qu'on a chez lui.
+    pub relayhost_user: String,
+    /// Le secret.
+    ///
+    /// **IL VIT DANS CE FICHIER**, que l'exploitant protège, et jamais sur une
+    /// ligne de commande : ce que `ps` affiche, tout le monde le lit.
+    pub relayhost_password: String,
 }
 
 /// La file d'attente du serveur — **tout ce qui sort passe par elle**.
@@ -725,6 +743,14 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
     let emission = lu.get_relay()?;
     let relay = Relay {
         enabled: emission.get_enabled(),
+        // **UN FICHIER ÉCRIT AVANT CES CHAMPS DÉCODE DU VIDE**, et du vide veut
+        // dire « remise directe ». Une configuration ancienne se comporte donc
+        // exactement comme avant.
+        relayhost: texte(emission.get_relayhost()?)?,
+        relayhost_port: emission.get_relayhost_port(),
+        relayhost_implicit_tls: emission.get_relayhost_implicit_tls(),
+        relayhost_user: texte(emission.get_relayhost_user()?)?,
+        relayhost_password: texte(emission.get_relayhost_password()?)?,
     };
 
     // **UN FICHIER ÉCRIT AVANT CE CHAMP DÉCODE UN DOSSIER VIDE**, et le serveur
@@ -979,6 +1005,11 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
         {
             let mut emission = ecrit.reborrow().init_relay();
             emission.set_enabled(config.relay.enabled);
+            emission.set_relayhost(&config.relay.relayhost);
+            emission.set_relayhost_port(config.relay.relayhost_port);
+            emission.set_relayhost_implicit_tls(config.relay.relayhost_implicit_tls);
+            emission.set_relayhost_user(&config.relay.relayhost_user);
+            emission.set_relayhost_password(&config.relay.relayhost_password);
         }
         {
             let mut attente = ecrit.reborrow().init_queue();
@@ -1077,6 +1108,91 @@ mod tests {
         Configuration, Dkim, Dmarc, Enforcement, Error, Spf, TRAVERSAL_LIMIT_WORDS, Timeouts, Tls,
         decode, encode,
     };
+    /// **UN CHAMP DU RELAIS QUI N'EST PAS DE L'UTF-8 FAIT REFUSER LE FICHIER.**
+    ///
+    /// Les trois sont du texte, et les trois se lisent par le même chemin. Un
+    /// seul d'entre eux éprouvé laisserait les deux autres sans garde.
+    #[test]
+    fn un_champ_du_relais_hors_utf8_fait_refuser() {
+        use crate::ams_config_capnp::configuration;
+        for rang in 0..3_usize {
+            let bon = encode(&Configuration {
+                relay: Relay {
+                    enabled: true,
+                    relayhost: String::from("smtp.example.com"),
+                    relayhost_port: 465,
+                    relayhost_implicit_tls: true,
+                    relayhost_user: String::from("nous"),
+                    relayhost_password: String::from("secret"),
+                },
+                ..exemple()
+            })
+            .expect("encodable");
+            assert!(decode(&bon).is_ok(), "le témoin doit se relire");
+
+            let mut message = capnp::message::Builder::new_default();
+            {
+                let lu = capnp::serialize::read_message(
+                    &mut bon.as_slice(),
+                    capnp::message::ReaderOptions::new(),
+                )
+                .expect("relisible");
+                message
+                    .set_root(lu.get_root::<configuration::Reader<'_>>().expect("racine"))
+                    .expect("recopiable");
+                let mut ecrit = message
+                    .get_root::<configuration::Builder<'_>>()
+                    .expect("racine");
+                let mut emission = ecrit.reborrow().init_relay();
+                emission.set_enabled(true);
+                let casse = capnp::text::Reader(b"smtp.\xff.test");
+                match rang {
+                    0 => emission.set_relayhost(casse),
+                    1 => emission.set_relayhost_user(casse),
+                    _ => emission.set_relayhost_password(casse),
+                }
+            }
+            let octets = capnp::serialize::write_message_to_words(&message);
+            assert_eq!(decode(&octets), Err(Error::NotUtf8), "champ {rang}");
+        }
+    }
+
+    /// **LE RELAIS DE SORTIE FAIT L'ALLER-RETOUR**, mot de passe compris.
+    ///
+    /// Il vit dans le fichier binaire, que l'exploitant protège, et jamais sur
+    /// une ligne de commande : ce que `ps` affiche, tout le monde le lit.
+    #[test]
+    fn le_relais_de_sortie_se_relit_comme_il_a_ete_ecrit() {
+        let mut config = exemple();
+        config.relay = Relay {
+            enabled: true,
+            relayhost: String::from("smtp.example.com"),
+            relayhost_port: 465,
+            relayhost_implicit_tls: true,
+            relayhost_user: String::from("nous@example.com"),
+            relayhost_password: String::from("un secret qui ne sort pas d'ici"),
+        };
+        let relue = decode(&encode(&config).expect("encodable")).expect("décodable");
+        assert_eq!(relue.relay, config.relay);
+    }
+
+    /// **UNE CONFIGURATION ÉCRITE AVANT CES CHAMPS REMET EN DIRECT.**
+    ///
+    /// Cap'n Proto rend du vide pour un champ qu'un fichier ancien ne porte pas,
+    /// et un hôte vide veut dire « pas de relais ». Une mise à jour ne change
+    /// donc le chemin du courrier de personne.
+    #[test]
+    fn un_fichier_sans_relais_remet_en_direct() {
+        let config = exemple();
+        assert!(config.relay.relayhost.is_empty());
+        let relue = decode(&encode(&config).expect("encodable")).expect("décodable");
+        assert!(relue.relay.relayhost.is_empty());
+        assert_eq!(relue.relay.relayhost_port, 0);
+        assert!(!relue.relay.relayhost_implicit_tls);
+        assert!(relue.relay.relayhost_user.is_empty());
+        assert!(relue.relay.relayhost_password.is_empty());
+    }
+
     use super::{Listener, Mtasts, Queue, Relay, Tlsrpt};
     use alloc::string::{String, ToString as _};
     use alloc::vec;
@@ -1813,7 +1929,10 @@ mod tests {
             warn_seconds: 7_200,
         };
         let config = Configuration {
-            relay: Relay { enabled: true },
+            relay: Relay {
+                enabled: true,
+                ..Relay::default()
+            },
             queue: voulue.clone(),
             ..exemple()
         };
@@ -1905,7 +2024,10 @@ mod tests {
 
     #[test]
     fn la_file_se_debogue_et_se_compare() {
-        let relais = Relay { enabled: true };
+        let relais = Relay {
+            enabled: true,
+            ..Relay::default()
+        };
         assert!(!std::format!("{relais:?}").is_empty());
         assert_ne!(relais, Relay::default());
         assert_eq!(relais.clone(), relais);

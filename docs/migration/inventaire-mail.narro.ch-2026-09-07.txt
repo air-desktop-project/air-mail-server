@@ -1,0 +1,442 @@
+
+══════════════════════════════════════════════════════════════
+  0. La machine
+══════════════════════════════════════════════════════════════
+date       : 2026-09-07T07:08:35+00:00
+hôte       : vps-9d275e3a.vps.ovh.net
+Ubuntu 25.04
+Linux 6.14.0-37-generic x86_64
+espace libre sur / et sur le stockage du courrier :
+/dev/sda1        96G   13G   84G  14% /
+Filesystem      Size  Used Avail Use% Mounted on
+
+══════════════════════════════════════════════════════════════
+  1. Ce qui écoute, et ce qui tourne
+══════════════════════════════════════════════════════════════
+State  Recv-Q Send-Q Local Address:Port  Peer Address:PortProcess                                                                                                                                                                                             
+LISTEN 0      4096      127.0.0.54:53         0.0.0.0:*    users:(("systemd-resolve",pid=468,fd=17))                                                                                                                                                          
+LISTEN 0      4096       127.0.0.1:11333      0.0.0.0:*    users:(("rspamd",pid=1294,fd=71),("rspamd",pid=1293,fd=71),("rspamd",pid=1292,fd=71),("rspamd",pid=1291,fd=71),("rspamd",pid=1249,fd=71))                                                          
+LISTEN 0      4096       127.0.0.1:11332      0.0.0.0:*    users:(("rspamd",pid=1289,fd=66),("rspamd",pid=1249,fd=66))                                                                                                                                        
+LISTEN 0      4096       127.0.0.1:11334      0.0.0.0:*    users:(("rspamd",pid=1290,fd=68),("rspamd",pid=1249,fd=68))                                                                                                                                        
+LISTEN 0      4096   127.0.0.53%lo:53         0.0.0.0:*    users:(("systemd-resolve",pid=468,fd=15))                                                                                                                                                          
+LISTEN 0      100          0.0.0.0:587        0.0.0.0:*    users:(("master",pid=1174,fd=92))                                                                                                                                                                  
+LISTEN 0      100          0.0.0.0:993        0.0.0.0:*    users:(("imap-login",pid=844815,fd=7),("imap-login",pid=844804,fd=7),("imap-login",pid=844803,fd=7),("imap-login",pid=844799,fd=7),("imap-login",pid=844797,fd=7),("dovecot",pid=1245,fd=36))      
+LISTEN 0      100          0.0.0.0:25         0.0.0.0:*    users:(("master",pid=1174,fd=13))                                                                                                                                                                  
+LISTEN 0      4096         0.0.0.0:22         0.0.0.0:*    users:(("sshd",pid=1260,fd=3),("systemd",pid=1,fd=173))                                                                                                                                            
+LISTEN 0      511          0.0.0.0:80         0.0.0.0:*    users:(("nginx",pid=533811,fd=5),("nginx",pid=533810,fd=5),("nginx",pid=533809,fd=5),("nginx",pid=533808,fd=5),("nginx",pid=533807,fd=5),("nginx",pid=533806,fd=5),("nginx",pid=59302,fd=5))       
+LISTEN 0      511          0.0.0.0:443        0.0.0.0:*    users:(("nginx",pid=533811,fd=22),("nginx",pid=533810,fd=22),("nginx",pid=533809,fd=22),("nginx",pid=533808,fd=22),("nginx",pid=533807,fd=22),("nginx",pid=533806,fd=22),("nginx",pid=59302,fd=22))
+LISTEN 0      100          0.0.0.0:465        0.0.0.0:*    users:(("master",pid=1174,fd=96))                                                                                                                                                                  
+LISTEN 0      100             [::]:587           [::]:*    users:(("master",pid=1174,fd=93))                                                                                                                                                                  
+LISTEN 0      100             [::]:993           [::]:*    users:(("imap-login",pid=844815,fd=8),("imap-login",pid=844804,fd=8),("imap-login",pid=844803,fd=8),("imap-login",pid=844799,fd=8),("imap-login",pid=844797,fd=8),("dovecot",pid=1245,fd=37))      
+LISTEN 0      100             [::]:25            [::]:*    users:(("master",pid=1174,fd=14))                                                                                                                                                                  
+LISTEN 0      4096            [::]:22            [::]:*    users:(("sshd",pid=1260,fd=4),("systemd",pid=1,fd=174))                                                                                                                                            
+LISTEN 0      511             [::]:80            [::]:*    users:(("nginx",pid=533811,fd=6),("nginx",pid=533810,fd=6),("nginx",pid=533809,fd=6),("nginx",pid=533808,fd=6),("nginx",pid=533807,fd=6),("nginx",pid=533806,fd=6),("nginx",pid=59302,fd=6))       
+LISTEN 0      511             [::]:443           [::]:*    users:(("nginx",pid=533811,fd=21),("nginx",pid=533810,fd=21),("nginx",pid=533809,fd=21),("nginx",pid=533808,fd=21),("nginx",pid=533807,fd=21),("nginx",pid=533806,fd=21),("nginx",pid=59302,fd=21))
+LISTEN 0      100             [::]:465           [::]:*    users:(("master",pid=1174,fd=97))                                                                                                                                                                  
+
+  dovecot.service             loaded active running Dovecot IMAP/POP3 email server
+  nginx.service               loaded active running A high performance web server and a reverse proxy server
+  postfix.service             loaded active running Postfix Mail Transport Agent (main/default instance)
+  rspamd.service              loaded active running rapid spam filtering system
+
+══════════════════════════════════════════════════════════════
+  2. Postfix — la configuration qui n'est PAS le défaut
+══════════════════════════════════════════════════════════════
+alias_database = hash:/etc/aliases
+alias_maps = hash:/etc/aliases
+append_dot_mydomain = no
+biff = no
+bounce_queue_lifetime = 1d
+compatibility_level = 3.6
+inet_interfaces = all
+inet_protocols = all
+mailbox_size_limit = 0
+maximal_queue_lifetime = 1d
+message_size_limit = 52428800
+milter_default_action = accept
+milter_mail_macros = i {mail_addr} {client_addr} {client_name} {auth_authen}
+milter_protocol = 6
+mydestination = localhost
+mydomain = narro.ch
+myhostname = mail.narro.ch
+mynetworks = 127.0.0.0/8 [::1]/128
+myorigin = $mydomain
+non_smtpd_milters = $smtpd_milters
+recipient_delimiter = +
+relayhost = [smtp.resend.com]:465
+smtp_sasl_auth_enable = yes
+smtp_sasl_mechanism_filter = plain, login
+smtp_sasl_password_maps = hash:/etc/postfix/sasl_passwd
+smtp_sasl_security_options = noanonymous
+smtp_tls_CAfile = /etc/ssl/certs/ca-certificates.crt
+smtp_tls_security_level = encrypt
+smtp_tls_session_cache_database = btree:${data_directory}/smtp_scache
+smtp_tls_wrappermode = yes
+smtpd_helo_required = yes
+smtpd_helo_restrictions = permit_mynetworks, reject_invalid_helo_hostname, reject_non_fqdn_helo_hostname
+smtpd_milters = inet:localhost:11332
+smtpd_recipient_restrictions = reject_non_fqdn_recipient, reject_unknown_recipient_domain, permit_mynetworks, reject_unauth_destination
+smtpd_relay_restrictions = permit_mynetworks, reject_unauth_destination
+smtpd_sender_restrictions = permit_mynetworks, reject_non_fqdn_sender, reject_unknown_sender_domain
+smtpd_tls_cert_file = /etc/letsencrypt/live/mail.narro.ch/fullchain.pem
+smtpd_tls_key_file = /etc/letsencrypt/live/mail.narro.ch/privkey.pem
+smtpd_tls_protocols = >=TLSv1.2
+smtpd_tls_security_level = may
+smtpd_tls_session_cache_database = btree:${data_directory}/smtpd_scache
+virtual_alias_maps = hash:/etc/postfix/valiases
+virtual_mailbox_domains = narro.ch
+virtual_mailbox_maps = hash:/etc/postfix/vmailbox
+virtual_transport = lmtp:unix:private/dovecot-lmtp
+
+══════════════════════════════════════════════════════════════
+  2b. Postfix — les services de master.cf
+══════════════════════════════════════════════════════════════
+smtp       inet  n       -       y       -       -       smtpd
+pickup     unix  n       -       y       60      1       pickup
+cleanup    unix  n       -       y       -       0       cleanup
+qmgr       unix  n       -       n       300     1       qmgr
+tlsmgr     unix  -       -       y       1000?   1       tlsmgr
+rewrite    unix  -       -       y       -       -       trivial-rewrite
+bounce     unix  -       -       y       -       0       bounce
+defer      unix  -       -       y       -       0       bounce
+trace      unix  -       -       y       -       0       bounce
+verify     unix  -       -       y       -       1       verify
+flush      unix  n       -       y       1000?   0       flush
+proxymap   unix  -       -       n       -       -       proxymap
+proxywrite unix  -       -       n       -       1       proxymap
+smtp       unix  -       -       y       -       -       smtp
+relay      unix  -       -       y       -       -       smtp -o syslog_name=${multi_instance_name?{$multi_instance_name}:{postfix}}/$service_name
+showq      unix  n       -       y       -       -       showq
+error      unix  -       -       y       -       -       error
+retry      unix  -       -       y       -       -       error
+discard    unix  -       -       y       -       -       discard
+local      unix  -       n       n       -       -       local
+virtual    unix  -       n       n       -       -       virtual
+lmtp       unix  -       -       y       -       -       lmtp
+anvil      unix  -       -       y       -       1       anvil
+scache     unix  -       -       y       -       1       scache
+postlog    unix-dgram n  -       n       -       1       postlogd
+submission inet  n       -       y       -       -       smtpd -o syslog_name=postfix/submission -o smtpd_tls_security_level=encrypt -o smtpd_sasl_auth_enable=yes -o smtpd_sasl_type=dovecot -o smtpd_sasl_path=private/auth -o smtpd_sasl_security_options=noanonymous -o smtpd_sasl_local_domain=$myhostname -o smtpd_client_restrictions=permit_sasl_authenticated,reject -o smtpd_relay_restrictions=permit_sasl_authenticated,reject -o smtpd_recipient_restrictions=permit_sasl_authenticated,reject -o smtpd_sender_login_maps=hash:/etc/postfix/sender_login -o smtpd_sender_restrictions=reject_sender_login_mismatch,permit_sasl_authenticated,reject -o milter_macro_daemon_name=ORIGINATING -o cleanup_service_name=submission-header-cleanup
+smtps      inet  n       -       y       -       -       smtpd -o syslog_name=postfix/smtps -o smtpd_tls_wrappermode=yes -o smtpd_sasl_auth_enable=yes -o smtpd_sasl_type=dovecot -o smtpd_sasl_path=private/auth -o smtpd_sasl_security_options=noanonymous -o smtpd_sasl_local_domain=$myhostname -o smtpd_client_restrictions=permit_sasl_authenticated,reject -o smtpd_relay_restrictions=permit_sasl_authenticated,reject -o smtpd_recipient_restrictions=permit_sasl_authenticated,reject -o smtpd_sender_login_maps=hash:/etc/postfix/sender_login -o smtpd_sender_restrictions=reject_sender_login_mismatch,permit_sasl_authenticated,reject -o milter_macro_daemon_name=ORIGINATING -o cleanup_service_name=submission-header-cleanup
+submission-header-cleanup unix n - n     -       0       cleanup -o header_checks=pcre:/etc/postfix/header_checks_submission
+
+══════════════════════════════════════════════════════════════
+  2c. Postfix — la file d'attente
+══════════════════════════════════════════════════════════════
+Mail queue is empty
+
+══════════════════════════════════════════════════════════════
+  3. Les tables de Postfix (domaines, alias, boîtes)
+══════════════════════════════════════════════════════════════
+
+── virtual_alias_maps = hash:/etc/postfix/valiases
+   contenu de /etc/postfix/valiases :
+     postmaster@narro.ch contact@narro.ch
+     abuse@narro.ch      contact@narro.ch
+     root@narro.ch       contact@narro.ch
+
+── virtual_mailbox_maps = hash:/etc/postfix/vmailbox
+   contenu de /etc/postfix/vmailbox :
+     contact@narro.ch narro.ch/contact/
+     thierry.delhaise@narro.ch narro.ch/thierry.delhaise/
+     vincent.delhaise@narro.ch narro.ch/vincent.delhaise/
+     support@narro.ch narro.ch/support/
+     kelly.garro@narro.ch narro.ch/kelly.garro/
+
+── virtual_mailbox_domains = narro.ch
+
+── alias_maps = hash:/etc/aliases
+   contenu de /etc/aliases :
+     mailer-daemon: postmaster
+     postmaster:    root
+     nobody:        root
+     hostmaster:    root
+     usenet:        root
+     news:          root
+     webmaster:     root
+     www:           root
+     ftp:           root
+     abuse:         root
+     noc:           root
+     security:      root
+     root:          contact@narro.ch
+
+── mydestination = localhost
+
+── relay_domains = ${{$compatibility_level} <level {2} ? {$mydestination} : {}}
+
+══════════════════════════════════════════════════════════════
+  4. Dovecot — la configuration qui n'est PAS le défaut
+══════════════════════════════════════════════════════════════
+# 2.3.21.1 (d492236fa0): /etc/dovecot/dovecot.conf
+# Pigeonhole version 0.5.21.1 (49005e73)
+# OS: Linux 6.14.0-37-generic x86_64 Ubuntu 25.04 ext4
+# Hostname: vps-9d275e3a.vps.ovh.net
+auth_mechanisms = plain login
+first_valid_uid = 5000
+last_valid_uid = 5000
+mail_gid = vmail
+mail_location = maildir:/var/vmail/%d/%n/Maildir
+mail_privileged_group = vmail
+mail_uid = vmail
+managesieve_notify_capability = mailto
+managesieve_sieve_capability = fileinto reject envelope encoded-character vacation subaddress comparator-i;ascii-numeric relational regex imap4flags copy include variables body enotify environment mailbox date index ihave duplicate mime foreverypart extracttext
+namespace inbox {
+  inbox = yes
+  location = 
+  mailbox Archive {
+    auto = subscribe
+    special_use = \Archive
+  }
+  mailbox Drafts {
+    auto = subscribe
+    special_use = \Drafts
+  }
+  mailbox Junk {
+    auto = subscribe
+    special_use = \Junk
+  }
+  mailbox Sent {
+    auto = subscribe
+    special_use = \Sent
+  }
+  mailbox Trash {
+    auto = subscribe
+    special_use = \Trash
+  }
+  prefix = 
+  separator = /
+  type = private
+}
+passdb {
+  args = scheme=SHA512-CRYPT username_format=%u /etc/dovecot/users
+  driver = passwd-file
+}
+protocols = imap lmtp
+service auth-worker {
+  user = vmail
+}
+service auth {
+  unix_listener /var/spool/postfix/private/auth {
+    group = postfix
+    mode = 0660
+    user = postfix
+  }
+  unix_listener auth-userdb {
+    group = vmail
+    mode = 0600
+    user = vmail
+  }
+  user = dovecot
+}
+service imap-login {
+  inet_listener imap {
+    port = 0
+  }
+  inet_listener imaps {
+    port = 993
+    ssl = yes
+  }
+}
+service lmtp {
+  unix_listener /var/spool/postfix/private/dovecot-lmtp {
+    group = postfix
+    mode = 0600
+    user = postfix
+  }
+}
+ssl = required
+ssl_cert = </etc/letsencrypt/live/mail.narro.ch/fullchain.pem
+ssl_key = # hidden, use -P to show it
+ssl_prefer_server_ciphers = yes
+userdb {
+  args = uid=vmail gid=vmail home=/var/vmail/%d/%n
+  driver = static
+}
+
+══════════════════════════════════════════════════════════════
+  5. Dovecot — LE FORMAT DES BOÎTES, qui décide de tout
+══════════════════════════════════════════════════════════════
+mail_location : maildir:/var/vmail/%d/%n/Maildir
+mail_home     : 
+mail_plugins  : 
+
+Ce que le disque montre — maildirfolder / cur / new / tmp disent Maildir,
+dovecot.map.index ou m.1 disent mdbox, dbox-Mails dit sdbox :
+
+  /var/mail :
+
+  /var/vmail :
+    f /var/vmail/narro.ch/contact/Maildir/dovecot-uidlist
+    d /var/vmail/narro.ch/contact/Maildir/cur
+    d /var/vmail/narro.ch/contact/Maildir/new
+    f /var/vmail/narro.ch/support/Maildir/dovecot-uidlist
+    d /var/vmail/narro.ch/support/Maildir/cur
+    d /var/vmail/narro.ch/support/Maildir/new
+    f /var/vmail/narro.ch/thierry.delhaise/Maildir/dovecot-uidlist
+    d /var/vmail/narro.ch/thierry.delhaise/Maildir/cur
+    d /var/vmail/narro.ch/thierry.delhaise/Maildir/new
+    f /var/vmail/narro.ch/vincent.delhaise/Maildir/dovecot-uidlist
+    d /var/vmail/narro.ch/vincent.delhaise/Maildir/cur
+    d /var/vmail/narro.ch/vincent.delhaise/Maildir/new
+    f /var/vmail/narro.ch/kelly.garro/Maildir/dovecot-uidlist
+    d /var/vmail/narro.ch/kelly.garro/Maildir/cur
+    d /var/vmail/narro.ch/kelly.garro/Maildir/new
+
+  /var/spool/mail :
+
+══════════════════════════════════════════════════════════════
+  6. Les comptes, et LE SCHÉMA de leurs empreintes
+══════════════════════════════════════════════════════════════
+ATTENTION : aucune empreinte n'est imprimée. Seul le schéma l'est.
+default_pass_scheme : 
+
+
+  /etc/dovecot/users — 5 ligne(s) :
+    contact@narro.ch                 {SHA512-CRYPT}
+    thierry.delhaise@narro.ch        {SHA512-CRYPT}
+    vincent.delhaise@narro.ch        {SHA512-CRYPT}
+    support@narro.ch                 {SHA512-CRYPT}
+    kelly.garro@narro.ch             {SHA512-CRYPT}
+
+══════════════════════════════════════════════════════════════
+  6b. Les boîtes vues par Dovecot
+══════════════════════════════════════════════════════════════
+Error: auth-master: userdb list: User listing returned failure
+Fatal: user listing failed
+
+── Nombre de messages et taille, par compte ──
+Fatal: Unknown command 'quota', but plugin quota exists. Try to set mail_plugins=quota
+
+══════════════════════════════════════════════════════════════
+  7. Les dossiers IMAP de chaque compte
+══════════════════════════════════════════════════════════════
+Error: auth-master: userdb list: User listing returned failure
+doveadm: Error: Failed to iterate through some users
+
+══════════════════════════════════════════════════════════════
+  8. TLS — les certificats, sans les clés
+══════════════════════════════════════════════════════════════
+  postfix smtpd_tls_cert_file      = /etc/letsencrypt/live/mail.narro.ch/fullchain.pem
+  postfix smtpd_tls_key_file       = /etc/letsencrypt/live/mail.narro.ch/privkey.pem
+  postfix smtp_tls_CAfile          = /etc/ssl/certs/ca-certificates.crt
+  dovecot ssl_cert                 = </etc/letsencrypt/live/mail.narro.ch/fullchain.pem
+  dovecot ssl_key                  = </etc/letsencrypt/live/mail.narro.ch/privkey.pem
+
+── Ce que les certificats contiennent ──
+
+  /etc/letsencrypt/live/mail.narro.ch/fullchain.pem
+    lrwxrwxrwx 1 root root 42 Aug 13 23:13 /etc/letsencrypt/live/mail.narro.ch/fullchain.pem -> ../../archive/mail.narro.ch/fullchain2.pem
+    subject=CN=mail.narro.ch
+    issuer=C=US, O=Let's Encrypt, CN=YE2
+    notBefore=Aug 13 22:15:23 2026 GMT
+    notAfter=Nov 11 22:15:22 2026 GMT
+    X509v3 Subject Alternative Name: 
+        DNS:mail.narro.ch
+
+  /etc/letsencrypt/live/mail.narro.ch/fullchain.pem
+    lrwxrwxrwx 1 root root 42 Aug 13 23:13 /etc/letsencrypt/live/mail.narro.ch/fullchain.pem -> ../../archive/mail.narro.ch/fullchain2.pem
+    subject=CN=mail.narro.ch
+    issuer=C=US, O=Let's Encrypt, CN=YE2
+    notBefore=Aug 13 22:15:23 2026 GMT
+    notAfter=Nov 11 22:15:22 2026 GMT
+    X509v3 Subject Alternative Name: 
+        DNS:mail.narro.ch
+
+  /etc/letsencrypt/live/docs.air-desktop.org/fullchain.pem
+    lrwxrwxrwx 1 root root 49 Jul 13 08:19 /etc/letsencrypt/live/docs.air-desktop.org/fullchain.pem -> ../../archive/docs.air-desktop.org/fullchain1.pem
+    subject=CN=docs.air-desktop.org
+    issuer=C=US, O=Let's Encrypt, CN=YE1
+    notBefore=Jul 13 07:21:21 2026 GMT
+    notAfter=Oct 11 07:21:20 2026 GMT
+    X509v3 Subject Alternative Name: 
+        DNS:docs.air-desktop.org
+
+  /etc/letsencrypt/live/mail.narro.ch/fullchain.pem
+    lrwxrwxrwx 1 root root 42 Aug 13 23:13 /etc/letsencrypt/live/mail.narro.ch/fullchain.pem -> ../../archive/mail.narro.ch/fullchain2.pem
+    subject=CN=mail.narro.ch
+    issuer=C=US, O=Let's Encrypt, CN=YE2
+    notBefore=Aug 13 22:15:23 2026 GMT
+    notAfter=Nov 11 22:15:22 2026 GMT
+    X509v3 Subject Alternative Name: 
+        DNS:mail.narro.ch
+
+── Les clés privées : chemin et PERMISSIONS seulement ──
+    -rw------- 1 root root 241 Aug 13 23:13 /etc/letsencrypt/live/mail.narro.ch/privkey.pem
+    -rw------- 1 root root 241 Aug 13 23:13 /etc/letsencrypt/live/mail.narro.ch/privkey.pem
+    -rw------- 1 root root 241 Jul 13 08:19 /etc/letsencrypt/live/docs.air-desktop.org/privkey.pem
+    -rw------- 1 root root 241 Aug 13 23:13 /etc/letsencrypt/live/mail.narro.ch/privkey.pem
+
+── Renouvellement automatique ──
+Mon 2026-09-07 18:20:21 UTC      11h Mon 2026-09-07 01:22:18 UTC  5h 46min ago certbot.timer                   certbot.service
+    total 8
+    -rw-r--r-- 1 root root 574 Jul 13 08:19 docs.air-desktop.org.conf
+    -rw-r--r-- 1 root root 539 Aug 13 23:13 mail.narro.ch.conf
+
+══════════════════════════════════════════════════════════════
+  9. DKIM, et ce qui signe
+══════════════════════════════════════════════════════════════
+  (absent : opendkim-testkey)
+
+  Clés DKIM (chemin et permissions, jamais le contenu) :
+
+══════════════════════════════════════════════════════════════
+  10. Ce qui filtre — et qu'air-mail-server ne sait PAS reprendre
+══════════════════════════════════════════════════════════════
+── Milters déclarés ──
+    inet:localhost:11332
+    $smtpd_milters
+── Sieve ──
+  plugins : 
+  protocol lda/lmtp mail_plugins :  
+  sieve_dir : 
+  scripts trouvés :
+── Quotas ──
+  quota :  
+
+══════════════════════════════════════════════════════════════
+  11. Volumétrie du courrier
+══════════════════════════════════════════════════════════════
+  /var/mail : 4.0K
+    fichiers : 0
+    par compte :
+  /var/vmail : 20M
+    fichiers : 713
+    par compte :
+      20M	/var/vmail/narro.ch
+  /var/spool/mail : 0
+    fichiers : 0
+    par compte :
+
+══════════════════════════════════════════════════════════════
+  12. Sauvegardes existantes
+══════════════════════════════════════════════════════════════
+Mon 2026-09-07 07:10:00 UTC 1min 22s Mon 2026-09-07 07:00:13 UTC      8min ago sysstat-collect.timer           sysstat-collect.service
+Mon 2026-09-07 07:13:06 UTC 4min 29s Mon 2026-09-07 07:08:03 UTC       33s ago sds-directory-healthcheck.timer sds-directory-healthcheck.service
+Mon 2026-09-07 07:39:59 UTC    31min Mon 2026-09-07 06:03:28 UTC   1h 5min ago fwupd-refresh.timer             fwupd-refresh.service
+Mon 2026-09-07 14:32:30 UTC       7h Mon 2026-09-07 00:10:46 UTC        6h ago motd-news.timer                 motd-news.service
+Mon 2026-09-07 18:20:21 UTC      11h Mon 2026-09-07 01:22:18 UTC  5h 46min ago certbot.timer                   certbot.service
+Mon 2026-09-07 20:11:28 UTC      13h Sun 2026-09-06 20:11:28 UTC       10h ago update-notifier-download.timer  update-notifier-download.service
+Mon 2026-09-07 20:20:28 UTC      13h Sun 2026-09-06 20:20:28 UTC       10h ago systemd-tmpfiles-clean.timer    systemd-tmpfiles-clean.service
+Mon 2026-09-07 23:46:37 UTC      16h Mon 2026-09-07 06:32:46 UTC     35min ago apt-daily.timer                 apt-daily.service
+Tue 2026-09-08 00:00:00 UTC      16h Mon 2026-09-07 00:00:08 UTC        7h ago dpkg-db-backup.timer            dpkg-db-backup.service
+Tue 2026-09-08 00:00:00 UTC      16h Mon 2026-09-07 00:00:08 UTC        7h ago sysstat-rotate.timer            sysstat-rotate.service
+Tue 2026-09-08 00:07:00 UTC      16h Mon 2026-09-07 00:07:08 UTC        7h ago sysstat-summary.timer           sysstat-summary.service
+Tue 2026-09-08 00:09:58 UTC      17h Mon 2026-09-07 00:25:46 UTC        6h ago logrotate.timer                 logrotate.service
+Tue 2026-09-08 02:48:09 UTC      19h Mon 2026-09-07 02:25:28 UTC  4h 43min ago man-db.timer                    man-db.service
+Tue 2026-09-08 06:53:15 UTC      23h Mon 2026-09-07 06:31:26 UTC     37min ago apt-daily-upgrade.timer         apt-daily-upgrade.service
+Sat 2026-09-12 11:49:29 UTC   5 days Sat 2026-09-05 17:30:46 UTC 1 day 13h ago update-notifier-motd.timer      update-notifier-motd.service
+Sun 2026-09-13 03:10:34 UTC   5 days Sun 2026-09-06 03:10:46 UTC  1 day 3h ago e2scrub_all.timer               e2scrub_all.service
+Mon 2026-09-14 00:01:27 UTC   6 days Mon 2026-09-07 00:01:18 UTC        7h ago fstrim.timer                    fstrim.service
+    total 24
+    drwxr-xr-x   2 root root 4096 May 15 22:28 .
+    drwxr-xr-x 119 root root 4096 Jul 13 08:18 ..
+    -rw-r--r--   1 root root  102 Mar 15  2025 .placeholder
+    -rw-r--r--   1 root root  802 Apr 16  2023 certbot
+    -rw-r--r--   1 root root  188 Jan  7  2025 e2scrub_all
+    -rw-r--r--   1 root root  400 Aug 15  2024 sysstat
+
+══════════════════════════════════════════════════════════════
+  FIN
+══════════════════════════════════════════════════════════════
+Relisez ce fichier avant de le transmettre : il nomme vos comptes.

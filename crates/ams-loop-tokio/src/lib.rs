@@ -121,7 +121,7 @@ pub use mtasts::Sts;
 pub use privileges::{is_root, masque_trop_large, refuse_root, restreindre_le_masque};
 pub use queue::{Bounced, QueueTally, Spool};
 pub use quic::{Application, QuicStats, SansApplication, serve_quic};
-pub use relay::{Outgoing, Relay, RelayOutcome, SMTP_PORT};
+pub use relay::{Outgoing, Relay, RelayOutcome, Relayhost, SMTP_PORT};
 pub use reports::{
     FailureObservation, Observation, PolitiqueLue, ReportSpool, SendTally, SignatureVue, SpfVu,
     SpoolTally,

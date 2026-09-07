@@ -112,6 +112,12 @@ struct Entree {
     /// Les deux chemins de MTA-STS — DEUX CHAÎNES LIBRES, y compris l'une sans
     /// l'autre. Le SERVEUR refuse ce cas ; cette crate les transporte.
     mtasts: [String; 2],
+    /// Le relais de sortie : son hôte, son compte, son secret.
+    ///
+    /// **LES TROIS SONT DU TEXTE**, et le troisième est un SECRET : ce qu'on
+    /// éprouve ici est qu'un aller-retour le rende intact, sans quoi une
+    /// authentification échouerait sans que rien ne dise pourquoi.
+    relais: [String; 3],
     /// Le dossier des rapports TLS, et le drapeau de remise — LIBRES tous les
     /// deux, y compris incohérents entre eux.
     tlsrpt: String,
@@ -238,6 +244,15 @@ fuzz_target!(|entree: Entree| {
         },
         relay: ams_config::Relay {
             enabled: entree.emet,
+            // **LE RELAIS DE SORTIE PASSE PAR LE MÊME CODEC**, et ses trois
+            // champs texte s'encodent comme les autres : ce que le fuzz doit
+            // éprouver, c'est qu'un aller-retour les rende intacts, quel que
+            // soit ce qu'ils portent.
+            relayhost: entree.relais[0].clone(),
+            relayhost_port: entree.reprises[0] as u16,
+            relayhost_implicit_tls: entree.emet,
+            relayhost_user: entree.relais[1].clone(),
+            relayhost_password: entree.relais[2].clone(),
         },
         queue: ams_config::Queue {
             spool: entree.file.clone(),

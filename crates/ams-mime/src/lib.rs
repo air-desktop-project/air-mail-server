@@ -95,7 +95,7 @@ pub use authres::{
     AUTHRES_RESERVE, Authentication, DKIM_MAX, DkimResult, DkimSeen, DmarcResult, SpfIdentity,
     SpfResult, authres_max, write_authres, write_authres_padded,
 };
-pub use base64::{BASE64_LINE, base64_max, encode_base64};
+pub use base64::{BASE64_LINE, base64_max, encode_base64, encode_base64_line};
 pub use bounce::{Action, Bounce, Failure, bounce_max, write_bounce};
 pub use compose::{ReportMail, report_mail_max, write_report_mail};
 pub use date::{DATE_MAX, RFC3339_MAX, read_day, write_date, write_rfc3339};

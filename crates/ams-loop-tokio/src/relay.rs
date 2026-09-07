@@ -48,6 +48,62 @@ use tokio_rustls::TlsConnector;
 use crate::connection::lire;
 use crate::resolver::{Mx, Resolver};
 
+/// Un relais de sortie : tout ce qui part passe par lui.
+///
+/// # POURQUOI CETTE FONCTION EXISTE
+///
+/// Beaucoup de machines n'émettent pas en direct — parce que leur adresse n'a
+/// pas d'histoire, parce que l'hébergeur ferme le 25 sortant, ou parce que la
+/// délivrabilité se loue. Elles confient alors leur courrier à un service qui
+/// l'expédie sous SA réputation, et s'authentifient auprès de lui.
+///
+/// C'est l'équivalent du `relayhost` de Postfix, et il a été ajouté pour
+/// remplacer exactement cela sur une machine qui l'employait.
+///
+/// # CE QU'ON PERD, ET QUI SE DIT
+///
+/// DANE et MTA-STS protègent le chemin jusqu'au serveur du DESTINATAIRE. Ce
+/// chemin, on ne le parcourt plus : c'est le relais qui le fait, et on ne voit
+/// pas comment. Les deux cessent donc de s'appliquer, et ce n'est pas un
+/// oubli — c'est ce qu'on a accepté en confiant le courrier à un tiers.
+///
+/// # CE QU'ON NE PERD PAS
+///
+/// Le chiffrement jusqu'au relais est EXIGÉ, sans réglage pour l'affaiblir :
+/// §4 de RFC 4954 interdit `PLAIN` en clair, et un mot de passe qui traverse un
+/// réseau en clair est un mot de passe volé. La signature DKIM, elle, est
+/// apposée AVANT — le relais reçoit un message déjà signé de notre domaine.
+///
+/// # ET SON CERTIFICAT EST VÉRIFIÉ, CONTRE L'USAGE
+///
+/// Postfix expédie par défaut sous `smtp_tls_security_level = encrypt`, qui
+/// chiffre SANS vérifier le certificat. C'est défendable entre MTA — mieux vaut
+/// du chiffre non vérifié que du clair — et ce ne l'est PAS ici : on présente un
+/// mot de passe, et un pair qu'on n'a pas identifié peut être n'importe qui.
+///
+/// La vérification est donc ordinaire — chaîne, nom et dates —, contre les
+/// autorités que l'exploitant a nommées. **Sans autorités, le relais ne se
+/// configure pas** : il n'y a pas de mode dégradé, parce qu'un mode dégradé
+/// serait celui qu'on emploierait par défaut.
+#[derive(Debug, Clone)]
+pub struct Relayhost {
+    /// Le nom du relais, tel qu'on le résout et tel qu'on le vérifie en TLS.
+    pub host: String,
+    /// Son port. Le 465 pour un TLS implicite, le 587 pour un `STARTTLS`.
+    pub port: u16,
+    /// Le TLS est-il monté d'emblée, sans `STARTTLS` (RFC 8314 §3) ?
+    pub implicit_tls: bool,
+    /// L'identité du compte que nous avons chez lui.
+    pub user: String,
+    /// Le secret. Il ne sort jamais en clair.
+    pub password: String,
+    /// De quoi VÉRIFIER le relais : chaîne, nom et dates.
+    ///
+    /// C'est la même configuration que celle de MTA-STS, et pour la même raison :
+    /// elle vérifie comme un navigateur, contre des autorités nommées.
+    pub tls: Arc<rustls::ClientConfig>,
+}
+
 /// Le port de la remise entre serveurs (RFC 5321 §4.1.1).
 ///
 /// **Ce n'est pas 587**, qui est celui de la SOUMISSION — là où un humain
@@ -117,6 +173,12 @@ pub enum RelayOutcome {
     Unreachable,
     /// Le pair ne sait pas chiffrer, et on l'exigeait.
     NoEncryption,
+    /// Le relais de sortie ne nous a pas laissés passer.
+    ///
+    /// Ou il n'offre pas `AUTH PLAIN`, ou il a refusé nos identifiants. **C'est
+    /// TEMPORAIRE** : le message n'y est pour rien, et le rendre à son
+    /// expéditeur ferait payer à un utilisateur une erreur de configuration.
+    RelayAuth,
     /// Ce que le pair a dit n'est pas du SMTP, ou pas à cet endroit.
     Protocol,
     /// **Le serveur n'est pas dans la politique MTA-STS du domaine.**
@@ -158,6 +220,8 @@ pub struct Relay {
     tls: Arc<rustls::ClientConfig>,
     /// Le nom qu'on annonce à l'`EHLO`.
     nom: String,
+    /// Le relais de sortie, quand l'exploitant en a nommé un.
+    relais: Option<Arc<Relayhost>>,
     /// Le port où l'on frappe. Toujours 25, sauf sous test.
     port: u16,
     /// Exige-t-on le chiffrement ?
@@ -195,6 +259,9 @@ impl Relay {
             port: SMTP_PORT,
             exige_tls,
             delai,
+            // **PAS DE RELAIS, SAUF DEMANDE EXPRESSE.** Le défaut est la remise
+            // directe : c'est celle qui ne confie le courrier à personne.
+            relais: None,
             // **ON N'ÉVALUE PAS MTA-STS, SAUF DEMANDE EXPRESSE.** Le
             // constructeur ne le prend pas : un argument de plus dans une liste
             // qui en compte cinq se passe à l'envers sans que le compilateur
@@ -221,6 +288,75 @@ impl Relay {
         self
     }
 
+    /// Donne à ce remetteur un RELAIS DE SORTIE.
+    ///
+    /// # CE QUE CELA CHANGE, ET CE QUE CELA COÛTE
+    ///
+    /// Tout part alors chez ce relais, quel que soit le destinataire. Le `MX` du
+    /// domaine visé n'est plus interrogé — ce n'est plus notre affaire —, et
+    /// avec lui **DANE et MTA-STS cessent de s'appliquer** : ils protègent le
+    /// chemin jusqu'au serveur d'un destinataire, et ce chemin est désormais
+    /// parcouru par quelqu'un d'autre.
+    ///
+    /// C'est une perte réelle, et elle est le prix de la fonction : on troque
+    /// une protection qu'on vérifie soi-même contre la réputation d'un tiers.
+    /// Le chiffrement jusqu'au relais, lui, reste EXIGÉ — voir [`Relayhost`].
+    #[must_use]
+    pub fn with_relayhost(mut self, relais: Arc<Relayhost>) -> Self {
+        self.relais = Some(relais);
+        self
+    }
+
+    /// Remet au relais de sortie, et à lui seul.
+    ///
+    /// # LE CHIFFREMENT EST EXIGÉ, ET IL N'Y A PAS DE RÉGLAGE
+    ///
+    /// On présente un mot de passe : §4 de RFC 4954 interdit `PLAIN` en clair,
+    /// et un secret qui traverse un réseau en clair est un secret volé. Que le
+    /// relais parle en TLS implicite (le 465) ou monte par `STARTTLS` (le 587),
+    /// le résultat est le même — sans chiffrement, rien ne part.
+    ///
+    /// # ON ESSAIE TOUTES SES ADRESSES
+    ///
+    /// Un relais de service porte souvent plusieurs `A` et `AAAA`, et une seule
+    /// injoignable ne doit pas retenir le courrier.
+    async fn envoyer_au_relais(&self, relais: &Relayhost, message: &Outgoing<'_>) -> RelayOutcome {
+        let adresses = self.resolveur.addresses(relais.host.as_bytes()).await;
+        if adresses.is_empty() {
+            return RelayOutcome::Unreachable;
+        }
+        let mut issue = RelayOutcome::Unreachable;
+        for adresse in adresses {
+            issue = self
+                .send_to_complet(
+                    &relais.host,
+                    SocketAddr::new(adresse, relais.port),
+                    message,
+                    None,
+                    // `sts` vaut ici « le chiffrement est exigé ». Il l'est.
+                    true,
+                    relais.implicit_tls,
+                )
+                .await;
+            // **UN REFUS ARRÊTE LA TOURNÉE.** Le relais qui dit non à une
+            // adresse dira non à l'autre : ce sont les mêmes machines.
+            if !matches!(issue, RelayOutcome::Unreachable) {
+                break;
+            }
+        }
+        issue
+    }
+
+    /// Les identifiants à présenter, s'il y a un relais.
+    fn identifiants_du_relais(&self) -> Option<ams_session::ClientCredentials<'_>> {
+        self.relais
+            .as_ref()
+            .map(|relais| ams_session::ClientCredentials {
+                user: relais.user.as_bytes(),
+                password: relais.password.as_bytes(),
+            })
+    }
+
     /// Change le port. **Réservé aux tests** : en production c'est 25, et un
     /// autre port ne joindrait personne.
     #[must_use]
@@ -238,6 +374,15 @@ impl Relay {
     /// n'est pas une invitation à demander au suivant s'il est plus complaisant.
     /// Seul ce qui n'a pas abouti — machine injoignable — fait passer au suivant.
     pub async fn send(&self, domaine: &str, message: &Outgoing<'_>) -> RelayOutcome {
+        // **UN RELAIS DE SORTIE COURT-CIRCUITE TOUT CE QUI SUIT.**
+        //
+        // Ni `MX`, ni `TLSA`, ni politique MTA-STS : ce n'est plus nous qui
+        // joignons le destinataire. Interroger son `MX` coûterait une résolution
+        // par message pour une réponse dont on ne ferait rien, et évaluer sa
+        // politique laisserait croire qu'on l'applique.
+        if let Some(relais) = self.relais.as_ref() {
+            return self.envoyer_au_relais(relais, message).await;
+        }
         let (serveurs, mx_authentique): (Vec<String>, bool) =
             match self.resolveur.mx(domaine.as_bytes()).await {
                 Mx::Trouves {
@@ -470,6 +615,24 @@ impl Relay {
         dane: Option<&Arc<rustls::ClientConfig>>,
         sts: bool,
     ) -> RelayOutcome {
+        self.send_to_complet(hote, adresse, message, dane, sts, false)
+            .await
+    }
+
+    /// Le corps de [`Relay::send_to_avec`], avec le TLS implicite en plus.
+    ///
+    /// `implicite` monte la poignée de main AVANT la bannière (RFC 8314 §3) : il
+    /// n'y a alors pas de `STARTTLS` à demander, et en attendre un ferait
+    /// attendre pour rien. C'est le 465 d'un relais de sortie.
+    async fn send_to_complet(
+        &self,
+        hote: &str,
+        adresse: SocketAddr,
+        message: &Outgoing<'_>,
+        dane: Option<&Arc<rustls::ClientConfig>>,
+        sts: bool,
+        implicite: bool,
+    ) -> RelayOutcome {
         let Some(corps) = farcir(message.body) else {
             return RelayOutcome::Unsendable;
         };
@@ -488,6 +651,8 @@ impl Relay {
             // soit en panne, soit déclassé par un tiers ; dans les deux cas on
             // n'émet pas.
             require_tls: self.exige_tls || dane.is_some() || sts,
+            credentials: self.identifiants_du_relais(),
+            implicit_tls: implicite,
         }) else {
             return RelayOutcome::Unsendable;
         };
@@ -495,6 +660,40 @@ impl Relay {
         let Ok(Ok(mut flux)) = timeout(self.delai, TcpStream::connect(adresse)).await else {
             return RelayOutcome::Unreachable;
         };
+        // **LE TLS IMPLICITE MONTE AVANT LA BANNIÈRE**, et la conversation
+        // entière se tient alors sur le flux chiffré — bannière comprise.
+        if implicite {
+            let Ok(nom) = ServerName::try_from(hote.to_string()) else {
+                return RelayOutcome::NoEncryption;
+            };
+            // **LA CONFIGURATION DU RELAIS, ET NON L'OPPORTUNISTE.** Celle-ci
+            // VÉRIFIE ; l'autre accepte n'importe quel certificat, ce qui
+            // conviendrait à un `MX` et jamais à qui reçoit un mot de passe.
+            let verificateur = match self.relais.as_ref() {
+                Some(relais) => Arc::clone(&relais.tls),
+                None => Arc::clone(&self.tls),
+            };
+            let connecteur = TlsConnector::from(verificateur);
+            let Ok(Ok(mut chiffre)) = timeout(self.delai, connecteur.connect(nom, flux)).await
+            else {
+                // On ne se rabat PAS sur le clair : ce port ne parle que chiffré,
+                // et un échec qu'un tiers peut provoquer serait sinon le levier
+                // d'un déclassement.
+                return RelayOutcome::NoEncryption;
+            };
+            let mut tampon = Vec::new();
+            return match self
+                .dialoguer(&mut chiffre, &mut client, &corps, &mut tampon)
+                .await
+            {
+                Suite::Fini(issue) => issue,
+                // Un pair qui annoncerait `STARTTLS` sous TLS implicite est
+                // confus ; le client ne le demande pas, puisqu'il se sait
+                // chiffré. Cette branche n'est donc pas atteignable, et l'on
+                // rend ce qu'on rendrait d'un protocole qu'on ne comprend pas.
+                Suite::Monter => RelayOutcome::Protocol,
+            };
+        }
         let mut tampon = Vec::new();
         let issue = match self
             .dialoguer(&mut flux, &mut client, &corps, &mut tampon)
@@ -564,10 +763,15 @@ impl Relay {
         // la vérification ORDINAIRE de la WebPKI, contre les autorités que
         // l'exploitant a nommées et pour le nom du `MX`. DANE passe avant.
         let sous_politique = if sts { self.sts.as_ref() } else { None };
-        let configuration = match (dane, sous_politique) {
-            (Some(dane), _) => Arc::clone(dane),
-            (None, Some(sts)) => Arc::clone(sts.tls()),
-            (None, None) => Arc::clone(&self.tls),
+        // **ET UN RELAIS DE SORTIE PASSE AVANT TOUT LE RESTE.** On lui présente
+        // un mot de passe ; l'opportuniste, qui accepte n'importe quel
+        // certificat, ne convient pas. Le `STARTTLS` d'un 587 doit vérifier
+        // autant que le TLS implicite d'un 465.
+        let configuration = match (self.relais.as_ref(), dane, sous_politique) {
+            (Some(relais), _, _) => Arc::clone(&relais.tls),
+            (None, Some(dane), _) => Arc::clone(dane),
+            (None, None, Some(sts)) => Arc::clone(sts.tls()),
+            (None, None, None) => Arc::clone(&self.tls),
         };
         let connecteur = TlsConnector::from(configuration);
         let Ok(Ok(mut chiffre)) = timeout(self.delai, connecteur.connect(nom, flux)).await else {
@@ -718,11 +922,16 @@ fn cause_de(issue: &RelayOutcome, dane: bool) -> Option<ams_tlsrpt::ResultType> 
         RelayOutcome::PolicyMismatch => Some(ams_tlsrpt::ResultType::StsPolicyInvalid),
         // Un refus SMTP, une panne de réseau, un message qu'on ne sait pas
         // émettre : rien de tout cela ne dit quoi que ce soit du chiffrement.
+        //
+        // `RelayAuth` non plus : un relais qui refuse notre mot de passe n'a
+        // rien dit du chiffrement — il a d'ailleurs fallu que le chiffrement
+        // MARCHE pour qu'on lui présente ce mot de passe.
         RelayOutcome::Rejected(_)
         | RelayOutcome::Deferred(_)
         | RelayOutcome::NullMx
         | RelayOutcome::Unreachable
         | RelayOutcome::Protocol
+        | RelayOutcome::RelayAuth
         | RelayOutcome::Unsendable => None,
     }
 }
@@ -769,6 +978,14 @@ fn issue_du_client(outcome: ClientOutcome, client: &SmtpClient<'_>) -> RelayOutc
         ClientOutcome::Rejected(code) => RelayOutcome::Rejected(refus_du_client(code, client)),
         ClientOutcome::Deferred(code) => RelayOutcome::Deferred(refus_du_client(code, client)),
         ClientOutcome::NoEncryption => RelayOutcome::NoEncryption,
+        // **UN RELAIS QUI NOUS REFUSE EST UNE PANNE, PAS UN VERDICT.**
+        //
+        // Le message n'y est pour rien : c'est notre configuration, ou le compte
+        // que nous avons chez ce relais. Rendre ces messages à leurs expéditeurs
+        // ferait payer aux utilisateurs une faute qui n'est pas la leur, et une
+        // fois rendus ils ne reviennent pas. On les garde en file ; l'exploitant
+        // corrige, et la file se vide toute seule.
+        ClientOutcome::NoAuthOffered | ClientOutcome::AuthRefused(_) => RelayOutcome::RelayAuth,
         ClientOutcome::Unexpected(_) => RelayOutcome::Protocol,
     }
 }

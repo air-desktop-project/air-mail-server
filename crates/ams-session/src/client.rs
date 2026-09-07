@@ -29,6 +29,7 @@
 //! ce serait le travail d'ailleurs — c'est la garantie que rien de ce qu'on
 //! écrit sur le fil ne vient d'être dicté par autrui.
 
+use ams_mime::encode_base64_line;
 use ams_proto_smtp::{
     Class, Code, ENVID_MAX, ORCPT_MAX, Reply, Status, XTEXT_GROWTH, encode_xtext,
 };
@@ -60,9 +61,47 @@ pub const DIAGNOSTIC_MAX: usize = 512;
 /// Ce qu'une valeur de RFC 3461 occupe au plus, une fois ré-encodée en xtext.
 const XTEXT_PIRE: usize = ORCPT_MAX * XTEXT_GROWTH;
 
+/// Ce qu'un identifiant et un secret occupent au plus, ENSEMBLE.
+///
+/// §3.4.1 de RFC 4954 borne la commande `AUTH` à 12 288 octets ; ici on est plus
+/// serré, parce que ces valeurs viennent d'une CONFIGURATION et non du réseau.
+/// Deux cent cinquante-six octets chacun, plus les deux `NUL` de RFC 4616 : un
+/// identifiant de messagerie n'est pas plus long qu'une adresse, et un secret de
+/// deux cent cinquante-six octets est déjà démesuré.
+///
+/// **CE QUI DÉPASSE EST REFUSÉ, ET NON TRONQUÉ.** Un secret tronqué produirait
+/// une authentification qui échoue sans que rien ne dise pourquoi.
+pub const AUTH_USER_MAX: usize = 256;
+/// Voir [`AUTH_USER_MAX`].
+pub const AUTH_PASSWORD_MAX: usize = 256;
+/// Le jeton clair : `NUL identité NUL secret`.
+const AUTH_CLAIR_MAX: usize = AUTH_USER_MAX + AUTH_PASSWORD_MAX + 2;
+/// Le même, en base64 : quatre caractères pour trois octets.
+const AUTH_ENCODE_MAX: usize = AUTH_CLAIR_MAX.div_ceil(3) * 4;
+
+// La commande `AUTH PLAIN <jeton>` doit tenir dans le tampon.
+const _: () = assert!(CLIENT_COMMAND_MAX >= AUTH_ENCODE_MAX + 16);
+
 // Le tampon d'une commande couvre le pire `RCPT TO:` : l'enveloppe, un chemin,
 // le `NOTIFY`, le mot-clé de l'`ORCPT`, et l'adresse d'origine triplée.
 const _: () = assert!(CLIENT_COMMAND_MAX >= XTEXT_PIRE + 256 + 64);
+
+/// De quoi s'authentifier auprès d'un relais de sortie (RFC 4954).
+///
+/// # CE N'EST PAS POUR PARLER À UN `MX`
+///
+/// On ne s'authentifie JAMAIS auprès du serveur d'un destinataire : entre MTA,
+/// l'identité se prouve par SPF, DKIM et DANE, pas par un mot de passe. Ces
+/// identifiants ne servent qu'à un RELAIS DE SORTIE que l'exploitant a nommé et
+/// chez qui il a un compte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientCredentials<'a> {
+    /// L'identité d'autorisation. C'est aussi l'identité d'authentification :
+    /// se faire passer pour un autre n'a pas de sens ici.
+    pub user: &'a [u8],
+    /// Le secret. **Il ne sort jamais en clair** — voir [`SmtpClient`].
+    pub password: &'a [u8],
+}
 
 /// Ce qu'une session cliente a besoin de savoir avant de parler.
 #[derive(Debug, Clone, Copy)]
@@ -82,6 +121,33 @@ pub struct ClientConfig<'a> {
     /// **Vrai, une remise en clair n'a pas lieu** : le pair qui n'annonce pas
     /// `STARTTLS` est laissé là, et l'issue est [`ClientOutcome::NoEncryption`].
     pub require_tls: bool,
+    /// La connexion est-elle DÉJÀ chiffrée quand la session commence ?
+    ///
+    /// # LE TLS IMPLICITE N'EST PAS UN `STARTTLS` QU'ON AURAIT DÉJÀ FAIT
+    ///
+    /// Sur le 465 (RFC 8314 §3), la poignée de main précède la bannière : il n'y
+    /// a pas de commande `STARTTLS`, et en attendre une ferait attendre pour
+    /// rien. La session doit donc SAVOIR qu'elle est chiffrée avant d'avoir rien
+    /// lu — sans quoi elle refuserait de présenter un mot de passe, ou
+    /// chercherait un `STARTTLS` que le pair n'annoncera jamais.
+    ///
+    /// **CE DRAPEAU N'AFFAIBLIT RIEN** : il ne dispense pas de chiffrer, il dit
+    /// que le chiffrement a eu lieu plus tôt. L'appelant qui le pose sans avoir
+    /// monté la poignée de main se ment à lui-même, et personne ne peut le
+    /// vérifier de l'intérieur d'une session.
+    pub implicit_tls: bool,
+    /// De quoi s'authentifier, quand on parle à un relais de sortie.
+    ///
+    /// # LE SECRET NE SORT JAMAIS EN CLAIR
+    ///
+    /// §4 de RFC 4954 l'interdit pour `PLAIN`, et il n'y a pas de réglage pour
+    /// l'autoriser : si le pair n'offre pas `STARTTLS` — et qu'on n'est pas déjà
+    /// sous TLS implicite —, la session s'arrête sur [`ClientOutcome::NoEncryption`]
+    /// sans qu'un octet du mot de passe ait été écrit.
+    ///
+    /// **`None` NE S'AUTHENTIFIE PAS**, et c'est le défaut : un serveur qui
+    /// remet à un `MX` n'a rien à prouver de cette façon.
+    pub credentials: Option<ClientCredentials<'a>>,
     /// Ce que le déposant a demandé du sort de son message (RFC 3461).
     ///
     /// # ON NE LE PASSE QUE SI LE PAIR L'ANNONCE
@@ -128,6 +194,20 @@ pub enum ClientOutcome {
     Deferred(Code),
     /// Le pair n'offre pas `STARTTLS`, et on l'exigeait.
     NoEncryption,
+    /// On devait s'authentifier, et le pair n'offre pas `AUTH PLAIN`.
+    ///
+    /// **On ne se rabat sur rien.** Émettre sans s'authentifier auprès d'un
+    /// relais qui l'exige ferait refuser le message une commande plus loin ; et
+    /// s'il ne l'exigeait pas, on lui aurait remis du courrier sous une identité
+    /// qu'il n'a pas vérifiée.
+    NoAuthOffered,
+    /// Le pair a refusé nos identifiants.
+    ///
+    /// **C'EST TEMPORAIRE, ET C'EST DÉLIBÉRÉ.** Un mot de passe faux est une
+    /// erreur de configuration, pas un jugement sur le message : rendre les
+    /// messages à leurs expéditeurs ferait payer aux utilisateurs une faute qui
+    /// n'est pas la leur. On les garde en file, et l'exploitant corrige.
+    AuthRefused(Code),
     /// Le pair a répondu quelque chose qui n'a pas de sens à cet endroit.
     ///
     /// **Ce n'est pas un refus** : c'est un désaccord sur le protocole, et
@@ -170,6 +250,8 @@ enum Etat {
     Helo,
     /// On attend le `220` qui précède la poignée de main.
     Tls,
+    /// On attend la réponse à `AUTH PLAIN`.
+    Auth,
     /// On attend la réponse à `MAIL FROM:`.
     Enveloppe,
     /// On attend la réponse au `RCPT TO:` de rang `usize`.
@@ -245,10 +327,29 @@ impl<'a> SmtpClient<'a> {
         {
             return Err(Error::UnsafeAddress);
         }
+        // **LES IDENTIFIANTS SE VÉRIFIENT ICI, ET PAS AU MILIEU DE LA
+        // CONVERSATION.**
+        //
+        // Un secret trop long est une faute de CONFIGURATION : la découvrir
+        // après avoir ouvert une connexion, écrit un `EHLO` et monté une
+        // poignée de main ferait payer à chaque message le prix d'une erreur qui
+        // ne changera pas. Ici, elle coûte un refus immédiat, et l'appelant sait
+        // que rien ne partira tant qu'il ne l'aura pas corrigée.
+        //
+        // Un identifiant vide est refusé aussi : `AUTH PLAIN` avec une identité
+        // vide est syntaxiquement valable et sémantiquement absurde.
+        if let Some(identifiants) = config.credentials
+            && (identifiants.user.is_empty()
+                || identifiants.user.len() > AUTH_USER_MAX
+                || identifiants.password.is_empty()
+                || identifiants.password.len() > AUTH_PASSWORD_MAX)
+        {
+            return Err(Error::UnsafeCredentials);
+        }
         Ok(Self {
+            chiffre: config.implicit_tls,
             config,
             etat: Etat::Banniere,
-            chiffre: false,
             esmtp_tente: false,
             acceptes: 0,
             refuses: 0,
@@ -321,6 +422,7 @@ impl<'a> SmtpClient<'a> {
         match self.etat {
             Etat::Banniere => self.sur_banniere(reply, out),
             Etat::Ehlo => self.sur_ehlo(reply, out),
+            Etat::Auth => self.sur_auth(reply, out),
             Etat::Helo => self.sur_helo(reply, out),
             Etat::Tls => self.sur_tls(reply, out),
             Etat::Enveloppe => self.sur_enveloppe(reply, out),
@@ -380,7 +482,94 @@ impl<'a> SmtpClient<'a> {
                 outcome: ClientOutcome::NoEncryption,
             });
         }
+        if let Some(identifiants) = self.config.credentials {
+            return self.authentifier(reply, identifiants, out);
+        }
         self.enveloppe(out)
+    }
+
+    /// Écrit `AUTH PLAIN`, ou renonce en le disant.
+    ///
+    /// # LE SECRET NE SORT JAMAIS EN CLAIR, ET CE N'EST PAS UN RÉGLAGE
+    ///
+    /// §4 de RFC 4954 : `PLAIN` ne s'emploie que sous une couche de
+    /// confidentialité. Il n'y a donc pas de branche qui écrive le mot de passe
+    /// sans chiffrement — pas même derrière une option. Le seul chemin qui
+    /// atteigne l'écriture passe par `self.chiffre`.
+    ///
+    /// # ON NE SE RABAT SUR RIEN
+    ///
+    /// Ni sur `LOGIN`, ni sur une remise anonyme. Un relais qui n'annonce pas
+    /// `PLAIN` n'est pas celui qu'on croit : émettre quand même remettrait du
+    /// courrier sous une identité que personne n'a vérifiée.
+    fn authentifier(
+        &mut self,
+        reply: &Reply<'_>,
+        identifiants: ClientCredentials<'_>,
+        out: &mut [u8],
+    ) -> Result<ClientStep, Error> {
+        if !self.chiffre {
+            self.etat = Etat::Fini;
+            return Ok(ClientStep::Done {
+                sent: ecrire(out, &[b"QUIT\r\n"])?,
+                outcome: ClientOutcome::NoEncryption,
+            });
+        }
+        // La liste des mécanismes suit le mot-clé : `AUTH PLAIN LOGIN`.
+        let offerts = reply.parameter(b"AUTH").unwrap_or_default();
+        if !offerts
+            .split(|octet| octet.is_ascii_whitespace())
+            .any(|mecanisme| mecanisme.eq_ignore_ascii_case(b"PLAIN"))
+        {
+            self.etat = Etat::Fini;
+            return Ok(ClientStep::Done {
+                sent: ecrire(out, &[b"QUIT\r\n"])?,
+                outcome: ClientOutcome::NoAuthOffered,
+            });
+        }
+        // §2 de RFC 4616 : `identité-d-autorisation NUL identité NUL secret`.
+        // La première est vide — se faire passer pour un autre n'a pas de sens
+        // en émettant chez soi.
+        //
+        // **AUCUNE GARDE DE PLACE ICI**, et ce n'est pas un oubli : `new` a
+        // refusé tout ce qui ne tiendrait pas, et les deux tampons sont
+        // dimensionnés sur ces bornes. Une garde qu'aucune entrée ne peut
+        // atteindre serait une garde qu'aucun essai ne peut couvrir.
+        let mut clair = [0_u8; AUTH_CLAIR_MAX];
+        let ecrits = identifiants
+            .user
+            .len()
+            .saturating_add(identifiants.password.len())
+            .saturating_add(2);
+        for (place, octet) in clair.iter_mut().zip(
+            core::iter::once(&0_u8)
+                .chain(identifiants.user)
+                .chain(core::iter::once(&0_u8))
+                .chain(identifiants.password),
+        ) {
+            *place = *octet;
+        }
+        let mut encode = [0_u8; AUTH_ENCODE_MAX];
+        let jeton = encode_base64_line(clair.get(..ecrits).unwrap_or_default(), &mut encode)
+            .unwrap_or_default();
+        self.etat = Etat::Auth;
+        Ok(ClientStep::Send(ecrire(
+            out,
+            &[b"AUTH PLAIN ", jeton, b"\r\n"],
+        )?))
+    }
+
+    /// La réponse à `AUTH PLAIN`.
+    fn sur_auth(&mut self, reply: &Reply<'_>, out: &mut [u8]) -> Result<ClientStep, Error> {
+        // §4 de RFC 4954 : `235` et rien d'autre vaut acceptation.
+        if reply.code().value() == 235 {
+            return self.enveloppe(out);
+        }
+        self.etat = Etat::Fini;
+        Ok(ClientStep::Done {
+            sent: ecrire(out, &[b"QUIT\r\n"])?,
+            outcome: ClientOutcome::AuthRefused(reply.code()),
+        })
     }
 
     /// La réponse à `HELO`.

@@ -1,6 +1,6 @@
 //! Ce que le base64 d'un corps MIME écrit.
 
-use super::{BASE64_LINE, base64_max, encode_base64};
+use super::{BASE64_LINE, base64_max, encode_base64, encode_base64_line};
 use crate::Error;
 
 /// Encode, et rend le texte.
@@ -84,4 +84,67 @@ fn un_tampon_trop_court_le_dit_ou_qu_il_cede() {
             "taille {taille}"
         );
     }
+}
+
+/// **UN JETON SASL TIENT SUR UNE LIGNE, ET N'A PAS DE FIN.**
+///
+/// Il voyage dans une COMMANDE SMTP : un `CRLF` la terminerait au milieu, et le
+/// repli à 76 colonnes la couperait en deux commandes dont la seconde n'aurait
+/// aucun sens.
+#[test]
+fn le_base64_d_une_ligne_ne_replie_ni_ne_termine() {
+    // Le jeton `AUTH PLAIN` de RFC 4616 : `\0utilisateur\0mot de passe`.
+    let mut place = [0_u8; 256];
+    let ecrit = encode_base64_line(b"\0jean\0secret", &mut place).expect("encodable");
+    assert_eq!(ecrit, b"AGplYW4Ac2VjcmV0");
+    assert!(!ecrit.contains(&b'\r'), "un CRLF couperait la commande");
+    assert!(!ecrit.contains(&b'\n'), "un CRLF couperait la commande");
+}
+
+/// **ET IL NE REPLIE PAS DAVANTAGE UN MOT DE PASSE LONG.**
+///
+/// C'est le seul cas où le défaut se verrait : soixante-seize caractères de
+/// base64, ce sont cinquante-sept octets clairs. Un identifiant court ne les
+/// atteint jamais ; un bon mot de passe, si — et le défaut n'apparaîtrait donc
+/// que le jour où quelqu'un en choisit un.
+#[test]
+fn un_long_secret_reste_sur_une_ligne() {
+    let mut clair = std::vec![0_u8];
+    clair.extend_from_slice(b"utilisateur");
+    clair.push(0);
+    clair.extend_from_slice(&[b'x'; 120]);
+
+    let mut place = [0_u8; 512];
+    let ecrit = encode_base64_line(&clair, &mut place).expect("encodable");
+    assert!(ecrit.len() > BASE64_LINE, "le cas visé n'est pas atteint");
+    assert!(!ecrit.contains(&b'\r'), "replié à {BASE64_LINE} caractères");
+
+    // ET LE REPLI ORDINAIRE, LUI, REPLIE TOUJOURS : les deux ne se confondent
+    // pas, et cet essai tomberait si l'on avait cassé le premier en écrivant le
+    // second.
+    let mut autre = std::vec![0_u8; base64_max(clair.len())];
+    let replie = encode_base64(&clair, &mut autre).expect("encodable");
+    assert!(replie.contains(&b'\r'), "l'encodeur MIME doit replier");
+}
+
+/// **UN TAMPON TROP COURT EST UNE ERREUR**, et non une troncature.
+#[test]
+fn une_ligne_qui_ne_tient_pas_refuse() {
+    let mut place = [0_u8; 4];
+    assert_eq!(
+        encode_base64_line(b"\0jean\0secret", &mut place),
+        Err(Error::BufferTooSmall)
+    );
+}
+
+/// **LE VIDE N'ÉCRIT RIEN** — pas même une fin de ligne.
+///
+/// L'encodeur MIME, lui, en écrit une : une partie vide reste une partie. La
+/// différence est délibérée.
+#[test]
+fn une_ligne_vide_est_vide() {
+    let mut place = [0_u8; 8];
+    assert_eq!(encode_base64_line(b"", &mut place).expect("encodable"), b"");
+    let mut autre = [0_u8; 8];
+    assert_eq!(encode_base64(b"", &mut autre).expect("encodable"), b"\r\n");
 }

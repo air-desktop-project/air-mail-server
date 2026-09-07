@@ -643,6 +643,17 @@ impl Spool {
                 String::new(),
                 String::from("destination server did not follow the protocol"),
             ),
+            // **4.7.0, ET AJOURNÉ.** Le relais de sortie ne nous a pas laissés
+            // passer : ou il n'offre pas `AUTH PLAIN`, ou il refuse nos
+            // identifiants. Le message n'y est pour rien, et le rendre à son
+            // expéditeur ferait payer à un utilisateur une erreur de
+            // configuration qu'il ne peut pas corriger. Il attend en file ;
+            // l'exploitant corrige, et la file se vide.
+            RelayOutcome::RelayAuth => Issue::Ajourne(
+                String::from("4.7.0"),
+                String::new(),
+                String::from("outbound relay refused our credentials"),
+            ),
         }
     }
 
