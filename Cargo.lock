@@ -57,6 +57,7 @@ dependencies = [
  "ams-proto-imap",
  "ams-proto-smtp",
  "ams-queue",
+ "ams-sasl",
  "ams-store",
  "libc",
 ]

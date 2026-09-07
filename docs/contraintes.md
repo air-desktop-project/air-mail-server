@@ -14072,3 +14072,216 @@ se serait vue que le jour J : le retour en arrière qui dupliquait, le
 vérificateur à quatre minutes de coupure, et maintenant la copie au mauvais
 endroit. **Une procédure écrite n'est pas une procédure éprouvée**, et un
 inventaire n'est pas un détail d'intendance.
+
+
+## Refuser un `HELO` non qualifié, sans refuser ce que la RFC recommande
+
+§4.1.4 de RFC 5321 dit deux choses dans la même section, et elles tirent en sens
+contraire. La première autorise le refus : « If the EHLO command is not
+acceptable to the SMTP server, 501, 500, 502, or 550 failure replies MUST be
+returned as appropriate. » La seconde l'interdit sur un motif précis : « if the
+verification fails, the server MUST NOT refuse to accept a message on that
+basis » — la vérification en question étant la comparaison du nom annoncé à
+l'adresse du pair.
+
+`--require-fqdn-helo` ne tient donc que la FORME : un nom sans point n'est pas le
+nom primaire que la section demande. L'adresse du pair n'est jamais regardée.
+
+**Et un littéral d'adresse passe toujours**, parce que la même section le
+RECOMMANDE à qui n'a pas de nom : « an address literal SHOULD be substituted for
+the domain name ». Refuser ce que la RFC conseille reviendrait à refuser les
+émetteurs les mieux intentionnés — l'inverse exact du but.
+
+### Le refus précède tout effet, et c'est un MUST
+
+« The SMTP server MUST stay in the same state after transmitting these replies
+that it was in before the EHLO was received. » Or un `EHLO` accepté annule la
+transaction en cours. La garde est donc placée AVANT `quitter_la_transaction()`,
+et un essai vérifie qu'une transaction garde ses destinataires — et reste
+remettable — après un refus. Déplacer la garde de trois lignes le fait tomber.
+
+### Ce que l'essai du littéral a appris
+
+`HELO [192.0.2.1]` ne répond pas `250`, et ce n'est pas la politique : la
+grammaire de §4.1.1.1 dit `helo = "HELO" SP Domain CRLF` quand `ehlo` prend
+`( Domain / address-literal )`. C'est un `501` de syntaxe, identique que le
+drapeau soit posé ou non. L'essai le montre en comparant les deux sessions
+plutôt qu'en l'affirmant — la première écriture assérait un `250` et avait tort.
+
+### L'inventaire a retourné le sujet
+
+Les `smtpd_*_restrictions` de Postfix, que je n'avais pas lues avant d'écrire le
+plan anti-abus, nomment SIX contrôles d'enveloppe déjà actifs sur narro.ch. Ce ne
+sont donc pas des durcissements à ajouter mais des refus à RESTAURER : sans eux,
+le remplaçant serait PLUS PERMISSIF que le remplacé le jour de la bascule, et un
+serveur plus permissif n'alerte personne — il encaisse.
+
+Et il n'y a AUCUNE liste noire dans cette configuration. Les listes noires sont
+donc la seule pièce du plan qui change vraiment le comportement du site, et la
+seule qu'on posera après la bascule. L'ordre de `docs/plan-anti-abus.md` est
+écrit là-dessus : ce qui restaure passe avant ce qui ajoute.
+
+
+## Changer un mot de passe effaçait les adresses du compte
+
+    $ printf 'neuf' | air-mail-admin account add comptes.bin --login jean
+    comptes.bin : compte `jean` remplacé
+    $ air-mail-admin account list comptes.bin
+    jean  (aucune adresse — ce compte ne reçoit rien)
+
+`account add` remplace le compte ENTIER, ce qui est le comportement voulu pour
+`add`. Employé pour changer un mot de passe — le seul chemin qui existait — il
+efface toute adresse qu'on n'a pas répétée. Le compte s'authentifie encore,
+relève encore son courrier ancien, et ne reçoit plus rien. La sortie dit
+« remplacé », ce qui est exact et ne prévient de rien.
+
+Cinq comptes de production devaient passer par là le 19 septembre.
+
+`account passwd` ne touche que l'empreinte : `addresses` n'est ni relu, ni
+réécrit, ni même nommé, et **ce qu'on ne touche pas ne peut pas se perdre**. Il
+refuse un compte inconnu, là où `add` en créerait un fantôme portant le secret
+qu'on croyait poser ailleurs, pendant que le vrai compte garderait l'ancien.
+
+Un des quatre essais CONSTATE le piège d'`add`, plutôt que de le décrire : le
+jour où quelqu'un trouvera `passwd` redondant, l'essai dira pourquoi il ne l'est
+pas.
+
+
+## Personne ne pouvait changer son propre mot de passe
+
+Un mot de passe n'ouvre que `Mail`, `Submit` et `Observe` — jamais `Admin`, et la
+limite est dans le code, pas dans une configuration. Comme
+`/v1/accounts/{compte}/password` exige `Admin`, un utilisateur devait confier son
+secret choisi à l'administrateur, qui le posait à sa place. Le secret transitait
+donc par un tiers, ce qu'un changement de mot de passe existe pour éviter.
+
+`PUT /v1/me/password` n'exige AUCUNE portée, comme `/v1/tokens/current` : elle
+agit sur soi, et le jeton présenté dit déjà de qui il s'agit. Le porteur vient du
+jeton et de nulle part ailleurs — un champ `login` dans le corps est refusé —, ce
+qui la rend incapable de toucher le compte d'un autre, quoi que le client écrive.
+
+### `/v1/me/password` et non `/v1/accounts/me/password`
+
+Le second aurait rendu inatteignable, par la route d'administration, un compte
+réellement nommé `me` : `check_login` l'accepte, et rien n'interdit de le
+choisir. Réserver un nom de compte pour faire tenir une route est un prix qu'on
+ne paie pas quand un segment de tête libre existe. Un essai vérifie que
+`/v1/accounts/me` et `/v1/accounts/me/password` désignent toujours ce compte-là.
+
+### Le mot de passe actuel est exigé, et un refus COMPTE
+
+Sans lui, un jeton ramassé dans le journal d'un intermédiaire suffirait à
+verrouiller le propriétaire hors de sa boîte : un vol de jeton, qui expire,
+deviendrait un vol de compte, qui n'expire pas.
+
+Mais un refus poli répété six cents fois par minute est un oracle, et le mot de
+passe vaut plus que le jeton pour exactement la même raison. Or `Served` n'avait
+aucune notion de faute du pair, quand le `Turn` d'une session SMTP en a une
+depuis toujours.
+
+**Elle lui est ajoutée sous le même nom, et pas l'adresse du pair en paramètre.**
+Le service ne connaît pas la source, et ne doit pas la connaître : elle est de la
+boucle, comme le videur. Lui passer l'une et l'autre le rendrait capable de
+bannir, ce qui n'est pas son travail. Il dit seulement « ce refus-ci vient d'une
+tentative », et la boucle en fait ce qu'elle fait déjà d'un refus d'identifiants.
+
+L'essai vérifie le bannissement RÉEL et non la forme du code : après dix-huit
+mots de passe faux, le videur ferme la porte sans un mot, et `curl` rend `000`.
+
+### 403, parce que 404 aurait menti
+
+`Forbidden` répond 404 délibérément, pour que « cette ressource existe » ne se
+lise pas dans la réponse. Ici il n'y a rien à cacher : le porteur agit sur SA
+ressource, dont il connaît l'existence, et un 404 l'enverrait chercher une route
+disparue. Ce n'est pas 401 non plus — le jeton est bon, c'est ce qui a permis
+d'arriver ici, et un 401 ferait recommencer une authentification qui a réussi.
+
+`BadPassword` répond donc 403 (§15.5.4 de RFC 9110), et `/problems/forbidden`
+s'ajoute à la table des types : sans lui, un 403 serait retombé sur
+`/problems/internal` et aurait accusé le serveur d'une faute qui est celle de qui
+tape son ancien mot de passe.
+
+
+## Un mode d'emploi qui n'aurait pas marché
+
+Le document destiné aux utilisateurs disait `curl https://mail.narro.ch/v1/…`. Or
+`bascule.md` n'ouvrait pas l'API, et elle ne peut pas passer derrière le nginx
+qui tient déjà le 443 : elle ne parle QUE `h2`, délibérément (C6), quand
+`proxy_pass` de nginx sort en HTTP/1.1.
+
+Le manuel ouvre donc `--listen-http 0.0.0.0:8443`, avec le certificat existant.
+
+**Et le pare-feu n'a pas été mesuré.** `inventaire.sh` ne le regarde pas. Une
+vérification depuis l'extérieur est ajoutée en phase 0 — pas le jour J, où
+découvrir le port fermé ferait accuser le serveur d'une panne qu'il n'a pas.
+
+C'est la quatrième fois que la marche à suivre est fausse d'une façon qui ne se
+serait vue que le jour J. À chaque fois, l'erreur était dans ce que je n'avais
+pas mesuré, et non dans ce que j'avais écrit.
+
+
+## Le temps d'un refus, OBSERVÉ et non plus seulement argumenté
+
+`DUMMY_HASH` existe pour qu'un compte inconnu coûte le même temps qu'un compte
+connu : sans lui, un nom absent répond en microsecondes et un nom présent après
+des dizaines de millisecondes, ce qui rend le magasin de comptes **énumérable
+sans connaître un seul mot de passe**. Un essai unitaire verrouille déjà ses
+paramètres — `m=19456,t=2,p=1` — pour que durcir le coût sans mettre le leurre à
+jour fasse échouer la construction plutôt que rouvrir l'écart en silence.
+
+C'était une garantie STRUCTURELLE : mêmes paramètres, donc même travail. Elle ne
+dit rien du jour où un court-circuit ajouté en amont rendrait la main sans rien
+calculer, les paramètres restant parfaitement justes.
+
+`crates/ams-auth/tests/temps.rs` l'observe. Un essai d'intégration, et non un
+essai unitaire, pour deux raisons : `ams-auth` est `no_std`, et `check-etages`
+interdit à tout `src/` du périmètre de LIRE L'HEURE (C1). Le harnais chronomètre,
+le produit non.
+
+### Il ne flotte pas, parce que le défaut est d'un facteur cinquante mille
+
+Mesuré en retirant `DUMMY_HASH` : **725 nanosecondes** contre 36 millisecondes.
+Le seuil peut donc être grossier, et il l'est — un plancher absolu d'une
+milliseconde, et un rapport de trois dans les deux sens.
+
+### La première écriture mesurait son propre biais
+
+Elle chronométrait toujours le compte connu en premier dans chaque paire, et
+rendait **1,86 s contre 1,15 s** pour deux chemins qui font le même travail. Le
+premier de chaque paire payait ce que la paire coûte à démarrer. On aurait pu
+lire ce 1,6× comme une fuite ; c'était le harnais.
+
+L'ordre alterne désormais d'un tour à l'autre, les mesures sont entrelacées, on
+prend la médiane, et une chauffe précède tout. L'écart tombe à sept pour cent.
+
+### Et `argon2` est compilé optimisé, même en essai
+
+Il est délibérément lent, mais sans optimisation il l'est **cinquante fois
+trop** : une seconde et demie par vérification en `dev` contre une trentaine de
+millisecondes en `release`. Cet essai seul en fait vingt-deux, et il coûtait
+quarante secondes.
+
+`[profile.dev.package.argon2] opt-level = 3` ne change rien au binaire livré, qui
+est déjà `release`, ni à ce que le produit calcule — mêmes paramètres, même
+empreinte. La suite entière passe d'environ cent secondes à soixante-quatre, et
+l'essai de quarante secondes à une.
+
+
+## Un mot de passe VIDE était accepté par l'API, refusé par l'outil
+
+`air-mail-admin` refuse depuis toujours un secret vide sur l'entrée standard. Les
+trois routes qui posent un secret — créer un compte, le poser en administrateur,
+le poser soi-même — le hachaient sans rien dire. Le compte s'ouvrait ensuite avec
+`""`, et rien dans le magasin ne le distinguait des autres.
+
+**Le laxisme était donc du côté que des PROGRAMMES appellent, et la rigueur du
+côté qu'un humain tape.** C'est l'inverse de ce qu'il faut : une faute de frappe
+au terminal se voit, un champ vide dans un corps JSON ne se voit pas.
+
+`secret_recevable` refuse le vide aux trois endroits. Il n'y a volontairement pas
+de longueur minimale : refuser le vide écarte l'accident, poser un seuil serait
+une politique — et une politique se règle (C8) plutôt qu'elle ne se grave.
+
+Sur la route « moi », le contrôle précède la vérification de l'ancien secret :
+refuser d'abord ce qui ne pourrait de toute façon pas être posé épargne un
+Argon2id de dix-neuf mébioctets à qui se trompe de corps.

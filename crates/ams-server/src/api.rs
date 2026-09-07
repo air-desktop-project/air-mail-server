@@ -262,6 +262,9 @@ impl ApiMaildir {
             // pas, et une liste d'adresses absente n'est pas une liste vide.
             return refus_de_corps(sortie);
         };
+        if !secret_recevable(secret) {
+            return refus_de_corps(sortie);
+        }
         let adresses: std::vec::Vec<String> = place
             .get(..combien)
             .unwrap_or_default()
@@ -347,6 +350,9 @@ impl ApiMaildir {
         let (Some(secret), None, None) = (lu.password, lu.login, lu.addresses) else {
             return refus_de_corps(sortie);
         };
+        if !secret_recevable(secret) {
+            return refus_de_corps(sortie);
+        }
         if !self.comptes.vue().iter().any(|vu| vu.login == nom) {
             return absente(sortie);
         }
@@ -369,6 +375,93 @@ impl ApiMaildir {
             },
             Err(quoi) => dire_la_faute(&quoi, sortie),
         }
+    }
+
+    /// **Change le secret de QUI APPELLE**, et de personne d'autre.
+    ///
+    /// # LE JETON DIT QUI, LE MOT DE PASSE ACTUEL DIT QUE C'EST BIEN LUI
+    ///
+    /// `porteur` vient du jeton, déjà scellé et vérifié : la boucle ne l'appelle
+    /// pas autrement. Il n'est donc jamais lu dans le corps — un champ `login`
+    /// y serait refusé, et c'est ce qui rend cette route incapable de toucher le
+    /// compte d'un autre, quoi que le client écrive.
+    ///
+    /// Le mot de passe actuel, lui, est exigé. Sans lui, un jeton ramassé dans
+    /// le journal d'un intermédiaire suffirait à verrouiller le propriétaire
+    /// hors de sa boîte, DÉFINITIVEMENT : un vol de jeton, qui expire,
+    /// deviendrait un vol de compte, qui n'expire pas.
+    ///
+    /// # POURQUOI 403 ET NON 401
+    ///
+    /// Le jeton est bon — c'est ce qui a permis d'arriver ici. Répondre 401
+    /// ferait recommencer au client une authentification qui a réussi ; §15.5.4
+    /// de RFC 9110 réserve le 403 à « la requête est comprise, et refusée ». Ce
+    /// qui manque est une preuve de possession, pas une identité.
+    fn poser_mon_secret<'o>(
+        &self,
+        porteur: &str,
+        corps: &[u8],
+        sortie: &'o mut [u8],
+    ) -> Served<'o> {
+        let mut actuel = [0_u8; MOT_DE_PASSE_MAX];
+        let mut neuf = [0_u8; MOT_DE_PASSE_MAX];
+        let Ok(lu) = render::read_own_password_body(corps, &mut actuel, &mut neuf) else {
+            return refus_de_corps(sortie);
+        };
+        // **AVANT MÊME DE VÉRIFIER L'ANCIEN** : refuser d'abord ce qui ne peut
+        // de toute façon pas être posé épargne un Argon2id de dix-neuf
+        // mébioctets à qui se trompe de corps.
+        if !secret_recevable(lu.new) {
+            return refus_de_corps(sortie);
+        }
+
+        // **LA VÉRIFICATION D'ABORD, ET SON COÛT EST LE MÊME QU'AILLEURS** :
+        // Argon2id est délibérément lent, et chaque calcul réclame dix-neuf
+        // mébioctets. Un compte disparu depuis la frappe du jeton échoue ici
+        // comme un mot de passe faux, et pour le même prix.
+        if !self.verifie(porteur, lu.current.as_bytes()) {
+            return Served {
+                peer_fault: true,
+                ..probleme(ams_api::Reason::BadPassword, StatusCode::FORBIDDEN, sortie)
+            };
+        }
+
+        let Some(hash) = self.empreinte(lu.new.as_bytes()) else {
+            return notre_faute();
+        };
+        match self.comptes.modifier(|comptes| {
+            let compte = comptes
+                .iter_mut()
+                .find(|vu| vu.login == porteur)
+                .ok_or(crate::comptes::Faute::Introuvable)?;
+            compte.hash = hash;
+            Ok(())
+        }) {
+            Ok(()) => Served {
+                status: StatusCode::NO_CONTENT,
+                media: JSON_MEDIA_TYPE,
+                body: &[],
+                ..Served::default()
+            },
+            Err(quoi) => dire_la_faute(&quoi, sortie),
+        }
+    }
+
+    /// Ce compte ouvre-t-il avec ce secret ?
+    ///
+    /// La même discipline que partout où l'on vérifie : `block_in_place`, parce
+    /// qu'Argon2id bloquerait l'ordonnanceur, et une borne sur les vérifications
+    /// simultanées, parce que chacune réclame dix-neuf mébioctets.
+    fn verifie(&self, login: &str, secret: &[u8]) -> bool {
+        let identifiants = ams_sasl::Credentials {
+            authorization_identity: b"",
+            authentication_identity: login.as_bytes(),
+            password: secret,
+        };
+        tokio::task::block_in_place(|| {
+            self.places
+                .occuper(|| ams_auth::authenticate(&self.comptes.vue(), &identifiants))
+        })
     }
 
     /// Remplace les adresses d'un compte.
@@ -802,6 +895,8 @@ impl ApiMaildir {
                 part: Some((debut, dernier)),
                 complete,
             }),
+            // Rendre un message n'est jamais une tentative.
+            peer_fault: false,
         }
     }
 
@@ -956,6 +1051,7 @@ impl Api for ApiMaildir {
             }
             Resource::Account { compte } => self.account(compte, sortie),
             Resource::AccountPassword { compte } => self.poser_un_secret(compte, body, sortie),
+            Resource::OwnPassword => self.poser_mon_secret(account, body, sortie),
             Resource::AccountAddresses { compte } if matches!(method, Method::Put) => {
                 self.poser_des_adresses(compte, body, sortie)
             }
@@ -1424,6 +1520,26 @@ fn dire_la_faute<'o>(quoi: &crate::comptes::Faute, sortie: &'o mut [u8]) -> Serv
 }
 
 /// Un corps qu'on ne sait pas lire.
+/// **UN MOT DE PASSE VIDE N'EN EST PAS UN.**
+///
+/// # L'OUTIL LE REFUSAIT, L'API L'ACCEPTAIT — DANS CE SENS-LÀ
+///
+/// `air-mail-admin` refuse depuis toujours un secret vide sur l'entrée standard.
+/// Les trois routes qui posent un secret, elles, le hachaient sans rien dire :
+/// le compte s'ouvrait ensuite avec `""`, et rien dans le magasin ne distinguait
+/// ce compte-là des autres.
+///
+/// Le laxisme était donc du côté que des PROGRAMMES appellent, et la rigueur du
+/// côté qu'un humain tape. C'est l'inverse de ce qu'il faut : une faute de
+/// frappe au terminal se voit, un champ vide dans un corps JSON ne se voit pas.
+///
+/// Il n'y a volontairement pas de longueur minimale ici. Refuser le vide écarte
+/// l'accident ; poser un seuil serait une politique, et une politique se règle
+/// (C8) plutôt qu'elle ne se grave.
+fn secret_recevable(secret: &str) -> bool {
+    !secret.is_empty()
+}
+
 fn refus_de_corps(sortie: &mut [u8]) -> Served<'_> {
     probleme(
         ams_api::Reason::BadJsonBody,
@@ -1514,6 +1630,9 @@ const fn notre_faute<'o>() -> Served<'o> {
         // fichier où la liste se répète, et elle tient sur deux lignes.
         ranges: false,
         range: None,
+        // **NOTRE FAUTE N'EST PAS CELLE DU PAIR** : bannir quelqu'un pour un
+        // tampon que nous n'avons pas su écrire serait le punir de notre bogue.
+        peer_fault: false,
     }
 }
 

@@ -439,6 +439,35 @@ fn un_client_curl_parle_a_l_api_en_http2() {
         "le refus doit être indiscernable d'une route inconnue : {corps}"
     );
 
+    // ── UN SECRET VIDE SE REFUSE, MÊME À UN ADMINISTRATEUR ─────────────────
+    //
+    // Le contrôle précède la recherche du compte : un corps qu'on ne pourrait
+    // de toute façon pas appliquer se refuse avant d'aller voir s'il existe
+    // quelqu'un à qui l'appliquer.
+    let poser = |corps: &str| -> String {
+        let sortie = std::process::Command::new("curl")
+            .args(["-s", "--insecure", "--http2", "-X", "PUT"])
+            .args(["-H", &format!("Authorization: Bearer {jeton}")])
+            .args(["-H", "Content-Type: application/json"])
+            .args(["-d", corps])
+            .args(["-o", "/dev/null", "-w", "%{http_code}"])
+            .arg(format!(
+                "https://127.0.0.1:{port_http}/v1/accounts/marc/password"
+            ))
+            .output()
+            .expect("curl s'exécute");
+        String::from_utf8_lossy(&sortie.stdout).into_owned()
+    };
+    assert_eq!(
+        poser(r#"{"password":""}"#),
+        "400",
+        "`air-mail-admin` refuse un secret vide ; l'API doit le refuser aussi"
+    );
+    // Et un secret non vide passe le contrôle DE CORPS — il échoue ensuite sur
+    // le compte, qui n'existe pas dans cette configuration sans magasin. Les
+    // deux codes distincts montrent que ce sont bien deux contrôles.
+    assert_eq!(poser(r#"{"password":"quelque-chose"}"#), "404");
+
     // ── ET SANS JETON, RIEN ────────────────────────────────────────────────
     let sortie = std::process::Command::new("curl")
         .arg("-s")
@@ -452,6 +481,25 @@ fn un_client_curl_parle_a_l_api_en_http2() {
         String::from_utf8_lossy(&sortie.stdout),
         "401",
         "sans jeton, l'API doit refuser"
+    );
+
+    // **`/v1/health` NE FAIT PAS EXCEPTION**, et `bascule.md` s'appuie dessus :
+    // la vérification de pare-feu qu'il prescrit attend un `401`, qui prouve
+    // que le port est ouvert ET que le serveur parle. Si cette route devenait
+    // un jour libre d'accès, la marche à suivre dirait une chose fausse le jour
+    // de la bascule — et l'on chercherait la panne du mauvais côté.
+    let sortie = std::process::Command::new("curl")
+        .arg("-s")
+        .arg("--insecure")
+        .arg("--http2")
+        .args(["-o", "/dev/null", "-w", "%{http_code}"])
+        .arg(format!("https://127.0.0.1:{port_http}/v1/health"))
+        .output()
+        .expect("curl s'exécute");
+    assert_eq!(
+        String::from_utf8_lossy(&sortie.stdout),
+        "401",
+        "`/v1/health` exige la portée `Observe` : sans jeton, c'est 401"
     );
 }
 
@@ -790,4 +838,243 @@ fn sans_http2_http3_ne_se_sert_pas() {
         "le serveur doit dire pourquoi : {journal}"
     );
     assert!(!ecoute_udp_ouverte(h3), "et ne pas ouvrir le port {h3}");
+}
+
+/// **UN UTILISATEUR CHANGE SON PROPRE MOT DE PASSE, DE BOUT EN BOUT.**
+///
+/// # Ce que cet essai éprouve et qu'aucun autre ne touche
+///
+/// La chaîne entière, avec un jeton d'UTILISATEUR — pas d'administrateur :
+/// l'échange d'identifiants contre un jeton, la route `/v1/me/password` qui
+/// n'exige aucune portée, la vérification du mot de passe ACTUEL, l'écriture du
+/// magasin, et le fait que le serveur relise ce magasin sans redémarrer.
+///
+/// Les trois propriétés qui comptent, et aucune ne se déduit des deux autres :
+/// le nouveau secret ouvre, l'ancien ferme, et un ancien mot de passe FAUX ne
+/// change rien du tout.
+#[test]
+fn un_utilisateur_change_son_propre_mot_de_passe() {
+    let atelier = atelier("mon-secret");
+    let Some((cert, cle)) = paire(&atelier.0) else {
+        panic!("{SANS_OPENSSL}");
+    };
+    if std::process::Command::new("curl")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("IGNORÉ : `curl` est absent — cet essai n'a RIEN éprouvé.");
+        return;
+    }
+
+    // Un compte ordinaire, avec une adresse : on vérifiera qu'elle survit.
+    let empreinte =
+        ams_auth::hash_password(b"secret-initial", b"seize octets ici").expect("hachable");
+    let magasin = atelier.0.join("comptes.bin");
+    std::fs::write(
+        &magasin,
+        ams_config::encode_accounts(&[ams_auth::Account {
+            login: String::from("marie"),
+            hash: empreinte,
+            addresses: vec![String::from("marie@example.com")],
+        }])
+        .expect("encodable"),
+    )
+    .expect("le magasin s'écrit");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&magasin, std::fs::Permissions::from_mode(0o600))
+            .expect("permissions du magasin");
+    }
+
+    let port_smtp = port_libre();
+    let port_http = port_libre();
+    let config = configuration_complete(
+        &atelier,
+        port_smtp,
+        Tls {
+            certificate_chain_path: cert.display().to_string(),
+            private_key_path: cle.display().to_string(),
+        },
+        &magasin.display().to_string(),
+        "",
+        &format!("127.0.0.1:{port_http}"),
+        "",
+        CLEF,
+    );
+    let _serveur = lancer(&config, port_smtp);
+
+    let base = format!("https://127.0.0.1:{port_http}");
+
+    // Échange des identifiants contre un jeton, et rend (corps, code).
+    let ouvrir = |secret: &str| -> (String, String) {
+        let sortie = std::process::Command::new("curl")
+            .args(["-s", "--insecure", "--http2"])
+            .args(["-H", "Content-Type: application/json"])
+            .args([
+                "-d",
+                &format!(r#"{{"login":"marie","password":"{secret}"}}"#),
+            ])
+            .args(["-w", "\n%{http_code}"])
+            .arg(format!("{base}/v1/tokens"))
+            .output()
+            .expect("curl s'exécute");
+        let tout = String::from_utf8_lossy(&sortie.stdout).into_owned();
+        let (corps, code) = tout.rsplit_once('\n').unwrap_or(("", ""));
+        (corps.to_string(), code.to_string())
+    };
+
+    // ── LE JETON D'UN UTILISATEUR, ET NON D'UN ADMINISTRATEUR ───────────────
+    let (corps, code) = ouvrir("secret-initial");
+    // **201, ET NON 200** : `POST /v1/tokens` CRÉE un jeton, et §15.3.2 de
+    // RFC 9110 réserve le 201 à cela.
+    assert_eq!(code, "201", "l'échange doit réussir : {corps}");
+    let jeton = corps
+        .split_once("\"token\":\"")
+        .and_then(|(_, reste)| reste.split_once('"'))
+        .map(|(jeton, _)| jeton.to_string())
+        .unwrap_or_else(|| panic!("un jeton dans {corps}"));
+
+    // Ce jeton-là n'ouvre PAS l'administration : c'est ce qui rend la route
+    // « moi » nécessaire, et l'essai le constate plutôt que de le supposer.
+    let changer = |jeton: &str, corps_json: &str, chemin: &str| -> String {
+        let sortie = std::process::Command::new("curl")
+            .args(["-s", "--insecure", "--http2", "-X", "PUT"])
+            .args(["-H", &format!("Authorization: Bearer {jeton}")])
+            .args(["-H", "Content-Type: application/json"])
+            .args(["-d", corps_json])
+            .args(["-o", "/dev/null", "-w", "%{http_code}"])
+            .arg(format!("{base}{chemin}"))
+            .output()
+            .expect("curl s'exécute");
+        String::from_utf8_lossy(&sortie.stdout).into_owned()
+    };
+    assert_eq!(
+        changer(
+            &jeton,
+            r#"{"password":"peu-importe"}"#,
+            "/v1/accounts/marie/password"
+        ),
+        "404",
+        "la route d'administration reste fermée à un utilisateur"
+    );
+
+    // ── UN ANCIEN MOT DE PASSE FAUX NE CHANGE RIEN ──────────────────────────
+    assert_eq!(
+        changer(
+            &jeton,
+            r#"{"current_password":"pas-le-bon","password":"tentative"}"#,
+            "/v1/me/password"
+        ),
+        "403",
+        "sans le secret actuel, un jeton volé ne doit pas verrouiller le compte"
+    );
+    assert_eq!(
+        ouvrir("secret-initial").1,
+        "201",
+        "APRÈS LE REFUS, L'ANCIEN SECRET OUVRE TOUJOURS"
+    );
+    assert_eq!(ouvrir("tentative").1, "401", "et le refusé n'ouvre pas");
+
+    // ── ET AVEC LE BON, IL CHANGE ───────────────────────────────────────────
+    assert_eq!(
+        changer(
+            &jeton,
+            r#"{"current_password":"secret-initial","password":"choisi-par-marie"}"#,
+            "/v1/me/password"
+        ),
+        "204",
+        "le changement doit réussir"
+    );
+
+    // Les trois propriétés. Aucun redémarrage : le serveur relit son magasin.
+    assert_eq!(ouvrir("choisi-par-marie").1, "201", "LE NEUF OUVRE");
+    assert_eq!(ouvrir("secret-initial").1, "401", "L'ANCIEN NE FERME PLUS");
+    let relu = ams_config::decode_accounts(&std::fs::read(&magasin).expect("le magasin se lit"))
+        .expect("le magasin se décode");
+    assert_eq!(
+        relu.first().map(|compte| compte.addresses.clone()),
+        Some(vec![String::from("marie@example.com")]),
+        "L'ADRESSE DOIT AVOIR SURVÉCU"
+    );
+
+    // ── ET LE MARTÈLEMENT SE FAIT BANNIR ────────────────────────────────────
+    //
+    // **C'EST LA PROPRIÉTÉ QUI COMPTE, ET ELLE NE SE DÉDUIT PAS DU 403.** Un
+    // refus poli répété six cents fois par minute est un oracle : le mot de
+    // passe vaut plus que le jeton, puisque le second expire et le premier non.
+    // Chaque `current_password` faux compte donc comme une trame invalide, et
+    // le videur ferme la porte au-delà du seuil.
+    let (jeton_neuf, _) = {
+        let (corps, code) = ouvrir("choisi-par-marie");
+        assert_eq!(code, "201", "{corps}");
+        (
+            corps
+                .split_once("\"token\":\"")
+                .and_then(|(_, reste)| reste.split_once('"'))
+                .map(|(jeton, _)| jeton.to_string())
+                .unwrap_or_else(|| panic!("un jeton dans {corps}")),
+            (),
+        )
+    };
+    // ── UN MOT DE PASSE VIDE N'EN EST PAS UN ────────────────────────────────
+    //
+    // `air-mail-admin` le refuse depuis toujours sur l'entrée standard ; l'API
+    // le hachait sans rien dire, et le compte s'ouvrait ensuite avec `""`. Le
+    // laxisme était du côté que des PROGRAMMES appellent, la rigueur du côté
+    // qu'un humain tape — l'inverse de ce qu'il faut, une faute de frappe au
+    // terminal se voyant et un champ vide dans un corps JSON non.
+    let (jeton_courant, _) = {
+        let (corps, code) = ouvrir("choisi-par-marie");
+        assert_eq!(code, "201", "{corps}");
+        (
+            corps
+                .split_once("\"token\":\"")
+                .and_then(|(_, reste)| reste.split_once('"'))
+                .map(|(jeton, _)| jeton.to_string())
+                .unwrap_or_else(|| panic!("un jeton dans {corps}")),
+            (),
+        )
+    };
+    assert_eq!(
+        changer(
+            &jeton_courant,
+            r#"{"current_password":"choisi-par-marie","password":""}"#,
+            "/v1/me/password"
+        ),
+        "400",
+        "un secret vide se refuse, et AVANT de vérifier l'ancien"
+    );
+    assert_eq!(
+        ouvrir("").1,
+        "401",
+        "et le compte ne s'ouvre donc pas avec le vide"
+    );
+    assert_eq!(
+        ouvrir("choisi-par-marie").1,
+        "201",
+        "le secret d'avant tient toujours"
+    );
+
+    let seuil = usize::try_from(Thresholds::DEFAULT.invalid_frames_per_minute)
+        .expect("le seuil tient dans un usize");
+    let mut banni = false;
+    for essai in 0..=seuil.saturating_add(2) {
+        let code = changer(
+            &jeton_neuf,
+            r#"{"current_password":"encore-faux","password":"x"}"#,
+            "/v1/me/password",
+        );
+        // Un pair banni ne reçoit RIEN — pas même un refus. `curl` rend alors
+        // un code vide ou nul, et c'est ce qu'on attend.
+        if code != "403" {
+            banni = true;
+            eprintln!("banni après {essai} essais, dernier code : `{code}`");
+            break;
+        }
+    }
+    assert!(
+        banni,
+        "après {seuil} mots de passe faux, le videur doit fermer la porte"
+    );
 }

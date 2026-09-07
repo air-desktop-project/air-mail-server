@@ -303,6 +303,20 @@ cast_sign_loss = "deny"
 cast_lossless = "deny"
 arithmetic_side_effects = "deny"
 
+# **`argon2` EST COMPILÉ OPTIMISÉ, MÊME EN ESSAI.**
+#
+# Il est délibérément lent — c'est son travail —, mais sans optimisation il l'est
+# CINQUANTE FOIS TROP : une vérification coûte une seconde et demie en `dev`
+# contre une trentaine de millisecondes en `release`. La suite d'essais en fait
+# des dizaines, et `crates/ams-auth/tests/temps.rs` en fait vingt-deux à lui
+# seul.
+#
+# Cela ne change RIEN au binaire livré, qui est déjà `release`, ni à ce que le
+# produit calcule : mêmes paramètres, même empreinte. Seul le temps que l'essai
+# passe à l'obtenir change.
+[profile.dev.package.argon2]
+opt-level = 3
+
 [profile.release]
 debug = "line-tables-only"
 lto = "thin"

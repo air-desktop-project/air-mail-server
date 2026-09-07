@@ -30,5 +30,11 @@ ams-proto-imap = { workspace = true }
 ams-proto-smtp = { workspace = true }
 ams-store = { workspace = true }
 
+# `Credentials` n'est pas dans les dépendances de l'outil : il HACHE des mots de
+# passe, il n'en vérifie aucun. Les essais, eux, doivent vérifier — c'est toute
+# la question qu'ils posent au magasin qu'ils viennent d'écrire.
+[dev-dependencies]
+ams-sasl = { workspace = true }
+
 [lints]
 workspace = true

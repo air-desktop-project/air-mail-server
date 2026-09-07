@@ -11,8 +11,9 @@ use ams_proto_imap::Flags;
 
 use super::{
     AccountRow, BanRow, FlagPatch, MailboxRow, MessageRow, read_account_body, read_flag_patch,
-    read_search_criteria, write_account, write_accounts, write_bans, write_domains, write_health,
-    write_mailbox, write_mailboxes, write_message, write_messages, write_metrics, write_search,
+    read_own_password_body, read_search_criteria, write_account, write_accounts, write_bans,
+    write_domains, write_health, write_mailbox, write_mailboxes, write_message, write_messages,
+    write_metrics, write_search,
 };
 
 /// Un tampon confortable.
@@ -795,5 +796,96 @@ fn un_drapeau_et_un_texte_ne_se_confondent_pas() {
             "{}",
             std::string::String::from_utf8_lossy(json)
         );
+    }
+}
+
+// ── Le corps d'un changement de son propre secret ───────────────────────────
+
+/// Lit un corps de changement de secret, sous une forme qu'un essai lit.
+fn mon_secret(json: &str) -> Result<(String, String), Reason> {
+    let mut actuel = [0_u8; 128];
+    let mut neuf = [0_u8; 128];
+    let lu = read_own_password_body(json.as_bytes(), &mut actuel, &mut neuf)
+        .map_err(|faute| faute.reason())?;
+    Ok((lu.current.to_string(), lu.new.to_string()))
+}
+
+/// **LES DEUX SE LISENT, ET S'ILS SONT ÉCHAPPÉS ILS SE DÉSÉCHAPPENT.**
+///
+/// Un mot de passe a le droit de porter un guillemet ou une barre oblique
+/// inverse — c'est même souhaitable. Les rendre échappés ferait comparer le
+/// secret à sa graphie JSON, et l'utilisateur qui a choisi `a"b` ne pourrait
+/// plus jamais entrer.
+#[test]
+fn les_deux_secrets_se_lisent_et_se_desechappent() {
+    assert_eq!(
+        mon_secret(r#"{"current_password":"ancien","password":"neuf"}"#),
+        Ok((String::from("ancien"), String::from("neuf")))
+    );
+    assert_eq!(
+        mon_secret(r#"{"current_password":"a\"b","password":"c\\d"}"#),
+        Ok((String::from("a\"b"), String::from("c\\d")))
+    );
+    // L'ordre des deux champs n'est pas imposé : §7 de RFC 8259 n'en donne
+    // aucun, et l'imposer refuserait un client parfaitement correct.
+    assert_eq!(
+        mon_secret(r#"{"password":"neuf","current_password":"ancien"}"#),
+        Ok((String::from("ancien"), String::from("neuf")))
+    );
+}
+
+/// **L'ABSENCE DE L'UN OU DE L'AUTRE EST UN REFUS.**
+///
+/// Il n'y a pas de « changer le secret sans dire lequel », et surtout pas de
+/// « changer le secret sans prouver qu'on tient l'ancien » : ce second cas
+/// ferait d'un jeton volé un vol de compte.
+#[test]
+fn il_faut_les_deux_secrets() {
+    for json in [
+        r#"{"password":"neuf"}"#,
+        r#"{"current_password":"ancien"}"#,
+        r#"{}"#,
+    ] {
+        assert_eq!(mon_secret(json), Err(Reason::BadJsonBody), "{json}");
+    }
+}
+
+/// **CE QU'ON N'EMPLOIE PAS, ON LE REFUSE.**
+///
+/// `login` surtout : l'accepter en silence ferait croire au client qu'il peut
+/// désigner un autre compte, alors que le porteur vient du jeton et de nulle
+/// part ailleurs. Un refus est plus honnête qu'un champ ignoré.
+#[test]
+fn un_champ_de_trop_fait_refuser() {
+    for json in [
+        r#"{"current_password":"a","password":"b","login":"marc"}"#,
+        r#"{"current_password":"a","password":"b","addresses":[]}"#,
+        r#"{"current_password":"a","password":"b","inconnu":1}"#,
+        // Une valeur du mauvais type, aussi : un nombre n'est pas un secret.
+        r#"{"current_password":1,"password":"b"}"#,
+        r#"{"current_password":"a","password":["b"]}"#,
+    ] {
+        assert_eq!(mon_secret(json), Err(Reason::BadJsonBody), "{json}");
+    }
+}
+
+/// Un secret plus long que le tampon fait REFUSER, et non tronquer.
+///
+/// Tronquer poserait un secret que l'utilisateur ne connaît pas — plus court
+/// que celui qu'il a tapé, et donc plus faible.
+#[test]
+fn un_secret_trop_long_fait_refuser() {
+    let long = "x".repeat(200);
+    let json = std::format!(r#"{{"current_password":"a","password":"{long}"}}"#);
+    assert_eq!(mon_secret(&json), Err(Reason::BadJsonBody));
+    let json = std::format!(r#"{{"current_password":"{long}","password":"b"}}"#);
+    assert_eq!(mon_secret(&json), Err(Reason::BadJsonBody));
+}
+
+/// Un corps qui n'est pas un objet JSON fait refuser.
+#[test]
+fn un_corps_qui_n_est_pas_un_objet_fait_refuser() {
+    for json in [r#"["a","b"]"#, r#""ancien""#, "12", "", "{"] {
+        assert_eq!(mon_secret(json), Err(Reason::BadJsonBody), "{json}");
     }
 }

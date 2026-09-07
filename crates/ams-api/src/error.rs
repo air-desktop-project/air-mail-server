@@ -33,6 +33,21 @@ pub enum Reason {
     MethodNotAllowed,
     /// Le jeton présenté n'ouvre pas cette portée.
     Forbidden,
+    /// **Le mot de passe actuel présenté ne correspond pas.**
+    ///
+    /// # POURQUOI CE N'EST PAS `Forbidden`, ET POURQUOI CE N'EST PAS 404
+    ///
+    /// `Forbidden` dit « votre jeton n'ouvre pas cette portée », et répond 404
+    /// pour que l'existence de la ressource ne se lise pas dans la réponse. Ici,
+    /// rien de tel à cacher : le porteur agit sur SA PROPRE ressource, dont il
+    /// connaît évidemment l'existence. Répondre 404 lui dirait que sa route a
+    /// disparu, ce qui est faux et le ferait chercher au mauvais endroit.
+    ///
+    /// Ce n'est pas 401 non plus : le jeton, lui, est bon — c'est ce qui a
+    /// permis d'arriver ici. Un 401 ferait recommencer une authentification qui
+    /// a réussi. §15.5.4 de RFC 9110 nomme exactement ce cas : « the server
+    /// understood the request but refuses to fulfill it ».
+    BadPassword,
     /// Le jeton présenté ne se vérifie pas — sceau, structure, ou écriture.
     ///
     /// **UNE SEULE RAISON POUR TOUTES CES FAUTES** : dire laquelle apprendrait à
@@ -94,6 +109,7 @@ impl Reason {
             // l'information elle-même.
             Self::NoSuchResource | Self::Forbidden => StatusCode::NOT_FOUND,
             Self::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
+            Self::BadPassword => StatusCode::FORBIDDEN,
             // §11.6.1 de RFC 9110 : « the request has not been applied because
             // it lacks valid authentication credentials ». Un jeton qui ne se
             // vérifie pas et un jeton périmé sont tous deux cela.
@@ -122,6 +138,7 @@ impl Reason {
             Self::PathTooLong => "le chemin est trop long",
             Self::NoSuchResource | Self::Forbidden => "aucune ressource ici",
             Self::MethodNotAllowed => "cette méthode n'est pas servie ici",
+            Self::BadPassword => "le mot de passe actuel ne correspond pas",
             Self::BadToken => "l'authentification n'est pas recevable",
             Self::TokenExpired => "l'authentification a expiré",
             // **CE QUI EST NÔTRE SE DIT D'UNE SEULE FAÇON.** Distinguer nos

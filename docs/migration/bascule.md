@@ -10,6 +10,34 @@ avoir besoin.**
 
 ---
 
+## LA FENÊTRE EST FIXÉE : samedi 19 septembre 2026, 09:00 CEST
+
+Décidée le 2026-09-07. Le chemin qui y mène, et pourquoi chaque étape est là :
+
+| Quand | Quoi | Pourquoi cette date |
+|---|---|---|
+| **mardi 8 septembre** | nouveau sélecteur DKIM **2048 bits** publié, et **rspamd signe avec** | la clé s'éprouve sous Postfix, en production. Le jour J ne changera plus que le serveur |
+| 9 → 17 septembre | on vérifie que les signatures se valident chez Gmail et Outlook | une semaine de vrai courrier vaut mieux qu'un essai |
+| **jeudi 17** | `deploy-hook` certbot pour `privkey.pem` ; première sauvegarde complète ; copie et `verifier.sh` à blanc | le blanc trouve les surprises pendant qu'on a le temps |
+| **vendredi 18** | distribution des **cinq secrets initiaux, tous distincts** | un secret commun laisserait chacun ouvrir la boîte des autres |
+| **samedi 19, 09:00** | la fenêtre | volume entrant au plus bas, utilisateurs joignables, deux jours de marge |
+
+**Le détail du samedi.** 09:00 sauvegarde et copie finale ; 09:30 arrêt de
+Postfix, delta, démarrage d'`air-mail-server` ; 09:50 `verifier.sh` décide ;
+10:00 essais clients ; 11:00 fin. **Coupure réelle : environ vingt minutes.**
+
+**LE RETOUR EN ARRIÈRE NE DÉPEND D'AUCUN DNS.** La bascule ne touche ni le `MX`
+ni le `A` : même machine, même enregistrement. Revenir, c'est redémarrer Postfix
+et rapatrier le courrier de la fenêtre par `rapatrier.sh` — quelques minutes,
+sans propagation à attendre.
+
+**Pourquoi le 19 et pas le 12 :** la clé DKIM a besoin de sa semaine sous
+Postfix. Le 12 ne serait tenable qu'en publiant le sélecteur le jour même de
+cette décision, et sans marge.
+
+---
+
+
 ## Pourquoi une coupure franche vaut mieux qu'une bascule douce
 
 On pourrait vouloir n'interrompre personne. C'est un piège : pendant qu'on
@@ -92,6 +120,7 @@ Le paquet **n'active ni ne démarre le service** — c'est délibéré, et
         --relay --queue-spool /var/spool/ams/file \
         --queue-expire-seconds 86400 \
         --require-fqdn-helo \
+        --listen-http 0.0.0.0:8443 \
         --dkim-selector mail --dkim-key /var/lib/rspamd/dkim/narro.ch.mail.key \
         --resolver 127.0.0.53 \
         --public-suffix-list /usr/share/publicsuffix/public_suffix_list.dat \
@@ -102,6 +131,47 @@ Le paquet **n'active ni ne démarre le service** — c'est délibéré, et
 
 **CETTE COMMANDE VIENT DE L'INVENTAIRE**, valeur par valeur, et chacune a une
 raison :
+
+**`--listen-http 0.0.0.0:8443` OUVRE L'API REST**, et il faut savoir pourquoi
+c'est là : sans elle, `/v1/me/password` n'est joignable de nulle part, et les
+utilisateurs ne peuvent pas poser leur propre mot de passe.
+
+- **Pourquoi 8443 et pas 443** : nginx tient déjà le 443 sur cette machine
+  (l'inventaire le montre), et il ne peut pas relayer vers l'API — celle-ci ne
+  parle QUE `h2`, délibérément (C6), quand `proxy_pass` de nginx sort en
+  HTTP/1.1. Un port à elle est plus simple qu'un montage `stream` avec
+  `ssl_preread`, pour cinq utilisateurs.
+- **Le certificat est le même**, celui de Let's Encrypt : rien de plus à
+  renouveler.
+- **Ce que cela expose** : le point d'échange de jetons, et rien d'autre sans
+  jeton. Un mot de passe n'ouvre JAMAIS la portée `Admin` — c'est écrit dans le
+  code, pas dans une configuration —, si bien que `/v1/accounts` reste fermé à
+  qui n'a pas frappé un jeton avec `air-mail-admin token`. Les essais par
+  martèlement sont comptés par le videur, qui ferme la porte au bout de vingt
+  par minute, **y compris sur un mot de passe actuel faux**.
+- **Si vous préférez fermer** : ôtez la ligne, et les mots de passe se posent
+  alors par `account passwd` en §0.4ter. Les utilisateurs perdent le
+  libre-service, vous gardez la main.
+
+**LE PARE-FEU N'A PAS ÉTÉ MESURÉ.** `inventaire.sh` ne le regarde pas, et le 8443
+n'est aujourd'hui ouvert par rien. À vérifier DEPUIS L'EXTÉRIEUR pendant la
+phase 0, où l'API tourne déjà sur le port d'essai — pas le jour J, où le
+découvrir fermé ferait croire à une panne du serveur :
+
+    # Depuis une autre machine :
+    curl -sS --max-time 10 -o /dev/null -w '%{http_code}\n' \
+        https://mail.narro.ch:8443/v1/health
+
+    # ON N'ATTEND PAS `200`, ET C'EST LE PIÈGE : `/v1/health` exige la portée
+    # `Observe`, donc sans jeton il répond `401`. Un `401` PROUVE que le port
+    # est ouvert et que le serveur répond — c'est ce qu'on cherche à savoir.
+    #
+    #   401  → ouvert, le serveur parle. C'est le résultat attendu.
+    #   000  → rien n'a répondu : port filtré, ou serveur arrêté.
+    #
+    # Si c'est `000`, il faut ouvrir le port aux DEUX endroits :
+    #   sudo ufw allow 8443/tcp        # si ufw est en service sur la machine
+    # et le groupe de sécurité OVH, qui se règle depuis leur console.
 
 **`--require-fqdn-helo` N'EST PAS UN DURCISSEMENT**, c'est une restauration :
 l'inventaire montre `reject_non_fqdn_helo_hostname` dans les
@@ -151,6 +221,43 @@ pas, et il n'y a pas de « mot de passe oublié » ici.
 
 `postmaster@` est ici une exigence, pas une commodité : §4.5.1 de RFC 5321 la
 pose, et le serveur AVERTIT au démarrage si personne ne la reçoit.
+
+**CINQ SECRETS DISTINCTS, ET NON UN SEUL PARTAGÉ.** La boucle ci-dessus en tire
+un par compte, et c'est délibéré : un secret commun laisserait, entre la bascule
+et le moment où chacun l'aura changé, n'importe lequel des cinq ouvrir la boîte
+des quatre autres. Ce n'est pas une fenêtre théorique — elle dure aussi longtemps
+que la personne la plus lente à lire son courrier.
+
+### 0.4ter Chacun pose ensuite le sien, sans passer par vous
+
+Ces cinq secrets sont des secrets de PASSAGE. Une fois connecté, chacun pose le
+sien lui-même :
+
+    curl -X PUT https://mail.narro.ch:8443/v1/me/password \
+         -H "Authorization: Bearer $JETON" \
+         -H 'Content-Type: application/json' \
+         -d '{"current_password":"celui-qu-on-vous-a-donné","password":"le-vôtre"}'
+
+Le jeton s'obtient contre ses propres identifiants :
+
+    curl -X POST https://mail.narro.ch:8443/v1/tokens \
+         -H 'Content-Type: application/json' \
+         -d '{"login":"votre-compte","password":"celui-qu-on-vous-a-donné"}'
+
+**Aucun mot de passe choisi ne transite par l'administrateur**, et c'est le
+point. La route n'exige aucune portée — elle agit sur soi —, mais elle **exige le
+mot de passe actuel** : sans lui, un jeton ramassé au passage suffirait à
+verrouiller le propriétaire hors de sa boîte.
+
+Si quelqu'un préfère ne pas toucher à `curl`, la voie d'administration reste
+ouverte, et c'est `account passwd` — **jamais `account add`**, qui effacerait les
+adresses du compte :
+
+    printf %s "$NOUVEAU" | sudo -u ams air-mail-admin account passwd \
+        /etc/ams/comptes.bin --login contact
+
+Le serveur relit son magasin dès que le fichier bouge : aucun redémarrage, et
+aucune session en cours n'est interrompue.
 
 ### 0.4bis Traduire les noms de dossiers, et les abonnements
 

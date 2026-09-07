@@ -654,6 +654,82 @@ pub fn read_account_body<'c, 's>(
     })
 }
 
+/// Ce qu'un changement de son propre secret demande.
+///
+/// **LES DEUX SONT OBLIGATOIRES**, et c'est toute la sécurité de la route. Le
+/// jeton dit de QUI il s'agit ; le mot de passe actuel dit que c'est bien LUI
+/// qui tient le clavier. Sans le second, un jeton volé — dans un journal
+/// d'intermédiaire, dans une sauvegarde de navigateur — permettrait de changer
+/// le secret, et donc de verrouiller le propriétaire hors de sa boîte pour de
+/// bon. Un vol de jeton, qui expire, deviendrait un vol de compte, qui n'expire
+/// pas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OwnPasswordBody<'a> {
+    /// Le secret actuel, déséchappé dans le premier tampon prêté.
+    pub current: &'a str,
+    /// Le secret voulu, déséchappé dans le second.
+    pub new: &'a str,
+}
+
+/// Lit un corps de changement de son propre secret.
+///
+/// Le corps attendu est `{"current_password": "…", "password": "…"}`, et **rien
+/// d'autre** : ni `login` — le jeton le dit —, ni `addresses`, qu'un client
+/// croirait avoir changées.
+///
+/// # DEUX TAMPONS, ET NON UN SEUL PARTAGÉ
+///
+/// Les deux chaînes se déséchappent, et les deux doivent survivre jusqu'à la
+/// comparaison. Les écrire dans un même tampon obligerait à retenir où finit la
+/// première — une longueur de plus à ne pas se tromper, pour rien.
+///
+/// # Errors
+///
+/// [`Reason::BadJsonBody`] : un champ inconnu, un champ manquant, une valeur du
+/// mauvais type, ou un secret plus long que le tampon prêté.
+pub fn read_own_password_body<'a>(
+    corps: &[u8],
+    actuel: &'a mut [u8],
+    neuf: &'a mut [u8],
+) -> Result<OwnPasswordBody<'a>, Error> {
+    let mauvais = Error::new(Reason::BadJsonBody);
+    let mut lecteur = Reader::new(corps);
+    let mut dit_actuel: Option<Str<'_>> = None;
+    let mut dit_neuf: Option<Str<'_>> = None;
+    // Quel champ on lit : 1 `current_password`, 2 `password`.
+    let mut quel = 0_u8;
+
+    loop {
+        match lecteur.read().map_err(|_| mauvais)? {
+            None => break,
+            Some(Event::Key(clef)) => {
+                quel = match (clef.is("current_password"), clef.is("password")) {
+                    (true, _) => 1,
+                    (_, true) => 2,
+                    _ => return Err(mauvais),
+                };
+            }
+            Some(Event::Text(texte)) => match quel {
+                1 => dit_actuel = Some(texte),
+                2 => dit_neuf = Some(texte),
+                _ => return Err(mauvais),
+            },
+            Some(Event::ObjectStart | Event::ObjectEnd) => {}
+            Some(_) => return Err(mauvais),
+        }
+    }
+
+    // **L'ABSENCE EST UN REFUS**, et non un champ laissé tel quel : il n'y a pas
+    // de « changer le secret sans dire lequel ».
+    let (Some(dit_actuel), Some(dit_neuf)) = (dit_actuel, dit_neuf) else {
+        return Err(mauvais);
+    };
+    Ok(OwnPasswordBody {
+        current: dit_actuel.unescape(actuel).map_err(|_| mauvais)?,
+        new: dit_neuf.unescape(neuf).map_err(|_| mauvais)?,
+    })
+}
+
 /// Ce qu'une modification de drapeaux demande.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FlagPatch {

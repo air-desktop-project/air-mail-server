@@ -129,6 +129,26 @@ pub struct Served<'o> {
     /// seul, qui dit quels octets partent**. Un `206` sans lui laisserait le
     /// client deviner, et deviner faux d'un octet ne se voit qu'à la fin.
     pub range: Option<ContentRange>,
+    /// **CE REFUS COMPTE CONTRE LE PAIR**, comme une trame invalide.
+    ///
+    /// # POURQUOI UN CHAMP, ET NON L'ADRESSE DU PAIR EN PARAMÈTRE
+    ///
+    /// Le service ne connaît pas la source, et ne doit pas la connaître : elle
+    /// est de la boucle, comme le videur. Lui passer l'une et l'autre le
+    /// rendrait capable de bannir, ce qui n'est pas son travail. Il dit
+    /// seulement « ce refus-ci vient d'une tentative, pas d'une méprise », et
+    /// la boucle en fait ce qu'elle fait déjà d'un refus d'identifiants.
+    ///
+    /// C'est le même concept que `peer_fault` sur le `Turn` d'une session SMTP,
+    /// et il porte le même nom pour cette raison.
+    ///
+    /// # CE QU'IL BORNE
+    ///
+    /// Un mot de passe actuel faux sur `/v1/me/password`. Sans lui, un jeton
+    /// volé permettrait de DEVINER le mot de passe à la cadence des commandes —
+    /// six cents par minute par défaut — et le mot de passe vaut plus que le
+    /// jeton : le second expire, le premier non.
+    pub peer_fault: bool,
 }
 
 /// Ce qu'un corps partiel couvre de la représentation (§14.4 de RFC 9110).
@@ -204,6 +224,7 @@ impl Default for Served<'_> {
             body: &[],
             ranges: false,
             range: None,
+            peer_fault: false,
         }
     }
 }
@@ -427,6 +448,11 @@ where
                     &mut rendu,
                 );
                 portee = (servi.ranges, servi.range);
+                if servi.peer_fault {
+                    // Le même compte que pour un refus d'identifiants : c'est
+                    // ce qui borne une attaque par essais, ici comme là.
+                    service.guard.observe(source, GuardEvent::InvalidFrame);
+                }
                 (servi.status, servi.media, servi.body)
             }
         };

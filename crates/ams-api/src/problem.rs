@@ -74,6 +74,7 @@ fn type_de(status: StatusCode) -> &'static str {
     match status.value() {
         400 => "/problems/bad-request",
         401 => "/problems/unauthorized",
+        403 => "/problems/forbidden",
         404 => "/problems/not-found",
         405 => "/problems/method-not-allowed",
         414 => "/problems/uri-too-long",

@@ -49,6 +49,17 @@ COMMANDES
                         compte se connecte mais ne reçoit rien.
                         Le nom du compte est aussi le nom de sa boîte : ni vide,
                         ni `.`, ni `..`, sans `/`, et sans point en tête.
+    account passwd <fichier> --login <nom>
+                        change LE SEUL MOT DE PASSE d'un compte existant. Le
+                        secret se lit sur l'entrée standard, comme pour `add`.
+                        À PRÉFÉRER À `account add` POUR CE SEUL USAGE : `add`
+                        remplace le compte ENTIER, et sans ses `--address` il
+                        les efface — le compte s'authentifie encore et ne reçoit
+                        plus rien, sans que rien ne le dise.
+                        Un compte inconnu est REFUSÉ, et le magasin n'est pas
+                        touché : une faute de frappe ferait créer par `add` un
+                        compte fantôme portant le secret qu'on croyait poser
+                        ailleurs.
     account list <fichier>
                         liste les noms de comptes. Jamais les empreintes.
     account remove <fichier> --login <nom>
@@ -189,6 +200,9 @@ fn main() -> ExitCode {
             }
         },
         ["account", "list", fichier] => lister(Path::new(fichier)),
+        ["account", "passwd", fichier, "--login", nom] => {
+            changer_le_secret(Path::new(fichier), nom)
+        }
         ["token", fichier, reste @ ..] => match jeton_demande(reste) {
             Ok((nom, minutes)) => frapper(Path::new(fichier), &nom, minutes),
             Err(quoi) => {
@@ -1018,6 +1032,67 @@ fn ajouter_ou_dire(fichier: &Path, nom: &str, adresses: &[String]) -> Result<boo
         .map_err(|erreur| format!("le magasin écrit ne se relit pas : {erreur}"))?;
     ecrire_magasin(fichier, &comptes)?;
     Ok(remplace)
+}
+
+/// Change le secret d'un compte, ET RIEN D'AUTRE.
+///
+/// # POURQUOI CETTE COMMANDE EXISTE, ALORS QU'`add` REMPLACE DÉJÀ
+///
+/// `account add` remplace le compte ENTIER. Changer un mot de passe avec lui
+/// oblige à réécrire toutes les `--address` du compte, et en oublier une les
+/// efface : le compte s'authentifie encore, relève encore son courrier ancien,
+/// et NE REÇOIT PLUS RIEN. L'utilisateur ne s'en aperçoit qu'après des heures
+/// de silence, et rien dans la sortie ne l'avait annoncé.
+///
+/// Cette commande-ci ne touche que l'empreinte. Les adresses sont reprises
+/// telles quelles, parce qu'on ne les a jamais lues.
+///
+/// # ET ELLE REFUSE UN COMPTE INCONNU
+///
+/// C'est ce qui la sépare d'`add`. Une faute de frappe sur `--login` ferait
+/// créer par `add` un compte fantôme, sans adresse, avec le mot de passe qu'on
+/// croyait poser ailleurs — et le vrai compte garderait l'ancien. Ici, un nom
+/// inconnu est une erreur, et le magasin n'est pas touché.
+fn changer_le_secret(fichier: &Path, nom: &str) -> ExitCode {
+    match changer_le_secret_ou_dire(fichier, nom) {
+        Ok(()) => {
+            println!("{} : secret du compte `{nom}` changé", fichier.display());
+            ExitCode::SUCCESS
+        }
+        Err(message) => {
+            eprintln!("air-mail-admin : {message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn changer_le_secret_ou_dire(fichier: &Path, nom: &str) -> Result<(), String> {
+    ams_auth::check_login(nom).map_err(|cause| format!("nom de compte : {cause}"))?;
+    let secret = lire_mot_de_passe()?;
+    let empreinte = ams_auth::hash_password(&secret, &sel()?)
+        .map_err(|erreur| format!("hachage : {erreur}"))?;
+
+    // Le même verrou, tenu de la lecture à l'écriture, et pour la même raison
+    // qu'en §`ajouter_ou_dire` : le serveur écrit ce fichier depuis son API.
+    let _verrou = ams_fichier::verrouiller(fichier)
+        .map_err(|erreur| format!("`{}` : {erreur}", fichier.display()))?;
+    let mut comptes = lire_magasin(fichier, false)?;
+    let Some(compte) = comptes.iter_mut().find(|compte| compte.login == nom) else {
+        return Err(format!(
+            "`{}` : aucun compte `{nom}` — `account list` dit lesquels existent, et \
+             `account add` en crée un",
+            fichier.display()
+        ));
+    };
+    // **SEULE L'EMPREINTE BOUGE.** `addresses` n'est pas relu, pas réécrit, pas
+    // même nommé ici : ce qu'on ne touche pas ne peut pas se perdre.
+    compte.hash = empreinte;
+
+    let octets =
+        ams_config::encode_accounts(&comptes).map_err(|erreur| format!("encodage : {erreur}"))?;
+    ams_config::decode_accounts(&octets)
+        .map_err(|erreur| format!("le magasin écrit ne se relit pas : {erreur}"))?;
+    ecrire_magasin(fichier, &comptes)
 }
 
 /// Liste les noms de comptes — **jamais les empreintes**.

@@ -29,8 +29,9 @@ fn ou(method: Method, chemin: &[u8]) -> Result<Resource<'static>, Reason> {
 /// Chaque ressource se désigne par son chemin.
 #[test]
 fn chaque_ressource_se_designe() {
-    let cas: [(Method, &[u8], Resource<'_>); 20] = [
+    let cas: [(Method, &[u8], Resource<'_>); 21] = [
         (Method::Post, b"/v1/tokens", Resource::Tokens),
+        (Method::Put, b"/v1/me/password", Resource::OwnPassword),
         (
             Method::Delete,
             b"/v1/tokens/current",
@@ -414,4 +415,73 @@ fn chaque_ressource_dit_ce_qu_elle_sert() {
             "{resource:?} sépare `GET` et `HEAD`"
         );
     }
+}
+
+/// **LA ROUTE « MOI » N'EXIGE AUCUNE PORTÉE, ET NE SE LIT PAS.**
+///
+/// Aucune portée, parce qu'elle agit sur SOI : le jeton présenté dit déjà de qui
+/// il s'agit, et exiger `Admin` en ferait la route que seul un administrateur
+/// peut emprunter — très exactement ce qu'elle existe pour éviter. La preuve de
+/// possession est ailleurs, dans le corps : le mot de passe actuel.
+///
+/// Et elle ne se lit pas, pour la même raison que celle de l'administrateur :
+/// il n'existe aucune méthode qui rende une empreinte.
+#[test]
+fn mon_secret_n_exige_aucune_portee_et_ne_se_lit_pas() {
+    let pose = resolu(Method::Put, b"/v1/me/password").expect("désignée");
+    assert!(pose.serves, "`PUT` pose le secret");
+    assert_eq!(pose.scope, Some(Scope::none()), "aucune portée exigée");
+
+    for lecture in [Method::Get, Method::Head, Method::Delete, Method::Post] {
+        let resolu = resolu(lecture, b"/v1/me/password").expect("désignée");
+        assert!(!resolu.serves, "{lecture:?} n'est pas servi");
+    }
+    assert!(ou(Method::Options, b"/v1/me/password").is_ok(), "OPTIONS");
+}
+
+/// **`/v1/me` NE PORTE QUE `password`**, et rien d'autre ne s'y accroche.
+///
+/// Un segment de tête qui accepterait n'importe quoi derrière lui rendrait `404`
+/// là où il faut `404` — mais il faudrait le vérifier à chaque ajout. On le
+/// vérifie une fois ici.
+#[test]
+fn rien_d_autre_ne_pend_a_la_route_moi() {
+    for chemin in [
+        &b"/v1/me"[..],
+        b"/v1/me/addresses",
+        b"/v1/me/password/encore",
+    ] {
+        assert_eq!(
+            ou(Method::Put, chemin),
+            Err(Reason::NoSuchResource),
+            "{chemin:?}"
+        );
+    }
+
+    // **ET LA BARRE FINALE EST UN CHEMIN FAUTIF, PAS UNE RESSOURCE ABSENTE.**
+    // Elle fait un segment VIDE, que le décodeur refuse avant que le routage ne
+    // soit consulté. Les deux erreurs ne disent pas la même chose au client :
+    // l'une lui apprend que sa ressource n'existe pas, l'autre que son chemin
+    // est mal formé.
+    assert_eq!(ou(Method::Put, b"/v1/me/"), Err(Reason::BadPath));
+}
+
+/// **UN COMPTE PEUT S'APPELER `me`**, et sa route d'administration reste
+/// atteignable.
+///
+/// C'est la raison d'être de `/v1/me/password` plutôt que
+/// `/v1/accounts/me/password` : `check_login` accepte `me`, et faire tenir une
+/// route au prix d'un nom de compte réservé aurait rendu ce compte-là
+/// ingérable. L'essai le CONSTATE, pour que le jour où quelqu'un déplacerait la
+/// route, la raison soit encore là.
+#[test]
+fn un_compte_nomme_me_reste_administrable() {
+    assert_eq!(
+        ou(Method::Put, b"/v1/accounts/me/password"),
+        Ok(Resource::AccountPassword { compte: "me" })
+    );
+    assert_eq!(
+        ou(Method::Get, b"/v1/accounts/me"),
+        Ok(Resource::Account { compte: "me" })
+    );
 }

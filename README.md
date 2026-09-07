@@ -1865,6 +1865,50 @@ Un compte **sans adresse** est licite : il se connecte, il envoie, il ne reçoit
 rien. Et `postmaster` est un compte comme un autre — le serveur avertit au
 démarrage si personne ne le reçoit, parce que la RFC 5321 §4.5.1 l'exige.
 
+#### Changer un mot de passe : `account passwd`, et non `account add`
+
+```sh
+printf %s "$MDP" | ./target/release/air-mail-admin account passwd comptes.bin --login jean
+```
+
+**`account add` REMPLACE LE COMPTE ENTIER.** S'en servir pour changer un mot de
+passe sans répéter toutes ses `--address` les efface — et le compte continue de
+s'authentifier, continue de relever son courrier ancien, **et ne reçoit plus
+rien**. Personne ne s'en aperçoit avant plusieurs heures de silence.
+
+`account passwd` ne touche que l'empreinte : les adresses ne sont ni relues ni
+réécrites, et ce qu'on ne touche pas ne peut pas se perdre. Il **refuse un compte
+inconnu**, là où `add` en créerait un fantôme portant le secret qu'on croyait
+poser ailleurs.
+
+Le serveur relit son magasin quand le fichier bouge : aucun redémarrage.
+
+#### Et l'utilisateur peut changer le sien lui-même
+
+```sh
+curl -X PUT https://mail.example.com/v1/me/password \
+     -H "Authorization: Bearer $JETON" \
+     -H 'Content-Type: application/json' \
+     -d '{"current_password":"l-ancien","password":"le-nouveau"}'
+```
+
+`/v1/me/password` **n'exige aucune portée** : elle agit sur soi, et le jeton
+présenté dit déjà de qui il s'agit. C'est ce qui permet à un utilisateur ordinaire
+de l'emprunter — un mot de passe n'ouvre jamais `Admin`, délibérément, si bien que
+`/v1/accounts/{compte}/password` lui reste fermée.
+
+**Le mot de passe actuel est exigé dans le corps**, et ce n'est pas une
+formalité : sans lui, un jeton ramassé dans le journal d'un intermédiaire
+suffirait à verrouiller le propriétaire hors de sa boîte. Un vol de jeton, qui
+expire, deviendrait un vol de compte, qui n'expire pas. Un secret actuel faux se
+dit `403` — pas `404`, qui ferait chercher une route disparue, ni `401`, qui
+ferait recommencer une authentification qui a réussi.
+
+La route est `/v1/me/password` et non `/v1/accounts/me/password` : ce second
+chemin aurait rendu ingérable un compte réellement nommé `me`, que `check_login`
+accepte. Réserver un nom de compte pour faire tenir une route est un prix qu'on
+ne paie pas quand un segment de tête libre existe.
+
 ### Authentifier
 
 ```sh

@@ -99,6 +99,28 @@ pub enum Resource<'o> {
         boite: &'o str,
     },
 
+    /// `/v1/me/password` — **le secret de qui appelle**, et de personne d'autre.
+    ///
+    /// # POURQUOI `/v1/me/…` ET NON `/v1/accounts/me/password`
+    ///
+    /// Le second aurait rendu INATTEIGNABLE, par la route d'administration, un
+    /// compte réellement nommé `me` : `check_login` l'accepte, et rien
+    /// n'interdit à quelqu'un de le choisir. Réserver un nom de compte pour
+    /// faire tenir une route est un prix qu'on ne paie pas quand un segment de
+    /// tête libre existe.
+    ///
+    /// # ELLE N'EXIGE AUCUNE PORTÉE, ET CE N'EST PAS UN OUBLI
+    ///
+    /// Comme `/v1/tokens/current`, elle agit sur SOI et non sur une ressource
+    /// du serveur : le jeton présenté dit déjà de qui il s'agit. Exiger `Admin`
+    /// en ferait une route que seul un administrateur peut emprunter, ce qui
+    /// est très exactement ce qu'elle existe pour éviter.
+    ///
+    /// **LE MOT DE PASSE ACTUEL EST EXIGÉ DANS LE CORPS**, lui. Sans cela, un
+    /// jeton volé permettrait de verrouiller le propriétaire légitime hors de
+    /// sa boîte, définitivement — un vol de jeton deviendrait un vol de compte.
+    OwnPassword,
+
     /// `/v1/accounts` — les comptes.
     Accounts,
     /// `/v1/accounts/{compte}` — un compte.
@@ -157,7 +179,7 @@ impl Resource<'_> {
             // **CELLE-CI N'EXIGE RIEN** : c'est là qu'on obtient de quoi exiger.
             Self::Tokens => return None,
             // Révoquer son propre jeton ne demande que de l'avoir.
-            Self::CurrentToken => return Some(Scope::none()),
+            Self::CurrentToken | Self::OwnPassword => return Some(Scope::none()),
             Self::Mailboxes
             | Self::Mailbox { .. }
             | Self::Messages { .. }
@@ -203,7 +225,7 @@ impl Resource<'_> {
             Self::Account { .. } => &[Method::Get, Method::Head, Method::Put, Method::Delete],
             // **CELLE-CI NE SE LIT PAS** : il n'existe aucune méthode qui rende
             // une empreinte, et c'est la raison d'être de cette ressource.
-            Self::AccountPassword { .. } => &[Method::Put],
+            Self::AccountPassword { .. } | Self::OwnPassword => &[Method::Put],
             Self::AccountAddresses { .. } => &[Method::Get, Method::Head, Method::Put],
             Self::Ban { .. } => &[Method::Delete],
         }
@@ -330,6 +352,7 @@ fn designer<'o>(segments: &Segments<'o>) -> Result<Resource<'o>, Error> {
                 _ => Err(manque),
             }
         }
+        ("me", 3) if segments.get(2) == "password" => Ok(Resource::OwnPassword),
         ("domains", 2) => Ok(Resource::Domains),
         ("bans", 2) => Ok(Resource::Bans),
         ("bans", 3) => Ok(Resource::Ban {

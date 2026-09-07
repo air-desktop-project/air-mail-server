@@ -10,12 +10,13 @@ use super::{JSON_MEDIA_TYPE, PROBLEM_MEDIA_TYPE, problem};
 use crate::error::Reason;
 
 /// Toutes les raisons, pour que chaque essai les parcoure toutes.
-const TOUTES: [Reason; 9] = [
+const TOUTES: [Reason; 10] = [
     Reason::BadPath,
     Reason::PathTooLong,
     Reason::NoSuchResource,
     Reason::MethodNotAllowed,
     Reason::Forbidden,
+    Reason::BadPassword,
     Reason::BadToken,
     Reason::TokenExpired,
     Reason::BadKey,
@@ -103,4 +104,32 @@ fn un_tampon_trop_court_est_notre_faute() {
         let faute = problem(Reason::NoSuchResource, &mut petit).expect_err("trop court");
         assert_eq!(faute.reason(), Reason::BufferTooSmall, "{taille}");
     }
+}
+
+/// **UN MOT DE PASSE ACTUEL FAUX SE DIT 403, ET NON 404 NI 401.**
+///
+/// Les trois codes racontent trois choses différentes, et le client agit
+/// différemment sur chacun : 404 le ferait chercher une route disparue, 401 lui
+/// ferait recommencer une authentification qui a réussi, 403 lui dit ce qui est
+/// vrai — la requête est comprise, et refusée.
+///
+/// L'essai tient aussi le `type`, parce qu'il vient du CODE : un 403 qui
+/// retomberait sur `/problems/internal` accuserait le serveur d'une faute qui
+/// est celle de qui tape son ancien mot de passe.
+#[test]
+fn un_mot_de_passe_actuel_faux_se_dit_403() {
+    assert_eq!(Reason::BadPassword.status().value(), 403);
+    assert_eq!(
+        document(Reason::BadPassword),
+        "{\"type\":\"/problems/forbidden\",\"title\":\"le mot de passe actuel ne \
+         correspond pas\",\"status\":403}"
+    );
+
+    // Et il ne se confond avec aucun des deux voisins.
+    assert_ne!(
+        Reason::BadPassword.status(),
+        Reason::Forbidden.status(),
+        "une portée refusée se cache derrière un 404 ; celui-ci n'a rien à cacher"
+    );
+    assert_ne!(Reason::BadPassword.status(), Reason::BadToken.status());
 }

@@ -238,6 +238,10 @@ fn segments_de(resource: &Resource<'_>) -> std::vec::Vec<std::string::String> {
     let mut pousser = |texte: &str| segments.push(std::string::String::from(texte));
     match *resource {
         Resource::Tokens => pousser("tokens"),
+        Resource::OwnPassword => {
+            pousser("me");
+            pousser("password");
+        }
         Resource::CurrentToken => {
             pousser("tokens");
             pousser("current");

@@ -192,8 +192,9 @@ echo "tableau de \`README.md\` les décrit toutes."
 #
 # libFuzzer écrit ses trouvailles dans le PREMIER répertoire de corpus qu'on lui
 # donne, sous un nom qui est le SHA-1 de leur contenu. Ce script lui donne
-# `corpus/<cible>` en premier — ignoré par git, c'est sa place. Mais lancé à la
-# main en l'oubliant :
+# `corpus/<cible>` en premier — VERSIONNÉ, et c'est sa place : voir le commit
+# « Le corpus de fuzz était jeté à chaque campagne ». Mais lancé à la main en
+# l'oubliant :
 #
 #     cargo +nightly fuzz run <cible> seeds/<graines>     # ← le piège
 #     cargo +nightly fuzz run <cible> corpus/<cible> seeds/<graines>   # ← ainsi

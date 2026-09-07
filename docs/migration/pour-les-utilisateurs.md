@@ -44,6 +44,38 @@ le redemandera de lui-même après la bascule.
 **Sur chaque appareil** : ordinateur, téléphone, tablette. Une seule oubliée, et
 elle continuera d'essayer avec l'ancien.
 
+### 1bis. Le remplacer par le vôtre
+
+Celui qu'on vous a transmis est un mot de passe **de passage**. Il a servi à vous
+faire entrer ; il n'a pas à rester.
+
+Vous pouvez le changer vous-même, sans passer par personne. Sur un terminal :
+
+    # 1. On échange son mot de passe actuel contre un jeton de session.
+    curl -X POST https://mail.narro.ch:8443/v1/tokens \
+         -H 'Content-Type: application/json' \
+         -d '{"login":"VOTRE-COMPTE","password":"CELUI-QU-ON-VOUS-A-DONNÉ"}'
+
+    # La réponse contient un `token`. On le recopie ci-dessous.
+    curl -X PUT https://mail.narro.ch:8443/v1/me/password \
+         -H "Authorization: Bearer LE-TOKEN-RECOPIÉ" \
+         -H 'Content-Type: application/json' \
+         -d '{"current_password":"CELUI-QU-ON-VOUS-A-DONNÉ","password":"LE-VÔTRE"}'
+
+Une réponse vide veut dire que c'est fait. **Ressaisissez alors le nouveau sur
+chacun de vos appareils**, comme à l'étape précédente.
+
+Si le terminal ne vous dit rien, demandez simplement qu'on le change pour vous.
+
+Deux choses, pour être exact sur ce que cela veut dire :
+
+- **personne ne peut LIRE votre mot de passe**, pas même l'administrateur. Le
+  serveur n'en garde qu'une empreinte, dont on ne revient pas ;
+- **l'administrateur peut en POSER un nouveau** sans connaître l'ancien — c'est
+  ce qu'est une réinitialisation, et c'est ce qui vous dépanne si vous perdez le
+  vôtre. Il vous le transmettra alors comme le premier, par un autre canal que le
+  courriel, et vous le remplacerez de nouveau.
+
 ### 2. Vérifier vos réglages
 
 Ils ne changent pas, mais vérifiez qu'ils sont bien ceux-ci :
