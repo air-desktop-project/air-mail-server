@@ -140,6 +140,14 @@ struct Configuration {
   # comme avant ». Une mise à jour ne se met donc à refuser personne.
   requireFqdnHelo @28 :Bool;
 
+  # Exige-t-on un domaine d'EXPÉDITEUR pleinement qualifié ?
+  # `reject_non_fqdn_sender` chez Postfix. Faux par défaut, pour la même raison.
+  requireFqdnSender @29 :Bool;
+
+  # Exige-t-on un domaine de DESTINATAIRE pleinement qualifié ?
+  # `reject_non_fqdn_recipient` chez Postfix. Faux par défaut.
+  requireFqdnRecipient @30 :Bool;
+
   # MTA-STS (RFC 8461) — la politique qu'un domaine publie en HTTPS.
   #
   # **UN CHAMP AJOUTÉ APRÈS COUP DÉCODE DEUX CHAÎNES VIDES**, et deux chaînes

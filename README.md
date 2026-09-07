@@ -2258,8 +2258,53 @@ Proto rend zéro pour un champ absent.
 La grammaire des étiquettes, elle, était déjà tenue par `check_domain`
 (§4.1.2) : l'équivalent de `reject_invalid_helo_hostname` n'a demandé aucun code.
 
-`docs/plan-anti-abus.md` dit ce qui suit, et dans quel ordre : l'expéditeur et le
-destinataire pleinement qualifiés — purs, comme celui-ci —, puis l'existence du
+### Refuser un expéditeur ou un destinataire non qualifié
+
+```sh
+./target/release/air-mail-admin config write air-mail.conf \
+    --domain mail.example.com --hosted example.com \
+    --require-fqdn-sender --require-fqdn-recipient
+```
+
+`reject_non_fqdn_sender` et `reject_non_fqdn_recipient` chez Postfix. Un
+`MAIL FROM:<jean@localhost>` ou un `RCPT TO:<paul@srv>` n'est adressable de nulle
+part : ni la réponse ni le rapport de non-remise n'y reviendront.
+
+**Le prédicat est LE MÊME que celui du `HELO`**, et c'est une seule fonction :
+`Mailbox::domain()` rend précisément le `ClientId` qu'annonce `EHLO`. Trois
+copies auraient fini par diverger, et la divergence aurait été invisible — deux
+contrôles qui ne refusent pas tout à fait la même chose.
+
+**Trois exemptions, et deux sont structurelles :**
+
+- **`<>`** n'a pas de domaine du tout. C'est l'expéditeur des avis de
+  non-remise : le refuser en provoquerait d'autres, refusés à leur tour ;
+- **`<Postmaster>`** sans domaine. §4.1.1.3 de RFC 5321 l'autorise et §4.5.1
+  exige que tout serveur accepte le courrier pour `postmaster` — le refuser
+  comme « non qualifié » violerait un MUST.
+
+Ces deux-là sont des **variantes distinctes** de `Path` : l'exemption ne peut pas
+être oubliée dans une condition qu'on aurait mal écrite.
+
+- **Un pair authentifié** en est exempté aussi, mais celle-ci est une condition.
+  Postfix n'applique pas ces contrôles sur `submission` ni `smtps`. Ce qu'un
+  compte a le droit d'écrire est borné ailleurs, et plus sévèrement : son `From:`
+  **et** son chemin de retour doivent tous deux router vers lui.
+
+**Les deux exigences sont indépendantes**, comme chez Postfix où elles vivent
+dans deux listes distinctes. Et les codes étendus diffèrent — `5.1.8` pour
+l'expéditeur (« Bad sender's system address »), `5.1.3` pour le destinataire
+(« Bad destination mailbox address syntax ») : l'un dit « votre domaine ne peut
+rien recevoir », l'autre « l'adresse que vous visez ne désigne aucune boîte, où
+que ce soit ». Envoyer l'émetteur chercher du mauvais côté lui coûterait des
+heures.
+
+**Le refus précède tout effet**, ici comme au `HELO` : celui de l'expéditeur
+avant l'ouverture de la transaction, celui du destinataire avant le compte de
+destinataires — « trop de destinataires » invite à recommencer, quand une adresse
+non qualifiée ne le sera jamais.
+
+`docs/plan-anti-abus.md` dit ce qui reste, et dans quel ordre : l'existence du
 domaine de l'expéditeur, puis les listes noires DNS. Il dit aussi ce que ces
 contrôles valent honnêtement, et ce qu'ils n'attrapent pas.
 

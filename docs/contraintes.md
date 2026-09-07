@@ -14285,3 +14285,79 @@ une politique — et une politique se règle (C8) plutôt qu'elle ne se grave.
 Sur la route « moi », le contrôle précède la vérification de l'ancien secret :
 refuser d'abord ce qui ne pourrait de toute façon pas être posé épargne un
 Argon2id de dix-neuf mébioctets à qui se trompe de corps.
+
+
+## Trois contrôles qui posent la même question, et une seule fonction
+
+Le `HELO`, l'expéditeur et le destinataire demandent tous les trois : « ce nom
+est-il pleinement qualifié ? » Et `Mailbox::domain()` rend précisément le
+`ClientId` qu'annonce `EHLO` — le même type, sans conversion.
+
+`nom_qualifie` est donc une fonction et trois appelants. Trois copies de ces
+quatre lignes auraient fini par diverger, et **la divergence aurait été
+invisible** : deux contrôles qui ne refusent pas tout à fait la même chose ne
+font échouer aucun essai, ils font seulement passer un courrier ici et le
+refuser là.
+
+### Trois exemptions, et deux sont structurelles
+
+`<>` et `<Postmaster>` sont des VARIANTES distinctes de `Path`, pas des cas
+particuliers d'une adresse. L'exemption tient donc dans un bras de `match`
+plutôt que dans une condition qu'on pourrait mal écrire :
+
+    Path::Null | Path::Postmaster => true,
+
+Ce n'est pas un raffinement. §4.5.1 de RFC 5321 exige que tout serveur accepte
+le courrier pour `postmaster`, et §4.1.1.3 autorise `<Postmaster>` sans domaine :
+le refuser comme « non qualifié » violerait un MUST, et priverait le serveur du
+seul canal par lequel on lui signale qu'il fonctionne mal. `<>`, lui, est
+l'expéditeur des avis de non-remise : le refuser en provoquerait d'autres, qui
+seraient refusés à leur tour.
+
+La troisième — **le pair authentifié** — est une condition, et elle vient de la
+machine réelle : `submission` et `smtps` y écrasent `smtpd_sender_restrictions`
+par `permit_sasl_authenticated`. Appliquer ces contrôles aux comptes refuserait
+du courrier que narro.ch accepte aujourd'hui, ce qui est la régression qu'on
+cherche à éviter, prise dans l'autre sens. Ce qu'un compte a le droit d'écrire
+est d'ailleurs borné ailleurs, et plus sévèrement : son `From:` ET son chemin de
+retour doivent tous deux router vers lui.
+
+### Deux codes étendus qui manquaient
+
+`ams-proto-smtp` n'avait que `5.1.1`, « Bad destination mailbox address » — juste
+pour le destinataire, MENSONGER pour l'expéditeur. Deux constantes s'ajoutent :
+
+- `5.1.8` (`SENDER_SYSTEM`) — « votre domaine ne peut rien recevoir » ;
+- `5.1.3` (`RECIPIENT_SYNTAX`) — « l'adresse que vous visez ne désigne aucune
+  boîte, où que ce soit », à distinguer de `1.1` qui dit « cette boîte-là
+  n'existe pas ».
+
+L'écart n'est pas décoratif : `1.1` invite à vérifier le compte auprès du
+destinataire, `1.3` à relire ce qu'on a tapé. Envoyer l'émetteur chercher du
+mauvais côté lui coûte des heures.
+
+### Le refus précède tout effet, et l'ordre des refus compte
+
+Celui de l'expéditeur est placé AVANT l'ouverture de la transaction : refuser
+après l'avoir ouverte laisserait une transaction entamée que le pair croirait
+close. Un essai le vérifie en constatant qu'un `RCPT` réclame encore un `MAIL`
+après le refus, et déplacer la garde de quelques lignes le fait tomber.
+
+Celui du destinataire est placé AVANT le compte de destinataires, et c'est
+délibéré : « trop de destinataires » est un refus TEMPORAIRE qui invite à
+recommencer, quand une adresse non qualifiée ne le sera jamais. Dire d'abord ce
+qui est définitif épargne au pair une reprise inutile.
+
+### Les deux exigences sont indépendantes
+
+Chez Postfix elles vivent dans deux listes distinctes, et l'une s'applique sans
+l'autre. Un exploitant qui n'en pose qu'une doit obtenir exactement celle-là ;
+les lier serait un durcissement qu'il n'a pas demandé. Deux essais le gardent,
+l'un sur la grammaire de la ligne de commande, l'autre sur le format binaire.
+
+### Un message d'exploitation mal accordé se lit deux fois
+
+La première écriture ne faisait varier que le sujet, et donnait « un EXPÉDITEUR
+et un DESTINATAIRE non qualifié EST refusé ». C'est la proposition ENTIÈRE qui
+varie désormais. Un message que l'exploitant doit relire pour s'assurer de ce
+qu'il dit est un message qui a échoué.

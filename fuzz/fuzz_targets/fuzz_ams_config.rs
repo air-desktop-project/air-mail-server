@@ -143,6 +143,10 @@ struct Entree {
     imap_implicite: bool,
     /// Exige-t-on un `HELO` pleinement qualifié ?
     helo_qualifie: bool,
+    /// Exige-t-on un expéditeur pleinement qualifié ?
+    expediteur_qualifie: bool,
+    /// Exige-t-on un destinataire pleinement qualifié ?
+    destinataire_qualifie: bool,
 }
 
 /// Traduit des écoutes tirées de l'entrée en ce que la configuration retient.
@@ -172,6 +176,8 @@ fuzz_target!(|entree: Entree| {
         pop3_listeners: en_ecoutes(&entree.ecoutes_pop3),
         imap_implicit_tls: entree.imap_implicite,
         require_fqdn_helo: entree.helo_qualifie,
+        require_fqdn_sender: entree.expediteur_qualifie,
+        require_fqdn_recipient: entree.destinataire_qualifie,
         maildir: entree.maildir.clone(),
         hosted: entree.hosted.clone(),
         max_recipients: entree.max_recipients,

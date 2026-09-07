@@ -373,6 +373,14 @@ pub struct Configuration {
     /// **Faux par défaut** : un serveur qui se met à refuser ce qu'il acceptait
     /// hier doit le faire parce que quelqu'un l'a décidé.
     pub require_fqdn_helo: bool,
+    /// Exige-t-on un domaine d'EXPÉDITEUR pleinement qualifié ?
+    ///
+    /// **Faux par défaut**, pour la même raison que le `HELO` : un serveur qui
+    /// se met à refuser ce qu'il acceptait hier doit le faire parce que
+    /// quelqu'un l'a décidé.
+    pub require_fqdn_sender: bool,
+    /// Exige-t-on un domaine de DESTINATAIRE pleinement qualifié ?
+    pub require_fqdn_recipient: bool,
     /// La file d'attente du serveur.
     pub queue: Queue,
     /// MTA-STS (RFC 8461).
@@ -873,6 +881,8 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
         // **UN FICHIER ÉCRIT AVANT CE CHAMP DÉCODE FAUX**, et faux veut dire
         // « on accepte comme avant » : une mise à jour ne refuse personne.
         require_fqdn_helo: lu.get_require_fqdn_helo(),
+        require_fqdn_sender: lu.get_require_fqdn_sender(),
+        require_fqdn_recipient: lu.get_require_fqdn_recipient(),
         queue,
         mtasts,
         tlsrpt,
@@ -1011,6 +1021,8 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
         ecrit.set_listen_h3(&config.listen_h3);
         ecrit.set_token_key(&config.token_key);
         ecrit.set_require_fqdn_helo(config.require_fqdn_helo);
+        ecrit.set_require_fqdn_sender(config.require_fqdn_sender);
+        ecrit.set_require_fqdn_recipient(config.require_fqdn_recipient);
         {
             let mut emission = ecrit.reborrow().init_relay();
             emission.set_enabled(config.relay.enabled);
@@ -1215,6 +1227,8 @@ mod tests {
             listen: String::from("127.0.0.1:2525"),
             // Le témoin n'exige rien : c'est le défaut du produit.
             require_fqdn_helo: false,
+            require_fqdn_sender: false,
+            require_fqdn_recipient: false,
             // Les trois écoutes d'un serveur réel : le `25` et le `587` en
             // `STARTTLS`, le `465` en TLS implicite.
             smtp_listeners: vec![
@@ -2105,6 +2119,32 @@ mod tests {
     /// zéro pour un champ absent, et zéro vaut `false` : une configuration
     /// d'hier continue d'accepter ce qu'elle acceptait hier. C'est la seule
     /// valeur par défaut acceptable pour un refus.
+    /// Les deux exigences d'enveloppe traversent le format, et INDÉPENDAMMENT.
+    ///
+    /// Une seule des deux posée doit se relire seule : chez Postfix elles vivent
+    /// dans deux listes distinctes, et un exploitant qui n'en pose qu'une doit
+    /// obtenir exactement celle-là.
+    #[test]
+    fn les_exigences_d_enveloppe_traversent_le_format() {
+        for (expediteur, destinataire) in [(true, true), (true, false), (false, true)] {
+            let config = Configuration {
+                require_fqdn_sender: expediteur,
+                require_fqdn_recipient: destinataire,
+                ..exemple()
+            };
+            let relue = decode(&encode(&config).expect("encodable")).expect("relisible");
+            assert_eq!(relue.require_fqdn_sender, expediteur);
+            assert_eq!(relue.require_fqdn_recipient, destinataire);
+            assert_eq!(relue, config);
+        }
+
+        // Et le défaut se relit faux des deux côtés — un fichier écrit avant ces
+        // champs continue d'accepter ce qu'il acceptait.
+        let muette = decode(&encode(&exemple()).expect("encodable")).expect("relisible");
+        assert!(!muette.require_fqdn_sender);
+        assert!(!muette.require_fqdn_recipient);
+    }
+
     #[test]
     fn l_exigence_de_helo_qualifie_traverse_le_format() {
         let config = Configuration {

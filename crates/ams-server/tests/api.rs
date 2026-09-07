@@ -202,6 +202,8 @@ fn configuration_complete(
     let config = Configuration {
         // Ces essais portent sur le transport, pas sur l'enveloppe.
         require_fqdn_helo: false,
+        require_fqdn_sender: false,
+        require_fqdn_recipient: false,
         // Une seule écoute, en `STARTTLS` : la liste vide dirait la même
         // chose, et l'écrire ici la rend lisible.
         smtp_listeners: Vec::new(),

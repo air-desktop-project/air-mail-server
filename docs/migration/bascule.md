@@ -120,6 +120,7 @@ Le paquet **n'active ni ne démarre le service** — c'est délibéré, et
         --relay --queue-spool /var/spool/ams/file \
         --queue-expire-seconds 86400 \
         --require-fqdn-helo \
+        --require-fqdn-sender --require-fqdn-recipient \
         --listen-http 0.0.0.0:8443 \
         --dkim-selector mail --dkim-key /var/lib/rspamd/dkim/narro.ch.mail.key \
         --resolver 127.0.0.53 \
@@ -173,12 +174,22 @@ découvrir fermé ferait croire à une panne du serveur :
     #   sudo ufw allow 8443/tcp        # si ufw est en service sur la machine
     # et le groupe de sécurité OVH, qui se règle depuis leur console.
 
-**`--require-fqdn-helo` N'EST PAS UN DURCISSEMENT**, c'est une restauration :
-l'inventaire montre `reject_non_fqdn_helo_hostname` dans les
-`smtpd_helo_restrictions` de Postfix. L'omettre rendrait le remplaçant PLUS
-PERMISSIF que le remplacé le jour de la bascule, et un serveur plus permissif
-n'alerte personne — il encaisse. `docs/plan-anti-abus.md` porte les trois autres
-contrôles que Postfix applique et que le produit ne sait pas encore rendre.
+**LES TROIS `--require-fqdn-*` NE SONT PAS DES DURCISSEMENTS**, ce sont des
+restaurations :
+l'inventaire montre `reject_non_fqdn_helo_hostname`,
+`reject_non_fqdn_sender` et `reject_non_fqdn_recipient` dans les restrictions de
+Postfix. Les omettre rendrait le remplaçant PLUS PERMISSIF que le remplacé le
+jour de la bascule, et un serveur plus permissif n'alerte personne — il encaisse.
+
+Les trois exemptions valent ici aussi, et deux d'entre elles comptent pour
+narro.ch : `<>` laisse passer les avis de non-remise, et `<Postmaster>` sans
+domaine reste joignable — c'est le compte `contact`, qui porte `postmaster@`.
+Les cinq comptes, eux, sont AUTHENTIFIÉS quand ils émettent, donc exemptés :
+rien de ce qu'ils envoient aujourd'hui ne se met à être refusé.
+
+Il reste un contrôle que Postfix applique et que le produit ne sait pas encore
+rendre — `reject_unknown_sender_domain`, qui demande un aller-retour DNS.
+`docs/plan-anti-abus.md` le porte, avec les listes noires.
 
 | | |
 |---|---|

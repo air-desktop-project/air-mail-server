@@ -972,6 +972,26 @@ async fn servir(fichier: &Path) -> Result<(), String> {
              comparé à l'adresse du pair : §4.1.4 de RFC 5321 l'interdit."
         );
     }
+    let config = config
+        .with_fqdn_sender(options.require_fqdn_sender)
+        .with_fqdn_recipient(options.require_fqdn_recipient);
+    if options.require_fqdn_sender || options.require_fqdn_recipient {
+        // **LA PROPOSITION ENTIÈRE VARIE, ET PAS SEULEMENT LE SUJET.** Un
+        // gabarit qui ne changeait que le nom donnait « un EXPÉDITEUR et un
+        // DESTINATAIRE non qualifié EST refusé ». Un message d'exploitation mal
+        // accordé se lit deux fois, et la seconde on doute de ce qu'il dit.
+        let quoi = match (options.require_fqdn_sender, options.require_fqdn_recipient) {
+            (true, true) => "un EXPÉDITEUR et un DESTINATAIRE NON QUALIFIÉS sont refusés",
+            (true, false) => "un EXPÉDITEUR NON QUALIFIÉ est refusé",
+            _ => "un DESTINATAIRE NON QUALIFIÉ est refusé",
+        };
+        eprintln!(
+            "air-mail-server : {quoi} (550). `<>`, `<Postmaster>` sans \
+             domaine et les pairs AUTHENTIFIÉS en sont exemptés — les deux premiers parce que \
+             §4.5.1 de RFC 5321 l'exige, le troisième parce que ce qu'un compte a le droit \
+             d'écrire est borné ailleurs, et plus sévèrement."
+        );
+    }
     // **UN COMPTEUR ÉTEINT QU'ON CROIT ALLUMÉ EST PIRE QU'UN COMPTEUR ABSENT.**
     // Ce seuil a été AJOUTÉ au schéma : une configuration écrite avant lui décode
     // zéro, et zéro l'éteint. L'exploitant doit l'apprendre au démarrage, et non

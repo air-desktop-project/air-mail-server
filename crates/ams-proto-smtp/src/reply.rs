@@ -219,6 +219,33 @@ impl Status {
         subject: 1,
         detail: 1,
     };
+    /// `5.1.3` — la SYNTAXE de l'adresse de destination est mauvaise.
+    ///
+    /// **À distinguer de `5.1.1`**, qui dit « cette boîte n'existe pas » : le
+    /// `1.3` dit que ce qu'on a écrit ne peut désigner AUCUNE boîte, où que ce
+    /// soit. C'est ce que rend un `RCPT TO:<paul@srv>` quand on exige un nom
+    /// pleinement qualifié — `srv` n'est adressable de nulle part.
+    ///
+    /// L'écart compte pour l'émetteur : `1.1` invite à vérifier le compte
+    /// auprès du destinataire, `1.3` à relire ce qu'on a tapé.
+    pub const RECIPIENT_SYNTAX: Self = Self {
+        class: 5,
+        subject: 1,
+        detail: 3,
+    };
+    /// `5.1.8` — le SYSTÈME de l'expéditeur est mauvais (RFC 3463 §3.2).
+    ///
+    /// « Bad sender's system address » : la partie DROITE du `MAIL FROM:` ne
+    /// désigne pas un système auquel on saurait répondre. Un `1.7`, lui, dirait
+    /// que c'est l'adresse de la boîte qui est en cause, et non son domaine.
+    ///
+    /// C'est le code des deux contrôles d'expéditeur : le nom non qualifié, et
+    /// le domaine qui n'existe pas.
+    pub const SENDER_SYSTEM: Self = Self {
+        class: 5,
+        subject: 1,
+        detail: 8,
+    };
     /// `5.7.1` — refusé par la politique.
     pub const POLICY: Self = Self {
         class: 5,

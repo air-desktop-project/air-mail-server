@@ -167,6 +167,10 @@ pub struct Options {
     pub relay: bool,
     /// Exige-t-on un `HELO`/`EHLO` pleinement qualifié ?
     pub require_fqdn_helo: bool,
+    /// Refuser un `MAIL FROM:` dont le domaine n'est pas pleinement qualifié.
+    pub require_fqdn_sender: bool,
+    /// Refuser un `RCPT TO:` dont le domaine n'est pas pleinement qualifié.
+    pub require_fqdn_recipient: bool,
     /// Le RELAIS DE SORTIE, sous la forme `hôte:port`.
     ///
     /// Vide veut dire « remise directe », et c'est le défaut.
@@ -290,6 +294,8 @@ impl Default for Options {
             queue_expire: 0,
             queue_warn: 0,
             require_fqdn_helo: false,
+            require_fqdn_sender: false,
+            require_fqdn_recipient: false,
             relayhost: None,
             relayhost_implicit_tls: false,
             relayhost_user: None,
@@ -415,6 +421,8 @@ impl Options {
                 cache: chemin(self.mtasts_cache.as_ref()),
             },
             require_fqdn_helo: self.require_fqdn_helo,
+            require_fqdn_sender: self.require_fqdn_sender,
+            require_fqdn_recipient: self.require_fqdn_recipient,
             relay: ams_config::Relay {
                 enabled: self.relay,
                 relayhost: relais.0,
@@ -600,7 +608,7 @@ OPTIONS DE `config write`
     --mta-sts-anchors <chemin>          les autorités, en PEM (défaut : non évalué)
     --mta-sts-cache <chemin>            le dossier des politiques (EXIGÉ avec le premier)
 
-    LA FILE DE RÉÉMISSION SORTANTE
+    LES CONTRÔLES D'ENVELOPPE — ce que Postfix refuse avant tout filtre
     --require-fqdn-helo                 REFUSER un `HELO`/`EHLO` qui n'est pas
                                         pleinement qualifié
 
@@ -621,6 +629,33 @@ OPTIONS DE `config write`
     FAUX PAR DÉFAUT : un serveur qui se met à refuser ce qu'il acceptait hier
     doit le faire parce que quelqu'un l'a décidé.
 
+    --require-fqdn-sender               REFUSER un `MAIL FROM:` dont le domaine
+                                        n'est pas pleinement qualifié
+    --require-fqdn-recipient            REFUSER un `RCPT TO:` dont le domaine
+                                        n'est pas pleinement qualifié
+
+    `reject_non_fqdn_sender` et `reject_non_fqdn_recipient` chez Postfix. Un
+    `jean@localhost` ou un `paul@srv` n'est adressable de nulle part : rien n'y
+    revient, ni la réponse, ni le rapport de non-remise.
+
+    LES DEUX SONT INDÉPENDANTES, comme chez Postfix, où elles vivent dans deux
+    listes distinctes.
+
+    TROIS EXEMPTIONS, ET AUCUNE N'EST FACULTATIVE :
+      - `<>`, l'expéditeur des avis de non-remise. Le refuser en provoquerait
+        d'autres, qui seraient refusés à leur tour ;
+      - `<Postmaster>` sans domaine. §4.1.1.3 de RFC 5321 l'autorise et §4.5.1
+        exige que tout serveur accepte le courrier pour `postmaster` : le
+        refuser violerait un MUST ;
+      - un pair AUTHENTIFIÉ. Postfix n'applique pas ces contrôles sur
+        `submission` ni `smtps`. Ce qu'un compte a le droit d'écrire est borné
+        ailleurs, et plus sévèrement : son `From:` et son chemin de retour
+        doivent tous deux router vers lui.
+
+    Un littéral d'adresse est qualifié, ici comme au `HELO`. FAUX PAR DÉFAUT,
+    toutes les deux.
+
+    LA FILE DE RÉÉMISSION SORTANTE
     --relay                             émettre pour les comptes authentifiés
 
 
@@ -1339,6 +1374,8 @@ where
             // ── La file de réémission sortante ──────────────────────────────
             "--relay" => options.relay = true,
             "--require-fqdn-helo" => options.require_fqdn_helo = true,
+            "--require-fqdn-sender" => options.require_fqdn_sender = true,
+            "--require-fqdn-recipient" => options.require_fqdn_recipient = true,
             "--relayhost" => options.relayhost = Some(valeur()?),
             "--relayhost-implicit-tls" => options.relayhost_implicit_tls = true,
             "--relayhost-user" => options.relayhost_user = Some(valeur()?),
@@ -3355,6 +3392,29 @@ mod tests {
     /// serveur ne doit se mettre à en refuser que parce que quelqu'un l'a
     /// écrit. L'essai tient donc les deux moitiés : posé, il vaut vrai ; absent,
     /// il vaut faux, et la configuration écrite le porte jusqu'au fichier.
+    /// Les deux exigences d'enveloppe se posent, séparément, et ne s'inventent
+    /// pas.
+    ///
+    /// **SÉPARÉMENT EST LE POINT** : chez Postfix elles vivent dans deux listes
+    /// distinctes, et un exploitant qui n'en pose qu'une doit obtenir exactement
+    /// celle-là. Les lier serait un durcissement qu'il n'a pas demandé.
+    #[test]
+    fn les_exigences_d_enveloppe_se_posent_separement() {
+        let expediteur = ecrire(&["--require-fqdn-sender"]);
+        assert!(expediteur.require_fqdn_sender);
+        assert!(!expediteur.require_fqdn_recipient, "l'autre ne suit pas");
+        assert!(expediteur.en_configuration().require_fqdn_sender);
+
+        let destinataire = ecrire(&["--require-fqdn-recipient"]);
+        assert!(destinataire.require_fqdn_recipient);
+        assert!(!destinataire.require_fqdn_sender, "l'autre ne suit pas");
+        assert!(destinataire.en_configuration().require_fqdn_recipient);
+
+        let tu = ecrire(&[]);
+        assert!(!tu.require_fqdn_sender, "le défaut n'exige rien");
+        assert!(!tu.require_fqdn_recipient);
+    }
+
     #[test]
     fn l_exigence_de_helo_qualifie_se_pose_et_ne_s_invente_pas() {
         let pose = ecrire(&["--require-fqdn-helo"]);

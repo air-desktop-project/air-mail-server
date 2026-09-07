@@ -102,6 +102,10 @@ pub struct Config<'a> {
     /// Faux par défaut : un serveur qui se met à refuser ce qu'il acceptait
     /// hier doit le faire parce que quelqu'un l'a décidé.
     require_fqdn_helo: bool,
+    /// Exige-t-on un domaine d'EXPÉDITEUR pleinement qualifié ?
+    require_fqdn_sender: bool,
+    /// Exige-t-on un domaine de DESTINATAIRE pleinement qualifié ?
+    require_fqdn_recipient: bool,
 }
 
 impl<'a> Config<'a> {
@@ -141,6 +145,8 @@ impl<'a> Config<'a> {
             capabilities: Capabilities::default(),
             sender_policy: SenderPolicy::default(),
             require_fqdn_helo: false,
+            require_fqdn_sender: false,
+            require_fqdn_recipient: false,
         })
     }
 
@@ -187,6 +193,46 @@ impl<'a> Config<'a> {
     #[must_use]
     pub fn require_fqdn_helo(&self) -> bool {
         self.require_fqdn_helo
+    }
+
+    /// Exige un domaine d'EXPÉDITEUR pleinement qualifié.
+    ///
+    /// `reject_non_fqdn_sender` chez Postfix. Un `MAIL FROM:<jean@localhost>`
+    /// annonce une adresse à laquelle rien ne peut revenir : ni le rapport de
+    /// non-remise, ni la réponse du destinataire.
+    ///
+    /// **UN PAIR AUTHENTIFIÉ EN EST EXEMPTÉ**, comme chez Postfix, dont les
+    /// services `submission` et `smtps` écrasent `smtpd_sender_restrictions`.
+    /// L'appliquer aussi à eux refuserait du courrier que le serveur remplacé
+    /// accepte — la régression qu'on cherche à éviter, dans l'autre sens.
+    #[must_use]
+    pub fn with_fqdn_sender(mut self, exige: bool) -> Self {
+        self.require_fqdn_sender = exige;
+        self
+    }
+
+    /// L'expéditeur doit-il être pleinement qualifié ?
+    #[must_use]
+    pub fn require_fqdn_sender(&self) -> bool {
+        self.require_fqdn_sender
+    }
+
+    /// Exige un domaine de DESTINATAIRE pleinement qualifié.
+    ///
+    /// `reject_non_fqdn_recipient` chez Postfix. **Et `<Postmaster>` sans
+    /// domaine en est exempté** : §4.1.1.3 de RFC 5321 l'autorise et §4.5.1
+    /// exige que tout serveur accepte le courrier pour `postmaster`. Le refuser
+    /// comme « non qualifié » violerait un MUST.
+    #[must_use]
+    pub fn with_fqdn_recipient(mut self, exige: bool) -> Self {
+        self.require_fqdn_recipient = exige;
+        self
+    }
+
+    /// Le destinataire doit-il être pleinement qualifié ?
+    #[must_use]
+    pub fn require_fqdn_recipient(&self) -> bool {
+        self.require_fqdn_recipient
     }
 
     /// Le nom que le serveur annonce.

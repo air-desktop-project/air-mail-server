@@ -650,6 +650,17 @@ fn afficher(config: &Configuration) {
         }
     );
     println!(
+        "enveloppe          {}",
+        match (config.require_fqdn_sender, config.require_fqdn_recipient) {
+            // **CHAQUE REFUS SE DIT**, et séparément : les deux exigences sont
+            // indépendantes, et n'en montrer qu'une laisserait croire à l'autre.
+            (false, false) => "aucune exigence — tout domaine de la grammaire est accepté",
+            (true, false) => "EXPÉDITEUR pleinement qualifié exigé (550)",
+            (false, true) => "DESTINATAIRE pleinement qualifié exigé (550)",
+            (true, true) => "EXPÉDITEUR et DESTINATAIRE pleinement qualifiés exigés (550)",
+        }
+    );
+    println!(
         "rapports TLS       {}",
         match (config.tlsrpt.compose(), config.tlsrpt.envoie()) {
             (false, _) => String::from("AUCUN — aucun dossier nommé"),

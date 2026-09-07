@@ -310,6 +310,30 @@ fn decimal_u64(octets: &[u8]) -> Option<u64> {
 /// défaut silencieux, c'est la réponse juste quand on n'a rien de plus précis à
 /// dire. La CLASSE, elle, n'est jamais devinée — elle vient du code à trois
 /// chiffres, et [`Status::agrees_with`] le vérifie.
+/// Ce nom est-il PLEINEMENT QUALIFIÉ ?
+///
+/// **UN LITTÉRAL D'ADRESSE L'EST TOUJOURS.** §4.1.4 de RFC 5321 le RECOMMANDE à
+/// qui n'a pas de nom — « an address literal SHOULD be substituted for the
+/// domain name » — et §4.1.2 l'admet dans un chemin d'enveloppe. Refuser ce que
+/// la RFC conseille reviendrait à refuser les émetteurs les mieux intentionnés.
+///
+/// **UN NOM SANS POINT NE L'EST PAS.** `localhost`, `mail`, `pc-de-jean` : rien
+/// n'y revient depuis l'extérieur. La grammaire des étiquettes, elle, est déjà
+/// tenue ailleurs — ici on ne juge que la qualification.
+///
+/// # UNE SEULE FONCTION POUR TROIS CONTRÔLES
+///
+/// Le `HELO`, l'expéditeur et le destinataire posent la MÊME question, et
+/// `Mailbox::domain()` rend précisément le type qu'annonce `EHLO`. Trois copies
+/// de ces quatre lignes finiraient par diverger, et la divergence serait
+/// invisible : deux contrôles qui ne refuseraient pas tout à fait la même chose.
+fn nom_qualifie(id: &ClientId<'_>) -> bool {
+    match id {
+        ClientId::AddressLiteral(_) => true,
+        ClientId::Domain(nom) => nom.contains(&b'.'),
+    }
+}
+
 fn statut_de(code: Code, texte: &[u8]) -> Option<Status> {
     let precis = match texte {
         b"Sender ok" => Some(Status::SENDER_OK),
@@ -321,6 +345,13 @@ fn statut_de(code: Code, texte: &[u8]) -> Option<Status> {
         | b"Message rejected"
         | b"Encryption required for authentication"
         | b"Authentication credentials invalid" => Some(Status::POLICY),
+        // **DEUX CODES DISTINCTS, ET C'EST L'ÉMETTEUR QUI EN PROFITE** : le
+        // `1.8` dit « votre domaine ne peut rien recevoir », le `1.3` dit
+        // « l'adresse que vous visez ne désigne aucune boîte, où que ce soit ».
+        b"Sender address rejected: need fully-qualified address" => Some(Status::SENDER_SYSTEM),
+        b"Recipient address rejected: need fully-qualified address" => {
+            Some(Status::RECIPIENT_SYNTAX)
+        }
         b"Unrecognized authentication type" | b"Authentication aborted" => Some(Status::SECURITY),
         b"Mailbox busy, try again later" => Some(Status::MAILBOX_BUSY),
         b"Too many recipients" => Some(Status::TOO_MANY_RECIPIENTS),
@@ -1175,12 +1206,34 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     /// « if the verification fails, the server MUST NOT refuse to accept a
     /// message on that basis. » Ce contrôle est de forme, pas de véracité.
     fn helo_recevable(&self, client_id: &ClientId<'_>) -> bool {
-        if !self.config.require_fqdn_helo() {
+        !self.config.require_fqdn_helo() || nom_qualifie(client_id)
+    }
+
+    /// Ce chemin d'enveloppe porte-t-il un domaine pleinement qualifié ?
+    ///
+    /// # TROIS EXEMPTIONS, ET DEUX SONT STRUCTURELLES
+    ///
+    /// - **`<>`** n'a pas de domaine du tout. C'est l'expéditeur des avis de
+    ///   non-remise, qui doivent passer sous peine d'en provoquer d'autres.
+    /// - **`<Postmaster>`** sans domaine : §4.1.1.3 de RFC 5321 l'autorise, et
+    ///   §4.5.1 exige que tout serveur accepte le courrier pour `postmaster`.
+    ///   Le refuser comme « non qualifié » violerait un MUST.
+    ///
+    /// Ces deux-là sont des VARIANTES distinctes de [`Path`] : l'exemption ne
+    /// peut donc pas être oubliée dans une condition qu'on aurait mal écrite.
+    ///
+    /// - **Le pair authentifié** en est exempté aussi, mais celle-ci est une
+    ///   condition. Postfix n'applique pas ces contrôles sur `submission` ni
+    ///   `smtps`, dont les services écrasent `smtpd_sender_restrictions` par
+    ///   `permit_sasl_authenticated`. Les appliquer partout refuserait du
+    ///   courrier que le serveur remplacé accepte aujourd'hui.
+    fn chemin_qualifie(&self, chemin: &Path<'_>, exige: bool) -> bool {
+        if !exige || self.authenticated {
             return true;
         }
-        match client_id {
-            ClientId::AddressLiteral(_) => true,
-            ClientId::Domain(nom) => nom.contains(&b'.'),
+        match chemin {
+            Path::Null | Path::Postmaster => true,
+            Path::Mailbox(boite) => nom_qualifie(&boite.domain()),
         }
     }
 
@@ -1265,6 +1318,17 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
                             );
                         }
                     }
+                }
+                // **LE REFUS PRÉCÈDE L'OUVERTURE DE LA TRANSACTION**, pour
+                // la même raison que les paramètres se trient avant elle :
+                // refuser après l'avoir ouverte laisserait une transaction
+                // entamée que le pair croirait close.
+                if !self.chemin_qualifie(reverse_path, self.config.require_fqdn_sender()) {
+                    return self.refus(
+                        Code::MAILBOX_UNAVAILABLE,
+                        b"Sender address rejected: need fully-qualified address",
+                        out,
+                    );
                 }
                 self.phase = Phase::Transaction {
                     recipients: 0,
@@ -1714,6 +1778,17 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         else {
             return self.refus(Code::BAD_SEQUENCE, b"Need MAIL before RCPT", out);
         };
+        // **AVANT LE COMPTE DE DESTINATAIRES, ET C'EST DÉLIBÉRÉ** : « trop de
+        // destinataires » est un refus TEMPORAIRE qui invite à recommencer,
+        // quand une adresse non qualifiée ne le sera jamais. Dire d'abord ce
+        // qui est définitif épargne au pair une reprise inutile.
+        if !self.chemin_qualifie(forward_path, self.config.require_fqdn_recipient()) {
+            return self.refus(
+                Code::MAILBOX_UNAVAILABLE,
+                b"Recipient address rejected: need fully-qualified address",
+                out,
+            );
+        }
         if recipients >= self.config.max_recipients() {
             return self.simple(Code::TOO_MANY_RECIPIENTS, b"Too many recipients", out);
         }
@@ -4754,5 +4829,182 @@ mod tests {
             ),
             Some(Status::POLICY)
         );
+    }
+
+    // ── L'expéditeur et le destinataire qualifiés ───────────────────────────
+
+    /// Une session qui exige les deux, et qui accepte tout destinataire.
+    fn exigeante_sur_l_enveloppe() -> SmtpSession<'static, Verdict> {
+        SmtpSession::new(
+            config().with_fqdn_sender(true).with_fqdn_recipient(true),
+            Verdict(RecipientVerdict::Accept),
+        )
+    }
+
+    /// Amène la session jusqu'à l'état identifié.
+    fn identifiee(session: &mut SmtpSession<'_, Verdict>) {
+        assert!(jouer(session, b"EHLO client.example\r\n").starts_with("250"));
+    }
+
+    #[test]
+    fn un_expediteur_non_qualifie_est_refuse() {
+        let mut session = exigeante_sur_l_enveloppe();
+        identifiee(&mut session);
+        for nu in [
+            &b"MAIL FROM:<jean@localhost>\r\n"[..],
+            b"MAIL FROM:<jean@srv>\r\n",
+        ] {
+            let reponse = jouer(&mut session, nu);
+            assert!(
+                reponse.starts_with("550 5.1.8 Sender address rejected"),
+                "{reponse}"
+            );
+        }
+        // ET LA TRANSACTION N'EST PAS OUVERTE : un `RCPT` doit encore réclamer
+        // un `MAIL`. Refuser après avoir ouvert laisserait le pair croire close
+        // une transaction entamée.
+        assert!(
+            jouer(&mut session, b"RCPT TO:<paul@example.com>\r\n")
+                .starts_with("503 5.5.0 Need MAIL before RCPT"),
+            "la transaction ne doit pas s'être ouverte"
+        );
+    }
+
+    #[test]
+    fn un_destinataire_non_qualifie_est_refuse() {
+        let mut session = exigeante_sur_l_enveloppe();
+        identifiee(&mut session);
+        jouer(&mut session, b"MAIL FROM:<jean@client.example>\r\n");
+        let reponse = jouer(&mut session, b"RCPT TO:<paul@srv>\r\n");
+        assert!(
+            reponse.starts_with("550 5.1.3 Recipient address rejected"),
+            "{reponse}"
+        );
+        // La transaction survit : un destinataire refusé n'est pas une
+        // transaction perdue, et le pair peut en nommer un autre.
+        assert!(jouer(&mut session, b"RCPT TO:<paul@example.com>\r\n").starts_with("250"));
+        assert_eq!(destinataires(&session), ["paul@example.com"]);
+    }
+
+    /// **LES DEUX CODES ÉTENDUS DIFFÈRENT, ET C'EST L'ÉMETTEUR QUI EN PROFITE.**
+    ///
+    /// `5.1.8` dit « votre domaine ne peut rien recevoir » et `5.1.3` « l'adresse
+    /// que vous visez ne désigne aucune boîte, où que ce soit ». Les confondre
+    /// enverrait l'émetteur chercher du côté du destinataire une faute qui est
+    /// dans sa propre configuration.
+    #[test]
+    fn les_deux_refus_ne_portent_pas_le_meme_code_etendu() {
+        assert_eq!(
+            super::statut_de(
+                Code::MAILBOX_UNAVAILABLE,
+                b"Sender address rejected: need fully-qualified address"
+            ),
+            Some(Status::SENDER_SYSTEM)
+        );
+        assert_eq!(
+            super::statut_de(
+                Code::MAILBOX_UNAVAILABLE,
+                b"Recipient address rejected: need fully-qualified address"
+            ),
+            Some(Status::RECIPIENT_SYNTAX)
+        );
+        assert_ne!(Status::SENDER_SYSTEM, Status::RECIPIENT_SYNTAX);
+    }
+
+    /// **`<>` PASSE TOUJOURS**, et l'exemption est structurelle.
+    ///
+    /// C'est l'expéditeur des avis de non-remise. Le refuser en provoquerait
+    /// d'autres, qui seraient refusés à leur tour.
+    #[test]
+    fn le_chemin_nul_passe_l_exigence() {
+        let mut session = exigeante_sur_l_enveloppe();
+        identifiee(&mut session);
+        assert!(jouer(&mut session, b"MAIL FROM:<>\r\n").starts_with("250"));
+    }
+
+    /// **`<Postmaster>` SANS DOMAINE PASSE TOUJOURS.**
+    ///
+    /// §4.1.1.3 de RFC 5321 l'autorise, et §4.5.1 exige que tout serveur accepte
+    /// le courrier pour `postmaster`. Le refuser comme « non qualifié »
+    /// violerait un MUST — et priverait le serveur du seul canal par lequel on
+    /// signale qu'il fonctionne mal.
+    #[test]
+    fn postmaster_sans_domaine_passe_l_exigence() {
+        let mut session = exigeante_sur_l_enveloppe();
+        identifiee(&mut session);
+        jouer(&mut session, b"MAIL FROM:<jean@client.example>\r\n");
+        let reponse = jouer(&mut session, b"RCPT TO:<Postmaster>\r\n");
+        assert!(reponse.starts_with("250"), "{reponse}");
+    }
+
+    /// Un littéral d'adresse est qualifié, dans un chemin comme au `HELO`.
+    #[test]
+    fn un_litteral_d_adresse_qualifie_un_chemin() {
+        let mut session = exigeante_sur_l_enveloppe();
+        identifiee(&mut session);
+        assert!(jouer(&mut session, b"MAIL FROM:<jean@[192.0.2.1]>\r\n").starts_with("250"));
+        assert!(jouer(&mut session, b"RCPT TO:<paul@[192.0.2.9]>\r\n").starts_with("250"));
+    }
+
+    /// L'exigence est un CHOIX : par défaut, rien n'est refusé.
+    #[test]
+    fn sans_l_exigence_l_enveloppe_nue_passe() {
+        let mut session = acceptante();
+        identifiee(&mut session);
+        assert!(jouer(&mut session, b"MAIL FROM:<jean@localhost>\r\n").starts_with("250"));
+        assert!(jouer(&mut session, b"RCPT TO:<paul@srv>\r\n").starts_with("250"));
+    }
+
+    /// **UN PAIR AUTHENTIFIÉ EN EST EXEMPTÉ**, et ce n'est pas un relâchement.
+    ///
+    /// Postfix n'applique PAS ces contrôles sur `submission` ni sur `smtps` :
+    /// les deux services y écrasent `smtpd_sender_restrictions` par
+    /// `reject_sender_login_mismatch, permit_sasl_authenticated, reject`. Les
+    /// appliquer partout refuserait du courrier que le serveur remplacé accepte
+    /// aujourd'hui — la régression qu'on cherche à éviter, dans l'autre sens.
+    ///
+    /// Ce qu'un compte authentifié a le droit d'écrire est borné AILLEURS, et
+    /// plus sévèrement : son `From:` et son chemin de retour doivent tous deux
+    /// router vers lui.
+    #[test]
+    fn un_pair_authentifie_est_exempte_des_deux_exigences() {
+        let mut session = SmtpSession::new(
+            config().with_fqdn_sender(true).with_fqdn_recipient(true),
+            Verdict(RecipientVerdict::Accept),
+        );
+        session.on_tls_established();
+        identifiee(&mut session);
+        assert!(
+            jouer(&mut session, b"AUTH PLAIN AGplYW4Ab3V2cmUtdG9p\r\n").starts_with("235"),
+            "l'essai doit d'abord s'authentifier"
+        );
+
+        assert!(jouer(&mut session, b"MAIL FROM:<jean@localhost>\r\n").starts_with("250"));
+        assert!(jouer(&mut session, b"RCPT TO:<paul@srv>\r\n").starts_with("250"));
+    }
+
+    /// **LES DEUX EXIGENCES SONT INDÉPENDANTES.**
+    ///
+    /// Chez Postfix elles vivent dans deux listes distinctes —
+    /// `smtpd_sender_restrictions` et `smtpd_recipient_restrictions` — et l'une
+    /// s'applique sans l'autre. Un exploitant qui n'en pose qu'une doit obtenir
+    /// exactement celle-là.
+    #[test]
+    fn les_deux_exigences_ne_se_commandent_pas() {
+        let seul_expediteur = config().with_fqdn_sender(true);
+        let mut session = SmtpSession::new(seul_expediteur, Verdict(RecipientVerdict::Accept));
+        identifiee(&mut session);
+        assert!(jouer(&mut session, b"MAIL FROM:<jean@localhost>\r\n").starts_with("550"));
+        assert!(jouer(&mut session, b"MAIL FROM:<jean@client.example>\r\n").starts_with("250"));
+        assert!(
+            jouer(&mut session, b"RCPT TO:<paul@srv>\r\n").starts_with("250"),
+            "le destinataire n'est pas exigé ici"
+        );
+
+        let seul_destinataire = config().with_fqdn_recipient(true);
+        let mut session = SmtpSession::new(seul_destinataire, Verdict(RecipientVerdict::Accept));
+        identifiee(&mut session);
+        assert!(jouer(&mut session, b"MAIL FROM:<jean@localhost>\r\n").starts_with("250"));
+        assert!(jouer(&mut session, b"RCPT TO:<paul@srv>\r\n").starts_with("550"));
     }
 }

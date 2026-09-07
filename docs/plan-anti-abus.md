@@ -29,8 +29,8 @@ Six, et voici ce que chacun devient :
 |---|---|
 | `reject_invalid_helo_hostname` | **déjà là** — `check_domain` tient §4.1.2 |
 | `reject_non_fqdn_helo_hostname` | **fait** — `--require-fqdn-helo` |
-| `reject_non_fqdn_sender` | à écrire, pur (§4 ci-dessous) |
-| `reject_non_fqdn_recipient` | à écrire, pur (§4 ci-dessous) |
+| `reject_non_fqdn_sender` | **fait** — `--require-fqdn-sender` |
+| `reject_non_fqdn_recipient` | **fait** — `--require-fqdn-recipient` |
 | `reject_unknown_sender_domain` | à écrire, demande le DNS (§3) |
 | `reject_unknown_recipient_domain` | **sans objet** — le serveur connaît ses domaines hébergés, et refuse déjà ce qui n'en est pas |
 
@@ -70,7 +70,7 @@ la bascule, le remplaçant ne doit pas être plus permissif que le remplacé ; c
 qu'il ferait de mieux peut attendre le lendemain.
 
 1. Le `HELO`/`EHLO` qualifié — **fait**. Pur, aucune entrée-sortie.
-2. L'expéditeur et le destinataire qualifiés — purs eux aussi, même prédicat.
+2. L'expéditeur et le destinataire qualifiés — **faits**, même prédicat.
 3. L'existence du domaine de l'expéditeur — un aller-retour DNS, sur une action
    qui existe déjà.
 4. Les listes noires DNS — la seule pièce qui n'est pas une restauration, et la
@@ -107,7 +107,7 @@ La grammaire de §4.1.2 était déjà tenue par `check_domain` : l'équivalent d
 quelqu'un l'a écrit — et un fichier de configuration écrit avant ce champ le
 relit faux, puisque Cap'n Proto rend zéro pour un champ absent.
 
-## 2. L'expéditeur et le destinataire pleinement qualifiés
+## 2. L'expéditeur et le destinataire pleinement qualifiés — FAIT
 
 `reject_non_fqdn_sender` et `reject_non_fqdn_recipient`, tous deux actifs sur
 narro.ch. Un `MAIL FROM:<jean@localhost>` ou un `RCPT TO:<paul@srv>` n'est pas
@@ -120,6 +120,20 @@ moitié de l'écart de permissivité.
 Le prédicat est **littéralement le même** que celui du `HELO` : `Mailbox` porte
 son domaine dans un `ClientId`, le type qu'annonce déjà `EHLO`. Une seule
 fonction sert les trois contrôles.
+
+C'est ce qu'est devenu `nom_qualifie` : une fonction, trois appelants. Trois
+copies de ces quatre lignes auraient fini par diverger, et la divergence aurait
+été invisible — deux contrôles qui ne refusent pas tout à fait la même chose.
+
+**Les deux exigences sont indépendantes**, comme chez Postfix où elles vivent
+dans deux listes distinctes. Un exploitant qui n'en pose qu'une obtient
+exactement celle-là, et un essai le garde.
+
+**Les codes étendus diffèrent** : `5.1.8` pour l'expéditeur, `5.1.3` pour le
+destinataire. Les deux manquaient à `ams-proto-smtp`, qui n'avait que `5.1.1`
+— juste pour le destinataire, mensonger pour l'expéditeur. L'écart compte pour
+l'émetteur : `1.8` dit « votre domaine ne peut rien recevoir », `1.3` dit
+« l'adresse que vous visez ne désigne aucune boîte, où que ce soit ».
 
 ### Quatre exemptions, et aucune n'est facultative
 

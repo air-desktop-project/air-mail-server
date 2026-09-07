@@ -60,6 +60,8 @@ fn configuration(repertoire: &Path, clef: &str) -> PathBuf {
         imap_implicit_tls: false,
         // Cet essai porte sur le scellement du jeton, pas sur l'enveloppe.
         require_fqdn_helo: false,
+        require_fqdn_sender: false,
+        require_fqdn_recipient: false,
         domain: String::from("mail.example.com"),
         listen: String::from("127.0.0.1:0"),
         maildir: repertoire.join("boite").display().to_string(),
