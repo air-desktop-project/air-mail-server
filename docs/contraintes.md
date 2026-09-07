@@ -14534,3 +14534,50 @@ lui seul, ce qui justifie d'avoir mis du chinois à côté du français. Le `&-`
 littéral cassé. Et une séquence illisible DEVINÉE au lieu d'être laissée.
 
 `--essais` est prescrit par la phase 0.4bis du manuel, avant le passage à blanc.
+
+
+## Le retour en arrière avait un banc, et personne ne pouvait le rejouer
+
+`rapatrier.sh` existe à cause d'un défaut trouvé en montant une fenêtre de
+bascule à la main : `rsync --ignore-existing` compare des CHEMINS, or lire un
+message change son nom ET son dossier — `new/1725…` devient `cur/1725…:2,S`. Le
+message lu pendant la fenêtre était donc recopié, et l'utilisateur le voyait
+deux fois.
+
+**Le banc qui l'a trouvé était manuel.** Un banc qu'on ne peut pas rejouer n'est
+pas une garde : c'est un souvenir. Et ce script-ci se lance quand tout le reste a
+déjà échoué, sous pression, Postfix arrêté et les utilisateurs qui attendent —
+c'est le pire moment pour découvrir qu'il se trompe.
+
+### Ce que `--essais` monte
+
+Dix-huit messages communs, dont six LUS pendant la fenêtre et donc renommés par
+Maildir ; deux arrivées ; un effacement ; et un message qui vit légitimement dans
+`INBOX` ET dans `Sent` — celui-là est ce qui oblige la comparaison à se faire
+boîte par boîte.
+
+Puis quatre vérifications : deux messages exactement rapatriés, aucun doublon par
+partie unique, l'effacé toujours dans l'ancien magasin, et **un second passage qui
+n'ajoute rien**. Ce dernier compte le jour J, où l'on relance ce qui a l'air
+d'avoir échoué.
+
+### Confronté au défaut d'origine, et il tombe
+
+Remplacer `unique()` par le nom entier — ce que fait `--ignore-existing` — et le
+banc annonce aussitôt les six messages lus comme « à rapatrier ». C'est
+exactement le compte qui était tombé faux : dix-huit plus deux moins un devait
+faire vingt, il y en avait vingt et un.
+
+La seconde mutation — une comparaison globale au lieu de boîte par boîte — est
+attrapée par le message qui vit dans deux boîtes.
+
+### Et un accent grave qui aurait exécuté une commande
+
+Un message d'erreur portait `` `Sent` `` entre guillemets doubles. Le shell y
+exécute ce qui est entre accents graves. La branche n'était pas empruntée, donc
+rien ne s'est produit — mais elle ne l'est justement que le jour où le script
+échoue, c'est-à-dire quand on a le moins besoin d'une surprise.
+
+C'est la deuxième fois de la journée : la première avait fait échouer
+`repeter-la-configuration.sh` à sa première exécution. **Dans une chaîne entre
+guillemets doubles, un accent grave n'est pas une décoration.**

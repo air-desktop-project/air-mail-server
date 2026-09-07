@@ -524,8 +524,23 @@ mot de passe oublié, un client réglé sur `AUTH LOGIN` (il se reconfigure).
     #    `rapatrier.sh` compare la PARTIE UNIQUE du nom Maildir, qui ne change
     #    ni quand on lit, ni quand on étiquette, ni quand un serveur donne un
     #    UID. Sans `--pour-de-vrai`, il n'écrit rien et dit ce qu'il ferait.
+    bash rapatrier.sh --essais                                 # le banc d'abord
     bash rapatrier.sh /var/vmail-ams /var/vmail-vue            # à blanc
     bash rapatrier.sh /var/vmail-ams /var/vmail-vue --pour-de-vrai
+
+**`--essais` D'ABORD, MÊME ICI — SURTOUT ICI.** On lance ce script quand tout le
+reste a déjà échoué, sous pression, Postfix arrêté et les utilisateurs qui
+attendent. C'est le pire moment pour découvrir qu'il se trompe, et le banc coûte
+une seconde.
+
+Il monte deux magasins, y joue une fenêtre de bascule — dix-huit messages
+communs dont six lus pendant la fenêtre, donc RENOMMÉS par Maildir, deux
+arrivées, un effacement, et un message qui vit légitimement dans `INBOX` ET dans
+`Sent` — puis vérifie que deux messages exactement sont rapatriés, qu'aucun
+doublon n'apparaît, que l'effacé n'a pas disparu de l'ancien, et qu'un SECOND
+passage n'ajoute rien.
+
+Ce dernier point compte le jour J : on relance ce qui a l'air d'avoir échoué.
     sudo chown -R vmail:vmail /var/vmail
 
     # 3. Remettre l'ancien en marche.

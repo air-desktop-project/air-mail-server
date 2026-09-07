@@ -48,6 +48,137 @@
 
 set -uo pipefail
 
+# ── LE BANC, ET POURQUOI IL EST DANS CE SCRIPT ──────────────────────────────
+#
+# Ce script est le RETOUR EN ARRIÈRE : on le lance quand tout le reste a déjà
+# échoué, sous pression, Postfix arrêté et les utilisateurs qui attendent. C'est
+# le pire moment pour découvrir qu'il se trompe.
+#
+# Son défaut d'origine — `rsync --ignore-existing`, qui dupliquait tout message
+# lu pendant la fenêtre — a été trouvé sur un banc MONTÉ À LA MAIN. Un banc
+# qu'on ne peut pas rejouer n'est pas une garde : c'est un souvenir.
+#
+#     bash rapatrier.sh --essais
+#
+essais() {
+    local banc; banc=$(mktemp -d) || return 1
+    trap 'rm -rf "$banc"' RETURN
+    local ancien="$banc/ancien" neuf="$banc/neuf"
+    local fautes=0
+
+    # Un message Maildir : `<unique>,S=<taille>` puis, s'il est lu, `:2,S`.
+    poser() { # <racine> <compte/dossier> <cur|new> <unique> [drapeaux]
+        local chemin="$1/$2/$3"
+        mkdir -p "$chemin"
+        printf 'message %s\n' "$4" > "$chemin/$4,S=42${5-}"
+    }
+
+    for racine in "$ancien" "$neuf"; do
+        # ── DIX-HUIT MESSAGES COMMUNS ───────────────────────────────────────
+        #
+        # Dans l'ANCIEN ils sont tous dans `new`, non lus. Dans le NEUF, les six
+        # premiers ont été lus pendant la fenêtre : Maildir les a donc déplacés
+        # dans `cur` ET renommés. C'est très exactement ce que
+        # `--ignore-existing` ne voyait pas.
+        local i
+        for i in $(seq 1 18); do
+            if [ "$racine" = "$neuf" ] && [ "$i" -le 6 ]; then
+                poser "$racine" alice cur "17250000$i.M1.banc" ":2,S"
+            else
+                poser "$racine" alice new "17250000$i.M1.banc"
+            fi
+        done
+        # ── LE MÊME MESSAGE DANS DEUX BOÎTES, LÉGITIMEMENT ──────────────────
+        #
+        # Un message envoyé à soi-même vit dans `INBOX` et dans `Sent`. La
+        # comparaison se fait BOÎTE PAR BOÎTE : une comparaison globale le
+        # croirait déjà rapatrié et le perdrait.
+        poser "$racine" alice/.Sent cur "1725000099.M9.banc" ":2,S"
+    done
+
+    # ── DEUX ARRIVÉES, QUE LE NEUF SEUL PORTE ───────────────────────────────
+    poser "$neuf" alice new "1725000101.M2.banc"
+    poser "$neuf" alice/.Sent new "1725000102.M2.banc"
+
+    # ── UN EFFACEMENT PENDANT LA FENÊTRE ────────────────────────────────────
+    #
+    # Le message 18 a été effacé dans le neuf. Le script NE LE RESSUSCITE PAS —
+    # il ne fait que copier du neuf vers l'ancien — mais il ne doit pas non plus
+    # l'effacer de l'ancien.
+    rm -f "$neuf/alice/new/172500001"8",S=42"
+
+    local avant apres
+    avant=$(find "$ancien" -type f | wc -l)
+
+    # ── À BLANC : RIEN NE DOIT BOUGER ───────────────────────────────────────
+    bash "$0" "$neuf" "$ancien" > "$banc/blanc.txt" 2>&1
+    apres=$(find "$ancien" -type f | wc -l)
+    if [ "$avant" -ne "$apres" ]; then
+        echo "FAUTE : le passage à blanc a écrit ($avant → $apres)" >&2
+        fautes=$((fautes + 1))
+    fi
+    if ! grep -q "à rapatrier      : 2" "$banc/blanc.txt"; then
+        echo "FAUTE : le passage à blanc devait annoncer 2 messages :" >&2
+        sed 's/^/       /' "$banc/blanc.txt" >&2
+        fautes=$((fautes + 1))
+    fi
+
+    # ── POUR DE VRAI ────────────────────────────────────────────────────────
+    bash "$0" "$neuf" "$ancien" --pour-de-vrai > "$banc/vrai.txt" 2>&1
+    apres=$(find "$ancien" -type f | wc -l)
+    if [ "$apres" -ne $((avant + 2)) ]; then
+        echo "FAUTE : $((avant + 2)) fichiers attendus, $apres trouvés" >&2
+        fautes=$((fautes + 1))
+    fi
+
+    # ── ET AUCUN DOUBLON, C'EST LE DÉFAUT D'ORIGINE ─────────────────────────
+    #
+    # Deux fichiers d'une même boîte qui partagent leur partie unique sont le
+    # même message vu deux fois par l'utilisateur — et il le voit pendant un
+    # retour en arrière, c'est-à-dire au pire moment.
+    local doublons
+    doublons=$(find "$ancien" -type f -printf '%h %f\n' \
+        | sed -E 's#/(cur|new) # #; s#(,|:)[^ ]*$##' | sort | uniq -d)
+    if [ -n "$doublons" ]; then
+        echo "FAUTE : doublons dans l'ancien magasin :" >&2
+        printf '%s\n' "$doublons" | sed 's/^/       /' >&2
+        fautes=$((fautes + 1))
+    fi
+
+    # ── L'EFFACÉ N'EST PAS RESSUSCITÉ, ET N'A PAS DISPARU ───────────────────
+    if [ ! -e "$ancien/alice/new/1725000018.M1.banc,S=42" ]; then
+        echo "FAUTE : le message effacé dans le neuf a disparu de l'ancien" >&2
+        fautes=$((fautes + 1))
+    fi
+
+    # ── LA BOÎTE `Sent` A REÇU LA SIENNE, ET ELLE SEULE ─────────────────────
+    if [ ! -e "$ancien/alice/.Sent/new/1725000102.M2.banc,S=42" ]; then
+        echo "FAUTE : l'arrivée de .Sent n'a pas été rapatriée" >&2
+        fautes=$((fautes + 1))
+    fi
+
+    # ── ET RELANCER NE DOIT RIEN AJOUTER ────────────────────────────────────
+    #
+    # Le jour J, on relance ce qui a l'air d'avoir échoué. Deux passages doivent
+    # donner le même magasin qu'un seul.
+    bash "$0" "$neuf" "$ancien" --pour-de-vrai > /dev/null 2>&1
+    if [ "$(find "$ancien" -type f | wc -l)" -ne $((avant + 2)) ]; then
+        echo "FAUTE : un second passage a ajouté des fichiers" >&2
+        fautes=$((fautes + 1))
+    fi
+
+    if [ "$fautes" -eq 0 ]; then
+        echo "OK : 2 rapatriés sur 21, aucun doublon, rien de perdu, et"
+        echo "     un second passage n'ajoute rien."
+    fi
+    return "$fautes"
+}
+
+if [ "${1-}" = "--essais" ]; then
+    essais
+    exit $?
+fi
+
 source=${1:?usage : rapatrier.sh <source> <destination> [--pour-de-vrai]}
 destination=${2:?usage : rapatrier.sh <source> <destination> [--pour-de-vrai]}
 pour_de_vrai=${3-}
