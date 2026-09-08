@@ -9,8 +9,9 @@ en lecture seule, sans rien modifier, sans lire une seule empreinte de mot de
 passe ni une clé privée. **Quand les deux divergent, c'est le §6 qui dit vrai.**
 
 Les trois décisions qu'il posait sont tranchées : les mots de passe (§5), le
-chemin de sortie (§6), et l'ouverture de l'API. La fenêtre est fixée au samedi
-19 septembre — voir `bascule.md`.
+chemin de sortie (§6), et l'ouverture de l'API. La fenêtre est fixée au **samedi
+12 septembre 2026, 09:00** — avancée d'une semaine le 2026-09-08, la phase 0
+ayant été menée sur la vraie machine. Voir `bascule.md`, qui fait foi.
 
 ---
 

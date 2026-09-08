@@ -14,18 +14,23 @@ avoir besoin.**
 
 ---
 
-## LA FENÊTRE EST FIXÉE : samedi 19 septembre 2026, 09:00 CEST
+## LA FENÊTRE EST FIXÉE : samedi 12 septembre 2026, 09:00 CEST
 
-Décidée le 2026-09-07. Le chemin qui y mène, et pourquoi chaque étape est là :
+**AVANCÉE D'UNE SEMAINE le 2026-09-08**, après une phase 0 menée sur la vraie
+machine dans la nuit. Ce qui fixait le 19 était la semaine d'épreuve de la clé
+DKIM ; elle ne peut pas avoir lieu — Resend efface notre signature — et ce
+qu'elle devait prouver l'a été autrement, plus solidement.
+
+Le chemin qui y mène, et pourquoi chaque étape est là :
 
 | Quand | Quoi | Pourquoi cette date |
 |---|---|---|
 | ~~**mardi 8 septembre**~~ **FAIT** | sélecteur **`ams202609`**, clé **2048 bits**, publié — et **rspamd signe avec** | la clé s'éprouve sous Postfix, en production. Le jour J ne changera plus que le serveur |
-| ~~9 → 17 septembre~~ **SANS OBJET** | ~~on vérifie que les signatures se valident chez Gmail et Outlook~~ | **IMPOSSIBLE PAR RESEND** : il reconstruit le message, réécrit le `Message-ID` et signe avec SON sélecteur. Notre signature n'arrive jamais. Vérifié autrement le 2026-09-08 — `R_DKIM_ALLOW` en local, et `dkim=pass header.s=ams202609` chez Google en envoi direct |
-| **vendredi 12** | `pour-les-utilisateurs.md` envoyé aux cinq | une semaine de préavis, et ce document PORTE la date |
-| **jeudi 17** | `deploy-hook` certbot pour `privkey.pem` ; première sauvegarde complète ; copie et `verifier.sh` à blanc | le blanc trouve les surprises pendant qu'on a le temps |
-| **vendredi 18** | distribution des **cinq secrets initiaux, tous distincts** | un secret commun laisserait chacun ouvrir la boîte des autres |
-| **samedi 19, 09:00** | la fenêtre | volume entrant au plus bas, utilisateurs joignables, deux jours de marge |
+| ~~la semaine d'épreuve DKIM~~ **SANS OBJET** | ~~on vérifie que les signatures se valident chez Gmail et Outlook~~ | **IMPOSSIBLE PAR RESEND** : il reconstruit le message, réécrit le `Message-ID` et signe avec SON sélecteur. Notre signature n'arrive jamais. Vérifié autrement le 2026-09-08 — `R_DKIM_ALLOW` en local, et `dkim=pass header.s=ams202609` chez Google en envoi direct |
+| **mardi 8** | le 8443 vu de l'EXTÉRIEUR · §0.6 avec un vrai client · `pour-les-utilisateurs.md` envoyé aux cinq | ce document PORTE la date, la durée de coupure et le moment des secrets : le relire si l'un des trois change |
+| **mercredi 9** | **LA PORTE** : le §0.6 doit être passé le soir | un défaut de la classe de ceux du 8 septembre, et l'on reprend le 19 — la courbe de découverte ne se serait pas aplatie |
+| **vendredi 11** | distribution des **cinq secrets initiaux, tous distincts** | un secret commun laisserait chacun ouvrir la boîte des autres |
+| **samedi 12, 09:00** | la fenêtre | volume entrant au plus bas, utilisateurs joignables, deux jours de marge |
 
 **Le détail du samedi.** 09:00 sauvegarde et copie finale ; 09:30 arrêt de
 Postfix, delta, démarrage d'`air-mail-server` ; 09:50 `verifier.sh` décide ;
@@ -47,6 +52,12 @@ problème plus lent, mais plus grave, que celui qu'on vient d'éviter.
 ni le `A` : même machine, même enregistrement. Revenir, c'est redémarrer Postfix
 et rapatrier le courrier de la fenêtre par `rapatrier.sh` — quelques minutes,
 sans propagation à attendre.
+
+**LA PHASE 0 EST FAITE**, dans la nuit du 7 au 8 septembre, sur la vraie machine :
+sauvegarde vérifiée, paquet posé sans rien remplacer, 573 messages copiés et
+servis sur les ports hauts, audit du §0.5 sans aucun écart ni nom illisible.
+Postfix et Dovecot n'en ont rien su. **Neuf défauts y ont été trouvés, dont trois
+auraient tué la bascule** — ils sont corrigés dans ce document et dans le produit.
 
 **~~Pourquoi le 19 et pas le 12~~ — CETTE RAISON EST TOMBÉE.** Elle disait que la
 clé DKIM avait besoin de sa semaine sous Postfix. Cette semaine ne peut pas avoir
@@ -653,8 +664,8 @@ date**, la durée de coupure et le moment où les secrets arrivent — il faut d
 le relire si l'un des trois change, sans quoi cinq personnes liront une date
 fausse.
 
-La fenêtre étant fixée au samedi 19, envoyez-le **au plus tard le vendredi 12**
-— une semaine — et rappelez le vendredi 18, en même temps que les secrets
+La fenêtre étant fixée au samedi 12, envoyez-le **au plus tard le mardi 8**
+— quatre jours — et rappelez le vendredi 11, en même temps que les secrets
 initiaux de §0.4.
 
 ---

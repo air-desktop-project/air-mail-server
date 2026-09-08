@@ -15117,3 +15117,48 @@ défaut d'origine.
 **Le manuel écrit néanmoins les deux commandes**, plutôt que de renvoyer au
 message du serveur. Un manuel qui dépend d'un texte d'aide pour être complet
 n'est pas complet.
+
+## 2026-09-08 — La bascule avancée au samedi 12
+
+Le 19 septembre ne tenait qu'à une raison, écrite noir sur blanc dans le manuel :
+« la clé DKIM a besoin de sa semaine sous Postfix ». **Cette semaine ne peut pas
+avoir lieu** — Resend reconstruit le message et signe avec son propre sélecteur,
+notre signature n'arrive jamais chez le destinataire. Le jalon « 9 → 17 » était
+vide dès son écriture ; on ne le savait pas.
+
+Ce qu'il devait prouver l'a été autrement, en une nuit et plus solidement :
+`R_DKIM_ALLOW` contre l'enregistrement réellement servi, puis
+`dkim=pass header.s=ams202609` chez Google en envoi direct. Une semaine d'attente
+n'aurait rien ajouté.
+
+### Ce qui a rendu l'avance possible, et ce qui l'a rendue prudente
+
+La phase 0 a été menée sur la VRAIE machine dans la nuit du 7 au 8, et elle est
+passée : 573 messages copiés et servis, audit sans écart ni nom illisible,
+Postfix et Dovecot intacts. La porte que le plan fixait au mercredi soir s'est
+ouverte quatre jours plus tôt.
+
+Un chiffre a compté autant que le reste : **le courrier pèse 20 Mo**. La copie
+prend des secondes, là où le plan budgétait vingt minutes de coupure pour elle.
+La fenêtre est bien moins tendue que ce qu'on avait supposé.
+
+### Mais neuf défauts en une nuit
+
+Trois auraient tué la bascule : le compte `ams` qui n'existe pas, les abonnements
+écrits à `root`, le conseil `postmaster` qui empêchait le redémarrage. Quand une
+première répétition réelle en trouve neuf, l'hypothèse honnête n'est pas qu'on
+les a tous eus.
+
+**D'où une porte, datée plutôt que vague : le §0.6 — éprouver la copie avec un
+VRAI client — doit être passé le mercredi 9 au soir.** Si un défaut de la même
+classe y apparaît, on reprend le 19 : la courbe de découverte ne se sera pas
+aplatie. Les deux défauts les plus graves de la nuit ont été trouvés par un
+script IMAP ; un vrai client fait des choses qu'un script ne fait pas, et c'est
+là que la prochaine surprise se trouve.
+
+### Le raisonnement, pour la prochaine fois
+
+Attendre ne trouve pas de défauts, éprouver en trouve. Une semaine de plus ne
+vaut que si on l'emploie à tester — et on peut tester cette semaine de toute
+façon. La question n'était donc pas « le 12 ou le 19 » mais « la découverte
+s'est-elle aplatie ». C'est ce que la porte du mercredi mesure.

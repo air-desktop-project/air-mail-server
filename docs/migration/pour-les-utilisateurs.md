@@ -2,7 +2,7 @@
 
 Bonjour,
 
-Le serveur de courrier de `narro.ch` est remplacé **le samedi 19 septembre au
+Le serveur de courrier de `narro.ch` est remplacé **le samedi 12 septembre au
 matin**. Vos adresses, vos messages et vos dossiers ne changent pas. Ce document
 dit ce que vous avez à faire — et ce n'est pas grand-chose.
 
@@ -13,14 +13,14 @@ dit ce que vous avez à faire — et ce n'est pas grand-chose.
 1. **Votre adresse ne change pas.** Ni vos alias.
 2. **Vos anciens messages sont conservés**, avec leurs dossiers, et le fait que
    vous les ayez lus, marqués ou auxquels vous avez répondu.
-3. **Vous recevrez un nouveau mot de passe** la veille, vendredi 18. Il faudra
+3. **Vous recevrez un nouveau mot de passe** la veille, vendredi 11. Il faudra
    le saisir dans votre logiciel de messagerie et sur votre téléphone.
 4. **Votre logiciel va retélécharger tous vos messages une fois.** C'est normal.
    Sur une grosse boîte, cela peut prendre un long moment.
 
 ---
 
-## Le jour de la bascule : samedi 19 septembre, à partir de 9 h
+## Le jour de la bascule : samedi 12 septembre, à partir de 9 h
 
 Comptez une coupure d'environ une demi-heure entre 9 h 30 et 10 h. Votre
 logiciel affichera pendant ce temps une erreur de connexion, et vous ne pourrez
@@ -34,7 +34,7 @@ arrivera avec quelques minutes ou quelques heures de retard.
 Un message que vous tenteriez d'envoyer pendant la coupure, lui, restera dans
 votre logiciel : renvoyez-le simplement une fois la messagerie revenue.
 
-**Vous recevrez votre nouveau mot de passe la veille**, vendredi 18, par un
+**Vous recevrez votre nouveau mot de passe la veille**, vendredi 11, par un
 autre canal que le courriel.
 
 ---
