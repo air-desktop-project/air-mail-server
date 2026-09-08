@@ -152,7 +152,11 @@ verifier "l'exigence de HELO qualifié" '^.HELO. qualifié +EXIGÉ'
 verifier "les deux exigences d'enveloppe" '^enveloppe +EXPÉDITEUR et DESTINATAIRE'
 verifier "l'existence du domaine"      '^domaine expéditeur +doit EXISTER'
 verifier "le relais Resend"            'smtp\.resend\.com:465'
-verifier "l'API REST"                  '^API REST +0\.0\.0\.0:8443'
+# **`[::]` ET NON `0.0.0.0`** : le premier couvre les deux familles d'adresses,
+# le second l'IPv4 SEULEMENT. `mail.narro.ch` a une AAAA et Dovecot écoute
+# aujourd'hui sur les deux ; s'en tenir à `0.0.0.0` ferait de la bascule une
+# régression. Mesuré le 2026-09-08 : `401` en IPv4, RIEN en IPv6.
+verifier "l'API REST sur les deux familles" '^API REST +\[::\]:8443'
 
 echo
 if [ "$manques" -ne 0 ]; then

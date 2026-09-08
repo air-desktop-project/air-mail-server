@@ -15162,3 +15162,74 @@ Attendre ne trouve pas de défauts, éprouver en trouve. Une semaine de plus ne
 vaut que si on l'emploie à tester — et on peut tester cette semaine de toute
 façon. La question n'était donc pas « le 12 ou le 19 » mais « la découverte
 s'est-elle aplatie ». C'est ce que la porte du mercredi mesure.
+
+## 2026-09-08 — Le §0.6, et le défaut qui aurait vidé les cinq boîtes
+
+Le §0.6 — éprouver la copie avec un vrai client — a trouvé deux défauts que
+l'audit ne pouvait pas voir, parce qu'il compte des fichiers et ne les lit pas.
+
+### Des lignes blanches, et un « OK : aucun écart »
+
+Dovecot stocke les messages en `LF` nu ; air-mail-server en `CRLF`, et son
+décodeur refuse un `LF` isolé — délibérément, la RFC 5322 impose CRLF sur le fil.
+**Mais un fichier Maildir n'est pas du fil.** Le décodeur ne trouvait pas la ligne
+vide qui sépare les en-têtes du corps :
+
+    FETCH 1 (ENVELOPE)     → ENVELOPE (NIL NIL … NIL)
+    FETCH 1 (BODY[TEXT])   → {0}
+    FETCH 1 (BODY[HEADER]) → 101864 octets, soit le message ENTIER
+
+Ni expéditeur, ni sujet, ni date, ni corps. **573 messages, cinq boîtes, cinq
+utilisateurs, samedi matin** — et `verifier.sh` disant « OK, aucun écart ».
+
+La preuve a demandé deux tentatives. La première comparait un message CRLF déposé
+à la main à un message LF : les deux rendaient `NIL`, ce qui semblait innocenter
+les fins de ligne. **L'expérience était fausse** — le serveur n'avait pas
+rescanné, `EXISTS` valait toujours 33, et j'interrogeais un ancien message. Après
+redémarrage, la même comparaison sépare nettement : enveloppe complète d'un côté,
+`NIL` de l'autre. Une expérience dont on ne vérifie pas qu'elle porte sur ce
+qu'on croit ne prouve rien, et innocente au lieu d'accuser.
+
+### L'oracle était déjà là, écrit par l'autre serveur
+
+Dovecot nomme chaque message `,S=<taille du fichier>,W=<taille RFC822>`. **`W=`
+est exactement la taille qu'aura le fichier une fois converti en CRLF.** Le
+convertisseur ne convertit donc pas en aveugle : il vérifie message par message
+contre un nombre calculé par le serveur qu'on remplace, et un seul octet d'écart
+arrête tout sans rien écrire. 573 messages, 573 oracles, aucun écart.
+
+Chercher un oracle indépendant avant d'écrire une vérification à soi : celui-ci
+était dans les noms de fichiers depuis le début.
+
+### L'ordre des opérations, qui n'est pas un détail
+
+air-mail-server réécrit les noms à l'adoption : il lit la taille par `stat` et
+l'inscrit dans son `,S=`, et c'est ce nom qui fait foi ensuite. Convertir APRÈS
+l'adoption laisserait un `S=` qui ment de la longueur d'un message. La séquence
+est `rsync`, conversion, premier démarrage — et elle a été rejouée telle quelle.
+
+### `0.0.0.0` n'est pas `[::]`
+
+La configuration du jour J écoutait en `0.0.0.0` — IPv4 seulement — alors que
+`mail.narro.ch` a une AAAA et que **Dovecot écoute aujourd'hui sur les deux
+familles**. La bascule aurait été une régression. Mesuré sur l'API : `401` en
+IPv4, rien du tout en IPv6.
+
+Ce qui rend ce défaut vicieux est sa forme : les MTA se rabattent en IPv4 après
+délai, les clients aussi. Cela n'aurait pas donné une panne, mais **un défaut
+intermittent dépendant du réseau de chacun** — le pire à diagnostiquer un samedi
+matin. Toutes les écoutes passent en `[::]`, et le rejeu de configuration le
+vérifie désormais.
+
+### Trois fois la même faute de banc dans la même nuit
+
+Le banc du convertisseur est passé du premier coup ; trois de ses six mutations
+ont survécu. La date de modification — le fichier temporaire naissait dans la
+même seconde. Le propriétaire — l'essai tournait sous le même utilisateur. Le
+compte des fichiers déjà convertis — rien ne le lisait.
+
+C'est la troisième fois de la nuit qu'**une assertion était vraie par accident**.
+Le remède est le même à chaque fois : forcer l'environnement à rendre l'assertion
+FAUSSE si le code ne fait pas son travail — une date de 2020, un groupe qui n'est
+pas le nôtre, un rapport qu'on lit. Une assertion qui ne peut pas échouer n'est
+pas une assertion.

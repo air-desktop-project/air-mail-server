@@ -288,7 +288,7 @@ commande, et elle a été trouvée en la jouant, pas en la relisant.
         --require-fqdn-helo \
         --require-fqdn-sender --require-fqdn-recipient \
         --require-sender-domain \
-        --listen-http 0.0.0.0:8443 \
+        --listen-http [::]:8443 \
         --dkim-selector ams202609 \
         --dkim-key /var/lib/rspamd/dkim/narro.ch.ams202609.key \
         --resolver 127.0.0.53:53 \
@@ -308,7 +308,30 @@ tirez pas de cet écart la conclusion qu'une copie a raté.
 **CETTE COMMANDE VIENT DE L'INVENTAIRE**, valeur par valeur, et chacune a une
 raison :
 
-**`--listen-http 0.0.0.0:8443` OUVRE L'API REST**, et il faut savoir pourquoi
+**TOUTES LES ADRESSES D'ÉCOUTE SONT EN `[::]`, ET NON EN `0.0.0.0`.**
+`0.0.0.0` est de l'IPv4 SEULEMENT. Or `mail.narro.ch` a une AAAA
+(`2001:41d0:305:2100::b711`), et **Dovecot écoute aujourd'hui sur les deux
+familles** : s'en tenir à `0.0.0.0` ferait de la bascule une régression, pas un
+remplacement.
+
+Mesuré le 2026-09-08, en phase 0, sur l'API : `401` en IPv4 — donc le port
+passe — et **rien du tout en IPv6**. Le serveur écoutait pourtant, sur
+`0.0.0.0:8443`. Avec `[::]:8443`, `ss` montre `*:8443` et les deux familles
+répondent `401`.
+
+Ce que cela aurait donné le jour J : les serveurs qui résolvent le `MX` en AAAA
+et préfèrent l'IPv6 — Google, la plupart des MTA modernes — trouvent le port 25
+injoignable et se rabattent après délai, quand ils se rabattent ; les clients des
+utilisateurs tentent l'IPv6 d'abord et échouent. **Un défaut intermittent,
+dépendant du réseau de chacun**, le pire à diagnostiquer un samedi matin.
+
+`[::]` suffit à couvrir les deux parce que `net.ipv6.bindv6only = 0` sur cette
+machine — à vérifier, c'est le défaut de Linux mais il se change :
+
+    sysctl net.ipv6.bindv6only    # doit valoir 0
+    sudo ss -ltn | grep 8443      # doit montrer `*:8443`, et non `0.0.0.0:8443`
+
+**`--listen-http [::]:8443` OUVRE L'API REST**, et il faut savoir pourquoi
 c'est là : sans elle, `/v1/me/password` n'est joignable de nulle part, et les
 utilisateurs ne peuvent pas poser leur propre mot de passe.
 
@@ -545,6 +568,48 @@ en bout :
   client n'aurait affiché **aucun dossier**. Le fichier prend désormais
   l'appartenance de la boîte.
 
+### 0.4bis-3 CONVERTIR LES FINS DE LIGNE, AVANT TOUTE ADOPTION
+
+**C'est le défaut le plus grave que la phase 0 ait trouvé, et il ne se voyait
+d'aucune façon dans l'audit.**
+
+Dovecot stocke les messages avec des fins de ligne `LF` nues — c'est son défaut,
+`mail_save_crlf = no`. air-mail-server stocke du `CRLF`, comme la RFC 5322 le
+veut sur le fil, et son décodeur refuse un `LF` isolé. Il ne trouve alors pas la
+ligne vide qui sépare les en-têtes du corps.
+
+Mesuré le 2026-09-08 sur les 573 messages réels de `narro.ch` :
+
+    FETCH 1 (ENVELOPE)     → ENVELOPE (NIL NIL NIL NIL NIL NIL NIL NIL NIL NIL)
+    FETCH 1 (BODY[TEXT])   → {0}
+    FETCH 1 (BODY[HEADER]) → 101864 octets, soit le message ENTIER
+
+**Ni expéditeur, ni sujet, ni date, ni corps.** Les cinq boîtes se seraient
+ouvertes sur des lignes blanches — et `verifier.sh` aurait dit « OK, aucun
+écart », parce qu'il compte des fichiers et ne les lit pas.
+
+    python3 convertir-fins-de-ligne.py --essais                   # le banc d'abord
+    python3 convertir-fins-de-ligne.py /var/vmail-ams             # à blanc
+    python3 convertir-fins-de-ligne.py /var/vmail-ams --pour-de-vrai
+
+**L'ORACLE EST DANS LE NOM, ET IL VIENT DE DOVECOT.** Chaque message porte
+`,S=<taille du fichier>` et `,W=<taille RFC822>` — et `W=` est exactement la
+taille qu'aura le fichier une fois converti. Le script ne convertit donc pas en
+aveugle : il vérifie message par message contre un nombre calculé par l'autre
+serveur, et **un seul octet d'écart arrête tout sans rien écrire**. Sur les 573
+messages de narro.ch : 573 oracles, aucun écart.
+
+**L'ORDRE N'EST PAS NÉGOCIABLE : `rsync`, PUIS ce script, PUIS le premier
+démarrage.** air-mail-server réécrit les noms quand il adopte une boîte venue
+d'ailleurs — il lit la taille par `stat` et l'inscrit dans son propre `,S=` —, et
+c'est ce nom qui fait foi ensuite : la taille servie ne vient pas d'un `stat` par
+message. Convertir APRÈS l'adoption laisserait un `S=` qui ment de la longueur
+d'un message entier.
+
+Le script est idempotent, conserve la date de modification — c'est elle qui fait
+l'`INTERNALDATE` d'IMAP — et l'appartenance des fichiers, et n'entre jamais dans
+`tmp/`, où Maildir dépose ce qui n'est pas encore livré.
+
 ### 0.4bis-2 Les rôles de dossiers, que personne ne pose
 
 **AIR-MAIL-SERVER N'ATTRIBUE AUCUN RÔLE DE SON CRU**, et c'est écrit dans son
@@ -649,6 +714,18 @@ Ce qu'il faut avoir vu de ses yeux avant de continuer :
 - [ ] `EXISTS` correspond, boîte par boîte, à ce que Dovecot annonçait ;
 - [ ] les drapeaux `\Seen` / `\Answered` / `\Flagged` ont survécu ;
 - [ ] les sous-dossiers (`Sent`, `Drafts`, `Junk`, `Trash`) sont là ;
+- [ ] **`FETCH 1 (ENVELOPE)` NE REND PAS `NIL`** — sur plusieurs messages, pas
+      un seul. C'est LE contrôle qui manquait : une enveloppe nulle veut dire que
+      le serveur n'a pas su séparer les en-têtes du corps, et le client
+      n'affichera ni sujet, ni expéditeur, ni date. L'audit ne le voit pas ;
+- [ ] **`FETCH 1 (BODY.PEEK[TEXT])` ne rend pas `{0}`** — un corps vide sur un
+      message qui n'est pas vide est le même défaut, vu de l'autre côté ;
+- [ ] **`LIST (SUBSCRIBED) "" "*" RETURN (SPECIAL-USE)` rend les dossiers AVEC
+      leurs rôles** — c'est la commande que Thunderbird envoie vraiment. Vide, ce
+      sont les abonnements qui manquent (§0.4bis) ; sans rôles, les `ams-usages`
+      (§0.4bis-2) ;
+- [ ] **le serveur écoute sur les DEUX familles** : `ss -ltn` doit montrer
+      `*:993` et non `0.0.0.0:993`, et un client IPv6 doit se connecter ;
 - [ ] un message entrant arrive ;
 - [ ] un message sortant part, et **porte une signature DKIM valide** ;
 - [ ] le certificat servi est bien celui de `mail.narro.ch`.
@@ -751,8 +828,8 @@ décidera si l'on recommence un autre jour.
     # 6. La configuration DÉFINITIVE : les vrais ports, la vraie racine.
     sudo -u air-mail air-mail-admin config write /var/lib/air-mail/serveur.conf \
         «les mêmes options qu'en 0.4, mais» \
-        --listen 0.0.0.0:25 --listen 0.0.0.0:587 \
-        --listen-smtps 0.0.0.0:465 --listen-imaps 0.0.0.0:993 \
+        --listen [::]:25 --listen [::]:587 \
+        --listen-smtps [::]:465 --listen-imaps [::]:993 \
         --maildir /var/vmail-ams
 
     # 7. On empêche l'ancien de revenir tout seul au prochain redémarrage.
