@@ -21,7 +21,7 @@ Décidée le 2026-09-07. Le chemin qui y mène, et pourquoi chaque étape est l�
 | Quand | Quoi | Pourquoi cette date |
 |---|---|---|
 | ~~**mardi 8 septembre**~~ **FAIT** | sélecteur **`ams202609`**, clé **2048 bits**, publié — et **rspamd signe avec** | la clé s'éprouve sous Postfix, en production. Le jour J ne changera plus que le serveur |
-| 9 → 17 septembre | on vérifie que les signatures se valident chez Gmail et Outlook | une semaine de vrai courrier vaut mieux qu'un essai |
+| ~~9 → 17 septembre~~ **SANS OBJET** | ~~on vérifie que les signatures se valident chez Gmail et Outlook~~ | **IMPOSSIBLE PAR RESEND** : il reconstruit le message, réécrit le `Message-ID` et signe avec SON sélecteur. Notre signature n'arrive jamais. Vérifié autrement le 2026-09-08 — `R_DKIM_ALLOW` en local, et `dkim=pass header.s=ams202609` chez Google en envoi direct |
 | **vendredi 12** | `pour-les-utilisateurs.md` envoyé aux cinq | une semaine de préavis, et ce document PORTE la date |
 | **jeudi 17** | `deploy-hook` certbot pour `privkey.pem` ; première sauvegarde complète ; copie et `verifier.sh` à blanc | le blanc trouve les surprises pendant qu'on a le temps |
 | **vendredi 18** | distribution des **cinq secrets initiaux, tous distincts** | un secret commun laisserait chacun ouvrir la boîte des autres |
@@ -31,14 +31,32 @@ Décidée le 2026-09-07. Le chemin qui y mène, et pourquoi chaque étape est l�
 Postfix, delta, démarrage d'`air-mail-server` ; 09:50 `verifier.sh` décide ;
 10:00 essais clients ; 11:00 fin. **Coupure réelle : environ vingt minutes.**
 
+**AVANT D'OUVRIR LA FENÊTRE, ON MUSELLE LES MISES À JOUR AUTOMATIQUES.**
+`unattended-upgrades` est ACTIF sur cette machine — relevé le 2026-09-08. Un
+redémarrage de Postfix, de Dovecot ou de rspamd décidé par `apt` au milieu de la
+coupure ajouterait une cause qu'on ne soupçonnerait pas, pendant les vingt
+minutes où l'on a le moins de temps pour chercher.
+
+    sudo systemctl mask unattended-upgrades     # avant d'ouvrir la fenêtre
+    sudo systemctl unmask unattended-upgrades   # une fois la bascule tenue
+
+**Et on le remet.** Une machine de courrier qui ne se met plus à jour est un
+problème plus lent, mais plus grave, que celui qu'on vient d'éviter.
+
 **LE RETOUR EN ARRIÈRE NE DÉPEND D'AUCUN DNS.** La bascule ne touche ni le `MX`
 ni le `A` : même machine, même enregistrement. Revenir, c'est redémarrer Postfix
 et rapatrier le courrier de la fenêtre par `rapatrier.sh` — quelques minutes,
 sans propagation à attendre.
 
-**Pourquoi le 19 et pas le 12 :** la clé DKIM a besoin de sa semaine sous
-Postfix. Le 12 ne serait tenable qu'en publiant le sélecteur le jour même de
-cette décision, et sans marge.
+**~~Pourquoi le 19 et pas le 12~~ — CETTE RAISON EST TOMBÉE.** Elle disait que la
+clé DKIM avait besoin de sa semaine sous Postfix. Cette semaine ne peut pas avoir
+lieu : le relais Resend efface notre signature, il n'y a rien à observer. Et ce
+qu'elle devait prouver l'a été autrement, en une nuit et plus solidement — la
+clé privée du serveur signe ce que le DNS publie, et Google le valide.
+
+**La date n'est donc plus contrainte par DKIM.** Ce qui la contraint encore : le
+préavis dû aux cinq utilisateurs, et l'audit du §0.5 sur les vraies boîtes. Le
+second est passé le 2026-09-08.
 
 ---
 
@@ -193,7 +211,13 @@ recours ; il ne remplace pas ce qui suit.
 **Et une copie du courrier ET de la configuration**, hors de la machine :
 
     sudo tar -C / -czf /tmp/avant-ams-$(date +%F).tar.gz \
-        var/vmail etc/postfix etc/dovecot etc/opendkim etc/opendkim.conf
+        var/vmail etc/postfix etc/dovecot etc/rspamd var/lib/rspamd/dkim
+
+**`etc/opendkim` N'EXISTE PAS SUR CETTE MACHINE**, et `tar` s'arrête sur un
+chemin absent : la commande d'origine le nommait, et la sauvegarde aurait paru
+échouer. C'est **rspamd** qui signe ici — d'où `etc/rspamd` et le répertoire des
+clés, qui porte celle du sélecteur `ams202609`. Vérifié le 2026-09-08 : l'archive
+tient 1 008 entrées, dont 842 fichiers de courrier et la clé DKIM.
     # …puis rapatriez-la, et VÉRIFIEZ qu'elle se relit :
     tar -tzf avant-ams-*.tar.gz | wc -l
 
@@ -238,17 +262,17 @@ commande, et elle a été trouvée en la jouant, pas en la relisant.
         sudo rsync -aH --delete \
             "/var/vmail/narro.ch/$compte/Maildir/" "/var/vmail-ams/$compte/"
     done
-    sudo chown -R ams:ams /var/vmail-ams
+    sudo chown -R air-mail:air-mail /var/vmail-ams
 
-    printf %s "$SECRET_RESEND" | sudo -u ams air-mail-admin config write \
-        /etc/ams/essai.conf \
+    printf %s "$SECRET_RESEND" | sudo -u air-mail air-mail-admin config write \
+        /var/lib/air-mail/essai.conf \
         --domain mail.narro.ch --hosted narro.ch \
-        --maildir /var/vmail-ams --accounts /etc/ams/comptes.bin \
+        --maildir /var/vmail-ams --accounts /var/lib/air-mail/comptes.bin \
         --listen 127.0.0.1:2525 --listen-imaps 127.0.0.1:9993 \
         --max-message 52428800 \
         --tls-cert /etc/letsencrypt/live/mail.narro.ch/fullchain.pem \
         --tls-key  /etc/letsencrypt/live/mail.narro.ch/privkey.pem \
-        --relay --queue-spool /var/spool/ams/file \
+        --relay --queue-spool /var/lib/air-mail/file \
         --queue-expire-seconds 86400 \
         --require-fqdn-helo \
         --require-fqdn-sender --require-fqdn-recipient \
@@ -261,7 +285,14 @@ commande, et elle a été trouvée en la jouant, pas en la relisant.
         --relayhost smtp.resend.com:465 --relayhost-implicit-tls \
         --relayhost-user «le compte Resend, dans /etc/postfix/sasl_passwd» \
         --mta-sts-anchors /etc/ssl/certs/ca-certificates.crt \
-        --mta-sts-cache /var/cache/ams/mtasts
+        --mta-sts-cache /var/lib/air-mail/mtasts
+
+**LA LIGNE DE DÉMARRAGE COMPTE MOINS DE MESSAGES QUE L'AUDIT, ET C'EST NORMAL.**
+Relevé le 2026-09-08 : le serveur annonce « 5 boîte(s) sous `/var/vmail-ams`
+(549 message(s)) » quand `verifier.sh` en compte 573. Les 549 sont la somme des
+`INBOX` ; les 24 manquants sont les `Sent`. Rien n'est perdu — une session IMAP
+rend bien 33 messages dans `INBOX` et 14 dans `Sent` pour le même compte. Ne
+tirez pas de cet écart la conclusion qu'une copie a raté.
 
 **CETTE COMMANDE VIENT DE L'INVENTAIRE**, valeur par valeur, et chacune a une
 raison :
@@ -343,9 +374,47 @@ vraiment le comportement du site, et elle attendra APRÈS la bascule.
 | `--mta-sts-anchors` | **exigé par `--relayhost`** : on présente un mot de passe, et sans autorités on ne saurait pas à qui. |
 | `--resolver 127.0.0.53:53` | `systemd-resolved` écoute là. **`--relay` sans résolveur fait REFUSER le démarrage**, et c'est heureux. |
 
-**Le compte sous lequel tourne le serveur doit lire deux fichiers que root seul
-possède** : `privkey.pem` et la clé DKIM de rspamd. Un groupe, ou un
-`deploy-hook` de `certbot` qui recopie, ou les deux.
+**Le compte `air-mail` doit lire trois fichiers qui ne lui appartiennent pas** —
+et la version d'origine de ce paragraphe n'en comptait que deux. Fait et vérifié
+le 2026-09-08 :
+
+**LE CERTIFICAT EST ILLISIBLE EN ENTIER, PAS SEULEMENT LA CLÉ.**
+`/etc/letsencrypt/live` et `/etc/letsencrypt/archive` sont en `0700 root`.
+`fullchain.pem` a beau être en 0644, un fichier lisible dans un répertoire qui ne
+se traverse pas est un fichier illisible. Un `deploy-hook` recopie les deux —
+**et il faut un crochet, pas un `chmod`** : certbot réécrit ces fichiers à chaque
+renouvellement, et sans lui le serveur servirait un certificat périmé soixante
+jours après la bascule, sans que rien ne le dise avant que les clients ne
+refusent la connexion.
+
+    sudo tee /etc/letsencrypt/renewal-hooks/deploy/air-mail-server > /dev/null <<'FIN'
+    #!/bin/sh
+    set -eu
+    CIBLE=/var/lib/air-mail/tls
+    LIGNEE="${RENEWED_LINEAGE:-/etc/letsencrypt/live/mail.narro.ch}"
+    case "$LIGNEE" in *mail.narro.ch) ;; *) exit 0 ;; esac
+    install -d -o air-mail -g air-mail -m 0700 "$CIBLE"
+    install -o air-mail -g air-mail -m 0600 "$LIGNEE/fullchain.pem" "$CIBLE/fullchain.pem"
+    install -o air-mail -g air-mail -m 0600 "$LIGNEE/privkey.pem"   "$CIBLE/privkey.pem"
+    systemctl is-active --quiet air-mail-server && systemctl reload-or-restart air-mail-server || true
+    FIN
+    sudo chmod 0755 /etc/letsencrypt/renewal-hooks/deploy/air-mail-server
+    # On le joue UNE FOIS pour peupler, sans attendre un renouvellement :
+    sudo RENEWED_LINEAGE=/etc/letsencrypt/live/mail.narro.ch \
+        /etc/letsencrypt/renewal-hooks/deploy/air-mail-server
+
+La configuration pointe alors sur `/var/lib/air-mail/tls/`, et non sur
+`/etc/letsencrypt/live/`.
+
+**LA CLÉ DKIM PASSE PAR LE GROUPE, POUR N'EN GARDER QU'UNE COPIE.** Elle est en
+`0600 _rspamd:_rspamd`, et rspamd doit continuer de la lire tant qu'il signe.
+Recopier une clé privée, c'est deux endroits à protéger et à faire tourner :
+
+    sudo chmod 640 /var/lib/rspamd/dkim/narro.ch.ams202609.key
+    sudo usermod -aG _rspamd air-mail
+    # à vérifier des DEUX côtés, la régression est silencieuse :
+    sudo -u air-mail -g _rspamd test -r /var/lib/rspamd/dkim/narro.ch.ams202609.key
+    sudo -u _rspamd test -r /var/lib/rspamd/dkim/narro.ch.ams202609.key
 
 Les cinq comptes, avec les alias que `valiases` porte. Le mot de passe se lit sur
 l'entrée standard, **jamais sur la ligne de commande** : ce que `ps` affiche,
@@ -362,14 +431,14 @@ pas, et il n'y a pas de « mot de passe oublié » ici.
     for compte in thierry.delhaise vincent.delhaise support kelly.garro; do
         mot=$(secret)
         printf '%s : %s\n' "$compte" "$mot"          # À NOTER MAINTENANT.
-        printf %s "$mot" | sudo -u ams air-mail-admin account add \
-            /etc/ams/comptes.bin --login "$compte" --address "$compte@narro.ch"
+        printf %s "$mot" | sudo -u air-mail air-mail-admin account add \
+            /var/lib/air-mail/comptes.bin --login "$compte" --address "$compte@narro.ch"
     done
 
     # `contact` porte en plus les trois alias de `/etc/postfix/valiases`.
     mot=$(secret); printf 'contact : %s\n' "$mot"
-    printf %s "$mot" | sudo -u ams air-mail-admin account add \
-        /etc/ams/comptes.bin --login contact \
+    printf %s "$mot" | sudo -u air-mail air-mail-admin account add \
+        /var/lib/air-mail/comptes.bin --login contact \
         --address contact@narro.ch --address postmaster@narro.ch \
         --address abuse@narro.ch --address root@narro.ch
 
@@ -407,8 +476,8 @@ Si quelqu'un préfère ne pas toucher à `curl`, la voie d'administration reste
 ouverte, et c'est `account passwd` — **jamais `account add`**, qui effacerait les
 adresses du compte :
 
-    printf %s "$NOUVEAU" | sudo -u ams air-mail-admin account passwd \
-        /etc/ams/comptes.bin --login contact
+    printf %s "$NOUVEAU" | sudo -u air-mail air-mail-admin account passwd \
+        /var/lib/air-mail/comptes.bin --login contact
 
 Le serveur relit son magasin dès que le fichier bouge : aucun redémarrage, et
 aucune session en cours n'est interrompue.
@@ -436,6 +505,54 @@ les montrent tous disparus.
 
 Il ne touche pas aux noms purement ASCII, et refuse de renommer si la cible
 existe déjà.
+
+**DEUX DÉFAUTS DE CE SCRIPT ONT ÉTÉ TROUVÉS SUR LA MACHINE LE 2026-09-08**, et
+tous deux se voyaient seulement en écrivant vraiment — un banc qui n'éprouve que
+le décodeur les laissait passer. Ils sont corrigés, et tenus par un essai de bout
+en bout :
+
+- Dovecot écrit `V<TAB>2` en tête de `subscriptions` : le script prenait cet
+  en-tête pour un dossier et posait un abonnement fantôme ;
+- il écrivait `ams-abonnements` sous l'identité qui lance, c'est-à-dire **`root`
+  en 0600** — donc ILLISIBLE par `air-mail`. Les abonnements seraient restés
+  invisibles, ce qui est exactement le défaut que ce paragraphe répare : le
+  client n'aurait affiché **aucun dossier**. Le fichier prend désormais
+  l'appartenance de la boîte.
+
+### 0.4bis-2 Les rôles de dossiers, que personne ne pose
+
+**AIR-MAIL-SERVER N'ATTRIBUE AUCUN RÔLE DE SON CRU**, et c'est écrit dans son
+code : « ce serveur ne désigne aucune boîte de son cru, c'est le client qui dit à
+quoi la sienne servira ». Défendable pour une installation neuve. **Pour une
+migration, c'est un trou** : Dovecot, lui, désignait `\Sent`, `\Drafts`,
+`\Junk`, `\Trash` et `\Archive`.
+
+Sans eux, `LIST … RETURN (SPECIAL-USE)` rend des dossiers sans rôle, et le client
+**crée les siens** : l'utilisateur se retrouve avec « Sent » et « Éléments
+envoyés », son courrier envoyé réparti entre les deux.
+
+Le magasin les retient dans `ams-usages` à la racine du compte — une ligne par
+rôle, `\Usage`, une TABULATION, le nom de la boîte. Les cinq rôles servis sont
+exactement les cinq dossiers de Dovecot :
+
+    for compte in contact support thierry.delhaise vincent.delhaise kelly.garro; do
+        boite="/var/vmail-ams/$compte"
+        printf '\\Archive\tArchive\n\\Drafts\tDrafts\n\\Junk\tJunk\n\\Sent\tSent\n\\Trash\tTrash\n' \
+            | sudo tee "$boite/ams-usages" > /dev/null
+        sudo chown air-mail:air-mail "$boite/ams-usages"
+        sudo chmod 600 "$boite/ams-usages"
+    done
+
+**ON VÉRIFIE AVEC LA COMMANDE QUE THUNDERBIRD ENVOIE**, et non avec un `LIST` nu :
+
+    LIST (SUBSCRIBED) "" "*" RETURN (SPECIAL-USE)
+
+Elle doit rendre, pour chaque dossier, `\Subscribed` ET son rôle :
+
+    * LIST (\Subscribed \Sent \HasNoChildren) "/" "Sent"
+
+Si elle ne rend RIEN, les abonnements ne sont pas posés — c'est §0.4bis. Si elle
+rend les dossiers sans rôle, ce sont les `ams-usages` qui manquent.
 
 **`--essais` D'ABORD, ET CE N'EST PAS DU ZÈLE.** Le décodeur d'UTF-7 modifié est
 écrit à la main, sur un encodage tordu, et il décide du NOM QUE L'UTILISATEUR
@@ -583,7 +700,7 @@ décidera si l'on recommence un autre jour.
         sudo rsync -aH --delete \
             "/var/vmail/narro.ch/$compte/Maildir/" "/var/vmail-ams/$compte/"
     done
-    sudo chown -R ams:ams /var/vmail-ams
+    sudo chown -R air-mail:air-mail /var/vmail-ams
 
     # 3bis. **LE `--delete` VIENT DE DÉFAIRE LES RENOMMAGES DE 0.4bis.**
     #       Il a effacé les répertoires en UTF-8 et remis ceux de Dovecot. On
@@ -592,7 +709,7 @@ décidera si l'on recommence un autre jour.
     #       OUBLIER CETTE LIGNE rend tous les dossiers accentués illisibles,
     #       et cela ne se verra qu'une fois les clients reconnectés.
     python3 renommer-dossiers.py /var/vmail-ams --pour-de-vrai
-    sudo chown -R ams:ams /var/vmail-ams
+    sudo chown -R air-mail:air-mail /var/vmail-ams
 
     # 4. L'audit, une dernière fois. S'il refuse : ON REMONTE (voir plus bas).
     # `verifier.sh` compare compte par compte : on lui donne de l'ancien magasin
@@ -606,7 +723,7 @@ décidera si l'on recommence un autre jour.
     # 5. L'instantané OVH. C'est ici qu'il vaut le plus cher.
 
     # 6. La configuration DÉFINITIVE : les vrais ports, la vraie racine.
-    sudo -u ams air-mail-admin config write /etc/ams/serveur.conf \
+    sudo -u air-mail air-mail-admin config write /var/lib/air-mail/serveur.conf \
         «les mêmes options qu'en 0.4, mais» \
         --listen 0.0.0.0:25 --listen 0.0.0.0:587 \
         --listen-smtps 0.0.0.0:465 --listen-imaps 0.0.0.0:993 \

@@ -65,6 +65,34 @@ if [ -z "$commande" ]; then
     exit 1
 fi
 
+# ── LE COMPTE DE SERVICE EST-IL CELUI DU PRODUIT ? ──────────────────────────
+#
+# **CE CONTRÔLE MANQUAIT, ET SON ABSENCE A LAISSÉ PASSER LE CINQUIÈME DÉFAUT.**
+# Ce script substituait `sudo -u ams air-mail-admin` par un jeton avant de jouer
+# la commande : il était donc AVEUGLE au nom du compte, précisément parce qu'il
+# le remplaçait. Le manuel a nommé `ams` pendant des semaines quand
+# l'installateur et le paquet créent `air-mail` — trouvé le 2026-09-08 en posant
+# le paquet sur la machine, à onze jours de la bascule. La première commande de
+# la §0.4 aurait échoué par « sudo: unknown user ams », Postfix déjà arrêté.
+#
+# On ne peut pas éprouver le compte en le jouant : il n'existe pas sur une
+# machine de développement. On peut, en revanche, vérifier que le manuel et
+# l'installateur nomment LE MÊME — c'est ce qui aurait suffi.
+compte_du_manuel=$(printf '%s\n' "$commande" \
+    | sed -n 's/.*sudo -u \([A-Za-z0-9_-]*\) air-mail-admin.*/\1/p' | head -1)
+compte_du_produit=$(sed -n 's/^compte="\([^"]*\)".*/\1/p' "$racine/scripts/installer.sh" | head -1)
+
+if [ -z "$compte_du_manuel" ] || [ -z "$compte_du_produit" ]; then
+    echo "ECHEC : compte de service introuvable — manuel «$compte_du_manuel», produit «$compte_du_produit»." >&2
+    exit 1
+fi
+if [ "$compte_du_manuel" != "$compte_du_produit" ]; then
+    echo "ECHEC : le manuel dit «$compte_du_manuel», l installateur cree «$compte_du_produit»." >&2
+    echo "        La premiere commande de la phase 0 echouerait sur la machine." >&2
+    exit 1
+fi
+echo "compte de service : «$compte_du_manuel» — le meme que l installateur cree"
+
 # ── LES SUBSTITUTIONS, ET CHACUNE EST NOMMÉE ────────────────────────────────
 #
 # On ne remplace QUE ce qui désigne la machine de production. Toute autre
@@ -73,15 +101,15 @@ fi
 jouable=$(printf '%s\n' "$commande" \
     | sed -e 's|^ *||' \
           -e 's#^printf %s "$SECRET_RESEND" | ##' \
-          -e 's|sudo -u ams air-mail-admin|«OUTIL»|' \
-          -e "s|/etc/ams/essai.conf|$banc/essai.conf|" \
-          -e "s|/etc/ams/comptes.bin|$banc/comptes.bin|" \
+          -e "s|sudo -u $compte_du_manuel air-mail-admin|«OUTIL»|" \
+          -e "s|/var/lib/air-mail/essai.conf|$banc/essai.conf|" \
+          -e "s|/var/lib/air-mail/comptes.bin|$banc/comptes.bin|" \
           -e "s|/var/vmail-ams|$banc/vmail|" \
-          -e "s|/var/spool/ams/file|$banc/file|" \
-          -e "s|/var/cache/ams/mtasts|$banc/mtasts|" \
-          -e "s|/etc/letsencrypt/live/mail.narro.ch/fullchain.pem|$banc/cert.pem|" \
-          -e "s|/etc/letsencrypt/live/mail.narro.ch/privkey.pem|$banc/cle.pem|" \
-          -e "s|/var/lib/rspamd/dkim/narro.ch.mail.key|$banc/dkim.key|" \
+          -e "s|/var/lib/air-mail/file|$banc/file|" \
+          -e "s|/var/lib/air-mail/mtasts|$banc/mtasts|" \
+          -e "s|/var/lib/air-mail/tls/fullchain.pem|$banc/cert.pem|" \
+          -e "s|/var/lib/air-mail/tls/privkey.pem|$banc/cle.pem|" \
+          -e "s|/var/lib/rspamd/dkim/narro.ch.ams202609.key|$banc/dkim.key|" \
           -e "s|/usr/share/publicsuffix/public_suffix_list.dat|$banc/psl.dat|" \
           -e "s|/etc/ssl/certs/ca-certificates.crt|$banc/anchors.pem|" \
           -e 's|«le compte Resend, dans /etc/postfix/sasl_passwd»|compte@narro.ch|')

@@ -119,6 +119,18 @@ def _encoder_utf7_modifie(nom: str) -> str:
     return "".join(sortie)
 
 
+def est_un_entete_dovecot(ligne: str) -> bool:
+    """La ligne est-elle l'en-tête de version d'un `subscriptions` Dovecot ?
+
+    Le format est `V`, une TABULATION, un entier. On exige les trois : une boîte
+    qui s'appellerait vraiment `V` — improbable mais permis — ne doit pas
+    disparaître parce qu'elle est en première ligne.
+    """
+    if not ligne.startswith("V\t"):
+        return False
+    return ligne[2:].strip().isdigit()
+
+
 def essais() -> int:
     """Éprouve le décodeur, et rend le nombre de fautes.
 
@@ -175,6 +187,72 @@ def essais() -> int:
     for abime in ["&AMk", "&", "&AMk-t&AOk", "&!!!-", "&&&-"]:
         if depuis_utf7_modifie(abime) != abime:
             print(f"FAUTE : {abime!r} aurait dû être rendu tel quel", file=sys.stderr)
+            fautes += 1
+
+    # ── L'EN-TÊTE DE DOVECOT N'EST PAS UN DOSSIER ───────────────────────────
+    #
+    # Trouvé sur la machine de narro.ch le 2026-09-08 : `subscriptions` commence
+    # par `V<TAB>2`, que le script prenait pour une boîte. L'abonnement fantôme
+    # ne fait rien tomber — il désigne une boîte qui n'existe pas — mais il est
+    # faux, et ce qui est faux sans bruit est ce qu'on ne corrige jamais.
+    entetes = [("V\t2\n", True), ("V\t1\n", True), ("V\t12\n", True)]
+    pas_des_entetes = [
+        ("Sent\n", False),
+        ("V\n", False),              # un `V` seul est une boîte nommée `V`
+        ("V\tdeux\n", False),        # pas un entier : on ne devine pas
+        ("Ventes\n", False),
+        ("\tV\t2\n", False),         # décalé : ce n'est plus l'en-tête
+    ]
+    for ligne, attendu in entetes + pas_des_entetes:
+        vu = est_un_entete_dovecot(ligne)
+        if vu != attendu:
+            print(f"FAUTE : est_un_entete_dovecot({ligne!r}) = {vu}, attendu {attendu}",
+                  file=sys.stderr)
+            fautes += 1
+
+    # ── DE BOUT EN BOUT : LE FICHIER ÉCRIT EST-IL UTILISABLE ? ──────────────
+    #
+    # Le décodeur peut être juste et le résultat inexploitable. Les deux défauts
+    # trouvés sur la machine de narro.ch le 2026-09-08 ne se voyaient QUE par un
+    # essai qui écrit vraiment : l'en-tête `V<TAB>2` pris pour une boîte, et le
+    # fichier écrit à `root` donc illisible par le compte de service. Un banc
+    # qui n'éprouve que la traduction laisse passer les deux.
+    import subprocess, tempfile
+    with tempfile.TemporaryDirectory() as banc:
+        boite = os.path.join(banc, "essai")
+        os.makedirs(os.path.join(boite, ".Sent", "cur"))
+        # **LA BOÎTE PREND UN GROUPE QUI N'EST PAS LE NÔTRE PAR DÉFAUT**, sans
+        # quoi l'essai ne prouve rien : un fichier créé par ce processus hérite
+        # déjà du bon propriétaire, et l'assertion passerait même si le script
+        # ne posait aucune appartenance. C'est ce qu'une mutation a montré.
+        autre_groupe = next(
+            (g for g in os.getgroups() if g != os.getgid()), None
+        )
+        if autre_groupe is not None:
+            os.chown(boite, os.getuid(), autre_groupe)
+        with open(os.path.join(boite, "subscriptions"), "w", encoding="utf-8") as f:
+            f.write("V\t2\n\nSent\nDrafts\n&AMk-t&AOk--2025\n")
+        subprocess.run(
+            [sys.executable, __file__, banc, "--pour-de-vrai"],
+            check=True, capture_output=True,
+        )
+        ecrit = os.path.join(boite, "ams-abonnements")
+        lignes = open(ecrit, encoding="utf-8").read().splitlines()
+        if lignes != ["Sent", "Drafts", "Été-2025"]:
+            print(f"FAUTE : abonnements écrits = {lignes!r}", file=sys.stderr)
+            fautes += 1
+        st, parent = os.stat(ecrit), os.stat(boite)
+        if (st.st_uid, st.st_gid) != (parent.st_uid, parent.st_gid):
+            print("FAUTE : le fichier n'a pas l'appartenance de la boîte "
+                  f"({st.st_uid}:{st.st_gid} au lieu de "
+                  f"{parent.st_uid}:{parent.st_gid})", file=sys.stderr)
+            fautes += 1
+        elif autre_groupe is None:
+            print("NOTE : un seul groupe pour cet utilisateur — l'appartenance "
+                  "n'a pas pu être éprouvée de façon discriminante.",
+                  file=sys.stderr)
+        if st.st_mode & 0o777 != 0o600:
+            print(f"FAUTE : mode {st.st_mode & 0o777:o}, attendu 600", file=sys.stderr)
             fautes += 1
 
     if fautes == 0:
@@ -243,9 +321,17 @@ def main() -> int:
             continue
         lignes = []
         with open(source, encoding="utf-8", errors="replace") as fichier:
-            for ligne in fichier:
+            for rang, ligne in enumerate(fichier):
                 nom = ligne.strip()
                 if not nom:
+                    continue
+                # **LA PREMIÈRE LIGNE PEUT ÊTRE UN EN-TÊTE, PAS UN DOSSIER.**
+                # Dovecot 2.x écrit `V<TAB>2` en tête de `subscriptions` ; les
+                # versions plus anciennes n'écrivent rien. Pris pour un nom de
+                # boîte, cet en-tête donnait un abonnement fantôme à une boîte
+                # qui n'existe pas — trouvé sur la machine de narro.ch le
+                # 2026-09-08, pendant la phase 0.
+                if rang == 0 and est_un_entete_dovecot(ligne):
                     continue
                 # Le séparateur de Maildir++ est le point ; celui de ce
                 # serveur, la barre. L'alphabet de l'UTF-7 modifié ne porte
@@ -288,6 +374,21 @@ def main() -> int:
             for nom in lignes:
                 fichier.write(nom + "\n")
         os.chmod(cible, 0o600)
+        # **LE FICHIER PREND LE PROPRIÉTAIRE DE LA BOÎTE, ET NON CELUI QUI LANCE.**
+        # Ce script tourne sous `sudo` : sans cela le fichier naît à `root` en
+        # 0600, donc ILLISIBLE par le compte de service — et les abonnements
+        # restent invisibles, ce qui est exactement le défaut qu'on répare ici.
+        # On copie l'appartenance du répertoire du compte plutôt que de nommer
+        # un utilisateur : le script n'a pas à savoir comment il s'appelle.
+        parent = os.stat(os.path.dirname(cible))
+        try:
+            os.chown(cible, parent.st_uid, parent.st_gid)
+        except PermissionError:
+            print(
+                f"AVERTISSEMENT : `{cible}` reste à l'utilisateur courant — "
+                "le compte de service ne le lira pas. Relancez sous `sudo`.",
+                file=sys.stderr,
+            )
     print("Fait.")
     return 0
 

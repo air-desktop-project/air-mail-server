@@ -15003,3 +15003,74 @@ adresse, que le bannissement ne touchait pas.
 **Chercher dans ce qui a déjà été dit avant de sonder quoi que ce soit.** Un
 essai d'authentification n'est pas une lecture, et une machine bien tenue les
 compte.
+
+## 2026-09-08 — La phase 0 sur la vraie machine, et sept défauts du manuel
+
+`air-mail-server` a servi les 573 messages de `narro.ch` sur les ports hauts,
+à côté d'un Postfix qui n'en a rien su. L'audit du §0.5 : aucun écart, aucun nom
+illisible. Ce qui suit est ce que la nuit a trouvé.
+
+### Un garde-fou aveugle à ce qu'il remplaçait
+
+Le manuel écrivait `sudo -u ams` et `/etc/ams/` ; l'installateur, le paquet et
+l'unité systemd créent `air-mail` et `/var/lib/air-mail`. La PREMIÈRE commande de
+la phase 0 aurait échoué sur « sudo: unknown user ams », Postfix déjà arrêté.
+
+Ce manuel avait pourtant un garde-fou fait pour ça — `repeter-la-configuration.sh`
+rejoue la commande, et il avait déjà trouvé quatre erreurs. **Il ne pouvait pas
+trouver celle-ci : il SUBSTITUAIT `sudo -u ams air-mail-admin` par un jeton avant
+de jouer.** Il était aveugle au nom du compte précisément parce qu'il le
+remplaçait.
+
+C'est la leçon de la nuit, et elle dépasse ce script : **ce qu'un banc neutralise
+pour pouvoir tourner est exactement ce qu'il cessera de vérifier.** Chaque
+substitution est un angle mort qu'on choisit, et qu'il faut donc nommer et
+compenser ailleurs.
+
+Compensé ici : le script compare désormais le compte que le manuel nomme à celui
+que `installer.sh` crée. On ne peut pas éprouver le compte en le jouant — il
+n'existe pas sur une machine de développement — mais on peut vérifier que les
+deux moitiés du projet parlent du même. Éprouvé dans les deux sens : manuel qui
+dérive, produit qui change.
+
+### Un fichier lisible dans un répertoire qui ne se traverse pas
+
+`/etc/letsencrypt/live` et `/archive` sont en `0700 root`. `fullchain.pem` a beau
+être en 0644, il est inaccessible au compte de service — et le manuel ne
+signalait que `privkey.pem`. Le crochet `deploy-hook` recopie les DEUX. Il fallait
+un crochet et non un `chmod` : certbot réécrit ces fichiers à chaque
+renouvellement, et sans lui le serveur aurait servi un certificat périmé soixante
+jours après la bascule.
+
+### Deux défauts dans l'outil censé éviter le désastre
+
+`renommer-dossiers.py` traduit les abonnements pour qu'un client voie ses
+dossiers. Il prenait l'en-tête de version `V<TAB>2` de Dovecot pour une boîte, et
+il écrivait `ams-abonnements` sous l'identité qui lance — donc `root` en 0600,
+ILLISIBLE par le compte de service. **Le client n'aurait affiché aucun dossier**,
+ce qui est exactement le désastre que ce script existe pour prévenir.
+
+Les deux ne se voyaient qu'en écrivant vraiment. Le banc n'éprouvait que le
+décodeur. Il a maintenant un essai de bout en bout — et il a fallu deux passes :
+la première version vérifiait l'appartenance sous le même utilisateur, si bien
+qu'elle passait même sans le `chown`. **Une assertion que l'environnement rend
+vraie d'office ne vérifie rien.** La boîte d'essai prend désormais un groupe qui
+n'est pas celui du processus.
+
+### Le rôle des dossiers, que personne ne pose
+
+`air-mail-server` n'attribue aucun usage `SPECIAL-USE` de son cru, et c'est écrit
+dans son code : c'est le client qui désigne. Défendable pour une installation
+neuve ; pour une MIGRATION, c'est un trou, parce que Dovecot désignait `\Sent`,
+`\Drafts`, `\Junk`, `\Trash` et `\Archive`. Sans eux, le client crée les siens et
+l'utilisateur retrouve son courrier envoyé réparti entre deux dossiers.
+
+Le manuel n'en disait rien. Il porte maintenant un §0.4bis-2, et le contrôle se
+fait avec la commande que Thunderbird envoie vraiment — pas avec un `LIST` nu,
+qui ne montre ni les abonnements ni les rôles.
+
+### Et le compte du démarrage qui fait peur pour rien
+
+Le serveur annonce 549 messages là où l'audit en compte 573 : les 549 sont la
+somme des `INBOX`, les 24 manquants les `Sent`. Rien n'est perdu. C'est noté,
+parce qu'un écart inexpliqué un samedi matin ferait chercher une copie ratée.
