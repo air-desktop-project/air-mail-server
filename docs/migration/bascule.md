@@ -266,7 +266,7 @@ commande, et elle a été trouvée en la jouant, pas en la relisant.
 
     printf %s "$SECRET_RESEND" | sudo -u air-mail air-mail-admin config write \
         /var/lib/air-mail/essai.conf \
-        --domain mail.narro.ch --hosted narro.ch \
+        --domain mail.narro.ch --hosted narro.ch --hosted mail.narro.ch \
         --maildir /var/vmail-ams --accounts /var/lib/air-mail/comptes.bin \
         --listen 127.0.0.1:2525 --listen-imaps 127.0.0.1:9993 \
         --max-message 52428800 \
@@ -440,10 +440,25 @@ pas, et il n'y a pas de « mot de passe oublié » ici.
     printf %s "$mot" | sudo -u air-mail air-mail-admin account add \
         /var/lib/air-mail/comptes.bin --login contact \
         --address contact@narro.ch --address postmaster@narro.ch \
-        --address abuse@narro.ch --address root@narro.ch
+        --address abuse@narro.ch --address root@narro.ch \
+        --address postmaster@mail.narro.ch
 
 `postmaster@` est ici une exigence, pas une commodité : §4.5.1 de RFC 5321 la
 pose, et le serveur AVERTIT au démarrage si personne ne la reçoit.
+
+**IL EN FAUT DEUX, ET LA SECONDE SEULE EMPÊCHE LE SERVEUR DE DÉMARRER.**
+`postmaster@narro.ch` couvre le DOMAINE servi ; `postmaster@mail.narro.ch`
+couvre le NOM DE LA MACHINE, que la RFC exige aussi. Or une adresse dans un
+domaine que `--hosted` n'annonce pas fait REFUSER le démarrage — c'est pourquoi
+la commande de configuration porte `--hosted mail.narro.ch` en plus de
+`--hosted narro.ch`.
+
+Le 2026-09-08, en phase 0, le serveur conseillait d'ajouter cette adresse sans
+dire qu'il fallait aussi annoncer le domaine. En suivant son conseil à la lettre,
+il refusait de repartir — code de sortie 1. Le conseil a été corrigé dans le
+produit, et un essai tient désormais l'enchaînement : suivre le conseil doit
+donner un serveur qui démarre. **On a néanmoins écrit les deux ici**, parce qu'un
+manuel qui dépend d'un message d'aide pour être complet n'est pas complet.
 
 **CINQ SECRETS DISTINCTS, ET NON UN SEUL PARTAGÉ.** La boucle ci-dessus en tire
 un par compte, et c'est délibéré : un secret commun laisserait, entre la bascule

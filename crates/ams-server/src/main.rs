@@ -671,6 +671,41 @@ fn charger_dkim(dkim: &ams_config::Dkim) -> Result<Option<Arc<SigningKey>>, Stri
 ///
 /// Le serveur connaît la liste ; la faire recopier serait lui faire refaire un
 /// travail qu'il a déjà fait, et c'est en recopiant qu'on se trompe.
+/// Le conseil à donner quand personne ne reçoit `postmaster@<domaine>`.
+///
+/// # UN CONSEIL DOIT MENER À UN SERVEUR QUI DÉMARRE
+///
+/// Celui-ci ne le faisait pas. Il disait « ajoutez cette adresse à un compte »,
+/// et rien de plus. Or si le domaine du serveur — `--domain` — n'est pas dans
+/// `--hosted`, l'ajouter fait ÉCHOUER [`verifier_les_domaines`] au démarrage
+/// suivant : code 1, plus de serveur.
+///
+/// Trouvé le 2026-09-08 sur la machine de narro.ch, en phase 0, en suivant ce
+/// conseil à la lettre. La séquence complète était : on démarre, on lit
+/// l'avertissement, on obéit, on redémarre — et rien ne revient. Le jour d'une
+/// bascule, l'ancien serveur est déjà arrêté quand cela se produit.
+///
+/// **Un message d'aide qui mène dans le mur est pire que pas de message** : on
+/// l'a suivi, donc on ne le soupçonne pas, et on cherche ailleurs.
+fn conseil_postmaster(postmaster: &str, domaine: &str, heberges: &[String]) -> String {
+    let annonce = heberges
+        .iter()
+        .any(|heberge| heberge.eq_ignore_ascii_case(domaine));
+    if annonce {
+        return format!(
+            "ATTENTION — aucun compte ne reçoit `{postmaster}`. La RFC 5321 §4.5.1 l'exige : \
+             `air-mail-admin account add … --address {postmaster}`."
+        );
+    }
+    format!(
+        "ATTENTION — aucun compte ne reçoit `{postmaster}`. La RFC 5321 §4.5.1 l'exige, et \
+         `{domaine}` N'EST PAS DANS LES DOMAINES ANNONCÉS : IL FAUT LES DEUX COMMANDES, dans \
+         cet ordre — `air-mail-admin config write … --hosted {domaine}` puis `air-mail-admin \
+         account add … --address {postmaster}`. La seconde seule ferait REFUSER le démarrage \
+         suivant."
+    )
+}
+
 fn a_publier(selecteur: &str, domaines: &[String], cle: &Arc<SigningKey>) -> String {
     if domaines.is_empty() {
         return String::from(" — aucun domaine hébergé, rien ne sera signé");
@@ -1757,8 +1792,8 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     // signaler qu'il va mal.
     if ams_auth::route(&comptes.vue(), postmaster.as_bytes()).is_none() {
         eprintln!(
-            "air-mail-server : ATTENTION — aucun compte ne reçoit `{postmaster}`. \
-             La RFC 5321 §4.5.1 l'exige : `air-mail-admin account add … --address {postmaster}`."
+            "air-mail-server : {}",
+            conseil_postmaster(&postmaster, &options.domain, &options.hosted)
         );
     }
 
@@ -2593,7 +2628,8 @@ async fn arret() {
 #[cfg(test)]
 mod tests {
     use super::{
-        charger_comptes, charger_tls, refuser_fichier_lisible_par_tous, verifier_les_domaines,
+        charger_comptes, charger_tls, conseil_postmaster, refuser_fichier_lisible_par_tous,
+        verifier_les_domaines,
     };
     use ams_auth::Account;
     use ams_config::Tls;
@@ -2623,6 +2659,62 @@ mod tests {
         std::fs::set_permissions(&chemin, std::fs::Permissions::from_mode(mode))
             .expect("permissions");
         chemin.display().to_string()
+    }
+
+    /// **SUIVRE LE CONSEIL DU SERVEUR DOIT DONNER UN SERVEUR QUI DÉMARRE.**
+    ///
+    /// C'est l'essai qui manquait, et son absence a coûté un serveur qui refusait
+    /// de repartir sur la machine de narro.ch le 2026-09-08. Le conseil disait
+    /// « ajoutez cette adresse » ; l'ajouter faisait échouer le démarrage
+    /// suivant, faute du `--hosted` correspondant.
+    ///
+    /// On n'éprouve donc pas la formulation du message : on éprouve **que ce
+    /// qu'il prescrit fonctionne**. C'est le genre d'essai qui n'existe jamais,
+    /// parce que personne ne pense à éprouver un texte d'aide.
+    #[test]
+    fn le_conseil_du_postmaster_mene_a_un_serveur_qui_demarre() {
+        let domaine = "mail.narro.ch";
+        let postmaster = "postmaster@mail.narro.ch";
+        let contact = Account {
+            login: String::from("contact"),
+            hash: String::from(ams_auth::DUMMY_HASH),
+            addresses: vec![String::from(postmaster)],
+        };
+
+        // ── Le domaine du serveur n'est PAS annoncé ─────────────────────────
+        let heberges = vec![String::from("narro.ch")];
+        let conseil = conseil_postmaster(postmaster, domaine, &heberges);
+
+        // N'OBÉIR QU'À MOITIÉ EMPÊCHE LE DÉMARRAGE : c'est le piège lui-même.
+        assert!(
+            verifier_les_domaines(std::slice::from_ref(&contact), &heberges).is_err(),
+            "l'adresse seule devrait faire refuser le démarrage — sinon cet essai ne prouve rien"
+        );
+
+        // DONC LE CONSEIL DOIT NOMMER LES DEUX GESTES.
+        assert!(
+            conseil.contains("--hosted mail.narro.ch"),
+            "le conseil doit dire d'annoncer le domaine : {conseil}"
+        );
+        assert!(
+            conseil.contains("--address postmaster@mail.narro.ch"),
+            "le conseil doit dire d'ajouter l'adresse : {conseil}"
+        );
+
+        // ET CE QU'IL PRESCRIT MARCHE : on applique les deux, ça démarre.
+        let comme_conseille = vec![String::from("narro.ch"), String::from(domaine)];
+        assert!(
+            verifier_les_domaines(std::slice::from_ref(&contact), &comme_conseille).is_ok(),
+            "en suivant le conseil en ENTIER, le démarrage doit passer"
+        );
+
+        // ── Et quand le domaine est déjà annoncé, on n'encombre pas ─────────
+        let conseil_simple = conseil_postmaster(postmaster, domaine, &comme_conseille);
+        assert!(
+            !conseil_simple.contains("--hosted"),
+            "inutile de parler de `--hosted` quand le domaine est déjà servi : {conseil_simple}"
+        );
+        assert!(conseil_simple.contains("--address"), "{conseil_simple}");
     }
 
     #[test]

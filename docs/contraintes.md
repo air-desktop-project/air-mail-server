@@ -15074,3 +15074,46 @@ qui ne montre ni les abonnements ni les rôles.
 Le serveur annonce 549 messages là où l'audit en compte 573 : les 549 sont la
 somme des `INBOX`, les 24 manquants les `Sent`. Rien n'est perdu. C'est noté,
 parce qu'un écart inexpliqué un samedi matin ferait chercher une copie ratée.
+
+## 2026-09-08 — Un conseil qui menait dans le mur
+
+Le serveur avertit, au démarrage, quand aucun compte ne reçoit
+`postmaster@<domaine>` — la RFC 5321 §4.5.1 l'exige. Il disait quoi faire :
+
+    air-mail-admin account add … --address postmaster@mail.narro.ch
+
+En phase 0, sur la machine de narro.ch, on a suivi ce conseil à la lettre. Le
+démarrage suivant a rendu **code 1** : l'adresse est dans `mail.narro.ch`, que
+`--hosted` n'annonçait pas, et `verifier_les_domaines` refuse une adresse hors
+des domaines servis — à raison, c'est presque toujours une faute de frappe.
+
+**Le conseil menait donc à une configuration sur laquelle le serveur refuse de
+démarrer.** La séquence complète : on démarre, on lit l'avertissement, on obéit,
+on redémarre, et rien ne revient. Le jour d'une bascule, l'ancien serveur est
+déjà arrêté à ce moment-là.
+
+### Ce qui rend ce défaut particulier
+
+Un message d'aide faux est pire qu'un message absent. Sans message, on cherche.
+Avec un message qu'on vient de suivre, **on ne le soupçonne pas** : on tient la
+cause pour écartée et on cherche ailleurs, pendant que la coupure dure.
+
+C'est aussi une classe de code que rien n'éprouvait. Les essais couvrent ce que
+le serveur FAIT ; personne ne pense à éprouver ce qu'il CONSEILLE. Le conseil est
+pourtant du comportement : il est lu, il est suivi, et il a des conséquences.
+
+### La correction, et la forme de son essai
+
+Le message nomme désormais les deux gestes quand le domaine n'est pas annoncé, et
+n'encombre pas quand il l'est. Il est sorti dans une fonction pure —
+`conseil_postmaster` — pour pouvoir être éprouvé.
+
+L'essai n'éprouve PAS la formulation, qui changera. Il éprouve **que ce que le
+conseil prescrit fonctionne** : n'obéir qu'à moitié doit faire échouer le
+démarrage — sans quoi l'essai ne prouverait rien — et obéir en entier doit le
+faire passer. Les deux mutations le tuent, dont celle qui restaure exactement le
+défaut d'origine.
+
+**Le manuel écrit néanmoins les deux commandes**, plutôt que de renvoyer au
+message du serveur. Un manuel qui dépend d'un texte d'aide pour être complet
+n'est pas complet.
