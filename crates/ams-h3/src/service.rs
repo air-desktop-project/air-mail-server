@@ -44,6 +44,8 @@ pub struct Reponse<'o> {
     champs: [Option<(&'o [u8], &'o [u8])>; CHAMPS_MAX],
     /// Le corps.
     corps: &'o [u8],
+    /// Le flux reste-t-il ouvert après cette réponse ?
+    tenue: bool,
 }
 
 impl<'o> Reponse<'o> {
@@ -54,7 +56,35 @@ impl<'o> Reponse<'o> {
             status,
             champs: [None; CHAMPS_MAX],
             corps,
+            tenue: false,
         }
+    }
+
+    /// La même, mais **le flux ne se termine pas**.
+    ///
+    /// # POURQUOI CETTE PORTE EXISTE
+    ///
+    /// §4.1 : une réponse ordinaire s'achève avec son flux, sans quoi le client
+    /// attendrait la suite. C'est le bon comportement pour une requête à
+    /// laquelle on répond une fois.
+    ///
+    /// **Il en existe une autre** : celle où le serveur a quelque chose à dire
+    /// PLUS TARD, sur une connexion déjà tenue — un verdict de sonde qui n'était
+    /// pas encore rendu quand on a répondu. Le flux reste alors ouvert, et
+    /// [`Http3::pousser`](crate::Http3::pousser) y écrit à mesure.
+    ///
+    /// # CE QUE L'APPELANT DOIT TENIR
+    ///
+    /// **Ne pas annoncer de `content-length`.** Une réponse dont la longueur est
+    /// déclarée et dont le corps s'allonge est un message qui se contredit, et
+    /// un intermédiaire aurait raison de la couper.
+    ///
+    /// **Fermer un jour**, par [`Http3::clore`](crate::Http3::clore). Un flux
+    /// tenu qu'on oublie est une ressource que le pair garde ouverte.
+    #[must_use]
+    pub const fn tenue(mut self) -> Self {
+        self.tenue = true;
+        self
     }
 
     /// La même, avec ce champ de plus.
@@ -86,6 +116,12 @@ impl<'o> Reponse<'o> {
     #[must_use]
     pub const fn body(&self) -> &'o [u8] {
         self.corps
+    }
+
+    /// Le flux reste-t-il ouvert après cette réponse ?
+    #[must_use]
+    pub const fn est_tenue(&self) -> bool {
+        self.tenue
     }
 }
 

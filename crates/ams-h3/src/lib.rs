@@ -192,6 +192,13 @@ pub struct Http3 {
     decodeur: Option<StreamId>,
     /// Les réglages qu'on annonce.
     nos_reglages: Settings,
+    /// Les flux qu'une réponse a laissés OUVERTS.
+    ///
+    /// **SANS CETTE LISTE, `pousser` ÉCRIRAIT N'IMPORTE OÙ.** Un identifiant de
+    /// flux est un nombre : rien ne distingue celui d'une réponse tenue de celui
+    /// d'un flux clos, ou d'un flux qui n'a jamais existé. Y écrire poserait des
+    /// octets qu'un pair lirait comme la suite d'autre chose.
+    tenus: Vec<StreamId>,
     /// Le plus grand flux de requête qu'on ait servi, s'il y en a eu un.
     ///
     /// **C'EST CE QUI DONNE SON IDENTIFIANT AU `GOAWAY` PRÉCIS** (§5.2) : le
@@ -213,6 +220,7 @@ impl Http3 {
         Self {
             h3: H3Connection::new(),
             suivis: Vec::new(),
+            tenus: Vec::new(),
             controle: None,
             encodeur: None,
             decodeur: None,
@@ -614,8 +622,89 @@ impl Http3 {
             paquet.extend_from_slice(reponse.body());
         }
         quic.write(flux, &paquet)?;
-        // §4.1 : et le flux se termine, sans quoi le client attendrait la suite.
+
+        // §4.1 : le flux se termine, sans quoi le client attendrait la suite.
+        //
+        // **SAUF SI LA RÉPONSE EST TENUE** : le service a dit qu'il aurait
+        // quelque chose à ajouter plus tard, et c'est précisément cette attente
+        // qu'on veut. Voir [`Reponse::tenue`].
+        if reponse.est_tenue() {
+            // **PAS DE DOUBLON À CRAINDRE** : `on_readable` ne sert une requête
+            // qu'une fois, et un identifiant de flux ne se réemploie pas dans une
+            // connexion. Chercher avant d'ajouter poserait une branche que rien
+            // ne peut atteindre.
+            self.tenus.push(flux);
+            return Ok(());
+        }
         quic.finish(flux)
+    }
+
+    /// Écrit un message de plus sur un flux qu'une réponse a laissé ouvert.
+    ///
+    /// # POURQUOI CE N'EST PAS UNE SECONDE RÉPONSE
+    ///
+    /// §4.1 ne permet qu'une section de champs par réponse. Ce qu'on écrit ici
+    /// est une trame `DATA` de plus — la SUITE du même corps —, et c'est au
+    /// protocole applicatif de dire comment le lecteur le découpe.
+    ///
+    /// # Errors
+    ///
+    /// [`Reason::Interne`] si ce flux n'a pas été laissé ouvert par une réponse
+    /// tenue — c'est NOTRE faute et non celle du pair, qui n'a rien demandé.
+    /// Le transport peut aussi refuser.
+    pub fn pousser<T: Transport>(
+        &mut self,
+        quic: &mut T,
+        flux: StreamId,
+        octets: &[u8],
+    ) -> Result<(), Error> {
+        if !self.tenus.contains(&flux) {
+            return Err(Error::new(Reason::Interne));
+        }
+        // **UNE TRAME VIDE NE DIT RIEN DE PLUS QUE SON ABSENCE**, et coûte deux
+        // octets. Même raison qu'un corps vide dans une réponse ordinaire.
+        if octets.is_empty() {
+            return Ok(());
+        }
+
+        let mut entete = [0_u8; ENTETE_OCTETS_MAX];
+        let pose = ams_proto_h3::write_header(
+            FrameKind::Data,
+            u64::try_from(octets.len()).unwrap_or(u64::MAX),
+            &mut entete,
+        )
+        .expect("un en-tête de §7.1 tient sur seize octets");
+
+        let mut paquet = Vec::with_capacity(pose.saturating_add(octets.len()));
+        paquet.extend_from_slice(entete.get(..pose).unwrap_or_default());
+        paquet.extend_from_slice(octets);
+        quic.write(flux, &paquet)?;
+        Ok(())
+    }
+
+    /// Ferme un flux tenu.
+    ///
+    /// **UN FLUX TENU QU'ON OUBLIE EST UNE RESSOURCE QUE LE PAIR GARDE
+    /// OUVERTE.** Fermer une connexion ferme tout, mais un daemon qui vit des
+    /// mois ne ferme rien.
+    ///
+    /// Fermer deux fois ne fait rien la seconde.
+    ///
+    /// # Errors
+    ///
+    /// Ce que le transport refuse.
+    pub fn clore<T: Transport>(&mut self, quic: &mut T, flux: StreamId) -> Result<(), Error> {
+        let Some(rang) = self.tenus.iter().position(|tenu| *tenu == flux) else {
+            return Ok(());
+        };
+        self.tenus.swap_remove(rang);
+        quic.finish(flux)
+    }
+
+    /// Les flux qu'une réponse a laissés ouverts.
+    #[must_use]
+    pub fn tenus(&self) -> &[StreamId] {
+        &self.tenus
     }
 
     /// Le rang de ce flux dans ce qu'on suit, en l'ouvrant au besoin.

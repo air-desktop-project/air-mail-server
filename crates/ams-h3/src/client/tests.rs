@@ -180,6 +180,31 @@ impl Service for Echo {
     }
 }
 
+/// Un service qui répond, puis GARDE le flux ouvert.
+///
+/// C'est ce que fait l'annuaire quand il répond `en_cours` : la sonde n'a pas
+/// encore parlé, et le verdict arrivera plus tard sur la connexion déjà tenue.
+struct Tenu;
+
+impl Service for Tenu {
+    fn serve<'o>(
+        &mut self,
+        _tete: &ams_proto_http::RequestHead<'_>,
+        _corps: &[u8],
+        sortie: &'o mut [u8],
+    ) -> Reponse<'o> {
+        let debut = br#"{"verdict":"en_cours"}"#;
+        let combien = debut.len().min(sortie.len());
+        sortie
+            .get_mut(..combien)
+            .expect("la borne vient d'être prise")
+            .copy_from_slice(debut.get(..combien).unwrap_or_default());
+        // **PAS DE `content-length`** : une réponse dont la longueur est déclarée
+        // et dont le corps s'allonge est un message qui se contredit.
+        Reponse::new(StatusCode::OK, sortie.get(..combien).unwrap_or_default()).tenue()
+    }
+}
+
 /// Fait circuler ce que chaque camp a écrit, et laisse les deux avancer.
 fn un_tour(
     client: &mut Http3Client,
@@ -188,6 +213,31 @@ fn un_tour(
     cote_serveur: &mut Fil,
     service: &mut Echo,
     fin_de_requete: Option<u64>,
+) {
+    un_tour_de(
+        client,
+        cote_client,
+        serveur,
+        cote_serveur,
+        service,
+        fin_de_requete,
+        true,
+    );
+}
+
+/// Le même, en disant si le serveur conclut son flux de réponse.
+///
+/// **UNE RÉPONSE TENUE NE LE CONCLUT PAS**, et c'est précisément ce qu'on veut
+/// éprouver : un faux transport qui poserait la fin quand même rendrait le
+/// mécanisme invisible.
+fn un_tour_de<S: Service>(
+    client: &mut Http3Client,
+    cote_client: &mut Fil,
+    serveur: &mut Http3,
+    cote_serveur: &mut Fil,
+    service: &mut S,
+    fin_de_requete: Option<u64>,
+    conclut: bool,
 ) {
     for (flux, octets) in cote_client.vider() {
         cote_serveur.recevoir(flux, &octets);
@@ -206,11 +256,14 @@ fn un_tour(
 
     for (flux, octets) in cote_serveur.vider() {
         cote_client.recevoir(flux, &octets);
-        // Le serveur conclut le flux de réponse dès qu'il a répondu.
-        if matches!(
-            StreamId::new(flux).expect("un flux valide").directional(),
-            Directional::Bidirectional
-        ) {
+        // Le serveur conclut le flux de réponse dès qu'il a répondu — sauf si la
+        // réponse est TENUE.
+        if conclut
+            && matches!(
+                StreamId::new(flux).expect("un flux valide").directional(),
+                Directional::Bidirectional
+            )
+        {
             cote_client.fin_recue(flux);
         }
     }
@@ -974,4 +1027,241 @@ fn des_octets_orphelins_a_la_fin_ne_font_pas_une_reponse() {
         client.take_response(flux).is_none(),
         "il reste des octets qui ne font pas une trame"
     );
+}
+
+// ── Le flux tenu, et ce qui y est poussé ────────────────────────────────────
+
+#[test]
+fn une_reponse_tenue_laisse_le_flux_ouvert_et_ce_qui_suit_arrive() {
+    // **C'EST LE MÉCANISME ENTIER, DES DEUX CÔTÉS.** L'annuaire répond
+    // `en_cours` parce qu'il ne fait pas attendre le démarrage d'un daemon le
+    // temps d'une sonde ; le verdict arrive ensuite, sur la connexion déjà
+    // tenue. Sans flux tenu, il n'arriverait jamais.
+    let mut client = Http3Client::new();
+    let mut serveur = Http3::new();
+    let mut cote_client = Fil::neuf(Initiator::Client);
+    let mut cote_serveur = Fil::neuf(Initiator::Server);
+    let mut service = Tenu;
+
+    client
+        .on_established(&mut cote_client)
+        .expect("le client ouvre ses trois flux");
+    serveur
+        .on_established(&mut cote_serveur)
+        .expect("le serveur ouvre les siens");
+
+    let flux = client
+        .request(
+            &mut cote_client,
+            b"GET",
+            b"/v1/poussees",
+            b"annuaire.example",
+            &[],
+            b"",
+        )
+        .expect("la requête s'écrit");
+
+    let tourner = |client: &mut Http3Client,
+                   cote_client: &mut Fil,
+                   serveur: &mut Http3,
+                   cote_serveur: &mut Fil,
+                   service: &mut Tenu| {
+        un_tour_de(
+            client,
+            cote_client,
+            serveur,
+            cote_serveur,
+            service,
+            Some(flux.value()),
+            false,
+        );
+    };
+
+    for _ in 0..4_u32 {
+        tourner(
+            &mut client,
+            &mut cote_client,
+            &mut serveur,
+            &mut cote_serveur,
+            &mut service,
+        );
+    }
+
+    // **LE STATUT EST LÀ AVANT LA FIN**, et c'est ce qui rend le flux utilisable.
+    assert_eq!(client.statut(flux), Some(StatusCode::OK));
+    assert!(
+        !client.est_fini(flux),
+        "le serveur n'a pas fini, et le client ne doit pas le croire"
+    );
+    assert!(
+        client.take_response(flux).is_none(),
+        "`take_response` attendrait pour toujours : c'est pourquoi l'autre porte existe"
+    );
+
+    let debut = client
+        .prendre_ce_qui_est_arrive(flux)
+        .expect("le flux est connu");
+    assert_eq!(debut, br#"{"verdict":"en_cours"}"#.to_vec());
+
+    // **ET LE DRAINAGE VIDE** : ce qu'on a pris ne revient pas.
+    assert_eq!(
+        client.prendre_ce_qui_est_arrive(flux),
+        Some(Vec::new()),
+        "un second appel ne doit rien rendre de plus"
+    );
+
+    // ── LE VERDICT ARRIVE, PLUS TARD ────────────────────────────────────────
+    serveur
+        .pousser(&mut cote_serveur, flux, br#"{"verdict":"joignable"}"#)
+        .expect("le flux est tenu");
+    serveur
+        .pousser(&mut cote_serveur, flux, br#"{"verdict":"injoignable"}"#)
+        .expect("le flux est tenu");
+
+    for _ in 0..2_u32 {
+        tourner(
+            &mut client,
+            &mut cote_client,
+            &mut serveur,
+            &mut cote_serveur,
+            &mut service,
+        );
+    }
+
+    let suite = client
+        .prendre_ce_qui_est_arrive(flux)
+        .expect("le flux est connu");
+    assert_eq!(
+        suite,
+        br#"{"verdict":"joignable"}{"verdict":"injoignable"}"#.to_vec(),
+        "les deux poussées doivent être arrivées, dans l'ordre"
+    );
+
+    // ── LA FERMETURE EST UNE INFORMATION ────────────────────────────────────
+    assert_eq!(serveur.tenus(), &[flux]);
+    serveur.clore(&mut cote_serveur, flux).expect("il se ferme");
+    assert!(serveur.tenus().is_empty());
+    for (quel, octets) in cote_serveur.vider() {
+        cote_client.recevoir(quel, &octets);
+    }
+    // `finish` n'écrit aucun octet : c'est un fanion du transport, et le faux fil
+    // le porte comme le vrai.
+    cote_client.fin_recue(flux.value());
+    client
+        .on_readable(&mut cote_client, flux)
+        .expect("la fin se lit");
+    assert!(
+        client.est_fini(flux),
+        "l'annuaire a fini de pousser, et ce qu'on attendait n'arrivera plus"
+    );
+}
+
+#[test]
+fn on_ne_pousse_pas_sur_un_flux_qu_aucune_reponse_n_a_tenu() {
+    // **UN IDENTIFIANT DE FLUX EST UN NOMBRE**, et rien ne distingue celui d'une
+    // réponse tenue de celui d'un flux clos, ou d'un flux qui n'a jamais existé.
+    // Y écrire poserait des octets qu'un pair lirait comme la suite d'autre
+    // chose.
+    let mut serveur = Http3::new();
+    let mut fil = Fil::neuf(Initiator::Server);
+    let flux = StreamId::new(0).expect("un flux valide");
+
+    assert!(serveur.tenus().is_empty());
+    assert_eq!(
+        serveur
+            .pousser(&mut fil, flux, b"x")
+            .map_err(|e| e.reason()),
+        Err(crate::Reason::Interne),
+        "notre faute, et non celle du pair : il n'a rien demandé"
+    );
+
+    // Fermer ce qui n'est pas tenu ne fait rien, et ne se plaint pas.
+    assert!(serveur.clore(&mut fil, flux).is_ok());
+}
+
+#[test]
+fn une_poussee_vide_n_ecrit_rien() {
+    // Une trame de zéro octet ne dit rien de plus que son absence, et coûte deux
+    // octets. Même raison qu'un corps vide dans une réponse ordinaire.
+    let mut client = Http3Client::new();
+    let mut serveur = Http3::new();
+    let mut cote_client = Fil::neuf(Initiator::Client);
+    let mut cote_serveur = Fil::neuf(Initiator::Server);
+    let mut service = Tenu;
+
+    client.on_established(&mut cote_client).expect("les trois");
+    serveur
+        .on_established(&mut cote_serveur)
+        .expect("les siens");
+    let flux = client
+        .request(&mut cote_client, b"GET", b"/v1/poussees", b"a", &[], b"")
+        .expect("elle s'écrit");
+
+    for _ in 0..4_u32 {
+        un_tour_de(
+            &mut client,
+            &mut cote_client,
+            &mut serveur,
+            &mut cote_serveur,
+            &mut service,
+            Some(flux.value()),
+            false,
+        );
+    }
+
+    let _ = cote_serveur.vider();
+    serveur
+        .pousser(&mut cote_serveur, flux, b"")
+        .expect("elle est acceptée");
+    assert!(
+        cote_serveur.vider().is_empty(),
+        "rien ne devait partir sur le fil"
+    );
+}
+
+#[test]
+fn un_transport_qui_refuse_d_ecrire_fait_echouer_la_poussee() {
+    // **ET LA FAUTE REMONTE**, au lieu d'une poussée perdue en silence : un
+    // verdict qu'on croit envoyé et qui n'est jamais parti laisserait un daemon
+    // sur `en_cours` pour toujours.
+    let mut client = Http3Client::new();
+    let mut serveur = Http3::new();
+    let mut cote_client = Fil::neuf(Initiator::Client);
+    let mut cote_serveur = Fil::neuf(Initiator::Server);
+    let mut service = Tenu;
+
+    client.on_established(&mut cote_client).expect("les trois");
+    serveur
+        .on_established(&mut cote_serveur)
+        .expect("les siens");
+    let flux = client
+        .request(&mut cote_client, b"GET", b"/v1/poussees", b"a", &[], b"")
+        .expect("elle s'écrit");
+
+    for _ in 0..4_u32 {
+        un_tour_de(
+            &mut client,
+            &mut cote_client,
+            &mut serveur,
+            &mut cote_serveur,
+            &mut service,
+            Some(flux.value()),
+            false,
+        );
+    }
+
+    cote_serveur.refuse_ecriture = true;
+    assert!(
+        serveur.pousser(&mut cote_serveur, flux, b"{}").is_err(),
+        "le refus du transport doit remonter"
+    );
+}
+
+#[test]
+fn un_flux_inconnu_ne_rend_ni_statut_ni_corps() {
+    let mut client = Http3Client::new();
+    let flux = StreamId::new(400).expect("un flux valide");
+    assert_eq!(client.statut(flux), None);
+    assert_eq!(client.prendre_ce_qui_est_arrive(flux), None);
+    assert!(!client.est_fini(flux));
 }

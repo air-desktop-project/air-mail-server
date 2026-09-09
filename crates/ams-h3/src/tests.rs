@@ -1680,3 +1680,88 @@ fn un_refus_que_le_transport_n_emet_pas_ne_se_tait_pas() {
         .expect_err("le transport refuse l'annulation");
     assert_eq!(faute.reason(), Reason::Transport);
 }
+
+// ── La réponse tenue ────────────────────────────────────────────────────────
+
+/// Un service qui répond, puis GARDE le flux ouvert.
+///
+/// C'est ce que fait l'annuaire quand il répond `en_cours` : la sonde n'a pas
+/// encore parlé, et le verdict arrivera plus tard sur la connexion déjà tenue.
+#[derive(Default)]
+struct Tenu;
+
+impl super::Service for Tenu {
+    fn serve<'o>(
+        &mut self,
+        _tete: &ams_proto_http::RequestHead<'_>,
+        _corps: &[u8],
+        sortie: &'o mut [u8],
+    ) -> super::Reponse<'o> {
+        let debut = br#"{"verdict":"en_cours"}"#;
+        let combien = debut.len().min(sortie.len());
+        sortie
+            .get_mut(..combien)
+            .expect("la borne vient d'être prise")
+            .copy_from_slice(debut.get(..combien).expect("de même"));
+        // **PAS DE `content-length`** : une réponse dont la longueur est déclarée
+        // et dont le corps s'allonge est un message qui se contredit, et un
+        // intermédiaire aurait raison de la couper.
+        super::Reponse::new(ams_proto_http::StatusCode::OK, &sortie[..combien]).tenue()
+    }
+}
+
+/// **UNE RÉPONSE TENUE NE CONCLUT PAS SON FLUX** (§4.1 par exception).
+///
+/// L'annuaire répond `en_cours` parce qu'il ne fait pas attendre le démarrage
+/// d'un daemon le temps d'une sonde. Le verdict arrive ensuite, sur la connexion
+/// déjà tenue — et sans flux tenu, il n'arriverait jamais.
+#[test]
+fn une_reponse_tenue_ne_conclut_pas_son_flux_et_ce_qui_suit_s_y_ecrit() {
+    let mut faux = Faux::new();
+    let mut h3 = Http3::new();
+    let mut tenu = Tenu;
+    h3.on_established(&mut faux).expect("on peut ouvrir");
+
+    let flux = requete_du_client(0);
+    poser_une_requete(&mut faux, flux, b"/v1/poussees", b"");
+    h3.on_readable(&mut faux, &mut tenu, flux)
+        .expect("elle passe");
+
+    assert_eq!(h3.tenus(), &[flux], "le flux doit rester ouvert");
+
+    let avant = faux.ce_qu_on_a_dit(flux.value()).len();
+    h3.pousser(&mut faux, flux, br#"{"verdict":"joignable"}"#)
+        .expect("le flux est tenu");
+    let apres = faux.ce_qu_on_a_dit(flux.value());
+    assert!(apres.len() > avant, "la poussée doit avoir été écrite");
+
+    // Ce qui suit la réponse est une trame `DATA`, et non une seconde section de
+    // champs : §4.1 n'en permet qu'une par réponse.
+    let suite = apres.get(avant..).unwrap_or_default();
+    let entete = ams_proto_h3::FrameHeader::parse(suite).expect("une trame");
+    assert_eq!(entete.kind(), FrameKind::Data);
+
+    h3.clore(&mut faux, flux).expect("il se ferme");
+    assert!(h3.tenus().is_empty(), "et il ne se tient plus");
+}
+
+/// **ON NE POUSSE PAS SUR UN FLUX QU'AUCUNE RÉPONSE N'A TENU.**
+///
+/// Un identifiant de flux est un nombre : rien ne distingue celui d'une réponse
+/// tenue de celui d'un flux clos. Y écrire poserait des octets qu'un pair lirait
+/// comme la suite d'autre chose.
+#[test]
+fn une_reponse_ordinaire_ne_laisse_rien_a_pousser() {
+    let mut faux = Faux::new();
+    let mut h3 = Http3::new();
+    let mut echo = Echo::default();
+    h3.on_established(&mut faux).expect("on peut ouvrir");
+
+    let flux = requete_du_client(0);
+    poser_une_requete(&mut faux, flux, b"/boites", b"");
+    h3.on_readable(&mut faux, &mut echo, flux)
+        .expect("elle passe");
+
+    assert!(h3.tenus().is_empty(), "une réponse ordinaire conclut");
+    assert!(h3.pousser(&mut faux, flux, b"{}").is_err());
+}

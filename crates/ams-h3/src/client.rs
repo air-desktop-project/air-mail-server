@@ -314,6 +314,63 @@ impl Http3Client {
         })
     }
 
+    /// Le statut d'un flux dont la section d'en-têtes est arrivée.
+    ///
+    /// **AVANT LA FIN, ET C'EST LE POINT** : un serveur peut répondre puis
+    /// tenir le flux ouvert pour y écrire plus tard. [`take_response`] attendrait
+    /// alors pour toujours.
+    ///
+    /// [`take_response`]: Http3Client::take_response
+    #[must_use]
+    pub fn statut(&self, flux: StreamId) -> Option<StatusCode> {
+        self.suivis
+            .iter()
+            .find(|suivi| suivi.flux == flux)
+            .and_then(|suivi| suivi.statut)
+    }
+
+    /// Prend les octets de corps ARRIVÉS JUSQU'ICI, sans clore le suivi.
+    ///
+    /// # POURQUOI CETTE PORTE EXISTE
+    ///
+    /// [`take_response`] rend une réponse ENTIÈRE, et ne rend rien tant que le
+    /// pair n'a pas fini d'écrire. C'est juste pour une requête à laquelle on
+    /// répond une fois.
+    ///
+    /// **Il en existe une autre** : le serveur répond, garde le flux ouvert, et
+    /// y écrit à mesure ce qu'il apprend — un verdict de sonde qui n'était pas
+    /// rendu quand il a répondu. Le corps n'a alors pas de fin, et l'attendre
+    /// serait l'attendre pour toujours.
+    ///
+    /// # LE DRAINAGE EST CE QUI BORNE LA MÉMOIRE
+    ///
+    /// `un_pas_de_reponse` refuse au-delà de [`CORPS_OCTETS_MAX`] — notre borne,
+    /// pas celle du pair (C3). Sur un flux qui ne finit jamais, c'est l'appelant
+    /// qui la tient : chaque appel VIDE ce qui s'est accumulé, et un appelant
+    /// qui ne viderait pas finirait par voir la connexion refuser.
+    ///
+    /// Rend `None` si le flux est inconnu, et une tranche vide s'il n'est rien
+    /// arrivé depuis la dernière fois.
+    ///
+    /// [`take_response`]: Http3Client::take_response
+    /// [`CORPS_OCTETS_MAX`]: crate::CORPS_OCTETS_MAX
+    pub fn prendre_ce_qui_est_arrive(&mut self, flux: StreamId) -> Option<Vec<u8>> {
+        let rang = self.suivis.iter().position(|suivi| suivi.flux == flux)?;
+        Some(core::mem::take(&mut self.suivis[rang].corps))
+    }
+
+    /// Le pair a-t-il fini d'écrire ce flux ?
+    ///
+    /// **UN FLUX TENU QUI SE FERME EST UNE INFORMATION** : l'annuaire a fini de
+    /// pousser, et ce qu'on attendait n'arrivera plus.
+    #[must_use]
+    pub fn est_fini(&self, flux: StreamId) -> bool {
+        self.suivis
+            .iter()
+            .find(|suivi| suivi.flux == flux)
+            .is_some_and(|suivi| suivi.fini)
+    }
+
     /// Le rang de ce flux, en le créant au besoin.
     fn rang_de(&mut self, flux: StreamId) -> usize {
         if let Some(rang) = self.suivis.iter().position(|suivi| suivi.flux == flux) {
