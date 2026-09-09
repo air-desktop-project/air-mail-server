@@ -27,10 +27,12 @@ use ams_proto_h3::{
 use ams_proto_quic::{Directional, Initiator, StreamId, varints};
 use ams_quic::RecvState;
 
+mod client;
 mod error;
 mod service;
 mod transport;
 
+pub use client::{Http3Client, Reponse as ReponseRecue};
 pub use error::{Error, Reason};
 pub use service::{CHAMPS_MAX, Reponse, Service};
 pub use transport::Transport;
@@ -280,43 +282,10 @@ impl Http3 {
         if self.controle.is_some() {
             return Ok(());
         }
-        let flux = quic.open_uni()?;
-
-        // **AUCUNE DE CES TROIS ÉCRITURES NE PEUT ÉCHOUER**, et un `?` ouvrirait
-        // trois branches que rien ne peut emprunter : le type du flux tient sur
-        // un octet, nos propres réglages sur quelques-uns, et le tampon fait la
-        // taille d'une trame entière.
-        let mut tete = [0_u8; TAMPON_OCTETS_MAX];
-        // §6.2 : le type du flux d'abord, une seule fois, en tête.
-        let mut pose = varints::encode(StreamKind::Control.value(), &mut tete)
-            .expect("le type d'un flux de contrôle tient sur un octet");
-
-        let mut charge = [0_u8; CHARGE_OCTETS_MAX];
-        let combien = self
-            .nos_reglages
-            .write(&mut charge)
-            .expect("nos propres réglages tiennent dans notre propre tampon");
-        let place = tete.get_mut(pose..).unwrap_or_default();
-        pose = pose.saturating_add(
-            ams_proto_h3::write_header(
-                FrameKind::Settings,
-                u64::try_from(combien).unwrap_or(u64::MAX),
-                place,
-            )
-            .expect("un en-tête de §7.1 tient dans ce qui reste"),
-        );
-
-        let mut sortie = Vec::with_capacity(pose.saturating_add(combien));
-        sortie.extend_from_slice(tete.get(..pose).unwrap_or_default());
-        sortie.extend_from_slice(charge.get(..combien).unwrap_or_default());
-        quic.write(flux, &sortie)?;
-        self.controle = Some(flux);
-
-        // §4.2 de RFC 9204 : et nos deux flux QPACK, qui n'ont que leur type à
-        // dire. L'ordre n'est pas imposé — seul le flux de contrôle doit venir
-        // en premier, et il vient d'être ouvert.
-        self.encodeur = Some(Self::ouvrir_un_flux(quic, StreamKind::QpackEncoder)?);
-        self.decodeur = Some(Self::ouvrir_un_flux(quic, StreamKind::QpackDecoder)?);
+        let (controle, encodeur, decodeur) = ouvrir_nos_flux(quic, &self.nos_reglages)?;
+        self.controle = Some(controle);
+        self.encodeur = Some(encodeur);
+        self.decodeur = Some(decodeur);
         Ok(())
     }
 
@@ -410,18 +379,83 @@ impl Http3 {
         quic.write(controle, &sortie)?;
         Ok(())
     }
+}
 
-    /// Ouvre un flux unidirectionnel qui n'a que son type à annoncer (§6.2).
-    fn ouvrir_un_flux<T: Transport>(quic: &mut T, kind: StreamKind) -> Result<StreamId, Error> {
-        let flux = quic.open_uni()?;
-        let mut tete = [0_u8; ENTETE_OCTETS_MAX];
-        // **CELLE-CI NON PLUS NE PEUT PAS ÉCHOUER** : les types de §11.2.3
-        // tiennent sur un octet, et le tampon en fait seize.
-        let pose = varints::encode(kind.value(), &mut tete)
-            .expect("le type d'un flux QPACK tient sur un octet");
-        quic.write(flux, tete.get(..pose).unwrap_or_default())?;
-        Ok(flux)
-    }
+/// Ouvre nos trois flux, et y dit ce que §6.2.1 exige.
+///
+/// # ELLE EST ÉCRITE UNE FOIS POUR LES DEUX CAMPS
+///
+/// §6.2.1 ne fait pas de différence : « **Each side** MUST initiate a single
+/// control stream at the beginning of the connection and send its SETTINGS frame
+/// as the first frame on this stream. » Un client qui l'écrirait de son côté
+/// aurait une copie de plus à tenir d'accord — et c'est celle qu'on oublie de
+/// corriger qui n'annonce plus les mêmes réglages.
+///
+/// # LE FLUX DE CONTRÔLE D'ABORD, PUIS LES DEUX FLUX QPACK
+///
+/// §4.2 de RFC 9204 dit « at most one » et non « exactly one » : les ouvrir n'est
+/// pas une obligation, et l'on n'y écrira jamais rien — notre encodeur n'emploie
+/// que la table statique, et notre décodeur n'a aucun accusé à rendre puisqu'on
+/// a annoncé une table nulle.
+///
+/// **On les ouvre quand même, et c'est un choix.** Un flux absent et un flux
+/// muet ne se distinguent pas d'un flux qui tarde : un pair qui attend ceux de
+/// son vis-à-vis pour commencer attendrait indéfiniment, et rien dans ce qu'il
+/// verrait ne lui dirait qu'il attend pour rien.
+///
+/// # Errors
+///
+/// [`Reason::Transport`] si le pair n'a pas ouvert de quoi ouvrir trois flux
+/// unidirectionnels.
+fn ouvrir_nos_flux<T: Transport>(
+    quic: &mut T,
+    reglages: &Settings,
+) -> Result<(StreamId, StreamId, StreamId), Error> {
+    let flux = quic.open_uni()?;
+
+    // **AUCUNE DE CES TROIS ÉCRITURES NE PEUT ÉCHOUER**, et un `?` ouvrirait
+    // trois branches que rien ne peut emprunter : le type du flux tient sur un
+    // octet, nos propres réglages sur quelques-uns, et le tampon fait la taille
+    // d'une trame entière.
+    let mut tete = [0_u8; TAMPON_OCTETS_MAX];
+    // §6.2 : le type du flux d'abord, une seule fois, en tête.
+    let mut pose = varints::encode(StreamKind::Control.value(), &mut tete)
+        .expect("le type d'un flux de contrôle tient sur un octet");
+
+    let mut charge = [0_u8; CHARGE_OCTETS_MAX];
+    let combien = reglages
+        .write(&mut charge)
+        .expect("nos propres réglages tiennent dans notre propre tampon");
+    let place = tete.get_mut(pose..).unwrap_or_default();
+    pose = pose.saturating_add(
+        ams_proto_h3::write_header(
+            FrameKind::Settings,
+            u64::try_from(combien).unwrap_or(u64::MAX),
+            place,
+        )
+        .expect("un en-tête de §7.1 tient dans ce qui reste"),
+    );
+
+    let mut sortie = Vec::with_capacity(pose.saturating_add(combien));
+    sortie.extend_from_slice(tete.get(..pose).unwrap_or_default());
+    sortie.extend_from_slice(charge.get(..combien).unwrap_or_default());
+    quic.write(flux, &sortie)?;
+
+    let encodeur = ouvrir_un_flux_de_type(quic, StreamKind::QpackEncoder)?;
+    let decodeur = ouvrir_un_flux_de_type(quic, StreamKind::QpackDecoder)?;
+    Ok((flux, encodeur, decodeur))
+}
+
+/// Ouvre un flux unidirectionnel qui ne portera que son type (§4.2 de RFC 9204).
+fn ouvrir_un_flux_de_type<T: Transport>(quic: &mut T, kind: StreamKind) -> Result<StreamId, Error> {
+    let flux = quic.open_uni()?;
+    let mut tete = [0_u8; ENTETE_OCTETS_MAX];
+    // **CELLE-CI NON PLUS NE PEUT PAS ÉCHOUER** : les types de §11.2.3 tiennent
+    // sur un octet, et le tampon en fait seize.
+    let pose = varints::encode(kind.value(), &mut tete)
+        .expect("le type d'un flux QPACK tient sur un octet");
+    quic.write(flux, tete.get(..pose).unwrap_or_default())?;
+    Ok(flux)
 }
 
 /// La lecture : à quoi rattacher les octets qui arrivent.

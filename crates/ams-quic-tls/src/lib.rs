@@ -37,8 +37,12 @@
 use std::sync::Arc;
 
 use ams_quic::{CRYPTO_OCTETS_MAX, Handshake, Level, crypto_error};
-use rustls::ServerConfig;
-use rustls::quic::{Connection as ConnexionTls, KeyChange, ServerConnection, Version};
+use ams_quic_crypto::Role;
+use rustls::pki_types::ServerName;
+use rustls::quic::{
+    ClientConnection, Connection as ConnexionTls, KeyChange, ServerConnection, Version,
+};
+use rustls::{ClientConfig, ServerConfig};
 
 mod connection;
 mod error;
@@ -148,7 +152,7 @@ impl core::fmt::Debug for Flight {
 /// client serait du code que rien n'appelle, donc que rien n'éprouve — et une
 /// poignée de main que personne n'a jamais fait tourner n'est pas une poignée de
 /// main, c'est une intention.
-pub struct Server {
+pub struct Poignee {
     /// Celui qui conduit vraiment TLS.
     ///
     /// # POURQUOI L'ÉNUMÉRÉ, ET NON `ServerConnection`
@@ -173,9 +177,22 @@ pub struct Server {
     /// n'alloue pas, et une machine sans allocation n'a pas à décider seule de
     /// réserver douze kibioctets par connexion.
     fenetres: [Vec<u8>; 3],
+    /// De quel côté on est.
+    ///
+    /// # UN SEUL ENDROIT S'EN SERT, ET C'EST §4.1.2
+    ///
+    /// « The TLS handshake is considered confirmed at the server when the
+    /// handshake completes. At the client, the handshake is considered confirmed
+    /// when a HANDSHAKE_DONE frame is received. »
+    ///
+    /// Tout le reste — les niveaux, les fenêtres, les refus de §4.1.3 — ne
+    /// dépend pas du côté. **C'est pour cela qu'il y a un champ plutôt que deux
+    /// types** : deux types auraient dupliqué cent vingt lignes pour une seule
+    /// différence, et c'est la copie qu'on oublie de corriger qui diverge.
+    role: Role,
 }
 
-impl Server {
+impl Poignee {
     /// Une poignée de main qui commence.
     ///
     /// `params` porte les paramètres de transport encodés (§8.2 de RFC 9001).
@@ -186,7 +203,7 @@ impl Server {
     ///
     /// [`Reason::NoQuicSuite`] si le fournisseur ne sait pas chiffrer un paquet
     /// QUIC, [`Reason::Tls`] pour tout autre refus de `rustls`.
-    pub fn new(config: Arc<ServerConfig>, params: Vec<u8>) -> Result<Self, Error> {
+    pub fn serveur(config: Arc<ServerConfig>, params: Vec<u8>) -> Result<Self, Error> {
         // **ON POSE LA QUESTION NOUS-MÊMES, PLUTÔT QUE DE LIRE UN MESSAGE.**
         //
         // `rustls` refuse une configuration sans suite capable de QUIC par un
@@ -205,7 +222,45 @@ impl Server {
             ServerConnection::new(config, VERSION, params)
                 .map_err(|_| Error::new(Reason::TlsSansAlerte))?,
         );
-        Ok(Self {
+        Ok(Self::montee(tls, Role::Server))
+    }
+
+    /// Une poignée de main CLIENTE qui commence.
+    ///
+    /// `nom` est le nom que le client exige du certificat présenté. **C'est la
+    /// seule chose qui distingue une connexion vérifiée d'une connexion
+    /// chiffrée** : sans lui, `rustls` chiffrerait aussi bien avec un
+    /// intermédiaire.
+    ///
+    /// `params` porte nos paramètres de transport encodés (§8.2). Contrairement
+    /// au serveur, un client n'y met **pas** `original_destination_connection_id`
+    /// — ce champ-là est la preuve que le SERVEUR a vu le premier paquet, et
+    /// c'est le client qui la vérifie.
+    ///
+    /// # Errors
+    ///
+    /// [`Reason::NoQuicSuite`] si le fournisseur ne sait pas chiffrer un paquet
+    /// QUIC, [`Reason::TlsSansAlerte`] pour tout autre refus de `rustls`.
+    pub fn client(
+        config: Arc<ClientConfig>,
+        params: Vec<u8>,
+        nom: ServerName<'static>,
+    ) -> Result<Self, Error> {
+        // Le fournisseur du client doit savoir chiffrer QUIC comme celui du
+        // serveur, et pour la même raison. La question se pose ici aussi.
+        if !suites_savent_chiffrer_quic(&config.crypto_provider().cipher_suites) {
+            return Err(Error::new(Reason::NoQuicSuite));
+        }
+        let tls = ConnexionTls::from(
+            ClientConnection::new(config, VERSION, nom, params)
+                .map_err(|_| Error::new(Reason::TlsSansAlerte))?,
+        );
+        Ok(Self::montee(tls, Role::Client))
+    }
+
+    /// Le corps commun des deux constructeurs.
+    fn montee(tls: ConnexionTls, role: Role) -> Self {
+        Self {
             tls,
             regles: Handshake::new(),
             fenetres: [
@@ -213,7 +268,17 @@ impl Server {
                 vec![0_u8; CRYPTO_OCTETS_MAX],
                 vec![0_u8; CRYPTO_OCTETS_MAX],
             ],
-        })
+            role,
+        }
+    }
+
+    /// §4.1.2 : la poignée de main est confirmée par un `HANDSHAKE_DONE`.
+    ///
+    /// **N'A DE SENS QUE POUR UN CLIENT.** Au serveur, terminer c'est confirmer,
+    /// et [`Poignee::next_flight`] s'en charge. Appeler ceci côté serveur ne
+    /// casse rien — la confirmation est idempotente — mais ne sert à rien.
+    pub const fn confirmee_par_le_pair(&mut self) {
+        self.regles.confirm();
     }
 
     /// Range les octets d'une trame `CRYPTO`.
@@ -247,13 +312,25 @@ impl Server {
     /// refuse entre les niveaux.
     pub fn next_flight(&mut self) -> Result<Option<Flight>, Error> {
         self.nourrir()?;
-        if !self.tls.is_handshaking() && !self.regles.is_confirmed() {
-            // §4.1.2 : côté serveur, terminer c'est confirmer — c'est le
+        if !self.tls.is_handshaking() && self.regles.read_level() < Level::OneRtt {
+            // §4.1.2 : **CÔTÉ SERVEUR, TERMINER C'EST CONFIRMER** — c'est le
             // `Finished` du client qui vient d'être vérifié.
-            self.regles.confirm();
-            // Et c'est SEULEMENT MAINTENANT que la lecture passe en `1-RTT` :
-            // ce qui viendra ensuite, ce sont des messages d'après-poignée
-            // (§4.6.1), et ils voyagent là.
+            //
+            // **CÔTÉ CLIENT, NON.** La confirmation attend un `HANDSHAKE_DONE`,
+            // que le serveur n'envoie qu'en `1-RTT` — il faut donc pouvoir y
+            // lire AVANT d'être confirmé, sans quoi le message qui confirme ne
+            // serait jamais lu. Les deux moments se séparent ici, et nulle part
+            // ailleurs.
+            // §4.1.1 : la poignée est TERMINÉE des deux côtés dès que TLS a
+            // fini. §4.1.2 : elle n'est CONFIRMÉE côté serveur qu'à cet instant
+            // aussi, et côté client qu'à l'arrivée d'un `HANDSHAKE_DONE`.
+            match self.role {
+                Role::Server => self.regles.confirm(),
+                Role::Client => self.regles.complete(),
+            }
+            // La lecture passe en `1-RTT` dans les deux cas : ce qui vient
+            // ensuite — tickets de session, `HANDSHAKE_DONE` — voyage là
+            // (§4.6.1).
             self.regles
                 .install_read(Level::OneRtt)
                 .map_err(Error::depuis_quic)?;
@@ -444,14 +521,15 @@ impl Server {
     }
 }
 
-impl core::fmt::Debug for Server {
+impl core::fmt::Debug for Poignee {
     /// **RIEN DE CE QUI EST SECRET N'EST IMPRIMÉ.**
     ///
-    /// Une `ServerConnection` porte des clés. `#[derive(Debug)]` les ferait
+    /// Une connexion `rustls` porte des clés. `#[derive(Debug)]` les ferait
     /// entrer dans le premier message de diagnostic venu, puis dans un journal,
     /// puis dans un ticket.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("Server")
+        f.debug_struct("Poignee")
+            .field("role", &self.role)
             .field("read_level", &self.regles.read_level())
             .field("write_level", &self.regles.write_level())
             .field("complete", &self.regles.is_complete())
@@ -481,9 +559,16 @@ pub fn generic_close_code() -> u64 {
 /// TLS. Une suite peut savoir l'une sans savoir l'autre, et c'est exactement le
 /// cas du fournisseur pur Rust monté sans [`ams_tls::provider_quic`].
 fn sait_chiffrer_quic(config: &ServerConfig) -> bool {
-    config
-        .crypto_provider()
-        .cipher_suites
+    suites_savent_chiffrer_quic(&config.crypto_provider().cipher_suites)
+}
+
+/// La même question, posée à une liste de suites.
+///
+/// **Elle est écrite une fois pour les deux camps** : un client dont le
+/// fournisseur ne sait pas chiffrer QUIC échoue exactement comme un serveur, et
+/// deux copies de ce filtre finiraient par ne plus poser la même question.
+fn suites_savent_chiffrer_quic(suites: &[rustls::SupportedCipherSuite]) -> bool {
+    suites
         .iter()
         .filter_map(rustls::SupportedCipherSuite::tls13)
         .any(|suite| suite.quic.is_some())

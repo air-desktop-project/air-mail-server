@@ -38,6 +38,21 @@ pub trait Transport {
     /// (§4.6 de RFC 9000).
     fn open_uni(&mut self) -> Result<StreamId, Error>;
 
+    /// Ouvre un flux bidirectionnel (§2.1 de RFC 9000).
+    ///
+    /// # C'EST UN CLIENT QUI S'EN SERT, ET LUI SEUL
+    ///
+    /// §6.1 de RFC 9114 : une requête voyage sur un flux bidirectionnel ouvert
+    /// par le CLIENT. Un serveur n'en ouvre jamais — il répond sur celui qu'on
+    /// lui a ouvert. La méthode existe donc pour un seul des deux conducteurs,
+    /// et c'est le transport qui la porte parce que c'est lui qui numérote.
+    ///
+    /// # Errors
+    ///
+    /// Ce que le transport rend quand le pair n'en a pas ouvert le crédit
+    /// (§4.6 de RFC 9000).
+    fn open_bi(&mut self) -> Result<StreamId, Error>;
+
     /// Prend ce qui est prêt sur ce flux, dans l'ordre. Rend combien.
     fn read(&mut self, flux: StreamId, vers: &mut [u8]) -> usize;
 

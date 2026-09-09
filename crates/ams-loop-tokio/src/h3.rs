@@ -56,6 +56,15 @@ impl Transport for Pont<'_> {
             .map_err(|_| ams_h3::Error::transport())
     }
 
+    fn open_bi(&mut self) -> Result<StreamId, ams_h3::Error> {
+        // **CE PONT SERT UN SERVEUR**, et §6.1 de RFC 9114 dit qu'un serveur
+        // n'ouvre jamais de flux bidirectionnel : il répond sur celui qu'on lui
+        // a ouvert. Le trait porte cette méthode pour le conducteur CLIENT, et
+        // le transport la refuse ici plutôt que d'ouvrir un flux dont personne
+        // ne saurait quoi faire.
+        Err(ams_h3::Error::transport())
+    }
+
     fn read(&mut self, flux: StreamId, vers: &mut [u8]) -> usize {
         self.0.read(flux, vers)
     }

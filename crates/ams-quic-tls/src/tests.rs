@@ -30,7 +30,7 @@ use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::quic::{ClientConnection, Connection as ConnexionTls, KeyChange, Version};
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
 
-use super::{Error, Reason, Server, generic_close_code};
+use super::{Error, Poignee, Reason, generic_close_code};
 
 const SANS_OPENSSL: &str = "ce test EXIGE `openssl` : sans lui, la poignée de main réelle n'est \
                             pas couverte, et le gate des 100 % (C2) échouerait quelques secondes \
@@ -172,7 +172,7 @@ fn niveau_du_changement(change: &KeyChange) -> Level {
     }
 }
 
-/// Un client d'essai : le pendant de [`super::Server`], écrit à la main pour
+/// Un client d'essai : le pendant de [`super::Poignee`], écrit à la main pour
 /// que le test ne se serve pas de ce qu'il éprouve.
 ///
 /// # SON NIVEAU D'ÉMISSION PERSISTE, ET C'EST TOUT LE POINT
@@ -211,7 +211,7 @@ impl Client {
     ///
     /// §4.1.3, littéralement : « Each time that TLS is provided with new data,
     /// new handshake bytes are requested from TLS. »
-    fn parler(&mut self, serveur: &mut Server) -> Result<(), Error> {
+    fn parler(&mut self, serveur: &mut Poignee) -> Result<(), Error> {
         loop {
             let mut octets = Vec::new();
             let change = self.tls.write_hs(&mut octets);
@@ -242,7 +242,7 @@ impl Client {
 }
 
 /// Mène la poignée de main jusqu'à ce que plus rien n'avance.
-fn conduire(serveur: &mut Server, client: &mut Client) -> Result<(), Error> {
+fn conduire(serveur: &mut Poignee, client: &mut Client) -> Result<(), Error> {
     client.parler(serveur)?;
     for _ in 0..8 {
         let mut a_dit = false;
@@ -268,7 +268,7 @@ fn une_poignee_de_main_va_jusqu_au_bout() {
     let atelier = atelier("poignee-complete");
     let (autorite, cert, cle) = materiel(&atelier.0).expect(SANS_OPENSSL);
 
-    let mut serveur = Server::new(
+    let mut serveur = Poignee::serveur(
         config_serveur(&cert, &cle, std::vec![b"h3".to_vec()]),
         NOS_PARAMETRES.to_vec(),
     )
@@ -315,7 +315,7 @@ fn un_client_sans_h3_n_est_pas_servi() {
     let atelier = atelier("alpn-refuse");
     let (autorite, cert, cle) = materiel(&atelier.0).expect(SANS_OPENSSL);
 
-    let mut serveur = Server::new(
+    let mut serveur = Poignee::serveur(
         config_serveur(&cert, &cle, std::vec![b"h3".to_vec()]),
         NOS_PARAMETRES.to_vec(),
     )
@@ -362,7 +362,7 @@ fn un_fournisseur_sans_quic_se_refuse_a_la_construction() {
     let mut config = ams_tls::server_config(&cert, &cle).expect("la paire est bonne");
     config.alpn_protocols = std::vec![b"h3".to_vec()];
 
-    let issue = Server::new(Arc::new(config), NOS_PARAMETRES.to_vec())
+    let issue = Poignee::serveur(Arc::new(config), NOS_PARAMETRES.to_vec())
         .expect_err("le fournisseur ordinaire ne sait pas chiffrer QUIC");
     assert_eq!(issue.reason(), Reason::NoQuicSuite);
     // §20.1 : `INTERNAL_ERROR`. Le pair n'y est pour rien.
@@ -379,7 +379,7 @@ fn un_fournisseur_sans_quic_se_refuse_a_la_construction() {
 fn un_crypto_en_zero_rtt_condamne() {
     let atelier = atelier("zero-rtt");
     let (_autorite, cert, cle) = materiel(&atelier.0).expect(SANS_OPENSSL);
-    let mut serveur = Server::new(
+    let mut serveur = Poignee::serveur(
         config_serveur(&cert, &cle, std::vec![b"h3".to_vec()]),
         NOS_PARAMETRES.to_vec(),
     )
@@ -401,7 +401,7 @@ fn un_crypto_en_zero_rtt_condamne() {
 fn plus_de_crypto_qu_on_n_en_retient() {
     let atelier = atelier("crypto-deborde");
     let (_autorite, cert, cle) = materiel(&atelier.0).expect(SANS_OPENSSL);
-    let mut serveur = Server::new(
+    let mut serveur = Poignee::serveur(
         config_serveur(&cert, &cle, std::vec![b"h3".to_vec()]),
         NOS_PARAMETRES.to_vec(),
     )
@@ -424,7 +424,7 @@ fn plus_de_crypto_qu_on_n_en_retient() {
 fn ce_que_tls_refuse_devient_un_code_de_fermeture() {
     let atelier = atelier("tls-refuse");
     let (_autorite, cert, cle) = materiel(&atelier.0).expect(SANS_OPENSSL);
-    let mut serveur = Server::new(
+    let mut serveur = Poignee::serveur(
         config_serveur(&cert, &cle, std::vec![b"h3".to_vec()]),
         NOS_PARAMETRES.to_vec(),
     )
@@ -471,7 +471,7 @@ fn le_code_generique_est_handshake_failure() {
 fn nourrir_ne_va_pas_chercher_de_fenetre_pour_zero_rtt() {
     let atelier = atelier("zero-rtt-nourrir");
     let (_autorite, cert, cle) = materiel(&atelier.0).expect(SANS_OPENSSL);
-    let mut serveur = Server::new(
+    let mut serveur = Poignee::serveur(
         config_serveur(&cert, &cle, std::vec![b"h3".to_vec()]),
         NOS_PARAMETRES.to_vec(),
     )
@@ -495,7 +495,7 @@ fn nourrir_ne_va_pas_chercher_de_fenetre_pour_zero_rtt() {
 fn le_serveur_hello_part_en_initial() {
     let atelier = atelier("niveaux-des-vols");
     let (autorite, cert, cle) = materiel(&atelier.0).expect(SANS_OPENSSL);
-    let mut serveur = Server::new(
+    let mut serveur = Poignee::serveur(
         config_serveur(&cert, &cle, std::vec![b"h3".to_vec()]),
         NOS_PARAMETRES.to_vec(),
     )
@@ -550,7 +550,7 @@ fn une_autre_faute_de_configuration_ne_s_appelle_pas_no_quic_suite() {
     config.alpn_protocols = std::vec![b"h3".to_vec()];
     config.max_early_data_size = 5;
 
-    let issue = Server::new(Arc::new(config), NOS_PARAMETRES.to_vec())
+    let issue = Poignee::serveur(Arc::new(config), NOS_PARAMETRES.to_vec())
         .expect_err("§4.6.1 ne permet que zéro ou 2^32-1");
     assert_eq!(issue.reason(), Reason::TlsSansAlerte);
     assert_eq!(issue.close_code(), generic_close_code());
@@ -571,7 +571,7 @@ fn une_autre_faute_de_configuration_ne_s_appelle_pas_no_quic_suite() {
 fn des_octets_initial_non_lus_condamnent_a_l_installation() {
     let atelier = atelier("initial-non-lus");
     let (autorite, cert, cle) = materiel(&atelier.0).expect(SANS_OPENSSL);
-    let mut serveur = Server::new(
+    let mut serveur = Poignee::serveur(
         config_serveur(&cert, &cle, std::vec![b"h3".to_vec()]),
         NOS_PARAMETRES.to_vec(),
     )
@@ -603,7 +603,7 @@ fn des_octets_initial_non_lus_condamnent_a_l_installation() {
 fn des_octets_handshake_non_lus_condamnent_a_la_confirmation() {
     let atelier = atelier("handshake-non-lus");
     let (autorite, cert, cle) = materiel(&atelier.0).expect(SANS_OPENSSL);
-    let mut serveur = Server::new(
+    let mut serveur = Poignee::serveur(
         config_serveur(&cert, &cle, std::vec![b"h3".to_vec()]),
         NOS_PARAMETRES.to_vec(),
     )
@@ -653,7 +653,7 @@ fn les_deux_camps_exportent_la_meme_valeur() {
     let atelier = atelier("export-accord");
     let (autorite, cert, cle) = materiel(&atelier.0).expect(SANS_OPENSSL);
 
-    let mut serveur = Server::new(
+    let mut serveur = Poignee::serveur(
         config_serveur(&cert, &cle, std::vec![b"h3".to_vec()]),
         NOS_PARAMETRES.to_vec(),
     )
@@ -687,7 +687,7 @@ fn l_etiquette_et_le_contexte_separent_les_usages() {
     let atelier = atelier("export-domaines");
     let (autorite, cert, cle) = materiel(&atelier.0).expect(SANS_OPENSSL);
 
-    let mut serveur = Server::new(
+    let mut serveur = Poignee::serveur(
         config_serveur(&cert, &cle, std::vec![b"h3".to_vec()]),
         NOS_PARAMETRES.to_vec(),
     )
@@ -719,7 +719,7 @@ fn deux_connexions_au_meme_serveur_exportent_deux_valeurs() {
     let (autorite, cert, cle) = materiel(&atelier.0).expect(SANS_OPENSSL);
 
     let exporter = || {
-        let mut serveur = Server::new(
+        let mut serveur = Poignee::serveur(
             config_serveur(&cert, &cle, std::vec![b"h3".to_vec()]),
             NOS_PARAMETRES.to_vec(),
         )
@@ -746,7 +746,7 @@ fn rien_ne_s_exporte_avant_la_fin_de_la_poignee_de_main() {
     let atelier = atelier("export-trop-tot");
     let (_autorite, cert, cle) = materiel(&atelier.0).expect(SANS_OPENSSL);
 
-    let serveur = Server::new(
+    let serveur = Poignee::serveur(
         config_serveur(&cert, &cle, std::vec![b"h3".to_vec()]),
         NOS_PARAMETRES.to_vec(),
     )
@@ -760,4 +760,50 @@ fn rien_ne_s_exporte_avant_la_fin_de_la_poignee_de_main() {
     // §20.1 : le pair n'y est pour rien — c'est nous qui avons demandé trop tôt.
     assert_eq!(faute.close_code(), 0x01);
     assert!(faute.to_string().contains("rien à exporter"), "{faute}");
+}
+
+// ── La moitié cliente refuse les mêmes configurations ───────────────────────
+
+#[test]
+fn un_client_sans_suite_quic_se_refuse_a_la_construction() {
+    // **LA QUESTION SE POSE DES DEUX CÔTÉS**, et la réponse est la même : un
+    // fournisseur ordinaire ne sait pas chiffrer un paquet QUIC, et `rustls`
+    // refuserait plus tard, par une phrase qu'on aurait dû chercher dans un
+    // texte.
+    // Celle-ci monte sur le fournisseur ORDINAIRE — c'est la faute qu'on éprouve.
+    let config = ClientConfig::builder_with_provider(Arc::new(ams_tls::provider()))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .expect("TLS 1.3")
+        .with_root_certificates(RootCertStore::empty())
+        .with_no_client_auth();
+
+    let issue = Poignee::client(
+        Arc::new(config),
+        SES_PARAMETRES.to_vec(),
+        ServerName::try_from("localhost").expect("un nom"),
+    )
+    .expect_err("ce fournisseur ne sait pas chiffrer QUIC");
+    assert_eq!(issue.reason(), Reason::NoQuicSuite);
+}
+
+#[test]
+fn une_autre_faute_de_configuration_cliente_ne_s_appelle_pas_no_quic_suite() {
+    // Le fournisseur sait chiffrer QUIC ; c'est la taille de fragment qui est
+    // absurde. **La faute doit se distinguer** : confondre les deux enverrait
+    // chercher un fournisseur là où c'est un réglage qui est faux.
+    let mut config = ClientConfig::builder_with_provider(Arc::new(ams_tls::provider_quic()))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .expect("TLS 1.3")
+        .with_root_certificates(RootCertStore::empty())
+        .with_no_client_auth();
+    config.max_fragment_size = Some(4);
+
+    let issue = Poignee::client(
+        Arc::new(config),
+        SES_PARAMETRES.to_vec(),
+        ServerName::try_from("localhost").expect("un nom"),
+    )
+    .expect_err("quatre octets ne portent pas un enregistrement TLS");
+    assert_eq!(issue.reason(), Reason::TlsSansAlerte);
+    assert_eq!(issue.close_code(), generic_close_code());
 }

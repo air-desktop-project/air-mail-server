@@ -63,6 +63,14 @@ struct Faux {
 }
 
 impl Transport for Faux {
+    fn open_bi(&mut self) -> Result<StreamId, Error> {
+        // **CETTE CIBLE ÉPROUVE LE CONDUCTEUR SERVEUR**, et §6.1 dit qu'un
+        // serveur n'ouvre jamais de flux bidirectionnel : il répond sur celui
+        // qu'on lui a ouvert. La méthode existe pour le conducteur client, et
+        // ici elle refuse.
+        Err(Error::transport())
+    }
+
     fn open_uni(&mut self) -> Result<StreamId, Error> {
         if self.prochain >= 8 {
             return Err(Error::transport());

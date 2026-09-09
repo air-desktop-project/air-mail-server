@@ -36,5 +36,5 @@ pub use instruction::{
 };
 pub use prefix::{Prefix, max_entries, read_prefix};
 pub use representation::{Decoded, FieldLine, Table, read_field_line};
-pub use section::{read_section, write_section};
+pub use section::{read_response_section, read_section, write_request_section, write_section};
 pub use table_statique::{STATIQUE, STATIQUE_LEN, entree_statique};

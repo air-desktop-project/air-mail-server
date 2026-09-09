@@ -112,6 +112,11 @@ fn chaque_raison_porte_son_code_et_se_dit() {
             "ne fait pas une requête",
         ),
         (
+            Reason::MalformedResponse,
+            H3Error::MessageError,
+            "ne fait pas une réponse",
+        ),
+        (
             Reason::BadResponseField,
             H3Error::InternalError,
             "champ de réponse",

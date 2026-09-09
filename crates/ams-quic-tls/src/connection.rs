@@ -51,7 +51,7 @@ use ams_quic_crypto::{Keys, Role, Secret};
 use rustls::ServerConfig;
 use rustls::quic::KeyChange;
 
-use crate::{Clefs, Error, Reason, Server};
+use crate::{Clefs, Error, Poignee, Reason};
 
 /// Combien d'espaces de numérotation une connexion tient (§12.3).
 const ESPACES: usize = 3;
@@ -246,17 +246,40 @@ const fn permise(trame: &Frame<'_>, niveau: Level) -> bool {
         | Frame::ConnectionClose { .. } => true,
         // §19.20 : « A server MUST treat receipt of a HANDSHAKE_DONE frame as a
         // connection error of type PROTOCOL_VIOLATION. »
-        Frame::HandshakeDone => false,
+        //
+        // **UN CLIENT, LUI, L'ATTEND** — c'est ce qui confirme sa poignée de
+        // main (§4.1.2). Le refus par NIVEAU reste le même des deux côtés : elle
+        // ne voyage qu'en `1-RTT`. C'est le rôle qui décide ensuite, et
+        // `une_trame` s'en charge : mêler les deux ici ferait dépendre une règle
+        // de cadrage d'une propriété de la connexion.
+        Frame::HandshakeDone => matches!(niveau, Level::OneRtt),
         _ => matches!(niveau, Level::OneRtt),
     }
 }
 
-/// Une connexion QUIC vue du serveur.
+/// Une connexion QUIC, d'un côté ou de l'autre.
 pub struct Connection {
+    /// De quel côté on est.
+    ///
+    /// # CE QUE LE RÔLE CHANGE, ET CE QU'IL NE CHANGE PAS
+    ///
+    /// **Il ne change presque rien**, et c'est le constat de cette tranche : la
+    /// protection des paquets, la détection de perte, le contrôle de congestion,
+    /// les flux et le cadrage sont les mêmes des deux côtés. Cinq endroits en
+    /// dépendent, et ils sont tous nommés :
+    ///
+    /// 1. les clés initiales, dérivées dans un sens ou dans l'autre (§5.2) ;
+    /// 2. le `Sender` avec lequel on lit les paramètres du pair (§8.2) ;
+    /// 3. l'`Initiator` avec lequel on numérote les flux (§2.1) ;
+    /// 4. §4.1.2 : le serveur confirme en terminant, le client en recevant
+    ///    `HANDSHAKE_DONE` — et c'est le serveur qui l'ÉMET ;
+    /// 5. §7.2 : le client apprend l'identifiant du serveur dans son premier
+    ///    paquet, alors que le serveur a lu celui du client d'emblée.
+    role: Role,
     /// L'état de connexion : amplification, oisiveté, fermeture.
     etat: ams_quic::Connection,
     /// La poignée de main TLS, et ses trois flux `CRYPTO` en réception.
-    poignee: Server,
+    poignee: Poignee,
     /// Ce qu'on a à émettre en `CRYPTO`, par espace.
     sortie: [Sortie; ESPACES],
     /// Ce qui est parti et attend un acquittement, par espace.
@@ -317,6 +340,22 @@ pub struct Connection {
     /// seconde compte les paquets REÇUS. Piloter la première avec le compteur de
     /// la seconde ferait qu'une fermeture ne partirait jamais si le pair se tait.
     a_dire: bool,
+    /// L'identifiant de destination qu'un CLIENT a choisi pour son premier
+    /// paquet — `None` côté serveur.
+    ///
+    /// **IL EXISTE POUR ÊTRE VÉRIFIÉ** (§7.3) : le serveur doit annoncer cette
+    /// valeur exacte dans ses paramètres de transport, et c'est ce qui prouve
+    /// qu'un intermédiaire n'a pas réécrit le premier paquet. La garder sans la
+    /// vérifier serait pire que de ne pas la garder.
+    origine_choisie: Option<ConnectionId>,
+    /// A-t-on déjà appris l'identifiant que le pair a choisi pour lui ?
+    ///
+    /// §7.2 : le client remplace celui qu'il avait inventé par celui que le
+    /// serveur annonce dans son premier paquet, **et une seule fois** — « a
+    /// client MUST NOT change the value it sends […] in response to subsequent
+    /// packets ». Sans ce drapeau, un tiers hors chemin détournerait la
+    /// connexion en injectant un paquet à lui.
+    distant_appris: bool,
     /// Les paramètres que le pair a annoncés (§8.2 de RFC 9001).
     siens: Option<TransportParameters>,
     /// Ce que nous avons annoncé — gardé pour bâtir les flux quand les siens
@@ -359,6 +398,154 @@ pub struct Connection {
 }
 
 impl Connection {
+    /// Accueille un client neuf.
+    ///
+    /// `incoming` est ce que [`Incoming::read`] a lu du premier datagramme,
+    /// `local` l'identifiant qu'on veut que le pair emploie désormais, et
+    /// `distant` celui qu'il a annoncé comme source.
+    ///
+    /// # LES CLÉS `Initial` VIENNENT DE L'IDENTIFIANT QUE LE CLIENT A CHOISI
+    ///
+    /// §5.2 de RFC 9001 : elles se dérivent de l'identifiant de destination du
+    /// premier paquet, en clair. **Tout le monde peut les fabriquer** — c'est ce
+    /// qui rend l'espace `Initial` non authentifié, et pourquoi §14.1 y impose un
+    /// plancher de taille.
+    ///
+    /// # Errors
+    ///
+    /// [`Reason::NoQuicSuite`] si le fournisseur ne sait pas chiffrer un paquet
+    /// QUIC ; [`Reason::TlsSansAlerte`] si les clés ou les paramètres ne se
+    /// fabriquent pas.
+    /// Monte une connexion CLIENTE vers ce serveur.
+    ///
+    /// `nom` est le nom exigé du certificat. `local` est l'identifiant que nous
+    /// choisissons pour nous ; `origine` est celui que nous mettons en
+    /// DESTINATION du premier paquet.
+    ///
+    /// # `origine` DOIT ÊTRE IMPRÉVISIBLE, ET CETTE CRATE N'EN SAIT RIEN
+    ///
+    /// §7.2 : le client choisit un identifiant de destination d'au moins huit
+    /// octets, et §5.2 en dérive les clés `Initial`. **Un identifiant devinable
+    /// rendrait ces clés-là devinables** — elles ne protègent rien d'autre que
+    /// contre un tiers hors chemin, mais c'est exactement ce contre quoi elles
+    /// existent.
+    ///
+    /// L'aléa vient donc de l'appelant, comme partout dans cette crate : elle ne
+    /// fait aucune entrée-sortie, et le tirage en est une.
+    ///
+    /// # CE QU'ELLE NE SAIT PAS FAIRE, ET QU'IL FAUT SAVOIR
+    ///
+    /// **Ni `Retry`, ni négociation de version.** `ams_quic::routing` les jette
+    /// (§17.2.5, §6), et un serveur qui en enverrait ferait échouer la connexion
+    /// plutôt que de la faire reprendre. Notre serveur n'en émet aucun — il ne
+    /// valide pas d'adresse par jeton et ne sert qu'une version. **Contre un
+    /// autre serveur, c'est une limite**, et elle est nommée ici plutôt que
+    /// découverte.
+    ///
+    /// # Errors
+    ///
+    /// [`Reason::NoQuicSuite`] si le fournisseur ne sait pas chiffrer QUIC,
+    /// [`Reason::TlsSansAlerte`] pour tout autre refus de `rustls`.
+    pub fn connect(
+        config: Arc<rustls::ClientConfig>,
+        nom: rustls::pki_types::ServerName<'static>,
+        local: ConnectionId,
+        origine: ConnectionId,
+        inactivite_us: u64,
+        maintenant: u64,
+    ) -> Result<Self, Error> {
+        let mut annonce = TransportParameters::DEFAULT;
+        annonce.max_idle_timeout_ms = inactivite_us.saturating_div(1_000);
+        annonce.max_ack_delay_ms = ACQUITTEMENT_MAX_MS;
+        annonce.initial_source_connection_id = Some(local);
+        annonce.initial_max_data = CONNEXION_OCTETS;
+        annonce.initial_max_stream_data_bidi_local = FLUX_OCTETS;
+        annonce.initial_max_stream_data_bidi_remote = FLUX_OCTETS;
+        annonce.initial_max_stream_data_uni = FLUX_OCTETS;
+        annonce.initial_max_streams_bidi = FLUX_PAR_FAMILLE_MAX;
+        annonce.initial_max_streams_uni = FLUX_PAR_FAMILLE_MAX;
+        // **PAS D'`original_destination_connection_id` ICI**, et c'est §7.3 :
+        // ce champ est la preuve que le SERVEUR a vu le premier paquet. Un
+        // client qui l'annoncerait affirmerait quelque chose dont il n'est pas
+        // l'autorité — et le serveur le refuserait.
+
+        let mut ecrits = vec![0_u8; 256];
+        let taille = annonce
+            .write(Sender::Client, &mut ecrits)
+            .expect("nos propres paramètres tiennent dans ce tampon");
+        ecrits.truncate(taille);
+
+        let clefs = |role| {
+            Secret::initial(origine.as_bytes(), role)
+                .and_then(|secret| secret.keys())
+                .expect("§17.2 borne l'identifiant, et §5.2 dérive de lui")
+        };
+        let mut connexion = Self {
+            role: Role::Client,
+            etat: ams_quic::Connection::new(Role::Client, inactivite_us, 0, maintenant),
+            poignee: Poignee::client(config, ecrits, nom)?,
+            sortie: Default::default(),
+            emis: [Sent::new(); ESPACES],
+            recus: [Received::new(); ESPACES],
+            enveloppes: Default::default(),
+            chiffrement: [None, None, None],
+            dechiffrement: [None, None, None],
+            // **LES DEUX SENS SONT INVERSÉS**, et c'est tout ce que §5.2 demande
+            // de plus : on chiffre en client, on déchiffre en serveur.
+            initiales_emission: Some(clefs(Role::Client)),
+            initiales_reception: Some(clefs(Role::Server)),
+            rtt: Rtt::new(),
+            congestion: Congestion::new(),
+            local,
+            // **CE N'EST PAS ENCORE L'IDENTIFIANT DU SERVEUR** : c'est celui
+            // qu'on a inventé pour le joindre. Son premier paquet portera le
+            // sien, et `sur_l_identifiant_du_serveur` prendra le relais (§7.2).
+            distant: origine,
+            // **CE QU'ON A ENVOYÉ, POUR POUVOIR LE VÉRIFIER** — voir §7.3 dans
+            // `confirmer_si_complete`.
+            origine_choisie: Some(origine),
+            distant_appris: false,
+            prochain: [0; ESPACES],
+            sondages: 0,
+            sonder: false,
+            a_confirmer: false,
+            confirmee: false,
+            fermeture: None,
+            a_dire: false,
+            siens: None,
+            notres: annonce,
+            flux: None,
+            fenetres: Vec::new(),
+            sorties: Vec::new(),
+            fins: Vec::new(),
+            annulations: Vec::new(),
+            tour: 0,
+            exposant: DEFAULT_ACK_DELAY_EXPONENT,
+        };
+
+        // ── LE CLIENT PARLE LE PREMIER, ET RIEN D'AUTRE NE LE FERAIT ────────
+        //
+        // `poll_transmit` dit en toutes lettres que la poignée n'avance plus à
+        // l'émission : « l'état de TLS ne change qu'à l'arrivée de données ».
+        // **C'est vrai d'un serveur, qui ne parle jamais le premier.** Un client
+        // a son `ClientHello` avant tout datagramme, et personne ne viendrait le
+        // lui demander.
+        //
+        // On le compose donc ICI, une fois : la connexion rendue a déjà son
+        // premier vol en attente, et le premier `poll_transmit` l'émet.
+        //
+        // **`expect` ET NON `?`** : ce vol-là ne peut pas échouer. `next_flight`
+        // ne rend une faute que sur ce qu'on lui a DONNÉ à lire, et rien n'a
+        // encore été lu ; `confirmer_si_complete` ne fait rien tant que la
+        // poignée n'est pas terminée. Un `?` ouvrirait une branche qu'aucun
+        // essai ne pourrait atteindre — c'est l'idiome d'`accept`, deux lignes
+        // plus haut, et pour la même raison.
+        connexion
+            .avancer_la_poignee()
+            .expect("le premier vol d'un client ne lit rien, et ne peut pas échouer");
+        Ok(connexion)
+    }
+
     /// Accueille un client neuf.
     ///
     /// `incoming` est ce que [`Incoming::read`] a lu du premier datagramme,
@@ -424,8 +611,13 @@ impl Connection {
                 .expect("§17.2 borne l'identifiant, et §5.2 dérive de lui")
         };
         Ok(Self {
+            role: Role::Server,
             etat: ams_quic::Connection::new(Role::Server, inactivite_us, 0, maintenant),
-            poignee: Server::new(config, ecrits)?,
+            poignee: Poignee::serveur(config, ecrits)?,
+            // **UN SERVEUR N'A RIEN CHOISI** : il a LU l'identifiant du premier
+            // paquet, et l'a déjà repris dans `distant`.
+            origine_choisie: None,
+            distant_appris: true,
             sortie: Default::default(),
             emis: [Sent::new(); ESPACES],
             recus: [Received::new(); ESPACES],
@@ -455,6 +647,19 @@ impl Connection {
             tour: 0,
             exposant: DEFAULT_ACK_DELAY_EXPONENT,
         })
+    }
+
+    /// L'identifiant qu'on adresse au pair.
+    ///
+    /// # POURQUOI IL EST PUBLIC
+    ///
+    /// **Pour qu'un essai puisse vérifier §7.2** : un client remplace
+    /// l'identifiant qu'il a inventé par celui que le serveur annonce, et cette
+    /// substitution ne se voit nulle part ailleurs — ni dans les octets émis,
+    /// que le chiffrement couvre, ni dans l'état de la poignée de main.
+    #[must_use]
+    pub const fn peer_id(&self) -> ConnectionId {
+        self.distant
     }
 
     /// L'identifiant qu'on a choisi — **c'est LUI que le démultiplexeur range**.
@@ -752,6 +957,30 @@ impl Connection {
         if niveau == Level::ZeroRtt {
             return Ok(None);
         }
+        // ── §7.2 : LE CLIENT APPREND L'IDENTIFIANT DU SERVEUR ───────────────
+        //
+        // « Upon first receiving an Initial or Retry packet from the server, the
+        // client uses the Source Connection ID supplied by the server as the
+        // Destination Connection ID for subsequent packets. »
+        //
+        // **ET UNE SEULE FOIS** : la même section poursuit — « a client MUST NOT
+        // change the value it sends […] in response to subsequent packets ».
+        // Sans ce verrou, un tiers hors chemin qui injecterait un paquet à lui
+        // détournerait la connexion vers son propre identifiant.
+        //
+        // On l'apprend AVANT de déchiffrer, et cela ne coûte rien : les clés
+        // `Initial` sont dérivées de l'identifiant qu'on a CHOISI (§5.2), et non
+        // de celui qu'on apprend. Un paquet forgé qui passerait ici échouerait
+        // donc au déchiffrement — mais il aurait déjà changé notre destination.
+        // C'est pourquoi le verrou est le premier paquet, et non le premier
+        // paquet DÉCHIFFRÉ : §7.2 dit « first receiving », et attendre le
+        // déchiffrement d'un paquet qu'on ne sait pas encore adresser
+        // n'aboutirait pas.
+        if matches!(self.role, Role::Client) && !self.distant_appris {
+            self.distant = arrivee.source();
+            self.distant_appris = true;
+        }
+
         let espace = niveau.space();
         let rang = rang_de(espace);
         let plus_grand = self.recus[rang].largest();
@@ -865,6 +1094,22 @@ impl Connection {
             Frame::Crypto { offset, data } => {
                 self.poignee.on_crypto(niveau, offset, data)?;
             }
+            // §19.20 : « A server MUST treat receipt of a HANDSHAKE_DONE frame
+            // as a connection error of type PROTOCOL_VIOLATION. »
+            //
+            // **ET POUR UN CLIENT, C'EST LA CONFIRMATION** (§4.1.2). Les clés
+            // `Handshake` partent avec elle (§4.9.2) : les garder laisserait une
+            // protection plus faible utilisable après qu'une plus forte est
+            // disponible.
+            Frame::HandshakeDone => match self.role {
+                Role::Server => {
+                    return Err(Error::new(Reason::Quic(ams_quic::Reason::FrameNotAllowed)));
+                }
+                Role::Client => {
+                    self.poignee.confirmee_par_le_pair();
+                    self.etat.on_handshake_confirmed();
+                }
+            },
             Frame::Ack(ref ack) => self.sur_un_acquittement(ack, niveau.space(), maintenant)?,
             Frame::ConnectionClose { .. } => {
                 let pto = self.rtt.pto(ACQUITTEMENT_MAX_US, self.sondages);
@@ -1335,28 +1580,71 @@ impl Connection {
         // demande de le DIRE au client, qui ne peut pas le deviner.
         if self.poignee.is_complete() && !self.confirmee {
             self.poignee.check_alpn()?;
-            self.a_confirmer = true;
+            // **SEUL LE SERVEUR ÉMET `HANDSHAKE_DONE`** (§19.20), et c'est lui
+            // qui confirme en terminant (§4.1.2). Le client, lui, attend cette
+            // trame — voir `une_trame`.
+            self.a_confirmer = matches!(self.role, Role::Server);
             // §7.4 : « An endpoint MUST treat receipt of transport parameters
             // that it cannot process as a connection error of type
             // TRANSPORT_PARAMETER_ERROR. » Les ignorer laisserait la connexion
             // tourner sur des limites qu'on aurait inventées.
+            //
+            // **LE `Sender` EST CELUI DU PAIR**, et non le nôtre : §18.2 réserve
+            // certains paramètres au serveur, et les lire avec le mauvais sens
+            // ferait accepter d'un client ce que lui seul n'a pas le droit de
+            // dire.
+            let sens = match self.role {
+                Role::Server => Sender::Client,
+                Role::Client => Sender::Server,
+            };
             let siens = self
                 .poignee
                 .peer_parameters()
-                .and_then(|octets| TransportParameters::read(octets, Sender::Client).ok())
+                .and_then(|octets| TransportParameters::read(octets, sens).ok())
                 .ok_or_else(|| Error::new(Reason::BadParameters))?;
+
+            // ── §7.3 : LA PREUVE QUE LE PREMIER PAQUET N'A PAS ÉTÉ RÉÉCRIT ──
+            //
+            // « The client MUST […] verify that the value of the
+            // original_destination_connection_id transport parameter matches
+            // the Destination Connection ID field of the first Initial packet
+            // it sent. »
+            //
+            // **C'EST LE SEUL CONTRÔLE QUI DISTINGUE UNE POIGNÉE DE MAIN D'UNE
+            // POIGNÉE DE MAIN DÉTOURNÉE** au niveau du transport : un
+            // intermédiaire qui aurait réécrit l'identifiant de destination du
+            // premier paquet ne peut pas faire coïncider cette valeur, qui est
+            // authentifiée par TLS.
+            if let Some(choisie) = self.origine_choisie
+                && siens.original_destination_connection_id != Some(choisie)
+            {
+                return Err(Error::new(Reason::BadParameters));
+            }
             // **ET C'EST MAINTENANT SEULEMENT** qu'on croit son exposant : avant,
             // rien ne l'authentifiait.
             self.exposant = siens.ack_delay_exponent;
             // **C'EST LE PREMIER INSTANT OÙ L'ON A LE DROIT DE BÂTIR LES FLUX** :
             // avant, ses limites n'étaient pas authentifiées.
-            self.flux = Some(Streams::new(Initiator::Server, &self.notres, &siens));
+            // §2.1 : la numérotation des flux dépend de qui les ouvre. Passer
+            // `Initiator::Server` côté client ferait ouvrir des flux que le pair
+            // lirait comme les siens.
+            let nous = match self.role {
+                Role::Server => Initiator::Server,
+                Role::Client => Initiator::Client,
+            };
+            self.flux = Some(Streams::new(nous, &self.notres, &siens));
             self.fenetres = (0..FLUX_MAX).map(|_| Vec::new()).collect();
             self.sorties = (0..FLUX_MAX).map(|_| Sortie::default()).collect();
             self.fins = vec![false; FLUX_MAX];
             self.annulations = vec![None; FLUX_MAX];
             self.siens = Some(siens);
-            self.etat.on_handshake_confirmed();
+            // **CÔTÉ CLIENT, ON N'A PAS ENCORE CONFIRMÉ** : §4.1.2 attend un
+            // `HANDSHAKE_DONE`. Ce qui vient d'être fait est de TERMINER, ce qui
+            // suffit à bâtir les flux — leurs limites sont authentifiées — mais
+            // pas à jeter les clés `Handshake` (§4.9.2).
+            if matches!(self.role, Role::Server) {
+                self.etat.on_handshake_confirmed();
+            }
             self.confirmee = true;
         }
         Ok(())

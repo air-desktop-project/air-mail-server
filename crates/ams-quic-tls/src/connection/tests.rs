@@ -3007,3 +3007,305 @@ fn une_trame_pour_un_flux_oublie_ne_condamne_pas() {
         "un flux oublié se tait, quelle que soit la trame"
     );
 }
+
+// ── LES DEUX MOITIÉS, FACE À FACE ───────────────────────────────────────────
+
+/// Passe les datagrammes d'un côté à l'autre jusqu'à ce que plus rien n'avance.
+///
+/// # CE QU'IL N'Y A PAS ICI, ET C'EST TOUT L'INTÉRÊT
+///
+/// **Aucun harnais.** Les essais précédents montaient un client à la main —
+/// `rustls` pour la moitié TLS, des datagrammes composés octet par octet pour la
+/// moitié QUIC. Il disait donc ce que NOUS croyons qu'un client dit.
+///
+/// Ici, les deux bouts sont des [`Connection`] de cette crate. Ce qui est éprouvé
+/// est que la moitié cliente et la moitié serveur s'accordent — et une faute de
+/// l'une ne peut plus être masquée par une complaisance de l'autre.
+fn conduire_les_deux(client: &mut Connection, serveur: &mut Connection, horloge: &mut u64) {
+    let mut place = vec![0_u8; 1500];
+    for _ in 0..32_u32 {
+        let mut a_dit = false;
+
+        loop {
+            let ecrit = client
+                .poll_transmit(&mut place, *horloge)
+                .expect("le client émet");
+            if ecrit == 0 {
+                break;
+            }
+            a_dit = true;
+            let mut datagramme = place[..ecrit].to_vec();
+            serveur
+                .on_datagram(&mut datagramme, *horloge)
+                .expect("le serveur accepte ce que le client dit");
+        }
+
+        loop {
+            let ecrit = serveur
+                .poll_transmit(&mut place, *horloge)
+                .expect("le serveur émet");
+            if ecrit == 0 {
+                break;
+            }
+            a_dit = true;
+            let mut datagramme = place[..ecrit].to_vec();
+            client
+                .on_datagram(&mut datagramme, *horloge)
+                .expect("le client accepte ce que le serveur dit");
+        }
+
+        *horloge = horloge.saturating_add(1_000);
+        if !a_dit {
+            return;
+        }
+    }
+    panic!("la poignée de main tourne en rond");
+}
+
+/// Monte les deux bouts, et mène la poignée de main jusqu'au bout.
+fn face_a_face(atelier: &std::path::Path) -> (Connection, Connection, u64) {
+    let (autorite, cert, cle) = materiel(atelier).expect(SANS_OPENSSL);
+    let mut horloge = 1_000_000_u64;
+
+    let mut client = Connection::connect(
+        config_client(&autorite, ams_tls::alpn_h3()),
+        rustls::pki_types::ServerName::try_from("localhost").expect("un nom"),
+        identifiant(&CLIENT),
+        identifiant(&ORIGINE),
+        INACTIVITE_US,
+        horloge,
+    )
+    .expect("le client se monte");
+
+    // **LE PREMIER DATAGRAMME DU CLIENT PORTE LE `ClientHello`**, et c'est lui
+    // qui donne au serveur de quoi s'accepter.
+    let mut place = vec![0_u8; 1500];
+    let ecrit = client
+        .poll_transmit(&mut place, horloge)
+        .expect("le client parle le premier");
+    assert!(
+        ecrit >= 1200,
+        "§14.1 : un `Initial` fait 1200 octets au moins"
+    );
+    let premier = place[..ecrit].to_vec();
+
+    let arrivee = ams_quic::Incoming::read(&premier, 0).expect("un premier paquet lisible");
+    let mut serveur = Connection::accept(
+        config_serveur(&cert, &cle),
+        &arrivee,
+        identifiant(&LOCAL),
+        arrivee.source(),
+        INACTIVITE_US,
+        horloge,
+    )
+    .expect("le serveur accepte");
+    serveur
+        .on_datagram(&mut premier.clone(), horloge)
+        .expect("le serveur lit le ClientHello");
+
+    conduire_les_deux(&mut client, &mut serveur, &mut horloge);
+    (client, serveur, horloge)
+}
+
+#[test]
+fn une_poignee_de_main_va_jusqu_au_bout_entre_nos_deux_moities() {
+    let atelier = atelier("face-a-face");
+    let (client, serveur, _) = face_a_face(&atelier.0);
+
+    assert!(serveur.is_established(), "le serveur doit avoir fini");
+    assert!(client.is_established(), "et le client aussi");
+
+    // §3.1 de RFC 9114 : le protocole applicatif se choisit par ALPN.
+    assert_eq!(client.alpn(), Some(&b"h3"[..]));
+    assert_eq!(serveur.alpn(), Some(&b"h3"[..]));
+
+    // §8.2 : chacun a lu les paramètres de l'autre, et ils sont authentifiés.
+    assert!(
+        client.peer_parameters().is_some(),
+        "le client a lu les siens"
+    );
+    assert!(serveur.peer_parameters().is_some(), "et le serveur aussi");
+}
+
+#[test]
+fn les_deux_moities_exportent_la_meme_liaison_de_canal() {
+    // **C'EST CE QUI FERME LE RELAIS**, et cela ne se vérifie qu'ici : deux
+    // camps qui ont mené LA MÊME poignée de main dérivent la même valeur.
+    let atelier = atelier("face-a-face-export");
+    let (client, serveur, _) = face_a_face(&atelier.0);
+
+    let du_client = client.export(b"liaison", None).expect("exportable");
+    let du_serveur = serveur.export(b"liaison", None).expect("exportable");
+    assert_eq!(du_client, du_serveur, "les deux camps doivent s'accorder");
+}
+
+#[test]
+fn le_client_adopte_l_identifiant_que_le_serveur_a_choisi() {
+    // §7.2 : le client remplace l'identifiant qu'il avait inventé par celui que
+    // le serveur annonce dans son premier paquet. Sans cela, ses paquets
+    // suivants seraient adressés à une destination que le serveur ne route pas.
+    let atelier = atelier("face-a-face-cid");
+    let (client, _serveur, _) = face_a_face(&atelier.0);
+
+    assert_eq!(
+        client.peer_id(),
+        identifiant(&LOCAL),
+        "le client doit s'adresser à l'identifiant du serveur, et non au sien"
+    );
+    assert_ne!(client.peer_id(), identifiant(&ORIGINE));
+}
+
+#[test]
+fn un_flux_du_client_arrive_au_serveur() {
+    // **LA POIGNÉE DE MAIN NE PROUVE PAS QUE LES FLUX MARCHENT.** §2.1 numérote
+    // les flux selon qui les ouvre ; un `Initiator` inversé donnerait un flux
+    // que le pair lirait comme le sien.
+    let atelier = atelier("face-a-face-flux");
+    let (mut client, mut serveur, mut horloge) = face_a_face(&atelier.0);
+
+    let flux = client
+        .open_stream(ams_proto_quic::Directional::Bidirectional)
+        .expect("le client ouvre un flux bidirectionnel");
+    client.write(flux, b"bonjour").expect("il écrit");
+    client.finish(flux).expect("et il termine");
+
+    conduire_les_deux(&mut client, &mut serveur, &mut horloge);
+
+    let mut recu = [0_u8; 32];
+    let lus = serveur.read(flux, &mut recu);
+    assert_eq!(
+        &recu[..lus],
+        b"bonjour",
+        "le serveur doit lire ce qu'on a écrit"
+    );
+}
+
+#[test]
+fn un_handshake_done_hors_du_un_rtt_n_est_pas_permis() {
+    // §12.4 : chaque trame a ses niveaux, et `HANDSHAKE_DONE` n'en a qu'un.
+    // **LE REFUS PAR NIVEAU EST LE MÊME DES DEUX CÔTÉS** — c'est le RÔLE qui
+    // décide ensuite ce qu'on en fait, et `une_trame` s'en charge.
+    for niveau in [Level::Initial, Level::Handshake] {
+        assert!(
+            !super::permise(&Frame::HandshakeDone, niveau),
+            "{niveau:?} ne porte pas de HANDSHAKE_DONE"
+        );
+    }
+    assert!(super::permise(&Frame::HandshakeDone, Level::OneRtt));
+}
+
+#[test]
+fn un_client_sur_un_fournisseur_ordinaire_se_refuse_a_la_connexion() {
+    // La faute remonte de `Poignee::client` jusqu'ici : une connexion qu'on ne
+    // saurait pas chiffrer ne doit pas exister à moitié.
+    let config = ClientConfig::builder_with_provider(Arc::new(ams_tls::provider()))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .expect("TLS 1.3")
+        .with_root_certificates(RootCertStore::empty())
+        .with_no_client_auth();
+
+    let issue = Connection::connect(
+        Arc::new(config),
+        rustls::pki_types::ServerName::try_from("localhost").expect("un nom"),
+        identifiant(&CLIENT),
+        identifiant(&ORIGINE),
+        INACTIVITE_US,
+        1_000_000,
+    )
+    .expect_err("le fournisseur ordinaire ne sait pas chiffrer QUIC");
+    assert_eq!(issue.reason(), crate::Reason::NoQuicSuite);
+}
+
+#[test]
+fn un_original_destination_connection_id_qui_ne_correspond_pas_ferme_la_connexion() {
+    // ── §7.3, ET C'EST LE CONTRÔLE QUI COMPTE ───────────────────────────────
+    //
+    // « The client MUST […] verify that the value of the
+    // original_destination_connection_id transport parameter matches the
+    // Destination Connection ID field of the first Initial packet it sent. »
+    //
+    // On fait croire au client qu'il avait choisi un AUTRE identifiant : c'est
+    // exactement ce qu'un intermédiaire qui aurait réécrit le premier paquet
+    // produirait, et le serveur ne peut pas le savoir.
+    let atelier = atelier("face-a-face-odcid");
+    let (autorite, cert, cle) = materiel(&atelier.0).expect(SANS_OPENSSL);
+    let mut horloge = 1_000_000_u64;
+
+    let mut client = Connection::connect(
+        config_client(&autorite, ams_tls::alpn_h3()),
+        rustls::pki_types::ServerName::try_from("localhost").expect("un nom"),
+        identifiant(&CLIENT),
+        identifiant(&ORIGINE),
+        INACTIVITE_US,
+        horloge,
+    )
+    .expect("le client se monte");
+    // **LE MENSONGE**, posé après la construction : les clés `Initial` restent
+    // celles de l'identifiant réellement envoyé, donc la poignée de main se
+    // déroule — et c'est bien §7.3 qui doit l'arrêter, et rien d'autre.
+    client.origine_choisie = Some(identifiant(&LOCAL));
+
+    let mut place = vec![0_u8; 1500];
+    let ecrit = client
+        .poll_transmit(&mut place, horloge)
+        .expect("le client parle le premier");
+    let premier = place[..ecrit].to_vec();
+    let arrivee = ams_quic::Incoming::read(&premier, 0).expect("un premier paquet lisible");
+    let mut serveur = Connection::accept(
+        config_serveur(&cert, &cle),
+        &arrivee,
+        identifiant(&LOCAL),
+        arrivee.source(),
+        INACTIVITE_US,
+        horloge,
+    )
+    .expect("le serveur accepte");
+    serveur
+        .on_datagram(&mut premier.clone(), horloge)
+        .expect("le serveur lit le ClientHello");
+
+    // On mène la conversation jusqu'à ce que le client refuse.
+    let mut refus = None;
+    for _ in 0..32_u32 {
+        let mut a_dit = false;
+        loop {
+            let ecrit = serveur
+                .poll_transmit(&mut place, horloge)
+                .expect("le serveur émet");
+            if ecrit == 0 {
+                break;
+            }
+            a_dit = true;
+            let mut datagramme = place[..ecrit].to_vec();
+            if let Err(faute) = client.on_datagram(&mut datagramme, horloge) {
+                refus = Some(faute);
+            }
+        }
+        if refus.is_some() {
+            break;
+        }
+        loop {
+            let ecrit = client
+                .poll_transmit(&mut place, horloge)
+                .expect("le client émet");
+            if ecrit == 0 {
+                break;
+            }
+            a_dit = true;
+            let mut datagramme = place[..ecrit].to_vec();
+            serveur
+                .on_datagram(&mut datagramme, horloge)
+                .expect("le serveur accepte");
+        }
+        horloge = horloge.saturating_add(1_000);
+        if !a_dit {
+            break;
+        }
+    }
+
+    assert_eq!(
+        refus.expect("le client doit refuser").reason(),
+        crate::Reason::BadParameters,
+        "§7.3 : l'identifiant annoncé ne correspond pas à celui qu'on a envoyé"
+    );
+}

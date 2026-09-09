@@ -131,6 +131,13 @@ pub enum Reason {
     DynamicTableRefused,
     /// Une section de champs qui ne fait pas une requête (§4.1.2 de RFC 9114).
     MalformedRequest,
+    /// Une section de champs qui ne fait pas une réponse (§4.1.2 de RFC 9114).
+    ///
+    /// **ELLE NE SE CONFOND PAS AVEC [`Reason::MalformedRequest`]**, et pas
+    /// seulement par symétrie : les deux fautes se lisent dans des journaux
+    /// différents. Celle-ci dit que le SERVEUR a mal parlé, et un client qui la
+    /// voit sait qu'il n'y peut rien.
+    MalformedResponse,
     /// Un champ de réponse que ce serveur refuse d'écrire.
     BadResponseField,
     /// Un second flux critique du même type (§6.2.1, §4.2 de RFC 9204).
@@ -187,7 +194,7 @@ impl Reason {
             }
             // §4.1.2 : une requête bien décomprimée qui ne fait pas un message
             // ne condamne que son flux. La connexion, elle, n'a rien perdu.
-            Self::MalformedRequest => H3Error::MessageError,
+            Self::MalformedRequest | Self::MalformedResponse => H3Error::MessageError,
             // **NOTRE CODE A PROPOSÉ CE CHAMP, PAS LE PAIR.**
             Self::BadResponseField => H3Error::InternalError,
             Self::DuplicateCriticalStream => H3Error::StreamCreationError,
@@ -253,6 +260,7 @@ impl core::fmt::Display for Error {
             }
             Reason::DynamicTableRefused => "une insertion dans une table qu'on a annoncée nulle",
             Reason::MalformedRequest => "une section de champs qui ne fait pas une requête",
+            Reason::MalformedResponse => "une section de champs qui ne fait pas une réponse",
             Reason::BadResponseField => "un champ de réponse qu'on refuse d'écrire",
             Reason::DuplicateCriticalStream => "un second flux critique du même type",
             Reason::CriticalStreamClosed => "un flux critique s'est fermé",

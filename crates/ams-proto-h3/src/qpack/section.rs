@@ -214,3 +214,131 @@ fn chiffre(valeur: u16, rang: u16) -> u8 {
 
 #[cfg(test)]
 mod tests;
+
+// ── L'AUTRE SENS : CE QU'UN CLIENT ÉCRIT, ET CE QU'IL LIT ───────────────────
+//
+// # POURQUOI CES DEUX FONCTIONS N'ÉTAIENT PAS LÀ
+//
+// Ce dépôt n'avait qu'un serveur : il LISAIT des requêtes et ÉCRIVAIT des
+// réponses. Les deux moitiés manquantes sont exactement les deux autres cases du
+// tableau, et elles n'ont rien de nouveau — le codage d'un champ, lui, ne
+// dépend pas du côté d'où l'on parle.
+
+/// Écrit la section de champs d'une requête.
+///
+/// # LES PSEUDO-CHAMPS D'ABORD, ET §4.3.1 L'EXIGE
+///
+/// « All pseudo-header fields MUST appear in the field section before regular
+/// header fields. » Un pair qui en trouverait un après un champ ordinaire
+/// traiterait le message comme malformé — et il aurait raison.
+///
+/// Les quatre sont obligatoires pour une requête ordinaire (§4.3.1 : `:method`,
+/// `:scheme`, `:authority`, `:path`). **`:authority` PLUTÔT QU'UN CHAMP `host`** :
+/// §4.3.1 dit que les clients « SHOULD » employer le pseudo-champ, et un serveur
+/// qui reçoit les deux doit vérifier qu'ils s'accordent — deux façons de dire la
+/// même chose sont une occasion de plus qu'elles divergent.
+///
+/// # Errors
+///
+/// [`Reason::BufferTooSmall`].
+pub fn write_request_section(
+    methode: &[u8],
+    schema: &[u8],
+    autorite: &[u8],
+    chemin: &[u8],
+    champs: &[(&[u8], &[u8])],
+    out: &mut [u8],
+) -> Result<usize, Error> {
+    let court = || Error::new(Reason::BufferTooSmall);
+    // §4.5.1 : le préfixe d'une section qui ne dépend de rien fait deux octets
+    // nuls — la même raison qu'à l'écriture d'une réponse.
+    let Some((prefixe, corps)) = out.split_at_mut_checked(2) else {
+        return Err(court());
+    };
+    prefixe.fill(0);
+    let mut ecrits = 0_usize;
+    let mut poser = |nom: &[u8], valeur: &[u8]| -> Result<(), Error> {
+        let place = corps.get_mut(ecrits..).unwrap_or_default();
+        ecrits = ecrits.saturating_add(ecrire_champ(nom, valeur, place)?);
+        Ok(())
+    };
+    poser(b":method", methode)?;
+    poser(b":scheme", schema)?;
+    poser(b":authority", autorite)?;
+    poser(b":path", chemin)?;
+    for (nom, valeur) in champs {
+        poser(nom, valeur)?;
+    }
+    Ok(ecrits.saturating_add(2))
+}
+
+/// Lit une section de champs, et en fait un code d'état.
+///
+/// # CE QU'ELLE RETIENT, ET CE QU'ELLE NE RETIENT PAS
+///
+/// **Le `:status`, et rien d'autre.** Les champs ordinaires sont bien décodés —
+/// il le faut, sans quoi la section ne se lirait pas jusqu'au bout et une faute
+/// de compression passerait — mais ils ne sont pas rendus.
+///
+/// Ce n'est pas un oubli, c'est le refus d'une décision qui n'appartient pas à
+/// cette crate : rendre une table de champs demanderait de choisir combien on en
+/// retient et où on les alloue, pour un appelant qu'on ne connaît pas. Le jour
+/// où l'un d'eux en aura besoin, il le dira — et ce sera un ajout, pas une
+/// correction.
+///
+/// # Errors
+///
+/// [`Reason::BadInsertCount`] pour une section qui dépend d'insertions ;
+/// [`Reason::BadIndex`] pour un index qui ne désigne rien ;
+/// [`Reason::BadFieldLine`] ; [`Reason::MalformedResponse`] pour une section
+/// sans `:status`, avec plusieurs, ou dont le code ne se lit pas.
+pub fn read_response_section(octets: &[u8], out: &mut [u8]) -> Result<StatusCode, Error> {
+    let malformee = || Error::new(Reason::MalformedResponse);
+    let sans_index = || Error::new(Reason::BadIndex);
+    let prefixe = read_prefix(octets, 0, 0)?;
+    let mut reste = octets.get(prefixe.read..).unwrap_or_default();
+    let mut libre = out;
+    let mut statut: Option<StatusCode> = None;
+    let mut ordinaire_vu = false;
+
+    while !reste.is_empty() {
+        let decode = read_field_line(reste, libre)?;
+        libre = decode.rest;
+        reste = reste.get(decode.read..).unwrap_or_default();
+        let (nom, valeur) = match decode.line {
+            FieldLine::Indexed {
+                table: Table::Dynamic,
+                ..
+            }
+            | FieldLine::IndexedPostBase { .. }
+            | FieldLine::LiteralWithName {
+                table: Table::Dynamic,
+                ..
+            }
+            | FieldLine::LiteralWithPostBaseName { .. } => return Err(sans_index()),
+            FieldLine::Indexed { index, .. } => entree_statique(index).ok_or_else(sans_index)?,
+            FieldLine::LiteralWithName { index, value, .. } => {
+                let (nom, _) = entree_statique(index).ok_or_else(sans_index)?;
+                (nom, value)
+            }
+            FieldLine::Literal { name, value, .. } => (name, value),
+        };
+
+        if nom == b":status" {
+            // §4.3.2 : un et un seul. Deux `:status` ne se départagent pas, et
+            // choisir le premier ou le dernier ferait lire deux réponses
+            // différentes à deux implémentations.
+            if statut.is_some() || ordinaire_vu {
+                return Err(malformee());
+            }
+            statut = Some(StatusCode::parse(valeur).map_err(|_| malformee())?);
+            continue;
+        }
+        // §4.3 : aucun autre pseudo-champ n'existe dans une réponse.
+        if nom.first() == Some(&b':') {
+            return Err(malformee());
+        }
+        ordinaire_vu = true;
+    }
+    statut.ok_or_else(malformee)
+}

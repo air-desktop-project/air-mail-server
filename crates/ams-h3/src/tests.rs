@@ -77,6 +77,13 @@ impl Faux {
 }
 
 impl Transport for Faux {
+    fn open_bi(&mut self) -> Result<StreamId, Error> {
+        // **CE FAUX TRANSPORT SERT UN SERVEUR**, et §6.1 dit qu'un serveur
+        // n'ouvre jamais de flux bidirectionnel. La méthode existe parce que le
+        // trait la porte pour le conducteur CLIENT ; ici, elle refuse.
+        Err(Error::transport())
+    }
+
     fn open_uni(&mut self) -> Result<StreamId, Error> {
         if self.prochain >= self.plafond {
             return Err(Error::transport());
