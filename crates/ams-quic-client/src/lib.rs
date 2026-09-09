@@ -33,7 +33,7 @@ use ams_quic_crypto::{Keys, Role, Secret};
 use ams_quic_tls::Clefs;
 use rustls::pki_types::pem::PemObject as _;
 use rustls::pki_types::{CertificateDer, ServerName};
-use rustls::quic::{ClientConnection, KeyChange, Version};
+use rustls::quic::{ClientConnection, Connection as ConnexionTls, KeyChange, Version};
 use rustls::{ClientConfig, RootCertStore};
 use tokio::net::UdpSocket;
 
@@ -187,7 +187,13 @@ pub fn config_client(autorite: &[u8]) -> Arc<ClientConfig> {
 
 /// Un client d'essai, qui parle sur une vraie socket.
 pub struct Client {
-    tls: ClientConnection,
+    /// La moitié TLS.
+    ///
+    /// **L'ÉNUMÉRÉ, ET NON `ClientConnection`** : c'est le seul type de
+    /// `rustls::quic` qui expose l'exportateur de RFC 8446 §7.5, et un client
+    /// d'essai qui ne saurait pas dériver la même valeur que le serveur ne
+    /// pourrait pas éprouver ce que cette valeur ferme.
+    tls: ConnexionTls,
     socket: UdpSocket,
     serveur: SocketAddr,
     chiffrement: [Option<Clefs>; 3],
@@ -236,8 +242,23 @@ pub struct Client {
 impl Client {
     /// La moitié TLS, pour savoir où en est la poignée de main.
     #[must_use]
-    pub const fn tls(&self) -> &ClientConnection {
+    pub const fn tls(&self) -> &ConnexionTls {
         &self.tls
+    }
+
+    /// Dérive la valeur que le serveur dérive aussi — RFC 8446 §7.5.
+    ///
+    /// **C'EST LA MOITIÉ CLIENTE D'UNE LIAISON DE CANAL.** Elle n'a d'intérêt
+    /// que parce que les deux camps obtiennent les mêmes octets : un essai qui
+    /// ne dériverait que d'un côté ne prouverait rien.
+    ///
+    /// Rend `None` tant que la poignée de main n'est pas terminée — le secret
+    /// maître n'existe pas encore.
+    #[must_use]
+    pub fn export(&self, etiquette: &[u8], contexte: Option<&[u8]>) -> Option<[u8; 32]> {
+        self.tls
+            .export_keying_material([0_u8; 32], etiquette, contexte)
+            .ok()
     }
 
     /// Pose ces trames applicatives, qui partiront au prochain datagramme.
@@ -282,13 +303,15 @@ impl Client {
         };
         let socket = UdpSocket::bind("127.0.0.1:0").await.expect("une socket");
         Self {
-            tls: ClientConnection::new(
-                config,
-                Version::V1,
-                ServerName::try_from("localhost").expect("un nom"),
-                ses_parametres(),
-            )
-            .expect("le client se construit"),
+            tls: ConnexionTls::from(
+                ClientConnection::new(
+                    config,
+                    Version::V1,
+                    ServerName::try_from("localhost").expect("un nom"),
+                    ses_parametres(),
+                )
+                .expect("le client se construit"),
+            ),
             socket,
             serveur,
             chiffrement: [None, None, None],

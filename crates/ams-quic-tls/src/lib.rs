@@ -38,7 +38,7 @@ use std::sync::Arc;
 
 use ams_quic::{CRYPTO_OCTETS_MAX, Handshake, Level, crypto_error};
 use rustls::ServerConfig;
-use rustls::quic::{KeyChange, ServerConnection, Version};
+use rustls::quic::{Connection as ConnexionTls, KeyChange, ServerConnection, Version};
 
 mod connection;
 mod error;
@@ -54,6 +54,14 @@ pub use keys::Clefs;
 /// initial et leurs propres étiquettes ; les servir demanderait de tenir deux
 /// dérivations à jour, pour des pairs qui n'existent plus.
 const VERSION: Version = Version::V1;
+
+/// La taille d'une valeur exportée, en octets.
+///
+/// **Trente-deux, et ce n'est pas un réglage.** C'est la taille d'un condensat
+/// SHA-256, celle qu'attend tout ce qui se sert d'un exportateur comme d'une
+/// liaison de canal. Un exportateur de longueur variable ferait dépendre la
+/// valeur d'un paramètre de plus, que les deux camps devraient tenir d'accord.
+pub const EXPORT_OCTETS: usize = 32;
 
 /// Ce que TLS veut émettre, et à quel niveau.
 ///
@@ -142,7 +150,21 @@ impl core::fmt::Debug for Flight {
 /// main, c'est une intention.
 pub struct Server {
     /// Celui qui conduit vraiment TLS.
-    tls: ServerConnection,
+    ///
+    /// # POURQUOI L'ÉNUMÉRÉ, ET NON `ServerConnection`
+    ///
+    /// Parce que `rustls::quic` porte DEUX types nommés `ConnectionCommon` — le
+    /// sien et celui de `rustls` tout court —, et que **seul l'énuméré
+    /// `quic::Connection` expose l'exportateur de RFC 8446 §7.5**. Le
+    /// `ServerConnection` déréférence vers le `ConnectionCommon` du module
+    /// `quic`, dont le champ interne est privé : l'exportateur y est
+    /// inatteignable.
+    ///
+    /// L'énuméré ne coûte rien — un `match` à deux bras dont un seul existe chez
+    /// nous — et il donne accès à tout ce que la poignée de main employait
+    /// déjà : `write_hs`, `read_hs`, `alert`, `quic_transport_parameters`, et
+    /// `alpn_protocol` par déréférencement.
+    tls: ConnexionTls,
     /// Les règles de §4 : niveaux, flux `CRYPTO`, refus.
     regles: Handshake,
     /// Les trois fenêtres de réassemblage, une par flux.
@@ -179,8 +201,10 @@ impl Server {
         if !sait_chiffrer_quic(&config) {
             return Err(Error::new(Reason::NoQuicSuite));
         }
-        let tls = ServerConnection::new(config, VERSION, params)
-            .map_err(|_| Error::new(Reason::TlsSansAlerte))?;
+        let tls = ConnexionTls::from(
+            ServerConnection::new(config, VERSION, params)
+                .map_err(|_| Error::new(Reason::TlsSansAlerte))?,
+        );
         Ok(Self {
             tls,
             regles: Handshake::new(),
@@ -293,6 +317,43 @@ impl Server {
     #[must_use]
     pub fn alpn(&self) -> Option<&[u8]> {
         self.tls.alpn_protocol()
+    }
+
+    /// Dérive une valeur propre à CETTE connexion TLS — RFC 8446 §7.5.
+    ///
+    /// # CE QUE CETTE FONCTION FERME, ET QU'AUCUNE AUTRE NE FERMAIT
+    ///
+    /// Une signature d'application qu'on lie à la connexion doit être liée à
+    /// **CETTE** connexion, et non au serveur. Une empreinte de certificat ne
+    /// distingue pas deux connexions au même serveur : un intermédiaire qui
+    /// transmet un défi au vrai serveur, puis la signature en retour,
+    /// s'authentifie à la place du pair. C'est le RELAIS, et c'est ce que
+    /// l'exportateur ferme — sa valeur est dérivée du secret maître, que
+    /// l'intermédiaire n'a pas.
+    ///
+    /// # ELLE ÉCHOUE AVANT LA FIN DE LA POIGNÉE DE MAIN, ET C'EST JUSTE
+    ///
+    /// `rustls` refuse tant que la poignée de main n'est pas terminée, et il a
+    /// raison : le secret maître n'existe pas encore. Rendre des octets de repli
+    /// serait pire que d'échouer — deux pairs dériveraient la même valeur pour
+    /// deux connexions différentes, et le relais se rouvrirait sans qu'on le
+    /// voie.
+    ///
+    /// L'étiquette et le contexte appartiennent à l'APPELANT : c'est lui qui
+    /// sait pour quel usage il dérive, et deux usages ne doivent jamais tomber
+    /// sur la même valeur.
+    ///
+    /// # Errors
+    ///
+    /// [`Reason::ExportImpossible`] si la poignée de main n'est pas terminée.
+    pub fn export(
+        &self,
+        etiquette: &[u8],
+        contexte: Option<&[u8]>,
+    ) -> Result<[u8; EXPORT_OCTETS], Error> {
+        self.tls
+            .export_keying_material([0_u8; EXPORT_OCTETS], etiquette, contexte)
+            .map_err(|_| Error::new(Reason::ExportImpossible))
     }
 
     /// Les paramètres de transport du pair (§8.2).

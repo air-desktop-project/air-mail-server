@@ -124,7 +124,7 @@ fn config_client(autorite: &[u8], alpn: Vec<Vec<u8>>) -> Arc<ClientConfig> {
 
 /// Un client d'essai : la moitié TLS vient de `rustls`, la moitié QUIC de nous.
 struct Client {
-    tls: ClientConnection,
+    tls: rustls::quic::Connection,
     /// Les clés, par espace et par sens.
     chiffrement: [Option<Clefs>; 3],
     dechiffrement: [Option<Clefs>; 3],
@@ -176,13 +176,15 @@ impl Client {
                 .expect("dérivables")
         };
         Self {
-            tls: ClientConnection::new(
-                config,
-                Version::V1,
-                ServerName::try_from("localhost").expect("un nom"),
-                params.to_vec(),
-            )
-            .expect("le client se construit"),
+            tls: rustls::quic::Connection::from(
+                ClientConnection::new(
+                    config,
+                    Version::V1,
+                    ServerName::try_from("localhost").expect("un nom"),
+                    params.to_vec(),
+                )
+                .expect("le client se construit"),
+            ),
             chiffrement: [None, None, None],
             dechiffrement: [None, None, None],
             initiales_emission: clefs(Role::Client),
@@ -562,6 +564,16 @@ fn une_poignee_de_main_va_jusqu_au_bout() {
     assert!(!client.tls.is_handshaking(), "le client aussi doit finir");
     assert_eq!(serveur.alpn(), Some(&b"h3"[..]));
     assert_eq!(client.tls.alpn_protocol(), Some(&b"h3"[..]));
+
+    // RFC 8446 §7.5 : une valeur propre à CETTE connexion, que les deux camps
+    // dérivent identiquement. Une empreinte de certificat, elle, serait la même
+    // pour toutes les connexions à ce serveur.
+    let du_serveur = serveur.export(b"liaison", None).expect("exportable");
+    let du_client = client
+        .tls
+        .export_keying_material([0_u8; crate::EXPORT_OCTETS], b"liaison", None)
+        .expect("le client aussi");
+    assert_eq!(du_serveur, du_client, "les deux camps doivent s'accorder");
 
     // §8.2 : les paramètres du pair sont authentifiés par la poignée de main.
     let siens = serveur.peer_parameters().expect("le client en a annoncé");

@@ -500,6 +500,22 @@ impl Connection {
         self.siens.as_ref()
     }
 
+    /// Dérive une valeur propre à CETTE connexion — RFC 8446 §7.5.
+    ///
+    /// Voir [`Server::export`] : cette fonction-ci ne fait que la présenter à
+    /// qui tient une connexion plutôt qu'une poignée de main.
+    ///
+    /// # Errors
+    ///
+    /// [`Reason::ExportImpossible`] si la poignée de main n'est pas terminée.
+    pub fn export(
+        &self,
+        etiquette: &[u8],
+        contexte: Option<&[u8]>,
+    ) -> Result<[u8; crate::EXPORT_OCTETS], Error> {
+        self.poignee.export(etiquette, contexte)
+    }
+
     /// Ferme la connexion avec ce code de transport (§10.2).
     pub fn close(&mut self, code: TransportError, maintenant: u64) {
         self.close_with(code.value(), maintenant);

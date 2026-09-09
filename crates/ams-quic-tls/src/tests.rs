@@ -27,7 +27,7 @@ use std::sync::Arc;
 use ams_quic::Level;
 use rustls::pki_types::pem::PemObject as _;
 use rustls::pki_types::{CertificateDer, ServerName};
-use rustls::quic::{ClientConnection, KeyChange, Version};
+use rustls::quic::{ClientConnection, Connection as ConnexionTls, KeyChange, Version};
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
 
 use super::{Error, Reason, Server, generic_close_code};
@@ -183,7 +183,7 @@ fn niveau_du_changement(change: &KeyChange) -> Level {
 /// test, pas dans le pont**, et il a fallu instrumenter pour le voir : les deux
 /// symptômes sont identiques.
 struct Client {
-    tls: ClientConnection,
+    tls: ConnexionTls,
     /// Le niveau où il écrit — il ne redescend jamais.
     niveau: Level,
     /// Les décalages atteints dans chaque flux `CRYPTO`.
@@ -193,13 +193,15 @@ struct Client {
 impl Client {
     fn new(config: Arc<ClientConfig>) -> Self {
         Self {
-            tls: ClientConnection::new(
-                config,
-                Version::V1,
-                ServerName::try_from("localhost").expect("un nom"),
-                SES_PARAMETRES.to_vec(),
-            )
-            .expect("le client se construit"),
+            tls: ConnexionTls::from(
+                ClientConnection::new(
+                    config,
+                    Version::V1,
+                    ServerName::try_from("localhost").expect("un nom"),
+                    SES_PARAMETRES.to_vec(),
+                )
+                .expect("le client se construit"),
+            ),
             niveau: Level::Initial,
             decalages: [0; 4],
         }
@@ -636,4 +638,126 @@ fn des_octets_handshake_non_lus_condamnent_a_la_confirmation() {
         !serveur.is_complete() || serveur.read_level() == Level::Handshake,
         "la lecture n'est pas passée en 1-RTT"
     );
+}
+
+// ── L'exportateur (RFC 8446 §7.5) ───────────────────────────────────────────
+
+/// **LES DEUX CAMPS DÉRIVENT LES MÊMES OCTETS, ET C'EST TOUT L'INTÉRÊT.**
+///
+/// Un exportateur qui ne serait éprouvé que d'un côté ne prouverait rien : ce
+/// qu'on veut est qu'un client et un serveur qui ont mené LA MÊME poignée de
+/// main obtiennent la même valeur, et que deux poignées de main différentes en
+/// obtiennent deux.
+#[test]
+fn les_deux_camps_exportent_la_meme_valeur() {
+    let atelier = atelier("export-accord");
+    let (autorite, cert, cle) = materiel(&atelier.0).expect(SANS_OPENSSL);
+
+    let mut serveur = Server::new(
+        config_serveur(&cert, &cle, std::vec![b"h3".to_vec()]),
+        NOS_PARAMETRES.to_vec(),
+    )
+    .expect("le fournisseur sait chiffrer QUIC");
+    let mut client = Client::new(config_client(&autorite, std::vec![b"h3".to_vec()]));
+    conduire(&mut serveur, &mut client).expect("la poignée de main aboutit");
+
+    let du_serveur = serveur
+        .export(b"essai/etiquette", None)
+        .expect("la poignée de main est terminée");
+    let du_client = client
+        .tls
+        .export_keying_material([0_u8; super::EXPORT_OCTETS], b"essai/etiquette", None)
+        .expect("le client aussi");
+
+    assert_eq!(du_serveur, du_client, "les deux camps doivent s'accorder");
+    assert_eq!(du_serveur.len(), super::EXPORT_OCTETS);
+    assert_ne!(
+        du_serveur,
+        [0_u8; super::EXPORT_OCTETS],
+        "et ce n'est pas du vide"
+    );
+}
+
+/// **DEUX ÉTIQUETTES DONNENT DEUX VALEURS, ET DEUX CONTEXTES AUSSI.**
+///
+/// C'est ce qui permet à deux usages de cohabiter sur une même connexion sans
+/// que l'un puisse valoir pour l'autre.
+#[test]
+fn l_etiquette_et_le_contexte_separent_les_usages() {
+    let atelier = atelier("export-domaines");
+    let (autorite, cert, cle) = materiel(&atelier.0).expect(SANS_OPENSSL);
+
+    let mut serveur = Server::new(
+        config_serveur(&cert, &cle, std::vec![b"h3".to_vec()]),
+        NOS_PARAMETRES.to_vec(),
+    )
+    .expect("le fournisseur sait chiffrer QUIC");
+    let mut client = Client::new(config_client(&autorite, std::vec![b"h3".to_vec()]));
+    conduire(&mut serveur, &mut client).expect("la poignée de main aboutit");
+
+    let une = serveur.export(b"usage/un", None).expect("exportable");
+    let autre = serveur.export(b"usage/deux", None).expect("exportable");
+    assert_ne!(une, autre, "deux étiquettes ne doivent pas se rejoindre");
+
+    let sans = serveur.export(b"usage/un", None).expect("exportable");
+    let avec = serveur
+        .export(b"usage/un", Some(b"contexte"))
+        .expect("exportable");
+    assert_ne!(sans, avec, "un contexte doit changer la valeur");
+    assert_eq!(une, sans, "et la même demande doit rendre la même valeur");
+}
+
+/// **DEUX POIGNÉES DE MAIN NE PARTAGENT RIEN**, et c'est ce qui ferme le relais.
+///
+/// Une empreinte de certificat, elle, est la MÊME pour toutes les connexions au
+/// même serveur : un intermédiaire qui transmet un défi au vrai serveur puis la
+/// signature en retour s'authentifierait à la place du pair. L'exportateur
+/// dérive du secret maître, que cet intermédiaire n'a pas.
+#[test]
+fn deux_connexions_au_meme_serveur_exportent_deux_valeurs() {
+    let atelier = atelier("export-connexions");
+    let (autorite, cert, cle) = materiel(&atelier.0).expect(SANS_OPENSSL);
+
+    let exporter = || {
+        let mut serveur = Server::new(
+            config_serveur(&cert, &cle, std::vec![b"h3".to_vec()]),
+            NOS_PARAMETRES.to_vec(),
+        )
+        .expect("le fournisseur sait chiffrer QUIC");
+        let mut client = Client::new(config_client(&autorite, std::vec![b"h3".to_vec()]));
+        conduire(&mut serveur, &mut client).expect("la poignée de main aboutit");
+        serveur.export(b"liaison", None).expect("exportable")
+    };
+
+    assert_ne!(
+        exporter(),
+        exporter(),
+        "le MÊME certificat, et pourtant deux valeurs : c'est ce que l'empreinte ne savait pas faire"
+    );
+}
+
+/// **AVANT LA FIN DE LA POIGNÉE DE MAIN, IL N'Y A RIEN À EXPORTER.**
+///
+/// Et il faut échouer plutôt que rendre des octets de repli : deux connexions
+/// différentes en dériveraient la même valeur, et le relais se rouvrirait sans
+/// qu'on le voie.
+#[test]
+fn rien_ne_s_exporte_avant_la_fin_de_la_poignee_de_main() {
+    let atelier = atelier("export-trop-tot");
+    let (_autorite, cert, cle) = materiel(&atelier.0).expect(SANS_OPENSSL);
+
+    let serveur = Server::new(
+        config_serveur(&cert, &cle, std::vec![b"h3".to_vec()]),
+        NOS_PARAMETRES.to_vec(),
+    )
+    .expect("le fournisseur sait chiffrer QUIC");
+    assert!(!serveur.is_complete());
+
+    let faute = serveur
+        .export(b"liaison", None)
+        .expect_err("rien à exporter");
+    assert_eq!(faute, Error::new(Reason::ExportImpossible));
+    // §20.1 : le pair n'y est pour rien — c'est nous qui avons demandé trop tôt.
+    assert_eq!(faute.close_code(), 0x01);
+    assert!(faute.to_string().contains("rien à exporter"), "{faute}");
 }

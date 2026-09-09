@@ -54,6 +54,13 @@ pub enum Reason {
     /// faute plutôt que de la taire la fait voir en essai, où elle se corrige,
     /// plutôt qu'en production, où l'application croirait ses octets partis.
     PasEncoreDeFlux,
+    /// On a demandé une valeur exportée avant la fin de la poignée de main.
+    ///
+    /// **C'EST NOTRE FAUTE, ET NON CELLE DU PAIR** : le secret maître n'existe
+    /// pas encore, et `rustls` refuse — avec raison. Rendre des octets de repli
+    /// serait pire, puisque deux connexions différentes en dériveraient la même
+    /// valeur.
+    ExportImpossible,
 }
 
 /// Une faute.
@@ -87,7 +94,7 @@ impl Error {
             // §20.1 : `INTERNAL_ERROR`. Le pair n'y est pour rien — et il n'y
             // est pour rien non plus quand c'est nous qui parlons de flux trop
             // tôt.
-            Reason::NoQuicSuite | Reason::PasEncoreDeFlux => 0x01,
+            Reason::NoQuicSuite | Reason::PasEncoreDeFlux | Reason::ExportImpossible => 0x01,
             Reason::Tls(alerte) => crypto_error(alerte),
             Reason::TlsSansAlerte => crypto_error(HANDSHAKE_FAILURE),
             Reason::WrongAlpn => crypto_error(NO_APPLICATION_PROTOCOL),
@@ -130,6 +137,7 @@ impl core::fmt::Display for Error {
             Reason::BadParameters => "les paramètres de transport du pair ne se lisent pas",
             Reason::Quic(_) => "les niveaux de chiffrement ont été mal employés",
             Reason::PasEncoreDeFlux => "la poignée de main n'a pas encore ouvert les flux",
+            Reason::ExportImpossible => "la poignée de main n'est pas terminée : rien à exporter",
         };
         write!(f, "{quoi} — on ferme avec {:#06x}", self.close_code())
     }
