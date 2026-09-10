@@ -227,8 +227,31 @@ recours ; il ne remplace pas ce qui suit.
 **`etc/opendkim` N'EXISTE PAS SUR CETTE MACHINE**, et `tar` s'arrête sur un
 chemin absent : la commande d'origine le nommait, et la sauvegarde aurait paru
 échouer. C'est **rspamd** qui signe ici — d'où `etc/rspamd` et le répertoire des
-clés, qui porte celle du sélecteur `ams202609`. Vérifié le 2026-09-08 : l'archive
-tient 1 008 entrées, dont 842 fichiers de courrier et la clé DKIM.
+clés, qui porte celle du sélecteur `ams202609`.
+
+**RELUE LE 2026-09-10**, sur les deux exemplaires, et le décompte est celui-ci :
+
+| | |
+|---|---|
+| entrées | 1 008 |
+| dont répertoires | 140 |
+| dont fichiers | 868 |
+| **dont MESSAGES** (`cur/` et `new/`) | **573** |
+
+Ce document annonçait « 842 fichiers de courrier ». Le nombre était faux et
+l'étiquette aussi : 842 ne comptait ni les fichiers ni les messages, et **qui
+vérifierait une restauration en cherchant 842 messages conclurait qu'il en manque
+269**. Les 573 sont le même compte que celui de `verifier.sh` sur
+`/var/vmail-ams` — c'est celui-là qui se contrôle.
+
+La clé privée `var/lib/rspamd/dkim/narro.ch.ams202609.key` est bien dedans.
+
+**ET ELLE EST À DEUX ENDROITS**, ce qui est le minimum pour appeler cela une
+sauvegarde : `/root/avant-ams-2026-09-08.tar.gz` sur la machine — elle a été
+déplacée de `/tmp`, où la commande ci-dessus l'écrit —, et
+`~/sauvegardes-narro/` sur le poste. Même empreinte SHA-256 des deux côtés. Celle
+qui vit sur la machine qu'elle protège ne protège de rien : c'est la seconde qui
+compte.
     # …puis rapatriez-la, et VÉRIFIEZ qu'elle se relit :
     tar -tzf avant-ams-*.tar.gz | wc -l
 
