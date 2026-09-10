@@ -172,8 +172,6 @@ pub struct Sent {
     en_vol: u64,
     /// Quand le prochain paquet pourra être déclaré perdu (§6.1.2).
     perte_a: Option<u64>,
-    /// Quand le dernier paquet sollicitant un acquittement est parti (§A.5).
-    dernier_sollicitant: Option<u64>,
 }
 
 impl Default for Sent {
@@ -191,7 +189,6 @@ impl Sent {
             plus_grand_acquitte: None,
             en_vol: 0,
             perte_a: None,
-            dernier_sollicitant: None,
         }
     }
 
@@ -238,7 +235,40 @@ impl Sent {
     /// sonder réveillerait la connexion pour ne rien dire.
     #[must_use]
     pub fn pto_deadline(&self, rtt: &Rtt, delai_max: u64, essais: u32) -> Option<u64> {
-        let depuis = self.dernier_sollicitant?;
+        // ── §6.2.1 : PAS DE SONDAGE SANS RIEN À SONDER ──────────────────────
+        //
+        // « The PTO timer MUST NOT be set if a timer is set for time threshold
+        // loss detection […] nor when there are no ack-eliciting packets in
+        // flight. »
+        //
+        // **UN CHAMP « DERNIER PAQUET SOLLICITANT » ÉTAIT POSÉ À L'ENVOI ET
+        // JAMAIS EFFACÉ**, si bien que la minuterie restait armée à jamais après
+        // le premier paquet sollicitant — même une fois tout acquitté.
+        //
+        // Ce que cela coûtait est bien plus grave qu'un réveil inutile : à
+        // chaque expiration, `sondages` montait d'un et le délai DOUBLAIT. Or
+        // §10.1 borne l'échéance d'inactivité par `3 × PTO` — donc elle doublait
+        // aussi. **Une connexion inactive ne s'éteignait plus jamais** : à 30 s
+        // annoncées, elle vivait encore après 200 s, et son échéance s'éloignait
+        // à chaque fois qu'elle l'atteignait.
+        //
+        // Pour un serveur, ce sont des connexions mortes qui occupent leur place
+        // jusqu'à saturer `--max-connections`. Pour un client, c'est une
+        // connexion qu'il croit vivante alors que son chemin est mort depuis
+        // longtemps — et qui ne basculera donc jamais sur un autre pair.
+        // **L'INSTANT VIENT DU PARCOURS, ET NON D'UN CHAMP À PART.** Un champ
+        // « dernier paquet sollicitant » posé à l'envoi ne sait pas qu'il a été
+        // acquitté depuis : c'est exactement ce qui laissait la minuterie armée.
+        // Le lire ICI, parmi ce qui est ENCORE en vol, rend la question et sa
+        // réponse indissociables — et supprime la branche morte qu'un garde
+        // séparé aurait laissée derrière lui.
+        let depuis = self
+            .paquets
+            .iter()
+            .flatten()
+            .filter(|emis| emis.sollicite)
+            .map(|emis| emis.parti_a)
+            .max()?;
         Some(depuis.saturating_add(rtt.pto(delai_max, essais)))
     }
 
@@ -297,11 +327,6 @@ impl Sent {
         });
         if en_vol {
             self.en_vol = self.en_vol.saturating_add(octets);
-        }
-        // §A.5 : seule la date d'un paquet SOLLICITANT arme le sondage. Un
-        // paquet qui ne demande rien ne se fait pas attendre.
-        if sollicite {
-            self.dernier_sollicitant = Some(parti_a);
         }
         Ok(())
     }

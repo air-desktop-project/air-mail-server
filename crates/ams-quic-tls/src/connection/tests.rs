@@ -1062,7 +1062,20 @@ fn une_fermeture_se_redit_de_moins_en_moins() {
 #[test]
 fn un_sondage_finit_par_partir() {
     let (_atelier, mut serveur, mut client, mut horloge) = etabli("sondage");
-    // On fait dire quelque chose au serveur, sans jamais l'acquitter.
+    // **IL FAUT UN PAQUET SOLLICITANT EN VOL, ET NON UN SIMPLE ACQUITTEMENT.**
+    //
+    // Cet essai posait un `PING` du CLIENT et laissait le serveur y répondre :
+    // sa réponse ne portait qu'un `ACK`, qui ne sollicite rien. Il ne restait
+    // donc rien à sonder — et l'essai passait quand même, parce que la minuterie
+    // de §6.2.1 restait armée à tort (voir `Sent::pto_deadline`). Il éprouvait
+    // le défaut, pas le sondage.
+    //
+    // Le serveur écrit maintenant sur un flux, et le client ne l'acquitte
+    // jamais : voilà de quoi sonder.
+    let flux = serveur
+        .open_stream(ams_proto_quic::Directional::Unidirectional)
+        .expect("un flux sortant");
+    serveur.write(flux, b"de quoi solliciter").expect("écrit");
     let mut trames = [0_u8; 8];
     let ecrits = Frame::Ping.write(&mut trames).expect("écrivable");
     let mut datagramme = un_paquet_du_client(&mut client, trames.get(..ecrits).expect("écrite"));
@@ -3489,4 +3502,65 @@ fn un_maintien_qui_arrive_au_pair_fait_repartir_son_inactivite() {
         tard.saturating_sub(horloge) / 1_000_000
     );
     assert!(!client.is_closed(), "et celle d'ici aussi");
+}
+
+/// **UNE CONNEXION INACTIVE S'ÉTEINT À L'HEURE DITE** (§10.1 de RFC 9000).
+///
+/// # CE QUE CET ESSAI A ÉTABLI, ET QUI NE SE VOYAIT NULLE PART
+///
+/// Elle ne s'éteignait pas. À trente secondes annoncées, elle vivait encore
+/// après deux cents — et son échéance s'ÉLOIGNAIT chaque fois qu'elle
+/// l'atteignait : 23 s, puis 47, puis 103.
+///
+/// La cause est dans `Sent::pto_deadline` : la minuterie de sondage restait
+/// armée après le premier paquet sollicitant, même une fois tout acquitté. À
+/// chaque expiration, `sondages` montait d'un et le délai doublait — et comme
+/// §10.1 borne l'échéance d'inactivité par `3 × PTO`, elle doublait avec lui.
+///
+/// **AUCUN ESSAI NE POUVAIT LE VOIR** : ils durent tous moins d'un délai
+/// d'inactivité, et c'est précisément au-delà que la connexion devient un
+/// fantôme — vivante en mémoire, morte sur le fil.
+///
+/// Ce que cela coûtait : pour un serveur, des connexions mortes qui occupent
+/// leur place jusqu'à saturer sa borne ; pour un client, une connexion qu'il
+/// croit bonne alors que son chemin est mort, et sur laquelle il n'ira donc
+/// jamais chercher un autre pair.
+#[test]
+fn une_connexion_inactive_s_eteint_a_l_heure_dite() {
+    let atelier = atelier("inactive");
+    let (mut client, _serveur, horloge) = face_a_face(&atelier.0);
+    let inactivite = INACTIVITE_US;
+
+    // **BIEN AVANT L'HEURE, ELLE VIT.** Sans cette moitié, un `on_timeout` qui
+    // fermerait tout de suite passerait l'essai.
+    let mut place = vec![0_u8; 1_500];
+    let avant = horloge.saturating_add(inactivite / 2);
+    assert!(!client.on_timeout(avant), "à la moitié, elle doit vivre");
+    assert!(!client.is_closed());
+
+    // Et l'on avance par pas, comme une vraie boucle : c'est ce qui a fait
+    // apparaître le doublement, qu'un unique saut aurait masqué.
+    let mut instant = horloge;
+    let limite = horloge.saturating_add(inactivite.saturating_mul(3));
+    while instant < limite && !client.is_closed() {
+        instant = instant.saturating_add(100_000);
+        client.on_timeout(instant);
+        while let Ok(ecrit) = client.poll_transmit(&mut place, instant) {
+            if ecrit == 0 {
+                break;
+            }
+        }
+    }
+
+    assert!(
+        client.is_closed(),
+        "après trois délais d'inactivité, elle devait être éteinte"
+    );
+    let ecoule = instant.saturating_sub(horloge);
+    assert!(
+        ecoule <= inactivite.saturating_add(1_000_000),
+        "elle s'éteint à {} s pour {} s annoncées",
+        ecoule / 1_000_000,
+        inactivite / 1_000_000
+    );
 }

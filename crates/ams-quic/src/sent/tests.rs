@@ -681,3 +681,44 @@ fn un_numero_ne_se_reemploie_pas() {
         .on_sent(7, 3_000, 800, true, true)
         .expect("ce module ne se souvient plus de lui");
 }
+
+/// **TOUT ACQUITTÉ, PLUS RIEN À SONDER** (§6.2.1 de RFC 9002).
+///
+/// # CE QUE CET ESSAI A ÉTABLI
+///
+/// « The PTO timer MUST NOT be set […] when there are no ack-eliciting packets
+/// in flight. » `dernier_sollicitant` est posé au premier envoi sollicitant et
+/// n'est jamais effacé : la minuterie restait donc armée à jamais, même une fois
+/// tout acquitté.
+///
+/// Le coût n'était pas un réveil de trop. À chaque expiration, l'appelant
+/// montait son compte de sondages et le délai DOUBLAIT — et comme §10.1 borne
+/// l'échéance d'inactivité par `3 × PTO`, elle doublait avec lui. **Une
+/// connexion inactive ne s'éteignait plus jamais.**
+#[test]
+fn tout_acquitte_il_n_y_a_plus_rien_a_sonder() {
+    let mut espace = Sent::new();
+    let rtt = trajet(50_000);
+    espace.on_sent(0, 1_000, 1_200, true, true).expect("place");
+    assert!(
+        espace.pto_deadline(&rtt, DELAI_MAX, 0).is_some(),
+        "tant qu'il est en vol, il y a de quoi sonder"
+    );
+
+    espace.on_ack(&ack(0, 0), false).expect("acquittable");
+    assert_eq!(
+        espace.pto_deadline(&rtt, DELAI_MAX, 0),
+        None,
+        "acquitté, il n'y a plus rien à sonder — et la minuterie se désarme"
+    );
+
+    // **UN PAQUET QUI NE SOLLICITE PAS N'ARME RIEN NON PLUS.** Un datagramme
+    // qui ne porte que des acquittements ne provoque pas de réponse : le
+    // sonder ne dirait rien à personne.
+    espace.on_sent(1, 2_000, 40, false, false).expect("place");
+    assert_eq!(
+        espace.pto_deadline(&rtt, DELAI_MAX, 0),
+        None,
+        "un paquet qui ne sollicite pas ne se sonde pas"
+    );
+}
