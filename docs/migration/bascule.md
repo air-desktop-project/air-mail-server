@@ -683,7 +683,16 @@ deux. La première exécution en a trouvé deux de plus, tous deux dans cette
         sudo ln -sfn "/var/vmail/narro.ch/$compte/Maildir" "/var/vmail-vue/$compte"
     done
     bash verifier.sh --essais                     # le banc d'abord
-    bash verifier.sh /var/vmail-ams /var/vmail-vue
+    #    **AVEC `sudo`, ET CE N'EST PAS UNE PRÉCAUTION DE STYLE.** Le magasin
+    #    appartient à `air-mail` : sans privilèges, `find` ne lit rien et se
+    #    tait. Les deux totaux valent alors zéro, aucun écart n'est possible, et
+    #    cet audit annonçait « OK : aucun écart » APRÈS N'AVOIR OUVERT AUCUN
+    #    FICHIER — le feu vert de la bascule, rendu sans rien examiner.
+    #
+    #    Mesuré le 2026-09-10 sur la machine : sans `sudo`, « 0 / 0 — OK » ;
+    #    avec, « 573 / 613 — NE BASCULEZ PAS ». Le script refuse désormais de
+    #    conclure quand il n'a rien lu, mais la commande juste est ici.
+    sudo bash verifier.sh /var/vmail-ams /var/vmail-vue
 
 **S'il refuse, on ne bascule pas.** Il refuse pour deux raisons, et les deux
 comptent :
@@ -821,16 +830,38 @@ décidera si l'on recommence un autre jour.
     for compte in contact thierry.delhaise vincent.delhaise support kelly.garro; do
         sudo ln -sfn "/var/vmail/narro.ch/$compte/Maildir" "/var/vmail-vue/$compte"
     done
-    bash verifier.sh /var/vmail-ams /var/vmail-vue
+    #    **AVEC `sudo`, ET CE N'EST PAS UNE PRÉCAUTION DE STYLE.** Le magasin
+    #    appartient à `air-mail` : sans privilèges, `find` ne lit rien et se
+    #    tait. Les deux totaux valent alors zéro, aucun écart n'est possible, et
+    #    cet audit annonçait « OK : aucun écart » APRÈS N'AVOIR OUVERT AUCUN
+    #    FICHIER — le feu vert de la bascule, rendu sans rien examiner.
+    #
+    #    Mesuré le 2026-09-10 sur la machine : sans `sudo`, « 0 / 0 — OK » ;
+    #    avec, « 573 / 613 — NE BASCULEZ PAS ». Le script refuse désormais de
+    #    conclure quand il n'a rien lu, mais la commande juste est ici.
+    sudo bash verifier.sh /var/vmail-ams /var/vmail-vue
 
     # 5. L'instantané OVH. C'est ici qu'il vaut le plus cher.
 
     # 6. La configuration DÉFINITIVE : les vrais ports, la vraie racine.
-    sudo -u air-mail air-mail-admin config write /var/lib/air-mail/serveur.conf \
+    #
+    #    **LE NOM DU FICHIER N'EST PAS LIBRE.** L'unité systemd que le paquet
+    #    installe lance `--config /var/lib/air-mail/air-mail.conf`, et rien
+    #    d'autre. Ce document disait `serveur.conf` : on aurait écrit une
+    #    configuration parfaite que le service n'aurait jamais lue, et
+    #    l'étape 8 aurait échoué à 09:40, au milieu des vingt minutes de
+    #    coupure — avec, pour tout indice, un service qui refuse de démarrer.
+    #
+    #    La répétition du §0.4 écrit `essai.conf`, et c'est voulu : elle ne doit
+    #    surtout pas écraser celle-ci.
+    sudo -u air-mail air-mail-admin config write /var/lib/air-mail/air-mail.conf \
         «les mêmes options qu'en 0.4, mais» \
         --listen [::]:25 --listen [::]:587 \
         --listen-smtps [::]:465 --listen-imaps [::]:993 \
         --maildir /var/vmail-ams
+
+    # 6bis. On la RELIT avant de démarrer. `config show` dit aussi ce qui manque.
+    sudo -u air-mail air-mail-admin config show /var/lib/air-mail/air-mail.conf
 
     # 7. On empêche l'ancien de revenir tout seul au prochain redémarrage.
     sudo systemctl disable postfix dovecot

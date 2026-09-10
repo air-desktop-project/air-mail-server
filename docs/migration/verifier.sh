@@ -166,8 +166,25 @@ essais() {
     printf 'x' > "$banc/ancien/alice/cur/1725000013.M1.banc,S=42:2,RS"
     attendu 1 "un nom illisible dans le neuf" "$banc/neuf" "$banc/ancien"
 
+    # ── UN MAGASIN QU'ON NE PEUT PAS LIRE N'EST PAS UN MAGASIN CONFORME ────
+    #
+    # **LE DÉFAUT QUE CE BANC EXISTE DÉSORMAIS AUSSI POUR TENIR.** Deux
+    # répertoires vides, c'est ce que voit un audit lancé sans les privilèges
+    # qu'il faut : zéro contre zéro, aucun écart possible, « OK ». Il a failli
+    # donner le feu vert de la bascule après n'avoir ouvert aucun fichier.
+    rm -rf "$banc/neuf" "$banc/ancien"
+    mkdir -p "$banc/neuf" "$banc/ancien"
+    attendu 1 "deux magasins vides : rien n'a été lu" "$banc/neuf" "$banc/ancien"
+
+    # Et le neuf vide face à un ancien plein reste un écart ordinaire : là, on a
+    # bien LU quelque chose, et ce qu'on a lu est une perte.
+    rm -rf "$banc/neuf" "$banc/ancien"
+    monter "$banc/ancien"
+    mkdir -p "$banc/neuf"
+    attendu 1 "le neuf est vide, l'ancien non" "$banc/neuf" "$banc/ancien"
+
     if [ "$fautes" -eq 0 ]; then
-        echo "OK : le sain passe, et les cinq écarts font tous ÉCHOUER."
+        echo "OK : le sain passe, et les sept écarts font tous ÉCHOUER."
     fi
     return "$fautes"
 }
@@ -316,6 +333,30 @@ printf 'TOTAL nouveau : %d message(s)\n' "$total_neuf"
 [ -n "$ancienne" ] && printf 'TOTAL ancien  : %d message(s)\n' "$total_ancien"
 
 printf 'noms illisibles : %d\n' "$illisibles"
+
+# ── ZÉRO CONTRE ZÉRO N'EST PAS « AUCUN ÉCART » ──────────────────────────────
+#
+# **C'EST « JE N'AI RIEN VU », ET C'EST UN ÉCHEC.**
+#
+# Lancé sans privilèges, `find` ne lit rien sous un magasin qui appartient à
+# `air-mail` — et il se tait, parce que ses plaintes partent au néant. Les deux
+# totaux valaient alors zéro, aucun écart n'était possible, et cet audit
+# annonçait « OK : aucun écart » APRÈS N'AVOIR OUVERT AUCUN FICHIER.
+#
+# Éprouvé le 2026-09-10 sur la vraie machine, à deux jours de la bascule : sans
+# `sudo`, « 0 / 0 — OK » ; avec, « 573 / 613 — NE BASCULEZ PAS ». Le document
+# donnait la commande SANS `sudo`, et cet audit est l'étape qui DÉCIDE.
+#
+# Un feu vert qui n'a rien examiné est pire qu'un feu rouge : il ne coûte pas une
+# répétition, il coûte la bascule.
+if [ "$total_neuf" -eq 0 ] && { [ -z "$ancienne" ] || [ "$total_ancien" -eq 0 ]; }; then
+    echo
+    echo "  Aucun message lu — ni d'un côté ni de l'autre."
+    echo "  Ce n'est pas « les deux concordent » : c'est « rien n'a été ouvert »."
+    echo "  Le magasin appartient à \`air-mail\` : relancez avec \`sudo\`."
+    echo "ÉCHEC : NE BASCULEZ PAS."
+    exit 1
+fi
 
 if [ "$ecart" -ne 0 ] || [ "$illisibles" -ne 0 ]; then
     echo
