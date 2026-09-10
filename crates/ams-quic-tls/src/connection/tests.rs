@@ -3309,3 +3309,184 @@ fn un_original_destination_connection_id_qui_ne_correspond_pas_ferme_la_connexio
         "§7.3 : l'identifiant annoncé ne correspond pas à celui qu'on a envoyé"
     );
 }
+
+// ── LE MAINTIEN, §10.1.2 DE RFC 9000 ───────────────────────────────────────
+
+/// Quand une connexion parle, en `duree`, sans rien recevoir.
+///
+/// **RIEN N'EST DONNÉ AU PAIR**, et c'est le point : on veut savoir ce qu'une
+/// connexion dit toute seule quand personne ne lui répond.
+///
+/// Rend les instants d'émission, parce que **c'est l'ÉCART qui compte** et non
+/// le compte. Un mappage NAT ne se soucie pas du nombre de paquets : il meurt
+/// quand un silence dépasse sa durée de vie, et un seul trou suffit.
+fn quand_elle_parle_seule(
+    connexion: &mut Connection,
+    depart: u64,
+    duree: u64,
+    pas: u64,
+) -> Vec<u64> {
+    let mut place = vec![0_u8; 1_500];
+    let mut instants = Vec::new();
+    let mut horloge = depart;
+    while horloge < depart.saturating_add(duree) {
+        connexion.on_timeout(horloge);
+        while let Ok(ecrit) = connexion.poll_transmit(&mut place, horloge) {
+            if ecrit == 0 {
+                break;
+            }
+            instants.push(horloge);
+        }
+        horloge = horloge.saturating_add(pas);
+    }
+    instants
+}
+
+/// Le plus long silence dans cette suite d'instants, bornes comprises.
+fn plus_long_silence(instants: &[u64], depart: u64, fin: u64) -> u64 {
+    let mut pire = 0_u64;
+    let mut precedent = depart;
+    for instant in instants {
+        pire = pire.max(instant.saturating_sub(precedent));
+        precedent = *instant;
+    }
+    pire.max(fin.saturating_sub(precedent))
+}
+
+#[test]
+fn sans_maintien_une_connexion_inactive_ne_dit_plus_rien() {
+    // **C'EST LA PRÉMISSE DE TOUT LE RESTE.** Si une connexion parlait d'elle-même
+    // sans qu'on le lui demande, l'essai suivant ne prouverait rien.
+    //
+    // Ce que cette connexion émet encore, ce sont les SONDAGES de §6.2 — elle
+    // n'a rien entendu, elle vérifie que le pair est là — et leur délai double à
+    // chaque essai. En trente secondes, cela fait une poignée de datagrammes, et
+    // surtout : **ils s'espacent**, alors qu'un mappage veut une cadence fixe.
+    let atelier = atelier("sans-maintien");
+    let (mut client, _serveur, horloge) = face_a_face(&atelier.0);
+    assert_eq!(client.keepalive(), 0, "aucun maintien par défaut");
+
+    let fin = horloge.saturating_add(30_000_000);
+    let instants = quand_elle_parle_seule(&mut client, horloge, 30_000_000, 100_000);
+    let silence = plus_long_silence(&instants, horloge, fin);
+    // **LE SILENCE FINIT PAR DÉPASSER DIX SECONDES**, et c'est exactement ce qui
+    // tue un mappage : ce qui part encore sont des sondages de §6.2, dont le
+    // délai DOUBLE à chaque essai sans réponse.
+    assert!(
+        silence > 10_000_000,
+        "sans maintien, le silence doit finir par s'allonger : {silence} µs au pire"
+    );
+}
+
+#[test]
+fn avec_un_maintien_elle_parle_a_cadence_fixe() {
+    // §10.1.2 : « An endpoint MAY send a PING frame to keep a connection
+    // alive ». C'est ce qui tient un mappage NAT ouvert, et c'est une décision
+    // UNILATÉRALE — rien ne circule sur le fil pour l'annoncer.
+    let atelier = atelier("maintien");
+    let (mut client, _serveur, horloge) = face_a_face(&atelier.0);
+
+    // Une seconde de cadence, dix secondes d'observation : on en attend dix.
+    client.set_keepalive(1_000_000, horloge);
+    assert_eq!(client.keepalive(), 1_000_000);
+
+    let fin = horloge.saturating_add(10_000_000);
+    let instants = quand_elle_parle_seule(&mut client, horloge, 10_000_000, 100_000);
+    let silence = plus_long_silence(&instants, horloge, fin);
+    // **AUCUN SILENCE PLUS LONG QUE LA CADENCE**, à un pas d'échantillonnage
+    // près. C'est la promesse du maintien, et la seule qui serve : compter les
+    // datagrammes ne dirait rien, puisqu'un sondage qui vient de partir dispense
+    // du maintien suivant — le chemin est déjà rouvert.
+    assert!(
+        silence <= 1_100_000,
+        "à une seconde de cadence, aucun silence ne doit dépasser une seconde : \
+         {silence} µs au pire"
+    );
+    assert!(!instants.is_empty(), "et il doit bien parler");
+}
+
+#[test]
+fn le_maintien_repousse_l_echeance_et_l_arret_la_ramene() {
+    // **C'EST CE QUI REND LE MAINTIEN VISIBLE À LA BOUCLE APPELANTE.** Une
+    // échéance qui ne tiendrait pas compte du maintien ferait dormir l'appelant
+    // par-dessus l'heure de celui-ci : le `PING` ne partirait qu'au réveil
+    // suivant, c'est-à-dire trop tard pour un mappage.
+    let atelier = atelier("echeance");
+    let (mut client, _serveur, horloge) = face_a_face(&atelier.0);
+
+    // **CE QU'ON ÉPROUVE EST UN PLAFOND, ET NON UNE ÉGALITÉ.** L'échéance d'une
+    // connexion est le plus PROCHE de plusieurs délais — perte, sondage,
+    // acquittement, inactivité — et le maintien n'est que l'un d'eux. Comparer
+    // deux échéances avant et après ne prouverait rien : une autre peut être
+    // plus proche, et l'était.
+    //
+    // Ce dont l'appelant a besoin est ceci : **il ne dormira jamais au-delà de
+    // la cadence**. Sans quoi le `PING` partirait au réveil suivant, c'est-à-dire
+    // trop tard.
+    let cadence = 1_000_000_u64;
+    client.set_keepalive(cadence, horloge);
+    let tard = horloge.saturating_add(10_000_000);
+    let avec = client.deadline(tard).expect("une échéance de maintien");
+    assert!(
+        avec <= tard.saturating_add(cadence),
+        "l'appelant dormirait au-delà de la cadence : {avec} contre {}",
+        tard.saturating_add(cadence)
+    );
+
+    // **ET L'ÉCHÉANCE NE FERME PAS.** C'est la distinction que la première
+    // version de ce mécanisme avait ratée : `deadline` sert à deux choses — dire
+    // à l'appelant quand le réveiller, et dire à la machine quand renoncer. Y
+    // avoir plié le maintien fermait la connexion à chaque cadence.
+    assert!(
+        !client.on_timeout(tard),
+        "une échéance de maintien ne doit pas éteindre la connexion"
+    );
+    assert!(!client.is_closed(), "et elle doit être encore là après");
+}
+
+#[test]
+fn un_maintien_qui_arrive_au_pair_fait_repartir_son_inactivite() {
+    // **C'EST TOUT L'OBJET, ET C'EST CE QUE LES AUTRES ESSAIS NE MONTRENT PAS** :
+    // les précédents comptent des datagrammes, celui-ci vérifie qu'ils SERVENT à
+    // quelque chose — que la connexion d'en face, qui serait morte, vit encore.
+    let atelier = atelier("maintien-utile");
+    let (mut client, mut serveur, horloge) = face_a_face(&atelier.0);
+
+    let inactivite = serveur.deadline(horloge).expect("une échéance");
+    // Bien au-delà de ce que le serveur tolère sans rien entendre.
+    let tard = inactivite.saturating_add(5_000_000);
+
+    client.set_keepalive(1_000_000, horloge);
+    let mut place = vec![0_u8; 1_500];
+    let mut instant = horloge;
+    while instant < tard {
+        client.on_timeout(instant);
+        while let Ok(ecrit) = client.poll_transmit(&mut place, instant) {
+            if ecrit == 0 {
+                break;
+            }
+            let mut datagramme = place[..ecrit].to_vec();
+            let _ = serveur.on_datagram(&mut datagramme, instant);
+        }
+        // Le serveur répond ce qu'il a à répondre — des acquittements.
+        while let Ok(ecrit) = serveur.poll_transmit(&mut place, instant) {
+            if ecrit == 0 {
+                break;
+            }
+            let mut datagramme = place[..ecrit].to_vec();
+            let _ = client.on_datagram(&mut datagramme, instant);
+        }
+        assert!(
+            !serveur.on_timeout(instant),
+            "le serveur ne doit pas s'éteindre : il reçoit un maintien"
+        );
+        instant = instant.saturating_add(200_000);
+    }
+
+    assert!(
+        !serveur.is_closed(),
+        "après {} s de maintien, la connexion d'en face doit vivre",
+        tard.saturating_sub(horloge) / 1_000_000
+    );
+    assert!(!client.is_closed(), "et celle d'ici aussi");
+}

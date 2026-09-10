@@ -310,6 +310,23 @@ pub struct Connection {
     sondages: u32,
     /// Faut-il sonder au prochain envoi ?
     sonder: bool,
+    /// Faut-il MAINTENIR la connexion au prochain envoi ?
+    ///
+    /// # DEUX MOTIFS D'ÉMETTRE UN `PING`, ET ILS NE SE CONFONDENT PAS
+    ///
+    /// Le sondage de §6.2.4 de RFC 9002 dit « je n'ai rien entendu, je vérifie
+    /// que tu es là » : il DÉPASSE la fenêtre de congestion, parce qu'il sert à
+    /// la débloquer. Le maintien de §10.1.2 de RFC 9000 dit « il n'y a rien à se
+    /// dire, mais je tiens le chemin ouvert » : il n'a aucune raison de dépasser
+    /// quoi que ce soit, et une connexion inactive a de toute façon toute sa
+    /// fenêtre.
+    ///
+    /// Les fondre aurait fait payer au maintien le prix du sondage — un délai de
+    /// retransmission doublé à chaque tour (`sondages`), donc une cadence qui
+    /// s'allonge alors qu'elle doit rester fixe. Ils partagent en revanche le
+    /// droit de passer devant la fenêtre de congestion, pour la même raison :
+    /// sans lui, un pair muet interdirait le paquet qui le réveillerait.
+    maintenir: bool,
     /// Faut-il dire au client que la poignée de main est confirmée (§19.20) ?
     a_confirmer: bool,
     /// A-t-on déjà pris acte de la fin de la poignée de main ?
@@ -508,6 +525,7 @@ impl Connection {
             prochain: [0; ESPACES],
             sondages: 0,
             sonder: false,
+            maintenir: false,
             a_confirmer: false,
             confirmee: false,
             fermeture: None,
@@ -633,6 +651,7 @@ impl Connection {
             prochain: [0; ESPACES],
             sondages: 0,
             sonder: false,
+            maintenir: false,
             a_confirmer: false,
             confirmee: false,
             fermeture: None,
@@ -822,6 +841,12 @@ impl Connection {
         // compose : c'est ce qui met le `MAX_STREAMS` dans CE paquet-ci plutôt
         // que dans le suivant.
         self.recolter_les_flux();
+        // **LE MAINTIEN SE DÉCIDE AUSSI ICI, ET PAS SEULEMENT DANS
+        // `on_timeout`.** Une boucle qui n'appellerait jamais le second — parce
+        // qu'elle se réveille sur autre chose que nos échéances — ne
+        // maintiendrait rien, et le défaut serait invisible : la connexion
+        // marcherait, jusqu'au jour où elle reste inactive.
+        self.maintenir |= self.etat.doit_maintenir(maintenant);
         // **LA POIGNÉE N'AVANCE PLUS ICI**, et c'est délibéré : l'état de TLS ne
         // change qu'à l'arrivée de données, donc dans `on_datagram`. L'avancer
         // aussi à l'émission ajoutait une branche d'erreur que RIEN ne pouvait
@@ -830,7 +855,16 @@ impl Connection {
         // §8.1 : trois fois ce qu'on a reçu, tant que l'adresse n'est pas
         // validée. §7 de RFC 9002 : et jamais plus que la fenêtre de congestion
         // — sauf pour un sondage, que §6.2.4 autorise à la dépasser.
-        let fenetre = match self.sonder {
+        // **LE SONDAGE ET LE MAINTIEN PASSENT TOUS DEUX DEVANT LA FENÊTRE**, et
+        // il le faut : un pair qui ne répond plus laisse les octets en vol
+        // s'accumuler, la fenêtre se ferme, et l'on n'aurait plus le droit
+        // d'émettre le paquet même qui servirait à la rouvrir. §7 de RFC 9002
+        // l'autorise pour le sondage ; un maintien a exactement le même besoin,
+        // et fait un octet.
+        //
+        // **CE N'EST PAS UNE RAISON DE LES CONFONDRE POUR AUTANT** : voir
+        // `maintenir`, dont la cadence est fixe là où celle du sondage double.
+        let fenetre = match self.sonder || self.maintenir {
             true => MAX_DATAGRAM_SIZE,
             false => self.congestion.available(),
         };
@@ -896,6 +930,13 @@ impl Connection {
             self.congestion.on_sent(octets);
         }
         self.sonder = false;
+        // **LE MARQUEUR NE BOUGE QUE SI QUELQUE CHOSE A SOLLICITÉ.** Un
+        // datagramme qui ne porterait que des acquittements ne maintient rien :
+        // le pair ne répondra pas, et le chemin ne se rouvre pas.
+        if sollicite {
+            self.etat.on_keepalive_sent(maintenant);
+        }
+        self.maintenir = false;
         Ok(ecrit)
     }
 
@@ -914,6 +955,25 @@ impl Connection {
             }
         }
         quand.map(|quand| quand.max(maintenant))
+    }
+
+    /// Demande — ou cesse de demander — que cette connexion soit maintenue.
+    ///
+    /// `us` à zéro l'arrête. §10.1.2 de RFC 9000 : c'est une décision
+    /// UNILATÉRALE, prise par celui qui a une raison de tenir le chemin ouvert —
+    /// typiquement celui qui est derrière un NAT ou un pare-feu à état. Rien ne
+    /// circule sur le fil pour l'annoncer.
+    ///
+    /// **LA CADENCE DOIT ÊTRE PLUS COURTE QUE LE DÉLAI D'INACTIVITÉ**, faute de
+    /// quoi la connexion meurt avant d'être maintenue.
+    pub const fn set_keepalive(&mut self, us: u64, maintenant: u64) {
+        self.etat.set_keepalive(us, maintenant);
+    }
+
+    /// La cadence de maintien, en microsecondes ; zéro si aucune.
+    #[must_use]
+    pub const fn keepalive(&self) -> u64 {
+        self.etat.keepalive()
     }
 
     /// Le délai est échu. Rend `true` quand la connexion vient de s'éteindre.
@@ -937,6 +997,13 @@ impl Connection {
         if echu {
             self.sondages = self.sondages.saturating_add(1);
             self.sonder = true;
+        }
+        // **LE MAINTIEN N'INCRÉMENTE RIEN.** Sa cadence est fixe, et c'est ce
+        // qui le distingue du sondage : celui-ci double son délai à chaque essai
+        // sans réponse, celui-là doit revenir toutes les N secondes quoi qu'il
+        // arrive, parce que c'est N qui tient le mappage ouvert.
+        if self.etat.doit_maintenir(maintenant) {
+            self.maintenir = true;
         }
         false
     }
@@ -1799,9 +1866,14 @@ impl Connection {
             self.a_confirmer = false;
         }
 
-        // §6.2.4 de RFC 9002 : un sondage doit SOLLICITER, sans quoi il ne
-        // provoque pas l'acquittement qui le rendrait utile.
-        if self.sonder && !sollicite && pose < borne {
+        // §6.2.4 de RFC 9002 pour le sondage, §10.1.2 de RFC 9000 pour le
+        // maintien : l'un et l'autre doivent SOLLICITER, sans quoi ils ne
+        // provoquent pas l'acquittement qui les rend utiles.
+        //
+        // **UNE SEULE TRAME POUR LES DEUX MOTIFS** : si quelque chose sollicite
+        // déjà, le maintien est fait — il n'y a pas de `PING` à ajouter pour
+        // tenir un chemin que le trafic tient déjà.
+        if (self.sonder || self.maintenir) && !sollicite && pose < borne {
             let place = trames.get_mut(pose..borne).unwrap_or_default();
             pose = pose.saturating_add(
                 Frame::Ping

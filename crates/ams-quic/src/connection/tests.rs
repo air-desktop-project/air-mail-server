@@ -334,3 +334,95 @@ fn l_emission_ne_relance_le_delai_qu_une_fois() {
     connexion.on_packet_sent(Space::Application, 100, false, 20_000);
     assert_eq!(connexion.deadline(PTO), Some(10_000 + delai));
 }
+
+// ── LE MAINTIEN, §10.1.2 DE RFC 9000 ───────────────────────────────────────
+
+#[test]
+fn sans_delai_d_inactivite_le_maintien_est_la_seule_echeance() {
+    // **UN DÉLAI D'INACTIVITÉ NUL VEUT DIRE « JAMAIS »**, et une connexion qui
+    // ne s'éteint jamais n'a pas d'échéance — jusqu'à ce qu'on lui demande de se
+    // maintenir. C'est le cas d'un pair qui tient un chemin ouvert sans vouloir
+    // que le silence le ferme.
+    let mut connexion = Connection::new(Role::Client, 0, 0, 1_000);
+    assert_eq!(connexion.deadline(100), None, "rien ne l'échoit");
+
+    connexion.set_keepalive(5_000, 1_000);
+    assert_eq!(
+        connexion.deadline(100),
+        Some(6_000),
+        "le maintien devient la seule échéance"
+    );
+}
+
+#[test]
+fn des_deux_echeances_c_est_la_plus_proche_qu_on_rend() {
+    // **ET C'EST TOUJOURS LE MAINTIEN QUAND IL EST BIEN RÉGLÉ.** Une cadence
+    // plus longue que l'inactivité ne maintiendrait rien — la connexion serait
+    // morte avant —, et ce type ne l'interdit pas : il ne connaît pas les
+    // raisons de son appelant. Ce qu'il garantit est de rendre la plus proche,
+    // pour que l'appelant ne dorme jamais par-dessus l'une des deux.
+    let mut connexion = Connection::new(Role::Client, 30_000_000, 30_000_000, 1_000);
+    let inactivite = connexion.deadline(PTO).expect("une échéance d'inactivité");
+
+    connexion.set_keepalive(5_000, 1_000);
+    assert_eq!(
+        connexion.deadline(PTO),
+        Some(6_000),
+        "le maintien est plus proche : c'est lui qu'on rend"
+    );
+
+    // Et une cadence absurde, plus lointaine que l'inactivité, rend l'autre.
+    connexion.set_keepalive(60_000_000, 1_000);
+    assert_eq!(
+        connexion.deadline(PTO),
+        Some(inactivite),
+        "l'inactivité est plus proche : c'est elle qu'on rend"
+    );
+}
+
+#[test]
+fn une_connexion_qui_s_eteint_ne_se_maintient_plus() {
+    // **ON NE TIENT PAS OUVERT CE QU'ON EST EN TRAIN DE FERMER.** §10.2 : une
+    // connexion en fermeture n'a plus qu'un `CONNECTION_CLOSE` à répéter, et un
+    // `PING` de maintien y serait du bruit — sur un chemin dont on n'a plus
+    // besoin.
+    let mut connexion = Connection::new(Role::Client, 30_000_000, 30_000_000, 1_000);
+    connexion.set_keepalive(5_000, 1_000);
+    assert!(connexion.doit_maintenir(10_000), "avant, il se maintient");
+
+    connexion.close(PTO, 20_000);
+    assert_eq!(connexion.keepalive_deadline(), None);
+    assert!(
+        !connexion.doit_maintenir(1_000_000),
+        "une connexion qui s'éteint ne se maintient plus"
+    );
+}
+
+#[test]
+fn le_maintien_s_arrete_quand_on_le_demande() {
+    let mut connexion = Connection::new(Role::Client, 30_000_000, 30_000_000, 1_000);
+    connexion.set_keepalive(5_000, 1_000);
+    assert_eq!(connexion.keepalive(), 5_000);
+    assert!(connexion.doit_maintenir(10_000));
+
+    connexion.set_keepalive(0, 10_000);
+    assert_eq!(connexion.keepalive(), 0);
+    assert_eq!(connexion.keepalive_deadline(), None);
+    assert!(!connexion.doit_maintenir(1_000_000));
+}
+
+#[test]
+fn un_maintien_emis_repousse_le_suivant_d_une_cadence() {
+    // **UN MARQUEUR À PART DE `dernier_signe`**, et il le faut : §10.1 ne fait
+    // repartir le délai d'inactivité qu'au PREMIER paquet sollicitant depuis la
+    // dernière réception. Un maintien non répondu ne le toucherait donc pas, et
+    // l'on redemanderait un maintien à chaque microseconde.
+    let mut connexion = Connection::new(Role::Client, 30_000_000, 30_000_000, 1_000);
+    connexion.set_keepalive(5_000, 1_000);
+    assert!(connexion.doit_maintenir(6_000));
+
+    connexion.on_keepalive_sent(6_000);
+    assert!(!connexion.doit_maintenir(6_000), "il vient de partir");
+    assert!(!connexion.doit_maintenir(10_000));
+    assert!(connexion.doit_maintenir(11_000), "une cadence plus tard");
+}

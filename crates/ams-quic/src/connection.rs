@@ -99,6 +99,30 @@ pub struct Connection {
     etat: State,
     /// Le délai d'inactivité négocié, en microsecondes ; zéro si aucun.
     inactivite: u64,
+    /// La cadence à laquelle on maintient la connexion en vie, en
+    /// microsecondes ; zéro si l'on ne la maintient pas.
+    ///
+    /// # POURQUOI ELLE N'EST PAS NÉGOCIÉE, ET NE PEUT PAS L'ÊTRE
+    ///
+    /// §10.1.2 : « An endpoint MAY send a PING frame to keep a connection
+    /// alive ». C'est une décision UNILATÉRALE, prise par celui qui a une raison
+    /// de tenir le chemin ouvert — typiquement celui qui est derrière un NAT.
+    /// Rien ne circule sur le fil pour l'annoncer, et le pair n'a rien à en
+    /// savoir : il voit des paquets arriver, ce qui est tout l'objet.
+    ///
+    /// **ELLE DOIT ÊTRE PLUS COURTE QUE `inactivite`**, faute de quoi la
+    /// connexion meurt avant le maintien. Ce type ne l'impose pas : il ne
+    /// connaît pas les raisons de son appelant, et un délai d'inactivité nul —
+    /// donc infini — rend la comparaison vide de sens.
+    keepalive: u64,
+    /// Quand on a maintenu la connexion pour la dernière fois.
+    ///
+    /// **UN MARQUEUR À PART DE `dernier_signe`, ET IL LE FAUT.** §10.1 ne fait
+    /// repartir le délai d'inactivité qu'au PREMIER paquet sollicitant depuis la
+    /// dernière réception : un maintien qui ne serait pas répondu ne le
+    /// toucherait donc pas, et l'on redemanderait un maintien à chaque tour de
+    /// boucle. C'est un `PING` par microseconde jusqu'à l'expiration.
+    dernier_maintien: u64,
     /// L'instant de la dernière activité qui compte.
     dernier_signe: u64,
     /// Un paquet suscitant un acquittement est-il parti depuis la dernière
@@ -155,6 +179,12 @@ impl Connection {
             role,
             etat: State::Handshaking,
             inactivite,
+            // **AUCUN MAINTIEN PAR DÉFAUT.** Une connexion qui se maintiendrait
+            // sans qu'on l'ait demandé tiendrait ouvert un chemin que personne
+            // n'emploie — et ferait payer à un serveur un paquet par client et
+            // par cadence, pour rien.
+            keepalive: 0,
+            dernier_maintien: maintenant,
             dernier_signe: maintenant,
             elicite_depuis_reception: false,
             recu: 0,
@@ -186,6 +216,54 @@ impl Connection {
     #[must_use]
     pub const fn idle_timeout(&self) -> u64 {
         self.inactivite
+    }
+
+    /// La cadence de maintien, en microsecondes ; zéro si aucune.
+    #[must_use]
+    pub const fn keepalive(&self) -> u64 {
+        self.keepalive
+    }
+
+    /// Demande — ou cesse de demander — que cette connexion soit maintenue.
+    ///
+    /// `us` à zéro l'arrête. Voir le champ [`Connection::keepalive`] pour ce que
+    /// ce mécanisme est, et pourquoi il n'est pas négocié.
+    pub const fn set_keepalive(&mut self, us: u64, maintenant: u64) {
+        self.keepalive = us;
+        self.dernier_maintien = maintenant;
+    }
+
+    /// Quand il faudra maintenir, si l'on maintient.
+    ///
+    /// **LE PLUS TARD DES DEUX MARQUEURS**, et non le seul `dernier_signe` : un
+    /// maintien non répondu ne fait pas repartir le délai d'inactivité (§10.1),
+    /// et s'y fier seul ferait redemander un maintien à chaque tour.
+    #[must_use]
+    pub fn keepalive_deadline(&self) -> Option<u64> {
+        if self.keepalive == 0 || self.etat.s_eteint() || matches!(self.etat, State::Closed) {
+            return None;
+        }
+        Some(
+            self.dernier_signe
+                .max(self.dernier_maintien)
+                .saturating_add(self.keepalive),
+        )
+    }
+
+    /// L'heure du maintien a-t-elle sonné ?
+    #[must_use]
+    pub fn doit_maintenir(&self, maintenant: u64) -> bool {
+        self.keepalive_deadline()
+            .is_some_and(|quand| maintenant >= quand)
+    }
+
+    /// Un maintien vient de partir.
+    ///
+    /// **À N'APPELER QUE SI LE PAQUET SOLLICITE UN ACQUITTEMENT.** Un `PING` qui
+    /// ne solliciterait rien ne provoquerait pas la réponse qui rouvre le
+    /// chemin, et ne maintiendrait donc rien.
+    pub const fn on_keepalive_sent(&mut self, maintenant: u64) {
+        self.dernier_maintien = maintenant;
     }
 
     /// L'adresse du pair est-elle validée (§8.1) ?
@@ -360,6 +438,30 @@ impl Connection {
     /// de fermeture en cours.
     #[must_use]
     pub fn deadline(&self, pto: u64) -> Option<u64> {
+        // **LE PLUS PROCHE DES DEUX**, et le maintien vient toujours avant
+        // l'inactivité quand il est bien réglé : c'est tout son objet. Ne rendre
+        // que l'inactivité ferait dormir l'appelant par-dessus l'heure du
+        // maintien, et celui-ci n'aurait lieu qu'au réveil suivant — trop tard.
+        match (self.echeance_d_inactivite(pto), self.keepalive_deadline()) {
+            (Some(un), Some(deux)) => Some(un.min(deux)),
+            (Some(seul), None) | (None, Some(seul)) => Some(seul),
+            (None, None) => None,
+        }
+    }
+
+    /// L'échéance qui FERME, et elle seule.
+    ///
+    /// # POURQUOI ELLE EST SÉPARÉE DE CELLE QU'ON REND
+    ///
+    /// [`Connection::deadline`] sert à deux choses qu'on peut croire une seule :
+    /// dire à l'appelant QUAND LE RÉVEILLER, et dire à la machine QUAND
+    /// RENONCER. Tant qu'il n'y avait que l'inactivité, les deux coïncidaient.
+    ///
+    /// **Le maintien les sépare** : son échéance doit réveiller l'appelant, et
+    /// surtout pas éteindre la connexion — c'est l'inverse de ce qu'il sert à
+    /// faire. La première version de ce mécanisme le pliait dans `deadline`, et
+    /// la connexion se fermait à chaque cadence.
+    fn echeance_d_inactivite(&self, pto: u64) -> Option<u64> {
         match self.etat {
             State::Closed => None,
             State::Closing | State::Draining => self.echeance,
@@ -385,7 +487,9 @@ impl Connection {
     /// Pas de `CONNECTION_CLOSE` : si le pair est parti, personne ne le lira, et
     /// s'il est encore là, son propre délai vient d'expirer aussi.
     pub fn on_timeout(&mut self, pto: u64, maintenant: u64) -> bool {
-        let Some(echeance) = self.deadline(pto) else {
+        // **CELLE QUI FERME, ET NON CELLE QU'ON REND.** Voir
+        // `echeance_d_inactivite` : le maintien réveille, il n'éteint pas.
+        let Some(echeance) = self.echeance_d_inactivite(pto) else {
             return false;
         };
         if maintenant < echeance {
