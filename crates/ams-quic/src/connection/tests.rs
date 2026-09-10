@@ -426,3 +426,64 @@ fn un_maintien_emis_repousse_le_suivant_d_une_cadence() {
     assert!(!connexion.doit_maintenir(10_000));
     assert!(connexion.doit_maintenir(11_000), "une cadence plus tard");
 }
+
+// ── §10.1 : LE MINIMUM DES DEUX INACTIVITÉS ────────────────────────────────
+
+#[test]
+fn le_delai_effectif_devient_le_plus_court_des_deux() {
+    // **LE PAIR N'EST CONNU QU'APRÈS LA POIGNÉE DE MAIN**, et c'est toute la
+    // raison d'être de cette porte : à la construction, on ne connaît que la
+    // sienne, et `new` ne peut donc pas faire le minimum tout seul.
+    let mut connexion = Connection::new(Role::Client, 60_000_000, 0, 0);
+    assert_eq!(
+        connexion.idle_timeout(),
+        60_000_000,
+        "seule la nôtre, d'abord"
+    );
+
+    connexion.set_peer_idle_timeout(30_000_000);
+    assert_eq!(
+        connexion.idle_timeout(),
+        30_000_000,
+        "le pair en veut moins : c'est le sien qui vaut"
+    );
+
+    // Et l'inverse : un pair plus patient ne rallonge pas le nôtre.
+    let mut connexion = Connection::new(Role::Server, 30_000_000, 0, 0);
+    connexion.set_peer_idle_timeout(60_000_000);
+    assert_eq!(
+        connexion.idle_timeout(),
+        30_000_000,
+        "le pair en veut plus : c'est le nôtre qui vaut"
+    );
+}
+
+#[test]
+fn un_zero_veut_dire_aucun_et_non_zero_seconde() {
+    // §10.1 : « or the sole advertised value, if only one endpoint advertises a
+    // non-zero value ». Prendre le minimum tout court ferait qu'un pair qui
+    // n'annonce RIEN — donc qui accepte de rester indéfiniment — annulerait le
+    // délai de celui qui en voulait un.
+    let mut connexion = Connection::new(Role::Client, 60_000_000, 0, 0);
+    connexion.set_peer_idle_timeout(0);
+    assert_eq!(
+        connexion.idle_timeout(),
+        60_000_000,
+        "le pair n'en veut aucun"
+    );
+
+    let mut connexion = Connection::new(Role::Client, 0, 0, 0);
+    assert_eq!(connexion.idle_timeout(), 0);
+    connexion.set_peer_idle_timeout(30_000_000);
+    assert_eq!(
+        connexion.idle_timeout(),
+        30_000_000,
+        "nous n'en voulions aucun : celui du pair s'applique"
+    );
+
+    // Aucun des deux : rien ne s'échoit, et `deadline` le dit.
+    let mut connexion = Connection::new(Role::Client, 0, 0, 1_000);
+    connexion.set_peer_idle_timeout(0);
+    assert_eq!(connexion.idle_timeout(), 0);
+    assert_eq!(connexion.deadline(100), None);
+}

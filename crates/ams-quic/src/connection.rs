@@ -99,6 +99,18 @@ pub struct Connection {
     etat: State,
     /// Le délai d'inactivité négocié, en microsecondes ; zéro si aucun.
     inactivite: u64,
+    /// Le délai qu'on a ANNONCÉ, en microsecondes ; zéro si aucun.
+    ///
+    /// # POURQUOI IL FAUT LE GARDER, ALORS QU'`inactivite` EN DÉRIVE
+    ///
+    /// §10.1 veut le MINIMUM des deux valeurs annoncées — mais celle du pair
+    /// n'arrive qu'avec ses paramètres de transport, c'est-à-dire APRÈS la
+    /// poignée de main. À la construction, on ne connaît que la nôtre.
+    ///
+    /// Sans ce champ, il n'y aurait rien à comparer le jour où l'on apprend la
+    /// sienne : `inactivite` vaudrait déjà notre valeur, et le minimum se
+    /// calculerait contre elle-même.
+    annoncee: u64,
     /// La cadence à laquelle on maintient la connexion en vie, en
     /// microsecondes ; zéro si l'on ne la maintient pas.
     ///
@@ -179,6 +191,7 @@ impl Connection {
             role,
             etat: State::Handshaking,
             inactivite,
+            annoncee: annonce,
             // **AUCUN MAINTIEN PAR DÉFAUT.** Une connexion qui se maintiendrait
             // sans qu'on l'ait demandé tiendrait ouvert un chemin que personne
             // n'emploie — et ferait payer à un serveur un paquet par client et
@@ -222,6 +235,32 @@ impl Connection {
     #[must_use]
     pub const fn keepalive(&self) -> u64 {
         self.keepalive
+    }
+
+    /// Le pair a annoncé SON délai d'inactivité : on prend le plus court.
+    ///
+    /// # §10.1 VEUT LE MINIMUM DES DEUX, ET IL N'ÉTAIT PRIS NULLE PART
+    ///
+    /// « the idle timeout is the minimum of the two advertised values (or the
+    /// sole advertised value, if only one endpoint advertises a non-zero
+    /// value) ». [`Connection::new`] sait déjà le calculer — mais ses appelants
+    /// lui passaient zéro pour le pair, faute de le connaître à cet instant, et
+    /// personne ne revenait le lui dire.
+    ///
+    /// Chaque bout tournait donc sur SA propre horloge. Un annuaire qui ferme à
+    /// trente secondes face à un daemon qui en tient soixante, ce sont trente
+    /// secondes pendant lesquelles le daemon croit être annoncé et ne l'est
+    /// plus — sans rien apprendre, puisque §10.1 fait taire l'extinction.
+    ///
+    /// **À N'APPELER QUE SUR DES PARAMÈTRES AUTHENTIFIÉS** (§7.4) : avant la fin
+    /// de la poignée de main, un tiers pourrait proposer un délai d'une
+    /// microseconde et faire tomber la connexion.
+    pub const fn set_peer_idle_timeout(&mut self, recu: u64) {
+        self.inactivite = match (self.annoncee, recu) {
+            (0, autre) | (autre, 0) => autre,
+            (un, deux) if un < deux => un,
+            (_, deux) => deux,
+        };
     }
 
     /// Demande — ou cesse de demander — que cette connexion soit maintenue.

@@ -3564,3 +3564,67 @@ fn une_connexion_inactive_s_eteint_a_l_heure_dite() {
         inactivite / 1_000_000
     );
 }
+
+/// **APRÈS LA POIGNÉE DE MAIN, LES DEUX BOUTS COMPTENT LE MÊME DÉLAI** (§10.1).
+///
+/// # CE QUE CET ESSAI A ÉTABLI
+///
+/// Ils ne le comptaient pas. `max_idle_timeout` était ANNONCÉ et jamais LU chez
+/// le pair : chaque bout appliquait le sien. Un serveur qui ferme à trente
+/// secondes face à un client qui en tient soixante, ce sont trente secondes
+/// pendant lesquelles le client croit tenir une connexion que l'autre a déjà
+/// oubliée — et §10.1 fait taire l'extinction, donc il ne l'apprend pas.
+#[test]
+fn les_deux_bouts_s_accordent_sur_le_plus_court_des_delais() {
+    let atelier = atelier("minimum");
+    let (autorite, cert, cle) = materiel(&atelier.0).expect(SANS_OPENSSL);
+    let mut horloge = 1_000_000_u64;
+
+    // **DEUX VALEURS DIFFÉRENTES, ET C'EST LA PRÉMISSE** : si les deux bouts
+    // annonçaient la même, l'essai passerait sans rien éprouver.
+    let long = 60_000_000_u64;
+    let court = 30_000_000_u64;
+
+    let mut client = Connection::connect(
+        config_client(&autorite, ams_tls::alpn_h3()),
+        rustls::pki_types::ServerName::try_from("localhost").expect("un nom"),
+        identifiant(&CLIENT),
+        identifiant(&ORIGINE),
+        long,
+        horloge,
+    )
+    .expect("le client se monte");
+
+    let mut place = vec![0_u8; 1_500];
+    let ecrit = client
+        .poll_transmit(&mut place, horloge)
+        .expect("le client parle le premier");
+    let premier = place[..ecrit].to_vec();
+    let arrivee = ams_quic::Incoming::read(&premier, 0).expect("un premier paquet lisible");
+    let mut serveur = Connection::accept(
+        config_serveur(&cert, &cle),
+        &arrivee,
+        identifiant(&LOCAL),
+        arrivee.source(),
+        court,
+        horloge,
+    )
+    .expect("le serveur accepte");
+    serveur
+        .on_datagram(&mut premier.clone(), horloge)
+        .expect("le serveur lit le ClientHello");
+
+    assert_eq!(client.idle_timeout(), long, "avant, chacun le sien");
+    conduire_les_deux(&mut client, &mut serveur, &mut horloge);
+
+    assert_eq!(
+        client.idle_timeout(),
+        court,
+        "le client doit adopter le délai du serveur, plus court que le sien"
+    );
+    assert_eq!(
+        serveur.idle_timeout(),
+        court,
+        "et le serveur garde le sien, plus court que celui du client"
+    );
+}

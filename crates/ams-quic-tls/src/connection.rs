@@ -976,6 +976,15 @@ impl Connection {
         self.etat.keepalive()
     }
 
+    /// Le délai d'inactivité EFFECTIF, en microsecondes ; zéro si aucun.
+    ///
+    /// **C'est le minimum des deux annoncés** (§10.1), et il ne vaut donc le
+    /// nôtre que tant que la poignée de main n'a pas rendu celui du pair.
+    #[must_use]
+    pub const fn idle_timeout(&self) -> u64 {
+        self.etat.idle_timeout()
+    }
+
     /// Le délai est échu. Rend `true` quand la connexion vient de s'éteindre.
     pub fn on_timeout(&mut self, maintenant: u64) -> bool {
         let pto = self.rtt.pto(ACQUITTEMENT_MAX_US, self.sondages);
@@ -1690,6 +1699,21 @@ impl Connection {
             // **ET C'EST MAINTENANT SEULEMENT** qu'on croit son exposant : avant,
             // rien ne l'authentifiait.
             self.exposant = siens.ack_delay_exponent;
+            // ── §10.1 : LE DÉLAI D'INACTIVITÉ EST LE MINIMUM DES DEUX ───────
+            //
+            // « the idle timeout is the minimum of the two advertised values ».
+            // Il ne l'était pas : chaque bout appliquait le sien, faute que
+            // celui du pair remonte jusqu'à la machine à états. Un serveur qui
+            // ferme à trente secondes face à un client qui en tient soixante,
+            // ce sont trente secondes pendant lesquelles le client croit tenir
+            // une connexion que l'autre a déjà oubliée — et §10.1 fait taire
+            // l'extinction, donc il ne l'apprend pas.
+            //
+            // **ICI, ET PAS PLUS TÔT** : §7.4 veut des paramètres authentifiés.
+            // Avant la fin de la poignée de main, un tiers pourrait proposer une
+            // microseconde et faire tomber la connexion.
+            self.etat
+                .set_peer_idle_timeout(siens.max_idle_timeout_ms.saturating_mul(1_000));
             // **C'EST LE PREMIER INSTANT OÙ L'ON A LE DROIT DE BÂTIR LES FLUX** :
             // avant, ses limites n'étaient pas authentifiées.
             // §2.1 : la numérotation des flux dépend de qui les ouvre. Passer
