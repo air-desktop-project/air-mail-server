@@ -286,13 +286,15 @@ titre "ce qui reste, et que ce script ne décidera pas pour vous"
 
 cat <<SUITE
 
-  1. La configuration. Remplacez le domaine et les adresses :
+  1. La configuration. Remplacez le domaine et les adresses — et gardez
+     \`[::]\`, qui écoute dans les deux familles : \`0.0.0.0\` servirait
+     l'IPv4 seule derrière une table qui redirige les deux.
 
      ${prefixe}/air-mail-admin config write ${etat}/air-mail.conf \\
          --domain mail.example.com --hosted example.com \\
          --maildir ${etat}/maildir --accounts ${etat}/comptes.bin \\
-         --listen 0.0.0.0:2525 --listen-smtps 0.0.0.0:4465 \\
-         --listen-imaps 0.0.0.0:9993 \\
+         --listen [::]:2525 --listen-smtps [::]:4465 \\
+         --listen-imaps [::]:9993 \\
          --tls-cert /etc/letsencrypt/live/example.com/fullchain.pem \\
          --tls-key  /etc/letsencrypt/live/example.com/privkey.pem
 

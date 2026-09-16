@@ -293,11 +293,21 @@ avec la configuration qui lui répond :
 
 ```
 air-mail-admin config write /var/lib/air-mail/air-mail.conf \
-    --listen 0.0.0.0:2525 --listen-smtps 0.0.0.0:4465 \
-    --listen-imap 0.0.0.0:1143 --listen-imaps 0.0.0.0:9993 \
-    --listen-pop3 0.0.0.0:1110 --listen-pop3s 0.0.0.0:9995 \
+    --listen [::]:2525 --listen-smtps [::]:4465 \
+    --listen-imap [::]:1143 --listen-imaps [::]:9993 \
+    --listen-pop3 [::]:1110 --listen-pop3s [::]:9995 \
     --tls-cert … --tls-key … …
 ```
+
+**`[::]`, ET NON `0.0.0.0`.** Le second est de l'IPv4 seule ; le premier couvre
+les deux familles dès que `net.ipv6.bindv6only` vaut 0, ce qui est le défaut de
+Linux. La table `inet mail` ci-dessus redirige déjà dans les deux familles — une
+écoute en `0.0.0.0` derrière elle sert donc l'IPv4 et REFUSE l'IPv6, et rien ne
+le dit : un émetteur qui résout la AAAA d'abord se rabat après délai, quand il
+se rabat. Cette page a donné `0.0.0.0` en exemple, l'exemple a été suivi sur
+`mail.air-desktop.org`, et le port 25 y a refusé l'IPv6 pendant quatre jours
+(mesuré et corrigé le 2026-09-16). `ss -ltn` doit montrer `*:2525`, pas
+`0.0.0.0:2525`.
 
 **Cette table a été éprouvée**, dans deux espaces de noms réseau reliés par un
 `veth` — l'un portant le serveur et la table, l'autre jouant le client. Ce qui

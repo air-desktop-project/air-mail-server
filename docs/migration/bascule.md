@@ -265,6 +265,46 @@ Une sauvegarde qu'on n'a pas ouverte n'est pas une sauvegarde. Le chemin
 Le paquet **n'active ni ne démarre le service** — c'est délibéré, et
 `check-paquet.sh` l'éprouve. Postfix et Dovecot continuent de tourner, intacts.
 
+### 0.3bis Le pare-feu du jour J, ÉCRIT à froid et PAS appliqué
+
+Le serveur ne liera jamais un port sous 1024 (C10, unité sans capacité,
+`ip_unprivileged_port_start = 1024`) : le jour J, ce sont les ports hauts qui
+écoutent, et le pare-feu qui y ramène le 25, le 587, le 465 et le 993 — RIEN
+D'AUTRE : le 143, le 110 et le 995 n'étaient pas servis par Dovecot, et un
+remplaçant n'ouvre pas ce que le remplacé fermait.
+
+Sur cette machine, `ufw` est actif et `nftables.service` désactivé. La table
+`inet mail` de `installation.md` §6 y serait perdue au premier redémarrage, et
+activer `nftables.service` pour la garder effacerait ufw et fail2ban (son
+`flush ruleset`). La redirection s'écrit donc dans les fichiers d'ufw, qui les
+rejoue à chaque démarrage et à chaque `ufw reload`.
+
+**ON L'ÉCRIT MAINTENANT ET ON NE L'APPLIQUE PAS** : dès que ces blocs sont
+chargés, le 25 est ramené sur le 2525 — et en phase 0 c'est Postfix qui sert le
+25. Un `ufw reload` à ce stade coupe le courrier. Les blocs sont appliqués à
+l'étape 6ter de la phase 1, et retirés à l'étape 2bis de la phase 2.
+
+Dans `/etc/ufw/before.rules`, AVANT la ligne `*filter` :
+
+    # air-mail-server — ramène les ports d'usage sur les ports hauts (bascule)
+    *nat
+    :PREROUTING ACCEPT [0:0]
+    -A PREROUTING -p tcp --dport 25  -j REDIRECT --to-ports 2525
+    -A PREROUTING -p tcp --dport 587 -j REDIRECT --to-ports 2525
+    -A PREROUTING -p tcp --dport 465 -j REDIRECT --to-ports 4465
+    -A PREROUTING -p tcp --dport 993 -j REDIRECT --to-ports 9993
+    COMMIT
+
+Et LE MÊME BLOC dans `/etc/ufw/before6.rules`, avant SON `*filter` : les deux
+fichiers sont chargés par deux commandes distinctes (`iptables-restore` et
+`ip6tables-restore`), et n'en poser qu'un rendrait la bascule IPv4 seule — le
+défaut exact que ce document interdit à chaque page.
+
+Les deux blocs se relisent sans les charger :
+
+    sudo iptables-restore --test  < /etc/ufw/before.rules
+    sudo ip6tables-restore --test < /etc/ufw/before6.rules
+
 ### 0.4 Une configuration en PORTS HAUTS, sur une COPIE du courrier
 
 **AVANT DE TAPER QUOI QUE CE SOIT, REJOUEZ LA COMMANDE.** Depuis un dépôt de
@@ -757,7 +797,12 @@ Ce qu'il faut avoir vu de ses yeux avant de continuer :
       sont les abonnements qui manquent (§0.4bis) ; sans rôles, les `ams-usages`
       (§0.4bis-2) ;
 - [ ] **le serveur écoute sur les DEUX familles** : `ss -ltn` doit montrer
-      `*:993` et non `0.0.0.0:993`, et un client IPv6 doit se connecter ;
+      `*:8443` et non `0.0.0.0:8443`, et le `curl` de §0.4 doit rendre `401`
+      en IPv4 (`-4`) COMME en IPv6 (`-6`). C'est le seul écouteur public de la
+      phase 0 — SMTP et IMAP sont en `127.0.0.1` ici, à dessein — et donc le
+      seul qui prouve ici que `[::]` fait ce qu'on en attend. Le même contrôle
+      sur le 2525, le 4465 et le 9993 se fait le jour J, à « La coupure
+      s'arrête ici » ;
 - [ ] un message entrant arrive ;
 - [ ] un message sortant part, et **porte une signature DKIM valide** ;
 - [ ] le certificat servi est bien celui de `mail.narro.ch`.
@@ -877,14 +922,80 @@ décidera si l'on recommence un autre jour.
     #
     #    La répétition du §0.4 écrit `essai.conf`, et c'est voulu : elle ne doit
     #    surtout pas écraser celle-ci.
-    sudo -u air-mail air-mail-admin config write /var/lib/air-mail/air-mail.conf \
-        «les mêmes options qu'en 0.4, mais» \
-        --listen [::]:25 --listen [::]:587 \
-        --listen-smtps [::]:465 --listen-imaps [::]:993 \
-        --maildir /var/vmail-ams
+    #
+    #    **PAS DE PORT SOUS 1024 DANS CETTE COMMANDE, ET CE N'EST PAS UN CHOIX.**
+    #    Ce document a dit `--listen [::]:25 … --listen-smtps [::]:465
+    #    --listen-imaps [::]:993` pendant des jours. Le serveur refuse de
+    #    s'exécuter en superutilisateur (C10), l'unité du paquet le lance en
+    #    `air-mail` avec `CapabilityBoundingSet=` et `AmbientCapabilities=`
+    #    VIDES, et `net.ipv4.ip_unprivileged_port_start` vaut 1024 sur la
+    #    machine (mesuré le 2026-09-16). L'étape 8 aurait dit « écoute sur
+    #    [::]:25 : Permission denied (os error 13) » et refusé de démarrer —
+    #    Postfix déjà arrêté, dans les vingt minutes de coupure. La voie est
+    #    celle de `installation.md` §6 : des PORTS HAUTS, et le pare-feu qui y
+    #    ramène les ports d'usage (étape 6ter).
+    #
+    #    **TOUT EN `[::]`, ET NON EN `127.0.0.1` NI EN `0.0.0.0`.** La
+    #    répétition de 0.4 écoutait en `127.0.0.1` POUR NE PAS ÊTRE JOINTE ; le
+    #    jour J on veut l'être, et par les deux familles — `mail.narro.ch` a une
+    #    AAAA, Dovecot servait les deux. Sur `mail.air-desktop.org`, une
+    #    configuration en `0.0.0.0` a servi l'IPv4 seule quatre jours sans que
+    #    rien ne le dise (« Connection refused » en IPv6, mesuré le 2026-09-16).
+    #
+    #    Le 587 n'a pas de ligne à lui : le pare-feu le ramène sur le 2525, le
+    #    même écouteur `STARTTLS` que le 25 — c'est ainsi que Postfix servait
+    #    `submission`, par le même démon.
+    printf %s "$SECRET_RESEND" | sudo -u air-mail air-mail-admin config write \
+        /var/lib/air-mail/air-mail.conf \
+        --domain mail.narro.ch --hosted narro.ch --hosted mail.narro.ch \
+        --maildir /var/vmail-ams --accounts /var/lib/air-mail/comptes.bin \
+        --listen [::]:2525 --listen-smtps [::]:4465 --listen-imaps [::]:9993 \
+        --max-message 52428800 \
+        --tls-cert /etc/letsencrypt/live/mail.narro.ch/fullchain.pem \
+        --tls-key  /etc/letsencrypt/live/mail.narro.ch/privkey.pem \
+        --relay --queue-spool /var/lib/air-mail/file \
+        --queue-expire-seconds 86400 \
+        --require-fqdn-helo \
+        --require-fqdn-sender --require-fqdn-recipient \
+        --require-sender-domain \
+        --listen-http [::]:8443 \
+        --dkim-selector ams202609 \
+        --dkim-key /var/lib/rspamd/dkim/narro.ch.ams202609.key \
+        --resolver 127.0.0.53:53 \
+        --public-suffix-list /usr/share/publicsuffix/public_suffix_list.dat \
+        --relayhost smtp.resend.com:465 --relayhost-implicit-tls \
+        --relayhost-user «le compte Resend, dans /etc/postfix/sasl_passwd» \
+        --mta-sts-anchors /etc/ssl/certs/ca-certificates.crt \
+        --mta-sts-cache /var/lib/air-mail/mtasts
 
     # 6bis. On la RELIT avant de démarrer. `config show` dit aussi ce qui manque.
+    #       Les trois lignes d'écoute doivent dire `[::]:2525`, `[::]:4465`,
+    #       `[::]:9993` — et `repeter-la-configuration.sh` l'a déjà vérifié à
+    #       froid, en jouant CETTE commande et pas seulement celle de 0.4.
     sudo -u air-mail air-mail-admin config show /var/lib/air-mail/air-mail.conf
+
+    # 6ter. LE PARE-FEU RAMÈNE LES PORTS D'USAGE SUR LES PORTS HAUTS.
+    #
+    #    Sur cette machine c'est `ufw` qui tient le pare-feu (actif, avec
+    #    fail2ban derrière), et `nftables.service` est DÉSACTIVÉ. **NE L'ACTIVEZ
+    #    PAS** pour charger la table de `installation.md` §6 : `/etc/nftables.conf`
+    #    commence par `flush ruleset`, et au prochain redémarrage il effacerait
+    #    ufw ET fail2ban. La redirection s'écrit donc DANS ufw, qui la recharge
+    #    lui-même à chaque démarrage — les deux blocs ont été préparés en §0.3bis,
+    #    il ne reste qu'à les appliquer.
+    #
+    #    **ET LES PORTS HAUTS DOIVENT ÊTRE OUVERTS DANS ufw**, ce qui n'a rien
+    #    d'évident : la redirection se fait en `PREROUTING`, AVANT le filtrage,
+    #    si bien que la chaîne `INPUT` voit arriver du 2525 — pas du 25. Un
+    #    `ufw allow 25/tcp` seul laisse tout passer… jusqu'à la redirection, où
+    #    tout est jeté, sans un mot dans le journal du serveur.
+    sudo ufw allow 2525/tcp comment 'air-mail-server SMTP+submission (25/587 redirigés)'
+    sudo ufw allow 4465/tcp comment 'air-mail-server SMTPS (465 redirigé)'
+    sudo ufw allow 9993/tcp comment 'air-mail-server IMAPS (993 redirigé)'
+    sudo ufw reload            # applique AUSSI les blocs *nat de §0.3bis
+
+    #    Un port redirigé n'est joignable QUE DU DEHORS : depuis la machine,
+    #    `127.0.0.1:25` est refusé, et un contrôle local doit viser le 2525.
 
     # 7. On empêche l'ancien de revenir tout seul au prochain redémarrage.
     sudo systemctl disable postfix dovecot
@@ -900,9 +1011,20 @@ aussi, s'il en reste.
 
 ### La coupure s'arrête ici
 
-    # Depuis l'extérieur, pas depuis la machine :
-    swaks --to jean@narro.ch --server mail.narro.ch
-    openssl s_client -connect mail.narro.ch:993 -quiet
+    # Sur la machine : les trois écouteurs, sur les DEUX familles.
+    sudo ss -ltn | grep -E ':(2525|4465|9993) '
+    #    doit montrer `*:2525`, `*:4465`, `*:9993` — et non `0.0.0.0:…`, qui
+    #    serait l'IPv4 seule, ni `127.0.0.1:…`, qui serait la configuration
+    #    d'essai de 0.4 restée en place.
+
+    # Depuis l'extérieur, pas depuis la machine — ET DANS LES DEUX FAMILLES.
+    # Un MTA moderne résout la AAAA d'abord ; s'il n'y trouve rien, il se
+    # rabat après délai, quand il se rabat. Un `-6` qui échoue est une panne
+    # que seuls certains émetteurs verront, et c'est la pire à diagnostiquer.
+    swaks -4 --to jean@narro.ch --server mail.narro.ch
+    swaks -6 --to jean@narro.ch --server mail.narro.ch
+    openssl s_client -4 -connect mail.narro.ch:993 -quiet
+    openssl s_client -6 -connect mail.narro.ch:993 -quiet
 
 ---
 
@@ -961,6 +1083,16 @@ passage n'ajoute rien.
 
 Ce dernier point compte le jour J : on relance ce qui a l'air d'avoir échoué.
     sudo chown -R vmail:vmail /var/vmail
+
+    # 2bis. RETIRER LA REDIRECTION AVANT DE RELANCER POSTFIX.
+    #    Sans cela, le 25, le 587, le 465 et le 993 continuent d'être ramenés
+    #    sur des ports hauts que plus rien n'écoute : Postfix et Dovecot
+    #    démarrent, `systemctl` les dit actifs, et personne ne les joint. Un
+    #    retour en arrière qui a l'air d'avoir réussi, et qui n'a rien rendu.
+    #    Ôter les deux blocs `*nat` posés en §0.3bis (jusqu'à leur `COMMIT`
+    #    inclus), puis :
+    sudo ufw reload
+    sudo nft list ruleset | grep -c redirect     # doit dire 0
 
     # 3. Remettre l'ancien en marche.
     sudo systemctl enable --now postfix dovecot
