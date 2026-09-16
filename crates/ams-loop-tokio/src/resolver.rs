@@ -614,13 +614,37 @@ mod confiance {
         Some(adresse)
     }
 
+    /// Ce processus peut-il RECEVOIR un datagramme sur cette adresse ?
+    ///
+    /// Avoir une adresse non locale ne suffit pas : le pare-feu applicatif de
+    /// macOS, en mode furtif, jette ce qui arrive à un binaire qu'il ne connaît
+    /// pas — même envoyé depuis la machine elle-même, et un binaire d'essai
+    /// change à chaque construction. Mesuré le 2026-09-16 : les deux questions
+    /// expiraient, la première assertion passait POUR LA MAUVAISE RAISON, la
+    /// seconde échouait. On sonde donc le faux résolveur avant de conclure quoi
+    /// que ce soit de ses réponses : il répond à tout, une absence de réponse
+    /// est un chemin bouché, pas un dépouillement.
+    async fn joignable(adresse: SocketAddr) -> bool {
+        let Ok(sonde) = tokio::net::UdpSocket::bind("0.0.0.0:0").await else {
+            return false;
+        };
+        if sonde.send_to(&[0_u8; 12], adresse).await.is_err() {
+            return false;
+        }
+        let mut recu = [0_u8; 64];
+        tokio::time::timeout(Duration::from_millis(500), sonde.recv_from(&mut recu))
+            .await
+            .is_ok_and(|reponse| reponse.is_ok())
+    }
+
     /// **LA CHAÎNE ENTIÈRE**, contre un résolveur qui pose `AD` sur tout.
     ///
     /// Cet essai s'abstient là où la machine n'a que la boucle locale — une
-    /// machine de construction cloisonnée, par exemple. Ce qu'il éprouve alors
-    /// est éprouvé par les essais unitaires au-dessus ; ce qu'il ajoute, c'est
-    /// que le dépouillement a bien lieu SUR LE CHEMIN RÉEL, et pas seulement
-    /// dans une fonction qu'on appellerait à la main.
+    /// machine de construction cloisonnée, par exemple — et là où son pare-feu
+    /// ne laisse rien entrer sur l'adresse non locale (le Mac de développement).
+    /// Ce qu'il éprouve alors est éprouvé par les essais unitaires au-dessus ;
+    /// ce qu'il ajoute, c'est que le dépouillement a bien lieu SUR LE CHEMIN
+    /// RÉEL, et pas seulement dans une fonction qu'on appellerait à la main.
     #[tokio::test]
     async fn un_resolveur_menteur_est_depouille_de_bout_en_bout() {
         let Some(non_locale) = adresse_non_locale() else {
@@ -629,6 +653,10 @@ mod confiance {
         let Some(adresse) = resolveur_qui_ment(non_locale).await else {
             return;
         };
+        if !joignable(adresse).await {
+            eprintln!("abstention : rien ne parvient à {adresse} — pare-feu de la machine ?");
+            return;
+        }
 
         // Non déclaré : le bit tombe, et DANE ne s'engagera pas.
         let strict = Resolver::new(std::vec![adresse], Duration::from_secs(2)).expect("résolveur");

@@ -7,7 +7,7 @@ use crate::Error;
 ///
 /// Ce n'est pas un durcissement facultatif. Tout ce que ce serveur écrit est soit
 /// un secret, soit le courrier de quelqu'un.
-const MASQUE: u32 = 0o077;
+const MASQUE: libc::mode_t = 0o077;
 
 /// Restreint le masque de création de ce processus, et rend l'ANCIEN.
 ///
@@ -53,9 +53,13 @@ pub fn restreindre_le_masque() -> u32 {
     // lui reconnaît aucune précondition. Elle n'est pas sûre entre fils —
     // l'ancien masque est un état global — et c'est pourquoi elle est appelée
     // une seule fois, au tout début, avant qu'aucun fil ne soit créé.
-    // `mode_t` EST DÉJÀ UN `u32` ICI : ce serveur est Linux seulement (C10), et
-    // convertir masquerait le jour où ce ne serait plus vrai.
-    unsafe { libc::umask(MASQUE) }
+    // `mode_t` N'A PAS LA MÊME LARGEUR PARTOUT : `u32` sous Linux, `u16` sous
+    // Darwin. Ce serveur ne tourne qu'en Linux (C10), mais il se COMPILE aussi
+    // sur le Mac de développement — et le `u32` nu écrit ici l'en empêchait
+    // (trouvé le 2026-09-16). `u32::from` est une conversion SANS PERTE dans
+    // les deux cas, là où un `as` aurait tronqué en silence le jour où la
+    // largeur changerait dans l'autre sens.
+    u32::from(unsafe { libc::umask(MASQUE) })
 }
 
 /// Ce masque laissait-il lire à quelqu'un d'autre que nous ?
