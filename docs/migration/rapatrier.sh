@@ -136,9 +136,20 @@ essais() {
     # Deux fichiers d'une même boîte qui partagent leur partie unique sont le
     # même message vu deux fois par l'utilisateur — et il le voit pendant un
     # retour en arrière, c'est-à-dire au pire moment.
-    local doublons
-    doublons=$(find "$ancien" -type f -printf '%h %f\n' \
-        | sed -E 's#/(cur|new) # #; s#(,|:)[^ ]*$##' | sort | uniq -d)
+    # **`-printf` EST UNE EXTENSION GNU**, et ce banc se joue aussi sur le Mac
+    # de développement, où `find` refuse l'option et n'imprime RIEN : `uniq -d`
+    # ne trouvait alors aucun doublon, et ce banc — celui qu'on lance quand tout
+    # le reste a déjà échoué — rendait « aucune faute » sans avoir ouvert un
+    # fichier. Trouvé le 2026-09-21. Le chemin complet porte ce que `%h %f`
+    # donnait ; on le découpe soi-même, et l'on refuse de conclure à vide.
+    local doublons messages
+    messages=$(find "$ancien" -type f \
+        | sed -E 's#^(.*)/(cur|new)/([^/]*)$#\1 \3#; s#(,|:)[^ ]*$##')
+    if [ -z "$messages" ]; then
+        echo "FAUTE : le contrôle des doublons n'a lu aucun message" >&2
+        fautes=$((fautes + 1))
+    fi
+    doublons=$(printf '%s\n' "$messages" | sort | uniq -d)
     if [ -n "$doublons" ]; then
         echo "FAUTE : doublons dans l'ancien magasin :" >&2
         printf '%s\n' "$doublons" | sed 's/^/       /' >&2

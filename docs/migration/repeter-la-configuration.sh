@@ -114,6 +114,33 @@ for commande in "$commande_essai" "$commande_jour_j"; do
 done
 echo "compte de service : «$compte_du_manuel» — le meme que l installateur cree"
 
+# ── LE CERTIFICAT EST-IL LISIBLE PAR LE COMPTE QUI SERT ? ───────────────────
+#
+# **CE CONTRÔLE MANQUAIT, ET LES DEUX COMMANDES ONT NOMMÉ LE MAUVAIS CHEMIN
+# PENDANT DEUX SEMAINES.** `/etc/letsencrypt/live` et `/etc/letsencrypt/archive`
+# sont en `0700 root` : un `fullchain.pem` en 0644 dans un répertoire qui ne se
+# traverse pas est un fichier ILLISIBLE. Le manuel l'expliquait — en prose, deux
+# paragraphes au-dessus de commandes qui nommaient ce chemin-là. Le serveur
+# aurait refusé de démarrer à l'étape 8, Postfix déjà arrêté.
+#
+# Le `deploy-hook` recopie les deux fichiers sous `/var/lib/air-mail/tls`, et
+# c'est CE chemin que la configuration doit porter. Trouvé le 2026-09-21.
+#
+# On ne peut pas l'éprouver en jouant la commande : sur une machine de
+# développement, les deux chemins sont également absents et `config write` les
+# accepte tous les deux. On lit donc le TEXTE de la commande, comme pour le
+# compte de service — c'est le même genre de faute, et le même genre de garde.
+for commande in "$commande_essai" "$commande_jour_j"; do
+    if printf '%s\n' "$commande" | grep -q '/etc/letsencrypt/live'; then
+        echo "ECHEC : une commande de \`bascule.md\` nomme /etc/letsencrypt/live." >&2
+        echo "        Ce repertoire est en 0700 root : \`$compte_du_manuel\` ne peut pas" >&2
+        echo "        le traverser, et le serveur refuserait de demarrer a l etape 8." >&2
+        echo "        Le deploy-hook recopie les deux fichiers sous /var/lib/air-mail/tls." >&2
+        exit 1
+    fi
+done
+echo "certificat : aucune commande ne nomme un chemin que «$compte_du_manuel» ne peut pas lire"
+
 # ── LES SUBSTITUTIONS, ET CHACUNE EST NOMMÉE ────────────────────────────────
 #
 # On ne remplace QUE ce qui désigne la machine de production. Toute autre

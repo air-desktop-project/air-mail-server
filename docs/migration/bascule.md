@@ -4,13 +4,43 @@ Ce document se lit AVANT le jour J, en entier, et se suit ligne à ligne le jour
 même. Il suppose que `etude-narro.md` a été lu.
 
 **Les décisions qu'il posait sont prises**, et datées du 2026-09-07 : cinq
-secrets initiaux distincts (§5 de l'étude), le relais Resend gardé pour la
-bascule, le sélecteur DKIM `ams202609` en 2048 bits publié une semaine avant, et
-l'API REST ouverte pour que chacun pose son propre mot de passe.
+secrets initiaux distincts (§5 de l'étude) — **six depuis le 2026-09-15**, voir
+ci-dessous —, le relais Resend gardé pour la bascule, le sélecteur DKIM
+`ams202609` en 2048 bits publié une semaine avant, et l'API REST ouverte pour
+que chacun pose son propre mot de passe.
 
 **Le principe qui gouverne tout : on ne remplace rien tant que la copie n'a pas
 été éprouvée, et on garde l'ancien intact jusqu'à ce qu'on décide de ne plus en
 avoir besoin.**
+
+## IL Y A SIX BOÎTES, ET NON CINQ
+
+`ofrou-sierre@narro.ch` a été créée le **2026-09-15**, c'est-à-dire APRÈS la
+phase 0. Elle ne figure donc dans aucun relevé du 7, ni dans l'inventaire, ni
+dans les décomptes de ce document — et **toutes ses boucles l'ont ignorée
+jusqu'au 2026-09-21**. Elles la nomment désormais. Une boucle qui nomme les
+comptes un par un est juste le jour où on l'écrit, et fausse le jour où une
+boîte naît : c'est ce qui est arrivé ici.
+
+**Ce n'est pas une personne, c'est une machine** : la passerelle Milesight du
+chantier OFROU Sierre, qui envoie ses alertes en `submission` authentifié et ne
+lit jamais sa boîte. Personne ne se plaindra donc si elle est oubliée — les
+alertes cesseront, et c'est tout ce qui se verra. Trois conséquences, et chacune
+a sa place plus bas :
+
+- **son secret ne se distribue pas par courrier** : il se TAPE dans l'interface
+  de la passerelle, joignable par son seul lien 4G. Prévoyez-y un accès AVANT la
+  fenêtre — c'est la seule pièce de cette bascule qui dépend d'un appareil
+  distant que vous ne contrôlez pas depuis la machine ;
+- **son secret n'a pas de tiret** : l'interface Milesight n'accepte que des
+  caractères alphanumériques (§0.4) ;
+- **sa boîte n'a AUCUN sous-dossier** — ni `Sent`, ni `Trash` : rien à traduire,
+  aucun rôle à poser, et lui en poser un serait NUISIBLE (§0.4bis-2).
+
+**Son mot de passe actuel n'est conservé nulle part.** Celui qui est dans la
+passerelle aujourd'hui a été tiré le 2026-09-15 et n'a pas été gardé : la
+bascule n'a donc pas le choix de le reconduire, elle en pose un neuf. C'est de
+toute façon ce que l'option A de §5 de l'étude fait des cinq autres.
 
 ---
 
@@ -332,7 +362,8 @@ commande, et elle a été trouvée en la jouant, pas en la relisant.
     # boîte étant un compte dont la boîte se créera à la première remise. On
     # copie donc COMPTE PAR COMPTE.
     sudo mkdir -p /var/vmail-ams
-    for compte in contact thierry.delhaise vincent.delhaise support kelly.garro; do
+    for compte in contact thierry.delhaise vincent.delhaise support kelly.garro \
+                  ofrou-sierre; do
         sudo rsync -aH --delete \
             "/var/vmail/narro.ch/$compte/Maildir/" "/var/vmail-ams/$compte/"
     done
@@ -344,8 +375,8 @@ commande, et elle a été trouvée en la jouant, pas en la relisant.
         --maildir /var/vmail-ams --accounts /var/lib/air-mail/comptes.bin \
         --listen 127.0.0.1:2525 --listen-imaps 127.0.0.1:9993 \
         --max-message 52428800 \
-        --tls-cert /etc/letsencrypt/live/mail.narro.ch/fullchain.pem \
-        --tls-key  /etc/letsencrypt/live/mail.narro.ch/privkey.pem \
+        --tls-cert /var/lib/air-mail/tls/fullchain.pem \
+        --tls-key  /var/lib/air-mail/tls/privkey.pem \
         --relay --queue-spool /var/lib/air-mail/file \
         --queue-expire-seconds 86400 \
         --require-fqdn-helo \
@@ -416,8 +447,9 @@ qui a été écrit pour les mots de passe ne sert à rien : chaque secret choisi
 devrait transiter par l'administrateur, ce qu'un changement de mot de passe
 existe précisément pour éviter.
 
-La fermer resterait tenable — ôter la ligne, et poser les cinq secrets par
-`account passwd` en §0.4ter — mais c'est un repli, pas le plan.
+La fermer resterait tenable — ôter la ligne, et poser les six secrets par
+`account passwd` en §0.4ter — mais c'est un repli, pas le plan. Celui de la
+passerelle se pose de toute façon ainsi : elle n'appellera jamais cette API.
 
 **LE PARE-FEU N'A PAS ÉTÉ MESURÉ.** `inventaire.sh` ne le regarde pas, et le 8443
 n'est aujourd'hui ouvert par rien. À vérifier DEPUIS L'EXTÉRIEUR pendant la
@@ -449,8 +481,23 @@ jour de la bascule, et un serveur plus permissif n'alerte personne — il encais
 Les trois exemptions valent ici aussi, et deux d'entre elles comptent pour
 narro.ch : `<>` laisse passer les avis de non-remise, et `<Postmaster>` sans
 domaine reste joignable — c'est le compte `contact`, qui porte `postmaster@`.
-Les cinq comptes, eux, sont AUTHENTIFIÉS quand ils émettent, donc exemptés :
+Les six comptes, eux, sont AUTHENTIFIÉS quand ils émettent, donc exemptés :
 rien de ce qu'ils envoient aujourd'hui ne se met à être refusé.
+
+**LE `HELO` N'A PAS D'EXEMPTION, ET LA PASSERELLE MILESIGHT PASSE QUAND MÊME.**
+`--require-fqdn-helo` s'applique à tout le monde — il ne peut pas en être
+autrement, l'`EHLO` précède l'`AUTH`. Or cette passerelle se présente `EHLO
+127.0.0.1`, et Postfix le REFUSE : il a fallu lui écrire une dérogation dans
+`master.cf` le 2026-09-15, sur `submission` et `smtps` seulement. Ici, rien à
+faire : `nom_qualifie` ne demande qu'un point dans le nom, et `127.0.0.1` en a
+trois. Le remplaçant est donc plus permissif que le remplacé sur ce point — et
+il l'est PARTOUT, port 25 compris, là où la dérogation de `master.cf` ne touche
+que `submission` et `smtps`. C'est un écart assumé et non un oubli : un point
+dans un `EHLO` n'a jamais arrêté personne, et les six contrôles d'enveloppe,
+eux, sont tenus.
+
+**À voir de ses yeux en §0.6, sur le 2525**, et non à déduire d'ici : c'est la
+seule des six boîtes dont l'émetteur ne se reconfigure pas en deux clics.
 
 `--require-sender-domain` est le quatrième, et c'est
 `reject_unknown_sender_domain`. Il exige un résolveur — `--resolver 127.0.0.53:53`
@@ -503,6 +550,15 @@ refusent la connexion.
 La configuration pointe alors sur `/var/lib/air-mail/tls/`, et non sur
 `/etc/letsencrypt/live/`.
 
+**ET LES DEUX COMMANDES DE CE MANUEL DISAIENT LE CONTRAIRE** — corrigé le
+2026-09-21. Ce paragraphe a expliqué pendant deux semaines pourquoi
+`/etc/letsencrypt/live` est illisible par `air-mail`, et les commandes de la
+§0.4 comme de l'étape 6 nommaient ce chemin-là. La configuration d'essai posée
+sur la machine le 2026-09-08, elle, porte bien `/var/lib/air-mail/tls` : la
+faute ne vivait que dans le manuel, et elle attendait le jour J, à l'étape 8,
+Postfix déjà arrêté. `repeter-la-configuration.sh` REFUSE désormais une commande
+qui nomme `/etc/letsencrypt/live` — la prose ne surveille rien, un banc si.
+
 **LA CLÉ DKIM PASSE PAR LE GROUPE, POUR N'EN GARDER QU'UNE COPIE.** Elle est en
 `0600 _rspamd:_rspamd`, et rspamd doit continuer de la lire tant qu'il signe.
 Recopier une clé privée, c'est deux endroits à protéger et à faire tourner :
@@ -513,11 +569,11 @@ Recopier une clé privée, c'est deux endroits à protéger et à faire tourner 
     sudo -u air-mail -g _rspamd test -r /var/lib/rspamd/dkim/narro.ch.ams202609.key
     sudo -u _rspamd test -r /var/lib/rspamd/dkim/narro.ch.ams202609.key
 
-Les cinq comptes, avec les alias que `valiases` porte. Le mot de passe se lit sur
+Les six comptes, avec les alias que `valiases` porte. Le mot de passe se lit sur
 l'entrée standard, **jamais sur la ligne de commande** : ce que `ps` affiche,
 tout le monde le lit.
 
-Avec cinq boîtes, l'option A de §5 de l'étude — tout réinitialiser — est la plus
+Avec six boîtes, l'option A de §5 de l'étude — tout réinitialiser — est la plus
 simple. **Gardez chaque mot de passe au moment où vous le tirez** : il ne se relit
 pas, et il n'y a pas de « mot de passe oublié » ici.
 
@@ -532,13 +588,32 @@ pas, et il n'y a pas de « mot de passe oublié » ici.
             /var/lib/air-mail/comptes.bin --login "$compte" --address "$compte@narro.ch"
     done
 
-    # `contact` porte en plus les trois alias de `/etc/postfix/valiases`.
+    # `contact` porte en plus les alias de `/etc/postfix/valiases` — ils sont
+    # QUATRE depuis le 2026-09-08 : `apple-review@` s'est ajouté aux trois.
     mot=$(secret); printf 'contact : %s\n' "$mot"
     printf %s "$mot" | sudo -u air-mail air-mail-admin account add \
         /var/lib/air-mail/comptes.bin --login contact \
         --address contact@narro.ch --address postmaster@narro.ch \
         --address abuse@narro.ch --address root@narro.ch \
+        --address apple-review@narro.ch \
         --address postmaster@mail.narro.ch
+
+    # **`ofrou-sierre` N'EST PAS TIRÉE PAR LA BOUCLE**, et ce n'est pas un
+    # oubli : son secret part dans une INTERFACE WEB, pas dans un courrier.
+    # `base64` y produit `+`, `/` et `=`, que l'interface Milesight refuse —
+    # elle n'accepte que des caractères alphanumériques. Un secret refusé au
+    # moment de la saisie, sur un appareil joint en 4G, se découvre mal.
+    #
+    # L'alphabet est celui de `poser-les-secrets.sh` : ni `0`/`O`, ni `1`/`l`/`I`.
+    # Celui-là se recopie d'un écran à l'autre, à la main, une seule fois — et
+    # il ne se change jamais ensuite.
+    mot=$(LC_ALL=C tr -dc 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789' \
+        < /dev/urandom | head -c 24)
+    printf 'ofrou-sierre : %s\n' "$mot"          # À NOTER, ET À TAPER DANS LA
+                                                 # PASSERELLE PENDANT LA FENÊTRE.
+    printf %s "$mot" | sudo -u air-mail air-mail-admin account add \
+        /var/lib/air-mail/comptes.bin --login ofrou-sierre \
+        --address ofrou-sierre@narro.ch
 
 `postmaster@` est ici une exigence, pas une commodité : §4.5.1 de RFC 5321 la
 pose, et le serveur AVERTIT au démarrage si personne ne la reçoit.
@@ -557,16 +632,19 @@ produit, et un essai tient désormais l'enchaînement : suivre le conseil doit
 donner un serveur qui démarre. **On a néanmoins écrit les deux ici**, parce qu'un
 manuel qui dépend d'un message d'aide pour être complet n'est pas complet.
 
-**CINQ SECRETS DISTINCTS, ET NON UN SEUL PARTAGÉ.** La boucle ci-dessus en tire
-un par compte, et c'est délibéré : un secret commun laisserait, entre la bascule
-et le moment où chacun l'aura changé, n'importe lequel des cinq ouvrir la boîte
-des quatre autres. Ce n'est pas une fenêtre théorique — elle dure aussi longtemps
-que la personne la plus lente à lire son courrier.
+**SIX SECRETS DISTINCTS, ET NON UN SEUL PARTAGÉ.** Les commandes ci-dessus en
+tirent un par compte, et c'est délibéré : un secret commun laisserait, entre la
+bascule et le moment où chacun l'aura changé, n'importe lequel des cinq ouvrir
+la boîte des quatre autres. Ce n'est pas une fenêtre théorique — elle dure aussi
+longtemps que la personne la plus lente à lire son courrier. **Le sixième ne se
+change jamais** : la passerelle ne sait pas le faire, il reste donc celui que
+vous posez, et c'est une raison de plus pour qu'il n'ouvre que sa propre boîte.
 
 ### 0.4ter Chacun pose ensuite le sien, sans passer par vous
 
-Ces cinq secrets sont des secrets de PASSAGE. Une fois connecté, chacun pose le
-sien lui-même :
+Ces secrets sont des secrets de PASSAGE — les cinq humains, s'entend : celui de
+`ofrou-sierre` est définitif, §0.4ter ne la concerne pas. Une fois connecté,
+chacun pose le sien lui-même :
 
     curl -X PUT https://mail.narro.ch:8443/v1/me/password \
          -H "Authorization: Bearer $JETON" \
@@ -697,6 +775,14 @@ exactement les cinq dossiers de Dovecot :
         sudo chmod 600 "$boite/ams-usages"
     done
 
+**`ofrou-sierre` N'EST PAS DANS CETTE BOUCLE, ET NE DOIT PAS Y ÊTRE.** Sa boîte
+n'a qu'une `INBOX` — aucun `Sent`, aucun `Trash`. Un `ams-usages` qui donnerait
+`\Sent` à un dossier ABSENT ne serait pas seulement inutile : le jour où un
+client voudrait créer son `Sent`, le serveur le lui REFUSERAIT par
+`UsageDejaPris` (RFC 6154 §3 — un usage déjà pris se refuse avant de créer quoi
+que ce soit), et le refus serait incompréhensible pour qui n'a jamais vu ce
+fichier. **Un rôle ne se pose que sur un dossier qui existe.**
+
 **ON VÉRIFIE AVEC LA COMMANDE QUE THUNDERBIRD ENVOIE**, et non avec un `LIST` nu :
 
     LIST (SUBSCRIBED) "" "*" RETURN (SPECIAL-USE)
@@ -742,7 +828,8 @@ deux. La première exécution en a trouvé deux de plus, tous deux dans cette
     # `verifier.sh` compare compte par compte : on lui donne de l'ancien magasin
     # une vue qui a la MÊME forme que le neuf.
     sudo mkdir -p /var/vmail-vue
-    for compte in contact thierry.delhaise vincent.delhaise support kelly.garro; do
+    for compte in contact thierry.delhaise vincent.delhaise support kelly.garro \
+                  ofrou-sierre; do
         sudo ln -sfn "/var/vmail/narro.ch/$compte/Maildir" "/var/vmail-vue/$compte"
     done
     bash verifier.sh --essais                     # le banc d'abord
@@ -822,6 +909,11 @@ La fenêtre étant fixée au samedi 12, envoyez-le **au plus tard le mardi 8**
 — quatre jours — et rappelez le vendredi 11, en même temps que les secrets
 initiaux de §0.4.
 
+**LA PASSERELLE NE LIT PAS CETTE LETTRE**, et c'est le piège de la veille : la
+liste des destinataires a CINQ noms quand le magasin en a six. Ce qui la
+concerne, elle, n'est pas un envoi mais un accès — celui de son interface, à
+ouvrir avant la fenêtre.
+
 ---
 
 ## Ce que chaque étape coûte — mesuré sur 50 000 messages
@@ -876,7 +968,8 @@ décidera si l'on recommence un autre jour.
     #    et le retour en arrière les retrouvera.
 
     # 3. Le delta : ce qui est arrivé depuis la copie de 0.4.
-    for compte in contact thierry.delhaise vincent.delhaise support kelly.garro; do
+    for compte in contact thierry.delhaise vincent.delhaise support kelly.garro \
+                  ofrou-sierre; do
         sudo rsync -aH --delete \
             "/var/vmail/narro.ch/$compte/Maildir/" "/var/vmail-ams/$compte/"
     done
@@ -891,11 +984,36 @@ décidera si l'on recommence un autre jour.
     python3 renommer-dossiers.py /var/vmail-ams --pour-de-vrai
     sudo chown -R air-mail:air-mail /var/vmail-ams
 
+    # 3ter. **IL A AUSSI EFFACÉ LES RÔLES DE DOSSIERS**, et cette ligne-là
+    #       manquait — trouvée le 2026-09-21, en relisant ce que `--delete`
+    #       emporte vraiment. Le `rsync` synchronise `Maildir/` SUR LA RACINE DU
+    #       COMPTE, où vivent `ams-usages`, `ams-abonnements` et `ams-index.bin`
+    #       : aucun des trois n'existe du côté Dovecot, donc les trois sont
+    #       « surnuméraires », donc les trois sautent.
+    #
+    #       Le 3bis ci-dessus recrée `ams-abonnements` — c'est ce que
+    #       `renommer-dossiers.py` fait —, et `ams-index.bin` se refait tout
+    #       seul à l'adoption. `ams-usages`, PERSONNE ne le recrée : les rôles
+    #       posés en §0.4bis-2 seraient perdus, et chaque client se remettrait à
+    #       créer son propre « Sent » à côté de celui qu'il vient de recevoir.
+    #       C'est le défaut exact que §0.4bis-2 existe pour éviter, réintroduit
+    #       par l'étape 3 vingt minutes avant la réouverture.
+    for compte in contact support thierry.delhaise vincent.delhaise kelly.garro; do
+        boite="/var/vmail-ams/$compte"
+        printf '\\Archive\tArchive\n\\Drafts\tDrafts\n\\Junk\tJunk\n\\Sent\tSent\n\\Trash\tTrash\n' \
+            | sudo tee "$boite/ams-usages" > /dev/null
+        sudo chown air-mail:air-mail "$boite/ams-usages"
+        sudo chmod 600 "$boite/ams-usages"
+    done
+    #       `ofrou-sierre` n'y est pas, pour la raison de §0.4bis-2 : sa boîte
+    #       n'a pas les dossiers que ces rôles nomment.
+
     # 4. L'audit, une dernière fois. S'il refuse : ON REMONTE (voir plus bas).
     # `verifier.sh` compare compte par compte : on lui donne de l'ancien magasin
     # une vue qui a la MÊME forme que le neuf.
     sudo mkdir -p /var/vmail-vue
-    for compte in contact thierry.delhaise vincent.delhaise support kelly.garro; do
+    for compte in contact thierry.delhaise vincent.delhaise support kelly.garro \
+                  ofrou-sierre; do
         sudo ln -sfn "/var/vmail/narro.ch/$compte/Maildir" "/var/vmail-vue/$compte"
     done
     #    **AVEC `sudo`, ET CE N'EST PAS UNE PRÉCAUTION DE STYLE.** Le magasin
@@ -951,8 +1069,8 @@ décidera si l'on recommence un autre jour.
         --maildir /var/vmail-ams --accounts /var/lib/air-mail/comptes.bin \
         --listen [::]:2525 --listen-smtps [::]:4465 --listen-imaps [::]:9993 \
         --max-message 52428800 \
-        --tls-cert /etc/letsencrypt/live/mail.narro.ch/fullchain.pem \
-        --tls-key  /etc/letsencrypt/live/mail.narro.ch/privkey.pem \
+        --tls-cert /var/lib/air-mail/tls/fullchain.pem \
+        --tls-key  /var/lib/air-mail/tls/privkey.pem \
         --relay --queue-spool /var/lib/air-mail/file \
         --queue-expire-seconds 86400 \
         --require-fqdn-helo \
@@ -1025,6 +1143,15 @@ aussi, s'il en reste.
     swaks -6 --to jean@narro.ch --server mail.narro.ch
     openssl s_client -4 -connect mail.narro.ch:993 -quiet
     openssl s_client -6 -connect mail.narro.ch:993 -quiet
+
+**ET LA PASSERELLE, QUI NE SE PLAINDRA PAS.** Le secret de `ofrou-sierre` tiré
+en §0.4 doit être saisi dans l'interface Milesight — `mail.narro.ch`, port 587
+`STARTTLS`, identifiant = l'adresse complète, `From:` obligatoirement
+`ofrou-sierre@narro.ch`. Tant qu'il ne l'est pas, la passerelle échoue en
+silence : son interface n'affiche qu'un « Server error » muet, et le diagnostic
+n'est plus dans `/var/log/mail.log` mais dans le journal d'`air-mail-server`.
+**C'est la dernière case de la fenêtre, et la seule qui se coche ailleurs que
+sur cette machine.**
 
 ---
 
