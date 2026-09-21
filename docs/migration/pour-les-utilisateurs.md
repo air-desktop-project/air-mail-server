@@ -2,9 +2,14 @@
 
 Bonjour,
 
-Le serveur de courrier de `narro.ch` est remplacé **le samedi 12 septembre au
-matin**. Vos adresses, vos messages et vos dossiers ne changent pas. Ce document
-dit ce que vous avez à faire — et ce n'est pas grand-chose.
+Le serveur de courrier de `narro.ch` est remplacé **demain soir, mardi 22
+septembre, à partir de 22 h**. Vos adresses, vos messages et vos dossiers ne
+changent pas. Ce document dit ce que vous avez à faire — et ce n'est pas
+grand-chose.
+
+Le délai est court, et nous le savons : vous avez une soirée pour lire ceci.
+Ce qu'il y a à faire tient en une ligne — saisir un nouveau mot de passe — et
+peut attendre demain soir.
 
 ---
 
@@ -13,18 +18,23 @@ dit ce que vous avez à faire — et ce n'est pas grand-chose.
 1. **Votre adresse ne change pas.** Ni vos alias.
 2. **Vos anciens messages sont conservés**, avec leurs dossiers, et le fait que
    vous les ayez lus, marqués ou auxquels vous avez répondu.
-3. **Vous recevrez un nouveau mot de passe** la veille, vendredi 11. Il faudra
-   le saisir dans votre logiciel de messagerie et sur votre téléphone.
+3. **Vous recevez un nouveau mot de passe** avec cette lettre, par un autre
+   canal. Il faudra le saisir dans votre logiciel de messagerie et sur votre
+   téléphone — mais seulement APRÈS la bascule de demain soir : d'ici là,
+   l'ancien reste le bon.
 4. **Votre logiciel va retélécharger tous vos messages une fois.** C'est normal.
    Sur une grosse boîte, cela peut prendre un long moment.
 
 ---
 
-## Le jour de la bascule : samedi 12 septembre, à partir de 9 h
+## Le jour de la bascule : mardi 22 septembre, à partir de 22 h
 
-Comptez une coupure d'environ une demi-heure entre 9 h 30 et 10 h. Votre
+Comptez une coupure d'environ une demi-heure entre 22 h 30 et 23 h. Votre
 logiciel affichera pendant ce temps une erreur de connexion, et vous ne pourrez
 ni recevoir ni envoyer.
+
+L'heure est tardive exprès : c'est le moment où le moins de courrier circule, et
+où une erreur de connexion ne dérange personne en pleine journée de travail.
 
 **Aucun message ne sera perdu.** Le courrier qui vous est envoyé pendant cette
 période est conservé par le serveur de l'expéditeur, qui réessaie
@@ -34,8 +44,9 @@ arrivera avec quelques minutes ou quelques heures de retard.
 Un message que vous tenteriez d'envoyer pendant la coupure, lui, restera dans
 votre logiciel : renvoyez-le simplement une fois la messagerie revenue.
 
-**Vous recevrez votre nouveau mot de passe la veille**, vendredi 11, par un
-autre canal que le courriel.
+**Votre nouveau mot de passe vous parvient avec cette lettre**, par un autre
+canal que le courriel. Ne le saisissez qu'une fois la coupure passée : avant
+elle, c'est l'ancien qui ouvre votre boîte.
 
 ---
 

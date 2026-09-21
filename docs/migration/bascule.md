@@ -44,9 +44,31 @@ toute façon ce que l'option A de §5 de l'étude fait des cinq autres.
 
 ---
 
-## LA FENÊTRE EST FIXÉE : samedi 12 septembre 2026, 09:00 CEST
+## LA FENÊTRE EST FIXÉE : mardi 22 septembre 2026, 22:00 CEST
 
-**AVANCÉE D'UNE SEMAINE le 2026-09-08**, après une phase 0 menée sur la vraie
+**CELLE DU SAMEDI 12 NE S'EST PAS OUVERTE**, et rien n'y a échoué : elle n'a pas
+été tenue. Le manuel a servi entre-temps à trouver ce que personne n'avait vu —
+la sixième boîte absente de toutes les boucles, les rôles de dossiers que le
+delta emporte, le certificat que le compte de service ne peut pas lire. C'est
+cette version-là qui se joue, et non celle du 12.
+
+**CE QUE LA NOUVELLE DATE CHANGE, ET QUI EST ASSUMÉ.** Deux hypothèses du 12
+tombent, et il vaut mieux les nommer que les découvrir :
+
+- **le soir d'un jour ouvré, et non le samedi matin.** Le samedi matin, c'était
+  le volume entrant au plus bas. 22:00 un mardi n'en est pas loin — le courrier
+  d'affaires s'est tu — et de toute façon une coupure de vingt minutes RETARDE
+  le courrier, elle n'en perd pas : c'est tout l'objet de la coupure franche ;
+- **un jour de préavis, et non quatre.** §0.7 en demandait quatre. La lettre
+  part donc le soir du 21, en même temps que les secrets, et non quatre jours
+  avant. Cinq personnes auront une soirée pour la lire.
+
+**ET UNE MARGE QUI DISPARAÎT.** Le samedi laissait deux jours devant soi pour
+reprendre ; mardi soir, le lendemain est un jour ouvré. Le retour en arrière ne
+dépend d'aucun DNS et tient en quelques minutes — c'est écrit plus bas —, mais
+cela se pèse AVANT d'ouvrir la fenêtre, pas pendant.
+
+**~~AVANCÉE D'UNE SEMAINE le 2026-09-08~~**, après une phase 0 menée sur la vraie
 machine dans la nuit. Ce qui fixait le 19 était la semaine d'épreuve de la clé
 DKIM ; elle ne peut pas avoir lieu — Resend efface notre signature — et ce
 qu'elle devait prouver l'a été autrement, plus solidement.
@@ -59,12 +81,19 @@ Le chemin qui y mène, et pourquoi chaque étape est là :
 | ~~la semaine d'épreuve DKIM~~ **SANS OBJET** | ~~on vérifie que les signatures se valident chez Gmail et Outlook~~ | **IMPOSSIBLE PAR RESEND** : il reconstruit le message, réécrit le `Message-ID` et signe avec SON sélecteur. Notre signature n'arrive jamais. Vérifié autrement le 2026-09-08 — `R_DKIM_ALLOW` en local, et `dkim=pass header.s=ams202609` chez Google en envoi direct |
 | **mardi 8** | le 8443 vu de l'EXTÉRIEUR · §0.6 avec un vrai client · `pour-les-utilisateurs.md` envoyé aux cinq | ce document PORTE la date, la durée de coupure et le moment des secrets : le relire si l'un des trois change |
 | **mercredi 9** | **LA PORTE** : le §0.6 doit être passé le soir | un défaut de la classe de ceux du 8 septembre, et l'on reprend le 19 — la courbe de découverte ne se serait pas aplatie |
-| **vendredi 11** | distribution des **cinq secrets initiaux, tous distincts** | un secret commun laisserait chacun ouvrir la boîte des autres |
-| **samedi 12, 09:00** | la fenêtre | volume entrant au plus bas, utilisateurs joignables, deux jours de marge |
+| ~~**vendredi 11**~~ **REFAIT LE 21** | ~~distribution des cinq secrets initiaux~~ | posés le 11, jamais servis, restés dix jours dans cinq boîtes : **retirés**, et six neufs posés le 21 |
+| ~~**samedi 12, 09:00**~~ **NON TENUE** | ~~la fenêtre~~ | elle n'a pas été ouverte. Les trois défauts trouvés depuis sont corrigés dans ce document |
+| **lundi 21** | le sixième compte dans `comptes.bin` · **six secrets posés et ÉPROUVÉS** · `pour-les-utilisateurs.md` redaté et envoyé | un secret posé qu'on n'a pas vu ouvrir la porte n'est pas un secret posé : `AUTH PLAIN` sur les six, et un témoin au mauvais secret qui doit être REFUSÉ |
+| **mardi 22, 22:00** | la fenêtre | le courrier d'affaires s'est tu, les cinq sont joignables dans la soirée |
 
-**Le détail du samedi.** 09:00 sauvegarde et copie finale ; 09:30 arrêt de
-Postfix, delta, démarrage d'`air-mail-server` ; 09:50 `verifier.sh` décide ;
-10:00 essais clients ; 11:00 fin. **Coupure réelle : environ vingt minutes.**
+**Le détail du mardi soir.** 22:00 sauvegarde et copie finale ; 22:30 arrêt de
+Postfix, delta, démarrage d'`air-mail-server` ; 22:50 `verifier.sh` décide ;
+23:00 essais clients, **dont la saisie du secret dans la passerelle Milesight** ;
+00:00 fin. **Coupure réelle : environ vingt minutes.**
+
+**LA PASSERELLE EST LA SEULE CASE QUI SE COCHE AILLEURS.** Tout le reste se fait
+sur la machine ; celle-là se fait dans une interface web jointe en 4G, et à
+23:00 un mardi. L'accès s'ouvre AVANT la fenêtre, pas pendant.
 
 **AVANT D'OUVRIR LA FENÊTRE, ON MUSELLE LES MISES À JOUR AUTOMATIQUES.**
 `unattended-upgrades` est ACTIF sur cette machine — relevé le 2026-09-08. Un
@@ -97,7 +126,8 @@ clé privée du serveur signe ce que le DNS publie, et Google le valide.
 
 **La date n'est donc plus contrainte par DKIM.** Ce qui la contraint encore : le
 préavis dû aux cinq utilisateurs, et l'audit du §0.5 sur les vraies boîtes. Le
-second est passé le 2026-09-08.
+second est passé le 2026-09-08 ; le premier est ramené à une soirée, et c'est
+une décision prise en connaissance de cause (voir en tête de section).
 
 ---
 
@@ -330,10 +360,32 @@ fichiers sont chargés par deux commandes distinctes (`iptables-restore` et
 `ip6tables-restore`), et n'en poser qu'un rendrait la bascule IPv4 seule — le
 défaut exact que ce document interdit à chaque page.
 
-Les deux blocs se relisent sans les charger :
+Les deux blocs se relisent sans les charger — **et la redirection va DANS le
+shell privilégié**, ce qui n'est pas un détail : écrite `sudo iptables-restore
+--test < /etc/ufw/before.rules`, elle est faite par le shell qui LANCE `sudo`,
+donc sans privilèges, sur un fichier en `0640 root:root`. On obtient
+« Permission denied » et l'on croit son bloc fautif. Cette page l'a écrit ainsi
+jusqu'au 2026-09-21, où la commande a été jouée pour de vrai.
 
-    sudo iptables-restore --test  < /etc/ufw/before.rules
-    sudo ip6tables-restore --test < /etc/ufw/before6.rules
+    sudo sh -c 'iptables-restore  --test < /etc/ufw/before.rules'
+    sudo sh -c 'ip6tables-restore --test < /etc/ufw/before6.rules'
+
+> **FAIT LE 2026-09-21, à 20:52.** Les deux blocs sont posés — sauvegardes
+> `/etc/ufw/before{,6}.rules.avant-ams-20260921-205253` —, les deux se relisent,
+> et `nft list ruleset | grep -c redirect` rend **0** : rien n'est appliqué. Le
+> 25 répond toujours depuis l'extérieur, Postfix écoute sur les quatre ports.
+>
+> **LES TROIS `ufw allow` DE L'ÉTAPE 6ter ONT ÉTÉ POSÉS EN MÊME TEMPS, ET
+> AVANT** — parce que `ufw allow` RECHARGE le pare-feu. Posés après les blocs
+> `*nat`, ils les auraient appliqués sur-le-champ, Postfix servant encore : le
+> 25 renvoyé sur un port que rien n'écoute, et le courrier entrant qui tombe
+> sans un mot dans les journaux. L'ordre est donc : les ouvertures d'abord, les
+> blocs ensuite. Il ne reste à l'étape 6ter qu'un `ufw reload`.
+>
+> ⚠️ **JUSQU'À LA FENÊTRE, ON NE TOUCHE PLUS À ufw**, et un REDÉMARRAGE aurait
+> le même effet qu'un `ufw reload` : il chargerait `before.rules`. Pour revenir
+> en arrière avant la bascule, ôter les deux blocs `*nat` (ou restaurer les deux
+> sauvegardes), et seulement ensuite recharger.
 
 ### 0.4 Une configuration en PORTS HAUTS, sur une COPIE du courrier
 
@@ -417,7 +469,7 @@ Ce que cela aurait donné le jour J : les serveurs qui résolvent le `MX` en AAA
 et préfèrent l'IPv6 — Google, la plupart des MTA modernes — trouvent le port 25
 injoignable et se rabattent après délai, quand ils se rabattent ; les clients des
 utilisateurs tentent l'IPv6 d'abord et échouent. **Un défaut intermittent,
-dépendant du réseau de chacun**, le pire à diagnostiquer un samedi matin.
+dépendant du réseau de chacun**, le pire à diagnostiquer un soir de bascule.
 
 `[::]` suffit à couvrir les deux parce que `net.ipv6.bindv6only = 0` sur cette
 machine — à vérifier, c'est le défaut de Linux mais il se change :
@@ -631,6 +683,23 @@ il refusait de repartir — code de sortie 1. Le conseil a été corrigé dans l
 produit, et un essai tient désormais l'enchaînement : suivre le conseil doit
 donner un serveur qui démarre. **On a néanmoins écrit les deux ici**, parce qu'un
 manuel qui dépend d'un message d'aide pour être complet n'est pas complet.
+
+> **FAIT LE 2026-09-21, à 22:12.** Les six comptes sont dans `comptes.bin`
+> — `ofrou-sierre` par `account add`, les cinq autres par `account passwd`, qui
+> ne touche pas aux adresses : celles de `contact` ont été relues après coup, et
+> les six y sont. Les secrets du 11 septembre, distribués et jamais servis, sont
+> caducs.
+>
+> **ILS ONT ÉTÉ ÉPROUVÉS, ET PAS SEULEMENT POSÉS.** `air-mail-server` a été
+> démarré sur `essai.conf` — en `127.0.0.1`, sans déranger Postfix —, et les six
+> se sont authentifiés en `AUTH PLAIN` à travers un tunnel, depuis le poste où
+> vivent les secrets. **Avec un témoin** : `contact` avec un mauvais secret doit
+> être REFUSÉ, sans quoi un « OK » ne prouverait pas que c'est CE secret-là qui
+> ouvre. Serveur arrêté, tunnel fermé, service toujours `disabled`.
+>
+> Les secrets ne sont ni sur onyx, ni dans un journal, ni dans aucun tampon de
+> terminal : ils ont traversé `ssh` sur l'entrée standard d'`air-mail-admin`, et
+> ils vivent dans un seul fichier en 0600, sur le poste.
 
 **SIX SECRETS DISTINCTS, ET NON UN SEUL PARTAGÉ.** Les commandes ci-dessus en
 tirent un par compte, et c'est délibéré : un secret commun laisserait, entre la
@@ -905,9 +974,19 @@ date**, la durée de coupure et le moment où les secrets arrivent — il faut d
 le relire si l'un des trois change, sans quoi cinq personnes liront une date
 fausse.
 
-La fenêtre étant fixée au samedi 12, envoyez-le **au plus tard le mardi 8**
-— quatre jours — et rappelez le vendredi 11, en même temps que les secrets
-initiaux de §0.4.
+La fenêtre étant fixée au **mardi 22 à 22:00**, il part **le soir du 21**, en
+même temps que les secrets initiaux de §0.4 — et non quatre jours avant, comme
+cette page le demandait pour le 12. C'est une soirée de préavis pour cinq
+personnes : le dire est plus honnête que de laisser le manuel promettre un délai
+qu'on ne tient pas.
+
+> **FAIT LE 2026-09-21.** La lettre redatée est partie aux cinq, et les six
+> secrets avec, par un canal privé distinct du courriel.
+
+**IL N'Y A DONC PAS DE RAPPEL SÉPARÉ.** L'envoi et les secrets sont le même
+geste, ce qui retire au passage le risque que §0.4 signalait — un secret qui
+traîne pendant que la bascule attend. Les cinq du 11 septembre ont vécu dix
+jours ainsi ; ils ont été retirés pour cette raison.
 
 **LA PASSERELLE NE LIT PAS CETTE LETTRE**, et c'est le piège de la veille : la
 liste des destinataires a CINQ noms quand le magasin en a six. Ce qui la
@@ -1107,10 +1186,17 @@ décidera si l'on recommence un autre jour.
     #    si bien que la chaîne `INPUT` voit arriver du 2525 — pas du 25. Un
     #    `ufw allow 25/tcp` seul laisse tout passer… jusqu'à la redirection, où
     #    tout est jeté, sans un mot dans le journal du serveur.
+    # **LES TROIS OUVERTURES SONT DÉJÀ POSÉES** (2026-09-21, §0.3bis) : elles
+    # rechargent le pare-feu, et devaient donc précéder les blocs `*nat`, pas
+    # les suivre. Elles sont laissées ici parce qu'elles sont idempotentes — et
+    # parce qu'un manuel qui suppose un état qu'il n'a pas vérifié est un manuel
+    # qui ment un jour sur deux.
+    sudo ufw status | grep -E '2525|4465|9993'   # les trois doivent être là
     sudo ufw allow 2525/tcp comment 'air-mail-server SMTP+submission (25/587 redirigés)'
     sudo ufw allow 4465/tcp comment 'air-mail-server SMTPS (465 redirigé)'
     sudo ufw allow 9993/tcp comment 'air-mail-server IMAPS (993 redirigé)'
     sudo ufw reload            # applique AUSSI les blocs *nat de §0.3bis
+    sudo nft list ruleset | grep -c redirect     # doit dire 4, et non 0
 
     #    Un port redirigé n'est joignable QUE DU DEHORS : depuis la machine,
     #    `127.0.0.1:25` est refusé, et un contrôle local doit viser le 2525.
