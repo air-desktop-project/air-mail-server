@@ -47,6 +47,25 @@ const MASQUE: libc::mode_t = 0o077;
 /// `0600` posé à l'ouverture reste juste, et vaut même si quelqu'un desserre le
 /// masque plus tard. Les deux se cumulent — le masque est un plancher, pas une
 /// dispense.
+// **CLIPPY A RAISON SOUS LINUX, ET TORT SOUS DARWIN**, et c'est pourquoi
+// l'exception est écrite ici plutôt que la conversion retirée. `mode_t` vaut
+// `u32` sous Linux : `u32::from` n'y convertit rien, `useless_conversion` le
+// refuse, et `-D warnings` fait tomber la CI — rouge du 2026-09-16 au
+// 2026-09-21, avec `cargo build`, `cargo test`, `check-paquet` et le reste
+// jamais joués derrière. La retirer empêcherait le dépôt de compiler sur le Mac,
+// où `mode_t` vaut `u16` : c'est le défaut que le 2026-09-16 réparait.
+//
+// **AUCUNE DES DEUX ÉCRITURES N'EST JUSTE POUR LES DEUX CIBLES.** Celle qui
+// compile PARTOUT est la bonne, et l'on dit au linteur pourquoi. Un `as` aurait
+// fait taire tout le monde en tronquant en silence le jour où la largeur
+// changerait dans l'autre sens.
+//
+// **ET `check-clippy.sh` NE POUVAIT PAS LE VOIR** : lancé sur le Mac, il est
+// vert, puisque là la conversion est réelle. Un lint qui dépend de la cible ne
+// s'éprouve qu'en nommant la cible — `cargo clippy --target
+// x86_64-unknown-linux-gnu` reproduit ce que la CI dit vingt-cinq minutes plus
+// tard.
+#[allow(clippy::useless_conversion)]
 pub fn restreindre_le_masque() -> u32 {
     // SAFETY : `umask` ne prend qu'un entier, ne touche à aucune mémoire de ce
     // processus, ne peut pas échouer, et rend toujours l'ancien masque. POSIX ne
