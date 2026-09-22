@@ -214,6 +214,35 @@ impl Authenticator for BoitesConnues {
                 .occuper(|| ams_auth::authenticate(&self.comptes.vue(), credentials))
         })
     }
+
+    /// Le nom du compte que cette identité désigne.
+    ///
+    /// Un pair peut s'authentifier sous son nom nu ou sous n'importe laquelle
+    /// de ses adresses (voir `ams_auth::authenticate`) ; c'est le NOM qui
+    /// désigne sa boîte. Sans cette traduction, `jean@narro.ch` relèverait un
+    /// répertoire `jean@narro.ch` vide, à côté de `jean`.
+    ///
+    /// Une identité inconnue se recopie telle quelle : cette méthode n'est
+    /// appelée qu'après un succès, et ne décide de rien.
+    fn canonical_login(&self, identity: &[u8], sortie: &mut [u8]) -> usize {
+        let comptes = self.comptes.vue();
+        let nom = comptes
+            .iter()
+            .find(|compte| {
+                compte.login.as_bytes() == identity
+                    || compte
+                        .addresses
+                        .iter()
+                        .any(|adresse| adresse.as_bytes().eq_ignore_ascii_case(identity))
+            })
+            .map_or(identity, |compte| compte.login.as_bytes());
+        let longueur = nom.len().min(sortie.len());
+        sortie
+            .get_mut(..longueur)
+            .unwrap_or_default()
+            .copy_from_slice(nom.get(..longueur).unwrap_or_default());
+        longueur
+    }
 }
 
 impl Policy for BoitesConnues {

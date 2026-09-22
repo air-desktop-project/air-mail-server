@@ -105,6 +105,44 @@ pub fn route<'a>(accounts: &'a [Account], address: &[u8]) -> Option<&'a Account>
     })
 }
 
+/// Cet identifiant désigne-t-il ce compte ?
+///
+/// # DEUX FORMES POUR UN COMPTE, ET LA SECONDE A COÛTÉ UNE BASCULE
+///
+/// Le nom nu — `jean` — est le nom du compte, et c'est ce que ce magasin
+/// enregistre. Mais **Dovecot authentifiait sur l'ADRESSE COMPLÈTE**, et c'est
+/// donc ce que portent les clients de courrier, les passerelles et les
+/// applications de tous ceux qui migrent depuis lui. Le 2026-09-22,
+/// `mail.narro.ch` a basculé sur ce serveur : aucun des cinq comptes ne s'est
+/// connecté, la plate-forme d'alertes s'est tue, et il a fallu corriger sept
+/// configurations à la main. Rien de la phase 0 ne pouvait le voir — tous les
+/// essais employaient le nom nu, parce que c'est ainsi qu'on crée un compte.
+///
+/// **LE REMPLAÇANT ACCEPTE DONC CE QUE LE REMPLACÉ ACCEPTAIT** : `jean`, et
+/// `jean@…` pour toute adresse que ce compte porte. C'est la règle que ce
+/// dépôt s'applique partout ailleurs — les `--require-fqdn-*`, la taille
+/// maximale d'un message —, et elle valait ici aussi.
+///
+/// # CE QUI N'EST PAS ACCEPTÉ, ET POURQUOI
+///
+/// **Une adresse qui n'est pas la sienne.** `jean` ne se connecte pas en
+/// donnant `contact@narro.ch` : l'identifiant désigne un compte, pas une boîte
+/// aux lettres, et accepter l'adresse d'autrui ferait dépendre l'ouverture de
+/// session d'une table de routage. Deux comptes ne peuvent pas porter la même
+/// adresse — `decode_accounts` le refuse au chargement —, donc la
+/// correspondance reste unique.
+///
+/// **Le repliement de casse est ASCII seulement**, comme pour [`route`] : replier
+/// de l'Unicode demanderait des tables, et deux formes normalisées différemment
+/// ne sont pas le même nom.
+fn est_ce_compte(compte: &Account, identite: &[u8]) -> bool {
+    compte.login.as_bytes() == identite
+        || compte
+            .addresses
+            .iter()
+            .any(|adresse| adresse.as_bytes().eq_ignore_ascii_case(identite))
+}
+
 /// Ce qui rend un magasin ou une empreinte irrecevable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -228,7 +266,7 @@ pub fn authenticate(accounts: &[Account], credentials: &Credentials<'_>) -> bool
 
     let empreinte = accounts
         .iter()
-        .find(|compte| compte.login.as_bytes() == credentials.authentication_identity)
+        .find(|compte| est_ce_compte(compte, credentials.authentication_identity))
         .map_or(DUMMY_HASH, |compte| compte.hash.as_str());
 
     let Ok(lue) = PasswordHash::new(empreinte) else {
@@ -243,7 +281,7 @@ pub fn authenticate(accounts: &[Account], credentials: &Credentials<'_>) -> bool
     juste
         && accounts
             .iter()
-            .any(|compte| compte.login.as_bytes() == credentials.authentication_identity)
+            .any(|compte| est_ce_compte(compte, credentials.authentication_identity))
 }
 
 #[cfg(test)]
@@ -492,5 +530,92 @@ mod tests {
         };
         assert_eq!(compte, compte.clone());
         assert!(!format!("{compte:?}").is_empty());
+    }
+
+    /// **LES DEUX FORMES OUVRENT LE MÊME COMPTE**, et c'est ce que la bascule
+    /// du 2026-09-22 a montré manquant : Dovecot authentifiait sur l'adresse,
+    /// et aucun des cinq comptes ne s'est connecté.
+    #[test]
+    fn un_compte_s_authentifie_sous_son_nom_ou_sous_une_de_ses_adresses() {
+        let compte = Account {
+            login: String::from("jean"),
+            hash: hash_password(b"ouvre-toi", b"un-sel-de-seize.").expect("empreinte"),
+            addresses: vec![
+                String::from("jean@narro.ch"),
+                String::from("j.dupont@narro.ch"),
+            ],
+        };
+        let magasin = vec![compte];
+        // **DES `&str`, ET NON DES `&[u8]`** : le message d'échec veut du texte,
+        // et le convertir dedans ouvrirait une branche de repli qu'aucune
+        // entrée ne prend — C2 la compterait à jamais découverte.
+        for identite in [
+            "jean",
+            "jean@narro.ch",
+            "j.dupont@narro.ch",
+            // La casse d'une ADRESSE ne compte pas — c'est la règle de `route`.
+            "Jean@Narro.CH",
+        ] {
+            assert!(
+                authenticate(
+                    &magasin,
+                    &Credentials {
+                        authorization_identity: b"",
+                        authentication_identity: identite.as_bytes(),
+                        password: b"ouvre-toi",
+                    }
+                ),
+                "« {identite} » aurait dû ouvrir"
+            );
+        }
+    }
+
+    #[test]
+    fn l_adresse_d_un_autre_compte_n_ouvre_pas_la_sienne() {
+        // L'identifiant désigne un COMPTE, pas une boîte aux lettres. Accepter
+        // l'adresse d'autrui ferait dépendre l'ouverture de session d'une table
+        // de routage — et le mot de passe de `jean` ouvrirait `contact`.
+        let magasin = vec![
+            Account {
+                login: String::from("jean"),
+                hash: hash_password(b"ouvre-toi", b"un-sel-de-seize.").expect("empreinte"),
+                addresses: vec![String::from("jean@narro.ch")],
+            },
+            Account {
+                login: String::from("contact"),
+                hash: hash_password(b"autre-chose", b"un-sel-de-seize.").expect("empreinte"),
+                addresses: vec![String::from("contact@narro.ch")],
+            },
+        ];
+        assert!(
+            !authenticate(
+                &magasin,
+                &Credentials {
+                    authorization_identity: b"",
+                    authentication_identity: b"contact@narro.ch",
+                    password: b"ouvre-toi",
+                }
+            ),
+            "le mot de passe de `jean` a ouvert `contact`"
+        );
+    }
+
+    /// La casse du NOM DE COMPTE, elle, compte : c'est un nom de répertoire, et
+    /// deux répertoires qui ne diffèrent que par la casse sont deux boîtes.
+    #[test]
+    fn la_casse_du_nom_de_compte_compte() {
+        let magasin = vec![Account {
+            login: String::from("jean"),
+            hash: hash_password(b"ouvre-toi", b"un-sel-de-seize.").expect("empreinte"),
+            addresses: vec![],
+        }];
+        assert!(!authenticate(
+            &magasin,
+            &Credentials {
+                authorization_identity: b"",
+                authentication_identity: b"Jean",
+                password: b"ouvre-toi",
+            }
+        ));
     }
 }

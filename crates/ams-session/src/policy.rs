@@ -55,11 +55,41 @@ pub trait Authenticator {
         let _ = credentials;
         false
     }
+
+    /// Le NOM DE COMPTE que cette identité désigne, écrit dans `sortie`.
+    ///
+    /// # POURQUOI CETTE MÉTHODE EXISTE
+    ///
+    /// Depuis le 2026-09-22, un compte s'authentifie sous deux formes : son nom
+    /// nu — `jean` — et n'importe laquelle de ses adresses — `jean@narro.ch` —,
+    /// parce que c'est ce que Dovecot acceptait et donc ce que portent les
+    /// clients de tous ceux qui migrent. Mais **l'identité authentifiée devient
+    /// ensuite le nom de la BOÎTE** : la retenir telle que le pair l'a écrite
+    /// donnerait un répertoire `jean@narro.ch` à côté de `jean`, et le compte
+    /// relèverait une boîte vide.
+    ///
+    /// La session appelle donc ceci juste après un succès, et retient ce qui en
+    /// sort. Rend combien d'octets ont été écrits.
+    ///
+    /// **LE DÉFAUT RECOPIE L'IDENTITÉ**, ce qui est juste pour toute politique
+    /// qui n'accepte que le nom nu — y compris les doublures des bancs.
+    fn canonical_login(&self, identity: &[u8], sortie: &mut [u8]) -> usize {
+        let longueur = identity.len().min(sortie.len());
+        sortie
+            .get_mut(..longueur)
+            .unwrap_or_default()
+            .copy_from_slice(identity.get(..longueur).unwrap_or_default());
+        longueur
+    }
 }
 
 impl<T: Authenticator + ?Sized> Authenticator for &T {
     fn authenticate(&self, credentials: &Credentials<'_>) -> bool {
         (**self).authenticate(credentials)
+    }
+
+    fn canonical_login(&self, identity: &[u8], sortie: &mut [u8]) -> usize {
+        (**self).canonical_login(identity, sortie)
     }
 }
 

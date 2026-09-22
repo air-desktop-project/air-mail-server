@@ -1835,7 +1835,11 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             password: secret,
         };
         let succes = self.policy.authenticate(&credentials);
-        self.conclure_l_authentification(succes, nom, out)
+        // Même canonisation que pour `AUTHENTICATE` : `LOGIN` accepte les deux
+        // formes lui aussi, et la boîte porte le nom du compte.
+        let mut canonique = [0_u8; USER_MAX_OCTETS];
+        let longueur = self.policy.canonical_login(nom, &mut canonique);
+        self.conclure_l_authentification(succes, canonique.get(..longueur).unwrap_or_default(), out)
     }
 
     /// `AUTHENTICATE` (§6.2.2), avec la réponse initiale de la RFC 4959.
@@ -1918,12 +1922,12 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             Err(_) => (false, &[][..]),
         };
         if succes {
+            // **LE NOM DU COMPTE, ET NON CE QUE LE PAIR A ÉCRIT** : il ouvre sa
+            // session sous son nom nu ou sous une de ses adresses, et c'est le
+            // nom qui désigne son répertoire de boîte. Voir
+            // `Authenticator::canonical_login`.
             let mut place = [0_u8; USER_MAX_OCTETS];
-            let longueur = nom.len().min(place.len());
-            place
-                .get_mut(..longueur)
-                .unwrap_or_default()
-                .copy_from_slice(nom.get(..longueur).unwrap_or_default());
+            let longueur = self.policy.canonical_login(nom, &mut place);
             return self.conclure_l_authentification(
                 true,
                 place.get(..longueur).unwrap_or_default(),

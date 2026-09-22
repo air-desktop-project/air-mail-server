@@ -2199,12 +2199,20 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
                 Ok(identifiants) => {
                     let accorde = self.policy.authenticate(&identifiants);
                     if accorde {
+                        // **ON RETIENT LE NOM DU COMPTE, PAS CE QUE LE PAIR A
+                        // ÉCRIT.** Il s'authentifie sous son nom nu ou sous une
+                        // de ses adresses ; c'est le nom qui désigne sa boîte.
+                        let mut canonique = [0_u8; SASL_DECODED_MAX];
+                        let longueur = self
+                            .policy
+                            .canonical_login(identifiants.authentication_identity, &mut canonique);
+                        self.compte
+                            .poser(&[canonique.get(..longueur).unwrap_or_default()]);
                         // **ON RETIENT QUI S'EST AUTHENTIFIÉ**, et pas seulement
                         // QUE quelqu'un l'a fait. Un nom qui ne tient pas laisse
                         // le tampon vide, et la remise refusera alors tout
                         // `From:` : mieux vaut ne rien émettre que de signer une
                         // adresse qu'on ne sait pas rattacher à un compte.
-                        self.compte.poser(&[identifiants.authentication_identity]);
                     }
                     accorde
                 }
