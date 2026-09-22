@@ -118,6 +118,14 @@ struct Entree {
     /// éprouve ici est qu'un aller-retour le rende intact, sans quoi une
     /// authentification échouerait sans que rien ne dise pourquoi.
     relais: [String; 3],
+    /// La clé de scellement de SCRAM et son magasin — DEUX CHAÎNES LIBRES, y
+    /// compris l'une sans l'autre.
+    ///
+    /// C'est `config write` qui refuse l'une sans l'autre, et le SERVEUR qui
+    /// refuse de démarrer si le magasin ne s'ouvre pas ; ce format-ci ne fait
+    /// que les transporter. Les lier ici cacherait ce partage au lieu de
+    /// l'éprouver.
+    scram: [String; 2],
     /// Le dossier des rapports TLS, et le drapeau de remise — LIBRES tous les
     /// deux, y compris incohérents entre eux.
     tlsrpt: String,
@@ -177,6 +185,8 @@ fuzz_target!(|entree: Entree| {
         imap_listeners: en_ecoutes(&entree.ecoutes_imap),
         pop3_listeners: en_ecoutes(&entree.ecoutes_pop3),
         imap_implicit_tls: entree.imap_implicite,
+        scram_key: entree.scram[0].clone(),
+        scram_store: entree.scram[1].clone(),
         require_fqdn_helo: entree.helo_qualifie,
         require_fqdn_sender: entree.expediteur_qualifie,
         require_fqdn_recipient: entree.destinataire_qualifie,

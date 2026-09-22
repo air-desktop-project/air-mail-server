@@ -76,6 +76,10 @@ pub struct Options {
     pub tls_key: Option<PathBuf>,
     /// Le fichier de comptes. Vide : pas d'`AUTH`.
     pub accounts: Option<PathBuf>,
+    /// La clé qui ouvre les vérificateurs SCRAM. Vide : SCRAM n'est pas servi.
+    pub scram_key: Option<PathBuf>,
+    /// Le magasin des vérificateurs SCRAM. Vide : SCRAM n'est pas servi.
+    pub scram_store: Option<PathBuf>,
     /// Où écouter en POP3. Vide : POP3 n'est pas servi.
     pub listen_pop3: Option<SocketAddr>,
     /// Les écoutes POP3, chacune avec son mode TLS.
@@ -232,6 +236,8 @@ impl Default for Options {
             // PAS DE COMPTES PAR DÉFAUT : un serveur qui n'a personne à qui
             // répondre oui n'annonce pas `AUTH`.
             accounts: None,
+            scram_key: None,
+            scram_store: None,
             // PAS DE POP3 PAR DÉFAUT : un port ouvert qu'on n'a pas demandé est
             // une surface de plus, et celui-ci ne sert personne sans certificat.
             listen_pop3: None,
@@ -415,6 +421,8 @@ impl Options {
                 private_key_path: chemin(self.dkim_key.as_ref()),
             },
             accounts: chemin(self.accounts.as_ref()),
+            scram_key: chemin(self.scram_key.as_ref()),
+            scram_store: chemin(self.scram_store.as_ref()),
             tlsrpt: ams_config::Tlsrpt {
                 directory: chemin(self.tlsrpt_dir.as_ref()),
                 send: self.tlsrpt_send,
@@ -571,6 +579,15 @@ OPTIONS DE `config write`
     --tls-cert <chemin>    chaîne de certificats, en PEM
     --tls-key <chemin>     clé privée, en PEM
     --accounts <chemin>    fichier de comptes (`air-mail-admin account add`)
+    --scram-key <chemin>   la clé qui ouvre les vérificateurs SCRAM
+    --scram <chemin>       le magasin des vérificateurs SCRAM
+                        LES DEUX VONT ENSEMBLE, OU AUCUNE. Sans elles, SCRAM
+                        n'est ni annoncé ni servi, et seul `PLAIN` l'est —
+                        c'est le défaut, et il convient à qui n'a pas de
+                        client qui sache faire mieux.
+                        La clé se tire par `air-mail-admin scram init`, et se
+                        range AILLEURS que le magasin : les deux au même
+                        endroit ne valent pas mieux qu'un seul fichier en clair.
     --listen-pop3 <adr>    où écouter en POP3 avec `STLS` — le 110. RÉPÉTABLE
                            (défaut : pas de POP3)
     --listen-pop3s <adr>   où écouter en POP3 avec TLS IMPLICITE — le 995.
@@ -1228,6 +1245,8 @@ where
             "--dkim-key" => options.dkim_key = Some(PathBuf::from(valeur()?)),
             "--tls-key" => options.tls_key = Some(PathBuf::from(valeur()?)),
             "--accounts" => options.accounts = Some(PathBuf::from(valeur()?)),
+            "--scram-key" => options.scram_key = Some(PathBuf::from(valeur()?)),
+            "--scram" => options.scram_store = Some(PathBuf::from(valeur()?)),
             "--resolver" => {
                 let brute = valeur()?;
                 let adresse: SocketAddr = brute
@@ -1607,6 +1626,7 @@ where
     }
     valider_le_relais(&options)?;
     valider_les_controles_dns(&options)?;
+    valider_scram(&options)?;
 
     // L'INVERSE N'EST PAS REFUSÉ, et c'est délibéré : nommer un dossier sans
     // rien émettre ne promet rien à personne, et permet de le préparer avant.
@@ -1699,6 +1719,25 @@ fn valider_les_controles_dns(options: &Options) -> Result<(), ArgError> {
         ));
     }
     Ok(())
+}
+
+/// Les deux options de SCRAM vont ensemble, ou aucune.
+///
+/// **REFUSER AU TERMINAL PLUTÔT QU'À L'OUVERTURE DE SESSION.** Une clé sans
+/// magasin n'a rien à ouvrir ; un magasin sans clé ne s'ouvre pas. Dans les
+/// deux cas, le serveur démarrerait, annoncerait — ou n'annoncerait pas — et le
+/// défaut ne se verrait qu'au premier client qui essaie.
+fn valider_scram(options: &Options) -> Result<(), ArgError> {
+    match (&options.scram_key, &options.scram_store) {
+        (Some(_), None) => Err(ArgError::new(
+            "`--scram-key` sans `--scram` : la clé n'aurait aucun magasin à ouvrir",
+        )),
+        (None, Some(_)) => Err(ArgError::new(
+            "`--scram` sans `--scram-key` : le magasin ne s'ouvrirait pas, et aucun compte \
+             ne pourrait se connecter en SCRAM",
+        )),
+        _ => Ok(()),
+    }
 }
 
 fn valider_le_relais(options: &Options) -> Result<(), ArgError> {
@@ -2109,6 +2148,11 @@ mod tests {
             (&["--mta-sts-anchors"], "attend une valeur"),
             (&["--mta-sts-cache"], "attend une valeur"),
             (&["--tlsrpt-dir"], "attend une valeur"),
+            // LES DEUX CHEMINS DE SCRAM : un chemin vide ouvrirait un magasin
+            // qui n'existe pas, et le serveur ne le dirait qu'au premier
+            // client.
+            (&["--scram-key"], "attend une valeur"),
+            (&["--scram"], "attend une valeur"),
         ] {
             let erreur = parse(arguments).expect_err("refusé");
             assert!(
@@ -3462,6 +3506,44 @@ mod tests {
     /// Un serveur qui ajourne tout n'est pas durci, il est en panne, et rien
     /// dans son journal ne dirait qu'il manque une option. Le refus a lieu ici,
     /// où le message peut encore nommer ce qui manque.
+    #[test]
+    fn les_deux_options_de_scram_vont_ensemble_ou_aucune() {
+        // **REFUSER AU TERMINAL PLUTÔT QU'À L'OUVERTURE DE SESSION** : dans les
+        // deux cas le serveur démarrerait, et le défaut ne se verrait qu'au
+        // premier client qui essaie.
+        let arguments: &[&str] = &["--scram-key", "/x/scram.key"];
+        let faute = parse(arguments).expect_err("refusé");
+        assert!(faute.message.contains("--scram"), "{}", faute.message);
+        assert!(
+            faute.message.contains("magasin"),
+            "le message doit dire CE QUI MANQUE : {}",
+            faute.message
+        );
+
+        let arguments: &[&str] = &["--scram", "/x/scram.bin"];
+        let faute = parse(arguments).expect_err("refusé");
+        assert!(faute.message.contains("--scram-key"), "{}", faute.message);
+        assert!(
+            faute.message.contains("ne s'ouvrirait pas"),
+            "{}",
+            faute.message
+        );
+
+        // Les deux ensemble passent, et se retrouvent dans la configuration.
+        let arguments: &[&str] = &["--scram-key", "/x/scram.key", "--scram", "/x/scram.bin"];
+        let options = ecrire(arguments);
+        assert_eq!(options.scram_key, Some(PathBuf::from("/x/scram.key")));
+        assert_eq!(options.scram_store, Some(PathBuf::from("/x/scram.bin")));
+        let config = options.en_configuration();
+        assert_eq!(config.scram_key, "/x/scram.key");
+        assert_eq!(config.scram_store, "/x/scram.bin");
+
+        // Et NI L'UNE NI L'AUTRE est le défaut : SCRAM ne s'invite pas.
+        let arguments: &[&str] = &["--domain", "mail.example.com"];
+        let config = ecrire(arguments).en_configuration();
+        assert!(config.scram_key.is_empty() && config.scram_store.is_empty());
+    }
+
     #[test]
     fn le_controle_de_domaine_exige_un_resolveur() {
         // **UNE TRANCHE, ET NON UN TABLEAU LITTÉRAL.** `parse` est générique :

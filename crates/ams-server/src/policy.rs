@@ -100,6 +100,11 @@ impl Places {
 /// vérifications à deux endroits finissent par ne plus dire la même chose.
 pub struct BoitesConnues {
     comptes: std::sync::Arc<crate::comptes::Comptes>,
+    /// Les vérificateurs SCRAM, si l'exploitant les a demandés.
+    ///
+    /// `None` est le cas ordinaire : sans `--scram-key` et `--scram`, ce
+    /// serveur n'annonce pas le mécanisme et ne le sert pas.
+    scram: Option<std::sync::Arc<crate::scram::Verificateurs>>,
     /// L'adresse du postmaster de ce serveur, composée une fois.
     postmaster: String,
     /// Les domaines que ce serveur DÉCLARE servir, en minuscules.
@@ -135,6 +140,10 @@ impl BoitesConnues {
     ) -> Self {
         Self {
             comptes,
+            // **ON N'OUVRE PAS SCRAM DANS LE CONSTRUCTEUR.** Un argument de plus
+            // se passe à l'envers sans que le compilateur bronche, et celui-ci
+            // décide d'un mécanisme d'authentification. `avec_scram` le pose.
+            scram: None,
             postmaster,
             // **EN MINUSCULES UNE FOIS**, plutôt qu'à chaque `RCPT` : un nom de
             // domaine se compare sans égard à la casse (RFC 5321 §2.4), et le
@@ -193,6 +202,20 @@ impl BoitesConnues {
     }
 }
 
+impl BoitesConnues {
+    /// Donne à cette politique de quoi conduire SCRAM.
+    ///
+    /// Tant qu'on ne l'appelle pas, `scram_first` rend `None` et la session
+    /// n'annonce que `PLAIN`.
+    pub fn avec_scram(
+        mut self,
+        verificateurs: std::sync::Arc<crate::scram::Verificateurs>,
+    ) -> Self {
+        self.scram = Some(verificateurs);
+        self
+    }
+}
+
 impl Authenticator for BoitesConnues {
     /// # Deux précautions, et aucune n'est facultative
     ///
@@ -213,6 +236,89 @@ impl Authenticator for BoitesConnues {
             self.places
                 .occuper(|| ams_auth::authenticate(&self.comptes.vue(), credentials))
         })
+    }
+
+    /// Le `server-first`, avec un nonce tiré du noyau.
+    ///
+    /// # POURQUOI LE NONCE EST TIRÉ ICI
+    ///
+    /// La session ne sait pas tirer au sort : le hasard est une entrée-sortie,
+    /// et C1 le garde hors des machines à états. C'est donc la politique, qui
+    /// vit du côté du système, qui le fournit — comme elle fournit déjà le
+    /// magasin.
+    ///
+    /// **UN NONCE PAR ÉCHANGE, ET JAMAIS DEUX FOIS LE MÊME.** §5.1 de RFC 5802 :
+    /// c'est lui qui empêche de rejouer une preuve écoutée. Vingt-quatre octets
+    /// tirés d'`/dev/urandom`, encodés en base64 — le `r=` ne tolère ni virgule
+    /// ni octet non imprimable.
+    fn scram_first(
+        &self,
+        client_first: &[u8],
+        sortie: &mut [u8],
+    ) -> Option<ams_session::ScramFirst> {
+        let verificateurs = self.scram.as_ref()?;
+        let lu = ams_sasl::parse_client_first(client_first).ok()?;
+        // Le nom arrive échappé (`=2C`, `=3D`) : on le rend tel qu'il se compare
+        // aux noms de comptes, qui ne portent ni virgule ni égal.
+        let mut nom = [0_u8; 128];
+        let taille = ams_sasl::desechapper(lu.username, &mut nom).ok()?;
+        let login = nom.get(..taille)?;
+
+        let mut graine = [0_u8; 24];
+        {
+            use std::io::Read as _;
+            std::fs::File::open("/dev/urandom")
+                .and_then(|mut source| source.read_exact(&mut graine))
+                .ok()?;
+        }
+        let mut encode = [0_u8; 64];
+        let nonce = ams_mime::encode_base64_line(&graine, &mut encode).ok()?;
+
+        let ecrits = verificateurs.server_first(login, lu.nonce, nonce, sortie)?;
+        // Le rang où commence le `client-first-bare` : la session le retiendra
+        // sans le recopier.
+        let debut_bare = client_first.len().checked_sub(lu.bare.len())?;
+        Some(ams_session::ScramFirst { ecrits, debut_bare })
+    }
+
+    fn scram_final(
+        &self,
+        bare: &[u8],
+        first: &[u8],
+        client_final: &[u8],
+        sortie: &mut [u8],
+    ) -> Option<usize> {
+        let verificateurs = self.scram.as_ref()?;
+        let mut liaison = [0_u8; ams_sasl::MESSAGE_MAX];
+        let lu = ams_sasl::parse_client_final(client_final, &mut liaison).ok()?;
+
+        // **LE NONCE DOIT ÊTRE CELUI QU'ON A ENVOYÉ.** §5.1 : sans ce contrôle,
+        // une preuve calculée sur un autre `server-first` passerait — c'est
+        // exactement ce que le nonce existe pour empêcher.
+        let attendu = first
+            .get(2..)
+            .and_then(|reste| reste.split(|octet| *octet == b',').next())?;
+        if !ams_sasl::egales(lu.nonce, attendu) {
+            return None;
+        }
+
+        // Le `AuthMessage` de §3 : les trois parts, séparées par des virgules.
+        let mut message = [0_u8; ams_sasl::MESSAGE_MAX];
+        let mut ecrits = 0_usize;
+        for part in [bare, b",", first, b",", lu.sans_preuve] {
+            let fin = ecrits.checked_add(part.len())?;
+            message.get_mut(ecrits..fin)?.copy_from_slice(part);
+            ecrits = fin;
+        }
+
+        let mut nom = [0_u8; 128];
+        let taille = ams_sasl::desechapper(nom_du_bare(bare), &mut nom).ok()?;
+        verificateurs.server_final(
+            nom.get(..taille)?,
+            message.get(..ecrits)?,
+            &lu.proof,
+            sortie,
+        )
     }
 
     /// Le nom du compte que cette identité désigne.
@@ -242,6 +348,19 @@ impl Authenticator for BoitesConnues {
             .unwrap_or_default()
             .copy_from_slice(nom.get(..longueur).unwrap_or_default());
         longueur
+    }
+}
+
+/// Le `n=` d'un `client-first-bare`, encore échappé.
+fn nom_du_bare(bare: &[u8]) -> &[u8] {
+    let apres = bare
+        .get(..2)
+        .filter(|debut| *debut == b"n=")
+        .and_then(|_| bare.get(2..))
+        .unwrap_or_default();
+    match apres.iter().position(|octet| *octet == b',') {
+        Some(rang) => apres.get(..rang).unwrap_or_default(),
+        None => apres,
     }
 }
 

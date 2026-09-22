@@ -81,6 +81,61 @@ pub trait Authenticator {
             .copy_from_slice(identity.get(..longueur).unwrap_or_default());
         longueur
     }
+
+    /// La première réponse de SCRAM : le `server-first` de RFC 5802 §3.
+    ///
+    /// Reçoit le `client-first` ENTIER — en-tête GS2 compris, parce que la
+    /// politique doit savoir si le pair a lié le canal — et écrit dans `sortie`
+    /// un `r=…,s=…,i=…`. Rend combien d'octets, et le `client-first-bare` que
+    /// la session devra retenir.
+    ///
+    /// # UN COMPTE INCONNU RÉPOND COMME UN AUTRE
+    ///
+    /// §7 le demande : refuser tout de suite rendrait le magasin énumérable
+    /// sans connaître un seul mot de passe. La politique rend donc un sel
+    /// FACTICE mais stable, et n'échoue qu'à la preuve. `None` ne veut pas dire
+    /// « compte inconnu » : il veut dire **SCRAM n'est pas servi ici**, ou le
+    /// message est mal formé.
+    ///
+    /// Le défaut ne sert pas SCRAM. Une politique qui ne l'implémente pas
+    /// obtient un serveur qui ne l'annonce pas — c'est cohérent, et silencieux.
+    fn scram_first(&self, client_first: &[u8], sortie: &mut [u8]) -> Option<ScramFirst> {
+        let _ = (client_first, sortie);
+        None
+    }
+
+    /// La conclusion : vérifie la preuve et écrit le `server-final` (`v=…`).
+    ///
+    /// Reçoit les trois parts du `AuthMessage` de §3 — le `client-first-bare`
+    /// et le `server-first` que la session a retenus, et le `client-final`
+    /// entier, dont la politique retirera la preuve.
+    ///
+    /// Rend le nombre d'octets écrits dans `sortie` quand la preuve est juste,
+    /// et `None` autrement. **Aucune distinction entre « compte inconnu » et
+    /// « preuve fausse »** : les séparer apprendrait à qui tâtonne lequel des
+    /// deux il a touché.
+    fn scram_final(
+        &self,
+        bare: &[u8],
+        first: &[u8],
+        client_final: &[u8],
+        sortie: &mut [u8],
+    ) -> Option<usize> {
+        let _ = (bare, first, client_final, sortie);
+        None
+    }
+}
+
+/// Ce que [`Authenticator::scram_first`] rend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScramFirst {
+    /// Combien d'octets de `server-first` ont été écrits.
+    pub ecrits: usize,
+    /// Où commence le `client-first-bare` dans le `client-first` reçu.
+    ///
+    /// **UN RANG, ET NON UNE COPIE** : la session tient déjà le message, et le
+    /// recopier ici demanderait un second tampon pour rien.
+    pub debut_bare: usize,
 }
 
 impl<T: Authenticator + ?Sized> Authenticator for &T {
@@ -90,6 +145,20 @@ impl<T: Authenticator + ?Sized> Authenticator for &T {
 
     fn canonical_login(&self, identity: &[u8], sortie: &mut [u8]) -> usize {
         (**self).canonical_login(identity, sortie)
+    }
+
+    fn scram_first(&self, client_first: &[u8], sortie: &mut [u8]) -> Option<ScramFirst> {
+        (**self).scram_first(client_first, sortie)
+    }
+
+    fn scram_final(
+        &self,
+        bare: &[u8],
+        first: &[u8],
+        client_final: &[u8],
+        sortie: &mut [u8],
+    ) -> Option<usize> {
+        (**self).scram_final(bare, first, client_final, sortie)
     }
 }
 
@@ -147,7 +216,7 @@ impl<T: Policy + ?Sized> Policy for &T {
 
 #[cfg(test)]
 mod tests {
-    use super::{Authenticator, Policy, RecipientVerdict};
+    use super::{Authenticator, Policy, RecipientVerdict, ScramFirst};
     use ams_proto_smtp::Path;
     use ams_sasl::Credentials;
 
@@ -224,6 +293,54 @@ mod tests {
     /// resterait morte. Il faut que `P` VAILLE `&Toujours` pour l'emprunter.
     fn interroger<P: Policy>(politique: P) -> RecipientVerdict {
         politique.accepts_recipient(&Path::Null, false)
+    }
+
+    /// Interroge SCRAM **par générique**, pour la raison déjà dite : un appel
+    /// direct sur une référence irait chercher l'implémentation concrète, et le
+    /// relais de `&T` resterait mort.
+    fn tenter_scram<P: Authenticator>(politique: P) -> (Option<ScramFirst>, Option<usize>) {
+        let mut sortie = [0_u8; 64];
+        let premier = politique.scram_first(b"n,,n=jean,r=abc", &mut sortie);
+        let dernier = politique.scram_final(
+            b"n=jean,r=abc",
+            b"r=abcdef,s=c2Vs,i=4096",
+            b"c=biws,r=abcdef,p=AAAA",
+            &mut sortie,
+        );
+        (premier, dernier)
+    }
+
+    #[test]
+    fn le_defaut_ne_sert_pas_scram_et_la_reference_non_plus() {
+        // **`None` NE VEUT PAS DIRE « COMPTE INCONNU »**, il veut dire « SCRAM
+        // n'est pas servi ici » : la session ne l'annonce alors pas, et le
+        // refuse si un client l'essaie quand même. Une politique qui oublie ces
+        // deux méthodes obtient un serveur en `PLAIN` seul — cohérent, et
+        // silencieux.
+        let politique = Toujours(RecipientVerdict::Accept);
+        let (premier, dernier) = tenter_scram(&politique);
+        assert!(premier.is_none() && dernier.is_none());
+        // Et par valeur, puisque c'est le même défaut des deux côtés.
+        let (premier, dernier) = tenter_scram(Toujours(RecipientVerdict::Accept));
+        assert!(premier.is_none() && dernier.is_none());
+    }
+
+    #[test]
+    fn le_nom_canonique_par_defaut_recopie_l_identite() {
+        // Le défaut convient à toute politique qui n'accepte que le nom nu ; une
+        // politique qui accepte aussi les adresses le remplace. **LA RECOPIE SE
+        // BORNE À LA SORTIE** : un nom plus long que le tampon est tronqué, et
+        // non écrit à côté.
+        fn canonique<P: Authenticator>(politique: P, identite: &[u8], place: &mut [u8]) -> usize {
+            politique.canonical_login(identite, place)
+        }
+        let politique = Toujours(RecipientVerdict::Accept);
+        let mut place = [0_u8; 16];
+        let taille = canonique(&politique, b"jean", &mut place);
+        assert_eq!(place.get(..taille), Some(&b"jean"[..]));
+        let mut etroite = [0_u8; 2];
+        let taille = canonique(Toujours(RecipientVerdict::Accept), b"jean", &mut etroite);
+        assert_eq!(etroite.get(..taille), Some(&b"je"[..]));
     }
 
     #[test]

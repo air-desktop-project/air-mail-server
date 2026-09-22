@@ -206,7 +206,15 @@ echo "tableau de \`README.md\` les décrit toutes."
 # Un répertoire de graines devient alors un dépotoir que personne ne relit,
 # alors que sa raison d'être est l'inverse : quelques entrées NOMMÉES, dont le
 # nom dit ce qu'elles visent, qu'un lecteur peut ouvrir et comprendre.
-egares=$(find seeds -type f -regextype posix-extended -regex '.*/[0-9a-f]{40}$' | sort)
+# `-regextype` EST UNE EXTENSION GNU, et `find` de BSD ne la connaît pas : sur
+# macOS, cette ligne échouait par « unknown primary or operator », et le gate
+# s'arrêtait là — après avoir annoncé que les soixante-six cibles étaient en
+# ordre, ce qui lui donnait l'air d'avoir travaillé. C'est la même famille de
+# pièges que `find -printf` et `head -n -1`, déjà payée deux fois dans ce dépôt :
+# **le script qui garde la CI doit tourner là où on l'écrit**.
+#
+# `grep -E` sur les NOMS fait le même tri, et les deux `find` le connaissent.
+egares=$(find seeds -type f | grep -E '/[0-9a-f]{40}$' | sort || true)
 if [ -n "$egares" ]; then
     echo >&2
     echo "ÉCHEC : des trouvailles de libFuzzer se sont glissées dans \`seeds/\`." >&2
@@ -227,6 +235,33 @@ fi
 # exactement le genre d'aller-retour que ce script existe pour éviter.
 echo "── formatage ────────────────────────────────────────────────────────────"
 cargo fmt -- --check
+
+# ── CE QUI SUIT DEMANDE `cargo-fuzz`, ET LE DIT QUAND IL MANQUE ─────────────
+#
+# Même situation que `check-paquet` avec `dpkg-deb` : l'intégration continue l'a,
+# une machine de développement ne l'a pas forcément, et les cibles se bâtissent
+# pour `x86_64-unknown-linux-gnu` — ce qui suppose de surcroît un éditeur de
+# liens pour cette cible.
+#
+# **UN GATE QUI ÉCHOUE FAUTE D'OUTIL APPREND À SON LECTEUR QUE SES ÉCHECS SONT
+# NORMAUX**, et c'est la seule façon sûre de rendre un gate illisible. Il le dit
+# donc, et ne prétend pas avoir éprouvé quoi que ce soit.
+#
+# Ce qui précède — la liste des cibles, le tableau du README, les graines
+# égarées, le formatage — a bien tourné, lui. Et la COMPILATION des cibles n'est
+# pas perdue pour autant : `check-compile` la fait dans le même passage de
+# `check-tout`, et c'est elle qui attrape une cible qui ne suit plus un trait.
+if ! cargo fuzz --version >/dev/null 2>&1; then
+    echo
+    echo "IGNORÉ : \`cargo-fuzz\` est absent de cette machine."
+    echo
+    echo "La compilation des cibles et la campagne n'ont donc RIEN éprouvé ici."
+    echo "Elles tournent en intégration continue, où \`cargo-fuzz\` est posé —"
+    echo "c'est là que leur verdict compte. En local :"
+    echo
+    echo "    cargo install cargo-fuzz"
+    exit 0
+fi
 
 # ── LA MINIMISATION, QUI NE COMPILE ET NE LANCE RIEN D'AUTRE ────────────────
 if [ "$minimiser" -eq 1 ]; then

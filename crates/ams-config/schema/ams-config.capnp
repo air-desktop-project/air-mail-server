@@ -152,6 +152,20 @@ struct Configuration {
   # `reject_unknown_sender_domain` chez Postfix. Faux par défaut.
   requireSenderDomain @31 :Bool;
 
+  # La clé qui ouvre les vérificateurs SCRAM. Vide : SCRAM n'est pas servi.
+  #
+  # ELLE N'EST PAS DANS CE FICHIER, ET C'EST TOUT LE POINT : ce champ porte un
+  # CHEMIN. La clé vit où l'exploitant la range — un autre montage, un autre
+  # support —, et ni la configuration ni le magasin ne la contiennent. Voir
+  # `ams-scram.capnp`, qui dit pourquoi.
+  scramKey @32 :Text;
+
+  # Le magasin des vérificateurs SCRAM. Vide : SCRAM n'est pas servi.
+  #
+  # LES DEUX VONT ENSEMBLE, OU AUCUN : une clé sans magasin n'a rien à ouvrir,
+  # un magasin sans clé ne s'ouvre pas. `config write` refuse l'un sans l'autre.
+  scramStore @33 :Text;
+
   # MTA-STS (RFC 8461) — la politique qu'un domaine publie en HTTPS.
   #
   # **UN CHAMP AJOUTÉ APRÈS COUP DÉCODE DEUX CHAÎNES VIDES**, et deux chaînes

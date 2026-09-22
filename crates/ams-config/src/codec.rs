@@ -383,6 +383,18 @@ pub struct Configuration {
     pub require_fqdn_recipient: bool,
     /// Exige-t-on que le domaine de l'EXPÉDITEUR existe dans le DNS ?
     pub require_sender_domain: bool,
+    /// Le fichier qui porte la clé de scellement SCRAM, ou une chaîne vide.
+    ///
+    /// **UN CHEMIN, ET NON LA CLÉ** : elle vit où l'exploitant la range, et ni
+    /// cette configuration ni le magasin ne la contiennent. Vide, SCRAM n'est
+    /// ni annoncé ni servi.
+    pub scram_key: String,
+    /// Le magasin des vérificateurs SCRAM, ou une chaîne vide.
+    ///
+    /// Les deux vont ensemble, ou aucun : `config write` refuse l'un sans
+    /// l'autre, parce qu'une clé sans magasin n'a rien à ouvrir et qu'un
+    /// magasin sans clé ne s'ouvre pas.
+    pub scram_store: String,
     /// La file d'attente du serveur.
     pub queue: Queue,
     /// MTA-STS (RFC 8461).
@@ -886,6 +898,8 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
         require_fqdn_sender: lu.get_require_fqdn_sender(),
         require_fqdn_recipient: lu.get_require_fqdn_recipient(),
         require_sender_domain: lu.get_require_sender_domain(),
+        scram_key: texte(lu.get_scram_key()?)?,
+        scram_store: texte(lu.get_scram_store()?)?,
         queue,
         mtasts,
         tlsrpt,
@@ -1027,6 +1041,8 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
         ecrit.set_require_fqdn_sender(config.require_fqdn_sender);
         ecrit.set_require_fqdn_recipient(config.require_fqdn_recipient);
         ecrit.set_require_sender_domain(config.require_sender_domain);
+        ecrit.set_scram_key(&config.scram_key);
+        ecrit.set_scram_store(&config.scram_store);
         {
             let mut emission = ecrit.reborrow().init_relay();
             emission.set_enabled(config.relay.enabled);
@@ -1234,6 +1250,13 @@ mod tests {
             require_fqdn_sender: false,
             require_fqdn_recipient: false,
             require_sender_domain: false,
+            // **LE TÉMOIN SERT SCRAM**, et ce n'est pas un détail de banc :
+            // deux chemins VIDES n'écrivent aucun pointeur dans le message, et
+            // le balayage de corruption ne pourrait donc jamais les atteindre.
+            // Un champ qu'aucun essai ne traverse est un champ dont on ne sait
+            // rien — celui de l'aller-retour comme celui de la corruption.
+            scram_key: String::from("/var/lib/air-mail/scram.key"),
+            scram_store: String::from("/var/lib/air-mail/scram.bin"),
             // Les trois écoutes d'un serveur réel : le `25` et le `587` en
             // `STARTTLS`, le `465` en TLS implicite.
             smtp_listeners: vec![

@@ -133,10 +133,18 @@ fi
 # `scripts/check-fuzz.sh` — d'où un argument fantôme, « ` fait ». Un fichier qui
 # s'explique abondamment est une chance ; le lire comme s'il ne contenait que des
 # commandes est une faute.
+# **`\?` EST UNE EXTENSION GNU DANS UNE EXPRESSION DE BASE**, et le `sed` de BSD
+# y voit un point d'interrogation littéral : sur macOS, la ligne n'était donc pas
+# amputée de son préfixe, et `check-fuzz` recevait « run: scripts/check-fuzz.sh
+# --smoke » en entier — d'où un « usage : » que l'on prenait pour un refus de la
+# barrière. `\{0,1\}` dit la même chose, et les deux `sed` le connaissent.
+#
+# La troisième fois que ce dépôt paie une GNU-isme dans un script de garde ; les
+# deux autres étaient `find -printf` et `head -n -1`.
 arguments_de() {
     grep -oE "run: *\.?/?scripts/$1\.sh[^\n]*" "$CI" |
         head -1 |
-        sed "s|^run: *\.\?/\?scripts/$1\.sh||; s|\\\${{[^}]*}}||g; s|\"||g" |
+        sed "s|^run: *\.\{0,1\}/\{0,1\}scripts/$1\.sh||; s|\\\${{[^}]*}}||g; s|\"||g" |
         xargs 2>/dev/null || true
 }
 

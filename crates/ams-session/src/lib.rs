@@ -136,6 +136,7 @@ mod policy;
 pub mod pop3;
 mod recipients;
 mod sauts;
+mod scram;
 mod smtp;
 mod tampon;
 
@@ -150,6 +151,7 @@ pub use client::{
 };
 pub use config::{Capabilities, Config, SenderPolicy};
 pub use error::Error;
-pub use policy::{Authenticator, Policy, RecipientVerdict};
+pub use policy::{Authenticator, Policy, RecipientVerdict, ScramFirst};
 pub use recipients::{ARENA_OCTETS, RECIPIENTS_MAX, Recipients};
+pub use scram::{BARE_MAX, EtatScram, FIRST_MAX};
 pub use smtp::{Action, DataOutcome, SenderDomain, SenderIdentity, SmtpSession, Turn};

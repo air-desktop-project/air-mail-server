@@ -79,6 +79,9 @@ fn configuration(
     let config = Configuration {
         // Ces essais portent sur le transport, pas sur l'enveloppe.
         require_fqdn_helo: false,
+        // Ce banc ne sert pas SCRAM : les deux chemins restent vides.
+        scram_key: String::new(),
+        scram_store: String::new(),
         require_fqdn_sender: false,
         require_fqdn_recipient: false,
         require_sender_domain: false,

@@ -36,6 +36,7 @@ mod imap;
 mod incidents;
 mod policy;
 mod pop3;
+mod scram;
 
 use std::collections::BTreeMap;
 use std::process::ExitCode;
@@ -1756,6 +1757,27 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     let mut responsables = options.hosted.clone();
     responsables.push(options.domain.clone());
     let politique = BoitesConnues::new(Arc::clone(&comptes), postmaster.clone(), &responsables);
+    // **SCRAM N'EXISTE QUE SI LES DEUX CHEMINS SONT LÀ.** `config write` refuse
+    // déjà l'un sans l'autre ; ici on ne fait que constater, et un échec de
+    // chargement — clé illisible, magasin refusé — EMPÊCHE DE DÉMARRER plutôt
+    // que de servir un mécanisme qui ne marcherait pour personne.
+    let politique = if options.scram_key.is_empty() || options.scram_store.is_empty() {
+        politique
+    } else {
+        let verificateurs = crate::scram::Verificateurs::charger(
+            &PathBuf::from(&options.scram_key),
+            PathBuf::from(&options.scram_store),
+        )?;
+        eprintln!(
+            "air-mail-server : SCRAM-SHA-256 servi — {} vérificateur(s) sous `{}`, scellés par \
+             `{}`. Les comptes SANS vérificateur restent joignables en `PLAIN` ; SCRAM leur \
+             répondra comme à un compte inconnu, et refusera.",
+            verificateurs.combien(),
+            options.scram_store,
+            options.scram_key
+        );
+        politique.avec_scram(Arc::new(verificateurs))
+    };
     // **`DSN` NE S'ANNONCE QUE SI L'ON PEUT ÉMETTRE** (RFC 3461 §4.2). Un
     // serveur qui l'annonce DOIT rendre compte d'un succès quand on lui en
     // demande un, et rendre compte suppose la file. Sans elle, `NOTIFY=SUCCESS`
