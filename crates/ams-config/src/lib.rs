@@ -81,9 +81,22 @@ mod ams_index_capnp {
     include!("ams_index_capnp.rs");
 }
 
+#[allow(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    missing_docs,
+    unused_qualifications,
+    reason = "code généré par capnpc-rust, hors de notre contrôle éditorial"
+)]
+mod ams_scram_capnp {
+    include!("ams_scram_capnp.rs");
+}
+
 mod accounts;
 mod codec;
 mod index;
+mod scram;
 
 pub use accounts::{decode_accounts, encode_accounts};
 pub use codec::{
@@ -91,3 +104,4 @@ pub use codec::{
     TRAVERSAL_LIMIT_WORDS, Timeouts, Tls, Tlsrpt, decode, encode,
 };
 pub use index::{decode_index, encode_index};
+pub use scram::{decode_scram, encode_scram};

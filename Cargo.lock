@@ -100,6 +100,7 @@ dependencies = [
  "ams-index",
  "ams-proto-smtp",
  "ams-queue",
+ "ams-sasl",
  "capnp",
 ]
 

@@ -47,6 +47,7 @@
 //! ou qui prend la clé ET le magasin, a les deux `ServerKey`. Le scellement
 //! protège de la fuite d'un fichier, pas de la compromission d'une machine.
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use ams_sasl::{CLE_OCTETS, client_key, derive_salted_password, server_key, stored_key};
@@ -98,6 +99,14 @@ pub const ITERATIONS: u32 = 32_768;
 /// obtenir — avec la clé.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Verificateur {
+    /// Le compte auquel ce vérificateur appartient.
+    ///
+    /// **IL EST AUSSI LES DONNÉES ASSOCIÉES DU SCELLEMENT**, et c'est ce qui
+    /// fait qu'une entrée déplacée d'un compte à l'autre ne s'ouvre pas. Le
+    /// porter DANS le type plutôt que le passer à [`ouvrir`] retire la seule
+    /// façon de se tromper : donner à l'ouverture un autre login que celui
+    /// sous lequel l'entrée a été scellée.
+    pub login: String,
     /// Le sel, en clair : le serveur l'annonce dans le `server-first`.
     pub sel: [u8; SEL_OCTETS],
     /// Le compte d'itérations, en clair : annoncé lui aussi.
@@ -148,7 +157,7 @@ pub enum Error {
 /// provoquer.
 pub fn deriver(
     mot_de_passe: &[u8],
-    login: &[u8],
+    login: &str,
     sel: [u8; SEL_OCTETS],
     iterations: u32,
     nonce: [u8; NONCE_OCTETS],
@@ -166,7 +175,8 @@ pub fn deriver(
     // mémoire de soixante-quatre octets ne peut pas échouer —, et C2 refuse les
     // gardes inatteignables. L'erreur reste dans la signature parce que c'est
     // l'amont qui la déclare, et qu'on ne la masque pas.
-    sceller(&clair, login, &nonce, clef).map(|scelle| Verificateur {
+    sceller(&clair, login.as_bytes(), &nonce, clef).map(|scelle| Verificateur {
+        login: String::from(login),
         sel,
         iterations,
         nonce,
@@ -176,14 +186,15 @@ pub fn deriver(
 
 /// Ouvre un vérificateur : rend les deux clés, ou refuse.
 ///
+/// Le login vient du vérificateur lui-même : il a été scellé avec, et l'entrée
+/// ne s'ouvre donc que sous le compte qui est écrit dedans.
+///
 /// # Errors
 ///
-/// [`Error::Sceau`] — mauvaise clé, données altérées, ou vérificateur qui
-/// n'appartient pas à ce `login` ; [`Error::Taille`] — le clair n'a pas la
-/// longueur des deux clés.
+/// [`Error::Sceau`] — mauvaise clé, données altérées, ou entrée dont le login a
+/// été changé ; [`Error::Taille`] — le clair n'a pas la longueur des deux clés.
 pub fn ouvrir(
     verificateur: &Verificateur,
-    login: &[u8],
     clef: &[u8; CLE_SCELLEMENT_OCTETS],
 ) -> Result<Cles, Error> {
     let clair = boite(clef)
@@ -191,7 +202,7 @@ pub fn ouvrir(
             &Nonce::from(verificateur.nonce),
             Payload {
                 msg: &verificateur.scelle,
-                aad: login,
+                aad: verificateur.login.as_bytes(),
             },
         )
         .map_err(|_| Error::Sceau)?;

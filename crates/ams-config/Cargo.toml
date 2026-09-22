@@ -13,6 +13,9 @@ ams-guard = { workspace = true }
 ams-queue = { workspace = true }
 ams-proto-smtp = { workspace = true }
 ams-auth = { workspace = true }
+# Le minimum d itérations de RFC 7677, que le chargement du magasin SCRAM
+# oppose : la constante vit là où la RFC est implémentée, pas ici.
+ams-sasl = { workspace = true }
 ams-index = { workspace = true }
 capnp = { workspace = true }
 

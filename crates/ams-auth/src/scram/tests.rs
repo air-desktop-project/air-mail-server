@@ -22,8 +22,8 @@ const TOURS: u32 = 4_096;
 
 #[test]
 fn ce_qui_est_scelle_est_bien_les_deux_cles_de_la_rfc() {
-    let v = deriver(b"pencil", b"jean", SEL, TOURS, NONCE, &CLEF).expect("dérivation");
-    let ouvertes = ouvrir(&v, b"jean", &CLEF).expect("ouverture");
+    let v = deriver(b"pencil", "jean", SEL, TOURS, NONCE, &CLEF).expect("dérivation");
+    let ouvertes = ouvrir(&v, &CLEF).expect("ouverture");
 
     // Les mêmes clés, calculées à côté par le chemin de `ams-sasl`.
     let salted = derive_salted_password(b"pencil", &SEL, TOURS);
@@ -50,10 +50,10 @@ fn ce_qui_est_scelle_est_bien_les_deux_cles_de_la_rfc() {
 
 #[test]
 fn une_mauvaise_clef_n_ouvre_pas() {
-    let v = deriver(b"pencil", b"jean", SEL, TOURS, NONCE, &CLEF).expect("dérivation");
+    let v = deriver(b"pencil", "jean", SEL, TOURS, NONCE, &CLEF).expect("dérivation");
     let mut autre = CLEF;
     *autre.first_mut().expect("clé") ^= 1;
-    assert_eq!(ouvrir(&v, b"jean", &autre), Err(Error::Sceau));
+    assert_eq!(ouvrir(&v, &autre), Err(Error::Sceau));
 }
 
 #[test]
@@ -61,20 +61,23 @@ fn un_verificateur_deplace_d_un_compte_a_l_autre_n_ouvre_pas() {
     // **C'EST CE QUE LES DONNÉES ASSOCIÉES ACHÈTENT.** Sans elles, qui peut
     // écrire le magasin sans connaître la clé donnerait à `contact` le
     // vérificateur d'un compte dont il connaît le mot de passe.
-    let v = deriver(b"pencil", b"jean", SEL, TOURS, NONCE, &CLEF).expect("dérivation");
-    assert_eq!(ouvrir(&v, b"contact", &CLEF), Err(Error::Sceau));
+    let mut v = deriver(b"pencil", "jean", SEL, TOURS, NONCE, &CLEF).expect("dérivation");
+    // On déplace l'entrée : le scellé reste, le login change. C'est exactement
+    // ce qu'un intrus qui peut écrire le fichier sans avoir la clé ferait.
+    v.login = std::string::String::from("contact");
+    assert_eq!(ouvrir(&v, &CLEF), Err(Error::Sceau));
 }
 
 #[test]
 fn un_scelle_altere_n_ouvre_pas() {
-    let v = deriver(b"pencil", b"jean", SEL, TOURS, NONCE, &CLEF).expect("dérivation");
+    let v = deriver(b"pencil", "jean", SEL, TOURS, NONCE, &CLEF).expect("dérivation");
     for rang in [0, CLE_OCTETS, v.scelle.len().saturating_sub(1)] {
         let mut abime = v.clone();
         if let Some(octet) = abime.scelle.get_mut(rang) {
             *octet ^= 1;
         }
         assert_eq!(
-            ouvrir(&abime, b"jean", &CLEF),
+            ouvrir(&abime, &CLEF),
             Err(Error::Sceau),
             "un octet retourné au rang {rang} a été accepté"
         );
@@ -82,7 +85,7 @@ fn un_scelle_altere_n_ouvre_pas() {
     // Un nonce changé ne s'ouvre pas davantage.
     let mut autre_nonce = v.clone();
     *autre_nonce.nonce.first_mut().expect("nonce") ^= 1;
-    assert_eq!(ouvrir(&autre_nonce, b"jean", &CLEF), Err(Error::Sceau));
+    assert_eq!(ouvrir(&autre_nonce, &CLEF), Err(Error::Sceau));
 }
 
 #[test]
@@ -92,12 +95,13 @@ fn un_clair_de_mauvaise_taille_est_refuse() {
     // ne peut pas en produire.
     let court = super::sceller(b"trop court", b"jean", &NONCE, &CLEF).expect("scellement");
     let v = super::Verificateur {
+        login: std::string::String::from("jean"),
         sel: SEL,
         iterations: TOURS,
         nonce: NONCE,
         scelle: court,
     };
-    assert_eq!(ouvrir(&v, b"jean", &CLEF), Err(Error::Taille));
+    assert_eq!(ouvrir(&v, &CLEF), Err(Error::Taille));
 }
 
 #[test]
@@ -136,10 +140,10 @@ fn les_erreurs_se_disent_et_se_distinguent() {
         assert_eq!(erreur, copie);
     }
     // Les deux types rendus se comparent et se déboguent, comme partout.
-    let v = deriver(b"pencil", b"jean", SEL, TOURS, NONCE, &CLEF).expect("dérivation");
+    let v = deriver(b"pencil", "jean", SEL, TOURS, NONCE, &CLEF).expect("dérivation");
     assert_eq!(v.clone(), v);
     assert!(!std::format!("{v:?}").is_empty());
-    let cles = ouvrir(&v, b"jean", &CLEF).expect("ouverture");
+    let cles = ouvrir(&v, &CLEF).expect("ouverture");
     assert_eq!(cles, cles);
     assert!(!std::format!("{cles:?}").is_empty());
 }

@@ -11,14 +11,22 @@
 #
 # Régénérer est donc une opération de MAINTENEUR, rare, et hors CI.
 #
-# # Pré-requis, en versions exactes
+# # Pré-requis
 #
-#   - outil C++ `capnp`  = 1.1.0   (`capnp --version`)
-#   - greffon Rust       = capnpc 0.26.0 (`cargo install capnpc --version 0.26.0`)
-#   - crate d'exécution  = capnp 0.26.0  (pin strict dans le Cargo.toml)
+#   - greffon Rust       = capnpc **0.26.0** (`cargo install capnpc --version 0.26.0`)
+#   - crate d'exécution  = capnp **0.26.0**  (pin strict dans le Cargo.toml)
+#   - outil C++ `capnp`  = n'importe quelle version récente (`brew install capnp`)
 #
-# Les trois doivent s'accorder : un greffon plus récent émet du code qu'une
-# ancienne crate ne compile pas, et l'inverse est pire — il compile et ne dit rien.
+# Les deux premières sont exactes ; la troisième ne l'est pas, et c'est une
+# correction du 2026-09-22 : cette liste disait « capnp = 1.1.0 » et ce chiffre
+# a failli faire renoncer à régénérer un schéma, faute de cette version-là.
+#
+# **CE QUI DOIT S'ACCORDER, C'EST LE GREFFON ET LA CRATE `capnp`** : un greffon
+# plus récent émet du code qu'une ancienne crate ne compile pas, et l'inverse est
+# pire — il compile et ne dit rien. L'outil C++, lui, ne fait que transmettre le
+# schéma analysé : sa version n'apparaît que dans un commentaire. Vérifié le
+# 2026-09-22 en régénérant les trois schémas avec capnp 1.1.0 puis 1.5.0 (greffon
+# 0.26.0) : code identique à l'octet près, hors cette ligne de commentaire.
 #
 # Usage, depuis `crates/ams-config/` :  ./regenerate.sh
 
@@ -30,8 +38,9 @@ trap 'rm -rf "$SORTIE"' EXIT
 
 capnp compile -I schema --src-prefix schema \
   -o "$(command -v capnpc-rust):$SORTIE" \
-  schema/ams-config.capnp schema/ams-accounts.capnp schema/ams-index.capnp || {
-    echo 'échec de la compilation des schémas (capnp 1.1.0 + capnpc-rust requis)' >&2
+  schema/ams-config.capnp schema/ams-accounts.capnp schema/ams-index.capnp \
+  schema/ams-scram.capnp || {
+    echo 'échec de la compilation des schémas (capnp + capnpc-rust 0.26.0 requis)' >&2
     exit 1
   }
 
@@ -45,13 +54,20 @@ capnp compile -I schema --src-prefix schema \
 # Les deux schémas passent par le même en-tête et le même traitement : une
 # boucle plutôt que deux copies, parce que la seconde copie est celle qu'on
 # oublie de corriger.
-for schema in ams_config ams_accounts ams_index; do
+for schema in ams_config ams_accounts ams_index ams_scram; do
 cat > "src/${schema}_capnp.rs" <<'ENTETE'
 // CODE GÉNÉRÉ — NE PAS ÉDITER À LA MAIN.
 //
-// Régénérer via `crates/ams-config/regenerate.sh` (outil C++ capnp 1.1.0 +
-// greffon capnpc-rust 0.26.0). Le build normal et la CI consomment ce fichier
-// SANS aucun outil C++ : voilà pourquoi il est committé.
+// Régénérer via `crates/ams-config/regenerate.sh` (outil C++ capnp + greffon
+// capnpc-rust 0.26.0). Le build normal et la CI consomment ce fichier SANS
+// aucun outil C++ : voilà pourquoi il est committé.
+//
+// C'EST LE GREFFON QUI ÉCRIT CE RUST, pas l'outil C++ : sa version à lui est ce
+// qui doit s'accorder avec la crate `capnp`. Mesuré le 2026-09-22 — régénérer
+// avec capnp 1.1.0 puis 1.5.0, greffon 0.26.0 dans les deux cas, donne un code
+// IDENTIQUE À L'OCTET PRÈS, à la seule ligne `// capnp binary version:` près,
+// que le greffon recopie. La version de l'outil C++ n'est donc plus épinglée
+// ici : ce serait épingler ce qui ne décide de rien.
 //
 // Inclus par `include!` dans `lib.rs`, qui porte les `#[allow(...)]`.
 
