@@ -5,16 +5,42 @@ use ams_sasl::Credentials;
 
 use super::{Action, BinarySize, Mailbox, Mailboxes, MessageInfo, Session, State, TAG_MAX_OCTETS};
 use crate::Authenticator;
+use crate::ScramFirst;
+// Le compte, son mot de passe et le serveur SCRAM d'épreuve viennent du banc
+// partagé : la session SMTP joue le MÊME échange.
+use crate::scram::banc::{self, AvecScram, COMPTE, SECRET};
 
 const BORNES: Limits = Limits::DEFAULT;
 
 /// Le seul compte que la politique de test connaisse.
+///
+/// **SON CHAMP DIT CE QU'ELLE SAIT FAIRE DE SCRAM**, et il n'y a qu'UN type
+/// pour les trois cas : `llvm-cov` résume un groupe d'instanciations par le
+/// MAXIMUM de ses membres, et non par leur union. Trois politiques feraient
+/// trois `Session<A, M>` dont aucune n'emprunterait à elle seule tous les bras
+/// d'`authenticate` et d'`on_auth_response`, et des régions resteraient
+/// comptées découvertes alors que les essais, pris ensemble, les traversent
+/// toutes. C'est la leçon payée du côté SMTP, et elle vaut ici.
 #[derive(Debug, Clone)]
-struct UnCompte;
+struct UnCompte(AvecScram);
 
 impl Authenticator for UnCompte {
     fn authenticate(&self, credentials: &Credentials<'_>) -> bool {
-        credentials.authentication_identity == b"jean" && credentials.password == b"ouvre-toi"
+        credentials.authentication_identity == COMPTE && credentials.password == SECRET
+    }
+
+    fn scram_first(&self, client_first: &[u8], sortie: &mut [u8]) -> Option<ScramFirst> {
+        banc::server_first(self.0, client_first, sortie)
+    }
+
+    fn scram_final(
+        &self,
+        bare: &[u8],
+        first: &[u8],
+        client_final: &[u8],
+        sortie: &mut [u8],
+    ) -> Option<usize> {
+        banc::server_final(self.0, bare, first, client_final, sortie)
     }
 }
 
@@ -715,7 +741,7 @@ impl Mailboxes for Boites {
 
 /// Une session, chiffrée ou non.
 fn nouvelle(chiffree: bool) -> Session<UnCompte, Boites> {
-    let mut session = Session::new(BORNES, true, UnCompte, Boites::default());
+    let mut session = Session::new(BORNES, true, UnCompte(AvecScram::Aucun), Boites::default());
     if chiffree {
         session.on_tls_established();
     }
@@ -888,7 +914,7 @@ fn les_capacites_suivent_le_chiffrement() {
 /// **Annoncer `STARTTLS` sans savoir le faire ferait mentir la bannière.**
 #[test]
 fn sans_materiel_starttls_n_est_pas_annonce() {
-    let mut session = Session::new(BORNES, false, UnCompte, Boites::default());
+    let mut session = Session::new(BORNES, false, UnCompte(AvecScram::Aucun), Boites::default());
     let (texte, _) = dire(&mut session, b"a001 CAPABILITY\r\n");
     assert!(!texte.contains("STARTTLS"), "{texte}");
     let (refus, action) = dire(&mut session, b"a002 STARTTLS\r\n");
@@ -1050,6 +1076,284 @@ fn authenticate_plain_avec_reponse_initiale() {
     assert!(texte.starts_with("a001 OK Authenticated"), "{texte}");
     assert_eq!(action, Action::Continue);
     assert_eq!(session.user(), b"jean");
+}
+
+/// Une session chiffrée dont la politique sert SCRAM comme on le lui dit.
+fn nouvelle_scram(scram: AvecScram) -> Session<UnCompte, Boites> {
+    let mut session = Session::new(BORNES, true, UnCompte(scram), Boites::default());
+    session.on_tls_established();
+    session
+}
+
+/// Le message que la demande de continuation porte, décodé.
+fn message_du_defi(ligne: &str) -> std::vec::Vec<u8> {
+    let defi = ligne
+        .lines()
+        .next()
+        .and_then(|premiere| premiere.trim_end().strip_prefix("+ "))
+        .expect("une demande de continuation");
+    let mut place = [0_u8; 1024];
+    let ecrits = ams_sasl::decode_base64(defi.as_bytes(), &mut place).expect("base64");
+    place.get(..ecrits).unwrap_or_default().to_vec()
+}
+
+#[test]
+fn scram_ne_s_annonce_que_si_la_politique_le_sert() {
+    let capacites = capacites_annoncees(&mut nouvelle_scram(AvecScram::Complet));
+    assert!(
+        capacites.iter().any(|c| c == "AUTH=SCRAM-SHA-256"),
+        "SCRAM n'est pas annoncé : {capacites:?}"
+    );
+    // **ET LE PLUS FORT EST EN TÊTE** : beaucoup de clients prennent le premier
+    // mécanisme qu'ils connaissent.
+    let rang_scram = capacites
+        .iter()
+        .position(|c| c == "AUTH=SCRAM-SHA-256")
+        .expect("annoncé");
+    let rang_plain = capacites
+        .iter()
+        .position(|c| c == "AUTH=PLAIN")
+        .expect("annoncé");
+    assert!(rang_scram < rang_plain, "{capacites:?}");
+
+    // Sans magasin, il ne s'annonce pas — et `PLAIN` reste.
+    let capacites = capacites_annoncees(&mut nouvelle(true));
+    assert!(
+        capacites.iter().any(|c| c == "AUTH=PLAIN")
+            && !capacites.iter().any(|c| c.contains("SCRAM")),
+        "{capacites:?}"
+    );
+}
+
+#[test]
+fn un_echange_scram_complet_ouvre_la_session() {
+    // Le chemin entier, avec la réponse initiale de RFC 4959.
+    let mut session = nouvelle_scram(AvecScram::Complet);
+    let mut sortie = [0_u8; 1024];
+    let premier = b"n,,n=jean,r=nonceduclient";
+    let commande = std::format!(
+        "a001 AUTHENTICATE SCRAM-SHA-256 {}\r\n",
+        banc::en_base64(premier)
+    );
+    let tour = session
+        .handle(commande.as_bytes(), &mut sortie)
+        .expect("traitable");
+    assert_eq!(tour.action(), Action::ReadAuthResponse);
+    let dit = std::string::String::from_utf8_lossy(tour.reply()).into_owned();
+    let server_first = message_du_defi(&dit);
+    assert!(
+        server_first.starts_with(b"r=nonceduclient"),
+        "le server-first ne reprend pas le nonce du client"
+    );
+
+    // Le client conclut ; le serveur rend son `v=` EN CONTINUATION.
+    let final_client = banc::client_final(b"n=jean,r=nonceduclient", &server_first);
+    let mut out2 = [0_u8; 1024];
+    let tour = session
+        .on_auth_response(banc::en_base64(&final_client).as_bytes(), &mut out2)
+        .expect("traitable");
+    let dit = std::string::String::from_utf8_lossy(tour.reply()).into_owned();
+    let server_final = message_du_defi(&dit);
+    assert!(server_final.starts_with(b"v="), "le `v=` manque : {dit}");
+    assert_eq!(tour.action(), Action::ReadAuthResponse);
+
+    // **RFC 4959 N'OFFRE PAS DE JOINDRE LE `v=` À LA RÉPONSE TAGUÉE** : le
+    // client répond une ligne vide, et c'est elle qui conclut.
+    let mut out3 = [0_u8; 1024];
+    let tour = session.on_auth_response(b"", &mut out3).expect("traitable");
+    let dit = std::string::String::from_utf8_lossy(tour.reply()).into_owned();
+    assert!(dit.starts_with("a001 OK Authenticated"), "{dit}");
+    assert_eq!(session.state(), State::Authenticated);
+    assert_eq!(session.user(), b"jean");
+}
+
+#[test]
+fn scram_sans_reponse_initiale_invite_puis_conclut() {
+    // Le chemin des clients qui ne connaissent pas RFC 4959.
+    let mut session = nouvelle_scram(AvecScram::Complet);
+    let mut sortie = [0_u8; 1024];
+    let tour = session
+        .handle(b"a001 AUTHENTICATE SCRAM-SHA-256\r\n", &mut sortie)
+        .expect("traitable");
+    assert_eq!(tour.reply(), b"+ \r\n", "le défi doit être vide");
+
+    let mut out2 = [0_u8; 1024];
+    let tour = session
+        .on_auth_response(banc::en_base64(b"n,,n=jean,r=abc").as_bytes(), &mut out2)
+        .expect("traitable");
+    let dit = std::string::String::from_utf8_lossy(tour.reply()).into_owned();
+    let server_first = message_du_defi(&dit);
+
+    let final_client = banc::client_final(b"n=jean,r=abc", &server_first);
+    let mut out3 = [0_u8; 1024];
+    let tour = session
+        .on_auth_response(banc::en_base64(&final_client).as_bytes(), &mut out3)
+        .expect("traitable");
+    assert!(
+        message_du_defi(&std::string::String::from_utf8_lossy(tour.reply())).starts_with(b"v=")
+    );
+
+    let mut out4 = [0_u8; 1024];
+    let tour = session.on_auth_response(b"", &mut out4).expect("traitable");
+    assert!(
+        std::string::String::from_utf8_lossy(tour.reply()).starts_with("a001 OK Authenticated")
+    );
+    assert_eq!(session.user(), b"jean");
+}
+
+#[test]
+fn une_reponse_initiale_vide_de_scram_est_refusee() {
+    // **`=` DÉSIGNE LA RÉPONSE INITIALE VIDE** (RFC 4959 §3). SCRAM n'a aucune
+    // raison d'en envoyer une, et l'analyse du message la refuse — mais elle ne
+    // doit pas être prise pour une réponse ABSENTE, qui ouvrirait le défi.
+    let mut session = nouvelle_scram(AvecScram::Complet);
+    let mut sortie = [0_u8; 1024];
+    let tour = session
+        .handle(b"a001 AUTHENTICATE SCRAM-SHA-256 =\r\n", &mut sortie)
+        .expect("traitable");
+    let dit = std::string::String::from_utf8_lossy(tour.reply()).into_owned();
+    assert!(dit.starts_with("a001 NO [AUTHENTICATIONFAILED]"), "{dit}");
+    assert_eq!(session.state(), State::NotAuthenticated);
+}
+
+#[test]
+fn une_preuve_scram_fausse_est_refusee_comme_un_compte_inconnu() {
+    let mut session = nouvelle_scram(AvecScram::Complet);
+    let mut sortie = [0_u8; 1024];
+    let commande = std::format!(
+        "a001 AUTHENTICATE SCRAM-SHA-256 {}\r\n",
+        banc::en_base64(b"n,,n=jean,r=nonceduclient")
+    );
+    session
+        .handle(commande.as_bytes(), &mut sortie)
+        .expect("traitable");
+
+    // Une preuve de trente-deux octets nuls : bien formée, et fausse.
+    let mut faux = std::vec::Vec::from(&b"c=biws,r=nonceduclientnoncedeserveur,p="[..]);
+    let mut encode = [0_u8; 64];
+    faux.extend_from_slice(ams_mime::encode_base64_line(&[0_u8; 32], &mut encode).expect("base64"));
+    let mut out2 = [0_u8; 1024];
+    let tour = session
+        .on_auth_response(banc::en_base64(&faux).as_bytes(), &mut out2)
+        .expect("traitable");
+    let dit = std::string::String::from_utf8_lossy(tour.reply()).into_owned();
+    assert!(dit.starts_with("a001 NO [AUTHENTICATIONFAILED]"), "{dit}");
+    assert_eq!(session.state(), State::NotAuthenticated);
+}
+
+#[test]
+fn une_politique_qui_ne_conclut_pas_scram_refuse() {
+    // **LE DÉFAUT DU TRAIT EST UN REFUS**, et il doit se voir de bout en bout.
+    let mut session = nouvelle_scram(AvecScram::SansConclure);
+    let mut sortie = [0_u8; 1024];
+    let commande = std::format!(
+        "a001 AUTHENTICATE SCRAM-SHA-256 {}\r\n",
+        banc::en_base64(b"n,,n=jean,r=abc")
+    );
+    session
+        .handle(commande.as_bytes(), &mut sortie)
+        .expect("traitable");
+    let mut out2 = [0_u8; 1024];
+    let tour = session
+        .on_auth_response(
+            banc::en_base64(b"c=biws,r=abcnoncedeserveur,p=AAAA").as_bytes(),
+            &mut out2,
+        )
+        .expect("traitable");
+    assert!(
+        std::string::String::from_utf8_lossy(tour.reply()).starts_with("a001 NO"),
+        "une politique sans `scram_final` a ouvert une session"
+    );
+}
+
+#[test]
+fn une_politique_sans_scram_refuse_le_mecanisme() {
+    // Elle ne l'annonce pas ; un client qui l'essaie quand même est refusé,
+    // et par le MÊME message qu'un mécanisme inconnu.
+    let mut session = nouvelle(true);
+    let mut sortie = [0_u8; 1024];
+    let tour = session
+        .handle(b"a001 AUTHENTICATE SCRAM-SHA-256\r\n", &mut sortie)
+        .expect("traitable");
+    let dit = std::string::String::from_utf8_lossy(tour.reply()).into_owned();
+    assert!(
+        dit.starts_with("a001 NO Unsupported authentication mechanism"),
+        "{dit}"
+    );
+}
+
+#[test]
+fn un_base64_illisible_est_refuse_aux_deux_tours_de_scram() {
+    // Premier tour : une longueur qui n'est pas un multiple de quatre.
+    let mut session = nouvelle_scram(AvecScram::Complet);
+    let mut sortie = [0_u8; 1024];
+    let tour = session
+        .handle(b"a001 AUTHENTICATE SCRAM-SHA-256 AAAAA\r\n", &mut sortie)
+        .expect("traitable");
+    assert!(
+        std::string::String::from_utf8_lossy(tour.reply()).starts_with("a001 NO"),
+        "un base64 illisible a été accepté"
+    );
+
+    // Second tour.
+    let mut session = nouvelle_scram(AvecScram::Complet);
+    let mut sortie = [0_u8; 1024];
+    let commande = std::format!(
+        "a001 AUTHENTICATE SCRAM-SHA-256 {}\r\n",
+        banc::en_base64(b"n,,n=jean,r=abc")
+    );
+    session
+        .handle(commande.as_bytes(), &mut sortie)
+        .expect("traitable");
+    let mut out2 = [0_u8; 1024];
+    let tour = session
+        .on_auth_response(b"AAAAA", &mut out2)
+        .expect("traitable");
+    assert!(std::string::String::from_utf8_lossy(tour.reply()).starts_with("a001 NO"));
+}
+
+#[test]
+fn un_nom_de_compte_trop_long_est_refuse_plutot_que_tronque() {
+    // Un `AuthMessage` tronqué ne correspondrait à rien, et le pair lirait
+    // « mot de passe invalide » pour un nom trop long.
+    let mut session = nouvelle_scram(AvecScram::Complet);
+    let mut sortie = [0_u8; 1024];
+    let mut premier = std::vec::Vec::from(&b"n,,n="[..]);
+    premier.extend(std::iter::repeat_n(b'a', 300));
+    premier.extend_from_slice(b",r=abc");
+    let commande = std::format!(
+        "a001 AUTHENTICATE SCRAM-SHA-256 {}\r\n",
+        banc::en_base64(&premier)
+    );
+    let tour = session
+        .handle(commande.as_bytes(), &mut sortie)
+        .expect("traitable");
+    assert!(std::string::String::from_utf8_lossy(tour.reply()).starts_with("a001 NO"));
+}
+
+#[test]
+fn un_echange_scram_annule_ne_laisse_rien_derriere() {
+    let mut session = nouvelle_scram(AvecScram::Complet);
+    let mut sortie = [0_u8; 1024];
+    let commande = std::format!(
+        "a001 AUTHENTICATE SCRAM-SHA-256 {}\r\n",
+        banc::en_base64(b"n,,n=jean,r=abc")
+    );
+    session
+        .handle(commande.as_bytes(), &mut sortie)
+        .expect("traitable");
+    let mut out2 = [0_u8; 1024];
+    let tour = session
+        .on_auth_response(b"*", &mut out2)
+        .expect("traitable");
+    assert!(
+        std::string::String::from_utf8_lossy(tour.reply())
+            .starts_with("a001 BAD Authentication cancelled")
+    );
+    assert_eq!(session.state(), State::NotAuthenticated);
+    // Et la session repart d'un état sain.
+    let (texte, _) = dire(&mut session, b"a002 NOOP\r\n");
+    assert!(texte.starts_with("a002 OK"), "{texte}");
 }
 
 /// **Un client qui se ravise n'est pas un client fautif** : le lui reprocher
@@ -1231,7 +1535,7 @@ fn selectionnee() -> Session<UnCompte, Boites> {
 /// par un client de l'autre — la propriété qui compte, puisque c'est LA MÊME
 /// boîte qu'ils désignent.
 fn nouvelle_partagee(boites: &Boites) -> Session<UnCompte, Boites> {
-    let mut session = Session::new(BORNES, true, UnCompte, boites.clone());
+    let mut session = Session::new(BORNES, true, UnCompte(AvecScram::Aucun), boites.clone());
     session.on_tls_established();
     session
 }
@@ -1718,8 +2022,21 @@ fn genre(issue: &Result<super::Turn<'_>, super::Error>) -> &'static str {
 fn un_tampon_trop_court_le_dit_ou_qu_il_cede() {
     /// Conduit la session jusqu'à la commande, puis la rejoue en tampon borné.
     fn court(avant: &[&[u8]], commande: &'static [u8], chiffree: bool) {
+        court_avec(avant, commande, &|| nouvelle(chiffree));
+    }
+
+    /// La même, pour une session que `nouvelle` ne sait pas composer.
+    ///
+    /// **UNE FABRIQUE, ET NON UN SECOND CORPS** : la politique de SCRAM se
+    /// choisit à la construction, et recopier ces quinze lignes pour elle
+    /// donnerait deux façons d'éprouver la même chose.
+    fn court_avec(
+        avant: &[&[u8]],
+        commande: &'static [u8],
+        neuve: &dyn Fn() -> Session<UnCompte, Boites>,
+    ) {
         let mut assez = [0_u8; 1024];
-        let mut reference = nouvelle(chiffree);
+        let mut reference = neuve();
         for prealable in avant {
             reference.handle(prealable, &mut assez).expect("traitable");
         }
@@ -1729,7 +2046,7 @@ fn un_tampon_trop_court_le_dit_ou_qu_il_cede() {
             .reply()
             .len();
         for taille in 0..entier {
-            let mut session = nouvelle(chiffree);
+            let mut session = neuve();
             let mut grand = [0_u8; 1024];
             for prealable in avant {
                 session.handle(prealable, &mut grand).expect("traitable");
@@ -1757,6 +2074,19 @@ fn un_tampon_trop_court_le_dit_ou_qu_il_cede() {
         true,
     );
     court(&[], b"a001 AUTHENTICATE GSSAPI\r\n", true);
+    // Les deux tours de SCRAM écrivent une DEMANDE DE CONTINUATION, qui a ses
+    // propres endroits où manquer de place.
+    court_avec(&[], b"a001 AUTHENTICATE SCRAM-SHA-256\r\n", &|| {
+        nouvelle_scram(AvecScram::Complet)
+    });
+    court_avec(
+        &[],
+        // `n,,n=jean,r=abc`, pour que le premier tour ABOUTISSE : c'est la
+        // demande de continuation qui porte le `server-first` qu'on éprouve
+        // ici, et non un refus.
+        b"a001 AUTHENTICATE SCRAM-SHA-256 biwsbj1qZWFuLHI9YWJj\r\n",
+        &|| nouvelle_scram(AvecScram::Complet),
+    );
     court(&[], b"a001 AUTHENTICATE\r\n", true);
     court(&[], b"a001 SELECT INBOX\r\n", true);
     court(&[], b"a001 FETCH 1 BODY[]\r\n", true);
@@ -3311,7 +3641,7 @@ fn close_efface_et_unselect_ne_touche_a_rien() {
     for (commande, efface) in [(&b"a004 CLOSE\r\n"[..], 1), (b"a004 UNSELECT\r\n", 0)] {
         let boites = Boites::default();
         let compteur = std::rc::Rc::clone(&boites.efface);
-        let mut session = Session::new(BORNES, true, UnCompte, boites);
+        let mut session = Session::new(BORNES, true, UnCompte(AvecScram::Aucun), boites);
         session.on_tls_established();
         dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
         dire(&mut session, b"a002 SELECT INBOX\r\n");
@@ -3378,7 +3708,7 @@ fn expunge_dans_une_boite_en_lecture_seule_se_refuse() {
 fn close_en_lecture_seule_n_efface_rien() {
     let boites = Boites::default();
     let compteur = std::rc::Rc::clone(&boites.efface);
-    let mut session = Session::new(BORNES, true, UnCompte, boites);
+    let mut session = Session::new(BORNES, true, UnCompte(AvecScram::Aucun), boites);
     session.on_tls_established();
     dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
     dire(&mut session, b"a002 EXAMINE INBOX\r\n");
@@ -4574,7 +4904,7 @@ fn append_depose_le_message_et_dit_ou() {
     let boites = Boites::default();
     let ecrit = std::rc::Rc::clone(&boites.ecrit);
     let valide = std::rc::Rc::clone(&boites.valide);
-    let mut session = Session::new(BORNES, true, UnCompte, boites);
+    let mut session = Session::new(BORNES, true, UnCompte(AvecScram::Aucun), boites);
     session.on_tls_established();
     dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
     let conclusion = deposer(
@@ -4592,7 +4922,7 @@ fn append_depose_le_message_et_dit_ou() {
 fn les_drapeaux_et_la_date_arrivent_avec_le_message() {
     let boites = Boites::default();
     let valide = std::rc::Rc::clone(&boites.valide);
-    let mut session = Session::new(BORNES, true, UnCompte, boites);
+    let mut session = Session::new(BORNES, true, UnCompte(AvecScram::Aucun), boites);
     session.on_tls_established();
     dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
     let conclusion = deposer(
@@ -4676,7 +5006,7 @@ fn un_depot_qui_refuse_de_se_valider_le_dit() {
 fn un_message_tronque_ne_se_depose_pas() {
     let boites = Boites::default();
     let ecrit = std::rc::Rc::clone(&boites.ecrit);
-    let mut session = Session::new(BORNES, true, UnCompte, boites);
+    let mut session = Session::new(BORNES, true, UnCompte(AvecScram::Aucun), boites);
     session.on_tls_established();
     dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
     let mut sortie = [0_u8; 1024];

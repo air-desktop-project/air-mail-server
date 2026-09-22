@@ -380,24 +380,6 @@ pub enum SenderDomain {
     Unknown,
 }
 
-/// Le `n=` d'un `client-first-bare`, **encore échappé**.
-///
-/// La session ne déséchappe pas : `=2C` et `=3D` ne peuvent apparaître que dans
-/// un nom qui porte une virgule ou un égal, et `check_login` refuse déjà le
-/// premier. Ce qui sort d'ici va à `canonical_login`, qui compare à des noms de
-/// comptes — lesquels n'en portent pas davantage.
-fn nom_du_bare(bare: &[u8]) -> &[u8] {
-    let apres = bare
-        .get(..2)
-        .filter(|debut| *debut == b"n=")
-        .and_then(|_| bare.get(2..))
-        .unwrap_or_default();
-    match apres.iter().position(|octet| *octet == b',') {
-        Some(rang) => apres.get(..rang).unwrap_or_default(),
-        None => apres,
-    }
-}
-
 /// Ce nom est-il PLEINEMENT QUALIFIÉ ?
 ///
 /// **UN LITTÉRAL D'ADRESSE L'EST TOUJOURS.** §4.1.4 de RFC 5321 le RECOMMANDE à
@@ -2366,7 +2348,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         // le pair a écrit : `n=jean@narro.ch` ouvre la boîte `jean`. Même règle
         // que pour `PLAIN`, et pour la même raison — l'identité authentifiée
         // devient un nom de répertoire.
-        let nom = nom_du_bare(etat.bare());
+        let nom = crate::scram::nom_du_bare(etat.bare());
         let mut canonique = [0_u8; SASL_DECODED_MAX];
         let taille = self.policy.canonical_login(nom, &mut canonique);
         self.compte
@@ -2588,6 +2570,10 @@ mod tests {
     };
     use crate::{Capabilities, Config, Error, Policy, RecipientVerdict, SenderPolicy};
     use ams_proto_smtp::{ClientId, DataEvent, Error as SmtpError, Limits, Path};
+    // Le compte, son mot de passe et le serveur SCRAM d'épreuve viennent du banc
+    // partagé : la session IMAP joue le MÊME échange, et deux jeux de constantes
+    // finiraient par ne plus se répondre.
+    use crate::scram::banc::{self, AvecScram, COMPTE, SECRET};
     use ams_spf::Verdict as SpfVerdict;
 
     /// L'erreur qu'un tampon de `disponible` octets provoque quand il en faut
@@ -2604,40 +2590,26 @@ mod tests {
         Error::Reply(SmtpError::BufferTooSmall { needed })
     }
 
-    /// Ce que la politique d'essai sait faire de SCRAM.
-    ///
-    /// **POURQUOI UN SEUL TYPE POUR LES TROIS CAS**, et non trois politiques :
-    /// `llvm-cov` mesure un groupe d'instanciations par le MAXIMUM de ses
-    /// membres, et non par leur union. Trois politiques feraient trois
-    /// `SmtpSession<P>` distinctes, dont aucune n'emprunterait à elle seule
-    /// tous les bras d'`on_ehlo`, d'`on_auth` et de `feed_auth` — et quinze
-    /// régions resteraient comptées découvertes alors que les essais, pris
-    /// ensemble, les traversent toutes. C'est arrivé : ces essais vivaient dans
-    /// `tests/scram_smtp.rs` avec trois politiques, et C2 tombait à 99,70 %.
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum AvecScram {
-        /// Elle ne le sert pas : le cas d'un serveur sans magasin.
-        Aucun,
-        /// Elle le conduit de bout en bout.
-        Complet,
-        /// Elle le commence et ne sait pas le conclure — `scram_final` reste
-        /// celui du trait, qui refuse.
-        SansConclure,
-    }
-
     /// Une politique qui rend toujours le même verdict, et connaît un compte.
+    ///
+    /// **SON CHAMP DE SCRAM DIT CE QU'ELLE SAIT FAIRE**, et il n'y a qu'UN type
+    /// pour les trois cas : `llvm-cov` résume un groupe d'instanciations par le
+    /// MAXIMUM de ses membres, et non par leur union. Trois politiques feraient
+    /// trois `SmtpSession<P>` dont aucune n'emprunterait à elle seule tous les
+    /// bras d'`on_ehlo`, d'`on_auth` et de `feed_auth` — et quinze régions
+    /// resteraient comptées découvertes alors que les essais, pris ensemble,
+    /// les traversent toutes. C'est arrivé, et c'est mesuré.
     struct Verdict(RecipientVerdict, AvecScram);
 
-    /// Le seul compte que la politique de test connaisse.
-    const COMPTE: &[u8] = b"jean";
-    /// Son mot de passe.
-    const SECRET: &[u8] = b"ouvre-toi";
-    /// Le sel de ce compte, et les tours de PBKDF2 qui vont avec.
-    const SEL: [u8; 16] = [5; 16];
-    const TOURS: u32 = 4_096;
-    /// Le nonce que la politique d'essai ajoute — fixe, pour que le banc soit
-    /// reproductible. Un vrai serveur en tire un neuf à chaque échange.
-    const NONCE_SERVEUR: &[u8] = b"noncedeserveur";
+    impl Policy for Verdict {
+        fn accepts_recipient(
+            &self,
+            _forward_path: &Path<'_>,
+            _submitter: bool,
+        ) -> RecipientVerdict {
+            self.0
+        }
+    }
 
     impl crate::Authenticator for Verdict {
         fn authenticate(&self, credentials: &ams_sasl::Credentials<'_>) -> bool {
@@ -2645,31 +2617,7 @@ mod tests {
         }
 
         fn scram_first(&self, client_first: &[u8], sortie: &mut [u8]) -> Option<crate::ScramFirst> {
-            if self.1 == AvecScram::Aucun {
-                return None;
-            }
-            // **LE SEUL ÉCHEC POSSIBLE ICI EST CELUI D'UN MESSAGE ILLISIBLE**,
-            // et un essai l'emprunte. Tout ce qui suit est composé dans un
-            // tampon que cette politique remplit elle-même : un `?` de plus y
-            // serait un garde que rien ne peut atteindre, et C2 le compterait
-            // à jamais découvert.
-            let lu = ams_sasl::parse_client_first(client_first).ok()?;
-            let mut message = std::vec::Vec::from(&b"r="[..]);
-            message.extend_from_slice(lu.nonce);
-            message.extend_from_slice(NONCE_SERVEUR);
-            // Le sel de l'exemple, encodé — `[5; 16]` fait
-            // `BQUFBQUFBQUFBQUFBQUFBQ==`.
-            message.extend_from_slice(b",s=BQUFBQUFBQUFBQUFBQUFBQ==,i=4096");
-            let ecrits = message.len();
-            sortie
-                .get_mut(..ecrits)
-                .expect("la session offre 256 octets, et ce message en fait moins de cent")
-                .copy_from_slice(&message);
-            // Le `client-first-bare` commence après l'en-tête GS2, que
-            // l'analyse vient de mesurer : la soustraction ne peut pas passer
-            // sous zéro.
-            let debut_bare = client_first.len().saturating_sub(lu.bare.len());
-            Some(crate::ScramFirst { ecrits, debut_bare })
+            banc::server_first(self.1, client_first, sortie)
         }
 
         fn scram_final(
@@ -2679,51 +2627,7 @@ mod tests {
             client_final: &[u8],
             sortie: &mut [u8],
         ) -> Option<usize> {
-            if self.1 != AvecScram::Complet {
-                return None;
-            }
-            let mut liaison = [0_u8; 1024];
-            let lu = ams_sasl::parse_client_final(client_final, &mut liaison).ok()?;
-            let message = auth_message(bare, first, lu.sans_preuve);
-
-            let salted = ams_sasl::derive_salted_password(SECRET, &SEL, TOURS);
-            let stored = ams_sasl::stored_key(&ams_sasl::client_key(&salted));
-            let retrouvee = ams_sasl::client_key_depuis_preuve(&stored, &message, &lu.proof);
-            if !ams_sasl::egales(&ams_sasl::stored_key(&retrouvee), &stored) {
-                return None;
-            }
-            let signature = ams_sasl::server_signature(&ams_sasl::server_key(&salted), &message);
-            let mut encode = [0_u8; 64];
-            let dit = ams_mime::encode_base64_line(&signature, &mut encode)
-                .expect("quarante-quatre octets de base64 tiennent dans soixante-quatre");
-            let mut rendu = std::vec::Vec::from(&b"v="[..]);
-            rendu.extend_from_slice(dit);
-            sortie
-                .get_mut(..rendu.len())
-                .expect("la session offre 256 octets, et `v=` plus la signature en font 46")
-                .copy_from_slice(&rendu);
-            Some(rendu.len())
-        }
-    }
-
-    /// Le `AuthMessage` de RFC 5802 §3 : les trois messages, virgules comprises.
-    fn auth_message(bare: &[u8], first: &[u8], sans_preuve: &[u8]) -> std::vec::Vec<u8> {
-        let mut message = std::vec::Vec::new();
-        message.extend_from_slice(bare);
-        message.push(b',');
-        message.extend_from_slice(first);
-        message.push(b',');
-        message.extend_from_slice(sans_preuve);
-        message
-    }
-
-    impl Policy for Verdict {
-        fn accepts_recipient(
-            &self,
-            _forward_path: &Path<'_>,
-            _submitter: bool,
-        ) -> RecipientVerdict {
-            self.0
+            banc::server_final(self.1, bare, first, client_final, sortie)
         }
     }
 
@@ -5659,11 +5563,11 @@ mod tests {
     /// autant rendre n'importe quoi — elle rend ce qu'elle a.
     #[test]
     fn le_nom_se_tire_d_un_bare_avec_ou_sans_virgule() {
-        assert_eq!(super::nom_du_bare(b"n=jean,r=abc"), b"jean");
-        assert_eq!(super::nom_du_bare(b"n=jean"), b"jean");
+        assert_eq!(crate::scram::nom_du_bare(b"n=jean,r=abc"), b"jean");
+        assert_eq!(crate::scram::nom_du_bare(b"n=jean"), b"jean");
         // Sans `n=` en tête, il n'y a pas de nom à lire.
-        assert_eq!(super::nom_du_bare(b"r=abc"), b"");
-        assert_eq!(super::nom_du_bare(b""), b"");
+        assert_eq!(crate::scram::nom_du_bare(b"r=abc"), b"");
+        assert_eq!(crate::scram::nom_du_bare(b""), b"");
     }
 
     // ── SCRAM-SHA-256 : l'enchaînement, du `EHLO` au `235` ──────────────────
@@ -5689,39 +5593,6 @@ mod tests {
             .expect("EHLO");
         let annonce = std::string::String::from_utf8_lossy(tour.reply()).into_owned();
         (session, annonce)
-    }
-
-    fn en_base64(clair: &[u8]) -> std::string::String {
-        let mut place = [0_u8; 1024];
-        std::string::String::from_utf8_lossy(
-            ams_mime::encode_base64_line(clair, &mut place).expect("base64"),
-        )
-        .into_owned()
-    }
-
-    /// Le client calcule sa preuve, et rend le `client-final` complet.
-    fn client_final(bare: &[u8], server_first: &[u8]) -> std::vec::Vec<u8> {
-        let sans_preuve = {
-            let mut v = std::vec::Vec::from(&b"c=biws,r="[..]);
-            // Le `r=` du client-final reprend le nonce COMPLET du server-first.
-            let nonce = server_first
-                .get(2..)
-                .and_then(|reste| reste.split(|octet| *octet == b',').next())
-                .expect("nonce");
-            v.extend_from_slice(nonce);
-            v
-        };
-        let message = auth_message(bare, server_first, &sans_preuve);
-        let salted = ams_sasl::derive_salted_password(SECRET, &SEL, TOURS);
-        let ck = ams_sasl::client_key(&salted);
-        let preuve = ams_sasl::client_proof(&ck, &ams_sasl::stored_key(&ck), &message);
-        let mut encode = [0_u8; 64];
-        let preuve_b64 = ams_mime::encode_base64_line(&preuve, &mut encode).expect("base64");
-
-        let mut complet = sans_preuve;
-        complet.extend_from_slice(b",p=");
-        complet.extend_from_slice(preuve_b64);
-        complet
     }
 
     /// Le `server-first` que le défi `334` porte, décodé.
@@ -5758,7 +5629,7 @@ mod tests {
 
         // ── Premier tour, avec réponse initiale (RFC 4959) ──────────────────
         let premier = b"n,,n=jean,r=nonceduclient";
-        let commande = std::format!("AUTH SCRAM-SHA-256 {}\r\n", en_base64(premier));
+        let commande = std::format!("AUTH SCRAM-SHA-256 {}\r\n", banc::en_base64(premier));
         let tour = session.handle(commande.as_bytes(), &mut out).expect("AUTH");
         let dit = std::string::String::from_utf8_lossy(tour.reply()).into_owned();
         assert!(dit.starts_with("334 "), "défi attendu, reçu : {dit}");
@@ -5773,10 +5644,10 @@ mod tests {
         );
 
         // ── Second tour ─────────────────────────────────────────────────────
-        let final_client = client_final(b"n=jean,r=nonceduclient", server_first);
+        let final_client = banc::client_final(b"n=jean,r=nonceduclient", server_first);
         let mut out2 = [0_u8; 2048];
         let tour = session
-            .feed_auth(en_base64(&final_client).as_bytes(), &mut out2)
+            .feed_auth(banc::en_base64(&final_client).as_bytes(), &mut out2)
             .expect("client-final");
         let dit = std::string::String::from_utf8_lossy(tour.reply()).into_owned();
         assert!(dit.starts_with("235 "), "succès attendu, reçu : {dit}");
@@ -5797,7 +5668,7 @@ mod tests {
 
         let mut out2 = [0_u8; 2048];
         let tour = session
-            .feed_auth(en_base64(b"n,,n=jean,r=abc").as_bytes(), &mut out2)
+            .feed_auth(banc::en_base64(b"n,,n=jean,r=abc").as_bytes(), &mut out2)
             .expect("client-first");
         let dit = std::string::String::from_utf8_lossy(tour.reply()).into_owned();
         assert!(dit.starts_with("334 "), "server-first attendu : {dit}");
@@ -5808,10 +5679,10 @@ mod tests {
         let mut place = [0_u8; 1024];
         let ecrits = server_first_du_defi(&dit, &mut place);
         let server_first = place.get(..ecrits).expect("longueur");
-        let final_client = client_final(b"n=jean,r=abc", server_first);
+        let final_client = banc::client_final(b"n=jean,r=abc", server_first);
         let mut out3 = [0_u8; 2048];
         let tour = session
-            .feed_auth(en_base64(&final_client).as_bytes(), &mut out3)
+            .feed_auth(banc::en_base64(&final_client).as_bytes(), &mut out3)
             .expect("client-final");
         assert!(
             std::string::String::from_utf8_lossy(tour.reply()).starts_with("235 "),
@@ -5852,7 +5723,7 @@ mod tests {
         let mut out = [0_u8; 2048];
         let commande = std::format!(
             "AUTH SCRAM-SHA-256 {}\r\n",
-            en_base64(b"n,,n=jean,r=nonceduclient")
+            banc::en_base64(b"n,,n=jean,r=nonceduclient")
         );
         session.handle(commande.as_bytes(), &mut out).expect("AUTH");
 
@@ -5865,7 +5736,7 @@ mod tests {
         );
         let mut out2 = [0_u8; 2048];
         let tour = session
-            .feed_auth(en_base64(&faux).as_bytes(), &mut out2)
+            .feed_auth(banc::en_base64(&faux).as_bytes(), &mut out2)
             .expect("client-final");
         let dit = std::string::String::from_utf8_lossy(tour.reply()).into_owned();
         assert!(dit.starts_with("535 "), "refus attendu : {dit}");
@@ -5880,7 +5751,10 @@ mod tests {
         let (mut session, _) = session_chiffree(AvecScram::Complet);
         let mut out = [0_u8; 2048];
         // Base64 valide, SCRAM illisible.
-        let commande = std::format!("AUTH SCRAM-SHA-256 {}\r\n", en_base64(b"n'importe quoi"));
+        let commande = std::format!(
+            "AUTH SCRAM-SHA-256 {}\r\n",
+            banc::en_base64(b"n'importe quoi")
+        );
         let tour = session.handle(commande.as_bytes(), &mut out).expect("AUTH");
         assert!(
             std::string::String::from_utf8_lossy(tour.reply()).starts_with("535 "),
@@ -5902,7 +5776,10 @@ mod tests {
         // refusé plutôt que servi à moitié.
         let (mut session, _) = session_chiffree(AvecScram::Aucun);
         let mut out = [0_u8; 2048];
-        let commande = std::format!("AUTH SCRAM-SHA-256 {}\r\n", en_base64(b"n,,n=jean,r=abc"));
+        let commande = std::format!(
+            "AUTH SCRAM-SHA-256 {}\r\n",
+            banc::en_base64(b"n,,n=jean,r=abc")
+        );
         let tour = session.handle(commande.as_bytes(), &mut out).expect("AUTH");
         assert!(
             std::string::String::from_utf8_lossy(tour.reply()).starts_with("535 "),
@@ -5917,12 +5794,15 @@ mod tests {
         // session.
         let (mut session, _) = session_chiffree(AvecScram::SansConclure);
         let mut out = [0_u8; 2048];
-        let commande = std::format!("AUTH SCRAM-SHA-256 {}\r\n", en_base64(b"n,,n=jean,r=abc"));
+        let commande = std::format!(
+            "AUTH SCRAM-SHA-256 {}\r\n",
+            banc::en_base64(b"n,,n=jean,r=abc")
+        );
         session.handle(commande.as_bytes(), &mut out).expect("AUTH");
         let mut out2 = [0_u8; 2048];
         let tour = session
             .feed_auth(
-                en_base64(b"c=biws,r=abcnoncedeserveur,p=AAAA").as_bytes(),
+                banc::en_base64(b"c=biws,r=abcnoncedeserveur,p=AAAA").as_bytes(),
                 &mut out2,
             )
             .expect("client-final");
@@ -5950,7 +5830,10 @@ mod tests {
         // Second tour.
         let (mut session, _) = session_chiffree(AvecScram::Complet);
         let mut out = [0_u8; 2048];
-        let commande = std::format!("AUTH SCRAM-SHA-256 {}\r\n", en_base64(b"n,,n=jean,r=abc"));
+        let commande = std::format!(
+            "AUTH SCRAM-SHA-256 {}\r\n",
+            banc::en_base64(b"n,,n=jean,r=abc")
+        );
         session.handle(commande.as_bytes(), &mut out).expect("AUTH");
         let mut out2 = [0_u8; 2048];
         let tour = session
@@ -5970,7 +5853,7 @@ mod tests {
         let mut premier = std::vec::Vec::from(&b"n,,n="[..]);
         premier.extend(std::iter::repeat_n(b'a', 300));
         premier.extend_from_slice(b",r=abc");
-        let commande = std::format!("AUTH SCRAM-SHA-256 {}\r\n", en_base64(&premier));
+        let commande = std::format!("AUTH SCRAM-SHA-256 {}\r\n", banc::en_base64(&premier));
         let tour = session.handle(commande.as_bytes(), &mut out).expect("AUTH");
         assert!(
             std::string::String::from_utf8_lossy(tour.reply()).starts_with("535 "),
@@ -5985,12 +5868,15 @@ mod tests {
         // RFC 5802 ne veut pas qu'on distingue.
         let (mut session, _) = session_chiffree(AvecScram::Complet);
         let mut out = [0_u8; 2048];
-        let commande = std::format!("AUTH SCRAM-SHA-256 {}\r\n", en_base64(b"n,,n=jean,r=abc"));
+        let commande = std::format!(
+            "AUTH SCRAM-SHA-256 {}\r\n",
+            banc::en_base64(b"n,,n=jean,r=abc")
+        );
         session.handle(commande.as_bytes(), &mut out).expect("AUTH");
         let mut out2 = [0_u8; 2048];
         let tour = session
             .feed_auth(
-                en_base64(b"ceci n'est pas un client-final").as_bytes(),
+                banc::en_base64(b"ceci n'est pas un client-final").as_bytes(),
                 &mut out2,
             )
             .expect("client-final");
@@ -6004,7 +5890,10 @@ mod tests {
         // le `client-final` d'un échange abandonné serait encore recevable.
         let (mut session, _) = session_chiffree(AvecScram::Complet);
         let mut out = [0_u8; 2048];
-        let commande = std::format!("AUTH SCRAM-SHA-256 {}\r\n", en_base64(b"n,,n=jean,r=abc"));
+        let commande = std::format!(
+            "AUTH SCRAM-SHA-256 {}\r\n",
+            banc::en_base64(b"n,,n=jean,r=abc")
+        );
         session.handle(commande.as_bytes(), &mut out).expect("AUTH");
         let mut out2 = [0_u8; 2048];
         let tour = session.feed_auth(b"*", &mut out2).expect("abandon");

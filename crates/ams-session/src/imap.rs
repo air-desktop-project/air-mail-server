@@ -792,6 +792,47 @@ const NOM_TRANSCRIT_MAX: usize = MAILBOX_NAME_MAX * 3;
 /// octets majorent largement tout ce qui peut correspondre à un compte.
 const SASL_DECODED_MAX: usize = 1024;
 
+/// Où en est l'échange SCRAM d'une session IMAP.
+///
+/// # POURQUOI QUATRE ÉTATS ICI, ET TROIS EN SMTP
+///
+/// RFC 4954 §4 laisse le `server-final` voyager dans la réponse de succès :
+/// SMTP conclut donc en deux allers-retours. **RFC 4959 n'offre rien de tel** —
+/// son §3 n'ajoute que la réponse initiale du client —, et le profil SASL
+/// d'IMAP veut que le serveur envoie son dernier message comme une demande de
+/// continuation, à laquelle le client répond une ligne VIDE avant la réponse
+/// taguée. D'où [`EtapeScram::Conclu`], qui n'a pas d'équivalent en SMTP.
+///
+/// Ce n'est pas une politesse : le `v=` est ce qui authentifie le SERVEUR
+/// auprès du client (§3 de RFC 5802). Conclure par un `OK` sans l'envoyer
+/// priverait le client de la moitié mutuelle de l'échange.
+// `EnCours` porte les deux messages retenus quand les trois autres variantes
+// sont vides ; `Box` les mettrait au tas, et C3 interdit l'allocation dans une
+// machine à états. Un `enum` occupe de toute façon sa plus grande variante.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "C3 interdit l allocation que le remède exige"
+)]
+#[derive(Debug, Clone, Copy)]
+enum EtapeScram {
+    /// Aucun échange SCRAM : c'est `PLAIN`, ou rien.
+    Aucune,
+    /// Le mécanisme est choisi, le `client-first` n'est pas encore arrivé.
+    Attendu,
+    /// Le premier tour est passé ; voici de quoi conclure.
+    EnCours(crate::scram::EtatScram),
+    /// La preuve est juste et le `server-final` est parti : il reste au client
+    /// à répondre la ligne vide que le profil SASL d'IMAP attend.
+    Conclu,
+}
+
+/// Ce qu'un `server-first` ou un `server-final` peut occuper, encodé ou non.
+///
+/// Mêmes bornes que du côté SMTP, et pour les mêmes raisons : `r=…,s=…,i=…`
+/// tient largement dans 256 octets, et le base64 en ajoute un tiers.
+const SCRAM_SORTIE_MAX: usize = 256;
+const SCRAM_ENCODE_MAX: usize = 512;
+
 /// Un morceau de réponse `FETCH` à écouler.
 ///
 /// # Pourquoi la session ne rend pas des octets
@@ -1240,6 +1281,8 @@ pub struct Session<A: Authenticator, M: Mailboxes> {
     tag_len: usize,
     /// Attend-on une réponse SASL ?
     attend_sasl: bool,
+    /// Où en est l'échange SCRAM, s'il y en a un.
+    scram: EtapeScram,
     /// L'utilisateur authentifié.
     utilisateur: [u8; USER_MAX_OCTETS],
     utilisateur_len: usize,
@@ -1461,6 +1504,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             tag: [0; TAG_MAX_OCTETS],
             tag_len: 0,
             attend_sasl: false,
+            scram: EtapeScram::Aucune,
             utilisateur: [0; USER_MAX_OCTETS],
             utilisateur_len: 0,
             boites,
@@ -1605,6 +1649,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         self.chiffre = true;
         self.etat = State::NotAuthenticated;
         self.attend_sasl = false;
+        self.scram = EtapeScram::Aucune;
         self.tag_len = 0;
         self.utilisateur_len = 0;
         self.ouverte = None;
@@ -1714,6 +1759,9 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         // un client qui se ravise, et le lui reprocher gonflerait un compteur
         // qui doit rester celui des vraies fautes.
         if reponse.trim_ascii() == b"*" {
+            // **L'ÉTAT PART AVEC L'ABANDON**, sans quoi le `client-final` d'un
+            // échange abandonné serait encore recevable.
+            self.scram = EtapeScram::Aucune;
             return self.termine(
                 Status::Bad,
                 b"Authentication cancelled",
@@ -1721,7 +1769,14 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
                 out,
             );
         }
-        self.regler_authentification(reponse.trim_ascii(), out)
+        match core::mem::replace(&mut self.scram, EtapeScram::Aucune) {
+            EtapeScram::Aucune => self.regler_authentification(reponse.trim_ascii(), out),
+            EtapeScram::Attendu => self.premier_tour_scram(reponse.trim_ascii(), out),
+            EtapeScram::EnCours(etat) => self.conclure_scram(etat, reponse.trim_ascii(), out),
+            // La ligne vide que le profil SASL attend après le `server-final`.
+            // Ce qu'elle porte n'est pas regardé : RFC 5802 n'y met rien.
+            EtapeScram::Conclu => self.termine(Status::Ok, b"Authenticated", Action::Continue, out),
+        }
     }
 
     // ── Les commandes ───────────────────────────────────────────────────────
@@ -1851,9 +1906,21 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         let Some(Ok(mecanisme)) = lus.next() else {
             return self.faute(b"AUTHENTICATE expects a mechanism", out);
         };
-        if !mecanisme.equals_ignore_case(b"PLAIN") {
-            // Le seul mécanisme servi. Le dire ainsi vaut mieux qu'un `BAD` :
-            // le client sait alors qu'il doit en essayer un autre.
+        let scram = mecanisme.equals_ignore_case(b"SCRAM-SHA-256");
+        if !scram && !mecanisme.equals_ignore_case(b"PLAIN") {
+            // Les deux seuls mécanismes servis. Le dire ainsi vaut mieux qu'un
+            // `BAD` : le client sait alors qu'il doit en essayer un autre.
+            return self.termine(
+                Status::No,
+                b"Unsupported authentication mechanism",
+                Action::Continue,
+                out,
+            );
+        }
+        // **SCRAM NE S'ESSAIE PAS SI LA POLITIQUE NE LE SERT PAS.** On ne
+        // l'annonce alors pas, et un client qui l'essaie quand même est refusé
+        // plutôt que servi à moitié.
+        if scram && !self.scram_servi() {
             return self.termine(
                 Status::No,
                 b"Unsupported authentication mechanism",
@@ -1884,10 +1951,27 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
                     .get_mut(..longueur)
                     .unwrap_or_default()
                     .copy_from_slice(base64.get(..longueur).unwrap_or_default());
-                self.regler_authentification(copie.get(..longueur).unwrap_or_default(), out)
+                let recu = copie.get(..longueur).unwrap_or_default();
+                if scram {
+                    // **`=` DÉSIGNE LA RÉPONSE INITIALE VIDE** (§3) : c'est
+                    // « présente, et de longueur nulle ». SCRAM n'a aucune
+                    // raison d'en envoyer une, et l'analyse du message la
+                    // refusera — mais elle ne doit pas être confondue avec une
+                    // réponse ABSENTE, qui elle ouvre le tour de défi.
+                    let brut: &[u8] = if recu == b"=" { b"" } else { recu };
+                    return self.premier_tour_scram(brut, out);
+                }
+                self.regler_authentification(recu, out)
             }
             (None, _) => {
                 self.attend_sasl = true;
+                // L'étape retient ce qu'on attend : sans elle, la réponse
+                // suivante serait prise pour celle de `PLAIN`.
+                self.scram = if scram {
+                    EtapeScram::Attendu
+                } else {
+                    EtapeScram::Aucune
+                };
                 let ecrit = encode_continuation(out, b"", &self.limits)
                     .map_err(Error::Reply)?
                     .len();
@@ -1899,6 +1983,120 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             }
             _ => self.faute(b"AUTHENTICATE takes at most one initial response", out),
         }
+    }
+
+    /// La politique sait-elle conduire SCRAM ?
+    ///
+    /// On le lui demande avec un `client-first` MINIMAL mais VALIDE : elle rend
+    /// `None` quand elle ne sert pas le mécanisme, et `None` aussi sur un
+    /// message mal formé — un message vide ne distinguerait donc pas les deux.
+    /// La sonde ne coûte rien : la politique ne consulte son magasin qu'ensuite.
+    fn scram_servi(&self) -> bool {
+        let mut place = [0_u8; SCRAM_SORTIE_MAX];
+        self.policy
+            .scram_first(b"n,,n=sonde,r=sonde", &mut place)
+            .is_some()
+    }
+
+    /// Premier tour : le `client-first` décodé, la politique, et le défi.
+    fn premier_tour_scram<'b>(
+        &mut self,
+        base64: &[u8],
+        out: &'b mut [u8],
+    ) -> Result<Turn<'b>, Error> {
+        let mut clair = [0_u8; SASL_DECODED_MAX];
+        let Ok(ecrits) = decode_base64(base64, &mut clair) else {
+            return self.refuser_l_authentification(out);
+        };
+        let recu = clair.get(..ecrits).unwrap_or_default();
+        let mut premier = [0_u8; SCRAM_SORTIE_MAX];
+        let Some(rendu) = self.policy.scram_first(recu, &mut premier) else {
+            return self.refuser_l_authentification(out);
+        };
+        let bare = recu.get(rendu.debut_bare..).unwrap_or_default();
+        let server_first = premier.get(..rendu.ecrits).unwrap_or_default();
+        let Some(etat) = crate::scram::EtatScram::neuf(bare, server_first) else {
+            // Trop long pour être retenu : on refuse plutôt que de tronquer un
+            // `AuthMessage`, qui ne correspondrait alors à rien.
+            return self.refuser_l_authentification(out);
+        };
+        self.scram = EtapeScram::EnCours(etat);
+        self.defi_scram(server_first, out)
+    }
+
+    /// Second tour : le `client-final` décodé, vérifié, et le `server-final`.
+    fn conclure_scram<'b>(
+        &mut self,
+        etat: crate::scram::EtatScram,
+        base64: &[u8],
+        out: &'b mut [u8],
+    ) -> Result<Turn<'b>, Error> {
+        let mut clair = [0_u8; SASL_DECODED_MAX];
+        let Ok(ecrits) = decode_base64(base64, &mut clair) else {
+            return self.refuser_l_authentification(out);
+        };
+        let client_final = clair.get(..ecrits).unwrap_or_default();
+        let mut dernier = [0_u8; SCRAM_SORTIE_MAX];
+        let Some(longueur) =
+            self.policy
+                .scram_final(etat.bare(), etat.first(), client_final, &mut dernier)
+        else {
+            return self.refuser_l_authentification(out);
+        };
+
+        // **LE NOM VIENT DU `client-first-bare`**, et non de ce que le pair a
+        // écrit : `n=jean@narro.ch` ouvre la boîte `jean`. Même règle que pour
+        // `PLAIN`, et pour la même raison — l'identité authentifiée devient un
+        // nom de répertoire.
+        let mut canonique = [0_u8; USER_MAX_OCTETS];
+        let taille = self
+            .policy
+            .canonical_login(crate::scram::nom_du_bare(etat.bare()), &mut canonique);
+        self.retenir_l_utilisateur(canonique.get(..taille).unwrap_or_default());
+
+        // **LA SESSION EST OUVERTE DÈS QUE LA PREUVE EST JUSTE.** La ligne vide
+        // qui suit est une formalité du profil SASL, et `handle` refuse toute
+        // commande tant que l'échange n'est pas clos : rien ne peut s'y glisser.
+        self.etat = State::Authenticated;
+        self.scram = EtapeScram::Conclu;
+        self.defi_scram(dernier.get(..longueur).unwrap_or_default(), out)
+    }
+
+    /// Écrit une demande de continuation portant `message` en base64.
+    ///
+    /// Les deux messages du serveur passent par là : le `server-first` et le
+    /// `server-final`. RFC 4959 n'offre AUCUN moyen de joindre le second à la
+    /// réponse taguée — contrairement à RFC 4954 §4 pour SMTP —, et le profil
+    /// SASL d'IMAP veut donc une continuation, à laquelle le client répond une
+    /// ligne vide.
+    fn defi_scram<'b>(&mut self, message: &[u8], out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
+        let mut encode = [0_u8; SCRAM_ENCODE_MAX];
+        // **AUCUNE GARDE ICI, PARCE QU'AUCUN ÉTAT NE PEUT LA FAIRE CÉDER** : le
+        // message vient d'un tampon de [`SCRAM_SORTIE_MAX`] octets, dont le
+        // base64 fait un tiers de plus — 344 pour 256 —, et [`SCRAM_ENCODE_MAX`]
+        // en offre 512. Un `if` de plus serait un chemin que C2 compterait à
+        // jamais découvert.
+        let defi = ams_mime::encode_base64_line(message, &mut encode)
+            .expect("le base64 de 256 octets en fait 344, et le tampon en offre 512");
+        self.attend_sasl = true;
+        let ecrit = encode_continuation(out, defi, &self.limits)
+            .map_err(Error::Reply)?
+            .len();
+        Ok(Turn {
+            reply: out.get(..ecrit).unwrap_or_default(),
+            action: Action::ReadAuthResponse,
+            peer_fault: false,
+        })
+    }
+
+    /// Retient le nom du compte authentifié, borné par le tampon.
+    fn retenir_l_utilisateur(&mut self, nom: &[u8]) {
+        let longueur = nom.len().min(self.utilisateur.len());
+        self.utilisateur
+            .get_mut(..longueur)
+            .unwrap_or_default()
+            .copy_from_slice(nom.get(..longueur).unwrap_or_default());
+        self.utilisateur_len = longueur;
     }
 
     /// Décode, lit, interroge la politique, et répond.
@@ -1947,12 +2145,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         if !succes {
             return self.refuser_l_authentification(out);
         }
-        let longueur = nom.len().min(self.utilisateur.len());
-        self.utilisateur
-            .get_mut(..longueur)
-            .unwrap_or_default()
-            .copy_from_slice(nom.get(..longueur).unwrap_or_default());
-        self.utilisateur_len = longueur;
+        self.retenir_l_utilisateur(nom);
         self.etat = State::Authenticated;
         self.termine(Status::Ok, b"Authenticated", Action::Continue, out)
     }
@@ -2250,6 +2443,11 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
     fn capacites(&self, prefixe: &'static [u8], suffixe: &'static [u8]) -> [&'static [u8]; 5] {
         // §6.2.3 : tant que la connexion n'est pas protégée, on l'annonce.
         let (troisieme, quatrieme): (&[u8], &[u8]) = match (self.chiffre, self.starttls_offered) {
+            // **LE PLUS FORT EN TÊTE**, et seulement si la politique le sert :
+            // RFC 4422 §3.2 laisse le client choisir, et beaucoup prennent le
+            // premier mécanisme qu'ils connaissent. Annoncer SCRAM sans magasin
+            // ferait renoncer un client qui sait faire les deux.
+            (true, _) if self.scram_servi() => (b" AUTH=SCRAM-SHA-256 AUTH=PLAIN", b""),
             (true, _) => (b" AUTH=PLAIN", b""),
             (false, true) => (b" STARTTLS", b" LOGINDISABLED"),
             (false, false) => (b" LOGINDISABLED", b""),

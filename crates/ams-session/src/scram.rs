@@ -27,6 +27,36 @@
 //! correspondrait à rien, et le pair verrait « mot de passe faux » là où il
 //! faudrait lire « votre nom de compte est trop long ».
 
+/// Le serveur et le client SCRAM que les bancs des deux sessions jouent.
+///
+/// Il vit ICI, et non dans le module d'essais de l'une des deux : SMTP et IMAP
+/// conduisent le MÊME échange, et deux politiques d'essai feraient deux fois la
+/// même arithmétique.
+#[cfg(test)]
+pub(crate) mod banc;
+
+/// Le `n=` d'un `client-first-bare`, **encore échappé**.
+///
+/// La session ne déséchappe pas : `=2C` et `=3D` ne peuvent apparaître que dans
+/// un nom qui porte une virgule ou un égal, et `check_login` refuse déjà le
+/// premier. Ce qui sort d'ici va à `canonical_login`, qui compare à des noms de
+/// comptes — lesquels n'en portent pas davantage.
+///
+/// **LES DEUX SESSIONS LE LISENT** : SMTP et IMAP tirent le nom du même
+/// endroit, et deux copies de cette lecture finiraient par ne plus désigner la
+/// même boîte.
+pub fn nom_du_bare(bare: &[u8]) -> &[u8] {
+    let apres = bare
+        .get(..2)
+        .filter(|debut| *debut == b"n=")
+        .and_then(|_| bare.get(2..))
+        .unwrap_or_default();
+    match apres.iter().position(|octet| *octet == b',') {
+        Some(rang) => apres.get(..rang).unwrap_or_default(),
+        None => apres,
+    }
+}
+
 /// Ce qu'un `client-first-bare` peut occuper.
 ///
 /// `n=<compte>,r=<nonce>` : un nom de compte est borné à soixante-quatre octets
