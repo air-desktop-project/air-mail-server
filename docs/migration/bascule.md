@@ -1080,6 +1080,46 @@ Ce qu'il faut avoir vu de ses yeux avant de continuer :
 drapeau `\Seen`. Employez `BODY.PEEK[…]`, sans quoi vous marquerez comme lu ce
 que vous étiez venu vérifier.
 
+#### SCRAM : à poser AVANT la fenêtre, ou pas du tout
+
+Depuis le 2026-09-22, ce serveur sait `SCRAM-SHA-256` — le mot de passe ne
+traverse plus le fil, même chiffré. **Ce n'est pas obligatoire pour basculer**, et
+la prudence dit de ne pas le poser le soir même : une pièce de plus dans une
+fenêtre de coupure est une pièce de plus qui peut manquer.
+
+S'il est posé, **il l'est pour les six comptes ou pour aucun** : un compte sans
+vérificateur reste joignable en `PLAIN`, mais SCRAM lui répondra comme à un
+compte inconnu — et un client qui choisit SCRAM parce qu'il le voit annoncé
+échouera, alors que le mot de passe est juste. C'est exactement la forme du
+défaut du 22 septembre : un client qui ne peut pas se connecter, et un serveur
+qui ne dit pas pourquoi.
+
+    # La clé, une fois, AILLEURS que le magasin.
+    sudo -u air-mail air-mail-admin scram init /etc/air-mail/scram.key
+
+    # Un vérificateur par compte — il se dérive du mot de passe EN CLAIR,
+    # donc au moment où on le pose, et jamais après.
+    for compte in thierry.delhaise vincent contact support facture ofrou-sierre; do
+        printf %s "«le secret de ce compte»" | sudo -u air-mail air-mail-admin \
+            account passwd /var/lib/air-mail/comptes.bin --login "$compte" \
+            --scram-key /etc/air-mail/scram.key --scram /var/lib/air-mail/scram.bin
+    done
+
+Puis les deux chemins dans la configuration (`--scram-key` et `--scram`), et le
+service relancé. **Ce qu'il faut avoir vu avant de continuer :**
+
+- [ ] `AUTH SCRAM-SHA-256 PLAIN` dans la réponse à `EHLO` sous TLS, et
+      `AUTH=SCRAM-SHA-256` dans les capacités IMAP ;
+- [ ] **un vrai client ouvre sa session en SCRAM** — Thunderbird le choisit tout
+      seul dès qu'il le voit. Apple Mail, lui, ne le fait pas : il reste en
+      `PLAIN`, et c'est bien ainsi ;
+- [ ] `SCRAM-SHA-256-PLUS` **n'apparaît qu'en TLS 1.3**, et son absence en
+      TLS 1.2 n'est pas un défaut — voir `crates/ams-loop-tokio/src/liaison.rs`.
+
+**ET SI L'ON HÉSITE, ON NE POSE RIEN** : sans les deux options, SCRAM n'existe
+pas — ni annoncé, ni stocké —, et la bascule est exactement celle qui était
+prévue. Il se posera à froid, un autre jour, sans coupure.
+
 ### 0.7 Prévenir
 
 `pour-les-utilisateurs.md` est fait pour être envoyé tel quel. **Il porte la

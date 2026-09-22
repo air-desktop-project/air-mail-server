@@ -1118,7 +1118,18 @@ fn poser_le_verificateur(
     ams_config::decode_scram(&octets)
         .map_err(|erreur| format!("le magasin SCRAM écrit ne se relit pas : {erreur}"))?;
     ams_fichier::poser(&demande.magasin, &octets)
-        .map_err(|erreur| format!("`{}` : {erreur}", demande.magasin.display()))
+        .map_err(|erreur| format!("`{}` : {erreur}", demande.magasin.display()))?;
+
+    // **CE QUI EST FAIT SE DIT.** Sans cette ligne, la commande annonçait « le
+    // compte est ajouté » et rien d'autre : l'exploitant qui a passé les deux
+    // options de SCRAM n'avait aucun moyen de savoir si elles avaient servi, et
+    // le seul indice était l'apparition d'un fichier.
+    println!(
+        "{} : vérificateur SCRAM posé pour `{nom}` ({} au total)",
+        demande.magasin.display(),
+        magasin.len()
+    );
+    Ok(())
 }
 
 /// Un sel de seize octets, tiré du noyau.

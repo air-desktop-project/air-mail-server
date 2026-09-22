@@ -154,16 +154,19 @@ Serveur de courrier écrit en Rust : **SMTP**, **POP3**, **IMAP** et **HTTP**.
 > moitiés de cette phrase sont éprouvées sur l'exécutable lui-même, face à un
 > vrai OpenSSL.
 >
-> **Il authentifie** : `AUTH PLAIN` sous TLS, contre des empreintes Argon2id
-> rangées dans un fichier séparé qu'`air-mail-admin` écrit. Sans comptes, il ne
-> l'annonce pas.
+> **Il authentifie** : `SCRAM-SHA-256` — et `SCRAM-SHA-256-PLUS`, lié au canal
+> TLS 1.3 — quand un magasin de vérificateurs est posé, `PLAIN` derrière pour
+> les clients qui ne savent rien d'autre, et jamais hors chiffrement. Les
+> empreintes Argon2id vivent dans un fichier séparé qu'`air-mail-admin` écrit ;
+> les vérificateurs SCRAM, scellés, dans un TROISIÈME, sous une clé rangée
+> ailleurs. Sans comptes, rien n'est annoncé.
 >
 > **Une boîte par compte** : seules les adresses qu'un compte déclare sont
 > acceptées, et chacune mène à `<maildir>/<compte>/`. Sans comptes, le serveur
 > n'accepte de courrier pour personne — ce n'est plus un fourre-tout.
 >
 > **Il ouvre les boîtes** : IMAP sur un troisième port, `STARTTLS` puis `LOGIN`
-> ou `AUTHENTICATE PLAIN`, `SELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`,
+> ou `AUTHENTICATE` (`SCRAM-SHA-256`, `PLAIN`), `SELECT`, `LIST`, `STATUS`, `FETCH`, `STORE`,
 > `EXPUNGE`, `SEARCH`, `COPY`, `MOVE`, `APPEND`, `CREATE`, `DELETE` et `RENAME` — un message traverse la socket sans jamais tenir en
 > mémoire, les drapeaux s'écrivent dans les noms de fichiers Maildir, et un
 > effacement n'a jamais lieu sur une marque périmée.
@@ -237,7 +240,7 @@ horloge.
 | --- | --- | --- |
 | `ams-mime` | RFC 5322 et MIME — le socle des quatre protocoles | **squelette du message, domaine d'un `From:`, composition d'un rapport, `Received:` et `Authentication-Results`** |
 | `ams-proto-smtp` | RFC 5321, et `BDAT` de RFC 3030 | **commandes, réponses écrites ET lues, phase de données, point-farcissage, morceaux comptés** |
-| `ams-sasl` | RFC 4422/4616 : `PLAIN` et son base64 | **implémenté** |
+| `ams-sasl` | RFC 4422/4616 `PLAIN`, RFC 5802/7677 `SCRAM-SHA-256`, RFC 9266 la liaison de canal, et le base64 des trois | **implémenté** |
 | `ams-proto-pop3` | RFC 1939 | **commandes et réponses** |
 | `ams-dns` | RFC 1035 : le codec d'un message | **question encodée, réponse décodée** |
 | `ams-proto-imap` | RFC 9051 (IMAP4rev2) | **découpage, tag, littéraux, arguments, ensembles de séquences, éléments de `FETCH`, drapeaux de `STORE`, critères de `SEARCH`, ligne d'`APPEND`, date-heure, noms de boîtes, réponses** |
@@ -317,12 +320,14 @@ du point d'une réponse multiligne vit à **un seul endroit** : l'écrire deux f
 c'est se donner deux occasions de l'écrire différemment, et un point non doublé
 termine le message au milieu. La boucle POP3 les emploie.
 
-`ams-sasl` : le mécanisme `PLAIN` et le base64 **strict** qui le transporte —
-décodage seul, sans allocation. Strict veut dire : une seule écriture par
-valeur. `Zg==` et `Zh==` décodent tous deux vers `f` ; accepter le second
-donnerait plusieurs formes pour un même identifiant, de quoi passer à côté d'un
-filtre ou d'un comptage. `LOGIN` et `CRAM-MD5` ne sont pas servis, et la crate
-dit pourquoi plutôt que de se taire.
+`ams-sasl` : les mécanismes `PLAIN` et `SCRAM-SHA-256`, et le base64 **strict**
+qui les transporte — décodage seul, sans allocation. Strict veut dire : une seule
+écriture par valeur. `Zg==` et `Zh==` décodent tous deux vers `f` ; accepter le
+second donnerait plusieurs formes pour un même identifiant, de quoi passer à côté
+d'un filtre ou d'un comptage. SCRAM y est l'arithmétique seule — PBKDF2, les
+trois clés, la liaison de canal de RFC 9266 —, éprouvée contre le vecteur de
+RFC 7677 : aucun magasin, aucune décision, aucune entrée-sortie. `LOGIN` et
+`CRAM-MD5` ne sont pas servis, et la crate dit pourquoi plutôt que de se taire.
 
 `ams-spf` : la lecture d'un enregistrement `v=spf1`, l'expansion des macros
 (§7) et l'évaluation d'une politique entière. **La validation a lieu d'un seul
@@ -1490,9 +1495,11 @@ serveur qui **retient**, dans `ams-usages` à la racine du compte. Cinq attribut
 refusent par `NO [USEATTR]`, jamais par un `BAD` qui dirait à tort au client
 qu'il a mal écrit sa commande.
 
-Reste un `SHOULD`, qui se nomme aussi. §6.2.2 recommande d'offrir un mécanisme
-SASL qui ne transporte pas le mot de passe en clair — SCRAM-SHA-256, GSSAPI,
-EXTERNAL ; ce serveur n'offre que `PLAIN`, et seulement sous chiffrement.
+Ce `SHOULD`-là est tenu depuis le 2026-09-22. §6.2.2 recommande d'offrir un
+mécanisme SASL qui ne transporte pas le mot de passe en clair :
+`AUTH=SCRAM-SHA-256` est annoncé dès qu'un magasin de vérificateurs est posé, et
+`AUTH=SCRAM-SHA-256-PLUS` en TLS 1.3. `PLAIN` reste derrière, pour les clients
+qui ne savent rien d'autre, et toujours sous chiffrement seul.
 
 Hors d'IMAP : rien de connu. **La file de réémission des messages sortants
 existe**, contrairement à ce que cette ligne a longtemps dit — `ams-queue` décide

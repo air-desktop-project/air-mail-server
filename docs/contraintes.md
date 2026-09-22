@@ -1270,20 +1270,32 @@ serveur à conserver le mot de passe en clair** pour calculer le condensat. Un
 mécanisme qui interdit de stocker une empreinte aggrave la fuite qu'il prétend
 éviter.
 
-**`SCRAM-SHA-256` est refusé depuis le 2026-09-06, et pour une raison voisine.**
-Il ne fait pas conserver le mot de passe, mais il fait conserver quelque chose
-qui, en cas de fuite, vaut presque autant. §2.2 de RFC 5802 impose PBKDF2 pour
-dériver son vérificateur : on ne peut pas y mettre l'`argon2id` du magasin sans
-cesser d'interopérer, puisque c'est le CLIENT qui calcule le sien — et un magasin
-qui porterait les deux serait attaquable par le plus faible. Pire, §9 dit que
-`ServerKey` permet d'usurper le SERVEUR auprès des clients, et qu'une
-conversation écoutée suffit alors à reconstituer `ClientKey`. Une empreinte
-`argon2id`, elle, doit d'abord être cassée.
+**`SCRAM-SHA-256` A ÉTÉ REFUSÉ LE 2026-09-06, PUIS SERVI LE 2026-09-22.** Le
+refus tenait en une phrase : §2.2 de RFC 5802 impose PBKDF2 pour dériver son
+vérificateur, on ne peut pas y substituer l'`argon2id` du magasin sans cesser
+d'interopérer — c'est le CLIENT qui calcule le sien —, et §9 ajoute que
+`ServerKey` permet d'usurper le SERVEUR auprès des clients. Ce vérificateur, en
+cas de fuite du fichier de comptes, valait presque le mot de passe.
 
-Ce que SCRAM apporterait est mince en regard : sous TLS 1.3, `PLAIN` ne fait
-jamais traverser le mot de passe, et le certificat authentifie déjà le serveur.
-**Le `SHOULD` de §6.2.2 de RFC 9051 n'est donc pas tenu, et c'est assumé** —
-`docs/v1.md` porte les trois conditions qui renverseraient ce choix.
+**C'EST LA TROISIÈME CONDITION DE `docs/v1.md` QUI L'A RENVERSÉ**, et elle y
+était écrite d'avance : « un magasin où le vérificateur SCRAM vivrait
+SÉPARÉMENT, chiffré par une clé que le fichier de comptes ne porte pas ». C'est
+ce qui existe depuis : `scram.bin` ne vit pas dans `accounts.bin`, et chaque
+vérificateur y est scellé par ChaCha20-Poly1305 sous une clé rangée AILLEURS —
+`scram.key`, que le magasin ne nomme pas et que la sauvegarde des comptes
+n'emporte pas. Une fuite du fichier de comptes ne livre donc plus rien de SCRAM ;
+il faut les deux fichiers, et ils ne vivent pas ensemble.
+
+Les comptes SANS vérificateur restent joignables en `PLAIN` : SCRAM leur répond
+comme à un compte inconnu — §7 l'exige — et refuse à la preuve. L'`argon2id` du
+magasin n'a pas bougé d'un octet ; ce qui a changé, c'est qu'un second secret,
+plus faible par obligation, vit désormais sous une autre clé.
+
+**ET LA LIAISON DE CANAL VA AVEC, DEPUIS LE 2026-09-22 ÉGALEMENT.**
+`SCRAM-SHA-256-PLUS` (RFC 9266) est annoncé aux connexions TLS 1.3, et à elles
+seules : §4.2 ne définit la liaison que si la poignée de main produit un secret
+maître unique, ce qui suppose en TLS 1.2 l'extension de RFC 7627 — que `rustls`
+n'expose pas. Une liaison qu'on ne peut pas PROUVER n'en a que l'apparence.
 
 **`USER`/`PASS` hors chiffrement sont refusés depuis le 2026-08-29**, par la
 session POP3 et sans réglage possible : le mot de passe y traverse le fil tel
@@ -2727,10 +2739,12 @@ Cette affirmation-là a été fausse deux fois avant d'être vraie, et ce qui l'
 rendue vraie n'est pas une liste de plus : c'est la confrontation à l'ABNF, mot
 par mot.
 
-**CE QUI RESTE, CE SONT DES `SHOULD`, ET ILS SE NOMMENT AUSSI.** §6.2.2 recommande
-d'offrir un mécanisme SASL qui ne transporte pas le mot de passe en clair —
-SCRAM-SHA-256, GSSAPI, EXTERNAL ; ce serveur n'offre que `PLAIN`, et seulement
-sous chiffrement. Les attributs de SPECIAL-USE — `\Drafts`, `\Sent`, `\Trash` —
+**CE QUI RESTE, CE SONT DES `SHOULD`, ET ILS SE NOMMENT AUSSI.** §6.2.2
+recommande d'offrir un mécanisme SASL qui ne transporte pas le mot de passe en
+clair : **c'est tenu depuis le 2026-09-22**, `AUTH=SCRAM-SHA-256` étant annoncé
+dès qu'un magasin de vérificateurs est posé, et `AUTH=SCRAM-SHA-256-PLUS` en
+TLS 1.3. `PLAIN` reste offert derrière, pour les clients qui ne savent rien
+d'autre, et toujours sous chiffrement seul. Les attributs de SPECIAL-USE — `\Drafts`, `\Sent`, `\Trash` —
 ne sont pas rendus non plus : ils désignent des boîtes que le serveur DÉSIGNE, et
 celui-ci n'en désigne aucune. Un `SHOULD` qu'on ne tient pas se dit ; ne pas le
 dire est la seule faute.

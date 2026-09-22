@@ -221,6 +221,59 @@ relit le magasin quand le fichier change, au plus une fois par seconde. Les deux
 programmes se partagent ce fichier par un verrou, si bien que des ajouts
 simultanés ne se perdent pas.
 
+### SCRAM, si vous voulez que le mot de passe ne traverse jamais le fil
+
+`PLAIN` sous TLS ne montre le mot de passe à personne sur le chemin — mais il le
+montre au SERVEUR, qui doit le comparer. `SCRAM-SHA-256` (RFC 7677) ne le fait
+pas traverser du tout : le client prouve qu'il le connaît sans l'envoyer.
+
+Il demande **deux fichiers, et ils ne doivent pas vivre au même endroit** :
+
+```sh
+# 1. La clé de scellement, une fois pour toutes. `0600`, et AILLEURS que le magasin.
+air-mail-admin scram init /etc/air-mail/scram.key
+
+# 2. Un vérificateur par compte, dérivé du mot de passe.
+printf %s "$MOT_DE_PASSE" | air-mail-admin account passwd \
+    /var/lib/air-mail/comptes.bin --login jean \
+    --scram-key /etc/air-mail/scram.key --scram /var/lib/air-mail/scram.bin
+```
+
+> **`scram init` N'ÉCRASE JAMAIS UNE CLÉ EXISTANTE.** Une clé perdue rend TOUS
+> les vérificateurs illisibles d'un coup, et rien ne les reconstitue : il
+> faudrait reposer chaque mot de passe. Un `init` lancé deux fois par distraction
+> coûterait donc autant qu'une suppression du magasin.
+
+**POURQUOI DEUX FICHIERS, ET DEUX ENDROITS.** Le vérificateur SCRAM n'est pas une
+empreinte : §9 de RFC 5802 dit qu'il permet d'usurper le serveur auprès des
+clients. Il est donc scellé, et la clé qui l'ouvre ne vit pas avec lui — les
+mettre côte à côte ne vaudrait pas mieux qu'un seul fichier en clair. C'est à
+cette condition, et à elle seule, que ce serveur sert SCRAM (`docs/v1.md`, B7).
+
+Puis on nomme les deux chemins dans la configuration :
+
+```sh
+air-mail-admin config write /etc/air-mail/ams.conf \
+    … \
+    --scram-key /etc/air-mail/scram.key --scram /var/lib/air-mail/scram.bin
+```
+
+`config write` **refuse l'une sans l'autre** : une clé sans magasin n'a rien à
+ouvrir, un magasin sans clé ne s'ouvre pas, et dans les deux cas le serveur
+démarrerait sans que le défaut se voie avant le premier client qui essaie.
+
+Ce qu'il faut savoir ensuite :
+
+- **les comptes sans vérificateur restent joignables en `PLAIN`.** SCRAM leur
+  répond comme à un compte inconnu — §7 de RFC 5802 l'exige, sans quoi le magasin
+  s'énumérerait — et refuse à la preuve ;
+- **`SCRAM-SHA-256-PLUS` s'ajoute tout seul aux connexions TLS 1.3**, et à elles
+  seules. Il lie la preuve à la session TLS elle-même (RFC 9266), ce qui ferme le
+  relais par un intermédiaire muni d'un certificat valide. En TLS 1.2, la liaison
+  ne peut pas être prouvée unique, et n'est donc pas annoncée ;
+- **le magasin se relit à chaud**, comme celui des comptes : un vérificateur
+  ajouté pendant que le serveur tourne est vu au plus une seconde après.
+
 ---
 
 ## 5. Le chiffrement
