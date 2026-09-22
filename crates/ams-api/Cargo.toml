@@ -1,6 +1,10 @@
 [package]
 name = "ams-api"
-version = "0.1.0"
+# **EN LOCKSTEP COMME LES AUTRES.** Cette crate portait son numéro en dur, et
+# le commentaire du workspace affirmait pourtant que « toutes les crates la
+# partagent via `version.workspace = true` ». Une seule ne le faisait pas —
+# assez pour que la montée en 0.2.0 laisse derrière elle une crate en 0.1.0.
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

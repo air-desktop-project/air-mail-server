@@ -712,6 +712,20 @@ fn afficher(config: &Configuration) {
             ),
         }
     );
+    // **CE QUE LE SERVEUR SERVIRA, LE MONTRER**, sans quoi `config show` dit
+    // une partie de la vérité : un mécanisme d'authentification qu'un fichier
+    // porte et qu'aucun affichage ne nomme ne se vérifie qu'en le servant.
+    println!(
+        "SCRAM              {}",
+        if config.scram_key.is_empty() || config.scram_store.is_empty() {
+            String::from("NON SERVI — `PLAIN` seul, et sous chiffrement seul")
+        } else {
+            format!(
+                "magasin `{}`, scellé par `{}` (et `-PLUS` en TLS 1.3)",
+                config.scram_store, config.scram_key
+            )
+        }
+    );
     println!(
         "MTA-STS            {}",
         if config.mtasts.est_configure() {
