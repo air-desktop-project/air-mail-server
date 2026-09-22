@@ -35,6 +35,10 @@ ams-store = { workspace = true }
 # la question qu'ils posent au magasin qu'ils viennent d'écrire.
 [dev-dependencies]
 ams-sasl = { workspace = true }
+# Les essais de SCRAM OUVRENT le scellé que l outil vient d écrire : sans cela,
+# un magasin bien formé et vide de sens passerait pour bon.
+ams-auth = { workspace = true }
+ams-config = { workspace = true }
 
 [lints]
 workspace = true

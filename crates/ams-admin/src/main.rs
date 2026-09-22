@@ -60,6 +60,19 @@ COMMANDES
                         touché : une faute de frappe ferait créer par `add` un
                         compte fantôme portant le secret qu'on croyait poser
                         ailleurs.
+    account add|passwd … --scram-key <clé> --scram <fichier>
+                        pose AUSSI un vérificateur SCRAM pour ce compte, dans un
+                        magasin SÉPARÉ et SCELLÉ. Les deux options vont
+                        ensemble, ou aucune : sans elles, SCRAM n'existe pas —
+                        ni annoncé, ni stocké.
+                        LE VÉRIFICATEUR NE SE DÉRIVE QUE DU MOT DE PASSE EN
+                        CLAIR : un compte créé sans ces options n'en aura
+                        jamais, tant que son mot de passe n'aura pas été reposé.
+    scram init <clé>    tire la clé de scellement du magasin SCRAM — trente-deux
+                        octets du noyau, en 0600. RANGEZ-LA AILLEURS QUE LE
+                        MAGASIN : c'est toute la raison d'être des deux
+                        fichiers. Refuse d'écraser une clé existante, parce
+                        qu'une clé perdue rend tous les vérificateurs illisibles.
     account list <fichier>
                         liste les noms de comptes. Jamais les empreintes.
     account remove <fichier> --login <nom>
@@ -192,16 +205,34 @@ fn main() -> ExitCode {
         ["summary", racine] => resumer(Path::new(racine)),
         ["config", "write", fichier, reste @ ..] => ecrire(Path::new(fichier), reste),
         ["config", "show", fichier] => montrer(Path::new(fichier)),
-        ["account", "add", fichier, "--login", nom, reste @ ..] => match adresses_de(reste) {
-            Ok(adresses) => ajouter(Path::new(fichier), nom, &adresses),
+        ["account", "add", fichier, "--login", nom, reste @ ..] => match demande_de_compte(reste) {
+            Ok((adresses, scram)) => ajouter(Path::new(fichier), nom, &adresses, scram.as_ref()),
             Err(message) => {
                 eprintln!("air-mail-admin : {message}");
                 ExitCode::from(2)
             }
         },
+        ["scram", "init", clef] => initialiser_la_clef(Path::new(clef)),
         ["account", "list", fichier] => lister(Path::new(fichier)),
-        ["account", "passwd", fichier, "--login", nom] => {
-            changer_le_secret(Path::new(fichier), nom)
+        ["account", "passwd", fichier, "--login", nom, reste @ ..] => {
+            match demande_de_compte(reste) {
+                Ok((adresses, scram)) if adresses.is_empty() => {
+                    changer_le_secret(Path::new(fichier), nom, scram.as_ref())
+                }
+                // **`passwd` NE PREND PAS D'ADRESSE**, et le dire vaut mieux que
+                // de l'ignorer : qui en passe une croit la poser.
+                Ok(_) => {
+                    eprintln!(
+                        "air-mail-admin : `account passwd` ne change QUE le secret — \
+                         `--address` n'a pas de sens ici, et `account add` les pose."
+                    );
+                    ExitCode::from(2)
+                }
+                Err(message) => {
+                    eprintln!("air-mail-admin : {message}");
+                    ExitCode::from(2)
+                }
+            }
         }
         ["token", fichier, reste @ ..] => match jeton_demande(reste) {
             Ok((nom, minutes)) => frapper(Path::new(fichier), &nom, minutes),
@@ -962,6 +993,134 @@ fn lire_mot_de_passe() -> Result<Vec<u8>, String> {
     Ok(secret)
 }
 
+/// Tire la clé de scellement du magasin SCRAM.
+///
+/// # POURQUOI ELLE NE S'ÉCRASE PAS
+///
+/// Une clé perdue rend TOUS les vérificateurs illisibles d'un coup, et rien ne
+/// les reconstitue : il faudrait reposer chaque mot de passe. Un `scram init`
+/// lancé deux fois par distraction coûterait donc autant qu'une suppression du
+/// magasin. On refuse, et on dit quoi faire.
+fn initialiser_la_clef(chemin: &Path) -> ExitCode {
+    match initialiser_la_clef_ou_dire(chemin) {
+        Ok(()) => {
+            println!(
+                "{} : clé de scellement SCRAM écrite (32 octets, 0600)",
+                chemin.display()
+            );
+            println!(
+                "RANGEZ-LA AILLEURS QUE LE MAGASIN : les deux au même endroit ne valent \
+                 pas mieux qu'un seul fichier en clair."
+            );
+            ExitCode::SUCCESS
+        }
+        Err(quoi) => {
+            eprintln!("air-mail-admin : {quoi}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn initialiser_la_clef_ou_dire(chemin: &Path) -> Result<(), String> {
+    if chemin.exists() {
+        return Err(format!(
+            "`{}` existe déjà — une clé perdue rend tous les vérificateurs \
+             illisibles, et ce refus est ce qui vous en protège. Écartez-la \
+             vous-même si vous voulez vraiment en tirer une neuve.",
+            chemin.display()
+        ));
+    }
+    let mut clef = [0_u8; ams_auth::CLE_SCELLEMENT_OCTETS];
+    {
+        use std::io::Read as _;
+        std::fs::File::open("/dev/urandom")
+            .and_then(|mut source| source.read_exact(&mut clef))
+            .map_err(|erreur| format!("/dev/urandom : {erreur}"))?;
+    }
+    ams_fichier::poser(chemin, &clef).map_err(|erreur| format!("`{}` : {erreur}", chemin.display()))
+}
+
+/// Lit une clé de scellement, et refuse ce qui n'en est pas une.
+fn lire_la_clef(chemin: &Path) -> Result<[u8; ams_auth::CLE_SCELLEMENT_OCTETS], String> {
+    let lue = std::fs::read(chemin)
+        .map_err(|erreur| format!("clé SCRAM `{}` : {erreur}", chemin.display()))?;
+    // **LA TAILLE EXACTE, ET NON « AU MOINS »** : une clé plus courte complétée
+    // de zéros serait une clé plus faible que ce que son nom promet, et rien ne
+    // le dirait. `scram init` en écrit trente-deux.
+    if lue.len() != ams_auth::CLE_SCELLEMENT_OCTETS {
+        return Err(format!(
+            "clé SCRAM `{}` : {} octet(s) au lieu de {} — `scram init` en tire une juste",
+            chemin.display(),
+            lue.len(),
+            ams_auth::CLE_SCELLEMENT_OCTETS
+        ));
+    }
+    let mut clef = [0_u8; ams_auth::CLE_SCELLEMENT_OCTETS];
+    for (place, octet) in clef.iter_mut().zip(&lue) {
+        *place = *octet;
+    }
+    Ok(clef)
+}
+
+/// Dérive et range le vérificateur SCRAM d'un compte, si l'appelant l'a demandé.
+///
+/// **UNE ENTRÉE PAR COMPTE, REMPLACÉE ET NON AJOUTÉE** : un mot de passe changé
+/// laisse sinon derrière lui un vérificateur qui ouvre encore, et SCRAM
+/// n'interroge pas l'empreinte Argon2id — le compte aurait deux mots de passe,
+/// dont un que personne ne croit valable.
+fn poser_le_verificateur(
+    scram: Option<&DemandeScram>,
+    nom: &str,
+    secret: &[u8],
+) -> Result<(), String> {
+    let Some(demande) = scram else {
+        return Ok(());
+    };
+    let clef = lire_la_clef(&demande.clef)?;
+    let sel_scram = sel()?;
+    let mut nonce = [0_u8; ams_auth::NONCE_OCTETS];
+    {
+        use std::io::Read as _;
+        std::fs::File::open("/dev/urandom")
+            .and_then(|mut source| source.read_exact(&mut nonce))
+            .map_err(|erreur| format!("/dev/urandom : {erreur}"))?;
+    }
+    let neuf = ams_auth::scram_deriver(
+        secret,
+        nom,
+        sel_scram,
+        ams_auth::SCRAM_ITERATIONS,
+        nonce,
+        &clef,
+    )
+    .map_err(|erreur| format!("dérivation SCRAM : {erreur:?}"))?;
+
+    // Le même verrou que pour les comptes, et pour la même raison : le serveur
+    // écrit ce fichier depuis son API.
+    let _verrou = ams_fichier::verrouiller(&demande.magasin)
+        .map_err(|erreur| format!("`{}` : {erreur}", demande.magasin.display()))?;
+    let mut magasin = match std::fs::read(&demande.magasin) {
+        Ok(octets) => ams_config::decode_scram(&octets)
+            .map_err(|erreur| format!("`{}` : {erreur}", demande.magasin.display()))?,
+        // Un magasin absent n'est pas une erreur : c'est le premier
+        // vérificateur, comme pour `comptes.bin`.
+        Err(erreur) if erreur.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(erreur) => {
+            return Err(format!("`{}` : {erreur}", demande.magasin.display()));
+        }
+    };
+    magasin.retain(|v| !v.login.eq_ignore_ascii_case(nom));
+    magasin.push(neuf);
+
+    // ON RELIT CE QU'ON VIENT D'ÉCRIRE, comme partout ailleurs dans cet outil.
+    let octets = ams_config::encode_scram(&magasin)
+        .map_err(|erreur| format!("encodage SCRAM : {erreur}"))?;
+    ams_config::decode_scram(&octets)
+        .map_err(|erreur| format!("le magasin SCRAM écrit ne se relit pas : {erreur}"))?;
+    ams_fichier::poser(&demande.magasin, &octets)
+        .map_err(|erreur| format!("`{}` : {erreur}", demande.magasin.display()))
+}
+
 /// Un sel de seize octets, tiré du noyau.
 ///
 /// `/dev/urandom` plutôt qu'une crate : ce binaire est déjà Unix seulement
@@ -976,28 +1135,78 @@ fn sel() -> Result<[u8; 16], String> {
     Ok(graine)
 }
 
-/// Lit les `--address` répétés.
-fn adresses_de(arguments: &[&str]) -> Result<Vec<String>, String> {
+/// Où vivent les deux fichiers de SCRAM.
+///
+/// **LES DEUX VONT ENSEMBLE, OU AUCUN.** Une clé sans magasin n'a rien à
+/// sceller ; un magasin sans clé ne s'ouvre pas. Les exiger ensemble refuse au
+/// terminal ce qui, séparé, ne se découvrirait qu'à la première ouverture de
+/// session.
+pub struct DemandeScram {
+    /// Le fichier qui porte la clé de scellement.
+    pub clef: PathBuf,
+    /// Le magasin des vérificateurs.
+    pub magasin: PathBuf,
+}
+
+/// Lit les `--address` répétés et, s'il y en a, les deux options de SCRAM.
+fn demande_de_compte(arguments: &[&str]) -> Result<(Vec<String>, Option<DemandeScram>), String> {
     let mut adresses = Vec::new();
+    let mut clef: Option<PathBuf> = None;
+    let mut magasin: Option<PathBuf> = None;
     let mut reste = arguments.iter();
     while let Some(argument) = reste.next() {
-        if *argument != "--address" {
-            return Err(format!("option inconnue : `{argument}`"));
+        match *argument {
+            "--address" => {
+                let valeur = reste
+                    .next()
+                    .ok_or_else(|| String::from("`--address` attend une valeur"))?;
+                if valeur.is_empty() {
+                    return Err(String::from("une adresse vide ne désigne personne"));
+                }
+                adresses.push((*valeur).to_string());
+            }
+            "--scram-key" => {
+                let valeur = reste
+                    .next()
+                    .ok_or_else(|| String::from("`--scram-key` attend un chemin"))?;
+                clef = Some(PathBuf::from(*valeur));
+            }
+            "--scram" => {
+                let valeur = reste
+                    .next()
+                    .ok_or_else(|| String::from("`--scram` attend un chemin"))?;
+                magasin = Some(PathBuf::from(*valeur));
+            }
+            autre => return Err(format!("option inconnue : `{autre}`")),
         }
-        let valeur = reste
-            .next()
-            .ok_or_else(|| String::from("`--address` attend une valeur"))?;
-        if valeur.is_empty() {
-            return Err(String::from("une adresse vide ne désigne personne"));
-        }
-        adresses.push((*valeur).to_string());
     }
-    Ok(adresses)
+    let scram = match (clef, magasin) {
+        (Some(clef), Some(magasin)) => Some(DemandeScram { clef, magasin }),
+        (None, None) => None,
+        // **L'UNE SANS L'AUTRE EST REFUSÉE AU TERMINAL**, et non ignorée : qui
+        // passe `--scram` seul croit avoir posé un vérificateur.
+        (Some(_), None) => {
+            return Err(String::from(
+                "`--scram-key` sans `--scram` : la clé n'aurait rien à sceller",
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(String::from(
+                "`--scram` sans `--scram-key` : le magasin ne s'ouvrirait pas",
+            ));
+        }
+    };
+    Ok((adresses, scram))
 }
 
 /// Ajoute ou remplace un compte.
-fn ajouter(fichier: &Path, nom: &str, adresses: &[String]) -> ExitCode {
-    match ajouter_ou_dire(fichier, nom, adresses) {
+fn ajouter(
+    fichier: &Path,
+    nom: &str,
+    adresses: &[String],
+    scram: Option<&DemandeScram>,
+) -> ExitCode {
+    match ajouter_ou_dire(fichier, nom, adresses, scram) {
         Ok(remplace) => {
             println!(
                 "{} : compte `{nom}` {}",
@@ -1013,7 +1222,12 @@ fn ajouter(fichier: &Path, nom: &str, adresses: &[String]) -> ExitCode {
     }
 }
 
-fn ajouter_ou_dire(fichier: &Path, nom: &str, adresses: &[String]) -> Result<bool, String> {
+fn ajouter_ou_dire(
+    fichier: &Path,
+    nom: &str,
+    adresses: &[String],
+    scram: Option<&DemandeScram>,
+) -> Result<bool, String> {
     // LE MÊME CONTRÔLE QU'AU CHARGEMENT, et devant le terminal : le nom devient
     // un nom de répertoire, et le dire ici coûte une seconde plutôt qu'un
     // démarrage refusé.
@@ -1021,6 +1235,10 @@ fn ajouter_ou_dire(fichier: &Path, nom: &str, adresses: &[String]) -> Result<boo
     let secret = lire_mot_de_passe()?;
     let empreinte = ams_auth::hash_password(&secret, &sel()?)
         .map_err(|erreur| format!("hachage : {erreur}"))?;
+    // **LE VÉRIFICATEUR SE DÉRIVE ICI, OU JAMAIS.** C'est l'un des deux seuls
+    // endroits de cet outil où le mot de passe est en clair ; ailleurs, il n'y
+    // a qu'une empreinte, dont on ne remonte pas.
+    poser_le_verificateur(scram, nom, &secret)?;
 
     // **LE VERROU AVANT LA LECTURE, ET TENU JUSQU'À L'ÉCRITURE.** Ce qui suit
     // est une lecture-modification-écriture, et le serveur écrit le MÊME
@@ -1071,8 +1289,8 @@ fn ajouter_ou_dire(fichier: &Path, nom: &str, adresses: &[String]) -> Result<boo
 /// créer par `add` un compte fantôme, sans adresse, avec le mot de passe qu'on
 /// croyait poser ailleurs — et le vrai compte garderait l'ancien. Ici, un nom
 /// inconnu est une erreur, et le magasin n'est pas touché.
-fn changer_le_secret(fichier: &Path, nom: &str) -> ExitCode {
-    match changer_le_secret_ou_dire(fichier, nom) {
+fn changer_le_secret(fichier: &Path, nom: &str, scram: Option<&DemandeScram>) -> ExitCode {
+    match changer_le_secret_ou_dire(fichier, nom, scram) {
         Ok(()) => {
             println!("{} : secret du compte `{nom}` changé", fichier.display());
             ExitCode::SUCCESS
@@ -1084,11 +1302,20 @@ fn changer_le_secret(fichier: &Path, nom: &str) -> ExitCode {
     }
 }
 
-fn changer_le_secret_ou_dire(fichier: &Path, nom: &str) -> Result<(), String> {
+fn changer_le_secret_ou_dire(
+    fichier: &Path,
+    nom: &str,
+    scram: Option<&DemandeScram>,
+) -> Result<(), String> {
     ams_auth::check_login(nom).map_err(|cause| format!("nom de compte : {cause}"))?;
     let secret = lire_mot_de_passe()?;
     let empreinte = ams_auth::hash_password(&secret, &sel()?)
         .map_err(|erreur| format!("hachage : {erreur}"))?;
+    // Le second des deux endroits où le mot de passe est en clair. **ET IL EST
+    // POSÉ AVANT LE VERROU DES COMPTES** : le magasin SCRAM est un autre
+    // fichier, avec son propre verrou, et les tenir tous les deux en même temps
+    // ouvrirait la porte à un interblocage avec l'API du serveur.
+    poser_le_verificateur(scram, nom, &secret)?;
 
     // Le même verrou, tenu de la lecture à l'écriture, et pour la même raison
     // qu'en §`ajouter_ou_dire` : le serveur écrit ce fichier depuis son API.
