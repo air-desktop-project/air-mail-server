@@ -204,6 +204,32 @@ jobs:
       - name: check-paquet
         run: ./scripts/check-paquet.sh
 
+      # ── LE PAQUET QUI A PASSÉ LA BARRIÈRE SE GARDE ────────────────────────
+      #
+      # `check-paquet.sh` construit un `.deb`, l'éprouve, puis l'efface avec son
+      # répertoire jetable. **On installait donc, sur la machine de production,
+      # un paquet que personne n'avait éprouvé** — un autre, construit ailleurs,
+      # à un autre moment, avec la même recette mais pas les mêmes mains.
+      #
+      # Celui-ci est le MÊME : `--sans-construire` reprend les binaires que
+      # l'étape précédente vient de bâtir et d'éprouver. Il se télécharge par
+      # `gh run download <id> -n paquet-debian`.
+      #
+      # **ET LA GLIBC VA DANS LE BON SENS** : ce coureur est plus ancien que la
+      # machine visée, et un binaire lié à une glibc ancienne tourne sur une
+      # récente. L'inverse ne serait pas vrai, et c'est pourquoi on ne construit
+      # pas le paquet sur la machine la plus neuve qu'on ait sous la main.
+      - name: paquet, gardé en artefact
+        run: ./scripts/paquet.sh --sans-construire --sortie paquet
+
+      - name: Garder le paquet
+        uses: actions/upload-artifact@v4
+        with:
+          name: paquet-debian
+          path: paquet/*.deb
+          if-no-files-found: error
+          retention-days: 30
+
       # ── LE FORMATAGE, EN DERNIER, ET C'EST UNE LEÇON PAYÉE ────────────────
       #
       # Il était en PREMIER. Il a échoué le 2026-09-04, et il est resté rouge
