@@ -9,6 +9,9 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+# SHA-256, pour le HMAC de RFC 2104 et le PBKDF2 de RFC 5802. La crate reste
+# sans entrée-sortie et sans allocation : `sha2` en `no_std` n'en fait aucune.
+sha2 = { workspace = true }
 
 
 [lints]

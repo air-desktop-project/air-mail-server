@@ -143,7 +143,10 @@ drwx------ var/lib/air-mail/maildir
 
 while read -r mode chemin; do
     [ -n "$chemin" ] || continue
-    vu=$(find "$arbre" -path "$arbre/$chemin" -printf '%M' 2>/dev/null || true)
+    # `-printf` est une extension GNU, absente de Darwin : on demande le mode à
+    # `ls`, qui le rend partout de la même façon. (Même famille de défaut que
+    # `check-etages` et `rapatrier.sh` — trouvée le 2026-09-22.)
+    vu=$(ls -ld "$arbre/$chemin" 2>/dev/null | awk '{print $1}' | sed 's/[@+.]$//' || true)
     if [ -z "$vu" ]; then
         rate "$chemin n'a pas été posé"
     elif [ "$vu" != "$mode" ]; then
@@ -182,10 +185,13 @@ echo "OK — elle porte les garanties que C10 exige"
 
 echo
 echo "── 6. il est idempotent ─────────────────────────────────────────────────"
-avant=$(find "$arbre" -printf '%M %P\n' | sort -k2)
+empreinte_arbre() { find "$arbre" | sort | while read -r chemin; do
+    printf '%s %s\n' "$(ls -ld "$chemin" | awk '{print $1}' | sed 's/[@+.]$//')" "${chemin#"$arbre"/}"
+done; }
+avant=$(empreinte_arbre)
 scripts/installer.sh --racine "$arbre" --sans-construire > /dev/null 2>&1 \
     || rate "le second passage a échoué"
-apres=$(find "$arbre" -printf '%M %P\n' | sort -k2)
+apres=$(empreinte_arbre)
 if [ "$avant" != "$apres" ]; then
     rate "le second passage a changé l'arborescence"
 else
@@ -225,8 +231,10 @@ echo "── 8. le document et le script posent LA MÊME unité ─────�
 # l'installateur a continué d'en écrire cinq. Un document qui se contredit
 # lui-même est pire qu'un document qui vieillit. Le contrôle 8bis existe pour
 # cela.
+# `head -n -1` (tout sauf la dernière ligne) est une extension GNU : sur Darwin
+# `head` refuse un compte négatif. `sed '$d'` fait la même chose partout.
 sed -n '/^## 7. L.unité systemd/,/^```$/p' docs/installation.md \
-    | sed -n '/^\[Unit\]/,$p' | head -n -1 > "$essai/unite-doc"
+    | sed -n '/^\[Unit\]/,$p' | sed '$d' > "$essai/unite-doc"
 if [ ! -s "$essai/unite-doc" ]; then
     rate "le §7 de docs/installation.md ne montre plus d'unité"
 elif ! diff -u "$essai/unite-doc" "$unite" > "$essai/ecart" 2>&1; then

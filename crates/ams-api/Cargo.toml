@@ -9,6 +9,10 @@ description = "L'API REST : ce qu'une requête désigne, et le droit qu'elle dem
 
 [dependencies]
 ams-proto-http = { workspace = true }
+# `HMAC-SHA-256` et sa comparaison à temps constant vivent dans `ams-sasl`
+# depuis le 2026-09-22 : SCRAM en a besoin aussi, et deux copies d'une
+# construction cryptographique divergent un jour.
+ams-sasl = { workspace = true }
 sha2 = { workspace = true }
 
 [lints]

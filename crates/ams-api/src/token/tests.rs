@@ -216,7 +216,7 @@ fn une_autre_version_se_refuse() {
     let mut modifie = decode.to_vec();
     modifie[0] = VERSION.wrapping_add(1);
     let coupe = modifie.len() - super::MAC_OCTETS;
-    let sceau = crate::mac::hmac_sha256(CLEF, modifie.get(..coupe).unwrap_or_default());
+    let sceau = ams_sasl::hmac_sha256(CLEF, modifie.get(..coupe).unwrap_or_default());
     modifie.truncate(coupe);
     modifie.extend_from_slice(&sceau);
 
@@ -238,7 +238,7 @@ fn une_longueur_de_nom_qui_ment_se_refuse() {
     // L'octet 18 porte la longueur du nom.
     modifie[18] = modifie[18].wrapping_add(1);
     let coupe = modifie.len() - super::MAC_OCTETS;
-    let sceau = crate::mac::hmac_sha256(CLEF, modifie.get(..coupe).unwrap_or_default());
+    let sceau = ams_sasl::hmac_sha256(CLEF, modifie.get(..coupe).unwrap_or_default());
     modifie.truncate(coupe);
     modifie.extend_from_slice(&sceau);
 
@@ -255,7 +255,7 @@ fn un_jeton_sans_nom_se_refuse() {
     // Dix-neuf octets d'en-tête et trente-deux de sceau, sans un octet de nom.
     let mut brut = std::vec![0_u8; 19];
     brut[0] = VERSION;
-    let sceau = crate::mac::hmac_sha256(CLEF, &brut);
+    let sceau = ams_sasl::hmac_sha256(CLEF, &brut);
     brut.extend_from_slice(&sceau);
     let mut ecrit = [0_u8; ENCODED_OCTETS_MAX];
     let refait = crate::base64url::encode(&brut, &mut ecrit).expect("écrivable");
@@ -275,7 +275,7 @@ fn un_nom_qui_n_est_pas_de_l_utf8_se_refuse() {
     }
     brut[18] = 2;
     brut.extend_from_slice(&[0xff, 0xfe]);
-    let sceau = crate::mac::hmac_sha256(CLEF, &brut);
+    let sceau = ams_sasl::hmac_sha256(CLEF, &brut);
     brut.extend_from_slice(&sceau);
     let mut ecrit = [0_u8; ENCODED_OCTETS_MAX];
     let refait = crate::base64url::encode(&brut, &mut ecrit).expect("écrivable");

@@ -31,8 +31,8 @@
 
 use crate::base64url;
 use crate::error::{Error, Reason};
-use crate::mac::{egales, hmac_sha256};
 use crate::scope::Scope;
+use ams_sasl::{egales, hmac_sha256};
 
 /// La seule version de jeton qui existe.
 ///
@@ -40,7 +40,7 @@ use crate::scope::Scope;
 /// algorithme, et rien à négocier.
 pub const VERSION: u8 = 0x01;
 
-pub use crate::mac::MAC_OCTETS;
+pub use ams_sasl::MAC_OCTETS;
 
 /// La plus petite clé qu'on accepte.
 ///

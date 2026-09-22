@@ -78,6 +78,7 @@ name = "ams-api"
 version = "0.1.0"
 dependencies = [
  "ams-proto-http",
+ "ams-sasl",
  "sha2",
 ]
 
@@ -290,6 +291,9 @@ dependencies = [
 [[package]]
 name = "ams-sasl"
 version = "0.1.0"
+dependencies = [
+ "sha2",
+]
 
 [[package]]
 name = "ams-server"

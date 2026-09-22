@@ -65,7 +65,6 @@ extern crate std;
 mod base64url;
 mod error;
 mod json;
-mod mac;
 mod path;
 mod problem;
 mod reader;

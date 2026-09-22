@@ -59,8 +59,23 @@
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+// Les BANCS, eux, ont le droit à `std` : `mac/tests.rs` vient d'`ams-api`, qui
+// en avait, et un vecteur d'essai se lit mieux avec un `Vec` qu'avec un tampon
+// dimensionné à la main. Le code livré, lui, reste `no_std` et sans allocation.
+#[cfg(test)]
+extern crate std;
+
 mod base64;
+mod mac;
 mod plain;
+mod scram;
 
 pub use base64::{Error as Base64Error, decode as decode_base64, decoded_len};
+pub use mac::{MAC_OCTETS, egales, hmac_sha256};
 pub use plain::{Credentials, Error as PlainError, parse as parse_plain};
+pub use scram::{
+    CLE_OCTETS, ClientFinal, ClientFirst, Error as ScramError, Gs2, ITERATIONS_MIN, LIAISON,
+    MESSAGE_MAX, client_key, client_key_depuis_preuve, client_proof, derive_salted_password,
+    desechapper, parse_client_final, parse_client_first, parse_iterations, server_key,
+    server_signature, stored_key,
+};

@@ -31,7 +31,7 @@ use sha2::{Digest, Sha256};
 pub const MAC_OCTETS: usize = 32;
 
 /// La taille de bloc de SHA-256, en octets.
-const BLOC: usize = 64;
+pub(crate) const BLOC: usize = 64;
 
 /// Le remplissage intérieur de RFC 2104.
 const IPAD: u8 = 0x36;
