@@ -62,8 +62,19 @@
 
 extern crate alloc;
 
+// Les BANCS ont le droit à `std` — un `format!` dit mieux qu'un compteur ce
+// qu'une variante écrit. Le code livré reste `no_std`.
+#[cfg(test)]
+extern crate std;
+
+mod scram;
 mod store;
 
+pub use scram::{
+    CLE_SCELLEMENT_OCTETS, Cles as ScramKeys, Error as ScramError, ITERATIONS as SCRAM_ITERATIONS,
+    NONCE_OCTETS, SEL_OCTETS, Verificateur as ScramVerifier, deriver as scram_deriver,
+    ouvrir as scram_ouvrir, sel_factice as scram_sel_factice,
+};
 pub use store::{
     Account, DUMMY_HASH, Error, MEMORY_KIB, PARALLELISM, TIME_COST, authenticate, check_login,
     check_stored, hash_password, route,

@@ -88,6 +88,7 @@ version = "0.1.0"
 dependencies = [
  "ams-sasl",
  "argon2",
+ "chacha20poly1305",
 ]
 
 [[package]]

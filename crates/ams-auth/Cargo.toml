@@ -11,6 +11,10 @@ repository.workspace = true
 [dependencies]
 ams-sasl = { workspace = true }
 argon2 = { workspace = true }
+# Le SCELLEMENT du vérificateur SCRAM (RFC 8439). DÉJÀ DANS L'ARBRE :
+# `rustls-rustcrypto` la tire, et cette ligne ne fait que la déclarer là où on
+# s'en sert. Aucune crate n'entre dans le graphe à cause d'elle.
+chacha20poly1305 = { workspace = true }
 
 
 [lints]
