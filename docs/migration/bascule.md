@@ -44,7 +44,42 @@ toute façon ce que l'option A de §5 de l'étude fait des cinq autres.
 
 ---
 
-## LA BASCULE EST FAITE — mardi 22 septembre 2026, 05:49 UTC (07:49 CEST)
+## RETOUR EN ARRIÈRE — mardi 22 septembre 2026, 09:48 UTC, après quatre heures
+
+> **`mail.narro.ch` est de nouveau servi par Postfix et Dovecot.** Décision
+> prise à 09:47, exécutée en **36 secondes** (air-mail-server arrêté 09:48:46,
+> redirections retirées 09:49:22), deux messages rapatriés, la plate-forme
+> remise sur ses anciens identifiants. Rien n'est perdu.
+>
+> **LA CAUSE : LE SERVEUR NE PARLE QUE TLS 1.3, ET APPLE MAIL NE PARLE QUE
+> TLS 1.2.** Capturé sur la machine, `ClientHello` d'Apple Mail vers le 993 :
+> pas d'extension `supported_versions`, `legacy_version 0x0303`, groupes
+> `secp256r1/384/521`, vingt-deux suites 1.2. Le serveur répond « alert
+> protocol version » — c'est C4, écrit noir sur blanc dans `ams-tls/provider.rs`.
+> La pile IMAP/SMTP de Mail (`CFStream`, celle que son journal nomme) ne monte
+> pas en 1.3 : **aucun réglage côté client ne contourne cela**, et c'est le
+> client de tous les comptes, sur Mac comme sur iPhone.
+>
+> **POURQUOI AUCUN CONTRÔLE NE L'A VU** : chaque essai du §0.6, de la veille et
+> du jour J venait d'OpenSSL ou de Python — des piles qui font du 1.3. Le
+> manuel demandait « §0.6 avec un vrai client » ; il ne disait pas LEQUEL, et
+> il ne l'a pas exigé. Il l'exige désormais : **Apple Mail, avant toute
+> nouvelle fenêtre**, et la capture du `ClientHello` pour le prouver.
+>
+> **DEUX AUTRES DÉFAUTS TROUVÉS DANS LES QUATRE HEURES**, qui auraient suffi
+> chacun à remonter : (1) le garde comptait les pairs IPv4 d'une écoute `[::]`
+> sous `::/64` — un client qui se trompe vingt fois bannissait l'IPv4 entière
+> pour une heure, mesuré `{"source":"::","prefixBits":64}` ; **corrigé dans
+> `source_de`**, avec son essai. (2) L'identifiant est le nom nu et non
+> l'adresse — voir plus bas, à corriger dans le produit.
+>
+> **ET LE RETOUR EN ARRIÈRE AVAIT LUI-MÊME UN TROU** : `ufw reload` ne retire
+> PAS les règles `*nat` déjà chargées. Après restauration des fichiers et
+> rechargement, `nft list ruleset | grep -c redirect` disait encore **4** —
+> Postfix écoutait, le 25 partait toujours vers un port vide. Dix-neuf
+> secondes d'aveuglement, et la ligne manquante est à l'étape 2bis.
+
+## ~~LA BASCULE EST FAITE~~ — mardi 22 septembre 2026, 05:49 UTC (07:49 CEST)
 
 > **AVANCÉE AU MATIN, LE JOUR MÊME.** La fenêtre était annoncée à 22:00 ; elle
 > s'est ouverte à 07:49, sur décision prise à 07:10. **Coupure réelle : 41
@@ -1027,7 +1062,19 @@ Ce qu'il faut avoir vu de ses yeux avant de continuer :
       s'arrête ici » ;
 - [ ] un message entrant arrive ;
 - [ ] un message sortant part, et **porte une signature DKIM valide** ;
-- [ ] le certificat servi est bien celui de `mail.narro.ch`.
+- [ ] le certificat servi est bien celui de `mail.narro.ch` ;
+- [ ] **APPLE MAIL SE CONNECTE, EN IMAP ET EN SMTP** — sur le port d'essai, via
+      un tunnel s'il le faut. Pas `openssl`, pas Python, pas `swaks` : ces
+      piles font du TLS 1.3 et le serveur aussi, donc elles ne prouvent rien
+      sur le client que les cinq emploient. Le 2026-09-22, la bascule a tenu
+      quatre heures avant qu'on découvre qu'Apple Mail ne parle que TLS 1.2
+      (C4). La preuve se lit dans son journal
+      (`~/Library/Containers/com.apple.mail/Data/Library/Logs/Mail/`) — une
+      ligne `CONNECTED` après `INITIATING CONNECTION` — et, en cas de doute,
+      dans une capture du `ClientHello` sur la machine :
+      `tcpdump -i any -s0 -w hello.pcap 'src host <le Mac> and tcp dst port 993'`,
+      puis lire l'extension `supported_versions` (0x002b) — absente, c'est
+      TLS 1.2 au plus.
 
 **Attention en lisant les boîtes** : un `FETCH BODY[…]` sans `.PEEK` POSE le
 drapeau `\Seen`. Employez `BODY.PEEK[…]`, sans quoi vous marquerez comme lu ce
@@ -1422,6 +1469,18 @@ Ce dernier point compte le jour J : on relance ce qui a l'air d'avoir échoué.
     #    inclus), puis :
     sudo ufw reload
     sudo nft list ruleset | grep -c redirect     # doit dire 0
+    #    **ET IL DIT 4.** Mesuré le 2026-09-22 à 09:49 : `ufw reload` recharge
+    #    ses fichiers, mais un `*nat` qui n'y figure PLUS n'est pas vidé pour
+    #    autant — `iptables-restore` ne touche qu'aux tables qu'on lui donne.
+    #    Postfix écoutait, le 25 était encore renvoyé sur le 2525 vide :
+    #    dix-neuf secondes avant que la ligne ci-dessous ne soit trouvée.
+    #    On retire donc les huit règles UNE À UNE, dans les deux familles :
+    for ipt in iptables ip6tables; do
+        for r in "25 2525" "587 2525" "465 4465" "993 9993"; do set -- $r
+            sudo $ipt -t nat -D PREROUTING -p tcp --dport $1 -j REDIRECT --to-ports $2
+        done
+    done
+    sudo nft list ruleset | grep -c redirect     # 0, cette fois pour de vrai
 
     # 3. Remettre l'ancien en marche.
     sudo systemctl enable --now postfix dovecot
@@ -1431,6 +1490,11 @@ Ce dernier point compte le jour J : on relance ce qui a l'air d'avoir échoué.
     #    /opt/vsl-iot-platform-preprod/env/app.env.avant-ams-<horodatage>
     #    puis redémarrer vsl-preprod-notification-worker, -gunicorn, -export-worker.
     #    Sans quoi les alertes clients restent coupées APRÈS le retour en arrière.
+    #    **LE GLOB SE DÉVELOPPE DANS LE SHELL PRIVILÉGIÉ** — `env/` est en 0750 :
+    sudo sh -c 'f=/opt/vsl-iot-platform-preprod/env/app.env; cp -p "$(ls -t $f.avant-ams-* | head -1)" "$f"'
+    sudo systemctl restart vsl-preprod-notification-worker vsl-preprod-gunicorn vsl-preprod-export-worker
+    #    (Fait le 2026-09-22 à 09:49 ; Django s'authentifie de nouveau en
+    #    `support@narro.ch` sur Postfix — vérifié dans mail.log.)
 
     # 4. Vérifier depuis l'extérieur.
     swaks --to jean@narro.ch --server mail.narro.ch
@@ -1466,6 +1530,13 @@ Ne faites rien de cette liste le jour même.
 - **J+7** : `/var/vmail` (l'ancien magasin) reste en place. Ne l'effacez pas.
 - **J+7** : `postfix` et `dovecot` restent installés, désactivés. Ne les
   désinstallez pas : le retour en arrière en dépend.
+- **AVANT TOUTE NOUVELLE FENÊTRE — dans le produit** : (1) **TLS 1.2 sur les
+  écouteurs** (`rustls-rustcrypto` avec `tls12`, `TLS12` dans les versions),
+  ou l'aveu que ce serveur ne sert pas Apple Mail — C4 est une contrainte,
+  pas une loi de la nature, et elle a été posée avant de savoir ce que les
+  clients parlent ; (2) `compte@domaine-hébergé` accepté à l'AUTH ;
+  (3) le garde qui démappe les pairs IPv4 — fait. Puis le §0.6 avec Apple
+  Mail, pour de vrai.
 - **J+0, mais pas dans la fenêtre** : rendre les mises à jour (`unmask` et
   `start` des deux timers, en tête de ce document), et **faire accepter
   `compte@domaine-hébergé` à l'authentification** — le chantier nommé sous

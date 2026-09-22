@@ -578,11 +578,33 @@ fn avec_dkim(stats: Stats, comptes: &CompteurDkim, rapports: &CompteurRapports) 
 }
 
 /// L'adresse d'un pair, telle que le garde la compte.
+///
+/// # UN PAIR IPv4 SUR UNE ÉCOUTE `[::]` EST UN PAIR IPv4
+///
+/// Une écoute en `[::]` sert les deux familles, et le noyau présente alors un
+/// client IPv4 sous une adresse IPv6 MAPPÉE — `::ffff:192.0.2.1` (RFC 4291
+/// §2.5.5.2). Comptée comme de l'IPv6, elle tombe sous le préfixe `/64` du
+/// garde, et **les 64 premiers bits d'une adresse mappée sont TOUS À ZÉRO** :
+/// tous les clients IPv4 du monde partagent alors la clé `::/64`. Un seul
+/// client qui se trompe vingt fois bannit l'IPv4 entière pour une heure —
+/// Gmail qui livre en v4, une passerelle en 4G, le poste de l'administrateur.
+///
+/// Mesuré le 2026-09-22, deux heures après la bascule de `narro.ch` : un client
+/// de courrier mal réglé, puis `{"source":"::","prefixBits":64}` dans la liste
+/// des bannis, et plus aucune connexion IPv4 acceptée sur aucun port. Les
+/// essais en IPv6 passaient, ce qui a caché la cause un moment.
+///
+/// On démappe donc AVANT de compter : le pair est IPv4, il est puni comme tel,
+/// sur son `/32`. C'est aussi l'adresse que SPF doit évaluer — un `ip4:` ne
+/// correspondra jamais à `::ffff:…`.
 #[must_use]
 pub fn source_de(adresse: SocketAddr) -> Source {
     match adresse {
         SocketAddr::V4(v4) => Source::V4(v4.ip().octets()),
-        SocketAddr::V6(v6) => Source::V6(v6.ip().octets()),
+        SocketAddr::V6(v6) => match v6.ip().to_ipv4_mapped() {
+            Some(v4) => Source::V4(v4.octets()),
+            None => Source::V6(v6.ip().octets()),
+        },
     }
 }
 
@@ -774,6 +796,30 @@ mod tests {
         assert_eq!(
             source_de(SocketAddr::from((six, 25))),
             Source::V6(six.octets())
+        );
+    }
+
+    /// **UN PAIR IPv4 MAPPÉ EST COMPTÉ EN IPv4**, et non sous `::/64` avec tous
+    /// les autres. C'est le défaut du 2026-09-22 : un client qui se trompe
+    /// bannissait l'IPv4 entière.
+    #[test]
+    fn un_pair_ipv4_mappe_est_une_source_ipv4() {
+        let mappee = Ipv4Addr::new(193, 250, 159, 198).to_ipv6_mapped();
+        assert_eq!(
+            source_de(SocketAddr::from((mappee, 993))),
+            Source::V4([193, 250, 159, 198])
+        );
+        // Et deux pairs IPv4 distincts ne partagent PAS leur clé de garde.
+        let autre = Ipv4Addr::new(198, 51, 100, 7).to_ipv6_mapped();
+        assert_ne!(
+            ams_guard::Key::from_source(source_de(SocketAddr::from((mappee, 993))), 32, 64),
+            ams_guard::Key::from_source(source_de(SocketAddr::from((autre, 993))), 32, 64)
+        );
+        // Une adresse IPv6 ordinaire, elle, reste de l'IPv6 : `::1` n'est pas
+        // mappée, et ne doit pas devenir `0.0.0.1`.
+        assert_eq!(
+            source_de(SocketAddr::from((Ipv6Addr::LOCALHOST, 993))),
+            Source::V6(Ipv6Addr::LOCALHOST.octets())
         );
     }
 
