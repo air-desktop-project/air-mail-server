@@ -65,7 +65,11 @@ pub fn server_first(mode: AvecScram, client_first: &[u8], sortie: &mut [u8]) -> 
     // Le `client-first-bare` commence après l'en-tête GS2, que l'analyse vient
     // de mesurer : la soustraction ne peut pas passer sous zéro.
     let debut_bare = client_first.len().saturating_sub(lu.bare.len());
-    Some(ScramFirst { ecrits, debut_bare })
+    Some(ScramFirst {
+        ecrits,
+        debut_bare,
+        gs2: lu.gs2,
+    })
 }
 
 /// Vérifie la preuve, et écrit le `server-final` (`v=…`) dans `sortie`.
@@ -80,7 +84,12 @@ pub fn server_final(
         return None;
     }
     let mut liaison = [0_u8; 1024];
-    let lu = ams_sasl::parse_client_final(client_final, &mut liaison).ok()?;
+    // **LA SESSION A DÉJÀ ANALYSÉ CE MESSAGE**, et avec un tampon PLUS PETIT
+    // que celui-ci : la vérification de la liaison passe avant la politique.
+    // Ce qui arrive ici est donc analysable par construction, et un `?` de plus
+    // serait un chemin que C2 compterait à jamais découvert.
+    let lu = ams_sasl::parse_client_final(client_final, &mut liaison)
+        .expect("la session refuse un `client-final` illisible avant d'appeler la politique");
     let message = auth_message(bare, first, lu.sans_preuve);
 
     let salted = ams_sasl::derive_salted_password(SECRET, &SEL, TOURS);
@@ -113,10 +122,42 @@ pub fn auth_message(bare: &[u8], first: &[u8], sans_preuve: &[u8]) -> std::vec::
     message
 }
 
+/// Les octets de liaison que ce banc prête au canal (RFC 9266).
+///
+/// Un vrai serveur les tire de l'exportateur de sa session TLS ; ici ils sont
+/// fixes, pour que le banc soit reproductible.
+pub const LIAISON: [u8; ams_sasl::LIAISON_OCTETS] = [11; ams_sasl::LIAISON_OCTETS];
+
 /// Le client calcule sa preuve, et rend le `client-final` complet.
+///
+/// L'en-tête est `n,,` et rien n'est lié : c'est l'échange ordinaire.
 pub fn client_final(bare: &[u8], server_first: &[u8]) -> std::vec::Vec<u8> {
+    client_final_avec(b"n,,", &[], bare, server_first)
+}
+
+/// Le même, en LIANT le canal : le `c=` porte l'en-tête PUIS les octets.
+///
+/// C'est §6 de RFC 5802, et c'est ce que le serveur recompose de son côté pour
+/// comparer. Un banc qui écrirait `c=` autrement n'éprouverait que lui-même.
+pub fn client_final_lie(bare: &[u8], server_first: &[u8]) -> std::vec::Vec<u8> {
+    client_final_avec(b"p=tls-exporter,,", &LIAISON, bare, server_first)
+}
+
+/// Le `client-final`, avec l'en-tête et la liaison que l'appelant veut y mettre.
+pub fn client_final_avec(
+    entete: &[u8],
+    liaison: &[u8],
+    bare: &[u8],
+    server_first: &[u8],
+) -> std::vec::Vec<u8> {
     let sans_preuve = {
-        let mut v = std::vec::Vec::from(&b"c=biws,r="[..]);
+        let mut canal = std::vec::Vec::from(entete);
+        canal.extend_from_slice(liaison);
+        let mut place = [0_u8; 128];
+        let encode = ams_mime::encode_base64_line(&canal, &mut place).expect("base64");
+        let mut v = std::vec::Vec::from(&b"c="[..]);
+        v.extend_from_slice(encode);
+        v.extend_from_slice(b",r=");
         // Le `r=` du client-final reprend le nonce COMPLET du server-first.
         let nonce = server_first
             .get(2..)

@@ -40,6 +40,67 @@ impl ams_session::Authenticator for NotreDomaine {
     }
 }
 
+/// Une politique qui SERT SCRAM, et ne vérifie AUCUNE preuve.
+///
+/// # POURQUOI UNE DOUBLURE AUSSI CREUSE, ET CE QU'ELLE PROUVE QUAND MÊME
+///
+/// Le banc qui l'emploie n'éprouve qu'UNE chose : que les octets de liaison que
+/// le serveur tire de SA connexion TLS sont les mêmes que ceux que le client
+/// tire de la SIENNE. L'arithmétique de SCRAM — PBKDF2, les trois clés, la
+/// comparaison — est déjà couverte à 100 % chez `ams-sasl`, `ams-auth` et
+/// `ams-session` ; la refaire ici n'éprouverait qu'une seconde copie.
+///
+/// **ET C'EST LA SESSION QUI VÉRIFIE LA LIAISON, PAS LA POLITIQUE** : elle le
+/// fait AVANT d'appeler `scram_final`. Une politique qui accepte tout laisse
+/// donc la liaison seule décider du verdict — ce qui est exactement le point de
+/// mesure qu'on veut.
+#[allow(dead_code)]
+pub struct QuiLieLeCanal;
+
+#[allow(dead_code)]
+impl ams_session::Authenticator for QuiLieLeCanal {
+    fn scram_first(
+        &self,
+        client_first: &[u8],
+        sortie: &mut [u8],
+    ) -> Option<ams_session::ScramFirst> {
+        let lu = ams_sasl::parse_client_first(client_first).ok()?;
+        let mut message = std::vec::Vec::from(&b"r="[..]);
+        message.extend_from_slice(lu.nonce);
+        message.extend_from_slice(b"noncedeserveur,s=BQUFBQUFBQUFBQUFBQUFBQ==,i=4096");
+        sortie.get_mut(..message.len())?.copy_from_slice(&message);
+        Some(ams_session::ScramFirst {
+            ecrits: message.len(),
+            debut_bare: client_first.len().saturating_sub(lu.bare.len()),
+            gs2: lu.gs2,
+        })
+    }
+
+    fn scram_final(
+        &self,
+        _bare: &[u8],
+        _first: &[u8],
+        _client_final: &[u8],
+        sortie: &mut [u8],
+    ) -> Option<usize> {
+        // Une signature de serveur bien formée, et fausse : ce banc ne mesure
+        // pas les preuves.
+        let dit = b"v=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        sortie.get_mut(..dit.len())?.copy_from_slice(dit);
+        Some(dit.len())
+    }
+}
+
+impl Policy for QuiLieLeCanal {
+    fn accepts_recipient(
+        &self,
+        _forward_path: &SmtpPath<'_>,
+        _submitter: bool,
+    ) -> RecipientVerdict {
+        RecipientVerdict::Accept
+    }
+}
+
 /// **LES TROIS RÉPONSES, ET NON DEUX.**
 ///
 /// Cette politique d'essai rendait `Accept` pour tout `@example.com` et
@@ -109,6 +170,18 @@ pub fn certificat(repertoire: &Path) -> Option<(PathBuf, PathBuf)> {
         .args(["req", "-x509", "-newkey", "ec"])
         .args(["-pkeyopt", "ec_paramgen_curve:P-256"])
         .args(["-nodes", "-days", "1", "-subj", "/CN=localhost"])
+        // **UN NOM ALTERNATIF, SANS QUOI AUCUN CLIENT NE VÉRIFIE CE CERTIFICAT.**
+        // `webpki` — donc `rustls` — ne regarde plus le `CN` depuis longtemps :
+        // RFC 6125 §6.4.4 le dit hérité, et un certificat sans `subjectAltName`
+        // est refusé avant même d'être comparé. Les bancs qui ne vérifient rien
+        // ne s'en apercevaient pas ; celui de la liaison de canal, si.
+        .args(["-addext", "subjectAltName=DNS:localhost"])
+        // **ET CE N'EST PAS UNE AUTORITÉ**, ce qu'`openssl req -x509` suppose
+        // par défaut. `webpki` refuse d'employer un certificat d'autorité comme
+        // certificat de serveur (`CaUsedAsEndEntity`) — à raison : les deux
+        // rôles ne se confondent pas. Un vrai certificat de serveur porte
+        // `CA:FALSE`, et celui-ci doit lui ressembler.
+        .args(["-addext", "basicConstraints=critical,CA:FALSE"])
         .arg("-keyout")
         .arg(&cle_pem)
         .args(["-outform", "DER"])

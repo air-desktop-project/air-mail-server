@@ -135,7 +135,21 @@ pub struct ScramFirst {
     ///
     /// **UN RANG, ET NON UNE COPIE** : la session tient déjà le message, et le
     /// recopier ici demanderait un second tampon pour rien.
+    ///
+    /// C'est aussi la LONGUEUR de l'en-tête GS2, qui précède le corps : la
+    /// session y lit l'en-tête sans avoir à réanalyser le message.
     pub debut_bare: usize,
+    /// L'en-tête GS2 que la politique a lu (§5.1).
+    ///
+    /// # POURQUOI LA POLITIQUE LE RAPPORTE AU LIEU D'EN DÉCIDER
+    ///
+    /// C'est la SESSION qui sait si le canal est liable : les octets de
+    /// liaison viennent de la couche TLS, que la politique ne voit pas. C'est
+    /// donc elle qui décide de ce qu'un `y,,` vaut — une rétrogradation quand
+    /// `-PLUS` a été annoncé, un client honnête sinon (§6 de RFC 5802).
+    ///
+    /// La politique, elle, ne fait que dire ce qu'elle a lu.
+    pub gs2: ams_sasl::Gs2,
 }
 
 impl<T: Authenticator + ?Sized> Authenticator for &T {

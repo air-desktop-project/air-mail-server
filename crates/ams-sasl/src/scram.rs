@@ -58,6 +58,25 @@ pub const CLE_OCTETS: usize = MAC_OCTETS;
 /// réserve, en 1.2, du secret maître étendu, que `rustls` négocie toujours.
 pub const LIAISON: &str = "tls-exporter";
 
+/// L'étiquette d'exportation de RFC 9266 §2, sans NUL final.
+///
+/// C'est elle qu'on donne à l'exportateur de clés de TLS (RFC 5705, RFC 8446
+/// §7.5) pour obtenir les octets de liaison.
+pub const LIAISON_ETIQUETTE: &[u8] = b"EXPORTER-Channel-Binding";
+
+/// Ce que la liaison occupe : trente-deux octets, §2.
+pub const LIAISON_OCTETS: usize = 32;
+
+/// **LE CONTEXTE EST UNE CHAÎNE VIDE, ET NON L'ABSENCE DE CONTEXTE.**
+///
+/// RFC 9266 §2 dit « Context value: Zero-length string ». Les deux ne sont pas
+/// la même chose : RFC 5705 §4 distingue un exportateur SANS contexte d'un
+/// exportateur avec un contexte de longueur nulle, et les deux rendent des
+/// octets DIFFÉRENTS. Se tromper ici ne casse rien de visible — le serveur
+/// calcule une liaison, le client en calcule une autre, et toute
+/// authentification `-PLUS` échoue par « mot de passe invalide ».
+pub const LIAISON_CONTEXTE: &[u8] = b"";
+
 /// Ce qu'un message de SCRAM peut avoir de mal fait.
 ///
 /// **AUCUNE VARIANTE NE DIT « LE MOT DE PASSE EST FAUX »**, et c'est délibéré :

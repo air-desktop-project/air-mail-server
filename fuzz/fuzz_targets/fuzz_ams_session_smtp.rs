@@ -72,7 +72,12 @@ enum Evenement {
     /// Le pair envoie une ligne.
     Ligne(Vec<u8>),
     /// La poignée de main TLS a abouti.
-    TlsEtabli,
+    ///
+    /// Le booléen dit si ce canal SE LIE (RFC 9266) : c'est lui qui décide si
+    /// `-PLUS` s'annonce, et donc quels en-têtes GS2 la session accepte. Le
+    /// laisser au fuzzer, c'est lui laisser composer la rétrogradation que §6
+    /// fait détecter.
+    TlsEtabli(bool),
     /// Le pair répond au défi SASL — n'importe quels octets.
     ReponseSasl(Vec<u8>),
     /// Le message a été lu.
@@ -288,6 +293,16 @@ fn ressemble_a_un_etat(reste: &[u8]) -> bool {
     })
 }
 
+/// Les octets de liaison qu'un canal prête, ou rien s'il ne se lie pas.
+///
+/// La VALEUR n'a aucune importance ici : la session la compare à ce que le pair
+/// écrit dans son `c=`, et le fuzzer peut y mettre ce qu'il veut. Ce qui
+/// compte, c'est la DIFFÉRENCE entre un canal qui se lie et un qui ne se lie
+/// pas — elle change ce que la session annonce et ce qu'elle accepte.
+fn liaison(lie: bool) -> Option<[u8; ams_sasl::LIAISON_OCTETS]> {
+    lie.then_some([7; ams_sasl::LIAISON_OCTETS])
+}
+
 fuzz_target!(|entree: Entree| {
     let connu = vocabulaire();
     let config = Config::new(DOMAINE, 2, 10_485_760, Limits::DEFAULT).expect("configurable");
@@ -305,8 +320,8 @@ fuzz_target!(|entree: Entree| {
 
     for evenement in entree.evenements {
         match evenement {
-            Evenement::TlsEtabli => {
-                session.on_tls_established();
+            Evenement::TlsEtabli(lie) => {
+                session.on_tls_established(liaison(lie));
                 // Après la poignée de main, RIEN n'a survécu (RFC 3207 §4.2).
                 assert!(session.is_encrypted());
                 assert!(!session.is_authenticated());

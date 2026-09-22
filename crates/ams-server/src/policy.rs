@@ -278,7 +278,11 @@ impl Authenticator for BoitesConnues {
         // Le rang où commence le `client-first-bare` : la session le retiendra
         // sans le recopier.
         let debut_bare = client_first.len().checked_sub(lu.bare.len())?;
-        Some(ams_session::ScramFirst { ecrits, debut_bare })
+        Some(ams_session::ScramFirst {
+            ecrits,
+            debut_bare,
+            gs2: lu.gs2,
+        })
     }
 
     fn scram_final(

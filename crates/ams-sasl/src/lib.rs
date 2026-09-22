@@ -75,7 +75,8 @@ pub use mac::{MAC_OCTETS, egales, hmac_sha256};
 pub use plain::{Credentials, Error as PlainError, parse as parse_plain};
 pub use scram::{
     CLE_OCTETS, ClientFinal, ClientFirst, Error as ScramError, Gs2, ITERATIONS_MIN, LIAISON,
-    MESSAGE_MAX, client_key, client_key_depuis_preuve, client_proof, derive_salted_password,
-    desechapper, parse_client_final, parse_client_first, parse_iterations, server_key,
-    server_signature, stored_key,
+    LIAISON_CONTEXTE, LIAISON_ETIQUETTE, LIAISON_OCTETS, MESSAGE_MAX, client_key,
+    client_key_depuis_preuve, client_proof, derive_salted_password, desechapper,
+    parse_client_final, parse_client_first, parse_iterations, server_key, server_signature,
+    stored_key,
 };

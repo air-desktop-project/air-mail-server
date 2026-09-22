@@ -442,7 +442,10 @@ where
         // mais c'est la MÊME entrée : la session apprend qu'elle est chiffrée,
         // cesse d'annoncer `STARTTLS`, et attend un `EHLO`. Sa phase de départ
         // est déjà « la bannière est partie », qui est exactement où l'on est.
-        session.on_tls_established();
+        //
+        // **LES OCTETS DE LIAISON VIENNENT D'ICI**, et d'ici seulement : la
+        // session ne voit pas la connexion TLS, et c'est C1 qui le veut.
+        session.on_tls_established(crate::liaison::liaison_de(chiffre.get_ref().1));
         etat.resume.tls = true;
         etat.banniere_due = true;
         return servir_chiffre(&mut chiffre, session, etat, service, delivery, source).await;
@@ -484,7 +487,7 @@ where
 
     // RFC 3207 §4.2 : le serveur DOIT oublier tout ce que le pair a dit en clair.
     // C'est la session qui le fait, pas la boucle.
-    session.on_tls_established();
+    session.on_tls_established(crate::liaison::liaison_de(chiffre.get_ref().1));
     etat.resume.tls = true;
 
     servir_chiffre(&mut chiffre, session, etat, service, delivery, source).await

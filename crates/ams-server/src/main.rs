@@ -1776,6 +1776,15 @@ async fn servir(fichier: &Path) -> Result<(), String> {
             options.scram_store,
             options.scram_key
         );
+        // **`-PLUS` SE DÉCIDE PAR CONNEXION, ET NON PAR CONFIGURATION** : il
+        // demande l'exportateur de RFC 9266, que seule une session TLS 1.3
+        // permet de PROUVER unique (§4.2). Le dire ici évite de chercher
+        // pourquoi un client en 1.2 ne le voit pas annoncé.
+        eprintln!(
+            "air-mail-server : SCRAM-SHA-256-PLUS annoncé aux seules connexions TLS 1.3 — la \
+             liaison de canal (RFC 9266) n'est définie que si la poignée de main produit un \
+             secret maître unique, ce qu'une session TLS 1.2 ne permet pas de prouver ici."
+        );
         politique.avec_scram(Arc::new(verificateurs))
     };
     // **`DSN` NE S'ANNONCE QUE SI L'ON PEUT ÉMETTRE** (RFC 3461 §4.2). Un

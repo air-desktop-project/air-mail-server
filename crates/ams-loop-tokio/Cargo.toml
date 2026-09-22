@@ -30,6 +30,10 @@ ams-h3 = { workspace = true }
 ams-proto-h2 = { workspace = true }
 ams-proto-http = { workspace = true }
 ams-session = { workspace = true }
+# L'étiquette et la longueur de l'exportateur de RFC 9266 : c'est cette crate
+# qui tient la connexion TLS, et donc la seule qui puisse tirer les octets de
+# liaison. Elle les tire ; la session les compare.
+ams-sasl = { workspace = true }
 # SPF (C9) : la boucle CONDUIT l'évaluation — elle seule a le droit d'attendre
 # une réponse DNS — mais elle n'en décide rien.
 ams-spf = { workspace = true }
@@ -78,8 +82,6 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-util"] 
 # pas un autre. Une dépendance de TEST seulement — la boucle, elle, reste
 # ignorante du fournisseur qu'on lui donne.
 ams-tls = { workspace = true }
-# La politique de test authentifie : il lui faut le type des identifiants.
-ams-sasl = { workspace = true }
 
 
 [lints]

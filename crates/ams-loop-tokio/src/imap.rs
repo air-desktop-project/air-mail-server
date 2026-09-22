@@ -150,7 +150,7 @@ where
                     return Err(Error::Timeout);
                 }
             };
-        session.on_tls_established();
+        session.on_tls_established(crate::liaison::liaison_de(chiffre.get_ref().1));
         etat.tls = true;
 
         if matches!(
@@ -227,7 +227,7 @@ where
             return Err(Error::Timeout);
         }
     };
-    session.on_tls_established();
+    session.on_tls_established(crate::liaison::liaison_de(chiffre.get_ref().1));
     etat.tls = true;
     // §6.2.1 : tout ce qui précède est oublié, LE TAMPON COMPRIS. Ce qui restait
     // à lire a été envoyé en clair, donc peut-être par quelqu'un d'autre ; le

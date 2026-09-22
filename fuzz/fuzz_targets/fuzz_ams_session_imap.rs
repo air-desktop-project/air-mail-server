@@ -451,6 +451,22 @@ struct Entree<'a> {
     starttls: bool,
     /// Part-on d'une connexion déjà chiffrée ?
     chiffree: bool,
+    /// Ce canal SE LIE-T-IL (RFC 9266) ?
+    ///
+    /// C'est lui qui décide si `-PLUS` s'annonce, et donc quels en-têtes GS2 la
+    /// session accepte. Le laisser au fuzzer, c'est lui laisser composer la
+    /// rétrogradation que §6 fait détecter.
+    canal_lie: bool,
+}
+
+/// Les octets de liaison qu'un canal prête, ou rien s'il ne se lie pas.
+///
+/// La VALEUR n'a aucune importance ici : la session la compare à ce que le pair
+/// écrit dans son `c=`, et le fuzzer peut y mettre ce qu'il veut. Ce qui
+/// compte, c'est la DIFFÉRENCE entre un canal qui se lie et un qui ne se lie
+/// pas — elle change ce que la session annonce et ce qu'elle accepte.
+fn liaison(lie: bool) -> Option<[u8; ams_sasl::LIAISON_OCTETS]> {
+    lie.then_some([7; ams_sasl::LIAISON_OCTETS])
 }
 
 fuzz_target!(|entree: Entree<'_>| {
@@ -466,7 +482,7 @@ fuzz_target!(|entree: Entree<'_>| {
         },
     );
     if entree.chiffree {
-        session.on_tls_established();
+        session.on_tls_established(liaison(entree.canal_lie));
     }
 
     let mut sortie = vec![0_u8; 16384];
@@ -507,7 +523,7 @@ fuzz_target!(|entree: Entree<'_>| {
         verifier(tour.reply(), commande);
 
         match tour.action() {
-            Action::StartTls => session.on_tls_established(),
+            Action::StartTls => session.on_tls_established(liaison(entree.canal_lie)),
             Action::ReadAuthResponse => {
                 // La boucle lirait une ligne de plus ; on lui en donne une qui
                 // ne prouve rien, pour voir la session s'en sortir.

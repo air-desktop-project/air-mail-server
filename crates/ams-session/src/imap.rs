@@ -818,7 +818,10 @@ enum EtapeScram {
     /// Aucun échange SCRAM : c'est `PLAIN`, ou rien.
     Aucune,
     /// Le mécanisme est choisi, le `client-first` n'est pas encore arrivé.
-    Attendu,
+    ///
+    /// `plus` retient LEQUEL des deux a été choisi : sans lui, le tour suivant
+    /// ne saurait pas s'il doit exiger une liaison.
+    Attendu { plus: bool },
     /// Le premier tour est passé ; voici de quoi conclure.
     EnCours(crate::scram::EtatScram),
     /// La preuve est juste et le `server-final` est parti : il reste au client
@@ -1283,6 +1286,11 @@ pub struct Session<A: Authenticator, M: Mailboxes> {
     attend_sasl: bool,
     /// Où en est l'échange SCRAM, s'il y en a un.
     scram: EtapeScram,
+    /// Les octets de liaison de ce canal (RFC 9266), s'il s'en lie un.
+    ///
+    /// **ILS NE SORTENT JAMAIS D'ICI** : ce sont des octets dérivés du secret
+    /// de la session TLS, et les rendre au pair reviendrait à les publier.
+    liaison: Option<[u8; ams_sasl::LIAISON_OCTETS]>,
     /// L'utilisateur authentifié.
     utilisateur: [u8; USER_MAX_OCTETS],
     utilisateur_len: usize,
@@ -1505,6 +1513,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             tag_len: 0,
             attend_sasl: false,
             scram: EtapeScram::Aucune,
+            liaison: None,
             utilisateur: [0; USER_MAX_OCTETS],
             utilisateur_len: 0,
             boites,
@@ -1645,8 +1654,19 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
     ///
     /// **Tout ce qui précède est oublié** (RFC 9051 §6.2.1) : ce qui a été dit
     /// en clair a pu être dit par quelqu'un d'autre.
-    pub fn on_tls_established(&mut self) {
+    ///
+    /// # `liaison` : LES OCTETS DE CANAL, OU RIEN
+    ///
+    /// `Some` porte les trente-deux octets de l'exportateur de RFC 9266, et
+    /// autorise alors `AUTH=SCRAM-SHA-256-PLUS`. `None` dit que ce canal ne se
+    /// lie pas, et le mécanisme n'est alors NI ANNONCÉ NI SERVI.
+    ///
+    /// **C'EST UN ARGUMENT, ET NON UN CHAMP QU'ON POSERAIT ENSUITE** : une
+    /// seconde méthode à appeler serait une méthode qu'on oublie, et l'oubli
+    /// ne se verrait qu'à l'absence d'une annonce — c'est-à-dire jamais.
+    pub fn on_tls_established(&mut self, liaison: Option<[u8; ams_sasl::LIAISON_OCTETS]>) {
         self.chiffre = true;
+        self.liaison = liaison;
         self.etat = State::NotAuthenticated;
         self.attend_sasl = false;
         self.scram = EtapeScram::Aucune;
@@ -1771,7 +1791,9 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         }
         match core::mem::replace(&mut self.scram, EtapeScram::Aucune) {
             EtapeScram::Aucune => self.regler_authentification(reponse.trim_ascii(), out),
-            EtapeScram::Attendu => self.premier_tour_scram(reponse.trim_ascii(), out),
+            EtapeScram::Attendu { plus } => {
+                self.premier_tour_scram(plus, reponse.trim_ascii(), out)
+            }
             EtapeScram::EnCours(etat) => self.conclure_scram(etat, reponse.trim_ascii(), out),
             // La ligne vide que le profil SASL attend après le `server-final`.
             // Ce qu'elle porte n'est pas regardé : RFC 5802 n'y met rien.
@@ -1906,7 +1928,10 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         let Some(Ok(mecanisme)) = lus.next() else {
             return self.faute(b"AUTHENTICATE expects a mechanism", out);
         };
-        let scram = mecanisme.equals_ignore_case(b"SCRAM-SHA-256");
+        // **`-PLUS` NE S'ACCEPTE QUE SI ON L'A ANNONCÉ** : un client qui le
+        // choisit sans cela lierait à un canal dont on n'a pas les octets.
+        let plus = mecanisme.equals_ignore_case(b"SCRAM-SHA-256-PLUS") && self.liaison.is_some();
+        let scram = plus || mecanisme.equals_ignore_case(b"SCRAM-SHA-256");
         if !scram && !mecanisme.equals_ignore_case(b"PLAIN") {
             // Les deux seuls mécanismes servis. Le dire ainsi vaut mieux qu'un
             // `BAD` : le client sait alors qu'il doit en essayer un autre.
@@ -1953,13 +1978,15 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
                     .copy_from_slice(base64.get(..longueur).unwrap_or_default());
                 let recu = copie.get(..longueur).unwrap_or_default();
                 if scram {
+                    // `plus` voyage avec le tour : sans lui, le second ne
+                    // saurait pas s'il doit exiger une liaison.
                     // **`=` DÉSIGNE LA RÉPONSE INITIALE VIDE** (§3) : c'est
                     // « présente, et de longueur nulle ». SCRAM n'a aucune
                     // raison d'en envoyer une, et l'analyse du message la
                     // refusera — mais elle ne doit pas être confondue avec une
                     // réponse ABSENTE, qui elle ouvre le tour de défi.
                     let brut: &[u8] = if recu == b"=" { b"" } else { recu };
-                    return self.premier_tour_scram(brut, out);
+                    return self.premier_tour_scram(plus, brut, out);
                 }
                 self.regler_authentification(recu, out)
             }
@@ -1968,7 +1995,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
                 // L'étape retient ce qu'on attend : sans elle, la réponse
                 // suivante serait prise pour celle de `PLAIN`.
                 self.scram = if scram {
-                    EtapeScram::Attendu
+                    EtapeScram::Attendu { plus }
                 } else {
                     EtapeScram::Aucune
                 };
@@ -2001,6 +2028,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
     /// Premier tour : le `client-first` décodé, la politique, et le défi.
     fn premier_tour_scram<'b>(
         &mut self,
+        plus: bool,
         base64: &[u8],
         out: &'b mut [u8],
     ) -> Result<Turn<'b>, Error> {
@@ -2013,9 +2041,16 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         let Some(rendu) = self.policy.scram_first(recu, &mut premier) else {
             return self.refuser_l_authentification(out);
         };
+        // La table de §6 vit dans `crate::scram` : les deux protocoles la
+        // lisent, et une seconde copie finirait par ne plus dire la même chose.
+        if !crate::scram::entete_recevable(plus, rendu.gs2, self.liaison.is_some()) {
+            return self.refuser_l_authentification(out);
+        }
+        let entete = recu.get(..rendu.debut_bare).unwrap_or_default();
         let bare = recu.get(rendu.debut_bare..).unwrap_or_default();
         let server_first = premier.get(..rendu.ecrits).unwrap_or_default();
-        let Some(etat) = crate::scram::EtatScram::neuf(bare, server_first) else {
+        let liee = rendu.gs2 == ams_sasl::Gs2::Liee;
+        let Some(etat) = crate::scram::EtatScram::neuf(entete, liee, bare, server_first) else {
             // Trop long pour être retenu : on refuse plutôt que de tronquer un
             // `AuthMessage`, qui ne correspondrait alors à rien.
             return self.refuser_l_authentification(out);
@@ -2036,6 +2071,12 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             return self.refuser_l_authentification(out);
         };
         let client_final = clair.get(..ecrits).unwrap_or_default();
+        // **AVANT LA PREUVE**, et le refus est le même : un pair qui verrait la
+        // liaison refusée autrement qu'un mot de passe faux saurait qu'il a
+        // trouvé un compte.
+        if !crate::scram::liaison_verifiee(&etat, self.liaison, client_final) {
+            return self.refuser_l_authentification(out);
+        }
         let mut dernier = [0_u8; SCRAM_SORTIE_MAX];
         let Some(longueur) =
             self.policy
@@ -2447,6 +2488,13 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             // RFC 4422 §3.2 laisse le client choisir, et beaucoup prennent le
             // premier mécanisme qu'ils connaissent. Annoncer SCRAM sans magasin
             // ferait renoncer un client qui sait faire les deux.
+            // **LE PLUS FORT EN TÊTE**, et `-PLUS` seulement si le canal se
+            // lie : le promettre sans pouvoir le tenir ferait échouer tout
+            // client qui le choisirait.
+            (true, _) if self.scram_servi() && self.liaison.is_some() => (
+                b" AUTH=SCRAM-SHA-256-PLUS AUTH=SCRAM-SHA-256 AUTH=PLAIN",
+                b"",
+            ),
             (true, _) if self.scram_servi() => (b" AUTH=SCRAM-SHA-256 AUTH=PLAIN", b""),
             (true, _) => (b" AUTH=PLAIN", b""),
             (false, true) => (b" STARTTLS", b" LOGINDISABLED"),

@@ -95,7 +95,10 @@ enum EtapeScram {
     /// Aucun échange SCRAM : c'est `PLAIN`, ou rien.
     Aucune,
     /// Le mécanisme est choisi, le `client-first` n'est pas encore arrivé.
-    Attendu,
+    ///
+    /// `plus` retient LEQUEL des deux a été choisi : sans lui, le tour suivant
+    /// ne saurait pas s'il doit exiger une liaison.
+    Attendu { plus: bool },
     /// Le premier tour est passé ; voici de quoi conclure.
     EnCours(crate::scram::EtatScram),
 }
@@ -699,6 +702,12 @@ pub struct SmtpSession<'a, P: Policy> {
     compte: Tampon<LOGIN_MAX>,
     /// Où en est l'échange SCRAM, s'il y en a un.
     scram: EtapeScram,
+    /// Les octets de liaison de ce canal (RFC 9266), s'il s'en lie un.
+    ///
+    /// **ILS NE SORTENT JAMAIS D'ICI.** La session les compare, et ne les
+    /// écrit nulle part : ce sont des octets dérivés du secret de la session
+    /// TLS, et les rendre au pair reviendrait à les publier.
+    liaison: Option<[u8; ams_sasl::LIAISON_OCTETS]>,
     /// Le chemin de retour TEL QU'IL A ÉTÉ ÉCRIT, pour le `Return-Path:`.
     ///
     /// # POURQUOI UN SECOND TAMPON, ET NON `chemin_de_retour`
@@ -783,6 +792,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
             expediteur: Tampon::vide(),
             compte: Tampon::vide(),
             scram: EtapeScram::Aucune,
+            liaison: None,
             chemin_de_retour: Tampon::vide(),
             depose: Tampon::vide(),
             depose_vu: false,
@@ -837,8 +847,21 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     /// la RFC 3207 §4.2 l'exige. Ce qu'un pair a dit en clair a pu être dit par
     /// quelqu'un d'autre ; le conserver après le chiffrement reviendrait à
     /// authentifier de la parole non protégée. Le pair doit renvoyer `EHLO`.
-    pub fn on_tls_established(&mut self) {
+    ///
+    /// # `liaison` : LES OCTETS DE CANAL, OU RIEN
+    ///
+    /// `Some` porte les trente-deux octets de l'exportateur de RFC 9266, et
+    /// autorise alors `SCRAM-SHA-256-PLUS`. `None` dit que ce canal ne se lie
+    /// pas — ni exportateur, ni preuve d'unicité du secret maître —, et le
+    /// mécanisme n'est alors NI ANNONCÉ NI SERVI.
+    ///
+    /// **C'EST UN ARGUMENT, ET NON UN CHAMP QU'ON POSERAIT ENSUITE.** Une
+    /// seconde méthode à appeler serait une méthode qu'on oublie, et l'oubli
+    /// ne se verrait qu'à l'absence d'une annonce — c'est-à-dire jamais. Ici,
+    /// l'appelant DOIT dire ce qu'il en est.
+    pub fn on_tls_established(&mut self, liaison: Option<[u8; ams_sasl::LIAISON_OCTETS]>) {
         self.tls = true;
+        self.liaison = liaison;
         self.authenticated = false;
         // **L'IDENTITÉ TOMBE AVEC L'AUTHENTIFICATION.** La laisser derrière
         // ferait écrire au nom du compte précédent après un `STARTTLS`, qui
@@ -1268,10 +1291,15 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
             // L'ORDRE COMPTE : RFC 4422 §3.2 laisse le client choisir, et
             // beaucoup prennent le premier qu'ils connaissent. Le plus fort
             // d'abord.
-            lignes[posees] = if self.scram_servi() {
-                b"AUTH SCRAM-SHA-256 PLAIN"
-            } else {
-                b"AUTH PLAIN"
+            // **LE PLUS FORT D'ABORD.** RFC 4422 §3.2 laisse le client
+            // choisir, et beaucoup prennent le premier mécanisme qu'ils
+            // connaissent. `-PLUS` ne s'annonce que si le canal se lie : le
+            // promettre sans pouvoir le tenir ferait échouer tout client qui
+            // le choisirait.
+            lignes[posees] = match (self.scram_servi(), self.liaison.is_some()) {
+                (true, true) => b"AUTH SCRAM-SHA-256-PLUS SCRAM-SHA-256 PLAIN",
+                (true, false) => b"AUTH SCRAM-SHA-256 PLAIN",
+                (false, _) => b"AUTH PLAIN",
             };
             posees = posees.saturating_add(1);
         }
@@ -2179,8 +2207,14 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         // impose des majuscules, et `ams_proto_smtp` refuse déjà tout le reste.
         // Une seconde lecture, plus tolérante que la première, finirait par
         // diverger d'elle — c'est la règle qu'on s'applique partout ailleurs.
+        // **`-PLUS` NE S'ACCEPTE QUE SI ON L'A ANNONCÉ.** Un client qui le
+        // choisit sans cela lierait à un canal dont on n'a pas les octets, et
+        // sa preuve échouerait pour une raison qu'il ne saurait pas lire.
+        if mechanism == b"SCRAM-SHA-256-PLUS" && self.liaison.is_some() {
+            return self.commencer_scram(true, initial_response, out);
+        }
         if mechanism == b"SCRAM-SHA-256" {
-            return self.commencer_scram(initial_response, out);
+            return self.commencer_scram(false, initial_response, out);
         }
         if mechanism != b"PLAIN" {
             return self.refus(
@@ -2238,7 +2272,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         // `client-first`, un état en cours attend son `client-final`, et le
         // reste est la réponse de `PLAIN`.
         match self.scram {
-            EtapeScram::Attendu => self.premier_tour_scram(response, out),
+            EtapeScram::Attendu { plus } => self.premier_tour_scram(plus, response, out),
             EtapeScram::EnCours(etat) => self.conclure_scram(etat, response, out),
             EtapeScram::Aucune => self.regler_authentification(response, out),
         }
@@ -2266,6 +2300,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     /// Premier tour : le `client-first` arrive, le `server-first` repart.
     fn commencer_scram<'b>(
         &mut self,
+        plus: bool,
         initial_response: Option<&[u8]>,
         out: &'b mut [u8],
     ) -> Result<Turn<'b>, Error> {
@@ -2276,16 +2311,17 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
             self.phase = Phase::Auth;
             // **ON RETIENT QUE LE MÉCANISME EST CHOISI**, sans quoi la réponse
             // du client serait lue comme un `PLAIN`.
-            self.scram = EtapeScram::Attendu;
+            self.scram = EtapeScram::Attendu { plus };
             return self.finish(Code::AUTH_CHALLENGE, b"", Action::ReadAuthResponse, out);
         };
         let brut: &[u8] = if reponse == b"=" { b"" } else { reponse };
-        self.premier_tour_scram(brut, out)
+        self.premier_tour_scram(plus, brut, out)
     }
 
     /// Le `client-first`, décodé, donné à la politique, et sa réponse encodée.
     fn premier_tour_scram<'b>(
         &mut self,
+        plus: bool,
         base64: &[u8],
         out: &'b mut [u8],
     ) -> Result<Turn<'b>, Error> {
@@ -2298,9 +2334,14 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         let Some(rendu) = self.policy.scram_first(recu, &mut premier) else {
             return self.refuser_scram(out);
         };
+        if !crate::scram::entete_recevable(plus, rendu.gs2, self.liaison.is_some()) {
+            return self.refuser_scram(out);
+        }
+        let entete = recu.get(..rendu.debut_bare).unwrap_or_default();
         let bare = recu.get(rendu.debut_bare..).unwrap_or_default();
         let server_first = premier.get(..rendu.ecrits).unwrap_or_default();
-        let Some(etat) = crate::scram::EtatScram::neuf(bare, server_first) else {
+        let liee = rendu.gs2 == ams_sasl::Gs2::Liee;
+        let Some(etat) = crate::scram::EtatScram::neuf(entete, liee, bare, server_first) else {
             // Trop long pour être retenu : on refuse plutôt que de tronquer un
             // `AuthMessage`, qui ne correspondrait alors à rien.
             return self.refuser_scram(out);
@@ -2336,6 +2377,12 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
             return self.refuser_scram(out);
         };
         let client_final = clair.get(..ecrits).unwrap_or_default();
+        // **AVANT LA PREUVE**, et le refus est le même : un pair qui verrait la
+        // liaison refusée autrement qu'un mot de passe faux saurait qu'il a
+        // trouvé un compte.
+        if !crate::scram::liaison_verifiee(&etat, self.liaison, client_final) {
+            return self.refuser_scram(out);
+        }
         let mut final_serveur = [0_u8; SCRAM_SORTIE_MAX];
         let Some(longueur) =
             self.policy
@@ -3034,7 +3081,7 @@ mod tests {
             std::string::String::from_utf8_lossy(vu).contains("with ESMTP;"),
             "{vu:?}"
         );
-        session.on_tls_established();
+        session.on_tls_established(None);
         assert!(jouer(&mut session, b"EHLO client.example\r\n").starts_with("250"));
         let vu = session
             .received(client, 1_788_242_400, &mut trace)
@@ -3359,7 +3406,7 @@ mod tests {
     #[test]
     fn ehlo_annonce_auth_mais_plus_starttls_apres_chiffrement() {
         let mut session = acceptante();
-        session.on_tls_established();
+        session.on_tls_established(None);
         let reponse = jouer(&mut session, b"EHLO client.example\r\n");
         assert_eq!(
             reponse,
@@ -3751,7 +3798,7 @@ mod tests {
         // 5. la poignée de main TLS (RFC 3207 §4.2)
         identifier(&mut session);
         ouvrir(&mut session);
-        session.on_tls_established();
+        session.on_tls_established(None);
         assert!(destinataires(&session).is_empty(), "STARTTLS");
     }
 
@@ -3909,7 +3956,7 @@ mod tests {
         let mut tampon = [0_u8; 512];
         session.greeting(&mut tampon).expect("bannière");
         // On force le chiffrement : `AUTH` est refusé sans lui, sans réglage.
-        session.on_tls_established();
+        session.on_tls_established(None);
         let dire = |session: &mut SmtpSession<'_, &Espionne>, ligne: &[u8]| {
             let mut place = [0_u8; 512];
             session.handle(ligne, &mut place).expect("une réponse");
@@ -4074,7 +4121,7 @@ mod tests {
         assert_eq!(tour.reply(), b"220 2.0.0 Ready to start TLS\r\n");
         assert_eq!(tour.action(), Action::StartTls);
 
-        session.on_tls_established();
+        session.on_tls_established(None);
         identifier(&mut session);
         assert!(jouer(&mut session, b"STARTTLS\r\n").starts_with("503"));
     }
@@ -4089,7 +4136,7 @@ mod tests {
         jouer(&mut session, b"MAIL FROM:<a@b.co>\r\n");
         assert!(!session.is_encrypted());
 
-        session.on_tls_established();
+        session.on_tls_established(None);
         assert!(session.is_encrypted());
         assert!(!session.is_authenticated());
         // Ni l'identification ni la transaction n'ont survécu.
@@ -4117,7 +4164,7 @@ mod tests {
         // envoyer de `334`. Le défi de trop désynchroniserait la conversation —
         // le client attendrait un verdict, le serveur une réponse.
         let mut session = acceptante();
-        session.on_tls_established();
+        session.on_tls_established(None);
         identifier(&mut session);
         let mut tampon = [0_u8; 128];
         let tour = session
@@ -4133,7 +4180,7 @@ mod tests {
     #[test]
     fn sans_reponse_initiale_le_defi_est_vide_puis_la_reponse_suit() {
         let mut session = acceptante();
-        session.on_tls_established();
+        session.on_tls_established(None);
         identifier(&mut session);
         let mut tampon = [0_u8; 128];
         let tour = session
@@ -4160,7 +4207,7 @@ mod tests {
     fn un_mot_de_passe_faux_est_refuse_et_compte_comme_une_faute() {
         // `\0jean\0autre` : le compte existe, le mot de passe non.
         let mut session = acceptante();
-        session.on_tls_established();
+        session.on_tls_established(None);
         identifier(&mut session);
         let mut tampon = [0_u8; 128];
         session
@@ -4189,7 +4236,7 @@ mod tests {
         // `\0paul\0ouvre-toi`. Deux réponses différentes feraient de ce serveur
         // un annuaire de comptes valides, interrogeable sans mot de passe.
         let mut session = acceptante();
-        session.on_tls_established();
+        session.on_tls_established(None);
         identifier(&mut session);
         let mut tampon = [0_u8; 128];
         session
@@ -4216,7 +4263,7 @@ mod tests {
             b"AABzZWNyZXQ=", // nom de compte vide
         ] {
             let mut session = acceptante();
-            session.on_tls_established();
+            session.on_tls_established(None);
             identifier(&mut session);
             let mut tampon = [0_u8; 128];
             session
@@ -4238,7 +4285,7 @@ mod tests {
         // s'écriraient pareil. Le vide n'est pas du `PLAIN`, donc c'est un refus
         // — mais un refus, pas un défi.
         let mut session = acceptante();
-        session.on_tls_established();
+        session.on_tls_established(None);
         identifier(&mut session);
         let mut tampon = [0_u8; 128];
         let tour = session
@@ -4257,7 +4304,7 @@ mod tests {
         // fenêtre fait exactement ce que la RFC prévoit ; le compter au garde
         // punirait la conformité.
         let mut session = acceptante();
-        session.on_tls_established();
+        session.on_tls_established(None);
         identifier(&mut session);
         let mut tampon = [0_u8; 128];
         session
@@ -4282,7 +4329,7 @@ mod tests {
         // INCONNU mais un mécanisme REFUSÉ — deux réponses différentes, et
         // `scram_smtp.rs` éprouve la seconde.
         let mut session = acceptante();
-        session.on_tls_established();
+        session.on_tls_established(None);
         identifier(&mut session);
         for ligne in [
             &b"AUTH CRAM-MD5\r\n"[..],
@@ -4304,7 +4351,7 @@ mod tests {
     #[test]
     fn auth_juste_apres_la_poignee_de_main_exige_un_nouvel_ehlo() {
         let mut session = acceptante();
-        session.on_tls_established();
+        session.on_tls_established(None);
         assert_eq!(
             jouer(&mut session, b"AUTH PLAIN\r\n"),
             "503 5.5.0 Send EHLO first\r\n"
@@ -4682,7 +4729,7 @@ mod tests {
         let mut tampon = [0_u8; 512];
         session.greeting(&mut tampon).expect("bannière");
         // `AUTH` est refusé sans chiffrement, et sans réglage.
-        session.on_tls_established();
+        session.on_tls_established(None);
         let dire = |session: &mut SmtpSession<'_, Verdict>, ligne: &[u8]| -> Action {
             let mut place = [0_u8; 512];
             session
@@ -5054,7 +5101,7 @@ mod tests {
     /// Une session chiffrée et présentée, prête pour un `AUTH`.
     fn session_authentifiable() -> SmtpSession<'static, Verdict> {
         let mut session = session(RecipientVerdict::Accept);
-        session.on_tls_established();
+        session.on_tls_established(None);
         assert!(jouer(&mut session, b"EHLO client.example\r\n").starts_with("250"));
         session
     }
@@ -5088,7 +5135,7 @@ mod tests {
         assert!(jouer(&mut session, b"AUTH PLAIN AGplYW4Ab3V2cmUtdG9p\r\n").starts_with("235"));
         assert_eq!(session.submitter(), Some(&b"jean"[..]));
         // Une seconde montée en chiffrement remet tout à zéro (§4.2 de RFC 3207).
-        session.on_tls_established();
+        session.on_tls_established(None);
         assert_eq!(
             session.submitter(),
             None,
@@ -5349,7 +5396,7 @@ mod tests {
             config().with_fqdn_sender(true).with_fqdn_recipient(true),
             Verdict(RecipientVerdict::Accept, AvecScram::Aucun),
         );
-        session.on_tls_established();
+        session.on_tls_established(None);
         identifiee(&mut session);
         assert!(
             jouer(&mut session, b"AUTH PLAIN AGplYW4Ab3V2cmUtdG9p\r\n").starts_with("235"),
@@ -5584,10 +5631,22 @@ mod tests {
 
     /// Ouvre une session déjà chiffrée, `EHLO` passé, et rend son annonce.
     fn session_chiffree(scram: AvecScram) -> (SmtpSession<'static, Verdict>, std::string::String) {
+        session_avec(scram, None)
+    }
+
+    /// La même, sur un canal qui SE LIE — celui que `-PLUS` demande.
+    fn session_liee(scram: AvecScram) -> (SmtpSession<'static, Verdict>, std::string::String) {
+        session_avec(scram, Some(banc::LIAISON))
+    }
+
+    fn session_avec(
+        scram: AvecScram,
+        liaison: Option<[u8; ams_sasl::LIAISON_OCTETS]>,
+    ) -> (SmtpSession<'static, Verdict>, std::string::String) {
         let mut session = SmtpSession::new(config(), Verdict(RecipientVerdict::Accept, scram));
         let mut out = [0_u8; 2048];
         let _ = session.greeting(&mut out).expect("bannière");
-        session.on_tls_established();
+        session.on_tls_established(liaison);
         let tour = session
             .handle(b"EHLO client.example\r\n", &mut out)
             .expect("EHLO");
@@ -5620,6 +5679,149 @@ mod tests {
             sans.contains("AUTH PLAIN") && !sans.contains("SCRAM"),
             "un serveur sans vérificateurs annonce SCRAM : {sans}"
         );
+    }
+
+    #[test]
+    fn plus_ne_s_annonce_que_si_le_canal_se_lie() {
+        // **UNE PROMESSE QU'ON NE PEUT PAS TENIR FAIT ÉCHOUER LE CLIENT QUI LA
+        // CROIT.** Sans exportateur, `-PLUS` n'est pas annoncé du tout.
+        let (_, sans) = session_chiffree(AvecScram::Complet);
+        assert!(
+            sans.contains("AUTH SCRAM-SHA-256 PLAIN") && !sans.contains("-PLUS"),
+            "{sans}"
+        );
+
+        let (_, avec) = session_liee(AvecScram::Complet);
+        assert!(
+            avec.contains("AUTH SCRAM-SHA-256-PLUS SCRAM-SHA-256 PLAIN"),
+            "{avec}"
+        );
+        // Le plus fort en tête, et les trois dans cet ordre-là.
+        let rang_plus = avec.find("SCRAM-SHA-256-PLUS").expect("annoncé");
+        let rang_nu = avec.find("SCRAM-SHA-256 ").expect("annoncé");
+        assert!(rang_plus < rang_nu, "{avec}");
+    }
+
+    /// Conduit un échange `-PLUS` jusqu'au `client-final` que l'appelant donne.
+    fn echange_plus(
+        session: &mut SmtpSession<'_, Verdict>,
+        entete: &[u8],
+        mecanisme: &str,
+    ) -> std::vec::Vec<u8> {
+        let mut premier = std::vec::Vec::from(entete);
+        premier.extend_from_slice(b"n=jean,r=nonceduclient");
+        let mut out = [0_u8; 2048];
+        let commande = std::format!("AUTH {mecanisme} {}\r\n", banc::en_base64(&premier));
+        let tour = session.handle(commande.as_bytes(), &mut out).expect("AUTH");
+        let dit = std::string::String::from_utf8_lossy(tour.reply()).into_owned();
+        if !dit.starts_with("334 ") {
+            return std::vec::Vec::new();
+        }
+        let mut place = [0_u8; 1024];
+        let ecrits = server_first_du_defi(&dit, &mut place);
+        place.get(..ecrits).unwrap_or_default().to_vec()
+    }
+
+    #[test]
+    fn un_echange_plus_lie_le_canal_et_ouvre_la_session() {
+        let (mut session, _) = session_liee(AvecScram::Complet);
+        let server_first = echange_plus(&mut session, b"p=tls-exporter,,", "SCRAM-SHA-256-PLUS");
+        assert!(!server_first.is_empty(), "le premier tour a été refusé");
+
+        let final_client = banc::client_final_lie(b"n=jean,r=nonceduclient", &server_first);
+        let mut out = [0_u8; 2048];
+        let tour = session
+            .feed_auth(banc::en_base64(&final_client).as_bytes(), &mut out)
+            .expect("client-final");
+        let dit = std::string::String::from_utf8_lossy(tour.reply()).into_owned();
+        assert!(dit.starts_with("235 "), "succès attendu, reçu : {dit}");
+    }
+
+    #[test]
+    fn une_liaison_qui_ne_correspond_pas_est_refusee() {
+        // **C'EST LE CAS QUE `-PLUS` EXISTE POUR ATTRAPER.** L'intermédiaire
+        // relaie un échange VALIDE — la preuve est juste, calculée sur le `c=`
+        // qu'il a écrit — mais il ne connaît pas l'exportateur de NOTRE canal,
+        // et son `c=` ne peut donc pas correspondre.
+        let (mut session, _) = session_liee(AvecScram::Complet);
+        let server_first = echange_plus(&mut session, b"p=tls-exporter,,", "SCRAM-SHA-256-PLUS");
+        let final_client = banc::client_final_avec(
+            b"p=tls-exporter,,",
+            &[99; ams_sasl::LIAISON_OCTETS],
+            b"n=jean,r=nonceduclient",
+            &server_first,
+        );
+        let mut out = [0_u8; 2048];
+        let tour = session
+            .feed_auth(banc::en_base64(&final_client).as_bytes(), &mut out)
+            .expect("client-final");
+        let dit = std::string::String::from_utf8_lossy(tour.reply()).into_owned();
+        assert!(
+            dit.starts_with("535 "),
+            "une liaison fausse a été acceptée : {dit}"
+        );
+        assert!(
+            dit.contains("Authentication credentials invalid"),
+            "le refus doit être CELUI DU MOT DE PASSE : {dit}"
+        );
+    }
+
+    #[test]
+    fn la_retrogradation_de_liaison_est_refusee() {
+        // **`y,,` VEUT DIRE « JE SAIS LIER, MAIS TU NE SAIS PAS ».** Si l'on
+        // sait — et ici l'on annonce `-PLUS` —, c'est qu'un tiers a retiré
+        // l'annonce du fil. §6 de RFC 5802 : on refuse, et c'est tout l'intérêt
+        // de ce `y`.
+        let (mut session, _) = session_liee(AvecScram::Complet);
+        let refus = echange_plus(&mut session, b"y,,", "SCRAM-SHA-256");
+        assert!(refus.is_empty(), "une rétrogradation a été acceptée");
+
+        // **ET SUR UN CANAL QUI NE SE LIE PAS, LE MÊME `y,,` EST HONNÊTE** :
+        // le client dit vrai, et l'échange doit aboutir.
+        let (mut session, _) = session_chiffree(AvecScram::Complet);
+        let server_first = echange_plus(&mut session, b"y,,", "SCRAM-SHA-256");
+        assert!(!server_first.is_empty(), "un `y,,` honnête a été refusé");
+        let final_client =
+            banc::client_final_avec(b"y,,", &[], b"n=jean,r=nonceduclient", &server_first);
+        let mut out = [0_u8; 2048];
+        let tour = session
+            .feed_auth(banc::en_base64(&final_client).as_bytes(), &mut out)
+            .expect("client-final");
+        assert!(
+            std::string::String::from_utf8_lossy(tour.reply()).starts_with("235 "),
+            "un `y,,` honnête n'a pas abouti"
+        );
+    }
+
+    #[test]
+    fn le_mecanisme_et_l_entete_doivent_s_accorder() {
+        // `-PLUS` sans lier : le client a choisi de lier puis ne lie pas.
+        let (mut session, _) = session_liee(AvecScram::Complet);
+        assert!(
+            echange_plus(&mut session, b"n,,", "SCRAM-SHA-256-PLUS").is_empty(),
+            "`-PLUS` sans `p=` a été accepté"
+        );
+
+        // Lier sur un mécanisme qui ne lie pas : le `c=` ne correspondrait à
+        // rien d'attendu, et le pair lirait « mot de passe invalide ».
+        let (mut session, _) = session_liee(AvecScram::Complet);
+        assert!(
+            echange_plus(&mut session, b"p=tls-exporter,,", "SCRAM-SHA-256").is_empty(),
+            "`p=` sur le mécanisme nu a été accepté"
+        );
+    }
+
+    #[test]
+    fn plus_non_annonce_est_un_mecanisme_inconnu() {
+        // Sur un canal qui ne se lie pas, `-PLUS` n'est pas annoncé — et s'il
+        // est demandé quand même, il n'est pas plus connu qu'un autre.
+        let (mut session, _) = session_chiffree(AvecScram::Complet);
+        let mut out = [0_u8; 2048];
+        let tour = session
+            .handle(b"AUTH SCRAM-SHA-256-PLUS\r\n", &mut out)
+            .expect("AUTH");
+        let dit = std::string::String::from_utf8_lossy(tour.reply()).into_owned();
+        assert!(dit.starts_with("504 "), "{dit}");
     }
 
     #[test]
@@ -5798,13 +6000,19 @@ mod tests {
             "AUTH SCRAM-SHA-256 {}\r\n",
             banc::en_base64(b"n,,n=jean,r=abc")
         );
-        session.handle(commande.as_bytes(), &mut out).expect("AUTH");
+        let tour = session.handle(commande.as_bytes(), &mut out).expect("AUTH");
+        // **UN `client-final` BIEN FORMÉ**, sans quoi ce serait l'analyse du
+        // message qui refuserait, et le défaut du trait ne serait jamais
+        // atteint. La couverture l'a montré : la vérification de la liaison,
+        // qui passe AVANT la politique, analyse déjà le message.
+        let dit = std::string::String::from_utf8_lossy(tour.reply()).into_owned();
+        let mut place = [0_u8; 1024];
+        let ecrits = server_first_du_defi(&dit, &mut place);
+        let final_client =
+            banc::client_final(b"n=jean,r=abc", place.get(..ecrits).unwrap_or_default());
         let mut out2 = [0_u8; 2048];
         let tour = session
-            .feed_auth(
-                banc::en_base64(b"c=biws,r=abcnoncedeserveur,p=AAAA").as_bytes(),
-                &mut out2,
-            )
+            .feed_auth(banc::en_base64(&final_client).as_bytes(), &mut out2)
             .expect("client-final");
         assert!(
             std::string::String::from_utf8_lossy(tour.reply()).starts_with("535 "),
