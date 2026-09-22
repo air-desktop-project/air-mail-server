@@ -85,7 +85,13 @@ fi
 objets=""
 for repertoire in target/debug/build target/release/build; do
     if [ -d "$repertoire" ]; then
-        trouves=$(find "$repertoire" \( -name '*.o' -o -name '*.a' \) 2>/dev/null | head -5 || true)
+        # **`*.rcgu.o` N'EST PAS DU C** : c'est une unité de génération de code
+        # de `rustc` lui-même (`<crate>.<hash>-cgu.N.rcgu.o`), que le Mac laisse
+        # traîner sous `build/` pour les scripts de construction là où Linux les
+        # range ailleurs. Ce gate les prenait pour des objets C et rendait un
+        # ÉCHEC sur le poste de développement (2026-09-22). Un objet C n'a
+        # jamais ce nom.
+        trouves=$(find "$repertoire" \( -name '*.o' -o -name '*.a' \) ! -name '*.rcgu.o' 2>/dev/null | head -5 || true)
         [ -n "$trouves" ] && objets="$objets$trouves"$'\n'
     fi
 done

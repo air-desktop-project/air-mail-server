@@ -70,7 +70,9 @@ echo "périmètre : $combien crates sans entrée-sortie (lu de check-couverture.
 # trente-quatre. Toute la pile QUIC, HTTP/2 et HTTP/3 y manquait, ainsi que
 # l'API REST — c'est-à-dire dix crates dont rien ne disait l'étage. Un tableau
 # tenu à la main dérive à chaque tranche ; celui-ci est confronté.
-sur_disque=$(find crates -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort)
+# `-printf` est une extension GNU : sur le Mac de développement, `find` la
+# refuse et ce gate rendait un écart au lieu d'un verdict (2026-09-22).
+sur_disque=$(find crates -mindepth 1 -maxdepth 1 -type d | sed 's#.*/##' | sort)
 au_tableau=$(grep -oE '^\| `ams-[a-z0-9-]+`' README.md | tr -d '|` ' | sort)
 
 if [ "$sur_disque" != "$au_tableau" ]; then

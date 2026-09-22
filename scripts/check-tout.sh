@@ -82,7 +82,7 @@ ORDRE=(
 
 # ── Ce que le répertoire porte ───────────────────────────────────────────────
 mapfile -t PRESENTES < <(
-    find scripts -maxdepth 1 -name 'check-*.sh' -printf '%f\n' |
+    find scripts -maxdepth 1 -name 'check-*.sh' | sed 's#.*/##' |
         sed 's/\.sh$//' | grep -vx 'check-tout' | sort
 )
 
