@@ -424,6 +424,13 @@ MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
 
 ReadWritePaths=/var/lib/air-mail
+# **SI LE MAGASIN DE COURRIER EST AILLEURS, IL FAUT L'AJOUTER ICI** — ou dans un
+# drop-in `/etc/systemd/system/air-mail-server.service.d/*.conf`. Sans cela,
+# `ProtectSystem=strict` le rend illisible et le serveur refuse de démarrer :
+# « boîte de … : Read-only file system ». Trouvé le 2026-09-22, au démarrage
+# de la bascule de narro.ch, Postfix déjà arrêté : le serveur n'avait jamais été
+# lancé PAR L'UNITÉ sur ce chemin, seulement à la main, qui n'a pas de
+# cloisonnement.
 
 # Ce serveur n'a besoin d'AUCUNE capacité, et l'unité le DIT au noyau plutôt
 # que de l'affirmer en commentaire.

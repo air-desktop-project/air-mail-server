@@ -104,7 +104,7 @@ Ils ne changent pas, mais vérifiez qu'ils sont bien ceux-ci :
 | Port IMAP | **993**, chiffrement **SSL/TLS** |
 | Serveur d'envoi (SMTP) | `mail.narro.ch` |
 | Port d'envoi | **587** avec **STARTTLS**, ou **465** avec **SSL/TLS** |
-| Nom d'utilisateur | le même qu'avant |
+| Nom d'utilisateur | **votre adresse SANS le `@narro.ch`** — par exemple `prenom.nom` et non `prenom.nom@narro.ch` |
 | Méthode d'authentification | **Mot de passe normal** |
 
 Ce dernier point est le seul qui puisse coincer. Si votre logiciel propose une
@@ -153,7 +153,9 @@ vous seriez prévenu.
 Avant de nous écrire — ce qui sera difficile si votre messagerie ne marche
 pas — vérifiez dans cet ordre :
 
-1. Le nouveau mot de passe, saisi **sans espace** avant ou après.
+1. Le nom d'utilisateur **sans le `@narro.ch`** — c'est le changement qu'on
+   ne voit pas, et le premier à vérifier.
+2. Le nouveau mot de passe, saisi **sans espace** avant ou après.
 2. Le port **993** pour la réception, avec **SSL/TLS**.
 3. La méthode d'authentification : **« Mot de passe normal »**.
 4. Sur téléphone : supprimer le compte et le recréer suffit souvent, et **ne

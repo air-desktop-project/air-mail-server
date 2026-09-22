@@ -44,7 +44,30 @@ toute façon ce que l'option A de §5 de l'étude fait des cinq autres.
 
 ---
 
-## LA FENÊTRE EST FIXÉE : mardi 22 septembre 2026, 22:00 CEST
+## LA BASCULE EST FAITE — mardi 22 septembre 2026, 05:49 UTC (07:49 CEST)
+
+> **AVANCÉE AU MATIN, LE JOUR MÊME.** La fenêtre était annoncée à 22:00 ; elle
+> s'est ouverte à 07:49, sur décision prise à 07:10. **Coupure réelle : 41
+> secondes** — Postfix arrêté à 05:49:31 UTC, air-mail-server à l'écoute sur
+> les quatre ports à 05:50:12. Les cinq n'ont pas été prévenus du changement
+> d'heure : c'est un choix, et il est écrit ici pour ne pas être oublié.
+>
+> **UN SEUL ACCROC, ET IL A COÛTÉ LES 41 SECONDES.** Le serveur a refusé de
+> démarrer : « boîte de `thierry.delhaise` : Read-only file system ». L'unité
+> du paquet porte `ProtectSystem=strict` avec `ReadWritePaths=/var/lib/air-mail`
+> seulement — et `/var/vmail-ams` n'y est pas. En phase 0, la veille, et à
+> chaque répétition, le serveur avait été lancé **à la main** ; jamais PAR
+> L'UNITÉ sur ce chemin. Un drop-in `ReadWritePaths=/var/vmail-ams` l'a réglé
+> (étape 6quater, ajoutée). Le banc qui manquait : démarrer par `systemctl`,
+> et non par `sudo -u air-mail air-mail-server`.
+>
+> **CE QUE LA BASCULE A CASSÉ, ET QU'AUCUN RELEVÉ NE NOMMAIT** : la plate-forme
+> narro (quartz) émet ses alertes clients par `mail.narro.ch:587`, authentifiée
+> `support@narro.ch` avec le mot de passe de Dovecot. Coupée de 05:50 à 05:58 —
+> identifiant ET secret faux —, réparée dans `app.env` de l'instance preprod.
+> Voir « L'IDENTIFIANT N'EST PLUS L'ADRESSE », plus bas.
+
+## LA FENÊTRE ÉTAIT FIXÉE : mardi 22 septembre 2026, 22:00 CEST
 
 **CELLE DU SAMEDI 12 NE S'EST PAS OUVERTE**, et rien n'y a échoué : elle n'a pas
 été tenue. Le manuel a servi entre-temps à trouver ce que personne n'avait vu —
@@ -62,6 +85,37 @@ tombent, et il vaut mieux les nommer que les découvrir :
 - **un jour de préavis, et non quatre.** §0.7 en demandait quatre. La lettre
   part donc le soir du 21, en même temps que les secrets, et non quatre jours
   avant. Cinq personnes auront une soirée pour la lire.
+
+## L'IDENTIFIANT N'EST PLUS L'ADRESSE, ET PERSONNE NE L'AVAIT ÉCRIT
+
+Dovecot authentifiait sur l'adresse complète — `/etc/dovecot/users` est écrit
+ainsi, et chaque client, la passerelle Milesight et la plate-forme narro
+portent donc `prenom.nom@narro.ch` comme identifiant. **air-mail-server veut le
+NOM DU COMPTE, `prenom.nom`, et REFUSE l'adresse** (mesuré le 2026-09-22 : `support`
+ouvre, `support@narro.ch` non — `ams_auth::authenticate` compare à `login`, et
+rien d'autre).
+
+Ce manuel disait pourtant « identifiant = l'adresse complète » pour la
+passerelle, et la lettre « nom d'utilisateur : le même qu'avant ». Les deux
+étaient faux, et **rien de la phase 0 ne pouvait le voir** : tous les essais
+s'authentifiaient avec le nom nu, parce que c'est ainsi qu'on crée un compte.
+Un inventaire qui relève `mail_location` et pas la FORME de l'identifiant est
+un inventaire qui manque la moitié de la migration.
+
+Ce que cela touche, et ce qui en a été fait :
+
+| Qui | Identifiant à poser | Fait ? |
+|---|---|---|
+| la plate-forme narro, `quartz:/opt/vsl-iot-platform-preprod/env/app.env` | `EMAIL_HOST_USER=support` + le secret neuf | **fait 05:58 UTC**, sauvegarde `app.env.avant-ams-*`, workers redémarrés, essai Django arrivé. ⚠️ **Le déploiement RÉGÉNÈRE `app.env`** : reporter la valeur là où le déploiement la lit |
+| la passerelle Milesight | `ofrou-sierre` — SANS `@narro.ch` | à saisir dans son interface |
+| les cinq clients de courrier | `prenom.nom` — SANS `@narro.ch` | une ligne à envoyer aux cinq |
+
+**Et le produit devrait accepter les deux formes.** « Le remplaçant accepte ce
+que le remplacé acceptait » vaut ici plus qu'ailleurs : sept configurations
+tenues par cinq personnes et deux machines. Mais l'identité authentifiée devient
+ensuite le nom de la boîte — `authenticate` doit rendre le login canonique, et
+SMTP, IMAP, l'API et leurs bancs doivent le reprendre. C'est le premier chantier
+d'après-bascule, pas un correctif de fenêtre.
 
 **ET UNE MARGE QUI DISPARAÎT.** Le samedi laissait deux jours devant soi pour
 reprendre ; mardi soir, le lendemain est un jour ouvré. Le retour en arrière ne
@@ -102,7 +156,19 @@ coupure ajouterait une cause qu'on ne soupçonnerait pas, pendant les vingt
 minutes où l'on a le moins de temps pour chercher.
 
     sudo systemctl mask unattended-upgrades     # avant d'ouvrir la fenêtre
-    sudo systemctl unmask unattended-upgrades   # une fois la bascule tenue
+    sudo systemctl stop apt-daily.timer apt-daily-upgrade.timer
+    # …et une fois la bascule tenue :
+    sudo systemctl unmask unattended-upgrades
+    sudo systemctl start apt-daily.timer apt-daily-upgrade.timer
+
+**LE `mask` SEUL NE MUSELAIT RIEN**, et cette page l'a prescrit seul pendant
+deux semaines. `unattended-upgrades.service` est l'unité de FIN D'ARRÊT
+(`unattended-upgrade-shutdown --wait-for-signal`, qui n'agit qu'en éteignant la
+machine). Le passage quotidien, lui, vient d'`apt-daily-upgrade.timer` →
+`apt.systemd.daily install`, que le `mask` ne touche pas. Trouvé le 2026-09-22
+en le jouant : les deux timers s'arrêtent (`stop`, pas `disable` — un `start`
+les rend, et le redémarrage aussi). Sur cette machine, `Automatic-Reboot` n'est
+pas défini : il ne redémarre jamais la machine de lui-même.
 
 **Et on le remet.** Une machine de courrier qui ne se met plus à jour est un
 problème plus lent, mais plus grave, que celui qu'on vient d'éviter.
@@ -1042,9 +1108,11 @@ décidera si l'on recommence un autre jour.
     sudo systemctl stop postfix dovecot
 
     # 2. On vide ce que Postfix tient encore en file.
-    sudo postqueue -p        # doit être vide, ou presque
+    #    **`postqueue -p` SE LIT AVANT L'ARRÊT**, il a besoin du démon. Après,
+    #    c'est le spool qu'on compte :
+    sudo find /var/spool/postfix/{incoming,active,deferred,maildrop} -type f | wc -l
     #    S'il reste des messages, laissez-les : ils sont dans /var/spool/postfix
-    #    et le retour en arrière les retrouvera.
+    #    et le retour en arrière les retrouvera. (Le 2026-09-22 : 0.)
 
     # 3. Le delta : ce qui est arrivé depuis la copie de 0.4.
     for compte in contact thierry.delhaise vincent.delhaise support kelly.garro \
@@ -1087,6 +1155,17 @@ décidera si l'on recommence un autre jour.
     #       `ofrou-sierre` n'y est pas, pour la raison de §0.4bis-2 : sa boîte
     #       n'a pas les dossiers que ces rôles nomment.
 
+    # 3quater. **LES FINS DE LIGNE, QUE LA PHASE 1 NE REJOUAIT PAS.** Le delta
+    #       vient de Dovecot en `LF` nu — et `rsync` a remplacé TOUS les fichiers,
+    #       pas seulement les nouveaux, puisque la conversion avait changé leur
+    #       taille. §0.4bis-3 dit « rsync, PUIS ce script, PUIS le premier
+    #       démarrage » et la phase 1 l'oubliait : le serveur aurait servi des
+    #       enveloppes NIL sur les 705 messages. Le script est idempotent et
+    #       vérifie chaque message contre le `W=` de Dovecot.
+    #       (Le 2026-09-22 : 705 convertis, 0 déjà en CRLF, aucun écart.)
+    sudo python3 convertir-fins-de-ligne.py /var/vmail-ams --pour-de-vrai
+    sudo chown -R air-mail:air-mail /var/vmail-ams
+
     # 4. L'audit, une dernière fois. S'il refuse : ON REMONTE (voir plus bas).
     # `verifier.sh` compare compte par compte : on lui donne de l'ancien magasin
     # une vue qui a la MÊME forme que le neuf.
@@ -1107,6 +1186,13 @@ décidera si l'on recommence un autre jour.
     sudo bash verifier.sh /var/vmail-ams /var/vmail-vue
 
     # 5. L'instantané OVH. C'est ici qu'il vaut le plus cher.
+    #    **CE VPS N'A PAS L'OPTION `snapshot`** (`GET /vps/…/option` ne rend
+    #    que `automatedBackup`, relevé le 2026-09-22). Ce qui en tient lieu :
+    #    la sauvegarde automatique quotidienne, à 23:19 UTC, rotation 1 —
+    #    `GET /vps/…/automatedBackup/restorePoints?state=available`. Celle de
+    #    la veille (2026-09-21T23:19:26Z) contenait déjà la préparation. Et la
+    #    sauvegarde `tar` de §0.2 a été REFAITE à 05:47, à deux endroits :
+    #    1 183 entrées, 705 messages, même empreinte des deux côtés.
 
     # 6. La configuration DÉFINITIVE : les vrais ports, la vraie racine.
     #
@@ -1204,6 +1290,19 @@ décidera si l'on recommence un autre jour.
     # 7. On empêche l'ancien de revenir tout seul au prochain redémarrage.
     sudo systemctl disable postfix dovecot
 
+    # 6quater. **L'UNITÉ DOIT POUVOIR ÉCRIRE LE MAGASIN**, et elle ne le peut
+    #    pas telle que le paquet la livre : `ProtectSystem=strict` ne laisse
+    #    écrire que `ReadWritePaths=/var/lib/air-mail`. Le 2026-09-22, l'étape 8
+    #    a rendu « boîte de `thierry.delhaise` : Read-only file system » et le
+    #    serveur a refusé de démarrer — Postfix arrêté, le 25 déjà redirigé.
+    #    Quarante et une secondes de coupure, toutes dues à cette ligne absente.
+    #    Rien ne pouvait le voir avant : à la main, `sudo -u air-mail
+    #    air-mail-server` n'a pas de cloisonnement.
+    sudo mkdir -p /etc/systemd/system/air-mail-server.service.d
+    printf '[Service]\nReadWritePaths=/var/vmail-ams\n' \
+        | sudo tee /etc/systemd/system/air-mail-server.service.d/maildir.conf > /dev/null
+    sudo systemctl daemon-reload
+
     # 8. On démarre.
     sudo systemctl enable --now air-mail-server
     sudo journalctl -u air-mail-server -n 60 --no-pager
@@ -1230,10 +1329,27 @@ aussi, s'il en reste.
     openssl s_client -4 -connect mail.narro.ch:993 -quiet
     openssl s_client -6 -connect mail.narro.ch:993 -quiet
 
+> **VU LE 2026-09-22, de 05:50 à 06:00 UTC.** Les quatre écouteurs sur `*:` ;
+> 25, 465, 587 et 993 joints en IPv4 ET en IPv6 depuis l'extérieur, certificat
+> `mail.narro.ch` vérifié par le système — le 25 en IPv4 depuis `quartz`, parce
+> qu'un accès résidentiel filtre le 25 sortant et rend un délai d'attente qu'on
+> prendrait pour une panne. Les six comptes en `AUTH PLAIN` sur le vrai 993 :
+> `EXISTS` juste, `ENVELOPE` non nulle, corps non vide, rôles 5/5 (0 pour la
+> passerelle, voulu). Un message Gmail → `thierry.delhaise@narro.ch` arrivé en
+> quelques secondes, `Received-SPF: pass`. Un message Django → boîte locale
+> arrivé. **Le sortant vers Gmail, lui, n'est pas arrivé** — voir plus bas.
+>
+> **LE SERVEUR EST STRICT SUR LES FINS DE LIGNE DE CE QU'IL REÇOIT** : un
+> `DATA` en `LF` nu est refusé « 554 5.6.0 Bare CR or LF in message data », là
+> où Postfix tolérait. Les clients de courrier envoient du `CRLF` ; un script
+> maison qui pousse `message.as_bytes()` sans la politique `SMTP` de Python ne
+> passe plus. À savoir avant de croire à une panne.
+
 **ET LA PASSERELLE, QUI NE SE PLAINDRA PAS.** Le secret de `ofrou-sierre` tiré
 en §0.4 doit être saisi dans l'interface Milesight — `mail.narro.ch`, port 587
-`STARTTLS`, identifiant = l'adresse complète, `From:` obligatoirement
-`ofrou-sierre@narro.ch`. Tant qu'il ne l'est pas, la passerelle échoue en
+`STARTTLS`, **identifiant `ofrou-sierre`, SANS `@narro.ch`** (cette page disait
+l'inverse jusqu'au 2026-09-22 : c'était la forme de Dovecot, et air-mail-server
+la refuse), `From:` obligatoirement `ofrou-sierre@narro.ch`. Tant qu'il ne l'est pas, la passerelle échoue en
 silence : son interface n'affiche qu'un « Server error » muet, et le diagnostic
 n'est plus dans `/var/log/mail.log` mais dans le journal d'`air-mail-server`.
 **C'est la dernière case de la fenêtre, et la seule qui se coche ailleurs que
@@ -1310,6 +1426,12 @@ Ce dernier point compte le jour J : on relance ce qui a l'air d'avoir échoué.
     # 3. Remettre l'ancien en marche.
     sudo systemctl enable --now postfix dovecot
 
+    # 3bis. ET LA PLATE-FORME, qui s'authentifie désormais en `support` avec le
+    #    secret neuf : restaurer sur quartz
+    #    /opt/vsl-iot-platform-preprod/env/app.env.avant-ams-<horodatage>
+    #    puis redémarrer vsl-preprod-notification-worker, -gunicorn, -export-worker.
+    #    Sans quoi les alertes clients restent coupées APRÈS le retour en arrière.
+
     # 4. Vérifier depuis l'extérieur.
     swaks --to jean@narro.ch --server mail.narro.ch
 
@@ -1344,7 +1466,28 @@ Ne faites rien de cette liste le jour même.
 - **J+7** : `/var/vmail` (l'ancien magasin) reste en place. Ne l'effacez pas.
 - **J+7** : `postfix` et `dovecot` restent installés, désactivés. Ne les
   désinstallez pas : le retour en arrière en dépend.
-- **J+30** : si tout va bien, on peut publier `MTA-STS` et `TLSRPT`, qui
-  n'existent pas aujourd'hui, et faire passer `DMARC` de `p=none` à
-  `p=quarantine`. Un changement à la fois, une semaine d'écart.
+- **J+0, mais pas dans la fenêtre** : rendre les mises à jour (`unmask` et
+  `start` des deux timers, en tête de ce document), et **faire accepter
+  `compte@domaine-hébergé` à l'authentification** — le chantier nommé sous
+  « L'IDENTIFIANT N'EST PLUS L'ADRESSE ». Tant qu'il n'est pas fait, chaque
+  nouveau client se configure avec le nom nu.
+- **J+0** : **Resend n'a remis aucun des quatre essais sortants vers Gmail**
+  (deux par air-mail-server, deux envoyés d'onyx DIRECTEMENT à Resend, le chemin
+  exact de Postfix), tous acceptés `250` avec un identifiant — le dernier :
+  `01a0c7b1-bc9f-77df-8663-e7e0d393557a`. Les notifications de la plate-forme
+  arrivent en une seconde par le même relais. Ce n'est donc pas la bascule ;
+  c'est à lire dans le tableau de bord Resend, la clé étant en envoi seul.
+- **J+0** : la plate-forme narro envoie ~25 messages par jour à des adresses
+  saisies dans un formulaire public (`liouwong@gmail.com`,
+  `taylorvulk@yahoo.com`…) — des inscriptions de robots, relayées par Resend
+  sous `support@narro.ch`. Un sujet pour le portail, et pour la réputation du
+  relais.
+- **J+7** : livrer dans le PAQUET ce que la bascule a appris : l'unité doit
+  documenter `ReadWritePaths` pour un magasin hors de `/var/lib/air-mail`
+  (`installation.md` le dit désormais), et `check-installation.sh` devrait
+  démarrer PAR L'UNITÉ sur un magasin ailleurs.
+- **J+30** : `MTA-STS` (mode `testing` depuis le 2026-09-09, servi par le vhost
+  nginx `mta-sts.narro.ch` de cette machine) et `TLSRPT` sont DÉJÀ publiés ;
+  ce qui reste est le passage de `testing` à `enforce`, et `DMARC` de `p=none`
+  à `p=quarantine`. Un changement à la fois, une semaine d'écart.
 - **J+30** : alors seulement, désinstaller l'ancien et libérer `/var/vmail`.

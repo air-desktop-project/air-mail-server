@@ -196,7 +196,7 @@ umask 077
     done
     printf '\n%s\n' "La passerelle Milesight (ofrou-sierre) ne lit pas son courrier :"
     printf '%s\n' "son secret se saisit dans son interface — mail.narro.ch, port 587"
-    printf '%s\n' "STARTTLS, identifiant = l'adresse complète, From: obligatoirement"
+    printf '%s\n' "STARTTLS, identifiant = ofrou-sierre SANS @narro.ch, From: obligatoirement"
     printf '%s\n' "ofrou-sierre@narro.ch. Tant qu'il n'y est pas, ses alertes s'arrêtent"
     printf '%s\n' "SANS QUE RIEN NE LE DISE."
 } > "$sortie"
