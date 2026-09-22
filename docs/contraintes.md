@@ -155,10 +155,50 @@ quelqu'un pourrait croire l'inverse.
 Ce que cela ne couvre toujours PAS : les lints voient une conversion douteuse, pas
 une borne oubliée ; et le fuzz ne voit que ce qu'il atteint.
 
-## C4 — TLS 1.3 au minimum
+## C4 — TLS 1.3 partout, TLS 1.2 toléré sur les seules écoutes de courrier
 
-Rien en dessous. Pas de TLS 1.2, pas de repli négocié, pas d'option de
-compatibilité. Un client qui ne sait pas faire TLS 1.3 n'est pas servi.
+**AMENDÉE LE 2026-09-22**, et voici pourquoi. Elle disait : « Rien en dessous.
+Pas de TLS 1.2, pas de repli négocié, pas d'option de compatibilité. Un client
+qui ne sait pas faire TLS 1.3 n'est pas servi. » Ce jour-là, `mail.narro.ch` a
+basculé sur ce serveur, y est resté quatre heures, et en est revenu : **Apple
+Mail — sur Mac comme sur iPhone — ne parle que TLS 1.2.** Capturé sur la
+machine, son `ClientHello` vers le 993 n'a pas d'extension `supported_versions`,
+propose `secp256r1/384/521` et vingt-deux suites 1.2. Aucun réglage du client
+n'y change rien : c'est sa pile IMAP/SMTP. « N'est pas servi » voulait donc dire
+« aucun des cinq utilisateurs n'est servi », et la contrainte avait été posée
+avant de savoir ce que les clients parlent.
+
+Ce qui tient désormais :
+
+- **TLS 1.3 reste la règle**, et la seule version acceptée par le relais de
+  sortie, l'API, QUIC/HTTP/3 et la lecture des politiques MTA-STS — tout ce qui
+  parle à des machines qu'on choisit. C'est `ams-tls::provider()`, qui **filtre**
+  désormais les suites de l'amont pour n'en garder que les 1.3.
+- **Les écoutes de courrier — SMTP, submission, IMAP — acceptent aussi TLS 1.2**,
+  par `ams-tls::provider_tls12()` et `server_config_resolving_tls12()`. rustls
+  choisit la version la plus haute que le pair propose : un client qui sait faire
+  du 1.3 en fait, un client qui ne sait pas obtient du 1.2 au lieu d'une porte
+  fermée. Tolérer n'est pas préférer.
+- **Ce que le 1.2 apporte est borné** : six suites, toutes ECDHE avec un AEAD
+  (AES-GCM, ChaCha20-Poly1305), signées ECDSA ou RSA. Aucune suite CBC, aucun
+  RSA statique, aucun SHA-1 — l'amont ne les fournit pas. Ce qui manque au 1.2
+  est structurel et ne se corrige pas par une suite.
+- **Toujours rien en dessous de 1.2.** SSLv3, TLS 1.0 et 1.1 restent exclus
+  (C6), et `rustls` ne sait de toute façon pas les parler.
+
+**Outillé par** : `provider.rs` — un essai tient que `provider()` n'offre que
+trois suites, toutes 1.3, et un autre que `provider_tls12()` en offre exactement
+neuf, dans l'ordre de l'amont, toutes ECDHE+AEAD, groupe hybride en tête ;
+`quic.rs` — une suite 1.2 donnée à QUIC arrête la compilation (panique dans une
+fonction `const`), et un essai la déclenche ; `ams-loop-tokio/tests/starttls.rs`
+— un `openssl s_client -tls1_2` est **servi** sur la configuration des écoutes,
+un `s_client` sans contrainte y obtient **1.3**, et la configuration ordinaire
+lui **refuse** le 1.2 par une alerte de version.
+
+Le texte d'origine suit, pour ce qu'il dit du fournisseur et de ce qui a été
+mesuré — tout y reste vrai, sauf « aucune suite TLS 1.2 » : il y en a six,
+derrière la feature `tls12` désormais active, et c'est le filtre de
+`provider()` qui les tient hors de tout ce qui n'est pas une écoute de courrier.
 
 **Le fournisseur cryptographique est `rustls-rustcrypto`** (décision du
 2026-08-28) : pur Rust, sans une ligne de C. `rustls` est sans entrée-sortie par
@@ -174,9 +214,11 @@ rustls-rustcrypto = { git = "https://github.com/RustCrypto/rustls-rustcrypto",
                       default-features = false, features = ["std"] }
 ```
 
-`default-features = false` **est ce qui applique C4 et C6** : la feature `tls12`
-est dans les défauts de `rustls-rustcrypto`, et la laisser active ferait entrer
-TLS 1.2 par la porte de derrière.
+`default-features = false` applique C6 et gardait C4 : la feature `tls12` est
+dans les défauts de `rustls-rustcrypto`. **Elle est réactivée explicitement
+depuis le 2026-09-22** (`features = ["std", "tls12"]`, sur `rustls` aussi) —
+non par la porte de derrière, mais par la porte de devant, avec le filtre de
+`provider()` qui décide où elle s'applique.
 
 ### Ce qui a été mesuré, et non supposé
 
@@ -1188,7 +1230,8 @@ portant ce nom laisserait croire qu'un portage est entamé.
 On ne sert pas ce qui affaiblit. Sont **exclus d'emblée**, et la liste est
 ouverte :
 
-- SSLv2, SSLv3, TLS 1.0, TLS 1.1, TLS 1.2 (cf. C4) ;
+- SSLv2, SSLv3, TLS 1.0, TLS 1.1 — et TLS 1.2 partout sauf sur les écoutes de
+  courrier, où il est toléré depuis le 2026-09-22 (cf. C4) ;
 - l'authentification en clair hors TLS — `AUTH PLAIN` / `AUTH LOGIN` sur une
   connexion non chiffrée, `USER`/`PASS` POP3 idem ;
 - `APOP` (MD5, exige le mot de passe en clair côté serveur) ;

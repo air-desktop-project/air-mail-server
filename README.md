@@ -261,7 +261,7 @@ des octets **et des actions**. Elles n'attendent jamais.
 | `ams-tlsrpt` | TLSRPT (RFC 8460) : ce qu'on rapporte du chiffrement sortant | **implémenté, et câblé** |
 | `ams-queue` | file de réémission : quand réessayer, quand renoncer | **implémenté, câblé, et il porte les demandes de RFC 3461** |
 | `ams-auth` | le magasin d'identifiants, vérification Argon2id | **implémenté** |
-| `ams-tls` | TLS 1.3 uniquement, échange de clés post-quantique | **implémenté, en entrant et en sortant** |
+| `ams-tls` | TLS 1.3 partout, TLS 1.2 toléré sur les écoutes de courrier (C4, 2026-09-22), échange de clés post-quantique | **implémenté, en entrant et en sortant** |
 | `ams-dkim` | RFC 6376 | **vérifiées, câblées, et posées** |
 | `ams-spf` | RFC 7208 | **évalué, câblé, et écrit dans le message** |
 | `ams-dmarc` | RFC 7489 | **alignement, politique, et câblé dans la boucle** |

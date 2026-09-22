@@ -4,8 +4,11 @@
 //!
 //! Assembler un `ServerConfig` tient en six lignes, et c'est exactement le
 //! problème : six lignes se recopient, et la copie qui oublie
-//! `with_protocol_versions(&[&TLS13])` sert du TLS 1.2 sans que personne ne s'en
-//! aperçoive. C4 vaut mieux qu'un copier-coller discipliné.
+//! `with_protocol_versions(…)` sert ce qu'elle ne devrait pas sans que personne
+//! ne s'en aperçoive. C4 vaut mieux qu'un copier-coller discipliné — et depuis
+//! le 2026-09-22 elle distingue deux cas, nommés ici par deux fonctions : tout
+//! en TLS 1.3 seul, sauf les écoutes de courrier, qui acceptent aussi le 1.2
+//! ([`server_config_resolving_tls12`]).
 //!
 //! Le matériel arrive en **octets**, pas en chemins : lire un fichier est une
 //! entrée-sortie, et C1 l'interdit ici. C'est l'appelant qui lit, et c'est aussi
@@ -21,7 +24,7 @@ use rustls::pki_types::pem::{self, PemObject as _};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::sign::CertifiedKey;
 
-use crate::provider;
+use crate::{provider, provider_tls12};
 
 /// Ce qui rend un matériel TLS inutilisable.
 #[derive(Debug)]
@@ -255,6 +258,30 @@ pub fn server_config_resolving(
         // `assembler` : il faudrait que le fournisseur n'offre aucune suite
         // TLS 1.3, ce qu'un test de `provider` interdit explicitement.
         .expect("le fournisseur n'offre que des suites TLS 1.3")
+        .with_no_client_auth()
+        .with_cert_resolver(resolveur)
+}
+
+/// Assemble la configuration des ÉCOUTES DE COURRIER : TLS 1.3 préféré, TLS 1.2
+/// accepté — pour les clients qui ne savent rien faire d'autre.
+///
+/// Mêmes garanties que [`server_config_resolving`] sur le matériel et sur le
+/// groupe hybride ; **une version de moins refusée**, et c'est tout ce qui
+/// change. Pourquoi, et pour qui : voir [`provider_tls12`]. rustls choisit la
+/// version la plus haute que le client propose — un pair qui sait faire du 1.3
+/// en fait, un pair qui ne sait pas obtient du 1.2 au lieu d'une porte fermée.
+///
+/// **NE S'EMPLOIE QUE POUR SMTP, SUBMISSION ET IMAP.** L'API, QUIC et le relais
+/// ne passent pas par ici, et ne doivent pas y passer.
+#[must_use]
+pub fn server_config_resolving_tls12(
+    resolveur: Arc<dyn rustls::server::ResolvesServerCert>,
+) -> ServerConfig {
+    ServerConfig::builder_with_provider(Arc::new(provider_tls12()))
+        .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+        // Même raison que plus haut : le fournisseur offre des suites pour les
+        // deux versions demandées, un essai de `provider` le tient.
+        .expect("le fournisseur offre des suites TLS 1.3 et TLS 1.2")
         .with_no_client_auth()
         .with_cert_resolver(resolveur)
 }
@@ -576,6 +603,39 @@ mod tests {
                 "{suite:?} n'est pas en TLS 1.3"
             );
         }
+    }
+
+    /// La configuration des ÉCOUTES DE COURRIER se monte, offre les deux
+    /// versions, et garde le groupe hybride en tête : c'est ce que
+    /// `charger_tls` donne au SMTP et à l'IMAP depuis le 2026-09-22.
+    #[test]
+    fn une_configuration_d_ecoute_de_courrier_offre_le_1_3_et_le_1_2() {
+        let vide = rustls::server::ResolvesServerCertUsingSni::new();
+        let config = super::server_config_resolving_tls12(Arc::new(vide));
+        assert!(
+            config.alpn_protocols.is_empty(),
+            "l'ALPN reste à l'appelant"
+        );
+        let versions: alloc::vec::Vec<rustls::ProtocolVersion> = config
+            .crypto_provider()
+            .cipher_suites
+            .iter()
+            .map(|suite| suite.version().version)
+            .collect();
+        assert!(
+            versions.contains(&rustls::ProtocolVersion::TLSv1_3)
+                && versions.contains(&rustls::ProtocolVersion::TLSv1_2),
+            "les deux versions doivent être servies : {versions:?}"
+        );
+        assert_eq!(
+            config
+                .crypto_provider()
+                .kx_groups
+                .first()
+                .map(|groupe| groupe.name()),
+            Some(rustls::NamedGroup::X25519MLKEM768),
+            "le groupe hybride n'est plus en tête"
+        );
     }
 
     /// **LE CHEMIN NOMINAL, ÉPROUVÉ ICI AUSSI.**

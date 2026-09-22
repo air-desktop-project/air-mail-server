@@ -263,13 +263,20 @@ static CHACHA: Algorithme = Algorithme(Suite::ChaCha20Poly1305);
 /// sont des **constantes de compilation** : il faut donc ouvrir la variante à la
 /// compilation. C'est ce que fait ce filtrage.
 ///
-/// **S'IL CESSAIT D'ÊTRE EXHAUSTIF, LA COMPILATION ÉCHOUERAIT** — ce qui est
-/// exactement le comportement voulu : une variante TLS 1.2 apparue dans le
-/// graphe de dépendances contredirait C4, et doit se voir au build, pas à
-/// l'exécution.
+/// **UNE SUITE TLS 1.2 DONNÉE À QUIC ARRÊTE LA COMPILATION.** Jusqu'au
+/// 2026-09-22 la variante `Tls12` n'existait pas dans le graphe, et le `match`
+/// à une branche suffisait. Elle existe désormais — les écoutes de courrier
+/// acceptent TLS 1.2, voir [`crate::provider_tls12`] — mais QUIC, lui, est
+/// TLS 1.3 par définition (RFC 9001 §4.2). La branche `Tls12` **panique**, et
+/// dans une fonction `const` évaluée pour un `static`, une panique est une
+/// erreur de compilation : la garde est restée au build, elle a seulement
+/// changé de forme. Un essai la déclenche à l'exécution pour le prouver.
 const fn tls13_de(suite: rustls::SupportedCipherSuite) -> &'static rustls::Tls13CipherSuite {
     match suite {
         rustls::SupportedCipherSuite::Tls13(tls13) => tls13,
+        rustls::SupportedCipherSuite::Tls12(_) => {
+            panic!("QUIC ne se conduit qu'en TLS 1.3 : une suite 1.2 n'a rien à faire ici")
+        }
     }
 }
 

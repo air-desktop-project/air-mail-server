@@ -145,6 +145,18 @@ impl Drop for Materiel {
 
 /// Monte de quoi chiffrer, ou explique pourquoi le test se saute.
 pub fn materiel(nom: &str) -> Option<Materiel> {
+    materiel_avec(nom, false)
+}
+
+/// Le même matériel, mais sur la configuration des ÉCOUTES DE COURRIER : TLS
+/// 1.3 préféré, TLS 1.2 accepté — celle que `charger_tls` donne au SMTP et à
+/// l'IMAP depuis le 2026-09-22, pour Apple Mail qui ne parle que 1.2.
+#[allow(dead_code)]
+pub fn materiel_ecoute_courrier(nom: &str) -> Option<Materiel> {
+    materiel_avec(nom, true)
+}
+
+fn materiel_avec(nom: &str, tolere_tls12: bool) -> Option<Materiel> {
     let repertoire =
         std::env::temp_dir().join(format!("ams-starttls-{nom}-{}", std::process::id()));
     std::fs::create_dir_all(&repertoire).expect("répertoire temporaire");
@@ -164,9 +176,18 @@ pub fn materiel(nom: &str) -> Option<Materiel> {
 
     // NOTRE fournisseur, celui de `ams-tls` : TLS 1.3 seul, groupe hybride en
     // tête. La boucle n'en construit aucun — elle reçoit celui-ci tout fait.
-    let tls = ServerConfig::builder_with_provider(Arc::new(ams_tls::provider()))
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .expect("TLS 1.3")
+    // Les écoutes de courrier, elles, prennent le fournisseur qui tolère 1.2.
+    let (fournisseur, versions): (_, &[&rustls::SupportedProtocolVersion]) = if tolere_tls12 {
+        (
+            ams_tls::provider_tls12(),
+            &[&rustls::version::TLS13, &rustls::version::TLS12],
+        )
+    } else {
+        (ams_tls::provider(), &[&rustls::version::TLS13])
+    };
+    let tls = ServerConfig::builder_with_provider(Arc::new(fournisseur))
+        .with_protocol_versions(versions)
+        .expect("versions servies")
         .with_no_client_auth()
         .with_single_cert(vec![cert], cle)
         .expect("certificat accepté");

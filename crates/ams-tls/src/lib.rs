@@ -59,8 +59,8 @@ mod relay;
 pub use kx::{CLIENT_SHARE, SERVER_SHARE, SHARED_SECRET, X25519MlKem768};
 pub use materiel::{
     ALPN_H2, Error as MaterialError, alpn, certified_key, quic_server_config, server_config,
-    server_config_resolving,
+    server_config_resolving, server_config_resolving_tls12,
 };
-pub use provider::provider;
+pub use provider::{provider, provider_tls12};
 pub use quic::{ALPN_H3, alpn_h3, provider_quic};
 pub use relay::{AnchorError, anchors, dane_config, relay_config, webpki_config};

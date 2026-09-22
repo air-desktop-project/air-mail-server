@@ -188,7 +188,7 @@ libc = "0.2"
 # `default-features = false` N'EST PAS UNE PRÉFÉRENCE DE STYLE : la feature
 # `tls12` est dans les défauts, et la laisser active ferait entrer TLS 1.2 par la
 # porte de derrière, sans qu'aucune ligne de notre code ne le demande.
-rustls = { version = "0.23", default-features = false, features = ["std"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
 # Le fournisseur cryptographique PUR RUST — pas une ligne de C (C4). `aws-lc-rs`
 # et `ring` en embarquent, et le portage vers Air ne peut pas payer ce prix.
 #
@@ -196,7 +196,7 @@ rustls = { version = "0.23", default-features = false, features = ["std"] }
 # `0.0.2-alpha` du 2024-04-24, alors que le dépôt amont est vivant. Le SHA est ce
 # qui préserve la reproductibilité — et ce qui doit être revu à chaque
 # changement, puisqu'une dépendance `git` échappe à `cargo audit`.
-rustls-rustcrypto = { git = "https://github.com/RustCrypto/rustls-rustcrypto", rev = "cb967bd6427865f72e5619326c16080cbfd98e53", default-features = false, features = ["std"] }
+rustls-rustcrypto = { git = "https://github.com/RustCrypto/rustls-rustcrypto", rev = "cb967bd6427865f72e5619326c16080cbfd98e53", default-features = false, features = ["std", "tls12"] }
 # webpki — VÉRIFIER UNE SIGNATURE CONTRE UN CERTIFICAT, et rien d'autre.
 #
 # DÉJÀ DANS L'ARBRE : `rustls` la tire, et cette ligne ne fait que la DÉCLARER

@@ -37,6 +37,14 @@ fn octets(hexa: &str) -> Vec<u8> {
 ///
 /// C'est exactement ce qui bloquait HTTP/3 : `rustls::quic::ServerConnection`
 /// refuse de se construire quand aucune suite ne porte de `quic`.
+/// La garde de `tls13_de` : une suite 1.2 ne passe pas. Au build, c'est une
+/// erreur de compilation ; ici, à l'exécution, c'est la panique qu'on attend.
+#[test]
+#[should_panic(expected = "QUIC ne se conduit qu'en TLS 1.3")]
+fn une_suite_tls_1_2_est_refusee_par_quic() {
+    let _ = super::tls13_de(rustls_rustcrypto::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256);
+}
+
 #[test]
 fn le_fournisseur_quic_sait_ce_que_l_autre_ignore() {
     let ordinaire = crate::provider();

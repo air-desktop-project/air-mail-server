@@ -35,7 +35,7 @@ use tokio::net::TcpListener;
 
 mod commun;
 
-use commun::{Neant, NotreDomaine, PAIR, config, materiel};
+use commun::{Neant, NotreDomaine, PAIR, config, materiel, materiel_ecoute_courrier};
 
 // ── Ce qui ne demande aucun certificat ──────────────────────────────────────
 
@@ -318,5 +318,142 @@ async fn openssl_monte_en_chiffrement_et_le_ehlo_suivant_change() {
     assert!(
         chiffre.contains("221 "),
         "le `QUIT` chiffré n'a pas reçu son `221`.\n{dit}"
+    );
+}
+
+// ── TLS 1.2 SUR LES ÉCOUTES DE COURRIER, ET NULLE PART AILLEURS ─────────────
+//
+// Le 2026-09-22, `mail.narro.ch` a tenu quatre heures sous ce serveur avant
+// qu'on découvre qu'Apple Mail ne parle que TLS 1.2 — capturé sur la machine :
+// pas de `supported_versions` dans son `ClientHello`. Tous les contrôles
+// venaient d'OpenSSL et de Python, qui font du 1.3. Les trois essais ci-dessous
+// sont ceux qui manquaient : un client 1.2 est SERVI sur une écoute de courrier,
+// un client moderne y obtient TOUJOURS du 1.3, et la configuration ordinaire —
+// relais, API, QUIC — refuse toujours le 1.2.
+
+/// Monte un serveur sur `tls`, lui envoie `openssl s_client -starttls smtp`
+/// avec `args`, un second `EHLO` chiffré puis `QUIT`, et rend la trace de
+/// `s_client`, ce qu'il a lu dans le tuyau chiffré, et le résumé du serveur.
+async fn openssl_contre(
+    tls: Arc<rustls::ServerConfig>,
+    args: &'static [&'static str],
+) -> Option<(String, String, Result<ams_loop_tokio::Summary, Error>)> {
+    let ecouteur = TcpListener::bind("127.0.0.1:0").await.expect("écoute");
+    let adresse = ecouteur.local_addr().expect("adresse");
+    let serveur = tokio::spawn(async move {
+        let (mut flux, _) = ecouteur.accept().await.expect("connexion");
+        let garde = SharedGuard::new(4, Thresholds::DEFAULT);
+        let service = Service {
+            config: config(true, false),
+            guard: &garde,
+            timeouts: Timeouts::default(),
+            tls: Some(tls),
+            spf: None,
+            dkim: None,
+            dmarc: None,
+            reports: None,
+        };
+        serve_connection(&mut flux, &service, NotreDomaine, &mut Neant, PAIR).await
+    });
+    let client = tokio::task::spawn_blocking(move || {
+        use std::io::Write as _;
+        let mut processus = Command::new("openssl")
+            .args(["s_client", "-connect"])
+            .arg(format!("127.0.0.1:{}", adresse.port()))
+            .args(["-starttls", "smtp", "-ign_eof"])
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .ok()?;
+        let entree = processus.stdin.as_mut()?;
+        entree.write_all(b"EHLO client.example\r\nQUIT\r\n").ok()?;
+        processus.wait_with_output().ok()
+    })
+    .await
+    .expect("tâche openssl");
+    let Some(client) = client else {
+        eprintln!("SAUTÉ : `openssl s_client` n'est pas lançable ici.");
+        serveur.abort();
+        return None;
+    };
+    let resume = serveur.await.expect("tâche serveur");
+    Some((
+        String::from_utf8_lossy(&client.stderr).into_owned(),
+        String::from_utf8_lossy(&client.stdout).into_owned(),
+        resume,
+    ))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn un_client_tls_1_2_est_servi_sur_une_ecoute_de_courrier() {
+    let Some(materiel) = materiel_ecoute_courrier("tls12-servi") else {
+        return;
+    };
+    // `-tls1_2` : c'est ce qu'Apple Mail fait de mieux, et ce que ce test
+    // reproduit — un client qui n'annonce pas `supported_versions`.
+    let Some((trace, chiffre, resume)) =
+        openssl_contre(Arc::clone(&materiel.tls), &["-tls1_2"]).await
+    else {
+        return;
+    };
+    let dit = format!("--- chiffré ---\n{chiffre}\n--- trace ---\n{trace}");
+    assert!(
+        trace.contains("TLSv1.2") || chiffre.contains("TLSv1.2"),
+        "la connexion n'est pas en TLS 1.2.\n{dit}"
+    );
+    // Et la session a CONTINUÉ par-dessus : le second `EHLO`, chiffré, a été servi.
+    assert!(
+        chiffre.contains("250-mail.example.com"),
+        "le EHLO chiffré n'a pas reçu de réponse en TLS 1.2.\n{dit}"
+    );
+    let resume = resume.expect("connexion servie");
+    assert!(
+        resume.tls,
+        "le résumé ne dit pas que la connexion a chiffré"
+    );
+    assert_eq!(resume.outcome, Outcome::Served);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn un_client_moderne_obtient_toujours_du_1_3_sur_une_ecoute_de_courrier() {
+    let Some(materiel) = materiel_ecoute_courrier("tls12-prefere-13") else {
+        return;
+    };
+    // Sans contrainte, `s_client` propose 1.3 ET 1.2 : c'est le serveur qui
+    // choisit, et il doit choisir le haut. Tolérer 1.2 n'est pas le préférer.
+    let Some((trace, chiffre, resume)) = openssl_contre(Arc::clone(&materiel.tls), &[]).await
+    else {
+        return;
+    };
+    let dit = format!("--- chiffré ---\n{chiffre}\n--- trace ---\n{trace}");
+    assert!(
+        trace.contains("TLSv1.3") || chiffre.contains("TLSv1.3"),
+        "une écoute qui tolère 1.2 a servi moins que 1.3 à un client qui savait mieux.\n{dit}"
+    );
+    assert!(resume.expect("connexion servie").tls);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn la_configuration_ordinaire_refuse_toujours_le_1_2() {
+    let Some(materiel) = materiel("tls12-refuse") else {
+        return;
+    };
+    // La configuration de `materiel` est celle du relais, de l'API et de QUIC :
+    // TLS 1.3 seul. Un client 1.2 y trouve porte close — C4 y est intacte.
+    let Some((trace, chiffre, resume)) =
+        openssl_contre(Arc::clone(&materiel.tls), &["-tls1_2"]).await
+    else {
+        return;
+    };
+    let dit = format!("--- chiffré ---\n{chiffre}\n--- trace ---\n{trace}");
+    assert!(
+        trace.contains("protocol version") || trace.contains("wrong version"),
+        "le serveur n'a pas refusé TLS 1.2 par une alerte de version.\n{dit}"
+    );
+    assert!(
+        matches!(resume, Err(Error::Io(_))),
+        "une poignée de main refusée doit remonter comme une erreur d'entrée-sortie"
     );
 }

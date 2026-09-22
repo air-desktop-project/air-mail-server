@@ -517,7 +517,11 @@ fn charger_tls(tls: &Tls) -> Result<Option<MaterielTls>, String> {
     // écoute, chaque connexion en cours et chaque tampon devrait sinon voir
     // changer.
     let vivant = Arc::new(Certificat::neuf(materiel));
-    let config = ams_tls::server_config_resolving(Arc::clone(&vivant) as Arc<_>);
+    // **TLS 1.2 ACCEPTÉ ICI, ET ICI SEULEMENT** : ces écoutes servent des
+    // clients de courrier que leurs utilisateurs ne choisissent pas — Apple
+    // Mail ne parle que TLS 1.2, mesuré le 2026-09-22 sur `mail.narro.ch`.
+    // L'API (`http.rs`), QUIC et le relais gardent TLS 1.3 seul.
+    let config = ams_tls::server_config_resolving_tls12(Arc::clone(&vivant) as Arc<_>);
     Ok(Some((Arc::new(config), vivant)))
 }
 
