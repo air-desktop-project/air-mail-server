@@ -15,6 +15,7 @@ argon2 = { workspace = true }
 # `rustls-rustcrypto` la tire, et cette ligne ne fait que la déclarer là où on
 # s'en sert. Aucune crate n'entre dans le graphe à cause d'elle.
 chacha20poly1305 = { workspace = true }
+p256 = { workspace = true }
 
 
 [lints]

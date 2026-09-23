@@ -67,9 +67,11 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+mod appareil;
 mod scram;
 mod store;
 
+pub use appareil::{CLE_OCTETS, CONDENSAT_OCTETS, Cle, Refus, SIGNATURE_OCTETS, verifier};
 pub use scram::{
     CLE_SCELLEMENT_OCTETS, Cles as ScramKeys, Error as ScramError, ITERATIONS as SCRAM_ITERATIONS,
     NONCE_OCTETS, SEL_OCTETS, Verificateur as ScramVerifier, deriver as scram_deriver,

@@ -178,6 +178,58 @@ pub struct BanRow<'a> {
     pub seconds: u64,
 }
 
+/// Un appareil enrôlé, tel qu'on le montre à son propriétaire.
+///
+/// # LA CLEF PUBLIQUE N'Y EST PAS, ET CE N'EST PAS PAR PRUDENCE
+///
+/// Elle est publique ; la rendre ne coûterait rien en secret. Mais soixante-cinq
+/// octets de base64 dans une liste n'apprennent rien à un humain qui cherche
+/// lequel de ses trois téléphones révoquer. **Ce qui lui servirait est une
+/// empreinte courte**, et elle viendra avec l'enrôlement croisé, où elle a un
+/// rôle : confirmer de visu l'appareil qu'on ajoute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeviceRow<'a> {
+    /// Ce qui le désigne, et ce qu'on écrit pour le révoquer.
+    pub id: &'a str,
+    /// Le nom que son propriétaire lui a donné. Peut être vide.
+    pub name: &'a str,
+    /// Quand il a été enrôlé, en secondes depuis l'époque.
+    pub enrolled: u64,
+    /// Quand il a ouvert une session pour la dernière fois, **ou zéro s'il ne
+    /// l'a jamais fait**.
+    ///
+    /// Le champ est écrit dans les deux cas. L'omettre obligerait chaque client
+    /// à distinguer « absent » de « zéro », et les deux moitiés de cette
+    /// distinction finiraient par diverger.
+    pub last_seen: u64,
+}
+
+/// Écrit la liste des appareils d'un compte.
+///
+/// # Errors
+///
+/// [`Reason::BufferTooSmall`] si `sortie` ne suffit pas.
+pub fn write_devices<'o>(
+    appareils: &[DeviceRow<'_>],
+    sortie: &'o mut [u8],
+) -> Result<&'o [u8], Error> {
+    let mut json = Json::new(sortie);
+    json.begin_object()?;
+    json.key("devices")?;
+    json.begin_array()?;
+    for appareil in appareils {
+        json.begin_object()?;
+        json.field_str("id", appareil.id)?;
+        json.field_str("name", appareil.name)?;
+        json.field_u64("enrolledAt", appareil.enrolled)?;
+        json.field_u64("lastSeenAt", appareil.last_seen)?;
+        json.end_object()?;
+    }
+    json.end_array()?;
+    json.end_object()?;
+    json.finish()
+}
+
 /// Écrit la liste des comptes.
 ///
 /// # Errors

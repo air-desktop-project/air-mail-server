@@ -121,6 +121,31 @@ pub enum Resource<'o> {
     /// sa boîte, définitivement — un vol de jeton deviendrait un vol de compte.
     OwnPassword,
 
+    /// `/v1/me/devices` — **les appareils de qui appelle**, et de personne
+    /// d'autre.
+    ///
+    /// # POURQUOI SOUS `/v1/me/…` ET NON SOUS `/v1/accounts/…`
+    ///
+    /// Pour la même raison que le mot de passe : elle agit sur SOI, et le jeton
+    /// présenté dit déjà de qui il s'agit. La ranger sous l'administration en
+    /// ferait une route que seul un administrateur peut emprunter — or c'est
+    /// l'utilisateur qui doit pouvoir voir ses propres appareils, et surtout en
+    /// révoquer un, sans demander à personne.
+    ///
+    /// **C'EST LA RÉVOCATION QUI PRESSE** : un téléphone perdu se retire dans la
+    /// minute, pas au prochain jour ouvré.
+    OwnDevices,
+    /// `/v1/me/devices/{id}` — un appareil à soi, pour le révoquer.
+    ///
+    /// **L'IDENTIFIANT NE SUFFIT PAS À DÉSIGNER** : le compte de qui appelle
+    /// entre dans la recherche. Sans cela, deviner un identifiant permettrait de
+    /// révoquer l'appareil d'un autre, et un déni de service tiendrait en une
+    /// boucle.
+    OwnDevice {
+        /// L'identifiant de l'appareil, tel que le serveur l'a tiré.
+        id: &'o str,
+    },
+
     /// `/v1/accounts` — les comptes.
     Accounts,
     /// `/v1/accounts/{compte}` — un compte.
@@ -179,7 +204,9 @@ impl Resource<'_> {
             // **CELLE-CI N'EXIGE RIEN** : c'est là qu'on obtient de quoi exiger.
             Self::Tokens => return None,
             // Révoquer son propre jeton ne demande que de l'avoir.
-            Self::CurrentToken | Self::OwnPassword => return Some(Scope::none()),
+            Self::CurrentToken | Self::OwnPassword | Self::OwnDevices | Self::OwnDevice { .. } => {
+                return Some(Scope::none());
+            }
             Self::Mailboxes
             | Self::Mailbox { .. }
             | Self::Messages { .. }
@@ -227,7 +254,11 @@ impl Resource<'_> {
             // une empreinte, et c'est la raison d'être de cette ressource.
             Self::AccountPassword { .. } | Self::OwnPassword => &[Method::Put],
             Self::AccountAddresses { .. } => &[Method::Get, Method::Head, Method::Put],
-            Self::Ban { .. } => &[Method::Delete],
+            Self::Ban { .. } | Self::OwnDevice { .. } => &[Method::Delete],
+            // **ELLE NE S'ÉCRIT PAS ICI** : un appareil s'enrôle par le
+            // chemin d'enrôlement, qui prouve la possession de la clef. Un
+            // `POST` de liste laisserait déclarer une clef sans rien prouver.
+            Self::OwnDevices => &[Method::Get, Method::Head],
         }
     }
 
@@ -353,6 +384,10 @@ fn designer<'o>(segments: &Segments<'o>) -> Result<Resource<'o>, Error> {
             }
         }
         ("me", 3) if segments.get(2) == "password" => Ok(Resource::OwnPassword),
+        ("me", 3) if segments.get(2) == "devices" => Ok(Resource::OwnDevices),
+        ("me", 4) if segments.get(2) == "devices" => Ok(Resource::OwnDevice {
+            id: segments.get(3),
+        }),
         ("domains", 2) => Ok(Resource::Domains),
         ("bans", 2) => Ok(Resource::Bans),
         ("bans", 3) => Ok(Resource::Ban {

@@ -80,6 +80,9 @@ pub struct Options {
     pub scram_key: Option<PathBuf>,
     /// Le magasin des vérificateurs SCRAM. Vide : SCRAM n'est pas servi.
     pub scram_store: Option<PathBuf>,
+    /// Le magasin des appareils enrôlés. Vide : pas d'ouverture de session par
+    /// clef, et le mot de passe reste seul.
+    pub devices: Option<PathBuf>,
     /// Où écouter en POP3. Vide : POP3 n'est pas servi.
     pub listen_pop3: Option<SocketAddr>,
     /// Les écoutes POP3, chacune avec son mode TLS.
@@ -238,6 +241,7 @@ impl Default for Options {
             accounts: None,
             scram_key: None,
             scram_store: None,
+            devices: None,
             // PAS DE POP3 PAR DÉFAUT : un port ouvert qu'on n'a pas demandé est
             // une surface de plus, et celui-ci ne sert personne sans certificat.
             listen_pop3: None,
@@ -423,6 +427,7 @@ impl Options {
             accounts: chemin(self.accounts.as_ref()),
             scram_key: chemin(self.scram_key.as_ref()),
             scram_store: chemin(self.scram_store.as_ref()),
+            devices: chemin(self.devices.as_ref()),
             tlsrpt: ams_config::Tlsrpt {
                 directory: chemin(self.tlsrpt_dir.as_ref()),
                 send: self.tlsrpt_send,
@@ -588,6 +593,12 @@ OPTIONS DE `config write`
                         La clé se tire par `air-mail-admin scram init`, et se
                         range AILLEURS que le magasin : les deux au même
                         endroit ne valent pas mieux qu'un seul fichier en clair.
+    --devices <chemin>     le magasin des appareils enrôlés
+                        Il ne porte que des clefs PUBLIQUES : une fuite
+                        n'ouvre aucune session. C'est pourquoi il est SÉPARÉ
+                        du fichier de comptes, qui porte des empreintes.
+                        Sans lui, aucun appareil ne peut ouvrir de session
+                        par clef, et le mot de passe reste seul.
     --listen-pop3 <adr>    où écouter en POP3 avec `STLS` — le 110. RÉPÉTABLE
                            (défaut : pas de POP3)
     --listen-pop3s <adr>   où écouter en POP3 avec TLS IMPLICITE — le 995.
@@ -1247,6 +1258,7 @@ where
             "--accounts" => options.accounts = Some(PathBuf::from(valeur()?)),
             "--scram-key" => options.scram_key = Some(PathBuf::from(valeur()?)),
             "--scram" => options.scram_store = Some(PathBuf::from(valeur()?)),
+            "--devices" => options.devices = Some(PathBuf::from(valeur()?)),
             "--resolver" => {
                 let brute = valeur()?;
                 let adresse: SocketAddr = brute
@@ -2153,6 +2165,10 @@ mod tests {
             // client.
             (&["--scram-key"], "attend une valeur"),
             (&["--scram"], "attend une valeur"),
+            // LE MAGASIN DES APPAREILS : un chemin vide ferait chercher les
+            // clefs enrôlées dans un fichier sans nom, et chaque ouverture de
+            // session par clef échouerait sans que rien ne dise pourquoi.
+            (&["--devices"], "attend une valeur"),
         ] {
             let erreur = parse(arguments).expect_err("refusé");
             assert!(
@@ -3542,6 +3558,34 @@ mod tests {
         let arguments: &[&str] = &["--domain", "mail.example.com"];
         let config = ecrire(arguments).en_configuration();
         assert!(config.scram_key.is_empty() && config.scram_store.is_empty());
+    }
+
+    /// **`--devices` SE POSE SEUL, ET SON ABSENCE EST LE DÉFAUT.**
+    ///
+    /// # POURQUOI IL N'EST LIÉ À RIEN, CONTRAIREMENT AUX DEUX DE SCRAM
+    ///
+    /// Une clé SCRAM sans magasin n'a rien à ouvrir, et un magasin sans clé ne
+    /// s'ouvre pas : les deux se tiennent, donc `config write` refuse l'un sans
+    /// l'autre. Le magasin des appareils, lui, se suffit — il ne porte que des
+    /// clefs publiques, et il n'y a pas de second fichier à nommer.
+    ///
+    /// **SON ABSENCE N'EST PAS UNE PANNE NON PLUS** : sans lui, le serveur
+    /// n'ouvre pas de session par clef, et le mot de passe reste seul. C'est
+    /// l'état de tout serveur qui n'a pas encore enrôlé.
+    #[test]
+    fn le_magasin_des_appareils_se_pose_seul() {
+        let arguments: &[&str] = &["--devices", "/x/appareils.bin"];
+        let options = ecrire(arguments);
+        assert_eq!(options.devices, Some(PathBuf::from("/x/appareils.bin")));
+        assert_eq!(
+            options.en_configuration().devices,
+            "/x/appareils.bin",
+            "le chemin doit traverser jusqu'à la configuration écrite"
+        );
+
+        // ABSENT PAR DÉFAUT : les sessions par clef ne s'invitent pas.
+        let arguments: &[&str] = &["--domain", "mail.example.com"];
+        assert!(ecrire(arguments).en_configuration().devices.is_empty());
     }
 
     #[test]

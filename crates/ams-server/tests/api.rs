@@ -170,7 +170,7 @@ fn configuration_api(
     ecoute_http: &str,
     clef: &str,
 ) -> PathBuf {
-    configuration_complete(atelier, port, tls, "", "", ecoute_http, "", clef)
+    configuration_complete(atelier, port, tls, "", "", "", ecoute_http, "", clef)
 }
 
 /// La même, avec une écoute HTTP/3 en plus.
@@ -182,7 +182,7 @@ fn configuration_avec_h3(
     ecoute_h3: &str,
     clef: &str,
 ) -> PathBuf {
-    configuration_complete(atelier, port, tls, "", "", ecoute_http, ecoute_h3, clef)
+    configuration_complete(atelier, port, tls, "", "", "", ecoute_http, ecoute_h3, clef)
 }
 
 #[expect(
@@ -194,6 +194,7 @@ fn configuration_complete(
     port: u16,
     tls: Tls,
     comptes: &str,
+    appareils: &str,
     pop3: &str,
     ecoute_http: &str,
     ecoute_h3: &str,
@@ -205,6 +206,7 @@ fn configuration_complete(
         // Ce banc ne sert pas SCRAM : les deux chemins restent vides.
         scram_key: String::new(),
         scram_store: String::new(),
+        devices: appareils.to_string(),
         require_fqdn_sender: false,
         require_fqdn_recipient: false,
         require_sender_domain: false,
@@ -904,6 +906,7 @@ fn un_utilisateur_change_son_propre_mot_de_passe() {
         },
         &magasin.display().to_string(),
         "",
+        "",
         &format!("127.0.0.1:{port_http}"),
         "",
         CLEF,
@@ -1153,6 +1156,7 @@ fn une_session_fermee_ne_rouvre_plus() {
         },
         &magasin.display().to_string(),
         "",
+        "",
         &format!("127.0.0.1:{port_http}"),
         "",
         CLEF,
@@ -1242,4 +1246,270 @@ fn une_session_fermee_ne_rouvre_plus() {
         "200",
         "un jeton d'administration ne dépend d'aucune session"
     );
+}
+
+/// **UN UTILISATEUR VOIT SES APPAREILS ET EN RÉVOQUE UN, SANS ADMINISTRATEUR.**
+///
+/// # CE QUE CET ESSAI ÉPROUVE, ET QU'AUCUN AUTRE NE PEUT
+///
+/// Les essais d'unité montrent que le magasin range, que le routeur route et que
+/// le rendu écrit. Aucun ne montre que les trois sont CÂBLÉS ENSEMBLE derrière
+/// un vrai jeton, sur une vraie socket TLS — et c'est exactement le genre de
+/// défaut qui a laissé, une semaine plus tôt, quatre routes d'écriture servir la
+/// lecture sans que rien ne bronche.
+///
+/// # ET IL ÉPROUVE LA CLOISON ENTRE COMPTES
+///
+/// Le jeton de Marie ne doit pas révoquer l'appareil de Paul, et il doit obtenir
+/// pour cela un `404` — le même que pour un identifiant qui n'existe pas. Un
+/// `403` distinguerait les deux, et cette distinction est l'information
+/// elle-même : elle laisserait énumérer les appareils du serveur.
+#[test]
+fn un_utilisateur_voit_et_revoque_ses_appareils() {
+    let atelier = atelier("mes-appareils");
+    let Some((cert, cle)) = paire(&atelier.0) else {
+        panic!("{SANS_OPENSSL}");
+    };
+    if std::process::Command::new("curl")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("IGNORÉ : `curl` est absent — cet essai n'a RIEN éprouvé.");
+        return;
+    }
+
+    let empreinte =
+        ams_auth::hash_password(b"secret-initial", b"seize octets ici").expect("hachable");
+    let magasin = atelier.0.join("comptes.bin");
+    std::fs::write(
+        &magasin,
+        ams_config::encode_accounts(&[ams_auth::Account {
+            login: String::from("marie"),
+            hash: empreinte,
+            addresses: vec![String::from("marie@example.com")],
+        }])
+        .expect("encodable"),
+    )
+    .expect("le magasin s'écrit");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&magasin, std::fs::Permissions::from_mode(0o600))
+            .expect("permissions du magasin");
+    }
+
+    // Une clef publique P-256 valide, figée : le point `7 · G`.
+    const CLE_VALIDE: [u8; 65] = [
+        0x04, 0x1e, 0x18, 0x53, 0x2f, 0xd4, 0x75, 0x4c, 0x02, 0xf3, 0x04, 0x1d, 0x9c, 0x75, 0xce,
+        0xb3, 0x3b, 0x83, 0xff, 0xd8, 0x1a, 0xc7, 0xce, 0x4f, 0xe8, 0x82, 0xcc, 0xb1, 0xc9, 0x8b,
+        0xc5, 0x89, 0x6e, 0xa4, 0x6c, 0x31, 0x1c, 0x4e, 0x2f, 0xf4, 0x0d, 0xd9, 0x6a, 0x36, 0x53,
+        0xe6, 0xe4, 0x54, 0x45, 0xd3, 0x2d, 0xfe, 0x48, 0x6e, 0xce, 0xd7, 0x5c, 0x7a, 0x90, 0xc6,
+        0xa1, 0x88, 0x81, 0xc0, 0xa3,
+    ];
+    let clef = ams_auth::Cle::lire(&CLE_VALIDE).expect("une clef d'épreuve valide");
+    let appareil = |login: &str, id: &str, nom: &str, vu: u64| ams_config::Device {
+        login: String::from(login),
+        id: String::from(id),
+        name: String::from(nom),
+        public_key: clef.clone(),
+        enrolled: 1_790_000_000,
+        last_seen: vu,
+    };
+    let appareils = atelier.0.join("appareils.bin");
+    std::fs::write(
+        &appareils,
+        ams_config::encode_devices(&[
+            appareil("marie", "tel-de-marie", "iPhone de Marie", 1_790_003_600),
+            // JAMAIS VU : c'est le cas qui écrit `lastSeenAt: 0`.
+            appareil("marie", "portable-de-marie", "portable du bureau", 0),
+            // CELUI D'UN AUTRE : il ne doit ni se voir, ni se révoquer.
+            appareil("paul", "tel-de-paul", "le téléphone de Paul", 0),
+        ])
+        .expect("encodable"),
+    )
+    .expect("le magasin d'appareils s'écrit");
+
+    let port_smtp = port_libre();
+    let port_http = port_libre();
+    let config = configuration_complete(
+        &atelier,
+        port_smtp,
+        Tls {
+            certificate_chain_path: cert.display().to_string(),
+            private_key_path: cle.display().to_string(),
+        },
+        &magasin.display().to_string(),
+        &appareils.display().to_string(),
+        "",
+        &format!("127.0.0.1:{port_http}"),
+        "",
+        CLEF,
+    );
+    let _serveur = lancer(&config, port_smtp);
+    let base = format!("https://127.0.0.1:{port_http}");
+
+    // ── LE JETON D'UNE UTILISATRICE ORDINAIRE ───────────────────────────────
+    let sortie = std::process::Command::new("curl")
+        .args(["-s", "--insecure", "--http2"])
+        .args(["-H", "Content-Type: application/json"])
+        .args(["-d", r#"{"login":"marie","password":"secret-initial"}"#])
+        .arg(format!("{base}/v1/tokens"))
+        .output()
+        .expect("curl s'exécute");
+    let corps = String::from_utf8_lossy(&sortie.stdout).into_owned();
+    let jeton = corps
+        .split_once("\"token\":\"")
+        .and_then(|(_, reste)| reste.split_once('"'))
+        .map(|(jeton, _)| jeton.to_string())
+        .unwrap_or_else(|| panic!("un jeton dans {corps}"));
+
+    let appeler = |methode: &str, chemin: &str| -> (String, String) {
+        let sortie = std::process::Command::new("curl")
+            .args(["-s", "--insecure", "--http2", "-X", methode])
+            .args(["-H", &format!("Authorization: Bearer {jeton}")])
+            .args(["-w", "\n%{http_code}"])
+            .arg(format!("{base}{chemin}"))
+            .output()
+            .expect("curl s'exécute");
+        let tout = String::from_utf8_lossy(&sortie.stdout).into_owned();
+        let (corps, code) = tout.rsplit_once('\n').unwrap_or(("", ""));
+        (corps.to_string(), code.to_string())
+    };
+
+    // ── ELLE VOIT LES SIENS, ET SEULEMENT LES SIENS ─────────────────────────
+    let (corps, code) = appeler("GET", "/v1/me/devices");
+    assert_eq!(code, "200", "la liste doit se servir : {corps}");
+    assert!(corps.contains("tel-de-marie"), "{corps}");
+    assert!(corps.contains("portable-de-marie"), "{corps}");
+    assert!(
+        !corps.contains("tel-de-paul"),
+        "l'appareil d'un autre ne doit pas s'y trouver : {corps}"
+    );
+    assert!(corps.contains("\"lastSeenAt\":0"), "{corps}");
+    // Et la clef publique n'en sort pas.
+    assert!(!corps.contains("publicKey"), "{corps}");
+
+    // ── CELUI D'UN AUTRE EST « INTROUVABLE », ET NON « INTERDIT » ───────────
+    let (_, chez_paul) = appeler("DELETE", "/v1/me/devices/tel-de-paul");
+    let (_, inexistant) = appeler("DELETE", "/v1/me/devices/jamais-vu");
+    assert_eq!(
+        chez_paul, inexistant,
+        "les deux cas DOIVENT se répondre pareil, sinon on énumère"
+    );
+    assert_eq!(chez_paul, "404");
+
+    // ── ET LA RÉVOCATION DU SIEN ABOUTIT ────────────────────────────────────
+    let (corps, code) = appeler("DELETE", "/v1/me/devices/tel-de-marie");
+    assert_eq!(code, "204", "la révocation doit aboutir : {corps}");
+
+    let (corps, code) = appeler("GET", "/v1/me/devices");
+    assert_eq!(code, "200");
+    assert!(
+        !corps.contains("tel-de-marie"),
+        "il ne doit plus s'y trouver : {corps}"
+    );
+    assert!(corps.contains("portable-de-marie"), "{corps}");
+
+    // **ET LE DISQUE A SUIVI** : c'est lui qui fait foi au prochain démarrage.
+    let relu = ams_config::decode_devices(&std::fs::read(&appareils).expect("lisible"))
+        .expect("relisible");
+    assert_eq!(relu.len(), 2);
+    assert!(relu.iter().all(|connu| connu.id != "tel-de-marie"));
+    assert!(
+        relu.iter().any(|connu| connu.login == "paul"),
+        "celui de Paul est resté"
+    );
+
+    // ── REVOQUER DEUX FOIS REND 404 LA SECONDE ──────────────────────────────
+    let (_, code) = appeler("DELETE", "/v1/me/devices/tel-de-marie");
+    assert_eq!(code, "404");
+}
+
+/// **SANS MAGASIN D'APPAREILS, LES DEUX ROUTES RÉPONDENT 501.**
+///
+/// Et non une liste vide : une configuration oubliée ne doit pas ressembler à un
+/// compte qui n'a rien enrôlé. L'exploitant chercherait sinon le défaut chez
+/// l'utilisateur.
+#[test]
+fn sans_magasin_les_appareils_ne_se_servent_pas() {
+    let atelier = atelier("sans-appareils");
+    let Some((cert, cle)) = paire(&atelier.0) else {
+        panic!("{SANS_OPENSSL}");
+    };
+    if std::process::Command::new("curl")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("IGNORÉ : `curl` est absent — cet essai n'a RIEN éprouvé.");
+        return;
+    }
+
+    let empreinte =
+        ams_auth::hash_password(b"secret-initial", b"seize octets ici").expect("hachable");
+    let magasin = atelier.0.join("comptes.bin");
+    std::fs::write(
+        &magasin,
+        ams_config::encode_accounts(&[ams_auth::Account {
+            login: String::from("marie"),
+            hash: empreinte,
+            addresses: vec![String::from("marie@example.com")],
+        }])
+        .expect("encodable"),
+    )
+    .expect("le magasin s'écrit");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&magasin, std::fs::Permissions::from_mode(0o600))
+            .expect("permissions du magasin");
+    }
+
+    let port_smtp = port_libre();
+    let port_http = port_libre();
+    // LE CHEMIN DES APPAREILS EST VIDE : c'est tout le sujet de cet essai.
+    let config = configuration_complete(
+        &atelier,
+        port_smtp,
+        Tls {
+            certificate_chain_path: cert.display().to_string(),
+            private_key_path: cle.display().to_string(),
+        },
+        &magasin.display().to_string(),
+        "",
+        "",
+        &format!("127.0.0.1:{port_http}"),
+        "",
+        CLEF,
+    );
+    let _serveur = lancer(&config, port_smtp);
+    let base = format!("https://127.0.0.1:{port_http}");
+
+    let sortie = std::process::Command::new("curl")
+        .args(["-s", "--insecure", "--http2"])
+        .args(["-H", "Content-Type: application/json"])
+        .args(["-d", r#"{"login":"marie","password":"secret-initial"}"#])
+        .arg(format!("{base}/v1/tokens"))
+        .output()
+        .expect("curl s'exécute");
+    let corps = String::from_utf8_lossy(&sortie.stdout).into_owned();
+    let jeton = corps
+        .split_once("\"token\":\"")
+        .and_then(|(_, reste)| reste.split_once('"'))
+        .map(|(jeton, _)| jeton.to_string())
+        .unwrap_or_else(|| panic!("un jeton dans {corps}"));
+
+    for (methode, chemin) in [("GET", "/v1/me/devices"), ("DELETE", "/v1/me/devices/a1")] {
+        let sortie = std::process::Command::new("curl")
+            .args(["-s", "--insecure", "--http2", "-X", methode])
+            .args(["-H", &format!("Authorization: Bearer {jeton}")])
+            .args(["-o", "/dev/null", "-w", "%{http_code}"])
+            .arg(format!("{base}{chemin}"))
+            .output()
+            .expect("curl s'exécute");
+        assert_eq!(
+            String::from_utf8_lossy(&sortie.stdout),
+            "501",
+            "{methode} {chemin}"
+        );
+    }
 }

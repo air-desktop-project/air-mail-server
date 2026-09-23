@@ -166,6 +166,18 @@ struct Configuration {
   # un magasin sans clé ne s'ouvre pas. `config write` refuse l'un sans l'autre.
   scramStore @33 :Text;
 
+  # Le magasin des APPAREILS enrôlés. Vide : aucun appareil ne peut ouvrir de
+  # session par clef, et l'authentification par mot de passe reste seule.
+  #
+  # POURQUOI UN CHEMIN À PART, ET PAS LE FICHIER DES COMPTES. Celui des comptes
+  # porte des empreintes de mots de passe ; celui-ci ne porte que des clefs
+  # PUBLIQUES. Une fuite du second n'ouvre aucune session. Leur donner les mêmes
+  # permissions ferait traiter l'un comme l'autre, dans un sens ou dans l'autre.
+  #
+  # Voir `ams-devices.capnp`, qui dit ce qu'il contient et ce qu'il ne contient
+  # jamais.
+  devices @34 :Text;
+
   # MTA-STS (RFC 8461) — la politique qu'un domaine publie en HTTPS.
   #
   # **UN CHAMP AJOUTÉ APRÈS COUP DÉCODE DEUX CHAÎNES VIDES**, et deux chaînes

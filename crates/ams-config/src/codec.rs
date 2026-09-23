@@ -395,6 +395,14 @@ pub struct Configuration {
     /// l'autre, parce qu'une clé sans magasin n'a rien à ouvrir et qu'un
     /// magasin sans clé ne s'ouvre pas.
     pub scram_store: String,
+    /// Le magasin des appareils enrôlés, ou une chaîne vide.
+    ///
+    /// Vide, aucun appareil ne peut ouvrir de session par clef, et
+    /// l'authentification par mot de passe reste seule. **Il est séparé du
+    /// fichier de comptes** : celui-ci ne porte que des clefs PUBLIQUES, et une
+    /// fuite n'ouvre donc aucune session. Leur donner les mêmes permissions
+    /// ferait traiter l'un comme l'autre.
+    pub devices: String,
     /// La file d'attente du serveur.
     pub queue: Queue,
     /// MTA-STS (RFC 8461).
@@ -633,6 +641,26 @@ pub enum Error {
     /// et l'administrateur croirait avoir changé un mot de passe.
     DuplicateLogin(String),
 
+    /// Deux appareils portent le même identifiant.
+    ///
+    /// Une question sans réponse : révoquer l'un reviendrait à ne pas savoir
+    /// lequel des deux on vient de retirer.
+    DuplicateDevice(String),
+
+    /// La clef publique d'un appareil n'est pas un point de la courbe.
+    ///
+    /// **CE N'EST PAS UNE CLEF FAIBLE, C'EST UNE CLEF QUI N'EXISTE PAS.**
+    /// L'accepter ouvrirait les attaques par courbe invalide : on ferait de
+    /// l'arithmétique sur une courbe que l'attaquant a choisie, et dont l'ordre
+    /// est assez petit pour qu'il en déduise le secret.
+    BadDeviceKey(String),
+
+    /// Un champ dépasse la borne que ce magasin lui donne.
+    ///
+    /// Le nom est là **exprès** : « trop long » sans dire lequel oblige à
+    /// relire le fichier entier.
+    TooLong(&'static str),
+
     /// Deux comptes déclarent la même adresse.
     ///
     /// Une question sans réponse : le premier arrivé l'emporterait en silence,
@@ -670,6 +698,14 @@ impl fmt::Display for Error {
             Error::UnknownEnforcement => f.write_str(
                 "ce fichier dit quelque chose d'`enforcement` que cette version ne sait pas lire",
             ),
+            Error::DuplicateDevice(id) => {
+                write!(f, "deux appareils portent l'identifiant `{id}`")
+            }
+            Error::BadDeviceKey(id) => write!(
+                f,
+                "la clef de l'appareil `{id}` n'est pas un point de la courbe P-256"
+            ),
+            Error::TooLong(champ) => write!(f, "le champ `{champ}` dépasse sa borne"),
             Error::DuplicateLogin(login) => {
                 write!(f, "le compte `{login}` figure deux fois")
             }
@@ -900,6 +936,7 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
         require_sender_domain: lu.get_require_sender_domain(),
         scram_key: texte(lu.get_scram_key()?)?,
         scram_store: texte(lu.get_scram_store()?)?,
+        devices: texte(lu.get_devices()?)?,
         queue,
         mtasts,
         tlsrpt,
@@ -1043,6 +1080,7 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
         ecrit.set_require_sender_domain(config.require_sender_domain);
         ecrit.set_scram_key(&config.scram_key);
         ecrit.set_scram_store(&config.scram_store);
+        ecrit.set_devices(&config.devices);
         {
             let mut emission = ecrit.reborrow().init_relay();
             emission.set_enabled(config.relay.enabled);
@@ -1257,6 +1295,10 @@ mod tests {
             // rien — celui de l'aller-retour comme celui de la corruption.
             scram_key: String::from("/var/lib/air-mail/scram.key"),
             scram_store: String::from("/var/lib/air-mail/scram.bin"),
+            // Non vide pour la même raison que les deux au-dessus : un
+            // chemin vide n'écrit aucun pointeur, et aucun essai ne le
+            // traverserait.
+            devices: String::from("/var/lib/air-mail/appareils.bin"),
             // Les trois écoutes d'un serveur réel : le `25` et le `587` en
             // `STARTTLS`, le `465` en TLS implicite.
             smtp_listeners: vec![

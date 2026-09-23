@@ -33,8 +33,10 @@
     </li>
     <li><a href="#surface">5. La surface à construire</a></li>
     <li><a href="#delegation">6. La délégation</a></li>
-    <li><a href="#phases">7. Les phases</a></li>
-    <li><a href="#risques">8. Risques et angles morts</a></li>
+    <li><a href="#mdp-app">7. Les mots de passe applicatifs</a></li>
+    <li><a href="#oauth">8. OAuth2 : quand, et quand pas</a></li>
+    <li><a href="#phases">9. Les phases</a></li>
+    <li><a href="#risques">10. Risques et angles morts</a></li>
   </ol>
 </nav>
 
@@ -76,14 +78,14 @@
 
 <div class="tableau">
 <table>
-  <thead><tr><th>Élément</th><th>État au 0.2.5</th></tr></thead>
+  <thead><tr><th>Élément</th><th>État au 0.2.7</th></tr></thead>
   <tbody>
     <tr><td>Authentification</td><td>Identifiant + mot de passe, <code>POST /v1/tokens</code></td></tr>
     <tr><td>Identité du client</td><td><strong>Aucune</strong> — le serveur ignore quel logiciel l'appelle</td></tr>
     <tr><td>Certificat client</td><td><strong>Jamais vérifié</strong> — <code>with_no_client_auth()</code> partout</td></tr>
-    <tr><td>Durée d'un jeton</td><td>12 heures au plus, <strong>sans renouvellement</strong></td></tr>
-    <tr><td>Révocation</td><td><strong>Inexistante</strong> — <code>DELETE /v1/tokens/current</code> rend <code>501</code></td></tr>
-    <tr><td>Écritures sur le courrier</td><td><strong>Sans effet</strong> — routées, autorisées, le serveur sert la lecture</td></tr>
+    <tr><td>Durée d'un jeton</td><td>15 minutes, <strong>sans renouvellement</strong></td></tr>
+    <tr><td>Révocation</td><td><strong>FAITE en 0.2.7</strong> — registre des sessions vivantes, 24 par compte</td></tr>
+    <tr><td>Écritures sur le courrier</td><td><strong>FAITES en 0.2.6</strong> — drapeaux, effacement, boîtes, ajout</td></tr>
     <tr><td>Pagination</td><td>50 messages, curseur rendu mais <strong>inutilisable</strong></td></tr>
     <tr><td>Synchronisation incrémentale</td><td><strong>Aucune</strong> — pas d'équivalent de <code>MODSEQ</code></td></tr>
     <tr><td>Notifications</td><td><strong>Aucune</strong></td></tr>
@@ -93,7 +95,13 @@
 
 <div class="note danger">
   <span class="etiquette">Le défaut qui rend ce chantier urgent</span>
-  <p>Un jeton vit douze heures et rien ne le renouvelle. Pour ne pas redemander le mot de passe deux fois par jour, <strong>une application n'a d'autre choix que de le stocker</strong>. C'est précisément ce que la clef d'appareil supprime.</p>
+  <p>Un jeton vit un quart d'heure et <strong>rien ne le renouvelle</strong>. Pour ne pas redemander le mot de passe quatre fois par heure, une application n'a d'autre choix que de le stocker — et le raccourcissement de la 0.2.7 a rendu ce défaut plus criant, non moins.</p>
+  <p>C'est précisément ce que la clef d'appareil supprime : elle EST le mécanisme de renouvellement, et le mot de passe cesse d'avoir à exister sur l'appareil.</p>
+</div>
+
+<div class="note sur">
+  <span class="etiquette">Deux préalables sont déjà levés</span>
+  <p>La <strong>phase 0</strong> — les écritures sur le courrier — est livrée en 0.2.6, et la <strong>phase 1</strong> — les sessions révocables — en 0.2.7. L'enrôlement d'appareils peut donc commencer : on sait désormais retirer une clef et fermer ce qu'elle avait ouvert.</p>
 </div>
 
 <h2 id="modele"><span class="numero">3</span>Le modèle retenu</h2>
@@ -325,28 +333,118 @@
 
 <p>Le jeton porte l'<strong>acteur</strong> ; la boîte visée vient du chemin ; le droit d'y toucher vient de la table. Une action sur une boîte partagée doit dire <em>qui</em> l'a faite, sans quoi trois personnes se partageant <code>support@</code> forment un seul coupable anonyme.</p>
 
-<h2 id="phases"><span class="numero">7</span>Les phases</h2>
+<h2 id="mdp-app"><span class="numero">7</span>Les mots de passe applicatifs</h2>
 
-<div class="phase bloquante">
-  <div class="entete"><span class="rang">Phase 0</span><h3>Cesser de mentir sur les écritures</h3><span class="cout">≈ 1 jour</span></div>
-  <p>Les écritures sur le courrier doivent <strong>soit être implémentées, soit rendre <code>501</code></strong>. L'état actuel — servir la lecture et répondre <code>200</code> — fera écrire du code client faux dans cinq applications à la fois.</p>
-  <p><strong>Rien ne doit commencer avant.</strong> C'est une heure de travail contre cent heures de débogage réparties sur cinq plateformes.</p>
+<div class="note danger">
+  <span class="etiquette">Le mot de passe ne disparaîtra pas, et il faut construire avec</span>
+  <p>Thunderbird, Apple Mail et les autres clients de messagerie n'offrent <strong>aucune authentification par clef</strong>. Ils passent par IMAP et la soumission SMTP, en SASL, avec un identifiant et un mot de passe. Tant qu'on veut les servir, le mot de passe reste.</p>
+</div>
+
+<h3><span class="numero">7.1</span>Pourquoi le désactiver sur la seule API REST n'aurait rien donné</h3>
+
+<p>Les trois portes — SMTP, IMAP, API REST — interrogent <strong>le même magasin de comptes</strong>. Un mot de passe refusé par l'API resterait parfaitement valable en IMAP, sur la même boîte. Un attaquant qui le détient n'a aucune raison de frapper à la porte fermée quand la voisine est ouverte.</p>
+
+<p><strong>La force d'un compte est celle de sa porte la plus faible.</strong> Fermer l'API aurait donné l'illusion d'un durcissement sans en produire.</p>
+
+<h3><span class="numero">7.2</span>Ce qui relève réellement le plancher</h3>
+
+<p>Un secret par client, et non un secret par compte. C'est le motif qu'emploient Google, Apple et Fastmail pour exactement ce problème.</p>
+
+<div class="tableau">
+<table>
+  <thead><tr><th>Ce que cela donne</th><th>Ce qu'on ne peut pas faire aujourd'hui</th></tr></thead>
+  <tbody>
+    <tr><td>Révoquer le Thunderbird d'un poste perdu</td><td>Il faut changer le mot de passe du compte, donc reconfigurer tous les autres clients</td></tr>
+    <tr><td>Voir quels clients sont connectés</td><td>Un seul secret, aucune trace de qui s'en sert</td></tr>
+    <tr><td>Un secret long et aléatoire par client</td><td>L'utilisateur saisit le sien, souvent réutilisé ailleurs</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>Techniquement : <code>ams_auth</code> accepte <strong>plusieurs empreintes par compte</strong> plutôt qu'une, chacune nommée et datée. SMTP, IMAP et POP3 continuent d'appeler la même fonction — c'est le magasin qui change, pas les protocoles.</p>
+
+<div class="note info">
+  <span class="etiquette">Et SCRAM travaille déjà pour vous</span>
+  <p>Le serveur sert <code>SCRAM-SHA-256</code>, et Thunderbird sait s'en servir : sur ce client, le mot de passe ne traverse déjà plus le fil. Apple Mail ne l'implémente pas — vérifié en production le 2026-09-23 : il voit <code>AUTH=SCRAM-SHA-256</code> et choisit <code>PLAIN</code>. C'est une limite de son client, pas du serveur.</p>
+</div>
+
+<h2 id="oauth"><span class="numero">8</span>OAuth2 : quand, et quand pas</h2>
+
+<p>Deux choses qu'on confond souvent, et qui n'ont pas le même coût du tout.</p>
+
+<div class="tableau">
+<table>
+  <thead><tr><th>Rôle</th><th>Ce que c'est</th><th>Coût</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Fournisseur</strong> OAuth2</td><td>Un serveur d'autorisation : consentement, codes, jetons, rafraîchissement, révocation, clients enregistrés</td><td>Un projet à part entière</td></tr>
+    <tr><td><strong>Client</strong> OIDC</td><td>Déléguer l'authentification à un fournisseur existant</td><td>Modeste</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3><span class="numero">8.1</span>Là où il ne paiera pas</h3>
+
+<div class="note danger">
+  <span class="etiquette">Le paradoxe : c'est aux clients de messagerie qu'il sert le moins</span>
+  <p>Thunderbird sait faire <code>OAUTHBEARER</code>, mais il embarque une configuration <strong>par fournisseur connu</strong> — Gmail, Outlook, Yahoo, Fastmail. Pour un serveur auto-hébergé, il faudrait qu'il vous connaisse. Apple Mail ne fait d'OAuth que pour une poignée de fournisseurs, et jamais pour un IMAP quelconque.</p>
+  <p>Vous écririez donc un serveur d'autorisation complet qui ne servirait <strong>ni Apple Mail, ni la plupart des installations de Thunderbird</strong>.</p>
+</div>
+
+<p><strong>Vos propres applications non plus.</strong> Pour une application de première partie, le détour par un navigateur, un écran de consentement et un code d'autorisation est un coût pur : vous ne déléguez rien à personne. La clef d'appareil fait mieux, sans navigateur et avec la biométrie.</p>
+
+<h3><span class="numero">8.2</span>Là où il aurait du sens</h3>
+
+<ul>
+  <li><strong>Une application tierce lit les boîtes de vos utilisateurs.</strong> C'est la raison d'être d'OAuth2 — « cette application-là peut lire mon courrier, avec ces droits, et je peux le lui retirer ». Aucun autre mécanisme ne le fait proprement.</li>
+  <li><strong>Une authentification unique</strong> entre le portail, le serveur de courrier et les applications. Bénéfice réel, mais c'est un <em>projet d'identité</em> qui concerne d'abord le portail — lequel tient déjà les comptes et le WebAuthn.</li>
+  <li><strong>AGENTConnect</strong>, pour l'administration française, est de l'OpenID Connect. Vous y seriez <strong>client</strong>, pas fournisseur : la version modeste.</li>
+</ul>
+
+<div class="note sur">
+  <span class="etiquette">La décision</span>
+  <p><strong>Pas maintenant, et pas pour les clients de messagerie.</strong> Les mots de passe applicatifs résolvent le problème réel pour une fraction du coût, et ils marchent avec Apple Mail comme avec Thunderbird, aujourd'hui. Gardez OAuth2 pour la question « un tiers accède-t-il aux boîtes de nos utilisateurs ? » — tant que la réponse est non, il ne rend rien.</p>
+</div>
+
+<h2 id="phases"><span class="numero">9</span>Les phases</h2>
+
+<div class="phase faite">
+  <div class="entete"><span class="rang">Phase 0</span><h3>Cesser de mentir sur les écritures</h3><span class="fait">FAITE — 0.2.6</span><span class="cout">≈ 1 jour</span></div>
+  <p>Les écritures sur le courrier devaient <strong>soit être implémentées, soit rendre <code>501</code></strong>. Elles sont implémentées : drapeaux, effacement, création et suppression de boîte, dépôt d'un message. Vérifié en production — une boîte passée de <code>[]</code> à <code>['\Seen']</code>.</p>
+</div>
+
+<div class="phase faite">
+  <div class="entete"><span class="rang">Phase 1</span><h3>La session révocable</h3><span class="fait">FAITE — 0.2.7</span><span class="cout">≈ 1 semaine</span></div>
+  <p>Liste d'autorisation des sessions vivantes, vingt-quatre par compte, jeton de quinze minutes, <code>DELETE /v1/tokens/current</code>. Vérifié en production : <code>200</code>, puis <code>DELETE</code> <code>204</code>, puis <code>401</code> « la session a été fermée ».</p>
+  <div class="note">
+    <span class="etiquette">Une exemption, et elle est assumée</span>
+    <p>Les jetons d'<strong>administration</strong> sont frappés hors bande et n'ouvrent aucune session : les soumettre à la liste les aurait tous refusés. Ils restent donc irrévocables jusqu'à leur expiration, et c'est le prix à payer pour que l'outil d'exploitation continue de fonctionner.</p>
+  </div>
 </div>
 
 <div class="phase">
-  <div class="entete"><span class="rang">Phase 1</span><h3>La session révocable</h3><span class="cout">≈ 1 semaine</span></div>
-  <p>Registre des jetons vivants, jetons d'accès courts, identité d'appareil dans le jeton, format v2.</p>
-  <p><strong>Elle précède l'enrôlement, et ce n'est pas négociable</strong> : enrôler des appareils sans pouvoir les révoquer, c'est fabriquer des clefs immortelles. Un téléphone perdu deviendrait un accès permanent.</p>
-</div>
-
-<div class="phase">
-  <div class="entete"><span class="rang">Phase 2</span><h3>L'authentification par clef</h3><span class="cout">≈ 2 semaines</span></div>
+  <div class="entete"><span class="rang">Phase 2</span><h3>L'authentification par clef</h3><span class="fait">EN COURS</span><span class="cout">≈ 2 semaines</span></div>
   <p>Invitations, enrôlement, appairage croisé, défi-réponse, ECDSA P-256. Le mot de passe reste pour l'amorçage et le dépannage, puis se retire compte par compte.</p>
+  <ul>
+    <li><strong>2a — le magasin d'appareils. <span style="color:var(--sur)">Fait (0.2.8)</span></strong> Vérification ECDSA P-256, fichier Cap'n Proto séparé de celui des comptes, magasin modifiable à chaud, et les deux routes <code>/v1/me/devices</code> : lister les siens, en révoquer un. Sans magasin configuré, elles rendent <code>501</code>.</li>
+    <li><strong>2b — les invitations.</strong> <code>/v1/invitations</code>, portée <code>admin</code>, à usage unique et de courte vie, portant le compte et ses adresses.</li>
+    <li><strong>2c — l'enrôlement et le défi-réponse.</strong> Un défi est émis <strong>même pour un appareil inconnu</strong>, sans quoi l'absence de défi énumérerait les appareils. Scellé sous un octet de version distinct de celui du jeton, valable soixante secondes.</li>
+    <li><strong>2d — l'enrôlement croisé</strong>, avec confirmation d'empreinte sur un appareil déjà enrôlé.</li>
+  </ul>
+  <div class="note">
+    <span class="etiquette">Une faute évitée de justesse, et qu'il faut garder écrite</span>
+    <p>La première écriture de la vérification <strong>refusait la forme « haute » de <code>s</code></strong>, au nom de la malléabilité. C'était faux : la forme basse est une convention du Bitcoin (BIP 62), pas une règle d'ECDSA, et les enclaves réelles produisent les deux au hasard — <strong>dix-neuf sur quarante, mesuré</strong>. La règle aurait refusé <strong>une signature légitime sur deux, sur les cinq plateformes</strong>, en se manifestant par « l'ouverture de session échoue une fois sur deux, sans raison apparente ». Ce qui protège du rejeu n'est pas l'unicité de la signature, c'est le <strong>défi</strong>.</p>
+  </div>
 </div>
 
 <div class="phase parallele">
   <div class="entete"><span class="rang">Phase 3</span><h3>La délégation</h3><span class="cout">≈ 1 semaine · en parallèle</span></div>
   <p>Table de délégation, adressage des boîtes d'autrui, journalisation de l'acteur. Ne dépend que de la phase 0.</p>
+</div>
+
+<div class="phase parallele">
+  <div class="entete"><span class="rang">Phase 3 bis</span><h3>Les mots de passe applicatifs</h3><span class="cout">≈ 1 semaine · en parallèle</span></div>
+  <p>Plusieurs empreintes par compte, chacune nommée, datée et révocable seule. Voir <a href="#mdp-app">§7</a>.</p>
+  <p><strong>Elle profite à Thunderbird et à Apple Mail</strong>, que la clef d'appareil ne touchera jamais — et elle est le seul moyen de révoquer l'accès d'un client sans changer le mot de passe du compte. Ne dépend que de la phase 0.</p>
 </div>
 
 <div class="phase parallele">
@@ -371,10 +469,11 @@
 <pre><code>Phase 0 ──┬──> Phase 1 ──> Phase 2 ──┐
           │                          ├──> Phase 5 ──> Phase 6
           ├──> Phase 3 ──────────────┤
+          ├──> Phase 3 bis ──────────┤     (mots de passe applicatifs)
           └──> Phase 4 ──────────────┘
 </code></pre>
 
-<h2 id="risques"><span class="numero">8</span>Risques et angles morts</h2>
+<h2 id="risques"><span class="numero">10</span>Risques et angles morts</h2>
 
 <div class="tableau">
 <table>

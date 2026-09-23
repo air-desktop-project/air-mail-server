@@ -458,6 +458,18 @@ figure.schema figcaption {
 .phase > :last-child { margin-bottom: 0; }
 .phase.bloquante { border-left-color: var(--alerte); }
 .phase.parallele { border-left-color: var(--sur); }
+.phase.faite { border-left-color: var(--sur); opacity: 0.85; }
+
+.phase .fait {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--sur);
+  border: 1px solid var(--sur);
+  border-radius: 4px;
+  padding: 0.1rem 0.45rem;
+}
 
 .phase .entete {
   display: flex;

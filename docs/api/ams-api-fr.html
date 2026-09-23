@@ -49,7 +49,7 @@
         <li><a href="#r-messages">5.3 Messages</a></li>
         <li><a href="#r-recherche">5.4 Recherche</a></li>
         <li><a href="#r-soumission">5.5 Soumission</a></li>
-        <li><a href="#r-moi">5.6 Son propre secret</a></li>
+        <li><a href="#r-moi">5.6 Ce qui est à soi</a></li>
         <li><a href="#r-admin">5.7 Administration</a></li>
         <li><a href="#r-supervision">5.8 Supervision</a></li>
       </ol>
@@ -572,16 +572,41 @@ Le corps du message.
   <p>Le serveur remet aux destinataires locaux, met en file ce qui sort, et <strong>signe en DKIM</strong> ce qu'il accepte, pour les domaines dont il tient la zone. Un échec de remise rend <code>503</code> : il est temporaire, et votre message a des chances de passer plus tard.</p>
 </div>
 
-<h3 id="r-moi"><span class="numero">5.6</span>Son propre secret</h3>
+<h3 id="r-moi"><span class="numero">5.6</span>Ce qui est à soi</h3>
+
+<p>Ces ressources n'exigent <strong>aucune portée</strong> : elles agissent sur <em>soi</em>, et le jeton présenté dit déjà de qui il s'agit. Exiger <code>admin</code> en ferait des routes que seul un administrateur peut emprunter, ce qui est exactement ce qu'elles existent pour éviter.</p>
 
 <div class="ressource">
   <div class="ligne"><span class="verbe put">PUT</span><span class="chemin">/v1/me/password</span><span class="portee">jeton valide</span></div>
   <pre><code>{ "current_password": "…", "password": "…" }</code></pre>
-  <p>Cette ressource n'exige <strong>aucune portée</strong> : elle agit sur soi, et le jeton présenté dit déjà de qui il s'agit. Exiger <code>admin</code> en ferait une route que seul un administrateur peut emprunter, ce qui est exactement ce qu'elle existe pour éviter.</p>
   <div class="note sur">
     <span class="etiquette">Le mot de passe actuel est exigé, et c'est essentiel</span>
     <p>Sans lui, un jeton volé permettrait de verrouiller le propriétaire légitime hors de sa boîte, définitivement : un vol de jeton deviendrait un vol de compte. Un mot de passe actuel faux rend <code>403</code>.</p>
   </div>
+</div>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/me/devices</span><span class="portee">jeton valide</span></div>
+  <pre><code>{ "devices": [
+    { "id": "a1b2c3", "name": "iPhone de Marie",
+      "enrolledAt": 1790000000, "lastSeenAt": 1790003600 }
+] }</code></pre>
+  <p>Les appareils dont la clef publique est enrôlée sur ce compte. <code>lastSeenAt</code> vaut <code>0</code> pour un appareil qui n'a jamais ouvert de session — <strong>le champ est écrit dans les deux cas</strong>, pour qu'aucun client n'ait à distinguer « absent » de « zéro ».</p>
+  <div class="note">
+    <span class="etiquette">La clef publique n'y est pas</span>
+    <p>Elle est publique et ne coûterait aucun secret, mais soixante-cinq octets de base64 n'apprennent rien à qui cherche lequel de ses trois téléphones révoquer. Une empreinte courte viendra avec l'enrôlement croisé, où elle aura un rôle : confirmer de visu l'appareil qu'on ajoute.</p>
+  </div>
+  <p>Un compte sans appareil rend <code>{"devices":[]}</code>, et non une erreur : c'est l'état de tout compte avant son premier enrôlement. Un serveur démarré <strong>sans magasin d'appareils</strong> rend <code>501</code> — une configuration oubliée ne doit pas ressembler à un compte qui n'a rien enrôlé.</p>
+</div>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe delete">DELETE</span><span class="chemin">/v1/me/devices/{id}</span><span class="portee">jeton valide</span></div>
+  <p>Révoque un appareil. Rend <code>204</code> sans corps. <strong>C'est l'opération qui presse</strong> : un téléphone perdu se retire dans la minute, et non au prochain jour ouvré — c'est pourquoi elle n'exige pas <code>admin</code>.</p>
+  <div class="note danger">
+    <span class="etiquette">L'appareil d'un autre est « introuvable », et non « interdit »</span>
+    <p>Le compte du jeton entre dans la recherche. Répondre <code>403</code> sur l'appareil d'un autre et <code>404</code> sur un identifiant qui n'existe pas laisserait <strong>énumérer les appareils du serveur</strong>, un identifiant à la fois. Les deux cas rendent donc <code>404</code>.</p>
+  </div>
+  <p>Révoquer deux fois rend <code>404</code> la seconde fois. §9.3.5 de RFC 9110 l'admet : ce qui doit être idempotent est l'<em>effet</em>, et il l'est — l'appareil n'est plus là dans les deux cas. Rendre <code>204</code> à une révocation qui n'a rien retiré laisserait croire qu'on a retiré quelque chose.</p>
 </div>
 
 <h3 id="r-admin"><span class="numero">5.7</span>Administration</h3>

@@ -727,6 +727,17 @@ fn afficher(config: &Configuration) {
         }
     );
     println!(
+        "appareils          {}",
+        if config.devices.is_empty() {
+            String::from("AUCUN MAGASIN — pas de session par clef, le mot de passe seul")
+        } else {
+            format!(
+                "magasin `{}` — clefs PUBLIQUES seules, aucun secret",
+                config.devices
+            )
+        }
+    );
+    println!(
         "MTA-STS            {}",
         if config.mtasts.est_configure() {
             format!(

@@ -136,6 +136,13 @@ pub struct ApiMaildir {
     file: Option<ams_loop_tokio::Spool>,
     /// Ce qu'un message peut peser, pour borner ce qu'on rassemble en file.
     message_max: usize,
+    /// Les appareils enrôlés, quand la configuration en nomme le magasin.
+    ///
+    /// **`None` VEUT DIRE « CE SERVEUR NE SERT PAS CELA »**, et les deux routes
+    /// de `/v1/me/devices` répondent alors 501. Rendre une liste vide à la
+    /// place ferait passer une configuration oubliée pour un compte sans
+    /// appareil, et l'exploitant chercherait le défaut chez l'utilisateur.
+    appareils: Option<Arc<crate::appareils::Appareils>>,
     /// De quoi signer ce qui sort (RFC 6376), quand une clé est nommée.
     ///
     /// **LA MÊME QUE DU CÔTÉ SMTP** : les deux portes de soumission n'ont pas
@@ -169,11 +176,24 @@ impl ApiMaildir {
             // celui-ci ouvre un relais.
             file: None,
             message_max: 0,
+            // PAS D'APPAREILS SANS MAGASIN, et le constructeur ne prend pas ce
+            // champ non plus : voir `avec_appareils`.
+            appareils: None,
             // ON NE SIGNE PAS SANS CLÉ, et le constructeur ne prend pas ce
             // champ non plus : une signature qu'on produirait sans clé publiée
             // échouerait partout, ce qui est pire que pas de signature.
             dkim: None,
         }
+    }
+
+    /// Lui donne le magasin des appareils enrôlés.
+    ///
+    /// **C'est la seule façon d'ouvrir `/v1/me/devices`**, et le serveur ne
+    /// l'appelle que si la configuration nomme un magasin.
+    #[must_use]
+    pub fn avec_appareils(mut self, magasin: Arc<crate::appareils::Appareils>) -> Self {
+        self.appareils = Some(magasin);
+        self
     }
 
     /// Lui donne de quoi signer ce qu'elle met en file (RFC 6376).
@@ -369,7 +389,7 @@ impl ApiMaildir {
             let compte = comptes
                 .iter_mut()
                 .find(|vu| vu.login == nom)
-                .ok_or(crate::comptes::Faute::Introuvable)?;
+                .ok_or(crate::comptes::INTROUVABLE)?;
             compte.hash = hash;
             Ok(())
         }) {
@@ -439,7 +459,7 @@ impl ApiMaildir {
             let compte = comptes
                 .iter_mut()
                 .find(|vu| vu.login == porteur)
-                .ok_or(crate::comptes::Faute::Introuvable)?;
+                .ok_or(crate::comptes::INTROUVABLE)?;
             compte.hash = hash;
             Ok(())
         }) {
@@ -493,7 +513,7 @@ impl ApiMaildir {
             let compte = comptes
                 .iter_mut()
                 .find(|vu| vu.login == nom)
-                .ok_or(crate::comptes::Faute::Introuvable)?;
+                .ok_or(crate::comptes::INTROUVABLE)?;
             compte.addresses = adresses;
             Ok(())
         }) {
@@ -553,6 +573,65 @@ impl ApiMaildir {
     }
 
     /// Les domaines qu'on héberge.
+    /// Les appareils de qui appelle.
+    ///
+    /// **LE COMPTE VIENT DU JETON, JAMAIS DU CHEMIN** : c'est ce qui rend cette
+    /// route incapable de montrer les appareils d'un autre, quoi qu'on écrive
+    /// dans l'URL — il n'y a rien à y écrire.
+    fn mes_appareils<'o>(&self, account: &str, sortie: &'o mut [u8]) -> Served<'o> {
+        let Some(magasin) = self.appareils.as_ref() else {
+            return pas_encore(sortie);
+        };
+        let siens = magasin.du_compte(account);
+        let lignes: std::vec::Vec<render::DeviceRow<'_>> = siens
+            .iter()
+            .map(|appareil| render::DeviceRow {
+                id: &appareil.id,
+                name: &appareil.name,
+                enrolled: appareil.enrolled,
+                last_seen: appareil.last_seen,
+            })
+            .collect();
+        rendre(render::write_devices(&lignes, sortie))
+    }
+
+    /// Révoque un appareil à soi.
+    ///
+    /// # UN APPAREIL QUI N'EST PAS LE SIEN EST « INTROUVABLE »
+    ///
+    /// Et non « interdit ». La distinction serait l'information elle-même :
+    /// répondre 403 sur l'appareil d'un autre et 404 sur un identifiant qui
+    /// n'existe pas laisserait énumérer les appareils du serveur, un
+    /// identifiant à la fois.
+    ///
+    /// # ELLE N'EST PAS IDEMPOTENTE, ET C'EST VOULU
+    ///
+    /// Révoquer deux fois rend 404 la seconde fois. §9.3.5 de RFC 9110 l'admet :
+    /// ce qui doit être idempotent, c'est l'EFFET, et il l'est — l'appareil
+    /// n'est plus là dans les deux cas. Rendre 204 à une révocation qui n'a rien
+    /// retiré laisserait croire qu'on a retiré quelque chose.
+    fn revoquer_mon_appareil<'o>(
+        &self,
+        account: &str,
+        id: &str,
+        sortie: &'o mut [u8],
+    ) -> Served<'o> {
+        let Some(magasin) = self.appareils.as_ref() else {
+            return pas_encore(sortie);
+        };
+        match magasin.modifier(|appareils| {
+            let place = appareils
+                .iter()
+                .position(|connu| connu.login == account && connu.id == id)
+                .ok_or(crate::appareils::INTROUVABLE)?;
+            appareils.remove(place);
+            Ok(())
+        }) {
+            Ok(()) => sans_contenu(),
+            Err(quoi) => dire_la_faute(&quoi, sortie),
+        }
+    }
+
     fn domains<'o>(&self, sortie: &'o mut [u8]) -> Served<'o> {
         let noms: std::vec::Vec<&str> = self.domaines.iter().map(String::as_str).collect();
         rendre(render::write_domains(&noms, sortie))
@@ -1270,6 +1349,8 @@ impl Api for ApiMaildir {
             Resource::Account { compte } => self.account(compte, sortie),
             Resource::AccountPassword { compte } => self.poser_un_secret(compte, body, sortie),
             Resource::OwnPassword => self.poser_mon_secret(account, body, sortie),
+            Resource::OwnDevices => self.mes_appareils(account, sortie),
+            Resource::OwnDevice { id } => self.revoquer_mon_appareil(account, id, sortie),
             Resource::AccountAddresses { compte } if matches!(method, Method::Put) => {
                 self.poser_des_adresses(compte, body, sortie)
             }
@@ -1798,7 +1879,7 @@ fn dire_la_faute<'o>(quoi: &crate::comptes::Faute, sortie: &'o mut [u8]) -> Serv
     eprintln!("air-mail-server : magasin de comptes — {quoi}");
     match *quoi {
         crate::comptes::Faute::Ecriture(_) => indisponible(sortie),
-        crate::comptes::Faute::Introuvable => absente(sortie),
+        crate::comptes::Faute::Introuvable(_) => absente(sortie),
         crate::comptes::Faute::Refuse(_) => refus_de_compte(sortie),
     }
 }

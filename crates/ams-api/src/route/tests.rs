@@ -29,9 +29,15 @@ fn ou(method: Method, chemin: &[u8]) -> Result<Resource<'static>, Reason> {
 /// Chaque ressource se désigne par son chemin.
 #[test]
 fn chaque_ressource_se_designe() {
-    let cas: [(Method, &[u8], Resource<'_>); 21] = [
+    let cas: [(Method, &[u8], Resource<'_>); 23] = [
         (Method::Post, b"/v1/tokens", Resource::Tokens),
         (Method::Put, b"/v1/me/password", Resource::OwnPassword),
+        (Method::Get, b"/v1/me/devices", Resource::OwnDevices),
+        (
+            Method::Delete,
+            b"/v1/me/devices/a1b2c3",
+            Resource::OwnDevice { id: "a1b2c3" },
+        ),
         (
             Method::Delete,
             b"/v1/tokens/current",
@@ -484,4 +490,72 @@ fn un_compte_nomme_me_reste_administrable() {
         ou(Method::Get, b"/v1/accounts/me"),
         Ok(Resource::Account { compte: "me" })
     );
+}
+
+/// **LES APPAREILS À SOI N'EXIGENT AUCUNE PORTÉE**, comme le mot de passe à soi
+/// et la révocation de son propre jeton.
+///
+/// Exiger `Admin` ferait de « je viens de perdre mon téléphone » une demande à
+/// adresser à l'administrateur du serveur. C'est très exactement ce que cette
+/// route existe pour éviter.
+#[test]
+fn les_appareils_a_soi_n_exigent_aucune_portee() {
+    for (methode, chemin) in [
+        (Method::Get, &b"/v1/me/devices"[..]),
+        (Method::Head, &b"/v1/me/devices"[..]),
+        (Method::Delete, &b"/v1/me/devices/a1"[..]),
+    ] {
+        assert_eq!(
+            resolu(methode, chemin).expect("résolue").scope,
+            Some(Scope::none()),
+            "{methode:?} {}",
+            std::str::from_utf8(chemin).expect("utf8")
+        );
+    }
+}
+
+/// **LA LISTE NE S'ÉCRIT PAS, ET L'APPAREIL NE SE LIT PAS.**
+///
+/// Un `POST` sur la liste laisserait déclarer une clef sans rien prouver ; c'est
+/// le chemin d'enrôlement qui exige la preuve. Et un `GET` sur un appareil
+/// nommé ne dirait rien que la liste ne dise déjà.
+#[test]
+fn les_verbes_des_appareils_sont_ceux_la_et_pas_d_autres() {
+    assert_eq!(Resource::OwnDevices.allowed(), &[Method::Get, Method::Head]);
+    assert_eq!(
+        Resource::OwnDevice { id: "a1" }.allowed(),
+        &[Method::Delete]
+    );
+
+    assert!(
+        !resolu(Method::Post, b"/v1/me/devices")
+            .expect("résolue")
+            .serves
+    );
+    assert!(
+        !resolu(Method::Get, b"/v1/me/devices/a1")
+            .expect("résolue")
+            .serves
+    );
+}
+
+/// **`/v1/me` NE DÉSIGNE RIEN**, et un segment inconnu sous lui non plus.
+///
+/// Sans cela, un chemin mal écrit obtiendrait une réponse au lieu d'un refus, et
+/// le client croirait avoir atteint quelque chose.
+#[test]
+fn un_chemin_de_soi_mal_forme_ne_designe_rien() {
+    for chemin in [
+        &b"/v1/me"[..],
+        &b"/v1/me/inconnu"[..],
+        &b"/v1/me/devices/a1/quelque-chose"[..],
+        &b"/v1/me/password/en-trop"[..],
+    ] {
+        assert_eq!(
+            ou(Method::Get, chemin).err(),
+            Some(Reason::NoSuchResource),
+            "{}",
+            std::str::from_utf8(chemin).expect("utf8")
+        );
+    }
 }

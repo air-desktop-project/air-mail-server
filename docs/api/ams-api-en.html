@@ -49,7 +49,7 @@
         <li><a href="#r-messages">5.3 Messages</a></li>
         <li><a href="#r-search">5.4 Search</a></li>
         <li><a href="#r-submission">5.5 Submission</a></li>
-        <li><a href="#r-self">5.6 Your own secret</a></li>
+        <li><a href="#r-self">5.6 What is yours</a></li>
         <li><a href="#r-admin">5.7 Administration</a></li>
         <li><a href="#r-observe">5.8 Observability</a></li>
       </ol>
@@ -570,16 +570,41 @@ The message body.
   <p>The server delivers to local recipients, queues what goes out, and <strong>DKIM-signs</strong> what it accepts, for the domains whose zone it holds. A delivery failure returns <code>503</code>: it is temporary, and your message may well go through later.</p>
 </div>
 
-<h3 id="r-self"><span class="numero">5.6</span>Your own secret</h3>
+<h3 id="r-self"><span class="numero">5.6</span>What is yours</h3>
+
+<p>These resources require <strong>no scope</strong>: they act on <em>yourself</em>, and the token presented already says who that is. Requiring <code>admin</code> would make them routes only an administrator could take, which is exactly what they exist to avoid.</p>
 
 <div class="ressource">
   <div class="ligne"><span class="verbe put">PUT</span><span class="chemin">/v1/me/password</span><span class="portee">valid token</span></div>
   <pre><code>{ "current_password": "…", "password": "…" }</code></pre>
-  <p>This resource requires <strong>no scope</strong>: it acts on yourself, and the token presented already says who that is. Requiring <code>admin</code> would make it a route only an administrator could take, which is exactly what it exists to avoid.</p>
   <div class="note sur">
     <span class="etiquette">The current password is required, and that matters</span>
     <p>Without it, a stolen token would let an attacker lock the rightful owner out of their mailbox permanently: a token theft would become an account theft. A wrong current password returns <code>403</code>.</p>
   </div>
+</div>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/me/devices</span><span class="portee">valid token</span></div>
+  <pre><code>{ "devices": [
+    { "id": "a1b2c3", "name": "Marie's iPhone",
+      "enrolledAt": 1790000000, "lastSeenAt": 1790003600 }
+] }</code></pre>
+  <p>The devices whose public key is enrolled on this account. <code>lastSeenAt</code> is <code>0</code> for a device that has never opened a session — <strong>the field is written either way</strong>, so that no client has to tell "absent" from "zero".</p>
+  <div class="note">
+    <span class="etiquette">The public key is not there</span>
+    <p>It is public and would cost no secret, but sixty-five base64 bytes teach nothing to someone trying to work out which of their three phones to revoke. A short fingerprint will come with cross-enrolment, where it has a job: confirming by sight the device being added.</p>
+  </div>
+  <p>An account with no device returns <code>{"devices":[]}</code>, not an error: that is the state of every account before its first enrolment. A server started <strong>without a device store</strong> returns <code>501</code> — a forgotten configuration must not look like an account that has enrolled nothing.</p>
+</div>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe delete">DELETE</span><span class="chemin">/v1/me/devices/{id}</span><span class="portee">valid token</span></div>
+  <p>Revokes a device. Returns <code>204</code> with no body. <strong>This is the operation that is urgent</strong>: a lost phone is removed within the minute, not on the next business day — which is why it does not require <code>admin</code>.</p>
+  <div class="note danger">
+    <span class="etiquette">Someone else's device is "not found", not "forbidden"</span>
+    <p>The token's account is part of the lookup. Returning <code>403</code> for someone else's device and <code>404</code> for an id that does not exist would allow <strong>enumerating the server's devices</strong>, one id at a time. Both cases therefore return <code>404</code>.</p>
+  </div>
+  <p>Revoking twice returns <code>404</code> the second time. RFC 9110 §9.3.5 allows this: what must be idempotent is the <em>effect</em>, and it is — the device is gone either way. Returning <code>204</code> to a revocation that removed nothing would suggest something had been removed.</p>
 </div>
 
 <h3 id="r-admin"><span class="numero">5.7</span>Administration</h3>

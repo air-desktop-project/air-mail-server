@@ -30,10 +30,12 @@
 //! `air-mail-admin config write`.
 
 mod api;
+mod appareils;
 mod comptes;
 mod delivery;
 mod imap;
 mod incidents;
+mod magasin;
 mod policy;
 mod pop3;
 mod scram;
@@ -174,8 +176,9 @@ type MontageApi = (
     clippy::too_many_arguments,
     reason = "monter l'API demande la configuration, le chiffrement, les boîtes, \
               les comptes, la remise, les domaines, le videur et le compteur \
-              d'incidents — chacun vient d'un endroit différent, et les grouper \
-              en une structure d'appel ne ferait que déplacer la liste."
+              d'incidents, les appareils — chacun vient d'un endroit différent, \
+              et les grouper en une structure d'appel ne ferait que déplacer la \
+              liste."
 )]
 fn monter_l_api(
     options: &Configuration,
@@ -187,6 +190,7 @@ fn monter_l_api(
     domaines: Arc<Vec<String>>,
     garde: Arc<ams_loop_tokio::SharedGuard>,
     incidents: Arc<crate::incidents::Incidents>,
+    appareils: Option<Arc<crate::appareils::Appareils>>,
     file: Option<ams_loop_tokio::Spool>,
     message_max: usize,
     port_h3: Option<u16>,
@@ -261,6 +265,13 @@ fn monter_l_api(
             // destinataire d'ailleurs est refusée. Deux portes, une seule règle.
             let api = match file {
                 Some(file) => api.avec_file(file, message_max),
+                None => api,
+            };
+            // **SANS MAGASIN, PAS D'APPAREILS**, et les deux routes répondent
+            // 501 plutôt qu'une liste vide : une configuration oubliée ne doit
+            // pas ressembler à un compte qui n'a rien enrôlé.
+            let api = match appareils {
+                Some(magasin) => api.avec_appareils(magasin),
                 None => api,
             };
             // **ET LA MÊME SIGNATURE.** Un message soumis par l'API n'est pas
@@ -389,6 +400,39 @@ fn charger_comptes(chemin: &str) -> Result<Vec<Account>, String> {
     let octets =
         std::fs::read(chemin).map_err(|erreur| format!("comptes `{chemin}` : {erreur}"))?;
     ams_config::decode_accounts(&octets).map_err(|erreur| format!("comptes `{chemin}` : {erreur}"))
+}
+
+/// Lit le magasin des appareils enrôlés.
+///
+/// # UN FICHIER ABSENT N'EST PAS UNE PANNE
+///
+/// Contrairement aux comptes, ce magasin **se crée au premier enrôlement** : un
+/// serveur neuf n'en a pas, et exiger qu'il existe obligerait l'installation à
+/// fabriquer un fichier vide pour rien. Tout autre défaut de lecture, lui, fait
+/// refuser de démarrer — servir avec un magasin qu'on n'a pas su lire ferait
+/// répondre « appareil inconnu » à des appareils légitimes.
+///
+/// # ET IL N'EST PAS SOUMIS AU REFUS DES FICHIERS LISIBLES PAR TOUS
+///
+/// Celui des comptes porte des empreintes de mots de passe, et l'ouvrir à tous
+/// est une faute qui doit arrêter le serveur. **Celui-ci ne porte que des clefs
+/// publiques** : une fuite n'ouvre aucune session. Elle apprend seulement
+/// combien d'appareils chaque compte a — ce qui mérite un avertissement, et non
+/// un refus de démarrer.
+///
+/// # Errors
+///
+/// Le chemin qui ne se lit pas, ou le fichier que le décodeur refuse.
+fn charger_appareils(chemin: &str) -> Result<Vec<ams_config::Device>, String> {
+    if chemin.is_empty() {
+        return Ok(Vec::new());
+    }
+    match std::fs::read(chemin) {
+        Ok(octets) => ams_config::decode_devices(&octets)
+            .map_err(|erreur| format!("appareils `{chemin}` : {erreur}")),
+        Err(erreur) if erreur.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(erreur) => Err(format!("appareils `{chemin}` : {erreur}")),
+    }
 }
 
 /// Chaque adresse de compte relève-t-elle d'un domaine annoncé ?
@@ -886,6 +930,8 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         ("le Maildir", &maildir),
         ("la configuration", fichier),
         ("le magasin des comptes", Path::new(&options.accounts)),
+        // IL NE PORTE QUE DES CLEFS PUBLIQUES : on avertit, on ne refuse pas.
+        ("le magasin des appareils", Path::new(&options.devices)),
     ]);
 
     if options.hosted.is_empty() {
@@ -926,6 +972,13 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     let comptes = Arc::new(crate::comptes::Comptes::new(
         std::path::PathBuf::from(&options.accounts),
         charges,
+    ));
+    // **LE MÊME TRAITEMENT POUR LES APPAREILS** : un enrôlement fait depuis un
+    // terminal doit être vu par le serveur sans qu'on l'arrête, et une
+    // révocation surtout — c'est elle qui presse.
+    let appareils = Arc::new(crate::appareils::Appareils::new(
+        std::path::PathBuf::from(&options.devices),
+        charger_appareils(&options.devices)?,
     ));
     // `AUTH` n'est annoncé QUE si les deux conditions tiennent : quelqu'un à qui
     // répondre oui, et de quoi chiffrer. La session refuse `AUTH` hors TLS de
@@ -2107,6 +2160,11 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         Arc::new(options.hosted.clone()),
         Arc::clone(&garde),
         incidents_pour_l_api,
+        if options.devices.is_empty() {
+            None
+        } else {
+            Some(Arc::clone(&appareils))
+        },
         file.as_ref().map(|attente| attente.as_ref().clone()),
         message_max,
         port_h3,

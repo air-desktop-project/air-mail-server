@@ -194,6 +194,7 @@ fn configuration_pop3(
         // Ce banc ne sert pas SCRAM : les deux chemins restent vides.
         scram_key: String::new(),
         scram_store: String::new(),
+        devices: String::new(),
         require_fqdn_sender: false,
         require_fqdn_recipient: false,
         require_sender_domain: false,

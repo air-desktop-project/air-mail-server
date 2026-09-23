@@ -65,6 +65,10 @@ mod ams_config_capnp {
     unused_qualifications,
     reason = "code généré par capnpc-rust, hors de notre contrôle éditorial"
 )]
+mod ams_devices_capnp {
+    include!("ams_devices_capnp.rs");
+}
+
 mod ams_accounts_capnp {
     include!("ams_accounts_capnp.rs");
 }
@@ -95,6 +99,7 @@ mod ams_scram_capnp {
 
 mod accounts;
 mod codec;
+mod devices;
 mod index;
 mod scram;
 
@@ -103,5 +108,6 @@ pub use codec::{
     Configuration, Dkim, Dmarc, Enforcement, Error, Listener, Mtasts, Queue, Relay, Spf,
     TRAVERSAL_LIMIT_WORDS, Timeouts, Tls, Tlsrpt, decode, encode,
 };
+pub use devices::{Device, ID_OCTETS_MAX, NOM_OCTETS_MAX, decode_devices, encode_devices};
 pub use index::{decode_index, encode_index};
 pub use scram::{decode_scram, encode_scram};

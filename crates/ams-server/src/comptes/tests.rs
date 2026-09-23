@@ -150,9 +150,9 @@ async fn une_modification_qui_renonce_ne_pose_rien() {
     let magasin = magasin(&atelier, std::vec![compte("marc", &["marc@exemple.test"])]);
     let issue = magasin.modifier(|comptes| {
         comptes.clear();
-        Err(Faute::Introuvable)
+        Err(super::INTROUVABLE)
     });
-    assert!(matches!(issue, Err(Faute::Introuvable)));
+    assert!(matches!(issue, Err(Faute::Introuvable(_))));
     assert_eq!(magasin.vue().len(), 1);
     assert!(
         !atelier.0.join("comptes.bin").exists(),
@@ -303,7 +303,7 @@ async fn modifier_n_efface_pas_ce_qu_un_autre_a_pose() {
             let marc = comptes
                 .iter_mut()
                 .find(|vu| vu.login == "marc")
-                .ok_or(Faute::Introuvable)?;
+                .ok_or(super::INTROUVABLE)?;
             marc.addresses = std::vec![String::from("marc@ailleurs.test")];
             Ok(())
         })

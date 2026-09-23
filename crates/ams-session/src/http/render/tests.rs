@@ -10,11 +10,31 @@ use ams_api::Reason;
 use ams_proto_imap::Flags;
 
 use super::{
-    AccountRow, BanRow, FlagPatch, MailboxRow, MessageRow, read_account_body, read_flag_patch,
-    read_own_password_body, read_search_criteria, write_account, write_accounts, write_bans,
-    write_domains, write_health, write_mailbox, write_mailboxes, write_message, write_messages,
-    write_metrics, write_search,
+    AccountRow, BanRow, DeviceRow, FlagPatch, MailboxRow, MessageRow, read_account_body,
+    read_flag_patch, read_own_password_body, read_search_criteria, write_account, write_accounts,
+    write_bans, write_devices, write_domains, write_health, write_mailbox, write_mailboxes,
+    write_message, write_messages, write_metrics, write_search,
 };
+
+/// Un appareil d'essai.
+fn appareil() -> DeviceRow<'static> {
+    DeviceRow {
+        id: "a1b2c3",
+        name: "iPhone de Marie",
+        enrolled: 1_790_000_000,
+        last_seen: 1_790_003_600,
+    }
+}
+
+/// Un appareil qui n'a jamais ouvert de session.
+fn appareil_neuf() -> DeviceRow<'static> {
+    DeviceRow {
+        id: "d4e5f6",
+        name: "",
+        enrolled: 1_790_000_000,
+        last_seen: 0,
+    }
+}
 
 /// Un tampon confortable.
 const PLACE: usize = 4_096;
@@ -351,7 +371,7 @@ fn un_corps_qui_n_est_pas_une_modification_se_refuse() {
 #[test]
 fn chaque_tampon_insuffisant_se_dit() {
     type Ecrivain = fn(&mut [u8]) -> Result<&[u8], ams_api::Error>;
-    let ecrivains: [(&str, Ecrivain); 14] = [
+    let ecrivains: [(&str, Ecrivain); 16] = [
         ("mailboxes", |place| write_mailboxes(&[boite()], place)),
         ("mailbox", |place| write_mailbox(&boite(), place)),
         ("messages", |place| {
@@ -378,6 +398,10 @@ fn chaque_tampon_insuffisant_se_dit() {
             write_domains(&["exemple.test", "autre.test"], place)
         }),
         ("bans", |place| write_bans(&[bannissement()], place)),
+        ("devices", |place| write_devices(&[appareil()], place)),
+        // Un compte SANS appareil écrit un tableau vide : une autre suite
+        // d'écritures, donc d'autres places à manquer.
+        ("devices-vide", |place| write_devices(&[], place)),
         ("search", |place| write_search(&[3, 41], 7, true, place)),
         // `complete: false` écrit un mot de plus : c'est une place de plus à
         // manquer.
@@ -909,4 +933,42 @@ fn un_uid_qui_ne_tient_pas_est_refuse() {
         let mut place = std::vec![0_u8; taille];
         assert!(super::write_uid_cree(1792, &mut place).is_err(), "{taille}");
     }
+}
+
+/// **LA LISTE DES APPAREILS DIT CE QU'IL FAUT POUR EN RÉVOQUER UN**, et rien de
+/// plus : pas de clef publique, pas d'identifiant matériel.
+#[test]
+fn la_liste_des_appareils_rend_ce_qu_il_faut() {
+    let mut place = [0_u8; PLACE];
+    let ecrit = write_devices(&[appareil(), appareil_neuf()], &mut place).expect("écrivable");
+    let rendu = std::str::from_utf8(ecrit).expect("utf8");
+
+    assert!(rendu.contains("\"id\":\"a1b2c3\""), "{rendu}");
+    assert!(rendu.contains("\"name\":\"iPhone de Marie\""), "{rendu}");
+    assert!(rendu.contains("\"enrolledAt\":1790000000"), "{rendu}");
+    assert!(rendu.contains("\"lastSeenAt\":1790003600"), "{rendu}");
+
+    // **ZÉRO S'ÉCRIT, IL NE S'OMET PAS** : un client qui doit distinguer
+    // « absent » de « zéro » finit par traiter les deux différemment.
+    assert!(rendu.contains("\"lastSeenAt\":0"), "{rendu}");
+    assert!(
+        rendu.contains("\"name\":\"\""),
+        "un nom vide s'écrit : {rendu}"
+    );
+
+    // ET CE QUI N'Y EST PAS N'Y EST PAS.
+    assert!(!rendu.contains("publicKey"), "{rendu}");
+    assert!(!rendu.contains("login"), "{rendu}");
+}
+
+/// **UN COMPTE SANS APPAREIL REND UN TABLEAU VIDE**, et non une absence : c'est
+/// l'état de tout compte avant son premier enrôlement.
+#[test]
+fn un_compte_sans_appareil_rend_un_tableau_vide() {
+    let mut place = [0_u8; PLACE];
+    let ecrit = write_devices(&[], &mut place).expect("écrivable");
+    assert_eq!(
+        std::str::from_utf8(ecrit).expect("utf8"),
+        "{\"devices\":[]}"
+    );
 }

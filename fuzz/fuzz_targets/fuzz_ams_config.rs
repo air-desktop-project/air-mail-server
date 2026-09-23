@@ -126,6 +126,12 @@ struct Entree {
     /// que les transporter. Les lier ici cacherait ce partage au lieu de
     /// l'éprouver.
     scram: [String; 2],
+    /// Le magasin des appareils enrôlés — UNE CHAÎNE LIBRE, y compris vide.
+    ///
+    /// Vide, le serveur ne sert pas les sessions par clef. Ce format-ci ne
+    /// fait que transporter le chemin ; il ne le valide pas, et c'est
+    /// délibéré — c'est au serveur de dire qu'un fichier ne s'ouvre pas.
+    appareils: String,
     /// Le dossier des rapports TLS, et le drapeau de remise — LIBRES tous les
     /// deux, y compris incohérents entre eux.
     tlsrpt: String,
@@ -187,6 +193,7 @@ fuzz_target!(|entree: Entree| {
         imap_implicit_tls: entree.imap_implicite,
         scram_key: entree.scram[0].clone(),
         scram_store: entree.scram[1].clone(),
+        devices: entree.appareils.clone(),
         require_fqdn_helo: entree.helo_qualifie,
         require_fqdn_sender: entree.expediteur_qualifie,
         require_fqdn_recipient: entree.destinataire_qualifie,
