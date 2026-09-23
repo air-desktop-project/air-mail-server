@@ -188,6 +188,20 @@ pub struct Authentication<'a, 'd> {
     pub dkim: &'d [DkimSeen<'a>],
     /// Ce que DMARC a rendu, et pour le domaine de quel `From:`.
     pub dmarc: Option<(DmarcResult, &'a [u8])>,
+    /// Le compte qui s'est authentifié en SMTP, s'il y en a un (§2.7.4).
+    ///
+    /// # CE N'EST PAS UNE MÉTHODE D'AUTHENTIFICATION DE PLUS, C'EST L'AUTRE SENS
+    ///
+    /// `spf`, `dkim` et `dmarc` jugent ce qu'un INCONNU prétend être. `auth`,
+    /// lui, consigne que ce serveur a lui-même ouvert la porte à un compte
+    /// qu'il connaît : la question n'est plus « ce message dit-il vrai ? » mais
+    /// « au nom de qui l'avons-nous accepté ? ».
+    ///
+    /// **Les deux ne cohabitent pas.** Une soumission authentifiée n'est pas
+    /// du courrier entrant, et lui appliquer les trois autres méthodes écrit
+    /// `dmarc=fail` sur le courrier de son propre client — un verdict d'usurpation
+    /// contre quelqu'un qui vient de prouver son identité.
+    pub auth: Option<&'a [u8]>,
 }
 
 /// Ce qu'il faut au plus pour écrire cet en-tête.
@@ -212,6 +226,7 @@ pub fn authres_max(authentication: &Authentication<'_, '_>) -> usize {
                 .map_or(0, |(_, _, domaine)| domaine.len()),
         )
         .saturating_add(authentication.dmarc.map_or(0, |(_, domaine)| domaine.len()))
+        .saturating_add(authentication.auth.map_or(0, <[u8]>::len))
         .saturating_add(signatures)
 }
 
@@ -262,6 +277,11 @@ pub fn write_authres<'b>(
     {
         return Err(Error::NotPrintable);
     }
+    if let Some(compte) = authentication.auth
+        && !jeton_recevable(compte)
+    {
+        return Err(Error::NotPrintable);
+    }
 
     let mut ecrits = pousser(sortie, 0, b"Authentication-Results: ")?;
     ecrits = pousser(sortie, ecrits, authentication.serv_id)?;
@@ -271,6 +291,7 @@ pub fn write_authres<'b>(
     if authentication.spf.is_none()
         && authentication.dmarc.is_none()
         && authentication.dkim.is_empty()
+        && authentication.auth.is_none()
     {
         ecrits = pousser(sortie, ecrits, b"; none\r\n")?;
         return sortie.get(..ecrits).ok_or(Error::BufferTooSmall);
@@ -279,6 +300,12 @@ pub fn write_authres<'b>(
     // **CHAQUE RÉSULTAT SUR SA LIGNE**, repliée par un blanc de continuation.
     // §2.2 de RFC 5322 borne une ligne à 998 octets, et huit signatures avec
     // leurs domaines la dépasseraient.
+    // **`auth` VIENT EN PREMIER**, parce qu'il dit sous quelle autorité tout le
+    // reste a été accepté. §2.7.4 : `auth=pass` avec la propriété `smtp.auth`.
+    if let Some(compte) = authentication.auth {
+        ecrits = pousser(sortie, ecrits, b";\r\n\tauth=pass smtp.auth=")?;
+        ecrits = pousser(sortie, ecrits, compte)?;
+    }
     if let Some((resultat, identite, domaine)) = authentication.spf {
         ecrits = pousser(sortie, ecrits, b";\r\n\tspf=")?;
         ecrits = pousser(sortie, ecrits, resultat.name().as_bytes())?;

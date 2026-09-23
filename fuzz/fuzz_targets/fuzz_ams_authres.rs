@@ -57,6 +57,8 @@ struct Entree {
     spf: Option<(u8, bool, Vec<u8>)>,
     dkim: Vec<Signature>,
     dmarc: Option<(u8, Vec<u8>)>,
+    /// Le compte d'une soumission authentifiée (§2.7.4), s'il y en a un.
+    auth: Option<Vec<u8>>,
     place: u16,
 }
 
@@ -121,6 +123,7 @@ fuzz_target!(|entree: Entree| {
             )
         }),
         dkim: &signatures,
+        auth: entree.auth.as_deref(),
         dmarc: entree
             .dmarc
             .as_ref()
@@ -145,7 +148,11 @@ fuzz_target!(|entree: Entree| {
         let ecrit = &tampon[..combien];
         let annonces = signatures.len()
             + usize::from(entree.spf.is_some())
-            + usize::from(entree.dmarc.is_some());
+            + usize::from(entree.dmarc.is_some())
+            // `auth=` EST UN RÉSULTAT COMME LES AUTRES au sens du comptage :
+            // il a son `;` devant lui, et l'oublier ici ferait croire qu'un
+            // résultat est apparu de nulle part.
+            + usize::from(entree.auth.is_some());
         verifier(ecrit, (annonces > 0).then_some(annonces));
     }
 

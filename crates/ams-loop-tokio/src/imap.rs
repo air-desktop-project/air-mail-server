@@ -259,9 +259,15 @@ fn journaliser(pair: std::net::SocketAddr, resume: &ImapSummary, duree: core::ti
     if resume.banned {
         return;
     }
+    // **C'EST LE MÉCANISME QUI DIT SI LA SESSION S'EST OUVERTE**, et non
+    // `authenticated` : celui-ci vaut `state() != NotAuthenticated`, et un
+    // `LOGOUT` fait passer l'état à `Logout` — si bien qu'une session jamais
+    // ouverte s'y comptait comme ouverte. Un mécanisme, lui, n'existe QU'APRÈS
+    // une authentification réussie. Trouvé au premier essai en production, le
+    // 2026-09-23 : « sans authentification, session ouverte » sur la même ligne.
     let issue: &dyn core::fmt::Display = if resume.injected {
         &"REFUSÉ, injection derrière STARTTLS"
-    } else if resume.authenticated {
+    } else if resume.mecanisme.is_some() {
         &"session ouverte"
     } else {
         &"session NON ouverte"

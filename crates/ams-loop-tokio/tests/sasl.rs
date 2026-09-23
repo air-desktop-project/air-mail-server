@@ -307,3 +307,122 @@ fn les_identifiants_de_test_sont_bien_ceux_qu_on_croit() {
     assert_eq!(lu.authentication_identity, commun::COMPTE);
     assert_ne!(lu.password, commun::SECRET);
 }
+
+// ── CE QUE L'EN-TÊTE DE TRACE DIT D'UNE SOUMISSION ──────────────────────────
+
+/// Un témoin qui ne retient qu'une chose : l'en-tête `Authentication-Results`.
+#[derive(Clone, Default)]
+struct Trace(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl ams_loop_tokio::Delivery for Trace {
+    fn add_recipient(&mut self, _address: &[u8]) -> Result<(), ams_loop_tokio::DeliveryFailure> {
+        Ok(())
+    }
+    fn append(&mut self, _chunk: &[u8]) -> Result<(), ams_loop_tokio::DeliveryFailure> {
+        Ok(())
+    }
+    fn finish(&mut self) -> Result<(), ams_loop_tokio::DeliveryFailure> {
+        Ok(())
+    }
+    fn abort(&mut self) {}
+    fn trace(&mut self, entete: &[u8]) {
+        if let Ok(mut place) = self.0.lock() {
+            place.clear();
+            place.extend_from_slice(entete);
+        }
+    }
+}
+
+/// Conduit un dialogue chiffré et rend l'en-tête de trace qui en est sorti.
+async fn trace_chiffree(nom: &str, dialogue: &'static str) -> Option<String> {
+    let materiel = materiel(nom)?;
+    let ecouteur = TcpListener::bind("127.0.0.1:0").await.expect("écoute");
+    let adresse = ecouteur.local_addr().expect("adresse");
+    let tls = Arc::clone(&materiel.tls);
+    let vu = Trace::default();
+    let copie = vu.clone();
+
+    let serveur = tokio::spawn(async move {
+        let (mut flux, _) = ecouteur.accept().await.expect("connexion");
+        let garde = SharedGuard::new(4, Thresholds::DEFAULT);
+        let service = Service {
+            config: config(true, true),
+            guard: &garde,
+            timeouts: Timeouts::default(),
+            tls: Some(tls),
+            spf: None,
+            dkim: None,
+            dmarc: None,
+            reports: None,
+        };
+        let mut temoin = copie;
+        let _ = serve_connection(&mut flux, &service, NotreDomaine, &mut temoin, PAIR).await;
+    });
+
+    let client = tokio::task::spawn_blocking(move || {
+        let mut processus = Command::new("openssl")
+            .args(["s_client", "-connect"])
+            .arg(format!("127.0.0.1:{}", adresse.port()))
+            .args(["-starttls", "smtp", "-ign_eof"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .ok()?;
+        processus
+            .stdin
+            .as_mut()?
+            .write_all(dialogue.as_bytes())
+            .ok()?;
+        processus.wait_with_output().ok()
+    });
+
+    let _ = client.await.ok()?;
+    let _ = serveur.await;
+    let place = vu.0.lock().ok()?;
+    Some(String::from_utf8_lossy(&place).into_owned())
+}
+
+/// **UNE SOUMISSION AUTHENTIFIÉE NE PORTE QUE `auth=`** (RFC 8601 §2.7.4).
+///
+/// # CE QUE CET ESSAI EMPÊCHE DE REVENIR
+///
+/// Le serveur évaluait SPF, DKIM et DMARC sur une soumission qu'il venait
+/// lui-même d'authentifier, et écrivait `dmarc=fail` sur le courrier de son
+/// propre client — vu en production le 2026-09-23 sur la passerelle
+/// `ofrou-sierre`, qui se présente en `HELO 127.0.0.1` et n'a donc rien
+/// d'aligné en SPF. Un verdict d'usurpation contre quelqu'un qui vient de
+/// prouver son identité.
+///
+/// **Sans le correctif, cet en-tête dirait `none`** — car rien n'aurait été
+/// vérifié et le compte ne serait pas nommé.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn une_soumission_authentifiee_ne_porte_que_le_compte() {
+    let Some(trace) = trace_chiffree(
+        "sasl-authres-soumission",
+        concat!(
+            "EHLO client.example\r\n",
+            "AUTH PLAIN AGplYW4Ab3V2cmUtdG9p\r\n",
+            "MAIL FROM:<jean@example.com>\r\n",
+            "RCPT TO:<jean@example.com>\r\n",
+            "DATA\r\n",
+            "From: jean@example.com\r\nSubject: alerte\r\n\r\ncorps\r\n.\r\n",
+            "QUIT\r\n",
+        ),
+    )
+    .await
+    else {
+        return;
+    };
+    assert!(
+        trace.contains("auth=pass smtp.auth=jean"),
+        "le compte doit être nommé : {trace}"
+    );
+    // **AUCUNE DES TROIS MÉTHODES D'ENTRANT**, puisqu'aucune n'a été conduite.
+    for absent in ["dmarc=", "spf=", "dkim=", "none"] {
+        assert!(
+            !trace.contains(absent),
+            "`{absent}` n'a rien à faire sur une soumission : {trace}"
+        );
+    }
+}

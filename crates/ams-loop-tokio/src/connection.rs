@@ -1233,8 +1233,29 @@ where
     // au fil des vérifications, et rien n'est écrit qui n'ait été mesuré.
     let mut dkim_vus: Vec<(ams_mime::DkimResult, String, String)> = Vec::new();
     let mut dmarc_vu: Option<(ams_mime::DmarcResult, String)> = None;
+    // ── UNE SOUMISSION AUTHENTIFIÉE N'EST PAS DU COURRIER ENTRANT ───────────
+    //
+    // SPF, DKIM et DMARC répondent à une question : **ce message vient-il bien
+    // de qui il prétend ?** Elle ne se pose que pour un inconnu. Quand le pair
+    // s'est authentifié, ce serveur n'est pas le destinataire du message, il en
+    // est l'ORIGINE — et il sait déjà qui parle, puisqu'il vient de le lui
+    // faire prouver.
+    //
+    // **LES ÉVALUER QUAND MÊME ÉCRIT `dmarc=fail` SUR LE COURRIER DE SON PROPRE
+    // CLIENT.** Vu en production le 2026-09-23 : une passerelle qui se présente
+    // en `HELO 127.0.0.1` — ce qu'on lui a accordé — n'a rien d'aligné en SPF et
+    // n'est pas signée à la soumission ; elle recevait donc un verdict
+    // d'usurpation après avoir prouvé son identité. Sans dossier de quarantaine
+    // configuré, rien n'était écarté ; avec, ses alertes auraient été mises de
+    // côté en silence.
+    //
+    // **CE QUI PROTÈGE ICI, CE N'EST PAS DMARC**, c'est la règle « un compte
+    // n'écrit qu'en son nom », que la remise vérifie sur chaque soumission
+    // authentifiée et qui, elle, ne bouge pas.
+    let soumission = session.is_authenticated();
     if !refuse
         && echec.is_none()
+        && !soumission
         && let Some(mut lecture) = flux
     {
         let mut authentifies = Authenticated::default();
@@ -1415,18 +1436,23 @@ where
             selector: selecteur.as_bytes(),
         })
         .collect();
+    // **UNE SOUMISSION NE PORTE QUE `auth=`.** Les autres méthodes n'ont pas été
+    // conduites ; en écrire le résultat serait inventer une mesure.
     let identite = session.sender_identity();
-    let spf_vu = session.sender_verdict().and_then(|verdict| {
-        let vue = identite.as_ref()?;
-        Some((
-            resultat_spf(verdict),
-            match vue.scope {
-                SpfIdentity::Helo => ams_mime::SpfIdentity::Helo,
-                SpfIdentity::MailFrom => ams_mime::SpfIdentity::MailFrom,
-            },
-            vue.domain,
-        ))
-    });
+    let spf_vu = (!soumission)
+        .then(|| session.sender_verdict())
+        .flatten()
+        .and_then(|verdict| {
+            let vue = identite.as_ref()?;
+            Some((
+                resultat_spf(verdict),
+                match vue.scope {
+                    SpfIdentity::Helo => ams_mime::SpfIdentity::Helo,
+                    SpfIdentity::MailFrom => ams_mime::SpfIdentity::MailFrom,
+                },
+                vue.domain,
+            ))
+        });
     let mut trace = [0_u8; AUTHRES_RESERVE];
     if ams_mime::write_authres_padded(
         &mut trace,
@@ -1437,6 +1463,9 @@ where
             dmarc: dmarc_vu
                 .as_ref()
                 .map(|(resultat, domaine)| (*resultat, domaine.as_bytes())),
+            // Le compte est celui que la POLITIQUE a canonisé, jamais ce que le
+            // pair a écrit — même règle que pour le journal.
+            auth: session.submitter(),
         },
     )
     .is_ok()

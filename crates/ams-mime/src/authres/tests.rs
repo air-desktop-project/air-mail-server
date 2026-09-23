@@ -27,6 +27,7 @@ fn les_trois_verdicts_s_ecrivent() {
         spf: Some((SpfResult::Pass, SpfIdentity::MailFrom, b"example.net")),
         dkim: &signatures,
         dmarc: Some((DmarcResult::Fail, b"example.com")),
+        auth: None,
     });
     assert_eq!(
         entete,
@@ -47,6 +48,7 @@ fn sans_rien_de_verifie_le_mot_est_none() {
         spf: None,
         dkim: &[],
         dmarc: None,
+        auth: None,
     });
     assert_eq!(entete, "Authentication-Results: mail.nous.test; none\r\n");
 }
@@ -68,6 +70,7 @@ fn chaque_mecanisme_s_ecrit_seul() {
         spf: None,
         dkim: &signatures,
         dmarc: None,
+        auth: None,
     });
     assert_eq!(
         seule_dkim,
@@ -80,6 +83,7 @@ fn chaque_mecanisme_s_ecrit_seul() {
         spf: Some((SpfResult::Neutral, SpfIdentity::MailFrom, b"example.net")),
         dkim: &[],
         dmarc: None,
+        auth: None,
     });
     assert_eq!(
         seul_spf,
@@ -92,6 +96,7 @@ fn chaque_mecanisme_s_ecrit_seul() {
         spf: None,
         dkim: &[],
         dmarc: Some((DmarcResult::None, b"example.com")),
+        auth: None,
     });
     assert_eq!(
         seul_dmarc,
@@ -119,6 +124,7 @@ fn aucune_ligne_ne_depasse_la_borne_de_rfc_5322() {
         spf: Some((SpfResult::Pass, SpfIdentity::MailFrom, domaine.as_bytes())),
         dkim: &signatures,
         dmarc: Some((DmarcResult::Pass, domaine.as_bytes())),
+        auth: None,
     });
     for ligne in entete.split("\r\n") {
         assert!(ligne.len() <= 998, "{} octets : {ligne}", ligne.len());
@@ -144,6 +150,7 @@ fn plus_de_signatures_que_la_borne_est_refuse() {
         spf: None,
         dkim: &signatures,
         dmarc: None,
+        auth: None,
     };
     let mut place = std::vec![0_u8; authres_max(&authentication)];
     assert_eq!(
@@ -180,6 +187,7 @@ fn une_valeur_qui_ecrirait_un_entete_est_refusee() {
                     spf: None,
                     dkim: &signatures,
                     dmarc: None,
+                    auth: None,
                 }
             ),
             Err(Error::NotPrintable),
@@ -194,6 +202,7 @@ fn une_valeur_qui_ecrirait_un_entete_est_refusee() {
                     spf: None,
                     dkim: &[],
                     dmarc: None,
+                    auth: None,
                 }
             ),
             Err(Error::NotPrintable),
@@ -207,6 +216,7 @@ fn une_valeur_qui_ecrirait_un_entete_est_refusee() {
                     spf: Some((SpfResult::Pass, SpfIdentity::MailFrom, hostile)),
                     dkim: &[],
                     dmarc: None,
+                    auth: None,
                 }
             ),
             Err(Error::NotPrintable),
@@ -220,6 +230,7 @@ fn une_valeur_qui_ecrirait_un_entete_est_refusee() {
                     spf: None,
                     dkim: &[],
                     dmarc: Some((DmarcResult::Pass, hostile)),
+                    auth: None,
                 }
             ),
             Err(Error::NotPrintable),
@@ -238,6 +249,7 @@ fn une_valeur_qui_ecrirait_un_entete_est_refusee() {
                     spf: None,
                     dkim: &signatures,
                     dmarc: None,
+                    auth: None,
                 }
             ),
             Err(Error::NotPrintable),
@@ -258,6 +270,7 @@ fn une_valeur_trop_longue_est_refusee() {
                 spf: None,
                 dkim: &[],
                 dmarc: None,
+                auth: None,
             }
         ),
         Err(Error::NotPrintable)
@@ -272,6 +285,7 @@ fn une_valeur_trop_longue_est_refusee() {
                 spf: None,
                 dkim: &[],
                 dmarc: None,
+                auth: None,
             }
         )
         .is_ok()
@@ -326,6 +340,7 @@ fn l_identite_helo_s_ecrit_aussi() {
         spf: Some((SpfResult::SoftFail, SpfIdentity::Helo, b"client.example")),
         dkim: &[],
         dmarc: None,
+        auth: None,
     });
     assert!(
         entete.contains("spf=softfail smtp.helo=client.example"),
@@ -345,6 +360,7 @@ fn un_tampon_trop_court_est_une_erreur_pas_un_entete_tronque() {
         spf: Some((SpfResult::Fail, SpfIdentity::MailFrom, b"example.net")),
         dkim: &signatures,
         dmarc: Some((DmarcResult::Fail, b"example.com")),
+        auth: None,
     };
     // **CHAQUE POINT DE RUPTURE**, et pas seulement le premier.
     let mut refuses = 0_usize;
@@ -365,6 +381,7 @@ fn un_tampon_trop_court_est_une_erreur_pas_un_entete_tronque() {
         spf: None,
         dkim: &[],
         dmarc: None,
+        auth: None,
     };
     for court in 0..authres_max(&vide) {
         let mut place = std::vec![0_u8; court];
@@ -405,6 +422,7 @@ fn les_types_se_copient_et_se_deboguent() {
         spf: None,
         dkim: &[],
         dmarc: None,
+        auth: None,
     };
     let jumelle = authentication;
     assert!(!std::format!("{jumelle:?}").is_empty());
@@ -428,6 +446,7 @@ fn l_entete_rempli_occupe_exactement_la_place() {
         spf: Some((SpfResult::Pass, SpfIdentity::MailFrom, b"example.net")),
         dkim: &signatures,
         dmarc: Some((DmarcResult::Fail, b"example.com")),
+        auth: None,
     };
     for taille in [64_usize, 128, 512, AUTHRES_RESERVE, 4096] {
         let mut place = std::vec![0_u8; taille];
@@ -451,6 +470,7 @@ fn le_remplissage_est_une_continuation_valide() {
         spf: Some((SpfResult::Fail, SpfIdentity::MailFrom, b"example.net")),
         dkim: &[],
         dmarc: Some((DmarcResult::Fail, b"example.com")),
+        auth: None,
     };
     let ecrit = write_authres_padded(&mut place, &authentication).expect("composable");
     let texte = std::str::from_utf8(ecrit).expect("de l'ASCII");
@@ -500,6 +520,7 @@ fn les_signatures_qui_ne_tiennent_pas_sont_laissees() {
             spf: Some((SpfResult::Pass, SpfIdentity::MailFrom, b"example.net")),
             dkim: &signatures,
             dmarc: Some((DmarcResult::Pass, b"example.com")),
+            auth: None,
         },
     )
     .expect("composable");
@@ -523,6 +544,7 @@ fn une_place_trop_petite_est_une_erreur() {
         spf: Some((SpfResult::Pass, SpfIdentity::MailFrom, b"example.net")),
         dkim: &[],
         dmarc: None,
+        auth: None,
     };
     for taille in 0..40 {
         let mut place = std::vec![0_u8; taille];
@@ -546,6 +568,7 @@ fn le_cas_none_se_remplit_aussi() {
             spf: None,
             dkim: &[],
             dmarc: None,
+            auth: None,
         },
     )
     .expect("composable");
@@ -572,6 +595,7 @@ fn un_refus_de_valeur_traverse_le_remplissage() {
                 spf: None,
                 dkim: &[],
                 dmarc: None,
+                auth: None,
             }
         ),
         Err(Error::NotPrintable)
@@ -592,6 +616,7 @@ fn un_refus_de_valeur_traverse_le_remplissage() {
                 spf: None,
                 dkim: &signatures,
                 dmarc: None,
+                auth: None,
             }
         ),
         Err(Error::TooManyFields { limit: DKIM_MAX })
@@ -633,6 +658,7 @@ fn aucune_ligne_ne_depasse_la_borne_quelle_que_soit_la_reserve() {
             spf: Some((SpfResult::Pass, SpfIdentity::MailFrom, b"example.net")),
             dkim: &signatures,
             dmarc: Some((DmarcResult::Pass, b"example.com")),
+            auth: None,
         },
         // Le cas le plus court : rien n'a été vérifié. C'est lui qui laisse le
         // plus de place à bourrer, donc le plus long bourrage.
@@ -641,6 +667,7 @@ fn aucune_ligne_ne_depasse_la_borne_quelle_que_soit_la_reserve() {
             spf: None,
             dkim: &[],
             dmarc: None,
+            auth: None,
         },
     ] {
         for taille in [
@@ -704,6 +731,7 @@ fn une_signature_sans_proprietes_s_ecrit_sans_elles() {
             spf: None,
             dkim: &sans,
             dmarc: None,
+            auth: None,
         },
     )
     .expect("composable");
@@ -742,6 +770,7 @@ fn les_deux_formes_de_signature_se_composent_ensemble() {
             spf: None,
             dkim: &deux,
             dmarc: None,
+            auth: None,
         },
     )
     .expect("composable");
@@ -783,10 +812,153 @@ fn une_moitie_de_paire_est_refusee() {
                     spf: None,
                     dkim: &bancale,
                     dmarc: None,
+                    auth: None,
                 },
             )
             .is_err(),
             "`d={domaine:?}` `s={selecteur:?}` aurait dû être refusé"
         );
     }
+}
+
+/// **UNE SOUMISSION AUTHENTIFIÉE NE PORTE QUE `auth=`** (§2.7.4).
+///
+/// Les trois autres méthodes jugent ce qu'un INCONNU prétend être. Sur une
+/// soumission, ce serveur est l'origine et connaît déjà le déposant : il
+/// consigne au nom de qui il a accepté, et n'invente pas de verdict pour des
+/// vérifications qu'il n'a pas conduites.
+#[test]
+fn une_soumission_authentifiee_ne_porte_que_le_compte() {
+    let entete = composer(&Authentication {
+        serv_id: NOUS,
+        spf: None,
+        dkim: &[],
+        dmarc: None,
+        auth: Some(b"ofrou-sierre"),
+    });
+    assert_eq!(
+        entete,
+        "Authentication-Results: mail.nous.test;\r\n\
+         \tauth=pass smtp.auth=ofrou-sierre\r\n"
+    );
+}
+
+/// **`auth=` EMPÊCHE LE MOT `none`.**
+///
+/// Sans cela, une soumission authentifiée serait écrite « rien n'a été
+/// vérifié » — alors qu'on a précisément vérifié la seule chose qui compte ici.
+#[test]
+fn le_compte_seul_n_est_pas_none() {
+    let entete = composer(&Authentication {
+        serv_id: NOUS,
+        spf: None,
+        dkim: &[],
+        dmarc: None,
+        auth: Some(b"contact"),
+    });
+    assert!(!entete.contains("none"), "{entete}");
+}
+
+/// **`auth=` VIENT EN PREMIER**, parce qu'il dit sous quelle autorité le reste
+/// a été accepté. L'ordre n'est pas cosmétique : un lecteur qui parcourt
+/// l'en-tête doit apprendre d'abord d'où vient le message.
+#[test]
+fn le_compte_precede_les_autres_methodes() {
+    let signatures = [DkimSeen {
+        result: DkimResult::Pass,
+        domain: b"example.net",
+        selector: b"sel",
+    }];
+    let entete = composer(&Authentication {
+        serv_id: NOUS,
+        spf: Some((SpfResult::Pass, SpfIdentity::MailFrom, b"example.net")),
+        dkim: &signatures,
+        dmarc: Some((DmarcResult::Pass, b"example.net")),
+        auth: Some(b"contact"),
+    });
+    let rang_auth = entete.find("auth=pass").expect("écrit");
+    assert!(rang_auth < entete.find("spf=").expect("écrit"), "{entete}");
+    assert!(rang_auth < entete.find("dkim=").expect("écrit"), "{entete}");
+    assert!(
+        rang_auth < entete.find("dmarc=").expect("écrit"),
+        "{entete}"
+    );
+}
+
+/// **UN NOM DE COMPTE IMPRÉSENTABLE EST REFUSÉ, PAS ÉCHAPPÉ.**
+///
+/// Même règle que pour les domaines : un octet qu'on ne sait pas écrire dans
+/// un en-tête casserait la syntaxe de RFC 8601, et un en-tête cassé se lit
+/// comme un en-tête d'un autre.
+#[test]
+fn un_compte_impresentable_est_refuse() {
+    let mut place = [0_u8; AUTHRES_RESERVE];
+    assert_eq!(
+        write_authres(
+            &mut place,
+            &Authentication {
+                serv_id: NOUS,
+                spf: None,
+                dkim: &[],
+                dmarc: None,
+                auth: Some(b"con\r\ntact"),
+            }
+        ),
+        Err(Error::NotPrintable)
+    );
+}
+
+/// La place réservée majore bien ce que le compte occupe.
+#[test]
+fn la_place_reservee_tient_compte_du_compte() {
+    let court = Authentication {
+        serv_id: NOUS,
+        spf: None,
+        dkim: &[],
+        dmarc: None,
+        auth: Some(b"a"),
+    };
+    let long = Authentication {
+        auth: Some(b"un-nom-de-compte-nettement-plus-long"),
+        ..court
+    };
+    assert!(authres_max(&long) > authres_max(&court));
+    // Et il compose vraiment dans la place annoncée.
+    let mut place = std::vec![0_u8; authres_max(&long)];
+    assert!(write_authres(&mut place, &long).is_ok());
+}
+
+/// **UN TAMPON TROP COURT EST UNE ERREUR, JAMAIS UN EN-TÊTE TRONQUÉ** — y
+/// compris au milieu du champ `auth`.
+///
+/// On éprouve TOUTES les tailles plutôt que d'en deviner deux : la coupure
+/// peut tomber dans le nom de la propriété comme dans le nom du compte, et un
+/// en-tête coupé en deux se lirait comme un en-tête d'un autre.
+#[test]
+fn une_coupure_dans_le_compte_est_refusee_a_toutes_les_tailles() {
+    let authentification = Authentication {
+        serv_id: NOUS,
+        spf: None,
+        dkim: &[],
+        dmarc: None,
+        auth: Some(b"ofrou-sierre"),
+    };
+    let entier = composer(&authentification).len();
+    let mut refus = 0_usize;
+    for taille in 0..entier {
+        let mut place = std::vec![0_u8; taille];
+        assert_eq!(
+            write_authres(&mut place, &authentification),
+            Err(Error::BufferTooSmall),
+            "taille {taille} aurait dû refuser"
+        );
+        refus = refus.saturating_add(1);
+    }
+    assert_eq!(
+        refus, entier,
+        "toutes les tailles courtes ont été éprouvées"
+    );
+    // Et à la taille exacte, il compose.
+    let mut place = std::vec![0_u8; entier];
+    assert!(write_authres(&mut place, &authentification).is_ok());
 }

@@ -652,6 +652,34 @@ exploitant qui croit SCRAM posé chez tous ses clients n'apprend que là qu'un
 seul d'entre eux ne le fait pas. IMAP ajoute `LOGIN` — sa commande d'origine,
 qui n'est pas un mécanisme SASL —, et POP3 n'offre que `USER/PASS`.
 
+### Une soumission authentifiée n'est pas du courrier entrant
+
+SPF, DKIM et DMARC répondent à une question : **ce message vient-il bien de qui
+il prétend ?** Elle ne se pose que pour un inconnu. Quand le pair s'est
+authentifié, ce serveur n'est pas le destinataire du message — il en est
+l'ORIGINE, et il sait déjà qui parle.
+
+Le serveur ne les évalue donc plus sur une soumission authentifiée. Il écrit à
+la place ce qu'il a réellement vérifié, et au nom de qui (RFC 8601 §2.7.4) :
+
+```
+Authentication-Results: mail.narro.ch;
+	auth=pass smtp.auth=ofrou-sierre
+```
+
+**Pourquoi ce n'est pas un affaiblissement.** Ce qui empêche un compte
+d'usurper une autre adresse n'est pas DMARC : c'est la règle « un compte
+n'écrit qu'en son nom », que la remise vérifie sur chaque soumission
+authentifiée et qui, elle, n'a pas bougé. Un `From:` qui n'appartient pas au
+compte est refusé, et l'incident nommé.
+
+**Ce que cela corrige.** Une passerelle qui se présente en `HELO 127.0.0.1` —
+ce qu'on lui accorde — n'a rien d'aligné en SPF et n'est pas signée à la
+soumission : elle recevait `dmarc=fail`, c'est-à-dire un verdict d'usurpation
+contre un client qui venait de prouver son identité. Sans dossier de
+quarantaine configuré, rien n'était écarté ; avec, ses alertes auraient été
+mises de côté en silence.
+
 #### Ce que le journal ne porte pas, et c'est délibéré
 
 - **Aucun secret** : ni mot de passe, ni preuve SCRAM, ni octets de liaison. Le
