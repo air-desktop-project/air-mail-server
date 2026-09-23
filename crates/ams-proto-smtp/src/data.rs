@@ -19,6 +19,32 @@
 //!
 //! Normaliser plutôt que refuser reviendrait à décider ce que l'expéditeur a
 //! voulu dire — et à se retrouver en désaccord avec le prochain saut.
+//!
+//! # LA SEULE DÉROGATION, ET POURQUOI ELLE NE ROUVRE PAS LA FAILLE
+//!
+//! **Sur une SOUMISSION AUTHENTIFIÉE, il n'y a pas de prochain saut en amont :
+//! ce serveur EST l'origine.** La contrebande a besoin de deux serveurs qui
+//! coupent le flux différemment — un relais qui transmet, un récepteur qui
+//! interprète. Quand un compte authentifié dépose un message ici, il n'y a rien
+//! avant nous : le message est composé par le pair, et c'est NOUS qui l'émettons
+//! ensuite, en `CRLF` propre. Le désaccord que la règle 2 empêche n'a pas
+//! d'endroit où se produire.
+//!
+//! [`DataReceiver::tolerant`] ouvre donc cette porte-là, et elle seule :
+//!
+//! - **le `LF` isolé devient une fin de ligne**, émise en `CRLF` — ce qui est
+//!   la seule lecture qu'un appareil qui l'écrit puisse avoir voulue ;
+//! - **le `CR` isolé reste REFUSÉ**, dans tous les cas. Il n'a aucune lecture
+//!   évidente — ni fin de ligne pour les uns, ni caractère pour les autres —,
+//!   et c'est lui que la contrebande de 2023 employait.
+//!
+//! **CE N'EST JAMAIS LE DÉFAUT.** Le courrier entrant, lui, garde la règle
+//! entière : c'est là que vivent les deux serveurs qui peuvent se contredire.
+//!
+//! Écrit le 2026-09-23, parce qu'une passerelle Milesight sur un chantier
+//! écrivait ses alertes en `LF` nu et que Postfix l'avait toujours tolérée. Le
+//! serveur refusait ses messages APRÈS les avoir acceptés jusqu'au `DATA` —
+//! l'appareil n'affichait qu'un « Erreur » muet.
 
 use crate::{Error, Limits};
 
@@ -106,6 +132,10 @@ pub struct DataReceiver {
     content_octets: u64,
     max_line: usize,
     max_message: u64,
+    /// Le `LF` isolé est-il rendu en `CRLF` plutôt que refusé ?
+    ///
+    /// **FAUX PAR DÉFAUT**, et vrai pour la seule soumission authentifiée.
+    tolere_le_lf: bool,
 }
 
 impl DataReceiver {
@@ -118,6 +148,20 @@ impl DataReceiver {
             content_octets: 0,
             max_line: limits.max_text_line_octets,
             max_message: max_message_octets,
+            tolere_le_lf: false,
+        }
+    }
+
+    /// Le même, qui TOLÈRE le `LF` isolé et le rend en `CRLF`.
+    ///
+    /// **À n'employer que pour une SOUMISSION AUTHENTIFIÉE** : voir l'en-tête
+    /// du module pour ce qui rend cette dérogation sûre, et pour ce qu'elle
+    /// n'ouvre pas — le `CR` isolé reste refusé.
+    #[must_use]
+    pub fn tolerant(limits: &Limits, max_message_octets: u64) -> Self {
+        Self {
+            tolere_le_lf: true,
+            ..Self::new(limits, max_message_octets)
         }
     }
 
@@ -205,6 +249,11 @@ impl DataReceiver {
                     self.scan = Scan::AfterDotCr;
                     Ok(Some((Event::NeedMore, 1)))
                 }
+                // Le `.` terminait la lecture précédente ; ce `LF` conclut.
+                b'\n' if self.tolere_le_lf => {
+                    self.scan = Scan::Done;
+                    Ok(Some((Event::Complete, 1)))
+                }
                 b'\n' => Err(DataFault::BareLineEnding),
                 _ => {
                     self.scan = Scan::InLine;
@@ -219,6 +268,22 @@ impl DataReceiver {
         let mut rang = 0_usize;
         while let Some(&octet) = input.get(rang) {
             match (self.scan, octet) {
+                // **LE `LF` ISOLÉ, QUAND ON LE TOLÈRE.** On rend d'abord ce qui
+                // précède, puis, au tour suivant, le `CRLF` de remplacement —
+                // les deux octets ne sont pas contigus dans l'entrée, et c'est
+                // exactement ce que fait déjà `Scan::AfterCr`.
+                (_, b'\n') if self.tolere_le_lf => {
+                    if rang > 0 {
+                        return Ok((self.cut(input, rang), rang));
+                    }
+                    // Un octet lu sur le fil, DEUX émis : le message grossit
+                    // d'un octet par ligne, et `SIZE` doit le compter tel qu'il
+                    // sera remis, non tel qu'il est arrivé.
+                    self.consume_wire(1)?;
+                    self.emit(2)?;
+                    self.end_line();
+                    return Ok((Event::Content(b"\r\n"), 1));
+                }
                 (_, b'\n') => return Err(DataFault::BareLineEnding),
                 (_, b'\r') => match input.get(rang.saturating_add(1)) {
                     Some(b'\n') => {
@@ -281,6 +346,21 @@ impl DataReceiver {
                     Ok((self.cut(input, rang), apres.saturating_add(1)))
                 }
             },
+            // **`<LF>.<LF>` TERMINE AUSSI, QUAND ON TOLÈRE LE `LF`.** Un
+            // appareil qui écrit ses lignes en `LF` nu écrit aussi sa fin de
+            // message ainsi : refuser celle-ci après avoir accepté celles-là
+            // laisserait le message sans terminaison, et la connexion pendrait
+            // jusqu'au délai.
+            Some(b'\n') if self.tolere_le_lf => {
+                if rang == 0 {
+                    self.scan = Scan::Done;
+                    Ok((Event::Complete, 2))
+                } else {
+                    // Le point a été compté au fil en entrant ici ; on le rend.
+                    self.line_octets = self.line_octets.saturating_sub(1);
+                    Ok((self.cut(input, rang), rang))
+                }
+            }
             Some(b'\n') => Err(DataFault::BareLineEnding),
             // Point ÉCHAPPÉ : il est consommé, jamais émis (RFC 5321 §4.5.2).
             Some(_) => {
@@ -409,6 +489,168 @@ mod tests {
 
     fn message(octets: &[u8]) -> Lecture {
         Lecture::Message(octets.to_vec())
+    }
+
+    // ── LA TOLÉRANCE AU `LF` NU, ET CE QU'ELLE N'OUVRE PAS ──────────────────
+
+    /// La même lecture, par un récepteur TOLÉRANT, et à toutes les tailles.
+    fn lire_tolerant(flux: &[u8], max_message: u64) -> Result<Lecture, DataFault> {
+        lire_tolerant_avec(flux, &Limits::DEFAULT, max_message)
+    }
+
+    fn lire_tolerant_avec(
+        flux: &[u8],
+        limits: &Limits,
+        max_message: u64,
+    ) -> Result<Lecture, DataFault> {
+        let mut reference: Option<Result<Lecture, DataFault>> = None;
+        for taille in 1..=flux.len() {
+            let mut receveur = DataReceiver::tolerant(limits, max_message);
+            let mut sortie = std::vec::Vec::new();
+            let (mut debut, mut fin) = (0_usize, 0_usize);
+            let obtenu = loop {
+                if debut == fin {
+                    if fin == flux.len() {
+                        break Ok(Lecture::Tronque);
+                    }
+                    fin = flux.len().min(fin.saturating_add(taille));
+                }
+                match receveur.next(&flux[debut..fin]) {
+                    Err(faute) => break Err(faute),
+                    Ok((evenement, consomme)) => {
+                        match evenement {
+                            Event::Complete => break Ok(Lecture::Message(sortie)),
+                            Event::Content(morceau) => sortie.extend_from_slice(morceau),
+                            Event::NeedMore => {}
+                        }
+                        assert!(consomme > 0, "ni consommé ni conclu");
+                        debut = debut.saturating_add(consomme);
+                    }
+                }
+            };
+            match &reference {
+                None => reference = Some(obtenu),
+                Some(attendu) => assert_eq!(
+                    &obtenu, attendu,
+                    "tranche de {taille} octets : résultat différent"
+                ),
+            }
+        }
+        reference.expect("un flux non vide")
+    }
+
+    #[test]
+    fn le_lf_nu_devient_un_crlf_quand_on_le_tolere() {
+        // **CE QUE L'APPAREIL A ÉCRIT, ET CE QUI SORT.** Une passerelle qui
+        // écrit ses lignes en `LF` nu voit son message rendu en `CRLF` — la
+        // seule lecture qu'elle puisse avoir voulue.
+        assert_eq!(
+            lire_tolerant(b"From: moi\nSujet: x\n\nbonjour\n.\n", 1024),
+            Ok(message(b"From: moi\r\nSujet: x\r\n\r\nbonjour\r\n"))
+        );
+        // Et un flux DÉJÀ en `CRLF` traverse inchangé : la tolérance n'abîme
+        // pas ce qui était juste.
+        assert_eq!(
+            lire_tolerant(b"From: moi\r\n\r\nbonjour\r\n.\r\n", 1024),
+            Ok(message(b"From: moi\r\n\r\nbonjour\r\n"))
+        );
+        // Les deux mêlés, ce que font les appareils qui recopient un en-tête
+        // et composent leur corps.
+        assert_eq!(
+            lire_tolerant(b"From: moi\r\nSujet: x\n\nbonjour\n.\r\n", 1024),
+            Ok(message(b"From: moi\r\nSujet: x\r\n\r\nbonjour\r\n"))
+        );
+    }
+
+    #[test]
+    fn le_cr_nu_reste_refuse_meme_quand_on_tolere_le_lf() {
+        // **C'EST LUI QUE LA CONTREBANDE DE 2023 EMPLOYAIT**, et il n'a aucune
+        // lecture évidente. La dérogation ne le couvre pas.
+        assert_eq!(
+            lire_tolerant(b"From: moi\rSujet: x\r\n.\r\n", 1024),
+            Err(DataFault::BareLineEnding)
+        );
+        // Y compris juste avant le point final.
+        assert_eq!(
+            lire_tolerant(b"bonjour\r\n.\rx\r\n.\r\n", 1024),
+            Err(DataFault::BareLineEnding)
+        );
+    }
+
+    #[test]
+    fn sans_tolerance_le_lf_nu_reste_refuse() {
+        // Le DÉFAUT n'a pas bougé : c'est le courrier entrant, et c'est là que
+        // deux serveurs peuvent se contredire.
+        assert_eq!(
+            lire_de_toutes_les_facons(b"From: moi\nbonjour\n.\n", 1024),
+            Err(DataFault::BareLineEnding)
+        );
+    }
+
+    #[test]
+    fn le_point_final_en_lf_nu_conclut_aussi() {
+        // Un appareil qui écrit ses lignes en `LF` écrit sa fin de message
+        // ainsi : la refuser laisserait la connexion pendre jusqu'au délai.
+        assert_eq!(lire_tolerant(b"x\n.\n", 1024), Ok(message(b"x\r\n")));
+        // Et le point ÉCHAPPÉ reste échappé, terminaison en `LF` comprise.
+        assert_eq!(lire_tolerant(b"..x\n.\n", 1024), Ok(message(b".x\r\n")));
+    }
+
+    #[test]
+    fn le_point_final_apres_un_vrai_crlf_dans_la_meme_lecture() {
+        // **LE CAS QUI SE CACHE ENTRE LES DEUX MONDES** : la ligne se termine
+        // en `CRLF` — consommé sans interruption —, et le point qui suit tombe
+        // donc au MILIEU d'un balayage, non à son début. Il faut rendre ce qui
+        // précède avant de conclure, et défalquer le point déjà compté.
+        assert_eq!(
+            lire_tolerant(b"bonjour\r\n.\n", 1024),
+            Ok(message(b"bonjour\r\n"))
+        );
+        assert_eq!(
+            lire_tolerant(b"a\r\nb\r\n.\n", 1024),
+            Ok(message(b"a\r\nb\r\n"))
+        );
+    }
+
+    #[test]
+    fn un_flux_tolere_sans_terminateur_est_tronque() {
+        // La tolérance ne fabrique pas de fin de message : un flux qui s'arrête
+        // en chemin s'arrête en chemin.
+        assert_eq!(lire_tolerant(b"x\n", 1024), Ok(Lecture::Tronque));
+    }
+
+    #[test]
+    fn un_lf_tolere_ne_sauve_pas_une_ligne_trop_longue() {
+        // **LE `LF` COMPTE COMME UN OCTET DE FIL**, et la borne de §4.5.3.1.6
+        // s'applique comme pour un `CRLF`. Sans quoi une ligne refusée en
+        // `CRLF` passerait en `LF` — deux règles pour le même texte.
+        let etroites = Limits {
+            max_text_line_octets: 4,
+            ..Limits::DEFAULT
+        };
+        assert_eq!(
+            lire_tolerant_avec(b"abcd\n.\n", &etroites, 1024),
+            Err(DataFault::LineTooLong { limit: 4 })
+        );
+        // Une ligne qui tient, elle, passe.
+        assert_eq!(
+            lire_tolerant_avec(b"abc\n.\n", &etroites, 1024),
+            Ok(message(b"abc\r\n"))
+        );
+    }
+
+    #[test]
+    fn le_lf_tolere_compte_deux_octets_pour_la_taille() {
+        // **`SIZE` COMPTE CE QUI SERA REMIS**, non ce qui est arrivé : le
+        // message grossit d'un octet par ligne, et un plafond calculé sur le
+        // flux d'entrée laisserait passer un message trop gros d'autant.
+        //
+        // `x\n` fait deux octets sur le fil et TROIS une fois rendu.
+        assert_eq!(
+            lire_tolerant(b"x\n.\n", 2),
+            Err(DataFault::MessageTooLarge { limit: 2 })
+        );
+        assert_eq!(lire_tolerant(b"x\n.\n", 3), Ok(message(b"x\r\n")));
     }
 
     // ── Le cas ordinaire ────────────────────────────────────────────────────

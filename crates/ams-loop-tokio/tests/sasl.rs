@@ -165,6 +165,78 @@ async fn sans_reponse_initiale_le_defi_puis_la_reponse_ouvrent_la_session() {
     assert!(dit.starts_with("[OK]"), "{dit}");
 }
 
+/// **UN MESSAGE EN `LF` NU PASSE QUAND LE PAIR S'EST AUTHENTIFIÉ — ET PAS
+/// AUTREMENT.**
+///
+/// VU EN PRODUCTION LE 2026-09-23 : une passerelle Milesight écrivait ses
+/// alertes en `LF` nu, ce que Postfix tolérait depuis des années. Ce serveur
+/// l'acceptait jusqu'au `DATA` puis refusait le message par `554` — l'appareil
+/// n'affichait qu'un « Erreur » muet.
+///
+/// **IL FALLAIT LA BOUCLE POUR QUE CELA SE VOIE** : la session seule ne dit
+/// rien de ce qu'un vrai client envoie sur le fil.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn le_lf_nu_passe_pour_un_pair_authentifie() {
+    let Some(dit) = conversation_chiffree(
+        "sasl-lf-authentifie",
+        concat!(
+            "EHLO client.example\r\n",
+            "AUTH PLAIN AGplYW4Ab3V2cmUtdG9p\r\n",
+            "MAIL FROM:<jean@example.com>\r\n",
+            "RCPT TO:<jean@example.com>\r\n",
+            "DATA\r\n",
+            "From: jean@example.com\nSubject: alerte\n\ncorps\n.\n",
+            "QUIT\r\n",
+        ),
+    )
+    .await
+    else {
+        return;
+    };
+    assert!(
+        dit.contains("235 2.7.0"),
+        "l'authentification a échoué : {dit}"
+    );
+    assert!(
+        dit.contains("250 2.0.0 Message accepted"),
+        "un pair authentifié doit pouvoir déposer en `LF` nu : {dit}"
+    );
+    assert!(
+        !dit.contains("Bare CR or LF"),
+        "message refusé alors que le pair était authentifié : {dit}"
+    );
+}
+
+/// **ET SANS AUTHENTIFICATION, LA RÈGLE ENTIÈRE** — c'est le courrier entrant
+/// que la contrebande SMTP vise, et c'est là que deux serveurs peuvent se
+/// contredire.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn le_lf_nu_reste_refuse_sans_authentification() {
+    let Some(dit) = conversation_chiffree(
+        "sasl-lf-anonyme",
+        concat!(
+            "EHLO client.example\r\n",
+            "MAIL FROM:<jean@example.com>\r\n",
+            "RCPT TO:<jean@example.com>\r\n",
+            "DATA\r\n",
+            // **LE CORPS PORTE DU `LF` NU, MAIS SE TERMINE PROPREMENT.** Sans
+            // tolérance, `.\n` n'est PAS une fin de message — le serveur
+            // attendrait indéfiniment, et ce banc expirerait au lieu de
+            // mesurer le refus. C'est la règle qui veut cela, pas un défaut.
+            "From: jean@example.com\nSubject: alerte\n\ncorps\r\n.\r\n",
+            "QUIT\r\n",
+        ),
+    )
+    .await
+    else {
+        return;
+    };
+    assert!(
+        dit.contains("554 5.6.0 Bare CR or LF in message data"),
+        "le courrier entrant doit garder la règle entière : {dit}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn un_mot_de_passe_faux_est_refuse_et_la_session_continue() {
     let Some(dit) = conversation_chiffree(

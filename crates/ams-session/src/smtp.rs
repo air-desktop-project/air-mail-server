@@ -2056,8 +2056,18 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
                 // Un récepteur NEUF par message : celui du message précédent
                 // porte ses compteurs, et les réutiliser ferait refuser le
                 // second message pour la taille du premier.
-                self.data =
-                    DataReceiver::new(self.config.limits(), self.config.max_message_octets());
+                // **LA TOLÉRANCE AU `LF` NU NE S'OUVRE QUE POUR UN PAIR
+                // AUTHENTIFIÉ**, c'est-à-dire pour une SOUMISSION — là où ce
+                // serveur est l'origine du message et non un intermédiaire. Le
+                // courrier entrant, lui, garde la règle entière : c'est lui que
+                // la contrebande SMTP vise, et elle a besoin de deux serveurs
+                // qui coupent le flux différemment. Voir l'en-tête de
+                // `ams_proto_smtp::data`.
+                self.data = if self.authenticated {
+                    DataReceiver::tolerant(self.config.limits(), self.config.max_message_octets())
+                } else {
+                    DataReceiver::new(self.config.limits(), self.config.max_message_octets())
+                };
                 self.finish(
                     Code::START_MAIL_INPUT,
                     b"Start mail input; end with <CRLF>.<CRLF>",
@@ -5678,6 +5688,70 @@ mod tests {
         assert!(
             sans.contains("AUTH PLAIN") && !sans.contains("SCRAM"),
             "un serveur sans vérificateurs annonce SCRAM : {sans}"
+        );
+    }
+
+    #[test]
+    fn le_lf_nu_passe_pour_un_pair_authentifie_et_pas_autrement() {
+        // **C'EST LA SEULE CHOSE QUE L'AUTHENTIFICATION CHANGE ICI**, et elle
+        // la change pour une raison : sur une soumission, ce serveur est
+        // l'ORIGINE du message. La contrebande SMTP a besoin de deux serveurs
+        // qui coupent le flux différemment ; il n'y a rien avant nous.
+        //
+        // VU EN PRODUCTION LE 2026-09-23 : une passerelle Milesight écrivait
+        // ses alertes en `LF` nu — Postfix les acceptait depuis des années —,
+        // et ce serveur les refusait APRÈS avoir accepté l'authentification,
+        // le `MAIL FROM`, le `RCPT TO` et le `DATA`. L'appareil n'affichait
+        // qu'un « Erreur » muet.
+        let (mut session, _) = session_chiffree(AvecScram::Complet);
+        let mut out = [0_u8; 2048];
+        let commande = std::format!(
+            "AUTH SCRAM-SHA-256 {}\r\n",
+            banc::en_base64(b"n,,n=jean,r=nonceduclient")
+        );
+        let tour = session.handle(commande.as_bytes(), &mut out).expect("AUTH");
+        let dit = std::string::String::from_utf8_lossy(tour.reply()).into_owned();
+        let mut place = [0_u8; 1024];
+        let ecrits = server_first_du_defi(&dit, &mut place);
+        let final_client = banc::client_final(
+            b"n=jean,r=nonceduclient",
+            place.get(..ecrits).unwrap_or_default(),
+        );
+        let mut out2 = [0_u8; 2048];
+        assert!(
+            std::string::String::from_utf8_lossy(
+                session
+                    .feed_auth(banc::en_base64(&final_client).as_bytes(), &mut out2)
+                    .expect("client-final")
+                    .reply()
+            )
+            .starts_with("235 "),
+            "le banc doit être authentifié pour éprouver ce qui suit"
+        );
+
+        jusqu_aux_donnees(&mut session);
+        assert_eq!(
+            remettre(&mut session, b"From: moi\nbonjour\n.\n").expect("lisible"),
+            b"From: moi\r\nbonjour\r\n".to_vec(),
+            "un pair authentifié doit voir son `LF` nu rendu en `CRLF`"
+        );
+
+        // ── ET SANS AUTHENTIFICATION, LA RÈGLE ENTIÈRE ─────────────────────
+        let mut session = acceptante();
+        jusqu_aux_donnees(&mut session);
+        // La remise ÉCHOUE, et le verdict le dit — comme pour toute contrebande.
+        assert_eq!(
+            remettre(&mut session, b"From: moi\nbonjour\n.\n"),
+            Err(Error::DataRefused),
+            "le courrier ENTRANT garde la règle entière"
+        );
+        let mut sortie = [0_u8; 128];
+        let tour = session
+            .on_data_settled(DataOutcome::Accepted, &mut sortie)
+            .expect("verdict");
+        assert_eq!(
+            std::string::String::from_utf8_lossy(tour.reply()),
+            "554 5.6.0 Bare CR or LF in message data\r\n"
         );
     }
 
