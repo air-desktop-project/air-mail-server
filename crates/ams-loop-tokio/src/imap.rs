@@ -718,9 +718,29 @@ where
     Ok(())
 }
 
-/// Lit la ligne qui répond à un défi SASL, et la donne à la session.
+/// Lit les lignes qui répondent aux défis SASL, et les donne à la session.
 ///
 /// Rend `true` s'il faut fermer.
+///
+/// # POURQUOI CETTE FONCTION BOUCLE, ET CE QU'IL EN COÛTAIT DE NE PAS LE FAIRE
+///
+/// **UN ÉCHANGE SASL N'A PAS TOUJOURS UNE SEULE RÉPONSE.** `PLAIN` en a une, et
+/// cette fonction n'en lisait qu'une. `SCRAM-SHA-256` en a DEUX sur IMAP : le
+/// `client-final`, puis la ligne VIDE qui suit le `server-final` — RFC 4959
+/// n'offrant aucun moyen de joindre la preuve du serveur à la réponse taguée
+/// (RFC 4954 §4 le permet en SMTP, et la boucle SMTP, elle, redemande une
+/// réponse tant que la session en veut une).
+///
+/// Sans cette boucle, la ligne vide était lue comme une COMMANDE : la session
+/// la refusait par `NotInCommandPhase`, l'erreur remontait, et la connexion
+/// tombait **après** que la preuve du serveur eut été envoyée. Vu en production
+/// le 2026-09-23, avec un client SCRAM écrit à part : l'arithmétique était juste
+/// des deux côtés — ma preuve acceptée, la sienne vérifiée — et la session ne
+/// s'ouvrait jamais. Les essais de `ams-session` ne pouvaient pas le voir : ils
+/// appellent `on_auth_response` eux-mêmes, autant de fois qu'il le faut.
+///
+/// **C'EST LA SESSION QUI DIT COMBIEN DE TOURS**, par son `Action` — et non la
+/// boucle qui compte. Un mécanisme de plus n'aura donc rien à changer ici.
 async fn lire_la_reponse_sasl<S, A, M>(
     stream: &mut S,
     session: &mut Session<A, M>,
@@ -745,6 +765,7 @@ where
             etat.rempli = etat.rempli.saturating_sub(rang.saturating_add(2));
             let tour = session.on_auth_response(&ligne, &mut etat.sortie)?;
             let faute = tour.peer_fault();
+            let encore = tour.action() == Action::ReadAuthResponse;
             stream.write_all(tour.reply()).await?;
             stream.flush().await?;
             let evenement = if faute {
@@ -752,10 +773,17 @@ where
             } else {
                 GuardEvent::Command
             };
-            return Ok(matches!(
+            if matches!(
                 service.guard.observe(source, evenement),
                 Verdict::Throttled | Verdict::Banned { .. }
-            ));
+            ) {
+                return Ok(true);
+            }
+            if encore {
+                // La session redemande une réponse : l'échange n'est pas clos.
+                continue;
+            }
+            return Ok(false);
         }
         if vu.len() > service.limits.max_line_octets {
             // Une réponse SASL plus longue qu'une ligne de commande n'en est

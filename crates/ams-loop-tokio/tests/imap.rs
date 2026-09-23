@@ -20,7 +20,7 @@ use ams_loop_tokio::imap::{ImapService, serve_imap_connection};
 use ams_proto_imap::Limits;
 use ams_proto_imap::{Flags, PartWhat, SearchScope, StoreMode};
 use ams_session::imap::{BinarySize, Mailbox, Mailboxes, MessageInfo};
-use commun::{COMPTE, NotreDomaine, PAIR, SECRET, materiel};
+use commun::{COMPTE, NotreDomaine, PAIR, QuiLieLeCanal, SECRET, materiel};
 use core::time::Duration;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
@@ -435,6 +435,128 @@ impl Mailboxes for Boites {
         }
         out.get(..longueur)
     }
+}
+
+/// Monte un service IMAP dont la politique SERT SCRAM.
+///
+/// La doublure ne vérifie aucune preuve — c'est voulu, et dit dans `commun` :
+/// ce banc mesure l'ENCHAÎNEMENT de la boucle, pas l'arithmétique, qui est
+/// couverte à 100 % ailleurs.
+async fn service_scram(
+    chiffrement: Option<Arc<rustls::ServerConfig>>,
+) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    let ecouteur = TcpListener::bind("127.0.0.1:0").await.expect("écoute");
+    let adresse = ecouteur.local_addr().expect("adresse");
+    let tache = tokio::spawn(async move {
+        let (mut flux, _) = ecouteur.accept().await.expect("connexion");
+        let garde = SharedGuard::new(4, Thresholds::DEFAULT);
+        let service = ImapService {
+            tls_mode: ams_loop_tokio::TlsMode::StartTls,
+            limits: Limits::DEFAULT,
+            guard: &garde,
+            timeouts: ams_loop_tokio::Timeouts::default(),
+            tls: chiffrement,
+            max_append_octets: 1_000_000,
+        };
+        let _ = serve_imap_connection(&mut flux, &service, QuiLieLeCanal, &Boites, PAIR).await;
+    });
+    (adresse, tache)
+}
+
+/// **DEUX RÉPONSES SASL, ET NON UNE — CE QUE LA BOUCLE NE SAVAIT PAS FAIRE.**
+///
+/// `PLAIN` n'a qu'une réponse, et `lire_la_reponse_sasl` n'en lisait qu'une.
+/// `SCRAM-SHA-256` en a DEUX sur IMAP : le `client-final`, puis la ligne VIDE
+/// qui suit le `server-final` — RFC 4959 n'offrant aucun moyen de joindre la
+/// preuve du serveur à la réponse taguée.
+///
+/// **VU EN PRODUCTION LE 2026-09-23**, sur `mail.narro.ch`, avec un client
+/// SCRAM écrit à part : le serveur menait l'échange jusqu'au bout — la preuve
+/// du client acceptée, la sienne vérifiée par le client — puis FERMAIT LA
+/// CONNEXION au lieu de conclure. La ligne vide était lue comme une commande,
+/// la session la refusait par `NotInCommandPhase`, et l'erreur remontait.
+///
+/// Les essais de `ams-session` ne pouvaient pas le voir : ils appellent
+/// `on_auth_response` eux-mêmes, autant de fois qu'il le faut. **Il fallait la
+/// boucle pour que le défaut existe, et donc la boucle pour qu'il se voie.**
+#[tokio::test]
+async fn un_echange_scram_en_deux_tours_ouvre_la_session() {
+    let Some(materiel) = materiel("imap-scram") else {
+        return;
+    };
+    let (adresse, _) = service_scram(Some(Arc::clone(&materiel.tls))).await;
+    let mut lecteur = BufReader::new(TcpStream::connect(adresse).await.expect("connexion"));
+    ligne(&mut lecteur).await;
+    ecrire(&mut lecteur, b"a001 STARTTLS\r\n").await;
+    assert!(ligne(&mut lecteur).await.starts_with("a001 OK Begin TLS"));
+
+    let connecteur = tokio_rustls::TlsConnector::from(Arc::new(ams_tls::relay_config()));
+    let chiffre = connecteur
+        .connect("localhost".try_into().expect("nom"), lecteur.into_inner())
+        .await
+        .expect("poignée de main");
+    let mut lecteur = BufReader::new(chiffre);
+
+    // ── Premier tour : le `client-first`, avec sa réponse initiale ──────────
+    let mut place = [0_u8; 256];
+    let premier =
+        ams_mime::encode_base64_line(b"n,,n=jean,r=nonceduclient", &mut place).expect("base64");
+    let mut commande = std::vec::Vec::from(&b"a002 AUTHENTICATE SCRAM-SHA-256 "[..]);
+    commande.extend_from_slice(premier);
+    commande.extend_from_slice(b"\r\n");
+    lecteur
+        .get_mut()
+        .write_all(&commande)
+        .await
+        .expect("écriture");
+    let defi = lire_ligne(&mut lecteur).await;
+    assert!(defi.starts_with("+ "), "server-first attendu : {defi}");
+
+    // ── Second tour : le `client-final` ─────────────────────────────────────
+    //
+    // La preuve n'a pas à être juste — la doublure accepte tout. Le `c=`, LUI,
+    // doit l'être : c'est la session qui le vérifie, avant la politique, et
+    // `biws` est le base64 de l'en-tête GS2 `n,,`.
+    let mut encode = [0_u8; 256];
+    let mut preuve = [0_u8; 64];
+    let proof = ams_mime::encode_base64_line(&[7_u8; 32], &mut preuve).expect("base64");
+    let mut final_client = std::vec::Vec::from(&b"c=biws,r=nonceduclientnoncedeserveur,p="[..]);
+    final_client.extend_from_slice(proof);
+    let envoi = ams_mime::encode_base64_line(&final_client, &mut encode).expect("base64");
+    let mut ligne_finale = std::vec::Vec::from(envoi);
+    ligne_finale.extend_from_slice(b"\r\n");
+    lecteur
+        .get_mut()
+        .write_all(&ligne_finale)
+        .await
+        .expect("écriture");
+    let serveur_final = lire_ligne(&mut lecteur).await;
+    assert!(
+        serveur_final.starts_with("+ "),
+        "le `server-final` doit partir en continuation : {serveur_final}"
+    );
+
+    // ── LA LIGNE VIDE, ET LE TOUR QUE LA BOUCLE NE FAISAIT PAS ──────────────
+    lecteur
+        .get_mut()
+        .write_all(b"\r\n")
+        .await
+        .expect("écriture");
+    let verdict = lire_ligne(&mut lecteur).await;
+    assert!(
+        verdict.starts_with("a002 OK"),
+        "la session ne s'est pas ouverte : {verdict:?}"
+    );
+}
+
+/// Lit une ligne sur un flux chiffré.
+async fn lire_ligne<S>(lecteur: &mut BufReader<S>) -> std::string::String
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
+    let mut texte = std::string::String::new();
+    lecteur.read_line(&mut texte).await.expect("réponse");
+    texte
 }
 
 /// Monte un service IMAP et rend l'adresse où le joindre.
