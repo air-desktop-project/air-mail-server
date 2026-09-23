@@ -89,6 +89,7 @@ mod guard;
 pub mod h3;
 pub mod http;
 pub mod imap;
+pub mod journal;
 mod liaison;
 mod mtasts;
 pub mod pop3;

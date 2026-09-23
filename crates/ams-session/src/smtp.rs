@@ -14,7 +14,7 @@ use ams_spf::{Identity, ReceivedSpf, Verdict, write_received_spf};
 use crate::digits::{MAX_DIGITS, decimal};
 use crate::sauts::Sauts;
 use crate::tampon::Tampon;
-use crate::{Config, Error, Policy, RecipientVerdict, Recipients, SenderPolicy};
+use crate::{Config, Error, Mecanisme, Policy, RecipientVerdict, Recipients, SenderPolicy};
 
 /// La bannière : le domaine (255 au plus) suivi de `" ESMTP"`.
 const BANNER_MAX: usize = 255 + 6;
@@ -702,6 +702,12 @@ pub struct SmtpSession<'a, P: Policy> {
     compte: Tampon<LOGIN_MAX>,
     /// Où en est l'échange SCRAM, s'il y en a un.
     scram: EtapeScram,
+    /// Sous quel mécanisme le pair s'est authentifié, s'il l'a fait.
+    ///
+    /// **Il ne se pose qu'APRÈS un succès**, et il ne se défait jamais : un
+    /// second `AUTH` sur une session déjà authentifiée est refusé avant
+    /// d'arriver ici.
+    mecanisme: Option<Mecanisme>,
     /// Les octets de liaison de ce canal (RFC 9266), s'il s'en lie un.
     ///
     /// **ILS NE SORTENT JAMAIS D'ICI.** La session les compare, et ne les
@@ -792,6 +798,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
             expediteur: Tampon::vide(),
             compte: Tampon::vide(),
             scram: EtapeScram::Aucune,
+            mecanisme: None,
             liaison: None,
             chemin_de_retour: Tampon::vide(),
             depose: Tampon::vide(),
@@ -1113,6 +1120,17 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     #[must_use]
     pub fn submitter(&self) -> Option<&[u8]> {
         (self.authenticated && !self.compte.est_vide()).then(|| self.compte.as_bytes())
+    }
+
+    /// Sous quel mécanisme le pair s'est authentifié, s'il l'a fait.
+    ///
+    /// **C'est pour le journal, et pour rien d'autre** : aucune décision de
+    /// protocole n'en dépend. Un exploitant qui voit un compte passer en
+    /// `PLAIN` alors qu'il croyait SCRAM posé chez tous ses clients apprend
+    /// là, et là seulement, que l'un d'eux ne le fait pas.
+    #[must_use]
+    pub fn mechanism(&self) -> Option<Mecanisme> {
+        self.mecanisme
     }
 
     /// Traite une ligne de commande, **CRLF compris**.
@@ -2420,6 +2438,10 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         )
         .expect("le tampon d'encodage est dimensionné sur la sortie");
         self.authenticated = true;
+        // `entete_recevable` a déjà vérifié que la liaison retenue s'accorde
+        // au mécanisme annoncé : `-PLUS` exige `Gs2::Liee`, et `Gs2::Liee`
+        // exige `-PLUS`. Le drapeau de l'état DIT donc lequel des deux a servi.
+        self.mecanisme = Some(Mecanisme::scram(etat.liee()));
         self.finish(Code::AUTH_SUCCEEDED, dit, Action::Continue, out)
     }
 
@@ -2485,6 +2507,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
 
         self.authenticated = succes;
         if succes {
+            self.mecanisme = Some(Mecanisme::Plain);
             self.simple(Code::AUTH_SUCCEEDED, b"Authentication successful", out)
         } else {
             // LE REFUS NE DIT PAS CE QUI A MANQUE. « Utilisateur inconnu » et
@@ -5809,6 +5832,55 @@ mod tests {
             .expect("client-final");
         let dit = std::string::String::from_utf8_lossy(tour.reply()).into_owned();
         assert!(dit.starts_with("235 "), "succès attendu, reçu : {dit}");
+    }
+
+    #[test]
+    fn le_journal_apprend_sous_quel_mecanisme_chacun_s_est_authentifie() {
+        use crate::Mecanisme;
+
+        // **POUR LE JOURNAL, ET RIEN D'AUTRE.** Les trois voies mènent au même
+        // `235` : seul le mécanisme retenu les distingue ensuite, et c'est
+        // exactement ce qu'un exploitant vient chercher quand il veut savoir
+        // lequel de ses clients passe encore son mot de passe en clair.
+        let mut session = acceptante();
+        session.on_tls_established(None);
+        identifier(&mut session);
+        // Rien tant que personne ne s'est authentifié.
+        assert_eq!(session.mechanism(), None);
+        let mut tampon = [0_u8; 128];
+        session
+            .handle(b"AUTH PLAIN AGplYW4Ab3V2cmUtdG9p\r\n", &mut tampon)
+            .expect("réponse");
+        assert_eq!(session.mechanism(), Some(Mecanisme::Plain));
+
+        // SCRAM sans liaison : le canal n'en porte pas.
+        let (mut session, _) = session_chiffree(AvecScram::Complet);
+        let server_first = echange_plus(&mut session, b"n,,", "SCRAM-SHA-256");
+        assert!(!server_first.is_empty(), "le premier tour a été refusé");
+        let final_client = banc::client_final(b"n=jean,r=nonceduclient", &server_first);
+        let mut out = [0_u8; 2048];
+        let tour = session
+            .feed_auth(banc::en_base64(&final_client).as_bytes(), &mut out)
+            .expect("client-final");
+        assert!(
+            std::string::String::from_utf8_lossy(tour.reply()).starts_with("235 "),
+            "succès attendu"
+        );
+        assert_eq!(session.mechanism(), Some(Mecanisme::ScramSha256));
+
+        // SCRAM lié au canal : **c'est le `-PLUS` qui doit se lire au journal**,
+        // et non le SCRAM nu — les distinguer est toute la raison de la ligne.
+        let (mut session, _) = session_liee(AvecScram::Complet);
+        let server_first = echange_plus(&mut session, b"p=tls-exporter,,", "SCRAM-SHA-256-PLUS");
+        let final_client = banc::client_final_lie(b"n=jean,r=nonceduclient", &server_first);
+        let tour = session
+            .feed_auth(banc::en_base64(&final_client).as_bytes(), &mut out)
+            .expect("client-final");
+        assert!(
+            std::string::String::from_utf8_lossy(tour.reply()).starts_with("235 "),
+            "succès attendu"
+        );
+        assert_eq!(session.mechanism(), Some(Mecanisme::ScramSha256Plus));
     }
 
     #[test]

@@ -241,8 +241,21 @@ fn verifier_reponse_a_une_commande(reply: &[u8], connu: &[Vec<u8>]) {
 /// aucune classe `3`. Ce sont des invitations à continuer, pas des verdicts.
 fn verifier_l_etat_etendu(reply: &[u8]) {
     // Une réponse multiligne — l'`EHLO` — négocie l'extension : elle n'en porte
-    // pas, et c'est la seule exception.
+    // pas.
     if reply.get(3) == Some(&b'-') {
+        return;
+    }
+    // **LA SALUTATION D'UN `HELO` N'EN PORTE PAS NON PLUS**, et c'est la règle
+    // qui manquait ici : `250 mail.example.com` est une SALUTATION, pas un
+    // verdict. RFC 2034 §4 ne s'applique qu'après que l'extension a été
+    // négociée, et `HELO` ne la négocie JAMAIS — §4.1.1.1 de RFC 5321 veut que
+    // sa réponse soit le domaine, et rien d'autre. Un état étendu écrit là
+    // ferait lire un verdict à un client qui n'a reçu qu'un bonjour.
+    //
+    // La même ligne clôt aussi un `EHLO` qui n'a rien à annoncer : toutes
+    // capacités éteintes, l'annonce se réduit à sa première ligne, et celle-ci
+    // reste une salutation.
+    if reply == format!("250 {}\r\n", String::from_utf8_lossy(DOMAINE)).as_bytes() {
         return;
     }
     let Some(classe) = reply.first().copied() else {

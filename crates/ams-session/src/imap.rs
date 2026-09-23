@@ -72,6 +72,7 @@ use ams_proto_imap::{
 use ams_sasl::{decode_base64, parse_plain};
 use core::fmt;
 
+use crate::mecanisme::Mecanisme;
 use crate::policy::Authenticator;
 
 /// Ce qui peut mal se passer dans une session IMAP.
@@ -1286,6 +1287,13 @@ pub struct Session<A: Authenticator, M: Mailboxes> {
     attend_sasl: bool,
     /// Où en est l'échange SCRAM, s'il y en a un.
     scram: EtapeScram,
+    /// Sous quel mécanisme le pair a ouvert sa session, s'il l'a fait.
+    ///
+    /// **Pour le journal, et pour rien d'autre** : aucune décision de
+    /// protocole n'en dépend. C'est ce qui distingue, dans la trace d'un
+    /// client, la commande `LOGIN` d'un `AUTHENTICATE PLAIN` et d'une preuve
+    /// SCRAM liée au canal.
+    mecanisme: Option<Mecanisme>,
     /// Les octets de liaison de ce canal (RFC 9266), s'il s'en lie un.
     ///
     /// **ILS NE SORTENT JAMAIS D'ICI** : ce sont des octets dérivés du secret
@@ -1513,6 +1521,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             tag_len: 0,
             attend_sasl: false,
             scram: EtapeScram::Aucune,
+            mecanisme: None,
             liaison: None,
             utilisateur: [0; USER_MAX_OCTETS],
             utilisateur_len: 0,
@@ -1539,6 +1548,14 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
     #[must_use]
     pub fn is_encrypted(&self) -> bool {
         self.chiffre
+    }
+
+    /// Sous quel mécanisme le pair a ouvert sa session, s'il l'a fait.
+    ///
+    /// **C'est pour le journal, et pour rien d'autre.**
+    #[must_use]
+    pub fn mechanism(&self) -> Option<Mecanisme> {
+        self.mecanisme
     }
 
     /// L'utilisateur authentifié, ou une tranche vide.
@@ -1916,7 +1933,12 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         // formes lui aussi, et la boîte porte le nom du compte.
         let mut canonique = [0_u8; USER_MAX_OCTETS];
         let longueur = self.policy.canonical_login(nom, &mut canonique);
-        self.conclure_l_authentification(succes, canonique.get(..longueur).unwrap_or_default(), out)
+        self.conclure_l_authentification(
+            succes,
+            canonique.get(..longueur).unwrap_or_default(),
+            Mecanisme::Login,
+            out,
+        )
     }
 
     /// `AUTHENTICATE` (§6.2.2), avec la réponse initiale de la RFC 4959.
@@ -2099,6 +2121,10 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         // qui suit est une formalité du profil SASL, et `handle` refuse toute
         // commande tant que l'échange n'est pas clos : rien ne peut s'y glisser.
         self.etat = State::Authenticated;
+        // `entete_recevable` a déjà lié le mécanisme annoncé à l'en-tête GS2 :
+        // `-PLUS` exige `Gs2::Liee`, et réciproquement. Le drapeau de l'état
+        // dit donc lequel des deux a servi.
+        self.mecanisme = Some(Mecanisme::scram(etat.liee()));
         self.scram = EtapeScram::Conclu;
         self.defi_scram(dernier.get(..longueur).unwrap_or_default(), out)
     }
@@ -2170,6 +2196,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             return self.conclure_l_authentification(
                 true,
                 place.get(..longueur).unwrap_or_default(),
+                Mecanisme::Plain,
                 out,
             );
         }
@@ -2181,12 +2208,14 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         &mut self,
         succes: bool,
         nom: &[u8],
+        mecanisme: Mecanisme,
         out: &'b mut [u8],
     ) -> Result<Turn<'b>, Error> {
         if !succes {
             return self.refuser_l_authentification(out);
         }
         self.retenir_l_utilisateur(nom);
+        self.mecanisme = Some(mecanisme);
         self.etat = State::Authenticated;
         self.termine(Status::Ok, b"Authenticated", Action::Continue, out)
     }

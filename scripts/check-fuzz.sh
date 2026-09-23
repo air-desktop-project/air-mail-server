@@ -263,6 +263,40 @@ if ! cargo fuzz --version >/dev/null 2>&1; then
     exit 0
 fi
 
+# ── POUR QUELLE CIBLE ON BÂTIT, ET POURQUOI CE N'EST PAS TOUJOURS CELLE DE LA CI
+#
+# L'intégration continue tourne sur `x86_64-unknown-linux-gnu`, et c'est là que
+# le verdict compte. Une machine de développement, elle, n'a pas forcément la
+# bibliothèque standard de cette cible — et ne l'aurait-elle que l'édition de
+# liens d'un binaire Linux depuis macOS ne se fait pas.
+#
+# **ON BASCULE ALORS SUR L'HÔTE, ET CE N'EST PAS UN PIS-ALLER.** Les cibles de
+# fuzz ne pilotent que des machines à états SANS ENTRÉE-SORTIE (C1) : elles ne
+# touchent ni socket, ni fichier, ni horloge, et ne dépendent donc d'aucun
+# service du système. Une entrée qui les fait paniquer ici les fait paniquer
+# là-bas, et réciproquement. Ce qui change d'une cible à l'autre, c'est la
+# VITESSE de la campagne, pas ce qu'elle peut trouver.
+#
+# Ce qu'on refuse, en revanche, c'est de faire échouer la barrière parce que la
+# cible de la CI manque : ce serait apprendre au lecteur que ses échecs sont
+# normaux — exactement ce que la garde sur `cargo-fuzz` ci-dessus évite.
+CIBLE_FUZZ=x86_64-unknown-linux-gnu
+if ! rustup target list --installed --toolchain nightly 2>/dev/null \
+    | grep -qx "$CIBLE_FUZZ"; then
+    hote=$(rustc +nightly -vV 2>/dev/null | awk '/^host: /{print $2}')
+    if [ -z "$hote" ]; then
+        echo
+        echo "IGNORÉ : ni la cible \`$CIBLE_FUZZ\`, ni un hôte identifiable."
+        exit 0
+    fi
+    echo
+    echo "La cible \`$CIBLE_FUZZ\` — celle de la CI — n'est pas posée ici."
+    echo "On bâtit pour l'hôte, \`$hote\` : les cibles de fuzz ne pilotent que"
+    echo "des machines à états sans entrée-sortie, et une entrée qui les fait"
+    echo "paniquer le fait sur l'une comme sur l'autre."
+    CIBLE_FUZZ=$hote
+fi
+
 # ── LA MINIMISATION, QUI NE COMPILE ET NE LANCE RIEN D'AUTRE ────────────────
 if [ "$minimiser" -eq 1 ]; then
     avant_o=$(du -sb corpus 2>/dev/null | cut -f1 || echo 0)
@@ -270,7 +304,7 @@ if [ "$minimiser" -eq 1 ]; then
     while read -r cible _; do
         echo "── $cible ───────────────────────────────────────────────────────"
         mkdir -p "corpus/$cible"
-        cargo +nightly fuzz cmin --target x86_64-unknown-linux-gnu \
+        cargo +nightly fuzz cmin --target "$CIBLE_FUZZ" \
             "$cible" "corpus/$cible"
     done <<< "$CIBLES"
     apres_o=$(du -sb corpus | cut -f1)
@@ -282,7 +316,7 @@ fi
 
 # UN SEUL `cargo fuzz build` LES BÂTIT TOUTES, et c'est le contrôle qui manquait.
 echo "── compilation ──────────────────────────────────────────────────────────"
-cargo +nightly fuzz build --target x86_64-unknown-linux-gnu
+cargo +nightly fuzz build --target "$CIBLE_FUZZ"
 
 if [ "$smoke" -eq 0 ]; then
     echo
@@ -317,7 +351,7 @@ if [ -d artifacts ]; then
         cible=$(basename "$(dirname "$artefact")")
         # `|| vrai` : un plantage doit se DIRE, pas faire sortir le script au
         # milieu de la boucle sous `set -e` — le message vaut mieux que le code.
-        if cargo +nightly fuzz run --target x86_64-unknown-linux-gnu \
+        if cargo +nightly fuzz run --target "$CIBLE_FUZZ" \
             "$cible" "$artefact" >/dev/null 2>&1; then
             mkdir -p "corpus/$cible"
             mv "$artefact" "corpus/$cible/"
@@ -349,7 +383,7 @@ while read -r cible graines; do
     # libFuzzer EXIGE que le premier répertoire de corpus existe : il n'y écrit
     # que s'il peut l'ouvrir, et refuse de démarrer sinon.
     mkdir -p "corpus/$cible"
-    cargo +nightly fuzz run --target x86_64-unknown-linux-gnu "$cible" \
+    cargo +nightly fuzz run --target "$CIBLE_FUZZ" "$cible" \
         "corpus/$cible" "seeds/$graines" -- "-max_total_time=$secondes"
     echo "::endgroup::"
 done <<< "$CIBLES"

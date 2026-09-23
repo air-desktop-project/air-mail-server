@@ -7,8 +7,8 @@ use ams_guard::{Event as GuardEvent, Source, Verdict};
 use ams_mime::{AUTHRES_RESERVE, RECEIVED_MAX, RETURN_PATH_MAX};
 use ams_proto_smtp::{ChunkEvent, DataEvent};
 use ams_session::{
-    Action, Config, DataOutcome, Identity as SpfIdentity, Policy, RECEIVED_SPF_MAX, SenderDomain,
-    SenderPolicy, SmtpSession,
+    Action, Config, DataOutcome, Identity as SpfIdentity, Mecanisme, Policy, RECEIVED_SPF_MAX,
+    SenderDomain, SenderPolicy, SmtpSession,
 };
 use ams_spf::Verdict as SpfVerdict;
 use rustls::ServerConfig;
@@ -18,6 +18,7 @@ use tokio_rustls::TlsAcceptor;
 
 use crate::dkim::{DkimChecker, DkimStream, DkimVerdict};
 use crate::dmarc::{Authenticated, DmarcChecker, DmarcResult, DmarcVerdict};
+use crate::journal::{Chiffrement, Compte};
 use crate::reports::{FailureObservation, Observation, ReportSpool, SignatureVue, SpfVu};
 use crate::{Delivery, DeliveryFailure, Error, SenderChecker, SharedGuard};
 use ams_dmarc::Policy as DmarcPolicy;
@@ -101,6 +102,15 @@ pub struct Summary {
     pub dkim: DkimTally,
     /// Ce que DMARC a conclu.
     pub dmarc: DmarcTally,
+    /// Ce que TLS a négocié, si la connexion a été chiffrée.
+    ///
+    /// **Il ne se déduit pas de [`Summary::tls`]** : une poignée de main peut
+    /// aboutir sans que `rustls` rende la version ou la suite.
+    pub chiffrement: Option<Chiffrement>,
+    /// Sous quel mécanisme le pair s'est authentifié, s'il l'a fait.
+    pub mecanisme: Option<Mecanisme>,
+    /// Le compte au nom duquel il a parlé, prêt à écrire au journal.
+    pub compte: Compte,
 }
 
 /// Le compte des verdicts DMARC d'une connexion.
@@ -447,6 +457,7 @@ where
         // session ne voit pas la connexion TLS, et c'est C1 qui le veut.
         session.on_tls_established(crate::liaison::liaison_de(chiffre.get_ref().1));
         etat.resume.tls = true;
+        etat.resume.chiffrement = crate::journal::chiffrement_de(chiffre.get_ref().1);
         etat.banniere_due = true;
         return servir_chiffre(&mut chiffre, session, etat, service, delivery, source).await;
     }
@@ -489,6 +500,7 @@ where
     // C'est la session qui le fait, pas la boucle.
     session.on_tls_established(crate::liaison::liaison_de(chiffre.get_ref().1));
     etat.resume.tls = true;
+    etat.resume.chiffrement = crate::journal::chiffrement_de(chiffre.get_ref().1);
 
     servir_chiffre(&mut chiffre, session, etat, service, delivery, source).await
 }
@@ -633,6 +645,14 @@ where
         // et il est relevé AVANT le `match`, dont plusieurs bras rendent la main.
         // Le relever après en aurait perdu la dernière valeur sur un `QUIT`.
         etat.resume.authenticated = session.is_authenticated();
+        // **POUR LE JOURNAL, ET RIEN D'AUTRE.** Relevés au même endroit et pour
+        // la même raison : un `QUIT` rend la main depuis le `match`, et les
+        // relever après perdrait le mécanisme et le compte de la connexion
+        // qu'on s'apprête justement à consigner.
+        etat.resume.mecanisme = session.mechanism();
+        etat.resume.compte = session
+            .submitter()
+            .map_or_else(Compte::default, Compte::neuf);
         // C'EST LA SESSION QUI DIT CE QUI EST UNE FAUTE, pas le code de réponse :
         // `502` sanctionne un verbe retiré — une faute — comme un `EXPN` qu'on
         // décline, qui n'en est pas une.
@@ -1952,6 +1972,9 @@ mod tests {
                 outcome: Outcome::Served,
                 dkim: DkimTally::default(),
                 dmarc: DmarcTally::default(),
+                chiffrement: None,
+                mecanisme: None,
+                compte: crate::journal::Compte::default(),
             }
         );
     }

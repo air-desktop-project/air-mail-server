@@ -30,14 +30,15 @@
 
 use ams_guard::{Event as GuardEvent, Source, Verdict};
 use ams_proto_imap::{CommandReader, Limits, Need};
-use ams_session::Authenticator;
 use ams_session::imap::{Action, FetchChunk, Mailboxes, Session};
+use ams_session::{Authenticator, Mecanisme};
 use core::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
 use tokio::time::Instant;
 
 use crate::connection::lire;
+use crate::journal::{Chiffrement, Compte};
 use crate::{Error, SharedGuard};
 
 /// Ce qu'un service IMAP apporte à chacune de ses connexions.
@@ -85,6 +86,12 @@ pub struct ImapSummary {
     /// C'est une injection (§6.2.1), et la connexion est refusée sans que la
     /// commande soit servie.
     pub injected: bool,
+    /// Ce que TLS a négocié, si la connexion a été chiffrée.
+    pub chiffrement: Option<Chiffrement>,
+    /// Sous quel mécanisme le pair a ouvert sa session, s'il l'a fait.
+    pub mecanisme: Option<Mecanisme>,
+    /// Le compte au nom duquel il l'a ouverte.
+    pub compte: Compte,
 }
 
 /// Sert une connexion IMAP jusqu'à sa fin.
@@ -152,6 +159,7 @@ where
             };
         session.on_tls_established(crate::liaison::liaison_de(chiffre.get_ref().1));
         etat.tls = true;
+        etat.chiffrement = crate::journal::chiffrement_de(chiffre.get_ref().1);
 
         if matches!(
             service.guard.observe(source, GuardEvent::Connection),
@@ -229,6 +237,7 @@ where
     };
     session.on_tls_established(crate::liaison::liaison_de(chiffre.get_ref().1));
     etat.tls = true;
+    etat.chiffrement = crate::journal::chiffrement_de(chiffre.get_ref().1);
     // §6.2.1 : tout ce qui précède est oublié, LE TAMPON COMPRIS. Ce qui restait
     // à lire a été envoyé en clair, donc peut-être par quelqu'un d'autre ; le
     // traiter après la poignée de main reviendrait à lui faire confiance.
@@ -243,6 +252,37 @@ where
     Ok(resume)
 }
 
+/// Ce qu'une connexion IMAP laisse au journal, **une ligne à sa fermeture**.
+fn journaliser(pair: std::net::SocketAddr, resume: &ImapSummary, duree: core::time::Duration) {
+    // Le banni n'a rien reçu, pas même une bannière : consigner chacune de ses
+    // tentatives lui donnerait le moyen de remplir le disque qui le bannit.
+    if resume.banned {
+        return;
+    }
+    let issue: &dyn core::fmt::Display = if resume.injected {
+        &"REFUSÉ, injection derrière STARTTLS"
+    } else if resume.authenticated {
+        &"session ouverte"
+    } else {
+        &"session NON ouverte"
+    };
+    let adresse = pair.ip();
+    std::eprintln!(
+        "air-mail-server : {}",
+        crate::journal::Trace {
+            protocole: "IMAP",
+            pair: &adresse,
+            chiffrement: resume.chiffrement,
+            tls: resume.tls,
+            mecanisme: resume.mecanisme,
+            compte: resume.compte,
+            issue,
+            commandes: resume.commands,
+            duree,
+        }
+    );
+}
+
 /// Ce qui survit à la montée en chiffrement.
 struct Etat {
     /// Le tampon d'accumulation, qui grandit avec les littéraux.
@@ -254,6 +294,8 @@ struct Etat {
     lecteur: CommandReader,
     commands: u64,
     tls: bool,
+    /// Ce que TLS a négocié, pour le journal. **Il ne se déduit pas de `tls`.**
+    chiffrement: Option<Chiffrement>,
     injected: bool,
 }
 
@@ -278,6 +320,7 @@ impl Etat {
             lecteur: CommandReader::new(),
             commands: 0,
             tls: false,
+            chiffrement: None,
             injected: false,
         }
     }
@@ -289,6 +332,16 @@ impl ImapSummary {
         self.tls = etat.tls;
         self.injected = etat.injected;
         self.authenticated = session.state() != ams_session::imap::State::NotAuthenticated;
+        self.chiffrement = etat.chiffrement;
+        // **POUR LE JOURNAL, ET RIEN D'AUTRE.** Le nom ne se recopie que si la
+        // session est ouverte : `user()` porte ce que la politique a canonisé,
+        // et il ne vaut qu'une fois l'authentification conclue.
+        self.mecanisme = session.mechanism();
+        self.compte = if self.authenticated {
+            Compte::neuf(session.user())
+        } else {
+            Compte::default()
+        };
     }
 }
 
@@ -874,10 +927,10 @@ where
                 max_append_octets: limits.max_append_octets,
                 tls_mode: options.tls_mode,
             };
-            // L'ÉCHEC d'une connexion ne regarde qu'elle — le journal viendra
-            // avec `air-log`. Une TENTATIVE D'INJECTION, en revanche, se
-            // rassemble : un compte que personne ne lit est un compte qui
-            // n'existe pas, et celle-là mérite d'être vue.
+            // Une TENTATIVE D'INJECTION se rassemble : un compte que personne
+            // ne lit est un compte qui n'existe pas. Ce que la connexion a fait
+            // part au journal, **une ligne à sa fermeture**, l'échec compris.
+            let debut = std::time::Instant::now();
             let issue = serve_imap_connection(
                 &mut flux,
                 &service,
@@ -886,8 +939,16 @@ where
                 crate::source_de(pair),
             )
             .await;
-            if issue.is_ok_and(|resume| resume.injected) {
-                injections.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            match issue {
+                Ok(resume) => {
+                    if resume.injected {
+                        injections.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    journaliser(pair, &resume, debut.elapsed());
+                }
+                Err(cause) => {
+                    crate::server::journaliser_l_echec("IMAP", pair, &cause, debut.elapsed())
+                }
             }
             drop(place);
         });

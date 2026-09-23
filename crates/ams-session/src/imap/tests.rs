@@ -1212,6 +1212,55 @@ fn un_echange_plus_lie_le_canal_et_ouvre_la_session() {
 }
 
 #[test]
+fn le_journal_apprend_par_quelle_voie_chaque_session_s_est_ouverte() {
+    use crate::Mecanisme;
+
+    // **IMAP EN OUVRE TROIS**, et le journal doit les distinguer : la commande
+    // `LOGIN`, qui n'est pas un mécanisme SASL ; `AUTHENTICATE PLAIN` ; et la
+    // preuve SCRAM, liée au canal ou non. Un exploitant qui croit SCRAM posé
+    // partout n'apprend que là qu'un client passe encore par la voie la plus
+    // ancienne.
+    let mut session = nouvelle(true);
+    assert_eq!(session.mechanism(), None);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    assert_eq!(session.mechanism(), Some(Mecanisme::Login));
+
+    let mut session = nouvelle(true);
+    dire(
+        &mut session,
+        b"a001 AUTHENTICATE PLAIN AGplYW4Ab3V2cmUtdG9p\r\n",
+    );
+    assert_eq!(session.mechanism(), Some(Mecanisme::Plain));
+
+    // SCRAM sans liaison de canal.
+    let mut session = nouvelle_scram(AvecScram::Complet);
+    let server_first = premier_tour(&mut session, b"n,,", "SCRAM-SHA-256");
+    assert!(!server_first.is_empty(), "le premier tour a été refusé");
+    let final_client = banc::client_final(b"n=jean,r=nonceduclient", &server_first);
+    let mut out = [0_u8; 1024];
+    session
+        .on_auth_response(banc::en_base64(&final_client).as_bytes(), &mut out)
+        .expect("traitable");
+    let mut out = [0_u8; 1024];
+    session.on_auth_response(b"", &mut out).expect("traitable");
+    assert_eq!(session.state(), State::Authenticated);
+    assert_eq!(session.mechanism(), Some(Mecanisme::ScramSha256));
+
+    // Et la même preuve, LIÉE : c'est `-PLUS` qui doit se lire au journal.
+    let mut session = nouvelle_liee(AvecScram::Complet);
+    let server_first = premier_tour(&mut session, b"p=tls-exporter,,", "SCRAM-SHA-256-PLUS");
+    let final_client = banc::client_final_lie(b"n=jean,r=nonceduclient", &server_first);
+    let mut out = [0_u8; 1024];
+    session
+        .on_auth_response(banc::en_base64(&final_client).as_bytes(), &mut out)
+        .expect("traitable");
+    let mut out = [0_u8; 1024];
+    session.on_auth_response(b"", &mut out).expect("traitable");
+    assert_eq!(session.state(), State::Authenticated);
+    assert_eq!(session.mechanism(), Some(Mecanisme::ScramSha256Plus));
+}
+
+#[test]
 fn une_liaison_qui_ne_correspond_pas_est_refusee() {
     // **C'EST LE CAS QUE `-PLUS` EXISTE POUR ATTRAPER** : l'intermédiaire
     // relaie un échange dont la preuve est juste, et ne peut pas connaître

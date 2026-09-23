@@ -472,6 +472,7 @@ where
 
         tokio::spawn(async move {
             let mut flux = flux;
+            let debut = std::time::Instant::now();
             let mut remise = fabrique();
             let service = Service {
                 config,
@@ -483,10 +484,12 @@ where
                 dmarc,
                 reports: rapports,
             };
-            // L'ÉCHEC d'une connexion ne regarde qu'elle — le journal viendra
-            // avec `air-log`. Ce qu'elle a CONCLU des signatures, en revanche,
-            // se rassemble : un verdict qu'on ne rend nulle part ne sert à rien.
-            if let Ok(resume) = crate::connection::serve_connection_with(
+            // Ce qu'une connexion a CONCLU des signatures se rassemble : un
+            // verdict qu'on ne rend nulle part ne sert à rien. Ce qu'elle a
+            // fait, elle, part au journal — **une ligne, à la fermeture**, et
+            // pour l'échec aussi : une connexion qui tombe est précisément
+            // celle qu'un exploitant cherche.
+            let issue = crate::connection::serve_connection_with(
                 &mut flux,
                 &service,
                 &*policy,
@@ -494,20 +497,88 @@ where
                 source_de(pair),
                 mode,
             )
-            .await
-            {
-                comptes.ajouter(resume.dkim);
-                comptes.ajouter_dmarc(resume.dmarc);
-                // **UNE TENTATIVE D'INJECTION SE DIT.** Le garde l'a comptée
-                // comme une trame invalide, ce qui la noie parmi les lignes mal
-                // formées ; ici elle est nommée.
-                if resume.outcome == crate::Outcome::Injected {
-                    comptes.injections.fetch_add(1, Ordering::Relaxed);
+            .await;
+            match issue {
+                Ok(resume) => {
+                    comptes.ajouter(resume.dkim);
+                    comptes.ajouter_dmarc(resume.dmarc);
+                    // **UNE TENTATIVE D'INJECTION SE DIT.** Le garde l'a comptée
+                    // comme une trame invalide, ce qui la noie parmi les lignes mal
+                    // formées ; ici elle est nommée.
+                    if resume.outcome == crate::Outcome::Injected {
+                        comptes.injections.fetch_add(1, Ordering::Relaxed);
+                    }
+                    journaliser(pair, &resume, debut.elapsed());
                 }
+                Err(cause) => journaliser_l_echec("SMTP", pair, &cause, debut.elapsed()),
             }
             drop(place);
         });
     }
+}
+
+/// Ce qu'une connexion SMTP laisse au journal, **une ligne, à sa fermeture**.
+///
+/// Elle part sur la sortie d'erreur, que `systemd` verse dans `journald` sans
+/// qu'aucune dépendance de journalisation soit nécessaire. Le préfixe est
+/// celui de tout ce que ce serveur dit, pour qu'un `journalctl -u air-mail`
+/// les rende ensemble.
+fn journaliser(pair: SocketAddr, resume: &crate::Summary, duree: Duration) {
+    let issue: &dyn core::fmt::Display = match resume.outcome {
+        // **LE BANNI NE DOIT PAS NOYER LE JOURNAL.** Il n'a rien reçu, pas même
+        // une bannière ; consigner chacune de ses tentatives donnerait à qui
+        // frappe le moyen de remplir le disque de celui qui l'a banni.
+        crate::Outcome::Banned => return,
+        crate::Outcome::Throttled => &"REFUSÉ, débit au-dessus du seuil",
+        crate::Outcome::Injected => &"REFUSÉ, injection derrière STARTTLS",
+        crate::Outcome::Served => &Remis(resume.messages),
+    };
+    let adresse = pair.ip();
+    std::eprintln!(
+        "air-mail-server : {}",
+        crate::journal::Trace {
+            protocole: "SMTP",
+            pair: &adresse,
+            chiffrement: resume.chiffrement,
+            tls: resume.tls,
+            mecanisme: resume.mecanisme,
+            compte: resume.compte,
+            issue,
+            commandes: resume.commands,
+            duree,
+        }
+    );
+}
+
+/// Combien de messages une connexion a remis, dit en français.
+struct Remis(u64);
+
+impl core::fmt::Display for Remis {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.0 {
+            0 => f.write_str("aucun message"),
+            1 => f.write_str("1 message accepté"),
+            n => write!(f, "{n} messages acceptés"),
+        }
+    }
+}
+
+/// Une connexion qui n'est pas allée à son terme.
+///
+/// **Elle se consigne aussi**, et plus brièvement : il n'y a pas de résumé à
+/// rendre, seulement d'où venait le pair et ce qui a cédé. C'est exactement ce
+/// qu'on cherche quand un client dit « ça ne marche pas » sans rien de plus.
+pub(crate) fn journaliser_l_echec(
+    protocole: &str,
+    pair: SocketAddr,
+    cause: &crate::Error,
+    duree: Duration,
+) {
+    let adresse = pair.ip();
+    std::eprintln!(
+        "air-mail-server : {protocole} {adresse} — connexion interrompue : {cause}, {} s",
+        duree.as_secs()
+    );
 }
 
 /// Ce que les vidanges ont produit, tous fils confondus.

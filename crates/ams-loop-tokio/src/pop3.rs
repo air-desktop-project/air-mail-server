@@ -17,6 +17,7 @@ use ams_session::pop3::{Action, Mailbox, Session};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
 
 use crate::connection::{lire, trouver_crlf};
+use crate::journal::{Chiffrement, Compte};
 use crate::{Error, SharedGuard};
 
 /// Ce qu'un service POP3 apporte à chacune de ses connexions.
@@ -106,6 +107,10 @@ pub struct Pop3Summary {
     /// Voir la garde de `conduire` : c'est une injection, et la connexion est
     /// refusée sans que la commande soit servie.
     pub injected: bool,
+    /// Ce que TLS a négocié, si la connexion a été chiffrée.
+    pub chiffrement: Option<Chiffrement>,
+    /// Le compte dont `PASS` a été accepté, s'il y en a un.
+    pub compte: Compte,
 }
 
 /// Sert une connexion POP3 jusqu'à sa fin.
@@ -211,6 +216,7 @@ where
     };
     session.on_tls_established();
     etat.tls = true;
+    etat.chiffrement = crate::journal::chiffrement_de(chiffre.get_ref().1);
 
     let etape = conduire(
         &mut chiffre,
@@ -238,6 +244,10 @@ struct Etat {
     retrieved: u64,
     expunged: u64,
     tls: bool,
+    /// Ce que TLS a négocié, pour le journal. **Il ne se déduit pas de `tls`.**
+    chiffrement: Option<Chiffrement>,
+    /// Le compte dont `PASS` a été accepté, pour le journal.
+    compte: Compte,
     injected: bool,
 }
 
@@ -259,6 +269,8 @@ impl Etat {
             retrieved: 0,
             expunged: 0,
             tls: false,
+            chiffrement: None,
+            compte: Compte::default(),
             injected: false,
         }
     }
@@ -271,6 +283,8 @@ impl Pop3Summary {
         self.expunged = etat.expunged;
         self.tls = etat.tls;
         self.injected = etat.injected;
+        self.chiffrement = etat.chiffrement;
+        self.compte = etat.compte;
     }
 }
 
@@ -325,6 +339,7 @@ where
     };
     session.on_tls_established();
     etat.tls = true;
+    etat.chiffrement = crate::journal::chiffrement_de(chiffre.get_ref().1);
 
     if matches!(
         service.guard.observe(source, GuardEvent::Connection),
@@ -349,6 +364,59 @@ where
     );
     resume.merge(etat);
     Ok(resume)
+}
+
+/// Ce qu'une connexion POP3 laisse au journal, **une ligne à sa fermeture**.
+fn journaliser(pair: std::net::SocketAddr, resume: &Pop3Summary, duree: core::time::Duration) {
+    // Le banni n'a rien reçu : consigner chacune de ses tentatives lui donnerait
+    // le moyen de remplir le disque qui le bannit.
+    if resume.banned {
+        return;
+    }
+    let issue: &dyn core::fmt::Display = if resume.injected {
+        &"REFUSÉ, injection derrière STLS"
+    } else {
+        &Releve {
+            retires: resume.retrieved,
+            effaces: resume.expunged,
+        }
+    };
+    let adresse = pair.ip();
+    std::eprintln!(
+        "air-mail-server : {}",
+        crate::journal::Trace {
+            protocole: "POP3",
+            pair: &adresse,
+            chiffrement: resume.chiffrement,
+            tls: resume.tls,
+            // **POP3 NE SERT QUE `USER`/`PASS`** : il n'annonce aucun mécanisme
+            // SASL. Le nommer quand même vaut mieux que de laisser le journal
+            // suggérer une session anonyme là où un compte s'est ouvert.
+            mecanisme: (!resume.compte.est_vide()).then_some(ams_session::Mecanisme::UserPass),
+            compte: resume.compte,
+            issue,
+            commandes: resume.commands,
+            duree,
+        }
+    );
+}
+
+/// Ce qu'un relevé POP3 a emporté, et laissé derrière lui.
+struct Releve {
+    retires: u64,
+    effaces: u64,
+}
+
+impl core::fmt::Display for Releve {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match (self.retires, self.effaces) {
+            (0, 0) => f.write_str("rien relevé"),
+            (retires, 0) => write!(f, "{retires} message(s) relevé(s)"),
+            (retires, effaces) => {
+                write!(f, "{retires} message(s) relevé(s), {effaces} effacé(s)")
+            }
+        }
+    }
 }
 
 /// Pourquoi le pilote a rendu la main.
@@ -428,6 +496,11 @@ where
         stream.write_all(tour.reply()).await?;
         stream.flush().await?;
         etat.commands = etat.commands.saturating_add(1);
+        // **POUR LE JOURNAL, ET RIEN D'AUTRE**, relevé à chaque tour : un
+        // `QUIT` rend la main depuis ce corps de boucle, et le relever après
+        // perdrait le compte de la connexion qu'on s'apprête à consigner.
+        // `user()` ne rend un nom qu'une fois `PASS` accepté.
+        etat.compte = Compte::neuf(session.user());
 
         etat.lecture.copy_within(fin_ligne..etat.rempli, 0);
         etat.rempli = etat.rempli.saturating_sub(fin_ligne);
@@ -618,10 +691,10 @@ where
                 tls,
                 tls_mode,
             };
-            // L'ÉCHEC d'une connexion ne regarde qu'elle — le journal viendra
-            // avec `air-log`. Une TENTATIVE D'INJECTION, en revanche, se
-            // rassemble : un compte que personne ne lit est un compte qui
-            // n'existe pas, et celle-là mérite d'être vue.
+            // Une TENTATIVE D'INJECTION se rassemble : un compte que personne
+            // ne lit est un compte qui n'existe pas. Ce que la connexion a fait
+            // part au journal, **une ligne à sa fermeture**, l'échec compris.
+            let debut = std::time::Instant::now();
             let issue = serve_pop3_connection(
                 &mut flux,
                 &service,
@@ -630,8 +703,16 @@ where
                 crate::source_de(pair),
             )
             .await;
-            if issue.is_ok_and(|resume| resume.injected) {
-                injections.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            match issue {
+                Ok(resume) => {
+                    if resume.injected {
+                        injections.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    journaliser(pair, &resume, debut.elapsed());
+                }
+                Err(cause) => {
+                    crate::server::journaliser_l_echec("POP3", pair, &cause, debut.elapsed());
+                }
             }
             drop(place);
         });

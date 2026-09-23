@@ -616,6 +616,58 @@ Pour regarder une boîte sans client :
 air-mail-admin summary /var/lib/air-mail/maildir/jean
 ```
 
+### Le journal : une ligne par connexion, à sa fermeture
+
+Le serveur écrit sur la sortie d'erreur, que `systemd` verse dans `journald` :
+aucune configuration de journalisation n'est à poser.
+
+```sh
+journalctl -u air-mail-server -f
+journalctl -u air-mail-server --since today | grep 'AUTH PLAIN'
+```
+
+Chaque connexion servie laisse **une seule ligne, écrite quand elle se ferme** :
+
+```
+air-mail-server : SMTP 178.197.196.110 — TLS1.3 (TLS13_AES_256_GCM_SHA384), AUTH PLAIN `ofrou-sierre`, 1 message accepté, 6 commande(s), 3 s
+air-mail-server : IMAP 2001:db8::42 — TLS1.2 (TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384), AUTH LOGIN `contact`, session ouverte, 24 commande(s), 41 s
+air-mail-server : SMTP 192.0.2.7 — EN CLAIR, sans authentification, aucun message, 2 commande(s), 0 s
+air-mail-server : SMTP 192.0.2.7 — connexion interrompue : le pair n'a rien envoyé dans le délai imparti, 300 s
+```
+
+Elle porte, dans cet ordre : le protocole, **d'où vient le pair**, ce que TLS a
+négocié — version ET suite —, **sous quel mécanisme il s'est authentifié** et au
+nom de quel compte, ce que la connexion a produit, combien de commandes, et
+combien de temps.
+
+**Une ligne, et à la fin.** Écrire à l'ouverture ne dirait rien encore : ni ce
+qui a été négocié, ni qui s'est authentifié. Il faudrait deux lignes à recoller
+soi-même, et elles s'entrelaceraient, puisque le serveur sert des milliers de
+connexions à la fois.
+
+**Le mécanisme est ce qu'on vient y chercher.** `PLAIN` dit que le mot de passe
+a traversé le tunnel tel quel ; `SCRAM-SHA-256` qu'il est resté chez le client ;
+`SCRAM-SHA-256-PLUS` que la preuve était en plus LIÉE à ce canal TLS. Un
+exploitant qui croit SCRAM posé chez tous ses clients n'apprend que là qu'un
+seul d'entre eux ne le fait pas. IMAP ajoute `LOGIN` — sa commande d'origine,
+qui n'est pas un mécanisme SASL —, et POP3 n'offre que `USER/PASS`.
+
+#### Ce que le journal ne porte pas, et c'est délibéré
+
+- **Aucun secret** : ni mot de passe, ni preuve SCRAM, ni octets de liaison. Le
+  mécanisme se nomme ; ce qu'il a transporté, non.
+- **Aucune adresse d'enveloppe, aucun objet de message.** Un journal
+  d'exploitation dit QUI s'est connecté et CE QU'IL A OBTENU. Le laisser devenir
+  une copie du courrier ferait des sauvegardes de `journald` un second magasin
+  de messages que personne n'a décidé.
+- **Rien que le pair ait écrit**, à une exception : le nom du compte, et
+  seulement APRÈS que la politique l'a reconnu et canonisé. Il est en outre
+  filtré à l'ASCII imprimable — un octet de contrôle y couperait la ligne en
+  deux, et une fausse ligne se lit comme une vraie.
+- **Rien d'un pair banni.** Il n'a rien reçu, pas même une bannière ; consigner
+  chacune de ses tentatives donnerait à qui frappe le moyen de remplir le disque
+  de celui qui l'a banni.
+
 ---
 
 ## Ce que ce document ne couvre pas
