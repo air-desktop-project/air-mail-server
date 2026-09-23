@@ -1,0 +1,687 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>air-mail-server REST API</title>
+<meta name="description" content="Developer manual for the air-mail-server REST API: resources, bearer-token authentication, scopes, error model, and the responsibilities that fall to you.">
+<link rel="stylesheet" href="manuel.css">
+</head>
+<body>
+<div class="page">
+
+<nav class="sommaire" aria-label="Contents">
+  <p class="marque">air-mail-server</p>
+  <p class="sous-marque">REST API · developer manual</p>
+  <ol>
+    <li><a href="#overview">1. Overview</a>
+      <ol>
+        <li><a href="#surface">1.1 Surface</a></li>
+        <li><a href="#principles">1.2 Design principles</a></li>
+      </ol>
+    </li>
+    <li><a href="#transport">2. Transport and conventions</a>
+      <ol>
+        <li><a href="#tls">2.1 TLS and HTTP/2</a></li>
+        <li><a href="#paths">2.2 Paths</a></li>
+        <li><a href="#types">2.3 Media types</a></li>
+        <li><a href="#representations">2.4 Representations</a></li>
+      </ol>
+    </li>
+    <li><a href="#security">3. Authentication and security</a>
+      <ol>
+        <li><a href="#model">3.1 The model on one page</a></li>
+        <li><a href="#token">3.2 The bearer token</a></li>
+        <li><a href="#obtain">3.3 Obtaining a token</a></li>
+        <li><a href="#present">3.4 Presenting a token</a></li>
+        <li><a href="#scopes">3.5 Scopes</a></li>
+        <li><a href="#admin">3.6 Administration</a></li>
+        <li><a href="#does">3.7 What the API does</a></li>
+        <li><a href="#does-not">3.8 What the API does not do</a></li>
+        <li><a href="#duties">3.9 Your responsibilities</a></li>
+      </ol>
+    </li>
+    <li><a href="#errors">4. Error model</a></li>
+    <li><a href="#reference">5. Resource reference</a>
+      <ol>
+        <li><a href="#r-tokens">5.1 Tokens</a></li>
+        <li><a href="#r-mailboxes">5.2 Mailboxes</a></li>
+        <li><a href="#r-messages">5.3 Messages</a></li>
+        <li><a href="#r-search">5.4 Search</a></li>
+        <li><a href="#r-submission">5.5 Submission</a></li>
+        <li><a href="#r-self">5.6 Your own secret</a></li>
+        <li><a href="#r-admin">5.7 Administration</a></li>
+        <li><a href="#r-observe">5.8 Observability</a></li>
+      </ol>
+    </li>
+    <li><a href="#limits">6. Limits</a></li>
+    <li><a href="#example">7. End-to-end example</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<p class="langue"><a href="ams-api-fr.html" hreflang="fr">Version française →</a></p>
+
+<header class="titre">
+  <h1>The air-mail-server REST API</h1>
+  <p class="resume">Developer manual. This API gives access to an account's mail and mailboxes, to message submission, and to server observability. It is served over HTTP/2 on TLS, and every request authenticates with a bearer token.</p>
+  <div class="meta">
+    <span>API version: <strong>v1</strong></span>
+    <span>Token version: <strong>0x01</strong></span>
+    <span>Server: <strong>air-mail-server 0.2.6</strong></span>
+  </div>
+</header>
+
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<h2 id="overview"><span class="numero">1</span>Overview</h2>
+
+<p>The <code>air-mail-server</code> REST API exposes four areas that have nothing to do with one another: reading your mail, submitting a message, administering the server, and watching its counters. That separation is not filing convenience — it is the foundation of the permission model described in <a href="#scopes">§3.5</a>.</p>
+
+<h3 id="surface"><span class="numero">1.1</span>Surface</h3>
+
+<div class="tableau">
+<table>
+  <thead><tr><th>Area</th><th>What it allows</th><th>Prefix</th></tr></thead>
+  <tbody>
+    <tr><td><code>mail</code></td><td>List mailboxes, read messages and their MIME parts, set and clear flags, search</td><td><code>/v1/mailboxes/…</code></td></tr>
+    <tr><td><code>submit</code></td><td>Submit a message for delivery or relay</td><td><code>/v1/submissions</code></td></tr>
+    <tr><td><code>admin</code></td><td>Accounts, addresses, domains, bans</td><td><code>/v1/accounts/…</code>, <code>/v1/domains</code>, <code>/v1/bans/…</code></td></tr>
+    <tr><td><code>observe</code></td><td>Health and counters</td><td><code>/v1/health</code>, <code>/v1/metrics</code></td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>Two resources sit outside these areas because they act on <em>yourself</em> rather than on a server resource: <code>/v1/tokens</code>, which requires no permission because it is where you acquire one, and <code>/v1/me/password</code>, which requires only that you hold a valid token.</p>
+
+<h3 id="principles"><span class="numero">1.2</span>Design principles</h3>
+
+<p>Three decisions shape everything else, and knowing them saves you from fighting the API.</p>
+
+<h4>A path is a designation, not a string</h4>
+<p>The server <strong>normalises nothing</strong>. An empty segment, a <code>.</code>, a <code>..</code>, a control byte, a malformed percent-escape, invalid UTF-8 — all are rejected rather than repaired. An ambiguous designation has no canonical form to choose; it has an author to say no to. This makes the classic failure inexpressible: a <code>%2F</code> that becomes a separator again <em>after</em> the access check.</p>
+
+<h4>Permission is demanded before it is granted</h4>
+<p>Every resource declares the scope it requires in the same table as the routing. There is no access-control list kept on the side — the kind that drifts out of step on the first addition, whose first symptom is a resource served without a permission check.</p>
+
+<h4>Nothing that goes out is concatenated</h4>
+<p>Almost everything this API returns came from elsewhere: a mailbox name a client chose, a subject a stranger wrote. Every representation goes through a single JSON encoder, and every fault through a single problem-document encoder.</p>
+
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<h2 id="transport"><span class="numero">2</span>Transport and conventions</h2>
+
+<h3 id="tls"><span class="numero">2.1</span>TLS and HTTP/2</h3>
+
+<p>The API is served <strong>only over HTTP/2 on TLS</strong>. ALPN advertises <code>h2</code> and nothing else: a client that cannot negotiate HTTP/2 will get no HTTP/1.1 fallback. There is no cleartext access, on any port.</p>
+
+<div class="note info">
+  <span class="etiquette">Note</span>
+  <p>The listening address comes from the server's configuration. In a typical deployment the API answers on port <code>8443</code>; ask your operator for the URL rather than assuming it.</p>
+</div>
+
+<h3 id="paths"><span class="numero">2.2</span>Paths</h3>
+
+<p>Every resource lives under <code>/v1</code>. The following limits apply to the path before anything else happens:</p>
+
+<div class="tableau">
+<table>
+  <thead><tr><th>Limit</th><th>Value</th><th>On overflow</th></tr></thead>
+  <tbody>
+    <tr><td>Segments in a path</td><td>8</td><td><code>414 URI Too Long</code></td></tr>
+    <tr><td>Bytes per segment, after decoding</td><td>255</td><td><code>400 Bad Request</code></td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="note danger">
+  <span class="etiquette">No query parameter is read</span>
+  <p>The string following a <code>?</code> is split off the path and then <strong>discarded</strong>. No resource in this API currently accepts a query parameter — no filter, no sort, no pagination cursor. A request carrying them is not rejected: its parameters simply have no effect, which is more treacherous than a refusal. Do not build a client that depends on them.</p>
+</div>
+
+<h3 id="types"><span class="numero">2.3</span>Media types</h3>
+
+<div class="tableau">
+<table>
+  <thead><tr><th>Type</th><th>Where</th></tr></thead>
+  <tbody>
+    <tr><td><code>application/json</code></td><td>Every request and response body except the two cases below</td></tr>
+    <tr><td><code>message/rfc822</code></td><td>The body of a submission, and the response of <code>…/raw</code></td></tr>
+    <tr><td><code>application/problem+json</code></td><td>Every error response, without exception</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>The server checks the body's type. For any protected resource it does so <em>after</em> authentication — a <code>400</code> about the content type would reveal that the path was recognised, and that is precisely the information <a href="#errors">§4</a> protects.</p>
+
+<h3 id="representations"><span class="numero">2.4</span>Representations</h3>
+
+<ul>
+  <li><strong>Dates are numbers.</strong> Message arrival times are in <em>seconds</em> since the epoch; token expiry is in <em>microseconds</em>. The server never formats a date: the client is the one who knows who is reading it.</li>
+  <li><strong>Empty and absent are distinguished.</strong> An empty subject is <code>""</code>; a message with no subject is <code>null</code>.</li>
+  <li><strong>UIDs are durable under a given <code>uidValidity</code>.</strong> Every response carrying UIDs also carries the mailbox's <code>uidValidity</code> (RFC 9051 §2.3.1.1). If it changes, your remembered UIDs no longer designate anything: discard your cache.</li>
+  <li><strong>A truncated list says so.</strong> Rather than silently returning half, bounded or paginated resources carry a field that announces it.</li>
+</ul>
+
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<h2 id="security"><span class="numero">3</span>Authentication and security</h2>
+
+<p>This is the most important section of the manual. It describes what the server guarantees, what it does not, and where your share of the work begins. Read it in full before writing code against this API.</p>
+
+<h3 id="model"><span class="numero">3.1</span>The model on one page</h3>
+
+<ol>
+  <li>The client exchanges a <em>login and password</em> for a <strong>bearer token</strong> at <code>POST /v1/tokens</code>.</li>
+  <li>The server verifies the credentials, then <strong>decides the scope on its own</strong>. The client does not request a scope and cannot obtain more.</li>
+  <li>The token is sealed with HMAC-SHA-256 under a key only the server holds. It carries the account, the scope, an expiry and an identifier.</li>
+  <li>Every subsequent request presents that token in <code>Authorization: Bearer …</code>.</li>
+  <li>The server verifies the seal, <em>only then</em> reads the fields, <em>then</em> compares the token's scope against the one the resource requires.</li>
+</ol>
+
+<div class="note sur">
+  <span class="etiquette">The order is the guarantee</span>
+  <p>The seal is verified <strong>before</strong> a single field is interpreted. Reading an expiry before authenticating the token that carries it means trusting what you have not yet verified. The seal comparison runs in constant time.</p>
+</div>
+
+<h3 id="token"><span class="numero">3.2</span>The bearer token</h3>
+
+<p>The token is an opaque base64url string. <strong>Do not parse it.</strong> Its internal structure may change; only the string matters to you.</p>
+
+<h4>Why this is not a JWT</h4>
+
+<p>A JWT carries its algorithm <em>inside</em> the token, in an <code>alg</code> field the verifier is expected to read in order to know how to verify. That is asking an unauthenticated message how to authenticate it, and two entire families of attacks live in that question: <code>alg: none</code>, which removes verification altogether, and the <code>RS256</code> → <code>HS256</code> confusion, which verifies a signature using a public key mistaken for a shared secret.</p>
+
+<p>This token <strong>has no algorithm field</strong>. Its version fixes exactly one, and there is only one version. There is nothing to negotiate, and therefore nothing to confuse.</p>
+
+<h4>What it carries</h4>
+
+<div class="tableau">
+<table>
+  <thead><tr><th>Field</th><th>Purpose</th></tr></thead>
+  <tbody>
+    <tr><td>Version</td><td>One byte, <code>0x01</code>. It fixes the sealing algorithm.</td></tr>
+    <tr><td>Account</td><td>The name the bearer acts under. At most 64 bytes.</td></tr>
+    <tr><td>Scope</td><td>Eight bits: two per area, read then write.</td></tr>
+    <tr><td>Expiry</td><td>Microseconds since the epoch.</td></tr>
+    <tr><td>Identifier</td><td>A random number distinguishing this token from others of the same account.</td></tr>
+    <tr><td>Seal</td><td>HMAC-SHA-256 over everything above, 32 bytes.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>The sealing key is at least 32 bytes. A key shorter than the seal it produces would give less security than the seal's size suggests.</p>
+
+<h3 id="obtain"><span class="numero">3.3</span>Obtaining a token</h3>
+
+<div class="ressource">
+  <div class="ligne">
+    <span class="verbe post">POST</span>
+    <span class="chemin">/v1/tokens</span>
+    <span class="portee">no scope required</span>
+  </div>
+
+<p>The body is a JSON object with two fields, both mandatory:</p>
+
+<pre><code>{ "login": "marie", "password": "…" }</code></pre>
+
+<p>Response <code>201 Created</code>:</p>
+
+<pre><code>{
+  "token":   "AQECAAAAAG…",
+  "expires": 1790209932000000
+}</code></pre>
+
+<p><code>expires</code> is in <strong>microseconds</strong> since the epoch, not seconds. It is the only date in this API in that unit; message dates are in seconds.</p>
+</div>
+
+<div class="note prudence">
+  <span class="etiquette">No escapes in credentials</span>
+  <p>The server reads <code>login</code> and <code>password</code> <strong>without decoding JSON escape sequences</strong>. A password containing <code>\n</code>, <code>\"</code> or <code>é</code> will not be read as you wrote it. Use characters that need no escaping, or expect a refusal.</p>
+</div>
+
+<h4>A refusal never says why</h4>
+
+<p>An unknown login and a wrong password produce <strong>exactly the same response</strong>: <code>401 Unauthorized</code>, with the same error document. Distinguishing them would make the account file enumerable without knowing a single password. Do not build a UI that claims to tell them apart: it would be lying.</p>
+
+<div class="note danger">
+  <span class="etiquette">A failure counts against you</span>
+  <p>Every credential failure is recorded by the server's abuse guard as an invalid frame. Past a threshold, <strong>your address is banned</strong> and receives no response at all — not even a refusal. A client that retries in a loop after a <code>401</code> bans itself. Stop at the first refusal and ask the user for fresh credentials.</p>
+</div>
+
+<h3 id="present"><span class="numero">3.4</span>Presenting a token</h3>
+
+<pre><code>GET /v1/mailboxes HTTP/2
+authorization: Bearer AQECAAAAAG…</code></pre>
+
+<p><code>Bearer</code> is the only recognised scheme (RFC 6750). An authentication failure returns <code>401 Unauthorized</code> together with <code>www-authenticate: Bearer</code>, which tells the client <em>how</em> to present itself.</p>
+
+<p>Two distinct causes lead to <code>401</code>, and the server deliberately distinguishes them in the error document's title:</p>
+
+<div class="tableau">
+<table>
+  <thead><tr><th>Cause</th><th>What you should do</th></tr></thead>
+  <tbody>
+    <tr><td>The token does not verify — seal, structure or encoding</td><td>Do not retry with the same token. Perform a fresh credential exchange.</td></tr>
+    <tr><td>The token is authentic and its time has passed</td><td>Re-authenticate. This is the normal end-of-session case.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>The second case is distinguished because it is only reachable <em>after</em> a valid seal: saying so teaches a forger nothing, and teaches an honest client that it should re-authenticate rather than believe its token rejected.</p>
+
+<h3 id="scopes"><span class="numero">3.5</span>Scopes</h3>
+
+<p>A scope is an <em>area × right</em> pair. The four areas are <code>mail</code>, <code>submit</code>, <code>admin</code> and <code>observe</code>; the two rights are <em>read</em> and <em>write</em>. <strong>Write contains read</strong>, not the other way round.</p>
+
+<p>The scope a request requires is computed simply:</p>
+
+<ul>
+  <li><strong>the area comes from the path</strong>;</li>
+  <li><strong>the right comes from the verb</strong>: <code>GET</code>, <code>HEAD</code> and <code>OPTIONS</code> require read; <code>POST</code>, <code>PUT</code>, <code>PATCH</code> and <code>DELETE</code> require write.</li>
+</ul>
+
+<h4>What a password grants</h4>
+
+<p>A successful credential exchange always returns exactly this scope, and only this one:</p>
+
+<div class="tableau">
+<table>
+  <thead><tr><th>Area</th><th>Right granted</th></tr></thead>
+  <tbody>
+    <tr><td><code>mail</code></td><td>write</td></tr>
+    <tr><td><code>submit</code></td><td>write</td></tr>
+    <tr><td><code>observe</code></td><td>read</td></tr>
+    <tr><td><code>admin</code></td><td><strong>none</strong></td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="note danger">
+  <span class="etiquette">A password never opens administration</span>
+  <p>This limit lives <strong>in the server's code, not in a configuration</strong>. A setting would eventually be flipped, and a compromised account would then become the whole server. No combination of credentials, whatever rights the user holds elsewhere, produces an administration token through the API.</p>
+</div>
+
+<p>One practical consequence is worth knowing before you discover it: <strong>the client does not choose its scope</strong>. There is no <code>scope</code> parameter on the token request. You cannot ask for a read-only token for a dashboard — you get the full scope above, or nothing.</p>
+
+<h3 id="admin"><span class="numero">3.6</span>Administration</h3>
+
+<p>An administration token is <strong>minted on the server machine</strong>, by whoever can already read its configuration:</p>
+
+<pre><code>air-mail-admin token /var/lib/air-mail/air-mail.conf \
+                --login marie --minutes 30</code></pre>
+
+<p>That is the same authority as the one that can stop the service or read the mailboxes: no new authority is introduced. The name given need not designate an existing account — it says <em>who is acting</em>, and appears in what the server logs.</p>
+
+<div class="note prudence">
+  <span class="etiquette">Treat it as a production secret</span>
+  <p>This token opens accounts, addresses, domains and bans. Give it the shortest lifetime that suffices, do not write it into a versioned configuration file, and do not pass it as a command-line argument on a shared machine — it would appear in the process table.</p>
+</div>
+
+<h3 id="does"><span class="numero">3.7</span>What the API does</h3>
+
+<ul>
+  <li><strong>It authenticates every request</strong> independently of the previous ones. There is no server-side session.</li>
+  <li><strong>It verifies the seal before reading anything</strong>, in constant time.</li>
+  <li><strong>It bounds a token's life</strong> — one hour in service, twelve at most that the format allows — both at issuance and at verification.</li>
+  <li><strong>It refuses what it does not understand</strong> rather than normalising it: ambiguous paths, JSON that parsers disagree about, excessive nesting.</li>
+  <li><strong>It gives the same answer</strong> to "this resource does not exist" and "you are not allowed to know".</li>
+  <li><strong>It counts abuse</strong> and bans sources that cross the thresholds.</li>
+  <li><strong>It checks that an account writes only in its own name</strong> at submission, and reports any impersonation attempt to the operator.</li>
+</ul>
+
+<h3 id="does-not"><span class="numero">3.8</span>What the API does not do</h3>
+
+<p>This list matters as much as the previous one. Each item is either a responsibility that falls to you, or an expectation you should not hold.</p>
+
+<div class="note danger">
+  <span class="etiquette">Revocation does not exist</span>
+  <p><code>DELETE /v1/tokens/current</code> is routed and requires a valid token, but <strong>returns <code>501 Not Implemented</code></strong>: it revokes nothing. A token verifies without consulting any registry, and <strong>its only guaranteed end is its expiry</strong>. There is currently no way, through the API, to invalidate a token before its time.</p>
+  <p>The direct consequence: <em>a stolen token remains usable until it expires</em>. That is why the lifetime is bounded, and why you should keep it short.</p>
+</div>
+
+<div class="tableau">
+<table>
+  <thead><tr><th>What does not exist</th><th>What that means for you</th></tr></thead>
+  <tbody>
+    <tr><td>Token revocation</td><td>Erase the token client-side on sign-out, and know it stays valid server-side until it expires.</td></tr>
+    <tr><td>Refresh token</td><td>There is none. On expiry you must perform a full credential exchange — so you must keep the means to do so, or ask the user again.</td></tr>
+    <tr><td>Client-chosen scope</td><td>You cannot obtain a read-only token. If your component only needs to read, containing it is your architecture's job.</td></tr>
+    <tr><td>Query parameters</td><td>No filter, no sort, no cursor. See <a href="#paths">§2.2</a>.</td></tr>
+    <tr><td>Usable pagination</td><td>Message listings return a <code>next</code> cursor but <strong>offer no way to send it back</strong>. It tells you there is more; it does not let you reach it.</td></tr>
+    <tr><td>CORS headers</td><td>The server emits no <code>access-control-allow-origin</code> and no preflight response. <strong>This API is not callable from a browser cross-origin.</strong> Go through your own service.</td></tr>
+    <tr><td>Advertised rate limits</td><td>No header tells you how many requests remain. The guard bans without warning; keep to a reasonable pace.</td></tr>
+    <tr><td>Concurrency control</td><td>No <code>ETag</code>, no <code>If-Match</code>. Two clients modifying the same resource overwrite each other silently.</td></tr>
+    <tr><td>Idempotent writes</td><td>No idempotency key. A replayed submission delivers a second message.</td></tr>
+    <tr><td>Accessible audit log</td><td>The server logs, but the API does not expose that log.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3 id="duties"><span class="numero">3.9</span>Your responsibilities</h3>
+
+<p>What the server cannot do for you, because it has no say in it.</p>
+
+<h4>Storing the token</h4>
+<p>A bearer token is a <strong>secret equivalent to the password</strong> for as long as it lives, and it is not revocable. You must:</p>
+<ul>
+  <li>keep it out of any storage readable by other code: no <code>localStorage</code> in a browser, no world-readable file, no environment variable of a shared process;</li>
+  <li>never write it to a log, a stack trace, a crash report or a URL — a URL ends up in the logs of every intermediary;</li>
+  <li>erase it from memory as soon as the session ends.</li>
+</ul>
+
+<h4>Lifetime</h4>
+<p><strong>A token lasts one hour</strong> in the configuration in service. Twelve hours is the ceiling the format allows, not the deployed value — hard-code neither: read <code>expires</code>, and design your client to survive re-authentication.</p>
+
+<h4>Certificate validation</h4>
+<p>You must validate the server's TLS certificate. Disabling that check — an <code>--insecure</code>, a <code>verify=False</code> — cancels the whole of this protection: the token then travels in the clear to whoever has placed themselves in the middle. No property in this section survives it.</p>
+
+<h4>Handling errors</h4>
+<ul>
+  <li><strong>Do not retry a <code>401</code> in a loop</strong>: you will get yourself banned.</li>
+  <li><strong>Infer nothing from a <code>404</code></strong>: it means "this does not exist" <em>or</em> "you are not allowed to know". The two are indistinguishable by construction.</li>
+  <li><strong>Respect a <code>503</code></strong>: it is temporary and your request may well succeed later.</li>
+</ul>
+
+<h4>The content you display</h4>
+<p>Subjects, senders and message bodies come from strangers. The server returns them <em>decoded</em> and correctly escaped for JSON — it does not return them <em>safe to display</em>. Escaping for your presentation layer remains entirely yours.</p>
+
+<h4>What you submit</h4>
+<p>At submission you compose the RFC 5322 message yourself. The server checks that the <code>From:</code> belongs to the authenticated account and refuses otherwise, but it fixes neither your MIME encoding nor your headers.</p>
+
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<h2 id="errors"><span class="numero">4</span>Error model</h2>
+
+<p>Every fault, without exception, returns an RFC 9457 document with media type <code>application/problem+json</code>:</p>
+
+<pre><code>{
+  "type":   "/problems/not-found",
+  "title":  "no such resource",
+  "status": 404
+}</code></pre>
+
+<p><code>type</code> is a <strong>relative reference</strong>, to be resolved against the document's URL (RFC 9457 §4.2.1). The server does not write it absolute because it does not know the name under which it is reached — a proxy can change that without telling it.</p>
+
+<div class="note info">
+  <span class="etiquette">The type comes from the status, not the cause</span>
+  <p>Two causes sharing a status code necessarily share a type. This is deliberate: "this resource does not exist" and "your token does not open this scope" both answer <code>404</code>, and a distinct type would immediately restore the distinction that the status code had just erased. Branch on <code>status</code>, not on <code>title</code>, which is meant for a human.</p>
+</div>
+
+<div class="tableau">
+<table>
+  <thead><tr><th>Status</th><th>Type</th><th>When</th></tr></thead>
+  <tbody>
+    <tr><td><code>400</code></td><td><code>/problems/bad-request</code></td><td>Rejected path, unreadable or ambiguous JSON, unreadable message, invalid account body</td></tr>
+    <tr><td><code>401</code></td><td><code>/problems/unauthorized</code></td><td>Token missing, unreadable, badly sealed, or expired. Carries <code>www-authenticate: Bearer</code></td></tr>
+    <tr><td><code>403</code></td><td><code>/problems/forbidden</code></td><td><strong>Only</strong>: the current password supplied during a secret change does not match</td></tr>
+    <tr><td><code>404</code></td><td><code>/problems/not-found</code></td><td>The resource does not exist, <em>or</em> your token does not open the scope it requires</td></tr>
+    <tr><td><code>405</code></td><td><code>/problems/method-not-allowed</code></td><td>The resource exists but not with this verb. Carries <code>allow</code></td></tr>
+    <tr><td><code>414</code></td><td><code>/problems/uri-too-long</code></td><td>More segments than the server retains</td></tr>
+    <tr><td><code>500</code>, <code>501</code>, <code>503</code></td><td><code>/problems/internal</code></td><td>A server-side fault. A <code>503</code> is temporary and worth retrying</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="note prudence">
+  <span class="etiquette">403 is rare, and it is not a permission failure</span>
+  <p>A missing permission returns <code>404</code>, never <code>403</code>. The only <code>403</code> in this API means "the current password you supplied is wrong": the bearer is acting on their own resource, whose existence they obviously know, and a <code>404</code> would send them looking in the wrong place.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<h2 id="reference"><span class="numero">5</span>Resource reference</h2>
+
+<p>The scope shown is the one for a read; a write on the same resource requires the write right of the same area.</p>
+
+<h3 id="r-tokens"><span class="numero">5.1</span>Tokens</h3>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe post">POST</span><span class="chemin">/v1/tokens</span><span class="portee">none</span></div>
+  <p>Exchanges credentials for a token. See <a href="#obtain">§3.3</a>.</p>
+</div>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe delete">DELETE</span><span class="chemin">/v1/tokens/current</span><span class="portee">valid token</span></div>
+  <p><strong>Returns <code>501 Not Implemented</code>.</strong> Revocation is not implemented; see <a href="#does-not">§3.8</a>.</p>
+</div>
+
+<h3 id="r-mailboxes"><span class="numero">5.2</span>Mailboxes</h3>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/mailboxes</span><span class="portee">mail:read</span></div>
+  <pre><code>{ "mailboxes": [
+    { "name": "INBOX", "messages": 716, "unseen": 12,
+      "uid_next": 1793, "uid_validity": 1756900000 }
+] }</code></pre>
+</div>
+
+<div class="ressource">
+  <div class="ligne">
+    <span class="verbe get">GET</span>
+    <span class="chemin">/v1/mailboxes/{mailbox}</span><span class="portee">mail:read</span>
+  </div>
+  <p><code>GET</code> returns a mailbox's state, in the same shape as a list entry.</p>
+  <p><code>PUT</code> creates the mailbox and returns <code>204</code>. It is <strong>idempotent</strong> (RFC 9110 §9.3.4): replayed on a mailbox that already exists, it does not fault — the requested state is the state that is.</p>
+  <div class="note danger">
+    <span class="etiquette">A mailbox DELETE is permanent</span>
+    <p>It removes the mailbox and what it holds, with no trash and no confirmation. A mailbox that had children has its mail removed and its name kept, as RFC 9051 §6.3.5 prescribes; the answer is the same <code>204</code>.</p>
+  </div>
+</div>
+
+<h3 id="r-messages"><span class="numero">5.3</span>Messages</h3>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/mailboxes/{mailbox}/messages</span><span class="portee">mail:read</span></div>
+  <pre><code>{
+  "uidValidity": 1756900000,
+  "messages": [
+    { "uid": 1792, "size": 1282, "received": 1790138347,
+      "subject": "[SG50 Battery] Test Email", "from": "ofrou-sierre@narro.ch",
+      "flags": ["seen"] }
+  ],
+  "next": 1741
+}</code></pre>
+  <p>A page holds <strong>at most 50 messages</strong>. <code>next</code> carries the UID of the first message <em>not returned</em>, or <code>null</code> if there are no more.</p>
+  <div class="note prudence">
+    <span class="etiquette">The cursor goes nowhere</span>
+    <p><code>next</code> tells you messages remain, but no parameter lets you resume from it. On a mailbox with more than fifty messages, this resource will only ever give you the first fifty.</p>
+  </div>
+</div>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe post">POST</span><span class="chemin">/v1/mailboxes/{mailbox}/messages</span><span class="portee">mail:write</span></div>
+  <p><strong>Files</strong> a message into the mailbox — a draft, a sent copy, an import. The body is a <code>message/rfc822</code> message, and the <code>201</code> response carries the UID obtained: <code>{"uid": 1792}</code>.</p>
+  <div class="note info">
+    <span class="etiquette">Filing is not sending</span>
+    <p>Nothing is routed, nothing is signed, nobody else receives it. This is IMAP's <code>APPEND</code> (RFC 9051 §6.3.12). To <em>send</em>, see <a href="#r-submission">§5.5</a>. A message that cannot be parsed is refused rather than filed: a mailbox holding one would no longer be served over IMAP.</p>
+  </div>
+</div>
+
+<div class="ressource">
+  <div class="ligne">
+    <span class="verbe get">GET</span><span class="verbe patch">PATCH</span><span class="verbe delete">DELETE</span>
+    <span class="chemin">/v1/mailboxes/{mailbox}/messages/{uid}</span><span class="portee">mail</span>
+  </div>
+  <p>Returns the message's decoded envelope, under <code>{"uidValidity": …, "message": {…}}</code>.</p>
+  <p>Flags are named as IMAP names them (RFC 9051 §2.3.2), not in lower case: <code>\Seen</code>, <code>\Answered</code>, <code>\Flagged</code>, <code>\Deleted</code>, <code>\Draft</code>, <code>$MDNSent</code>, <code>$Forwarded</code>, <code>$Junk</code>, <code>$NonJunk</code>, <code>$Phishing</code>. The set is closed: ten, and not one more.</p>
+  <p><code>PATCH</code> sets and clears flags, and returns the message <strong>as it has become</strong>:</p>
+  <pre><code>{ "add": ["\\Seen"], "remove": ["\\Flagged"] }</code></pre>
+  <p>The same flag on both sides is refused with <code>400</code> — the request would contradict itself, and guessing would be worse than refusing.</p>
+  <div class="note danger">
+    <span class="etiquette">A message DELETE is permanent</span>
+    <p>It returns <code>204</code> and the message is gone. Server-side this single gesture is worth two: the message is first marked <code>\Deleted</code>, then removed — the store <strong>refuses to remove what does not carry the mark on disk</strong>, so that a stale belief never loses mail.</p>
+  </div>
+</div>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/mailboxes/{mailbox}/messages/{uid}/raw</span><span class="portee">mail:read</span></div>
+  <p>The message <strong>exactly as it arrived</strong>, as <code>message/rfc822</code>. This is not an alternative representation of the previous resource: one is what was received, the other is our reading of it. The question "what did the server actually receive?" must have a stable answer that does not depend on an <code>Accept</code> header.</p>
+</div>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/mailboxes/{mailbox}/messages/{uid}/parts/{part}</span><span class="portee">mail:read</span></div>
+  <p>One MIME part, numbered as RFC 9051 §6.4.5 prescribes — <code>1</code>, <code>1.2</code>, <code>2.1.1</code>.</p>
+</div>
+
+<h3 id="r-search"><span class="numero">5.4</span>Search</h3>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe post">POST</span><span class="chemin">/v1/mailboxes/{mailbox}/search</span><span class="portee">mail:read</span></div>
+  <p>Search is a <code>POST</code> rather than a <code>GET</code>: its criteria do not fit unambiguously in a query string, and putting them there would have every intermediary log them.</p>
+  <pre><code>{ "seen": false, "from": "narro.ch", "subject": "alert" }</code></pre>
+  <div class="tableau">
+  <table>
+    <thead><tr><th>Criterion</th><th>Type</th><th>Applies to</th></tr></thead>
+    <tbody>
+      <tr><td><code>seen</code>, <code>answered</code>, <code>flagged</code>, <code>deleted</code>, <code>draft</code></td><td>boolean</td><td>The flag, set or cleared</td></tr>
+      <tr><td><code>from</code>, <code>to</code>, <code>subject</code></td><td>text</td><td>The corresponding header field</td></tr>
+      <tr><td><code>body</code></td><td>text</td><td>The body</td></tr>
+      <tr><td><code>text</code></td><td>text</td><td>Header and body (RFC 9051 §6.4.4)</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p><strong>Criteria combine with AND, and there is no other way.</strong> No <code>OR</code>, no <code>NOT</code>: an expression language would require a tree, a bounded depth and a grammar of its own.</p>
+  <pre><code>{ "uids": [1792, 1788, 1741], "uidValidity": 1756900000, "complete": true }</code></pre>
+  <p><code>complete</code> is <code>false</code> when the list was truncated. A client ignoring it would act on half its results believing it had them all.</p>
+</div>
+
+<h3 id="r-submission"><span class="numero">5.5</span>Submission</h3>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe post">POST</span><span class="chemin">/v1/submissions</span><span class="portee">submit:write</span></div>
+  <p>The body is a <strong>complete RFC 5322 message</strong> as <code>message/rfc822</code> — not JSON. Wrapping a message in a JSON string would double its size to say nothing more.</p>
+  <pre><code>POST /v1/submissions HTTP/2
+authorization: Bearer AQECAAAAAG…
+content-type: message/rfc822
+
+From: marie@example.com
+To: john@elsewhere.test
+Subject: hello
+
+The message body.
+</code></pre>
+  <div class="note danger">
+    <span class="etiquette">An account writes only in its own name</span>
+    <p>The <code>From:</code> must belong to the account the token carries. A message asserting another address is refused with <code>400</code>, and the attempt is <strong>reported to the operator as impersonation</strong>. This is not a politeness check: it, and not DMARC, is what stops a compromised account from writing in a colleague's name.</p>
+  </div>
+  <p>The server delivers to local recipients, queues what goes out, and <strong>DKIM-signs</strong> what it accepts, for the domains whose zone it holds. A delivery failure returns <code>503</code>: it is temporary, and your message may well go through later.</p>
+</div>
+
+<h3 id="r-self"><span class="numero">5.6</span>Your own secret</h3>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe put">PUT</span><span class="chemin">/v1/me/password</span><span class="portee">valid token</span></div>
+  <pre><code>{ "current_password": "…", "password": "…" }</code></pre>
+  <p>This resource requires <strong>no scope</strong>: it acts on yourself, and the token presented already says who that is. Requiring <code>admin</code> would make it a route only an administrator could take, which is exactly what it exists to avoid.</p>
+  <div class="note sur">
+    <span class="etiquette">The current password is required, and that matters</span>
+    <p>Without it, a stolen token would let an attacker lock the rightful owner out of their mailbox permanently: a token theft would become an account theft. A wrong current password returns <code>403</code>.</p>
+  </div>
+</div>
+
+<h3 id="r-admin"><span class="numero">5.7</span>Administration</h3>
+
+<p>All of these require the <code>admin</code> area, which a password never grants. See <a href="#admin">§3.6</a>.</p>
+
+<div class="tableau">
+<table>
+  <thead><tr><th>Resource</th><th>Verbs</th><th>Purpose</th></tr></thead>
+  <tbody>
+    <tr><td><code>/v1/accounts</code></td><td><code>GET</code>, <code>POST</code></td><td>List accounts, create one</td></tr>
+    <tr><td><code>/v1/accounts/{account}</code></td><td><code>GET</code>, <code>PUT</code>, <code>DELETE</code></td><td>One account</td></tr>
+    <tr><td><code>/v1/accounts/{account}/password</code></td><td><code>PUT</code></td><td>Set a secret. <strong>Cannot be read</strong></td></tr>
+    <tr><td><code>/v1/accounts/{account}/addresses</code></td><td><code>GET</code>, <code>PUT</code></td><td>The envelope addresses that reach it</td></tr>
+    <tr><td><code>/v1/domains</code></td><td><code>GET</code></td><td>The hosted domains</td></tr>
+    <tr><td><code>/v1/bans</code></td><td><code>GET</code></td><td>Currently banned sources</td></tr>
+    <tr><td><code>/v1/bans/{source}</code></td><td><code>DELETE</code></td><td>Lift a ban</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="note info">
+  <span class="etiquette">The secret is a separate resource, and it cannot be read</span>
+  <p>No method returns a password hash: there is no representation of the account that contains one. That is the reason for the separation, not a presentation choice.</p>
+</div>
+
+<p>A ban entry carries the source, the prefix length and the time remaining:</p>
+
+<pre><code>{ "bans": [ { "source": "2001:db8::", "prefix": 64, "seconds": 1740 } ] }</code></pre>
+
+<p>The prefix length is not decorative: <code>2001:db8::</code> alone does not say that an entire <code>/64</code> is banned, and an operator would believe they had banned a single machine.</p>
+
+<h3 id="r-observe"><span class="numero">5.8</span>Observability</h3>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/health</span><span class="portee">observe:read</span></div>
+  <pre><code>{ "status": "ok" }</code></pre>
+  <p>It only says "yes". No version, no build date, no host name: that would be a <code>server</code> header under another name, and this is precisely the resource a scan queries first.</p>
+</div>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/metrics</span><span class="portee">observe:read</span></div>
+  <p>A flat object of integer counters. Their names and number depend on the server version — do not hard-code the list you expect.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<h2 id="limits"><span class="numero">6</span>Limits</h2>
+
+<div class="tableau">
+<table>
+  <thead><tr><th>Item</th><th>Limit</th></tr></thead>
+  <tbody>
+    <tr><td>Token lifetime</td><td><strong>1 hour</strong> in service; 12 h is the format's ceiling</td></tr>
+    <tr><td>Account name in a token</td><td>64 bytes</td></tr>
+    <tr><td>Sealing key</td><td>32 bytes minimum</td></tr>
+    <tr><td>Path segments</td><td>8</td></tr>
+    <tr><td>Bytes per segment</td><td>255</td></tr>
+    <tr><td>Messages per page</td><td>50</td></tr>
+    <tr><td>Flags per message</td><td>10</td></tr>
+    <tr><td>JSON body depth</td><td>8</td></tr>
+    <tr><td>Fields per JSON object</td><td>16</td></tr>
+    <tr><td>Submitted message size</td><td>set by the server's configuration</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="note prudence">
+  <span class="etiquette">The JSON accepted is narrower than the RFC</span>
+  <p>The reader refuses anything parsers disagree about, even where the standard tolerates it. A JSON body often crosses more than one piece of software before it arrives here; if two of them do not read the same thing in the same bytes, a filter placed upstream protects a document the server will never see. Compose plain JSON: no duplicate keys, no exotic numbers, no deep nesting.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<h2 id="example"><span class="numero">7</span>End-to-end example</h2>
+
+<pre><code># 1. Exchange credentials for a token.
+TOKEN=$(curl -sS --fail-with-body \
+  -X POST https://mail.example.com:8443/v1/tokens \
+  -H 'content-type: application/json' \
+  -d '{"login":"marie","password":"…"}' \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])')
+
+# 2. List the mailboxes.
+curl -sS --fail-with-body https://mail.example.com:8443/v1/mailboxes \
+  -H "authorization: Bearer $TOKEN"
+
+# 3. Read a page of messages.
+curl -sS --fail-with-body \
+  https://mail.example.com:8443/v1/mailboxes/INBOX/messages \
+  -H "authorization: Bearer $TOKEN"
+
+# 4. Submit a message.
+curl -sS --fail-with-body -X POST \
+  https://mail.example.com:8443/v1/submissions \
+  -H "authorization: Bearer $TOKEN" \
+  -H 'content-type: message/rfc822' \
+  --data-binary $'From: marie@example.com\r\nTo: john@elsewhere.test\r\nSubject: hello\r\n\r\nThe body.\r\n'
+</code></pre>
+
+<div class="note danger">
+  <span class="etiquette">What this example does badly, and you should not copy</span>
+  <p>The token travels through an environment variable and ends up in shell history — acceptable for hand exploration, never for code. The password is in cleartext on the command line, so visible in the process table. And <code>--fail-with-body</code> is no substitute for reading the error document.</p>
+</div>
+
+<footer>
+  <p>This manual describes <code>air-mail-server 0.2.6</code>. Where it states a limitation — no revocation, no usable pagination, no CORS — it describes the server's actual state, not an intention. Check the version of the server you are calling before relying on this document.</p>
+</footer>
+
+</main>
+</div>
+</body>
+</html>

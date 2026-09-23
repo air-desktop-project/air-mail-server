@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>API REST air-mail-server</title>
+<meta name="description" content="Manuel de développement de l'API REST d'air-mail-server : ressources, authentification par jeton porteur, portées, modèle d'erreurs et responsabilités du développeur.">
+<link rel="stylesheet" href="manuel.css">
+</head>
+<body>
+<div class="page">
+
+<nav class="sommaire" aria-label="Sommaire">
+  <p class="marque">air-mail-server</p>
+  <p class="sous-marque">API REST · manuel de développement</p>
+  <ol>
+    <li><a href="#presentation">1. Présentation</a>
+      <ol>
+        <li><a href="#perimetre">1.1 Périmètre</a></li>
+        <li><a href="#principes">1.2 Principes de conception</a></li>
+      </ol>
+    </li>
+    <li><a href="#transport">2. Transport et conventions</a>
+      <ol>
+        <li><a href="#tls">2.1 TLS et HTTP/2</a></li>
+        <li><a href="#chemins">2.2 Chemins</a></li>
+        <li><a href="#types">2.3 Types de média</a></li>
+        <li><a href="#representations">2.4 Représentations</a></li>
+      </ol>
+    </li>
+    <li><a href="#securite">3. Authentification et sécurité</a>
+      <ol>
+        <li><a href="#modele">3.1 Le modèle en une page</a></li>
+        <li><a href="#jeton">3.2 Le jeton porteur</a></li>
+        <li><a href="#obtenir">3.3 Obtenir un jeton</a></li>
+        <li><a href="#presenter">3.4 Présenter un jeton</a></li>
+        <li><a href="#portees">3.5 Les portées</a></li>
+        <li><a href="#admin">3.6 L'administration</a></li>
+        <li><a href="#fait">3.7 Ce que l'API fait</a></li>
+        <li><a href="#ne-fait-pas">3.8 Ce que l'API ne fait pas</a></li>
+        <li><a href="#responsabilites">3.9 Vos responsabilités</a></li>
+      </ol>
+    </li>
+    <li><a href="#erreurs">4. Modèle d'erreurs</a></li>
+    <li><a href="#reference">5. Référence des ressources</a>
+      <ol>
+        <li><a href="#r-jetons">5.1 Jetons</a></li>
+        <li><a href="#r-boites">5.2 Boîtes</a></li>
+        <li><a href="#r-messages">5.3 Messages</a></li>
+        <li><a href="#r-recherche">5.4 Recherche</a></li>
+        <li><a href="#r-soumission">5.5 Soumission</a></li>
+        <li><a href="#r-moi">5.6 Son propre secret</a></li>
+        <li><a href="#r-admin">5.7 Administration</a></li>
+        <li><a href="#r-supervision">5.8 Supervision</a></li>
+      </ol>
+    </li>
+    <li><a href="#limites">6. Limites</a></li>
+    <li><a href="#exemple">7. Exemple de bout en bout</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<p class="langue"><a href="ams-api-en.html" hreflang="en">English version →</a></p>
+
+<header class="titre">
+  <h1>API REST d'air-mail-server</h1>
+  <p class="resume">Manuel de développement. Cette API donne accès au courrier d'un compte, à ses boîtes, à la soumission de messages et à la supervision du serveur. Elle est servie en HTTP/2 sur TLS, et chaque requête s'authentifie par un jeton porteur.</p>
+  <div class="meta">
+    <span>Version de l'API : <strong>v1</strong></span>
+    <span>Version du jeton : <strong>0x01</strong></span>
+    <span>Serveur : <strong>air-mail-server 0.2.6</strong></span>
+  </div>
+</header>
+
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<h2 id="presentation"><span class="numero">1</span>Présentation</h2>
+
+<p>L'API REST d'<code>air-mail-server</code> expose quatre domaines qui n'ont rien à voir entre eux : lire son courrier, déposer un message, administrer le serveur, et regarder ses compteurs. Cette séparation n'est pas une commodité de rangement — c'est le fondement du modèle de droits décrit en <a href="#portees">§3.5</a>.</p>
+
+<h3 id="perimetre"><span class="numero">1.1</span>Périmètre</h3>
+
+<div class="tableau">
+<table>
+  <thead><tr><th>Domaine</th><th>Ce qu'il permet</th><th>Préfixe</th></tr></thead>
+  <tbody>
+    <tr><td><code>mail</code></td><td>Lister les boîtes, lire les messages et leurs parties MIME, poser et ôter des drapeaux, rechercher</td><td><code>/v1/mailboxes/…</code></td></tr>
+    <tr><td><code>submit</code></td><td>Déposer un message pour remise ou relais</td><td><code>/v1/submissions</code></td></tr>
+    <tr><td><code>admin</code></td><td>Comptes, adresses, domaines, bannissements</td><td><code>/v1/accounts/…</code>, <code>/v1/domains</code>, <code>/v1/bans/…</code></td></tr>
+    <tr><td><code>observe</code></td><td>Santé et compteurs</td><td><code>/v1/health</code>, <code>/v1/metrics</code></td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>Deux ressources sortent de ces domaines parce qu'elles agissent sur <em>soi</em> et non sur une ressource du serveur : <code>/v1/tokens</code>, qui n'exige aucun droit puisque c'est là qu'on en obtient, et <code>/v1/me/password</code>, qui n'exige que de porter un jeton valide.</p>
+
+<h3 id="principes"><span class="numero">1.2</span>Principes de conception</h3>
+
+<p>Trois décisions structurent tout le reste, et les connaître évite de se battre contre l'API.</p>
+
+<h4>Un chemin est une désignation, pas une chaîne</h4>
+<p>Le serveur ne <strong>normalise rien</strong>. Un segment vide, un <code>.</code>, un <code>..</code>, un octet de contrôle, un pourcentage mal écrit, de l'UTF-8 invalide : tout cela est refusé plutôt que corrigé. Une désignation ambiguë n'a pas de forme canonique à choisir, elle a un auteur à qui dire non. C'est ce qui rend inexprimables les fautes classiques du genre « un <code>%2F</code> qui redevient un séparateur après le contrôle d'accès ».</p>
+
+<h4>Le droit se demande avant de s'accorder</h4>
+<p>Chaque ressource déclare elle-même la portée qu'elle exige, dans la même table que le routage. Il n'existe pas de liste de contrôle tenue à part — celle qui se désynchronise au premier ajout, et dont le premier symptôme est une ressource servie sans droit.</p>
+
+<h4>Rien de ce qui sort n'est concaténé</h4>
+<p>Presque tout ce que l'API rend vient d'ailleurs : un nom de boîte qu'un client a choisi, un sujet qu'un inconnu a écrit. Toute représentation passe par un seul encodeur JSON, et toute faute par un seul encodeur de document d'erreur.</p>
+
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<h2 id="transport"><span class="numero">2</span>Transport et conventions</h2>
+
+<h3 id="tls"><span class="numero">2.1</span>TLS et HTTP/2</h3>
+
+<p>L'API n'est servie <strong>qu'en HTTP/2 sur TLS</strong>. L'ALPN annonce <code>h2</code> et rien d'autre : un client qui ne sait pas négocier HTTP/2 n'obtiendra pas de repli en HTTP/1.1. Il n'existe aucun accès en clair, sur aucun port.</p>
+
+<div class="note info">
+  <span class="etiquette">À retenir</span>
+  <p>L'adresse d'écoute est fixée par la configuration du serveur. Dans un déploiement type, l'API répond sur le port <code>8443</code> ; demandez son URL à votre exploitant plutôt que de la supposer.</p>
+</div>
+
+<h3 id="chemins"><span class="numero">2.2</span>Chemins</h3>
+
+<p>Toutes les ressources vivent sous <code>/v1</code>. Les bornes suivantes s'appliquent au chemin, avant toute autre chose :</p>
+
+<div class="tableau">
+<table>
+  <thead><tr><th>Borne</th><th>Valeur</th><th>Dépassement</th></tr></thead>
+  <tbody>
+    <tr><td>Segments dans un chemin</td><td>8</td><td><code>414 URI Too Long</code></td></tr>
+    <tr><td>Octets par segment, après décodage</td><td>255</td><td><code>400 Bad Request</code></td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="note danger">
+  <span class="etiquette">Aucun paramètre de requête n'est lu</span>
+  <p>La chaîne qui suit un <code>?</code> est séparée du chemin puis <strong>ignorée</strong>. Aucune ressource de cette API n'accepte aujourd'hui de paramètre de requête — ni filtre, ni tri, ni curseur de pagination. Une requête qui en porte n'est pas refusée : ses paramètres sont simplement sans effet, ce qui est plus traître qu'un refus. Ne construisez pas de client qui en dépende.</p>
+</div>
+
+<h3 id="types"><span class="numero">2.3</span>Types de média</h3>
+
+<div class="tableau">
+<table>
+  <thead><tr><th>Type</th><th>Où</th></tr></thead>
+  <tbody>
+    <tr><td><code>application/json</code></td><td>Tout corps de requête et de réponse, sauf les deux cas ci-dessous</td></tr>
+    <tr><td><code>message/rfc822</code></td><td>Le corps d'une soumission, et la réponse de <code>…/raw</code></td></tr>
+    <tr><td><code>application/problem+json</code></td><td>Toute réponse d'erreur, sans exception</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>Le type du corps est vérifié par le serveur. Il l'est <em>après</em> l'authentification pour toute ressource protégée — un <code>400</code> sur le type dirait que le chemin a été reconnu, et cette information est précisément ce que <a href="#erreurs">§4</a> protège.</p>
+
+<h3 id="representations"><span class="numero">2.4</span>Représentations</h3>
+
+<p>Quelques conventions valent partout :</p>
+
+<ul>
+  <li><strong>Les dates sont des nombres.</strong> Les dates d'arrivée de message sont en <em>secondes</em> depuis l'époque ; l'expiration d'un jeton est en <em>microsecondes</em>. Le serveur ne met jamais une date en forme : c'est le client qui sait pour qui il l'affiche.</li>
+  <li><strong>Le vide et l'absence sont distingués.</strong> Un sujet vide s'écrit <code>""</code>, un message sans sujet <code>null</code>.</li>
+  <li><strong>Les UID sont durables, sous un <code>uidValidity</code> donné.</strong> Toute réponse qui porte des UID porte aussi le <code>uidValidity</code> de la boîte (§2.3.1.1 de RFC 9051). S'il change, vos UID mémorisés ne désignent plus rien : jetez votre cache.</li>
+  <li><strong>Une liste tronquée le dit.</strong> Plutôt que de rendre une moitié en silence, les ressources paginées ou bornées portent un champ qui l'annonce.</li>
+</ul>
+
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<h2 id="securite"><span class="numero">3</span>Authentification et sécurité</h2>
+
+<p>Cette section est la plus importante du manuel. Elle décrit ce que le serveur garantit, ce qu'il ne garantit pas, et où commence votre part du travail. Lisez-la en entier avant d'écrire du code qui consomme cette API.</p>
+
+<h3 id="modele"><span class="numero">3.1</span>Le modèle en une page</h3>
+
+<ol>
+  <li>Le client échange un couple <em>identifiant + mot de passe</em> contre un <strong>jeton porteur</strong> sur <code>POST /v1/tokens</code>.</li>
+  <li>Le serveur vérifie les identifiants, puis <strong>décide seul</strong> de la portée qu'il accorde. Le client ne demande pas de portée et ne peut pas en obtenir davantage.</li>
+  <li>Le jeton est scellé par HMAC-SHA-256 avec une clé que seul le serveur détient. Il porte le compte, la portée, une expiration et un identifiant.</li>
+  <li>Chaque requête ultérieure présente ce jeton dans <code>Authorization: Bearer …</code>.</li>
+  <li>Le serveur vérifie le sceau, <em>puis seulement</em> lit les champs, <em>puis</em> compare la portée du jeton à celle qu'exige la ressource.</li>
+</ol>
+
+<div class="note sur">
+  <span class="etiquette">L'ordre est la garantie</span>
+  <p>Le sceau est vérifié <strong>avant</strong> que le moindre champ soit interprété. Lire une expiration avant d'avoir authentifié le jeton qui la porte, c'est faire confiance à ce qu'on n'a pas encore vérifié. La comparaison du sceau se fait à temps constant.</p>
+</div>
+
+<h3 id="jeton"><span class="numero">3.2</span>Le jeton porteur</h3>
+
+<p>Le jeton est une chaîne opaque en base64url. <strong>Ne tentez pas de l'analyser.</strong> Sa structure interne peut changer ; seule la chaîne compte pour vous.</p>
+
+<h4>Pourquoi ce n'est pas un JWT</h4>
+
+<p>Un JWT porte son algorithme <em>dans</em> le jeton, dans un champ <code>alg</code> que le vérificateur est censé lire pour savoir comment vérifier. C'est demander à un message non authentifié comment l'authentifier, et deux familles d'attaques entières vivent dans cette question : <code>alg: none</code>, qui supprime la vérification, et la confusion <code>RS256</code> → <code>HS256</code>, qui fait vérifier une signature avec une clé publique prise pour un secret partagé.</p>
+
+<p>Ce jeton <strong>n'a pas de champ d'algorithme</strong>. Sa version en fixe un seul, et il n'existe qu'une version. Il n'y a donc rien à négocier, et par conséquent rien à confondre.</p>
+
+<h4>Ce qu'il porte</h4>
+
+<div class="tableau">
+<table>
+  <thead><tr><th>Champ</th><th>Rôle</th></tr></thead>
+  <tbody>
+    <tr><td>Version</td><td>Un octet, <code>0x01</code>. Elle fixe l'algorithme de scellement.</td></tr>
+    <tr><td>Compte</td><td>Le nom sous lequel le porteur agit. 64 octets au plus.</td></tr>
+    <tr><td>Portée</td><td>Huit bits : deux par domaine, lecture puis écriture.</td></tr>
+    <tr><td>Expiration</td><td>Microsecondes depuis l'époque.</td></tr>
+    <tr><td>Identifiant</td><td>Un nombre aléatoire qui distingue ce jeton des autres du même compte.</td></tr>
+    <tr><td>Sceau</td><td>HMAC-SHA-256 sur tout ce qui précède, 32 octets.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>La clé de scellement fait au moins 32 octets. Une clé plus courte que le sceau qu'elle produit donnerait moins de sécurité que la taille du sceau ne le laisse croire.</p>
+
+<h3 id="obtenir"><span class="numero">3.3</span>Obtenir un jeton</h3>
+
+<div class="ressource">
+  <div class="ligne">
+    <span class="verbe post">POST</span>
+    <span class="chemin">/v1/tokens</span>
+    <span class="portee">aucune portée exigée</span>
+  </div>
+
+<p>Le corps est un objet JSON à deux champs, tous deux obligatoires :</p>
+
+<pre><code>{ "login": "marie", "password": "…" }</code></pre>
+
+<p>Réponse <code>201 Created</code> :</p>
+
+<pre><code>{
+  "token":   "AQECAAAAAG…",
+  "expires": 1790209932000000
+}</code></pre>
+
+<p><code>expires</code> est en <strong>microsecondes</strong> depuis l'époque, et non en secondes. C'est la seule date de cette API dans cette unité ; les dates de message sont en secondes.</p>
+</div>
+
+<div class="note prudence">
+  <span class="etiquette">Aucun échappement dans les identifiants</span>
+  <p>Le serveur lit <code>login</code> et <code>password</code> <strong>sans décoder les séquences d'échappement JSON</strong>. Un mot de passe contenant <code>\n</code>, <code>\"</code> ou <code>é</code> ne sera pas lu comme vous l'écrivez. Utilisez des caractères qui ne demandent pas d'échappement, ou attendez-vous à un refus.</p>
+</div>
+
+<h4>Un refus ne dit jamais pourquoi</h4>
+
+<p>Un identifiant inconnu et un mot de passe faux rendent <strong>exactement la même réponse</strong> : <code>401 Unauthorized</code>, avec le même document d'erreur. Distinguer les deux rendrait le fichier de comptes énumérable sans en connaître un seul mot de passe. Ne construisez pas d'interface qui prétende faire la différence : elle mentirait.</p>
+
+<div class="note danger">
+  <span class="etiquette">Un échec compte contre vous</span>
+  <p>Chaque échec d'identifiants est compté par le garde anti-abus du serveur comme une trame invalide. Au-delà d'un seuil, <strong>votre adresse est bannie</strong> et ne reçoit plus de réponse du tout — pas même un refus. Un client qui réessaie en boucle après un <code>401</code> se bannit lui-même. Arrêtez-vous au premier refus et demandez de nouveaux identifiants à l'utilisateur.</p>
+</div>
+
+<h3 id="presenter"><span class="numero">3.4</span>Présenter un jeton</h3>
+
+<pre><code>GET /v1/mailboxes HTTP/2
+authorization: Bearer AQECAAAAAG…</code></pre>
+
+<p>Le schéma <code>Bearer</code> est le seul reconnu (RFC 6750). Un refus d'authentification rend <code>401 Unauthorized</code> accompagné de <code>www-authenticate: Bearer</code>, qui dit au client <em>comment</em> se présenter.</p>
+
+<p>Deux causes distinctes mènent au <code>401</code>, et le serveur les distingue volontairement dans le titre du document d'erreur :</p>
+
+<div class="tableau">
+<table>
+  <thead><tr><th>Cause</th><th>Ce que vous devez faire</th></tr></thead>
+  <tbody>
+    <tr><td>Le jeton ne se vérifie pas — sceau, structure ou écriture</td><td>Ne réessayez pas avec le même jeton. Refaites un échange d'identifiants.</td></tr>
+    <tr><td>Le jeton est authentique et son heure est passée</td><td>Réauthentifiez-vous. C'est le cas normal en fin de session.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>Le second cas est distingué parce qu'on ne l'atteint <em>qu'après</em> un sceau valide : le dire n'apprend rien à qui forge, et apprend au client honnête qu'il doit se réauthentifier plutôt que de croire son jeton rejeté.</p>
+
+<h3 id="portees"><span class="numero">3.5</span>Les portées</h3>
+
+<p>Une portée est un couple <em>domaine × droit</em>. Les quatre domaines sont <code>mail</code>, <code>submit</code>, <code>admin</code> et <code>observe</code> ; les deux droits sont <em>lecture</em> et <em>écriture</em>. <strong>L'écriture contient la lecture</strong>, et non l'inverse.</p>
+
+<p>La portée exigée par une requête se calcule simplement :</p>
+
+<ul>
+  <li><strong>le domaine vient du chemin</strong> ;</li>
+  <li><strong>le droit vient du verbe</strong> : <code>GET</code>, <code>HEAD</code> et <code>OPTIONS</code> demandent la lecture ; <code>POST</code>, <code>PUT</code>, <code>PATCH</code> et <code>DELETE</code> demandent l'écriture.</li>
+</ul>
+
+<h4>Ce qu'un mot de passe accorde</h4>
+
+<p>Un échange d'identifiants réussi rend toujours, et uniquement, la portée suivante :</p>
+
+<div class="tableau">
+<table>
+  <thead><tr><th>Domaine</th><th>Droit accordé</th></tr></thead>
+  <tbody>
+    <tr><td><code>mail</code></td><td>écriture</td></tr>
+    <tr><td><code>submit</code></td><td>écriture</td></tr>
+    <tr><td><code>observe</code></td><td>lecture</td></tr>
+    <tr><td><code>admin</code></td><td><strong>aucun</strong></td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="note danger">
+  <span class="etiquette">Un mot de passe n'ouvre jamais l'administration</span>
+  <p>Cette limite est <strong>dans le code du serveur, et non dans une configuration</strong>. Un réglage finirait par être basculé, et un compte compromis deviendrait alors le serveur entier. Aucune combinaison d'identifiants, quels que soient les droits de l'utilisateur ailleurs, ne produit un jeton d'administration par l'API.</p>
+</div>
+
+<p>Il en découle une conséquence pratique qu'il vaut mieux connaître avant de la découvrir : <strong>le client ne choisit pas sa portée</strong>. Il n'existe pas de paramètre <code>scope</code> à la demande de jeton. Vous ne pouvez pas demander un jeton restreint à la lecture pour un tableau de bord — vous obtiendrez la portée complète ci-dessus, ou rien.</p>
+
+<h3 id="admin"><span class="numero">3.6</span>L'administration</h3>
+
+<p>Un jeton d'administration se <strong>frappe sur la machine du serveur</strong>, par qui peut déjà lire sa configuration :</p>
+
+<pre><code>air-mail-admin token /var/lib/air-mail/air-mail.conf \
+                --login marie --minutes 30</code></pre>
+
+<p>C'est la même autorité que celle qui peut arrêter le service ou lire les boîtes : on n'en ajoute aucune. Le nom donné n'a pas besoin de désigner un compte existant — il dit <em>qui agit</em>, et se retrouve dans ce que le serveur journalise.</p>
+
+<div class="note prudence">
+  <span class="etiquette">Traitez-le comme un secret de production</span>
+  <p>Ce jeton ouvre les comptes, les adresses, les domaines et les bannissements. Donnez-lui la durée la plus courte qui suffise, ne l'écrivez pas dans un fichier de configuration versionné, et ne le passez pas en argument de ligne de commande sur une machine partagée — il apparaîtrait dans la table des processus.</p>
+</div>
+
+<h3 id="fait"><span class="numero">3.7</span>Ce que l'API fait</h3>
+
+<ul>
+  <li><strong>Elle authentifie chaque requête</strong>, indépendamment des précédentes. Il n'y a pas de session côté serveur.</li>
+  <li><strong>Elle vérifie le sceau avant de lire quoi que ce soit</strong>, à temps constant.</li>
+  <li><strong>Elle borne la vie d'un jeton</strong> — une heure en service, douze au plus que le format autorise — à l'émission comme à la vérification.</li>
+  <li><strong>Elle refuse ce qu'elle ne comprend pas</strong> plutôt que de le normaliser : chemins ambigus, JSON sur lequel les analyseurs divergent, profondeur excessive.</li>
+  <li><strong>Elle rend la même réponse</strong> à « cette ressource n'existe pas » et à « vous n'avez pas le droit de le savoir ».</li>
+  <li><strong>Elle compte les abus</strong> et bannit les sources qui dépassent les seuils.</li>
+  <li><strong>Elle vérifie qu'un compte n'écrit qu'en son nom</strong> à la soumission, et signale toute tentative d'usurpation à l'exploitant.</li>
+</ul>
+
+<h3 id="ne-fait-pas"><span class="numero">3.8</span>Ce que l'API ne fait pas</h3>
+
+<p>Cette liste est aussi importante que la précédente. Chacun de ces points est une responsabilité qui vous revient, ou une attente qu'il ne faut pas avoir.</p>
+
+<div class="note danger">
+  <span class="etiquette">La révocation n'existe pas</span>
+  <p><code>DELETE /v1/tokens/current</code> est routé et exige un jeton valide, mais <strong>rend <code>501 Not Implemented</code></strong> : il ne révoque rien. Un jeton se vérifie sans consulter aucun registre, et <strong>sa seule fin garantie est son expiration</strong>. Il n'existe aujourd'hui aucun moyen, par l'API, d'invalider un jeton avant son heure.</p>
+  <p>Conséquence directe : <em>un jeton volé reste utilisable jusqu'à son expiration</em>. C'est la raison pour laquelle la durée de vie est bornée, et la raison pour laquelle vous devez la choisir courte.</p>
+</div>
+
+<div class="tableau">
+<table>
+  <thead><tr><th>Ce qui n'existe pas</th><th>Ce que cela implique pour vous</th></tr></thead>
+  <tbody>
+    <tr><td>Révocation d'un jeton</td><td>Effacez le jeton côté client à la déconnexion, et sachez qu'il reste valide côté serveur jusqu'à son expiration.</td></tr>
+    <tr><td>Jeton de rafraîchissement</td><td>Il n'y a pas de <em>refresh token</em>. À l'expiration, vous devez refaire un échange d'identifiants complet — donc conserver de quoi le faire, ou redemander à l'utilisateur.</td></tr>
+    <tr><td>Choix de la portée par le client</td><td>Vous ne pouvez pas obtenir un jeton en lecture seule. Si votre composant n'a besoin que de lire, c'est à votre architecture de le contenir.</td></tr>
+    <tr><td>Paramètres de requête</td><td>Pas de filtre, pas de tri, pas de curseur. Voir <a href="#chemins">§2.2</a>.</td></tr>
+    <tr><td>Pagination utilisable</td><td>Les listes de messages rendent un curseur <code>next</code>, mais <strong>aucun moyen de le passer au serveur</strong>. Il vous dit qu'il y a une suite ; il ne vous permet pas d'y accéder.</td></tr>
+    <tr><td>En-têtes CORS</td><td>Le serveur n'émet ni <code>access-control-allow-origin</code>, ni réponse de pré-vol. <strong>Cette API n'est pas appelable depuis un navigateur en contexte d'origine croisée.</strong> Passez par votre propre service.</td></tr>
+    <tr><td>Limitation de débit annoncée</td><td>Aucun en-tête ne dit combien de requêtes il vous reste. Le garde bannit sans prévenir ; tenez-vous à un rythme raisonnable.</td></tr>
+    <tr><td>Contrôle de concurrence</td><td>Ni <code>ETag</code>, ni <code>If-Match</code>. Deux clients qui modifient la même ressource s'écrasent l'un l'autre sans que rien ne le signale.</td></tr>
+    <tr><td>Idempotence des écritures</td><td>Aucune clé d'idempotence. Une soumission rejouée dépose un second message.</td></tr>
+    <tr><td>Journal d'audit accessible</td><td>Le serveur journalise, mais l'API n'expose pas ce journal.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3 id="responsabilites"><span class="numero">3.9</span>Vos responsabilités</h3>
+
+<p>Ce que le serveur ne peut pas faire à votre place, parce qu'il n'a pas la main dessus.</p>
+
+<h4>Le stockage du jeton</h4>
+<p>Un jeton porteur est un <strong>secret équivalent au mot de passe</strong> pour la durée de sa vie, et il n'est pas révocable. Vous devez :</p>
+<ul>
+  <li>le garder hors de tout stockage lisible par un autre code : pas de <code>localStorage</code> dans un navigateur, pas de fichier lisible par tous, pas de variable d'environnement d'un processus partagé ;</li>
+  <li>ne jamais l'écrire dans un journal, une trace d'erreur, un rapport de plantage ou une URL — une URL finit dans les journaux de tous les intermédiaires ;</li>
+  <li>l'effacer de la mémoire dès la fin de la session.</li>
+</ul>
+
+<h4>La durée de vie</h4>
+<p><strong>Un jeton vaut une heure</strong> dans la configuration en service. Douze heures est le plafond que le format autorise, pas la valeur déployée — ne codez ni l'une ni l'autre en dur : lisez <code>expires</code>, et concevez votre client pour survivre à une réauthentification.</p>
+
+<h4>La validation du certificat</h4>
+<p>Vous devez vérifier le certificat TLS du serveur. Désactiver cette vérification — un <code>--insecure</code>, un <code>verify=False</code> — annule l'intégralité de la protection : le jeton part alors en clair vers qui se sera placé au milieu. Aucune propriété de cette section ne survit à cela.</p>
+
+<h4>Le traitement des erreurs</h4>
+<ul>
+  <li><strong>Ne réessayez pas un <code>401</code> en boucle</strong> : vous vous ferez bannir.</li>
+  <li><strong>Ne déduisez rien d'un <code>404</code></strong> : il signifie « cela n'existe pas » <em>ou</em> « vous n'avez pas le droit de savoir ». Les deux sont indistinguables par construction.</li>
+  <li><strong>Respectez un <code>503</code></strong> : il est temporaire et votre requête a des chances d'aboutir plus tard.</li>
+</ul>
+
+<h4>Le contenu que vous affichez</h4>
+<p>Les sujets, les expéditeurs et les corps de message viennent d'inconnus. Le serveur vous les rend <em>décodés</em> et correctement échappés pour JSON — il ne les rend pas <em>sûrs à afficher</em>. L'échappement pour votre couche de présentation reste entièrement votre affaire.</p>
+
+<h4>Ce que vous déposez</h4>
+<p>À la soumission, vous composez vous-même le message RFC 5322. Le serveur vérifie que le <code>From:</code> appartient bien au compte authentifié et refuse le reste, mais il ne corrige ni votre encodage MIME, ni vos en-têtes.</p>
+
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<h2 id="erreurs"><span class="numero">4</span>Modèle d'erreurs</h2>
+
+<p>Toute faute, sans exception, rend un document au format RFC 9457, de type <code>application/problem+json</code> :</p>
+
+<pre><code>{
+  "type":   "/problems/not-found",
+  "title":  "no such resource",
+  "status": 404
+}</code></pre>
+
+<p>Le <code>type</code> est une <strong>référence relative</strong>, à résoudre contre l'URL du document (§4.2.1 de RFC 9457). Le serveur ne l'écrit pas en absolu parce qu'il ignore sous quel nom on l'atteint — un mandataire peut le changer sans le lui dire.</p>
+
+<div class="note info">
+  <span class="etiquette">Le type vient du code, pas de la cause</span>
+  <p>Deux causes qui partagent un code d'état partagent nécessairement un type. C'est délibéré : « cette ressource n'existe pas » et « votre jeton n'ouvre pas cette portée » répondent toutes deux <code>404</code>, et un type distinct rendrait immédiatement la distinction qu'on venait d'effacer. Branchez donc sur le <code>status</code>, et non sur le <code>title</code>, qui est destiné à un humain.</p>
+</div>
+
+<div class="tableau">
+<table>
+  <thead><tr><th>Code</th><th>Type</th><th>Quand</th></tr></thead>
+  <tbody>
+    <tr><td><code>400</code></td><td><code>/problems/bad-request</code></td><td>Chemin refusé, JSON illisible ou ambigu, message illisible, corps de compte invalide</td></tr>
+    <tr><td><code>401</code></td><td><code>/problems/unauthorized</code></td><td>Jeton absent, illisible, mal scellé, ou expiré. Porte <code>www-authenticate: Bearer</code></td></tr>
+    <tr><td><code>403</code></td><td><code>/problems/forbidden</code></td><td><strong>Uniquement</strong> : le mot de passe actuel présenté lors d'un changement de secret ne correspond pas</td></tr>
+    <tr><td><code>404</code></td><td><code>/problems/not-found</code></td><td>La ressource n'existe pas, <em>ou</em> votre jeton n'ouvre pas la portée qu'elle exige</td></tr>
+    <tr><td><code>405</code></td><td><code>/problems/method-not-allowed</code></td><td>La ressource existe mais pas avec ce verbe. Porte <code>allow</code></td></tr>
+    <tr><td><code>414</code></td><td><code>/problems/uri-too-long</code></td><td>Plus de segments que le serveur n'en retient</td></tr>
+    <tr><td><code>500</code>, <code>501</code>, <code>503</code></td><td><code>/problems/internal</code></td><td>Une faute du serveur. Un <code>503</code> est temporaire et mérite d'être réessayé</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="note prudence">
+  <span class="etiquette">Le 403 est rare, et ce n'est pas un défaut de droits</span>
+  <p>Un manque de droits rend <code>404</code>, jamais <code>403</code>. Le seul <code>403</code> de cette API signifie « le mot de passe actuel que vous avez fourni est faux » : le porteur agit sur sa propre ressource, dont il connaît l'existence, et un <code>404</code> l'enverrait chercher au mauvais endroit.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<h2 id="reference"><span class="numero">5</span>Référence des ressources</h2>
+
+<p>La portée indiquée est celle d'une lecture ; une écriture sur la même ressource demande le droit d'écriture du même domaine.</p>
+
+<h3 id="r-jetons"><span class="numero">5.1</span>Jetons</h3>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe post">POST</span><span class="chemin">/v1/tokens</span><span class="portee">aucune</span></div>
+  <p>Échange des identifiants contre un jeton. Voir <a href="#obtenir">§3.3</a>.</p>
+</div>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe delete">DELETE</span><span class="chemin">/v1/tokens/current</span><span class="portee">jeton valide</span></div>
+  <p><strong>Rend <code>501 Not Implemented</code>.</strong> La révocation n'est pas implémentée ; voir <a href="#ne-fait-pas">§3.8</a>.</p>
+</div>
+
+<h3 id="r-boites"><span class="numero">5.2</span>Boîtes</h3>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/mailboxes</span><span class="portee">mail:read</span></div>
+  <pre><code>{ "mailboxes": [
+    { "name": "INBOX", "messages": 716, "unseen": 12,
+      "uid_next": 1793, "uid_validity": 1756900000 }
+] }</code></pre>
+</div>
+
+<div class="ressource">
+  <div class="ligne">
+    <span class="verbe get">GET</span>
+    <span class="chemin">/v1/mailboxes/{boite}</span><span class="portee">mail:read</span>
+  </div>
+  <p><code>GET</code> rend l'état d'une boîte, sous la même forme qu'une entrée de la liste.</p>
+  <p><code>PUT</code> crée la boîte et rend <code>204</code>. Il est <strong>idempotent</strong> (§9.3.4 de RFC 9110) : rejoué sur une boîte qui existe déjà, il ne faute pas — l'état demandé est celui qui est.</p>
+  <div class="note danger">
+    <span class="etiquette">Un DELETE de boîte est définitif</span>
+    <p>Il supprime la boîte et ce qu'elle contient, sans corbeille ni confirmation. Une boîte qui portait des filles voit son courrier partir et son nom demeurer, comme §6.3.5 de RFC 9051 le prescrit ; la réponse est la même <code>204</code>.</p>
+  </div>
+</div>
+
+<h3 id="r-messages"><span class="numero">5.3</span>Messages</h3>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/mailboxes/{boite}/messages</span><span class="portee">mail:read</span></div>
+  <pre><code>{
+  "uidValidity": 1756900000,
+  "messages": [
+    { "uid": 1792, "size": 1282, "received": 1790138347,
+      "subject": "[SG50 Battery] Test Email", "from": "ofrou-sierre@narro.ch",
+      "flags": ["seen"] }
+  ],
+  "next": 1741
+}</code></pre>
+  <p>La page compte <strong>50 messages au plus</strong>. <code>next</code> porte l'UID du premier message <em>non rendu</em>, ou <code>null</code> s'il n'y en a plus.</p>
+  <div class="note prudence">
+    <span class="etiquette">Le curseur ne se passe nulle part</span>
+    <p><code>next</code> vous apprend qu'il reste des messages, mais aucun paramètre ne permet de reprendre à partir de lui. Sur une boîte de plus de cinquante messages, cette ressource ne vous donnera jamais que les cinquante premiers.</p>
+  </div>
+</div>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe post">POST</span><span class="chemin">/v1/mailboxes/{boite}/messages</span><span class="portee">mail:write</span></div>
+  <p><strong>Range</strong> un message dans la boîte — un brouillon, une copie d'envoi, un import. Le corps est un message <code>message/rfc822</code>, et la réponse <code>201</code> porte l'UID obtenu : <code>{"uid": 1792}</code>.</p>
+  <div class="note info">
+    <span class="etiquette">Ranger n'est pas envoyer</span>
+    <p>Rien n'est routé, rien n'est signé, personne d'autre ne le reçoit. C'est l'<code>APPEND</code> d'IMAP (§6.3.12 de RFC 9051). Pour <em>envoyer</em>, voir <a href="#r-soumission">§5.5</a>. Un message qu'on ne sait pas relire est refusé plutôt que rangé : une boîte qui en porterait un ne serait plus servie par IMAP.</p>
+  </div>
+</div>
+
+<div class="ressource">
+  <div class="ligne">
+    <span class="verbe get">GET</span><span class="verbe patch">PATCH</span><span class="verbe delete">DELETE</span>
+    <span class="chemin">/v1/mailboxes/{boite}/messages/{uid}</span><span class="portee">mail</span>
+  </div>
+  <p>Rend l'enveloppe décodée du message, sous <code>{"uidValidity": …, "message": {…}}</code>.</p>
+  <p>Les drapeaux sont nommés comme IMAP les nomme (§2.3.2 de RFC 9051), et non en minuscules : <code>\Seen</code>, <code>\Answered</code>, <code>\Flagged</code>, <code>\Deleted</code>, <code>\Draft</code>, <code>$MDNSent</code>, <code>$Forwarded</code>, <code>$Junk</code>, <code>$NonJunk</code>, <code>$Phishing</code>. L'ensemble est fermé : dix, et pas un de plus.</p>
+  <p><code>PATCH</code> pose et ôte des drapeaux, et rend le message <strong>tel qu'il est devenu</strong> :</p>
+  <pre><code>{ "add": ["\\Seen"], "remove": ["\\Flagged"] }</code></pre>
+  <p>Un même drapeau des deux côtés est refusé par <code>400</code> — la demande serait contradictoire, et la deviner serait pire que la refuser.</p>
+  <div class="note danger">
+    <span class="etiquette">Un DELETE de message est définitif</span>
+    <p>Il rend <code>204</code> et le message a disparu. Côté serveur, ce geste unique en vaut deux : le message est d'abord marqué <code>\Deleted</code>, puis effacé — le magasin <strong>refuse d'effacer ce qui ne porte pas la marque sur le disque</strong>, pour qu'une croyance périmée ne fasse jamais perdre du courrier.</p>
+  </div>
+</div>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/mailboxes/{boite}/messages/{uid}/raw</span><span class="portee">mail:read</span></div>
+  <p>Le message <strong>tel qu'il est arrivé</strong>, en <code>message/rfc822</code>. Ce n'est pas une représentation alternative de la ressource précédente : l'une est ce qui a été reçu, l'autre notre lecture. La question « qu'est-ce que le serveur a vraiment reçu ? » doit avoir une réponse stable, qui ne dépende pas d'un en-tête <code>Accept</code>.</p>
+</div>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/mailboxes/{boite}/messages/{uid}/parts/{partie}</span><span class="portee">mail:read</span></div>
+  <p>Une partie MIME, numérotée comme §6.4.5 de RFC 9051 le prescrit — <code>1</code>, <code>1.2</code>, <code>2.1.1</code>.</p>
+</div>
+
+<h3 id="r-recherche"><span class="numero">5.4</span>Recherche</h3>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe post">POST</span><span class="chemin">/v1/mailboxes/{boite}/search</span><span class="portee">mail:read</span></div>
+  <p>La recherche est un <code>POST</code> et non un <code>GET</code> : ses critères ne tiennent pas dans une chaîne de requête sans ambiguïté, et les y mettre les ferait journaliser par tout intermédiaire.</p>
+  <pre><code>{ "seen": false, "from": "narro.ch", "subject": "alerte" }</code></pre>
+  <div class="tableau">
+  <table>
+    <thead><tr><th>Critère</th><th>Type</th><th>Portant sur</th></tr></thead>
+    <tbody>
+      <tr><td><code>seen</code>, <code>answered</code>, <code>flagged</code>, <code>deleted</code>, <code>draft</code></td><td>booléen</td><td>Le drapeau, posé ou ôté</td></tr>
+      <tr><td><code>from</code>, <code>to</code>, <code>subject</code></td><td>texte</td><td>Le champ d'en-tête correspondant</td></tr>
+      <tr><td><code>body</code></td><td>texte</td><td>Le corps</td></tr>
+      <tr><td><code>text</code></td><td>texte</td><td>L'en-tête et le corps (§6.4.4 de RFC 9051)</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p><strong>Les critères se combinent par ET, et il n'y a pas d'autre façon.</strong> Ni <code>OR</code>, ni <code>NOT</code> : un langage d'expression demanderait un arbre, une profondeur bornée et sa propre grammaire.</p>
+  <pre><code>{ "uids": [1792, 1788, 1741], "uidValidity": 1756900000, "complete": true }</code></pre>
+  <p><code>complete</code> vaut <code>false</code> quand la liste a été tronquée. Un client qui l'ignorerait agirait sur une moitié de résultats en croyant les avoir tous.</p>
+</div>
+
+<h3 id="r-soumission"><span class="numero">5.5</span>Soumission</h3>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe post">POST</span><span class="chemin">/v1/submissions</span><span class="portee">submit:write</span></div>
+  <p>Le corps est un <strong>message RFC 5322 complet</strong>, en <code>message/rfc822</code> — et non du JSON. Emballer un message dans une chaîne JSON doublerait sa taille pour ne rien dire de plus.</p>
+  <pre><code>POST /v1/submissions HTTP/2
+authorization: Bearer AQECAAAAAG…
+content-type: message/rfc822
+
+From: marie@example.com
+To: jean@ailleurs.test
+Subject: bonjour
+
+Le corps du message.
+</code></pre>
+  <div class="note danger">
+    <span class="etiquette">Un compte n'écrit qu'en son nom</span>
+    <p>Le <code>From:</code> doit appartenir au compte que porte le jeton. Un message qui affirme une autre adresse est refusé par <code>400</code>, et la tentative est <strong>signalée à l'exploitant comme une usurpation</strong>. Ce n'est pas une vérification de politesse : c'est elle, et non DMARC, qui empêche un compte compromis d'écrire au nom de ses collègues.</p>
+  </div>
+  <p>Le serveur remet aux destinataires locaux, met en file ce qui sort, et <strong>signe en DKIM</strong> ce qu'il accepte, pour les domaines dont il tient la zone. Un échec de remise rend <code>503</code> : il est temporaire, et votre message a des chances de passer plus tard.</p>
+</div>
+
+<h3 id="r-moi"><span class="numero">5.6</span>Son propre secret</h3>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe put">PUT</span><span class="chemin">/v1/me/password</span><span class="portee">jeton valide</span></div>
+  <pre><code>{ "current_password": "…", "password": "…" }</code></pre>
+  <p>Cette ressource n'exige <strong>aucune portée</strong> : elle agit sur soi, et le jeton présenté dit déjà de qui il s'agit. Exiger <code>admin</code> en ferait une route que seul un administrateur peut emprunter, ce qui est exactement ce qu'elle existe pour éviter.</p>
+  <div class="note sur">
+    <span class="etiquette">Le mot de passe actuel est exigé, et c'est essentiel</span>
+    <p>Sans lui, un jeton volé permettrait de verrouiller le propriétaire légitime hors de sa boîte, définitivement : un vol de jeton deviendrait un vol de compte. Un mot de passe actuel faux rend <code>403</code>.</p>
+  </div>
+</div>
+
+<h3 id="r-admin"><span class="numero">5.7</span>Administration</h3>
+
+<p>Toutes ces ressources exigent le domaine <code>admin</code>, qu'un mot de passe n'accorde jamais. Voir <a href="#admin">§3.6</a>.</p>
+
+<div class="tableau">
+<table>
+  <thead><tr><th>Ressource</th><th>Verbes</th><th>Rôle</th></tr></thead>
+  <tbody>
+    <tr><td><code>/v1/accounts</code></td><td><code>GET</code>, <code>POST</code></td><td>Lister les comptes, en créer un</td></tr>
+    <tr><td><code>/v1/accounts/{compte}</code></td><td><code>GET</code>, <code>PUT</code>, <code>DELETE</code></td><td>Un compte</td></tr>
+    <tr><td><code>/v1/accounts/{compte}/password</code></td><td><code>PUT</code></td><td>Poser un secret. <strong>Ne se lit pas</strong></td></tr>
+    <tr><td><code>/v1/accounts/{compte}/addresses</code></td><td><code>GET</code>, <code>PUT</code></td><td>Les adresses d'enveloppe qui lui arrivent</td></tr>
+    <tr><td><code>/v1/domains</code></td><td><code>GET</code></td><td>Les domaines hébergés</td></tr>
+    <tr><td><code>/v1/bans</code></td><td><code>GET</code></td><td>Les sources bannies</td></tr>
+    <tr><td><code>/v1/bans/{source}</code></td><td><code>DELETE</code></td><td>Lever un bannissement</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="note info">
+  <span class="etiquette">Le secret est une ressource à part, et elle ne se lit pas</span>
+  <p>Aucune méthode ne rend une empreinte de mot de passe : il n'existe pas de représentation du compte qui la contienne. C'est la raison d'être de la séparation, et non un choix de présentation.</p>
+</div>
+
+<p>Une entrée de bannissement porte la source, la longueur du préfixe et le temps restant :</p>
+
+<pre><code>{ "bans": [ { "source": "2001:db8::", "prefix": 64, "seconds": 1740 } ] }</code></pre>
+
+<p>La longueur du préfixe n'est pas décorative : <code>2001:db8::</code> seul ne dit pas qu'un <code>/64</code> entier est puni, et un exploitant croirait n'avoir banni qu'une machine.</p>
+
+<h3 id="r-supervision"><span class="numero">5.8</span>Supervision</h3>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/health</span><span class="portee">observe:read</span></div>
+  <pre><code>{ "status": "ok" }</code></pre>
+  <p>Elle ne dit que « oui ». Pas de version, pas de date de construction, pas de nom de machine : ce serait un en-tête <code>server</code> sous un autre nom, et cette ressource est justement celle qu'un balayage interroge en premier.</p>
+</div>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/metrics</span><span class="portee">observe:read</span></div>
+  <p>Un objet plat de compteurs entiers. Les noms et le nombre de compteurs dépendent de la version du serveur — ne codez pas en dur la liste attendue.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<h2 id="limites"><span class="numero">6</span>Limites</h2>
+
+<div class="tableau">
+<table>
+  <thead><tr><th>Élément</th><th>Borne</th></tr></thead>
+  <tbody>
+    <tr><td>Durée de vie d'un jeton</td><td><strong>1 heure</strong> en service ; 12 h est le plafond du format</td></tr>
+    <tr><td>Nom de compte dans un jeton</td><td>64 octets</td></tr>
+    <tr><td>Clé de scellement</td><td>32 octets au minimum</td></tr>
+    <tr><td>Segments d'un chemin</td><td>8</td></tr>
+    <tr><td>Octets par segment</td><td>255</td></tr>
+    <tr><td>Messages par page</td><td>50</td></tr>
+    <tr><td>Drapeaux par message</td><td>10</td></tr>
+    <tr><td>Profondeur d'un corps JSON</td><td>8</td></tr>
+    <tr><td>Champs par objet JSON</td><td>16</td></tr>
+    <tr><td>Taille d'un message soumis</td><td>fixée par la configuration du serveur</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="note prudence">
+  <span class="etiquette">Le JSON accepté est plus étroit que la RFC</span>
+  <p>Le lecteur refuse tout ce sur quoi les analyseurs divergent, même quand la norme le tolère. Un corps JSON traverse souvent plus d'un logiciel avant d'arriver ici ; si deux d'entre eux ne lisent pas la même chose dans les mêmes octets, un filtre placé en amont protège un document que le serveur ne verra jamais. Composez du JSON simple : pas de clé dupliquée, pas de nombre exotique, pas d'imbrication profonde.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<h2 id="exemple"><span class="numero">7</span>Exemple de bout en bout</h2>
+
+<pre><code># 1. Échanger les identifiants contre un jeton.
+JETON=$(curl -sS --fail-with-body \
+  -X POST https://mail.example.com:8443/v1/tokens \
+  -H 'content-type: application/json' \
+  -d '{"login":"marie","password":"…"}' \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])')
+
+# 2. Lister les boîtes.
+curl -sS --fail-with-body https://mail.example.com:8443/v1/mailboxes \
+  -H "authorization: Bearer $JETON"
+
+# 3. Lire une page de messages.
+curl -sS --fail-with-body \
+  https://mail.example.com:8443/v1/mailboxes/INBOX/messages \
+  -H "authorization: Bearer $JETON"
+
+# 4. Déposer un message.
+curl -sS --fail-with-body -X POST \
+  https://mail.example.com:8443/v1/submissions \
+  -H "authorization: Bearer $JETON" \
+  -H 'content-type: message/rfc822' \
+  --data-binary $'From: marie@example.com\r\nTo: jean@ailleurs.test\r\nSubject: bonjour\r\n\r\nLe corps.\r\n'
+</code></pre>
+
+<div class="note danger">
+  <span class="etiquette">Ce que cet exemple fait de mal, et que vous ne devez pas copier</span>
+  <p>Le jeton passe ici par une variable d'environnement et se retrouve dans l'historique du shell — acceptable pour une exploration à la main, jamais pour du code. Le mot de passe est en clair dans la ligne de commande, donc visible dans la table des processus. Et <code>--fail-with-body</code> ne dispense pas de lire le document d'erreur.</p>
+</div>
+
+<footer>
+  <p>Ce manuel décrit <code>air-mail-server 0.2.6</code>. Lorsqu'il décrit une limite — l'absence de révocation, l'absence de pagination utilisable, l'absence de CORS — il décrit l'état réel du serveur et non une intention. Vérifiez la version du serveur que vous appelez avant de vous fier à ce document.</p>
+</footer>
+
+</main>
+</div>
+</body>
+</html>

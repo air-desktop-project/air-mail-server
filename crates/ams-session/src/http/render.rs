@@ -855,3 +855,20 @@ fn noms_des_drapeaux(flags: Flags) -> impl Iterator<Item = &'static str> {
 
 #[cfg(test)]
 mod tests;
+
+/// Écrit l'UID d'un message qu'on vient de ranger.
+///
+/// **UN `201` DOIT DIRE CE QU'IL A CRÉÉ.** Un corps vide obligerait le client à
+/// relire la boîte entière pour retrouver ce qu'il venait d'y mettre — et à le
+/// deviner, si deux messages sont arrivés entre-temps.
+///
+/// # Errors
+///
+/// [`Reason::BufferTooSmall`] si `sortie` ne suffit pas.
+pub fn write_uid_cree(uid: u32, sortie: &mut [u8]) -> Result<&[u8], Error> {
+    let mut json = Json::new(sortie);
+    json.begin_object()?;
+    json.field_u64("uid", u64::from(uid))?;
+    json.end_object()?;
+    json.finish()
+}

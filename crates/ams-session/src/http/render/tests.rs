@@ -889,3 +889,24 @@ fn un_corps_qui_n_est_pas_un_objet_fait_refuser() {
         assert_eq!(mon_secret(json), Err(Reason::BadJsonBody), "{json}");
     }
 }
+
+/// **UN `201` DIT CE QU'IL A CRÉÉ.**
+///
+/// Sans l'UID, un client qui vient de ranger un message devrait relire la boîte
+/// entière pour le retrouver — et le deviner, si deux autres sont arrivés
+/// entre-temps.
+#[test]
+fn un_message_range_rend_son_uid() {
+    let mut place = [0_u8; 64];
+    let ecrit = super::write_uid_cree(1792, &mut place).expect("composable");
+    assert_eq!(std::str::from_utf8(ecrit), Ok(r#"{"uid":1792}"#));
+}
+
+/// Et un tampon trop court est une erreur, pas un document tronqué.
+#[test]
+fn un_uid_qui_ne_tient_pas_est_refuse() {
+    for taille in 0..12 {
+        let mut place = std::vec![0_u8; taille];
+        assert!(super::write_uid_cree(1792, &mut place).is_err(), "{taille}");
+    }
+}

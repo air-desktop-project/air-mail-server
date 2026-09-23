@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Authentification par clef</title>
+<meta name="description" content="Feuille de route de l'authentification par clef d'appareil pour l'API REST d'air-mail-server : enrôlement par invitation, enrôlement croisé, délégation multi-boîtes et notifications.">
+<link rel="stylesheet" href="manuel.css">
+</head>
+<body>
+<div class="page">
+
+<nav class="sommaire" aria-label="Sommaire">
+  <p class="marque">air-mail-server</p>
+  <p class="sous-marque">Authentification par clef · feuille de route</p>
+  <ol>
+    <li><a href="#decisions">1. Les décisions prises</a></li>
+    <li><a href="#etat">2. L'état de départ</a></li>
+    <li><a href="#modele">3. Le modèle retenu</a>
+      <ol>
+        <li><a href="#une-clef">3.1 Une seule clef</a></li>
+        <li><a href="#p256">3.2 Pourquoi P-256</a></li>
+        <li><a href="#plateformes">3.3 Les cinq plateformes</a></li>
+      </ol>
+    </li>
+    <li><a href="#flux">4. Les flux</a>
+      <ol>
+        <li><a href="#f-premier">4.1 Premier appareil</a></li>
+        <li><a href="#f-croise">4.2 Enrôlement croisé</a></li>
+        <li><a href="#f-session">4.3 Ouverture de session</a></li>
+        <li><a href="#f-revocation">4.4 Révocation</a></li>
+      </ol>
+    </li>
+    <li><a href="#surface">5. La surface à construire</a></li>
+    <li><a href="#delegation">6. La délégation</a></li>
+    <li><a href="#phases">7. Les phases</a></li>
+    <li><a href="#risques">8. Risques et angles morts</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<header class="titre">
+  <h1>Authentification par clef d'appareil</h1>
+  <p class="resume">Feuille de route pour remplacer le couple identifiant / mot de passe de l'API REST par une authentification à clef publique, enrôlée par appareil et déverrouillée par la biométrie — pour cinq applications natives.</p>
+  <div class="meta">
+    <span>Établie le <strong>2026-09-23</strong></span>
+    <span>Base : <strong>air-mail-server 0.2.5</strong></span>
+    <span>État : <strong>proposition</strong></span>
+  </div>
+</header>
+
+<h2 id="decisions"><span class="numero">1</span>Les décisions prises</h2>
+
+<p>Trois choix ont été arrêtés, et tout ce document en découle.</p>
+
+<div class="tableau">
+<table>
+  <thead><tr><th>Décision</th><th>Conséquence</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Pas d'autorité de certification</strong></td><td>Ni mTLS, ni certificat applicatif. La clef d'appareil porte seule l'authentification.</td></tr>
+    <tr><td><strong>Invitation pour le premier appareil</strong></td><td>Un code à usage unique, transmis hors bande, autorise la création du compte.</td></tr>
+    <tr><td><strong>Enrôlement croisé ensuite</strong></td><td>Un appareil déjà enrôlé autorise le suivant. L'exploitant n'intervient plus.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="note info">
+  <span class="etiquette">Ce que ces choix évitent</span>
+  <p>Renoncer à la CA supprime une infrastructure à exploiter dans la durée — émission, renouvellement, révocation — pour un bénéfice qui aurait été mince : un certificat livré dans une application n'est pas un secret, et un certificat par appareil aurait fait double emploi avec la clef d'appareil.</p>
+</div>
+
+<h2 id="etat"><span class="numero">2</span>L'état de départ</h2>
+
+<p>Ce que le serveur sait faire aujourd'hui, et qu'il faut connaître pour mesurer le chemin.</p>
+
+<div class="tableau">
+<table>
+  <thead><tr><th>Élément</th><th>État au 0.2.5</th></tr></thead>
+  <tbody>
+    <tr><td>Authentification</td><td>Identifiant + mot de passe, <code>POST /v1/tokens</code></td></tr>
+    <tr><td>Identité du client</td><td><strong>Aucune</strong> — le serveur ignore quel logiciel l'appelle</td></tr>
+    <tr><td>Certificat client</td><td><strong>Jamais vérifié</strong> — <code>with_no_client_auth()</code> partout</td></tr>
+    <tr><td>Durée d'un jeton</td><td>12 heures au plus, <strong>sans renouvellement</strong></td></tr>
+    <tr><td>Révocation</td><td><strong>Inexistante</strong> — <code>DELETE /v1/tokens/current</code> rend <code>501</code></td></tr>
+    <tr><td>Écritures sur le courrier</td><td><strong>Sans effet</strong> — routées, autorisées, le serveur sert la lecture</td></tr>
+    <tr><td>Pagination</td><td>50 messages, curseur rendu mais <strong>inutilisable</strong></td></tr>
+    <tr><td>Synchronisation incrémentale</td><td><strong>Aucune</strong> — pas d'équivalent de <code>MODSEQ</code></td></tr>
+    <tr><td>Notifications</td><td><strong>Aucune</strong></td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="note danger">
+  <span class="etiquette">Le défaut qui rend ce chantier urgent</span>
+  <p>Un jeton vit douze heures et rien ne le renouvelle. Pour ne pas redemander le mot de passe deux fois par jour, <strong>une application n'a d'autre choix que de le stocker</strong>. C'est précisément ce que la clef d'appareil supprime.</p>
+</div>
+
+<h2 id="modele"><span class="numero">3</span>Le modèle retenu</h2>
+
+<h3 id="une-clef"><span class="numero">3.1</span>Une seule clef, et elle ne quitte jamais l'appareil</h3>
+
+<p>Chaque installation génère <strong>sa propre paire de clefs</strong>, sur l'appareil, dans l'enclave sécurisée quand il y en a une. La clef privée n'est pas exportable et n'existe nulle part ailleurs — ni sur un serveur, ni dans une sauvegarde, ni dans un fichier de configuration.</p>
+
+<p>Cette clef unique sert à deux choses à la fois : elle <strong>identifie l'appareil</strong> et elle <strong>authentifie l'utilisateur</strong>. Un compte porte autant de clefs que l'utilisateur a d'appareils, chacune nommée et révocable seule.</p>
+
+<div class="note prudence">
+  <span class="etiquette">La biométrie n'authentifie pas auprès du serveur</span>
+  <p>Face ID et Touch ID <strong>déverrouillent une clef locale</strong>. Le serveur ne voit qu'une signature : il ne saura jamais « l'utilisateur a posé son doigt », il saura « une clef que j'ai enrôlée a signé mon défi ». Le biométrique est une promesse du client, et il faut le dire ainsi plutôt que de laisser croire à une garantie serveur.</p>
+  <p>Si cette garantie devient nécessaire, elle s'obtient par l'<strong>attestation de plateforme</strong> — App Attest sur iOS, Play Integrity sur Android — qui est un chantier distinct, et qui n'existe pas sous Windows ni sous Linux.</p>
+</div>
+
+<h3 id="p256"><span class="numero">3.2</span>Pourquoi ECDSA P-256, et pas Ed25519</h3>
+
+<p>Le dépôt emploie Ed25519 pour DKIM, et ce serait le choix naturel. <strong>Il est pourtant impossible ici</strong>, et la raison est matérielle : la Secure Enclave d'Apple ne génère que des clefs <strong>P-256</strong>, et ne sait pas faire d'Ed25519. Le Keystore Android suit la même réalité en pratique, en particulier lorsqu'on exige StrongBox.</p>
+
+<p>Le choix est donc contraint : <strong>ECDSA sur P-256, SHA-256</strong>. Une courbe, un algorithme de condensat, aucune négociation — dans l'esprit du jeton actuel, dont la version fixe l'algorithme.</p>
+
+<div class="note sur">
+  <span class="etiquette">Les primitives sont déjà là</span>
+  <p><code>p256 0.14</code> et <code>ecdsa 0.17</code> figurent déjà dans l'arbre de dépendances, en Rust pur. La barrière <code>check-sans-c</code> — ni <code>ring</code>, ni <code>cc</code>, ni crate <code>*-sys</code> — reste tenue.</p>
+</div>
+
+<h3 id="plateformes"><span class="numero">3.3</span>Les cinq plateformes, et leur inégalité</h3>
+
+<div class="tableau">
+<table>
+  <thead><tr><th>Plateforme</th><th>Où vit la clef</th><th>Déverrouillage</th></tr></thead>
+  <tbody>
+    <tr><td>iOS, iPadOS</td><td>Secure Enclave</td><td>Face ID, Touch ID</td></tr>
+    <tr><td>Android</td><td>Keystore, StrongBox si présent</td><td>BiometricPrompt</td></tr>
+    <tr><td>macOS</td><td>Secure Enclave (Apple Silicon, puce T2)</td><td>Touch ID</td></tr>
+    <tr><td>Windows</td><td>TPM par CNG</td><td>Windows Hello</td></tr>
+    <tr><td><strong>Linux</strong></td><td><strong>Pas de solution générale</strong></td><td><strong>Aucune</strong></td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="note danger">
+  <span class="etiquette">Linux est le maillon faible, et il faut le décider</span>
+  <p>Il n'existe pas d'équivalent répandu de la Secure Enclave sur un poste Linux ordinaire. La clef y vivra dans un fichier protégé par le trousseau du système, ou par une phrase de passe — <strong>extractible par tout code tournant sous le même compte</strong>, et sans biométrie.</p>
+  <p>Trois issues, à trancher : accepter cette faiblesse en la nommant ; exiger un jeton matériel (YubiKey) sous Linux ; ou ne pas livrer d'application Linux. Ce document ne tranche pas — mais l'ignorer ferait croire à une sécurité uniforme qui n'existera pas.</p>
+</div>
+
+<h2 id="flux"><span class="numero">4</span>Les flux</h2>
+
+<h3 id="f-premier"><span class="numero">4.1</span>Le premier appareil, par invitation</h3>
+
+<figure class="schema">
+<svg viewBox="0 0 780 426" role="img" xmlns="http://www.w3.org/2000/svg">
+<line class="vie" x1="103.5" y1="36" x2="103.5" y2="414"/>
+<line class="vie" x1="294.5" y1="36" x2="294.5" y2="414"/>
+<line class="vie" x1="485.5" y1="36" x2="485.5" y2="414"/>
+<line class="vie" x1="676.5" y1="36" x2="676.5" y2="414"/>
+<rect class="acteur" x="61.0" y="4" width="85.0" height="26" rx="5"/><text class="acteur-nom" x="103.5" y="21" text-anchor="middle">Exploitant</text>
+<rect class="acteur" x="248.3" y="4" width="92.4" height="26" rx="5"/><text class="acteur-nom" x="294.5" y="21" text-anchor="middle">Utilisateur</text>
+<rect class="acteur" x="439.3" y="4" width="92.4" height="26" rx="5"/><text class="acteur-nom" x="485.5" y="21" text-anchor="middle">Application</text>
+<rect class="acteur" x="630.3" y="4" width="92.4" height="26" rx="5"/><text class="acteur-nom" x="676.5" y="21" text-anchor="middle">Serveur ams</text>
+<line class="fleche" x1="103.5" y1="56" x2="669.5" y2="56"/><path class="fleche-tete" d="M 676.5 56 l -8.0 -4 l 0 8 z"/>
+<text class="etiq" x="390.0" y="49" text-anchor="middle">POST /v1/invitations</text>
+<text class="etiq-douce" x="390.0" y="70" text-anchor="middle">portée admin</text>
+<line class="fleche" x1="676.5" y1="100" x2="110.5" y2="100"/><path class="fleche-tete" d="M 103.5 100 l 8.0 -4 l 0 8 z"/>
+<text class="etiq" x="390.0" y="93" text-anchor="middle">code, usage unique, 24 h</text>
+<line class="hors-bande" x1="103.5" y1="144" x2="287.5" y2="144"/><path class="hors-bande-tete" d="M 294.5 144 l -8.0 -4 l 0 8 z"/>
+<text class="etiq" x="199.0" y="137" text-anchor="middle">le code, HORS BANDE</text>
+<text class="etiq-douce" x="199.0" y="158" text-anchor="middle">de vive voix, courrier signé, SMS</text>
+<line class="fleche" x1="294.5" y1="188" x2="478.5" y2="188"/><path class="fleche-tete" d="M 485.5 188 l -8.0 -4 l 0 8 z"/>
+<text class="etiq" x="390.0" y="181" text-anchor="middle">saisit le code</text>
+<rect class="note" x="304.1" y="217" width="362.9" height="24" rx="4"/><text class="note-texte" x="485.5" y="233" text-anchor="middle">génère une paire P-256 dans l&#x27;enclave, biométrie exigée</text>
+<line class="fleche" x1="485.5" y1="276" x2="669.5" y2="276"/><path class="fleche-tete" d="M 676.5 276 l -8.0 -4 l 0 8 z"/>
+<text class="etiq" x="581.0" y="269" text-anchor="middle">POST /v1/devices</text>
+<text class="etiq-douce" x="581.0" y="290" text-anchor="middle">{ code, login, clef publique, nom d&#x27;appareil }</text>
+<rect class="note" x="454.6" y="305" width="315.4" height="24" rx="4"/><text class="note-texte" x="612.3" y="321" text-anchor="middle">vérifie le code, crée le compte, enrôle la clef</text>
+<line class="fleche" x1="676.5" y1="364" x2="492.5" y2="364"/><path class="fleche-tete" d="M 485.5 364 l 8.0 -4 l 0 8 z"/>
+<text class="etiq" x="581.0" y="357" text-anchor="middle">201 { compte, device_id, jeton 15 min }</text>
+</svg>
+<figcaption>L'invitation est la seule chose qui autorise la création d'un compte. Sans elle, quiconque atteint l'API pourrait fabriquer des comptes sur le domaine — et sa réputation avec.</figcaption>
+</figure>
+
+<p>Le code d'invitation est <strong>à usage unique, de courte vie, et transmis hors bande</strong> : de vive voix, par courrier signé, par SMS. Il ne circule jamais sur le même canal que la requête qu'il autorise.</p>
+
+<p>Il porte deux informations : le <strong>compte</strong> qu'il permet de créer ou d'ouvrir, et les <strong>adresses</strong> que ce compte recevra. C'est l'exploitant qui les fixe en le frappant — l'utilisateur ne choisit pas son adresse, sans quoi le premier venu réserverait <code>postmaster@</code>.</p>
+
+<h3 id="f-croise"><span class="numero">4.2</span>L'enrôlement croisé</h3>
+
+<figure class="schema">
+<svg viewBox="0 0 780 426" role="img" xmlns="http://www.w3.org/2000/svg">
+<line class="vie" x1="135.3" y1="36" x2="135.3" y2="414"/>
+<line class="vie" x1="390.0" y1="36" x2="390.0" y2="414"/>
+<line class="vie" x1="644.7" y1="36" x2="644.7" y2="414"/>
+<rect class="acteur" x="89.1" y="4" width="92.4" height="26" rx="5"/><text class="acteur-nom" x="135.3" y="21" text-anchor="middle">Serveur ams</text>
+<rect class="acteur" x="329.0" y="4" width="122.0" height="26" rx="5"/><text class="acteur-nom" x="390.0" y="21" text-anchor="middle">Appareil enrôlé</text>
+<rect class="acteur" x="583.7" y="4" width="122.0" height="26" rx="5"/><text class="acteur-nom" x="644.7" y="21" text-anchor="middle">Nouvel appareil</text>
+<line class="fleche" x1="390.0" y1="56" x2="142.3" y2="56"/><path class="fleche-tete" d="M 135.3 56 l 8.0 -4 l 0 8 z"/>
+<text class="etiq" x="262.7" y="49" text-anchor="middle">POST /v1/devices/pairings</text>
+<text class="etiq-douce" x="262.7" y="70" text-anchor="middle">authentifié, biométrie exigée</text>
+<line class="fleche" x1="135.3" y1="100" x2="383.0" y2="100"/><path class="fleche-tete" d="M 390.0 100 l -8.0 -4 l 0 8 z"/>
+<text class="etiq" x="262.7" y="93" text-anchor="middle">code à 8 chiffres, 5 min</text>
+<line class="hors-bande" x1="390.0" y1="144" x2="637.7" y2="144"/><path class="hors-bande-tete" d="M 644.7 144 l -8.0 -4 l 0 8 z"/>
+<text class="etiq" x="517.3" y="137" text-anchor="middle">le code, à l&#x27;écran ou en QR</text>
+<text class="etiq-douce" x="517.3" y="158" text-anchor="middle">l&#x27;utilisateur le recopie</text>
+<rect class="note" x="479.4" y="173" width="290.6" height="24" rx="4"/><text class="note-texte" x="624.7" y="189" text-anchor="middle">génère sa propre paire P-256 dans l&#x27;enclave</text>
+<line class="fleche" x1="644.7" y1="232" x2="142.3" y2="232"/><path class="fleche-tete" d="M 135.3 232 l 8.0 -4 l 0 8 z"/>
+<text class="etiq" x="390.0" y="225" text-anchor="middle">POST /v1/devices { code, clef publique }</text>
+<line class="fleche" x1="135.3" y1="276" x2="383.0" y2="276"/><path class="fleche-tete" d="M 390.0 276 l -8.0 -4 l 0 8 z"/>
+<text class="etiq" x="262.7" y="269" text-anchor="middle">empreinte de la clef du nouvel appareil</text>
+<text class="etiq-douce" x="262.7" y="290" text-anchor="middle">affichée des deux côtés</text>
+<line class="fleche" x1="390.0" y1="320" x2="142.3" y2="320"/><path class="fleche-tete" d="M 135.3 320 l 8.0 -4 l 0 8 z"/>
+<text class="etiq" x="262.7" y="313" text-anchor="middle">POST /v1/devices/{id}/confirm</text>
+<text class="etiq-douce" x="262.7" y="334" text-anchor="middle">l&#x27;utilisateur compare et confirme</text>
+<line class="fleche" x1="135.3" y1="364" x2="637.7" y2="364"/><path class="fleche-tete" d="M 644.7 364 l -8.0 -4 l 0 8 z"/>
+<text class="etiq" x="390.0" y="357" text-anchor="middle">201 { device_id, jeton 15 min }</text>
+</svg>
+<figcaption>À partir du deuxième appareil, l'autorité vient d'un appareil déjà enrôlé. L'exploitant n'intervient plus.</figcaption>
+</figure>
+
+<div class="note prudence">
+  <span class="etiquette">Pourquoi la confirmation d'empreinte, et pas seulement le code</span>
+  <p>Un code lu par-dessus l'épaule suffirait à enrôler l'appareil d'un tiers. La confirmation ferme cette porte : le nouvel appareil envoie sa clef, le serveur en affiche l'empreinte <strong>des deux côtés</strong>, et l'utilisateur compare avant de confirmer sur l'appareil qu'il tient déjà. C'est le motif que Signal et WhatsApp emploient pour la même raison.</p>
+  <p>Sans elle, l'enrôlement croisé serait moins sûr que l'invitation qu'il remplace.</p>
+</div>
+
+<h3 id="f-session"><span class="numero">4.3</span>L'ouverture de session</h3>
+
+<figure class="schema">
+<svg viewBox="0 0 780 382" role="img" xmlns="http://www.w3.org/2000/svg">
+<line class="vie" x1="135.3" y1="36" x2="135.3" y2="370"/>
+<line class="vie" x1="390.0" y1="36" x2="390.0" y2="370"/>
+<line class="vie" x1="644.7" y1="36" x2="644.7" y2="370"/>
+<rect class="acteur" x="89.1" y="4" width="92.4" height="26" rx="5"/><text class="acteur-nom" x="135.3" y="21" text-anchor="middle">Utilisateur</text>
+<rect class="acteur" x="343.8" y="4" width="92.4" height="26" rx="5"/><text class="acteur-nom" x="390.0" y="21" text-anchor="middle">Application</text>
+<rect class="acteur" x="598.5" y="4" width="92.4" height="26" rx="5"/><text class="acteur-nom" x="644.7" y="21" text-anchor="middle">Serveur ams</text>
+<line class="fleche" x1="390.0" y1="56" x2="637.7" y2="56"/><path class="fleche-tete" d="M 644.7 56 l -8.0 -4 l 0 8 z"/>
+<text class="etiq" x="517.3" y="49" text-anchor="middle">POST /v1/sessions/challenge</text>
+<text class="etiq-douce" x="517.3" y="70" text-anchor="middle">{ device_id }</text>
+<line class="fleche" x1="644.7" y1="100" x2="397.0" y2="100"/><path class="fleche-tete" d="M 390.0 100 l 8.0 -4 l 0 8 z"/>
+<text class="etiq" x="517.3" y="93" text-anchor="middle">défi de 32 octets, 60 s, usage unique</text>
+<line class="fleche" x1="390.0" y1="144" x2="142.3" y2="144"/><path class="fleche-tete" d="M 135.3 144 l 8.0 -4 l 0 8 z"/>
+<text class="etiq" x="262.7" y="137" text-anchor="middle">Face ID / Touch ID</text>
+<text class="etiq-douce" x="262.7" y="158" text-anchor="middle">l&#x27;enclave déverrouille la clef</text>
+<rect class="note" x="216.8" y="173" width="346.4" height="24" rx="4"/><text class="note-texte" x="390.0" y="189" text-anchor="middle">signe : défi ‖ identité du serveur ‖ « ams-session »</text>
+<line class="fleche" x1="390.0" y1="232" x2="637.7" y2="232"/><path class="fleche-tete" d="M 644.7 232 l -8.0 -4 l 0 8 z"/>
+<text class="etiq" x="517.3" y="225" text-anchor="middle">POST /v1/sessions { device_id, signature }</text>
+<rect class="note" x="485.6" y="261" width="284.4" height="24" rx="4"/><text class="note-texte" x="627.8" y="277" text-anchor="middle">vérifie ECDSA P-256 contre la clef enrôlée</text>
+<line class="fleche" x1="644.7" y1="320" x2="397.0" y2="320"/><path class="fleche-tete" d="M 390.0 320 l 8.0 -4 l 0 8 z"/>
+<text class="etiq" x="517.3" y="313" text-anchor="middle">201 { jeton d&#x27;acces, 15 min }</text>
+</svg>
+<figcaption>Le défi-réponse a lieu en couche applicative, et non pendant une poignée de main TLS : c'est ce qui permet de choisir le moment où l'invite biométrique apparaît.</figcaption>
+</figure>
+
+<p>Ce que le client signe n'est pas le défi nu, mais <strong>le défi, l'identité du serveur et une chaîne de rôle</strong>. Sans cette liaison, une signature obtenue pour un usage pourrait être rejouée pour un autre — ou contre un autre serveur.</p>
+
+<div class="note sur">
+  <span class="etiquette">Il n'y a pas de jeton de rafraîchissement, et c'est voulu</span>
+  <p>La clef d'appareil <strong>est</strong> le mécanisme de renouvellement. Un jeton de rafraîchissement serait un second secret à stocker, à faire tourner et à révoquer — alors que la clef, elle, ne quitte jamais l'enclave. Quinze minutes d'accès, renouvelées par une signature : le mot de passe n'a plus à exister sur l'appareil.</p>
+</div>
+
+<h3 id="f-revocation"><span class="numero">4.4</span>La révocation</h3>
+
+<p>Un appareil perdu se retire depuis n'importe quel autre appareil enrôlé, ou par l'exploitant. Trois effets doivent être immédiats :</p>
+
+<ol>
+  <li>la clef est <strong>retirée du compte</strong> — elle ne signe plus rien ;</li>
+  <li>les <strong>jetons d'accès vivants</strong> de cet appareil cessent de valoir ;</li>
+  <li>son <strong>abonnement aux notifications</strong> est supprimé.</li>
+</ol>
+
+<div class="note danger">
+  <span class="etiquette">Le deuxième point est bloquant aujourd'hui</span>
+  <p>Un jeton se vérifie sans consulter aucun registre : retirer une clef n'invalide rien de ce qui a déjà été émis. <strong>Tant que la révocation de jeton n'existe pas, révoquer un appareil laisse jusqu'à quinze minutes d'accès.</strong> C'est tenable avec des jetons courts, et intenable avec les jetons de douze heures d'aujourd'hui — d'où l'ordre des phases.</p>
+</div>
+
+<h2 id="surface"><span class="numero">5</span>La surface à construire</h2>
+
+<p>Les ressources nouvelles, et ce qu'elles exigent.</p>
+
+<div class="tableau">
+<table>
+  <thead><tr><th>Ressource</th><th>Verbes</th><th>Portée</th><th>Rôle</th></tr></thead>
+  <tbody>
+    <tr><td><code>/v1/invitations</code></td><td><code>POST</code>, <code>GET</code></td><td>admin</td><td>Frapper un code, lister ceux qui courent</td></tr>
+    <tr><td><code>/v1/invitations/{code}</code></td><td><code>DELETE</code></td><td>admin</td><td>Annuler un code avant son usage</td></tr>
+    <tr><td><code>/v1/devices</code></td><td><code>POST</code></td><td><strong>aucune</strong></td><td>Enrôler, par invitation ou par code d'appairage</td></tr>
+    <tr><td><code>/v1/devices</code></td><td><code>GET</code></td><td>jeton valide</td><td>Ses propres appareils</td></tr>
+    <tr><td><code>/v1/devices/{id}</code></td><td><code>DELETE</code></td><td>jeton valide</td><td>Révoquer un appareil</td></tr>
+    <tr><td><code>/v1/devices/{id}/confirm</code></td><td><code>POST</code></td><td>jeton valide</td><td>Confirmer l'empreinte d'un enrôlement croisé</td></tr>
+    <tr><td><code>/v1/devices/pairings</code></td><td><code>POST</code></td><td>jeton valide</td><td>Obtenir un code d'appairage</td></tr>
+    <tr><td><code>/v1/sessions/challenge</code></td><td><code>POST</code></td><td><strong>aucune</strong></td><td>Obtenir un défi</td></tr>
+    <tr><td><code>/v1/sessions</code></td><td><code>POST</code></td><td><strong>aucune</strong></td><td>Échanger une signature contre un jeton</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="note prudence">
+  <span class="etiquette">Trois ressources sans portée, et chacune est une porte publique</span>
+  <p><code>POST /v1/devices</code>, <code>/v1/sessions/challenge</code> et <code>/v1/sessions</code> s'atteignent sans rien présenter — comme <code>/v1/tokens</code> aujourd'hui. Elles doivent donc être <strong>comptées par le garde anti-abus</strong> au même titre, et leurs refus rester indistinguables : un code d'invitation inconnu et un code expiré rendent la même réponse, sinon les codes deviennent énumérables.</p>
+</div>
+
+<h4>Le jeton, version 2</h4>
+
+<p>Le format actuel porte le compte, la portée, une expiration et un identifiant. Il lui faut en plus <strong>l'appareil</strong>, pour qu'une révocation d'appareil puisse atteindre ses jetons.</p>
+
+<p>Le jeton n'a qu'une version et aucun champ de négociation — c'est une force, et cela impose de traiter l'ajout comme une <strong>bascule</strong> : les deux versions se vérifient pendant la transition, puis la première est retirée. Rien ne se négocie ; le serveur accepte l'une et l'autre, jusqu'à la date où il cesse.</p>
+
+<h2 id="delegation"><span class="numero">6</span>La délégation multi-boîtes</h2>
+
+<p>Un utilisateur relève <code>contact@</code>, <code>support@</code>, <code>admin@</code> en plus de sa propre boîte. Ce besoin est indépendant de l'authentification et peut avancer en parallèle.</p>
+
+<div class="note danger">
+  <span class="etiquette">La délégation ne doit jamais entrer dans le jeton</span>
+  <p>Si le jeton portait la liste des boîtes accessibles, <strong>retirer une délégation exigerait de révoquer les jetons</strong> — et l'on retomberait sur le manque de révocation. La table de délégation se consulte <strong>à chaque requête</strong>, comme le fait déjà le contrôle de portée.</p>
+</div>
+
+<div class="tableau">
+<table>
+  <thead><tr><th>Élément</th><th>Forme</th></tr></thead>
+  <tbody>
+    <tr><td>Administration</td><td><code>/v1/accounts/{compte}/delegates</code> — qui accède, avec quels droits</td></tr>
+    <tr><td>Adressage d'une boîte déléguée</td><td><code>/v1/accounts/{compte}/mailboxes/…</code></td></tr>
+    <tr><td>Sa propre boîte</td><td><code>/v1/mailboxes/…</code>, inchangé</td></tr>
+    <tr><td>Journalisation</td><td>L'acteur <strong>et</strong> la boîte visée, sur chaque écriture</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>Le jeton porte l'<strong>acteur</strong> ; la boîte visée vient du chemin ; le droit d'y toucher vient de la table. Une action sur une boîte partagée doit dire <em>qui</em> l'a faite, sans quoi trois personnes se partageant <code>support@</code> forment un seul coupable anonyme.</p>
+
+<h2 id="phases"><span class="numero">7</span>Les phases</h2>
+
+<div class="phase bloquante">
+  <div class="entete"><span class="rang">Phase 0</span><h3>Cesser de mentir sur les écritures</h3><span class="cout">≈ 1 jour</span></div>
+  <p>Les écritures sur le courrier doivent <strong>soit être implémentées, soit rendre <code>501</code></strong>. L'état actuel — servir la lecture et répondre <code>200</code> — fera écrire du code client faux dans cinq applications à la fois.</p>
+  <p><strong>Rien ne doit commencer avant.</strong> C'est une heure de travail contre cent heures de débogage réparties sur cinq plateformes.</p>
+</div>
+
+<div class="phase">
+  <div class="entete"><span class="rang">Phase 1</span><h3>La session révocable</h3><span class="cout">≈ 1 semaine</span></div>
+  <p>Registre des jetons vivants, jetons d'accès courts, identité d'appareil dans le jeton, format v2.</p>
+  <p><strong>Elle précède l'enrôlement, et ce n'est pas négociable</strong> : enrôler des appareils sans pouvoir les révoquer, c'est fabriquer des clefs immortelles. Un téléphone perdu deviendrait un accès permanent.</p>
+</div>
+
+<div class="phase">
+  <div class="entete"><span class="rang">Phase 2</span><h3>L'authentification par clef</h3><span class="cout">≈ 2 semaines</span></div>
+  <p>Invitations, enrôlement, appairage croisé, défi-réponse, ECDSA P-256. Le mot de passe reste pour l'amorçage et le dépannage, puis se retire compte par compte.</p>
+</div>
+
+<div class="phase parallele">
+  <div class="entete"><span class="rang">Phase 3</span><h3>La délégation</h3><span class="cout">≈ 1 semaine · en parallèle</span></div>
+  <p>Table de délégation, adressage des boîtes d'autrui, journalisation de l'acteur. Ne dépend que de la phase 0.</p>
+</div>
+
+<div class="phase parallele">
+  <div class="entete"><span class="rang">Phase 4</span><h3>Le client de messagerie réel</h3><span class="cout">le plus long · en parallèle</span></div>
+  <p>Pagination utilisable, <strong>synchronisation incrémentale</strong>, écritures, soumission idempotente, téléchargement partiel des pièces jointes.</p>
+  <p>C'est sans doute <strong>plus de travail que les phases 1, 2 et 3 réunies</strong>, et c'est ce qui décide si l'application se lance en une seconde ou en trente. Commencez-la tôt.</p>
+</div>
+
+<div class="phase">
+  <div class="entete"><span class="rang">Phase 5</span><h3>Les notifications</h3><span class="cout">≈ 2 semaines</span></div>
+  <p>Abonnement par appareil, déclenchement à la remise pour le propriétaire <strong>et les délégués</strong>, charge utile minimale — « réveille-toi et synchronise », sans sujet ni expéditeur.</p>
+  <p><strong>Une question d'architecture à trancher</strong> : ce déclencheur vit-il dans l'MTA, ou dans un service séparé qui observe le magasin ? Le second garde le serveur de courrier sans client HTTP sortant vers Apple et Google, ce qui cadre mieux avec les contraintes du dépôt.</p>
+</div>
+
+<div class="phase">
+  <div class="entete"><span class="rang">Phase 6</span><h3>Durcissement</h3><span class="cout">continu</span></div>
+  <p>Limitation de débit <strong>par appareil</strong> et non par adresse, journal d'audit consultable, attestation de plateforme si la garantie serveur devient nécessaire.</p>
+</div>
+
+<h4>L'ordre des dépendances</h4>
+
+<pre><code>Phase 0 ──┬──> Phase 1 ──> Phase 2 ──┐
+          │                          ├──> Phase 5 ──> Phase 6
+          ├──> Phase 3 ──────────────┤
+          └──> Phase 4 ──────────────┘
+</code></pre>
+
+<h2 id="risques"><span class="numero">8</span>Risques et angles morts</h2>
+
+<div class="tableau">
+<table>
+  <thead><tr><th>Risque</th><th>Ce qu'il faut décider ou surveiller</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Linux sans enclave</strong></td><td>Accepter la faiblesse en la nommant, exiger un jeton matériel, ou ne pas livrer d'application Linux</td></tr>
+    <tr><td><strong>Perte de tous les appareils</strong></td><td>Sans appareil enrôlé, l'enrôlement croisé est impossible. Il faut une voie de secours — une nouvelle invitation de l'exploitant — et elle doit être aussi contrôlée que la première</td></tr>
+    <tr><td><strong>Réinitialisation biométrique</strong></td><td>Sur iOS, ajouter un doigt ou un visage <strong>invalide une clef liée à la biométrie</strong>. L'application doit détecter ce cas et proposer un réenrôlement, sinon l'utilisateur est bloqué sans comprendre</td></tr>
+    <tr><td><strong>Sauvegarde et restauration</strong></td><td>Une clef d'enclave ne se restaure pas sur un nouveau téléphone. Un utilisateur qui change d'appareil doit <strong>réenrôler</strong> — depuis l'ancien tant qu'il l'a, par invitation sinon</td></tr>
+    <tr><td><strong>Horloge du client</strong></td><td>Le défi a une durée de vie courte ; une horloge fausse côté client produira des échecs incompréhensibles. Le serveur doit dire « défi expiré » distinctement de « signature fausse »</td></tr>
+    <tr><td><strong>Fuite du code d'appairage</strong></td><td>Durée très courte, usage unique, et <strong>confirmation d'empreinte</strong> — sans cette dernière, l'enrôlement croisé est plus faible que l'invitation</td></tr>
+    <tr><td><strong>Création de comptes</strong></td><td>L'invitation est le seul garde-fou contre une fabrique à comptes de spam sur le domaine. Aucune voie ne doit la contourner</td></tr>
+  </tbody>
+</table>
+</div>
+
+<footer>
+  <p>Cette feuille de route est une <strong>proposition</strong>, établie le 2026-09-23 sur <code>air-mail-server 0.2.5</code>. Les états décrits en §2 ont été vérifiés dans le code, non supposés. Les estimations de durée sont des ordres de grandeur pour ordonner le travail, et non des engagements.</p>
+</footer>
+
+</main>
+</div>
+</body>
+</html>

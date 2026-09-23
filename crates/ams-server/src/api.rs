@@ -977,6 +977,182 @@ impl ApiMaildir {
     }
 
     /// Un message.
+    /// Ajoute un message à une boîte, tel qu'il est donné.
+    ///
+    /// # CE N'EST PAS UNE SOUMISSION, ET LA DIFFÉRENCE EST ENTIÈRE
+    ///
+    /// `POST /v1/submissions` REMET un message : il vérifie que le compte écrit
+    /// en son nom, route les destinataires, signe en DKIM. Ici, on RANGE un
+    /// message dans une boîte — un brouillon, une copie d'envoi, un import.
+    /// Rien n'est routé, rien n'est signé, et personne d'autre ne le reçoit.
+    ///
+    /// C'est l'`APPEND` d'IMAP (§6.3.12 de RFC 9051), par la même porte.
+    fn ajouter_un_message<'o>(
+        &self,
+        compte: &str,
+        nom: &str,
+        corps: &[u8],
+        sortie: &'o mut [u8],
+    ) -> Served<'o> {
+        use ams_session::imap::Deposit as _;
+
+        // **LE MESSAGE SE LIT AVANT D'ÊTRE RANGÉ.** Ranger ce qu'on ne sait pas
+        // relire donnerait une boîte qu'IMAP ne saurait plus servir.
+        let bornes = ams_mime::Limits::DEFAULT;
+        if ams_mime::Message::parse(corps, &bornes).is_err() {
+            return refus_de_depot(sortie);
+        }
+        let Some(mut depot) = self.boites.append(compte.as_bytes(), nom.as_bytes()) else {
+            return absente(sortie);
+        };
+        if !depot.write(corps) {
+            depot.abort();
+            return notre_faute();
+        }
+        // **AUCUN DRAPEAU IMPOSÉ** : un message rangé n'est ni lu ni brouillon
+        // tant que son propriétaire ne l'a pas dit. Le poser « vu » d'office
+        // ferait disparaître un import d'une liste de non-lus.
+        let Some(uid) = depot.commit(ams_proto_imap::Flags::NONE, None) else {
+            return notre_faute();
+        };
+        cree(render::write_uid_cree(uid, sortie))
+    }
+
+    /// Retrouve le rang d'un message d'après son UID.
+    ///
+    /// **L'API DÉSIGNE PAR UID, LE MAGASIN TRAVAILLE PAR RANG.** L'UID est
+    /// durable — c'est ce qu'un client retient d'une session à l'autre —, le
+    /// rang ne vaut que pour l'instant où on l'a lu. Les confondre ferait agir
+    /// sur le voisin dès qu'un message disparaît.
+    fn rang_de<B: ams_session::imap::Mailbox>(boite: &B, uid: u64) -> Option<u32> {
+        let voulu = u32::try_from(uid).ok()?;
+        (1..=boite.exists()).find(|rang| boite.info(*rang).map(|info| info.uid) == Some(voulu))
+    }
+
+    /// Pose et ôte des drapeaux sur un message.
+    fn drapeaux<'o>(
+        &self,
+        compte: &str,
+        nom: &str,
+        uid: u64,
+        corps: &[u8],
+        sortie: &'o mut [u8],
+    ) -> Served<'o> {
+        // **LE CORPS SE LIT AVANT D'OUVRIR QUOI QUE CE SOIT** : un corps refusé
+        // ne doit pas laisser deviner si la boîte existe.
+        let Ok(demande) = render::read_flag_patch(corps) else {
+            return corps_refuse(sortie);
+        };
+        let Some(mut boite) = self.boites.open(compte.as_bytes(), nom.as_bytes()) else {
+            return absente(sortie);
+        };
+        let Some(rang) = Self::rang_de(&boite, uid) else {
+            return absente(sortie);
+        };
+        // **AJOUTER PUIS RETIRER**, et l'ordre compte : `read_flag_patch` refuse
+        // déjà qu'un même drapeau figure des deux côtés, mais si cela changeait,
+        // le retrait doit l'emporter — c'est le sens le moins surprenant.
+        if demande.add != ams_proto_imap::Flags::NONE
+            && boite
+                .store_flags(rang, ams_proto_imap::StoreMode::Add, demande.add)
+                .is_none()
+        {
+            return notre_faute();
+        }
+        if demande.remove != ams_proto_imap::Flags::NONE
+            && boite
+                .store_flags(rang, ams_proto_imap::StoreMode::Remove, demande.remove)
+                .is_none()
+        {
+            return notre_faute();
+        }
+        // **ON REND LE MESSAGE TEL QU'IL EST DEVENU.** Un `204` obligerait le
+        // client à relire pour savoir ce qu'il a obtenu, et deux clients qui
+        // modifient le même message verraient chacun ce qu'il a demandé plutôt
+        // que ce qui est.
+        let Some(info) = boite.info(rang) else {
+            return notre_faute();
+        };
+        let resume = resumer(&boite, rang, info);
+        rendre(render::write_message(
+            &ligne_de(&resume),
+            boite.uid_validity(),
+            sortie,
+        ))
+    }
+
+    /// Efface un message, pour de bon.
+    fn effacer_le_message<'o>(
+        &self,
+        compte: &str,
+        nom: &str,
+        uid: u64,
+        sortie: &'o mut [u8],
+    ) -> Served<'o> {
+        let Some(mut boite) = self.boites.open(compte.as_bytes(), nom.as_bytes()) else {
+            return absente(sortie);
+        };
+        let Some(rang) = Self::rang_de(&boite, uid) else {
+            return absente(sortie);
+        };
+        // ── MARQUER, PUIS EFFACER : LES DEUX GESTES D'IMAP, EN UN SEUL VERBE ─
+        //
+        // `expunge` REFUSE d'effacer un message qui ne porte pas `\Deleted` sur
+        // le disque, et cette garde n'est pas une formalité : la session
+        // demande d'effacer ce que SON instantané croyait marqué, pris
+        // peut-être des heures plus tôt. Effacer sur cette croyance-là, c'est
+        // perdre du courrier que personne n'a demandé de perdre.
+        //
+        // Un `DELETE` REST est un geste unique pour le client ; il en vaut
+        // deux ici, et c'est à nous de les composer plutôt que de contourner la
+        // garde.
+        if boite
+            .store_flags(
+                rang,
+                ams_proto_imap::StoreMode::Add,
+                ams_proto_imap::Flags::DELETED,
+            )
+            .is_none()
+        {
+            return notre_faute();
+        }
+        if !boite.expunge(rang) {
+            return notre_faute();
+        }
+        sans_contenu()
+    }
+
+    /// Crée une boîte.
+    fn creer_la_boite<'o>(&self, compte: &str, nom: &str, sortie: &'o mut [u8]) -> Served<'o> {
+        use ams_session::imap::Creation;
+
+        match self.boites.create(
+            compte.as_bytes(),
+            nom.as_bytes(),
+            ams_proto_imap::SpecialUse::NONE,
+        ) {
+            // **`PUT` EST IDEMPOTENT** (§9.3.4 de RFC 9110) : une boîte qui
+            // existait déjà n'est pas une faute, c'est l'état demandé.
+            Creation::Faite | Creation::DejaLa => sans_contenu(),
+            Creation::Refusee => notre_faute(),
+            _ => corps_refuse(sortie),
+        }
+    }
+
+    /// Efface une boîte et ce qu'elle contient.
+    fn effacer_la_boite<'o>(&self, compte: &str, nom: &str, sortie: &'o mut [u8]) -> Served<'o> {
+        use ams_session::imap::Deletion;
+
+        match self.boites.delete(compte.as_bytes(), nom.as_bytes()) {
+            // **`Videe` N'EST PAS UN ÉCHEC** : la boîte avait des filles, son
+            // courrier est parti et son nom demeure pour les porter. C'est ce
+            // que §6.3.5 de RFC 9051 prescrit, et le client n'a rien à y faire.
+            Deletion::Faite | Deletion::Videe => sans_contenu(),
+            Deletion::Absente => absente(sortie),
+            Deletion::Refusee => notre_faute(),
+        }
+    }
+
     fn message<'o>(&self, compte: &str, nom: &str, uid: u64, sortie: &'o mut [u8]) -> Served<'o> {
         let Some(boite) = self.boites.open(compte.as_bytes(), nom.as_bytes()) else {
             return absente(sortie);
@@ -1014,8 +1190,34 @@ impl Api for ApiMaildir {
                 sortie,
             )),
             Resource::Mailboxes => self.mailboxes(account, sortie),
+            // ── LE VERBE DÉCIDE, ET IL ÉTAIT IGNORÉ ─────────────────────────
+            //
+            // Ces quatre bras servaient la LECTURE quel que soit le verbe : un
+            // `DELETE` de boîte rendait son état avec `200`, un `PATCH` de
+            // drapeaux rendait le message inchangé. Le routage les déclarait,
+            // le contrôle d'accès exigeait le droit d'écrire, et rien n'écrivait.
+            //
+            // **C'ÉTAIT PIRE QU'UN `501`** : le client croyait avoir écrit, et
+            // aucune réponse ne le détrompait. Trouvé le 2026-09-23 en
+            // documentant l'API — le code n'avait jamais menti à un essai,
+            // faute d'essai qui le regarde.
+            Resource::Mailbox { boite } if matches!(method, Method::Put) => {
+                self.creer_la_boite(account, boite, sortie)
+            }
+            Resource::Mailbox { boite } if matches!(method, Method::Delete) => {
+                self.effacer_la_boite(account, boite, sortie)
+            }
             Resource::Mailbox { boite } => self.mailbox(account, boite, sortie),
+            Resource::Messages { boite } if matches!(method, Method::Post) => {
+                self.ajouter_un_message(account, boite, body, sortie)
+            }
             Resource::Messages { boite } => self.messages(account, boite, sortie),
+            Resource::Message { boite, uid } if matches!(method, Method::Patch) => {
+                self.drapeaux(account, boite, uid, body, sortie)
+            }
+            Resource::Message { boite, uid } if matches!(method, Method::Delete) => {
+                self.effacer_le_message(account, boite, uid, sortie)
+            }
             Resource::Message { boite, uid } => self.message(account, boite, uid, sortie),
             Resource::MessageRaw { boite, uid } => {
                 self.message_brut(account, boite, uid, portee, sortie)
@@ -1244,6 +1446,47 @@ fn rendre(ecrit: Result<&[u8], ams_api::Error>) -> Served<'_> {
 ///
 /// **LE MÊME `404` QUE POUR UNE ROUTE INCONNUE** : la boîte d'un autre compte et
 /// la boîte qui n'existe pas se répondent pareil, sans quoi la différence dirait
+/// Ce qui a créé une ressource (§15.3.2 de RFC 9110).
+fn cree(ecrit: Result<&[u8], ams_api::Error>) -> Served<'_> {
+    match ecrit {
+        Ok(corps) => Served {
+            status: StatusCode::CREATED,
+            media: ams_api::JSON_MEDIA_TYPE,
+            body: corps,
+            ..Served::default()
+        },
+        Err(_) => notre_faute(),
+    }
+}
+
+/// Un corps qu'on refuse de lire.
+///
+/// **LA MÊME RÉPONSE QU'UN MESSAGE ILLISIBLE** : dire lequel des deux a cloché
+/// apprendrait à qui sonde ce que le serveur a reconnu.
+fn corps_refuse(sortie: &mut [u8]) -> Served<'_> {
+    match ams_api::problem(ams_api::Reason::BadJsonBody, sortie) {
+        Ok(corps) => Served {
+            status: StatusCode::BAD_REQUEST,
+            media: ams_api::PROBLEM_MEDIA_TYPE,
+            body: corps,
+            ..Served::default()
+        },
+        Err(_) => notre_faute(),
+    }
+}
+
+/// Ce qui a réussi et n'a rien à rendre (§15.3.5 de RFC 9110).
+const fn sans_contenu<'o>() -> Served<'o> {
+    Served {
+        status: StatusCode::NO_CONTENT,
+        media: ams_api::PROBLEM_MEDIA_TYPE,
+        body: &[],
+        ranges: false,
+        range: None,
+        peer_fault: false,
+    }
+}
+
 /// laquelle des deux choses on a touchée.
 fn absente(sortie: &mut [u8]) -> Served<'_> {
     match ams_api::problem(ams_api::Reason::NoSuchResource, sortie) {
@@ -2083,5 +2326,358 @@ mod porte_http {
             incidents.bilan().is_empty(),
             "rien d'anormal, donc rien à dire"
         );
+    }
+}
+
+/// Les écritures sur le courrier, éprouvées par leur EFFET.
+///
+/// # POURQUOI CE BANC EXISTE
+///
+/// Le répartiteur servait la lecture quel que soit le verbe : un `DELETE` de
+/// boîte rendait son état avec `200`, un `PATCH` de drapeaux rendait le message
+/// inchangé. Aucun essai ne le voyait, parce qu'aucun essai ne regardait
+/// l'EFFET d'une écriture — ils regardaient le code de retour, et il était bon.
+///
+/// **Chacun de ces essais relit le magasin après coup.** C'est la seule façon
+/// de distinguer « a répondu 200 » de « a fait ce qu'on lui demandait », et
+/// c'est précisément la distinction qui manquait.
+#[cfg(test)]
+mod ecritures {
+    use super::{Api as _, ApiMaildir, BoitesImap, Resource};
+    use ams_loop_tokio::http::Served;
+    use ams_proto_http::{Method, StatusCode};
+    use ams_session::imap::{Mailbox as _, Mailboxes as _};
+    use std::string::String;
+    use std::sync::Arc;
+
+    /// Un répertoire qui s'efface quand l'essai finit.
+    struct Ephemere(std::path::PathBuf);
+
+    impl Ephemere {
+        fn neuf() -> Self {
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |depuis| depuis.as_nanos());
+            let chemin = std::env::temp_dir().join(std::format!(
+                "ams-api-ecritures-{unique}-{:?}",
+                std::thread::current().id()
+            ));
+            std::fs::create_dir_all(&chemin).expect("créable");
+            Self(chemin)
+        }
+    }
+
+    impl Drop for Ephemere {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Une API servant un seul compte, `marie`, avec sa boîte de réception.
+    fn api(racine: &std::path::Path) -> (Arc<BoitesImap>, ApiMaildir) {
+        let boite = ams_store::Maildir::open(
+            racine.join("marie"),
+            b"mail.exemple.test",
+            ams_store::fresh_uid_validity(),
+        )
+        .expect("ouvrable");
+        let mut carte = std::collections::BTreeMap::new();
+        carte.insert(String::from("marie"), Arc::new(boite));
+        let comptes = Arc::new(crate::comptes::Comptes::new(
+            racine.join("comptes.bin"),
+            std::vec![ams_auth::Account {
+                login: String::from("marie"),
+                hash: String::new(),
+                addresses: std::vec![String::from("marie@exemple.test")],
+            }],
+        ));
+        let remise = Arc::new(crate::delivery::Boites::new(
+            carte,
+            racine.to_path_buf(),
+            b"mail.exemple.test".to_vec(),
+            Arc::clone(&comptes),
+        ));
+        let boites = Arc::new(BoitesImap::new(Arc::clone(&remise), b"mail.exemple.test"));
+        let api = ApiMaildir::new(
+            Arc::clone(&boites),
+            comptes,
+            remise,
+            Arc::new(std::vec![String::from("exemple.test")]),
+            Arc::new(ams_loop_tokio::SharedGuard::new(
+                4,
+                ams_guard::Thresholds::DEFAULT,
+            )),
+            Arc::new(crate::incidents::Incidents::new()),
+        );
+        (boites, api)
+    }
+
+    /// Sert une requête et rend son code et son corps.
+    fn servir(
+        api: &ApiMaildir,
+        resource: Resource<'_>,
+        method: Method,
+        corps: &[u8],
+    ) -> (StatusCode, String) {
+        let mut place = std::vec![0_u8; 64 * 1024];
+        let Served { status, body, .. } =
+            api.serve(resource, method, "marie", corps, None, &mut place);
+        (status, String::from_utf8_lossy(body).into_owned())
+    }
+
+    /// Range un message dans `INBOX` et rend son UID.
+    fn ranger(api: &ApiMaildir, sujet: &str) -> u64 {
+        let message = std::format!(
+            "From: marie@exemple.test\r\nTo: marie@exemple.test\r\n\
+             Subject: {sujet}\r\n\r\nLe corps.\r\n"
+        );
+        let (status, corps) = servir(
+            api,
+            Resource::Messages { boite: "INBOX" },
+            Method::Post,
+            message.as_bytes(),
+        );
+        assert_eq!(status, StatusCode::CREATED, "{corps}");
+        corps
+            .trim_start_matches("{\"uid\":")
+            .trim_end_matches('}')
+            .parse()
+            .expect("un UID")
+    }
+
+    /// Les drapeaux que porte ce message, relus DANS LE MAGASIN.
+    fn drapeaux_du_magasin(boites: &BoitesImap, uid: u64) -> ams_proto_imap::Flags {
+        let boite = boites.open(b"marie", b"INBOX").expect("ouvrable");
+        let voulu = u32::try_from(uid).expect("tient");
+        (1..=boite.exists())
+            .filter_map(|rang| boite.info(rang))
+            .find(|info| info.uid == voulu)
+            .expect("le message est là")
+            .flags
+    }
+
+    // ── L'AJOUT ────────────────────────────────────────────────────────────
+
+    /// **UN MESSAGE RANGÉ EXISTE VRAIMENT**, et son UID est celui qu'on rend.
+    #[test]
+    fn un_message_range_se_retrouve_dans_la_boite() {
+        let temporaire = Ephemere::neuf();
+        let (boites, api) = api(&temporaire.0);
+        let uid = ranger(&api, "bonjour");
+
+        let boite = boites.open(b"marie", b"INBOX").expect("ouvrable");
+        assert_eq!(boite.exists(), 1, "le message doit être dans la boîte");
+        assert_eq!(u64::from(boite.info(1).expect("présent").uid), uid);
+    }
+
+    /// **CE QU'ON NE SAIT PAS RELIRE NE SE RANGE PAS.** Une boîte qui porterait
+    /// un message illisible ne serait plus servie par IMAP.
+    #[test]
+    fn un_message_illisible_est_refuse() {
+        let temporaire = Ephemere::neuf();
+        let (boites, api) = api(&temporaire.0);
+        let (status, _) = servir(
+            &api,
+            Resource::Messages { boite: "INBOX" },
+            Method::Post,
+            b"ceci n'est pas un message",
+        );
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let boite = boites.open(b"marie", b"INBOX").expect("ouvrable");
+        assert_eq!(boite.exists(), 0, "rien ne doit avoir été rangé");
+    }
+
+    // ── LES DRAPEAUX ───────────────────────────────────────────────────────
+
+    /// **UN `PATCH` POSE VRAIMENT LE DRAPEAU**, et le magasin s'en souvient.
+    ///
+    /// C'est l'essai qui manquait : le répartiteur servait la lecture, rendait
+    /// `200` avec le message inchangé, et rien ne le disait.
+    #[test]
+    fn un_patch_pose_le_drapeau_dans_le_magasin() {
+        let temporaire = Ephemere::neuf();
+        let (boites, api) = api(&temporaire.0);
+        let uid = ranger(&api, "à lire");
+        assert_eq!(
+            drapeaux_du_magasin(&boites, uid),
+            ams_proto_imap::Flags::NONE,
+            "un message rangé ne porte aucun drapeau"
+        );
+
+        let (status, corps) = servir(
+            &api,
+            Resource::Message {
+                boite: "INBOX",
+                uid,
+            },
+            Method::Patch,
+            br#"{"add":["\\Seen"]}"#,
+        );
+        assert_eq!(status, StatusCode::OK, "{corps}");
+        // **LE MAGASIN, ET NON LA RÉPONSE.** Une réponse peut mentir ; le
+        // fichier sur le disque, non.
+        assert_eq!(
+            drapeaux_du_magasin(&boites, uid),
+            ams_proto_imap::Flags::SEEN
+        );
+        // Et la réponse dit ce qui est.
+        assert!(corps.contains(r"\\Seen"), "{corps}");
+    }
+
+    /// **ET IL L'ÔTE AUSSI.**
+    #[test]
+    fn un_patch_ote_le_drapeau() {
+        let temporaire = Ephemere::neuf();
+        let (boites, api) = api(&temporaire.0);
+        let uid = ranger(&api, "déjà lu");
+        let cible = Resource::Message {
+            boite: "INBOX",
+            uid,
+        };
+        servir(&api, cible, Method::Patch, br#"{"add":["\\Seen"]}"#);
+        assert_eq!(
+            drapeaux_du_magasin(&boites, uid),
+            ams_proto_imap::Flags::SEEN
+        );
+
+        servir(&api, cible, Method::Patch, br#"{"remove":["\\Seen"]}"#);
+        assert_eq!(
+            drapeaux_du_magasin(&boites, uid),
+            ams_proto_imap::Flags::NONE
+        );
+    }
+
+    /// Un corps refusé ne touche à rien, et ne dit pas si la boîte existe.
+    #[test]
+    fn un_patch_illisible_ne_change_rien() {
+        let temporaire = Ephemere::neuf();
+        let (boites, api) = api(&temporaire.0);
+        let uid = ranger(&api, "intact");
+        let (status, _) = servir(
+            &api,
+            Resource::Message {
+                boite: "INBOX",
+                uid,
+            },
+            Method::Patch,
+            br#"{"add":["\\PasUnDrapeau"]}"#,
+        );
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            drapeaux_du_magasin(&boites, uid),
+            ams_proto_imap::Flags::NONE
+        );
+    }
+
+    // ── L'EFFACEMENT ───────────────────────────────────────────────────────
+
+    /// **UN `DELETE` EFFACE POUR DE BON.**
+    #[test]
+    fn un_delete_retire_le_message_du_magasin() {
+        let temporaire = Ephemere::neuf();
+        let (boites, api) = api(&temporaire.0);
+        let uid = ranger(&api, "à jeter");
+
+        let (status, _) = servir(
+            &api,
+            Resource::Message {
+                boite: "INBOX",
+                uid,
+            },
+            Method::Delete,
+            &[],
+        );
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let boite = boites.open(b"marie", b"INBOX").expect("ouvrable");
+        assert_eq!(boite.exists(), 0, "le message doit avoir disparu");
+    }
+
+    /// Un UID qu'on ne connaît pas ne dit pas si la boîte existe.
+    #[test]
+    fn un_delete_d_un_uid_inconnu_rend_404() {
+        let temporaire = Ephemere::neuf();
+        let (_boites, api) = api(&temporaire.0);
+        let (status, _) = servir(
+            &api,
+            Resource::Message {
+                boite: "INBOX",
+                uid: 9999,
+            },
+            Method::Delete,
+            &[],
+        );
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    // ── LES BOÎTES ─────────────────────────────────────────────────────────
+
+    /// **UN `PUT` CRÉE LA BOÎTE, ET IL EST IDEMPOTENT** (§9.3.4 de RFC 9110).
+    #[test]
+    fn un_put_cree_la_boite_et_se_rejoue_sans_faute() {
+        let temporaire = Ephemere::neuf();
+        let (boites, api) = api(&temporaire.0);
+        let cible = Resource::Mailbox { boite: "Archives" };
+
+        let (status, _) = servir(&api, cible, Method::Put, &[]);
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(
+            boites.open(b"marie", b"Archives").is_some(),
+            "la boîte doit exister"
+        );
+
+        // **REJOUÉ, IL NE FAUTE PAS** : l'état demandé est déjà celui qui est.
+        let (status, _) = servir(&api, cible, Method::Put, &[]);
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    /// **UN `DELETE` EFFACE LA BOÎTE.**
+    #[test]
+    fn un_delete_efface_la_boite() {
+        let temporaire = Ephemere::neuf();
+        let (boites, api) = api(&temporaire.0);
+        let cible = Resource::Mailbox { boite: "Archives" };
+        servir(&api, cible, Method::Put, &[]);
+        assert!(boites.open(b"marie", b"Archives").is_some());
+
+        let (status, _) = servir(&api, cible, Method::Delete, &[]);
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(
+            boites.open(b"marie", b"Archives").is_none(),
+            "la boîte doit avoir disparu"
+        );
+    }
+
+    /// Effacer ce qui n'existe pas rend `404`, et non un succès silencieux.
+    #[test]
+    fn effacer_une_boite_absente_rend_404() {
+        let temporaire = Ephemere::neuf();
+        let (_boites, api) = api(&temporaire.0);
+        let (status, _) = servir(
+            &api,
+            Resource::Mailbox { boite: "Jamais" },
+            Method::Delete,
+            &[],
+        );
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    // ── ET LA LECTURE N'A PAS BOUGÉ ────────────────────────────────────────
+
+    /// **UN `GET` REND TOUJOURS LA LECTURE.** Le câblage du verbe ne doit pas
+    /// avoir détourné le chemin ordinaire.
+    #[test]
+    fn la_lecture_sert_toujours_la_lecture() {
+        let temporaire = Ephemere::neuf();
+        let (_boites, api) = api(&temporaire.0);
+        ranger(&api, "présent");
+        let (status, corps) = servir(
+            &api,
+            Resource::Messages { boite: "INBOX" },
+            Method::Get,
+            &[],
+        );
+        assert_eq!(status, StatusCode::OK);
+        assert!(corps.contains("\"messages\""), "{corps}");
+        assert!(corps.contains("présent"), "{corps}");
     }
 }
