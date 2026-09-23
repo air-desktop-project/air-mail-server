@@ -92,7 +92,7 @@ exclude = ["fuzz"]
 # Version en LOCKSTEP : toutes les crates du workspace la partagent via
 # `version.workspace = true`. Un seul numéro à incrémenter par release, donc
 # aucune dérive possible entre les paquets.
-version = "0.2.4"
+version = "0.2.5"
 edition = "2024"
 # Égale au `channel` de `rust-toolchain.toml`. Les deux doivent bouger ensemble :
 # ce champ fait échouer le build avec un message clair si quelqu'un compile avec
@@ -105,39 +105,39 @@ repository = "https://github.com/air-desktop-project/air-mail-server"
 [workspace.dependencies]
 # Les arêtes INTERNES ne se déclarent qu'à mesure qu'elles servent : une
 # dépendance posée d'avance affirmerait un assemblage qui n'existe pas.
-ams-config = { path = "crates/ams-config", version = "0.2.4" }
-ams-dane = { path = "crates/ams-dane", version = "0.2.4" }
-ams-dkim = { path = "crates/ams-dkim", version = "0.2.4" }
-ams-mime = { path = "crates/ams-mime", version = "0.2.4" }
-ams-mtasts = { path = "crates/ams-mtasts", version = "0.2.4" }
-ams-tlsrpt = { path = "crates/ams-tlsrpt", version = "0.2.4" }
-ams-dmarc = { path = "crates/ams-dmarc", version = "0.2.4" }
-ams-dns = { path = "crates/ams-dns", version = "0.2.4" }
-ams-guard = { path = "crates/ams-guard", version = "0.2.4" }
-ams-fichier = { path = "crates/ams-fichier", version = "0.2.4" }
-ams-admin-options = { path = "crates/ams-admin-options", version = "0.2.4" }
-ams-index = { path = "crates/ams-index", version = "0.2.4" }
-ams-loop-tokio = { path = "crates/ams-loop-tokio", version = "0.2.4" }
-ams-proto-imap = { path = "crates/ams-proto-imap", version = "0.2.4" }
-ams-proto-pop3 = { path = "crates/ams-proto-pop3", version = "0.2.4" }
-ams-proto-http = { path = "crates/ams-proto-http", version = "0.2.4" }
-ams-proto-h2 = { path = "crates/ams-proto-h2", version = "0.2.4" }
-ams-proto-quic = { path = "crates/ams-proto-quic", version = "0.2.4" }
-ams-quic-crypto = { path = "crates/ams-quic-crypto", version = "0.2.4" }
-ams-proto-h3 = { path = "crates/ams-proto-h3", version = "0.2.4" }
-ams-quic = { path = "crates/ams-quic", version = "0.2.4" }
-ams-quic-tls = { path = "crates/ams-quic-tls", version = "0.2.4" }
-ams-h3 = { path = "crates/ams-h3", version = "0.2.4" }
-ams-quic-client = { path = "crates/ams-quic-client", version = "0.2.4" }
-ams-proto-smtp = { path = "crates/ams-proto-smtp", version = "0.2.4" }
-ams-queue = { path = "crates/ams-queue", version = "0.2.4" }
-ams-api = { path = "crates/ams-api", version = "0.2.4" }
-ams-auth = { path = "crates/ams-auth", version = "0.2.4" }
-ams-sasl = { path = "crates/ams-sasl", version = "0.2.4" }
-ams-spf = { path = "crates/ams-spf", version = "0.2.4" }
-ams-session = { path = "crates/ams-session", version = "0.2.4" }
-ams-store = { path = "crates/ams-store", version = "0.2.4" }
-ams-tls = { path = "crates/ams-tls", version = "0.2.4" }
+ams-config = { path = "crates/ams-config", version = "0.2.5" }
+ams-dane = { path = "crates/ams-dane", version = "0.2.5" }
+ams-dkim = { path = "crates/ams-dkim", version = "0.2.5" }
+ams-mime = { path = "crates/ams-mime", version = "0.2.5" }
+ams-mtasts = { path = "crates/ams-mtasts", version = "0.2.5" }
+ams-tlsrpt = { path = "crates/ams-tlsrpt", version = "0.2.5" }
+ams-dmarc = { path = "crates/ams-dmarc", version = "0.2.5" }
+ams-dns = { path = "crates/ams-dns", version = "0.2.5" }
+ams-guard = { path = "crates/ams-guard", version = "0.2.5" }
+ams-fichier = { path = "crates/ams-fichier", version = "0.2.5" }
+ams-admin-options = { path = "crates/ams-admin-options", version = "0.2.5" }
+ams-index = { path = "crates/ams-index", version = "0.2.5" }
+ams-loop-tokio = { path = "crates/ams-loop-tokio", version = "0.2.5" }
+ams-proto-imap = { path = "crates/ams-proto-imap", version = "0.2.5" }
+ams-proto-pop3 = { path = "crates/ams-proto-pop3", version = "0.2.5" }
+ams-proto-http = { path = "crates/ams-proto-http", version = "0.2.5" }
+ams-proto-h2 = { path = "crates/ams-proto-h2", version = "0.2.5" }
+ams-proto-quic = { path = "crates/ams-proto-quic", version = "0.2.5" }
+ams-quic-crypto = { path = "crates/ams-quic-crypto", version = "0.2.5" }
+ams-proto-h3 = { path = "crates/ams-proto-h3", version = "0.2.5" }
+ams-quic = { path = "crates/ams-quic", version = "0.2.5" }
+ams-quic-tls = { path = "crates/ams-quic-tls", version = "0.2.5" }
+ams-h3 = { path = "crates/ams-h3", version = "0.2.5" }
+ams-quic-client = { path = "crates/ams-quic-client", version = "0.2.5" }
+ams-proto-smtp = { path = "crates/ams-proto-smtp", version = "0.2.5" }
+ams-queue = { path = "crates/ams-queue", version = "0.2.5" }
+ams-api = { path = "crates/ams-api", version = "0.2.5" }
+ams-auth = { path = "crates/ams-auth", version = "0.2.5" }
+ams-sasl = { path = "crates/ams-sasl", version = "0.2.5" }
+ams-spf = { path = "crates/ams-spf", version = "0.2.5" }
+ams-session = { path = "crates/ams-session", version = "0.2.5" }
+ams-store = { path = "crates/ams-store", version = "0.2.5" }
+ams-tls = { path = "crates/ams-tls", version = "0.2.5" }
 
 #
 # LES DÉPENDANCES EXTERNES n'entrent qu'au moment où une crate les consomme.

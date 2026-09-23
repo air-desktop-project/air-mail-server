@@ -114,7 +114,8 @@ pub use connection::{
 };
 pub use delivery::{Delivery, DeliveryFailure};
 pub use dkim::{
-    DkimChecker, DkimResult, DkimSigner, DkimStream, DkimVerdict, PublicationDkim, publication_dkim,
+    DkimChecker, DkimResult, DkimSigner, DkimStream, DkimVerdict, PublicationDkim,
+    publication_dkim, replier_la_signature,
 };
 pub use dmarc::{Authenticated, DmarcChecker, DmarcResult, DmarcVerdict, PourRapport};
 pub use error::Error;

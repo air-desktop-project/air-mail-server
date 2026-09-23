@@ -324,6 +324,26 @@ pub struct MaildirDelivery {
     ///
     /// Zéro : on n'en écrit pas, et rien n'est réservé.
     trace: usize,
+    // ── CE QU'IL FAUT POUR SIGNER UNE SOUMISSION SANS RIEN RASSEMBLER ──────
+    //
+    // Le corps se condense AU FIL DE L'EAU pendant qu'il part vers le disque :
+    // rien n'est retenu, et C3 tient. Seul l'en-tête est gardé, et il est borné
+    // par `max_header_octets`.
+    /// Le condensat du corps en cours, si cette transaction se signe.
+    hacheur: Option<ams_dkim::BodyHasher>,
+    /// L'en-tête TEL QU'IL A ÉTÉ ÉCRIT — `Bcc:` retiré compris.
+    ///
+    /// **Ce n'est pas celui que le pair a envoyé**, et c'est tout l'enjeu :
+    /// signer ce qu'on n'écrit pas produirait une signature qui échoue chez
+    /// tout le monde.
+    entete_signe: Vec<u8>,
+    /// L'en-tête `Authentication-Results` que la boucle a composé.
+    ///
+    /// Il est RETENU plutôt qu'écrit tout de suite, parce que la place réservée
+    /// porte alors deux en-têtes et que `set_prologue` les veut d'un seul bloc.
+    authres: Vec<u8>,
+    /// La place réservée pour le champ `DKIM-Signature:`, ou zéro.
+    reserve_dkim: usize,
     /// Le dossier où mettre de côté ce que `p=quarantine` vise.
     ///
     /// **Aucun : la quarantaine n'existe pas**, et le message va dans la boîte
@@ -385,6 +405,10 @@ impl MaildirDelivery {
             domaines: Arc::new(Vec::new()),
             corps: Vec::new(),
             corps_max: 0,
+            hacheur: None,
+            entete_signe: Vec::new(),
+            authres: Vec::new(),
+            reserve_dkim: 0,
             trace: 0,
             quarantaine: None,
             envid: String::new(),
@@ -480,6 +504,10 @@ impl Delivery for MaildirDelivery {
         self.envid.clear();
         self.rapports.clear();
         self.ecarte = false;
+        self.hacheur = None;
+        self.entete_signe.clear();
+        self.authres.clear();
+        self.reserve_dkim = 0;
     }
 
     fn submitter(&mut self, login: &[u8]) {
@@ -493,6 +521,20 @@ impl Delivery for MaildirDelivery {
 
     fn reserve_trace(&mut self, combien: usize) {
         self.trace = combien;
+        // **LA PLACE DU CHAMP `DKIM-Signature:` SE DEMANDE ICI**, avec celle de
+        // l'`Authentication-Results` et pour la même raison : le premier octet
+        // du message n'est pas encore écrit, et le condensat du corps n'existera
+        // qu'à la fin. La boucle appelle `submitter` AVANT `reserve_trace`, si
+        // bien qu'on sait déjà si le pair s'est authentifié.
+        //
+        // **ON NE SIGNE QU'UNE SOUMISSION**, et seulement si une clé existe :
+        // signer du courrier en transit apposerait notre nom sur ce qu'un autre
+        // a écrit.
+        self.reserve_dkim = if self.compte.is_some() && self.dkim.is_some() {
+            ams_dkim::SIGNATURE_FIELD_MAX
+        } else {
+            0
+        };
     }
 
     fn envelope_id(&mut self, id: &[u8]) {
@@ -523,6 +565,13 @@ impl Delivery for MaildirDelivery {
     }
 
     fn trace(&mut self, entete: &[u8]) {
+        // **QUAND ON SIGNE, LA PLACE PORTE DEUX EN-TÊTES** et `set_prologue` les
+        // veut d'un seul bloc : on retient celui-ci, et `finish` composera.
+        if self.reserve_dkim > 0 {
+            self.authres.clear();
+            self.authres.extend_from_slice(entete);
+            return;
+        }
         for (_, arrivee) in &mut self.arrivees {
             // **UN EN-TÊTE QU'ON NE SAIT PAS POSER NE FAIT PAS ÉCHOUER LA
             // REMISE.** Le message arrive alors avec une place réservée remplie
@@ -553,7 +602,8 @@ impl Delivery for MaildirDelivery {
             self.incident(crate::incidents::Cause::Ecriture);
             return Err(DeliveryFailure::Temporary);
         };
-        if self.trace > 0 && arrivee.reserve_prologue(self.trace).is_err() {
+        let reserve = self.trace.saturating_add(self.reserve_dkim);
+        if reserve > 0 && arrivee.reserve_prologue(reserve).is_err() {
             self.incident(crate::incidents::Cause::Ecriture);
             return Err(DeliveryFailure::Temporary);
         }
@@ -563,7 +613,8 @@ impl Delivery for MaildirDelivery {
 
     fn append(&mut self, chunk: &[u8]) -> Result<(), DeliveryFailure> {
         let Some(mut retenus) = self.entetes.take() else {
-            return self.ecrire(chunk);
+            // L'en-tête est déjà passé : tout ce qui suit est du corps.
+            return self.ecrire_le_corps(chunk);
         };
         retenus.extend_from_slice(chunk);
         let Some(fin) = fin_de_l_entete(&retenus) else {
@@ -618,8 +669,19 @@ impl Delivery for MaildirDelivery {
         }
         let sans_bcc = sans_le_bcc(entete);
         let corps = corps.to_vec();
+        // **ON RETIENT L'EN-TÊTE TEL QU'ON L'ÉCRIT**, `Bcc:` déjà retiré : signer
+        // celui que le pair a envoyé produirait une signature qui échoue chez
+        // tout le monde, puisque ce n'est pas celui qui part. Il est borné par
+        // `max_header_octets`, vérifié plus haut.
+        if self.reserve_dkim > 0 {
+            self.entete_signe.clear();
+            self.entete_signe.extend_from_slice(&sans_bcc);
+            // Le condensat du corps s'ouvre ICI et se nourrit à chaque morceau :
+            // rien du corps n'est jamais retenu.
+            self.hacheur = Some(ams_dkim::BodyHasher::new(ams_dkim::Canon::Relaxed, None));
+        }
         self.ecrire(&sans_bcc)?;
-        self.ecrire(&corps)
+        self.ecrire_le_corps(&corps)
     }
 
     /// **LE `Return-Path:` NE SUIT PAS CE QU'ON RELAIE** (RFC 5321 §4.4).
@@ -653,6 +715,9 @@ impl Delivery for MaildirDelivery {
         if self.arrivees.is_empty() && self.sortants.is_empty() {
             return Err(DeliveryFailure::Temporary);
         }
+        // **LE PROLOGUE SE POSE AVANT LE `commit`**, pendant que les fichiers
+        // sont encore ouverts : après, il n'y a plus rien à réécrire.
+        self.poser_le_prologue();
         let arrivees = core::mem::take(&mut self.arrivees);
         // **LES BOÎTES D'ABORD, LA FILE ENSUITE**, et l'ordre n'est pas
         // indifférent. Si le second échoue après le premier, le pair réessaie et
@@ -745,6 +810,19 @@ fn sans_le_bcc(entete: &[u8]) -> Vec<u8> {
 }
 
 impl MaildirDelivery {
+    /// Écrit des octets **de CORPS** : ils partent au disque et au condensat.
+    ///
+    /// **LE CONDENSAT SE NOURRIT ICI, ET NULLE PART AILLEURS.** Le séparer de
+    /// l'écriture laisserait un chemin par lequel un morceau pourrait partir au
+    /// disque sans être condensé — et la signature ne correspondrait alors plus
+    /// à ce qui a été écrit, ce qui est pire que pas de signature.
+    fn ecrire_le_corps(&mut self, chunk: &[u8]) -> Result<(), DeliveryFailure> {
+        if let Some(hacheur) = self.hacheur.as_mut() {
+            hacheur.update(chunk);
+        }
+        self.ecrire(chunk)
+    }
+
     /// Écrit ces octets aux arrivées, et au message qu'on relaiera s'il y en a un.
     fn ecrire(&mut self, chunk: &[u8]) -> Result<(), DeliveryFailure> {
         // **LE CONSTAT D'ABORD, LA PAROLE ENSUITE** : la boucle emprunte
@@ -769,6 +847,70 @@ impl MaildirDelivery {
             self.corps.extend_from_slice(chunk);
         }
         Ok(())
+    }
+
+    /// Compose la place réservée : le champ `DKIM-Signature:`, puis
+    /// l'`Authentication-Results`.
+    ///
+    /// # POURQUOI LA SIGNATURE VIENT EN PREMIER
+    ///
+    /// §3.5 de RFC 6376 veut que le champ précède ce qu'il couvre. Il ne couvre
+    /// pas l'`Authentication-Results` — celui-ci n'est pas dans le `h=` —, mais
+    /// l'ordre reste celui qu'un lecteur attend : d'abord ce que l'origine
+    /// affirme, ensuite ce que le serveur a constaté.
+    ///
+    /// # CE QUI ARRIVE QUAND ON NE SAIT PAS SIGNER
+    ///
+    /// **Le message part quand même**, avec son seul `Authentication-Results` et
+    /// le reste de la place en blancs. Une soumission refusée parce qu'une clé
+    /// n'a pas voulu signer serait une punition infligée au déposant pour une
+    /// faute qui n'est pas la sienne — la même règle que pour les rapports.
+    fn poser_le_prologue(&mut self) {
+        if self.reserve_dkim == 0 {
+            return;
+        }
+        let place = self.trace.saturating_add(self.reserve_dkim);
+        let mut prologue = self.champ_dkim().unwrap_or_default();
+        prologue.extend_from_slice(&self.authres);
+        // Ce qui manque se comble par des blancs : ils ne sont pas un en-tête,
+        // et c'est exactement ce que la place réservée portait déjà.
+        if prologue.len() < place {
+            prologue.resize(place, b' ');
+        }
+        if prologue.len() != place {
+            return;
+        }
+        for (_, arrivee) in &mut self.arrivees {
+            // Un en-tête qu'on ne sait pas poser ne fait pas échouer la remise.
+            let _ = arrivee.set_prologue(&prologue);
+        }
+    }
+
+    /// Le champ `DKIM-Signature:`, replié pour occuper la place qui lui est due.
+    fn champ_dkim(&self) -> Option<Vec<u8>> {
+        let signataire = self.dkim.as_ref()?;
+        let hacheur = self.hacheur.clone()?;
+        let (condensat, _) = hacheur.finish();
+        // **LE DOMAINE VIENT DU `From:`**, et l'on ne signe que pour un domaine
+        // dont on tient la zone : une signature pour un domaine qui n'est pas le
+        // nôtre échoue PARTOUT, et son échec se voit dans les rapports DMARC du
+        // domaine usurpé. C'est pire que pas de signature.
+        let bornes = ams_mime::Limits::DEFAULT;
+        let lu = ams_mime::Message::parse(&self.entete_signe, &bornes).ok()?;
+        let champ = lu.fields().find(|champ| champ.name_is(b"from"))?;
+        let adresse = ams_mime::bare_address(champ.raw_value())?;
+        let auteur = String::from_utf8_lossy(adresse).into_owned();
+        let (_, domaine) = auteur.rsplit_once('@')?;
+        if !self
+            .domaines
+            .iter()
+            .any(|notre| notre.eq_ignore_ascii_case(domaine))
+        {
+            return None;
+        }
+        let compose =
+            signataire.champ_depuis(&self.entete_signe, &condensat, &auteur, Self::maintenant())?;
+        ams_loop_tokio::replier_la_signature(&compose, self.reserve_dkim)
     }
 
     /// Le dossier de quarantaine de ce compte, ouvert ou créé.
@@ -2208,5 +2350,230 @@ mod copie_cachee {
             "coupé, mais retiré : {recu}"
         );
         assert!(recu.ends_with("Le corps.\r\n"), "et le corps est entier");
+    }
+}
+
+#[cfg(test)]
+mod signature_locale {
+    use super::tests::{Ephemere, remise};
+    use ams_loop_tokio::Delivery as _;
+    use ams_mime::AUTHRES_RESERVE;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    /// La clé d'épreuve du dépôt, Ed25519 — la même que partout ailleurs.
+    const CLE_PRIVEE: &str = "-----BEGIN PRIVATE KEY-----\n\
+         MC4CAQAwBQYDK2VwBCIEIPycWR71gsJjQjlyixhg1EFwd/RmkyoHfIBubnK3v8rE\n\
+         -----END PRIVATE KEY-----\n";
+
+    pub(super) fn signataire() -> ams_loop_tokio::DkimSigner {
+        let cle = ams_dkim::SigningKey::from_pem(CLE_PRIVEE.as_bytes()).expect("la clé se lit");
+        ams_loop_tokio::DkimSigner::new(String::from("epreuve"), Arc::new(cle))
+    }
+
+    pub(super) fn enregistrement() -> Vec<u8> {
+        ams_dkim::SigningKey::from_pem(CLE_PRIVEE.as_bytes())
+            .expect("la clé se lit")
+            .public_record()
+    }
+
+    /// Le message tel qu'il a été déposé dans la boîte de `marie`.
+    fn remis(racine: &Path) -> Vec<u8> {
+        let dossier = racine.join("marie").join("new");
+        let entree = std::fs::read_dir(&dossier)
+            .expect("dossier")
+            .next()
+            .expect("un message")
+            .expect("lisible");
+        std::fs::read(entree.path()).expect("lisible")
+    }
+
+    /// Vérifie la signature **exactement comme un pair le ferait**.
+    ///
+    /// Repris du banc d'`ams-loop-tokio` : la clé lue de l'enregistrement, le
+    /// condensat du corps, celui des en-têtes signés, et la signature dépliée.
+    pub(super) fn verifier(message: &[u8], enregistrement: &[u8]) -> Result<(), ams_dkim::Error> {
+        let bornes = ams_mime::Limits::DEFAULT;
+        let lu = ams_mime::Message::parse(message, &bornes).expect("lisible");
+        let champ = lu
+            .fields()
+            .find(|champ| champ.name_is(b"dkim-signature"))
+            .expect("signé");
+        let signature = ams_dkim::Signature::parse(champ.raw_value())?;
+        let record = ams_dkim::PublicKeyRecord::parse(enregistrement)?;
+
+        let mut corps = ams_dkim::BodyHasher::new(signature.canonicalization.body, None);
+        corps.update(lu.body());
+        let (condensat_du_corps, _) = corps.finish();
+
+        let mut sans_blancs = std::vec![0_u8; record.key.len()];
+        let deplie = record.key_base64(&mut sans_blancs)?;
+        let mut cle = std::vec![0_u8; deplie.len()];
+        let combien = ams_dkim::decoder_base64(deplie, &mut cle)?;
+        cle.truncate(combien);
+
+        let mut tampon = std::vec![0_u8; signature.signature.len()];
+        let deplie = signature.signature_base64(&mut tampon)?;
+        let mut scellee = std::vec![0_u8; deplie.len()];
+        let combien = ams_dkim::decoder_base64(deplie, &mut scellee)?;
+        scellee.truncate(combien);
+
+        let mut condensat = ams_dkim::HeaderHasher::new(signature.canonicalization.header);
+        ams_dkim::hash_signed_headers(&signature, &mut condensat, || {
+            lu.fields().map(|champ| (champ.name(), champ.raw_value()))
+        });
+        condensat.signature_field(champ.name(), champ.raw_value())?;
+
+        ams_dkim::verify(
+            &signature,
+            &record,
+            &cle,
+            &condensat_du_corps,
+            &condensat.finish(),
+            &scellee,
+        )
+    }
+
+    /// Dépose une soumission authentifiée dans une boîte d'ici.
+    pub(super) fn soumettre(racine: &Path, corps: &[u8], signe: bool) -> Vec<u8> {
+        let (_boites, remise) = remise(racine);
+        let mut remise = remise.avec_domaines(Arc::new(std::vec![String::from("example.com")]));
+        if signe {
+            remise = remise.avec_dkim(signataire());
+        }
+        remise.begin(Some(b"marie@example.com"));
+        // **C'EST CET APPEL QUI FAIT LA SOUMISSION**, et lui seul : la boucle ne
+        // le passe que pour un pair authentifié.
+        remise.submitter(b"marie");
+        remise.reserve_trace(AUTHRES_RESERVE);
+        remise
+            .add_recipient(b"marie@example.com")
+            .expect("destinataire");
+        remise.append(corps).expect("corps");
+        // La boucle écrit toujours son en-tête de trace, rempli à la taille exacte.
+        let mut trace = [0_u8; AUTHRES_RESERVE];
+        let ecrit = ams_mime::write_authres_padded(
+            &mut trace,
+            &ams_mime::Authentication {
+                serv_id: b"mail.example.com",
+                spf: None,
+                dkim: &[],
+                dmarc: None,
+                auth: Some(b"marie"),
+            },
+        )
+        .expect("composable")
+        .to_vec();
+        remise.trace(&ecrit);
+        remise.finish().expect("remis");
+        remis(racine)
+    }
+
+    /// Un répertoire éphémère, pour le module voisin.
+    pub(super) fn ephemere() -> Ephemere {
+        Ephemere::nouveau()
+    }
+
+    /// Le chemin d'un répertoire éphémère.
+    pub(super) fn chemin(ephemere: &Ephemere) -> &Path {
+        &ephemere.0
+    }
+
+    const MESSAGE: &[u8] = b"From: marie@example.com\r\n\
+To: marie@example.com\r\n\
+Subject: bonjour\r\n\
+Date: Mon, 31 Aug 2026 09:00:00 +0200\r\n\
+Message-Id: <1@example.com>\r\n\
+\r\n\
+Le corps.\r\n";
+
+    /// **CE QU'UNE SOUMISSION DÉPOSE ICI EST SIGNÉ, ET LA SIGNATURE SE VÉRIFIE.**
+    ///
+    /// # CE QUE CET ESSAI PROUVE, ET QUE RIEN D'AUTRE NE PROUVAIT
+    ///
+    /// La signature ne couvrait que ce qui PART : `signer` n'était appelé que
+    /// par `deposer_les_sortants`. Un message déposé dans une boîte d'ici
+    /// n'était signé par personne — et si on l'en exportait, ou qu'un client le
+    /// faisait suivre, rien ne permettait d'établir qu'il venait bien de nous.
+    ///
+    /// **Il ne suffit pas que le champ SOIT là.** Le corps part en flux vers le
+    /// disque et son condensat se calcule au fil de l'eau ; l'en-tête est
+    /// retouché — `Bcc:` retiré — avant d'être écrit. Signer ce qu'on n'écrit
+    /// pas produirait un champ d'apparence juste qui échoue partout. D'où la
+    /// vérification complète, celle qu'un pair ferait.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn une_soumission_remise_ici_porte_une_signature_qui_se_verifie() {
+        let temporaire = Ephemere::nouveau();
+        let ecrit = soumettre(&temporaire.0, MESSAGE, true);
+        let texte = String::from_utf8_lossy(&ecrit).into_owned();
+
+        // §3.5 : le champ précède ce qu'il couvre.
+        assert!(texte.starts_with("DKIM-Signature: "), "{texte}");
+        assert!(texte.contains("d=example.com"), "{texte}");
+        assert!(texte.contains("s=epreuve"), "{texte}");
+        // L'en-tête de trace est là lui aussi, dans la même place réservée.
+        assert!(texte.contains("auth=pass smtp.auth=marie"), "{texte}");
+        // Et le message suit, intact.
+        assert!(texte.contains("Subject: bonjour\r\n"), "{texte}");
+
+        // **LE VERDICT** : la cryptographie, pas la forme.
+        assert_eq!(verifier(&ecrit, &enregistrement()), Ok(()));
+    }
+
+    /// **SANS CLÉ, LE MESSAGE ARRIVE QUAND MÊME**, et sa trace avec lui.
+    ///
+    /// Refuser une soumission parce qu'aucune clé n'est posée serait punir le
+    /// déposant d'une faute qui n'est pas la sienne.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sans_cle_la_soumission_arrive_sans_signature() {
+        let temporaire = Ephemere::nouveau();
+        let ecrit = soumettre(&temporaire.0, MESSAGE, false);
+        let texte = String::from_utf8_lossy(&ecrit).into_owned();
+        assert!(!texte.contains("DKIM-Signature:"), "{texte}");
+        assert!(texte.contains("auth=pass smtp.auth=marie"), "{texte}");
+        assert!(texte.contains("Subject: bonjour\r\n"), "{texte}");
+    }
+}
+
+#[cfg(test)]
+mod signature_locale_bcc {
+    use super::signature_locale::*;
+
+    /// **UN EN-TÊTE RETOUCHÉ SE SIGNE QUAND MÊME JUSTE.**
+    ///
+    /// `Bcc:` est RETIRÉ avant écriture (§4.5.3 de RFC 5322 : il ne doit pas
+    /// parvenir aux autres destinataires), et le message n'en arrive pas moins
+    /// avec une signature vérifiable.
+    ///
+    /// # CE QUE CET ESSAI N'ÉTABLIT PAS, ET IL FAUT LE DIRE
+    ///
+    /// Il ne prouve PAS qu'on signe l'en-tête écrit plutôt que celui reçu.
+    /// Vérifié en cassant le code exprès — en signant l'en-tête d'avant le
+    /// retrait — : l'essai passe toujours. La raison est que `bcc` ne figure
+    /// pas dans `CHAMPS_SIGNES`, si bien que son retrait ne change pas le
+    /// condensat des en-têtes.
+    ///
+    /// **Le code signe malgré tout ce qu'il écrit**, parce que c'est la seule
+    /// règle qui reste vraie si un champ SIGNÉ venait un jour à être retouché.
+    /// Ce qu'un essai ne peut pas distinguer aujourd'hui, un commentaire doit
+    /// le dire plutôt que de le laisser croire.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn un_bcc_retire_ne_casse_pas_la_signature() {
+        const AVEC_BCC: &[u8] = b"From: marie@example.com\r\n\
+To: marie@example.com\r\n\
+Bcc: secret@ailleurs.test\r\n\
+Subject: bonjour\r\n\
+Date: Mon, 31 Aug 2026 09:00:00 +0200\r\n\
+Message-Id: <2@example.com>\r\n\
+\r\n\
+Le corps.\r\n";
+        let temporaire = ephemere();
+        let ecrit = soumettre(chemin(&temporaire), AVEC_BCC, true);
+        let texte = String::from_utf8_lossy(&ecrit).into_owned();
+        // Le `Bcc:` n'est pas parvenu au destinataire.
+        assert!(!texte.contains("Bcc:"), "{texte}");
+        assert!(!texte.contains("secret@ailleurs.test"), "{texte}");
+        // Et la signature couvre bien ce qui a été écrit.
+        assert_eq!(verifier(&ecrit, &enregistrement()), Ok(()));
     }
 }

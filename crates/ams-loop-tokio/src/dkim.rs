@@ -711,16 +711,44 @@ impl DkimSigner {
 
     /// Compose le champ `DKIM-Signature`, s'il se compose.
     fn champ(&self, message: &[u8], from: &str, timestamp: u64) -> Option<Vec<u8>> {
-        let domaine = from.rsplit_once('@').map(|(_, apres)| apres)?;
         let lu = Message::parse(message, &MimeLimits::DEFAULT).ok()?;
+        let mut corps = BodyHasher::new(Canon::Relaxed, None);
+        corps.update(lu.body());
+        let (condensat, _) = corps.finish();
+        self.champ_depuis(message, &condensat, from, timestamp)
+    }
+
+    /// Le champ `DKIM-Signature:`, **à partir d'un corps DÉJÀ condensé**.
+    ///
+    /// # POURQUOI CETTE PORTE-LÀ EXISTE
+    ///
+    /// [`DkimSigner::sign`] veut le message entier en mémoire. C'est tenable
+    /// pour un rapport qu'on vient de composer ; cela ne l'est pas pour une
+    /// remise, qui écrit le corps en flux vers le disque sans jamais le retenir
+    /// — c'est ce que C3 demande, et un message de dix mébioctets par connexion
+    /// le rappellerait vite.
+    ///
+    /// **Le condensat, lui, se calcule au fil de l'eau** ([`BodyHasher::update`]),
+    /// et l'en-tête seul est borné. La remise peut donc signer sans rien
+    /// rassembler, en ne gardant que ce qui tient.
+    ///
+    /// `entete` porte le bloc d'en-tête **TEL QU'IL SERA ÉCRIT**, ligne vide
+    /// comprise ou non : ce qui compte est que ce soit celui-là, et non celui
+    /// que le pair a envoyé. Un `Bcc:` retiré après coup casserait la signature.
+    #[must_use]
+    pub fn champ_depuis(
+        &self,
+        entete: &[u8],
+        condensat: &[u8; ams_dkim::DIGEST_LEN],
+        from: &str,
+        timestamp: u64,
+    ) -> Option<Vec<u8>> {
+        let domaine = from.rsplit_once('@').map(|(_, apres)| apres)?;
+        let lu = Message::parse(entete, &MimeLimits::DEFAULT).ok()?;
         let canon = Canonicalization {
             header: Canon::Relaxed,
             body: Canon::Relaxed,
         };
-
-        let mut corps = BodyHasher::new(canon.body, None);
-        corps.update(lu.body());
-        let (condensat, _) = corps.finish();
 
         let champs: Vec<(&[u8], &[u8])> = lu
             .fields()
@@ -745,7 +773,7 @@ impl DkimSigner {
         // les lui laisse exploiter.
         let mut alea = Urandom::ouvrir()?;
         let ecrits = signataire
-            .sign_with(&self.key, &condensat, &champs, &mut alea, &mut sortie)
+            .sign_with(&self.key, condensat, &champs, &mut alea, &mut sortie)
             .ok()?
             .len();
         sortie.truncate(ecrits);
@@ -791,6 +819,56 @@ impl TryRng for Urandom {
 }
 
 impl TryCryptoRng for Urandom {}
+
+/// Replie un champ `DKIM-Signature:` pour qu'il occupe EXACTEMENT `place`.
+///
+/// # POURQUOI ON A LE DROIT DE REMBOURRER UN CHAMP SIGNÉ
+///
+/// Le rembourrage tombe **à la fin de la valeur**, sous forme d'un pli de
+/// continuation rempli de blancs. §3.4.2 de RFC 6376 — canonisation `relaxed`
+/// des en-têtes — prescrit, dans cet ordre : déplier, réduire chaque suite de
+/// blancs à une espace, puis **SUPPRIMER LES BLANCS DE FIN DE VALEUR**.
+///
+/// Le vérificateur voit donc exactement ce que le signataire a signé : les
+/// blancs ajoutés ici disparaissent de son côté comme ils étaient absents du
+/// nôtre. **C'est vrai de `relaxed`, et de lui seul** — en `simple`, l'en-tête
+/// se condense tel quel et ce rembourrage casserait la signature. Le signataire
+/// de ce fichier emploie `relaxed` pour les en-têtes, et ce n'est pas un détail
+/// qu'on peut changer sans revenir ici.
+///
+/// Rend `None` si le champ ne tient pas, ou s'il ne reste pas de quoi ouvrir
+/// un pli — `CRLF`, une espace, et le `CRLF` final.
+#[must_use]
+pub fn replier_la_signature(champ: &[u8], place: usize) -> Option<Vec<u8>> {
+    // Le champ arrive terminé par `CRLF` ; on écrit sur le nu et l'on referme.
+    let nu = champ.strip_suffix(b"\r\n").unwrap_or(champ);
+    // Il faut la place du pli et celle du `CRLF` final.
+    if nu.len().saturating_add(5) > place {
+        return None;
+    }
+    let mut sortie = Vec::with_capacity(place);
+    sortie.extend_from_slice(nu);
+    sortie.extend_from_slice(b"\r\n ");
+    // **AUCUNE LIGNE NE DÉPASSE LA BORNE DE §2.1.1 DE RFC 5322** : 998 octets,
+    // `CRLF` non compris. Un rembourrage d'un seul tenant la franchirait dès
+    // qu'il y a un kibioctet à combler, et un message dont une ligne déborde
+    // est un message qu'un pair a le droit de refuser.
+    let mut sur_la_ligne = 1_usize;
+    while sortie.len().saturating_add(2) < place {
+        if sur_la_ligne >= 900 {
+            sortie.extend_from_slice(b"\r\n ");
+            sur_la_ligne = 1;
+            continue;
+        }
+        sortie.push(b' ');
+        sur_la_ligne = sur_la_ligne.saturating_add(1);
+    }
+    sortie.extend_from_slice(b"\r\n");
+    // Le `while` s'arrête à `place - 2` au plus tard, et l'on vient d'écrire
+    // ces deux octets : la taille est exacte. On le VÉRIFIE plutôt que de
+    // l'affirmer, parce qu'un octet d'écart écraserait l'en-tête du pair.
+    (sortie.len() == place).then_some(sortie)
+}
 
 #[cfg(test)]
 mod publication {

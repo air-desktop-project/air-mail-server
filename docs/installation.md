@@ -680,6 +680,30 @@ contre un client qui venait de prouver son identité. Sans dossier de
 quarantaine configuré, rien n'était écarté ; avec, ses alertes auraient été
 mises de côté en silence.
 
+### Ce qu'une soumission dépose ici est signé
+
+**Depuis la 0.2.5, une soumission authentifiée est signée en DKIM même quand
+elle ne sort pas.** Jusque-là, seul ce qui partait en file l'était : un message
+déposé dans une boîte d'ici n'était signé par personne, et rien ne permettait
+d'établir qu'il venait de nous si on l'exportait ou le faisait suivre.
+
+```
+DKIM-Signature: v=1; a=ed25519-sha256; d=narro.ch; s=ams202609; ...
+Authentication-Results: mail.narro.ch;
+	auth=pass smtp.auth=ofrou-sierre
+```
+
+**Rien n'est rassemblé en mémoire pour autant** (C3) : le condensat du corps se
+calcule au fil de l'eau pendant qu'il part vers le disque, et seul l'en-tête —
+borné — est retenu. La place des deux en-têtes est réservée avant le premier
+octet, comme elle l'était déjà pour l'`Authentication-Results` seul.
+
+**On ne signe que pour un domaine dont on tient la zone.** Une signature pour
+un domaine qui n'est pas le nôtre échoue partout, et son échec se lit dans les
+rapports DMARC du domaine usurpé : c'est pire que pas de signature. Et un
+message qu'on ne sait pas signer **part quand même** — refuser serait punir le
+déposant d'une faute qui n'est pas la sienne.
+
 #### Ce que le journal ne porte pas, et c'est délibéré
 
 - **Aucun secret** : ni mot de passe, ni preuve SCRAM, ni octets de liaison. Le
