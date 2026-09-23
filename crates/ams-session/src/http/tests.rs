@@ -29,6 +29,9 @@ fn une_session() -> Http {
     Http::new(Key::new(CLEF).expect("trente-deux octets"), HEURE).expect("une durée licite")
 }
 
+/// L'identifiant que portent les jetons de ce banc.
+const IDENTIFIANT: u64 = 7;
+
 /// Un jeton scellé pour ce compte et cette portée.
 fn jeton(login: &str, scope: Scope) -> String {
     let mut place = [0_u8; ams_api::ENCODED_OCTETS_MAX];
@@ -38,7 +41,7 @@ fn jeton(login: &str, scope: Scope) -> String {
             login,
             scope,
             expiry: MAINTENANT + HEURE,
-            nonce: 7,
+            nonce: IDENTIFIANT,
         },
         MAINTENANT,
         &mut place,
@@ -71,14 +74,16 @@ fn requete<'a>(method: &'a [u8], chemin: &'a [u8], porte: &'a [u8]) -> Vec<(&'a 
 }
 
 /// La ressource qu'une suite désigne, si elle en désigne une.
-fn en_ressource<'o>(next: Next<'o>) -> Option<(Resource<'o>, Method, &'o str)> {
+fn en_ressource<'o>(next: Next<'o>) -> Option<(Resource<'o>, Method, &'o str, u64, Scope)> {
     match next {
         Next::Serve {
             resource,
             method,
             account,
+            nonce,
+            scope,
             ..
-        } => Some((resource, method, account)),
+        } => Some((resource, method, account, nonce, scope)),
         _ => None,
     }
 }
@@ -112,16 +117,21 @@ fn une_requete_autorisee_demande_a_servir() {
     let session = une_session();
     let tour = session.request(&tete, &[], MAINTENANT, &mut place);
     assert_eq!(tour.status(), StatusCode::OK);
-    let (resource, method, account) = en_ressource(tour.next()).expect("on sert");
+    let (resource, method, account, nonce, portee) = en_ressource(tour.next()).expect("on sert");
     assert_eq!(resource, Resource::Mailboxes);
     assert_eq!(method, Method::Get);
     assert_eq!(account, "marc");
+    // **L'IDENTIFIANT DE SESSION REMONTE JUSQU'À L'APPELANT**, et c'est ce qui
+    // lui permet de fermer CETTE session-là plutôt que le compte entier.
+    assert_eq!(nonce, IDENTIFIANT);
     assert_eq!(
         tour.next(),
         Next::Serve {
             resource,
             method,
             account,
+            nonce,
+            scope: portee,
             body: &[],
         }
     );
@@ -713,7 +723,7 @@ fn la_chaine_de_requete_ne_change_pas_la_ressource() {
         let mut place = [0_u8; PLACE];
         let session = une_session();
         let tour = session.request(&tete, &[], MAINTENANT, &mut place);
-        let (resource, _, _) = en_ressource(tour.next()).expect("on sert");
+        let (resource, _, _, _, _) = en_ressource(tour.next()).expect("on sert");
         assert_eq!(resource, Resource::Mailboxes, "{chemin:?}");
     }
 }
@@ -829,4 +839,29 @@ fn tout_port_s_annonce_sans_se_tronquer() {
         // La borne annoncée couvre le pire cas.
         assert!(session.alt_svc().len() <= super::ALT_SVC_MAX, "port {port}");
     }
+}
+
+/// **LA DURÉE QU'ON ANNONCE EST CELLE QU'ON ÉMET.**
+///
+/// L'appelant s'en sert pour inscrire la session : si elle différait de celle
+/// que le jeton porte, la session mourrait avant lui — et un porteur parfaitement
+/// légitime serait refusé sans que rien ne l'explique.
+#[test]
+fn la_duree_annoncee_est_celle_des_jetons_emis() {
+    let session = Http::new(Key::new(CLEF).expect("trente-deux octets"), HEURE).expect("montable");
+    assert_eq!(session.duree(), HEURE);
+
+    // Et elle se retrouve dans ce qu'un échange rend.
+    let mut place = [0_u8; 4096];
+    let tour = session.on_credentials(
+        true,
+        "marc",
+        Scope::one(Area::Mail, Rights::Read),
+        IDENTIFIANT,
+        MAINTENANT,
+        &mut place,
+    );
+    let dit = String::from_utf8_lossy(tour.body()).into_owned();
+    let attendu = std::format!("\"expires\":{}", MAINTENANT + HEURE);
+    assert!(dit.contains(&attendu), "{dit}");
 }

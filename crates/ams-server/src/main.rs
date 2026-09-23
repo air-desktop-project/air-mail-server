@@ -37,6 +37,7 @@ mod incidents;
 mod policy;
 mod pop3;
 mod scram;
+mod sessions;
 
 use std::collections::BTreeMap;
 use std::process::ExitCode;
@@ -136,10 +137,16 @@ async fn main() -> ExitCode {
 
 /// Combien de temps un jeton d'API vaut, en microsecondes.
 ///
-/// Une heure. **UN JETON NE SE RÉVOQUE PAS TOUT SEUL** : il se vérifie sans
-/// consulter quoi que ce soit, donc sa seule fin garantie est son expiration.
-/// Plus il vit, plus longtemps un vol reste utile.
-const DUREE_DE_JETON_US: u64 = 3_600 * 1_000_000;
+/// **UN QUART D'HEURE**, et non l'heure d'avant. Un jeton se révoque désormais
+/// — son registre de sessions le permet —, mais la révocation exige que le
+/// porteur ou l'exploitant AGISSE. L'expiration, elle, n'exige rien de
+/// personne, et reste donc la seule fin sur laquelle on peut compter.
+///
+/// **CE QUE LE RACCOURCISSEMENT COÛTAIT AVANT, IL NE LE COÛTE PLUS** : sans
+/// renouvellement, une heure était déjà un compromis entre le confort et le vol.
+/// La clef d'appareil qui vient rendra la réauthentification gratuite, et ce
+/// quart d'heure deviendra invisible.
+const DUREE_DE_JETON_US: u64 = 15 * 60 * 1_000_000;
 
 /// Ce qu'il faut pour servir l'API.
 type MontageApi = (

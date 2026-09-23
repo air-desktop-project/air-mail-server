@@ -1084,3 +1084,162 @@ fn un_utilisateur_change_son_propre_mot_de_passe() {
         "après {seuil} mots de passe faux, le videur doit fermer la porte"
     );
 }
+
+/// **UN JETON RÉVOQUÉ EST REFUSÉ, ET UN JETON D'ADMINISTRATION NE L'EST PAS.**
+///
+/// # CE QUE CET ESSAI PROUVE, ET QUE RIEN D'AUTRE NE PROUVAIT
+///
+/// Un jeton se vérifiait sans rien consulter : sa SEULE fin garantie était son
+/// expiration. `DELETE /v1/tokens/current` rendait `501` — il annonçait une
+/// révocation qui n'existait pas, ce qui est pire que de ne pas l'annoncer.
+///
+/// L'essai va jusqu'au bout de la chaîne réelle : un vrai serveur, `curl`, un
+/// jeton obtenu par `POST /v1/tokens`. Il vérifie qu'il ouvre, qu'il se ferme,
+/// et qu'une fois fermé **il ne rouvre plus** — ce qu'aucune vérification de
+/// sceau ne peut dire.
+///
+/// # ET LE SECOND VOLET EST AUSSI IMPORTANT QUE LE PREMIER
+///
+/// Le registre a failli refuser TOUS les jetons d'administration, qui ne
+/// passent jamais par `POST /v1/tokens` et n'ont donc aucune session ouverte.
+/// L'exploitant se serait retrouvé sans son outil sur un serveur en service.
+#[test]
+fn une_session_fermee_ne_rouvre_plus() {
+    // **UN NOM D'ATELIER PAR ESSAI, ET C'EST OBLIGATOIRE** : `atelier` EFFACE le
+    // répertoire avant de le créer, et deux essais du même nom tournant en
+    // parallèle se détruisent mutuellement leurs fichiers. Le coût de l'oubli
+    // est un `503` à l'écriture du magasin de comptes, que rien ne relie à sa
+    // cause — vu ici même.
+    let atelier = atelier("session-fermee");
+    let Some((cert, cle)) = paire(&atelier.0) else {
+        panic!("{SANS_OPENSSL}");
+    };
+    if std::process::Command::new("curl")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("IGNORÉ : `curl` est absent — cet essai n'a RIEN éprouvé.");
+        return;
+    }
+
+    let empreinte =
+        ams_auth::hash_password(b"secret-initial", b"seize octets ici").expect("hachable");
+    let magasin = atelier.0.join("comptes.bin");
+    std::fs::write(
+        &magasin,
+        ams_config::encode_accounts(&[ams_auth::Account {
+            login: String::from("marie"),
+            hash: empreinte,
+            addresses: vec![String::from("marie@example.com")],
+        }])
+        .expect("encodable"),
+    )
+    .expect("le magasin s'écrit");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&magasin, std::fs::Permissions::from_mode(0o600))
+            .expect("permissions du magasin");
+    }
+
+    let port_smtp = port_libre();
+    let port_http = port_libre();
+    let config = configuration_complete(
+        &atelier,
+        port_smtp,
+        Tls {
+            certificate_chain_path: cert.display().to_string(),
+            private_key_path: cle.display().to_string(),
+        },
+        &magasin.display().to_string(),
+        "",
+        &format!("127.0.0.1:{port_http}"),
+        "",
+        CLEF,
+    );
+    let _serveur = lancer(&config, port_smtp);
+    let base = format!("https://127.0.0.1:{port_http}");
+
+    // Un appel quelconque avec ce jeton, et le code qu'il rend.
+    let code_de = |jeton: &str, chemin: &str| -> String {
+        let sortie = std::process::Command::new("curl")
+            .args(["-s", "--insecure", "--http2"])
+            .args(["-H", &format!("Authorization: Bearer {jeton}")])
+            .args(["-o", "/dev/null", "-w", "%{http_code}"])
+            .arg(format!("{base}{chemin}"))
+            .output()
+            .expect("curl s'exécute");
+        String::from_utf8_lossy(&sortie.stdout).into_owned()
+    };
+
+    // ── 1. UN JETON D'UTILISATEUR, OBTENU PAR LA PORTE ORDINAIRE ────────────
+    let sortie = std::process::Command::new("curl")
+        .args(["-s", "--insecure", "--http2"])
+        .args(["-H", "Content-Type: application/json"])
+        .args(["-d", r#"{"login":"marie","password":"secret-initial"}"#])
+        .arg(format!("{base}/v1/tokens"))
+        .output()
+        .expect("curl s'exécute");
+    let corps = String::from_utf8_lossy(&sortie.stdout).into_owned();
+    let jeton = corps
+        .split_once("\"token\":\"")
+        .and_then(|(_, reste)| reste.split_once('"'))
+        .map(|(jeton, _)| jeton.to_string())
+        .unwrap_or_else(|| panic!("un jeton dans {corps}"));
+
+    // Il ouvre.
+    assert_eq!(
+        code_de(&jeton, "/v1/mailboxes"),
+        "200",
+        "un jeton frais doit ouvrir"
+    );
+
+    // ── 2. ON LE RÉVOQUE ────────────────────────────────────────────────────
+    let sortie = std::process::Command::new("curl")
+        .args(["-s", "--insecure", "--http2", "-X", "DELETE"])
+        .args(["-H", &format!("Authorization: Bearer {jeton}")])
+        .args(["-o", "/dev/null", "-w", "%{http_code}"])
+        .arg(format!("{base}/v1/tokens/current"))
+        .output()
+        .expect("curl s'exécute");
+    assert_eq!(
+        String::from_utf8_lossy(&sortie.stdout),
+        "204",
+        "fermer sa session doit réussir — et ne plus rendre 501"
+    );
+
+    // ── 3. ET IL NE ROUVRE PLUS ─────────────────────────────────────────────
+    //
+    // **C'EST TOUT L'OBJET DE LA TRANCHE.** Le sceau est toujours bon et
+    // l'heure n'est pas passée : seul le registre peut refuser ce jeton-là.
+    assert_eq!(
+        code_de(&jeton, "/v1/mailboxes"),
+        "401",
+        "un jeton dont la session est fermée ne doit plus rien ouvrir"
+    );
+
+    // Et le refermer dit qu'il n'y avait plus rien à fermer.
+    let sortie = std::process::Command::new("curl")
+        .args(["-s", "--insecure", "--http2", "-X", "DELETE"])
+        .args(["-H", &format!("Authorization: Bearer {jeton}")])
+        .args(["-o", "/dev/null", "-w", "%{http_code}"])
+        .arg(format!("{base}/v1/tokens/current"))
+        .output()
+        .expect("curl s'exécute");
+    assert_eq!(
+        String::from_utf8_lossy(&sortie.stdout),
+        "401",
+        "la session étant close, même la fermer n'est plus possible"
+    );
+
+    // ── 4. LE JETON D'ADMINISTRATION, LUI, N'A JAMAIS EU DE SESSION ─────────
+    //
+    // Il est frappé hors bande par `air-mail-admin token`. Exiger qu'il ait une
+    // session ouverte retirerait à l'exploitant l'outil qu'on lui a donné.
+    let administrateur = jeton_d_administration();
+    assert_eq!(
+        code_de(&administrateur, "/v1/accounts"),
+        "200",
+        "un jeton d'administration ne dépend d'aucune session"
+    );
+}

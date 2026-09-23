@@ -69,7 +69,7 @@
   <div class="meta">
     <span>API version: <strong>v1</strong></span>
     <span>Token version: <strong>0x01</strong></span>
-    <span>Server: <strong>air-mail-server 0.2.6</strong></span>
+    <span>Server: <strong>air-mail-server 0.2.7</strong></span>
   </div>
 </header>
 
@@ -321,7 +321,8 @@ authorization: Bearer AQECAAAAAG…</code></pre>
 <ul>
   <li><strong>It authenticates every request</strong> independently of the previous ones. There is no server-side session.</li>
   <li><strong>It verifies the seal before reading anything</strong>, in constant time.</li>
-  <li><strong>It bounds a token's life</strong> — one hour in service, twelve at most that the format allows — both at issuance and at verification.</li>
+  <li><strong>It bounds a token's life</strong> — fifteen minutes in service, twelve hours at most that the format allows — both at issuance and at verification.</li>
+  <li><strong>It revokes a session</strong>, and then refuses the token that carried it.</li>
   <li><strong>It refuses what it does not understand</strong> rather than normalising it: ambiguous paths, JSON that parsers disagree about, excessive nesting.</li>
   <li><strong>It gives the same answer</strong> to "this resource does not exist" and "you are not allowed to know".</li>
   <li><strong>It counts abuse</strong> and bans sources that cross the thresholds.</li>
@@ -332,17 +333,21 @@ authorization: Bearer AQECAAAAAG…</code></pre>
 
 <p>This list matters as much as the previous one. Each item is either a responsibility that falls to you, or an expectation you should not hold.</p>
 
+<div class="note sur">
+  <span class="etiquette">Revocation exists, and here is its exact reach</span>
+  <p>The server keeps a <strong>registry of live sessions</strong>. A token is accepted only if its session is listed, and <code>DELETE /v1/tokens/current</code> removes it: the token stops holding on the next request.</p>
+  <p><strong>A server restart closes every session.</strong> The registry lives in memory, and that is deliberate: a list of revocations lost on restart would give validity back to tokens someone meant to kill. Here the failure falls on the right side — everyone re-authenticates.</p>
+</div>
+
 <div class="note danger">
-  <span class="etiquette">Revocation does not exist</span>
-  <p><code>DELETE /v1/tokens/current</code> is routed and requires a valid token, but <strong>returns <code>501 Not Implemented</code></strong>: it revokes nothing. A token verifies without consulting any registry, and <strong>its only guaranteed end is its expiry</strong>. There is currently no way, through the API, to invalidate a token before its time.</p>
-  <p>The direct consequence: <em>a stolen token remains usable until it expires</em>. That is why the lifetime is bounded, and why you should keep it short.</p>
+  <span class="etiquette">An administration token, however, stays irrevocable</span>
+  <p>It is minted out of band by <code>air-mail-admin token</code> and opens no session: there is nothing to close. <strong>It holds until its hour, whatever happens</strong> — which is why the tool mints it short by default, fifteen minutes.</p>
 </div>
 
 <div class="tableau">
 <table>
   <thead><tr><th>What does not exist</th><th>What that means for you</th></tr></thead>
   <tbody>
-    <tr><td>Token revocation</td><td>Erase the token client-side on sign-out, and know it stays valid server-side until it expires.</td></tr>
     <tr><td>Refresh token</td><td>There is none. On expiry you must perform a full credential exchange — so you must keep the means to do so, or ask the user again.</td></tr>
     <tr><td>Client-chosen scope</td><td>You cannot obtain a read-only token. If your component only needs to read, containing it is your architecture's job.</td></tr>
     <tr><td>Query parameters</td><td>No filter, no sort, no cursor. See <a href="#paths">§2.2</a>.</td></tr>
@@ -369,7 +374,7 @@ authorization: Bearer AQECAAAAAG…</code></pre>
 </ul>
 
 <h4>Lifetime</h4>
-<p><strong>A token lasts one hour</strong> in the configuration in service. Twelve hours is the ceiling the format allows, not the deployed value — hard-code neither: read <code>expires</code>, and design your client to survive re-authentication.</p>
+<p><strong>A token lasts fifteen minutes</strong> in the configuration in service. Twelve hours is the ceiling the format allows, not the deployed value — hard-code neither: read <code>expires</code>, and design your client to survive re-authentication.</p>
 
 <h4>Certificate validation</h4>
 <p>You must validate the server's TLS certificate. Disabling that check — an <code>--insecure</code>, a <code>verify=False</code> — cancels the whole of this protection: the token then travels in the clear to whoever has placed themselves in the middle. No property in this section survives it.</p>
@@ -439,7 +444,8 @@ authorization: Bearer AQECAAAAAG…</code></pre>
 
 <div class="ressource">
   <div class="ligne"><span class="verbe delete">DELETE</span><span class="chemin">/v1/tokens/current</span><span class="portee">valid token</span></div>
-  <p><strong>Returns <code>501 Not Implemented</code>.</strong> Revocation is not implemented; see <a href="#does-not">§3.8</a>.</p>
+  <p><strong>Closes the session</strong> the presented token carries, and returns <code>204</code>. The token is refused by every later request, with <code>401</code>.</p>
+  <p>An already-closed session returns <code>401</code>: the token no longer holds, so it no longer opens even the door that would close it.</p>
 </div>
 
 <h3 id="r-mailboxes"><span class="numero">5.2</span>Mailboxes</h3>
@@ -626,7 +632,7 @@ The message body.
 <table>
   <thead><tr><th>Item</th><th>Limit</th></tr></thead>
   <tbody>
-    <tr><td>Token lifetime</td><td><strong>1 hour</strong> in service; 12 h is the format's ceiling</td></tr>
+    <tr><td>Token lifetime</td><td><strong>15 minutes</strong> in service; 12 h is the format's ceiling</td></tr>
     <tr><td>Account name in a token</td><td>64 bytes</td></tr>
     <tr><td>Sealing key</td><td>32 bytes minimum</td></tr>
     <tr><td>Path segments</td><td>8</td></tr>
@@ -678,7 +684,7 @@ curl -sS --fail-with-body -X POST \
 </div>
 
 <footer>
-  <p>This manual describes <code>air-mail-server 0.2.6</code>. Where it states a limitation — no revocation, no usable pagination, no CORS — it describes the server's actual state, not an intention. Check the version of the server you are calling before relying on this document.</p>
+  <p>This manual describes <code>air-mail-server 0.2.7</code>. Where it states a limitation — no revocation, no usable pagination, no CORS — it describes the server's actual state, not an intention. Check the version of the server you are calling before relying on this document.</p>
 </footer>
 
 </main>

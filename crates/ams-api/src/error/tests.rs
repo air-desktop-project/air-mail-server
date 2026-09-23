@@ -50,6 +50,15 @@ fn chaque_raison_a_son_code_et_son_message() {
             "n'est pas recevable",
         ),
         (Reason::TokenExpired, StatusCode::UNAUTHORIZED, "a expiré"),
+        // **UNE SESSION FERMÉE SE DISTINGUE D'UNE EXPIRATION**, bien que les
+        // deux répondent 401 : l'une est la marche du temps, l'autre une
+        // DÉCISION. Un exploitant qui lit l'une ne cherche pas la même chose
+        // que s'il lisait l'autre.
+        (
+            Reason::SessionClosed,
+            StatusCode::UNAUTHORIZED,
+            "session a été fermée",
+        ),
         (
             Reason::BadKey,
             StatusCode::INTERNAL_SERVER_ERROR,

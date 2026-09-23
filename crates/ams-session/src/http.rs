@@ -167,6 +167,23 @@ pub enum Next<'o> {
         method: Method,
         /// Pour qui.
         account: &'o str,
+        /// **CE QUI DISTINGUE CETTE SESSION DES AUTRES DU MÊME COMPTE.**
+        ///
+        /// Il sort d'ici parce qu'il ne sert qu'à l'appelant : c'est la clef du
+        /// registre des sessions vivantes, que cette crate ne tient pas — elle
+        /// n'a ni état partagé ni horloge (C1). Sans lui, l'appelant ne
+        /// pourrait vérifier que le compte, et fermer une session reviendrait à
+        /// fermer le compte.
+        nonce: u64,
+        /// Ce que le jeton ouvre.
+        ///
+        /// **L'APPELANT EN A BESOIN POUR SAVOIR SI C'EST UNE SESSION.** Cette
+        /// API n'émet jamais de portée `admin` : un jeton qui la porte a été
+        /// frappé hors d'ici, par quelqu'un qui lit le secret de scellement —
+        /// c'est-à-dire depuis la machine. Il n'y a alors aucune session à
+        /// consulter, et exiger qu'il y en ait une refuserait à l'exploitant
+        /// l'outil qu'on lui a donné.
+        scope: Scope,
         /// Le corps de la requête, s'il y en avait un.
         body: &'o [u8],
     },
@@ -396,9 +413,22 @@ impl Http {
                 resource: resolu.resource,
                 method: resolu.method,
                 account: jeton.login,
+                nonce: jeton.nonce,
+                scope: jeton.scope,
                 body: corps,
             },
         })
+    }
+
+    /// Combien de temps un jeton qu'on émet vaudra, en microsecondes.
+    ///
+    /// **L'APPELANT EN A BESOIN POUR INSCRIRE LA SESSION** : l'expiration
+    /// qu'il retient doit être CELLE DU JETON, et non une qu'il recalculerait.
+    /// Deux calculs de la même durée finissent par différer, et une session qui
+    /// meurt avant son jeton refuse un porteur légitime.
+    #[must_use]
+    pub const fn duree(&self) -> u64 {
+        self.duree
     }
 
     /// Vérifie le jeton porteur et la portée qu'il ouvre.

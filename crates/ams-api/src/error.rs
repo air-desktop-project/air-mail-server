@@ -59,6 +59,20 @@ pub enum Reason {
     /// un sceau valide. Et cela apprend au client honnête qu'il doit se
     /// réauthentifier plutôt que de croire son jeton refusé.
     TokenExpired,
+    /// Le jeton est authentique, et **sa session a été fermée**.
+    ///
+    /// # POURQUOI LA DISTINGUER DE L'EXPIRATION
+    ///
+    /// Les deux disent au client « réauthentifie-toi », et les deux répondent
+    /// 401. Mais elles ne se réparent pas pareil : une expiration est la marche
+    /// normale du temps, une fermeture est une DÉCISION — un appareil révoqué,
+    /// une déconnexion ailleurs. Un exploitant qui lit « session fermée » dans
+    /// un journal sait que quelqu'un a agi ; « jeton expiré » le laisserait
+    /// chercher une horloge qui dérive.
+    ///
+    /// **ET CELA N'APPREND RIEN À QUI FORGE** : on ne l'atteint qu'après un
+    /// sceau valide, c'est-à-dire en tenant déjà un jeton de ce compte.
+    SessionClosed,
     /// La clé de scellement n'est pas acceptable. **Notre faute** : c'est la
     /// configuration du serveur qui la fournit.
     BadKey,
@@ -113,7 +127,7 @@ impl Reason {
             // §11.6.1 de RFC 9110 : « the request has not been applied because
             // it lacks valid authentication credentials ». Un jeton qui ne se
             // vérifie pas et un jeton périmé sont tous deux cela.
-            Self::BadToken | Self::TokenExpired => StatusCode::UNAUTHORIZED,
+            Self::BadToken | Self::TokenExpired | Self::SessionClosed => StatusCode::UNAUTHORIZED,
             Self::BadKey | Self::BadJson | Self::JsonTooDeep | Self::BufferTooSmall => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
@@ -141,6 +155,7 @@ impl Reason {
             Self::BadPassword => "le mot de passe actuel ne correspond pas",
             Self::BadToken => "l'authentification n'est pas recevable",
             Self::TokenExpired => "l'authentification a expiré",
+            Self::SessionClosed => "la session a été fermée",
             // **CE QUI EST NÔTRE SE DIT D'UNE SEULE FAÇON.** Distinguer nos
             // fautes internes apprendrait au client ce que notre code a fait de
             // travers, et ne lui servirait à rien : il n'y peut rien. Le journal

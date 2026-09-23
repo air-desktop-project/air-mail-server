@@ -41,7 +41,7 @@
 use core::future::Future;
 use std::sync::Arc;
 
-use ams_api::{JSON_MEDIA_TYPE, PROBLEM_MEDIA_TYPE, Resource, Scope};
+use ams_api::{Area, JSON_MEDIA_TYPE, PROBLEM_MEDIA_TYPE, Resource, Rights, Scope};
 use ams_guard::{Event as GuardEvent, Source, Verdict};
 use ams_proto_h2::{
     Connection, ErrorCode, Event, FRAME_HEADER_OCTETS, FrameReader, Handshake, Need, PREFACE,
@@ -272,6 +272,34 @@ pub trait Api {
     /// être imprévisible : la boucle ne le fabrique pas, parce qu'une source
     /// d'aléa est une dépendance, et que les dépendances entrent par l'appelant.
     fn nonce(&self) -> u64;
+
+    // ── LES SESSIONS, ET POURQUOI ELLES PASSENT PAR ICI ─────────────────────
+    //
+    // Un jeton se vérifie sans rien consulter, et c'est ce qui le rendait
+    // IRRÉVOCABLE : sa seule fin garantie était son expiration. Le registre des
+    // sessions vivantes est ce qui lui donne une fin décidée.
+    //
+    // **IL N'EST PAS DANS LA BOUCLE**, parce qu'il a un état partagé et une
+    // horloge : `ams-session` n'a ni l'un ni l'autre (C1), et la boucle n'a pas
+    // à porter la mémoire du serveur. Il vit donc chez l'appelant, comme le
+    // magasin de comptes.
+
+    /// Inscrit une session qui vient de s'ouvrir.
+    ///
+    /// Appelée APRÈS qu'un jeton a été émis, et jamais avant : inscrire une
+    /// session dont l'émission échouerait laisserait une entrée que personne ne
+    /// fermera.
+    fn open_session(&self, login: &str, nonce: u64, expiry: u64, maintenant: u64);
+
+    /// Cette session est-elle encore ouverte ?
+    ///
+    /// **CONSULTÉE APRÈS LA VÉRIFICATION DU SCEAU, ET SEULEMENT APRÈS.** La
+    /// consulter avant reviendrait à laisser un inconnu faire chercher dans
+    /// notre table avec des octets qu'il a choisis.
+    fn session_open(&self, login: &str, nonce: u64, maintenant: u64) -> bool;
+
+    /// Ferme une session. Rend `true` si elle était ouverte.
+    fn close_session(&self, login: &str, nonce: u64) -> bool;
 }
 
 /// Ce qu'une connexion a fait.
@@ -418,11 +446,16 @@ where
             Next::Respond => (tour.status(), PROBLEM_MEDIA_TYPE, tour.body()),
             Next::CheckCredentials { login, password } => {
                 let accorde = api.authenticate(login, password);
+                // **L'IDENTIFIANT SE TIRE UNE FOIS**, et il sert deux fois : à sceller
+                // le jeton, et à inscrire la session. En tirer deux donnerait une
+                // session que le jeton ne désigne pas — donc un jeton refusé au
+                // premier usage.
+                let identifiant = api.nonce();
                 let suite = service.session.on_credentials(
                     accorde.is_some(),
                     login,
                     accorde.unwrap_or_else(Scope::none),
-                    api.nonce(),
+                    identifiant,
                     maintenant,
                     &mut echange,
                 );
@@ -430,30 +463,97 @@ where
                     // **UN REFUS D'IDENTIFIANTS EST UNE TRAME INVALIDE** pour le
                     // videur : c'est ce qui borne une attaque par essais.
                     service.guard.observe(source, GuardEvent::InvalidFrame);
+                } else if suite.status().class() < 4 {
+                    // **ON N'INSCRIT QUE CE QUI A ÉTÉ ÉMIS.** Un jeton que la
+                    // session n'a pas su écrire laisserait ici une entrée que
+                    // personne ne viendra jamais fermer — et le plafond du
+                    // compte se remplirait de sessions qui n'existent pas.
+                    api.open_session(
+                        login,
+                        identifiant,
+                        maintenant.saturating_add(service.session.duree()),
+                        maintenant,
+                    );
                 }
                 (suite.status(), JSON_MEDIA_TYPE, suite.body())
+            }
+            // ── UN JETON D'ADMINISTRATION N'EST PAS UNE SESSION ────────────
+            //
+            // Cette API n'émet JAMAIS la portée `admin` : `authenticate` accorde
+            // le courrier, la soumission et la supervision, et rien d'autre. Un
+            // jeton qui la porte vient donc de `air-mail-admin token`, frappé
+            // par quelqu'un qui lit le secret de scellement — la même autorité
+            // que celle qui peut arrêter le service.
+            //
+            // **IL N'Y A AUCUNE SESSION À CONSULTER**, puisque personne n'en a
+            // ouvert. Exiger qu'il y en ait une retirerait à l'exploitant
+            // l'outil qu'on lui a donné, et c'est exactement ce qu'un essai a
+            // attrapé avant que cela ne parte.
+            //
+            // **CE QUE CELA COÛTE, ET IL FAUT LE DIRE** : un jeton
+            // d'administration reste IRRÉVOCABLE jusqu'à son heure. C'est
+            // l'état d'avant, que cette tranche n'aggrave pas — et la raison
+            // pour laquelle l'outil le frappe court par défaut.
+            Next::Serve {
+                account,
+                nonce,
+                scope,
+                ..
+            } if !scope.contains(Scope::one(Area::Admin, Rights::Read))
+                && !api.session_open(account, nonce, maintenant) =>
+            {
+                // ── LA SESSION A ÉTÉ FERMÉE ─────────────────────────────────
+                //
+                // Le sceau est bon, l'heure n'est pas passée, et pourtant ce
+                // jeton ne vaut plus : quelqu'un a fermé sa session. C'est
+                // précisément ce que le registre existe pour rendre possible —
+                // sans lui, la seule fin d'un jeton était son expiration.
+                //
+                // **APRÈS LA VÉRIFICATION DU SCEAU, ET JAMAIS AVANT** : chercher
+                // dans notre table avec des octets qu'un inconnu a choisis,
+                // c'est lui offrir un oracle.
+                let corps = ams_api::problem(ams_api::Reason::SessionClosed, &mut rendu)
+                    .unwrap_or_default();
+                (StatusCode::UNAUTHORIZED, ams_api::PROBLEM_MEDIA_TYPE, corps)
             }
             Next::Serve {
                 resource,
                 method,
                 account,
+                nonce,
                 body,
+                ..
             } => {
-                let servi = api.serve(
-                    resource,
-                    method,
-                    account,
-                    body,
-                    demande.tete.field(b"range"),
-                    &mut rendu,
-                );
-                portee = (servi.ranges, servi.range);
-                if servi.peer_fault {
-                    // Le même compte que pour un refus d'identifiants : c'est
-                    // ce qui borne une attaque par essais, ici comme là.
-                    service.guard.observe(source, GuardEvent::InvalidFrame);
+                // **SE DÉCONNECTER, C'EST FERMER SA SESSION.** Cette ressource
+                // rendait `501` : elle annonçait une révocation qui n'existait
+                // pas, ce qui est pire que de ne pas l'annoncer.
+                if matches!(resource, Resource::CurrentToken) {
+                    let ferme = api.close_session(account, nonce);
+                    let status = if ferme {
+                        StatusCode::NO_CONTENT
+                    } else {
+                        // Fermer ce qui l'est déjà n'est pas une faute, mais le
+                        // client a le droit de savoir qu'il n'a rien fait.
+                        StatusCode::NOT_FOUND
+                    };
+                    (status, ams_api::PROBLEM_MEDIA_TYPE, &[][..])
+                } else {
+                    let servi = api.serve(
+                        resource,
+                        method,
+                        account,
+                        body,
+                        demande.tete.field(b"range"),
+                        &mut rendu,
+                    );
+                    portee = (servi.ranges, servi.range);
+                    if servi.peer_fault {
+                        // Le même compte que pour un refus d'identifiants : c'est
+                        // ce qui borne une attaque par essais, ici comme là.
+                        service.guard.observe(source, GuardEvent::InvalidFrame);
+                    }
+                    (servi.status, servi.media, servi.body)
                 }
-                (servi.status, servi.media, servi.body)
             }
         };
         if status.class() >= 4 {

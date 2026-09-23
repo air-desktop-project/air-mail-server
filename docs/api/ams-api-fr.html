@@ -69,7 +69,7 @@
   <div class="meta">
     <span>Version de l'API : <strong>v1</strong></span>
     <span>Version du jeton : <strong>0x01</strong></span>
-    <span>Serveur : <strong>air-mail-server 0.2.6</strong></span>
+    <span>Serveur : <strong>air-mail-server 0.2.7</strong></span>
   </div>
 </header>
 
@@ -323,7 +323,8 @@ authorization: Bearer AQECAAAAAG…</code></pre>
 <ul>
   <li><strong>Elle authentifie chaque requête</strong>, indépendamment des précédentes. Il n'y a pas de session côté serveur.</li>
   <li><strong>Elle vérifie le sceau avant de lire quoi que ce soit</strong>, à temps constant.</li>
-  <li><strong>Elle borne la vie d'un jeton</strong> — une heure en service, douze au plus que le format autorise — à l'émission comme à la vérification.</li>
+  <li><strong>Elle borne la vie d'un jeton</strong> — un quart d'heure en service, douze heures au plus que le format autorise — à l'émission comme à la vérification.</li>
+  <li><strong>Elle révoque une session</strong>, et refuse ensuite le jeton qui la portait.</li>
   <li><strong>Elle refuse ce qu'elle ne comprend pas</strong> plutôt que de le normaliser : chemins ambigus, JSON sur lequel les analyseurs divergent, profondeur excessive.</li>
   <li><strong>Elle rend la même réponse</strong> à « cette ressource n'existe pas » et à « vous n'avez pas le droit de le savoir ».</li>
   <li><strong>Elle compte les abus</strong> et bannit les sources qui dépassent les seuils.</li>
@@ -334,17 +335,21 @@ authorization: Bearer AQECAAAAAG…</code></pre>
 
 <p>Cette liste est aussi importante que la précédente. Chacun de ces points est une responsabilité qui vous revient, ou une attente qu'il ne faut pas avoir.</p>
 
+<div class="note sur">
+  <span class="etiquette">La révocation existe, et voici sa portée exacte</span>
+  <p>Le serveur tient un <strong>registre des sessions vivantes</strong>. Un jeton n'est accepté que si sa session y figure, et <code>DELETE /v1/tokens/current</code> l'en retire : le jeton cesse de valoir à la requête suivante.</p>
+  <p><strong>Un redémarrage du serveur ferme toutes les sessions.</strong> Le registre vit en mémoire, et ce choix est délibéré : une liste des révocations perdue au redémarrage rendrait leur validité à des jetons qu'on avait voulu tuer. Ici la panne tombe du bon côté — tout le monde se réauthentifie.</p>
+</div>
+
 <div class="note danger">
-  <span class="etiquette">La révocation n'existe pas</span>
-  <p><code>DELETE /v1/tokens/current</code> est routé et exige un jeton valide, mais <strong>rend <code>501 Not Implemented</code></strong> : il ne révoque rien. Un jeton se vérifie sans consulter aucun registre, et <strong>sa seule fin garantie est son expiration</strong>. Il n'existe aujourd'hui aucun moyen, par l'API, d'invalider un jeton avant son heure.</p>
-  <p>Conséquence directe : <em>un jeton volé reste utilisable jusqu'à son expiration</em>. C'est la raison pour laquelle la durée de vie est bornée, et la raison pour laquelle vous devez la choisir courte.</p>
+  <span class="etiquette">Un jeton d'administration, lui, reste irrévocable</span>
+  <p>Il est frappé hors bande par <code>air-mail-admin token</code> et n'ouvre aucune session : il n'y a donc rien à fermer. <strong>Il vaut jusqu'à son heure, quoi qu'il arrive</strong> — c'est pourquoi l'outil le frappe court par défaut, quinze minutes.</p>
 </div>
 
 <div class="tableau">
 <table>
   <thead><tr><th>Ce qui n'existe pas</th><th>Ce que cela implique pour vous</th></tr></thead>
   <tbody>
-    <tr><td>Révocation d'un jeton</td><td>Effacez le jeton côté client à la déconnexion, et sachez qu'il reste valide côté serveur jusqu'à son expiration.</td></tr>
     <tr><td>Jeton de rafraîchissement</td><td>Il n'y a pas de <em>refresh token</em>. À l'expiration, vous devez refaire un échange d'identifiants complet — donc conserver de quoi le faire, ou redemander à l'utilisateur.</td></tr>
     <tr><td>Choix de la portée par le client</td><td>Vous ne pouvez pas obtenir un jeton en lecture seule. Si votre composant n'a besoin que de lire, c'est à votre architecture de le contenir.</td></tr>
     <tr><td>Paramètres de requête</td><td>Pas de filtre, pas de tri, pas de curseur. Voir <a href="#chemins">§2.2</a>.</td></tr>
@@ -371,7 +376,7 @@ authorization: Bearer AQECAAAAAG…</code></pre>
 </ul>
 
 <h4>La durée de vie</h4>
-<p><strong>Un jeton vaut une heure</strong> dans la configuration en service. Douze heures est le plafond que le format autorise, pas la valeur déployée — ne codez ni l'une ni l'autre en dur : lisez <code>expires</code>, et concevez votre client pour survivre à une réauthentification.</p>
+<p><strong>Un jeton vaut un quart d'heure</strong> dans la configuration en service. Douze heures est le plafond que le format autorise, pas la valeur déployée — ne codez ni l'une ni l'autre en dur : lisez <code>expires</code>, et concevez votre client pour survivre à une réauthentification.</p>
 
 <h4>La validation du certificat</h4>
 <p>Vous devez vérifier le certificat TLS du serveur. Désactiver cette vérification — un <code>--insecure</code>, un <code>verify=False</code> — annule l'intégralité de la protection : le jeton part alors en clair vers qui se sera placé au milieu. Aucune propriété de cette section ne survit à cela.</p>
@@ -441,7 +446,8 @@ authorization: Bearer AQECAAAAAG…</code></pre>
 
 <div class="ressource">
   <div class="ligne"><span class="verbe delete">DELETE</span><span class="chemin">/v1/tokens/current</span><span class="portee">jeton valide</span></div>
-  <p><strong>Rend <code>501 Not Implemented</code>.</strong> La révocation n'est pas implémentée ; voir <a href="#ne-fait-pas">§3.8</a>.</p>
+  <p><strong>Ferme la session</strong> que porte le jeton présenté, et rend <code>204</code>. Le jeton est aussitôt refusé par toute requête ultérieure, avec <code>401</code>.</p>
+  <p>Une session déjà fermée rend <code>401</code> : le jeton ne vaut plus, donc il n'ouvre même plus la porte qui le fermerait.</p>
 </div>
 
 <h3 id="r-boites"><span class="numero">5.2</span>Boîtes</h3>
@@ -628,7 +634,7 @@ Le corps du message.
 <table>
   <thead><tr><th>Élément</th><th>Borne</th></tr></thead>
   <tbody>
-    <tr><td>Durée de vie d'un jeton</td><td><strong>1 heure</strong> en service ; 12 h est le plafond du format</td></tr>
+    <tr><td>Durée de vie d'un jeton</td><td><strong>15 minutes</strong> en service ; 12 h est le plafond du format</td></tr>
     <tr><td>Nom de compte dans un jeton</td><td>64 octets</td></tr>
     <tr><td>Clé de scellement</td><td>32 octets au minimum</td></tr>
     <tr><td>Segments d'un chemin</td><td>8</td></tr>
@@ -680,7 +686,7 @@ curl -sS --fail-with-body -X POST \
 </div>
 
 <footer>
-  <p>Ce manuel décrit <code>air-mail-server 0.2.6</code>. Lorsqu'il décrit une limite — l'absence de révocation, l'absence de pagination utilisable, l'absence de CORS — il décrit l'état réel du serveur et non une intention. Vérifiez la version du serveur que vous appelez avant de vous fier à ce document.</p>
+  <p>Ce manuel décrit <code>air-mail-server 0.2.7</code>. Lorsqu'il décrit une limite — l'absence de révocation, l'absence de pagination utilisable, l'absence de CORS — il décrit l'état réel du serveur et non une intention. Vérifiez la version du serveur que vous appelez avant de vous fier à ce document.</p>
 </footer>
 
 </main>

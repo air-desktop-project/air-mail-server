@@ -110,6 +110,11 @@ pub struct ApiMaildir {
     remise: Arc<crate::delivery::Boites>,
     /// Les domaines qu'on héberge, tels que la configuration les nomme.
     domaines: Arc<Vec<String>>,
+    /// Les sessions ouvertes, et le seul endroit où l'on peut les fermer.
+    ///
+    /// **C'EST CE QUI REND UN JETON RÉVOCABLE.** Sans ce registre, un jeton se
+    /// vérifiait sans rien consulter et n'avait d'autre fin que son expiration.
+    sessions: Arc<crate::sessions::Sessions>,
     /// Le videur (C8), pour voir et lever ses bannissements.
     ///
     /// **LE MÊME QUE CELUI QUI PUNIT**, et non une copie : un état par voie de
@@ -154,6 +159,7 @@ impl ApiMaildir {
             comptes,
             remise,
             domaines,
+            sessions: Arc::new(crate::sessions::Sessions::new()),
             guard,
             incidents,
             places: Places::new(VERIFICATIONS_SIMULTANEES),
@@ -1186,7 +1192,17 @@ impl Api for ApiMaildir {
         match resource {
             Resource::Health => rendre(render::write_health(sortie)),
             Resource::Metrics => rendre(render::write_metrics(
-                &[("mailboxes", self.compte_des_boites(account))],
+                &[
+                    ("mailboxes", self.compte_des_boites(account)),
+                    // **CE QU'UN COMPTE TIENT OUVERT SE VOIT.** Un plafond qu'on
+                    // ne peut pas observer est un plafond dont on n'apprend
+                    // l'existence qu'en le heurtant.
+                    (
+                        "sessions",
+                        u64::try_from(self.sessions.combien(account, microsecondes()))
+                            .unwrap_or(u64::MAX),
+                    ),
+                ],
                 sortie,
             )),
             Resource::Mailboxes => self.mailboxes(account, sortie),
@@ -1309,6 +1325,18 @@ impl Api for ApiMaildir {
     /// illisible, on rend zéro** : le jeton reste scellé et vérifiable, seule sa
     /// révocation individuelle devient impossible — ce qui vaut mieux que de
     /// refuser toute ouverture de session.
+    fn open_session(&self, login: &str, nonce: u64, expiry: u64, maintenant: u64) {
+        self.sessions.ouvrir(login, nonce, expiry, maintenant);
+    }
+
+    fn session_open(&self, login: &str, nonce: u64, maintenant: u64) -> bool {
+        self.sessions.ouverte(login, nonce, maintenant)
+    }
+
+    fn close_session(&self, login: &str, nonce: u64) -> bool {
+        self.sessions.fermer(login, nonce)
+    }
+
     fn nonce(&self) -> u64 {
         use std::io::Read as _;
 
@@ -1457,6 +1485,19 @@ fn cree(ecrit: Result<&[u8], ams_api::Error>) -> Served<'_> {
         },
         Err(_) => notre_faute(),
     }
+}
+
+/// L'heure en MICROSECONDES depuis l'époque.
+///
+/// **L'UNITÉ N'EST PAS CELLE DE `crate::maintenant`**, qui rend des secondes :
+/// les jetons et les sessions comptent en microsecondes, et confondre les deux
+/// ferait expirer une session un million de fois trop tôt — ou jamais.
+fn microsecondes() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |depuis| {
+            u64::try_from(depuis.as_micros()).unwrap_or(u64::MAX)
+        })
 }
 
 /// Un corps qu'on refuse de lire.

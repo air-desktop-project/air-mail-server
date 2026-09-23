@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 
-use ams_api::{JSON_MEDIA_TYPE, PROBLEM_MEDIA_TYPE, Scope};
+use ams_api::{Area, JSON_MEDIA_TYPE, PROBLEM_MEDIA_TYPE, Rights, Scope};
 use ams_guard::{Event as GuardEvent, Source};
 use ams_h3::{Http3, Reponse, Transport};
 use ams_proto_http::{Method, RequestHead, StatusCode};
@@ -168,11 +168,16 @@ impl<A: Api> ams_h3::Service for ServiceH3<'_, A> {
             Next::Respond => (tour.status(), PROBLEM_MEDIA_TYPE, tour.body()),
             Next::CheckCredentials { login, password } => {
                 let accorde = self.api.authenticate(login, password);
+                // **L'IDENTIFIANT SE TIRE UNE FOIS**, et il sert deux fois : à sceller
+                // le jeton, et à inscrire la session. En tirer deux donnerait une
+                // session que le jeton ne désigne pas — donc un jeton refusé au
+                // premier usage.
+                let identifiant = self.api.nonce();
                 let suite = self.session.on_credentials(
                     accorde.is_some(),
                     login,
                     accorde.unwrap_or_else(Scope::none),
-                    self.api.nonce(),
+                    identifiant,
                     maintenant,
                     &mut self.echange,
                 );
@@ -180,25 +185,76 @@ impl<A: Api> ams_h3::Service for ServiceH3<'_, A> {
                     // **UN REFUS D'IDENTIFIANTS EST UNE TRAME INVALIDE** pour le
                     // videur : c'est ce qui borne une attaque par essais.
                     self.guard.observe(self.source, GuardEvent::InvalidFrame);
+                } else if suite.status().class() < 4 {
+                    // La même règle qu'en HTTP/2, et pour la même raison.
+                    self.api.open_session(
+                        login,
+                        identifiant,
+                        maintenant.saturating_add(self.session.duree()),
+                        maintenant,
+                    );
                 }
                 (suite.status(), JSON_MEDIA_TYPE, suite.body())
+            }
+            // **LA MÊME RÈGLE QU'EN HTTP/2, ET ELLE DOIT LE RESTER.** Deux
+            // conducteurs qui n'appliqueraient pas la même révocation
+            // offriraient une porte par la version du protocole.
+            // ── UN JETON D'ADMINISTRATION N'EST PAS UNE SESSION ────────────
+            //
+            // Cette API n'émet JAMAIS la portée `admin` : `authenticate` accorde
+            // le courrier, la soumission et la supervision, et rien d'autre. Un
+            // jeton qui la porte vient donc de `air-mail-admin token`, frappé
+            // par quelqu'un qui lit le secret de scellement — la même autorité
+            // que celle qui peut arrêter le service.
+            //
+            // **IL N'Y A AUCUNE SESSION À CONSULTER**, puisque personne n'en a
+            // ouvert. Exiger qu'il y en ait une retirerait à l'exploitant
+            // l'outil qu'on lui a donné, et c'est exactement ce qu'un essai a
+            // attrapé avant que cela ne parte.
+            //
+            // **CE QUE CELA COÛTE, ET IL FAUT LE DIRE** : un jeton
+            // d'administration reste IRRÉVOCABLE jusqu'à son heure. C'est
+            // l'état d'avant, que cette tranche n'aggrave pas — et la raison
+            // pour laquelle l'outil le frappe court par défaut.
+            Next::Serve {
+                account,
+                nonce,
+                scope,
+                ..
+            } if !scope.contains(Scope::one(Area::Admin, Rights::Read))
+                && !self.api.session_open(account, nonce, maintenant) =>
+            {
+                let corps = ams_api::problem(ams_api::Reason::SessionClosed, &mut self.rendu)
+                    .unwrap_or_default();
+                (StatusCode::UNAUTHORIZED, ams_api::PROBLEM_MEDIA_TYPE, corps)
             }
             Next::Serve {
                 resource,
                 method,
                 account,
+                nonce,
                 body,
+                ..
             } => {
-                let servi = self.api.serve(
-                    resource,
-                    method,
-                    account,
-                    body,
-                    tete.field(b"range"),
-                    &mut self.rendu,
-                );
-                portee = (servi.ranges, servi.range);
-                (servi.status, servi.media, servi.body)
+                if matches!(resource, ams_api::Resource::CurrentToken) {
+                    let status = if self.api.close_session(account, nonce) {
+                        StatusCode::NO_CONTENT
+                    } else {
+                        StatusCode::NOT_FOUND
+                    };
+                    (status, ams_api::PROBLEM_MEDIA_TYPE, &[][..])
+                } else {
+                    let servi = self.api.serve(
+                        resource,
+                        method,
+                        account,
+                        body,
+                        tete.field(b"range"),
+                        &mut self.rendu,
+                    );
+                    portee = (servi.ranges, servi.range);
+                    (servi.status, servi.media, servi.body)
+                }
             }
         };
 
