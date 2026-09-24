@@ -228,6 +228,17 @@ impl<A: Api> ams_h3::Service for ServiceH3<'_, A> {
                     .unwrap_or_default();
                 (StatusCode::UNAUTHORIZED, ams_api::PROBLEM_MEDIA_TYPE, corps)
             }
+            // **LA MÊME RÈGLE QUE DANS L'AUTRE CONDUCTEUR** : deux
+            // conducteurs qui n'enrôleraient pas pareil offriraient une porte
+            // par la version du protocole.
+            Next::Enrol {
+                account,
+                public_key,
+                name,
+            } => {
+                let servi = self.api.enrol(account, public_key, name, &mut self.rendu);
+                (servi.status, servi.media, servi.body)
+            }
             Next::Serve {
                 resource,
                 method,

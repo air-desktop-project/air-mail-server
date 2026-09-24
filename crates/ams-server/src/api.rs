@@ -136,6 +136,15 @@ pub struct ApiMaildir {
     file: Option<ams_loop_tokio::Spool>,
     /// Ce qu'un message peut peser, pour borner ce qu'on rassemble en file.
     message_max: usize,
+    /// La clé qui scelle les invitations.
+    ///
+    /// **LA MÊME QUE CELLE DES JETONS, ET C'EST VOULU.** Deux clés seraient deux
+    /// secrets à ranger, à tourner et à perdre ; une seule suffit parce que
+    /// l'octet de version sépare les deux objets, et qu'il est couvert par le
+    /// sceau. Elle vient du même endroit que celle de la session — la
+    /// configuration —, et le serveur la leur donne toutes les deux au
+    /// démarrage.
+    scellement: Option<ams_api::Key>,
     /// Les appareils enrôlés, quand la configuration en nomme le magasin.
     ///
     /// **`None` VEUT DIRE « CE SERVEUR NE SERT PAS CELA »**, et les deux routes
@@ -179,11 +188,24 @@ impl ApiMaildir {
             // PAS D'APPAREILS SANS MAGASIN, et le constructeur ne prend pas ce
             // champ non plus : voir `avec_appareils`.
             appareils: None,
+            // ET PAS D'INVITATIONS SANS CLÉ : voir `avec_scellement`.
+            scellement: None,
             // ON NE SIGNE PAS SANS CLÉ, et le constructeur ne prend pas ce
             // champ non plus : une signature qu'on produirait sans clé publiée
             // échouerait partout, ce qui est pire que pas de signature.
             dkim: None,
         }
+    }
+
+    /// Lui donne la clé qui scelle les invitations.
+    ///
+    /// **C'est la MÊME que celle des jetons**, et le serveur la lui passe depuis
+    /// la configuration, en même temps qu'à la session. Sans elle, frapper une
+    /// invitation rend `501`.
+    #[must_use]
+    pub fn avec_scellement(mut self, clef: ams_api::Key) -> Self {
+        self.scellement = Some(clef);
+        self
     }
 
     /// Lui donne le magasin des appareils enrôlés.
@@ -630,6 +652,142 @@ impl ApiMaildir {
             Ok(()) => sans_contenu(),
             Err(quoi) => dire_la_faute(&quoi, sortie),
         }
+    }
+
+    /// Frappe une invitation pour un compte.
+    ///
+    /// # LE COMPTE DOIT EXISTER, ET ON LE VÉRIFIE ICI
+    ///
+    /// Une invitation pour un compte qui n'existe pas est une faute de frappe de
+    /// l'exploitant, et elle ne se verrait qu'à l'enrôlement — c'est-à-dire chez
+    /// l'utilisateur, qui n'y peut rien et ne saura pas quoi dire.
+    ///
+    /// # ET ON NE VÉRIFIE PAS QU'IL N'A PAS D'APPAREIL
+    ///
+    /// Ce serait courir après l'état : entre la frappe et l'enrôlement, un
+    /// appareil peut s'enrôler ou se révoquer. **C'est l'enrôlement qui décide**,
+    /// parce que c'est lui qui agit. Refuser ici en plus donnerait deux règles
+    /// pour une seule question, et elles divergeraient.
+    fn frapper_une_invitation<'o>(&self, body: &[u8], sortie: &'o mut [u8]) -> Served<'o> {
+        let Some(clef) = self.scellement.as_ref() else {
+            return pas_encore(sortie);
+        };
+        let Ok(demande) = render::read_invitation_request(body) else {
+            return corps_refuse(sortie);
+        };
+        // **LE COMPTE, MAINTENANT** : voir ci-dessus.
+        if !self
+            .comptes
+            .vue()
+            .iter()
+            .any(|compte| compte.login == demande.login)
+        {
+            return absente(sortie);
+        }
+
+        let minutes = demande.minutes.unwrap_or(INVITATION_MINUTES);
+        let Some(duree) = minutes
+            .checked_mul(60_000_000)
+            .filter(|duree| *duree <= ams_api::INVITATION_LIFETIME_MAX_US && *duree > 0)
+        else {
+            return corps_refuse(sortie);
+        };
+        let maintenant = microsecondes();
+        let expiry = maintenant.saturating_add(duree);
+
+        let mut texte = [0_u8; ams_api::INVITATION_ENCODED_OCTETS_MAX];
+        let Ok(ecrite) = ams_api::issue_invitation(
+            clef,
+            &ams_api::Invitation {
+                login: demande.login,
+                expiry,
+            },
+            maintenant,
+            &mut texte,
+        ) else {
+            // Le nom vient du magasin, donc il est recevable ; ce qui reste est
+            // notre tampon, et c'est notre faute.
+            return notre_faute();
+        };
+        // **EN SECONDES DEHORS**, comme tout ce que cette API rend.
+        cree(render::write_invitation(
+            ecrite,
+            demande.login,
+            expiry / 1_000_000,
+            sortie,
+        ))
+    }
+
+    /// Enrôle une clef publique sur un compte, sur la foi d'une invitation que
+    /// la session a déjà vérifiée.
+    fn enroler<'o>(
+        &self,
+        account: &str,
+        public_key: &str,
+        name: &str,
+        sortie: &'o mut [u8],
+    ) -> Served<'o> {
+        let Some(magasin) = self.appareils.as_ref() else {
+            return pas_encore(sortie);
+        };
+        // **LA CLEF SE DÉCODE ET SE VALIDE AVANT TOUT LE RESTE.** Une clef qui
+        // n'est pas un point de la courbe n'est pas une clef faible : c'est une
+        // clef qui n'existe pas, et la ranger ouvrirait les attaques par courbe
+        // invalide.
+        let mut octets = [0_u8; ams_auth::CLE_OCTETS];
+        let Ok(lus) = ams_api::decode_base64url(public_key.as_bytes(), &mut octets) else {
+            return corps_de_l_enrolement_refuse(sortie);
+        };
+        let Ok(cle) = ams_auth::Cle::lire(lus) else {
+            return corps_de_l_enrolement_refuse(sortie);
+        };
+
+        // Le compte de l'invitation doit toujours exister : un administrateur a
+        // pu le retirer entre la frappe et l'enrôlement.
+        let comptes = self.comptes.vue();
+        let Some(compte) = comptes.iter().find(|connu| connu.login == account) else {
+            return absente(sortie);
+        };
+
+        // **L'USAGE UNIQUE EST ICI, ET NULLE PART AILLEURS** : l'invitation ne
+        // vaut que tant que le compte n'a AUCUN appareil. Le premier enrôlement
+        // la tue, et aucun registre n'a à s'en souvenir.
+        if !magasin.du_compte(account).is_empty() {
+            return deja_enrole(sortie);
+        }
+
+        // **L'IDENTIFIANT EST LE CONDENSAT DE LA CLEF**, et non un tirage.
+        //
+        // Trois raisons. Il n'a besoin d'AUCUN aléa, donc d'aucune source qui
+        // puisse manquer — celle du serveur rend zéro quand `/dev/urandom` ne
+        // s'ouvre pas, et deux appareils porteraient alors le même identifiant.
+        // Il est unique par construction, puisque deux clefs distinctes
+        // n'auraient le même condensat qu'au prix d'une collision SHA-256. Et
+        // c'est déjà l'EMPREINTE dont l'enrôlement croisé aura besoin pour se
+        // faire confirmer de visu.
+        let id = en_hexadecimal(&ams_sasl::sha256(&cle.octets()));
+
+        let a_ranger = ams_config::Device {
+            login: String::from(account),
+            id: id.clone(),
+            name: String::from(name),
+            enrolled: crate::maintenant(),
+            last_seen: 0,
+            public_key: cle,
+        };
+        if let Err(quoi) = magasin.modifier(move |appareils| {
+            appareils.push(a_ranger);
+            Ok(())
+        }) {
+            return dire_la_faute(&quoi, sortie);
+        }
+
+        let adresses: std::vec::Vec<&str> = compte
+            .addresses
+            .iter()
+            .map(std::string::String::as_str)
+            .collect();
+        cree(render::write_enrolled(&id, account, &adresses, sortie))
     }
 
     fn domains<'o>(&self, sortie: &'o mut [u8]) -> Served<'o> {
@@ -1349,6 +1507,7 @@ impl Api for ApiMaildir {
             Resource::Account { compte } => self.account(compte, sortie),
             Resource::AccountPassword { compte } => self.poser_un_secret(compte, body, sortie),
             Resource::OwnPassword => self.poser_mon_secret(account, body, sortie),
+            Resource::Invitations => self.frapper_une_invitation(body, sortie),
             Resource::OwnDevices => self.mes_appareils(account, sortie),
             Resource::OwnDevice { id } => self.revoquer_mon_appareil(account, id, sortie),
             Resource::AccountAddresses { compte } if matches!(method, Method::Put) => {
@@ -1412,6 +1571,16 @@ impl Api for ApiMaildir {
 
     fn session_open(&self, login: &str, nonce: u64, maintenant: u64) -> bool {
         self.sessions.ouverte(login, nonce, maintenant)
+    }
+
+    fn enrol<'o>(
+        &self,
+        account: &str,
+        public_key: &str,
+        name: &str,
+        sortie: &'o mut [u8],
+    ) -> Served<'o> {
+        self.enroler(account, public_key, name, sortie)
     }
 
     fn close_session(&self, login: &str, nonce: u64) -> bool {
@@ -1579,6 +1748,72 @@ fn microsecondes() -> u64 {
         .map_or(0, |depuis| {
             u64::try_from(depuis.as_micros()).unwrap_or(u64::MAX)
         })
+}
+
+/// Combien de temps une invitation vaut, quand personne ne le dit.
+///
+/// Vingt-quatre heures. **ASSEZ POUR QU'UN COURRIEL SOIT LU LE LENDEMAIN**, et
+/// moitié moins que le plafond du format : l'exploitant qui veut davantage le
+/// demande, celui qui ne se pose pas la question obtient une durée qu'il n'aura
+/// pas à regretter.
+const INVITATION_MINUTES: u64 = 24 * 60;
+
+/// Ce que ces octets s'écrivent en hexadécimal minuscule.
+///
+/// **LA CASSE EST FIXÉE**, et ce n'est pas cosmétique : cet hexadécimal devient
+/// un identifiant d'appareil, donc un segment d'URL que l'on compare. Deux
+/// écritures du même condensat en feraient deux appareils.
+fn en_hexadecimal(octets: &[u8]) -> String {
+    use core::fmt::Write as _;
+
+    let mut texte = String::with_capacity(octets.len().saturating_mul(2));
+    for octet in octets {
+        // L'écriture dans une `String` ne peut pas échouer ; l'ignorer
+        // explicitement vaut mieux qu'un `unwrap` que personne ne relit.
+        let _ = write!(texte, "{octet:02x}");
+    }
+    texte
+}
+
+/// Ce qu'on répond à une clef publique qu'on ne sait pas lire.
+///
+/// **QUI LA REÇOIT EST AUTORISÉ** : il a présenté une invitation que notre clé a
+/// scellée. Lui répondre « aucune ressource ici » l'enverrait chercher un défaut
+/// de chemin ; ce qu'il doit corriger est son corps.
+fn corps_de_l_enrolement_refuse(sortie: &mut [u8]) -> Served<'_> {
+    match ams_api::problem(ams_api::Reason::BadJsonBody, sortie) {
+        Ok(corps) => Served {
+            status: StatusCode::BAD_REQUEST,
+            media: ams_api::PROBLEM_MEDIA_TYPE,
+            body: corps,
+            // **CELLE-CI COMPTE CONTRE LE PAIR** : cette porte s'ouvre sans
+            // jeton, et sans cela elle offrirait des essais illimités.
+            peer_fault: true,
+            ..Served::default()
+        },
+        Err(_) => notre_faute(),
+    }
+}
+
+/// Ce qu'on répond quand le compte a déjà un appareil.
+///
+/// §15.5.10 de RFC 9110 : « the request could not be completed due to a conflict
+/// with the current state of the target resource ». C'est exactement cela, et le
+/// dire précisément est ce qui permet à l'application d'afficher la seule chose
+/// utile — « demandez à votre exploitant de révoquer l'ancien ».
+///
+/// **CE N'EST PAS UNE FAUTE DU PAIR** : présenter une invitation légitime dont
+/// l'heure est passée par les faits n'est pas un essai d'intrusion.
+fn deja_enrole(sortie: &mut [u8]) -> Served<'_> {
+    match ams_api::problem(ams_api::Reason::AlreadyEnrolled, sortie) {
+        Ok(corps) => Served {
+            status: ams_api::Reason::AlreadyEnrolled.status(),
+            media: ams_api::PROBLEM_MEDIA_TYPE,
+            body: corps,
+            ..Served::default()
+        },
+        Err(_) => notre_faute(),
+    }
 }
 
 /// Un corps qu'on refuse de lire.

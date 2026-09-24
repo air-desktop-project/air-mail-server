@@ -1531,3 +1531,355 @@ fn sans_magasin_les_appareils_ne_se_servent_pas() {
         );
     }
 }
+
+/// **UNE INVITATION AMORCE LE PREMIER APPAREIL, ET UN SEUL.**
+///
+/// # CE QUE CET ESSAI ÉPROUVE, ET QU'AUCUN AUTRE NE PEUT
+///
+/// Cinq couches doivent être câblées ensemble pour qu'un enrôlement aboutisse :
+/// le sceau (`ams-api`), la route, la session qui vérifie l'invitation SANS
+/// jeton, le conducteur qui distingue un enrôlement d'une session, et le
+/// magasin. Chacune est éprouvée chez elle ; aucune de ces épreuves ne dit
+/// qu'elles se parlent.
+///
+/// # ET IL ÉPROUVE L'USAGE UNIQUE
+///
+/// C'est la propriété qui a décidé de toute la conception : l'invitation ne vaut
+/// que tant que le compte n'a AUCUN appareil. Rejouer la MÊME invitation, encore
+/// valide, doit échouer — sans quoi qui l'intercepte s'enrôle un second appareil
+/// permanent.
+#[test]
+fn une_invitation_amorce_le_premier_appareil_et_un_seul() {
+    let atelier = atelier("invitation");
+    let Some((cert, cle)) = paire(&atelier.0) else {
+        panic!("{SANS_OPENSSL}");
+    };
+    if std::process::Command::new("curl")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("IGNORÉ : `curl` est absent — cet essai n'a RIEN éprouvé.");
+        return;
+    }
+
+    let empreinte =
+        ams_auth::hash_password(b"secret-initial", b"seize octets ici").expect("hachable");
+    let magasin = atelier.0.join("comptes.bin");
+    std::fs::write(
+        &magasin,
+        ams_config::encode_accounts(&[ams_auth::Account {
+            login: String::from("marie"),
+            hash: empreinte,
+            addresses: vec![String::from("marie@example.com")],
+        }])
+        .expect("encodable"),
+    )
+    .expect("le magasin s'écrit");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&magasin, std::fs::Permissions::from_mode(0o600))
+            .expect("permissions du magasin");
+    }
+
+    // Le magasin d'appareils est NOMMÉ mais ABSENT : il se crée au premier
+    // enrôlement, et c'est le cas d'un serveur neuf.
+    let appareils = atelier.0.join("appareils.bin");
+    assert!(!appareils.exists());
+
+    let port_smtp = port_libre();
+    let port_http = port_libre();
+    let config = configuration_complete(
+        &atelier,
+        port_smtp,
+        Tls {
+            certificate_chain_path: cert.display().to_string(),
+            private_key_path: cle.display().to_string(),
+        },
+        &magasin.display().to_string(),
+        &appareils.display().to_string(),
+        "",
+        &format!("127.0.0.1:{port_http}"),
+        "",
+        CLEF,
+    );
+    let _serveur = lancer(&config, port_smtp);
+    let base = format!("https://127.0.0.1:{port_http}");
+
+    // ── LE JETON D'ADMINISTRATION, SEUL À POUVOIR INVITER ───────────────────
+    let admin = jeton_d_administration();
+    let poster = |chemin: &str, corps: &str, entete: Option<&str>| -> (String, String) {
+        let mut commande = std::process::Command::new("curl");
+        commande
+            .args(["-s", "--insecure", "--http2", "-X", "POST"])
+            .args(["-H", "Content-Type: application/json"])
+            .args(["-d", corps])
+            .args(["-w", "\n%{http_code}"]);
+        if let Some(valeur) = entete {
+            commande.args(["-H", valeur]);
+        }
+        let sortie = commande
+            .arg(format!("{base}{chemin}"))
+            .output()
+            .expect("curl s'exécute");
+        let tout = String::from_utf8_lossy(&sortie.stdout).into_owned();
+        let (corps, code) = tout.rsplit_once('\n').unwrap_or(("", ""));
+        (corps.to_string(), code.to_string())
+    };
+
+    // **SANS PORTÉE `admin`, ON N'INVITE PAS.** Un jeton d'utilisateur ne doit
+    // pas pouvoir s'inviter lui-même : ce serait s'enrôler sans exploitant.
+    let (corps, code) = poster(
+        "/v1/tokens",
+        r#"{"login":"marie","password":"secret-initial"}"#,
+        None,
+    );
+    assert_eq!(code, "201", "{corps}");
+    let jeton_de_marie = corps
+        .split_once("\"token\":\"")
+        .and_then(|(_, reste)| reste.split_once('"'))
+        .map(|(jeton, _)| jeton.to_string())
+        .unwrap_or_else(|| panic!("un jeton dans {corps}"));
+    let (_, code) = poster(
+        "/v1/invitations",
+        r#"{"login":"marie"}"#,
+        Some(&format!("Authorization: Bearer {jeton_de_marie}")),
+    );
+    assert_eq!(
+        code, "404",
+        "un jeton d'utilisateur ne doit pas pouvoir inviter"
+    );
+
+    // ── L'EXPLOITANT INVITE ─────────────────────────────────────────────────
+    let (corps, code) = poster(
+        "/v1/invitations",
+        r#"{"login":"marie"}"#,
+        Some(&format!("Authorization: Bearer {admin}")),
+    );
+    assert_eq!(code, "201", "l'invitation doit se frapper : {corps}");
+    assert!(corps.contains("\"login\":\"marie\""), "{corps}");
+    assert!(corps.contains("\"expiresAt\":"), "{corps}");
+    let invitation = corps
+        .split_once("\"invitation\":\"")
+        .and_then(|(_, reste)| reste.split_once('"'))
+        .map(|(texte, _)| texte.to_string())
+        .unwrap_or_else(|| panic!("une invitation dans {corps}"));
+
+    // Inviter un compte qui n'existe pas se refuse : c'est une faute de frappe
+    // de l'exploitant, et elle ne doit pas se découvrir chez l'utilisateur.
+    let (_, code) = poster(
+        "/v1/invitations",
+        r#"{"login":"personne"}"#,
+        Some(&format!("Authorization: Bearer {admin}")),
+    );
+    assert_eq!(code, "404");
+
+    // ── L'ENRÔLEMENT, SANS AUCUN JETON ──────────────────────────────────────
+    //
+    // La clef publique P-256 d'épreuve, le point `7 · G`, en base64url.
+    const CLE_VALIDE: [u8; 65] = [
+        0x04, 0x1e, 0x18, 0x53, 0x2f, 0xd4, 0x75, 0x4c, 0x02, 0xf3, 0x04, 0x1d, 0x9c, 0x75, 0xce,
+        0xb3, 0x3b, 0x83, 0xff, 0xd8, 0x1a, 0xc7, 0xce, 0x4f, 0xe8, 0x82, 0xcc, 0xb1, 0xc9, 0x8b,
+        0xc5, 0x89, 0x6e, 0xa4, 0x6c, 0x31, 0x1c, 0x4e, 0x2f, 0xf4, 0x0d, 0xd9, 0x6a, 0x36, 0x53,
+        0xe6, 0xe4, 0x54, 0x45, 0xd3, 0x2d, 0xfe, 0x48, 0x6e, 0xce, 0xd7, 0x5c, 0x7a, 0x90, 0xc6,
+        0xa1, 0x88, 0x81, 0xc0, 0xa3,
+    ];
+    let en_base64url = |octets: &[u8]| -> String {
+        const ALPHABET: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut texte = String::new();
+        for morceau in octets.chunks(3) {
+            let mut bloc = [0_u8; 3];
+            bloc[..morceau.len()].copy_from_slice(morceau);
+            let valeur =
+                (u32::from(bloc[0]) << 16) | (u32::from(bloc[1]) << 8) | u32::from(bloc[2]);
+            let combien = morceau.len() * 8 / 6 + usize::from(morceau.len() * 8 % 6 != 0);
+            for rang in 0..combien {
+                let decalage = 18 - rang * 6;
+                texte.push(char::from(ALPHABET[((valeur >> decalage) & 0x3f) as usize]));
+            }
+        }
+        texte
+    };
+    let clef = en_base64url(&CLE_VALIDE);
+
+    // **AUCUN EN-TÊTE `Authorization`** : c'est tout le sujet.
+    let (corps, code) = poster(
+        "/v1/devices",
+        &format!(
+            r#"{{"invitation":"{invitation}","publicKey":"{clef}","name":"iPhone de Marie"}}"#
+        ),
+        None,
+    );
+    assert_eq!(
+        code, "201",
+        "l'enrôlement doit aboutir sans jeton : {corps}"
+    );
+    assert!(corps.contains("\"login\":\"marie\""), "{corps}");
+    assert!(
+        corps.contains("marie@example.com"),
+        "les adresses doivent revenir, l'application n'a pas de second appel : {corps}"
+    );
+    let id = corps
+        .split_once("\"id\":\"")
+        .and_then(|(_, reste)| reste.split_once('"'))
+        .map(|(texte, _)| texte.to_string())
+        .unwrap_or_else(|| panic!("un identifiant dans {corps}"));
+    // **L'IDENTIFIANT EST LE CONDENSAT DE LA CLEF** : soixante-quatre chiffres
+    // hexadécimaux minuscules, et rien d'autre.
+    assert_eq!(id.len(), 64, "{id}");
+    assert!(
+        id.bytes()
+            .all(|o| o.is_ascii_digit() || (b'a'..=b'f').contains(&o)),
+        "{id}"
+    );
+
+    // ── ET LE DISQUE A SUIVI ────────────────────────────────────────────────
+    let relu = ams_config::decode_devices(&std::fs::read(&appareils).expect("lisible"))
+        .expect("relisible");
+    assert_eq!(relu.len(), 1);
+    assert_eq!(relu[0].login, "marie");
+    assert_eq!(relu[0].public_key.octets(), CLE_VALIDE);
+
+    // ── LA MÊME INVITATION NE SERT PAS DEUX FOIS ────────────────────────────
+    //
+    // Elle est encore valide — son heure n'est pas passée —, mais le compte a
+    // maintenant un appareil. C'est là, et nulle part ailleurs, que l'usage
+    // unique se décide.
+    let (corps, code) = poster(
+        "/v1/devices",
+        &format!(r#"{{"invitation":"{invitation}","publicKey":"{clef}","name":"le second"}}"#),
+        None,
+    );
+    assert_eq!(code, "409", "la seconde fois doit échouer : {corps}");
+    assert!(corps.contains("/problems/conflict"), "{corps}");
+    assert_eq!(
+        ams_config::decode_devices(&std::fs::read(&appareils).expect("lisible"))
+            .expect("relisible")
+            .len(),
+        1,
+        "rien ne s'est ajouté"
+    );
+
+    // ── ET L'APPAREIL SE VOIT SOUS SON COMPTE ───────────────────────────────
+    let sortie = std::process::Command::new("curl")
+        .args(["-s", "--insecure", "--http2"])
+        .args(["-H", &format!("Authorization: Bearer {jeton_de_marie}")])
+        .arg(format!("{base}/v1/me/devices"))
+        .output()
+        .expect("curl s'exécute");
+    let liste = String::from_utf8_lossy(&sortie.stdout).into_owned();
+    assert!(liste.contains(&id), "{liste}");
+    assert!(liste.contains("iPhone de Marie"), "{liste}");
+}
+
+/// **CE QU'UN ENRÔLEMENT REFUSE, ET AVEC QUEL CODE.**
+///
+/// Les distinctions comptent : qui présente une invitation que NOTRE clé a
+/// scellée est autorisé, et lui répondre « aucune ressource ici » l'enverrait
+/// chercher un défaut de chemin. Ce qu'il doit corriger, il doit l'apprendre.
+#[test]
+fn un_enrolement_refuse_dit_ce_qu_il_faut() {
+    let atelier = atelier("enrolement-refus");
+    let Some((cert, cle)) = paire(&atelier.0) else {
+        panic!("{SANS_OPENSSL}");
+    };
+    if std::process::Command::new("curl")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("IGNORÉ : `curl` est absent — cet essai n'a RIEN éprouvé.");
+        return;
+    }
+
+    let empreinte =
+        ams_auth::hash_password(b"secret-initial", b"seize octets ici").expect("hachable");
+    let magasin = atelier.0.join("comptes.bin");
+    std::fs::write(
+        &magasin,
+        ams_config::encode_accounts(&[ams_auth::Account {
+            login: String::from("marie"),
+            hash: empreinte,
+            addresses: vec![String::from("marie@example.com")],
+        }])
+        .expect("encodable"),
+    )
+    .expect("le magasin s'écrit");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&magasin, std::fs::Permissions::from_mode(0o600))
+            .expect("permissions du magasin");
+    }
+
+    let port_smtp = port_libre();
+    let port_http = port_libre();
+    let config = configuration_complete(
+        &atelier,
+        port_smtp,
+        Tls {
+            certificate_chain_path: cert.display().to_string(),
+            private_key_path: cle.display().to_string(),
+        },
+        &magasin.display().to_string(),
+        &atelier.0.join("appareils.bin").display().to_string(),
+        "",
+        &format!("127.0.0.1:{port_http}"),
+        "",
+        CLEF,
+    );
+    let _serveur = lancer(&config, port_smtp);
+    let base = format!("https://127.0.0.1:{port_http}");
+
+    let admin = jeton_d_administration();
+    let sortie = std::process::Command::new("curl")
+        .args(["-s", "--insecure", "--http2", "-X", "POST"])
+        .args(["-H", "Content-Type: application/json"])
+        .args(["-H", &format!("Authorization: Bearer {admin}")])
+        .args(["-d", r#"{"login":"marie"}"#])
+        .arg(format!("{base}/v1/invitations"))
+        .output()
+        .expect("curl s'exécute");
+    let corps = String::from_utf8_lossy(&sortie.stdout).into_owned();
+    let invitation = corps
+        .split_once("\"invitation\":\"")
+        .and_then(|(_, reste)| reste.split_once('"'))
+        .map(|(texte, _)| texte.to_string())
+        .unwrap_or_else(|| panic!("une invitation dans {corps}"));
+
+    let enroler = |corps: &str| -> String {
+        let sortie = std::process::Command::new("curl")
+            .args(["-s", "--insecure", "--http2", "-X", "POST"])
+            .args(["-H", "Content-Type: application/json"])
+            .args(["-d", corps])
+            .args(["-o", "/dev/null", "-w", "%{http_code}"])
+            .arg(format!("{base}/v1/devices"))
+            .output()
+            .expect("curl s'exécute");
+        String::from_utf8_lossy(&sortie.stdout).into_owned()
+    };
+
+    // **UNE INVITATION FORGÉE : 401**, comme un jeton qui ne se vérifie pas.
+    assert_eq!(
+        enroler(r#"{"invitation":"AAAAAAAAAAAAAAAAAAAAAAAA","publicKey":"BAECAwQ"}"#),
+        "401"
+    );
+
+    // **UNE CLEF QUI N'EST PAS UN POINT DE LA COURBE : 400.**
+    //
+    // L'invitation est bonne — il est autorisé —, c'est son corps qui cloche, et
+    // c'est ce qu'il doit apprendre pour le corriger.
+    assert_eq!(
+        enroler(&format!(
+            r#"{{"invitation":"{invitation}","publicKey":"BAECAwQ"}}"#
+        )),
+        "400",
+        "une clef trop courte"
+    );
+
+    // Et le magasin n'a rien gardé de tout cela.
+    assert!(
+        !atelier.0.join("appareils.bin").exists(),
+        "un refus ne doit rien poser"
+    );
+}

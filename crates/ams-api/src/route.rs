@@ -146,6 +146,25 @@ pub enum Resource<'o> {
         id: &'o str,
     },
 
+    /// `/v1/devices` — **enrôler un appareil, sans jeton.**
+    ///
+    /// # LA SEULE AUTRE RESSOURCE QUI N'EXIGE AUCUN JETON
+    ///
+    /// Comme `/v1/tokens`, et pour la même raison : c'est une porte d'entrée.
+    /// Celui qui s'enrôle n'a encore rien — ni mot de passe qu'il veuille
+    /// donner, ni appareil déjà connu. **C'est l'invitation, dans le corps, qui
+    /// l'autorise**, et elle se vérifie avec la même clé qu'un jeton.
+    ///
+    /// Elle n'est PAS sous `/v1/me` : « moi » n'a pas de sens sans jeton, et
+    /// c'est l'invitation qui dit de quel compte il s'agit.
+    Devices,
+
+    /// `/v1/invitations` — frapper une invitation.
+    ///
+    /// **CELLE-CI EXIGE `admin`**, et c'est toute la dissymétrie : inviter est
+    /// un geste d'exploitant, s'enrôler est un geste d'utilisateur.
+    Invitations,
+
     /// `/v1/accounts` — les comptes.
     Accounts,
     /// `/v1/accounts/{compte}` — un compte.
@@ -202,7 +221,10 @@ impl Resource<'_> {
     pub const fn scope(self, method: Method) -> Option<Scope> {
         let domaine = match self {
             // **CELLE-CI N'EXIGE RIEN** : c'est là qu'on obtient de quoi exiger.
-            Self::Tokens => return None,
+            // **NI L'UNE NI L'AUTRE N'EXIGE DE JETON** : ce sont les deux
+            // portes d'entrée. Ce qui autorise est dans le corps — des
+            // identifiants pour l'une, une invitation scellée pour l'autre.
+            Self::Tokens | Self::Devices => return None,
             // Révoquer son propre jeton ne demande que de l'avoir.
             Self::CurrentToken | Self::OwnPassword | Self::OwnDevices | Self::OwnDevice { .. } => {
                 return Some(Scope::none());
@@ -214,7 +236,8 @@ impl Resource<'_> {
             | Self::MessageRaw { .. }
             | Self::MessagePart { .. }
             | Self::Search { .. } => Area::Mail,
-            Self::Accounts
+            Self::Invitations
+            | Self::Accounts
             | Self::Account { .. }
             | Self::AccountPassword { .. }
             | Self::AccountAddresses { .. }
@@ -235,7 +258,7 @@ impl Resource<'_> {
     #[must_use]
     pub const fn allowed(self) -> &'static [Method] {
         match self {
-            Self::Tokens | Self::Submissions => &[Method::Post],
+            Self::Tokens | Self::Submissions | Self::Devices | Self::Invitations => &[Method::Post],
             Self::CurrentToken => &[Method::Delete],
             // La recherche est un `POST` : ses critères ne tiennent pas dans une
             // chaîne de requête sans ambiguïté, et les y mettre les ferait
@@ -369,6 +392,8 @@ fn designer<'o>(segments: &Segments<'o>) -> Result<Resource<'o>, Error> {
     let manque = Error::new(Reason::NoSuchResource);
     match (segments.get(1), segments.len()) {
         ("tokens", 2) => Ok(Resource::Tokens),
+        ("devices", 2) => Ok(Resource::Devices),
+        ("invitations", 2) => Ok(Resource::Invitations),
         ("tokens", 3) if segments.get(2) == "current" => Ok(Resource::CurrentToken),
         ("mailboxes", _) => boites(segments),
         ("accounts", 2) => Ok(Resource::Accounts),

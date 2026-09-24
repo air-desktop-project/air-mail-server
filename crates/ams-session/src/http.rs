@@ -47,7 +47,7 @@
 
 use ams_api::{
     Error as ApiError, JSON_MEDIA_TYPE, Json, Key, PROBLEM_MEDIA_TYPE, Reason, Resource, Scope,
-    Token, authorize, bearer, problem, resolve, split_query, verify,
+    Token, authorize, bearer, problem, resolve, split_query, verify, verify_invitation,
 };
 use ams_proto_http::{Method, RequestHead, StatusCode};
 
@@ -154,6 +154,32 @@ pub enum Next<'o> {
         login: &'o str,
         /// Le secret présenté.
         password: &'o [u8],
+    },
+    /// Enrôler cet appareil, **sur la foi d'une invitation et non d'un jeton**.
+    ///
+    /// # POURQUOI CE N'EST PAS UN `Serve`
+    ///
+    /// Un `Serve` désigne une SESSION : l'appelant consulte son registre des
+    /// sessions vivantes pour savoir si celle-ci a été fermée. Un enrôlement
+    /// n'est pas une session — il n'y en a pas encore —, et le faire passer pour
+    /// tel avec un identifiant nul ferait chercher dans le registre une entrée
+    /// qui ne peut pas s'y trouver, donc refuser chaque enrôlement.
+    ///
+    /// **LA SESSION A DÉJÀ VÉRIFIÉ L'INVITATION** : si l'appelant reçoit ceci,
+    /// le sceau était bon, la version était celle d'une invitation et non d'un
+    /// jeton, et l'heure n'était pas passée. Ce qu'il lui reste à faire est ce
+    /// que cette crate ne peut pas faire : lire le magasin.
+    Enrol {
+        /// Le compte que l'invitation désigne.
+        account: &'o str,
+        /// La clef publique annoncée, **telle qu'elle a été écrite**.
+        ///
+        /// Elle n'est pas décodée ici : la décoder demanderait un tampon de plus
+        /// à une machine qui n'alloue pas, et l'appelant doit de toute façon la
+        /// valider comme point de la courbe avant de la ranger.
+        public_key: &'o str,
+        /// Le nom que son propriétaire lui donne. Peut être vide.
+        name: &'o str,
     },
     /// Servir cette ressource, pour ce compte.
     ///
@@ -387,6 +413,20 @@ impl Http {
             // le secret que le reste de cette fonction protège.
             if let Err(raison) = verifier_le_type(tete, corps, resolu.resource) {
                 return Err((raison, place_de_la_reponse));
+            }
+            // **DEUX PORTES, ET ELLES NE FONT PAS LA MÊME CHOSE.** L'une
+            // échange des identifiants contre un jeton ; l'autre enrôle une
+            // clef sur la foi d'une invitation. Les distinguer ici plutôt que
+            // dans l'appelant garde la vérification du sceau là où la clé vit.
+            if matches!(resolu.resource, Resource::Devices) {
+                return enroler_un_appareil(
+                    self.alt_svc(),
+                    &self.clef,
+                    corps,
+                    maintenant,
+                    place_du_jeton,
+                    place_de_la_reponse,
+                );
             }
             return echanger_un_jeton(self.alt_svc(), corps, place_de_la_reponse);
         };
@@ -662,6 +702,100 @@ fn rogner(octets: &[u8]) -> &[u8] {
         .rposition(|octet| !octet.is_ascii_whitespace())
         .map_or(0, |rang| rang.saturating_add(1));
     reste.get(..fin).unwrap_or_default()
+}
+
+/// L'enrôlement d'un appareil, sur la foi d'une invitation.
+///
+/// `place_de_l_invitation` reçoit l'invitation déchiffrée : le nom de compte y
+/// pointe, et vit donc aussi longtemps que la réponse.
+///
+/// # LE MÊME REFUS POUR TOUT, ET C'EST DÉLIBÉRÉ
+///
+/// Un corps mal formé, une invitation forgée, un jeton porteur présenté à sa
+/// place, une invitation expirée : tout rend le même refus. Les distinguer
+/// dirait à qui essaie jusqu'où il est allé — et surtout, une invitation
+/// EXPIRÉE distinguée apprendrait qu'elle a existé, donc que ce compte a été
+/// invité.
+fn enroler_un_appareil<'o>(
+    alt_svc: &'o [u8],
+    clef: &Key,
+    corps: &'o [u8],
+    maintenant: u64,
+    place_de_l_invitation: &'o mut [u8],
+    sortie: &'o mut [u8],
+) -> Result<Turn<'o>, (Reason, &'o mut [u8])> {
+    let Some((invitation, public_key, name)) = lire_un_enrolement(corps) else {
+        return Err((Reason::BadToken, sortie));
+    };
+    let lue = match verify_invitation(
+        clef,
+        invitation.as_bytes(),
+        maintenant,
+        place_de_l_invitation,
+    ) {
+        Ok(lue) => lue,
+        Err(_) => return Err((Reason::BadToken, sortie)),
+    };
+    Ok(Turn {
+        status: StatusCode::OK,
+        fields: champs_ordinaires(StatusCode::OK, alt_svc, &[]),
+        body: &[],
+        next: Next::Enrol {
+            account: lue.login,
+            public_key,
+            name,
+        },
+    })
+}
+
+/// Lit un corps d'enrôlement.
+///
+/// # AUCUN ÉCHAPPEMENT, ET CE QUE CELA COÛTE EST DIT
+///
+/// Les trois champs se lisent tels quels. Pour l'invitation et la clef, c'est
+/// sans conséquence : leur alphabet est celui de §5 de RFC 4648, qui ne contient
+/// rien qu'on échappe. Pour le NOM, cela exclut `"` et `\` et les caractères de
+/// contrôle — un nom d'appareil n'en a pas besoin, et l'UTF-8 littéral passe
+/// entier. Décoder les échappements demanderait un tampon que cette machine
+/// n'a pas.
+fn lire_un_enrolement(corps: &[u8]) -> Option<(&str, &str, &str)> {
+    use ams_api::{Event, Reader};
+
+    let mut lecteur = Reader::new(corps);
+    let mut invitation = None;
+    let mut public_key = None;
+    // **LE NOM EST FACULTATIF** : un appareil qu'on n'a pas nommé reste un
+    // appareil, et refuser l'enrôlement pour cela serait une pédanterie.
+    let mut name = "";
+    let mut attendu = 0_u8;
+    loop {
+        match lecteur.read() {
+            Err(_) => return None,
+            Ok(None) => break,
+            Ok(Some(Event::Key(clef))) => {
+                attendu = match (clef.is("invitation"), clef.is("publicKey"), clef.is("name")) {
+                    (true, _, _) => 1,
+                    (_, true, _) => 2,
+                    (_, _, true) => 3,
+                    _ => 0,
+                };
+            }
+            Ok(Some(Event::Text(texte))) => {
+                let clair = texte.as_plain()?;
+                match attendu {
+                    1 => invitation = Some(clair),
+                    2 => public_key = Some(clair),
+                    3 => name = clair,
+                    _ => {}
+                }
+            }
+            Ok(Some(_)) => {}
+        }
+    }
+    match (invitation, public_key) {
+        (Some(invitation), Some(public_key)) => Some((invitation, public_key, name)),
+        _ => None,
+    }
 }
 
 /// L'échange d'identifiants contre un jeton.

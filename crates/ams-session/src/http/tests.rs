@@ -865,3 +865,298 @@ fn la_duree_annoncee_est_celle_des_jetons_emis() {
     let attendu = std::format!("\"expires\":{}", MAINTENANT + HEURE);
     assert!(dit.contains(&attendu), "{dit}");
 }
+
+/// Frappe une invitation d'épreuve pour ce compte.
+fn une_invitation(login: &str, expiry: u64) -> std::string::String {
+    use std::string::ToString as _;
+    let mut place = [0_u8; ams_api::INVITATION_ENCODED_OCTETS_MAX];
+    ams_api::issue_invitation(
+        &Key::new(CLEF).expect("trente-deux octets"),
+        &ams_api::Invitation { login, expiry },
+        MAINTENANT,
+        &mut place,
+    )
+    .expect("écrivable")
+    .to_string()
+}
+
+/// Les champs d'une requête d'enrôlement bien formée.
+fn champs_d_enrolement<'a>() -> std::vec::Vec<(&'a [u8], &'a [u8])> {
+    std::vec![
+        (&b":method"[..], &b"POST"[..]),
+        (&b":scheme"[..], &b"https"[..]),
+        (&b":authority"[..], &b"exemple.fr"[..]),
+        (&b":path"[..], &b"/v1/devices"[..]),
+        (&b"content-type"[..], &b"application/json"[..]),
+    ]
+}
+
+/// **L'ENRÔLEMENT N'EXIGE AUCUN JETON, ET L'INVITATION DIT QUI C'EST.**
+///
+/// C'est tout l'amorçage : celui qui s'enrôle n'a rien à présenter — ni mot de
+/// passe qu'il veuille donner, ni appareil déjà connu. Ce qui l'autorise est le
+/// sceau, et la session en tire le compte.
+#[test]
+fn un_enrolement_tire_son_compte_de_l_invitation() {
+    let invitation = une_invitation("marc", MAINTENANT + HEURE);
+    let corps = std::format!(
+        r#"{{"invitation":"{invitation}","publicKey":"BAECAwQ","name":"iPhone de Marc"}}"#
+    );
+    let champs = champs_d_enrolement();
+    let tete = entete(&champs);
+    let mut place = [0_u8; PLACE];
+    let session = une_session();
+    let tour = session.request(&tete, corps.as_bytes(), MAINTENANT, &mut place);
+    assert_eq!(
+        tour.next(),
+        Next::Enrol {
+            account: "marc",
+            public_key: "BAECAwQ",
+            name: "iPhone de Marc",
+        }
+    );
+}
+
+/// **LE NOM EST FACULTATIF** : un appareil qu'on n'a pas nommé reste un
+/// appareil, et refuser l'enrôlement pour cela serait une pédanterie.
+#[test]
+fn un_enrolement_sans_nom_passe() {
+    let invitation = une_invitation("marc", MAINTENANT + HEURE);
+    let corps = std::format!(r#"{{"invitation":"{invitation}","publicKey":"BAECAwQ"}}"#);
+    let champs = champs_d_enrolement();
+    let tete = entete(&champs);
+    let mut place = [0_u8; PLACE];
+    assert_eq!(
+        une_session()
+            .request(&tete, corps.as_bytes(), MAINTENANT, &mut place)
+            .next(),
+        Next::Enrol {
+            account: "marc",
+            public_key: "BAECAwQ",
+            name: "",
+        }
+    );
+}
+
+/// **UN JETON PORTEUR NE S'ENRÔLE PAS.**
+///
+/// Il est scellé par la MÊME clé ; seule sa version le sépare d'une invitation.
+/// Sans cette séparation, le jeton de courrier de n'importe qui — ou le sien —
+/// s'échangerait contre une clef d'appareil permanente sur le compte.
+#[test]
+fn un_jeton_ne_s_enrole_pas() {
+    use std::string::ToString as _;
+    let mut ecrit = [0_u8; ams_api::ENCODED_OCTETS_MAX];
+    let jeton = ams_api::issue(
+        &Key::new(CLEF).expect("trente-deux octets"),
+        &ams_api::Token {
+            login: "marc",
+            scope: Scope::one(Area::Mail, Rights::Read),
+            expiry: MAINTENANT + HEURE,
+            nonce: 7,
+        },
+        MAINTENANT,
+        &mut ecrit,
+    )
+    .expect("écrivable")
+    .to_string();
+
+    let corps = std::format!(r#"{{"invitation":"{jeton}","publicKey":"BAECAwQ"}}"#);
+    let champs = champs_d_enrolement();
+    let tete = entete(&champs);
+    let mut place = [0_u8; PLACE];
+    let session = une_session();
+    let tour = session.request(&tete, corps.as_bytes(), MAINTENANT, &mut place);
+    assert_eq!(tour.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(tour.next(), Next::Respond);
+}
+
+/// **TOUT CE QUI NE S'ENRÔLE PAS SE REFUSE PAREIL.**
+///
+/// Une invitation forgée, une invitation expirée, un corps sans invitation, un
+/// corps sans clef : les distinguer dirait à qui essaie jusqu'où il est allé —
+/// et une invitation EXPIRÉE distinguée apprendrait qu'elle a existé, donc que
+/// ce compte a été invité.
+#[test]
+fn tout_ce_qui_ne_s_enrole_pas_se_refuse_pareil() {
+    // **DÉJÀ MORTE À L'INSTANT OÙ ON LA LIT** : `maintenant >= expiry` refuse.
+    let expiree = une_invitation("marc", MAINTENANT);
+    let bonne = une_invitation("marc", MAINTENANT + HEURE);
+    let cas: std::vec::Vec<std::string::String> = std::vec![
+        // Forgée : un sceau qui n'est pas le nôtre.
+        std::string::String::from(
+            r#"{"invitation":"AAAAAAAAAAAAAAAAAAAAAA","publicKey":"BAECAwQ"}"#
+        ),
+        // Authentique, et son heure est passée.
+        std::format!(r#"{{"invitation":"{expiree}","publicKey":"BAECAwQ"}}"#),
+        // Pas d'invitation du tout.
+        std::string::String::from(r#"{"publicKey":"BAECAwQ"}"#),
+        // Pas de clef.
+        std::format!(r#"{{"invitation":"{bonne}"}}"#),
+        // Un corps qui n'est pas du JSON.
+        std::string::String::from("pas du json"),
+    ];
+    for corps in &cas {
+        let champs = champs_d_enrolement();
+        let tete = entete(&champs);
+        let mut place = [0_u8; PLACE];
+        let session = une_session();
+        let tour = session.request(&tete, corps.as_bytes(), MAINTENANT, &mut place);
+        assert_eq!(
+            tour.status(),
+            StatusCode::UNAUTHORIZED,
+            "« {corps} » n'a pas été refusé pareil"
+        );
+    }
+}
+
+/// **UNE INVITATION AUTHENTIQUE CESSE DE VALOIR À SON HEURE**, et pas avant.
+#[test]
+fn une_invitation_vaut_jusqu_a_son_heure() {
+    let invitation = une_invitation("marc", MAINTENANT + HEURE);
+    let corps = std::format!(r#"{{"invitation":"{invitation}","publicKey":"BAECAwQ"}}"#);
+
+    let champs = champs_d_enrolement();
+    let tete = entete(&champs);
+    let mut place = [0_u8; PLACE];
+    assert!(
+        matches!(
+            une_session()
+                .request(&tete, corps.as_bytes(), MAINTENANT + HEURE - 1, &mut place)
+                .next(),
+            Next::Enrol { .. }
+        ),
+        "une microseconde avant, elle vaut encore"
+    );
+
+    let champs = champs_d_enrolement();
+    let tete = entete(&champs);
+    let mut place = [0_u8; PLACE];
+    assert_eq!(
+        une_session()
+            .request(&tete, corps.as_bytes(), MAINTENANT + HEURE, &mut place)
+            .status(),
+        StatusCode::UNAUTHORIZED,
+        "à l'heure exacte, elle ne vaut DÉJÀ plus"
+    );
+}
+
+/// **L'ENRÔLEMENT GARDE SON VERBE ET SON TYPE**, comme l'autre porte publique.
+#[test]
+fn l_enrolement_garde_son_verbe_et_son_type() {
+    let champs = std::vec![
+        (&b":method"[..], &b"GET"[..]),
+        (&b":scheme"[..], &b"https"[..]),
+        (&b":authority"[..], &b"exemple.fr"[..]),
+        (&b":path"[..], &b"/v1/devices"[..]),
+    ];
+    let tete = entete(&champs);
+    let mut place = [0_u8; PLACE];
+    assert_eq!(
+        une_session()
+            .request(&tete, &[], MAINTENANT, &mut place)
+            .status(),
+        StatusCode::METHOD_NOT_ALLOWED
+    );
+
+    let invitation = une_invitation("marc", MAINTENANT + HEURE);
+    let corps = std::format!(r#"{{"invitation":"{invitation}","publicKey":"BAECAwQ"}}"#);
+    let champs = std::vec![
+        (&b":method"[..], &b"POST"[..]),
+        (&b":scheme"[..], &b"https"[..]),
+        (&b":authority"[..], &b"exemple.fr"[..]),
+        (&b":path"[..], &b"/v1/devices"[..]),
+        (&b"content-type"[..], &b"message/rfc822"[..]),
+    ];
+    let tete = entete(&champs);
+    let mut place = [0_u8; PLACE];
+    assert_eq!(
+        une_session()
+            .request(&tete, corps.as_bytes(), MAINTENANT, &mut place)
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+}
+
+/// **UN CHAMP INCONNU DANS UN CORPS D'ENRÔLEMENT EST IGNORÉ**, et n'empêche pas
+/// l'enrôlement.
+///
+/// # POURQUOI ICI ON TOLÈRE, ET DANS LA DEMANDE D'INVITATION ON REFUSE
+///
+/// Ce ne sont pas les mêmes appelants. La demande d'invitation vient de
+/// l'exploitant, d'un seul outil : y refuser `minute` pour `minutes` lui dit
+/// qu'on ne l'a pas écouté, ce qu'il doit savoir.
+///
+/// **CE CORPS-CI VIENT DE CINQ APPLICATIONS NATIVES**, qui ne se mettent pas à
+/// jour le même jour que le serveur. Un champ qu'une version plus récente
+/// ajouterait ferait refuser tout enrôlement par un serveur plus ancien — alors
+/// que les champs dont il a besoin sont là. Ce qui manque se voit autrement :
+/// une invitation ou une clef absente refuse, puisqu'on les exige.
+#[test]
+fn un_champ_inconnu_n_empeche_pas_un_enrolement() {
+    let invitation = une_invitation("marc", MAINTENANT + HEURE);
+    let corps = std::format!(
+        r#"{{"attestation":"d'une version future","invitation":"{invitation}","publicKey":"BAECAwQ"}}"#
+    );
+    let champs = champs_d_enrolement();
+    let tete = entete(&champs);
+    let mut place = [0_u8; PLACE];
+    let session = une_session();
+    assert_eq!(
+        session
+            .request(&tete, corps.as_bytes(), MAINTENANT, &mut place)
+            .next(),
+        Next::Enrol {
+            account: "marc",
+            public_key: "BAECAwQ",
+            name: "",
+        }
+    );
+}
+
+/// **UNE CHAÎNE ÉCHAPPÉE SE REFUSE**, et c'est ce que coûte une machine qui
+/// n'alloue pas.
+///
+/// Déséchapper demanderait un tampon que cette session n'a pas. Pour
+/// l'invitation et la clef, l'alphabet de §5 de RFC 4648 ne contient rien qu'on
+/// échappe ; pour le NOM, cela exclut `"`, `\` et les caractères de contrôle —
+/// l'UTF-8 littéral, lui, passe entier.
+#[test]
+fn une_chaine_echappee_ne_s_enrole_pas() {
+    let invitation = une_invitation("marc", MAINTENANT + HEURE);
+    let corps = std::format!(
+        r#"{{"invitation":"{invitation}","publicKey":"BAECAwQ","name":"iPhone de Marc\/"}}"#
+    );
+    let champs = champs_d_enrolement();
+    let tete = entete(&champs);
+    let mut place = [0_u8; PLACE];
+    let session = une_session();
+    let tour = session.request(&tete, corps.as_bytes(), MAINTENANT, &mut place);
+    assert_eq!(tour.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(tour.next(), Next::Respond);
+}
+
+/// **UN NOM EN UTF-8 LITTÉRAL PASSE**, lui : c'est la moitié de la règle
+/// ci-dessus, et sans elle un appareil nommé « Téléphone de Renée » serait
+/// refusé.
+#[test]
+fn un_nom_accentue_s_enrole() {
+    let invitation = une_invitation("marc", MAINTENANT + HEURE);
+    let corps = std::format!(
+        r#"{{"invitation":"{invitation}","publicKey":"BAECAwQ","name":"Téléphone de Renée"}}"#
+    );
+    let champs = champs_d_enrolement();
+    let tete = entete(&champs);
+    let mut place = [0_u8; PLACE];
+    let session = une_session();
+    assert_eq!(
+        session
+            .request(&tete, corps.as_bytes(), MAINTENANT, &mut place)
+            .next(),
+        Next::Enrol {
+            account: "marc",
+            public_key: "BAECAwQ",
+            name: "Téléphone de Renée",
+        }
+    );
+}

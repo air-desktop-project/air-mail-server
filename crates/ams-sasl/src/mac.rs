@@ -39,6 +39,23 @@ const IPAD: u8 = 0x36;
 /// Le remplissage extérieur.
 const OPAD: u8 = 0x5c;
 
+/// Le condensat SHA-256 de ce message.
+///
+/// # POURQUOI IL VIT ICI, À CÔTÉ DU HMAC
+///
+/// Cette crate enveloppe déjà `sha2` pour son HMAC. Ouvrir une seconde route
+/// vers la même bibliothèque depuis une autre crate donnerait deux chemins vers
+/// un seul algorithme, et c'est exactement ce que la règle des étages existe
+/// pour éviter.
+///
+/// **IL NE SERT PAS À RANGER DES SECRETS.** Un mot de passe se hache avec
+/// Argon2id — voir `ams_auth` —, et confondre les deux donnerait un magasin
+/// qu'un dictionnaire épuise en quelques heures.
+#[must_use]
+pub fn sha256(message: &[u8]) -> [u8; MAC_OCTETS] {
+    Sha256::digest(message).into()
+}
+
 /// `HMAC-SHA-256` de ce message sous cette clé.
 ///
 /// # UNE CLÉ PLUS LONGUE QU'UN BLOC SE HACHE D'ABORD

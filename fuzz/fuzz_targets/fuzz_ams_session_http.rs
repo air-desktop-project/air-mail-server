@@ -275,6 +275,31 @@ fuzz_target!(|entree: Entree| {
             assert!(!entree.en_clair, "une requête en clair a été servie");
             assert_eq!(tour.status(), StatusCode::OK);
         }
+        // **UN ENRÔLEMENT N'ARRIVE QUE PAR UNE SEULE PORTE**, et seulement après
+        // qu'une invitation scellée PAR NOTRE CLÉ s'est vérifiée.
+        //
+        // Ce bras est en pratique inatteignable par mutation : fabriquer un
+        // sceau HMAC-SHA-256 au hasard demande 2^256 essais. Il est là comme
+        // GARDE — le jour où un câblage laisserait une autre route y tomber, ou
+        // laisserait passer sans sceau, c'est ici qu'on l'apprendrait.
+        Next::Enrol { account, .. } => {
+            assert!(!entree.en_clair, "un enrôlement en clair a été servi");
+            assert_eq!(tour.status(), StatusCode::OK);
+            let mut place_du_chemin = [0_u8; 2 * 1024];
+            let (chemin, _requete) = split_query(tete.path());
+            let resolu = resolve(tete.method(), chemin, &mut place_du_chemin)
+                .expect("la session a enrôlé : cette route se résout");
+            assert!(
+                matches!(resolu.resource, ams_api::Resource::Devices),
+                "un enrôlement est sorti d'une autre route que `/v1/devices`"
+            );
+            assert_eq!(
+                resolu.method,
+                Method::Post,
+                "un enrôlement est sorti d'un autre verbe que `POST`"
+            );
+            assert!(!account.is_empty(), "un enrôlement sans compte");
+        }
         Next::Respond => {
             // Un refus porte un document, et son code n'est jamais un succès
             // silencieux.

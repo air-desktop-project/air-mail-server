@@ -69,6 +69,33 @@ impl Api for ApiEssai {
         }
     }
 
+    /// **ELLE REND CE QU'ON LUI A DONNÉ**, plutôt qu'un succès vide : c'est ce
+    /// qui permet d'éprouver que le conducteur transmet bien le compte tiré de
+    /// l'invitation, et non celui d'un jeton qu'il n'y avait pas.
+    fn enrol<'o>(
+        &self,
+        account: &str,
+        public_key: &str,
+        name: &str,
+        sortie: &'o mut [u8],
+    ) -> Served<'o> {
+        let mut json = ams_api::Json::new(sortie);
+        let ecrit = (|| {
+            json.begin_object()?;
+            json.field_str("compte", account)?;
+            json.field_str("clef", public_key)?;
+            json.field_str("nom", name)?;
+            json.end_object()?;
+            json.finish()
+        })();
+        Served {
+            status: StatusCode::CREATED,
+            media: ams_api::JSON_MEDIA_TYPE,
+            body: ecrit.unwrap_or_default(),
+            ..Served::default()
+        }
+    }
+
     fn authenticate(&self, login: &str, password: &[u8]) -> Option<Scope> {
         (login == "marc" && password == b"secret")
             .then(|| Scope::one(Area::Mail, Rights::Read).with(Area::Observe, Rights::Read))

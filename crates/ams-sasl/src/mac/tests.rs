@@ -6,7 +6,7 @@
 
 use std::vec::Vec;
 
-use super::{MAC_OCTETS, egales, hmac_sha256};
+use super::{MAC_OCTETS, egales, hmac_sha256, sha256};
 
 /// Les octets que décrit cette écriture hexadécimale.
 fn octets(hexa: &str) -> Vec<u8> {
@@ -141,4 +141,44 @@ fn la_comparaison_dit_vrai() {
         b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab"
     ));
+}
+
+/// **LE CONDENSAT NU REND CE QUE LA NORME DIT**, sur les vecteurs de la FIPS 180-4.
+///
+/// Un condensat qui différerait ne se verrait nulle part ailleurs : il sert à
+/// tirer des identifiants d'appareil, et deux implémentations qui divergeraient
+/// donneraient deux identifiants pour une même clef — donc un appareil qu'on ne
+/// retrouve plus après une mise à jour.
+#[test]
+fn le_condensat_nu_rend_les_vecteurs_de_la_norme() {
+    // Les deux exemples de la FIPS 180-4, annexe B.
+    assert_eq!(
+        sha256(b"abc").to_vec(),
+        octets("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+    );
+    assert_eq!(
+        sha256(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq").to_vec(),
+        octets("248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1")
+    );
+    // Et la chaîne vide, que rien n'interdit de condenser.
+    assert_eq!(
+        sha256(b"").to_vec(),
+        octets("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+    );
+}
+
+/// **IL REND TOUJOURS LA MÊME TAILLE**, et c'est ce sur quoi l'appelant compte
+/// pour découper.
+#[test]
+fn le_condensat_nu_fait_toujours_la_meme_taille() {
+    for longueur in [0_usize, 1, 55, 56, 64, 65, 1000] {
+        assert_eq!(sha256(&std::vec![7_u8; longueur]).len(), MAC_OCTETS);
+    }
+}
+
+/// **CE N'EST PAS UN HMAC**, et les confondre donnerait un sceau qu'aucune clé
+/// ne protège.
+#[test]
+fn le_condensat_nu_n_est_pas_un_sceau() {
+    assert_ne!(sha256(b"message"), hmac_sha256(b"", b"message"));
 }

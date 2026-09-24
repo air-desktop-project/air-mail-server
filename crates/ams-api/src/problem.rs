@@ -77,6 +77,7 @@ fn type_de(status: StatusCode) -> &'static str {
         403 => "/problems/forbidden",
         404 => "/problems/not-found",
         405 => "/problems/method-not-allowed",
+        409 => "/problems/conflict",
         414 => "/problems/uri-too-long",
         501 => "/problems/not-implemented",
         // Tout ce qui est nôtre se dit d'une seule façon : le client n'a rien à

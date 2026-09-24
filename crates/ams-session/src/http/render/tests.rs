@@ -6,14 +6,15 @@
 
 use std::string::{String, ToString};
 
-use ams_api::Reason;
+use ams_api::{Error, Reason};
 use ams_proto_imap::Flags;
 
 use super::{
     AccountRow, BanRow, DeviceRow, FlagPatch, MailboxRow, MessageRow, read_account_body,
-    read_flag_patch, read_own_password_body, read_search_criteria, write_account, write_accounts,
-    write_bans, write_devices, write_domains, write_health, write_mailbox, write_mailboxes,
-    write_message, write_messages, write_metrics, write_search,
+    read_flag_patch, read_invitation_request, read_own_password_body, read_search_criteria,
+    write_account, write_accounts, write_bans, write_devices, write_domains, write_enrolled,
+    write_health, write_invitation, write_mailbox, write_mailboxes, write_message, write_messages,
+    write_metrics, write_search,
 };
 
 /// Un appareil d'essai.
@@ -371,7 +372,7 @@ fn un_corps_qui_n_est_pas_une_modification_se_refuse() {
 #[test]
 fn chaque_tampon_insuffisant_se_dit() {
     type Ecrivain = fn(&mut [u8]) -> Result<&[u8], ams_api::Error>;
-    let ecrivains: [(&str, Ecrivain); 16] = [
+    let ecrivains: [(&str, Ecrivain); 19] = [
         ("mailboxes", |place| write_mailboxes(&[boite()], place)),
         ("mailbox", |place| write_mailbox(&boite(), place)),
         ("messages", |place| {
@@ -402,6 +403,17 @@ fn chaque_tampon_insuffisant_se_dit() {
         // Un compte SANS appareil écrit un tableau vide : une autre suite
         // d'écritures, donc d'autres places à manquer.
         ("devices-vide", |place| write_devices(&[], place)),
+        ("invitation", |place| {
+            write_invitation("AbCd", "marie", 1_790_086_400, place)
+        }),
+        ("enrolled", |place| {
+            write_enrolled("a1b2", "marie", &["marie@exemple.test"], place)
+        }),
+        // Un compte SANS adresse écrit un tableau vide : une autre suite
+        // d'écritures, donc d'autres places à manquer.
+        ("enrolled-sans-adresse", |place| {
+            write_enrolled("a1b2", "marie", &[], place)
+        }),
         ("search", |place| write_search(&[3, 41], 7, true, place)),
         // `complete: false` écrit un mot de plus : c'est une place de plus à
         // manquer.
@@ -971,4 +983,92 @@ fn un_compte_sans_appareil_rend_un_tableau_vide() {
         std::str::from_utf8(ecrit).expect("utf8"),
         "{\"devices\":[]}"
     );
+}
+
+/// **UNE INVITATION SE REND AVEC SON COMPTE ET SON HEURE.**
+///
+/// L'exploitant relaie souvent les deux à son utilisateur ; les rendre ensemble
+/// lui évite de les rapprocher lui-même, et de se tromper le jour où il en
+/// frappe trois d'affilée.
+#[test]
+fn une_invitation_se_rend_avec_son_compte() {
+    let mut place = [0_u8; PLACE];
+    let ecrit = write_invitation("AbCdEf", "marie", 1_790_086_400, &mut place).expect("écrivable");
+    assert_eq!(
+        std::str::from_utf8(ecrit).expect("utf8"),
+        "{\"invitation\":\"AbCdEf\",\"login\":\"marie\",\"expiresAt\":1790086400}"
+    );
+}
+
+/// **UN ENRÔLEMENT REND DE QUOI SE CONFIGURER**, et rien de plus.
+///
+/// C'est la seule réponse que reçoit un client qui n'a encore aucun jeton : sans
+/// les adresses, il lui faudrait un second appel qu'il ne peut pas faire.
+#[test]
+fn un_enrolement_rend_de_quoi_se_configurer() {
+    let mut place = [0_u8; PLACE];
+    let ecrit = write_enrolled(
+        "a1b2c3",
+        "marie",
+        &["marie@exemple.test", "m.dupont@exemple.test"],
+        &mut place,
+    )
+    .expect("écrivable");
+    let rendu = std::str::from_utf8(ecrit).expect("utf8");
+    assert_eq!(
+        rendu,
+        "{\"id\":\"a1b2c3\",\"login\":\"marie\",\"addresses\":\
+         [\"marie@exemple.test\",\"m.dupont@exemple.test\"]}"
+    );
+    // **LA CLEF N'Y EST PAS** : le client vient de l'envoyer, la lui rendre
+    // n'apprendrait rien et grossirait la réponse.
+    assert!(!rendu.contains("publicKey"), "{rendu}");
+}
+
+/// **UNE DEMANDE D'INVITATION SE LIT, AVEC OU SANS DURÉE.**
+#[test]
+fn une_demande_d_invitation_se_lit() {
+    let lue = read_invitation_request(br#"{"login":"marie"}"#).expect("lisible");
+    assert_eq!(lue.login, "marie");
+    assert_eq!(lue.minutes, None, "l'absence laisse choisir l'appelant");
+
+    let lue = read_invitation_request(br#"{"login":"marie","minutes":60}"#).expect("lisible");
+    assert_eq!(lue.login, "marie");
+    assert_eq!(lue.minutes, Some(60));
+}
+
+/// **CE QU'UNE DEMANDE D'INVITATION NE PEUT PAS ÊTRE.**
+///
+/// Un champ inconnu se refuse plutôt que de s'ignorer : un client qui écrirait
+/// `minute` au lieu de `minutes` obtiendrait sinon la durée par défaut sans
+/// jamais apprendre qu'on ne l'a pas écouté.
+#[test]
+fn une_demande_d_invitation_irrecevable_se_refuse() {
+    for corps in [
+        &b"{}"[..],
+        br#"{"minutes":60}"#,
+        br#"{"login":"marie","inconnu":1}"#,
+        br#"{"login":"marie","minutes":-1}"#,
+        br#"{"login":"marie","minutes":"soixante"}"#,
+        br#"{"login":123}"#,
+        // **UNE VALEUR D'UN AUTRE TYPE QUE TEXTE OU NOMBRE** : un tableau, un
+        // booléen, un nul. Le lecteur les nomme séparément, et les laisser
+        // passer ferait lire une demande dont un champ n'a pas été compris.
+        br#"{"login":["marie"]}"#,
+        br#"{"login":true}"#,
+        br#"{"login":null}"#,
+        br#"{"minutes":[60]}"#,
+        // Un nom ÉCHAPPÉ se refuse : `check_login` n'accepte de toute façon
+        // rien qu'un échappement puisse porter, et le déséchapper demanderait
+        // un tampon que cette lecture n'a pas.
+        br#"{"login":"ma\u0072ie"}"#,
+        b"pas du json",
+    ] {
+        assert_eq!(
+            read_invitation_request(corps).err().map(Error::reason),
+            Some(Reason::BadJsonBody),
+            "{}",
+            std::string::String::from_utf8_lossy(corps)
+        );
+    }
 }

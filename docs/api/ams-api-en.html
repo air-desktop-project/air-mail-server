@@ -45,13 +45,14 @@
     <li><a href="#reference">5. Resource reference</a>
       <ol>
         <li><a href="#r-tokens">5.1 Tokens</a></li>
-        <li><a href="#r-mailboxes">5.2 Mailboxes</a></li>
-        <li><a href="#r-messages">5.3 Messages</a></li>
-        <li><a href="#r-search">5.4 Search</a></li>
-        <li><a href="#r-submission">5.5 Submission</a></li>
-        <li><a href="#r-self">5.6 What is yours</a></li>
-        <li><a href="#r-admin">5.7 Administration</a></li>
-        <li><a href="#r-observe">5.8 Observability</a></li>
+        <li><a href="#r-enrolment">5.2 Invitation and enrolment</a></li>
+        <li><a href="#r-mailboxes">5.3 Mailboxes</a></li>
+        <li><a href="#r-messages">5.4 Messages</a></li>
+        <li><a href="#r-search">5.5 Search</a></li>
+        <li><a href="#r-submission">5.6 Submission</a></li>
+        <li><a href="#r-self">5.7 What is yours</a></li>
+        <li><a href="#r-admin">5.8 Administration</a></li>
+        <li><a href="#r-observe">5.9 Observability</a></li>
       </ol>
     </li>
     <li><a href="#limits">6. Limits</a></li>
@@ -448,7 +449,57 @@ authorization: Bearer AQECAAAAAG…</code></pre>
   <p>An already-closed session returns <code>401</code>: the token no longer holds, so it no longer opens even the door that would close it.</p>
 </div>
 
-<h3 id="r-mailboxes"><span class="numero">5.2</span>Mailboxes</h3>
+<h3 id="r-enrolment"><span class="numero">5.2</span>Invitation and enrolment</h3>
+
+<p>This is how key-based authentication is bootstrapped: an operator mints an <strong>invitation</strong>, and the user redeems it to enrol the public key of their <strong>first</strong> device. Further devices will come through cross-enrolment, from a device already enrolled.</p>
+
+<div class="note info">
+  <span class="etiquette">Enrolment alone ships; opening a session with the key does not</span>
+  <p>An enrolled key can be listed and revoked under <a href="#r-self"><code>/v1/me/devices</code></a>, but nothing authenticates with it yet: challenge–response comes next. For now, authentication is still by password.</p>
+</div>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe post">POST</span><span class="chemin">/v1/invitations</span><span class="portee">admin:write</span></div>
+  <pre><code>{ "login": "marie", "minutes": 1440 }</code></pre>
+  <p><code>minutes</code> is optional — <strong>1440 (twenty-four hours) by default, 2880 at most</strong>. An invitation lives longer than a token because it travels by a human channel: its bearer needs time to install an application.</p>
+  <pre><code>HTTP/2 201
+{ "invitation": "AgAABp…", "login": "marie", "expiresAt": 1790086400 }</code></pre>
+  <p>An account that does not exist returns <code>404</code>: an invitation for a misspelt name would otherwise only surface at enrolment — that is, at a user who can do nothing about it.</p>
+  <div class="note danger">
+    <span class="etiquette">An invitation is a bearer credential</span>
+    <p>Whoever holds it can enrol a key on that account. Send it over a channel you consider safe, and be aware that <strong>nothing attests that the person redeeming it is the person you gave it to</strong>. That is the limit of this mechanism, and the reason it is short-lived and single-use.</p>
+  </div>
+</div>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe post">POST</span><span class="chemin">/v1/devices</span><span class="portee">none</span></div>
+  <pre><code>{ "invitation": "AgAABp…",
+  "publicKey": "BB4YUy_UdUwC8wQdnHXOszuD_9gax85P6ILMscmLxYlupGwxHE4v9A3ZajZT5uRURdMt_khuztdcepDGoYiBwKM",
+  "name": "Marie's iPhone" }</code></pre>
+  <p><strong>No <code>Authorization</code> header</strong>: the invitation is what authorises. Together with <code>/v1/tokens</code>, this is the only resource in this API reached without a token — and for the same reason: whoever is enrolling has nothing yet.</p>
+  <p><code>publicKey</code> is an <strong>ECDSA P-256</strong> key in SEC 1 uncompressed form (§2.3.3) — the byte <code>0x04</code> then <code>x</code> and <code>y</code>, sixty-five bytes — written in base64url <strong>without padding</strong>. <code>name</code> is optional.</p>
+  <pre><code>HTTP/2 201
+{ "id": "6b86b273ff34fce1…", "login": "marie",
+  "addresses": ["marie@example.com"] }</code></pre>
+  <p>The addresses come back here because the application has no token yet to ask for them. The <code>id</code> is the <strong>SHA-256 digest of the public key</strong>, in sixty-four hexadecimal digits: it needs no randomness, it is unique by construction, and it is already the fingerprint that cross-enrolment will need.</p>
+  <div class="note prudence">
+    <span class="etiquette">An invitation is only good for the FIRST device</span>
+    <p>It is not consumed by a registry: it stops being valid because the account now has a device. Replaying the same invitation — even one still within its lifetime — returns <code>409</code> with <code>/problems/conflict</code>.</p>
+    <p><strong>Operational consequence:</strong> re-inviting someone requires <a href="#r-self">revoking</a> their devices first. That is the right hygiene after a lost phone, and an inconvenience until cross-enrolment ships.</p>
+  </div>
+  <table>
+    <thead><tr><th>Code</th><th>When</th></tr></thead>
+    <tbody>
+      <tr><td><code>401</code></td><td>Invitation forged, expired, missing, or a <strong>bearer token presented in its place</strong>. All four answer alike.</td></tr>
+      <tr><td><code>400</code></td><td>The key is not a point on the curve, or is the wrong size.</td></tr>
+      <tr><td><code>409</code></td><td>This account already has an enrolled device.</td></tr>
+      <tr><td><code>404</code></td><td>The invitation's account no longer exists.</td></tr>
+      <tr><td><code>501</code></td><td>This server has no device store configured.</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<h3 id="r-mailboxes"><span class="numero">5.3</span>Mailboxes</h3>
 
 <div class="ressource">
   <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/mailboxes</span><span class="portee">mail:read</span></div>
@@ -471,7 +522,7 @@ authorization: Bearer AQECAAAAAG…</code></pre>
   </div>
 </div>
 
-<h3 id="r-messages"><span class="numero">5.3</span>Messages</h3>
+<h3 id="r-messages"><span class="numero">5.4</span>Messages</h3>
 
 <div class="ressource">
   <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/mailboxes/{mailbox}/messages</span><span class="portee">mail:read</span></div>
@@ -526,7 +577,7 @@ authorization: Bearer AQECAAAAAG…</code></pre>
   <p>One MIME part, numbered as RFC 9051 §6.4.5 prescribes — <code>1</code>, <code>1.2</code>, <code>2.1.1</code>.</p>
 </div>
 
-<h3 id="r-search"><span class="numero">5.4</span>Search</h3>
+<h3 id="r-search"><span class="numero">5.5</span>Search</h3>
 
 <div class="ressource">
   <div class="ligne"><span class="verbe post">POST</span><span class="chemin">/v1/mailboxes/{mailbox}/search</span><span class="portee">mail:read</span></div>
@@ -548,7 +599,7 @@ authorization: Bearer AQECAAAAAG…</code></pre>
   <p><code>complete</code> is <code>false</code> when the list was truncated. A client ignoring it would act on half its results believing it had them all.</p>
 </div>
 
-<h3 id="r-submission"><span class="numero">5.5</span>Submission</h3>
+<h3 id="r-submission"><span class="numero">5.6</span>Submission</h3>
 
 <div class="ressource">
   <div class="ligne"><span class="verbe post">POST</span><span class="chemin">/v1/submissions</span><span class="portee">submit:write</span></div>
@@ -570,7 +621,7 @@ The message body.
   <p>The server delivers to local recipients, queues what goes out, and <strong>DKIM-signs</strong> what it accepts, for the domains whose zone it holds. A delivery failure returns <code>503</code>: it is temporary, and your message may well go through later.</p>
 </div>
 
-<h3 id="r-self"><span class="numero">5.6</span>What is yours</h3>
+<h3 id="r-self"><span class="numero">5.7</span>What is yours</h3>
 
 <p>These resources require <strong>no scope</strong>: they act on <em>yourself</em>, and the token presented already says who that is. Requiring <code>admin</code> would make them routes only an administrator could take, which is exactly what they exist to avoid.</p>
 
@@ -618,7 +669,7 @@ The message body.
   <p>Revoking twice returns <code>404</code> the second time. RFC 9110 §9.3.5 allows this: what must be idempotent is the <em>effect</em>, and it is — the device is gone either way. Returning <code>204</code> to a revocation that removed nothing would suggest something had been removed.</p>
 </div>
 
-<h3 id="r-admin"><span class="numero">5.7</span>Administration</h3>
+<h3 id="r-admin"><span class="numero">5.8</span>Administration</h3>
 
 <p>All of these require the <code>admin</code> area, which a password never grants. See <a href="#admin">§3.6</a>.</p>
 
@@ -648,7 +699,7 @@ The message body.
 
 <p>The prefix length is not decorative: <code>2001:db8::</code> alone does not say that an entire <code>/64</code> is banned, and an operator would believe they had banned a single machine.</p>
 
-<h3 id="r-observe"><span class="numero">5.8</span>Observability</h3>
+<h3 id="r-observe"><span class="numero">5.9</span>Observability</h3>
 
 <div class="ressource">
   <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/health</span><span class="portee">observe:read</span></div>

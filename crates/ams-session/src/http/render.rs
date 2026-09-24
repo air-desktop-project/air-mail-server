@@ -178,6 +178,127 @@ pub struct BanRow<'a> {
     pub seconds: u64,
 }
 
+/// Ce qu'une demande d'invitation dit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvitationRequest<'a> {
+    /// Le compte à inviter.
+    pub login: &'a str,
+    /// Combien de minutes elle vaudra, ou `None` pour la durée par défaut.
+    pub minutes: Option<u64>,
+}
+
+/// Lit une demande d'invitation.
+///
+/// # LE NOM N'EST PAS DÉSÉCHAPPÉ, ET C'EST SANS CONSÉQUENCE
+///
+/// `check_login` refuse de toute façon tout ce qu'un échappement pourrait
+/// porter : un nom de compte devient un nom de répertoire, et son alphabet est
+/// borné bien en deçà de ce que JSON sait écrire.
+///
+/// # Errors
+///
+/// [`Reason::BadJsonBody`] pour un corps qu'on ne sait pas lire, un champ
+/// inconnu, un nom échappé, ou une durée qui n'est pas un entier positif.
+pub fn read_invitation_request(corps: &[u8]) -> Result<InvitationRequest<'_>, Error> {
+    let mauvais = Error::new(Reason::BadJsonBody);
+    let mut lecteur = Reader::new(corps);
+    let mut login = None;
+    let mut minutes = None;
+    // Quel champ on lit : 1 `login`, 2 `minutes`.
+    let mut quel = 0_u8;
+
+    loop {
+        match lecteur.read().map_err(|_| mauvais)? {
+            None => break,
+            Some(Event::Key(clef)) => {
+                quel = match (clef.is("login"), clef.is("minutes")) {
+                    (true, _) => 1,
+                    (_, true) => 2,
+                    _ => return Err(mauvais),
+                };
+            }
+            Some(Event::Text(texte)) => match quel {
+                1 => login = Some(texte.as_plain().ok_or(mauvais)?),
+                _ => return Err(mauvais),
+            },
+            Some(Event::Number(nombre)) => match quel {
+                2 => minutes = Some(nombre.as_u64().ok_or(mauvais)?),
+                _ => return Err(mauvais),
+            },
+            Some(Event::ObjectStart | Event::ObjectEnd) => {}
+            Some(_) => return Err(mauvais),
+        }
+    }
+    Ok(InvitationRequest {
+        login: login.ok_or(mauvais)?,
+        minutes,
+    })
+}
+
+/// Écrit une invitation fraîchement frappée.
+///
+/// # LE COMPTE Y FIGURE, BIEN QU'IL SOIT DANS LE SCEAU
+///
+/// L'exploitant qui la frappe relaie souvent DEUX choses à son utilisateur : le
+/// texte à coller, et le compte auquel il correspond. Les rendre ensemble lui
+/// évite de les rapprocher lui-même — et de se tromper le jour où il en frappe
+/// trois d'affilée.
+///
+/// # Errors
+///
+/// [`Reason::BufferTooSmall`] si `sortie` ne suffit pas.
+pub fn write_invitation<'o>(
+    invitation: &str,
+    login: &str,
+    expires_at: u64,
+    sortie: &'o mut [u8],
+) -> Result<&'o [u8], Error> {
+    let mut json = Json::new(sortie);
+    json.begin_object()?;
+    json.field_str("invitation", invitation)?;
+    json.field_str("login", login)?;
+    // **EN SECONDES, COMME PARTOUT CE QUI SORT** : les microsecondes sont une
+    // unité interne, et les rendre obligerait chaque client à savoir laquelle
+    // des deux il lit.
+    json.field_u64("expiresAt", expires_at)?;
+    json.end_object()?;
+    json.finish()
+}
+
+/// Écrit ce qu'un enrôlement réussi rend.
+///
+/// # LES ADRESSES SONT LÀ POUR QUE L'APPLICATION SE CONFIGURE
+///
+/// C'est la seule réponse que reçoit un client qui n'a encore rien : sans elles,
+/// il faudrait un second appel, et il n'a pas encore de jeton pour le faire.
+///
+/// **ELLES SONT LUES MAINTENANT, ET NON SCELLÉES DANS L'INVITATION** : un
+/// administrateur qui corrige une adresse entre l'invitation et l'enrôlement
+/// verrait sinon l'application se configurer avec l'ancienne.
+///
+/// # Errors
+///
+/// [`Reason::BufferTooSmall`] si `sortie` ne suffit pas.
+pub fn write_enrolled<'o>(
+    id: &str,
+    login: &str,
+    addresses: &[&str],
+    sortie: &'o mut [u8],
+) -> Result<&'o [u8], Error> {
+    let mut json = Json::new(sortie);
+    json.begin_object()?;
+    json.field_str("id", id)?;
+    json.field_str("login", login)?;
+    json.key("addresses")?;
+    json.begin_array()?;
+    for adresse in addresses {
+        json.string(adresse)?;
+    }
+    json.end_array()?;
+    json.end_object()?;
+    json.finish()
+}
+
 /// Un appareil enrôlé, tel qu'on le montre à son propriétaire.
 ///
 /// # LA CLEF PUBLIQUE N'Y EST PAS, ET CE N'EST PAS PAR PRUDENCE

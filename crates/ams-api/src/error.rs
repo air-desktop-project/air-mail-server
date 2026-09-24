@@ -119,6 +119,21 @@ pub enum Reason {
     /// ne dépend d'aucun compte, seulement de ce que ce serveur sert. Deux
     /// comptes obtiennent la même.
     NotImplemented,
+    /// **Ce compte a déjà un appareil**, et l'invitation ne vaut que pour le
+    /// premier.
+    ///
+    /// # POURQUOI ELLE SE DIT, ET NE SE CACHE PAS
+    ///
+    /// Qui la reçoit a présenté une invitation que NOTRE clé a scellée : il est
+    /// autorisé, et lui répondre « aucune ressource ici » l'enverrait chercher
+    /// un défaut dans son application. Ce qu'il doit savoir est précis — il faut
+    /// révoquer l'appareil existant avant d'en enrôler un autre —, et lui seul
+    /// peut le demander à son exploitant.
+    ///
+    /// §15.5.10 de RFC 9110 nomme exactement ce cas : « the request could not be
+    /// completed due to a conflict with the current state of the target
+    /// resource ».
+    AlreadyEnrolled,
 }
 
 impl Reason {
@@ -149,6 +164,7 @@ impl Reason {
             // §15.6.2 de RFC 9110 : « the server does not support the
             // functionality required to fulfill the request ».
             Self::NotImplemented => StatusCode::NOT_IMPLEMENTED,
+            Self::AlreadyEnrolled => StatusCode::CONFLICT,
         }
     }
 
@@ -175,6 +191,7 @@ impl Reason {
             Self::TokenExpired => "l'authentification a expiré",
             Self::SessionClosed => "la session a été fermée",
             Self::NotImplemented => "ce serveur ne sert pas cette ressource",
+            Self::AlreadyEnrolled => "ce compte a déjà un appareil enrôlé",
             // **CE QUI EST NÔTRE SE DIT D'UNE SEULE FAÇON.** Distinguer nos
             // fautes internes apprendrait au client ce que notre code a fait de
             // travers, et ne lui servirait à rien : il n'y peut rien. Le journal

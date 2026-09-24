@@ -503,6 +503,22 @@ async fn des_octets_d_application_font_l_aller_retour() {
 struct ApiEssai;
 
 impl ams_loop_tokio::http::Api for ApiEssai {
+    /// **CE BANC N'ENRÔLE PAS.** Il éprouve le transport QUIC, et non
+    /// l'amorçage : rendre un refus net vaut mieux qu'une réussite feinte que
+    /// personne ne regarde.
+    fn enrol<'o>(
+        &self,
+        _account: &str,
+        _public_key: &str,
+        _name: &str,
+        _sortie: &'o mut [u8],
+    ) -> ams_loop_tokio::http::Served<'o> {
+        ams_loop_tokio::http::Served {
+            status: ams_proto_http::StatusCode::NOT_IMPLEMENTED,
+            ..ams_loop_tokio::http::Served::default()
+        }
+    }
+
     fn serve<'o>(
         &self,
         resource: ams_api::Resource<'_>,

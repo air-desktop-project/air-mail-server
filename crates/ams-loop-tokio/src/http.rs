@@ -259,6 +259,25 @@ pub trait Api {
         sortie: &'o mut [u8],
     ) -> Served<'o>;
 
+    /// Enrôle cette clef sur ce compte, et écrit la réponse.
+    ///
+    /// **L'INVITATION EST DÉJÀ VÉRIFIÉE** : recevoir cet appel veut dire qu'une
+    /// invitation scellée par notre clé, portant la bonne version et non
+    /// expirée, désignait `account`. Ce qui reste à décider est ce que la
+    /// session ne peut pas savoir : ce compte existe-t-il, a-t-il déjà un
+    /// appareil, et cette clef est-elle un point de la courbe.
+    ///
+    /// `public_key` arrive **telle qu'elle a été écrite**, en base64url : la
+    /// décoder dans la session aurait demandé un tampon de plus à une machine
+    /// qui n'alloue pas.
+    fn enrol<'o>(
+        &self,
+        account: &str,
+        public_key: &str,
+        name: &str,
+        sortie: &'o mut [u8],
+    ) -> Served<'o>;
+
     /// Ces identifiants ouvrent-ils une session, et sur quelle portée ?
     ///
     /// `None` refuse. **LE TEMPS QUE PREND UN REFUS NE DOIT PAS DIRE POURQUOI IL
@@ -515,6 +534,24 @@ where
                 let corps = ams_api::problem(ams_api::Reason::SessionClosed, &mut rendu)
                     .unwrap_or_default();
                 (StatusCode::UNAUTHORIZED, ams_api::PROBLEM_MEDIA_TYPE, corps)
+            }
+            // **UN ENRÔLEMENT N'EST PAS UNE SESSION**, et ne passe donc pas
+            // par le registre : il n'y a rien à y chercher, et l'y chercher
+            // refuserait tout enrôlement. C'est l'invitation qui a autorisé,
+            // et la session l'a déjà vérifiée.
+            Next::Enrol {
+                account,
+                public_key,
+                name,
+            } => {
+                let servi = api.enrol(account, public_key, name, &mut rendu);
+                if servi.peer_fault {
+                    // **LE MÊME COMPTE QU'UN REFUS D'IDENTIFIANTS.** Cette
+                    // porte s'ouvre SANS JETON : sans cela, elle offrirait des
+                    // essais illimités sur des invitations forgées.
+                    service.guard.observe(source, GuardEvent::InvalidFrame);
+                }
+                (servi.status, servi.media, servi.body)
             }
             Next::Serve {
                 resource,

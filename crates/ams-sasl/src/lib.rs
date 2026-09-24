@@ -71,7 +71,7 @@ mod plain;
 mod scram;
 
 pub use base64::{Error as Base64Error, decode as decode_base64, decoded_len};
-pub use mac::{MAC_OCTETS, egales, hmac_sha256};
+pub use mac::{MAC_OCTETS, egales, hmac_sha256, sha256};
 pub use plain::{Credentials, Error as PlainError, parse as parse_plain};
 pub use scram::{
     CLE_OCTETS, ClientFinal, ClientFirst, Error as ScramError, Gs2, ITERATIONS_MIN, LIAISON,

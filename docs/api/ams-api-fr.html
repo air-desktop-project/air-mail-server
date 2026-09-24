@@ -45,13 +45,14 @@
     <li><a href="#reference">5. Référence des ressources</a>
       <ol>
         <li><a href="#r-jetons">5.1 Jetons</a></li>
-        <li><a href="#r-boites">5.2 Boîtes</a></li>
-        <li><a href="#r-messages">5.3 Messages</a></li>
-        <li><a href="#r-recherche">5.4 Recherche</a></li>
-        <li><a href="#r-soumission">5.5 Soumission</a></li>
-        <li><a href="#r-moi">5.6 Ce qui est à soi</a></li>
-        <li><a href="#r-admin">5.7 Administration</a></li>
-        <li><a href="#r-supervision">5.8 Supervision</a></li>
+        <li><a href="#r-enrolement">5.2 Invitation et enrôlement</a></li>
+        <li><a href="#r-boites">5.3 Boîtes</a></li>
+        <li><a href="#r-messages">5.4 Messages</a></li>
+        <li><a href="#r-recherche">5.5 Recherche</a></li>
+        <li><a href="#r-soumission">5.6 Soumission</a></li>
+        <li><a href="#r-moi">5.7 Ce qui est à soi</a></li>
+        <li><a href="#r-admin">5.8 Administration</a></li>
+        <li><a href="#r-supervision">5.9 Supervision</a></li>
       </ol>
     </li>
     <li><a href="#limites">6. Limites</a></li>
@@ -450,7 +451,57 @@ authorization: Bearer AQECAAAAAG…</code></pre>
   <p>Une session déjà fermée rend <code>401</code> : le jeton ne vaut plus, donc il n'ouvre même plus la porte qui le fermerait.</p>
 </div>
 
-<h3 id="r-boites"><span class="numero">5.2</span>Boîtes</h3>
+<h3 id="r-enrolement"><span class="numero">5.2</span>Invitation et enrôlement</h3>
+
+<p>C'est l'amorçage de l'authentification par clef : un exploitant frappe une <strong>invitation</strong>, l'utilisateur l'emploie pour enrôler la clef publique de son <strong>premier</strong> appareil. Les appareils suivants viendront par appairage croisé, depuis un appareil déjà enrôlé.</p>
+
+<div class="note info">
+  <span class="etiquette">L'enrôlement seul est livré ; ouvrir une session par clef ne l'est pas</span>
+  <p>Une clef enrôlée se voit et se révoque sous <a href="#r-moi"><code>/v1/me/devices</code></a>, mais rien ne s'authentifie encore avec elle : le défi-réponse vient ensuite. Aujourd'hui, on continue de s'authentifier par mot de passe.</p>
+</div>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe post">POST</span><span class="chemin">/v1/invitations</span><span class="portee">admin:write</span></div>
+  <pre><code>{ "login": "marie", "minutes": 1440 }</code></pre>
+  <p><code>minutes</code> est facultatif — <strong>1440 (vingt-quatre heures) par défaut, 2880 au plus</strong>. Une invitation vit plus longtemps qu'un jeton parce qu'elle voyage par un canal humain : son porteur doit avoir le temps d'installer une application.</p>
+  <pre><code>HTTP/2 201
+{ "invitation": "AgAABp…", "login": "marie", "expiresAt": 1790086400 }</code></pre>
+  <p>Un compte qui n'existe pas rend <code>404</code> : une invitation pour un nom mal orthographié ne se découvrirait sinon qu'à l'enrôlement, c'est-à-dire chez un utilisateur qui n'y peut rien.</p>
+  <div class="note danger">
+    <span class="etiquette">Une invitation est un identifiant porteur</span>
+    <p>Qui la détient peut enrôler une clef sur ce compte. Transmettez-la par un canal que vous jugez sûr, et sachez que <strong>rien n'atteste que celui qui l'emploie est celui à qui vous l'avez donnée</strong>. C'est la limite de ce mécanisme, et la raison pour laquelle elle est courte et à usage unique.</p>
+  </div>
+</div>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe post">POST</span><span class="chemin">/v1/devices</span><span class="portee">aucune</span></div>
+  <pre><code>{ "invitation": "AgAABp…",
+  "publicKey": "BB4YUy_UdUwC8wQdnHXOszuD_9gax85P6ILMscmLxYlupGwxHE4v9A3ZajZT5uRURdMt_khuztdcepDGoYiBwKM",
+  "name": "iPhone de Marie" }</code></pre>
+  <p><strong>Aucun en-tête <code>Authorization</code></strong> : c'est l'invitation qui autorise. Avec <code>/v1/tokens</code>, c'est la seule ressource de cette API qu'on atteint sans jeton — et pour la même raison : celui qui s'enrôle n'a encore rien.</p>
+  <p><code>publicKey</code> est une clef <strong>ECDSA P-256</strong> en forme non compressée SEC 1 (§2.3.3) — l'octet <code>0x04</code> puis <code>x</code> et <code>y</code>, soixante-cinq octets — écrite en base64url <strong>sans remplissage</strong>. <code>name</code> est facultatif.</p>
+  <pre><code>HTTP/2 201
+{ "id": "6b86b273ff34fce1…", "login": "marie",
+  "addresses": ["marie@example.com"] }</code></pre>
+  <p>Les adresses reviennent ici parce que l'application n'a pas encore de jeton pour les demander. L'<code>id</code> est le <strong>condensat SHA-256 de la clef publique</strong>, en soixante-quatre chiffres hexadécimaux : il ne demande aucun aléa, il est unique par construction, et c'est déjà l'empreinte dont l'appairage croisé aura besoin.</p>
+  <div class="note prudence">
+    <span class="etiquette">Une invitation ne vaut que pour le PREMIER appareil</span>
+    <p>Elle n'est pas consommée par un registre : elle cesse de valoir parce que le compte a désormais un appareil. Rejouer la même invitation — même encore valide — rend <code>409</code> avec <code>/problems/conflict</code>.</p>
+    <p><strong>Conséquence pour l'exploitation :</strong> réinviter quelqu'un exige de <a href="#r-moi">révoquer</a> ses appareils d'abord. C'est la bonne hygiène après un téléphone perdu, et c'est une gêne tant que l'appairage croisé n'est pas livré.</p>
+  </div>
+  <table>
+    <thead><tr><th>Code</th><th>Quand</th></tr></thead>
+    <tbody>
+      <tr><td><code>401</code></td><td>Invitation forgée, expirée, absente, ou <strong>jeton porteur présenté à sa place</strong>. Les quatre se répondent pareil.</td></tr>
+      <tr><td><code>400</code></td><td>La clef n'est pas un point de la courbe, ou n'a pas la bonne taille.</td></tr>
+      <tr><td><code>409</code></td><td>Ce compte a déjà un appareil enrôlé.</td></tr>
+      <tr><td><code>404</code></td><td>Le compte de l'invitation n'existe plus.</td></tr>
+      <tr><td><code>501</code></td><td>Ce serveur n'a pas de magasin d'appareils configuré.</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<h3 id="r-boites"><span class="numero">5.3</span>Boîtes</h3>
 
 <div class="ressource">
   <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/mailboxes</span><span class="portee">mail:read</span></div>
@@ -473,7 +524,7 @@ authorization: Bearer AQECAAAAAG…</code></pre>
   </div>
 </div>
 
-<h3 id="r-messages"><span class="numero">5.3</span>Messages</h3>
+<h3 id="r-messages"><span class="numero">5.4</span>Messages</h3>
 
 <div class="ressource">
   <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/mailboxes/{boite}/messages</span><span class="portee">mail:read</span></div>
@@ -528,7 +579,7 @@ authorization: Bearer AQECAAAAAG…</code></pre>
   <p>Une partie MIME, numérotée comme §6.4.5 de RFC 9051 le prescrit — <code>1</code>, <code>1.2</code>, <code>2.1.1</code>.</p>
 </div>
 
-<h3 id="r-recherche"><span class="numero">5.4</span>Recherche</h3>
+<h3 id="r-recherche"><span class="numero">5.5</span>Recherche</h3>
 
 <div class="ressource">
   <div class="ligne"><span class="verbe post">POST</span><span class="chemin">/v1/mailboxes/{boite}/search</span><span class="portee">mail:read</span></div>
@@ -550,7 +601,7 @@ authorization: Bearer AQECAAAAAG…</code></pre>
   <p><code>complete</code> vaut <code>false</code> quand la liste a été tronquée. Un client qui l'ignorerait agirait sur une moitié de résultats en croyant les avoir tous.</p>
 </div>
 
-<h3 id="r-soumission"><span class="numero">5.5</span>Soumission</h3>
+<h3 id="r-soumission"><span class="numero">5.6</span>Soumission</h3>
 
 <div class="ressource">
   <div class="ligne"><span class="verbe post">POST</span><span class="chemin">/v1/submissions</span><span class="portee">submit:write</span></div>
@@ -572,7 +623,7 @@ Le corps du message.
   <p>Le serveur remet aux destinataires locaux, met en file ce qui sort, et <strong>signe en DKIM</strong> ce qu'il accepte, pour les domaines dont il tient la zone. Un échec de remise rend <code>503</code> : il est temporaire, et votre message a des chances de passer plus tard.</p>
 </div>
 
-<h3 id="r-moi"><span class="numero">5.6</span>Ce qui est à soi</h3>
+<h3 id="r-moi"><span class="numero">5.7</span>Ce qui est à soi</h3>
 
 <p>Ces ressources n'exigent <strong>aucune portée</strong> : elles agissent sur <em>soi</em>, et le jeton présenté dit déjà de qui il s'agit. Exiger <code>admin</code> en ferait des routes que seul un administrateur peut emprunter, ce qui est exactement ce qu'elles existent pour éviter.</p>
 
@@ -616,7 +667,7 @@ Le corps du message.
   <p>Révoquer deux fois rend <code>404</code> la seconde fois. §9.3.5 de RFC 9110 l'admet : ce qui doit être idempotent est l'<em>effet</em>, et il l'est — l'appareil n'est plus là dans les deux cas. Rendre <code>204</code> à une révocation qui n'a rien retiré laisserait croire qu'on a retiré quelque chose.</p>
 </div>
 
-<h3 id="r-admin"><span class="numero">5.7</span>Administration</h3>
+<h3 id="r-admin"><span class="numero">5.8</span>Administration</h3>
 
 <p>Toutes ces ressources exigent le domaine <code>admin</code>, qu'un mot de passe n'accorde jamais. Voir <a href="#admin">§3.6</a>.</p>
 
@@ -646,7 +697,7 @@ Le corps du message.
 
 <p>La longueur du préfixe n'est pas décorative : <code>2001:db8::</code> seul ne dit pas qu'un <code>/64</code> entier est puni, et un exploitant croirait n'avoir banni qu'une machine.</p>
 
-<h3 id="r-supervision"><span class="numero">5.8</span>Supervision</h3>
+<h3 id="r-supervision"><span class="numero">5.9</span>Supervision</h3>
 
 <div class="ressource">
   <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/health</span><span class="portee">observe:read</span></div>

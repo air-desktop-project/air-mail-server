@@ -29,8 +29,10 @@ fn ou(method: Method, chemin: &[u8]) -> Result<Resource<'static>, Reason> {
 /// Chaque ressource se désigne par son chemin.
 #[test]
 fn chaque_ressource_se_designe() {
-    let cas: [(Method, &[u8], Resource<'_>); 23] = [
+    let cas: [(Method, &[u8], Resource<'_>); 25] = [
         (Method::Post, b"/v1/tokens", Resource::Tokens),
+        (Method::Post, b"/v1/devices", Resource::Devices),
+        (Method::Post, b"/v1/invitations", Resource::Invitations),
         (Method::Put, b"/v1/me/password", Resource::OwnPassword),
         (Method::Get, b"/v1/me/devices", Resource::OwnDevices),
         (
@@ -553,6 +555,75 @@ fn un_chemin_de_soi_mal_forme_ne_designe_rien() {
     ] {
         assert_eq!(
             ou(Method::Get, chemin).err(),
+            Some(Reason::NoSuchResource),
+            "{}",
+            std::str::from_utf8(chemin).expect("utf8")
+        );
+    }
+}
+
+/// **L'ENRÔLEMENT N'EXIGE AUCUN JETON**, comme l'échange d'identifiants.
+///
+/// # SANS CELA, IL N'Y AURAIT PAS D'AMORÇAGE
+///
+/// Celui qui s'enrôle n'a rien : ni jeton, ni appareil déjà connu. Exiger un
+/// jeton ferait de l'enrôlement une opération qui suppose ce qu'elle produit.
+/// Ce qui l'autorise est l'invitation, dans le corps, scellée par la même clé.
+#[test]
+fn l_enrolement_n_exige_aucun_jeton() {
+    assert_eq!(
+        resolu(Method::Post, b"/v1/devices").expect("résolue").scope,
+        None,
+        "aucune portée, donc aucun jeton"
+    );
+    // Et c'est la SEULE autre : `Tokens` mise à part, tout le reste en exige un.
+    assert_eq!(
+        resolu(Method::Post, b"/v1/tokens").expect("résolue").scope,
+        None
+    );
+}
+
+/// **MAIS INVITER EST UN GESTE D'EXPLOITANT.**
+///
+/// La dissymétrie est le cœur du dispositif : n'importe qui peut présenter une
+/// invitation, personne ne peut en fabriquer une sans la portée `admin` — et
+/// l'API n'émet jamais cette portée, qui se frappe depuis la machine.
+#[test]
+fn inviter_exige_l_administration() {
+    assert_eq!(
+        resolu(Method::Post, b"/v1/invitations")
+            .expect("résolue")
+            .scope,
+        Some(Scope::one(Area::Admin, Rights::Write))
+    );
+}
+
+/// **LES DEUX NE SERVENT QUE `POST`.**
+///
+/// Pas de `GET` sur les invitations : il n'y a pas de registre à lire — l'usage
+/// unique vient du magasin d'appareils, et non d'une liste d'invitations en
+/// attente. Pas de `GET` sur `/v1/devices` non plus : ses appareils, on les lit
+/// sous `/v1/me/devices`, avec un jeton.
+#[test]
+fn l_enrolement_et_l_invitation_ne_servent_que_post() {
+    assert_eq!(Resource::Devices.allowed(), &[Method::Post]);
+    assert_eq!(Resource::Invitations.allowed(), &[Method::Post]);
+    for methode in [Method::Get, Method::Head, Method::Put, Method::Delete] {
+        assert!(!Resource::Devices.serves(methode), "{methode:?}");
+        assert!(!Resource::Invitations.serves(methode), "{methode:?}");
+    }
+}
+
+/// **UN SEGMENT SOUS L'UNE OU L'AUTRE NE DÉSIGNE RIEN.**
+#[test]
+fn rien_ne_pend_sous_l_enrolement_ni_sous_l_invitation() {
+    for chemin in [
+        &b"/v1/devices/a1"[..],
+        &b"/v1/invitations/a1"[..],
+        &b"/v1/devices/a1/quelque-chose"[..],
+    ] {
+        assert_eq!(
+            ou(Method::Post, chemin).err(),
             Some(Reason::NoSuchResource),
             "{}",
             std::str::from_utf8(chemin).expect("utf8")

@@ -106,6 +106,15 @@ impl Key {
         }
         Ok(Self { octets: clef })
     }
+
+    /// Le secret, pour qui scelle DANS CETTE CRATE.
+    ///
+    /// **`pub(crate)` ET NON `pub`** : l'invitation se scelle avec la même clé
+    /// que le jeton, et les deux vivent ici. L'ouvrir au-dehors ferait de cette
+    /// clé une valeur qu'on se passe, et le premier journal venu la montrerait.
+    pub(crate) const fn octets(&self) -> &[u8; KEY_OCTETS_MIN] {
+        &self.octets
+    }
 }
 
 /// Ce qu'un jeton dit.

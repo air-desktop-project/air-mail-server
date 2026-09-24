@@ -64,6 +64,7 @@ extern crate std;
 
 mod base64url;
 mod error;
+mod invitation;
 mod json;
 mod path;
 mod problem;
@@ -72,6 +73,10 @@ mod route;
 mod scope;
 mod token;
 
+// **LE DÉCODAGE SORT, L'ENCODAGE NON.** Le serveur lit une clef publique que
+// le client a écrite ; il n'écrit rien en base64url de son côté, et exporter
+// ce dont personne ne se sert donnerait une surface à maintenir pour rien.
+pub use base64url::decode as decode_base64url;
 pub use error::{Error, Reason};
 pub use json::{DEPTH_MAX, FIELDS_MAX as JSON_FIELDS_MAX, Json};
 pub use path::{SEGMENT_OCTETS_MAX, SEGMENTS_MAX, Segments, split_query};
@@ -83,4 +88,12 @@ pub use token::{
     ENCODED_OCTETS_MAX, KEY_OCTETS_MIN, Key, KeyProblem, LIFETIME_MAX_US, LOGIN_OCTETS_MAX,
     MAC_OCTETS, TOKEN_OCTETS_MAX, Token, VERSION as TOKEN_VERSION, authorize, bearer, issue,
     key_from_hex, verify,
+};
+// **LES NOMS SONT PRÉFIXÉS, ET CE N'EST PAS DE LA COQUETTERIE** : `issue` et
+// `verify` existent des deux côtés, et importer les deux sans les distinguer
+// ferait sceller une invitation là où l'on croyait sceller un jeton.
+pub use invitation::{
+    ENCODED_OCTETS_MAX as INVITATION_ENCODED_OCTETS_MAX, INVITATION_OCTETS_MAX, Invitation,
+    LIFETIME_MAX_US as INVITATION_LIFETIME_MAX_US, VERSION as INVITATION_VERSION,
+    issue as issue_invitation, verify as verify_invitation,
 };
