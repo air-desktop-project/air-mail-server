@@ -1114,26 +1114,81 @@ fn un_champ_inconnu_n_empeche_pas_un_enrolement() {
     );
 }
 
-/// **UNE CHAÎNE ÉCHAPPÉE SE REFUSE**, et c'est ce que coûte une machine qui
-/// n'alloue pas.
+/// **UN NOM ÉCHAPPÉ S'ENRÔLE, ET C'EST UN PIÈGE RÉEL QUI L'A IMPOSÉ.**
 ///
-/// Déséchapper demanderait un tampon que cette session n'a pas. Pour
-/// l'invitation et la clef, l'alphabet de §5 de RFC 4648 ne contient rien qu'on
-/// échappe ; pour le NOM, cela exclut `"`, `\` et les caractères de contrôle —
-/// l'UTF-8 littéral, lui, passe entier.
+/// # CE QUI A CHANGÉ, ET POURQUOI
+///
+/// La première écriture refusait toute chaîne échappée : déséchapper demandait
+/// un tampon que cette session n'avait pas. C'était juste pour l'invitation et
+/// la clef — leur alphabet est celui de §5 de RFC 4648, qui ne contient rien
+/// qu'on échappe.
+///
+/// **POUR LE NOM, C'ÉTAIT UN PIÈGE D'INTEROPÉRABILITÉ.** Beaucoup d'encodeurs
+/// JSON échappent le non-ASCII PAR DÉFAUT — celui de Python le premier — et un
+/// appareil nommé « Téléphone de Renée » partait alors en
+/// `T\u00e9l\u00e9phone`. L'enrôlement échouait avec un `401` qui n'expliquait
+/// rien, et les cinq applications natives l'auraient rencontré.
+///
+/// Le nom a donc sa place à part dans le tampon de sortie, et se déséchappe.
 #[test]
-fn une_chaine_echappee_ne_s_enrole_pas() {
+fn un_nom_echappe_s_enrole() {
     let invitation = une_invitation("marc", MAINTENANT + HEURE);
     let corps = std::format!(
-        r#"{{"invitation":"{invitation}","publicKey":"BAECAwQ","name":"iPhone de Marc\/"}}"#
+        r#"{{"invitation":"{invitation}","publicKey":"BAECAwQ","name":"T\u00e9l\u00e9phone de Ren\u00e9e"}}"#
     );
     let champs = champs_d_enrolement();
     let tete = entete(&champs);
     let mut place = [0_u8; PLACE];
     let session = une_session();
-    let tour = session.request(&tete, corps.as_bytes(), MAINTENANT, &mut place);
-    assert_eq!(tour.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(tour.next(), Next::Respond);
+    assert_eq!(
+        session
+            .request(&tete, corps.as_bytes(), MAINTENANT, &mut place)
+            .next(),
+        Next::Enrol {
+            account: "marc",
+            public_key: "BAECAwQ",
+            name: "Téléphone de Renée",
+        },
+        "un nom échappé doit arriver DÉSÉCHAPPÉ"
+    );
+}
+
+/// **UN NOM PLUS LONG QUE LA BORNE SE REFUSE ICI**, et non au magasin.
+///
+/// Le refuser plus loin ferait consommer l'invitation pour rien : le magasin
+/// n'est atteint qu'après, et une invitation ne vaut qu'une fois.
+#[test]
+fn un_nom_trop_long_ne_s_enrole_pas() {
+    let invitation = une_invitation("marc", MAINTENANT + HEURE);
+    let trop: std::string::String =
+        core::iter::repeat_n('x', super::NOM_D_APPAREIL_MAX + 1).collect();
+    let corps =
+        std::format!(r#"{{"invitation":"{invitation}","publicKey":"BAECAwQ","name":"{trop}"}}"#);
+    let champs = champs_d_enrolement();
+    let tete = entete(&champs);
+    let mut place = [0_u8; PLACE];
+    let session = une_session();
+    assert_eq!(
+        session
+            .request(&tete, corps.as_bytes(), MAINTENANT, &mut place)
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+
+    // **ET À LA BORNE EXACTE, CELA PASSE.**
+    let juste: std::string::String = core::iter::repeat_n('x', super::NOM_D_APPAREIL_MAX).collect();
+    let corps =
+        std::format!(r#"{{"invitation":"{invitation}","publicKey":"BAECAwQ","name":"{juste}"}}"#);
+    let champs = champs_d_enrolement();
+    let tete = entete(&champs);
+    let mut place = [0_u8; PLACE];
+    let session = une_session();
+    assert!(matches!(
+        session
+            .request(&tete, corps.as_bytes(), MAINTENANT, &mut place)
+            .next(),
+        Next::Enrol { .. }
+    ));
 }
 
 /// **UN NOM EN UTF-8 LITTÉRAL PASSE**, lui : c'est la moitié de la règle
@@ -1488,4 +1543,102 @@ fn un_tampon_trop_court_pour_un_defi_est_notre_faute() {
         vu_un_cinq_cents,
         "aucune taille n'a mis le chemin d'écriture en défaut"
     );
+}
+
+/// **UN DÉFI AUX BORNES SE DÉCHIFFRE**, et c'est un défaut réel qui impose cet
+/// essai.
+///
+/// # CE QUE LA PRODUCTION A TROUVÉ ET QUE LES ESSAIS AVAIENT MANQUÉ
+///
+/// La place où la session déchiffre ce qu'on lui présente valait la taille d'un
+/// JETON. Un défi est plus gros — il porte DEUX noms, le compte et l'appareil —
+/// et son déchiffrage échouait donc par manque de place : `500` à toute
+/// ouverture de session par clef.
+///
+/// **L'ESSAI DE BOUT EN BOUT NE L'A PAS VU** parce que son compte s'appelle
+/// `marie` : le total tombait à trois octets sous la borne. En production, avec
+/// un compte de seize caractères, il la dépassait de huit. Un essai qui passe
+/// par la longueur de ses données d'épreuve ne prouve rien.
+///
+/// Celui-ci emploie donc les noms les plus longs que les bornes admettent.
+#[test]
+fn un_defi_aux_bornes_se_dechiffre() {
+    let compte: std::string::String =
+        core::iter::repeat_n('c', ams_api::LOGIN_OCTETS_MAX).collect();
+    let appareil: std::string::String =
+        core::iter::repeat_n('a', ams_api::CHALLENGE_ID_OCTETS_MAX).collect();
+
+    let session = une_session_avec_domaine();
+    let corps = std::format!(r#"{{"login":"{compte}","deviceId":"{appareil}"}}"#);
+    let champs = champs_vers(b"/v1/sessions/challenge");
+    let tete = entete(&champs);
+    let mut place = [0_u8; PLACE];
+    let tour = session.request(&tete, corps.as_bytes(), MAINTENANT, &mut place);
+    assert_eq!(tour.status(), StatusCode::CREATED, "le défi doit s'émettre");
+    let dit = std::string::String::from(std::str::from_utf8(tour.body()).expect("utf8"));
+    let defi = dit
+        .split_once("\"challenge\":\"")
+        .and_then(|(_, reste)| reste.split_once('"'))
+        .map(|(texte, _)| std::string::String::from(texte))
+        .expect("un défi");
+
+    // **ET IL SE RELIT** : c'est ici que la place manquait.
+    let reponse = std::format!(r#"{{"challenge":"{defi}","signature":"AQID"}}"#);
+    let champs = champs_vers(b"/v1/sessions");
+    let tete = entete(&champs);
+    let mut place = [0_u8; PLACE];
+    let session = une_session_avec_domaine();
+    let tour = session.request(&tete, reponse.as_bytes(), MAINTENANT, &mut place);
+    assert_eq!(
+        tour.next(),
+        Next::CheckDevice {
+            account: &compte,
+            device: &appareil,
+            issued_at_seconds: MAINTENANT / 1_000_000,
+            challenge: &defi,
+            signature: "AQID",
+        },
+        "un défi aux bornes doit se déchiffrer, et non rendre 500"
+    );
+}
+
+/// **L'INVITATION ET LA CLEF NE S'ACCEPTENT JAMAIS ÉCHAPPÉES**, contrairement au
+/// nom.
+///
+/// # POURQUOI LA RÈGLE DIFFÈRE D'UN CHAMP À L'AUTRE
+///
+/// Leur alphabet est celui de §5 de RFC 4648 — lettres, chiffres, tiret et
+/// souligné — et **aucun encodeur JSON n'échappe rien de cela**. Une invitation
+/// échappée n'est donc jamais l'œuvre d'un client honnête : c'est une écriture
+/// de plus pour désigner la même chose, et ce dépôt refuse partout qu'une chose
+/// ait deux écritures.
+///
+/// Le NOM est l'inverse : il porte du texte humain, et beaucoup d'encodeurs y
+/// échappent le non-ASCII par défaut. Le refuser aurait fait échouer tout
+/// appareil au nom accentué.
+#[test]
+fn ni_l_invitation_ni_la_clef_ne_s_acceptent_echappees() {
+    let invitation = une_invitation("marc", MAINTENANT + HEURE);
+    // La MÊME chaîne, écrite deux fois : dans l'invitation chaque `A`
+    // devient `\u0041`, et la clef `BAECAwQ` s'écrit `BAECAw\u0051`.
+    let cas = [
+        std::format!(
+            r#"{{"invitation":"{}","publicKey":"BAECAwQ"}}"#,
+            invitation.replace('A', "\\u0041")
+        ),
+        std::format!(r#"{{"invitation":"{invitation}","publicKey":"BAECAw\u0051"}}"#),
+    ];
+    for corps in &cas {
+        let champs = champs_d_enrolement();
+        let tete = entete(&champs);
+        let mut place = [0_u8; PLACE];
+        let session = une_session();
+        let tour = session.request(&tete, corps.as_bytes(), MAINTENANT, &mut place);
+        assert_eq!(
+            tour.status(),
+            StatusCode::UNAUTHORIZED,
+            "une écriture échappée est passée : {corps}"
+        );
+        assert_eq!(tour.next(), Next::Respond);
+    }
 }

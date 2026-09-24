@@ -486,6 +486,12 @@ authorization: Bearer AQECAAAAAG…</code></pre>
   "addresses": ["marie@example.com"] }</code></pre>
   <p>Les adresses reviennent ici parce que l'application n'a pas encore de jeton pour les demander. L'<code>id</code> est le <strong>condensat SHA-256 de la clef publique</strong>, en soixante-quatre chiffres hexadécimaux : il ne demande aucun aléa, il est unique par construction, et c'est déjà l'empreinte dont l'appairage croisé aura besoin.</p>
   <div class="note prudence">
+    <span class="etiquette">Le nom peut être échappé — mais pas l'invitation ni la clef</span>
+    <p>Beaucoup d'encodeurs JSON échappent le non-ASCII <strong>par défaut</strong> : l'encodeur standard de Python écrit <code>"T\u00e9l\u00e9phone"</code> plutôt que <code>"Téléphone"</code>. Le champ <code>name</code> accepte les deux écritures et les rend identiques.</p>
+    <p>L'<code>invitation</code> et la <code>publicKey</code>, elles, <strong>ne s'échappent jamais</strong> : leur alphabet est celui de §5 de RFC 4648, qui ne contient rien qu'un encodeur JSON échapperait. Les y accepter n'ouvrirait aucun usage.</p>
+    <p>Un <code>name</code> de plus de 128 octets une fois déséchappé rend <code>400</code>, <strong>sans consommer l'invitation</strong>.</p>
+  </div>
+  <div class="note prudence">
     <span class="etiquette">Une invitation ne vaut que pour le PREMIER appareil</span>
     <p>Elle n'est pas consommée par un registre : elle cesse de valoir parce que le compte a désormais un appareil. Rejouer la même invitation — même encore valide — rend <code>409</code> avec <code>/problems/conflict</code>.</p>
     <p><strong>Conséquence pour l'exploitation :</strong> réinviter quelqu'un exige de <a href="#r-moi">révoquer</a> ses appareils d'abord. C'est la bonne hygiène après un téléphone perdu, et c'est une gêne tant que l'appairage croisé n'est pas livré.</p>

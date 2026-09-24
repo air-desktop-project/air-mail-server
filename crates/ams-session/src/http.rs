@@ -452,7 +452,7 @@ impl Http {
         //    permet au nom de compte de vivre aussi longtemps que la réponse
         //    sans qu'aucune part n'écrase l'autre.
         let (place_du_chemin, reste) = couper(sortie, CHEMIN_OCTETS);
-        let (place_du_jeton, place_de_la_reponse) = couper(reste, ams_api::TOKEN_OCTETS_MAX);
+        let (place_du_sceau, place_de_la_reponse) = couper(reste, PLACE_DU_SCEAU);
 
         // 4. Le routage. La chaîne de requête ne participe pas : elle n'est pas
         //    dans le chemin (§3.4 de RFC 3986).
@@ -495,7 +495,7 @@ impl Http {
                 return self.repondre_a_un_defi(
                     corps,
                     maintenant,
-                    place_du_jeton,
+                    place_du_sceau,
                     place_de_la_reponse,
                 );
             }
@@ -505,13 +505,13 @@ impl Http {
                     &self.clef,
                     corps,
                     maintenant,
-                    place_du_jeton,
+                    place_du_sceau,
                     place_de_la_reponse,
                 );
             }
             return echanger_un_jeton(self.alt_svc(), corps, place_de_la_reponse);
         };
-        let jeton = match self.authentifier(tete, maintenant, voulue, place_du_jeton) {
+        let jeton = match self.authentifier(tete, maintenant, voulue, place_du_sceau) {
             Ok(jeton) => jeton,
             Err(raison) => return Err((raison, place_de_la_reponse)),
         };
@@ -798,12 +798,40 @@ fn decimales(valeur: u16, out: &mut [u8; 5]) -> usize {
 /// Le nom du champ qui porte le type d'un contenu.
 const EN_TETE_TYPE: &[u8] = b"content-type";
 
+/// Ce qu'un nom d'appareil peut faire de long, une fois déséchappé.
+///
+/// **LA MÊME BORNE QUE `ams_config::NOM_OCTETS_MAX`**, et cette crate ne peut
+/// pas la lire : elle ne dépend pas du magasin, et ne doit pas en dépendre. Un
+/// essai d'`ams-server` — qui voit les deux — vérifie qu'elles coïncident, parce
+/// qu'une borne recopiée finit par diverger.
+pub const NOM_D_APPAREIL_MAX: usize = 128;
+
+/// La place où l'on déchiffre ce qu'un pair présente : un jeton, ou un défi.
+///
+/// # ELLE EST DIMENSIONNÉE SUR LE PLUS GRAND DES DEUX, ET C'EST UN DÉFAUT RÉEL
+///
+/// Elle valait la taille d'un JETON. Un défi est plus gros — il porte DEUX noms,
+/// le compte et l'appareil, là où un jeton n'en porte qu'un — et son déchiffrage
+/// échouait donc par manque de place, rendant `500` à toute ouverture de session
+/// par clef.
+///
+/// **L'ESSAI DE BOUT EN BOUT NE L'A PAS VU** : son compte s'appelle `marie`, et
+/// le total tombait à trois octets sous la borne. En production, avec
+/// `thierry.delhaise`, il la dépassait de huit. Un essai qui passe par la
+/// longueur de ses données d'épreuve ne prouve rien, et c'est la production qui
+/// l'a dit.
+const PLACE_DU_SCEAU: usize = if ams_api::CHALLENGE_OCTETS_MAX > ams_api::TOKEN_OCTETS_MAX {
+    ams_api::CHALLENGE_OCTETS_MAX
+} else {
+    ams_api::TOKEN_OCTETS_MAX
+};
+
 /// Ce que le tampon de travail doit faire au minimum.
 ///
-/// Le chemin décodé, le jeton déchiffré, et de quoi écrire une réponse. En
-/// dessous, tout se refuse par manque de place — ce qui est notre faute, et se
-/// dit comme telle.
-pub const SCRATCH_OCTETS_MIN: usize = CHEMIN_OCTETS + ams_api::TOKEN_OCTETS_MAX + 1024;
+/// Le chemin décodé, le plus grand des deux sceaux déchiffrés, et de quoi écrire
+/// une réponse. En dessous, tout se refuse par manque de place — ce qui est
+/// notre faute, et se dit comme telle.
+pub const SCRATCH_OCTETS_MIN: usize = CHEMIN_OCTETS + PLACE_DU_SCEAU + 1024;
 
 /// Coupe un tampon en deux, sans jamais déborder.
 ///
@@ -918,8 +946,22 @@ fn enroler_un_appareil<'o>(
     place_de_l_invitation: &'o mut [u8],
     sortie: &'o mut [u8],
 ) -> Result<Turn<'o>, (Reason, &'o mut [u8])> {
+    // **LE NOM A SA PLACE À PART**, et le reste sert aux refus : un nom
+    // déséchappé doit vivre aussi longtemps que la réponse, et le corps de la
+    // requête ne peut pas le porter — il est en lecture seule.
+    let (place_du_nom, sortie) = couper(sortie, NOM_D_APPAREIL_MAX);
     let Some((invitation, public_key, name)) = lire_un_enrolement(corps) else {
         return Err((Reason::BadToken, sortie));
+    };
+    // **UN NOM QUI NE TIENT PAS DANS LA BORNE SE REFUSE ICI**, et non au
+    // magasin : le refuser plus loin ferait écrire une invitation consommée
+    // pour rien.
+    let name = match name {
+        None => "",
+        Some(texte) => match texte.unescape(place_du_nom) {
+            Ok(clair) => clair,
+            Err(_) => return Err((Reason::BadJsonBody, sortie)),
+        },
     };
     let lue = match verify_invitation(
         clef,
@@ -952,7 +994,7 @@ fn enroler_un_appareil<'o>(
 /// contrôle — un nom d'appareil n'en a pas besoin, et l'UTF-8 littéral passe
 /// entier. Décoder les échappements demanderait un tampon que cette machine
 /// n'a pas.
-fn lire_un_enrolement(corps: &[u8]) -> Option<(&str, &str, &str)> {
+fn lire_un_enrolement(corps: &[u8]) -> Option<(&str, &str, Option<ams_api::Str<'_>>)> {
     use ams_api::{Event, Reader};
 
     let mut lecteur = Reader::new(corps);
@@ -960,7 +1002,7 @@ fn lire_un_enrolement(corps: &[u8]) -> Option<(&str, &str, &str)> {
     let mut public_key = None;
     // **LE NOM EST FACULTATIF** : un appareil qu'on n'a pas nommé reste un
     // appareil, et refuser l'enrôlement pour cela serait une pédanterie.
-    let mut name = "";
+    let mut name = None;
     let mut attendu = 0_u8;
     loop {
         match lecteur.read() {
@@ -974,15 +1016,18 @@ fn lire_un_enrolement(corps: &[u8]) -> Option<(&str, &str, &str)> {
                     _ => 0,
                 };
             }
-            Ok(Some(Event::Text(texte))) => {
-                let clair = texte.as_plain()?;
-                match attendu {
-                    1 => invitation = Some(clair),
-                    2 => public_key = Some(clair),
-                    3 => name = clair,
-                    _ => {}
-                }
-            }
+            Ok(Some(Event::Text(texte))) => match attendu {
+                // **L'INVITATION ET LA CLEF NE S'ÉCHAPPENT JAMAIS** : leur
+                // alphabet est celui de §5 de RFC 4648, qui ne contient rien
+                // qu'on échappe. Les accepter échappées n'ouvrirait aucun usage
+                // et ajouterait un chemin de plus.
+                1 => invitation = Some(texte.as_plain()?),
+                2 => public_key = Some(texte.as_plain()?),
+                // **LE NOM, LUI, SE DÉSÉCHAPPE**, et l'appelant s'en charge :
+                // c'est lui qui tient le tampon. Voir `enroler_un_appareil`.
+                3 => name = Some(texte),
+                _ => {}
+            },
             Ok(Some(_)) => {}
         }
     }

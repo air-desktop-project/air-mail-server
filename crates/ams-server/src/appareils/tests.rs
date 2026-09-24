@@ -307,3 +307,24 @@ async fn un_magasin_absent_se_cree_au_premier_enrolement() {
     assert!(chemin.exists());
     assert_eq!(magasin.du_compte("marc").len(), 1);
 }
+
+/// **LES DEUX BORNES DU NOM D'APPAREIL COÏNCIDENT.**
+///
+/// # POURQUOI CET ESSAI VIT ICI, ET NULLE PART AILLEURS
+///
+/// La session déséchappe un nom d'appareil dans un tampon borné ; le magasin le
+/// refuse au-delà de sa propre borne. **Ce sont deux constantes dans deux
+/// caisses qui ne se voient pas** — `ams-session` ne dépend pas du magasin, et
+/// ne doit pas en dépendre.
+///
+/// Cette caisse-ci voit les deux. Si elles divergeaient, un nom passerait la
+/// session et ferait ÉCHOUER l'écriture du magasin — après que l'invitation a
+/// été consommée, donc sans recours pour l'utilisateur.
+#[test]
+fn les_deux_bornes_du_nom_coincident() {
+    assert_eq!(
+        ams_session::http::NOM_D_APPAREIL_MAX,
+        ams_config::NOM_OCTETS_MAX,
+        "la session et le magasin n'admettent pas le même nom d'appareil"
+    );
+}

@@ -484,6 +484,12 @@ authorization: Bearer AQECAAAAAG…</code></pre>
   "addresses": ["marie@example.com"] }</code></pre>
   <p>The addresses come back here because the application has no token yet to ask for them. The <code>id</code> is the <strong>SHA-256 digest of the public key</strong>, in sixty-four hexadecimal digits: it needs no randomness, it is unique by construction, and it is already the fingerprint that cross-enrolment will need.</p>
   <div class="note prudence">
+    <span class="etiquette">The name may be escaped — the invitation and key may not</span>
+    <p>Many JSON encoders escape non-ASCII <strong>by default</strong>: Python's standard encoder writes <code>"T\u00e9l\u00e9phone"</code> rather than <code>"Téléphone"</code>. The <code>name</code> field accepts both spellings and treats them as one.</p>
+    <p>The <code>invitation</code> and <code>publicKey</code>, by contrast, are <strong>never escaped</strong>: their alphabet is that of RFC 4648 §5, which holds nothing a JSON encoder would escape. Accepting escapes there would open no use.</p>
+    <p>A <code>name</code> longer than 128 bytes once unescaped returns <code>400</code>, <strong>without consuming the invitation</strong>.</p>
+  </div>
+  <div class="note prudence">
     <span class="etiquette">An invitation is only good for the FIRST device</span>
     <p>It is not consumed by a registry: it stops being valid because the account now has a device. Replaying the same invitation — even one still within its lifetime — returns <code>409</code> with <code>/problems/conflict</code>.</p>
     <p><strong>Operational consequence:</strong> re-inviting someone requires <a href="#r-self">revoking</a> their devices first. That is the right hygiene after a lost phone, and an inconvenience until cross-enrolment ships.</p>
