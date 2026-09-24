@@ -92,6 +92,14 @@ struct Entree<'a> {
     type_de_corps: Option<&'a [u8]>,
     /// L'instant présent.
     maintenant: u32,
+    /// Ce serveur connaît-il son domaine ?
+    ///
+    /// **LES DEUX MOITIÉS SE JOUENT DANS LA MÊME CAMPAGNE**, comme pour HTTP/3.
+    /// Sans ce drapeau, le banc n'avait jamais de domaine, et les deux routes de
+    /// session par clef répondaient TOUJOURS `501` : le vrai chemin du défi
+    /// n'était jamais exercé. C'est l'intégration continue qui l'a dit, en
+    /// trouvant un refus dont le document n'était pas au vocabulaire.
+    domaine_servi: bool,
     /// Le port UDP d'HTTP/3. **Zéro veut dire « pas servi »** — c'est le seul
     /// port qu'un socket lié ne rend jamais, puisque `:0` fait choisir le noyau.
     port_h3: u16,
@@ -120,6 +128,10 @@ fuzz_target!(|entree: Entree| {
     let session = match entree.port_h3 {
         0 => session,
         port => session.with_h3_port(port),
+    };
+    let session = match entree.domaine_servi {
+        true => session.avec_domaine(DOMAINE),
+        false => session,
     };
     let maintenant = u64::from(entree.maintenant).saturating_add(HEURE);
 
@@ -346,6 +358,30 @@ fuzz_target!(|entree: Entree| {
         }
     }
 
+    // **UN `501` NE SORT QUE DES ROUTES DE SESSION PAR CLEF, ET SANS DOMAINE.**
+    //
+    // C'est la seule capacité que cette session puisse ne pas servir. Le voir
+    // ailleurs voudrait dire qu'une route a cessé d'être implémentée sans que
+    // personne ne le décide.
+    if tour.status() == StatusCode::NOT_IMPLEMENTED {
+        assert!(
+            !entree.domaine_servi,
+            "un 501 alors que le domaine est servi"
+        );
+        let mut place_du_chemin = [0_u8; 2 * 1024];
+        let (chemin, _requete) = split_query(tete.path());
+        let resolu = resolve(tete.method(), chemin, &mut place_du_chemin)
+            .expect("un 501 suppose une route résolue");
+        assert!(
+            matches!(
+                resolu.resource,
+                ams_api::Resource::Sessions | ams_api::Resource::SessionChallenge
+            ),
+            "un 501 est sorti de {:?}",
+            resolu.resource
+        );
+    }
+
     // PROPRIÉTÉ 5 : un refus est tiré d'un vocabulaire fini.
     if matches!(tour.next(), Next::Respond) && tour.status().class() >= 4 {
         let mut place = [0_u8; 256];
@@ -375,8 +411,15 @@ fuzz_target!(|entree: Entree| {
 ///
 /// **C'EST LE VOCABULAIRE ENTIER D'UN REFUS.** Ajouter une raison sans l'ajouter
 /// ici fait échouer la cible, ce qui est exactement ce qu'on veut : une réponse
+
+/// Le domaine que ce banc fait servir, quand l'entrée le demande.
+const DOMAINE: &[u8] = b"mail.exemple.fr";
+
 /// qu'on n'a pas prévue est une réponse qu'on n'a pas relue.
-const RAISONS: [ams_api::Reason; 10] = [
+const RAISONS: [ams_api::Reason; 11] = [
+    // **SANS DOMAINE, LES SESSIONS PAR CLEF NE SONT PAS SERVIES.** Un défi lié à
+    // un domaine vide serait un défi que deux serveurs partageraient.
+    ams_api::Reason::NotImplemented,
     ams_api::Reason::BadPath,
     ams_api::Reason::PathTooLong,
     ams_api::Reason::NoSuchResource,

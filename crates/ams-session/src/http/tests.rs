@@ -1228,13 +1228,26 @@ fn sans_domaine_les_sessions_par_clef_ne_se_servent_pas() {
         let champs = champs_vers(chemin);
         let tete = entete(&champs);
         let mut place = [0_u8; PLACE];
+        let tour = session.request(&tete, corps, MAINTENANT, &mut place);
         assert_eq!(
-            session
-                .request(&tete, corps, MAINTENANT, &mut place)
-                .status(),
+            tour.status(),
             StatusCode::NOT_IMPLEMENTED,
             "{}",
             std::str::from_utf8(chemin).expect("utf8")
+        );
+
+        // **LE DOCUMENT EST CELUI DU VOCABULAIRE, ET CET ESSAI LE LIE.**
+        //
+        // Le banc de fuzz vérifie qu'un refus écrit l'un des documents connus,
+        // et sa liste est tenue à la main. Un motif devenu joignable sans y
+        // figurer ne se voit qu'en campagne, au hasard d'une entrée — et
+        // l'intégration continue l'a trouvé là où la machine de développement
+        // ne l'avait pas. Cet essai-ci le dit à chaque `cargo test`.
+        let mut attendu = [0_u8; 256];
+        assert_eq!(
+            tour.body(),
+            ams_api::problem(ams_api::Reason::NotImplemented, &mut attendu).expect("écrivable"),
+            "le 501 doit écrire le document de `NotImplemented`"
         );
     }
 }
