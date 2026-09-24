@@ -139,15 +139,21 @@
     <tr><td>Android</td><td>Keystore, StrongBox si présent</td><td>BiometricPrompt</td></tr>
     <tr><td>macOS</td><td>Secure Enclave (Apple Silicon, puce T2)</td><td>Touch ID</td></tr>
     <tr><td>Windows</td><td>TPM par CNG</td><td>Windows Hello</td></tr>
-    <tr><td><strong>Linux</strong></td><td><strong>Pas de solution générale</strong></td><td><strong>Aucune</strong></td></tr>
+    <tr><td><strong>Linux</strong></td><td>Fichier sous <code>$HOME/.air-mail-server/</code> (0700/0600)</td><td><strong>Aucune</strong></td></tr>
   </tbody>
 </table>
 </div>
 
 <div class="note danger">
-  <span class="etiquette">Linux est le maillon faible, et il faut le décider</span>
-  <p>Il n'existe pas d'équivalent répandu de la Secure Enclave sur un poste Linux ordinaire. La clef y vivra dans un fichier protégé par le trousseau du système, ou par une phrase de passe — <strong>extractible par tout code tournant sous le même compte</strong>, et sans biométrie.</p>
-  <p>Trois issues, à trancher : accepter cette faiblesse en la nommant ; exiger un jeton matériel (YubiKey) sous Linux ; ou ne pas livrer d'application Linux. Ce document ne tranche pas — mais l'ignorer ferait croire à une sécurité uniforme qui n'existera pas.</p>
+  <span class="etiquette">Linux est le maillon faible — TRANCHÉ : on accepte, et on le nomme</span>
+  <p>Il n'existe pas d'équivalent répandu de la Secure Enclave sur un poste Linux ordinaire. <strong>Décision : la clef privée vit dans un fichier, sous <code>$HOME/.air-mail-server/</code></strong> — répertoire en <code>0700</code>, fichier en <code>0600</code>. Pas de jeton matériel exigé, pas d'application Linux sacrifiée.</p>
+  <p><strong>Ce que cela vaut, et ce que cela ne vaut pas.</strong> Les permissions écartent les autres comptes de la machine. Elles n'écartent <em>rien</em> de ce qui tourne sous le compte de l'utilisateur : un script, une extension, un paquet compromis lisent ce fichier. Une sauvegarde du répertoire personnel l'emporte, et une synchronisation le recopie ailleurs. Il n'y a pas de biométrie : la clef s'emploie parce qu'elle est lisible, et non parce que quelqu'un s'est authentifié.</p>
+  <div class="note danger">
+    <span class="etiquette">Le serveur ne peut pas faire la différence, et ne le prétendra pas</span>
+    <p>Une signature d'enclave et une signature de fichier sont <strong>identiques sur le fil</strong>. Rien, côté serveur, ne distingue un iPhone d'un poste Linux — seule l'attestation de plateforme le permettrait, et elle n'existe pas sous Linux (voir §6).</p>
+    <p>Conséquence à ne pas perdre de vue : <strong>« authentification biométrique » décrit ce que font iOS, Android, Windows Hello et macOS, pas ce que le serveur exige.</strong> La garantie réelle est « une clef que ce compte a enrôlée a signé », et elle est la même partout. Un compte dont un appareil Linux est enrôlé vaut la sécurité de ce fichier.</p>
+  </div>
+  <p>Cette décision est <strong>provisoire et révisable</strong> : le jour où un poste Linux doit valoir un téléphone — une administration, un poste d'exploitant —, la voie est le jeton matériel, qui parle la même courbe P-256 et ne change rien au serveur.</p>
 </div>
 
 <h2 id="flux"><span class="numero">4</span>Les flux</h2>
@@ -479,7 +485,7 @@
 <table>
   <thead><tr><th>Risque</th><th>Ce qu'il faut décider ou surveiller</th></tr></thead>
   <tbody>
-    <tr><td><strong>Linux sans enclave</strong></td><td>Accepter la faiblesse en la nommant, exiger un jeton matériel, ou ne pas livrer d'application Linux</td></tr>
+    <tr><td><strong>Linux sans enclave</strong></td><td><strong>Tranché :</strong> clef en fichier sous <code>$HOME/.air-mail-server/</code> (0700/0600), faiblesse acceptée et nommée. À surveiller : le serveur ne distingue pas cette signature de celle d'une enclave, donc <strong>ne promettez pas « biométrique » à qui déploie sous Linux</strong>. Jeton matériel si un poste doit un jour valoir un téléphone</td></tr>
     <tr><td><strong>Perte de tous les appareils</strong></td><td>Sans appareil enrôlé, l'enrôlement croisé est impossible. Il faut une voie de secours — une nouvelle invitation de l'exploitant — et elle doit être aussi contrôlée que la première</td></tr>
     <tr><td><strong>Réinitialisation biométrique</strong></td><td>Sur iOS, ajouter un doigt ou un visage <strong>invalide une clef liée à la biométrie</strong>. L'application doit détecter ce cas et proposer un réenrôlement, sinon l'utilisateur est bloqué sans comprendre</td></tr>
     <tr><td><strong>Sauvegarde et restauration</strong></td><td>Une clef d'enclave ne se restaure pas sur un nouveau téléphone. Un utilisateur qui change d'appareil doit <strong>réenrôler</strong> — depuis l'ancien tant qu'il l'a, par invitation sinon</td></tr>

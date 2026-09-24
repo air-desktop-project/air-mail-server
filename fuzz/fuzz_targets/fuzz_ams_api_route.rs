@@ -129,16 +129,24 @@ fuzz_target!(|entree: Entree| {
         );
     }
 
-    // PROPRIÉTÉ 5 : toute ressource exige une portée, sauf l'échange de jeton.
+    // PROPRIÉTÉ 5 : toute ressource exige une portée, SAUF LES DEUX PORTES
+    // D'ENTRÉE — celle où l'on obtient un jeton, et celle où l'on enrôle un
+    // appareil. Ce qui les autorise est dans le CORPS : des identifiants pour
+    // l'une, une invitation scellée pour l'autre.
+    //
+    // **CETTE LISTE EST EXACTE DANS LES DEUX SENS**, et c'est tout son intérêt :
+    // une ressource qui cesserait d'exiger une portée sans figurer ici ouvrirait
+    // une porte publique que personne n'aurait voulue. Elle a d'ailleurs attrapé
+    // l'inverse — `/v1/devices` ajouté sans que cet oracle le sache.
     match resolu.scope {
         None => assert!(
-            matches!(resource, Resource::Tokens),
+            matches!(resource, Resource::Tokens | Resource::Devices),
             "{resource:?} n'exige aucune portée"
         ),
         Some(portee) => {
             assert!(
-                !matches!(resource, Resource::Tokens),
-                "l'échange de jeton exige une portée"
+                !matches!(resource, Resource::Tokens | Resource::Devices),
+                "une porte d'entrée exige une portée"
             );
             // PROPRIÉTÉ 6 : la lecture ne donne jamais l'écriture.
             let ecrit = Area::TOUS
