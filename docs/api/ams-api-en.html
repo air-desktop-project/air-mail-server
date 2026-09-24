@@ -595,6 +595,17 @@ The message body.
     <p>It is public and would cost no secret, but sixty-five base64 bytes teach nothing to someone trying to work out which of their three phones to revoke. A short fingerprint will come with cross-enrolment, where it has a job: confirming by sight the device being added.</p>
   </div>
   <p>An account with no device returns <code>{"devices":[]}</code>, not an error: that is the state of every account before its first enrolment. A server started <strong>without a device store</strong> returns <code>501</code> — a forgotten configuration must not look like an account that has enrolled nothing.</p>
+  <pre><code>HTTP/2 501
+{ "type": "/problems/not-implemented",
+  "title": "this server does not serve this resource", "status": 501 }</code></pre>
+  <div class="note prudence">
+    <span class="etiquette">Titles are shown here in English; the wire carries French</span>
+    <p>This manual translates the <code>title</code> member for readability. <strong>The server emits it in French</strong>, and §3.1.3 of RFC 9457 makes it advisory in any case: branch on <code>type</code> and <code>status</code>, never on <code>title</code>. A client that string-matches it will break on the first rewording.</p>
+  </div>
+  <div class="note">
+    <span class="etiquette">A 501 is not an outage, and is not to be retried</span>
+    <p>It carries the 5xx class, but it does not say "our code failed": it says <strong>"this server does not serve that"</strong>. Treat it as a missing capability — stop asking, do not offer the screen that goes with it — and not as a temporary unavailability.</p>
+  </div>
 </div>
 
 <div class="ressource">

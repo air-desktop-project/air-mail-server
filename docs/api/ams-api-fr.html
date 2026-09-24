@@ -597,6 +597,13 @@ Le corps du message.
     <p>Elle est publique et ne coûterait aucun secret, mais soixante-cinq octets de base64 n'apprennent rien à qui cherche lequel de ses trois téléphones révoquer. Une empreinte courte viendra avec l'enrôlement croisé, où elle aura un rôle : confirmer de visu l'appareil qu'on ajoute.</p>
   </div>
   <p>Un compte sans appareil rend <code>{"devices":[]}</code>, et non une erreur : c'est l'état de tout compte avant son premier enrôlement. Un serveur démarré <strong>sans magasin d'appareils</strong> rend <code>501</code> — une configuration oubliée ne doit pas ressembler à un compte qui n'a rien enrôlé.</p>
+  <pre><code>HTTP/2 501
+{ "type": "/problems/not-implemented",
+  "title": "ce serveur ne sert pas cette ressource", "status": 501 }</code></pre>
+  <div class="note">
+    <span class="etiquette">Un 501 n'est pas une panne, et ne se réessaie pas</span>
+    <p>Il porte la classe 5, mais il ne dit pas « notre code a échoué » : il dit <strong>« ce serveur-ci ne sert pas cela »</strong>. Traitez-le comme une capacité absente — cessez de demander, ne proposez pas l'écran qui va avec — et non comme une indisponibilité passagère.</p>
+  </div>
 </div>
 
 <div class="ressource">

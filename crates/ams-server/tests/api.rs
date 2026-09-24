@@ -1502,14 +1502,32 @@ fn sans_magasin_les_appareils_ne_se_servent_pas() {
         let sortie = std::process::Command::new("curl")
             .args(["-s", "--insecure", "--http2", "-X", methode])
             .args(["-H", &format!("Authorization: Bearer {jeton}")])
-            .args(["-o", "/dev/null", "-w", "%{http_code}"])
+            .args(["-w", "\n%{http_code}"])
             .arg(format!("{base}{chemin}"))
             .output()
             .expect("curl s'exécute");
-        assert_eq!(
-            String::from_utf8_lossy(&sortie.stdout),
-            "501",
-            "{methode} {chemin}"
+        let tout = String::from_utf8_lossy(&sortie.stdout).into_owned();
+        let (corps, code) = tout.rsplit_once('\n').unwrap_or(("", ""));
+        assert_eq!(code, "501", "{methode} {chemin}");
+
+        // **LE CORPS DOIT DIRE LE MÊME CODE QUE LA LIGNE DE STATUT.**
+        //
+        // Il disait `"status":404` sous un 501 : `pas_encore` composait son
+        // document avec `NoSuchResource`, dont le statut vaut 404. §3.1 de
+        // RFC 9457 demande que les deux coïncident, et un client qui croirait le
+        // corps chercherait une route disparue au lieu d'une capacité que
+        // l'exploitant n'a pas configurée.
+        //
+        // **VU EN PRODUCTION, ET NON PAR UN ESSAI** : le bras était inatteignable
+        // avant que ces deux routes ne l'empruntent, et aucun essai ne regardait
+        // le CORPS d'un 501.
+        assert!(
+            corps.contains("\"status\":501"),
+            "{methode} {chemin} : le corps contredit le statut — {corps}"
+        );
+        assert!(
+            corps.contains("/problems/not-implemented"),
+            "{methode} {chemin} : {corps}"
         );
     }
 }

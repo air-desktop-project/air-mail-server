@@ -2055,9 +2055,15 @@ fn message_a_remettre(
 
 /// Une ressource que ce serveur ne sert pas encore.
 fn pas_encore(sortie: &mut [u8]) -> Served<'_> {
-    match ams_api::problem(ams_api::Reason::NoSuchResource, sortie) {
+    // **LE MOTIF DOIT PORTER LE MÊME CODE QUE LA RÉPONSE.** Il portait
+    // `NoSuchResource`, dont le statut vaut 404, sous une ligne de statut à 501 :
+    // le document disait donc `"status":404` quand le serveur disait 501, et
+    // §3.1 de RFC 9457 demande que les deux coïncident. Le défaut était invisible
+    // tant que ce bras n'était atteint par aucune route ; `/v1/me/devices` l'a
+    // rendu visible en production.
+    match ams_api::problem(ams_api::Reason::NotImplemented, sortie) {
         Ok(corps) => Served {
-            status: StatusCode::NOT_IMPLEMENTED,
+            status: ams_api::Reason::NotImplemented.status(),
             media: ams_api::PROBLEM_MEDIA_TYPE,
             body: corps,
             ..Served::default()

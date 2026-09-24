@@ -78,6 +78,7 @@ fn type_de(status: StatusCode) -> &'static str {
         404 => "/problems/not-found",
         405 => "/problems/method-not-allowed",
         414 => "/problems/uri-too-long",
+        501 => "/problems/not-implemented",
         // Tout ce qui est nôtre se dit d'une seule façon : le client n'a rien à
         // en tirer, et le détailler dirait ce que notre code a fait de travers.
         _ => "/problems/internal",

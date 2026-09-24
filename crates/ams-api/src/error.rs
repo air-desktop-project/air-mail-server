@@ -104,6 +104,21 @@ pub enum Reason {
     JsonTooDeep,
     /// Le tampon de sortie ne suffit pas. **Notre faute, pas celle du client.**
     BufferTooSmall,
+    /// La ressource existe dans cette API, et **ce serveur-ci ne la sert pas**.
+    ///
+    /// # POURQUOI CE N'EST PAS 404, POUR UNE FOIS
+    ///
+    /// La règle de ce module est que « cela n'existe pas » et « vous n'avez pas
+    /// le droit de savoir » se répondent pareil. Elle ne s'applique pas ici :
+    /// ce qui manque n'est pas une ressource d'un AUTRE, c'est une capacité que
+    /// l'exploitant n'a pas configurée. Le porteur agit sur SA propre ressource,
+    /// et répondre 404 lui dirait que sa route a disparu — il chercherait le
+    /// défaut dans son client, alors qu'il est dans la configuration du serveur.
+    ///
+    /// **ET CELA N'APPREND RIEN QU'UN BALAYAGE PUISSE EXPLOITER** : la réponse
+    /// ne dépend d'aucun compte, seulement de ce que ce serveur sert. Deux
+    /// comptes obtiennent la même.
+    NotImplemented,
 }
 
 impl Reason {
@@ -131,6 +146,9 @@ impl Reason {
             Self::BadKey | Self::BadJson | Self::JsonTooDeep | Self::BufferTooSmall => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
+            // §15.6.2 de RFC 9110 : « the server does not support the
+            // functionality required to fulfill the request ».
+            Self::NotImplemented => StatusCode::NOT_IMPLEMENTED,
         }
     }
 
@@ -156,6 +174,7 @@ impl Reason {
             Self::BadToken => "l'authentification n'est pas recevable",
             Self::TokenExpired => "l'authentification a expiré",
             Self::SessionClosed => "la session a été fermée",
+            Self::NotImplemented => "ce serveur ne sert pas cette ressource",
             // **CE QUI EST NÔTRE SE DIT D'UNE SEULE FAÇON.** Distinguer nos
             // fautes internes apprendrait au client ce que notre code a fait de
             // travers, et ne lui servirait à rien : il n'y peut rien. Le journal
