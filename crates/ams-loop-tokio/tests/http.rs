@@ -96,6 +96,19 @@ impl Api for ApiEssai {
         }
     }
 
+    /// **CE BANC N'OUVRE PAS DE SESSION PAR CLEF.** Il éprouve le transport ;
+    /// accorder ici ferait croire à une vérification qui n'a pas lieu.
+    fn verify_device(
+        &self,
+        _account: &str,
+        _device: &str,
+        _issued_at_seconds: u64,
+        _challenge: &str,
+        _signature: &str,
+    ) -> Option<Scope> {
+        None
+    }
+
     fn authenticate(&self, login: &str, password: &[u8]) -> Option<Scope> {
         (login == "marc" && password == b"secret")
             .then(|| Scope::one(Area::Mail, Rights::Read).with(Area::Observe, Rights::Read))

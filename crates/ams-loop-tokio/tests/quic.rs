@@ -503,6 +503,18 @@ async fn des_octets_d_application_font_l_aller_retour() {
 struct ApiEssai;
 
 impl ams_loop_tokio::http::Api for ApiEssai {
+    /// **CE BANC N'OUVRE PAS DE SESSION PAR CLEF.** Il éprouve QUIC.
+    fn verify_device(
+        &self,
+        _account: &str,
+        _device: &str,
+        _issued_at_seconds: u64,
+        _challenge: &str,
+        _signature: &str,
+    ) -> Option<ams_api::Scope> {
+        None
+    }
+
     /// **CE BANC N'ENRÔLE PAS.** Il éprouve le transport QUIC, et non
     /// l'amorçage : rendre un refus net vaut mieux qu'une réussite feinte que
     /// personne ne regarde.

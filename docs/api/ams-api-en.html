@@ -46,13 +46,14 @@
       <ol>
         <li><a href="#r-tokens">5.1 Tokens</a></li>
         <li><a href="#r-enrolment">5.2 Invitation and enrolment</a></li>
-        <li><a href="#r-mailboxes">5.3 Mailboxes</a></li>
-        <li><a href="#r-messages">5.4 Messages</a></li>
-        <li><a href="#r-search">5.5 Search</a></li>
-        <li><a href="#r-submission">5.6 Submission</a></li>
-        <li><a href="#r-self">5.7 What is yours</a></li>
-        <li><a href="#r-admin">5.8 Administration</a></li>
-        <li><a href="#r-observe">5.9 Observability</a></li>
+        <li><a href="#r-key-session">5.3 Opening a session with a key</a></li>
+        <li><a href="#r-mailboxes">5.4 Mailboxes</a></li>
+        <li><a href="#r-messages">5.5 Messages</a></li>
+        <li><a href="#r-search">5.6 Search</a></li>
+        <li><a href="#r-submission">5.7 Submission</a></li>
+        <li><a href="#r-self">5.8 What is yours</a></li>
+        <li><a href="#r-admin">5.9 Administration</a></li>
+        <li><a href="#r-observe">5.10 Observability</a></li>
       </ol>
     </li>
     <li><a href="#limits">6. Limits</a></li>
@@ -499,7 +500,66 @@ authorization: Bearer AQECAAAAAG…</code></pre>
   </table>
 </div>
 
-<h3 id="r-mailboxes"><span class="numero">5.3</span>Mailboxes</h3>
+<h3 id="r-key-session"><span class="numero">5.3</span>Opening a session with a key</h3>
+
+<p>Once a device is <a href="#r-enrolment">enrolled</a>, its key replaces the password: the server issues a <strong>challenge</strong>, the device signs it, and the server returns the <strong>same token</strong> as <code>POST /v1/tokens</code>. Nothing downstream changes — the token is used, revoked and expires identically.</p>
+
+<div class="note info">
+  <span class="etiquette">What the server knows, and what it does not</span>
+  <p>Face ID and Touch ID <strong>unlock a local key</strong>. The server only sees a signature: it will never know "the user placed their finger", it knows "a key I enrolled signed my challenge". Biometrics are a promise made by the client.</p>
+</div>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe post">POST</span><span class="chemin">/v1/sessions/challenge</span><span class="portee">none</span></div>
+  <pre><code>{ "login": "marie", "deviceId": "6b86b273ff34fce1…" }</code></pre>
+  <pre><code>HTTP/2 201
+{ "challenge": "AwAAaN1…",
+  "role": "ams-session",
+  "serverIdentity": "mail.narro.ch",
+  "expiresInSeconds": 60 }</code></pre>
+  <p><strong>No <code>Authorization</code> header</strong>: this is the third entry point of this API.</p>
+  <div class="note danger">
+    <span class="etiquette">A challenge is issued even for a device that does not exist</span>
+    <p>Deliberately so. Refusing to issue one for an unknown id would make this route an <strong>enumeration oracle</strong>: you would only have to see which one gets a challenge. A challenge issued for an unknown device leads nowhere — no signature can ever match it.</p>
+  </div>
+  <p>The server returns the <code>role</code> and its <code>serverIdentity</code> <strong>alongside</strong> the challenge so the client need not guess them — and above all so that five native applications do not guess them differently.</p>
+</div>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe post">POST</span><span class="chemin">/v1/sessions</span><span class="portee">none</span></div>
+  <pre><code>{ "challenge": "AwAAaN1…", "signature": "MEUCIQ…" }</code></pre>
+  <p><code>signature</code> is an <strong>ECDSA P-256</strong> signature in <strong>fixed form</strong> — <code>r ‖ s</code>, sixty-four bytes — written in base64url without padding. <strong>DER is not accepted</strong>: platforms disagree on the serialisation, and reading two grammars over the same bytes is an ambiguity this server refuses. A client holding DER converts it; that is three lines on their side.</p>
+  <div class="note prudence">
+    <span class="etiquette">What is signed is NOT the bare challenge</span>
+    <pre><code>digest = SHA-256( role ‖ 0x00 ‖ serverIdentity ‖ 0x00 ‖ challenge )</code></pre>
+    <p>All three parts are taken <strong>exactly as returned</strong>, in ASCII, separated by null bytes. Without this binding, a signature obtained to open a session here would open one elsewhere, or serve another purpose. The null separators stop two different inputs from running together into the same byte string.</p>
+    <p>The signature covers that <strong>digest</strong>, not the message: sign the digest directly (<code>sign_prehash</code>, <code>SecKeyAlgorithmECDSASignatureDigestX962SHA256</code>, and their equivalents).</p>
+  </div>
+  <pre><code>HTTP/2 201
+{ "token": "AQ…", "expires": 1790086400000000 }</code></pre>
+  <p>The same body as <code>POST /v1/tokens</code>, and the same scope: mail, submission, observability. <strong>Never <code>admin</code></strong> — holding a phone is not the operator's authority.</p>
+  <div class="note danger">
+    <span class="etiquette">A challenge is good for one use</span>
+    <p>Yet there is no registry of issued challenges. <strong>It is not the challenge that remembers, it is the device</strong>: opening a session records the date, and a challenge is only acceptable if it was issued <em>after</em> that date. Replaying the same challenge — even within its sixty seconds — returns <code>401</code>.</p>
+    <p>Consequence: <strong>two sessions cannot open within the same second</strong> for one device. The second asks for a new challenge, one second later.</p>
+  </div>
+  <div class="note prudence">
+    <span class="etiquette">What a client should do with a <code>401</code></span>
+    <p><strong>Retry ONCE, with a fresh challenge, after one second.</strong> If that fails too, treat it as a refused authentication and fall back to the password or to re-enrolment.</p>
+    <p>Why: two session openings started <em>at the same time</em> by one application — mail sync and push registration, say — compete for the same second, and the second one is refused as a replay. One second of waiting is always enough.</p>
+    <p><strong>The server will not say which cause applied</strong>, and that is not an oversight: distinguishing a replay would reveal that a given device authenticated recently — and anyone can ask for a challenge for any id. The silence here is the same rule as everywhere else in this API.</p>
+  </div>
+  <table>
+    <thead><tr><th>Code</th><th>When</th></tr></thead>
+    <tbody>
+      <tr><td><code>401</code> "expired"</td><td>The challenge is more than sixty seconds old. <strong>Distinguished on purpose</strong>: a drifting client clock would otherwise produce failures nobody can explain.</td></tr>
+      <tr><td><code>401</code> "not acceptable"</td><td>Forged challenge, unknown device, wrong or malformed signature, <strong>replay</strong>, or a token presented in place of a challenge. All six answer alike.</td></tr>
+      <tr><td><code>501</code></td><td>This server has no device store, or does not know its own domain.</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<h3 id="r-mailboxes"><span class="numero">5.4</span>Mailboxes</h3>
 
 <div class="ressource">
   <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/mailboxes</span><span class="portee">mail:read</span></div>
@@ -522,7 +582,7 @@ authorization: Bearer AQECAAAAAG…</code></pre>
   </div>
 </div>
 
-<h3 id="r-messages"><span class="numero">5.4</span>Messages</h3>
+<h3 id="r-messages"><span class="numero">5.5</span>Messages</h3>
 
 <div class="ressource">
   <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/mailboxes/{mailbox}/messages</span><span class="portee">mail:read</span></div>
@@ -577,7 +637,7 @@ authorization: Bearer AQECAAAAAG…</code></pre>
   <p>One MIME part, numbered as RFC 9051 §6.4.5 prescribes — <code>1</code>, <code>1.2</code>, <code>2.1.1</code>.</p>
 </div>
 
-<h3 id="r-search"><span class="numero">5.5</span>Search</h3>
+<h3 id="r-search"><span class="numero">5.6</span>Search</h3>
 
 <div class="ressource">
   <div class="ligne"><span class="verbe post">POST</span><span class="chemin">/v1/mailboxes/{mailbox}/search</span><span class="portee">mail:read</span></div>
@@ -599,7 +659,7 @@ authorization: Bearer AQECAAAAAG…</code></pre>
   <p><code>complete</code> is <code>false</code> when the list was truncated. A client ignoring it would act on half its results believing it had them all.</p>
 </div>
 
-<h3 id="r-submission"><span class="numero">5.6</span>Submission</h3>
+<h3 id="r-submission"><span class="numero">5.7</span>Submission</h3>
 
 <div class="ressource">
   <div class="ligne"><span class="verbe post">POST</span><span class="chemin">/v1/submissions</span><span class="portee">submit:write</span></div>
@@ -621,7 +681,7 @@ The message body.
   <p>The server delivers to local recipients, queues what goes out, and <strong>DKIM-signs</strong> what it accepts, for the domains whose zone it holds. A delivery failure returns <code>503</code>: it is temporary, and your message may well go through later.</p>
 </div>
 
-<h3 id="r-self"><span class="numero">5.7</span>What is yours</h3>
+<h3 id="r-self"><span class="numero">5.8</span>What is yours</h3>
 
 <p>These resources require <strong>no scope</strong>: they act on <em>yourself</em>, and the token presented already says who that is. Requiring <code>admin</code> would make them routes only an administrator could take, which is exactly what they exist to avoid.</p>
 
@@ -669,7 +729,7 @@ The message body.
   <p>Revoking twice returns <code>404</code> the second time. RFC 9110 §9.3.5 allows this: what must be idempotent is the <em>effect</em>, and it is — the device is gone either way. Returning <code>204</code> to a revocation that removed nothing would suggest something had been removed.</p>
 </div>
 
-<h3 id="r-admin"><span class="numero">5.8</span>Administration</h3>
+<h3 id="r-admin"><span class="numero">5.9</span>Administration</h3>
 
 <p>All of these require the <code>admin</code> area, which a password never grants. See <a href="#admin">§3.6</a>.</p>
 
@@ -699,7 +759,7 @@ The message body.
 
 <p>The prefix length is not decorative: <code>2001:db8::</code> alone does not say that an entire <code>/64</code> is banned, and an operator would believe they had banned a single machine.</p>
 
-<h3 id="r-observe"><span class="numero">5.9</span>Observability</h3>
+<h3 id="r-observe"><span class="numero">5.10</span>Observability</h3>
 
 <div class="ressource">
   <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/health</span><span class="portee">observe:read</span></div>

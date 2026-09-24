@@ -196,6 +196,44 @@ impl<A: Api> ams_h3::Service for ServiceH3<'_, A> {
                 }
                 (suite.status(), JSON_MEDIA_TYPE, suite.body())
             }
+            // **LA MÊME RÈGLE QU'EN HTTP/2, ET POUR LA MÊME RAISON** : deux
+            // conducteurs qui n'ouvriraient pas les sessions par clef de la
+            // même façon offriraient une porte par la version du protocole.
+            Next::CheckDevice {
+                account,
+                device,
+                issued_at_seconds,
+                challenge,
+                signature,
+            } => {
+                let accorde = self.api.verify_device(
+                    account,
+                    device,
+                    issued_at_seconds,
+                    challenge,
+                    signature,
+                );
+                let identifiant = self.api.nonce();
+                let suite = self.session.on_credentials(
+                    accorde.is_some(),
+                    account,
+                    accorde.unwrap_or_else(Scope::none),
+                    identifiant,
+                    maintenant,
+                    &mut self.echange,
+                );
+                if accorde.is_none() {
+                    self.guard.observe(self.source, GuardEvent::InvalidFrame);
+                } else if suite.status().class() < 4 {
+                    self.api.open_session(
+                        account,
+                        identifiant,
+                        maintenant.saturating_add(self.session.duree()),
+                        maintenant,
+                    );
+                }
+                (suite.status(), JSON_MEDIA_TYPE, suite.body())
+            }
             // **LA MÊME RÈGLE QU'EN HTTP/2, ET ELLE DOIT LE RESTER.** Deux
             // conducteurs qui n'appliqueraient pas la même révocation
             // offriraient une porte par la version du protocole.

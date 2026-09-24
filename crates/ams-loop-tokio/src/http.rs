@@ -278,6 +278,32 @@ pub trait Api {
         sortie: &'o mut [u8],
     ) -> Served<'o>;
 
+    /// Cette signature d'appareil ouvre-t-elle une session, et sur quelle portée ?
+    ///
+    /// **LE DÉFI EST DÉJÀ VÉRIFIÉ** : son sceau, sa version et ses soixante
+    /// secondes l'étaient avant cet appel. Ce qui reste à décider est ce que la
+    /// session ne peut pas savoir :
+    ///
+    ///   - cet appareil existe-t-il, sous ce compte, avec quelle clef ;
+    ///   - la signature couvre-t-elle le condensat de CE défi, lié au domaine ;
+    ///   - **ce défi a-t-il été émis APRÈS la dernière session de cet
+    ///     appareil** — sans quoi c'est un rejeu.
+    ///
+    /// Et si elle accorde, elle doit **noter la date de cette session** : c'est
+    /// ce qui tue le défi qu'on vient d'employer. Une acceptation qui n'écrirait
+    /// pas cette date rendrait le défi rejouable pendant soixante secondes.
+    ///
+    /// `None` refuse, et **d'une seule façon pour toutes les causes** : dire
+    /// laquelle apprendrait à qui essaie si cet appareil existe.
+    fn verify_device(
+        &self,
+        account: &str,
+        device: &str,
+        issued_at_seconds: u64,
+        challenge: &str,
+        signature: &str,
+    ) -> Option<Scope>;
+
     /// Ces identifiants ouvrent-ils une session, et sur quelle portée ?
     ///
     /// `None` refuse. **LE TEMPS QUE PREND UN REFUS NE DOIT PAS DIRE POURQUOI IL
@@ -489,6 +515,43 @@ where
                     // compte se remplirait de sessions qui n'existent pas.
                     api.open_session(
                         login,
+                        identifiant,
+                        maintenant.saturating_add(service.session.duree()),
+                        maintenant,
+                    );
+                }
+                (suite.status(), JSON_MEDIA_TYPE, suite.body())
+            }
+            // **UNE SESSION PAR CLEF EST UNE SESSION**, et elle passe donc par
+            // le même chemin de frappe et le même registre que le mot de passe.
+            // Deux chemins donneraient deux jetons, et l'un des deux finirait
+            // par ne plus être inscrit.
+            Next::CheckDevice {
+                account,
+                device,
+                issued_at_seconds,
+                challenge,
+                signature,
+            } => {
+                let accorde =
+                    api.verify_device(account, device, issued_at_seconds, challenge, signature);
+                let identifiant = api.nonce();
+                let suite = service.session.on_credentials(
+                    accorde.is_some(),
+                    account,
+                    accorde.unwrap_or_else(Scope::none),
+                    identifiant,
+                    maintenant,
+                    &mut echange,
+                );
+                if accorde.is_none() {
+                    // **LE MÊME COMPTE QU'UN REFUS D'IDENTIFIANTS.** Cette porte
+                    // s'ouvre sans jeton : sans cela, elle offrirait des essais
+                    // illimités sur des signatures forgées.
+                    service.guard.observe(source, GuardEvent::InvalidFrame);
+                } else if suite.status().class() < 4 {
+                    api.open_session(
+                        account,
                         identifiant,
                         maintenant.saturating_add(service.session.duree()),
                         maintenant,

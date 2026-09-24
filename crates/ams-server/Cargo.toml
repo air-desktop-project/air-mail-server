@@ -51,4 +51,8 @@ workspace = true
 # LE CLIENT QUIC D'ESSAI, partagé avec `ams-loop-tokio` : le dupliquer en
 # ferait diverger les copies.
 ams-quic-client = { workspace = true }
+# DE QUOI SIGNER DANS LES ESSAIS, et nulle part ailleurs. Le serveur VÉRIFIE des
+# signatures d'appareil ; il n'en produit jamais. Seul l'essai de bout en bout
+# doit tenir le rôle du téléphone, et il ne peut pas le tenir sans clef privée.
+p256 = { workspace = true }
 tokio = { workspace = true }

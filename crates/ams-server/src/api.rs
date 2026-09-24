@@ -136,6 +136,16 @@ pub struct ApiMaildir {
     file: Option<ams_loop_tokio::Spool>,
     /// Ce qu'un message peut peser, pour borner ce qu'on rassemble en file.
     message_max: usize,
+    /// Le domaine que les appareils font entrer dans leur signature.
+    ///
+    /// **LE MÊME QUE CELUI DE LA SESSION, ET LE SERVEUR LE LEUR DONNE DEPUIS UNE
+    /// SEULE SOURCE.** La session l'annonce au client, l'API le vérifie ; deux
+    /// valeurs donneraient deux condensats, et **aucune signature ne passerait
+    /// jamais** — sans que rien ne dise pourquoi.
+    ///
+    /// Ce n'est PAS la liste des domaines hébergés : celle-ci en porte
+    /// plusieurs, et « le premier » n'est pas une identité de serveur.
+    domaine: Vec<u8>,
     /// La clé qui scelle les invitations.
     ///
     /// **LA MÊME QUE CELLE DES JETONS, ET C'EST VOULU.** Deux clés seraient deux
@@ -190,11 +200,24 @@ impl ApiMaildir {
             appareils: None,
             // ET PAS D'INVITATIONS SANS CLÉ : voir `avec_scellement`.
             scellement: None,
+            // NI DE SESSIONS PAR CLEF SANS DOMAINE : voir `avec_domaine`.
+            domaine: Vec::new(),
             // ON NE SIGNE PAS SANS CLÉ, et le constructeur ne prend pas ce
             // champ non plus : une signature qu'on produirait sans clé publiée
             // échouerait partout, ce qui est pire que pas de signature.
             dkim: None,
         }
+    }
+
+    /// Lui dit quel domaine les appareils font entrer dans leur signature.
+    ///
+    /// **LE SERVEUR DOIT LUI DONNER LE MÊME QU'À LA SESSION**, et depuis la même
+    /// source : c'est la session qui l'annonce au client, et cette API qui le
+    /// vérifie.
+    #[must_use]
+    pub fn avec_domaine(mut self, domaine: &[u8]) -> Self {
+        self.domaine = domaine.to_vec();
+        self
     }
 
     /// Lui donne la clé qui scelle les invitations.
@@ -716,6 +739,96 @@ impl ApiMaildir {
             expiry / 1_000_000,
             sortie,
         ))
+    }
+
+    /// Vérifie qu'un appareil a bien signé ce défi, et ouvre la session.
+    ///
+    /// # TROIS CONTRÔLES, ET LE TROISIÈME EST CELUI QU'ON OUBLIE
+    ///
+    /// 1. **L'appareil existe**, sous ce compte, et porte une clef ;
+    /// 2. **la signature couvre le condensat de CE défi**, lié au domaine de ce
+    ///    serveur et au rôle — pas le défi nu ;
+    /// 3. **le défi a été émis après la dernière session de cet appareil.**
+    ///
+    /// Le troisième est l'usage unique. Sans lui, un défi vaudrait soixante
+    /// secondes et se rejouerait autant de fois qu'on veut pendant ce temps.
+    ///
+    /// # ET L'ACCEPTATION ÉCRIT, SINON ELLE NE VAUT RIEN
+    ///
+    /// Ouvrir la session note la date. **Si cette écriture échoue, on REFUSE** :
+    /// accorder sans noter laisserait le défi rejouable, et un disque plein
+    /// deviendrait une faille.
+    ///
+    /// # UN SEUL REFUS POUR TOUTES LES CAUSES
+    ///
+    /// Appareil inconnu, clef qui ne correspond pas, signature mal écrite,
+    /// rejeu : `None` dans tous les cas. Les distinguer dirait à qui essaie si
+    /// cet appareil existe — ce que l'émission du défi refuse déjà de dire.
+    fn verifier_un_appareil(
+        &self,
+        account: &str,
+        device: &str,
+        issued_at_seconds: u64,
+        challenge: &str,
+        signature: &str,
+    ) -> Option<Scope> {
+        let magasin = self.appareils.as_ref()?;
+        let connu = magasin
+            .du_compte(account)
+            .into_iter()
+            .find(|appareil| appareil.id == device)?;
+
+        // **LE REJEU SE REFUSE AVANT LA CRYPTOGRAPHIE**, et cet ordre a une
+        // conséquence qu'il faut nommer plutôt que taire.
+        //
+        // Un rejeu sort d'ici sans vérifier de signature ; une signature fausse,
+        // elle, coûte un décodage et une vérification sur la courbe. **Les deux
+        // rendent la même réponse, mais pas dans le même temps** — et ce temps
+        // dit « cet appareil s'est authentifié depuis que ce défi a été émis ».
+        //
+        // On garde cet ordre, pour une raison précise : **exploiter cette
+        // différence suppose de connaître un identifiant d'appareil**, et un
+        // identifiant est le condensat SHA-256 d'une clef publique. Il ne se
+        // devine pas, et la seule route qui les liste exige le jeton de leur
+        // propriétaire. Qui le connaît déjà a déjà davantage.
+        //
+        // L'ordre inverse ferait travailler la courbe sur chaque rejeu, alors
+        // que le videur (C8) compte déjà ces refus — le coût serait réel et le
+        // gain hypothétique.
+        if connu.last_seen >= issued_at_seconds {
+            return None;
+        }
+
+        let mut octets = [0_u8; ams_auth::SIGNATURE_OCTETS];
+        let lue = ams_api::decode_base64url(signature.as_bytes(), &mut octets).ok()?;
+        // **VIDE, RIEN NE SE VÉRIFIE**, et c'est le bon défaut : un condensat
+        // lié à un domaine vide serait un condensat que deux serveurs
+        // partageraient.
+        if self.domaine.is_empty() {
+            return None;
+        }
+        let condensat = ams_api::digest(&self.domaine, challenge.as_bytes());
+        ams_auth::verifier(&connu.public_key, &condensat, lue).ok()?;
+
+        // **ON NOTE LA DATE, ET L'ÉCHEC REFUSE.** C'est cette écriture qui tue
+        // le défi qu'on vient d'employer.
+        let identifiant = String::from(device);
+        let quand = crate::maintenant();
+        magasin
+            .modifier(move |appareils| {
+                let vu = appareils
+                    .iter_mut()
+                    .find(|appareil| appareil.id == identifiant)
+                    .ok_or(crate::appareils::INTROUVABLE)?;
+                vu.last_seen = quand;
+                Ok(())
+            })
+            .ok()?;
+
+        // **LA MÊME PORTÉE QU'UN MOT DE PASSE, ET JAMAIS `admin`.** Une clef
+        // d'appareil n'est pas une autorité d'exploitation : elle prouve qu'on
+        // tient un téléphone, pas qu'on lit le secret de scellement.
+        Some(PORTEE_DE_SESSION)
     }
 
     /// Enrôle une clef publique sur un compte, sur la foi d'une invitation que
@@ -1548,11 +1661,7 @@ impl Api for ApiMaildir {
         });
         // **UN MOT DE PASSE N'OUVRE PAS L'ADMINISTRATION.** Voir l'en-tête du
         // module : la limite est dans le code, et non dans une configuration.
-        ouvre.then(|| {
-            Scope::one(ams_api::Area::Mail, ams_api::Rights::Write)
-                .with(ams_api::Area::Submit, ams_api::Rights::Write)
-                .with(ams_api::Area::Observe, ams_api::Rights::Read)
-        })
+        ouvre.then_some(PORTEE_DE_SESSION)
     }
 
     /// # L'ALÉA VIENT DU NOYAU, ET SE RELIT À CHAQUE JETON
@@ -1571,6 +1680,17 @@ impl Api for ApiMaildir {
 
     fn session_open(&self, login: &str, nonce: u64, maintenant: u64) -> bool {
         self.sessions.ouverte(login, nonce, maintenant)
+    }
+
+    fn verify_device(
+        &self,
+        account: &str,
+        device: &str,
+        issued_at_seconds: u64,
+        challenge: &str,
+        signature: &str,
+    ) -> Option<Scope> {
+        self.verifier_un_appareil(account, device, issued_at_seconds, challenge, signature)
     }
 
     fn enrol<'o>(
@@ -1749,6 +1869,20 @@ fn microsecondes() -> u64 {
             u64::try_from(depuis.as_micros()).unwrap_or(u64::MAX)
         })
 }
+
+/// Ce qu'une session ouverte par cette API accorde.
+///
+/// **LA MÊME POUR UN MOT DE PASSE ET POUR UNE CLEF D'APPAREIL**, et écrite UNE
+/// fois : deux endroits qui accorderaient « la même chose » finiraient par ne
+/// plus accorder la même, et l'un des deux ouvrirait ce que l'autre ferme.
+///
+/// **ELLE N'OUVRE JAMAIS L'ADMINISTRATION.** Ni un mot de passe ni un téléphone
+/// ne valent l'autorité de l'exploitant : celle-ci se frappe depuis la machine,
+/// par qui lit le secret de scellement. C'est ce qui fait qu'un compte compromis
+/// ne devient jamais le serveur entier.
+const PORTEE_DE_SESSION: Scope = Scope::one(ams_api::Area::Mail, ams_api::Rights::Write)
+    .with(ams_api::Area::Submit, ams_api::Rights::Write)
+    .with(ams_api::Area::Observe, ams_api::Rights::Read);
 
 /// Combien de temps une invitation vaut, quand personne ne le dit.
 ///

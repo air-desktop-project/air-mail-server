@@ -46,13 +46,14 @@
       <ol>
         <li><a href="#r-jetons">5.1 Jetons</a></li>
         <li><a href="#r-enrolement">5.2 Invitation et enrôlement</a></li>
-        <li><a href="#r-boites">5.3 Boîtes</a></li>
-        <li><a href="#r-messages">5.4 Messages</a></li>
-        <li><a href="#r-recherche">5.5 Recherche</a></li>
-        <li><a href="#r-soumission">5.6 Soumission</a></li>
-        <li><a href="#r-moi">5.7 Ce qui est à soi</a></li>
-        <li><a href="#r-admin">5.8 Administration</a></li>
-        <li><a href="#r-supervision">5.9 Supervision</a></li>
+        <li><a href="#r-session-clef">5.3 Ouvrir une session avec une clef</a></li>
+        <li><a href="#r-boites">5.4 Boîtes</a></li>
+        <li><a href="#r-messages">5.5 Messages</a></li>
+        <li><a href="#r-recherche">5.6 Recherche</a></li>
+        <li><a href="#r-soumission">5.7 Soumission</a></li>
+        <li><a href="#r-moi">5.8 Ce qui est à soi</a></li>
+        <li><a href="#r-admin">5.9 Administration</a></li>
+        <li><a href="#r-supervision">5.10 Supervision</a></li>
       </ol>
     </li>
     <li><a href="#limites">6. Limites</a></li>
@@ -501,7 +502,66 @@ authorization: Bearer AQECAAAAAG…</code></pre>
   </table>
 </div>
 
-<h3 id="r-boites"><span class="numero">5.3</span>Boîtes</h3>
+<h3 id="r-session-clef"><span class="numero">5.3</span>Ouvrir une session avec une clef</h3>
+
+<p>Une fois un appareil <a href="#r-enrolement">enrôlé</a>, sa clef remplace le mot de passe : le serveur émet un <strong>défi</strong>, l'appareil le signe, et le serveur rend le <strong>même jeton</strong> que <code>POST /v1/tokens</code>. Rien ne change en aval — le jeton s'emploie, se révoque et expire à l'identique.</p>
+
+<div class="note info">
+  <span class="etiquette">Ce que le serveur sait, et ce qu'il ne sait pas</span>
+  <p>Face ID et Touch ID <strong>déverrouillent une clef locale</strong>. Le serveur ne voit qu'une signature : il ne saura jamais « l'utilisateur a posé son doigt », il saura « une clef que j'ai enrôlée a signé mon défi ». Le biométrique est une promesse du client. Voir aussi la <a href="feuille-de-route-auth.html">feuille de route</a> pour ce que cela implique sous Linux, où la clef vit dans un fichier.</p>
+</div>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe post">POST</span><span class="chemin">/v1/sessions/challenge</span><span class="portee">aucune</span></div>
+  <pre><code>{ "login": "marie", "deviceId": "6b86b273ff34fce1…" }</code></pre>
+  <pre><code>HTTP/2 201
+{ "challenge": "AwAAaN1…",
+  "role": "ams-session",
+  "serverIdentity": "mail.narro.ch",
+  "expiresInSeconds": 60 }</code></pre>
+  <p><strong>Aucun en-tête <code>Authorization</code></strong> : c'est la troisième porte d'entrée de cette API.</p>
+  <div class="note danger">
+    <span class="etiquette">Un défi est émis même pour un appareil qui n'existe pas</span>
+    <p>Et c'est délibéré. Refuser d'en émettre pour un identifiant inconnu ferait de cette route un <strong>oracle d'énumération</strong> : il suffirait de regarder lequel obtient un défi. Un défi émis pour un inconnu ne mène nulle part — aucune signature ne pourra lui correspondre.</p>
+  </div>
+  <p>Le serveur rend le <code>role</code> et son <code>serverIdentity</code> <strong>avec</strong> le défi, pour que le client n'ait pas à les deviner — et surtout pour que cinq applications natives ne les devinent pas différemment.</p>
+</div>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe post">POST</span><span class="chemin">/v1/sessions</span><span class="portee">aucune</span></div>
+  <pre><code>{ "challenge": "AwAAaN1…", "signature": "MEUCIQ…" }</code></pre>
+  <p><code>signature</code> est une signature <strong>ECDSA P-256</strong> en <strong>forme fixe</strong> — <code>r ‖ s</code>, soixante-quatre octets — écrite en base64url sans remplissage. <strong>Le DER n'est pas accepté</strong> : les plateformes ne s'accordent pas sur la sérialisation, et lire deux grammaires sur les mêmes octets est une ambiguïté qu'on refuse. Un client qui tient du DER le convertit ; c'est trois lignes chez lui.</p>
+  <div class="note prudence">
+    <span class="etiquette">Ce qui est signé n'est PAS le défi nu</span>
+    <pre><code>condensat = SHA-256( role ‖ 0x00 ‖ serverIdentity ‖ 0x00 ‖ challenge )</code></pre>
+    <p>Les trois parties sont prises <strong>telles qu'elles ont été rendues</strong>, en ASCII, séparées par des octets nuls. Sans cette liaison, une signature obtenue pour ouvrir une session ici vaudrait pour en ouvrir une ailleurs, ou pour un autre usage. Les séparateurs nuls empêchent deux entrées différentes de se recoller en la même suite d'octets.</p>
+    <p>La signature couvre ce <strong>condensat</strong>, pas le message : signez le condensat directement (<code>sign_prehash</code>, <code>SecKeyAlgorithmECDSASignatureDigestX962SHA256</code>, et leurs équivalents).</p>
+  </div>
+  <pre><code>HTTP/2 201
+{ "token": "AQ…", "expires": 1790086400000000 }</code></pre>
+  <p>Le même corps que <code>POST /v1/tokens</code>, et la même portée : courrier, soumission, supervision. <strong>Jamais <code>admin</code></strong> — tenir un téléphone ne vaut pas l'autorité de l'exploitant.</p>
+  <div class="note danger">
+    <span class="etiquette">Un défi ne sert qu'une fois</span>
+    <p>Il n'y a pourtant aucun registre des défis émis. <strong>Ce n'est pas le défi qui se souvient, c'est l'appareil</strong> : ouvrir une session note la date, et un défi n'est recevable que s'il a été émis <em>après</em> cette date. Rejouer le même défi — même dans ses soixante secondes — rend <code>401</code>.</p>
+    <p>Conséquence : <strong>deux sessions ne peuvent pas s'ouvrir dans la même seconde</strong> pour un même appareil. La seconde redemande un défi, une seconde plus tard.</p>
+  </div>
+  <div class="note prudence">
+    <span class="etiquette">Ce qu'un client doit faire d'un <code>401</code></span>
+    <p><strong>Réessayer UNE fois, avec un défi neuf, après une seconde.</strong> Puis, si cela échoue encore, traiter l'échec comme une authentification refusée et retomber sur le mot de passe ou le réenrôlement.</p>
+    <p>Pourquoi : deux ouvertures de session lancées <em>en même temps</em> par la même application — la synchronisation et l'enregistrement aux notifications, par exemple — se disputent la même seconde, et la seconde est refusée comme un rejeu. Une seconde d'attente suffit toujours.</p>
+    <p><strong>Le serveur ne dira pas laquelle des causes a joué</strong>, et ce n'est pas une négligence : distinguer un rejeu apprendrait qu'un appareil donné s'est authentifié récemment — or n'importe qui peut demander un défi pour n'importe quel identifiant. Le silence est ici la même règle que partout ailleurs dans cette API.</p>
+  </div>
+  <table>
+    <thead><tr><th>Code</th><th>Quand</th></tr></thead>
+    <tbody>
+      <tr><td><code>401</code> <code>l'authentification a expiré</code></td><td>Le défi a plus de soixante secondes. <strong>Distingué exprès</strong> : une horloge de client qui dérive produirait sinon des échecs incompréhensibles.</td></tr>
+      <tr><td><code>401</code> <code>l'authentification n'est pas recevable</code></td><td>Défi forgé, appareil inconnu, signature fausse ou mal écrite, <strong>rejeu</strong>, ou jeton présenté à la place d'un défi. Les six se répondent pareil.</td></tr>
+      <tr><td><code>501</code></td><td>Ce serveur n'a pas de magasin d'appareils, ou ne connaît pas son domaine.</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<h3 id="r-boites"><span class="numero">5.4</span>Boîtes</h3>
 
 <div class="ressource">
   <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/mailboxes</span><span class="portee">mail:read</span></div>
@@ -524,7 +584,7 @@ authorization: Bearer AQECAAAAAG…</code></pre>
   </div>
 </div>
 
-<h3 id="r-messages"><span class="numero">5.4</span>Messages</h3>
+<h3 id="r-messages"><span class="numero">5.5</span>Messages</h3>
 
 <div class="ressource">
   <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/mailboxes/{boite}/messages</span><span class="portee">mail:read</span></div>
@@ -579,7 +639,7 @@ authorization: Bearer AQECAAAAAG…</code></pre>
   <p>Une partie MIME, numérotée comme §6.4.5 de RFC 9051 le prescrit — <code>1</code>, <code>1.2</code>, <code>2.1.1</code>.</p>
 </div>
 
-<h3 id="r-recherche"><span class="numero">5.5</span>Recherche</h3>
+<h3 id="r-recherche"><span class="numero">5.6</span>Recherche</h3>
 
 <div class="ressource">
   <div class="ligne"><span class="verbe post">POST</span><span class="chemin">/v1/mailboxes/{boite}/search</span><span class="portee">mail:read</span></div>
@@ -601,7 +661,7 @@ authorization: Bearer AQECAAAAAG…</code></pre>
   <p><code>complete</code> vaut <code>false</code> quand la liste a été tronquée. Un client qui l'ignorerait agirait sur une moitié de résultats en croyant les avoir tous.</p>
 </div>
 
-<h3 id="r-soumission"><span class="numero">5.6</span>Soumission</h3>
+<h3 id="r-soumission"><span class="numero">5.7</span>Soumission</h3>
 
 <div class="ressource">
   <div class="ligne"><span class="verbe post">POST</span><span class="chemin">/v1/submissions</span><span class="portee">submit:write</span></div>
@@ -623,7 +683,7 @@ Le corps du message.
   <p>Le serveur remet aux destinataires locaux, met en file ce qui sort, et <strong>signe en DKIM</strong> ce qu'il accepte, pour les domaines dont il tient la zone. Un échec de remise rend <code>503</code> : il est temporaire, et votre message a des chances de passer plus tard.</p>
 </div>
 
-<h3 id="r-moi"><span class="numero">5.7</span>Ce qui est à soi</h3>
+<h3 id="r-moi"><span class="numero">5.8</span>Ce qui est à soi</h3>
 
 <p>Ces ressources n'exigent <strong>aucune portée</strong> : elles agissent sur <em>soi</em>, et le jeton présenté dit déjà de qui il s'agit. Exiger <code>admin</code> en ferait des routes que seul un administrateur peut emprunter, ce qui est exactement ce qu'elles existent pour éviter.</p>
 
@@ -667,7 +727,7 @@ Le corps du message.
   <p>Révoquer deux fois rend <code>404</code> la seconde fois. §9.3.5 de RFC 9110 l'admet : ce qui doit être idempotent est l'<em>effet</em>, et il l'est — l'appareil n'est plus là dans les deux cas. Rendre <code>204</code> à une révocation qui n'a rien retiré laisserait croire qu'on a retiré quelque chose.</p>
 </div>
 
-<h3 id="r-admin"><span class="numero">5.8</span>Administration</h3>
+<h3 id="r-admin"><span class="numero">5.9</span>Administration</h3>
 
 <p>Toutes ces ressources exigent le domaine <code>admin</code>, qu'un mot de passe n'accorde jamais. Voir <a href="#admin">§3.6</a>.</p>
 
@@ -697,7 +757,7 @@ Le corps du message.
 
 <p>La longueur du préfixe n'est pas décorative : <code>2001:db8::</code> seul ne dit pas qu'un <code>/64</code> entier est puni, et un exploitant croirait n'avoir banni qu'une machine.</p>
 
-<h3 id="r-supervision"><span class="numero">5.9</span>Supervision</h3>
+<h3 id="r-supervision"><span class="numero">5.10</span>Supervision</h3>
 
 <div class="ressource">
   <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/health</span><span class="portee">observe:read</span></div>

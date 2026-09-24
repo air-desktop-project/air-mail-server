@@ -140,12 +140,24 @@ fuzz_target!(|entree: Entree| {
     // l'inverse — `/v1/devices` ajouté sans que cet oracle le sache.
     match resolu.scope {
         None => assert!(
-            matches!(resource, Resource::Tokens | Resource::Devices),
+            matches!(
+                resource,
+                Resource::Tokens
+                    | Resource::Devices
+                    | Resource::Sessions
+                    | Resource::SessionChallenge
+            ),
             "{resource:?} n'exige aucune portée"
         ),
         Some(portee) => {
             assert!(
-                !matches!(resource, Resource::Tokens | Resource::Devices),
+                !matches!(
+                    resource,
+                    Resource::Tokens
+                        | Resource::Devices
+                        | Resource::Sessions
+                        | Resource::SessionChallenge
+                ),
                 "une porte d'entrée exige une portée"
             );
             // PROPRIÉTÉ 6 : la lecture ne donne jamais l'écriture.
@@ -247,6 +259,11 @@ fn segments_de(resource: &Resource<'_>) -> std::vec::Vec<std::string::String> {
     match *resource {
         Resource::Tokens => pousser("tokens"),
         Resource::Devices => pousser("devices"),
+        Resource::Sessions => pousser("sessions"),
+        Resource::SessionChallenge => {
+            pousser("sessions");
+            pousser("challenge");
+        }
         Resource::Invitations => pousser("invitations"),
         Resource::OwnPassword => {
             pousser("me");

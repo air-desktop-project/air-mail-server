@@ -282,6 +282,41 @@ fuzz_target!(|entree: Entree| {
         // sceau HMAC-SHA-256 au hasard demande 2^256 essais. Il est là comme
         // GARDE — le jour où un câblage laisserait une autre route y tomber, ou
         // laisserait passer sans sceau, c'est ici qu'on l'apprendrait.
+        // **UNE SESSION PAR CLEF NE SORT QUE D'UN DÉFI SCELLÉ PAR NOTRE CLÉ.**
+        //
+        // Ce bras est en pratique inatteignable par mutation — fabriquer un
+        // sceau HMAC-SHA-256 au hasard demande 2^256 essais. Il est là comme
+        // GARDE : le jour où un câblage laisserait une autre route y tomber, ou
+        // laisserait passer sans sceau, c'est ici qu'on l'apprendrait.
+        Next::CheckDevice {
+            account,
+            device,
+            issued_at_seconds,
+            ..
+        } => {
+            assert!(
+                !entree.en_clair,
+                "une session par clef en clair a été servie"
+            );
+            assert_eq!(tour.status(), StatusCode::OK);
+            let mut place_du_chemin = [0_u8; 2 * 1024];
+            let (chemin, _requete) = split_query(tete.path());
+            let resolu = resolve(tete.method(), chemin, &mut place_du_chemin)
+                .expect("la session a répondu à un défi : cette route se résout");
+            assert!(
+                matches!(resolu.resource, ams_api::Resource::Sessions),
+                "une session par clef est sortie d'une autre route que `/v1/sessions`"
+            );
+            assert_eq!(resolu.method, Method::Post);
+            assert!(!account.is_empty(), "un défi sans compte");
+            assert!(!device.is_empty(), "un défi sans appareil");
+            // **LE DÉFI N'EST JAMAIS VENU DU FUTUR** : la lecture le refuse, et
+            // l'accepter le ferait vivre bien au-delà de ses soixante secondes.
+            assert!(
+                issued_at_seconds <= maintenant / 1_000_000,
+                "un défi daté du futur a été accepté"
+            );
+        }
         Next::Enrol { account, .. } => {
             assert!(!entree.en_clair, "un enrôlement en clair a été servi");
             assert_eq!(tour.status(), StatusCode::OK);

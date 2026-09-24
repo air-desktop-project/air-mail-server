@@ -71,6 +71,8 @@ const ALT_SVC_PREFIXE: &[u8] = b"h3=\":";
 
 /// Ce qui sépare le port de sa durée de validité.
 const ALT_SVC_MILIEU: &[u8] = b"\"; ma=";
+/// Ce qu'un nom de domaine peut faire de long (§3.1 de RFC 1035).
+pub const DOMAINE_MAX: usize = 255;
 
 /// La plus longue valeur d'`Alt-Svc` que ce serveur écrive.
 ///
@@ -181,6 +183,34 @@ pub enum Next<'o> {
         /// Le nom que son propriétaire lui donne. Peut être vide.
         name: &'o str,
     },
+    /// Vérifier cette signature d'appareil, puis appeler [`Http::on_credentials`].
+    ///
+    /// **LE MÊME CHEMIN DE FRAPPE QUE LE MOT DE PASSE**, et c'est voulu : une
+    /// session ouverte par clef EST une session, et lui donner un second
+    /// chemin donnerait deux jetons qui finiraient par différer.
+    ///
+    /// **LA SESSION A DÉJÀ VÉRIFIÉ LE DÉFI** : si l'appelant reçoit ceci, le
+    /// sceau était bon, la version était celle d'un défi et non d'un jeton ni
+    /// d'une invitation, et les soixante secondes n'étaient pas passées.
+    ///
+    /// Ce qu'il reste à faire est ce que cette crate ne peut pas faire : lire la
+    /// clef publique dans le magasin, vérifier la signature, et refuser le
+    /// REJEU — un défi émis avant la dernière session de cet appareil ne vaut
+    /// plus, et c'est le magasin qui porte cette date.
+    CheckDevice {
+        /// Le compte que le défi désigne.
+        account: &'o str,
+        /// L'appareil que le défi désigne.
+        device: &'o str,
+        /// Quand le défi a été émis, **en secondes** — l'unité du magasin.
+        issued_at_seconds: u64,
+        /// Le défi, **tel qu'il a été rendu** : c'est lui qui entre dans le
+        /// condensat signé, et le redécouper ici ferait deux écritures d'une
+        /// seule chose.
+        challenge: &'o str,
+        /// La signature annoncée, en base64url.
+        signature: &'o str,
+    },
     /// Servir cette ressource, pour ce compte.
     ///
     /// L'autorisation est déjà faite : si l'appelant reçoit ceci, le jeton
@@ -268,6 +298,16 @@ pub struct Http {
     /// change.
     alt_svc: [u8; ALT_SVC_MAX],
     alt_svc_len: usize,
+    /// Le domaine de ce serveur, et sa longueur. Zéro : les sessions par clef
+    /// ne sont pas servies.
+    ///
+    /// **IL ENTRE DANS CE QU'UN APPAREIL SIGNE**, et c'est ce qui empêche une
+    /// signature obtenue ici de valoir ailleurs. Une session qui ne le connaît
+    /// pas ne peut donc pas émettre de défi — et répondre `501` vaut mieux
+    /// qu'émettre un défi lié à un domaine vide, que deux serveurs
+    /// partageraient.
+    domaine: [u8; DOMAINE_MAX],
+    domaine_len: usize,
 }
 
 impl Http {
@@ -294,7 +334,37 @@ impl Http {
             duree,
             alt_svc: [0; ALT_SVC_MAX],
             alt_svc_len: 0,
+            domaine: [0; DOMAINE_MAX],
+            domaine_len: 0,
         })
+    }
+
+    /// Lui dit quel domaine ce serveur sert.
+    ///
+    /// **C'est la seule façon d'ouvrir les sessions par clef** : le domaine
+    /// entre dans le condensat qu'un appareil signe, et sans lui une signature
+    /// obtenue ici vaudrait contre un autre serveur.
+    ///
+    /// Un domaine plus long que [`DOMAINE_MAX`] est **ignoré** plutôt que
+    /// tronqué : un domaine tronqué donnerait un condensat qu'aucun client ne
+    /// saurait reproduire, et les sessions par clef échoueraient sans que rien
+    /// ne dise pourquoi. §3.1 de RFC 1035 borne un nom à 255 octets, et ce
+    /// serveur refuse déjà de démarrer sur un domaine qui n'en est pas un.
+    #[must_use]
+    pub fn avec_domaine(mut self, domaine: &[u8]) -> Self {
+        if domaine.is_empty() || domaine.len() > DOMAINE_MAX {
+            return self;
+        }
+        for (place, lu) in self.domaine.iter_mut().zip(domaine) {
+            *place = *lu;
+        }
+        self.domaine_len = domaine.len();
+        self
+    }
+
+    /// Le domaine de ce serveur, ou une tranche vide s'il n'est pas connu.
+    fn domaine(&self) -> &[u8] {
+        self.domaine.get(..self.domaine_len).unwrap_or_default()
     }
 
     /// Annonce qu'HTTP/3 s'écoute sur ce port UDP (RFC 7838, §3.1 de RFC 9114).
@@ -418,6 +488,17 @@ impl Http {
             // échange des identifiants contre un jeton ; l'autre enrôle une
             // clef sur la foi d'une invitation. Les distinguer ici plutôt que
             // dans l'appelant garde la vérification du sceau là où la clé vit.
+            if matches!(resolu.resource, Resource::SessionChallenge) {
+                return self.emettre_un_defi(corps, maintenant, place_de_la_reponse);
+            }
+            if matches!(resolu.resource, Resource::Sessions) {
+                return self.repondre_a_un_defi(
+                    corps,
+                    maintenant,
+                    place_du_jeton,
+                    place_de_la_reponse,
+                );
+            }
             if matches!(resolu.resource, Resource::Devices) {
                 return enroler_un_appareil(
                     self.alt_svc(),
@@ -456,6 +537,119 @@ impl Http {
                 nonce: jeton.nonce,
                 scope: jeton.scope,
                 body: corps,
+            },
+        })
+    }
+
+    /// Émet un défi pour ce couple compte-appareil.
+    ///
+    /// # ON N'A RIEN À CONSULTER, ET C'EST TOUT L'INTÉRÊT
+    ///
+    /// Un défi est émis pour **n'importe quel** couple, connu ou non : cette
+    /// session n'a pas le magasin, et c'est ce qui rend l'énumération
+    /// impossible par construction — il n'y a rien ici qui puisse dire qu'un
+    /// appareil existe.
+    ///
+    /// **SANS DOMAINE, ON N'ÉMET PAS.** Il entre dans ce que l'appareil signe ;
+    /// un défi lié à un domaine vide serait un défi que deux serveurs
+    /// partageraient.
+    fn emettre_un_defi<'o>(
+        &'o self,
+        corps: &[u8],
+        maintenant: u64,
+        sortie: &'o mut [u8],
+    ) -> Result<Turn<'o>, (Reason, &'o mut [u8])> {
+        if self.domaine().is_empty() {
+            return Err((Reason::NotImplemented, sortie));
+        }
+        let Ok(demande) = render::read_challenge_request(corps) else {
+            return Err((Reason::BadJsonBody, sortie));
+        };
+        let mut texte = [0_u8; ams_api::CHALLENGE_ENCODED_OCTETS_MAX];
+        // **LE DÉFI COMPTE EN SECONDES**, et l'appelant nous donne des
+        // microsecondes : la conversion a lieu ICI, une fois, et le nom du champ
+        // porte son unité. Voir l'en-tête de `ams_api::challenge`.
+        let defi = match ams_api::issue_challenge(
+            &self.clef,
+            &ams_api::Challenge {
+                login: demande.login,
+                device: demande.device,
+                issued_at_seconds: maintenant / 1_000_000,
+            },
+            &mut texte,
+        ) {
+            Ok(defi) => defi,
+            // Un compte ou un appareil hors bornes : c'est le corps qui cloche.
+            Err(_) => return Err((Reason::BadJsonBody, sortie)),
+        };
+        match render::write_challenge(
+            defi,
+            // **L'ALPHABET DE §5 DE RFC 4648 EST DE L'ASCII**, et le rôle est une
+            // constante de ce dépôt : les deux sont de l'UTF-8 par construction.
+            core::str::from_utf8(ams_api::CHALLENGE_ROLE).unwrap_or_default(),
+            core::str::from_utf8(self.domaine()).unwrap_or_default(),
+            ams_api::CHALLENGE_VIE_SECONDES,
+            sortie,
+        ) {
+            Ok(ecrit) => Ok(Turn {
+                status: StatusCode::CREATED,
+                fields: champs_ordinaires(StatusCode::CREATED, self.alt_svc(), &[]),
+                body: ecrit,
+                next: Next::Respond,
+            }),
+            // **LE MÊME TRAITEMENT QUE POUR UN JETON QU'ON NE SAIT PAS ÉCRIRE** :
+            // le tampon ne suffit pas, c'est notre faute, et l'on ne peut même
+            // plus écrire dans ce tampon le document qui le dirait.
+            Err(_) => Ok(Turn {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                fields: champs_ordinaires(StatusCode::INTERNAL_SERVER_ERROR, self.alt_svc(), &[]),
+                body: &[],
+                next: Next::Respond,
+            }),
+        }
+    }
+
+    /// Lit une réponse à un défi, et demande à l'appelant de vérifier la
+    /// signature.
+    ///
+    /// # LE MÊME REFUS POUR TOUT CE QUI N'EST PAS UN DÉFI DE CE SERVEUR
+    ///
+    /// Un corps mal formé, un défi forgé, un jeton présenté à sa place : tout
+    /// rend `401`. **L'EXPIRATION, ELLE, SE DIT** — on ne l'atteint qu'après un
+    /// sceau valide, elle n'apprend donc rien à qui forge, et une horloge de
+    /// client qui dérive produirait sinon des échecs incompréhensibles.
+    fn repondre_a_un_defi<'o>(
+        &'o self,
+        corps: &'o [u8],
+        maintenant: u64,
+        place_du_defi: &'o mut [u8],
+        sortie: &'o mut [u8],
+    ) -> Result<Turn<'o>, (Reason, &'o mut [u8])> {
+        if self.domaine().is_empty() {
+            return Err((Reason::NotImplemented, sortie));
+        }
+        let Ok(demande) = render::read_session_request(corps) else {
+            return Err((Reason::BadJsonBody, sortie));
+        };
+        let lu = match ams_api::verify_challenge(
+            &self.clef,
+            demande.challenge.as_bytes(),
+            maintenant / 1_000_000,
+            place_du_defi,
+        ) {
+            Ok(lu) => lu,
+            Err(faute) => return Err((faute.reason(), sortie)),
+        };
+        Ok(Turn {
+            status: StatusCode::OK,
+            fields: champs_ordinaires(StatusCode::OK, self.alt_svc(), &[]),
+            body: &[],
+            next: Next::CheckDevice {
+                account: lu.login,
+                device: lu.device,
+                issued_at_seconds: lu.issued_at_seconds,
+                challenge: demande.challenge,
+                signature: demande.signature,
             },
         })
     }

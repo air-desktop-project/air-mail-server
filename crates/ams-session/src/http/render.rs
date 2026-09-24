@@ -178,6 +178,139 @@ pub struct BanRow<'a> {
     pub seconds: u64,
 }
 
+/// Ce qu'une demande de défi dit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChallengeRequest<'a> {
+    /// Le compte dont on veut ouvrir une session.
+    pub login: &'a str,
+    /// L'appareil qui prétend tenir la clef.
+    pub device: &'a str,
+}
+
+/// Lit une demande de défi.
+///
+/// # Errors
+///
+/// [`Reason::BadJsonBody`] pour un corps qu'on ne sait pas lire, un champ
+/// inconnu, ou un champ échappé.
+pub fn read_challenge_request(corps: &[u8]) -> Result<ChallengeRequest<'_>, Error> {
+    let mauvais = Error::new(Reason::BadJsonBody);
+    let mut lecteur = Reader::new(corps);
+    let mut login = None;
+    let mut device = None;
+    // Quel champ on lit : 1 `login`, 2 `deviceId`.
+    let mut quel = 0_u8;
+
+    loop {
+        match lecteur.read().map_err(|_| mauvais)? {
+            None => break,
+            Some(Event::Key(clef)) => {
+                quel = match (clef.is("login"), clef.is("deviceId")) {
+                    (true, _) => 1,
+                    (_, true) => 2,
+                    _ => return Err(mauvais),
+                };
+            }
+            Some(Event::Text(texte)) => {
+                let clair = texte.as_plain().ok_or(mauvais)?;
+                match quel {
+                    1 => login = Some(clair),
+                    2 => device = Some(clair),
+                    _ => return Err(mauvais),
+                }
+            }
+            Some(Event::ObjectStart | Event::ObjectEnd) => {}
+            Some(_) => return Err(mauvais),
+        }
+    }
+    Ok(ChallengeRequest {
+        login: login.ok_or(mauvais)?,
+        device: device.ok_or(mauvais)?,
+    })
+}
+
+/// Écrit un défi fraîchement émis.
+///
+/// # CE QU'IL FAUT POUR LE SIGNER EST DIT AVEC LUI
+///
+/// Le client doit signer le condensat d'une suite qui porte un **rôle** et le
+/// **domaine du serveur** — et non le défi nu. Les rendre ici lui évite de les
+/// deviner, et évite surtout que cinq applications natives les devinent
+/// différemment.
+///
+/// # Errors
+///
+/// [`Reason::BufferTooSmall`] si `sortie` ne suffit pas.
+pub fn write_challenge<'o>(
+    challenge: &str,
+    role: &str,
+    domaine: &str,
+    expires_in: u64,
+    sortie: &'o mut [u8],
+) -> Result<&'o [u8], Error> {
+    let mut json = Json::new(sortie);
+    json.begin_object()?;
+    json.field_str("challenge", challenge)?;
+    json.field_str("role", role)?;
+    json.field_str("serverIdentity", domaine)?;
+    // **UNE DURÉE, ET NON UNE DATE.** Une date obligerait le client à comparer
+    // son horloge à la nôtre ; une durée lui dit seulement combien de temps il
+    // lui reste pour obtenir une empreinte de son propriétaire.
+    json.field_u64("expiresInSeconds", expires_in)?;
+    json.end_object()?;
+    json.finish()
+}
+
+/// Ce qu'une réponse à un défi dit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionRequest<'a> {
+    /// Le défi tel qu'il a été rendu.
+    pub challenge: &'a str,
+    /// La signature, en base64url : `r ‖ s`, soixante-quatre octets.
+    pub signature: &'a str,
+}
+
+/// Lit une réponse à un défi.
+///
+/// # Errors
+///
+/// [`Reason::BadJsonBody`].
+pub fn read_session_request(corps: &[u8]) -> Result<SessionRequest<'_>, Error> {
+    let mauvais = Error::new(Reason::BadJsonBody);
+    let mut lecteur = Reader::new(corps);
+    let mut challenge = None;
+    let mut signature = None;
+    // Quel champ on lit : 1 `challenge`, 2 `signature`.
+    let mut quel = 0_u8;
+
+    loop {
+        match lecteur.read().map_err(|_| mauvais)? {
+            None => break,
+            Some(Event::Key(clef)) => {
+                quel = match (clef.is("challenge"), clef.is("signature")) {
+                    (true, _) => 1,
+                    (_, true) => 2,
+                    _ => return Err(mauvais),
+                };
+            }
+            Some(Event::Text(texte)) => {
+                let clair = texte.as_plain().ok_or(mauvais)?;
+                match quel {
+                    1 => challenge = Some(clair),
+                    2 => signature = Some(clair),
+                    _ => return Err(mauvais),
+                }
+            }
+            Some(Event::ObjectStart | Event::ObjectEnd) => {}
+            Some(_) => return Err(mauvais),
+        }
+    }
+    Ok(SessionRequest {
+        challenge: challenge.ok_or(mauvais)?,
+        signature: signature.ok_or(mauvais)?,
+    })
+}
+
 /// Ce qu'une demande d'invitation dit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InvitationRequest<'a> {

@@ -56,6 +56,28 @@ pub fn sha256(message: &[u8]) -> [u8; MAC_OCTETS] {
     Sha256::digest(message).into()
 }
 
+/// Le condensat SHA-256 de ces morceaux, mis bout à bout.
+///
+/// # POURQUOI CETTE FORME EXISTE, ET C'EST UN DÉFAUT RÉEL QUI L'A IMPOSÉE
+///
+/// Condenser « un rôle, un domaine, un défi » demandait d'abord de les recopier
+/// dans un tampon. Un tampon a une borne ; ce qui la dépasse est **tronqué en
+/// silence**, et deux entrées distinctes donnent alors le MÊME condensat — donc
+/// une signature qui vaut pour les deux.
+///
+/// Le défaut a été trouvé par l'essai qui prétendait seulement vérifier qu'un
+/// domaine démesuré ne fait pas paniquer : il ne paniquait pas, il collisionnait.
+///
+/// **ICI IL N'Y A PAS DE TAMPON**, donc rien à borner et rien à tronquer.
+#[must_use]
+pub fn sha256_des_morceaux(morceaux: &[&[u8]]) -> [u8; MAC_OCTETS] {
+    let mut hacheur = Sha256::new();
+    for morceau in morceaux {
+        hacheur.update(morceau);
+    }
+    hacheur.finalize().into()
+}
+
 /// `HMAC-SHA-256` de ce message sous cette clé.
 ///
 /// # UNE CLÉ PLUS LONGUE QU'UN BLOC SE HACHE D'ABORD

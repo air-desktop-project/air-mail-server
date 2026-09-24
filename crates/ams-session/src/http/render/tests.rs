@@ -11,10 +11,10 @@ use ams_proto_imap::Flags;
 
 use super::{
     AccountRow, BanRow, DeviceRow, FlagPatch, MailboxRow, MessageRow, read_account_body,
-    read_flag_patch, read_invitation_request, read_own_password_body, read_search_criteria,
-    write_account, write_accounts, write_bans, write_devices, write_domains, write_enrolled,
-    write_health, write_invitation, write_mailbox, write_mailboxes, write_message, write_messages,
-    write_metrics, write_search,
+    read_challenge_request, read_flag_patch, read_invitation_request, read_own_password_body,
+    read_search_criteria, read_session_request, write_account, write_accounts, write_bans,
+    write_challenge, write_devices, write_domains, write_enrolled, write_health, write_invitation,
+    write_mailbox, write_mailboxes, write_message, write_messages, write_metrics, write_search,
 };
 
 /// Un appareil d'essai.
@@ -372,7 +372,7 @@ fn un_corps_qui_n_est_pas_une_modification_se_refuse() {
 #[test]
 fn chaque_tampon_insuffisant_se_dit() {
     type Ecrivain = fn(&mut [u8]) -> Result<&[u8], ams_api::Error>;
-    let ecrivains: [(&str, Ecrivain); 19] = [
+    let ecrivains: [(&str, Ecrivain); 20] = [
         ("mailboxes", |place| write_mailboxes(&[boite()], place)),
         ("mailbox", |place| write_mailbox(&boite(), place)),
         ("messages", |place| {
@@ -403,6 +403,9 @@ fn chaque_tampon_insuffisant_se_dit() {
         // Un compte SANS appareil écrit un tableau vide : une autre suite
         // d'écritures, donc d'autres places à manquer.
         ("devices-vide", |place| write_devices(&[], place)),
+        ("challenge", |place| {
+            write_challenge("AwAAaN1", "ams-session", "mail.exemple.fr", 60, place)
+        }),
         ("invitation", |place| {
             write_invitation("AbCd", "marie", 1_790_086_400, place)
         }),
@@ -1066,6 +1069,89 @@ fn une_demande_d_invitation_irrecevable_se_refuse() {
     ] {
         assert_eq!(
             read_invitation_request(corps).err().map(Error::reason),
+            Some(Reason::BadJsonBody),
+            "{}",
+            std::string::String::from_utf8_lossy(corps)
+        );
+    }
+}
+
+/// **UN DÉFI SE REND AVEC CE QU'IL FAUT POUR LE SIGNER.**
+///
+/// Le client doit connaître le rôle et l'identité du serveur : les lui faire
+/// deviner ferait deviner différemment à cinq applications natives.
+#[test]
+fn un_defi_se_rend_avec_ce_qu_il_faut_pour_le_signer() {
+    let mut place = [0_u8; PLACE];
+    let ecrit = write_challenge("AwAAaN1", "ams-session", "mail.exemple.fr", 60, &mut place)
+        .expect("écrivable");
+    assert_eq!(
+        std::str::from_utf8(ecrit).expect("utf8"),
+        "{\"challenge\":\"AwAAaN1\",\"role\":\"ams-session\",\
+         \"serverIdentity\":\"mail.exemple.fr\",\"expiresInSeconds\":60}"
+    );
+}
+
+/// **UNE DEMANDE DE DÉFI SE LIT.**
+#[test]
+fn une_demande_de_defi_se_lit() {
+    let lue = read_challenge_request(br#"{"login":"marie","deviceId":"a1b2"}"#).expect("lisible");
+    assert_eq!(lue.login, "marie");
+    assert_eq!(lue.device, "a1b2");
+}
+
+/// **CE QU'UNE DEMANDE DE DÉFI NE PEUT PAS ÊTRE.**
+#[test]
+fn une_demande_de_defi_irrecevable_se_refuse() {
+    for corps in [
+        &b"{}"[..],
+        br#"{"login":"marie"}"#,
+        br#"{"deviceId":"a1"}"#,
+        br#"{"login":"marie","inconnu":"x"}"#,
+        // Une valeur d'un autre type que du texte.
+        br#"{"login":["marie"],"deviceId":"a1"}"#,
+        br#"{"login":42,"deviceId":"a1"}"#,
+        br#"{"login":true,"deviceId":"a1"}"#,
+        // Une chaîne ÉCHAPPÉE : la déséchapper demanderait un tampon que cette
+        // lecture n'a pas.
+        br#"{"login":"ma\u0072ie","deviceId":"a1"}"#,
+        // Un texte hors de toute clef.
+        br#""juste une chaine""#,
+        b"pas du json",
+    ] {
+        assert_eq!(
+            read_challenge_request(corps).err().map(Error::reason),
+            Some(Reason::BadJsonBody),
+            "{}",
+            std::string::String::from_utf8_lossy(corps)
+        );
+    }
+}
+
+/// **UNE RÉPONSE À UN DÉFI SE LIT.**
+#[test]
+fn une_reponse_a_un_defi_se_lit() {
+    let lue = read_session_request(br#"{"challenge":"AwAA","signature":"MEUC"}"#).expect("lisible");
+    assert_eq!(lue.challenge, "AwAA");
+    assert_eq!(lue.signature, "MEUC");
+}
+
+/// **CE QU'UNE RÉPONSE À UN DÉFI NE PEUT PAS ÊTRE.**
+#[test]
+fn une_reponse_a_un_defi_irrecevable_se_refuse() {
+    for corps in [
+        &b"{}"[..],
+        br#"{"challenge":"AwAA"}"#,
+        br#"{"signature":"MEUC"}"#,
+        br#"{"challenge":"AwAA","inconnu":1}"#,
+        br#"{"challenge":["AwAA"],"signature":"MEUC"}"#,
+        br#"{"challenge":42,"signature":"MEUC"}"#,
+        br#"{"challenge":"Aw\u0041A","signature":"MEUC"}"#,
+        br#""juste une chaine""#,
+        b"pas du json",
+    ] {
+        assert_eq!(
+            read_session_request(corps).err().map(Error::reason),
             Some(Reason::BadJsonBody),
             "{}",
             std::string::String::from_utf8_lossy(corps)

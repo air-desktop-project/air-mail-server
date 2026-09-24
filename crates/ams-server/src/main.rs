@@ -220,9 +220,12 @@ fn monter_l_api(
     // session vérifie les invitations, l'API les frappe, et deux clés seraient
     // deux secrets à tourner — dont l'un finirait par ne plus correspondre.
     let scellement = clef.clone();
-    let session = ams_session::http::Http::new(clef, DUREE_DE_JETON_US).map_err(|_| {
-        String::from("la durée de vie des jetons dépasse ce qu'un jeton peut vivre")
-    })?;
+    let session = ams_session::http::Http::new(clef, DUREE_DE_JETON_US)
+        .map_err(|_| String::from("la durée de vie des jetons dépasse ce qu'un jeton peut vivre"))?
+        // **LE DOMAINE OUVRE LES SESSIONS PAR CLEF** : il entre dans ce qu'un
+        // appareil signe, et sans lui une signature obtenue ici vaudrait contre
+        // un autre serveur. Le MÊME que celui que l'API fait signer.
+        .avec_domaine(options.domain.as_bytes());
     // **`Alt-Svc` EST LA SEULE CHOSE QUI RENDE LE PORT HTTP/3 TROUVABLE**
     // (RFC 7838, §3.1 de RFC 9114) : sans elle, ce serveur ouvre un port UDP
     // qu'aucun client conforme ne cherchera jamais. Elle n'est écrite que si ce
@@ -281,6 +284,10 @@ fn monter_l_api(
             // **ET LA CLÉ QUI SCELLE LES INVITATIONS**, la même que celle des
             // jetons : sans elle, `POST /v1/invitations` rend 501.
             let api = api.avec_scellement(scellement);
+            // **LE MÊME DOMAINE QUE LA SESSION, DEPUIS LA MÊME SOURCE.** La
+            // session l'annonce au client, l'API vérifie la signature qui le
+            // porte : deux valeurs et plus aucune signature ne passerait.
+            let api = api.avec_domaine(options.domain.as_bytes());
             // **ET LA MÊME SIGNATURE.** Un message soumis par l'API n'est pas
             // moins émis par ce serveur qu'un message soumis en SMTP : deux
             // portes qui signeraient différemment donneraient à l'exploitant un

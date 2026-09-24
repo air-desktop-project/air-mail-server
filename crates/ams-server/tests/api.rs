@@ -1676,32 +1676,7 @@ fn une_invitation_amorce_le_premier_appareil_et_un_seul() {
 
     // ── L'ENRÔLEMENT, SANS AUCUN JETON ──────────────────────────────────────
     //
-    // La clef publique P-256 d'épreuve, le point `7 · G`, en base64url.
-    const CLE_VALIDE: [u8; 65] = [
-        0x04, 0x1e, 0x18, 0x53, 0x2f, 0xd4, 0x75, 0x4c, 0x02, 0xf3, 0x04, 0x1d, 0x9c, 0x75, 0xce,
-        0xb3, 0x3b, 0x83, 0xff, 0xd8, 0x1a, 0xc7, 0xce, 0x4f, 0xe8, 0x82, 0xcc, 0xb1, 0xc9, 0x8b,
-        0xc5, 0x89, 0x6e, 0xa4, 0x6c, 0x31, 0x1c, 0x4e, 0x2f, 0xf4, 0x0d, 0xd9, 0x6a, 0x36, 0x53,
-        0xe6, 0xe4, 0x54, 0x45, 0xd3, 0x2d, 0xfe, 0x48, 0x6e, 0xce, 0xd7, 0x5c, 0x7a, 0x90, 0xc6,
-        0xa1, 0x88, 0x81, 0xc0, 0xa3,
-    ];
-    let en_base64url = |octets: &[u8]| -> String {
-        const ALPHABET: &[u8; 64] =
-            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-        let mut texte = String::new();
-        for morceau in octets.chunks(3) {
-            let mut bloc = [0_u8; 3];
-            bloc[..morceau.len()].copy_from_slice(morceau);
-            let valeur =
-                (u32::from(bloc[0]) << 16) | (u32::from(bloc[1]) << 8) | u32::from(bloc[2]);
-            let combien = morceau.len() * 8 / 6 + usize::from(morceau.len() * 8 % 6 != 0);
-            for rang in 0..combien {
-                let decalage = 18 - rang * 6;
-                texte.push(char::from(ALPHABET[((valeur >> decalage) & 0x3f) as usize]));
-            }
-        }
-        texte
-    };
-    let clef = en_base64url(&CLE_VALIDE);
+    let clef = en_base64url(&cle_publique());
 
     // **AUCUN EN-TÊTE `Authorization`** : c'est tout le sujet.
     let (corps, code) = poster(
@@ -1739,7 +1714,7 @@ fn une_invitation_amorce_le_premier_appareil_et_un_seul() {
         .expect("relisible");
     assert_eq!(relu.len(), 1);
     assert_eq!(relu[0].login, "marie");
-    assert_eq!(relu[0].public_key.octets(), CLE_VALIDE);
+    assert_eq!(relu[0].public_key.octets(), cle_publique());
 
     // ── LA MÊME INVITATION NE SERT PAS DEUX FOIS ────────────────────────────
     //
@@ -1881,5 +1856,282 @@ fn un_enrolement_refuse_dit_ce_qu_il_faut() {
     assert!(
         !atelier.0.join("appareils.bin").exists(),
         "un refus ne doit rien poser"
+    );
+}
+
+// ── DE QUOI TENIR LE RÔLE DU TÉLÉPHONE ──────────────────────────────────────
+//
+// Ces quatre aides servent à l'essai d'enrôlement ET à celui de session par
+// clef. Les dupliquer ferait deux copies qui finiraient par différer — donc
+// deux clefs qui ne se correspondraient plus.
+
+/// La clef privée d'épreuve : des octets FIXES, jamais un tirage.
+///
+/// **PAS D'ALÉA DANS UN ESSAI** : celui qui tire au sort échoue un jour sur
+/// mille, et ce jour-là personne ne sait pourquoi.
+fn cle_privee() -> p256::ecdsa::SigningKey {
+    p256::ecdsa::SigningKey::from_slice(&[7_u8; 32]).expect("une clef valide")
+}
+
+/// Sa clef publique, en forme non compressée SEC 1 (§2.3.3).
+fn cle_publique() -> [u8; 65] {
+    let point = cle_privee().verifying_key().to_sec1_point(false);
+    let mut sortie = [0_u8; 65];
+    sortie.copy_from_slice(point.as_bytes());
+    sortie
+}
+
+/// Le base64url de §5 de RFC 4648, **sans remplissage** — celui que l'API lit.
+fn en_base64url(octets: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut texte = String::new();
+    for morceau in octets.chunks(3) {
+        let mut bloc = [0_u8; 3];
+        for (place, lu) in bloc.iter_mut().zip(morceau) {
+            *place = *lu;
+        }
+        let valeur = (u32::from(bloc[0]) << 16) | (u32::from(bloc[1]) << 8) | u32::from(bloc[2]);
+        // **UN MORCEAU DE `n` OCTETS DONNE `n + 1` CARACTÈRES** : un pour deux,
+        // deux pour trois, trois pour quatre. L'écrire ainsi évite le calcul de
+        // bits arrondi vers le haut, qui se relit mal et s'écrit de travers.
+        for decalage in [18_u32, 12, 6, 0]
+            .iter()
+            .take(morceau.len().saturating_add(1))
+        {
+            let rang = ((valeur >> decalage) & 0x3f) as usize;
+            texte.push(char::from(ALPHABET[rang]));
+        }
+    }
+    texte
+}
+
+/// Signe ce condensat comme le ferait une enclave : **forme fixe de
+/// soixante-quatre octets**, et la forme de `s` telle qu'elle sort.
+fn signer(condensat: &[u8; 32]) -> String {
+    use p256::ecdsa::signature::hazmat::PrehashSigner as _;
+    let signature: p256::ecdsa::Signature = cle_privee().sign_prehash(condensat).expect("signable");
+    en_base64url(&signature.to_bytes())
+}
+
+/// **UNE CLEF ENRÔLÉE OUVRE UNE SESSION, ET LE DÉFI NE SERT QU'UNE FOIS.**
+///
+/// # CE QUE CET ESSAI ÉPROUVE, ET QU'AUCUN AUTRE NE PEUT
+///
+/// Le cycle complet, avec une VRAIE signature ECDSA P-256 : invitation,
+/// enrôlement, défi, signature, session, puis un appel authentifié par le jeton
+/// obtenu. Six couches doivent s'accorder, et notamment sur **le condensat
+/// signé** — rôle, domaine du serveur, défi. Un désaccord d'un seul octet sur
+/// l'une des trois parties fait échouer toutes les signatures, et aucune épreuve
+/// d'unité ne le verrait.
+///
+/// # ET IL ÉPROUVE L'USAGE UNIQUE
+///
+/// C'est la promesse de la feuille de route, et elle ne vient d'aucun registre :
+/// un défi n'est recevable que s'il a été émis APRÈS la dernière session de
+/// l'appareil. Rejouer le même couple défi-signature, encore dans ses soixante
+/// secondes, doit échouer.
+#[test]
+fn une_clef_enrolee_ouvre_une_session_et_le_defi_ne_sert_qu_une_fois() {
+    let atelier = atelier("session-par-clef");
+    let Some((cert, cle)) = paire(&atelier.0) else {
+        panic!("{SANS_OPENSSL}");
+    };
+    if std::process::Command::new("curl")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("IGNORÉ : `curl` est absent — cet essai n'a RIEN éprouvé.");
+        return;
+    }
+
+    let empreinte =
+        ams_auth::hash_password(b"secret-initial", b"seize octets ici").expect("hachable");
+    let magasin = atelier.0.join("comptes.bin");
+    std::fs::write(
+        &magasin,
+        ams_config::encode_accounts(&[ams_auth::Account {
+            login: String::from("marie"),
+            hash: empreinte,
+            addresses: vec![String::from("marie@example.com")],
+        }])
+        .expect("encodable"),
+    )
+    .expect("le magasin s'écrit");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&magasin, std::fs::Permissions::from_mode(0o600))
+            .expect("permissions du magasin");
+    }
+
+    let appareils = atelier.0.join("appareils.bin");
+    let port_smtp = port_libre();
+    let port_http = port_libre();
+    let config = configuration_complete(
+        &atelier,
+        port_smtp,
+        Tls {
+            certificate_chain_path: cert.display().to_string(),
+            private_key_path: cle.display().to_string(),
+        },
+        &magasin.display().to_string(),
+        &appareils.display().to_string(),
+        "",
+        &format!("127.0.0.1:{port_http}"),
+        "",
+        CLEF,
+    );
+    let _serveur = lancer(&config, port_smtp);
+    let base = format!("https://127.0.0.1:{port_http}");
+
+    let poster = |chemin: &str, corps: &str, entete: Option<&str>| -> (String, String) {
+        let mut commande = std::process::Command::new("curl");
+        commande
+            .args(["-s", "--insecure", "--http2", "-X", "POST"])
+            .args(["-H", "Content-Type: application/json"])
+            .args(["-d", corps])
+            .args(["-w", "\n%{http_code}"]);
+        if let Some(valeur) = entete {
+            commande.args(["-H", valeur]);
+        }
+        let sortie = commande
+            .arg(format!("{base}{chemin}"))
+            .output()
+            .expect("curl s'exécute");
+        let tout = String::from_utf8_lossy(&sortie.stdout).into_owned();
+        let (corps, code) = tout.rsplit_once('\n').unwrap_or(("", ""));
+        (corps.to_string(), code.to_string())
+    };
+    let champ = |corps: &str, nom: &str| -> String {
+        corps
+            .split_once(&format!("\"{nom}\":\""))
+            .and_then(|(_, reste)| reste.split_once('"'))
+            .map(|(valeur, _)| valeur.to_string())
+            .unwrap_or_else(|| panic!("`{nom}` dans {corps}"))
+    };
+
+    // ── ENRÔLER, PAR INVITATION ─────────────────────────────────────────────
+    let admin = jeton_d_administration();
+    let (corps, code) = poster(
+        "/v1/invitations",
+        r#"{"login":"marie"}"#,
+        Some(&format!("Authorization: Bearer {admin}")),
+    );
+    assert_eq!(code, "201", "{corps}");
+    let invitation = champ(&corps, "invitation");
+
+    let (corps, code) = poster(
+        "/v1/devices",
+        &format!(
+            r#"{{"invitation":"{invitation}","publicKey":"{}","name":"le téléphone"}}"#,
+            en_base64url(&cle_publique())
+        ),
+        None,
+    );
+    assert_eq!(code, "201", "{corps}");
+    let appareil = champ(&corps, "id");
+
+    // ── UN DÉFI, SANS AUCUN JETON ───────────────────────────────────────────
+    let (corps, code) = poster(
+        "/v1/sessions/challenge",
+        &format!(r#"{{"login":"marie","deviceId":"{appareil}"}}"#),
+        None,
+    );
+    assert_eq!(code, "201", "le défi doit s'émettre sans jeton : {corps}");
+    let defi = champ(&corps, "challenge");
+    let role = champ(&corps, "role");
+    let identite = champ(&corps, "serverIdentity");
+    assert_eq!(role, "ams-session");
+    assert_eq!(
+        identite, "mail.example.com",
+        "l'identité annoncée doit être le domaine du serveur"
+    );
+    assert!(corps.contains("\"expiresInSeconds\":60"), "{corps}");
+
+    // ── SIGNER COMME LE FERAIT UN TÉLÉPHONE ─────────────────────────────────
+    //
+    // **PAS LE DÉFI NU** : le condensat porte le rôle, l'identité du serveur et
+    // le défi, séparés par des octets nuls. C'est ce qui empêche une signature
+    // obtenue ici de valoir ailleurs.
+    let mut a_signer = Vec::new();
+    a_signer.extend_from_slice(role.as_bytes());
+    a_signer.push(0);
+    a_signer.extend_from_slice(identite.as_bytes());
+    a_signer.push(0);
+    a_signer.extend_from_slice(defi.as_bytes());
+    let condensat = ams_sasl::sha256(&a_signer);
+    let signature = signer(&condensat);
+
+    // ── OUVRIR LA SESSION ───────────────────────────────────────────────────
+    let (corps, code) = poster(
+        "/v1/sessions",
+        &format!(r#"{{"challenge":"{defi}","signature":"{signature}"}}"#),
+        None,
+    );
+    assert_eq!(code, "201", "la session doit s'ouvrir : {corps}");
+    let jeton = champ(&corps, "token");
+
+    // **ET LE JETON OUVRE VRAIMENT LE COURRIER.** Un jeton qu'on rend sans qu'il
+    // serve à rien serait une réussite de façade.
+    let sortie = std::process::Command::new("curl")
+        .args(["-s", "--insecure", "--http2"])
+        .args(["-H", &format!("Authorization: Bearer {jeton}")])
+        .args(["-o", "/dev/null", "-w", "%{http_code}"])
+        .arg(format!("{base}/v1/mailboxes"))
+        .output()
+        .expect("curl s'exécute");
+    assert_eq!(String::from_utf8_lossy(&sortie.stdout), "200");
+
+    // ── LE MÊME DÉFI NE SERT PAS DEUX FOIS ──────────────────────────────────
+    //
+    // Il est encore dans ses soixante secondes, et la signature est la même.
+    // Ce qui l'a tué est la date de session que l'ouverture vient d'écrire.
+    let (corps, code) = poster(
+        "/v1/sessions",
+        &format!(r#"{{"challenge":"{defi}","signature":"{signature}"}}"#),
+        None,
+    );
+    assert_eq!(code, "401", "le rejeu doit échouer : {corps}");
+
+    // ── UN DÉFI EST ÉMIS MÊME POUR UN APPAREIL INCONNU ──────────────────────
+    //
+    // Sans cela, l'émission serait un oracle d'énumération : qui cherche un
+    // identifiant valide n'aurait qu'à regarder lequel obtient un défi.
+    let (corps, code) = poster(
+        "/v1/sessions/challenge",
+        r#"{"login":"marie","deviceId":"appareil-qui-n-existe-pas"}"#,
+        None,
+    );
+    assert_eq!(code, "201", "{corps}");
+    let (corps, code) = poster(
+        "/v1/sessions/challenge",
+        r#"{"login":"compte-qui-n-existe-pas","deviceId":"a1"}"#,
+        None,
+    );
+    assert_eq!(code, "201", "{corps}");
+    // Mais il ne mène nulle part : la signature ne peut pas correspondre.
+    let inconnu = champ(&corps, "challenge");
+    let (_, code) = poster(
+        "/v1/sessions",
+        &format!(r#"{{"challenge":"{inconnu}","signature":"{signature}"}}"#),
+        None,
+    );
+    assert_eq!(code, "401");
+
+    // ── ET UNE SIGNATURE FAUSSE SUR UN DÉFI FRAIS ÉCHOUE ────────────────────
+    let (corps, _) = poster(
+        "/v1/sessions/challenge",
+        &format!(r#"{{"login":"marie","deviceId":"{appareil}"}}"#),
+        None,
+    );
+    let frais = champ(&corps, "challenge");
+    let (_, code) = poster(
+        "/v1/sessions",
+        &format!(r#"{{"challenge":"{frais}","signature":"{signature}"}}"#),
+        None,
+    );
+    assert_eq!(
+        code, "401",
+        "une signature d'un AUTRE défi ne doit pas passer"
     );
 }

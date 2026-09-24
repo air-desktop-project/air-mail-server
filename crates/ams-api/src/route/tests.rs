@@ -29,8 +29,14 @@ fn ou(method: Method, chemin: &[u8]) -> Result<Resource<'static>, Reason> {
 /// Chaque ressource se désigne par son chemin.
 #[test]
 fn chaque_ressource_se_designe() {
-    let cas: [(Method, &[u8], Resource<'_>); 25] = [
+    let cas: [(Method, &[u8], Resource<'_>); 27] = [
         (Method::Post, b"/v1/tokens", Resource::Tokens),
+        (Method::Post, b"/v1/sessions", Resource::Sessions),
+        (
+            Method::Post,
+            b"/v1/sessions/challenge",
+            Resource::SessionChallenge,
+        ),
         (Method::Post, b"/v1/devices", Resource::Devices),
         (Method::Post, b"/v1/invitations", Resource::Invitations),
         (Method::Put, b"/v1/me/password", Resource::OwnPassword),
@@ -576,11 +582,47 @@ fn l_enrolement_n_exige_aucun_jeton() {
         None,
         "aucune portée, donc aucun jeton"
     );
-    // Et c'est la SEULE autre : `Tokens` mise à part, tout le reste en exige un.
-    assert_eq!(
-        resolu(Method::Post, b"/v1/tokens").expect("résolue").scope,
-        None
-    );
+}
+
+/// **QUATRE PORTES D'ENTRÉE, ET PAS UNE DE PLUS.**
+///
+/// Elles n'exigent aucun jeton parce qu'on n'en a pas encore : on y échange des
+/// identifiants, on y enrôle une clef, on y demande un défi, on y présente ce
+/// défi signé. **Toute autre ressource en exige un**, et cet essai le vérifie
+/// dans les deux sens — une porte de plus ouverte par mégarde serait attrapée
+/// ici.
+#[test]
+fn il_y_a_quatre_portes_d_entree_et_pas_une_de_plus() {
+    let publiques: [&[u8]; 4] = [
+        b"/v1/tokens",
+        b"/v1/devices",
+        b"/v1/sessions",
+        b"/v1/sessions/challenge",
+    ];
+    for chemin in publiques {
+        assert_eq!(
+            resolu(Method::Post, chemin).expect("résolue").scope,
+            None,
+            "{}",
+            std::str::from_utf8(chemin).expect("utf8")
+        );
+    }
+    // Et un échantillon de tout le reste en exige une.
+    for (methode, chemin) in [
+        (Method::Get, &b"/v1/mailboxes"[..]),
+        (Method::Get, &b"/v1/accounts"[..]),
+        (Method::Get, &b"/v1/health"[..]),
+        (Method::Get, &b"/v1/me/devices"[..]),
+        (Method::Post, &b"/v1/invitations"[..]),
+        (Method::Post, &b"/v1/submissions"[..]),
+        (Method::Delete, &b"/v1/tokens/current"[..]),
+    ] {
+        assert!(
+            resolu(methode, chemin).expect("résolue").scope.is_some(),
+            "{} n'exige aucune portée",
+            std::str::from_utf8(chemin).expect("utf8")
+        );
+    }
 }
 
 /// **MAIS INVITER EST UN GESTE D'EXPLOITANT.**
@@ -621,6 +663,38 @@ fn rien_ne_pend_sous_l_enrolement_ni_sous_l_invitation() {
         &b"/v1/devices/a1"[..],
         &b"/v1/invitations/a1"[..],
         &b"/v1/devices/a1/quelque-chose"[..],
+    ] {
+        assert_eq!(
+            ou(Method::Post, chemin).err(),
+            Some(Reason::NoSuchResource),
+            "{}",
+            std::str::from_utf8(chemin).expect("utf8")
+        );
+    }
+}
+
+/// **LES DEUX ROUTES DE SESSION NE SERVENT QUE `POST`.**
+#[test]
+fn les_routes_de_session_ne_servent_que_post() {
+    assert_eq!(Resource::Sessions.allowed(), &[Method::Post]);
+    assert_eq!(Resource::SessionChallenge.allowed(), &[Method::Post]);
+    for methode in [Method::Get, Method::Head, Method::Put, Method::Delete] {
+        assert!(!Resource::Sessions.serves(methode), "{methode:?}");
+        assert!(!Resource::SessionChallenge.serves(methode), "{methode:?}");
+    }
+}
+
+/// **RIEN D'AUTRE NE PEND SOUS `/v1/sessions`.**
+///
+/// `challenge` est le seul segment reconnu : sans cette exactitude,
+/// `/v1/sessions/nimporte` désignerait une ressource, et le client croirait
+/// avoir atteint quelque chose.
+#[test]
+fn rien_d_autre_ne_pend_sous_les_sessions() {
+    for chemin in [
+        &b"/v1/sessions/nimporte"[..],
+        &b"/v1/sessions/challenge/en-trop"[..],
+        &b"/v1/sessions/Challenge"[..],
     ] {
         assert_eq!(
             ou(Method::Post, chemin).err(),

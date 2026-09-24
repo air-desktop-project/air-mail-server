@@ -248,11 +248,11 @@
 <text class="etiq" x="517.3" y="49" text-anchor="middle">POST /v1/sessions/challenge</text>
 <text class="etiq-douce" x="517.3" y="70" text-anchor="middle">{ device_id }</text>
 <line class="fleche" x1="644.7" y1="100" x2="397.0" y2="100"/><path class="fleche-tete" d="M 390.0 100 l 8.0 -4 l 0 8 z"/>
-<text class="etiq" x="517.3" y="93" text-anchor="middle">défi de 32 octets, 60 s, usage unique</text>
+<text class="etiq" x="517.3" y="93" text-anchor="middle">défi scellé, 60 s, usage unique</text>
 <line class="fleche" x1="390.0" y1="144" x2="142.3" y2="144"/><path class="fleche-tete" d="M 135.3 144 l 8.0 -4 l 0 8 z"/>
 <text class="etiq" x="262.7" y="137" text-anchor="middle">Face ID / Touch ID</text>
 <text class="etiq-douce" x="262.7" y="158" text-anchor="middle">l&#x27;enclave déverrouille la clef</text>
-<rect class="note" x="216.8" y="173" width="346.4" height="24" rx="4"/><text class="note-texte" x="390.0" y="189" text-anchor="middle">signe : défi ‖ identité du serveur ‖ « ams-session »</text>
+<rect class="note" x="216.8" y="173" width="346.4" height="24" rx="4"/><text class="note-texte" x="390.0" y="189" text-anchor="middle">signe : SHA-256(« ams-session » ‖ domaine ‖ défi)</text>
 <line class="fleche" x1="390.0" y1="232" x2="637.7" y2="232"/><path class="fleche-tete" d="M 644.7 232 l -8.0 -4 l 0 8 z"/>
 <text class="etiq" x="517.3" y="225" text-anchor="middle">POST /v1/sessions { device_id, signature }</text>
 <rect class="note" x="485.6" y="261" width="284.4" height="24" rx="4"/><text class="note-texte" x="627.8" y="277" text-anchor="middle">vérifie ECDSA P-256 contre la clef enrôlée</text>
@@ -433,7 +433,9 @@
   <ul>
     <li><strong>2a — le magasin d'appareils. <span style="color:var(--sur)">Fait (0.2.8)</span></strong> Vérification ECDSA P-256, fichier Cap'n Proto séparé de celui des comptes, magasin modifiable à chaud, et les deux routes <code>/v1/me/devices</code> : lister les siens, en révoquer un. Sans magasin configuré, elles rendent <code>501</code>.</li>
     <li><strong>2b — les invitations et l'enrôlement. <span style="color:var(--sur)">Fait (0.2.10)</span></strong> <code>POST /v1/invitations</code> (portée <code>admin</code>) et <code>POST /v1/devices</code> — <strong>la seule autre route de cette API qu'on atteigne sans jeton</strong>. L'invitation est scellée par la clé des jetons, sous un octet de version distinct : un jeton porteur présenté à sa place ne s'enrôle pas.<p><strong>L'usage unique ne vient pas d'un registre.</strong> Une invitation cesse de valoir parce que le compte a désormais un appareil — l'état qui décide est le magasin, déjà sur disque, donc rien ne se perd au redémarrage et aucun troisième fichier n'existe. Le prix est dit : réinviter exige de révoquer d'abord.</p><p>L'enrôlement était annoncé en 2c ; il est venu ici parce qu'avec ce choix, <strong>rien d'autre ne consomme une invitation</strong> — et du code que personne n'appelle est du code que personne n'éprouve.</p></li>
-    <li><strong>2c — le défi-réponse.</strong> <code>/v1/sessions/challenge</code> et <code>/v1/sessions</code> : ouvrir une session AVEC la clef enrôlée. Un défi est émis <strong>même pour un appareil inconnu</strong>, sans quoi l'absence de défi énumérerait les appareils. Scellé sous un troisième octet de version, valable soixante secondes.</li>
+    <li><strong>2c — le défi-réponse. <span style="color:var(--sur)">Fait (0.2.11)</span></strong> <code>POST /v1/sessions/challenge</code> et <code>POST /v1/sessions</code> — les deux dernières routes sans jeton. Un défi est émis <strong>même pour un appareil inconnu</strong> : la session qui l'émet n'a pas le magasin, donc l'énumération est impossible par construction et non par règle. Scellé sous le troisième octet de version, soixante secondes.
+      <p><strong>L'usage unique, encore une fois sans registre.</strong> Ce n'est pas le défi qui se souvient, c'est l'appareil : ouvrir une session note la date, et un défi n'est recevable que s'il a été émis après elle. Même idée que l'invitation, appliquée une troisième fois. Le prix est dit : deux sessions ne s'ouvrent pas dans la même seconde pour un même appareil.</p>
+      <p><strong>Deux défauts trouvés en chemin, et le second aurait tout cassé en silence.</strong> Le condensat signé se calculait dans un tampon borné : un domaine trop long chassait le défi, et <em>deux défis distincts donnaient le même condensat</em> — une signature aurait valu pour n'importe lequel. Il ne paniquait pas, il collisionnait ; le tampon a été supprimé. Et la session annonçait <code>--domain</code> quand l'API vérifiait <code>--hosted</code> : le client aurait signé pour l'un, le serveur vérifié l'autre, et <strong>aucune signature n'aurait jamais passé</strong>.</p></li>
     <li><strong>2d — l'enrôlement croisé</strong>, avec confirmation d'empreinte sur un appareil déjà enrôlé.</li>
   </ul>
   <div class="note">

@@ -1160,3 +1160,319 @@ fn un_nom_accentue_s_enrole() {
         }
     );
 }
+
+/// Une session qui connaît son domaine — sans lui, les sessions par clef ne
+/// sont pas servies.
+fn une_session_avec_domaine() -> Http {
+    une_session().avec_domaine(b"mail.exemple.fr")
+}
+
+/// Les champs d'une requête vers cette route.
+fn champs_vers(chemin: &[u8]) -> std::vec::Vec<(&[u8], &[u8])> {
+    std::vec![
+        (&b":method"[..], &b"POST"[..]),
+        (&b":scheme"[..], &b"https"[..]),
+        (&b":authority"[..], &b"exemple.fr"[..]),
+        (&b":path"[..], chemin),
+        (&b"content-type"[..], &b"application/json"[..]),
+    ]
+}
+
+/// **UN DÉFI S'ÉMET SANS RIEN CONSULTER, ET POUR N'IMPORTE QUI.**
+///
+/// Cette session n'a pas le magasin : elle ne peut pas savoir si cet appareil
+/// existe, et c'est précisément ce qui rend l'énumération impossible par
+/// construction.
+#[test]
+fn un_defi_s_emet_pour_n_importe_quel_appareil() {
+    let champs = champs_vers(b"/v1/sessions/challenge");
+    let tete = entete(&champs);
+    let mut place = [0_u8; PLACE];
+    let session = une_session_avec_domaine();
+    let tour = session.request(
+        &tete,
+        br#"{"login":"marc","deviceId":"appareil-inconnu"}"#,
+        MAINTENANT,
+        &mut place,
+    );
+    assert_eq!(tour.status(), StatusCode::CREATED);
+    assert_eq!(tour.next(), Next::Respond);
+
+    let dit = std::str::from_utf8(tour.body()).expect("utf8");
+    assert!(dit.contains("\"challenge\":\""), "{dit}");
+    assert!(dit.contains("\"role\":\"ams-session\""), "{dit}");
+    assert!(
+        dit.contains("\"serverIdentity\":\"mail.exemple.fr\""),
+        "le client ne doit pas avoir à deviner le domaine : {dit}"
+    );
+    assert!(dit.contains("\"expiresInSeconds\":60"), "{dit}");
+}
+
+/// **SANS DOMAINE, LES SESSIONS PAR CLEF NE SONT PAS SERVIES.**
+///
+/// Un défi lié à un domaine vide serait un défi que deux serveurs partageraient,
+/// et une signature obtenue chez l'un vaudrait chez l'autre. Mieux vaut `501`.
+#[test]
+fn sans_domaine_les_sessions_par_clef_ne_se_servent_pas() {
+    let session = une_session();
+    for (chemin, corps) in [
+        (
+            &b"/v1/sessions/challenge"[..],
+            &br#"{"login":"marc","deviceId":"a1"}"#[..],
+        ),
+        (
+            &b"/v1/sessions"[..],
+            &br#"{"challenge":"AAAA","signature":"AAAA"}"#[..],
+        ),
+    ] {
+        let champs = champs_vers(chemin);
+        let tete = entete(&champs);
+        let mut place = [0_u8; PLACE];
+        assert_eq!(
+            session
+                .request(&tete, corps, MAINTENANT, &mut place)
+                .status(),
+            StatusCode::NOT_IMPLEMENTED,
+            "{}",
+            std::str::from_utf8(chemin).expect("utf8")
+        );
+    }
+}
+
+/// **UN DÉFI VÉRIFIÉ DEMANDE À L'APPELANT DE JUGER LA SIGNATURE.**
+///
+/// La session ne peut pas la juger : elle n'a ni le magasin, ni la clef
+/// publique. Elle vérifie le SCEAU, en tire le compte et l'appareil, et passe.
+#[test]
+fn un_defi_verifie_demande_la_signature_a_l_appelant() {
+    let session = une_session_avec_domaine();
+
+    // On obtient d'abord un vrai défi de cette session.
+    let champs = champs_vers(b"/v1/sessions/challenge");
+    let tete = entete(&champs);
+    let mut place = [0_u8; PLACE];
+    let tour = session.request(
+        &tete,
+        br#"{"login":"marc","deviceId":"a1b2"}"#,
+        MAINTENANT,
+        &mut place,
+    );
+    let dit = std::string::String::from(std::str::from_utf8(tour.body()).expect("utf8"));
+    let defi = dit
+        .split_once("\"challenge\":\"")
+        .and_then(|(_, reste)| reste.split_once('"'))
+        .map(|(texte, _)| std::string::String::from(texte))
+        .expect("un défi");
+
+    let corps = std::format!(r#"{{"challenge":"{defi}","signature":"AQID"}}"#);
+    let champs = champs_vers(b"/v1/sessions");
+    let tete = entete(&champs);
+    let mut place = [0_u8; PLACE];
+    let session = une_session_avec_domaine();
+    let tour = session.request(&tete, corps.as_bytes(), MAINTENANT, &mut place);
+    assert_eq!(
+        tour.next(),
+        Next::CheckDevice {
+            account: "marc",
+            device: "a1b2",
+            issued_at_seconds: MAINTENANT / 1_000_000,
+            challenge: &defi,
+            signature: "AQID",
+        }
+    );
+}
+
+/// **UN DÉFI EXPIRÉ SE DIT DISTINCTEMENT D'UN DÉFI FORGÉ.**
+///
+/// Le tableau des risques l'exige : une horloge de client qui dérive produirait
+/// sinon des échecs que personne ne sait expliquer. Et cela n'apprend rien à qui
+/// forge — on n'atteint cette réponse qu'après un sceau valide.
+#[test]
+fn un_defi_expire_se_distingue_d_un_defi_forge() {
+    let session = une_session_avec_domaine();
+    let champs = champs_vers(b"/v1/sessions/challenge");
+    let tete = entete(&champs);
+    let mut place = [0_u8; PLACE];
+    let tour = session.request(
+        &tete,
+        br#"{"login":"marc","deviceId":"a1"}"#,
+        MAINTENANT,
+        &mut place,
+    );
+    let dit = std::string::String::from(std::str::from_utf8(tour.body()).expect("utf8"));
+    let defi = dit
+        .split_once("\"challenge\":\"")
+        .and_then(|(_, reste)| reste.split_once('"'))
+        .map(|(texte, _)| std::string::String::from(texte))
+        .expect("un défi");
+
+    // Soixante secondes plus tard, à la seconde exacte.
+    let corps = std::format!(r#"{{"challenge":"{defi}","signature":"AQID"}}"#);
+    let champs = champs_vers(b"/v1/sessions");
+    let tete = entete(&champs);
+    let mut place = [0_u8; PLACE];
+    let session = une_session_avec_domaine();
+    let tour = session.request(
+        &tete,
+        corps.as_bytes(),
+        MAINTENANT + 60 * 1_000_000,
+        &mut place,
+    );
+    assert_eq!(tour.status(), StatusCode::UNAUTHORIZED);
+    let document = std::str::from_utf8(tour.body()).expect("utf8");
+    assert!(
+        document.contains("l'authentification a expiré"),
+        "un défi expiré doit se dire : {document}"
+    );
+
+    // Un défi forgé, lui, ne dit rien de plus que « irrecevable ».
+    let champs = champs_vers(b"/v1/sessions");
+    let tete = entete(&champs);
+    let mut place = [0_u8; PLACE];
+    let session = une_session_avec_domaine();
+    let tour = session.request(
+        &tete,
+        br#"{"challenge":"AAAAAAAAAAAAAAAAAAAAAA","signature":"AQID"}"#,
+        MAINTENANT,
+        &mut place,
+    );
+    assert_eq!(tour.status(), StatusCode::UNAUTHORIZED);
+    let document = std::str::from_utf8(tour.body()).expect("utf8");
+    assert!(
+        document.contains("n'est pas recevable"),
+        "un défi forgé ne doit rien dire de plus : {document}"
+    );
+}
+
+/// **TOUT CE QUI N'EST PAS UNE DEMANDE SE REFUSE.**
+#[test]
+fn les_corps_irrecevables_des_sessions_se_refusent() {
+    let session = une_session_avec_domaine();
+    for (chemin, corps) in [
+        (&b"/v1/sessions/challenge"[..], &b"{}"[..]),
+        (&b"/v1/sessions/challenge"[..], br#"{"login":"marc"}"#),
+        (&b"/v1/sessions/challenge"[..], br#"{"deviceId":"a1"}"#),
+        (
+            &b"/v1/sessions/challenge"[..],
+            br#"{"login":"","deviceId":"a1"}"#,
+        ),
+        (
+            &b"/v1/sessions/challenge"[..],
+            br#"{"login":"marc","inconnu":1}"#,
+        ),
+        (&b"/v1/sessions/challenge"[..], b"pas du json"),
+        (&b"/v1/sessions"[..], &b"{}"[..]),
+        (&b"/v1/sessions"[..], br#"{"challenge":"AAAA"}"#),
+        (&b"/v1/sessions"[..], br#"{"signature":"AAAA"}"#),
+        (&b"/v1/sessions"[..], b"pas du json"),
+    ] {
+        let champs = champs_vers(chemin);
+        let tete = entete(&champs);
+        let mut place = [0_u8; PLACE];
+        let tour = session.request(&tete, corps, MAINTENANT, &mut place);
+        assert!(
+            tour.status().class() >= 4,
+            "« {} » sur {} a été accepté",
+            std::string::String::from_utf8_lossy(corps),
+            std::str::from_utf8(chemin).expect("utf8")
+        );
+    }
+}
+
+/// **UN DOMAINE IRRECEVABLE EST IGNORÉ, ET NON TRONQUÉ.**
+///
+/// Un domaine tronqué donnerait un condensat qu'aucun client ne saurait
+/// reproduire : toutes les sessions par clef échoueraient, et rien ne dirait
+/// pourquoi. L'ignorer laisse la route répondre `501`, ce qui se comprend.
+#[test]
+fn un_domaine_irrecevable_est_ignore() {
+    let trop_long: std::vec::Vec<u8> = std::vec![b'x'; super::DOMAINE_MAX + 1];
+    for domaine in [&b""[..], &trop_long] {
+        let session = une_session().avec_domaine(domaine);
+        let champs = champs_vers(b"/v1/sessions/challenge");
+        let tete = entete(&champs);
+        let mut place = [0_u8; PLACE];
+        assert_eq!(
+            session
+                .request(
+                    &tete,
+                    br#"{"login":"marc","deviceId":"a1"}"#,
+                    MAINTENANT,
+                    &mut place
+                )
+                .status(),
+            StatusCode::NOT_IMPLEMENTED,
+            "domaine de {} octets",
+            domaine.len()
+        );
+    }
+
+    // **ET À LA BORNE EXACTE, CELA PASSE** : une borne inatteignable est mal
+    // écrite.
+    let juste: std::vec::Vec<u8> = std::vec![b'x'; super::DOMAINE_MAX];
+    let session = une_session().avec_domaine(&juste);
+    let champs = champs_vers(b"/v1/sessions/challenge");
+    let tete = entete(&champs);
+    let mut place = [0_u8; PLACE];
+    assert_eq!(
+        session
+            .request(
+                &tete,
+                br#"{"login":"marc","deviceId":"a1"}"#,
+                MAINTENANT,
+                &mut place
+            )
+            .status(),
+        StatusCode::CREATED
+    );
+}
+
+/// **UN TAMPON TROP COURT POUR UN DÉFI EST NOTRE FAUTE**, et se dit `500`.
+///
+/// Toutes les tailles jusqu'à la bonne : c'est ce qui met en jeu chacune des
+/// écritures du chemin, plutôt que la première qui échoue. Et rien ne doit
+/// paniquer — un tampon trop court est une faute de configuration, pas un
+/// effondrement.
+#[test]
+fn un_tampon_trop_court_pour_un_defi_est_notre_faute() {
+    let session = une_session_avec_domaine();
+    let champs = champs_vers(b"/v1/sessions/challenge");
+
+    let entier = {
+        let tete = entete(&champs);
+        let mut place = [0_u8; PLACE];
+        session
+            .request(
+                &tete,
+                br#"{"login":"marc","deviceId":"a1"}"#,
+                MAINTENANT,
+                &mut place,
+            )
+            .body()
+            .len()
+    };
+    assert!(entier > 0, "un défi doit écrire quelque chose");
+
+    let mut vu_un_cinq_cents = false;
+    for taille in 0..PLACE {
+        let tete = entete(&champs);
+        let mut petit = std::vec![0_u8; taille];
+        let tour = session.request(
+            &tete,
+            br#"{"login":"marc","deviceId":"a1"}"#,
+            MAINTENANT,
+            &mut petit,
+        );
+        if tour.status() == StatusCode::INTERNAL_SERVER_ERROR {
+            vu_un_cinq_cents = true;
+            assert!(
+                tour.body().is_empty(),
+                "on ne peut plus écrire dans le tampon qui manque"
+            );
+        }
+    }
+    assert!(
+        vu_un_cinq_cents,
+        "aucune taille n'a mis le chemin d'écriture en défaut"
+    );
+}

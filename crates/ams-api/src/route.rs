@@ -159,6 +159,25 @@ pub enum Resource<'o> {
     /// c'est l'invitation qui dit de quel compte il s'agit.
     Devices,
 
+    /// `/v1/sessions/challenge` — **obtenir un défi à signer.**
+    ///
+    /// # ELLE N'EXIGE AUCUN JETON, ET N'APPREND RIEN
+    ///
+    /// C'est la troisième porte d'entrée. Un défi est émis pour **n'importe
+    /// quel** couple compte-appareil, connu ou non : refuser d'en émettre pour
+    /// un inconnu ferait de cette route un oracle d'énumération des appareils.
+    ///
+    /// Ce qu'elle rend est scellé, borné à soixante secondes, et ne vaut que
+    /// pour l'appareil qui tient la clef correspondante.
+    SessionChallenge,
+
+    /// `/v1/sessions` — **ouvrir une session avec la clef d'un appareil.**
+    ///
+    /// Le pendant de `/v1/tokens` pour l'authentification par clef : on y
+    /// présente un défi signé au lieu d'un mot de passe, et l'on en ressort avec
+    /// le même jeton.
+    Sessions,
+
     /// `/v1/invitations` — frapper une invitation.
     ///
     /// **CELLE-CI EXIGE `admin`**, et c'est toute la dissymétrie : inviter est
@@ -224,7 +243,9 @@ impl Resource<'_> {
             // **NI L'UNE NI L'AUTRE N'EXIGE DE JETON** : ce sont les deux
             // portes d'entrée. Ce qui autorise est dans le corps — des
             // identifiants pour l'une, une invitation scellée pour l'autre.
-            Self::Tokens | Self::Devices => return None,
+            Self::Tokens | Self::Devices | Self::SessionChallenge | Self::Sessions => {
+                return None;
+            }
             // Révoquer son propre jeton ne demande que de l'avoir.
             Self::CurrentToken | Self::OwnPassword | Self::OwnDevices | Self::OwnDevice { .. } => {
                 return Some(Scope::none());
@@ -258,7 +279,12 @@ impl Resource<'_> {
     #[must_use]
     pub const fn allowed(self) -> &'static [Method] {
         match self {
-            Self::Tokens | Self::Submissions | Self::Devices | Self::Invitations => &[Method::Post],
+            Self::Tokens
+            | Self::Submissions
+            | Self::Devices
+            | Self::Invitations
+            | Self::SessionChallenge
+            | Self::Sessions => &[Method::Post],
             Self::CurrentToken => &[Method::Delete],
             // La recherche est un `POST` : ses critères ne tiennent pas dans une
             // chaîne de requête sans ambiguïté, et les y mettre les ferait
@@ -394,6 +420,8 @@ fn designer<'o>(segments: &Segments<'o>) -> Result<Resource<'o>, Error> {
         ("tokens", 2) => Ok(Resource::Tokens),
         ("devices", 2) => Ok(Resource::Devices),
         ("invitations", 2) => Ok(Resource::Invitations),
+        ("sessions", 2) => Ok(Resource::Sessions),
+        ("sessions", 3) if segments.get(2) == "challenge" => Ok(Resource::SessionChallenge),
         ("tokens", 3) if segments.get(2) == "current" => Ok(Resource::CurrentToken),
         ("mailboxes", _) => boites(segments),
         ("accounts", 2) => Ok(Resource::Accounts),
