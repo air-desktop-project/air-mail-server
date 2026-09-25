@@ -298,6 +298,26 @@ fn lire_huit(octets: &[u8]) -> u64 {
     valeur
 }
 
+/// Ce qu'une signature d'appareil autorise.
+///
+/// **LE GESTE, ET NON LE RÔLE NU.** Un appairage lie sa signature à la clef
+/// qu'il approuve ; le rôle seul ne le pourrait pas. En faisant du nouvel
+/// appareil une donnée de la variante, **il devient impossible de calculer le
+/// condensat d'un appairage sans nommer ce qu'il approuve** — on ne peut pas
+/// l'oublier, le compilateur le refuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Geste<'a> {
+    /// Ouvrir une session : le rôle [`ROLE`].
+    Session,
+    /// Approuver un appairage : le rôle [`ROLE_APPAIRAGE`], ET l'identifiant du
+    /// nouvel appareil — le condensat SHA-256 de sa clef publique, en
+    /// hexadécimal minuscule, celui que les deux écrans affichent.
+    Appairage {
+        /// L'identifiant de l'appareil approuvé.
+        nouvel_appareil: &'a [u8],
+    },
+}
+
 /// Le condensat que l'appareil doit signer.
 ///
 /// **CE N'EST PAS LE DÉFI NU**, et c'est ce qui lie la signature à un serveur et
@@ -306,12 +326,17 @@ fn lire_huit(octets: &[u8]) -> u64 {
 ///
 /// Le condensat couvre, dans cet ordre et séparés par des octets nuls : le
 /// **rôle** — [`ROLE`] ou [`ROLE_APPAIRAGE`] —, le domaine du serveur, puis
-/// **le texte du défi tel qu'il a été rendu**.
+/// **le texte du défi tel qu'il a été rendu** ; et pour un appairage,
+/// **l'identifiant de l'appareil approuvé**.
 ///
-/// **LE RÔLE EST UN ARGUMENT, ET NON UNE CONSTANTE INTERNE.** Les deux gestes
-/// qu'une clef d'appareil signe — ouvrir une session, approuver un appairage —
-/// se distinguent alors À L'APPEL, là où on les lit, plutôt que par un défaut
-/// qu'on oublierait de changer.
+/// # POURQUOI L'APPAIRAGE SIGNE CE QU'IL APPROUVE
+///
+/// Sans cela, la signature disait « j'approuve UN appareil », pas « j'approuve
+/// CELUI-CI ». Qui détenait une signature d'appairage et un jeton pouvait la
+/// présenter avec une autre clef que celle que le propriétaire avait vue — et
+/// la confirmation d'empreinte, faite de visu entre deux écrans, n'aurait rien
+/// garanti. **Signer l'identifiant fait de cette confirmation une garantie que
+/// le serveur vérifie**, et non une convention entre applications.
 ///
 /// # POURQUOI LE TEXTE, ET NON LES OCTETS DÉCODÉS
 ///
@@ -323,15 +348,27 @@ fn lire_huit(octets: &[u8]) -> u64 {
 ///
 /// Sans eux, un domaine et un défi différents pourraient se recoller en la même
 /// suite d'octets, et deux condensats distincts n'en feraient qu'un. Aucun des
-/// trois éléments ne peut contenir d'octet nul : le rôle est une constante, un
-/// domaine n'en porte pas, et l'alphabet de §5 de RFC 4648 non plus.
+/// éléments ne peut contenir d'octet nul : le rôle est une constante, un
+/// domaine n'en porte pas, l'alphabet de §5 de RFC 4648 non plus, et un
+/// identifiant d'appareil est de l'hexadécimal.
 #[must_use]
-pub fn digest(role: &[u8], domaine: &[u8], defi: &[u8]) -> [u8; MAC_OCTETS] {
+pub fn digest(geste: Geste<'_>, domaine: &[u8], defi: &[u8]) -> [u8; MAC_OCTETS] {
     // **AUCUN TAMPON, DONC RIEN À TRONQUER.** La première écriture recopiait les
     // trois morceaux dans un tableau borné, et un domaine plus long que la borne
     // chassait le défi : deux défis distincts donnaient alors le MÊME condensat,
     // donc une signature qui vaut pour les deux. Un essai l'a trouvé.
-    ams_sasl::sha256_des_morceaux(&[role, &[0], domaine, &[0], defi])
+    match geste {
+        Geste::Session => ams_sasl::sha256_des_morceaux(&[ROLE, &[0], domaine, &[0], defi]),
+        Geste::Appairage { nouvel_appareil } => ams_sasl::sha256_des_morceaux(&[
+            ROLE_APPAIRAGE,
+            &[0],
+            domaine,
+            &[0],
+            defi,
+            &[0],
+            nouvel_appareil,
+        ]),
+    }
 }
 
 #[cfg(test)]

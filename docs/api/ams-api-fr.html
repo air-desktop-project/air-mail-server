@@ -740,6 +740,13 @@ POST /v1/sessions/challenge
 POST /v1/me/devices
 { "challenge": "…", "signature": "…",
   "publicKey": "&lt;la clef du nouvel appareil&gt;", "name": "la tablette" }</code></pre>
+  <div class="note danger">
+    <span class="etiquette">Un appairage signe CE QU'IL APPROUVE</span>
+    <p>Le condensat d'un appairage est celui d'une session, <strong>suivi de l'identifiant du nouvel appareil</strong> :</p>
+    <pre><code>condensat = SHA-256( "ams-pairing" ‖ 0x00 ‖ serverIdentity ‖ 0x00 ‖ challenge
+                     ‖ 0x00 ‖ id-du-nouvel-appareil )</code></pre>
+    <p>où l'identifiant est le condensat SHA-256 de sa clef publique, en hexadécimal minuscule — celui-là même que les deux écrans affichent pour la confirmation d'empreinte. <strong>Une signature donnée pour la tablette que le propriétaire a vue ne vaut donc pour aucune autre clef</strong> : la confirmation d'empreinte devient une garantie que le serveur vérifie, et non une convention entre applications. Présentée avec une autre <code>publicKey</code>, elle rend <code>401</code>.</p>
+  </div>
   <p>La réponse est celle de l'enrôlement : <code>201</code> avec l'<code>id</code> du nouvel appareil et les adresses du compte.</p>
   <div class="note prudence">
     <span class="etiquette">Le rôle n'est pas décoratif</span>

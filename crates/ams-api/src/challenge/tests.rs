@@ -5,8 +5,8 @@
 //! Ce qu'un défi prouve, ce qu'il refuse, et ce qu'il lie.
 
 use super::{
-    CHALLENGE_OCTETS_MAX, Challenge, ENCODED_OCTETS_MAX, ID_OCTETS_MAX, LOGIN_OCTETS_MAX, ROLE,
-    ROLE_APPAIRAGE, ROLES, VERSION, VIE_SECONDES, digest, issue, verify,
+    CHALLENGE_OCTETS_MAX, Challenge, ENCODED_OCTETS_MAX, Geste, ID_OCTETS_MAX, LOGIN_OCTETS_MAX,
+    ROLE, ROLE_APPAIRAGE, ROLES, VERSION, VIE_SECONDES, digest, issue, verify,
 };
 use crate::error::{Error, Reason};
 use crate::token::Key;
@@ -379,14 +379,14 @@ fn un_tampon_trop_court_est_notre_faute() {
 fn le_condensat_lie_au_serveur_et_a_l_usage() {
     let defi = ecrire("marie", "a1", MAINTENANT);
 
-    let ici = digest(ROLE, DOMAINE, defi.as_bytes());
-    let ailleurs = digest(ROLE, b"mail.autre.test", defi.as_bytes());
+    let ici = digest(Geste::Session, DOMAINE, defi.as_bytes());
+    let ailleurs = digest(Geste::Session, b"mail.autre.test", defi.as_bytes());
     assert_ne!(ici, ailleurs, "deux serveurs, deux condensats");
 
     let autre_defi = ecrire("marie", "a1", MAINTENANT + 1);
     assert_ne!(
         ici,
-        digest(ROLE, DOMAINE, autre_defi.as_bytes()),
+        digest(Geste::Session, DOMAINE, autre_defi.as_bytes()),
         "deux défis, deux condensats"
     );
 }
@@ -397,8 +397,8 @@ fn le_condensat_lie_au_serveur_et_a_l_usage() {
 fn le_condensat_est_stable() {
     let defi = ecrire("marie", "a1", MAINTENANT);
     assert_eq!(
-        digest(ROLE, DOMAINE, defi.as_bytes()),
-        digest(ROLE, DOMAINE, defi.as_bytes())
+        digest(Geste::Session, DOMAINE, defi.as_bytes()),
+        digest(Geste::Session, DOMAINE, defi.as_bytes())
     );
 }
 
@@ -409,7 +409,10 @@ fn le_condensat_est_stable() {
 /// signature obtenue pour l'un vaudrait pour l'autre.
 #[test]
 fn les_separateurs_empechent_le_recollement() {
-    assert_ne!(digest(ROLE, b"ab", b"c"), digest(ROLE, b"a", b"bc"));
+    assert_ne!(
+        digest(Geste::Session, b"ab", b"c"),
+        digest(Geste::Session, b"a", b"bc")
+    );
 }
 
 /// **LE RÔLE EST DANS LE CONDENSAT**, et l'essai le constate plutôt que de le
@@ -426,7 +429,7 @@ fn le_role_est_dans_le_condensat() {
     attendu.push(0);
     attendu.extend_from_slice(b"un-defi");
     assert_eq!(
-        digest(ROLE, DOMAINE, b"un-defi"),
+        digest(Geste::Session, DOMAINE, b"un-defi"),
         ams_sasl::sha256(&attendu)
     );
 }
@@ -448,15 +451,15 @@ fn le_role_est_dans_le_condensat() {
 fn un_domaine_demesure_ne_fait_pas_collisionner() {
     let enorme = std::vec![b'x'; 4_096];
     assert_ne!(
-        digest(ROLE, &enorme, b"defi"),
-        digest(ROLE, &enorme, b"autre"),
+        digest(Geste::Session, &enorme, b"defi"),
+        digest(Geste::Session, &enorme, b"autre"),
         "le défi doit encore compter, quelle que soit la taille du domaine"
     );
     // Et le domaine aussi, quelle que soit sa taille.
     let autre_enorme = std::vec![b'y'; 4_096];
     assert_ne!(
-        digest(ROLE, &enorme, b"defi"),
-        digest(ROLE, &autre_enorme, b"defi")
+        digest(Geste::Session, &enorme, b"defi"),
+        digest(Geste::Session, &autre_enorme, b"defi")
     );
 }
 
@@ -474,8 +477,14 @@ fn un_domaine_demesure_ne_fait_pas_collisionner() {
 fn deux_roles_donnent_deux_condensats() {
     let defi = ecrire("marie", "a1", MAINTENANT);
     assert_ne!(
-        digest(ROLE, DOMAINE, defi.as_bytes()),
-        digest(ROLE_APPAIRAGE, DOMAINE, defi.as_bytes()),
+        digest(Geste::Session, DOMAINE, defi.as_bytes()),
+        digest(
+            Geste::Appairage {
+                nouvel_appareil: b"b2"
+            },
+            DOMAINE,
+            defi.as_bytes()
+        ),
         "une signature de session ne doit pas valoir pour un appairage"
     );
 }
@@ -491,4 +500,74 @@ fn les_roles_sont_distincts_et_enumeres() {
         assert!(!role.contains(&0), "{role:?} porte un octet nul");
         assert!(!role.is_empty());
     }
+}
+
+/// **UN APPAIRAGE SIGNE CE QU'IL APPROUVE.**
+///
+/// Deux appareils approuvés, deux condensats : une signature donnée pour la
+/// tablette que son propriétaire a vue ne vaut pas pour une autre clef. C'est
+/// ce qui fait de la confirmation d'empreinte une garantie vérifiée par le
+/// serveur, et non une convention entre applications.
+#[test]
+fn un_appairage_signe_ce_qu_il_approuve() {
+    let defi = ecrire("marie", "a1", MAINTENANT);
+    let pour = |appareil: &[u8]| {
+        digest(
+            Geste::Appairage {
+                nouvel_appareil: appareil,
+            },
+            DOMAINE,
+            defi.as_bytes(),
+        )
+    };
+    assert_ne!(pour(b"tablette"), pour(b"intrus"));
+    assert_eq!(pour(b"tablette"), pour(b"tablette"));
+}
+
+/// **LE CONDENSAT D'APPAIRAGE EST CELUI QU'ON DOCUMENTE**, calculé à la main :
+/// rôle, domaine, défi, identifiant de l'appareil approuvé, séparés par des
+/// octets nuls. Un client le reproduit à partir de cette seule description.
+#[test]
+fn le_condensat_d_appairage_est_celui_qu_on_documente() {
+    let mut attendu = std::vec::Vec::new();
+    attendu.extend_from_slice(b"ams-pairing");
+    attendu.push(0);
+    attendu.extend_from_slice(DOMAINE);
+    attendu.push(0);
+    attendu.extend_from_slice(b"un-defi");
+    attendu.push(0);
+    attendu.extend_from_slice(b"c0ffee");
+    assert_eq!(
+        digest(
+            Geste::Appairage {
+                nouvel_appareil: b"c0ffee"
+            },
+            DOMAINE,
+            b"un-defi"
+        ),
+        ams_sasl::sha256(&attendu)
+    );
+}
+
+/// **LE SÉPARATEUR DE L'IDENTIFIANT N'EST PAS DÉCORATIF NON PLUS** : sans lui,
+/// un défi `ab` pour l'appareil `c` et un défi `a` pour l'appareil `bc` se
+/// recolleraient en la même suite d'octets.
+#[test]
+fn l_identifiant_ne_se_recolle_pas_au_defi() {
+    assert_ne!(
+        digest(
+            Geste::Appairage {
+                nouvel_appareil: b"c"
+            },
+            DOMAINE,
+            b"ab"
+        ),
+        digest(
+            Geste::Appairage {
+                nouvel_appareil: b"bc"
+            },
+            DOMAINE,
+            b"a"
+        )
+    );
 }

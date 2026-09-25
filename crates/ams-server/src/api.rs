@@ -682,11 +682,28 @@ impl ApiMaildir {
         if defi.login != account {
             return refus_d_appairage(sortie);
         }
-        // **LA SIGNATURE, SANS RIEN ÉCRIRE ENCORE.** Tant que la demande peut
-        // échouer pour une autre raison, le défi ne doit pas être consommé.
+        // **LA CLEF NOUVELLE, D'ABORD** — parce que la signature la couvre. Une
+        // clef qui n'est pas un point de la courbe n'est pas une clef faible :
+        // c'est une clef qui n'existe pas.
+        let mut octets = [0_u8; ams_auth::CLE_OCTETS];
+        let Ok(lus) = ams_api::decode_base64url(demande.public_key.as_bytes(), &mut octets) else {
+            return corps_de_l_enrolement_refuse(sortie);
+        };
+        let Ok(cle) = ams_auth::Cle::lire(lus) else {
+            return corps_de_l_enrolement_refuse(sortie);
+        };
+        let id = en_hexadecimal(&ams_sasl::sha256(&cle.octets()));
+
+        // **LA SIGNATURE, SANS RIEN ÉCRIRE ENCORE**, et sur CE QU'ELLE APPROUVE :
+        // l'identifiant du nouvel appareil entre dans le condensat. Une
+        // signature donnée pour la tablette que le propriétaire a vue ne vaut
+        // donc pas pour une autre clef. Tant que la demande peut échouer pour
+        // une autre raison, le défi ne doit pas être consommé.
         if self
             .signature_recevable(
-                ams_api::CHALLENGE_ROLE_APPAIRAGE,
+                ams_api::Geste::Appairage {
+                    nouvel_appareil: id.as_bytes(),
+                },
                 account,
                 defi.device,
                 defi.issued_at_ms,
@@ -697,17 +714,6 @@ impl ApiMaildir {
         {
             return refus_d_appairage(sortie);
         }
-
-        // **LA CLEF NOUVELLE, ENSUITE.** Une clef qui n'est pas un point de la
-        // courbe n'est pas une clef faible : c'est une clef qui n'existe pas.
-        let mut octets = [0_u8; ams_auth::CLE_OCTETS];
-        let Ok(lus) = ams_api::decode_base64url(demande.public_key.as_bytes(), &mut octets) else {
-            return corps_de_l_enrolement_refuse(sortie);
-        };
-        let Ok(cle) = ams_auth::Cle::lire(lus) else {
-            return corps_de_l_enrolement_refuse(sortie);
-        };
-        let id = en_hexadecimal(&ams_sasl::sha256(&cle.octets()));
 
         let adresses: std::vec::Vec<String> = {
             let comptes = self.comptes.vue();
@@ -889,7 +895,8 @@ impl ApiMaildir {
     /// Ouvrir une session donne quinze minutes ; approuver un appairage crée une
     /// clef qui vaut jusqu'à sa révocation. **Une signature obtenue pour l'un ne
     /// vaut pas pour l'autre**, parce que les deux rôles donnent deux
-    /// condensats.
+    /// condensats. Et un appairage signe EN PLUS l'appareil qu'il approuve —
+    /// voir [`ams_api::Geste`].
     ///
     /// # UN SEUL REFUS POUR TOUTES LES CAUSES
     ///
@@ -898,7 +905,7 @@ impl ApiMaildir {
     /// cet appareil existe — ce que l'émission du défi refuse déjà de dire.
     fn signature_recevable(
         &self,
-        role: &[u8],
+        geste: ams_api::Geste<'_>,
         account: &str,
         device: &str,
         issued_at_ms: u64,
@@ -936,7 +943,7 @@ impl ApiMaildir {
         if self.domaine.is_empty() {
             return None;
         }
-        let condensat = ams_api::digest(role, &self.domaine, challenge.as_bytes());
+        let condensat = ams_api::digest(geste, &self.domaine, challenge.as_bytes());
         ams_auth::verifier(&connu.public_key, &condensat, lue).ok()
     }
 
@@ -1002,7 +1009,7 @@ impl ApiMaildir {
         signature: &str,
     ) -> Option<Scope> {
         self.signature_recevable(
-            ams_api::CHALLENGE_ROLE,
+            ams_api::Geste::Session,
             account,
             device,
             issued_at_ms,

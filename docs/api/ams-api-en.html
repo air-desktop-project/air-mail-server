@@ -742,6 +742,13 @@ POST /v1/sessions/challenge
 POST /v1/me/devices
 { "challenge": "…", "signature": "…",
   "publicKey": "&lt;the new device's key&gt;", "name": "the tablet" }</code></pre>
+  <div class="note danger">
+    <span class="etiquette">A pairing signs WHAT IT APPROVES</span>
+    <p>A pairing digest is a session digest <strong>followed by the new device's id</strong>:</p>
+    <pre><code>digest = SHA-256( "ams-pairing" ‖ 0x00 ‖ serverIdentity ‖ 0x00 ‖ challenge
+                  ‖ 0x00 ‖ new-device-id )</code></pre>
+    <p>where the id is the SHA-256 of its public key, in lowercase hex — the very value both screens show for fingerprint confirmation. <strong>A signature given for the tablet the owner saw is therefore worthless for any other key</strong>: fingerprint confirmation becomes a guarantee the server checks, not a convention between applications. Presented with another <code>publicKey</code>, it returns <code>401</code>.</p>
+  </div>
   <p>The response is the enrolment one: <code>201</code> with the new device's <code>id</code> and the account's addresses.</p>
   <div class="note prudence">
     <span class="etiquette">The role is not decorative</span>

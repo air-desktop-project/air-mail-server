@@ -94,7 +94,7 @@ pub use token::{
 // `verify` existent des deux côtés, et importer les deux sans les distinguer
 // ferait sceller une invitation là où l'on croyait sceller un jeton.
 pub use challenge::{
-    CHALLENGE_OCTETS_MAX, Challenge, ENCODED_OCTETS_MAX as CHALLENGE_ENCODED_OCTETS_MAX,
+    CHALLENGE_OCTETS_MAX, Challenge, ENCODED_OCTETS_MAX as CHALLENGE_ENCODED_OCTETS_MAX, Geste,
     ID_OCTETS_MAX as CHALLENGE_ID_OCTETS_MAX, ROLE as CHALLENGE_ROLE,
     ROLE_APPAIRAGE as CHALLENGE_ROLE_APPAIRAGE, ROLES as CHALLENGE_ROLES,
     VERSION as CHALLENGE_VERSION, VIE_SECONDES as CHALLENGE_VIE_SECONDES, digest,

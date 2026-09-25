@@ -1957,6 +1957,29 @@ fn condensat_a_signer(role: &str, identite: &str, defi: &str) -> [u8; 32] {
     ams_sasl::sha256(&a_signer)
 }
 
+/// Le condensat d'un APPAIRAGE : celui d'une session, sous le rôle
+/// `ams-pairing`, suivi de l'identifiant de l'appareil approuvé.
+fn condensat_d_appairage(identite: &str, defi: &str, nouvel_appareil: &str) -> [u8; 32] {
+    let mut a_signer = Vec::new();
+    a_signer.extend_from_slice(b"ams-pairing");
+    a_signer.push(0);
+    a_signer.extend_from_slice(identite.as_bytes());
+    a_signer.push(0);
+    a_signer.extend_from_slice(defi.as_bytes());
+    a_signer.push(0);
+    a_signer.extend_from_slice(nouvel_appareil.as_bytes());
+    ams_sasl::sha256(&a_signer)
+}
+
+/// L'identifiant d'appareil de la clef tirée de cette graine : le condensat
+/// SHA-256 de sa forme SEC 1, en hexadécimal minuscule.
+fn identifiant_de(graine: u8) -> String {
+    ams_sasl::sha256(&cle_publique_de(graine))
+        .iter()
+        .map(|octet| format!("{octet:02x}"))
+        .collect()
+}
+
 /// **UNE CLEF ENRÔLÉE OUVRE UNE SESSION, ET LE DÉFI NE SERT QU'UNE FOIS.**
 ///
 /// # CE QUE CET ESSAI ÉPROUVE, ET QU'AUCUN AUTRE NE PEUT
@@ -2323,7 +2346,7 @@ fn un_appareil_enrole_en_approuve_un_autre() {
     assert_eq!(role, "ams-pairing", "l'usage doit choisir le rôle");
     let signature = signer_avec(
         &cle_privee_de(7),
-        &condensat_a_signer(&role, "mail.example.com", &defi),
+        &condensat_d_appairage("mail.example.com", &defi, &identifiant_de(9)),
     );
     let (corps, code) = poster(
         "/v1/me/devices",
@@ -2375,10 +2398,30 @@ fn un_appareil_enrole_en_approuve_un_autre() {
 
     // **ET LA MÊME DEMANDE, AVEC LE BON RÔLE, ABOUTIT.** Sans ce second volet,
     // l'essai ci-dessus prouverait seulement que quelque chose a échoué.
-    let (defi, role) = defi_pour(&tablette, "pairing");
+    let (defi, _) = defi_pour(&tablette, "pairing");
     let comme_il_faut = signer_avec(
         &cle_privee_de(9),
-        &condensat_a_signer(&role, "mail.example.com", &defi),
+        &condensat_d_appairage("mail.example.com", &defi, &identifiant_de(11)),
+    );
+
+    // ── LA SIGNATURE COUVRE CE QU'ELLE APPROUVE ─────────────────────────────
+    //
+    // La tablette a signé pour LE POSTE. La même signature, présentée avec une
+    // AUTRE clef, doit se refuser : sans quoi qui la détient avec un jeton
+    // enrôlerait ce qu'il veut, et la confirmation d'empreinte ne garantirait
+    // rien. Le refus ne consomme pas le défi — d'où le second volet, qui
+    // réussit avec la MÊME signature et la bonne clef.
+    let (corps, code) = poster(
+        "/v1/me/devices",
+        &format!(
+            r#"{{"challenge":"{defi}","signature":"{comme_il_faut}","publicKey":"{}","name":"un intrus"}}"#,
+            en_base64url(&cle_publique_de(13))
+        ),
+        Some(&porteur),
+    );
+    assert_eq!(
+        code, "401",
+        "une signature d'appairage ne doit valoir que pour la clef approuvée : {corps}"
     );
     let (corps, code) = poster(
         "/v1/me/devices",
@@ -2397,10 +2440,10 @@ fn un_appareil_enrole_en_approuve_un_autre() {
     // consommé**, et la session qu'elle ouvre AUSSITÔT — sans la moindre
     // attente — doit aboutir. En 0.2.13, la preuve écrivait la date avant que
     // le doublon ne se découvre, et cette session se prenait pour un rejeu.
-    let (defi, role) = defi_pour(&tablette, "pairing");
+    let (defi, _) = defi_pour(&tablette, "pairing");
     let signature = signer_avec(
         &cle_privee_de(9),
-        &condensat_a_signer(&role, "mail.example.com", &defi),
+        &condensat_d_appairage("mail.example.com", &defi, &identifiant_de(7)),
     );
     let (corps, code) = poster(
         "/v1/me/devices",
