@@ -96,6 +96,29 @@ pub const ENCODED_OCTETS_MAX: usize = base64url::encoded_len(CHALLENGE_OCTETS_MA
 /// signerait autre chose, une autre chaîne l'en séparera.
 pub const ROLE: &[u8] = b"ams-session";
 
+/// La chaîne de rôle d'un **appairage** : approuver l'enrôlement d'un second
+/// appareil depuis un appareil déjà enrôlé.
+///
+/// # POURQUOI DEUX RÔLES, ET NON UN SEUL
+///
+/// Les deux gestes n'ont pas la même portée. Ouvrir une session donne un jeton
+/// de quinze minutes ; approuver un appairage crée une clef qui vaut jusqu'à sa
+/// révocation. **Une signature obtenue pour l'un ne doit pas valoir pour
+/// l'autre** — sans quoi une application qui demande « ouvre ma boîte » à son
+/// propriétaire obtiendrait de quoi lui ajouter un appareil permanent.
+///
+/// Le rôle n'est pas dans le sceau, et n'a pas à y être : il entre dans le
+/// CONDENSAT SIGNÉ. Deux rôles donnent deux condensats, donc deux signatures qui
+/// ne se substituent pas — c'est exactement la propriété qu'on veut.
+pub const ROLE_APPAIRAGE: &[u8] = b"ams-pairing";
+
+/// Les rôles que ce serveur fait signer, et les seuls.
+///
+/// **UNE LISTE QUI SERT À CHOISIR, ET NON À DÉCORER** : c'est elle que consulte
+/// l'émission d'un défi pour traduire ce que l'appelant demande. Un rôle qui ne
+/// figure pas ici ne s'obtient pas.
+pub const ROLES: [&[u8]; 2] = [ROLE, ROLE_APPAIRAGE];
+
 /// Ce qu'un défi dit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Challenge<'o> {
@@ -275,9 +298,14 @@ fn lire_huit(octets: &[u8]) -> u64 {
 /// à un usage : sans cette liaison, une signature obtenue pour ouvrir une
 /// session ici vaudrait pour ouvrir une session ailleurs, ou pour autre chose.
 ///
-/// Le condensat couvre, dans cet ordre et séparés par des octets nuls :
-/// [`ROLE`], le domaine du serveur, puis **le texte du défi tel qu'il a été
-/// rendu**.
+/// Le condensat couvre, dans cet ordre et séparés par des octets nuls : le
+/// **rôle** — [`ROLE`] ou [`ROLE_APPAIRAGE`] —, le domaine du serveur, puis
+/// **le texte du défi tel qu'il a été rendu**.
+///
+/// **LE RÔLE EST UN ARGUMENT, ET NON UNE CONSTANTE INTERNE.** Les deux gestes
+/// qu'une clef d'appareil signe — ouvrir une session, approuver un appairage —
+/// se distinguent alors À L'APPEL, là où on les lit, plutôt que par un défaut
+/// qu'on oublierait de changer.
 ///
 /// # POURQUOI LE TEXTE, ET NON LES OCTETS DÉCODÉS
 ///
@@ -292,12 +320,12 @@ fn lire_huit(octets: &[u8]) -> u64 {
 /// trois éléments ne peut contenir d'octet nul : le rôle est une constante, un
 /// domaine n'en porte pas, et l'alphabet de §5 de RFC 4648 non plus.
 #[must_use]
-pub fn digest(domaine: &[u8], defi: &[u8]) -> [u8; MAC_OCTETS] {
+pub fn digest(role: &[u8], domaine: &[u8], defi: &[u8]) -> [u8; MAC_OCTETS] {
     // **AUCUN TAMPON, DONC RIEN À TRONQUER.** La première écriture recopiait les
     // trois morceaux dans un tableau borné, et un domaine plus long que la borne
     // chassait le défi : deux défis distincts donnaient alors le MÊME condensat,
     // donc une signature qui vaut pour les deux. Un essai l'a trouvé.
-    ams_sasl::sha256_des_morceaux(&[ROLE, &[0], domaine, &[0], defi])
+    ams_sasl::sha256_des_morceaux(&[role, &[0], domaine, &[0], defi])
 }
 
 #[cfg(test)]

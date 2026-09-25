@@ -6,7 +6,7 @@
 
 use super::{
     CHALLENGE_OCTETS_MAX, Challenge, ENCODED_OCTETS_MAX, ID_OCTETS_MAX, LOGIN_OCTETS_MAX, ROLE,
-    VERSION, VIE_SECONDES, digest, issue, verify,
+    ROLE_APPAIRAGE, ROLES, VERSION, VIE_SECONDES, digest, issue, verify,
 };
 use crate::error::{Error, Reason};
 use crate::token::Key;
@@ -391,14 +391,14 @@ fn un_tampon_trop_court_est_notre_faute() {
 fn le_condensat_lie_au_serveur_et_a_l_usage() {
     let defi = ecrire("marie", "a1", MAINTENANT);
 
-    let ici = digest(DOMAINE, defi.as_bytes());
-    let ailleurs = digest(b"mail.autre.test", defi.as_bytes());
+    let ici = digest(ROLE, DOMAINE, defi.as_bytes());
+    let ailleurs = digest(ROLE, b"mail.autre.test", defi.as_bytes());
     assert_ne!(ici, ailleurs, "deux serveurs, deux condensats");
 
     let autre_defi = ecrire("marie", "a1", MAINTENANT + 1);
     assert_ne!(
         ici,
-        digest(DOMAINE, autre_defi.as_bytes()),
+        digest(ROLE, DOMAINE, autre_defi.as_bytes()),
         "deux défis, deux condensats"
     );
 }
@@ -409,8 +409,8 @@ fn le_condensat_lie_au_serveur_et_a_l_usage() {
 fn le_condensat_est_stable() {
     let defi = ecrire("marie", "a1", MAINTENANT);
     assert_eq!(
-        digest(DOMAINE, defi.as_bytes()),
-        digest(DOMAINE, defi.as_bytes())
+        digest(ROLE, DOMAINE, defi.as_bytes()),
+        digest(ROLE, DOMAINE, defi.as_bytes())
     );
 }
 
@@ -421,7 +421,7 @@ fn le_condensat_est_stable() {
 /// signature obtenue pour l'un vaudrait pour l'autre.
 #[test]
 fn les_separateurs_empechent_le_recollement() {
-    assert_ne!(digest(b"ab", b"c"), digest(b"a", b"bc"));
+    assert_ne!(digest(ROLE, b"ab", b"c"), digest(ROLE, b"a", b"bc"));
 }
 
 /// **LE RÔLE EST DANS LE CONDENSAT**, et l'essai le constate plutôt que de le
@@ -437,7 +437,10 @@ fn le_role_est_dans_le_condensat() {
     attendu.extend_from_slice(DOMAINE);
     attendu.push(0);
     attendu.extend_from_slice(b"un-defi");
-    assert_eq!(digest(DOMAINE, b"un-defi"), ams_sasl::sha256(&attendu));
+    assert_eq!(
+        digest(ROLE, DOMAINE, b"un-defi"),
+        ams_sasl::sha256(&attendu)
+    );
 }
 
 /// **UN DOMAINE DÉMESURÉ NE FAIT PAS COLLISIONNER LE CONDENSAT.**
@@ -457,11 +460,47 @@ fn le_role_est_dans_le_condensat() {
 fn un_domaine_demesure_ne_fait_pas_collisionner() {
     let enorme = std::vec![b'x'; 4_096];
     assert_ne!(
-        digest(&enorme, b"defi"),
-        digest(&enorme, b"autre"),
+        digest(ROLE, &enorme, b"defi"),
+        digest(ROLE, &enorme, b"autre"),
         "le défi doit encore compter, quelle que soit la taille du domaine"
     );
     // Et le domaine aussi, quelle que soit sa taille.
     let autre_enorme = std::vec![b'y'; 4_096];
-    assert_ne!(digest(&enorme, b"defi"), digest(&autre_enorme, b"defi"));
+    assert_ne!(
+        digest(ROLE, &enorme, b"defi"),
+        digest(ROLE, &autre_enorme, b"defi")
+    );
+}
+
+/// **DEUX RÔLES DONNENT DEUX CONDENSATS**, et c'est ce qui empêche une signature
+/// obtenue pour un geste de valoir pour l'autre.
+///
+/// # POURQUOI CETTE PROPRIÉTÉ EST LE CŒUR DE L'APPAIRAGE
+///
+/// Ouvrir une session donne un jeton de quinze minutes ; approuver un appairage
+/// crée une clef qui vaut jusqu'à sa révocation. Sans cette séparation, une
+/// application qui demande « ouvre ma boîte » à son propriétaire obtiendrait de
+/// quoi lui ajouter un appareil permanent — et le propriétaire n'aurait vu
+/// qu'une invite biométrique ordinaire.
+#[test]
+fn deux_roles_donnent_deux_condensats() {
+    let defi = ecrire("marie", "a1", MAINTENANT);
+    assert_ne!(
+        digest(ROLE, DOMAINE, defi.as_bytes()),
+        digest(ROLE_APPAIRAGE, DOMAINE, defi.as_bytes()),
+        "une signature de session ne doit pas valoir pour un appairage"
+    );
+}
+
+/// **LES DEUX RÔLES SONT DISTINCTS, ET LA LISTE LES PORTE TOUS LES DEUX.**
+#[test]
+fn les_roles_sont_distincts_et_enumeres() {
+    assert_ne!(ROLE, ROLE_APPAIRAGE);
+    assert_eq!(ROLES, [ROLE, ROLE_APPAIRAGE]);
+    // **AUCUN RÔLE NE PORTE D'OCTET NUL** : c'est ce qui rend les séparateurs du
+    // condensat non ambigus.
+    for role in ROLES {
+        assert!(!role.contains(&0), "{role:?} porte un octet nul");
+        assert!(!role.is_empty());
+    }
 }

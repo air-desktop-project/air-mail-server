@@ -724,6 +724,45 @@ Le corps du message.
 </div>
 
 <div class="ressource">
+  <div class="ligne"><span class="verbe post">POST</span><span class="chemin">/v1/me/devices</span><span class="portee">jeton valide <strong>+ signature</strong></span></div>
+  <p><strong>L'appairage croisé</strong> : un appareil déjà enrôlé en approuve un autre. Sans lui, ajouter une tablette exigerait une invitation de l'exploitant — et comme une invitation ne vaut que pour le <em>premier</em> appareil, il faudrait révoquer le téléphone d'abord.</p>
+  <div class="note danger">
+    <span class="etiquette">Le jeton ne suffit pas, et c'est délibéré</span>
+    <p>Un jeton vaut quinze minutes ; une clef enrôlée vaut <strong>jusqu'à sa révocation</strong>. Laisser un simple porteur créer une clef ferait d'un vol de quinze minutes un <strong>accès permanent</strong>, que fermer la session ne retirerait même pas.</p>
+    <p>Il faut donc <strong>un défi signé par un appareil déjà enrôlé</strong> : la preuve qu'on tient l'enclave à cet instant, et pas seulement un porteur.</p>
+  </div>
+  <pre><code>// 1. un défi POUR L'APPAIRAGE, sur l'appareil qui approuve
+POST /v1/sessions/challenge
+{ "login": "marie", "deviceId": "&lt;l'approbateur&gt;", "purpose": "pairing" }
+→ { "challenge": "…", "role": "ams-pairing", … }
+
+// 2. l'approbateur signe, et présente la clef du NOUVEL appareil
+POST /v1/me/devices
+{ "challenge": "…", "signature": "…",
+  "publicKey": "&lt;la clef du nouvel appareil&gt;", "name": "la tablette" }</code></pre>
+  <p>La réponse est celle de l'enrôlement : <code>201</code> avec l'<code>id</code> du nouvel appareil et les adresses du compte.</p>
+  <div class="note prudence">
+    <span class="etiquette">Le rôle n'est pas décoratif</span>
+    <p>Le condensat signé porte <code>ams-pairing</code>, et non <code>ams-session</code>. <strong>Une signature obtenue pour ouvrir une boîte ne vaut pas pour ajouter un appareil</strong> — sans quoi une application qui demande « ouvre ma boîte » à son propriétaire obtiendrait de quoi lui enrôler un appareil permanent, et le propriétaire n'aurait vu qu'une invite biométrique ordinaire.</p>
+    <p>C'est <code>purpose</code> qui choisit le rôle, et le serveur le rend avec le défi. Un <code>purpose</code> inconnu est <strong>refusé</strong> plutôt que ramené à <code>session</code> : un client qui écrirait <code>pair</code> signerait sinon le mauvais condensat et chercherait sa faute dans la cryptographie.</p>
+  </div>
+  <p><strong>Comment la clef publique passe d'un appareil à l'autre</strong> est un problème de client, pas de serveur : QR code affiché par le nouvel appareil et lu par l'ancien, copier-coller entre deux postes. Les deux peuvent afficher le condensat SHA-256 de la clef — <strong>c'est l'<code>id</code></strong> — pour que leur propriétaire compare de visu ce qu'il approuve.</p>
+  <table>
+    <thead><tr><th>Code</th><th>Quand</th></tr></thead>
+    <tbody>
+      <tr><td><code>401</code></td><td>Défi forgé, expiré, <strong>rejoué</strong>, émis pour un autre compte, appareil approbateur inconnu, signature fausse, ou <strong>signée sous le mauvais rôle</strong>. Les sept se répondent pareil.</td></tr>
+      <tr><td><code>400</code></td><td>La clef du nouvel appareil n'est pas un point de la courbe, ou le corps est illisible.</td></tr>
+      <tr><td><code>409</code></td><td>Cette clef est déjà enrôlée, <strong>ou</strong> le compte a atteint ses <strong>douze</strong> appareils.</td></tr>
+      <tr><td><code>501</code></td><td>Ce serveur n'a pas de magasin d'appareils, ou pas de secret de scellement.</td></tr>
+    </tbody>
+  </table>
+  <div class="note">
+    <span class="etiquette">Douze appareils par compte</span>
+    <p>L'appairage <strong>s'auto-alimente</strong> — un appareil approuvé peut en approuver un autre. Sans borne, une clef compromise en sèmerait autant qu'elle veut, et la liste que son propriétaire doit lire pour s'en apercevoir deviendrait illisible.</p>
+  </div>
+</div>
+
+<div class="ressource">
   <div class="ligne"><span class="verbe delete">DELETE</span><span class="chemin">/v1/me/devices/{id}</span><span class="portee">jeton valide</span></div>
   <p>Révoque un appareil. Rend <code>204</code> sans corps. <strong>C'est l'opération qui presse</strong> : un téléphone perdu se retire dans la minute, et non au prochain jour ouvré — c'est pourquoi elle n'exige pas <code>admin</code>.</p>
   <div class="note danger">

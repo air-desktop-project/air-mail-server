@@ -522,24 +522,42 @@ fn les_appareils_a_soi_n_exigent_aucune_portee() {
     }
 }
 
-/// **LA LISTE NE S'ÉCRIT PAS, ET L'APPAREIL NE SE LIT PAS.**
+/// **LA LISTE S'ÉCRIT PAR APPAIRAGE, ET L'APPAREIL NE SE LIT PAS.**
 ///
-/// Un `POST` sur la liste laisserait déclarer une clef sans rien prouver ; c'est
-/// le chemin d'enrôlement qui exige la preuve. Et un `GET` sur un appareil
-/// nommé ne dirait rien que la liste ne dise déjà.
+/// Le `POST` sur la liste est l'appairage croisé : il enrôle un second appareil,
+/// approuvé par un premier. Ce n'est PAS le `POST /v1/devices` de l'amorçage —
+/// celui-là s'atteint sans jeton, sur invitation ; celui-ci exige un jeton ET un
+/// défi signé par un appareil déjà enrôlé.
+///
+/// Un `GET` sur un appareil nommé, lui, ne dirait rien que la liste ne dise
+/// déjà.
 #[test]
 fn les_verbes_des_appareils_sont_ceux_la_et_pas_d_autres() {
-    assert_eq!(Resource::OwnDevices.allowed(), &[Method::Get, Method::Head]);
+    assert_eq!(
+        Resource::OwnDevices.allowed(),
+        &[Method::Get, Method::Head, Method::Post]
+    );
     assert_eq!(
         Resource::OwnDevice { id: "a1" }.allowed(),
         &[Method::Delete]
     );
 
-    assert!(
-        !resolu(Method::Post, b"/v1/me/devices")
+    // **L'APPAIRAGE EXIGE UN JETON**, contrairement à l'amorçage : c'est ce qui
+    // sépare « ajouter une tablette depuis son téléphone » de « enrôler son
+    // premier appareil sur invitation ».
+    assert_eq!(
+        resolu(Method::Post, b"/v1/me/devices")
             .expect("résolue")
-            .serves
+            .scope,
+        Some(Scope::none()),
+        "un jeton valide, et rien de plus"
     );
+    assert_eq!(
+        resolu(Method::Post, b"/v1/devices").expect("résolue").scope,
+        None,
+        "l'amorçage, lui, n'exige aucun jeton"
+    );
+
     assert!(
         !resolu(Method::Get, b"/v1/me/devices/a1")
             .expect("résolue")

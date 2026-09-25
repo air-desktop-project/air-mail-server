@@ -726,6 +726,45 @@ The message body.
 </div>
 
 <div class="ressource">
+  <div class="ligne"><span class="verbe post">POST</span><span class="chemin">/v1/me/devices</span><span class="portee">valid token <strong>+ signature</strong></span></div>
+  <p><strong>Cross-enrolment</strong>: a device already enrolled approves another one. Without it, adding a tablet would require an invitation from the operator — and since an invitation is only good for the <em>first</em> device, the phone would have to be revoked first.</p>
+  <div class="note danger">
+    <span class="etiquette">The token is not enough, and that is deliberate</span>
+    <p>A token lasts fifteen minutes; an enrolled key lasts <strong>until it is revoked</strong>. Letting a mere bearer create a key would turn a fifteen-minute theft into <strong>permanent access</strong>, which closing the session would not even remove.</p>
+    <p>So a <strong>challenge signed by an already-enrolled device</strong> is required: proof that the enclave is held at that moment, not merely a bearer token.</p>
+  </div>
+  <pre><code>// 1. a challenge FOR PAIRING, on the approving device
+POST /v1/sessions/challenge
+{ "login": "marie", "deviceId": "&lt;the approver&gt;", "purpose": "pairing" }
+→ { "challenge": "…", "role": "ams-pairing", … }
+
+// 2. the approver signs, and presents the NEW device's key
+POST /v1/me/devices
+{ "challenge": "…", "signature": "…",
+  "publicKey": "&lt;the new device's key&gt;", "name": "the tablet" }</code></pre>
+  <p>The response is the enrolment one: <code>201</code> with the new device's <code>id</code> and the account's addresses.</p>
+  <div class="note prudence">
+    <span class="etiquette">The role is not decorative</span>
+    <p>The signed digest carries <code>ams-pairing</code>, not <code>ams-session</code>. <strong>A signature obtained to open a mailbox does not serve to add a device</strong> — otherwise an application asking its owner to "open my mailbox" would obtain the means to enrol a permanent device, and the owner would have seen nothing but an ordinary biometric prompt.</p>
+    <p><code>purpose</code> selects the role, and the server returns it with the challenge. An unknown <code>purpose</code> is <strong>refused</strong> rather than falling back to <code>session</code>: a client writing <code>pair</code> would otherwise sign the wrong digest and hunt for its mistake in the cryptography.</p>
+  </div>
+  <p><strong>How the public key travels between devices</strong> is a client problem, not a server one: a QR code shown by the new device and read by the old one, copy-paste between two desktops. Both can display the key's SHA-256 digest — <strong>that is the <code>id</code></strong> — so their owner can compare by sight what they are approving.</p>
+  <table>
+    <thead><tr><th>Code</th><th>When</th></tr></thead>
+    <tbody>
+      <tr><td><code>401</code></td><td>Challenge forged, expired, <strong>replayed</strong>, issued for another account, approving device unknown, signature wrong, or <strong>signed under the wrong role</strong>. All seven answer alike.</td></tr>
+      <tr><td><code>400</code></td><td>The new device's key is not a point on the curve, or the body is unreadable.</td></tr>
+      <tr><td><code>409</code></td><td>That key is already enrolled, <strong>or</strong> the account has reached its <strong>twelve</strong> devices.</td></tr>
+      <tr><td><code>501</code></td><td>This server has no device store, or no sealing secret.</td></tr>
+    </tbody>
+  </table>
+  <div class="note">
+    <span class="etiquette">Twelve devices per account</span>
+    <p>Pairing <strong>feeds itself</strong> — an approved device can approve another. Without a bound, one compromised key would sow as many as it liked, and the list its owner must read to notice would become unreadable.</p>
+  </div>
+</div>
+
+<div class="ressource">
   <div class="ligne"><span class="verbe delete">DELETE</span><span class="chemin">/v1/me/devices/{id}</span><span class="portee">valid token</span></div>
   <p>Revokes a device. Returns <code>204</code> with no body. <strong>This is the operation that is urgent</strong>: a lost phone is removed within the minute, not on the next business day — which is why it does not require <code>admin</code>.</p>
   <div class="note danger">

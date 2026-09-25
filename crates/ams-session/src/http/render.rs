@@ -185,6 +185,16 @@ pub struct ChallengeRequest<'a> {
     pub login: &'a str,
     /// L'appareil qui prétend tenir la clef.
     pub device: &'a str,
+    /// Ce que l'appelant compte faire de ce défi : ouvrir une session, ou
+    /// approuver un appairage.
+    ///
+    /// **IL NE CHANGE PAS LE DÉFI**, seulement le RÔLE que le serveur annonce —
+    /// et donc le condensat que l'appareil signera. Un défi reste un défi ; ce
+    /// qui distingue les deux gestes est la signature, pas le scellé.
+    ///
+    /// Absent, c'est une session : c'est le geste courant, et celui que tout
+    /// client fait au moins une fois.
+    pub appairage: bool,
 }
 
 /// Lit une demande de défi.
@@ -198,16 +208,18 @@ pub fn read_challenge_request(corps: &[u8]) -> Result<ChallengeRequest<'_>, Erro
     let mut lecteur = Reader::new(corps);
     let mut login = None;
     let mut device = None;
-    // Quel champ on lit : 1 `login`, 2 `deviceId`.
+    let mut appairage = false;
+    // Quel champ on lit : 1 `login`, 2 `deviceId`, 3 `purpose`.
     let mut quel = 0_u8;
 
     loop {
         match lecteur.read().map_err(|_| mauvais)? {
             None => break,
             Some(Event::Key(clef)) => {
-                quel = match (clef.is("login"), clef.is("deviceId")) {
-                    (true, _) => 1,
-                    (_, true) => 2,
+                quel = match (clef.is("login"), clef.is("deviceId"), clef.is("purpose")) {
+                    (true, _, _) => 1,
+                    (_, true, _) => 2,
+                    (_, _, true) => 3,
                     _ => return Err(mauvais),
                 };
             }
@@ -216,6 +228,11 @@ pub fn read_challenge_request(corps: &[u8]) -> Result<ChallengeRequest<'_>, Erro
                 match quel {
                     1 => login = Some(clair),
                     2 => device = Some(clair),
+                    // **UN USAGE INCONNU SE REFUSE**, plutôt que de retomber en
+                    // silence sur la session : un client qui écrirait `pairing`
+                    // obtiendrait sinon un défi de session, signerait le mauvais
+                    // condensat, et chercherait sa faute dans la cryptographie.
+                    3 => appairage = usage_d_appairage(clair).ok_or(mauvais)?,
                     _ => return Err(mauvais),
                 }
             }
@@ -226,7 +243,20 @@ pub fn read_challenge_request(corps: &[u8]) -> Result<ChallengeRequest<'_>, Erro
     Ok(ChallengeRequest {
         login: login.ok_or(mauvais)?,
         device: device.ok_or(mauvais)?,
+        appairage,
     })
+}
+
+/// L'usage que nomme ce mot, s'il en nomme un.
+///
+/// **DEUX MOTS, ET PAS D'AUTRES.** Les écrire ici plutôt que chez l'appelant
+/// garde le vocabulaire là où il est lu.
+fn usage_d_appairage(mot: &str) -> Option<bool> {
+    match mot {
+        "session" => Some(false),
+        "pairing" => Some(true),
+        _ => None,
+    }
 }
 
 /// Écrit un défi fraîchement émis.
@@ -308,6 +338,85 @@ pub fn read_session_request(corps: &[u8]) -> Result<SessionRequest<'_>, Error> {
     Ok(SessionRequest {
         challenge: challenge.ok_or(mauvais)?,
         signature: signature.ok_or(mauvais)?,
+    })
+}
+
+/// Ce qu'une demande d'appairage dit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PairingRequest<'a> {
+    /// Le défi que l'appareil APPROBATEUR a obtenu.
+    ///
+    /// **C'EST LUI QUI DIT QUI APPROUVE** : le compte et l'appareil y sont
+    /// scellés, et le corps n'a donc pas à les répéter — deux écritures d'une
+    /// même chose finiraient par ne plus dire la même.
+    pub challenge: &'a str,
+    /// Sa signature, sous le rôle d'appairage.
+    pub signature: &'a str,
+    /// La clef publique du NOUVEL appareil, en base64url.
+    pub public_key: &'a str,
+    /// Le nom que son propriétaire lui donne. Peut être vide.
+    pub name: &'a str,
+}
+
+/// Lit une demande d'appairage.
+///
+/// # LE NOM N'EST PAS DÉSÉCHAPPÉ ICI
+///
+/// Contrairement à l'enrôlement par invitation, cette lecture a lieu dans une
+/// caisse qui alloue : l'appelant range le nom tel quel, et ce sont les mêmes
+/// échappements qu'il verrait. **Ce lecteur les refuse donc**, comme il refuse
+/// ceux du défi et de la clef — l'appelant qui voudrait les admettre devra
+/// déséchapper là où il range.
+///
+/// # Errors
+///
+/// [`Reason::BadJsonBody`].
+pub fn read_pairing_request(corps: &[u8]) -> Result<PairingRequest<'_>, Error> {
+    let mauvais = Error::new(Reason::BadJsonBody);
+    let mut lecteur = Reader::new(corps);
+    let mut challenge = None;
+    let mut signature = None;
+    let mut public_key = None;
+    let mut name = "";
+    // Quel champ : 1 `challenge`, 2 `signature`, 3 `publicKey`, 4 `name`.
+    let mut quel = 0_u8;
+
+    loop {
+        match lecteur.read().map_err(|_| mauvais)? {
+            None => break,
+            Some(Event::Key(clef)) => {
+                quel = match (
+                    clef.is("challenge"),
+                    clef.is("signature"),
+                    clef.is("publicKey"),
+                    clef.is("name"),
+                ) {
+                    (true, _, _, _) => 1,
+                    (_, true, _, _) => 2,
+                    (_, _, true, _) => 3,
+                    (_, _, _, true) => 4,
+                    _ => return Err(mauvais),
+                };
+            }
+            Some(Event::Text(texte)) => {
+                let clair = texte.as_plain().ok_or(mauvais)?;
+                match quel {
+                    1 => challenge = Some(clair),
+                    2 => signature = Some(clair),
+                    3 => public_key = Some(clair),
+                    4 => name = clair,
+                    _ => return Err(mauvais),
+                }
+            }
+            Some(Event::ObjectStart | Event::ObjectEnd) => {}
+            Some(_) => return Err(mauvais),
+        }
+    }
+    Ok(PairingRequest {
+        challenge: challenge.ok_or(mauvais)?,
+        signature: signature.ok_or(mauvais)?,
+        public_key: public_key.ok_or(mauvais)?,
+        name,
     })
 }
 

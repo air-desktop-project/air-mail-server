@@ -134,6 +134,18 @@ pub enum Resource<'o> {
     ///
     /// **C'EST LA RÉVOCATION QUI PRESSE** : un téléphone perdu se retire dans la
     /// minute, pas au prochain jour ouvré.
+    ///
+    /// # ELLE S'ÉCRIT AUSSI, ET C'EST L'APPAIRAGE CROISÉ
+    ///
+    /// Un `POST` y enrôle un SECOND appareil, approuvé par un premier. Sans
+    /// cela, ajouter une tablette exigerait une invitation de l'exploitant, et
+    /// donc de révoquer le téléphone d'abord.
+    ///
+    /// **LE JETON NE SUFFIT PAS À CE `POST`** : il faut un défi signé par un
+    /// appareil DÉJÀ enrôlé. Un jeton vaut quinze minutes, une clef vaut jusqu'à
+    /// sa révocation — laisser un porteur créer une clef ferait d'un vol de
+    /// quinze minutes un accès permanent, que fermer la session ne retirerait
+    /// pas.
     OwnDevices,
     /// `/v1/me/devices/{id}` — un appareil à soi, pour le révoquer.
     ///
@@ -307,7 +319,7 @@ impl Resource<'_> {
             // **ELLE NE S'ÉCRIT PAS ICI** : un appareil s'enrôle par le
             // chemin d'enrôlement, qui prouve la possession de la clef. Un
             // `POST` de liste laisserait déclarer une clef sans rien prouver.
-            Self::OwnDevices => &[Method::Get, Method::Head],
+            Self::OwnDevices => &[Method::Get, Method::Head, Method::Post],
         }
     }
 

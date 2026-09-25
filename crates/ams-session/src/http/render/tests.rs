@@ -12,9 +12,10 @@ use ams_proto_imap::Flags;
 use super::{
     AccountRow, BanRow, DeviceRow, FlagPatch, MailboxRow, MessageRow, read_account_body,
     read_challenge_request, read_flag_patch, read_invitation_request, read_own_password_body,
-    read_search_criteria, read_session_request, write_account, write_accounts, write_bans,
-    write_challenge, write_devices, write_domains, write_enrolled, write_health, write_invitation,
-    write_mailbox, write_mailboxes, write_message, write_messages, write_metrics, write_search,
+    read_pairing_request, read_search_criteria, read_session_request, write_account,
+    write_accounts, write_bans, write_challenge, write_devices, write_domains, write_enrolled,
+    write_health, write_invitation, write_mailbox, write_mailboxes, write_message, write_messages,
+    write_metrics, write_search,
 };
 
 /// Un appareil d'essai.
@@ -1152,6 +1153,91 @@ fn une_reponse_a_un_defi_irrecevable_se_refuse() {
     ] {
         assert_eq!(
             read_session_request(corps).err().map(Error::reason),
+            Some(Reason::BadJsonBody),
+            "{}",
+            std::string::String::from_utf8_lossy(corps)
+        );
+    }
+}
+
+/// **UN USAGE CHOISIT LE RÔLE, ET UN USAGE INCONNU SE REFUSE.**
+///
+/// Un client qui écrirait `pair` au lieu de `pairing` obtiendrait sinon un défi
+/// de SESSION, signerait le mauvais condensat, et chercherait sa faute dans la
+/// cryptographie.
+#[test]
+fn l_usage_d_un_defi_choisit_le_role() {
+    let lue = read_challenge_request(br#"{"login":"marie","deviceId":"a1"}"#).expect("lisible");
+    assert!(!lue.appairage, "l'absence vaut session");
+
+    let lue = read_challenge_request(br#"{"login":"marie","deviceId":"a1","purpose":"session"}"#)
+        .expect("lisible");
+    assert!(!lue.appairage);
+
+    let lue = read_challenge_request(br#"{"login":"marie","deviceId":"a1","purpose":"pairing"}"#)
+        .expect("lisible");
+    assert!(lue.appairage);
+
+    for mot in ["pair", "PAIRING", "", "appairage", "1"] {
+        let corps = std::format!(r#"{{"login":"marie","deviceId":"a1","purpose":"{mot}"}}"#);
+        assert_eq!(
+            read_challenge_request(corps.as_bytes())
+                .err()
+                .map(Error::reason),
+            Some(Reason::BadJsonBody),
+            "« {mot} » a été accepté"
+        );
+    }
+}
+
+/// **UNE DEMANDE D'APPAIRAGE SE LIT**, et son nom est facultatif.
+#[test]
+fn une_demande_d_appairage_se_lit() {
+    let lue = read_pairing_request(
+        br#"{"challenge":"AwAA","signature":"MEUC","publicKey":"BB4Y","name":"la tablette"}"#,
+    )
+    .expect("lisible");
+    assert_eq!(lue.challenge, "AwAA");
+    assert_eq!(lue.signature, "MEUC");
+    assert_eq!(lue.public_key, "BB4Y");
+    assert_eq!(lue.name, "la tablette");
+
+    let lue =
+        read_pairing_request(br#"{"challenge":"AwAA","signature":"MEUC","publicKey":"BB4Y"}"#)
+            .expect("lisible");
+    assert_eq!(
+        lue.name, "",
+        "un appareil qu'on n'a pas nommé reste un appareil"
+    );
+}
+
+/// **CE QU'UNE DEMANDE D'APPAIRAGE NE PEUT PAS ÊTRE.**
+///
+/// Les trois premiers champs sont exigés : sans défi il n'y a rien à vérifier,
+/// sans signature rien à prouver, sans clef rien à enrôler.
+#[test]
+fn une_demande_d_appairage_irrecevable_se_refuse() {
+    for corps in [
+        &b"{}"[..],
+        br#"{"signature":"MEUC","publicKey":"BB4Y"}"#,
+        br#"{"challenge":"AwAA","publicKey":"BB4Y"}"#,
+        br#"{"challenge":"AwAA","signature":"MEUC"}"#,
+        br#"{"challenge":"AwAA","signature":"MEUC","publicKey":"BB4Y","inconnu":1}"#,
+        br#"{"challenge":["AwAA"],"signature":"MEUC","publicKey":"BB4Y"}"#,
+        br#"{"challenge":42,"signature":"MEUC","publicKey":"BB4Y"}"#,
+        br#""juste une chaine""#,
+        b"pas du json",
+        // **AUCUN CHAMP D'APPAIRAGE NE S'ACCEPTE ÉCHAPPÉ.** Le défi, la
+        // signature et la clef ont l'alphabet de §5 de RFC 4648, qui ne
+        // contient rien qu'un encodeur JSON échapperait ; et le nom est rangé
+        // tel quel par l'appelant, qui verrait donc les échappements.
+        br#"{"challenge":"Aw\u0041A","signature":"MEUC","publicKey":"BB4Y"}"#,
+        br#"{"challenge":"AwAA","signature":"ME\u0055C","publicKey":"BB4Y"}"#,
+        br#"{"challenge":"AwAA","signature":"MEUC","publicKey":"BB\u0034Y"}"#,
+        br#"{"challenge":"AwAA","signature":"MEUC","publicKey":"BB4Y","name":"T\u00e9l"}"#,
+    ] {
+        assert_eq!(
+            read_pairing_request(corps).err().map(Error::reason),
             Some(Reason::BadJsonBody),
             "{}",
             std::string::String::from_utf8_lossy(corps)

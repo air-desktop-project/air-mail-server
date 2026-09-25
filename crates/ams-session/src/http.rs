@@ -586,7 +586,14 @@ impl Http {
             defi,
             // **L'ALPHABET DE §5 DE RFC 4648 EST DE L'ASCII**, et le rôle est une
             // constante de ce dépôt : les deux sont de l'UTF-8 par construction.
-            core::str::from_utf8(ams_api::CHALLENGE_ROLE).unwrap_or_default(),
+            // **LE RÔLE SUIT L'USAGE DEMANDÉ**, et le serveur le rend au client
+            // pour qu'il n'ait pas à le deviner — ni à le deviner
+            // différemment d'une application à l'autre.
+            core::str::from_utf8(match demande.appairage {
+                true => ams_api::CHALLENGE_ROLE_APPAIRAGE,
+                false => ams_api::CHALLENGE_ROLE,
+            })
+            .unwrap_or_default(),
             core::str::from_utf8(self.domaine()).unwrap_or_default(),
             ams_api::CHALLENGE_VIE_SECONDES,
             sortie,

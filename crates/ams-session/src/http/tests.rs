@@ -1642,3 +1642,42 @@ fn ni_l_invitation_ni_la_clef_ne_s_acceptent_echappees() {
         assert_eq!(tour.next(), Next::Respond);
     }
 }
+
+/// **L'USAGE DEMANDÉ CHOISIT LE RÔLE QUE LE SERVEUR ANNONCE.**
+///
+/// Le défi, lui, ne change pas : le rôle n'est pas dans le sceau, il entre dans
+/// le CONDENSAT que l'appareil signera. C'est ce qui sépare « ouvrir une boîte »
+/// de « approuver un appairage » sans qu'il existe deux sortes de défis.
+#[test]
+fn l_usage_demande_choisit_le_role_annonce() {
+    let session = une_session_avec_domaine();
+    for (usage, attendu) in [("session", "ams-session"), ("pairing", "ams-pairing")] {
+        let corps = std::format!(r#"{{"login":"marc","deviceId":"a1","purpose":"{usage}"}}"#);
+        let champs = champs_vers(b"/v1/sessions/challenge");
+        let tete = entete(&champs);
+        let mut place = [0_u8; PLACE];
+        let tour = session.request(&tete, corps.as_bytes(), MAINTENANT, &mut place);
+        assert_eq!(tour.status(), StatusCode::CREATED, "{usage}");
+        let dit = std::str::from_utf8(tour.body()).expect("utf8");
+        assert!(
+            dit.contains(&std::format!("\"role\":\"{attendu}\"")),
+            "usage `{usage}` : {dit}"
+        );
+    }
+
+    // **LE DÉFI EST LE MÊME DANS LES DEUX CAS**, et c'est voulu : ce qui
+    // distingue les deux gestes est la signature, pas le scellé.
+    let lire_le_defi = |usage: &str| -> std::string::String {
+        let corps = std::format!(r#"{{"login":"marc","deviceId":"a1","purpose":"{usage}"}}"#);
+        let champs = champs_vers(b"/v1/sessions/challenge");
+        let tete = entete(&champs);
+        let mut place = [0_u8; PLACE];
+        let tour = session.request(&tete, corps.as_bytes(), MAINTENANT, &mut place);
+        let dit = std::string::String::from(std::str::from_utf8(tour.body()).expect("utf8"));
+        dit.split_once("\"challenge\":\"")
+            .and_then(|(_, reste)| reste.split_once('"'))
+            .map(|(texte, _)| std::string::String::from(texte))
+            .expect("un défi")
+    };
+    assert_eq!(lire_le_defi("session"), lire_le_defi("pairing"));
+}

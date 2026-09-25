@@ -1908,9 +1908,44 @@ fn en_base64url(octets: &[u8]) -> String {
 /// Signe ce condensat comme le ferait une enclave : **forme fixe de
 /// soixante-quatre octets**, et la forme de `s` telle qu'elle sort.
 fn signer(condensat: &[u8; 32]) -> String {
+    signer_avec(&cle_privee(), condensat)
+}
+
+/// Une clef d'épreuve tirée de cette graine — des octets FIXES, jamais un
+/// tirage.
+///
+/// **PLUSIEURS CLEFS DISTINCTES SONT NÉCESSAIRES** : un appairage où
+/// l'approbateur et l'approuvé porteraient la même clef n'éprouverait rien,
+/// puisque le magasin refuse deux fois le même identifiant.
+fn cle_privee_de(graine: u8) -> p256::ecdsa::SigningKey {
+    p256::ecdsa::SigningKey::from_slice(&[graine; 32]).expect("une clef valide")
+}
+
+/// Sa clef publique, en forme non compressée SEC 1 (§2.3.3).
+fn cle_publique_de(graine: u8) -> [u8; 65] {
+    let point = cle_privee_de(graine).verifying_key().to_sec1_point(false);
+    let mut sortie = [0_u8; 65];
+    sortie.copy_from_slice(point.as_bytes());
+    sortie
+}
+
+/// Signe ce condensat avec cette clef, en forme fixe.
+fn signer_avec(privee: &p256::ecdsa::SigningKey, condensat: &[u8; 32]) -> String {
     use p256::ecdsa::signature::hazmat::PrehashSigner as _;
-    let signature: p256::ecdsa::Signature = cle_privee().sign_prehash(condensat).expect("signable");
+    let signature: p256::ecdsa::Signature = privee.sign_prehash(condensat).expect("signable");
     en_base64url(&signature.to_bytes())
+}
+
+/// Le condensat qu'un appareil signe : rôle, identité du serveur, défi —
+/// séparés par des octets nuls, et **jamais le défi nu**.
+fn condensat_a_signer(role: &str, identite: &str, defi: &str) -> [u8; 32] {
+    let mut a_signer = Vec::new();
+    a_signer.extend_from_slice(role.as_bytes());
+    a_signer.push(0);
+    a_signer.extend_from_slice(identite.as_bytes());
+    a_signer.push(0);
+    a_signer.extend_from_slice(defi.as_bytes());
+    ams_sasl::sha256(&a_signer)
 }
 
 /// **UNE CLEF ENRÔLÉE OUVRE UNE SESSION, ET LE DÉFI NE SERT QU'UNE FOIS.**
@@ -2134,4 +2169,324 @@ fn une_clef_enrolee_ouvre_une_session_et_le_defi_ne_sert_qu_une_fois() {
         code, "401",
         "une signature d'un AUTRE défi ne doit pas passer"
     );
+}
+
+/// **UN APPAREIL ENRÔLÉ EN APPROUVE UN AUTRE, ET UN JETON N'Y SUFFIT PAS.**
+///
+/// # CE QUE CET ESSAI ÉPROUVE, ET QU'AUCUN AUTRE NE PEUT
+///
+/// L'appairage croisé, de bout en bout, avec de VRAIES signatures ECDSA P-256 :
+/// un premier appareil arrivé par invitation en approuve un second, sans que
+/// l'exploitant intervienne et sans révoquer quoi que ce soit.
+///
+/// # ET IL ÉPROUVE LA SÉPARATION DES RÔLES, QUI EST LE CŒUR DU DISPOSITIF
+///
+/// Une signature obtenue pour **ouvrir une session** ne doit pas valoir pour
+/// **approuver un appairage**. Sans cette séparation, une application qui
+/// demande « ouvre ma boîte » à son propriétaire obtiendrait de quoi lui ajouter
+/// un appareil permanent — et le propriétaire n'aurait rien vu d'autre qu'une
+/// invite biométrique ordinaire.
+#[test]
+fn un_appareil_enrole_en_approuve_un_autre() {
+    let atelier = atelier("appairage");
+    let Some((cert, cle)) = paire(&atelier.0) else {
+        panic!("{SANS_OPENSSL}");
+    };
+    if std::process::Command::new("curl")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("IGNORÉ : `curl` est absent — cet essai n'a RIEN éprouvé.");
+        return;
+    }
+
+    let empreinte =
+        ams_auth::hash_password(b"secret-initial", b"seize octets ici").expect("hachable");
+    let magasin = atelier.0.join("comptes.bin");
+    std::fs::write(
+        &magasin,
+        ams_config::encode_accounts(&[ams_auth::Account {
+            login: String::from("marie"),
+            hash: empreinte,
+            addresses: vec![String::from("marie@example.com")],
+        }])
+        .expect("encodable"),
+    )
+    .expect("le magasin s'écrit");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&magasin, std::fs::Permissions::from_mode(0o600))
+            .expect("permissions du magasin");
+    }
+
+    let appareils = atelier.0.join("appareils.bin");
+    let port_smtp = port_libre();
+    let port_http = port_libre();
+    let config = configuration_complete(
+        &atelier,
+        port_smtp,
+        Tls {
+            certificate_chain_path: cert.display().to_string(),
+            private_key_path: cle.display().to_string(),
+        },
+        &magasin.display().to_string(),
+        &appareils.display().to_string(),
+        "",
+        &format!("127.0.0.1:{port_http}"),
+        "",
+        CLEF,
+    );
+    let _serveur = lancer(&config, port_smtp);
+    let base = format!("https://127.0.0.1:{port_http}");
+
+    let poster = |chemin: &str, corps: &str, entete: Option<&str>| -> (String, String) {
+        let mut commande = std::process::Command::new("curl");
+        commande
+            .args(["-s", "--insecure", "--http2", "-X", "POST"])
+            .args(["-H", "Content-Type: application/json"])
+            .args(["-d", corps])
+            .args(["-w", "\n%{http_code}"]);
+        if let Some(valeur) = entete {
+            commande.args(["-H", valeur]);
+        }
+        let sortie = commande
+            .arg(format!("{base}{chemin}"))
+            .output()
+            .expect("curl s'exécute");
+        let tout = String::from_utf8_lossy(&sortie.stdout).into_owned();
+        let (corps, code) = tout.rsplit_once('\n').unwrap_or(("", ""));
+        (corps.to_string(), code.to_string())
+    };
+    let champ = |corps: &str, nom: &str| -> String {
+        corps
+            .split_once(&format!("\"{nom}\":\""))
+            .and_then(|(_, reste)| reste.split_once('"'))
+            .map(|(valeur, _)| valeur.to_string())
+            .unwrap_or_else(|| panic!("`{nom}` dans {corps}"))
+    };
+
+    // ── LE PREMIER APPAREIL, PAR INVITATION ─────────────────────────────────
+    let admin = jeton_d_administration();
+    let (corps, code) = poster(
+        "/v1/invitations",
+        r#"{"login":"marie"}"#,
+        Some(&format!("Authorization: Bearer {admin}")),
+    );
+    assert_eq!(code, "201", "{corps}");
+    let invitation = champ(&corps, "invitation");
+    let (corps, code) = poster(
+        "/v1/devices",
+        &format!(
+            r#"{{"invitation":"{invitation}","publicKey":"{}","name":"le telephone"}}"#,
+            en_base64url(&cle_publique_de(7))
+        ),
+        None,
+    );
+    assert_eq!(code, "201", "{corps}");
+    let telephone = champ(&corps, "id");
+
+    // **UN JETON ORDINAIRE, PAR MOT DE PASSE.** Il suffit à atteindre la route,
+    // et c'est précisément ce que l'essai doit montrer : il ne suffit PAS à
+    // appairer.
+    let (corps, code) = poster(
+        "/v1/tokens",
+        r#"{"login":"marie","password":"secret-initial"}"#,
+        None,
+    );
+    assert_eq!(code, "201", "{corps}");
+    let jeton = champ(&corps, "token");
+    let porteur = format!("Authorization: Bearer {jeton}");
+
+    // Obtient un défi pour cet appareil, sous cet usage.
+    let defi_pour = |appareil: &str, usage: &str| -> (String, String) {
+        let (corps, code) = poster(
+            "/v1/sessions/challenge",
+            &format!(r#"{{"login":"marie","deviceId":"{appareil}","purpose":"{usage}"}}"#),
+            None,
+        );
+        assert_eq!(code, "201", "{corps}");
+        (champ(&corps, "challenge"), champ(&corps, "role"))
+    };
+
+    // ── L'APPAIRAGE ─────────────────────────────────────────────────────────
+    let (defi, role) = defi_pour(&telephone, "pairing");
+    assert_eq!(role, "ams-pairing", "l'usage doit choisir le rôle");
+    let signature = signer_avec(
+        &cle_privee_de(7),
+        &condensat_a_signer(&role, "mail.example.com", &defi),
+    );
+    let (corps, code) = poster(
+        "/v1/me/devices",
+        &format!(
+            r#"{{"challenge":"{defi}","signature":"{signature}","publicKey":"{}","name":"la tablette"}}"#,
+            en_base64url(&cle_publique_de(9))
+        ),
+        Some(&porteur),
+    );
+    assert_eq!(code, "201", "l'appairage doit aboutir : {corps}");
+    let tablette = champ(&corps, "id");
+    assert_ne!(tablette, telephone);
+
+    // **LES DEUX APPAREILS SONT LÀ**, et le premier n'a pas été révoqué.
+    let sortie = std::process::Command::new("curl")
+        .args(["-s", "--insecure", "--http2"])
+        .args(["-H", &porteur])
+        .arg(format!("{base}/v1/me/devices"))
+        .output()
+        .expect("curl s'exécute");
+    let liste = String::from_utf8_lossy(&sortie.stdout).into_owned();
+    assert!(liste.contains(&telephone), "{liste}");
+    assert!(liste.contains(&tablette), "{liste}");
+    assert!(liste.contains("la tablette"), "{liste}");
+
+    // ── LA SÉPARATION DES RÔLES ─────────────────────────────────────────────
+    //
+    // La tablette vient d'être enrôlée : sa date de dernière session vaut zéro,
+    // donc un défi frais lui est recevable. **Le seul motif de refus possible
+    // est le rôle**, et c'est ce qui rend cet essai concluant.
+    let (defi, _) = defi_pour(&tablette, "pairing");
+    let a_tort = signer_avec(
+        &cle_privee_de(9),
+        // Le rôle d'une SESSION, sur un défi d'appairage.
+        &condensat_a_signer("ams-session", "mail.example.com", &defi),
+    );
+    let (corps, code) = poster(
+        "/v1/me/devices",
+        &format!(
+            r#"{{"challenge":"{defi}","signature":"{a_tort}","publicKey":"{}","name":"le poste"}}"#,
+            en_base64url(&cle_publique_de(11))
+        ),
+        Some(&porteur),
+    );
+    assert_eq!(
+        code, "401",
+        "une signature de SESSION ne doit pas approuver un appairage : {corps}"
+    );
+
+    // **ET LA MÊME DEMANDE, AVEC LE BON RÔLE, ABOUTIT.** Sans ce second volet,
+    // l'essai ci-dessus prouverait seulement que quelque chose a échoué.
+    let (defi, role) = defi_pour(&tablette, "pairing");
+    let comme_il_faut = signer_avec(
+        &cle_privee_de(9),
+        &condensat_a_signer(&role, "mail.example.com", &defi),
+    );
+    let (corps, code) = poster(
+        "/v1/me/devices",
+        &format!(
+            r#"{{"challenge":"{defi}","signature":"{comme_il_faut}","publicKey":"{}","name":"le poste"}}"#,
+            en_base64url(&cle_publique_de(11))
+        ),
+        Some(&porteur),
+    );
+    assert_eq!(code, "201", "{corps}");
+
+    // ── ET LE DISQUE PORTE LES TROIS ────────────────────────────────────────
+    let relu = ams_config::decode_devices(&std::fs::read(&appareils).expect("lisible"))
+        .expect("relisible");
+    assert_eq!(relu.len(), 3);
+    assert!(relu.iter().all(|connu| connu.login == "marie"));
+}
+
+/// **UN APPAIRAGE SANS PREUVE DE CLEF SE REFUSE, JETON VALIDE OU NON.**
+///
+/// C'est la propriété qui justifie toute la conception : un jeton vaut quinze
+/// minutes, une clef vaut jusqu'à sa révocation. Si un porteur suffisait, un vol
+/// de quinze minutes deviendrait un accès permanent — que fermer la session ne
+/// retirerait même pas.
+#[test]
+fn un_jeton_seul_n_appaire_rien() {
+    let atelier = atelier("appairage-refus");
+    let Some((cert, cle)) = paire(&atelier.0) else {
+        panic!("{SANS_OPENSSL}");
+    };
+    if std::process::Command::new("curl")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("IGNORÉ : `curl` est absent — cet essai n'a RIEN éprouvé.");
+        return;
+    }
+
+    let empreinte =
+        ams_auth::hash_password(b"secret-initial", b"seize octets ici").expect("hachable");
+    let magasin = atelier.0.join("comptes.bin");
+    std::fs::write(
+        &magasin,
+        ams_config::encode_accounts(&[ams_auth::Account {
+            login: String::from("marie"),
+            hash: empreinte,
+            addresses: vec![String::from("marie@example.com")],
+        }])
+        .expect("encodable"),
+    )
+    .expect("le magasin s'écrit");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&magasin, std::fs::Permissions::from_mode(0o600))
+            .expect("permissions du magasin");
+    }
+
+    let appareils = atelier.0.join("appareils.bin");
+    let port_smtp = port_libre();
+    let port_http = port_libre();
+    let config = configuration_complete(
+        &atelier,
+        port_smtp,
+        Tls {
+            certificate_chain_path: cert.display().to_string(),
+            private_key_path: cle.display().to_string(),
+        },
+        &magasin.display().to_string(),
+        &appareils.display().to_string(),
+        "",
+        &format!("127.0.0.1:{port_http}"),
+        "",
+        CLEF,
+    );
+    let _serveur = lancer(&config, port_smtp);
+    let base = format!("https://127.0.0.1:{port_http}");
+
+    let sortie = std::process::Command::new("curl")
+        .args(["-s", "--insecure", "--http2", "-X", "POST"])
+        .args(["-H", "Content-Type: application/json"])
+        .args(["-d", r#"{"login":"marie","password":"secret-initial"}"#])
+        .arg(format!("{base}/v1/tokens"))
+        .output()
+        .expect("curl s'exécute");
+    let corps = String::from_utf8_lossy(&sortie.stdout).into_owned();
+    let jeton = corps
+        .split_once("\"token\":\"")
+        .and_then(|(_, reste)| reste.split_once('"'))
+        .map(|(v, _)| v.to_string())
+        .unwrap_or_else(|| panic!("un jeton dans {corps}"));
+
+    let appairer = |corps: &str| -> String {
+        let sortie = std::process::Command::new("curl")
+            .args(["-s", "--insecure", "--http2", "-X", "POST"])
+            .args(["-H", "Content-Type: application/json"])
+            .args(["-H", &format!("Authorization: Bearer {jeton}")])
+            .args(["-d", corps])
+            .args(["-o", "/dev/null", "-w", "%{http_code}"])
+            .arg(format!("{base}/v1/me/devices"))
+            .output()
+            .expect("curl s'exécute");
+        String::from_utf8_lossy(&sortie.stdout).into_owned()
+    };
+
+    let clef = en_base64url(&cle_publique_de(9));
+    // **AUCUN APPAREIL N'EST ENRÔLÉ** : il n'existe personne pour approuver.
+    assert_eq!(
+        appairer(&format!(
+            r#"{{"challenge":"AAAAAAAAAAAAAAAAAAAAAA","signature":"AQID","publicKey":"{clef}"}}"#
+        )),
+        "401",
+        "un défi forgé ne doit rien approuver"
+    );
+    // Un corps sans défi ni signature se refuse aussi, et par le corps.
+    assert_eq!(appairer(&format!(r#"{{"publicKey":"{clef}"}}"#)), "400");
+
+    // **ET RIEN N'A ÉTÉ POSÉ** : un refus ne laisse pas de magasin derrière lui.
+    assert!(!appareils.exists(), "un refus ne doit rien écrire");
 }

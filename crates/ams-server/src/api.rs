@@ -640,6 +640,110 @@ impl ApiMaildir {
         rendre(render::write_devices(&lignes, sortie))
     }
 
+    /// Enrôle un second appareil, approuvé par un premier.
+    ///
+    /// # LE JETON NE SUFFIT PAS, ET C'EST TOUT L'INTÉRÊT
+    ///
+    /// Un jeton vaut quinze minutes ; une clef enrôlée vaut jusqu'à sa
+    /// révocation. Laisser un simple porteur créer une clef ferait **d'un vol de
+    /// quinze minutes un accès permanent**, que fermer la session ne retirerait
+    /// pas. On exige donc un défi signé par un appareil DÉJÀ enrôlé : la preuve
+    /// qu'on tient l'enclave à cet instant, et pas seulement un jeton.
+    ///
+    /// # ET LE DÉFI PORTE SON PROPRE RÔLE
+    ///
+    /// `ams-pairing`, et non `ams-session`. Une signature obtenue pour ouvrir
+    /// une boîte ne doit pas valoir pour ajouter un appareil — sans quoi une
+    /// application qui demande « ouvre ma boîte » à son propriétaire obtiendrait
+    /// de quoi lui en ajouter un.
+    fn appairer<'o>(&self, account: &str, body: &[u8], sortie: &'o mut [u8]) -> Served<'o> {
+        let (Some(magasin), Some(clef)) = (self.appareils.as_ref(), self.scellement.as_ref())
+        else {
+            return pas_encore(sortie);
+        };
+        let Ok(demande) = render::read_pairing_request(body) else {
+            return corps_refuse(sortie);
+        };
+
+        // **LE DÉFI D'ABORD** : sans lui, rien de ce qui suit n'est autorisé.
+        let mut place = [0_u8; ams_api::CHALLENGE_OCTETS_MAX];
+        let Ok(defi) = ams_api::verify_challenge(
+            clef,
+            demande.challenge.as_bytes(),
+            crate::maintenant(),
+            &mut place,
+        ) else {
+            return refus_d_appairage(sortie);
+        };
+        // **LE DÉFI DOIT DÉSIGNER LE COMPTE DU JETON.** Sans ce contrôle, un
+        // défi obtenu pour un autre compte servirait ici — et l'appareil
+        // approbateur serait celui d'un autre.
+        if defi.login != account {
+            return refus_d_appairage(sortie);
+        }
+        if self
+            .prouve_sa_clef(
+                ams_api::CHALLENGE_ROLE_APPAIRAGE,
+                account,
+                defi.device,
+                defi.issued_at_seconds,
+                demande.challenge,
+                demande.signature,
+            )
+            .is_none()
+        {
+            return refus_d_appairage(sortie);
+        }
+
+        // **LA CLEF NOUVELLE, ENSUITE.** Une clef qui n'est pas un point de la
+        // courbe n'est pas une clef faible : c'est une clef qui n'existe pas.
+        let mut octets = [0_u8; ams_auth::CLE_OCTETS];
+        let Ok(lus) = ams_api::decode_base64url(demande.public_key.as_bytes(), &mut octets) else {
+            return corps_de_l_enrolement_refuse(sortie);
+        };
+        let Ok(cle) = ams_auth::Cle::lire(lus) else {
+            return corps_de_l_enrolement_refuse(sortie);
+        };
+        let id = en_hexadecimal(&ams_sasl::sha256(&cle.octets()));
+
+        let siens = magasin.du_compte(account);
+        // **LA MÊME CLEF NE S'ENRÔLE PAS DEUX FOIS.** Le magasin le refuserait
+        // — deux appareils ne partagent pas un identifiant —, mais il le
+        // refuserait par une faute d'écriture que le client ne saurait pas lire.
+        if siens.iter().any(|connu| connu.id == id) {
+            return deja_enrole(sortie);
+        }
+        if siens.len() >= APPAREILS_PAR_COMPTE {
+            return trop_d_appareils(sortie);
+        }
+
+        let adresses: std::vec::Vec<String> = {
+            let comptes = self.comptes.vue();
+            let Some(compte) = comptes.iter().find(|connu| connu.login == account) else {
+                return absente(sortie);
+            };
+            compte.addresses.clone()
+        };
+
+        let a_ranger = ams_config::Device {
+            login: String::from(account),
+            id: id.clone(),
+            name: String::from(demande.name),
+            enrolled: crate::maintenant(),
+            last_seen: 0,
+            public_key: cle,
+        };
+        if let Err(quoi) = magasin.modifier(move |appareils| {
+            appareils.push(a_ranger);
+            Ok(())
+        }) {
+            return dire_la_faute(&quoi, sortie);
+        }
+
+        let vues: std::vec::Vec<&str> = adresses.iter().map(String::as_str).collect();
+        cree(render::write_enrolled(&id, account, &vues, sortie))
+    }
+
     /// Révoque un appareil à soi.
     ///
     /// # UN APPAREIL QUI N'EST PAS LE SIEN EST « INTROUVABLE »
@@ -764,14 +868,45 @@ impl ApiMaildir {
     /// Appareil inconnu, clef qui ne correspond pas, signature mal écrite,
     /// rejeu : `None` dans tous les cas. Les distinguer dirait à qui essaie si
     /// cet appareil existe — ce que l'émission du défi refuse déjà de dire.
-    fn verifier_un_appareil(
+    /// Cet appareil vient-il de prouver qu'il tient sa clef, pour CE geste ?
+    ///
+    /// # TROIS CONTRÔLES, ET LE TROISIÈME EST CELUI QU'ON OUBLIE
+    ///
+    /// 1. **L'appareil existe**, sous ce compte, et porte une clef ;
+    /// 2. **la signature couvre le condensat de CE défi**, lié au domaine de ce
+    ///    serveur ET AU RÔLE — pas le défi nu ;
+    /// 3. **le défi a été émis après la dernière session de cet appareil.**
+    ///
+    /// Le troisième est l'usage unique. Sans lui, un défi vaudrait soixante
+    /// secondes et se rejouerait autant de fois qu'on veut pendant ce temps.
+    ///
+    /// # LE RÔLE SÉPARE DEUX GESTES QUI N'ONT PAS LA MÊME PORTÉE
+    ///
+    /// Ouvrir une session donne quinze minutes ; approuver un appairage crée une
+    /// clef qui vaut jusqu'à sa révocation. **Une signature obtenue pour l'un ne
+    /// vaut pas pour l'autre**, parce que les deux rôles donnent deux
+    /// condensats.
+    ///
+    /// # ET L'ACCEPTATION ÉCRIT, SINON ELLE NE VAUT RIEN
+    ///
+    /// On note la date. **Si cette écriture échoue, on REFUSE** : accorder sans
+    /// noter laisserait le défi rejouable, et un disque plein deviendrait une
+    /// faille.
+    ///
+    /// # UN SEUL REFUS POUR TOUTES LES CAUSES
+    ///
+    /// Appareil inconnu, clef qui ne correspond pas, signature mal écrite,
+    /// rejeu : `None` dans tous les cas. Les distinguer dirait à qui essaie si
+    /// cet appareil existe — ce que l'émission du défi refuse déjà de dire.
+    fn prouve_sa_clef(
         &self,
+        role: &[u8],
         account: &str,
         device: &str,
         issued_at_seconds: u64,
         challenge: &str,
         signature: &str,
-    ) -> Option<Scope> {
+    ) -> Option<()> {
         let magasin = self.appareils.as_ref()?;
         let connu = magasin
             .du_compte(account)
@@ -791,10 +926,6 @@ impl ApiMaildir {
         // identifiant est le condensat SHA-256 d'une clef publique. Il ne se
         // devine pas, et la seule route qui les liste exige le jeton de leur
         // propriétaire. Qui le connaît déjà a déjà davantage.
-        //
-        // L'ordre inverse ferait travailler la courbe sur chaque rejeu, alors
-        // que le videur (C8) compte déjà ces refus — le coût serait réel et le
-        // gain hypothétique.
         if connu.last_seen >= issued_at_seconds {
             return None;
         }
@@ -807,7 +938,7 @@ impl ApiMaildir {
         if self.domaine.is_empty() {
             return None;
         }
-        let condensat = ams_api::digest(&self.domaine, challenge.as_bytes());
+        let condensat = ams_api::digest(role, &self.domaine, challenge.as_bytes());
         ams_auth::verifier(&connu.public_key, &condensat, lue).ok()?;
 
         // **ON NOTE LA DATE, ET L'ÉCHEC REFUSE.** C'est cette écriture qui tue
@@ -824,7 +955,26 @@ impl ApiMaildir {
                 Ok(())
             })
             .ok()?;
+        Some(())
+    }
 
+    /// Cette signature ouvre-t-elle une session ?
+    fn verifier_un_appareil(
+        &self,
+        account: &str,
+        device: &str,
+        issued_at_seconds: u64,
+        challenge: &str,
+        signature: &str,
+    ) -> Option<Scope> {
+        self.prouve_sa_clef(
+            ams_api::CHALLENGE_ROLE,
+            account,
+            device,
+            issued_at_seconds,
+            challenge,
+            signature,
+        )?;
         // **LA MÊME PORTÉE QU'UN MOT DE PASSE, ET JAMAIS `admin`.** Une clef
         // d'appareil n'est pas une autorité d'exploitation : elle prouve qu'on
         // tient un téléphone, pas qu'on lit le secret de scellement.
@@ -1621,6 +1771,9 @@ impl Api for ApiMaildir {
             Resource::AccountPassword { compte } => self.poser_un_secret(compte, body, sortie),
             Resource::OwnPassword => self.poser_mon_secret(account, body, sortie),
             Resource::Invitations => self.frapper_une_invitation(body, sortie),
+            Resource::OwnDevices if matches!(method, Method::Post) => {
+                self.appairer(account, body, sortie)
+            }
             Resource::OwnDevices => self.mes_appareils(account, sortie),
             Resource::OwnDevice { id } => self.revoquer_mon_appareil(account, id, sortie),
             Resource::AccountAddresses { compte } if matches!(method, Method::Put) => {
@@ -1884,6 +2037,17 @@ const PORTEE_DE_SESSION: Scope = Scope::one(ams_api::Area::Mail, ams_api::Rights
     .with(ams_api::Area::Submit, ams_api::Rights::Write)
     .with(ams_api::Area::Observe, ams_api::Rights::Read);
 
+/// Combien d'appareils un compte peut enrôler.
+///
+/// **UN PLAFOND EXISTE PARCE QUE L'APPAIRAGE S'AUTO-ALIMENTE** : un appareil
+/// enrôlé peut en approuver un autre, qui peut en approuver un autre. Sans
+/// borne, une clef compromise en sèmerait autant qu'elle veut, et la liste que
+/// son propriétaire doit lire pour s'en apercevoir deviendrait illisible.
+///
+/// Douze. Un téléphone, une tablette, deux postes, et de la marge pour les
+/// remplacer sans révoquer d'abord.
+const APPAREILS_PAR_COMPTE: usize = 12;
+
 /// Combien de temps une invitation vaut, quand personne ne le dit.
 ///
 /// Vingt-quatre heures. **ASSEZ POUR QU'UN COURRIEL SOIT LU LE LENDEMAIN**, et
@@ -1923,6 +2087,46 @@ fn corps_de_l_enrolement_refuse(sortie: &mut [u8]) -> Served<'_> {
             // **CELLE-CI COMPTE CONTRE LE PAIR** : cette porte s'ouvre sans
             // jeton, et sans cela elle offrirait des essais illimités.
             peer_fault: true,
+            ..Served::default()
+        },
+        Err(_) => notre_faute(),
+    }
+}
+
+/// Ce qu'on répond à un appairage que rien n'autorise.
+///
+/// **LE MÊME REFUS POUR TOUTES LES CAUSES** : défi forgé, expiré, appareil
+/// approbateur inconnu, signature fausse, rejeu, ou défi émis pour un autre
+/// compte. Les distinguer dirait à qui essaie jusqu'où il est allé.
+///
+/// **ET CELLE-CI COMPTE CONTRE LE PAIR** : elle s'atteint avec un jeton valide,
+/// mais approuver un appairage demande davantage — sans cela, un jeton volé
+/// offrirait des essais illimités sur des signatures forgées.
+fn refus_d_appairage(sortie: &mut [u8]) -> Served<'_> {
+    match ams_api::problem(ams_api::Reason::BadToken, sortie) {
+        Ok(corps) => Served {
+            status: StatusCode::UNAUTHORIZED,
+            media: ams_api::PROBLEM_MEDIA_TYPE,
+            body: corps,
+            peer_fault: true,
+            ..Served::default()
+        },
+        Err(_) => notre_faute(),
+    }
+}
+
+/// Ce qu'on répond quand le compte a atteint son plafond d'appareils.
+///
+/// **CE N'EST PAS UNE FAUTE DU PAIR** : la demande est légitime, le compte est
+/// simplement plein. Ce qu'il doit faire est précis — révoquer un appareil qu'il
+/// n'emploie plus —, et la liste qu'il lit pour choisir porte la date de
+/// dernière session de chacun.
+fn trop_d_appareils(sortie: &mut [u8]) -> Served<'_> {
+    match ams_api::problem(ams_api::Reason::AlreadyEnrolled, sortie) {
+        Ok(corps) => Served {
+            status: ams_api::Reason::AlreadyEnrolled.status(),
+            media: ams_api::PROBLEM_MEDIA_TYPE,
+            body: corps,
             ..Served::default()
         },
         Err(_) => notre_faute(),
