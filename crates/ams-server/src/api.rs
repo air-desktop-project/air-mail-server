@@ -634,7 +634,9 @@ impl ApiMaildir {
                 id: &appareil.id,
                 name: &appareil.name,
                 enrolled: appareil.enrolled,
-                last_seen: appareil.last_seen,
+                // **EN SECONDES DEHORS**, comme tout ce que cette API rend ; le
+                // magasin compte en millisecondes pour le défi.
+                last_seen: appareil.last_seen / 1_000,
             })
             .collect();
         rendre(render::write_devices(&lignes, sortie))
@@ -657,8 +659,7 @@ impl ApiMaildir {
     /// application qui demande « ouvre ma boîte » à son propriétaire obtiendrait
     /// de quoi lui en ajouter un.
     fn appairer<'o>(&self, account: &str, body: &[u8], sortie: &'o mut [u8]) -> Served<'o> {
-        let (Some(magasin), Some(clef)) = (self.appareils.as_ref(), self.scellement.as_ref())
-        else {
+        let (Some(_), Some(clef)) = (self.appareils.as_ref(), self.scellement.as_ref()) else {
             return pas_encore(sortie);
         };
         let Ok(demande) = render::read_pairing_request(body) else {
@@ -670,7 +671,7 @@ impl ApiMaildir {
         let Ok(defi) = ams_api::verify_challenge(
             clef,
             demande.challenge.as_bytes(),
-            crate::maintenant(),
+            millisecondes(),
             &mut place,
         ) else {
             return refus_d_appairage(sortie);
@@ -681,12 +682,14 @@ impl ApiMaildir {
         if defi.login != account {
             return refus_d_appairage(sortie);
         }
+        // **LA SIGNATURE, SANS RIEN ÉCRIRE ENCORE.** Tant que la demande peut
+        // échouer pour une autre raison, le défi ne doit pas être consommé.
         if self
-            .prouve_sa_clef(
+            .signature_recevable(
                 ams_api::CHALLENGE_ROLE_APPAIRAGE,
                 account,
                 defi.device,
-                defi.issued_at_seconds,
+                defi.issued_at_ms,
                 demande.challenge,
                 demande.signature,
             )
@@ -706,17 +709,6 @@ impl ApiMaildir {
         };
         let id = en_hexadecimal(&ams_sasl::sha256(&cle.octets()));
 
-        let siens = magasin.du_compte(account);
-        // **LA MÊME CLEF NE S'ENRÔLE PAS DEUX FOIS.** Le magasin le refuserait
-        // — deux appareils ne partagent pas un identifiant —, mais il le
-        // refuserait par une faute d'écriture que le client ne saurait pas lire.
-        if siens.iter().any(|connu| connu.id == id) {
-            return deja_enrole(sortie);
-        }
-        if siens.len() >= APPAREILS_PAR_COMPTE {
-            return trop_d_appareils(sortie);
-        }
-
         let adresses: std::vec::Vec<String> = {
             let comptes = self.comptes.vue();
             let Some(compte) = comptes.iter().find(|connu| connu.login == account) else {
@@ -733,11 +725,36 @@ impl ApiMaildir {
             last_seen: 0,
             public_key: cle,
         };
-        if let Err(quoi) = magasin.modifier(move |appareils| {
+        // **UNE SEULE ÉCRITURE, QUI DÉCIDE DE TOUT SOUS LE VERROU** : le rejeu,
+        // le doublon, le plafond, puis la date de l'approbateur ET le nouvel
+        // appareil ensemble. Un appairage refusé — `409` compris — laisse donc
+        // l'approbateur tel qu'il était, et son défi suivant n'a pas à attendre.
+        let issue = self.consommer(defi.device, defi.issued_at_ms, |appareils| {
+            let siens = appareils
+                .iter()
+                .filter(|connu| connu.login == account)
+                .count();
+            // **LA MÊME CLEF NE S'ENRÔLE PAS DEUX FOIS.** Le magasin le
+            // refuserait — deux appareils ne partagent pas un identifiant —, mais
+            // il le refuserait par une faute que le client ne saurait pas lire.
+            if appareils
+                .iter()
+                .any(|connu| connu.login == account && connu.id == id)
+            {
+                return Err(Refus::Doublon);
+            }
+            if siens >= APPAREILS_PAR_COMPTE {
+                return Err(Refus::Plein);
+            }
             appareils.push(a_ranger);
             Ok(())
-        }) {
-            return dire_la_faute(&quoi, sortie);
+        });
+        match issue {
+            Ok(()) => {}
+            Err(Refus::Preuve) => return refus_d_appairage(sortie),
+            Err(Refus::Doublon) => return deja_enrole(sortie),
+            Err(Refus::Plein) => return trop_d_appareils(sortie),
+            Err(Refus::Magasin(quoi)) => return dire_la_faute(&quoi, sortie),
         }
 
         let vues: std::vec::Vec<&str> = adresses.iter().map(String::as_str).collect();
@@ -845,30 +862,14 @@ impl ApiMaildir {
         ))
     }
 
-    /// Vérifie qu'un appareil a bien signé ce défi, et ouvre la session.
+    /// Cet appareil a-t-il signé ce défi, pour CE geste ?
     ///
-    /// # TROIS CONTRÔLES, ET LE TROISIÈME EST CELUI QU'ON OUBLIE
+    /// # ELLE NE FAIT QUE LIRE
     ///
-    /// 1. **L'appareil existe**, sous ce compte, et porte une clef ;
-    /// 2. **la signature couvre le condensat de CE défi**, lié au domaine de ce
-    ///    serveur et au rôle — pas le défi nu ;
-    /// 3. **le défi a été émis après la dernière session de cet appareil.**
-    ///
-    /// Le troisième est l'usage unique. Sans lui, un défi vaudrait soixante
-    /// secondes et se rejouerait autant de fois qu'on veut pendant ce temps.
-    ///
-    /// # ET L'ACCEPTATION ÉCRIT, SINON ELLE NE VAUT RIEN
-    ///
-    /// Ouvrir la session note la date. **Si cette écriture échoue, on REFUSE** :
-    /// accorder sans noter laisserait le défi rejouable, et un disque plein
-    /// deviendrait une faille.
-    ///
-    /// # UN SEUL REFUS POUR TOUTES LES CAUSES
-    ///
-    /// Appareil inconnu, clef qui ne correspond pas, signature mal écrite,
-    /// rejeu : `None` dans tous les cas. Les distinguer dirait à qui essaie si
-    /// cet appareil existe — ce que l'émission du défi refuse déjà de dire.
-    /// Cet appareil vient-il de prouver qu'il tient sa clef, pour CE geste ?
+    /// Le défi n'est consommé que par [`Self::consommer`], dans la même
+    /// écriture que ce que la preuve autorise. **Une demande qui échoue après la
+    /// signature ne touche donc pas à la date de l'appareil** : un appairage
+    /// refusé pour doublon n'empêche pas la session qui suit.
     ///
     /// # TROIS CONTRÔLES, ET LE TROISIÈME EST CELUI QU'ON OUBLIE
     ///
@@ -878,7 +879,10 @@ impl ApiMaildir {
     /// 3. **le défi a été émis après la dernière session de cet appareil.**
     ///
     /// Le troisième est l'usage unique. Sans lui, un défi vaudrait soixante
-    /// secondes et se rejouerait autant de fois qu'on veut pendant ce temps.
+    /// secondes et se rejouerait autant de fois qu'on veut pendant ce temps. Il
+    /// est jugé ici pour refuser tôt, et **rejugé sous le verrou** par
+    /// [`Self::consommer`] : deux présentations simultanées du même défi
+    /// passeraient sinon toutes deux ce premier contrôle.
     ///
     /// # LE RÔLE SÉPARE DEUX GESTES QUI N'ONT PAS LA MÊME PORTÉE
     ///
@@ -887,23 +891,17 @@ impl ApiMaildir {
     /// vaut pas pour l'autre**, parce que les deux rôles donnent deux
     /// condensats.
     ///
-    /// # ET L'ACCEPTATION ÉCRIT, SINON ELLE NE VAUT RIEN
-    ///
-    /// On note la date. **Si cette écriture échoue, on REFUSE** : accorder sans
-    /// noter laisserait le défi rejouable, et un disque plein deviendrait une
-    /// faille.
-    ///
     /// # UN SEUL REFUS POUR TOUTES LES CAUSES
     ///
     /// Appareil inconnu, clef qui ne correspond pas, signature mal écrite,
     /// rejeu : `None` dans tous les cas. Les distinguer dirait à qui essaie si
     /// cet appareil existe — ce que l'émission du défi refuse déjà de dire.
-    fn prouve_sa_clef(
+    fn signature_recevable(
         &self,
         role: &[u8],
         account: &str,
         device: &str,
-        issued_at_seconds: u64,
+        issued_at_ms: u64,
         challenge: &str,
         signature: &str,
     ) -> Option<()> {
@@ -926,7 +924,7 @@ impl ApiMaildir {
         // identifiant est le condensat SHA-256 d'une clef publique. Il ne se
         // devine pas, et la seule route qui les liste exige le jeton de leur
         // propriétaire. Qui le connaît déjà a déjà davantage.
-        if connu.last_seen >= issued_at_seconds {
+        if connu.last_seen >= issued_at_ms {
             return None;
         }
 
@@ -939,23 +937,59 @@ impl ApiMaildir {
             return None;
         }
         let condensat = ams_api::digest(role, &self.domaine, challenge.as_bytes());
-        ams_auth::verifier(&connu.public_key, &condensat, lue).ok()?;
+        ams_auth::verifier(&connu.public_key, &condensat, lue).ok()
+    }
 
-        // **ON NOTE LA DATE, ET L'ÉCHEC REFUSE.** C'est cette écriture qui tue
-        // le défi qu'on vient d'employer.
-        let identifiant = String::from(device);
-        let quand = crate::maintenant();
-        magasin
-            .modifier(move |appareils| {
+    /// Consomme le défi d'un appareil, et fait ce qu'il autorise, **dans la
+    /// même écriture**.
+    ///
+    /// `ensuite` reçoit les appareils sous le verrou ; s'il refuse, **rien
+    /// n'est écrit** — ni ce qu'il allait faire, ni la date de l'appareil.
+    ///
+    /// # L'ACCEPTATION ÉCRIT, SINON ELLE NE VAUT RIEN
+    ///
+    /// Noter la date est ce qui tue le défi. **Si cette écriture échoue, on
+    /// REFUSE** : accorder sans noter laisserait le défi rejouable, et un disque
+    /// plein deviendrait une faille.
+    fn consommer<F>(&self, device: &str, issued_at_ms: u64, ensuite: F) -> Result<(), Refus>
+    where
+        F: FnOnce(&mut std::vec::Vec<ams_config::Device>) -> Result<(), Refus>,
+    {
+        let magasin = self.appareils.as_ref().ok_or(Refus::Preuve)?;
+        let quand = millisecondes();
+        // Ce que `ensuite` ou le rejeu ont refusé. Le magasin ne connaît que
+        // ses propres fautes : on abandonne l'écriture par l'une d'elles, et la
+        // vraie raison attend ici.
+        let mut refus = None;
+        let ecrit = magasin.modifier(|appareils| {
+            let decide = (|| {
+                // **LE REJEU, REJUGÉ SOUS LE VERROU** : c'est ici, et non dans
+                // la lecture qui précède, que l'usage unique se décide.
+                let connu = appareils
+                    .iter()
+                    .find(|appareil| appareil.id == device)
+                    .ok_or(Refus::Preuve)?;
+                if connu.last_seen >= issued_at_ms {
+                    return Err(Refus::Preuve);
+                }
+                ensuite(&mut *appareils)?;
                 let vu = appareils
                     .iter_mut()
-                    .find(|appareil| appareil.id == identifiant)
-                    .ok_or(crate::appareils::INTROUVABLE)?;
+                    .find(|appareil| appareil.id == device)
+                    .ok_or(Refus::Preuve)?;
                 vu.last_seen = quand;
                 Ok(())
+            })();
+            decide.map_err(|raison| {
+                refus = Some(raison);
+                crate::appareils::INTROUVABLE
             })
-            .ok()?;
-        Some(())
+        });
+        match (ecrit, refus) {
+            (Ok(()), _) => Ok(()),
+            (Err(_), Some(raison)) => Err(raison),
+            (Err(quoi), None) => Err(Refus::Magasin(quoi)),
+        }
     }
 
     /// Cette signature ouvre-t-elle une session ?
@@ -963,18 +997,24 @@ impl ApiMaildir {
         &self,
         account: &str,
         device: &str,
-        issued_at_seconds: u64,
+        issued_at_ms: u64,
         challenge: &str,
         signature: &str,
     ) -> Option<Scope> {
-        self.prouve_sa_clef(
+        self.signature_recevable(
             ams_api::CHALLENGE_ROLE,
             account,
             device,
-            issued_at_seconds,
+            issued_at_ms,
             challenge,
             signature,
         )?;
+        if let Err(raison) = self.consommer(device, issued_at_ms, |_| Ok(())) {
+            if let Refus::Magasin(quoi) = raison {
+                eprintln!("air-mail-server : magasin d'appareils — {quoi}");
+            }
+            return None;
+        }
         // **LA MÊME PORTÉE QU'UN MOT DE PASSE, ET JAMAIS `admin`.** Une clef
         // d'appareil n'est pas une autorité d'exploitation : elle prouve qu'on
         // tient un téléphone, pas qu'on lit le secret de scellement.
@@ -1839,11 +1879,11 @@ impl Api for ApiMaildir {
         &self,
         account: &str,
         device: &str,
-        issued_at_seconds: u64,
+        issued_at_ms: u64,
         challenge: &str,
         signature: &str,
     ) -> Option<Scope> {
-        self.verifier_un_appareil(account, device, issued_at_seconds, challenge, signature)
+        self.verifier_un_appareil(account, device, issued_at_ms, challenge, signature)
     }
 
     fn enrol<'o>(
@@ -2021,6 +2061,28 @@ fn microsecondes() -> u64 {
         .map_or(0, |depuis| {
             u64::try_from(depuis.as_micros()).unwrap_or(u64::MAX)
         })
+}
+
+/// L'heure, en millisecondes depuis l'époque — l'unité du défi et de la date
+/// de dernière session d'un appareil.
+fn millisecondes() -> u64 {
+    microsecondes() / 1_000
+}
+
+/// Pourquoi un défi signé n'a pas été consommé.
+///
+/// **LA PREUVE ET CE QU'ELLE AUTORISE ÉCHOUENT POUR DES RAISONS DIFFÉRENTES**, et
+/// le client doit les lire différemment : un `401` lui dit de redemander un
+/// défi, un `409` que sa demande n'a pas de sens.
+enum Refus {
+    /// Appareil introuvable, ou défi déjà consommé.
+    Preuve,
+    /// La clef à enrôler l'est déjà sur ce compte.
+    Doublon,
+    /// Le compte a atteint [`APPAREILS_PAR_COMPTE`].
+    Plein,
+    /// Le magasin n'a pas voulu écrire.
+    Magasin(crate::appareils::Faute),
 }
 
 /// Ce qu'une session ouverte par cette API accorde.

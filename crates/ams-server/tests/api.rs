@@ -1319,7 +1319,12 @@ fn un_utilisateur_voit_et_revoque_ses_appareils() {
     std::fs::write(
         &appareils,
         ams_config::encode_devices(&[
-            appareil("marie", "tel-de-marie", "iPhone de Marie", 1_790_003_600),
+            appareil(
+                "marie",
+                "tel-de-marie",
+                "iPhone de Marie",
+                1_790_003_600_000,
+            ),
             // JAMAIS VU : c'est le cas qui écrit `lastSeenAt: 0`.
             appareil("marie", "portable-de-marie", "portable du bureau", 0),
             // CELUI D'UN AUTRE : il ne doit ni se voir, ni se révoquer.
@@ -1386,6 +1391,10 @@ fn un_utilisateur_voit_et_revoque_ses_appareils() {
         "l'appareil d'un autre ne doit pas s'y trouver : {corps}"
     );
     assert!(corps.contains("\"lastSeenAt\":0"), "{corps}");
+    // **LE MAGASIN COMPTE EN MILLISECONDES, L'API REND DES SECONDES**, comme
+    // pour toutes ses dates.
+    assert!(corps.contains("\"lastSeenAt\":1790003600"), "{corps}");
+    assert!(!corps.contains("1790003600000"), "{corps}");
     // Et la clef publique n'en sort pas.
     assert!(!corps.contains("publicKey"), "{corps}");
 
@@ -2380,6 +2389,46 @@ fn un_appareil_enrole_en_approuve_un_autre() {
         Some(&porteur),
     );
     assert_eq!(code, "201", "{corps}");
+
+    // ── UN APPAIRAGE REFUSÉ NE CONSOMME RIEN ────────────────────────────────
+    //
+    // La tablette approuve une clef DÉJÀ enrôlée : la signature est bonne, la
+    // demande n'a pas de sens, et c'est un `409`. **Son défi n'est pas
+    // consommé**, et la session qu'elle ouvre AUSSITÔT — sans la moindre
+    // attente — doit aboutir. En 0.2.13, la preuve écrivait la date avant que
+    // le doublon ne se découvre, et cette session se prenait pour un rejeu.
+    let (defi, role) = defi_pour(&tablette, "pairing");
+    let signature = signer_avec(
+        &cle_privee_de(9),
+        &condensat_a_signer(&role, "mail.example.com", &defi),
+    );
+    let (corps, code) = poster(
+        "/v1/me/devices",
+        &format!(
+            r#"{{"challenge":"{defi}","signature":"{signature}","publicKey":"{}","name":"encore"}}"#,
+            en_base64url(&cle_publique_de(7))
+        ),
+        Some(&porteur),
+    );
+    assert_eq!(code, "409", "la clef du téléphone est déjà là : {corps}");
+
+    // **DEUX SESSIONS D'AFFILÉE, SANS ATTENDRE.** La date de dernière session
+    // compte en millisecondes : la seconde n'est plus prise pour un rejeu de la
+    // première, même si les deux tombent dans la même seconde.
+    for fois in ["la première", "la seconde"] {
+        let (defi, role) = defi_pour(&tablette, "session");
+        assert_eq!(role, "ams-session");
+        let signature = signer_avec(
+            &cle_privee_de(9),
+            &condensat_a_signer(&role, "mail.example.com", &defi),
+        );
+        let (corps, code) = poster(
+            "/v1/sessions",
+            &format!(r#"{{"challenge":"{defi}","signature":"{signature}"}}"#),
+            None,
+        );
+        assert_eq!(code, "201", "{fois} session doit s'ouvrir : {corps}");
+    }
 
     // ── ET LE DISQUE PORTE LES TROIS ────────────────────────────────────────
     let relu = ams_config::decode_devices(&std::fs::read(&appareils).expect("lisible"))

@@ -22,18 +22,21 @@
 //! C'est exactement le mécanisme de l'invitation, dont l'usage unique vient du
 //! magasin et non d'une liste : une seule idée, appliquée deux fois.
 //!
-//! # POURQUOI IL COMPTE EN SECONDES, ALORS QUE LE JETON COMPTE EN MICROSECONDES
+//! # POURQUOI IL COMPTE EN MILLISECONDES
 //!
-//! **PARCE QU'IL SE COMPARE À UNE DATE EN SECONDES.** La date de dernière
-//! session d'un appareil est en secondes — c'est ce que le magasin range et ce
-//! que l'utilisateur lit. Un défi qui compterait en microsecondes se comparerait
-//! à une date tronquée, et **un rejeu passerait dans la même seconde que la
-//! session légitime** : la date de session aurait été arrondie vers le bas, donc
-//! jugée antérieure au défi qu'on rejoue.
+//! **PARCE QU'IL SE COMPARE À LA DATE DE DERNIÈRE SESSION, ET DANS LA MÊME
+//! UNITÉ.** Les deux doivent compter pareil : un défi plus fin que la date à
+//! laquelle il se compare se comparerait à une date tronquée, et **un rejeu
+//! passerait dans la même unité de temps que la session légitime** — la date
+//! aurait été arrondie vers le bas, donc jugée antérieure au défi rejoué.
 //!
-//! Compter en secondes des deux côtés ferme ce trou. Ce que cela coûte est dit :
-//! deux sessions ouvertes dans la MÊME seconde sont impossibles — la seconde
-//! redemande un défi, une seconde plus tard. Personne ne le remarque.
+//! La milliseconde, et non la seconde : **deux sessions enchaînées dans la même
+//! seconde étaient refusées**, la seconde comme un rejeu. Une application qui
+//! ouvre une session puis en rouvre une aussitôt — ou qui approuve un
+//! appairage puis ouvre une session — le fait bien plus vite qu'une seconde, et
+//! la production l'a montré. Ce qui reste, et qui est dit : un défi émis AVANT
+//! qu'une autre session du même appareil n'aboutisse reste refusé. C'est
+//! l'usage unique lui-même, et aucune unité ne l'effacerait.
 //!
 //! # CE QU'IL NE PORTE PAS
 //!
@@ -70,6 +73,9 @@ pub const VERSION: u8 = 0x03;
 /// de poser un doigt ou de montrer son visage, et pas davantage : un défi qui
 /// vivrait longtemps serait une signature réutilisable longtemps.
 pub const VIE_SECONDES: u64 = 60;
+
+/// La même vie, dans l'unité du défi.
+const VIE_MS: u64 = VIE_SECONDES * 1_000;
 
 /// Ce qu'un identifiant d'appareil peut faire de long dans un défi.
 ///
@@ -126,11 +132,11 @@ pub struct Challenge<'o> {
     pub login: &'o str,
     /// L'appareil qui prétend tenir la clef.
     pub device: &'o str,
-    /// Quand il a été émis, **en secondes** depuis l'époque.
+    /// Quand il a été émis, **en millisecondes** depuis l'époque.
     ///
     /// Le nom porte l'unité **exprès** : elle n'est pas celle des jetons, et
     /// l'en-tête du module dit pourquoi.
-    pub issued_at_seconds: u64,
+    pub issued_at_ms: u64,
 }
 
 /// Écrit un défi scellé, en base64url.
@@ -178,7 +184,7 @@ pub fn issue<'o>(
 fn ecrire_le_clair(place: &mut [u8], challenge: &Challenge<'_>, login: &[u8], device: &[u8]) {
     // Les tableaux sont NOMMÉS : les enchaîner sans les lier les ferait détruire
     // avant que la chaîne ne les lise.
-    let instant = challenge.issued_at_seconds.to_be_bytes();
+    let instant = challenge.issued_at_ms.to_be_bytes();
     let tete = [VERSION];
     let longueurs = [
         u8::try_from(login.len()).unwrap_or(0),
@@ -197,7 +203,7 @@ fn ecrire_le_clair(place: &mut [u8], challenge: &Challenge<'_>, login: &[u8], de
 
 /// Vérifie un défi, et rend ce qu'il dit.
 ///
-/// `maintenant_secondes` est l'heure du serveur, **en secondes**.
+/// `maintenant_ms` est l'heure du serveur, **en millisecondes**.
 ///
 /// # L'ORDRE EST TOUT, COMME POUR UN JETON
 ///
@@ -215,7 +221,7 @@ fn ecrire_le_clair(place: &mut [u8], challenge: &Challenge<'_>, login: &[u8], de
 pub fn verify<'o>(
     key: &Key,
     presente: &[u8],
-    maintenant_secondes: u64,
+    maintenant_ms: u64,
     sortie: &'o mut [u8],
 ) -> Result<Challenge<'o>, Error> {
     if presente.len() > ENCODED_OCTETS_MAX {
@@ -235,18 +241,18 @@ pub fn verify<'o>(
         false => return Err(Error::new(Reason::BadToken)),
     }
 
-    lire_le_clair(clair, maintenant_secondes)
+    lire_le_clair(clair, maintenant_ms)
 }
 
 /// Interprète la partie en clair d'un défi dont le sceau est vérifié.
-fn lire_le_clair(clair: &[u8], maintenant_secondes: u64) -> Result<Challenge<'_>, Error> {
+fn lire_le_clair(clair: &[u8], maintenant_ms: u64) -> Result<Challenge<'_>, Error> {
     let mauvais = Error::new(Reason::BadToken);
     // L'appelant a vérifié que la partie en clair dépasse l'en-tête.
     let (entete, noms) = clair.split_at(ENTETE_OCTETS);
     if entete.first() != Some(&VERSION) {
         return Err(mauvais);
     }
-    let issued_at_seconds = lire_huit(entete.get(1..9).unwrap_or_default());
+    let issued_at_ms = lire_huit(entete.get(1..9).unwrap_or_default());
     let taille_du_login = usize::from(entete.get(9).copied().unwrap_or(0));
     let taille_de_l_appareil = usize::from(entete.get(10).copied().unwrap_or(0));
 
@@ -267,19 +273,19 @@ fn lire_le_clair(clair: &[u8], maintenant_secondes: u64) -> Result<Challenge<'_>
     // déclare expiré a forcément un sceau valide : la distinguer n'apprend donc
     // rien à qui forge, et elle apprend au client honnête que son horloge dérive
     // ou qu'il a trop attendu l'empreinte de son propriétaire.
-    if maintenant_secondes >= issued_at_seconds.saturating_add(VIE_SECONDES) {
+    if maintenant_ms >= issued_at_ms.saturating_add(VIE_MS) {
         return Err(Error::new(Reason::TokenExpired));
     }
     // **UN DÉFI ÉMIS DANS LE FUTUR EST UN DÉFI QU'ON N'A PAS ÉMIS**, ou une
     // horloge qui a reculé. Dans les deux cas il ne vaut rien : l'accepter
     // ferait vivre un défi bien au-delà de ses soixante secondes.
-    if issued_at_seconds > maintenant_secondes {
+    if issued_at_ms > maintenant_ms {
         return Err(mauvais);
     }
     Ok(Challenge {
         login,
         device,
-        issued_at_seconds,
+        issued_at_ms,
     })
 }
 

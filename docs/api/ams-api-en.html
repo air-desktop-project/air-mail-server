@@ -547,12 +547,12 @@ authorization: Bearer AQECAAAAAG…</code></pre>
   <div class="note danger">
     <span class="etiquette">A challenge is good for one use</span>
     <p>Yet there is no registry of issued challenges. <strong>It is not the challenge that remembers, it is the device</strong>: opening a session records the date, and a challenge is only acceptable if it was issued <em>after</em> that date. Replaying the same challenge — even within its sixty seconds — returns <code>401</code>.</p>
-    <p>Consequence: <strong>two sessions cannot open within the same second</strong> for one device. The second asks for a new challenge, one second later.</p>
+    <p>Both dates compare <strong>to the millisecond</strong>: two sessions opened back to back both succeed, with no wait. What is still refused is a challenge issued <em>before</em> another session of the same device succeeded — that is single use itself, and no unit of time would remove it.</p>
   </div>
   <div class="note prudence">
     <span class="etiquette">What a client should do with a <code>401</code></span>
-    <p><strong>Retry ONCE, with a fresh challenge, after one second.</strong> If that fails too, treat it as a refused authentication and fall back to the password or to re-enrolment.</p>
-    <p>Why: two session openings started <em>at the same time</em> by one application — mail sync and push registration, say — compete for the same second, and the second one is refused as a replay. One second of waiting is always enough.</p>
+    <p><strong>Retry ONCE, with a fresh challenge.</strong> If that fails too, treat it as a refused authentication and fall back to the password or to re-enrolment.</p>
+    <p>Why: two session openings started <em>at the same time</em> by one application — mail sync and push registration, say — each ask for a challenge, and whichever succeeds first voids the other: it was issued before. A challenge requested <em>afterwards</em> always works; there is nothing to wait for.</p>
     <p><strong>The server will not say which cause applied</strong>, and that is not an oversight: distinguishing a replay would reveal that a given device authenticated recently — and anyone can ask for a challenge for any id. The silence here is the same rule as everywhere else in this API.</p>
   </div>
   <table>
@@ -758,6 +758,7 @@ POST /v1/me/devices
       <tr><td><code>501</code></td><td>This server has no device store, or no sealing secret.</td></tr>
     </tbody>
   </table>
+  <p><strong>A refused pairing consumes nothing.</strong> The challenge is only consumed in the same write as the new device: after a <code>409</code>, the approver is unchanged, and the session it opens right away succeeds.</p>
   <div class="note">
     <span class="etiquette">Twelve devices per account</span>
     <p>Pairing <strong>feeds itself</strong> — an approved device can approve another. Without a bound, one compromised key would sow as many as it liked, and the list its owner must read to notice would become unreadable.</p>

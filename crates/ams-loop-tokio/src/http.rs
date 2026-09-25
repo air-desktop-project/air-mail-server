@@ -299,7 +299,7 @@ pub trait Api {
         &self,
         account: &str,
         device: &str,
-        issued_at_seconds: u64,
+        issued_at_ms: u64,
         challenge: &str,
         signature: &str,
     ) -> Option<Scope>;
@@ -529,12 +529,12 @@ where
             Next::CheckDevice {
                 account,
                 device,
-                issued_at_seconds,
+                issued_at_ms,
                 challenge,
                 signature,
             } => {
                 let accorde =
-                    api.verify_device(account, device, issued_at_seconds, challenge, signature);
+                    api.verify_device(account, device, issued_at_ms, challenge, signature);
                 let identifiant = api.nonce();
                 let suite = service.session.on_credentials(
                     accorde.is_some(),

@@ -549,12 +549,12 @@ authorization: Bearer AQECAAAAAG…</code></pre>
   <div class="note danger">
     <span class="etiquette">Un défi ne sert qu'une fois</span>
     <p>Il n'y a pourtant aucun registre des défis émis. <strong>Ce n'est pas le défi qui se souvient, c'est l'appareil</strong> : ouvrir une session note la date, et un défi n'est recevable que s'il a été émis <em>après</em> cette date. Rejouer le même défi — même dans ses soixante secondes — rend <code>401</code>.</p>
-    <p>Conséquence : <strong>deux sessions ne peuvent pas s'ouvrir dans la même seconde</strong> pour un même appareil. La seconde redemande un défi, une seconde plus tard.</p>
+    <p>Les deux dates se comparent <strong>à la milliseconde</strong> : deux sessions enchaînées s'ouvrent sans attendre. Ce qui reste refusé est un défi émis <em>avant</em> qu'une autre session du même appareil n'aboutisse — c'est l'usage unique lui-même, et aucune unité de temps ne l'effacerait.</p>
   </div>
   <div class="note prudence">
     <span class="etiquette">Ce qu'un client doit faire d'un <code>401</code></span>
-    <p><strong>Réessayer UNE fois, avec un défi neuf, après une seconde.</strong> Puis, si cela échoue encore, traiter l'échec comme une authentification refusée et retomber sur le mot de passe ou le réenrôlement.</p>
-    <p>Pourquoi : deux ouvertures de session lancées <em>en même temps</em> par la même application — la synchronisation et l'enregistrement aux notifications, par exemple — se disputent la même seconde, et la seconde est refusée comme un rejeu. Une seconde d'attente suffit toujours.</p>
+    <p><strong>Réessayer UNE fois, avec un défi neuf.</strong> Puis, si cela échoue encore, traiter l'échec comme une authentification refusée et retomber sur le mot de passe ou le réenrôlement.</p>
+    <p>Pourquoi : deux ouvertures de session lancées <em>en même temps</em> par la même application — la synchronisation et l'enregistrement aux notifications, par exemple — demandent chacune un défi, et la première qui aboutit rend l'autre caduc : il a été émis avant elle. Un défi demandé <em>après</em> suffit toujours ; il n'y a rien à attendre.</p>
     <p><strong>Le serveur ne dira pas laquelle des causes a joué</strong>, et ce n'est pas une négligence : distinguer un rejeu apprendrait qu'un appareil donné s'est authentifié récemment — or n'importe qui peut demander un défi pour n'importe quel identifiant. Le silence est ici la même règle que partout ailleurs dans cette API.</p>
   </div>
   <table>
@@ -756,6 +756,7 @@ POST /v1/me/devices
       <tr><td><code>501</code></td><td>Ce serveur n'a pas de magasin d'appareils, ou pas de secret de scellement.</td></tr>
     </tbody>
   </table>
+  <p><strong>Un appairage refusé ne consomme rien.</strong> Le défi n'est consommé que dans la même écriture que le nouvel appareil : après un <code>409</code>, l'approbateur n'a pas changé, et la session qu'il ouvre aussitôt aboutit.</p>
   <div class="note">
     <span class="etiquette">Douze appareils par compte</span>
     <p>L'appairage <strong>s'auto-alimente</strong> — un appareil approuvé peut en approuver un autre. Sans borne, une clef compromise en sèmerait autant qu'elle veut, et la liste que son propriétaire doit lire pour s'en apercevoir deviendrait illisible.</p>

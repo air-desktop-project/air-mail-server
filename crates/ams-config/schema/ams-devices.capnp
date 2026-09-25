@@ -64,11 +64,14 @@ struct Device {
   # Quand il a été enrôlé, en secondes depuis l'époque.
   enrolled @4 :UInt64;
 
-  # Quand il a ouvert une session pour la dernière fois, en secondes depuis
-  # l'époque. Zéro s'il ne l'a jamais fait.
+  # Quand il a ouvert une session pour la dernière fois, en MILLISECONDES
+  # depuis l'époque. Zéro s'il ne l'a jamais fait.
   #
-  # ELLE SERT À L'UTILISATEUR, et à lui seul : « ce portable n'a rien ouvert
-  # depuis huit mois » est la seule information qui lui dise lequel révoquer
-  # sans risque.
+  # ELLE SERT DEUX FOIS. À l'utilisateur, d'abord : « ce portable n'a rien
+  # ouvert depuis huit mois » est la seule information qui lui dise lequel
+  # révoquer sans risque. Au serveur, ensuite : un défi n'est recevable que
+  # s'il a été émis APRÈS cette date, et c'est tout l'usage unique. D'où la
+  # milliseconde — en secondes, deux sessions enchaînées dans la même seconde
+  # se prenaient pour un rejeu.
   lastSeen @5 :UInt64;
 }

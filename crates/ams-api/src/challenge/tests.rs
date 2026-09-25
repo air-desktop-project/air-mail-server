@@ -16,8 +16,8 @@ fn clef() -> Key {
     Key::new(&[7_u8; 32]).expect("une clé valide")
 }
 
-/// Une heure d'épreuve, **en secondes** — l'unité du défi.
-const MAINTENANT: u64 = 1_790_000_000;
+/// Une heure d'épreuve, **en millisecondes** — l'unité du défi.
+const MAINTENANT: u64 = 1_790_000_000_000;
 
 /// Le domaine d'épreuve.
 const DOMAINE: &[u8] = b"mail.example.com";
@@ -31,7 +31,7 @@ fn ecrire(login: &str, device: &str, instant: u64) -> std::string::String {
         &Challenge {
             login,
             device,
-            issued_at_seconds: instant,
+            issued_at_ms: instant,
         },
         &mut place,
     )
@@ -47,13 +47,7 @@ fn lire(
     use std::string::ToString as _;
     let mut place = [0_u8; CHALLENGE_OCTETS_MAX];
     verify(&clef(), texte.as_bytes(), maintenant, &mut place)
-        .map(|lu| {
-            (
-                lu.login.to_string(),
-                lu.device.to_string(),
-                lu.issued_at_seconds,
-            )
-        })
+        .map(|lu| (lu.login.to_string(), lu.device.to_string(), lu.issued_at_ms))
         .map_err(Error::reason)
 }
 
@@ -92,10 +86,10 @@ fn ni_jeton_ni_invitation_ne_passent_pour_un_defi() {
         &crate::token::Token {
             login: "marie",
             scope: crate::scope::Scope::none(),
-            expiry: MAINTENANT * 1_000_000 + 3_600_000_000,
+            expiry: MAINTENANT * 1_000 + 3_600_000_000,
             nonce: 1,
         },
-        MAINTENANT * 1_000_000,
+        MAINTENANT * 1_000,
         &mut place,
     )
     .expect("écrivable")
@@ -107,9 +101,9 @@ fn ni_jeton_ni_invitation_ne_passent_pour_un_defi() {
         &clef(),
         &crate::invitation::Invitation {
             login: "marie",
-            expiry: MAINTENANT * 1_000_000 + 3_600_000_000,
+            expiry: MAINTENANT * 1_000 + 3_600_000_000,
         },
-        MAINTENANT * 1_000_000,
+        MAINTENANT * 1_000,
         &mut place,
     )
     .expect("écrivable")
@@ -124,27 +118,17 @@ fn un_defi_n_ouvre_ni_session_ni_enrolement() {
 
     let mut place = [0_u8; crate::token::TOKEN_OCTETS_MAX];
     assert_eq!(
-        crate::token::verify(
-            &clef(),
-            texte.as_bytes(),
-            MAINTENANT * 1_000_000,
-            &mut place
-        )
-        .err()
-        .map(Error::reason),
+        crate::token::verify(&clef(), texte.as_bytes(), MAINTENANT * 1_000, &mut place)
+            .err()
+            .map(Error::reason),
         Some(Reason::BadToken)
     );
 
     let mut place = [0_u8; crate::invitation::INVITATION_OCTETS_MAX];
     assert_eq!(
-        crate::invitation::verify(
-            &clef(),
-            texte.as_bytes(),
-            MAINTENANT * 1_000_000,
-            &mut place
-        )
-        .err()
-        .map(Error::reason),
+        crate::invitation::verify(&clef(), texte.as_bytes(), MAINTENANT * 1_000, &mut place)
+            .err()
+            .map(Error::reason),
         Some(Reason::BadToken)
     );
 }
@@ -158,13 +142,17 @@ fn un_defi_n_ouvre_ni_session_ni_enrolement() {
 #[test]
 fn un_defi_expire_se_dit_distinctement() {
     let texte = ecrire("marie", "a1", MAINTENANT);
-    assert!(lire(&texte, MAINTENANT + VIE_SECONDES - 1).is_ok());
+    let vie = VIE_SECONDES * 1_000;
+    assert!(lire(&texte, MAINTENANT + vie - 1).is_ok());
     assert_eq!(
-        lire(&texte, MAINTENANT + VIE_SECONDES),
+        lire(&texte, MAINTENANT + vie),
         Err(Reason::TokenExpired),
         "à la soixantième seconde exacte, il ne vaut DÉJÀ plus"
     );
-    assert_eq!(lire(&texte, MAINTENANT + 3_600), Err(Reason::TokenExpired));
+    assert_eq!(
+        lire(&texte, MAINTENANT + 3_600_000),
+        Err(Reason::TokenExpired)
+    );
 }
 
 /// **UN DÉFI ÉMIS DANS LE FUTUR NE VAUT RIEN.**
@@ -177,7 +165,7 @@ fn un_defi_expire_se_dit_distinctement() {
 fn un_defi_venu_du_futur_ne_vaut_rien() {
     let texte = ecrire("marie", "a1", MAINTENANT + 1);
     assert_eq!(lire(&texte, MAINTENANT), Err(Reason::BadToken));
-    // À la seconde exacte, il vaut.
+    // À la milliseconde exacte, il vaut.
     assert!(lire(&texte, MAINTENANT + 1).is_ok());
 }
 
@@ -242,7 +230,7 @@ fn un_nom_irrecevable_ne_s_emet_pas() {
                 &Challenge {
                     login,
                     device,
-                    issued_at_seconds: MAINTENANT,
+                    issued_at_ms: MAINTENANT,
                 },
                 &mut place,
             )
@@ -266,7 +254,7 @@ fn un_nom_irrecevable_ne_s_emet_pas() {
             &Challenge {
                 login: &juste_login,
                 device: &juste_device,
-                issued_at_seconds: MAINTENANT,
+                issued_at_ms: MAINTENANT,
             },
             &mut place,
         )
@@ -364,7 +352,7 @@ fn un_tampon_trop_court_est_notre_faute() {
             &Challenge {
                 login: "marie",
                 device: "a1",
-                issued_at_seconds: MAINTENANT,
+                issued_at_ms: MAINTENANT,
             },
             &mut minuscule,
         )

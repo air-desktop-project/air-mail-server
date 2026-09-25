@@ -202,17 +202,13 @@ impl<A: Api> ams_h3::Service for ServiceH3<'_, A> {
             Next::CheckDevice {
                 account,
                 device,
-                issued_at_seconds,
+                issued_at_ms,
                 challenge,
                 signature,
             } => {
-                let accorde = self.api.verify_device(
-                    account,
-                    device,
-                    issued_at_seconds,
-                    challenge,
-                    signature,
-                );
+                let accorde =
+                    self.api
+                        .verify_device(account, device, issued_at_ms, challenge, signature);
                 let identifiant = self.api.nonce();
                 let suite = self.session.on_credentials(
                     accorde.is_some(),

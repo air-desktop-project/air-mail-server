@@ -508,7 +508,7 @@ impl ams_loop_tokio::http::Api for ApiEssai {
         &self,
         _account: &str,
         _device: &str,
-        _issued_at_seconds: u64,
+        _issued_at_ms: u64,
         _challenge: &str,
         _signature: &str,
     ) -> Option<ams_api::Scope> {

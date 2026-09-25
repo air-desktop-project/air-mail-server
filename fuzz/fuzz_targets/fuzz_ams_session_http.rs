@@ -303,7 +303,7 @@ fuzz_target!(|entree: Entree| {
         Next::CheckDevice {
             account,
             device,
-            issued_at_seconds,
+            issued_at_ms,
             ..
         } => {
             assert!(
@@ -325,7 +325,7 @@ fuzz_target!(|entree: Entree| {
             // **LE DÉFI N'EST JAMAIS VENU DU FUTUR** : la lecture le refuse, et
             // l'accepter le ferait vivre bien au-delà de ses soixante secondes.
             assert!(
-                issued_at_seconds <= maintenant / 1_000_000,
+                issued_at_ms <= maintenant / 1_000,
                 "un défi daté du futur a été accepté"
             );
         }

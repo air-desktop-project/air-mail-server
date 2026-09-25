@@ -53,8 +53,12 @@ pub struct Device {
     pub public_key: Cle,
     /// Quand il a été enrôlé, en secondes depuis l'époque.
     pub enrolled: u64,
-    /// Quand il a ouvert une session pour la dernière fois. Zéro s'il ne l'a
-    /// jamais fait.
+    /// Quand il a ouvert une session pour la dernière fois, **en
+    /// millisecondes** depuis l'époque. Zéro s'il ne l'a jamais fait.
+    ///
+    /// **LA MILLISECONDE, ET NON LA SECONDE COMME `enrolled`** : c'est à cette
+    /// date que se compare l'instant d'émission d'un défi, et en secondes deux
+    /// sessions enchaînées dans la même seconde se prenaient pour un rejeu.
     pub last_seen: u64,
 }
 

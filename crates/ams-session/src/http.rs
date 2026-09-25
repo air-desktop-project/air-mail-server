@@ -202,8 +202,8 @@ pub enum Next<'o> {
         account: &'o str,
         /// L'appareil que le défi désigne.
         device: &'o str,
-        /// Quand le défi a été émis, **en secondes** — l'unité du magasin.
-        issued_at_seconds: u64,
+        /// Quand le défi a été émis, **en millisecondes** — l'unité du magasin.
+        issued_at_ms: u64,
         /// Le défi, **tel qu'il a été rendu** : c'est lui qui entre dans le
         /// condensat signé, et le redécouper ici ferait deux écritures d'une
         /// seule chose.
@@ -566,7 +566,7 @@ impl Http {
             return Err((Reason::BadJsonBody, sortie));
         };
         let mut texte = [0_u8; ams_api::CHALLENGE_ENCODED_OCTETS_MAX];
-        // **LE DÉFI COMPTE EN SECONDES**, et l'appelant nous donne des
+        // **LE DÉFI COMPTE EN MILLISECONDES**, et l'appelant nous donne des
         // microsecondes : la conversion a lieu ICI, une fois, et le nom du champ
         // porte son unité. Voir l'en-tête de `ams_api::challenge`.
         let defi = match ams_api::issue_challenge(
@@ -574,7 +574,7 @@ impl Http {
             &ams_api::Challenge {
                 login: demande.login,
                 device: demande.device,
-                issued_at_seconds: maintenant / 1_000_000,
+                issued_at_ms: maintenant / 1_000,
             },
             &mut texte,
         ) {
@@ -641,7 +641,7 @@ impl Http {
         let lu = match ams_api::verify_challenge(
             &self.clef,
             demande.challenge.as_bytes(),
-            maintenant / 1_000_000,
+            maintenant / 1_000,
             place_du_defi,
         ) {
             Ok(lu) => lu,
@@ -654,7 +654,7 @@ impl Http {
             next: Next::CheckDevice {
                 account: lu.login,
                 device: lu.device,
-                issued_at_seconds: lu.issued_at_seconds,
+                issued_at_ms: lu.issued_at_ms,
                 challenge: demande.challenge,
                 signature: demande.signature,
             },

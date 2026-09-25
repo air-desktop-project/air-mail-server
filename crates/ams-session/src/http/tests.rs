@@ -1343,7 +1343,7 @@ fn un_defi_verifie_demande_la_signature_a_l_appelant() {
         Next::CheckDevice {
             account: "marc",
             device: "a1b2",
-            issued_at_seconds: MAINTENANT / 1_000_000,
+            issued_at_ms: MAINTENANT / 1_000,
             challenge: &defi,
             signature: "AQID",
         }
@@ -1594,7 +1594,7 @@ fn un_defi_aux_bornes_se_dechiffre() {
         Next::CheckDevice {
             account: &compte,
             device: &appareil,
-            issued_at_seconds: MAINTENANT / 1_000_000,
+            issued_at_ms: MAINTENANT / 1_000,
             challenge: &defi,
             signature: "AQID",
         },
