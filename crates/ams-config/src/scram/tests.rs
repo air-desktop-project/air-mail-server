@@ -23,12 +23,18 @@ fn verificateur(login: &str) -> ScramVerifier {
         iterations: 32_768,
         nonce: [2; NONCE_OCTETS],
         scelle: vec![3; 80],
+        lie: true,
     }
 }
 
 #[test]
 fn l_aller_retour_rend_ce_qu_on_a_ecrit() {
-    let ecrits = vec![verificateur("jean"), verificateur("contact")];
+    // Un lié et un non lié : le drapeau fait l'aller-retour dans les deux sens.
+    let ancien = ScramVerifier {
+        lie: false,
+        ..verificateur("contact")
+    };
+    let ecrits = vec![verificateur("jean"), ancien];
     let octets = encode_scram(&ecrits).expect("encodage");
     assert_eq!(decode_scram(&octets).expect("décodage"), ecrits);
 }

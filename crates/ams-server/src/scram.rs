@@ -167,6 +167,87 @@ impl Verificateurs {
         self.vue().len()
     }
 
+    /// Combien de vérificateurs ne sont pas liés à l'empreinte de leur compte.
+    ///
+    /// Écrits avant la 0.2.16, **ils ne s'ouvrent plus** : le démarrage le dit
+    /// à l'exploitant, avec la commande qui les lie.
+    #[must_use]
+    pub fn non_lies(&self) -> usize {
+        self.vue().iter().filter(|v| !v.lie).count()
+    }
+
+    /// Dérive le vérificateur d'un compte dont on tient le mot de passe en
+    /// clair, et le range — en REMPLAÇANT celui qu'il avait.
+    ///
+    /// # POURQUOI L'API L'APPELLE
+    ///
+    /// Jusqu'en 0.2.15, poser un mot de passe par l'API laissait le magasin
+    /// SCRAM intact, et **l'ancien mot de passe ouvrait encore la boîte par
+    /// SCRAM**. La liaison à l'empreinte ferme ce défaut à elle seule ; ceci en
+    /// répare la conséquence : sans nouveau vérificateur, Thunderbird, qui
+    /// choisit SCRAM, échouerait avec le NOUVEAU mot de passe.
+    ///
+    /// `empreinte` est celle que le compte VA porter. **L'appelant range le
+    /// vérificateur AVANT le compte** : lié à une empreinte que le compte ne
+    /// porte pas encore, il ne s'ouvre pas, donc l'ordre ne laisse jamais de
+    /// fenêtre où un mot de passe vaudrait sans devoir valoir.
+    ///
+    /// # Errors
+    ///
+    /// Le noyau refuse son aléa, le magasin ne se relit pas, ou le disque
+    /// refuse d'écrire. **Rien n'est alors changé** — ni le magasin, ni, si
+    /// l'appelant s'arrête là, le compte.
+    pub fn deriver_et_poser(
+        &self,
+        login: &str,
+        secret: &[u8],
+        empreinte: &str,
+    ) -> Result<(), String> {
+        let mut alea = [0_u8; ams_auth::SEL_OCTETS + ams_auth::NONCE_OCTETS];
+        {
+            use std::io::Read as _;
+            std::fs::File::open("/dev/urandom")
+                .and_then(|mut source| source.read_exact(&mut alea))
+                .map_err(|erreur| format!("/dev/urandom : {erreur}"))?;
+        }
+        let (sel, nonce) = alea.split_at(ams_auth::SEL_OCTETS);
+        let mut le_sel = [0_u8; ams_auth::SEL_OCTETS];
+        le_sel.copy_from_slice(sel);
+        let mut le_nonce = [0_u8; ams_auth::NONCE_OCTETS];
+        le_nonce.copy_from_slice(nonce);
+        // **PBKDF2 À TRENTE-DEUX MILLE TOURS BLOQUE**, comme Argon2id : hors de
+        // l'ordonnanceur, et le verrou du fichier aussi, pour la même raison.
+        tokio::task::block_in_place(|| {
+            let neuf = ams_auth::scram_deriver(
+                secret,
+                login,
+                empreinte,
+                le_sel,
+                ams_auth::SCRAM_ITERATIONS,
+                le_nonce,
+                &self.clef,
+            )
+            .map_err(|erreur| format!("dérivation SCRAM : {erreur:?}"))?;
+            let _verrou = ams_fichier::verrouiller(&self.chemin)
+                .map_err(|erreur| format!("`{}` : {erreur}", self.chemin.display()))?;
+            let mut magasin = match std::fs::read(&self.chemin) {
+                Ok(octets) => ams_config::decode_scram(&octets)
+                    .map_err(|erreur| format!("`{}` : {erreur}", self.chemin.display()))?,
+                Err(erreur) if erreur.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+                Err(erreur) => return Err(format!("`{}` : {erreur}", self.chemin.display())),
+            };
+            magasin.retain(|v| !v.login.eq_ignore_ascii_case(login));
+            magasin.push(neuf);
+            let octets = ams_config::encode_scram(&magasin)
+                .map_err(|erreur| format!("encodage SCRAM : {erreur}"))?;
+            ams_config::decode_scram(&octets)
+                .map_err(|erreur| format!("le magasin SCRAM écrit ne se relit pas : {erreur}"))?;
+            ams_fichier::poser(&self.chemin, &octets)
+                .map_err(|erreur| format!("`{}` : {erreur}", self.chemin.display()))?;
+            self.relire().map(|_| ())
+        })
+    }
+
     /// Un instantané du magasin, qui ne changera pas sous les pieds du lecteur.
     fn vue(&self) -> Arc<Vec<ScramVerifier>> {
         self.relire_si_le_disque_a_bouge();
@@ -193,14 +274,19 @@ impl Verificateurs {
     /// clé — et les itérations sont celles du produit. Un compte inconnu qui
     /// rendrait un sel neuf à chaque essai, ou un autre compte d'itérations, se
     /// trahirait par cela seul.
+    ///
+    /// `empreinte` est celle que le fichier de comptes porte pour ce login, ou
+    /// `None` s'il n'y est pas : **un vérificateur dont le compte a disparu
+    /// répond comme un compte inconnu**, sel factice compris.
     pub fn server_first(
         &self,
         login: &[u8],
+        empreinte: Option<&str>,
         nonce_client: &[u8],
         nonce_serveur: &[u8],
         sortie: &mut [u8],
     ) -> Option<usize> {
-        let (sel, iterations) = match self.pour(login) {
+        let (sel, iterations) = match self.pour(login).filter(|_| empreinte.is_some()) {
             Some(v) => (v.sel, v.iterations),
             None => (
                 ams_auth::scram_sel_factice(login, &self.clef),
@@ -231,15 +317,21 @@ impl Verificateurs {
     /// Vérifie la preuve, et écrit le `server-final`.
     ///
     /// **AUCUNE DISTINCTION ENTRE « INCONNU » ET « FAUX »** : un `None` unique.
+    ///
+    /// `empreinte` est celle que le compte porte MAINTENANT : le vérificateur
+    /// n'ouvre que s'il a été dérivé de ce mot de passe-là. Un mot de passe
+    /// changé depuis — par l'API, par l'outil, par quoi que ce soit — l'a
+    /// éteint, et l'ancien mot de passe ne passe plus.
     pub fn server_final(
         &self,
         login: &[u8],
+        empreinte: Option<&str>,
         auth_message: &[u8],
         preuve: &[u8; 32],
         sortie: &mut [u8],
     ) -> Option<usize> {
         let verificateur = self.pour(login)?;
-        let cles = ams_auth::scram_ouvrir(&verificateur, &self.clef).ok()?;
+        let cles = ams_auth::scram_ouvrir(&verificateur, empreinte?, &self.clef).ok()?;
         let retrouvee = ams_sasl::client_key_depuis_preuve(&cles.stored, auth_message, preuve);
         if !ams_sasl::egales(&ams_sasl::stored_key(&retrouvee), &cles.stored) {
             return None;

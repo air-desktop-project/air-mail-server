@@ -39,6 +39,10 @@ ams-sasl = { workspace = true }
 # un magasin bien formé et vide de sens passerait pour bon.
 ams-auth = { workspace = true }
 ams-config = { workspace = true }
+# La migration `scram bind` s'éprouve sur un magasin tel que la 0.2.15
+# l'écrivait — scellé sous le seul login —, et aucune fonction publique ne sait
+# plus en fabriquer un : l'essai le scelle lui-même.
+chacha20poly1305 = { workspace = true }
 
 [lints]
 workspace = true

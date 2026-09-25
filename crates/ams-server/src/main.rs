@@ -191,6 +191,7 @@ fn monter_l_api(
     garde: Arc<ams_loop_tokio::SharedGuard>,
     incidents: Arc<crate::incidents::Incidents>,
     appareils: Option<Arc<crate::appareils::Appareils>>,
+    scram: Option<Arc<crate::scram::Verificateurs>>,
     file: Option<ams_loop_tokio::Spool>,
     message_max: usize,
     port_h3: Option<u16>,
@@ -279,6 +280,13 @@ fn monter_l_api(
             // pas ressembler à un compte qui n'a rien enrôlé.
             let api = match appareils {
                 Some(magasin) => api.avec_appareils(magasin),
+                None => api,
+            };
+            // **ET LE MAGASIN SCRAM**, pour qu'un mot de passe posé ici redérive
+            // son vérificateur : sans cela, un client SCRAM échouerait avec le
+            // nouveau mot de passe.
+            let api = match scram {
+                Some(verificateurs) => api.avec_scram(verificateurs),
                 None => api,
             };
             // **ET LA CLÉ QUI SCELLE LES INVITATIONS**, la même que celle des
@@ -1835,8 +1843,8 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     // déjà l'un sans l'autre ; ici on ne fait que constater, et un échec de
     // chargement — clé illisible, magasin refusé — EMPÊCHE DE DÉMARRER plutôt
     // que de servir un mécanisme qui ne marcherait pour personne.
-    let politique = if options.scram_key.is_empty() || options.scram_store.is_empty() {
-        politique
+    let verificateurs_scram = if options.scram_key.is_empty() || options.scram_store.is_empty() {
+        None
     } else {
         let verificateurs = crate::scram::Verificateurs::charger(
             &PathBuf::from(&options.scram_key),
@@ -1850,6 +1858,21 @@ async fn servir(fichier: &Path) -> Result<(), String> {
             options.scram_store,
             options.scram_key
         );
+        // **UN VÉRIFICATEUR NON LIÉ NE S'OUVRE PLUS**, et c'est un changement de
+        // comportement qu'une mise à jour ne doit pas faire en silence : les
+        // clients SCRAM de ces comptes échoueraient sans que rien ne dise
+        // pourquoi. Le démarrage le dit, avec la commande qui répare.
+        let non_lies = verificateurs.non_lies();
+        if non_lies > 0 {
+            eprintln!(
+                "air-mail-server : ATTENTION — {non_lies} vérificateur(s) SCRAM écrit(s) avant la \
+                 0.2.16 ne sont pas liés à l'empreinte de leur compte, et NE S'OUVRENT PLUS : \
+                 leurs comptes ne passent qu'en `PLAIN`. `air-mail-admin scram bind <comptes> \
+                 --scram-key {} --scram {}` les lie, si aucun mot de passe n'a été changé par \
+                 l'API depuis leur dérivation.",
+                options.scram_key, options.scram_store
+            );
+        }
         // **`-PLUS` SE DÉCIDE PAR CONNEXION, ET NON PAR CONFIGURATION** : il
         // demande l'exportateur de RFC 9266, que seule une session TLS 1.3
         // permet de PROUVER unique (§4.2). Le dire ici évite de chercher
@@ -1859,7 +1882,14 @@ async fn servir(fichier: &Path) -> Result<(), String> {
              liaison de canal (RFC 9266) n'est définie que si la poignée de main produit un \
              secret maître unique, ce qu'une session TLS 1.2 ne permet pas de prouver ici."
         );
-        politique.avec_scram(Arc::new(verificateurs))
+        Some(Arc::new(verificateurs))
+    };
+    // **LE MÊME MAGASIN POUR LA POLITIQUE ET POUR L'API** : l'une y lit les
+    // vérificateurs, l'autre y écrit celui d'un mot de passe qu'elle pose. Deux
+    // instances tiendraient deux mémoires du même fichier.
+    let politique = match &verificateurs_scram {
+        Some(verificateurs) => politique.avec_scram(Arc::clone(verificateurs)),
+        None => politique,
     };
     // **`DSN` NE S'ANNONCE QUE SI L'ON PEUT ÉMETTRE** (RFC 3461 §4.2). Un
     // serveur qui l'annonce DOIT rendre compte d'un succès quand on lui en
@@ -2179,6 +2209,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         } else {
             Some(Arc::clone(&appareils))
         },
+        verificateurs_scram.clone(),
         file.as_ref().map(|attente| attente.as_ref().clone()),
         message_max,
         port_h3,

@@ -72,4 +72,16 @@ struct ScramVerifier {
   # Le sceau de Poly1305 est ce qui fait échouer l'ouverture quand la clé est
   # fausse, quand les octets ont bougé, ou quand l'entrée a changé de compte.
   sealed @4 :Data;
+
+  # Le scellement couvre-t-il AUSSI l'empreinte du mot de passe du compte ?
+  #
+  # Depuis 0.2.16, les données associées sont `login ‖ 0 ‖ SHA-256(empreinte
+  # argon2id du compte)` : un vérificateur ne s'ouvre que tant que le compte a
+  # encore le mot de passe dont il a été dérivé. Jusque-là, changer un mot de
+  # passe par l'API laissait l'ancien ouvrir la boîte par SCRAM.
+  #
+  # FAUX PAR DÉFAUT, et c'est ce qu'un magasin écrit avant 0.2.16 relit : ces
+  # vérificateurs-là ne s'ouvrent plus tant que `air-mail-admin scram bind` ne
+  # les a pas liés.
+  bound @5 :Bool;
 }

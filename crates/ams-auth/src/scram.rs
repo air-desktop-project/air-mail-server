@@ -42,6 +42,13 @@
 //!   donner à `contact` le vérificateur d'un compte dont il connaît le mot de
 //!   passe.
 //!
+//! - **L'empreinte du mot de passe y entre aussi** — celle, `argon2id`, que le
+//!   fichier de comptes porte au même instant. Un vérificateur ne s'ouvre donc
+//!   que tant que le compte a ENCORE le mot de passe dont il a été dérivé.
+//!   Changer ce mot de passe par n'importe quel chemin — l'API, l'outil
+//!   d'administration, un outil qui n'existe pas encore — éteint l'ancien
+//!   vérificateur sans que ce chemin ait à y penser. Voir [`Verificateur::lie`].
+//!
 //! **CE QUE CELA NE PROTÈGE PAS**, et qu'il faut écrire plutôt que taire : un
 //! serveur en marche tient la clé en mémoire. Qui lit la mémoire du processus,
 //! ou qui prend la clé ET le magasin, a les deux `ServerKey`. Le scellement
@@ -115,6 +122,21 @@ pub struct Verificateur {
     pub nonce: [u8; NONCE_OCTETS],
     /// `StoredKey ‖ ServerKey`, scellées — soixante-quatre octets et le sceau.
     pub scelle: Vec<u8>,
+    /// Le scellement couvre-t-il AUSSI l'empreinte du mot de passe du compte ?
+    ///
+    /// # POURQUOI CE CHAMP EXISTE
+    ///
+    /// Jusqu'en 0.2.15, le magasin SCRAM et le fichier de comptes ne se
+    /// connaissaient pas : changer un mot de passe par l'API laissait l'ancien
+    /// vérificateur en place, et **l'ancien mot de passe ouvrait encore la
+    /// boîte par SCRAM**. Un vérificateur LIÉ scelle l'empreinte `argon2id` du
+    /// compte dans ses données associées : dès que le compte change de mot de
+    /// passe, il cesse de s'ouvrir.
+    ///
+    /// **UN VÉRIFICATEUR NON LIÉ NE S'OUVRE PLUS** — [`Error::NonLie`]. Ceux
+    /// qu'ont écrits les versions précédentes se lient une fois pour toutes par
+    /// [`lier`], que l'outil d'administration expose.
+    pub lie: bool,
 }
 
 /// Les deux clés, une fois ouvertes.
@@ -139,14 +161,22 @@ pub enum Error {
     Sceau,
     /// Le contenu scellé ne fait pas la taille des deux clés.
     Taille,
+    /// Le vérificateur n'est pas lié à l'empreinte du compte : écrit par une
+    /// version antérieure à 0.2.16, il ne s'ouvre plus tant qu'on ne l'a pas
+    /// lié. Voir [`Verificateur::lie`].
+    NonLie,
 }
 
 /// Dérive un vérificateur **au moment où l'on tient le mot de passe en clair**.
 ///
-/// C'est-à-dire à trois endroits, et nulle part ailleurs : `account add`,
-/// `account passwd`, et la route `/v1/me/password`. Le magasin ne sait pas
+/// C'est-à-dire à `account add`, à `account passwd`, et aux routes de l'API
+/// qui posent un mot de passe. Le magasin ne sait pas
 /// fabriquer un vérificateur pour un compte dont il n'a que l'empreinte
 /// `argon2id` — c'est la propriété même d'une fonction de dérivation.
+///
+/// `empreinte` est l'empreinte `argon2id` que le fichier de comptes portera
+/// pour CE mot de passe : le vérificateur y est lié, et ne s'ouvrira que tant
+/// que le compte la porte. Voir [`Verificateur::lie`].
 ///
 /// `sel` et `nonce` viennent de l'appelant : cette crate ne sait pas tirer au
 /// sort (C1), et le hasard est une entrée-sortie.
@@ -158,6 +188,7 @@ pub enum Error {
 pub fn deriver(
     mot_de_passe: &[u8],
     login: &str,
+    empreinte: &str,
     sel: [u8; SEL_OCTETS],
     iterations: u32,
     nonce: [u8; NONCE_OCTETS],
@@ -175,26 +206,116 @@ pub fn deriver(
     // mémoire de soixante-quatre octets ne peut pas échouer —, et C2 refuse les
     // gardes inatteignables. L'erreur reste dans la signature parce que c'est
     // l'amont qui la déclare, et qu'on ne la masque pas.
-    sceller(&clair, login.as_bytes(), &nonce, clef).map(|scelle| Verificateur {
+    sceller(&clair, &donnees_liees(login, empreinte), &nonce, clef).map(|scelle| Verificateur {
         login: String::from(login),
         sel,
         iterations,
         nonce,
         scelle,
+        lie: true,
     })
+}
+
+/// Lie un vérificateur écrit AVANT la 0.2.16 à l'empreinte actuelle du compte.
+///
+/// # CE QUE L'APPELANT AFFIRME EN L'APPELANT
+///
+/// **Que ce vérificateur a été dérivé du mot de passe que `empreinte` décrit.**
+/// Rien ici ne peut le vérifier : le mot de passe n'est plus là, et c'est tout
+/// le problème que la liaison résout pour l'avenir. Lier un vérificateur
+/// dérivé d'un ANCIEN mot de passe à l'empreinte du NOUVEAU rouvrirait
+/// exactement la porte qu'on ferme — l'outil d'administration le dit à
+/// l'exploitant avant qu'il ne l'emploie.
+///
+/// Un nonce NEUF est exigé : on rescelle le même clair sous d'autres données
+/// associées, et réemployer le nonce avec la même clé révélerait le
+/// ou-exclusif des deux scellés.
+///
+/// # Errors
+///
+/// [`Error::Sceau`] — le vérificateur ne s'ouvre pas sous son login ;
+/// [`Error::Taille`] — son clair n'a pas la longueur des deux clés. **Un
+/// vérificateur DÉJÀ lié se rend tel quel** : le lier deux fois n'a pas de
+/// sens, et le refuser ferait échouer une migration relancée.
+pub fn lier(
+    verificateur: &Verificateur,
+    empreinte: &str,
+    nonce: [u8; NONCE_OCTETS],
+    clef: &[u8; CLE_SCELLEMENT_OCTETS],
+) -> Result<Verificateur, Error> {
+    if verificateur.lie {
+        return Ok(verificateur.clone());
+    }
+    let cles = ouvrir_sous(verificateur, verificateur.login.as_bytes(), clef)?;
+    let mut clair = [0_u8; CLE_OCTETS * 2];
+    for (place, octet) in clair
+        .iter_mut()
+        .zip(cles.stored.iter().chain(cles.server.iter()))
+    {
+        *place = *octet;
+    }
+    sceller(
+        &clair,
+        &donnees_liees(&verificateur.login, empreinte),
+        &nonce,
+        clef,
+    )
+    .map(|scelle| Verificateur {
+        login: verificateur.login.clone(),
+        sel: verificateur.sel,
+        iterations: verificateur.iterations,
+        nonce,
+        scelle,
+        lie: true,
+    })
+}
+
+/// Les données associées d'un vérificateur lié : le login, un octet nul, et le
+/// condensat SHA-256 de l'empreinte du compte.
+///
+/// **LE CONDENSAT, ET NON L'EMPREINTE ELLE-MÊME** : il a une taille fixe, et
+/// l'octet nul qui le précède ne peut pas apparaître dans un login
+/// (`check_login`) — le login et l'empreinte ne se recollent donc pas.
+fn donnees_liees(login: &str, empreinte: &str) -> Vec<u8> {
+    let mut donnees = Vec::with_capacity(login.len().saturating_add(33));
+    donnees.extend_from_slice(login.as_bytes());
+    donnees.push(0);
+    donnees.extend_from_slice(&ams_sasl::sha256(empreinte.as_bytes()));
+    donnees
 }
 
 /// Ouvre un vérificateur : rend les deux clés, ou refuse.
 ///
 /// Le login vient du vérificateur lui-même : il a été scellé avec, et l'entrée
-/// ne s'ouvre donc que sous le compte qui est écrit dedans.
+/// ne s'ouvre donc que sous le compte qui est écrit dedans. `empreinte` est
+/// celle que le fichier de comptes porte **maintenant** : le vérificateur ne
+/// s'ouvre que si c'est celle dont il a été dérivé.
 ///
 /// # Errors
 ///
-/// [`Error::Sceau`] — mauvaise clé, données altérées, ou entrée dont le login a
-/// été changé ; [`Error::Taille`] — le clair n'a pas la longueur des deux clés.
+/// [`Error::Sceau`] — mauvaise clé, données altérées, entrée dont le login a
+/// été changé, **ou compte qui a changé de mot de passe depuis** ;
+/// [`Error::Taille`] — le clair n'a pas la longueur des deux clés ;
+/// [`Error::NonLie`] — un vérificateur d'avant la 0.2.16, qu'il faut lier.
 pub fn ouvrir(
     verificateur: &Verificateur,
+    empreinte: &str,
+    clef: &[u8; CLE_SCELLEMENT_OCTETS],
+) -> Result<Cles, Error> {
+    if !verificateur.lie {
+        return Err(Error::NonLie);
+    }
+    ouvrir_sous(
+        verificateur,
+        &donnees_liees(&verificateur.login, empreinte),
+        clef,
+    )
+}
+
+/// Ouvre un vérificateur sous ces données associées.
+fn ouvrir_sous(
+    verificateur: &Verificateur,
+    donnees: &[u8],
     clef: &[u8; CLE_SCELLEMENT_OCTETS],
 ) -> Result<Cles, Error> {
     let clair = boite(clef)
@@ -202,7 +323,7 @@ pub fn ouvrir(
             &Nonce::from(verificateur.nonce),
             Payload {
                 msg: &verificateur.scelle,
-                aad: verificateur.login.as_bytes(),
+                aad: donnees,
             },
         )
         .map_err(|_| Error::Sceau)?;
@@ -253,10 +374,10 @@ pub fn sel_factice(login: &[u8], clef: &[u8; CLE_SCELLEMENT_OCTETS]) -> [u8; SEL
     sel
 }
 
-/// Scelle `clair` sous `clef`, avec `login` en données associées.
+/// Scelle `clair` sous `clef`, avec `donnees` en données associées.
 fn sceller(
     clair: &[u8],
-    login: &[u8],
+    donnees: &[u8],
     nonce: &[u8; NONCE_OCTETS],
     clef: &[u8; CLE_SCELLEMENT_OCTETS],
 ) -> Result<Vec<u8>, Error> {
@@ -265,7 +386,7 @@ fn sceller(
             &Nonce::from(*nonce),
             Payload {
                 msg: clair,
-                aad: login,
+                aad: donnees,
             },
         )
         .map_err(|_| Error::Sceau)

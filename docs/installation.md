@@ -273,6 +273,31 @@ Ce qu'il faut savoir ensuite :
   ne peut pas être prouvée unique, et n'est donc pas annoncée ;
 - **le magasin se relit à chaud**, comme celui des comptes : un vérificateur
   ajouté pendant que le serveur tourne est vu au plus une seconde après.
+- **un vérificateur est LIÉ au mot de passe dont il est dérivé** (depuis la
+  0.2.16) : l'empreinte du compte entre dans son scellement. Changer le mot de
+  passe — par l'API, par `account passwd`, par quoi que ce soit — éteint l'ancien
+  vérificateur, et l'ancien mot de passe ne passe plus par SCRAM. L'API redérive
+  elle-même le vérificateur du mot de passe qu'elle pose.
+
+### Mettre à jour depuis une version antérieure à 0.2.16
+
+Les vérificateurs écrits avant la 0.2.16 ne sont pas liés, et **ne s'ouvrent
+plus** : leurs comptes ne passent qu'en `PLAIN` tant qu'on ne les a pas liés. Le
+démarrage le signale. Une commande les lie, une fois pour toutes :
+
+```sh
+sudo -u air-mail air-mail-admin scram bind /var/lib/air-mail/comptes.bin \
+    --scram-key /etc/air-mail/scram.key --scram /var/lib/air-mail/scram.bin
+```
+
+> **NE LA LANCEZ QUE SI AUCUN MOT DE PASSE N'A ÉTÉ CHANGÉ PAR L'API** depuis la
+> dernière dérivation. Jusqu'en 0.2.15, l'API ne touchait pas le magasin SCRAM :
+> un compte dont le mot de passe a été changé par elle porte encore le
+> vérificateur de l'ANCIEN. Le lier à l'empreinte du nouveau rouvrirait
+> exactement la porte qu'on ferme. En cas de doute sur un compte,
+> `account passwd --scram …` le redérive depuis le mot de passe en clair.
+>
+> Le signe qui rassure : `comptes.bin` n'a pas été modifié depuis `scram.bin`.
 
 ---
 

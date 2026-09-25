@@ -73,6 +73,14 @@ COMMANDES
                         MAGASIN : c'est toute la raison d'être des deux
                         fichiers. Refuse d'écraser une clé existante, parce
                         qu'une clé perdue rend tous les vérificateurs illisibles.
+    scram bind <comptes> --scram-key <clé> --scram <fichier>
+                        lie à l'empreinte ACTUELLE de leur compte les
+                        vérificateurs écrits avant la 0.2.16 — qui, sans cela,
+                        ne s'ouvrent plus. À lancer UNE FOIS après la mise à
+                        jour. N'EMPLOYEZ-LA QUE SI AUCUN MOT DE PASSE N'A ÉTÉ
+                        CHANGÉ PAR L'API depuis la dernière dérivation : lier
+                        le vérificateur d'un ancien mot de passe le rouvrirait.
+                        En cas de doute, `account passwd --scram` redérive.
     account list <fichier>
                         liste les noms de comptes. Jamais les empreintes.
     account remove <fichier> --login <nom>
@@ -213,6 +221,15 @@ fn main() -> ExitCode {
             }
         },
         ["scram", "init", clef] => initialiser_la_clef(Path::new(clef)),
+        [
+            "scram",
+            "bind",
+            fichier,
+            "--scram-key",
+            clef,
+            "--scram",
+            magasin,
+        ] => lier_les_verificateurs(Path::new(fichier), Path::new(clef), Path::new(magasin)),
         ["account", "list", fichier] => lister(Path::new(fichier)),
         ["account", "passwd", fichier, "--login", nom, reste @ ..] => {
             match demande_de_compte(reste) {
@@ -1089,30 +1106,26 @@ fn lire_la_clef(chemin: &Path) -> Result<[u8; ams_auth::CLE_SCELLEMENT_OCTETS], 
 
 /// Dérive et range le vérificateur SCRAM d'un compte, si l'appelant l'a demandé.
 ///
-/// **UNE ENTRÉE PAR COMPTE, REMPLACÉE ET NON AJOUTÉE** : un mot de passe changé
-/// laisse sinon derrière lui un vérificateur qui ouvre encore, et SCRAM
-/// n'interroge pas l'empreinte Argon2id — le compte aurait deux mots de passe,
-/// dont un que personne ne croit valable.
+/// **UNE ENTRÉE PAR COMPTE, REMPLACÉE ET NON AJOUTÉE.** Le vérificateur est LIÉ
+/// à `empreinte` — celle que le compte portera —, donc un ancien vérificateur
+/// laissé en place ne s'ouvrirait de toute façon plus ; le remplacer garde
+/// simplement le magasin sans débris.
 fn poser_le_verificateur(
     scram: Option<&DemandeScram>,
     nom: &str,
     secret: &[u8],
+    empreinte: &str,
 ) -> Result<(), String> {
     let Some(demande) = scram else {
         return Ok(());
     };
     let clef = lire_la_clef(&demande.clef)?;
     let sel_scram = sel()?;
-    let mut nonce = [0_u8; ams_auth::NONCE_OCTETS];
-    {
-        use std::io::Read as _;
-        std::fs::File::open("/dev/urandom")
-            .and_then(|mut source| source.read_exact(&mut nonce))
-            .map_err(|erreur| format!("/dev/urandom : {erreur}"))?;
-    }
+    let nonce = nonce()?;
     let neuf = ams_auth::scram_deriver(
         secret,
         nom,
+        empreinte,
         sel_scram,
         ams_auth::SCRAM_ITERATIONS,
         nonce,
@@ -1155,6 +1168,96 @@ fn poser_le_verificateur(
         magasin.len()
     );
     Ok(())
+}
+
+/// Lie à l'empreinte ACTUELLE de leur compte les vérificateurs SCRAM écrits
+/// avant la 0.2.16.
+///
+/// # CE QUE L'EXPLOITANT AFFIRME EN LA LANÇANT
+///
+/// **Que chaque vérificateur a été dérivé du mot de passe que le compte porte
+/// aujourd'hui.** C'est vrai tant qu'aucun mot de passe n'a été changé par
+/// l'API depuis la dernière dérivation — l'API ne touchait pas le magasin
+/// SCRAM, et c'est précisément le défaut que la liaison ferme. Un vérificateur
+/// dérivé d'un ANCIEN mot de passe, lié à l'empreinte du NOUVEAU, rouvrirait
+/// la porte : en cas de doute sur un compte, `account passwd --scram` le
+/// redérive plutôt.
+///
+/// Un vérificateur dont le compte n'existe plus est RETIRÉ : il n'a plus
+/// d'empreinte à laquelle se lier, et le garder ne servirait à personne.
+fn lier_les_verificateurs(fichier: &Path, clef: &Path, magasin: &Path) -> ExitCode {
+    match lier_les_verificateurs_ou_dire(fichier, clef, magasin) {
+        Ok((lies, deja, retires)) => {
+            println!(
+                "{} : {lies} vérificateur(s) lié(s), {deja} déjà lié(s), {retires} retiré(s) \
+                 faute de compte",
+                magasin.display()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(message) => {
+            eprintln!("air-mail-admin : {message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn lier_les_verificateurs_ou_dire(
+    fichier: &Path,
+    clef: &Path,
+    magasin: &Path,
+) -> Result<(usize, usize, usize), String> {
+    let clef = lire_la_clef(clef)?;
+    // Les comptes se LISENT seulement : on n'écrit que le magasin SCRAM, sous
+    // son propre verrou.
+    let comptes = lire_magasin(fichier, false)?;
+    let _verrou = ams_fichier::verrouiller(magasin)
+        .map_err(|erreur| format!("`{}` : {erreur}", magasin.display()))?;
+    let octets =
+        std::fs::read(magasin).map_err(|erreur| format!("`{}` : {erreur}", magasin.display()))?;
+    let anciens = ams_config::decode_scram(&octets)
+        .map_err(|erreur| format!("`{}` : {erreur}", magasin.display()))?;
+
+    let (mut lies, mut deja, mut retires) = (0_usize, 0_usize, 0_usize);
+    let mut neufs = Vec::with_capacity(anciens.len());
+    for ancien in &anciens {
+        let Some(compte) = comptes.iter().find(|compte| compte.login == ancien.login) else {
+            retires = retires.saturating_add(1);
+            continue;
+        };
+        if ancien.lie {
+            deja = deja.saturating_add(1);
+            neufs.push(ancien.clone());
+            continue;
+        }
+        let lie =
+            ams_auth::scram_lier(ancien, &compte.hash, nonce()?, &clef).map_err(|erreur| {
+                format!(
+                    "vérificateur de `{}` : {erreur:?} — ne s'ouvre pas sous cette clé",
+                    ancien.login
+                )
+            })?;
+        lies = lies.saturating_add(1);
+        neufs.push(lie);
+    }
+
+    let octets =
+        ams_config::encode_scram(&neufs).map_err(|erreur| format!("encodage SCRAM : {erreur}"))?;
+    ams_config::decode_scram(&octets)
+        .map_err(|erreur| format!("le magasin SCRAM écrit ne se relit pas : {erreur}"))?;
+    ams_fichier::poser(magasin, &octets)
+        .map_err(|erreur| format!("`{}` : {erreur}", magasin.display()))?;
+    Ok((lies, deja, retires))
+}
+
+/// Un nonce de scellement, tiré du noyau.
+fn nonce() -> Result<[u8; ams_auth::NONCE_OCTETS], String> {
+    use std::io::Read as _;
+    let mut nonce = [0_u8; ams_auth::NONCE_OCTETS];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut source| source.read_exact(&mut nonce))
+        .map_err(|erreur| format!("/dev/urandom : {erreur}"))?;
+    Ok(nonce)
 }
 
 /// Un sel de seize octets, tiré du noyau.
@@ -1274,7 +1377,7 @@ fn ajouter_ou_dire(
     // **LE VÉRIFICATEUR SE DÉRIVE ICI, OU JAMAIS.** C'est l'un des deux seuls
     // endroits de cet outil où le mot de passe est en clair ; ailleurs, il n'y
     // a qu'une empreinte, dont on ne remonte pas.
-    poser_le_verificateur(scram, nom, &secret)?;
+    poser_le_verificateur(scram, nom, &secret, &empreinte)?;
 
     // **LE VERROU AVANT LA LECTURE, ET TENU JUSQU'À L'ÉCRITURE.** Ce qui suit
     // est une lecture-modification-écriture, et le serveur écrit le MÊME
@@ -1351,7 +1454,7 @@ fn changer_le_secret_ou_dire(
     // POSÉ AVANT LE VERROU DES COMPTES** : le magasin SCRAM est un autre
     // fichier, avec son propre verrou, et les tenir tous les deux en même temps
     // ouvrirait la porte à un interblocage avec l'API du serveur.
-    poser_le_verificateur(scram, nom, &secret)?;
+    poser_le_verificateur(scram, nom, &secret, &empreinte)?;
 
     // Le même verrou, tenu de la lecture à l'écriture, et pour la même raison
     // qu'en §`ajouter_ou_dire` : le serveur écrit ce fichier depuis son API.

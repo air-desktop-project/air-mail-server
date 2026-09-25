@@ -214,6 +214,20 @@ impl BoitesConnues {
         self.scram = Some(verificateurs);
         self
     }
+
+    /// L'empreinte que le fichier de comptes porte pour ce login, s'il existe.
+    ///
+    /// **LE LOGIN EXACT, ET NON UNE ADRESSE** : SCRAM ne connaît que des
+    /// logins, puisque ses vérificateurs sont rangés sous eux. C'est à cette
+    /// empreinte que le vérificateur est lié — un compte qui a changé de mot de
+    /// passe, ou qui n'existe plus, n'ouvre donc plus rien par SCRAM.
+    fn empreinte_de(&self, login: &[u8]) -> Option<String> {
+        self.comptes
+            .vue()
+            .iter()
+            .find(|compte| compte.login.as_bytes() == login)
+            .map(|compte| compte.hash.clone())
+    }
 }
 
 impl Authenticator for BoitesConnues {
@@ -274,7 +288,9 @@ impl Authenticator for BoitesConnues {
         let mut encode = [0_u8; 64];
         let nonce = ams_mime::encode_base64_line(&graine, &mut encode).ok()?;
 
-        let ecrits = verificateurs.server_first(login, lu.nonce, nonce, sortie)?;
+        let empreinte = self.empreinte_de(login);
+        let ecrits =
+            verificateurs.server_first(login, empreinte.as_deref(), lu.nonce, nonce, sortie)?;
         // Le rang où commence le `client-first-bare` : la session le retiendra
         // sans le recopier.
         let debut_bare = client_first.len().checked_sub(lu.bare.len())?;
@@ -317,8 +333,11 @@ impl Authenticator for BoitesConnues {
 
         let mut nom = [0_u8; 128];
         let taille = ams_sasl::desechapper(nom_du_bare(bare), &mut nom).ok()?;
+        let login = nom.get(..taille)?;
+        let empreinte = self.empreinte_de(login);
         verificateurs.server_final(
-            nom.get(..taille)?,
+            login,
+            empreinte.as_deref(),
             message.get(..ecrits)?,
             &lu.proof,
             sortie,

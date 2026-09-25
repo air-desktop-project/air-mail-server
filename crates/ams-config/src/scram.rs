@@ -95,6 +95,7 @@ pub fn decode_scram(octets: &[u8]) -> Result<Vec<ScramVerifier>, Error> {
             iterations,
             nonce,
             scelle: scelle.to_vec(),
+            lie: entree.get_bound(),
         });
     }
     Ok(verificateurs)
@@ -121,6 +122,7 @@ pub fn encode_scram(verificateurs: &[ScramVerifier]) -> Result<Vec<u8>, Error> {
             case.set_iterations(v.iterations);
             case.set_nonce(&v.nonce);
             case.set_sealed(&v.scelle);
+            case.set_bound(v.lie);
         }
     }
     Ok(serialize::write_message_to_words(&message))

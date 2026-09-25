@@ -73,9 +73,19 @@ fn stored_key_de(repertoire: &Path, login: &str) -> [u8; 32] {
         .iter()
         .find(|v| v.login == login)
         .expect("le compte a un vérificateur");
-    ams_auth::scram_ouvrir(v, &clef)
+    ams_auth::scram_ouvrir(v, &empreinte_de(repertoire, login), &clef)
         .expect("le scellé s'ouvre")
         .stored
+}
+
+/// L'empreinte que le fichier de comptes porte pour ce compte.
+fn empreinte_de(repertoire: &Path, login: &str) -> String {
+    ams_config::decode_accounts(&std::fs::read(repertoire.join("comptes.bin")).expect("comptes"))
+        .expect("comptes valides")
+        .into_iter()
+        .find(|compte| compte.login == login)
+        .expect("le compte existe")
+        .hash
 }
 
 /// La `StoredKey` que ce mot de passe produirait, avec le sel du magasin.
@@ -162,10 +172,9 @@ fn un_compte_ajoute_avec_scram_a_un_verificateur_qui_ouvre() {
 
 #[test]
 fn changer_le_secret_remplace_le_verificateur_au_lieu_d_en_ajouter_un() {
-    // **C'EST LE DÉFAUT QUI COMPTE ICI.** Une entrée ajoutée sans retirer
-    // l'ancienne laisserait un vérificateur qui ouvre encore — et SCRAM
-    // n'interroge pas l'empreinte Argon2id : le compte aurait deux mots de
-    // passe, dont un que personne ne croit valable.
+    // Une entrée ajoutée sans retirer l'ancienne laisserait un débris : lié à
+    // l'ancienne empreinte, il ne s'ouvrirait plus, mais le magasin porterait
+    // deux entrées pour un compte — ce que son chargement refuse.
     let atelier = atelier("remplace");
     let clef = atelier.0.join("scram.key").display().to_string();
     let magasin = atelier.0.join("scram.bin").display().to_string();
@@ -317,4 +326,223 @@ fn account_passwd_refuse_une_adresse() {
     );
     assert!(!ok);
     assert!(plainte.contains("ne change QUE le secret"), "{plainte}");
+}
+
+/// **`scram bind` LIE LES VÉRIFICATEURS D'AVANT LA 0.2.16**, retire ceux dont
+/// le compte n'existe plus, et laisse tels quels ceux qui sont déjà liés.
+///
+/// Le magasin « ancien » est fabriqué ici comme la 0.2.15 l'écrivait : le même
+/// clair, scellé sous le SEUL login. C'est la seule façon d'éprouver la
+/// migration sur ce qu'elle rencontrera réellement.
+#[test]
+fn scram_bind_lie_les_anciens_verificateurs() {
+    use chacha20poly1305::aead::{Aead as _, KeyInit as _, Payload};
+
+    let atelier = atelier("lier");
+    let clef = atelier.0.join("scram.key").display().to_string();
+    let magasin = atelier.0.join("scram.bin").display().to_string();
+    let comptes = atelier.0.join("comptes.bin").display().to_string();
+
+    outil("", &["scram", "init", &clef]);
+    for (nom, secret) in [("jean", "ouvre-toi"), ("paul", "sesame")] {
+        let (_, plainte, ok) = outil(
+            secret,
+            &[
+                "account",
+                "add",
+                &comptes,
+                "--login",
+                nom,
+                "--address",
+                &format!("{nom}@e.com"),
+                "--scram-key",
+                &clef,
+                "--scram",
+                &magasin,
+            ],
+        );
+        assert!(ok, "{plainte}");
+    }
+    let attendue = stored_key_de(&atelier.0, "jean");
+
+    // ── LE MAGASIN TEL QUE LA 0.2.15 L'ÉCRIVAIT ────────────────────────────
+    let clef_lue: [u8; 32] = std::fs::read(atelier.0.join("scram.key"))
+        .expect("clé")
+        .try_into()
+        .expect("trente-deux octets");
+    let boite = chacha20poly1305::ChaCha20Poly1305::new(&clef_lue.into());
+    let lus = ams_config::decode_scram(&std::fs::read(atelier.0.join("scram.bin")).expect("m"))
+        .expect("magasin");
+    let mut anciens = std::vec::Vec::new();
+    for v in &lus {
+        let cles = ams_auth::scram_ouvrir(v, &empreinte_de(&atelier.0, &v.login), &clef_lue)
+            .expect("ouverture");
+        let mut clair = cles.stored.to_vec();
+        clair.extend_from_slice(&cles.server);
+        let scelle = boite
+            .encrypt(
+                &v.nonce.into(),
+                Payload {
+                    msg: &clair,
+                    aad: v.login.as_bytes(),
+                },
+            )
+            .expect("scellement");
+        anciens.push(ams_auth::ScramVerifier {
+            scelle,
+            lie: false,
+            ..v.clone()
+        });
+    }
+    // Un vérificateur ORPHELIN : son compte n'existe pas.
+    anciens.push(ams_auth::ScramVerifier {
+        login: String::from("disparu"),
+        ..anciens.first().expect("un vérificateur").clone()
+    });
+    std::fs::write(
+        atelier.0.join("scram.bin"),
+        ams_config::encode_scram(&anciens).expect("encodage"),
+    )
+    .expect("écriture");
+
+    // **NON LIÉ, IL NE S'OUVRE PLUS** : c'est ce que la mise à jour fait aux
+    // magasins qu'on ne migre pas.
+    let avant = ams_config::decode_scram(&std::fs::read(atelier.0.join("scram.bin")).expect("m"))
+        .expect("magasin");
+    let jean = avant.iter().find(|v| v.login == "jean").expect("jean");
+    assert_eq!(
+        ams_auth::scram_ouvrir(jean, &empreinte_de(&atelier.0, "jean"), &clef_lue),
+        Err(ams_auth::ScramError::NonLie)
+    );
+
+    // ── LA MIGRATION ────────────────────────────────────────────────────────
+    let (dit, plainte, ok) = outil(
+        "",
+        &[
+            "scram",
+            "bind",
+            &comptes,
+            "--scram-key",
+            &clef,
+            "--scram",
+            &magasin,
+        ],
+    );
+    assert!(ok, "{plainte}");
+    assert!(dit.contains("2 vérificateur(s) lié(s)"), "{dit}");
+    assert!(dit.contains("1 retiré(s)"), "{dit}");
+    assert_eq!(
+        stored_key_de(&atelier.0, "jean"),
+        attendue,
+        "lié, le vérificateur rend les MÊMES clés qu'avant"
+    );
+    let apres = ams_config::decode_scram(&std::fs::read(atelier.0.join("scram.bin")).expect("m"))
+        .expect("magasin");
+    assert_eq!(apres.len(), 2, "l'orphelin est retiré");
+    assert!(apres.iter().all(|v| v.lie));
+
+    // **RELANCÉE, ELLE NE CHANGE RIEN** : une migration qu'on repasse par
+    // prudence ne doit pas échouer.
+    let (dit, plainte, ok) = outil(
+        "",
+        &[
+            "scram",
+            "bind",
+            &comptes,
+            "--scram-key",
+            &clef,
+            "--scram",
+            &magasin,
+        ],
+    );
+    assert!(ok, "{plainte}");
+    assert!(
+        dit.contains("0 vérificateur(s) lié(s), 2 déjà lié(s)"),
+        "{dit}"
+    );
+
+    // **ET UN MOT DE PASSE CHANGÉ ÉTEINT LE VÉRIFICATEUR LIÉ**, même quand ce
+    // n'est pas cet outil qui le change : on réécrit l'empreinte à la main,
+    // comme l'API le ferait, sans toucher au magasin SCRAM.
+    let mut lus =
+        ams_config::decode_accounts(&std::fs::read(atelier.0.join("comptes.bin")).expect("c"))
+            .expect("comptes");
+    let autre = lus
+        .iter()
+        .find(|c| c.login == "paul")
+        .expect("paul")
+        .hash
+        .clone();
+    lus.iter_mut()
+        .find(|c| c.login == "jean")
+        .expect("jean")
+        .hash = autre;
+    std::fs::write(
+        atelier.0.join("comptes.bin"),
+        ams_config::encode_accounts(&lus).expect("encodage"),
+    )
+    .expect("écriture");
+    let jean = apres.iter().find(|v| v.login == "jean").expect("jean");
+    assert_eq!(
+        ams_auth::scram_ouvrir(jean, &empreinte_de(&atelier.0, "jean"), &clef_lue),
+        Err(ams_auth::ScramError::Sceau),
+        "l'ancien mot de passe ouvre encore par SCRAM"
+    );
+}
+
+/// **UN VÉRIFICATEUR QUI NE S'OUVRE PAS SOUS LA CLÉ ARRÊTE LA MIGRATION**, et
+/// le magasin n'est pas touché.
+#[test]
+fn scram_bind_refuse_ce_qui_ne_s_ouvre_pas() {
+    let atelier = atelier("lier-refus");
+    let clef = atelier.0.join("scram.key").display().to_string();
+    let magasin = atelier.0.join("scram.bin").display().to_string();
+    let comptes = atelier.0.join("comptes.bin").display().to_string();
+    outil("", &["scram", "init", &clef]);
+    outil(
+        "ouvre-toi",
+        &[
+            "account",
+            "add",
+            &comptes,
+            "--login",
+            "jean",
+            "--address",
+            "j@e.com",
+            "--scram-key",
+            &clef,
+            "--scram",
+            &magasin,
+        ],
+    );
+    // Un vérificateur lié, dont on prétend qu'il ne l'est pas : il ne s'ouvre
+    // pas sous le seul login.
+    let mut lus = ams_config::decode_scram(&std::fs::read(atelier.0.join("scram.bin")).expect("m"))
+        .expect("magasin");
+    lus.iter_mut().for_each(|v| v.lie = false);
+    let octets = ams_config::encode_scram(&lus).expect("encodage");
+    std::fs::write(atelier.0.join("scram.bin"), &octets).expect("écriture");
+
+    let (_, plainte, ok) = outil(
+        "",
+        &[
+            "scram",
+            "bind",
+            &comptes,
+            "--scram-key",
+            &clef,
+            "--scram",
+            &magasin,
+        ],
+    );
+    assert!(!ok);
+    assert!(
+        plainte.contains("ne s'ouvre pas sous cette clé"),
+        "{plainte}"
+    );
+    assert_eq!(
+        std::fs::read(atelier.0.join("scram.bin")).expect("m"),
+        octets,
+        "le magasin a été touché malgré le refus"
+    );
 }

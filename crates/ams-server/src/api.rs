@@ -167,6 +167,13 @@ pub struct ApiMaildir {
     /// **LA MÊME QUE DU CÔTÉ SMTP** : les deux portes de soumission n'ont pas
     /// deux règles, pas plus pour la signature que pour le relais.
     dkim: Option<ams_loop_tokio::DkimSigner>,
+    /// Le magasin SCRAM, quand ce serveur sert SCRAM.
+    ///
+    /// **POSER UN MOT DE PASSE REDÉRIVE SON VÉRIFICATEUR**, sans quoi un client
+    /// qui choisit SCRAM — Thunderbird — échouerait avec le nouveau mot de
+    /// passe. `None` quand SCRAM n'est pas servi : il n'y a alors rien à tenir
+    /// à jour.
+    scram: Option<Arc<crate::scram::Verificateurs>>,
 }
 
 impl ApiMaildir {
@@ -198,6 +205,7 @@ impl ApiMaildir {
             // PAS D'APPAREILS SANS MAGASIN, et le constructeur ne prend pas ce
             // champ non plus : voir `avec_appareils`.
             appareils: None,
+            scram: None,
             // ET PAS D'INVITATIONS SANS CLÉ : voir `avec_scellement`.
             scellement: None,
             // NI DE SESSIONS PAR CLEF SANS DOMAINE : voir `avec_domaine`.
@@ -238,6 +246,14 @@ impl ApiMaildir {
     #[must_use]
     pub fn avec_appareils(mut self, magasin: Arc<crate::appareils::Appareils>) -> Self {
         self.appareils = Some(magasin);
+        self
+    }
+
+    /// Lui donne le magasin SCRAM, pour que poser un mot de passe y redérive le
+    /// vérificateur du compte.
+    #[must_use]
+    pub fn avec_scram(mut self, verificateurs: Arc<crate::scram::Verificateurs>) -> Self {
+        self.scram = Some(verificateurs);
         self
     }
 
@@ -350,6 +366,9 @@ impl ApiMaildir {
         let Some(hash) = self.empreinte(secret.as_bytes()) else {
             return notre_faute();
         };
+        if !self.poser_le_verificateur(nom, secret.as_bytes(), &hash) {
+            return indisponible(sortie);
+        }
         // **LA BOÎTE D'ABORD.**
         if self.ouvrir_la_boite(nom).is_none() {
             return indisponible(sortie);
@@ -430,6 +449,9 @@ impl ApiMaildir {
         let Some(hash) = self.empreinte(secret.as_bytes()) else {
             return notre_faute();
         };
+        if !self.poser_le_verificateur(nom, secret.as_bytes(), &hash) {
+            return indisponible(sortie);
+        }
         match self.comptes.modifier(|comptes| {
             let compte = comptes
                 .iter_mut()
@@ -500,6 +522,9 @@ impl ApiMaildir {
         let Some(hash) = self.empreinte(lu.new.as_bytes()) else {
             return notre_faute();
         };
+        if !self.poser_le_verificateur(porteur, lu.new.as_bytes(), &hash) {
+            return indisponible(sortie);
+        }
         match self.comptes.modifier(|comptes| {
             let compte = comptes
                 .iter_mut()
@@ -515,6 +540,32 @@ impl ApiMaildir {
                 ..Served::default()
             },
             Err(quoi) => dire_la_faute(&quoi, sortie),
+        }
+    }
+
+    /// Redérive le vérificateur SCRAM d'un compte dont on pose le secret.
+    ///
+    /// **À APPELER AVANT D'ÉCRIRE LE COMPTE** : le vérificateur est lié à
+    /// `empreinte`, que le compte ne porte pas encore — il ne s'ouvre donc pas
+    /// tant que le compte n'est pas écrit, et l'ordre ne laisse aucune fenêtre.
+    ///
+    /// `true` si rien n'était à faire ou si c'est fait ; `false` si le magasin
+    /// SCRAM a refusé, et l'appelant renonce alors à poser le secret : un
+    /// mot de passe changé dont SCRAM ne saurait rien laisserait les clients
+    /// SCRAM en échec sans que personne ne sache pourquoi.
+    fn poser_le_verificateur(&self, login: &str, secret: &[u8], empreinte: &str) -> bool {
+        let Some(verificateurs) = self.scram.as_ref() else {
+            return true;
+        };
+        match verificateurs.deriver_et_poser(login, secret, empreinte) {
+            Ok(()) => true,
+            Err(cause) => {
+                eprintln!(
+                    "air-mail-server : SCRAM — le vérificateur de `{login}` ne se pose pas \
+                     ({cause}) ; le mot de passe n'est PAS changé"
+                );
+                false
+            }
         }
     }
 

@@ -14,6 +14,10 @@ use super::{Verificateurs, nombre};
 
 const CLEF: [u8; 32] = [7; 32];
 
+/// L'empreinte que le compte d'épreuve porte : la liaison la condense sans la
+/// lire, donc sa forme importe peu.
+const EMPREINTE: &str = "$argon2id$v=19$m=19456,t=2,p=1$c2Vs$ZW1wcmVpbnRl";
+
 /// Monte un magasin jetable avec un compte, et rend le répertoire.
 fn atelier(nom: &str, login: &str, mot_de_passe: &[u8]) -> (PathBuf, Verificateurs) {
     let repertoire = std::env::temp_dir().join(format!(
@@ -27,8 +31,16 @@ fn atelier(nom: &str, login: &str, mot_de_passe: &[u8]) -> (PathBuf, Verificateu
     std::fs::write(&chemin_clef, CLEF).expect("clé");
     let chemin = repertoire.join("scram.bin");
 
-    let v = ams_auth::scram_deriver(mot_de_passe, login, [3; 16], 4_096, [9; 12], &CLEF)
-        .expect("dérivation");
+    let v = ams_auth::scram_deriver(
+        mot_de_passe,
+        login,
+        EMPREINTE,
+        [3; 16],
+        4_096,
+        [9; 12],
+        &CLEF,
+    )
+    .expect("dérivation");
     std::fs::write(&chemin, ams_config::encode_scram(&[v]).expect("encodage")).expect("magasin");
     let charge = Verificateurs::charger(&chemin_clef, chemin).expect("chargement");
     (repertoire, charge)
@@ -61,7 +73,13 @@ fn un_vrai_client_ouvre_sa_session() {
     // ── Le `server-first` ────────────────────────────────────────────────────
     let mut premier = [0_u8; 256];
     let ecrits = serveur
-        .server_first(b"jean", b"nonceclient", b"noncesrv", &mut premier)
+        .server_first(
+            b"jean",
+            Some(EMPREINTE),
+            b"nonceclient",
+            b"noncesrv",
+            &mut premier,
+        )
         .expect("server-first");
     let server_first = premier.get(..ecrits).expect("longueur");
     let texte = String::from_utf8_lossy(server_first).into_owned();
@@ -89,7 +107,13 @@ fn un_vrai_client_ouvre_sa_session() {
 
     let mut final_serveur = [0_u8; 256];
     let longueur = serveur
-        .server_final(b"jean", &auth_message, &preuve, &mut final_serveur)
+        .server_final(
+            b"jean",
+            Some(EMPREINTE),
+            &auth_message,
+            &preuve,
+            &mut final_serveur,
+        )
         .expect("la preuve doit être acceptée");
     let dit = String::from_utf8_lossy(final_serveur.get(..longueur).expect("l")).into_owned();
     assert!(dit.starts_with("v="), "{dit}");
@@ -102,7 +126,7 @@ fn un_mauvais_mot_de_passe_ne_passe_pas() {
     let (repertoire, serveur) = atelier("faux", "jean", b"ouvre-toi");
     let mut premier = [0_u8; 256];
     let ecrits = serveur
-        .server_first(b"jean", b"nc", b"ns", &mut premier)
+        .server_first(b"jean", Some(EMPREINTE), b"nc", b"ns", &mut premier)
         .expect("server-first");
     let server_first = premier.get(..ecrits).expect("longueur");
     let bare = b"n=jean,r=nc";
@@ -125,7 +149,13 @@ fn un_mauvais_mot_de_passe_ne_passe_pas() {
     let mut sortie = [0_u8; 256];
     assert!(
         serveur
-            .server_final(b"jean", &auth_message, &preuve, &mut sortie)
+            .server_final(
+                b"jean",
+                Some(EMPREINTE),
+                &auth_message,
+                &preuve,
+                &mut sortie
+            )
             .is_none(),
         "un mauvais mot de passe a été accepté"
     );
@@ -138,7 +168,7 @@ fn un_compte_inconnu_repond_comme_un_autre_puis_refuse() {
     let (repertoire, serveur) = atelier("inconnu", "jean", b"ouvre-toi");
     let mut un = [0_u8; 256];
     let a = serveur
-        .server_first(b"fantome", b"nc", b"ns", &mut un)
+        .server_first(b"fantome", None, b"nc", b"ns", &mut un)
         .expect("un compte inconnu répond quand même");
     let premier = String::from_utf8_lossy(un.get(..a).expect("l")).into_owned();
     // Mêmes itérations que les vrais comptes : le nombre ne doit pas trahir.
@@ -151,7 +181,7 @@ fn un_compte_inconnu_repond_comme_un_autre_puis_refuse() {
     // d'un vrai compte en deux tentatives.
     let mut deux = [0_u8; 256];
     let b = serveur
-        .server_first(b"fantome", b"nc", b"ns", &mut deux)
+        .server_first(b"fantome", None, b"nc", b"ns", &mut deux)
         .expect("server-first");
     assert_eq!(
         un.get(..a),
@@ -163,7 +193,7 @@ fn un_compte_inconnu_repond_comme_un_autre_puis_refuse() {
     let mut sortie = [0_u8; 256];
     assert!(
         serveur
-            .server_final(b"fantome", b"peu importe", &[0; 32], &mut sortie)
+            .server_final(b"fantome", None, b"peu importe", &[0; 32], &mut sortie)
             .is_none()
     );
     let _ = std::fs::remove_dir_all(&repertoire);
@@ -211,10 +241,20 @@ fn le_magasin_se_relit_a_chaud() {
     let (repertoire, serveur) = atelier("relire", "jean", b"ouvre-toi");
     assert_eq!(serveur.combien(), 1);
     // On ajoute un compte dans le fichier, et on relit.
-    let un = ams_auth::scram_deriver(b"ouvre-toi", "jean", [3; 16], 4_096, [9; 12], &CLEF)
-        .expect("dérivation");
-    let deux = ams_auth::scram_deriver(b"autre", "contact", [4; 16], 4_096, [8; 12], &CLEF)
-        .expect("dérivation");
+    let un = ams_auth::scram_deriver(
+        b"ouvre-toi",
+        "jean",
+        EMPREINTE,
+        [3; 16],
+        4_096,
+        [9; 12],
+        &CLEF,
+    )
+    .expect("dérivation");
+    let deux = ams_auth::scram_deriver(
+        b"autre", "contact", EMPREINTE, [4; 16], 4_096, [8; 12], &CLEF,
+    )
+    .expect("dérivation");
     std::fs::write(
         repertoire.join("scram.bin"),
         ams_config::encode_scram(&[un, deux]).expect("encodage"),
@@ -246,9 +286,116 @@ fn une_sortie_trop_courte_est_dite_et_non_debordee() {
     let mut minuscule = [0_u8; 4];
     assert!(
         serveur
-            .server_first(b"jean", b"nc", b"ns", &mut minuscule)
+            .server_first(b"jean", Some(EMPREINTE), b"nc", b"ns", &mut minuscule)
             .is_none(),
         "un tampon de quatre octets a été accepté"
     );
+    let _ = std::fs::remove_dir_all(&repertoire);
+}
+
+/// **UN MOT DE PASSE CHANGÉ ÉTEINT SCRAM**, quel que soit le chemin qui l'a
+/// changé : le compte porte une autre empreinte, et la BONNE preuve de l'ANCIEN
+/// mot de passe ne passe plus. C'est le défaut que la 0.2.16 ferme — jusque-là,
+/// `PUT /v1/me/password` laissait l'ancien mot de passe ouvrir la boîte par
+/// SCRAM.
+#[test]
+fn un_mot_de_passe_change_n_ouvre_plus_par_scram() {
+    let (repertoire, serveur) = atelier("change", "jean", b"ouvre-toi");
+    let mut premier = [0_u8; 256];
+    let ecrits = serveur
+        .server_first(b"jean", Some(EMPREINTE), b"nc", b"ns", &mut premier)
+        .expect("server-first");
+    let server_first = premier.get(..ecrits).expect("longueur");
+    let bare = b"n=jean,r=nc";
+    let sans_preuve = b"c=biws,r=ncns";
+    let preuve = preuve_du_client(
+        b"ouvre-toi",
+        bare,
+        server_first,
+        sans_preuve,
+        &[3; 16],
+        4_096,
+    );
+    let mut auth_message = Vec::new();
+    auth_message.extend_from_slice(bare);
+    auth_message.push(b',');
+    auth_message.extend_from_slice(server_first);
+    auth_message.push(b',');
+    auth_message.extend_from_slice(sans_preuve);
+
+    let mut sortie = [0_u8; 256];
+    // Sous l'empreinte d'origine, la preuve passe : l'essai est donc valide.
+    assert!(
+        serveur
+            .server_final(
+                b"jean",
+                Some(EMPREINTE),
+                &auth_message,
+                &preuve,
+                &mut sortie
+            )
+            .is_some()
+    );
+    // Le compte a changé de mot de passe : même preuve, refusée.
+    let nouvelle = "$argon2id$v=19$m=19456,t=2,p=1$YXV0cmU$bm91dmVsbGU";
+    assert!(
+        serveur
+            .server_final(b"jean", Some(nouvelle), &auth_message, &preuve, &mut sortie)
+            .is_none(),
+        "l'ancien mot de passe ouvre encore par SCRAM"
+    );
+    // Et un compte disparu ne s'ouvre plus du tout.
+    assert!(
+        serveur
+            .server_final(b"jean", None, &auth_message, &preuve, &mut sortie)
+            .is_none()
+    );
+    let _ = std::fs::remove_dir_all(&repertoire);
+}
+
+/// **UN COMPTE DISPARU RÉPOND COMME UN COMPTE INCONNU**, sel factice compris :
+/// son vérificateur resté dans le magasin ne doit pas trahir qu'il a existé.
+#[test]
+fn un_compte_disparu_repond_comme_un_inconnu() {
+    let (repertoire, serveur) = atelier("disparu", "jean", b"ouvre-toi");
+    let mut reel = [0_u8; 256];
+    let a = serveur
+        .server_first(b"jean", Some(EMPREINTE), b"nc", b"ns", &mut reel)
+        .expect("server-first");
+    let mut disparu = [0_u8; 256];
+    let b = serveur
+        .server_first(b"jean", None, b"nc", b"ns", &mut disparu)
+        .expect("server-first");
+    assert_ne!(reel.get(..a), disparu.get(..b), "le vrai sel a été annoncé");
+    let attendu = ams_auth::scram_sel_factice(b"jean", &CLEF);
+    let mut encode = [0_u8; 32];
+    let sel = ams_mime::encode_base64_line(&attendu, &mut encode).expect("b64");
+    let texte = String::from_utf8_lossy(disparu.get(..b).expect("l")).into_owned();
+    assert!(
+        texte.contains(&String::from_utf8_lossy(sel).into_owned()),
+        "{texte}"
+    );
+    let _ = std::fs::remove_dir_all(&repertoire);
+}
+
+/// **LES VÉRIFICATEURS NON LIÉS SE COMPTENT**, pour que le démarrage le dise.
+#[test]
+fn les_verificateurs_non_lies_se_comptent() {
+    let (repertoire, serveur) = atelier("non-lies", "jean", b"ouvre-toi");
+    assert_eq!(serveur.non_lies(), 0);
+    let lie = ams_auth::scram_deriver(b"x", "jean", EMPREINTE, [3; 16], 4_096, [9; 12], &CLEF)
+        .expect("dérivation");
+    let ancien = ams_auth::ScramVerifier {
+        login: String::from("contact"),
+        lie: false,
+        ..lie.clone()
+    };
+    std::fs::write(
+        repertoire.join("scram.bin"),
+        ams_config::encode_scram(&[lie, ancien]).expect("encodage"),
+    )
+    .expect("magasin");
+    serveur.relire().expect("relecture");
+    assert_eq!(serveur.non_lies(), 1);
     let _ = std::fs::remove_dir_all(&repertoire);
 }

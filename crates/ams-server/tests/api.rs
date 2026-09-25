@@ -2582,3 +2582,168 @@ fn un_jeton_seul_n_appaire_rien() {
     // **ET RIEN N'A ÉTÉ POSÉ** : un refus ne laisse pas de magasin derrière lui.
     assert!(!appareils.exists(), "un refus ne doit rien écrire");
 }
+
+/// **UN MOT DE PASSE POSÉ PAR L'API REDÉRIVE SON VÉRIFICATEUR SCRAM, ET
+/// L'ANCIEN NE S'OUVRE PLUS.**
+///
+/// # LE DÉFAUT QUE CET ESSAI GARDE FERMÉ
+///
+/// Jusqu'en 0.2.15, `PUT /v1/me/password` réécrivait l'empreinte du compte et
+/// laissait le magasin SCRAM intact : **l'ancien mot de passe ouvrait encore la
+/// boîte par SCRAM**, que Thunderbird choisit. On ouvre donc le vérificateur
+/// écrit, sous l'empreinte que le compte porte APRÈS, et l'on vérifie qu'il
+/// correspond au NOUVEAU mot de passe — et que celui d'avant, lié à l'ancienne
+/// empreinte, ne s'ouvre plus.
+#[test]
+fn un_mot_de_passe_pose_par_l_api_rederive_son_verificateur_scram() {
+    let atelier = atelier("api-scram");
+    let Some((cert, cle)) = paire(&atelier.0) else {
+        panic!("{SANS_OPENSSL}");
+    };
+    if std::process::Command::new("curl")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("IGNORÉ : `curl` est absent — cet essai n'a RIEN éprouvé.");
+        return;
+    }
+
+    const CLEF_SCRAM: [u8; 32] = [5; 32];
+    let empreinte =
+        ams_auth::hash_password(b"secret-initial", b"seize octets ici").expect("hachable");
+    let magasin = atelier.0.join("comptes.bin");
+    std::fs::write(
+        &magasin,
+        ams_config::encode_accounts(&[ams_auth::Account {
+            login: String::from("marie"),
+            hash: empreinte.clone(),
+            addresses: vec![String::from("marie@example.com")],
+        }])
+        .expect("encodable"),
+    )
+    .expect("le magasin s'écrit");
+    let chemin_clef = atelier.0.join("scram.key");
+    let chemin_scram = atelier.0.join("scram.bin");
+    let ancien = ams_auth::scram_deriver(
+        b"secret-initial",
+        "marie",
+        &empreinte,
+        [3; 16],
+        4_096,
+        [9; 12],
+        &CLEF_SCRAM,
+    )
+    .expect("dérivation");
+    std::fs::write(&chemin_clef, CLEF_SCRAM).expect("clé");
+    std::fs::write(
+        &chemin_scram,
+        ams_config::encode_scram(std::slice::from_ref(&ancien)).expect("encodage"),
+    )
+    .expect("magasin SCRAM");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        for fichier in [&magasin, &chemin_clef, &chemin_scram] {
+            std::fs::set_permissions(fichier, std::fs::Permissions::from_mode(0o600))
+                .expect("permissions");
+        }
+    }
+
+    let port_smtp = port_libre();
+    let port_http = port_libre();
+    let config = configuration_complete(
+        &atelier,
+        port_smtp,
+        Tls {
+            certificate_chain_path: cert.display().to_string(),
+            private_key_path: cle.display().to_string(),
+        },
+        &magasin.display().to_string(),
+        "",
+        "",
+        &format!("127.0.0.1:{port_http}"),
+        "",
+        CLEF,
+    );
+    // Ce banc-ci SERT SCRAM : on rouvre la configuration pour le lui dire.
+    let mut lue = ams_config::decode(&std::fs::read(&config).expect("config")).expect("décodable");
+    lue.scram_key = chemin_clef.display().to_string();
+    lue.scram_store = chemin_scram.display().to_string();
+    std::fs::write(&config, ams_config::encode(&lue).expect("encodable")).expect("écriture");
+    let _serveur = lancer(&config, port_smtp);
+    let base = format!("https://127.0.0.1:{port_http}");
+
+    let sortie = std::process::Command::new("curl")
+        .args(["-s", "--insecure", "--http2"])
+        .args(["-H", "Content-Type: application/json"])
+        .args(["-d", r#"{"login":"marie","password":"secret-initial"}"#])
+        .arg(format!("{base}/v1/tokens"))
+        .output()
+        .expect("curl s'exécute");
+    let corps = String::from_utf8_lossy(&sortie.stdout).into_owned();
+    let jeton = corps
+        .split_once("\"token\":\"")
+        .and_then(|(_, reste)| reste.split_once('"'))
+        .map(|(jeton, _)| jeton.to_string())
+        .unwrap_or_else(|| panic!("un jeton dans {corps}"));
+
+    // Pose un secret par cette route, avec ce jeton, et rend le code.
+    let poser = |jeton: &str, chemin: &str, corps_json: &str| -> String {
+        let sortie = std::process::Command::new("curl")
+            .args(["-s", "--insecure", "--http2", "-X", "PUT"])
+            .args(["-H", &format!("Authorization: Bearer {jeton}")])
+            .args(["-H", "Content-Type: application/json"])
+            .args(["-d", corps_json])
+            .args(["-o", "/dev/null", "-w", "%{http_code}"])
+            .arg(format!("{base}{chemin}"))
+            .output()
+            .expect("curl s'exécute");
+        String::from_utf8_lossy(&sortie.stdout).into_owned()
+    };
+    // Le vérificateur de marie, ouvert sous l'empreinte que son compte porte
+    // MAINTENANT ; et la StoredKey que ce mot de passe produirait avec son sel.
+    let constater = |mot_de_passe: &[u8]| {
+        let comptes = ams_config::decode_accounts(&std::fs::read(&magasin).expect("comptes"))
+            .expect("comptes");
+        let actuelle = &comptes.first().expect("marie").hash;
+        let verificateurs =
+            ams_config::decode_scram(&std::fs::read(&chemin_scram).expect("scram")).expect("scram");
+        assert_eq!(verificateurs.len(), 1, "remplacé, et non ajouté");
+        let v = verificateurs.first().expect("un vérificateur");
+        let cles = ams_auth::scram_ouvrir(v, actuelle, &CLEF_SCRAM)
+            .expect("le vérificateur neuf s'ouvre sous l'empreinte du compte");
+        let salted = ams_sasl::derive_salted_password(mot_de_passe, &v.sel, v.iterations);
+        assert_eq!(
+            cles.stored,
+            ams_sasl::stored_key(&ams_sasl::client_key(&salted)),
+            "le vérificateur ne suit pas le nouveau mot de passe"
+        );
+        assert_eq!(
+            ams_auth::scram_ouvrir(&ancien, actuelle, &CLEF_SCRAM),
+            Err(ams_auth::ScramError::Sceau),
+            "L'ANCIEN VÉRIFICATEUR S'OUVRE ENCORE : l'ancien mot de passe passerait par SCRAM"
+        );
+    };
+
+    // ── PAR L'UTILISATEUR LUI-MÊME ──────────────────────────────────────────
+    assert_eq!(
+        poser(
+            &jeton,
+            "/v1/me/password",
+            r#"{"current_password":"secret-initial","password":"nouveau-secret"}"#
+        ),
+        "204"
+    );
+    constater(b"nouveau-secret");
+
+    // ── PAR L'ADMINISTRATION ────────────────────────────────────────────────
+    assert_eq!(
+        poser(
+            &jeton_d_administration(),
+            "/v1/accounts/marie/password",
+            r#"{"password":"pose-par-l-admin"}"#
+        ),
+        "204"
+    );
+    constater(b"pose-par-l-admin");
+}

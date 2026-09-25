@@ -75,7 +75,7 @@ pub use appareil::{CLE_OCTETS, CONDENSAT_OCTETS, Cle, Refus, SIGNATURE_OCTETS, v
 pub use scram::{
     CLE_SCELLEMENT_OCTETS, Cles as ScramKeys, Error as ScramError, ITERATIONS as SCRAM_ITERATIONS,
     NONCE_OCTETS, SEL_OCTETS, Verificateur as ScramVerifier, deriver as scram_deriver,
-    ouvrir as scram_ouvrir, sel_factice as scram_sel_factice,
+    lier as scram_lier, ouvrir as scram_ouvrir, sel_factice as scram_sel_factice,
 };
 pub use store::{
     Account, DUMMY_HASH, Error, MEMORY_KIB, PARALLELISM, TIME_COST, authenticate, check_login,
