@@ -147,6 +147,13 @@ pub enum Reason {
     /// Refusée plutôt qu'ignorée : un paramètre ignoré ferait croire au client
     /// qu'il a été entendu.
     BadQuery,
+    /// **Le curseur de synchronisation n'est plus servi** : le journal de la
+    /// boîte a oublié ce qui s'est passé avant lui, ou a été recréé.
+    ///
+    /// `410` (§15.5.11 de RFC 9110), et non `404` : la ressource existe, c'est
+    /// le passé qu'elle ne sait plus rendre. Le client relit la boîte entière,
+    /// prend le nouveau `highestModseq`, et reprend les deltas depuis lui.
+    SyncExpired,
 }
 
 impl Reason {
@@ -180,6 +187,7 @@ impl Reason {
             // functionality required to fulfill the request ».
             Self::NotImplemented => StatusCode::NOT_IMPLEMENTED,
             Self::AlreadyEnrolled | Self::LimitReached => StatusCode::CONFLICT,
+            Self::SyncExpired => StatusCode::GONE,
         }
     }
 
@@ -209,6 +217,7 @@ impl Reason {
             Self::AlreadyEnrolled => "ce compte a déjà un appareil enrôlé",
             Self::LimitReached => "ce compte a atteint sa limite ; révoquez-en un d'abord",
             Self::BadQuery => "la chaîne de requête est refusée",
+            Self::SyncExpired => "ce curseur n'est plus servi ; relisez la boîte entière",
             // **CE QUI EST NÔTRE SE DIT D'UNE SEULE FAÇON.** Distinguer nos
             // fautes internes apprendrait au client ce que notre code a fait de
             // travers, et ne lui servirait à rien : il n'y peut rien. Le journal

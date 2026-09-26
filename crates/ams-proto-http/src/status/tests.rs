@@ -31,6 +31,7 @@ fn les_codes_s_ecrivent_et_se_relisent() {
     assert_eq!(StatusCode::OK.value(), 200);
     assert_eq!(StatusCode::NOT_FOUND.value(), 404);
     assert_eq!(StatusCode::HEADER_FIELDS_TOO_LARGE.value(), 431);
+    assert_eq!(StatusCode::GONE.value(), 410);
 }
 
 /// **HORS DE `100..=599`, CE N'EST PAS UN CODE D'ÉTAT** : §15 n'en définit pas

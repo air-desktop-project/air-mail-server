@@ -40,8 +40,8 @@ use libfuzzer_sys::fuzz_target;
 use ams_api::{Event, Reader};
 use ams_proto_imap::Flags;
 use ams_session::http::render::{
-    MailboxRow, MessageRow, read_flag_patch, write_mailbox, write_mailboxes, write_message,
-    write_messages, write_metrics,
+    MailboxRow, MessageRow, read_flag_patch, write_changes, write_mailbox, write_mailboxes,
+    write_message, write_messages, write_metrics,
 };
 
 /// Ce qu'on soumet.
@@ -80,6 +80,8 @@ fuzz_target!(|entree: Entree| {
         unseen: entree.unseen,
         uid_next: entree.uid_next,
         uid_validity: entree.uid_validity,
+        // Présent ou non selon l'entrée : les deux écritures passent ici.
+        highest_modseq: entree.suivant.map(u64::from),
     };
     let messages = [
         MessageRow {
@@ -106,6 +108,15 @@ fuzz_target!(|entree: Entree| {
         write_mailboxes(&[boite], &mut place).map(<[u8]>::to_vec),
         write_mailbox(&boite, &mut [0_u8; PLACE]).map(<[u8]>::to_vec),
         write_message(&messages[0], entree.uid_validity, &mut [0_u8; PLACE]).map(<[u8]>::to_vec),
+        write_changes(
+            &messages,
+            &[entree.uid[0], entree.uid[1]],
+            entree.uid_validity,
+            entree.valeurs[0],
+            entree.suivant.is_some(),
+            &mut [0_u8; PLACE],
+        )
+        .map(<[u8]>::to_vec),
         write_metrics(
             &[
                 (entree.compteurs[0], entree.valeurs[0]),

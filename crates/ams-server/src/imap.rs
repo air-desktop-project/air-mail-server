@@ -419,6 +419,14 @@ impl BoiteImap {
 }
 
 impl BoiteImap {
+    /// Le répertoire de cette boîte — là où vit son journal des changements.
+    #[must_use]
+    pub fn racine(&self) -> &std::path::Path {
+        self.maildir.root()
+    }
+}
+
+impl BoiteImap {
     /// Le sujet et l'expéditeur du message de rang `sequence`, pour une liste.
     ///
     /// # POURQUOI CE N'EST NI `info`, NI `envelope`

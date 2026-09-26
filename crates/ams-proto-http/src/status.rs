@@ -46,6 +46,14 @@ impl StatusCode {
     /// l'ÉTAT actuel de la ressource qui l'empêche. Un `400` enverrait le client
     /// relire son corps, qui n'a rien à corriger.
     pub const CONFLICT: Self = Self(409);
+    /// `410 Gone` (§15.5.11 de RFC 9110) : ce qui a existé ici n'existe plus,
+    /// et n'existera plus.
+    ///
+    /// **C'EST LA RÉPONSE À UN CURSEUR DE SYNCHRONISATION TROP ANCIEN** : le
+    /// journal a oublié ce qui s'est passé avant lui. Un `404` laisserait
+    /// croire que la ressource manque ; celle-ci dit au client qu'il doit tout
+    /// relire.
+    pub const GONE: Self = Self(410);
     /// `405 Method Not Allowed`.
     pub const METHOD_NOT_ALLOWED: Self = Self(405);
     /// `413 Content Too Large`.

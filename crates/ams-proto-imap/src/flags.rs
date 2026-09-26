@@ -83,6 +83,17 @@ impl Flags {
     /// `$Phishing` — le message tente d'usurper une identité.
     pub const PHISHING: Self = Self(0b0000_0010_0000_0000);
 
+    /// Les bits, tels quels.
+    ///
+    /// **POUR COMPARER, ET POUR RIEN D'AUTRE** : le journal des changements
+    /// range ces seize bits pour savoir si les drapeaux d'un message ont bougé
+    /// depuis sa dernière réconciliation. Leur signification reste celle des
+    /// constantes de ce type.
+    #[must_use]
+    pub const fn bits(self) -> u16 {
+        self.0
+    }
+
     /// Ce drapeau est-il posé ?
     #[must_use]
     pub const fn contains(self, autre: Self) -> bool {

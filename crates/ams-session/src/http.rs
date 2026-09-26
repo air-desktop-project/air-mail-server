@@ -54,16 +54,20 @@ use ams_proto_http::{Method, RequestHead, StatusCode};
 
 /// Cette ressource accepte-t-elle ces paramètres, sous ce verbe ?
 ///
-/// **LA LISTE DES MESSAGES, ET ELLE SEULE**, prend `before` et `limit` — en
-/// lecture. Ailleurs, un paramètre est refusé plutôt qu'ignoré : un client qui
-/// croit filtrer ce qui ne l'est pas ne s'en apercevrait jamais.
+/// **DEUX RESSOURCES EN PRENNENT, EN LECTURE SEULEMENT** : la liste des
+/// messages (`before`, `limit`) et le journal des changements (`since`,
+/// EXIGÉ, et `limit`). Ailleurs, un paramètre est refusé plutôt qu'ignoré : un
+/// client qui croit filtrer ce qui ne l'est pas ne s'en apercevrait jamais.
 fn requete_permise(ressource: Resource<'_>, verbe: Method, requete: &Query) -> bool {
-    if requete.is_empty() {
-        return true;
+    let lecture = matches!(verbe, Method::Get | Method::Head);
+    match ressource {
+        Resource::Messages { .. } => requete.is_empty() || (lecture && requete.since.is_none()),
+        // **`since` EST EXIGÉ** : une synchronisation incrémentale part de
+        // quelque part. Sans lui, la réponse serait « tout » — ce que la liste
+        // des messages rend déjà, et mieux.
+        Resource::Changes { .. } => requete.since.is_some() && requete.before.is_none(),
+        _ => requete.is_empty(),
     }
-    matches!(ressource, Resource::Messages { .. })
-        && matches!(verbe, Method::Get | Method::Head)
-        && requete.since.is_none()
 }
 
 /// Ce qu'un corps de requête peut faire de long.

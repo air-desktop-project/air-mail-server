@@ -81,6 +81,18 @@ mod ams_app_passwords_capnp {
     include!("ams_app_passwords_capnp.rs");
 }
 
+#[allow(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    missing_docs,
+    unused_qualifications,
+    reason = "code généré par capnpc-rust, hors de notre contrôle éditorial"
+)]
+mod ams_journal_capnp {
+    include!("ams_journal_capnp.rs");
+}
+
 mod ams_accounts_capnp {
     include!("ams_accounts_capnp.rs");
 }
@@ -114,6 +126,7 @@ mod app_passwords;
 mod codec;
 mod devices;
 mod index;
+mod journal;
 mod scram;
 
 pub use accounts::{decode_accounts, encode_accounts};
@@ -124,4 +137,7 @@ pub use codec::{
 };
 pub use devices::{Device, ID_OCTETS_MAX, NOM_OCTETS_MAX, decode_devices, encode_devices};
 pub use index::{decode_index, encode_index};
+pub use journal::{
+    Delta, Disparu, Journal, Perime, Present, VANISHED_MAX, decode_journal, encode_journal,
+};
 pub use scram::{decode_scram, encode_scram};

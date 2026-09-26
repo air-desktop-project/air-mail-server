@@ -39,7 +39,7 @@ trap 'rm -rf "$SORTIE"' EXIT
 capnp compile -I schema --src-prefix schema \
   -o "$(command -v capnpc-rust):$SORTIE" \
   schema/ams-config.capnp schema/ams-accounts.capnp schema/ams-index.capnp \
-  schema/ams-scram.capnp schema/ams-devices.capnp schema/ams-app-passwords.capnp || {
+  schema/ams-scram.capnp schema/ams-devices.capnp schema/ams-app-passwords.capnp schema/ams-journal.capnp || {
     echo 'échec de la compilation des schémas (capnp + capnpc-rust 0.26.0 requis)' >&2
     exit 1
   }
@@ -54,7 +54,7 @@ capnp compile -I schema --src-prefix schema \
 # Les deux schémas passent par le même en-tête et le même traitement : une
 # boucle plutôt que deux copies, parce que la seconde copie est celle qu'on
 # oublie de corriger.
-for schema in ams_config ams_accounts ams_index ams_scram ams_devices ams_app_passwords; do
+for schema in ams_config ams_accounts ams_index ams_scram ams_devices ams_app_passwords ams_journal; do
 cat > "src/${schema}_capnp.rs" <<'ENTETE'
 // CODE GÉNÉRÉ — NE PAS ÉDITER À LA MAIN.
 //

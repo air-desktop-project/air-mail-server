@@ -36,6 +36,7 @@ mod comptes;
 mod delivery;
 mod imap;
 mod incidents;
+mod journal;
 mod magasin;
 mod policy;
 mod pop3;

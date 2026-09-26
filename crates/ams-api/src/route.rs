@@ -93,6 +93,15 @@ pub enum Resource<'o> {
         /// Le chemin de la partie, tel que §6.4.5 de RFC 9051 le numérote.
         partie: &'o str,
     },
+    /// `/v1/mailboxes/{boite}/changes` — **ce qui a changé depuis un point**.
+    ///
+    /// `?since=<modseq>` est exigé : c'est la synchronisation incrémentale, et
+    /// elle n'a de sens que depuis quelque part. Un curseur que le journal ne
+    /// sert plus rend `410` — le client relit la boîte entière.
+    Changes {
+        /// Le nom de la boîte.
+        boite: &'o str,
+    },
     /// `/v1/mailboxes/{boite}/search` — une recherche dans une boîte.
     Search {
         /// Le nom de la boîte.
@@ -289,7 +298,8 @@ impl Resource<'_> {
             | Self::Message { .. }
             | Self::MessageRaw { .. }
             | Self::MessagePart { .. }
-            | Self::Search { .. } => Area::Mail,
+            | Self::Search { .. }
+            | Self::Changes { .. } => Area::Mail,
             Self::Invitations
             | Self::Accounts
             | Self::Account { .. }
@@ -323,6 +333,9 @@ impl Resource<'_> {
             // chaîne de requête sans ambiguïté, et les y mettre les ferait
             // journaliser par tout intermédiaire.
             Self::Search { .. } => &[Method::Post],
+            // **ELLE NE S'ÉCRIT PAS** : le journal se déduit de la boîte, il ne
+            // se pose pas.
+            Self::Changes { .. } => &[Method::Get, Method::Head],
             Self::Mailboxes | Self::Domains | Self::Bans | Self::Health | Self::Metrics => {
                 &[Method::Get, Method::Head]
             }
@@ -505,6 +518,7 @@ fn boites<'o>(segments: &Segments<'o>) -> Result<Resource<'o>, Error> {
     match (segments.len(), segments.get(3)) {
         (3, _) => Ok(Resource::Mailbox { boite }),
         (4, "search") => Ok(Resource::Search { boite }),
+        (4, "changes") => Ok(Resource::Changes { boite }),
         (4, "messages") => Ok(Resource::Messages { boite }),
         (5, "messages") => Ok(Resource::Message {
             boite,

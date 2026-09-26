@@ -22,7 +22,7 @@ use crate::error::Reason;
 /// Le `match` ci-dessous la rend exhaustive **à la compilation** : un motif de
 /// plus ne compile pas tant qu'on ne l'y a pas mis. C'est la même discipline
 /// que `Resource::scope`, et pour la même raison.
-fn toutes() -> [Reason; 20] {
+fn toutes() -> [Reason; 21] {
     // Ce `match` ne sert qu'à faire échouer la compilation si un motif
     // s'ajoute : sa valeur est jetée, sa VÉRIFICATION est tout l'objet.
     const fn _exhaustive(reason: Reason) -> u8 {
@@ -47,6 +47,7 @@ fn toutes() -> [Reason; 20] {
             Reason::AlreadyEnrolled => 17,
             Reason::LimitReached => 18,
             Reason::BadQuery => 19,
+            Reason::SyncExpired => 20,
         }
     }
     [
@@ -70,6 +71,7 @@ fn toutes() -> [Reason; 20] {
         Reason::AlreadyEnrolled,
         Reason::LimitReached,
         Reason::BadQuery,
+        Reason::SyncExpired,
     ]
 }
 
@@ -249,4 +251,13 @@ fn ce_que_le_serveur_ne_sert_pas_se_dit() {
         "{\"type\":\"/problems/not-implemented\",\"title\":\"ce serveur ne sert pas cette \
          ressource\",\"status\":501}"
     );
+}
+
+/// **UN CURSEUR PÉRIMÉ DIT `410`, ET SON PROPRE TYPE** : le client doit le
+/// distinguer d'une ressource absente — l'un relit la boîte, l'autre renonce.
+#[test]
+fn un_curseur_perime_se_dit_gone() {
+    let dit = document(Reason::SyncExpired);
+    assert!(dit.contains("/problems/gone"), "{dit}");
+    assert!(dit.contains("\"status\":410"), "{dit}");
 }

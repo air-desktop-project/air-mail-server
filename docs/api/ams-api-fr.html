@@ -355,7 +355,6 @@ authorization: Bearer AQECAAAAAG…</code></pre>
     <tr><td>Jeton de rafraîchissement</td><td>Il n'y a pas de <em>refresh token</em>. À l'expiration, vous devez refaire un échange d'identifiants complet — donc conserver de quoi le faire, ou redemander à l'utilisateur.</td></tr>
     <tr><td>Choix de la portée par le client</td><td>Vous ne pouvez pas obtenir un jeton en lecture seule. Si votre composant n'a besoin que de lire, c'est à votre architecture de le contenir.</td></tr>
     <tr><td>Paramètres de requête</td><td>Seule la liste des messages en prend (<code>before</code>, <code>limit</code>). Pas de filtre ni de tri. Voir <a href="#chemins">§2.2</a>.</td></tr>
-    <tr><td>Synchronisation incrémentale</td><td>Pas encore : aucun moyen de demander « ce qui a changé depuis ». Elle vient avec la 0.2.19 (<code>/changes?since=</code>).</td></tr>
     <tr><td>En-têtes CORS</td><td>Le serveur n'émet ni <code>access-control-allow-origin</code>, ni réponse de pré-vol. <strong>Cette API n'est pas appelable depuis un navigateur en contexte d'origine croisée.</strong> Passez par votre propre service.</td></tr>
     <tr><td>Limitation de débit annoncée</td><td>Aucun en-tête ne dit combien de requêtes il vous reste. Le garde bannit sans prévenir ; tenez-vous à un rythme raisonnable.</td></tr>
     <tr><td>Contrôle de concurrence</td><td>Ni <code>ETag</code>, ni <code>If-Match</code>. Deux clients qui modifient la même ressource s'écrasent l'un l'autre sans que rien ne le signale.</td></tr>
@@ -582,7 +581,7 @@ authorization: Bearer AQECAAAAAG…</code></pre>
     <span class="verbe get">GET</span>
     <span class="chemin">/v1/mailboxes/{boite}</span><span class="portee">mail:read</span>
   </div>
-  <p><code>GET</code> rend l'état d'une boîte, sous la même forme qu'une entrée de la liste.</p>
+  <p><code>GET</code> rend l'état d'une boîte, sous la même forme qu'une entrée de la liste — <strong>plus <code>highestModseq</code></strong>, le point du journal des changements à partir duquel demander les deltas (voir <a href="#r-messages">…/changes</a>). La liste des boîtes ne le porte pas : il faudrait relire chacune.</p>
   <p><code>PUT</code> crée la boîte et rend <code>204</code>. Il est <strong>idempotent</strong> (§9.3.4 de RFC 9110) : rejoué sur une boîte qui existe déjà, il ne faute pas — l'état demandé est celui qui est.</p>
   <div class="note danger">
     <span class="etiquette">Un DELETE de boîte est définitif</span>
@@ -616,6 +615,32 @@ authorization: Bearer AQECAAAAAG…</code></pre>
     <span class="etiquette">Pourquoi un UID, et pas un numéro de page</span>
     <p>Un UID ne bouge pas quand d'autres messages arrivent ou partent. Un décalage (« à partir du 51e ») sauterait ou répéterait des messages dès que la boîte change entre deux pages ; <code>before</code> ne rate rien et ne répète rien. Les drapeaux s'écrivent comme en IMAP : <code>\Seen</code>, <code>\Flagged</code>, <code>\Answered</code>, <code>\Draft</code>, <code>\Deleted</code>, et les mots-clefs tels quels.</p>
   </div>
+</div>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/mailboxes/{boite}/changes?since=&lt;modseq&gt;</span><span class="portee">mail:read</span></div>
+  <pre><code>{
+  "uidValidity": 1756900000,
+  "modseq": 1790000000142,
+  "more": false,
+  "changed": [
+    { "uid": 1793, "size": 2210, "received": 1790139001,
+      "subject": "Relevé", "from": "contact@narro.ch", "flags": [] },
+    { "uid": 1788, "size": 1282, "received": 1790138000,
+      "subject": "Alerte", "from": "ofrou-sierre@narro.ch", "flags": ["\\Seen"] }
+  ],
+  "vanished": [1201, 1203]
+}</code></pre>
+  <p><strong>La synchronisation incrémentale</strong> : ce qui a changé dans la boîte depuis le point <code>since</code>. <code>changed</code> porte les messages <strong>arrivés ou dont les drapeaux ont bougé</strong>, en entier — vous les distinguez en sachant ou non l'UID. <code>vanished</code> porte les UID disparus. <code>modseq</code> est le curseur à renvoyer en <code>since</code> la fois suivante ; <code>more: true</code> dit de le faire tout de suite. <code>limit</code> (1 à 50) borne le nombre de messages rendus.</p>
+  <div class="note info">
+    <span class="etiquette">Le parcours d'un client</span>
+    <p>1. <code>GET /v1/mailboxes/{boite}</code> : prenez <code>highestModseq</code> <strong>avant</strong> de lire la boîte. 2. Lisez-la entière par <code>…/messages</code>. 3. Ensuite, et pour toujours : <code>…/changes?since=</code> le dernier <code>modseq</code> reçu. Un changement survenu pendant l'étape 2 revient à l'étape 3 — en double au pire, jamais perdu.</p>
+  </div>
+  <div class="note prudence">
+    <span class="etiquette">410 : relisez tout</span>
+    <p>Un curseur que le journal ne sert plus — trop ancien (il ne retient que les dix mille dernières disparitions), ou venu d'un journal recréé — rend <code>410</code> (<code>/problems/gone</code>). Reprenez à l'étape 1. Sans <code>since</code>, la requête est refusée en <code>400</code>.</p>
+  </div>
+  <p>Le journal <strong>se déduit de la boîte</strong> : ce que Thunderbird change en IMAP, ce que POP3 supprime, ce qui arrive par SMTP, tout s'y voit. Un changement défait entre deux synchronisations — lu, puis remis non lu — ne laisse pas de trace ; votre état final est juste quand même.</p>
 </div>
 
 <div class="ressource">

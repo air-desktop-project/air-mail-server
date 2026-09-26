@@ -29,7 +29,7 @@ fn ou(method: Method, chemin: &[u8]) -> Result<Resource<'static>, Reason> {
 /// Chaque ressource se désigne par son chemin.
 #[test]
 fn chaque_ressource_se_designe() {
-    let cas: [(Method, &[u8], Resource<'_>); 29] = [
+    let cas: [(Method, &[u8], Resource<'_>); 30] = [
         (Method::Post, b"/v1/tokens", Resource::Tokens),
         (Method::Post, b"/v1/sessions", Resource::Sessions),
         (
@@ -116,6 +116,11 @@ fn chaque_ressource_se_designe() {
             Method::Post,
             b"/v1/mailboxes/INBOX/search",
             Resource::Search { boite: "INBOX" },
+        ),
+        (
+            Method::Get,
+            b"/v1/mailboxes/INBOX/changes",
+            Resource::Changes { boite: "INBOX" },
         ),
         (Method::Get, b"/v1/accounts", Resource::Accounts),
         (Method::Post, b"/v1/accounts", Resource::Accounts),
@@ -409,6 +414,7 @@ fn chaque_ressource_dit_ce_qu_elle_sert() {
             partie: "1",
         },
         Resource::Search { boite: "b" },
+        Resource::Changes { boite: "b" },
         Resource::Accounts,
         Resource::Account { compte: "c" },
         Resource::AccountPassword { compte: "c" },

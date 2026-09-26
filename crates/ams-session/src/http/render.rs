@@ -69,6 +69,14 @@ pub struct MailboxRow<'a> {
     pub uid_next: u32,
     /// Sous quel `uidvalidity` ces UID valent (§2.3.1.1 de RFC 9051).
     pub uid_validity: u32,
+    /// Le dernier point du journal des changements, **quand on l'a tenu**.
+    ///
+    /// C'est le curseur à partir duquel un client demande les deltas : il le
+    /// prend AVANT sa lecture complète de la boîte, pour ne rien manquer de ce
+    /// qui change pendant. `None` dans la liste des boîtes, où réconcilier
+    /// chacune coûterait une relecture par boîte — le champ n'est alors pas
+    /// écrit.
+    pub highest_modseq: Option<u64>,
 }
 
 /// Un message, tel que l'API le rend.
@@ -133,6 +141,9 @@ fn ecrire_une_boite(json: &mut Json<'_>, boite: &MailboxRow<'_>) -> Result<(), E
     json.field_u64("uidNext", u64::from(boite.uid_next))?;
     // **IL ACCOMPAGNE TOUT CE QUI PORTE UN UID** (§2.3.1.1 de RFC 9051).
     json.field_u64("uidValidity", u64::from(boite.uid_validity))?;
+    if let Some(modseq) = boite.highest_modseq {
+        json.field_u64("highestModseq", modseq)?;
+    }
     json.end_object()
 }
 
@@ -818,6 +829,46 @@ pub fn write_messages<'o>(
         // plus rien » de « ce serveur ne pagine pas ».
         None => json.null()?,
     }
+    json.end_object()?;
+    json.finish()
+}
+
+/// Écrit ce qui a changé dans une boîte depuis un point.
+///
+/// `changed` porte les messages arrivés OU dont les drapeaux ont bougé, en
+/// entier — le client distingue les deux : il connaît l'UID ou non.
+/// `vanished` porte les UID disparus. `modseq` est le curseur à renvoyer en
+/// `since` ; `more` dit qu'il faut le faire tout de suite.
+///
+/// # Errors
+///
+/// [`Reason::BufferTooSmall`] si `sortie` ne suffit pas.
+pub fn write_changes<'o>(
+    changes: &[MessageRow<'_>],
+    disparus: &[u32],
+    uid_validity: u32,
+    modseq: u64,
+    more: bool,
+    sortie: &'o mut [u8],
+) -> Result<&'o [u8], Error> {
+    let mut json = Json::new(sortie);
+    json.begin_object()?;
+    json.field_u64("uidValidity", u64::from(uid_validity))?;
+    json.field_u64("modseq", modseq)?;
+    json.key("more")?;
+    json.boolean(more)?;
+    json.key("changed")?;
+    json.begin_array()?;
+    for message in changes {
+        ecrire_un_message(&mut json, message)?;
+    }
+    json.end_array()?;
+    json.key("vanished")?;
+    json.begin_array()?;
+    for uid in disparus {
+        json.number(u64::from(*uid))?;
+    }
+    json.end_array()?;
     json.end_object()?;
     json.finish()
 }

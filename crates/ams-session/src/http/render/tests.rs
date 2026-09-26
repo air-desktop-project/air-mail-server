@@ -14,9 +14,9 @@ use super::{
     read_account_body, read_app_password_request, read_challenge_request, read_flag_patch,
     read_invitation_request, read_own_password_body, read_pairing_request, read_search_criteria,
     read_session_request, write_account, write_accounts, write_app_password_created,
-    write_app_passwords, write_bans, write_challenge, write_devices, write_domains, write_enrolled,
-    write_health, write_invitation, write_mailbox, write_mailboxes, write_message, write_messages,
-    write_metrics, write_search,
+    write_app_passwords, write_bans, write_challenge, write_changes, write_devices, write_domains,
+    write_enrolled, write_health, write_invitation, write_mailbox, write_mailboxes, write_message,
+    write_messages, write_metrics, write_search,
 };
 
 /// Un appareil d'essai.
@@ -63,6 +63,7 @@ fn boite() -> MailboxRow<'static> {
         unseen: 3,
         uid_next: 42,
         uid_validity: 1_700_000_000,
+        highest_modseq: None,
     }
 }
 
@@ -387,7 +388,7 @@ fn un_corps_qui_n_est_pas_une_modification_se_refuse() {
 #[test]
 fn chaque_tampon_insuffisant_se_dit() {
     type Ecrivain = fn(&mut [u8]) -> Result<&[u8], ams_api::Error>;
-    let ecrivains: [(&str, Ecrivain); 23] = [
+    let ecrivains: [(&str, Ecrivain); 26] = [
         ("mailboxes", |place| write_mailboxes(&[boite()], place)),
         ("mailbox", |place| write_mailbox(&boite(), place)),
         ("messages", |place| {
@@ -410,6 +411,17 @@ fn chaque_tampon_insuffisant_se_dit() {
             write_accounts(&[sans_adresse()], place)
         }),
         ("account", |place| write_account(&compte(), place)),
+        // Une boîte qui porte le point du journal écrit un champ de plus :
+        // une place de plus à manquer.
+        ("mailbox-modseq", |place| {
+            write_mailbox(
+                &MailboxRow {
+                    highest_modseq: Some(1_790_000_000_007),
+                    ..boite()
+                },
+                place,
+            )
+        }),
         ("domains", |place| {
             write_domains(&["exemple.test", "autre.test"], place)
         }),
@@ -423,6 +435,19 @@ fn chaque_tampon_insuffisant_se_dit() {
         }),
         ("app-passwords-vide", |place| {
             write_app_passwords(&[], place)
+        }),
+        ("changes", |place| {
+            write_changes(
+                &[message()],
+                &[7, 9],
+                1_756_900_000,
+                1_790_000_000_042,
+                true,
+                place,
+            )
+        }),
+        ("changes-vide", |place| {
+            write_changes(&[], &[], 1_756_900_000, 1_790_000_000_000, false, place)
         }),
         ("app-password-created", |place| {
             write_app_password_created(&applicatif(), MOT_APPLICATIF, place)
@@ -1338,4 +1363,58 @@ fn le_corps_de_creation_ne_porte_qu_un_nom() {
             .map(Error::reason),
         Some(Reason::BadJsonBody)
     );
+}
+
+/// **LE DELTA DIT TOUT CE QU'UN CLIENT DOIT FAIRE** : les messages à poser ou
+/// à mettre à jour, les UID à retirer, le curseur, et s'il faut revenir.
+#[test]
+fn le_delta_s_ecrit() {
+    let mut place = [0_u8; PLACE];
+    let ecrit = String::from_utf8(
+        write_changes(
+            &[],
+            &[7, 9],
+            1_756_900_000,
+            1_790_000_000_042,
+            true,
+            &mut place,
+        )
+        .expect("écrivable")
+        .to_vec(),
+    )
+    .expect("utf-8");
+    assert_eq!(
+        ecrit,
+        r#"{"uidValidity":1756900000,"modseq":1790000000042,"more":true,"changed":[],"vanished":[7,9]}"#
+    );
+}
+
+/// **`highestModseq` S'ÉCRIT QUAND ON L'A, ET SEULEMENT ALORS** : la liste des
+/// boîtes ne réconcilie pas chacune, et ne le prétend pas.
+#[test]
+fn le_point_du_journal_ne_s_ecrit_que_quand_on_l_a() {
+    let avec = MailboxRow {
+        highest_modseq: Some(1_790_000_000_007),
+        ..boite()
+    };
+    let mut place = [0_u8; PLACE];
+    let avec = String::from_utf8(
+        write_mailbox(&avec, &mut place)
+            .expect("écrivable")
+            .to_vec(),
+    )
+    .expect("utf-8");
+    assert!(avec.contains(r#""highestModseq":1790000000007"#), "{avec}");
+    let sans = MailboxRow {
+        highest_modseq: None,
+        ..boite()
+    };
+    let mut place = [0_u8; PLACE];
+    let sans = String::from_utf8(
+        write_mailbox(&sans, &mut place)
+            .expect("écrivable")
+            .to_vec(),
+    )
+    .expect("utf-8");
+    assert!(!sans.contains("highestModseq"), "{sans}");
 }

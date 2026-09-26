@@ -59,6 +59,12 @@ use crate::policy::Places;
 /// reçu tout ce qu'il a demandé.
 const PAGE_MAX: usize = 50;
 
+/// Combien de disparitions une page du journal rend au plus.
+///
+/// **CINQ CENTS UID** : au plus six kibioctets, qui tiennent avec cinquante
+/// messages dans le tampon de HTTP/3. Au-delà, `more` fait revenir le client.
+const DISPARUS_PAR_PAGE: usize = 500;
+
 /// Combien de boîtes une liste rend au plus.
 ///
 /// Deux cent cinquante-six. Ce sont les dossiers d'un compte, donc ce que ce
@@ -1392,6 +1398,7 @@ impl ApiMaildir {
                 unseen: non_lus(&boite),
                 uid_next: boite.uid_next(),
                 uid_validity: boite.uid_validity(),
+                highest_modseq: None,
             });
         }
         rendre(render::write_mailboxes(&lignes, sortie))
@@ -1402,14 +1409,90 @@ impl ApiMaildir {
         let Some(boite) = self.boites.open(compte.as_bytes(), nom.as_bytes()) else {
             return absente(sortie);
         };
+        // **LE POINT DU JOURNAL, TENU MAINTENANT** : c'est le curseur qu'un
+        // client prend avant sa lecture complète.
+        let journal = match self.journal_de(&boite) {
+            Ok(journal) => journal,
+            Err(servi) => return servi(sortie),
+        };
         let ligne = MailboxRow {
             name: nom,
             messages: boite.exists(),
             unseen: non_lus(&boite),
             uid_next: boite.uid_next(),
             uid_validity: boite.uid_validity(),
+            highest_modseq: Some(journal.modseq),
         };
         rendre(render::write_mailbox(&ligne, sortie))
+    }
+
+    /// Réconcilie le journal de cette boîte ouverte, et le rend — ou la réponse
+    /// à faire si le disque ne suit pas.
+    fn journal_de(
+        &self,
+        boite: &crate::imap::BoiteImap,
+    ) -> Result<ams_config::Journal, fn(&mut [u8]) -> Served<'_>> {
+        let vus: std::vec::Vec<(u32, u16)> = (1..=boite.exists())
+            .filter_map(|sequence| boite.info(sequence))
+            .map(|info| (info.uid, info.flags.bits()))
+            .collect();
+        crate::journal::reconcilier(boite.racine(), boite.uid_validity(), &vus).map_err(|cause| {
+            eprintln!("air-mail-server : journal des changements — {cause}");
+            indisponible as fn(&mut [u8]) -> Served<'_>
+        })
+    }
+
+    /// Ce qui a changé dans une boîte depuis `since` — **LA SYNCHRONISATION
+    /// INCRÉMENTALE**.
+    ///
+    /// Le journal se réconcilie d'abord : ce que le répertoire montre
+    /// maintenant, comparé à ce qu'on avait vu. Puis on rend ce qui a un point
+    /// au-delà de `since`, au plus `limit` messages changés — en entier, comme
+    /// dans la liste — et une page de disparitions. `more` dit s'il faut
+    /// revenir tout de suite avec le `modseq` rendu.
+    fn changements<'o>(
+        &self,
+        compte: &str,
+        nom: &str,
+        requete: ams_api::Query,
+        sortie: &'o mut [u8],
+    ) -> Served<'o> {
+        let limite = requete.limit.map_or(PAGE_MAX, usize::from);
+        let (Some(depuis), true) = (requete.since, limite <= PAGE_MAX) else {
+            return probleme(ams_api::Reason::BadQuery, StatusCode::BAD_REQUEST, sortie);
+        };
+        let Some(boite) = self.boites.open(compte.as_bytes(), nom.as_bytes()) else {
+            return absente(sortie);
+        };
+        let journal = match self.journal_de(&boite) {
+            Ok(journal) => journal,
+            Err(servi) => return servi(sortie),
+        };
+        let Ok(delta) = journal.since(depuis, limite, DISPARUS_PAR_PAGE) else {
+            return probleme(ams_api::Reason::SyncExpired, StatusCode::GONE, sortie);
+        };
+        // Le rang de chaque UID dans l'instantané, pour relire son résumé.
+        let rangs: std::vec::Vec<(u32, u32)> = (1..=boite.exists())
+            .filter_map(|sequence| boite.info(sequence).map(|info| (info.uid, sequence)))
+            .collect();
+        let resumes: std::vec::Vec<Resume> = delta
+            .changed
+            .iter()
+            .filter_map(|uid| {
+                let rang = rangs.binary_search_by_key(uid, |&(connu, _)| connu).ok()?;
+                let (_, sequence) = *rangs.get(rang)?;
+                Some(resumer(&boite, sequence, boite.info(sequence)?))
+            })
+            .collect();
+        let lignes: std::vec::Vec<MessageRow<'_>> = resumes.iter().map(ligne_de).collect();
+        rendre(render::write_changes(
+            &lignes,
+            &delta.vanished,
+            boite.uid_validity(),
+            delta.modseq,
+            delta.more,
+            sortie,
+        ))
     }
 
     /// Une page de messages, **LES PLUS RÉCENTS D'ABORD**.
@@ -2026,6 +2109,7 @@ impl Api for ApiMaildir {
                 self.ajouter_un_message(account, boite, body, sortie)
             }
             Resource::Messages { boite } => self.messages(account, boite, query, sortie),
+            Resource::Changes { boite } => self.changements(account, boite, query, sortie),
             Resource::Message { boite, uid } if matches!(method, Method::Patch) => {
                 self.drapeaux(account, boite, uid, body, sortie)
             }
@@ -3655,6 +3739,219 @@ mod ecritures {
             },
         );
         assert_eq!(status, StatusCode::OK);
+    }
+
+    // ── LE JOURNAL DES CHANGEMENTS ─────────────────────────────────────────
+
+    /// Un nombre écrit après `"clef":` dans un corps JSON.
+    fn nombre(corps: &str, clef: &str) -> Option<u64> {
+        corps
+            .split_once(&std::format!("\"{clef}\":"))
+            .and_then(|(_, reste)| {
+                reste
+                    .split(|c: char| !c.is_ascii_digit())
+                    .next()
+                    .and_then(|chiffres| chiffres.parse().ok())
+            })
+    }
+
+    /// Les UID d'un tableau `"clef":[…]` — des objets `{"uid":…}` ou des
+    /// nombres nus.
+    fn uids_de(corps: &str, clef: &str) -> Vec<u64> {
+        let Some((_, reste)) = corps.split_once(&std::format!("\"{clef}\":[")) else {
+            return Vec::new();
+        };
+        let mut profondeur = 0_i32;
+        let mut fin = reste.len();
+        for (rang, c) in reste.char_indices() {
+            match c {
+                '[' | '{' => profondeur = profondeur.saturating_add(1),
+                ']' | '}' if profondeur > 0 => profondeur = profondeur.saturating_sub(1),
+                ']' => {
+                    fin = rang;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let tableau = &reste[..fin];
+        if tableau.contains("\"uid\":") {
+            tableau
+                .split("\"uid\":")
+                .skip(1)
+                .filter_map(|morceau| {
+                    morceau
+                        .split(|c: char| !c.is_ascii_digit())
+                        .next()
+                        .and_then(|chiffres| chiffres.parse().ok())
+                })
+                .collect()
+        } else {
+            tableau
+                .split(',')
+                .filter_map(|nombre| nombre.trim().parse().ok())
+                .collect()
+        }
+    }
+
+    /// Demande le delta depuis ce point.
+    fn changements(api: &ApiMaildir, since: u64, limit: Option<u16>) -> (StatusCode, String) {
+        servir_avec(
+            api,
+            Resource::Changes { boite: "INBOX" },
+            Method::Get,
+            b"",
+            ams_api::Query {
+                since: Some(since),
+                limit,
+                before: None,
+            },
+        )
+    }
+
+    /// **LA SYNCHRONISATION INCRÉMENTALE, DE BOUT EN BOUT, SUR UNE VRAIE BOÎTE.**
+    ///
+    /// Le client prend `highestModseq`, puis la boîte change par les chemins
+    /// ordinaires — un message arrive, un autre est lu, un troisième est
+    /// supprimé —, et le delta rend exactement cela. Aucun de ces chemins
+    /// n'écrit au journal : c'est la comparaison qui l'a vu.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn le_delta_rend_exactement_ce_qui_a_change() {
+        let temporaire = Ephemere::neuf();
+        let (_, api) = api(&temporaire.0);
+        let premier = ranger(&api, "un");
+        let deuxieme = ranger(&api, "deux");
+        let troisieme = ranger(&api, "trois");
+
+        // ── LE POINT DE DÉPART ─────────────────────────────────────────────
+        let (status, etat) = servir(&api, Resource::Mailbox { boite: "INBOX" }, Method::Get, b"");
+        assert_eq!(status, StatusCode::OK, "{etat}");
+        let depart = nombre(&etat, "highestModseq").expect("un point de départ");
+        assert!(
+            temporaire
+                .0
+                .join("marie")
+                .join(crate::journal::NOM)
+                .exists(),
+            "le journal vit dans le répertoire de la boîte"
+        );
+
+        // Rien n'a changé : un delta vide, au même point.
+        let (status, corps) = changements(&api, depart, None);
+        assert_eq!(status, StatusCode::OK, "{corps}");
+        assert!(uids_de(&corps, "changed").is_empty(), "{corps}");
+        assert!(uids_de(&corps, "vanished").is_empty(), "{corps}");
+        assert_eq!(nombre(&corps, "modseq"), Some(depart));
+
+        // ── LA BOÎTE CHANGE, PAR SES CHEMINS ORDINAIRES ────────────────────
+        let quatrieme = ranger(&api, "quatre");
+        let (status, _) = servir(
+            &api,
+            Resource::Message {
+                boite: "INBOX",
+                uid: deuxieme,
+            },
+            Method::Patch,
+            br#"{"add":["\\Seen"]}"#,
+        );
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = servir(
+            &api,
+            Resource::Message {
+                boite: "INBOX",
+                uid: premier,
+            },
+            Method::Delete,
+            b"",
+        );
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (status, corps) = changements(&api, depart, None);
+        assert_eq!(status, StatusCode::OK, "{corps}");
+        let mut changes = uids_de(&corps, "changed");
+        changes.sort_unstable();
+        assert_eq!(changes, [deuxieme, quatrieme], "{corps}");
+        assert_eq!(uids_de(&corps, "vanished"), [premier], "{corps}");
+        assert!(
+            corps.contains("\\\\Seen"),
+            "le message lu porte son drapeau : {corps}"
+        );
+        assert!(
+            !corps.contains(&std::format!("\"uid\":{troisieme},")),
+            "{corps}"
+        );
+        let apres = nombre(&corps, "modseq").expect("un curseur");
+        assert!(apres > depart);
+        assert!(corps.contains("\"more\":false"), "{corps}");
+
+        // Depuis ce curseur : plus rien.
+        let (_, corps) = changements(&api, apres, None);
+        assert!(uids_de(&corps, "changed").is_empty(), "{corps}");
+        assert!(uids_de(&corps, "vanished").is_empty(), "{corps}");
+
+        // ── PAR PAGES D'UN ─────────────────────────────────────────────────
+        let (mut curseur, mut vus, mut pages) = (depart, Vec::new(), 0);
+        loop {
+            let (status, corps) = changements(&api, curseur, Some(1));
+            assert_eq!(status, StatusCode::OK, "{corps}");
+            vus.extend(uids_de(&corps, "changed"));
+            vus.extend(uids_de(&corps, "vanished"));
+            curseur = nombre(&corps, "modseq").expect("un curseur");
+            pages += 1;
+            if corps.contains("\"more\":false") {
+                break;
+            }
+            assert!(pages < 10, "la pagination ne converge pas");
+        }
+        vus.sort_unstable();
+        assert_eq!(vus, [premier, deuxieme, quatrieme]);
+        assert_eq!(curseur, apres);
+        assert!(pages > 1);
+    }
+
+    /// **UN CURSEUR QUE LE JOURNAL NE SERT PAS REND `410`** — trop ancien, ou
+    /// venu d'ailleurs — et une requête sans point de départ, `400`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn un_curseur_perime_rend_410() {
+        let temporaire = Ephemere::neuf();
+        let (_, api) = api(&temporaire.0);
+        ranger(&api, "un");
+        let (_, etat) = servir(&api, Resource::Mailbox { boite: "INBOX" }, Method::Get, b"");
+        let depart = nombre(&etat, "highestModseq").expect("un point");
+        for perime in [0, depart - 1, depart + 1_000] {
+            let (status, corps) = changements(&api, perime, None);
+            assert_eq!(status, StatusCode::GONE, "{perime} : {corps}");
+            assert!(corps.contains("/problems/gone"), "{corps}");
+        }
+        // Sans `since`, ou avec une page trop grande : la requête est mal faite.
+        let (status, _) = servir_avec(
+            &api,
+            Resource::Changes { boite: "INBOX" },
+            Method::Get,
+            b"",
+            ams_api::Query::default(),
+        );
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = changements(
+            &api,
+            depart,
+            Some(u16::try_from(super::PAGE_MAX + 1).expect("tient")),
+        );
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // Et une boîte qui n'existe pas n'a pas de journal.
+        let (status, _) = servir_avec(
+            &api,
+            Resource::Changes {
+                boite: "Nulle-part",
+            },
+            Method::Get,
+            b"",
+            ams_api::Query {
+                since: Some(depart),
+                ..ams_api::Query::default()
+            },
+        );
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     // ── LES DRAPEAUX ───────────────────────────────────────────────────────

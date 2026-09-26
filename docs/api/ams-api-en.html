@@ -353,7 +353,6 @@ authorization: Bearer AQECAAAAAG…</code></pre>
     <tr><td>Refresh token</td><td>There is none. On expiry you must perform a full credential exchange — so you must keep the means to do so, or ask the user again.</td></tr>
     <tr><td>Client-chosen scope</td><td>You cannot obtain a read-only token. If your component only needs to read, containing it is your architecture's job.</td></tr>
     <tr><td>Query parameters</td><td>Only the message listing takes any (<code>before</code>, <code>limit</code>). No filter, no sort. See <a href="#paths">§2.2</a>.</td></tr>
-    <tr><td>Incremental sync</td><td>Not yet: no way to ask "what changed since". It comes with 0.2.19 (<code>/changes?since=</code>).</td></tr>
     <tr><td>CORS headers</td><td>The server emits no <code>access-control-allow-origin</code> and no preflight response. <strong>This API is not callable from a browser cross-origin.</strong> Go through your own service.</td></tr>
     <tr><td>Advertised rate limits</td><td>No header tells you how many requests remain. The guard bans without warning; keep to a reasonable pace.</td></tr>
     <tr><td>Concurrency control</td><td>No <code>ETag</code>, no <code>If-Match</code>. Two clients modifying the same resource overwrite each other silently.</td></tr>
@@ -580,7 +579,7 @@ authorization: Bearer AQECAAAAAG…</code></pre>
     <span class="verbe get">GET</span>
     <span class="chemin">/v1/mailboxes/{mailbox}</span><span class="portee">mail:read</span>
   </div>
-  <p><code>GET</code> returns a mailbox's state, in the same shape as a list entry.</p>
+  <p><code>GET</code> returns a mailbox's state, in the same shape as a list entry — <strong>plus <code>highestModseq</code></strong>, the point of the change journal from which to ask for deltas (see <a href="#r-messages">…/changes</a>). The mailbox list does not carry it: it would mean re-reading every mailbox.</p>
   <p><code>PUT</code> creates the mailbox and returns <code>204</code>. It is <strong>idempotent</strong> (RFC 9110 §9.3.4): replayed on a mailbox that already exists, it does not fault — the requested state is the state that is.</p>
   <div class="note danger">
     <span class="etiquette">A mailbox DELETE is permanent</span>
@@ -614,6 +613,30 @@ authorization: Bearer AQECAAAAAG…</code></pre>
     <span class="etiquette">Why a UID, not a page number</span>
     <p>A UID does not move when other messages arrive or leave. An offset ("from the 51st") would skip or repeat messages as soon as the mailbox changes between two pages; <code>before</code> misses nothing and repeats nothing. Flags are written as in IMAP: <code>\Seen</code>, <code>\Flagged</code>, <code>\Answered</code>, <code>\Draft</code>, <code>\Deleted</code>, and keywords as they are.</p>
   </div>
+</div>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/mailboxes/{box}/changes?since=&lt;modseq&gt;</span><span class="portee">mail:read</span></div>
+  <pre><code>{
+  "uidValidity": 1756900000,
+  "modseq": 1790000000142,
+  "more": false,
+  "changed": [
+    { "uid": 1793, "size": 2210, "received": 1790139001,
+      "subject": "Report", "from": "contact@narro.ch", "flags": [] }
+  ],
+  "vanished": [1201, 1203]
+}</code></pre>
+  <p><strong>Incremental sync</strong>: what changed in the mailbox since point <code>since</code>. <code>changed</code> carries messages that <strong>arrived or whose flags moved</strong>, in full — you tell them apart by whether you know the UID. <code>vanished</code> carries removed UIDs. <code>modseq</code> is the cursor to send back as <code>since</code> next time; <code>more: true</code> means do it right away. <code>limit</code> (1 to 50) caps the number of messages returned.</p>
+  <div class="note info">
+    <span class="etiquette">A client's path</span>
+    <p>1. <code>GET /v1/mailboxes/{box}</code>: take <code>highestModseq</code> <strong>before</strong> reading the mailbox. 2. Read it all through <code>…/messages</code>. 3. From then on: <code>…/changes?since=</code> the last <code>modseq</code> received. A change made during step 2 comes back in step 3 — duplicated at worst, never lost.</p>
+  </div>
+  <div class="note prudence">
+    <span class="etiquette">410: read everything again</span>
+    <p>A cursor the journal no longer serves — too old (it keeps only the last ten thousand removals), or from a recreated journal — returns <code>410</code> (<code>/problems/gone</code>). Start again at step 1. Without <code>since</code>, the request is refused with <code>400</code>.</p>
+  </div>
+  <p>The journal <strong>is derived from the mailbox</strong>: what Thunderbird changes over IMAP, what POP3 deletes, what arrives over SMTP, all of it shows. A change undone between two syncs — read, then marked unread again — leaves no trace; your final state is right regardless.</p>
 </div>
 
 <div class="ressource">

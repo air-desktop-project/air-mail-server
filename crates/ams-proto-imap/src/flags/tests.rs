@@ -212,3 +212,12 @@ fn les_dix_tiennent_dans_leur_borne() {
     let mut juste = std::vec![0_u8; taille.saturating_sub(1)];
     assert!(Flags::write(tous, &mut juste).is_err());
 }
+
+/// **LES BITS SE LISENT TELS QUELS**, et deux jeux distincts en donnent deux :
+/// c'est tout ce que le journal des changements leur demande.
+#[test]
+fn les_bits_distinguent_deux_jeux_de_drapeaux() {
+    assert_eq!(Flags::NONE.bits(), 0);
+    assert_eq!(Flags::SEEN.bits(), 1);
+    assert_ne!(Flags::SEEN.with(Flags::FLAGGED).bits(), Flags::SEEN.bits());
+}

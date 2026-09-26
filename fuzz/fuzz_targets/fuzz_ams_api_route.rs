@@ -306,6 +306,11 @@ fn segments_de(resource: &Resource<'_>) -> std::vec::Vec<std::string::String> {
             pousser(boite);
             pousser("search");
         }
+        Resource::Changes { boite } => {
+            pousser("mailboxes");
+            pousser(boite);
+            pousser("changes");
+        }
         Resource::Message { boite, uid } => {
             pousser("mailboxes");
             pousser(boite);

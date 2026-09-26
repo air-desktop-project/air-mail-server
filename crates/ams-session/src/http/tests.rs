@@ -1765,3 +1765,42 @@ fn les_parametres_incompris_ou_hors_de_propos_sont_refuses() {
     let (statut, _) = refus_de(b"POST", b"/v1/tokens?limit=1", b"");
     assert_eq!(statut, StatusCode::BAD_REQUEST);
 }
+
+/// **LE JOURNAL EXIGE `since`**, prend `limit`, et refuse `before` : une
+/// synchronisation incrémentale part de quelque part, et ne se pagine que par
+/// son propre curseur.
+#[test]
+fn le_journal_des_changements_exige_son_point_de_depart() {
+    let lecteur = jeton("marc", Scope::one(Area::Mail, Rights::Read));
+    let champs = requete(
+        b"GET",
+        b"/v1/mailboxes/INBOX/changes?since=1790000000000&limit=10",
+        lecteur.as_bytes(),
+    );
+    let tete = entete(&champs);
+    let mut place = [0_u8; PLACE];
+    let session = une_session();
+    let tour = session.request(&tete, &[], MAINTENANT, &mut place);
+    assert_eq!(tour.status(), StatusCode::OK);
+    assert_eq!(
+        parametres(tour.next()),
+        Some(ams_api::Query {
+            before: None,
+            limit: Some(10),
+            since: Some(1_790_000_000_000),
+        })
+    );
+    for chemin in [
+        &b"/v1/mailboxes/INBOX/changes"[..],
+        b"/v1/mailboxes/INBOX/changes?limit=10",
+        b"/v1/mailboxes/INBOX/changes?since=1&before=5",
+    ] {
+        let (statut, _) = refus_de(b"GET", chemin, lecteur.as_bytes());
+        assert_eq!(
+            statut,
+            StatusCode::BAD_REQUEST,
+            "{}",
+            String::from_utf8_lossy(chemin)
+        );
+    }
+}
