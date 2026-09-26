@@ -284,3 +284,42 @@ fn retirer_un_compte_emporte_ses_mots_de_passe_applicatifs() {
     assert_eq!(restants.len(), 1);
     assert!(restants.iter().all(|entree| entree.login == "paul"));
 }
+
+/// **`config show` DIT OÙ EST LE MAGASIN DES MOTS DE PASSE APPLICATIFS** — et
+/// qu'il n'y en a pas, quand il n'y en a pas. La 0.2.17 l'écrivait sans que
+/// cette commande le montre : l'exploitant qui relisait sa configuration avant
+/// de redémarrer ne pouvait pas vérifier qu'il y était.
+#[test]
+fn config_show_montre_le_magasin_des_mots_de_passe_applicatifs() {
+    let atelier = atelier("montrer");
+    let avec = atelier.0.join("avec.conf").display().to_string();
+    let sans = atelier.0.join("sans.conf").display().to_string();
+    let (_, plainte, ok) = outil(
+        "",
+        &[
+            "config",
+            "write",
+            &avec,
+            "--app-passwords",
+            "/x/applicatifs.bin",
+        ],
+    );
+    assert!(ok, "{plainte}");
+    let (dit, plainte, ok) = outil("", &["config", "show", &avec]);
+    assert!(ok, "{plainte}");
+    assert!(
+        dit.lines()
+            .any(|ligne| ligne.starts_with("mdp applicatifs")
+                && ligne.contains("/x/applicatifs.bin")),
+        "{dit}"
+    );
+
+    let (_, plainte, ok) = outil("", &["config", "write", &sans]);
+    assert!(ok, "{plainte}");
+    let (dit, _, _) = outil("", &["config", "show", &sans]);
+    assert!(
+        dit.lines()
+            .any(|ligne| ligne.starts_with("mdp applicatifs") && ligne.contains("AUCUN MAGASIN")),
+        "{dit}"
+    );
+}

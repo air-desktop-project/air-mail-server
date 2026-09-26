@@ -136,8 +136,8 @@
 </div>
 
 <div class="note danger">
-  <span class="etiquette">Aucun paramètre de requête n'est lu</span>
-  <p>La chaîne qui suit un <code>?</code> est séparée du chemin puis <strong>ignorée</strong>. Aucune ressource de cette API n'accepte aujourd'hui de paramètre de requête — ni filtre, ni tri, ni curseur de pagination. Une requête qui en porte n'est pas refusée : ses paramètres sont simplement sans effet, ce qui est plus traître qu'un refus. Ne construisez pas de client qui en dépende.</p>
+  <span class="etiquette">Un paramètre de requête qui n'est pas compris est REFUSÉ</span>
+  <p>Depuis la 0.2.18, la chaîne qui suit un <code>?</code> est lue. Seule la liste des messages en accepte (<code>before</code>, <code>limit</code>, voir <a href="#r-messages">§5.5</a>). Partout ailleurs — et pour tout paramètre inconnu, répété, vide, ou dont la valeur n'est pas un entier écrit d'une seule façon — la réponse est <code>400</code> (<code>la chaîne de requête est refusée</code>). <strong>Refusé plutôt qu'ignoré</strong> : un <code>limt=10</code> ignoré rendrait cinquante messages, et personne ne saurait pourquoi. Jusqu'en 0.2.17, elle était ignorée en silence.</p>
 </div>
 
 <h3 id="types"><span class="numero">2.3</span>Types de média</h3>
@@ -354,8 +354,8 @@ authorization: Bearer AQECAAAAAG…</code></pre>
   <tbody>
     <tr><td>Jeton de rafraîchissement</td><td>Il n'y a pas de <em>refresh token</em>. À l'expiration, vous devez refaire un échange d'identifiants complet — donc conserver de quoi le faire, ou redemander à l'utilisateur.</td></tr>
     <tr><td>Choix de la portée par le client</td><td>Vous ne pouvez pas obtenir un jeton en lecture seule. Si votre composant n'a besoin que de lire, c'est à votre architecture de le contenir.</td></tr>
-    <tr><td>Paramètres de requête</td><td>Pas de filtre, pas de tri, pas de curseur. Voir <a href="#chemins">§2.2</a>.</td></tr>
-    <tr><td>Pagination utilisable</td><td>Les listes de messages rendent un curseur <code>next</code>, mais <strong>aucun moyen de le passer au serveur</strong>. Il vous dit qu'il y a une suite ; il ne vous permet pas d'y accéder.</td></tr>
+    <tr><td>Paramètres de requête</td><td>Seule la liste des messages en prend (<code>before</code>, <code>limit</code>). Pas de filtre ni de tri. Voir <a href="#chemins">§2.2</a>.</td></tr>
+    <tr><td>Synchronisation incrémentale</td><td>Pas encore : aucun moyen de demander « ce qui a changé depuis ». Elle vient avec la 0.2.19 (<code>/changes?since=</code>).</td></tr>
     <tr><td>En-têtes CORS</td><td>Le serveur n'émet ni <code>access-control-allow-origin</code>, ni réponse de pré-vol. <strong>Cette API n'est pas appelable depuis un navigateur en contexte d'origine croisée.</strong> Passez par votre propre service.</td></tr>
     <tr><td>Limitation de débit annoncée</td><td>Aucun en-tête ne dit combien de requêtes il vous reste. Le garde bannit sans prévenir ; tenez-vous à un rythme raisonnable.</td></tr>
     <tr><td>Contrôle de concurrence</td><td>Ni <code>ETag</code>, ni <code>If-Match</code>. Deux clients qui modifient la même ressource s'écrasent l'un l'autre sans que rien ne le signale.</td></tr>
@@ -573,7 +573,7 @@ authorization: Bearer AQECAAAAAG…</code></pre>
   <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/mailboxes</span><span class="portee">mail:read</span></div>
   <pre><code>{ "mailboxes": [
     { "name": "INBOX", "messages": 716, "unseen": 12,
-      "uid_next": 1793, "uid_validity": 1756900000 }
+      "uidNext": 1793, "uidValidity": 1756900000 }
 ] }</code></pre>
 </div>
 
@@ -599,14 +599,22 @@ authorization: Bearer AQECAAAAAG…</code></pre>
   "messages": [
     { "uid": 1792, "size": 1282, "received": 1790138347,
       "subject": "[SG50 Battery] Test Email", "from": "ofrou-sierre@narro.ch",
-      "flags": ["seen"] }
+      "flags": ["\\Seen"] }
   ],
-  "next": 1741
+  "next": 1792
 }</code></pre>
-  <p>La page compte <strong>50 messages au plus</strong>. <code>next</code> porte l'UID du premier message <em>non rendu</em>, ou <code>null</code> s'il n'y en a plus.</p>
-  <div class="note prudence">
-    <span class="etiquette">Le curseur ne se passe nulle part</span>
-    <p><code>next</code> vous apprend qu'il reste des messages, mais aucun paramètre ne permet de reprendre à partir de lui. Sur une boîte de plus de cinquante messages, cette ressource ne vous donnera jamais que les cinquante premiers.</p>
+  <p><strong>Les plus récents d'abord</strong> : la première page est ce que l'utilisateur regarde en ouvrant sa boîte. Deux paramètres, tous deux facultatifs :</p>
+  <table>
+    <thead><tr><th>Paramètre</th><th>Ce qu'il fait</th></tr></thead>
+    <tbody>
+      <tr><td><code>before=&lt;uid&gt;</code></td><td>Les messages d'UID <strong>strictement inférieur</strong> — c'est le curseur pour remonter dans le temps.</td></tr>
+      <tr><td><code>limit=&lt;n&gt;</code></td><td>Combien au plus, de 1 à <strong>50</strong> (le défaut). Au-delà, <code>400</code> : le serveur ne ramène pas votre demande en silence.</td></tr>
+    </tbody>
+  </table>
+  <p><code>next</code> porte l'UID du <strong>dernier message rendu</strong>, ou <code>null</code> s'il n'en reste pas. Pour la page suivante, renvoyez-le tel quel : <code>GET …/messages?before=1792</code>.</p>
+  <div class="note info">
+    <span class="etiquette">Pourquoi un UID, et pas un numéro de page</span>
+    <p>Un UID ne bouge pas quand d'autres messages arrivent ou partent. Un décalage (« à partir du 51e ») sauterait ou répéterait des messages dès que la boîte change entre deux pages ; <code>before</code> ne rate rien et ne répète rien. Les drapeaux s'écrivent comme en IMAP : <code>\Seen</code>, <code>\Flagged</code>, <code>\Answered</code>, <code>\Draft</code>, <code>\Deleted</code>, et les mots-clefs tels quels.</p>
   </div>
 </div>
 

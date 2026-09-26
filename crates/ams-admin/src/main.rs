@@ -799,6 +799,20 @@ fn afficher(config: &Configuration) {
             )
         }
     );
+    // **LE MAGASIN DES MOTS DE PASSE APPLICATIFS SE MONTRE AUSSI** : la 0.2.17
+    // l'écrivait sans que cette commande le dise, et l'exploitant qui relisait
+    // sa configuration avant de redémarrer ne pouvait pas vérifier qu'il y était.
+    println!(
+        "mdp applicatifs    {}",
+        if config.app_passwords.is_empty() {
+            String::from("AUCUN MAGASIN — seul le mot de passe principal ouvre IMAP, SMTP, POP3")
+        } else {
+            format!(
+                "magasin `{}` — condensats de secrets, IMAP/SMTP/POP3 en `PLAIN` seulement",
+                config.app_passwords
+            )
+        }
+    );
     println!(
         "MTA-STS            {}",
         if config.mtasts.est_configure() {

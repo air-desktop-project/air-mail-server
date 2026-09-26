@@ -233,6 +233,21 @@ impl Default for Served<'_> {
 ///
 /// # LA BOUCLE CONDUIT, CETTE INTERFACE RÉPOND
 ///
+/// Ce qu'une requête dit, en plus de la ressource qu'elle vise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Appel<'a> {
+    /// Le corps, s'il y en avait un.
+    pub body: &'a [u8],
+    /// Les paramètres de la chaîne de requête, **déjà lus et déjà jugés
+    /// recevables** pour cette ressource par la session.
+    pub query: ams_api::Query,
+    /// Le champ `Range` **tel que le client l'a écrit** (§14.2 de RFC 9110),
+    /// sans analyse : ce qu'une portée a le droit d'être dépend de la
+    /// RESSOURCE — de sa taille, et de si elle se lit par morceaux —, et la
+    /// boucle ne sait ni l'un ni l'autre.
+    pub range: Option<&'a [u8]>,
+}
+
 /// Tout ce qui touche au magasin vit derrière ceci : la boucle n'ouvre aucune
 /// boîte et ne connaît aucun compte. C'est la même séparation qu'entre une
 /// session et sa politique, et pour la même raison — ce qui décide et ce qui
@@ -240,10 +255,9 @@ impl Default for Served<'_> {
 pub trait Api {
     /// Sert cette ressource, et écrit la réponse dans `sortie`.
     ///
-    /// `range` porte le champ `Range` **tel que le client l'a écrit** (§14.2 de
-    /// RFC 9110), sans analyse : ce qu'une portée a le droit d'être dépend de la
-    /// RESSOURCE — de sa taille, et de si elle se lit par morceaux —, et la
-    /// boucle ne sait ni l'un ni l'autre.
+    /// `appel` porte ce que la requête dit d'autre que sa ressource : son
+    /// corps, ses paramètres déjà lus, et son champ `Range` brut — voir
+    /// [`Appel`].
     ///
     /// L'autorisation est **déjà faite** : recevoir cet appel veut dire qu'un
     /// jeton scellé par notre clé, non expiré, ouvrait la portée que la route
@@ -254,8 +268,7 @@ pub trait Api {
         resource: Resource<'_>,
         method: Method,
         account: &str,
-        body: &[u8],
-        range: Option<&[u8]>,
+        appel: Appel<'_>,
         sortie: &'o mut [u8],
     ) -> Served<'o>;
 
@@ -622,6 +635,7 @@ where
                 account,
                 nonce,
                 body,
+                query,
                 ..
             } => {
                 // **SE DÉCONNECTER, C'EST FERMER SA SESSION.** Cette ressource
@@ -642,8 +656,11 @@ where
                         resource,
                         method,
                         account,
-                        body,
-                        demande.tete.field(b"range"),
+                        Appel {
+                            body,
+                            query,
+                            range: demande.tete.field(b"range"),
+                        },
                         &mut rendu,
                     );
                     portee = (servi.ranges, servi.range);

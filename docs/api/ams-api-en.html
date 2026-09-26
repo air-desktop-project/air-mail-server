@@ -136,8 +136,8 @@
 </div>
 
 <div class="note danger">
-  <span class="etiquette">No query parameter is read</span>
-  <p>The string following a <code>?</code> is split off the path and then <strong>discarded</strong>. No resource in this API currently accepts a query parameter — no filter, no sort, no pagination cursor. A request carrying them is not rejected: its parameters simply have no effect, which is more treacherous than a refusal. Do not build a client that depends on them.</p>
+  <span class="etiquette">A query parameter that is not understood is REFUSED</span>
+  <p>Since 0.2.18, the string after a <code>?</code> is read. Only the message listing accepts parameters (<code>before</code>, <code>limit</code>, see <a href="#r-messages">§5.5</a>). Everywhere else — and for any unknown, repeated or empty parameter, or a value that is not an integer written one single way — the answer is <code>400</code>. <strong>Refused rather than ignored</strong>: an ignored <code>limt=10</code> would return fifty messages, and nobody would know why. Up to 0.2.17 it was silently ignored.</p>
 </div>
 
 <h3 id="types"><span class="numero">2.3</span>Media types</h3>
@@ -352,8 +352,8 @@ authorization: Bearer AQECAAAAAG…</code></pre>
   <tbody>
     <tr><td>Refresh token</td><td>There is none. On expiry you must perform a full credential exchange — so you must keep the means to do so, or ask the user again.</td></tr>
     <tr><td>Client-chosen scope</td><td>You cannot obtain a read-only token. If your component only needs to read, containing it is your architecture's job.</td></tr>
-    <tr><td>Query parameters</td><td>No filter, no sort, no cursor. See <a href="#paths">§2.2</a>.</td></tr>
-    <tr><td>Usable pagination</td><td>Message listings return a <code>next</code> cursor but <strong>offer no way to send it back</strong>. It tells you there is more; it does not let you reach it.</td></tr>
+    <tr><td>Query parameters</td><td>Only the message listing takes any (<code>before</code>, <code>limit</code>). No filter, no sort. See <a href="#paths">§2.2</a>.</td></tr>
+    <tr><td>Incremental sync</td><td>Not yet: no way to ask "what changed since". It comes with 0.2.19 (<code>/changes?since=</code>).</td></tr>
     <tr><td>CORS headers</td><td>The server emits no <code>access-control-allow-origin</code> and no preflight response. <strong>This API is not callable from a browser cross-origin.</strong> Go through your own service.</td></tr>
     <tr><td>Advertised rate limits</td><td>No header tells you how many requests remain. The guard bans without warning; keep to a reasonable pace.</td></tr>
     <tr><td>Concurrency control</td><td>No <code>ETag</code>, no <code>If-Match</code>. Two clients modifying the same resource overwrite each other silently.</td></tr>
@@ -571,7 +571,7 @@ authorization: Bearer AQECAAAAAG…</code></pre>
   <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/mailboxes</span><span class="portee">mail:read</span></div>
   <pre><code>{ "mailboxes": [
     { "name": "INBOX", "messages": 716, "unseen": 12,
-      "uid_next": 1793, "uid_validity": 1756900000 }
+      "uidNext": 1793, "uidValidity": 1756900000 }
 ] }</code></pre>
 </div>
 
@@ -597,14 +597,22 @@ authorization: Bearer AQECAAAAAG…</code></pre>
   "messages": [
     { "uid": 1792, "size": 1282, "received": 1790138347,
       "subject": "[SG50 Battery] Test Email", "from": "ofrou-sierre@narro.ch",
-      "flags": ["seen"] }
+      "flags": ["\\Seen"] }
   ],
-  "next": 1741
+  "next": 1792
 }</code></pre>
-  <p>A page holds <strong>at most 50 messages</strong>. <code>next</code> carries the UID of the first message <em>not returned</em>, or <code>null</code> if there are no more.</p>
-  <div class="note prudence">
-    <span class="etiquette">The cursor goes nowhere</span>
-    <p><code>next</code> tells you messages remain, but no parameter lets you resume from it. On a mailbox with more than fifty messages, this resource will only ever give you the first fifty.</p>
+  <p><strong>Newest first</strong>: the first page is what the user looks at when opening the mailbox. Two parameters, both optional:</p>
+  <table>
+    <thead><tr><th>Parameter</th><th>What it does</th></tr></thead>
+    <tbody>
+      <tr><td><code>before=&lt;uid&gt;</code></td><td>Messages with a UID <strong>strictly lower</strong> — the cursor to go back in time.</td></tr>
+      <tr><td><code>limit=&lt;n&gt;</code></td><td>How many at most, from 1 to <strong>50</strong> (the default). Beyond that, <code>400</code>: the server does not silently shrink your request.</td></tr>
+    </tbody>
+  </table>
+  <p><code>next</code> carries the UID of the <strong>last message returned</strong>, or <code>null</code> when none remain. For the next page, send it back as is: <code>GET …/messages?before=1792</code>.</p>
+  <div class="note info">
+    <span class="etiquette">Why a UID, not a page number</span>
+    <p>A UID does not move when other messages arrive or leave. An offset ("from the 51st") would skip or repeat messages as soon as the mailbox changes between two pages; <code>before</code> misses nothing and repeats nothing. Flags are written as in IMAP: <code>\Seen</code>, <code>\Flagged</code>, <code>\Answered</code>, <code>\Draft</code>, <code>\Deleted</code>, and keywords as they are.</p>
   </div>
 </div>
 

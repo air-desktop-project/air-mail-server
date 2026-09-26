@@ -46,10 +46,25 @@
 //! inexprimable, et pas seulement refusée par l'encodeur.
 
 use ams_api::{
-    Error as ApiError, JSON_MEDIA_TYPE, Json, Key, PROBLEM_MEDIA_TYPE, Reason, Resource, Scope,
-    Token, authorize, bearer, problem, resolve, split_query, verify, verify_invitation,
+    Error as ApiError, JSON_MEDIA_TYPE, Json, Key, PROBLEM_MEDIA_TYPE, Query, Reason, Resource,
+    Scope, Token, authorize, bearer, parse_query, problem, resolve, split_query, verify,
+    verify_invitation,
 };
 use ams_proto_http::{Method, RequestHead, StatusCode};
+
+/// Cette ressource accepte-t-elle ces paramètres, sous ce verbe ?
+///
+/// **LA LISTE DES MESSAGES, ET ELLE SEULE**, prend `before` et `limit` — en
+/// lecture. Ailleurs, un paramètre est refusé plutôt qu'ignoré : un client qui
+/// croit filtrer ce qui ne l'est pas ne s'en apercevrait jamais.
+fn requete_permise(ressource: Resource<'_>, verbe: Method, requete: &Query) -> bool {
+    if requete.is_empty() {
+        return true;
+    }
+    matches!(ressource, Resource::Messages { .. })
+        && matches!(verbe, Method::Get | Method::Head)
+        && requete.since.is_none()
+}
 
 /// Ce qu'un corps de requête peut faire de long.
 ///
@@ -242,6 +257,9 @@ pub enum Next<'o> {
         scope: Scope,
         /// Le corps de la requête, s'il y en avait un.
         body: &'o [u8],
+        /// Les paramètres de la chaîne de requête, déjà lus et déjà jugés
+        /// recevables pour CETTE ressource et CE verbe.
+        query: Query,
     },
 }
 
@@ -456,9 +474,17 @@ impl Http {
 
         // 4. Le routage. La chaîne de requête ne participe pas : elle n'est pas
         //    dans le chemin (§3.4 de RFC 3986).
-        let (chemin, _requete) = split_query(tete.path());
+        let (chemin, brute) = split_query(tete.path());
         let resolu = match resolve(tete.method(), chemin, place_du_chemin) {
             Ok(resolu) => resolu,
+            Err(faute) => return Err((faute.reason(), place_de_la_reponse)),
+        };
+        // 4 bis. **SA GRAMMAIRE SE JUGE ICI, SON SENS PLUS LOIN.** Une chaîne
+        //    mal écrite l'est sur toute ressource, et le dire n'apprend rien ;
+        //    qu'une ressource accepte tel paramètre, en revanche, se dit après
+        //    le jeton — comme tout ce qui dépend de la ressource.
+        let requete = match parse_query(brute) {
+            Ok(requete) => requete,
             Err(faute) => return Err((faute.reason(), place_de_la_reponse)),
         };
 
@@ -483,6 +509,12 @@ impl Http {
             // le secret que le reste de cette fonction protège.
             if let Err(raison) = verifier_le_type(tete, corps, resolu.resource) {
                 return Err((raison, place_de_la_reponse));
+            }
+            // **AUCUNE PORTE D'ENTRÉE NE PREND DE PARAMÈTRE** : ce qui autorise
+            // est dans le corps, et une chaîne ignorée ferait croire au client
+            // qu'elle a servi.
+            if !requete.is_empty() {
+                return Err((Reason::BadQuery, place_de_la_reponse));
             }
             // **DEUX PORTES, ET ELLES NE FONT PAS LA MÊME CHOSE.** L'une
             // échange des identifiants contre un jeton ; l'autre enrôle une
@@ -526,6 +558,11 @@ impl Http {
             return Err((raison, place_de_la_reponse));
         }
 
+        // 8. Les paramètres, maintenant qu'on sait ce qu'ils visent.
+        if !requete_permise(resolu.resource, resolu.method, &requete) {
+            return Err((Reason::BadQuery, place_de_la_reponse));
+        }
+
         Ok(Turn {
             status: StatusCode::OK,
             fields: champs_ordinaires(StatusCode::OK, self.alt_svc(), &[]),
@@ -537,6 +574,7 @@ impl Http {
                 nonce: jeton.nonce,
                 scope: jeton.scope,
                 body: corps,
+                query: requete,
             },
         })
     }

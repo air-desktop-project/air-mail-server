@@ -22,7 +22,7 @@ use crate::error::Reason;
 /// Le `match` ci-dessous la rend exhaustive **à la compilation** : un motif de
 /// plus ne compile pas tant qu'on ne l'y a pas mis. C'est la même discipline
 /// que `Resource::scope`, et pour la même raison.
-fn toutes() -> [Reason; 19] {
+fn toutes() -> [Reason; 20] {
     // Ce `match` ne sert qu'à faire échouer la compilation si un motif
     // s'ajoute : sa valeur est jetée, sa VÉRIFICATION est tout l'objet.
     const fn _exhaustive(reason: Reason) -> u8 {
@@ -46,6 +46,7 @@ fn toutes() -> [Reason; 19] {
             Reason::NotImplemented => 16,
             Reason::AlreadyEnrolled => 17,
             Reason::LimitReached => 18,
+            Reason::BadQuery => 19,
         }
     }
     [
@@ -68,6 +69,7 @@ fn toutes() -> [Reason; 19] {
         Reason::NotImplemented,
         Reason::AlreadyEnrolled,
         Reason::LimitReached,
+        Reason::BadQuery,
     ]
 }
 

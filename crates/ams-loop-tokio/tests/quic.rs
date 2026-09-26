@@ -536,8 +536,7 @@ impl ams_loop_tokio::http::Api for ApiEssai {
         resource: ams_api::Resource<'_>,
         _method: ams_proto_http::Method,
         _account: &str,
-        _body: &[u8],
-        _range: Option<&[u8]>,
+        _appel: ams_loop_tokio::http::Appel<'_>,
         sortie: &'o mut [u8],
     ) -> ams_loop_tokio::http::Served<'o> {
         let quoi: &[u8] = match resource {

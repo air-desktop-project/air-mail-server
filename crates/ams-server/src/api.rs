@@ -49,11 +49,14 @@ use ams_session::imap::{Mailbox as _, Mailboxes as _};
 use crate::imap::BoitesImap;
 use crate::policy::Places;
 
-/// Combien de messages une page rend au plus.
+/// Combien de messages une page rend au plus, et par défaut.
 ///
 /// Cinquante. Le client demande la suite avec le curseur que la réponse porte —
-/// voir [`render::write_messages`]. Une page plus grande ferait retenir plus
-/// longtemps ce qu'un client peut demander sans fin.
+/// voir [`render::write_messages`]. **LA BORNE VIENT DU TAMPON DE HTTP/3** —
+/// soixante-quatre kibioctets de réponse — et d'un sujet qui peut en faire un :
+/// une page plus grande tiendrait en HTTP/2 et échouerait en HTTP/3. Un `limit`
+/// plus grand est refusé, et non ramené en silence : le client croirait avoir
+/// reçu tout ce qu'il a demandé.
 const PAGE_MAX: usize = 50;
 
 /// Combien de boîtes une liste rend au plus.
@@ -1409,22 +1412,52 @@ impl ApiMaildir {
         rendre(render::write_mailbox(&ligne, sortie))
     }
 
-    /// Une page de messages.
-    fn messages<'o>(&self, compte: &str, nom: &str, sortie: &'o mut [u8]) -> Served<'o> {
+    /// Une page de messages, **LES PLUS RÉCENTS D'ABORD**.
+    ///
+    /// # L'ORDRE EST CELUI QU'UN CLIENT AFFICHE
+    ///
+    /// La première page est ce que l'utilisateur regarde en ouvrant sa boîte :
+    /// elle doit porter les derniers arrivés. Jusqu'en 0.2.17, elle portait les
+    /// cinquante PLUS ANCIENS, et le curseur ne pouvait pas être renvoyé — la
+    /// chaîne de requête était jetée.
+    ///
+    /// # LE CURSEUR EST UN UID, ET IL NE BOUGE PAS
+    ///
+    /// `before=<uid>` rend les messages d'UID strictement inférieur. Un UID ne
+    /// change pas quand d'autres messages arrivent ou partent — là où un
+    /// décalage (« à partir du 51e ») sauterait ou répéterait des messages dès
+    /// que la boîte bouge entre deux pages. `next` est l'UID du dernier rendu :
+    /// le renvoyer tel quel en `before` donne la page suivante.
+    fn messages<'o>(
+        &self,
+        compte: &str,
+        nom: &str,
+        requete: ams_api::Query,
+        sortie: &'o mut [u8],
+    ) -> Served<'o> {
+        let limite = requete.limit.map_or(PAGE_MAX, usize::from);
+        if limite > PAGE_MAX {
+            return probleme(ams_api::Reason::BadQuery, StatusCode::BAD_REQUEST, sortie);
+        }
         let Some(boite) = self.boites.open(compte.as_bytes(), nom.as_bytes()) else {
             return absente(sortie);
         };
-        let mut resumes = std::vec::Vec::with_capacity(PAGE_MAX);
+        let avant = requete.before.unwrap_or(u32::MAX);
+        let mut resumes = std::vec::Vec::with_capacity(limite);
         let mut suivant = None;
-        for sequence in 1..=boite.exists() {
+        // Les numéros de séquence suivent l'ordre des UID : les parcourir à
+        // rebours, c'est aller du plus récent au plus ancien.
+        for sequence in (1..=boite.exists()).rev() {
             let Some(info) = boite.info(sequence) else {
                 continue;
             };
-            if resumes.len() >= PAGE_MAX {
-                // **LE CURSEUR EST L'UID DU PREMIER QU'ON NE REND PAS.** Un
-                // curseur sur le dernier rendu obligerait le client à savoir
-                // s'il est inclus ou non.
-                suivant = Some(info.uid);
+            if info.uid >= avant {
+                continue;
+            }
+            if resumes.len() >= limite {
+                // **IL EN RESTE** : le curseur est l'UID du dernier rendu, que
+                // le client renvoie en `before`.
+                suivant = resumes.last().map(|resume: &Resume| resume.info.uid);
                 break;
             }
             // **C'EST ICI QUE LA PAGE COÛTE**, et c'est pourquoi elle est bornée :
@@ -1946,10 +1979,14 @@ impl Api for ApiMaildir {
         resource: Resource<'_>,
         method: Method,
         account: &str,
-        body: &[u8],
-        portee: Option<&[u8]>,
+        appel: ams_loop_tokio::http::Appel<'_>,
         sortie: &'o mut [u8],
     ) -> Served<'o> {
+        let ams_loop_tokio::http::Appel {
+            body,
+            query,
+            range: portee,
+        } = appel;
         match resource {
             Resource::Health => rendre(render::write_health(sortie)),
             Resource::Metrics => rendre(render::write_metrics(
@@ -1988,7 +2025,7 @@ impl Api for ApiMaildir {
             Resource::Messages { boite } if matches!(method, Method::Post) => {
                 self.ajouter_un_message(account, boite, body, sortie)
             }
-            Resource::Messages { boite } => self.messages(account, boite, sortie),
+            Resource::Messages { boite } => self.messages(account, boite, query, sortie),
             Resource::Message { boite, uid } if matches!(method, Method::Patch) => {
                 self.drapeaux(account, boite, uid, body, sortie)
             }
@@ -3414,9 +3451,29 @@ mod ecritures {
         method: Method,
         corps: &[u8],
     ) -> (StatusCode, String) {
+        servir_avec(api, resource, method, corps, ams_api::Query::default())
+    }
+
+    /// Sert une ressource AVEC ces paramètres, et rend (statut, corps).
+    fn servir_avec(
+        api: &ApiMaildir,
+        resource: Resource<'_>,
+        method: Method,
+        corps: &[u8],
+        query: ams_api::Query,
+    ) -> (StatusCode, String) {
         let mut place = std::vec![0_u8; 64 * 1024];
-        let Served { status, body, .. } =
-            api.serve(resource, method, "marie", corps, None, &mut place);
+        let Served { status, body, .. } = api.serve(
+            resource,
+            method,
+            "marie",
+            ams_loop_tokio::http::Appel {
+                body: corps,
+                query,
+                range: None,
+            },
+            &mut place,
+        );
         (status, String::from_utf8_lossy(body).into_owned())
     }
 
@@ -3480,6 +3537,124 @@ mod ecritures {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let boite = boites.open(b"marie", b"INBOX").expect("ouvrable");
         assert_eq!(boite.exists(), 0, "rien ne doit avoir été rangé");
+    }
+
+    // ── LA PAGINATION ──────────────────────────────────────────────────────
+
+    /// Les UID d'une page, dans l'ordre où elle les rend, et son curseur.
+    fn page(api: &ApiMaildir, query: ams_api::Query) -> (StatusCode, Vec<u64>, Option<u64>) {
+        let (status, corps) = servir_avec(
+            api,
+            Resource::Messages { boite: "INBOX" },
+            Method::Get,
+            b"",
+            query,
+        );
+        let uids = corps
+            .split("\"uid\":")
+            .skip(1)
+            .filter_map(|reste| {
+                reste
+                    .split(|c: char| !c.is_ascii_digit())
+                    .next()
+                    .and_then(|chiffres| chiffres.parse().ok())
+            })
+            .collect();
+        let suivant = corps.split_once("\"next\":").and_then(|(_, reste)| {
+            reste
+                .split(|c: char| !c.is_ascii_digit())
+                .next()
+                .and_then(|chiffres| chiffres.parse().ok())
+        });
+        (status, uids, suivant)
+    }
+
+    /// **LES PLUS RÉCENTS D'ABORD, ET LE CURSEUR SE RENVOIE TEL QUEL.**
+    ///
+    /// Jusqu'en 0.2.17, la liste rendait les cinquante plus ANCIENS, et le
+    /// curseur ne pouvait pas revenir : la chaîne de requête était jetée. On
+    /// parcourt ici une boîte de cinq messages par pages de deux, en renvoyant
+    /// chaque fois `next` en `before` — exactement ce que fera un client.
+    #[test]
+    fn la_liste_se_parcourt_des_plus_recents_aux_plus_anciens() {
+        let temporaire = Ephemere::neuf();
+        let (_, api) = api(&temporaire.0);
+        let uids: Vec<u64> = (1..=5)
+            .map(|n| ranger(&api, &std::format!("n{n}")))
+            .collect();
+        let recents: Vec<u64> = uids.iter().rev().copied().collect();
+
+        // Sans paramètre : tout, du plus récent au plus ancien, et rien après.
+        assert_eq!(
+            page(&api, ams_api::Query::default()),
+            (StatusCode::OK, recents.clone(), None)
+        );
+
+        // Par pages de deux, en suivant le curseur.
+        let mut vus = Vec::new();
+        let mut avant = None;
+        loop {
+            let (status, lus, suivant) = page(
+                &api,
+                ams_api::Query {
+                    before: avant.map(|uid: u64| u32::try_from(uid).expect("tient")),
+                    limit: Some(2),
+                    since: None,
+                },
+            );
+            assert_eq!(status, StatusCode::OK);
+            assert!(lus.len() <= 2);
+            vus.extend(lus.iter().copied());
+            match suivant {
+                // Le curseur est le DERNIER rendu : le renvoyer n'omet rien et
+                // ne répète rien.
+                Some(curseur) => {
+                    assert_eq!(Some(&curseur), lus.last());
+                    avant = Some(curseur);
+                }
+                None => break,
+            }
+        }
+        assert_eq!(vus, recents, "chaque message une fois, dans l'ordre");
+
+        // Avant le plus ancien : une page vide, sans curseur.
+        let plus_ancien = u32::try_from(*uids.first().expect("un")).expect("tient");
+        assert_eq!(
+            page(
+                &api,
+                ams_api::Query {
+                    before: Some(plus_ancien),
+                    ..ams_api::Query::default()
+                }
+            ),
+            (StatusCode::OK, Vec::new(), None)
+        );
+    }
+
+    /// **UN `limit` AU-DELÀ DE LA BORNE EST REFUSÉ**, et non ramené en silence :
+    /// le client croirait avoir tout ce qu'il a demandé.
+    #[test]
+    fn un_limit_trop_grand_est_refuse() {
+        let temporaire = Ephemere::neuf();
+        let (_, api) = api(&temporaire.0);
+        let trop = u16::try_from(super::PAGE_MAX + 1).expect("tient");
+        let (status, _, _) = page(
+            &api,
+            ams_api::Query {
+                limit: Some(trop),
+                ..ams_api::Query::default()
+            },
+        );
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let juste = u16::try_from(super::PAGE_MAX).expect("tient");
+        let (status, _, _) = page(
+            &api,
+            ams_api::Query {
+                limit: Some(juste),
+                ..ams_api::Query::default()
+            },
+        );
+        assert_eq!(status, StatusCode::OK);
     }
 
     // ── LES DRAPEAUX ───────────────────────────────────────────────────────

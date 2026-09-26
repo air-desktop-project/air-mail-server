@@ -279,6 +279,7 @@ impl<A: Api> ams_h3::Service for ServiceH3<'_, A> {
                 account,
                 nonce,
                 body,
+                query,
                 ..
             } => {
                 if matches!(resource, ams_api::Resource::CurrentToken) {
@@ -293,8 +294,11 @@ impl<A: Api> ams_h3::Service for ServiceH3<'_, A> {
                         resource,
                         method,
                         account,
-                        body,
-                        tete.field(b"range"),
+                        crate::http::Appel {
+                            body,
+                            query,
+                            range: tete.field(b"range"),
+                        },
                         &mut self.rendu,
                     );
                     portee = (servi.ranges, servi.range);

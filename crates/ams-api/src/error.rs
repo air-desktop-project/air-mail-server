@@ -141,6 +141,12 @@ pub enum Reason {
     /// c'est l'état du compte qui l'empêche. Ce que le client doit en faire est
     /// précis — révoquer celui dont il ne se sert plus.
     LimitReached,
+    /// **La chaîne de requête est refusée** : un paramètre inconnu, en double,
+    /// ou dont la valeur n'est pas un entier écrit d'une seule façon.
+    ///
+    /// Refusée plutôt qu'ignorée : un paramètre ignoré ferait croire au client
+    /// qu'il a été entendu.
+    BadQuery,
 }
 
 impl Reason {
@@ -148,9 +154,11 @@ impl Reason {
     #[must_use]
     pub const fn status(self) -> StatusCode {
         match self {
-            Self::BadPath | Self::BadJsonBody | Self::BadMessage | Self::BadAccount => {
-                StatusCode::BAD_REQUEST
-            }
+            Self::BadPath
+            | Self::BadQuery
+            | Self::BadJsonBody
+            | Self::BadMessage
+            | Self::BadAccount => StatusCode::BAD_REQUEST,
             // §15.5.15 : celui-ci existe exactement pour un chemin trop long, et
             // le distinguer d'un 400 dit au client que c'est la LONGUEUR qui
             // gêne — donc qu'il peut réessayer plus court.
@@ -200,6 +208,7 @@ impl Reason {
             Self::NotImplemented => "ce serveur ne sert pas cette ressource",
             Self::AlreadyEnrolled => "ce compte a déjà un appareil enrôlé",
             Self::LimitReached => "ce compte a atteint sa limite ; révoquez-en un d'abord",
+            Self::BadQuery => "la chaîne de requête est refusée",
             // **CE QUI EST NÔTRE SE DIT D'UNE SEULE FAÇON.** Distinguer nos
             // fautes internes apprendrait au client ce que notre code a fait de
             // travers, et ne lui servirait à rien : il n'y peut rien. Le journal

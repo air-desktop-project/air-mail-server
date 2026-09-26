@@ -42,8 +42,7 @@ impl Api for ApiEssai {
         resource: ams_api::Resource<'_>,
         _method: Method,
         account: &str,
-        _body: &[u8],
-        _range: Option<&[u8]>,
+        _appel: ams_loop_tokio::http::Appel<'_>,
         sortie: &'o mut [u8],
     ) -> Served<'o> {
         let mut json = ams_api::Json::new(sortie);

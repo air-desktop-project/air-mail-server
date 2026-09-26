@@ -133,6 +133,7 @@ fn une_requete_autorisee_demande_a_servir() {
             nonce,
             scope: portee,
             body: &[],
+            query: ams_api::Query::default(),
         }
     );
 }
@@ -709,15 +710,15 @@ fn un_tampon_trop_court_est_notre_faute() {
 }
 
 /// La chaîne de requête ne participe pas au routage (§3.4 de RFC 3986).
+///
+/// **ELLE N'EST PLUS IGNORÉE POUR AUTANT** : jusqu'en 0.2.17, `?depuis=10`
+/// passait ici sans un mot. Désormais, un paramètre inconnu est refusé — voir
+/// `les_parametres_incompris_ou_hors_de_propos_sont_refuses`. Reste vrai qu'une
+/// chaîne VIDE, avec ou sans `?`, désigne la même ressource.
 #[test]
 fn la_chaine_de_requete_ne_change_pas_la_ressource() {
     let porte = jeton("marc", Scope::one(Area::Mail, Rights::Read));
-    for chemin in [
-        &b"/v1/mailboxes"[..],
-        b"/v1/mailboxes?",
-        b"/v1/mailboxes?depuis=10",
-        b"/v1/mailboxes?a=1&b=2",
-    ] {
+    for chemin in [&b"/v1/mailboxes"[..], b"/v1/mailboxes?"] {
         let champs = requete(b"GET", chemin, porte.as_bytes());
         let tete = entete(&champs);
         let mut place = [0_u8; PLACE];
@@ -1680,4 +1681,87 @@ fn l_usage_demande_choisit_le_role_annonce() {
             .expect("un défi")
     };
     assert_eq!(lire_le_defi("session"), lire_le_defi("pairing"));
+}
+
+/// Les paramètres qu'une requête a fait remonter jusqu'à l'appelant.
+fn parametres(next: Next<'_>) -> Option<ams_api::Query> {
+    match next {
+        Next::Serve { query, .. } => Some(query),
+        _ => None,
+    }
+}
+
+/// **LA LISTE DES MESSAGES PREND `before` ET `limit`**, et l'appelant les
+/// reçoit déjà lus.
+#[test]
+fn la_liste_des_messages_recoit_ses_parametres() {
+    let porte = jeton("marc", Scope::one(Area::Mail, Rights::Read));
+    let champs = requete(
+        b"GET",
+        b"/v1/mailboxes/INBOX/messages?before=1201&limit=20",
+        porte.as_bytes(),
+    );
+    let tete = entete(&champs);
+    let mut place = [0_u8; PLACE];
+    let session = une_session();
+    let tour = session.request(&tete, &[], MAINTENANT, &mut place);
+    assert_eq!(tour.status(), StatusCode::OK);
+    assert_eq!(
+        parametres(tour.next()),
+        Some(ams_api::Query {
+            before: Some(1201),
+            limit: Some(20),
+            since: None,
+        })
+    );
+    assert!(parametres(Next::Respond).is_none());
+}
+
+/// Le statut que rend cette requête, et le type de problème qu'elle écrit.
+fn refus_de(methode: &[u8], chemin: &[u8], porte: &[u8]) -> (StatusCode, String) {
+    let champs = requete(methode, chemin, porte);
+    let tete = entete(&champs);
+    let mut place = [0_u8; PLACE];
+    let session = une_session();
+    let tour = session.request(&tete, &[], MAINTENANT, &mut place);
+    (tour.status(), texte(tour.body()))
+}
+
+/// **CE QUI N'EST PAS COMPRIS EST REFUSÉ, PAS IGNORÉ** — et le sens d'un
+/// paramètre ne se juge qu'APRÈS le jeton : sans lui, un `400` sur une
+/// ressource dirait qu'elle existe.
+#[test]
+fn les_parametres_incompris_ou_hors_de_propos_sont_refuses() {
+    let lecteur = jeton("marc", Scope::one(Area::Mail, Rights::Read));
+    let ecrivain = jeton("marc", Scope::one(Area::Mail, Rights::Write));
+    // Une grammaire fautive, où que ce soit.
+    let (statut, _) = refus_de(
+        b"GET",
+        b"/v1/mailboxes/INBOX/messages?limt=10",
+        lecteur.as_bytes(),
+    );
+    assert_eq!(statut, StatusCode::BAD_REQUEST);
+    // Un paramètre juste, sur une ressource qui ne le prend pas.
+    let (statut, _) = refus_de(b"GET", b"/v1/mailboxes?limit=10", lecteur.as_bytes());
+    assert_eq!(statut, StatusCode::BAD_REQUEST);
+    // `since` n'est pas pour la liste.
+    let (statut, _) = refus_de(
+        b"GET",
+        b"/v1/mailboxes/INBOX/messages?since=3",
+        lecteur.as_bytes(),
+    );
+    assert_eq!(statut, StatusCode::BAD_REQUEST);
+    // Ni pour un dépôt dans la liste.
+    let (statut, _) = refus_de(
+        b"POST",
+        b"/v1/mailboxes/INBOX/messages?limit=3",
+        ecrivain.as_bytes(),
+    );
+    assert_eq!(statut, StatusCode::BAD_REQUEST);
+    // **SANS JETON, UN PARAMÈTRE BIEN ÉCRIT N'APPREND RIEN** : 401, pas 400.
+    let (statut, _) = refus_de(b"GET", b"/v1/mailboxes?limit=10", b"Bearer rien");
+    assert_eq!(statut, StatusCode::UNAUTHORIZED);
+    // Et une porte d'entrée n'en prend aucun.
+    let (statut, _) = refus_de(b"POST", b"/v1/tokens?limit=1", b"");
+    assert_eq!(statut, StatusCode::BAD_REQUEST);
 }

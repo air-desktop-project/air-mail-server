@@ -416,10 +416,13 @@ fuzz_target!(|entree: Entree| {
 const DOMAINE: &[u8] = b"mail.exemple.fr";
 
 /// qu'on n'a pas prévue est une réponse qu'on n'a pas relue.
-const RAISONS: [ams_api::Reason; 11] = [
+const RAISONS: [ams_api::Reason; 12] = [
     // **SANS DOMAINE, LES SESSIONS PAR CLEF NE SONT PAS SERVIES.** Un défi lié à
     // un domaine vide serait un défi que deux serveurs partageraient.
     ams_api::Reason::NotImplemented,
+    // **LA CHAÎNE DE REQUÊTE SE LIT DEPUIS 0.2.18**, et ce qu'elle ne dit pas
+    // bien se refuse — un `?` quelconque dans un chemin tiré au sort suffit.
+    ams_api::Reason::BadQuery,
     ams_api::Reason::BadPath,
     ams_api::Reason::PathTooLong,
     ams_api::Reason::NoSuchResource,
