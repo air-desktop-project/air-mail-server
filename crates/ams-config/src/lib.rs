@@ -69,6 +69,18 @@ mod ams_devices_capnp {
     include!("ams_devices_capnp.rs");
 }
 
+#[allow(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    missing_docs,
+    unused_qualifications,
+    reason = "code généré par capnpc-rust, hors de notre contrôle éditorial"
+)]
+mod ams_app_passwords_capnp {
+    include!("ams_app_passwords_capnp.rs");
+}
+
 mod ams_accounts_capnp {
     include!("ams_accounts_capnp.rs");
 }
@@ -98,12 +110,14 @@ mod ams_scram_capnp {
 }
 
 mod accounts;
+mod app_passwords;
 mod codec;
 mod devices;
 mod index;
 mod scram;
 
 pub use accounts::{decode_accounts, encode_accounts};
+pub use app_passwords::{APP_NOM_OCTETS_MAX, decode_app_passwords, encode_app_passwords};
 pub use codec::{
     Configuration, Dkim, Dmarc, Enforcement, Error, Listener, Mtasts, Queue, Relay, Spf,
     TRAVERSAL_LIMIT_WORDS, Timeouts, Tls, Tlsrpt, decode, encode,

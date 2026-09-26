@@ -455,8 +455,14 @@
 </div>
 
 <div class="phase parallele">
-  <div class="entete"><span class="rang">Phase 3 bis</span><h3>Les mots de passe applicatifs</h3><span class="cout">≈ 1 semaine · en parallèle</span></div>
-  <p>Plusieurs empreintes par compte, chacune nommée, datée et révocable seule. Voir <a href="#mdp-app">§7</a>.</p>
+  <div class="entete"><span class="rang">Phase 3 bis</span><h3>Les mots de passe applicatifs</h3><span class="fait">FAITE — 0.2.17</span><span class="cout">≈ 1 semaine · en parallèle</span></div>
+  <p>Plusieurs secrets par compte, chacun nommé, daté et révocable seul. Voir <a href="#mdp-app">§7</a>.</p>
+  <ul>
+    <li><strong>0.2.16 — d'abord une faille, trouvée en préparant celle-ci.</strong> Changer un mot de passe par l'API laissait le vérificateur SCRAM en place : l'ancien mot de passe ouvrait encore la boîte par SCRAM, que Thunderbird choisit. Chaque vérificateur est désormais <strong>lié à l'empreinte du compte</strong> — elle entre dans les données associées de son scellement —, donc un mot de passe changé par n'importe quel chemin éteint l'ancien. L'API redérive le nouveau.</li>
+    <li><strong>0.2.17 — les mots de passe applicatifs.</strong> <code>GET</code>, <code>POST</code> <code>/v1/me/app-passwords</code> et <code>DELETE …/{id}</code> ; <code>air-mail-admin app-password add|list|remove</code>. <strong>Le serveur tire le secret</strong> — cent vingt-huit bits —, le montre une fois, et n'en range que le SHA-256 : pour un secret que personne n'a choisi, un hachage lent n'ajoute rien. <strong>Il porte son propre identifiant</strong> (<code>amsp-&lt;id&gt;-&lt;secret&gt;</code>) : la vérification trouve l'entrée sans essayer les autres, et le temps d'un refus ne dit pas combien le compte en a.</li>
+    <li><strong>Deux décisions de l'exploitant.</strong> Ils ne passent qu'en <code>PLAIN</code> — le sel de SCRAM part avant toute preuve, donc pour un seul secret par identifiant. Et le mot de passe principal <strong>reste valable</strong> en IMAP, SMTP et POP3 : un interrupteur « applicatifs seulement » par compte viendra quand les clients auront migré.</li>
+    <li><strong>Ils n'ouvrent pas l'API REST.</strong> Sans cela, le client de courrier d'un poste perdu pourrait fabriquer d'autres mots de passe, et le révoquer ne suffirait plus.</li>
+  </ul>
   <p><strong>Elle profite à Thunderbird et à Apple Mail</strong>, que la clef d'appareil ne touchera jamais — et elle est le seul moyen de révoquer l'accès d'un client sans changer le mot de passe du compte. Ne dépend que de la phase 0.</p>
 </div>
 

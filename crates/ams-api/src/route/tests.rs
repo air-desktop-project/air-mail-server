@@ -29,7 +29,7 @@ fn ou(method: Method, chemin: &[u8]) -> Result<Resource<'static>, Reason> {
 /// Chaque ressource se désigne par son chemin.
 #[test]
 fn chaque_ressource_se_designe() {
-    let cas: [(Method, &[u8], Resource<'_>); 27] = [
+    let cas: [(Method, &[u8], Resource<'_>); 29] = [
         (Method::Post, b"/v1/tokens", Resource::Tokens),
         (Method::Post, b"/v1/sessions", Resource::Sessions),
         (
@@ -45,6 +45,18 @@ fn chaque_ressource_se_designe() {
             Method::Delete,
             b"/v1/me/devices/a1b2c3",
             Resource::OwnDevice { id: "a1b2c3" },
+        ),
+        (
+            Method::Get,
+            b"/v1/me/app-passwords",
+            Resource::OwnAppPasswords,
+        ),
+        (
+            Method::Delete,
+            b"/v1/me/app-passwords/0123456789abcdef",
+            Resource::OwnAppPassword {
+                id: "0123456789abcdef",
+            },
         ),
         (
             Method::Delete,
@@ -531,6 +543,29 @@ fn les_appareils_a_soi_n_exigent_aucune_portee() {
 ///
 /// Un `GET` sur un appareil nommé, lui, ne dirait rien que la liste ne dise
 /// déjà.
+/// **LES MOTS DE PASSE APPLICATIFS SE LISTENT, SE CRÉENT, SE RÉVOQUENT** — et
+/// n'importe quel jeton de leur propriétaire y suffit, comme pour ses
+/// appareils : « j'ai perdu mon portable » ne s'adresse pas à l'exploitant.
+#[test]
+fn les_verbes_des_mots_de_passe_applicatifs() {
+    assert_eq!(
+        Resource::OwnAppPasswords.allowed(),
+        &[Method::Get, Method::Head, Method::Post]
+    );
+    assert_eq!(
+        Resource::OwnAppPassword { id: "a1" }.allowed(),
+        &[Method::Delete]
+    );
+    assert_eq!(
+        Resource::OwnAppPasswords.scope(Method::Post),
+        Some(Scope::none())
+    );
+    assert_eq!(
+        Resource::OwnAppPassword { id: "a1" }.scope(Method::Delete),
+        Some(Scope::none())
+    );
+}
+
 #[test]
 fn les_verbes_des_appareils_sont_ceux_la_et_pas_d_autres() {
     assert_eq!(

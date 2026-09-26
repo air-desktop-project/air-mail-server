@@ -132,6 +132,8 @@ struct Entree {
     /// fait que transporter le chemin ; il ne le valide pas, et c'est
     /// délibéré — c'est au serveur de dire qu'un fichier ne s'ouvre pas.
     appareils: String,
+    /// Le magasin des mots de passe applicatifs — une chaîne libre elle aussi.
+    applicatifs: String,
     /// Le dossier des rapports TLS, et le drapeau de remise — LIBRES tous les
     /// deux, y compris incohérents entre eux.
     tlsrpt: String,
@@ -194,6 +196,7 @@ fuzz_target!(|entree: Entree| {
         scram_key: entree.scram[0].clone(),
         scram_store: entree.scram[1].clone(),
         devices: entree.appareils.clone(),
+        app_passwords: entree.applicatifs.clone(),
         require_fqdn_helo: entree.helo_qualifie,
         require_fqdn_sender: entree.expediteur_qualifie,
         require_fqdn_recipient: entree.destinataire_qualifie,

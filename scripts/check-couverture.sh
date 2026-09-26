@@ -92,7 +92,7 @@ CRATES_SANS_IO=(
 #
 # Elle est aussi VISIBLE : ce script l'annonce à chaque exécution. Une dérogation
 # qu'on ne voit plus est une dérogation qui s'élargit.
-IGNORE='/ams_[a-z]+_capnp\.rs$'
+IGNORE='/ams_[a-z_]+_capnp\.rs$'
 
 args=(--ignore-filename-regex "$IGNORE")
 for crate in "${CRATES_SANS_IO[@]}"; do

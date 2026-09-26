@@ -207,6 +207,7 @@ fn configuration_complete(
         scram_key: String::new(),
         scram_store: String::new(),
         devices: appareils.to_string(),
+        app_passwords: String::new(),
         require_fqdn_sender: false,
         require_fqdn_recipient: false,
         require_sender_domain: false,
@@ -2746,4 +2747,215 @@ fn un_mot_de_passe_pose_par_l_api_rederive_son_verificateur_scram() {
         "204"
     );
     constater(b"pose-par-l-admin");
+}
+
+/// **LE CYCLE D'UN MOT DE PASSE APPLICATIF, DE BOUT EN BOUT, PAR LE VRAI
+/// SERVEUR** : créé par l'API, employé par un vrai client de courrier en SMTP,
+/// refusé par l'API elle-même, puis révoqué — et le client est aussitôt
+/// refusé.
+///
+/// # CE QUE CET ESSAI ÉPROUVE, ET QU'AUCUN AUTRE NE PEUT
+///
+/// Que SMTP passe bien par la vérification qui connaît les mots de passe
+/// applicatifs, et que l'API REST, elle, ne les connaît pas : sans ce second
+/// volet, le client de courrier d'un poste perdu pourrait créer d'autres
+/// mots de passe, et le révoquer ne suffirait plus.
+#[test]
+fn un_mot_de_passe_applicatif_ouvre_smtp_et_pas_l_api() {
+    let atelier = atelier("api-applicatifs");
+    let Some((cert, cle)) = paire(&atelier.0) else {
+        panic!("{SANS_OPENSSL}");
+    };
+    if std::process::Command::new("curl")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("IGNORÉ : `curl` est absent — cet essai n'a RIEN éprouvé.");
+        return;
+    }
+
+    let empreinte =
+        ams_auth::hash_password(b"secret-initial", b"seize octets ici").expect("hachable");
+    let magasin = atelier.0.join("comptes.bin");
+    std::fs::write(
+        &magasin,
+        ams_config::encode_accounts(&[ams_auth::Account {
+            login: String::from("marie"),
+            hash: empreinte,
+            addresses: vec![String::from("marie@example.com")],
+        }])
+        .expect("encodable"),
+    )
+    .expect("le magasin s'écrit");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&magasin, std::fs::Permissions::from_mode(0o600))
+            .expect("permissions");
+    }
+    let applicatifs = atelier.0.join("applicatifs.bin");
+
+    let port_smtp = port_libre();
+    let port_http = port_libre();
+    let config = configuration_complete(
+        &atelier,
+        port_smtp,
+        Tls {
+            certificate_chain_path: cert.display().to_string(),
+            private_key_path: cle.display().to_string(),
+        },
+        &magasin.display().to_string(),
+        "",
+        "",
+        &format!("127.0.0.1:{port_http}"),
+        "",
+        CLEF,
+    );
+    let mut lue = ams_config::decode(&std::fs::read(&config).expect("config")).expect("décodable");
+    lue.app_passwords = applicatifs.display().to_string();
+    std::fs::write(&config, ams_config::encode(&lue).expect("encodable")).expect("écriture");
+    let _serveur = lancer(&config, port_smtp);
+    let base = format!("https://127.0.0.1:{port_http}");
+
+    // Un appel HTTP, et rend (corps, code).
+    let appeler = |methode: &str, chemin: &str, corps: Option<&str>, jeton: Option<&str>| {
+        let mut commande = std::process::Command::new("curl");
+        commande
+            .args(["-s", "--insecure", "--http2", "-X", methode])
+            .args(["-w", "\n%{http_code}"]);
+        if let Some(corps) = corps {
+            commande
+                .args(["-H", "Content-Type: application/json"])
+                .args(["-d", corps]);
+        }
+        if let Some(jeton) = jeton {
+            commande.args(["-H", &format!("Authorization: Bearer {jeton}")]);
+        }
+        let sortie = commande
+            .arg(format!("{base}{chemin}"))
+            .output()
+            .expect("curl s'exécute");
+        let tout = String::from_utf8_lossy(&sortie.stdout).into_owned();
+        let (corps, code) = tout.rsplit_once('\n').unwrap_or(("", ""));
+        (corps.to_string(), code.to_string())
+    };
+    let champ = |corps: &str, nom: &str| -> String {
+        corps
+            .split_once(&format!("\"{nom}\":\""))
+            .and_then(|(_, reste)| reste.split_once('"'))
+            .map(|(valeur, _)| valeur.to_string())
+            .unwrap_or_else(|| panic!("`{nom}` dans {corps}"))
+    };
+    // Soumet une lettre en SMTP avec ce secret, et dit si curl a abouti.
+    let lettre = atelier.0.join("lettre.eml");
+    std::fs::write(
+        &lettre,
+        "From: <marie@example.com>\r\nSubject: par Thunderbird\r\n\r\ncorps\r\n",
+    )
+    .expect("écriture");
+    let soumettre = |secret: &str| -> bool {
+        std::process::Command::new("curl")
+            .args(["-s", "--insecure", "--ssl-reqd"])
+            .args(["-u", &format!("marie:{secret}")])
+            .args(["--mail-from", "marie@example.com"])
+            .args(["--mail-rcpt", "marie@example.com"])
+            .arg("-T")
+            .arg(&lettre)
+            .arg(format!("smtp://127.0.0.1:{port_smtp}"))
+            .output()
+            .expect("curl s'exécute")
+            .status
+            .success()
+    };
+
+    // ── CRÉÉ PAR L'API, AVEC UN JETON DE MOT DE PASSE ───────────────────────
+    let (corps, code) = appeler(
+        "POST",
+        "/v1/tokens",
+        Some(r#"{"login":"marie","password":"secret-initial"}"#),
+        None,
+    );
+    assert_eq!(code, "201", "{corps}");
+    let jeton = champ(&corps, "token");
+    let (corps, code) = appeler(
+        "POST",
+        "/v1/me/app-passwords",
+        Some(r#"{"name":"Thunderbird — bureau"}"#),
+        Some(&jeton),
+    );
+    assert_eq!(code, "201", "{corps}");
+    let secret = champ(&corps, "password");
+    let id = champ(&corps, "id");
+    assert!(secret.starts_with("amsp-"), "{secret}");
+    assert!(
+        corps.contains("Thunderbird \u{2014} bureau"),
+        "le nom échappé doit se lire : {corps}"
+    );
+
+    // La liste le montre — nom, dates —, et JAMAIS le secret.
+    let (liste, code) = appeler("GET", "/v1/me/app-passwords", None, Some(&jeton));
+    assert_eq!(code, "200", "{liste}");
+    assert!(liste.contains(&id), "{liste}");
+    assert!(liste.contains("\"lastUsedAt\":0"), "{liste}");
+    assert!(
+        !liste.contains("amsp-"),
+        "LE SECRET SORT DE LA LISTE : {liste}"
+    );
+
+    // ── UN VRAI CLIENT DE COURRIER S'EN SERT ────────────────────────────────
+    assert!(
+        soumettre(&secret),
+        "le mot de passe applicatif doit ouvrir SMTP"
+    );
+    assert!(soumettre("secret-initial"), "le principal reste valable");
+    // Et sa dernière utilisation est notée.
+    let (liste, _) = appeler("GET", "/v1/me/app-passwords", None, Some(&jeton));
+    assert!(!liste.contains("\"lastUsedAt\":0"), "{liste}");
+
+    // ── IL N'OUVRE PAS L'API ────────────────────────────────────────────────
+    let (corps, code) = appeler(
+        "POST",
+        "/v1/tokens",
+        Some(&format!(r#"{{"login":"marie","password":"{secret}"}}"#)),
+        None,
+    );
+    assert_eq!(
+        code, "401",
+        "UN MOT DE PASSE APPLICATIF OUVRE L'API : un poste perdu fabriquerait des accès — {corps}"
+    );
+
+    // ── ET UN MOT DE PASSE PRINCIPAL NE PREND PAS SA FORME ──────────────────
+    let (corps, code) = appeler(
+        "PUT",
+        "/v1/me/password",
+        Some(&format!(
+            r#"{{"current_password":"secret-initial","password":"{secret}"}}"#
+        )),
+        Some(&jeton),
+    );
+    assert_eq!(code, "400", "{corps}");
+
+    // ── RÉVOQUÉ, IL EST REFUSÉ SUR-LE-CHAMP ─────────────────────────────────
+    let (_, code) = appeler(
+        "DELETE",
+        &format!("/v1/me/app-passwords/{id}"),
+        None,
+        Some(&jeton),
+    );
+    assert_eq!(code, "204");
+    assert!(
+        !soumettre(&secret),
+        "un mot de passe révoqué ouvre encore SMTP"
+    );
+    assert!(
+        soumettre("secret-initial"),
+        "révoquer n'a pas touché au principal"
+    );
+    let (_, code) = appeler(
+        "DELETE",
+        &format!("/v1/me/app-passwords/{id}"),
+        None,
+        Some(&jeton),
+    );
+    assert_eq!(code, "404", "révoquer deux fois rend 404");
 }

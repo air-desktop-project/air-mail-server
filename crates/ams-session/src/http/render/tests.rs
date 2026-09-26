@@ -10,10 +10,11 @@ use ams_api::{Error, Reason};
 use ams_proto_imap::Flags;
 
 use super::{
-    AccountRow, BanRow, DeviceRow, FlagPatch, MailboxRow, MessageRow, read_account_body,
-    read_challenge_request, read_flag_patch, read_invitation_request, read_own_password_body,
-    read_pairing_request, read_search_criteria, read_session_request, write_account,
-    write_accounts, write_bans, write_challenge, write_devices, write_domains, write_enrolled,
+    AccountRow, AppPasswordRow, BanRow, DeviceRow, FlagPatch, MailboxRow, MessageRow,
+    read_account_body, read_app_password_request, read_challenge_request, read_flag_patch,
+    read_invitation_request, read_own_password_body, read_pairing_request, read_search_criteria,
+    read_session_request, write_account, write_accounts, write_app_password_created,
+    write_app_passwords, write_bans, write_challenge, write_devices, write_domains, write_enrolled,
     write_health, write_invitation, write_mailbox, write_mailboxes, write_message, write_messages,
     write_metrics, write_search,
 };
@@ -37,6 +38,19 @@ fn appareil_neuf() -> DeviceRow<'static> {
         last_seen: 0,
     }
 }
+
+/// Un mot de passe applicatif d'essai.
+fn applicatif() -> AppPasswordRow<'static> {
+    AppPasswordRow {
+        id: "0123456789abcdef",
+        name: "Thunderbird du bureau",
+        created: 1_790_000_000,
+        last_used: 0,
+    }
+}
+
+/// Le secret qui va avec — un secret d'ESSAI, qui n'ouvre rien nulle part.
+const MOT_APPLICATIF: &str = "amsp-0123456789abcdef-fedcba98765432100011223344556677";
 
 /// Un tampon confortable.
 const PLACE: usize = 4_096;
@@ -373,7 +387,7 @@ fn un_corps_qui_n_est_pas_une_modification_se_refuse() {
 #[test]
 fn chaque_tampon_insuffisant_se_dit() {
     type Ecrivain = fn(&mut [u8]) -> Result<&[u8], ams_api::Error>;
-    let ecrivains: [(&str, Ecrivain); 20] = [
+    let ecrivains: [(&str, Ecrivain); 23] = [
         ("mailboxes", |place| write_mailboxes(&[boite()], place)),
         ("mailbox", |place| write_mailbox(&boite(), place)),
         ("messages", |place| {
@@ -404,6 +418,15 @@ fn chaque_tampon_insuffisant_se_dit() {
         // Un compte SANS appareil écrit un tableau vide : une autre suite
         // d'écritures, donc d'autres places à manquer.
         ("devices-vide", |place| write_devices(&[], place)),
+        ("app-passwords", |place| {
+            write_app_passwords(&[applicatif()], place)
+        }),
+        ("app-passwords-vide", |place| {
+            write_app_passwords(&[], place)
+        }),
+        ("app-password-created", |place| {
+            write_app_password_created(&applicatif(), MOT_APPLICATIF, place)
+        }),
         ("challenge", |place| {
             write_challenge("AwAAaN1", "ams-session", "mail.exemple.fr", 60, place)
         }),
@@ -1243,4 +1266,76 @@ fn une_demande_d_appairage_irrecevable_se_refuse() {
             std::string::String::from_utf8_lossy(corps)
         );
     }
+}
+
+/// **LA LISTE NE PORTE AUCUN SECRET**, et la création le porte UNE fois.
+#[test]
+fn les_mots_de_passe_applicatifs_s_ecrivent() {
+    let mut place = [0_u8; PLACE];
+    let liste = String::from_utf8(
+        write_app_passwords(&[applicatif()], &mut place)
+            .expect("écrivable")
+            .to_vec(),
+    )
+    .expect("utf-8");
+    assert_eq!(
+        liste,
+        r#"{"appPasswords":[{"id":"0123456789abcdef","name":"Thunderbird du bureau","createdAt":1790000000,"lastUsedAt":0}]}"#
+    );
+    assert!(!liste.contains("amsp-"), "{liste}");
+
+    let mut place = [0_u8; PLACE];
+    let cree = String::from_utf8(
+        write_app_password_created(&applicatif(), MOT_APPLICATIF, &mut place)
+            .expect("écrivable")
+            .to_vec(),
+    )
+    .expect("utf-8");
+    assert!(
+        cree.contains(&std::format!(r#""password":"{MOT_APPLICATIF}""#)),
+        "{cree}"
+    );
+    assert!(cree.contains(r#""id":"0123456789abcdef""#), "{cree}");
+}
+
+/// **LE NOM SE LIT, ÉCHAPPÉ OU NON** — et rien d'autre ne passe.
+#[test]
+fn le_corps_de_creation_ne_porte_qu_un_nom() {
+    let mut place = [0_u8; 128];
+    assert_eq!(
+        read_app_password_request(br#"{"name":"Thunderbird"}"#, &mut place),
+        Ok("Thunderbird")
+    );
+    let mut place = [0_u8; 128];
+    assert_eq!(
+        read_app_password_request(br#"{"name":"Thunderbird \u2014 bureau"}"#, &mut place),
+        Ok("Thunderbird \u{2014} bureau")
+    );
+    for corps in [
+        &br#"{}"#[..],
+        br#"{"name":""}"#,
+        br#"{"nom":"x"}"#,
+        br#"{"name":3}"#,
+        br#"{"name":"a","name":"b"}"#,
+        br#"{"name":"a","autre":"b"}"#,
+        br#"{"#,
+    ] {
+        let mut place = [0_u8; 128];
+        assert_eq!(
+            read_app_password_request(corps, &mut place)
+                .err()
+                .map(Error::reason),
+            Some(Reason::BadJsonBody),
+            "{}",
+            String::from_utf8_lossy(corps)
+        );
+    }
+    // Un nom qui ne tient pas dans la place se refuse.
+    let mut petite = [0_u8; 4];
+    assert_eq!(
+        read_app_password_request(br#"{"name":"Thunderbird"}"#, &mut petite)
+            .err()
+            .map(Error::reason),
+        Some(Reason::BadJsonBody)
+    );
 }

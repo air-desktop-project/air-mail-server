@@ -299,6 +299,39 @@ sudo -u air-mail air-mail-admin scram bind /var/lib/air-mail/comptes.bin \
 >
 > Le signe qui rassure : `comptes.bin` n'a pas été modifié depuis `scram.bin`.
 
+### Les mots de passe applicatifs : un secret par client de messagerie
+
+Thunderbird et Apple Mail ne connaissent que l'identifiant et le mot de passe.
+Avec un seul secret par compte, révoquer le client d'un poste perdu oblige à
+changer le mot de passe, donc à reconfigurer tous les autres. Un **mot de passe
+applicatif** se révoque seul.
+
+```sh
+# Le magasin, nommé dans la configuration. Il porte des CONDENSATS DE SECRETS :
+# `0600`, comme celui des comptes — lisible par tous, il empêche de démarrer.
+air-mail-admin config write /etc/air-mail/ams.conf … \
+    --app-passwords /var/lib/air-mail/applicatifs.bin
+
+# En créer un. Le secret est écrit UNE FOIS sur la sortie standard : copiez-le.
+sudo -u air-mail air-mail-admin app-password add /var/lib/air-mail/applicatifs.bin \
+    --accounts /var/lib/air-mail/comptes.bin --login jean --name "Thunderbird — bureau"
+
+# Les voir (jamais un secret), en révoquer un.
+sudo -u air-mail air-mail-admin app-password list /var/lib/air-mail/applicatifs.bin
+sudo -u air-mail air-mail-admin app-password remove /var/lib/air-mail/applicatifs.bin \
+    --login jean --id 0123456789abcdef
+```
+
+L'utilisateur peut aussi les gérer lui-même par l'API (`/v1/me/app-passwords`).
+Ce qu'il faut savoir :
+
+- **ils ouvrent IMAP, SMTP et POP3, en `PLAIN`** — toujours sous TLS —, avec le
+  nom de compte ou une de ses adresses. **Ni SCRAM, ni l'API REST** ;
+- **le mot de passe principal reste valable** à côté d'eux ;
+- la date de dernière utilisation est tenue **à l'heure près** ;
+- `account remove … --app-passwords <magasin>` retire aussi ceux du compte :
+  sans cela, un compte recréé sous le même nom en hériterait.
+
 ---
 
 ## 5. Le chiffrement

@@ -593,6 +593,106 @@ pub fn write_devices<'o>(
     json.finish()
 }
 
+/// Lit le corps de `POST /v1/me/app-passwords` : `{"name": "…"}`, et rien
+/// d'autre.
+///
+/// **LE NOM SE DÉSÉCHAPPE** dans `place` : un client qui écrit « Thunderbird —
+/// bureau » par une bibliothèque JSON ordinaire l'enverra sous la forme
+/// `\u2014`, et le refuser serait refuser la plupart des clients. Un nom plus
+/// long que `place` se refuse.
+///
+/// # Errors
+///
+/// [`Reason::BadJsonBody`] pour un corps illisible, un champ inconnu, un nom
+/// absent, vide, ou plus long que `place`.
+pub fn read_app_password_request<'p>(corps: &[u8], place: &'p mut [u8]) -> Result<&'p str, Error> {
+    let mauvais = Error::new(Reason::BadJsonBody);
+    let mut lecteur = Reader::new(corps);
+    let mut nom = None;
+    let mut est_le_nom = false;
+    loop {
+        match lecteur.read().map_err(|_| mauvais)? {
+            None => break,
+            Some(Event::Key(clef)) => {
+                if !clef.is("name") {
+                    return Err(mauvais);
+                }
+                est_le_nom = true;
+            }
+            Some(Event::Text(texte)) if est_le_nom && nom.is_none() => nom = Some(texte),
+            Some(Event::ObjectStart | Event::ObjectEnd) => {}
+            Some(_) => return Err(mauvais),
+        }
+    }
+    let clair = nom.ok_or(mauvais)?.unescape(place).map_err(|_| mauvais)?;
+    if clair.is_empty() {
+        return Err(mauvais);
+    }
+    Ok(clair)
+}
+
+/// Une ligne de la liste des mots de passe applicatifs d'un compte.
+#[derive(Debug, Clone, Copy)]
+pub struct AppPasswordRow<'a> {
+    /// Ce qui le désigne, et ce qu'on écrit pour le révoquer.
+    pub id: &'a str,
+    /// Le nom que son propriétaire lui a donné.
+    pub name: &'a str,
+    /// Quand il a été créé, en secondes depuis l'époque.
+    pub created: u64,
+    /// Quand il a servi pour la dernière fois — à l'heure près —, **ou zéro
+    /// s'il n'a jamais servi**. Écrit dans les deux cas, comme pour un appareil.
+    pub last_used: u64,
+}
+
+/// Écrit la liste des mots de passe applicatifs d'un compte — **sans aucun
+/// secret** : le serveur n'en a que les condensats, et ne les rend pas non plus.
+///
+/// # Errors
+///
+/// [`Reason::BufferTooSmall`] si `sortie` ne suffit pas.
+pub fn write_app_passwords<'o>(
+    lignes: &[AppPasswordRow<'_>],
+    sortie: &'o mut [u8],
+) -> Result<&'o [u8], Error> {
+    let mut json = Json::new(sortie);
+    json.begin_object()?;
+    json.key("appPasswords")?;
+    json.begin_array()?;
+    for ligne in lignes {
+        json.begin_object()?;
+        json.field_str("id", ligne.id)?;
+        json.field_str("name", ligne.name)?;
+        json.field_u64("createdAt", ligne.created)?;
+        json.field_u64("lastUsedAt", ligne.last_used)?;
+        json.end_object()?;
+    }
+    json.end_array()?;
+    json.end_object()?;
+    json.finish()
+}
+
+/// Écrit un mot de passe applicatif fraîchement créé, **secret compris** —
+/// c'est la seule fois qu'il sort du serveur.
+///
+/// # Errors
+///
+/// [`Reason::BufferTooSmall`] si `sortie` ne suffit pas.
+pub fn write_app_password_created<'o>(
+    ligne: &AppPasswordRow<'_>,
+    mot_de_passe: &str,
+    sortie: &'o mut [u8],
+) -> Result<&'o [u8], Error> {
+    let mut json = Json::new(sortie);
+    json.begin_object()?;
+    json.field_str("id", ligne.id)?;
+    json.field_str("name", ligne.name)?;
+    json.field_u64("createdAt", ligne.created)?;
+    json.field_str("password", mot_de_passe)?;
+    json.end_object()?;
+    json.finish()
+}
+
 /// Écrit la liste des comptes.
 ///
 /// # Errors

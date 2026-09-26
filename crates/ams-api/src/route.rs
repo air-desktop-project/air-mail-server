@@ -157,6 +157,22 @@ pub enum Resource<'o> {
         /// L'identifiant de l'appareil, tel que le serveur l'a tiré.
         id: &'o str,
     },
+    /// `/v1/me/app-passwords` — les mots de passe applicatifs de qui appelle.
+    ///
+    /// Un `GET` les liste — noms et dates, **jamais le secret** ; un `POST` en
+    /// crée un, dont le secret est rendu UNE FOIS, dans la réponse.
+    ///
+    /// **ILS N'OUVRENT PAS CETTE API**, seulement IMAP, SMTP et POP3 : sans
+    /// cela, le client de courrier d'un poste perdu pourrait en créer d'autres,
+    /// et le révoquer ne suffirait plus.
+    OwnAppPasswords,
+    /// `/v1/me/app-passwords/{id}` — un mot de passe applicatif à soi, pour le
+    /// révoquer. Le compte de qui appelle entre dans la recherche, comme pour
+    /// un appareil.
+    OwnAppPassword {
+        /// L'identifiant du mot de passe applicatif.
+        id: &'o str,
+    },
 
     /// `/v1/devices` — **enrôler un appareil, sans jeton.**
     ///
@@ -259,7 +275,12 @@ impl Resource<'_> {
                 return None;
             }
             // Révoquer son propre jeton ne demande que de l'avoir.
-            Self::CurrentToken | Self::OwnPassword | Self::OwnDevices | Self::OwnDevice { .. } => {
+            Self::CurrentToken
+            | Self::OwnPassword
+            | Self::OwnDevices
+            | Self::OwnDevice { .. }
+            | Self::OwnAppPasswords
+            | Self::OwnAppPassword { .. } => {
                 return Some(Scope::none());
             }
             Self::Mailboxes
@@ -315,7 +336,12 @@ impl Resource<'_> {
             // une empreinte, et c'est la raison d'être de cette ressource.
             Self::AccountPassword { .. } | Self::OwnPassword => &[Method::Put],
             Self::AccountAddresses { .. } => &[Method::Get, Method::Head, Method::Put],
-            Self::Ban { .. } | Self::OwnDevice { .. } => &[Method::Delete],
+            Self::Ban { .. } | Self::OwnDevice { .. } | Self::OwnAppPassword { .. } => {
+                &[Method::Delete]
+            }
+            // **UN MOT DE PASSE APPLICATIF NE SE LIT PAS SEUL** : son secret
+            // n'est rendu qu'à sa création, et le reste figure dans la liste.
+            Self::OwnAppPasswords => &[Method::Get, Method::Head, Method::Post],
             // **ELLE NE S'ÉCRIT PAS ICI** : un appareil s'enrôle par le
             // chemin d'enrôlement, qui prouve la possession de la clef. Un
             // `POST` de liste laisserait déclarer une clef sans rien prouver.
@@ -451,6 +477,10 @@ fn designer<'o>(segments: &Segments<'o>) -> Result<Resource<'o>, Error> {
         ("me", 3) if segments.get(2) == "password" => Ok(Resource::OwnPassword),
         ("me", 3) if segments.get(2) == "devices" => Ok(Resource::OwnDevices),
         ("me", 4) if segments.get(2) == "devices" => Ok(Resource::OwnDevice {
+            id: segments.get(3),
+        }),
+        ("me", 3) if segments.get(2) == "app-passwords" => Ok(Resource::OwnAppPasswords),
+        ("me", 4) if segments.get(2) == "app-passwords" => Ok(Resource::OwnAppPassword {
             id: segments.get(3),
         }),
         ("domains", 2) => Ok(Resource::Domains),

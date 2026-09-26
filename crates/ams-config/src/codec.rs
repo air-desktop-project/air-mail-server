@@ -403,6 +403,13 @@ pub struct Configuration {
     /// fuite n'ouvre donc aucune session. Leur donner les mêmes permissions
     /// ferait traiter l'un comme l'autre.
     pub devices: String,
+    /// Le magasin des mots de passe applicatifs, ou une chaîne vide.
+    ///
+    /// Vide, aucun n'existe, et seul le mot de passe principal ouvre IMAP, SMTP
+    /// et POP3. **Il porte des condensats de secrets** : le serveur le traite
+    /// comme le fichier de comptes, et refuse de démarrer s'il est lisible par
+    /// tous.
+    pub app_passwords: String,
     /// La file d'attente du serveur.
     pub queue: Queue,
     /// MTA-STS (RFC 8461).
@@ -655,6 +662,20 @@ pub enum Error {
     /// est assez petit pour qu'il en déduise le secret.
     BadDeviceKey(String),
 
+    /// Deux mots de passe applicatifs portent le même identifiant.
+    ///
+    /// L'identifiant est ce par quoi la vérification TROUVE l'entrée : deux
+    /// entrées sous le même, et l'une des deux n'ouvrirait jamais — sans que
+    /// rien ne dise laquelle.
+    DuplicateAppPassword(String),
+
+    /// L'identifiant ou le condensat d'un mot de passe applicatif n'a pas sa
+    /// forme : seize chiffres hexadécimaux minuscules, trente-deux octets.
+    ///
+    /// Une entrée de mauvaise forme est une entrée qu'aucun mot de passe
+    /// n'ouvrira jamais, et son propriétaire la croirait valable.
+    BadAppPassword(String),
+
     /// Un champ dépasse la borne que ce magasin lui donne.
     ///
     /// Le nom est là **exprès** : « trop long » sans dire lequel oblige à
@@ -704,6 +725,17 @@ impl fmt::Display for Error {
             Error::BadDeviceKey(id) => write!(
                 f,
                 "la clef de l'appareil `{id}` n'est pas un point de la courbe P-256"
+            ),
+            Error::DuplicateAppPassword(id) => {
+                write!(
+                    f,
+                    "deux mots de passe applicatifs portent l'identifiant `{id}`"
+                )
+            }
+            Error::BadAppPassword(id) => write!(
+                f,
+                "le mot de passe applicatif `{id}` n'a pas sa forme : seize chiffres \
+                 hexadécimaux minuscules, et un condensat de trente-deux octets"
             ),
             Error::TooLong(champ) => write!(f, "le champ `{champ}` dépasse sa borne"),
             Error::DuplicateLogin(login) => {
@@ -937,6 +969,7 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
         scram_key: texte(lu.get_scram_key()?)?,
         scram_store: texte(lu.get_scram_store()?)?,
         devices: texte(lu.get_devices()?)?,
+        app_passwords: texte(lu.get_app_passwords()?)?,
         queue,
         mtasts,
         tlsrpt,
@@ -1081,6 +1114,7 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
         ecrit.set_scram_key(&config.scram_key);
         ecrit.set_scram_store(&config.scram_store);
         ecrit.set_devices(&config.devices);
+        ecrit.set_app_passwords(&config.app_passwords);
         {
             let mut emission = ecrit.reborrow().init_relay();
             emission.set_enabled(config.relay.enabled);
@@ -1299,6 +1333,8 @@ mod tests {
             // chemin vide n'écrit aucun pointeur, et aucun essai ne le
             // traverserait.
             devices: String::from("/var/lib/air-mail/appareils.bin"),
+            // Non vide, pour la même raison encore.
+            app_passwords: String::from("/var/lib/air-mail/applicatifs.bin"),
             // Les trois écoutes d'un serveur réel : le `25` et le `587` en
             // `STARTTLS`, le `465` en TLS implicite.
             smtp_listeners: vec![

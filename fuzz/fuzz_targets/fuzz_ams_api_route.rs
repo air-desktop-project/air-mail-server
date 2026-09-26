@@ -278,6 +278,15 @@ fn segments_de(resource: &Resource<'_>) -> std::vec::Vec<std::string::String> {
             pousser("devices");
             pousser(id);
         }
+        Resource::OwnAppPasswords => {
+            pousser("me");
+            pousser("app-passwords");
+        }
+        Resource::OwnAppPassword { id } => {
+            pousser("me");
+            pousser("app-passwords");
+            pousser(id);
+        }
         Resource::CurrentToken => {
             pousser("tokens");
             pousser("current");

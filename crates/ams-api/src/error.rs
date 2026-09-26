@@ -134,6 +134,13 @@ pub enum Reason {
     /// completed due to a conflict with the current state of the target
     /// resource ».
     AlreadyEnrolled,
+    /// **La limite est atteinte** : ce compte a déjà autant de mots de passe
+    /// applicatifs qu'il en peut avoir.
+    ///
+    /// Un `409`, comme un appareil déjà enrôlé : la demande est bien formée, et
+    /// c'est l'état du compte qui l'empêche. Ce que le client doit en faire est
+    /// précis — révoquer celui dont il ne se sert plus.
+    LimitReached,
 }
 
 impl Reason {
@@ -164,7 +171,7 @@ impl Reason {
             // §15.6.2 de RFC 9110 : « the server does not support the
             // functionality required to fulfill the request ».
             Self::NotImplemented => StatusCode::NOT_IMPLEMENTED,
-            Self::AlreadyEnrolled => StatusCode::CONFLICT,
+            Self::AlreadyEnrolled | Self::LimitReached => StatusCode::CONFLICT,
         }
     }
 
@@ -192,6 +199,7 @@ impl Reason {
             Self::SessionClosed => "la session a été fermée",
             Self::NotImplemented => "ce serveur ne sert pas cette ressource",
             Self::AlreadyEnrolled => "ce compte a déjà un appareil enrôlé",
+            Self::LimitReached => "ce compte a atteint sa limite ; révoquez-en un d'abord",
             // **CE QUI EST NÔTRE SE DIT D'UNE SEULE FAÇON.** Distinguer nos
             // fautes internes apprendrait au client ce que notre code a fait de
             // travers, et ne lui servirait à rien : il n'y peut rien. Le journal

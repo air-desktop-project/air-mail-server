@@ -105,6 +105,9 @@ pub struct BoitesConnues {
     /// `None` est le cas ordinaire : sans `--scram-key` et `--scram`, ce
     /// serveur n'annonce pas le mécanisme et ne le sert pas.
     scram: Option<std::sync::Arc<crate::scram::Verificateurs>>,
+    /// Les mots de passe applicatifs, quand la configuration en nomme le
+    /// magasin. `None` : seul le mot de passe principal ouvre.
+    applicatifs: Option<std::sync::Arc<crate::applicatifs::Applicatifs>>,
     /// L'adresse du postmaster de ce serveur, composée une fois.
     postmaster: String,
     /// Les domaines que ce serveur DÉCLARE servir, en minuscules.
@@ -144,6 +147,9 @@ impl BoitesConnues {
             // se passe à l'envers sans que le compilateur bronche, et celui-ci
             // décide d'un mécanisme d'authentification. `avec_scram` le pose.
             scram: None,
+            // Pas de mots de passe applicatifs tant qu'on ne les donne pas :
+            // voir `avec_applicatifs`.
+            applicatifs: None,
             postmaster,
             // **EN MINUSCULES UNE FOIS**, plutôt qu'à chaque `RCPT` : un nom de
             // domaine se compare sans égard à la casse (RFC 5321 §2.4), et le
@@ -215,6 +221,18 @@ impl BoitesConnues {
         self
     }
 
+    /// Donne à cette politique les mots de passe applicatifs.
+    ///
+    /// Tant qu'on ne l'appelle pas, seul le mot de passe principal ouvre.
+    #[must_use]
+    pub fn avec_applicatifs(
+        mut self,
+        applicatifs: std::sync::Arc<crate::applicatifs::Applicatifs>,
+    ) -> Self {
+        self.applicatifs = Some(applicatifs);
+        self
+    }
+
     /// L'empreinte que le fichier de comptes porte pour ce login, s'il existe.
     ///
     /// **LE LOGIN EXACT, ET NON UNE ADRESSE** : SCRAM ne connaît que des
@@ -245,11 +263,35 @@ impl Authenticator for BoitesConnues {
     /// Le reste — le compte inconnu qui coûte le même temps, l'identité
     /// d'autorisation étrangère qu'on refuse — vit dans `ams-auth`, qui est
     /// couvert à 100 %.
+    ///
+    /// # ET UN MOT DE PASSE APPLICATIF OUVRE AUSSI, PAR CE CHEMIN SEUL
+    ///
+    /// C'est ici, et nulle part ailleurs, qu'un mot de passe applicatif est
+    /// admis : SMTP, IMAP et POP3 passent par cette méthode, l'API REST non.
+    /// Quand il a servi, sa date de dernière utilisation se note — à l'heure
+    /// près, et sans jamais refuser la session si le disque ne suit pas.
     fn authenticate(&self, credentials: &Credentials<'_>) -> bool {
-        tokio::task::block_in_place(|| {
-            self.places
-                .occuper(|| ams_auth::authenticate(&self.comptes.vue(), credentials))
-        })
+        let ouverture = tokio::task::block_in_place(|| {
+            self.places.occuper(|| match self.applicatifs.as_ref() {
+                Some(applicatifs) => {
+                    ams_auth::authenticate_all(&self.comptes.vue(), &applicatifs.vue(), credentials)
+                }
+                None => match ams_auth::authenticate(&self.comptes.vue(), credentials) {
+                    true => ams_auth::Ouverture::Principal,
+                    false => ams_auth::Ouverture::Refusee,
+                },
+            })
+        });
+        match ouverture {
+            ams_auth::Ouverture::Refusee => false,
+            ams_auth::Ouverture::Principal => true,
+            ams_auth::Ouverture::Applicatif(id) => {
+                if let Some(applicatifs) = self.applicatifs.as_ref() {
+                    applicatifs.noter_l_usage(&id, crate::maintenant());
+                }
+                true
+            }
+        }
     }
 
     /// Le `server-first`, avec un nonce tiré du noyau.

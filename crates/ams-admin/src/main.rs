@@ -83,8 +83,20 @@ COMMANDES
                         En cas de doute, `account passwd --scram` redérive.
     account list <fichier>
                         liste les noms de comptes. Jamais les empreintes.
-    account remove <fichier> --login <nom>
-                        retire un compte.
+    account remove <fichier> --login <nom> [--app-passwords <applicatifs>]
+                        retire un compte — et, si l'on nomme leur magasin, ses
+                        mots de passe applicatifs : sans cela, un compte recréé
+                        sous le même nom en hériterait.
+    app-password add <applicatifs> --accounts <comptes> --login <nom> --name <nom>
+                        crée un mot de passe applicatif — un secret par client
+                        de messagerie, révocable seul. Il ouvre IMAP, SMTP et
+                        POP3 en `PLAIN`, JAMAIS l'API REST ni SCRAM. LE SECRET
+                        EST ÉCRIT UNE FOIS sur la sortie standard, et n'est
+                        rangé que sous forme de condensat : copiez-le.
+    app-password list <applicatifs> [--login <nom>]
+                        liste identifiants, noms et dates. Jamais un secret.
+    app-password remove <applicatifs> --login <nom> --id <identifiant>
+                        révoque un mot de passe applicatif, sur-le-champ.
     config write … --relay --queue-spool <chemin>
                         ouvre l'ÉMISSION pour les comptes authentifiés. Éteinte
                         par défaut : ce serveur reçoit, il n'émet pas.
@@ -258,7 +270,40 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
-        ["account", "remove", fichier, "--login", nom] => retirer(Path::new(fichier), nom),
+        ["account", "remove", fichier, "--login", nom] => retirer(Path::new(fichier), nom, None),
+        [
+            "account",
+            "remove",
+            fichier,
+            "--login",
+            nom,
+            "--app-passwords",
+            applicatifs,
+        ] => retirer(Path::new(fichier), nom, Some(Path::new(applicatifs))),
+        [
+            "app-password",
+            "add",
+            fichier,
+            "--accounts",
+            comptes,
+            "--login",
+            nom,
+            "--name",
+            libelle,
+        ] => creer_un_applicatif(Path::new(fichier), Path::new(comptes), nom, libelle),
+        ["app-password", "list", fichier] => lister_les_applicatifs(Path::new(fichier), None),
+        ["app-password", "list", fichier, "--login", nom] => {
+            lister_les_applicatifs(Path::new(fichier), Some(nom))
+        }
+        [
+            "app-password",
+            "remove",
+            fichier,
+            "--login",
+            nom,
+            "--id",
+            id,
+        ] => revoquer_un_applicatif(Path::new(fichier), nom, id),
         autre => {
             eprintln!("air-mail-admin : commande inconnue : {autre:?}");
             eprintln!("Essayez `air-mail-admin --help`.");
@@ -1643,7 +1688,7 @@ fn aléa() -> Result<u64, String> {
 }
 
 /// Retire un compte.
-fn retirer(fichier: &Path, nom: &str) -> ExitCode {
+fn retirer(fichier: &Path, nom: &str, applicatifs: Option<&Path>) -> ExitCode {
     // MÊME VERROU QUE POUR L'AJOUT, et pour la même raison : retirer un compte
     // réécrit tous les autres.
     //
@@ -1665,6 +1710,187 @@ fn retirer(fichier: &Path, nom: &str) -> ExitCode {
     match resultat {
         Ok(()) => {
             println!("{} : compte `{nom}` retiré", fichier.display());
+            // **SES MOTS DE PASSE APPLICATIFS PARTENT AVEC LUI**, quand on nomme
+            // leur magasin : un compte recréé sous le même nom en hériterait
+            // sinon, et son nouveau titulaire aurait des secrets qu'il n'a
+            // jamais vus.
+            if let Some(applicatifs) = applicatifs {
+                match modifier_les_applicatifs(applicatifs, |entrees| {
+                    let avant = entrees.len();
+                    entrees.retain(|entree| entree.login != nom);
+                    Ok(avant.saturating_sub(entrees.len()))
+                }) {
+                    Ok(combien) => println!(
+                        "{} : {combien} mot(s) de passe applicatif(s) de `{nom}` retiré(s)",
+                        applicatifs.display()
+                    ),
+                    Err(message) => {
+                        eprintln!("air-mail-admin : {message}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Err(message) => {
+            eprintln!("air-mail-admin : {message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Lit, modifie et réécrit le magasin des mots de passe applicatifs, sous son
+/// verrou — le serveur l'écrit aussi, depuis son API et à chaque « dernière
+/// utilisation ».
+///
+/// Un magasin absent est un magasin vide : il se crée au premier mot de passe.
+fn modifier_les_applicatifs<T>(
+    fichier: &Path,
+    quoi: impl FnOnce(&mut Vec<ams_auth::AppPassword>) -> Result<T, String>,
+) -> Result<T, String> {
+    let _verrou = ams_fichier::verrouiller(fichier)
+        .map_err(|erreur| format!("`{}` : {erreur}", fichier.display()))?;
+    let mut entrees = lire_les_applicatifs(fichier)?;
+    let rendu = quoi(&mut entrees)?;
+    let octets = ams_config::encode_app_passwords(&entrees)
+        .map_err(|erreur| format!("encodage : {erreur}"))?;
+    ams_config::decode_app_passwords(&octets)
+        .map_err(|erreur| format!("le magasin écrit ne se relit pas : {erreur}"))?;
+    ams_fichier::poser(fichier, &octets)
+        .map_err(|erreur| format!("`{}` : {erreur}", fichier.display()))?;
+    Ok(rendu)
+}
+
+/// Lit le magasin des mots de passe applicatifs ; absent, il est vide.
+fn lire_les_applicatifs(fichier: &Path) -> Result<Vec<ams_auth::AppPassword>, String> {
+    match std::fs::read(fichier) {
+        Ok(octets) => ams_config::decode_app_passwords(&octets)
+            .map_err(|erreur| format!("`{}` : {erreur}", fichier.display())),
+        Err(erreur) if erreur.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(erreur) => Err(format!("`{}` : {erreur}", fichier.display())),
+    }
+}
+
+/// Crée un mot de passe applicatif, et l'écrit UNE FOIS sur la sortie standard.
+///
+/// # LE COMPTE DOIT EXISTER
+///
+/// C'est pourquoi le fichier de comptes est nommé : une faute de frappe sur
+/// `--login` créerait sinon un secret pour un compte qui n'existe pas — et le
+/// compte créé plus tard sous ce nom en hériterait.
+///
+/// # LE SECRET SORT SUR STDOUT, ET NULLE PART AILLEURS
+///
+/// Seul son condensat est rangé. Ce qui n'est pas copié maintenant est perdu,
+/// et c'est voulu : il se révoque et se recrée, il ne se relit pas.
+fn creer_un_applicatif(fichier: &Path, comptes: &Path, nom: &str, libelle: &str) -> ExitCode {
+    let resultat = (|| {
+        if libelle.is_empty() || libelle.len() > ams_config::APP_NOM_OCTETS_MAX {
+            return Err(format!(
+                "`--name` : de 1 à {} octets",
+                ams_config::APP_NOM_OCTETS_MAX
+            ));
+        }
+        if !lire_magasin(comptes, false)?
+            .iter()
+            .any(|compte| compte.login == nom)
+        {
+            return Err(format!(
+                "`{}` : aucun compte `{nom}` — `account list` dit lesquels existent",
+                comptes.display()
+            ));
+        }
+        let mut alea = [0_u8; ams_auth::APP_ALEA_OCTETS];
+        {
+            use std::io::Read as _;
+            std::fs::File::open("/dev/urandom")
+                .and_then(|mut source| source.read_exact(&mut alea))
+                .map_err(|erreur| format!("/dev/urandom : {erreur}"))?;
+        }
+        let (id, mot_de_passe, condensat) = ams_auth::fabriquer_applicatif(&alea);
+        let maintenant = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |depuis| depuis.as_secs());
+        modifier_les_applicatifs(fichier, |entrees| {
+            entrees.push(ams_auth::AppPassword {
+                login: nom.to_string(),
+                id: id.clone(),
+                name: libelle.to_string(),
+                created: maintenant,
+                last_used: 0,
+                digest: condensat,
+            });
+            Ok(())
+        })?;
+        Ok((id, mot_de_passe))
+    })();
+    match resultat {
+        Ok((id, mot_de_passe)) => {
+            eprintln!(
+                "{} : mot de passe applicatif `{id}` créé pour `{nom}` — IL NE SERA PLUS \
+                 JAMAIS AFFICHÉ, copiez-le maintenant :",
+                fichier.display()
+            );
+            println!("{mot_de_passe}");
+            ExitCode::SUCCESS
+        }
+        Err(message) => {
+            eprintln!("air-mail-admin : {message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Liste les mots de passe applicatifs — **jamais un secret**, que le magasin
+/// n'a d'ailleurs pas.
+fn lister_les_applicatifs(fichier: &Path, nom: Option<&str>) -> ExitCode {
+    match lire_les_applicatifs(fichier) {
+        Ok(entrees) => {
+            let retenues: Vec<_> = entrees
+                .iter()
+                .filter(|entree| nom.is_none_or(|nom| entree.login == nom))
+                .collect();
+            if retenues.is_empty() {
+                println!("{} : aucun mot de passe applicatif", fichier.display());
+            }
+            for entree in retenues {
+                println!(
+                    "{}  {}  « {} »  créé {}  {}",
+                    entree.id,
+                    entree.login,
+                    entree.name,
+                    entree.created,
+                    match entree.last_used {
+                        0 => String::from("jamais servi"),
+                        quand => format!("dernier usage {quand}"),
+                    }
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(message) => {
+            eprintln!("air-mail-admin : {message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Révoque un mot de passe applicatif. Le compte entre dans la recherche : un
+/// identifiant tapé de travers ne retire pas celui d'un autre.
+fn revoquer_un_applicatif(fichier: &Path, nom: &str, id: &str) -> ExitCode {
+    match modifier_les_applicatifs(fichier, |entrees| {
+        let place = entrees
+            .iter()
+            .position(|entree| entree.login == nom && entree.id == id)
+            .ok_or_else(|| format!("aucun mot de passe applicatif `{id}` pour `{nom}`"))?;
+        entrees.remove(place);
+        Ok(())
+    }) {
+        Ok(()) => {
+            println!(
+                "{} : mot de passe applicatif `{id}` de `{nom}` révoqué",
+                fichier.display()
+            );
             ExitCode::SUCCESS
         }
         Err(message) => {

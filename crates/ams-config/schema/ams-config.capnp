@@ -178,6 +178,14 @@ struct Configuration {
   # jamais.
   devices @34 :Text;
 
+  # Le magasin des MOTS DE PASSE APPLICATIFS. Vide : aucun n'existe, et seul le
+  # mot de passe principal ouvre IMAP, SMTP et POP3.
+  #
+  # Voir `ams-app-passwords.capnp`. Ce fichier porte des condensats de SECRETS :
+  # le serveur refuse de démarrer s'il est lisible par tous, comme celui des
+  # comptes.
+  appPasswords @35 :Text;
+
   # MTA-STS (RFC 8461) — la politique qu'un domaine publie en HTTPS.
   #
   # **UN CHAMP AJOUTÉ APRÈS COUP DÉCODE DEUX CHAÎNES VIDES**, et deux chaînes

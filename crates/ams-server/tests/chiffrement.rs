@@ -195,6 +195,7 @@ fn configuration_pop3(
         scram_key: String::new(),
         scram_store: String::new(),
         devices: String::new(),
+        app_passwords: String::new(),
         require_fqdn_sender: false,
         require_fqdn_recipient: false,
         require_sender_domain: false,

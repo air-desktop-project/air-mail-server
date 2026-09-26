@@ -135,7 +135,7 @@ pub fn route<'a>(accounts: &'a [Account], address: &[u8]) -> Option<&'a Account>
 /// **Le repliement de casse est ASCII seulement**, comme pour [`route`] : replier
 /// de l'Unicode demanderait des tables, et deux formes normalisées différemment
 /// ne sont pas le même nom.
-fn est_ce_compte(compte: &Account, identite: &[u8]) -> bool {
+pub(crate) fn est_ce_compte(compte: &Account, identite: &[u8]) -> bool {
     compte.login.as_bytes() == identite
         || compte
             .addresses

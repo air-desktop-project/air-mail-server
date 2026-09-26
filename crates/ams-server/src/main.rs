@@ -31,6 +31,7 @@
 
 mod api;
 mod appareils;
+mod applicatifs;
 mod comptes;
 mod delivery;
 mod imap;
@@ -192,6 +193,7 @@ fn monter_l_api(
     incidents: Arc<crate::incidents::Incidents>,
     appareils: Option<Arc<crate::appareils::Appareils>>,
     scram: Option<Arc<crate::scram::Verificateurs>>,
+    applicatifs: Option<Arc<crate::applicatifs::Applicatifs>>,
     file: Option<ams_loop_tokio::Spool>,
     message_max: usize,
     port_h3: Option<u16>,
@@ -287,6 +289,12 @@ fn monter_l_api(
             // nouveau mot de passe.
             let api = match scram {
                 Some(verificateurs) => api.avec_scram(verificateurs),
+                None => api,
+            };
+            // **ET LES MOTS DE PASSE APPLICATIFS** : sans magasin, leurs routes
+            // rendent 501 plutôt qu'une liste vide.
+            let api = match applicatifs {
+                Some(magasin) => api.avec_applicatifs(magasin),
                 None => api,
             };
             // **ET LA CLÉ QUI SCELLE LES INVITATIONS**, la même que celle des
@@ -455,6 +463,33 @@ fn charger_appareils(chemin: &str) -> Result<Vec<ams_config::Device>, String> {
         Err(erreur) if erreur.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(erreur) => Err(format!("appareils `{chemin}` : {erreur}")),
     }
+}
+
+/// Lit le magasin des mots de passe applicatifs.
+///
+/// # ABSENT, IL N'EST PAS UNE PANNE ; PRÉSENT, IL EST TRAITÉ COMME LES COMPTES
+///
+/// Il se crée au premier mot de passe applicatif, comme le magasin d'appareils.
+/// Mais contrairement à celui-ci, **il porte des condensats de secrets** : lisible
+/// par tous, il empêche de démarrer, exactement comme le fichier de comptes.
+///
+/// # Errors
+///
+/// Le fichier lisible par tous, qui ne se lit pas, ou que le décodeur refuse.
+fn charger_applicatifs(chemin: &str) -> Result<Vec<ams_auth::AppPassword>, String> {
+    if chemin.is_empty() {
+        return Ok(Vec::new());
+    }
+    match std::fs::metadata(chemin) {
+        Err(erreur) if erreur.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(erreur) => return Err(format!("mots de passe applicatifs `{chemin}` : {erreur}")),
+        Ok(_) => {}
+    }
+    refuser_fichier_lisible_par_tous(chemin, "magasin des mots de passe applicatifs")?;
+    let octets = std::fs::read(chemin)
+        .map_err(|erreur| format!("mots de passe applicatifs `{chemin}` : {erreur}"))?;
+    ams_config::decode_app_passwords(&octets)
+        .map_err(|erreur| format!("mots de passe applicatifs `{chemin}` : {erreur}"))
 }
 
 /// Chaque adresse de compte relève-t-elle d'un domaine annoncé ?
@@ -1002,6 +1037,23 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         std::path::PathBuf::from(&options.devices),
         charger_appareils(&options.devices)?,
     ));
+    // **ET POUR LES MOTS DE PASSE APPLICATIFS** : une révocation faite depuis
+    // l'API ou le terminal vaut tout de suite, sur les trois protocoles.
+    let applicatifs = if options.app_passwords.is_empty() {
+        None
+    } else {
+        let charges = charger_applicatifs(&options.app_passwords)?;
+        eprintln!(
+            "air-mail-server : mots de passe applicatifs — {} sous `{}`. Ils ouvrent IMAP, \
+             SMTP et POP3 en `PLAIN`, et JAMAIS l'API REST ni SCRAM.",
+            charges.len(),
+            options.app_passwords
+        );
+        Some(Arc::new(crate::applicatifs::Applicatifs::new(
+            std::path::PathBuf::from(&options.app_passwords),
+            charges,
+        )))
+    };
     // `AUTH` n'est annoncé QUE si les deux conditions tiennent : quelqu'un à qui
     // répondre oui, et de quoi chiffrer. La session refuse `AUTH` hors TLS de
     // toute façon ; l'annoncer sans chiffrement ne ferait que mentir plus tôt.
@@ -1839,6 +1891,12 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     let mut responsables = options.hosted.clone();
     responsables.push(options.domain.clone());
     let politique = BoitesConnues::new(Arc::clone(&comptes), postmaster.clone(), &responsables);
+    // **LE MÊME MAGASIN POUR LA POLITIQUE ET POUR L'API** : l'une y vérifie,
+    // l'autre y crée et y révoque.
+    let politique = match &applicatifs {
+        Some(magasin) => politique.avec_applicatifs(Arc::clone(magasin)),
+        None => politique,
+    };
     // **SCRAM N'EXISTE QUE SI LES DEUX CHEMINS SONT LÀ.** `config write` refuse
     // déjà l'un sans l'autre ; ici on ne fait que constater, et un échec de
     // chargement — clé illisible, magasin refusé — EMPÊCHE DE DÉMARRER plutôt
@@ -2210,6 +2268,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
             Some(Arc::clone(&appareils))
         },
         verificateurs_scram.clone(),
+        applicatifs.clone(),
         file.as_ref().map(|attente| attente.as_ref().clone()),
         message_max,
         port_h3,

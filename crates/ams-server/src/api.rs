@@ -174,7 +174,17 @@ pub struct ApiMaildir {
     /// passe. `None` quand SCRAM n'est pas servi : il n'y a alors rien à tenir
     /// à jour.
     scram: Option<Arc<crate::scram::Verificateurs>>,
+    /// Les mots de passe applicatifs, quand la configuration en nomme le
+    /// magasin. `None` : les routes `/v1/me/app-passwords` rendent 501.
+    applicatifs: Option<Arc<crate::applicatifs::Applicatifs>>,
 }
+
+/// Combien de mots de passe applicatifs un compte peut avoir.
+///
+/// **SEIZE** : un client de courrier par poste et par téléphone, avec de la
+/// marge. Sans borne, un jeton volé en fabriquerait autant qu'il veut, et la
+/// liste que son propriétaire lit pour repérer l'intrus deviendrait illisible.
+const APPLICATIFS_PAR_COMPTE: usize = 16;
 
 impl ApiMaildir {
     /// Monte l'API sur le service de boîtes et le magasin de comptes.
@@ -206,6 +216,7 @@ impl ApiMaildir {
             // champ non plus : voir `avec_appareils`.
             appareils: None,
             scram: None,
+            applicatifs: None,
             // ET PAS D'INVITATIONS SANS CLÉ : voir `avec_scellement`.
             scellement: None,
             // NI DE SESSIONS PAR CLEF SANS DOMAINE : voir `avec_domaine`.
@@ -254,6 +265,14 @@ impl ApiMaildir {
     #[must_use]
     pub fn avec_scram(mut self, verificateurs: Arc<crate::scram::Verificateurs>) -> Self {
         self.scram = Some(verificateurs);
+        self
+    }
+
+    /// Lui donne le magasin des mots de passe applicatifs : c'est ce qui ouvre
+    /// `/v1/me/app-passwords`.
+    #[must_use]
+    pub fn avec_applicatifs(mut self, magasin: Arc<crate::applicatifs::Applicatifs>) -> Self {
+        self.applicatifs = Some(magasin);
         self
     }
 
@@ -420,6 +439,21 @@ impl ApiMaildir {
         // La carte des boîtes suit le magasin : une boîte qui resterait
         // accessible sans compte serait servie à un nom que plus rien n'authentifie.
         self.remise.retirer(nom);
+        // **SES MOTS DE PASSE APPLICATIFS PARTENT AVEC LUI.** Ils n'ouvrent plus
+        // rien sans compte ; mais un compte recréé sous le même nom en
+        // hériterait, et le nouveau titulaire aurait des secrets qu'il n'a
+        // jamais vus. Un échec se dit et ne défait pas le retrait.
+        if let Some(magasin) = self.applicatifs.as_ref()
+            && let Err(quoi) = magasin.modifier(|entrees| {
+                entrees.retain(|entree| entree.login != nom);
+                Ok(())
+            })
+        {
+            eprintln!(
+                "air-mail-server : mots de passe applicatifs de `{nom}` NON retirés ({quoi}) — \
+                 à retirer avant de recréer ce compte"
+            );
+        }
         Served {
             status: StatusCode::NO_CONTENT,
             media: JSON_MEDIA_TYPE,
@@ -816,6 +850,135 @@ impl ApiMaildir {
 
         let vues: std::vec::Vec<&str> = adresses.iter().map(String::as_str).collect();
         cree(render::write_enrolled(&id, account, &vues, sortie))
+    }
+
+    /// Les mots de passe applicatifs de qui appelle — **sans leurs secrets**, que
+    /// le serveur n'a pas.
+    fn mes_applicatifs<'o>(&self, account: &str, sortie: &'o mut [u8]) -> Served<'o> {
+        let Some(magasin) = self.applicatifs.as_ref() else {
+            return pas_encore(sortie);
+        };
+        let siens = magasin.du_compte(account);
+        let lignes: std::vec::Vec<render::AppPasswordRow<'_>> = siens
+            .iter()
+            .map(|entree| render::AppPasswordRow {
+                id: &entree.id,
+                name: &entree.name,
+                created: entree.created,
+                last_used: entree.last_used,
+            })
+            .collect();
+        rendre(render::write_app_passwords(&lignes, sortie))
+    }
+
+    /// Crée un mot de passe applicatif pour qui appelle, et le rend UNE FOIS.
+    ///
+    /// # LE SERVEUR TIRE LE SECRET
+    ///
+    /// Cent vingt-huit bits du noyau. Un secret choisi par l'utilisateur serait
+    /// réemployé ailleurs, deviné, ou trop court — et c'est parce qu'il ne l'est
+    /// pas qu'un SHA-256 suffit à le ranger.
+    ///
+    /// # UN JETON SUFFIT, ET C'EST UN CHOIX
+    ///
+    /// Contrairement à l'appairage, qui crée une clef valant jusqu'à sa
+    /// révocation, un mot de passe applicatif **n'ouvre pas cette API** : un
+    /// jeton volé qui en fabriquerait un obtiendrait l'accès au courrier, pas
+    /// celui de fabriquer davantage une fois le jeton expiré. Il reste visible
+    /// dans la liste que le propriétaire lit, et se révoque seul.
+    fn creer_un_applicatif<'o>(
+        &self,
+        account: &str,
+        body: &[u8],
+        sortie: &'o mut [u8],
+    ) -> Served<'o> {
+        let Some(magasin) = self.applicatifs.as_ref() else {
+            return pas_encore(sortie);
+        };
+        let mut place = [0_u8; ams_config::APP_NOM_OCTETS_MAX];
+        let Ok(nom) = render::read_app_password_request(body, &mut place) else {
+            return corps_refuse(sortie);
+        };
+        if !self
+            .comptes
+            .vue()
+            .iter()
+            .any(|compte| compte.login == account)
+        {
+            return absente(sortie);
+        }
+        let mut alea = [0_u8; ams_auth::APP_ALEA_OCTETS];
+        {
+            use std::io::Read as _;
+            if std::fs::File::open("/dev/urandom")
+                .and_then(|mut source| source.read_exact(&mut alea))
+                .is_err()
+            {
+                return notre_faute();
+            }
+        }
+        let (id, mot_de_passe, condensat) = ams_auth::fabriquer_applicatif(&alea);
+        let cree_le = crate::maintenant();
+        let neuf = ams_auth::AppPassword {
+            login: String::from(account),
+            id: id.clone(),
+            name: String::from(nom),
+            created: cree_le,
+            last_used: 0,
+            digest: condensat,
+        };
+        // **LE PLAFOND SE JUGE SOUS LE VERROU** : deux créations simultanées
+        // passeraient sinon toutes deux un contrôle fait avant.
+        let mut plein = false;
+        if let Err(quoi) = magasin.modifier(|entrees| {
+            if entrees.iter().filter(|e| e.login == account).count() >= APPLICATIFS_PAR_COMPTE {
+                plein = true;
+                return Err(crate::applicatifs::INTROUVABLE);
+            }
+            entrees.push(neuf);
+            Ok(())
+        }) {
+            return match plein {
+                true => probleme(ams_api::Reason::LimitReached, StatusCode::CONFLICT, sortie),
+                false => dire_la_faute(&quoi, sortie),
+            };
+        }
+        cree(render::write_app_password_created(
+            &render::AppPasswordRow {
+                id: &id,
+                name: nom,
+                created: cree_le,
+                last_used: 0,
+            },
+            &mot_de_passe,
+            sortie,
+        ))
+    }
+
+    /// Révoque un mot de passe applicatif à soi.
+    ///
+    /// Celui d'un autre est « introuvable », et non « interdit » — la même règle
+    /// que pour les appareils, et pour la même raison.
+    fn revoquer_un_applicatif<'o>(
+        &self,
+        account: &str,
+        id: &str,
+        sortie: &'o mut [u8],
+    ) -> Served<'o> {
+        let Some(magasin) = self.applicatifs.as_ref() else {
+            return pas_encore(sortie);
+        };
+        match magasin.modifier(|entrees| {
+            let place = entrees
+                .iter()
+                .position(|entree| entree.login == account && entree.id == id)
+                .ok_or(crate::applicatifs::INTROUVABLE)?;
+            entrees.remove(place);
+            Ok(())
+        }) {
+            Ok(()) => sans_contenu(),
+            Err(quoi) => dire_la_faute(&quoi, sortie),
+        }
     }
 
     /// Révoque un appareil à soi.
@@ -1874,6 +2037,11 @@ impl Api for ApiMaildir {
             }
             Resource::OwnDevices => self.mes_appareils(account, sortie),
             Resource::OwnDevice { id } => self.revoquer_mon_appareil(account, id, sortie),
+            Resource::OwnAppPasswords if matches!(method, Method::Post) => {
+                self.creer_un_applicatif(account, body, sortie)
+            }
+            Resource::OwnAppPasswords => self.mes_applicatifs(account, sortie),
+            Resource::OwnAppPassword { id } => self.revoquer_un_applicatif(account, id, sortie),
             Resource::AccountAddresses { compte } if matches!(method, Method::Put) => {
                 self.poser_des_adresses(compte, body, sortie)
             }
@@ -2594,8 +2762,14 @@ fn dire_la_faute<'o>(quoi: &crate::comptes::Faute, sortie: &'o mut [u8]) -> Serv
 /// Il n'y a volontairement pas de longueur minimale ici. Refuser le vide écarte
 /// l'accident ; poser un seuil serait une politique, et une politique se règle
 /// (C8) plutôt qu'elle ne se grave.
+///
+/// # ET UN SECRET QUI A LA FORME D'UN MOT DE PASSE APPLICATIF EST REFUSÉ
+///
+/// La vérification choisit son chemin sur la forme : `amsp-…` ne s'essaie QUE
+/// comme mot de passe applicatif. Un mot de passe principal de cette forme
+/// n'ouvrirait donc jamais rien, et son propriétaire croirait l'avoir posé.
 fn secret_recevable(secret: &str) -> bool {
-    !secret.is_empty()
+    !secret.is_empty() && ams_auth::identifiant_applicatif(secret.as_bytes()).is_none()
 }
 
 fn refus_de_corps(sortie: &mut [u8]) -> Served<'_> {

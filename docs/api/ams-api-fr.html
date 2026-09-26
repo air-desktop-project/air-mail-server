@@ -780,6 +780,40 @@ POST /v1/me/devices
   <p>Révoquer deux fois rend <code>404</code> la seconde fois. §9.3.5 de RFC 9110 l'admet : ce qui doit être idempotent est l'<em>effet</em>, et il l'est — l'appareil n'est plus là dans les deux cas. Rendre <code>204</code> à une révocation qui n'a rien retiré laisserait croire qu'on a retiré quelque chose.</p>
 </div>
 
+<div class="ressource">
+  <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/me/app-passwords</span><span class="portee">jeton valide</span></div>
+  <pre><code>{ "appPasswords": [
+    { "id": "0123456789abcdef", "name": "Thunderbird — bureau",
+      "createdAt": 1790000000, "lastUsedAt": 1790003600 }
+] }</code></pre>
+  <p><strong>Les mots de passe applicatifs</strong> du compte : un secret par client de messagerie — Thunderbird au bureau, Apple Mail sur le portable —, nommé, daté, et révocable <em>seul</em>. Perdre un poste ne force plus à changer le mot de passe du compte, donc à reconfigurer tous les autres clients. <code>lastUsedAt</code> est tenu <strong>à l'heure près</strong>, et vaut <code>0</code> pour un mot de passe qui n'a jamais servi.</p>
+  <p><strong>Le secret n'y figure jamais</strong> : le serveur n'en garde que le condensat.</p>
+</div>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe post">POST</span><span class="chemin">/v1/me/app-passwords</span><span class="portee">jeton valide</span></div>
+  <pre><code>POST /v1/me/app-passwords
+{ "name": "Thunderbird — bureau" }
+
+→ 201
+{ "id": "0123456789abcdef", "name": "Thunderbird — bureau",
+  "createdAt": 1790000000,
+  "password": "amsp-0123456789abcdef-fedcba98765432100011223344556677" }</code></pre>
+  <p>Crée un mot de passe applicatif. <strong>Le serveur le tire</strong> — cent vingt-huit bits d'aléa — et <strong>le rend une seule fois</strong>, dans cette réponse : il n'en garde que le condensat. Ce qui n'est pas copié maintenant se révoque et se recrée ; il ne se relit pas. <code>name</code> est obligatoire, de 1 à 128 octets, et peut arriver échappé (<code>\u2014</code>).</p>
+  <div class="note danger">
+    <span class="etiquette">Ce qu'il ouvre, et ce qu'il n'ouvre pas</span>
+    <p>Il ouvre <strong>IMAP, la soumission SMTP et POP3</strong>, en <code>PLAIN</code> — toujours sous TLS —, avec le nom de compte ou l'une de ses adresses comme identifiant.</p>
+    <p>Il n'ouvre <strong>ni cette API</strong> — <code>POST /v1/tokens</code> le refuse en <code>401</code> —, <strong>ni SCRAM</strong>. Sans la première règle, le client de courrier d'un poste perdu pourrait fabriquer d'autres mots de passe, et le révoquer ne suffirait plus. La seconde tient à SCRAM lui-même : son sel part avant toute preuve, donc pour un seul secret par identifiant.</p>
+  </div>
+  <p>Seize par compte au plus : au-delà, <code>409</code> (<code>/problems/conflict</code>) — révoquez celui dont vous ne vous servez plus. <code>501</code> si ce serveur n'a pas de magasin de mots de passe applicatifs.</p>
+  <p>Un mot de passe principal ne peut pas prendre leur forme (<code>amsp-</code> suivi de seize puis trente-deux chiffres hexadécimaux) : <code>PUT /v1/me/password</code> le refuse en <code>400</code>, parce qu'il ne s'essaierait jamais comme mot de passe principal.</p>
+</div>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe delete">DELETE</span><span class="chemin">/v1/me/app-passwords/{id}</span><span class="portee">jeton valide</span></div>
+  <p>Révoque un mot de passe applicatif : <code>204</code>, et le client qui s'en servait est refusé <strong>à sa prochaine connexion</strong>. Celui d'un autre compte rend <code>404</code>, comme un identifiant qui n'existe pas — la même règle que pour les appareils. Révoquer deux fois rend <code>404</code>.</p>
+</div>
+
 <h3 id="r-admin"><span class="numero">5.9</span>Administration</h3>
 
 <p>Toutes ces ressources exigent le domaine <code>admin</code>, qu'un mot de passe n'accorde jamais. Voir <a href="#admin">§3.6</a>.</p>

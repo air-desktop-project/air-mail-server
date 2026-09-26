@@ -68,10 +68,16 @@ extern crate alloc;
 extern crate std;
 
 mod appareil;
+mod applicatif;
 mod scram;
 mod store;
 
 pub use appareil::{CLE_OCTETS, CONDENSAT_OCTETS, Cle, Refus, SIGNATURE_OCTETS, verifier};
+pub use applicatif::{
+    ALEA_OCTETS as APP_ALEA_OCTETS, AppPassword, ID_CHIFFRES as APP_ID_CHIFFRES,
+    LONGUEUR as APP_LONGUEUR, Ouverture, PREFIXE as APP_PREFIXE, authenticate_all,
+    fabriquer as fabriquer_applicatif, identifiant as identifiant_applicatif,
+};
 pub use scram::{
     CLE_SCELLEMENT_OCTETS, Cles as ScramKeys, Error as ScramError, ITERATIONS as SCRAM_ITERATIONS,
     NONCE_OCTETS, SEL_OCTETS, Verificateur as ScramVerifier, deriver as scram_deriver,

@@ -83,6 +83,9 @@ pub struct Options {
     /// Le magasin des appareils enrôlés. Vide : pas d'ouverture de session par
     /// clef, et le mot de passe reste seul.
     pub devices: Option<PathBuf>,
+    /// Le magasin des mots de passe applicatifs. Vide : seul le mot de passe
+    /// principal ouvre IMAP, SMTP et POP3.
+    pub app_passwords: Option<PathBuf>,
     /// Où écouter en POP3. Vide : POP3 n'est pas servi.
     pub listen_pop3: Option<SocketAddr>,
     /// Les écoutes POP3, chacune avec son mode TLS.
@@ -242,6 +245,7 @@ impl Default for Options {
             scram_key: None,
             scram_store: None,
             devices: None,
+            app_passwords: None,
             // PAS DE POP3 PAR DÉFAUT : un port ouvert qu'on n'a pas demandé est
             // une surface de plus, et celui-ci ne sert personne sans certificat.
             listen_pop3: None,
@@ -428,6 +432,7 @@ impl Options {
             scram_key: chemin(self.scram_key.as_ref()),
             scram_store: chemin(self.scram_store.as_ref()),
             devices: chemin(self.devices.as_ref()),
+            app_passwords: chemin(self.app_passwords.as_ref()),
             tlsrpt: ams_config::Tlsrpt {
                 directory: chemin(self.tlsrpt_dir.as_ref()),
                 send: self.tlsrpt_send,
@@ -599,6 +604,13 @@ OPTIONS DE `config write`
                         du fichier de comptes, qui porte des empreintes.
                         Sans lui, aucun appareil ne peut ouvrir de session
                         par clef, et le mot de passe reste seul.
+    --app-passwords <chemin>
+                        le magasin des mots de passe applicatifs — un secret
+                        par client de messagerie, révocable seul. Il porte
+                        des condensats de SECRETS : même règle que le
+                        fichier de comptes, lisible par tous il empêche de
+                        démarrer. Sans lui, seul le mot de passe principal
+                        ouvre IMAP, SMTP et POP3.
     --listen-pop3 <adr>    où écouter en POP3 avec `STLS` — le 110. RÉPÉTABLE
                            (défaut : pas de POP3)
     --listen-pop3s <adr>   où écouter en POP3 avec TLS IMPLICITE — le 995.
@@ -1259,6 +1271,7 @@ where
             "--scram-key" => options.scram_key = Some(PathBuf::from(valeur()?)),
             "--scram" => options.scram_store = Some(PathBuf::from(valeur()?)),
             "--devices" => options.devices = Some(PathBuf::from(valeur()?)),
+            "--app-passwords" => options.app_passwords = Some(PathBuf::from(valeur()?)),
             "--resolver" => {
                 let brute = valeur()?;
                 let adresse: SocketAddr = brute
@@ -2169,6 +2182,7 @@ mod tests {
             // clefs enrôlées dans un fichier sans nom, et chaque ouverture de
             // session par clef échouerait sans que rien ne dise pourquoi.
             (&["--devices"], "attend une valeur"),
+            (&["--app-passwords"], "attend une valeur"),
         ] {
             let erreur = parse(arguments).expect_err("refusé");
             assert!(
@@ -3586,6 +3600,30 @@ mod tests {
         // ABSENT PAR DÉFAUT : les sessions par clef ne s'invitent pas.
         let arguments: &[&str] = &["--domain", "mail.example.com"];
         assert!(ecrire(arguments).en_configuration().devices.is_empty());
+    }
+
+    /// **`--app-passwords` SE POSE SEUL, ET SON ABSENCE EST LE DÉFAUT** : sans
+    /// lui, seul le mot de passe principal ouvre IMAP, SMTP et POP3 — l'état de
+    /// tout serveur d'avant la 0.2.17.
+    #[test]
+    fn le_magasin_des_mots_de_passe_applicatifs_se_pose_seul() {
+        let arguments: &[&str] = &["--app-passwords", "/x/applicatifs.bin"];
+        let options = ecrire(arguments);
+        assert_eq!(
+            options.app_passwords,
+            Some(PathBuf::from("/x/applicatifs.bin"))
+        );
+        assert_eq!(
+            options.en_configuration().app_passwords,
+            "/x/applicatifs.bin"
+        );
+        let arguments: &[&str] = &["--domain", "mail.example.com"];
+        assert!(
+            ecrire(arguments)
+                .en_configuration()
+                .app_passwords
+                .is_empty()
+        );
     }
 
     #[test]

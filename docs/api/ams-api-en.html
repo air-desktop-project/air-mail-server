@@ -782,6 +782,40 @@ POST /v1/me/devices
   <p>Revoking twice returns <code>404</code> the second time. RFC 9110 §9.3.5 allows this: what must be idempotent is the <em>effect</em>, and it is — the device is gone either way. Returning <code>204</code> to a revocation that removed nothing would suggest something had been removed.</p>
 </div>
 
+<div class="ressource">
+  <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/me/app-passwords</span><span class="portee">valid token</span></div>
+  <pre><code>{ "appPasswords": [
+    { "id": "0123456789abcdef", "name": "Thunderbird — office",
+      "createdAt": 1790000000, "lastUsedAt": 1790003600 }
+] }</code></pre>
+  <p><strong>The account's application passwords</strong>: one secret per mail client — Thunderbird at the office, Apple Mail on the laptop —, named, dated, and revocable <em>on its own</em>. Losing a machine no longer forces a change of the account password, and so a reconfiguration of every other client. <code>lastUsedAt</code> is kept <strong>to the hour</strong>, and is <code>0</code> for a password never used.</p>
+  <p><strong>The secret never appears</strong>: the server only keeps its digest.</p>
+</div>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe post">POST</span><span class="chemin">/v1/me/app-passwords</span><span class="portee">valid token</span></div>
+  <pre><code>POST /v1/me/app-passwords
+{ "name": "Thunderbird — office" }
+
+→ 201
+{ "id": "0123456789abcdef", "name": "Thunderbird — office",
+  "createdAt": 1790000000,
+  "password": "amsp-0123456789abcdef-fedcba98765432100011223344556677" }</code></pre>
+  <p>Creates an application password. <strong>The server draws it</strong> — 128 bits of randomness — and <strong>returns it once</strong>, in this response: it keeps only the digest. What is not copied now gets revoked and recreated; it cannot be read again. <code>name</code> is required, 1 to 128 bytes, and may arrive escaped (<code>\u2014</code>).</p>
+  <div class="note danger">
+    <span class="etiquette">What it opens, and what it does not</span>
+    <p>It opens <strong>IMAP, SMTP submission and POP3</strong>, over <code>PLAIN</code> — always under TLS —, with the account name or one of its addresses as the user name.</p>
+    <p>It opens <strong>neither this API</strong> — <code>POST /v1/tokens</code> refuses it with <code>401</code> — <strong>nor SCRAM</strong>. Without the first rule, the mail client of a lost machine could mint more passwords, and revoking it would no longer be enough. The second comes from SCRAM itself: its salt is sent before any proof, hence for a single secret per user name.</p>
+  </div>
+  <p>At most sixteen per account: beyond that, <code>409</code> (<code>/problems/conflict</code>) — revoke the one you no longer use. <code>501</code> if this server has no application-password store.</p>
+  <p>A main password cannot take their shape (<code>amsp-</code> followed by sixteen then thirty-two hex digits): <code>PUT /v1/me/password</code> refuses it with <code>400</code>, since it would never be tried as a main password.</p>
+</div>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe delete">DELETE</span><span class="chemin">/v1/me/app-passwords/{id}</span><span class="portee">valid token</span></div>
+  <p>Revokes an application password: <code>204</code>, and the client using it is refused <strong>at its next connection</strong>. Another account's returns <code>404</code>, like an id that does not exist — the same rule as for devices. Revoking twice returns <code>404</code>.</p>
+</div>
+
 <h3 id="r-admin"><span class="numero">5.9</span>Administration</h3>
 
 <p>All of these require the <code>admin</code> area, which a password never grants. See <a href="#admin">§3.6</a>.</p>
