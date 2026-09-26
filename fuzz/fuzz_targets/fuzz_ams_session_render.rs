@@ -40,8 +40,8 @@ use libfuzzer_sys::fuzz_target;
 use ams_api::{Event, Reader};
 use ams_proto_imap::Flags;
 use ams_session::http::render::{
-    MailboxRow, MessageRow, read_flag_patch, write_changes, write_mailbox, write_mailboxes,
-    write_message, write_messages, write_metrics,
+    MailboxRow, MessageRow, TRANSFER_UIDS_MAX, read_flag_patch, read_transfer_request,
+    write_changes, write_mailbox, write_mailboxes, write_message, write_messages, write_metrics,
 };
 
 /// Ce qu'on soumet.
@@ -154,6 +154,31 @@ fuzz_target!(|entree: Entree| {
                 "une modification pose et ôte le même drapeau"
             );
         }
+    }
+
+    // PROPRIÉTÉ 6 bis : une demande de transfert acceptée est bornée, sans
+    // doublon ni zéro, et nomme une destination. Le même corps, lu deux fois,
+    // se lit pareil.
+    let mut nom = [0_u8; 255];
+    if let Ok(demande) = read_transfer_request(entree.patch, &mut nom) {
+        let uids = demande.uids();
+        assert!(!demande.to.is_empty(), "une destination vide acceptée");
+        assert!(
+            !uids.is_empty() && uids.len() <= TRANSFER_UIDS_MAX,
+            "{} UID acceptés",
+            uids.len()
+        );
+        for (rang, uid) in uids.iter().enumerate() {
+            assert_ne!(*uid, 0, "un UID nul accepté");
+            assert!(
+                !uids.iter().skip(rang + 1).any(|autre| autre == uid),
+                "un doublon accepté"
+            );
+        }
+        let (to, vus) = (demande.to.to_owned(), uids.to_vec());
+        let mut encore = [0_u8; 255];
+        let relue = read_transfer_request(entree.patch, &mut encore).expect("relisible");
+        assert_eq!((relue.to, relue.uids()), (to.as_str(), vus.as_slice()));
     }
 
     // PROPRIÉTÉ 7 : chaque taille insuffisante se dit.

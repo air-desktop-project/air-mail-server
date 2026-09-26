@@ -274,7 +274,11 @@ fn un_corps_la_ou_il_n_a_pas_de_sens_se_refuse() {
 fn un_corps_sans_type_se_refuse() {
     let porte = jeton("marc", Scope::one(Area::Mail, Rights::Write));
     // Sans `content-type`.
-    let champs = requete(b"POST", b"/v1/mailboxes/INBOX/messages", porte.as_bytes());
+    let champs = requete(
+        b"PATCH",
+        b"/v1/mailboxes/INBOX/messages/1",
+        porte.as_bytes(),
+    );
     let tete = entete(&champs);
     let mut place = [0_u8; PLACE];
     let session = une_session();
@@ -288,7 +292,11 @@ fn un_corps_sans_type_se_refuse() {
         b"application/json-patch+json",
         b"",
     ] {
-        let mut champs = requete(b"POST", b"/v1/mailboxes/INBOX/messages", porte.as_bytes());
+        let mut champs = requete(
+            b"PATCH",
+            b"/v1/mailboxes/INBOX/messages/1",
+            porte.as_bytes(),
+        );
         champs.push((b"content-type", dit));
         let tete = entete(&champs);
         let mut place = [0_u8; PLACE];
@@ -309,7 +317,11 @@ fn le_type_se_lit_avec_ses_parametres() {
         b"application/json ;charset=utf-8",
         b"application/json; charset=UTF-8",
     ] {
-        let mut champs = requete(b"POST", b"/v1/mailboxes/INBOX/messages", porte.as_bytes());
+        let mut champs = requete(
+            b"PATCH",
+            b"/v1/mailboxes/INBOX/messages/1",
+            porte.as_bytes(),
+        );
         champs.push((b"content-type", dit));
         let tete = entete(&champs);
         let mut place = [0_u8; PLACE];
@@ -320,10 +332,15 @@ fn le_type_se_lit_avec_ses_parametres() {
     }
 }
 
-/// **UNE SOUMISSION PORTE UN MESSAGE, ET LE RESTE PORTE DU JSON.**
+/// **UNE SOUMISSION ET UN DÉPÔT PORTENT UN MESSAGE, ET LE RESTE PORTE DU JSON.**
 ///
 /// §5.2.1 de RFC 2046 nomme le type d'un message de courrier. L'emballer dans une
 /// chaîne JSON doublerait sa taille pour ne rien dire de plus.
+///
+/// **CET ESSAI VERROUILLAIT LE DÉFAUT** : il exigeait qu'un dépôt
+/// (`POST …/messages`) refuse `message/rfc822`, le type que le manuel annonce —
+/// et la production acceptait `application/json` pour un message brut. Il dit
+/// désormais ce que le manuel dit.
 ///
 /// **ET PAS L'INVERSE** : accepter un message là où l'on attend du JSON ferait
 /// lire un message comme une représentation, et du JSON là où l'on attend un
@@ -353,9 +370,30 @@ fn une_soumission_porte_un_message_et_rien_d_autre() {
     let tour = session.request(&tete, b"{}", MAINTENANT, &mut place);
     assert_eq!(tour.status(), StatusCode::BAD_REQUEST);
 
-    // Un message là où l'on attend du JSON : refusé de même.
+    // Un dépôt porte un message, lui aussi…
     let porte = jeton("marc", Scope::one(Area::Mail, Rights::Write));
     let mut champs = requete(b"POST", b"/v1/mailboxes/INBOX/messages", porte.as_bytes());
+    champs.push((b"content-type", b"message/rfc822"));
+    let tete = entete(&champs);
+    let mut place = [0_u8; PLACE];
+    let tour = session.request(&tete, message, MAINTENANT, &mut place);
+    assert_eq!(tour.status(), StatusCode::OK);
+    assert!(en_ressource(tour.next()).is_some());
+
+    // … et non du JSON.
+    let mut champs = requete(b"POST", b"/v1/mailboxes/INBOX/messages", porte.as_bytes());
+    champs.push((b"content-type", b"application/json"));
+    let tete = entete(&champs);
+    let mut place = [0_u8; PLACE];
+    let tour = session.request(&tete, b"{}", MAINTENANT, &mut place);
+    assert_eq!(tour.status(), StatusCode::BAD_REQUEST);
+
+    // Un message là où l'on attend du JSON — changer des drapeaux : refusé.
+    let mut champs = requete(
+        b"PATCH",
+        b"/v1/mailboxes/INBOX/messages/1",
+        porte.as_bytes(),
+    );
     champs.push((b"content-type", b"message/rfc822"));
     let tete = entete(&champs);
     let mut place = [0_u8; PLACE];

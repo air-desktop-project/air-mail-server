@@ -11,13 +11,13 @@ use ams_proto_imap::Flags;
 
 use super::{
     AccountRow, AppPasswordRow, BanRow, DelegationRow, DeviceRow, FlagPatch, MailboxRow,
-    MessageRow, read_account_body, read_app_password_request, read_challenge_request,
-    read_flag_patch, read_invitation_request, read_own_password_body, read_pairing_request,
-    read_rights_request, read_search_criteria, read_session_request, write_account, write_accounts,
-    write_app_password_created, write_app_passwords, write_bans, write_challenge, write_changes,
-    write_delegations, write_devices, write_domains, write_enrolled, write_health,
-    write_invitation, write_mailbox, write_mailboxes, write_message, write_messages, write_metrics,
-    write_search,
+    MessageRow, TRANSFER_UIDS_MAX, read_account_body, read_app_password_request,
+    read_challenge_request, read_flag_patch, read_invitation_request, read_own_password_body,
+    read_pairing_request, read_rights_request, read_search_criteria, read_session_request,
+    read_transfer_request, write_account, write_accounts, write_app_password_created,
+    write_app_passwords, write_bans, write_challenge, write_changes, write_delegations,
+    write_devices, write_domains, write_enrolled, write_health, write_invitation, write_mailbox,
+    write_mailboxes, write_message, write_messages, write_metrics, write_search, write_transfer,
 };
 
 /// Un appareil d'essai.
@@ -389,7 +389,11 @@ fn un_corps_qui_n_est_pas_une_modification_se_refuse() {
 #[test]
 fn chaque_tampon_insuffisant_se_dit() {
     type Ecrivain = fn(&mut [u8]) -> Result<&[u8], ams_api::Error>;
-    let ecrivains: [(&str, Ecrivain); 28] = [
+    let ecrivains: [(&str, Ecrivain); 30] = [
+        ("transfer", |place| {
+            write_transfer(7, &[(1, 57), (2, 58)], &[4], place)
+        }),
+        ("transfer-vide", |place| write_transfer(7, &[], &[], place)),
         ("mailboxes", |place| write_mailboxes(&[boite()], place)),
         ("mailbox", |place| write_mailbox(&boite(), place)),
         ("messages", |place| {
@@ -1482,4 +1486,80 @@ fn le_corps_d_une_delegation_ne_porte_que_des_droits() {
             String::from_utf8_lossy(corps)
         );
     }
+}
+
+// ── Copier et déplacer ──────────────────────────────────────────────────────
+
+/// **LA DESTINATION SE DÉSÉCHAPPE** : `json.dumps` de Python écrit
+/// `Envoy\u00e9s`, et c'est « Envoyés » qu'il désigne.
+#[test]
+fn une_demande_de_transfert_se_lit_et_se_desechappe() {
+    let mut nom = [0_u8; 64];
+    let lue = read_transfer_request(br#"{"to":"Envoy\u00e9s","uids":[3,1,2]}"#, &mut nom)
+        .expect("lisible");
+    assert_eq!(lue.to, "Envoyés");
+    assert_eq!(lue.uids(), &[3, 1, 2]);
+    let mut nom = [0_u8; 64];
+    let lue = read_transfer_request(br#"{"uids":[9],"to":"Archives"}"#, &mut nom).expect("lisible");
+    assert_eq!((lue.to, lue.uids()), ("Archives", &[9_u32][..]));
+}
+
+/// Ce qu'une demande de transfert n'a pas le droit d'être.
+#[test]
+fn une_demande_de_transfert_mal_dite_se_refuse() {
+    let trop: String = std::format!(
+        r#"{{"to":"A","uids":[{}]}}"#,
+        (1..=TRANSFER_UIDS_MAX + 1)
+            .map(|uid| uid.to_string())
+            .collect::<std::vec::Vec<_>>()
+            .join(",")
+    );
+    for corps in [
+        &br#"{"to":"A","uids":[]}"#[..],
+        br#"{"to":"","uids":[1]}"#,
+        br#"{"uids":[1]}"#,
+        br#"{"to":"A"}"#,
+        br#"{"to":"A","uids":[0]}"#,
+        br#"{"to":"A","uids":[-1]}"#,
+        br#"{"to":"A","uids":[4294967296]}"#,
+        br#"{"to":"A","uids":[1,1]}"#,
+        br#"{"to":"A","to":"B","uids":[1]}"#,
+        br#"{"to":"A","uids":[1],"uids":[2]}"#,
+        br#"{"to":"A","uids":[1],"autre":1}"#,
+        br#"{"to":["A"],"uids":[1]}"#,
+        br#"{"to":"A","uids":[[1]]}"#,
+        br#"{"to":"A","uids":["1"]}"#,
+        br#"{"to":"A","uids":1}"#,
+        br#"{"to":true,"uids":[1]}"#,
+        br#"{"to":"A","uids":[1]"#,
+        trop.as_bytes(),
+    ] {
+        let mut nom = [0_u8; 64];
+        assert_eq!(
+            read_transfer_request(corps, &mut nom)
+                .err()
+                .map(Error::reason),
+            Some(Reason::BadJsonBody),
+            "{}",
+            String::from_utf8_lossy(corps)
+        );
+    }
+    // Une destination trop longue pour la place qu'on lui donne.
+    let mut nom = [0_u8; 2];
+    assert_eq!(
+        read_transfer_request(br#"{"to":"Archives","uids":[1]}"#, &mut nom)
+            .err()
+            .map(Error::reason),
+        Some(Reason::BadJsonBody)
+    );
+}
+
+#[test]
+fn l_issue_d_un_transfert_s_ecrit() {
+    let mut place = [0_u8; 256];
+    let ecrit = write_transfer(7, &[(1, 57), (2, 58)], &[4], &mut place).expect("écrit");
+    assert_eq!(
+        core::str::from_utf8(ecrit).expect("utf-8"),
+        r#"{"uidValidity":7,"uids":[{"from":1,"to":57},{"from":2,"to":58}],"missing":[4]}"#
+    );
 }

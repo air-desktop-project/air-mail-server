@@ -244,6 +244,8 @@ fuzz_target!(|entree: Entree| {
                     | Resource::MessageRaw { .. }
                     | Resource::MessagePart { .. }
                     | Resource::Search { .. }
+                    | Resource::Copy { .. }
+                    | Resource::Move { .. }
                     | Resource::Changes { .. }
             ),
             "un titulaire nommé pour autre chose qu'une boîte : {resource:?}"
@@ -349,6 +351,16 @@ fn segments_de(
             pousser("mailboxes");
             pousser(boite);
             pousser("search");
+        }
+        Resource::Copy { boite } => {
+            pousser("mailboxes");
+            pousser(boite);
+            pousser("copy");
+        }
+        Resource::Move { boite } => {
+            pousser("mailboxes");
+            pousser(boite);
+            pousser("move");
         }
         Resource::Changes { boite } => {
             pousser("mailboxes");

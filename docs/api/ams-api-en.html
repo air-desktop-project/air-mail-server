@@ -665,6 +665,22 @@ authorization: Bearer AQECAAAAAG…</code></pre>
 </div>
 
 <div class="ressource">
+  <div class="ligne"><span class="verbe post">POST</span><span class="chemin">/v1/mailboxes/{mailbox}/copy</span><span class="chemin">/v1/mailboxes/{mailbox}/move</span><span class="portee">mail:write</span></div>
+  <pre><code>POST /v1/mailboxes/INBOX/move
+{ "to": "Archives", "uids": [1792, 1795, 1801] }
+
+→ 200
+{ "uidValidity": 7,
+  "uids": [ { "from": 1792, "to": 57 }, { "from": 1795, "to": 58 } ],
+  "missing": [1801] }</code></pre>
+  <p><strong>Copy or move messages</strong> to another mailbox of the same account, up to 256 per request — filing a selection must not cost one round trip per message. This is IMAP's <code>COPY</code> and <code>MOVE</code>: each message returned states its new UID in the destination (under its <code>uidValidity</code>), and a UID the source no longer holds is returned in <code>missing</code>, without failing the rest.</p>
+  <div class="note">
+    <span class="etiquette">All or nothing</span>
+    <p>If a copy fails, the successful ones are undone and the answer is <code>500</code>. A move removes the originals only once every copy is done. The destination must exist (<code>404</code> otherwise); moving a mailbox onto itself is refused (<code>400</code>). The destination name may be JSON-escaped (<code>"Envoy\u00e9s"</code>).</p>
+  </div>
+</div>
+
+<div class="ressource">
   <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/mailboxes/{mailbox}/messages/{uid}/raw</span><span class="portee">mail:read</span></div>
   <p>The message <strong>exactly as it arrived</strong>, as <code>message/rfc822</code>. This is not an alternative representation of the previous resource: one is what was received, the other is our reading of it. The question "what did the server actually receive?" must have a stable answer that does not depend on an <code>Accept</code> header.</p>
 </div>

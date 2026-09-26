@@ -790,6 +790,143 @@ pub fn read_rights_request(corps: &[u8]) -> Result<([&str; 3], usize), Error> {
     Ok((noms, combien))
 }
 
+/// Combien d'UID une copie ou un déplacement nomme au plus.
+///
+/// **UNE BORNE, PAS UNE PAGE** : ranger une sélection de deux cent cinquante-six
+/// messages en une requête suffit à toute interface, et la réponse — deux UID
+/// par message — tient dans le tampon de sortie.
+pub const TRANSFER_UIDS_MAX: usize = 256;
+
+/// Une demande de copie ou de déplacement : `{"to":"Archives","uids":[1,2]}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransferRequest<'n> {
+    /// La boîte de destination, DÉSÉCHAPPÉE — `Envoy\u00e9s` est `Envoyés`.
+    pub to: &'n str,
+    /// Les UID, dans l'ordre où ils ont été écrits.
+    pub uids: [u32; TRANSFER_UIDS_MAX],
+    /// Combien de `uids` valent.
+    pub count: usize,
+}
+
+impl TransferRequest<'_> {
+    /// Les UID demandés.
+    #[must_use]
+    pub fn uids(&self) -> &[u32] {
+        self.uids.get(..self.count).unwrap_or_default()
+    }
+}
+
+/// Lit une demande de copie ou de déplacement.
+///
+/// # LA DESTINATION SE DÉSÉCHAPPE, AU LIEU DE SE REFUSER
+///
+/// Les noms de boîte portent des accents, et bien des bibliothèques JSON les
+/// échappent d'office — `json.dumps` de Python écrit `Envoy\u00e9s`. Les
+/// refuser écarterait ces clients pour une écriture équivalente. `nom` reçoit
+/// la forme décodée.
+///
+/// # Errors
+///
+/// [`Reason::BadJsonBody`] pour un corps illisible, un champ inconnu ou
+/// répété, une destination absente ou vide, un UID nul, négatif ou au-delà de
+/// 2³² − 1, un doublon, aucun UID ou plus de [`TRANSFER_UIDS_MAX`] — ou une
+/// destination trop longue pour `nom`.
+pub fn read_transfer_request<'n>(
+    corps: &[u8],
+    nom: &'n mut [u8],
+) -> Result<TransferRequest<'n>, Error> {
+    let mauvais = Error::new(Reason::BadJsonBody);
+    let mut lecteur = Reader::new(corps);
+    let mut destination: Option<Str<'_>> = None;
+    let mut uids = [0_u32; TRANSFER_UIDS_MAX];
+    let mut combien = 0_usize;
+    // Le champ qu'on lit : 1 `to`, 2 `uids`.
+    let mut quel = 0_u8;
+    let mut vus = (false, false);
+    let mut dans_le_tableau = false;
+    loop {
+        match lecteur.read().map_err(|_| mauvais)? {
+            None => break,
+            Some(Event::Key(clef)) => {
+                quel = match (clef.is("to"), clef.is("uids"), vus) {
+                    (true, _, (false, _)) => 1,
+                    (_, true, (_, false)) => 2,
+                    _ => return Err(mauvais),
+                };
+                vus = (vus.0 || quel == 1, vus.1 || quel == 2);
+            }
+            Some(Event::Text(texte)) if quel == 1 => destination = Some(texte),
+            Some(Event::ArrayStart) if quel == 2 && !dans_le_tableau => dans_le_tableau = true,
+            Some(Event::ArrayEnd) if dans_le_tableau => dans_le_tableau = false,
+            Some(Event::Number(nombre)) if dans_le_tableau => {
+                let uid = nombre
+                    .as_u64()
+                    .and_then(|valeur| u32::try_from(valeur).ok())
+                    .filter(|valeur| *valeur != 0)
+                    .ok_or(mauvais)?;
+                if uids.iter().take(combien).any(|connu| *connu == uid) {
+                    return Err(mauvais);
+                }
+                let place = uids.get_mut(combien).ok_or(mauvais)?;
+                *place = uid;
+                combien = combien.saturating_add(1);
+            }
+            Some(Event::ObjectStart | Event::ObjectEnd) => {}
+            Some(_) => return Err(mauvais),
+        }
+    }
+    let to = destination
+        .ok_or(mauvais)?
+        .unescape(nom)
+        .map_err(|_| mauvais)?;
+    if to.is_empty() || combien == 0 {
+        return Err(mauvais);
+    }
+    Ok(TransferRequest {
+        to,
+        uids,
+        count: combien,
+    })
+}
+
+/// Écrit l'issue d'une copie ou d'un déplacement :
+/// `{"uidValidity":7,"uids":[{"from":1,"to":57}],"missing":[4]}`.
+///
+/// **LES ABSENTS SE DISENT** : un UID qui n'est plus dans la source — effacé
+/// ailleurs entre-temps — n'est pas une faute (§6.4.7 de RFC 9051 le tait de
+/// même), mais le client qui l'a nommé doit savoir qu'il n'a rien copié.
+///
+/// # Errors
+///
+/// [`Reason::BufferTooSmall`] si `sortie` ne suffit pas.
+pub fn write_transfer<'o>(
+    uid_validity: u32,
+    faits: &[(u32, u32)],
+    absents: &[u32],
+    sortie: &'o mut [u8],
+) -> Result<&'o [u8], Error> {
+    let mut json = Json::new(sortie);
+    json.begin_object()?;
+    json.field_u64("uidValidity", u64::from(uid_validity))?;
+    json.key("uids")?;
+    json.begin_array()?;
+    for (de, vers) in faits {
+        json.begin_object()?;
+        json.field_u64("from", u64::from(*de))?;
+        json.field_u64("to", u64::from(*vers))?;
+        json.end_object()?;
+    }
+    json.end_array()?;
+    json.key("missing")?;
+    json.begin_array()?;
+    for absent in absents {
+        json.number(u64::from(*absent))?;
+    }
+    json.end_array()?;
+    json.end_object()?;
+    json.finish()
+}
+
 /// Écrit la liste des comptes.
 ///
 /// # Errors

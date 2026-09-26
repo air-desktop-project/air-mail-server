@@ -2103,6 +2103,106 @@ impl ApiMaildir {
         (1..=boite.exists()).find(|rang| boite.info(*rang).map(|info| info.uid) == Some(voulu))
     }
 
+    /// Le rang d'un UID, par dichotomie.
+    ///
+    /// **LES UID CROISSENT AVEC LE RANG** — c'est une garantie d'IMAP
+    /// (§2.3.1.1 de RFC 9051), que l'instantané tient. [`Self::rang_de`]
+    /// parcourt la boîte ; une copie de deux cent cinquante-six messages dans
+    /// une boîte de cinquante mille ferait douze millions de lectures.
+    fn rang_par_dichotomie<B: ams_session::imap::Mailbox>(boite: &B, uid: u32) -> Option<u32> {
+        let (mut bas, mut haut) = (1_u32, boite.exists());
+        while bas <= haut {
+            let milieu = bas.saturating_add(haut.saturating_sub(bas) / 2);
+            let lu = boite.info(milieu)?.uid;
+            match lu.cmp(&uid) {
+                core::cmp::Ordering::Equal => return Some(milieu),
+                core::cmp::Ordering::Less => bas = milieu.saturating_add(1),
+                core::cmp::Ordering::Greater => haut = milieu.checked_sub(1)?,
+            }
+        }
+        None
+    }
+
+    /// Copie — ou déplace — des messages d'une boîte à une autre du même
+    /// compte.
+    ///
+    /// # TOUT OU RIEN, COMME `COPY` ET `MOVE` D'IMAP
+    ///
+    /// Les copies se font d'abord, toutes ; si l'une échoue, celles qui ont
+    /// réussi sont DÉFAITES et rien n'a eu lieu. Un déplacement ne retire les
+    /// originaux qu'ensuite, du rang le plus haut au plus bas — retirer le
+    /// premier décalerait tous les rangs suivants. Un message que la source n'a
+    /// plus n'est pas une faute : il est rendu dans `missing`.
+    ///
+    /// # LA DESTINATION EST DU MÊME COMPTE, ET PAS DE `Partagés`
+    ///
+    /// L'API nomme la boîte d'autrui par son chemin, sous le contrôle de la
+    /// table ; une destination `Partagés/…` dans le corps rouvrirait l'espace
+    /// d'IMAP que l'API ne voit pas. Elle rend `404`, comme une destination
+    /// qui n'existe pas.
+    fn transferer<'o>(
+        &self,
+        compte: &str,
+        nom: &str,
+        corps: &[u8],
+        deplacer: bool,
+        sortie: &'o mut [u8],
+    ) -> Served<'o> {
+        let mut place = [0_u8; ams_session::imap::MAILBOX_NAME_MAX];
+        let Ok(demande) = render::read_transfer_request(corps, &mut place) else {
+            return corps_refuse(sortie);
+        };
+        let meme = demande.to == nom
+            || (demande.to.eq_ignore_ascii_case("INBOX") && nom.eq_ignore_ascii_case("INBOX"));
+        // Déplacer une boîte vers elle-même ne ferait que renuméroter.
+        if deplacer && meme {
+            return corps_refuse(sortie);
+        }
+        if ams_proto_imap::shared_name(demande.to.as_bytes()).is_some() {
+            return absente(sortie);
+        }
+        let Some(destination) = self.boites.open(compte.as_bytes(), demande.to.as_bytes()) else {
+            return absente(sortie);
+        };
+        let validite = destination.uid_validity();
+        drop(destination);
+        let Some(mut boite) = self.boites.open(compte.as_bytes(), nom.as_bytes()) else {
+            return absente(sortie);
+        };
+
+        let mut faits: Vec<(u32, u32, u32)> = Vec::with_capacity(demande.uids().len());
+        let mut absents: Vec<u32> = Vec::new();
+        for uid in demande.uids() {
+            let Some(rang) = Self::rang_par_dichotomie(&boite, *uid) else {
+                absents.push(*uid);
+                continue;
+            };
+            let Some(neuf) = boite.copy_to(rang, demande.to.as_bytes()) else {
+                // **ON DÉFAIT CE QU'ON A FAIT** : les UID attribués sont
+                // strictement croissants, et forment donc une seule plage.
+                if let (Some(premier), Some(dernier)) = (
+                    faits.iter().map(|(_, _, neuf)| *neuf).min(),
+                    faits.iter().map(|(_, _, neuf)| *neuf).max(),
+                ) {
+                    boite.undo_copies(demande.to.as_bytes(), premier, dernier);
+                }
+                return notre_faute();
+            };
+            faits.push((*uid, rang, neuf));
+        }
+        if deplacer {
+            let mut rangs: Vec<u32> = faits.iter().map(|(_, rang, _)| *rang).collect();
+            rangs.sort_unstable_by(|a, b| b.cmp(a));
+            for rang in rangs {
+                // Un original qui a disparu entre-temps n'est plus à retirer :
+                // la copie, elle, est faite, et c'est ce qu'on rend.
+                let _ = boite.remove(rang);
+            }
+        }
+        let paires: Vec<(u32, u32)> = faits.iter().map(|(uid, _, neuf)| (*uid, *neuf)).collect();
+        rendre(render::write_transfer(validite, &paires, &absents, sortie))
+    }
+
     /// Pose et ôte des drapeaux sur un message.
     fn drapeaux<'o>(
         &self,
@@ -2357,6 +2457,8 @@ impl Api for ApiMaildir {
                 self.partie_de_message(account, boite, uid, partie, portee, sortie)
             }
             Resource::Search { boite } => self.search(account, boite, body, sortie),
+            Resource::Copy { boite } => self.transferer(account, boite, body, false, sortie),
+            Resource::Move { boite } => self.transferer(account, boite, body, true, sortie),
             Resource::Submissions => self.submissions(account, body, sortie),
             // **L'ADMINISTRATION, EN LECTURE ET EN ÉCRITURE.** Le magasin est
             // modifiable pendant qu'on sert : voir `crate::comptes`.
@@ -3986,6 +4088,119 @@ mod ecritures {
     /// **LA DÉLÉGATION, DE BOUT EN BOUT** : l'administration la pose, le
     /// délégué atteint la boîte dans la mesure de ses droits, et la retirer
     /// vaut tout de suite.
+    /// **COPIER ET DÉPLACER, EN GROUPE ET TOUT OU RIEN** : chaque message dit
+    /// son nouvel UID, ce qui manque se dit à part, et un déplacement retire
+    /// les originaux — sans décaler les rangs de ceux qui restent.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn copier_et_deplacer_des_messages() {
+        let temporaire = Ephemere::neuf();
+        let (api, _) = api_partagee(&temporaire.0);
+        let boite = Resource::Messages { boite: "INBOX" };
+        let mut uids = Vec::new();
+        for rang in 1..=4 {
+            let lettre = std::format!("From: a@ailleurs.test\r\nSubject: n{rang}\r\n\r\nc\r\n");
+            let (status, corps) = servir(&api, boite, Method::Post, lettre.as_bytes());
+            assert_eq!(status, StatusCode::CREATED, "{corps}");
+            let uid: u32 = corps
+                .trim_start_matches("{\"uid\":")
+                .trim_end_matches('}')
+                .parse()
+                .expect("un UID");
+            uids.push(uid);
+        }
+        let (status, _) = servir(
+            &api,
+            Resource::Mailbox { boite: "Archives" },
+            Method::Put,
+            b"",
+        );
+        assert!(
+            matches!(status, StatusCode::CREATED | StatusCode::NO_CONTENT),
+            "{status:?}"
+        );
+
+        // Déplacer le 2e et le 4e, plus un UID qui n'existe pas.
+        let corps = std::format!(
+            r#"{{"to":"Archives","uids":[{},{},999]}}"#,
+            uids[1],
+            uids[3]
+        );
+        let (status, rendu) = servir(
+            &api,
+            Resource::Move { boite: "INBOX" },
+            Method::Post,
+            corps.as_bytes(),
+        );
+        assert_eq!(status, StatusCode::OK, "{rendu}");
+        assert!(rendu.contains(r#""missing":[999]"#), "{rendu}");
+        assert_eq!(rendu.matches(r#""from":"#).count(), 2, "{rendu}");
+        let (_, liste) = servir(&api, boite, Method::Get, b"");
+        assert_eq!(
+            liste.matches(r#""uid":"#).count(),
+            2,
+            "la source garde deux : {liste}"
+        );
+        assert!(liste.contains("n1") && liste.contains("n3"), "{liste}");
+        let (_, archives) = servir(
+            &api,
+            Resource::Messages { boite: "Archives" },
+            Method::Get,
+            b"",
+        );
+        assert!(
+            archives.contains("n2") && archives.contains("n4"),
+            "{archives}"
+        );
+
+        // Copier laisse l'original.
+        let corps = std::format!(r#"{{"to":"Archives","uids":[{}]}}"#, uids[0]);
+        let (status, rendu) = servir(
+            &api,
+            Resource::Copy { boite: "INBOX" },
+            Method::Post,
+            corps.as_bytes(),
+        );
+        assert_eq!(status, StatusCode::OK, "{rendu}");
+        let (_, liste) = servir(&api, boite, Method::Get, b"");
+        assert_eq!(liste.matches(r#""uid":"#).count(), 2, "{liste}");
+        let (_, archives) = servir(
+            &api,
+            Resource::Messages { boite: "Archives" },
+            Method::Get,
+            b"",
+        );
+        assert_eq!(archives.matches(r#""uid":"#).count(), 3, "{archives}");
+
+        // Ce qui se refuse.
+        let un = std::format!(r#"{{"to":"INBOX","uids":[{}]}}"#, uids[0]);
+        let (status, _) = servir(
+            &api,
+            Resource::Move { boite: "INBOX" },
+            Method::Post,
+            un.as_bytes(),
+        );
+        assert_eq!(status, StatusCode::BAD_REQUEST, "déplacer vers soi-même");
+        for destination in ["Inconnue", "Partagés/support/INBOX"] {
+            let corps = std::format!(r#"{{"to":"{destination}","uids":[{}]}}"#, uids[0]);
+            let (status, _) = servir(
+                &api,
+                Resource::Copy { boite: "INBOX" },
+                Method::Post,
+                corps.as_bytes(),
+            );
+            assert_eq!(status, StatusCode::NOT_FOUND, "{destination}");
+        }
+        let (status, _) = servir(
+            &api,
+            Resource::Copy { boite: "Inconnue" },
+            Method::Post,
+            br#"{"to":"Archives","uids":[1]}"#,
+        );
+        assert_eq!(status, StatusCode::NOT_FOUND, "source absente");
+        let (status, _) = servir(&api, Resource::Copy { boite: "INBOX" }, Method::Post, b"{}");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
     /// **L'ESPACE `Partagés` EST CELUI D'IMAP** : les routes personnelles de
     /// l'API ne le listent pas et ne l'ouvrent pas — la boîte d'autrui s'y
     /// nomme par `/v1/accounts/{compte}/mailboxes/…`, et par là seulement.

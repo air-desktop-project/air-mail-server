@@ -941,8 +941,14 @@ fn verifier_le_type(
     if corps.is_empty() {
         return Ok(());
     }
+    // **UN DÉPÔT PORTE UN MESSAGE, COMME UNE SOUMISSION** : `POST
+    // /v1/mailboxes/{boite}/messages` range un message brut, et le manuel le dit
+    // `message/rfc822`. Ce contrôle ne connaissait que la soumission, et
+    // refusait donc le type annoncé en acceptant `application/json` pour un
+    // message — mesuré en production le 2026-09-26. Aucune autre méthode sur
+    // cette ressource ne porte de corps.
     let attendu = match resource {
-        Resource::Submissions => ams_api::MESSAGE_MEDIA_TYPE,
+        Resource::Submissions | Resource::Messages { .. } => ams_api::MESSAGE_MEDIA_TYPE,
         _ => JSON_MEDIA_TYPE,
     };
     match tete.field(EN_TETE_TYPE) {

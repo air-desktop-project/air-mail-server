@@ -669,6 +669,22 @@ authorization: Bearer AQECAAAAAG…</code></pre>
 </div>
 
 <div class="ressource">
+  <div class="ligne"><span class="verbe post">POST</span><span class="chemin">/v1/mailboxes/{boite}/copy</span><span class="chemin">/v1/mailboxes/{boite}/move</span><span class="portee">mail:write</span></div>
+  <pre><code>POST /v1/mailboxes/INBOX/move
+{ "to": "Archives", "uids": [1792, 1795, 1801] }
+
+→ 200
+{ "uidValidity": 7,
+  "uids": [ { "from": 1792, "to": 57 }, { "from": 1795, "to": 58 } ],
+  "missing": [1801] }</code></pre>
+  <p><strong>Copier ou déplacer des messages</strong> vers une autre boîte du même compte, jusqu'à 256 en une requête — ranger une sélection ne doit pas coûter un aller-retour par message. C'est le <code>COPY</code> et le <code>MOVE</code> d'IMAP : chaque message rendu dit son nouvel UID dans la destination (sous son <code>uidValidity</code>), et un UID que la source n'a plus est rendu dans <code>missing</code>, sans faire échouer le reste.</p>
+  <div class="note">
+    <span class="etiquette">Tout ou rien</span>
+    <p>Si une copie échoue, celles qui ont réussi sont défaites et la réponse est <code>500</code>. Un déplacement ne retire les originaux qu'une fois toutes les copies faites. La destination doit exister (<code>404</code> sinon) ; déplacer une boîte vers elle-même est refusé (<code>400</code>). Le nom de la destination peut être échappé en JSON (<code>"Envoy\u00e9s"</code>).</p>
+  </div>
+</div>
+
+<div class="ressource">
   <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/mailboxes/{boite}/messages/{uid}/raw</span><span class="portee">mail:read</span></div>
   <p>Le message <strong>tel qu'il est arrivé</strong>, en <code>message/rfc822</code>. Ce n'est pas une représentation alternative de la ressource précédente : l'une est ce qui a été reçu, l'autre notre lecture. La question « qu'est-ce que le serveur a vraiment reçu ? » doit avoir une réponse stable, qui ne dépende pas d'un en-tête <code>Accept</code>.</p>
 </div>

@@ -107,6 +107,21 @@ pub enum Resource<'o> {
         /// Le nom de la boîte.
         boite: &'o str,
     },
+    /// `/v1/mailboxes/{boite}/copy` — copier des messages vers une autre boîte.
+    ///
+    /// **GROUPÉ, COMME `COPY` D'IMAP** : ranger cinquante messages ne doit pas
+    /// coûter cinquante allers-retours sur un réseau mobile. Le corps nomme la
+    /// destination et les UID ; la réponse dit l'UID de chaque copie.
+    Copy {
+        /// La boîte d'où l'on copie.
+        boite: &'o str,
+    },
+    /// `/v1/mailboxes/{boite}/move` — déplacer des messages vers une autre
+    /// boîte : copier, puis retirer l'original, comme `MOVE` d'IMAP (RFC 6851).
+    Move {
+        /// La boîte d'où l'on déplace.
+        boite: &'o str,
+    },
 
     /// `/v1/me/password` — **le secret de qui appelle**, et de personne d'autre.
     ///
@@ -319,6 +334,8 @@ impl Resource<'_> {
             | Self::MessageRaw { .. }
             | Self::MessagePart { .. }
             | Self::Search { .. }
+            | Self::Copy { .. }
+            | Self::Move { .. }
             | Self::Changes { .. } => Area::Mail,
             Self::Invitations
             | Self::Accounts
@@ -355,6 +372,8 @@ impl Resource<'_> {
             // chaîne de requête sans ambiguïté, et les y mettre les ferait
             // journaliser par tout intermédiaire.
             Self::Search { .. } => &[Method::Post],
+            // Ni l'une ni l'autre ne se lit : ce sont des gestes, pas des états.
+            Self::Copy { .. } | Self::Move { .. } => &[Method::Post],
             // **ELLE NE S'ÉCRIT PAS** : le journal se déduit de la boîte, il ne
             // se pose pas.
             Self::Changes { .. } => &[Method::Get, Method::Head],
@@ -569,6 +588,8 @@ fn boites<'o>(segments: &Segments<'o>, base: usize) -> Result<Resource<'o>, Erro
         (3, _) => Ok(Resource::Mailbox { boite }),
         (4, "search") => Ok(Resource::Search { boite }),
         (4, "changes") => Ok(Resource::Changes { boite }),
+        (4, "copy") => Ok(Resource::Copy { boite }),
+        (4, "move") => Ok(Resource::Move { boite }),
         (4, "messages") => Ok(Resource::Messages { boite }),
         (5, "messages") => Ok(Resource::Message {
             boite,

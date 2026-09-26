@@ -167,10 +167,22 @@ fn port_libre() -> u16 {
     static SUIVANT: AtomicU16 = AtomicU16::new(0);
     for _ in 0..64_u16 {
         let rang = SUIVANT.fetch_add(1, Ordering::Relaxed);
-        let candidat = 24_000_u16.saturating_add(rang % 4_000);
-        // On éprouve qu'il est libre, et on le rend aussitôt : c'est tout ce
-        // qu'on peut faire pour un serveur qui liera lui-même.
-        if TcpListener::bind(("127.0.0.1", candidat)).is_ok() {
+        // **UNE PLAGE PAR BINAIRE D'ESSAI** : `api.rs` et `chiffrement.rs`
+        // partaient tous deux de 24000 avec chacun son compteur, et se
+        // tendaient donc les mêmes ports dans le même ordre. Un serveur de
+        // l'un encore vivant quand l'autre démarre suffisait : « Address already
+        // in use », deux fois dans la barrière, sur des essais sans rapport.
+        let candidat = 26_000_u16.saturating_add(rang % 2_000);
+        // On éprouve qu'il est libre — que personne n'y répond, et qu'on peut
+        // le lier —, et on le rend aussitôt : c'est tout ce qu'on peut faire
+        // pour un serveur qui liera lui-même. La connexion voit aussi une
+        // écoute sur l'adresse joker, que la liaison seule laisse passer.
+        let occupe = std::net::TcpStream::connect_timeout(
+            &std::net::SocketAddr::from(([127, 0, 0, 1], candidat)),
+            Duration::from_millis(50),
+        )
+        .is_ok();
+        if !occupe && TcpListener::bind(("127.0.0.1", candidat)).is_ok() {
             return candidat;
         }
     }
