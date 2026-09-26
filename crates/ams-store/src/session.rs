@@ -206,6 +206,16 @@ impl MailboxView {
         &self.racine
     }
 
+    /// Ajoute un message relevé APRÈS l'instantané, à la fin.
+    ///
+    /// **SON UID DOIT DÉPASSER TOUS CEUX QU'ON TIENT** : l'instantané est rangé
+    /// par UID croissant, et c'est ce qui fait correspondre les rangs aux UID.
+    /// L'appelant — le rafraîchissement d'une boîte IMAP — ne lui passe que
+    /// ceux-là.
+    pub fn push(&mut self, message: Message) {
+        self.messages.push(message);
+    }
+
     /// Retire le message de rang `index` de l'instantané.
     ///
     /// **Ne touche pas au disque** : c'est l'appelant qui a effacé le fichier,

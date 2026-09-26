@@ -70,6 +70,12 @@ impl Mailbox for Boite {
         // arriver le courrier.
         2
     }
+    fn vanished(&mut self) -> Option<u32> {
+        None
+    }
+    fn flags_changed(&mut self) -> Option<u32> {
+        None
+    }
     fn recent(&self) -> u32 {
         // Un des deux n'a jamais été lu : de quoi distinguer `RECENT` d'`EXISTS`.
         1

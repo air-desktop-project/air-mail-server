@@ -2855,11 +2855,24 @@ ce qui la rend particulière à tenir : `+ idling` ouvre l'attente, et la conclu
 fois — la ligne du client et le changement de la boîte — par un `tokio::select!`
 dont la lecture est annulable sans perte.
 
-**SEULE LA CROISSANCE SE DIT.** Un `* n EXPUNGE` renumérote (§7.5.1) tous les
-rangs qui suivent, et un client qui idle les a retenus. §6.3.13 n'oblige à rien
-envoyer : se taire est correct, mentir sur les rangs ne l'est pas. La règle est
-tenue par le magasin, pas par une convention : il n'ajoute qu'à la fin, et
-seulement si le nouveau relevé COMMENCE par l'ancien, UID pour UID.
+~~**SEULE LA CROISSANCE SE DIT.**~~ **Remplacé en 0.2.20** : la règle se
+taisait sur les disparitions et sur les drapeaux changés ailleurs, et `NOOP` ne
+regardait même pas la boîte. Un Thunderbird ouvert ne voyait donc jamais un
+message lu sur le téléphone, ni un message effacé ailleurs, avant de
+resélectionner la boîte.
+
+**DÉSORMAIS, `NOOP` ET `IDLE` DISENT TOUT CE QUI A BOUGÉ**, dans cet ordre : les
+disparitions (`* n EXPUNGE`, du plus grand rang au plus petit, pour que chaque
+annonce laisse valides les rangs qui restent à annoncer), les arrivées
+(`* n EXISTS`), puis les drapeaux changés ailleurs (`* n FETCH (FLAGS (…) UID
+u)`) — §7.5.1 et §7.5.2 de RFC 9051. La crainte d'origine — renuméroter chez un
+client qui a retenu des rangs — est tenue autrement : **le magasin ne retire un
+message de son instantané qu'au moment où la session l'annonce**, jamais avant ;
+et ces annonces ne se font qu'aux moments où RFC 9051 les permet, jamais au
+milieu d'un `FETCH`, d'un `STORE` ou d'un `SEARCH`. Un message arrivé puis
+effacé entre deux regards, que le client n'a jamais vu, disparaît sans bruit.
+Chaque ligne ne se retire qu'une fois sa place assurée dans le tampon : ce qui
+ne tient pas attend le regard suivant.
 
 **DEUX `stat` PLUTÔT QU'UN PARCOURS.** La question se pose toutes les cinq
 secondes, pour chaque session ouverte. Les dates de `new/` et `cur/` y répondent
@@ -3646,6 +3659,12 @@ que C10 interdit.
 `air-mail-admin summary` relit une boîte. Ce n'est pas une commodité : c'est la
 reconstruction de C13 exécutée à la demande, celle qui prouve que les fichiers
 suffisent à retrouver ce que l'index dirait.
+
+**Depuis 0.2.20, elle ne fait QUE relire.** Elle ouvrait la boîte, donc adoptait
+les fichiers sans UID et réécrivait l'index avec une nouvelle réserve — sur une
+boîte que le serveur tenait ouverte, c'était donner des UID que le serveur, qui
+garde son compteur en mémoire, donnerait à son tour. `ams_store::inspect` relit
+les noms et l'index sans rien écrire.
 
 **Les commandes de configuration n'existent pas**, parce que le format de C11
 n'existe pas. Le serveur se règle en attendant par sa ligne de commande — ce qui

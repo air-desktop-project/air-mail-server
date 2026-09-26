@@ -107,6 +107,12 @@ impl Mailbox for Boite {
             .push((ENTETE_D_EPREUVE.len() as u64, Flags::NONE));
         self.exists()
     }
+    fn vanished(&mut self) -> Option<u32> {
+        None
+    }
+    fn flags_changed(&mut self) -> Option<u32> {
+        None
+    }
     fn uid_validity(&self) -> u32 {
         7
     }

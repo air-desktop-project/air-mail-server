@@ -304,6 +304,29 @@ pub trait Mailbox {
     /// session ouverte.
     fn refresh(&mut self) -> u32;
 
+    /// Le rang d'un message qui a **disparu** depuis le dernier
+    /// [`refresh`](Mailbox::refresh) — effacé par une autre session, par POP3,
+    /// ou à la main —, **le plus grand d'abord**, et la boîte l'oublie en le
+    /// rendant : ce qui suivait descend d'un rang.
+    ///
+    /// # POURQUOI UN À UN, ET DU PLUS GRAND AU PLUS PETIT
+    ///
+    /// Chaque `* n EXPUNGE` renumérote ce qui le suit (§7.5.1 de RFC 9051).
+    /// Annoncer du plus grand au plus petit garde valides les rangs qui restent
+    /// à annoncer ; et ne retirer qu'au moment d'annoncer garde l'instantané et
+    /// le client d'accord à chaque ligne.
+    ///
+    /// `None` : rien n'a disparu. C'est aussi ce que rend une boîte qui ne sait
+    /// pas le dire.
+    fn vanished(&mut self) -> Option<u32>;
+
+    /// Le rang d'un message dont les drapeaux ont **changé ailleurs** depuis le
+    /// dernier [`refresh`](Mailbox::refresh) — l'instantané porte déjà les
+    /// nouveaux. Chacun n'est rendu qu'une fois.
+    ///
+    /// `None` : rien n'a changé, ou la boîte ne sait pas le dire.
+    fn flags_changed(&mut self) -> Option<u32>;
+
     /// Le jour que le champ `Date:` du message porte, compté depuis l'époque.
     ///
     /// # CE N'EST PAS LA DATE D'ARRIVÉE
@@ -469,6 +492,11 @@ pub trait Mailbox {
     /// la session ne lui soumet que ce qui y figure.
     fn store_flags(&mut self, sequence: u32, mode: StoreMode, flags: Flags) -> Option<Flags>;
 }
+
+/// La place d'une ligne non sollicitée, la plus longue qu'on annonce :
+/// `* n FETCH (FLAGS (…) UID u)` avec les dix drapeaux — moins de deux cents
+/// octets.
+const LIGNE_MAX: usize = 256;
 
 /// Ce qu'il faut savoir énumérer et ouvrir pour servir une session.
 ///
@@ -1716,7 +1744,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         match lue.command {
             // ── Valables dans tous les états (§6.1) ─────────────────────────
             Command::Capability => self.capability(out),
-            Command::Noop => self.termine(Status::Ok, b"NOOP completed", Action::Continue, out),
+            Command::Noop => self.noop(out),
             Command::Logout => self.logout(out),
             // ── Non authentifié seulement (§6.2) ────────────────────────────
             Command::StartTls => self.starttls(out),
@@ -2300,31 +2328,87 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
     ///
     /// Rend le nombre d'octets écrits ; zéro signifie « rien de neuf ».
     ///
-    /// # SEULE LA CROISSANCE SE DIT
-    ///
-    /// `* n EXISTS` annonce que la boîte porte plus de messages qu'avant. Ce qui
-    /// a disparu ne se dit PAS : l'annoncer renumérote, et un client qui idle a
-    /// retenu des rangs. RFC 9051 §6.3.13 n'oblige à rien envoyer — se taire est
-    /// donc correct, et mentir sur les rangs ne le serait pas.
-    ///
     /// # Errors
     ///
     /// [`Error::Reply`] si `out` ne suffit pas.
     pub fn idle_poll(&mut self, out: &mut [u8]) -> Result<usize, Error> {
+        Ok(self.annoncer_les_changements(out))
+    }
+
+    /// Écrit ce qui a changé dans la boîte ouverte depuis le dernier regard :
+    /// **les disparitions, puis les arrivées, puis les drapeaux changés
+    /// ailleurs**. Rend le nombre d'octets écrits.
+    ///
+    /// # CE QUE LA 0.2.19 NE DISAIT PAS
+    ///
+    /// Seule la croissance se disait, et seulement pendant `IDLE` : `NOOP` ne
+    /// regardait même pas la boîte. Un Thunderbird ouvert ne voyait donc jamais
+    /// un message lu sur le téléphone, ni un message effacé ailleurs, avant de
+    /// resélectionner la boîte. §7.5.1 et §7.5.2 de RFC 9051 prévoient
+    /// exactement ces deux annonces, et `NOOP` comme `IDLE` sont les moments où
+    /// elles sont permises — jamais au milieu d'un `FETCH`, d'un `STORE` ou d'un
+    /// `SEARCH`, qui passent par d'autres chemins.
+    ///
+    /// # ON N'ÔTE RIEN QU'ON NE PUISSE ANNONCER
+    ///
+    /// Chaque événement ne se retire de la boîte qu'une fois la place de sa
+    /// ligne assurée. Ce qui ne tient pas attend le prochain regard, et la
+    /// boîte le garde jusque-là.
+    ///
+    /// # UN MESSAGE QUE LE CLIENT N'A JAMAIS VU DISPARAÎT SANS BRUIT
+    ///
+    /// Arrivé puis effacé entre deux regards, il porte un rang au-delà de ce
+    /// que le client connaît : l'annoncer lui parlerait d'un rang qu'il n'a
+    /// jamais eu.
+    ///
+    /// # ELLE NE PEUT PAS ÉCHOUER
+    ///
+    /// Chaque ligne est plus courte que [`LIGNE_MAX`], et aucune ne s'écrit
+    /// sans cette place : un tampon trop court REPORTE l'annonce au regard
+    /// suivant, au lieu de faire échouer la commande.
+    fn annoncer_les_changements(&mut self, out: &mut [u8]) -> usize {
         let Some(boite) = self.ouverte.as_mut() else {
-            // Sans boîte ouverte, `IDLE` attend sans rien avoir à dire : c'est
-            // permis (§6.3.13), et c'est ce que fait un client qui garde sa
-            // connexion chaude.
-            return Ok(0);
+            // Sans boîte ouverte, il n'y a rien à dire : c'est permis
+            // (§6.3.13), et c'est ce que fait un client qui garde sa connexion
+            // chaude.
+            return 0;
         };
-        let combien = boite.refresh();
-        if combien <= self.exists_vus {
-            return Ok(0);
-        }
-        self.exists_vus = combien;
+        boite.refresh();
         let mut plume = Plume::neuve(out);
-        plume.nombre_non_sollicite(combien, b"EXISTS")?;
-        Ok(plume.ecrits())
+        while plume.reste() >= LIGNE_MAX {
+            let Some(rang) = boite.vanished() else {
+                break;
+            };
+            if rang <= self.exists_vus {
+                let _ = plume.nombre_non_sollicite(rang, b"EXPUNGE");
+                self.exists_vus = self.exists_vus.saturating_sub(1);
+            }
+        }
+        let combien = boite.exists();
+        if combien > self.exists_vus && plume.reste() >= LIGNE_MAX {
+            self.exists_vus = combien;
+            let _ = plume.nombre_non_sollicite(combien, b"EXISTS");
+        }
+        while plume.reste() >= LIGNE_MAX {
+            let Some(rang) = boite.flags_changed() else {
+                break;
+            };
+            // Un rang que le client ne connaît pas encore lui sera décrit en
+            // entier quand il le demandera : ses drapeaux n'ont rien à lui dire.
+            let Some(info) = boite.info(rang).filter(|_| rang <= self.exists_vus) else {
+                continue;
+            };
+            // La place d'une ligne est assurée : ces écritures ne peuvent pas
+            // échouer, et leurs résultats n'ont rien à dire.
+            let _ = plume.pousser(b"* ");
+            let _ = plume.nombre(u64::from(rang));
+            let _ = plume.pousser(b" FETCH (FLAGS (");
+            let _ = plume.drapeaux(info.flags);
+            let _ = plume.pousser(b") UID ");
+            let _ = plume.nombre(u64::from(info.uid));
+            let _ = plume.pousser(b")\r\n");
+        }
+        plume.ecrits()
     }
 
     /// Le client a parlé pendant l'attente : c'est `DONE`, ou c'est une faute.
@@ -2398,6 +2482,32 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         let conclusion = encode_tagged(suite, self.tag_lu(), Status::No, texte, &self.limits)
             .map_err(Error::Reply)?
             .len();
+        Ok(Turn {
+            reply: out
+                .get(..ecrits.saturating_add(conclusion))
+                .unwrap_or_default(),
+            action: Action::Continue,
+            peer_fault: false,
+        })
+    }
+
+    /// `NOOP` (§6.1.2) : **le moment où un client demande ce qui a changé.**
+    ///
+    /// Jusqu'en 0.2.19, il répondait `OK` sans regarder la boîte. C'est
+    /// pourtant ce qu'un client qui n'`IDLE` pas envoie pour se tenir à jour :
+    /// on lui dit donc tout ce qui a bougé avant de conclure.
+    fn noop<'b>(&mut self, out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
+        let ecrits = self.annoncer_les_changements(out);
+        let suite = out.get_mut(ecrits..).unwrap_or_default();
+        let conclusion = encode_tagged(
+            suite,
+            self.tag_lu(),
+            Status::Ok,
+            b"NOOP completed",
+            &self.limits,
+        )
+        .map_err(Error::Reply)?
+        .len();
         Ok(Turn {
             reply: out
                 .get(..ecrits.saturating_add(conclusion))
@@ -6086,6 +6196,11 @@ impl<'a> Plume<'a> {
 
     fn ecrits(&self) -> usize {
         self.ecrits
+    }
+
+    /// Ce qu'il reste de place.
+    fn reste(&self) -> usize {
+        self.out.len().saturating_sub(self.ecrits)
     }
 
     fn pousser(&mut self, morceau: &[u8]) -> Result<(), Error> {

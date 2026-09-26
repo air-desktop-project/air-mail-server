@@ -202,7 +202,7 @@ impl Maildir {
         boite
             .prochain_uid
             .store(vu.state.uid_next.value(), Ordering::Relaxed);
-        boite.adopter()?;
+        boite.adopt_unnumbered()?;
 
         // On réserve dès l'ouverture, ce qui réécrit l'index : une boîte ouverte
         // puis abandonnée sans remise laisse tout de même un index valide.
@@ -436,6 +436,19 @@ impl Maildir {
 
     /// Donne un UID aux messages qui n'en ont pas.
     ///
+    /// # À L'OUVERTURE, ET À CHAQUE RELECTURE
+    ///
+    /// Jusqu'en 0.2.19, elle ne tournait qu'à l'ouverture — une fois au
+    /// démarrage pour une arrivée. Un fichier déposé ENSUITE par un autre
+    /// programme restait donc invisible jusqu'au redémarrage suivant : le
+    /// relevé saute les noms sans UID. Les relectures de l'API, d'IMAP et de
+    /// POP3 l'appellent désormais avant de relever.
+    ///
+    /// # Errors
+    ///
+    /// [`Error`] si un répertoire ne se lit pas, ou si l'index ne s'écrit pas
+    /// quand la réserve d'UID doit s'étendre.
+    ///
     /// # Pourquoi c'est nécessaire, et pas seulement soigné
     ///
     /// Un message sans `,U=` n'a **aucun UID stable** : au prochain parcours, on
@@ -446,7 +459,7 @@ impl Maildir {
     /// Un `rename` qui échoue parce que la source a disparu n'est **pas** une
     /// erreur : un autre serveur sur la même boîte vient de l'adopter, et Maildir
     /// est fait pour cela.
-    fn adopter(&self) -> Result<(), Error> {
+    pub fn adopt_unnumbered(&self) -> Result<(), Error> {
         for sous in ["new", "cur"] {
             let repertoire = self.racine.join(sous);
             let mut a_adopter: Vec<Vec<u8>> = Vec::new();
@@ -478,6 +491,45 @@ impl Maildir {
         }
         Ok(())
     }
+}
+
+/// Ce qu'une boîte porte, relu **SANS L'OUVRIR**.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Inspection {
+    /// Ce que les noms de `new/` et `cur/` disent.
+    pub summary: MailboxSummary,
+    /// Ce que l'index dit, s'il y en a un de lisible.
+    pub index: Option<MailboxState>,
+}
+
+/// Relit une boîte sans rien y changer : ni adoption, ni index réécrit.
+///
+/// # POURQUOI CE N'EST PAS `Maildir::open_existing`
+///
+/// Ouvrir une boîte ADOPTE les fichiers sans UID et RÉÉCRIT l'index avec une
+/// nouvelle réserve. Fait par `air-mail-admin summary` sur une boîte qu'un
+/// serveur tient ouverte, c'était donner des UID que le serveur — qui garde son
+/// compteur en mémoire sans relire l'index — donnerait à son tour : deux
+/// messages sous le même UID. Une commande qui « relit » ne doit rien écrire.
+///
+/// # Errors
+///
+/// [`Error`] si `new/` ou `cur/` ne se lisent pas — ce qui est aussi le cas
+/// d'un chemin qui n'est pas une boîte.
+pub fn inspect(racine: &Path) -> Result<Inspection, Error> {
+    let mut noms: Vec<Vec<u8>> = Vec::new();
+    for sous in ["new", "cur"] {
+        for entree in fs::read_dir(racine.join(sous))? {
+            noms.push(entree?.file_name().as_bytes().to_vec());
+        }
+    }
+    let index = fs::read(racine.join(NOM_INDEX))
+        .ok()
+        .and_then(|octets| ams_config::decode_index(&octets).ok());
+    Ok(Inspection {
+        summary: summarise(noms.iter().map(Vec::as_slice)),
+        index,
+    })
 }
 
 /// Un message en cours de remise.

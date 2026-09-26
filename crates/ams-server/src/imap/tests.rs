@@ -361,3 +361,112 @@ fn un_fichier_d_usages_abime_ne_fait_pas_deviner() {
         "seule la première ligne bien formée et non conflictuelle doit valoir"
     );
 }
+
+/// **RENOMMER `INBOX` NE FAIT RESSERVIR AUCUN UID** — ni dans la boîte qui
+/// reçoit le courrier, ni dans `INBOX` qui reste.
+///
+/// §6.3.6 de RFC 9051 : renommer `INBOX` déplace son courrier dans une boîte
+/// neuve et la laisse, vide. Les messages gardent leurs UID ; c'est licite,
+/// puisque la boîte neuve a son propre `UIDVALIDITY`. Ce qui ne le serait pas :
+/// qu'un message déposé ensuite dans l'une ou l'autre reprenne un UID déjà
+/// servi SOUS LE MÊME `UIDVALIDITY`.
+#[test]
+fn renommer_inbox_ne_fait_resservir_aucun_uid() {
+    let racine = Ephemere::nouveau("renommer-inbox");
+    let service = service(&racine.0);
+    let deplaces: Vec<u32> = (0..3)
+        .map(|rang| {
+            deposer(
+                &service,
+                INBOX,
+                std::format!("Subject: {rang}\r\n\r\nx\r\n").as_bytes(),
+            )
+        })
+        .collect();
+    let plus_grand = *deplaces.iter().max().expect("trois");
+    let validite_inbox = service.open(COMPTE, INBOX).expect("INBOX").uid_validity();
+
+    assert_eq!(
+        service.rename(COMPTE, INBOX, b"Ancien"),
+        ams_session::imap::Renaming::Faite
+    );
+    assert_eq!(combien(&racine.0, None), 0, "INBOX est vidée");
+    assert_eq!(
+        combien(&racine.0, Some("Ancien")),
+        3,
+        "le courrier est parti"
+    );
+
+    // La boîte neuve : un autre `UIDVALIDITY`, et un dépôt au-delà des UID reçus.
+    let ancien = service.open(COMPTE, b"Ancien").expect("Ancien");
+    assert_ne!(ancien.uid_validity(), validite_inbox);
+    let dans_ancien = deposer(&service, b"Ancien", b"Subject: neuf\r\n\r\nx\r\n");
+    assert!(
+        dans_ancien > plus_grand,
+        "un UID déjà porté dans la boîte neuve est resservi : {dans_ancien} ≤ {plus_grand}"
+    );
+
+    // INBOX : même `UIDVALIDITY`, et ses UID ne redescendent pas.
+    let dans_inbox = deposer(&service, INBOX, b"Subject: arrive\r\n\r\nx\r\n");
+    assert!(
+        dans_inbox > plus_grand,
+        "INBOX resservirait un UID sous le même UIDVALIDITY : {dans_inbox} ≤ {plus_grand}"
+    );
+    assert_eq!(
+        service.open(COMPTE, INBOX).expect("INBOX").uid_validity(),
+        validite_inbox
+    );
+}
+
+/// **UNE SESSION VOIT CE QU'UNE AUTRE A FAIT** — un message lu, un message
+/// retiré — et le rend un à un, pour que la session l'annonce.
+///
+/// Jusqu'en 0.2.19, le rafraîchissement n'ajoutait que les nouveaux, et se
+/// taisait dès qu'un message manquait au milieu : un Thunderbird ouvert ne
+/// voyait ni l'un ni l'autre avant de resélectionner la boîte.
+#[test]
+fn une_session_voit_ce_qu_une_autre_a_fait() {
+    let racine = Ephemere::nouveau("autre-session");
+    let service = service(&racine.0);
+    let uids: Vec<u32> = (0..3)
+        .map(|rang| {
+            deposer(
+                &service,
+                INBOX,
+                std::format!("Subject: {rang}\r\n\r\nx\r\n").as_bytes(),
+            )
+        })
+        .collect();
+    let mut ici = service.open(COMPTE, INBOX).expect("ouvrable");
+    assert_eq!(ici.exists(), 3);
+    // Rien n'a bougé : rien à dire.
+    ici.refresh();
+    assert_eq!(ici.vanished(), None);
+    assert_eq!(ici.flags_changed(), None);
+
+    // **UNE AUTRE SESSION** lit le premier et retire le troisième. Le système de
+    // fichiers date ses répertoires à la milliseconde près au mieux : on laisse
+    // passer de quoi que l'empreinte change.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let mut ailleurs = service.open(COMPTE, INBOX).expect("ouvrable");
+    assert!(
+        ailleurs
+            .store_flags(1, ams_proto_imap::StoreMode::Add, Flags::SEEN)
+            .is_some()
+    );
+    assert!(ailleurs.remove(3));
+
+    // Le regard suivant le voit, SANS RENUMÉROTER tant que rien n'est annoncé.
+    assert_eq!(ici.refresh(), 3, "rien ne renumérote avant l'annonce");
+    assert_eq!(ici.vanished(), Some(3), "le troisième a disparu");
+    assert_eq!(ici.vanished(), None);
+    assert_eq!(ici.exists(), 2);
+    assert_eq!(ici.flags_changed(), Some(1), "le premier a été lu ailleurs");
+    assert!(ici.info(1).expect("présent").flags.contains(Flags::SEEN));
+    assert_eq!(ici.flags_changed(), None, "chacun ne se dit qu'une fois");
+    assert_eq!(
+        ici.info(2).map(|info| info.uid),
+        uids.get(1).copied(),
+        "le deuxième garde son UID"
+    );
+}

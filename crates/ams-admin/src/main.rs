@@ -19,7 +19,6 @@ use std::process::ExitCode;
 
 use ams_auth::Account;
 use ams_config::{Configuration, Enforcement};
-use ams_store::Maildir;
 
 use ams_admin_options::{Demande, OPTIONS_AIDE};
 
@@ -118,7 +117,9 @@ COMMANDES
                         `--minutes` vaut 15 par défaut, et douze heures au plus.
     summary <maildir>   relit une boîte et rend ce que ses noms de fichiers
                         portent : messages numérotés, messages à adopter, noms
-                        illisibles, et le prochain UID.
+                        illisibles, et la réserve d'UID de l'index. EN LECTURE
+                        SEULE : elle n'adopte rien et ne réécrit pas l'index —
+                        sans danger sur une boîte que le serveur tient ouverte.
     --help              ce texte
     --version           la version
 ";
@@ -1916,51 +1917,37 @@ fn revoquer_un_applicatif(fichier: &Path, nom: &str, id: &str) -> ExitCode {
 
 /// Relit une boîte et rend ce que ses noms portent.
 fn resumer(racine: &Path) -> ExitCode {
-    // Le nom d'hôte ne sert qu'à composer de NOUVEAUX noms ; relire n'en a pas
-    // besoin, mais l'ouverture ADOPTE ce qui traîne, et l'adoption en compose.
-    // **ON N'EN CRÉE PAS UNE EN VOULANT LA LIRE.** `Maildir::open` crée
-    // l'arborescence qu'on lui nomme : cette commande, dont l'aide dit
-    // « relit une boîte », fabriquait un répertoire, ses trois sous-dossiers et
-    // un index sur un chemin tapé de travers — puis annonçait « 0 message » et
-    // rendait un code nul. Qui l'a tapé conclut que la boîte est vide alors
-    // qu'elle n'existe pas.
-    let boite = match Maildir::open_existing(
-        PathBuf::from(racine),
-        b"air-mail-admin",
-        // Une boîte SANS index en reçoit un, avec cette validité-ci. C'est une
-        // réparation, pas un effet de bord subi : le serveur en ferait autant à
-        // sa prochaine ouverture, et une boîte qui a déjà un index garde le sien.
-        ams_store::fresh_uid_validity(),
-    ) {
-        Ok(boite) => boite,
+    // **EN LECTURE SEULE**, et c'est tout l'enjeu : ouvrir la boîte adoptait
+    // ses fichiers sans UID et réécrivait son index — sur une boîte que le
+    // serveur tient ouverte, c'était donner des UID que le serveur donnerait à
+    // son tour. `inspect` ne fait que lire.
+    let vue = match ams_store::inspect(racine) {
+        Ok(vue) => vue,
         Err(erreur) => {
             eprintln!("air-mail-admin : `{}` : {erreur}", racine.display());
             return ExitCode::FAILURE;
         }
     };
-    let resume = match boite.summary() {
-        Ok(resume) => resume,
-        Err(erreur) => {
-            eprintln!("air-mail-admin : `{}` : {erreur}", racine.display());
-            return ExitCode::FAILURE;
-        }
-    };
-
+    let resume = vue.summary;
     println!("boîte             {}", racine.display());
-    println!("UIDVALIDITY       {}", boite.uid_validity().value());
+    match vue.index {
+        Some(index) => {
+            println!("UIDVALIDITY       {}", index.uid_validity.value());
+            println!("réserve de l'index {}", index.uid_next.value());
+        }
+        None => println!("UIDVALIDITY       aucun index lisible — le serveur en posera un"),
+    }
     println!("messages          {}", resume.numbered);
     println!("sans UID          {}", resume.unnumbered);
     println!("noms illisibles   {}", resume.unreadable);
-    // DEUX NOMBRES, ET CE N'EST PAS UNE REDONDANCE. Le premier dit ce que les
-    // FICHIERS portent ; le second, ce que la boîte SERVIRA — plus loin après
-    // une réouverture, parce que le filigrane écrit couvre les UID réservés.
-    // N'en montrer qu'un ferait annoncer un numéro qui ne sera pas donné.
     println!("plus grand UID +1 {}", resume.next_uid.value());
-    println!("prochain UID servi {}", boite.next_uid().value());
+    if resume.unnumbered > 0 {
+        println!(
+            "                  les messages sans UID en recevront un du serveur, à sa \
+             prochaine relecture de la boîte"
+        );
+    }
     if resume.exhausted {
-        // Ce n'est pas un détail : au-delà, il n'y a plus d'UID à donner sans
-        // changer l'`UIDVALIDITY`, ce qui fait retélécharger la boîte entière à
-        // tous les clients.
         println!("ATTENTION         la boîte a épuisé ses UID ; son `UIDVALIDITY` doit changer");
     }
     ExitCode::SUCCESS

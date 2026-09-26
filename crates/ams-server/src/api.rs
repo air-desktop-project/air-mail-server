@@ -4114,6 +4114,74 @@ mod ecritures {
         );
     }
 
+    /// **UN FICHIER DÉPOSÉ APRÈS L'OUVERTURE, SANS UID, SE VOIT À LA LECTURE
+    /// SUIVANTE.**
+    ///
+    /// Jusqu'en 0.2.19, l'adoption n'avait lieu qu'à l'ouverture de la boîte —
+    /// une fois au démarrage pour une arrivée —, et un message déposé ensuite
+    /// par un autre programme restait invisible jusqu'au redémarrage.
+    #[test]
+    fn un_fichier_depose_apres_l_ouverture_se_voit() {
+        let temporaire = Ephemere::neuf();
+        let (_, api) = api(&temporaire.0);
+        let avant = ranger(&api, "déjà là");
+        // Un autre programme dépose un message, sans UID, comme le ferait un
+        // `procmail` ou une copie à la main.
+        std::fs::write(
+            temporaire
+                .0
+                .join("marie")
+                .join("new")
+                .join("1790000000.M1P2.ailleurs"),
+            "From: autre@exemple.test\r\nSubject: déposé à côté\r\n\r\ncorps\r\n",
+        )
+        .expect("dépôt");
+        let (status, uids, _) = page(&api, ams_api::Query::default());
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(uids.len(), 2, "le message déposé doit se voir : {uids:?}");
+        assert!(
+            uids.iter().any(|&uid| uid > avant),
+            "il reçoit un UID après ceux déjà donnés : {uids:?}"
+        );
+        // Et son nom porte désormais son UID.
+        let noms: Vec<String> = std::fs::read_dir(temporaire.0.join("marie").join("new"))
+            .expect("lisible")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            noms.iter().all(|nom| nom.contains(",U=")),
+            "un nom est resté sans UID : {noms:?}"
+        );
+    }
+
+    /// **UNE BOÎTE DONT ON A CONSULTÉ LE JOURNAL S'EFFACE ENTIÈREMENT.**
+    ///
+    /// La 0.2.19 laissait `ams-journal.bin` et son verrou derrière elle : le
+    /// répertoire n'était plus vide, ne se retirait pas, et une vraie boîte de
+    /// production a gardé ce résidu après une suppression qui répondait `204`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn une_boite_consultee_s_efface_sans_residu() {
+        let temporaire = Ephemere::neuf();
+        let (_, api) = api(&temporaire.0);
+        let cible = Resource::Mailbox { boite: "Archives" };
+        servir(&api, cible, Method::Put, &[]);
+        // Consulter la boîte tient son journal, donc le crée sur le disque.
+        let (status, etat) = servir(&api, cible, Method::Get, &[]);
+        assert_eq!(status, StatusCode::OK, "{etat}");
+        let repertoire = temporaire.0.join("marie").join(".Archives");
+        assert!(repertoire.join(crate::journal::NOM).exists());
+
+        let (status, _) = servir(&api, cible, Method::Delete, &[]);
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(
+            !repertoire.exists(),
+            "le répertoire de la boîte est resté : {:?}",
+            std::fs::read_dir(&repertoire)
+                .map(|entrees| entrees.flatten().map(|e| e.file_name()).collect::<Vec<_>>())
+        );
+    }
+
     /// Effacer ce qui n'existe pas rend `404`, et non un succès silencieux.
     #[test]
     fn effacer_une_boite_absente_rend_404() {

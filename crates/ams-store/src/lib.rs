@@ -37,5 +37,5 @@ mod maildir;
 mod session;
 
 pub use error::Error;
-pub use maildir::{Incoming, Maildir, flags_of, fresh_uid_validity};
+pub use maildir::{Incoming, Inspection, Maildir, flags_of, fresh_uid_validity, inspect};
 pub use session::{LockedMailbox, MailboxView, Message};

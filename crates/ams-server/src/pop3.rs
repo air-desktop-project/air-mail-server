@@ -105,6 +105,9 @@ impl Mailboxes for BoitesPop3 {
         // n'ouvre rien.
         let nom = core::str::from_utf8(user).ok()?;
         let boite = self.boites.get(nom)?;
+        // Ce qui a été déposé sans UID depuis le démarrage en reçoit un avant
+        // le relevé : sans cela, POP3 ne le verrait qu'au redémarrage.
+        let _ = boite.adopt_unnumbered();
         let verrouillee = LockedMailbox::open(&boite).ok().flatten()?;
         let marques = vec![false; verrouillee.messages().len()];
         Some(BoiteOuverte {

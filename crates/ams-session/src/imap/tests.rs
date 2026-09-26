@@ -76,6 +76,13 @@ pub struct Boite {
     /// l'ordre, une autre session a retiré la marque `\Deleted`, et le magasin
     /// refuse alors d'effacer plutôt que de perdre du courrier. `0` : aucun.
     tetu: u32,
+    /// Bougera-t-elle AILLEURS au prochain regard ? `Changeante` le fait, une
+    /// fois : des messages disparaissent, un arrive, des drapeaux changent.
+    bouge: bool,
+    /// Les rangs disparus, pas encore annoncés.
+    disparus: std::vec::Vec<u32>,
+    /// Les rangs dont les drapeaux ont changé, APRÈS les disparitions.
+    changes: std::vec::Vec<u32>,
 }
 
 impl Mailbox for Boite {
@@ -127,7 +134,44 @@ impl Mailbox for Boite {
             }));
             self.grandit = false;
         }
+        // `Changeante` : quatre messages connus du client. Au premier regard,
+        // un cinquième arrive puis disparaît aussitôt — le client ne l'a
+        // jamais vu —, le quatrième et le deuxième disparaissent, un sixième
+        // arrive qui ne se lit pas, et les deux qui restent sont lus ailleurs.
+        if self.bouge {
+            self.bouge = false;
+            self.messages.push(Some(MessageInfo {
+                uid: 5,
+                size: 100,
+                flags: Flags::NONE,
+                internal_date: 0,
+            }));
+            self.messages.push(None);
+            self.disparus = std::vec![2, 4, 5];
+            self.changes = std::vec![1, 2, 3];
+        }
         self.exists()
+    }
+
+    fn vanished(&mut self) -> Option<u32> {
+        let rang = self.disparus.iter().copied().max()?;
+        self.disparus.retain(|autre| *autre != rang);
+        self.messages
+            .remove(usize::try_from(rang.saturating_sub(1)).unwrap_or(usize::MAX));
+        // Ce qui reste, une fois tout retiré, est lu : ses drapeaux ont changé.
+        if self.disparus.is_empty() {
+            for message in self.messages.iter_mut().flatten() {
+                message.flags = Flags::SEEN;
+            }
+        }
+        Some(rang)
+    }
+
+    fn flags_changed(&mut self) -> Option<u32> {
+        if self.changes.is_empty() {
+            return None;
+        }
+        Some(self.changes.remove(0))
     }
 
     fn permanent_flags(&self) -> Flags {
@@ -719,6 +763,12 @@ impl Mailboxes for Boites {
                 message(2, 100, Flags::NONE, 0),
                 message(3, 100, Flags::NONE, 0),
             ],
+            b"Changeante" => std::vec![
+                message(1, 100, Flags::NONE, 0),
+                message(2, 100, Flags::NONE, 0),
+                message(3, 100, Flags::NONE, 0),
+                message(4, 100, Flags::NONE, 0),
+            ],
             b"Archives" | b"Archives/2026" => std::vec::Vec::new(),
             _ => return None,
         };
@@ -735,6 +785,9 @@ impl Mailboxes for Boites {
             tetu: if name == b"Tetue" { 20 } else { 0 },
             // `Recente` porte deux messages jamais lus ; les autres, aucun.
             recents: if name == b"Recente" { 2 } else { 0 },
+            bouge: name == b"Changeante",
+            disparus: std::vec::Vec::new(),
+            changes: std::vec::Vec::new(),
         })
     }
 }
@@ -5992,7 +6045,16 @@ fn un_tampon_trop_court_pour_l_attente_le_dit() {
         dire(&mut autre, b"a001 LOGIN jean ouvre-toi\r\n");
         dire(&mut autre, b"a002 SELECT Vivante\r\n");
         let mut place = std::vec![0_u8; taille];
-        assert!(autre.idle_poll(&mut place).is_err(), "regard {taille}");
+        // **UN TAMPON TROP COURT REPORTE L'ANNONCE**, il ne la perd pas et ne
+        // fait pas échouer l'attente : l'arrivée se dit au regard suivant.
+        assert_eq!(autre.idle_poll(&mut place).expect("regard"), 0, "{taille}");
+        let mut assez = [0_u8; 512];
+        let ecrits = autre.idle_poll(&mut assez).expect("regard");
+        assert_eq!(
+            std::string::String::from_utf8_lossy(assez.get(..ecrits).unwrap_or_default()),
+            "* 2 EXISTS\r\n",
+            "{taille}"
+        );
     }
 }
 
@@ -6918,4 +6980,51 @@ fn un_nom_a_parenthese_ne_trompe_pas_le_parametre() {
         tout.contains("* LIST (\\Sent \\HasNoChildren) \"/\" \"Compte (perso)\"\r\n"),
         "{tout}"
     );
+}
+
+/// **`NOOP` DIT TOUT CE QUI A BOUGÉ AILLEURS** — les disparitions du plus grand
+/// rang au plus petit, puis les arrivées, puis les drapeaux changés.
+///
+/// Jusqu'en 0.2.19, il répondait `OK` sans regarder : un Thunderbird ouvert ne
+/// voyait jamais un message lu sur le téléphone, ni un message effacé
+/// ailleurs, avant de resélectionner la boîte.
+#[test]
+fn noop_dit_ce_qui_a_bouge_ailleurs() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut session, b"a002 SELECT Changeante\r\n");
+    let (texte, _) = dire(&mut session, b"a003 NOOP\r\n");
+    assert_eq!(
+        texte,
+        // Le cinquième, jamais vu du client, disparaît SANS BRUIT ; le
+        // sixième, qui ne se lit pas, n'a pas de drapeaux à dire.
+        "* 4 EXPUNGE\r\n* 2 EXPUNGE\r\n* 3 EXISTS\r\n\
+         * 1 FETCH (FLAGS (\\Seen) UID 1)\r\n* 2 FETCH (FLAGS (\\Seen) UID 3)\r\n\
+         a003 OK NOOP completed\r\n"
+    );
+    // Rien de plus au regard suivant.
+    let (texte, _) = dire(&mut session, b"a004 NOOP\r\n");
+    assert_eq!(texte, "a004 OK NOOP completed\r\n");
+}
+
+/// **UN TAMPON QUI NE TIENT PAS LA CONCLUSION LE DIT** ; un tampon qui la tient
+/// mais pas une annonce la REPORTE, et conclut quand même.
+#[test]
+fn noop_reporte_ce_qui_ne_tient_pas() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut session, b"a002 SELECT Changeante\r\n");
+    let mut minuscule = [0_u8; 4];
+    assert!(session.handle(b"a003 NOOP\r\n", &mut minuscule).is_err());
+    let mut court = [0_u8; 64];
+    let tour = session
+        .handle(b"a004 NOOP\r\n", &mut court)
+        .expect("traitable");
+    assert_eq!(
+        std::string::String::from_utf8_lossy(tour.reply()),
+        "a004 OK NOOP completed\r\n"
+    );
+    // L'annonce n'est pas perdue : elle vient au regard suivant.
+    let (texte, _) = dire(&mut session, b"a005 NOOP\r\n");
+    assert!(texte.starts_with("* 4 EXPUNGE\r\n"), "{texte}");
 }

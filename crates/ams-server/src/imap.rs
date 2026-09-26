@@ -356,6 +356,13 @@ pub struct BoiteImap {
     /// c'est renommer. Le chemin relevé à l'ouverture cesse donc d'être valide
     /// au premier `STORE` — le nôtre comme celui d'une autre session.
     chemins: Vec<PathBuf>,
+    /// Les UID disparus du disque depuis un rafraîchissement, **pas encore
+    /// annoncés** : ils restent dans l'instantané jusqu'à ce que la session
+    /// dise `* n EXPUNGE` — les retirer avant renumérote chez le client sans
+    /// qu'il le sache.
+    disparus: Vec<u32>,
+    /// Les UID dont les drapeaux ont changé ailleurs, pas encore annoncés.
+    changes: Vec<u32>,
 }
 
 /// Ce qu'on retient d'un répertoire pour savoir s'il a bougé.
@@ -630,33 +637,89 @@ impl Mailbox for BoiteImap {
             return self.exists();
         }
         self.vu = maintenant;
+        // Un fichier déposé par un autre programme reçoit son UID ici, sans
+        // attendre la prochaine ouverture de la boîte.
+        let _ = self.maildir.adopt_unnumbered();
         let Ok(vue) = MailboxView::open(&self.maildir) else {
             return self.exists();
         };
-        // ON N'AJOUTE, ON NE RETIRE PAS : les rangs qu'un client a retenus
-        // doivent rester valides, et retirer RENUMÉROTE tout ce qui suit.
-        //
-        // **LE NOUVEAU RELEVÉ DOIT DONC COMMENCER PAR L'ANCIEN**, UID pour UID.
-        // S'il ne le fait pas, c'est qu'un message a disparu au milieu : on se
-        // tait, et le client gardera les rangs qu'il connaît jusqu'à sa
-        // prochaine ouverture. Le dire renuméroterait chez lui.
-        let connus = self.vue.messages().len();
-        let prefixe = vue.messages().len() >= connus
-            && vue
-                .messages()
-                .iter()
-                .zip(self.vue.messages())
-                .all(|(neuf, ancien)| neuf.uid == ancien.uid);
-        if !prefixe {
-            return self.exists();
+        // **ON COMPARE, ON NE REMPLACE PAS.** Remplacer l'instantané
+        // renumérotait chez le client sans qu'il le sache ; la 0.2.19 se
+        // taisait donc dès qu'un message manquait au milieu. On note ce qui a
+        // disparu et ce qui a changé, et la session l'annonce quand elle en a
+        // le droit — `NOOP`, `IDLE`.
+        let neufs: std::collections::BTreeMap<u32, &ams_store::Message> = vue
+            .messages()
+            .iter()
+            .map(|message| (message.uid.value(), message))
+            .collect();
+        let dernier = self
+            .vue
+            .messages()
+            .last()
+            .map_or(0, |message| message.uid.value());
+        let mut releves = Vec::new();
+        for (rang, ancien) in self.vue.messages().iter().enumerate() {
+            let uid = ancien.uid.value();
+            match neufs.get(&uid) {
+                None => {
+                    if !self.disparus.contains(&uid) {
+                        self.disparus.push(uid);
+                    }
+                }
+                Some(neuf) => releves.push((rang, uid, drapeaux_de(&neuf.path), neuf.path.clone())),
+            }
         }
-        for message in vue.messages().iter().skip(connus) {
+        for (rang, uid, drapeaux, chemin) in releves {
+            if self.drapeaux.get(rang) != Some(&drapeaux) {
+                if let Some(place) = self.drapeaux.get_mut(rang) {
+                    *place = drapeaux;
+                }
+                if !self.changes.contains(&uid) {
+                    self.changes.push(uid);
+                }
+            }
+            // Le chemin suit toujours : un autre a pu déplacer le fichier.
+            self.poser_le_chemin(rang, chemin);
+        }
+        // LES NOUVEAUX S'AJOUTENT À LA FIN — ceux dont l'UID dépasse tout ce
+        // qu'on tient. Un UID plus petit (un message restauré d'une sauvegarde)
+        // ne peut pas se glisser au milieu sans renuméroter : il se verra à la
+        // prochaine sélection.
+        for message in vue.messages().iter().filter(|m| m.uid.value() > dernier) {
             self.drapeaux.push(drapeaux_de(&message.path));
             self.dates.push(date_de(&message.path));
             self.chemins.push(message.path.clone());
+            self.vue.push(message.clone());
         }
-        self.vue = vue;
         self.exists()
+    }
+
+    fn vanished(&mut self) -> Option<u32> {
+        // Ce que notre propre `EXPUNGE` a déjà retiré n'est plus à annoncer.
+        let tenus: Vec<u32> = self
+            .disparus
+            .iter()
+            .copied()
+            .filter(|uid| self.rang_de_l_uid(*uid).is_some())
+            .collect();
+        self.disparus = tenus;
+        // LE PLUS GRAND RANG D'ABORD : les UID croissent avec les rangs.
+        let uid = self.disparus.iter().copied().max()?;
+        let rang = self.rang_de_l_uid(uid)?;
+        self.disparus.retain(|autre| *autre != uid);
+        self.changes.retain(|autre| *autre != uid);
+        self.oublier(rang);
+        u32::try_from(rang.saturating_add(1)).ok()
+    }
+
+    fn flags_changed(&mut self) -> Option<u32> {
+        while let Some(uid) = self.changes.pop() {
+            if let Some(rang) = self.rang_de_l_uid(uid) {
+                return u32::try_from(rang.saturating_add(1)).ok();
+            }
+        }
+        None
     }
 
     fn binary_size(&self, sequence: u32, path: &[u32]) -> BinarySize {
@@ -1915,6 +1978,12 @@ impl Mailboxes for BoitesImap {
         // L'index part avec le courrier : le garder ferait qu'une boîte recréée
         // sous le même nom reprendrait les UID de l'ancienne.
         let _ = std::fs::remove_file(chemin.join("ams-index.bin"));
+        // **ET LE JOURNAL DES CHANGEMENTS, AVEC SON VERROU.** La 0.2.19 les
+        // oubliait : le répertoire n'était plus vide, ne se retirait pas, et la
+        // suppression rendait « vidée » là où elle aurait dû rendre « faite ».
+        let journal = chemin.join(crate::journal::NOM);
+        let _ = std::fs::remove_file(ams_fichier::chemin_du_verrou(&journal));
+        let _ = std::fs::remove_file(&journal);
         if a_des_filles {
             return Deletion::Videe;
         }
@@ -1995,6 +2064,10 @@ impl Mailboxes for BoitesImap {
 
     fn open(&self, user: &[u8], name: &[u8]) -> Option<Self::Open> {
         let maildir = self.maildir(user, name)?;
+        // **CE QUI A ÉTÉ DÉPOSÉ SANS UID EN REÇOIT UN**, avant le relevé qui ne
+        // voit que les noms numérotés. Un échec n'empêche pas d'ouvrir : on sert
+        // ce qui est déjà numéroté.
+        let _ = maildir.adopt_unnumbered();
         let vue = MailboxView::open(&maildir).ok()?;
         let (drapeaux, dates) = vue
             .messages()
@@ -2016,6 +2089,8 @@ impl Mailboxes for BoitesImap {
             dates,
             chemins,
             vu: empreinte_du_maildir(&maildir),
+            disparus: Vec::new(),
+            changes: Vec::new(),
         })
     }
 }
@@ -2031,6 +2106,17 @@ impl BoiteImap {
     /// Retire un message de l'instantané, et de tout ce qui le suit rang par
     /// rang. **Les quatre listes descendent ensemble** : en oublier une ferait
     /// lire les drapeaux d'un message dans ceux d'un autre.
+    /// Le rang, dans l'instantané, du message qui porte cet UID.
+    ///
+    /// L'instantané est rangé par UID croissant : une recherche dichotomique
+    /// suffit.
+    fn rang_de_l_uid(&self, uid: u32) -> Option<usize> {
+        self.vue
+            .messages()
+            .binary_search_by_key(&uid, |message| message.uid.value())
+            .ok()
+    }
+
     fn oublier(&mut self, rang: usize) {
         self.vue.forget(rang);
         for liste in [&mut self.chemins] {

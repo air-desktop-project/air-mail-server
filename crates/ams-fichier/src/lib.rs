@@ -66,6 +66,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// Le suffixe du fichier de verrou, à côté de ce qu'il protège.
 const SUFFIXE_VERROU: &str = ".verrou";
 
+/// Le fichier de verrou qui protège `chemin`, à côté de lui.
+///
+/// **POUR LE RETIRER AVEC CE QU'IL PROTÈGE** : qui supprime un répertoire doit
+/// savoir quels fichiers il y a laissés, sans recopier le suffixe — deux
+/// copies d'un nom finissent par diverger.
+#[must_use]
+pub fn chemin_du_verrou(chemin: &Path) -> PathBuf {
+    let mut nom = PathBuf::from(chemin).into_os_string();
+    nom.push(SUFFIXE_VERROU);
+    PathBuf::from(nom)
+}
+
 /// Un verrou exclusif sur une lecture-modification-écriture.
 ///
 /// # Pourquoi [`poser`] ne suffit pas
@@ -119,8 +131,7 @@ pub struct Verrou {
 pub fn verrouiller(chemin: &Path) -> io::Result<Verrou> {
     use std::os::unix::fs::OpenOptionsExt as _;
 
-    let mut nom = PathBuf::from(chemin).into_os_string();
-    nom.push(SUFFIXE_VERROU);
+    let nom = chemin_du_verrou(chemin);
     let fichier = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -132,7 +143,7 @@ pub fn verrouiller(chemin: &Path) -> io::Result<Verrou> {
         // indéfiniment. Le masque du processus le dit déjà ; le redire ici tient
         // même chez un appelant qui ne l'aurait pas posé.
         .mode(0o600)
-        .open(PathBuf::from(nom))?;
+        .open(nom)?;
 
     // SAFETY : `flock` reçoit un descripteur valide, emprunté à `fichier` qui
     // vit plus longtemps que l'appel.
