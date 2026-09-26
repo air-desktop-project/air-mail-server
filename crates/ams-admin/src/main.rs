@@ -83,6 +83,7 @@ COMMANDES
     account list <fichier>
                         liste les noms de comptes. Jamais les empreintes.
     account remove <fichier> --login <nom> [--app-passwords <applicatifs>]
+                   [--delegations <délégations>]
                         retire un compte — et, si l'on nomme leur magasin, ses
                         mots de passe applicatifs : sans cela, un compte recréé
                         sous le même nom en hériterait.
@@ -271,16 +272,15 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
-        ["account", "remove", fichier, "--login", nom] => retirer(Path::new(fichier), nom, None),
-        [
-            "account",
-            "remove",
-            fichier,
-            "--login",
-            nom,
-            "--app-passwords",
-            applicatifs,
-        ] => retirer(Path::new(fichier), nom, Some(Path::new(applicatifs))),
+        ["account", "remove", fichier, "--login", nom, reste @ ..] => {
+            match magasins_a_purger(reste) {
+                Ok(magasins) => retirer(Path::new(fichier), nom, &magasins),
+                Err(quoi) => {
+                    eprintln!("air-mail-admin : {quoi}");
+                    ExitCode::from(2)
+                }
+            }
+        }
         [
             "app-password",
             "add",
@@ -803,6 +803,14 @@ fn afficher(config: &Configuration) {
     // **LE MAGASIN DES MOTS DE PASSE APPLICATIFS SE MONTRE AUSSI** : la 0.2.17
     // l'écrivait sans que cette commande le dise, et l'exploitant qui relisait
     // sa configuration avant de redémarrer ne pouvait pas vérifier qu'il y était.
+    println!(
+        "délégations        {}",
+        if config.delegations.is_empty() {
+            String::from("AUCUN MAGASIN — aucun compte n'atteint la boîte d'un autre")
+        } else {
+            format!("magasin `{}`", config.delegations)
+        }
+    );
     println!(
         "mdp applicatifs    {}",
         if config.app_passwords.is_empty() {
@@ -1702,8 +1710,32 @@ fn aléa() -> Result<u64, String> {
     Ok(u64::from_ne_bytes(graine))
 }
 
+/// Les magasins qu'un `account remove` purge du compte retiré.
+#[derive(Default)]
+struct APurger<'a> {
+    applicatifs: Option<&'a Path>,
+    delegations: Option<&'a Path>,
+}
+
+/// Lit `--app-passwords` et `--delegations`, chacun au plus une fois, dans
+/// l'ordre qu'on voudra.
+fn magasins_a_purger<'a>(reste: &[&'a str]) -> Result<APurger<'a>, String> {
+    let mut magasins = APurger::default();
+    for paire in reste.chunks(2) {
+        let (option, place, chemin) = match *paire {
+            [option @ "--app-passwords", chemin] => (option, &mut magasins.applicatifs, chemin),
+            [option @ "--delegations", chemin] => (option, &mut magasins.delegations, chemin),
+            _ => return Err(format!("argument inattendu : {paire:?}")),
+        };
+        if place.replace(Path::new(chemin)).is_some() {
+            return Err(format!("`{option}` donné deux fois"));
+        }
+    }
+    Ok(magasins)
+}
+
 /// Retire un compte.
-fn retirer(fichier: &Path, nom: &str, applicatifs: Option<&Path>) -> ExitCode {
+fn retirer(fichier: &Path, nom: &str, magasins: &APurger<'_>) -> ExitCode {
     // MÊME VERROU QUE POUR L'AJOUT, et pour la même raison : retirer un compte
     // réécrit tous les autres.
     //
@@ -1729,7 +1761,7 @@ fn retirer(fichier: &Path, nom: &str, applicatifs: Option<&Path>) -> ExitCode {
             // leur magasin : un compte recréé sous le même nom en hériterait
             // sinon, et son nouveau titulaire aurait des secrets qu'il n'a
             // jamais vus.
-            if let Some(applicatifs) = applicatifs {
+            if let Some(applicatifs) = magasins.applicatifs {
                 match modifier_les_applicatifs(applicatifs, |entrees| {
                     let avant = entrees.len();
                     entrees.retain(|entree| entree.login != nom);
@@ -1745,6 +1777,21 @@ fn retirer(fichier: &Path, nom: &str, applicatifs: Option<&Path>) -> ExitCode {
                     }
                 }
             }
+            // **SES DÉLÉGATIONS AUSSI, DANS LES DEUX SENS** — pour la même
+            // raison : un compte recréé sous ce nom atteindrait sinon des boîtes
+            // qu'on ne lui a jamais ouvertes, ou ouvrirait la sienne à d'autres.
+            if let Some(delegations) = magasins.delegations {
+                match purger_les_delegations(delegations, nom) {
+                    Ok(combien) => println!(
+                        "{} : {combien} délégation(s) de ou vers `{nom}` retirée(s)",
+                        delegations.display()
+                    ),
+                    Err(message) => {
+                        eprintln!("air-mail-admin : {message}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
             ExitCode::SUCCESS
         }
         Err(message) => {
@@ -1752,6 +1799,27 @@ fn retirer(fichier: &Path, nom: &str, applicatifs: Option<&Path>) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Retire du magasin des délégations celles qui nomment `nom`, comme délégué
+/// ou comme titulaire, sous son verrou — le serveur l'écrit aussi, depuis son
+/// API. Un magasin absent n'a rien à perdre.
+fn purger_les_delegations(fichier: &Path, nom: &str) -> Result<usize, String> {
+    let _verrou = ams_fichier::verrouiller(fichier)
+        .map_err(|erreur| format!("`{}` : {erreur}", fichier.display()))?;
+    let mut tenues = match std::fs::read(fichier) {
+        Ok(octets) => ams_config::decode_delegations(&octets)
+            .map_err(|erreur| format!("`{}` : {erreur}", fichier.display()))?,
+        Err(erreur) if erreur.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(erreur) => return Err(format!("`{}` : {erreur}", fichier.display())),
+    };
+    let avant = tenues.len();
+    tenues.retain(|tenue| tenue.delegate != nom && tenue.owner != nom);
+    let octets =
+        ams_config::encode_delegations(&tenues).map_err(|erreur| format!("encodage : {erreur}"))?;
+    ams_fichier::poser(fichier, &octets)
+        .map_err(|erreur| format!("`{}` : {erreur}", fichier.display()))?;
+    Ok(avant.saturating_sub(tenues.len()))
 }
 
 /// Lit, modifie et réécrit le magasin des mots de passe applicatifs, sous son

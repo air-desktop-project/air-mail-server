@@ -198,7 +198,7 @@ fuzz_target!(|entree: Entree| {
     // PROPRIÉTÉS 2 et 3 : on réécrit le chemin depuis ce qu'on en a compris, et
     // il doit se relire à l'identique.
     let mut refait = std::string::String::new();
-    for segment in segments_de(&resource) {
+    for segment in segments_de(&resource, resolu.owner) {
         let segment = segment.as_str();
         // PROPRIÉTÉ 2 : rien de ce qui est accepté ne peut remonter.
         assert!(!segment.is_empty(), "un segment vide est passé");
@@ -229,6 +229,26 @@ fuzz_target!(|entree: Entree| {
         relu.resource, resource,
         "deux écritures désignent la même ressource : {refait}"
     );
+    // **ET LE MÊME TITULAIRE** : une boîte d'autrui ne devient pas la sienne en
+    // se réécrivant, ni l'inverse.
+    assert_eq!(relu.owner, resolu.owner, "le titulaire a changé : {refait}");
+    // Un titulaire ne se nomme que pour une boîte.
+    if resolu.owner.is_some() {
+        assert!(
+            matches!(
+                resource,
+                Resource::Mailboxes
+                    | Resource::Mailbox { .. }
+                    | Resource::Messages { .. }
+                    | Resource::Message { .. }
+                    | Resource::MessageRaw { .. }
+                    | Resource::MessagePart { .. }
+                    | Resource::Search { .. }
+                    | Resource::Changes { .. }
+            ),
+            "un titulaire nommé pour autre chose qu'une boîte : {resource:?}"
+        );
+    }
     assert_eq!(relu.scope, resolu.scope);
 
     // Et une faute de chemin ne se déguise jamais en ressource inconnue.
@@ -253,8 +273,17 @@ fuzz_target!(|entree: Entree| {
 /// On rend des chaînes possédées : emprunter obligerait à faire vivre l'écriture
 /// décimale d'un identifiant aussi longtemps que le chemin, donc à la fuir — et
 /// une fuite délibérée dans le harnais masquerait celles du code.
-fn segments_de(resource: &Resource<'_>) -> std::vec::Vec<std::string::String> {
+fn segments_de(
+    resource: &Resource<'_>,
+    titulaire: Option<&str>,
+) -> std::vec::Vec<std::string::String> {
     let mut segments = std::vec![std::string::String::from("v1")];
+    // UNE BOÎTE D'AUTRUI SE PRÉFIXE DE SON TITULAIRE, puis s'écrit comme la
+    // sienne.
+    if let Some(titulaire) = titulaire {
+        segments.push(std::string::String::from("accounts"));
+        segments.push(std::string::String::from(titulaire));
+    }
     let mut pousser = |texte: &str| segments.push(std::string::String::from(texte));
     match *resource {
         Resource::Tokens => pousser("tokens"),
@@ -281,6 +310,21 @@ fn segments_de(resource: &Resource<'_>) -> std::vec::Vec<std::string::String> {
         Resource::OwnAppPasswords => {
             pousser("me");
             pousser("app-passwords");
+        }
+        Resource::OwnDelegations => {
+            pousser("me");
+            pousser("delegations");
+        }
+        Resource::Delegates { compte } => {
+            pousser("accounts");
+            pousser(compte);
+            pousser("delegates");
+        }
+        Resource::Delegate { compte, delegue } => {
+            pousser("accounts");
+            pousser(compte);
+            pousser("delegates");
+            pousser(delegue);
         }
         Resource::OwnAppPassword { id } => {
             pousser("me");

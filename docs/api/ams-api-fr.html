@@ -847,7 +847,49 @@ POST /v1/me/devices
   <p>Révoque un mot de passe applicatif : <code>204</code>, et le client qui s'en servait est refusé <strong>à sa prochaine connexion</strong>. Celui d'un autre compte rend <code>404</code>, comme un identifiant qui n'existe pas — la même règle que pour les appareils. Révoquer deux fois rend <code>404</code>.</p>
 </div>
 
+<div class="ressource">
+  <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/me/delegations</span><span class="portee">jeton valide</span></div>
+  <pre><code>{ "delegations": [
+    { "account": "support", "rights": ["read", "write", "send"] }
+] }</code></pre>
+  <p>Les boîtes <strong>d'autrui</strong> que vous pouvez atteindre, et vos droits sur chacune. C'est ce qu'une application lit pour afficher « support@ » à côté de votre propre boîte.</p>
+</div>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/accounts/{compte}/mailboxes/…</span><span class="portee">mail + délégation</span></div>
+  <p><strong>La boîte d'un autre compte</strong>, par exemple une boîte partagée <code>support</code>. Tout ce qui se trouve sous <code>/v1/mailboxes/…</code> s'y retrouve à l'identique — liste des boîtes, messages, parties, recherche, <code>changes</code> —, préfixé de <code>/v1/accounts/{compte}</code>.</p>
+  <div class="note danger">
+    <span class="etiquette">Le droit vient de la table, pas du jeton</span>
+    <p>La table des délégations se consulte <strong>à chaque requête</strong> : une délégation retirée cesse de valoir à la requête suivante, sans révoquer aucun jeton. Sans le droit nécessaire, la réponse est <code>404</code>, comme pour une boîte qui n'existe pas — un <code>403</code> apprendrait que le compte existe.</p>
+    <p><strong>Lire</strong> (<code>read</code>) ouvre <code>GET</code>, <code>HEAD</code> et la recherche. <strong>Écrire</strong> (<code>write</code>) ouvre le reste : drapeaux, dépôt, suppression, création ou suppression d'une boîte. Chaque écriture sur une boîte d'autrui est <strong>journalisée avec son acteur</strong>.</p>
+  </div>
+  <p><strong>Envoyer au nom d'autrui</strong> (<code>send</code>) : <code>POST /v1/submissions</code> accepte alors un <code>From:</code> qui est une adresse du titulaire — c'est ce qui permet de répondre <em>en tant que</em> <code>support@</code>.</p>
+</div>
+
 <h3 id="r-admin"><span class="numero">5.9</span>Administration</h3>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/accounts/{compte}/delegates</span><span class="portee">admin:read</span></div>
+  <pre><code>{ "delegates": [
+    { "login": "thierry.delhaise", "rights": ["read", "write", "send"] }
+] }</code></pre>
+  <p>Qui atteint la boîte de ce compte, et avec quels droits. <code>501</code> si ce serveur n'a pas de magasin de délégations.</p>
+</div>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe put">PUT</span><span class="verbe delete">DELETE</span><span class="chemin">/v1/accounts/{compte}/delegates/{délégué}</span><span class="portee">admin:write</span></div>
+  <pre><code>PUT /v1/accounts/support/delegates/thierry.delhaise
+{ "rights": ["write", "send"] }
+
+→ 201 (neuve) ou 200 (remplacée)
+{ "delegates": [ { "login": "thierry.delhaise", "rights": ["read", "write", "send"] } ] }</code></pre>
+  <p>Pose ou remplace une délégation. Les droits se nomment <code>read</code>, <code>write</code>, <code>send</code> ; <strong>écrire et envoyer impliquent lire</strong>, et la réponse le montre. Les deux comptes doivent exister (<code>404</code> sinon) et être deux (<code>400</code> pour une délégation de soi à soi). <code>DELETE</code> la retire : <code>204</code>, puis <code>404</code>.</p>
+  <div class="note">
+    <span class="etiquette">L'administration seule</span>
+    <p>Les boîtes partagées n'ont pas de titulaire humain pour décider qui y accède, et un compte compromis ne doit pas pouvoir s'ouvrir d'accès. Supprimer un compte retire ses délégations, dans les deux sens.</p>
+  </div>
+</div>
+
 
 <p>Toutes ces ressources exigent le domaine <code>admin</code>, qu'un mot de passe n'accorde jamais. Voir <a href="#admin">§3.6</a>.</p>
 

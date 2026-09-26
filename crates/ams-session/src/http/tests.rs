@@ -134,6 +134,7 @@ fn une_requete_autorisee_demande_a_servir() {
             scope: portee,
             body: &[],
             query: ams_api::Query::default(),
+            owner: None,
         }
     );
 }
@@ -1802,5 +1803,31 @@ fn le_journal_des_changements_exige_son_point_de_depart() {
             "{}",
             String::from_utf8_lossy(chemin)
         );
+    }
+}
+
+/// **LE TITULAIRE D'UNE BOÎTE D'AUTRUI REMONTE JUSQU'À L'APPELANT** — et la
+/// session n'en juge pas : c'est la table des délégations qui décide.
+#[test]
+fn le_titulaire_d_une_boite_d_autrui_remonte() {
+    let porte = jeton("marc", Scope::one(Area::Mail, Rights::Read));
+    let champs = requete(
+        b"GET",
+        b"/v1/accounts/support/mailboxes/INBOX/messages",
+        porte.as_bytes(),
+    );
+    let tete = entete(&champs);
+    let mut place = [0_u8; PLACE];
+    let session = une_session();
+    let tour = session.request(&tete, &[], MAINTENANT, &mut place);
+    assert_eq!(tour.status(), StatusCode::OK);
+    match tour.next() {
+        Next::Serve {
+            resource, owner, ..
+        } => {
+            assert_eq!(resource, Resource::Messages { boite: "INBOX" });
+            assert_eq!(owner, Some("support"));
+        }
+        autre => panic!("on devait servir : {autre:?}"),
     }
 }

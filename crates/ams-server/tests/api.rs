@@ -208,6 +208,7 @@ fn configuration_complete(
         scram_store: String::new(),
         devices: appareils.to_string(),
         app_passwords: String::new(),
+        delegations: String::new(),
         require_fqdn_sender: false,
         require_fqdn_recipient: false,
         require_sender_domain: false,

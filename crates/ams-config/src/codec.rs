@@ -410,6 +410,9 @@ pub struct Configuration {
     /// comme le fichier de comptes, et refuse de démarrer s'il est lisible par
     /// tous.
     pub app_passwords: String,
+    /// Le magasin des délégations, ou une chaîne vide : aucun compte n'atteint
+    /// alors la boîte d'un autre.
+    pub delegations: String,
     /// La file d'attente du serveur.
     pub queue: Queue,
     /// MTA-STS (RFC 8461).
@@ -676,6 +679,13 @@ pub enum Error {
     /// n'ouvrira jamais, et son propriétaire la croirait valable.
     BadAppPassword(String),
 
+    /// Une délégation ne se construit pas : de soi à soi, ou des droits qui
+    /// n'en sont pas (un bit inconnu, aucun droit, l'écriture sans la lecture).
+    BadDelegation(String),
+
+    /// Deux délégations pour le même couple : laquelle vaudrait ?
+    DuplicateDelegation(String),
+
     /// Un champ dépasse la borne que ce magasin lui donne.
     ///
     /// Le nom est là **exprès** : « trop long » sans dire lequel oblige à
@@ -726,6 +736,14 @@ impl fmt::Display for Error {
                 f,
                 "la clef de l'appareil `{id}` n'est pas un point de la courbe P-256"
             ),
+            Error::BadDelegation(couple) => write!(
+                f,
+                "la délégation `{couple}` ne se construit pas : de soi à soi, ou des \
+                 droits inconnus, vides, ou sans la lecture"
+            ),
+            Error::DuplicateDelegation(couple) => {
+                write!(f, "la délégation `{couple}` figure deux fois")
+            }
             Error::DuplicateAppPassword(id) => {
                 write!(
                     f,
@@ -970,6 +988,7 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
         scram_store: texte(lu.get_scram_store()?)?,
         devices: texte(lu.get_devices()?)?,
         app_passwords: texte(lu.get_app_passwords()?)?,
+        delegations: texte(lu.get_delegations()?)?,
         queue,
         mtasts,
         tlsrpt,
@@ -1115,6 +1134,7 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
         ecrit.set_scram_store(&config.scram_store);
         ecrit.set_devices(&config.devices);
         ecrit.set_app_passwords(&config.app_passwords);
+        ecrit.set_delegations(&config.delegations);
         {
             let mut emission = ecrit.reborrow().init_relay();
             emission.set_enabled(config.relay.enabled);
@@ -1335,6 +1355,7 @@ mod tests {
             devices: String::from("/var/lib/air-mail/appareils.bin"),
             // Non vide, pour la même raison encore.
             app_passwords: String::from("/var/lib/air-mail/applicatifs.bin"),
+            delegations: String::from("/var/lib/air-mail/delegations.bin"),
             // Les trois écoutes d'un serveur réel : le `25` et le `587` en
             // `STARTTLS`, le `465` en TLS implicite.
             smtp_listeners: vec![

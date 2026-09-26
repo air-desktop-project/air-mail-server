@@ -332,6 +332,37 @@ Ce qu'il faut savoir :
 - `account remove … --app-passwords <magasin>` retire aussi ceux du compte :
   sans cela, un compte recréé sous le même nom en hériterait.
 
+### La délégation : ouvrir une boîte à un autre compte
+
+Une boîte partagée — `support`, `compta` — est un compte comme un autre, dont
+d'autres comptes atteignent la boîte **par l'API**, sous
+`/v1/accounts/support/mailboxes/…`. Qui y accède, et pour quoi faire, se décide
+**par l'administration seule** : ni le titulaire ni le délégué ne peuvent
+s'ouvrir un accès.
+
+```sh
+# Le magasin, nommé dans la configuration. `0600`, comme les autres.
+air-mail-admin config write /etc/air-mail/ams.conf … \
+    --delegations /var/lib/air-mail/delegations.bin
+
+# Poser une délégation, avec un jeton d'administration (`admin:write`).
+# Droits : read, write, send — écrire et envoyer impliquent lire.
+curl --http2 -X PUT -H "Authorization: Bearer $JETON" \
+    -d '{"rights":["write","send"]}' \
+    https://mail.example.org:8443/v1/accounts/support/delegates/jean
+```
+
+- **la table se relit à chaque requête** : une délégation retirée
+  (`DELETE …/delegates/jean`) cesse de valoir tout de suite, sans révoquer de
+  jeton ;
+- sans le droit, la réponse est `404`, comme pour un compte qui n'existe pas ;
+- `send` permet d'envoyer avec pour `From:` une adresse du titulaire ;
+- chaque écriture sur la boîte d'autrui est **journalisée avec son acteur** ;
+- `account remove … --delegations <magasin>` retire celles du compte, dans les
+  deux sens (l'API le fait d'elle-même en supprimant un compte) ;
+- **IMAP ne les voit pas encore** : un client de messagerie n'atteint que sa
+  propre boîte.
+
 ---
 
 ## 5. Le chiffrement

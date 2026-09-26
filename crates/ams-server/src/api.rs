@@ -186,6 +186,9 @@ pub struct ApiMaildir {
     /// Les mots de passe applicatifs, quand la configuration en nomme le
     /// magasin. `None` : les routes `/v1/me/app-passwords` rendent 501.
     applicatifs: Option<Arc<crate::applicatifs::Applicatifs>>,
+    /// Les délégations, quand la configuration en nomme le magasin. `None` :
+    /// aucune boîte d'autrui ne s'atteint.
+    delegations: Option<Arc<crate::delegations::Delegations>>,
 }
 
 /// Combien de mots de passe applicatifs un compte peut avoir.
@@ -226,6 +229,7 @@ impl ApiMaildir {
             appareils: None,
             scram: None,
             applicatifs: None,
+            delegations: None,
             // ET PAS D'INVITATIONS SANS CLÉ : voir `avec_scellement`.
             scellement: None,
             // NI DE SESSIONS PAR CLEF SANS DOMAINE : voir `avec_domaine`.
@@ -282,6 +286,14 @@ impl ApiMaildir {
     #[must_use]
     pub fn avec_applicatifs(mut self, magasin: Arc<crate::applicatifs::Applicatifs>) -> Self {
         self.applicatifs = Some(magasin);
+        self
+    }
+
+    /// Lui donne le magasin des délégations : c'est ce qui ouvre les boîtes
+    /// d'autrui sous `/v1/accounts/{compte}/mailboxes/…`.
+    #[must_use]
+    pub fn avec_delegations(mut self, magasin: Arc<crate::delegations::Delegations>) -> Self {
+        self.delegations = Some(magasin);
         self
     }
 
@@ -448,6 +460,17 @@ impl ApiMaildir {
         // La carte des boîtes suit le magasin : une boîte qui resterait
         // accessible sans compte serait servie à un nom que plus rien n'authentifie.
         self.remise.retirer(nom);
+        // **SES DÉLÉGATIONS AUSSI, DANS LES DEUX SENS** : un compte recréé sous
+        // le même nom hériterait sinon des accès de l'ancien, ou de ses
+        // délégués.
+        if let Some(table) = self.delegations.as_ref()
+            && let Err(quoi) = table.modifier(|tenues| {
+                tenues.retain(|tenue| tenue.delegate != nom && tenue.owner != nom);
+                Ok(())
+            })
+        {
+            eprintln!("air-mail-server : délégations de `{nom}` NON retirées ({quoi})");
+        }
         // **SES MOTS DE PASSE APPLICATIFS PARTENT AVEC LUI.** Ils n'ouvrent plus
         // rien sans compte ; mais un compte recréé sous le même nom en
         // hériterait, et le nouveau titulaire aurait des secrets qu'il n'a
@@ -986,6 +1009,163 @@ impl ApiMaildir {
             Ok(())
         }) {
             Ok(()) => sans_contenu(),
+            Err(quoi) => dire_la_faute(&quoi, sortie),
+        }
+    }
+
+    /// Les boîtes d'autrui que ce compte atteint, et ses droits sur chacune.
+    fn mes_delegations<'o>(&self, account: &str, sortie: &'o mut [u8]) -> Served<'o> {
+        let recues = self
+            .delegations
+            .as_ref()
+            .map(|table| table.recues_par(account))
+            .unwrap_or_default();
+        let noms: std::vec::Vec<std::vec::Vec<&str>> =
+            recues.iter().map(|tenue| tenue.rights.names()).collect();
+        let lignes: std::vec::Vec<render::DelegationRow<'_>> = recues
+            .iter()
+            .zip(&noms)
+            .map(|(tenue, droits)| render::DelegationRow {
+                login: &tenue.owner,
+                rights: droits,
+            })
+            .collect();
+        rendre(render::write_delegations(
+            "delegations",
+            "account",
+            &lignes,
+            sortie,
+        ))
+    }
+
+    /// Qui atteint la boîte de ce compte, et avec quels droits.
+    fn delegues_de<'o>(&self, compte: &str, sortie: &'o mut [u8]) -> Served<'o> {
+        let Some(table) = self.delegations.as_ref() else {
+            return pas_encore(sortie);
+        };
+        if !self.comptes.vue().iter().any(|connu| connu.login == compte) {
+            return absente(sortie);
+        }
+        let accordees = table.accordees_par(compte);
+        let noms: std::vec::Vec<std::vec::Vec<&str>> =
+            accordees.iter().map(|tenue| tenue.rights.names()).collect();
+        let lignes: std::vec::Vec<render::DelegationRow<'_>> = accordees
+            .iter()
+            .zip(&noms)
+            .map(|(tenue, droits)| render::DelegationRow {
+                login: &tenue.delegate,
+                rights: droits,
+            })
+            .collect();
+        rendre(render::write_delegations(
+            "delegates",
+            "login",
+            &lignes,
+            sortie,
+        ))
+    }
+
+    /// Pose ou remplace une délégation. `201` si elle est neuve, `200` si elle
+    /// en remplace une.
+    ///
+    /// **LES DEUX COMPTES DOIVENT EXISTER**, et être deux : une délégation de
+    /// soi à soi ne donnerait rien. Les droits se nomment `read`, `write`,
+    /// `send` ; écrire et envoyer IMPLIQUENT lire, et la réponse le montre.
+    fn poser_une_delegation<'o>(
+        &self,
+        compte: &str,
+        delegue: &str,
+        body: &[u8],
+        sortie: &'o mut [u8],
+    ) -> Served<'o> {
+        let Some(table) = self.delegations.as_ref() else {
+            return pas_encore(sortie);
+        };
+        let Ok((noms, combien)) = render::read_rights_request(body) else {
+            return corps_refuse(sortie);
+        };
+        let mut droits = ams_config::Rights::READ;
+        for nom in noms.iter().take(combien) {
+            let Some(droit) = ams_config::Rights::from_name(nom) else {
+                return corps_refuse(sortie);
+            };
+            droits = droits.with(droit);
+        }
+        if compte == delegue {
+            return refus_de_compte(sortie);
+        }
+        {
+            let comptes = self.comptes.vue();
+            let existe = |login: &str| comptes.iter().any(|connu| connu.login == login);
+            if !existe(compte) || !existe(delegue) {
+                return absente(sortie);
+            }
+        }
+        let mut neuve = true;
+        if let Err(quoi) = table.modifier(|tenues| {
+            neuve = !tenues
+                .iter()
+                .any(|tenue| tenue.delegate == delegue && tenue.owner == compte);
+            tenues.retain(|tenue| !(tenue.delegate == delegue && tenue.owner == compte));
+            tenues.push(ams_config::Delegation {
+                delegate: String::from(delegue),
+                owner: String::from(compte),
+                rights: droits,
+            });
+            Ok(())
+        }) {
+            return dire_la_faute(&quoi, sortie);
+        }
+        eprintln!(
+            "air-mail-server : délégation posée — `{delegue}` atteint la boîte de `{compte}` \
+             ({})",
+            droits.names().join(", ")
+        );
+        let noms = droits.names();
+        let servi = rendre(render::write_delegations(
+            "delegates",
+            "login",
+            &[render::DelegationRow {
+                login: delegue,
+                rights: &noms,
+            }],
+            sortie,
+        ));
+        Served {
+            status: if neuve {
+                StatusCode::CREATED
+            } else {
+                StatusCode::OK
+            },
+            ..servi
+        }
+    }
+
+    /// Retire une délégation : elle cesse de valoir à la requête suivante.
+    fn retirer_une_delegation<'o>(
+        &self,
+        compte: &str,
+        delegue: &str,
+        sortie: &'o mut [u8],
+    ) -> Served<'o> {
+        let Some(table) = self.delegations.as_ref() else {
+            return pas_encore(sortie);
+        };
+        match table.modifier(|tenues| {
+            let place = tenues
+                .iter()
+                .position(|tenue| tenue.delegate == delegue && tenue.owner == compte)
+                .ok_or(crate::delegations::INTROUVABLE)?;
+            tenues.remove(place);
+            Ok(())
+        }) {
+            Ok(()) => {
+                eprintln!(
+                    "air-mail-server : délégation retirée — `{delegue}` n'atteint plus la \
+                     boîte de `{compte}`"
+                );
+                sans_contenu()
+            }
             Err(quoi) => dire_la_faute(&quoi, sortie),
         }
     }
@@ -1588,7 +1768,17 @@ impl ApiMaildir {
             return refus_de_depot(sortie);
         };
         let vue = self.comptes.vue();
-        let Some(expediteur) = ecrit_bien_en_son_nom(&vue, compte, &message) else {
+        // **ENVOYER AU NOM D'AUTRUI SE DÉLÈGUE** : le droit `send` sur la boîte
+        // de support@ permet d'écrire `From: support@…`. Sans lui, la règle reste
+        // celle d'avant — on n'écrit qu'en son nom.
+        let peut_envoyer_pour = |titulaire: &str| {
+            self.delegations
+                .as_ref()
+                .and_then(|table| table.droits(compte, titulaire))
+                .is_some_and(|droits| droits.contains(ams_config::Rights::SEND))
+        };
+        let Some(expediteur) = ecrit_bien_en_son_nom(&vue, compte, peut_envoyer_pour, &message)
+        else {
             // **LA MÊME RÈGLE QUE SMTP, ET DÉSORMAIS LE MÊME AVEU.** Cette porte
             // refusait l'usurpation en silence : le `400` partait au déposant, et
             // l'exploitant n'apprenait rien d'un compte authentifié qui tente
@@ -2069,7 +2259,39 @@ impl Api for ApiMaildir {
             body,
             query,
             range: portee,
+            owner,
         } = appel;
+        // **UNE BOÎTE D'AUTRUI : LA TABLE DÉCIDE, À CHAQUE REQUÊTE.** Le jeton dit
+        // QUI appelle ; le chemin dit la boîte de QUI ; la table dit si le
+        // premier peut toucher à la seconde, et pour quoi faire. Sans le droit,
+        // la réponse est celle d'une boîte qui n'existe pas : un `403`
+        // apprendrait que le compte existe, et laisserait les énumérer.
+        let acteur = account;
+        let account = match owner {
+            None => account,
+            Some(titulaire) if titulaire == account => account,
+            Some(titulaire) => {
+                let requis = droit_requis(resource, method);
+                let permis = self
+                    .delegations
+                    .as_ref()
+                    .and_then(|table| table.droits(acteur, titulaire))
+                    .is_some_and(|droits| droits.contains(requis));
+                if !permis {
+                    return absente(sortie);
+                }
+                // **CHAQUE ÉCRITURE DIT QUI L'A FAITE.** Trois personnes qui se
+                // partagent support@ ne doivent pas former un seul coupable
+                // anonyme.
+                if requis == ams_config::Rights::WRITE {
+                    eprintln!(
+                        "air-mail-server : délégation — `{acteur}` écrit dans la boîte de \
+                         `{titulaire}` : {method:?} {resource:?}"
+                    );
+                }
+                titulaire
+            }
+        };
         match resource {
             Resource::Health => rendre(render::write_health(sortie)),
             Resource::Metrics => rendre(render::write_metrics(
@@ -2163,6 +2385,14 @@ impl Api for ApiMaildir {
             }
             Resource::OwnAppPasswords => self.mes_applicatifs(account, sortie),
             Resource::OwnAppPassword { id } => self.revoquer_un_applicatif(account, id, sortie),
+            Resource::OwnDelegations => self.mes_delegations(account, sortie),
+            Resource::Delegates { compte } => self.delegues_de(compte, sortie),
+            Resource::Delegate { compte, delegue } if matches!(method, Method::Delete) => {
+                self.retirer_une_delegation(compte, delegue, sortie)
+            }
+            Resource::Delegate { compte, delegue } => {
+                self.poser_une_delegation(compte, delegue, body, sortie)
+            }
             Resource::AccountAddresses { compte } if matches!(method, Method::Put) => {
                 self.poser_des_adresses(compte, body, sortie)
             }
@@ -2432,6 +2662,19 @@ enum Refus {
     Magasin(crate::appareils::Faute),
 }
 
+/// Le droit qu'une requête exige sur une boîte d'autrui.
+///
+/// **LA LECTURE POUR CE QUI NE MODIFIE RIEN** — `GET`, `HEAD`, et la recherche,
+/// qui passe par un `POST` sans rien écrire —, l'écriture pour le reste : poser
+/// des drapeaux, ranger, supprimer, créer ou effacer une boîte.
+fn droit_requis(resource: Resource<'_>, method: Method) -> ams_config::Rights {
+    if matches!(method, Method::Get | Method::Head) || matches!(resource, Resource::Search { .. }) {
+        ams_config::Rights::READ
+    } else {
+        ams_config::Rights::WRITE
+    }
+}
+
 /// Ce qu'une session ouverte par cette API accorde.
 ///
 /// **LA MÊME POUR UN MOT DE PASSE ET POUR UNE CLEF D'APPAREIL**, et écrite UNE
@@ -2613,6 +2856,7 @@ fn absente(sortie: &mut [u8]) -> Served<'_> {
 fn ecrit_bien_en_son_nom<'m>(
     comptes: &[Account],
     compte: &str,
+    peut_envoyer_pour: impl Fn(&str) -> bool,
     message: &ams_mime::Message<'m>,
 ) -> Option<&'m [u8]> {
     let champ = message.fields().find(|champ| champ.name_is(b"from"))?;
@@ -2623,7 +2867,7 @@ fn ecrit_bien_en_son_nom<'m>(
     // reviendrait à la relire deux fois, et deux lectures d'un même champ
     // finissent par ne plus dire la même chose.
     ams_auth::route(comptes, adresse)
-        .is_some_and(|vu| vu.login == compte)
+        .is_some_and(|vu| vu.login == compte || peut_envoyer_pour(&vu.login))
         .then_some(adresse)
 }
 
@@ -3113,7 +3357,7 @@ mod tests {
         let brut = std::format!("{entete}\r\n\r\n");
         let bornes = ams_mime::Limits::DEFAULT;
         let message = ams_mime::Message::parse(brut.as_bytes(), &bornes).expect("lisible");
-        ecrit_bien_en_son_nom(&comptes(), compte, &message).is_some()
+        ecrit_bien_en_son_nom(&comptes(), compte, |_| false, &message).is_some()
     }
 
     /// **UN COMPTE N'ÉCRIT QU'EN SON NOM.**
@@ -3555,6 +3799,7 @@ mod ecritures {
                 body: corps,
                 query,
                 range: None,
+                owner: None,
             },
             &mut place,
         );
@@ -3621,6 +3866,282 @@ mod ecritures {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let boite = boites.open(b"marie", b"INBOX").expect("ouvrable");
         assert_eq!(boite.exists(), 0, "rien ne doit avoir été rangé");
+    }
+
+    // ── LA DÉLÉGATION ──────────────────────────────────────────────────────
+
+    /// Une API sur deux comptes : `marie`, et la boîte partagée `support`.
+    fn api_partagee(
+        racine: &std::path::Path,
+    ) -> (ApiMaildir, Arc<crate::delegations::Delegations>) {
+        let mut carte = std::collections::BTreeMap::new();
+        for nom in ["marie", "support"] {
+            let boite = ams_store::Maildir::open(
+                racine.join(nom),
+                b"mail.exemple.test",
+                ams_store::fresh_uid_validity(),
+            )
+            .expect("ouvrable");
+            carte.insert(String::from(nom), Arc::new(boite));
+        }
+        let comptes = Arc::new(crate::comptes::Comptes::new(
+            racine.join("comptes.bin"),
+            ["marie", "support"]
+                .into_iter()
+                .map(|nom| ams_auth::Account {
+                    login: String::from(nom),
+                    hash: String::new(),
+                    addresses: std::vec![std::format!("{nom}@exemple.test")],
+                })
+                .collect(),
+        ));
+        let remise = Arc::new(crate::delivery::Boites::new(
+            carte,
+            racine.to_path_buf(),
+            b"mail.exemple.test".to_vec(),
+            Arc::clone(&comptes),
+        ));
+        let boites = Arc::new(BoitesImap::new(Arc::clone(&remise), b"mail.exemple.test"));
+        let table = Arc::new(crate::delegations::Delegations::new(
+            racine.join("delegations.bin"),
+            Vec::new(),
+        ));
+        let api = ApiMaildir::new(
+            boites,
+            comptes,
+            remise,
+            Arc::new(std::vec![String::from("exemple.test")]),
+            Arc::new(ams_loop_tokio::SharedGuard::new(
+                4,
+                ams_guard::Thresholds::DEFAULT,
+            )),
+            Arc::new(crate::incidents::Incidents::new()),
+        )
+        .avec_delegations(Arc::clone(&table));
+        (api, table)
+    }
+
+    /// Sert une requête au nom de `qui`, sur la boîte de `titulaire` s'il y en
+    /// a un.
+    fn servir_pour(
+        api: &ApiMaildir,
+        qui: &str,
+        titulaire: Option<&str>,
+        resource: Resource<'_>,
+        method: Method,
+        corps: &[u8],
+    ) -> (StatusCode, String) {
+        let mut place = std::vec![0_u8; 64 * 1024];
+        let Served { status, body, .. } = api.serve(
+            resource,
+            method,
+            qui,
+            ams_loop_tokio::http::Appel {
+                body: corps,
+                query: ams_api::Query::default(),
+                range: None,
+                owner: titulaire,
+            },
+            &mut place,
+        );
+        (status, String::from_utf8_lossy(body).into_owned())
+    }
+
+    /// **LA DÉLÉGATION, DE BOUT EN BOUT** : l'administration la pose, le
+    /// délégué atteint la boîte dans la mesure de ses droits, et la retirer
+    /// vaut tout de suite.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn une_delegation_ouvre_la_boite_d_autrui_dans_la_mesure_de_ses_droits() {
+        let temporaire = Ephemere::neuf();
+        let (api, _) = api_partagee(&temporaire.0);
+        let boite = Resource::Messages { boite: "INBOX" };
+        let lettre = b"From: client@ailleurs.test\r\nSubject: au support\r\n\r\naide\r\n";
+        // support@ reçoit un message, par sa propre voie.
+        let (status, corps) = servir_pour(&api, "support", None, boite, Method::Post, lettre);
+        assert_eq!(status, StatusCode::CREATED, "{corps}");
+
+        // ── SANS DÉLÉGATION : LA BOÎTE D'AUTRUI N'EXISTE PAS ───────────────
+        let (status, _) = servir_pour(&api, "marie", Some("support"), boite, Method::Get, b"");
+        assert_eq!(status, StatusCode::NOT_FOUND, "sans délégation, rien");
+
+        // ── L'ADMINISTRATION ACCORDE LA LECTURE ─────────────────────────────
+        let cible = Resource::Delegate {
+            compte: "support",
+            delegue: "marie",
+        };
+        let (status, corps) = servir(&api, cible, Method::Put, br#"{"rights":["read"]}"#);
+        assert_eq!(status, StatusCode::CREATED, "{corps}");
+        assert!(corps.contains(r#""rights":["read"]"#), "{corps}");
+
+        let (status, corps) = servir_pour(&api, "marie", Some("support"), boite, Method::Get, b"");
+        assert_eq!(status, StatusCode::OK, "{corps}");
+        assert!(
+            corps.contains("au support"),
+            "marie lit la boîte de support : {corps}"
+        );
+        // Mais elle n'y écrit pas.
+        let (status, _) = servir_pour(&api, "marie", Some("support"), boite, Method::Post, lettre);
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "la lecture n'ouvre pas l'écriture"
+        );
+
+        // ── ELLE VOIT SES DÉLÉGATIONS ───────────────────────────────────────
+        let (_, corps) = servir_pour(
+            &api,
+            "marie",
+            None,
+            Resource::OwnDelegations,
+            Method::Get,
+            b"",
+        );
+        assert_eq!(
+            corps,
+            r#"{"delegations":[{"account":"support","rights":["read"]}]}"#
+        );
+
+        // ── L'ÉCRITURE, PUIS L'ENVOI AU NOM DE SUPPORT@ ────────────────────
+        let (status, corps) = servir(&api, cible, Method::Put, br#"{"rights":["write"]}"#);
+        assert_eq!(status, StatusCode::OK, "remplacée, pas créée : {corps}");
+        assert!(
+            corps.contains(r#""rights":["read","write"]"#),
+            "écrire implique lire : {corps}"
+        );
+        let (status, _) = servir_pour(&api, "marie", Some("support"), boite, Method::Post, lettre);
+        assert_eq!(status, StatusCode::CREATED, "l'écriture ouvre le dépôt");
+
+        let reponse =
+            b"From: support@exemple.test\r\nTo: support@exemple.test\r\nSubject: re\r\n\r\nok\r\n";
+        let (status, _) = servir_pour(
+            &api,
+            "marie",
+            None,
+            Resource::Submissions,
+            Method::Post,
+            reponse,
+        );
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "sans `send`, pas au nom de support@"
+        );
+        servir(&api, cible, Method::Put, br#"{"rights":["write","send"]}"#);
+        let (status, corps) = servir_pour(
+            &api,
+            "marie",
+            None,
+            Resource::Submissions,
+            Method::Post,
+            reponse,
+        );
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "avec `send`, au nom de support@ : {corps}"
+        );
+
+        // ── LA LISTE DE L'ADMINISTRATION ────────────────────────────────────
+        let (_, corps) = servir(
+            &api,
+            Resource::Delegates { compte: "support" },
+            Method::Get,
+            b"",
+        );
+        assert_eq!(
+            corps,
+            r#"{"delegates":[{"login":"marie","rights":["read","write","send"]}]}"#
+        );
+
+        // ── RETIRÉE, ELLE CESSE DE VALOIR À LA REQUÊTE SUIVANTE ────────────
+        let (status, _) = servir(&api, cible, Method::Delete, b"");
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, _) = servir_pour(&api, "marie", Some("support"), boite, Method::Get, b"");
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = servir(&api, cible, Method::Delete, b"");
+        assert_eq!(status, StatusCode::NOT_FOUND, "retirer deux fois rend 404");
+    }
+
+    /// **CE QU'UNE DÉLÉGATION NE PEUT PAS ÊTRE SE REFUSE.**
+    #[tokio::test(flavor = "multi_thread")]
+    async fn une_delegation_mal_formee_se_refuse() {
+        let temporaire = Ephemere::neuf();
+        let (api, _) = api_partagee(&temporaire.0);
+        let vers = |compte, delegue, corps: &[u8]| {
+            servir(
+                &api,
+                Resource::Delegate { compte, delegue },
+                Method::Put,
+                corps,
+            )
+            .0
+        };
+        assert_eq!(
+            vers("support", "marie", br#"{"rights":["admin"]}"#),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            vers("support", "marie", br#"{"rights":[]}"#),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            vers("marie", "marie", br#"{"rights":["read"]}"#),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            vers("support", "fantome", br#"{"rights":["read"]}"#),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            vers("fantome", "marie", br#"{"rights":["read"]}"#),
+            StatusCode::NOT_FOUND
+        );
+        let (status, _) = servir(
+            &api,
+            Resource::Delegates { compte: "fantome" },
+            Method::Get,
+            b"",
+        );
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        // Sa propre boîte, nommée par le chemin d'autrui, s'atteint sans délégation.
+        let (status, _) = servir_pour(
+            &api,
+            "marie",
+            Some("marie"),
+            Resource::Mailboxes,
+            Method::Get,
+            b"",
+        );
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    /// **SANS MAGASIN DE DÉLÉGATIONS**, les routes d'administration le disent,
+    /// et aucune boîte d'autrui ne s'atteint.
+    #[test]
+    fn sans_magasin_pas_de_delegation() {
+        let temporaire = Ephemere::neuf();
+        let (_, api) = api(&temporaire.0);
+        let (status, _) = servir(
+            &api,
+            Resource::Delegates { compte: "marie" },
+            Method::Get,
+            b"",
+        );
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        let (status, corps) = servir(&api, Resource::OwnDelegations, Method::Get, b"");
+        assert_eq!(
+            (status, corps.as_str()),
+            (StatusCode::OK, r#"{"delegations":[]}"#)
+        );
+        let (status, _) = servir_pour(
+            &api,
+            "marie",
+            Some("support"),
+            Resource::Mailboxes,
+            Method::Get,
+            b"",
+        );
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     // ── LA PAGINATION ──────────────────────────────────────────────────────

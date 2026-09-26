@@ -847,7 +847,49 @@ POST /v1/me/devices
   <p>Revokes an application password: <code>204</code>, and the client using it is refused <strong>at its next connection</strong>. Another account's returns <code>404</code>, like an id that does not exist — the same rule as for devices. Revoking twice returns <code>404</code>.</p>
 </div>
 
+<div class="ressource">
+  <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/me/delegations</span><span class="portee">valid token</span></div>
+  <pre><code>{ "delegations": [
+    { "account": "support", "rights": ["read", "write", "send"] }
+] }</code></pre>
+  <p>The <strong>other accounts'</strong> mailboxes you can reach, and your rights on each. This is what an application reads to show "support@" next to your own mailbox.</p>
+</div>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/accounts/{account}/mailboxes/…</span><span class="portee">mail + delegation</span></div>
+  <p><strong>Another account's mailbox</strong>, a shared <code>support</code> box for instance. Everything under <code>/v1/mailboxes/…</code> is there identically — mailbox list, messages, parts, search, <code>changes</code> — prefixed with <code>/v1/accounts/{account}</code>.</p>
+  <div class="note danger">
+    <span class="etiquette">The right comes from the table, not the token</span>
+    <p>The delegation table is read <strong>on every request</strong>: a revoked delegation stops working on the next request, without revoking any token. Without the needed right, the answer is <code>404</code>, as for a mailbox that does not exist — a <code>403</code> would reveal that the account exists.</p>
+    <p><strong>Read</strong> (<code>read</code>) opens <code>GET</code>, <code>HEAD</code> and search. <strong>Write</strong> (<code>write</code>) opens the rest: flags, append, delete, mailbox creation or deletion. Every write on another account's mailbox is <strong>logged with its actor</strong>.</p>
+  </div>
+  <p><strong>Send on behalf</strong> (<code>send</code>): <code>POST /v1/submissions</code> then accepts a <code>From:</code> that is one of the owner's addresses — this is what lets you reply <em>as</em> <code>support@</code>.</p>
+</div>
+
 <h3 id="r-admin"><span class="numero">5.9</span>Administration</h3>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/accounts/{account}/delegates</span><span class="portee">admin:read</span></div>
+  <pre><code>{ "delegates": [
+    { "login": "thierry.delhaise", "rights": ["read", "write", "send"] }
+] }</code></pre>
+  <p>Who reaches this account's mailbox, with which rights. <code>501</code> if this server has no delegation store.</p>
+</div>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe put">PUT</span><span class="verbe delete">DELETE</span><span class="chemin">/v1/accounts/{account}/delegates/{delegate}</span><span class="portee">admin:write</span></div>
+  <pre><code>PUT /v1/accounts/support/delegates/thierry.delhaise
+{ "rights": ["write", "send"] }
+
+→ 201 (new) or 200 (replaced)
+{ "delegates": [ { "login": "thierry.delhaise", "rights": ["read", "write", "send"] } ] }</code></pre>
+  <p>Sets or replaces a delegation. Rights are named <code>read</code>, <code>write</code>, <code>send</code>; <strong>write and send imply read</strong>, and the response shows it. Both accounts must exist (<code>404</code> otherwise) and be two (<code>400</code> for self-delegation). <code>DELETE</code> removes it: <code>204</code>, then <code>404</code>.</p>
+  <div class="note">
+    <span class="etiquette">Administration only</span>
+    <p>Shared mailboxes have no human owner to decide who reaches them, and a compromised account must not be able to grant itself access. Deleting an account removes its delegations, both ways.</p>
+  </div>
+</div>
+
 
 <p>All of these require the <code>admin</code> area, which a password never grants. See <a href="#admin">§3.6</a>.</p>
 

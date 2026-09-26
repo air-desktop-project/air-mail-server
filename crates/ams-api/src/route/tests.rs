@@ -343,7 +343,7 @@ fn une_faute_de_chemin_remonte_telle_quelle() {
     assert_eq!(ou(Method::Get, b"/v1//health"), Err(Reason::BadPath));
     assert_eq!(ou(Method::Get, b"v1/health"), Err(Reason::BadPath));
     assert_eq!(
-        ou(Method::Get, b"/a/b/c/d/e/f/g/h/i"),
+        ou(Method::Get, b"/a/b/c/d/e/f/g/h/i/j"),
         Err(Reason::PathTooLong)
     );
 }
@@ -401,6 +401,12 @@ fn les_presque_ressources_se_refusent() {
 #[test]
 fn chaque_ressource_dit_ce_qu_elle_sert() {
     let toutes = [
+        Resource::Delegates { compte: "c" },
+        Resource::Delegate {
+            compte: "c",
+            delegue: "d",
+        },
+        Resource::OwnDelegations,
         Resource::Tokens,
         Resource::CurrentToken,
         Resource::Mailboxes,
@@ -762,4 +768,121 @@ fn rien_d_autre_ne_pend_sous_les_sessions() {
             std::str::from_utf8(chemin).expect("utf8")
         );
     }
+}
+
+/// La ressource et le titulaire qu'un chemin désigne.
+fn avec_titulaire(
+    method: Method,
+    chemin: &[u8],
+) -> Result<(Resource<'static>, Option<&'static str>), Reason> {
+    resolu(method, chemin).map(|resolu| (resolu.resource, resolu.owner))
+}
+
+/// **UNE BOÎTE D'AUTRUI SE DÉSIGNE PAR SON TITULAIRE, PUIS COMME LA SIENNE** —
+/// les mêmes ressources, jusqu'à la plus longue, qui compte neuf segments.
+#[test]
+fn une_boite_d_autrui_mene_aux_memes_ressources() {
+    for (chemin, attendue) in [
+        (&b"/v1/accounts/support/mailboxes"[..], Resource::Mailboxes),
+        (
+            b"/v1/accounts/support/mailboxes/INBOX",
+            Resource::Mailbox { boite: "INBOX" },
+        ),
+        (
+            b"/v1/accounts/support/mailboxes/INBOX/messages",
+            Resource::Messages { boite: "INBOX" },
+        ),
+        (
+            b"/v1/accounts/support/mailboxes/INBOX/changes",
+            Resource::Changes { boite: "INBOX" },
+        ),
+        (
+            b"/v1/accounts/support/mailboxes/INBOX/messages/7/raw",
+            Resource::MessageRaw {
+                boite: "INBOX",
+                uid: 7,
+            },
+        ),
+        (
+            b"/v1/accounts/support/mailboxes/INBOX/messages/7/parts/1.2",
+            Resource::MessagePart {
+                boite: "INBOX",
+                uid: 7,
+                partie: "1.2",
+            },
+        ),
+    ] {
+        assert_eq!(
+            avec_titulaire(Method::Get, chemin),
+            Ok((attendue, Some("support"))),
+            "{}",
+            std::string::String::from_utf8_lossy(chemin)
+        );
+    }
+    // Sa propre boîte n'a pas de titulaire à nommer.
+    assert_eq!(
+        avec_titulaire(Method::Get, b"/v1/mailboxes/INBOX"),
+        Ok((Resource::Mailbox { boite: "INBOX" }, None))
+    );
+    // Et ce qui ne mène à rien sous une boîte d'autrui reste inconnu.
+    assert_eq!(
+        ou(
+            Method::Get,
+            b"/v1/accounts/support/mailboxes/INBOX/nulle-part"
+        ),
+        Err(Reason::NoSuchResource)
+    );
+    // La portée est celle du courrier, pas de l'administration : c'est la table
+    // des délégations, et non le jeton, qui décide.
+    let lu = resolu(Method::Get, b"/v1/accounts/support/mailboxes").expect("résolu");
+    assert_eq!(lu.scope, Some(Scope::one(Area::Mail, Rights::Read)));
+}
+
+/// **LES DÉLÉGATIONS S'ADMINISTRENT**, et chacun voit les siennes.
+#[test]
+fn les_delegations_se_designent() {
+    assert_eq!(
+        avec_titulaire(Method::Get, b"/v1/accounts/support/delegates"),
+        Ok((Resource::Delegates { compte: "support" }, None))
+    );
+    assert_eq!(
+        ou(Method::Put, b"/v1/accounts/support/delegates/thierry"),
+        Ok(Resource::Delegate {
+            compte: "support",
+            delegue: "thierry",
+        })
+    );
+    assert_eq!(
+        ou(Method::Get, b"/v1/me/delegations"),
+        Ok(Resource::OwnDelegations)
+    );
+    // L'administration, pour les poser ; n'importe quel jeton, pour les siennes.
+    assert_eq!(
+        Resource::Delegates { compte: "c" }.scope(Method::Get),
+        Some(Scope::one(Area::Admin, Rights::Read))
+    );
+    assert_eq!(
+        Resource::Delegate {
+            compte: "c",
+            delegue: "d",
+        }
+        .scope(Method::Put),
+        Some(Scope::one(Area::Admin, Rights::Write))
+    );
+    assert_eq!(
+        Resource::OwnDelegations.scope(Method::Get),
+        Some(Scope::none())
+    );
+    assert_eq!(
+        Resource::Delegate {
+            compte: "c",
+            delegue: "d",
+        }
+        .allowed(),
+        &[Method::Put, Method::Delete]
+    );
+    assert_eq!(
+        Resource::Delegates { compte: "c" }.allowed(),
+        &[Method::Get, Method::Head]
+    );
 }

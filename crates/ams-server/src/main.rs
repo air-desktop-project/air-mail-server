@@ -33,6 +33,7 @@ mod api;
 mod appareils;
 mod applicatifs;
 mod comptes;
+mod delegations;
 mod delivery;
 mod imap;
 mod incidents;
@@ -195,6 +196,7 @@ fn monter_l_api(
     appareils: Option<Arc<crate::appareils::Appareils>>,
     scram: Option<Arc<crate::scram::Verificateurs>>,
     applicatifs: Option<Arc<crate::applicatifs::Applicatifs>>,
+    delegations: Option<Arc<crate::delegations::Delegations>>,
     file: Option<ams_loop_tokio::Spool>,
     message_max: usize,
     port_h3: Option<u16>,
@@ -296,6 +298,12 @@ fn monter_l_api(
             // rendent 501 plutôt qu'une liste vide.
             let api = match applicatifs {
                 Some(magasin) => api.avec_applicatifs(magasin),
+                None => api,
+            };
+            // **ET LES DÉLÉGATIONS** : sans magasin, aucune boîte d'autrui ne
+            // s'atteint, et leurs routes d'administration rendent 501.
+            let api = match delegations {
+                Some(magasin) => api.avec_delegations(magasin),
                 None => api,
             };
             // **ET LA CLÉ QUI SCELLE LES INVITATIONS**, la même que celle des
@@ -491,6 +499,26 @@ fn charger_applicatifs(chemin: &str) -> Result<Vec<ams_auth::AppPassword>, Strin
         .map_err(|erreur| format!("mots de passe applicatifs `{chemin}` : {erreur}"))?;
     ams_config::decode_app_passwords(&octets)
         .map_err(|erreur| format!("mots de passe applicatifs `{chemin}` : {erreur}"))
+}
+
+/// Lit le magasin des délégations.
+///
+/// Absent, il n'est pas une panne : il se crée à la première délégation, comme
+/// celui des appareils. Il ne porte aucun secret — seulement qui atteint quoi.
+///
+/// # Errors
+///
+/// Le fichier qui ne se lit pas, ou que le décodeur refuse.
+fn charger_delegations(chemin: &str) -> Result<Vec<ams_config::Delegation>, String> {
+    if chemin.is_empty() {
+        return Ok(Vec::new());
+    }
+    match std::fs::read(chemin) {
+        Ok(octets) => ams_config::decode_delegations(&octets)
+            .map_err(|erreur| format!("délégations `{chemin}` : {erreur}")),
+        Err(erreur) if erreur.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(erreur) => Err(format!("délégations `{chemin}` : {erreur}")),
+    }
 }
 
 /// Chaque adresse de compte relève-t-elle d'un domaine annoncé ?
@@ -1038,6 +1066,23 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         std::path::PathBuf::from(&options.devices),
         charger_appareils(&options.devices)?,
     ));
+    // **ET POUR LES DÉLÉGATIONS** : en retirer une vaut tout de suite, puisque
+    // la table se consulte à chaque requête.
+    let delegations = if options.delegations.is_empty() {
+        None
+    } else {
+        let chargees = charger_delegations(&options.delegations)?;
+        eprintln!(
+            "air-mail-server : délégations — {} sous `{}`. Chaque écriture sur une boîte \
+             d'autrui dit qui l'a faite.",
+            chargees.len(),
+            options.delegations
+        );
+        Some(Arc::new(crate::delegations::Delegations::new(
+            std::path::PathBuf::from(&options.delegations),
+            chargees,
+        )))
+    };
     // **ET POUR LES MOTS DE PASSE APPLICATIFS** : une révocation faite depuis
     // l'API ou le terminal vaut tout de suite, sur les trois protocoles.
     let applicatifs = if options.app_passwords.is_empty() {
@@ -2270,6 +2315,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         },
         verificateurs_scram.clone(),
         applicatifs.clone(),
+        delegations.clone(),
         file.as_ref().map(|attente| attente.as_ref().clone()),
         message_max,
         port_h3,

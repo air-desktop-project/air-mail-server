@@ -280,6 +280,7 @@ impl<A: Api> ams_h3::Service for ServiceH3<'_, A> {
                 nonce,
                 body,
                 query,
+                owner,
                 ..
             } => {
                 if matches!(resource, ams_api::Resource::CurrentToken) {
@@ -297,6 +298,7 @@ impl<A: Api> ams_h3::Service for ServiceH3<'_, A> {
                         crate::http::Appel {
                             body,
                             query,
+                            owner,
                             range: tete.field(b"range"),
                         },
                         &mut self.rendu,

@@ -704,6 +704,92 @@ pub fn write_app_password_created<'o>(
     json.finish()
 }
 
+/// Une ligne d'une liste de délégations : un compte, et les droits qu'elle
+/// porte, par leur nom.
+#[derive(Debug, Clone, Copy)]
+pub struct DelegationRow<'a> {
+    /// Le compte de l'autre côté : le délégué dans la liste d'un titulaire, le
+    /// titulaire dans la liste de qui appelle.
+    pub login: &'a str,
+    /// Les droits : `read`, `write`, `send`.
+    pub rights: &'a [&'a str],
+}
+
+/// Écrit une liste de délégations sous la clé `cle`, chaque compte sous le
+/// champ `champ` — `{"delegates":[{"login":…}]}` pour l'administration,
+/// `{"delegations":[{"account":…}]}` pour qui appelle.
+///
+/// # Errors
+///
+/// [`Reason::BufferTooSmall`] si `sortie` ne suffit pas.
+pub fn write_delegations<'o>(
+    cle: &str,
+    champ: &str,
+    lignes: &[DelegationRow<'_>],
+    sortie: &'o mut [u8],
+) -> Result<&'o [u8], Error> {
+    let mut json = Json::new(sortie);
+    json.begin_object()?;
+    json.key(cle)?;
+    json.begin_array()?;
+    for ligne in lignes {
+        json.begin_object()?;
+        json.field_str(champ, ligne.login)?;
+        json.key("rights")?;
+        json.begin_array()?;
+        for droit in ligne.rights {
+            json.string(droit)?;
+        }
+        json.end_array()?;
+        json.end_object()?;
+    }
+    json.end_array()?;
+    json.end_object()?;
+    json.finish()
+}
+
+/// Lit le corps d'une délégation : `{"rights":["read","write"]}`.
+///
+/// Rend les noms, **sans les juger** — c'est le serveur qui sait lesquels sont
+/// des droits. Au plus trois, sans doublon, et au moins un : une délégation sans
+/// droit ne délègue rien.
+///
+/// # Errors
+///
+/// [`Reason::BadJsonBody`] pour un corps illisible, un champ inconnu, un nom
+/// échappé, plus de trois noms, un doublon, ou aucun.
+pub fn read_rights_request(corps: &[u8]) -> Result<([&str; 3], usize), Error> {
+    let mauvais = Error::new(Reason::BadJsonBody);
+    let mut lecteur = Reader::new(corps);
+    let mut noms = [""; 3];
+    let mut combien = 0_usize;
+    let mut dans_le_tableau = false;
+    let mut vu_la_cle = false;
+    loop {
+        match lecteur.read().map_err(|_| mauvais)? {
+            None => break,
+            Some(Event::Key(clef)) if clef.is("rights") && !vu_la_cle => vu_la_cle = true,
+            Some(Event::ArrayStart) if vu_la_cle && !dans_le_tableau => dans_le_tableau = true,
+            Some(Event::ArrayEnd) if dans_le_tableau => dans_le_tableau = false,
+            Some(Event::Text(texte)) if dans_le_tableau => {
+                let nom = texte.as_plain().ok_or(mauvais)?;
+                if noms.iter().take(combien).any(|connu| *connu == nom) {
+                    return Err(mauvais);
+                }
+                let place = noms.get_mut(combien).ok_or(mauvais)?;
+                *place = nom;
+                combien = combien.saturating_add(1);
+            }
+            Some(Event::ObjectStart | Event::ObjectEnd) => {}
+            Some(_) => return Err(mauvais),
+        }
+    }
+    if combien == 0 {
+        return Err(mauvais);
+    }
+    Ok((noms, combien))
+}
+
 /// Écrit la liste des comptes.
 ///
 /// # Errors

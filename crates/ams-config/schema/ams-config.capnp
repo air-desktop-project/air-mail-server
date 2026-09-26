@@ -186,6 +186,10 @@ struct Configuration {
   # comptes.
   appPasswords @35 :Text;
 
+  # Le magasin des DÉLÉGATIONS. Vide : aucun compte n'atteint la boîte d'un
+  # autre. Voir `ams-delegations.capnp`.
+  delegations @36 :Text;
+
   # MTA-STS (RFC 8461) — la politique qu'un domaine publie en HTTPS.
   #
   # **UN CHAMP AJOUTÉ APRÈS COUP DÉCODE DEUX CHAÎNES VIDES**, et deux chaînes

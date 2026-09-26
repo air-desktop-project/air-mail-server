@@ -323,3 +323,79 @@ fn config_show_montre_le_magasin_des_mots_de_passe_applicatifs() {
         "{dit}"
     );
 }
+
+/// **RETIRER UN COMPTE EMPORTE SES DÉLÉGATIONS, DANS LES DEUX SENS** — un
+/// compte recréé sous le même nom atteindrait sinon des boîtes qu'on ne lui a
+/// jamais ouvertes. Celles qui ne le nomment pas restent.
+#[test]
+fn retirer_un_compte_emporte_ses_delegations() {
+    use ams_config::{Delegation, Rights};
+    let atelier = atelier("delegations");
+    let comptes = atelier.0.join("comptes.bin").display().to_string();
+    let chemin = atelier.0.join("delegations.bin");
+    let delegations = chemin.display().to_string();
+    for nom in ["jean", "paul", "support"] {
+        outil("principal", &["account", "add", &comptes, "--login", nom]);
+    }
+    let une = |delegate: &str, owner: &str| Delegation {
+        delegate: delegate.to_owned(),
+        owner: owner.to_owned(),
+        rights: Rights::READ,
+    };
+    let tenues = [
+        une("jean", "support"),
+        une("paul", "jean"),
+        une("paul", "support"),
+    ];
+    std::fs::write(
+        &chemin,
+        ams_config::encode_delegations(&tenues).expect("encodable"),
+    )
+    .expect("écrit");
+
+    let (dit, plainte, ok) = outil(
+        "",
+        &[
+            "account",
+            "remove",
+            &comptes,
+            "--login",
+            "jean",
+            "--delegations",
+            &delegations,
+        ],
+    );
+    assert!(ok, "{plainte}");
+    assert!(
+        dit.contains("2 délégation(s) de ou vers `jean` retirée(s)"),
+        "{dit}"
+    );
+    let restantes =
+        ams_config::decode_delegations(&std::fs::read(&chemin).expect("lisible")).expect("relu");
+    assert_eq!(restantes, vec![une("paul", "support")]);
+}
+
+/// Une option de purge donnée deux fois, ou inconnue, est refusée AVANT de
+/// retirer quoi que ce soit.
+#[test]
+fn account_remove_refuse_une_purge_mal_dite() {
+    let atelier = atelier("purge");
+    let comptes = atelier.0.join("comptes.bin").display().to_string();
+    outil(
+        "principal",
+        &["account", "add", &comptes, "--login", "jean"],
+    );
+    for reste in [
+        &["--delegations", "/x/a", "--delegations", "/x/b"][..],
+        &["--inconnue", "/x/a"][..],
+        &["--delegations"][..],
+    ] {
+        let mut arguments = vec!["account", "remove", &comptes, "--login", "jean"];
+        arguments.extend_from_slice(reste);
+        let (_, plainte, ok) = outil("", &arguments);
+        assert!(!ok && !plainte.is_empty(), "{reste:?}");
+    }
+    let tenus =
+        ams_config::decode_accounts(&std::fs::read(&comptes).expect("lisible")).expect("relu");
+    assert_eq!(tenus.len(), 1, "un refus a retiré le compte");
+}

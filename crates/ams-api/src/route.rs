@@ -175,6 +175,25 @@ pub enum Resource<'o> {
     /// cela, le client de courrier d'un poste perdu pourrait en créer d'autres,
     /// et le révoquer ne suffirait plus.
     OwnAppPasswords,
+    /// `/v1/accounts/{compte}/delegates` — qui atteint la boîte de ce compte, et
+    /// avec quels droits. **ADMINISTRATION SEULE** : les boîtes partagées n'ont
+    /// pas de titulaire humain pour en décider.
+    Delegates {
+        /// Le titulaire.
+        compte: &'o str,
+    },
+    /// `/v1/accounts/{compte}/delegates/{delegue}` — une délégation : `PUT` la
+    /// pose ou la remplace, `DELETE` la retire.
+    Delegate {
+        /// Le titulaire.
+        compte: &'o str,
+        /// Le compte qui reçoit l'accès.
+        delegue: &'o str,
+    },
+    /// `/v1/me/delegations` — les boîtes d'autrui que qui appelle peut
+    /// atteindre, et ses droits sur chacune. C'est ce qu'une application lit
+    /// pour afficher « support@ » à côté de sa propre boîte.
+    OwnDelegations,
     /// `/v1/me/app-passwords/{id}` — un mot de passe applicatif à soi, pour le
     /// révoquer. Le compte de qui appelle entre dans la recherche, comme pour
     /// un appareil.
@@ -289,7 +308,8 @@ impl Resource<'_> {
             | Self::OwnDevices
             | Self::OwnDevice { .. }
             | Self::OwnAppPasswords
-            | Self::OwnAppPassword { .. } => {
+            | Self::OwnAppPassword { .. }
+            | Self::OwnDelegations => {
                 return Some(Scope::none());
             }
             Self::Mailboxes
@@ -307,7 +327,9 @@ impl Resource<'_> {
             | Self::AccountAddresses { .. }
             | Self::Domains
             | Self::Bans
-            | Self::Ban { .. } => Area::Admin,
+            | Self::Ban { .. }
+            | Self::Delegates { .. }
+            | Self::Delegate { .. } => Area::Admin,
             Self::Submissions => Area::Submit,
             Self::Health | Self::Metrics => Area::Observe,
         };
@@ -349,6 +371,8 @@ impl Resource<'_> {
             // une empreinte, et c'est la raison d'être de cette ressource.
             Self::AccountPassword { .. } | Self::OwnPassword => &[Method::Put],
             Self::AccountAddresses { .. } => &[Method::Get, Method::Head, Method::Put],
+            Self::Delegates { .. } | Self::OwnDelegations => &[Method::Get, Method::Head],
+            Self::Delegate { .. } => &[Method::Put, Method::Delete],
             Self::Ban { .. } | Self::OwnDevice { .. } | Self::OwnAppPassword { .. } => {
                 &[Method::Delete]
             }
@@ -404,6 +428,14 @@ pub struct Resolved<'o> {
     /// **C'EST L'APPELANT QUI EN TIRE LE `405`, ET APRÈS L'AUTORISATION.** Voir
     /// [`resolve`] : le rendre ici le rendait avant, et c'était une fuite.
     pub serves: bool,
+    /// **LE TITULAIRE DE LA BOÎTE VISÉE**, quand le chemin en nomme un autre :
+    /// `/v1/accounts/{compte}/mailboxes/…`. `None` : la boîte de qui appelle.
+    ///
+    /// La ressource est la MÊME que sous `/v1/mailboxes/…` — c'est ce qui rend
+    /// toutes les routes d'une boîte déléguables d'un coup. Le droit d'y
+    /// toucher ne se décide PAS ici : il vient de la table des délégations,
+    /// consultée par le serveur à chaque requête.
+    pub owner: Option<&'o str>,
 }
 
 /// Résout une requête.
@@ -447,7 +479,14 @@ pub fn resolve<'o>(
     if segments.get(0) != VERSION {
         return Err(Error::new(Reason::NoSuchResource));
     }
-    let resource = designer(&segments)?;
+    // **UNE BOÎTE D'AUTRUI SE DÉSIGNE PAR SON TITULAIRE, PUIS COMME LA SIENNE**
+    // : `/v1/accounts/{compte}/mailboxes/…` mène aux mêmes ressources que
+    // `/v1/mailboxes/…`, à partir du quatrième segment.
+    let (resource, owner) = if segments.get(1) == "accounts" && segments.get(3) == "mailboxes" {
+        (boites(&segments, 3)?, Some(segments.get(2)))
+    } else {
+        (designer(&segments)?, None)
+    };
     let serves = resource.serves(method);
     Ok(Resolved {
         resource,
@@ -456,6 +495,7 @@ pub fn resolve<'o>(
         // n'est pas servi, c'est ce qu'il faut pour lire la ressource.
         scope: resource.scope(if serves { method } else { Method::Get }),
         serves,
+        owner,
     })
 }
 
@@ -474,7 +514,7 @@ fn designer<'o>(segments: &Segments<'o>) -> Result<Resource<'o>, Error> {
         ("sessions", 2) => Ok(Resource::Sessions),
         ("sessions", 3) if segments.get(2) == "challenge" => Ok(Resource::SessionChallenge),
         ("tokens", 3) if segments.get(2) == "current" => Ok(Resource::CurrentToken),
-        ("mailboxes", _) => boites(segments),
+        ("mailboxes", _) => boites(segments, 1),
         ("accounts", 2) => Ok(Resource::Accounts),
         ("accounts", 3) => Ok(Resource::Account {
             compte: segments.get(2),
@@ -484,9 +524,15 @@ fn designer<'o>(segments: &Segments<'o>) -> Result<Resource<'o>, Error> {
             match segments.get(3) {
                 "password" => Ok(Resource::AccountPassword { compte }),
                 "addresses" => Ok(Resource::AccountAddresses { compte }),
+                "delegates" => Ok(Resource::Delegates { compte }),
                 _ => Err(manque),
             }
         }
+        ("accounts", 5) if segments.get(3) == "delegates" => Ok(Resource::Delegate {
+            compte: segments.get(2),
+            delegue: segments.get(4),
+        }),
+        ("me", 3) if segments.get(2) == "delegations" => Ok(Resource::OwnDelegations),
         ("me", 3) if segments.get(2) == "password" => Ok(Resource::OwnPassword),
         ("me", 3) if segments.get(2) == "devices" => Ok(Resource::OwnDevices),
         ("me", 4) if segments.get(2) == "devices" => Ok(Resource::OwnDevice {
@@ -509,29 +555,33 @@ fn designer<'o>(segments: &Segments<'o>) -> Result<Resource<'o>, Error> {
 }
 
 /// Ce que désigne un chemin sous `/v1/mailboxes`.
-fn boites<'o>(segments: &Segments<'o>) -> Result<Resource<'o>, Error> {
+/// Ce qu'un chemin de boîte désigne, à partir du segment `mailboxes` qui porte
+/// le rang `base` : un pour sa propre boîte, trois pour celle d'autrui.
+fn boites<'o>(segments: &Segments<'o>, base: usize) -> Result<Resource<'o>, Error> {
     let manque = Error::new(Reason::NoSuchResource);
-    if segments.len() == 2 {
+    let rang = |decalage: usize| segments.get(base.saturating_add(decalage));
+    let combien = segments.len().saturating_sub(base.saturating_sub(1));
+    if combien == 2 {
         return Ok(Resource::Mailboxes);
     }
-    let boite = segments.get(2);
-    match (segments.len(), segments.get(3)) {
+    let boite = rang(1);
+    match (combien, rang(2)) {
         (3, _) => Ok(Resource::Mailbox { boite }),
         (4, "search") => Ok(Resource::Search { boite }),
         (4, "changes") => Ok(Resource::Changes { boite }),
         (4, "messages") => Ok(Resource::Messages { boite }),
         (5, "messages") => Ok(Resource::Message {
             boite,
-            uid: uid(segments.get(4))?,
+            uid: uid(rang(3))?,
         }),
-        (6, "messages") if segments.get(5) == "raw" => Ok(Resource::MessageRaw {
+        (6, "messages") if rang(4) == "raw" => Ok(Resource::MessageRaw {
             boite,
-            uid: uid(segments.get(4))?,
+            uid: uid(rang(3))?,
         }),
-        (7, "messages") if segments.get(5) == "parts" => Ok(Resource::MessagePart {
+        (7, "messages") if rang(4) == "parts" => Ok(Resource::MessagePart {
             boite,
-            uid: uid(segments.get(4))?,
-            partie: segments.get(6),
+            uid: uid(rang(3))?,
+            partie: rang(5),
         }),
         _ => Err(manque),
     }

@@ -10,13 +10,14 @@ use ams_api::{Error, Reason};
 use ams_proto_imap::Flags;
 
 use super::{
-    AccountRow, AppPasswordRow, BanRow, DeviceRow, FlagPatch, MailboxRow, MessageRow,
-    read_account_body, read_app_password_request, read_challenge_request, read_flag_patch,
-    read_invitation_request, read_own_password_body, read_pairing_request, read_search_criteria,
-    read_session_request, write_account, write_accounts, write_app_password_created,
-    write_app_passwords, write_bans, write_challenge, write_changes, write_devices, write_domains,
-    write_enrolled, write_health, write_invitation, write_mailbox, write_mailboxes, write_message,
-    write_messages, write_metrics, write_search,
+    AccountRow, AppPasswordRow, BanRow, DelegationRow, DeviceRow, FlagPatch, MailboxRow,
+    MessageRow, read_account_body, read_app_password_request, read_challenge_request,
+    read_flag_patch, read_invitation_request, read_own_password_body, read_pairing_request,
+    read_rights_request, read_search_criteria, read_session_request, write_account, write_accounts,
+    write_app_password_created, write_app_passwords, write_bans, write_challenge, write_changes,
+    write_delegations, write_devices, write_domains, write_enrolled, write_health,
+    write_invitation, write_mailbox, write_mailboxes, write_message, write_messages, write_metrics,
+    write_search,
 };
 
 /// Un appareil d'essai.
@@ -388,7 +389,7 @@ fn un_corps_qui_n_est_pas_une_modification_se_refuse() {
 #[test]
 fn chaque_tampon_insuffisant_se_dit() {
     type Ecrivain = fn(&mut [u8]) -> Result<&[u8], ams_api::Error>;
-    let ecrivains: [(&str, Ecrivain); 26] = [
+    let ecrivains: [(&str, Ecrivain); 28] = [
         ("mailboxes", |place| write_mailboxes(&[boite()], place)),
         ("mailbox", |place| write_mailbox(&boite(), place)),
         ("messages", |place| {
@@ -448,6 +449,20 @@ fn chaque_tampon_insuffisant_se_dit() {
         }),
         ("changes-vide", |place| {
             write_changes(&[], &[], 1_756_900_000, 1_790_000_000_000, false, place)
+        }),
+        ("delegations", |place| {
+            write_delegations(
+                "delegates",
+                "login",
+                &[DelegationRow {
+                    login: "thierry",
+                    rights: &["read", "send"],
+                }],
+                place,
+            )
+        }),
+        ("delegations-vide", |place| {
+            write_delegations("delegations", "account", &[], place)
         }),
         ("app-password-created", |place| {
             write_app_password_created(&applicatif(), MOT_APPLICATIF, place)
@@ -1417,4 +1432,54 @@ fn le_point_du_journal_ne_s_ecrit_que_quand_on_l_a() {
     )
     .expect("utf-8");
     assert!(!sans.contains("highestModseq"), "{sans}");
+}
+
+/// **UNE DÉLÉGATION SE LIT ET S'ÉCRIT PAR LE NOM DE SES DROITS.**
+#[test]
+fn les_delegations_s_ecrivent() {
+    let mut place = [0_u8; PLACE];
+    let ecrit = String::from_utf8(
+        write_delegations(
+            "delegates",
+            "login",
+            &[DelegationRow {
+                login: "thierry",
+                rights: &["read", "write", "send"],
+            }],
+            &mut place,
+        )
+        .expect("écrivable")
+        .to_vec(),
+    )
+    .expect("utf-8");
+    assert_eq!(
+        ecrit,
+        r#"{"delegates":[{"login":"thierry","rights":["read","write","send"]}]}"#
+    );
+}
+
+#[test]
+fn le_corps_d_une_delegation_ne_porte_que_des_droits() {
+    let (noms, combien) = read_rights_request(br#"{"rights":["read","send"]}"#).expect("lisible");
+    assert_eq!(noms.get(..combien), Some(&["read", "send"][..]));
+    for corps in [
+        &br#"{}"#[..],
+        br#"{"rights":[]}"#,
+        br#"{"rights":["read","read"]}"#,
+        br#"{"rights":["read","write","send","admin"]}"#,
+        br#"{"rights":"read"}"#,
+        br#"{"droits":["read"]}"#,
+        br#"{"rights":["read"],"rights":["write"]}"#,
+        br#"{"rights":[["read"]]}"#,
+        br#"{"rights":[1]}"#,
+        br#"{"rights":["r\u0065ad"]}"#,
+        br#"{"#,
+    ] {
+        assert_eq!(
+            read_rights_request(corps).err().map(Error::reason),
+            Some(Reason::BadJsonBody),
+            "{}",
+            String::from_utf8_lossy(corps)
+        );
+    }
 }

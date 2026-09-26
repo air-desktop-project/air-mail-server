@@ -264,6 +264,10 @@ pub enum Next<'o> {
         /// Les paramètres de la chaîne de requête, déjà lus et déjà jugés
         /// recevables pour CETTE ressource et CE verbe.
         query: Query,
+        /// Le titulaire de la boîte visée, quand le chemin en nomme un autre
+        /// (`/v1/accounts/{compte}/mailboxes/…`). **LE DROIT N'EST PAS JUGÉ
+        /// ICI** : il vient de la table des délégations, que l'appelant tient.
+        owner: Option<&'o str>,
     },
 }
 
@@ -579,6 +583,7 @@ impl Http {
                 scope: jeton.scope,
                 body: corps,
                 query: requete,
+                owner: resolu.owner,
             },
         })
     }

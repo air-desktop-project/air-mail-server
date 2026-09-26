@@ -48,10 +48,11 @@ use crate::error::{Error, Reason};
 
 /// Combien de segments un chemin peut porter.
 ///
-/// Huit. La route la plus longue de cette API en compte six — `/v1/mailboxes/
-/// {boite}/messages/{uid}/parts/{partie}` — et deux de marge suffisent à
-/// distinguer « trop long » de « inconnu » sans retenir ce qu'un pair choisit.
-pub const SEGMENTS_MAX: usize = 8;
+/// Neuf. La route la plus longue de cette API en compte neuf depuis la
+/// délégation — `/v1/accounts/{compte}/mailboxes/{boite}/messages/{uid}/parts/
+/// {partie}`. Au-delà, un chemin est « trop long » plutôt qu'« inconnu », et l'on
+/// ne retient pas davantage de ce qu'un pair choisit.
+pub const SEGMENTS_MAX: usize = 9;
 
 /// Ce qu'un segment peut faire de long, **une fois décodé**.
 ///

@@ -93,6 +93,18 @@ mod ams_journal_capnp {
     include!("ams_journal_capnp.rs");
 }
 
+#[allow(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    missing_docs,
+    unused_qualifications,
+    reason = "code généré par capnpc-rust, hors de notre contrôle éditorial"
+)]
+mod ams_delegations_capnp {
+    include!("ams_delegations_capnp.rs");
+}
+
 mod ams_accounts_capnp {
     include!("ams_accounts_capnp.rs");
 }
@@ -124,6 +136,7 @@ mod ams_scram_capnp {
 mod accounts;
 mod app_passwords;
 mod codec;
+mod delegations;
 mod devices;
 mod index;
 mod journal;
@@ -135,6 +148,7 @@ pub use codec::{
     Configuration, Dkim, Dmarc, Enforcement, Error, Listener, Mtasts, Queue, Relay, Spf,
     TRAVERSAL_LIMIT_WORDS, Timeouts, Tls, Tlsrpt, decode, encode,
 };
+pub use delegations::{Delegation, Rights, decode_delegations, encode_delegations};
 pub use devices::{Device, ID_OCTETS_MAX, NOM_OCTETS_MAX, decode_devices, encode_devices};
 pub use index::{decode_index, encode_index};
 pub use journal::{

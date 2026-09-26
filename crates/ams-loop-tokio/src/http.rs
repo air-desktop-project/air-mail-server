@@ -246,6 +246,9 @@ pub struct Appel<'a> {
     /// RESSOURCE — de sa taille, et de si elle se lit par morceaux —, et la
     /// boucle ne sait ni l'un ni l'autre.
     pub range: Option<&'a [u8]>,
+    /// Le titulaire de la boîte visée, quand ce n'est pas qui appelle. Voir
+    /// `ams_api::Resolved::owner`.
+    pub owner: Option<&'a str>,
 }
 
 /// Tout ce qui touche au magasin vit derrière ceci : la boucle n'ouvre aucune
@@ -636,6 +639,7 @@ where
                 nonce,
                 body,
                 query,
+                owner,
                 ..
             } => {
                 // **SE DÉCONNECTER, C'EST FERMER SA SESSION.** Cette ressource
@@ -659,6 +663,7 @@ where
                         Appel {
                             body,
                             query,
+                            owner,
                             range: demande.tete.field(b"range"),
                         },
                         &mut rendu,
