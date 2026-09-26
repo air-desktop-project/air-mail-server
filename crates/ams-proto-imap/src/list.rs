@@ -57,6 +57,8 @@ pub struct List<'a> {
     report_subscribed: bool,
     /// Le `STATUS` de chaque boîte rendue, si le client l'a demandé.
     status: Option<StatusItems>,
+    /// La référence, telle qu'écrite — souvent vide.
+    reference: &'a [u8],
     /// Les motifs, dans l'ordre où ils ont été écrits.
     motifs: [&'a [u8]; LIST_PATTERNS_MAX],
     /// Combien de `motifs` valent.
@@ -111,6 +113,20 @@ impl<'a> List<'a> {
         self.status
     }
 
+    /// La référence (§6.3.9), telle que le client l'a écrite.
+    ///
+    /// # ELLE NE SE JETTE PLUS
+    ///
+    /// Tant que ce serveur n'avait qu'un espace de noms, elle ne désignait rien
+    /// et on la lisait pour la jeter. L'espace `Partagés/` en fait un second, et
+    /// un client qui le parcourt écrit `LIST "Partagés/" "%"` : c'est la
+    /// référence, préfixée au motif comme RFC 3501 §6.3.8 le propose, qui dit
+    /// où chercher.
+    #[must_use]
+    pub fn reference(&self) -> &'a [u8] {
+        self.reference
+    }
+
     /// Les motifs demandés.
     #[must_use]
     pub fn patterns(&self) -> &[&'a [u8]] {
@@ -119,9 +135,9 @@ impl<'a> List<'a> {
 
     /// Lit les arguments d'un `LIST`.
     ///
-    /// La référence est lue et jetée : ce serveur n'a qu'un espace de noms, et
-    /// `NAMESPACE` le dit. Elle doit néanmoins ÊTRE LÀ — sa place dans la
-    /// grammaire est ce qui distingue le motif de l'option de sélection.
+    /// La référence est lue et rendue par [`List::reference`]. Elle doit ÊTRE
+    /// LÀ — sa place dans la grammaire est ce qui distingue le motif de
+    /// l'option de sélection.
     ///
     /// # Errors
     ///
@@ -142,8 +158,8 @@ impl<'a> List<'a> {
             _ => ((false, false), reste),
         };
 
-        // 2. La référence, qu'on lit pour la jeter.
-        let (_, reste) = un_mot(reste)?;
+        // 2. La référence.
+        let (reference, reste) = un_mot(reste)?;
 
         // 3. Le ou les motifs.
         let (motifs, combien, reste) = if reste.trim_ascii_start().starts_with(b"(") {
@@ -182,6 +198,7 @@ impl<'a> List<'a> {
             special_use_only,
             report_subscribed: report_subscribed.0,
             status: report_subscribed.1,
+            reference,
             motifs,
             combien,
         })

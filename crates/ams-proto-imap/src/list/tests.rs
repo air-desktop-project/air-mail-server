@@ -352,3 +352,14 @@ fn le_retour_special_use_se_lit_et_ne_decide_de_rien() {
     let filtre = List::parse(b"(SPECIAL-USE) \"\" *").expect("lisible");
     assert!(filtre.special_use_only());
 }
+
+/// **LA RÉFÉRENCE SE RETIENT**, sans ses guillemets : c'est elle qui dit
+/// qu'un `LIST "Partagés/" "%"` parcourt l'espace des boîtes d'autrui.
+#[test]
+fn la_reference_se_retient() {
+    let demande = List::parse(br#""Partag&AOk-s/" "%""#).expect("lisible");
+    assert_eq!(demande.reference(), b"Partag&AOk-s/");
+    assert_eq!(demande.patterns(), &[&b"%"[..]]);
+    let demande = List::parse(br#""" *"#).expect("lisible");
+    assert_eq!(demande.reference(), b"");
+}

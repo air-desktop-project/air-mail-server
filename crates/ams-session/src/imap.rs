@@ -3284,11 +3284,21 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             .unwrap_or(Tag::PLACEHOLDER);
         self.retenir_le_tag(tag);
 
+        // **LE NOM SE TRANSCRIT COMME PARTOUT AILLEURS** : un client rev1 écrit
+        // `Envoy&AOk-s`, et le magasin ne connaît que l'UTF-8. L'`APPEND`
+        // passait le nom tel quel, et tout dépôt dans une boîte accentuée
+        // tombait sur `[TRYCREATE]` — l'espace `Partagés` l'a révélé en
+        // production. Un nom trop long pour être transcrit ne désigne rien.
+        let mut transcrit = [0_u8; MAILBOX_NAME_MAX];
+        let nom_de_boite = match append.mailbox().len() <= MAILBOX_NAME_MAX {
+            true => self.transcrire_le_nom(append.mailbox(), &mut transcrit),
+            false => None,
+        };
         // §6.3.12 : LA BOÎTE DOIT EXISTER, et son absence se dit `[TRYCREATE]`.
         let dedans = if self.etat == State::NotAuthenticated {
             Dedans::Jete(Refus::Authentification)
         } else {
-            match self.boites.append(self.user(), append.mailbox()) {
+            match nom_de_boite.and_then(|nom| self.boites.append(self.user(), nom)) {
                 Some(depot) => Dedans::Ouvert(depot),
                 None => Dedans::Jete(Refus::Inconnue),
             }
@@ -3303,9 +3313,12 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             let (statut, texte) = Self::dire_le_refus(*raison);
             return self.termine(statut, texte, Action::Continue, out);
         }
+        // C'est le nom TRANSCRIT qu'on retient : c'est lui qui rouvre la boîte
+        // pour dire son `UIDVALIDITY` dans `APPENDUID`.
+        let retenu = nom_de_boite.unwrap_or_default();
         let mut nom = [0_u8; MAILBOX_NAME_MAX];
-        let nom_len = append.mailbox().len().min(nom.len());
-        for (place, octet) in nom.iter_mut().zip(append.mailbox()) {
+        let nom_len = retenu.len().min(nom.len());
+        for (place, octet) in nom.iter_mut().zip(retenu) {
             *place = *octet;
         }
         self.depot = Some(Depot {
@@ -3868,6 +3881,41 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
                 })?;
             }
         }
+        // **LES MOTIFS SE COMPARENT EN UTF-8, RÉFÉRENCE COMPRISE.** Le magasin
+        // nomme ses boîtes en UTF-8 ; un client rev1 écrit ses motifs en UTF-7
+        // modifié, et `Partag&AOk-s/%` ne correspondait à rien. La référence
+        // (§6.3.9) se préfixe au motif, comme RFC 3501 §6.3.8 le propose :
+        // c'est ainsi qu'un client parcourt l'espace que `NAMESPACE` annonce.
+        // Un motif vide ne désigne aucune boîte ; un motif qui ne se transcrit
+        // pas, ou trop long une fois préfixé, non plus.
+        let mut reference = [0_u8; MAILBOX_NAME_MAX];
+        let reference_len = self.transcrire_le_motif(demande.reference(), &mut reference);
+        let mut motifs = [[0_u8; MAILBOX_NAME_MAX]; ams_proto_imap::LIST_PATTERNS_MAX];
+        let mut longueurs = [None::<usize>; ams_proto_imap::LIST_PATTERNS_MAX];
+        for ((brut, place), longueur) in demande
+            .patterns()
+            .iter()
+            .zip(motifs.iter_mut())
+            .zip(longueurs.iter_mut())
+        {
+            let Some(debut) = reference_len.filter(|_| !brut.is_empty()) else {
+                continue;
+            };
+            for (case, octet) in place
+                .iter_mut()
+                .zip(reference.get(..debut).unwrap_or_default())
+            {
+                *case = *octet;
+            }
+            *longueur = self
+                .transcrire_le_motif(brut, place.get_mut(debut..).unwrap_or_default())
+                .map(|suite| debut.saturating_add(suite));
+        }
+        let repond = |nom: &[u8]| {
+            motifs.iter().zip(longueurs).any(|(motif, longueur)| {
+                longueur.is_some_and(|fin| correspond(motif.get(..fin).unwrap_or_default(), nom))
+            })
+        };
         let mut index = 0_usize;
         let mut place = [0_u8; MAILBOX_NAME_MAX];
         while let Some(boite) = self.boites.name(self.user(), index, &mut place) {
@@ -3875,11 +3923,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             // **UNE BOÎTE QUI RÉPOND À DEUX MOTIFS NE SE REND QU'UNE FOIS** :
             // deux lignes pour une seule boîte en feraient deux dans le panneau
             // du client.
-            if !demande
-                .patterns()
-                .iter()
-                .any(|motif| !motif.is_empty() && correspond(motif, boite.name))
-            {
+            if !repond(boite.name) {
                 continue;
             }
             let abonnee = self.boites.is_subscribed(self.user(), boite.name);
@@ -3953,11 +3997,7 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
             let mut orphelin = 0_usize;
             while let Some(nom) = self.boites.orphan(self.user(), orphelin, &mut place) {
                 orphelin = orphelin.saturating_add(1);
-                if demande
-                    .patterns()
-                    .iter()
-                    .any(|motif| !motif.is_empty() && correspond(motif, nom))
-                {
+                if repond(nom) {
                     plume.nom_de_boite(tete_orpheline, nom, b"\r\n", rev2)?;
                 }
             }
@@ -4306,6 +4346,17 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         };
         let (Ok(avant), Ok(apres)) = (premier.value(&mut avant), second.value(&mut apres)) else {
             return self.faute(b"RENAME arguments are too long", out);
+        };
+        // **LES DEUX NOMS SE TRANSCRIVENT, comme partout ailleurs** : sans cela,
+        // un client rev1 qui renommait vers `Envoy&AOk-s` créait une boîte
+        // nommée littéralement ainsi, que `LIST` lui rendait ensuite déformée.
+        let mut avant_utf8 = [0_u8; MAILBOX_NAME_MAX];
+        let mut apres_utf8 = [0_u8; MAILBOX_NAME_MAX];
+        let (Some(avant), Some(apres)) = (
+            self.transcrire_le_nom(avant, &mut avant_utf8),
+            self.transcrire_le_nom(apres, &mut apres_utf8),
+        ) else {
+            return self.faute(b"RENAME expects two mailbox names", out);
         };
         let avant = ams_proto_imap::mailbox_name_trimmed(avant);
         let apres = ams_proto_imap::mailbox_name_trimmed(apres);
@@ -5393,6 +5444,31 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
         let premier = lus.next()?.ok()?;
         let mut brut = [0_u8; MAILBOX_NAME_MAX];
         let ecrit = premier.value(&mut brut).ok()?;
+        self.transcrire_le_nom(ecrit, place)
+    }
+
+    /// Transcrit en UTF-8 un motif de `LIST` ou sa référence, et rend sa
+    /// longueur — ou `None` s'il ne se transcrit pas dans `place`.
+    ///
+    /// Ce n'est pas [`Self::transcrire_le_nom`] : un motif peut être vide, et
+    /// il porte des jokers qu'un nom n'a pas.
+    fn transcrire_le_motif(&self, brut: &[u8], place: &mut [u8]) -> Option<usize> {
+        match self.rev2 {
+            true => {
+                let cible = place.get_mut(..brut.len())?;
+                cible.copy_from_slice(brut);
+                Some(brut.len())
+            }
+            false => ams_proto_imap::utf7_decode(brut, place).ok(),
+        }
+    }
+
+    /// Transcrit en UTF-8 un nom de boîte tel que le client l'a écrit.
+    ///
+    /// `ecrit` tient dans `MAILBOX_NAME_MAX` octets : c'est à l'appelant de s'en
+    /// assurer — `un_nom` le lit dans un tampon de cette taille, `APPEND` le
+    /// vérifie avant.
+    fn transcrire_le_nom<'n>(&self, ecrit: &[u8], place: &'n mut [u8]) -> Option<&'n [u8]> {
         // **UN NOM VIDE EST REFUSÉ PLUS BAS**, une seule fois : le transcrire
         // rend zéro octet, le recopier aussi, et le contrôle final les attrape
         // tous les deux. Le vérifier ici EN PLUS ferait une garde que la

@@ -641,7 +641,8 @@ impl Mailboxes for Boites {
         // `Refusante` accepte le dépôt et le perd en route ; `Ingrate` l'accepte
         // et refuse de le valider. Les deux existent parce que ce sont deux
         // façons différentes d'échouer.
-        let connue = matches!(name, b"INBOX" | b"Archives" | b"Refusante" | b"Ingrate");
+        let connue = matches!(name, b"INBOX" | b"Archives" | b"Refusante" | b"Ingrate")
+            || name == "Envoyés".as_bytes();
         connue.then(|| Depot {
             ecrit: std::rc::Rc::clone(&self.ecrit),
             refuse: name == b"Refusante",
@@ -5182,6 +5183,38 @@ fn append_depose_le_message_et_dit_ou() {
     assert_eq!(valide.get(), Some((31, Flags::NONE, None)));
 }
 
+/// **LE NOM D'UN `APPEND` SE TRANSCRIT COMME PARTOUT AILLEURS** : un client
+/// rev1 écrit `Envoy&AOk-s`, et c'est « Envoyés », en UTF-8, que le magasin doit
+/// recevoir. Il recevait le nom brut, et tout dépôt dans une boîte accentuée
+/// tombait sur `[TRYCREATE]`.
+#[test]
+fn append_transcrit_le_nom_d_un_client_rev1() {
+    let boites = Boites::default();
+    let ecrit = std::rc::Rc::clone(&boites.ecrit);
+    let mut session = Session::new(BORNES, true, UnCompte(AvecScram::Aucun), boites);
+    session.on_tls_established(None);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let conclusion = deposer(
+        &mut session,
+        b"a002 APPEND \"Envoy&AOk-s\" {5}\r\n",
+        b"salut",
+    );
+    assert!(conclusion.contains("OK [APPENDUID"), "{conclusion}");
+    assert_eq!(&*ecrit.borrow(), b"salut");
+}
+
+/// Un nom trop long pour être transcrit ne désigne aucune boîte.
+#[test]
+fn append_vers_un_nom_trop_long_se_dit_trycreate() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let mut ligne = b"a002 APPEND ".to_vec();
+    ligne.extend(std::iter::repeat_n(b'a', super::MAILBOX_NAME_MAX + 1));
+    ligne.extend_from_slice(b" {5}\r\n");
+    let texte = deposer(&mut session, &ligne, b"salut");
+    assert!(texte.contains("NO [TRYCREATE]"), "{texte}");
+}
+
 /// **Les drapeaux et la date suivent le message** (§6.3.12).
 #[test]
 fn les_drapeaux_et_la_date_arrivent_avec_le_message() {
@@ -7092,4 +7125,78 @@ fn noop_reporte_ce_qui_ne_tient_pas() {
     // L'annonce n'est pas perdue : elle vient au regard suivant.
     let (texte, _) = dire(&mut session, b"a005 NOOP\r\n");
     assert!(texte.starts_with("* 4 EXPUNGE\r\n"), "{texte}");
+}
+
+// ── Les noms d'un client rev1 : `LIST`, sa référence, et `RENAME` ────────────
+
+/// **UN MOTIF REV1 SE COMPARE EN UTF-8** : `Envoy&AOk-s` désigne « Envoyés »,
+/// que le magasin nomme en UTF-8. Il ne correspondait à rien.
+#[test]
+fn list_transcrit_le_motif_d_un_client_rev1() {
+    let boites = Boites::default();
+    let creees = std::rc::Rc::clone(&boites.creees);
+    let mut session = Session::new(BORNES, true, UnCompte(AvecScram::Aucun), boites);
+    session.on_tls_established(None);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    creees.borrow_mut().push("Envoyés".as_bytes().to_vec());
+    let (texte, _) = dire(&mut session, b"a002 LIST \"\" \"Envoy&AOk-s\"\r\n");
+    assert!(texte.contains("\"Envoy&AOk-s\"\r\n"), "{texte}");
+    assert!(!texte.contains("Archives"), "{texte}");
+}
+
+/// **LA RÉFERENCE SE PRÉFIXE AU MOTIF** (RFC 3501 §6.3.8) : c'est ainsi qu'un
+/// client parcourt l'espace que `NAMESPACE` lui annonce.
+#[test]
+fn list_prefixe_la_reference_au_motif() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (texte, _) = dire(&mut session, b"a002 LIST \"Archives/\" \"%\"\r\n");
+    assert!(texte.contains("\"Archives/2026\"\r\n"), "{texte}");
+    assert!(!texte.contains("\"INBOX\""), "{texte}");
+    // Une référence qui ne se transcrit pas ne désigne rien.
+    let (texte, _) = dire(&mut session, b"a003 LIST \"&ZZZ\" \"*\"\r\n");
+    assert_eq!(texte, "a003 OK LIST completed\r\n");
+}
+
+/// En rev2, un motif que sa référence rend trop long ne désigne rien — et ne
+/// se tronque pas en un motif plus court.
+#[test]
+fn list_un_motif_trop_long_une_fois_prefixe_ne_designe_rien() {
+    let mut session = nouvelle(true);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut session, b"a002 ENABLE IMAP4rev2\r\n");
+    let reference = "a".repeat(200);
+    let motif = std::format!("{}*", "b".repeat(100));
+    let commande = std::format!("a003 LIST \"{reference}\" \"{motif}\"\r\n");
+    let (texte, _) = dire(&mut session, commande.as_bytes());
+    assert_eq!(texte, "a003 OK LIST completed\r\n");
+}
+
+/// **`RENAME` TRANSCRIT SES DEUX NOMS** : sans cela, renommer vers
+/// `Envoy&AOk-s` créait une boîte nommée littéralement ainsi.
+#[test]
+fn rename_transcrit_les_noms_d_un_client_rev1() {
+    let boites = Boites::default();
+    let creees = std::rc::Rc::clone(&boites.creees);
+    let mut session = Session::new(BORNES, true, UnCompte(AvecScram::Aucun), boites);
+    session.on_tls_established(None);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (texte, _) = dire(&mut session, b"a002 RENAME Archives \"Envoy&AOk-s\"\r\n");
+    assert!(texte.contains("a002 OK"), "{texte}");
+    assert!(
+        creees
+            .borrow()
+            .iter()
+            .any(|nom| nom.as_slice() == "Envoyés".as_bytes()),
+        "le magasin doit recevoir de l'UTF-8"
+    );
+    // Un nom qui ne se transcrit pas est une faute de grammaire.
+    let (texte, _) = dire(&mut session, b"a003 RENAME Archives \"&ZZZ\"\r\n");
+    assert!(texte.contains("a003 BAD"), "{texte}");
+    // `/` se transcrit, mais ne nomme rien une fois son séparateur retiré.
+    let (texte, _) = dire(&mut session, b"a004 RENAME / Autre\r\n");
+    assert!(
+        texte.contains("a004 BAD RENAME expects two mailbox names"),
+        "{texte}"
+    );
 }
