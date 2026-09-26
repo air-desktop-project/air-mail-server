@@ -72,7 +72,8 @@ use libfuzzer_sys::fuzz_target;
 use ams_proto_imap::{
     Append, Candidate, FETCH_ITEMS_MAX, Fetch, FetchItem, Flags, LIST_PATTERNS_MAX, Limits, List,
     MAILBOX_NAME_MAX, SEARCH_KEYS_MAX, STATUS_ATTS_MAX, Search, SearchReturn, SearchScope,
-    SearchSource, SequenceSet, StatusItems, Store, mailbox_name_is_safe, mailbox_name_trimmed,
+    SearchSource, SequenceSet, SharedName, StatusItems, Store, mailbox_name_is_safe,
+    mailbox_name_trimmed, shared_name,
 };
 
 /// Ce qu'on soumet.
@@ -274,10 +275,22 @@ fuzz_target!(|entree: Entree<'_>| {
             nom.len() <= MAILBOX_NAME_MAX,
             "un nom accepté est trop long"
         );
+        // **SOUS `Partagés/`, SEUL LE NOM INTÉRIEUR DEVIENT UN RÉPERTOIRE**, dans
+        // la racine du titulaire ; le titulaire est un login, cherché dans la
+        // table des comptes, et les deux nœuds ne deviennent rien. C'est donc
+        // ce nom intérieur qu'on transcrit — et `INBOX`, qui n'en devient pas
+        // un, n'a rien à transcrire.
+        let devient = match shared_name(nom) {
+            None => Some(nom),
+            Some(SharedName::Mailbox { name, .. }) if !name.eq_ignore_ascii_case(b"INBOX") => {
+                Some(name)
+            }
+            Some(_) => None,
+        };
         // La transcription Maildir++ : les `/` deviennent des `.`, et l'on
         // préfixe d'un point. C'est CE nom-là qui devient un répertoire.
         let mut repertoire = vec![b'.'];
-        for octet in nom {
+        for octet in devient.unwrap_or_default() {
             repertoire.push(if *octet == b'/' { b'.' } else { *octet });
         }
         assert!(

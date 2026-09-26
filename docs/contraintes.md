@@ -2944,9 +2944,21 @@ serveur deux choses différentes de la même boîte**, selon la question qu'on l
 pose — exactement le genre d'incohérence qu'un client n'a aucun moyen de
 détecter.
 
-**`NAMESPACE`** (§6.3.10) dit où les boîtes vivent. Un seul espace ici, et les
-deux autres valent `NIL` : `NIL` n'est pas « je ne sais pas », c'est « il n'y en a
-pas ». Un client qui lirait une liste vide chercherait encore.
+**`NAMESPACE`** (§6.3.10) dit où les boîtes vivent. Le premier espace est celui
+du compte. Le second — « Other Users » de RFC 2342 — est `Partagés/` (en rev1 :
+`Partag&AOk-s/`), et **il ne paraît qu'à un compte qui atteint au moins une
+boîte d'autrui** : un espace vide ferait afficher un dossier où il n'y a rien à
+ouvrir. Le troisième vaut `NIL` : `NIL` n'est pas « je ne sais pas », c'est « il
+n'y en a pas ». Un client qui lirait une liste vide chercherait encore.
+
+**`Partagés/<titulaire>/<boîte>` EST LA BOÎTE D'UN AUTRE** (0.2.22), atteinte
+par délégation. Le magasin résout le nom en un seul endroit, et la table se
+relit à chaque question : sans droit d'écrire, `permanent_flags` est vide — la
+session en tire `[READ-ONLY]`, et refuse `STORE` et `EXPUNGE` —, et une
+délégation retirée ferme l'écriture même dans une boîte déjà ouverte. Le
+composant du titulaire admet le point (`thierry.delhaise`), parce qu'il ne
+devient jamais un chemin. Un dossier personnel qui s'appellerait `Partagés` est
+masqué.
 
 **`ENABLE` N'ACTIVE RIEN, ET LE DIT.** Aucune extension de ce serveur ne se
 négocie : tout ce qu'il sait faire, il le fait. La réponse liste ce qui a été

@@ -2159,7 +2159,11 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     // **UN SEUL SERVICE DE BOÎTES POUR IMAP ET POUR L'API** : deux voies de
     // lecture finiraient par ne plus montrer la même chose, et personne ne
     // saurait laquelle croire.
-    let boites_imap = Arc::new(BoitesImap::new(Arc::clone(&boites), domaine));
+    let boites_imap = Arc::new(BoitesImap::new(
+        Arc::clone(&boites),
+        domaine,
+        delegations.clone(),
+    ));
 
     // **UNE TÂCHE PAR ÉCOUTE**, comme pour le SMTP et le POP3. Le 143 et le 993
     // n'ont pas le même mode, et un serveur déployé sert les deux.
@@ -2532,6 +2536,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         let quarantaine = quarantaine.clone();
         let signature_de_la_remise = signature_de_la_remise.clone();
         let file_pour_la_remise = file_pour_la_remise.clone();
+        let delegations_pour_la_remise = delegations.clone();
         let attente = arret();
         taches.push(tokio::spawn(async move {
             let issue = serve(
@@ -2555,6 +2560,12 @@ async fn servir(fichier: &Path) -> Result<(), String> {
                     // alors même que le serveur annonce au démarrage qu'il signe
                     // ce qu'il émet.
                     let remise = remise.avec_domaines(Arc::clone(&domaines_signables));
+                    // **LA MÊME TABLE QUE L'API ET IMAP** : le droit `send` vaut
+                    // pour Thunderbird comme pour une application.
+                    let remise = match delegations_pour_la_remise.clone() {
+                        Some(table) => remise.avec_delegations(table),
+                        None => remise,
+                    };
                     let remise = match signature_de_la_remise.clone() {
                         Some(signataire) => remise.avec_dkim(signataire),
                         None => remise,

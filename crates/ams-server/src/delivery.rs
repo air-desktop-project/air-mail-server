@@ -383,6 +383,10 @@ pub struct MaildirDelivery {
     /// Voir [`crate::incidents`] : une remise qui échouait rendait un `451` et
     /// n'écrivait rien.
     incidents: Arc<crate::incidents::Incidents>,
+    /// La table des délégations, pour qui a le droit d'envoyer au nom d'autrui.
+    ///
+    /// **Sans elle, on n'écrit qu'en son nom**, comme avant la délégation.
+    delegations: Option<Arc<crate::delegations::Delegations>>,
 }
 
 impl MaildirDelivery {
@@ -416,7 +420,17 @@ impl MaildirDelivery {
             ecarte: false,
             entetes: None,
             incidents,
+            delegations: None,
         }
+    }
+
+    /// Lui donne la table des délégations : un compte qui tient le droit
+    /// `send` sur la boîte de `support` peut alors soumettre avec
+    /// `From: support@…` — et le même chemin de retour.
+    #[must_use]
+    pub fn avec_delegations(mut self, table: Arc<crate::delegations::Delegations>) -> Self {
+        self.delegations = Some(table);
+        self
     }
 
     /// Retient cet échec, et le dit s'il est temps.
@@ -1005,10 +1019,32 @@ impl MaildirDelivery {
         };
         // **LA MÊME LECTURE QUE LA PORTE HTTP**, et la même fonction de routage :
         // deux règles à deux endroits finissent par ne plus dire la même chose.
-        let sien = |adresse: &[u8]| {
-            ams_auth::route(&self.comptes.vue(), adresse).is_some_and(|vu| vu.login == compte)
+        //
+        // **ENVOYER AU NOM D'AUTRUI SE DÉLÈGUE**, par le droit `send` — la même
+        // table et la même règle que la porte HTTP. Le `From:` et le chemin de
+        // retour doivent alors mener au MÊME compte : un message de support@
+        // dont les rebonds reviendraient à jean@ dirait deux choses.
+        let vue = self.comptes.vue();
+        let titulaire = |adresse: &[u8]| ams_auth::route(&vue, adresse).map(|vu| vu.login.clone());
+        let (Some(auteur), Some(renvoi)) = (titulaire(adresse), titulaire(retour.as_bytes()))
+        else {
+            return false;
         };
-        sien(adresse) && sien(retour.as_bytes())
+        if auteur != renvoi {
+            return false;
+        }
+        if auteur == compte {
+            return true;
+        }
+        let permis = self
+            .delegations
+            .as_ref()
+            .and_then(|table| table.droits(compte, &auteur))
+            .is_some_and(|droits| droits.contains(ams_config::Rights::SEND));
+        if permis {
+            eprintln!("air-mail-server : délégation — `{compte}` soumet au nom de `{auteur}`");
+        }
+        permis
     }
 
     /// Retient une adresse qui n'est pas d'ici, pour la file.
@@ -2037,6 +2073,60 @@ mod tests {
             matches!(issue, Err(DeliveryFailure::Permanent)),
             "une usurpation vers une boîte locale doit être refusée : {issue:?}"
         );
+    }
+
+    /// **LE DROIT `send` PERMET D'ÉCRIRE AU NOM DU TITULAIRE**, en SMTP comme
+    /// par l'API — et lui seul : la lecture n'y suffit pas, et le `From:` et le
+    /// chemin de retour doivent mener au même compte.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn le_droit_send_permet_d_ecrire_au_nom_du_titulaire() {
+        let temporaire = Ephemere::nouveau();
+        let (_boites, remise) = remise_a_carte_vide(&temporaire.0, &["marie", "support"]);
+        let table = Arc::new(crate::delegations::Delegations::new(
+            temporaire.0.join("delegations.bin"),
+            vec![ams_config::Delegation {
+                delegate: String::from("marie"),
+                owner: String::from("support"),
+                rights: ams_config::Rights::READ,
+            }],
+        ));
+        let mut remise = remise.avec_delegations(Arc::clone(&table));
+        let essai = |remise: &mut MaildirDelivery, retour: &[u8], de: &str| {
+            remise.begin(Some(retour));
+            remise.submitter(b"marie");
+            if remise.add_recipient(b"marie@example.com").is_err() {
+                return false;
+            }
+            let message = format!("From: {de}\r\n\r\nbonjour\r\n");
+            remise.append(message.as_bytes()).is_ok() && remise.finish().is_ok()
+        };
+
+        assert!(
+            !essai(&mut remise, b"support@example.com", "support@example.com"),
+            "la lecture seule ne permet pas d'écrire en son nom"
+        );
+        table
+            .modifier(|tenues| {
+                for tenue in tenues.iter_mut() {
+                    tenue.rights = ams_config::Rights::SEND;
+                }
+                Ok(())
+            })
+            .expect("modifiée");
+        assert!(essai(
+            &mut remise,
+            b"support@example.com",
+            "support@example.com"
+        ));
+        assert!(
+            !essai(&mut remise, b"marie@example.com", "support@example.com"),
+            "un `From:` de support@ dont les rebonds reviendraient à marie@"
+        );
+        assert!(essai(
+            &mut remise,
+            b"marie@example.com",
+            "marie@example.com"
+        ));
     }
 
     /// **ET UN ENTRANT ANONYME N'EST PAS CONCERNÉ.**

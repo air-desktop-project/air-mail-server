@@ -340,8 +340,12 @@ pub struct BoiteImap {
     /// qui retire ensuite l'original, ferait disparaître le message pour le
     /// client qui l'a demandé.
     magasin: Arc<Magasin>,
-    /// Le compte, dont la racine porte les dossiers.
+    /// Le compte qui a ouvert la boîte — l'ACTEUR —, dont les noms désignent
+    /// la destination d'un `COPY`.
     compte: Vec<u8>,
+    /// Le compte chez qui elle vit : l'acteur lui-même, ou celui qui la lui a
+    /// déléguée.
+    titulaire: Vec<u8>,
     uid_validity: u32,
     /// Les drapeaux, un par message, lus à l'ouverture depuis les noms de
     /// fichiers. Les relire à chaque `FETCH` rouvrirait le répertoire.
@@ -893,6 +897,13 @@ impl Mailbox for BoiteImap {
     }
 
     fn permanent_flags(&self) -> Flags {
+        // **SANS DROIT D'ÉCRIRE, RIEN NE SURVIT** : c'est de ce mot que la
+        // session tire `[READ-ONLY]`, le refus de `STORE` et celui d'`EXPUNGE`.
+        // Il est relu à chaque question, et une délégation retirée pendant la
+        // session ferme donc l'écriture tout de suite.
+        if !self.peut_ecrire() {
+            return Flags::NONE;
+        }
         // `\Deleted` N'EST PAS DE LA LISTE, ET C'EST VOULU. Le poser n'aurait de
         // sens que si quelque chose l'honorait : §6.4.2 veut qu'un `CLOSE`
         // efface les messages qui le portent, et rien n'efface encore. Un client
@@ -920,7 +931,9 @@ impl Mailbox for BoiteImap {
         // rend le `Maildir` déjà ouvert plutôt qu'un second sur le même
         // répertoire — deux compteurs d'UID sur une seule boîte donneraient le
         // même UID à deux messages.
-        let destination = self.magasin.maildir(&self.compte, mailbox)?;
+        // **ÉCRIRE DANS LA DESTINATION DEMANDE LE DROIT D'Y ÉCRIRE** : copier
+        // vers `Partagés/support/INBOX` est un dépôt chez `support`.
+        let destination = self.magasin.maildir_pour(&self.compte, mailbox, true)?;
         let rang = self.rang(sequence)?;
         let chemin = self.chemins.get(rang)?.clone();
         let drapeaux = self.drapeaux.get(rang).copied().unwrap_or_default();
@@ -958,7 +971,7 @@ impl Mailbox for BoiteImap {
         // ON DÉFAIT LÀ OÙ L'ON A FAIT : la même boîte que `copy_to` a ouverte,
         // et donc résolue de la même façon. Défaire ailleurs ne retirerait rien
         // et laisserait la destination avec des messages à moitié copiés.
-        let Some(destination) = self.magasin.maildir(&self.compte, mailbox) else {
+        let Some(destination) = self.magasin.maildir_pour(&self.compte, mailbox, true) else {
             return;
         };
         // On ne défait QUE ce qu'on vient de faire : les UID de la plage sont
@@ -983,6 +996,9 @@ impl Mailbox for BoiteImap {
     }
 
     fn remove(&mut self, sequence: u32) -> bool {
+        if !self.peut_ecrire() {
+            return false;
+        }
         let Some(rang) = self.rang(sequence) else {
             return false;
         };
@@ -1023,9 +1039,13 @@ impl Mailbox for BoiteImap {
     }
 
     fn expunge(&mut self, sequence: u32) -> bool {
+        if !self.peut_ecrire() {
+            return false;
+        }
         let Some(rang) = self.rang(sequence) else {
             return false;
         };
+        self.dire_l_ecriture("efface un message dans une boîte de");
         // TROIS TENTATIVES, comme pour `store_flags` : chaque échec vient d'un
         // renommage concurrent, et trois de suite ne sont plus une course.
         for _ in 0..3_u32 {
@@ -1094,6 +1114,9 @@ impl Mailbox for BoiteImap {
     }
 
     fn store_flags(&mut self, sequence: u32, mode: StoreMode, flags: Flags) -> Option<Flags> {
+        if !self.peut_ecrire() {
+            return None;
+        }
         let rang = self.rang(sequence)?;
         // TROIS TENTATIVES, ET PAS UNE BOUCLE SANS FIN. Chaque échec vient d'un
         // renommage concurrent ; s'il s'en produit trois de suite pendant qu'on
@@ -1200,6 +1223,39 @@ struct Magasin {
     boites: Arc<crate::delivery::Boites>,
     /// Le nom d'hôte, qui entre dans les noms de fichiers Maildir.
     hote: Vec<u8>,
+    /// La table des délégations, si le serveur en tient une.
+    ///
+    /// **LA MÊME QUE CELLE DE L'API**, relue à chaque question : une délégation
+    /// retirée cesse d'ouvrir quoi que ce soit dès l'ouverture suivante, et
+    /// cesse d'écrire dès l'écriture suivante — même dans une boîte déjà
+    /// sélectionnée.
+    delegations: Option<Arc<crate::delegations::Delegations>>,
+}
+
+/// Où mène un nom de boîte, pour un compte donné.
+///
+/// # UN SEUL ENDROIT OÙ `Partagés/<titulaire>/…` DEVIENT LA BOÎTE D'UN AUTRE
+///
+/// Ouvrir, déposer, copier, créer, effacer, renommer : tous passent par
+/// [`Magasin::cible`]. Une résolution recopiée dans chacun finirait par oublier
+/// le contrôle des droits à l'un d'eux — et ce serait celui qu'on n'éprouve pas.
+#[derive(Debug)]
+struct Cible<'n> {
+    /// Le compte dont la racine porte la boîte.
+    titulaire: Vec<u8>,
+    /// Le nom de la boîte chez lui.
+    nom: &'n [u8],
+    /// Ce que le compte qui demande peut y faire. Chez soi : tout.
+    droits: ams_config::Rights,
+    /// Est-ce la boîte d'autrui ?
+    autrui: bool,
+}
+
+impl Cible<'_> {
+    /// Le compte peut-il y écrire ?
+    fn ecrit(&self) -> bool {
+        self.droits.contains(ams_config::Rights::WRITE)
+    }
 }
 
 /// Les boîtes du serveur, telles qu'IMAP les ouvre.
@@ -1243,6 +1299,54 @@ struct Usages {
 }
 
 impl Magasin {
+    /// Les droits que `user` tient sur la boîte de `titulaire`.
+    ///
+    /// **Aucun sur la sienne propre par ce chemin-ci** : la table refuse la
+    /// délégation de soi à soi, et `Partagés/<soi>/…` ne mène donc nulle part —
+    /// un seul nom par boîte.
+    fn droits(&self, user: &[u8], titulaire: &[u8]) -> Option<ams_config::Rights> {
+        let table = self.delegations.as_ref()?;
+        table.droits(
+            core::str::from_utf8(user).ok()?,
+            core::str::from_utf8(titulaire).ok()?,
+        )
+    }
+
+    /// Où mène ce nom, pour ce compte — ou nulle part.
+    ///
+    /// Un nom personnel mène chez soi, avec tous les droits. Un nom de l'espace
+    /// partagé mène chez le titulaire, **si et seulement si** la table le dit,
+    /// avec les droits qu'elle dit. `Partagés` et `Partagés/<titulaire>` ne
+    /// sont que des nœuds de la hiérarchie : ils ne mènent à aucune boîte.
+    fn cible<'n>(&self, user: &[u8], name: &'n [u8]) -> Option<Cible<'n>> {
+        let name = ams_proto_imap::mailbox_name_trimmed(name);
+        match ams_proto_imap::shared_name(name) {
+            None => Some(Cible {
+                titulaire: user.to_vec(),
+                nom: name,
+                droits: ams_config::Rights::WRITE.with(ams_config::Rights::SEND),
+                autrui: false,
+            }),
+            Some(ams_proto_imap::SharedName::Mailbox { owner, name }) => Some(Cible {
+                droits: self.droits(user, owner)?,
+                titulaire: owner.to_vec(),
+                nom: name,
+                autrui: true,
+            }),
+            Some(_) => None,
+        }
+    }
+
+    /// La boîte que ce nom désigne pour ce compte, s'il a le droit d'y
+    /// `ecrire` quand on le lui demande.
+    fn maildir_pour(&self, user: &[u8], name: &[u8], ecrire: bool) -> Option<Arc<Maildir>> {
+        let cible = self.cible(user, name)?;
+        if ecrire && !cible.ecrit() {
+            return None;
+        }
+        self.maildir(&cible.titulaire, cible.nom)
+    }
+
     /// La racine de la boîte d'arrivée d'un compte.
     fn racine(&self, user: &[u8]) -> Option<PathBuf> {
         let nom = core::str::from_utf8(user).ok()?;
@@ -1321,11 +1425,19 @@ struct Abonnements {
 impl BoitesImap {
     /// Monte le service à partir des boîtes déjà ouvertes par le serveur.
     #[must_use]
-    pub fn new(boites: Arc<crate::delivery::Boites>, hote: &[u8]) -> Self {
+    ///
+    /// `delegations` : la table que l'API tient aussi, ou `None` si le serveur
+    /// n'en a pas — l'espace `Partagés` reste alors vide.
+    pub fn new(
+        boites: Arc<crate::delivery::Boites>,
+        hote: &[u8],
+        delegations: Option<Arc<crate::delegations::Delegations>>,
+    ) -> Self {
         Self {
             magasin: Arc::new(Magasin {
                 boites,
                 hote: hote.to_vec(),
+                delegations,
             }),
             abonnes: std::sync::Mutex::new(BTreeMap::new()),
             usages: std::sync::Mutex::new(BTreeMap::new()),
@@ -1369,7 +1481,7 @@ impl BoitesImap {
         let Some(arrivee) = self.racine(user) else {
             return Renaming::Absente;
         };
-        if self.create(user, to, SpecialUse::NONE) == Creation::Refusee {
+        if self.creer(user, to, SpecialUse::NONE) == Creation::Refusee {
             return Renaming::Refusee;
         }
         for sous in ["cur", "new"] {
@@ -1609,13 +1721,71 @@ impl BoitesImap {
                 .iter()
                 .map(|octet| if *octet == b'.' { b'/' } else { *octet })
                 .collect();
-            if ams_proto_imap::mailbox_name_is_safe(&imap) {
+            // **UN DOSSIER PERSONNEL NOMMÉ `Partagés` EST MASQUÉ** : ce nom est
+            // celui de l'espace des boîtes d'autrui, et deux choses sous un même
+            // nom, c'est une que le client n'atteindra jamais.
+            if ams_proto_imap::mailbox_name_is_safe(&imap)
+                && ams_proto_imap::shared_name(&imap).is_none()
+            {
                 dossiers.push(imap);
             }
         }
         dossiers.sort_unstable();
         noms.extend(dossiers);
         noms
+    }
+
+    /// Tout ce que `LIST` rend à ce compte : ses dossiers, puis l'espace des
+    /// boîtes d'autrui — `Partagés`, `Partagés/<titulaire>`, et les boîtes de
+    /// chaque titulaire qui lui en a délégué.
+    ///
+    /// **Un titulaire dont le compte n'existe plus n'y paraît pas**, et un nom
+    /// trop long ou trop profond une fois préfixé non plus : on ne rend que ce
+    /// qu'on saurait rouvrir.
+    fn noms_visibles(&self, user: &[u8]) -> Vec<Vec<u8>> {
+        let mut noms = self.dossiers_de(user);
+        let titulaires = self.titulaires_de(user);
+        if titulaires.is_empty() {
+            return noms;
+        }
+        noms.push(ams_proto_imap::SHARED_ROOT.as_bytes().to_vec());
+        for titulaire in titulaires {
+            let mut noeud = ams_proto_imap::SHARED_ROOT.as_bytes().to_vec();
+            noeud.push(ams_proto_imap::MAILBOX_SEPARATOR);
+            noeud.extend_from_slice(titulaire.as_bytes());
+            if !ams_proto_imap::mailbox_name_is_safe(&noeud) {
+                continue;
+            }
+            for dossier in self.dossiers_de(titulaire.as_bytes()) {
+                let mut nom = noeud.clone();
+                nom.push(ams_proto_imap::MAILBOX_SEPARATOR);
+                nom.extend_from_slice(&dossier);
+                if ams_proto_imap::mailbox_name_is_safe(&nom) {
+                    noms.push(nom);
+                }
+            }
+            noms.push(noeud);
+        }
+        noms
+    }
+
+    /// Les comptes qui ont délégué leur boîte à celui-ci, et qui existent
+    /// encore — triés, pour que `LIST` rende deux fois la même chose.
+    fn titulaires_de(&self, user: &[u8]) -> Vec<String> {
+        let (Some(table), Ok(compte)) = (
+            self.magasin.delegations.as_ref(),
+            core::str::from_utf8(user),
+        ) else {
+            return Vec::new();
+        };
+        let mut titulaires: Vec<String> = table
+            .recues_par(compte)
+            .into_iter()
+            .map(|tenue| tenue.owner)
+            .filter(|titulaire| self.magasin.boites.get(titulaire).is_some())
+            .collect();
+        titulaires.sort_unstable();
+        titulaires
     }
 }
 
@@ -1765,113 +1935,132 @@ impl Deposit for DepotImap {
     }
 }
 
-impl Mailboxes for BoitesImap {
-    type Open = BoiteImap;
-    type Deposit = DepotImap;
-
-    fn append(&self, user: &[u8], name: &[u8]) -> Option<DepotImap> {
-        let maildir = self.maildir(user, name)?;
-        Some(DepotImap {
-            entrant: Some(maildir.deliver().ok()?),
-        })
+impl BoitesImap {
+    /// Crée une boîte CHEZ LE TITULAIRE, sous ses noms à lui.
+    fn creer(&self, user: &[u8], name: &[u8], usage: SpecialUse) -> Creation {
+        let name = ams_proto_imap::mailbox_name_trimmed(name);
+        // RFC 6154 §3 : UN USAGE DÉJÀ PRIS SE REFUSE AVANT DE CRÉER QUOI QUE CE
+        // SOIT. Créer d'abord et refuser ensuite laisserait un répertoire que le
+        // client n'a pas demandé, et qu'il ne saurait pas devoir effacer.
+        let deja = self.usages(user);
+        if usage.any()
+            && deja.iter().any(|(autre, pris)| {
+                autre.as_slice() != name
+                    && USAGES_CONNUS
+                        .into_iter()
+                        .any(|un| usage.contains(un) && pris.contains(un))
+            })
+        {
+            return Creation::UsageDejaPris;
+        }
+        // §6.3.4 : `INBOX` existe toujours. La session le dit déjà ; on ne s'y
+        // fie pas, puisque c'est ici qu'un répertoire naîtrait.
+        if name.eq_ignore_ascii_case(INBOX) {
+            return Creation::DejaLa;
+        }
+        let Some(chemin) = self.chemin_du_dossier(user, name) else {
+            return Creation::Refusee;
+        };
+        // §6.3.4 : CRÉER SUR UN NOM `\Noselect` LE REND OUVRABLE. C'est
+        // exactement ce que la RFC prévoit pour reprendre une boîte effacée qui
+        // avait des filles.
+        if chemin.is_dir() && Self::selectionnable(&chemin) {
+            return Creation::DejaLa;
+        }
+        // §6.3.4 : CRÉER `A/B` CRÉE AUSSI `A`. En Maildir++ il n'y a qu'un
+        // niveau de répertoires, et les parents sont donc des répertoires
+        // frères — il faut les faire, sans quoi `LIST` montrerait une fille
+        // sans sa mère.
+        let mut parcouru = std::vec::Vec::new();
+        for composant in name.split(|octet| *octet == b'/') {
+            if !parcouru.is_empty() {
+                parcouru.push(b'/');
+            }
+            parcouru.extend_from_slice(composant);
+            let Some(chemin) = self.chemin_du_dossier(user, &parcouru) else {
+                return Creation::Refusee;
+            };
+            if chemin.is_dir() && Self::selectionnable(&chemin) {
+                continue;
+            }
+            if Maildir::open(&chemin, &self.magasin.hote, fresh_uid_validity()).is_err() {
+                return Creation::Refusee;
+            }
+        }
+        // L'USAGE S'ÉCRIT APRÈS LA BOÎTE, et c'est le bon ordre : un usage posé
+        // sur une boîte qui n'aurait pas été créée désignerait un nom que `LIST`
+        // ne rendrait jamais. L'inverse — une boîte sans son usage, après une
+        // coupure entre les deux — est une boîte ordinaire, que le client peut
+        // redésigner.
+        if usage.any() {
+            let mut toutes = (*deja).clone();
+            toutes.retain(|(autre, _)| autre.as_slice() != name);
+            toutes.push((name.to_vec(), usage));
+            toutes.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+            if !self.ecrire_les_usages(user, &toutes) {
+                return Creation::Refusee;
+            }
+        }
+        Creation::Faite
     }
 
-    fn subscribe(&self, user: &[u8], name: &[u8]) -> Subscription {
-        let nom = Self::nom_abonne(name);
-        // ON VALIDE À L'ABONNEMENT : accepter un abonnement à une boîte qui n'a
-        // jamais existé rendrait au client une liste où figure un nom qu'il ne
-        // pourra pas ouvrir.
-        if !self.dossiers_de(user).contains(&nom) {
-            return Subscription::Absente;
+    /// Efface une boîte DU TITULAIRE, sous ses noms à lui.
+    fn effacer(&self, user: &[u8], name: &[u8]) -> Deletion {
+        let name = ams_proto_imap::mailbox_name_trimmed(name);
+        // §6.3.5 : `INBOX` ne s'efface pas. La session le dit déjà ; on ne s'y
+        // fie pas, puisque c'est ici que des fichiers disparaîtraient.
+        if name.eq_ignore_ascii_case(INBOX) {
+            return Deletion::Refusee;
         }
-        let mut noms = (*self.abonnements(user)).clone();
-        // §6.3.7 : se réabonner n'est pas une faute. Rien à écrire, et l'état
-        // demandé est déjà celui qu'on a.
-        if noms.contains(&nom) {
-            return Subscription::Faite;
+        let Some(chemin) = self.chemin_du_dossier(user, name) else {
+            return Deletion::Absente;
+        };
+        if !chemin.is_dir() || !Self::selectionnable(&chemin) {
+            return Deletion::Absente;
         }
-        if noms.len() >= ABONNEMENTS_MAX {
-            return Subscription::Refusee;
+        // La boîte cesse d'être ouverte AVANT d'être effacée : un `Maildir`
+        // gardé en cache écrirait son index dans un répertoire qui n'est plus.
+        if let (Ok(compte), Ok(boite)) = (core::str::from_utf8(user), core::str::from_utf8(name)) {
+            self.magasin
+                .boites
+                .oublier_les_dossiers(|c, ouvert| c != compte || ouvert != boite);
         }
-        noms.push(nom);
-        noms.sort_unstable();
-        match self.ecrire_les_abonnements(user, &noms) {
-            true => Subscription::Faite,
-            false => Subscription::Refusee,
-        }
-    }
 
-    fn unsubscribe(&self, user: &[u8], name: &[u8]) -> Subscription {
-        // **AUCUNE VÉRIFICATION D'EXISTENCE ICI**, et c'est le point de §6.3.8 :
-        // se désabonner d'une boîte disparue est exactement ce qu'un client fait
-        // pour se débarrasser d'un abonnement orphelin. Le refuser l'y
-        // enfermerait.
-        let nom = Self::nom_abonne(name);
-        let mut noms = (*self.abonnements(user)).clone();
-        let avant = noms.len();
-        noms.retain(|autre| *autre != nom);
-        if noms.len() == avant {
-            // Se désabonner de ce à quoi l'on n'est pas abonné n'est pas une
-            // faute : l'état demandé est déjà celui qu'on a.
-            return Subscription::Faite;
-        }
-        match self.ecrire_les_abonnements(user, &noms) {
-            true => Subscription::Faite,
-            false => Subscription::Refusee,
-        }
-    }
-
-    fn is_subscribed(&self, user: &[u8], name: &[u8]) -> bool {
-        let nom = Self::nom_abonne(name);
-        self.abonnements(user).contains(&nom)
-    }
-
-    fn orphan<'n>(&self, user: &[u8], index: usize, out: &'n mut [u8]) -> Option<&'n [u8]> {
-        let existantes = self.dossiers_de(user);
-        let abonnements = self.abonnements(user);
-        let nom = abonnements
-            .iter()
-            .filter(|nom| !existantes.contains(nom))
-            .nth(index)?;
-        let longueur = nom.len().min(out.len());
-        let place = out.get_mut(..longueur)?;
-        place.copy_from_slice(nom.get(..longueur)?);
-        Some(place)
-    }
-
-    fn name<'n>(&self, user: &[u8], index: usize, out: &'n mut [u8]) -> Option<Listing<'n>> {
-        // Le compte d'abord : sans lui, il n'y a pas de boîte à nommer.
-        let compte = core::str::from_utf8(user).ok()?;
-        self.magasin.boites.get(compte)?;
-        let noms = self.dossiers_de(user);
-        let nom = noms.get(index)?;
-        let selectable = nom.as_slice() == INBOX
-            || self
-                .chemin_du_dossier(user, nom)
-                .is_some_and(|chemin| Self::selectionnable(&chemin));
-        // UNE FILLE EST UNE BOÎTE DONT LE NOM COMMENCE PAR LE NÔTRE, SUIVI DU
-        // SÉPARATEUR. On les cherche dans la liste qu'on tient déjà : ouvrir le
-        // système de fichiers une seconde fois pour la même question coûterait un
-        // parcours de répertoire par boîte listée.
-        let has_children = noms.iter().any(|autre| {
-            autre
-                .get(..nom.len())
-                .is_some_and(|debut| debut == nom.as_slice())
-                && autre.get(nom.len()).copied() == Some(b'/')
+        // §6.3.5 : UNE BOÎTE QUI A DES FILLES NE DISPARAÎT PAS. Son courrier
+        // s'en va, son nom demeure — sans quoi ses filles n'auraient plus de
+        // chemin par où être nommées.
+        let a_des_filles = self.dossiers_de(user).iter().any(|autre| {
+            autre.len() > name.len()
+                && autre.starts_with(name)
+                && autre.get(name.len()) == Some(&b'/')
         });
-        let longueur = nom.len().min(out.len());
-        for (place, octet) in out.iter_mut().zip(nom) {
-            *place = *octet;
+        for sous in ["cur", "new", "tmp"] {
+            if std::fs::remove_dir_all(chemin.join(sous)).is_err() {
+                return Deletion::Refusee;
+            }
         }
-        Some(Listing {
-            name: out.get(..longueur)?,
-            selectable,
-            has_children,
-            special: self.usage_de(user, nom),
-        })
+        // L'index part avec le courrier : le garder ferait qu'une boîte recréée
+        // sous le même nom reprendrait les UID de l'ancienne.
+        let _ = std::fs::remove_file(chemin.join("ams-index.bin"));
+        // **ET LE JOURNAL DES CHANGEMENTS, AVEC SON VERROU.** La 0.2.19 les
+        // oubliait : le répertoire n'était plus vide, ne se retirait pas, et la
+        // suppression rendait « vidée » là où elle aurait dû rendre « faite ».
+        let journal = chemin.join(crate::journal::NOM);
+        let _ = std::fs::remove_file(ams_fichier::chemin_du_verrou(&journal));
+        let _ = std::fs::remove_file(&journal);
+        if a_des_filles {
+            return Deletion::Videe;
+        }
+        if std::fs::remove_dir(&chemin).is_err() {
+            // Le répertoire n'est pas vide : quelque chose y vit qui n'est pas à
+            // nous. On a retiré le courrier, on ne retire pas le reste.
+            return Deletion::Videe;
+        }
+        Deletion::Faite
     }
 
-    fn rename(&self, user: &[u8], from: &[u8], to: &[u8]) -> Renaming {
+    /// Renomme une boîte DU TITULAIRE, sous ses noms à lui.
+    fn renommer(&self, user: &[u8], from: &[u8], to: &[u8]) -> Renaming {
         let from = ams_proto_imap::mailbox_name_trimmed(from);
         let to = ams_proto_imap::mailbox_name_trimmed(to);
         if to.eq_ignore_ascii_case(INBOX) || !ams_proto_imap::mailbox_name_is_safe(to) {
@@ -1940,130 +2129,212 @@ impl Mailboxes for BoitesImap {
         }
         Renaming::Faite
     }
+}
+
+/// Journalise un geste fait dans la boîte d'autrui, avec son acteur — comme
+/// l'API le fait pour les siens.
+fn dire_chez_autrui(acteur: &[u8], titulaire: &[u8], quoi: &str) {
+    eprintln!(
+        "air-mail-server : IMAP — `{}` {quoi} `{}`",
+        String::from_utf8_lossy(acteur),
+        String::from_utf8_lossy(titulaire)
+    );
+}
+
+impl Mailboxes for BoitesImap {
+    type Open = BoiteImap;
+    type Deposit = DepotImap;
+
+    fn append(&self, user: &[u8], name: &[u8]) -> Option<DepotImap> {
+        let cible = self.magasin.cible(user, name)?;
+        if !cible.ecrit() {
+            return None;
+        }
+        let maildir = self.maildir(&cible.titulaire, cible.nom)?;
+        if cible.autrui {
+            dire_chez_autrui(user, &cible.titulaire, "dépose un message chez");
+        }
+        Some(DepotImap {
+            entrant: Some(maildir.deliver().ok()?),
+        })
+    }
+
+    fn subscribe(&self, user: &[u8], name: &[u8]) -> Subscription {
+        let nom = Self::nom_abonne(name);
+        // ON VALIDE À L'ABONNEMENT : accepter un abonnement à une boîte qui n'a
+        // jamais existé rendrait au client une liste où figure un nom qu'il ne
+        // pourra pas ouvrir.
+        if !self.noms_visibles(user).contains(&nom) {
+            return Subscription::Absente;
+        }
+        let mut noms = (*self.abonnements(user)).clone();
+        // §6.3.7 : se réabonner n'est pas une faute. Rien à écrire, et l'état
+        // demandé est déjà celui qu'on a.
+        if noms.contains(&nom) {
+            return Subscription::Faite;
+        }
+        if noms.len() >= ABONNEMENTS_MAX {
+            return Subscription::Refusee;
+        }
+        noms.push(nom);
+        noms.sort_unstable();
+        match self.ecrire_les_abonnements(user, &noms) {
+            true => Subscription::Faite,
+            false => Subscription::Refusee,
+        }
+    }
+
+    fn unsubscribe(&self, user: &[u8], name: &[u8]) -> Subscription {
+        // **AUCUNE VÉRIFICATION D'EXISTENCE ICI**, et c'est le point de §6.3.8 :
+        // se désabonner d'une boîte disparue est exactement ce qu'un client fait
+        // pour se débarrasser d'un abonnement orphelin. Le refuser l'y
+        // enfermerait.
+        let nom = Self::nom_abonne(name);
+        let mut noms = (*self.abonnements(user)).clone();
+        let avant = noms.len();
+        noms.retain(|autre| *autre != nom);
+        if noms.len() == avant {
+            // Se désabonner de ce à quoi l'on n'est pas abonné n'est pas une
+            // faute : l'état demandé est déjà celui qu'on a.
+            return Subscription::Faite;
+        }
+        match self.ecrire_les_abonnements(user, &noms) {
+            true => Subscription::Faite,
+            false => Subscription::Refusee,
+        }
+    }
+
+    fn is_subscribed(&self, user: &[u8], name: &[u8]) -> bool {
+        let nom = Self::nom_abonne(name);
+        self.abonnements(user).contains(&nom)
+    }
+
+    fn shares(&self, user: &[u8]) -> bool {
+        !self.titulaires_de(user).is_empty()
+    }
+
+    fn orphan<'n>(&self, user: &[u8], index: usize, out: &'n mut [u8]) -> Option<&'n [u8]> {
+        let existantes = self.noms_visibles(user);
+        let abonnements = self.abonnements(user);
+        let nom = abonnements
+            .iter()
+            .filter(|nom| !existantes.contains(nom))
+            .nth(index)?;
+        let longueur = nom.len().min(out.len());
+        let place = out.get_mut(..longueur)?;
+        place.copy_from_slice(nom.get(..longueur)?);
+        Some(place)
+    }
+
+    fn name<'n>(&self, user: &[u8], index: usize, out: &'n mut [u8]) -> Option<Listing<'n>> {
+        // Le compte d'abord : sans lui, il n'y a pas de boîte à nommer.
+        let compte = core::str::from_utf8(user).ok()?;
+        self.magasin.boites.get(compte)?;
+        let noms = self.noms_visibles(user);
+        let nom = noms.get(index)?;
+        // UN NOM DE L'ESPACE PARTAGÉ SE JUGE CHEZ SON TITULAIRE, et les deux
+        // nœuds — `Partagés`, `Partagés/<titulaire>` — ne s'ouvrent pas.
+        let (selectable, special) = match self.magasin.cible(user, nom) {
+            None => (false, SpecialUse::NONE),
+            Some(cible) => (
+                cible.nom.eq_ignore_ascii_case(INBOX)
+                    || self
+                        .chemin_du_dossier(&cible.titulaire, cible.nom)
+                        .is_some_and(|chemin| Self::selectionnable(&chemin)),
+                // Les usages de `support` sont les siens : les montrer à qui la
+                // consulte ferait prendre sa boîte d'envoi pour la sienne.
+                match cible.autrui {
+                    true => SpecialUse::NONE,
+                    false => self.usage_de(user, nom),
+                },
+            ),
+        };
+        // UNE FILLE EST UNE BOÎTE DONT LE NOM COMMENCE PAR LE NÔTRE, SUIVI DU
+        // SÉPARATEUR. On les cherche dans la liste qu'on tient déjà : ouvrir le
+        // système de fichiers une seconde fois pour la même question coûterait un
+        // parcours de répertoire par boîte listée.
+        let has_children = noms.iter().any(|autre| {
+            autre
+                .get(..nom.len())
+                .is_some_and(|debut| debut == nom.as_slice())
+                && autre.get(nom.len()).copied() == Some(b'/')
+        });
+        let longueur = nom.len().min(out.len());
+        for (place, octet) in out.iter_mut().zip(nom) {
+            *place = *octet;
+        }
+        Some(Listing {
+            name: out.get(..longueur)?,
+            selectable,
+            has_children,
+            special,
+        })
+    }
+
+    fn rename(&self, user: &[u8], from: &[u8], to: &[u8]) -> Renaming {
+        let (Some(de), Some(vers)) = (self.magasin.cible(user, from), self.magasin.cible(user, to))
+        else {
+            return Renaming::Refusee;
+        };
+        // **ON NE RENOMME PAS D'UN COMPTE À L'AUTRE** : ce serait déplacer le
+        // courrier de l'un chez l'autre sous couvert d'un nom — ce que `MOVE`
+        // fait message par message, avec les droits de chaque côté.
+        if de.titulaire != vers.titulaire {
+            return Renaming::Refusee;
+        }
+        if !de.ecrit() {
+            return Renaming::Refusee;
+        }
+        let issue = self.renommer(&de.titulaire, de.nom, vers.nom);
+        if de.autrui && issue == Renaming::Faite {
+            dire_chez_autrui(user, &de.titulaire, "renomme une boîte de");
+        }
+        issue
+    }
 
     fn delete(&self, user: &[u8], name: &[u8]) -> Deletion {
-        let name = ams_proto_imap::mailbox_name_trimmed(name);
-        // §6.3.5 : `INBOX` ne s'efface pas. La session le dit déjà ; on ne s'y
-        // fie pas, puisque c'est ici que des fichiers disparaîtraient.
-        if name.eq_ignore_ascii_case(INBOX) {
-            return Deletion::Refusee;
-        }
-        let Some(chemin) = self.chemin_du_dossier(user, name) else {
+        let Some(cible) = self.magasin.cible(user, name) else {
             return Deletion::Absente;
         };
-        if !chemin.is_dir() || !Self::selectionnable(&chemin) {
-            return Deletion::Absente;
+        if !cible.ecrit() {
+            return Deletion::Refusee;
         }
-        // La boîte cesse d'être ouverte AVANT d'être effacée : un `Maildir`
-        // gardé en cache écrirait son index dans un répertoire qui n'est plus.
-        if let (Ok(compte), Ok(boite)) = (core::str::from_utf8(user), core::str::from_utf8(name)) {
-            self.magasin
-                .boites
-                .oublier_les_dossiers(|c, ouvert| c != compte || ouvert != boite);
+        let issue = self.effacer(&cible.titulaire, cible.nom);
+        if cible.autrui && matches!(issue, Deletion::Faite | Deletion::Videe) {
+            dire_chez_autrui(user, &cible.titulaire, "efface une boîte de");
         }
-
-        // §6.3.5 : UNE BOÎTE QUI A DES FILLES NE DISPARAÎT PAS. Son courrier
-        // s'en va, son nom demeure — sans quoi ses filles n'auraient plus de
-        // chemin par où être nommées.
-        let a_des_filles = self.dossiers_de(user).iter().any(|autre| {
-            autre.len() > name.len()
-                && autre.starts_with(name)
-                && autre.get(name.len()) == Some(&b'/')
-        });
-        for sous in ["cur", "new", "tmp"] {
-            if std::fs::remove_dir_all(chemin.join(sous)).is_err() {
-                return Deletion::Refusee;
-            }
-        }
-        // L'index part avec le courrier : le garder ferait qu'une boîte recréée
-        // sous le même nom reprendrait les UID de l'ancienne.
-        let _ = std::fs::remove_file(chemin.join("ams-index.bin"));
-        // **ET LE JOURNAL DES CHANGEMENTS, AVEC SON VERROU.** La 0.2.19 les
-        // oubliait : le répertoire n'était plus vide, ne se retirait pas, et la
-        // suppression rendait « vidée » là où elle aurait dû rendre « faite ».
-        let journal = chemin.join(crate::journal::NOM);
-        let _ = std::fs::remove_file(ams_fichier::chemin_du_verrou(&journal));
-        let _ = std::fs::remove_file(&journal);
-        if a_des_filles {
-            return Deletion::Videe;
-        }
-        if std::fs::remove_dir(&chemin).is_err() {
-            // Le répertoire n'est pas vide : quelque chose y vit qui n'est pas à
-            // nous. On a retiré le courrier, on ne retire pas le reste.
-            return Deletion::Videe;
-        }
-        Deletion::Faite
+        issue
     }
 
     fn create(&self, user: &[u8], name: &[u8], usage: SpecialUse) -> Creation {
-        let name = ams_proto_imap::mailbox_name_trimmed(name);
-        // RFC 6154 §3 : UN USAGE DÉJÀ PRIS SE REFUSE AVANT DE CRÉER QUOI QUE CE
-        // SOIT. Créer d'abord et refuser ensuite laisserait un répertoire que le
-        // client n'a pas demandé, et qu'il ne saurait pas devoir effacer.
-        let deja = self.usages(user);
-        if usage.any()
-            && deja.iter().any(|(autre, pris)| {
-                autre.as_slice() != name
-                    && USAGES_CONNUS
-                        .into_iter()
-                        .any(|un| usage.contains(un) && pris.contains(un))
-            })
-        {
-            return Creation::UsageDejaPris;
-        }
-        // §6.3.4 : `INBOX` existe toujours. La session le dit déjà ; on ne s'y
-        // fie pas, puisque c'est ici qu'un répertoire naîtrait.
-        if name.eq_ignore_ascii_case(INBOX) {
-            return Creation::DejaLa;
-        }
-        let Some(chemin) = self.chemin_du_dossier(user, name) else {
+        let Some(cible) = self.magasin.cible(user, name) else {
             return Creation::Refusee;
         };
-        // §6.3.4 : CRÉER SUR UN NOM `\Noselect` LE REND OUVRABLE. C'est
-        // exactement ce que la RFC prévoit pour reprendre une boîte effacée qui
-        // avait des filles.
-        if chemin.is_dir() && Self::selectionnable(&chemin) {
-            return Creation::DejaLa;
+        // **CHEZ AUTRUI, ON N'ÉCRIT PAS SES USAGES** : désigner la boîte
+        // d'envoi de `support` revient à `support`, pas à qui la consulte.
+        if !cible.ecrit() || (cible.autrui && usage.any()) {
+            return Creation::Refusee;
         }
-        // §6.3.4 : CRÉER `A/B` CRÉE AUSSI `A`. En Maildir++ il n'y a qu'un
-        // niveau de répertoires, et les parents sont donc des répertoires
-        // frères — il faut les faire, sans quoi `LIST` montrerait une fille
-        // sans sa mère.
-        let mut parcouru = std::vec::Vec::new();
-        for composant in name.split(|octet| *octet == b'/') {
-            if !parcouru.is_empty() {
-                parcouru.push(b'/');
-            }
-            parcouru.extend_from_slice(composant);
-            let Some(chemin) = self.chemin_du_dossier(user, &parcouru) else {
-                return Creation::Refusee;
-            };
-            if chemin.is_dir() && Self::selectionnable(&chemin) {
-                continue;
-            }
-            if Maildir::open(&chemin, &self.magasin.hote, fresh_uid_validity()).is_err() {
-                return Creation::Refusee;
-            }
+        let issue = self.creer(&cible.titulaire, cible.nom, usage);
+        if cible.autrui && issue == Creation::Faite {
+            dire_chez_autrui(user, &cible.titulaire, "crée une boîte chez");
         }
-        // L'USAGE S'ÉCRIT APRÈS LA BOÎTE, et c'est le bon ordre : un usage posé
-        // sur une boîte qui n'aurait pas été créée désignerait un nom que `LIST`
-        // ne rendrait jamais. L'inverse — une boîte sans son usage, après une
-        // coupure entre les deux — est une boîte ordinaire, que le client peut
-        // redésigner.
-        if usage.any() {
-            let mut toutes = (*deja).clone();
-            toutes.retain(|(autre, _)| autre.as_slice() != name);
-            toutes.push((name.to_vec(), usage));
-            toutes.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
-            if !self.ecrire_les_usages(user, &toutes) {
-                return Creation::Refusee;
-            }
-        }
-        Creation::Faite
+        issue
     }
 
     fn open(&self, user: &[u8], name: &[u8]) -> Option<Self::Open> {
-        let maildir = self.maildir(user, name)?;
+        let cible = self.magasin.cible(user, name)?;
+        let maildir = self.maildir(&cible.titulaire, cible.nom)?;
+        if cible.autrui {
+            dire_chez_autrui(
+                user,
+                &cible.titulaire,
+                match cible.ecrit() {
+                    true => "ouvre en écriture une boîte de",
+                    false => "ouvre en lecture une boîte de",
+                },
+            );
+        }
         // **CE QUI A ÉTÉ DÉPOSÉ SANS UID EN REÇOIT UN**, avant le relevé qui ne
         // voit que les noms numérotés. Un échec n'empêche pas d'ouvrir : on sert
         // ce qui est déjà numéroté.
@@ -2084,6 +2355,7 @@ impl Mailboxes for BoitesImap {
             maildir: Arc::clone(&maildir),
             magasin: Arc::clone(&self.magasin),
             compte: user.to_vec(),
+            titulaire: cible.titulaire,
             uid_validity: maildir.uid_validity().value(),
             drapeaux,
             dates,
@@ -2096,6 +2368,23 @@ impl Mailboxes for BoitesImap {
 }
 
 impl BoiteImap {
+    /// L'acteur peut-il écrire ici ? Chez soi, toujours ; chez autrui, tant que
+    /// la table le dit.
+    fn peut_ecrire(&self) -> bool {
+        self.titulaire == self.compte
+            || self
+                .magasin
+                .droits(&self.compte, &self.titulaire)
+                .is_some_and(|droits| droits.contains(ams_config::Rights::WRITE))
+    }
+
+    /// Journalise une écriture faite dans la boîte d'autrui, avec son acteur.
+    fn dire_l_ecriture(&self, quoi: &str) {
+        if self.titulaire != self.compte {
+            dire_chez_autrui(&self.compte, &self.titulaire, quoi);
+        }
+    }
+
     /// Note où vit désormais le message de rang `rang`.
     fn poser_le_chemin(&mut self, rang: usize, chemin: PathBuf) {
         if let Some(place) = self.chemins.get_mut(rang) {

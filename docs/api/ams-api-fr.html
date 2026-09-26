@@ -863,7 +863,8 @@ POST /v1/me/devices
     <p>La table des délégations se consulte <strong>à chaque requête</strong> : une délégation retirée cesse de valoir à la requête suivante, sans révoquer aucun jeton. Sans le droit nécessaire, la réponse est <code>404</code>, comme pour une boîte qui n'existe pas — un <code>403</code> apprendrait que le compte existe.</p>
     <p><strong>Lire</strong> (<code>read</code>) ouvre <code>GET</code>, <code>HEAD</code> et la recherche. <strong>Écrire</strong> (<code>write</code>) ouvre le reste : drapeaux, dépôt, suppression, création ou suppression d'une boîte. Chaque écriture sur une boîte d'autrui est <strong>journalisée avec son acteur</strong>.</p>
   </div>
-  <p><strong>Envoyer au nom d'autrui</strong> (<code>send</code>) : <code>POST /v1/submissions</code> accepte alors un <code>From:</code> qui est une adresse du titulaire — c'est ce qui permet de répondre <em>en tant que</em> <code>support@</code>.</p>
+  <p><strong>Envoyer au nom d'autrui</strong> (<code>send</code>) : <code>POST /v1/submissions</code> accepte alors un <code>From:</code> qui est une adresse du titulaire — c'est ce qui permet de répondre <em>en tant que</em> <code>support@</code>. La soumission SMTP applique la même règle.</p>
+  <p><strong>En IMAP</strong>, la même boîte paraît sous <code>Partagés/support/…</code> — et nulle part ailleurs dans l'API : <code>/v1/mailboxes</code> ne liste que les boîtes du compte, et un nom en <code>Partagés/</code> y rend <code>404</code>.</p>
 </div>
 
 <h3 id="r-admin"><span class="numero">5.9</span>Administration</h3>

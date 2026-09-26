@@ -1303,8 +1303,9 @@ d'ouverture — une commande par boîte, là où une seule suffit. Le `LIST` que
 `SELECT` les porte aussi : en omettre un ferait dire au serveur deux choses
 différentes de la même boîte, selon la question qu'on lui pose.
 
-**`NAMESPACE`** dit où les boîtes vivent. Ce serveur n'en a qu'un espace — pas de
-boîte partagée, pas de boîte d'autrui — et les deux autres valent donc `NIL`. Le
+**`NAMESPACE`** dit où les boîtes vivent. Le premier espace est celui du compte ;
+le second, `Partagés/`, porte les boîtes que d'autres comptes lui ont déléguées,
+et ne paraît que s'il y en a ; le troisième, les boîtes publiques, vaut `NIL`. Le
 point qui compte : `NIL` n'est pas « je ne sais pas », c'est « il n'y en a pas ».
 Un client qui lirait une liste vide chercherait encore.
 

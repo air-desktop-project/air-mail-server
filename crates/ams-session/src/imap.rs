@@ -596,6 +596,14 @@ pub trait Mailboxes {
     /// permet d'abandonner un message à moitié reçu sans que personne ne l'ait
     /// vu.
     fn append(&self, user: &[u8], name: &[u8]) -> Option<Self::Deposit>;
+
+    /// Ce compte atteint-il au moins une boîte d'autrui ?
+    ///
+    /// C'est ce qui décide si `NAMESPACE` annonce l'espace
+    /// [`ams_proto_imap::SHARED_ROOT`]. **OBLIGATOIRE, sans défaut** : chaque
+    /// magasin dit ce qu'il sait faire, et un défaut « non » qu'une doublure
+    /// d'essai hériterait masquerait un magasin qui a oublié de répondre.
+    fn shares(&self, user: &[u8]) -> bool;
 }
 
 /// Une boîte, telle que `LIST` la rend.
@@ -766,6 +774,10 @@ impl<T: Mailboxes> Mailboxes for &T {
     fn orphan<'n>(&self, user: &[u8], index: usize, out: &'n mut [u8]) -> Option<&'n [u8]> {
         (**self).orphan(user, index, out)
     }
+
+    fn shares(&self, user: &[u8]) -> bool {
+        (**self).shares(user)
+    }
 }
 
 /// Le tag le plus long que la session retienne.
@@ -814,6 +826,11 @@ pub const MAILBOX_NAME_MAX: usize = ams_proto_imap::MAILBOX_NAME_MAX;
 /// pourquoi son refus s'écrit `expect` là où on l'appelle : une garde qu'aucun
 /// nom ne peut faire céder n'est pas une garde.
 const NOM_TRANSCRIT_MAX: usize = MAILBOX_NAME_MAX * 3;
+
+/// Le préfixe de l'espace des boîtes d'autrui, tel que `NAMESPACE` l'annonce :
+/// [`ams_proto_imap::SHARED_ROOT`] suivi du séparateur. Un essai vérifie qu'ils
+/// disent la même chose.
+const ESPACE_D_AUTRUI: &str = "Partagés/";
 
 /// Ce qu'une réponse SASL peut faire au plus, une fois décodée.
 ///
@@ -2519,21 +2536,36 @@ impl<A: Authenticator, M: Mailboxes> Session<A, M> {
 
     /// `NAMESPACE` (§6.3.10) : où les boîtes vivent.
     ///
-    /// # UN SEUL ESPACE, ET C'EST TOUT CE QU'IL Y A À DIRE
+    /// # LES BOÎTES D'AUTRUI NE S'ANNONCENT QU'À QUI EN ATTEINT
     ///
-    /// Ce serveur sert les boîtes d'un compte, et rien d'autre : pas de boîte
-    /// partagée, pas de boîte d'un autre utilisateur. Les deux autres espaces
-    /// valent donc `NIL` — et `NIL` n'est pas « je ne sais pas », c'est « il n'y
-    /// en a pas ». Un client qui lit une liste vide chercherait encore.
+    /// Le premier espace est celui du compte. Le second — « Other Users » de
+    /// RFC 2342 — est [`ams_proto_imap::SHARED_ROOT`], et il ne paraît que si le
+    /// magasin dit que ce compte atteint au moins une boîte d'autrui : un espace
+    /// vide ferait afficher au client un dossier où il n'y a rien à ouvrir. Le
+    /// troisième, les boîtes publiques, n'existe pas ici. `NIL` n'est pas « je
+    /// ne sais pas », c'est « il n'y en a pas ».
     fn namespace<'b>(&mut self, out: &'b mut [u8]) -> Result<Turn<'b>, Error> {
         if self.etat == State::NotAuthenticated {
             return self.faute(b"Command is not allowed before authentication", out);
         }
+        let autrui = self.boites.shares(self.user());
+        let rev2 = self.rev2;
         // LA PLUME REND SON EMPRUNT AVANT LA CONCLUSION : le bloc le dit, et
         // c'est ce qui permet d'écrire les deux dans le même tampon.
         let ecrits = {
             let mut plume = Plume::neuve(out);
-            plume.pousser(b"* NAMESPACE ((\"\" \"/\")) NIL NIL\r\n")?;
+            if autrui {
+                // LE PRÉFIXE EST UN NOM DE BOÎTE, et il sort donc dans
+                // l'écriture de la version du client : `Partag&AOk-s/` en rev1.
+                plume.nom_de_boite(
+                    b"* NAMESPACE ((\"\" \"/\")) ((",
+                    ESPACE_D_AUTRUI.as_bytes(),
+                    b" \"/\")) NIL\r\n",
+                    rev2,
+                )?;
+            } else {
+                plume.pousser(b"* NAMESPACE ((\"\" \"/\")) NIL NIL\r\n")?;
+            }
             plume.ecrits()
         };
         self.apres(ecrits, b"NAMESPACE completed", out)

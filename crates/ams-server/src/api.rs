@@ -1563,7 +1563,8 @@ impl ApiMaildir {
             let Ok(nom) = core::str::from_utf8(vue.name) else {
                 continue;
             };
-            if !vue.selectable {
+            // Ni les nœuds, ni les boîtes de l'espace `Partagés` : voir `serve`.
+            if !vue.selectable || ams_proto_imap::shared_name(vue.name).is_some() {
                 continue;
             }
             textes.push(nom.to_string());
@@ -2292,6 +2293,16 @@ impl Api for ApiMaildir {
                 titulaire
             }
         };
+        // **L'ESPACE `Partagés` EST CELUI D'IMAP, PAS DE L'API.** L'API nomme la
+        // boîte d'autrui par `/v1/accounts/{compte}/mailboxes/…`, sous le
+        // contrôle et le journal ci-dessus ; la laisser aussi atteindre
+        // `Partagés/support/INBOX` par les routes personnelles ferait deux
+        // chemins pour une boîte, dont un qu'on n'éprouve pas.
+        if boite_de(&resource)
+            .is_some_and(|boite| ams_proto_imap::shared_name(boite.as_bytes()).is_some())
+        {
+            return absente(sortie);
+        }
         match resource {
             Resource::Health => rendre(render::write_health(sortie)),
             Resource::Metrics => rendre(render::write_metrics(
@@ -2497,14 +2508,13 @@ impl ApiMaildir {
         let mut combien = 0_u64;
         for rang in 0..BOITES_MAX {
             let mut place = [0_u8; 512];
-            if self
-                .boites
-                .name(compte.as_bytes(), rang, &mut place)
-                .is_none()
-            {
+            let Some(vue) = self.boites.name(compte.as_bytes(), rang, &mut place) else {
                 break;
+            };
+            // L'espace `Partagés` n'est pas à lui : on ne le compte pas.
+            if ams_proto_imap::shared_name(vue.name).is_none() {
+                combien = combien.saturating_add(1);
             }
-            combien = combien.saturating_add(1);
         }
         combien
     }
@@ -2849,6 +2859,20 @@ fn absente(sortie: &mut [u8]) -> Served<'_> {
             body: &[],
             ..Served::default()
         },
+    }
+}
+
+/// Le nom de boîte que la ressource désigne, s'il y en a un.
+fn boite_de<'r>(resource: &Resource<'r>) -> Option<&'r str> {
+    match *resource {
+        Resource::Mailbox { boite }
+        | Resource::Messages { boite }
+        | Resource::Message { boite, .. }
+        | Resource::MessageRaw { boite, .. }
+        | Resource::MessagePart { boite, .. }
+        | Resource::Changes { boite }
+        | Resource::Search { boite } => Some(boite),
+        _ => None,
     }
 }
 
@@ -3631,6 +3655,7 @@ mod porte_http {
             Arc::new(crate::imap::BoitesImap::new(
                 Arc::clone(&boites),
                 b"mail.example.com",
+                None,
             )),
             Arc::clone(&comptes),
             boites,
@@ -3757,7 +3782,11 @@ mod ecritures {
             b"mail.exemple.test".to_vec(),
             Arc::clone(&comptes),
         ));
-        let boites = Arc::new(BoitesImap::new(Arc::clone(&remise), b"mail.exemple.test"));
+        let boites = Arc::new(BoitesImap::new(
+            Arc::clone(&remise),
+            b"mail.exemple.test",
+            None,
+        ));
         let api = ApiMaildir::new(
             Arc::clone(&boites),
             comptes,
@@ -3901,10 +3930,17 @@ mod ecritures {
             b"mail.exemple.test".to_vec(),
             Arc::clone(&comptes),
         ));
-        let boites = Arc::new(BoitesImap::new(Arc::clone(&remise), b"mail.exemple.test"));
         let table = Arc::new(crate::delegations::Delegations::new(
             racine.join("delegations.bin"),
             Vec::new(),
+        ));
+        // **LA MÊME TABLE POUR IMAP ET POUR L'API**, comme en production : c'est
+        // ce qui permet de vérifier que l'espace `Partagés` d'IMAP ne fuit pas
+        // dans les routes personnelles.
+        let boites = Arc::new(BoitesImap::new(
+            Arc::clone(&remise),
+            b"mail.exemple.test",
+            Some(Arc::clone(&table)),
         ));
         let api = ApiMaildir::new(
             boites,
@@ -3950,6 +3986,50 @@ mod ecritures {
     /// **LA DÉLÉGATION, DE BOUT EN BOUT** : l'administration la pose, le
     /// délégué atteint la boîte dans la mesure de ses droits, et la retirer
     /// vaut tout de suite.
+    /// **L'ESPACE `Partagés` EST CELUI D'IMAP** : les routes personnelles de
+    /// l'API ne le listent pas et ne l'ouvrent pas — la boîte d'autrui s'y
+    /// nomme par `/v1/accounts/{compte}/mailboxes/…`, et par là seulement.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn l_espace_partage_d_imap_ne_fuit_pas_dans_l_api() {
+        let temporaire = Ephemere::neuf();
+        let (api, _) = api_partagee(&temporaire.0);
+        let cible = Resource::Delegate {
+            compte: "support",
+            delegue: "marie",
+        };
+        let (status, corps) = servir(&api, cible, Method::Put, br#"{"rights":["write"]}"#);
+        assert_eq!(status, StatusCode::CREATED, "{corps}");
+
+        let (status, corps) =
+            servir_pour(&api, "marie", None, Resource::Mailboxes, Method::Get, b"");
+        assert_eq!(status, StatusCode::OK, "{corps}");
+        assert!(!corps.contains("Partag"), "l'espace d'IMAP a fui : {corps}");
+        for ressource in [
+            Resource::Mailbox {
+                boite: "Partagés/support/INBOX",
+            },
+            Resource::Messages {
+                boite: "Partagés/support/INBOX",
+            },
+            Resource::Mailbox { boite: "Partagés" },
+        ] {
+            for methode in [Method::Get, Method::Put, Method::Delete] {
+                let (status, _) = servir_pour(&api, "marie", None, ressource, methode, b"");
+                assert_eq!(status, StatusCode::NOT_FOUND, "{ressource:?} {methode:?}");
+            }
+        }
+        // Et la voie prévue, elle, mène bien à la boîte.
+        let (status, _) = servir_pour(
+            &api,
+            "marie",
+            Some("support"),
+            Resource::Mailbox { boite: "INBOX" },
+            Method::Get,
+            b"",
+        );
+        assert_eq!(status, StatusCode::OK);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn une_delegation_ouvre_la_boite_d_autrui_dans_la_mesure_de_ses_droits() {
         let temporaire = Ephemere::neuf();

@@ -428,6 +428,10 @@ impl Mailboxes for Boites {
         name == b"INBOX"
     }
 
+    fn shares(&self, _user: &[u8]) -> bool {
+        false
+    }
+
     fn orphan<'n>(&self, _user: &[u8], index: usize, out: &'n mut [u8]) -> Option<&'n [u8]> {
         // Un abonnement dont la boîte a disparu : §6.3.7 interdit de le retirer
         // de soi-même, et §6.3.9.6 veut qu'il paraisse quand même.

@@ -360,8 +360,15 @@ curl --http2 -X PUT -H "Authorization: Bearer $JETON" \
 - chaque écriture sur la boîte d'autrui est **journalisée avec son acteur** ;
 - `account remove … --delegations <magasin>` retire celles du compte, dans les
   deux sens (l'API le fait d'elle-même en supprimant un compte) ;
-- **IMAP ne les voit pas encore** : un client de messagerie n'atteint que sa
-  propre boîte.
+- **IMAP les montre sous `Partagés/<titulaire>/…`** (0.2.22) : Thunderbird
+  ou Apple Mail affichent un dossier « Partagés », et dessous les boîtes de
+  `support`. Sans `write`, elles s'ouvrent en lecture seule. Un client qui
+  n'affiche que ses abonnements demande qu'on s'y abonne une fois ;
+- **`send` vaut aussi en SMTP** : Thunderbird peut répondre en tant que
+  `support@`, pourvu que son identité utilise la même adresse pour le `From:`
+  et pour l'enveloppe ;
+- un dossier personnel qui s'appellerait `Partagés` est **masqué** : ce nom est
+  réservé à l'espace des boîtes d'autrui.
 
 ---
 

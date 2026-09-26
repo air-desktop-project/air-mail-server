@@ -489,6 +489,8 @@ pub struct Boites {
     abonnees: std::rc::Rc<std::cell::RefCell<std::vec::Vec<std::vec::Vec<u8>>>>,
     /// Les usages désignés, comme le magasin réel les retient (RFC 6154).
     usages: Designes,
+    /// Le compte atteint-il une boîte d'autrui ?
+    partage: bool,
 }
 
 impl Mailboxes for Boites {
@@ -683,6 +685,10 @@ impl Mailboxes for Boites {
 
     fn is_subscribed(&self, _user: &[u8], name: &[u8]) -> bool {
         self.abonnees.borrow().contains(&nom_abonne(name))
+    }
+
+    fn shares(&self, _user: &[u8]) -> bool {
+        self.partage
     }
 
     fn orphan<'n>(&self, _user: &[u8], index: usize, out: &'n mut [u8]) -> Option<&'n [u8]> {
@@ -3602,6 +3608,7 @@ fn un_magasin_partage_se_passe_par_reference() {
         super::Subscription::Faite
     );
     assert!(Mailboxes::is_subscribed(&partage, b"jean", b"Archives"));
+    assert!(!Mailboxes::shares(&partage, b"jean"));
     assert_eq!(
         Mailboxes::orphan(&partage, b"jean", 0, &mut place),
         None,
@@ -5784,6 +5791,64 @@ fn namespace_dit_l_espace_et_l_absence_des_autres() {
     assert_eq!(
         texte,
         "* NAMESPACE ((\"\" \"/\")) NIL NIL\r\na002 OK NAMESPACE completed\r\n"
+    );
+}
+
+/// **LES BOÎTES D'AUTRUI S'ANNONCENT À QUI EN ATTEINT**, dans l'écriture de la
+/// version du client : UTF-7 modifié en rev1, UTF-8 en rev2.
+#[test]
+fn namespace_annonce_l_espace_d_autrui_a_qui_en_atteint() {
+    let partage = Boites {
+        partage: true,
+        ..Boites::default()
+    };
+    let mut rev1 = Session::new(BORNES, true, UnCompte(AvecScram::Aucun), partage.clone());
+    rev1.on_tls_established(None);
+    dire(&mut rev1, b"a001 LOGIN jean ouvre-toi\r\n");
+    let (texte, _) = dire(&mut rev1, b"a002 NAMESPACE\r\n");
+    assert_eq!(
+        texte,
+        "* NAMESPACE ((\"\" \"/\")) ((\"Partag&AOk-s/\" \"/\")) NIL\r\n\
+         a002 OK NAMESPACE completed\r\n"
+    );
+
+    let mut rev2 = Session::new(BORNES, true, UnCompte(AvecScram::Aucun), partage);
+    rev2.on_tls_established(None);
+    dire(&mut rev2, b"a001 LOGIN jean ouvre-toi\r\n");
+    dire(&mut rev2, b"a002 ENABLE IMAP4rev2\r\n");
+    let (texte, _) = dire(&mut rev2, b"a003 NAMESPACE\r\n");
+    assert!(
+        texte.starts_with("* NAMESPACE ((\"\" \"/\")) ((\"Partagés/\" \"/\")) NIL\r\n"),
+        "{texte}"
+    );
+}
+
+/// Une sortie trop courte pour l'annonce de l'espace d'autrui est une erreur,
+/// et non une réponse tronquée.
+#[test]
+fn namespace_ne_tronque_pas_l_espace_d_autrui() {
+    let partage = Boites {
+        partage: true,
+        ..Boites::default()
+    };
+    let mut session = Session::new(BORNES, true, UnCompte(AvecScram::Aucun), partage);
+    session.on_tls_established(None);
+    dire(&mut session, b"a001 LOGIN jean ouvre-toi\r\n");
+    let mut courte = [0_u8; 24];
+    assert!(session.handle(b"a002 NAMESPACE\r\n", &mut courte).is_err());
+}
+
+/// Le préfixe annoncé est bien la racine que le magasin sert, suivie du
+/// séparateur : les deux constantes ne peuvent pas diverger en silence.
+#[test]
+fn le_prefixe_annonce_est_la_racine_servie() {
+    assert_eq!(
+        super::ESPACE_D_AUTRUI,
+        std::format!(
+            "{}{}",
+            ams_proto_imap::SHARED_ROOT,
+            char::from(ams_proto_imap::MAILBOX_SEPARATOR)
+        )
     );
 }
 

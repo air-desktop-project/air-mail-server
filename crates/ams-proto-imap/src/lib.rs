@@ -82,8 +82,8 @@ pub use frame::{CommandReader, Need, literal_announcement};
 pub use limits::Limits;
 pub use list::{LIST_PATTERNS_MAX, List};
 pub use mailbox::{
-    MAILBOX_COMPONENT_MAX, MAILBOX_DEPTH_MAX, MAILBOX_NAME_MAX, MAILBOX_SEPARATOR,
-    mailbox_name_is_safe, mailbox_name_trimmed,
+    MAILBOX_COMPONENT_MAX, MAILBOX_DEPTH_MAX, MAILBOX_NAME_MAX, MAILBOX_SEPARATOR, SHARED_ROOT,
+    SharedName, mailbox_name_is_safe, mailbox_name_trimmed, shared_name,
 };
 pub use response::{
     Status, encode_continuation, encode_tagged, encode_untagged, encode_untagged_parts,

@@ -71,7 +71,7 @@ fn service(racine: &Path) -> BoitesImap {
         HOTE.to_vec(),
         comptes,
     ));
-    BoitesImap::new(boites, HOTE)
+    BoitesImap::new(boites, HOTE, None)
 }
 
 /// Dépose un message dans la boîte nommée, et rend son UID.
@@ -468,5 +468,275 @@ fn une_session_voit_ce_qu_une_autre_a_fait() {
         ici.info(2).map(|info| info.uid),
         uids.get(1).copied(),
         "le deuxième garde son UID"
+    );
+}
+
+// ── L'espace `Partagés` : la boîte d'autrui, dans la mesure de ses droits ────
+
+/// `marie` et `support`, et une table où `support` a délégué sa boîte à
+/// `marie` avec ces droits.
+fn service_partage(
+    racine: &Path,
+    droits: ams_config::Rights,
+) -> (BoitesImap, Arc<crate::delegations::Delegations>) {
+    let mut carte = BTreeMap::new();
+    let mut comptes = Vec::new();
+    for login in ["marie", "support"] {
+        let boite = Maildir::open(racine.join(login), HOTE, ams_store::fresh_uid_validity())
+            .expect("ouvrable");
+        carte.insert(String::from(login), Arc::new(boite));
+        comptes.push(Account {
+            login: String::from(login),
+            hash: String::new(),
+            addresses: std::vec![std::format!("{login}@example.com")],
+        });
+    }
+    let comptes = Arc::new(crate::comptes::Comptes::new(
+        racine.join("comptes.bin"),
+        comptes,
+    ));
+    let boites = Arc::new(crate::delivery::Boites::new(
+        carte,
+        racine.to_path_buf(),
+        HOTE.to_vec(),
+        comptes,
+    ));
+    let table = Arc::new(crate::delegations::Delegations::new(
+        racine.join("delegations.bin"),
+        std::vec![ams_config::Delegation {
+            delegate: String::from("marie"),
+            owner: String::from("support"),
+            rights: droits,
+        }],
+    ));
+    (
+        BoitesImap::new(boites, HOTE, Some(Arc::clone(&table))),
+        table,
+    )
+}
+
+/// Tous les noms que `LIST` rendrait, avec « ouvrable ? ».
+fn liste(service: &BoitesImap, user: &[u8]) -> Vec<(String, bool)> {
+    let mut noms = Vec::new();
+    for rang in 0.. {
+        let mut place = [0_u8; 512];
+        let Some(vue) = service.name(user, rang, &mut place) else {
+            break;
+        };
+        noms.push((
+            String::from_utf8_lossy(vue.name).into_owned(),
+            vue.selectable,
+        ));
+    }
+    noms
+}
+
+const SA_BOITE: &[u8] = "Partagés/support/INBOX".as_bytes();
+
+/// **LA BOÎTE D'AUTRUI PARAÎT SOUS `Partagés`, AVEC SES NŒUDS**, pour qui la
+/// reçoit — et pour lui seul.
+#[test]
+fn la_boite_d_autrui_parait_sous_partages() {
+    let atelier = Ephemere::nouveau("partage-liste");
+    let (service, _) = service_partage(&atelier.0, ams_config::Rights::READ);
+    let noms = liste(&service, b"marie");
+    for (attendu, ouvrable) in [
+        ("INBOX", true),
+        ("Partagés", false),
+        ("Partagés/support", false),
+        ("Partagés/support/INBOX", true),
+    ] {
+        assert!(
+            noms.contains(&(String::from(attendu), ouvrable)),
+            "{attendu} manque : {noms:?}"
+        );
+    }
+    assert!(service.shares(b"marie"));
+    // `support` n'a rien reçu : ni espace, ni annonce.
+    assert_eq!(
+        liste(&service, b"support"),
+        std::vec![(String::from("INBOX"), true)]
+    );
+    assert!(!service.shares(b"support"));
+}
+
+/// **EN LECTURE SEULE, RIEN NE S'ÉCRIT** : la boîte s'ouvre sans drapeau
+/// permanent — la session en fait `[READ-ONLY]` —, et le dépôt, la création,
+/// la copie vers elle sont refusés.
+#[test]
+fn en_lecture_seule_la_boite_s_ouvre_et_rien_ne_s_ecrit() {
+    let atelier = Ephemere::nouveau("partage-lecture");
+    let (service, _) = service_partage(&atelier.0, ams_config::Rights::READ);
+    let mut depot = service.append(b"support", INBOX).expect("sa propre boîte");
+    assert!(depot.write(b"From: a@b.test\r\n\r\nun\r\n"));
+    depot.commit(Flags::NONE, None).expect("validé");
+
+    let mut ouverte = service.open(b"marie", SA_BOITE).expect("lisible");
+    assert_eq!(ouverte.exists(), 1);
+    assert_eq!(ouverte.permanent_flags(), Flags::NONE);
+    assert!(
+        ouverte
+            .store_flags(1, ams_proto_imap::StoreMode::Add, Flags::SEEN)
+            .is_none()
+    );
+    assert!(!ouverte.expunge(1));
+    assert!(service.append(b"marie", SA_BOITE).is_none());
+    assert_eq!(
+        service.create(
+            b"marie",
+            "Partagés/support/Neuve".as_bytes(),
+            SpecialUse::NONE
+        ),
+        Creation::Refusee
+    );
+    // Copier DEPUIS elle vers chez soi est une lecture : permis.
+    assert!(ouverte.copy_to(1, INBOX).is_some());
+    // Copier VERS elle depuis chez soi est une écriture : refusé.
+    let mut a_soi = service.open(b"marie", INBOX).expect("sa boîte");
+    assert!(a_soi.copy_to(1, SA_BOITE).is_none());
+}
+
+/// **AVEC LE DROIT D'ÉCRIRE, ON ÉCRIT CHEZ LE TITULAIRE** — et nulle part
+/// ailleurs : la boîte créée l'est dans SA racine.
+#[test]
+fn avec_l_ecriture_on_ecrit_chez_le_titulaire() {
+    let atelier = Ephemere::nouveau("partage-ecriture");
+    let (service, _) = service_partage(&atelier.0, ams_config::Rights::WRITE);
+    let neuve = "Partagés/support/Traité".as_bytes();
+    assert_eq!(
+        service.create(b"marie", neuve, SpecialUse::NONE),
+        Creation::Faite
+    );
+    assert!(
+        atelier
+            .0
+            .join("support")
+            .join(".Traité")
+            .join("cur")
+            .is_dir()
+    );
+    assert!(!atelier.0.join("marie").join(".Traité").exists());
+    // Ses usages restent les siens : on ne les pose pas chez autrui.
+    assert_eq!(
+        service.create(
+            b"marie",
+            "Partagés/support/Envoi".as_bytes(),
+            SpecialUse::SENT
+        ),
+        Creation::Refusee
+    );
+
+    let mut depot = service.append(b"marie", neuve).expect("écrivable");
+    assert!(depot.write(b"From: a@b.test\r\n\r\nun\r\n"));
+    depot.commit(Flags::NONE, None).expect("validé");
+    let mut ouverte = service.open(b"marie", neuve).expect("ouvrable");
+    assert_ne!(ouverte.permanent_flags(), Flags::NONE);
+    assert!(
+        ouverte
+            .store_flags(1, ams_proto_imap::StoreMode::Add, Flags::SEEN)
+            .is_some()
+    );
+
+    // Renommer chez lui : oui. D'un compte à l'autre : jamais.
+    assert_eq!(
+        service.rename(b"marie", neuve, "Partagés/support/Classé".as_bytes()),
+        ams_session::imap::Renaming::Faite
+    );
+    assert_eq!(
+        service.rename(b"marie", "Partagés/support/Classé".as_bytes(), b"Vole"),
+        ams_session::imap::Renaming::Refusee
+    );
+    assert_eq!(
+        service.delete(b"marie", "Partagés/support/Classé".as_bytes()),
+        ams_session::imap::Deletion::Faite
+    );
+    // Son INBOX ne s'efface pas plus que la nôtre.
+    assert_eq!(
+        service.delete(b"marie", SA_BOITE),
+        ams_session::imap::Deletion::Refusee
+    );
+}
+
+/// **SANS DÉLÉGATION, L'ESPACE NE MÈNE NULLE PART** — ni vers autrui, ni vers
+/// soi-même, ni par ses nœuds.
+#[test]
+fn sans_delegation_l_espace_ne_mene_nulle_part() {
+    let atelier = Ephemere::nouveau("partage-rien");
+    let (service, _) = service_partage(&atelier.0, ams_config::Rights::READ);
+    for nom in [
+        "Partagés/marie/INBOX",
+        "Partagés",
+        "Partagés/support",
+        "Partagés/inconnu/INBOX",
+    ] {
+        assert!(service.open(b"marie", nom.as_bytes()).is_none(), "{nom}");
+    }
+    // `support` n'a rien reçu de `marie`.
+    assert!(
+        service
+            .open(b"support", "Partagés/marie/INBOX".as_bytes())
+            .is_none()
+    );
+    // Et l'on ne crée pas un dossier personnel à la place de l'espace.
+    assert_eq!(
+        service.create(b"marie", "Partagés".as_bytes(), SpecialUse::NONE),
+        Creation::Refusee
+    );
+    assert_eq!(
+        service.delete(b"marie", "Partagés/support".as_bytes()),
+        ams_session::imap::Deletion::Absente
+    );
+}
+
+/// **UNE DÉLÉGATION RETIRÉE FERME L'ÉCRITURE TOUT DE SUITE**, même dans une
+/// boîte déjà ouverte ; et elle ne s'ouvre plus.
+#[test]
+fn une_delegation_retiree_ferme_l_ecriture_tout_de_suite() {
+    let atelier = Ephemere::nouveau("partage-retrait");
+    let (service, table) = service_partage(&atelier.0, ams_config::Rights::WRITE);
+    let ouverte = service.open(b"marie", SA_BOITE).expect("ouvrable");
+    assert_ne!(ouverte.permanent_flags(), Flags::NONE);
+    table
+        .modifier(|tenues| {
+            tenues.clear();
+            Ok(())
+        })
+        .expect("retirée");
+    assert_eq!(ouverte.permanent_flags(), Flags::NONE);
+    assert!(service.open(b"marie", SA_BOITE).is_none());
+    assert!(!service.shares(b"marie"));
+}
+
+/// **S'ABONNER À LA BOÎTE D'AUTRUI SE PEUT**, puisqu'elle se liste : c'est ce
+/// qui la fait paraître dans un client qui n'affiche que ses abonnements.
+#[test]
+fn on_s_abonne_a_la_boite_d_autrui() {
+    let atelier = Ephemere::nouveau("partage-abonnement");
+    let (service, _) = service_partage(&atelier.0, ams_config::Rights::READ);
+    assert_eq!(
+        service.subscribe(b"marie", SA_BOITE),
+        ams_session::imap::Subscription::Faite
+    );
+    assert!(service.is_subscribed(b"marie", SA_BOITE));
+    assert_eq!(
+        service.subscribe(b"marie", "Partagés/inconnu/INBOX".as_bytes()),
+        ams_session::imap::Subscription::Absente
+    );
+}
+
+/// **UN DOSSIER PERSONNEL NOMMÉ `Partagés` EST MASQUÉ** : l'espace l'emporte.
+#[test]
+fn un_dossier_personnel_nomme_partages_est_masque() {
+    let atelier = Ephemere::nouveau("partage-masque");
+    let service = service(&atelier.0);
+    Maildir::open(
+        atelier.0.join("marie").join(".Partagés"),
+        HOTE,
+        ams_store::fresh_uid_validity(),
+    )
+    .expect("créé à la main");
+    assert_eq!(
+        liste(&service, COMPTE),
+        std::vec![(String::from("INBOX"), true)]
     );
 }

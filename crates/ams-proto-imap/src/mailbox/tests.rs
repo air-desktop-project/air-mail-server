@@ -1,8 +1,8 @@
 //! Ce qu'un nom de boîte a le droit d'être.
 
 use super::{
-    MAILBOX_COMPONENT_MAX, MAILBOX_DEPTH_MAX, MAILBOX_NAME_MAX, mailbox_name_is_safe,
-    mailbox_name_trimmed,
+    MAILBOX_COMPONENT_MAX, MAILBOX_DEPTH_MAX, MAILBOX_NAME_MAX, SharedName, mailbox_name_is_safe,
+    mailbox_name_trimmed, shared_name,
 };
 
 #[test]
@@ -141,4 +141,72 @@ fn le_slash_final_se_retire() {
     assert_eq!(mailbox_name_trimmed(b"Archives/"), b"Archives");
     assert_eq!(mailbox_name_trimmed(b"Archives"), b"Archives");
     assert_eq!(mailbox_name_trimmed(b""), b"");
+}
+
+// ── L'espace des boîtes d'autrui ────────────────────────────────────────────
+
+#[test]
+fn l_espace_partage_se_decoupe() {
+    assert_eq!(shared_name("Partagés".as_bytes()), Some(SharedName::Root));
+    assert_eq!(shared_name("Partagés/".as_bytes()), Some(SharedName::Root));
+    assert_eq!(
+        shared_name("Partagés/support".as_bytes()),
+        Some(SharedName::Owner(b"support"))
+    );
+    assert_eq!(
+        shared_name("Partagés/support/Archives/2026".as_bytes()),
+        Some(SharedName::Mailbox {
+            owner: b"support",
+            name: b"Archives/2026"
+        })
+    );
+    // Un nom personnel, même proche, n'est pas de l'espace.
+    assert_eq!(shared_name(b"INBOX"), None);
+    assert_eq!(shared_name("PartagésX".as_bytes()), None);
+    // La casse compte : ce n'est pas `INBOX`.
+    assert_eq!(shared_name("partagés/support".as_bytes()), None);
+}
+
+/// **LE TITULAIRE PEUT PORTER UN POINT**, parce qu'il ne devient jamais un
+/// chemin ; la boîte qui suit, elle, reste sous les règles ordinaires.
+#[test]
+fn le_titulaire_admet_le_point_et_la_boite_reste_sure() {
+    for bon in [
+        "Partagés",
+        "Partagés/support",
+        "Partagés/thierry.delhaise",
+        "Partagés/thierry.delhaise/INBOX",
+        "Partagés/thierry.delhaise/inbox",
+        "Partagés/support/Archives/2026",
+        "Partagés/support/Envoyés/",
+        "Partagés/support/",
+    ] {
+        assert!(mailbox_name_is_safe(bon.as_bytes()), "{bon}");
+    }
+    let long = std::format!("Partagés/{}", "a".repeat(MAILBOX_COMPONENT_MAX + 1));
+    let profond = std::format!(
+        "Partagés/support/{}",
+        ["a"; MAILBOX_DEPTH_MAX - 1].join("/")
+    );
+    for mauvais in [
+        "Partagés//INBOX",
+        "Partagés/.support",
+        "Partagés/../INBOX",
+        "Partagés/ support",
+        "Partagés/sup*port",
+        "Partagés/support/a.b",
+        "Partagés/support/../x",
+        long.as_str(),
+        profond.as_str(),
+    ] {
+        assert!(!mailbox_name_is_safe(mauvais.as_bytes()), "{mauvais}");
+    }
+    // Un titulaire qui n'est pas de l'UTF-8 valide.
+    let mut invalide = "Partagés/".as_bytes().to_vec();
+    invalide.push(0xFF);
+    assert!(!mailbox_name_is_safe(&invalide));
+    // `Partagés/support//` : la boîte nommée est vide.
+    assert!(!mailbox_name_is_safe("Partagés/support//".as_bytes()));
+    // Un point reste interdit HORS de l'espace, titulaire compris.
+    assert!(!mailbox_name_is_safe(b"thierry.delhaise"));
 }

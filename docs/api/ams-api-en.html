@@ -863,7 +863,8 @@ POST /v1/me/devices
     <p>The delegation table is read <strong>on every request</strong>: a revoked delegation stops working on the next request, without revoking any token. Without the needed right, the answer is <code>404</code>, as for a mailbox that does not exist — a <code>403</code> would reveal that the account exists.</p>
     <p><strong>Read</strong> (<code>read</code>) opens <code>GET</code>, <code>HEAD</code> and search. <strong>Write</strong> (<code>write</code>) opens the rest: flags, append, delete, mailbox creation or deletion. Every write on another account's mailbox is <strong>logged with its actor</strong>.</p>
   </div>
-  <p><strong>Send on behalf</strong> (<code>send</code>): <code>POST /v1/submissions</code> then accepts a <code>From:</code> that is one of the owner's addresses — this is what lets you reply <em>as</em> <code>support@</code>.</p>
+  <p><strong>Send on behalf</strong> (<code>send</code>): <code>POST /v1/submissions</code> then accepts a <code>From:</code> that is one of the owner's addresses — this is what lets you reply <em>as</em> <code>support@</code>. SMTP submission applies the same rule.</p>
+  <p><strong>Over IMAP</strong>, the same mailbox appears under <code>Partagés/support/…</code> — and nowhere else in the API: <code>/v1/mailboxes</code> lists only the account's own mailboxes, and a <code>Partagés/</code> name there returns <code>404</code>.</p>
 </div>
 
 <h3 id="r-admin"><span class="numero">5.9</span>Administration</h3>

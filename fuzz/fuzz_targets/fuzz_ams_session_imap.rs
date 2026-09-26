@@ -360,6 +360,10 @@ impl Mailboxes for Boites {
         self.abonnes.borrow().iter().any(|connu| connu == name)
     }
 
+    fn shares(&self, _user: &[u8]) -> bool {
+        false
+    }
+
     fn orphan<'n>(&self, _user: &[u8], index: usize, out: &'n mut [u8]) -> Option<&'n [u8]> {
         let abonnes = self.abonnes.borrow();
         let nom = abonnes
