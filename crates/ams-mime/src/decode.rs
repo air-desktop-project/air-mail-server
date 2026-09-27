@@ -143,13 +143,7 @@ fn ecrire_le_mot(
     encodage: u8,
     texte: &[u8],
 ) -> Result<(), Error> {
-    let latin1 =
-        charset.eq_ignore_ascii_case(b"iso-8859-1") || charset.eq_ignore_ascii_case(b"latin1");
-    let connu = latin1
-        || charset.eq_ignore_ascii_case(b"utf-8")
-        || charset.eq_ignore_ascii_case(b"us-ascii")
-        || charset.eq_ignore_ascii_case(b"ascii");
-    if !connu {
+    let Some(latin1) = jeu_latin1(charset) else {
         // On recopie le mot ENTIER, bornes comprises : le décoder à demi
         // donnerait un texte qui n'est celui d'aucun jeu de caractères.
         plume.pousser(b"=?")?;
@@ -159,7 +153,7 @@ fn ecrire_le_mot(
         plume.pousser(b"?")?;
         plume.pousser(texte)?;
         return plume.pousser(b"?=");
-    }
+    };
     let mut ecrire = |octet: u8| -> Result<(), Error> {
         match latin1 && octet >= 0x80 {
             // `iso-8859-1` vers UTF-8 : deux octets, sans table.
@@ -171,6 +165,23 @@ fn ecrire_le_mot(
         b'B' => pour_chaque_base64(texte, &mut ecrire),
         _ => pour_chaque_q(texte, &mut ecrire),
     }
+}
+
+/// Les jeux de caractères qu'on sait convertir en UTF-8 : `Some(true)` pour
+/// `iso-8859-1`, qu'il faut convertir, `Some(false)` pour ceux dont les octets
+/// sont déjà de l'UTF-8, `None` pour les autres.
+///
+/// **UNE SEULE LISTE** pour les mots encodés et les paramètres de la RFC 2231 :
+/// deux listes feraient lire un nom de fichier et un sujet écrits dans le même
+/// jeu, l'un décodé, l'autre non.
+pub(crate) fn jeu_latin1(charset: &[u8]) -> Option<bool> {
+    if charset.eq_ignore_ascii_case(b"iso-8859-1") || charset.eq_ignore_ascii_case(b"latin1") {
+        return Some(true);
+    }
+    let direct = charset.eq_ignore_ascii_case(b"utf-8")
+        || charset.eq_ignore_ascii_case(b"us-ascii")
+        || charset.eq_ignore_ascii_case(b"ascii");
+    direct.then_some(false)
 }
 
 /// Décode un corps selon son `Content-Transfer-Encoding`.

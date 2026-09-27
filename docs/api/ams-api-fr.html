@@ -681,6 +681,24 @@ authorization: Bearer AQECAAAAAG…</code></pre>
     <p>Chaque liste est bornée à <strong>cent</strong> éléments ; une adresse illisible (pas de l'UTF-8, plus de 256 octets) n'est pas rendue. Dans ces cas <code>complete</code> vaut <code>false</code> : un « répondre à tous » construit sur cette enveloppe n'atteindrait pas tout le monde — relisez le message brut. Pour <code>references</code>, on garde le premier (la racine du fil) et les plus récents. Si l'enveloppe entière ne tient pas dans la réponse, <code>envelope</code> vaut <code>null</code> et le reste du message est rendu.</p>
   </div>
   <p>Le nom d'affichage n'engage à rien : <code>"Votre banque" &lt;pirate@example.test&gt;</code> est un message ordinaire. Montrez l'adresse à côté du nom.</p>
+  <p>Le message porte aussi sa <strong>structure</strong> : l'arbre de ses parties MIME, de quoi afficher le corps et lister les pièces jointes sans rien télécharger.</p>
+  <pre><code>"structure": {
+  "part": null, "type": "multipart/mixed", "parts": [
+    { "part": "1", "type": "multipart/alternative", "parts": [
+      { "part": "1.1", "type": "text/plain", "charset": "utf-8", "name": null,
+        "disposition": null, "cid": null, "encoding": "quoted-printable", "size": 812 },
+      { "part": "1.2", "type": "text/html", "charset": "utf-8", "name": null,
+        "disposition": null, "cid": null, "encoding": "quoted-printable", "size": 2410 } ] },
+    { "part": "2", "type": "application/pdf", "charset": null, "name": "défi.pdf",
+      "disposition": "attachment", "cid": null, "encoding": "base64", "size": 180344 },
+    { "part": "3", "type": "message/rfc822", "name": "transféré.eml",
+      "disposition": "attachment", "size": 5120, "parts": [ … ] } ] }</code></pre>
+  <p><code>part</code> est le chemin que <code>…/parts/{partie}</code> sert — la numérotation de §6.4.5 de RFC 9051 ; un <code>multipart</code> à la racine d'un message n'en a pas (<code>null</code>), ses filles si. <code>name</code> est décodé (RFC 2231, et RFC 2047 que beaucoup de logiciels emploient à tort) : <code>filename</code> de la disposition d'abord, <code>name</code> du type ensuite. <code>size</code> est la taille <em>encodée</em>, telle que stockée ; un contenu en base64 pèse, décodé, environ les trois quarts. Les types, dispositions et encodages sont en minuscules ; <code>cid</code> est rendu sans chevrons, pour résoudre les <code>cid:</code> d'un corps HTML.</p>
+  <div class="note danger">
+    <span class="etiquette">Un nom de fichier n'est pas un chemin</span>
+    <p><code>name</code> est choisi par l'expéditeur : <code>../../.bashrc</code> y est une valeur valable. Ne l'employez jamais tel quel pour écrire sur le disque.</p>
+  </div>
+  <p>Au plus soixante-quatre parties sont décrites. Si la structure ne tient pas dans la réponse — une fois l'enveloppe déjà abandonnée —, elle vaut <code>null</code> à son tour.</p>
   <p>Les drapeaux sont nommés comme IMAP les nomme (§2.3.2 de RFC 9051), et non en minuscules : <code>\Seen</code>, <code>\Answered</code>, <code>\Flagged</code>, <code>\Deleted</code>, <code>\Draft</code>, <code>$MDNSent</code>, <code>$Forwarded</code>, <code>$Junk</code>, <code>$NonJunk</code>, <code>$Phishing</code>. L'ensemble est fermé : dix, et pas un de plus.</p>
   <p><code>PATCH</code> pose et ôte des drapeaux, et rend le message <strong>tel qu'il est devenu</strong> :</p>
   <pre><code>{ "add": ["\\Seen"], "remove": ["\\Flagged"] }</code></pre>

@@ -803,3 +803,196 @@ fn un_chemin_designe_la_partie_qui_porte() {
     nu.finish();
     assert_eq!(nu.part_of(&[]).map(|partie| partie.text), Some(true));
 }
+
+// --- Le parcours ----------------------------------------------------------
+
+use crate::{PartKind, StructureStep};
+
+fn balayer(message: &[u8]) -> BodyScanner {
+    let mut balayeur = BodyScanner::new(&BORNES);
+    balayeur.push(message);
+    balayeur.finish();
+    balayeur
+}
+
+/// Le parcours à plat : (profondeur, chemin, type/sous-type, genre).
+fn parcours(
+    balayeur: &BodyScanner,
+) -> std::vec::Vec<(usize, std::string::String, std::string::String, PartKind)> {
+    let mut vu = std::vec::Vec::new();
+    let mut profondeur = 0_usize;
+    let fini = balayeur.walk(&mut |pas| {
+        match pas {
+            StructureStep::Enter { index, path } => {
+                let d = balayeur.describe(index).expect("décrite");
+                let chemin = path.map_or(std::string::String::from("-"), |p| {
+                    p.iter()
+                        .map(|n| std::format!("{n}"))
+                        .collect::<std::vec::Vec<_>>()
+                        .join(".")
+                });
+                let genre = std::format!(
+                    "{}/{}",
+                    std::string::String::from_utf8_lossy(d.media_type),
+                    std::string::String::from_utf8_lossy(d.subtype)
+                );
+                vu.push((profondeur, chemin, genre, d.kind));
+                profondeur = profondeur.saturating_add(1);
+            }
+            StructureStep::Leave => profondeur = profondeur.saturating_sub(1),
+        }
+        true
+    });
+    assert!(fini, "le parcours va au bout");
+    assert_eq!(profondeur, 0, "chaque entrée a sa sortie");
+    vu
+}
+
+/// Un message à tiroirs : un `mixed` qui porte une `alternative`, une pièce
+/// jointe, et un message transféré qui porte lui-même un `mixed`.
+const TIROIRS: &[u8] = b"Content-Type: multipart/mixed; boundary=a\r\n\r\n\
+--a\r\nContent-Type: multipart/alternative; boundary=b\r\n\r\n\
+--b\r\nContent-Type: text/plain; charset=utf-8\r\n\r\ntexte\r\n\
+--b\r\nContent-Type: text/html\r\n\r\n<p>html</p>\r\n--b--\r\n\
+--a\r\nContent-Type: application/pdf; name=\"x.pdf\"\r\n\
+Content-Disposition: attachment; filename*=utf-8''d%C3%A9fi.pdf\r\n\
+Content-Transfer-Encoding: base64\r\nContent-ID: <pj@x>\r\n\r\nAAAA\r\n\
+--a\r\nContent-Type: message/rfc822\r\n\r\n\
+Subject: transfere\r\nContent-Type: multipart/mixed; boundary=c\r\n\r\n\
+--c\r\n\r\ndedans\r\n--c\r\nContent-Type: image/png\r\n\r\nPNG\r\n--c--\r\n\
+--a\r\nContent-Type: message/rfc822\r\n\r\nSubject: seul\r\n\r\nseul\r\n\
+--a\r\nContent-Type: multipart/mixed\r\n\r\nsans frontiere\r\n--a--\r\n";
+
+/// **LA NUMÉROTATION EST CELLE DE `part_of`** : chaque chemin rendu désigne,
+/// servi, la partie qu'on a décrite.
+#[test]
+fn le_parcours_numerote_comme_on_sert() {
+    let balayeur = balayer(TIROIRS);
+    let vu = parcours(&balayeur);
+    let attendu: [(usize, &str, &str, PartKind); 12] = [
+        (0, "-", "multipart/mixed", PartKind::Multipart),
+        (1, "1", "multipart/alternative", PartKind::Multipart),
+        (2, "1.1", "text/plain", PartKind::Leaf),
+        (2, "1.2", "text/html", PartKind::Leaf),
+        (1, "2", "application/pdf", PartKind::Leaf),
+        (1, "3", "message/rfc822", PartKind::Message),
+        (2, "-", "multipart/mixed", PartKind::Multipart),
+        (3, "3.1", "text/plain", PartKind::Leaf),
+        (3, "3.2", "image/png", PartKind::Leaf),
+        (1, "4", "message/rfc822", PartKind::Message),
+        (2, "4.1", "text/plain", PartKind::Leaf),
+        // Un `multipart` sans frontière est devenu un contenu.
+        (1, "5", "application/octet-stream", PartKind::Leaf),
+    ];
+    assert_eq!(vu.len(), attendu.len(), "{vu:?}");
+    for (lu, voulu) in vu.iter().zip(attendu) {
+        assert_eq!((lu.0, lu.1.as_str(), lu.2.as_str(), lu.3), voulu);
+    }
+    // Chaque contenu se retrouve par son chemin.
+    let mut index_par_chemin = std::vec::Vec::new();
+    balayeur.walk(&mut |pas| {
+        if let StructureStep::Enter {
+            index,
+            path: Some(p),
+        } = pas
+        {
+            index_par_chemin.push((p.to_vec(), index));
+        }
+        true
+    });
+    for (chemin, index) in index_par_chemin {
+        let decrite = balayeur.describe(index).expect("décrite");
+        if decrite.kind == PartKind::Leaf {
+            let servie = balayeur.part_of(&chemin).expect("servie");
+            assert_eq!(
+                servie.end.saturating_sub(servie.start),
+                decrite.size,
+                "{chemin:?}"
+            );
+        }
+    }
+}
+
+/// Un message simple est sa propre partie `1`.
+#[test]
+fn un_message_simple_est_sa_partie_un() {
+    let balayeur = balayer(b"Subject: x\r\n\r\nbonjour\r\n");
+    let vu = parcours(&balayeur);
+    assert_eq!(vu.len(), 1);
+    assert_eq!((vu[0].1.as_str(), vu[0].2.as_str()), ("1", "text/plain"));
+}
+
+/// Ce que l'en-tête d'une partie dit d'elle, brut.
+#[test]
+fn une_partie_se_decrit() {
+    let balayeur = balayer(TIROIRS);
+    let mut pdf = None;
+    balayeur.walk(&mut |pas| {
+        if let StructureStep::Enter {
+            index,
+            path: Some(&[2]),
+        } = pas
+        {
+            pdf = balayeur.describe(index);
+        }
+        true
+    });
+    let pdf = pdf.expect("la pièce jointe");
+    assert_eq!(pdf.encoding, b"base64");
+    assert_eq!(pdf.disposition, b"attachment");
+    assert_eq!(pdf.disposition_params, b"; filename*=utf-8''d%C3%A9fi.pdf");
+    assert_eq!(pdf.type_params, b"; name=\"x.pdf\"");
+    assert_eq!(pdf.content_id, Some(&b"<pj@x>"[..]));
+    assert_eq!(pdf.size, 4);
+    // Sans en-tête, du texte en US-ASCII, sans disposition ni encodage.
+    let nu = balayer(b"Subject: x\r\n\r\nbonjour\r\n");
+    let d = nu.describe(0).expect("décrite");
+    assert_eq!((d.media_type, d.subtype), (&b"text"[..], &b"plain"[..]));
+    assert_eq!(d.type_params, b"; charset=us-ascii");
+    assert_eq!(
+        (d.encoding, d.disposition, d.content_id),
+        (&b""[..], &b""[..], None)
+    );
+    // Hors de la table, rien.
+    assert_eq!(nu.describe(1), None);
+    assert_eq!(nu.describe(STRUCTURE_PARTS_MAX), None);
+}
+
+/// `visit` peut arrêter le parcours, à l'entrée comme à la sortie.
+#[test]
+fn le_parcours_s_arrete_quand_on_le_demande() {
+    let balayeur = balayer(TIROIRS);
+    for arret in 0..30_usize {
+        let mut pas_vus = 0_usize;
+        let fini = balayeur.walk(&mut |_| {
+            if pas_vus == arret {
+                return false;
+            }
+            pas_vus = pas_vus.saturating_add(1);
+            true
+        });
+        assert_eq!(fini, arret >= 24, "arrêt au pas {arret}");
+    }
+}
+
+/// Un `message/rfc822` qui ne porte rien se parcourt quand même, sans fille.
+#[test]
+fn un_message_vide_se_parcourt() {
+    let mut tampon = std::vec::Vec::new();
+    tampon.extend_from_slice(b"Content-Type: multipart/mixed; boundary=a\r\n\r\n");
+    // La table se remplit : le dernier message transféré n'a plus de place
+    // pour ce qu'il porte.
+    for _ in 1..STRUCTURE_PARTS_MAX {
+        tampon.extend_from_slice(
+            b"--a\r\nContent-Type: message/rfc822\r\n\r\nSubject: x\r\n\r\ny\r\n",
+        );
+    }
+    tampon.extend_from_slice(b"--a--\r\n");
+    let vu = parcours(&balayer(&tampon));
+    let dernier = vu.last().expect("au moins une partie");
+    assert_eq!(
+        (dernier.2.as_str(), dernier.3),
+        ("message/rfc822", PartKind::Message),
+        "{vu:?}"
+    );
+}

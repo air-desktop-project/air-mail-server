@@ -1289,12 +1289,13 @@ pub fn write_changes<'o>(
     json.finish()
 }
 
-/// Écrit un message seul, et son enveloppe lue dans `entete`.
+/// Écrit un message seul, son enveloppe lue dans `entete`, et sa structure.
 ///
-/// `entete` est le bloc d'en-tête du message ; `None` écrit `"envelope": null`
-/// — c'est ce que l'appelant rend quand l'enveloppe entière ne tient pas dans
-/// la réponse : le message reste servi, et le client sait qu'il lui manque
-/// quelque chose au lieu de croire qu'il n'y a rien.
+/// `entete` est le bloc d'en-tête du message ; `structure`, le balayeur qui a
+/// lu le message entier. `None` écrit `null` — c'est ce que l'appelant rend
+/// quand la représentation entière ne tient pas dans la réponse : le message
+/// reste servi, et le client sait qu'il lui manque quelque chose au lieu de
+/// croire qu'il n'y a rien.
 ///
 /// # Errors
 ///
@@ -1302,6 +1303,7 @@ pub fn write_changes<'o>(
 pub fn write_message<'o>(
     message: &MessageRow<'_>,
     entete: Option<&[u8]>,
+    structure: Option<&ams_mime::BodyScanner>,
     uid_validity: u32,
     sortie: &'o mut [u8],
 ) -> Result<&'o [u8], Error> {
@@ -1314,6 +1316,11 @@ pub fn write_message<'o>(
     json.key("envelope")?;
     match entete {
         Some(entete) => ecrire_l_enveloppe(&mut json, entete)?,
+        None => json.null()?,
+    }
+    json.key("structure")?;
+    match structure {
+        Some(balayeur) => ecrire_la_structure(&mut json, balayeur)?,
         None => json.null()?,
     }
     json.end_object()?;
@@ -1411,6 +1418,231 @@ fn ecrire_l_enveloppe(json: &mut Json<'_>, entete: &[u8]) -> Result<(), Error> {
     }
     json.field_bool("complete", complet)?;
     json.end_object()
+}
+
+/// Ce qu'une valeur de paramètre peut occuper, avant et après décodage.
+///
+/// L'en-tête d'une partie est retenu sur deux kibioctets au plus par le
+/// balayeur : un paramètre n'en occupe jamais davantage, et sa conversion en
+/// UTF-8 au plus le double.
+const PARAMETRE_MAX: usize = 2 * 1024;
+
+/// Ce qu'un `type/sous-type` peut occuper. Au-delà, ce n'est plus un type que
+/// quiconque saurait lire, et l'on écrit `application/octet-stream`, comme la
+/// RFC 2049 §2 le demande de ce qu'on ne sait pas interpréter.
+const TYPE_MAX: usize = 128;
+
+/// L'arbre des parties, tel qu'un client le parcourt pour afficher le corps et
+/// lister les pièces jointes.
+///
+/// # LE CHEMIN EST CELUI QUE `…/parts/{p}` SERT
+///
+/// Il vient du balayeur, qui numérote comme §6.4.5 de RFC 9051 : un chemin lu
+/// ici désigne la même partie, servie là. Un `multipart` à la racine d'un
+/// message n'a pas de chemin à lui — `"part": null` —, ses filles si.
+///
+/// # LES NOMS SONT DÉCODÉS, ET RESTENT CE QUE L'EXPÉDITEUR A ÉCRIT
+///
+/// `filename` de la disposition d'abord, `name` du type ensuite ; RFC 2231 et
+/// RFC 2047 défaits. Un nom de fichier est un texte choisi par un inconnu :
+/// `../../.bashrc` est un nom valable ici, et c'est au client de ne jamais s'en
+/// servir comme d'un chemin.
+fn ecrire_la_structure(json: &mut Json<'_>, balayeur: &ams_mime::BodyScanner) -> Result<(), Error> {
+    let mut travail = [0_u8; PARAMETRE_MAX];
+    let mut valeur = [0_u8; PARAMETRE_MAX * 2];
+    // Ce qui a été ouvert à chaque profondeur porte-t-il des `parts` ?
+    let mut conteneurs = [false; ams_mime::STRUCTURE_PARTS_MAX];
+    let mut profondeur = 0_usize;
+    let mut faute = None;
+    let fini = balayeur.walk(&mut |pas| {
+        let ecrit = match pas {
+            ams_mime::StructureStep::Enter { index, path } => {
+                // `walk` ne rend que des rangs de la table, qui se décrivent
+                // toujours : `map_or` évite une branche qu'aucun message ne
+                // prendrait.
+                let conteneur = balayeur.describe(index).map_or(Ok(false), |partie| {
+                    ecrire_une_partie(json, &partie, path, &mut travail, &mut valeur)
+                });
+                conteneur.map(|conteneur| {
+                    conteneurs
+                        .get_mut(profondeur)
+                        .into_iter()
+                        .for_each(|place| *place = conteneur);
+                    profondeur = profondeur.saturating_add(1);
+                })
+            }
+            ams_mime::StructureStep::Leave => {
+                profondeur = profondeur.saturating_sub(1);
+                let conteneur = conteneurs.get(profondeur).copied().unwrap_or_default();
+                fermer_une_partie(json, conteneur)
+            }
+        };
+        match ecrit {
+            Ok(()) => true,
+            Err(erreur) => {
+                faute = Some(erreur);
+                false
+            }
+        }
+    });
+    // `walk` ne s'arrête que si l'écriture a échoué, et la faute le dit.
+    let _ = fini;
+    faute.map_or(Ok(()), Err)
+}
+
+/// Ouvre une partie et écrit ce qu'elle est. Rend si elle porte des `parts`,
+/// laissées ouvertes pour ses filles.
+fn ecrire_une_partie(
+    json: &mut Json<'_>,
+    partie: &ams_mime::PartHeader<'_>,
+    chemin: Option<&[u32]>,
+    travail: &mut [u8],
+    valeur: &mut [u8],
+) -> Result<bool, Error> {
+    json.begin_object()?;
+    json.key("part")?;
+    let mut place = [0_u8; ams_mime::STRUCTURE_PARTS_MAX * 4];
+    ecrire_un_texte_facultatif(
+        json,
+        chemin.map(|chemin| ecrire_le_chemin(chemin, &mut place)),
+    )?;
+    let mut genre = [0_u8; TYPE_MAX];
+    json.field_str("type", ecrire_le_type(partie, &mut genre))?;
+    let conteneur = partie.kind != ams_mime::PartKind::Leaf;
+    if partie.kind != ams_mime::PartKind::Multipart {
+        if partie.kind == ams_mime::PartKind::Leaf {
+            json.key("charset")?;
+            let longueur = longueur_decodee(partie.type_params, b"charset", travail, valeur);
+            ecrire_un_texte_facultatif(json, longueur.and_then(|n| texte_de(valeur, n)))?;
+        }
+        json.key("name")?;
+        // `filename` d'abord (RFC 2183), `name` ensuite : le second est
+        // l'usage ancien, que les deux écrivent souvent.
+        let longueur = longueur_decodee(partie.disposition_params, b"filename", travail, valeur)
+            .or_else(|| longueur_decodee(partie.type_params, b"name", travail, valeur));
+        ecrire_un_texte_facultatif(json, longueur.and_then(|n| texte_de(valeur, n)))?;
+        json.key("disposition")?;
+        let mut disposition = [0_u8; TYPE_MAX];
+        ecrire_un_texte_facultatif(json, en_minuscules(partie.disposition, &mut disposition))?;
+        if partie.kind == ams_mime::PartKind::Leaf {
+            json.key("cid")?;
+            let cid = partie
+                .content_id
+                .and_then(|brut| ams_mime::message_ids(brut).next())
+                .and_then(|octets| core::str::from_utf8(octets).ok());
+            ecrire_un_texte_facultatif(json, cid)?;
+            let mut encodage = [0_u8; TYPE_MAX];
+            json.field_str(
+                "encoding",
+                en_minuscules(partie.encoding, &mut encodage).unwrap_or("7bit"),
+            )?;
+        }
+        json.field_u64("size", partie.size)?;
+    }
+    if conteneur {
+        json.key("parts")?;
+        json.begin_array()?;
+    }
+    Ok(conteneur)
+}
+
+/// Ferme une partie, et ses `parts` s'il y en a.
+fn fermer_une_partie(json: &mut Json<'_>, conteneur: bool) -> Result<(), Error> {
+    if conteneur {
+        json.end_array()?;
+    }
+    json.end_object()
+}
+
+/// Ce qu'occupe, dans `valeur`, le paramètre `nom` décodé — s'il est là.
+fn longueur_decodee(
+    params: &[u8],
+    nom: &[u8],
+    travail: &mut [u8],
+    valeur: &mut [u8],
+) -> Option<usize> {
+    ams_mime::write_parameter(params, nom, travail, valeur)
+        .ok()
+        .flatten()
+}
+
+/// Les `longueur` premiers octets de `valeur`, s'ils sont un texte non vide.
+fn texte_de(valeur: &[u8], longueur: usize) -> Option<&str> {
+    valeur
+        .get(..longueur)
+        .and_then(|octets| core::str::from_utf8(octets).ok())
+        .filter(|texte| !texte.is_empty())
+}
+
+/// `1.2.3`.
+fn ecrire_le_chemin<'p>(chemin: &[u32], place: &'p mut [u8]) -> &'p str {
+    let octets = chemin.iter().enumerate().flat_map(|(rang, numero)| {
+        (rang > 0)
+            .then_some(b'.')
+            .into_iter()
+            .chain(chiffres_de(*numero))
+    });
+    // LA PLACE SUFFIT TOUJOURS — un chemin compte au plus autant de numéros
+    // que la table de parties, et chacun deux chiffres —, et `zip` s'arrête de
+    // lui-même là où elle finirait.
+    let mut ecrits = 0_usize;
+    for (case, octet) in place.iter_mut().zip(octets) {
+        *case = octet;
+        ecrits = ecrits.saturating_add(1);
+    }
+    core::str::from_utf8(place.get(..ecrits).unwrap_or_default()).unwrap_or_default()
+}
+
+/// Les chiffres décimaux d'un nombre, sans zéro en tête.
+fn chiffres_de(nombre: u32) -> impl Iterator<Item = u8> {
+    const PUISSANCES: [u32; 10] = [
+        1_000_000_000,
+        100_000_000,
+        10_000_000,
+        1_000_000,
+        100_000,
+        10_000,
+        1_000,
+        100,
+        10,
+        1,
+    ];
+    let debut = PUISSANCES
+        .iter()
+        .position(|puissance| nombre >= *puissance)
+        .unwrap_or(9);
+    PUISSANCES.into_iter().skip(debut).map(move |puissance| {
+        let chiffre = nombre.checked_div(puissance).unwrap_or(0) % 10;
+        b'0'.wrapping_add(u8::try_from(chiffre).unwrap_or(0))
+    })
+}
+
+/// `type/sous-type`, en minuscules.
+fn ecrire_le_type<'g>(partie: &ams_mime::PartHeader<'_>, place: &'g mut [u8]) -> &'g str {
+    const INCONNU: &str = "application/octet-stream";
+    let longueur = partie
+        .media_type
+        .len()
+        .saturating_add(1)
+        .saturating_add(partie.subtype.len());
+    let Some(cible) = place.get_mut(..longueur) else {
+        return INCONNU;
+    };
+    let octets = partie.media_type.iter().chain(b"/").chain(partie.subtype);
+    for (case, octet) in cible.iter_mut().zip(octets) {
+        *case = octet.to_ascii_lowercase();
+    }
+    // Des jetons MIME : de l'ASCII imprimable (RFC 2045 §5.1).
+    core::str::from_utf8(cible).unwrap_or(INCONNU)
+}
+
+/// Un jeton en minuscules, ou `None` s'il est vide ou ne tient pas.
+fn en_minuscules<'m>(jeton: &[u8], place: &'m mut [u8]) -> Option<&'m str> {
+    let cible = place.get_mut(..jeton.len()).filter(|_| !jeton.is_empty())?;
+    for (case, octet) in cible.iter_mut().zip(jeton) {
+        *case = octet.to_ascii_lowercase();
+    }
+    core::str::from_utf8(cible).ok()
 }
 
 /// Écrit une liste d'adresses, `{"name": …, "email": …}` chacune. Rend si elle

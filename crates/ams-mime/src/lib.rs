@@ -85,6 +85,7 @@ mod failure;
 mod limits;
 mod message;
 mod msgid;
+mod param;
 mod plume;
 mod received;
 mod select;
@@ -115,12 +116,14 @@ pub use failure::{
 pub use limits::Limits;
 pub use message::{Field, Fields, Message, Unfolded};
 pub use msgid::{MessageIds, message_ids};
+pub use param::{PARAMETER_SEGMENTS_MAX, write_parameter};
 pub use received::{
     RECEIVED_MAX, RETURN_PATH_MAX, Received, Transport, write_received, write_return_path,
 };
 pub use select::write_header_fields;
 pub use structure::{
-    BodyPart, BodyScanner, BodySpan, STRUCTURE_DEPTH_MAX, STRUCTURE_PARTS_MAX, write_body_structure,
+    BodyPart, BodyScanner, BodySpan, PartHeader, PartKind, STRUCTURE_DEPTH_MAX,
+    STRUCTURE_PARTS_MAX, StructureStep, write_body_structure,
 };
 pub use submission::{
     Missing, SUBMISSION_FIELDS_MAX, UNIQUE_MAX, missing_submission_fields, write_submission_fields,

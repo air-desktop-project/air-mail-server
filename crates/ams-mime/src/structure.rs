@@ -799,7 +799,10 @@ fn est_jeton(octet: u8) -> bool {
 /// Chercher un paramètre et les écrire tous sont la même lecture. Deux
 /// parcours du même texte finiraient par ne plus dire la même chose — et c'est
 /// exactement le défaut qu'un pré-contrôle avait déjà introduit ailleurs.
-fn parametres<'a>(params: &'a [u8], mut voir: impl FnMut(&'a [u8], &'a [u8], bool) -> bool) {
+pub(crate) fn parametres<'a>(
+    params: &'a [u8],
+    mut voir: impl FnMut(&'a [u8], &'a [u8], bool) -> bool,
+) {
     let mut i = 0_usize;
     while i < params.len() {
         let octet = params.get(i).copied().unwrap_or(0);
@@ -1102,6 +1105,180 @@ impl BodyScanner {
             .filter(|(_, fille)| fille.parent == index)
             .map(|(rang, _)| rang)
             .nth(rang)
+    }
+}
+
+/// Ce qu'une partie est, pour qui la parcourt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PartKind {
+    /// Un contenu : du texte, une image, une pièce jointe.
+    Leaf,
+    /// Un `multipart/…` : ses filles sont ses parties.
+    Multipart,
+    /// Un `message/rfc822` : sa fille est le message qu'il porte.
+    Message,
+}
+
+/// Ce que l'en-tête d'une partie dit d'elle — BRUT, tel qu'il est écrit.
+///
+/// Les paramètres se décodent par [`crate::write_parameter`] ; le reste est
+/// fait de jetons, que l'appelant compare sans casse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PartHeader<'a> {
+    /// Ce qu'elle est.
+    pub kind: PartKind,
+    /// Le type : `text`, `image`… `text` sans `Content-Type:` (RFC 2045 §5.2).
+    pub media_type: &'a [u8],
+    /// Le sous-type : `plain`, `pdf`…
+    pub subtype: &'a [u8],
+    /// Les paramètres du type, `;` de tête compris.
+    pub type_params: &'a [u8],
+    /// Le `Content-Transfer-Encoding:`, vide s'il n'y en a pas.
+    pub encoding: &'a [u8],
+    /// Le premier mot de `Content-Disposition:`, vide s'il n'y en a pas.
+    pub disposition: &'a [u8],
+    /// Les paramètres de la disposition, `;` de tête compris.
+    pub disposition_params: &'a [u8],
+    /// Le `Content-ID:`, tel qu'il est écrit.
+    pub content_id: Option<&'a [u8]>,
+    /// Ce que son corps pèse, encodé.
+    pub size: u64,
+}
+
+/// Un pas du parcours de [`BodyScanner::walk`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StructureStep<'p> {
+    /// On entre dans une partie : son rang dans la table, et son chemin de
+    /// §6.4.5 quand elle en a un propre.
+    Enter {
+        /// Ce que [`BodyScanner::describe`] prend.
+        index: usize,
+        /// `[1, 2]` pour `1.2`. `None` pour un `multipart` qui est la racine
+        /// d'un message : il n'a pas de numéro à lui (§6.4.5), ses filles si.
+        path: Option<&'p [u32]>,
+    },
+    /// On sort de la dernière partie où l'on est entré.
+    Leave,
+}
+
+impl BodyScanner {
+    /// Ce que l'en-tête de la partie de rang `index` dit d'elle.
+    #[must_use]
+    pub fn describe(&self, index: usize) -> Option<PartHeader<'_>> {
+        let partie = self.parties.get(index).filter(|_| index < self.nb)?;
+        let message = Message::parse(self.entete_de(partie), &self.limites).ok();
+        let (principal, sous, params) = match champ(message.as_ref(), b"content-type") {
+            Some(valeur) => type_de(valeur),
+            None => (&b"text"[..], &b"plain"[..], &b"; charset=us-ascii"[..]),
+        };
+        let (kind, principal, sous) = match partie.genre {
+            Genre::Multipart => (PartKind::Multipart, principal, sous),
+            Genre::Message => (PartKind::Message, principal, sous),
+            // UN `multipart` QU'ON N'A PAS SU OUVRIR N'EN EST PLUS UN — la même
+            // règle que la `BODYSTRUCTURE`, pour que deux vues ne divergent pas.
+            Genre::Feuille if principal.eq_ignore_ascii_case(b"multipart") => {
+                (PartKind::Leaf, &b"application"[..], &b"octet-stream"[..])
+            }
+            Genre::Feuille => (PartKind::Leaf, principal, sous),
+        };
+        let (disposition, disposition_params) = champ(message.as_ref(), b"content-disposition")
+            .map(|valeur| {
+                let (avant, params) = couper(valeur, b';');
+                (mot(avant.trim_ascii()), params)
+            })
+            .unwrap_or_default();
+        Some(PartHeader {
+            kind,
+            media_type: jeton(principal, b"text"),
+            subtype: jeton(sous, b"plain"),
+            type_params: params,
+            encoding: mot(champ(message.as_ref(), b"content-transfer-encoding")
+                .map(<[u8]>::trim_ascii)
+                .unwrap_or_default()),
+            disposition,
+            disposition_params,
+            content_id: champ(message.as_ref(), b"content-id").map(<[u8]>::trim_ascii),
+            size: partie.octets,
+        })
+    }
+
+    /// Parcourt l'arbre des parties, dans l'ordre, et numérote comme §6.4.5.
+    ///
+    /// # LA NUMÉROTATION EST CELLE DE [`BodyScanner::part_of`]
+    ///
+    /// Un contenu simple à la racine d'un message est la partie `1` ; les
+    /// filles d'un `multipart` sont `k` sous lui ; un `message/rfc822` ne
+    /// compte pas pour un niveau — le message qu'il porte se numérote sous son
+    /// chemin à lui, comme s'il était seul. Deux numérotations, l'une pour
+    /// décrire et l'autre pour servir, finiraient par désigner deux parties
+    /// différentes sous un même nom.
+    ///
+    /// `visit` rend `false` pour arrêter le parcours ; `walk` rend alors
+    /// `false`, et `true` s'il est allé au bout.
+    pub fn walk(&self, visit: &mut dyn FnMut(StructureStep<'_>) -> bool) -> bool {
+        let mut chemin = [0_u32; STRUCTURE_PARTS_MAX];
+        self.visiter(0, &mut chemin, 0, true, visit)
+    }
+
+    /// Visite la partie `index`, dont le chemin est `chemin[..long]`.
+    ///
+    /// # LA RÉCURSION SE TERMINE PARCE QUE LES RANGS MONTENT
+    ///
+    /// Une fille est créée après ce qui la porte, et chaque niveau allonge le
+    /// chemin d'au plus un : la table compte [`STRUCTURE_PARTS_MAX`] parties,
+    /// le chemin autant de places.
+    fn visiter(
+        &self,
+        index: usize,
+        chemin: &mut [u32; STRUCTURE_PARTS_MAX],
+        long: usize,
+        racine: bool,
+        visit: &mut dyn FnMut(StructureStep<'_>) -> bool,
+    ) -> bool {
+        let genre = self.genre_de(index);
+        // UN CONTENU SIMPLE À LA RACINE D'UN MESSAGE EST SA PARTIE `1`.
+        let long = match (genre, racine) {
+            (Genre::Feuille, true) => {
+                // `long` reste sous la taille du chemin (voir plus haut) :
+                // `for_each` sur l'`Option` écrit sans ouvrir une branche
+                // qu'aucun message ne pourrait prendre.
+                chemin
+                    .get_mut(long)
+                    .into_iter()
+                    .for_each(|place| *place = 1);
+                long.saturating_add(1)
+            }
+            _ => long,
+        };
+        let propre = !(racine && genre == Genre::Multipart) && long > 0;
+        let vu = chemin.get(..long).filter(|_| propre);
+        if !visit(StructureStep::Enter { index, path: vu }) {
+            return false;
+        }
+        let va_au_bout = match genre {
+            Genre::Feuille => true,
+            Genre::Message => self
+                .enfant(index)
+                .is_none_or(|(fille, _)| self.visiter(fille, chemin, long, true, visit)),
+            Genre::Multipart => {
+                let filles = self
+                    .parties
+                    .iter()
+                    .enumerate()
+                    .take(self.nb)
+                    .filter(|(_, fille)| fille.parent == index)
+                    .map(|(rang, _)| rang);
+                // `all` s'arrête à la première fille qui arrête le parcours.
+                (1_u32..).zip(filles).all(|(numero, fille)| {
+                    chemin
+                        .get_mut(long)
+                        .into_iter()
+                        .for_each(|place| *place = numero);
+                    self.visiter(fille, chemin, long.saturating_add(1), false, visit)
+                })
+            }
+        };
+        va_au_bout && visit(StructureStep::Leave)
     }
 }
 

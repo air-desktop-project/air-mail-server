@@ -493,6 +493,14 @@ impl BoiteImap {
         lire(chemin, 0, combien)
     }
 
+    /// La structure MIME du message de rang `sequence`, lue en entier.
+    ///
+    /// **LE MÊME BALAYEUR QUE `BODYSTRUCTURE` ET QUE `…/parts/{p}`** : une
+    /// structure décrite par l'un et servie par l'autre ne peut pas diverger.
+    pub fn structure(&self, sequence: u32) -> Option<Box<ams_mime::BodyScanner>> {
+        balayer(self.chemins.get(self.rang(sequence)?)?)
+    }
+
     /// Un morceau du message de rang `sequence`, tel qu'il est sur le disque.
     ///
     /// Rend les octets lus, ou `None` si le message ne se lit pas.

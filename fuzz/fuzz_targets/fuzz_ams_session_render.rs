@@ -105,6 +105,11 @@ fuzz_target!(|entree: Entree| {
         },
     ];
 
+    // La structure d'un message venu d'un inconnu : l'en-tête sert de message.
+    let mut balayeur = ams_mime::BodyScanner::new(&ams_mime::Limits::DEFAULT);
+    balayeur.push(entree.entete.unwrap_or_default());
+    balayeur.finish();
+
     let mut place = [0_u8; PLACE];
     // PROPRIÉTÉS 2, 3 et 5 : chaque représentation se relit, sans rien de nu.
     for ecrit in [
@@ -113,6 +118,7 @@ fuzz_target!(|entree: Entree| {
         write_message(
             &messages[0],
             entree.entete,
+            Some(&balayeur),
             entree.uid_validity,
             &mut [0_u8; PLACE],
         )

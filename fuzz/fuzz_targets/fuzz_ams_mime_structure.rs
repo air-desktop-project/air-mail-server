@@ -30,13 +30,16 @@
 //!    qu'on rend part droit dans une lecture de fichier : s'il débordait, le
 //!    client recevrait ce qui suit le message — ou le serveur lirait ce qu'il
 //!    n'a pas. Le chemin, lui, vient du réseau.
+//! 6. **LE PARCOURS NUMÉROTE COMME ON SERT** : chaque contenu que
+//!    `walk` décrit se retrouve par `part_of` sous son chemin, avec sa taille,
+//!    et chaque entrée du parcours a sa sortie.
 
 #![no_main]
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-use ams_mime::{BodyScanner, BodySpan, Error, Limits};
+use ams_mime::{BodyScanner, BodySpan, Error, Limits, PartKind, StructureStep, write_parameter};
 
 /// Ce qu'on soumet.
 #[derive(Arbitrary, Debug)]
@@ -150,6 +153,51 @@ fuzz_target!(|entree: Entree<'_>| {
         assert!(
             fin <= taille,
             "une partie qui sort du message : {debut}..{fin} pour {taille}"
+        );
+    }
+
+    // PROPRIÉTÉ 6 : LE PARCOURS NUMÉROTE COMME ON SERT. Chaque contenu décrit
+    // se retrouve par son chemin, avec la taille décrite ; chaque entrée a sa
+    // sortie ; et un paramètre décodé tient dans ses tampons.
+    let mut profondeur = 0_usize;
+    let mut contenus: Vec<(Vec<u32>, u64)> = Vec::new();
+    let fini = balayeur.walk(&mut |pas| {
+        match pas {
+            StructureStep::Enter { index, path } => {
+                let partie = balayeur
+                    .describe(index)
+                    .expect("walk ne rend que des rangs décrits");
+                if let (PartKind::Leaf, Some(chemin)) = (partie.kind, path) {
+                    contenus.push((chemin.to_vec(), partie.size));
+                }
+                for (params, nom) in [
+                    (partie.type_params, &b"name"[..]),
+                    (partie.disposition_params, b"filename"),
+                ] {
+                    let mut travail = vec![0_u8; params.len()];
+                    let mut valeur = vec![0_u8; params.len().saturating_mul(2)];
+                    write_parameter(params, nom, &mut travail, &mut valeur)
+                        .expect("des tampons à la taille des paramètres suffisent");
+                }
+                profondeur = profondeur.saturating_add(1);
+            }
+            StructureStep::Leave => {
+                assert!(profondeur > 0, "une sortie sans entrée");
+                profondeur = profondeur.saturating_sub(1);
+            }
+        }
+        true
+    });
+    assert!(
+        fini && profondeur == 0,
+        "un parcours qui ne s'équilibre pas"
+    );
+    for (chemin, taille) in contenus {
+        let servie = balayeur.part_of(&chemin).expect("un chemin décrit se sert");
+        assert_eq!(
+            servie.end.saturating_sub(servie.start),
+            taille,
+            "{chemin:?}"
         );
     }
 

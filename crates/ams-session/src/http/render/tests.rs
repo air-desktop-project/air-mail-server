@@ -157,7 +157,7 @@ fn l_uid_validity_accompagne_tout_uid() {
         texte(write_mailboxes(&[boite()], &mut place).expect("écrivable")),
         texte(write_mailbox(&boite(), &mut [0_u8; PLACE]).expect("écrivable")),
         texte(write_messages(&[message()], 7, None, &mut [0_u8; PLACE]).expect("écrivable")),
-        texte(write_message(&message(), None, 7, &mut [0_u8; PLACE]).expect("écrivable")),
+        texte(write_message(&message(), None, None, 7, &mut [0_u8; PLACE]).expect("écrivable")),
     ] {
         assert!(ecrit.contains("uidValidity"), "{ecrit}");
     }
@@ -201,7 +201,7 @@ fn le_vide_et_l_absence_se_distinguent() {
     sans.subject = None;
     sans.from = None;
     let mut place = [0_u8; PLACE];
-    let ecrit = texte(write_message(&sans, None, 7, &mut place).expect("écrivable"));
+    let ecrit = texte(write_message(&sans, None, None, 7, &mut place).expect("écrivable"));
     assert!(ecrit.contains(r#""subject":null"#), "{ecrit}");
     assert!(ecrit.contains(r#""from":null"#), "{ecrit}");
 
@@ -209,7 +209,7 @@ fn le_vide_et_l_absence_se_distinguent() {
     vide.subject = Some("");
     vide.from = Some("");
     let mut place = [0_u8; PLACE];
-    let ecrit = texte(write_message(&vide, None, 7, &mut place).expect("écrivable"));
+    let ecrit = texte(write_message(&vide, None, None, 7, &mut place).expect("écrivable"));
     assert!(ecrit.contains(r#""subject":"""#), "{ecrit}");
     assert!(ecrit.contains(r#""from":"""#), "{ecrit}");
 }
@@ -234,7 +234,7 @@ fn les_drapeaux_portent_leurs_noms_d_imap() {
         let mut seul = message();
         seul.flags = drapeau;
         let mut place = [0_u8; PLACE];
-        let ecrit = texte(write_message(&seul, None, 7, &mut place).expect("écrivable"));
+        let ecrit = texte(write_message(&seul, None, None, 7, &mut place).expect("écrivable"));
         assert!(
             ecrit.contains(&std::format!("\"flags\":[\"{nom}\"]")),
             "{drapeau:?} : {ecrit}"
@@ -248,7 +248,7 @@ fn un_message_sans_drapeau_rend_un_tableau_vide() {
     let mut nu = message();
     nu.flags = Flags::NONE;
     let mut place = [0_u8; PLACE];
-    let ecrit = texte(write_message(&nu, None, 7, &mut place).expect("écrivable"));
+    let ecrit = texte(write_message(&nu, None, None, 7, &mut place).expect("écrivable"));
     assert!(ecrit.contains(r#""flags":[]"#), "{ecrit}");
 }
 
@@ -259,7 +259,7 @@ fn un_sujet_hostile_ne_casse_rien() {
     hostile.subject = Some(r#"a","admin":true,"x":"b"#);
     hostile.from = Some("<script>alert(1)</script>");
     let mut place = [0_u8; PLACE];
-    let ecrit = texte(write_message(&hostile, None, 7, &mut place).expect("écrivable"));
+    let ecrit = texte(write_message(&hostile, None, None, 7, &mut place).expect("écrivable"));
     assert!(!ecrit.contains(r#""admin":true"#), "{ecrit}");
     assert!(!ecrit.contains('<'), "{ecrit}");
     // Et le document reste lisible : un seul objet, bien clos.
@@ -393,7 +393,7 @@ fn un_corps_qui_n_est_pas_une_modification_se_refuse() {
 #[test]
 fn chaque_tampon_insuffisant_se_dit() {
     type Ecrivain = fn(&mut [u8]) -> Result<&[u8], ams_api::Error>;
-    let ecrivains: [(&str, Ecrivain); 35] = [
+    let ecrivains: [(&str, Ecrivain); 36] = [
         ("draft", |place| write_draft("0a1b", 99, &[piece()], place)),
         ("draft-vide", |place| write_draft("0a1b", 99, &[], place)),
         ("attachment", |place| write_attachment(&piece(), place)),
@@ -411,14 +411,20 @@ fn chaque_tampon_insuffisant_se_dit() {
         ("messages-fin", |place| {
             write_messages(&[message()], 7, None, place)
         }),
-        ("message", |place| write_message(&message(), None, 7, place)),
+        ("message", |place| {
+            write_message(&message(), None, None, 7, place)
+        }),
         ("message-enveloppe", |place| {
-            write_message(&message(), Some(ENTETE_COMPLET), 7, place)
+            write_message(&message(), Some(ENTETE_COMPLET), None, 7, place)
+        }),
+        ("message-structure", |place| {
+            let balayeur = balayer(TIROIRS);
+            write_message(&message(), None, Some(&balayeur), 7, place)
         }),
         // Une enveloppe où tout manque écrit `null` à chaque place : d'autres
         // écritures, donc d'autres places à manquer.
         ("message-enveloppe-vide", |place| {
-            write_message(&message(), Some(b"Subject: x\r\n\r\n"), 7, place)
+            write_message(&message(), Some(b"Subject: x\r\n\r\n"), None, 7, place)
         }),
         ("health", write_health),
         ("metrics", |place| {
@@ -1721,11 +1727,13 @@ Subject: Bonjour\r\n\
 
 fn enveloppe(entete: &[u8]) -> String {
     let mut place = std::vec![0_u8; 256 * 1024];
-    let ecrit = texte(write_message(&message(), Some(entete), 7, &mut place).expect("écrivable"));
+    let ecrit =
+        texte(write_message(&message(), Some(entete), None, 7, &mut place).expect("écrivable"));
     let debut = ecrit.find(r#""envelope":"#).expect("une enveloppe");
     // Le message se ferme, puis le document : deux accolades.
     let debut = debut.saturating_add(r#""envelope":"#.len());
-    ecrit[debut..ecrit.len().saturating_sub(2)].to_string()
+    let fin = ecrit.rfind(r#","structure":"#).expect("une structure");
+    ecrit[debut..fin].to_string()
 }
 
 /// Les noms décodés, la date en instant, les identifiants sans chevrons.
@@ -1763,8 +1771,11 @@ fn ce_qui_manque_a_l_enveloppe_est_null() {
     assert_eq!(enveloppe(b"Subject: a\nFrom: b\r\n\r\n"), "null");
     // Et `None` le dit de la même façon.
     let mut place = [0_u8; PLACE];
-    let ecrit = texte(write_message(&message(), None, 7, &mut place).expect("écrivable"));
-    assert!(ecrit.ends_with(r#""envelope":null}}"#), "{ecrit}");
+    let ecrit = texte(write_message(&message(), None, None, 7, &mut place).expect("écrivable"));
+    assert!(
+        ecrit.ends_with(r#""envelope":null,"structure":null}}"#),
+        "{ecrit}"
+    );
 }
 
 /// **UN CLIENT QUI RÉPOND À TOUS DOIT SAVOIR QU'IL N'A PAS « TOUS ».**
@@ -1839,4 +1850,112 @@ fn un_fil_trop_long_garde_sa_racine_et_ses_derniers() {
 fn un_nom_hostile_ne_casse_rien() {
     let rendu = enveloppe(b"From: \"a\\\",\\\"admin\\\":true,\\\"x\" <a@b.test>\r\n\r\n");
     assert!(!rendu.contains(r#""admin":true"#), "{rendu}");
+}
+
+// ── LA STRUCTURE D'UN MESSAGE ───────────────────────────────────────────────
+
+fn balayer(message: &[u8]) -> ams_mime::BodyScanner {
+    let mut balayeur = ams_mime::BodyScanner::new(&ams_mime::Limits::DEFAULT);
+    balayeur.push(message);
+    balayeur.finish();
+    balayeur
+}
+
+/// Un message à tiroirs : une `alternative`, une pièce jointe au nom encodé,
+/// un message transféré.
+const TIROIRS: &[u8] = b"Content-Type: multipart/mixed; boundary=a\r\n\r\n\
+--a\r\nContent-Type: multipart/alternative; boundary=b\r\n\r\n\
+--b\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: Quoted-Printable\r\n\r\nt=C3=A9\r\n\
+--b\r\nContent-Type: TEXT/HTML\r\n\r\n<p>x</p>\r\n--b--\r\n\
+--a\r\nContent-Type: application/pdf; name=\"ancien.pdf\"\r\n\
+Content-Disposition: ATTACHMENT; filename*=utf-8''d%C3%A9fi.pdf\r\n\
+Content-Transfer-Encoding: base64\r\nContent-ID: <pj@x>\r\n\r\nAAAA\r\n\
+--a\r\nContent-Type: image/png; name=\"=?utf-8?B?w6kucG5n?=\"\r\nContent-Disposition: inline\r\n\r\nPNG\r\n\
+--a\r\nContent-Type: message/rfc822\r\nContent-Disposition: attachment; filename=\"fw.eml\"\r\n\r\n\
+Subject: seul\r\n\r\nseul\r\n--a--\r\n";
+
+fn structure(message: &[u8]) -> String {
+    let balayeur = balayer(message);
+    let mut place = std::vec![0_u8; 64 * 1024];
+    let ecrit = texte(
+        write_message(&message_nu(), None, Some(&balayeur), 7, &mut place).expect("écrivable"),
+    );
+    let debut = ecrit.find(r#""structure":"#).expect("une structure");
+    ecrit[debut.saturating_add(r#""structure":"#.len())..ecrit.len().saturating_sub(2)].to_string()
+}
+
+fn message_nu() -> MessageRow<'static> {
+    MessageRow {
+        subject: None,
+        from: None,
+        ..message()
+    }
+}
+
+/// **LE CHEMIN EST CELUI QUE `…/parts/{p}` SERT**, et les noms sont décodés.
+#[test]
+fn la_structure_se_rend_en_arbre() {
+    assert_eq!(
+        structure(TIROIRS),
+        concat!(
+            r#"{"part":null,"type":"multipart/mixed","parts":["#,
+            r#"{"part":"1","type":"multipart/alternative","parts":["#,
+            r#"{"part":"1.1","type":"text/plain","charset":"UTF-8","name":null,"disposition":null,"cid":null,"encoding":"quoted-printable","size":7},"#,
+            r#"{"part":"1.2","type":"text/html","charset":null,"name":null,"disposition":null,"cid":null,"encoding":"7bit","size":8}]},"#,
+            r#"{"part":"2","type":"application/pdf","charset":null,"name":"défi.pdf","disposition":"attachment","cid":"pj@x","encoding":"base64","size":4},"#,
+            r#"{"part":"3","type":"image/png","charset":null,"name":"é.png","disposition":"inline","cid":null,"encoding":"7bit","size":3},"#,
+            r#"{"part":"4","type":"message/rfc822","name":"fw.eml","disposition":"attachment","size":21,"parts":["#,
+            r#"{"part":"4.1","type":"text/plain","charset":"us-ascii","name":null,"disposition":null,"cid":null,"encoding":"7bit","size":4}]}]}"#
+        )
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+    );
+}
+
+/// Un message simple est sa partie `1`.
+#[test]
+fn un_message_simple_est_sa_partie_un() {
+    assert_eq!(
+        structure(b"Subject: x\r\n\r\nbonjour\r\n"),
+        concat!(
+            r#"{"part":"1","type":"text/plain","charset":"us-ascii","name":null,"#,
+            r#""disposition":null,"cid":null,"encoding":"7bit","size":9}"#
+        )
+    );
+}
+
+/// Ce qui ne tient pas se dit sans rien inventer : un type démesuré devient
+/// `application/octet-stream`, une disposition démesurée `null`, un nom dans
+/// un jeu inconnu `null`.
+#[test]
+fn ce_qui_ne_tient_pas_ne_s_invente_pas() {
+    let long = "x".repeat(200);
+    let rendu = structure(
+        std::format!(
+            "Content-Type: application/{long}; name*=koi8-r''%C1\r\n\
+             Content-Disposition: {long}\r\nContent-ID: pas-un-id\r\n\r\nx\r\n"
+        )
+        .as_bytes(),
+    );
+    assert!(
+        rendu.contains(r#""type":"application/octet-stream""#),
+        "{rendu}"
+    );
+    assert!(
+        rendu.contains(r#""name":null,"disposition":null,"cid":null"#),
+        "{rendu}"
+    );
+}
+
+/// Un chemin à plusieurs chiffres s'écrit en entier.
+#[test]
+fn un_chemin_a_plusieurs_chiffres_s_ecrit() {
+    let mut message = b"Content-Type: multipart/mixed; boundary=a\r\n\r\n".to_vec();
+    for _ in 0..12 {
+        message.extend_from_slice(b"--a\r\n\r\nx\r\n");
+    }
+    message.extend_from_slice(b"--a--\r\n");
+    let rendu = structure(&message);
+    assert!(rendu.contains(r#""part":"12""#), "{rendu}");
+    assert!(rendu.contains(r#""part":"10""#), "{rendu}");
 }

@@ -3077,16 +3077,17 @@ fn resumer(
     }
 }
 
-/// Un message et son enveloppe — ou, si l'enveloppe ne tient pas, le message
-/// avec `"envelope": null`.
+/// Un message, son enveloppe et sa structure — ou ce qui en tient.
 ///
-/// # LE MESSAGE D'ABORD, L'ENVELOPPE SI ELLE TIENT
+/// # LE MESSAGE D'ABORD, LE RESTE S'IL TIENT
 ///
 /// Un en-tête peut peser soixante-quatre kibioctets, et ses noms grandir au
-/// décodage : l'enveloppe entière peut dépasser la réponse. Rendre `500` pour
-/// cela priverait le client du message entier — ses drapeaux, son sujet — pour
-/// une liste de destinataires trop longue. `null` lui dit qu'il lui manque
-/// quelque chose, et le message brut reste là pour le reste.
+/// décodage : l'enveloppe entière peut dépasser la réponse, et la structure
+/// s'y ajoute. Rendre `500` pour cela priverait le client du message entier —
+/// ses drapeaux, son sujet — pour une liste de destinataires trop longue. On
+/// renonce donc dans l'ordre : l'enveloppe d'abord, qui est la plus grosse et
+/// que le message brut redit, puis la structure. `null` dit au client ce qui
+/// lui manque.
 fn rendre_le_message<'o>(
     boite: &crate::imap::BoiteImap,
     sequence: u32,
@@ -3096,18 +3097,22 @@ fn rendre_le_message<'o>(
     let resume = resumer(boite, sequence, info);
     let ligne = ligne_de(&resume);
     let entete = boite.entete(sequence);
-    let entiere = render::write_message(&ligne, entete.as_deref(), boite.uid_validity(), sortie)
-        .map(<[u8]>::len)
-        .ok();
-    match entiere {
-        Some(ecrits) => rendre(Ok(sortie.get(..ecrits).unwrap_or_default())),
-        None => rendre(render::write_message(
+    let structure = boite.structure(sequence);
+    let validite = boite.uid_validity();
+    for (avec_entete, avec_structure) in [(true, true), (false, true)] {
+        let tente = render::write_message(
             &ligne,
-            None,
-            boite.uid_validity(),
+            entete.as_deref().filter(|_| avec_entete),
+            structure.as_deref().filter(|_| avec_structure),
+            validite,
             sortie,
-        )),
+        )
+        .map(<[u8]>::len);
+        if let Ok(ecrits) = tente {
+            return rendre(Ok(sortie.get(..ecrits).unwrap_or_default()));
+        }
     }
+    rendre(render::write_message(&ligne, None, None, validite, sortie))
 }
 
 /// La ligne que rend un résumé.
@@ -5319,6 +5324,10 @@ mod ecritures {
                 "{corps}"
             );
             assert!(corps.contains(r#""complete":true"#), "{corps}");
+            assert!(
+                corps.contains(r#""structure":{"part":"1","type":"text/plain""#),
+                "{corps}"
+            );
         }
     }
 
@@ -5359,7 +5368,66 @@ mod ecritures {
         );
         assert_eq!(status, StatusCode::OK, "{corps}");
         assert!(corps.contains(r#""subject":"long""#), "{corps}");
-        assert!(corps.ends_with(r#""envelope":null}}"#), "{corps}");
+        // L'enveloppe a cédé ; la structure, petite, est restée.
+        assert!(
+            corps.contains(r#""envelope":null,"structure":{"part":"1""#),
+            "{corps}"
+        );
+    }
+
+    /// **UNE STRUCTURE QUI NE TIENT PAS CÈDE À SON TOUR** : le message reste.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn une_structure_trop_grande_devient_null() {
+        let temporaire = Ephemere::neuf();
+        let (_, api) = api(&temporaire.0);
+        // Quarante parties dont le nom fait neuf cents chevrons — une ligne
+        // sous les 998 octets de la RFC 5322 : six octets de JSON par chevron,
+        // bien au-delà des 64 Kio de la réponse.
+        let nom = "<".repeat(900);
+        let mut message = std::string::String::from(
+            "From: marie@exemple.test\r\nSubject: pieces\r\n\
+             Content-Type: multipart/alternative; boundary=a\r\n\r\n",
+        );
+        for _ in 0..40 {
+            message.push_str(&std::format!(
+                "--a\r\nContent-Type: text/plain;\r\n name=\"{nom}\"\r\n\r\nx\r\n"
+            ));
+        }
+        message.push_str("--a--\r\n");
+        // DÉPOSÉ COMME PAR SMTP, et non par l'API : un dépôt REST exige un
+        // brouillon pour ce qui porte des parties nommées (phase 4b), mais un
+        // message reçu arrive tel que l'expéditeur l'a écrit.
+        let neuf = temporaire.0.join("marie").join("new");
+        std::fs::create_dir_all(&neuf).expect("new/");
+        std::fs::write(neuf.join("1.essai.local"), message.as_bytes()).expect("déposé");
+        let (status, corps) = servir(
+            &api,
+            Resource::Messages { boite: "INBOX" },
+            Method::Get,
+            b"",
+        );
+        assert_eq!(status, StatusCode::OK, "{corps}");
+        let uid: u64 = corps
+            .split(r#""uid":"#)
+            .nth(1)
+            .and_then(|reste| reste.split(',').next())
+            .and_then(|nombre| nombre.parse().ok())
+            .expect("un UID");
+        let (status, corps) = servir(
+            &api,
+            Resource::Message {
+                boite: "INBOX",
+                uid,
+            },
+            Method::Get,
+            b"",
+        );
+        assert_eq!(status, StatusCode::OK, "{corps}");
+        assert!(corps.contains(r#""subject":"pieces""#), "{corps}");
+        assert!(
+            corps.ends_with(r#""envelope":null,"structure":null}}"#),
+            "{corps}"
+        );
     }
 
     /// **LA SYNCHRONISATION INCRÉMENTALE, DE BOUT EN BOUT, SUR UNE VRAIE BOÎTE.**

@@ -677,6 +677,24 @@ authorization: Bearer AQECAAAAAG…</code></pre>
     <p>Each list is capped at <strong>one hundred</strong> items; an unreadable address (not UTF-8, longer than 256 bytes) is not returned. In those cases <code>complete</code> is <code>false</code>: a "reply all" built from this envelope would not reach everyone — read the raw message. For <code>references</code>, the first (the thread's root) and the most recent are kept. If the whole envelope does not fit in the response, <code>envelope</code> is <code>null</code> and the rest of the message is returned.</p>
   </div>
   <p>The display name commits to nothing: <code>"Your bank" &lt;crook@example.test&gt;</code> is an ordinary message. Show the address next to the name.</p>
+  <p>The message also carries its <strong>structure</strong>: the tree of its MIME parts, enough to display the body and list attachments without downloading anything.</p>
+  <pre><code>"structure": {
+  "part": null, "type": "multipart/mixed", "parts": [
+    { "part": "1", "type": "multipart/alternative", "parts": [
+      { "part": "1.1", "type": "text/plain", "charset": "utf-8", "name": null,
+        "disposition": null, "cid": null, "encoding": "quoted-printable", "size": 812 },
+      { "part": "1.2", "type": "text/html", "charset": "utf-8", "name": null,
+        "disposition": null, "cid": null, "encoding": "quoted-printable", "size": 2410 } ] },
+    { "part": "2", "type": "application/pdf", "charset": null, "name": "défi.pdf",
+      "disposition": "attachment", "cid": null, "encoding": "base64", "size": 180344 },
+    { "part": "3", "type": "message/rfc822", "name": "forwarded.eml",
+      "disposition": "attachment", "size": 5120, "parts": [ … ] } ] }</code></pre>
+  <p><code>part</code> is the path <code>…/parts/{part}</code> serves — RFC 9051 §6.4.5 numbering; a <code>multipart</code> at the root of a message has none (<code>null</code>), its children do. <code>name</code> is decoded (RFC 2231, and the RFC 2047 many programs wrongly use): the disposition's <code>filename</code> first, the type's <code>name</code> next. <code>size</code> is the <em>encoded</em> size, as stored; base64 content weighs about three quarters of it once decoded. Types, dispositions and encodings are lower case; <code>cid</code> comes without angle brackets, to resolve the <code>cid:</code> links of an HTML body.</p>
+  <div class="note danger">
+    <span class="etiquette">A file name is not a path</span>
+    <p><code>name</code> is chosen by the sender: <code>../../.bashrc</code> is a valid value. Never use it as is to write to disk.</p>
+  </div>
+  <p>At most sixty-four parts are described. If the structure does not fit in the response — once the envelope has already been dropped —, it is <code>null</code> in turn.</p>
   <p>Flags are named as IMAP names them (RFC 9051 §2.3.2), not in lower case: <code>\Seen</code>, <code>\Answered</code>, <code>\Flagged</code>, <code>\Deleted</code>, <code>\Draft</code>, <code>$MDNSent</code>, <code>$Forwarded</code>, <code>$Junk</code>, <code>$NonJunk</code>, <code>$Phishing</code>. The set is closed: ten, and not one more.</p>
   <p><code>PATCH</code> sets and clears flags, and returns the message <strong>as it has become</strong>:</p>
   <pre><code>{ "add": ["\\Seen"], "remove": ["\\Flagged"] }</code></pre>
