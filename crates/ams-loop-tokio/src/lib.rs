@@ -117,12 +117,23 @@ pub use delivery::{Delivery, DeliveryFailure};
 pub use dkim::{
     DkimChecker, DkimResult, DkimSigner, DkimStream, DkimVerdict, PublicationDkim,
     publication_dkim, replier_la_signature,
-};
+, Urandom};
 pub use dmarc::{Authenticated, DmarcChecker, DmarcResult, DmarcVerdict, PourRapport};
 pub use error::Error;
 pub use guard::SharedGuard;
 pub use mtasts::Sts;
 pub use privileges::{is_root, masque_trop_large, refuse_root, restreindre_le_masque};
+/// Un verrou que prennent les essais qui ne supportent pas qu'un autre ouvre
+/// des sockets en même temps.
+///
+/// **LE TEST D'ARRÊT DU SERVEUR** vérifie qu'après l'arrêt, son port refuse les
+/// connexions — ce qui suppose que personne ne le reprend entre-temps. Les
+/// essais du transport des réveils ouvrent des écoutes, des connexions TLS et
+/// un processus `openssl` : ensemble, sur macOS, le port libéré se retrouvait
+/// assez souvent pris. Les deux prennent ce verrou.
+#[cfg(test)]
+pub(crate) static SOCKETS_EXCLUSIFS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 pub use push::{PushFault, PushResponse, PushTransport, RESPONSE_BODY_MAX, is_public};
 pub use queue::{Bounced, QueueTally, Spool};
 pub use quic::{Application, QuicStats, SansApplication, serve_quic};

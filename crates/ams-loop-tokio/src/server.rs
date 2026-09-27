@@ -786,6 +786,9 @@ mod tests {
 
     #[tokio::test]
     async fn l_arret_cesse_l_acceptation_sans_couper_ce_qui_est_en_cours() {
+        // Personne d'autre n'ouvre de socket pendant cet essai : voir
+        // `SOCKETS_EXCLUSIFS`.
+        let _exclusif = crate::SOCKETS_EXCLUSIFS.lock().await;
         let ecouteur = TcpListener::bind("127.0.0.1:0").await.expect("écoute");
         let adresse = ecouteur.local_addr().expect("adresse");
         let (arret, attendre) = tokio::sync::oneshot::channel::<()>();

@@ -783,15 +783,20 @@ impl DkimSigner {
 
 /// Une source d'aléa qui lit `/dev/urandom`.
 ///
+/// L'aléa du noyau, pour l'aveuglement d'une signature RSA — DKIM, et
+/// l'assertion OAuth2 de FCM.
+///
 /// # POURQUOI UNE LECTURE BLOQUANTE EST ICI ACCEPTABLE
 ///
 /// `/dev/urandom` ne bloque pas une fois la machine amorcée, et la signature
 /// elle-même — une exponentiation RSA privée — occupe déjà le fil bien plus
 /// longtemps. C'est pour cela que l'appelant signe hors de la boucle.
-struct Urandom(std::fs::File);
+pub struct Urandom(std::fs::File);
 
 impl Urandom {
-    fn ouvrir() -> Option<Self> {
+    /// Ouvre `/dev/urandom`, ou `None` s'il ne s'ouvre pas.
+    #[must_use]
+    pub fn ouvrir() -> Option<Self> {
         std::fs::File::open("/dev/urandom").ok().map(Self)
     }
 }

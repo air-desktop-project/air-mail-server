@@ -95,6 +95,16 @@ pub struct Options {
     pub push_vapid_key: Option<PathBuf>,
     /// Où l'exploitant se joint, pour les services de push.
     pub push_contact: Option<String>,
+    /// La clef `.p8` d'APNs. Vide : APNs n'est pas transmis.
+    pub apns_key: Option<PathBuf>,
+    /// Son identifiant (« Key ID »).
+    pub apns_key_id: Option<String>,
+    /// L'équipe du compte de développeur (« Team ID »).
+    pub apns_team_id: Option<String>,
+    /// L'identifiant de l'application (« bundle id »).
+    pub apns_topic: Option<String>,
+    /// L'environnement de développement d'Apple.
+    pub apns_sandbox: bool,
     /// Où écouter en POP3. Vide : POP3 n'est pas servi.
     pub listen_pop3: Option<SocketAddr>,
     /// Les écoutes POP3, chacune avec son mode TLS.
@@ -259,6 +269,11 @@ impl Default for Options {
             drafts: None,
             push_vapid_key: None,
             push_contact: None,
+            apns_key: None,
+            apns_key_id: None,
+            apns_team_id: None,
+            apns_topic: None,
+            apns_sandbox: false,
             // PAS DE POP3 PAR DÉFAUT : un port ouvert qu'on n'a pas demandé est
             // une surface de plus, et celui-ci ne sert personne sans certificat.
             listen_pop3: None,
@@ -450,6 +465,11 @@ impl Options {
             drafts: chemin(self.drafts.as_ref()),
             push_vapid_key: chemin(self.push_vapid_key.as_ref()),
             push_contact: self.push_contact.clone().unwrap_or_default(),
+            apns_key: chemin(self.apns_key.as_ref()),
+            apns_key_id: self.apns_key_id.clone().unwrap_or_default(),
+            apns_team_id: self.apns_team_id.clone().unwrap_or_default(),
+            apns_topic: self.apns_topic.clone().unwrap_or_default(),
+            apns_sandbox: self.apns_sandbox,
             tlsrpt: ams_config::Tlsrpt {
                 directory: chemin(self.tlsrpt_dir.as_ref()),
                 send: self.tlsrpt_send,
@@ -646,6 +666,14 @@ OPTIONS DE `config write`
     --push-contact <mailto:…|https:…>
                         où l'exploitant se joint, pour un service de push qui
                         aurait à se plaindre. Exigé avec --push-vapid-key.
+    --apns-key <chemin.p8> --apns-key-id <id> --apns-team-id <id>
+    --apns-topic <bundle id> [--apns-sandbox]
+                        APNs, pour les appareils Apple : la clef
+                        d'authentification que livre le compte de développeur
+                        (lisible du seul compte de service), ses identifiants,
+                        et celui de l'application. `--apns-sandbox` vise
+                        l'environnement de développement d'Apple. Sans clef,
+                        APNs n'est pas transmis.
     --listen-pop3 <adr>    où écouter en POP3 avec `STLS` — le 110. RÉPÉTABLE
                            (défaut : pas de POP3)
     --listen-pop3s <adr>   où écouter en POP3 avec TLS IMPLICITE — le 995.
@@ -1311,6 +1339,11 @@ where
             "--drafts" => options.drafts = Some(PathBuf::from(valeur()?)),
             "--push-vapid-key" => options.push_vapid_key = Some(PathBuf::from(valeur()?)),
             "--push-contact" => options.push_contact = Some(valeur()?),
+            "--apns-key" => options.apns_key = Some(PathBuf::from(valeur()?)),
+            "--apns-key-id" => options.apns_key_id = Some(valeur()?),
+            "--apns-team-id" => options.apns_team_id = Some(valeur()?),
+            "--apns-topic" => options.apns_topic = Some(valeur()?),
+            "--apns-sandbox" => options.apns_sandbox = true,
             "--resolver" => {
                 let brute = valeur()?;
                 let adresse: SocketAddr = brute
@@ -2226,6 +2259,10 @@ mod tests {
             (&["--drafts"], "attend une valeur"),
             (&["--push-vapid-key"], "attend une valeur"),
             (&["--push-contact"], "attend une valeur"),
+            (&["--apns-key"], "attend une valeur"),
+            (&["--apns-key-id"], "attend une valeur"),
+            (&["--apns-team-id"], "attend une valeur"),
+            (&["--apns-topic"], "attend une valeur"),
         ] {
             let erreur = parse(arguments).expect_err("refusé");
             assert!(
@@ -3710,6 +3747,31 @@ mod tests {
         let arguments: &[&str] = &["--domain", "mail.example.com"];
         let configuration = ecrire(arguments).en_configuration();
         assert!(configuration.push_vapid_key.is_empty() && configuration.push_contact.is_empty());
+    }
+
+    /// **APNS SE POSE EN CINQ MORCEAUX**, et son absence est le défaut.
+    #[test]
+    fn apns_se_pose() {
+        let arguments: &[&str] = &[
+            "--apns-key",
+            "/x/apns.p8",
+            "--apns-key-id",
+            "ABC123DEFG",
+            "--apns-team-id",
+            "DEF123GHIJ",
+            "--apns-topic",
+            "ch.narro.mail",
+            "--apns-sandbox",
+        ];
+        let configuration = ecrire(arguments).en_configuration();
+        assert_eq!(configuration.apns_key, "/x/apns.p8");
+        assert_eq!(configuration.apns_key_id, "ABC123DEFG");
+        assert_eq!(configuration.apns_team_id, "DEF123GHIJ");
+        assert_eq!(configuration.apns_topic, "ch.narro.mail");
+        assert!(configuration.apns_sandbox);
+        let arguments: &[&str] = &["--domain", "mail.example.com"];
+        let configuration = ecrire(arguments).en_configuration();
+        assert!(configuration.apns_key.is_empty() && !configuration.apns_sandbox);
     }
 
     #[test]

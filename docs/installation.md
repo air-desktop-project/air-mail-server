@@ -375,7 +375,30 @@ air-mail-admin config write /etc/air-mail/ams.conf … \
   contactées — jamais une adresse privée, locale ou réservée —, et son
   certificat en TLS 1.3 ;
 - sans clef, les réveils Web Push sont décidés et comptés, mais ne partent pas.
-  APNs et FCM viendront par la même voie.
+
+### Les réveils APNs : iPhone, iPad, Mac
+
+Pour les applications Apple, le serveur parle à APNs en HTTP/2, signé par la
+**clef d'authentification** que livre le compte de développeur Apple
+(Certificates, Identifiers & Profiles → Keys → « Apple Push Notifications
+service ») — un fichier `.p8`, son Key ID, et le Team ID du compte :
+
+```sh
+sudo install -o air-mail -g air-mail -m 600 AuthKey_ABC123DEFG.p8 /var/lib/air-mail/apns.p8
+air-mail-admin config write /etc/air-mail/ams.conf … \
+    --apns-key /var/lib/air-mail/apns.p8 \
+    --apns-key-id ABC123DEFG --apns-team-id DEF123GHIJ \
+    --apns-topic ch.exemple.mail
+```
+
+- `--apns-topic` est l'identifiant de l'application (« bundle id ») ;
+- `--apns-sandbox` vise l'environnement de développement d'Apple, pour une
+  application signée en développement ; sans lui, la production ;
+- les réveils sont des notifications **silencieuses** (`content-available`) :
+  rien ne s'affiche, l'application se synchronise, et Apple ne voit ni sujet ni
+  expéditeur ;
+- la même exigence que Web Push : un résolveur et des autorités ; une clef
+  nommée sans ses identifiants, ou lisible par d'autres, arrête le démarrage.
 
 ### La délégation : ouvrir une boîte à un autre compte
 

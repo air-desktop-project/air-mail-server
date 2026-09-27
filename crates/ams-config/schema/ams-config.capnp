@@ -207,6 +207,21 @@ struct Configuration {
   # `pushVapidKey` l'est.
   pushContact @39 :Text;
 
+  # APNs (Apple Push Notification service) — la clef d'authentification que le
+  # compte de développeur Apple livre : un fichier `.p8`, lisible du seul compte
+  # de service. Vide : les appareils Apple abonnés ne sont pas réveillés.
+  apnsKey @40 :Text;
+  # Son identifiant (« Key ID »), et celui de l'équipe (« Team ID ») : dix
+  # lettres et chiffres chacun, tels qu'Apple les affiche.
+  apnsKeyId @41 :Text;
+  apnsTeamId @42 :Text;
+  # Le sujet : l'identifiant de l'application (« bundle id »), qu'APNs exige
+  # dans `apns-topic`.
+  apnsTopic @43 :Text;
+  # L'environnement de développement d'Apple (`api.sandbox.push.apple.com`)
+  # plutôt que la production : pour les applications signées en développement.
+  apnsSandbox @44 :Bool;
+
   # MTA-STS (RFC 8461) — la politique qu'un domaine publie en HTTPS.
   #
   # **UN CHAMP AJOUTÉ APRÈS COUP DÉCODE DEUX CHAÎNES VIDES**, et deux chaînes

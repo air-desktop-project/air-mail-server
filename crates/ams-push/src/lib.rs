@@ -73,6 +73,8 @@ pub enum Error {
     TooLong,
     /// Une revendication VAPID hors de la forme admise.
     BadClaim,
+    /// Un fichier de clef qui n'est pas une clef `.p8` P-256.
+    BadKeyFile,
 }
 
 /// Chiffre `clair` pour un navigateur (RFC 8291 §3.4), et écrit le corps du
@@ -192,7 +194,6 @@ pub fn write_vapid(
     cle: &[u8; PRIVATE_KEY_OCTETS],
     out: &mut [u8],
 ) -> Result<usize, Error> {
-    use p256::ecdsa::signature::Signer as _;
     let propre = |texte: &str| {
         !texte.is_empty()
             && texte.len() <= 255
@@ -224,20 +225,212 @@ pub fn write_vapid(
 
     let mut plume = Plume::neuve(out);
     plume.pousser(b"vapid t=");
-    let debut = plume.ecrits;
-    plume.base64url(br#"{"typ":"JWT","alg":"ES256"}"#);
-    plume.pousser(b".");
-    plume.base64url(claims.get(..longueur).unwrap_or_default());
-    let signe = plume.ecrits;
-    let signature: p256::ecdsa::Signature =
-        signataire.sign(plume.out.get(debut..signe).unwrap_or_default());
-    plume.pousser(b".");
-    plume.base64url(&signature.to_bytes());
+    signer_un_jwt(
+        &mut plume,
+        br#"{"typ":"JWT","alg":"ES256"}"#,
+        claims.get(..longueur).unwrap_or_default(),
+        &signataire,
+    );
     plume.pousser(b", k=");
     plume.base64url(&publique(&p256::SecretKey::from(
         signataire.as_nonzero_scalar(),
     )));
     plume.fin()
+}
+
+/// Écrit un JWT ES256 : en-tête et revendications en base64url, puis la
+/// signature (§3.4 de RFC 7518 : `r` et `s`, trente-deux octets chacun).
+fn signer_un_jwt(
+    plume: &mut Plume<'_>,
+    entete: &[u8],
+    revendications: &[u8],
+    signataire: &p256::ecdsa::SigningKey,
+) {
+    use p256::ecdsa::signature::Signer as _;
+    let debut = plume.ecrits;
+    plume.base64url(entete);
+    plume.pousser(b".");
+    plume.base64url(revendications);
+    let signe = plume.ecrits;
+    let signature: p256::ecdsa::Signature =
+        signataire.sign(plume.out.get(debut..signe).unwrap_or_default());
+    plume.pousser(b".");
+    plume.base64url(&signature.to_bytes());
+}
+
+/// Écrit la valeur du champ `authorization` d'APNs : `bearer <jwt>`, le jeton
+/// de fournisseur qu'Apple exige (« token-based connection »).
+///
+/// `identifiant` est le Key ID de la clef `.p8`, `equipe` le Team ID du compte
+/// de développeur, `emis` l'instant d'émission en secondes. Apple refuse un
+/// jeton de plus d'une heure, et un jeton renouvelé plus souvent que toutes les
+/// vingt minutes : c'est à l'appelant de le garder entre deux.
+///
+/// # Errors
+///
+/// [`Error::BadClaim`] si un identifiant n'est pas fait d'une à trente-deux
+/// lettres et chiffres ASCII ; [`Error::BadPrivateKey`] ;
+/// [`Error::BufferTooSmall`].
+pub fn write_apns_token(
+    identifiant: &str,
+    equipe: &str,
+    emis: u64,
+    cle: &[u8; PRIVATE_KEY_OCTETS],
+    out: &mut [u8],
+) -> Result<usize, Error> {
+    let propre = |texte: &str| {
+        (1..=32).contains(&texte.len()) && texte.bytes().all(|octet| octet.is_ascii_alphanumeric())
+    };
+    if !(propre(identifiant) && propre(equipe)) {
+        return Err(Error::BadClaim);
+    }
+    let signataire = p256::ecdsa::SigningKey::from_slice(cle).map_err(|_| Error::BadPrivateKey)?;
+    let mut entete = [0_u8; 96];
+    let mut plume = Plume::neuve(&mut entete);
+    plume.pousser(br#"{"alg":"ES256","kid":""#);
+    plume.pousser(identifiant.as_bytes());
+    plume.pousser(br#""}"#);
+    let longueur_entete = plume.ecrits;
+    let mut claims = [0_u8; 96];
+    let mut plume = Plume::neuve(&mut claims);
+    plume.pousser(br#"{"iss":""#);
+    plume.pousser(equipe.as_bytes());
+    plume.pousser(br#"","iat":"#);
+    plume.nombre(emis);
+    plume.pousser(b"}");
+    let longueur_claims = plume.ecrits;
+
+    let mut plume = Plume::neuve(out);
+    plume.pousser(b"bearer ");
+    signer_un_jwt(
+        &mut plume,
+        entete.get(..longueur_entete).unwrap_or_default(),
+        claims.get(..longueur_claims).unwrap_or_default(),
+        &signataire,
+    );
+    plume.fin()
+}
+
+/// Lit une clef d'authentification APNs — le fichier `.p8` qu'Apple livre : une
+/// `PRIVATE KEY` PKCS#8 (RFC 5958) en PEM, sur la courbe P-256.
+///
+/// # UNE LECTURE ÉTROITE
+///
+/// Seule la forme qu'Apple écrit passe : la version zéro, l'algorithme
+/// `id-ecPublicKey` sur `prime256v1`, et une `ECPrivateKey` (RFC 5915) de
+/// version un qui porte trente-deux octets. Rien d'autre n'est deviné.
+///
+/// # Errors
+///
+/// [`Error::BadKeyFile`] pour tout ce qui n'a pas cette forme ;
+/// [`Error::BadPrivateKey`] si les trente-deux octets ne sont pas un scalaire.
+pub fn decode_p8(pem: &[u8]) -> Result<[u8; PRIVATE_KEY_OCTETS], Error> {
+    const DEBUT: &[u8] = b"-----BEGIN PRIVATE KEY-----";
+    const FIN: &[u8] = b"-----END PRIVATE KEY-----";
+    let apres = pem
+        .windows(DEBUT.len())
+        .position(|fenetre| fenetre == DEBUT)
+        .and_then(|rang| pem.get(rang.saturating_add(DEBUT.len())..))
+        .ok_or(Error::BadKeyFile)?;
+    let corps = apres
+        .windows(FIN.len())
+        .position(|fenetre| fenetre == FIN)
+        .and_then(|rang| apres.get(..rang))
+        .ok_or(Error::BadKeyFile)?;
+    let mut der = [0_u8; 256];
+    let longueur = base64_standard(corps, &mut der)?;
+    let der = der.get(..longueur).unwrap_or_default();
+
+    // PrivateKeyInfo ::= SEQUENCE { version, algorithm, privateKey OCTET STRING }
+    let (info, reste) = element(der, 0x30)?;
+    if !reste.is_empty() {
+        return Err(Error::BadKeyFile);
+    }
+    let (version, info) = element(info, 0x02)?;
+    let (algorithme, info) = element(info, 0x30)?;
+    let (cle_privee, _) = element(info, 0x04)?;
+    // id-ecPublicKey (1.2.840.10045.2.1), prime256v1 (1.2.840.10045.3.1.7).
+    const ALGORITHME: &[u8] = &[
+        0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce,
+        0x3d, 0x03, 0x01, 0x07,
+    ];
+    if version != [0] || algorithme != ALGORITHME {
+        return Err(Error::BadKeyFile);
+    }
+    // ECPrivateKey ::= SEQUENCE { version 1, privateKey OCTET STRING, … }
+    let (ec, _) = element(cle_privee, 0x30)?;
+    let (version, ec) = element(ec, 0x02)?;
+    let (scalaire, _) = element(ec, 0x04)?;
+    let scalaire: [u8; PRIVATE_KEY_OCTETS] = scalaire.try_into().map_err(|_| Error::BadKeyFile)?;
+    if version != [1] {
+        return Err(Error::BadKeyFile);
+    }
+    p256::SecretKey::from_slice(&scalaire).map_err(|_| Error::BadPrivateKey)?;
+    Ok(scalaire)
+}
+
+/// Un élément DER de cette étiquette : son contenu, et ce qui le suit.
+fn element(der: &[u8], etiquette: u8) -> Result<(&[u8], &[u8]), Error> {
+    let (&lue, reste) = der.split_first().ok_or(Error::BadKeyFile)?;
+    let (&premier, reste) = reste.split_first().ok_or(Error::BadKeyFile)?;
+    let (longueur, reste) = match premier {
+        0..=0x7f => (usize::from(premier), reste),
+        0x81 => {
+            let (&un, reste) = reste.split_first().ok_or(Error::BadKeyFile)?;
+            (usize::from(un), reste)
+        }
+        0x82 => {
+            let (deux, reste) = reste.split_at_checked(2).ok_or(Error::BadKeyFile)?;
+            let valeur = deux.iter().fold(0_usize, |acc, octet| {
+                acc.saturating_mul(256).saturating_add(usize::from(*octet))
+            });
+            (valeur, reste)
+        }
+        _ => return Err(Error::BadKeyFile),
+    };
+    if lue != etiquette {
+        return Err(Error::BadKeyFile);
+    }
+    reste.split_at_checked(longueur).ok_or(Error::BadKeyFile)
+}
+
+/// Décode du base64 STANDARD (§4 de RFC 4648), blancs ignorés, remplissage
+/// admis à la fin seulement.
+fn base64_standard(texte: &[u8], out: &mut [u8]) -> Result<usize, Error> {
+    let valeur = |octet: u8| -> Option<u32> {
+        let rang = match octet {
+            b'A'..=b'Z' => octet.wrapping_sub(b'A'),
+            b'a'..=b'z' => octet.wrapping_sub(b'a').wrapping_add(26),
+            b'0'..=b'9' => octet.wrapping_sub(b'0').wrapping_add(52),
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        };
+        Some(u32::from(rang))
+    };
+    let mut plume = Plume::neuve(out);
+    let mut accumulateur = 0_u32;
+    let mut bits = 0_u32;
+    let mut fini = false;
+    for octet in texte
+        .iter()
+        .copied()
+        .filter(|octet| !octet.is_ascii_whitespace())
+    {
+        if octet == b'=' {
+            fini = true;
+            continue;
+        }
+        // Rien ne suit le remplissage.
+        let six = valeur(octet).filter(|_| !fini).ok_or(Error::BadKeyFile)?;
+        accumulateur = (accumulateur << 6 | six) & 0x00ff_ffff;
+        bits = bits.saturating_add(6);
+        if bits >= 8 {
+            bits = bits.saturating_sub(8);
+            plume.pousser(&[u8::try_from((accumulateur >> bits) & 0xff).unwrap_or(0)]);
+        }
+    }
+    plume.fin().map_err(|_| Error::BadKeyFile)
 }
 
 /// Écrit `octets` en base64url sans remplissage (§5 de RFC 4648), et rend ce

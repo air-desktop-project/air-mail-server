@@ -548,6 +548,11 @@ impl ApiMaildir {
         }
         // **ET SES SESSIONS FERMENT**, par mot de passe comme par clef.
         self.sessions.fermer_le_compte(nom);
+        // Et ce que le réveil a compté pour lui s'oublie : un compte recréé
+        // sous ce nom n'hérite pas des compteurs de l'ancien.
+        if let Some(reveil) = self.reveil.as_ref() {
+            reveil.oublier(nom);
+        }
         Served {
             status: StatusCode::NO_CONTENT,
             media: JSON_MEDIA_TYPE,

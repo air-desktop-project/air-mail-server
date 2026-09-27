@@ -14,8 +14,9 @@
 //! 2. **UN MESSAGE CHIFFRÉ A LA TAILLE ANNONCÉE** : le clair, plus l'en-tête,
 //!    le délimiteur et l'étiquette — et son en-tête porte le sel et la clef
 //!    éphémère.
-//! 3. **UN JETON VAPID EST DE L'ASCII IMPRIMABLE**, sans fin de ligne : il
-//!    devient un champ HTTP.
+//! 3. **UN JETON VAPID OU APNS EST DE L'ASCII IMPRIMABLE**, sans fin de
+//!    ligne : il devient un champ HTTP.
+//! 4. **UNE CLEF `.p8` LUE EST UN SCALAIRE** qui signe.
 
 #![no_main]
 
@@ -61,5 +62,20 @@ fuzz_target!(|entree: Entree<'_>| {
         // PROPRIÉTÉ 3.
         assert!(jeton[..n].iter().all(|octet| (b' '..=b'~').contains(octet)));
         assert!(jeton[..n].starts_with(b"vapid t="));
+    }
+    if let Ok(n) = ams_push::write_apns_token(
+        entree.audience,
+        entree.contact,
+        entree.expiration,
+        &entree.cle,
+        &mut jeton,
+    ) {
+        // PROPRIÉTÉ 3.
+        assert!(jeton[..n].iter().all(|octet| (b' '..=b'~').contains(octet)));
+        assert!(jeton[..n].starts_with(b"bearer "));
+    }
+    // PROPRIÉTÉ 4.
+    if let Ok(cle) = ams_push::decode_p8(entree.clair) {
+        assert!(ams_push::vapid_public_key(&cle).is_ok());
     }
 });

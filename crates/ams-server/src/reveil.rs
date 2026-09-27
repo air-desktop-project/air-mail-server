@@ -225,6 +225,37 @@ impl Envoyeur for SansTransport {
     }
 }
 
+/// L'aiguillage : chaque canal à son envoyeur, et « non transmis » pour un
+/// canal qui n'en a pas.
+#[derive(Default)]
+pub struct Aiguillage {
+    /// Web Push, si une clef VAPID est nommée.
+    pub web_push: Option<Arc<dyn Envoyeur>>,
+    /// APNs, si une clef `.p8` est nommée.
+    pub apns: Option<Arc<dyn Envoyeur>>,
+    /// FCM, si un compte de service est nommé.
+    pub fcm: Option<Arc<dyn Envoyeur>>,
+}
+
+impl Envoyeur for Aiguillage {
+    fn envoyer<'a>(
+        &'a self,
+        appareil: &'a ams_config::Device,
+        push: &'a ams_config::Push,
+        compte: &'a str,
+    ) -> EnvoiEnCours<'a> {
+        let voie = match push.channel() {
+            ams_config::PushChannel::WebPush => self.web_push.as_ref(),
+            ams_config::PushChannel::Apns => self.apns.as_ref(),
+            ams_config::PushChannel::Fcm => self.fcm.as_ref(),
+        };
+        match voie {
+            Some(envoyeur) => envoyeur.envoyer(appareil, push, compte),
+            None => SansTransport.envoyer(appareil, push, compte),
+        }
+    }
+}
+
 /// Ce que le réveil a fait pour un compte : des nombres, pour `/v1/metrics`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Bilan {
@@ -271,6 +302,15 @@ impl Reveil {
             .get(compte)
             .copied()
             .unwrap_or_default()
+    }
+
+    /// Oublie ce que le réveil a fait pour ce compte : il a été retiré, et un
+    /// compte recréé sous le même nom ne doit pas hériter de ses compteurs.
+    pub fn oublier(&self, compte: &str) {
+        self.bilans
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(compte);
     }
 
     /// Compte un envoi.

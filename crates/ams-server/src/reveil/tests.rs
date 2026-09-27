@@ -249,6 +249,10 @@ async fn un_signal_reveille_les_appareils_abonnes() {
     assert_eq!(reveil.bilan("support"), bilan);
     assert_eq!(reveil.bilan("paul"), bilan);
     assert_eq!(reveil.bilan("autre"), Bilan::default());
+    // Un compte retiré n'a plus de bilan.
+    reveil.oublier("support");
+    assert_eq!(reveil.bilan("support"), Bilan::default());
+    assert_eq!(reveil.bilan("paul"), bilan);
 }
 
 /// Un échec se compte comme un échec.
@@ -361,4 +365,56 @@ async fn un_abonnement_perime_se_retire() {
     );
     assert_eq!(reveil.bilan("marie").echoues, 1);
     let _ = std::fs::remove_dir_all(&atelier);
+}
+
+/// **CHAQUE CANAL À SON ENVOYEUR**, et un canal sans envoyeur n'est pas
+/// transmis.
+#[test]
+fn l_aiguillage_confie_chaque_canal_au_sien() {
+    let web = Arc::new(Temoin {
+        vus: Mutex::default(),
+        rendu: Some(Envoi::Transmis),
+    });
+    let apple = Arc::new(Temoin {
+        vus: Mutex::default(),
+        rendu: Some(Envoi::Echec),
+    });
+    let aiguillage = super::Aiguillage {
+        web_push: Some(Arc::clone(&web) as Arc<dyn Envoyeur>),
+        apns: Some(Arc::clone(&apple) as Arc<dyn Envoyeur>),
+        fcm: None,
+    };
+    let sous = |canal, jeton: &str, cle: Vec<u8>, auth: Vec<u8>| {
+        ams_config::Push::new(canal, String::from(jeton), cle, auth, 1).expect("recevable")
+    };
+    let cle = ams_push::vapid_public_key(&[3; 32])
+        .expect("une clef")
+        .to_vec();
+    let x = appareil("x", "x1", false);
+    let web_push = sous(
+        ams_config::PushChannel::WebPush,
+        "https://p.example.com/a",
+        cle,
+        std::vec![1; 16],
+    );
+    let apns = sous(
+        ams_config::PushChannel::Apns,
+        &"ab".repeat(32),
+        Vec::new(),
+        Vec::new(),
+    );
+    let fcm = sous(
+        ams_config::PushChannel::Fcm,
+        "jeton",
+        Vec::new(),
+        Vec::new(),
+    );
+    assert_eq!(
+        pret(aiguillage.envoyer(&x, &web_push, "x")),
+        Envoi::Transmis
+    );
+    assert_eq!(pret(aiguillage.envoyer(&x, &apns, "x")), Envoi::Echec);
+    assert_eq!(pret(aiguillage.envoyer(&x, &fcm, "x")), Envoi::NonTransmis);
+    assert_eq!(web.vus.lock().expect("verrou").len(), 1);
+    assert_eq!(apple.vus.lock().expect("verrou").len(), 1);
 }

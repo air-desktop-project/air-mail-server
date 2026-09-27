@@ -909,6 +909,25 @@ fn afficher(config: &Configuration) {
         }
     );
     println!(
+        "APNs               {}",
+        if config.apns_key.is_empty() {
+            String::from("AUCUNE CLEF — les appareils Apple abonnés ne sont pas réveillés")
+        } else {
+            format!(
+                "clef `{}` (Key ID {}, Team ID {}), application `{}`, {}",
+                config.apns_key,
+                config.apns_key_id,
+                config.apns_team_id,
+                config.apns_topic,
+                if config.apns_sandbox {
+                    "DÉVELOPPEMENT (api.sandbox.push.apple.com)"
+                } else {
+                    "production (api.push.apple.com)"
+                }
+            )
+        }
+    );
+    println!(
         "mdp applicatifs    {}",
         if config.app_passwords.is_empty() {
             String::from("AUCUN MAGASIN — seul le mot de passe principal ouvre IMAP, SMTP, POP3")

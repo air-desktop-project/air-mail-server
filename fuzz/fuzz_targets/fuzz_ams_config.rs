@@ -139,6 +139,11 @@ struct Entree {
     drafts: String,
     push_vapid_key: String,
     push_contact: String,
+    apns_key: String,
+    apns_key_id: String,
+    apns_team_id: String,
+    apns_topic: String,
+    apns_sandbox: bool,
     /// Le dossier des rapports TLS, et le drapeau de remise — LIBRES tous les
     /// deux, y compris incohérents entre eux.
     tlsrpt: String,
@@ -206,6 +211,11 @@ fuzz_target!(|entree: Entree| {
         drafts: entree.drafts.clone(),
         push_vapid_key: entree.push_vapid_key.clone(),
         push_contact: entree.push_contact.clone(),
+        apns_key: entree.apns_key.clone(),
+        apns_key_id: entree.apns_key_id.clone(),
+        apns_team_id: entree.apns_team_id.clone(),
+        apns_topic: entree.apns_topic.clone(),
+        apns_sandbox: entree.apns_sandbox,
         require_fqdn_helo: entree.helo_qualifie,
         require_fqdn_sender: entree.expediteur_qualifie,
         require_fqdn_recipient: entree.destinataire_qualifie,

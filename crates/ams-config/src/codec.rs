@@ -422,6 +422,17 @@ pub struct Configuration {
     /// Où l'exploitant se joint, pour les services de push : `mailto:…` ou
     /// `https:…`.
     pub push_contact: String,
+    /// La clef `.p8` d'APNs, ou une chaîne vide : APNs n'est alors pas
+    /// transmis.
+    pub apns_key: String,
+    /// Son identifiant (« Key ID »).
+    pub apns_key_id: String,
+    /// L'équipe du compte de développeur (« Team ID »).
+    pub apns_team_id: String,
+    /// L'identifiant de l'application (« bundle id »).
+    pub apns_topic: String,
+    /// L'environnement de développement d'Apple plutôt que la production.
+    pub apns_sandbox: bool,
     /// La file d'attente du serveur.
     pub queue: Queue,
     /// MTA-STS (RFC 8461).
@@ -1013,6 +1024,11 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
         drafts: texte(lu.get_drafts()?)?,
         push_vapid_key: texte(lu.get_push_vapid_key()?)?,
         push_contact: texte(lu.get_push_contact()?)?,
+        apns_key: texte(lu.get_apns_key()?)?,
+        apns_key_id: texte(lu.get_apns_key_id()?)?,
+        apns_team_id: texte(lu.get_apns_team_id()?)?,
+        apns_topic: texte(lu.get_apns_topic()?)?,
+        apns_sandbox: lu.get_apns_sandbox(),
         queue,
         mtasts,
         tlsrpt,
@@ -1162,6 +1178,11 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
         ecrit.set_drafts(&config.drafts);
         ecrit.set_push_vapid_key(&config.push_vapid_key);
         ecrit.set_push_contact(&config.push_contact);
+        ecrit.set_apns_key(&config.apns_key);
+        ecrit.set_apns_key_id(&config.apns_key_id);
+        ecrit.set_apns_team_id(&config.apns_team_id);
+        ecrit.set_apns_topic(&config.apns_topic);
+        ecrit.set_apns_sandbox(config.apns_sandbox);
         {
             let mut emission = ecrit.reborrow().init_relay();
             emission.set_enabled(config.relay.enabled);
@@ -1386,6 +1407,11 @@ mod tests {
             drafts: String::from("/var/lib/air-mail/brouillons"),
             push_vapid_key: String::from("/var/lib/air-mail/vapid.key"),
             push_contact: String::from("mailto:postmaster@example.com"),
+            apns_key: String::from("/var/lib/air-mail/apns.p8"),
+            apns_key_id: String::from("ABC123DEFG"),
+            apns_team_id: String::from("DEF123GHIJ"),
+            apns_topic: String::from("ch.narro.mail"),
+            apns_sandbox: true,
             // Les trois écoutes d'un serveur réel : le `25` et le `587` en
             // `STARTTLS`, le `465` en TLS implicite.
             smtp_listeners: vec![

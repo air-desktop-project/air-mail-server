@@ -121,6 +121,7 @@ struct Vu {
     methode: String,
     chemin: String,
     ttl: String,
+    agent: String,
     corps: Vec<u8>,
 }
 
@@ -179,6 +180,9 @@ async fn faux_service(
                     vu.chemin = String::from_utf8_lossy(tete.path()).into_owned();
                     vu.ttl = String::from_utf8_lossy(tete.field(b"ttl").unwrap_or_default())
                         .into_owned();
+                    vu.agent =
+                        String::from_utf8_lossy(tete.field(b"user-agent").unwrap_or_default())
+                            .into_owned();
                     end_stream
                 }
                 Event::Data {
@@ -215,6 +219,9 @@ async fn faux_service(
 /// HTTP/2 par ALPN, la requête et son corps arrivent, la réponse revient.
 #[tokio::test(flavor = "multi_thread")]
 async fn un_reveil_part_et_sa_reponse_revient() {
+    // Voir `SOCKETS_EXCLUSIFS` : le test d'arrêt du serveur ne doit pas voir
+    // son port repris par nos écoutes.
+    let _exclusif = crate::SOCKETS_EXCLUSIFS.lock().await;
     let repertoire = std::env::temp_dir().join(std::format!("ams-push-{}", std::process::id()));
     std::fs::create_dir_all(&repertoire).expect("répertoire");
     let Some((cert, cle)) = certificat(&repertoire) else {
@@ -223,7 +230,10 @@ async fn un_reveil_part_et_sa_reponse_revient() {
     };
     let mut serveur = ams_tls::server_config(&cert, &cle).expect("matériel");
     serveur.alpn_protocols = ams_tls::alpn();
-    let ecoute = tokio::net::TcpListener::bind("127.0.0.1:0")
+    // SUR `[::1]`, ET NON SUR `127.0.0.1` : les tests de ce binaire tournent
+    // ensemble, et un port de `127.0.0.1` tout juste libéré par l'un est celui
+    // qu'un autre croit fermé. La boucle IPv6 est un autre espace de ports.
+    let ecoute = tokio::net::TcpListener::bind("[::1]:0")
         .await
         .expect("liée");
     let adresse = ecoute.local_addr().expect("adresse");
@@ -253,11 +263,14 @@ async fn un_reveil_part_et_sa_reponse_revient() {
     assert_eq!(vu.methode, "Post");
     assert_eq!(vu.chemin, "/wpush/abc");
     assert_eq!(vu.ttl, "60");
+    // **LE SERVEUR S'ANNONCE**, sans version : un service peut refuser une
+    // requête anonyme.
+    assert_eq!(vu.agent, "air-mail-server");
     assert_eq!(vu.corps, "le message chiffré".as_bytes());
 
     // **UN AUTRE NOM QUE CELUI DU CERTIFICAT NE PASSE PAS** : la vérification
     // est réelle.
-    let ecoute = tokio::net::TcpListener::bind("127.0.0.1:0")
+    let ecoute = tokio::net::TcpListener::bind("[::1]:0")
         .await
         .expect("liée");
     let adresse = ecoute.local_addr().expect("adresse");
@@ -284,7 +297,7 @@ async fn un_reveil_part_et_sa_reponse_revient() {
     let _ = accepte.await;
 
     // **SANS HTTP/2, PAS D'ÉCHANGE.**
-    let ecoute = tokio::net::TcpListener::bind("127.0.0.1:0")
+    let ecoute = tokio::net::TcpListener::bind("[::1]:0")
         .await
         .expect("liée");
     let adresse = ecoute.local_addr().expect("adresse");

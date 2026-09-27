@@ -17,8 +17,6 @@
 //! réemployer défait AES-GCM. S'ils ne se tirent pas, rien ne part — un
 //! message chiffré avec un aléa douteux vaut moins que pas de message.
 
-use std::sync::Arc;
-
 use crate::reveil::{Envoi, EnvoiEnCours, Envoyeur};
 
 /// Combien de temps le service garde un réveil pour un appareil éteint.
@@ -31,28 +29,25 @@ const TTL: &[u8] = b"3600";
 /// plafond de §2 de RFC 8292.
 const VAPID_SECONDES: u64 = 12 * 3600;
 
-/// L'envoyeur Web Push, et à qui passer les autres canaux.
+/// L'envoyeur Web Push.
 pub struct WebPush {
     transport: ams_loop_tokio::PushTransport,
     cle: [u8; ams_push::PRIVATE_KEY_OCTETS],
     contact: String,
-    autres: Arc<dyn Envoyeur>,
 }
 
 impl WebPush {
-    /// Un envoyeur Web Push, qui confie APNs et FCM à `autres`.
+    /// Un envoyeur Web Push.
     #[must_use]
     pub fn new(
         transport: ams_loop_tokio::PushTransport,
         cle: [u8; ams_push::PRIVATE_KEY_OCTETS],
         contact: String,
-        autres: Arc<dyn Envoyeur>,
     ) -> Self {
         Self {
             transport,
             cle,
             contact,
-            autres,
         }
     }
 
@@ -76,7 +71,19 @@ impl WebPush {
             .post(push.token(), &champs, &requete.corps)
             .await
         {
-            Ok(reponse) => verdict(reponse.status),
+            Ok(reponse) => {
+                let envoi = verdict(reponse.status);
+                // **UN REFUS SE DIT**, par son seul statut : l'épreuve de la
+                // 0.2.33 a échoué sans laisser de trace, et c'est le pire des
+                // échecs.
+                if envoi != Envoi::Transmis {
+                    eprintln!(
+                        "air-mail-server : Web Push — le service a répondu {}",
+                        reponse.status
+                    );
+                }
+                envoi
+            }
             Err(faute) => {
                 eprintln!("air-mail-server : Web Push — {faute:?}");
                 Envoi::Echec
@@ -88,14 +95,11 @@ impl WebPush {
 impl Envoyeur for WebPush {
     fn envoyer<'a>(
         &'a self,
-        appareil: &'a ams_config::Device,
+        _: &'a ams_config::Device,
         push: &'a ams_config::Push,
         compte: &'a str,
     ) -> EnvoiEnCours<'a> {
-        match push.channel() {
-            ams_config::PushChannel::WebPush => Box::pin(self.poster(push, compte)),
-            _ => self.autres.envoyer(appareil, push, compte),
-        }
+        Box::pin(self.poster(push, compte))
     }
 }
 

@@ -38,6 +38,14 @@ use crate::resolver::Resolver;
 /// ils refusent ; seize kibioctets, c'est cent fois cela.
 pub const RESPONSE_BODY_MAX: usize = 16 * 1024;
 
+/// Comment le serveur s'annonce aux services de notifications.
+///
+/// **SANS NUMÉRO DE VERSION**, comme partout ailleurs dans ce serveur : dire
+/// laquelle on fait tourner n'apprendrait qu'aux curieux ce qu'on n'a pas
+/// encore corrigé. Mais s'annoncer, oui : un service peut refuser une requête
+/// anonyme — l'épreuve de la 0.2.33 en a rencontré un, qui répondait `402`.
+pub const USER_AGENT: &[u8] = b"air-mail-server";
+
 /// Ce qu'on retient au plus de cadres pas encore consommés.
 const RECU_MAX: usize = 256 * 1024;
 
@@ -216,11 +224,14 @@ pub(crate) async fn echanger(
     }
 
     let mut client = Box::new(ams_proto_h2::Client::new());
+    let mut champs: Vec<(&[u8], &[u8])> = Vec::with_capacity(fields.len().saturating_add(1));
+    champs.extend_from_slice(fields);
+    champs.push((b"user-agent", USER_AGENT));
     let requete = ams_proto_h2::Request {
         method: b"POST",
         authority: hote.as_bytes(),
         path: chemin.as_bytes(),
-        fields,
+        fields: &champs,
         body,
     };
     let mut sortie =

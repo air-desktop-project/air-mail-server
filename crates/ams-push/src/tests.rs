@@ -217,3 +217,208 @@ fn le_base64url_s_ecrit_sans_remplissage() {
         Err(Error::BufferTooSmall)
     );
 }
+
+// ── APNs ────────────────────────────────────────────────────────────────────
+
+use super::{decode_p8, write_apns_token};
+
+/// Une clef `.p8` d'ESSAI, fabriquée par `openssl pkcs8 -topk8` comme celles
+/// qu'Apple livre — et son scalaire, tel qu'`openssl ec -text` le lit. Elle ne
+/// sert nulle part ailleurs.
+const P8: &str = "-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgvbUYvu4iOcQREByj
+YQmsWz/cMxaW+fDpfMxgAmlBXbKhRANCAASUJeciHAlEyyIZxIt5RYgS8mhuLF4Q
+xgwD6RstvOSWGz2m1fqnUVKuiXCBeM1sUwHqlUBiUa+VvK51hxhKtQZR
+-----END PRIVATE KEY-----
+";
+const SCALAIRE: [u8; 32] = [
+    0xbd, 0xb5, 0x18, 0xbe, 0xee, 0x22, 0x39, 0xc4, 0x11, 0x10, 0x1c, 0xa3, 0x61, 0x09, 0xac, 0x5b,
+    0x3f, 0xdc, 0x33, 0x16, 0x96, 0xf9, 0xf0, 0xe9, 0x7c, 0xcc, 0x60, 0x02, 0x69, 0x41, 0x5d, 0xb2,
+];
+
+/// **LA CLEF QU'OPENSSL ÉCRIT SE LIT À L'OCTET** — la forme exacte d'Apple.
+#[test]
+fn une_clef_p8_se_lit() {
+    assert_eq!(decode_p8(P8.as_bytes()), Ok(SCALAIRE));
+    // Du texte autour ne gêne pas.
+    let entouree = std::format!("Clef d'essai\n{P8}\nfin\n");
+    assert_eq!(decode_p8(entouree.as_bytes()), Ok(SCALAIRE));
+}
+
+/// Ce qui n'a pas la forme d'une clef `.p8` P-256 se refuse.
+#[test]
+fn ce_qui_n_est_pas_une_clef_p8_se_refuse() {
+    let remplacer = |de: &str, par: &str| P8.replacen(de, par, 1);
+    let fautes = [
+        String::from("rien"),
+        String::from("-----BEGIN PRIVATE KEY-----\nMIGH"),
+        remplacer(
+            "-----BEGIN PRIVATE KEY-----",
+            "-----BEGIN EC PRIVATE KEY-----",
+        ),
+        // Un signe hors de l'alphabet, ou après le remplissage.
+        remplacer("MIGH", "MI!H"),
+        remplacer("tQZR", "tQ=R"),
+        // Des octets tronqués : le DER ne se ferme pas.
+        remplacer(
+            "xgwD6RstvOSWGz2m1fqnUVKuiXCBeM1sUwHqlUBiUa+VvK51hxhKtQZR\n",
+            "",
+        ),
+        // La version (0 → 1), la courbe (prime256v1 → secp384r1 tronquée),
+        // la version de l'ECPrivateKey (1 → 2).
+        remplacer("MIGHAgEAMBMG", "MIGHAgEBMBMG"),
+        remplacer("AwEHBG0w", "AwEIBG0w"),
+        remplacer("awIBAQQg", "awIBAgQg"),
+        // Une longueur de scalaire qui n'est pas trente-deux.
+        remplacer("awIBAQQg", "awIBAQQf"),
+        // Un en-tête d'élément qui n'est ni court, ni sur un ou deux octets.
+        String::from("-----BEGIN PRIVATE KEY-----\nMIQAAAAA\n-----END PRIVATE KEY-----"),
+        // Un élément qui annonce plus qu'il ne porte, et des octets après la
+        // séquence.
+        String::from("-----BEGIN PRIVATE KEY-----\nMIIBAAAA\n-----END PRIVATE KEY-----"),
+        String::from("-----BEGIN PRIVATE KEY-----\nMAAA\n-----END PRIVATE KEY-----"),
+        String::from("-----BEGIN PRIVATE KEY-----\nMIEA\n-----END PRIVATE KEY-----"),
+        String::from("-----BEGIN PRIVATE KEY-----\nMA==\n-----END PRIVATE KEY-----"),
+        String::from("-----BEGIN PRIVATE KEY-----\nMIE=\n-----END PRIVATE KEY-----"),
+        String::from("-----BEGIN PRIVATE KEY-----\nMII=\n-----END PRIVATE KEY-----"),
+        String::from("-----BEGIN PRIVATE KEY-----\n\n-----END PRIVATE KEY-----"),
+        // Plus long que ce qu'une clef P-256 occupe.
+        std::format!(
+            "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----",
+            "A".repeat(400)
+        ),
+    ];
+    for faute in fautes {
+        assert_eq!(
+            decode_p8(faute.as_bytes()),
+            Err(Error::BadKeyFile),
+            "{faute}"
+        );
+    }
+    // Trente-deux octets nuls : la forme est bonne, le scalaire non.
+    let nul = "-----BEGIN PRIVATE KEY-----
+MEECAQAwEwYHKoZIzj0CAQYIKoZIzj0DAQcEJzAlAgEBBCAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+-----END PRIVATE KEY-----";
+    assert_eq!(decode_p8(nul.as_bytes()), Err(Error::BadPrivateKey));
+}
+
+/// Le jeton de fournisseur d'APNs : `bearer`, un en-tête ES256 qui nomme la
+/// clef, l'équipe et l'instant — et une signature que la clef vérifie.
+#[test]
+fn un_jeton_apns_se_verifie() {
+    use p256::ecdsa::signature::Verifier as _;
+    let mut out = [0_u8; 512];
+    let n = write_apns_token(
+        "ABC123DEFG",
+        "DEF123GHIJ",
+        1_790_000_000,
+        &SCALAIRE,
+        &mut out,
+    )
+    .expect("écrivable");
+    let texte = String::from_utf8(out[..n].to_vec()).expect("ASCII");
+    let jeton = texte.strip_prefix("bearer ").expect("bearer");
+    let morceaux: Vec<&str> = jeton.split('.').collect();
+    assert_eq!(morceaux.len(), 3);
+    assert_eq!(
+        lire(morceaux[0]),
+        br#"{"alg":"ES256","kid":"ABC123DEFG"}"#.to_vec()
+    );
+    assert_eq!(
+        lire(morceaux[1]),
+        br#"{"iss":"DEF123GHIJ","iat":1790000000}"#.to_vec()
+    );
+    let publique = super::vapid_public_key(&SCALAIRE).expect("une clef");
+    let verifiante = p256::ecdsa::VerifyingKey::from_sec1_bytes(&publique).expect("un point");
+    let signature = p256::ecdsa::Signature::from_slice(&lire(morceaux[2])).expect("64 octets");
+    let signe = std::format!("{}.{}", morceaux[0], morceaux[1]);
+    assert!(verifiante.verify(signe.as_bytes(), &signature).is_ok());
+    // Des identifiants hors forme, une clef nulle, une place trop courte.
+    for (id, equipe) in [
+        ("", "E"),
+        ("K", ""),
+        ("K-1", "E"),
+        ("K", "é"),
+        ("K", &"E".repeat(33)),
+    ] {
+        assert_eq!(
+            write_apns_token(id, equipe, 1, &SCALAIRE, &mut out),
+            Err(Error::BadClaim),
+            "{id} {equipe}"
+        );
+    }
+    assert_eq!(
+        write_apns_token("K", "E", 1, &[0; 32], &mut out),
+        Err(Error::BadPrivateKey)
+    );
+    assert_eq!(
+        write_apns_token("K", "E", 1, &SCALAIRE, &mut out[..20]),
+        Err(Error::BufferTooSmall)
+    );
+}
+
+/// Enveloppe du DER en PEM `PRIVATE KEY`.
+fn pem(der: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut texte = String::new();
+    for groupe in der.chunks(3) {
+        let octets = [
+            groupe.first().copied().unwrap_or(0),
+            groupe.get(1).copied().unwrap_or(0),
+            groupe.get(2).copied().unwrap_or(0),
+        ];
+        let n = u32::from_be_bytes([0, octets[0], octets[1], octets[2]]);
+        for (rang, decalage) in [18_u32, 12, 6, 0].into_iter().enumerate() {
+            let signe = ALPHABET[usize::try_from((n >> decalage) & 63).expect("six bits")];
+            texte.push(if rang <= groupe.len() {
+                char::from(signe)
+            } else {
+                '='
+            });
+        }
+    }
+    std::format!("-----BEGIN PRIVATE KEY-----\n{texte}\n-----END PRIVATE KEY-----\n")
+}
+
+/// Chaque élément de la structure se vérifie, à sa place.
+#[test]
+fn chaque_element_du_der_se_verifie() {
+    const ALGORITHME: [u8; 21] = [
+        0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, 0x86,
+        0x48, 0xce, 0x3d, 0x03, 0x01, 0x07,
+    ];
+    let sequence = |corps: &[u8]| {
+        let mut der = std::vec![0x30, u8::try_from(corps.len()).expect("court")];
+        der.extend_from_slice(corps);
+        der
+    };
+    let avec = |suite: &[u8]| {
+        let mut corps = std::vec![0x02, 0x01, 0x00];
+        corps.extend_from_slice(&ALGORITHME);
+        corps.extend_from_slice(suite);
+        sequence(&corps)
+    };
+    for der in [
+        // Un algorithme qui n'est pas une séquence.
+        sequence(&[0x02, 0x01, 0x00, 0x31, 0x00]),
+        // Pas de clef privée derrière l'algorithme.
+        avec(&[]),
+        // Une clef privée qui n'est pas une `ECPrivateKey`.
+        avec(&[0x04, 0x01, 0x05]),
+        // Une `ECPrivateKey` sans version, puis sans scalaire.
+        avec(&[0x04, 0x02, 0x30, 0x00]),
+        avec(&[0x04, 0x05, 0x30, 0x03, 0x02, 0x01, 0x01]),
+    ] {
+        assert_eq!(
+            decode_p8(pem(&der).as_bytes()),
+            Err(Error::BadKeyFile),
+            "{der:02x?}"
+        );
+    }
+    // Et la bonne forme, reconstruite ici, se lit.
+    let mut ec = std::vec![0x02, 0x01, 0x01, 0x04, 0x20];
+    ec.extend_from_slice(&SCALAIRE);
+    let mut octets = std::vec![0x04, u8::try_from(ec.len() + 2).expect("court")];
+    octets.extend(sequence(&ec));
+    assert_eq!(decode_p8(pem(&avec(&octets)).as_bytes()), Ok(SCALAIRE));
+}
