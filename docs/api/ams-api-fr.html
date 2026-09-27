@@ -762,6 +762,16 @@ Le corps du message.
   <p>Le serveur compose lui-même le <code>multipart/mixed</code> : le corps en première partie, puis chaque pièce en base64, <code>Content-Disposition: attachment</code>, un nom accentué écrit selon RFC 2231. L'envoi suit les règles de <code>/v1/submissions</code> — le <code>From:</code> du compte, le <code>Bcc:</code> retiré, la signature DKIM. Envoyé ou rangé, le brouillon disparaît ; sinon il expire au bout de vingt-quatre heures. <code>GET</code> et <code>DELETE /v1/drafts/{id}</code> le lisent et l'abandonnent ; <code>DELETE …/attachments/{n}</code> retire une pièce. <code>501</code> si ce serveur ne sert pas les brouillons.</p>
 </div>
 
+<div class="ressource">
+  <div class="ligne"><span class="chemin">Idempotency-Key: "…"</span><span class="portee">soumission, envoi, dépôt</span></div>
+  <p><strong>Rejouer sans doubler.</strong> Une soumission, l'envoi ou le rangement d'un brouillon, un dépôt : ces requêtes acceptent le champ <code>Idempotency-Key</code> — une chaîne structurée (<code>"8e03978e-40d5-43e8"</code>), ASCII imprimable, 255 caractères au plus. Si la réponse se perd et que le client réessaie <strong>avec la même clé et la même requête</strong>, le serveur rend la première réponse, sans rien refaire : le message ne part pas deux fois. La même clé pour une autre requête rend <code>422</code> (<code>/problems/idempotency-key-reused</code>) ; la même clé pendant que la première est en cours, <code>409</code>. Une réponse se rejoue pendant vingt-quatre heures, redémarrage du serveur compris. Un échec de notre fait (<code>5xx</code>) ne se retient pas : réessayez sous la même clé.</p>
+</div>
+
+<div class="ressource">
+  <div class="ligne"><span class="chemin">« Envoyés »</span><span class="portee">après chaque envoi</span></div>
+  <p><strong>Ce qui part par l'API se range dans la boîte d'envoi</strong> — celle que le compte a désignée <code>\Sent</code> (RFC 6154), ou « Envoyés », créée avec cet usage s'il n'en a désigné aucune. La copie est marquée lue, et garde son <code>Bcc:</code>. Ne rangez donc pas vous-même une copie de ce que vous envoyez par l'API : elle y serait deux fois. Un échec de cette copie ne fait pas échouer l'envoi — le message est parti — et se dit au journal du serveur.</p>
+</div>
+
 <h3 id="r-moi"><span class="numero">5.8</span>Ce qui est à soi</h3>
 
 <p>Ces ressources n'exigent <strong>aucune portée</strong> : elles agissent sur <em>soi</em>, et le jeton présenté dit déjà de qui il s'agit. Exiger <code>admin</code> en ferait des routes que seul un administrateur peut emprunter, ce qui est exactement ce qu'elles existent pour éviter.</p>

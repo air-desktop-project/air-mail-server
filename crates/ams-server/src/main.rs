@@ -37,6 +37,7 @@ mod comptes;
 mod delegations;
 mod delivery;
 mod forme;
+mod idempotence;
 mod imap;
 mod incidents;
 mod journal;
@@ -331,13 +332,21 @@ fn monter_l_api(
                     u64::try_from(message_max).unwrap_or(u64::MAX),
                 );
                 brouillons.balayer_tout(maintenant());
+                // **LE REGISTRE DES CLÉS D'IDEMPOTENCE VIT À CÔTÉ**, sous un nom
+                // qui commence par un point : le balayage des brouillons ne le
+                // prend pas pour un compte.
+                let registre =
+                    crate::idempotence::Idempotence::new(racine_des_cles(&options.drafts));
+                registre.balayer(maintenant());
                 eprintln!(
                     "air-mail-server : brouillons sous `{}` — le corps d'abord, les pièces \
-                     jointes ensuite par morceaux ; un brouillon vit {} h.",
+                     jointes ensuite par morceaux ; un brouillon vit {} h. `Idempotency-Key` \
+                     servi : une soumission rejouée ne part pas deux fois.",
                     options.drafts,
                     crate::brouillons::DUREE_S / 3600
                 );
                 api.avec_brouillons(Arc::new(brouillons))
+                    .avec_idempotence(Arc::new(registre))
             };
             // **ET LA CLÉ QUI SCELLE LES INVITATIONS**, la même que celle des
             // jetons : sans elle, `POST /v1/invitations` rend 501.
@@ -2876,6 +2885,11 @@ fn dire_les_injections(protocole: &str, commande: &str, combien: u64) {
         "air-mail-server : {protocole} ; {combien} pair(s) ont glissé une commande derrière leur \
          `{commande}` — connexion REFUSÉE"
     );
+}
+
+/// Où vivent les clés d'idempotence : `<brouillons>/.cles`.
+fn racine_des_cles(brouillons: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(brouillons).join(".cles")
 }
 
 /// L'heure, en secondes depuis l'époque.

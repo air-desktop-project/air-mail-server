@@ -24,8 +24,6 @@
 //! raisons qui partagent un code partagent nécessairement un type. Il n'y a plus
 //! de règle à maintenir, seulement une fonction.
 
-use ams_proto_http::StatusCode;
-
 use crate::error::{Error, Reason};
 use crate::json::Json;
 
@@ -61,7 +59,7 @@ pub fn problem(reason: Reason, sortie: &mut [u8]) -> Result<&[u8], Error> {
     let status = reason.status();
     let mut json = Json::new(sortie);
     json.begin_object()?;
-    json.field_str("type", type_de(status))?;
+    json.field_str("type", type_de(reason))?;
     // §3.1.2 : « a short, human-readable summary of the problem type ». Le nôtre
     // ne nomme jamais la règle qu'on a touchée — voir [`Reason::message`].
     json.field_str("title", reason.message())?;
@@ -77,8 +75,17 @@ pub fn problem(reason: Reason, sortie: &mut [u8]) -> Result<&[u8], Error> {
 /// document's base URI ». Les écrire absolues obligerait ce serveur à connaître
 /// le nom sous lequel on l'atteint — qu'un mandataire peut changer sans le lui
 /// dire.
-fn type_de(status: StatusCode) -> &'static str {
-    match status.value() {
+///
+/// **DEUX RAISONS PARTAGENT `422`**, et le client doit les distinguer — l'une
+/// l'envoie vers un brouillon, l'autre lui dit qu'il a réutilisé une clé. Le
+/// type se choisit donc sur la raison, et se replie sur le code d'état.
+fn type_de(reason: Reason) -> &'static str {
+    match reason {
+        Reason::AttachmentsNeedDraft => return "/problems/attachments-need-draft",
+        Reason::IdempotencyKeyReused => return "/problems/idempotency-key-reused",
+        _ => {}
+    }
+    match reason.status().value() {
         400 => "/problems/bad-request",
         401 => "/problems/unauthorized",
         403 => "/problems/forbidden",
@@ -87,7 +94,6 @@ fn type_de(status: StatusCode) -> &'static str {
         409 => "/problems/conflict",
         410 => "/problems/gone",
         413 => "/problems/content-too-large",
-        422 => "/problems/attachments-need-draft",
         414 => "/problems/uri-too-long",
         501 => "/problems/not-implemented",
         // Tout ce qui est nôtre se dit d'une seule façon : le client n'a rien à

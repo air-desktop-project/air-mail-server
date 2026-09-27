@@ -22,7 +22,7 @@ use crate::error::Reason;
 /// Le `match` ci-dessous la rend exhaustive **à la compilation** : un motif de
 /// plus ne compile pas tant qu'on ne l'y a pas mis. C'est la même discipline
 /// que `Resource::scope`, et pour la même raison.
-fn toutes() -> [Reason; 24] {
+fn toutes() -> [Reason; 27] {
     // Ce `match` ne sert qu'à faire échouer la compilation si un motif
     // s'ajoute : sa valeur est jetée, sa VÉRIFICATION est tout l'objet.
     const fn _exhaustive(reason: Reason) -> u8 {
@@ -51,6 +51,9 @@ fn toutes() -> [Reason; 24] {
             Reason::BodyTooLarge => 21,
             Reason::AttachmentsNeedDraft => 22,
             Reason::DraftConflict => 23,
+            Reason::BadIdempotencyKey => 24,
+            Reason::IdempotencyKeyReused => 25,
+            Reason::IdempotencyInFlight => 26,
         }
     }
     [
@@ -78,6 +81,9 @@ fn toutes() -> [Reason; 24] {
         Reason::BodyTooLarge,
         Reason::AttachmentsNeedDraft,
         Reason::DraftConflict,
+        Reason::BadIdempotencyKey,
+        Reason::IdempotencyKeyReused,
+        Reason::IdempotencyInFlight,
     ]
 }
 
@@ -284,4 +290,15 @@ fn des_pieces_jointes_d_un_seul_tenant_se_disent_422() {
     assert!(dit.contains("/problems/attachments-need-draft"), "{dit}");
     assert!(dit.contains("\"status\":422"), "{dit}");
     assert!(dit.contains("/v1/drafts"), "{dit}");
+}
+
+/// **UNE CLÉ RÉUTILISÉE DIT `422` SOUS SON PROPRE TYPE** — distinct de celui
+/// des pièces jointes, qui partage le code.
+#[test]
+fn une_cle_reutilisee_a_son_propre_type() {
+    let dit = document(Reason::IdempotencyKeyReused);
+    assert!(dit.contains("/problems/idempotency-key-reused"), "{dit}");
+    assert!(dit.contains("\"status\":422"), "{dit}");
+    assert!(document(Reason::IdempotencyInFlight).contains("\"status\":409"));
+    assert!(document(Reason::BadIdempotencyKey).contains("/problems/bad-request"));
 }

@@ -1528,6 +1528,31 @@ impl BoitesImap {
         Some(self.racine(user)?.join(USAGES))
     }
 
+    /// La boîte où ranger ce que ce compte envoie par l'API.
+    ///
+    /// # CELLE QU'IL A DÉSIGNÉE, OU « ENVOYÉS »
+    ///
+    /// Ce serveur ne désigne aucune boîte de son cru : c'est le client qui dit,
+    /// par `CREATE … (USE (\Sent))`, où vont ses messages envoyés — et
+    /// Thunderbird comme Apple Mail le disent. Un compte qui n'a rien désigné
+    /// reçoit « Envoyés », créée avec cet usage : c'est le nom que ses clients
+    /// francophones lui donneraient, et l'usage le fait trouver par les autres.
+    /// Une boîte « Envoyés » qui existe déjà sans usage sert telle quelle.
+    pub fn boite_d_envoi(&self, user: &[u8]) -> Option<Vec<u8>> {
+        if let Some((nom, _)) = self
+            .usages(user)
+            .iter()
+            .find(|(_, usage)| usage.contains(SpecialUse::SENT))
+        {
+            return Some(nom.clone());
+        }
+        let envoyes = "Envoyés".as_bytes();
+        match self.create(user, envoyes, SpecialUse::SENT) {
+            Creation::Faite | Creation::DejaLa | Creation::UsageDejaPris => Some(envoyes.to_vec()),
+            Creation::Refusee => None,
+        }
+    }
+
     /// Les usages d'un compte, relus seulement si le fichier a bougé.
     fn usages(&self, user: &[u8]) -> Arc<Vec<(Vec<u8>, SpecialUse)>> {
         let vide = || Arc::new(std::vec::Vec::new());

@@ -177,6 +177,18 @@ pub enum Reason {
     /// c'est l'état de la ressource qui l'empêche. Le client relit le brouillon
     /// (`GET /v1/drafts/{id}`) pour savoir ce qui manque.
     DraftConflict,
+    /// **Le champ `Idempotency-Key` est mal formé** : ce doit être une chaîne
+    /// structurée (§3.3.3 de RFC 8941) — `"…"`, de l'ASCII imprimable, au plus
+    /// deux cent cinquante-cinq caractères.
+    BadIdempotencyKey,
+    /// **Cette clé d'idempotence a déjà servi, pour une AUTRE requête** : même
+    /// clé, autre chemin ou autre corps. `422`, comme le prévoit le brouillon
+    /// IETF `httpapi-idempotency-key-header` : rejouer la première réponse
+    /// ferait croire au client que sa seconde demande a eu lieu.
+    IdempotencyKeyReused,
+    /// **La requête qui porte cette clé est encore en cours.** `409` : le client
+    /// réessaie un peu plus tard, et obtiendra la réponse de la première.
+    IdempotencyInFlight,
 }
 
 impl Reason {
@@ -188,7 +200,8 @@ impl Reason {
             | Self::BadQuery
             | Self::BadJsonBody
             | Self::BadMessage
-            | Self::BadAccount => StatusCode::BAD_REQUEST,
+            | Self::BadAccount
+            | Self::BadIdempotencyKey => StatusCode::BAD_REQUEST,
             // §15.5.15 : celui-ci existe exactement pour un chemin trop long, et
             // le distinguer d'un 400 dit au client que c'est la LONGUEUR qui
             // gêne — donc qu'il peut réessayer plus court.
@@ -209,12 +222,15 @@ impl Reason {
             // §15.6.2 de RFC 9110 : « the server does not support the
             // functionality required to fulfill the request ».
             Self::NotImplemented => StatusCode::NOT_IMPLEMENTED,
-            Self::AlreadyEnrolled | Self::LimitReached | Self::DraftConflict => {
-                StatusCode::CONFLICT
-            }
+            Self::AlreadyEnrolled
+            | Self::LimitReached
+            | Self::DraftConflict
+            | Self::IdempotencyInFlight => StatusCode::CONFLICT,
             Self::SyncExpired => StatusCode::GONE,
             Self::BodyTooLarge => StatusCode::CONTENT_TOO_LARGE,
-            Self::AttachmentsNeedDraft => StatusCode::UNPROCESSABLE_CONTENT,
+            Self::AttachmentsNeedDraft | Self::IdempotencyKeyReused => {
+                StatusCode::UNPROCESSABLE_CONTENT
+            }
         }
     }
 
@@ -246,6 +262,13 @@ impl Reason {
             Self::BadQuery => "la chaîne de requête est refusée",
             Self::SyncExpired => "ce curseur n'est plus servi ; relisez la boîte entière",
             Self::BodyTooLarge => "le corps de la requête est trop long pour cette ressource",
+            Self::BadIdempotencyKey => "le champ Idempotency-Key est refusé",
+            Self::IdempotencyKeyReused => {
+                "cette clé d'idempotence a déjà servi pour une autre requête"
+            }
+            Self::IdempotencyInFlight => {
+                "la requête qui porte cette clé est encore en cours ; réessayez plus tard"
+            }
             Self::DraftConflict => {
                 "l'état du brouillon l'empêche ; relisez-le pour savoir ce qui manque"
             }

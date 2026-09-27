@@ -758,6 +758,16 @@ The message body.
   <p>The server composes the <code>multipart/mixed</code> itself: the body as the first part, then each attachment in base64, <code>Content-Disposition: attachment</code>, an accented name written per RFC 2231. Sending follows the rules of <code>/v1/submissions</code> — the account's <code>From:</code>, <code>Bcc:</code> removed, DKIM signature. Sent or stored, the draft disappears; otherwise it expires after twenty-four hours. <code>GET</code> and <code>DELETE /v1/drafts/{id}</code> read and abandon it; <code>DELETE …/attachments/{n}</code> removes an attachment. <code>501</code> if this server does not serve drafts.</p>
 </div>
 
+<div class="ressource">
+  <div class="ligne"><span class="chemin">Idempotency-Key: "…"</span><span class="portee">submission, send, deposit</span></div>
+  <p><strong>Retry without duplicating.</strong> A submission, sending or storing a draft, a deposit: these requests accept the <code>Idempotency-Key</code> field — a structured string (<code>"8e03978e-40d5-43e8"</code>), printable ASCII, at most 255 characters. If the response is lost and the client retries <strong>with the same key and the same request</strong>, the server returns the first response without redoing anything: the message does not go out twice. The same key for another request returns <code>422</code> (<code>/problems/idempotency-key-reused</code>); the same key while the first is still running, <code>409</code>. A response replays for twenty-four hours, server restarts included. A failure on our side (<code>5xx</code>) is not kept: retry under the same key.</p>
+</div>
+
+<div class="ressource">
+  <div class="ligne"><span class="chemin">"Sent"</span><span class="portee">after each send</span></div>
+  <p><strong>What goes out through the API is filed in the sent mailbox</strong> — the one the account designated <code>\Sent</code> (RFC 6154), or « Envoyés », created with that use if it designated none. The copy is marked read and keeps its <code>Bcc:</code>. So do not file a copy yourself of what you send through the API: it would be there twice. A failure of this copy does not fail the send — the message is gone — and is logged by the server.</p>
+</div>
+
 <h3 id="r-self"><span class="numero">5.8</span>What is yours</h3>
 
 <p>These resources require <strong>no scope</strong>: they act on <em>yourself</em>, and the token presented already says who that is. Requiring <code>admin</code> would make them routes only an administrator could take, which is exactly what they exist to avoid.</p>

@@ -192,6 +192,9 @@ pub struct ApiMaildir {
     /// Les brouillons, quand la configuration en nomme le répertoire. `None` :
     /// les routes `/v1/drafts` rendent 501.
     brouillons: Option<Arc<crate::brouillons::Brouillons>>,
+    /// Le registre des clés d'idempotence, qui vit à côté des brouillons.
+    /// `None` : le champ `Idempotency-Key` est ignoré.
+    idempotence: Option<Arc<crate::idempotence::Idempotence>>,
 }
 
 /// Combien de mots de passe applicatifs un compte peut avoir.
@@ -234,6 +237,7 @@ impl ApiMaildir {
             applicatifs: None,
             delegations: None,
             brouillons: None,
+            idempotence: None,
             // ET PAS D'INVITATIONS SANS CLÉ : voir `avec_scellement`.
             scellement: None,
             // NI DE SESSIONS PAR CLEF SANS DOMAINE : voir `avec_domaine`.
@@ -306,6 +310,14 @@ impl ApiMaildir {
     #[must_use]
     pub fn avec_brouillons(mut self, brouillons: Arc<crate::brouillons::Brouillons>) -> Self {
         self.brouillons = Some(brouillons);
+        self
+    }
+
+    /// Lui donne le registre des clés d'idempotence : c'est ce qui fait qu'une
+    /// soumission rejouée ne part pas deux fois.
+    #[must_use]
+    pub fn avec_idempotence(mut self, registre: Arc<crate::idempotence::Idempotence>) -> Self {
+        self.idempotence = Some(registre);
         self
     }
 
@@ -1839,6 +1851,9 @@ impl ApiMaildir {
             }
             return indisponible(sortie);
         }
+        // **UNE COPIE DANS « ENVOYÉS »**, telle que soumise — `Bcc` compris :
+        // l'expéditeur, lui, doit savoir à qui il a écrit.
+        self.copier_dans_envoyes(compte, &mut |ecrire| ecrire(corps));
         let combien = u64::try_from(destinataires.len()).unwrap_or(u64::MAX);
         rendre(render::write_metrics(&[("delivered", combien)], sortie))
     }
@@ -2025,6 +2040,10 @@ impl ApiMaildir {
             remise.abort();
             return indisponible(sortie);
         }
+        // La copie se recompose depuis le disque, `Bcc` compris.
+        self.copier_dans_envoyes(compte, &mut |ecrire| {
+            crate::brouillons::composer(&corps, &pieces, &frontiere, ecrire)
+        });
         let _ = brouillons.supprimer(compte, id, maintenant);
         let combien = u64::try_from(destinataires.len()).unwrap_or(u64::MAX);
         rendre(render::write_metrics(&[("delivered", combien)], sortie))
@@ -2088,6 +2107,38 @@ impl ApiMaildir {
             remise = remise.avec_dkim(signataire);
         }
         remise
+    }
+
+    /// Range une copie de ce qui vient de partir dans la boîte d'envoi du
+    /// compte, marquée lue.
+    ///
+    /// # L'ENVOI EST FAIT, QUOI QU'IL ARRIVE ICI
+    ///
+    /// Le message est remis ou en file : échouer maintenant ne le rappellerait
+    /// pas, et rendre une erreur ferait renvoyer au client ce qui est parti.
+    /// Un échec se DIT donc au journal, et la réponse reste celle de l'envoi.
+    ///
+    /// **SEUL CE QUI PASSE PAR L'API EST COPIÉ** : Thunderbird et Apple Mail
+    /// rangent eux-mêmes leur copie par IMAP, et en ranger une de plus la
+    /// doublerait.
+    fn copier_dans_envoyes(&self, compte: &str, composer: &mut Composeur<'_>) {
+        use ams_session::imap::Deposit as _;
+        let dire = |quoi: &str| {
+            eprintln!("air-mail-server : copie dans « Envoyés » pour `{compte}` — {quoi}");
+        };
+        let Some(boite) = self.boites.boite_d_envoi(compte.as_bytes()) else {
+            return dire("aucune boîte d'envoi ne s'ouvre ni ne se crée");
+        };
+        let Some(mut depot) = self.boites.append(compte.as_bytes(), &boite) else {
+            return dire("la boîte d'envoi refuse le dépôt");
+        };
+        if !composer(&mut |morceau| depot.write(morceau)) {
+            depot.abort();
+            return dire("la copie n'a pas pu s'écrire");
+        }
+        if depot.commit(ams_proto_imap::Flags::SEEN, None).is_none() {
+            dire("la copie n'a pas pu se valider");
+        }
     }
 
     /// Le message entier, tel qu'il est sur le disque.
@@ -2637,6 +2688,7 @@ impl Api for ApiMaildir {
             query,
             range: portee,
             content_range,
+            idempotency_key,
             owner,
         } = appel;
         // **UNE BOÎTE D'AUTRUI : LA TABLE DÉCIDE, À CHAQUE REQUÊTE.** Le jeton dit
@@ -2680,7 +2732,55 @@ impl Api for ApiMaildir {
         {
             return absente(sortie);
         }
-        match resource {
+        // **UNE CLÉ D'IDEMPOTENCE SE PRÉSENTE AVANT D'AGIR** : rejouée, elle
+        // rend la première réponse sans rien refaire — c'est tout son objet.
+        // Seules les requêtes qui ÉCRIVENT un message la regardent.
+        let ecrit_un_message = matches!(method, Method::Post)
+            && matches!(
+                resource,
+                Resource::Submissions
+                    | Resource::DraftSend { .. }
+                    | Resource::DraftStore { .. }
+                    | Resource::Messages { .. }
+            );
+        let mut retenir = None;
+        if let (true, Some(champ), Some(registre)) =
+            (ecrit_un_message, idempotency_key, self.idempotence.as_ref())
+        {
+            let Some(cle) = crate::idempotence::cle_du_champ(champ) else {
+                return probleme(
+                    ams_api::Reason::BadIdempotencyKey,
+                    ams_api::Reason::BadIdempotencyKey.status(),
+                    sortie,
+                );
+            };
+            let empreinte =
+                crate::idempotence::empreinte(&format!("{method:?} {resource:?}"), body);
+            match registre.commencer(acteur, cle, &empreinte, crate::maintenant()) {
+                Ok(crate::idempotence::Debut::Neuve) => retenir = Some((registre, cle, empreinte)),
+                Ok(crate::idempotence::Debut::Rejouer {
+                    status,
+                    media,
+                    corps,
+                }) => return rejouer(status, &media, &corps, sortie),
+                Ok(crate::idempotence::Debut::AutreRequete) => {
+                    return probleme(
+                        ams_api::Reason::IdempotencyKeyReused,
+                        ams_api::Reason::IdempotencyKeyReused.status(),
+                        sortie,
+                    );
+                }
+                Ok(crate::idempotence::Debut::EnCours) => {
+                    return probleme(
+                        ams_api::Reason::IdempotencyInFlight,
+                        ams_api::Reason::IdempotencyInFlight.status(),
+                        sortie,
+                    );
+                }
+                Err(_) => return indisponible(sortie),
+            }
+        }
+        let servi = match resource {
             Resource::Health => rendre(render::write_health(sortie)),
             Resource::Metrics => rendre(render::write_metrics(
                 &[
@@ -2817,7 +2917,31 @@ impl Api for ApiMaildir {
             // s'ajoute au routage sans être servie, elle le DISE (§15.6.2) au
             // lieu d'être servie de travers.
             _ => pas_encore(sortie),
+        };
+        if let Some((registre, cle, empreinte)) = retenir {
+            // **CE QUI ÉCHOUE DE NOTRE FAIT NE SE REJOUE PAS** : un `503` rejoué
+            // interdirait au client de réessayer. La clé s'oublie, et le
+            // prochain essai s'exécute.
+            if servi.status.class() >= 5 {
+                registre.abandonner(acteur, cle);
+            } else if registre
+                .finir(
+                    acteur,
+                    cle,
+                    &empreinte,
+                    servi.status.value(),
+                    servi.media,
+                    servi.body,
+                )
+                .is_err()
+            {
+                eprintln!(
+                    "air-mail-server : idempotence — la réponse n'a pas pu être retenue ; un \
+                     nouvel essai sous la même clé s'exécuterait de nouveau"
+                );
+            }
         }
+        servi
     }
 
     /// # Deux précautions, et aucune n'est facultative
@@ -3218,6 +3342,36 @@ fn deja_enrole(sortie: &mut [u8]) -> Served<'_> {
 ///
 /// **LA MÊME RÉPONSE QU'UN MESSAGE ILLISIBLE** : dire lequel des deux a cloché
 /// apprendrait à qui sonde ce que le serveur a reconnu.
+/// Ce qui écoule un message, morceau par morceau, dans l'écrivain qu'on lui
+/// donne — et rend `false` si l'un des deux a lâché.
+type Composeur<'a> = dyn FnMut(&mut dyn FnMut(&[u8]) -> bool) -> bool + 'a;
+
+/// Rend une réponse retenue, telle quelle.
+fn rejouer<'o>(status: u16, media: &str, corps: &[u8], sortie: &'o mut [u8]) -> Served<'o> {
+    let Ok(status) = StatusCode::new(status) else {
+        return notre_faute();
+    };
+    let Some(place) = sortie.get_mut(..corps.len()) else {
+        return notre_faute();
+    };
+    place.copy_from_slice(corps);
+    // Le type revient à sa constante : `Served` n'en porte que de statiques.
+    let media = [
+        ams_api::JSON_MEDIA_TYPE,
+        ams_api::PROBLEM_MEDIA_TYPE,
+        ams_api::MESSAGE_MEDIA_TYPE,
+    ]
+    .into_iter()
+    .find(|connu| *connu == media)
+    .unwrap_or(ams_api::JSON_MEDIA_TYPE);
+    Served {
+        status,
+        media,
+        body: sortie.get(..corps.len()).unwrap_or_default(),
+        ..Served::default()
+    }
+}
+
 /// Ce qu'une faute de brouillon rend.
 fn faute_de_brouillon(faute: crate::brouillons::Faute, sortie: &mut [u8]) -> Served<'_> {
     use crate::brouillons::Faute;
@@ -4268,6 +4422,7 @@ mod ecritures {
                 query,
                 range: None,
                 content_range: None,
+                idempotency_key: None,
                 owner: None,
             },
             &mut place,
@@ -4417,6 +4572,7 @@ mod ecritures {
                 query: ams_api::Query::default(),
                 range: None,
                 content_range: None,
+                idempotency_key: None,
                 owner: titulaire,
             },
             &mut place,
@@ -4538,6 +4694,125 @@ mod ecritures {
         assert_eq!(status, StatusCode::NOT_FOUND, "source absente");
         let (status, _) = servir(&api, Resource::Copy { boite: "INBOX" }, Method::Post, b"{}");
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    /// Sert une requête de `marie` qui porte ce champ `Idempotency-Key`.
+    fn servir_une_fois(
+        api: &ApiMaildir,
+        resource: Resource<'_>,
+        corps: &[u8],
+        cle: &[u8],
+    ) -> (StatusCode, String) {
+        let mut place = std::vec![0_u8; 64 * 1024];
+        let Served { status, body, .. } = api.serve(
+            resource,
+            Method::Post,
+            "marie",
+            ams_loop_tokio::http::Appel {
+                body: corps,
+                query: ams_api::Query::default(),
+                range: None,
+                content_range: None,
+                idempotency_key: Some(cle),
+                owner: None,
+            },
+            &mut place,
+        );
+        (status, String::from_utf8_lossy(body).into_owned())
+    }
+
+    /// **UNE REQUÊTE REJOUÉE SOUS LA MÊME CLÉ NE SE REFAIT PAS** : la même
+    /// réponse revient, et rien ne s'ajoute ; la même clé pour une autre
+    /// requête se refuse.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn une_cle_d_idempotence_ne_double_rien() {
+        let temporaire = Ephemere::neuf();
+        let (api, _) = api_partagee(&temporaire.0);
+        let api = api.avec_idempotence(Arc::new(crate::idempotence::Idempotence::new(
+            temporaire.0.join("cles"),
+        )));
+        let boite = Resource::Messages { boite: "INBOX" };
+        let lettre = b"From: a@ailleurs.test\r\nSubject: une fois\r\n\r\nc\r\n";
+        let (status, premier) = servir_une_fois(&api, boite, lettre, b"\"k-1\"");
+        assert_eq!(status, StatusCode::CREATED, "{premier}");
+        let (status, second) = servir_une_fois(&api, boite, lettre, b"\"k-1\"");
+        assert_eq!(
+            (status, second.clone()),
+            (StatusCode::CREATED, premier),
+            "rejouée"
+        );
+        let (_, liste) = servir(&api, boite, Method::Get, b"");
+        assert_eq!(
+            liste.matches(r#""uid":"#).count(),
+            1,
+            "rien ne s'est ajouté : {liste}"
+        );
+
+        let (status, corps) =
+            servir_une_fois(&api, boite, b"From: a@b.test\r\n\r\nautre\r\n", b"\"k-1\"");
+        assert_eq!(status, StatusCode::UNPROCESSABLE_CONTENT, "{corps}");
+        assert!(corps.contains("idempotency-key-reused"), "{corps}");
+        let (status, _) = servir_une_fois(&api, boite, lettre, b"sans-guillemets");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // Une autre clé s'exécute.
+        let (status, _) = servir_une_fois(&api, boite, lettre, b"\"k-2\"");
+        assert_eq!(status, StatusCode::CREATED);
+        // Une lecture ne regarde pas la clé.
+        let mut place = std::vec![0_u8; 64 * 1024];
+        let servi = api.serve(
+            boite,
+            Method::Get,
+            "marie",
+            ams_loop_tokio::http::Appel {
+                body: b"",
+                query: ams_api::Query::default(),
+                range: None,
+                content_range: None,
+                idempotency_key: Some(b"mal formee"),
+                owner: None,
+            },
+            &mut place,
+        );
+        assert_eq!(servi.status, StatusCode::OK);
+    }
+
+    /// **CE QUI PART PAR L'API SE RANGE DANS « ENVOYÉS »**, marqué lu — et la
+    /// boîte naît, avec son usage, quand le compte n'en a pas désigné.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn une_soumission_se_copie_dans_envoyes() {
+        let temporaire = Ephemere::neuf();
+        let (api, _) = api_partagee(&temporaire.0);
+        let lettre = b"From: marie@exemple.test\r\nTo: support@exemple.test\r\n\
+            Bcc: support@exemple.test\r\nSubject: copie\r\n\r\nc\r\n";
+        for _ in 0..2 {
+            let (status, corps) = servir(&api, Resource::Submissions, Method::Post, lettre);
+            assert_eq!(status, StatusCode::OK, "{corps}");
+        }
+        let (_, envoyes) = servir(
+            &api,
+            Resource::Messages { boite: "Envoyés" },
+            Method::Get,
+            b"",
+        );
+        assert_eq!(envoyes.matches(r#""uid":"#).count(), 2, "{envoyes}");
+        assert!(envoyes.contains("\\\\Seen"), "{envoyes}");
+        // L'usage est posé : IMAP la rend `\\Sent`, et c'est par lui que les
+        // clients la trouvent.
+        let usages: Vec<_> = (0..)
+            .map_while(|rang| {
+                let mut place = [0_u8; 256];
+                api.boites
+                    .name(b"marie", rang, &mut place)
+                    .map(|vue| (vue.name.to_vec(), vue.special))
+            })
+            .collect();
+        assert!(
+            usages
+                .iter()
+                .any(|(nom, usage)| nom.as_slice() == "Envoyés".as_bytes()
+                    && usage.contains(ams_proto_imap::SpecialUse::SENT)),
+            "{usages:?}"
+        );
     }
 
     /// **L'ESPACE `Partagés` EST CELUI D'IMAP** : les routes personnelles de

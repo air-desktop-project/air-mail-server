@@ -740,3 +740,43 @@ fn un_dossier_personnel_nomme_partages_est_masque() {
         std::vec![(String::from("INBOX"), true)]
     );
 }
+
+/// **LA BOÎTE D'ENVOI EST CELLE QUE LE COMPTE A DÉSIGNÉE**, ou « Envoyés »,
+/// créée avec l'usage `\Sent` — et une « Envoyés » déjà là sert telle quelle.
+#[test]
+fn la_boite_d_envoi_est_celle_qu_on_a_designee() {
+    let atelier = Ephemere::nouveau("envoi-designee");
+    let magasin = service(&atelier.0);
+    assert_eq!(
+        magasin.create(COMPTE, b"Sent", SpecialUse::SENT),
+        Creation::Faite
+    );
+    assert_eq!(magasin.boite_d_envoi(COMPTE), Some(b"Sent".to_vec()));
+
+    let atelier = Ephemere::nouveau("envoi-cree");
+    let magasin = service(&atelier.0);
+    let envoyes = "Envoyés".as_bytes().to_vec();
+    assert_eq!(magasin.boite_d_envoi(COMPTE), Some(envoyes.clone()));
+    assert_eq!(
+        magasin.boite_d_envoi(COMPTE),
+        Some(envoyes.clone()),
+        "une seule fois"
+    );
+    let mut place = [0_u8; 256];
+    let designee = (0..)
+        .map_while(|rang| {
+            magasin
+                .name(COMPTE, rang, &mut place)
+                .map(|vue| (vue.name.to_vec(), vue.special))
+        })
+        .any(|(nom, usage)| nom == envoyes && usage.contains(SpecialUse::SENT));
+    assert!(designee, "l'usage est posé");
+
+    let atelier = Ephemere::nouveau("envoi-existante");
+    let magasin = service(&atelier.0);
+    assert_eq!(
+        magasin.create(COMPTE, &envoyes, SpecialUse::NONE),
+        Creation::Faite
+    );
+    assert_eq!(magasin.boite_d_envoi(COMPTE), Some(envoyes));
+}

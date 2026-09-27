@@ -250,6 +250,9 @@ pub struct Appel<'a> {
     /// morceau de pièce jointe dans le fichier entier (§14.4 de RFC 9110). La
     /// ressource le lit, pour la même raison que `range`.
     pub content_range: Option<&'a [u8]>,
+    /// Le champ `Idempotency-Key`, tel qu'écrit : ce qui permet à un client de
+    /// rejouer une soumission sans la doubler. La ressource le lit.
+    pub idempotency_key: Option<&'a [u8]>,
     /// Le titulaire de la boîte visée, quand ce n'est pas qui appelle. Voir
     /// `ams_api::Resolved::owner`.
     pub owner: Option<&'a str>,
@@ -675,6 +678,7 @@ where
                             owner,
                             range: demande.tete.field(b"range"),
                             content_range: demande.tete.field(b"content-range"),
+                            idempotency_key: demande.tete.field(b"idempotency-key"),
                         },
                         &mut rendu,
                     );

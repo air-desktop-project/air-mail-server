@@ -301,6 +301,7 @@ impl<A: Api> ams_h3::Service for ServiceH3<'_, A> {
                             owner,
                             range: tete.field(b"range"),
                             content_range: tete.field(b"content-range"),
+                            idempotency_key: tete.field(b"idempotency-key"),
                         },
                         &mut self.rendu,
                     );
