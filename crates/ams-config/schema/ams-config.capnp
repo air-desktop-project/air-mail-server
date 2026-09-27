@@ -196,6 +196,17 @@ struct Configuration {
   # soumet pas par l'API.
   drafts @37 :Text;
 
+  # WEB PUSH (RFC 8292) — la clef VAPID du serveur : un fichier de trente-deux
+  # octets bruts, la clef privée P-256, lisible du seul compte de service. Vide :
+  # les appareils abonnés par Web Push ne sont pas réveillés. Sa moitié publique
+  # est ce que le navigateur reçoit pour s'abonner (`applicationServerKey`).
+  pushVapidKey @38 :Text;
+
+  # Où l'exploitant se joint, pour le service de push qui aurait à se plaindre :
+  # `mailto:postmaster@…` ou une URL `https:` (§2.1 de RFC 8292). Exigé dès que
+  # `pushVapidKey` l'est.
+  pushContact @39 :Text;
+
   # MTA-STS (RFC 8461) — la politique qu'un domaine publie en HTTPS.
   #
   # **UN CHAMP AJOUTÉ APRÈS COUP DÉCODE DEUX CHAÎNES VIDES**, et deux chaînes

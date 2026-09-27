@@ -75,6 +75,9 @@ path = "../crates/ams-field-codec"
 [dependencies.ams-proto-h2]
 path = "../crates/ams-proto-h2"
 
+[dependencies.ams-push]
+path = "../crates/ams-push"
+
 [dependencies.ams-dns]
 path = "../crates/ams-dns"
 
@@ -590,6 +593,20 @@ bench = false
 [[bin]]
 name = "fuzz_ams_session_render"
 path = "fuzz_targets/fuzz_ams_session_render.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ams_h2_client"
+path = "fuzz_targets/fuzz_ams_h2_client.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ams_push"
+path = "fuzz_targets/fuzz_ams_push.rs"
 test = false
 doc = false
 bench = false

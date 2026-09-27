@@ -179,20 +179,21 @@ impl Carnet {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Envoi {
     /// Parti vers le service de notifications.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "le premier transport arrive en 0.2.33")
-    )]
     Transmis,
     /// Préparé, mais aucun transport ne le porte encore pour ce canal.
     NonTransmis,
     /// Le service l'a refusé, ou ne répond pas.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "le premier transport arrive en 0.2.33")
-    )]
     Echec,
+    /// Le service dit que l'abonnement n'existe plus (`404`, `410`) : il se
+    /// retire de la fiche de l'appareil, pour ne plus frapper à une porte
+    /// murée.
+    Perime,
 }
+
+/// Ce que rend un envoi : un futur, pour que le transport attende le réseau
+/// sans tenir un fil.
+pub type EnvoiEnCours<'a> =
+    core::pin::Pin<Box<dyn core::future::Future<Output = Envoi> + Send + 'a>>;
 
 /// Ce qui porte un réveil jusqu'au service de notifications.
 ///
@@ -201,21 +202,26 @@ pub enum Envoi {
 /// un, chacun derrière la même porte.
 pub trait Envoyeur: Send + Sync {
     /// Réveille cet appareil pour cette boîte.
-    fn envoyer(
-        &self,
-        appareil: &ams_config::Device,
-        push: &ams_config::Push,
-        compte: &str,
-    ) -> Envoi;
+    fn envoyer<'a>(
+        &'a self,
+        appareil: &'a ams_config::Device,
+        push: &'a ams_config::Push,
+        compte: &'a str,
+    ) -> EnvoiEnCours<'a>;
 }
 
-/// L'envoyeur de la 0.2.32 : il n'a encore aucun transport, et le dit.
+/// L'envoyeur des canaux qui n'ont pas encore de transport : il le dit.
 #[derive(Debug, Default)]
 pub struct SansTransport;
 
 impl Envoyeur for SansTransport {
-    fn envoyer(&self, _: &ams_config::Device, _: &ams_config::Push, _: &str) -> Envoi {
-        Envoi::NonTransmis
+    fn envoyer<'a>(
+        &'a self,
+        _: &'a ams_config::Device,
+        _: &'a ams_config::Push,
+        _: &'a str,
+    ) -> EnvoiEnCours<'a> {
+        Box::pin(core::future::ready(Envoi::NonTransmis))
     }
 }
 
@@ -274,7 +280,7 @@ impl Reveil {
         bilan.prepares = bilan.prepares.saturating_add(1);
         match envoi {
             Envoi::Transmis => bilan.transmis = bilan.transmis.saturating_add(1),
-            Envoi::Echec => bilan.echoues = bilan.echoues.saturating_add(1),
+            Envoi::Echec | Envoi::Perime => bilan.echoues = bilan.echoues.saturating_add(1),
             Envoi::NonTransmis => {}
         }
     }
@@ -334,7 +340,7 @@ async fn tourner(
             }
         }
         for destination in carnet.a_reveiller(maintenant) {
-            reveiller(&reveil, &sources, &destination);
+            reveiller(&reveil, &sources, &destination).await;
         }
     }
 }
@@ -367,25 +373,50 @@ pub fn destinations(
 
 /// Réveille les appareils abonnés d'une destination.
 ///
-/// **BLOQUANT, ET HORS DE LA TÂCHE ASYNCHRONE** : l'envoi fera du réseau, et le
-/// magasin d'appareils lit un fichier.
-fn reveiller(reveil: &Arc<Reveil>, sources: &Sources, destination: &Destination) {
-    let abonnes: Vec<(ams_config::Device, ams_config::Push)> = sources
-        .appareils
-        .du_compte(&destination.destinataire)
-        .into_iter()
-        .filter_map(|appareil| {
-            let push = appareil.push.clone()?;
-            Some((appareil, push))
-        })
-        .collect();
+/// **LE MAGASIN SE LIT HORS DE LA TÂCHE ASYNCHRONE** — c'est un fichier —, et
+/// l'envoi s'attend sans tenir de fil : c'est du réseau.
+async fn reveiller(reveil: &Arc<Reveil>, sources: &Sources, destination: &Destination) {
+    let abonnes: Vec<(ams_config::Device, ams_config::Push)> = tokio::task::block_in_place(|| {
+        sources
+            .appareils
+            .du_compte(&destination.destinataire)
+            .into_iter()
+            .filter_map(|appareil| {
+                let push = appareil.push.clone()?;
+                Some((appareil, push))
+            })
+            .collect()
+    });
     for (appareil, push) in abonnes {
-        let envoi = tokio::task::block_in_place(|| {
-            sources
-                .envoyeur
-                .envoyer(&appareil, &push, &destination.compte)
-        });
+        let envoi = sources
+            .envoyeur
+            .envoyer(&appareil, &push, &destination.compte)
+            .await;
         reveil.noter(&destination.destinataire, envoi);
+        if envoi == Envoi::Perime {
+            oublier_l_abonnement(sources, &appareil, &push);
+        }
+    }
+}
+
+/// Retire un abonnement que son service dit périmé — S'IL N'A PAS CHANGÉ entre
+/// l'envoi et maintenant : un appareil qui s'est réabonné entre-temps garde le
+/// nouveau.
+fn oublier_l_abonnement(sources: &Sources, appareil: &ams_config::Device, push: &ams_config::Push) {
+    let fait = tokio::task::block_in_place(|| {
+        sources.appareils.modifier(|appareils| {
+            if let Some(fiche) = appareils
+                .iter_mut()
+                .find(|fiche| fiche.login == appareil.login && fiche.id == appareil.id)
+                && fiche.push.as_ref() == Some(push)
+            {
+                fiche.push = None;
+            }
+            Ok(())
+        })
+    });
+    if let Err(quoi) = fait {
+        eprintln!("air-mail-server : réveil — abonnement périmé NON retiré ({quoi})");
     }
 }
 

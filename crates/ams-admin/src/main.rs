@@ -116,6 +116,12 @@ COMMANDES
                         qui fait qu'un compte compromis ne devient jamais le
                         serveur entier, et c'est pourquoi ce jeton se frappe ici.
                         `--minutes` vaut 15 par défaut, et douze heures au plus.
+    vapid <chemin>      la clef VAPID de Web Push (RFC 8292) : CRÉÉE si le
+                        fichier n'existe pas — trente-deux octets tirés du
+                        noyau, en 0600 —, et jamais remplacée s'il existe.
+                        Écrit sa moitié PUBLIQUE en base64url : c'est ce que
+                        les applications donnent au navigateur pour s'abonner.
+                        Remplacer la clef désabonnerait tous les navigateurs.
     summary <maildir>   relit une boîte et rend ce que ses noms de fichiers
                         portent : messages numérotés, messages à adopter, noms
                         illisibles, et la réserve d'UID de l'index. EN LECTURE
@@ -172,6 +178,77 @@ fn restreindre_le_masque() {
     }
 }
 
+/// Crée la clef VAPID si elle n'existe pas, et écrit sa moitié publique.
+///
+/// # ELLE NE SE REMPLACE JAMAIS ICI
+///
+/// Chaque navigateur abonné a reçu la moitié publique de CETTE clef ; une autre
+/// clef, et aucun ne reconnaîtrait plus le serveur. Le fichier se crée en
+/// `create_new` : s'il existe, on le lit, on ne l'écrase pas.
+fn vapid(chemin: &Path) -> ExitCode {
+    use std::io::{Read as _, Write as _};
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let lue = match std::fs::read(chemin) {
+        Ok(octets) => octets,
+        Err(erreur) if erreur.kind() == std::io::ErrorKind::NotFound => {
+            // UN SCALAIRE QUI N'EN EST PAS UN SE RETIRE : zéro, ou au-delà de
+            // l'ordre de la courbe — une chance sur 2^32 par tirage.
+            let mut cle = [0_u8; ams_push::PRIVATE_KEY_OCTETS];
+            loop {
+                let tire = std::fs::File::open("/dev/urandom")
+                    .and_then(|mut source| source.read_exact(&mut cle));
+                if let Err(erreur) = tire {
+                    eprintln!("air-mail-admin : /dev/urandom : {erreur}");
+                    return ExitCode::FAILURE;
+                }
+                if ams_push::vapid_public_key(&cle).is_ok() {
+                    break;
+                }
+            }
+            let cree = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(chemin)
+                .and_then(|mut fichier| {
+                    fichier.write_all(&cle)?;
+                    fichier.sync_all()
+                });
+            if let Err(erreur) = cree {
+                eprintln!("air-mail-admin : `{}` : {erreur}", chemin.display());
+                return ExitCode::FAILURE;
+            }
+            eprintln!(
+                "air-mail-admin : clef VAPID CRÉÉE dans `{}` (0600) — donnez-la au compte \
+                 de service, et ne la remplacez jamais.",
+                chemin.display()
+            );
+            cle.to_vec()
+        }
+        Err(erreur) => {
+            eprintln!("air-mail-admin : `{}` : {erreur}", chemin.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    let publique = <[u8; ams_push::PRIVATE_KEY_OCTETS]>::try_from(lue.as_slice())
+        .ok()
+        .and_then(|cle| ams_push::vapid_public_key(&cle).ok());
+    let Some(publique) = publique else {
+        eprintln!(
+            "air-mail-admin : `{}` n'est pas une clef VAPID — trente-deux octets bruts attendus",
+            chemin.display()
+        );
+        return ExitCode::FAILURE;
+    };
+    let mut texte = [0_u8; 128];
+    let n = ams_push::encode_base64url(&publique, &mut texte).unwrap_or_default();
+    println!(
+        "{}",
+        String::from_utf8_lossy(texte.get(..n).unwrap_or_default())
+    );
+    ExitCode::SUCCESS
+}
+
 /// L'aide à écrire si l'un des arguments la demande, ou `None`.
 ///
 /// # `--help` N'EST JAMAIS UN CHEMIN
@@ -225,6 +302,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         ["summary", racine] => resumer(Path::new(racine)),
+        ["vapid", chemin] => vapid(Path::new(chemin)),
         ["config", "write", fichier, reste @ ..] => ecrire(Path::new(fichier), reste),
         ["config", "show", fichier] => montrer(Path::new(fichier)),
         ["account", "add", fichier, "--login", nom, reste @ ..] => match demande_de_compte(reste) {
@@ -817,6 +895,17 @@ fn afficher(config: &Configuration) {
             String::from("AUCUN — un message avec pièces jointes ne se soumet pas par l'API")
         } else {
             format!("répertoire `{}`", config.drafts)
+        }
+    );
+    println!(
+        "Web Push           {}",
+        if config.push_vapid_key.is_empty() {
+            String::from("AUCUNE CLEF VAPID — les abonnés Web Push ne sont pas réveillés")
+        } else {
+            format!(
+                "clef VAPID `{}`, contact `{}`",
+                config.push_vapid_key, config.push_contact
+            )
         }
     );
     println!(

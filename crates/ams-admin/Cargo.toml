@@ -23,6 +23,8 @@ libc = { workspace = true }
 ams-admin-options = { workspace = true }
 ams-fichier = { workspace = true }
 ams-config = { workspace = true }
+# La clef VAPID de Web Push : la créer et en dire la moitié publique.
+ams-push = { workspace = true }
 ams-guard = { workspace = true }
 ams-queue = { workspace = true }
 ams-index = { workspace = true }

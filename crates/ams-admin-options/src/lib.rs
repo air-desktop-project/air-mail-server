@@ -91,6 +91,10 @@ pub struct Options {
     pub delegations: Option<PathBuf>,
     /// Le répertoire des brouillons de l'API. Vide : ils ne sont pas servis.
     pub drafts: Option<PathBuf>,
+    /// La clef VAPID de Web Push. Vide : Web Push n'est pas transmis.
+    pub push_vapid_key: Option<PathBuf>,
+    /// Où l'exploitant se joint, pour les services de push.
+    pub push_contact: Option<String>,
     /// Où écouter en POP3. Vide : POP3 n'est pas servi.
     pub listen_pop3: Option<SocketAddr>,
     /// Les écoutes POP3, chacune avec son mode TLS.
@@ -253,6 +257,8 @@ impl Default for Options {
             app_passwords: None,
             delegations: None,
             drafts: None,
+            push_vapid_key: None,
+            push_contact: None,
             // PAS DE POP3 PAR DÉFAUT : un port ouvert qu'on n'a pas demandé est
             // une surface de plus, et celui-ci ne sert personne sans certificat.
             listen_pop3: None,
@@ -442,6 +448,8 @@ impl Options {
             app_passwords: chemin(self.app_passwords.as_ref()),
             delegations: chemin(self.delegations.as_ref()),
             drafts: chemin(self.drafts.as_ref()),
+            push_vapid_key: chemin(self.push_vapid_key.as_ref()),
+            push_contact: self.push_contact.clone().unwrap_or_default(),
             tlsrpt: ams_config::Tlsrpt {
                 directory: chemin(self.tlsrpt_dir.as_ref()),
                 send: self.tlsrpt_send,
@@ -630,6 +638,14 @@ OPTIONS DE `config write`
                         le corps d'abord, les pièces jointes ensuite, par
                         morceaux écrits sur disque. Sans lui, un message avec
                         pièces jointes ne se soumet pas par l'API.
+    --push-vapid-key <chemin>
+                        la clef VAPID (RFC 8292) qui signe les réveils Web
+                        Push — trente-deux octets bruts, lisibles du seul
+                        compte de service (`air-mail-admin vapid <chemin>` la
+                        crée). Sans elle, Web Push n'est pas transmis.
+    --push-contact <mailto:…|https:…>
+                        où l'exploitant se joint, pour un service de push qui
+                        aurait à se plaindre. Exigé avec --push-vapid-key.
     --listen-pop3 <adr>    où écouter en POP3 avec `STLS` — le 110. RÉPÉTABLE
                            (défaut : pas de POP3)
     --listen-pop3s <adr>   où écouter en POP3 avec TLS IMPLICITE — le 995.
@@ -1293,6 +1309,8 @@ where
             "--app-passwords" => options.app_passwords = Some(PathBuf::from(valeur()?)),
             "--delegations" => options.delegations = Some(PathBuf::from(valeur()?)),
             "--drafts" => options.drafts = Some(PathBuf::from(valeur()?)),
+            "--push-vapid-key" => options.push_vapid_key = Some(PathBuf::from(valeur()?)),
+            "--push-contact" => options.push_contact = Some(valeur()?),
             "--resolver" => {
                 let brute = valeur()?;
                 let adresse: SocketAddr = brute
@@ -2206,6 +2224,8 @@ mod tests {
             (&["--app-passwords"], "attend une valeur"),
             (&["--delegations"], "attend une valeur"),
             (&["--drafts"], "attend une valeur"),
+            (&["--push-vapid-key"], "attend une valeur"),
+            (&["--push-contact"], "attend une valeur"),
         ] {
             let erreur = parse(arguments).expect_err("refusé");
             assert!(
@@ -3672,6 +3692,24 @@ mod tests {
         assert_eq!(options.en_configuration().drafts, "/x/brouillons");
         let arguments: &[&str] = &["--domain", "mail.example.com"];
         assert!(ecrire(arguments).en_configuration().drafts.is_empty());
+    }
+
+    /// **LA CLEF VAPID ET LE CONTACT SE POSENT**, et leur absence est le
+    /// défaut.
+    #[test]
+    fn la_clef_vapid_et_le_contact_se_posent() {
+        let arguments: &[&str] = &[
+            "--push-vapid-key",
+            "/x/vapid.key",
+            "--push-contact",
+            "mailto:postmaster@x.test",
+        ];
+        let configuration = ecrire(arguments).en_configuration();
+        assert_eq!(configuration.push_vapid_key, "/x/vapid.key");
+        assert_eq!(configuration.push_contact, "mailto:postmaster@x.test");
+        let arguments: &[&str] = &["--domain", "mail.example.com"];
+        let configuration = ecrire(arguments).en_configuration();
+        assert!(configuration.push_vapid_key.is_empty() && configuration.push_contact.is_empty());
     }
 
     #[test]

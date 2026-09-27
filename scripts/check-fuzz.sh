@@ -118,6 +118,8 @@ fuzz_ams_http_head http-head
 fuzz_ams_h2_frame h2-frame
 fuzz_ams_h2_hpack h2-hpack
 fuzz_ams_h2_connection h2-connection
+fuzz_ams_h2_client h2-client
+fuzz_ams_push push
 fuzz_ams_quic_varint quic-varint
 fuzz_ams_quic_packet quic-packet
 fuzz_ams_h3_frame h3-frame

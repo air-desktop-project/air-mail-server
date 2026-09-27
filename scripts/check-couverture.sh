@@ -59,6 +59,7 @@ CRATES_SANS_IO=(
     ams-queue
     ams-tls
     ams-dkim
+    ams-push
     ams-spf
     ams-dns
     ams-dmarc

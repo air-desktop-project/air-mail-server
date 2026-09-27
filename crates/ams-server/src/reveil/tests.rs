@@ -147,18 +147,18 @@ struct Temoin {
 }
 
 impl Envoyeur for Temoin {
-    fn envoyer(
-        &self,
-        appareil: &ams_config::Device,
-        push: &ams_config::Push,
-        compte: &str,
-    ) -> Envoi {
+    fn envoyer<'a>(
+        &'a self,
+        appareil: &'a ams_config::Device,
+        push: &'a ams_config::Push,
+        compte: &'a str,
+    ) -> super::EnvoiEnCours<'a> {
         self.vus.lock().expect("verrou").push((
             appareil.id.clone(),
             String::from(compte),
             push.channel().name(),
         ));
-        self.rendu.unwrap_or(Envoi::Transmis)
+        Box::pin(core::future::ready(self.rendu.unwrap_or(Envoi::Transmis)))
     }
 }
 
@@ -306,8 +306,59 @@ fn sans_transport_rien_ne_part() {
         1,
     )
     .expect("recevable");
+    let x1 = appareil("x", "x1", false);
     assert_eq!(
-        super::SansTransport.envoyer(&appareil("x", "x1", false), &push, "x"),
+        pret(super::SansTransport.envoyer(&x1, &push, "x")),
         Envoi::NonTransmis
     );
+}
+
+/// Attend un futur déjà prêt, sans ordonnanceur.
+fn pret(mut futur: super::EnvoiEnCours<'_>) -> Envoi {
+    let mut contexte = core::task::Context::from_waker(core::task::Waker::noop());
+    match futur.as_mut().poll(&mut contexte) {
+        core::task::Poll::Ready(envoi) => envoi,
+        core::task::Poll::Pending => panic!("un futur prêt ne se fait pas attendre"),
+    }
+}
+
+/// **UN ABONNEMENT PÉRIMÉ SE RETIRE**, et se compte comme un échec.
+#[tokio::test(flavor = "multi_thread")]
+async fn un_abonnement_perime_se_retire() {
+    let atelier =
+        std::env::temp_dir().join(std::format!("ams-reveil-perime-{}", std::process::id()));
+    std::fs::create_dir_all(&atelier).expect("répertoire");
+    let appareils = Arc::new(crate::appareils::Appareils::new(
+        atelier.join("appareils.bin"),
+        std::vec![appareil("marie", "m1", true)],
+    ));
+    let temoin = Arc::new(Temoin {
+        vus: Mutex::default(),
+        rendu: Some(Envoi::Perime),
+    });
+    let reveil = demarrer(Sources {
+        appareils: Arc::clone(&appareils),
+        delegations: None,
+        envoyeur: Arc::clone(&temoin) as Arc<dyn Envoyeur>,
+    });
+    reveil.signaler("marie");
+    let _ = attendre(&temoin, 1).await;
+    for _ in 0..500 {
+        if appareils
+            .du_compte("marie")
+            .iter()
+            .all(|fiche| fiche.push.is_none())
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        appareils
+            .du_compte("marie")
+            .iter()
+            .all(|fiche| fiche.push.is_none())
+    );
+    assert_eq!(reveil.bilan("marie").echoues, 1);
+    let _ = std::fs::remove_dir_all(&atelier);
 }

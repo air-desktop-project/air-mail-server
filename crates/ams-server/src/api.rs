@@ -173,6 +173,8 @@ pub struct ApiMaildir {
     appareils: Option<Arc<crate::appareils::Appareils>>,
     /// Le réveil des appareils abonnés, s'il y a un magasin d'appareils.
     reveil: Option<Arc<crate::reveil::Reveil>>,
+    /// La clef publique VAPID, en base64url, si Web Push est servi.
+    vapid: Option<String>,
     /// De quoi signer ce qui sort (RFC 6376), quand une clé est nommée.
     ///
     /// **LA MÊME QUE DU CÔTÉ SMTP** : les deux portes de soumission n'ont pas
@@ -236,6 +238,7 @@ impl ApiMaildir {
             // champ non plus : voir `avec_appareils`.
             appareils: None,
             reveil: None,
+            vapid: None,
             scram: None,
             applicatifs: None,
             delegations: None,
@@ -281,6 +284,13 @@ impl ApiMaildir {
     #[must_use]
     pub fn avec_appareils(mut self, magasin: Arc<crate::appareils::Appareils>) -> Self {
         self.appareils = Some(magasin);
+        self
+    }
+
+    /// Lui donne la clef publique VAPID, que `GET /v1/me/push` publie.
+    #[must_use]
+    pub fn avec_vapid(mut self, publique: String) -> Self {
+        self.vapid = Some(publique);
         self
     }
 
@@ -1296,7 +1306,11 @@ impl ApiMaildir {
             .push
             .as_ref()
             .map(|push| (push.channel().name(), push.since()));
-        rendre(render::write_push(abonnement, sortie))
+        rendre(render::write_push(
+            abonnement,
+            self.vapid.as_deref(),
+            sortie,
+        ))
     }
 
     /// `PUT /v1/me/push` — abonne l'appareil qui appelle, ou remplace son
@@ -1346,7 +1360,11 @@ impl ApiMaildir {
             appareil.push = Some(abonnement);
             Ok(())
         }) {
-            Ok(()) => rendre(render::write_push(Some(resume), sortie)),
+            Ok(()) => rendre(render::write_push(
+                Some(resume),
+                self.vapid.as_deref(),
+                sortie,
+            )),
             Err(quoi) => dire_la_faute(&quoi, sortie),
         }
     }
@@ -4610,17 +4628,17 @@ mod porte_http {
 
         struct Temoin(std::sync::Mutex<std::vec::Vec<std::string::String>>);
         impl crate::reveil::Envoyeur for Temoin {
-            fn envoyer(
-                &self,
-                appareil: &ams_config::Device,
-                _: &ams_config::Push,
-                compte: &str,
-            ) -> crate::reveil::Envoi {
+            fn envoyer<'a>(
+                &'a self,
+                appareil: &'a ams_config::Device,
+                _: &'a ams_config::Push,
+                compte: &'a str,
+            ) -> crate::reveil::EnvoiEnCours<'a> {
                 self.0
                     .lock()
                     .expect("verrou")
                     .push(std::format!("{}:{compte}", appareil.id));
-                crate::reveil::Envoi::Transmis
+                Box::pin(core::future::ready(crate::reveil::Envoi::Transmis))
             }
         }
         const CLE: [u8; 65] = [

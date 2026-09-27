@@ -222,6 +222,8 @@ fn configuration_complete(
         app_passwords: String::new(),
         delegations: String::new(),
         drafts: String::new(),
+        push_vapid_key: String::new(),
+        push_contact: String::new(),
         require_fqdn_sender: false,
         require_fqdn_recipient: false,
         require_sender_domain: false,
@@ -2242,7 +2244,10 @@ fn une_clef_enrolee_ouvre_une_session_et_le_defi_ne_sert_qu_une_fois() {
         (corps.to_string(), code.to_string())
     };
     let (corps, code) = appeler("GET", "/v1/me/push", "", &jeton);
-    assert_eq!((code.as_str(), corps.as_str()), ("200", r#"{"push":null}"#));
+    assert_eq!(
+        (code.as_str(), corps.as_str()),
+        ("200", r#"{"push":null,"vapidKey":null}"#)
+    );
     let apns = "ab".repeat(32);
     let (corps, code) = appeler(
         "PUT",
@@ -2302,7 +2307,7 @@ fn une_clef_enrolee_ouvre_une_session_et_le_defi_ne_sert_qu_une_fois() {
     let (_, code) = appeler("DELETE", "/v1/me/push", "", &jeton);
     assert_eq!(code, "204");
     let (corps, _) = appeler("GET", "/v1/me/push", "", &jeton);
-    assert_eq!(corps, r#"{"push":null}"#);
+    assert_eq!(corps, r#"{"push":null,"vapidKey":null}"#);
 
     // ── RÉVOQUER L'APPAREIL FERME SES SESSIONS, SUR-LE-CHAMP ─────────────
     let (_, code) = appeler(

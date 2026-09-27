@@ -931,7 +931,9 @@ PUT /v1/me/push
 { "channel": "webpush", "endpoint": "https://…", "expirationTime": null,
   "keys": { "p256dh": "BN…", "auth": "q1…" } }
 
-→ 200 { "push": { "channel": "webpush", "since": 1790000000 } }</code></pre>
+→ 200 { "push": { "channel": "webpush", "since": 1790000000 },
+        "vapidKey": "BCN0PMZx…" }</code></pre>
+  <p><code>vapidKey</code> est la clef publique VAPID du serveur, en base64url : c'est l'<code>applicationServerKey</code> que votre application web passe à <code>pushManager.subscribe()</code>. <code>null</code> si le serveur n'en a pas — Web Push n'est alors pas servi.</p>
   <p>Trois canaux : <code>apns</code> (jeton APNs en hexadécimal), <code>fcm</code> (jeton d'enregistrement Firebase), <code>webpush</code> (RFC 8030 — l'objet que rend <code>PushSubscription.toJSON()</code>, tel quel, plus <code>channel</code>). Un <code>PUT</code> remplace l'abonnement précédent ; <code>DELETE</code> le retire (<code>204</code>, même s'il n'y en avait pas) ; <code>GET</code> rend le canal et la date, <strong>jamais le jeton</strong>.</p>
   <div class="note prudence">
     <span class="etiquette">Une adresse Web Push doit être publique</span>
@@ -941,8 +943,8 @@ PUT /v1/me/push
   <p><strong>Quand un appareil est réveillé</strong> (0.2.32) : à la remise d'un message dans une boîte — par SMTP ou par l'API —, les appareils abonnés de son titulaire, et ceux de chaque délégué qui peut la lire. Pas pour un message mis en quarantaine : un pourriel ne fait pas sonner un téléphone. Pas non plus pour ce que vous rangez vous-même (<code>APPEND</code>, dépôt, copie dans « Envoyés »).</p>
   <p><strong>Au plus un réveil par destinataire et par boîte toutes les trente secondes</strong> : le premier message réveille tout de suite, ceux qui suivent dans l'intervalle en font un seul, à sa fin. Aucun message ne reste sans réveil.</p>
   <div class="note prudence">
-    <span class="etiquette">0.2.32 : décidé, pas encore transmis</span>
-    <p>Le serveur décide et compte les réveils, mais aucun transport vers APNs, FCM ou Web Push n'est encore écrit : ils viennent en 0.2.33 et suivantes. <code>/v1/metrics</code> montre ce qui a été préparé (<code>wakeupsPrepared</code>), transmis (<code>wakeupsSent</code>) et refusé (<code>wakeupsFailed</code>).</p>
+    <span class="etiquette">Ce qui part aujourd'hui</span>
+    <p><strong>Web Push est transmis</strong> (0.2.33) quand le serveur a une clef VAPID : le message, chiffré pour le navigateur seul (RFC 8291), ne porte que <code>{"account":"…"}</code>, signé VAPID (RFC 8292), avec <code>TTL: 3600</code> et <code>Urgency: normal</code>. Un service qui répond <code>404</code> ou <code>410</code> a oublié l'abonnement : il se retire de lui-même. APNs et FCM sont décidés et comptés, pas encore transmis. <code>/v1/metrics</code> montre ce qui a été préparé (<code>wakeupsPrepared</code>), transmis (<code>wakeupsSent</code>) et refusé (<code>wakeupsFailed</code>).</p>
   </div>
 </div>
 

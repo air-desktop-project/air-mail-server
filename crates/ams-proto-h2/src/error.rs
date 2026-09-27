@@ -183,6 +183,17 @@ pub enum Cause {
     ResponseHeadTooLong,
     /// La liste d'en-têtes décodée ne fait pas une requête (§8.3).
     MalformedRequest,
+    /// CLIENT : le corps de la requête ne tient pas dans la fenêtre du
+    /// serveur.
+    RequestBodyTooLarge,
+    /// CLIENT : le corps de la réponse ne tient pas dans son tampon.
+    ResponseBodyTooLong,
+    /// CLIENT : le serveur a réinitialisé le flux.
+    StreamReset,
+    /// CLIENT : le serveur a refusé la requête par `GOAWAY`.
+    Refused,
+    /// CLIENT : un flux fini, ou une tête, sans `:status` (§8.3.2).
+    NoStatus,
 }
 
 impl Error {
@@ -259,6 +270,11 @@ impl fmt::Display for Error {
             Cause::BadResponseField => "un champ de réponse qu'on refuse d'écrire",
             Cause::ResponseHeadTooLong => "une tête de réponse ne tient pas dans un cadre",
             Cause::MalformedRequest => "la liste d'en-têtes ne fait pas une requête",
+            Cause::RequestBodyTooLarge => "le corps de la requête dépasse la fenêtre du serveur",
+            Cause::ResponseBodyTooLong => "le corps de la réponse dépasse son tampon",
+            Cause::StreamReset => "le serveur a réinitialisé le flux",
+            Cause::Refused => "le serveur a refusé la requête (`GOAWAY`)",
+            Cause::NoStatus => "une réponse sans `:status`",
         };
         let portee = match self.fatal {
             true => "connexion",

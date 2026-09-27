@@ -417,9 +417,9 @@ fn chaque_tampon_insuffisant_se_dit() {
             write_message(&message(), None, None, 7, place)
         }),
         ("push", |place| {
-            write_push(Some(("webpush", 1_790_000_000)), place)
+            write_push(Some(("webpush", 1_790_000_000)), Some("BCN0"), place)
         }),
-        ("push-absent", |place| write_push(None, place)),
+        ("push-absent", |place| write_push(None, None, place)),
         ("message-enveloppe", |place| {
             write_message(&message(), Some(ENTETE_COMPLET), None, 7, place)
         }),
@@ -2128,12 +2128,14 @@ fn un_abonnement_mal_forme_se_refuse() {
 fn un_abonnement_se_rend_sans_son_jeton() {
     let mut place = [0_u8; PLACE];
     assert_eq!(
-        texte(write_push(Some(("apns", 1_790_000_000)), &mut place).expect("écrivable")),
-        r#"{"push":{"channel":"apns","since":1790000000}}"#
+        texte(
+            write_push(Some(("apns", 1_790_000_000)), Some("BCN0"), &mut place).expect("écrivable")
+        ),
+        r#"{"push":{"channel":"apns","since":1790000000},"vapidKey":"BCN0"}"#
     );
     let mut place = [0_u8; PLACE];
     assert_eq!(
-        texte(write_push(None, &mut place).expect("écrivable")),
-        r#"{"push":null}"#
+        texte(write_push(None, None, &mut place).expect("écrivable")),
+        r#"{"push":null,"vapidKey":null}"#
     );
 }

@@ -350,6 +350,33 @@ air-mail-admin config write /etc/air-mail/ams.conf … \
 - sans ce répertoire, `/v1/drafts` rend `501`, et un message avec pièces
   jointes ne se soumet pas par l'API — SMTP et IMAP ne sont pas concernés.
 
+### Les réveils Web Push : la clef VAPID
+
+Un appareil abonné (`PUT /v1/me/push`) est réveillé quand du courrier arrive
+dans sa boîte. Pour Web Push (RFC 8030) — navigateurs, UnifiedPush —, le
+serveur signe chaque envoi avec **sa clef VAPID** (RFC 8292), et chiffre le
+message pour le navigateur seul (RFC 8291). La clef se crée une fois :
+
+```sh
+sudo -u air-mail air-mail-admin vapid /var/lib/air-mail/vapid.key
+# → écrit la clef en 0600, et affiche sa moitié PUBLIQUE (base64url)
+air-mail-admin config write /etc/air-mail/ams.conf … \
+    --push-vapid-key /var/lib/air-mail/vapid.key \
+    --push-contact mailto:postmaster@exemple.fr
+```
+
+- **ne remplacez jamais la clef** : chaque navigateur abonné a reçu sa moitié
+  publique, et une autre clef les désabonnerait tous. La commande refuse
+  d'écraser un fichier existant ;
+- le contact (`mailto:` ou `https:`) est ce qu'un service de push emploie pour
+  joindre l'exploitant ; il est exigé ;
+- l'envoi demande un **résolveur** (`--resolver`) et des **autorités**
+  (`--mta-sts-anchors`) : les adresses du service se vérifient avant d'être
+  contactées — jamais une adresse privée, locale ou réservée —, et son
+  certificat en TLS 1.3 ;
+- sans clef, les réveils Web Push sont décidés et comptés, mais ne partent pas.
+  APNs et FCM viendront par la même voie.
+
 ### La délégation : ouvrir une boîte à un autre compte
 
 Une boîte partagée — `support`, `compta` — est un compte comme un autre, dont

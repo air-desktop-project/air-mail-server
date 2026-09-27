@@ -1,0 +1,18 @@
+[package]
+name = "ams-push"
+description = "Web Push (RFC 8291, RFC 8292) : chiffrement du message et jeton VAPID, sans entrée-sortie"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+aes-gcm = { workspace = true }
+hkdf = { workspace = true }
+p256 = { workspace = true }
+sha2 = { workspace = true }
+
+[lints]
+workspace = true

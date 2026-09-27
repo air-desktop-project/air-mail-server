@@ -736,7 +736,11 @@ fn decoder_exactement<const N: usize>(texte: Str<'_>, place: &mut [u8; N]) -> Op
 }
 
 /// Écrit l'abonnement de l'appareil qui appelle : `{"push": {"channel": …,
-/// "since": …}}`, ou `{"push": null}` s'il n'en a pas.
+/// "since": …}, "vapidKey": …}`, `"push": null` s'il n'en a pas.
+///
+/// `vapidKey` est la clef publique VAPID du serveur, en base64url — ce qu'une
+/// application web donne au navigateur pour s'abonner (`applicationServerKey`)
+/// —, ou `null` si le serveur n'en a pas : Web Push n'est alors pas servi.
 ///
 /// **NI LE JETON NI LES CLEFS NE REVIENNENT** : le client les a, et un jeton
 /// qu'on relirait par l'API est un jeton qu'un jeton d'accès volé suffirait à
@@ -747,6 +751,7 @@ fn decoder_exactement<const N: usize>(texte: Str<'_>, place: &mut [u8; N]) -> Op
 /// [`Reason::BufferTooSmall`].
 pub fn write_push<'o>(
     abonnement: Option<(&str, u64)>,
+    vapid: Option<&str>,
     sortie: &'o mut [u8],
 ) -> Result<&'o [u8], Error> {
     let mut json = Json::new(sortie);
@@ -761,6 +766,8 @@ pub fn write_push<'o>(
         }
         None => json.null()?,
     }
+    json.key("vapidKey")?;
+    ecrire_un_texte_facultatif(&mut json, vapid)?;
     json.end_object()?;
     json.finish()
 }

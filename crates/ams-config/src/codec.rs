@@ -416,6 +416,12 @@ pub struct Configuration {
     /// Le répertoire des brouillons de l'API, ou une chaîne vide : ils ne sont
     /// alors pas servis.
     pub drafts: String,
+    /// La clef VAPID de Web Push (RFC 8292), ou une chaîne vide : Web Push
+    /// n'est alors pas transmis.
+    pub push_vapid_key: String,
+    /// Où l'exploitant se joint, pour les services de push : `mailto:…` ou
+    /// `https:…`.
+    pub push_contact: String,
     /// La file d'attente du serveur.
     pub queue: Queue,
     /// MTA-STS (RFC 8461).
@@ -1005,6 +1011,8 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
         app_passwords: texte(lu.get_app_passwords()?)?,
         delegations: texte(lu.get_delegations()?)?,
         drafts: texte(lu.get_drafts()?)?,
+        push_vapid_key: texte(lu.get_push_vapid_key()?)?,
+        push_contact: texte(lu.get_push_contact()?)?,
         queue,
         mtasts,
         tlsrpt,
@@ -1152,6 +1160,8 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
         ecrit.set_app_passwords(&config.app_passwords);
         ecrit.set_delegations(&config.delegations);
         ecrit.set_drafts(&config.drafts);
+        ecrit.set_push_vapid_key(&config.push_vapid_key);
+        ecrit.set_push_contact(&config.push_contact);
         {
             let mut emission = ecrit.reborrow().init_relay();
             emission.set_enabled(config.relay.enabled);
@@ -1374,6 +1384,8 @@ mod tests {
             app_passwords: String::from("/var/lib/air-mail/applicatifs.bin"),
             delegations: String::from("/var/lib/air-mail/delegations.bin"),
             drafts: String::from("/var/lib/air-mail/brouillons"),
+            push_vapid_key: String::from("/var/lib/air-mail/vapid.key"),
+            push_contact: String::from("mailto:postmaster@example.com"),
             // Les trois écoutes d'un serveur réel : le `25` et le `587` en
             // `STARTTLS`, le `465` en TLS implicite.
             smtp_listeners: vec![

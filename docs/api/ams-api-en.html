@@ -931,7 +931,9 @@ PUT /v1/me/push
 { "channel": "webpush", "endpoint": "https://…", "expirationTime": null,
   "keys": { "p256dh": "BN…", "auth": "q1…" } }
 
-→ 200 { "push": { "channel": "webpush", "since": 1790000000 } }</code></pre>
+→ 200 { "push": { "channel": "webpush", "since": 1790000000 },
+        "vapidKey": "BCN0PMZx…" }</code></pre>
+  <p><code>vapidKey</code> is the server's VAPID public key, in base64url: it is the <code>applicationServerKey</code> your web app passes to <code>pushManager.subscribe()</code>. <code>null</code> when the server has none — Web Push is then not served.</p>
   <p>Three channels: <code>apns</code> (APNs token in hexadecimal), <code>fcm</code> (Firebase registration token), <code>webpush</code> (RFC 8030 — the object <code>PushSubscription.toJSON()</code> returns, as is, plus <code>channel</code>). A <code>PUT</code> replaces the previous subscription; <code>DELETE</code> removes it (<code>204</code>, even if there was none); <code>GET</code> returns the channel and date, <strong>never the token</strong>.</p>
   <div class="note prudence">
     <span class="etiquette">A Web Push address must be public</span>
@@ -941,8 +943,8 @@ PUT /v1/me/push
   <p><strong>When a device is woken up</strong> (0.2.32): when a message is delivered to a mailbox — by SMTP or through the API —, the subscribed devices of its owner, and those of every delegate who can read it. Not for a quarantined message: spam does not make a phone ring. Nor for what you file yourself (<code>APPEND</code>, deposit, copy to "Sent").</p>
   <p><strong>At most one wake-up per recipient and per mailbox every thirty seconds</strong>: the first message wakes up at once, those that follow within the interval make a single one, at its end. No message is left without a wake-up.</p>
   <div class="note prudence">
-    <span class="etiquette">0.2.32: decided, not yet transmitted</span>
-    <p>The server decides and counts wake-ups, but no transport to APNs, FCM or Web Push is written yet: they come in 0.2.33 and after. <code>/v1/metrics</code> shows what was prepared (<code>wakeupsPrepared</code>), sent (<code>wakeupsSent</code>) and refused (<code>wakeupsFailed</code>).</p>
+    <span class="etiquette">What is sent today</span>
+    <p><strong>Web Push is transmitted</strong> (0.2.33) when the server has a VAPID key: the message, encrypted for the browser only (RFC 8291), carries only <code>{"account":"…"}</code>, VAPID-signed (RFC 8292), with <code>TTL: 3600</code> and <code>Urgency: normal</code>. A service answering <code>404</code> or <code>410</code> has forgotten the subscription: it is removed automatically. APNs and FCM are decided and counted, not yet transmitted. <code>/v1/metrics</code> shows what was prepared (<code>wakeupsPrepared</code>), sent (<code>wakeupsSent</code>) and refused (<code>wakeupsFailed</code>).</p>
   </div>
 </div>
 

@@ -266,6 +266,7 @@ des octets **et des actions**. Elles n'attendent jamais.
 | `ams-auth` | le magasin d'identifiants, vérification Argon2id | **implémenté** |
 | `ams-tls` | TLS 1.3 partout, TLS 1.2 toléré sur les écoutes de courrier (C4, 2026-09-22), échange de clés post-quantique | **implémenté, en entrant et en sortant** |
 | `ams-dkim` | RFC 6376 | **vérifiées, câblées, et posées** |
+| `ams-push` | RFC 8291, RFC 8292 — chiffrement Web Push et jeton VAPID | **implémenté, éprouvé contre l'annexe A de RFC 8291** |
 | `ams-spf` | RFC 7208 | **évalué, câblé, et écrit dans le message** |
 | `ams-dmarc` | RFC 7489 | **alignement, politique, et câblé dans la boucle** |
 | `ams-config` | les trois formats binaires : configuration, comptes, index | **implémenté** |

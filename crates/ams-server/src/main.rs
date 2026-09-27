@@ -47,6 +47,7 @@ mod pop3;
 mod reveil;
 mod scram;
 mod sessions;
+mod webpush;
 
 use std::collections::BTreeMap;
 use std::process::ExitCode;
@@ -202,6 +203,7 @@ fn monter_l_api(
     applicatifs: Option<Arc<crate::applicatifs::Applicatifs>>,
     delegations: Option<Arc<crate::delegations::Delegations>>,
     reveil: Option<Arc<crate::reveil::Reveil>>,
+    vapid: Option<String>,
     file: Option<ams_loop_tokio::Spool>,
     message_max: usize,
     port_h3: Option<u16>,
@@ -315,6 +317,12 @@ fn monter_l_api(
             // appareils abonnés, comme ce qui arrive par SMTP.
             let api = match reveil {
                 Some(reveil) => api.avec_reveil(reveil),
+                None => api,
+            };
+            // **ET LA CLEF VAPID PUBLIQUE**, que les applications web donnent au
+            // navigateur pour s'abonner.
+            let api = match vapid {
+                Some(publique) => api.avec_vapid(publique),
                 None => api,
             };
             // **ET LES BROUILLONS** : sans répertoire, `/v1/drafts` rend 501, et
@@ -549,6 +557,84 @@ fn charger_applicatifs(chemin: &str) -> Result<Vec<ams_auth::AppPassword>, Strin
         .map_err(|erreur| format!("mots de passe applicatifs `{chemin}` : {erreur}"))?;
     ams_config::decode_app_passwords(&octets)
         .map_err(|erreur| format!("mots de passe applicatifs `{chemin}` : {erreur}"))
+}
+
+/// Ce qui porte les réveils : Web Push si une clef VAPID est nommée, rien
+/// sinon.
+///
+/// # UNE CLEF NOMMÉE ET INUTILISABLE ARRÊTE LE DÉMARRAGE
+///
+/// Sans contact, sans résolveur, sans autorités, ou avec une clef illisible ou
+/// lisible par d'autres, Web Push ne partirait pas — et rien ne le dirait,
+/// sinon des abonnés qui ne sonnent jamais. Refuser de démarrer se voit tout
+/// de suite.
+fn envoyeur_du_reveil(
+    options: &Configuration,
+    verificateur: Option<&ams_loop_tokio::SenderChecker>,
+) -> Result<(Arc<dyn crate::reveil::Envoyeur>, Option<String>), String> {
+    let sans: Arc<dyn crate::reveil::Envoyeur> = Arc::new(crate::reveil::SansTransport);
+    if options.push_vapid_key.is_empty() {
+        eprintln!(
+            "air-mail-server : réveils — AUCUNE CLEF VAPID, Web Push n'est pas transmis \
+             (`air-mail-admin vapid <chemin>`, puis `config write … --push-vapid-key <chemin> \
+             --push-contact mailto:…`). APNs et FCM n'ont pas encore de transport."
+        );
+        return Ok((sans, None));
+    }
+    let chemin = &options.push_vapid_key;
+    if options.push_contact.is_empty() {
+        return Err(String::from(
+            "une clef VAPID est nommée sans contact : un service de push doit pouvoir joindre \
+             l'exploitant (`--push-contact mailto:postmaster@…`, §2.1 de RFC 8292)",
+        ));
+    }
+    refuser_fichier_lisible_par_tous(chemin, "clef VAPID")?;
+    let octets =
+        std::fs::read(chemin).map_err(|erreur| format!("clef VAPID `{chemin}` : {erreur}"))?;
+    let cle = <[u8; ams_push::PRIVATE_KEY_OCTETS]>::try_from(octets.as_slice())
+        .ok()
+        .filter(|cle| ams_push::vapid_public_key(cle).is_ok())
+        .ok_or_else(|| format!("clef VAPID `{chemin}` : trente-deux octets bruts attendus"))?;
+    let Some(verificateur) = verificateur else {
+        return Err(String::from(
+            "Web Push demande un résolveur DNS (`--resolver 127.0.0.1:53`) : les adresses d'un \
+             service de push se vérifient AVANT d'être contactées",
+        ));
+    };
+    if options.mtasts.anchors.is_empty() {
+        return Err(String::from(
+            "Web Push demande des autorités pour vérifier les services de push \
+             (`--mta-sts-anchors /etc/ssl/certs/ca-certificates.crt`)",
+        ));
+    }
+    let pem = std::fs::read(&options.mtasts.anchors)
+        .map_err(|erreur| format!("`{}` : {erreur}", options.mtasts.anchors))?;
+    let racines = ams_tls::anchors(&pem)
+        .map_err(|erreur| format!("`{}` : {erreur}", options.mtasts.anchors))?;
+    let transport = ams_loop_tokio::PushTransport::new(
+        verificateur.resolver().clone(),
+        Arc::new(racines),
+        std::time::Duration::from_secs(u64::from(options.timeouts.command_seconds)),
+    );
+    let publique = ams_push::vapid_public_key(&cle).unwrap_or([0; ams_push::PUBLIC_KEY_OCTETS]);
+    let mut texte = [0_u8; 128];
+    let n = ams_push::encode_base64url(&publique, &mut texte).unwrap_or_default();
+    let publique = String::from_utf8_lossy(texte.get(..n).unwrap_or_default()).into_owned();
+    eprintln!(
+        "air-mail-server : réveils — Web Push TRANSMIS (clef VAPID `{chemin}`, publique `{}`), \
+         en TLS 1.3 vérifié contre `{}`, vers des adresses PUBLIQUES seulement. APNs et FCM \
+         n'ont pas encore de transport.",
+        publique, options.mtasts.anchors
+    );
+    Ok((
+        Arc::new(crate::webpush::WebPush::new(
+            transport,
+            cle,
+            options.push_contact.clone(),
+            sans,
+        )),
+        Some(publique),
+    ))
 }
 
 /// Lit le magasin des délégations.
@@ -1133,17 +1219,6 @@ async fn servir(fichier: &Path) -> Result<(), String> {
             chargees,
         )))
     };
-    // **LE RÉVEIL DES APPAREILS ABONNÉS** : sans magasin d'appareils, personne
-    // n'est abonné, et il ne démarre pas. Il ne transmet encore rien — aucun
-    // transport vers Apple, Google ou Web Push n'est écrit — : il décide et
-    // compte, et `/v1/metrics` le montre.
-    let reveil = (!options.devices.is_empty()).then(|| {
-        crate::reveil::demarrer(crate::reveil::Sources {
-            appareils: Arc::clone(&appareils),
-            delegations: delegations.clone(),
-            envoyeur: Arc::new(crate::reveil::SansTransport),
-        })
-    });
     // **ET POUR LES MOTS DE PASSE APPLICATIFS** : une révocation faite depuis
     // l'API ou le terminal vaut tout de suite, sur les trois protocoles.
     let applicatifs = if options.app_passwords.is_empty() {
@@ -1202,6 +1277,14 @@ async fn servir(fichier: &Path) -> Result<(), String> {
                 .map_err(|erreur| format!("SPF : {erreur}"))?
                 .avec_lien_de_confiance(options.spf.resolvers_trusted),
         )
+    };
+    // CE QUI PORTERA LES RÉVEILS se décide ici, pendant que le résolveur est
+    // encore à nous : il part ensuite au vérificateur SPF.
+    let (envoyeur_des_reveils, vapid_publique) = if options.devices.is_empty() {
+        (None, None)
+    } else {
+        let (envoyeur, publique) = envoyeur_du_reveil(&options, verificateur.as_ref())?;
+        (Some(envoyeur), publique)
     };
     // ── LE CANAL JUSQU'AUX RÉSOLVEURS (§2.1 de RFC 7672) ────────────────────
     //
@@ -2363,6 +2446,17 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     // liste, et la lui passer deux fois en donnerait deux à tenir d'accord.
     let signature_pour_l_api = signature_de_la_remise.clone();
 
+    // **LE RÉVEIL DES APPAREILS ABONNÉS** : sans magasin d'appareils, personne
+    // n'est abonné, et il ne démarre pas. Web Push part si une clef VAPID est
+    // nommée ; APNs et FCM n'ont pas encore de transport, et le disent.
+    let reveil = envoyeur_des_reveils.map(|envoyeur| {
+        crate::reveil::demarrer(crate::reveil::Sources {
+            appareils: Arc::clone(&appareils),
+            delegations: delegations.clone(),
+            envoyeur,
+        })
+    });
+
     let montage = monter_l_api(
         &options,
         options_de_service.tls.as_ref(),
@@ -2382,6 +2476,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         applicatifs.clone(),
         delegations.clone(),
         reveil.clone(),
+        vapid_publique.clone(),
         file.as_ref().map(|attente| attente.as_ref().clone()),
         message_max,
         port_h3,

@@ -210,6 +210,8 @@ fn configuration_pop3(
         app_passwords: String::new(),
         delegations: String::new(),
         drafts: String::new(),
+        push_vapid_key: String::new(),
+        push_contact: String::new(),
         require_fqdn_sender: false,
         require_fqdn_recipient: false,
         require_sender_domain: false,
