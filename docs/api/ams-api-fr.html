@@ -657,7 +657,30 @@ authorization: Bearer AQECAAAAAG…</code></pre>
     <span class="verbe get">GET</span><span class="verbe patch">PATCH</span><span class="verbe delete">DELETE</span>
     <span class="chemin">/v1/mailboxes/{boite}/messages/{uid}</span><span class="portee">mail</span>
   </div>
-  <p>Rend l'enveloppe décodée du message, sous <code>{"uidValidity": …, "message": {…}}</code>.</p>
+  <p>Rend le message et son <strong>enveloppe décodée</strong>, sous <code>{"uidValidity": …, "message": {…}}</code> :</p>
+  <pre><code>"envelope": {
+  "date": 1787994511, "dateZone": "+0200",
+  "from": [{ "name": "José Dupont", "email": "jose@exemple.fr" }],
+  "sender": null,
+  "replyTo": null,
+  "to": [{ "name": null, "email": "anne@exemple.fr" },
+         { "name": "Marc", "email": "marc@exemple.fr" }],
+  "cc": [], "bcc": null,
+  "messageId": "m1@exemple.fr",
+  "inReplyTo": ["m0@exemple.fr"],
+  "references": ["racine@exemple.fr", "m0@exemple.fr"],
+  "complete": true
+}</code></pre>
+  <p>Les noms sont décodés (mots encodés de RFC 2047, guillemets, commentaires) ; <code>date</code> est l'instant du champ <code>Date:</code> en secondes depuis l'époque, et <code>dateZone</code> le fuseau de qui l'a écrit ; les identifiants de message sont rendus <strong>sans chevrons</strong>. Les groupes (<code>amis: …;</code>) se traversent : leurs membres sont rendus, leur nom non.</p>
+  <div class="note info">
+    <span class="etiquette">Absent n'est pas vide</span>
+    <p>Un champ que le message ne porte pas vaut <code>null</code> ; un champ présent sans adresse — <code>undisclosed-recipients:;</code> — vaut <code>[]</code>. Un <code>Sender:</code> absent reste <code>null</code> : c'est à vous de répondre au <code>replyTo</code>, sinon au <code>from</code>. Une date sans fuseau, ou illisible, vaut <code>null</code> — la deviner placerait le message une heure ou deux à côté.</p>
+  </div>
+  <div class="note prudence">
+    <span class="etiquette"><code>complete</code> : avez-vous « tous » ?</span>
+    <p>Chaque liste est bornée à <strong>cent</strong> éléments ; une adresse illisible (pas de l'UTF-8, plus de 256 octets) n'est pas rendue. Dans ces cas <code>complete</code> vaut <code>false</code> : un « répondre à tous » construit sur cette enveloppe n'atteindrait pas tout le monde — relisez le message brut. Pour <code>references</code>, on garde le premier (la racine du fil) et les plus récents. Si l'enveloppe entière ne tient pas dans la réponse, <code>envelope</code> vaut <code>null</code> et le reste du message est rendu.</p>
+  </div>
+  <p>Le nom d'affichage n'engage à rien : <code>"Votre banque" &lt;pirate@example.test&gt;</code> est un message ordinaire. Montrez l'adresse à côté du nom.</p>
   <p>Les drapeaux sont nommés comme IMAP les nomme (§2.3.2 de RFC 9051), et non en minuscules : <code>\Seen</code>, <code>\Answered</code>, <code>\Flagged</code>, <code>\Deleted</code>, <code>\Draft</code>, <code>$MDNSent</code>, <code>$Forwarded</code>, <code>$Junk</code>, <code>$NonJunk</code>, <code>$Phishing</code>. L'ensemble est fermé : dix, et pas un de plus.</p>
   <p><code>PATCH</code> pose et ôte des drapeaux, et rend le message <strong>tel qu'il est devenu</strong> :</p>
   <pre><code>{ "add": ["\\Seen"], "remove": ["\\Flagged"] }</code></pre>

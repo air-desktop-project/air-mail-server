@@ -24,6 +24,7 @@
 //! pas.
 
 use crate::Error;
+use crate::decode::decode_encoded_words;
 
 /// Le domaine de l'adresse d'un champ, `From:` en particulier.
 ///
@@ -263,7 +264,7 @@ impl<'a> Iterator for AddressElements<'a> {
             if self.reste.is_empty() {
                 return None;
             }
-            let (element, apres) = decouper(self.reste);
+            let (element, _, apres) = decouper(self.reste);
             self.reste = apres;
             let nu = element.trim_ascii();
             if !nu.is_empty() {
@@ -278,7 +279,10 @@ impl<'a> Iterator for AddressElements<'a> {
 /// **ON PARCOURT UNE FOIS, ET L'ON DÉLIMITE EN CHEMIN.** Découper d'abord sur les
 /// virgules couperait un groupe en deux, et une virgule entre guillemets, dans un
 /// commentaire ou entre chevrons n'en est pas une.
-fn decouper(valeur: &[u8]) -> (&[u8], &[u8]) {
+///
+/// Rend aussi le séparateur qui l'a coupé : un élément que `:` termine est le
+/// NOM d'un groupe, et non une adresse.
+fn decouper(valeur: &[u8]) -> (&[u8], Option<u8>, &[u8]) {
     let mut i = 0_usize;
     while i < valeur.len() {
         match valeur.get(i).copied().unwrap_or(0) {
@@ -287,15 +291,220 @@ fn decouper(valeur: &[u8]) -> (&[u8], &[u8]) {
             b'<' => i = fin_d_angle(valeur, i),
             // §3.4 : `:` ouvre un groupe, `;` le ferme. Ni l'un ni l'autre ne
             // porte d'adresse, et ce qui les entoure en porte.
-            b',' | b';' | b':' => {
+            separateur @ (b',' | b';' | b':') => {
                 let element = valeur.get(..i).unwrap_or_default();
                 let apres = valeur.get(i.saturating_add(1)..).unwrap_or_default();
-                return (element, apres);
+                return (element, Some(separateur), apres);
             }
             _ => i = i.saturating_add(1),
         }
     }
-    (valeur, &[])
+    (valeur, None, &[])
+}
+
+/// Une adresse d'une liste, et le nom qui l'accompagne — tels qu'ils sont écrits.
+///
+/// Les deux sont BRUTS : guillemets, commentaires, plis et mots encodés
+/// compris. [`write_display_name`] et [`write_addr_spec`] en tirent ce qu'ils
+/// valent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NamedAddress<'a> {
+    /// Ce qui précède le chevron ouvrant ; vide sans chevron.
+    pub name: &'a [u8],
+    /// Ce qui est entre les chevrons, ou l'élément entier sans eux.
+    pub address: &'a [u8],
+}
+
+/// Les adresses d'un champ `From:`, `To:`, `Cc:`… avec leur nom d'affichage.
+///
+/// # LES GROUPES SE TRAVERSENT, ET LEUR NOM NE SE REND PAS
+///
+/// `amis: jean@example.test, marie@example.test;` rend deux adresses, et
+/// `undisclosed-recipients:;` n'en rend aucune — ce qui est exactement ce que
+/// le champ désigne. Le nom d'un groupe n'est l'adresse de personne : le rendre
+/// comme tel ferait écrire un client à « amis ».
+#[must_use]
+pub fn named_addresses(value: &[u8]) -> NamedAddresses<'_> {
+    NamedAddresses { reste: value }
+}
+
+/// Les adresses d'une liste, une par une, avec leur nom.
+#[derive(Debug, Clone, Copy)]
+pub struct NamedAddresses<'a> {
+    /// Ce qu'il reste à parcourir.
+    reste: &'a [u8],
+}
+
+impl<'a> Iterator for NamedAddresses<'a> {
+    type Item = NamedAddress<'a>;
+
+    fn next(&mut self) -> Option<NamedAddress<'a>> {
+        loop {
+            if self.reste.is_empty() {
+                return None;
+            }
+            let (element, separateur, apres) = decouper(self.reste);
+            self.reste = apres;
+            let nu = element.trim_ascii();
+            if separateur == Some(b':') || nu.is_empty() {
+                continue;
+            }
+            return Some(scinder(nu));
+        }
+    }
+}
+
+/// Sépare le nom de l'adresse.
+fn scinder(element: &[u8]) -> NamedAddress<'_> {
+    let Some(ouvrant) = debut_d_angle(element) else {
+        return NamedAddress {
+            name: &[],
+            address: element,
+        };
+    };
+    let fin = fin_d_angle(element, ouvrant);
+    // UN CHEVRON QUE RIEN NE FERME garde tout ce qui suit : couper le dernier
+    // octet ferait d'une adresse une autre.
+    let fin = match fin.checked_sub(1) {
+        Some(ferme) if element.get(ferme) == Some(&b'>') && ferme > ouvrant => ferme,
+        _ => fin,
+    };
+    NamedAddress {
+        name: element.get(..ouvrant).unwrap_or_default(),
+        address: element
+            .get(ouvrant.saturating_add(1)..fin)
+            .unwrap_or_default(),
+    }
+}
+
+/// Le rang du chevron ouvrant, hors chaîne et hors commentaire.
+pub(crate) fn debut_d_angle(texte: &[u8]) -> Option<usize> {
+    let mut i = 0_usize;
+    while i < texte.len() {
+        match texte.get(i).copied().unwrap_or(0) {
+            b'"' => i = fin_de_chaine(texte, i),
+            b'(' => i = fin_de_commentaire(texte, i),
+            b'<' => return Some(i),
+            _ => i = i.saturating_add(1),
+        }
+    }
+    None
+}
+
+/// Écrit ce qu'un nom d'affichage VAUT, et rend ce qu'il occupe.
+///
+/// Les guillemets et leurs échappements défaits, les commentaires sautés, les
+/// plis effacés, chaque suite de blancs réduite à un seul — puis les mots
+/// encodés de la RFC 2047 décodés. `work` reçoit l'étape intermédiaire ; il
+/// doit être aussi grand que `name`, et `out` deux fois plus (voir
+/// [`crate::decoded_max`]).
+///
+/// # UN MOT ENCODÉ ENTRE GUILLEMETS SE DÉCODE AUSSI
+///
+/// §5 de RFC 2047 l'interdit, et une bonne part des logiciels l'écrit quand
+/// même : `"=?utf-8?Q?Jos=C3=A9?=" <jose@example.test>`. Ne pas le décoder
+/// afficherait la soupe encodée à la place du nom, sans rien gagner — un nom
+/// d'affichage n'engage à rien.
+///
+/// # Errors
+///
+/// [`Error::BufferTooSmall`] si `work` ou `out` ne suffit pas.
+pub fn write_display_name(name: &[u8], work: &mut [u8], out: &mut [u8]) -> Result<usize, Error> {
+    let mut ecrits = 0_usize;
+    let mut blanc = false;
+    let mut pousser = |octet: u8, blanc: &mut bool| -> Result<(), Error> {
+        if *blanc && ecrits > 0 {
+            *work.get_mut(ecrits).ok_or(Error::BufferTooSmall)? = b' ';
+            ecrits = ecrits.saturating_add(1);
+        }
+        *blanc = false;
+        *work.get_mut(ecrits).ok_or(Error::BufferTooSmall)? = octet;
+        ecrits = ecrits.saturating_add(1);
+        Ok(())
+    };
+    let mut i = 0_usize;
+    while i < name.len() {
+        let octet = name.get(i).copied().unwrap_or(0);
+        match octet {
+            b'(' => {
+                i = fin_de_commentaire(name, i);
+                blanc = true;
+            }
+            b' ' | b'\t' | b'\r' | b'\n' => {
+                blanc = true;
+                i = i.saturating_add(1);
+            }
+            b'"' => {
+                let fin = fin_de_chaine(name, i);
+                let mut j = i.saturating_add(1);
+                // Le contenu s'arrête avant le guillemet fermant — ou au bout
+                // d'une chaîne que rien ne ferme.
+                let bout = match name.get(fin.saturating_sub(1)) {
+                    Some(b'"') if fin > i.saturating_add(1) => fin.saturating_sub(1),
+                    _ => fin,
+                };
+                while j < bout {
+                    let dedans = name.get(j).copied().unwrap_or(0);
+                    let (vaut, saut) = match dedans {
+                        b'\\' => (name.get(j.saturating_add(1)).copied().unwrap_or(b'\\'), 2),
+                        _ => (dedans, 1),
+                    };
+                    j = j.saturating_add(saut);
+                    match vaut {
+                        // LE PLI S'EFFACE : le blanc qui le suit est déjà là.
+                        b'\r' | b'\n' => {}
+                        b' ' | b'\t' => blanc = true,
+                        _ => pousser(vaut, &mut blanc)?,
+                    }
+                }
+                i = fin;
+            }
+            _ => {
+                pousser(octet, &mut blanc)?;
+                i = i.saturating_add(1);
+            }
+        }
+    }
+    decode_encoded_words(work.get(..ecrits).unwrap_or_default(), out)
+}
+
+/// Écrit une adresse sans ce qui ne fait que l'entourer, et rend ce qu'elle
+/// occupe : commentaires, blancs et plis ôtés, chaînes citées gardées telles
+/// quelles.
+///
+/// `jean (le vrai) @ example.test` vaut `jean@example.test` (§3.4.1 de RFC
+/// 5322 admet le blanc et les commentaires autour de chaque morceau).
+///
+/// # Errors
+///
+/// [`Error::BufferTooSmall`] si `out` ne suffit pas — la longueur de `address`
+/// suffit toujours.
+pub fn write_addr_spec(address: &[u8], out: &mut [u8]) -> Result<usize, Error> {
+    let mut ecrits = 0_usize;
+    let mut i = 0_usize;
+    while i < address.len() {
+        let octet = address.get(i).copied().unwrap_or(0);
+        let fin = match octet {
+            b'(' => {
+                i = fin_de_commentaire(address, i);
+                continue;
+            }
+            b' ' | b'\t' | b'\r' | b'\n' => {
+                i = i.saturating_add(1);
+                continue;
+            }
+            b'"' => fin_de_chaine(address, i),
+            _ => i.saturating_add(1),
+        };
+        let morceau = address.get(i..fin).unwrap_or_default();
+        let place = out
+            .get_mut(ecrits..ecrits.saturating_add(morceau.len()))
+            .ok_or(Error::BufferTooSmall)?;
+        place.copy_from_slice(morceau);
+        ecrits = ecrits.saturating_add(morceau.len());
+        i = fin;
+    }
+    Ok(ecrits)
 }
 
 /// Les trois lecteurs qui disent OÙ S'ARRÊTE ce qui n'est pas une adresse.

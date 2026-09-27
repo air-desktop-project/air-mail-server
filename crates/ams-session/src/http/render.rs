@@ -1289,13 +1289,19 @@ pub fn write_changes<'o>(
     json.finish()
 }
 
-/// Écrit un message seul.
+/// Écrit un message seul, et son enveloppe lue dans `entete`.
+///
+/// `entete` est le bloc d'en-tête du message ; `None` écrit `"envelope": null`
+/// — c'est ce que l'appelant rend quand l'enveloppe entière ne tient pas dans
+/// la réponse : le message reste servi, et le client sait qu'il lui manque
+/// quelque chose au lieu de croire qu'il n'y a rien.
 ///
 /// # Errors
 ///
 /// [`Reason::BufferTooSmall`].
 pub fn write_message<'o>(
     message: &MessageRow<'_>,
+    entete: Option<&[u8]>,
     uid_validity: u32,
     sortie: &'o mut [u8],
 ) -> Result<&'o [u8], Error> {
@@ -1303,14 +1309,185 @@ pub fn write_message<'o>(
     json.begin_object()?;
     json.field_u64("uidValidity", u64::from(uid_validity))?;
     json.key("message")?;
-    ecrire_un_message(&mut json, message)?;
+    json.begin_object()?;
+    ecrire_les_champs(&mut json, message)?;
+    json.key("envelope")?;
+    match entete {
+        Some(entete) => ecrire_l_enveloppe(&mut json, entete)?,
+        None => json.null()?,
+    }
+    json.end_object()?;
     json.end_object()?;
     json.finish()
 }
 
-/// Le corps d'un message.
+/// Combien d'éléments au plus par liste de l'enveloppe.
+///
+/// **Aucune RFC ne le borne.** Un message envoyé à une liste de diffusion peut
+/// nommer mille destinataires dans son `To:`, et une réponse doit tenir dans son
+/// tampon. Au-delà, `complete` le dit.
+pub const ENVELOPE_LIST_MAX: usize = 100;
+
+/// Ce qu'un nom d'affichage peut occuper, avant décodage.
+///
+/// Mille octets : la RFC 5322 §2.1.1 borne une ligne à 998, et un nom plus long
+/// est plié sur plusieurs — ce qu'aucun client n'afficherait entier.
+const NOM_MAX: usize = 1000;
+
+/// Ce qu'une adresse peut occuper. §4.5.3.1.3 de RFC 5321 borne un chemin à
+/// 256 octets ; celui qui en écrit plus n'écrit pas une adresse qu'un serveur
+/// accepterait.
+const ADRESSE_MAX: usize = 256;
+
+/// L'enveloppe, lue et DÉCODÉE pour un client qui l'affiche.
+///
+/// # CE N'EST PAS L'`ENVELOPE` D'IMAP, ET C'EST VOULU
+///
+/// IMAP rend le texte de l'en-tête tel quel, et c'est la règle pour un client
+/// IMAP. Un client REST veut le sens : les noms décodés, la date en instant, les
+/// identifiants sans chevrons. Et ce qui est absent est `null` — IMAP remplace
+/// un `Sender:` absent par le `From:`, ce qui ferait croire ici que le message
+/// en porte un.
+///
+/// # CE QU'ON NE SAIT PAS RENDRE NE SE REND PAS, ET `complete` LE DIT
+///
+/// Une liste coupée à [`ENVELOPE_LIST_MAX`], une adresse qui n'est pas de
+/// l'UTF-8 ou qui ne tient pas : `complete` vaut `false`. Un client qui répond
+/// à tous doit savoir qu'il n'a pas « tous ».
+fn ecrire_l_enveloppe(json: &mut Json<'_>, entete: &[u8]) -> Result<(), Error> {
+    let Ok(lu) = ams_mime::Message::parse(entete, &ams_mime::Limits::DEFAULT) else {
+        // UN EN-TÊTE ILLISIBLE N'A PAS D'ENVELOPPE : l'inventer vide ferait
+        // croire à un message sans expéditeur.
+        return json.null();
+    };
+    // LE PREMIER CHAMP DE CE NOM, comme partout dans ce dépôt : prendre le
+    // dernier laisserait qui a fabriqué le message choisir lequel on montre.
+    let champ = |nom: &[u8]| {
+        lu.fields()
+            .find(|champ| champ.name_is(nom))
+            .map(|champ| champ.raw_value())
+    };
+    let mut complet = true;
+    json.begin_object()?;
+    let date = champ(b"date").and_then(ams_mime::read_date_time);
+    json.key("date")?;
+    match date {
+        Some(date) => json.number(date.epoch_seconds)?,
+        None => json.null()?,
+    }
+    json.key("dateZone")?;
+    match date {
+        Some(date) => json.string(core::str::from_utf8(&date.zone()).unwrap_or_default())?,
+        None => json.null()?,
+    }
+    for (cle, nom) in [
+        ("from", &b"from"[..]),
+        ("sender", b"sender"),
+        ("replyTo", b"reply-to"),
+        ("to", b"to"),
+        ("cc", b"cc"),
+        ("bcc", b"bcc"),
+    ] {
+        json.key(cle)?;
+        match champ(nom) {
+            Some(valeur) => complet &= ecrire_les_adresses(json, valeur)?,
+            None => json.null()?,
+        }
+    }
+    json.key("messageId")?;
+    let identifiant = champ(b"message-id")
+        .and_then(|valeur| ams_mime::message_ids(valeur).next())
+        .and_then(|octets| core::str::from_utf8(octets).ok());
+    ecrire_un_texte_facultatif(json, identifiant)?;
+    for (cle, nom) in [
+        ("inReplyTo", &b"in-reply-to"[..]),
+        ("references", b"references"),
+    ] {
+        json.key(cle)?;
+        match champ(nom) {
+            Some(valeur) => complet &= ecrire_les_identifiants(json, valeur)?,
+            None => json.null()?,
+        }
+    }
+    json.field_bool("complete", complet)?;
+    json.end_object()
+}
+
+/// Écrit une liste d'adresses, `{"name": …, "email": …}` chacune. Rend si elle
+/// est complète.
+fn ecrire_les_adresses(json: &mut Json<'_>, valeur: &[u8]) -> Result<bool, Error> {
+    let mut travail = [0_u8; NOM_MAX];
+    let mut nom = [0_u8; NOM_MAX * 2];
+    let mut adresse = [0_u8; ADRESSE_MAX];
+    let mut complet = true;
+    let mut rendues = 0_usize;
+    json.begin_array()?;
+    for une in ams_mime::named_addresses(valeur) {
+        if rendues == ENVELOPE_LIST_MAX {
+            complet = false;
+            break;
+        }
+        // UNE ADRESSE QU'ON NE PEUT PAS RENDRE ENTIÈRE NE SE REND PAS : la
+        // moitié d'une adresse est l'adresse de quelqu'un d'autre.
+        let courriel = ams_mime::write_addr_spec(une.address, &mut adresse)
+            .ok()
+            .and_then(|ecrits| adresse.get(..ecrits))
+            .and_then(|octets| core::str::from_utf8(octets).ok())
+            .filter(|texte| !texte.is_empty());
+        let Some(courriel) = courriel else {
+            complet = false;
+            continue;
+        };
+        // UN NOM QU'ON NE SAIT PAS RENDRE VAUT `null` : le nom n'engage à rien,
+        // l'adresse reste juste.
+        let affiche = ams_mime::write_display_name(une.name, &mut travail, &mut nom)
+            .ok()
+            .and_then(|ecrits| nom.get(..ecrits))
+            .and_then(|octets| core::str::from_utf8(octets).ok())
+            .filter(|texte| !texte.is_empty());
+        json.begin_object()?;
+        json.key("name")?;
+        ecrire_un_texte_facultatif(json, affiche)?;
+        json.field_str("email", courriel)?;
+        json.end_object()?;
+        rendues = rendues.saturating_add(1);
+    }
+    json.end_array()?;
+    Ok(complet)
+}
+
+/// Écrit une liste d'identifiants de message. Rend si elle est complète.
+///
+/// # LE PREMIER ET LES DERNIERS
+///
+/// Au-delà de [`ENVELOPE_LIST_MAX`], on garde le premier — la racine du fil —
+/// et les plus récents, dont le parent direct : c'est ce qu'un client emploie
+/// pour ranger un message dans son fil. Garder les premiers perdrait justement
+/// le parent.
+fn ecrire_les_identifiants(json: &mut Json<'_>, valeur: &[u8]) -> Result<bool, Error> {
+    let total = ams_mime::message_ids(valeur).count();
+    let sautes = total.saturating_sub(ENVELOPE_LIST_MAX);
+    json.begin_array()?;
+    for (rang, identifiant) in ams_mime::message_ids(valeur).enumerate() {
+        if rang != 0 && rang <= sautes {
+            continue;
+        }
+        // Un identifiant est de l'ASCII imprimable : `message_ids` l'a vérifié.
+        json.string(core::str::from_utf8(identifiant).unwrap_or_default())?;
+    }
+    json.end_array()?;
+    Ok(sautes == 0)
+}
+
+/// Le corps d'un message, tel qu'une liste le rend.
 fn ecrire_un_message(json: &mut Json<'_>, message: &MessageRow<'_>) -> Result<(), Error> {
     json.begin_object()?;
+    ecrire_les_champs(json, message)?;
+    json.end_object()
+}
+
+/// Les champs qu'un message porte dans toutes ses représentations.
+fn ecrire_les_champs(json: &mut Json<'_>, message: &MessageRow<'_>) -> Result<(), Error> {
     json.field_u64("uid", u64::from(message.uid))?;
     json.field_u64("size", message.size)?;
     // **UNE DATE EST UN NOMBRE** : le client la met en forme, puisque c'est lui
@@ -1325,8 +1502,7 @@ fn ecrire_un_message(json: &mut Json<'_>, message: &MessageRow<'_>) -> Result<()
     for nom in noms_des_drapeaux(message.flags) {
         json.string(nom)?;
     }
-    json.end_array()?;
-    json.end_object()
+    json.end_array()
 }
 
 /// Écrit un texte, ou `null` s'il n'y en a pas.

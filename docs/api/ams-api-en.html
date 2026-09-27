@@ -653,7 +653,30 @@ authorization: Bearer AQECAAAAAG…</code></pre>
     <span class="verbe get">GET</span><span class="verbe patch">PATCH</span><span class="verbe delete">DELETE</span>
     <span class="chemin">/v1/mailboxes/{mailbox}/messages/{uid}</span><span class="portee">mail</span>
   </div>
-  <p>Returns the message's decoded envelope, under <code>{"uidValidity": …, "message": {…}}</code>.</p>
+  <p>Returns the message and its <strong>decoded envelope</strong>, under <code>{"uidValidity": …, "message": {…}}</code>:</p>
+  <pre><code>"envelope": {
+  "date": 1787994511, "dateZone": "+0200",
+  "from": [{ "name": "José Dupont", "email": "jose@example.com" }],
+  "sender": null,
+  "replyTo": null,
+  "to": [{ "name": null, "email": "anne@example.com" },
+         { "name": "Marc", "email": "marc@example.com" }],
+  "cc": [], "bcc": null,
+  "messageId": "m1@example.com",
+  "inReplyTo": ["m0@example.com"],
+  "references": ["root@example.com", "m0@example.com"],
+  "complete": true
+}</code></pre>
+  <p>Names are decoded (RFC 2047 encoded words, quotes, comments); <code>date</code> is the instant of the <code>Date:</code> field in seconds since the epoch, and <code>dateZone</code> the writer's time zone; message identifiers come <strong>without angle brackets</strong>. Groups (<code>friends: …;</code>) are walked through: their members are returned, their name is not.</p>
+  <div class="note info">
+    <span class="etiquette">Absent is not empty</span>
+    <p>A field the message does not carry is <code>null</code>; a field present with no address — <code>undisclosed-recipients:;</code> — is <code>[]</code>. A missing <code>Sender:</code> stays <code>null</code>: reply to <code>replyTo</code>, otherwise to <code>from</code>. A date without a time zone, or unreadable, is <code>null</code> — guessing would place the message an hour or two off.</p>
+  </div>
+  <div class="note prudence">
+    <span class="etiquette"><code>complete</code>: do you have "all"?</span>
+    <p>Each list is capped at <strong>one hundred</strong> items; an unreadable address (not UTF-8, longer than 256 bytes) is not returned. In those cases <code>complete</code> is <code>false</code>: a "reply all" built from this envelope would not reach everyone — read the raw message. For <code>references</code>, the first (the thread's root) and the most recent are kept. If the whole envelope does not fit in the response, <code>envelope</code> is <code>null</code> and the rest of the message is returned.</p>
+  </div>
+  <p>The display name commits to nothing: <code>"Your bank" &lt;crook@example.test&gt;</code> is an ordinary message. Show the address next to the name.</p>
   <p>Flags are named as IMAP names them (RFC 9051 §2.3.2), not in lower case: <code>\Seen</code>, <code>\Answered</code>, <code>\Flagged</code>, <code>\Deleted</code>, <code>\Draft</code>, <code>$MDNSent</code>, <code>$Forwarded</code>, <code>$Junk</code>, <code>$NonJunk</code>, <code>$Phishing</code>. The set is closed: ten, and not one more.</p>
   <p><code>PATCH</code> sets and clears flags, and returns the message <strong>as it has become</strong>:</p>
   <pre><code>{ "add": ["\\Seen"], "remove": ["\\Flagged"] }</code></pre>

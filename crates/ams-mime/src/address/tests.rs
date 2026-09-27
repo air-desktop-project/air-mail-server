@@ -268,3 +268,144 @@ fn une_adresse_nue_ne_porte_que_l_adresse() {
         assert_eq!(nue(valeur), None, "« {valeur} »");
     }
 }
+
+// ── LES ADRESSES NOMMÉES ────────────────────────────────────────────────────
+
+use super::{NamedAddress, named_addresses, write_addr_spec, write_display_name};
+
+fn nommees(valeur: &str) -> std::vec::Vec<(std::string::String, std::string::String)> {
+    named_addresses(valeur.as_bytes())
+        .map(|NamedAddress { name, address }| {
+            (
+                std::string::String::from_utf8_lossy(name).into_owned(),
+                std::string::String::from_utf8_lossy(address).into_owned(),
+            )
+        })
+        .collect()
+}
+
+fn paire(nom: &str, adresse: &str) -> (std::string::String, std::string::String) {
+    (nom.into(), adresse.into())
+}
+
+#[test]
+fn chaque_adresse_rend_son_nom_et_son_adresse() {
+    assert_eq!(
+        nommees("\"Dupont, Jean\" <jean@example.test>, marie@example.test"),
+        [
+            paire("\"Dupont, Jean\" ", "jean@example.test"),
+            paire("", "marie@example.test"),
+        ]
+    );
+    // Un chevron que rien ne ferme garde tout ce qui suit.
+    assert_eq!(
+        nommees("Jean <jean@example.test"),
+        [paire("Jean ", "jean@example.test")]
+    );
+    // Un chevron vide reste vide.
+    assert_eq!(nommees("Jean <>"), [paire("Jean ", "")]);
+    // Un chevron dans un commentaire n'en est pas un.
+    assert_eq!(
+        nommees("jean@example.test (<rien>)"),
+        [paire("", "jean@example.test (<rien>)")]
+    );
+}
+
+/// **LE NOM D'UN GROUPE N'EST L'ADRESSE DE PERSONNE.**
+#[test]
+fn les_groupes_se_traversent_sans_leur_nom() {
+    assert_eq!(
+        nommees("amis: jean@example.test, marie@example.test;, paul@example.test"),
+        [
+            paire("", "jean@example.test"),
+            paire("", "marie@example.test"),
+            paire("", "paul@example.test"),
+        ]
+    );
+    assert!(nommees("undisclosed-recipients:;").is_empty());
+    assert!(nommees(" , ,").is_empty());
+}
+
+fn nom(brut: &str) -> std::string::String {
+    let mut travail = [0_u8; 256];
+    let mut sortie = [0_u8; 512];
+    let ecrits = write_display_name(brut.as_bytes(), &mut travail, &mut sortie).expect("tient");
+    std::string::String::from_utf8(sortie[..ecrits].to_vec()).expect("UTF-8")
+}
+
+/// Ce qu'un nom VAUT : guillemets, échappements, commentaires et plis défaits,
+/// mots encodés décodés.
+#[test]
+fn un_nom_d_affichage_se_rend_pour_ce_qu_il_vaut() {
+    assert_eq!(nom("\"Dupont, Jean\" "), "Dupont, Jean");
+    assert_eq!(nom("  Jean   Dupont  "), "Jean Dupont");
+    assert_eq!(nom("Jean (le vrai) Dupont"), "Jean Dupont");
+    assert_eq!(nom("\"Jean \\\"Jojo\\\" Dupont\""), "Jean \"Jojo\" Dupont");
+    assert_eq!(nom("\"Jean\r\n Dupont\""), "Jean Dupont");
+    assert_eq!(nom("\"Jean\tDupont\""), "Jean Dupont");
+    assert_eq!(nom("Jean\r\n Dupont"), "Jean Dupont");
+    assert_eq!(nom("=?utf-8?Q?Jos=C3=A9?= Dupont"), "José Dupont");
+    // Entre guillemets aussi, bien que §5 de RFC 2047 l'interdise.
+    assert_eq!(nom("\"=?utf-8?B?Sm9zw6k=?=\""), "José");
+    // Une chaîne que rien ne ferme garde son dernier octet.
+    assert_eq!(nom("\"Jean"), "Jean");
+    assert_eq!(nom("\""), "");
+    // Un échappement en toute fin vaut une barre.
+    assert_eq!(nom("\"Jean\\"), "Jean\\");
+    // Rien que des commentaires et du blanc : pas de nom.
+    assert_eq!(nom(" (rien) "), "");
+    assert_eq!(nom(""), "");
+}
+
+#[test]
+fn un_nom_trop_long_pour_ses_tampons_le_dit() {
+    let mut petit = [0_u8; 3];
+    let mut sortie = [0_u8; 64];
+    assert_eq!(
+        write_display_name(b"Jean Dupont", &mut petit, &mut sortie),
+        Err(Error::BufferTooSmall)
+    );
+    // Entre guillemets aussi.
+    assert_eq!(
+        write_display_name(b"\"Jean Dupont\"", &mut petit, &mut sortie),
+        Err(Error::BufferTooSmall)
+    );
+    // Le blanc qu'on réinsère compte aussi.
+    let mut juste = [0_u8; 4];
+    assert_eq!(
+        write_display_name(b"Jean D", &mut juste, &mut sortie),
+        Err(Error::BufferTooSmall)
+    );
+    let mut travail = [0_u8; 64];
+    assert_eq!(
+        write_display_name(b"Jean Dupont", &mut travail, &mut petit),
+        Err(Error::BufferTooSmall)
+    );
+}
+
+fn adresse(brut: &str) -> std::string::String {
+    let mut sortie = [0_u8; 256];
+    let ecrits = write_addr_spec(brut.as_bytes(), &mut sortie).expect("tient");
+    std::string::String::from_utf8(sortie[..ecrits].to_vec()).expect("UTF-8")
+}
+
+/// Ce qui ne fait qu'entourer l'adresse s'en va ; une chaîne citée reste.
+#[test]
+fn une_adresse_se_rend_sans_ce_qui_l_entoure() {
+    assert_eq!(adresse("jean@example.test"), "jean@example.test");
+    assert_eq!(
+        adresse(" jean (le vrai) @ example.test "),
+        "jean@example.test"
+    );
+    assert_eq!(adresse("jean@\r\n example.test"), "jean@example.test");
+    assert_eq!(
+        adresse("\"jean dupont\"@example.test"),
+        "\"jean dupont\"@example.test"
+    );
+    assert_eq!(adresse(""), "");
+    let mut petit = [0_u8; 3];
+    assert_eq!(
+        write_addr_spec(b"jean@x", &mut petit),
+        Err(Error::BufferTooSmall)
+    );
+}

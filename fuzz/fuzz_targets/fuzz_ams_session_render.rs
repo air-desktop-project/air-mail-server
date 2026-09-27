@@ -66,6 +66,8 @@ struct Entree<'a> {
     suivant: Option<u32>,
     /// Un corps de modification de drapeaux.
     patch: &'a [u8],
+    /// Un bloc d'en-tête, venu d'un inconnu : l'enveloppe s'y lit.
+    entete: Option<&'a [u8]>,
     /// Des noms de compteurs.
     compteurs: [&'a str; 2],
     valeurs: [u64; 2],
@@ -108,7 +110,13 @@ fuzz_target!(|entree: Entree| {
     for ecrit in [
         write_mailboxes(&[boite], &mut place).map(<[u8]>::to_vec),
         write_mailbox(&boite, &mut [0_u8; PLACE]).map(<[u8]>::to_vec),
-        write_message(&messages[0], entree.uid_validity, &mut [0_u8; PLACE]).map(<[u8]>::to_vec),
+        write_message(
+            &messages[0],
+            entree.entete,
+            entree.uid_validity,
+            &mut [0_u8; PLACE],
+        )
+        .map(<[u8]>::to_vec),
         write_changes(
             &messages,
             &[entree.uid[0], entree.uid[1]],

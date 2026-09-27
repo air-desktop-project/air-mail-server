@@ -179,3 +179,120 @@ fn un_horodatage_ne_se_tronque_pas() {
     let mut place = [0_u8; super::RFC3339_MAX];
     assert!(super::write_rfc3339(1_756_458_511, &mut place).is_ok());
 }
+
+// ── LIRE UN INSTANT ─────────────────────────────────────────────────────────
+
+use super::{DateTime, read_date_time};
+
+fn instant(valeur: &[u8]) -> Option<(u64, i16)> {
+    read_date_time(valeur).map(|lu| (lu.epoch_seconds, lu.offset_minutes))
+}
+
+/// L'heure locale moins le décalage : c'est un instant, et non une heure murale.
+#[test]
+fn un_instant_se_lit_en_temps_universel() {
+    // 2026-08-29T09:08:31Z.
+    const T: u64 = 1_787_994_511;
+    assert_eq!(instant(b"Sat, 29 Aug 2026 09:08:31 +0000"), Some((T, 0)));
+    assert_eq!(instant(b"Sat, 29 Aug 2026 11:08:31 +0200"), Some((T, 120)));
+    assert_eq!(instant(b"29 Aug 2026 04:08:31 -0500"), Some((T, -300)));
+    assert_eq!(instant(b"29 Aug 2026 14:38:31 +0530"), Some((T, 330)));
+    // Les secondes sont facultatives.
+    assert_eq!(instant(b"29 Aug 2026 09:08 +0000"), Some((T - 31, 0)));
+    // Un commentaire après le fuseau ne compte pas, ni un pli.
+    assert_eq!(
+        instant(b"Sat, 29 Aug 2026 11:08:31 +0200 (CEST)"),
+        Some((T, 120))
+    );
+    assert_eq!(
+        instant(b"Sat, 29 Aug 2026\r\n 11:08:31 +0200"),
+        Some((T, 120))
+    );
+    // La seconde intercalaire est admise.
+    assert_eq!(
+        instant(b"31 Dec 2016 23:59:60 +0000"),
+        Some((1_483_228_800, 0))
+    );
+}
+
+/// §4.3 : les zones nommées se lisent, une lettre militaire vaut `-0000`.
+#[test]
+fn les_zones_obsoletes_se_lisent() {
+    const T: u64 = 1_787_994_511;
+    for (zone, decalage) in [
+        (&b"UT"[..], 0_i16),
+        (b"GMT", 0),
+        (b"gmt", 0),
+        (b"EST", -300),
+        (b"EDT", -240),
+        (b"CST", -360),
+        (b"CDT", -300),
+        (b"MST", -420),
+        (b"MDT", -360),
+        (b"PST", -480),
+        (b"PDT", -420),
+        (b"Z", 0),
+        (b"a", 0),
+    ] {
+        let mut valeur = b"29 Aug 2026 09:08:31 ".to_vec();
+        valeur.extend_from_slice(zone);
+        let lu = read_date_time(&valeur).expect("lisible");
+        assert_eq!(lu.offset_minutes, decalage, "{zone:?}");
+        let ecart = u64::from(decalage.unsigned_abs()) * 60;
+        assert_eq!(lu.epoch_seconds, T + ecart, "{zone:?}");
+    }
+}
+
+/// Ce qui n'est pas un instant se refuse, et ne se devine pas.
+#[test]
+fn ce_qui_n_est_pas_un_instant_se_refuse() {
+    for valeur in [
+        // Un jour sans heure, ou sans fuseau : pas un instant.
+        &b"29 Aug 2026"[..],
+        b"29 Aug 2026 09:08:31",
+        // Un jour qui ne se lit pas.
+        b"31 Feb 2026 09:08:31 +0000",
+        // Une heure qui n'en est pas une.
+        b"29 Aug 2026 24:00:00 +0000",
+        b"29 Aug 2026 09:60:00 +0000",
+        b"29 Aug 2026 09:08:61 +0000",
+        b"29 Aug 2026 09 +0000",
+        b"29 Aug 2026 09:08:31:00 +0000",
+        b"29 Aug 2026 neuf:08 +0000",
+        b"29 Aug 2026 09:huit +0000",
+        b"29 Aug 2026 09:08:trente +0000",
+        // Un fuseau qui n'en est pas un.
+        b"29 Aug 2026 09:08:31 +02",
+        b"29 Aug 2026 09:08:31 0200",
+        b"29 Aug 2026 09:08:31 +0260",
+        b"29 Aug 2026 09:08:31 +02h0",
+        b"29 Aug 2026 09:08:31 +h200",
+        b"29 Aug 2026 09:08:31 CEST",
+        b"29 Aug 2026 09:08:31 1",
+        // Avant l'époque, il n'y a pas de nombre à rendre.
+        b"1 Jan 1970 00:30:00 +0100",
+    ] {
+        assert_eq!(read_date_time(valeur), None, "{valeur:?}");
+    }
+    // L'époque elle-même, oui.
+    assert_eq!(instant(b"1 Jan 1970 01:00:00 +0100"), Some((0, 60)));
+}
+
+/// Le fuseau s'écrit comme la RFC 5322 l'écrit.
+#[test]
+fn le_fuseau_s_ecrit() {
+    for (decalage, attendu) in [
+        (0_i16, b"+0000"),
+        (120, b"+0200"),
+        (330, b"+0530"),
+        (-300, b"-0500"),
+        (-570, b"-0930"),
+        (5_999, b"+9959"),
+    ] {
+        let date = DateTime {
+            epoch_seconds: 0,
+            offset_minutes: decalage,
+        };
+        assert_eq!(&date.zone(), attendu, "{decalage}");
+    }
+}

@@ -1,0 +1,4 @@
+v=1; a=rsa-sha256; c=relaxed/relaxed; d=exam.ocelpm; s=brisbane; h=from       k:          date; bh=6=; b=Q
+
+:
+elaxed; d=exam

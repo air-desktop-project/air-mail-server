@@ -480,6 +480,19 @@ impl BoiteImap {
 }
 
 impl BoiteImap {
+    /// Le bloc d'en-tête du message de rang `sequence`, borné comme celui de
+    /// l'enveloppe.
+    ///
+    /// **LA MÊME BORNE QUE `envelope` ET `digest`**, pour la raison qu'ils
+    /// donnent : deux bornes différentes feraient voir deux enveloppes
+    /// différentes d'un même message, selon le protocole qui la demande.
+    pub fn entete(&self, sequence: u32) -> Option<Vec<u8>> {
+        let chemin = self.chemins.get(self.rang(sequence)?)?;
+        let fin = fin_de_l_entete(chemin)?;
+        let combien = usize::try_from(fin).unwrap_or(usize::MAX).min(ENTETE_MAX);
+        lire(chemin, 0, combien)
+    }
+
     /// Un morceau du message de rang `sequence`, tel qu'il est sur le disque.
     ///
     /// Rend les octets lus, ou `None` si le message ne se lit pas.

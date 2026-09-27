@@ -84,13 +84,17 @@ mod error;
 mod failure;
 mod limits;
 mod message;
+mod msgid;
 mod plume;
 mod received;
 mod select;
 mod structure;
 mod submission;
 
-pub use address::{AddressElements, address_elements, author_domain, bare_address, sole_address};
+pub use address::{
+    AddressElements, NamedAddress, NamedAddresses, address_elements, author_domain, bare_address,
+    named_addresses, sole_address, write_addr_spec, write_display_name,
+};
 pub use authres::{
     AUTHRES_RESERVE, Authentication, DKIM_MAX, DkimResult, DkimSeen, DmarcResult, SpfIdentity,
     SpfResult, authres_max, write_authres, write_authres_padded,
@@ -98,7 +102,9 @@ pub use authres::{
 pub use base64::{BASE64_LINE, base64_max, encode_base64, encode_base64_line};
 pub use bounce::{Action, Bounce, Failure, bounce_max, write_bounce};
 pub use compose::{ReportMail, report_mail_max, write_report_mail};
-pub use date::{DATE_MAX, RFC3339_MAX, read_day, write_date, write_rfc3339};
+pub use date::{
+    DATE_MAX, DateTime, RFC3339_MAX, read_date_time, read_day, write_date, write_rfc3339,
+};
 pub use decode::{decode_chunk, decode_encoded_words, decode_transfer, decoded_max};
 pub use digest::{DIGEST_FROM_MAX, DIGEST_SUBJECT_MAX, Digest, write_digest};
 pub use envelope::{ENVELOPE_ADDRESSES_MAX, write_envelope};
@@ -108,6 +114,7 @@ pub use failure::{
 };
 pub use limits::Limits;
 pub use message::{Field, Fields, Message, Unfolded};
+pub use msgid::{MessageIds, message_ids};
 pub use received::{
     RECEIVED_MAX, RETURN_PATH_MAX, Received, Transport, write_received, write_return_path,
 };

@@ -58,15 +58,7 @@ pub fn read_day(valeur: &[u8]) -> Option<u64> {
         (b"Nov", 11),
         (b"Dec", 12),
     ];
-    // Le nom du jour, s'il est là, se termine par une virgule.
-    let reste = valeur.trim_ascii_start();
-    let reste = match reste.iter().position(|octet| *octet == b',') {
-        Some(rang) => reste.get(rang.saturating_add(1)..).unwrap_or_default(),
-        None => reste,
-    };
-    let mut mots = reste
-        .split(|octet| matches!(*octet, b' ' | b'\t'))
-        .filter(|mot| !mot.is_empty());
+    let mut mots = mots(valeur);
     let jour = lire_un_nombre(mots.next()?)?;
     let nom = mots.next()?;
     let annee = lire_un_nombre(mots.next()?)?;
@@ -84,6 +76,149 @@ pub fn read_day(valeur: &[u8]) -> Option<u64> {
     // rendre en secondes obligerait chaque appelant à diviser — donc à savoir
     // que l'heure ne compte pas, alors que c'est justement ce qu'on lui épargne.
     Some(jours_depuis_l_epoque(annee, mois, jour))
+}
+
+/// Les mots d'une date, le nom du jour écarté.
+fn mots(valeur: &[u8]) -> impl Iterator<Item = &[u8]> {
+    // Le nom du jour, s'il est là, se termine par une virgule.
+    let reste = valeur.trim_ascii_start();
+    let reste = match reste.iter().position(|octet| *octet == b',') {
+        Some(rang) => reste.get(rang.saturating_add(1)..).unwrap_or_default(),
+        None => reste,
+    };
+    reste
+        .split(|octet| matches!(*octet, b' ' | b'\t' | b'\r' | b'\n'))
+        .filter(|mot| !mot.is_empty())
+}
+
+/// Ce que dit un champ `Date:` : l'instant, et le fuseau de qui l'a écrit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DateTime {
+    /// L'instant, en secondes depuis l'époque — en temps universel.
+    pub epoch_seconds: u64,
+    /// Le décalage de l'expéditeur, en minutes à l'est de Greenwich.
+    pub offset_minutes: i16,
+}
+
+impl DateTime {
+    /// Le fuseau tel que la RFC 5322 l'écrit : `+0200`, `-0500`.
+    #[must_use]
+    pub fn zone(&self) -> [u8; 5] {
+        let signe = if self.offset_minutes < 0 { b'-' } else { b'+' };
+        let minutes = self.offset_minutes.unsigned_abs();
+        let chiffre = |valeur: u16| b'0'.wrapping_add(u8::try_from(valeur % 10).unwrap_or(0));
+        [
+            signe,
+            chiffre(minutes / 600),
+            chiffre(minutes / 60),
+            chiffre((minutes % 60) / 10),
+            chiffre(minutes % 60),
+        ]
+    }
+}
+
+/// Lit une date RFC 5322 entière : le jour, l'heure et le fuseau.
+///
+/// # POURQUOI UNE SECONDE LECTURE, ET NON [`read_day`] ÉLARGI
+///
+/// `read_day` sert la recherche, qui compare des JOURS et ignore le fuseau
+/// (§6.4.4 de RFC 9051) : lui faire lire l'heure la rendrait plus exigeante
+/// qu'elle ne doit l'être, et un message sans heure lisible cesserait de
+/// répondre à `SENTON`. Celle-ci sert l'affichage, qui veut l'instant exact.
+/// Elle part du même jour, lu par le même code : les deux ne peuvent pas
+/// diverger sur la date.
+///
+/// # LE FUSEAU EST EXIGÉ
+///
+/// §3.3 le rend obligatoire, et sans lui l'heure n'est pas un instant : deviner
+/// `+0000` placerait un message écrit à Paris une ou deux heures à côté. Les
+/// zones obsolètes de §4.3 se lisent — `UT`, `GMT` et les huit nord-américaines
+/// —, et une lettre militaire vaut `-0000` comme §4.3 le demande : elles ont été
+/// si souvent écrites de travers que leur sens est perdu.
+///
+/// Ce qui suit le fuseau — typiquement un commentaire `(CEST)` — est ignoré.
+#[must_use]
+pub fn read_date_time(valeur: &[u8]) -> Option<DateTime> {
+    let jours = read_day(valeur)?;
+    let mut suite = mots(valeur).skip(3);
+    let (heures, minutes, secondes) = lire_l_heure(suite.next()?)?;
+    let decalage = lire_le_fuseau(suite.next()?)?;
+    let locale = jours
+        .saturating_mul(86_400)
+        .saturating_add(heures.saturating_mul(3_600))
+        .saturating_add(minutes.saturating_mul(60))
+        .saturating_add(secondes);
+    // L'HEURE LOCALE MOINS LE DÉCALAGE : `10:00 +0200`, c'est `08:00` en temps
+    // universel. Avant l'époque, il n'y a pas de nombre à rendre.
+    let ecart = u64::from(decalage.unsigned_abs()).saturating_mul(60);
+    let universelle = if decalage < 0 {
+        locale.saturating_add(ecart)
+    } else {
+        locale.checked_sub(ecart)?
+    };
+    Some(DateTime {
+        epoch_seconds: universelle,
+        offset_minutes: decalage,
+    })
+}
+
+/// `hh:mm` ou `hh:mm:ss` — les secondes sont facultatives (§3.3), et la
+/// soixantième admise pour une seconde intercalaire.
+fn lire_l_heure(mot: &[u8]) -> Option<(u64, u64, u64)> {
+    let mut morceaux = mot.split(|octet| *octet == b':');
+    let heures = lire_un_nombre(morceaux.next().unwrap_or_default())?;
+    let minutes = lire_un_nombre(morceaux.next()?)?;
+    let secondes = match morceaux.next() {
+        Some(morceau) => lire_un_nombre(morceau)?,
+        None => 0,
+    };
+    if morceaux.next().is_some() || heures > 23 || minutes > 59 || secondes > 60 {
+        return None;
+    }
+    Some((heures, minutes, secondes))
+}
+
+/// Le décalage d'un fuseau, en minutes à l'est.
+fn lire_le_fuseau(mot: &[u8]) -> Option<i16> {
+    // §4.3 : les zones nommées, et la seule dont le sens n'a pas été perdu.
+    const NOMMEES: [(&[u8], i16); 10] = [
+        (b"UT", 0),
+        (b"GMT", 0),
+        (b"EST", -300),
+        (b"EDT", -240),
+        (b"CST", -360),
+        (b"CDT", -300),
+        (b"MST", -420),
+        (b"MDT", -360),
+        (b"PST", -480),
+        (b"PDT", -420),
+    ];
+    if let Some((_, decalage)) = NOMMEES
+        .iter()
+        .find(|(nom, _)| mot.eq_ignore_ascii_case(nom))
+    {
+        return Some(*decalage);
+    }
+    match mot {
+        // Une lettre militaire : `-0000`, c'est-à-dire « on ne sait pas ».
+        [lettre] if lettre.is_ascii_alphabetic() => Some(0),
+        [signe @ (b'+' | b'-'), chiffres @ ..] if chiffres.len() == 4 => {
+            let heures = lire_un_nombre(chiffres.get(..2).unwrap_or_default())?;
+            let minutes = lire_un_nombre(chiffres.get(2..).unwrap_or_default())?;
+            if minutes > 59 {
+                return None;
+            }
+            // Quatre chiffres tiennent toujours : 99 × 60 + 59 < 32 767.
+            let total = i16::try_from(heures.saturating_mul(60).saturating_add(minutes))
+                .unwrap_or(i16::MAX);
+            Some(if *signe == b'-' {
+                total.saturating_neg()
+            } else {
+                total
+            })
+        }
+        _ => None,
+    }
 }
 
 /// Combien de jours ce mois-là porte.

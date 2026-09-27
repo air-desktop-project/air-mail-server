@@ -157,7 +157,7 @@ fn l_uid_validity_accompagne_tout_uid() {
         texte(write_mailboxes(&[boite()], &mut place).expect("écrivable")),
         texte(write_mailbox(&boite(), &mut [0_u8; PLACE]).expect("écrivable")),
         texte(write_messages(&[message()], 7, None, &mut [0_u8; PLACE]).expect("écrivable")),
-        texte(write_message(&message(), 7, &mut [0_u8; PLACE]).expect("écrivable")),
+        texte(write_message(&message(), None, 7, &mut [0_u8; PLACE]).expect("écrivable")),
     ] {
         assert!(ecrit.contains("uidValidity"), "{ecrit}");
     }
@@ -201,7 +201,7 @@ fn le_vide_et_l_absence_se_distinguent() {
     sans.subject = None;
     sans.from = None;
     let mut place = [0_u8; PLACE];
-    let ecrit = texte(write_message(&sans, 7, &mut place).expect("écrivable"));
+    let ecrit = texte(write_message(&sans, None, 7, &mut place).expect("écrivable"));
     assert!(ecrit.contains(r#""subject":null"#), "{ecrit}");
     assert!(ecrit.contains(r#""from":null"#), "{ecrit}");
 
@@ -209,7 +209,7 @@ fn le_vide_et_l_absence_se_distinguent() {
     vide.subject = Some("");
     vide.from = Some("");
     let mut place = [0_u8; PLACE];
-    let ecrit = texte(write_message(&vide, 7, &mut place).expect("écrivable"));
+    let ecrit = texte(write_message(&vide, None, 7, &mut place).expect("écrivable"));
     assert!(ecrit.contains(r#""subject":"""#), "{ecrit}");
     assert!(ecrit.contains(r#""from":"""#), "{ecrit}");
 }
@@ -234,7 +234,7 @@ fn les_drapeaux_portent_leurs_noms_d_imap() {
         let mut seul = message();
         seul.flags = drapeau;
         let mut place = [0_u8; PLACE];
-        let ecrit = texte(write_message(&seul, 7, &mut place).expect("écrivable"));
+        let ecrit = texte(write_message(&seul, None, 7, &mut place).expect("écrivable"));
         assert!(
             ecrit.contains(&std::format!("\"flags\":[\"{nom}\"]")),
             "{drapeau:?} : {ecrit}"
@@ -248,7 +248,7 @@ fn un_message_sans_drapeau_rend_un_tableau_vide() {
     let mut nu = message();
     nu.flags = Flags::NONE;
     let mut place = [0_u8; PLACE];
-    let ecrit = texte(write_message(&nu, 7, &mut place).expect("écrivable"));
+    let ecrit = texte(write_message(&nu, None, 7, &mut place).expect("écrivable"));
     assert!(ecrit.contains(r#""flags":[]"#), "{ecrit}");
 }
 
@@ -259,7 +259,7 @@ fn un_sujet_hostile_ne_casse_rien() {
     hostile.subject = Some(r#"a","admin":true,"x":"b"#);
     hostile.from = Some("<script>alert(1)</script>");
     let mut place = [0_u8; PLACE];
-    let ecrit = texte(write_message(&hostile, 7, &mut place).expect("écrivable"));
+    let ecrit = texte(write_message(&hostile, None, 7, &mut place).expect("écrivable"));
     assert!(!ecrit.contains(r#""admin":true"#), "{ecrit}");
     assert!(!ecrit.contains('<'), "{ecrit}");
     // Et le document reste lisible : un seul objet, bien clos.
@@ -393,7 +393,7 @@ fn un_corps_qui_n_est_pas_une_modification_se_refuse() {
 #[test]
 fn chaque_tampon_insuffisant_se_dit() {
     type Ecrivain = fn(&mut [u8]) -> Result<&[u8], ams_api::Error>;
-    let ecrivains: [(&str, Ecrivain); 33] = [
+    let ecrivains: [(&str, Ecrivain); 35] = [
         ("draft", |place| write_draft("0a1b", 99, &[piece()], place)),
         ("draft-vide", |place| write_draft("0a1b", 99, &[], place)),
         ("attachment", |place| write_attachment(&piece(), place)),
@@ -411,7 +411,15 @@ fn chaque_tampon_insuffisant_se_dit() {
         ("messages-fin", |place| {
             write_messages(&[message()], 7, None, place)
         }),
-        ("message", |place| write_message(&message(), 7, place)),
+        ("message", |place| write_message(&message(), None, 7, place)),
+        ("message-enveloppe", |place| {
+            write_message(&message(), Some(ENTETE_COMPLET), 7, place)
+        }),
+        // Une enveloppe où tout manque écrit `null` à chaque place : d'autres
+        // écritures, donc d'autres places à manquer.
+        ("message-enveloppe-vide", |place| {
+            write_message(&message(), Some(b"Subject: x\r\n\r\n"), 7, place)
+        }),
         ("health", write_health),
         ("metrics", |place| {
             write_metrics(&[("connexions", 12)], place)
@@ -1694,4 +1702,141 @@ fn une_demande_de_rangement_se_lit() {
     }
     let mut court = [0_u8; 2];
     assert!(read_store_request(br#"{"mailbox":"Archives"}"#, &mut court).is_err());
+}
+
+// ── L'ENVELOPPE D'UN MESSAGE ────────────────────────────────────────────────
+
+/// Un en-tête qui porte tout ce qu'une enveloppe rend.
+const ENTETE_COMPLET: &[u8] = b"Date: Sat, 29 Aug 2026 11:08:31 +0200 (CEST)\r\n\
+From: =?utf-8?Q?Jos=C3=A9?= Dupont <jose@exemple.fr>\r\n\
+Sender: secretariat@exemple.fr\r\n\
+Reply-To: \"Dupont, Jos\\\"e\" <jose@maison.test>\r\n\
+To: amis: anne@exemple.fr, Marc <marc@exemple.fr>;\r\n\
+Cc: undisclosed-recipients:;\r\n\
+Message-ID: <m1@exemple.fr>\r\n\
+In-Reply-To: <m0@exemple.fr>\r\n\
+References: <racine@exemple.fr>\r\n <m0@exemple.fr>\r\n\
+Subject: Bonjour\r\n\
+\r\n";
+
+fn enveloppe(entete: &[u8]) -> String {
+    let mut place = std::vec![0_u8; 256 * 1024];
+    let ecrit = texte(write_message(&message(), Some(entete), 7, &mut place).expect("écrivable"));
+    let debut = ecrit.find(r#""envelope":"#).expect("une enveloppe");
+    // Le message se ferme, puis le document : deux accolades.
+    let debut = debut.saturating_add(r#""envelope":"#.len());
+    ecrit[debut..ecrit.len().saturating_sub(2)].to_string()
+}
+
+/// Les noms décodés, la date en instant, les identifiants sans chevrons.
+#[test]
+fn l_enveloppe_se_rend_decodee() {
+    assert_eq!(
+        enveloppe(ENTETE_COMPLET),
+        concat!(
+            r#"{"date":1787994511,"dateZone":"+0200","#,
+            r#""from":[{"name":"José Dupont","email":"jose@exemple.fr"}],"#,
+            r#""sender":[{"name":null,"email":"secretariat@exemple.fr"}],"#,
+            r#""replyTo":[{"name":"Dupont, Jos\"e","email":"jose@maison.test"}],"#,
+            r#""to":[{"name":null,"email":"anne@exemple.fr"},"#,
+            r#"{"name":"Marc","email":"marc@exemple.fr"}],"#,
+            r#""cc":[],"bcc":null,"#,
+            r#""messageId":"m1@exemple.fr","inReplyTo":["m0@exemple.fr"],"#,
+            r#""references":["racine@exemple.fr","m0@exemple.fr"],"complete":true}"#
+        )
+    );
+}
+
+/// **L'ABSENT EST `null`** — et non le `From:` à la place du `Sender:`, comme
+/// IMAP le fait : ce serait dire que le message en porte un.
+#[test]
+fn ce_qui_manque_a_l_enveloppe_est_null() {
+    assert_eq!(
+        enveloppe(b"Date: hier\r\nMessage-ID: pas un identifiant\r\n\r\n"),
+        concat!(
+            r#"{"date":null,"dateZone":null,"from":null,"sender":null,"#,
+            r#""replyTo":null,"to":null,"cc":null,"bcc":null,"messageId":null,"#,
+            r#""inReplyTo":null,"references":null,"complete":true}"#
+        )
+    );
+    // Un en-tête illisible n'a pas d'enveloppe du tout.
+    assert_eq!(enveloppe(b"Subject: a\nFrom: b\r\n\r\n"), "null");
+    // Et `None` le dit de la même façon.
+    let mut place = [0_u8; PLACE];
+    let ecrit = texte(write_message(&message(), None, 7, &mut place).expect("écrivable"));
+    assert!(ecrit.ends_with(r#""envelope":null}}"#), "{ecrit}");
+}
+
+/// **UN CLIENT QUI RÉPOND À TOUS DOIT SAVOIR QU'IL N'A PAS « TOUS ».**
+#[test]
+fn une_liste_coupee_le_dit() {
+    let mut entete = b"To: ".to_vec();
+    for rang in 0..=super::ENVELOPE_LIST_MAX {
+        entete.extend_from_slice(std::format!("a{rang}@exemple.fr,\r\n ").as_bytes());
+    }
+    entete.extend_from_slice(b"fin@exemple.fr\r\n\r\n");
+    let rendu = enveloppe(&entete);
+    assert_eq!(rendu.matches("\"email\"").count(), super::ENVELOPE_LIST_MAX);
+    assert!(
+        rendu.contains("a99@exemple.fr") && !rendu.contains("a100@"),
+        "{rendu}"
+    );
+    assert!(rendu.ends_with(r#""complete":false}"#), "{rendu}");
+}
+
+/// Une adresse qu'on ne peut pas rendre entière ne se rend pas, et cela se dit.
+#[test]
+fn une_adresse_illisible_ne_se_rend_pas() {
+    let longue = "x".repeat(300);
+    for champ in [
+        "To: <>, anne@exemple.fr\r\n\r\n".to_string(),
+        std::format!("To: {longue}@exemple.fr, anne@exemple.fr\r\n\r\n"),
+    ] {
+        let rendu = enveloppe(champ.as_bytes());
+        assert!(
+            rendu.contains(r#""to":[{"name":null,"email":"anne@exemple.fr"}]"#),
+            "{rendu}"
+        );
+        assert!(rendu.ends_with(r#""complete":false}"#), "{rendu}");
+    }
+    // Ni de l'UTF-8 invalide.
+    let rendu = enveloppe(b"To: \xff@exemple.fr, anne@exemple.fr\r\n\r\n");
+    assert!(rendu.ends_with(r#""complete":false}"#), "{rendu}");
+    // Un nom qu'on ne sait pas rendre vaut `null`, et l'adresse reste.
+    // Plié : une ligne de plus de 998 octets rendrait l'en-tête illisible.
+    let moitie = "N".repeat(600);
+    let nom = std::format!("To: {moitie}\r\n {moitie} <anne@exemple.fr>\r\n\r\n");
+    assert!(enveloppe(nom.as_bytes()).contains(r#"{"name":null,"email":"anne@exemple.fr"}"#));
+    let rendu = enveloppe(b"To: \"\xff\" <anne@exemple.fr>\r\n\r\n");
+    assert!(
+        rendu.contains(r#"{"name":null,"email":"anne@exemple.fr"}"#),
+        "{rendu}"
+    );
+    assert!(rendu.ends_with(r#""complete":true}"#), "{rendu}");
+}
+
+/// **LE PREMIER ET LES DERNIERS** : la racine du fil, et le parent direct.
+#[test]
+fn un_fil_trop_long_garde_sa_racine_et_ses_derniers() {
+    let mut entete = b"References:".to_vec();
+    for rang in 0..150 {
+        entete.extend_from_slice(std::format!(" <r{rang}@x>\r\n").as_bytes());
+    }
+    entete.extend_from_slice(b"\r\n");
+    let rendu = enveloppe(&entete);
+    assert_eq!(rendu.matches("@x\"").count(), super::ENVELOPE_LIST_MAX);
+    assert!(
+        rendu.contains(r#""references":["r0@x","r51@x","#),
+        "{rendu}"
+    );
+    assert!(rendu.contains(r#""r149@x"]"#), "{rendu}");
+    assert!(!rendu.contains("\"r50@x\""), "{rendu}");
+    assert!(rendu.ends_with(r#""complete":false}"#), "{rendu}");
+}
+
+/// Un nom hostile est échappé comme tout texte venu d'un inconnu.
+#[test]
+fn un_nom_hostile_ne_casse_rien() {
+    let rendu = enveloppe(b"From: \"a\\\",\\\"admin\\\":true,\\\"x\" <a@b.test>\r\n\r\n");
+    assert!(!rendu.contains(r#""admin":true"#), "{rendu}");
 }

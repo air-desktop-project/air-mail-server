@@ -42,7 +42,7 @@
 //! - **Les commentaires** se traversent et ne se recopient pas : ils ne font
 //!   partie ni du nom ni de l'adresse.
 
-use crate::address::{fin_d_angle, fin_de_chaine, fin_de_commentaire};
+use crate::address::{debut_d_angle, fin_d_angle, fin_de_chaine, fin_de_commentaire};
 use crate::error::Error;
 use crate::limits::Limits;
 use crate::message::Message;
@@ -369,20 +369,6 @@ fn chaine_porte_du_texte(chaine: &[u8]) -> bool {
         j = j.saturating_add(saut);
     }
     false
-}
-
-/// Le rang du chevron ouvrant, hors chaîne et hors commentaire.
-fn debut_d_angle(texte: &[u8]) -> Option<usize> {
-    let mut i = 0_usize;
-    while i < texte.len() {
-        match texte.get(i).copied().unwrap_or(0) {
-            b'"' => i = fin_de_chaine(texte, i),
-            b'(' => i = fin_de_commentaire(texte, i),
-            b'<' => return Some(i),
-            _ => i = i.saturating_add(1),
-        }
-    }
-    None
 }
 
 /// Le rang du dernier arobase hors chaîne et hors commentaire.

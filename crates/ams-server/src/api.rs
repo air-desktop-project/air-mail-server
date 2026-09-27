@@ -2574,12 +2574,7 @@ impl ApiMaildir {
         let Some(info) = boite.info(rang) else {
             return notre_faute();
         };
-        let resume = resumer(&boite, rang, info);
-        rendre(render::write_message(
-            &ligne_de(&resume),
-            boite.uid_validity(),
-            sortie,
-        ))
+        rendre_le_message(&boite, rang, info, sortie)
     }
 
     /// Efface un message, pour de bon.
@@ -2665,12 +2660,7 @@ impl ApiMaildir {
         let Some((sequence, info)) = trouve else {
             return absente(sortie);
         };
-        let resume = resumer(&boite, sequence, info);
-        rendre(render::write_message(
-            &ligne_de(&resume),
-            boite.uid_validity(),
-            sortie,
-        ))
+        rendre_le_message(&boite, sequence, info, sortie)
     }
 }
 
@@ -3084,6 +3074,39 @@ fn resumer(
         info,
         sujet: prendre(&sujet, vu.subject),
         expediteur: prendre(&expediteur, vu.from),
+    }
+}
+
+/// Un message et son enveloppe — ou, si l'enveloppe ne tient pas, le message
+/// avec `"envelope": null`.
+///
+/// # LE MESSAGE D'ABORD, L'ENVELOPPE SI ELLE TIENT
+///
+/// Un en-tête peut peser soixante-quatre kibioctets, et ses noms grandir au
+/// décodage : l'enveloppe entière peut dépasser la réponse. Rendre `500` pour
+/// cela priverait le client du message entier — ses drapeaux, son sujet — pour
+/// une liste de destinataires trop longue. `null` lui dit qu'il lui manque
+/// quelque chose, et le message brut reste là pour le reste.
+fn rendre_le_message<'o>(
+    boite: &crate::imap::BoiteImap,
+    sequence: u32,
+    info: ams_session::imap::MessageInfo,
+    sortie: &'o mut [u8],
+) -> Served<'o> {
+    let resume = resumer(boite, sequence, info);
+    let ligne = ligne_de(&resume);
+    let entete = boite.entete(sequence);
+    let entiere = render::write_message(&ligne, entete.as_deref(), boite.uid_validity(), sortie)
+        .map(<[u8]>::len)
+        .ok();
+    match entiere {
+        Some(ecrits) => rendre(Ok(sortie.get(..ecrits).unwrap_or_default())),
+        None => rendre(render::write_message(
+            &ligne,
+            None,
+            boite.uid_validity(),
+            sortie,
+        )),
     }
 }
 
@@ -5237,6 +5260,106 @@ mod ecritures {
                 before: None,
             },
         )
+    }
+
+    /// **L'ENVELOPPE SE LIT SUR LE DISQUE**, décodée, dans le GET comme dans le
+    /// PATCH — les deux rendent la même représentation.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn un_message_rend_son_enveloppe() {
+        let temporaire = Ephemere::neuf();
+        let (_, api) = api(&temporaire.0);
+        let message = "Date: Sat, 29 Aug 2026 11:08:31 +0200\r\n\
+             From: =?utf-8?Q?Marie_Cur=C3=A9?= <marie@exemple.test>\r\n\
+             To: Jean <jean@exemple.test>, paul@exemple.test\r\n\
+             Message-ID: <un@exemple.test>\r\n\
+             Subject: bonjour\r\n\r\nLe corps.\r\n";
+        let (status, corps) = servir(
+            &api,
+            Resource::Messages { boite: "INBOX" },
+            Method::Post,
+            message.as_bytes(),
+        );
+        assert_eq!(status, StatusCode::CREATED, "{corps}");
+        let uid: u64 = corps
+            .trim_start_matches("{\"uid\":")
+            .trim_end_matches('}')
+            .parse()
+            .expect("un UID");
+        for (methode, demande) in [
+            (Method::Get, &b""[..]),
+            (Method::Patch, br#"{"add":["\\Seen"]}"#),
+        ] {
+            let (status, corps) = servir(
+                &api,
+                Resource::Message {
+                    boite: "INBOX",
+                    uid,
+                },
+                methode,
+                demande,
+            );
+            assert_eq!(status, StatusCode::OK, "{corps}");
+            assert!(
+                corps.contains(r#""date":1787994511,"dateZone":"+0200""#),
+                "{corps}"
+            );
+            assert!(
+                corps.contains(r#""from":[{"name":"Marie Curé","email":"marie@exemple.test"}]"#),
+                "{corps}"
+            );
+            assert!(
+                corps.contains(concat!(
+                    r#""to":[{"name":"Jean","email":"jean@exemple.test"},"#,
+                    r#"{"name":null,"email":"paul@exemple.test"}]"#
+                )),
+                "{corps}"
+            );
+            assert!(
+                corps.contains(r#""messageId":"un@exemple.test""#),
+                "{corps}"
+            );
+            assert!(corps.contains(r#""complete":true"#), "{corps}");
+        }
+    }
+
+    /// **UNE ENVELOPPE QUI NE TIENT PAS N'EMPORTE PAS LE MESSAGE** : il est
+    /// rendu, avec `"envelope": null`, et non un `500`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn une_enveloppe_trop_grande_devient_null() {
+        let temporaire = Ephemere::neuf();
+        let (_, api) = api(&temporaire.0);
+        // Chaque `<` s'écrit `\u003c` en JSON : six octets pour un. Vingt noms
+        // de neuf cents chevrons dépassent de loin les 64 Kio de la réponse.
+        let nom = "<".repeat(900);
+        let mut message = std::string::String::from("From: marie@exemple.test\r\nTo: ");
+        for rang in 0..20 {
+            message.push_str(&std::format!("\"{nom}\" <a{rang}@exemple.test>,\r\n "));
+        }
+        message.push_str("fin@exemple.test\r\nSubject: long\r\n\r\nLe corps.\r\n");
+        let (status, corps) = servir(
+            &api,
+            Resource::Messages { boite: "INBOX" },
+            Method::Post,
+            message.as_bytes(),
+        );
+        assert_eq!(status, StatusCode::CREATED, "{corps}");
+        let uid: u64 = corps
+            .trim_start_matches("{\"uid\":")
+            .trim_end_matches('}')
+            .parse()
+            .expect("un UID");
+        let (status, corps) = servir(
+            &api,
+            Resource::Message {
+                boite: "INBOX",
+                uid,
+            },
+            Method::Get,
+            b"",
+        );
+        assert_eq!(status, StatusCode::OK, "{corps}");
+        assert!(corps.contains(r#""subject":"long""#), "{corps}");
+        assert!(corps.ends_with(r#""envelope":null}}"#), "{corps}");
     }
 
     /// **LA SYNCHRONISATION INCRÉMENTALE, DE BOUT EN BOUT, SUR UNE VRAIE BOÎTE.**

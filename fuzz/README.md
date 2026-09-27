@@ -196,6 +196,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_mime_limits` | `seeds/mime` | le même, avec des **bornes arbitraires** |
 | `fuzz_ams_mime_decode` | `seeds/mime-decode` | défaire un mot encodé — **`decoded_max` majore sans lire l'entrée**, et un encodage inconnu est l'identité |
 | `fuzz_ams_mime_digest` | `seeds/mime-digest` | le résumé d'un message — **rien au-delà des deux tampons fixes**, et aucune fin de ligne dans ce qu'on rend |
+| `fuzz_ams_mime_addresses` | `seeds/mime-addresses` | les lecteurs de l'enveloppe REST — adresses nommées, identifiants, date : **rien au-delà des tampons**, rien d'inventé |
 | `fuzz_ams_mime_envelope` | `seeds/mime-envelope` | l'`ENVELOPE` d'un en-tête quelconque — **ce qui part sur le fil est bien formé** : dix champs, parenthèses équilibrées, et **aucune fin de ligne dans une chaîne** |
 | `fuzz_ams_mime_structure` | `seeds/mime-structure` | la `BODYSTRUCTURE` d'un message quelconque — **le découpage ne change pas le résultat**, ce qui part sur le fil est bien formé, et **une partie désignée ne sort jamais du message** |
 | `fuzz_ams_mime_compose` | `seeds/mime-compose` | les messages de rapport — **la pièce jointe se relit, la liste blanche tient** |
