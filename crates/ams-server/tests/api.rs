@@ -2972,3 +2972,141 @@ fn un_mot_de_passe_applicatif_ouvre_smtp_et_pas_l_api() {
     );
     assert_eq!(code, "404", "révoquer deux fois rend 404");
 }
+
+/// **UN MESSAGE DE PLUS DE 64 KIO ARRIVE ENTIER, ET AU-DELÀ D'UN MÉBIOCTET
+/// IL SE REFUSE** — contre le vrai serveur, par `curl` en HTTP/2.
+///
+/// Jusqu'à la 0.2.24, HTTP/2 cessait d'écrire le corps au-delà de 64 Kio, et
+/// la requête partait avec un corps TRONQUÉ : le message déposé était amputé,
+/// sans que rien ne le dise. On dépose ici trois cents kibioctets, et on relit
+/// le message brut : il doit revenir à l'octet près.
+#[test]
+fn un_gros_message_arrive_entier_en_http2() {
+    let atelier = atelier("gros-corps");
+    let Some((cert, cle)) = paire(&atelier.0) else {
+        panic!("{SANS_OPENSSL}");
+    };
+    if std::process::Command::new("curl")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("IGNORÉ : `curl` est absent — cet essai n'a RIEN éprouvé.");
+        return;
+    }
+    let empreinte =
+        ams_auth::hash_password(b"secret-initial", b"seize octets ici").expect("hachable");
+    let magasin = atelier.0.join("comptes.bin");
+    std::fs::write(
+        &magasin,
+        ams_config::encode_accounts(&[ams_auth::Account {
+            login: String::from("marie"),
+            hash: empreinte,
+            addresses: vec![String::from("marie@example.com")],
+        }])
+        .expect("encodable"),
+    )
+    .expect("le magasin s'écrit");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&magasin, std::fs::Permissions::from_mode(0o600))
+            .expect("permissions du magasin");
+    }
+    let port_smtp = port_libre();
+    let port_http = port_libre();
+    let config = configuration_complete(
+        &atelier,
+        port_smtp,
+        Tls {
+            certificate_chain_path: cert.display().to_string(),
+            private_key_path: cle.display().to_string(),
+        },
+        &magasin.display().to_string(),
+        "",
+        "",
+        &format!("127.0.0.1:{port_http}"),
+        "",
+        CLEF,
+    );
+    let serveur = lancer(&config, port_smtp);
+    let base = format!("https://127.0.0.1:{port_http}");
+
+    let sortie = std::process::Command::new("curl")
+        .args(["-s", "--insecure", "--http2"])
+        .args(["-H", "Content-Type: application/json"])
+        .args(["-d", r#"{"login":"marie","password":"secret-initial"}"#])
+        .arg(format!("{base}/v1/tokens"))
+        .output()
+        .expect("curl s'exécute");
+    let corps = String::from_utf8_lossy(&sortie.stdout).into_owned();
+    let jeton = corps
+        .split_once("\"token\":\"")
+        .and_then(|(_, reste)| reste.split_once('"'))
+        .map(|(jeton, _)| jeton.to_string())
+        .unwrap_or_else(|| panic!("un jeton dans {corps} — {}", serveur.journal()));
+
+    // Un message de trois cents kibioctets : des lignes de soixante-dix
+    // caractères, comme un corps de courrier ordinaire.
+    let fabriquer = |octets: usize| -> Vec<u8> {
+        let mut message = b"From: marie@example.com\r\nSubject: gros\r\n\r\n".to_vec();
+        let ligne = format!("{}\r\n", "x".repeat(68));
+        while message.len() + ligne.len() <= octets {
+            message.extend_from_slice(ligne.as_bytes());
+        }
+        message
+    };
+    let deposer = |message: &[u8]| -> (String, String) {
+        let fichier = atelier.0.join("message.eml");
+        std::fs::write(&fichier, message).expect("écrit");
+        let sortie = std::process::Command::new("curl")
+            .args(["-s", "--insecure", "--http2"])
+            .args(["-H", &format!("Authorization: Bearer {jeton}")])
+            .args(["-H", "Content-Type: message/rfc822"])
+            .args(["--data-binary", &format!("@{}", fichier.display())])
+            .args(["-w", "\n%{http_code} %{http_version}"])
+            .arg(format!("{base}/v1/mailboxes/INBOX/messages"))
+            .output()
+            .expect("curl s'exécute");
+        let tout = String::from_utf8_lossy(&sortie.stdout).into_owned();
+        let (corps, fin) = tout.rsplit_once('\n').unwrap_or(("", ""));
+        (corps.to_string(), fin.to_string())
+    };
+
+    let gros = fabriquer(300 * 1024);
+    let (corps, fin) = deposer(&gros);
+    assert_eq!(
+        fin,
+        "201 2",
+        "le dépôt doit réussir : {corps} — {}",
+        serveur.journal()
+    );
+    let uid = corps
+        .trim_start_matches("{\"uid\":")
+        .trim_end_matches('}')
+        .to_string();
+    // On relit PAR TRANCHES : au-delà de 64 Kio, la relecture brute exige
+    // `Range` (§14) — c'est voulu, et c'est ce que ferait un client.
+    let mut relu: Vec<u8> = Vec::new();
+    while relu.len() < gros.len() {
+        let debut = relu.len();
+        let sortie = std::process::Command::new("curl")
+            .args(["-s", "--insecure", "--http2"])
+            .args(["-H", &format!("Authorization: Bearer {jeton}")])
+            .args(["-r", &format!("{debut}-{}", debut + 64 * 1024 - 1)])
+            .arg(format!("{base}/v1/mailboxes/INBOX/messages/{uid}/raw"))
+            .output()
+            .expect("curl s'exécute");
+        assert!(!sortie.stdout.is_empty(), "une tranche vide à {debut}");
+        relu.extend_from_slice(&sortie.stdout);
+    }
+    assert_eq!(
+        relu.len(),
+        gros.len(),
+        "le message doit revenir ENTIER, et non tronqué à 64 Kio"
+    );
+    assert!(relu == gros, "et octet pour octet");
+
+    let (corps, fin) = deposer(&fabriquer(1024 * 1024 + 4096));
+    assert_eq!(fin, "413 2", "au-delà d'un mébioctet : {corps}");
+    assert!(corps.contains("content-too-large"), "{corps}");
+}

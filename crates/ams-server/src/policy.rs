@@ -248,6 +248,54 @@ impl BoitesConnues {
     }
 }
 
+impl BoitesConnues {
+    /// Dit au journal qu'une authentification est refusée.
+    ///
+    /// # POURQUOI CETTE LIGNE EXISTE
+    ///
+    /// Le 2026-09-27, Apple Mail n'envoyait plus rien pour un compte : son mot
+    /// de passe SMTP était resté celui d'avant la bascule. Le journal ne disait
+    /// que « sans authentification, aucun message » — rien d'un REFUS, rien de
+    /// l'identifiant —, et il a fallu lire les journaux du client pour trouver
+    /// le `535`. Cette ligne le dit côté serveur.
+    ///
+    /// # L'IDENTIFIANT NE S'ÉCRIT QUE S'IL DÉSIGNE UN COMPTE
+    ///
+    /// Le journal ne recopie pas ce qu'un inconnu a tapé (voir
+    /// `ams_loop_tokio::journal`) : un octet de contrôle y fabriquerait une
+    /// fausse ligne, et surtout, **qui tape son mot de passe dans le champ de
+    /// l'identifiant le verrait écrit en clair dans `journald`**. Un identifiant
+    /// qui désigne un compte — son nom, ou l'une de ses adresses — n'est pas un
+    /// secret, et il est écrit sous sa forme connue ; tout autre se dit
+    /// « identifiant inconnu ». Le mot de passe, jamais.
+    fn dire_le_refus(&self, mecanisme: &str, identite: &[u8]) {
+        let vue = self.comptes.vue();
+        let connu = vue
+            .iter()
+            .find(|compte| compte.login.as_bytes() == identite)
+            .map(|compte| (compte.login.clone(), compte.login.clone()))
+            .or_else(|| {
+                let compte = ams_auth::route(&vue, identite)?;
+                let adresse = compte
+                    .addresses
+                    .iter()
+                    .find(|adresse| adresse.as_bytes().eq_ignore_ascii_case(identite))?;
+                Some((adresse.clone(), compte.login.clone()))
+            });
+        match connu {
+            Some((ecrit, login)) if ecrit == login => {
+                eprintln!("air-mail-server : AUTH{mecanisme} refusée pour `{login}`");
+            }
+            Some((ecrit, login)) => {
+                eprintln!(
+                    "air-mail-server : AUTH{mecanisme} refusée pour `{ecrit}` (compte `{login}`)"
+                );
+            }
+            None => eprintln!("air-mail-server : AUTH{mecanisme} refusée — identifiant inconnu"),
+        }
+    }
+}
+
 impl Authenticator for BoitesConnues {
     /// # Deux précautions, et aucune n'est facultative
     ///
@@ -283,7 +331,10 @@ impl Authenticator for BoitesConnues {
             })
         });
         match ouverture {
-            ams_auth::Ouverture::Refusee => false,
+            ams_auth::Ouverture::Refusee => {
+                self.dire_le_refus("", credentials.authentication_identity);
+                false
+            }
             ams_auth::Ouverture::Principal => true,
             ams_auth::Ouverture::Applicatif(id) => {
                 if let Some(applicatifs) = self.applicatifs.as_ref() {
@@ -377,13 +428,17 @@ impl Authenticator for BoitesConnues {
         let taille = ams_sasl::desechapper(nom_du_bare(bare), &mut nom).ok()?;
         let login = nom.get(..taille)?;
         let empreinte = self.empreinte_de(login);
-        verificateurs.server_final(
+        let issue = verificateurs.server_final(
             login,
             empreinte.as_deref(),
             message.get(..ecrits)?,
             &lu.proof,
             sortie,
-        )
+        );
+        if issue.is_none() {
+            self.dire_le_refus(" SCRAM", login);
+        }
+        issue
     }
 
     /// Le nom du compte que cette identité désigne.

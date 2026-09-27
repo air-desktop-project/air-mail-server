@@ -959,13 +959,15 @@ POST /v1/me/devices
     <tr><td>Durée de vie d'un jeton</td><td><strong>15 minutes</strong> en service ; 12 h est le plafond du format</td></tr>
     <tr><td>Nom de compte dans un jeton</td><td>64 octets</td></tr>
     <tr><td>Clé de scellement</td><td>32 octets au minimum</td></tr>
-    <tr><td>Segments d'un chemin</td><td>8</td></tr>
+    <tr><td>Segments d'un chemin</td><td>9 (depuis la délégation)</td></tr>
     <tr><td>Octets par segment</td><td>255</td></tr>
     <tr><td>Messages par page</td><td>50</td></tr>
     <tr><td>Drapeaux par message</td><td>10</td></tr>
     <tr><td>Profondeur d'un corps JSON</td><td>8</td></tr>
     <tr><td>Champs par objet JSON</td><td>16</td></tr>
-    <tr><td>Taille d'un message soumis</td><td>fixée par la configuration du serveur</td></tr>
+    <tr><td>Corps d'une requête JSON</td><td>64 Kio — au-delà, <code>413</code> (<code>/problems/content-too-large</code>)</td></tr>
+    <tr><td>Corps d'une soumission ou d'un dépôt</td><td><strong>1 Mio</strong> — le message sans ses pièces jointes ; au-delà, <code>413</code></td></tr>
+    <tr><td>Taille d'un message émis</td><td>fixée aussi par la configuration du serveur</td></tr>
   </tbody>
 </table>
 </div>

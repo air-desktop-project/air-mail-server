@@ -959,13 +959,15 @@ POST /v1/me/devices
     <tr><td>Token lifetime</td><td><strong>15 minutes</strong> in service; 12 h is the format's ceiling</td></tr>
     <tr><td>Account name in a token</td><td>64 bytes</td></tr>
     <tr><td>Sealing key</td><td>32 bytes minimum</td></tr>
-    <tr><td>Path segments</td><td>8</td></tr>
+    <tr><td>Path segments</td><td>9 (since delegation)</td></tr>
     <tr><td>Bytes per segment</td><td>255</td></tr>
     <tr><td>Messages per page</td><td>50</td></tr>
     <tr><td>Flags per message</td><td>10</td></tr>
     <tr><td>JSON body depth</td><td>8</td></tr>
     <tr><td>Fields per JSON object</td><td>16</td></tr>
-    <tr><td>Submitted message size</td><td>set by the server's configuration</td></tr>
+    <tr><td>JSON request body</td><td>64 KiB — beyond that, <code>413</code> (<code>/problems/content-too-large</code>)</td></tr>
+    <tr><td>Submission or deposit body</td><td><strong>1 MiB</strong> — the message without its attachments; beyond that, <code>413</code></td></tr>
+    <tr><td>Sent message size</td><td>also set by the server's configuration</td></tr>
   </tbody>
 </table>
 </div>

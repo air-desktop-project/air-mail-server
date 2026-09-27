@@ -336,6 +336,13 @@ impl<A: Api> ams_h3::Service for ServiceH3<'_, A> {
 // où il manque. Deux du composeur, quatre de la session, deux de la portée.
 const _: () = assert!(ams_h3::CHAMPS_MAX >= 2 + ams_session::http::COMMUNS_MAX + 2);
 
+/// **HTTP/2 ET HTTP/3 REÇOIVENT LE MÊME MESSAGE** : la borne d'un corps que
+/// `ams-h3` retient est celle qu'un message peut faire pour la session. Si
+/// elles divergeaient, un message accepté par l'une serait une « charge
+/// excessive » pour l'autre — et le client ne saurait pas lequel des deux il
+/// parle. La compilation échoue plutôt.
+const _: () = assert!(ams_h3::CORPS_OCTETS_MAX == ams_session::http::MESSAGE_OCTETS_MAX);
+
 /// Recopie la réponse dans le tampon de sortie, et la décrit.
 ///
 /// # POURQUOI RECOPIER

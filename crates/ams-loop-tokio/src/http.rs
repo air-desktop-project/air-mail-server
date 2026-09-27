@@ -48,7 +48,7 @@ use ams_proto_h2::{
     Settings as H2Settings,
 };
 use ams_proto_http::{Limits, Method, RequestHead, StatusCode};
-use ams_session::http::{BODY_OCTETS_MAX, Http, Next, SCRATCH_OCTETS_MIN};
+use ams_session::http::{BODY_OCTETS_MAX, Http, MESSAGE_OCTETS_MAX, Next, SCRATCH_OCTETS_MIN};
 use rustls::ServerConfig;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio_rustls::TlsAcceptor;
@@ -460,7 +460,10 @@ where
     let mut ecriture = std::vec![0_u8; ECRITURE_OCTETS];
     let mut entetes = std::vec![0_u8; ENTETES_OCTETS];
     let mut tete_place = std::vec![0_u8; ENTETES_OCTETS];
-    let mut corps = std::vec![0_u8; BODY_OCTETS_MAX];
+    // **LE CORPS GRANDIT À LA DEMANDE**, jusqu'à ce qu'un message peut faire
+    // plus un octet, et revient à sa taille ordinaire entre deux requêtes : une
+    // connexion au repos ne garde pas un mébioctet pour rien.
+    let mut corps: Vec<u8> = Vec::with_capacity(BODY_OCTETS_MAX);
     let mut travail = std::vec![0_u8; TRAVAIL_OCTETS];
     let mut echange = std::vec![0_u8; TRAVAIL_OCTETS];
     let mut rendu = std::vec![0_u8; RENDU_OCTETS];
@@ -476,6 +479,8 @@ where
     .await?;
 
     loop {
+        corps.clear();
+        corps.shrink_to(BODY_OCTETS_MAX);
         let lue = lire_une_requete(
             flux,
             &mut connexion,
@@ -779,7 +784,7 @@ async fn lire_une_requete<'t, S>(
     remplis: &mut usize,
     entetes: &mut [u8],
     tete_place: &'t mut [u8],
-    corps: &mut [u8],
+    corps: &mut Vec<u8>,
     ecriture: &mut [u8],
 ) -> Result<Option<Demande<'t>>, Error>
 where
@@ -977,20 +982,23 @@ where
 
 /// Ajoute un morceau de corps, et rend la nouvelle longueur.
 ///
-/// **UN CORPS QUI DÉBORDE NE SE TRONQUE PAS** : on cesse d'écrire, et la session
-/// verra un corps plus court que ce que `content-length` annonçait — ce qu'elle
-/// refuse. Tronquer en silence ferait agir sur ce que le client n'a pas demandé.
-fn pousser(corps: &mut [u8], lu: usize, morceau: &[u8]) -> usize {
-    let fin = lu.saturating_add(morceau.len());
-    match corps.get_mut(lu..fin) {
-        Some(place) => {
-            for (ou, octet) in place.iter_mut().zip(morceau) {
-                *ou = *octet;
-            }
-            fin
-        }
-        None => lu,
-    }
+/// # UN CORPS QUI DÉBORDE SE RETIENT D'UN OCTET DE TROP, ET SE REFUSE
+///
+/// On retient au plus [`MESSAGE_OCTETS_MAX`] **plus un** octet : la session
+/// voit alors un corps plus long que ce qu'une ressource reçoit, et répond
+/// `413`. Ce qui suit est lu — c'est le flux du pair — et jeté.
+///
+/// **CE COMMENTAIRE MENTAIT JUSQU'À LA 0.2.24.** Il disait qu'un corps trop
+/// long serait refusé parce que la session comparerait sa longueur au
+/// `content-length` ; elle ne le faisait pas. Au-delà de 64 Kio, les morceaux
+/// cessaient simplement d'être écrits, et la requête partait avec un corps
+/// TRONQUÉ — un message amputé, soumis comme s'il était complet. Elle le
+/// compare désormais, et cette borne-ci ne laisse plus rien passer d'amputé.
+fn pousser(corps: &mut Vec<u8>, lu: usize, morceau: &[u8]) -> usize {
+    let place = MESSAGE_OCTETS_MAX.saturating_add(1).saturating_sub(lu);
+    corps.truncate(lu);
+    corps.extend_from_slice(morceau.get(..morceau.len().min(place)).unwrap_or_default());
+    corps.len()
 }
 
 /// Ôte les `combien` premiers octets du tampon.

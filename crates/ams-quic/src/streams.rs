@@ -791,6 +791,47 @@ impl Streams {
         }
     }
 
+    /// La limite à annoncer pour le flux de ce rang, afin de laisser `voulu`
+    /// octets d'avance à l'application — ou `None` si celle en vigueur suffit
+    /// encore (§19.10).
+    ///
+    /// # SANS ELLE, UN FLUX SE FIGEAIT À SA PREMIÈRE FENÊTRE
+    ///
+    /// Seule la limite de CONNEXION se rouvrait. Celle de chaque flux restait
+    /// celle du départ, et une requête HTTP/3 de plus de seize kibioctets
+    /// attendait un crédit qui ne venait jamais : le pair se taisait, le serveur
+    /// attendait, et rien ne disait pourquoi.
+    ///
+    /// # À MOITIÉ, COMME `MAX_DATA` ET COMME HTTP/2
+    ///
+    /// On ne rouvre que lorsqu'il reste moins de la moitié de `voulu` devant ce
+    /// que l'application a lu : rouvrir à chaque lecture ferait une trame par
+    /// paquet, attendre l'épuisement arrêterait l'émission du pair. Un flux dont
+    /// la taille finale est connue n'a plus besoin de rien.
+    #[must_use]
+    pub fn grant_stream_data(&self, rang: usize, voulu: u64) -> Option<(StreamId, u64)> {
+        let vivant = self.flux.get(rang)?.as_ref()?;
+        let reception = vivant.reception.as_ref()?;
+        let devant = reception.limit().saturating_sub(reception.read_offset());
+        (reception.state() == RecvState::Recv && devant <= voulu / 2)
+            .then_some((vivant.id, reception.read_offset().saturating_add(voulu)))
+    }
+
+    /// Entérine la limite qu'on vient d'annoncer par un `MAX_STREAM_DATA`.
+    ///
+    /// **À N'APPELER QU'UNE FOIS LA TRAME ÉCRITE**, comme
+    /// [`Streams::set_max_data`].
+    pub fn set_max_stream_data(&mut self, rang: usize, limite: u64) {
+        if let Some(reception) = self
+            .flux
+            .get_mut(rang)
+            .and_then(|place| place.as_mut())
+            .and_then(|vivant| vivant.reception.as_mut())
+        {
+            reception.set_limit(limite);
+        }
+    }
+
     /// Ce que l'application a consommé, en octets cumulés.
     #[must_use]
     pub const fn consumed(&self) -> u64 {

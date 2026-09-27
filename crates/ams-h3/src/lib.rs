@@ -54,10 +54,13 @@ pub const CHAMPS_OCTETS_MAX: usize = 16 * 1024;
 
 /// Ce qu'un corps de requête peut faire.
 ///
-/// **CE SERVEUR N'EST PAS UN DÉPÔT** : son API administre des boîtes, et ce qui
-/// entre par une requête tient en quelques kibioctets. Un message de courrier
-/// entre par SMTP, où il s'écoule sans être retenu.
-pub const CORPS_OCTETS_MAX: usize = 64 * 1024;
+/// **UN MÉBIOCTET : CE QU'UN MESSAGE SANS SES PIÈCES JOINTES PEUT FAIRE.** Un
+/// document JSON en fait bien moins, et la session le refuse au-delà de sa
+/// propre borne ; un message se soumet corps d'abord, ses pièces jointes
+/// ensuite, par morceaux. Cette borne valait 64 Kio — et c'est la même que
+/// `ams_session::http::MESSAGE_OCTETS_MAX`, que cette crate ne peut pas lire.
+/// Au-delà, le flux est une charge excessive (§8.1), comme avant.
+pub const CORPS_OCTETS_MAX: usize = 1024 * 1024;
 
 /// Le code applicatif d'une extinction qui s'est bien passée (§8.1).
 ///

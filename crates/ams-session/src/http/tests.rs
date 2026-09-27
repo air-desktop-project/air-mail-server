@@ -10,7 +10,7 @@ use std::vec::Vec;
 use ams_api::{Area, Key, Resource, Rights, Scope, Token, issue};
 use ams_proto_http::{HeadBuilder, Limits, Method, RequestHead, StatusCode};
 
-use super::{BODY_OCTETS_MAX, Http, Next, SCRATCH_OCTETS_MIN};
+use super::{BODY_OCTETS_MAX, Http, MESSAGE_OCTETS_MAX, Next, SCRATCH_OCTETS_MIN};
 
 /// Une clé de scellement d'essai.
 const CLEF: &[u8; 32] = b"une clef de trente-deux octets!!";
@@ -416,18 +416,79 @@ fn un_corps_vide_ne_demande_aucun_type() {
     assert_eq!(tour.status(), StatusCode::OK);
 }
 
-/// Un corps plus gros que ce qu'on lit se refuse.
+/// **UN CORPS TROP LONG POUR SA RESSOURCE DIT `413`** : 64 Kio pour un
+/// document JSON, un mébioctet pour un message — et un message de plus de
+/// 64 Kio passe, ce que HTTP/2 tronquait en silence jusqu'à la 0.2.24.
 #[test]
-fn un_corps_trop_gros_se_refuse() {
+fn un_corps_trop_gros_pour_sa_ressource_dit_413() {
     let porte = jeton("marc", Scope::one(Area::Mail, Rights::Write));
-    let mut champs = requete(b"POST", b"/v1/mailboxes/INBOX/messages", porte.as_bytes());
-    champs.push((b"content-type", b"application/json"));
-    let tete = entete(&champs);
-    let gros = std::vec![b'x'; BODY_OCTETS_MAX + 1];
-    let mut place = [0_u8; PLACE];
     let session = une_session();
-    let tour = session.request(&tete, &gros, MAINTENANT, &mut place);
-    assert_eq!(tour.status(), StatusCode::BAD_REQUEST);
+    let essai = |verbe: &[u8], chemin: &[u8], type_: &[u8], taille: usize| {
+        let mut champs = requete(verbe, chemin, porte.as_bytes());
+        champs.push((b"content-type", type_));
+        let tete = entete(&champs);
+        let corps = std::vec![b'x'; taille];
+        let mut place = [0_u8; PLACE];
+        session
+            .request(&tete, &corps, MAINTENANT, &mut place)
+            .status()
+    };
+    let json = (
+        &b"PATCH"[..],
+        &b"/v1/mailboxes/INBOX/messages/1"[..],
+        &b"application/json"[..],
+    );
+    let message = (
+        &b"POST"[..],
+        &b"/v1/mailboxes/INBOX/messages"[..],
+        &b"message/rfc822"[..],
+    );
+    assert_eq!(
+        essai(json.0, json.1, json.2, BODY_OCTETS_MAX + 1),
+        StatusCode::CONTENT_TOO_LARGE
+    );
+    assert_eq!(
+        essai(message.0, message.1, message.2, BODY_OCTETS_MAX + 1),
+        StatusCode::OK,
+        "un message de plus de 64 Kio passe"
+    );
+    assert_eq!(
+        essai(message.0, message.1, message.2, MESSAGE_OCTETS_MAX),
+        StatusCode::OK
+    );
+    assert_eq!(
+        essai(message.0, message.1, message.2, MESSAGE_OCTETS_MAX + 1),
+        StatusCode::CONTENT_TOO_LARGE
+    );
+}
+
+/// **LE CORPS DIT CE QUE `content-length` ANNONÇAIT** (§8.1.1 de RFC 9113) :
+/// c'est ce qui distingue un corps complet d'un corps que la boucle aurait
+/// cessé de retenir.
+#[test]
+fn un_corps_qui_contredit_content_length_se_refuse() {
+    let porte = jeton("marc", Scope::one(Area::Submit, Rights::Write));
+    let session = une_session();
+    let message = b"From: marc@exemple.test\r\n\r\nbonjour";
+    let juste = message.len().to_string();
+    for (annonce, corps, attendu) in [
+        (juste.as_bytes(), &message[..], StatusCode::OK),
+        (b"99", message, StatusCode::BAD_REQUEST),
+        (b"5", b"", StatusCode::BAD_REQUEST),
+    ] {
+        let mut champs = requete(b"POST", b"/v1/submissions", porte.as_bytes());
+        champs.push((b"content-type", b"message/rfc822"));
+        champs.push((b"content-length", annonce));
+        let tete = entete(&champs);
+        let mut place = [0_u8; PLACE];
+        let tour = session.request(&tete, corps, MAINTENANT, &mut place);
+        assert_eq!(
+            tour.status(),
+            attendu,
+            "{}",
+            String::from_utf8_lossy(annonce)
+        );
+    }
 }
 
 /// **`no-store` ET `nosniff` SUR TOUTE RÉPONSE**, quelle qu'elle soit.

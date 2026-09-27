@@ -154,6 +154,13 @@ pub enum Reason {
     /// le passé qu'elle ne sait plus rendre. Le client relit la boîte entière,
     /// prend le nouveau `highestModseq`, et reprend les deltas depuis lui.
     SyncExpired,
+    /// **Le corps de la requête dépasse ce que cette ressource reçoit** :
+    /// 64 Kio pour un document JSON, 1 Mio pour un message.
+    ///
+    /// `413` (§15.5.14 de RFC 9110), et non `400` : la requête est bien formée,
+    /// c'est sa TAILLE qui gêne. Un message qui porte des pièces jointes ne se
+    /// soumet pas d'un seul tenant — il passe par un brouillon.
+    BodyTooLarge,
 }
 
 impl Reason {
@@ -188,6 +195,7 @@ impl Reason {
             Self::NotImplemented => StatusCode::NOT_IMPLEMENTED,
             Self::AlreadyEnrolled | Self::LimitReached => StatusCode::CONFLICT,
             Self::SyncExpired => StatusCode::GONE,
+            Self::BodyTooLarge => StatusCode::CONTENT_TOO_LARGE,
         }
     }
 
@@ -218,6 +226,7 @@ impl Reason {
             Self::LimitReached => "ce compte a atteint sa limite ; révoquez-en un d'abord",
             Self::BadQuery => "la chaîne de requête est refusée",
             Self::SyncExpired => "ce curseur n'est plus servi ; relisez la boîte entière",
+            Self::BodyTooLarge => "le corps de la requête est trop long pour cette ressource",
             // **CE QUI EST NÔTRE SE DIT D'UNE SEULE FAÇON.** Distinguer nos
             // fautes internes apprendrait au client ce que notre code a fait de
             // travers, et ne lui servirait à rien : il n'y peut rien. Le journal

@@ -70,14 +70,24 @@ fn requete_permise(ressource: Resource<'_>, verbe: Method, requete: &Query) -> b
     }
 }
 
-/// Ce qu'un corps de requête peut faire de long.
+/// Ce qu'un document JSON peut faire de long.
 ///
-/// Soixante-quatre kibioctets. Aucune requête de cette API n'a besoin de
-/// davantage : ce sont des drapeaux, des noms, des critères. **Un dépôt de
-/// message, lui, ne passe pas par un corps JSON** — il passe par
-/// `/v1/submissions`, dont le corps est le message lui-même et que la boucle
-/// écoule sans le retenir.
+/// Soixante-quatre kibioctets. Aucun document de cette API n'a besoin de
+/// davantage : ce sont des drapeaux, des noms, des critères.
 pub const BODY_OCTETS_MAX: usize = 64 * 1024;
+
+/// Ce qu'un MESSAGE — une soumission, un dépôt — peut faire de long.
+///
+/// # UN MÉBIOCTET, ET C'EST LE CORPS SEUL
+///
+/// Décision de l'exploitant : un message se soumet corps d'abord — texte, HTML
+/// —, et ses pièces jointes ensuite, par morceaux écrits sur disque. Le corps
+/// seul tient en mémoire le temps de la requête ; un mébioctet suffit à un long
+/// texte, sa version HTML et un fil cité. **La boucle retient au plus un octet
+/// de plus**, et c'est ce qui permet de refuser un corps trop long (`413`)
+/// plutôt que d'agir sur un corps tronqué — ce que faisait HTTP/2 jusqu'à la
+/// 0.2.24, en silence, au-delà de 64 Kio.
+pub const MESSAGE_OCTETS_MAX: usize = 1024 * 1024;
 
 /// Combien de champs une réponse porte au plus.
 pub const FIELDS_MAX: usize = 8;
@@ -899,6 +909,23 @@ fn couper(tampon: &mut [u8], combien: usize) -> (&mut [u8], &mut [u8]) {
 /// Vérifie qu'un corps a sa place ici, et qu'il dit ce qu'il est.
 fn verifier_le_corps(tete: &RequestHead<'_>, corps: &[u8]) -> Result<(), Reason> {
     let attendu = matches!(tete.method(), Method::Post | Method::Put | Method::Patch);
+    // **TROP LONG D'ABORD** : la boucle retient au plus un octet de plus que ce
+    // qu'un message peut faire, et un corps qu'elle a cessé de retenir
+    // contredit donc aussi son `content-length`. C'est la TAILLE qu'il faut
+    // dire (`413`), et non la contradiction qu'elle entraîne.
+    if corps.len() > MESSAGE_OCTETS_MAX {
+        return Err(Reason::BodyTooLarge);
+    }
+    // **LE CORPS DIT CE QUE `content-length` ANNONÇAIT, OU IL EST REFUSÉ** :
+    // §8.1.1 de RFC 9113 tient pour malformée une requête dont les trames
+    // `DATA` ne font pas la longueur annoncée. C'est aussi ce qui distingue un
+    // corps complet d'un corps que la boucle aurait cessé de retenir.
+    if tete
+        .content_length()
+        .is_some_and(|annonce| u64::try_from(corps.len()).ok() != Some(annonce))
+    {
+        return Err(Reason::BadJsonBody);
+    }
     if corps.is_empty() {
         return Ok(());
     }
@@ -908,9 +935,8 @@ fn verifier_le_corps(tete: &RequestHead<'_>, corps: &[u8]) -> Result<(), Reason>
     if !attendu {
         return Err(Reason::BadPath);
     }
-    if corps.len() > BODY_OCTETS_MAX {
-        return Err(Reason::BadJsonBody);
-    }
+    // La borne d'un document JSON, plus étroite que celle d'un message, se
+    // juge une fois la ressource connue — voir `verifier_le_type`.
     Ok(())
 }
 
@@ -947,10 +973,15 @@ fn verifier_le_type(
     // refusait donc le type annoncé en acceptant `application/json` pour un
     // message — mesuré en production le 2026-09-26. Aucune autre méthode sur
     // cette ressource ne porte de corps.
-    let attendu = match resource {
-        Resource::Submissions | Resource::Messages { .. } => ams_api::MESSAGE_MEDIA_TYPE,
-        _ => JSON_MEDIA_TYPE,
+    let (attendu, borne) = match resource {
+        Resource::Submissions | Resource::Messages { .. } => {
+            (ams_api::MESSAGE_MEDIA_TYPE, MESSAGE_OCTETS_MAX)
+        }
+        _ => (JSON_MEDIA_TYPE, BODY_OCTETS_MAX),
     };
+    if corps.len() > borne {
+        return Err(Reason::BodyTooLarge);
+    }
     match tete.field(EN_TETE_TYPE) {
         Some(dit) if est_le_type(dit, attendu) => Ok(()),
         _ => Err(Reason::BadJsonBody),

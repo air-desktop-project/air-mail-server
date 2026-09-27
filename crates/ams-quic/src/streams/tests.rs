@@ -915,3 +915,60 @@ fn un_rang_admis_sans_place_ne_panique_pas() {
         "c'est ce que la documentation de `trouver_ou_ouvrir` annonçait déjà"
     );
 }
+
+/// **LE CRÉDIT D'UN FLUX SE ROUVRE À MESURE QU'ON LE LIT** (§4.1, §19.10) —
+/// sans quoi une requête plus longue que la première fenêtre ne finissait
+/// jamais d'arriver.
+#[test]
+fn le_credit_d_un_flux_se_rouvre_a_mesure_qu_on_le_lit() {
+    let mut flux_ = serveur();
+    let sien = flux(0);
+    let mut fenetre = [0_u8; 2_000];
+    flux_
+        .on_stream(sien, 0, &[7; 2_000], false, &mut fenetre)
+        .expect("toute sa fenêtre");
+    let rang = flux_.slot(sien).expect("vivant");
+    assert_eq!(
+        flux_.grant_stream_data(rang, 2_000),
+        None,
+        "rien n'est lu : la fenêtre est pleine, et elle le reste"
+    );
+
+    let mut vers = [0_u8; 1_200];
+    assert_eq!(flux_.read(sien, &mut fenetre, &mut vers), 1_200);
+    // Il reste huit cents octets devant la lecture : moins de la moitié.
+    assert_eq!(flux_.grant_stream_data(rang, 2_000), Some((sien, 3_200)));
+    flux_.set_max_stream_data(rang, 3_200);
+    assert_eq!(flux_.grant_stream_data(rang, 2_000), None, "annoncé");
+    // Et le pair peut désormais écrire au-delà de sa première fenêtre.
+    let mut vers = [0_u8; 800];
+    assert_eq!(flux_.read(sien, &mut fenetre, &mut vers), 800);
+    flux_
+        .on_stream(sien, 2_000, &[8; 1_200], true, &mut fenetre)
+        .expect("au-delà de la première fenêtre");
+    // Le `FIN` est là : il n'y a plus rien à rouvrir.
+    let mut vers = [0_u8; 1_200];
+    flux_.read(sien, &mut fenetre, &mut vers);
+    assert_eq!(flux_.grant_stream_data(rang, 2_000), None);
+}
+
+/// Ce qui n'a pas de réception n'a pas de crédit à rouvrir.
+#[test]
+fn sans_reception_pas_de_credit_de_flux() {
+    let mut flux_ = serveur();
+    let notre = flux_.open(Directional::Unidirectional).expect("ouvert");
+    let rang = flux_.slot(notre).expect("vivant");
+    assert_eq!(
+        flux_.grant_stream_data(rang, 2_000),
+        None,
+        "nous seuls y écrivons"
+    );
+    let libre = (0..crate::FLUX_MAX)
+        .find(|rang| flux_.occupant(*rang).is_none())
+        .expect("une place libre");
+    assert_eq!(flux_.grant_stream_data(libre, 2_000), None);
+    assert_eq!(flux_.grant_stream_data(crate::FLUX_MAX, 2_000), None);
+    // Entériner sur une place vide ne fait rien, et ne tombe pas.
+    flux_.set_max_stream_data(libre, 9_999);
+    assert_eq!(flux_.grant_stream_data(libre, 2_000), None);
+}

@@ -1975,6 +1975,23 @@ impl Connection {
             *sollicite = true;
             flux.set_max_data(limite);
         }
+        // §4.1 : ET CHAQUE FLUX, À MESURE QUE L'APPLICATION LE LIT. Sans ces
+        // trames, un flux restait figé à sa première fenêtre de seize
+        // kibioctets, et une requête plus longue ne finissait jamais d'arriver.
+        for rang in 0..FLUX_MAX {
+            if let Some((id, limite)) = flux.grant_stream_data(rang, FLUX_OCTETS)
+                && let Some(place) = trames.get_mut(pose..borne)
+                && let Ok(ecrits) = (Frame::MaxStreamData {
+                    stream: id.value(),
+                    maximum: limite,
+                })
+                .write(place)
+            {
+                pose = pose.saturating_add(ecrits);
+                *sollicite = true;
+                flux.set_max_stream_data(rang, limite);
+            }
+        }
         for sens in [Directional::Bidirectional, Directional::Unidirectional] {
             if let Some(plafond) = flux.grant_streams(sens)
                 && let Some(place) = trames.get_mut(pose..borne)

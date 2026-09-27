@@ -22,7 +22,7 @@ use crate::error::Reason;
 /// Le `match` ci-dessous la rend exhaustive **à la compilation** : un motif de
 /// plus ne compile pas tant qu'on ne l'y a pas mis. C'est la même discipline
 /// que `Resource::scope`, et pour la même raison.
-fn toutes() -> [Reason; 21] {
+fn toutes() -> [Reason; 22] {
     // Ce `match` ne sert qu'à faire échouer la compilation si un motif
     // s'ajoute : sa valeur est jetée, sa VÉRIFICATION est tout l'objet.
     const fn _exhaustive(reason: Reason) -> u8 {
@@ -48,6 +48,7 @@ fn toutes() -> [Reason; 21] {
             Reason::LimitReached => 18,
             Reason::BadQuery => 19,
             Reason::SyncExpired => 20,
+            Reason::BodyTooLarge => 21,
         }
     }
     [
@@ -72,6 +73,7 @@ fn toutes() -> [Reason; 21] {
         Reason::LimitReached,
         Reason::BadQuery,
         Reason::SyncExpired,
+        Reason::BodyTooLarge,
     ]
 }
 
@@ -260,4 +262,13 @@ fn un_curseur_perime_se_dit_gone() {
     let dit = document(Reason::SyncExpired);
     assert!(dit.contains("/problems/gone"), "{dit}");
     assert!(dit.contains("\"status\":410"), "{dit}");
+}
+
+/// **UN CORPS TROP LONG DIT `413`, ET SON PROPRE TYPE** : c'est la TAILLE qui
+/// gêne, et le client doit pouvoir le distinguer d'un corps mal formé.
+#[test]
+fn un_corps_trop_long_se_dit_content_too_large() {
+    let dit = document(Reason::BodyTooLarge);
+    assert!(dit.contains("/problems/content-too-large"), "{dit}");
+    assert!(dit.contains("\"status\":413"), "{dit}");
 }

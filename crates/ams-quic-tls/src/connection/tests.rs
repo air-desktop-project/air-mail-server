@@ -165,6 +165,8 @@ struct Client {
     /// Les crédits que le serveur a annoncés.
     plafond_recu: Option<u64>,
     credit_recu: Option<u64>,
+    /// Le dernier crédit de flux annoncé : le flux, et sa limite.
+    credit_de_flux: Option<(u64, u64)>,
 }
 
 impl Client {
@@ -208,6 +210,7 @@ impl Client {
             fin_recue: false,
             plafond_recu: None,
             credit_recu: None,
+            credit_de_flux: None,
         }
     }
 
@@ -420,6 +423,9 @@ impl Client {
                     }
                     Frame::MaxStreams { maximum, .. } => self.plafond_recu = Some(maximum),
                     Frame::MaxData { maximum } => self.credit_recu = Some(maximum),
+                    Frame::MaxStreamData { stream, maximum } => {
+                        self.credit_de_flux = Some((stream, maximum));
+                    }
                     _ => {}
                 }
                 if let Frame::Crypto { offset, data } = trame {
@@ -3626,5 +3632,62 @@ fn les_deux_bouts_s_accordent_sur_le_plus_court_des_delais() {
         serveur.idle_timeout(),
         court,
         "et le serveur garde le sien, plus court que celui du client"
+    );
+}
+
+/// **LE CRÉDIT D'UN FLUX SE ROUVRE À MESURE QU'ON LE LIT** (§4.1, §19.10).
+///
+/// Seul `MAX_DATA` se rouvrait : chaque flux restait figé à sa première
+/// fenêtre, et une requête HTTP/3 de plus de seize kibioctets attendait un
+/// crédit qui ne venait jamais. Le client remplit ici la fenêtre d'un flux, le
+/// serveur en lit les trois quarts, et doit alors la rouvrir.
+#[test]
+fn le_credit_d_un_flux_se_rouvre_a_mesure_qu_on_le_lit() {
+    let (_atelier, mut serveur, mut client, mut horloge) = etabli("credit-de-flux");
+    let fenetre = usize::try_from(crate::connection::FLUX_OCTETS).expect("tient");
+    let morceau = 1_000_usize;
+    let mut decalage = 0_usize;
+    while decalage < fenetre {
+        let taille = morceau.min(fenetre - decalage);
+        let donnees = std::vec![0x61_u8; taille];
+        let mut trames = [0_u8; 1_100];
+        let ecrits = (Frame::Stream {
+            stream: 0,
+            offset: u64::try_from(decalage).expect("tient"),
+            data: &donnees,
+            fin: false,
+        })
+        .write(&mut trames)
+        .expect("écrivable");
+        let mut datagramme =
+            un_paquet_du_client(&mut client, trames.get(..ecrits).expect("écrits"));
+        serveur
+            .on_datagram(&mut datagramme, horloge)
+            .expect("dans la fenêtre annoncée");
+        decalage += taille;
+    }
+    let flux = ams_proto_quic::StreamId::new(0).expect("un numéro");
+    let trois_quarts = fenetre / 4 * 3;
+    let mut vers = std::vec![0_u8; trois_quarts];
+    assert_eq!(serveur.read(flux, &mut vers), trois_quarts);
+    for _ in 0..4 {
+        let mut place = std::vec![0_u8; 1_500];
+        let ecrit = serveur
+            .poll_transmit(&mut place, horloge)
+            .expect("le serveur avance");
+        if ecrit == 0 {
+            break;
+        }
+        client.ecouter(place.get(..ecrit).expect("écrit"));
+        horloge = horloge.saturating_add(1_000);
+    }
+    assert_eq!(
+        client.credit_de_flux,
+        Some((
+            0,
+            crate::connection::FLUX_OCTETS
+                .saturating_add(u64::try_from(trois_quarts).expect("tient"))
+        )),
+        "§19.10 : le flux lu doit être rouvert d'une fenêtre devant la lecture"
     );
 }

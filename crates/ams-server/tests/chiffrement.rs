@@ -1372,3 +1372,95 @@ fn un_quit_sans_dele_n_efface_rien_et_un_mauvais_mot_de_passe_non_plus() {
     let autre = pop3(port_pop3, "USER paul\r\nPASS ouvre-toi\r\nQUIT\r\n");
     assert!(autre.contains("-ERR Authentication failed"), "{autre}");
 }
+
+/// **UNE AUTHENTIFICATION REFUSÉE SE DIT AU JOURNAL, SANS RECOPIER CE QU'UN
+/// INCONNU A TAPÉ.**
+///
+/// Le 2026-09-27, Apple Mail n'envoyait plus rien : son mot de passe SMTP était
+/// resté celui d'avant la bascule, et le journal du serveur ne disait que « sans
+/// authentification, aucun message ». Il faut désormais y lire le refus, et
+/// l'identifiant quand il désigne un compte — jamais quand il n'en désigne pas,
+/// car c'est là qu'atterrit un mot de passe tapé dans le mauvais champ.
+#[test]
+fn une_authentification_refusee_se_dit_au_journal() {
+    let atelier = atelier("refus-au-journal");
+    let Some((cert, cle)) = paire(&atelier.0) else {
+        panic!("{SANS_OPENSSL}");
+    };
+    let magasin = atelier.0.join("comptes.bin");
+    let empreinte = ams_auth::hash_password(b"ouvre-toi", b"seize octets ici").expect("hachable");
+    std::fs::write(
+        &magasin,
+        ams_config::encode_accounts(&[ams_auth::Account {
+            login: String::from("jean"),
+            hash: empreinte,
+            addresses: vec![String::from("jean@example.com")],
+        }])
+        .expect("encodable"),
+    )
+    .expect("écriture");
+    std::fs::set_permissions(&magasin, std::fs::Permissions::from_mode(0o600))
+        .expect("permissions");
+    let port = port_libre();
+    let config = configuration(
+        &atelier,
+        port,
+        Tls {
+            certificate_chain_path: cert.display().to_string(),
+            private_key_path: cle.display().to_string(),
+        },
+        &magasin.display().to_string(),
+    );
+    let serveur = lancer(&config, port);
+
+    // Trois refus : par l'adresse, par le nom, et par un « identifiant » qui
+    // est en réalité un secret tapé dans le mauvais champ.
+    for charge in [
+        "AGplYW5AZXhhbXBsZS5jb20AbWF1dmFpcw==",
+        "AGplYW4AbWF1dmFpcw==",
+        "AG1vbi1zZWNyZXQtdGFwZS1pY2kAeA==",
+    ] {
+        let mut client = Command::new("openssl")
+            .args(["s_client", "-connect"])
+            .arg(format!("127.0.0.1:{port}"))
+            .args(["-starttls", "smtp", "-ign_eof", "-quiet"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect(SANS_OPENSSL);
+        client
+            .stdin
+            .as_mut()
+            .expect("entrée standard")
+            .write_all(format!("EHLO client.example\r\nAUTH PLAIN {charge}\r\nQUIT\r\n").as_bytes())
+            .expect("écriture");
+        let dit = client.wait_with_output().expect("openssl s_client");
+        assert!(
+            String::from_utf8_lossy(&dit.stdout).contains("535"),
+            "le refus doit être dit au client"
+        );
+    }
+    let depart = std::time::Instant::now();
+    let journal = loop {
+        let journal = serveur.journal();
+        if journal.matches("AUTH refusée").count() >= 3 || depart.elapsed().as_secs() > 10 {
+            break journal;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert!(
+        journal.contains("AUTH refusée pour `jean@example.com` (compte `jean`)"),
+        "{journal}"
+    );
+    assert!(journal.contains("AUTH refusée pour `jean`\n"), "{journal}");
+    assert!(
+        journal.contains("AUTH refusée — identifiant inconnu"),
+        "{journal}"
+    );
+    assert!(
+        !journal.contains("mon-secret-tape-ici"),
+        "ce qu'un inconnu a tapé ne doit pas finir au journal"
+    );
+    assert!(!journal.contains("mauvais"), "un mot de passe au journal !");
+}
