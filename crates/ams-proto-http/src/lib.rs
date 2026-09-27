@@ -70,6 +70,6 @@ pub use field::{
 pub use head::{FIELDS_MAX, HeadBuilder, RequestHead};
 pub use limits::Limits;
 pub use method::Method;
-pub use range::{ByteRange, RangeFault, parse_range};
+pub use range::{ByteRange, RangeFault, parse_content_range, parse_range};
 pub use response::{Body, ResponseHead, parse_response};
 pub use status::StatusCode;

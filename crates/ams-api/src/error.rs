@@ -161,6 +161,22 @@ pub enum Reason {
     /// c'est sa TAILLE qui gêne. Un message qui porte des pièces jointes ne se
     /// soumet pas d'un seul tenant — il passe par un brouillon.
     BodyTooLarge,
+    /// **Le message porte plus que son corps** : une pièce jointe, une image
+    /// en ligne. Il ne se soumet pas — ni ne se dépose — d'un seul tenant : il
+    /// passe par un brouillon (`/v1/drafts`), corps d'abord, pièces jointes
+    /// ensuite.
+    ///
+    /// `422` (§15.5.21 de RFC 9110) : le message est bien formé et compris, et
+    /// c'est sa FORME qui demande un autre chemin.
+    AttachmentsNeedDraft,
+    /// **L'état du brouillon empêche ce geste** : une pièce jointe encore
+    /// incomplète au moment d'envoyer, un morceau qui en chevauche un autre
+    /// sans l'égaler, une pièce déjà entière, ou trop de pièces.
+    ///
+    /// `409`, comme un appareil déjà enrôlé : la demande est bien formée, et
+    /// c'est l'état de la ressource qui l'empêche. Le client relit le brouillon
+    /// (`GET /v1/drafts/{id}`) pour savoir ce qui manque.
+    DraftConflict,
 }
 
 impl Reason {
@@ -193,9 +209,12 @@ impl Reason {
             // §15.6.2 de RFC 9110 : « the server does not support the
             // functionality required to fulfill the request ».
             Self::NotImplemented => StatusCode::NOT_IMPLEMENTED,
-            Self::AlreadyEnrolled | Self::LimitReached => StatusCode::CONFLICT,
+            Self::AlreadyEnrolled | Self::LimitReached | Self::DraftConflict => {
+                StatusCode::CONFLICT
+            }
             Self::SyncExpired => StatusCode::GONE,
             Self::BodyTooLarge => StatusCode::CONTENT_TOO_LARGE,
+            Self::AttachmentsNeedDraft => StatusCode::UNPROCESSABLE_CONTENT,
         }
     }
 
@@ -227,6 +246,12 @@ impl Reason {
             Self::BadQuery => "la chaîne de requête est refusée",
             Self::SyncExpired => "ce curseur n'est plus servi ; relisez la boîte entière",
             Self::BodyTooLarge => "le corps de la requête est trop long pour cette ressource",
+            Self::DraftConflict => {
+                "l'état du brouillon l'empêche ; relisez-le pour savoir ce qui manque"
+            }
+            Self::AttachmentsNeedDraft => {
+                "ce message porte des pièces jointes : envoyez-le par un brouillon (/v1/drafts)"
+            }
             // **CE QUI EST NÔTRE SE DIT D'UNE SEULE FAÇON.** Distinguer nos
             // fautes internes apprendrait au client ce que notre code a fait de
             // travers, et ne lui servirait à rien : il n'y peut rien. Le journal

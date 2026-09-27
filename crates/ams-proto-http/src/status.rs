@@ -68,6 +68,11 @@ impl StatusCode {
     pub const RANGE_NOT_SATISFIABLE: Self = Self(416);
     /// `415 Unsupported Media Type`.
     pub const UNSUPPORTED_MEDIA_TYPE: Self = Self(415);
+    /// `422 Unprocessable Content` — §15.5.21 de RFC 9110 : la requête est bien
+    /// formée, son contenu est compris, et il ne peut pas être traité TEL
+    /// QUEL. C'est ce que rend un message qui porte des pièces jointes soumis
+    /// d'un seul tenant : il doit passer par un brouillon.
+    pub const UNPROCESSABLE_CONTENT: Self = Self(422);
     /// `429 Too Many Requests`.
     pub const TOO_MANY_REQUESTS: Self = Self(429);
     /// `431 Request Header Fields Too Large`.

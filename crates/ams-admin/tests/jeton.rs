@@ -66,6 +66,7 @@ fn configuration(repertoire: &Path, clef: &str) -> PathBuf {
         devices: String::new(),
         app_passwords: String::new(),
         delegations: String::new(),
+        drafts: String::new(),
         require_fqdn_sender: false,
         require_fqdn_recipient: false,
         require_sender_domain: false,

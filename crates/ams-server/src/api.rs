@@ -189,6 +189,9 @@ pub struct ApiMaildir {
     /// Les délégations, quand la configuration en nomme le magasin. `None` :
     /// aucune boîte d'autrui ne s'atteint.
     delegations: Option<Arc<crate::delegations::Delegations>>,
+    /// Les brouillons, quand la configuration en nomme le répertoire. `None` :
+    /// les routes `/v1/drafts` rendent 501.
+    brouillons: Option<Arc<crate::brouillons::Brouillons>>,
 }
 
 /// Combien de mots de passe applicatifs un compte peut avoir.
@@ -230,6 +233,7 @@ impl ApiMaildir {
             scram: None,
             applicatifs: None,
             delegations: None,
+            brouillons: None,
             // ET PAS D'INVITATIONS SANS CLÉ : voir `avec_scellement`.
             scellement: None,
             // NI DE SESSIONS PAR CLEF SANS DOMAINE : voir `avec_domaine`.
@@ -294,6 +298,14 @@ impl ApiMaildir {
     #[must_use]
     pub fn avec_delegations(mut self, magasin: Arc<crate::delegations::Delegations>) -> Self {
         self.delegations = Some(magasin);
+        self
+    }
+
+    /// Lui donne le répertoire des brouillons : c'est ce qui ouvre `/v1/drafts`,
+    /// donc les messages avec pièces jointes.
+    #[must_use]
+    pub fn avec_brouillons(mut self, brouillons: Arc<crate::brouillons::Brouillons>) -> Self {
+        self.brouillons = Some(brouillons);
         self
     }
 
@@ -1768,6 +1780,15 @@ impl ApiMaildir {
         let Ok(message) = ams_mime::Message::parse(corps, &bornes) else {
             return refus_de_depot(sortie);
         };
+        // **LE CORPS SEUL SE SOUMET D'UN TENANT** — décision de l'exploitant :
+        // les pièces jointes passent par un brouillon, par morceaux sur disque.
+        if !crate::forme::corps_seul(corps) {
+            return probleme(
+                ams_api::Reason::AttachmentsNeedDraft,
+                ams_api::Reason::AttachmentsNeedDraft.status(),
+                sortie,
+            );
+        }
         let vue = self.comptes.vue();
         // **ENVOYER AU NOM D'AUTRUI SE DÉLÈGUE** : le droit `send` sur la boîte
         // de support@ permet d'écrire `From: support@…`. Sans lui, la règle reste
@@ -1820,6 +1841,253 @@ impl ApiMaildir {
         }
         let combien = u64::try_from(destinataires.len()).unwrap_or(u64::MAX);
         rendre(render::write_metrics(&[("delivered", combien)], sortie))
+    }
+
+    /// Un geste sur un brouillon, qui ne rend rien de plus qu'un `204` ou une
+    /// faute.
+    fn sur_un_brouillon<'o>(
+        &self,
+        sortie: &'o mut [u8],
+        geste: impl FnOnce(
+            &crate::brouillons::Brouillons,
+            u64,
+        ) -> Result<Option<()>, crate::brouillons::Faute>,
+    ) -> Served<'o> {
+        let Some(brouillons) = self.brouillons.as_ref() else {
+            return pas_encore(sortie);
+        };
+        match geste(brouillons, crate::maintenant()) {
+            Ok(_) => sans_contenu(),
+            Err(faute) => faute_de_brouillon(faute, sortie),
+        }
+    }
+
+    /// Crée un brouillon à partir de son corps.
+    fn creer_un_brouillon<'o>(
+        &self,
+        compte: &str,
+        corps: &[u8],
+        sortie: &'o mut [u8],
+    ) -> Served<'o> {
+        let Some(brouillons) = self.brouillons.as_ref() else {
+            return pas_encore(sortie);
+        };
+        if ams_mime::Message::parse(corps, &ams_mime::Limits::DEFAULT).is_err() {
+            return refus_de_depot(sortie);
+        }
+        // **UN BROUILLON COMMENCE PAR SON CORPS, ET PAR RIEN D'AUTRE** : ses
+        // pièces jointes viennent ensuite, déclarées et par morceaux.
+        if !crate::forme::corps_seul(corps) {
+            return probleme(
+                ams_api::Reason::AttachmentsNeedDraft,
+                ams_api::Reason::AttachmentsNeedDraft.status(),
+                sortie,
+            );
+        }
+        let Some(alea) = seize_octets() else {
+            return indisponible(sortie);
+        };
+        match brouillons.creer(compte, corps, crate::maintenant(), alea) {
+            Ok((id, expire)) => cree(render::write_draft(&id, expire, &[], sortie)),
+            Err(faute) => faute_de_brouillon(faute, sortie),
+        }
+    }
+
+    /// L'état d'un brouillon : son expiration, et ce que chaque pièce a reçu.
+    fn etat_du_brouillon<'o>(&self, compte: &str, id: &str, sortie: &'o mut [u8]) -> Served<'o> {
+        let Some(brouillons) = self.brouillons.as_ref() else {
+            return pas_encore(sortie);
+        };
+        match brouillons.etat(compte, id, crate::maintenant()) {
+            Ok((expire, pieces)) => {
+                let lignes: Vec<render::AttachmentRow<'_>> =
+                    pieces.iter().map(ligne_de_piece).collect();
+                rendre(render::write_draft(id, expire, &lignes, sortie))
+            }
+            Err(faute) => faute_de_brouillon(faute, sortie),
+        }
+    }
+
+    /// Déclare une pièce jointe : son nom, son type, sa taille.
+    fn declarer_une_piece<'o>(
+        &self,
+        compte: &str,
+        id: &str,
+        corps: &[u8],
+        sortie: &'o mut [u8],
+    ) -> Served<'o> {
+        let Some(brouillons) = self.brouillons.as_ref() else {
+            return pas_encore(sortie);
+        };
+        let mut place = [0_u8; 256];
+        let Ok(demande) = render::read_attachment_request(corps, &mut place) else {
+            return corps_refuse(sortie);
+        };
+        match brouillons.declarer(
+            compte,
+            id,
+            demande.name,
+            demande.media,
+            demande.size,
+            crate::maintenant(),
+        ) {
+            Ok(piece) => cree(render::write_attachment(&ligne_de_piece(&piece), sortie)),
+            Err(faute) => faute_de_brouillon(faute, sortie),
+        }
+    }
+
+    /// Pose un morceau de pièce jointe, placé par son `Content-Range`.
+    fn poser_un_morceau<'o>(
+        &self,
+        compte: &str,
+        id: &str,
+        numero: u64,
+        content_range: Option<&[u8]>,
+        corps: &[u8],
+        sortie: &'o mut [u8],
+    ) -> Served<'o> {
+        let Some(brouillons) = self.brouillons.as_ref() else {
+            return pas_encore(sortie);
+        };
+        // **UN MORCEAU DIT SA PLACE, OU IL NE SE RANGE PAS** (§14.4) : sans
+        // `Content-Range`, on ne saurait pas où mettre ces octets.
+        let Some((portee, total)) = content_range.and_then(ams_proto_http::parse_content_range)
+        else {
+            return corps_refuse(sortie);
+        };
+        match brouillons.poser(
+            compte,
+            id,
+            numero,
+            (portee.first, portee.last, total),
+            corps,
+            crate::maintenant(),
+        ) {
+            Ok(piece) => rendre(render::write_attachment(&ligne_de_piece(&piece), sortie)),
+            Err(faute) => faute_de_brouillon(faute, sortie),
+        }
+    }
+
+    /// Compose le brouillon et l'envoie — puis l'efface.
+    ///
+    /// # LA MÊME PORTE QUE `/v1/submissions`
+    ///
+    /// Le `From:` doit être du compte (ou d'un titulaire qui lui délègue
+    /// l'envoi), les destinataires se lisent dans l'en-tête, et le `Bcc:`
+    /// disparaît du message remis. Seule change la façon dont les octets
+    /// arrivent à la remise : **par morceaux**, lus sur le disque et encodés au
+    /// fil de l'eau — aucune pièce jointe n'est entière en mémoire.
+    fn envoyer_le_brouillon<'o>(&self, compte: &str, id: &str, sortie: &'o mut [u8]) -> Served<'o> {
+        use ams_loop_tokio::Delivery as _;
+        let Some(brouillons) = self.brouillons.as_ref() else {
+            return pas_encore(sortie);
+        };
+        let maintenant = crate::maintenant();
+        let (corps, pieces) = match brouillons.a_composer(compte, id, maintenant) {
+            Ok(pret) => pret,
+            Err(faute) => return faute_de_brouillon(faute, sortie),
+        };
+        let bornes = ams_mime::Limits::DEFAULT;
+        let Ok(message) = ams_mime::Message::parse(&corps, &bornes) else {
+            return refus_de_depot(sortie);
+        };
+        let vue = self.comptes.vue();
+        let peut_envoyer_pour = |titulaire: &str| {
+            self.delegations
+                .as_ref()
+                .and_then(|table| table.droits(compte, titulaire))
+                .is_some_and(|droits| droits.contains(ams_config::Rights::SEND))
+        };
+        let Some(expediteur) = ecrit_bien_en_son_nom(&vue, compte, peut_envoyer_pour, &message)
+        else {
+            crate::incidents::dire(&self.incidents, crate::incidents::Cause::Usurpation);
+            return refus_de_depot(sortie);
+        };
+        let Some(destinataires) = destinataires_de(&vue, &message, self.file.is_some()) else {
+            return refus_de_depot(sortie);
+        };
+        let Some(remis) = message_a_remettre(&corps, &message, &bornes) else {
+            return notre_faute();
+        };
+        let frontiere = format!("=_air_{id}_=");
+        let mut remise = self.une_remise();
+        remise.begin(Some(expediteur));
+        for adresse in &destinataires {
+            if remise.add_recipient(adresse).is_err() {
+                remise.abort();
+                return indisponible(sortie);
+            }
+        }
+        let ecoule = crate::brouillons::composer(&remis, &pieces, &frontiere, &mut |morceau| {
+            remise.append(morceau).is_ok()
+        });
+        if !ecoule || remise.finish().is_err() {
+            remise.abort();
+            return indisponible(sortie);
+        }
+        let _ = brouillons.supprimer(compte, id, maintenant);
+        let combien = u64::try_from(destinataires.len()).unwrap_or(u64::MAX);
+        rendre(render::write_metrics(&[("delivered", combien)], sortie))
+    }
+
+    /// Compose le brouillon et le range dans une boîte du compte — puis
+    /// l'efface. **Rien ne part** : c'est l'`APPEND` d'IMAP, le `Bcc:` compris.
+    fn ranger_le_brouillon<'o>(
+        &self,
+        compte: &str,
+        id: &str,
+        corps_json: &[u8],
+        sortie: &'o mut [u8],
+    ) -> Served<'o> {
+        use ams_session::imap::Deposit as _;
+        let Some(brouillons) = self.brouillons.as_ref() else {
+            return pas_encore(sortie);
+        };
+        let mut place = [0_u8; ams_session::imap::MAILBOX_NAME_MAX];
+        let Ok(boite) = render::read_store_request(corps_json, &mut place) else {
+            return corps_refuse(sortie);
+        };
+        // L'espace `Partagés` est celui d'IMAP : voir `serve`.
+        if ams_proto_imap::shared_name(boite.as_bytes()).is_some() {
+            return absente(sortie);
+        }
+        let maintenant = crate::maintenant();
+        let (corps, pieces) = match brouillons.a_composer(compte, id, maintenant) {
+            Ok(pret) => pret,
+            Err(faute) => return faute_de_brouillon(faute, sortie),
+        };
+        let Some(mut depot) = self.boites.append(compte.as_bytes(), boite.as_bytes()) else {
+            return absente(sortie);
+        };
+        let frontiere = format!("=_air_{id}_=");
+        if !crate::brouillons::composer(&corps, &pieces, &frontiere, &mut |morceau| {
+            depot.write(morceau)
+        }) {
+            depot.abort();
+            return notre_faute();
+        }
+        let Some(uid) = depot.commit(ams_proto_imap::Flags::NONE, None) else {
+            return notre_faute();
+        };
+        let _ = brouillons.supprimer(compte, id, maintenant);
+        cree(render::write_uid_cree(uid, sortie))
+    }
+
+    /// Une remise comme celle de `/v1/submissions` : file, domaines, DKIM.
+    fn une_remise(&self) -> crate::delivery::MaildirDelivery {
+        let mut remise = crate::delivery::MaildirDelivery::new(
+            std::sync::Arc::clone(&self.remise),
+            std::sync::Arc::clone(&self.comptes),
+            std::sync::Arc::clone(&self.incidents),
+        );
+        if let Some(file) = self.file.clone() {
+            remise = remise.avec_file(file, self.message_max);
+        }
+        remise = remise.avec_domaines(std::sync::Arc::clone(&self.domaines));
+        if let Some(signataire) = self.dkim.clone() {
+            remise = remise.avec_dkim(signataire);
+        }
+        remise
     }
 
     /// Le message entier, tel qu'il est sur le disque.
@@ -2075,6 +2343,14 @@ impl ApiMaildir {
         let bornes = ams_mime::Limits::DEFAULT;
         if ams_mime::Message::parse(corps, &bornes).is_err() {
             return refus_de_depot(sortie);
+        }
+        // Le dépôt suit la même règle que la soumission : le corps seul.
+        if !crate::forme::corps_seul(corps) {
+            return probleme(
+                ams_api::Reason::AttachmentsNeedDraft,
+                ams_api::Reason::AttachmentsNeedDraft.status(),
+                sortie,
+            );
         }
         let Some(mut depot) = self.boites.append(compte.as_bytes(), nom.as_bytes()) else {
             return absente(sortie);
@@ -2360,6 +2636,7 @@ impl Api for ApiMaildir {
             body,
             query,
             range: portee,
+            content_range,
             owner,
         } = appel;
         // **UNE BOÎTE D'AUTRUI : LA TABLE DÉCIDE, À CHAQUE REQUÊTE.** Le jeton dit
@@ -2458,6 +2735,25 @@ impl Api for ApiMaildir {
             }
             Resource::Search { boite } => self.search(account, boite, body, sortie),
             Resource::Copy { boite } => self.transferer(account, boite, body, false, sortie),
+            Resource::Drafts => self.creer_un_brouillon(account, body, sortie),
+            Resource::Draft { id } if matches!(method, Method::Delete) => {
+                self.sur_un_brouillon(sortie, |brouillons, maintenant| {
+                    brouillons.supprimer(account, id, maintenant).map(|()| None)
+                })
+            }
+            Resource::Draft { id } => self.etat_du_brouillon(account, id, sortie),
+            Resource::DraftAttachments { id } => self.declarer_une_piece(account, id, body, sortie),
+            Resource::DraftAttachment { id, piece } if matches!(method, Method::Delete) => self
+                .sur_un_brouillon(sortie, |brouillons, maintenant| {
+                    brouillons
+                        .retirer(account, id, piece, maintenant)
+                        .map(|()| None)
+                }),
+            Resource::DraftAttachment { id, piece } => {
+                self.poser_un_morceau(account, id, piece, content_range, body, sortie)
+            }
+            Resource::DraftSend { id } => self.envoyer_le_brouillon(account, id, sortie),
+            Resource::DraftStore { id } => self.ranger_le_brouillon(account, id, body, sortie),
             Resource::Move { boite } => self.transferer(account, boite, body, true, sortie),
             Resource::Submissions => self.submissions(account, body, sortie),
             // **L'ADMINISTRATION, EN LECTURE ET EN ÉCRITURE.** Le magasin est
@@ -2922,6 +3218,47 @@ fn deja_enrole(sortie: &mut [u8]) -> Served<'_> {
 ///
 /// **LA MÊME RÉPONSE QU'UN MESSAGE ILLISIBLE** : dire lequel des deux a cloché
 /// apprendrait à qui sonde ce que le serveur a reconnu.
+/// Ce qu'une faute de brouillon rend.
+fn faute_de_brouillon(faute: crate::brouillons::Faute, sortie: &mut [u8]) -> Served<'_> {
+    use crate::brouillons::Faute;
+    match faute {
+        Faute::Introuvable => absente(sortie),
+        Faute::Refus => corps_refuse(sortie),
+        Faute::TropGros => probleme(
+            ams_api::Reason::BodyTooLarge,
+            ams_api::Reason::BodyTooLarge.status(),
+            sortie,
+        ),
+        Faute::Conflit => probleme(
+            ams_api::Reason::DraftConflict,
+            ams_api::Reason::DraftConflict.status(),
+            sortie,
+        ),
+        Faute::Disque => indisponible(sortie),
+    }
+}
+
+/// Une pièce, telle que le JSON la rend.
+fn ligne_de_piece(piece: &crate::brouillons::Piece) -> render::AttachmentRow<'_> {
+    render::AttachmentRow {
+        piece: piece.numero,
+        name: &piece.nom,
+        media: &piece.media,
+        size: piece.taille,
+        received: &piece.recu,
+    }
+}
+
+/// Seize octets tirés du noyau : l'identifiant d'un brouillon.
+fn seize_octets() -> Option<[u8; 16]> {
+    use std::io::Read as _;
+    let mut octets = [0_u8; 16];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut source| source.read_exact(&mut octets))
+        .ok()?;
+    Some(octets)
+}
+
 fn corps_refuse(sortie: &mut [u8]) -> Served<'_> {
     match ams_api::problem(ams_api::Reason::BadJsonBody, sortie) {
         Ok(corps) => Served {
@@ -3930,6 +4267,7 @@ mod ecritures {
                 body: corps,
                 query,
                 range: None,
+                content_range: None,
                 owner: None,
             },
             &mut place,
@@ -4078,6 +4416,7 @@ mod ecritures {
                 body: corps,
                 query: ams_api::Query::default(),
                 range: None,
+                content_range: None,
                 owner: titulaire,
             },
             &mut place,

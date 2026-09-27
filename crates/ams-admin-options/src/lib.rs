@@ -89,6 +89,8 @@ pub struct Options {
     /// Le magasin des délégations. Vide : aucun compte n'atteint la boîte d'un
     /// autre.
     pub delegations: Option<PathBuf>,
+    /// Le répertoire des brouillons de l'API. Vide : ils ne sont pas servis.
+    pub drafts: Option<PathBuf>,
     /// Où écouter en POP3. Vide : POP3 n'est pas servi.
     pub listen_pop3: Option<SocketAddr>,
     /// Les écoutes POP3, chacune avec son mode TLS.
@@ -250,6 +252,7 @@ impl Default for Options {
             devices: None,
             app_passwords: None,
             delegations: None,
+            drafts: None,
             // PAS DE POP3 PAR DÉFAUT : un port ouvert qu'on n'a pas demandé est
             // une surface de plus, et celui-ci ne sert personne sans certificat.
             listen_pop3: None,
@@ -438,6 +441,7 @@ impl Options {
             devices: chemin(self.devices.as_ref()),
             app_passwords: chemin(self.app_passwords.as_ref()),
             delegations: chemin(self.delegations.as_ref()),
+            drafts: chemin(self.drafts.as_ref()),
             tlsrpt: ams_config::Tlsrpt {
                 directory: chemin(self.tlsrpt_dir.as_ref()),
                 send: self.tlsrpt_send,
@@ -621,6 +625,11 @@ OPTIONS DE `config write`
                         qui (support@, contact@…), en lecture, écriture ou
                         envoi. Sans lui, aucun compte n'atteint la boîte d'un
                         autre.
+    --drafts <répertoire>
+                        où l'API compose les messages avec pièces jointes :
+                        le corps d'abord, les pièces jointes ensuite, par
+                        morceaux écrits sur disque. Sans lui, un message avec
+                        pièces jointes ne se soumet pas par l'API.
     --listen-pop3 <adr>    où écouter en POP3 avec `STLS` — le 110. RÉPÉTABLE
                            (défaut : pas de POP3)
     --listen-pop3s <adr>   où écouter en POP3 avec TLS IMPLICITE — le 995.
@@ -1283,6 +1292,7 @@ where
             "--devices" => options.devices = Some(PathBuf::from(valeur()?)),
             "--app-passwords" => options.app_passwords = Some(PathBuf::from(valeur()?)),
             "--delegations" => options.delegations = Some(PathBuf::from(valeur()?)),
+            "--drafts" => options.drafts = Some(PathBuf::from(valeur()?)),
             "--resolver" => {
                 let brute = valeur()?;
                 let adresse: SocketAddr = brute
@@ -2195,6 +2205,7 @@ mod tests {
             (&["--devices"], "attend une valeur"),
             (&["--app-passwords"], "attend une valeur"),
             (&["--delegations"], "attend une valeur"),
+            (&["--drafts"], "attend une valeur"),
         ] {
             let erreur = parse(arguments).expect_err("refusé");
             assert!(
@@ -3650,6 +3661,17 @@ mod tests {
         assert_eq!(options.en_configuration().delegations, "/x/delegations.bin");
         let arguments: &[&str] = &["--domain", "mail.example.com"];
         assert!(ecrire(arguments).en_configuration().delegations.is_empty());
+    }
+
+    /// **`--drafts` SE POSE SEUL, ET SON ABSENCE EST LE DÉFAUT.**
+    #[test]
+    fn le_repertoire_des_brouillons_se_pose_seul() {
+        let arguments: &[&str] = &["--drafts", "/x/brouillons"];
+        let options = ecrire(arguments);
+        assert_eq!(options.drafts, Some(PathBuf::from("/x/brouillons")));
+        assert_eq!(options.en_configuration().drafts, "/x/brouillons");
+        let arguments: &[&str] = &["--domain", "mail.example.com"];
+        assert!(ecrire(arguments).en_configuration().drafts.is_empty());
     }
 
     #[test]

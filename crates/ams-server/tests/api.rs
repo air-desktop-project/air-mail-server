@@ -221,6 +221,7 @@ fn configuration_complete(
         devices: appareils.to_string(),
         app_passwords: String::new(),
         delegations: String::new(),
+        drafts: String::new(),
         require_fqdn_sender: false,
         require_fqdn_recipient: false,
         require_sender_domain: false,
@@ -3109,4 +3110,231 @@ fn un_gros_message_arrive_entier_en_http2() {
     let (corps, fin) = deposer(&fabriquer(1024 * 1024 + 4096));
     assert_eq!(fin, "413 2", "au-delà d'un mébioctet : {corps}");
     assert!(corps.contains("content-too-large"), "{corps}");
+}
+
+/// **UN MESSAGE AVEC PIÈCE JOINTE PASSE PAR UN BROUILLON** — contre le vrai
+/// serveur, par `curl` en HTTP/2.
+///
+/// Décision de l'exploitant : le corps d'abord, les pièces jointes ensuite,
+/// par morceaux écrits sur disque. D'un seul tenant, un `multipart/mixed` se
+/// refuse (`422`) ; par un brouillon, trois morceaux envoyés dans le désordre
+/// se rassemblent, et le message composé se range, puis s'envoie.
+#[test]
+fn un_message_avec_piece_jointe_passe_par_un_brouillon() {
+    let atelier = atelier("brouillons");
+    let Some((cert, cle)) = paire(&atelier.0) else {
+        panic!("{SANS_OPENSSL}");
+    };
+    if std::process::Command::new("curl")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("IGNORÉ : `curl` est absent — cet essai n'a RIEN éprouvé.");
+        return;
+    }
+    let empreinte =
+        ams_auth::hash_password(b"secret-initial", b"seize octets ici").expect("hachable");
+    let magasin = atelier.0.join("comptes.bin");
+    std::fs::write(
+        &magasin,
+        ams_config::encode_accounts(&[ams_auth::Account {
+            login: String::from("marie"),
+            hash: empreinte,
+            addresses: vec![String::from("marie@example.com")],
+        }])
+        .expect("encodable"),
+    )
+    .expect("le magasin s'écrit");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&magasin, std::fs::Permissions::from_mode(0o600))
+            .expect("permissions du magasin");
+    }
+    let port_smtp = port_libre();
+    let port_http = port_libre();
+    let chemin = configuration_complete(
+        &atelier,
+        port_smtp,
+        Tls {
+            certificate_chain_path: cert.display().to_string(),
+            private_key_path: cle.display().to_string(),
+        },
+        &magasin.display().to_string(),
+        "",
+        "",
+        &format!("127.0.0.1:{port_http}"),
+        "",
+        CLEF,
+    );
+    // Le répertoire des brouillons, que `configuration_complete` ne pose pas.
+    let mut config =
+        ams_config::decode(&std::fs::read(&chemin).expect("lisible")).expect("décodable");
+    config.drafts = atelier.0.join("brouillons").display().to_string();
+    std::fs::write(&chemin, ams_config::encode(&config).expect("encodable")).expect("écrite");
+    let serveur = lancer(&chemin, port_smtp);
+    let base = format!("https://127.0.0.1:{port_http}");
+
+    let sortie = std::process::Command::new("curl")
+        .args(["-s", "--insecure", "--http2"])
+        .args(["-H", "Content-Type: application/json"])
+        .args(["-d", r#"{"login":"marie","password":"secret-initial"}"#])
+        .arg(format!("{base}/v1/tokens"))
+        .output()
+        .expect("curl s'exécute");
+    let corps = String::from_utf8_lossy(&sortie.stdout).into_owned();
+    let jeton = corps
+        .split_once("\"token\":\"")
+        .and_then(|(_, reste)| reste.split_once('"'))
+        .map(|(jeton, _)| jeton.to_string())
+        .unwrap_or_else(|| panic!("un jeton dans {corps} — {}", serveur.journal()));
+
+    // Une requête, et rend (corps, code).
+    let appeler = |verbe: &str, chemin: &str, type_: &str, extra: &[&str], donnees: &[u8]| {
+        let fichier = atelier.0.join("envoi.bin");
+        std::fs::write(&fichier, donnees).expect("écrit");
+        let mut commande = std::process::Command::new("curl");
+        commande
+            .args(["-s", "--insecure", "--http2", "-X", verbe])
+            .args(["-H", &format!("Authorization: Bearer {jeton}")])
+            .args(["-w", "\n%{http_code}"]);
+        if !type_.is_empty() {
+            commande
+                .args(["-H", &format!("Content-Type: {type_}")])
+                .args(["--data-binary", &format!("@{}", fichier.display())]);
+        }
+        for champ in extra {
+            commande.args(["-H", champ]);
+        }
+        let sortie = commande
+            .arg(format!("{base}{chemin}"))
+            .output()
+            .expect("curl s'exécute");
+        let tout = String::from_utf8_lossy(&sortie.stdout).into_owned();
+        let (corps, code) = tout.rsplit_once('\n').unwrap_or(("", ""));
+        (corps.to_string(), code.to_string())
+    };
+
+    // ── D'UN SEUL TENANT, UNE PIÈCE JOINTE SE REFUSE ───────────────────────
+    let mixte = b"From: marie@example.com\r\nTo: marie@example.com\r\n\
+        Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\n\r\nx\r\n--b--\r\n";
+    let (corps, code) = appeler("POST", "/v1/submissions", "message/rfc822", &[], mixte);
+    assert_eq!(code, "422", "{corps}");
+    assert!(corps.contains("attachments-need-draft"), "{corps}");
+
+    // ── LE CORPS D'ABORD ────────────────────────────────────────────────────
+    let texte = b"From: marie@example.com\r\nTo: marie@example.com\r\nSubject: rapport\r\n\
+        Content-Type: text/plain; charset=utf-8\r\n\r\nci-joint le rapport\r\n";
+    let creer = || {
+        let (corps, code) = appeler("POST", "/v1/drafts", "message/rfc822", &[], texte);
+        assert_eq!(code, "201", "{corps} — {}", serveur.journal());
+        corps
+            .split_once("\"id\":\"")
+            .and_then(|(_, reste)| reste.split_once('"'))
+            .map(|(id, _)| id.to_string())
+            .unwrap_or_else(|| panic!("un identifiant dans {corps}"))
+    };
+    let id = creer();
+
+    // ── LA PIÈCE JOINTE ENSUITE, PAR MORCEAUX, DANS LE DÉSORDRE ─────────────
+    let donnees: Vec<u8> = (0..300_000_u32).map(|i| (i % 253) as u8).collect();
+    let (corps, code) = appeler(
+        "POST",
+        &format!("/v1/drafts/{id}/attachments"),
+        "application/json",
+        &[],
+        // Le nom ÉCHAPPÉ, comme `json.dumps` de Python l'écrirait.
+        r#"{"name":"donn\u00e9es.bin","type":"application/octet-stream","size":300000}"#.as_bytes(),
+    );
+    assert_eq!(code, "201", "{corps}");
+    let mut dernier = String::new();
+    for debut in [200_000_usize, 0, 100_000] {
+        let (corps, code) = appeler(
+            "PUT",
+            &format!("/v1/drafts/{id}/attachments/1"),
+            "application/octet-stream",
+            &[&format!(
+                "Content-Range: bytes {debut}-{}/300000",
+                debut + 99_999
+            )],
+            &donnees[debut..debut + 100_000],
+        );
+        assert_eq!(code, "200", "{corps} — {}", serveur.journal());
+        dernier = corps;
+    }
+    assert!(dernier.contains(r#""complete":true"#), "{dernier}");
+    let (etat, code) = appeler("GET", &format!("/v1/drafts/{id}"), "", &[], b"");
+    assert_eq!(code, "200");
+    assert!(etat.contains(r#""received":[[0,299999]]"#), "{etat}");
+
+    // ── RANGÉ DANS UNE BOÎTE, IL SE RELIT ───────────────────────────────────
+    let (corps, code) = appeler(
+        "POST",
+        &format!("/v1/drafts/{id}/store"),
+        "application/json",
+        &[],
+        br#"{"mailbox":"INBOX"}"#,
+    );
+    assert_eq!(code, "201", "{corps} — {}", serveur.journal());
+    let uid = corps
+        .trim_start_matches("{\"uid\":")
+        .trim_end_matches('}')
+        .to_string();
+    let mut relu: Vec<u8> = Vec::new();
+    loop {
+        let debut = relu.len();
+        let sortie = std::process::Command::new("curl")
+            .args(["-s", "--insecure", "--http2"])
+            .args(["-H", &format!("Authorization: Bearer {jeton}")])
+            .args(["-r", &format!("{debut}-{}", debut + 64 * 1024 - 1)])
+            .args(["-w", "\n%{http_code}"])
+            .arg(format!("{base}/v1/mailboxes/INBOX/messages/{uid}/raw"))
+            .output()
+            .expect("curl s'exécute");
+        let (octets, code) = sortie.stdout.split_at(sortie.stdout.len() - 4);
+        relu.extend_from_slice(octets);
+        if code != b"\n206" || octets.len() < 64 * 1024 {
+            break;
+        }
+    }
+    let message = String::from_utf8_lossy(&relu).into_owned();
+    assert!(
+        message.contains("multipart/mixed"),
+        "{}",
+        &message[..400.min(message.len())]
+    );
+    assert!(message.contains("ci-joint le rapport"));
+    assert!(message.contains("filename*=UTF-8''donn%C3%A9es.bin"));
+    // La première ligne de base64 : les 57 premiers octets de la pièce.
+    let mut place = [0_u8; 128];
+    let ligne = ams_mime::encode_base64_line(&donnees[..57], &mut place).expect("encodable");
+    assert!(message.contains(core::str::from_utf8(ligne).expect("ascii")));
+    // Le brouillon est parti avec le rangement.
+    let (_, code) = appeler("GET", &format!("/v1/drafts/{id}"), "", &[], b"");
+    assert_eq!(code, "404");
+
+    // ── UN SECOND BROUILLON S'ENVOIE ─────────────────────────────────────────
+    let id = creer();
+    let (_, code) = appeler(
+        "POST",
+        &format!("/v1/drafts/{id}/attachments"),
+        "application/json",
+        &[],
+        br#"{"name":"a.txt","type":"text/plain","size":3}"#,
+    );
+    assert_eq!(code, "201");
+    // Envoyer avant la fin : la pièce manque.
+    let (corps, code) = appeler("POST", &format!("/v1/drafts/{id}/send"), "", &[], b"");
+    assert_eq!(code, "409", "{corps}");
+    let (_, code) = appeler(
+        "PUT",
+        &format!("/v1/drafts/{id}/attachments/1"),
+        "application/octet-stream",
+        &["Content-Range: bytes 0-2/3"],
+        b"abc",
+    );
+    assert_eq!(code, "200");
+    let (corps, code) = appeler("POST", &format!("/v1/drafts/{id}/send"), "", &[], b"");
+    assert_eq!(code, "200", "{corps} — {}", serveur.journal());
+    assert!(corps.contains(r#""delivered":1"#), "{corps}");
 }

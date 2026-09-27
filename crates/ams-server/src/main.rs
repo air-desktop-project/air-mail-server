@@ -32,9 +32,11 @@
 mod api;
 mod appareils;
 mod applicatifs;
+mod brouillons;
 mod comptes;
 mod delegations;
 mod delivery;
+mod forme;
 mod imap;
 mod incidents;
 mod journal;
@@ -305,6 +307,37 @@ fn monter_l_api(
             let api = match delegations {
                 Some(magasin) => api.avec_delegations(magasin),
                 None => api,
+            };
+            // **ET LES BROUILLONS** : sans répertoire, `/v1/drafts` rend 501, et
+            // un message avec pièces jointes ne se soumet pas par l'API. Le
+            // répertoire naît en `0700` — il porte du courrier en préparation —,
+            // et ce qui y a expiré s'en va dès le démarrage.
+            let api = if options.drafts.is_empty() {
+                eprintln!(
+                    "air-mail-server : brouillons NON SERVIS — un message avec pièces jointes ne \
+                     se soumet pas par l'API (`air-mail-admin config write … --drafts …`)"
+                );
+                api
+            } else {
+                use std::os::unix::fs::DirBuilderExt as _;
+                let racine = std::path::PathBuf::from(&options.drafts);
+                std::fs::DirBuilder::new()
+                    .recursive(true)
+                    .mode(0o700)
+                    .create(&racine)
+                    .map_err(|erreur| format!("brouillons `{}` : {erreur}", options.drafts))?;
+                let brouillons = crate::brouillons::Brouillons::new(
+                    racine,
+                    u64::try_from(message_max).unwrap_or(u64::MAX),
+                );
+                brouillons.balayer_tout(maintenant());
+                eprintln!(
+                    "air-mail-server : brouillons sous `{}` — le corps d'abord, les pièces \
+                     jointes ensuite par morceaux ; un brouillon vit {} h.",
+                    options.drafts,
+                    crate::brouillons::DUREE_S / 3600
+                );
+                api.avec_brouillons(Arc::new(brouillons))
             };
             // **ET LA CLÉ QUI SCELLE LES INVITATIONS**, la même que celle des
             // jetons : sans elle, `POST /v1/invitations` rend 501.

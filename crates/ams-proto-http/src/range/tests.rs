@@ -4,7 +4,7 @@
 
 //! Ce qu'une requête de portée demande, et ce qu'on en retient.
 
-use super::{ByteRange, RangeFault, parse_range};
+use super::{ByteRange, RangeFault, parse_content_range, parse_range};
 
 /// Une portée, pour comparer sans bruit.
 fn portee(first: u64, last: u64) -> Result<ByteRange, RangeFault> {
@@ -138,4 +138,52 @@ fn seule_la_premiere_portee_compte() {
 fn les_blancs_se_rognent() {
     assert_eq!(parse_range(b"bytes= 0 - 9 ", 100), portee(0, 9));
     assert_eq!(parse_range(b"bytes=\t10\t-\t19\t", 100), portee(10, 19));
+}
+
+/// **UN MORCEAU DIT OÙ IL SE PLACE, ET LA TAILLE ENTIÈRE** (§14.4) — et ce qui
+/// n'est pas exactement cela ne se range nulle part.
+#[test]
+fn un_content_range_se_lit_strictement() {
+    assert_eq!(
+        parse_content_range(b"bytes 0-1048575/3000000"),
+        Some((
+            ByteRange {
+                first: 0,
+                last: 1_048_575
+            },
+            3_000_000
+        ))
+    );
+    assert_eq!(
+        parse_content_range(b"bytes 2999999-2999999/3000000"),
+        Some((
+            ByteRange {
+                first: 2_999_999,
+                last: 2_999_999
+            },
+            3_000_000
+        ))
+    );
+    for mauvais in [
+        &b"bytes 0-9/*"[..],
+        b"bytes */100",
+        b"bytes 5-4/100",
+        b"bytes 0-100/100",
+        b"bytes 0-9 /100",
+        b"bytes 0-9",
+        b"bytes 09/100",
+        b"bytes -9/100",
+        b"bytes 0-/100",
+        b"items 0-9/100",
+        b"bytes=0-9/100",
+        b"bytes 0-9/99999999999999999999999",
+        b"",
+    ] {
+        assert_eq!(
+            parse_content_range(mauvais),
+            None,
+            "{}",
+            std::string::String::from_utf8_lossy(mauvais)
+        );
+    }
 }

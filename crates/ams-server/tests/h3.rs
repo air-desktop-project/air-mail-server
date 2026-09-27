@@ -85,6 +85,7 @@ fn configuration(
         devices: String::new(),
         app_passwords: String::new(),
         delegations: String::new(),
+        drafts: String::new(),
         require_fqdn_sender: false,
         require_fqdn_recipient: false,
         require_sender_domain: false,
@@ -794,20 +795,23 @@ async fn un_message_se_lit_par_portees() {
         + debut;
     let jeton = texte[debut..fin].to_string();
 
-    // Un message à deux parties, pour éprouver aussi `parts`.
+    // Un message à deux parties, pour éprouver aussi `parts`. **UNE ALTERNATIVE,
+    // ET NON UN `multipart/mixed`** : depuis la 0.2.26, un message qui porte
+    // plus que son corps ne se soumet pas d'un seul tenant — texte et HTML en
+    // alternative, eux, sont un corps.
     let message = concat!(
         "From: jean@example.com\r\n",
         "To: jean@example.com\r\n",
         "Subject: deux parties\r\n",
         "MIME-Version: 1.0\r\n",
-        "Content-Type: multipart/mixed; boundary=\"FRONTIERE\"\r\n",
+        "Content-Type: multipart/alternative; boundary=\"FRONTIERE\"\r\n",
         "\r\n",
         "--FRONTIERE\r\n",
         "Content-Type: text/plain\r\n",
         "\r\n",
         "la premiere partie\r\n",
         "--FRONTIERE\r\n",
-        "Content-Type: text/plain\r\n",
+        "Content-Type: text/html\r\n",
         "\r\n",
         "la seconde partie\r\n",
         "--FRONTIERE--\r\n",

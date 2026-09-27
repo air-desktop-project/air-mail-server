@@ -413,6 +413,9 @@ pub struct Configuration {
     /// Le magasin des délégations, ou une chaîne vide : aucun compte n'atteint
     /// alors la boîte d'un autre.
     pub delegations: String,
+    /// Le répertoire des brouillons de l'API, ou une chaîne vide : ils ne sont
+    /// alors pas servis.
+    pub drafts: String,
     /// La file d'attente du serveur.
     pub queue: Queue,
     /// MTA-STS (RFC 8461).
@@ -989,6 +992,7 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
         devices: texte(lu.get_devices()?)?,
         app_passwords: texte(lu.get_app_passwords()?)?,
         delegations: texte(lu.get_delegations()?)?,
+        drafts: texte(lu.get_drafts()?)?,
         queue,
         mtasts,
         tlsrpt,
@@ -1135,6 +1139,7 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
         ecrit.set_devices(&config.devices);
         ecrit.set_app_passwords(&config.app_passwords);
         ecrit.set_delegations(&config.delegations);
+        ecrit.set_drafts(&config.drafts);
         {
             let mut emission = ecrit.reborrow().init_relay();
             emission.set_enabled(config.relay.enabled);
@@ -1356,6 +1361,7 @@ mod tests {
             // Non vide, pour la même raison encore.
             app_passwords: String::from("/var/lib/air-mail/applicatifs.bin"),
             delegations: String::from("/var/lib/air-mail/delegations.bin"),
+            drafts: String::from("/var/lib/air-mail/brouillons"),
             // Les trois écoutes d'un serveur réel : le `25` et le `587` en
             // `STARTTLS`, le `465` en TLS implicite.
             smtp_listeners: vec![

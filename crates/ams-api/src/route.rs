@@ -107,6 +107,42 @@ pub enum Resource<'o> {
         /// Le nom de la boîte.
         boite: &'o str,
     },
+    /// `/v1/drafts` — **un message se soumet corps d'abord.**
+    ///
+    /// Décision de l'exploitant : le corps — texte, HTML — part seul, dans la
+    /// borne d'un message ; les pièces jointes suivent, par morceaux écrits sur
+    /// disque, et le serveur compose le message entier au moment d'envoyer ou
+    /// de ranger. Un `POST` crée le brouillon à partir du corps.
+    Drafts,
+    /// `/v1/drafts/{id}` — un brouillon : son état, ou son abandon.
+    Draft {
+        /// L'identifiant du brouillon.
+        id: &'o str,
+    },
+    /// `/v1/drafts/{id}/attachments` — déclarer une pièce jointe.
+    DraftAttachments {
+        /// L'identifiant du brouillon.
+        id: &'o str,
+    },
+    /// `/v1/drafts/{id}/attachments/{n}` — un morceau d'une pièce jointe
+    /// (`PUT` avec `Content-Range`), ou son retrait.
+    DraftAttachment {
+        /// L'identifiant du brouillon.
+        id: &'o str,
+        /// Le numéro de la pièce jointe dans le brouillon.
+        piece: u64,
+    },
+    /// `/v1/drafts/{id}/send` — composer le message et l'envoyer.
+    DraftSend {
+        /// L'identifiant du brouillon.
+        id: &'o str,
+    },
+    /// `/v1/drafts/{id}/store` — composer le message et le ranger dans une
+    /// boîte, sans l'envoyer.
+    DraftStore {
+        /// L'identifiant du brouillon.
+        id: &'o str,
+    },
     /// `/v1/mailboxes/{boite}/copy` — copier des messages vers une autre boîte.
     ///
     /// **GROUPÉ, COMME `COPY` D'IMAP** : ranger cinquante messages ne doit pas
@@ -336,7 +372,9 @@ impl Resource<'_> {
             | Self::Search { .. }
             | Self::Copy { .. }
             | Self::Move { .. }
-            | Self::Changes { .. } => Area::Mail,
+            | Self::Changes { .. }
+            // Ranger dans une boîte est un geste sur le courrier.
+            | Self::DraftStore { .. } => Area::Mail,
             Self::Invitations
             | Self::Accounts
             | Self::Account { .. }
@@ -347,7 +385,15 @@ impl Resource<'_> {
             | Self::Ban { .. }
             | Self::Delegates { .. }
             | Self::Delegate { .. } => Area::Admin,
-            Self::Submissions => Area::Submit,
+            // **UN BROUILLON EST UNE SOUMISSION EN COURS** : il vit sous la même
+            // portée qu'elle, et un jeton qui ne peut pas soumettre ne peut pas
+            // non plus préparer ce qu'il ne pourra pas envoyer.
+            Self::Submissions
+            | Self::Drafts
+            | Self::Draft { .. }
+            | Self::DraftAttachments { .. }
+            | Self::DraftAttachment { .. }
+            | Self::DraftSend { .. } => Area::Submit,
             Self::Health | Self::Metrics => Area::Observe,
         };
         Some(Scope::one(domaine, droit(method)))
@@ -374,6 +420,14 @@ impl Resource<'_> {
             Self::Search { .. } => &[Method::Post],
             // Ni l'une ni l'autre ne se lit : ce sont des gestes, pas des états.
             Self::Copy { .. } | Self::Move { .. } => &[Method::Post],
+            Self::Drafts
+            | Self::DraftAttachments { .. }
+            | Self::DraftSend { .. }
+            | Self::DraftStore { .. } => &[Method::Post],
+            Self::Draft { .. } => &[Method::Get, Method::Head, Method::Delete],
+            // **UN MORCEAU SE POSE, IL NE SE LIT PAS** : l'état de la pièce
+            // jointe — ce qui est reçu — se lit dans le brouillon.
+            Self::DraftAttachment { .. } => &[Method::Put, Method::Delete],
             // **ELLE NE S'ÉCRIT PAS** : le journal se déduit de la boîte, il ne
             // se pose pas.
             Self::Changes { .. } => &[Method::Get, Method::Head],
@@ -567,6 +621,23 @@ fn designer<'o>(segments: &Segments<'o>) -> Result<Resource<'o>, Error> {
             source: segments.get(2),
         }),
         ("submissions", 2) => Ok(Resource::Submissions),
+        ("drafts", 2) => Ok(Resource::Drafts),
+        ("drafts", 3) => Ok(Resource::Draft {
+            id: segments.get(2),
+        }),
+        ("drafts", 4) => {
+            let id = segments.get(2);
+            match segments.get(3) {
+                "attachments" => Ok(Resource::DraftAttachments { id }),
+                "send" => Ok(Resource::DraftSend { id }),
+                "store" => Ok(Resource::DraftStore { id }),
+                _ => Err(manque),
+            }
+        }
+        ("drafts", 5) if segments.get(3) == "attachments" => Ok(Resource::DraftAttachment {
+            id: segments.get(2),
+            piece: uid(segments.get(4))?,
+        }),
         ("health", 2) => Ok(Resource::Health),
         ("metrics", 2) => Ok(Resource::Metrics),
         _ => Err(manque),

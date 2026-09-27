@@ -39,6 +39,13 @@ pub const JSON_MEDIA_TYPE: &str = "application/json";
 /// corps que ce serveur sait lire, et il ne le lit qu'à la soumission.
 pub const MESSAGE_MEDIA_TYPE: &str = "message/rfc822";
 
+/// Le type d'un morceau de pièce jointe : des octets, et rien de plus.
+///
+/// Le type RÉEL de la pièce jointe — `application/pdf`, `image/jpeg` — se
+/// déclare une fois, avec son nom et sa taille ; ses morceaux, eux, ne sont
+/// que des tranches.
+pub const OCTET_STREAM_MEDIA_TYPE: &str = "application/octet-stream";
+
 /// Le type de média d'un document d'erreur (§3 de RFC 9457).
 ///
 /// **CE N'EST PAS `application/json`**, et la différence sert : un
@@ -80,6 +87,7 @@ fn type_de(status: StatusCode) -> &'static str {
         409 => "/problems/conflict",
         410 => "/problems/gone",
         413 => "/problems/content-too-large",
+        422 => "/problems/attachments-need-draft",
         414 => "/problems/uri-too-long",
         501 => "/problems/not-implemented",
         // Tout ce qui est nôtre se dit d'une seule façon : le client n'a rien à

@@ -332,6 +332,24 @@ Ce qu'il faut savoir :
 - `account remove … --app-passwords <magasin>` retire aussi ceux du compte :
   sans cela, un compte recréé sous le même nom en hériterait.
 
+### Les brouillons : les messages avec pièces jointes par l'API
+
+Par l'API, un message se soumet **corps d'abord** (texte, HTML, ≤ 1 Mio), et
+ses **pièces jointes ensuite**, par morceaux que le serveur écrit sur le disque
+puis rassemble. Il lui faut un répertoire :
+
+```sh
+air-mail-admin config write /etc/air-mail/ams.conf … \
+    --drafts /var/lib/air-mail/brouillons
+```
+
+- le répertoire naît en `0700` au démarrage ; il porte du courrier en
+  préparation, et rien d'autre ne doit y lire ;
+- un brouillon vit **vingt-quatre heures** ; ce qui a expiré s'en va au
+  démarrage et au premier regard ;
+- sans ce répertoire, `/v1/drafts` rend `501`, et un message avec pièces
+  jointes ne se soumet pas par l'API — SMTP et IMAP ne sont pas concernés.
+
 ### La délégation : ouvrir une boîte à un autre compte
 
 Une boîte partagée — `support`, `compta` — est un compte comme un autre, dont

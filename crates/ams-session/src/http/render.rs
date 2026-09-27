@@ -927,6 +927,199 @@ pub fn write_transfer<'o>(
     json.finish()
 }
 
+/// La déclaration d'une pièce jointe : `{"name":"facture.pdf",
+/// "type":"application/pdf","size":123456}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AttachmentRequest<'n> {
+    /// Le nom du fichier, DÉSÉCHAPPÉ — comme la destination d'une copie.
+    pub name: &'n str,
+    /// Son type, `type/sous-type`, tel qu'écrit.
+    pub media: &'n str,
+    /// Sa taille entière, en octets. Jamais nulle.
+    pub size: u64,
+}
+
+/// Ce type de média se lit-il `type/sous-type`, en jetons de RFC 2045 ?
+///
+/// **IL FINIRA DANS UN EN-TÊTE MIME** : ce qui n'est pas un jeton — un
+/// guillemet, un point-virgule, un retour à la ligne — y ouvrirait un paramètre
+/// ou un champ que personne n'a demandé.
+fn type_de_media_sur(media: &str) -> bool {
+    let jeton = |partie: &str| {
+        !partie.is_empty()
+            && partie
+                .bytes()
+                .all(|octet| octet.is_ascii_graphic() && !b"()<>@,;:\\\"/[]?=".contains(&octet))
+    };
+    media.len() <= 127
+        && media
+            .split_once('/')
+            .is_some_and(|(genre, sorte)| jeton(genre) && jeton(sorte))
+}
+
+/// Lit la déclaration d'une pièce jointe.
+///
+/// Le nom se déséchappe dans `nom` ; il ne peut être ni vide, ni porter un
+/// octet de contrôle — il finira dans un en-tête.
+///
+/// # Errors
+///
+/// [`Reason::BadJsonBody`] pour un corps illisible, un champ inconnu, répété ou
+/// absent, un nom vide ou trop long pour `nom`, un octet de contrôle dans le
+/// nom, un type qui n'est pas `type/sous-type` en jetons, ou une taille nulle.
+pub fn read_attachment_request<'n>(
+    corps: &'n [u8],
+    nom: &'n mut [u8],
+) -> Result<AttachmentRequest<'n>, Error> {
+    let mauvais = Error::new(Reason::BadJsonBody);
+    let mut lecteur = Reader::new(corps);
+    let (mut brut, mut media, mut taille) = (None, None, None);
+    // Le champ qu'on lit : 1 `name`, 2 `type`, 3 `size`.
+    let mut quel = 0_u8;
+    loop {
+        match lecteur.read().map_err(|_| mauvais)? {
+            None => break,
+            Some(Event::Key(clef)) => {
+                quel = match (clef.is("name"), clef.is("type"), clef.is("size")) {
+                    (true, _, _) if brut.is_none() => 1,
+                    (_, true, _) if media.is_none() => 2,
+                    (_, _, true) if taille.is_none() => 3,
+                    _ => return Err(mauvais),
+                };
+            }
+            Some(Event::Text(texte)) if quel == 1 => brut = Some(texte),
+            Some(Event::Text(texte)) if quel == 2 => {
+                media = Some(texte.as_plain().ok_or(mauvais)?);
+            }
+            Some(Event::Number(nombre)) if quel == 3 => {
+                taille = Some(
+                    nombre
+                        .as_u64()
+                        .filter(|octets| *octets > 0)
+                        .ok_or(mauvais)?,
+                );
+            }
+            Some(Event::ObjectStart | Event::ObjectEnd) => {}
+            Some(_) => return Err(mauvais),
+        }
+    }
+    let media = media
+        .filter(|media| type_de_media_sur(media))
+        .ok_or(mauvais)?;
+    let size = taille.ok_or(mauvais)?;
+    let name = brut.ok_or(mauvais)?.unescape(nom).map_err(|_| mauvais)?;
+    if name.is_empty() || name.chars().any(char::is_control) {
+        return Err(mauvais);
+    }
+    Ok(AttachmentRequest { name, media, size })
+}
+
+/// Lit une demande de rangement : `{"mailbox":"Brouillons"}`, le nom
+/// déséchappé dans `nom`.
+///
+/// # Errors
+///
+/// [`Reason::BadJsonBody`] pour un corps illisible, un champ inconnu ou
+/// répété, ou une boîte absente, vide ou trop longue pour `nom`.
+pub fn read_store_request<'n>(corps: &[u8], nom: &'n mut [u8]) -> Result<&'n str, Error> {
+    let mauvais = Error::new(Reason::BadJsonBody);
+    let mut lecteur = Reader::new(corps);
+    let mut boite: Option<Str<'_>> = None;
+    let mut vu = false;
+    loop {
+        match lecteur.read().map_err(|_| mauvais)? {
+            None => break,
+            Some(Event::Key(clef)) if clef.is("mailbox") && !vu => vu = true,
+            Some(Event::Text(texte)) if vu && boite.is_none() => boite = Some(texte),
+            Some(Event::ObjectStart | Event::ObjectEnd) => {}
+            Some(_) => return Err(mauvais),
+        }
+    }
+    let nom = boite.ok_or(mauvais)?.unescape(nom).map_err(|_| mauvais)?;
+    if nom.is_empty() {
+        return Err(mauvais);
+    }
+    Ok(nom)
+}
+
+/// L'état d'une pièce jointe, tel que le brouillon le rend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AttachmentRow<'a> {
+    /// Son numéro dans le brouillon.
+    pub piece: u64,
+    /// Son nom.
+    pub name: &'a str,
+    /// Son type.
+    pub media: &'a str,
+    /// Sa taille entière.
+    pub size: u64,
+    /// Les portées reçues, bornes comprises et sans chevauchement.
+    pub received: &'a [(u64, u64)],
+}
+
+/// Écrit une pièce jointe dans un objet déjà ouvert.
+fn ecrire_une_piece(json: &mut Json<'_>, piece: &AttachmentRow<'_>) -> Result<(), Error> {
+    json.begin_object()?;
+    json.field_u64("attachment", piece.piece)?;
+    json.field_str("name", piece.name)?;
+    json.field_str("type", piece.media)?;
+    json.field_u64("size", piece.size)?;
+    json.key("received")?;
+    json.begin_array()?;
+    let mut recu = 0_u64;
+    for (debut, fin) in piece.received {
+        json.begin_array()?;
+        json.number(*debut)?;
+        json.number(*fin)?;
+        json.end_array()?;
+        recu = recu.saturating_add(fin.saturating_sub(*debut).saturating_add(1));
+    }
+    json.end_array()?;
+    // **COMPLÈTE SE DIT**, plutôt que de laisser le client sommer des portées :
+    // c'est la seule question qu'il se pose avant d'envoyer.
+    json.field_bool("complete", recu == piece.size)?;
+    json.end_object()
+}
+
+/// Écrit l'état d'une pièce jointe seule — la réponse à un morceau.
+///
+/// # Errors
+///
+/// [`Reason::BufferTooSmall`] si `sortie` ne suffit pas.
+pub fn write_attachment<'o>(
+    piece: &AttachmentRow<'_>,
+    sortie: &'o mut [u8],
+) -> Result<&'o [u8], Error> {
+    let mut json = Json::new(sortie);
+    ecrire_une_piece(&mut json, piece)?;
+    json.finish()
+}
+
+/// Écrit un brouillon : `{"id":…,"expiresAt":…,"attachments":[…]}`.
+///
+/// # Errors
+///
+/// [`Reason::BufferTooSmall`] si `sortie` ne suffit pas.
+pub fn write_draft<'o>(
+    id: &str,
+    expires_at: u64,
+    pieces: &[AttachmentRow<'_>],
+    sortie: &'o mut [u8],
+) -> Result<&'o [u8], Error> {
+    let mut json = Json::new(sortie);
+    json.begin_object()?;
+    json.field_str("id", id)?;
+    json.field_u64("expiresAt", expires_at)?;
+    json.key("attachments")?;
+    json.begin_array()?;
+    for piece in pieces {
+        ecrire_une_piece(&mut json, piece)?;
+    }
+    json.end_array()?;
+    json.end_object()?;
+    json.finish()
+}
+
 /// Écrit la liste des comptes.
 ///
 /// # Errors

@@ -410,6 +410,32 @@ fn segments_de(
             pousser(source);
         }
         Resource::Submissions => pousser("submissions"),
+        Resource::Drafts => pousser("drafts"),
+        Resource::Draft { id } => {
+            pousser("drafts");
+            pousser(id);
+        }
+        Resource::DraftAttachments { id } => {
+            pousser("drafts");
+            pousser(id);
+            pousser("attachments");
+        }
+        Resource::DraftAttachment { id, piece } => {
+            pousser("drafts");
+            pousser(id);
+            pousser("attachments");
+            pousser(&std::format!("{piece}"));
+        }
+        Resource::DraftSend { id } => {
+            pousser("drafts");
+            pousser(id);
+            pousser("send");
+        }
+        Resource::DraftStore { id } => {
+            pousser("drafts");
+            pousser(id);
+            pousser("store");
+        }
         Resource::Health => pousser("health"),
         Resource::Metrics => pousser("metrics"),
     }

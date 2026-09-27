@@ -1930,3 +1930,52 @@ fn le_titulaire_d_une_boite_d_autrui_remonte() {
         autre => panic!("on devait servir : {autre:?}"),
     }
 }
+
+/// **UN BROUILLON COMMENCE PAR UN MESSAGE, ET SES PIÈCES JOINTES ARRIVENT EN
+/// OCTETS** — chacun dans la borne d'un message.
+#[test]
+fn les_corps_d_un_brouillon_ont_leur_type() {
+    let porte = jeton("marc", Scope::one(Area::Submit, Rights::Write));
+    let session = une_session();
+    let essai = |chemin: &[u8], verbe: &[u8], type_: &[u8], taille: usize| {
+        let mut champs = requete(verbe, chemin, porte.as_bytes());
+        champs.push((b"content-type", type_));
+        let tete = entete(&champs);
+        let corps = std::vec![b'x'; taille];
+        let mut place = [0_u8; PLACE];
+        session
+            .request(&tete, &corps, MAINTENANT, &mut place)
+            .status()
+    };
+    let (brouillon, morceau) = (&b"/v1/drafts"[..], &b"/v1/drafts/ab/attachments/1"[..]);
+    assert_eq!(
+        essai(brouillon, b"POST", b"message/rfc822", 10),
+        StatusCode::OK
+    );
+    assert_eq!(
+        essai(brouillon, b"POST", b"application/json", 10),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        essai(
+            morceau,
+            b"PUT",
+            b"application/octet-stream",
+            MESSAGE_OCTETS_MAX
+        ),
+        StatusCode::OK
+    );
+    assert_eq!(
+        essai(morceau, b"PUT", b"application/json", 10),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        essai(
+            morceau,
+            b"PUT",
+            b"application/octet-stream",
+            MESSAGE_OCTETS_MAX + 1
+        ),
+        StatusCode::CONTENT_TOO_LARGE
+    );
+}

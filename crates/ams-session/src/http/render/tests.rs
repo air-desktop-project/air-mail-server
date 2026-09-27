@@ -10,6 +10,10 @@ use ams_api::{Error, Reason};
 use ams_proto_imap::Flags;
 
 use super::{
+    AttachmentRow, read_attachment_request, read_store_request, write_attachment, write_draft,
+};
+
+use super::{
     AccountRow, AppPasswordRow, BanRow, DelegationRow, DeviceRow, FlagPatch, MailboxRow,
     MessageRow, TRANSFER_UIDS_MAX, read_account_body, read_app_password_request,
     read_challenge_request, read_flag_patch, read_invitation_request, read_own_password_body,
@@ -389,7 +393,10 @@ fn un_corps_qui_n_est_pas_une_modification_se_refuse() {
 #[test]
 fn chaque_tampon_insuffisant_se_dit() {
     type Ecrivain = fn(&mut [u8]) -> Result<&[u8], ams_api::Error>;
-    let ecrivains: [(&str, Ecrivain); 30] = [
+    let ecrivains: [(&str, Ecrivain); 33] = [
+        ("draft", |place| write_draft("0a1b", 99, &[piece()], place)),
+        ("draft-vide", |place| write_draft("0a1b", 99, &[], place)),
+        ("attachment", |place| write_attachment(&piece(), place)),
         ("transfer", |place| {
             write_transfer(7, &[(1, 57), (2, 58)], &[4], place)
         }),
@@ -1562,4 +1569,129 @@ fn l_issue_d_un_transfert_s_ecrit() {
         core::str::from_utf8(ecrit).expect("utf-8"),
         r#"{"uidValidity":7,"uids":[{"from":1,"to":57},{"from":2,"to":58}],"missing":[4]}"#
     );
+}
+
+// ── Brouillons ──────────────────────────────────────────────────────────────
+
+fn piece() -> AttachmentRow<'static> {
+    AttachmentRow {
+        piece: 1,
+        name: "facture.pdf",
+        media: "application/pdf",
+        size: 300,
+        received: &[(0, 99), (200, 299)],
+    }
+}
+
+#[test]
+fn l_etat_d_un_brouillon_s_ecrit() {
+    let mut place = [0_u8; 512];
+    let ecrit = write_draft("0a1b", 99, &[piece()], &mut place).expect("écrit");
+    assert_eq!(
+        core::str::from_utf8(ecrit).expect("utf-8"),
+        r#"{"id":"0a1b","expiresAt":99,"attachments":[{"attachment":1,"name":"facture.pdf","type":"application/pdf","size":300,"received":[[0,99],[200,299]],"complete":false}]}"#
+    );
+    let complete = AttachmentRow {
+        received: &[(0, 299)],
+        ..piece()
+    };
+    let ecrit = write_attachment(&complete, &mut place).expect("écrit");
+    assert!(
+        core::str::from_utf8(ecrit)
+            .expect("utf-8")
+            .ends_with(r#""complete":true}"#)
+    );
+}
+
+/// **LE NOM SE DÉSÉCHAPPE, LE TYPE EST UN JETON** : il finira dans un en-tête
+/// MIME, où un guillemet ou un point-virgule ouvrirait un paramètre.
+#[test]
+fn une_piece_jointe_se_declare() {
+    let mut nom = [0_u8; 64];
+    let lue = read_attachment_request(
+        br#"{"name":"re\u00e7u.pdf","type":"application/pdf","size":12}"#,
+        &mut nom,
+    )
+    .expect("lisible");
+    assert_eq!(
+        (lue.name, lue.media, lue.size),
+        ("reçu.pdf", "application/pdf", 12)
+    );
+    for corps in [
+        &br#"{"name":"a","type":"application/pdf"}"#[..],
+        br#"{"name":"a","size":1}"#,
+        br#"{"type":"text/plain","size":1}"#,
+        br#"{"name":"","type":"text/plain","size":1}"#,
+        br#"{"name":"a\nb","type":"text/plain","size":1}"#,
+        br#"{"name":"a","type":"text/plain","size":0}"#,
+        br#"{"name":"a","type":"text/plain","size":-1}"#,
+        br#"{"name":"a","type":"textplain","size":1}"#,
+        br#"{"name":"a","type":"text/","size":1}"#,
+        br#"{"name":"a","type":"/plain","size":1}"#,
+        br#"{"name":"a","type":"text/plain; x=1","size":1}"#,
+        br#"{"name":"a","type":"text/pl\u0022ain","size":1}"#,
+        br#"{"name":"a","name":"b","type":"text/plain","size":1}"#,
+        br#"{"name":"a","type":"text/plain","type":"text/html","size":1}"#,
+        br#"{"name":"a","type":"text/plain","size":1,"size":2}"#,
+        br#"{"name":"a","type":"text/plain","size":1,"autre":1}"#,
+        br#"{"name":1,"type":"text/plain","size":1}"#,
+        br#"{"name":"a","type":"text/plain","size":"1"}"#,
+        br#"{"name":"a","type":"text/plain","size":1"#,
+    ] {
+        let mut nom = [0_u8; 64];
+        assert_eq!(
+            read_attachment_request(corps, &mut nom)
+                .err()
+                .map(Error::reason),
+            Some(Reason::BadJsonBody),
+            "{}",
+            String::from_utf8_lossy(corps)
+        );
+    }
+    let long = std::format!(
+        r#"{{"name":"a","type":"text/{}","size":1}}"#,
+        "x".repeat(130)
+    );
+    let mut nom = [0_u8; 64];
+    assert!(read_attachment_request(long.as_bytes(), &mut nom).is_err());
+    let mut court = [0_u8; 2];
+    assert!(
+        read_attachment_request(
+            br#"{"name":"abc","type":"text/plain","size":1}"#,
+            &mut court
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn une_demande_de_rangement_se_lit() {
+    let mut nom = [0_u8; 64];
+    assert_eq!(
+        read_store_request(br#"{"mailbox":"Brouillons"}"#, &mut nom),
+        Ok("Brouillons")
+    );
+    let mut nom = [0_u8; 64];
+    assert_eq!(
+        read_store_request(br#"{"mailbox":"Envoy\u00e9s"}"#, &mut nom),
+        Ok("Envoyés")
+    );
+    for corps in [
+        &br#"{}"#[..],
+        br#"{"mailbox":""}"#,
+        br#"{"mailbox":"a","mailbox":"b"}"#,
+        br#"{"autre":"a"}"#,
+        br#"{"mailbox":1}"#,
+        br#"{"mailbox":"a""#,
+    ] {
+        let mut nom = [0_u8; 64];
+        assert_eq!(
+            read_store_request(corps, &mut nom).err().map(Error::reason),
+            Some(Reason::BadJsonBody),
+            "{}",
+            String::from_utf8_lossy(corps)
+        );
+    }
+    let mut court = [0_u8; 2];
+    assert!(read_store_request(br#"{"mailbox":"Archives"}"#, &mut court).is_err());
 }

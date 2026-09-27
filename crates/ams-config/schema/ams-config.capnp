@@ -190,6 +190,12 @@ struct Configuration {
   # autre. Voir `ams-delegations.capnp`.
   delegations @36 :Text;
 
+  # Le répertoire des BROUILLONS de l'API : un message s'y compose, corps
+  # d'abord, pièces jointes ensuite, par morceaux écrits sur disque. Vide : les
+  # brouillons ne sont pas servis, et un message avec pièces jointes ne se
+  # soumet pas par l'API.
+  drafts @37 :Text;
+
   # MTA-STS (RFC 8461) — la politique qu'un domaine publie en HTTPS.
   #
   # **UN CHAMP AJOUTÉ APRÈS COUP DÉCODE DEUX CHAÎNES VIDES**, et deux chaînes

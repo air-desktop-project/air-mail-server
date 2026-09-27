@@ -738,6 +738,30 @@ Le corps du message.
   <p>Le serveur remet aux destinataires locaux, met en file ce qui sort, et <strong>signe en DKIM</strong> ce qu'il accepte, pour les domaines dont il tient la zone. Un échec de remise rend <code>503</code> : il est temporaire, et votre message a des chances de passer plus tard.</p>
 </div>
 
+<div class="ressource">
+  <div class="ligne"><span class="verbe post">POST</span><span class="chemin">/v1/drafts</span><span class="portee">submit:write</span></div>
+  <p><strong>Un message avec pièces jointes passe par un brouillon</strong> — le corps d'abord, les pièces jointes ensuite. <code>/v1/submissions</code> et le dépôt dans une boîte n'acceptent d'un seul tenant que le <em>corps</em> : du texte, du HTML, ou les deux en <code>multipart/alternative</code>. Tout autre message — une pièce jointe, une image en ligne — y rend <code>422</code> (<code>/problems/attachments-need-draft</code>).</p>
+  <pre><code>1. POST   /v1/drafts                          message/rfc822, le corps seul (≤ 1 Mio)
+   → 201 { "id": "9f3c…", "expiresAt": 1790086400, "attachments": [] }
+
+2. POST   /v1/drafts/{id}/attachments         { "name": "facture.pdf", "type": "application/pdf", "size": 2400000 }
+   → 201 { "attachment": 1, "name": …, "size": 2400000, "received": [], "complete": false }
+
+3. PUT    /v1/drafts/{id}/attachments/1       application/octet-stream, ≤ 1 Mio par morceau
+   Content-Range: bytes 0-1048575/2400000
+   → 200 { "attachment": 1, …, "received": [[0,1048575]], "complete": false }
+   … les morceaux suivants, dans l'ordre qu'on veut …
+
+4. POST   /v1/drafts/{id}/send                → 200 { "delivered": 2 }
+   ou
+   POST   /v1/drafts/{id}/store               { "mailbox": "Brouillons" }  → 201 { "uid": 57 }</code></pre>
+  <div class="note">
+    <span class="etiquette">Des morceaux qu'on peut reprendre</span>
+    <p>Chaque morceau s'écrit sur le disque du serveur ; quand ils couvrent la pièce de bout en bout, elle est rassemblée en un seul fichier. <strong>Un morceau renvoyé à l'identique remplace le sien</strong> : après une coupure, relisez le brouillon (<code>GET /v1/drafts/{id}</code> dit ce qui est reçu) et renvoyez ce qui manque. Un morceau qui en chevauche un autre sans l'égaler rend <code>409</code>, comme un envoi dont une pièce est incomplète. La taille de chaque pièce se juge à sa déclaration : si le message composé dépasserait la taille d'un message, <code>413</code> avant le premier octet.</p>
+  </div>
+  <p>Le serveur compose lui-même le <code>multipart/mixed</code> : le corps en première partie, puis chaque pièce en base64, <code>Content-Disposition: attachment</code>, un nom accentué écrit selon RFC 2231. L'envoi suit les règles de <code>/v1/submissions</code> — le <code>From:</code> du compte, le <code>Bcc:</code> retiré, la signature DKIM. Envoyé ou rangé, le brouillon disparaît ; sinon il expire au bout de vingt-quatre heures. <code>GET</code> et <code>DELETE /v1/drafts/{id}</code> le lisent et l'abandonnent ; <code>DELETE …/attachments/{n}</code> retire une pièce. <code>501</code> si ce serveur ne sert pas les brouillons.</p>
+</div>
+
 <h3 id="r-moi"><span class="numero">5.8</span>Ce qui est à soi</h3>
 
 <p>Ces ressources n'exigent <strong>aucune portée</strong> : elles agissent sur <em>soi</em>, et le jeton présenté dit déjà de qui il s'agit. Exiger <code>admin</code> en ferait des routes que seul un administrateur peut emprunter, ce qui est exactement ce qu'elles existent pour éviter.</p>

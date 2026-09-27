@@ -29,7 +29,7 @@ fn ou(method: Method, chemin: &[u8]) -> Result<Resource<'static>, Reason> {
 /// Chaque ressource se désigne par son chemin.
 #[test]
 fn chaque_ressource_se_designe() {
-    let cas: [(Method, &[u8], Resource<'_>); 32] = [
+    let cas: [(Method, &[u8], Resource<'_>); 38] = [
         (Method::Post, b"/v1/tokens", Resource::Tokens),
         (Method::Post, b"/v1/sessions", Resource::Sessions),
         (
@@ -159,6 +159,35 @@ fn chaque_ressource_se_designe() {
             },
         ),
         (Method::Post, b"/v1/submissions", Resource::Submissions),
+        (Method::Post, b"/v1/drafts", Resource::Drafts),
+        (
+            Method::Get,
+            b"/v1/drafts/0123abcd",
+            Resource::Draft { id: "0123abcd" },
+        ),
+        (
+            Method::Post,
+            b"/v1/drafts/0123abcd/attachments",
+            Resource::DraftAttachments { id: "0123abcd" },
+        ),
+        (
+            Method::Put,
+            b"/v1/drafts/0123abcd/attachments/2",
+            Resource::DraftAttachment {
+                id: "0123abcd",
+                piece: 2,
+            },
+        ),
+        (
+            Method::Post,
+            b"/v1/drafts/0123abcd/send",
+            Resource::DraftSend { id: "0123abcd" },
+        ),
+        (
+            Method::Post,
+            b"/v1/drafts/0123abcd/store",
+            Resource::DraftStore { id: "0123abcd" },
+        ),
     ];
     for (method, chemin, attendue) in cas {
         assert_eq!(ou(method, chemin), Ok(attendue), "{chemin:?}");
@@ -441,6 +470,12 @@ fn chaque_ressource_dit_ce_qu_elle_sert() {
         Resource::Bans,
         Resource::Ban { source: "s" },
         Resource::Submissions,
+        Resource::Drafts,
+        Resource::Draft { id: "d" },
+        Resource::DraftAttachments { id: "d" },
+        Resource::DraftAttachment { id: "d", piece: 1 },
+        Resource::DraftSend { id: "d" },
+        Resource::DraftStore { id: "d" },
         Resource::Health,
         Resource::Metrics,
     ];
@@ -897,4 +932,23 @@ fn les_delegations_se_designent() {
         Resource::Delegates { compte: "c" }.allowed(),
         &[Method::Get, Method::Head]
     );
+}
+
+/// Ce qu'un chemin de brouillon ne peut pas être.
+#[test]
+fn un_chemin_de_brouillon_mal_forme_ne_designe_rien() {
+    for chemin in [
+        &b"/v1/drafts/d/inconnu"[..],
+        b"/v1/drafts/d/attachments/0",
+        b"/v1/drafts/d/attachments/x",
+        b"/v1/drafts/d/autre/1",
+        b"/v1/drafts/d/attachments/1/plus",
+    ] {
+        let mut place = [0_u8; 256];
+        assert!(
+            resolve(Method::Put, chemin, &mut place).is_err(),
+            "{}",
+            std::string::String::from_utf8_lossy(chemin)
+        );
+    }
 }

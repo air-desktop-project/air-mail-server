@@ -974,9 +974,14 @@ fn verifier_le_type(
     // message — mesuré en production le 2026-09-26. Aucune autre méthode sur
     // cette ressource ne porte de corps.
     let (attendu, borne) = match resource {
-        Resource::Submissions | Resource::Messages { .. } => {
+        // Un message : une soumission, un dépôt, le corps d'un brouillon.
+        Resource::Submissions | Resource::Messages { .. } | Resource::Drafts => {
             (ams_api::MESSAGE_MEDIA_TYPE, MESSAGE_OCTETS_MAX)
         }
+        // **UN MORCEAU DE PIÈCE JOINTE N'EST QUE DES OCTETS**, et il tient dans
+        // la même borne qu'un message : c'est ce qui borne la mémoire qu'une
+        // requête coûte, quelle que soit la taille de la pièce jointe.
+        Resource::DraftAttachment { .. } => (ams_api::OCTET_STREAM_MEDIA_TYPE, MESSAGE_OCTETS_MAX),
         _ => (JSON_MEDIA_TYPE, BODY_OCTETS_MAX),
     };
     if corps.len() > borne {

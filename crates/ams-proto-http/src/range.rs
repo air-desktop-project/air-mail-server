@@ -122,6 +122,35 @@ pub fn parse_range(valeur: &[u8], complete: u64) -> Result<ByteRange, RangeFault
     }
 }
 
+/// Ce qu'un morceau ENVOYÉ dit couvrir : `Content-Range: bytes a-b/total`
+/// (§14.4 de RFC 9110), lu sur une REQUÊTE.
+///
+/// # POURQUOI UNE REQUÊTE EN PORTE UN
+///
+/// Une pièce jointe s'envoie par morceaux, chacun dans sa requête : c'est ce
+/// qui permet de ne renvoyer que le morceau perdu quand le réseau d'un
+/// téléphone coupe. Le morceau dit où il se place, et la taille entière.
+///
+/// # STRICT, ET RIEN À IGNORER ICI
+///
+/// À l'inverse de `Range`, qui s'ignore quand on ne le comprend pas, un morceau
+/// dont on ne comprend pas la place ne peut être rangé nulle part. Rend `None`
+/// pour tout ce qui n'est pas exactement `bytes a-b/total` avec
+/// `a ≤ b < total` — ni `*`, ni espace de trop, ni signe.
+#[must_use]
+pub fn parse_content_range(valeur: &[u8]) -> Option<(ByteRange, u64)> {
+    let reste = valeur.strip_prefix(b"bytes ")?;
+    let barre = reste.iter().position(|octet| *octet == b'/')?;
+    let (portee, total) = reste.split_at(barre);
+    // `total` commence par la barre, que `position` vient de trouver.
+    let complete = entier(total.get(1..).unwrap_or_default()).ok()?;
+    let tiret = portee.iter().position(|octet| *octet == b'-')?;
+    let (avant, apres) = portee.split_at(tiret);
+    let first = entier(avant).ok()?;
+    let last = entier(apres.get(1..).unwrap_or_default()).ok()?;
+    (first <= last && last < complete).then_some((ByteRange { first, last }, complete))
+}
+
 /// Coupe `premier-dernier` sur son tiret, sans en admettre deux.
 fn couper(portee: &[u8]) -> Result<(&[u8], &[u8]), RangeFault> {
     let tiret = portee

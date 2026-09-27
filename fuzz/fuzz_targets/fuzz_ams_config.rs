@@ -136,6 +136,7 @@ struct Entree {
     applicatifs: String,
     /// Le magasin des délégations — une chaîne libre elle aussi.
     delegations: String,
+    drafts: String,
     /// Le dossier des rapports TLS, et le drapeau de remise — LIBRES tous les
     /// deux, y compris incohérents entre eux.
     tlsrpt: String,
@@ -200,6 +201,7 @@ fuzz_target!(|entree: Entree| {
         devices: entree.appareils.clone(),
         app_passwords: entree.applicatifs.clone(),
         delegations: entree.delegations.clone(),
+        drafts: entree.drafts.clone(),
         require_fqdn_helo: entree.helo_qualifie,
         require_fqdn_sender: entree.expediteur_qualifie,
         require_fqdn_recipient: entree.destinataire_qualifie,

@@ -22,7 +22,7 @@ use crate::error::Reason;
 /// Le `match` ci-dessous la rend exhaustive **à la compilation** : un motif de
 /// plus ne compile pas tant qu'on ne l'y a pas mis. C'est la même discipline
 /// que `Resource::scope`, et pour la même raison.
-fn toutes() -> [Reason; 22] {
+fn toutes() -> [Reason; 24] {
     // Ce `match` ne sert qu'à faire échouer la compilation si un motif
     // s'ajoute : sa valeur est jetée, sa VÉRIFICATION est tout l'objet.
     const fn _exhaustive(reason: Reason) -> u8 {
@@ -49,6 +49,8 @@ fn toutes() -> [Reason; 22] {
             Reason::BadQuery => 19,
             Reason::SyncExpired => 20,
             Reason::BodyTooLarge => 21,
+            Reason::AttachmentsNeedDraft => 22,
+            Reason::DraftConflict => 23,
         }
     }
     [
@@ -74,6 +76,8 @@ fn toutes() -> [Reason; 22] {
         Reason::BadQuery,
         Reason::SyncExpired,
         Reason::BodyTooLarge,
+        Reason::AttachmentsNeedDraft,
+        Reason::DraftConflict,
     ]
 }
 
@@ -271,4 +275,13 @@ fn un_corps_trop_long_se_dit_content_too_large() {
     let dit = document(Reason::BodyTooLarge);
     assert!(dit.contains("/problems/content-too-large"), "{dit}");
     assert!(dit.contains("\"status\":413"), "{dit}");
+}
+
+/// **UN MESSAGE AVEC PIÈCES JOINTES DIT `422`, ET OÙ ALLER.**
+#[test]
+fn des_pieces_jointes_d_un_seul_tenant_se_disent_422() {
+    let dit = document(Reason::AttachmentsNeedDraft);
+    assert!(dit.contains("/problems/attachments-need-draft"), "{dit}");
+    assert!(dit.contains("\"status\":422"), "{dit}");
+    assert!(dit.contains("/v1/drafts"), "{dit}");
 }

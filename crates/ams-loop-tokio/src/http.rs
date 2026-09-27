@@ -246,6 +246,10 @@ pub struct Appel<'a> {
     /// RESSOURCE — de sa taille, et de si elle se lit par morceaux —, et la
     /// boucle ne sait ni l'un ni l'autre.
     pub range: Option<&'a [u8]>,
+    /// Le champ `Content-Range` d'une REQUÊTE, tel qu'écrit : la place d'un
+    /// morceau de pièce jointe dans le fichier entier (§14.4 de RFC 9110). La
+    /// ressource le lit, pour la même raison que `range`.
+    pub content_range: Option<&'a [u8]>,
     /// Le titulaire de la boîte visée, quand ce n'est pas qui appelle. Voir
     /// `ams_api::Resolved::owner`.
     pub owner: Option<&'a str>,
@@ -670,6 +674,7 @@ where
                             query,
                             owner,
                             range: demande.tete.field(b"range"),
+                            content_range: demande.tete.field(b"content-range"),
                         },
                         &mut rendu,
                     );

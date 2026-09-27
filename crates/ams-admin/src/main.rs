@@ -812,6 +812,14 @@ fn afficher(config: &Configuration) {
         }
     );
     println!(
+        "brouillons         {}",
+        if config.drafts.is_empty() {
+            String::from("AUCUN — un message avec pièces jointes ne se soumet pas par l'API")
+        } else {
+            format!("répertoire `{}`", config.drafts)
+        }
+    );
+    println!(
         "mdp applicatifs    {}",
         if config.app_passwords.is_empty() {
             String::from("AUCUN MAGASIN — seul le mot de passe principal ouvre IMAP, SMTP, POP3")

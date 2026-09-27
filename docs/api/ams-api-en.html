@@ -734,6 +734,30 @@ The message body.
   <p>The server delivers to local recipients, queues what goes out, and <strong>DKIM-signs</strong> what it accepts, for the domains whose zone it holds. A delivery failure returns <code>503</code>: it is temporary, and your message may well go through later.</p>
 </div>
 
+<div class="ressource">
+  <div class="ligne"><span class="verbe post">POST</span><span class="chemin">/v1/drafts</span><span class="portee">submit:write</span></div>
+  <p><strong>A message with attachments goes through a draft</strong> — body first, attachments next. <code>/v1/submissions</code> and the mailbox deposit accept in one piece only the <em>body</em>: text, HTML, or both in <code>multipart/alternative</code>. Any other message — an attachment, an inline image — returns <code>422</code> (<code>/problems/attachments-need-draft</code>).</p>
+  <pre><code>1. POST   /v1/drafts                          message/rfc822, the body alone (≤ 1 MiB)
+   → 201 { "id": "9f3c…", "expiresAt": 1790086400, "attachments": [] }
+
+2. POST   /v1/drafts/{id}/attachments         { "name": "invoice.pdf", "type": "application/pdf", "size": 2400000 }
+   → 201 { "attachment": 1, "name": …, "size": 2400000, "received": [], "complete": false }
+
+3. PUT    /v1/drafts/{id}/attachments/1       application/octet-stream, ≤ 1 MiB per chunk
+   Content-Range: bytes 0-1048575/2400000
+   → 200 { "attachment": 1, …, "received": [[0,1048575]], "complete": false }
+   … the following chunks, in any order …
+
+4. POST   /v1/drafts/{id}/send                → 200 { "delivered": 2 }
+   or
+   POST   /v1/drafts/{id}/store               { "mailbox": "Drafts" }  → 201 { "uid": 57 }</code></pre>
+  <div class="note">
+    <span class="etiquette">Resumable chunks</span>
+    <p>Each chunk is written to the server's disk; once they cover the attachment end to end, it is assembled into a single file. <strong>A chunk resent identically replaces its own</strong>: after a network cut, read the draft back (<code>GET /v1/drafts/{id}</code> says what was received) and resend what is missing. A chunk that overlaps another without matching it returns <code>409</code>, as does a send while an attachment is incomplete. Each attachment's size is judged when it is declared: if the composed message would exceed the message size, <code>413</code> before the first byte.</p>
+  </div>
+  <p>The server composes the <code>multipart/mixed</code> itself: the body as the first part, then each attachment in base64, <code>Content-Disposition: attachment</code>, an accented name written per RFC 2231. Sending follows the rules of <code>/v1/submissions</code> — the account's <code>From:</code>, <code>Bcc:</code> removed, DKIM signature. Sent or stored, the draft disappears; otherwise it expires after twenty-four hours. <code>GET</code> and <code>DELETE /v1/drafts/{id}</code> read and abandon it; <code>DELETE …/attachments/{n}</code> removes an attachment. <code>501</code> if this server does not serve drafts.</p>
+</div>
+
 <h3 id="r-self"><span class="numero">5.8</span>What is yours</h3>
 
 <p>These resources require <strong>no scope</strong>: they act on <em>yourself</em>, and the token presented already says who that is. Requiring <code>admin</code> would make them routes only an administrator could take, which is exactly what they exist to avoid.</p>

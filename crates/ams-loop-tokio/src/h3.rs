@@ -300,6 +300,7 @@ impl<A: Api> ams_h3::Service for ServiceH3<'_, A> {
                             query,
                             owner,
                             range: tete.field(b"range"),
+                            content_range: tete.field(b"content-range"),
                         },
                         &mut self.rendu,
                     );

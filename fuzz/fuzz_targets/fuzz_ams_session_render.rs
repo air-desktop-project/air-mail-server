@@ -40,8 +40,9 @@ use libfuzzer_sys::fuzz_target;
 use ams_api::{Event, Reader};
 use ams_proto_imap::Flags;
 use ams_session::http::render::{
-    MailboxRow, MessageRow, TRANSFER_UIDS_MAX, read_flag_patch, read_transfer_request,
-    write_changes, write_mailbox, write_mailboxes, write_message, write_messages, write_metrics,
+    MailboxRow, MessageRow, TRANSFER_UIDS_MAX, read_attachment_request, read_flag_patch,
+    read_store_request, read_transfer_request, write_changes, write_mailbox, write_mailboxes,
+    write_message, write_messages, write_metrics,
 };
 
 /// Ce qu'on soumet.
@@ -179,6 +180,27 @@ fuzz_target!(|entree: Entree| {
         let mut encore = [0_u8; 255];
         let relue = read_transfer_request(entree.patch, &mut encore).expect("relisible");
         assert_eq!((relue.to, relue.uids()), (to.as_str(), vus.as_slice()));
+    }
+
+    // PROPRIÉTÉ 6 ter : une pièce jointe déclarée a un nom lisible, un type
+    // `type/sous-type` sans séparateur MIME, et une taille — et le même corps se
+    // relit pareil. Une demande de rangement nomme une boîte.
+    let mut nom = [0_u8; 255];
+    if let Ok(piece) = read_attachment_request(entree.patch, &mut nom) {
+        assert!(!piece.name.is_empty() && !piece.name.chars().any(char::is_control));
+        assert!(piece.media.contains('/') && !piece.media.contains([';', '"', ' ', '\r', '\n']));
+        assert!(piece.size > 0);
+        let (vu_nom, vu_type, vu_taille) = (piece.name.to_owned(), piece.media, piece.size);
+        let mut encore = [0_u8; 255];
+        let relue = read_attachment_request(entree.patch, &mut encore).expect("relisible");
+        assert_eq!(
+            (relue.name, relue.media, relue.size),
+            (vu_nom.as_str(), vu_type, vu_taille)
+        );
+    }
+    let mut rangement = [0_u8; 255];
+    if let Ok(nommee) = read_store_request(entree.patch, &mut rangement) {
+        assert!(!nommee.is_empty());
     }
 
     // PROPRIÉTÉ 7 : chaque taille insuffisante se dit.
