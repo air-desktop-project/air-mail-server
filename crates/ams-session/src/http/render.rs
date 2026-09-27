@@ -576,6 +576,12 @@ pub struct DeviceRow<'a> {
     /// à distinguer « absent » de « zéro », et les deux moitiés de cette
     /// distinction finiraient par diverger.
     pub last_seen: u64,
+    /// Le canal de son abonnement aux notifications (`apns`, `fcm`,
+    /// `webpush`), ou `None` s'il n'est pas abonné.
+    ///
+    /// **LE CANAL, PAS LE JETON** : savoir lequel de ses appareils sonne est
+    /// utile à l'utilisateur ; l'adresse où il sonne ne l'est pas.
+    pub push: Option<&'a str>,
 }
 
 /// Écrit la liste des appareils d'un compte.
@@ -597,9 +603,164 @@ pub fn write_devices<'o>(
         json.field_str("name", appareil.name)?;
         json.field_u64("enrolledAt", appareil.enrolled)?;
         json.field_u64("lastSeenAt", appareil.last_seen)?;
+        json.key("push")?;
+        ecrire_un_texte_facultatif(&mut json, appareil.push)?;
         json.end_object()?;
     }
     json.end_array()?;
+    json.end_object()?;
+    json.finish()
+}
+
+/// Un abonnement aux notifications, tel qu'un client le demande.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PushRequest<'a> {
+    /// Le canal nommé : `apns`, `fcm` ou `webpush`. Non vérifié ici.
+    pub channel: &'a str,
+    /// Le jeton APNs ou FCM, ou l'URL Web Push — déséchappé.
+    pub token: &'a str,
+    /// La clef publique Web Push, décodée de base64url.
+    pub key: Option<[u8; PUSH_KEY_OCTETS]>,
+    /// Le secret d'authentification Web Push, décodé de base64url.
+    pub auth: Option<[u8; PUSH_AUTH_OCTETS]>,
+}
+
+/// Une clef publique P-256 non compressée : soixante-cinq octets.
+pub const PUSH_KEY_OCTETS: usize = 65;
+
+/// Le secret d'authentification de Web Push : seize octets (§3.2 de RFC 8291).
+pub const PUSH_AUTH_OCTETS: usize = 16;
+
+/// Lit le corps de `PUT /v1/me/push`.
+///
+/// ```json
+/// {"channel": "apns", "token": "a1b2…"}
+/// {"channel": "webpush", "endpoint": "https://…",
+///  "keys": {"p256dh": "BN…", "auth": "q1…"}, "expirationTime": null}
+/// ```
+///
+/// # LA FORME DU NAVIGATEUR, TELLE QUELLE
+///
+/// Pour Web Push, c'est ce que `PushSubscription.toJSON()` rend, plus le canal :
+/// un client web n'a rien à reconstruire. `endpoint` et `token` sont deux noms
+/// du même champ ; `expirationTime` se lit et s'ignore.
+///
+/// **ICI, LA FORME ; LA RÈGLE EST AILLEURS** : ce lecteur ne dit pas si le canal
+/// existe ni si l'URL est acceptable — c'est `ams_config::Push::new`, la même
+/// porte que pour le fichier relu.
+///
+/// # Errors
+///
+/// [`Reason::BadJsonBody`] pour un corps illisible, un champ inconnu ou
+/// répété, un canal ou un jeton absent, un jeton plus long que `jeton`, une
+/// clef ou un secret qui ne se décode pas à sa longueur exacte.
+pub fn read_push_request<'n>(
+    corps: &'n [u8],
+    jeton: &'n mut [u8],
+) -> Result<PushRequest<'n>, Error> {
+    let mauvais = Error::new(Reason::BadJsonBody);
+    let mut lecteur = Reader::new(corps);
+    let (mut canal, mut brut, mut cle, mut auth) = (None, None, None, None);
+    let (mut profondeur, mut quel, mut cles_vues, mut expiration_vue) = (0_u8, 0_u8, false, false);
+    loop {
+        let evenement = lecteur.read().map_err(|_| mauvais)?;
+        match (evenement, profondeur, quel) {
+            (None, _, _) => break,
+            (Some(Event::ObjectStart), 0, _) => profondeur = 1,
+            // `keys` s'ouvre, et rien d'autre ne s'imbrique.
+            (Some(Event::ObjectStart), 1, 3) => {
+                profondeur = 2;
+                quel = 0;
+            }
+            (Some(Event::ObjectEnd), _, 0) => profondeur = profondeur.saturating_sub(1),
+            (Some(Event::Key(clef)), 1, 0) => {
+                quel = match clef {
+                    _ if clef.is("channel") && canal.is_none() => 1,
+                    _ if (clef.is("token") || clef.is("endpoint")) && brut.is_none() => 2,
+                    _ if clef.is("keys") && !cles_vues => {
+                        cles_vues = true;
+                        3
+                    }
+                    _ if clef.is("expirationTime") && !expiration_vue => {
+                        expiration_vue = true;
+                        4
+                    }
+                    _ => return Err(mauvais),
+                };
+            }
+            (Some(Event::Key(clef)), 2, 0) => {
+                quel = match clef {
+                    _ if clef.is("p256dh") && cle.is_none() => 5,
+                    _ if clef.is("auth") && auth.is_none() => 6,
+                    _ => return Err(mauvais),
+                };
+            }
+            (Some(Event::Text(texte)), _, 1) => {
+                canal = Some(texte.as_plain().ok_or(mauvais)?);
+                quel = 0;
+            }
+            (Some(Event::Text(texte)), _, 2) => {
+                brut = Some(texte);
+                quel = 0;
+            }
+            (Some(Event::Text(texte)), _, 5) => {
+                let mut place = [0_u8; PUSH_KEY_OCTETS];
+                cle = Some(decoder_exactement(texte, &mut place).ok_or(mauvais)?);
+                quel = 0;
+            }
+            (Some(Event::Text(texte)), _, 6) => {
+                let mut place = [0_u8; PUSH_AUTH_OCTETS];
+                auth = Some(decoder_exactement(texte, &mut place).ok_or(mauvais)?);
+                quel = 0;
+            }
+            (Some(Event::Null | Event::Number(_)), _, 4) => quel = 0,
+            _ => return Err(mauvais),
+        }
+    }
+    let channel = canal.ok_or(mauvais)?;
+    let token = brut.ok_or(mauvais)?.unescape(jeton).map_err(|_| mauvais)?;
+    Ok(PushRequest {
+        channel,
+        token,
+        key: cle,
+        auth,
+    })
+}
+
+/// Décode du base64url dans `place`, à sa longueur EXACTE : ni plus court, ni
+/// plus long — un octet de plus ne tiendrait pas, un de moins resterait à zéro.
+fn decoder_exactement<const N: usize>(texte: Str<'_>, place: &mut [u8; N]) -> Option<[u8; N]> {
+    let brut = texte.as_plain()?;
+    let lu = ams_api::decode_base64url(brut.as_bytes(), place).ok()?;
+    (lu.len() == N).then_some(*place)
+}
+
+/// Écrit l'abonnement de l'appareil qui appelle : `{"push": {"channel": …,
+/// "since": …}}`, ou `{"push": null}` s'il n'en a pas.
+///
+/// **NI LE JETON NI LES CLEFS NE REVIENNENT** : le client les a, et un jeton
+/// qu'on relirait par l'API est un jeton qu'un jeton d'accès volé suffirait à
+/// apprendre.
+///
+/// # Errors
+///
+/// [`Reason::BufferTooSmall`].
+pub fn write_push<'o>(
+    abonnement: Option<(&str, u64)>,
+    sortie: &'o mut [u8],
+) -> Result<&'o [u8], Error> {
+    let mut json = Json::new(sortie);
+    json.begin_object()?;
+    json.key("push")?;
+    match abonnement {
+        Some((canal, depuis)) => {
+            json.begin_object()?;
+            json.field_str("channel", canal)?;
+            json.field_u64("since", depuis)?;
+            json.end_object()?;
+        }
+        None => json.null()?,
+    }
     json.end_object()?;
     json.finish()
 }

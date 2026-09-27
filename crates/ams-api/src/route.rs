@@ -217,6 +217,14 @@ pub enum Resource<'o> {
         /// L'identifiant de l'appareil, tel que le serveur l'a tiré.
         id: &'o str,
     },
+    /// `/v1/me/push` — l'abonnement aux notifications de l'APPAREIL qui
+    /// appelle.
+    ///
+    /// **L'APPAREIL, ET NON LE COMPTE** : c'est la session qui le désigne,
+    /// ouverte par sa clef. Une session ouverte par mot de passe n'a pas
+    /// d'appareil, donc pas d'abonnement — la réponse le dit (`409`). Un
+    /// identifiant dans le chemin laisserait abonner l'appareil d'un autre.
+    OwnPush,
     /// `/v1/me/app-passwords` — les mots de passe applicatifs de qui appelle.
     ///
     /// Un `GET` les liste — noms et dates, **jamais le secret** ; un `POST` en
@@ -358,6 +366,7 @@ impl Resource<'_> {
             | Self::OwnPassword
             | Self::OwnDevices
             | Self::OwnDevice { .. }
+            | Self::OwnPush
             | Self::OwnAppPasswords
             | Self::OwnAppPassword { .. }
             | Self::OwnDelegations => {
@@ -449,6 +458,7 @@ impl Resource<'_> {
             Self::Ban { .. } | Self::OwnDevice { .. } | Self::OwnAppPassword { .. } => {
                 &[Method::Delete]
             }
+            Self::OwnPush => &[Method::Get, Method::Head, Method::Put, Method::Delete],
             // **UN MOT DE PASSE APPLICATIF NE SE LIT PAS SEUL** : son secret
             // n'est rendu qu'à sa création, et le reste figure dans la liste.
             Self::OwnAppPasswords => &[Method::Get, Method::Head, Method::Post],
@@ -611,6 +621,7 @@ fn designer<'o>(segments: &Segments<'o>) -> Result<Resource<'o>, Error> {
         ("me", 4) if segments.get(2) == "devices" => Ok(Resource::OwnDevice {
             id: segments.get(3),
         }),
+        ("me", 3) if segments.get(2) == "push" => Ok(Resource::OwnPush),
         ("me", 3) if segments.get(2) == "app-passwords" => Ok(Resource::OwnAppPasswords),
         ("me", 4) if segments.get(2) == "app-passwords" => Ok(Resource::OwnAppPassword {
             id: segments.get(3),

@@ -510,6 +510,23 @@ impl ApiMaildir {
                  à retirer avant de recréer ce compte"
             );
         }
+        // **SES APPAREILS PARTENT AVEC LUI, ET LEURS ABONNEMENTS** (0.2.31).
+        // Ils restaient : un compte recréé sous le même nom se serait ouvert
+        // aux clefs de l'ancien titulaire. Un échec se dit, comme pour les
+        // mots de passe applicatifs.
+        if let Some(magasin) = self.appareils.as_ref()
+            && let Err(quoi) = magasin.modifier(|appareils| {
+                appareils.retain(|appareil| appareil.login != nom);
+                Ok(())
+            })
+        {
+            eprintln!(
+                "air-mail-server : appareils de `{nom}` NON retirés ({quoi}) — \
+                 à retirer avant de recréer ce compte"
+            );
+        }
+        // **ET SES SESSIONS FERMENT**, par mot de passe comme par clef.
+        self.sessions.fermer_le_compte(nom);
         Served {
             status: StatusCode::NO_CONTENT,
             media: JSON_MEDIA_TYPE,
@@ -778,6 +795,7 @@ impl ApiMaildir {
                 // **EN SECONDES DEHORS**, comme tout ce que cette API rend ; le
                 // magasin compte en millisecondes pour le défi.
                 last_seen: appareil.last_seen / 1_000,
+                push: appareil.push.as_ref().map(|push| push.channel().name()),
             })
             .collect();
         rendre(render::write_devices(&lignes, sortie))
@@ -870,6 +888,7 @@ impl ApiMaildir {
             name: String::from(demande.name),
             enrolled: crate::maintenant(),
             last_seen: 0,
+            push: None,
             public_key: cle,
         };
         // **UNE SEULE ÉCRITURE, QUI DÉCIDE DE TOUT SOUS LE VERROU** : le rejeu,
@@ -1226,6 +1245,112 @@ impl ApiMaildir {
             appareils.remove(place);
             Ok(())
         }) {
+            Ok(()) => {
+                // **UNE RÉVOCATION RÉVOQUE** : ses sessions ferment ici, et non
+                // à l'expiration de leurs jetons. L'abonnement, lui, est parti
+                // avec la fiche.
+                self.sessions.fermer_l_appareil(account, id);
+                sans_contenu()
+            }
+            Err(quoi) => dire_la_faute(&quoi, sortie),
+        }
+    }
+
+    /// L'appareil qui a ouvert la session de cette requête, s'il y en a un.
+    fn appareil_de_la_session(&self, account: &str, nonce: u64) -> Option<String> {
+        self.sessions.appareil(account, nonce, microsecondes())
+    }
+
+    /// `GET /v1/me/push` — l'abonnement de l'appareil qui appelle.
+    fn mon_abonnement<'o>(&self, account: &str, nonce: u64, sortie: &'o mut [u8]) -> Served<'o> {
+        let Some(magasin) = self.appareils.as_ref() else {
+            return pas_encore(sortie);
+        };
+        let Some(id) = self.appareil_de_la_session(account, nonce) else {
+            return probleme(ams_api::Reason::NotADevice, StatusCode::CONFLICT, sortie);
+        };
+        let siens = magasin.du_compte(account);
+        let Some(appareil) = siens.iter().find(|connu| connu.id == id) else {
+            return absente(sortie);
+        };
+        let abonnement = appareil
+            .push
+            .as_ref()
+            .map(|push| (push.channel().name(), push.since()));
+        rendre(render::write_push(abonnement, sortie))
+    }
+
+    /// `PUT /v1/me/push` — abonne l'appareil qui appelle, ou remplace son
+    /// abonnement.
+    ///
+    /// # LA SESSION DÉSIGNE L'APPAREIL, ET LA RÈGLE EST CELLE DU FICHIER
+    ///
+    /// Aucun identifiant dans le chemin ni dans le corps : c'est la session,
+    /// ouverte par la clef, qui dit quel appareil on abonne. Et l'abonnement
+    /// passe par [`ams_config::Push::new`], la même porte que le fichier relu
+    /// au démarrage — ce qui est accepté ici se relira.
+    fn abonner<'o>(
+        &self,
+        account: &str,
+        nonce: u64,
+        corps: &[u8],
+        sortie: &'o mut [u8],
+    ) -> Served<'o> {
+        let mut jeton = [0_u8; ams_config::FCM_TOKEN_MAX];
+        let Ok(demande) = render::read_push_request(corps, &mut jeton) else {
+            return corps_refuse(sortie);
+        };
+        let Some(magasin) = self.appareils.as_ref() else {
+            return pas_encore(sortie);
+        };
+        let Some(id) = self.appareil_de_la_session(account, nonce) else {
+            return probleme(ams_api::Reason::NotADevice, StatusCode::CONFLICT, sortie);
+        };
+        let Some(canal) = ams_config::PushChannel::from_name(demande.channel) else {
+            return corps_refuse(sortie);
+        };
+        let Ok(abonnement) = ams_config::Push::new(
+            canal,
+            String::from(demande.token),
+            demande.key.map(|cle| cle.to_vec()).unwrap_or_default(),
+            demande.auth.map(|auth| auth.to_vec()).unwrap_or_default(),
+            crate::maintenant(),
+        ) else {
+            return corps_refuse(sortie);
+        };
+        let resume = (abonnement.channel().name(), abonnement.since());
+        match magasin.modifier(|appareils| {
+            let appareil = appareils
+                .iter_mut()
+                .find(|connu| connu.login == account && connu.id == id)
+                .ok_or(crate::appareils::INTROUVABLE)?;
+            appareil.push = Some(abonnement);
+            Ok(())
+        }) {
+            Ok(()) => rendre(render::write_push(Some(resume), sortie)),
+            Err(quoi) => dire_la_faute(&quoi, sortie),
+        }
+    }
+
+    /// `DELETE /v1/me/push` — désabonne l'appareil qui appelle.
+    ///
+    /// **SANS ABONNEMENT, C'EST DÉJÀ L'ÉTAT DEMANDÉ** : `204` aussi, comme un
+    /// client qui se désabonne deux fois ne fait rien de mal.
+    fn desabonner<'o>(&self, account: &str, nonce: u64, sortie: &'o mut [u8]) -> Served<'o> {
+        let Some(magasin) = self.appareils.as_ref() else {
+            return pas_encore(sortie);
+        };
+        let Some(id) = self.appareil_de_la_session(account, nonce) else {
+            return probleme(ams_api::Reason::NotADevice, StatusCode::CONFLICT, sortie);
+        };
+        match magasin.modifier(|appareils| {
+            let appareil = appareils
+                .iter_mut()
+                .find(|connu| connu.login == account && connu.id == id)
+                .ok_or(crate::appareils::INTROUVABLE)?;
+            appareil.push = None;
+            Ok(())
+        }) {
             Ok(()) => sans_contenu(),
             Err(quoi) => dire_la_faute(&quoi, sortie),
         }
@@ -1510,6 +1635,7 @@ impl ApiMaildir {
             name: String::from(name),
             enrolled: crate::maintenant(),
             last_seen: 0,
+            push: None,
             public_key: cle,
         };
         if let Err(quoi) = magasin.modifier(move |appareils| {
@@ -2704,6 +2830,7 @@ impl Api for ApiMaildir {
             content_range,
             idempotency_key,
             owner,
+            nonce,
         } = appel;
         // **UNE BOÎTE D'AUTRUI : LA TABLE DÉCIDE, À CHAQUE REQUÊTE.** Le jeton dit
         // QUI appelle ; le chemin dit la boîte de QUI ; la table dit si le
@@ -2903,6 +3030,15 @@ impl Api for ApiMaildir {
             }
             Resource::OwnDevices => self.mes_appareils(account, sortie),
             Resource::OwnDevice { id } => self.revoquer_mon_appareil(account, id, sortie),
+            // **L'APPAREIL DE QUI APPELLE, PAR SA SESSION** — `acteur`, et non
+            // un titulaire : un abonnement n'est jamais celui d'un autre.
+            Resource::OwnPush if matches!(method, Method::Put) => {
+                self.abonner(acteur, nonce, body, sortie)
+            }
+            Resource::OwnPush if matches!(method, Method::Delete) => {
+                self.desabonner(acteur, nonce, sortie)
+            }
+            Resource::OwnPush => self.mon_abonnement(acteur, nonce, sortie),
             Resource::OwnAppPasswords if matches!(method, Method::Post) => {
                 self.creer_un_applicatif(account, body, sortie)
             }
@@ -2991,8 +3127,16 @@ impl Api for ApiMaildir {
     /// illisible, on rend zéro** : le jeton reste scellé et vérifiable, seule sa
     /// révocation individuelle devient impossible — ce qui vaut mieux que de
     /// refuser toute ouverture de session.
-    fn open_session(&self, login: &str, nonce: u64, expiry: u64, maintenant: u64) {
-        self.sessions.ouvrir(login, nonce, expiry, maintenant);
+    fn open_session(
+        &self,
+        login: &str,
+        nonce: u64,
+        expiry: u64,
+        maintenant: u64,
+        device: Option<&str>,
+    ) {
+        self.sessions
+            .ouvrir(login, nonce, expiry, maintenant, device);
     }
 
     fn session_open(&self, login: &str, nonce: u64, maintenant: u64) -> bool {
@@ -4586,6 +4730,7 @@ mod ecritures {
                 content_range: None,
                 idempotency_key: None,
                 owner: None,
+                nonce: 0,
             },
             &mut place,
         );
@@ -4736,6 +4881,7 @@ mod ecritures {
                 content_range: None,
                 idempotency_key: None,
                 owner: titulaire,
+                nonce: 0,
             },
             &mut place,
         );
@@ -4877,6 +5023,7 @@ mod ecritures {
                 content_range: None,
                 idempotency_key: Some(cle),
                 owner: None,
+                nonce: 0,
             },
             &mut place,
         );
@@ -4932,6 +5079,7 @@ mod ecritures {
                 content_range: None,
                 idempotency_key: Some(b"mal formee"),
                 owner: None,
+                nonce: 0,
             },
             &mut place,
         );
@@ -5612,6 +5760,7 @@ mod ecritures {
                 content_range: None,
                 idempotency_key: None,
                 owner: None,
+                nonce: 0,
             },
             &mut place,
         );

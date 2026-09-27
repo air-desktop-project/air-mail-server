@@ -196,6 +196,11 @@ pub enum Reason {
     /// client sans qu'il puisse s'en apercevoir ; le message brut, lui, reste
     /// servi.
     UnknownEncoding,
+    /// **Cette session n'a pas été ouverte par un appareil** : par mot de
+    /// passe, elle n'a pas d'appareil à abonner. `409` : la demande est bien
+    /// formée, c'est l'état de la session qui l'empêche — une session ouverte
+    /// par la clef de l'appareil le pourra.
+    NotADevice,
 }
 
 impl Reason {
@@ -232,7 +237,8 @@ impl Reason {
             Self::AlreadyEnrolled
             | Self::LimitReached
             | Self::DraftConflict
-            | Self::IdempotencyInFlight => StatusCode::CONFLICT,
+            | Self::IdempotencyInFlight
+            | Self::NotADevice => StatusCode::CONFLICT,
             Self::SyncExpired => StatusCode::GONE,
             Self::BodyTooLarge => StatusCode::CONTENT_TOO_LARGE,
             Self::AttachmentsNeedDraft | Self::IdempotencyKeyReused | Self::UnknownEncoding => {
@@ -281,6 +287,9 @@ impl Reason {
             }
             Self::AttachmentsNeedDraft => {
                 "ce message porte des pièces jointes : envoyez-le par un brouillon (/v1/drafts)"
+            }
+            Self::NotADevice => {
+                "cette session n'a pas été ouverte par un appareil ; ouvrez-la avec sa clef"
             }
             Self::UnknownEncoding => {
                 "cette partie porte un encodage que le serveur ne sait pas défaire ; lisez le message brut"

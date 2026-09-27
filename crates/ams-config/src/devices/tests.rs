@@ -58,6 +58,7 @@ fn appareil(login: &str, id: &str, clef: &[u8; CLE_OCTETS]) -> Device {
         public_key: Cle::lire(clef).expect("une clef d'épreuve valide"),
         enrolled: 1_790_000_000,
         last_seen: 1_790_003_600,
+        push: None,
     }
 }
 
@@ -296,6 +297,9 @@ fn les_refus_se_lisent() {
     let clef = Error::BadDeviceKey("a1".to_string()).to_string();
     assert!(clef.contains("a1"), "{clef}");
 
+    let abonnement = Error::BadPush("a1".to_string()).to_string();
+    assert!(abonnement.contains("a1"), "{abonnement}");
+
     let borne = Error::TooLong("device id").to_string();
     assert!(borne.contains("device id"), "{borne}");
 }
@@ -362,4 +366,83 @@ fn un_fichier_corrompu_ne_fait_jamais_paniquer_le_serveur() {
         acceptes > 0,
         "toutes les corruptions ont été refusées : le balayage ne traverse pas le chemin nominal"
     );
+}
+
+// ── L'ABONNEMENT AUX NOTIFICATIONS ──────────────────────────────────────────
+
+use crate::{Push, PushChannel};
+
+fn abonnement(canal: PushChannel) -> Push {
+    let (jeton, cle, auth) = match canal {
+        PushChannel::Apns => ("ab".repeat(32), Vec::new(), Vec::new()),
+        PushChannel::Fcm => (String::from("jeton:fcm"), Vec::new(), Vec::new()),
+        PushChannel::WebPush => (
+            String::from("https://push.example.com/abc"),
+            CLE_VALIDE.to_vec(),
+            alloc::vec![9; 16],
+        ),
+    };
+    Push::new(canal, jeton, cle, auth, 1_790_000_123).expect("recevable")
+}
+
+/// **UN ABONNEMENT TRAVERSE LE DISQUE**, pour chaque canal, et l'absence aussi.
+#[test]
+fn un_abonnement_se_relit_a_l_identique() {
+    let mut original = Vec::new();
+    for (rang, canal) in [PushChannel::Apns, PushChannel::Fcm, PushChannel::WebPush]
+        .into_iter()
+        .enumerate()
+    {
+        let mut abonne = appareil("jean", &alloc::format!("p{rang}"), &CLE_VALIDE);
+        abonne.push = Some(abonnement(canal));
+        original.push(abonne);
+    }
+    original.push(appareil("jean", "sans", &AUTRE_CLE));
+    let relu = decode_devices(&encode_devices(&original).expect("encodable")).expect("relisible");
+    for (avant, apres) in original.iter().zip(relu.iter()) {
+        assert_eq!(avant.push, apres.push, "{}", avant.id);
+    }
+}
+
+/// **UN ABONNEMENT RELU PASSE LA MÊME RÈGLE QU'À L'ENTRÉE** : retouché à la
+/// main, il fait refuser le magasin plutôt que contacter une adresse interdite.
+#[test]
+fn un_abonnement_retouche_est_refuse() {
+    let mut message = capnp::message::Builder::new_default();
+    {
+        let ecrit = message.init_root::<devices::Builder<'_>>();
+        let mut case = ecrit.init_devices(1).get(0);
+        case.set_login("jean");
+        case.set_id("a1");
+        case.set_public_key(&CLE_VALIDE);
+        case.set_push_channel(crate::ams_devices_capnp::PushChannel::WebPush);
+        case.set_push_token("https://10.0.0.1/x");
+        case.set_push_key(&CLE_VALIDE);
+        case.set_push_auth(&[0; 16]);
+    }
+    let octets = capnp::serialize::write_message_to_words(&message);
+    assert!(matches!(decode_devices(&octets), Err(crate::Error::BadPush(id)) if id == "a1"));
+}
+
+/// Un canal qu'on ne connaît pas — écrit par une version future — fait refuser
+/// le magasin, plutôt que d'éteindre l'abonnement en silence.
+#[test]
+fn un_canal_inconnu_est_refuse() {
+    let mut abonne = appareil("jean", "a1", &CLE_VALIDE);
+    abonne.enrolled = 0x1122_3344_5566_7788;
+    abonne.push = Some(abonnement(PushChannel::Apns));
+    let mut octets = encode_devices(&[abonne]).expect("encodable");
+    let repere = 0x1122_3344_5566_7788_u64.to_le_bytes();
+    let rang = octets
+        .windows(8)
+        .position(|fenetre| fenetre == repere)
+        .expect("la date d'enrôlement est dans les données");
+    // `enrolled` occupe le premier mot, `lastSeen` le deuxième, le canal les
+    // deux premiers octets du troisième.
+    octets[rang + 16] = 9;
+    octets[rang + 17] = 0;
+    assert!(matches!(
+        decode_devices(&octets),
+        Err(crate::Error::BadPush(_))
+    ));
 }

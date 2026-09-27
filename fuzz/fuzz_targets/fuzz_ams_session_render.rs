@@ -44,9 +44,9 @@ use ams_api::{Event, Reader};
 use ams_proto_imap::Flags;
 use ams_session::http::render::{
     MailboxRow, MessageRow, PART_DISPOSITION_MAX, PART_MEDIA_MAX, TRANSFER_UIDS_MAX,
-    read_attachment_request, read_flag_patch, read_store_request, read_transfer_request,
-    write_changes, write_mailbox, write_mailboxes, write_message, write_messages, write_metrics,
-    write_part_disposition, write_part_media,
+    read_attachment_request, read_flag_patch, read_push_request, read_store_request,
+    read_transfer_request, write_changes, write_mailbox, write_mailboxes, write_message,
+    write_messages, write_metrics, write_part_disposition, write_part_media,
 };
 
 /// Ce qu'on soumet.
@@ -244,6 +244,15 @@ fuzz_target!(|entree: Entree| {
     let mut rangement = [0_u8; 255];
     if let Ok(nommee) = read_store_request(entree.patch, &mut rangement) {
         assert!(!nommee.is_empty());
+    }
+    // Un abonnement lu nomme un canal et un jeton, et ses clefs ont leur
+    // longueur exacte — sinon il n'est pas lu du tout.
+    let mut jeton = [0_u8; 512];
+    if let Ok(abonnement) = read_push_request(entree.patch, &mut jeton) {
+        assert!(!abonnement.channel.is_empty() || entree.patch.windows(2).any(|f| f == b"\"\""));
+        assert!(abonnement.token.len() <= 512);
+        assert!(abonnement.key.is_none_or(|cle| cle.len() == 65));
+        assert!(abonnement.auth.is_none_or(|auth| auth.len() == 16));
     }
 
     // PROPRIÉTÉ 7 : chaque taille insuffisante se dit.

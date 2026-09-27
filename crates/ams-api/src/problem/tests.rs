@@ -22,7 +22,7 @@ use crate::error::Reason;
 /// Le `match` ci-dessous la rend exhaustive **à la compilation** : un motif de
 /// plus ne compile pas tant qu'on ne l'y a pas mis. C'est la même discipline
 /// que `Resource::scope`, et pour la même raison.
-fn toutes() -> [Reason; 28] {
+fn toutes() -> [Reason; 29] {
     // Ce `match` ne sert qu'à faire échouer la compilation si un motif
     // s'ajoute : sa valeur est jetée, sa VÉRIFICATION est tout l'objet.
     const fn _exhaustive(reason: Reason) -> u8 {
@@ -55,6 +55,7 @@ fn toutes() -> [Reason; 28] {
             Reason::IdempotencyKeyReused => 25,
             Reason::IdempotencyInFlight => 26,
             Reason::UnknownEncoding => 27,
+            Reason::NotADevice => 28,
         }
     }
     [
@@ -86,6 +87,7 @@ fn toutes() -> [Reason; 28] {
         Reason::IdempotencyKeyReused,
         Reason::IdempotencyInFlight,
         Reason::UnknownEncoding,
+        Reason::NotADevice,
     ]
 }
 
@@ -311,4 +313,12 @@ fn un_encodage_inconnu_a_son_propre_type() {
     let dit = document(Reason::UnknownEncoding);
     assert!(dit.contains("/problems/unknown-encoding"), "{dit}");
     assert!(dit.contains("\"status\":422"), "{dit}");
+}
+
+/// **UNE SESSION SANS APPAREIL DIT `409`**, et comment en avoir une.
+#[test]
+fn une_session_sans_appareil_dit_409() {
+    let dit = document(Reason::NotADevice);
+    assert!(dit.contains("\"status\":409"), "{dit}");
+    assert!(dit.contains("clef"), "{dit}");
 }

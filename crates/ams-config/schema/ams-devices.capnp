@@ -74,4 +74,40 @@ struct Device {
   # milliseconde — en secondes, deux sessions enchaînées dans la même seconde
   # se prenaient pour un rejeu.
   lastSeen @5 :UInt64;
+
+  # ── L'ABONNEMENT AUX NOTIFICATIONS (0.2.31) ────────────────────────────────
+  #
+  # IL VIT DANS LA FICHE DE L'APPAREIL, et non dans un fichier à part : un
+  # abonnement n'a pas d'existence sans l'appareil qui le reçoit, et révoquer
+  # l'appareil doit l'éteindre SANS QU'UN SECOND FICHIER PUISSE L'OUBLIER.
+  #
+  # `none` : l'appareil n'est pas abonné, et les quatre champs suivants sont
+  # vides.
+  pushChannel @6 :PushChannel;
+
+  # Ce qui désigne l'appareil chez le service de notifications : le jeton APNs
+  # en hexadécimal, le jeton d'enregistrement FCM, ou l'URL `https` que le
+  # navigateur a donnée pour Web Push (RFC 8030).
+  #
+  # C'EST UNE ADRESSE, PAS UN SECRET : qui la tient peut réveiller l'appareil,
+  # pas lire son courrier. Les notifications ne portent rien d'autre qu'un
+  # « synchronise-toi ».
+  pushToken @7 :Text;
+
+  # Web Push seulement (RFC 8291) : la clef publique P-256 du navigateur,
+  # soixante-cinq octets non compressés, et son secret d'authentification,
+  # seize octets. Ils chiffrent ce qui part, pour que le service de push ne le
+  # lise pas. Vides pour APNs et FCM.
+  pushKey @8 :Data;
+  pushAuth @9 :Data;
+
+  # Quand l'abonnement a été posé, en secondes depuis l'époque.
+  pushSince @10 :UInt64;
+}
+
+enum PushChannel {
+  none @0;
+  apns @1;
+  fcm @2;
+  webPush @3;
 }

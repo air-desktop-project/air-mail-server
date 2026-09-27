@@ -309,6 +309,10 @@ fn segments_de(
             pousser("devices");
             pousser(id);
         }
+        Resource::OwnPush => {
+            pousser("me");
+            pousser("push");
+        }
         Resource::OwnAppPasswords => {
             pousser("me");
             pousser("app-passwords");

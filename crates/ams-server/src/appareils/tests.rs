@@ -77,6 +77,7 @@ fn appareil(login: &str, id: &str) -> Device {
         public_key: Cle::lire(&CLE_VALIDE).expect("une clef d'épreuve valide"),
         enrolled: 1_790_000_000,
         last_seen: 0,
+        push: None,
     }
 }
 

@@ -31,6 +31,7 @@ fn appareil() -> DeviceRow<'static> {
         name: "iPhone de Marie",
         enrolled: 1_790_000_000,
         last_seen: 1_790_003_600,
+        push: Some("apns"),
     }
 }
 
@@ -41,6 +42,7 @@ fn appareil_neuf() -> DeviceRow<'static> {
         name: "",
         enrolled: 1_790_000_000,
         last_seen: 0,
+        push: None,
     }
 }
 
@@ -393,7 +395,7 @@ fn un_corps_qui_n_est_pas_une_modification_se_refuse() {
 #[test]
 fn chaque_tampon_insuffisant_se_dit() {
     type Ecrivain = fn(&mut [u8]) -> Result<&[u8], ams_api::Error>;
-    let ecrivains: [(&str, Ecrivain); 36] = [
+    let ecrivains: [(&str, Ecrivain); 38] = [
         ("draft", |place| write_draft("0a1b", 99, &[piece()], place)),
         ("draft-vide", |place| write_draft("0a1b", 99, &[], place)),
         ("attachment", |place| write_attachment(&piece(), place)),
@@ -414,6 +416,10 @@ fn chaque_tampon_insuffisant_se_dit() {
         ("message", |place| {
             write_message(&message(), None, None, 7, place)
         }),
+        ("push", |place| {
+            write_push(Some(("webpush", 1_790_000_000)), place)
+        }),
+        ("push-absent", |place| write_push(None, place)),
         ("message-enveloppe", |place| {
             write_message(&message(), Some(ENTETE_COMPLET), None, 7, place)
         }),
@@ -1051,6 +1057,9 @@ fn la_liste_des_appareils_rend_ce_qu_il_faut() {
     assert!(rendu.contains("\"name\":\"iPhone de Marie\""), "{rendu}");
     assert!(rendu.contains("\"enrolledAt\":1790000000"), "{rendu}");
     assert!(rendu.contains("\"lastSeenAt\":1790003600"), "{rendu}");
+    // Le canal de l'abonnement, et `null` pour qui n'en a pas.
+    assert!(rendu.contains("\"push\":\"apns\""), "{rendu}");
+    assert!(rendu.contains("\"push\":null"), "{rendu}");
 
     // **ZÉRO S'ÉCRIT, IL NE S'OMET PAS** : un client qui doit distinguer
     // « absent » de « zéro » finit par traiter les deux différemment.
@@ -2027,4 +2036,104 @@ fn ce_qui_vient_du_message_se_filtre() {
         &[1],
     );
     assert_eq!(disposition, "attachment");
+}
+
+// ── L'ABONNEMENT AUX NOTIFICATIONS ──────────────────────────────────────────
+
+use super::{PUSH_AUTH_OCTETS, PUSH_KEY_OCTETS, read_push_request, write_push};
+
+fn abonnement(corps: &str) -> Result<(String, String, Option<usize>, Option<usize>), Error> {
+    let mut jeton = [0_u8; 256];
+    read_push_request(corps.as_bytes(), &mut jeton).map(|lu| {
+        (
+            lu.channel.to_string(),
+            lu.token.to_string(),
+            lu.key.map(|cle| cle.len()),
+            lu.auth.map(|auth| auth.len()),
+        )
+    })
+}
+
+/// La forme d'APNs et de FCM, et celle du navigateur pour Web Push.
+#[test]
+fn un_abonnement_se_lit() {
+    assert_eq!(
+        abonnement(r#"{"channel":"apns","token":"a1b2"}"#).expect("lisible"),
+        ("apns".to_string(), "a1b2".to_string(), None, None)
+    );
+    // `PushSubscription.toJSON()`, telle quelle, et l'URL déséchappée.
+    let cle = "B".to_string() + &"A".repeat(86);
+    let corps = std::format!(
+        r#"{{"channel":"webpush","endpoint":"https:\/\/push.example.com\/x","expirationTime":null,"keys":{{"p256dh":"{cle}","auth":"AAAAAAAAAAAAAAAAAAAAAA"}}}}"#
+    );
+    assert_eq!(
+        abonnement(&corps).expect("lisible"),
+        (
+            "webpush".to_string(),
+            "https://push.example.com/x".to_string(),
+            Some(PUSH_KEY_OCTETS),
+            Some(PUSH_AUTH_OCTETS)
+        )
+    );
+    // Une échéance chiffrée se lit et s'ignore, comme `null`.
+    assert!(abonnement(r#"{"channel":"fcm","token":"t","expirationTime":1790000000}"#).is_ok());
+}
+
+/// Ce qui n'a pas la forme se refuse, sans rien deviner.
+#[test]
+fn un_abonnement_mal_forme_se_refuse() {
+    let cle = "B".to_string() + &"A".repeat(86);
+    for corps in [
+        String::from("pas du json"),
+        String::from(r#"{"token":"t"}"#),
+        String::from(r#"{"channel":"apns"}"#),
+        String::from(r#"{"channel":"apns","token":"t","token":"u"}"#),
+        String::from(r#"{"channel":"apns","channel":"fcm","token":"t"}"#),
+        String::from(r#"{"channel":"apns","token":"t","autre":1}"#),
+        String::from(r#"{"channel":1,"token":"t"}"#),
+        String::from(r#"{"channel":"a\u00e9","token":"t"}"#),
+        String::from(r#"{"channel":"apns","token":"t","expirationTime":"demain"}"#),
+        String::from(
+            r#"{"channel":"apns","token":"t","expirationTime":null,"expirationTime":null}"#,
+        ),
+        String::from(r#"{"channel":"webpush","token":"t","keys":"x"}"#),
+        String::from(r#"{"channel":"webpush","token":"t","keys":{},"keys":{}}"#),
+        String::from(r#"{"channel":"webpush","token":"t","keys":{"autre":"x"}}"#),
+        String::from(r#"{"channel":"webpush","token":"t","keys":{"p256dh":"AAAA"}}"#),
+        String::from(r#"{"channel":"webpush","token":"t","keys":{"auth":"AAAA"}}"#),
+        String::from(r#"{"channel":"webpush","token":"t","keys":{"auth":"!!!!"}}"#),
+        String::from(
+            r#"{"channel":"webpush","token":"t","keys":{"auth":"\u0041AAAAAAAAAAAAAAAAAAAAA"}}"#,
+        ),
+        std::format!(
+            r#"{{"channel":"webpush","token":"t","keys":{{"p256dh":"{cle}","p256dh":"{cle}"}}}}"#
+        ),
+        String::from(
+            r#"{"channel":"webpush","token":"t","keys":{"auth":"AAAAAAAAAAAAAAAAAAAAAA","auth":"AAAAAAAAAAAAAAAAAAAAAA"}}"#,
+        ),
+        String::from(r#"{"channel":"webpush","token":"t","keys":{"x":{}}}"#),
+        String::from(r#"[]"#),
+        std::format!(r#"{{"channel":"fcm","token":"{}"}}"#, "x".repeat(300)),
+    ] {
+        assert_eq!(
+            abonnement(&corps).map(|_| ()),
+            Err(Error::new(Reason::BadJsonBody)),
+            "{corps}"
+        );
+    }
+}
+
+/// Le canal et la date, et jamais le jeton.
+#[test]
+fn un_abonnement_se_rend_sans_son_jeton() {
+    let mut place = [0_u8; PLACE];
+    assert_eq!(
+        texte(write_push(Some(("apns", 1_790_000_000)), &mut place).expect("écrivable")),
+        r#"{"push":{"channel":"apns","since":1790000000}}"#
+    );
+    let mut place = [0_u8; PLACE];
+    assert_eq!(
+        texte(write_push(None, &mut place).expect("écrivable")),
+        r#"{"push":null}"#
+    );
 }

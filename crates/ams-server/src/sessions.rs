@@ -29,17 +29,14 @@
 //! avant reviendrait à laisser un inconnu faire chercher dans notre table avec
 //! des octets qu'il a choisis.
 //!
-//! # ET L'APPAREIL VIENDRA ICI, PAS DANS LE JETON
+//! # ET L'APPAREIL EST ICI, PAS DANS LE JETON
 //!
-//! Quand les appareils s'enrôleront, il aurait fallu un format de jeton nouveau
-//! pour y loger leur identité — avec sa bascule, sa transition et ses deux
-//! versions à vérifier. Ce sera inutile : le jeton porte déjà l'identifiant qui
-//! distingue une session des autres, et **c'est ce registre qui saura à quel
-//! appareil elle appartient**. Révoquer un appareil sera balayer ses entrées.
-//!
-//! **RIEN N'EST ÉCRIT D'AVANCE POUR AUTANT** : le champ viendra avec son
-//! appelant, et pas avant. Du code que personne n'appelle est du code que
-//! personne n'éprouve.
+//! Loger l'identité de l'appareil dans le jeton aurait demandé un format
+//! nouveau — avec sa bascule, sa transition et ses deux versions à vérifier.
+//! C'est inutile : le jeton porte déjà l'identifiant qui distingue une session
+//! des autres, et **c'est ce registre qui sait à quel appareil elle
+//! appartient** (0.2.31). Révoquer un appareil, c'est balayer ses entrées : ses
+//! jetons cessent de valoir sur-le-champ, et non à leur expiration.
 
 use std::collections::BTreeMap;
 use std::string::String;
@@ -65,6 +62,9 @@ pub const PAR_COMPTE: usize = 24;
 struct Vivante {
     /// Quand elle cesse de valoir, en microsecondes depuis l'époque.
     expiration: u64,
+    /// L'appareil qui l'a ouverte par sa clef, ou `None` pour une session
+    /// ouverte par mot de passe.
+    appareil: Option<String>,
 }
 
 /// Les sessions ouvertes, tous comptes confondus.
@@ -90,7 +90,14 @@ impl Sessions {
     /// **LA PURGE A LIEU ICI**, et nulle part ailleurs : un registre qui
     /// n'oublierait qu'à la lecture garderait la mémoire d'un compte qui ne se
     /// connecte plus. L'insertion est le seul moment où l'on sait qu'il vit.
-    pub fn ouvrir(&self, compte: &str, identifiant: u64, expiration: u64, maintenant: u64) {
+    pub fn ouvrir(
+        &self,
+        compte: &str,
+        identifiant: u64,
+        expiration: u64,
+        maintenant: u64,
+        appareil: Option<&str>,
+    ) {
         let mut table = self.ouvertes.lock().unwrap_or_else(PoisonError::into_inner);
         let siennes = table.entry(String::from(compte)).or_default();
         siennes.retain(|(_, vue)| vue.expiration > maintenant);
@@ -99,7 +106,13 @@ impl Sessions {
         while siennes.len() >= PAR_COMPTE {
             siennes.remove(0);
         }
-        siennes.push((identifiant, Vivante { expiration }));
+        siennes.push((
+            identifiant,
+            Vivante {
+                expiration,
+                appareil: appareil.map(String::from),
+            },
+        ));
     }
 
     /// Cette session est-elle ouverte ?
@@ -137,6 +150,49 @@ impl Sessions {
             table.remove(compte);
         }
         ferme
+    }
+
+    /// L'appareil qui a ouvert cette session, si c'est un appareil.
+    ///
+    /// `None` aussi pour une session inconnue ou périmée : il n'y a pas
+    /// d'appareil à qui rattacher ce qui n'est plus ouvert.
+    #[must_use]
+    pub fn appareil(&self, compte: &str, identifiant: u64, maintenant: u64) -> Option<String> {
+        let table = self.ouvertes.lock().unwrap_or_else(PoisonError::into_inner);
+        table
+            .get(compte)?
+            .iter()
+            .find(|(vu, vue)| *vu == identifiant && vue.expiration > maintenant)
+            .and_then(|(_, vue)| vue.appareil.clone())
+    }
+
+    /// Ferme toutes les sessions qu'un appareil a ouvertes, et rend combien.
+    ///
+    /// **C'EST CE QUI FAIT QU'UNE RÉVOCATION RÉVOQUE** : sans cela, retirer la
+    /// clef d'un téléphone volé laissait valoir ses jetons jusqu'à leur
+    /// expiration — un quart d'heure pendant lequel le voleur lisait encore.
+    pub fn fermer_l_appareil(&self, compte: &str, appareil: &str) -> usize {
+        let mut table = self.ouvertes.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(siennes) = table.get_mut(compte) else {
+            return 0;
+        };
+        let avant = siennes.len();
+        siennes.retain(|(_, vue)| vue.appareil.as_deref() != Some(appareil));
+        let fermees = avant.saturating_sub(siennes.len());
+        if siennes.is_empty() {
+            table.remove(compte);
+        }
+        fermees
+    }
+
+    /// Ferme toutes les sessions d'un compte, et rend combien.
+    ///
+    /// **UN COMPTE RETIRÉ NE GARDE PAS SES JETONS** : ils valaient encore jusqu'à
+    /// leur expiration, pour un nom que plus rien n'authentifie — et qu'un
+    /// compte recréé porterait.
+    pub fn fermer_le_compte(&self, compte: &str) -> usize {
+        let mut table = self.ouvertes.lock().unwrap_or_else(PoisonError::into_inner);
+        table.remove(compte).map_or(0, |siennes| siennes.len())
     }
 
     /// Combien de sessions ce compte tient ouvertes.

@@ -29,7 +29,7 @@ fn ou(method: Method, chemin: &[u8]) -> Result<Resource<'static>, Reason> {
 /// Chaque ressource se désigne par son chemin.
 #[test]
 fn chaque_ressource_se_designe() {
-    let cas: [(Method, &[u8], Resource<'_>); 38] = [
+    let cas: [(Method, &[u8], Resource<'_>); 39] = [
         (Method::Post, b"/v1/tokens", Resource::Tokens),
         (Method::Post, b"/v1/sessions", Resource::Sessions),
         (
@@ -41,6 +41,7 @@ fn chaque_ressource_se_designe() {
         (Method::Post, b"/v1/invitations", Resource::Invitations),
         (Method::Put, b"/v1/me/password", Resource::OwnPassword),
         (Method::Get, b"/v1/me/devices", Resource::OwnDevices),
+        (Method::Put, b"/v1/me/push", Resource::OwnPush),
         (
             Method::Delete,
             b"/v1/me/devices/a1b2c3",
@@ -627,6 +628,10 @@ fn les_verbes_des_mots_de_passe_applicatifs() {
 
 #[test]
 fn les_verbes_des_appareils_sont_ceux_la_et_pas_d_autres() {
+    assert_eq!(
+        Resource::OwnPush.allowed(),
+        &[Method::Get, Method::Head, Method::Put, Method::Delete]
+    );
     assert_eq!(
         Resource::OwnDevices.allowed(),
         &[Method::Get, Method::Head, Method::Post]

@@ -843,7 +843,7 @@ Le corps du message.
   <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/me/devices</span><span class="portee">jeton valide</span></div>
   <pre><code>{ "devices": [
     { "id": "a1b2c3", "name": "iPhone de Marie",
-      "enrolledAt": 1790000000, "lastSeenAt": 1790003600 }
+      "enrolledAt": 1790000000, "lastSeenAt": 1790003600, "push": "apns" }
 ] }</code></pre>
   <p>Les appareils dont la clef publique est enrôlée sur ce compte. <code>lastSeenAt</code> vaut <code>0</code> pour un appareil qui n'a jamais ouvert de session — <strong>le champ est écrit dans les deux cas</strong>, pour qu'aucun client n'ait à distinguer « absent » de « zéro ».</p>
   <div class="note">
@@ -914,7 +914,30 @@ POST /v1/me/devices
     <span class="etiquette">L'appareil d'un autre est « introuvable », et non « interdit »</span>
     <p>Le compte du jeton entre dans la recherche. Répondre <code>403</code> sur l'appareil d'un autre et <code>404</code> sur un identifiant qui n'existe pas laisserait <strong>énumérer les appareils du serveur</strong>, un identifiant à la fois. Les deux cas rendent donc <code>404</code>.</p>
   </div>
+  <div class="note sur">
+    <span class="etiquette">Ses sessions ferment avec lui (0.2.31)</span>
+    <p>Les jetons que l'appareil a obtenus par sa clef cessent de valoir <strong>sur-le-champ</strong>, et non à leur expiration : un téléphone volé ne lit plus rien dès sa révocation. Son abonnement aux notifications disparaît avec lui. Les sessions ouvertes par mot de passe ne sont pas touchées.</p>
+  </div>
   <p>Révoquer deux fois rend <code>404</code> la seconde fois. §9.3.5 de RFC 9110 l'admet : ce qui doit être idempotent est l'<em>effet</em>, et il l'est — l'appareil n'est plus là dans les deux cas. Rendre <code>204</code> à une révocation qui n'a rien retiré laisserait croire qu'on a retiré quelque chose.</p>
+</div>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe get">GET</span><span class="verbe put">PUT</span><span class="verbe delete">DELETE</span><span class="chemin">/v1/me/push</span><span class="portee">jeton d'appareil</span></div>
+  <p>L'abonnement aux notifications de <strong>l'appareil qui appelle</strong> — celui dont la clef a ouvert la session. Aucun identifiant dans le chemin : la session désigne l'appareil, et nul ne peut abonner celui d'un autre. Une session ouverte par mot de passe n'a pas d'appareil, et rend <code>409</code>.</p>
+  <pre><code>PUT /v1/me/push
+{ "channel": "apns", "token": "a1b2c3…" }
+
+PUT /v1/me/push
+{ "channel": "webpush", "endpoint": "https://…", "expirationTime": null,
+  "keys": { "p256dh": "BN…", "auth": "q1…" } }
+
+→ 200 { "push": { "channel": "webpush", "since": 1790000000 } }</code></pre>
+  <p>Trois canaux : <code>apns</code> (jeton APNs en hexadécimal), <code>fcm</code> (jeton d'enregistrement Firebase), <code>webpush</code> (RFC 8030 — l'objet que rend <code>PushSubscription.toJSON()</code>, tel quel, plus <code>channel</code>). Un <code>PUT</code> remplace l'abonnement précédent ; <code>DELETE</code> le retire (<code>204</code>, même s'il n'y en avait pas) ; <code>GET</code> rend le canal et la date, <strong>jamais le jeton</strong>.</p>
+  <div class="note prudence">
+    <span class="etiquette">Une adresse Web Push doit être publique</span>
+    <p>Le serveur écrira vers l'URL que vous donnez. Seule une URL <code>https</code>, sur le port 443, vers un nom public est acceptée : ni adresse IP, ni <code>localhost</code>, ni nom local (<code>.local</code>, <code>.internal</code>, <code>.lan</code>, <code>.home.arpa</code>). Autrement : <code>400</code>.</p>
+  </div>
+  <p>Les notifications ne portent rien du courrier — ni sujet, ni expéditeur : elles disent seulement « synchronise-toi ». L'envoi viendra dans une version suivante ; cette version pose l'abonnement.</p>
 </div>
 
 <div class="ressource">
@@ -1016,6 +1039,11 @@ POST /v1/me/devices
 <div class="note info">
   <span class="etiquette">Le secret est une ressource à part, et elle ne se lit pas</span>
   <p>Aucune méthode ne rend une empreinte de mot de passe : il n'existe pas de représentation du compte qui la contienne. C'est la raison d'être de la séparation, et non un choix de présentation.</p>
+</div>
+
+<div class="note danger">
+  <span class="etiquette">Retirer un compte emporte tout ce qui l'ouvrait</span>
+  <p><code>DELETE /v1/accounts/{compte}</code> retire aussi ses délégations (dans les deux sens), ses mots de passe applicatifs, <strong>ses appareils enrôlés et leurs abonnements</strong>, et <strong>ferme toutes ses sessions</strong>. Un compte recréé plus tard sous le même nom part de rien : aucune clef de l'ancien titulaire ne l'ouvre. Jusqu'à la 0.2.30, les appareils et les sessions survivaient au compte.</p>
 </div>
 
 <p>Une entrée de bannissement porte la source, la longueur du préfixe et le temps restant :</p>

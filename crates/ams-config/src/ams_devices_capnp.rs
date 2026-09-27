@@ -334,11 +334,43 @@ pub mod device {
         pub fn get_last_seen(self) -> u64 {
             self.reader.get_data_field::<u64>(1)
         }
+        #[inline]
+        pub fn get_push_channel(self) -> ::core::result::Result<crate::ams_devices_capnp::PushChannel,::capnp::NotInSchema> {
+            ::core::convert::TryFrom::try_from(self.reader.get_data_field::<u16>(8))
+        }
+        #[inline]
+        pub fn get_push_token(self) -> ::capnp::Result<::capnp::text::Reader<'a>> {
+            ::capnp::traits::FromPointerReader::get_from_pointer(&self.reader.get_pointer_field(4), ::core::option::Option::None)
+        }
+        #[inline]
+        pub fn has_push_token(&self) -> bool {
+            !self.reader.get_pointer_field(4).is_null()
+        }
+        #[inline]
+        pub fn get_push_key(self) -> ::capnp::Result<::capnp::data::Reader<'a>> {
+            ::capnp::traits::FromPointerReader::get_from_pointer(&self.reader.get_pointer_field(5), ::core::option::Option::None)
+        }
+        #[inline]
+        pub fn has_push_key(&self) -> bool {
+            !self.reader.get_pointer_field(5).is_null()
+        }
+        #[inline]
+        pub fn get_push_auth(self) -> ::capnp::Result<::capnp::data::Reader<'a>> {
+            ::capnp::traits::FromPointerReader::get_from_pointer(&self.reader.get_pointer_field(6), ::core::option::Option::None)
+        }
+        #[inline]
+        pub fn has_push_auth(&self) -> bool {
+            !self.reader.get_pointer_field(6).is_null()
+        }
+        #[inline]
+        pub fn get_push_since(self) -> u64 {
+            self.reader.get_data_field::<u64>(3)
+        }
     }
 
     pub struct Builder<'a> { builder: ::capnp::private::layout::StructBuilder<'a> }
     impl <> ::capnp::traits::HasStructSize for Builder<'_,>  {
-        const STRUCT_SIZE: ::capnp::private::layout::StructSize = ::capnp::private::layout::StructSize { data: 2, pointers: 4 };
+        const STRUCT_SIZE: ::capnp::private::layout::StructSize = ::capnp::private::layout::StructSize { data: 4, pointers: 7 };
     }
     impl <> ::capnp::traits::HasTypeId for Builder<'_,>  {
         const TYPE_ID: u64 = _private::TYPE_ID;
@@ -468,6 +500,70 @@ pub mod device {
         pub fn set_last_seen(&mut self, value: u64)  {
             self.builder.set_data_field::<u64>(1, value);
         }
+        #[inline]
+        pub fn get_push_channel(self) -> ::core::result::Result<crate::ams_devices_capnp::PushChannel,::capnp::NotInSchema> {
+            ::core::convert::TryFrom::try_from(self.builder.get_data_field::<u16>(8))
+        }
+        #[inline]
+        pub fn set_push_channel(&mut self, value: crate::ams_devices_capnp::PushChannel)  {
+            self.builder.set_data_field::<u16>(8, value as u16);
+        }
+        #[inline]
+        pub fn get_push_token(self) -> ::capnp::Result<::capnp::text::Builder<'a>> {
+            ::capnp::traits::FromPointerBuilder::get_from_pointer(self.builder.get_pointer_field(4), ::core::option::Option::None)
+        }
+        #[inline]
+        pub fn set_push_token(&mut self, value: impl ::capnp::traits::SetterInput<::capnp::text::Owned>)  {
+            ::capnp::traits::SetterInput::set_pointer_builder(self.builder.reborrow().get_pointer_field(4), value, false).unwrap()
+        }
+        #[inline]
+        pub fn init_push_token(self, size: u32) -> ::capnp::text::Builder<'a> {
+            self.builder.get_pointer_field(4).init_text(size)
+        }
+        #[inline]
+        pub fn has_push_token(&self) -> bool {
+            !self.builder.is_pointer_field_null(4)
+        }
+        #[inline]
+        pub fn get_push_key(self) -> ::capnp::Result<::capnp::data::Builder<'a>> {
+            ::capnp::traits::FromPointerBuilder::get_from_pointer(self.builder.get_pointer_field(5), ::core::option::Option::None)
+        }
+        #[inline]
+        pub fn set_push_key(&mut self, value: ::capnp::data::Reader<'_>)  {
+            self.builder.reborrow().get_pointer_field(5).set_data(value);
+        }
+        #[inline]
+        pub fn init_push_key(self, size: u32) -> ::capnp::data::Builder<'a> {
+            self.builder.get_pointer_field(5).init_data(size)
+        }
+        #[inline]
+        pub fn has_push_key(&self) -> bool {
+            !self.builder.is_pointer_field_null(5)
+        }
+        #[inline]
+        pub fn get_push_auth(self) -> ::capnp::Result<::capnp::data::Builder<'a>> {
+            ::capnp::traits::FromPointerBuilder::get_from_pointer(self.builder.get_pointer_field(6), ::core::option::Option::None)
+        }
+        #[inline]
+        pub fn set_push_auth(&mut self, value: ::capnp::data::Reader<'_>)  {
+            self.builder.reborrow().get_pointer_field(6).set_data(value);
+        }
+        #[inline]
+        pub fn init_push_auth(self, size: u32) -> ::capnp::data::Builder<'a> {
+            self.builder.get_pointer_field(6).init_data(size)
+        }
+        #[inline]
+        pub fn has_push_auth(&self) -> bool {
+            !self.builder.is_pointer_field_null(6)
+        }
+        #[inline]
+        pub fn get_push_since(self) -> u64 {
+            self.builder.get_data_field::<u64>(3)
+        }
+        #[inline]
+        pub fn set_push_since(&mut self, value: u64)  {
+            self.builder.set_data_field::<u64>(3, value);
+        }
     }
 
     pub struct Pipeline { _typeless: ::capnp::any_pointer::Pipeline }
@@ -479,18 +575,18 @@ pub mod device {
     impl Pipeline  {
     }
     mod _private {
-        pub(crate) static ENCODED_NODE: [::capnp::Word; 112] = [
+        pub(crate) static ENCODED_NODE: [::capnp::Word; 191] = [
             ::capnp::word(0, 0, 0, 0, 6, 0, 6, 0),
             ::capnp::word(103, 159, 115, 218, 1, 227, 123, 218),
-            ::capnp::word(18, 0, 0, 0, 1, 0, 2, 0),
+            ::capnp::word(18, 0, 0, 0, 1, 0, 4, 0),
             ::capnp::word(5, 158, 163, 198, 113, 43, 143, 212),
-            ::capnp::word(4, 0, 7, 0, 0, 0, 0, 0),
+            ::capnp::word(7, 0, 7, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(235, 5, 0, 0, 96, 13, 0, 0),
+            ::capnp::word(235, 5, 0, 0, 144, 18, 0, 0),
             ::capnp::word(21, 0, 0, 0, 202, 0, 0, 0),
             ::capnp::word(33, 0, 0, 0, 7, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(29, 0, 0, 0, 87, 1, 0, 0),
+            ::capnp::word(29, 0, 0, 0, 111, 2, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
             ::capnp::word(97, 109, 115, 45, 100, 101, 118, 105),
@@ -498,49 +594,84 @@ pub mod device {
             ::capnp::word(112, 58, 68, 101, 118, 105, 99, 101),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 1, 0, 1, 0),
-            ::capnp::word(24, 0, 0, 0, 3, 0, 4, 0),
+            ::capnp::word(44, 0, 0, 0, 3, 0, 4, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 1, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(153, 0, 0, 0, 50, 0, 0, 0),
+            ::capnp::word(37, 1, 0, 0, 50, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(148, 0, 0, 0, 3, 0, 1, 0),
-            ::capnp::word(160, 0, 0, 0, 2, 0, 1, 0),
+            ::capnp::word(32, 1, 0, 0, 3, 0, 1, 0),
+            ::capnp::word(44, 1, 0, 0, 2, 0, 1, 0),
             ::capnp::word(1, 0, 0, 0, 1, 0, 0, 0),
             ::capnp::word(0, 0, 1, 0, 1, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(157, 0, 0, 0, 26, 0, 0, 0),
+            ::capnp::word(41, 1, 0, 0, 26, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(152, 0, 0, 0, 3, 0, 1, 0),
-            ::capnp::word(164, 0, 0, 0, 2, 0, 1, 0),
+            ::capnp::word(36, 1, 0, 0, 3, 0, 1, 0),
+            ::capnp::word(48, 1, 0, 0, 2, 0, 1, 0),
             ::capnp::word(2, 0, 0, 0, 2, 0, 0, 0),
             ::capnp::word(0, 0, 1, 0, 2, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(161, 0, 0, 0, 42, 0, 0, 0),
+            ::capnp::word(45, 1, 0, 0, 42, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(156, 0, 0, 0, 3, 0, 1, 0),
-            ::capnp::word(168, 0, 0, 0, 2, 0, 1, 0),
+            ::capnp::word(40, 1, 0, 0, 3, 0, 1, 0),
+            ::capnp::word(52, 1, 0, 0, 2, 0, 1, 0),
             ::capnp::word(3, 0, 0, 0, 3, 0, 0, 0),
             ::capnp::word(0, 0, 1, 0, 3, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(165, 0, 0, 0, 82, 0, 0, 0),
+            ::capnp::word(49, 1, 0, 0, 82, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(164, 0, 0, 0, 3, 0, 1, 0),
-            ::capnp::word(176, 0, 0, 0, 2, 0, 1, 0),
+            ::capnp::word(48, 1, 0, 0, 3, 0, 1, 0),
+            ::capnp::word(60, 1, 0, 0, 2, 0, 1, 0),
             ::capnp::word(4, 0, 0, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 1, 0, 4, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(173, 0, 0, 0, 74, 0, 0, 0),
+            ::capnp::word(57, 1, 0, 0, 74, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(172, 0, 0, 0, 3, 0, 1, 0),
-            ::capnp::word(184, 0, 0, 0, 2, 0, 1, 0),
+            ::capnp::word(56, 1, 0, 0, 3, 0, 1, 0),
+            ::capnp::word(68, 1, 0, 0, 2, 0, 1, 0),
             ::capnp::word(5, 0, 0, 0, 1, 0, 0, 0),
             ::capnp::word(0, 0, 1, 0, 5, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(181, 0, 0, 0, 74, 0, 0, 0),
+            ::capnp::word(65, 1, 0, 0, 74, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(180, 0, 0, 0, 3, 0, 1, 0),
-            ::capnp::word(192, 0, 0, 0, 2, 0, 1, 0),
+            ::capnp::word(64, 1, 0, 0, 3, 0, 1, 0),
+            ::capnp::word(76, 1, 0, 0, 2, 0, 1, 0),
+            ::capnp::word(6, 0, 0, 0, 8, 0, 0, 0),
+            ::capnp::word(0, 0, 1, 0, 6, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(73, 1, 0, 0, 98, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(72, 1, 0, 0, 3, 0, 1, 0),
+            ::capnp::word(84, 1, 0, 0, 2, 0, 1, 0),
+            ::capnp::word(7, 0, 0, 0, 4, 0, 0, 0),
+            ::capnp::word(0, 0, 1, 0, 7, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(81, 1, 0, 0, 82, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(80, 1, 0, 0, 3, 0, 1, 0),
+            ::capnp::word(92, 1, 0, 0, 2, 0, 1, 0),
+            ::capnp::word(8, 0, 0, 0, 5, 0, 0, 0),
+            ::capnp::word(0, 0, 1, 0, 8, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(89, 1, 0, 0, 66, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(84, 1, 0, 0, 3, 0, 1, 0),
+            ::capnp::word(96, 1, 0, 0, 2, 0, 1, 0),
+            ::capnp::word(9, 0, 0, 0, 6, 0, 0, 0),
+            ::capnp::word(0, 0, 1, 0, 9, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(93, 1, 0, 0, 74, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(92, 1, 0, 0, 3, 0, 1, 0),
+            ::capnp::word(104, 1, 0, 0, 2, 0, 1, 0),
+            ::capnp::word(10, 0, 0, 0, 3, 0, 0, 0),
+            ::capnp::word(0, 0, 1, 0, 10, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(101, 1, 0, 0, 82, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(100, 1, 0, 0, 3, 0, 1, 0),
+            ::capnp::word(112, 1, 0, 0, 2, 0, 1, 0),
             ::capnp::word(108, 111, 103, 105, 110, 0, 0, 0),
             ::capnp::word(12, 0, 0, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -592,6 +723,50 @@ pub mod device {
             ::capnp::word(9, 0, 0, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(112, 117, 115, 104, 67, 104, 97, 110),
+            ::capnp::word(110, 101, 108, 0, 0, 0, 0, 0),
+            ::capnp::word(15, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(4, 237, 161, 186, 182, 194, 97, 157),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(15, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(112, 117, 115, 104, 84, 111, 107, 101),
+            ::capnp::word(110, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(12, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(12, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(112, 117, 115, 104, 75, 101, 121, 0),
+            ::capnp::word(13, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(13, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(112, 117, 115, 104, 65, 117, 116, 104),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(13, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(13, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(112, 117, 115, 104, 83, 105, 110, 99),
+            ::capnp::word(101, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(9, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(9, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
         ];
         pub(crate) fn get_field_types(index: u16) -> ::capnp::introspect::Type {
             match index {
@@ -601,6 +776,11 @@ pub mod device {
                 3 => <::capnp::data::Owned as ::capnp::introspect::Introspect>::introspect(),
                 4 => <u64 as ::capnp::introspect::Introspect>::introspect(),
                 5 => <u64 as ::capnp::introspect::Introspect>::introspect(),
+                6 => <crate::ams_devices_capnp::PushChannel as ::capnp::introspect::Introspect>::introspect(),
+                7 => <::capnp::text::Owned as ::capnp::introspect::Introspect>::introspect(),
+                8 => <::capnp::data::Owned as ::capnp::introspect::Introspect>::introspect(),
+                9 => <::capnp::data::Owned as ::capnp::introspect::Introspect>::introspect(),
+                10 => <u64 as ::capnp::introspect::Introspect>::introspect(),
                 _ => ::capnp::introspect::panic_invalid_field_index(index),
             }
         }
@@ -614,9 +794,87 @@ pub mod device {
             MEMBERS_BY_DISCRIMINANT,
             MEMBERS_BY_NAME
         );
-        pub(crate) static NONUNION_MEMBERS : &[u16] = &[0,1,2,3,4,5];
+        pub(crate) static NONUNION_MEMBERS : &[u16] = &[0,1,2,3,4,5,6,7,8,9,10];
         pub(crate) static MEMBERS_BY_DISCRIMINANT : &[u16] = &[];
-        pub(crate) static MEMBERS_BY_NAME : &[u16] = &[4,1,5,0,2,3];
+        pub(crate) static MEMBERS_BY_NAME : &[u16] = &[4,1,5,0,2,3,9,6,8,10,7];
         pub(crate) const TYPE_ID: u64 = 0xda7b_e301_da73_9f67;
     }
+}
+
+#[repr(u16)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PushChannel {
+    None = 0,
+    Apns = 1,
+    Fcm = 2,
+    WebPush = 3,
+}
+
+impl ::capnp::introspect::Introspect for PushChannel {
+    fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Enum(::capnp::introspect::RawEnumSchema::new(&push_channel::ARENA, push_channel::get_annotation_types)).into() }
+}
+impl ::core::convert::From<PushChannel> for ::capnp::dynamic_value::Reader<'_> {
+    fn from(e: PushChannel) -> Self { ::capnp::dynamic_value::Enum::new(e.into(), ::capnp::introspect::RawEnumSchema::new(&push_channel::ARENA, push_channel::get_annotation_types).into()).into() }
+}
+impl ::core::convert::TryFrom<u16> for PushChannel {
+    type Error = ::capnp::NotInSchema;
+    fn try_from(value: u16) -> ::core::result::Result<Self, <PushChannel as ::core::convert::TryFrom<u16>>::Error> {
+        match value {
+            0 => ::core::result::Result::Ok(Self::None),
+            1 => ::core::result::Result::Ok(Self::Apns),
+            2 => ::core::result::Result::Ok(Self::Fcm),
+            3 => ::core::result::Result::Ok(Self::WebPush),
+            n => ::core::result::Result::Err(::capnp::NotInSchema(n)),
+        }
+    }
+}
+impl From<PushChannel> for u16 {
+    #[inline]
+    fn from(x: PushChannel) -> u16 { x as u16 }
+}
+impl ::capnp::traits::HasTypeId for PushChannel {
+    const TYPE_ID: u64 = 0x9d61_c2b6_baa1_ed04u64;
+}
+mod push_channel {
+pub(crate) static ENCODED_NODE: [::capnp::Word; 35] = [
+    ::capnp::word(0, 0, 0, 0, 6, 0, 6, 0),
+    ::capnp::word(4, 237, 161, 186, 182, 194, 97, 157),
+    ::capnp::word(18, 0, 0, 0, 2, 0, 0, 0),
+    ::capnp::word(5, 158, 163, 198, 113, 43, 143, 212),
+    ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+    ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+    ::capnp::word(146, 18, 0, 0, 212, 18, 0, 0),
+    ::capnp::word(21, 0, 0, 0, 242, 0, 0, 0),
+    ::capnp::word(33, 0, 0, 0, 7, 0, 0, 0),
+    ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+    ::capnp::word(29, 0, 0, 0, 103, 0, 0, 0),
+    ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+    ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+    ::capnp::word(97, 109, 115, 45, 100, 101, 118, 105),
+    ::capnp::word(99, 101, 115, 46, 99, 97, 112, 110),
+    ::capnp::word(112, 58, 80, 117, 115, 104, 67, 104),
+    ::capnp::word(97, 110, 110, 101, 108, 0, 0, 0),
+    ::capnp::word(0, 0, 0, 0, 1, 0, 1, 0),
+    ::capnp::word(16, 0, 0, 0, 1, 0, 2, 0),
+    ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+    ::capnp::word(41, 0, 0, 0, 42, 0, 0, 0),
+    ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+    ::capnp::word(1, 0, 0, 0, 0, 0, 0, 0),
+    ::capnp::word(33, 0, 0, 0, 42, 0, 0, 0),
+    ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+    ::capnp::word(2, 0, 0, 0, 0, 0, 0, 0),
+    ::capnp::word(25, 0, 0, 0, 34, 0, 0, 0),
+    ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+    ::capnp::word(3, 0, 0, 0, 0, 0, 0, 0),
+    ::capnp::word(17, 0, 0, 0, 66, 0, 0, 0),
+    ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+    ::capnp::word(110, 111, 110, 101, 0, 0, 0, 0),
+    ::capnp::word(97, 112, 110, 115, 0, 0, 0, 0),
+    ::capnp::word(102, 99, 109, 0, 0, 0, 0, 0),
+    ::capnp::word(119, 101, 98, 80, 117, 115, 104, 0),
+];
+pub(crate) fn get_annotation_types(child_index: Option<u16>, index: u32) -> ::capnp::introspect::Type {
+    ::capnp::introspect::panic_invalid_annotation_indices(child_index, index)
+}
+pub(crate) static ARENA: ::capnp::private::arena::GeneratedCodeArena = ::capnp::private::arena::GeneratedCodeArena::new(&ENCODED_NODE);
 }

@@ -668,6 +668,14 @@ pub enum Error {
     /// est assez petit pour qu'il en déduise le secret.
     BadDeviceKey(String),
 
+    /// L'abonnement aux notifications d'un appareil ne passe pas la règle de
+    /// [`crate::Push::new`] — un canal inconnu, un jeton ou une adresse de
+    /// mauvaise forme.
+    ///
+    /// Refusé au chargement plutôt qu'ignoré : un abonnement retouché à la
+    /// main ferait contacter une adresse que l'API aurait refusée.
+    BadPush(String),
+
     /// Deux mots de passe applicatifs portent le même identifiant.
     ///
     /// L'identifiant est ce par quoi la vérification TROUVE l'entrée : deux
@@ -738,6 +746,10 @@ impl fmt::Display for Error {
             Error::BadDeviceKey(id) => write!(
                 f,
                 "la clef de l'appareil `{id}` n'est pas un point de la courbe P-256"
+            ),
+            Error::BadPush(id) => write!(
+                f,
+                "l'abonnement aux notifications de l'appareil `{id}` est refusé"
             ),
             Error::BadDelegation(couple) => write!(
                 f,

@@ -120,7 +120,15 @@ impl Api for ApiEssai {
     // **LES SESSIONS NE SONT PAS CE QU'ÉPROUVE CE BANC.** Une doublure qui dit
     // « toujours ouverte » laisse les essais d'avant valoir exactement ce qu'ils
     // valaient ; le registre, lui, a son banc à part.
-    fn open_session(&self, _login: &str, _nonce: u64, _expiry: u64, _maintenant: u64) {}
+    fn open_session(
+        &self,
+        _login: &str,
+        _nonce: u64,
+        _expiry: u64,
+        _maintenant: u64,
+        _device: Option<&str>,
+    ) {
+    }
 
     fn session_open(&self, _login: &str, _nonce: u64, _maintenant: u64) -> bool {
         true

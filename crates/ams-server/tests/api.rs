@@ -1329,6 +1329,7 @@ fn un_utilisateur_voit_et_revoque_ses_appareils() {
         public_key: clef.clone(),
         enrolled: 1_790_000_000,
         last_seen: vu,
+        push: None,
     };
     let appareils = atelier.0.join("appareils.bin");
     std::fs::write(
@@ -2215,6 +2216,176 @@ fn une_clef_enrolee_ouvre_une_session_et_le_defi_ne_sert_qu_une_fois() {
     assert_eq!(
         code, "401",
         "une signature d'un AUTRE défi ne doit pas passer"
+    );
+
+    // ── L'ABONNEMENT AUX NOTIFICATIONS, PAR LA SESSION DE L'APPAREIL ──────
+    //
+    // `jeton` a été ouvert par la clef : c'est lui qui désigne l'appareil. Un
+    // jeton ouvert par mot de passe n'en désigne aucun.
+    let appeler = |verbe: &str, chemin: &str, corps: &str, avec: &str| -> (String, String) {
+        let mut commande = std::process::Command::new("curl");
+        commande
+            .args(["-s", "--insecure", "--http2", "-X", verbe])
+            .args(["-H", &format!("Authorization: Bearer {avec}")])
+            .args(["-w", "\n%{http_code}"]);
+        if !corps.is_empty() {
+            commande
+                .args(["-H", "Content-Type: application/json"])
+                .args(["-d", corps]);
+        }
+        let sortie = commande
+            .arg(format!("{base}{chemin}"))
+            .output()
+            .expect("curl s'exécute");
+        let tout = String::from_utf8_lossy(&sortie.stdout).into_owned();
+        let (corps, code) = tout.rsplit_once('\n').unwrap_or(("", ""));
+        (corps.to_string(), code.to_string())
+    };
+    let (corps, code) = appeler("GET", "/v1/me/push", "", &jeton);
+    assert_eq!((code.as_str(), corps.as_str()), ("200", r#"{"push":null}"#));
+    let apns = "ab".repeat(32);
+    let (corps, code) = appeler(
+        "PUT",
+        "/v1/me/push",
+        &format!(r#"{{"channel":"apns","token":"{apns}"}}"#),
+        &jeton,
+    );
+    assert_eq!(code, "200", "{corps}");
+    assert!(corps.contains(r#""channel":"apns""#), "{corps}");
+    assert!(!corps.contains(&apns), "le jeton ne revient pas : {corps}");
+    let (corps, _) = appeler("GET", "/v1/me/devices", "", &jeton);
+    assert!(corps.contains(r#""push":"apns""#), "{corps}");
+    // **LE SERVEUR NE POSTERA PAS VERS L'INTÉRIEUR.**
+    let cle = en_base64url(&cle_publique());
+    let (corps, code) = appeler(
+        "PUT",
+        "/v1/me/push",
+        &format!(
+            r#"{{"channel":"webpush","endpoint":"https://10.0.0.1/x","keys":{{"p256dh":"{cle}","auth":"AAAAAAAAAAAAAAAAAAAAAA"}}}}"#
+        ),
+        &jeton,
+    );
+    assert_eq!(code, "400", "{corps}");
+    let (corps, code) = appeler(
+        "PUT",
+        "/v1/me/push",
+        &format!(
+            r#"{{"channel":"webpush","endpoint":"https://push.example.com/x","keys":{{"p256dh":"{cle}","auth":"AAAAAAAAAAAAAAAAAAAAAA"}}}}"#
+        ),
+        &jeton,
+    );
+    assert_eq!(code, "200", "{corps}");
+    assert!(corps.contains(r#""channel":"webpush""#), "{corps}");
+    // Un canal qu'on ne connaît pas.
+    let (_, code) = appeler(
+        "PUT",
+        "/v1/me/push",
+        r#"{"channel":"sms","token":"x"}"#,
+        &jeton,
+    );
+    assert_eq!(code, "400");
+    // **UNE SESSION PAR MOT DE PASSE N'A PAS D'APPAREIL** : `409`.
+    let (corps, _) = poster(
+        "/v1/tokens",
+        r#"{"login":"marie","password":"secret-initial"}"#,
+        None,
+    );
+    let par_mot_de_passe = champ(&corps, "token");
+    for (verbe, corps) in [
+        ("GET", ""),
+        ("PUT", r#"{"channel":"fcm","token":"x"}"#),
+        ("DELETE", ""),
+    ] {
+        let (dit, code) = appeler(verbe, "/v1/me/push", corps, &par_mot_de_passe);
+        assert_eq!(code, "409", "{verbe} : {dit}");
+    }
+    let (_, code) = appeler("DELETE", "/v1/me/push", "", &jeton);
+    assert_eq!(code, "204");
+    let (corps, _) = appeler("GET", "/v1/me/push", "", &jeton);
+    assert_eq!(corps, r#"{"push":null}"#);
+
+    // ── RÉVOQUER L'APPAREIL FERME SES SESSIONS, SUR-LE-CHAMP ─────────────
+    let (_, code) = appeler(
+        "DELETE",
+        &format!("/v1/me/devices/{appareil}"),
+        "",
+        &par_mot_de_passe,
+    );
+    assert_eq!(code, "204");
+    let (_, code) = appeler("GET", "/v1/mailboxes", "", &jeton);
+    assert_eq!(
+        code, "401",
+        "le jeton d'un appareil révoqué ne doit plus rien ouvrir"
+    );
+    // Celui du mot de passe, lui, vit toujours.
+    let (_, code) = appeler("GET", "/v1/mailboxes", "", &par_mot_de_passe);
+    assert_eq!(code, "200");
+
+    // ── UN COMPTE RETIRÉ EMPORTE SES APPAREILS ET SES SESSIONS ────────────
+    //
+    // Réenrôlé, l'appareil rouvre une session ; puis le compte est retiré et
+    // recréé sous le même nom. **L'ANCIENNE CLEF NE DOIT PAS OUVRIR LE NOUVEAU
+    // COMPTE**, ni l'ancien jeton valoir encore.
+    let (corps, _) = poster(
+        "/v1/invitations",
+        r#"{"login":"marie"}"#,
+        Some(&format!("Authorization: Bearer {admin}")),
+    );
+    let invitation = champ(&corps, "invitation");
+    let (corps, code) = poster(
+        "/v1/devices",
+        &format!(
+            r#"{{"invitation":"{invitation}","publicKey":"{}","name":"le retour"}}"#,
+            en_base64url(&cle_publique())
+        ),
+        None,
+    );
+    assert_eq!(code, "201", "{corps}");
+    let revenu = champ(&corps, "id");
+    let ouvrir_par_la_clef = |id: &str| -> (String, String) {
+        let (corps, _) = poster(
+            "/v1/sessions/challenge",
+            &format!(r#"{{"login":"marie","deviceId":"{id}"}}"#),
+            None,
+        );
+        let defi = champ(&corps, "challenge");
+        let mut a_signer = Vec::new();
+        for (rang, morceau) in ["ams-session", "mail.example.com", defi.as_str()]
+            .iter()
+            .enumerate()
+        {
+            if rang > 0 {
+                a_signer.push(0);
+            }
+            a_signer.extend_from_slice(morceau.as_bytes());
+        }
+        let signature = signer(&ams_sasl::sha256(&a_signer));
+        poster(
+            "/v1/sessions",
+            &format!(r#"{{"challenge":"{defi}","signature":"{signature}"}}"#),
+            None,
+        )
+    };
+    let (corps, code) = ouvrir_par_la_clef(&revenu);
+    assert_eq!(code, "201", "{corps}");
+    let jeton_revenu = champ(&corps, "token");
+    let (_, code) = appeler("DELETE", "/v1/accounts/marie", "", &admin);
+    assert_eq!(code, "204");
+    let (_, code) = appeler("GET", "/v1/mailboxes", "", &jeton_revenu);
+    assert_eq!(code, "401", "le jeton d'un compte retiré ne vaut plus");
+    let (_, code) = appeler("GET", "/v1/mailboxes", "", &par_mot_de_passe);
+    assert_eq!(code, "401", "ni celui de son mot de passe");
+    let (corps, code) = appeler(
+        "PUT",
+        "/v1/accounts/marie",
+        r#"{"password":"un-tout-autre-secret","addresses":["marie@example.com"]}"#,
+        &admin,
+    );
+    assert_eq!(code, "201", "{corps}");
+    let (corps, code) = ouvrir_par_la_clef(&revenu);
+    assert_eq!(
+        code, "401",
+        "l'ancienne clef ne doit pas ouvrir le compte recréé : {corps}"
     );
 }
 

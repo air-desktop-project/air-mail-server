@@ -194,6 +194,7 @@ impl<A: Api> ams_h3::Service for ServiceH3<'_, A> {
                         identifiant,
                         maintenant.saturating_add(self.session.duree()),
                         maintenant,
+                        None,
                     );
                 }
                 (suite.status(), JSON_MEDIA_TYPE, suite.body())
@@ -228,6 +229,7 @@ impl<A: Api> ams_h3::Service for ServiceH3<'_, A> {
                         identifiant,
                         maintenant.saturating_add(self.session.duree()),
                         maintenant,
+                        Some(device),
                     );
                 }
                 (suite.status(), JSON_MEDIA_TYPE, suite.body())
@@ -304,6 +306,7 @@ impl<A: Api> ams_h3::Service for ServiceH3<'_, A> {
                             range: tete.field(b"range"),
                             content_range: tete.field(b"content-range"),
                             idempotency_key: tete.field(b"idempotency-key"),
+                            nonce,
                         },
                         &mut self.rendu,
                     );

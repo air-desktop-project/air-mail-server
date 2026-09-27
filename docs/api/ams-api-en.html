@@ -839,7 +839,7 @@ The message body.
   <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/me/devices</span><span class="portee">valid token</span></div>
   <pre><code>{ "devices": [
     { "id": "a1b2c3", "name": "Marie's iPhone",
-      "enrolledAt": 1790000000, "lastSeenAt": 1790003600 }
+      "enrolledAt": 1790000000, "lastSeenAt": 1790003600, "push": "apns" }
 ] }</code></pre>
   <p>The devices whose public key is enrolled on this account. <code>lastSeenAt</code> is <code>0</code> for a device that has never opened a session — <strong>the field is written either way</strong>, so that no client has to tell "absent" from "zero".</p>
   <div class="note">
@@ -914,7 +914,30 @@ POST /v1/me/devices
     <span class="etiquette">Someone else's device is "not found", not "forbidden"</span>
     <p>The token's account is part of the lookup. Returning <code>403</code> for someone else's device and <code>404</code> for an id that does not exist would allow <strong>enumerating the server's devices</strong>, one id at a time. Both cases therefore return <code>404</code>.</p>
   </div>
+  <div class="note sur">
+    <span class="etiquette">Its sessions close with it (0.2.31)</span>
+    <p>The tokens the device obtained with its key stop working <strong>immediately</strong>, not when they expire: a stolen phone reads nothing more once revoked. Its notification subscription goes with it. Sessions opened by password are not affected.</p>
+  </div>
   <p>Revoking twice returns <code>404</code> the second time. RFC 9110 §9.3.5 allows this: what must be idempotent is the <em>effect</em>, and it is — the device is gone either way. Returning <code>204</code> to a revocation that removed nothing would suggest something had been removed.</p>
+</div>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe get">GET</span><span class="verbe put">PUT</span><span class="verbe delete">DELETE</span><span class="chemin">/v1/me/push</span><span class="portee">device token</span></div>
+  <p>The notification subscription of <strong>the calling device</strong> — the one whose key opened the session. No id in the path: the session designates the device, and nobody can subscribe someone else's. A session opened by password has no device, and returns <code>409</code>.</p>
+  <pre><code>PUT /v1/me/push
+{ "channel": "apns", "token": "a1b2c3…" }
+
+PUT /v1/me/push
+{ "channel": "webpush", "endpoint": "https://…", "expirationTime": null,
+  "keys": { "p256dh": "BN…", "auth": "q1…" } }
+
+→ 200 { "push": { "channel": "webpush", "since": 1790000000 } }</code></pre>
+  <p>Three channels: <code>apns</code> (APNs token in hexadecimal), <code>fcm</code> (Firebase registration token), <code>webpush</code> (RFC 8030 — the object <code>PushSubscription.toJSON()</code> returns, as is, plus <code>channel</code>). A <code>PUT</code> replaces the previous subscription; <code>DELETE</code> removes it (<code>204</code>, even if there was none); <code>GET</code> returns the channel and date, <strong>never the token</strong>.</p>
+  <div class="note prudence">
+    <span class="etiquette">A Web Push address must be public</span>
+    <p>The server will write to the URL you give. Only an <code>https</code> URL, on port 443, to a public name is accepted: no IP address, no <code>localhost</code>, no local name (<code>.local</code>, <code>.internal</code>, <code>.lan</code>, <code>.home.arpa</code>). Otherwise: <code>400</code>.</p>
+  </div>
+  <p>Notifications carry nothing from the mail — no subject, no sender: they only say "synchronise". Sending comes in a later version; this version sets up the subscription.</p>
 </div>
 
 <div class="ressource">
@@ -1016,6 +1039,11 @@ POST /v1/me/devices
 <div class="note info">
   <span class="etiquette">The secret is a separate resource, and it cannot be read</span>
   <p>No method returns a password hash: there is no representation of the account that contains one. That is the reason for the separation, not a presentation choice.</p>
+</div>
+
+<div class="note danger">
+  <span class="etiquette">Removing an account takes everything that opened it</span>
+  <p><code>DELETE /v1/accounts/{account}</code> also removes its delegations (both ways), its app passwords, <strong>its enrolled devices and their subscriptions</strong>, and <strong>closes all its sessions</strong>. An account recreated later under the same name starts from nothing: no key of the former holder opens it. Up to 0.2.30, devices and sessions outlived the account.</p>
 </div>
 
 <p>A ban entry carries the source, the prefix length and the time remaining:</p>

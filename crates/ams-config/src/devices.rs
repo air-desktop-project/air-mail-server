@@ -20,8 +20,9 @@ use ams_auth::{CLE_OCTETS, Cle, check_login};
 use capnp::message::ReaderOptions;
 use capnp::serialize;
 
-use crate::ams_devices_capnp::devices;
+use crate::ams_devices_capnp::{PushChannel as CanalLu, devices};
 use crate::codec::{Error, TRAVERSAL_LIMIT_WORDS, texte};
+use crate::push::{Push, PushChannel};
 
 /// Ce qu'un identifiant d'appareil peut faire de long.
 ///
@@ -60,6 +61,11 @@ pub struct Device {
     /// date que se compare l'instant d'émission d'un défi, et en secondes deux
     /// sessions enchaînées dans la même seconde se prenaient pour un rejeu.
     pub last_seen: u64,
+    /// Son abonnement aux notifications, s'il en a un.
+    ///
+    /// **DANS LA FICHE, ET NON À CÔTÉ** : révoquer l'appareil l'éteint, sans
+    /// qu'un second fichier puisse l'oublier.
+    pub push: Option<Push>,
 }
 
 /// Lit un fichier d'appareils.
@@ -124,6 +130,43 @@ pub fn decode_devices(octets: &[u8]) -> Result<Vec<Device>, Error> {
         }
         let public_key = Cle::lire(octets).map_err(|_| Error::BadDeviceKey(id.clone()))?;
 
+        // UN ABONNEMENT RELU PASSE LA MÊME RÈGLE QU'À L'ENTRÉE : un fichier
+        // retouché à la main ne ferait pas contacter une adresse que l'API
+        // aurait refusée.
+        let canal = match appareil.get_push_channel() {
+            Ok(CanalLu::None) => None,
+            Ok(CanalLu::Apns) => Some(PushChannel::Apns),
+            Ok(CanalLu::Fcm) => Some(PushChannel::Fcm),
+            Ok(CanalLu::WebPush) => Some(PushChannel::WebPush),
+            Err(_) => return Err(Error::BadPush(id)),
+        };
+        let push = match canal {
+            None => None,
+            Some(canal) => Some(
+                // UN CHAMP ILLISIBLE SE LIT VIDE, et la règle le refuse : un
+                // jeton vide n'est d'aucun canal, une clef vide n'est pas un
+                // point. Le magasin est rejeté comme pour toute autre faute.
+                Push::new(
+                    canal,
+                    appareil
+                        .get_push_token()
+                        .ok()
+                        .and_then(|lu| texte(lu).ok())
+                        .unwrap_or_default(),
+                    appareil
+                        .get_push_key()
+                        .map(<[u8]>::to_vec)
+                        .unwrap_or_default(),
+                    appareil
+                        .get_push_auth()
+                        .map(<[u8]>::to_vec)
+                        .unwrap_or_default(),
+                    appareil.get_push_since(),
+                )
+                .map_err(|_| Error::BadPush(id.clone()))?,
+            ),
+        };
+
         appareils.push(Device {
             login,
             id,
@@ -131,6 +174,7 @@ pub fn decode_devices(octets: &[u8]) -> Result<Vec<Device>, Error> {
             public_key,
             enrolled: appareil.get_enrolled(),
             last_seen: appareil.get_last_seen(),
+            push,
         });
     }
     Ok(appareils)
@@ -157,6 +201,17 @@ pub fn encode_devices(appareils: &[Device]) -> Result<Vec<u8>, Error> {
             case.set_public_key(&appareil.public_key.octets());
             case.set_enrolled(appareil.enrolled);
             case.set_last_seen(appareil.last_seen);
+            if let Some(push) = &appareil.push {
+                case.set_push_channel(match push.channel() {
+                    PushChannel::Apns => CanalLu::Apns,
+                    PushChannel::Fcm => CanalLu::Fcm,
+                    PushChannel::WebPush => CanalLu::WebPush,
+                });
+                case.set_push_token(push.token());
+                case.set_push_key(push.key());
+                case.set_push_auth(push.auth());
+                case.set_push_since(push.since());
+            }
         }
     }
     Ok(serialize::write_message_to_words(&message))

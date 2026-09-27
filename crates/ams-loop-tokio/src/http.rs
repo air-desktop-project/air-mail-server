@@ -267,6 +267,13 @@ pub struct Appel<'a> {
     /// Le titulaire de la boîte visée, quand ce n'est pas qui appelle. Voir
     /// `ams_api::Resolved::owner`.
     pub owner: Option<&'a str>,
+    /// L'identifiant de la session qui porte cette requête, tel que le jeton
+    /// le dit.
+    ///
+    /// **IL NE PROUVE RIEN À LUI SEUL** — le sceau et le registre l'ont déjà
+    /// vérifié avant qu'on arrive ici. Il sert à retrouver, dans le registre,
+    /// l'appareil qui a ouvert la session.
+    pub nonce: u64,
 }
 
 /// Tout ce qui touche au magasin vit derrière ceci : la boucle n'ouvre aucune
@@ -368,7 +375,18 @@ pub trait Api {
     /// Appelée APRÈS qu'un jeton a été émis, et jamais avant : inscrire une
     /// session dont l'émission échouerait laisserait une entrée que personne ne
     /// fermera.
-    fn open_session(&self, login: &str, nonce: u64, expiry: u64, maintenant: u64);
+    ///
+    /// `device` est l'appareil dont la clef a ouvert la session, ou `None`
+    /// pour un mot de passe : c'est ce qui permet de fermer ses sessions quand
+    /// on le révoque, et de rattacher une requête à son abonnement.
+    fn open_session(
+        &self,
+        login: &str,
+        nonce: u64,
+        expiry: u64,
+        maintenant: u64,
+        device: Option<&str>,
+    );
 
     /// Cette session est-elle encore ouverte ?
     ///
@@ -559,6 +577,7 @@ where
                         identifiant,
                         maintenant.saturating_add(service.session.duree()),
                         maintenant,
+                        None,
                     );
                 }
                 (suite.status(), JSON_MEDIA_TYPE, suite.body())
@@ -596,6 +615,7 @@ where
                         identifiant,
                         maintenant.saturating_add(service.session.duree()),
                         maintenant,
+                        Some(device),
                     );
                 }
                 (suite.status(), JSON_MEDIA_TYPE, suite.body())
@@ -692,6 +712,7 @@ where
                             range: demande.tete.field(b"range"),
                             content_range: demande.tete.field(b"content-range"),
                             idempotency_key: demande.tete.field(b"idempotency-key"),
+                            nonce,
                         },
                         &mut rendu,
                     );
