@@ -387,6 +387,11 @@ pub struct MaildirDelivery {
     ///
     /// **Sans elle, on n'écrit qu'en son nom**, comme avant la délégation.
     delegations: Option<Arc<crate::delegations::Delegations>>,
+    /// Le réveil des appareils abonnés, prévenu de chaque boîte qui reçoit.
+    ///
+    /// **Sans lui, personne n'est réveillé** — c'est l'état d'un serveur sans
+    /// magasin d'appareils.
+    reveil: Option<Arc<crate::reveil::Reveil>>,
 }
 
 impl MaildirDelivery {
@@ -421,7 +426,15 @@ impl MaildirDelivery {
             entetes: None,
             incidents,
             delegations: None,
+            reveil: None,
         }
+    }
+
+    /// Lui donne le réveil : chaque boîte qui reçoit un message le lui signale.
+    #[must_use]
+    pub fn avec_reveil(mut self, reveil: Arc<crate::reveil::Reveil>) -> Self {
+        self.reveil = Some(reveil);
+        self
     }
 
     /// Lui donne la table des délégations : un compte qui tient le droit
@@ -739,6 +752,9 @@ impl Delivery for MaildirDelivery {
         // « quelque part » est une boîte d'ici. L'ordre inverse ferait partir un
         // doublon chez un tiers, que personne ne peut plus rattraper.
         let ecarte = self.ecarte;
+        // Les boîtes où le message est VRAIMENT arrivé, hors quarantaine : ce
+        // sont elles, et elles seules, qui réveillent.
+        let mut recues: Vec<String> = Vec::new();
         tokio::task::block_in_place(|| {
             for (compte, arrivee) in arrivees {
                 // TOUT OU RIEN N'EST PAS TENABLE ICI : les `rename` sont
@@ -747,16 +763,22 @@ impl Delivery for MaildirDelivery {
                 // le message en double dans ces boîtes-là. C'est le compromis
                 // que fait tout serveur sans file d'attente, et le doublon est
                 // moins grave que la perte.
-                let ecrit = match ecarte
+                let quarantaine = ecarte
                     .then(|| self.dossier_de_quarantaine(&compte))
-                    .flatten()
-                {
+                    .flatten();
+                // **UN POURRIEL NE FAIT PAS SONNER UN TÉLÉPHONE** : ce qui va en
+                // quarantaine ne réveille personne.
+                let reveille = quarantaine.is_none();
+                let ecrit = match quarantaine {
                     // **LE DOSSIER ADOPTE LE MESSAGE, IL NE LE RECOPIE PAS** :
                     // le fichier est déjà écrit dans le `tmp/` de la boîte de
                     // réception, et un `rename` suffit à le nommer ailleurs.
                     Some(dossier) => dossier.adopt(arrivee),
                     None => arrivee.commit(),
                 };
+                if ecrit.is_ok() && reveille && !recues.contains(&compte) {
+                    recues.push(compte.clone());
+                }
                 if ecrit.is_err() {
                     // **LE PIRE DES ÉCHECS DE CE FICHIER** : le message était
                     // ENTIÈREMENT reçu. Son expéditeur l'a transmis en entier
@@ -768,6 +790,12 @@ impl Delivery for MaildirDelivery {
             }
             Ok(())
         })?;
+        // **APRÈS L'ÉCRITURE, ET SANS ATTENDRE** : le signal ne retient rien.
+        if let Some(reveil) = &self.reveil {
+            for compte in &recues {
+                reveil.signaler(compte);
+            }
+        }
         self.deposer_les_sortants()
     }
 

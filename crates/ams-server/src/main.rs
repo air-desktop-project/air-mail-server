@@ -44,6 +44,7 @@ mod journal;
 mod magasin;
 mod policy;
 mod pop3;
+mod reveil;
 mod scram;
 mod sessions;
 
@@ -200,6 +201,7 @@ fn monter_l_api(
     scram: Option<Arc<crate::scram::Verificateurs>>,
     applicatifs: Option<Arc<crate::applicatifs::Applicatifs>>,
     delegations: Option<Arc<crate::delegations::Delegations>>,
+    reveil: Option<Arc<crate::reveil::Reveil>>,
     file: Option<ams_loop_tokio::Spool>,
     message_max: usize,
     port_h3: Option<u16>,
@@ -307,6 +309,12 @@ fn monter_l_api(
             // s'atteint, et leurs routes d'administration rendent 501.
             let api = match delegations {
                 Some(magasin) => api.avec_delegations(magasin),
+                None => api,
+            };
+            // **ET LE RÉVEIL** : ce que l'API remet localement réveille les
+            // appareils abonnés, comme ce qui arrive par SMTP.
+            let api = match reveil {
+                Some(reveil) => api.avec_reveil(reveil),
                 None => api,
             };
             // **ET LES BROUILLONS** : sans répertoire, `/v1/drafts` rend 501, et
@@ -1125,6 +1133,17 @@ async fn servir(fichier: &Path) -> Result<(), String> {
             chargees,
         )))
     };
+    // **LE RÉVEIL DES APPAREILS ABONNÉS** : sans magasin d'appareils, personne
+    // n'est abonné, et il ne démarre pas. Il ne transmet encore rien — aucun
+    // transport vers Apple, Google ou Web Push n'est écrit — : il décide et
+    // compte, et `/v1/metrics` le montre.
+    let reveil = (!options.devices.is_empty()).then(|| {
+        crate::reveil::demarrer(crate::reveil::Sources {
+            appareils: Arc::clone(&appareils),
+            delegations: delegations.clone(),
+            envoyeur: Arc::new(crate::reveil::SansTransport),
+        })
+    });
     // **ET POUR LES MOTS DE PASSE APPLICATIFS** : une révocation faite depuis
     // l'API ou le terminal vaut tout de suite, sur les trois protocoles.
     let applicatifs = if options.app_passwords.is_empty() {
@@ -2362,6 +2381,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         verificateurs_scram.clone(),
         applicatifs.clone(),
         delegations.clone(),
+        reveil.clone(),
         file.as_ref().map(|attente| attente.as_ref().clone()),
         message_max,
         port_h3,
@@ -2579,6 +2599,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         let signature_de_la_remise = signature_de_la_remise.clone();
         let file_pour_la_remise = file_pour_la_remise.clone();
         let delegations_pour_la_remise = delegations.clone();
+        let reveil_pour_la_remise = reveil.clone();
         let attente = arret();
         taches.push(tokio::spawn(async move {
             let issue = serve(
@@ -2606,6 +2627,11 @@ async fn servir(fichier: &Path) -> Result<(), String> {
                     // pour Thunderbird comme pour une application.
                     let remise = match delegations_pour_la_remise.clone() {
                         Some(table) => remise.avec_delegations(table),
+                        None => remise,
+                    };
+                    // **CE QUI ARRIVE RÉVEILLE** les appareils abonnés.
+                    let remise = match reveil_pour_la_remise.clone() {
+                        Some(reveil) => remise.avec_reveil(reveil),
                         None => remise,
                     };
                     let remise = match signature_de_la_remise.clone() {

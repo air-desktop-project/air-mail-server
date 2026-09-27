@@ -937,7 +937,13 @@ PUT /v1/me/push
     <span class="etiquette">Une adresse Web Push doit être publique</span>
     <p>Le serveur écrira vers l'URL que vous donnez. Seule une URL <code>https</code>, sur le port 443, vers un nom public est acceptée : ni adresse IP, ni <code>localhost</code>, ni nom local (<code>.local</code>, <code>.internal</code>, <code>.lan</code>, <code>.home.arpa</code>). Autrement : <code>400</code>.</p>
   </div>
-  <p>Les notifications ne portent rien du courrier — ni sujet, ni expéditeur : elles disent seulement « synchronise-toi ». L'envoi viendra dans une version suivante ; cette version pose l'abonnement.</p>
+  <p>Les notifications ne portent rien du courrier — ni sujet, ni expéditeur : elles disent seulement <strong>quelle boîte a changé</strong>. Réveillée, l'application relit ce qui a changé par <code>/changes</code>, sous son jeton.</p>
+  <p><strong>Quand un appareil est réveillé</strong> (0.2.32) : à la remise d'un message dans une boîte — par SMTP ou par l'API —, les appareils abonnés de son titulaire, et ceux de chaque délégué qui peut la lire. Pas pour un message mis en quarantaine : un pourriel ne fait pas sonner un téléphone. Pas non plus pour ce que vous rangez vous-même (<code>APPEND</code>, dépôt, copie dans « Envoyés »).</p>
+  <p><strong>Au plus un réveil par destinataire et par boîte toutes les trente secondes</strong> : le premier message réveille tout de suite, ceux qui suivent dans l'intervalle en font un seul, à sa fin. Aucun message ne reste sans réveil.</p>
+  <div class="note prudence">
+    <span class="etiquette">0.2.32 : décidé, pas encore transmis</span>
+    <p>Le serveur décide et compte les réveils, mais aucun transport vers APNs, FCM ou Web Push n'est encore écrit : ils viennent en 0.2.33 et suivantes. <code>/v1/metrics</code> montre ce qui a été préparé (<code>wakeupsPrepared</code>), transmis (<code>wakeupsSent</code>) et refusé (<code>wakeupsFailed</code>).</p>
+  </div>
 </div>
 
 <div class="ressource">
@@ -1063,6 +1069,9 @@ PUT /v1/me/push
 <div class="ressource">
   <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/metrics</span><span class="portee">observe:read</span></div>
   <p>Un objet plat de compteurs entiers. Les noms et le nombre de compteurs dépendent de la version du serveur — ne codez pas en dur la liste attendue.</p>
+  <pre><code>{ "mailboxes": 7, "sessions": 2,
+  "wakeupsPrepared": 12, "wakeupsSent": 12, "wakeupsFailed": 0 }</code></pre>
+  <p>Les compteurs sont ceux du compte du jeton. <code>wakeups…</code> comptent les réveils de <strong>ses</strong> appareils, depuis le démarrage du serveur.</p>
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════════ -->

@@ -937,7 +937,13 @@ PUT /v1/me/push
     <span class="etiquette">A Web Push address must be public</span>
     <p>The server will write to the URL you give. Only an <code>https</code> URL, on port 443, to a public name is accepted: no IP address, no <code>localhost</code>, no local name (<code>.local</code>, <code>.internal</code>, <code>.lan</code>, <code>.home.arpa</code>). Otherwise: <code>400</code>.</p>
   </div>
-  <p>Notifications carry nothing from the mail — no subject, no sender: they only say "synchronise". Sending comes in a later version; this version sets up the subscription.</p>
+  <p>Notifications carry nothing from the mail — no subject, no sender: they only say <strong>which mailbox changed</strong>. Woken up, the app reads what changed through <code>/changes</code>, with its token.</p>
+  <p><strong>When a device is woken up</strong> (0.2.32): when a message is delivered to a mailbox — by SMTP or through the API —, the subscribed devices of its owner, and those of every delegate who can read it. Not for a quarantined message: spam does not make a phone ring. Nor for what you file yourself (<code>APPEND</code>, deposit, copy to "Sent").</p>
+  <p><strong>At most one wake-up per recipient and per mailbox every thirty seconds</strong>: the first message wakes up at once, those that follow within the interval make a single one, at its end. No message is left without a wake-up.</p>
+  <div class="note prudence">
+    <span class="etiquette">0.2.32: decided, not yet transmitted</span>
+    <p>The server decides and counts wake-ups, but no transport to APNs, FCM or Web Push is written yet: they come in 0.2.33 and after. <code>/v1/metrics</code> shows what was prepared (<code>wakeupsPrepared</code>), sent (<code>wakeupsSent</code>) and refused (<code>wakeupsFailed</code>).</p>
+  </div>
 </div>
 
 <div class="ressource">
@@ -1063,6 +1069,9 @@ PUT /v1/me/push
 <div class="ressource">
   <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/metrics</span><span class="portee">observe:read</span></div>
   <p>A flat object of integer counters. Their names and number depend on the server version — do not hard-code the list you expect.</p>
+  <pre><code>{ "mailboxes": 7, "sessions": 2,
+  "wakeupsPrepared": 12, "wakeupsSent": 12, "wakeupsFailed": 0 }</code></pre>
+  <p>The counters are those of the token's account. <code>wakeups…</code> count wake-ups of <strong>its</strong> devices, since the server started.</p>
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════════ -->

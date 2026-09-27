@@ -171,6 +171,8 @@ pub struct ApiMaildir {
     /// place ferait passer une configuration oubliée pour un compte sans
     /// appareil, et l'exploitant chercherait le défaut chez l'utilisateur.
     appareils: Option<Arc<crate::appareils::Appareils>>,
+    /// Le réveil des appareils abonnés, s'il y a un magasin d'appareils.
+    reveil: Option<Arc<crate::reveil::Reveil>>,
     /// De quoi signer ce qui sort (RFC 6376), quand une clé est nommée.
     ///
     /// **LA MÊME QUE DU CÔTÉ SMTP** : les deux portes de soumission n'ont pas
@@ -233,6 +235,7 @@ impl ApiMaildir {
             // PAS D'APPAREILS SANS MAGASIN, et le constructeur ne prend pas ce
             // champ non plus : voir `avec_appareils`.
             appareils: None,
+            reveil: None,
             scram: None,
             applicatifs: None,
             delegations: None,
@@ -278,6 +281,14 @@ impl ApiMaildir {
     #[must_use]
     pub fn avec_appareils(mut self, magasin: Arc<crate::appareils::Appareils>) -> Self {
         self.appareils = Some(magasin);
+        self
+    }
+
+    /// Lui donne le réveil : ce que l'API remet localement réveille les
+    /// appareils abonnés, et `/v1/metrics` dit ce qu'il a fait.
+    #[must_use]
+    pub fn avec_reveil(mut self, reveil: Arc<crate::reveil::Reveil>) -> Self {
+        self.reveil = Some(reveil);
         self
     }
 
@@ -1256,6 +1267,14 @@ impl ApiMaildir {
         }
     }
 
+    /// Ce que le réveil a fait pour les appareils de ce compte.
+    fn bilan_du_reveil(&self, account: &str) -> crate::reveil::Bilan {
+        self.reveil
+            .as_ref()
+            .map(|reveil| reveil.bilan(account))
+            .unwrap_or_default()
+    }
+
     /// L'appareil qui a ouvert la session de cette requête, s'il y en a un.
     fn appareil_de_la_session(&self, account: &str, nonce: u64) -> Option<String> {
         self.sessions.appareil(account, nonce, microsecondes())
@@ -1959,6 +1978,9 @@ impl ApiMaildir {
             std::sync::Arc::clone(&self.comptes),
             std::sync::Arc::clone(&self.incidents),
         );
+        if let Some(reveil) = self.reveil.clone() {
+            remise = remise.avec_reveil(reveil);
+        }
         if let Some(file) = self.file.clone() {
             remise = remise.avec_file(file, self.message_max);
         }
@@ -2225,6 +2247,9 @@ impl ApiMaildir {
             std::sync::Arc::clone(&self.comptes),
             std::sync::Arc::clone(&self.incidents),
         );
+        if let Some(reveil) = self.reveil.clone() {
+            remise = remise.avec_reveil(reveil);
+        }
         if let Some(file) = self.file.clone() {
             remise = remise.avec_file(file, self.message_max);
         }
@@ -2934,6 +2959,12 @@ impl Api for ApiMaildir {
                         u64::try_from(self.sessions.combien(account, microsecondes()))
                             .unwrap_or(u64::MAX),
                     ),
+                    // **CE QUE LE RÉVEIL A FAIT POUR SES APPAREILS** : décidé,
+                    // transmis, échoué. Sans transport, les premiers seuls
+                    // bougent.
+                    ("wakeupsPrepared", self.bilan_du_reveil(account).prepares),
+                    ("wakeupsSent", self.bilan_du_reveil(account).transmis),
+                    ("wakeupsFailed", self.bilan_du_reveil(account).echoues),
                 ],
                 sortie,
             )),
@@ -4566,6 +4597,101 @@ mod porte_http {
             Arc::clone(&incidents),
         );
         (Ephemere(racine), api, incidents)
+    }
+
+    /// **UN MESSAGE REMIS PAR L'API RÉVEILLE LES APPAREILS ABONNÉS** de son
+    /// destinataire, et `/v1/metrics` le compte.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn une_remise_reveille_et_se_compte() {
+        use ams_api::Resource;
+        use ams_loop_tokio::http::Api as _;
+        use ams_proto_http::Method;
+        use ams_proto_http::StatusCode;
+
+        struct Temoin(std::sync::Mutex<std::vec::Vec<std::string::String>>);
+        impl crate::reveil::Envoyeur for Temoin {
+            fn envoyer(
+                &self,
+                appareil: &ams_config::Device,
+                _: &ams_config::Push,
+                compte: &str,
+            ) -> crate::reveil::Envoi {
+                self.0
+                    .lock()
+                    .expect("verrou")
+                    .push(std::format!("{}:{compte}", appareil.id));
+                crate::reveil::Envoi::Transmis
+            }
+        }
+        const CLE: [u8; 65] = [
+            0x04, 0x6B, 0x17, 0xD1, 0xF2, 0xE1, 0x2C, 0x42, 0x47, 0xF8, 0xBC, 0xE6, 0xE5, 0x63,
+            0xA4, 0x40, 0xF2, 0x77, 0x03, 0x7D, 0x81, 0x2D, 0xEB, 0x33, 0xA0, 0xF4, 0xA1, 0x39,
+            0x45, 0xD8, 0x98, 0xC2, 0x96, 0x4F, 0xE3, 0x42, 0xE2, 0xFE, 0x1A, 0x7F, 0x9B, 0x8E,
+            0xE7, 0xEB, 0x4A, 0x7C, 0x0F, 0x9E, 0x16, 0x2B, 0xCE, 0x33, 0x57, 0x6B, 0x31, 0x5E,
+            0xCE, 0xCB, 0xB6, 0x40, 0x68, 0x37, 0xBF, 0x51, 0xF5,
+        ];
+        let (ephemere, api, _) = api("reveil");
+        let appareils = Arc::new(crate::appareils::Appareils::new(
+            ephemere.0.join("appareils.bin"),
+            std::vec![ams_config::Device {
+                login: std::string::String::from("jean"),
+                id: std::string::String::from("tel"),
+                name: std::string::String::new(),
+                public_key: ams_auth::Cle::lire(&CLE).expect("le point générateur"),
+                enrolled: 1,
+                last_seen: 0,
+                push: Some(
+                    ams_config::Push::new(
+                        ams_config::PushChannel::Fcm,
+                        std::string::String::from("jeton"),
+                        std::vec::Vec::new(),
+                        std::vec::Vec::new(),
+                        1,
+                    )
+                    .expect("recevable"),
+                ),
+            }],
+        ));
+        let temoin = Arc::new(Temoin(std::sync::Mutex::default()));
+        let reveil = crate::reveil::demarrer(crate::reveil::Sources {
+            appareils,
+            delegations: None,
+            envoyeur: Arc::clone(&temoin) as Arc<dyn crate::reveil::Envoyeur>,
+        });
+        let api = api.avec_reveil(reveil);
+        let lettre = b"From: jean@example.com\r\nTo: jean@example.com\r\n\r\nbonjour\r\n";
+        let mut sortie = std::vec![0_u8; 4096];
+        let rendu = api.submissions("jean", lettre, &mut sortie);
+        assert_eq!(rendu.status, StatusCode::OK);
+        let mut vus = std::vec::Vec::new();
+        for _ in 0..500 {
+            vus = temoin.0.lock().expect("verrou").clone();
+            if !vus.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(vus, ["tel:jean"]);
+        let mut place = std::vec![0_u8; 4096];
+        let servi = api.serve(
+            Resource::Metrics,
+            Method::Get,
+            "jean",
+            ams_loop_tokio::http::Appel {
+                body: b"",
+                query: ams_api::Query::default(),
+                range: None,
+                content_range: None,
+                idempotency_key: None,
+                owner: None,
+                nonce: 0,
+            },
+            &mut place,
+        );
+        let corps = std::string::String::from_utf8_lossy(servi.body).into_owned();
+        assert!(corps.contains(r#""wakeupsPrepared":1"#), "{corps}");
+        assert!(corps.contains(r#""wakeupsSent":1"#), "{corps}");
+        assert!(corps.contains(r#""wakeupsFailed":0"#), "{corps}");
     }
 
     /// **UNE USURPATION REFUSÉE PAR L'API SE DIT, COMME CELLE DE SMTP.**

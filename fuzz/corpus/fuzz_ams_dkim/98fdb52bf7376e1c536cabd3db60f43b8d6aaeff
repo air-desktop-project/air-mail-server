@@ -1,0 +1,2 @@
+v=1; a=rsa-sha256; c=relaxed/relaxed; d=examelpm; s=brisbane; h=from       k:          date; bh=7=; b=Q
+ d=exam
