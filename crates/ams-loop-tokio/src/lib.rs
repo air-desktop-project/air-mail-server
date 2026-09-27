@@ -115,9 +115,9 @@ pub use connection::{
 };
 pub use delivery::{Delivery, DeliveryFailure};
 pub use dkim::{
-    DkimChecker, DkimResult, DkimSigner, DkimStream, DkimVerdict, PublicationDkim,
+    DkimChecker, DkimResult, DkimSigner, DkimStream, DkimVerdict, PublicationDkim, Urandom,
     publication_dkim, replier_la_signature,
-, Urandom};
+};
 pub use dmarc::{Authenticated, DmarcChecker, DmarcResult, DmarcVerdict, PourRapport};
 pub use error::Error;
 pub use guard::SharedGuard;
