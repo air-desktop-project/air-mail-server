@@ -31,6 +31,9 @@
 //!    DRAPEAU**, et ne demande jamais rien.
 //! 7. **CHAQUE TAILLE DE TAMPON INSUFFISANTE SE DIT**, plutôt que d'écrire à
 //!    moitié.
+//! 8. **LES EN-TÊTES D'UNE PARTIE SERVIE NE PORTENT QUE DE L'ASCII
+//!    IMPRIMABLE** : le type et le nom de fichier viennent du message, et
+//!    deviennent des champs HTTP.
 
 #![no_main]
 
@@ -40,9 +43,10 @@ use libfuzzer_sys::fuzz_target;
 use ams_api::{Event, Reader};
 use ams_proto_imap::Flags;
 use ams_session::http::render::{
-    MailboxRow, MessageRow, TRANSFER_UIDS_MAX, read_attachment_request, read_flag_patch,
-    read_store_request, read_transfer_request, write_changes, write_mailbox, write_mailboxes,
-    write_message, write_messages, write_metrics,
+    MailboxRow, MessageRow, PART_DISPOSITION_MAX, PART_MEDIA_MAX, TRANSFER_UIDS_MAX,
+    read_attachment_request, read_flag_patch, read_store_request, read_transfer_request,
+    write_changes, write_mailbox, write_mailboxes, write_message, write_messages, write_metrics,
+    write_part_disposition, write_part_media,
 };
 
 /// Ce qu'on soumet.
@@ -109,6 +113,31 @@ fuzz_target!(|entree: Entree| {
     let mut balayeur = ams_mime::BodyScanner::new(&ams_mime::Limits::DEFAULT);
     balayeur.push(entree.entete.unwrap_or_default());
     balayeur.finish();
+
+    // PROPRIÉTÉ 8 : LES EN-TÊTES D'UNE PARTIE SERVIE NE PORTENT QUE DE
+    // L'ASCII IMPRIMABLE. Ils viennent du message, et deviennent des champs
+    // HTTP : un `CR`, un `LF` ou un octet de contrôle y ouvrirait un champ que
+    // l'expéditeur aurait choisi.
+    balayeur.walk(&mut |pas| {
+        if let ams_mime::StructureStep::Enter { index, .. } = pas {
+            let partie = balayeur
+                .describe(index)
+                .expect("walk ne rend que des rangs décrits");
+            let mut media = [0_u8; PART_MEDIA_MAX];
+            let mut disposition = [0_u8; PART_DISPOSITION_MAX];
+            for champ in [
+                write_part_media(&partie, &mut media),
+                write_part_disposition(&partie, &mut disposition),
+            ] {
+                assert!(!champ.is_empty(), "un champ vide");
+                assert!(
+                    champ.bytes().all(|octet| (b' '..=b'~').contains(&octet)),
+                    "un champ hors de l'ASCII imprimable : {champ:?}"
+                );
+            }
+        }
+        true
+    });
 
     let mut place = [0_u8; PLACE];
     // PROPRIÉTÉS 2, 3 et 5 : chaque représentation se relit, sans rien de nu.

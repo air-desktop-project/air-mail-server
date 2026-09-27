@@ -2189,20 +2189,43 @@ impl ApiMaildir {
             }
             rangs.push(rang);
         }
-        // **UN DÉBUT ET UNE FIN, ET NON UNE LONGUEUR** : `part_span` rend un
-        // intervalle. Les confondre faisait lire au-delà du fichier, et la
-        // lecture échouait — une partie parfaitement présente rendait `404`.
-        let Some((debut, fin)) = boite.partie(sequence, &rangs) else {
+        let Some(balayeur) = boite.structure(sequence) else {
             return absente(sortie);
         };
-        self.ecouler(
-            &boite,
-            sequence,
-            debut,
-            fin.saturating_sub(debut),
-            portee,
-            sortie,
-        )
+        let Some(entete) = balayeur.describe_path(&rangs) else {
+            return absente(sortie);
+        };
+        match entete.kind {
+            // **UN `multipart` N'A PAS DE CONTENU À LUI** : ce sont ses filles,
+            // chacune sous son chemin. Rendre ses octets bruts ferait passer
+            // des frontières MIME pour un document.
+            ams_mime::PartKind::Multipart => absente(sortie),
+            // UN MESSAGE TRANSFÉRÉ SE REND TEL QU'IL EST : c'est un message, et
+            // il se lit comme `…/raw`.
+            ams_mime::PartKind::Message => {
+                // **UN DÉBUT ET UNE FIN, ET NON UNE LONGUEUR** : `part_span`
+                // rend un intervalle. Les confondre faisait lire au-delà du
+                // fichier — une partie parfaitement présente rendait `404`.
+                let Some((debut, fin)) = boite.partie(sequence, &rangs) else {
+                    return absente(sortie);
+                };
+                self.ecouler(
+                    &boite,
+                    sequence,
+                    debut,
+                    fin.saturating_sub(debut),
+                    portee,
+                    sortie,
+                )
+            }
+            ams_mime::PartKind::Leaf => {
+                // Un contenu se décrit toujours comme une partie servie.
+                let Some(partie) = balayeur.part_of(&rangs) else {
+                    return absente(sortie);
+                };
+                servir_decodee(&boite, sequence, &entete, &partie, portee, sortie)
+            }
+        }
     }
 
     /// La boîte, le rang et ce qu'on sait du message que cet UID désigne.
@@ -2282,6 +2305,7 @@ impl ApiMaildir {
                 false => StatusCode::OK,
             },
             media: ams_api::MESSAGE_MEDIA_TYPE,
+            disposition: None,
             body: rendu,
             ranges: true,
             range: partiel.then_some(ams_loop_tokio::http::ContentRange {
@@ -3458,6 +3482,7 @@ const fn sans_contenu<'o>() -> Served<'o> {
     Served {
         status: StatusCode::NO_CONTENT,
         media: ams_api::PROBLEM_MEDIA_TYPE,
+        disposition: None,
         body: &[],
         ranges: false,
         range: None,
@@ -3634,6 +3659,114 @@ fn hors_bornes(complete: u64, sortie: &mut [u8]) -> Served<'_> {
             complete,
         }),
         ..servi
+    }
+}
+
+/// La place qu'une partie servie réserve à ses deux champs d'en-tête.
+const TETE_DE_PARTIE: usize = render::PART_MEDIA_MAX + render::PART_DISPOSITION_MAX;
+
+/// Sert le contenu DÉCODÉ d'une partie, sous son type et sa disposition.
+///
+/// # CE QUE LE CLIENT DEMANDE, C'EST LE FICHIER
+///
+/// `BODY[1]` d'IMAP rend les octets du message ; une application veut le PDF.
+/// On défait donc le `Content-Transfer-Encoding` — base64, quoted-printable —,
+/// et la portée de §14 de RFC 9110 se compte sur le contenu décodé : c'est le
+/// seul rang que le client connaît. Un encodage qu'on ne sait pas défaire rend
+/// `422` plutôt que des octets encodés qu'on ferait passer pour le contenu.
+///
+/// # LE TYPE ET LE NOM VIENNENT DU MESSAGE, ET ILS SONT FILTRÉS
+///
+/// Voir [`render::write_part_media`] et [`render::write_part_disposition`]. Le
+/// type et le nom s'écrivent en tête du tampon, le corps derrière : les trois
+/// vivent aussi longtemps que la réponse.
+fn servir_decodee<'o>(
+    boite: &crate::imap::BoiteImap,
+    sequence: u32,
+    entete: &ams_mime::PartHeader<'_>,
+    partie: &ams_mime::BodyPart<'_>,
+    portee: Option<&[u8]>,
+    sortie: &'o mut [u8],
+) -> Served<'o> {
+    if sortie.len() <= TETE_DE_PARTIE {
+        return probleme(
+            ams_api::Reason::BufferTooSmall,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            sortie,
+        );
+    }
+    let (tete, corps) = sortie.split_at_mut(TETE_DE_PARTIE);
+    let (place_du_type, place_du_nom) = tete.split_at_mut(render::PART_MEDIA_MAX);
+    let media = render::write_part_media(entete, place_du_type);
+    let disposition = render::write_part_disposition(entete, place_du_nom);
+    let fenetre = corps.len().min(FENETRE_MAX);
+    let decoder =
+        |debut: u64, combien: usize| boite.partie_decodee(sequence, partie, debut, combien);
+
+    // SANS PORTÉE, on recueille une fenêtre et un octet de plus : la taille dit
+    // si tout tient, sans seconde passe.
+    let demandee = match portee {
+        None => None,
+        Some(valeur) => match decoder(0, 0) {
+            Err(faute) => return refus_de_decodage(faute, corps),
+            Ok((_, total)) => Some((ams_proto_http::parse_range(valeur, total), total)),
+        },
+    };
+    let (debut, combien, partiel) = match demandee {
+        // §15.5.17 : ce qui commence au-delà ne peut pas être satisfait.
+        Some((Err(ams_proto_http::RangeFault::Unsatisfiable), total)) => {
+            return hors_bornes(total, corps);
+        }
+        Some((Ok(voulue), _)) => {
+            let combien = usize::try_from(voulue.octets())
+                .unwrap_or(usize::MAX)
+                .min(fenetre);
+            (voulue.first, combien, true)
+        }
+        // §14.2 : un champ qu'on ne comprend pas s'ignore.
+        Some((Err(ams_proto_http::RangeFault::Ignored), _)) | None => {
+            (0, fenetre.saturating_add(1), false)
+        }
+    };
+    let (octets, total) = match decoder(debut, combien) {
+        Ok(lu) => lu,
+        Err(faute) => return refus_de_decodage(faute, corps),
+    };
+    if !partiel && octets.len() > fenetre {
+        return trop_grand(corps);
+    }
+    let place = corps.get_mut(..octets.len()).unwrap_or_default();
+    place.copy_from_slice(&octets);
+    let rendu = corps.get(..octets.len()).unwrap_or_default();
+    let dernier = debut
+        .saturating_add(u64::try_from(octets.len()).unwrap_or(0))
+        .saturating_sub(1);
+    Served {
+        status: match partiel {
+            true => StatusCode::PARTIAL_CONTENT,
+            false => StatusCode::OK,
+        },
+        media,
+        disposition: Some(disposition),
+        body: rendu,
+        ranges: true,
+        range: partiel.then_some(ams_loop_tokio::http::ContentRange {
+            part: Some((debut, dernier)),
+            complete: total,
+        }),
+        peer_fault: false,
+    }
+}
+
+/// Une partie qui ne se décode pas : absente, ou d'un encodage inconnu.
+fn refus_de_decodage(faute: crate::imap::Decodage, sortie: &mut [u8]) -> Served<'_> {
+    match faute {
+        crate::imap::Decodage::Absente => absente(sortie),
+        crate::imap::Decodage::EncodageInconnu => probleme(
+            ams_api::Reason::UnknownEncoding,
+            StatusCode::UNPROCESSABLE_CONTENT,
+            sortie,
+        ),
     }
 }
 
@@ -3866,6 +3999,7 @@ const fn notre_faute<'o>() -> Served<'o> {
     Served {
         status: StatusCode::INTERNAL_SERVER_ERROR,
         media: ams_api::PROBLEM_MEDIA_TYPE,
+        disposition: None,
         body: &[],
         // **ÉCRITS À LA MAIN, ET NON `..Default::default()`** : cette fonction
         // est `const`, et un `Default` ne l'est pas. C'est le seul endroit du
@@ -5428,6 +5562,183 @@ mod ecritures {
             corps.ends_with(r#""envelope":null,"structure":null}}"#),
             "{corps}"
         );
+    }
+
+    /// Ce qu'une partie servie rend : statut, type, disposition, corps, portée.
+    type PartieServie = (
+        StatusCode,
+        String,
+        Option<String>,
+        std::vec::Vec<u8>,
+        Option<ams_loop_tokio::http::ContentRange>,
+    );
+
+    /// Dépose un message comme SMTP le ferait, et rend son UID.
+    fn deposer(temporaire: &Ephemere, api: &ApiMaildir, message: &[u8]) -> u64 {
+        let neuf = temporaire.0.join("marie").join("new");
+        std::fs::create_dir_all(&neuf).expect("new/");
+        let nom = std::format!(
+            "{}.essai.local",
+            std::fs::read_dir(&neuf).map_or(0, Iterator::count)
+        );
+        std::fs::write(neuf.join(nom), message).expect("déposé");
+        let (status, corps) = servir(api, Resource::Messages { boite: "INBOX" }, Method::Get, b"");
+        assert_eq!(status, StatusCode::OK, "{corps}");
+        // Les plus récents d'abord : le premier UID de la page est le dernier
+        // arrivé.
+        corps
+            .split(r#""uid":"#)
+            .nth(1)
+            .and_then(|reste| reste.split(',').next())
+            .and_then(|nombre| nombre.parse().ok())
+            .expect("un UID")
+    }
+
+    /// Sert une partie, avec ou sans portée.
+    fn partie(api: &ApiMaildir, uid: u64, chemin: &str, portee: Option<&str>) -> PartieServie {
+        let mut place = std::vec![0_u8; 64 * 1024];
+        let servi = api.serve(
+            Resource::MessagePart {
+                boite: "INBOX",
+                uid,
+                partie: chemin,
+            },
+            Method::Get,
+            "marie",
+            ams_loop_tokio::http::Appel {
+                body: b"",
+                query: ams_api::Query::default(),
+                range: portee.map(str::as_bytes),
+                content_range: None,
+                idempotency_key: None,
+                owner: None,
+            },
+            &mut place,
+        );
+        (
+            servi.status,
+            servi.media.to_string(),
+            servi.disposition.map(str::to_string),
+            servi.body.to_vec(),
+            servi.range,
+        )
+    }
+
+    /// **UNE PARTIE SE SERT DÉCODÉE**, sous son type, et un `multipart` n'a pas
+    /// de contenu à lui.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn une_partie_se_sert_decodee() {
+        let temporaire = Ephemere::neuf();
+        let (_, api) = api(&temporaire.0);
+        let uid = deposer(
+            &temporaire,
+            &api,
+            b"From: marie@exemple.test\r\nSubject: parties\r\n\
+              Content-Type: multipart/mixed; boundary=a\r\n\r\n\
+              --a\r\nContent-Type: multipart/alternative; boundary=b\r\n\r\n\
+              --b\r\nContent-Type: text/plain; charset=utf-8\r\n\
+              Content-Transfer-Encoding: quoted-printable\r\n\r\nd=C3=A9j=\r\n=C3=A0\r\n\
+              --b--\r\n\
+              --a\r\nContent-Type: application/octet-stream; name=\"x.bin\"\r\n\
+              Content-Transfer-Encoding: base64\r\n\r\nAAECAwQFBgcICQ==\r\n\
+              --a\r\nContent-Type: application/x-bizarre\r\n\
+              Content-Transfer-Encoding: x-uuencode\r\n\r\nbegin 644 x\r\n\
+              --a\r\nContent-Type: message/rfc822\r\n\r\nSubject: dedans\r\n\r\ncorps\r\n\
+              --a--\r\n",
+        );
+        // Le quoted-printable défait, coupure molle comprise.
+        let (status, media, disposition, corps, portee) = partie(&api, uid, "1.1", None);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(media, "text/plain; charset=utf-8");
+        assert_eq!(disposition.as_deref(), Some("attachment"));
+        assert_eq!(corps, "déjà".as_bytes());
+        assert_eq!(portee, None);
+        // Le base64 défait, et le nom dit.
+        let (status, media, disposition, corps, _) = partie(&api, uid, "2", None);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(media, "application/octet-stream");
+        assert_eq!(
+            disposition.as_deref(),
+            Some("attachment; filename=\"x.bin\"; filename*=UTF-8''x.bin")
+        );
+        assert_eq!(corps, (0_u8..10).collect::<std::vec::Vec<_>>());
+        // UNE PORTÉE SE COMPTE SUR LE DÉCODÉ.
+        let (status, _, _, corps, portee) = partie(&api, uid, "2", Some("bytes=2-4"));
+        assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+        assert_eq!(corps, [2, 3, 4]);
+        assert_eq!(
+            portee,
+            Some(ams_loop_tokio::http::ContentRange {
+                part: Some((2, 4)),
+                complete: 10
+            })
+        );
+        let (status, _, _, corps, _) = partie(&api, uid, "2", Some("bytes=-3"));
+        assert_eq!(
+            (status, corps),
+            (StatusCode::PARTIAL_CONTENT, std::vec![7, 8, 9])
+        );
+        // Au-delà : `416`, et la taille décodée.
+        let (status, _, _, _, portee) = partie(&api, uid, "2", Some("bytes=10-"));
+        assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(portee.map(|p| p.complete), Some(10));
+        // Un champ qu'on ne comprend pas s'ignore : tout part.
+        let (status, _, _, corps, _) = partie(&api, uid, "2", Some("octets=0-1"));
+        assert_eq!((status, corps.len()), (StatusCode::OK, 10));
+        // UN ENCODAGE INCONNU NE PASSE PAS POUR LE CONTENU, avec ou sans portée.
+        for portee in [None, Some("bytes=0-1")] {
+            let (status, _, _, corps, _) = partie(&api, uid, "3", portee);
+            assert_eq!(status, StatusCode::UNPROCESSABLE_CONTENT);
+            assert!(String::from_utf8_lossy(&corps).contains("unknown-encoding"));
+        }
+        // Un `multipart` n'a pas de contenu à lui ; un chemin absent non plus.
+        assert_eq!(partie(&api, uid, "1", None).0, StatusCode::NOT_FOUND);
+        assert_eq!(partie(&api, uid, "9", None).0, StatusCode::NOT_FOUND);
+        assert_eq!(partie(&api, uid, "1.x", None).0, StatusCode::NOT_FOUND);
+        // Un message transféré se rend tel qu'il est.
+        let (status, media, disposition, corps, _) = partie(&api, uid, "4", None);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(media, ams_api::MESSAGE_MEDIA_TYPE);
+        assert_eq!(disposition, None);
+        assert!(corps.starts_with(b"Subject: dedans"), "{corps:?}");
+    }
+
+    /// **UNE PARTIE TROP GRANDE SANS PORTÉE DIT `413`**, et la porte des
+    /// portées ; avec une portée, elle se lit par morceaux.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn une_grande_partie_se_lit_par_portees() {
+        let temporaire = Ephemere::neuf();
+        let (_, api) = api(&temporaire.0);
+        let donnees: std::vec::Vec<u8> = (0..100_000_u32).map(|i| (i % 251) as u8).collect();
+        let mut message = b"From: marie@exemple.test\r\nSubject: grand\r\n\
+            Content-Type: application/octet-stream\r\n\
+            Content-Transfer-Encoding: base64\r\n\r\n"
+            .to_vec();
+        for morceau in donnees.chunks(57) {
+            let mut ligne = [0_u8; 128];
+            let dite = ams_mime::encode_base64_line(morceau, &mut ligne).expect("encodable");
+            message.extend_from_slice(dite);
+        }
+        let uid = deposer(&temporaire, &api, &message);
+        let (status, _, _, _, _) = partie(&api, uid, "1", None);
+        assert_eq!(status, StatusCode::CONTENT_TOO_LARGE);
+        let mut relu = std::vec::Vec::new();
+        while relu.len() < donnees.len() {
+            let debut = relu.len();
+            let (status, _, _, corps, portee) = partie(
+                &api,
+                uid,
+                "1",
+                Some(&std::format!(
+                    "bytes={debut}-{}",
+                    debut.saturating_add(29_999)
+                )),
+            );
+            assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+            assert_eq!(portee.map(|p| p.complete), Some(100_000));
+            relu.extend_from_slice(&corps);
+        }
+        assert!(relu == donnees, "la partie relue n'est pas celle déposée");
     }
 
     /// **LA SYNCHRONISATION INCRÉMENTALE, DE BOUT EN BOUT, SUR UNE VRAIE BOÎTE.**

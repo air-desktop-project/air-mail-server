@@ -1959,3 +1959,72 @@ fn un_chemin_a_plusieurs_chiffres_s_ecrit() {
     assert!(rendu.contains(r#""part":"12""#), "{rendu}");
     assert!(rendu.contains(r#""part":"10""#), "{rendu}");
 }
+
+// ── LES EN-TÊTES D'UNE PARTIE SERVIE ────────────────────────────────────────
+
+use super::{PART_DISPOSITION_MAX, PART_MEDIA_MAX, write_part_disposition, write_part_media};
+
+fn en_tetes(message: &[u8], chemin: &[u32]) -> (String, String) {
+    let balayeur = balayer(message);
+    let partie = balayeur.describe_path(chemin).expect("une partie");
+    let mut media = [0_u8; PART_MEDIA_MAX];
+    let mut disposition = [0_u8; PART_DISPOSITION_MAX];
+    (
+        write_part_media(&partie, &mut media).to_string(),
+        write_part_disposition(&partie, &mut disposition).to_string(),
+    )
+}
+
+/// Le type en minuscules, le jeu pour du texte ; `attachment` toujours, et le
+/// nom sous ses deux formes.
+#[test]
+fn une_partie_dit_son_type_et_son_nom() {
+    assert_eq!(
+        en_tetes(TIROIRS, &[1, 1]),
+        (
+            "text/plain; charset=utf-8".to_string(),
+            "attachment".to_string()
+        )
+    );
+    assert_eq!(
+        en_tetes(TIROIRS, &[2]),
+        (
+            "application/pdf".to_string(),
+            "attachment; filename=\"d_fi.pdf\"; filename*=UTF-8''d%C3%A9fi.pdf".to_string()
+        )
+    );
+    // `inline` dans le message, `attachment` pour le navigateur.
+    assert_eq!(
+        en_tetes(TIROIRS, &[3]).1,
+        "attachment; filename=\"_.png\"; filename*=UTF-8''%C3%A9.png"
+    );
+}
+
+/// Ce qui vient du message se filtre : un jeu douteux ne se redit pas, un
+/// guillemet ou une barre ne ferme pas le nom, un nom trop long ne se dit pas.
+#[test]
+fn ce_qui_vient_du_message_se_filtre() {
+    let (media, _) = en_tetes(
+        b"Content-Type: text/plain; charset=\"utf-8\\r\\nx: y\"\r\n\r\nx\r\n",
+        &[1],
+    );
+    assert_eq!(media, "text/plain");
+    // Un jeu sur une pièce qui n'est pas du texte ne se redit pas non plus.
+    let (media, _) = en_tetes(b"Content-Type: image/png; charset=utf-8\r\n\r\nx\r\n", &[1]);
+    assert_eq!(media, "image/png");
+    let (_, disposition) = en_tetes(
+        b"Content-Type: application/pdf; name=\"a\\\"b\\\\c d.pdf\"\r\n\r\nx\r\n",
+        &[1],
+    );
+    assert_eq!(
+        disposition,
+        "attachment; filename=\"a_b_c d.pdf\"; filename*=UTF-8''a%22b%5Cc%20d.pdf"
+    );
+    // Quatre cent cinquante « é » : deux octets chacun, six une fois encodés.
+    let long = "é".repeat(450);
+    let (_, disposition) = en_tetes(
+        std::format!("Content-Type: application/pdf; name=\"{long}\"\r\n\r\nx\r\n").as_bytes(),
+        &[1],
+    );
+    assert_eq!(disposition, "attachment");
+}

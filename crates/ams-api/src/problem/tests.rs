@@ -22,7 +22,7 @@ use crate::error::Reason;
 /// Le `match` ci-dessous la rend exhaustive **à la compilation** : un motif de
 /// plus ne compile pas tant qu'on ne l'y a pas mis. C'est la même discipline
 /// que `Resource::scope`, et pour la même raison.
-fn toutes() -> [Reason; 27] {
+fn toutes() -> [Reason; 28] {
     // Ce `match` ne sert qu'à faire échouer la compilation si un motif
     // s'ajoute : sa valeur est jetée, sa VÉRIFICATION est tout l'objet.
     const fn _exhaustive(reason: Reason) -> u8 {
@@ -54,6 +54,7 @@ fn toutes() -> [Reason; 27] {
             Reason::BadIdempotencyKey => 24,
             Reason::IdempotencyKeyReused => 25,
             Reason::IdempotencyInFlight => 26,
+            Reason::UnknownEncoding => 27,
         }
     }
     [
@@ -84,6 +85,7 @@ fn toutes() -> [Reason; 27] {
         Reason::BadIdempotencyKey,
         Reason::IdempotencyKeyReused,
         Reason::IdempotencyInFlight,
+        Reason::UnknownEncoding,
     ]
 }
 
@@ -301,4 +303,12 @@ fn une_cle_reutilisee_a_son_propre_type() {
     assert!(dit.contains("\"status\":422"), "{dit}");
     assert!(document(Reason::IdempotencyInFlight).contains("\"status\":409"));
     assert!(document(Reason::BadIdempotencyKey).contains("/problems/bad-request"));
+}
+
+/// **UN ENCODAGE INCONNU DIT `422` SOUS SON PROPRE TYPE**, et renvoie au brut.
+#[test]
+fn un_encodage_inconnu_a_son_propre_type() {
+    let dit = document(Reason::UnknownEncoding);
+    assert!(dit.contains("/problems/unknown-encoding"), "{dit}");
+    assert!(dit.contains("\"status\":422"), "{dit}");
 }

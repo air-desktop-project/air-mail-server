@@ -1,0 +1,5 @@
+eomp1.cgm
+mx: *.e.om
+mx: *.exaom
+mx:*.exameom  
+mx: *.ex,

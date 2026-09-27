@@ -1574,6 +1574,148 @@ fn texte_de(valeur: &[u8], longueur: usize) -> Option<&str> {
         .filter(|texte| !texte.is_empty())
 }
 
+/// Ce que le `Content-Type` d'une partie servie peut occuper.
+pub const PART_MEDIA_MAX: usize = 256;
+
+/// Ce que le `Content-Disposition` d'une partie servie peut occuper. Un nom
+/// qui n'y tiendrait pas n'est pas dit — la partie reste `attachment`.
+pub const PART_DISPOSITION_MAX: usize = 2 * 1024;
+
+/// Ce qu'un `charset` peut occuper pour être redit. Les noms de l'IANA en font
+/// moins de quarante.
+const JEU_MAX: usize = 40;
+
+/// Le `Content-Type` d'une partie servie : son type, et son jeu si c'est du
+/// texte.
+///
+/// # CE QUI VIENT DU MESSAGE SE FILTRE AVANT D'ÊTRE REDIT
+///
+/// C'est un champ d'en-tête HTTP que l'expéditeur remplirait : le type est fait
+/// de jetons MIME, et le `charset` n'est redit que s'il n'est fait que de
+/// lettres, de chiffres et de `-_.:+`. Autrement, le texte part sans jeu — le
+/// client sait qu'il ne sait pas, au lieu de lire un jeu inventé.
+#[must_use]
+pub fn write_part_media<'o>(partie: &ams_mime::PartHeader<'_>, sortie: &'o mut [u8]) -> &'o str {
+    let mut genre = [0_u8; TYPE_MAX];
+    let mut jeu = [0_u8; JEU_MAX];
+    let mut travail = [0_u8; PARAMETRE_MAX];
+    let mut valeur = [0_u8; PARAMETRE_MAX * 2];
+    let texte = partie.media_type.eq_ignore_ascii_case(b"text");
+    let charset = longueur_decodee(partie.type_params, b"charset", &mut travail, &mut valeur)
+        .and_then(|n| valeur.get(..n))
+        .filter(|octets| {
+            texte
+                && octets.iter().all(|o| {
+                    o.is_ascii_alphanumeric() || matches!(*o, b'-' | b'_' | b'.' | b':' | b'+')
+                })
+        })
+        .and_then(|octets| en_minuscules(octets, &mut jeu));
+    let mut plume = Plume::neuve(sortie);
+    plume.mettre(ecrire_le_type(partie, &mut genre).as_bytes());
+    if let Some(charset) = charset {
+        plume.mettre(b"; charset=");
+        plume.mettre(charset.as_bytes());
+    }
+    plume.texte()
+}
+
+/// Le `Content-Disposition` d'une partie servie : TOUJOURS `attachment`, et
+/// son nom de fichier sous les deux formes de la RFC 6266.
+///
+/// - `filename="…"` en ASCII, pour les lecteurs anciens : ce qui n'y tient pas
+///   devient `_`, un guillemet ou une barre aussi ;
+/// - `filename*=UTF-8''…` pour les autres, chaque octet hors des caractères
+///   admis écrit `%XX` (§3.2.1 de RFC 8187).
+///
+/// **`attachment` MÊME POUR UNE PARTIE `inline`** : c'est un navigateur qu'on
+/// empêche ici d'afficher chez nous ce qu'un inconnu a écrit. La disposition
+/// que le message déclare est dans la structure, pour le client.
+#[must_use]
+pub fn write_part_disposition<'o>(
+    partie: &ams_mime::PartHeader<'_>,
+    sortie: &'o mut [u8],
+) -> &'o str {
+    let mut travail = [0_u8; PARAMETRE_MAX];
+    let mut valeur = [0_u8; PARAMETRE_MAX * 2];
+    let longueur = longueur_decodee(
+        partie.disposition_params,
+        b"filename",
+        &mut travail,
+        &mut valeur,
+    )
+    .or_else(|| longueur_decodee(partie.type_params, b"name", &mut travail, &mut valeur));
+    let nom = longueur.and_then(|n| texte_de(&valeur, n));
+    let mut plume = Plume::neuve(sortie);
+    plume.mettre(b"attachment");
+    if let Some(nom) = nom {
+        let marque = plume.ecrits;
+        plume.mettre(b"; filename=\"");
+        for caractere in nom.chars() {
+            let octet = u8::try_from(caractere)
+                .ok()
+                .filter(|o| (b' '..=b'~').contains(o) && !matches!(*o, b'"' | b'\\'))
+                .unwrap_or(b'_');
+            plume.mettre(&[octet]);
+        }
+        plume.mettre(b"\"; filename*=UTF-8''");
+        for octet in nom.bytes() {
+            if octet.is_ascii_alphanumeric() || b"!#$&+-.^_`|~".contains(&octet) {
+                plume.mettre(&[octet]);
+            } else {
+                const HEXA: &[u8; 16] = b"0123456789ABCDEF";
+                let haut = HEXA.get(usize::from(octet >> 4)).copied().unwrap_or(b'0');
+                let bas = HEXA.get(usize::from(octet & 0x0F)).copied().unwrap_or(b'0');
+                plume.mettre(&[b'%', haut, bas]);
+            }
+        }
+        // UN NOM QUI NE TIENT PAS N'EST PAS DIT À MOITIÉ : la moitié d'un nom
+        // de fichier est le nom d'un autre fichier.
+        if !plume.entier {
+            plume.ecrits = marque;
+            plume.entier = true;
+        }
+    }
+    plume.texte()
+}
+
+/// De quoi écrire un champ d'en-tête dans un tampon fixe, et savoir s'il a
+/// tenu.
+struct Plume<'a> {
+    out: &'a mut [u8],
+    ecrits: usize,
+    /// Tout ce qu'on a mis a tenu.
+    entier: bool,
+}
+
+impl<'a> Plume<'a> {
+    fn neuve(out: &'a mut [u8]) -> Self {
+        Self {
+            out,
+            ecrits: 0,
+            entier: true,
+        }
+    }
+
+    /// Met `octets` à la suite, si tout tient ; sinon ne met rien, et le
+    /// retient.
+    fn mettre(&mut self, octets: &[u8]) {
+        let fin = self.ecrits.saturating_add(octets.len());
+        match self.out.get_mut(self.ecrits..fin).filter(|_| self.entier) {
+            Some(place) => {
+                place.copy_from_slice(octets);
+                self.ecrits = fin;
+            }
+            None => self.entier = false,
+        }
+    }
+
+    /// Ce qui a été écrit. Des octets ASCII, et des caractères UTF-8 entiers.
+    fn texte(self) -> &'a str {
+        let Self { out, ecrits, .. } = self;
+        core::str::from_utf8(out.get(..ecrits).unwrap_or_default()).unwrap_or_default()
+    }
+}
+
 /// `1.2.3`.
 fn ecrire_le_chemin<'p>(chemin: &[u32], place: &'p mut [u8]) -> &'p str {
     let octets = chemin.iter().enumerate().flat_map(|(rang, numero)| {

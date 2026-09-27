@@ -3309,6 +3309,64 @@ fn un_message_avec_piece_jointe_passe_par_un_brouillon() {
     let mut place = [0_u8; 128];
     let ligne = ams_mime::encode_base64_line(&donnees[..57], &mut place).expect("encodable");
     assert!(message.contains(core::str::from_utf8(ligne).expect("ascii")));
+
+    // ── LA PIÈCE SE RELIT DÉCODÉE, PAR PORTÉES SUR LE DÉCODÉ ────────────────
+    // `…/parts/2` rend le fichier et non son base64 : ce sont les trois cent
+    // mille octets envoyés, et les portées se comptent sur eux.
+    let entetes = atelier.0.join("entetes.txt");
+    let mut piece: Vec<u8> = Vec::new();
+    let mut premiers = String::new();
+    loop {
+        let debut = piece.len();
+        let sortie = std::process::Command::new("curl")
+            .args(["-s", "--insecure", "--http2", "-D"])
+            .arg(&entetes)
+            .args(["-H", &format!("Authorization: Bearer {jeton}")])
+            .args(["-r", &format!("{debut}-{}", debut + 50_000 - 1)])
+            .args(["-w", "\n%{http_code}"])
+            .arg(format!("{base}/v1/mailboxes/INBOX/messages/{uid}/parts/2"))
+            .output()
+            .expect("curl s'exécute");
+        let (octets, code) = sortie.stdout.split_at(sortie.stdout.len() - 4);
+        assert_eq!(code, b"\n206", "{}", serveur.journal());
+        if debut == 0 {
+            premiers = std::fs::read_to_string(&entetes).expect("les en-têtes");
+        }
+        piece.extend_from_slice(octets);
+        if octets.len() < 50_000 || piece.len() >= donnees.len() {
+            break;
+        }
+    }
+    assert!(piece == donnees, "la pièce relue n'est pas celle envoyée");
+    let premiers = premiers.to_ascii_lowercase();
+    for attendu in [
+        "content-type: application/octet-stream",
+        "content-range: bytes 0-49999/300000",
+        "content-disposition: attachment; filename=\"donn_es.bin\"; filename*=utf-8''donn%c3%a9es.bin",
+        "content-security-policy: default-src 'none'; sandbox",
+        "x-content-type-options: nosniff",
+    ] {
+        assert!(premiers.contains(attendu), "{attendu} — {premiers}");
+    }
+    // Le corps texte se lit décodé lui aussi, sous son jeu.
+    let (texte_lu, code) = appeler(
+        "GET",
+        &format!("/v1/mailboxes/INBOX/messages/{uid}/parts/1"),
+        "",
+        &[],
+        b"",
+    );
+    assert_eq!(code, "200");
+    assert!(texte_lu.contains("ci-joint le rapport"), "{texte_lu}");
+    // Un `multipart` n'a pas de contenu à lui.
+    let (_, code) = appeler(
+        "GET",
+        &format!("/v1/mailboxes/INBOX/messages/{uid}/parts/9"),
+        "",
+        &[],
+        b"",
+    );
+    assert_eq!(code, "404");
     // Le brouillon est parti avec le rangement.
     let (_, code) = appeler("GET", &format!("/v1/drafts/{id}"), "", &[], b"");
     assert_eq!(code, "404");

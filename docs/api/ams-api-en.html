@@ -728,7 +728,20 @@ authorization: Bearer AQECAAAAAG…</code></pre>
 
 <div class="ressource">
   <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/mailboxes/{mailbox}/messages/{uid}/parts/{part}</span><span class="portee">mail:read</span></div>
-  <p>One MIME part, numbered as RFC 9051 §6.4.5 prescribes — <code>1</code>, <code>1.2</code>, <code>2.1.1</code>.</p>
+  <p>One MIME part, under the path the message's <code>structure</code> gives — <code>1</code>, <code>1.2</code>, <code>2.1.1</code> (RFC 9051 §6.4.5).</p>
+  <p><strong>The content is returned decoded</strong>: base64 and quoted-printable are undone, and you get the file, not its wrapping. The response carries the type the part declares (<code>application/pdf</code>, <code>text/plain; charset=utf-8</code>…), and its name in <code>Content-Disposition</code>, in both RFC 6266 forms (<code>filename="…"</code> in ASCII, <code>filename*=UTF-8''…</code> exact).</p>
+  <pre><code>GET /v1/mailboxes/INBOX/messages/1792/parts/2
+Range: bytes=0-65535
+→ 206
+content-type: application/pdf
+content-disposition: attachment; filename="d_fi.pdf"; filename*=UTF-8''d%C3%A9fi.pdf
+content-range: bytes 0-65535/133400</code></pre>
+  <p><strong>Ranges count on the decoded content</strong>: it is the only offset you know. A part that does not fit in one response returns <code>413</code> with <code>Accept-Ranges</code>; request it in pieces then, and <code>Content-Range</code> tells you its decoded size.</p>
+  <div class="note danger">
+    <span class="etiquette">This content was written by a stranger</span>
+    <p>Every part is sent as <code>attachment</code> — even those the message declares <code>inline</code>, which the <code>structure</code> says — and under <code>Content-Security-Policy: default-src 'none'; sandbox</code>. A browser opening the URL therefore runs nothing. If you display an HTML body, do it in an isolated view, with no script and no remote loading.</p>
+  </div>
+  <p>A <code>multipart</code> has no content of its own: <code>404</code>, its children are requested one by one. A <code>message/rfc822</code> is returned as it is, like <code>…/raw</code>. A part whose encoding cannot be undone returns <code>422</code> (<code>/problems/unknown-encoding</code>) rather than encoded bytes passed off as the content: read the raw message then.</p>
 </div>
 
 <h3 id="r-search"><span class="numero">5.6</span>Search</h3>

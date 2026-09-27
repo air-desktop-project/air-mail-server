@@ -732,7 +732,20 @@ authorization: Bearer AQECAAAAAG…</code></pre>
 
 <div class="ressource">
   <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/mailboxes/{boite}/messages/{uid}/parts/{partie}</span><span class="portee">mail:read</span></div>
-  <p>Une partie MIME, numérotée comme §6.4.5 de RFC 9051 le prescrit — <code>1</code>, <code>1.2</code>, <code>2.1.1</code>.</p>
+  <p>Une partie MIME, sous le chemin que la <code>structure</code> du message donne — <code>1</code>, <code>1.2</code>, <code>2.1.1</code> (§6.4.5 de RFC 9051).</p>
+  <p><strong>Le contenu est rendu décodé</strong> : le base64 et le quoted-printable sont défaits, et vous recevez le fichier, pas son emballage. La réponse porte le type que la partie déclare (<code>application/pdf</code>, <code>text/plain; charset=utf-8</code>…), et son nom dans <code>Content-Disposition</code>, sous les deux formes de la RFC 6266 (<code>filename="…"</code> en ASCII, <code>filename*=UTF-8''…</code> exact).</p>
+  <pre><code>GET /v1/mailboxes/INBOX/messages/1792/parts/2
+Range: bytes=0-65535
+→ 206
+content-type: application/pdf
+content-disposition: attachment; filename="d_fi.pdf"; filename*=UTF-8''d%C3%A9fi.pdf
+content-range: bytes 0-65535/133400</code></pre>
+  <p><strong>Les portées se comptent sur le contenu décodé</strong> : c'est le seul rang que vous connaissez. Une pièce qui ne tient pas dans une réponse rend <code>413</code> avec <code>Accept-Ranges</code> ; demandez-la alors par morceaux, et <code>Content-Range</code> vous dit sa taille décodée.</p>
+  <div class="note danger">
+    <span class="etiquette">Ce contenu a été écrit par un inconnu</span>
+    <p>Chaque partie part en <code>attachment</code> — même celles que le message déclare <code>inline</code>, ce que dit la <code>structure</code> — et sous <code>Content-Security-Policy: default-src 'none'; sandbox</code>. Un navigateur qui ouvrirait l'URL n'exécute donc rien. Si vous affichez un corps HTML, faites-le dans une vue isolée, sans script ni chargement distant.</p>
+  </div>
+  <p>Un <code>multipart</code> n'a pas de contenu à lui : <code>404</code>, ses filles se demandent chacune. Un <code>message/rfc822</code> se rend tel qu'il est, comme <code>…/raw</code>. Une partie dont l'encodage ne se défait pas rend <code>422</code> (<code>/problems/unknown-encoding</code>) plutôt que des octets encodés qu'on ferait passer pour le contenu : lisez alors le message brut.</p>
 </div>
 
 <h3 id="r-recherche"><span class="numero">5.6</span>Recherche</h3>

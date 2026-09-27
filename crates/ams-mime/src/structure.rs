@@ -1202,6 +1202,13 @@ impl BodyScanner {
         })
     }
 
+    /// Ce que l'en-tête de la partie que `chemin` désigne dit d'elle — la
+    /// même résolution que [`BodyScanner::part_of`], pour toute partie.
+    #[must_use]
+    pub fn describe_path(&self, chemin: &[u32]) -> Option<PartHeader<'_>> {
+        self.describe(self.resoudre(chemin)?)
+    }
+
     /// Parcourt l'arbre des parties, dans l'ordre, et numérote comme §6.4.5.
     ///
     /// # LA NUMÉROTATION EST CELLE DE [`BodyScanner::part_of`]

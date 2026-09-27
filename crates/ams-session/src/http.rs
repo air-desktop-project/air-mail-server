@@ -169,6 +169,37 @@ pub fn champs_de_toute_reponse(
     ]
 }
 
+/// Combien de champs [`champs_d_une_piece`] rend.
+pub const PIECE_MAX: usize = 2;
+
+/// Ce que porte, en plus, une réponse qui sert une PARTIE d'un message.
+///
+/// # UN CONTENU ÉCRIT PAR UN INCONNU, SERVI DEPUIS NOTRE ORIGINE
+///
+/// Une partie `text/html` est du HTML que l'expéditeur a choisi. Servie telle
+/// quelle depuis l'origine de l'API, un navigateur l'exécuterait chez nous — un
+/// script cousu dans un courrier deviendrait un script de l'API. Deux champs
+/// l'empêchent, pour les deux versions d'HTTP à la fois :
+///
+/// - `content-disposition: attachment` : un navigateur l'enregistre au lieu de
+///   l'afficher ; le nom de fichier s'y dit (RFC 6266) ;
+/// - `content-security-policy: default-src 'none'; sandbox` : si quelque chose
+///   l'affiche quand même, il ne charge rien et n'exécute rien, dans une
+///   origine qui n'est pas la nôtre.
+///
+/// Un client de l'API, lui, lit les octets et le type : rien de ceci ne le
+/// gêne.
+#[must_use]
+pub fn champs_d_une_piece(disposition: &[u8]) -> [(&'static [u8], &[u8]); PIECE_MAX] {
+    [
+        (&b"content-disposition"[..], disposition),
+        (
+            &b"content-security-policy"[..],
+            &b"default-src 'none'; sandbox"[..],
+        ),
+    ]
+}
+
 /// Ce que la session demande à l'appelant de faire ensuite.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Next<'o> {

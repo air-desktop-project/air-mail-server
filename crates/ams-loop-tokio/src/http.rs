@@ -76,7 +76,7 @@ const ENTETES_OCTETS: usize = 16 * 1024;
 const RENDU_OCTETS: usize = 256 * 1024;
 
 /// Combien de champs une réponse porte au plus, `content-type` compris.
-const CHAMPS_MAX: usize = ams_session::http::FIELDS_MAX + 1;
+const CHAMPS_MAX: usize = ams_session::http::FIELDS_MAX + 1 + ams_session::http::PIECE_MAX;
 
 /// Assemble la configuration TLS d'une écoute HTTP/2.
 ///
@@ -113,7 +113,17 @@ pub struct Served<'o> {
     /// Le code d'état.
     pub status: StatusCode,
     /// Le type de média du corps.
-    pub media: &'static str,
+    ///
+    /// **IL PEUT VENIR DU MESSAGE** : une partie servie porte le type que son
+    /// en-tête déclare, écrit dans le tampon de sortie comme le corps.
+    pub media: &'o str,
+    /// La disposition d'une PARTIE de message, si c'en est une.
+    ///
+    /// Sa présence fait écrire `content-disposition` et une politique de
+    /// contenu qui interdit tout — voir
+    /// [`ams_session::http::champs_d_une_piece`] : ce corps a été écrit par un
+    /// inconnu, et c'est notre origine qui le sert.
+    pub disposition: Option<&'o str>,
     /// Le corps.
     pub body: &'o [u8],
     /// Cette ressource se lit-elle par morceaux (§14.3 de RFC 9110) ?
@@ -221,6 +231,7 @@ impl Default for Served<'_> {
         Self {
             status: StatusCode::OK,
             media: JSON_MEDIA_TYPE,
+            disposition: None,
             body: &[],
             ranges: false,
             range: None,
@@ -515,6 +526,8 @@ where
         // ressource qui ne se lit pas par morceaux n'en dit rien, et c'est le cas
         // de toutes sauf deux.
         let mut portee: (bool, Option<ContentRange>) = (false, None);
+        // La disposition d'une partie servie : elle ne vient que d'un `Serve`.
+        let mut piece: Option<&str> = None;
         let (status, media, corps_a_ecrire) = match tour.next() {
             Next::Respond => (tour.status(), PROBLEM_MEDIA_TYPE, tour.body()),
             Next::CheckCredentials { login, password } => {
@@ -683,6 +696,7 @@ where
                         &mut rendu,
                     );
                     portee = (servi.ranges, servi.range);
+                    piece = servi.disposition;
                     if servi.peer_fault {
                         // Le même compte que pour un refus d'identifiants : c'est
                         // ce qui borne une attaque par essais, ici comme là.
@@ -708,7 +722,7 @@ where
             portee,
             demande.stream,
             status,
-            media,
+            (media, piece),
             corps_a_ecrire,
             sans_corps,
             &mut ecriture,
@@ -928,7 +942,7 @@ async fn repondre<S>(
     portee: (bool, Option<ContentRange>),
     stream: u32,
     status: StatusCode,
-    media: &str,
+    (media, piece): (&str, Option<&str>),
     corps: &[u8],
     sans_corps: bool,
     ecriture: &mut [u8],
@@ -947,6 +961,13 @@ where
             .into_iter()
             .flatten(),
     );
+    // UNE PARTIE DE MESSAGE EST ÉCRITE PAR UN INCONNU : ce qui l'empêche de
+    // s'exécuter chez nous vient de la session, pour les deux transports.
+    if let Some(disposition) = piece {
+        champs.extend(ams_session::http::champs_d_une_piece(
+            disposition.as_bytes(),
+        ));
+    }
     // §14.3 : l'invitation D'ABORD — un client qui reçoit un refus doit savoir
     // qu'une porte existe, et c'est sur le refus qu'il en a le plus besoin.
     let (divisible, morceau) = portee;

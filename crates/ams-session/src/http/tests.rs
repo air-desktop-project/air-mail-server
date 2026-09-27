@@ -1979,3 +1979,24 @@ fn les_corps_d_un_brouillon_ont_leur_type() {
         StatusCode::CONTENT_TOO_LARGE
     );
 }
+
+/// **UNE PARTIE DE MESSAGE NE S'EXÉCUTE PAS CHEZ NOUS** : elle part en pièce
+/// jointe, sous une politique qui interdit tout.
+#[test]
+fn une_partie_porte_sa_disposition_et_sa_politique() {
+    let champs = super::champs_d_une_piece(b"attachment; filename=\"x.html\"");
+    assert_eq!(champs.len(), super::PIECE_MAX);
+    assert_eq!(
+        champs,
+        [
+            (
+                &b"content-disposition"[..],
+                &b"attachment; filename=\"x.html\""[..]
+            ),
+            (
+                &b"content-security-policy"[..],
+                &b"default-src 'none'; sandbox"[..]
+            ),
+        ]
+    );
+}

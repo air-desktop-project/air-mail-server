@@ -189,6 +189,13 @@ pub enum Reason {
     /// **La requête qui porte cette clé est encore en cours.** `409` : le client
     /// réessaie un peu plus tard, et obtiendra la réponse de la première.
     IdempotencyInFlight,
+    /// **Cette partie porte un `Content-Transfer-Encoding` que ce serveur ne
+    /// sait pas défaire** (§6.4.5 de RFC 9051 dit `UNKNOWN-CTE`). `422` : la
+    /// demande est bien formée, c'est le message qui ne se lit pas. Rendre les
+    /// octets encodés en les faisant passer pour le contenu tromperait le
+    /// client sans qu'il puisse s'en apercevoir ; le message brut, lui, reste
+    /// servi.
+    UnknownEncoding,
 }
 
 impl Reason {
@@ -228,7 +235,7 @@ impl Reason {
             | Self::IdempotencyInFlight => StatusCode::CONFLICT,
             Self::SyncExpired => StatusCode::GONE,
             Self::BodyTooLarge => StatusCode::CONTENT_TOO_LARGE,
-            Self::AttachmentsNeedDraft | Self::IdempotencyKeyReused => {
+            Self::AttachmentsNeedDraft | Self::IdempotencyKeyReused | Self::UnknownEncoding => {
                 StatusCode::UNPROCESSABLE_CONTENT
             }
         }
@@ -274,6 +281,9 @@ impl Reason {
             }
             Self::AttachmentsNeedDraft => {
                 "ce message porte des pièces jointes : envoyez-le par un brouillon (/v1/drafts)"
+            }
+            Self::UnknownEncoding => {
+                "cette partie porte un encodage que le serveur ne sait pas défaire ; lisez le message brut"
             }
             // **CE QUI EST NÔTRE SE DIT D'UNE SEULE FAÇON.** Distinguer nos
             // fautes internes apprendrait au client ce que notre code a fait de

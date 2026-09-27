@@ -996,3 +996,18 @@ fn un_message_vide_se_parcourt() {
         "{vu:?}"
     );
 }
+
+/// Un chemin se décrit comme `walk` le décrit, conteneurs compris.
+#[test]
+fn un_chemin_se_decrit() {
+    let balayeur = balayer(TIROIRS);
+    let pdf = balayeur.describe_path(&[2]).expect("la pièce jointe");
+    assert_eq!((pdf.kind, pdf.subtype), (PartKind::Leaf, &b"pdf"[..]));
+    let transfere = balayeur.describe_path(&[3]).expect("le message transféré");
+    assert_eq!(transfere.kind, PartKind::Message);
+    assert_eq!(
+        balayeur.describe_path(&[1]).expect("l'alternative").kind,
+        PartKind::Multipart
+    );
+    assert_eq!(balayeur.describe_path(&[9]), None);
+}

@@ -315,6 +315,15 @@ fn balayer(chemin: &Path) -> Option<Box<ams_mime::BodyScanner>> {
     Some(balayeur)
 }
 
+/// Pourquoi une partie ne se décode pas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decodage {
+    /// Le message ou la partie n'est plus là.
+    Absente,
+    /// Son `Content-Transfer-Encoding` ne se défait pas (`UNKNOWN-CTE`).
+    EncodageInconnu,
+}
+
 /// Une boîte relevée, vue par IMAP.
 pub struct BoiteImap {
     vue: MailboxView,
@@ -499,6 +508,65 @@ impl BoiteImap {
     /// structure décrite par l'un et servie par l'autre ne peut pas diverger.
     pub fn structure(&self, sequence: u32) -> Option<Box<ams_mime::BodyScanner>> {
         balayer(self.chemins.get(self.rang(sequence)?)?)
+    }
+
+    /// Le contenu DÉCODÉ d'une partie : les `combien` octets à partir du rang
+    /// décodé `debut`, et la taille décodée entière.
+    ///
+    /// # UNE PASSE, QUI COMPTE ET QUI RECUEILLE
+    ///
+    /// La taille décodée ne se déduit pas de celle du fichier — plis, blancs et
+    /// coupures molles ne rendent rien —, et le rang décodé n'est pas
+    /// proportionnel au rang brut. On décode donc depuis le début, par
+    /// fenêtres, en jetant ce qui précède `debut` : c'est le prix d'une portée
+    /// sur un contenu encodé, et il est linéaire. Rien de plus que la fenêtre
+    /// demandée ne séjourne en mémoire.
+    ///
+    /// `partie` vient du balayeur que l'appelant a déjà : relire le message
+    /// pour la retrouver serait le lire deux fois.
+    pub fn partie_decodee(
+        &self,
+        sequence: u32,
+        partie: &ams_mime::BodyPart<'_>,
+        debut: u64,
+        combien: usize,
+    ) -> Result<(Vec<u8>, u64), Decodage> {
+        let chemin = self
+            .rang(sequence)
+            .and_then(|rang| self.chemins.get(rang))
+            .ok_or(Decodage::Absente)?;
+        let fin_voulue = debut.saturating_add(u64::try_from(combien).unwrap_or(u64::MAX));
+        let mut recueilli = Vec::with_capacity(combien.min(FENETRE));
+        let mut sortie = std::vec![0_u8; FENETRE];
+        let mut total = 0_u64;
+        let mut vu = 0_u64;
+        while partie.start.saturating_add(vu) < partie.end {
+            let reste = partie.end.saturating_sub(partie.start).saturating_sub(vu);
+            let lisible = usize::try_from(reste.min(FENETRE_64)).unwrap_or(FENETRE);
+            let brut =
+                lire(chemin, partie.start.saturating_add(vu), lisible).ok_or(Decodage::Absente)?;
+            let dernier = reste <= FENETRE_64;
+            let (lus, ecrits) =
+                ams_mime::decode_chunk(partie.encoding, &brut, dernier, &mut sortie)
+                    .map_err(|_| Decodage::EncodageInconnu)?;
+            // Rien n'avance : ce qui reste ne porte aucun groupe complet.
+            if lus == 0 {
+                break;
+            }
+            let bloc = sortie.get(..ecrits).unwrap_or_default();
+            let apres = total.saturating_add(u64::try_from(ecrits).unwrap_or(0));
+            // Ce que ce bloc a en commun avec la fenêtre demandée.
+            let de = debut.max(total);
+            let a = fin_voulue.min(apres);
+            if de < a {
+                let de = usize::try_from(de.saturating_sub(total)).unwrap_or(0);
+                let a = usize::try_from(a.saturating_sub(total)).unwrap_or(0);
+                recueilli.extend_from_slice(bloc.get(de..a).unwrap_or_default());
+            }
+            total = apres;
+            vu = vu.saturating_add(u64::try_from(lus).unwrap_or(0));
+        }
+        Ok((recueilli, total))
     }
 
     /// Un morceau du message de rang `sequence`, tel qu'il est sur le disque.

@@ -33,7 +33,7 @@ use ams_proto_http::{RequestHead, StatusCode};
 /// **CETTE BORNE A DÉJÀ ÉTÉ TROP PETITE**, et personne ne l'aurait vu :
 /// [`Reponse::avec_champ`] perd en silence ce qui dépasse. C'est pourquoi
 /// l'appelant en pose une assertion de compilation plutôt que de s'y fier.
-pub const CHAMPS_MAX: usize = 8;
+pub const CHAMPS_MAX: usize = 10;
 
 /// Ce qu'un service rend pour une requête.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,13 +147,13 @@ mod tests {
 
     use super::{CHAMPS_MAX, Reponse};
 
-    /// **AU-DELÀ DE SIX CHAMPS, LE SEPTIÈME EST PERDU** (C3).
+    /// **AU-DELÀ DE LA BORNE, LE CHAMP DE TROP EST PERDU** (C3).
     ///
     /// C'est une borne à nous, que l'appelant tient : une réponse de ce serveur
-    /// n'a jamais six champs. Rendre une faute ici obligerait à traiter un cas
+    /// n'en a jamais autant. Rendre une faute ici obligerait à traiter un cas
     /// qui n'arrive pas, et le taire est ce qui garde la réponse écrivable.
     #[test]
-    fn au_dela_de_six_champs_le_septieme_est_perdu() {
+    fn au_dela_de_la_borne_le_champ_de_trop_est_perdu() {
         let mut reponse = Reponse::new(StatusCode::OK, b"corps");
         for _ in 0..CHAMPS_MAX {
             reponse = reponse.avec_champ(b"x-essai", b"1");
@@ -161,7 +161,11 @@ mod tests {
         assert_eq!(reponse.fields().count(), CHAMPS_MAX);
 
         let pleine = reponse.avec_champ(b"x-de-trop", b"2");
-        assert_eq!(pleine.fields().count(), CHAMPS_MAX, "le septième est perdu");
+        assert_eq!(
+            pleine.fields().count(),
+            CHAMPS_MAX,
+            "le champ de trop est perdu"
+        );
         assert!(
             !pleine.fields().any(|(nom, _)| nom == b"x-de-trop"),
             "et c'est bien celui-là"

@@ -164,6 +164,8 @@ impl<A: Api> ams_h3::Service for ServiceH3<'_, A> {
             .request(tete, corps, maintenant, &mut self.travail);
         // Ce que la ressource dit de sa divisibilité (§14 de RFC 9110).
         let mut portee: (bool, Option<crate::http::ContentRange>) = (false, None);
+        // La disposition d'une partie servie : elle ne vient que d'un `Serve`.
+        let mut piece: Option<&str> = None;
         let (status, media, a_ecrire) = match tour.next() {
             Next::Respond => (tour.status(), PROBLEM_MEDIA_TYPE, tour.body()),
             Next::CheckCredentials { login, password } => {
@@ -306,6 +308,7 @@ impl<A: Api> ams_h3::Service for ServiceH3<'_, A> {
                         &mut self.rendu,
                     );
                     portee = (servi.ranges, servi.range);
+                    piece = servi.disposition;
                     (servi.status, servi.media, servi.body)
                 }
             }
@@ -322,7 +325,7 @@ impl<A: Api> ams_h3::Service for ServiceH3<'_, A> {
         let sans_corps = matches!(tete.method(), Method::Head);
         composer(
             status,
-            media,
+            (media, piece),
             portee,
             a_ecrire,
             sans_corps,
@@ -335,8 +338,11 @@ impl<A: Api> ams_h3::Service for ServiceH3<'_, A> {
 // **CE QU'ON ÉCRIT TIENT DANS CE QUI EST ANNONCÉ**, et c'est dit à la
 // compilation plutôt que constaté en production : `avec_champ` perd en silence
 // ce qui dépasse, si bien qu'un champ de trop ne se verrait que dans une réponse
-// où il manque. Deux du composeur, quatre de la session, deux de la portée.
-const _: () = assert!(ams_h3::CHAMPS_MAX >= 2 + ams_session::http::COMMUNS_MAX + 2);
+// où il manque. Deux du composeur, quatre de la session, deux d'une partie,
+// deux de la portée.
+const _: () = assert!(
+    ams_h3::CHAMPS_MAX >= 2 + ams_session::http::COMMUNS_MAX + ams_session::http::PIECE_MAX + 2
+);
 
 /// **HTTP/2 ET HTTP/3 REÇOIVENT LE MÊME MESSAGE** : la borne d'un corps que
 /// `ams-h3` retient est celle qu'un message peut faire pour la session. Si
@@ -355,7 +361,7 @@ const _: () = assert!(ams_h3::CORPS_OCTETS_MAX == ams_session::http::MESSAGE_OCT
 /// la tenir deux fois.
 fn composer<'o>(
     status: StatusCode,
-    media: &'static str,
+    (media, piece): (&str, Option<&str>),
     portee: (bool, Option<crate::http::ContentRange>),
     corps: &[u8],
     sans_corps: bool,
@@ -410,12 +416,37 @@ fn composer<'o>(
             .copy_from_slice(alt_svc);
     }
 
+    // **ET LE TYPE, PUIS LA DISPOSITION D'UNE PARTIE**, derrière l'alternative :
+    // ils peuvent venir du message, donc du tampon du service. Un type qui ne
+    // tiendrait plus devient `application/octet-stream` — jamais un type vide,
+    // ni la moitié d'un autre.
+    let disposition = piece.unwrap_or_default().as_bytes();
+    let apres_type = apres_alt.saturating_add(media.len());
+    let apres_piece = apres_type.saturating_add(disposition.len());
+    let tout_tient = apres_piece <= sortie.len();
+    if tout_tient {
+        sortie
+            .get_mut(apres_alt..apres_type)
+            .unwrap_or_default()
+            .copy_from_slice(media.as_bytes());
+        sortie
+            .get_mut(apres_type..apres_piece)
+            .unwrap_or_default()
+            .copy_from_slice(disposition);
+    }
+
     let (corps_rendu, reste) = sortie.split_at_mut(combien);
     let (longueur, suite) = reste.split_at_mut(ecrits.min(reste.len()));
     let (portee_dite, apres) = suite.split_at(dits.min(suite.len()));
-    let alt_dite = apres.get(..alt_svc.len()).unwrap_or_default();
+    let (alt_dite, apres) = apres.split_at(alt_svc.len().min(apres.len()));
+    let (type_dit, apres) = apres.split_at(media.len().min(apres.len()));
+    let piece_dite = apres.get(..disposition.len()).unwrap_or_default();
+    let type_dit = match tout_tient {
+        true => type_dit,
+        false => b"application/octet-stream",
+    };
     let mut reponse = Reponse::new(status, corps_rendu)
-        .avec_champ(b"content-type", media.as_bytes())
+        .avec_champ(b"content-type", type_dit)
         .avec_champ(b"content-length", longueur);
     // **CE QUE TOUTE RÉPONSE PORTE VIENT DE LA SESSION.** Ce composeur écrivait
     // sa propre liste, et elle avait divergé : ni `no-store` (§5.2.2.5 de
@@ -427,6 +458,17 @@ fn composer<'o>(
         .flatten()
     {
         reponse = reponse.avec_champ(nom, valeur);
+    }
+    // UNE PARTIE DE MESSAGE EST ÉCRITE PAR UN INCONNU : les mêmes champs
+    // qu'en HTTP/2, venus du même endroit. Sans la place de les dire, le
+    // corps ne part pas — l'écrire sans eux serait l'exécuter chez nous.
+    if piece.is_some() {
+        if !tout_tient {
+            return Reponse::new(StatusCode::INTERNAL_SERVER_ERROR, &[]);
+        }
+        for (nom, valeur) in ams_session::http::champs_d_une_piece(piece_dite) {
+            reponse = reponse.avec_champ(nom, valeur);
+        }
     }
     // §14.3 : l'invitation d'abord — un client qui reçoit un refus doit savoir
     // qu'une porte existe, et c'est sur le refus qu'il en a le plus besoin.
@@ -573,7 +615,7 @@ mod tests {
         let mut sortie = [0_u8; 512];
         let reponse = super::composer(
             status,
-            "application/json",
+            ("application/json", None),
             (false, None),
             b"{}",
             false,
@@ -584,6 +626,85 @@ mod tests {
             .fields()
             .map(|(nom, _)| std::string::String::from_utf8_lossy(nom).into_owned())
             .collect()
+    }
+
+    /// **UNE PARTIE DE MESSAGE PORTE SON TYPE, SA DISPOSITION ET SA POLITIQUE** :
+    /// ce corps a été écrit par un inconnu, et c'est notre origine qui le sert.
+    #[test]
+    fn une_partie_servie_porte_ses_protections() {
+        let mut sortie = [0_u8; 512];
+        let reponse = super::composer(
+            StatusCode::OK,
+            (
+                "text/html; charset=utf-8",
+                Some("attachment; filename=\"x.html\""),
+            ),
+            (true, None),
+            b"<p>x</p>",
+            false,
+            b"",
+            &mut sortie,
+        );
+        let champs: std::vec::Vec<(std::string::String, std::string::String)> = reponse
+            .fields()
+            .map(|(nom, valeur)| {
+                (
+                    std::string::String::from_utf8_lossy(nom).into_owned(),
+                    std::string::String::from_utf8_lossy(valeur).into_owned(),
+                )
+            })
+            .collect();
+        let valeur = |nom: &str| {
+            champs
+                .iter()
+                .find(|(vu, _)| vu == nom)
+                .map(|(_, valeur)| valeur.as_str())
+        };
+        assert_eq!(valeur("content-type"), Some("text/html; charset=utf-8"));
+        assert_eq!(
+            valeur("content-disposition"),
+            Some("attachment; filename=\"x.html\"")
+        );
+        assert_eq!(
+            valeur("content-security-policy"),
+            Some("default-src 'none'; sandbox")
+        );
+        assert_eq!(reponse.body(), b"<p>x</p>");
+    }
+
+    /// **SANS LA PLACE DE DIRE SES PROTECTIONS, UNE PARTIE NE PART PAS** ; une
+    /// réponse ordinaire garde son corps, sous un type qui ne ment pas.
+    #[test]
+    fn sans_place_une_partie_ne_part_pas() {
+        let corps = [b'x'; 40];
+        let mut sortie = [0_u8; 48];
+        let reponse = super::composer(
+            StatusCode::OK,
+            ("text/html", Some("attachment")),
+            (false, None),
+            &corps,
+            false,
+            b"",
+            &mut sortie,
+        );
+        assert_eq!(reponse.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(reponse.body().is_empty());
+        let mut sortie = [0_u8; 48];
+        let reponse = super::composer(
+            StatusCode::OK,
+            ("application/un-type-bien-trop-long-pour-tenir", None),
+            (false, None),
+            &corps,
+            false,
+            b"",
+            &mut sortie,
+        );
+        assert_eq!(reponse.status(), StatusCode::OK);
+        assert!(
+            reponse.fields().any(
+                |(nom, valeur)| nom == b"content-type" && valeur == b"application/octet-stream"
+            )
+        );
     }
 
     /// **HTTP/3 REND LES MÊMES PROTECTIONS QU'HTTP/2**, et c'est le défaut que
@@ -654,7 +775,7 @@ mod tests {
         );
         let reponse = super::composer(
             StatusCode::UNAUTHORIZED,
-            "application/json",
+            ("application/json", None),
             portee,
             b"{}",
             false,
