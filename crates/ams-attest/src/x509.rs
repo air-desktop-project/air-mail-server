@@ -93,6 +93,9 @@ pub(crate) struct Certificat<'a> {
     pub(crate) fin: i64,
     /// Le contenu de l'extension d'attestation, s'il y en a une.
     pub(crate) attestation: Option<&'a [u8]>,
+    /// Le numéro de série, s'il tient sur seize octets — ce que la liste de
+    /// révocation nomme. Au-delà, aucune entrée ne peut le désigner.
+    pub(crate) serie: Option<u128>,
 }
 
 /// Lit un certificat.
@@ -120,7 +123,7 @@ pub(crate) fn lire(certificat: &[u8]) -> Result<Certificat<'_>, Refusal> {
     // [0] version, facultative ; le numéro de série ; l'algorithme (redit) ;
     // l'émetteur.
     let _ = tbs_champs.optionnel(0)?;
-    let _ = tbs_champs.attendre(ENTIER)?;
+    let serie = serie(tbs_champs.attendre(ENTIER)?.contenu);
     let _ = tbs_champs.attendre(SEQUENCE)?;
     let _ = tbs_champs.attendre(SEQUENCE)?;
     let mut validite = Lecteur::new(tbs_champs.attendre(SEQUENCE)?.contenu);
@@ -152,6 +155,24 @@ pub(crate) fn lire(certificat: &[u8]) -> Result<Certificat<'_>, Refusal> {
         debut,
         fin,
         attestation,
+        serie,
+    })
+}
+
+/// Un numéro de série en nombre, s'il tient sur seize octets une fois son
+/// zéro de signe ôté. Un numéro négatif — que RFC 5280 interdit, et que des
+/// fabricants ont écrit — n'est pas un de ceux que la liste nomme : elle les
+/// écrit en hexadécimal positif.
+fn serie(contenu: &[u8]) -> Option<u128> {
+    let chiffres = match contenu {
+        [0, reste @ ..] => reste,
+        [premier, ..] if premier & 0x80 != 0 => return None,
+        tout => tout,
+    };
+    (chiffres.len() <= 16).then(|| {
+        chiffres
+            .iter()
+            .fold(0_u128, |acc, &octet| (acc << 8) | u128::from(octet))
     })
 }
 

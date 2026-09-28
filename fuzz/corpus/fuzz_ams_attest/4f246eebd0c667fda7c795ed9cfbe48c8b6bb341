@@ -1,0 +1,17 @@
+{
+  "entries": {
+    "6681152659205225093" : {
+      "status": "REVOKED",
+      "reasonon": "KEY_COMPROMISE"
+    },
+    "9408173275444922801" : {
+      "stat643b26c15879786f7" : {
+      "status": "SUSPENDED",
+      "reason": "KEY_COMPROMISE",
+      "co643b26c15879786f7" : {
+      "status": "SUSPENDED",
+      "reason": "KEY_COMPROMISE",
+      "comment": "Entry for t#esting only"
+    }
+  }
+}

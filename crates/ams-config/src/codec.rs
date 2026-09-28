@@ -452,6 +452,9 @@ pub struct Configuration {
     /// Un fichier PEM de racines admises en plus de celles de Google, ou une
     /// chaîne vide.
     pub android_roots: String,
+    /// La liste de révocation : une chaîne vide pour celle de Google, ou le
+    /// chemin d'un fichier local.
+    pub android_revocation: String,
     /// La file d'attente du serveur.
     pub queue: Queue,
     /// MTA-STS (RFC 8461).
@@ -1108,6 +1111,7 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
             empreintes
         },
         android_roots: texte(lu.get_android_roots()?)?,
+        android_revocation: texte(lu.get_android_revocation()?)?,
         queue,
         mtasts,
         tlsrpt,
@@ -1281,6 +1285,7 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
             }
         }
         ecrit.set_android_roots(&config.android_roots);
+        ecrit.set_android_revocation(&config.android_revocation);
         {
             let mut emission = ecrit.reborrow().init_relay();
             emission.set_enabled(config.relay.enabled);
@@ -1470,6 +1475,10 @@ mod tests {
         assert_eq!(relue.android_package, "org.airdesktop.mail");
         assert_eq!(relue.android_signers, vec![[7; 32], [8; 32]]);
         assert_eq!(relue.android_roots, "/var/lib/air-mail/racines-android.pem");
+        assert_eq!(
+            relue.android_revocation,
+            "/var/lib/air-mail/revocation-android.json"
+        );
         for mode in [
             AndroidAttestation::Off,
             AndroidAttestation::Verify,
@@ -1604,6 +1613,7 @@ mod tests {
             android_package: String::from("org.airdesktop.mail"),
             android_signers: vec![[7; 32], [8; 32]],
             android_roots: String::from("/var/lib/air-mail/racines-android.pem"),
+            android_revocation: String::from("/var/lib/air-mail/revocation-android.json"),
             // Les trois écoutes d'un serveur réel : le `25` et le `587` en
             // `STARTTLS`, le `465` en TLS implicite.
             smtp_listeners: vec![

@@ -13,6 +13,8 @@
 //! 1. **Rien ne panique**, quels que soient les octets.
 //! 2. **UNE ATTESTATION ACCEPTÉE L'EST SOUS UNE RACINE ADMISE** : sans racine
 //!    admise, tout est refusé — une chaîne ne s'accepte jamais « par défaut ».
+//! 3. **LA LISTE DE RÉVOCATION SE LIT SANS PANIQUE**, et dit combien elle a lu
+//!    — autant que d'appels.
 
 #![no_main]
 
@@ -28,6 +30,11 @@ const EMPREINTE: &[u8] =
 const MAINTENANT: i64 = 1_790_553_600;
 
 fuzz_target!(|chaine: &[u8]| {
+    let mut vus = 0_usize;
+    if let Ok(combien) = ams_attest::read_status_list(chaine, &mut |_| vus += 1) {
+        assert_eq!(combien, vus, "la liste dit autre chose que ce qu'elle a lu");
+    }
+
     let Ok(appareil) = <[u8; 65]>::try_from(APPAREIL) else {
         return;
     };
@@ -40,6 +47,7 @@ fuzz_target!(|chaine: &[u8]| {
         roots: &racines,
         package: b"org.airdesktop.mail",
         signers: &signataires,
+        revoked: &[],
     };
     let _ = ams_attest::verify(chaine, &appareil, DEFI, &politique, MAINTENANT);
 

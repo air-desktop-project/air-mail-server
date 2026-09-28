@@ -2317,8 +2317,21 @@ air-desktop.org et téléchargée depuis ses serveurs.
   Google — pour les essais, ou une racine que Google annoncerait avant la
   prochaine version.
 
-Ce qui n'est pas vérifié : la liste de révocation des clefs d'usine que Google
-publie. Elle change, et viendra d'une mise à jour périodique.
+**LA LISTE DE RÉVOCATION DE GOOGLE** (0.2.40) — les clefs d'usine qui ont fui,
+révoquées ou suspendues, près de deux mille en 2026 — est relue **chaque jour**
+depuis `https://android.googleapis.com/attestation/status`, par le même transport
+HTTPS vérifié que les réveils (il demande `--resolver` et `--mta-sts-anchors`).
+Chaque certificat d'une chaîne s'y cherche, et un seul suffit à la refuser.
+**Tant qu'aucune liste n'est chargée, toute attestation se refuse** : on ne
+croit pas une clef dont on ne sait pas si elle a été révoquée. Une relecture qui
+échoue laisse l'ancienne en vigueur et se retente toutes les heures. Un serveur
+sans accès au dehors lit un fichier local à la place :
+
+```sh
+curl -sS -o /var/lib/air-mail/revocation-android.json \
+    https://android.googleapis.com/attestation/status
+air-mail-admin config write … --android-revocation-list /var/lib/air-mail/revocation-android.json
+```
 
 ### Refuser un `HELO` non qualifié
 

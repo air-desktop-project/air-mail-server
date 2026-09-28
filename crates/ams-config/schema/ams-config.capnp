@@ -252,6 +252,13 @@ struct Configuration {
   # essais, et à une rotation de racine que Google annoncerait.
   androidRoots @50 :Text;
 
+  # D'où vient la liste de révocation des clefs d'attestation (0.2.40) : vide,
+  # de Google (`https://android.googleapis.com/attestation/status`), relue
+  # chaque jour ; un chemin, d'un fichier local — pour un serveur sans accès
+  # au dehors, et pour les essais. Tant qu'aucune liste n'est chargée, toute
+  # attestation se refuse.
+  androidRevocation @51 :Text;
+
   enum AndroidAttestation {
     off @0;
     verify @1;

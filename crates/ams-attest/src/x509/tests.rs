@@ -257,6 +257,7 @@ fn signe(algorithme: Algorithme, signature: &'static [u8]) -> Certificat<'static
         debut: 0,
         fin: 0,
         attestation: None,
+        serie: None,
     }
 }
 
@@ -316,4 +317,21 @@ fn une_signature_ecdsa_mal_formee_rend_faux() {
     let mut p384 = intermediaire;
     p384.signature = &[0x04, 0x00];
     assert!(!signe_par(&p384, racine.cle));
+}
+
+/// **UN NUMÉRO DE SÉRIE SE LIT S'IL TIENT SUR SEIZE OCTETS**, zéro de signe
+/// ôté ; négatif ou plus long, aucune entrée de la liste ne le nomme.
+#[test]
+fn un_numero_de_serie_se_lit_s_il_tient() {
+    assert_eq!(super::serie(&[0x01]), Some(1));
+    assert_eq!(super::serie(&[0x00, 0x80]), Some(0x80));
+    assert_eq!(
+        super::serie(&[0xFF; 16].map(|_| 0x7F)),
+        Some(u128::from_be_bytes([0x7F; 16]))
+    );
+    let mut seize = std::vec![0x00];
+    seize.extend_from_slice(&[0xFF; 16]);
+    assert_eq!(super::serie(&seize), Some(u128::MAX));
+    assert_eq!(super::serie(&[0x80]), None, "négatif");
+    assert_eq!(super::serie(&[0x01; 17]), None, "dix-sept octets");
 }

@@ -45,7 +45,10 @@ extern crate std;
 
 mod der;
 mod description;
+mod status;
 mod x509;
+
+pub use status::{SERIAL_HEX_MAX, read_status_list};
 
 use description::{Demarrage, Niveau};
 
@@ -84,6 +87,10 @@ pub struct Policy<'a> {
     pub package: &'a [u8],
     /// Les empreintes SHA-256 admises du certificat qui SIGNE l'application.
     pub signers: &'a [[u8; 32]],
+    /// Les numéros de série que la liste de révocation de Google nomme,
+    /// **TRIÉS** — voir [`read_status_list`]. Un certificat de la chaîne qui
+    /// y figure la fait refuser.
+    pub revoked: &'a [u128],
 }
 
 /// Où vit la clef attestée.
@@ -154,6 +161,8 @@ pub enum Refusal {
     OtherApplication,
     /// L'application n'est pas signée par un certificat admis.
     OtherSigner,
+    /// Un certificat de la chaîne est révoqué, ou suspendu, par Google.
+    Revoked,
 }
 
 impl Refusal {
@@ -176,6 +185,7 @@ impl Refusal {
             Self::NoRootOfTrust => "racine de confiance absente",
             Self::OtherApplication => "autre application",
             Self::OtherSigner => "application signée par un autre certificat",
+            Self::Revoked => "une clef de la chaîne est révoquée par Google",
         }
     }
 }
@@ -230,6 +240,17 @@ pub fn verify(
     }
     if !policy.roots.contains(&racine.spki) {
         return Err(Refusal::UnknownRoot);
+    }
+    // **CHAQUE CERTIFICAT SE CHERCHE DANS LA LISTE** (§« Certificate
+    // revocation status list » de la documentation d'Android) : c'est une clef
+    // d'usine qui fuit, et elle peut être à n'importe quel étage.
+    for certificat in lus.iter().flatten() {
+        if certificat
+            .serie
+            .is_some_and(|serie| policy.revoked.binary_search(&serie).is_ok())
+        {
+            return Err(Refusal::Revoked);
+        }
     }
     // **LA RACINE EST ÉPINGLÉE PAR SA CLEF, PAS PAR SES DATES** : Google a
     // réémis la même clef sous d'autres certificats. Les autres le sont par

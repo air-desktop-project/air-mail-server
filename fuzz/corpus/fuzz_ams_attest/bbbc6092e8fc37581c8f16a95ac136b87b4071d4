@@ -1,0 +1,20 @@
+{
+  "entries": {
+    "6681152659205225093" : {
+      "status": "REVOKED",
+      "reasonon": "KEOMISE"
+    },
+    "11244410301401252959" : {
+      "status": "REVOKED",
+      "reason": "KEY_COMPROMISE"
+    },
+    "cc66e9a93713b6e643b26c15879786f7" : {
+      "status": "SUSPENDED",
+      "reaÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿson": "KEY_COMPROMISE",
+      "co643b26c15879786f7" : {
+      "status": "SUSPENDED",
+      "reason": "_EKYCOMPROMISE",
+      "comment": "Entry for testing only"
+    }
+  }
+}

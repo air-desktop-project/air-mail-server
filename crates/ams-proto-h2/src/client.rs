@@ -39,9 +39,15 @@ const FLUX: u32 = 1;
 /// Ce qu'une valeur d'en-tête décodée peut occuper.
 const CHAMP_MAX: usize = 4 * 1024;
 
-/// Ce qu'on écrit au plus en une fois : préambule, `SETTINGS`, tête.
-pub const START_OCTETS_MAX: usize =
-    24 + FRAME_HEADER_OCTETS + Settings::OCTETS_MAX + FRAME_HEADER_OCTETS + REQUEST_HEAD_MAX;
+/// Ce qu'on écrit au plus en une fois : préambule, `SETTINGS`, le
+/// `WINDOW_UPDATE` de la connexion, tête.
+pub const START_OCTETS_MAX: usize = 24
+    + FRAME_HEADER_OCTETS
+    + Settings::OCTETS_MAX
+    + FRAME_HEADER_OCTETS
+    + 4
+    + FRAME_HEADER_OCTETS
+    + REQUEST_HEAD_MAX;
 
 /// Ce que la tête d'une requête peut occuper : un seul cadre `HEADERS`, à la
 /// taille que tout serveur accepte (§4.2).
@@ -72,6 +78,17 @@ pub struct Progress {
     /// La réponse est complète.
     pub done: bool,
 }
+
+/// Ce que le client laisse le serveur lui envoyer sans attendre, par flux et
+/// pour la connexion : huit mébioctets.
+///
+/// **SANS ELLE, UNE RÉPONSE S'ARRÊTE À 64 KIO** : la fenêtre par défaut de §6.9.2
+/// est de 65 535 octets, et ce client n'envoie aucun `WINDOW_UPDATE` en cours
+/// de route — il n'en a pas besoin pour une réponse qu'il reçoit d'un trait.
+/// Huit mébioctets couvrent la liste de révocation de Google (0.2.40) avec
+/// plus qu'assez de marge ; ce que l'appelant accepte vraiment se borne
+/// ailleurs, par la place qu'il donne au corps.
+pub const RECEIVE_WINDOW: u32 = 8 * 1024 * 1024;
 
 /// Le client d'une requête.
 #[derive(Debug)]
@@ -116,6 +133,7 @@ impl Client {
     const fn nos_reglages() -> Settings {
         Settings {
             enable_push: false,
+            initial_window_size: RECEIVE_WINDOW,
             ..Settings::DEFAULT
         }
     }
@@ -141,6 +159,17 @@ impl Client {
             0,
             0,
             reglages.get(..longueur).unwrap_or_default(),
+        )?;
+        // **LA FENÊTRE DE LA CONNEXION S'OUVRE D'EMBLÉE** (§6.9.2) : `SETTINGS`
+        // ne règle que celle des flux, et celle de la connexion reste à
+        // 65 535 octets tant qu'un `WINDOW_UPDATE` ne l'élargit pas.
+        let ecrits = poser_un_cadre(
+            out,
+            ecrits,
+            FrameKind::WindowUpdate,
+            0,
+            0,
+            &RECEIVE_WINDOW.saturating_sub(65_535).to_be_bytes(),
         )?;
 
         let mut tete = [0_u8; REQUEST_HEAD_MAX];

@@ -85,7 +85,17 @@ fn le_debut_d_une_requete_s_ecrit() {
     crate::settings::SettingsReader::apply_all(&reste[9..reglages.total()], &mut lus)
         .expect("lisibles");
     assert!(!lus.enable_push);
+    assert_eq!(lus.initial_window_size, super::RECEIVE_WINDOW);
     let reste = &reste[reglages.total()..];
+    // La fenêtre de la connexion s'ouvre juste après.
+    let fenetre = FrameHeader::parse(reste[..9].try_into().expect("neuf"));
+    assert_eq!(
+        (fenetre.kind(), fenetre.stream()),
+        (FrameKind::WindowUpdate, 0)
+    );
+    let increment = u32::from_be_bytes(reste[9..13].try_into().expect("quatre"));
+    assert_eq!(increment + 65_535, super::RECEIVE_WINDOW);
+    let reste = &reste[fenetre.total()..];
     let tete = FrameHeader::parse(reste[..9].try_into().expect("neuf"));
     assert_eq!((tete.kind(), tete.stream()), (FrameKind::Headers, 1));
     assert!(tete.flags().end_headers() && !tete.flags().end_stream());
@@ -117,7 +127,9 @@ fn le_debut_d_une_requete_s_ecrit() {
     });
     let reste = &out[PREFACE.len()..];
     let reglages = FrameHeader::parse(reste[..9].try_into().expect("neuf"));
-    let tete = FrameHeader::parse(reste[reglages.total()..][..9].try_into().expect("neuf"));
+    let apres = &reste[reglages.total()..];
+    let fenetre = FrameHeader::parse(apres[..9].try_into().expect("neuf"));
+    let tete = FrameHeader::parse(apres[fenetre.total()..][..9].try_into().expect("neuf"));
     assert!(tete.flags().end_stream());
 }
 
@@ -358,7 +370,18 @@ fn un_cadre_incomplet_attend() {
 #[test]
 fn ce_qui_ne_tient_pas_se_dit() {
     let mut client = Client::new();
-    for taille in [0, PREFACE.len(), PREFACE.len() + 12, PREFACE.len() + 30] {
+    // La taille qui laisse passer les `SETTINGS`, et pas le `WINDOW_UPDATE`.
+    let (_, debut) = demarrer(&REQUETE);
+    let cadre_des_reglages =
+        FrameHeader::parse(debut[PREFACE.len()..][..9].try_into().expect("neuf"));
+    let apres_reglages = PREFACE.len() + cadre_des_reglages.total();
+    for taille in [
+        0,
+        PREFACE.len(),
+        PREFACE.len() + 12,
+        apres_reglages + 5,
+        apres_reglages + 13 + 5,
+    ] {
         let mut petit = std::vec![0_u8; taille];
         assert_eq!(
             client

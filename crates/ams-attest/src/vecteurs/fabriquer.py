@@ -176,7 +176,7 @@ def certificat(sujet, publique, emetteur, cle_emetteur, ca, extension=None,
         .subject_name(nom(sujet))
         .issuer_name(nom(emetteur))
         .public_key(publique)
-        .serial_number(x509.random_serial_number())
+        .serial_number(x509.random_serial_number() >> 96)
         .not_valid_before(debut)
         .not_valid_after(fin)
         .add_extension(x509.BasicConstraints(ca=ca, path_length=None), critical=True)

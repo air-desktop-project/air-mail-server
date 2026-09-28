@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-use super::{PushFault, config_h2, decouper, echanger, is_public};
+use super::{Demande, PushFault, RESPONSE_BODY_MAX, config_h2, decouper, echanger, is_public};
 
 /// **LE SERVEUR NE CONTACTE QUE DES ADRESSES PUBLIQUES** pour le compte d'un
 /// abonné.
@@ -202,17 +202,78 @@ async fn faux_service(
                     .write_head(1, code, &[], reponse.is_empty(), &mut sortie)
                     .expect("tête");
                 flux.write_all(&sortie[..n]).await.expect("écrit");
-                if !reponse.is_empty() {
-                    let (n, _) = conn
-                        .write_data(1, reponse, true, &mut sortie)
-                        .expect("corps");
+                // UN CORPS PLUS LONG QU'UN CADRE part en plusieurs : le pair
+                // en accepte autant que ses fenêtres le permettent.
+                let mut reste = reponse;
+                while !reste.is_empty() {
+                    let (n, pris) = conn.write_data(1, reste, true, &mut sortie).expect("corps");
+                    assert!(pris > 0, "la fenêtre du client s'est fermée");
                     flux.write_all(&sortie[..n]).await.expect("écrit");
+                    reste = &reste[pris..];
                 }
                 flux.flush().await.expect("vidé");
                 return vu;
             }
         }
     }
+}
+
+/// Deux cent mille octets : plus de trois fois la fenêtre par défaut de §6.9.2.
+static GROS: [u8; 200_000] = [b'x'; 200_000];
+
+/// **UN `GET` RAMÈNE UN CORPS DE PLUSIEURS FENÊTRES** (0.2.40) — c'est ce que
+/// la liste de révocation de Google demande, et ce que la fenêtre de 65 535
+/// octets arrêtait. Et un corps plus long que ce que l'appelant accepte est
+/// une faute, pas une troncature.
+#[tokio::test(flavor = "multi_thread")]
+async fn un_get_ramene_un_corps_de_plusieurs_fenetres() {
+    let _exclusif = crate::SOCKETS_EXCLUSIFS.lock().await;
+    let repertoire = std::env::temp_dir().join(std::format!("ams-get-{}", std::process::id()));
+    std::fs::create_dir_all(&repertoire).expect("répertoire");
+    let Some((cert, cle)) = certificat(&repertoire) else {
+        eprintln!("SAUTÉ : `openssl` n'a pas su fabriquer de certificat.");
+        return;
+    };
+    let ancres = Arc::new(ams_tls::anchors(&cert).expect("une ancre"));
+    let client = Arc::new(config_h2(ancres));
+    for (corps_max, attendu) in [(256 * 1024, true), (100_000, false)] {
+        let mut serveur = ams_tls::server_config(&cert, &cle).expect("matériel");
+        serveur.alpn_protocols = ams_tls::alpn();
+        let ecoute = tokio::net::TcpListener::bind("[::1]:0")
+            .await
+            .expect("liée");
+        let adresse = ecoute.local_addr().expect("adresse");
+        let service = tokio::spawn(faux_service(ecoute, Arc::new(serveur), 200, &GROS));
+        let reponse = echanger(
+            &client,
+            Duration::from_secs(5),
+            adresse,
+            Demande {
+                methode: b"GET",
+                hote: "push.test",
+                chemin: "/attestation/status",
+                fields: &[],
+                body: &[],
+                corps_max,
+            },
+        )
+        .await;
+        match attendu {
+            true => {
+                let reponse = reponse.expect("une réponse");
+                assert_eq!(reponse.status, 200);
+                assert_eq!(reponse.body.len(), GROS.len());
+                let vu = service.await.expect("le service a fini");
+                assert_eq!(vu.methode, "Get");
+                assert!(vu.corps.is_empty());
+            }
+            false => {
+                assert_eq!(reponse, Err(PushFault::Protocol));
+                service.abort();
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&repertoire);
 }
 
 /// **UN ÉCHANGE ENTIER** : TLS 1.3 vérifié contre l'ancre et pour le nom,
@@ -250,10 +311,14 @@ async fn un_reveil_part_et_sa_reponse_revient() {
         &client,
         Duration::from_secs(5),
         adresse,
-        "push.test",
-        "/wpush/abc",
-        &[(b"ttl", b"60")],
-        b"le message chiffr\xc3\xa9",
+        Demande {
+            methode: b"POST",
+            hote: "push.test",
+            chemin: "/wpush/abc",
+            fields: &[(b"ttl", b"60")],
+            body: b"le message chiffr\xc3\xa9",
+            corps_max: RESPONSE_BODY_MAX,
+        },
     )
     .await
     .expect("une réponse");
@@ -286,10 +351,14 @@ async fn un_reveil_part_et_sa_reponse_revient() {
         &client,
         Duration::from_secs(5),
         adresse,
-        "autre.test",
-        "/x",
-        &[],
-        b"",
+        Demande {
+            methode: b"POST",
+            hote: "autre.test",
+            chemin: "/x",
+            fields: &[],
+            body: b"",
+            corps_max: RESPONSE_BODY_MAX,
+        },
     )
     .await
     .expect_err("un nom qui ne correspond pas");
@@ -310,10 +379,14 @@ async fn un_reveil_part_et_sa_reponse_revient() {
         &client,
         Duration::from_secs(5),
         adresse,
-        "push.test",
-        "/x",
-        &[],
-        b"",
+        Demande {
+            methode: b"POST",
+            hote: "push.test",
+            chemin: "/x",
+            fields: &[],
+            body: b"",
+            corps_max: RESPONSE_BODY_MAX,
+        },
     )
     .await
     .expect_err("pas d'ALPN h2");
@@ -326,10 +399,14 @@ async fn un_reveil_part_et_sa_reponse_revient() {
         &client,
         Duration::from_secs(5),
         personne,
-        "push.test",
-        "/x",
-        &[],
-        b"",
+        Demande {
+            methode: b"POST",
+            hote: "push.test",
+            chemin: "/x",
+            fields: &[],
+            body: b"",
+            corps_max: RESPONSE_BODY_MAX,
+        },
     )
     .await
     .expect_err("fermé");

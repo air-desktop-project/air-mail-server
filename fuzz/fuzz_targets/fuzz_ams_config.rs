@@ -154,6 +154,7 @@ struct Entree {
     android_package: String,
     android_signers: Vec<[u8; 32]>,
     android_roots: String,
+    android_revocation: String,
     /// Le dossier des rapports TLS, et le drapeau de remise — LIBRES tous les
     /// deux, y compris incohérents entre eux.
     tlsrpt: String,
@@ -236,6 +237,7 @@ fuzz_target!(|entree: Entree| {
         android_package: entree.android_package.clone(),
         android_signers: entree.android_signers.clone(),
         android_roots: entree.android_roots.clone(),
+        android_revocation: entree.android_revocation.clone(),
         require_fqdn_helo: entree.helo_qualifie,
         require_fqdn_sender: entree.expediteur_qualifie,
         require_fqdn_recipient: entree.destinataire_qualifie,

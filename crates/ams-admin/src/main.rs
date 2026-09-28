@@ -1017,7 +1017,7 @@ fn afficher(config: &Configuration) {
                 String::from("NON LUE — la clef d'un appareil n'a pas à prouver où elle vit")
             }
             mode => format!(
-                "`{}` — application `{}`, {} empreinte(s) de signature{}",
+                "`{}` — application `{}`, {} empreinte(s) de signature{} ; révocation {}",
                 mode.name(),
                 config.android_package,
                 config.android_signers.len(),
@@ -1025,6 +1025,11 @@ fn afficher(config: &Configuration) {
                     String::new()
                 } else {
                     format!(", racines en plus `{}`", config.android_roots)
+                },
+                if config.android_revocation.is_empty() {
+                    String::from("lue chez Google chaque jour")
+                } else {
+                    format!("lue dans `{}`", config.android_revocation)
                 }
             ),
         }

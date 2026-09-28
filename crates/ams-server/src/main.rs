@@ -610,7 +610,7 @@ fn envoyeur_du_reveil(
         );
         return Ok((Arc::new(aiguillage), None));
     }
-    let transport = transport_des_reveils(options, verificateur)?;
+    let transport = transport_https(options, verificateur, "réveils")?;
     if !options.push_vapid_key.is_empty() {
         let chemin = &options.push_vapid_key;
         if options.push_contact.is_empty() {
@@ -703,20 +703,21 @@ fn envoyeur_du_reveil(
 
 /// Le transport commun aux canaux : le résolveur, pour vérifier les adresses
 /// avant de les contacter, et les autorités, pour vérifier les certificats.
-fn transport_des_reveils(
+fn transport_https(
     options: &Configuration,
     verificateur: Option<&ams_loop_tokio::SenderChecker>,
+    pour: &str,
 ) -> Result<ams_loop_tokio::PushTransport, String> {
     let Some(verificateur) = verificateur else {
-        return Err(String::from(
-            "les réveils demandent un résolveur DNS (`--resolver 127.0.0.1:53`) : les adresses \
-             d'un service de notifications se vérifient AVANT d'être contactées",
+        return Err(format!(
+            "{pour} : il faut un résolveur DNS (`--resolver 127.0.0.1:53`) — les adresses d'un \
+             service se vérifient AVANT d'être contactées"
         ));
     };
     if options.mtasts.anchors.is_empty() {
-        return Err(String::from(
-            "les réveils demandent des autorités pour vérifier les services de notifications \
-             (`--mta-sts-anchors /etc/ssl/certs/ca-certificates.crt`)",
+        return Err(format!(
+            "{pour} : il faut des autorités pour vérifier le service \
+             (`--mta-sts-anchors /etc/ssl/certs/ca-certificates.crt`)"
         ));
     }
     let pem = std::fs::read(&options.mtasts.anchors)
@@ -724,7 +725,7 @@ fn transport_des_reveils(
     let racines = ams_tls::anchors(&pem)
         .map_err(|erreur| format!("`{}` : {erreur}", options.mtasts.anchors))?;
     eprintln!(
-        "air-mail-server : réveils — en TLS 1.3 vérifié contre `{}`, vers des adresses \
+        "air-mail-server : {pour} — en TLS 1.3 vérifié contre `{}`, vers des adresses \
          PUBLIQUES seulement.",
         options.mtasts.anchors
     );
@@ -1384,6 +1385,38 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         let (envoyeur, publique) = envoyeur_du_reveil(&options, verificateur.as_ref())?;
         (Some(envoyeur), publique)
     };
+    // ── ET LE JUGE DES ATTESTATIONS ANDROID, AVEC SA LISTE DE RÉVOCATION ─────
+    //
+    // Ici aussi pour la même raison : la liste de Google se lit par le même
+    // transport vérifié, qui demande le résolveur.
+    let juge = juge_d_attestation(&options)?;
+    if options.android_attestation != ams_config::AndroidAttestation::Off {
+        let source = if options.android_revocation.is_empty() {
+            match transport_https(
+                &options,
+                verificateur.as_ref(),
+                "liste de révocation Android",
+            ) {
+                Ok(transport) => Some(SourceDeListe::Google(transport)),
+                Err(cause) => {
+                    eprintln!(
+                        "air-mail-server : liste de révocation Android INJOIGNABLE ({cause}) — \
+                         toute attestation sera refusée"
+                    );
+                    None
+                }
+            }
+        } else {
+            // **UN FICHIER SE LIT AVANT DE SERVIR** : sans quoi le premier
+            // enrôlement pourrait devancer la première lecture.
+            let chemin = PathBuf::from(&options.android_revocation);
+            charger_la_liste(&juge.liste(), &SourceDeListe::Fichier(chemin.clone())).await;
+            Some(SourceDeListe::Fichier(chemin))
+        };
+        if let Some(source) = source {
+            tokio::spawn(tenir_la_liste_a_jour(juge.liste(), source));
+        }
+    }
     // ── LE CANAL JUSQU'AUX RÉSOLVEURS (§2.1 de RFC 7672) ────────────────────
     //
     // **ON DIT CE QU'ON CROIT, ET CE QU'ON NE CROIT PAS.** Le bit `AD` décide
@@ -2601,7 +2634,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         reveil.clone(),
         vapid_publique.clone(),
         audit.clone(),
-        juge_d_attestation(&options)?,
+        juge.clone(),
         file.as_ref().map(|attente| attente.as_ref().clone()),
         message_max,
         port_h3,
@@ -3169,6 +3202,84 @@ fn juge_d_attestation(options: &Configuration) -> Result<crate::attestation::Jug
         ),
     }
     Ok(juge)
+}
+
+/// L'adresse où Google publie la liste de révocation des clefs d'attestation.
+const LISTE_DE_GOOGLE: &str = "https://android.googleapis.com/attestation/status";
+
+/// Ce que la liste de Google peut peser : quarante fois sa taille de 2026.
+const LISTE_OCTETS_MAX: usize = 8 * 1024 * 1024;
+
+/// D'où vient la liste de révocation.
+enum SourceDeListe {
+    /// De Google, par le transport HTTPS vérifié.
+    Google(ams_loop_tokio::PushTransport),
+    /// D'un fichier local.
+    Fichier(PathBuf),
+}
+
+/// Lit la liste, et la pose si elle se lit entière. Rend `true` si c'est
+/// fait ; sinon le journal dit pourquoi, et l'ancienne reste en vigueur.
+async fn charger_la_liste(liste: &crate::attestation::Liste, source: &SourceDeListe) -> bool {
+    let (octets, d_ou) = match source {
+        SourceDeListe::Fichier(chemin) => (
+            tokio::fs::read(chemin)
+                .await
+                .map_err(|erreur| erreur.to_string()),
+            chemin.display().to_string(),
+        ),
+        SourceDeListe::Google(transport) => (
+            match transport.get(LISTE_DE_GOOGLE, LISTE_OCTETS_MAX).await {
+                Ok(reponse) if reponse.status == 200 => Ok(reponse.body),
+                Ok(reponse) => Err(format!("statut {}", reponse.status)),
+                Err(faute) => Err(format!("{faute:?}")),
+            },
+            String::from(LISTE_DE_GOOGLE),
+        ),
+    };
+    match octets.and_then(|octets| {
+        crate::attestation::lire_la_liste(&octets).map_err(|refus| refus.describe().to_string())
+    }) {
+        Ok(series) => {
+            let combien = liste.poser(series);
+            eprintln!(
+                "air-mail-server : liste de révocation Android relue — {combien} clef(s) \
+                 révoquée(s) ou suspendue(s), depuis `{d_ou}`"
+            );
+            true
+        }
+        Err(cause) => {
+            eprintln!(
+                "air-mail-server : liste de révocation Android NON relue depuis `{d_ou}` ({cause}) \
+                 — {}",
+                match liste.courante() {
+                    Some(_) => "l'ancienne reste en vigueur",
+                    None => "aucune n'est chargée : toute attestation est refusée",
+                }
+            );
+            false
+        }
+    }
+}
+
+/// Relit la liste chaque jour — chaque heure tant qu'elle ne se relit pas.
+///
+/// **UNE FOIS PAR JOUR, C'EST CE QUE GOOGLE DIT** : sa réponse porte
+/// `Cache-Control: max-age=86400`. Une clef d'usine révoquée l'est pour de bon,
+/// et un jour de retard ne rouvre rien qu'on ait déjà refusé.
+async fn tenir_la_liste_a_jour(liste: Arc<crate::attestation::Liste>, source: SourceDeListe) {
+    // Un fichier vient d'être lu au démarrage : on attend avant de le relire.
+    let mut prochaine = match source {
+        SourceDeListe::Fichier(_) => std::time::Duration::from_secs(86_400),
+        SourceDeListe::Google(_) => std::time::Duration::ZERO,
+    };
+    loop {
+        tokio::time::sleep(prochaine).await;
+        prochaine = match charger_la_liste(&liste, &source).await {
+            true => std::time::Duration::from_secs(86_400),
+            false => std::time::Duration::from_secs(3_600),
+        };
+    }
 }
 
 /// Où vivent les clés d'idempotence : `<brouillons>/.cles`.

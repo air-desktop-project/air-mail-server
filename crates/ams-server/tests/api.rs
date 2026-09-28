@@ -235,6 +235,7 @@ fn configuration_complete(
         android_package: String::new(),
         android_signers: Vec::new(),
         android_roots: String::new(),
+        android_revocation: String::new(),
         require_fqdn_sender: false,
         require_fqdn_recipient: false,
         require_sender_domain: false,
@@ -1363,6 +1364,7 @@ mod attestation_d_essai {
 
     /// Un certificat : `sujet` signé par `emetteur`, avec ces extensions.
     fn certificat(
+        serie: u8,
         sujet: &p256::ecdsa::SigningKey,
         emetteur: &p256::ecdsa::SigningKey,
         extensions: &[&[u8]],
@@ -1375,7 +1377,7 @@ mod attestation_d_essai {
         ]);
         let mut champs: Vec<Vec<u8>> = vec![
             contexte(0, &entier(&[2])),
-            entier(&[1]),
+            entier(&[serie]),
             ecdsa_sha256.clone(),
             nom.clone(),
             validite,
@@ -1440,10 +1442,11 @@ mod attestation_d_essai {
             &oid(&[0x2B, 0x06, 0x01, 0x04, 0x01, 0xD6, 0x79, 0x02, 0x01, 0x11]),
             &octets(&description),
         ]);
+        // Des numéros de série distincts : la liste de révocation en nomme un.
         [
-            certificat(appareil, &intermediaire, &[&extension]),
-            certificat(&intermediaire, racine, &[]),
-            certificat(racine, racine, &[]),
+            certificat(1, appareil, &intermediaire, &[&extension]),
+            certificat(0x2a, &intermediaire, racine, &[]),
+            certificat(3, racine, racine, &[]),
         ]
         .concat()
     }
@@ -1460,7 +1463,29 @@ mod attestation_d_essai {
 /// l'enrôlement se refuse en `422`, sans consommer l'invitation.
 #[test]
 fn une_attestation_android_se_verifie_a_l_enrolement() {
-    let atelier = atelier("attestation-android");
+    enroler_sous_attestation(
+        "attestation-android",
+        br#"{"entries":{"ff":{"status":"REVOKED"}}}"#,
+        true,
+    );
+}
+
+/// **UNE CLEF D'USINE RÉVOQUÉE PAR GOOGLE N'ENRÔLE RIEN** (0.2.40) : la même
+/// attestation, en règle en tout point, sous une liste qui révoque son
+/// intermédiaire — `422`.
+#[test]
+fn une_attestation_revoquee_n_enrole_rien() {
+    enroler_sous_attestation(
+        "attestation-revoquee",
+        br#"{"entries":{"2a":{"status":"SUSPENDED","reason":"KEY_COMPROMISE"}}}"#,
+        false,
+    );
+}
+
+/// Le banc des deux essais : un serveur en `require`, sous cette liste de
+/// révocation ; `admise` dit si la bonne attestation doit enrôler.
+fn enroler_sous_attestation(nom: &str, liste_json: &[u8], admise: bool) {
+    let atelier = atelier(nom);
     let Some((cert, cle)) = paire(&atelier.0) else {
         panic!("{SANS_OPENSSL}");
     };
@@ -1532,6 +1557,12 @@ fn une_attestation_android_se_verifie_a_l_enrolement() {
     lue.android_package = String::from("org.airdesktop.mail");
     lue.android_signers = vec![attestation_d_essai::empreinte()];
     lue.android_roots = racines.display().to_string();
+    // LA LISTE DE RÉVOCATION, locale : sans elle, rien ne passerait. Celle-ci
+    // ne nomme QUE l'intermédiaire, sous le numéro 0x2a — sauf si l'essai en
+    // veut une vide.
+    let liste = atelier.0.join("revocation.json");
+    std::fs::write(&liste, liste_json).expect("la liste s'écrit");
+    lue.android_revocation = liste.display().to_string();
     std::fs::write(&config, ams_config::encode(&lue).expect("encodable")).expect("écriture");
     let _serveur = lancer(&config, port_smtp);
     let base = format!("https://127.0.0.1:{port_http}");
@@ -1604,6 +1635,12 @@ fn une_attestation_android_se_verifie_a_l_enrolement() {
         ),
         None,
     );
+    if !admise {
+        assert_eq!(code, "422", "une clef révoquée a enrôlé : {corps}");
+        assert!(corps.contains("/problems/attestation-refused"), "{corps}");
+        assert!(!appareils.exists(), "rien ne s'est écrit");
+        return;
+    }
     assert_eq!(code, "201", "{corps}");
     let ranges = ams_config::decode_devices(&std::fs::read(&appareils).expect("le magasin existe"))
         .expect("lisible");

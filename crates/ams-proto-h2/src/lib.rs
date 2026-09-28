@@ -54,7 +54,7 @@ mod settings;
 mod stream;
 
 pub use block::{BLOCK_OCTETS_MAX, BlockState, CONTINUATIONS_MAX, HeaderBlock};
-pub use client::{Client, Progress, REQUEST_HEAD_MAX, Request, START_OCTETS_MAX};
+pub use client::{Client, Progress, RECEIVE_WINDOW, REQUEST_HEAD_MAX, Request, START_OCTETS_MAX};
 pub use connection::{
     CANCELLATIONS_MAX, CODE_OCTETS, Connection, Event, GOAWAY_OCTETS, Handshake, PING_OCTETS,
     PRIORITY_OCTETS, SERVICE_FRAMES_MAX,

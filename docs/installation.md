@@ -455,7 +455,11 @@ air-mail-admin config write /etc/air-mail/ams.conf … \
 - `verify` laisse passer les appareils qui n'en présentent pas (iOS, postes) ;
   `require` l'exige de tous ;
 - le démarrage refuse un mode qui juge sans paquet ni empreinte, et un fichier de
-  racines en plus (`--android-attestation-roots`) sans clef lisible.
+  racines en plus (`--android-attestation-roots`) sans clef lisible ;
+- la liste de révocation de Google se relit chaque jour par HTTPS (il faut
+  `--resolver` et `--mta-sts-anchors`) ; **tant qu'aucune n'est chargée, toute
+  attestation se refuse**. Sans accès au dehors,
+  `--android-revocation-list <fichier.json>` la lit sur le disque.
 
 ### La délégation : ouvrir une boîte à un autre compte
 

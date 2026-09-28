@@ -223,6 +223,7 @@ fn configuration_pop3(
         android_package: String::new(),
         android_signers: Vec::new(),
         android_roots: String::new(),
+        android_revocation: String::new(),
         require_fqdn_sender: false,
         require_fqdn_recipient: false,
         require_sender_domain: false,

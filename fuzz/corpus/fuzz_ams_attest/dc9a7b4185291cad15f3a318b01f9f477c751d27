@@ -1,0 +1,17 @@
+{
+  "entr—šŒÝÅß„ô225093" : {
+      "status": "REVOKED",
+      "reason": "KE§ ¼§MPROMISE"
+    },
+    "8350192447815«228107" : {
+      "staqus": "REVOKED",
+      "reason": "KEY_COMPROMISE"
+    },
+    "9408173275444922801" : {
+     "cc66e9a93713b6e643b26c15879786f7" : {
+      "status": "SUSPENDED",
+      "reason": "KEY_COMPROMISE",
+      "comment": "Entry for tÁesting only"
+    }
+  }
+}

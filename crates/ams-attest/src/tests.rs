@@ -51,6 +51,7 @@ fn juger(chaine: &[u8]) -> Result<Attestation, Refusal> {
         roots: &racines,
         package: PAQUET,
         signers: &signataires,
+        revoked: &[],
     };
     verify(chaine, &appareil(), defi(), &politique, MAINTENANT)
 }
@@ -120,6 +121,7 @@ fn un_autre_defi_est_refuse() {
         roots: &racines,
         package: PAQUET,
         signers: &signataires,
+        revoked: &[],
     };
     assert_eq!(
         verify(
@@ -143,6 +145,7 @@ fn hors_de_ses_dates_une_chaine_est_refusee() {
         roots: &racines,
         package: PAQUET,
         signers: &signataires,
+        revoked: &[],
     };
     let chaine = vecteur!("tee.der");
     // 2024 : avant le début de validité ; 2036 : après la fin.
@@ -183,6 +186,69 @@ fn une_chaine_trop_courte_trop_longue_ou_dans_le_desordre_est_refusee() {
     assert_eq!(juger(&intrus), Err(Refusal::Malformed));
 }
 
+/// **UNE CLEF RÉVOQUÉE FAIT REFUSER SA CHAÎNE**, à quelque étage qu'elle soit
+/// — et seulement elle : un autre numéro ne change rien.
+#[test]
+fn une_clef_revoquee_fait_refuser_la_chaine() {
+    let chaine = vecteur!("tee.der");
+    let series: Vec<u128> = certificats(chaine)
+        .iter()
+        .map(|brut| {
+            crate::x509::lire(brut)
+                .expect("lisible")
+                .serie
+                .expect("seize octets")
+        })
+        .collect();
+    let racines = [RACINE];
+    let signataires = [empreinte()];
+    for serie in &series {
+        let mut revoques = std::vec![1_u128, *serie, u128::MAX];
+        revoques.sort_unstable();
+        let politique = Policy {
+            roots: &racines,
+            package: PAQUET,
+            signers: &signataires,
+            revoked: &revoques,
+        };
+        assert_eq!(
+            verify(chaine, &appareil(), defi(), &politique, MAINTENANT),
+            Err(Refusal::Revoked)
+        );
+    }
+    let autres = [2_u128, 3];
+    let politique = Policy {
+        roots: &racines,
+        package: PAQUET,
+        signers: &signataires,
+        revoked: &autres,
+    };
+    assert!(verify(chaine, &appareil(), defi(), &politique, MAINTENANT).is_ok());
+}
+
+/// **UNE VRAIE CLEF D'USINE RÉVOQUÉE** : l'intermédiaire de la vraie chaîne de
+/// Google, déclaré révoqué, la fait refuser — avant même qu'on regarde sa
+/// clef d'appareil.
+#[test]
+fn une_vraie_chaine_revoquee_est_refusee() {
+    let chaine = include_bytes!("vecteurs/google/ec-tee.der");
+    let intermediaire = crate::x509::lire(certificats(chaine)[1]).expect("lisible");
+    let revoques = [intermediaire.serie.expect("seize octets")];
+    // Le numéro que `openssl x509 -serial` écrit, en hexadécimal comme la liste.
+    assert_eq!(revoques[0], 0x1320_6311_7896_3882_0911);
+    let signataires = [empreinte()];
+    let politique = Policy {
+        roots: &GOOGLE_ROOTS,
+        package: PAQUET,
+        signers: &signataires,
+        revoked: &revoques,
+    };
+    assert_eq!(
+        verify(chaine, &appareil(), b"abc", &politique, MAINTENANT),
+        Err(Refusal::Revoked)
+    );
+}
+
 /// **LES RACINES SONT CELLES DE LA DOCUMENTATION D'ANDROID** : deux clefs, et
 /// leurs empreintes sont celles qu'on a relevées sur les certificats publiés.
 #[test]
@@ -212,6 +278,7 @@ fn juger_chez_google(chaine: &[u8], cle: &[u8; 65], defi: &[u8]) -> Result<Attes
         roots: &GOOGLE_ROOTS,
         package: PAQUET,
         signers: &signataires,
+        revoked: &[],
     };
     verify(chaine, cle, defi, &politique, MAINTENANT)
 }
@@ -295,6 +362,7 @@ fn chaque_refus_et_chaque_niveau_se_disent() {
         Refusal::NoRootOfTrust,
         Refusal::OtherApplication,
         Refusal::OtherSigner,
+        Refusal::Revoked,
     ];
     let dits: std::collections::BTreeSet<&str> = tous.iter().map(|r| r.describe()).collect();
     assert_eq!(dits.len(), tous.len(), "deux refus se disent pareil");

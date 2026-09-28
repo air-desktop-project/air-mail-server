@@ -19,6 +19,7 @@
 //! invitation ne vaut pas pour celle-ci.
 
 use std::string::String;
+use std::sync::{Arc, PoisonError, RwLock};
 use std::vec::Vec;
 
 use ams_config::{AndroidAttestation, Attested};
@@ -34,6 +35,9 @@ const CHAINE_OCTETS_MAX: usize = 16 * 1024;
 pub enum Refus {
     /// Le serveur l'exige, et l'appareil n'en présente pas.
     Absente,
+    /// Aucune liste de révocation n'est encore chargée : on ne croit pas une
+    /// clef dont on ne sait pas si Google l'a révoquée.
+    SansListe,
     /// Elle n'est pas du base64url, ou pèse trop.
     Illisible,
     /// La politique la refuse — et dit pourquoi.
@@ -46,6 +50,7 @@ impl Refus {
     pub const fn dire(self) -> &'static str {
         match self {
             Self::Absente => "aucune attestation, et le serveur l'exige",
+            Self::SansListe => "aucune liste de révocation n'est encore chargée",
             Self::Illisible => "attestation illisible",
             Self::Refusee(raison) => raison.describe(),
         }
@@ -61,6 +66,53 @@ pub struct Juge {
     /// Les racines admises : celles de Google, puis celles de la
     /// configuration.
     racines: Vec<Vec<u8>>,
+    /// La liste de révocation, partagée avec ce qui la relit.
+    liste: Arc<Liste>,
+}
+
+/// La liste de révocation courante — les numéros de série que Google nomme,
+/// triés.
+///
+/// **ELLE SE REMPLACE ENTIÈRE, ET NE SE VIDE JAMAIS** : une relecture qui
+/// échoue laisse l'ancienne en vigueur. Seule une liste lue en entier en
+/// remplace une autre — voir `ams_attest::read_status_list`.
+#[derive(Debug, Default)]
+pub struct Liste {
+    courante: RwLock<Option<Arc<Vec<u128>>>>,
+}
+
+impl Liste {
+    /// Pose une liste neuve. Rend combien de clefs elle nomme.
+    pub fn poser(&self, mut series: Vec<u128>) -> usize {
+        series.sort_unstable();
+        series.dedup();
+        let combien = series.len();
+        *self
+            .courante
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Some(Arc::new(series));
+        combien
+    }
+
+    /// La liste courante, s'il y en a une.
+    #[must_use]
+    pub fn courante(&self) -> Option<Arc<Vec<u128>>> {
+        self.courante
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
+/// Lit une liste de révocation publiée par Google.
+///
+/// # Errors
+///
+/// Une liste qui n'a pas la forme publiée : elle se refuse entière.
+pub fn lire_la_liste(json: &[u8]) -> Result<Vec<u128>, ams_attest::Refusal> {
+    let mut series = Vec::new();
+    ams_attest::read_status_list(json, &mut |serie| series.push(serie))?;
+    Ok(series)
 }
 
 impl Juge {
@@ -72,7 +124,14 @@ impl Juge {
             paquet: Vec::new(),
             signataires: Vec::new(),
             racines: Vec::new(),
+            liste: Arc::new(Liste::default()),
         }
+    }
+
+    /// La liste de révocation de ce juge, à tenir à jour.
+    #[must_use]
+    pub fn liste(&self) -> Arc<Liste> {
+        Arc::clone(&self.liste)
     }
 
     /// Le juge que cette configuration décrit. `pem_des_racines` est le
@@ -113,6 +172,7 @@ impl Juge {
             paquet: paquet.as_bytes().to_vec(),
             signataires: signataires.to_vec(),
             racines,
+            liste: Arc::new(Liste::default()),
         })
     }
 
@@ -152,6 +212,7 @@ impl Juge {
             (AndroidAttestation::Require, None) => return Err(Refus::Absente),
             (_, Some(encodee)) => encodee,
         };
+        let revoquees = self.liste.courante().ok_or(Refus::SansListe)?;
         let mut place = std::vec![0_u8; CHAINE_OCTETS_MAX];
         let chaine = ams_api::decode_base64url(encodee.as_bytes(), &mut place)
             .map_err(|_| Refus::Illisible)?;
@@ -160,6 +221,7 @@ impl Juge {
             roots: &racines,
             package: &self.paquet,
             signers: &self.signataires,
+            revoked: &revoquees,
         };
         let condensat = ams_sasl::sha256(defi.as_bytes());
         let verdict = ams_attest::verify(chaine, cle, &condensat, &politique, maintenant)

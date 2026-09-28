@@ -125,13 +125,67 @@ impl PushTransport {
             &self.tls,
             self.delai,
             SocketAddr::new(adresse, 443),
-            hote,
-            chemin,
-            fields,
-            body,
+            Demande {
+                methode: b"POST",
+                hote,
+                chemin,
+                fields,
+                body,
+                corps_max: RESPONSE_BODY_MAX,
+            },
         )
         .await
     }
+
+    /// Lit cette URL par un `GET`, et rend la réponse — son corps borné à
+    /// `body_max` octets (0.2.40, pour la liste de révocation de Google).
+    ///
+    /// **LA MÊME RÈGLE QU'UN `POST`** : une adresse publique, un certificat
+    /// vérifié, HTTP/2. Un corps plus long que `body_max` est une faute.
+    ///
+    /// # Errors
+    ///
+    /// [`PushFault`].
+    pub async fn get(&self, url: &str, body_max: usize) -> Result<PushResponse, PushFault> {
+        let (hote, chemin) = decouper(url).ok_or(PushFault::BadUrl)?;
+        let adresse = self
+            .resolveur
+            .addresses(hote.as_bytes())
+            .await
+            .into_iter()
+            .find(|adresse| is_public(*adresse))
+            .ok_or(PushFault::NoPublicAddress)?;
+        echanger(
+            &self.tls,
+            self.delai,
+            SocketAddr::new(adresse, 443),
+            Demande {
+                methode: b"GET",
+                hote,
+                chemin,
+                fields: &[],
+                body: &[],
+                corps_max: body_max,
+            },
+        )
+        .await
+    }
+}
+
+/// Ce qu'un échange envoie, et ce qu'il accepte en retour.
+pub(crate) struct Demande<'a> {
+    /// `POST` ou `GET`.
+    pub(crate) methode: &'a [u8],
+    /// L'hôte, tel que le certificat doit le nommer.
+    pub(crate) hote: &'a str,
+    /// Le chemin.
+    pub(crate) chemin: &'a str,
+    /// Les champs de la requête.
+    pub(crate) fields: &'a [(&'a [u8], &'a [u8])],
+    /// Le corps de la requête.
+    pub(crate) body: &'a [u8],
+    /// Ce que le corps de la réponse peut peser.
+    pub(crate) corps_max: usize,
 }
 
 /// La configuration TLS : vérifiante, TLS 1.3, post-quantique en tête, et
@@ -201,11 +255,16 @@ pub(crate) async fn echanger(
     tls: &Arc<rustls::ClientConfig>,
     delai: Duration,
     adresse: SocketAddr,
-    hote: &str,
-    chemin: &str,
-    fields: &[(&[u8], &[u8])],
-    body: &[u8],
+    demande: Demande<'_>,
 ) -> Result<PushResponse, PushFault> {
+    let Demande {
+        methode,
+        hote,
+        chemin,
+        fields,
+        body,
+        corps_max,
+    } = demande;
     let injoignable = |_| PushFault::Unreachable;
     let nom = ServerName::try_from(hote.to_owned()).map_err(|_| PushFault::BadUrl)?;
     let flux = timeout(delai, TcpStream::connect(adresse))
@@ -228,7 +287,7 @@ pub(crate) async fn echanger(
     champs.extend_from_slice(fields);
     champs.push((b"user-agent", USER_AGENT));
     let requete = ams_proto_h2::Request {
-        method: b"POST",
+        method: methode,
         authority: hote.as_bytes(),
         path: chemin.as_bytes(),
         fields: &champs,
@@ -242,7 +301,7 @@ pub(crate) async fn echanger(
     ecrire(&mut chiffre, sortie.get(..debut).unwrap_or_default(), delai).await?;
 
     let mut recu: Vec<u8> = Vec::new();
-    let mut reponse = vec![0_u8; RESPONSE_BODY_MAX];
+    let mut reponse = vec![0_u8; corps_max];
     let mut morceau = [0_u8; 16 * 1024];
     loop {
         let lus = timeout(delai, chiffre.read(&mut morceau))

@@ -51,14 +51,17 @@ fn pem_de_la_racine() -> std::vec::Vec<u8> {
     .into_bytes()
 }
 
+/// Un juge sous la racine d'essai, avec une liste de révocation vide.
 fn juge(mode: AndroidAttestation) -> Juge {
-    Juge::new(
+    let juge = Juge::new(
         mode,
         "org.airdesktop.mail",
         &[empreinte()],
         Some(&pem_de_la_racine()),
     )
-    .expect("un réglage cohérent")
+    .expect("un réglage cohérent");
+    assert_eq!(juge.liste().poser(std::vec::Vec::new()), 0);
+    juge
 }
 
 fn encode(chaine: &[u8]) -> std::string::String {
@@ -170,6 +173,7 @@ fn une_attestation_illisible_ou_refusee_se_refuse() {
     )
     .expect("cohérent");
     assert_eq!(google_seul.racines(), 2);
+    let _ = google_seul.liste().poser(std::vec::Vec::new());
     assert_eq!(
         google_seul.juger(
             &appareil(),
@@ -181,6 +185,7 @@ fn une_attestation_illisible_ou_refusee_se_refuse() {
     );
     for refus in [
         Refus::Absente,
+        Refus::SansListe,
         Refus::Illisible,
         Refus::Refusee(ams_attest::Refusal::OtherSigner),
     ] {
@@ -216,4 +221,90 @@ fn les_clefs_d_un_fichier_pem_se_lisent() {
     assert_eq!(clefs_publiques(&sans_fin).len(), 1);
     assert!(clefs_publiques(b"rien").is_empty());
     assert!(!std::format!("{:?}", Juge::eteint()).is_empty());
+}
+
+/// Le numéro de série du certificat de rang `rang` d'une chaîne — lu à la main :
+/// `Certificate ::= SEQUENCE { TBSCertificate ::= SEQUENCE { [0] version,
+/// serialNumber INTEGER, … } … }`.
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "des positions dans une chaîne d'essai de quelques kilo-octets"
+)]
+fn serie(chaine: &[u8], rang: usize) -> u128 {
+    fn tlv(octets: &[u8]) -> (usize, usize) {
+        match octets[1] {
+            n if n < 0x80 => (2, usize::from(n)),
+            0x81 => (3, usize::from(octets[2])),
+            _ => (4, usize::from(u16::from_be_bytes([octets[2], octets[3]]))),
+        }
+    }
+    let mut debut = 0;
+    for _ in 0..rang {
+        let (entete, longueur) = tlv(&chaine[debut..]);
+        debut += entete + longueur;
+    }
+    let certificat = &chaine[debut..];
+    let tbs = &certificat[tlv(certificat).0..];
+    let dans = &tbs[tlv(tbs).0..];
+    let version = tlv(dans);
+    let entier = &dans[version.0 + version.1..];
+    let (entete, longueur) = tlv(entier);
+    entier[entete..entete + longueur]
+        .iter()
+        .fold(0_u128, |acc, octet| (acc << 8) | u128::from(*octet))
+}
+
+/// **SANS LISTE, RIEN NE PASSE ; AVEC ELLE, UNE CLEF RÉVOQUÉE NON PLUS** (0.2.40).
+#[test]
+fn la_liste_de_revocation_decide() {
+    let chaine = encode(vecteur!("tee.der"));
+    let sans = Juge::new(
+        AndroidAttestation::Verify,
+        "org.airdesktop.mail",
+        &[empreinte()],
+        Some(&pem_de_la_racine()),
+    )
+    .expect("cohérent");
+    assert!(sans.liste().courante().is_none());
+    assert_eq!(
+        sans.juger(&appareil(), INVITATION, Some(&chaine), MAINTENANT),
+        Err(Refus::SansListe)
+    );
+    // Sans attestation, en `verify`, la liste ne compte pas.
+    assert_eq!(
+        sans.juger(&appareil(), INVITATION, None, MAINTENANT),
+        Ok(None)
+    );
+
+    let intermediaire = serie(vecteur!("tee.der"), 1);
+    assert_eq!(
+        sans.liste().poser(std::vec![intermediaire, 7, 7, 3]),
+        3,
+        "triée, sans doublon"
+    );
+    assert_eq!(
+        sans.juger(&appareil(), INVITATION, Some(&chaine), MAINTENANT),
+        Err(Refus::Refusee(ams_attest::Refusal::Revoked))
+    );
+    // Une liste neuve la remplace entière.
+    assert_eq!(sans.liste().poser(std::vec![7]), 1);
+    assert_eq!(
+        sans.juger(&appareil(), INVITATION, Some(&chaine), MAINTENANT),
+        Ok(Some(Attested::Tee))
+    );
+    assert!(!std::format!("{:?}", sans.liste()).is_empty());
+}
+
+/// **LA VRAIE LISTE DE GOOGLE SE LIT**, et une liste mal formée se refuse.
+#[test]
+fn une_liste_se_lit_ou_se_refuse() {
+    let lue = super::lire_la_liste(include_bytes!(
+        "../../../ams-attest/src/vecteurs/google/status-2026-09-28.json"
+    ))
+    .expect("lisible");
+    assert_eq!(lue.len(), 1757);
+    assert_eq!(
+        super::lire_la_liste(b"{\"entries\":["),
+        Err(ams_attest::Refusal::Malformed)
+    );
 }

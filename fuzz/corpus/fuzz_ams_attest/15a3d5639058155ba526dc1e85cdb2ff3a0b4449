@@ -1,0 +1,29 @@
+{
+  "entries": {
+    "6681152659205225093" : {
+      "status": "REVOKED",
+      "reason": "KEY_COMPROMISE"
+    },
+    "8350192447815228106" : {
+      "status": "REVOKED",
+      "reason": "KEY_COMPROMISE"
+    },
+    "9408173275444922801" : {
+      "status": "REVOKED",
+      "reason": "KEY_COMPROMISE"
+    },
+    "11244410301401252959" : {
+      "status": "RMPROMISE"
+    },
+    "8350192447815228106" : {
+      "status": "REVOKED",
+      "reason": "KEY_COMPROMISE"
+    },
+    "9408173275444922801" : {
+      "status": "9786f7" : {
+      "status": "SUSPENDED",
+      "reason": "KEY_COMPROMISE",
+      "comment": "Entry for t¡esting only"
+    }
+  }
+}

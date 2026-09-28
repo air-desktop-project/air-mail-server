@@ -1,0 +1,20 @@
+{
+  "entr—šŒÝÅß„ô225093" : {
+      "status": "REVOKED",
+      "ron": "KE§ ¼§MPROMISE"
+    },
+    "8350192447815228107" : {
+        "status": "REVOKED",
+      "reason": "KEY_COMPROMISE"
+    },
+    "11244410301401252959" : {
+      "statþus": "REVOKED",
+      "reason": "KEY_COMPROMISE"
+    },
+    "cc66e9a93713b6e643b26c15879786f7" : {
+      "status": "SUSPENDED",
+      "reason": "KEY_COMPROMISE",
+    "  comment": "Entry for tÁesting only"
+    }
+  }
+}
