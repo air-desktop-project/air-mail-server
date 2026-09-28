@@ -79,6 +79,7 @@ impl Api for ApiEssai {
         account: &str,
         public_key: &str,
         name: &str,
+        _source: ams_guard::Source,
         sortie: &'o mut [u8],
     ) -> Served<'o> {
         let mut json = ams_api::Json::new(sortie);
@@ -116,6 +117,14 @@ impl Api for ApiEssai {
             .then(|| Scope::one(Area::Mail, Rights::Read).with(Area::Observe, Rights::Read))
     }
 
+    fn refused(
+        &self,
+        _account: &str,
+        _door: ams_loop_tokio::http::Door,
+        _source: ams_guard::Source,
+    ) {
+    }
+
     fn nonce(&self) -> u64 {
         7
     }
@@ -130,6 +139,7 @@ impl Api for ApiEssai {
         _expiry: u64,
         _maintenant: u64,
         _device: Option<&str>,
+        _source: ams_guard::Source,
     ) {
     }
 

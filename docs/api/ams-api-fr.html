@@ -1003,7 +1003,24 @@ PUT /v1/me/push
   <p><strong>En IMAP</strong>, la même boîte paraît sous <code>Partagés/support/…</code> — et nulle part ailleurs dans l'API : <code>/v1/mailboxes</code> ne liste que les boîtes du compte, et un nom en <code>Partagés/</code> y rend <code>404</code>.</p>
 </div>
 
+<div class="ressource">
+  <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/me/audit</span><span class="portee">jeton valide</span></div>
+  <pre><code>{ "entries": [
+  { "at": 1790000300, "event": "session.opened", "source": "2001:db8::7",
+    "device": "9f2c…", "detail": "device" },
+  { "at": 1790000100, "event": "auth.refused", "source": "192.0.2.44",
+    "device": null, "detail": "password" } ] }</code></pre>
+  <p><strong>Le journal d'audit de votre compte</strong> (0.2.37), le plus récent d'abord : <code>?limit=</code> en demande au plus 100, et 50 par défaut. Il dit <strong>quand</strong> (<code>at</code>, en secondes), <strong>quoi</strong> (<code>event</code>) et <strong>d'où</strong> (<code>source</code>, l'adresse du pair). Jamais un secret ni un contenu.</p>
+  <p>Les événements : <code>session.opened</code> (<code>detail</code> : <code>password</code> ou <code>device</code>), <code>auth.refused</code> (des identifiants refusés pour ce compte), <code>device.enrolled</code>, <code>device.paired</code>, <code>device.revoked</code>, <code>password.changed</code> (<code>self</code> ou <code>admin</code>), <code>app-password.created</code>, <code>app-password.revoked</code>, <code>delegation.granted</code>, <code>delegation.removed</code> (avec <code>owner</code> et <code>delegate</code>, écrits aux journaux des deux comptes), <code>push.subscribed</code>, <code>push.unsubscribed</code>, <code>invitation.issued</code>. Ne codez pas en dur la liste : elle peut s'allonger.</p>
+  <p>Il ne s'écrit pas (<code>405</code>) : un journal qu'on peut retoucher ne prouve rien. Il couvre l'API ; les connexions IMAP, SMTP et POP3 n'y figurent pas encore. Sans répertoire configuré, <code>501</code>.</p>
+</div>
+
 <h3 id="r-admin"><span class="numero">5.9</span>Administration</h3>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/accounts/{compte}/audit</span><span class="portee">admin:read</span></div>
+  <p>Le journal d'audit d'un compte, sous la même forme que <code>/v1/me/audit</code>. Sur la machine du serveur, <code>air-mail-admin audit &lt;config&gt; --login &lt;compte&gt;</code> le lit aussi. Un compte retiré emporte son journal : un compte recréé sous le même nom n'y lirait pas d'où se connectait l'ancien titulaire.</p>
+</div>
 
 <div class="ressource">
   <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/accounts/{compte}/delegates</span><span class="portee">admin:read</span></div>

@@ -439,6 +439,8 @@ pub struct Configuration {
     /// Le compte de service FCM (JSON), ou une chaîne vide : FCM n'est alors
     /// pas transmis.
     pub fcm_service_account: String,
+    /// Le répertoire du journal d'audit, ou une chaîne vide : rien ne s'écrit.
+    pub audit: String,
     /// La file d'attente du serveur.
     pub queue: Queue,
     /// MTA-STS (RFC 8461).
@@ -1044,6 +1046,7 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
         apns_topic: texte(lu.get_apns_topic()?)?,
         apns_sandbox: lu.get_apns_sandbox(),
         fcm_service_account: texte(lu.get_fcm_service_account()?)?,
+        audit: texte(lu.get_audit()?)?,
         queue,
         mtasts,
         tlsrpt,
@@ -1201,6 +1204,7 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
         ecrit.set_apns_topic(&config.apns_topic);
         ecrit.set_apns_sandbox(config.apns_sandbox);
         ecrit.set_fcm_service_account(&config.fcm_service_account);
+        ecrit.set_audit(&config.audit);
         {
             let mut emission = ecrit.reborrow().init_relay();
             emission.set_enabled(config.relay.enabled);
@@ -1451,6 +1455,7 @@ mod tests {
             apns_topic: String::from("ch.narro.mail"),
             apns_sandbox: true,
             fcm_service_account: String::from("/var/lib/air-mail/fcm.json"),
+            audit: String::from("/var/lib/air-mail/audit"),
             // Les trois écoutes d'un serveur réel : le `25` et le `587` en
             // `STARTTLS`, le `465` en TLS implicite.
             smtp_listeners: vec![

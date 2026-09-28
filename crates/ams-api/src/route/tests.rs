@@ -29,8 +29,14 @@ fn ou(method: Method, chemin: &[u8]) -> Result<Resource<'static>, Reason> {
 /// Chaque ressource se désigne par son chemin.
 #[test]
 fn chaque_ressource_se_designe() {
-    let cas: [(Method, &[u8], Resource<'_>); 39] = [
+    let cas: [(Method, &[u8], Resource<'_>); 41] = [
         (Method::Post, b"/v1/tokens", Resource::Tokens),
+        (Method::Get, b"/v1/me/audit", Resource::OwnAudit),
+        (
+            Method::Get,
+            b"/v1/accounts/marie/audit",
+            Resource::AccountAudit { compte: "marie" },
+        ),
         (Method::Post, b"/v1/sessions", Resource::Sessions),
         (
             Method::Post,
@@ -441,6 +447,8 @@ fn les_presque_ressources_se_refusent() {
 #[test]
 fn chaque_ressource_dit_ce_qu_elle_sert() {
     let toutes = [
+        Resource::OwnAudit,
+        Resource::AccountAudit { compte: "c" },
         Resource::Delegates { compte: "c" },
         Resource::Delegate {
             compte: "c",
@@ -956,4 +964,25 @@ fn un_chemin_de_brouillon_mal_forme_ne_designe_rien() {
             std::string::String::from_utf8_lossy(chemin)
         );
     }
+}
+
+/// **UN JOURNAL D'AUDIT SE LIT, ET NE S'ÉCRIT PAS** ; le sien avec n'importe
+/// quel jeton, celui d'un autre avec l'administration.
+#[test]
+fn le_journal_d_audit_se_lit_seulement() {
+    assert_eq!(Resource::OwnAudit.allowed(), &[Method::Get, Method::Head]);
+    assert_eq!(
+        Resource::AccountAudit { compte: "c" }.allowed(),
+        &[Method::Get, Method::Head]
+    );
+    assert_eq!(Resource::OwnAudit.scope(Method::Get), Some(Scope::none()));
+    assert_eq!(
+        Resource::AccountAudit { compte: "c" }.scope(Method::Get),
+        Some(Scope::one(Area::Admin, Rights::Read))
+    );
+    assert_eq!(
+        ou(Method::Delete, b"/v1/me/audit").err(),
+        None,
+        "le chemin existe ; c'est le verbe que la session refusera"
+    );
 }

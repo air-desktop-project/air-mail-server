@@ -230,6 +230,7 @@ fn configuration_complete(
         apns_topic: String::new(),
         apns_sandbox: false,
         fcm_service_account: String::new(),
+        audit: String::new(),
         require_fqdn_sender: false,
         require_fqdn_recipient: false,
         require_sender_domain: false,
@@ -1270,6 +1271,145 @@ fn une_session_fermee_ne_rouvre_plus() {
         "200",
         "un jeton d'administration ne dépend d'aucune session"
     );
+}
+
+/// **LE JOURNAL D'AUDIT DIT QUI S'EST CONNECTÉ, QUI A ÉCHOUÉ, ET D'OÙ** (phase 6).
+///
+/// # CE QUE CET ESSAI ÉPROUVE
+///
+/// Que tout est câblé derrière de vraies requêtes : une session ouverte et un
+/// mot de passe faux s'écrivent au journal du compte, avec l'adresse du pair ;
+/// le titulaire les lit par `/v1/me/audit`, l'administration par
+/// `/v1/accounts/{compte}/audit` ; et **un compte qui n'existe pas n'écrit
+/// rien** — pas même un fichier à son nom.
+#[test]
+fn le_journal_d_audit_dit_les_sessions_et_les_refus() {
+    let atelier = atelier("journal-d-audit");
+    let Some((cert, cle)) = paire(&atelier.0) else {
+        panic!("{SANS_OPENSSL}");
+    };
+    if std::process::Command::new("curl")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("IGNORÉ : `curl` est absent — cet essai n'a RIEN éprouvé.");
+        return;
+    }
+
+    let empreinte =
+        ams_auth::hash_password(b"secret-initial", b"seize octets ici").expect("hachable");
+    let magasin = atelier.0.join("comptes.bin");
+    std::fs::write(
+        &magasin,
+        ams_config::encode_accounts(&[ams_auth::Account {
+            login: String::from("marie"),
+            hash: empreinte,
+            addresses: vec![String::from("marie@example.com")],
+        }])
+        .expect("encodable"),
+    )
+    .expect("le magasin s'écrit");
+    std::fs::set_permissions(&magasin, std::fs::Permissions::from_mode(0o600))
+        .expect("permissions du magasin");
+
+    let port_smtp = port_libre();
+    let port_http = port_libre();
+    let config = configuration_complete(
+        &atelier,
+        port_smtp,
+        Tls {
+            certificate_chain_path: cert.display().to_string(),
+            private_key_path: cle.display().to_string(),
+        },
+        &magasin.display().to_string(),
+        "",
+        "",
+        &format!("127.0.0.1:{port_http}"),
+        "",
+        CLEF,
+    );
+    let repertoire = atelier.0.join("audit");
+    let mut lue =
+        ams_config::decode(&std::fs::read(&config).expect("relisible")).expect("décodable");
+    lue.audit = repertoire.display().to_string();
+    std::fs::write(&config, ams_config::encode(&lue).expect("encodable")).expect("écriture");
+    let _serveur = lancer(&config, port_smtp);
+    let base = format!("https://127.0.0.1:{port_http}");
+
+    let presenter = |login: &str, secret: &str| -> String {
+        let sortie = std::process::Command::new("curl")
+            .args(["-s", "--insecure", "--http2"])
+            .args(["-H", "Content-Type: application/json"])
+            .args([
+                "-d",
+                &format!(r#"{{"login":"{login}","password":"{secret}"}}"#),
+            ])
+            .arg(format!("{base}/v1/tokens"))
+            .output()
+            .expect("curl s'exécute");
+        String::from_utf8_lossy(&sortie.stdout).into_owned()
+    };
+    let lire = |jeton: &str, chemin: &str, verbe: &str| -> String {
+        let sortie = std::process::Command::new("curl")
+            .args(["-s", "--insecure", "--http2", "-i", "-X", verbe])
+            .args(["-H", &format!("Authorization: Bearer {jeton}")])
+            .arg(format!("{base}{chemin}"))
+            .output()
+            .expect("curl s'exécute");
+        String::from_utf8_lossy(&sortie.stdout).into_owned()
+    };
+
+    // ── 1. UN REFUS, PUIS UNE SESSION ───────────────────────────────────────
+    assert!(!presenter("marie", "faux").contains("token"));
+    // Un compte inconnu, refusé lui aussi : il ne doit RIEN écrire.
+    assert!(!presenter("fantome", "faux").contains("token"));
+    let corps = presenter("marie", "secret-initial");
+    let jeton = corps
+        .split_once("\"token\":\"")
+        .and_then(|(_, reste)| reste.split_once('"'))
+        .map(|(jeton, _)| jeton.to_string())
+        .unwrap_or_else(|| panic!("un jeton dans {corps}"));
+
+    // ── 2. LE TITULAIRE LIT SON JOURNAL, LE PLUS RÉCENT D'ABORD ─────────────
+    //
+    // L'écriture passe par un fil : on laisse la file se vider.
+    let mut journal = String::new();
+    for _ in 0..100 {
+        journal = lire(&jeton, "/v1/me/audit?limit=10", "GET");
+        if journal.contains("session.opened") && journal.contains("auth.refused") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(journal.starts_with("HTTP/2 200"), "{journal}");
+    let ouverte = journal.find("session.opened").expect("la session s'y lit");
+    let refus = journal.find("auth.refused").expect("le refus s'y lit");
+    assert!(ouverte < refus, "le plus récent d'abord : {journal}");
+    assert!(journal.contains(r#""source":"127.0.0.1""#), "{journal}");
+    assert!(journal.contains(r#""detail":"password""#), "{journal}");
+
+    // ── 3. L'ADMINISTRATION LIT LE MÊME ─────────────────────────────────────
+    let administrateur = jeton_d_administration();
+    let vu = lire(&administrateur, "/v1/accounts/marie/audit", "GET");
+    assert!(vu.starts_with("HTTP/2 200"), "{vu}");
+    assert!(
+        vu.contains("session.opened") && vu.contains("auth.refused"),
+        "{vu}"
+    );
+
+    // ── 4. UN JOURNAL NE S'ÉCRIT PAS, ET UN INCONNU N'Y EST PAS ─────────────
+    assert!(lire(&jeton, "/v1/me/audit", "DELETE").starts_with("HTTP/2 405"));
+    assert!(
+        !repertoire.join("fantome.jsonl").exists(),
+        "un compte inconnu a laissé un fichier à son nom"
+    );
+    let presents: Vec<String> = std::fs::read_dir(&repertoire)
+        .expect("le répertoire existe")
+        .filter_map(Result::ok)
+        .map(|entree| entree.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(presents, ["marie.jsonl"]);
 }
 
 /// **UN APPAREIL TROP PRESSÉ LIT `429`, ET SE RECONNECTER NE LUI REND RIEN** (phase 6).

@@ -422,6 +422,22 @@ air-mail-admin config write /etc/air-mail/ams.conf … \
 - ce fichier porte une clef privée : lisible par d'autres, il arrête le
   démarrage.
 
+### Le journal d'audit : qui s'est connecté, et d'où
+
+```sh
+air-mail-admin config write /etc/air-mail/ams.conf … \
+    --audit /var/lib/air-mail/audit
+```
+
+- le répertoire naît en `0700` au démarrage, un fichier `0600` par compte ; il
+  dit d'où chacun se connecte, et rien d'autre ne doit y lire ;
+- il doit vivre sous un chemin que l'unité systemd laisse écrire
+  (`ReadWritePaths=/var/lib/air-mail`) ;
+- chaque compte lit le sien par `GET /v1/me/audit`, l'administration par
+  `GET /v1/accounts/{compte}/audit`, et l'exploitant par
+  `air-mail-admin audit /etc/air-mail/ams.conf --login <compte>` ;
+- sans ce répertoire, rien ne s'écrit et `…/audit` rend `501`.
+
 ### La délégation : ouvrir une boîte à un autre compte
 
 Une boîte partagée — `support`, `compta` — est un compte comme un autre, dont

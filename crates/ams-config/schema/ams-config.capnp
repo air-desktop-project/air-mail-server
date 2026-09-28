@@ -228,6 +228,12 @@ struct Configuration {
   # abonnés ne sont pas réveillés.
   fcmServiceAccount @45 :Text;
 
+  # Le répertoire du journal d'audit (phase 6) : un fichier par compte, où
+  # s'ajoute ce qui a touché à sa sécurité — sessions, refus, appareils, mots de
+  # passe, délégations, abonnements. Vide : rien ne s'écrit, et les routes
+  # `…/audit` rendent 501.
+  audit @46 :Text;
+
   # MTA-STS (RFC 8461) — la politique qu'un domaine publie en HTTPS.
   #
   # **UN CHAMP AJOUTÉ APRÈS COUP DÉCODE DEUX CHAÎNES VIDES**, et deux chaînes

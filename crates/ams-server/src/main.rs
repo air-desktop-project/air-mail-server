@@ -33,6 +33,7 @@ mod api;
 mod apns;
 mod appareils;
 mod applicatifs;
+mod audit;
 mod brouillons;
 mod comptes;
 mod debits;
@@ -374,6 +375,28 @@ fn monter_l_api(
                 );
                 api.avec_brouillons(Arc::new(brouillons))
                     .avec_idempotence(Arc::new(registre))
+            };
+            // **ET LE JOURNAL D'AUDIT** (phase 6) : sans répertoire, rien ne
+            // s'écrit, et `…/audit` rend 501. Le répertoire naît en `0700` — il
+            // dit d'où chacun se connecte.
+            let api = if options.audit.is_empty() {
+                eprintln!(
+                    "air-mail-server : journal d'audit NON TENU — sessions, refus et appareils ne \
+                     s'écrivent pas (`air-mail-admin config write … --audit …`)"
+                );
+                api
+            } else {
+                let audit = crate::audit::Audit::ouvrir(std::path::PathBuf::from(&options.audit))
+                    .map_err(|erreur| {
+                    format!("journal d'audit `{}` : {erreur}", options.audit)
+                })?;
+                eprintln!(
+                    "air-mail-server : journal d'audit sous `{}` — un fichier par compte, qui \
+                     tourne au-delà de {} Kio.",
+                    options.audit,
+                    crate::audit::ROTATION_OCTETS / 1024
+                );
+                api.avec_audit(audit)
             };
             // **ET LA CLÉ QUI SCELLE LES INVITATIONS**, la même que celle des
             // jetons : sans elle, `POST /v1/invitations` rend 501.

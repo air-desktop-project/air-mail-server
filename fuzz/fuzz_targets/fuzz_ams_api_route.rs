@@ -321,6 +321,15 @@ fn segments_de(
             pousser("me");
             pousser("delegations");
         }
+        Resource::OwnAudit => {
+            pousser("me");
+            pousser("audit");
+        }
+        Resource::AccountAudit { compte } => {
+            pousser("accounts");
+            pousser(compte);
+            pousser("audit");
+        }
         Resource::Delegates { compte } => {
             pousser("accounts");
             pousser(compte);

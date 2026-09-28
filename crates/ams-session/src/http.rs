@@ -54,9 +54,9 @@ use ams_proto_http::{Method, RequestHead, StatusCode};
 
 /// Cette ressource accepte-t-elle ces paramètres, sous ce verbe ?
 ///
-/// **DEUX RESSOURCES EN PRENNENT, EN LECTURE SEULEMENT** : la liste des
-/// messages (`before`, `limit`) et le journal des changements (`since`,
-/// EXIGÉ, et `limit`). Ailleurs, un paramètre est refusé plutôt qu'ignoré : un
+/// **TROIS RESSOURCES EN PRENNENT, EN LECTURE SEULEMENT** : la liste des
+/// messages (`before`, `limit`), le journal des changements (`since`,
+/// EXIGÉ, et `limit`) et le journal d'audit (`limit`). Ailleurs, un paramètre est refusé plutôt qu'ignoré : un
 /// client qui croit filtrer ce qui ne l'est pas ne s'en apercevrait jamais.
 fn requete_permise(ressource: Resource<'_>, verbe: Method, requete: &Query) -> bool {
     let lecture = matches!(verbe, Method::Get | Method::Head);
@@ -66,6 +66,10 @@ fn requete_permise(ressource: Resource<'_>, verbe: Method, requete: &Query) -> b
         // quelque part. Sans lui, la réponse serait « tout » — ce que la liste
         // des messages rend déjà, et mieux.
         Resource::Changes { .. } => requete.since.is_some() && requete.before.is_none(),
+        // Le journal d'audit ne se lit que par la fin : `limit`, et rien d'autre.
+        Resource::OwnAudit | Resource::AccountAudit { .. } => {
+            requete.before.is_none() && requete.since.is_none()
+        }
         _ => requete.is_empty(),
     }
 }

@@ -75,6 +75,7 @@ fn configuration(repertoire: &Path, clef: &str) -> PathBuf {
         apns_topic: String::new(),
         apns_sandbox: false,
         fcm_service_account: String::new(),
+        audit: String::new(),
         require_fqdn_sender: false,
         require_fqdn_recipient: false,
         require_sender_domain: false,

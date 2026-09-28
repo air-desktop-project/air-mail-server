@@ -2249,6 +2249,34 @@ s'oublie que plein. Au-delà, l'API répond `429` avec `Retry-After: 1`, et
 remplit jamais, refuserait tout. Un fichier écrit avant la 0.2.36 décode deux
 zéros, et le serveur les lit comme les valeurs par défaut.
 
+### Tenir un journal d'audit
+
+```sh
+./target/release/air-mail-admin config write air-mail.conf \
+    --domain mail.example.com --hosted example.com \
+    --audit /var/lib/air-mail/audit
+```
+
+Chaque compte y a son fichier, `<compte>.jsonl`, où s'**ajoute** une ligne JSON
+par événement touchant à sa sécurité : sessions ouvertes, identifiants refusés,
+appareils enrôlés, appairés ou révoqués, secrets changés, mots de passe
+applicatifs, délégations, abonnements aux réveils, invitations. Chaque ligne dit
+quand, quoi, et **d'où** — jamais un secret. Au-delà de 256 Kio, le fichier
+devient `<compte>.1.jsonl` et un neuf commence : deux fichiers au plus par
+compte.
+
+Il se lit par `GET /v1/me/audit` (le titulaire), `GET
+/v1/accounts/{compte}/audit` (l'administration), ou sur la machine :
+
+```sh
+./target/release/air-mail-admin audit air-mail.conf --login marie --limit 20
+```
+
+**Un compte inconnu ne s'y écrit pas**, et le temps d'un refus ne le trahit pas :
+l'écriture part dans une file qu'un fil dédié vide. Une file pleine perd
+l'entrée plutôt que de ralentir le service, et le dit. Un compte retiré emporte
+son journal. Il couvre l'API ; IMAP, SMTP et POP3 n'y figurent pas encore.
+
 ### Refuser un `HELO` non qualifié
 
 ```sh

@@ -122,6 +122,12 @@ COMMANDES
                         Écrit sa moitié PUBLIQUE en base64url : c'est ce que
                         les applications donnent au navigateur pour s'abonner.
                         Remplacer la clef désabonnerait tous les navigateurs.
+    audit <config> --login <nom> [--limit <n>]
+                        le journal d'audit du compte : sessions, refus,
+                        appareils, secrets, délégations, abonnements — une
+                        ligne JSON par entrée, LA PLUS RÉCENTE D'ABORD, et 50
+                        par défaut. EN LECTURE SEULE, depuis la machine du
+                        serveur et par qui peut lire son répertoire.
     summary <maildir>   relit une boîte et rend ce que ses noms de fichiers
                         portent : messages numérotés, messages à adopter, noms
                         illisibles, et la réserve d'UID de l'index. EN LECTURE
@@ -249,6 +255,61 @@ fn vapid(chemin: &Path) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Écrit le journal d'audit d'un compte, le plus récent d'abord.
+///
+/// **LA MÊME LECTURE QUE CELLE DU SERVEUR** : le fichier ancien puis le
+/// courant, et seulement les lignes entières — une écriture interrompue ne
+/// s'affiche pas comme une entrée.
+fn lire_l_audit(fichier: &Path, nom: &str, limite: usize) -> ExitCode {
+    let config = match std::fs::read(fichier)
+        .map_err(|erreur| erreur.to_string())
+        .and_then(|octets| ams_config::decode(&octets).map_err(|erreur| erreur.to_string()))
+    {
+        Ok(config) => config,
+        Err(erreur) => {
+            eprintln!("air-mail-admin : `{}` : {erreur}", fichier.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    if config.audit.is_empty() {
+        eprintln!(
+            "air-mail-admin : cette configuration ne tient pas de journal d'audit \
+             (`config write … --audit <répertoire>`)"
+        );
+        return ExitCode::FAILURE;
+    }
+    // **UN NOM QUI N'EST PAS UN COMPTE NE DEVIENT PAS UN CHEMIN.**
+    if ams_auth::check_login(nom).is_err() {
+        eprintln!("air-mail-admin : ce nom n'est pas un nom de compte");
+        return ExitCode::from(2);
+    }
+    let racine = Path::new(&config.audit);
+    let mut lignes: Vec<String> = Vec::new();
+    for chemin in [
+        racine.join(format!("{nom}.1.jsonl")),
+        racine.join(format!("{nom}.jsonl")),
+    ] {
+        match std::fs::read(&chemin) {
+            Ok(octets) => lignes.extend(
+                octets
+                    .split_inclusive(|octet| *octet == b'\n')
+                    .filter_map(|ligne| ligne.strip_suffix(b"\n"))
+                    .filter(|ligne| ligne.starts_with(b"{\"at\":") && ligne.ends_with(b"}"))
+                    .map(|ligne| String::from_utf8_lossy(ligne).into_owned()),
+            ),
+            Err(erreur) if erreur.kind() == std::io::ErrorKind::NotFound => {}
+            Err(erreur) => {
+                eprintln!("air-mail-admin : `{}` : {erreur}", chemin.display());
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    for ligne in lignes.iter().rev().take(limite) {
+        println!("{ligne}");
+    }
+    ExitCode::SUCCESS
+}
+
 /// L'aide à écrire si l'un des arguments la demande, ou `None`.
 ///
 /// # `--help` N'EST JAMAIS UN CHEMIN
@@ -303,6 +364,14 @@ fn main() -> ExitCode {
         }
         ["summary", racine] => resumer(Path::new(racine)),
         ["vapid", chemin] => vapid(Path::new(chemin)),
+        ["audit", fichier, "--login", nom] => lire_l_audit(Path::new(fichier), nom, 50),
+        ["audit", fichier, "--login", nom, "--limit", limite] => match limite.parse::<usize>() {
+            Ok(limite) if limite > 0 => lire_l_audit(Path::new(fichier), nom, limite),
+            _ => {
+                eprintln!("air-mail-admin : `--limit` attend un nombre d'entrées, au moins un");
+                ExitCode::from(2)
+            }
+        },
         ["config", "write", fichier, reste @ ..] => ecrire(Path::new(fichier), reste),
         ["config", "show", fichier] => montrer(Path::new(fichier)),
         ["account", "add", fichier, "--login", nom, reste @ ..] => match demande_de_compte(reste) {
@@ -939,6 +1008,14 @@ fn afficher(config: &Configuration) {
             )
         } else {
             format!("compte de service `{}`", config.fcm_service_account)
+        }
+    );
+    println!(
+        "journal d'audit    {}",
+        if config.audit.is_empty() {
+            String::from("AUCUN — ce qui touche à la sécurité des comptes ne s'écrit pas")
+        } else {
+            format!("sous `{}` (un fichier par compte)", config.audit)
         }
     );
     println!(

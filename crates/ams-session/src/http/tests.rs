@@ -1916,6 +1916,36 @@ fn le_journal_des_changements_exige_son_point_de_depart() {
     }
 }
 
+/// **LE JOURNAL D'AUDIT PREND `limit`, ET RIEN D'AUTRE** : il se lit par la
+/// fin, et un curseur qu'il ne sert pas serait ignoré sans le dire.
+#[test]
+fn le_journal_d_audit_ne_prend_que_limit() {
+    let porte = jeton("marc", Scope::one(Area::Mail, Rights::Read));
+    let champs = requete(b"GET", b"/v1/me/audit?limit=7", porte.as_bytes());
+    let tete = entete(&champs);
+    let mut place = [0_u8; PLACE];
+    let session = une_session();
+    let tour = session.request(&tete, &[], MAINTENANT, &mut place);
+    assert_eq!(tour.status(), StatusCode::OK);
+    assert_eq!(
+        parametres(tour.next()),
+        Some(ams_api::Query {
+            before: None,
+            limit: Some(7),
+            since: None,
+        })
+    );
+    for chemin in [&b"/v1/me/audit?before=3"[..], b"/v1/me/audit?since=3"] {
+        let (statut, _) = refus_de(b"GET", chemin, porte.as_bytes());
+        assert_eq!(
+            statut,
+            StatusCode::BAD_REQUEST,
+            "{}",
+            String::from_utf8_lossy(chemin)
+        );
+    }
+}
+
 /// **LE TITULAIRE D'UNE BOÎTE D'AUTRUI REMONTE JUSQU'À L'APPELANT** — et la
 /// session n'en juge pas : c'est la table des délégations qui décide.
 #[test]

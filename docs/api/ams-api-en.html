@@ -1003,7 +1003,24 @@ PUT /v1/me/push
   <p><strong>Over IMAP</strong>, the same mailbox appears under <code>Partagés/support/…</code> — and nowhere else in the API: <code>/v1/mailboxes</code> lists only the account's own mailboxes, and a <code>Partagés/</code> name there returns <code>404</code>.</p>
 </div>
 
+<div class="ressource">
+  <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/me/audit</span><span class="portee">valid token</span></div>
+  <pre><code>{ "entries": [
+  { "at": 1790000300, "event": "session.opened", "source": "2001:db8::7",
+    "device": "9f2c…", "detail": "device" },
+  { "at": 1790000100, "event": "auth.refused", "source": "192.0.2.44",
+    "device": null, "detail": "password" } ] }</code></pre>
+  <p><strong>Your account's audit log</strong> (0.2.37), most recent first: <code>?limit=</code> asks for at most 100, 50 by default. It says <strong>when</strong> (<code>at</code>, in seconds), <strong>what</strong> (<code>event</code>) and <strong>from where</strong> (<code>source</code>, the peer's address). Never a secret nor any content.</p>
+  <p>Events: <code>session.opened</code> (<code>detail</code>: <code>password</code> or <code>device</code>), <code>auth.refused</code> (credentials refused for this account), <code>device.enrolled</code>, <code>device.paired</code>, <code>device.revoked</code>, <code>password.changed</code> (<code>self</code> or <code>admin</code>), <code>app-password.created</code>, <code>app-password.revoked</code>, <code>delegation.granted</code>, <code>delegation.removed</code> (with <code>owner</code> and <code>delegate</code>, written to both accounts' logs), <code>push.subscribed</code>, <code>push.unsubscribed</code>, <code>invitation.issued</code>. Do not hard-code the list: it may grow.</p>
+  <p>It cannot be written (<code>405</code>): a log that can be edited proves nothing. It covers the API; IMAP, SMTP and POP3 logins are not in it yet. Without a configured directory, <code>501</code>.</p>
+</div>
+
 <h3 id="r-admin"><span class="numero">5.9</span>Administration</h3>
+
+<div class="ressource">
+  <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/accounts/{account}/audit</span><span class="portee">admin:read</span></div>
+  <p>An account's audit log, in the same form as <code>/v1/me/audit</code>. On the server machine, <code>air-mail-admin audit &lt;config&gt; --login &lt;account&gt;</code> reads it too. A removed account takes its log with it: an account recreated under the same name would not read where the previous holder connected from.</p>
+</div>
 
 <div class="ressource">
   <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/accounts/{account}/delegates</span><span class="portee">admin:read</span></div>

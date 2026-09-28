@@ -27,7 +27,7 @@ use ams_quic_tls::Connection;
 use ams_session::http::{Http, Next};
 
 use crate::guard::SharedGuard;
-use crate::http::{Admission, Api};
+use crate::http::{Admission, Api, Door};
 
 /// Ce qu'un tampon de travail de la session doit faire.
 ///
@@ -190,6 +190,7 @@ impl<A: Api> ams_h3::Service for ServiceH3<'_, A> {
                     // **UN REFUS D'IDENTIFIANTS EST UNE TRAME INVALIDE** pour le
                     // videur : c'est ce qui borne une attaque par essais.
                     self.guard.observe(self.source, GuardEvent::InvalidFrame);
+                    self.api.refused(login, Door::Password, self.source);
                 } else if suite.status().class() < 4 {
                     // La même règle qu'en HTTP/2, et pour la même raison.
                     self.api.open_session(
@@ -198,6 +199,7 @@ impl<A: Api> ams_h3::Service for ServiceH3<'_, A> {
                         maintenant.saturating_add(self.session.duree()),
                         maintenant,
                         None,
+                        self.source,
                     );
                 }
                 (suite.status(), JSON_MEDIA_TYPE, suite.body())
@@ -226,6 +228,7 @@ impl<A: Api> ams_h3::Service for ServiceH3<'_, A> {
                 );
                 if accorde.is_none() {
                     self.guard.observe(self.source, GuardEvent::InvalidFrame);
+                    self.api.refused(account, Door::Device, self.source);
                 } else if suite.status().class() < 4 {
                     self.api.open_session(
                         account,
@@ -233,6 +236,7 @@ impl<A: Api> ams_h3::Service for ServiceH3<'_, A> {
                         maintenant.saturating_add(self.session.duree()),
                         maintenant,
                         Some(device),
+                        self.source,
                     );
                 }
                 (suite.status(), JSON_MEDIA_TYPE, suite.body())
@@ -281,7 +285,9 @@ impl<A: Api> ams_h3::Service for ServiceH3<'_, A> {
                 public_key,
                 name,
             } => {
-                let servi = self.api.enrol(account, public_key, name, &mut self.rendu);
+                let servi = self
+                    .api
+                    .enrol(account, public_key, name, self.source, &mut self.rendu);
                 (servi.status, servi.media, servi.body)
             }
             Next::Serve {
@@ -314,6 +320,7 @@ impl<A: Api> ams_h3::Service for ServiceH3<'_, A> {
                             content_range: tete.field(b"content-range"),
                             idempotency_key: tete.field(b"idempotency-key"),
                             nonce,
+                            source: self.source,
                         },
                         &mut self.rendu,
                     );

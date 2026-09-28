@@ -249,6 +249,20 @@ pub enum Resource<'o> {
         /// Le compte qui reçoit l'accès.
         delegue: &'o str,
     },
+    /// `/v1/me/audit` — le journal d'audit de qui appelle : ce qui a touché à
+    /// la sécurité de son compte, du plus récent au plus ancien (phase 6).
+    ///
+    /// **N'IMPORTE QUEL JETON DE SON TITULAIRE Y SUFFIT**, comme pour ses
+    /// appareils : « qui s'est connecté à mon compte ? » ne s'adresse pas à
+    /// l'exploitant. Il ne s'écrit pas : un journal qu'on peut retoucher ne
+    /// prouve rien.
+    OwnAudit,
+    /// `/v1/accounts/{compte}/audit` — le journal d'audit d'un compte.
+    /// **ADMINISTRATION SEULE.**
+    AccountAudit {
+        /// Le compte.
+        compte: &'o str,
+    },
     /// `/v1/me/delegations` — les boîtes d'autrui que qui appelle peut
     /// atteindre, et ses droits sur chacune. C'est ce qu'une application lit
     /// pour afficher « support@ » à côté de sa propre boîte.
@@ -369,7 +383,8 @@ impl Resource<'_> {
             | Self::OwnPush
             | Self::OwnAppPasswords
             | Self::OwnAppPassword { .. }
-            | Self::OwnDelegations => {
+            | Self::OwnDelegations
+            | Self::OwnAudit => {
                 return Some(Scope::none());
             }
             Self::Mailboxes
@@ -393,7 +408,8 @@ impl Resource<'_> {
             | Self::Bans
             | Self::Ban { .. }
             | Self::Delegates { .. }
-            | Self::Delegate { .. } => Area::Admin,
+            | Self::Delegate { .. }
+            | Self::AccountAudit { .. } => Area::Admin,
             // **UN BROUILLON EST UNE SOUMISSION EN COURS** : il vit sous la même
             // portée qu'elle, et un jeton qui ne peut pas soumettre ne peut pas
             // non plus préparer ce qu'il ne pourra pas envoyer.
@@ -454,6 +470,8 @@ impl Resource<'_> {
             Self::AccountPassword { .. } | Self::OwnPassword => &[Method::Put],
             Self::AccountAddresses { .. } => &[Method::Get, Method::Head, Method::Put],
             Self::Delegates { .. } | Self::OwnDelegations => &[Method::Get, Method::Head],
+            // **UN JOURNAL D'AUDIT SE LIT, ET C'EST TOUT.**
+            Self::OwnAudit | Self::AccountAudit { .. } => &[Method::Get, Method::Head],
             Self::Delegate { .. } => &[Method::Put, Method::Delete],
             Self::Ban { .. } | Self::OwnDevice { .. } | Self::OwnAppPassword { .. } => {
                 &[Method::Delete]
@@ -608,6 +626,7 @@ fn designer<'o>(segments: &Segments<'o>) -> Result<Resource<'o>, Error> {
                 "password" => Ok(Resource::AccountPassword { compte }),
                 "addresses" => Ok(Resource::AccountAddresses { compte }),
                 "delegates" => Ok(Resource::Delegates { compte }),
+                "audit" => Ok(Resource::AccountAudit { compte }),
                 _ => Err(manque),
             }
         }
@@ -616,6 +635,7 @@ fn designer<'o>(segments: &Segments<'o>) -> Result<Resource<'o>, Error> {
             delegue: segments.get(4),
         }),
         ("me", 3) if segments.get(2) == "delegations" => Ok(Resource::OwnDelegations),
+        ("me", 3) if segments.get(2) == "audit" => Ok(Resource::OwnAudit),
         ("me", 3) if segments.get(2) == "password" => Ok(Resource::OwnPassword),
         ("me", 3) if segments.get(2) == "devices" => Ok(Resource::OwnDevices),
         ("me", 4) if segments.get(2) == "devices" => Ok(Resource::OwnDevice {

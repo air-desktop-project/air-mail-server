@@ -274,6 +274,19 @@ pub struct Appel<'a> {
     /// vérifié avant qu'on arrive ici. Il sert à retrouver, dans le registre,
     /// l'appareil qui a ouvert la session.
     pub nonce: u64,
+    /// L'adresse d'où vient la requête — pour le journal d'audit, et pour rien
+    /// d'autre : l'autorisation est faite, et elle ne dépend pas d'où l'on
+    /// appelle.
+    pub source: Source,
+}
+
+/// La porte par laquelle des identifiants ont été refusés.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Door {
+    /// Un mot de passe (`POST /v1/tokens`).
+    Password,
+    /// La signature d'un appareil (`POST /v1/sessions`).
+    Device,
 }
 
 /// Tout ce qui touche au magasin vit derrière ceci : la boucle n'ouvre aucune
@@ -316,6 +329,7 @@ pub trait Api {
         account: &str,
         public_key: &str,
         name: &str,
+        source: Source,
         sortie: &'o mut [u8],
     ) -> Served<'o>;
 
@@ -352,6 +366,16 @@ pub trait Api {
     /// faux, comme `ams_auth::authenticate` le fait déjà pour SMTP.
     fn authenticate(&self, login: &str, password: &[u8]) -> Option<Scope>;
 
+    /// Des identifiants viennent d'être refusés, à cette porte, depuis cette
+    /// adresse.
+    ///
+    /// **POUR LE JOURNAL D'AUDIT DU COMPTE**, s'il existe : un compte inconnu
+    /// ne s'y écrit pas — ce serait écrire un nom qu'un inconnu a choisi. Et
+    /// **CE QUI S'ÉCRIT NE DOIT PAS SE VOIR AU TEMPS DE LA RÉPONSE** : un refus
+    /// qui coûterait une écriture pour un compte existant, et rien pour un
+    /// autre, dirait lequel existe.
+    fn refused(&self, account: &str, door: Door, source: Source);
+
     /// Un identifiant qui distingue ce jeton des autres du même compte.
     ///
     /// **SANS LUI, RÉVOQUER UN JETON REVIENDRAIT À RÉVOQUER LE COMPTE.** Il doit
@@ -386,6 +410,7 @@ pub trait Api {
         expiry: u64,
         maintenant: u64,
         device: Option<&str>,
+        source: Source,
     );
 
     /// Cette session est-elle encore ouverte, et son appareil a-t-il encore
@@ -622,6 +647,7 @@ where
                     // **UN REFUS D'IDENTIFIANTS EST UNE TRAME INVALIDE** pour le
                     // videur : c'est ce qui borne une attaque par essais.
                     service.guard.observe(source, GuardEvent::InvalidFrame);
+                    api.refused(login, Door::Password, source);
                 } else if suite.status().class() < 4 {
                     // **ON N'INSCRIT QUE CE QUI A ÉTÉ ÉMIS.** Un jeton que la
                     // session n'a pas su écrire laisserait ici une entrée que
@@ -633,6 +659,7 @@ where
                         maintenant.saturating_add(service.session.duree()),
                         maintenant,
                         None,
+                        source,
                     );
                 }
                 (suite.status(), JSON_MEDIA_TYPE, suite.body())
@@ -664,6 +691,7 @@ where
                     // s'ouvre sans jeton : sans cela, elle offrirait des essais
                     // illimités sur des signatures forgées.
                     service.guard.observe(source, GuardEvent::InvalidFrame);
+                    api.refused(account, Door::Device, source);
                 } else if suite.status().class() < 4 {
                     api.open_session(
                         account,
@@ -671,6 +699,7 @@ where
                         maintenant.saturating_add(service.session.duree()),
                         maintenant,
                         Some(device),
+                        source,
                     );
                 }
                 (suite.status(), JSON_MEDIA_TYPE, suite.body())
@@ -730,7 +759,7 @@ where
                 public_key,
                 name,
             } => {
-                let servi = api.enrol(account, public_key, name, &mut rendu);
+                let servi = api.enrol(account, public_key, name, source, &mut rendu);
                 if servi.peer_fault {
                     // **LE MÊME COMPTE QU'UN REFUS D'IDENTIFIANTS.** Cette
                     // porte s'ouvre SANS JETON : sans cela, elle offrirait des
@@ -775,6 +804,7 @@ where
                             content_range: demande.tete.field(b"content-range"),
                             idempotency_key: demande.tete.field(b"idempotency-key"),
                             nonce,
+                            source,
                         },
                         &mut rendu,
                     );

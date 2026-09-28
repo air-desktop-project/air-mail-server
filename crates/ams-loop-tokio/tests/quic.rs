@@ -523,6 +523,7 @@ impl ams_loop_tokio::http::Api for ApiEssai {
         _account: &str,
         _public_key: &str,
         _name: &str,
+        _source: ams_guard::Source,
         _sortie: &'o mut [u8],
     ) -> ams_loop_tokio::http::Served<'o> {
         ams_loop_tokio::http::Served {
@@ -563,6 +564,14 @@ impl ams_loop_tokio::http::Api for ApiEssai {
         })
     }
 
+    fn refused(
+        &self,
+        _account: &str,
+        _door: ams_loop_tokio::http::Door,
+        _source: ams_guard::Source,
+    ) {
+    }
+
     fn nonce(&self) -> u64 {
         7
     }
@@ -577,6 +586,7 @@ impl ams_loop_tokio::http::Api for ApiEssai {
         _expiry: u64,
         _maintenant: u64,
         _device: Option<&str>,
+        _source: ams_guard::Source,
     ) {
     }
 

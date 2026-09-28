@@ -126,6 +126,9 @@ pub struct ApiMaildir {
     sessions: Arc<crate::sessions::Sessions>,
     /// Le débit de chaque appareil, une fois authentifié (phase 6).
     debits: crate::debits::Debits,
+    /// Le journal d'audit, quand la configuration en nomme le répertoire
+    /// (phase 6). `None` : rien ne s'écrit, et les routes `…/audit` rendent 501.
+    audit: Option<Arc<crate::audit::Audit>>,
     /// Le videur (C8), pour voir et lever ses bannissements.
     ///
     /// **LE MÊME QUE CELUI QUI PUNIT**, et non une copie : un état par voie de
@@ -230,6 +233,8 @@ impl ApiMaildir {
             // LE DÉBIT DE DÉPART, que la configuration remplace : voir
             // `avec_debit`.
             debits: crate::debits::Debits::new(ams_guard::Rate::DEFAULT),
+            // PAS DE JOURNAL SANS RÉPERTOIRE : voir `avec_audit`.
+            audit: None,
             guard,
             incidents,
             places: Places::new(VERIFICATIONS_SIMULTANEES),
@@ -257,6 +262,126 @@ impl ApiMaildir {
             // champ non plus : une signature qu'on produirait sans clé publiée
             // échouerait partout, ce qui est pire que pas de signature.
             dkim: None,
+        }
+    }
+
+    /// Lui donne le journal d'audit.
+    #[must_use]
+    pub fn avec_audit(mut self, audit: Arc<crate::audit::Audit>) -> Self {
+        self.audit = Some(audit);
+        self
+    }
+
+    /// Note un événement au journal d'audit de ce compte, s'il y en a un.
+    fn noter(
+        &self,
+        compte: &str,
+        evenement: crate::audit::Evenement<'_>,
+        source: Option<ams_guard::Source>,
+    ) {
+        if let Some(audit) = self.audit.as_ref() {
+            let texte = source.map(texte_de_source);
+            audit.noter(compte, evenement, texte.as_deref(), crate::maintenant());
+        }
+    }
+
+    /// `GET /v1/me/audit` et `/v1/accounts/{compte}/audit` — les entrées les
+    /// plus récentes d'abord.
+    ///
+    /// **CE QUI NE TIENT PAS NE SORT PAS** : la réponse s'arrête à la dernière
+    /// entrée entière qui tient, plutôt que d'échouer. Une ligne fait au plus
+    /// quelques centaines d'octets, et `limit` est borné.
+    fn journal_d_audit<'o>(
+        &self,
+        compte: &str,
+        limite: Option<u16>,
+        sortie: &'o mut [u8],
+    ) -> Served<'o> {
+        let Some(audit) = self.audit.as_ref() else {
+            return pas_encore(sortie);
+        };
+        let limite = limite
+            .map_or(crate::audit::LIMITE_PAR_DEFAUT, usize::from)
+            .min(crate::audit::LIMITE_MAX);
+        let entrees = audit.lire(compte, limite);
+        let pied: &[u8] = b"]}";
+        let mut corps: std::vec::Vec<u8> = std::vec::Vec::from(&b"{\"entries\":["[..]);
+        for entree in &entrees {
+            let virgule = usize::from(corps.len() > b"{\"entries\":[".len());
+            let besoin = corps
+                .len()
+                .saturating_add(virgule)
+                .saturating_add(entree.len())
+                .saturating_add(pied.len());
+            if besoin > sortie.len() {
+                break;
+            }
+            if virgule == 1 {
+                corps.push(b',');
+            }
+            corps.extend_from_slice(entree);
+        }
+        corps.extend_from_slice(pied);
+        let Some(place) = sortie.get_mut(..corps.len()) else {
+            return notre_faute();
+        };
+        place.copy_from_slice(&corps);
+        Served {
+            status: StatusCode::OK,
+            media: JSON_MEDIA_TYPE,
+            body: place,
+            ..Served::default()
+        }
+    }
+
+    /// Note au journal ce qu'une requête réussie a fait, quand son chemin dit
+    /// tout ce qu'il faut en savoir.
+    ///
+    /// **APRÈS LA RÉPONSE, ET SEULEMENT SUR UN SUCCÈS** : une révocation
+    /// refusée n'a rien révoqué. Ce que le chemin ne dit pas — l'identifiant
+    /// d'un appareil ou d'un mot de passe créé — se note là où il naît.
+    fn noter_ce_que_le_chemin_dit(
+        &self,
+        acteur: &str,
+        resource: Resource<'_>,
+        method: Method,
+        source: ams_guard::Source,
+    ) {
+        use crate::audit::Evenement;
+        let source = Some(source);
+        match (resource, method) {
+            (Resource::OwnDevice { id }, Method::Delete) => {
+                self.noter(acteur, Evenement::AppareilRevoque { appareil: id }, source);
+            }
+            (Resource::OwnAppPassword { id }, Method::Delete) => {
+                self.noter(acteur, Evenement::ApplicatifRevoque { id }, source);
+            }
+            (Resource::OwnPassword, Method::Put) => {
+                self.noter(acteur, Evenement::SecretChange { par: "self" }, source);
+            }
+            (Resource::AccountPassword { compte }, Method::Put) => {
+                self.noter(compte, Evenement::SecretChange { par: "admin" }, source);
+            }
+            // **UNE DÉLÉGATION S'ÉCRIT DANS LES DEUX JOURNAUX** : le titulaire
+            // doit voir qui atteint sa boîte, et le délégué ce qu'on lui a
+            // ouvert.
+            (Resource::Delegate { compte, delegue }, Method::Put) => {
+                let evenement = Evenement::DelegationPosee {
+                    titulaire: compte,
+                    delegue,
+                };
+                self.noter(compte, evenement, source);
+                self.noter(delegue, evenement, source);
+            }
+            (Resource::Delegate { compte, delegue }, Method::Delete) => {
+                let evenement = Evenement::DelegationRetiree {
+                    titulaire: compte,
+                    delegue,
+                };
+                self.noter(compte, evenement, source);
+                self.noter(delegue, evenement, source);
+            }
+            _ => {}
         }
     }
 
@@ -563,6 +688,11 @@ impl ApiMaildir {
         // Ses seaux et ses refus s'oublient aussi : un compte recréé sous ce
         // nom repart d'un seau plein et d'un compteur à zéro.
         self.debits.oublier(nom);
+        // **ET SON JOURNAL D'AUDIT S'EFFACE** : un compte recréé sous ce nom y
+        // lirait d'où se connectait quelqu'un d'autre.
+        if let Some(audit) = self.audit.as_ref() {
+            audit.oublier(nom);
+        }
         // Et ce que le réveil a compté pour lui s'oublie : un compte recréé
         // sous ce nom n'hérite pas des compteurs de l'ancien.
         if let Some(reveil) = self.reveil.as_ref() {
@@ -858,7 +988,13 @@ impl ApiMaildir {
     /// une boîte ne doit pas valoir pour ajouter un appareil — sans quoi une
     /// application qui demande « ouvre ma boîte » à son propriétaire obtiendrait
     /// de quoi lui en ajouter un.
-    fn appairer<'o>(&self, account: &str, body: &[u8], sortie: &'o mut [u8]) -> Served<'o> {
+    fn appairer<'o>(
+        &self,
+        account: &str,
+        body: &[u8],
+        source: ams_guard::Source,
+        sortie: &'o mut [u8],
+    ) -> Served<'o> {
         let (Some(_), Some(clef)) = (self.appareils.as_ref(), self.scellement.as_ref()) else {
             return pas_encore(sortie);
         };
@@ -964,6 +1100,14 @@ impl ApiMaildir {
             Err(Refus::Magasin(quoi)) => return dire_la_faute(&quoi, sortie),
         }
 
+        self.noter(
+            account,
+            crate::audit::Evenement::AppareilAppaire {
+                appareil: &id,
+                nom: demande.name,
+            },
+            Some(source),
+        );
         let vues: std::vec::Vec<&str> = adresses.iter().map(String::as_str).collect();
         cree(render::write_enrolled(&id, account, &vues, sortie))
     }
@@ -1006,6 +1150,7 @@ impl ApiMaildir {
         &self,
         account: &str,
         body: &[u8],
+        source: ams_guard::Source,
         sortie: &'o mut [u8],
     ) -> Served<'o> {
         let Some(magasin) = self.applicatifs.as_ref() else {
@@ -1059,6 +1204,11 @@ impl ApiMaildir {
                 false => dire_la_faute(&quoi, sortie),
             };
         }
+        self.noter(
+            account,
+            crate::audit::Evenement::ApplicatifCree { id: &id, nom },
+            Some(source),
+        );
         cree(render::write_app_password_created(
             &render::AppPasswordRow {
                 id: &id,
@@ -1347,6 +1497,7 @@ impl ApiMaildir {
         account: &str,
         nonce: u64,
         corps: &[u8],
+        source: ams_guard::Source,
         sortie: &'o mut [u8],
     ) -> Served<'o> {
         let mut jeton = [0_u8; ams_config::FCM_TOKEN_MAX];
@@ -1380,11 +1531,21 @@ impl ApiMaildir {
             appareil.push = Some(abonnement);
             Ok(())
         }) {
-            Ok(()) => rendre(render::write_push(
-                Some(resume),
-                self.vapid.as_deref(),
-                sortie,
-            )),
+            Ok(()) => {
+                self.noter(
+                    account,
+                    crate::audit::Evenement::Abonnement {
+                        appareil: &id,
+                        canal: resume.0,
+                    },
+                    Some(source),
+                );
+                rendre(render::write_push(
+                    Some(resume),
+                    self.vapid.as_deref(),
+                    sortie,
+                ))
+            }
             Err(quoi) => dire_la_faute(&quoi, sortie),
         }
     }
@@ -1393,7 +1554,13 @@ impl ApiMaildir {
     ///
     /// **SANS ABONNEMENT, C'EST DÉJÀ L'ÉTAT DEMANDÉ** : `204` aussi, comme un
     /// client qui se désabonne deux fois ne fait rien de mal.
-    fn desabonner<'o>(&self, account: &str, nonce: u64, sortie: &'o mut [u8]) -> Served<'o> {
+    fn desabonner<'o>(
+        &self,
+        account: &str,
+        nonce: u64,
+        source: ams_guard::Source,
+        sortie: &'o mut [u8],
+    ) -> Served<'o> {
         let Some(magasin) = self.appareils.as_ref() else {
             return pas_encore(sortie);
         };
@@ -1408,7 +1575,14 @@ impl ApiMaildir {
             appareil.push = None;
             Ok(())
         }) {
-            Ok(()) => sans_contenu(),
+            Ok(()) => {
+                self.noter(
+                    account,
+                    crate::audit::Evenement::Desabonnement { appareil: &id },
+                    Some(source),
+                );
+                sans_contenu()
+            }
             Err(quoi) => dire_la_faute(&quoi, sortie),
         }
     }
@@ -1427,7 +1601,12 @@ impl ApiMaildir {
     /// appareil peut s'enrôler ou se révoquer. **C'est l'enrôlement qui décide**,
     /// parce que c'est lui qui agit. Refuser ici en plus donnerait deux règles
     /// pour une seule question, et elles divergeraient.
-    fn frapper_une_invitation<'o>(&self, body: &[u8], sortie: &'o mut [u8]) -> Served<'o> {
+    fn frapper_une_invitation<'o>(
+        &self,
+        body: &[u8],
+        source: ams_guard::Source,
+        sortie: &'o mut [u8],
+    ) -> Served<'o> {
         let Some(clef) = self.scellement.as_ref() else {
             return pas_encore(sortie);
         };
@@ -1468,6 +1647,11 @@ impl ApiMaildir {
             // notre tampon, et c'est notre faute.
             return notre_faute();
         };
+        self.noter(
+            demande.login,
+            crate::audit::Evenement::InvitationEmise,
+            Some(source),
+        );
         // **EN SECONDES DEHORS**, comme tout ce que cette API rend.
         cree(render::write_invitation(
             ecrite,
@@ -1644,6 +1828,7 @@ impl ApiMaildir {
         account: &str,
         public_key: &str,
         name: &str,
+        source: ams_guard::Source,
         sortie: &'o mut [u8],
     ) -> Served<'o> {
         let Some(magasin) = self.appareils.as_ref() else {
@@ -1702,6 +1887,14 @@ impl ApiMaildir {
             return dire_la_faute(&quoi, sortie);
         }
 
+        self.noter(
+            account,
+            crate::audit::Evenement::AppareilEnrole {
+                appareil: &id,
+                nom: name,
+            },
+            Some(source),
+        );
         let adresses: std::vec::Vec<&str> = compte
             .addresses
             .iter()
@@ -2894,6 +3087,7 @@ impl Api for ApiMaildir {
             idempotency_key,
             owner,
             nonce,
+            source,
         } = appel;
         // **UNE BOÎTE D'AUTRUI : LA TABLE DÉCIDE, À CHAQUE REQUÊTE.** Le jeton dit
         // QUI appelle ; le chemin dit la boîte de QUI ; la table dit si le
@@ -3097,27 +3291,31 @@ impl Api for ApiMaildir {
             Resource::Account { compte } => self.account(compte, sortie),
             Resource::AccountPassword { compte } => self.poser_un_secret(compte, body, sortie),
             Resource::OwnPassword => self.poser_mon_secret(account, body, sortie),
-            Resource::Invitations => self.frapper_une_invitation(body, sortie),
+            Resource::Invitations => self.frapper_une_invitation(body, source, sortie),
             Resource::OwnDevices if matches!(method, Method::Post) => {
-                self.appairer(account, body, sortie)
+                self.appairer(account, body, source, sortie)
             }
             Resource::OwnDevices => self.mes_appareils(account, sortie),
             Resource::OwnDevice { id } => self.revoquer_mon_appareil(account, id, sortie),
             // **L'APPAREIL DE QUI APPELLE, PAR SA SESSION** — `acteur`, et non
             // un titulaire : un abonnement n'est jamais celui d'un autre.
             Resource::OwnPush if matches!(method, Method::Put) => {
-                self.abonner(acteur, nonce, body, sortie)
+                self.abonner(acteur, nonce, body, source, sortie)
             }
             Resource::OwnPush if matches!(method, Method::Delete) => {
-                self.desabonner(acteur, nonce, sortie)
+                self.desabonner(acteur, nonce, source, sortie)
             }
             Resource::OwnPush => self.mon_abonnement(acteur, nonce, sortie),
             Resource::OwnAppPasswords if matches!(method, Method::Post) => {
-                self.creer_un_applicatif(account, body, sortie)
+                self.creer_un_applicatif(account, body, source, sortie)
             }
             Resource::OwnAppPasswords => self.mes_applicatifs(account, sortie),
             Resource::OwnAppPassword { id } => self.revoquer_un_applicatif(account, id, sortie),
             Resource::OwnDelegations => self.mes_delegations(account, sortie),
+            // **SON PROPRE JOURNAL, PAR `acteur`** : celui du titulaire d'une
+            // boîte déléguée n'est pas à qui l'atteint.
+            Resource::OwnAudit => self.journal_d_audit(acteur, query.limit, sortie),
+            Resource::AccountAudit { compte } => self.journal_d_audit(compte, query.limit, sortie),
             Resource::Delegates { compte } => self.delegues_de(compte, sortie),
             Resource::Delegate { compte, delegue } if matches!(method, Method::Delete) => {
                 self.retirer_une_delegation(compte, delegue, sortie)
@@ -3141,6 +3339,9 @@ impl Api for ApiMaildir {
             // lieu d'être servie de travers.
             _ => pas_encore(sortie),
         };
+        if servi.status.class() == 2 {
+            self.noter_ce_que_le_chemin_dit(acteur, resource, method, source);
+        }
         if let Some((registre, cle, empreinte)) = retenir {
             // **CE QUI ÉCHOUE DE NOTRE FAIT NE SE REJOUE PAS** : un `503` rejoué
             // interdirait au client de réessayer. La clé s'oublie, et le
@@ -3207,9 +3408,41 @@ impl Api for ApiMaildir {
         expiry: u64,
         maintenant: u64,
         device: Option<&str>,
+        source: ams_guard::Source,
     ) {
         self.sessions
             .ouvrir(login, nonce, expiry, maintenant, device);
+        self.noter(
+            login,
+            crate::audit::Evenement::SessionOuverte { appareil: device },
+            Some(source),
+        );
+    }
+
+    /// # UN COMPTE INCONNU NE S'ÉCRIT PAS, ET CELA NE SE VOIT PAS AU TEMPS
+    ///
+    /// La recherche du compte se fait dans la vue en mémoire, et l'écriture
+    /// part dans la file du journal : ni l'une ni l'autre ne pèse à côté de
+    /// l'Argon2id qui vient d'être payé — le même pour un compte inconnu.
+    fn refused(&self, account: &str, door: ams_loop_tokio::http::Door, source: ams_guard::Source) {
+        if self.audit.is_none()
+            || !self
+                .comptes
+                .vue()
+                .iter()
+                .any(|connu| connu.login == account)
+        {
+            return;
+        }
+        let porte = match door {
+            ams_loop_tokio::http::Door::Password => "password",
+            ams_loop_tokio::http::Door::Device => "device",
+        };
+        self.noter(
+            account,
+            crate::audit::Evenement::Refus { porte },
+            Some(source),
+        );
     }
 
     /// # LA SESSION D'ABORD, LE DÉBIT ENSUITE
@@ -3243,9 +3476,10 @@ impl Api for ApiMaildir {
         account: &str,
         public_key: &str,
         name: &str,
+        source: ams_guard::Source,
         sortie: &'o mut [u8],
     ) -> Served<'o> {
-        self.enroler(account, public_key, name, sortie)
+        self.enroler(account, public_key, name, source, sortie)
     }
 
     fn close_session(&self, login: &str, nonce: u64) -> bool {
@@ -3855,6 +4089,23 @@ fn bits_de(cle: &ams_guard::Key) -> u8 {
 }
 
 /// La source que ce texte désigne, s'il en désigne une.
+/// Une adresse, telle que le journal d'audit l'écrit.
+///
+/// **UNE ADRESSE IPv4 MAPPÉE S'ÉCRIT EN IPv4** : `::ffff:192.0.2.1` et
+/// `192.0.2.1` sont le même pair, et un exploitant qui cherche l'une ne doit
+/// pas manquer l'autre.
+fn texte_de_source(source: ams_guard::Source) -> String {
+    match source {
+        ams_guard::Source::V4(octets) => std::net::Ipv4Addr::from(octets).to_string(),
+        ams_guard::Source::V6(octets) => {
+            let adresse = std::net::Ipv6Addr::from(octets);
+            adresse
+                .to_ipv4_mapped()
+                .map_or_else(|| adresse.to_string(), |v4| v4.to_string())
+        }
+    }
+}
+
 fn source_de(texte: &str) -> Option<ams_guard::Source> {
     match texte.parse::<std::net::IpAddr>().ok()? {
         std::net::IpAddr::V4(adresse) => Some(ams_guard::Source::V4(adresse.octets())),
@@ -4738,6 +4989,7 @@ mod porte_http {
                 idempotency_key: None,
                 owner: None,
                 nonce: 0,
+                source: ams_guard::Source::V4([192, 0, 2, 1]),
             },
             &mut place,
         );
@@ -4910,6 +5162,7 @@ mod ecritures {
                 idempotency_key: None,
                 owner: None,
                 nonce: 0,
+                source: ams_guard::Source::V4([192, 0, 2, 1]),
             },
             &mut place,
         );
@@ -5061,6 +5314,7 @@ mod ecritures {
                 idempotency_key: None,
                 owner: titulaire,
                 nonce: 0,
+                source: ams_guard::Source::V4([192, 0, 2, 1]),
             },
             &mut place,
         );
@@ -5203,6 +5457,7 @@ mod ecritures {
                 idempotency_key: Some(cle),
                 owner: None,
                 nonce: 0,
+                source: ams_guard::Source::V4([192, 0, 2, 1]),
             },
             &mut place,
         );
@@ -5259,6 +5514,7 @@ mod ecritures {
                 idempotency_key: Some(b"mal formee"),
                 owner: None,
                 nonce: 0,
+                source: ams_guard::Source::V4([192, 0, 2, 1]),
             },
             &mut place,
         );
@@ -5940,6 +6196,7 @@ mod ecritures {
                 idempotency_key: None,
                 owner: None,
                 nonce: 0,
+                source: ams_guard::Source::V4([192, 0, 2, 1]),
             },
             &mut place,
         );
