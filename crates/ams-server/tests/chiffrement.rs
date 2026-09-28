@@ -62,6 +62,23 @@ struct Serveur {
 }
 
 impl Serveur {
+    /// Attend que le serveur annonce son écoute sur ce port.
+    ///
+    /// **`lancer` N'ATTEND QUE SMTP** : POP3 lie son écoute un peu après, et
+    /// un client trop pressé trouve porte close — une session vide, qui fait
+    /// échouer l'essai une fois sur cent.
+    fn attendre_l_ecoute(&self, port: u16) {
+        let annonce = format!("écoute sur 127.0.0.1:{port}");
+        let depart = Instant::now();
+        while depart.elapsed() < Duration::from_secs(10) {
+            if self.journal().contains(&annonce) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("rien n'écoute sur le port {port} au bout de dix secondes");
+    }
+
     /// Ce que le serveur a écrit jusqu'ici.
     fn journal(&self) -> String {
         match self.journal.lock() {
@@ -219,12 +236,15 @@ fn configuration_pop3(
         apns_sandbox: false,
         fcm_service_account: String::new(),
         audit: String::new(),
-        android_attestation: ams_config::AndroidAttestation::Off,
+        android_attestation: ams_config::AttestationMode::Off,
         android_package: String::new(),
         android_signers: Vec::new(),
         android_roots: String::new(),
         android_revocation: String::new(),
         android_revocation_max_days: 7,
+        apple_attestation: ams_config::AttestationMode::Off,
+        apple_app_id: String::new(),
+        apple_development: false,
         require_fqdn_sender: false,
         require_fqdn_recipient: false,
         require_sender_domain: false,
@@ -881,6 +901,7 @@ fn un_client_curl_releve_le_courrier_en_pop3() {
     // d'une URL `pop3s`.
     reecrire_avec_pop3_implicite(&config, port_pop3);
     let mut serveur = lancer(&config, port_smtp);
+    serveur.attendre_l_ecoute(port_pop3);
 
     let mut flux = joindre(&mut serveur, port_smtp);
     flux.set_read_timeout(Some(Duration::from_secs(5)))
@@ -1177,6 +1198,8 @@ fn le_pop3_sert_ses_deux_ports_chacun_dans_son_mode() {
     // LES DEUX ÉCOUTES, chacune avec son mode.
     reecrire_avec_deux_pop3(&mut config, explicite, implicite);
     let serveur = lancer(&config, port_smtp);
+    serveur.attendre_l_ecoute(explicite);
+    serveur.attendre_l_ecoute(implicite);
 
     // Le 110 : `STLS` d'abord, puis la conversation.
     let clair = pop3(explicite, "USER jean\r\nPASS ouvre-toi\r\nSTAT\r\nQUIT\r\n");
@@ -1248,6 +1271,7 @@ fn un_client_pop3_releve_puis_efface_son_courrier() {
         &format!("127.0.0.1:{port_pop3}"),
     );
     let mut serveur = lancer(&config, port_smtp);
+    serveur.attendre_l_ecoute(port_pop3);
 
     // ── 1. Un message arrive par SMTP ───────────────────────────────────────
     let mut flux = joindre(&mut serveur, port_smtp);
@@ -1375,7 +1399,8 @@ fn un_quit_sans_dele_n_efface_rien_et_un_mauvais_mot_de_passe_non_plus() {
         &magasin.display().to_string(),
         &format!("127.0.0.1:{port_pop3}"),
     );
-    let _serveur = lancer(&config, port_smtp);
+    let serveur = lancer(&config, port_smtp);
+    serveur.attendre_l_ecoute(port_pop3);
 
     // UN MAUVAIS MOT DE PASSE N'OUVRE RIEN, et ne dit pas pourquoi.
     let vu = pop3(port_pop3, "USER jean\r\nPASS autre\r\nSTAT\r\nQUIT\r\n");
@@ -1433,7 +1458,8 @@ fn pop3_ecrit_au_journal_d_audit_et_regroupe() {
         ams_config::decode(&std::fs::read(&config).expect("relisible")).expect("décodable");
     lue.audit = repertoire.display().to_string();
     std::fs::write(&config, ams_config::encode(&lue).expect("encodable")).expect("écriture");
-    let _serveur = lancer(&config, port_smtp);
+    let serveur = lancer(&config, port_smtp);
+    serveur.attendre_l_ecoute(port_pop3);
 
     for _ in 0..2 {
         let vu = pop3(port_pop3, "USER jean\r\nPASS autre\r\nQUIT\r\n");

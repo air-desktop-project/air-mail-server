@@ -78,6 +78,9 @@ pub enum Attested {
     Tee,
     /// Dans une puce de sécurité à part (StrongBox).
     StrongBox,
+    /// Dans la Secure Enclave d'un appareil Apple, attestée par App Attest
+    /// (0.2.43).
+    AppAttest,
 }
 
 impl Attested {
@@ -87,6 +90,7 @@ impl Attested {
         match self {
             Self::Tee => "tee",
             Self::StrongBox => "strongbox",
+            Self::AppAttest => "app-attest",
         }
     }
 }
@@ -197,6 +201,7 @@ pub fn decode_devices(octets: &[u8]) -> Result<Vec<Device>, Error> {
             Ok(AttestationLue::None) => None,
             Ok(AttestationLue::Tee) => Some(Attested::Tee),
             Ok(AttestationLue::StrongBox) => Some(Attested::StrongBox),
+            Ok(AttestationLue::AppAttest) => Some(Attested::AppAttest),
             Err(_) => return Err(Error::BadPush(id)),
         };
         appareils.push(Device {
@@ -238,6 +243,7 @@ pub fn encode_devices(appareils: &[Device]) -> Result<Vec<u8>, Error> {
                 None => AttestationLue::None,
                 Some(Attested::Tee) => AttestationLue::Tee,
                 Some(Attested::StrongBox) => AttestationLue::StrongBox,
+                Some(Attested::AppAttest) => AttestationLue::AppAttest,
             });
             if let Some(push) = &appareil.push {
                 case.set_push_channel(match push.channel() {

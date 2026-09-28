@@ -257,6 +257,7 @@ fn signe(algorithme: Algorithme, signature: &'static [u8]) -> Certificat<'static
         debut: 0,
         fin: 0,
         attestation: None,
+        apple: None,
         serie: None,
     }
 }

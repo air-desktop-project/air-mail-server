@@ -1390,7 +1390,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     // Ici aussi pour la même raison : la liste de Google se lit par le même
     // transport vérifié, qui demande le résolveur.
     let juge = juge_d_attestation(&options)?;
-    if options.android_attestation != ams_config::AndroidAttestation::Off {
+    if options.android_attestation != ams_config::AttestationMode::Off {
         let source = if options.android_revocation.is_empty() {
             match transport_https(
                 &options,
@@ -3187,9 +3187,32 @@ fn juge_d_attestation(options: &Configuration) -> Result<crate::attestation::Jug
         &options.android_signers,
         racines.as_deref(),
         options.android_revocation_max_days,
+    )?
+    .avec_apple(
+        options.apple_attestation,
+        &options.apple_app_id,
+        options.apple_development,
     )?;
+    match juge.mode_apple() {
+        ams_config::AttestationMode::Off => eprintln!(
+            "air-mail-server : App Attest NON LUE — la clef d'un appareil iOS n'a pas à \
+             prouver où elle vit (`config write … --apple-attestation verify|require`)"
+        ),
+        mode => eprintln!(
+            "air-mail-server : App Attest `{}` — application `{}`, environnement de {}, {} \
+             racine(s) admise(s), vérifiée ICI.",
+            mode.name(),
+            options.apple_app_id,
+            if options.apple_development {
+                "DÉVELOPPEMENT"
+            } else {
+                "production"
+            },
+            juge.racines_apple()
+        ),
+    }
     match juge.mode() {
-        ams_config::AndroidAttestation::Off => eprintln!(
+        ams_config::AttestationMode::Off => eprintln!(
             "air-mail-server : attestation Android NON LUE — la clef d'un appareil n'a pas à \
              prouver où elle vit (`config write … --android-attestation verify|require`)"
         ),

@@ -279,7 +279,7 @@ impl ApiMaildir {
         sortie: &'o mut [u8],
     ) -> Served<'o> {
         eprintln!(
-            "air-mail-server : attestation Android refusée pour `{compte}` — {}",
+            "air-mail-server : attestation refusée pour `{compte}` — {}",
             refus.dire()
         );
         let mut servi = probleme(

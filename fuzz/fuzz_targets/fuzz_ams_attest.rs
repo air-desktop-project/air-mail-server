@@ -15,6 +15,8 @@
 //!    admise, tout est refusé — une chaîne ne s'accepte jamais « par défaut ».
 //! 3. **LA LISTE DE RÉVOCATION SE LIT SANS PANIQUE**, et dit combien elle a lu
 //!    — autant que d'appels.
+//! 4. **UN OBJET APP ATTEST SE LIT SANS PANIQUE** (0.2.43), et sans racine
+//!    admise rien n'est accepté.
 
 #![no_main]
 
@@ -26,6 +28,10 @@ const APPAREIL: &[u8] =
 const DEFI: &[u8] = include_bytes!("../../crates/ams-attest/src/vecteurs/synthese/defi.bin");
 const EMPREINTE: &[u8] =
     include_bytes!("../../crates/ams-attest/src/vecteurs/synthese/empreinte.bin");
+const APPLE_ESSAI: &[u8] =
+    include_bytes!("../../crates/ams-attest/src/vecteurs/apple/synthese/racine.spki");
+const CLIENT: &[u8] =
+    include_bytes!("../../crates/ams-attest/src/vecteurs/apple/synthese/client.bin");
 /// 2026-09-28 à minuit UTC.
 const MAINTENANT: i64 = 1_790_553_600;
 
@@ -50,6 +56,23 @@ fuzz_target!(|chaine: &[u8]| {
         revoked: &[],
     };
     let _ = ams_attest::verify(chaine, &appareil, DEFI, &politique, MAINTENANT);
+
+    // App Attest : l'objet d'essai, sous sa racine d'essai et celle d'Apple.
+    let racines_apple = [APPLE_ESSAI, ams_attest::APPLE_ROOTS[0]];
+    let apple = ams_attest::ApplePolicy {
+        roots: &racines_apple,
+        app_id: b"TEAM123456.org.airdesktop.mail",
+        environment: ams_attest::AppleEnvironment::Production,
+    };
+    let _ = ams_attest::verify_app_attest(chaine, CLIENT, &apple, MAINTENANT);
+    let apple_sans_racine = ams_attest::ApplePolicy {
+        roots: &[],
+        ..apple
+    };
+    assert!(
+        ams_attest::verify_app_attest(chaine, CLIENT, &apple_sans_racine, MAINTENANT).is_err(),
+        "un objet App Attest accepté sans aucune racine admise"
+    );
 
     let sans_racine = ams_attest::Policy {
         roots: &[],

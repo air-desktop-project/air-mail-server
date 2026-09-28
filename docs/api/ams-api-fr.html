@@ -423,7 +423,7 @@ authorization: Bearer AQECAAAAAG…</code></pre>
     <tr><td><code>404</code></td><td><code>/problems/not-found</code></td><td>La ressource n'existe pas, <em>ou</em> votre jeton n'ouvre pas la portée qu'elle exige</td></tr>
     <tr><td><code>405</code></td><td><code>/problems/method-not-allowed</code></td><td>La ressource existe mais pas avec ce verbe. Porte <code>allow</code></td></tr>
     <tr><td><code>414</code></td><td><code>/problems/uri-too-long</code></td><td>Plus de segments que le serveur n'en retient</td></tr>
-    <tr><td><code>422</code></td><td><code>/problems/attestation-refused</code></td><td>L'attestation Android d'une clef n'est pas recevable (enrôlement, appairage)</td></tr>
+    <tr><td><code>422</code></td><td><code>/problems/attestation-refused</code></td><td>L'attestation d'une clef — Android ou App Attest — n'est pas recevable (enrôlement, appairage)</td></tr>
     <tr><td><code>429</code></td><td><code>/problems/too-many-requests</code></td><td>Cet appareil demande plus vite que son débit (voir <a href="#limites">Limites</a>). Porte <code>retry-after: 1</code> : revenez dans une seconde</td></tr>
     <tr><td><code>500</code>, <code>501</code>, <code>503</code></td><td><code>/problems/internal</code></td><td>Une faute du serveur. Un <code>503</code> est temporaire et mérite d'être réessayé</td></tr>
   </tbody>
@@ -496,7 +496,13 @@ authorization: Bearer AQECAAAAAG…</code></pre>
     <span class="etiquette">Android : l'attestation de la clef (0.2.39)</span>
     <p>Un appareil Android peut prouver que sa clef a été <strong>créée dans le matériel</strong> (TEE ou StrongBox), <strong>par notre application</strong>, sur un téléphone <strong>verrouillé au démarrage vérifié</strong>. Il ajoute au corps un champ <code>"attestation"</code> : sa chaîne de certificats d'attestation (<code>KeyStore.getCertificateChain</code>), en DER mis bout à bout — la feuille d'abord, la racine en dernier —, écrite en base64url sans remplissage.</p>
     <p><strong>Le défi est le SHA-256 de l'invitation</strong>, telle qu'écrite : l'application le calcule et le passe à <code>KeyGenParameterSpec.Builder.setAttestationChallenge</code> <em>avant</em> de créer sa clef. Pour un appairage (<code>POST /v1/me/devices</code>), c'est le SHA-256 du défi d'appairage.</p>
-    <p>Le serveur la vérifie <strong>lui-même</strong>, contre les racines de Google, sans Google Play, et contre la <strong>liste de révocation</strong> que Google publie, relue chaque jour (0.2.40) : une clef d'usine révoquée ou suspendue fait refuser la chaîne ; une liste de plus de sept jours ne se croit plus (0.2.42). Selon sa configuration, il l'ignore, la juge quand elle est présente, ou l'exige. Refusée — ou absente quand elle est exigée —, l'enrôlement rend <code>422</code> avec <code>/problems/attestation-refused</code>, <strong>sans consommer l'invitation</strong> ; laquelle des règles a manqué ne se dit pas. <code>/v1/me/devices</code> dit ensuite où vit la clef : <code>"attestation": "tee"</code>, <code>"strongbox"</code>, ou <code>null</code>.</p>
+    <p>Le serveur la vérifie <strong>lui-même</strong>, contre les racines de Google, sans Google Play, et contre la <strong>liste de révocation</strong> que Google publie, relue chaque jour (0.2.40) : une clef d'usine révoquée ou suspendue fait refuser la chaîne ; une liste de plus de sept jours ne se croit plus (0.2.42). Selon sa configuration, il l'ignore, la juge quand elle est présente, ou l'exige. Refusée — ou absente quand elle est exigée —, l'enrôlement rend <code>422</code> avec <code>/problems/attestation-refused</code>, <strong>sans consommer l'invitation</strong> ; laquelle des règles a manqué ne se dit pas. <code>/v1/me/devices</code> dit ensuite où vit la clef : <code>"attestation": "tee"</code>, <code>"strongbox"</code>, <code>"app-attest"</code>, ou <code>null</code>.</p>
+  </div>
+  <div class="note info">
+    <span class="etiquette">iOS : App Attest (0.2.43)</span>
+    <p>Un appareil iOS prouve, par App Attest, que la demande vient de <strong>notre application</strong>, telle qu'Apple l'a signée, sur un <strong>appareil Apple authentique</strong>. Il met dans le même champ <code>"attestation"</code> l'objet que rend <code>DCAppAttestService.attestKey</code>, tel quel, en base64url sans remplissage. Le serveur reconnaît la plateforme au premier octet décodé : une <code>SEQUENCE</code> DER pour Android, une table CBOR pour Apple.</p>
+    <p><strong>Le <code>clientDataHash</code> est SHA-256(invitation ‖ 0x00 ‖ clef d'appareil)</strong> : le texte de l'invitation tel qu'écrit, un octet nul, puis les 65 octets de la clef publique d'appareil (<code>publicKey</code>, décodée). La clef d'App Attest n'est pas la clef d'appareil ; ce condensat les lie, et une attestation obtenue pour une autre clef ou une autre invitation ne vaut pas. Pour un appairage, le défi d'appairage remplace l'invitation.</p>
+    <p>Le serveur la vérifie <strong>lui-même</strong>, contre la racine d'App Attest d'Apple épinglée : la chaîne, le nonce, l'identifiant d'application (<code>TeamID.bundleID</code>), un compteur à zéro, l'environnement (production ou développement) et l'identifiant de la clef. Les modes et les refus sont ceux d'Android ; une attestation d'une plateforme que le serveur ne juge pas ne vaut rien quand il en exige une.</p>
   </div>
   <div class="note prudence">
     <span class="etiquette">Une invitation ne vaut que pour le PREMIER appareil</span>
@@ -510,7 +516,7 @@ authorization: Bearer AQECAAAAAG…</code></pre>
       <tr><td><code>400</code></td><td>La clef n'est pas un point de la courbe, ou n'a pas la bonne taille.</td></tr>
       <tr><td><code>409</code></td><td>Ce compte a déjà un appareil enrôlé.</td></tr>
       <tr><td><code>404</code></td><td>Le compte de l'invitation n'existe plus.</td></tr>
-      <tr><td><code>422</code></td><td>L'attestation Android est refusée, ou absente alors que le serveur l'exige (<code>/problems/attestation-refused</code>).</td></tr>
+      <tr><td><code>422</code></td><td>L'attestation — Android ou App Attest — est refusée, ou absente alors que le serveur l'exige (<code>/problems/attestation-refused</code>).</td></tr>
       <tr><td><code>501</code></td><td>Ce serveur n'a pas de magasin d'appareils configuré.</td></tr>
     </tbody>
   </table>

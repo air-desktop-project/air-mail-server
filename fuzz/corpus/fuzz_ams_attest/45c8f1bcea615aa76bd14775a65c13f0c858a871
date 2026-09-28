@@ -1,0 +1,13 @@
+{
+  "entries": {
+    "6681152659205225093" : {
+      "status": "REVOKED",
+          "6700384895630456214" : {
+          },
+    "cce9a93713b6e643b26c15879786f7" : {
+      "status": "SUSPENDED",
+      "reason": "KEY_COMPROMISE",
+      "commen": "Entry for testing only"
+    }
+  }
+}

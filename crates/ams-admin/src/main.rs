@@ -1031,7 +1031,7 @@ fn afficher(config: &Configuration) {
     println!(
         "attestation Android {}",
         match config.android_attestation {
-            ams_config::AndroidAttestation::Off => {
+            ams_config::AttestationMode::Off => {
                 String::from("NON LUE — la clef d'un appareil n'a pas à prouver où elle vit")
             }
             mode => format!(
@@ -1055,6 +1055,29 @@ fn afficher(config: &Configuration) {
                         config.android_revocation, config.android_revocation_max_days
                     )
                 }
+            ),
+        }
+    );
+    println!(
+        "App Attest         {}",
+        match config.apple_attestation {
+            ams_config::AttestationMode::Off => {
+                String::from("NON LUE — la clef d'un appareil iOS n'a pas à prouver où elle vit")
+            }
+            mode => format!(
+                "`{}` — application `{}`, environnement de {}{}",
+                mode.name(),
+                config.apple_app_id,
+                if config.apple_development {
+                    "DÉVELOPPEMENT"
+                } else {
+                    "production"
+                },
+                if config.android_roots.is_empty() {
+                    String::new()
+                } else {
+                    format!(", racines en plus `{}`", config.android_roots)
+                },
             ),
         }
     );

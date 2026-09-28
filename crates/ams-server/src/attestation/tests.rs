@@ -3,7 +3,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use super::{Juge, Refus, clefs_publiques};
-use ams_config::{AndroidAttestation, Attested};
+use ams_config::{AttestationMode, Attested};
 
 macro_rules! vecteur {
     ($nom:literal) => {
@@ -27,9 +27,22 @@ fn empreinte() -> [u8; 32] {
     <[u8; 32]>::try_from(&vecteur!("empreinte.bin")[..]).expect("trente-deux octets")
 }
 
+macro_rules! vecteur_apple {
+    ($nom:literal) => {
+        include_bytes!(concat!(
+            "../../../ams-attest/src/vecteurs/apple/synthese/",
+            $nom
+        ))
+    };
+}
+
 /// La racine d'essai, écrite comme un fichier PEM de clefs publiques.
 fn pem_de_la_racine() -> std::vec::Vec<u8> {
-    let der = vecteur!("racine.spki");
+    pem_de(vecteur!("racine.spki"))
+}
+
+/// Une clef publique `SubjectPublicKeyInfo`, écrite en PEM.
+fn pem_de(der: &[u8]) -> std::vec::Vec<u8> {
     let mut url = [0_u8; 512];
     let n = ams_push::encode_base64url(der, &mut url).expect("encodable");
     // Le PEM emploie l'alphabet standard, avec son remplissage.
@@ -54,7 +67,7 @@ fn pem_de_la_racine() -> std::vec::Vec<u8> {
 }
 
 /// Un juge sous la racine d'essai, avec une liste de révocation vide.
-fn juge(mode: AndroidAttestation) -> Juge {
+fn juge(mode: AttestationMode) -> Juge {
     let juge = Juge::new(
         mode,
         "org.airdesktop.mail",
@@ -75,7 +88,7 @@ fn encode(chaine: &[u8]) -> std::string::String {
 
 #[test]
 fn une_attestation_en_regle_dit_ou_vit_la_clef() {
-    for mode in [AndroidAttestation::Verify, AndroidAttestation::Require] {
+    for mode in [AttestationMode::Verify, AttestationMode::Require] {
         let juge = juge(mode);
         assert_eq!(juge.mode(), mode);
         assert_eq!(
@@ -110,29 +123,29 @@ fn une_attestation_en_regle_dit_ou_vit_la_clef() {
 fn l_absence_se_juge_selon_le_mode() {
     let tee = encode(vecteur!("tee.der"));
     let eteint = Juge::eteint();
-    assert_eq!(eteint.mode(), AndroidAttestation::Off);
+    assert_eq!(eteint.mode(), AttestationMode::Off);
     assert_eq!(
         eteint.juger(&appareil(), INVITATION, Some("§§"), MAINTENANT),
         Ok(None)
     );
     assert_eq!(
-        juge(AndroidAttestation::Off).juger(&appareil(), INVITATION, Some(&tee), MAINTENANT),
+        juge(AttestationMode::Off).juger(&appareil(), INVITATION, Some(&tee), MAINTENANT),
         Ok(None),
         "éteinte, même une attestation en règle n'est pas lue"
     );
     assert_eq!(
-        juge(AndroidAttestation::Verify).juger(&appareil(), INVITATION, None, MAINTENANT),
+        juge(AttestationMode::Verify).juger(&appareil(), INVITATION, None, MAINTENANT),
         Ok(None)
     );
     assert_eq!(
-        juge(AndroidAttestation::Require).juger(&appareil(), INVITATION, None, MAINTENANT),
+        juge(AttestationMode::Require).juger(&appareil(), INVITATION, None, MAINTENANT),
         Err(Refus::Absente)
     );
 }
 
 #[test]
 fn une_attestation_illisible_ou_refusee_se_refuse() {
-    let juge = juge(AndroidAttestation::Verify);
+    let juge = juge(AttestationMode::Verify);
     assert_eq!(
         juge.juger(
             &appareil(),
@@ -169,7 +182,7 @@ fn une_attestation_illisible_ou_refusee_se_refuse() {
     );
     // Sans la racine d'essai, la même chaîne ne remonte à rien.
     let google_seul = Juge::new(
-        AndroidAttestation::Verify,
+        AttestationMode::Verify,
         "org.airdesktop.mail",
         &[empreinte()],
         None,
@@ -201,11 +214,11 @@ fn une_attestation_illisible_ou_refusee_se_refuse() {
 
 #[test]
 fn un_reglage_incoherent_ne_fait_pas_de_juge() {
-    assert!(Juge::new(AndroidAttestation::Verify, "", &[empreinte()], None, 7).is_err());
-    assert!(Juge::new(AndroidAttestation::Require, "org.a.b", &[], None, 7).is_err());
-    assert!(Juge::new(AndroidAttestation::Off, "", &[], None, 7).is_ok());
+    assert!(Juge::new(AttestationMode::Verify, "", &[empreinte()], None, 7).is_err());
+    assert!(Juge::new(AttestationMode::Require, "org.a.b", &[], None, 7).is_err());
+    assert!(Juge::new(AttestationMode::Off, "", &[], None, 7).is_ok());
     let vide = Juge::new(
-        AndroidAttestation::Verify,
+        AttestationMode::Verify,
         "org.a.b",
         &[empreinte()],
         Some(b"-----BEGIN PUBLIC KEY-----\n!!!\n-----END PUBLIC KEY-----\n"),
@@ -266,7 +279,7 @@ fn serie(chaine: &[u8], rang: usize) -> u128 {
 fn la_liste_de_revocation_decide() {
     let chaine = encode(vecteur!("tee.der"));
     let sans = Juge::new(
-        AndroidAttestation::Verify,
+        AttestationMode::Verify,
         "org.airdesktop.mail",
         &[empreinte()],
         Some(&pem_de_la_racine()),
@@ -322,7 +335,7 @@ fn une_liste_se_lit_ou_se_refuse() {
 /// seconde de plus refuse — comme sans liste.
 #[test]
 fn une_liste_trop_vieille_ne_se_croit_plus() {
-    let juge = juge(AndroidAttestation::Verify);
+    let juge = juge(AttestationMode::Verify);
     let chaine = encode(vecteur!("tee.der"));
     let sept_jours: u64 = 604_800;
     let _ = juge.liste().poser(
@@ -353,4 +366,199 @@ fn une_liste_trop_vieille_ne_se_croit_plus() {
     assert!(!Refus::ListePerimee.dire().is_empty());
     let courante = juge.liste().courante().expect("posée");
     assert_eq!(courante.date, MAINTENANT_U64.saturating_add(3_600));
+}
+
+/// Un juge d'App Attest sous les racines d'essai des DEUX plateformes, Android
+/// dans ce mode.
+fn juge_apple(android: AttestationMode, apple: AttestationMode, developpement: bool) -> Juge {
+    let pem = [pem_de_la_racine(), pem_de(vecteur_apple!("racine.spki"))].concat();
+    let juge = Juge::new(
+        android,
+        "org.airdesktop.mail",
+        &[empreinte()],
+        Some(&pem),
+        7,
+    )
+    .expect("un réglage cohérent")
+    .avec_apple(apple, "TEAM123456.org.airdesktop.mail", developpement)
+    .expect("un réglage cohérent");
+    assert_eq!(juge.liste().poser(std::vec::Vec::new(), MAINTENANT_U64), 0);
+    juge
+}
+
+/// **LE `clientDataHash` LIE L'INVITATION ET LA CLEF D'APPAREIL** (0.2.43) :
+/// celui que les vecteurs ont attesté est celui que le serveur recalcule.
+#[test]
+fn les_donnees_client_lient_l_invitation_et_la_clef() {
+    assert_eq!(
+        super::donnees_client(INVITATION, &appareil()).as_slice(),
+        vecteur_apple!("client.bin").as_slice()
+    );
+}
+
+#[test]
+fn une_attestation_app_attest_en_regle_enrole() {
+    for apple in [AttestationMode::Verify, AttestationMode::Require] {
+        let juge = juge_apple(AttestationMode::Off, apple, false);
+        assert_eq!(juge.mode_apple(), apple);
+        assert_eq!(
+            juge.racines_apple(),
+            3,
+            "Apple, et les deux racines d'essai"
+        );
+        assert_eq!(
+            juge.juger(
+                &appareil(),
+                INVITATION,
+                Some(&encode(vecteur_apple!("bon.cbor"))),
+                MAINTENANT
+            ),
+            Ok(Some(Attested::AppAttest))
+        );
+    }
+    // L'environnement de développement, et lui seul, quand il est demandé.
+    let developpement = encode(vecteur_apple!("developpement.cbor"));
+    assert_eq!(
+        juge_apple(AttestationMode::Off, AttestationMode::Verify, true).juger(
+            &appareil(),
+            INVITATION,
+            Some(&developpement),
+            MAINTENANT
+        ),
+        Ok(Some(Attested::AppAttest))
+    );
+    assert_eq!(
+        juge_apple(AttestationMode::Off, AttestationMode::Verify, false).juger(
+            &appareil(),
+            INVITATION,
+            Some(&developpement),
+            MAINTENANT
+        ),
+        Err(Refus::Refusee(ams_attest::Refusal::OtherEnvironment))
+    );
+}
+
+/// **L'ATTESTATION NE VAUT QUE POUR SON INVITATION ET SA CLEF D'APPAREIL.**
+#[test]
+fn une_attestation_app_attest_d_ailleurs_se_refuse() {
+    let juge = juge_apple(AttestationMode::Off, AttestationMode::Require, false);
+    let bon = encode(vecteur_apple!("bon.cbor"));
+    assert_eq!(
+        juge.juger(&appareil(), "une autre invitation", Some(&bon), MAINTENANT),
+        Err(Refus::Refusee(ams_attest::Refusal::OtherChallenge))
+    );
+    let mut autre_clef = appareil();
+    autre_clef[64] ^= 1;
+    assert_eq!(
+        juge.juger(&autre_clef, INVITATION, Some(&bon), MAINTENANT),
+        Err(Refus::Refusee(ams_attest::Refusal::OtherChallenge))
+    );
+    // Sans la racine d'essai, l'objet ne remonte à rien.
+    let apple_seul = Juge::new(AttestationMode::Off, "", &[], None, 7)
+        .expect("cohérent")
+        .avec_apple(
+            AttestationMode::Verify,
+            "TEAM123456.org.airdesktop.mail",
+            false,
+        )
+        .expect("cohérent");
+    assert_eq!(apple_seul.racines_apple(), 1);
+    assert_eq!(
+        apple_seul.juger(&appareil(), INVITATION, Some(&bon), MAINTENANT),
+        Err(Refus::Refusee(ams_attest::Refusal::UnknownRoot))
+    );
+    assert!(
+        Juge::eteint()
+            .avec_apple(AttestationMode::Verify, "", false)
+            .is_err(),
+        "juger sans identifiant laisserait passer n'importe quelle application"
+    );
+}
+
+/// **LA PLATEFORME SE RECONNAÎT AU PREMIER OCTET**, et celle que le serveur ne
+/// juge pas ne prouve rien — ce qui ne compte que si l'un des modes exige une
+/// attestation.
+#[test]
+fn une_plateforme_non_jugee_ne_prouve_rien() {
+    let bon = encode(vecteur_apple!("bon.cbor"));
+    let tee = encode(vecteur!("tee.der"));
+    assert_eq!(
+        juge_apple(AttestationMode::Require, AttestationMode::Off, false).juger(
+            &appareil(),
+            INVITATION,
+            Some(&bon),
+            MAINTENANT
+        ),
+        Err(Refus::NonJugee)
+    );
+    assert_eq!(
+        juge_apple(AttestationMode::Verify, AttestationMode::Off, false).juger(
+            &appareil(),
+            INVITATION,
+            Some(&bon),
+            MAINTENANT
+        ),
+        Ok(None)
+    );
+    assert_eq!(
+        juge_apple(AttestationMode::Off, AttestationMode::Require, false).juger(
+            &appareil(),
+            INVITATION,
+            Some(&tee),
+            MAINTENANT
+        ),
+        Err(Refus::NonJugee)
+    );
+    assert_eq!(
+        juge_apple(AttestationMode::Off, AttestationMode::Verify, false).juger(
+            &appareil(),
+            INVITATION,
+            Some(&tee),
+            MAINTENANT
+        ),
+        Ok(None)
+    );
+    // Les deux jugées : chacune va à son vérificateur.
+    let deux = juge_apple(AttestationMode::Verify, AttestationMode::Verify, false);
+    assert_eq!(
+        deux.juger(&appareil(), INVITATION, Some(&tee), MAINTENANT),
+        Ok(Some(Attested::Tee))
+    );
+    assert_eq!(
+        deux.juger(&appareil(), INVITATION, Some(&bon), MAINTENANT),
+        Ok(Some(Attested::AppAttest))
+    );
+    // Ni DER ni table CBOR : rien ne se lit.
+    for illisible in [&b""[..], &[0x01, 0x02], &[0x80]] {
+        assert_eq!(
+            deux.juger(
+                &appareil(),
+                INVITATION,
+                Some(&encode(illisible)),
+                MAINTENANT
+            ),
+            Err(Refus::Illisible)
+        );
+    }
+    // L'absence, sous App Attest seule : `require` refuse, `verify` laisse
+    // passer.
+    assert_eq!(
+        juge_apple(AttestationMode::Off, AttestationMode::Require, false).juger(
+            &appareil(),
+            INVITATION,
+            None,
+            MAINTENANT
+        ),
+        Err(Refus::Absente)
+    );
+    assert_eq!(
+        juge_apple(AttestationMode::Off, AttestationMode::Verify, false).juger(
+            &appareil(),
+            INVITATION,
+            None,
+            MAINTENANT
+        ),
+        Ok(None)
+    );
+    assert!(!Refus::NonJugee.dire().is_empty());
 }

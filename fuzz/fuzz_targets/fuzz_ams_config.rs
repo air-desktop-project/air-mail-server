@@ -156,6 +156,10 @@ struct Entree {
     android_roots: String,
     android_revocation: String,
     android_revocation_max_days: u16,
+    /// App Attest (0.2.43) : le mode, l'identifiant, l'environnement.
+    apple_mode: u8,
+    apple_app_id: String,
+    apple_development: bool,
     /// Le dossier des rapports TLS, et le drapeau de remise — LIBRES tous les
     /// deux, y compris incohérents entre eux.
     tlsrpt: String,
@@ -231,9 +235,9 @@ fuzz_target!(|entree: Entree| {
         fcm_service_account: entree.fcm_service_account.clone(),
         audit: entree.audit.clone(),
         android_attestation: match entree.android_mode % 3 {
-            0 => ams_config::AndroidAttestation::Off,
-            1 => ams_config::AndroidAttestation::Verify,
-            _ => ams_config::AndroidAttestation::Require,
+            0 => ams_config::AttestationMode::Off,
+            1 => ams_config::AttestationMode::Verify,
+            _ => ams_config::AttestationMode::Require,
         },
         android_package: entree.android_package.clone(),
         android_signers: entree.android_signers.clone(),
@@ -242,6 +246,13 @@ fuzz_target!(|entree: Entree| {
         // Zéro se lit comme le défaut : l'aller-retour s'éprouve sur ce qui
         // se relit à l'identique.
         android_revocation_max_days: entree.android_revocation_max_days.max(1),
+        apple_attestation: match entree.apple_mode % 3 {
+            0 => ams_config::AttestationMode::Off,
+            1 => ams_config::AttestationMode::Verify,
+            _ => ams_config::AttestationMode::Require,
+        },
+        apple_app_id: entree.apple_app_id.clone(),
+        apple_development: entree.apple_development,
         require_fqdn_helo: entree.helo_qualifie,
         require_fqdn_sender: entree.expediteur_qualifie,
         require_fqdn_recipient: entree.destinataire_qualifie,

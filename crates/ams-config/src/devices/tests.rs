@@ -452,7 +452,12 @@ fn un_canal_inconnu_est_refuse() {
 #[test]
 fn l_attestation_d_une_clef_se_relit() {
     use crate::Attested;
-    for attestation in [None, Some(Attested::Tee), Some(Attested::StrongBox)] {
+    for attestation in [
+        None,
+        Some(Attested::Tee),
+        Some(Attested::StrongBox),
+        Some(Attested::AppAttest),
+    ] {
         let mut atteste = appareil("jean", "a1", &CLE_VALIDE);
         atteste.attestation = attestation;
         let relu =
@@ -461,6 +466,7 @@ fn l_attestation_d_une_clef_se_relit() {
     }
     assert_eq!(Attested::Tee.name(), "tee");
     assert_eq!(Attested::StrongBox.name(), "strongbox");
+    assert_eq!(Attested::AppAttest.name(), "app-attest");
 }
 
 /// Une attestation d'une sorte inconnue — écrite par une version future — fait

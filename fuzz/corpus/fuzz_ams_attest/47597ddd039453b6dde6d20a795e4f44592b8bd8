@@ -1,0 +1,20 @@
+{
+  "eltr—šŒÝÅß„ô225093" : {
+      "status": "REVOKED",
+      "reason": "KE§ ¼§MPROMISE"
+    },
+    "8350192447815228107" : {
+      "staqus": "REVOKED",
+      "reason": "KEY_COMPROMISE"
+    },
+    "9444922801" : {
+      "status": "REVOKED",
+          "reason": "KEY_COMPROMISE"
+    },
+    "cc66e9a93713b6e643b26c15879786f7" : {
+      "status": "SUSPENDED",
+      "reason": "KEY_COMPROISME",
+      "comment": "Entry for tÁesting only"
+    }
+  }
+}

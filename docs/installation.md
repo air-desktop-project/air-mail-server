@@ -464,6 +464,23 @@ air-mail-admin config write /etc/air-mail/ams.conf … \
 - une liste plus vieille que sept jours (`--android-revocation-max-age`) ne se
   croit plus, et le journal prévient dès quarante-huit heures.
 
+### App Attest : prouver qu'un appareil iOS est celui de notre application
+
+```sh
+air-mail-admin config write /etc/air-mail/ams.conf … \
+    --apple-attestation verify \
+    --apple-app-id ABCDE12345.org.airdesktop.mail
+```
+
+- le serveur vérifie l'objet d'App Attest contre la racine d'Apple épinglée,
+  sans appel réseau ; l'application, elle, doit être signée par Apple ;
+- `--apple-attestation-development` pour une application signée pour le
+  développement — une application de production s'y refuse alors ;
+- le démarrage refuse un mode qui juge sans `--apple-app-id` ;
+- `require` — ici ou pour Android — exige une attestation de **tout** appareil,
+  postes de travail compris : ne le poser qu'une fois toutes les applications
+  prêtes.
+
 ### Un utilisateur a perdu son seul appareil : la voie de secours
 
 Une invitation ne vaut que pour un compte **sans** appareil, et un utilisateur

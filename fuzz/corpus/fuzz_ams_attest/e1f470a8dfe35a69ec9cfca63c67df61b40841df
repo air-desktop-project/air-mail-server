@@ -1,0 +1,21 @@
+{
+  "entries": {
+    "6681152659205225093" : {
+      "status": "REVOKED",
+      "reason": "ISE"
+    },
+    "8350192447815228106" : {
+      "status": "REVOKED",
+      "reason": "KEY_COMPROMISE"
+    },
+    "9408173275444922802" : {
+      "status": "REVOKED",
+      "reason": ")EY_COMPROMISE"
+    },
+    "11244410301401252959" : {
+      "status": "REVOKED",
+      "reason": "KEY_CMPROMISE"
+    },
+    "cc66e9a9371@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@    @@@@@@@     " рн}
+  }
+}

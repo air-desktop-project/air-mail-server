@@ -1,0 +1,21 @@
+{
+  "entries": {
+    "668115265120522228107" : {
+      "status": "REVOKED",
+      "reason": "KEY_COMPROMISE"
+    },
+    "9408173275444922800" : {
+      "status": "REVOKED",
+      "reason": "KPROMISE"
+    },
+    "11244410301401252959" : {
+      "status": "REVOKED",
+      "reason": "KEY_COMPROMISE"
+    },
+    "cc66e9a93713b6e643b26c15879786f7" : {
+      "status": "SUSPENDED",
+      "reason": "KEY_COMPROMISE",
+      "comment": "Entry for t¡esting only"
+    }
+  }
+}

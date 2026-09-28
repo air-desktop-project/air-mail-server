@@ -2362,6 +2362,38 @@ curl -sS -o /var/lib/air-mail/revocation-android.json \
 air-mail-admin config write … --android-revocation-list /var/lib/air-mail/revocation-android.json
 ```
 
+### Exiger App Attest des appareils iOS
+
+```sh
+./target/release/air-mail-admin config write air-mail.conf \
+    --domain mail.example.com --hosted example.com \
+    --apple-attestation verify \
+    --apple-app-id ABCDE12345.org.airdesktop.mail
+```
+
+Un appareil iOS prouve par **App Attest** (0.2.43) que sa demande vient de
+**notre application**, telle qu'Apple l'a signée, sur un **appareil Apple
+authentique**. Le serveur vérifie l'objet d'attestation **lui-même**
+(`ams-attest`), contre la racine d'App Attest d'Apple épinglée dans le code —
+sans appel réseau. L'application, elle, doit être signée par Apple (App Store,
+TestFlight, distribution d'entreprise ou de développement) : App Attest ne
+fonctionne pas autrement.
+
+- `--apple-app-id` est `TeamID.bundleID` : l'identifiant d'équipe (dix
+  caractères) et l'identifiant de paquet de l'application.
+- `--apple-attestation-development` admet les applications signées pour le
+  développement — **et elles seules** : une application de production s'y
+  refuse, et inversement.
+- L'attestation arrive dans le même champ que celle d'Android ; le serveur
+  reconnaît la plateforme. Le `clientDataHash` est **SHA-256(invitation ‖ 0x00 ‖
+  clef d'appareil)** : la clef d'App Attest n'est pas la clef d'appareil, et ce
+  condensat les lie.
+- Les modes sont ceux d'Android. `require`, sur l'une ou l'autre plateforme,
+  exige une attestation **de chaque appareil** — les postes de travail compris —
+  et une attestation d'une plateforme que le serveur ne juge pas ne vaut rien.
+  `GET /v1/me/devices` dit ensuite `"attestation": "app-attest"`.
+- Les racines en plus (`--android-attestation-roots`) valent aussi pour elle.
+
 ### Refuser un `HELO` non qualifié
 
 ```sh

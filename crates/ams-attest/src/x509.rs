@@ -46,6 +46,9 @@ const CLE_RSA: &[u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01];
 
 /// L'extension d'attestation d'Android (1.3.6.1.4.1.11129.2.1.17).
 const ATTESTATION: &[u8] = &[0x2B, 0x06, 0x01, 0x04, 0x01, 0xD6, 0x79, 0x02, 0x01, 0x11];
+/// L'extension d'App Attest d'Apple (1.2.840.113635.100.8.2), qui porte le
+/// nonce.
+const APPLE: &[u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x63, 0x64, 0x08, 0x02];
 
 /// Un algorithme de signature qu'on sait vérifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,8 +94,10 @@ pub(crate) struct Certificat<'a> {
     pub(crate) debut: i64,
     /// La fin de validité, en secondes depuis l'époque.
     pub(crate) fin: i64,
-    /// Le contenu de l'extension d'attestation, s'il y en a une.
+    /// Le contenu de l'extension d'attestation d'Android, s'il y en a une.
     pub(crate) attestation: Option<&'a [u8]>,
+    /// Le contenu de l'extension d'App Attest d'Apple, s'il y en a une.
+    pub(crate) apple: Option<&'a [u8]>,
     /// Le numéro de série, s'il tient sur seize octets — ce que la liste de
     /// révocation nomme. Au-delà, aucune entrée ne peut le désigner.
     pub(crate) serie: Option<u128>,
@@ -139,9 +144,9 @@ pub(crate) fn lire(certificat: &[u8]) -> Result<Certificat<'_>, Refusal> {
     // [1] et [2], les identifiants uniques, facultatifs et sans intérêt ici.
     let _ = tbs_champs.optionnel(1)?;
     let _ = tbs_champs.optionnel(2)?;
-    let attestation = match tbs_champs.optionnel(3)? {
-        Some(extensions) => attestation(extensions.contenu)?,
-        None => None,
+    let (attestation, apple) = match tbs_champs.optionnel(3)? {
+        Some(extensions) => attestations(extensions.contenu)?,
+        None => (None, None),
     };
     if !tbs_champs.fini() {
         return Err(Refusal::Malformed);
@@ -155,6 +160,7 @@ pub(crate) fn lire(certificat: &[u8]) -> Result<Certificat<'_>, Refusal> {
         debut,
         fin,
         attestation,
+        apple,
         serie,
     })
 }
@@ -218,17 +224,22 @@ fn cle<'a>(contenu: &'a [u8], brut: &'a [u8]) -> Result<Cle<'a>, Refusal> {
     }
 }
 
-/// Cherche l'extension d'attestation parmi les extensions.
+/// Les deux extensions d'attestation : celle d'Android, celle d'App Attest.
+type Extensions<'a> = (Option<&'a [u8]>, Option<&'a [u8]>);
+
+/// Cherche les extensions d'attestation parmi les extensions : celle d'Android,
+/// et celle d'App Attest.
 ///
-/// **UNE SEULE**, et c'est vérifié : deux extensions d'attestation dans un même
-/// certificat laisseraient choisir celle qu'on lit.
-fn attestation(contenu: &[u8]) -> Result<Option<&[u8]>, Refusal> {
+/// **UNE SEULE DE CHAQUE**, et c'est vérifié : deux extensions d'attestation
+/// dans un même certificat laisseraient choisir celle qu'on lit.
+fn attestations(contenu: &[u8]) -> Result<Extensions<'_>, Refusal> {
     let mut exterieur = Lecteur::new(contenu);
     let mut liste = Lecteur::new(exterieur.attendre(SEQUENCE)?.contenu);
     if !exterieur.fini() {
         return Err(Refusal::Malformed);
     }
     let mut trouvee = None;
+    let mut apple = None;
     while !liste.fini() {
         let mut extension = Lecteur::new(liste.attendre(SEQUENCE)?.contenu);
         let oid = extension.attendre(OID)?.contenu;
@@ -239,14 +250,31 @@ fn attestation(contenu: &[u8]) -> Result<Option<&[u8]>, Refusal> {
         if !valeur.est(OCTETS) || !extension.fini() {
             return Err(Refusal::Malformed);
         }
-        if oid == ATTESTATION {
-            if trouvee.is_some() {
-                return Err(Refusal::Malformed);
-            }
-            trouvee = Some(valeur.contenu);
+        let place = match oid {
+            ATTESTATION => &mut trouvee,
+            APPLE => &mut apple,
+            _ => continue,
+        };
+        if place.is_some() {
+            return Err(Refusal::Malformed);
         }
+        *place = Some(valeur.contenu);
     }
-    Ok(trouvee)
+    Ok((trouvee, apple))
+}
+
+/// La clef d'une `SubjectPublicKeyInfo` entière — une racine épinglée.
+///
+/// # Errors
+///
+/// Comme la lecture d'une clef de certificat.
+pub(crate) fn cle_de_spki(spki: &[u8]) -> Result<Cle<'_>, Refusal> {
+    let mut exterieur = Lecteur::new(spki);
+    let lu = exterieur.attendre(SEQUENCE)?;
+    if !exterieur.fini() {
+        return Err(Refusal::Malformed);
+    }
+    cle(lu.contenu, lu.brut)
 }
 
 /// Un instant `UTCTime` ou `GeneralizedTime`, en secondes depuis l'époque.

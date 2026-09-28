@@ -2,7 +2,8 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Juger l'attestation de clef d'un appareil Android à l'enrôlement (0.2.39).
+//! Juger l'attestation de clef d'un appareil à l'enrôlement : Android
+//! (0.2.39) et App Attest d'Apple (0.2.43).
 //!
 //! La vérification elle-même vit dans `ams-attest`, sans entrée-sortie. Ce
 //! module tient ce qui vient de la configuration — le mode, le paquet, les
@@ -17,12 +18,27 @@
 //! l'application le calcule avant de créer sa clef
 //! (`setAttestationChallenge`), et une attestation produite pour une autre
 //! invitation ne vaut pas pour celle-ci.
+//!
+//! # APP ATTEST : LE DÉFI LIE AUSSI LA CLEF D'APPAREIL
+//!
+//! La clef qu'App Attest atteste n'est pas la clef d'appareil : elle ne sait
+//! signer que des assertions. L'application iOS passe donc à `attestKey` le
+//! `clientDataHash` = SHA-256(défi ‖ 0x00 ‖ clef d'appareil, 65 octets) : une
+//! attestation obtenue pour une autre clef d'appareil — ou une autre
+//! invitation — ne vaut pas pour celle-ci. L'octet nul sépare le texte de la
+//! clef, que le texte ne peut contenir.
+//!
+//! # UN SEUL CHAMP, DEUX PLATEFORMES
+//!
+//! L'attestation arrive dans le même champ. Décodée, une chaîne Android est
+//! une `SEQUENCE` DER (`0x30`) ; un objet App Attest, une table CBOR
+//! (`0xA0` à `0xBF`). Rien d'autre ne se lit.
 
 use std::string::String;
 use std::sync::{Arc, PoisonError, RwLock};
 use std::vec::Vec;
 
-use ams_config::{AndroidAttestation, Attested};
+use ams_config::{AttestationMode, Attested};
 
 /// Ce qu'une chaîne d'attestation peut peser, décodée.
 ///
@@ -41,8 +57,11 @@ pub enum Refus {
     /// La liste est plus vieille que l'âge admis (0.2.42) : elle ne dit plus
     /// ce que Google a révoqué depuis.
     ListePerimee,
-    /// Elle n'est pas du base64url, ou pèse trop.
+    /// Elle n'est pas du base64url, pèse trop, ou n'est d'aucune plateforme.
     Illisible,
+    /// Elle est d'une plateforme dont le serveur ne juge pas l'attestation,
+    /// et il en exige une.
+    NonJugee,
     /// La politique la refuse — et dit pourquoi.
     Refusee(ams_attest::Refusal),
 }
@@ -56,6 +75,9 @@ impl Refus {
             Self::SansListe => "aucune liste de révocation n'est encore chargée",
             Self::ListePerimee => "la liste de révocation est trop vieille",
             Self::Illisible => "attestation illisible",
+            Self::NonJugee => {
+                "attestation d'une plateforme que le serveur ne juge pas, et il en exige une"
+            }
             Self::Refusee(raison) => raison.describe(),
         }
     }
@@ -64,7 +86,8 @@ impl Refus {
 /// Le juge : ce que la configuration exige d'une attestation.
 #[derive(Debug, Clone)]
 pub struct Juge {
-    mode: AndroidAttestation,
+    /// Le mode Android.
+    mode: AttestationMode,
     paquet: Vec<u8>,
     signataires: Vec<[u8; 32]>,
     /// Les racines admises : celles de Google, puis celles de la
@@ -74,6 +97,33 @@ pub struct Juge {
     liste: Arc<Liste>,
     /// L'âge, en secondes, au-delà duquel la liste ne se croit plus.
     age_max: u64,
+    /// Les racines en plus, lues de la configuration : elles valent pour les
+    /// deux plateformes.
+    en_plus: Vec<Vec<u8>>,
+    /// App Attest.
+    apple: Apple,
+}
+
+/// Ce que la configuration exige d'App Attest.
+#[derive(Debug, Clone)]
+struct Apple {
+    mode: AttestationMode,
+    /// `TeamID.bundleID`.
+    application: Vec<u8>,
+    environnement: ams_attest::AppleEnvironment,
+    /// La racine d'Apple, puis celles de la configuration.
+    racines: Vec<Vec<u8>>,
+}
+
+impl Apple {
+    fn eteint() -> Self {
+        Self {
+            mode: AttestationMode::Off,
+            application: Vec::new(),
+            environnement: ams_attest::AppleEnvironment::Production,
+            racines: Vec::new(),
+        }
+    }
 }
 
 /// La liste de révocation courante — les numéros de série que Google nomme,
@@ -139,12 +189,14 @@ impl Juge {
     #[must_use]
     pub fn eteint() -> Self {
         Self {
-            mode: AndroidAttestation::Off,
+            mode: AttestationMode::Off,
             paquet: Vec::new(),
             signataires: Vec::new(),
             racines: Vec::new(),
             liste: Arc::new(Liste::default()),
             age_max: 0,
+            en_plus: Vec::new(),
+            apple: Apple::eteint(),
         }
     }
 
@@ -162,13 +214,13 @@ impl Juge {
     /// Un fichier de racines qui ne contient aucune clef lisible, ou un mode
     /// qui juge sans paquet ni empreinte.
     pub fn new(
-        mode: AndroidAttestation,
+        mode: AttestationMode,
         paquet: &str,
         signataires: &[[u8; 32]],
         pem_des_racines: Option<&[u8]>,
         age_max_jours: u16,
     ) -> Result<Self, String> {
-        if mode != AndroidAttestation::Off && (paquet.is_empty() || signataires.is_empty()) {
+        if mode != AttestationMode::Off && (paquet.is_empty() || signataires.is_empty()) {
             return Err(String::from(
                 "l'attestation Android est jugée sans paquet ni empreinte de signature : \
                  n'importe quelle application passerait",
@@ -178,6 +230,7 @@ impl Juge {
             .iter()
             .map(|racine| racine.to_vec())
             .collect();
+        let mut en_plus = Vec::new();
         if let Some(pem) = pem_des_racines {
             let lues = clefs_publiques(pem);
             if lues.is_empty() {
@@ -186,7 +239,8 @@ impl Juge {
                      (`-----BEGIN PUBLIC KEY-----`)",
                 ));
             }
-            racines.extend(lues);
+            racines.extend(lues.iter().cloned());
+            en_plus = lues;
         }
         Ok(Self {
             mode,
@@ -195,13 +249,63 @@ impl Juge {
             racines,
             liste: Arc::new(Liste::default()),
             age_max: u64::from(age_max_jours).saturating_mul(86_400),
+            en_plus,
+            apple: Apple::eteint(),
         })
     }
 
-    /// Le mode.
+    /// Ce juge, qui juge aussi App Attest (0.2.43) — sous la racine d'Apple et
+    /// les racines en plus de [`Self::new`].
+    ///
+    /// # Errors
+    ///
+    /// Un mode qui juge sans identifiant d'application.
+    pub fn avec_apple(
+        mut self,
+        mode: AttestationMode,
+        application: &str,
+        developpement: bool,
+    ) -> Result<Self, String> {
+        if mode != AttestationMode::Off && application.is_empty() {
+            return Err(String::from(
+                "App Attest est jugée sans identifiant d'application : n'importe quelle \
+                 application passerait",
+            ));
+        }
+        let mut racines: Vec<Vec<u8>> = ams_attest::APPLE_ROOTS
+            .iter()
+            .map(|racine| racine.to_vec())
+            .collect();
+        racines.extend(self.en_plus.iter().cloned());
+        self.apple = Apple {
+            mode,
+            application: application.as_bytes().to_vec(),
+            environnement: if developpement {
+                ams_attest::AppleEnvironment::Development
+            } else {
+                ams_attest::AppleEnvironment::Production
+            },
+            racines,
+        };
+        Ok(self)
+    }
+
+    /// Le mode Android.
     #[must_use]
-    pub const fn mode(&self) -> AndroidAttestation {
+    pub const fn mode(&self) -> AttestationMode {
         self.mode
+    }
+
+    /// Le mode d'App Attest.
+    #[must_use]
+    pub const fn mode_apple(&self) -> AttestationMode {
+        self.apple.mode
+    }
+
+    /// Combien de racines sont admises pour App Attest.
+    #[must_use]
+    pub fn racines_apple(&self) -> usize {
+        self.apple.racines.len()
     }
 
     /// Combien de racines sont admises.
@@ -212,12 +316,14 @@ impl Juge {
 
     /// Juge l'attestation qu'un appareil présente avec sa clef.
     ///
-    /// - `defi` : le texte scellé dont le SHA-256 est le défi — l'invitation,
-    ///   ou le défi d'appairage ;
-    /// - `attestation` : la chaîne en base64url, ou rien.
+    /// - `defi` : le texte scellé dont est tiré le défi — l'invitation, ou le
+    ///   défi d'appairage ;
+    /// - `attestation` : la chaîne Android ou l'objet App Attest, en
+    ///   base64url, ou rien.
     ///
     /// Rend ce que l'attestation a établi, ou `None` quand il n'y en a pas et
-    /// que le mode le permet — ou quand le mode n'en lit aucune.
+    /// qu'aucun mode ne l'exige — ou quand le mode de sa plateforme n'en lit
+    /// aucune.
     ///
     /// # Errors
     ///
@@ -229,11 +335,51 @@ impl Juge {
         attestation: Option<&str>,
         maintenant: i64,
     ) -> Result<Option<Attested>, Refus> {
-        let encodee = match (self.mode, attestation) {
-            (AndroidAttestation::Off, _) | (AndroidAttestation::Verify, None) => return Ok(None),
-            (AndroidAttestation::Require, None) => return Err(Refus::Absente),
-            (_, Some(encodee)) => encodee,
+        let exigee =
+            self.mode == AttestationMode::Require || self.apple.mode == AttestationMode::Require;
+        let lue = self.mode != AttestationMode::Off || self.apple.mode != AttestationMode::Off;
+        let encodee = match (lue, attestation) {
+            (false, _) => return Ok(None),
+            (true, None) if exigee => return Err(Refus::Absente),
+            (true, None) => return Ok(None),
+            (true, Some(encodee)) => encodee,
         };
+        let mut place = std::vec![0_u8; CHAINE_OCTETS_MAX];
+        let decodee = ams_api::decode_base64url(encodee.as_bytes(), &mut place)
+            .map_err(|_| Refus::Illisible)?;
+        let (mode, attestee) = match decodee.first() {
+            Some(0x30) => (
+                self.mode,
+                self.juger_android(decodee, cle, defi, maintenant),
+            ),
+            Some(0xA0..=0xBF) => (
+                self.apple.mode,
+                self.juger_apple(decodee, cle, defi, maintenant),
+            ),
+            _ => return Err(Refus::Illisible),
+        };
+        // **UNE PLATEFORME ÉTEINTE NE LIT PAS SON ATTESTATION** — mais si l'un
+        // des modes l'exige, ne rien lire ne peut pas valoir preuve.
+        if mode == AttestationMode::Off {
+            return if exigee {
+                Err(Refus::NonJugee)
+            } else {
+                Ok(None)
+            };
+        }
+        attestee.map(Some)
+    }
+
+    fn juger_android(
+        &self,
+        chaine: &[u8],
+        cle: &[u8; ams_attest::DEVICE_KEY_OCTETS],
+        defi: &str,
+        maintenant: i64,
+    ) -> Result<Attested, Refus> {
+        if self.mode == AttestationMode::Off {
+            return Err(Refus::NonJugee);
+        }
         let courante = self.liste.courante().ok_or(Refus::SansListe)?;
         // **UNE LISTE TROP VIEILLE NE SE CROIT PLUS** (0.2.42) : elle ne dit
         // rien de ce que Google a révoqué depuis. Refuser, c'est retarder un
@@ -245,9 +391,6 @@ impl Juge {
             return Err(Refus::ListePerimee);
         }
         let revoquees = courante.series;
-        let mut place = std::vec![0_u8; CHAINE_OCTETS_MAX];
-        let chaine = ams_api::decode_base64url(encodee.as_bytes(), &mut place)
-            .map_err(|_| Refus::Illisible)?;
         let racines: Vec<&[u8]> = self.racines.iter().map(Vec::as_slice).collect();
         let politique = ams_attest::Policy {
             roots: &racines,
@@ -258,11 +401,44 @@ impl Juge {
         let condensat = ams_sasl::sha256(defi.as_bytes());
         let verdict = ams_attest::verify(chaine, cle, &condensat, &politique, maintenant)
             .map_err(Refus::Refusee)?;
-        Ok(Some(match verdict.level {
+        Ok(match verdict.level {
             ams_attest::SecurityLevel::TrustedEnvironment => Attested::Tee,
             ams_attest::SecurityLevel::StrongBox => Attested::StrongBox,
-        }))
+        })
     }
+
+    fn juger_apple(
+        &self,
+        objet: &[u8],
+        cle: &[u8; ams_attest::DEVICE_KEY_OCTETS],
+        defi: &str,
+        maintenant: i64,
+    ) -> Result<Attested, Refus> {
+        if self.apple.mode == AttestationMode::Off {
+            return Err(Refus::NonJugee);
+        }
+        let racines: Vec<&[u8]> = self.apple.racines.iter().map(Vec::as_slice).collect();
+        let politique = ams_attest::ApplePolicy {
+            roots: &racines,
+            app_id: &self.apple.application,
+            environment: self.apple.environnement,
+        };
+        let condensat = donnees_client(defi, cle);
+        ams_attest::verify_app_attest(objet, &condensat, &politique, maintenant)
+            .map_err(Refus::Refusee)?;
+        Ok(Attested::AppAttest)
+    }
+}
+
+/// Le `clientDataHash` qu'une application iOS passe à `attestKey` :
+/// SHA-256(défi ‖ 0x00 ‖ clef d'appareil).
+#[must_use]
+pub fn donnees_client(defi: &str, cle: &[u8; ams_attest::DEVICE_KEY_OCTETS]) -> [u8; 32] {
+    let mut tout = Vec::with_capacity(defi.len().saturating_add(1).saturating_add(cle.len()));
+    tout.extend_from_slice(defi.as_bytes());
+    tout.push(0);
+    tout.extend_from_slice(cle);
+    ams_sasl::sha256(&tout)
 }
 
 /// Les clefs publiques d'un fichier PEM (`-----BEGIN PUBLIC KEY-----`), en

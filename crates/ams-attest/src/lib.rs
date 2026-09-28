@@ -43,10 +43,14 @@
 #[cfg(test)]
 extern crate std;
 
+mod apple;
+mod cbor;
 mod der;
 mod description;
 mod status;
 mod x509;
+
+pub use apple::{APPLE_ROOTS, AppAttestation, AppleEnvironment, ApplePolicy, verify_app_attest};
 
 pub use status::{SERIAL_HEX_MAX, read_status_list};
 
@@ -163,6 +167,9 @@ pub enum Refusal {
     OtherSigner,
     /// Un certificat de la chaîne est révoqué, ou suspendu, par Google.
     Revoked,
+    /// App Attest : la clef a été attestée dans un autre environnement —
+    /// développement au lieu de production, ou l'inverse.
+    OtherEnvironment,
 }
 
 impl Refusal {
@@ -186,6 +193,7 @@ impl Refusal {
             Self::OtherApplication => "autre application",
             Self::OtherSigner => "application signée par un autre certificat",
             Self::Revoked => "une clef de la chaîne est révoquée par Google",
+            Self::OtherEnvironment => "autre environnement App Attest",
         }
     }
 }

@@ -110,7 +110,7 @@ pub struct Options {
     /// Le répertoire du journal d'audit. Vide : rien ne s'écrit.
     pub audit: Option<PathBuf>,
     /// L'attestation de clef d'Android : ignorée, jugée si présente, exigée.
-    pub android_attestation: ams_config::AndroidAttestation,
+    pub android_attestation: ams_config::AttestationMode,
     /// Le nom de paquet de l'application Android.
     pub android_package: Option<String>,
     /// Les empreintes SHA-256 admises du certificat qui signe l'application.
@@ -121,6 +121,12 @@ pub struct Options {
     pub android_revocation: Option<PathBuf>,
     /// L'âge, en jours, au-delà duquel la liste ne se croit plus.
     pub android_revocation_max_days: u16,
+    /// App Attest d'Apple : ignorée, jugée si présente, exigée.
+    pub apple_attestation: ams_config::AttestationMode,
+    /// L'identifiant de l'application iOS : `TeamID.bundleID`.
+    pub apple_app_id: Option<String>,
+    /// L'environnement de développement d'Apple, plutôt que la production.
+    pub apple_development: bool,
     /// Où écouter en POP3. Vide : POP3 n'est pas servi.
     pub listen_pop3: Option<SocketAddr>,
     /// Les écoutes POP3, chacune avec son mode TLS.
@@ -294,12 +300,15 @@ impl Default for Options {
             apns_sandbox: false,
             fcm_service_account: None,
             audit: None,
-            android_attestation: ams_config::AndroidAttestation::Off,
+            android_attestation: ams_config::AttestationMode::Off,
             android_package: None,
             android_signers: Vec::new(),
             android_roots: None,
             android_revocation: None,
             android_revocation_max_days: ams_config::ANDROID_REVOCATION_MAX_DAYS,
+            apple_attestation: ams_config::AttestationMode::Off,
+            apple_app_id: None,
+            apple_development: false,
             // PAS DE POP3 PAR DÉFAUT : un port ouvert qu'on n'a pas demandé est
             // une surface de plus, et celui-ci ne sert personne sans certificat.
             listen_pop3: None,
@@ -507,6 +516,9 @@ impl Options {
             android_roots: chemin(self.android_roots.as_ref()),
             android_revocation: chemin(self.android_revocation.as_ref()),
             android_revocation_max_days: self.android_revocation_max_days,
+            apple_attestation: self.apple_attestation,
+            apple_app_id: self.apple_app_id.clone().unwrap_or_default(),
+            apple_development: self.apple_development,
             tlsrpt: ams_config::Tlsrpt {
                 directory: chemin(self.tlsrpt_dir.as_ref()),
                 send: self.tlsrpt_send,
@@ -731,6 +743,18 @@ OPTIONS DE `config write`
                         dehors. Tant qu'aucune n'est chargée, rien ne passe ;
                         plus vieille que `--android-revocation-max-age` jours
                         (7 par défaut, 90 au plus), non plus.
+    --apple-attestation off|verify|require
+    --apple-app-id <TeamID.bundleID> [--apple-attestation-development]
+                        App Attest, pour les appareils iOS : l'objet que rend
+                        `DCAppAttestService`, vérifié ICI contre la racine
+                        d'Apple. Les mêmes modes qu'Android ; `require` exige
+                        une attestation de chaque appareil, de l'une ou de
+                        l'autre plateforme. L'identifiant d'application est
+                        exigé dès qu'elle est jugée ; les racines en plus
+                        (`--android-attestation-roots`) valent aussi pour elle.
+                        `--apple-attestation-development` admet les
+                        applications signées pour le développement, et elles
+                        seules.
     --audit <répertoire>
                         le journal d'audit : un fichier par compte, où
                         s'ajoute ce qui touche à sa sécurité (sessions, refus,
@@ -1416,18 +1440,23 @@ where
             }
             "--audit" => options.audit = Some(PathBuf::from(valeur()?)),
             "--android-attestation" => {
-                options.android_attestation = match valeur()?.as_str() {
-                    "off" => ams_config::AndroidAttestation::Off,
-                    "verify" => ams_config::AndroidAttestation::Verify,
-                    "require" => ams_config::AndroidAttestation::Require,
-                    autre => {
-                        return Err(ArgError::new(format!(
-                            "`--android-attestation` attend `off`, `verify` ou `require`, pas \
-                             `{autre}`"
-                        )));
-                    }
-                };
+                options.android_attestation = mode_d_attestation(argument, &valeur()?)?;
             }
+            "--apple-attestation" => {
+                options.apple_attestation = mode_d_attestation(argument, &valeur()?)?;
+            }
+            "--apple-app-id" => {
+                let nom = valeur()?;
+                if !identifiant_apple(&nom) {
+                    return Err(ArgError::new(format!(
+                        "`{nom}` n'est pas un identifiant d'application Apple : `TeamID.bundleID`, \
+                         dix lettres majuscules ou chiffres, un point, puis l'identifiant de \
+                         paquet"
+                    )));
+                }
+                options.apple_app_id = Some(nom);
+            }
+            "--apple-attestation-development" => options.apple_development = true,
             "--android-package" => {
                 let nom = valeur()?;
                 if !paquet_android(&nom) {
@@ -1805,12 +1834,20 @@ where
     // son paquet, et le certificat qui la signe. Sans eux, toute application
     // installée sur un téléphone intègre passerait — celle d'un attaquant
     // comprise.
-    if options.android_attestation != ams_config::AndroidAttestation::Off
+    if options.android_attestation != ams_config::AttestationMode::Off
         && (options.android_package.is_none() || options.android_signers.is_empty())
     {
         return Err(ArgError::new(
             "`--android-attestation verify|require` demande `--android-package` et au moins un \
              `--android-signer` : sans eux, n'importe quelle application passerait",
+        ));
+    }
+    if options.apple_attestation != ams_config::AttestationMode::Off
+        && options.apple_app_id.is_none()
+    {
+        return Err(ArgError::new(
+            "`--apple-attestation verify|require` demande `--apple-app-id` : sans lui, \
+             n'importe quelle application passerait",
         ));
     }
     // UNE ROTATION QUI NE ROTATIONNE RIEN. Sans API, aucun jeton n'est scellé ni
@@ -1970,6 +2007,38 @@ fn valider_les_controles_dns(options: &Options) -> Result<(), ArgError> {
         ));
     }
     Ok(())
+}
+
+/// `off`, `verify` ou `require`, pour cette option.
+fn mode_d_attestation(option: &str, brute: &str) -> Result<ams_config::AttestationMode, ArgError> {
+    match brute {
+        "off" => Ok(ams_config::AttestationMode::Off),
+        "verify" => Ok(ams_config::AttestationMode::Verify),
+        "require" => Ok(ams_config::AttestationMode::Require),
+        autre => Err(ArgError::new(format!(
+            "`{option}` attend `off`, `verify` ou `require`, pas `{autre}`"
+        ))),
+    }
+}
+
+/// Un identifiant d'application Apple : l'identifiant d'équipe — dix lettres
+/// majuscules ou chiffres —, un point, puis un identifiant de paquet d'au moins
+/// deux segments de lettres ASCII, chiffres et `-`.
+fn identifiant_apple(nom: &str) -> bool {
+    let Some((equipe, paquet)) = nom.split_once('.') else {
+        return false;
+    };
+    equipe.len() == 10
+        && equipe
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+        && paquet.split('.').count() >= 2
+        && paquet.split('.').all(|segment| {
+            !segment.is_empty()
+                && segment
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-')
+        })
 }
 
 /// Un nom de paquet Android : au moins deux segments, séparés par des points,
@@ -2460,6 +2529,42 @@ mod tests {
                 &["--android-attestation", "parfois"],
                 "`off`, `verify` ou `require`",
             ),
+            (
+                &["--apple-attestation", "toujours"],
+                "`--apple-attestation` attend `off`, `verify` ou `require`",
+            ),
+            (
+                &["--apple-app-id", "org.airdesktop.mail"],
+                "n'est pas un identifiant",
+            ),
+            (
+                &["--apple-app-id", "TEAM12345.org.mail"],
+                "n'est pas un identifiant",
+            ),
+            (
+                &["--apple-app-id", "team123456.org.mail"],
+                "n'est pas un identifiant",
+            ),
+            (
+                &["--apple-app-id", "TEAM123456.mail"],
+                "n'est pas un identifiant",
+            ),
+            (
+                &["--apple-app-id", "TEAM123456.org..mail"],
+                "n'est pas un identifiant",
+            ),
+            (
+                &["--apple-app-id", "TEAM123456.org.m_ail"],
+                "n'est pas un identifiant",
+            ),
+            (
+                &["--apple-app-id", "TEAM123456"],
+                "n'est pas un identifiant",
+            ),
+            (
+                &["--apple-attestation", "verify"],
+                "demande `--apple-app-id`",
+            ),
             (&["--android-revocation-max-age", "0"], "aucun jour"),
             (&["--android-revocation-max-age", "91"], "90 jours au plus"),
             (
@@ -2773,7 +2878,9 @@ mod tests {
     /// peut donc pas dériver en silence.
     #[test]
     fn les_quarante_quatre_options_a_valeur_refusent_de_se_taire() {
-        const A_VALEUR: [&str; 52] = [
+        const A_VALEUR: [&str; 54] = [
+            "--apple-attestation",
+            "--apple-app-id",
             "--android-revocation-max-age",
             "--android-revocation-list",
             "--android-attestation",
@@ -4056,7 +4163,7 @@ mod tests {
         let configuration = ecrire(arguments).en_configuration();
         assert_eq!(
             configuration.android_attestation,
-            ams_config::AndroidAttestation::Require
+            ams_config::AttestationMode::Require
         );
         assert_eq!(configuration.android_package, "org.airdesktop.mail_2");
         let premiere: Vec<u8> = (1..=32).collect();
@@ -4074,8 +4181,8 @@ mod tests {
         assert_eq!(configuration.android_revocation, "/x/liste.json");
         assert_eq!(configuration.android_revocation_max_days, 3);
         for (mode, attendu) in [
-            ("off", ams_config::AndroidAttestation::Off),
-            ("verify", ams_config::AndroidAttestation::Verify),
+            ("off", ams_config::AttestationMode::Off),
+            ("verify", ams_config::AttestationMode::Verify),
         ] {
             let arguments: &[&str] = &[
                 "--android-attestation",
@@ -4094,9 +4201,32 @@ mod tests {
         let configuration = ecrire(sans).en_configuration();
         assert_eq!(
             configuration.android_attestation,
-            ams_config::AndroidAttestation::Off
+            ams_config::AttestationMode::Off
         );
         assert!(configuration.android_package.is_empty() && configuration.android_roots.is_empty());
+        assert_eq!(
+            configuration.apple_attestation,
+            ams_config::AttestationMode::Off
+        );
+        assert!(configuration.apple_app_id.is_empty() && !configuration.apple_development);
+        // App Attest : le mode, l'identifiant, l'environnement.
+        let arguments: &[&str] = &[
+            "--apple-attestation",
+            "require",
+            "--apple-app-id",
+            "TEAM123456.org.air-desktop.mail",
+            "--apple-attestation-development",
+        ];
+        let configuration = ecrire(arguments).en_configuration();
+        assert_eq!(
+            configuration.apple_attestation,
+            ams_config::AttestationMode::Require
+        );
+        assert_eq!(
+            configuration.apple_app_id,
+            "TEAM123456.org.air-desktop.mail"
+        );
+        assert!(configuration.apple_development);
     }
 
     #[test]

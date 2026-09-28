@@ -1,0 +1,78 @@
+{ "entries": {
+    "6681152659205225093" : {
+      "status": "REVOKED",
+      "reason": "KEY_COMPROMISE"
+    },
+    "8350192447815228107" : {
+          },
+    "cc66e9a93713b6e643b26c15879786f7" : {
+      "status": "SUSPENDED",
+      "reason": "KEY_COMPROMISE",
+      "comment": "Entry for testing only"
+    }
+  },
+
+
+  "entries": {
+    "6681152659205225093" : {
+      "status": "REVOKED",
+      "re": "KEY_COMPROMISE"
+    },
+    "8350192447815228107" : {
+          },
+    "cc66e9a93713b6e643b26c15879786f7" : {
+      "status": "SUSPENDED",
+      "reason": "KEY_COMPROMISE",
+      "comment": "Entry for testing only"
+    }
+  },
+
+
+  "entries": {
+    "6681152659205225093" : {
+      "status": "REVOKED",
+      "reason": "KEY_COMPROMISE"
+    },
+    "8350192447815228107" : {
+          },
+    "cc66e9a93713b6e643b26c15879786f7" : {
+      "status": "SUSPENDED",
+      "reason": "KEY_COMPROMISE",
+      "comment": "Entry for testing onlyg only"
+    }
+  },
+
+
+  "entries": {
+    "6681152659205225093" : {
+      "status": "REVOKED",
+      "reason": "KEY_COMPROMISE"
+    },
+    "8350192447815228107" : {
+          },
+    "cc66e9a93713b6e643b26c15879786f7" : {
+      "status": "SUSPENDED",ason": "KEY_COMPROMISE"
+    },
+    "8350192447815228107" : {
+          },
+    "cc66e9a93713b6e643b26c15879786f7" : {
+      "status": "SUSPENDED",
+      "reason": "KEY_COMPROMISE",
+      "comment": "Entry for testing onlyg only"
+    }
+  },
+
+
+  "entries": {
+    "6681152659205225093" : {
+      "status": "REVOKED",
+      "reason": "KEY_COMPROMISE"
+    },
+    "8350192447815228107" : {
+          },
+    "status": "SUSPENDED",
+      "reason": "KEY_COMPROMISE",
+      "comment": "Entry for testi"
+    }
+  },
+

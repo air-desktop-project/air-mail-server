@@ -7,7 +7,7 @@ use core::time::Duration;
 
 use ams_guard::{Rate, Thresholds};
 
-use crate::ams_config_capnp::configuration::AndroidAttestation as Lue;
+use crate::ams_config_capnp::configuration::AttestationMode as Lue;
 use ams_proto_smtp::{ClientId, Limits};
 use ams_queue::Backoff;
 use capnp::message::ReaderOptions;
@@ -444,7 +444,7 @@ pub struct Configuration {
     /// Le répertoire du journal d'audit, ou une chaîne vide : rien ne s'écrit.
     pub audit: String,
     /// L'attestation de clef d'Android : ignorée, jugée si présente, ou exigée.
-    pub android_attestation: AndroidAttestation,
+    pub android_attestation: AttestationMode,
     /// Le nom de paquet de l'application Android.
     pub android_package: String,
     /// Les empreintes SHA-256 admises du certificat qui signe l'application.
@@ -458,6 +458,12 @@ pub struct Configuration {
     /// L'âge, en jours, au-delà duquel la liste de révocation ne se croit
     /// plus. Jamais zéro une fois lu : voir [`ANDROID_REVOCATION_MAX_DAYS`].
     pub android_revocation_max_days: u16,
+    /// App Attest : ignoré, jugé si présent, ou exigé.
+    pub apple_attestation: AttestationMode,
+    /// L'identifiant d'application : `TeamID.bundleID`.
+    pub apple_app_id: String,
+    /// L'environnement de développement d'Apple, plutôt que la production.
+    pub apple_development: bool,
     /// La file d'attente du serveur.
     pub queue: Queue,
     /// MTA-STS (RFC 8461).
@@ -852,7 +858,7 @@ pub const ANDROID_REVOCATION_MAX_DAYS: u16 = 7;
 
 /// Ce que ce serveur fait de l'attestation de clef d'Android.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum AndroidAttestation {
+pub enum AttestationMode {
     /// Aucune n'est lue : celle qu'un appareil présente est ignorée.
     #[default]
     Off,
@@ -863,7 +869,7 @@ pub enum AndroidAttestation {
     Require,
 }
 
-impl AndroidAttestation {
+impl AttestationMode {
     /// Son nom, tel que la ligne de commande et `config show` le disent.
     #[must_use]
     pub const fn name(self) -> &'static str {
@@ -1109,9 +1115,9 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
         // **UN FICHIER ÉCRIT AVANT CE CHAMP DÉCODE `off`** : rien ne change pour
         // qui ne réécrit pas sa configuration.
         android_attestation: match lu.get_android_attestation() {
-            Ok(Lue::Off) => AndroidAttestation::Off,
-            Ok(Lue::Verify) => AndroidAttestation::Verify,
-            Ok(Lue::Require) => AndroidAttestation::Require,
+            Ok(Lue::Off) => AttestationMode::Off,
+            Ok(Lue::Verify) => AttestationMode::Verify,
+            Ok(Lue::Require) => AttestationMode::Require,
             Err(_) => return Err(Error::BadAndroid),
         },
         android_package: texte(lu.get_android_package()?)?,
@@ -1131,6 +1137,14 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
             0 => ANDROID_REVOCATION_MAX_DAYS,
             jours => jours,
         },
+        apple_attestation: match lu.get_apple_attestation() {
+            Ok(Lue::Off) => AttestationMode::Off,
+            Ok(Lue::Verify) => AttestationMode::Verify,
+            Ok(Lue::Require) => AttestationMode::Require,
+            Err(_) => return Err(Error::BadAndroid),
+        },
+        apple_app_id: texte(lu.get_apple_app_id()?)?,
+        apple_development: lu.get_apple_attestation_development(),
         queue,
         mtasts,
         tlsrpt,
@@ -1290,9 +1304,9 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
         ecrit.set_fcm_service_account(&config.fcm_service_account);
         ecrit.set_audit(&config.audit);
         ecrit.set_android_attestation(match config.android_attestation {
-            AndroidAttestation::Off => Lue::Off,
-            AndroidAttestation::Verify => Lue::Verify,
-            AndroidAttestation::Require => Lue::Require,
+            AttestationMode::Off => Lue::Off,
+            AttestationMode::Verify => Lue::Verify,
+            AttestationMode::Require => Lue::Require,
         });
         ecrit.set_android_package(&config.android_package);
         {
@@ -1306,6 +1320,13 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
         ecrit.set_android_roots(&config.android_roots);
         ecrit.set_android_revocation(&config.android_revocation);
         ecrit.set_android_revocation_max_days(config.android_revocation_max_days);
+        ecrit.set_apple_attestation(match config.apple_attestation {
+            AttestationMode::Off => Lue::Off,
+            AttestationMode::Verify => Lue::Verify,
+            AttestationMode::Require => Lue::Require,
+        });
+        ecrit.set_apple_app_id(&config.apple_app_id);
+        ecrit.set_apple_attestation_development(config.apple_development);
         {
             let mut emission = ecrit.reborrow().init_relay();
             emission.set_enabled(config.relay.enabled);
@@ -1491,7 +1512,7 @@ mod tests {
     fn l_attestation_android_se_relit_et_se_refuse_mal_reglee() {
         let config = exemple();
         let relue = decode(&encode(&config).expect("encodable")).expect("relisible");
-        assert_eq!(relue.android_attestation, AndroidAttestation::Require);
+        assert_eq!(relue.android_attestation, AttestationMode::Require);
         assert_eq!(relue.android_package, "org.airdesktop.mail");
         assert_eq!(relue.android_signers, vec![[7; 32], [8; 32]]);
         assert_eq!(relue.android_roots, "/var/lib/air-mail/racines-android.pem");
@@ -1500,6 +1521,19 @@ mod tests {
             "/var/lib/air-mail/revocation-android.json"
         );
         assert_eq!(relue.android_revocation_max_days, 3);
+        assert_eq!(relue.apple_attestation, AttestationMode::Verify);
+        assert_eq!(relue.apple_app_id, "TEAM123456.org.airdesktop.mail");
+        assert!(relue.apple_development);
+        for mode in [
+            AttestationMode::Off,
+            AttestationMode::Verify,
+            AttestationMode::Require,
+        ] {
+            let mut config = exemple();
+            config.apple_attestation = mode;
+            let relue = decode(&encode(&config).expect("encodable")).expect("décodable");
+            assert_eq!(relue.apple_attestation, mode);
+        }
         // Zéro — un fichier antérieur au champ — prend le défaut.
         let mut ancienne = exemple();
         ancienne.android_revocation_max_days = 0;
@@ -1509,9 +1543,9 @@ mod tests {
             super::ANDROID_REVOCATION_MAX_DAYS
         );
         for mode in [
-            AndroidAttestation::Off,
-            AndroidAttestation::Verify,
-            AndroidAttestation::Require,
+            AttestationMode::Off,
+            AttestationMode::Verify,
+            AttestationMode::Require,
         ] {
             let mut autre = exemple();
             autre.android_attestation = mode;
@@ -1520,13 +1554,13 @@ mod tests {
         }
         assert_eq!(
             [
-                AndroidAttestation::Off.name(),
-                AndroidAttestation::Verify.name(),
-                AndroidAttestation::Require.name()
+                AttestationMode::Off.name(),
+                AttestationMode::Verify.name(),
+                AttestationMode::Require.name()
             ],
             ["off", "verify", "require"]
         );
-        assert_eq!(AndroidAttestation::default(), AndroidAttestation::Off);
+        assert_eq!(AttestationMode::default(), AttestationMode::Off);
 
         // Une empreinte de trente et un octets : on l'écrit à la main.
         let mut message = capnp::message::Builder::new_default();
@@ -1554,7 +1588,20 @@ mod tests {
         // Un mode inconnu — écrit par une version future : l'octet qui change
         // entre `off` et `require` est le sien.
         let mut eteinte = exemple();
-        eteinte.android_attestation = AndroidAttestation::Off;
+        eteinte.android_attestation = AttestationMode::Off;
+        let eteinte = encode(&eteinte).expect("encodable");
+        let mut inconnue = encode(&exemple()).expect("encodable");
+        let rang = eteinte
+            .iter()
+            .zip(&inconnue)
+            .position(|(a, b)| a != b)
+            .expect("le mode est écrit");
+        inconnue[rang] = 9;
+        assert_eq!(decode(&inconnue).map(|_| ()), Err(Error::BadAndroid));
+
+        // De même pour le mode d'App Attest (0.2.43).
+        let mut eteinte = exemple();
+        eteinte.apple_attestation = AttestationMode::Off;
         let eteinte = encode(&eteinte).expect("encodable");
         let mut inconnue = encode(&exemple()).expect("encodable");
         let rang = eteinte
@@ -1598,7 +1645,7 @@ mod tests {
         assert!(relue.relay.relayhost_password.is_empty());
     }
 
-    use super::{AndroidAttestation, Listener, Mtasts, Queue, Relay, Tlsrpt};
+    use super::{AttestationMode, Listener, Mtasts, Queue, Relay, Tlsrpt};
     use alloc::string::{String, ToString as _};
     use alloc::vec;
     use ams_guard::{Rate, Thresholds};
@@ -1638,12 +1685,15 @@ mod tests {
             apns_sandbox: true,
             fcm_service_account: String::from("/var/lib/air-mail/fcm.json"),
             audit: String::from("/var/lib/air-mail/audit"),
-            android_attestation: AndroidAttestation::Require,
+            android_attestation: AttestationMode::Require,
             android_package: String::from("org.airdesktop.mail"),
             android_signers: vec![[7; 32], [8; 32]],
             android_roots: String::from("/var/lib/air-mail/racines-android.pem"),
             android_revocation: String::from("/var/lib/air-mail/revocation-android.json"),
             android_revocation_max_days: 3,
+            apple_attestation: AttestationMode::Verify,
+            apple_app_id: String::from("TEAM123456.org.airdesktop.mail"),
+            apple_development: true,
             // Les trois écoutes d'un serveur réel : le `25` et le `587` en
             // `STARTTLS`, le `465` en TLS implicite.
             smtp_listeners: vec![

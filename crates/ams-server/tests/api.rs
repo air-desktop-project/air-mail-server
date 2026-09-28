@@ -231,12 +231,15 @@ fn configuration_complete(
         apns_sandbox: false,
         fcm_service_account: String::new(),
         audit: String::new(),
-        android_attestation: ams_config::AndroidAttestation::Off,
+        android_attestation: ams_config::AttestationMode::Off,
         android_package: String::new(),
         android_signers: Vec::new(),
         android_roots: String::new(),
         android_revocation: String::new(),
         android_revocation_max_days: 7,
+        apple_attestation: ams_config::AttestationMode::Off,
+        apple_app_id: String::new(),
+        apple_development: false,
         require_fqdn_sender: false,
         require_fqdn_recipient: false,
         require_sender_domain: false,
@@ -1674,6 +1677,99 @@ mod attestation_d_essai {
         ]
         .concat()
     }
+
+    /// L'identifiant de l'application iOS d'essai.
+    pub(super) const APPLICATION_APPLE: &str = "TEAM123456.org.airdesktop.mail";
+
+    fn cbor(majeur: u8, n: usize) -> Vec<u8> {
+        let majeur = majeur << 5;
+        match u16::try_from(n) {
+            Ok(petit @ 0..=23) => vec![majeur | u8::try_from(petit).expect("petit")],
+            Ok(octet @ 24..=255) => vec![majeur | 24, u8::try_from(octet).expect("un octet")],
+            Ok(deux) => [&[majeur | 25][..], &deux.to_be_bytes()].concat(),
+            Err(_) => panic!("trop long pour l'essai"),
+        }
+    }
+
+    fn cbor_octets(contenu: &[u8]) -> Vec<u8> {
+        [cbor(2, contenu.len()), contenu.to_vec()].concat()
+    }
+
+    fn cbor_texte(texte: &str) -> Vec<u8> {
+        [cbor(3, texte.len()), texte.as_bytes().to_vec()].concat()
+    }
+
+    /// Un objet App Attest : la clef d'App Attest — qui n'est PAS la clef
+    /// d'appareil — attestée sous `racine`, pour le `clientDataHash` que
+    /// l'application iOS tire de l'invitation ET de la clef d'appareil.
+    pub(super) fn app_attest(
+        appareil: &p256::ecdsa::SigningKey,
+        racine: &p256::ecdsa::SigningKey,
+        invitation: &str,
+    ) -> Vec<u8> {
+        let cle_app_attest =
+            p256::ecdsa::SigningKey::from_slice(&[23_u8; 32]).expect("une clef valide");
+        let intermediaire =
+            p256::ecdsa::SigningKey::from_slice(&[24_u8; 32]).expect("une clef valide");
+        let point_appareil = appareil.verifying_key().to_sec1_point(false);
+        let donnees_client = sha2::Sha256::new()
+            .chain_update(invitation.as_bytes())
+            .chain_update([0])
+            .chain_update(point_appareil.as_bytes())
+            .finalize();
+        let point = cle_app_attest.verifying_key().to_sec1_point(false);
+        let identifiant = sha2::Sha256::digest(point.as_bytes());
+        let longueur = u16::try_from(identifiant.len())
+            .expect("court")
+            .to_be_bytes();
+        let auth_data = [
+            &sha2::Sha256::digest(APPLICATION_APPLE.as_bytes())[..],
+            &[0x40],
+            &[0; 4],
+            b"appattest\0\0\0\0\0\0\0",
+            &longueur,
+            &identifiant,
+        ]
+        .concat();
+        let nonce = sha2::Sha256::new()
+            .chain_update(&auth_data)
+            .chain_update(donnees_client)
+            .finalize();
+        let extension = seq(&[
+            &oid(&[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x63, 0x64, 0x08, 0x02]),
+            &octets(&seq(&[&contexte(1, &octets(&nonce))])),
+        ]);
+        [
+            cbor(5, 3),
+            cbor_texte("fmt"),
+            cbor_texte("apple-appattest"),
+            cbor_texte("attStmt"),
+            cbor(5, 2),
+            cbor_texte("x5c"),
+            cbor(4, 2),
+            cbor_octets(&certificat(
+                1,
+                &cle_app_attest,
+                &intermediaire,
+                &[&extension],
+            )),
+            cbor_octets(&certificat(2, &intermediaire, racine, &[])),
+            cbor_texte("receipt"),
+            cbor_octets(b"recu"),
+            cbor_texte("authData"),
+            cbor_octets(&auth_data),
+        ]
+        .concat()
+    }
+}
+
+/// La plateforme dont un essai d'attestation éprouve le câblage.
+enum Plateforme {
+    /// Android en `require`, sous cette liste de révocation ; `admise` dit si
+    /// la bonne attestation doit enrôler.
+    Android { liste: &'static [u8], admise: bool },
+    /// App Attest en `require`, Android éteint.
+    Apple,
 }
 
 /// **UNE CLEF ANDROID PROUVE OÙ ELLE VIT, ET POUR QUELLE INVITATION** (0.2.39).
@@ -1689,9 +1785,25 @@ mod attestation_d_essai {
 fn une_attestation_android_se_verifie_a_l_enrolement() {
     enroler_sous_attestation(
         "attestation-android",
-        br#"{"entries":{"ff":{"status":"REVOKED"}}}"#,
-        true,
+        &Plateforme::Android {
+            liste: br#"{"entries":{"ff":{"status":"REVOKED"}}}"#,
+            admise: true,
+        },
     );
+}
+
+/// **UNE CLEF iOS PROUVE, PAR APP ATTEST, QU'ELLE EST CELLE DE NOTRE
+/// APPLICATION** (0.2.43).
+///
+/// # CE QUE CET ESSAI ÉPROUVE
+///
+/// Le même câblage qu'Android, sous App Attest en `require` : un objet dont le
+/// `clientDataHash` lie l'invitation ET la clef d'appareil enrôle — et le
+/// magasin le retient. Sans attestation, pour une autre invitation, ou une
+/// chaîne Android alors qu'Android n'est pas jugé : `422`.
+#[test]
+fn une_attestation_app_attest_se_verifie_a_l_enrolement() {
+    enroler_sous_attestation("attestation-apple", &Plateforme::Apple);
 }
 
 /// **UNE CLEF D'USINE RÉVOQUÉE PAR GOOGLE N'ENRÔLE RIEN** (0.2.40) : la même
@@ -1701,14 +1813,16 @@ fn une_attestation_android_se_verifie_a_l_enrolement() {
 fn une_attestation_revoquee_n_enrole_rien() {
     enroler_sous_attestation(
         "attestation-revoquee",
-        br#"{"entries":{"2a":{"status":"SUSPENDED","reason":"KEY_COMPROMISE"}}}"#,
-        false,
+        &Plateforme::Android {
+            liste: br#"{"entries":{"2a":{"status":"SUSPENDED","reason":"KEY_COMPROMISE"}}}"#,
+            admise: false,
+        },
     );
 }
 
-/// Le banc des deux essais : un serveur en `require`, sous cette liste de
-/// révocation ; `admise` dit si la bonne attestation doit enrôler.
-fn enroler_sous_attestation(nom: &str, liste_json: &[u8], admise: bool) {
+/// Le banc des essais d'attestation : un serveur qui exige celle de cette
+/// plateforme.
+fn enroler_sous_attestation(nom: &str, plateforme: &Plateforme) {
     let atelier = atelier(nom);
     let Some((cert, cle)) = paire(&atelier.0) else {
         panic!("{SANS_OPENSSL}");
@@ -1777,16 +1891,37 @@ fn enroler_sous_attestation(nom: &str, liste_json: &[u8], admise: bool) {
     );
     let mut lue =
         ams_config::decode(&std::fs::read(&config).expect("relisible")).expect("décodable");
-    lue.android_attestation = ams_config::AndroidAttestation::Require;
-    lue.android_package = String::from("org.airdesktop.mail");
-    lue.android_signers = vec![attestation_d_essai::empreinte()];
+    // Les racines en plus valent pour les deux plateformes.
     lue.android_roots = racines.display().to_string();
-    // LA LISTE DE RÉVOCATION, locale : sans elle, rien ne passerait. Celle-ci
-    // ne nomme QUE l'intermédiaire, sous le numéro 0x2a — sauf si l'essai en
-    // veut une vide.
-    let liste = atelier.0.join("revocation.json");
-    std::fs::write(&liste, liste_json).expect("la liste s'écrit");
-    lue.android_revocation = liste.display().to_string();
+    let admise = match plateforme {
+        Plateforme::Android { liste, admise } => {
+            lue.android_attestation = ams_config::AttestationMode::Require;
+            lue.android_package = String::from("org.airdesktop.mail");
+            lue.android_signers = vec![attestation_d_essai::empreinte()];
+            // LA LISTE DE RÉVOCATION, locale : sans elle, rien ne passerait.
+            // Celle de l'essai de révocation nomme l'intermédiaire, sous le
+            // numéro 0x2a.
+            let chemin = atelier.0.join("revocation.json");
+            std::fs::write(&chemin, liste).expect("la liste s'écrit");
+            lue.android_revocation = chemin.display().to_string();
+            *admise
+        }
+        Plateforme::Apple => {
+            lue.apple_attestation = ams_config::AttestationMode::Require;
+            lue.apple_app_id = String::from(attestation_d_essai::APPLICATION_APPLE);
+            true
+        }
+    };
+    let fabriquer = |invitation: &str| -> Vec<u8> {
+        match plateforme {
+            Plateforme::Android { .. } => {
+                attestation_d_essai::chaine(&cle_privee(), &racine, invitation)
+            }
+            Plateforme::Apple => {
+                attestation_d_essai::app_attest(&cle_privee(), &racine, invitation)
+            }
+        }
+    };
     std::fs::write(&config, ams_config::encode(&lue).expect("encodable")).expect("écriture");
     let _serveur = lancer(&config, port_smtp);
     let base = format!("https://127.0.0.1:{port_http}");
@@ -1836,7 +1971,7 @@ fn enroler_sous_attestation(nom: &str, liste_json: &[u8], admise: bool) {
     assert!(corps.contains("/problems/attestation-refused"), "{corps}");
 
     // ── UNE ATTESTATION FAITE POUR UNE AUTRE INVITATION NE VAUT PAS ─────────
-    let autre = attestation_d_essai::chaine(&cle_privee(), &racine, "une autre invitation");
+    let autre = fabriquer("une autre invitation");
     let (corps, code) = poster(
         "/v1/devices",
         &format!(
@@ -1850,7 +1985,20 @@ fn enroler_sous_attestation(nom: &str, liste_json: &[u8], admise: bool) {
     // ── LA BONNE ENRÔLE, ET LE MAGASIN SAIT OÙ VIT LA CLEF ──────────────────
     //
     // La même invitation : les deux refus ne l'ont pas consommée.
-    let bonne = attestation_d_essai::chaine(&cle_privee(), &racine, &invitation);
+    // ── UNE PLATEFORME QUE LE SERVEUR NE JUGE PAS NE PROUVE RIEN ────────────
+    if matches!(plateforme, Plateforme::Apple) {
+        let android = attestation_d_essai::chaine(&cle_privee(), &racine, &invitation);
+        let (corps, code) = poster(
+            "/v1/devices",
+            &format!(
+                r#"{{"invitation":"{invitation}","publicKey":"{clef}","attestation":"{}"}}"#,
+                en_base64url(&android)
+            ),
+            None,
+        );
+        assert_eq!(code, "422", "{corps}");
+    }
+    let bonne = fabriquer(&invitation);
     let (corps, code) = poster(
         "/v1/devices",
         &format!(
@@ -1869,7 +2017,13 @@ fn enroler_sous_attestation(nom: &str, liste_json: &[u8], admise: bool) {
     let ranges = ams_config::decode_devices(&std::fs::read(&appareils).expect("le magasin existe"))
         .expect("lisible");
     assert_eq!(ranges.len(), 1);
-    assert_eq!(ranges[0].attestation, Some(ams_config::Attested::Tee));
+    assert_eq!(
+        ranges[0].attestation,
+        Some(match plateforme {
+            Plateforme::Android { .. } => ams_config::Attested::Tee,
+            Plateforme::Apple => ams_config::Attested::AppAttest,
+        })
+    );
 }
 
 /// **LE JOURNAL D'AUDIT DIT QUI S'EST CONNECTÉ, QUI A ÉCHOUÉ, ET D'OÙ** (phase 6).

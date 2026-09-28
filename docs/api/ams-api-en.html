@@ -421,7 +421,7 @@ authorization: Bearer AQECAAAAAG…</code></pre>
     <tr><td><code>404</code></td><td><code>/problems/not-found</code></td><td>The resource does not exist, <em>or</em> your token does not open the scope it requires</td></tr>
     <tr><td><code>405</code></td><td><code>/problems/method-not-allowed</code></td><td>The resource exists but not with this verb. Carries <code>allow</code></td></tr>
     <tr><td><code>414</code></td><td><code>/problems/uri-too-long</code></td><td>More segments than the server retains</td></tr>
-    <tr><td><code>422</code></td><td><code>/problems/attestation-refused</code></td><td>A key's Android attestation is not acceptable (enrolment, pairing)</td></tr>
+    <tr><td><code>422</code></td><td><code>/problems/attestation-refused</code></td><td>A key's attestation — Android or App Attest — is not acceptable (enrolment, pairing)</td></tr>
     <tr><td><code>429</code></td><td><code>/problems/too-many-requests</code></td><td>This device is asking faster than its rate (see <a href="#limits">Limits</a>). Carries <code>retry-after: 1</code>: come back in one second</td></tr>
     <tr><td><code>500</code>, <code>501</code>, <code>503</code></td><td><code>/problems/internal</code></td><td>A server-side fault. A <code>503</code> is temporary and worth retrying</td></tr>
   </tbody>
@@ -494,7 +494,13 @@ authorization: Bearer AQECAAAAAG…</code></pre>
     <span class="etiquette">Android: key attestation (0.2.39)</span>
     <p>An Android device can prove that its key was <strong>created in hardware</strong> (TEE or StrongBox), <strong>by our application</strong>, on a phone with a <strong>locked bootloader and verified boot</strong>. It adds an <code>"attestation"</code> field to the body: its attestation certificate chain (<code>KeyStore.getCertificateChain</code>), DER certificates concatenated — leaf first, root last —, written in unpadded base64url.</p>
     <p><strong>The challenge is the SHA-256 of the invitation</strong>, as written: the app computes it and passes it to <code>KeyGenParameterSpec.Builder.setAttestationChallenge</code> <em>before</em> creating its key. For pairing (<code>POST /v1/me/devices</code>), it is the SHA-256 of the pairing challenge.</p>
-    <p>The server verifies it <strong>itself</strong>, against Google's roots, without Google Play, and against the <strong>revocation list</strong> Google publishes, re-read daily (0.2.40): a revoked or suspended factory key makes the chain refused; a list older than seven days is no longer trusted (0.2.42). Depending on its configuration it ignores it, judges it when present, or requires it. Refused — or missing when required —, enrolment returns <code>422</code> with <code>/problems/attestation-refused</code>, <strong>without consuming the invitation</strong>; which rule failed is not said. <code>/v1/me/devices</code> then tells where the key lives: <code>"attestation": "tee"</code>, <code>"strongbox"</code>, or <code>null</code>.</p>
+    <p>The server verifies it <strong>itself</strong>, against Google's roots, without Google Play, and against the <strong>revocation list</strong> Google publishes, re-read daily (0.2.40): a revoked or suspended factory key makes the chain refused; a list older than seven days is no longer trusted (0.2.42). Depending on its configuration it ignores it, judges it when present, or requires it. Refused — or missing when required —, enrolment returns <code>422</code> with <code>/problems/attestation-refused</code>, <strong>without consuming the invitation</strong>; which rule failed is not said. <code>/v1/me/devices</code> then tells where the key lives: <code>"attestation": "tee"</code>, <code>"strongbox"</code>, <code>"app-attest"</code>, or <code>null</code>.</p>
+  </div>
+  <div class="note info">
+    <span class="etiquette">iOS: App Attest (0.2.43)</span>
+    <p>An iOS device proves, through App Attest, that the request comes from <strong>our application</strong>, as Apple signed it, on a <strong>genuine Apple device</strong>. It puts in the same <code>"attestation"</code> field the object returned by <code>DCAppAttestService.attestKey</code>, as is, in unpadded base64url. The server recognises the platform by the first decoded byte: a DER <code>SEQUENCE</code> for Android, a CBOR map for Apple.</p>
+    <p><strong>The <code>clientDataHash</code> is SHA-256(invitation ‖ 0x00 ‖ device key)</strong>: the invitation text as written, one zero byte, then the 65 bytes of the device public key (<code>publicKey</code>, decoded). The App Attest key is not the device key; this hash binds them, and an attestation obtained for another key or another invitation is worthless. For pairing, the pairing challenge replaces the invitation.</p>
+    <p>The server verifies it <strong>itself</strong>, against Apple's pinned App Attest root: the chain, the nonce, the app identifier (<code>TeamID.bundleID</code>), a zero counter, the environment (production or development) and the key identifier. Modes and refusals are Android's; an attestation from a platform the server does not judge is worth nothing when it requires one.</p>
   </div>
   <div class="note prudence">
     <span class="etiquette">An invitation is only good for the FIRST device</span>
@@ -508,7 +514,7 @@ authorization: Bearer AQECAAAAAG…</code></pre>
       <tr><td><code>400</code></td><td>The key is not a point on the curve, or is the wrong size.</td></tr>
       <tr><td><code>409</code></td><td>This account already has an enrolled device.</td></tr>
       <tr><td><code>404</code></td><td>The invitation's account no longer exists.</td></tr>
-      <tr><td><code>422</code></td><td>The Android attestation is refused, or missing while the server requires it (<code>/problems/attestation-refused</code>).</td></tr>
+      <tr><td><code>422</code></td><td>The attestation — Android or App Attest — is refused, or missing while the server requires it (<code>/problems/attestation-refused</code>).</td></tr>
       <tr><td><code>501</code></td><td>This server has no device store configured.</td></tr>
     </tbody>
   </table>

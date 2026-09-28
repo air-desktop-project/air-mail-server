@@ -113,6 +113,7 @@ enum KeyAttestation {
   none @0;
   tee @1;
   strongBox @2;
+  appAttest @3;
 }
 
 enum PushChannel {

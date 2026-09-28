@@ -239,7 +239,7 @@ struct Configuration {
   # verrouillé. `off` n'en lit aucune ; `verify` juge celle qu'on présente et
   # laisse passer qui n'en présente pas (iOS, les postes) ; `require` l'exige
   # de tous. Un fichier écrit avant ce champ décode `off`.
-  androidAttestation @47 :AndroidAttestation;
+  androidAttestation @47 :AttestationMode;
 
   # Le nom de paquet de l'application Android, et les empreintes SHA-256 du
   # certificat qui la SIGNE — celui d'air-desktop.org, trente-deux octets
@@ -264,7 +264,16 @@ struct Configuration {
   # LE DÉFAUT — sept jours —, ce qui rend le champ ajoutable sans rien casser.
   androidRevocationMaxDays @52 :UInt16;
 
-  enum AndroidAttestation {
+  # App Attest d'Apple (0.2.43) : la clef d'un appareil iOS se prouve tenue par
+  # notre application, sur un appareil Apple authentique. Les mêmes modes que
+  # pour Android. L'identifiant d'application est `TeamID.bundleID`. Les racines
+  # en plus (`androidRoots`) valent pour les deux plateformes.
+  appleAttestation @53 :AttestationMode;
+  appleAppId @54 :Text;
+  # L'environnement de développement d'Apple, plutôt que la production.
+  appleAttestationDevelopment @55 :Bool;
+
+  enum AttestationMode {
     off @0;
     verify @1;
     require @2;
