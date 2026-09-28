@@ -2275,7 +2275,13 @@ Il se lit par `GET /v1/me/audit` (le titulaire), `GET
 **Un compte inconnu ne s'y écrit pas**, et le temps d'un refus ne le trahit pas :
 l'écriture part dans une file qu'un fil dédié vide. Une file pleine perd
 l'entrée plutôt que de ralentir le service, et le dit. Un compte retiré emporte
-son journal. Il couvre l'API ; IMAP, SMTP et POP3 n'y figurent pas encore.
+son journal.
+
+Il couvre l'API **et SMTP, IMAP et POP3** (0.2.38), mots de passe applicatifs et
+SCRAM compris. Un client de courrier se reconnectant sans cesse, une même
+ouverture — même compte, protocole, adresse et mot de passe — ne s'écrit qu'une
+fois par heure, et un même refus une fois par minute : une adresse inconnue,
+elle, apparaît tout de suite.
 
 ### Refuser un `HELO` non qualifié
 

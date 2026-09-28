@@ -112,6 +112,27 @@ where
     A: Authenticator,
     B: Mailboxes,
 {
+    crate::pair::sous(
+        source,
+        crate::pair::Porte::Imap,
+        Box::pin(conduire_imap(stream, service, auth, boites, source)),
+    )
+    .await
+}
+
+/// Le corps de [`serve_imap_connection`], sous son pair.
+async fn conduire_imap<S, A, B>(
+    stream: &mut S,
+    service: &ImapService<'_>,
+    auth: A,
+    boites: &B,
+    source: Source,
+) -> Result<ImapSummary, Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    A: Authenticator,
+    B: Mailboxes,
+{
     let mut resume = ImapSummary::default();
 
     // ON NE PARLE PAS À UN BANNI. Interroger le garde ne compte pas comme un

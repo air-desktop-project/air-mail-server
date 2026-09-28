@@ -433,6 +433,8 @@ air-mail-admin config write /etc/air-mail/ams.conf … \
   dit d'où chacun se connecte, et rien d'autre ne doit y lire ;
 - il doit vivre sous un chemin que l'unité systemd laisse écrire
   (`ReadWritePaths=/var/lib/air-mail`) ;
+- l'API, SMTP, IMAP et POP3 y écrivent ; une ouverture de courrier répétée ne
+  s'écrit qu'une fois par heure, un refus répété qu'une fois par minute ;
 - chaque compte lit le sien par `GET /v1/me/audit`, l'administration par
   `GET /v1/accounts/{compte}/audit`, et l'exploitant par
   `air-mail-admin audit /etc/air-mail/ams.conf --login <compte>` ;

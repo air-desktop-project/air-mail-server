@@ -407,6 +407,30 @@ where
     P: Policy,
     D: Delivery,
 {
+    crate::pair::sous(
+        source,
+        crate::pair::Porte::Smtp,
+        Box::pin(conduire_smtp(
+            stream, service, policy, delivery, source, mode,
+        )),
+    )
+    .await
+}
+
+/// Le corps de [`serve_connection_with`], sous son pair.
+async fn conduire_smtp<S, P, D>(
+    stream: &mut S,
+    service: &Service<'_>,
+    policy: P,
+    delivery: &mut D,
+    source: Source,
+    mode: TlsMode,
+) -> Result<Summary, Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    P: Policy,
+    D: Delivery,
+{
     // ON REFUSE AVANT DE PARLER, pas au milieu de la conversation. Annoncer une
     // extension qu'on ne sait pas conduire reviendrait à mentir au pair dès la
     // bannière — et un serveur qui annonce `STARTTLS` puis ne chiffre pas est

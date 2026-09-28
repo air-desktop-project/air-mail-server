@@ -208,6 +208,7 @@ fn monter_l_api(
     delegations: Option<Arc<crate::delegations::Delegations>>,
     reveil: Option<Arc<crate::reveil::Reveil>>,
     vapid: Option<String>,
+    audit: Option<Arc<crate::audit::Audit>>,
     file: Option<ams_loop_tokio::Spool>,
     message_max: usize,
     port_h3: Option<u16>,
@@ -376,27 +377,11 @@ fn monter_l_api(
                 api.avec_brouillons(Arc::new(brouillons))
                     .avec_idempotence(Arc::new(registre))
             };
-            // **ET LE JOURNAL D'AUDIT** (phase 6) : sans répertoire, rien ne
-            // s'écrit, et `…/audit` rend 501. Le répertoire naît en `0700` — il
-            // dit d'où chacun se connecte.
-            let api = if options.audit.is_empty() {
-                eprintln!(
-                    "air-mail-server : journal d'audit NON TENU — sessions, refus et appareils ne \
-                     s'écrivent pas (`air-mail-admin config write … --audit …`)"
-                );
-                api
-            } else {
-                let audit = crate::audit::Audit::ouvrir(std::path::PathBuf::from(&options.audit))
-                    .map_err(|erreur| {
-                    format!("journal d'audit `{}` : {erreur}", options.audit)
-                })?;
-                eprintln!(
-                    "air-mail-server : journal d'audit sous `{}` — un fichier par compte, qui \
-                     tourne au-delà de {} Kio.",
-                    options.audit,
-                    crate::audit::ROTATION_OCTETS / 1024
-                );
-                api.avec_audit(audit)
+            // **ET LE JOURNAL D'AUDIT** (phase 6), le même que celui de la
+            // politique : sans lui, `…/audit` rend 501.
+            let api = match audit {
+                Some(audit) => api.avec_audit(audit),
+                None => api,
             };
             // **ET LA CLÉ QUI SCELLE LES INVITATIONS**, la même que celle des
             // jetons : sans elle, `POST /v1/invitations` rend 501.
@@ -2190,6 +2175,31 @@ async fn servir(fichier: &Path) -> Result<(), String> {
     let mut responsables = options.hosted.clone();
     responsables.push(options.domain.clone());
     let politique = BoitesConnues::new(Arc::clone(&comptes), postmaster.clone(), &responsables);
+    // **LE JOURNAL D'AUDIT S'OUVRE ICI**, avant la politique et l'API : les
+    // deux y écrivent — l'une les sessions de courrier (SMTP, IMAP, POP3),
+    // l'autre celles de l'API et la gestion du compte. Le répertoire naît en
+    // `0700` : il dit d'où chacun se connecte.
+    let audit = if options.audit.is_empty() {
+        eprintln!(
+            "air-mail-server : journal d'audit NON TENU — sessions, refus et appareils ne \
+             s'écrivent pas (`air-mail-admin config write … --audit …`)"
+        );
+        None
+    } else {
+        let audit = crate::audit::Audit::ouvrir(PathBuf::from(&options.audit))
+            .map_err(|erreur| format!("journal d'audit `{}` : {erreur}", options.audit))?;
+        eprintln!(
+            "air-mail-server : journal d'audit sous `{}` — un fichier par compte, qui tourne \
+             au-delà de {} Kio ; API, SMTP, IMAP et POP3 y écrivent.",
+            options.audit,
+            crate::audit::ROTATION_OCTETS / 1024
+        );
+        Some(audit)
+    };
+    let politique = match &audit {
+        Some(audit) => politique.avec_audit(Arc::clone(audit)),
+        None => politique,
+    };
     // **LE MÊME MAGASIN POUR LA POLITIQUE ET POUR L'API** : l'une y vérifie,
     // l'autre y crée et y révoque.
     let politique = match &applicatifs {
@@ -2586,6 +2596,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         delegations.clone(),
         reveil.clone(),
         vapid_publique.clone(),
+        audit.clone(),
         file.as_ref().map(|attente| attente.as_ref().clone()),
         message_max,
         port_h3,

@@ -70,9 +70,17 @@ pub enum Evenement<'a> {
         /// L'appareil, s'il y en a un.
         appareil: Option<&'a str>,
     },
+    /// Une session de courrier s'est ouverte — SMTP, IMAP ou POP3 (0.2.38).
+    ConnexionCourrier {
+        /// `smtp`, `imap` ou `pop3`.
+        porte: &'static str,
+        /// Le mot de passe applicatif qui l'a ouverte, s'il y en a un.
+        applicatif: Option<&'a str>,
+    },
     /// Des identifiants ont été refusés à cette porte.
     Refus {
-        /// `password` ou `device`.
+        /// `password` ou `device` pour l'API ; `smtp`, `imap` ou `pop3` pour le
+        /// courrier.
         porte: &'static str,
     },
     /// Un appareil a été enrôlé sur invitation.
@@ -146,7 +154,7 @@ impl Evenement<'_> {
     /// Son nom, tel que l'API le rend.
     const fn nom(self) -> &'static str {
         match self {
-            Self::SessionOuverte { .. } => "session.opened",
+            Self::SessionOuverte { .. } | Self::ConnexionCourrier { .. } => "session.opened",
             Self::Refus { .. } => "auth.refused",
             Self::AppareilEnrole { .. } => "device.enrolled",
             Self::AppareilAppaire { .. } => "device.paired",
@@ -176,7 +184,9 @@ pub fn ligne(evenement: Evenement<'_>, source: Option<&str>, quand: u64) -> Vec<
                 None => "password",
             }),
         ),
-        Evenement::Refus { porte } => (None, Some(porte)),
+        Evenement::Refus { porte } | Evenement::ConnexionCourrier { porte, .. } => {
+            (None, Some(porte))
+        }
         Evenement::AppareilEnrole { appareil, nom }
         | Evenement::AppareilAppaire { appareil, nom } => (Some(appareil), Some(nom)),
         Evenement::AppareilRevoque { appareil } | Evenement::Desabonnement { appareil } => {
@@ -197,6 +207,10 @@ pub fn ligne(evenement: Evenement<'_>, source: Option<&str>, quand: u64) -> Vec<
         Evenement::ApplicatifCree { nom, .. } => Some(nom),
         _ => None,
     };
+    let applicatif = match evenement {
+        Evenement::ConnexionCourrier { applicatif, .. } => applicatif,
+        _ => None,
+    };
     let mut place = std::vec![0_u8; 1024];
     let ecrit = {
         let mut json = ams_api::Json::new(&mut place);
@@ -209,6 +223,9 @@ pub fn ligne(evenement: Evenement<'_>, source: Option<&str>, quand: u64) -> Vec<
             champ(&mut json, "detail", detail)?;
             if let Some(nom) = nom {
                 json.field_str("name", borne(nom))?;
+            }
+            if let Some(id) = applicatif {
+                json.field_str("appPassword", borne(id))?;
             }
             json.end_object()?;
             json.finish().map(<[u8]>::len)
@@ -293,7 +310,18 @@ pub struct Audit {
     envoi: SyncSender<Ordre>,
     /// Combien d'entrées ont été perdues, la file étant pleine.
     perdues: AtomicU64,
+    /// Quand chaque entrée regroupée a été écrite pour la dernière fois — voir
+    /// [`Audit::noter_au_plus`].
+    recentes: std::sync::Mutex<std::collections::HashMap<String, u64>>,
 }
+
+/// Combien d'entrées regroupées se retiennent au plus.
+///
+/// **LA TABLE EST BORNÉE** : ses clefs portent l'adresse du pair, et un
+/// attaquant qui dispose d'un `/64` en fabriquerait autant qu'il veut. Pleine,
+/// elle oublie d'abord ce qui a plus d'une heure, puis tout : on écrit alors
+/// une entrée de trop, jamais une de moins.
+const RECENTES_MAX: usize = 4096;
 
 impl Audit {
     /// Ouvre le journal sous cette racine, qui naît en `0700`, et lance son fil.
@@ -316,7 +344,66 @@ impl Audit {
             racine,
             envoi,
             perdues: AtomicU64::new(0),
+            recentes: std::sync::Mutex::new(std::collections::HashMap::new()),
         }))
+    }
+
+    /// Note un événement — mais AU PLUS une fois par `intervalle` secondes pour
+    /// ce compte, cet événement, ce détail et cette adresse (0.2.38).
+    ///
+    /// # POURQUOI REGROUPER
+    ///
+    /// Un client de courrier se reconnecte sans cesse : iOS Mail ouvre une
+    /// session IMAP par dossier, Thunderbird toutes les quelques minutes. Une
+    /// entrée par connexion noierait le journal — et avec lui la seule ligne
+    /// qui compte, celle d'une adresse qu'on ne connaît pas. Ce que le titulaire
+    /// veut savoir est « qui s'est connecté, d'où », et une entrée par heure le
+    /// dit. Un refus se regroupe à la minute : une rafale d'essais se voit, sans
+    /// écrire chacun.
+    pub fn noter_au_plus(
+        &self,
+        compte: &str,
+        evenement: Evenement<'_>,
+        source: Option<&str>,
+        quand: u64,
+        intervalle: u64,
+    ) {
+        if ams_auth::check_login(compte).is_err() {
+            return;
+        }
+        let detail = match evenement {
+            Evenement::Refus { porte } | Evenement::ConnexionCourrier { porte, .. } => porte,
+            _ => "",
+        };
+        let applicatif = match evenement {
+            Evenement::ConnexionCourrier { applicatif, .. } => applicatif.unwrap_or_default(),
+            _ => "",
+        };
+        let clef = format!(
+            "{compte}\0{}\0{detail}\0{applicatif}\0{}",
+            evenement.nom(),
+            source.unwrap_or_default()
+        );
+        {
+            let mut recentes = self
+                .recentes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if recentes
+                .get(&clef)
+                .is_some_and(|derniere| derniere.saturating_add(intervalle) > quand)
+            {
+                return;
+            }
+            if recentes.len() >= RECENTES_MAX {
+                recentes.retain(|_, derniere| derniere.saturating_add(3600) > quand);
+                if recentes.len() >= RECENTES_MAX {
+                    recentes.clear();
+                }
+            }
+            recentes.insert(clef, quand);
+        }
+        self.noter(compte, evenement, source, quand);
     }
 
     /// Note un événement pour ce compte, depuis cette adresse, à cet instant

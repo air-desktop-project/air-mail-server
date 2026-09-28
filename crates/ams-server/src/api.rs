@@ -4094,7 +4094,7 @@ fn bits_de(cle: &ams_guard::Key) -> u8 {
 /// **UNE ADRESSE IPv4 MAPPÉE S'ÉCRIT EN IPv4** : `::ffff:192.0.2.1` et
 /// `192.0.2.1` sont le même pair, et un exploitant qui cherche l'une ne doit
 /// pas manquer l'autre.
-fn texte_de_source(source: ams_guard::Source) -> String {
+pub(crate) fn texte_de_source(source: ams_guard::Source) -> String {
     match source {
         ams_guard::Source::V4(octets) => std::net::Ipv4Addr::from(octets).to_string(),
         ams_guard::Source::V6(octets) => {

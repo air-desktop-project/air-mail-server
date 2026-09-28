@@ -92,6 +92,7 @@ pub mod imap;
 pub mod journal;
 mod liaison;
 mod mtasts;
+mod pair;
 pub mod pop3;
 mod privileges;
 mod push;
@@ -122,6 +123,7 @@ pub use dmarc::{Authenticated, DmarcChecker, DmarcResult, DmarcVerdict, PourRapp
 pub use error::Error;
 pub use guard::SharedGuard;
 pub use mtasts::Sts;
+pub use pair::{Porte, current_peer};
 pub use privileges::{is_root, masque_trop_large, refuse_root, restreindre_le_masque};
 /// Un verrou que prennent les essais qui ne supportent pas qu'un autre ouvre
 /// des sockets en même temps.

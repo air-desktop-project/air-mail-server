@@ -268,6 +268,7 @@ fn au_dela_de_sa_taille_le_fichier_tourne() {
         racine: racine.clone(),
         envoi,
         perdues: AtomicU64::new(0),
+        recentes: std::sync::Mutex::new(std::collections::HashMap::new()),
     };
     let lues = audit.lire("marie", 3);
     assert_eq!(lues.len(), 3);
@@ -285,6 +286,7 @@ fn une_file_fermee_perd_et_le_compte() {
         racine: atelier("perte"),
         envoi,
         perdues: AtomicU64::new(0),
+        recentes: std::sync::Mutex::new(std::collections::HashMap::new()),
     };
     audit.noter("marie", Evenement::InvitationEmise, None, 1);
     audit.noter("marie", Evenement::InvitationEmise, None, 2);
@@ -292,4 +294,94 @@ fn une_file_fermee_perd_et_le_compte() {
     // Un oubli sur une file fermée ne bloque pas non plus.
     audit.oublier("marie");
     assert!(!std::format!("{audit:?}").is_empty());
+}
+
+#[test]
+fn une_connexion_de_courrier_dit_son_protocole_et_son_mot_de_passe() {
+    let dite = texte(&ligne(
+        Evenement::ConnexionCourrier {
+            porte: "imap",
+            applicatif: Some("0123"),
+        },
+        Some("192.0.2.1"),
+        5,
+    ));
+    assert_eq!(
+        dite,
+        "{\"at\":5,\"event\":\"session.opened\",\"source\":\"192.0.2.1\",\"device\":null,\"detail\":\"imap\",\"appPassword\":\"0123\"}\n"
+    );
+    let dite = texte(&ligne(
+        Evenement::ConnexionCourrier {
+            porte: "smtp",
+            applicatif: None,
+        },
+        None,
+        5,
+    ));
+    assert!(!dite.contains("appPassword"), "{dite}");
+}
+
+/// **CE QUI SE RÉPÈTE SE REGROUPE**, par compte, événement, protocole,
+/// mot de passe et adresse — et seulement pendant l'intervalle.
+#[test]
+fn ce_qui_se_repete_se_regroupe() {
+    let racine = atelier("regrouper");
+    let audit = Audit::ouvrir(racine.clone()).expect("le journal s'ouvre");
+    let imap = Evenement::ConnexionCourrier {
+        porte: "imap",
+        applicatif: None,
+    };
+    let a = Some("192.0.2.1");
+    audit.noter_au_plus("marie", imap, a, 1000, 3600);
+    audit.noter_au_plus("marie", imap, a, 1500, 3600);
+    // Une autre adresse, un autre protocole, un autre compte : chacun s'écrit.
+    audit.noter_au_plus("marie", imap, Some("192.0.2.2"), 1500, 3600);
+    audit.noter_au_plus(
+        "marie",
+        Evenement::ConnexionCourrier {
+            porte: "smtp",
+            applicatif: None,
+        },
+        a,
+        1500,
+        3600,
+    );
+    audit.noter_au_plus("paul", imap, a, 1500, 3600);
+    // L'intervalle passé, la même s'écrit de nouveau.
+    audit.noter_au_plus("marie", imap, a, 4600, 3600);
+    // Un nom qui n'est pas un compte ne s'écrit ni ne se retient.
+    audit.noter_au_plus("../x", imap, a, 1, 3600);
+    attendre(&audit, "paul", 1);
+    let lues = attendre(&audit, "marie", 4);
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert_eq!(audit.lire("marie", 10).len(), 4, "{lues:?}");
+    let _ = std::fs::remove_dir_all(&racine);
+}
+
+/// **LA TABLE DE REGROUPEMENT EST BORNÉE** : pleine, elle oublie ce qui a plus
+/// d'une heure, puis tout — une entrée de trop, jamais une de moins.
+#[test]
+fn la_table_de_regroupement_est_bornee() {
+    let (envoi, _reception) = std::sync::mpsc::sync_channel(super::RECENTES_MAX.saturating_mul(2));
+    let audit = Audit {
+        racine: atelier("borne"),
+        envoi,
+        perdues: AtomicU64::new(0),
+        recentes: std::sync::Mutex::new(std::collections::HashMap::new()),
+    };
+    let refus = Evenement::Refus { porte: "smtp" };
+    let taille = || audit.recentes.lock().expect("verrou").len();
+    for rang in 0..super::RECENTES_MAX {
+        audit.noter_au_plus("marie", refus, Some(&format!("r{rang}")), 10, 60);
+    }
+    assert_eq!(taille(), super::RECENTES_MAX);
+    // Tout est récent : la table se vide, et la nouvelle entrée y entre.
+    audit.noter_au_plus("marie", refus, Some("neuve"), 20, 60);
+    assert_eq!(taille(), 1);
+    for rang in 1..super::RECENTES_MAX {
+        audit.noter_au_plus("marie", refus, Some(&format!("s{rang}")), 5000, 60);
+    }
+    // Pleine de nouveau : ce qui a plus d'une heure s'oublie seul.
+    audit.noter_au_plus("marie", refus, Some("autre"), 5000, 60);
+    assert_eq!(taille(), super::RECENTES_MAX);
 }

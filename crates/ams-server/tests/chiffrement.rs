@@ -1384,6 +1384,106 @@ fn un_quit_sans_dele_n_efface_rien_et_un_mauvais_mot_de_passe_non_plus() {
     assert!(autre.contains("-ERR Authentication failed"), "{autre}");
 }
 
+/// **POP3 ÉCRIT AU JOURNAL D'AUDIT, ET REGROUPE CE QUI SE RÉPÈTE** (0.2.38).
+///
+/// Deux refus, puis deux ouvertures, depuis la même adresse : une entrée de
+/// chaque, qui dit le protocole et l'adresse. Un compte inconnu n'écrit rien —
+/// pas même un fichier à son nom.
+#[test]
+fn pop3_ecrit_au_journal_d_audit_et_regroupe() {
+    let atelier = atelier("pop3-audit");
+    let Some((cert, cle)) = paire(&atelier.0) else {
+        panic!("{SANS_OPENSSL}");
+    };
+    let magasin = atelier.0.join("comptes.bin");
+    let empreinte = ams_auth::hash_password(b"ouvre-toi", b"seize octets ici").expect("hachable");
+    std::fs::write(
+        &magasin,
+        ams_config::encode_accounts(&[ams_auth::Account {
+            login: String::from("jean"),
+            hash: empreinte,
+            addresses: vec![String::from("jean@example.com")],
+        }])
+        .expect("encodable"),
+    )
+    .expect("écriture");
+    std::fs::set_permissions(&magasin, std::fs::Permissions::from_mode(0o600))
+        .expect("permissions");
+
+    let port_smtp = port_libre();
+    let port_pop3 = port_libre();
+    let config = configuration_pop3(
+        &atelier,
+        port_smtp,
+        Tls {
+            certificate_chain_path: cert.display().to_string(),
+            private_key_path: cle.display().to_string(),
+        },
+        &magasin.display().to_string(),
+        &format!("127.0.0.1:{port_pop3}"),
+    );
+    let repertoire = atelier.0.join("audit");
+    let mut lue =
+        ams_config::decode(&std::fs::read(&config).expect("relisible")).expect("décodable");
+    lue.audit = repertoire.display().to_string();
+    std::fs::write(&config, ams_config::encode(&lue).expect("encodable")).expect("écriture");
+    let _serveur = lancer(&config, port_smtp);
+
+    for _ in 0..2 {
+        let vu = pop3(port_pop3, "USER jean\r\nPASS autre\r\nQUIT\r\n");
+        assert!(vu.contains("-ERR Authentication failed"), "{vu}");
+    }
+    let vu = pop3(port_pop3, "USER paul\r\nPASS ouvre-toi\r\nQUIT\r\n");
+    assert!(vu.contains("-ERR Authentication failed"), "{vu}");
+    for _ in 0..2 {
+        let vu = pop3(
+            port_pop3,
+            "USER jean@example.com\r\nPASS ouvre-toi\r\nQUIT\r\n",
+        );
+        assert!(vu.contains("+OK"), "{vu}");
+    }
+
+    // L'écriture passe par un fil : on laisse la file se vider.
+    let fichier = repertoire.join("jean.jsonl");
+    for _ in 0..200 {
+        let ecrites = std::fs::read_to_string(&fichier).unwrap_or_default();
+        if ecrites.lines().count() >= 2 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    // Un peu plus, pour qu'une entrée de trop ait le temps d'apparaître.
+    std::thread::sleep(Duration::from_millis(200));
+    let lignes: Vec<String> = std::fs::read_to_string(&fichier)
+        .unwrap_or_default()
+        .lines()
+        .map(String::from)
+        .collect();
+    assert_eq!(lignes.len(), 2, "une entrée par geste répété : {lignes:#?}");
+    assert!(
+        lignes[0].contains(r#""event":"auth.refused""#),
+        "{}",
+        lignes[0]
+    );
+    assert!(
+        lignes[1].contains(r#""event":"session.opened""#),
+        "{}",
+        lignes[1]
+    );
+    for ligne in &lignes {
+        assert!(ligne.contains(r#""detail":"pop3""#), "{ligne}");
+        assert!(ligne.contains(r#""source":"127.0.0.1""#), "{ligne}");
+        assert!(
+            !ligne.contains("ouvre-toi") && !ligne.contains("autre"),
+            "{ligne}"
+        );
+    }
+    assert!(
+        !repertoire.join("paul.jsonl").exists(),
+        "un compte inconnu a laissé un fichier à son nom"
+    );
+}
+
 /// **UNE AUTHENTIFICATION REFUSÉE SE DIT AU JOURNAL, SANS RECOPIER CE QU'UN
 /// INCONNU A TAPÉ.**
 ///

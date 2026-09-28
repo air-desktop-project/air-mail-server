@@ -108,6 +108,9 @@ pub struct BoitesConnues {
     /// Les mots de passe applicatifs, quand la configuration en nomme le
     /// magasin. `None` : seul le mot de passe principal ouvre.
     applicatifs: Option<std::sync::Arc<crate::applicatifs::Applicatifs>>,
+    /// Le journal d'audit, où SMTP, IMAP et POP3 écrivent leurs ouvertures et
+    /// leurs refus (0.2.38). `None` : rien ne s'écrit.
+    audit: Option<std::sync::Arc<crate::audit::Audit>>,
     /// L'adresse du postmaster de ce serveur, composée une fois.
     postmaster: String,
     /// Les domaines que ce serveur DÉCLARE servir, en minuscules.
@@ -150,6 +153,7 @@ impl BoitesConnues {
             // Pas de mots de passe applicatifs tant qu'on ne les donne pas :
             // voir `avec_applicatifs`.
             applicatifs: None,
+            audit: None,
             postmaster,
             // **EN MINUSCULES UNE FOIS**, plutôt qu'à chaque `RCPT` : un nom de
             // domaine se compare sans égard à la casse (RFC 5321 §2.4), et le
@@ -221,6 +225,13 @@ impl BoitesConnues {
         self
     }
 
+    /// Lui donne le journal d'audit.
+    #[must_use]
+    pub fn avec_audit(mut self, audit: std::sync::Arc<crate::audit::Audit>) -> Self {
+        self.audit = Some(audit);
+        self
+    }
+
     /// Donne à cette politique les mots de passe applicatifs.
     ///
     /// Tant qu'on ne l'appelle pas, seul le mot de passe principal ouvre.
@@ -249,6 +260,70 @@ impl BoitesConnues {
 }
 
 impl BoitesConnues {
+    /// Note au journal d'audit qu'une session de courrier s'est ouverte pour ce
+    /// compte (0.2.38) — au plus une fois par heure pour ce compte, ce
+    /// protocole, cette adresse et ce mot de passe.
+    ///
+    /// L'adresse et le protocole viennent de la boucle (voir
+    /// `ams_loop_tokio::current_peer`) : la politique est partagée, et ne sait
+    /// pas qui appelle. Hors d'une connexion, rien ne s'écrit.
+    fn temoigner_de_l_ouverture(&self, identite: &[u8], applicatif: Option<&str>) {
+        let (Some(audit), Some((source, porte))) =
+            (self.audit.as_ref(), ams_loop_tokio::current_peer())
+        else {
+            return;
+        };
+        let Some(login) = self.compte_designe(identite) else {
+            return;
+        };
+        audit.noter_au_plus(
+            &login,
+            crate::audit::Evenement::ConnexionCourrier {
+                porte: porte.name(),
+                applicatif,
+            },
+            Some(&crate::api::texte_de_source(source)),
+            crate::maintenant(),
+            3_600,
+        );
+    }
+
+    /// Note au journal d'audit un refus pour ce compte — au plus une fois par
+    /// minute pour ce compte, ce protocole et cette adresse.
+    ///
+    /// **UN IDENTIFIANT QUI NE DÉSIGNE AUCUN COMPTE NE S'ÉCRIT PAS** : ce
+    /// serait écrire ce qu'un inconnu a tapé — parfois son mot de passe, tapé
+    /// dans le mauvais champ.
+    fn temoigner_du_refus(&self, identite: &[u8]) {
+        let (Some(audit), Some((source, porte))) =
+            (self.audit.as_ref(), ams_loop_tokio::current_peer())
+        else {
+            return;
+        };
+        let Some(login) = self.compte_designe(identite) else {
+            return;
+        };
+        audit.noter_au_plus(
+            &login,
+            crate::audit::Evenement::Refus {
+                porte: porte.name(),
+            },
+            Some(&crate::api::texte_de_source(source)),
+            crate::maintenant(),
+            60,
+        );
+    }
+
+    /// Le compte que cette identité désigne — son nom, ou l'une de ses
+    /// adresses —, s'il existe.
+    fn compte_designe(&self, identite: &[u8]) -> Option<String> {
+        let vue = self.comptes.vue();
+        vue.iter()
+            .find(|compte| compte.login.as_bytes() == identite)
+            .or_else(|| ams_auth::route(&vue, identite))
+            .map(|compte| compte.login.clone())
+    }
+
     /// Dit au journal qu'une authentification est refusée.
     ///
     /// # POURQUOI CETTE LIGNE EXISTE
@@ -330,16 +405,22 @@ impl Authenticator for BoitesConnues {
                 },
             })
         });
+        let identite = credentials.authentication_identity;
         match ouverture {
             ams_auth::Ouverture::Refusee => {
-                self.dire_le_refus("", credentials.authentication_identity);
+                self.dire_le_refus("", identite);
+                self.temoigner_du_refus(identite);
                 false
             }
-            ams_auth::Ouverture::Principal => true,
+            ams_auth::Ouverture::Principal => {
+                self.temoigner_de_l_ouverture(identite, None);
+                true
+            }
             ams_auth::Ouverture::Applicatif(id) => {
                 if let Some(applicatifs) = self.applicatifs.as_ref() {
                     applicatifs.noter_l_usage(&id, crate::maintenant());
                 }
+                self.temoigner_de_l_ouverture(identite, Some(&id));
                 true
             }
         }
@@ -435,8 +516,12 @@ impl Authenticator for BoitesConnues {
             &lu.proof,
             sortie,
         );
-        if issue.is_none() {
-            self.dire_le_refus(" SCRAM", login);
+        match issue {
+            None => {
+                self.dire_le_refus(" SCRAM", login);
+                self.temoigner_du_refus(login);
+            }
+            Some(_) => self.temoigner_de_l_ouverture(login, None),
         }
         issue
     }

@@ -131,6 +131,27 @@ where
     A: Authenticator,
     B: Mailboxes,
 {
+    crate::pair::sous(
+        source,
+        crate::pair::Porte::Pop3,
+        Box::pin(conduire_pop3(stream, service, auth, boites, source)),
+    )
+    .await
+}
+
+/// Le corps de [`serve_pop3_connection`], sous son pair.
+async fn conduire_pop3<S, A, B>(
+    stream: &mut S,
+    service: &Pop3Service<'_>,
+    auth: A,
+    boites: &B,
+    source: Source,
+) -> Result<Pop3Summary, Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    A: Authenticator,
+    B: Mailboxes,
+{
     let mut resume = Pop3Summary::default();
 
     // ON NE PARLE PAS À UN BANNI. Interroger le garde ne compte pas comme un
