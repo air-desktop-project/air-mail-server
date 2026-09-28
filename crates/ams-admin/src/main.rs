@@ -928,6 +928,16 @@ fn afficher(config: &Configuration) {
         }
     );
     println!(
+        "FCM                {}",
+        if config.fcm_service_account.is_empty() {
+            String::from(
+                "AUCUN COMPTE DE SERVICE — les appareils Android abonnés ne sont pas réveillés",
+            )
+        } else {
+            format!("compte de service `{}`", config.fcm_service_account)
+        }
+    );
+    println!(
         "mdp applicatifs    {}",
         if config.app_passwords.is_empty() {
             String::from("AUCUN MAGASIN — seul le mot de passe principal ouvre IMAP, SMTP, POP3")

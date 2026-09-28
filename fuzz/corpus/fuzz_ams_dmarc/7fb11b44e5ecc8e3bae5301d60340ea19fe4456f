@@ -1,0 +1,4 @@
+v=DMARC1; p=reject; s=1B0plne
+.v=DM’jtime.co.@k
+; p=reject;co.uk
+ec

@@ -222,6 +222,12 @@ struct Configuration {
   # plutôt que la production : pour les applications signées en développement.
   apnsSandbox @44 :Bool;
 
+  # FCM (Firebase Cloud Messaging) — le fichier JSON du compte de service du
+  # projet Firebase, tel que la console le livre (« Générer une nouvelle clé
+  # privée »), lisible du seul compte de service. Vide : les appareils Android
+  # abonnés ne sont pas réveillés.
+  fcmServiceAccount @45 :Text;
+
   # MTA-STS (RFC 8461) — la politique qu'un domaine publie en HTTPS.
   #
   # **UN CHAMP AJOUTÉ APRÈS COUP DÉCODE DEUX CHAÎNES VIDES**, et deux chaînes

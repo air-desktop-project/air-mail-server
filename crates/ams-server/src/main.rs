@@ -37,6 +37,7 @@ mod brouillons;
 mod comptes;
 mod delegations;
 mod delivery;
+mod fcm;
 mod forme;
 mod idempotence;
 mod imap;
@@ -576,12 +577,15 @@ fn envoyeur_du_reveil(
 ) -> Result<(Arc<dyn crate::reveil::Envoyeur>, Option<String>), String> {
     let mut aiguillage = crate::reveil::Aiguillage::default();
     let mut vapid_publique = None;
-    if options.push_vapid_key.is_empty() && options.apns_key.is_empty() {
+    if options.push_vapid_key.is_empty()
+        && options.apns_key.is_empty()
+        && options.fcm_service_account.is_empty()
+    {
         eprintln!(
             "air-mail-server : réveils — AUCUN CANAL CONFIGURÉ : ils sont décidés et comptés, \
              pas transmis (Web Push : `air-mail-admin vapid <chemin>` puis `--push-vapid-key … \
              --push-contact mailto:…` ; APNs : `--apns-key … --apns-key-id … --apns-team-id … \
-             --apns-topic …`)."
+             --apns-topic …` ; FCM : `--fcm-service-account …`)."
         );
         return Ok((Arc::new(aiguillage), None));
     }
@@ -659,6 +663,19 @@ fn envoyeur_du_reveil(
                 developpement: options.apns_sandbox,
             },
         )));
+    }
+    if !options.fcm_service_account.is_empty() {
+        let chemin = &options.fcm_service_account;
+        refuser_fichier_lisible_par_tous(chemin, "compte de service FCM")?;
+        let json = std::fs::read(chemin)
+            .map_err(|erreur| format!("compte de service FCM `{chemin}` : {erreur}"))?;
+        let compte = crate::fcm::lire_compte_de_service(&json)
+            .map_err(|erreur| format!("compte de service FCM `{chemin}` : {erreur}"))?;
+        eprintln!(
+            "air-mail-server : réveils — FCM TRANSMIS (projet `{}`, compte `{}`).",
+            compte.projet, compte.email
+        );
+        aiguillage.fcm = Some(Arc::new(crate::fcm::Fcm::new(transport.clone(), compte)));
     }
     Ok((Arc::new(aiguillage), vapid_publique))
 }

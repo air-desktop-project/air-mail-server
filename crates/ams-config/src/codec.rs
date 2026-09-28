@@ -433,6 +433,9 @@ pub struct Configuration {
     pub apns_topic: String,
     /// L'environnement de développement d'Apple plutôt que la production.
     pub apns_sandbox: bool,
+    /// Le compte de service FCM (JSON), ou une chaîne vide : FCM n'est alors
+    /// pas transmis.
+    pub fcm_service_account: String,
     /// La file d'attente du serveur.
     pub queue: Queue,
     /// MTA-STS (RFC 8461).
@@ -1029,6 +1032,7 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
         apns_team_id: texte(lu.get_apns_team_id()?)?,
         apns_topic: texte(lu.get_apns_topic()?)?,
         apns_sandbox: lu.get_apns_sandbox(),
+        fcm_service_account: texte(lu.get_fcm_service_account()?)?,
         queue,
         mtasts,
         tlsrpt,
@@ -1183,6 +1187,7 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
         ecrit.set_apns_team_id(&config.apns_team_id);
         ecrit.set_apns_topic(&config.apns_topic);
         ecrit.set_apns_sandbox(config.apns_sandbox);
+        ecrit.set_fcm_service_account(&config.fcm_service_account);
         {
             let mut emission = ecrit.reborrow().init_relay();
             emission.set_enabled(config.relay.enabled);
@@ -1412,6 +1417,7 @@ mod tests {
             apns_team_id: String::from("DEF123GHIJ"),
             apns_topic: String::from("ch.narro.mail"),
             apns_sandbox: true,
+            fcm_service_account: String::from("/var/lib/air-mail/fcm.json"),
             // Les trois écoutes d'un serveur réel : le `25` et le `587` en
             // `STARTTLS`, le `465` en TLS implicite.
             smtp_listeners: vec![

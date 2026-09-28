@@ -400,6 +400,28 @@ air-mail-admin config write /etc/air-mail/ams.conf … \
 - la même exigence que Web Push : un résolveur et des autorités ; une clef
   nommée sans ses identifiants, ou lisible par d'autres, arrête le démarrage.
 
+### Les réveils FCM : Android
+
+Pour les applications Android, le serveur parle à FCM (API HTTP v1), avec le
+**compte de service** du projet Firebase — le fichier JSON que la console livre
+(Paramètres du projet → Comptes de service → « Générer une nouvelle clé
+privée ») :
+
+```sh
+sudo install -o air-mail -g air-mail -m 600 projet-firebase.json /var/lib/air-mail/fcm.json
+air-mail-admin config write /etc/air-mail/ams.conf … \
+    --fcm-service-account /var/lib/air-mail/fcm.json
+```
+
+- le serveur échange une assertion signée par la clef du compte (RS256,
+  RFC 7523) contre un jeton d'accès d'une heure, qu'il garde ; il ne demande
+  que la portée `firebase.messaging` ;
+- les réveils sont des messages de **données** (`{"account":"…"}`) : rien ne
+  s'affiche, l'application se synchronise, et Google ne voit ni sujet ni
+  expéditeur ; un jeton `UNREGISTERED` fait retirer l'abonnement ;
+- ce fichier porte une clef privée : lisible par d'autres, il arrête le
+  démarrage.
+
 ### La délégation : ouvrir une boîte à un autre compte
 
 Une boîte partagée — `support`, `compta` — est un compte comme un autre, dont

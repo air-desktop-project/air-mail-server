@@ -144,6 +144,7 @@ struct Entree {
     apns_team_id: String,
     apns_topic: String,
     apns_sandbox: bool,
+    fcm_service_account: String,
     /// Le dossier des rapports TLS, et le drapeau de remise — LIBRES tous les
     /// deux, y compris incohérents entre eux.
     tlsrpt: String,
@@ -216,6 +217,7 @@ fuzz_target!(|entree: Entree| {
         apns_team_id: entree.apns_team_id.clone(),
         apns_topic: entree.apns_topic.clone(),
         apns_sandbox: entree.apns_sandbox,
+        fcm_service_account: entree.fcm_service_account.clone(),
         require_fqdn_helo: entree.helo_qualifie,
         require_fqdn_sender: entree.expediteur_qualifie,
         require_fqdn_recipient: entree.destinataire_qualifie,

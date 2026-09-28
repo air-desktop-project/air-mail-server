@@ -105,6 +105,8 @@ pub struct Options {
     pub apns_topic: Option<String>,
     /// L'environnement de développement d'Apple.
     pub apns_sandbox: bool,
+    /// Le compte de service FCM. Vide : FCM n'est pas transmis.
+    pub fcm_service_account: Option<PathBuf>,
     /// Où écouter en POP3. Vide : POP3 n'est pas servi.
     pub listen_pop3: Option<SocketAddr>,
     /// Les écoutes POP3, chacune avec son mode TLS.
@@ -274,6 +276,7 @@ impl Default for Options {
             apns_team_id: None,
             apns_topic: None,
             apns_sandbox: false,
+            fcm_service_account: None,
             // PAS DE POP3 PAR DÉFAUT : un port ouvert qu'on n'a pas demandé est
             // une surface de plus, et celui-ci ne sert personne sans certificat.
             listen_pop3: None,
@@ -470,6 +473,7 @@ impl Options {
             apns_team_id: self.apns_team_id.clone().unwrap_or_default(),
             apns_topic: self.apns_topic.clone().unwrap_or_default(),
             apns_sandbox: self.apns_sandbox,
+            fcm_service_account: chemin(self.fcm_service_account.as_ref()),
             tlsrpt: ams_config::Tlsrpt {
                 directory: chemin(self.tlsrpt_dir.as_ref()),
                 send: self.tlsrpt_send,
@@ -674,6 +678,10 @@ OPTIONS DE `config write`
                         et celui de l'application. `--apns-sandbox` vise
                         l'environnement de développement d'Apple. Sans clef,
                         APNs n'est pas transmis.
+    --fcm-service-account <chemin.json>
+                        FCM, pour les appareils Android : le fichier du compte
+                        de service du projet Firebase (lisible du seul compte
+                        de service). Sans lui, FCM n'est pas transmis.
     --listen-pop3 <adr>    où écouter en POP3 avec `STLS` — le 110. RÉPÉTABLE
                            (défaut : pas de POP3)
     --listen-pop3s <adr>   où écouter en POP3 avec TLS IMPLICITE — le 995.
@@ -1344,6 +1352,9 @@ where
             "--apns-team-id" => options.apns_team_id = Some(valeur()?),
             "--apns-topic" => options.apns_topic = Some(valeur()?),
             "--apns-sandbox" => options.apns_sandbox = true,
+            "--fcm-service-account" => {
+                options.fcm_service_account = Some(PathBuf::from(valeur()?));
+            }
             "--resolver" => {
                 let brute = valeur()?;
                 let adresse: SocketAddr = brute
@@ -2263,6 +2274,7 @@ mod tests {
             (&["--apns-key-id"], "attend une valeur"),
             (&["--apns-team-id"], "attend une valeur"),
             (&["--apns-topic"], "attend une valeur"),
+            (&["--fcm-service-account"], "attend une valeur"),
         ] {
             let erreur = parse(arguments).expect_err("refusé");
             assert!(
@@ -3772,6 +3784,12 @@ mod tests {
         let arguments: &[&str] = &["--domain", "mail.example.com"];
         let configuration = ecrire(arguments).en_configuration();
         assert!(configuration.apns_key.is_empty() && !configuration.apns_sandbox);
+        assert!(configuration.fcm_service_account.is_empty());
+        let arguments: &[&str] = &["--fcm-service-account", "/x/fcm.json"];
+        assert_eq!(
+            ecrire(arguments).en_configuration().fcm_service_account,
+            "/x/fcm.json"
+        );
     }
 
     #[test]
