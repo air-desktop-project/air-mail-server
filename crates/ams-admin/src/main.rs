@@ -812,6 +812,10 @@ fn afficher(config: &Configuration) {
         }
     );
     println!(
+        "débit par appareil {} requêtes d'un coup, puis {}/s (API REST, une fois authentifié)",
+        config.api_rate.burst, config.api_rate.per_second
+    );
+    println!(
         "`HELO` qualifié    {}",
         match config.require_fqdn_helo {
             // **UN REFUS SE DIT.** Un exploitant qui pose ce drapeau refuse du

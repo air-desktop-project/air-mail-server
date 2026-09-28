@@ -35,6 +35,7 @@ mod appareils;
 mod applicatifs;
 mod brouillons;
 mod comptes;
+mod debits;
 mod delegations;
 mod delivery;
 mod fcm;
@@ -276,13 +277,21 @@ fn monter_l_api(
          UN MOT DE PASSE N'OUVRE PAS L'ADMINISTRATION : il ouvre le courrier, la soumission \
          et la supervision du compte, et rien de plus."
     );
+    eprintln!(
+        "air-mail-server : débit par appareil sur l'API — {} requêtes d'un coup, puis {}/s ; \
+         au-delà, `429` et `Retry-After: 1`.",
+        options.api_rate.burst, options.api_rate.per_second
+    );
     Ok(Some((
         ecouteur,
         session,
         Arc::new(http_tls),
         Arc::new({
+            // **LE DÉBIT EST CELUI DE CHAQUE APPAREIL** (phase 6), et non d'une
+            // adresse : voir `debits`.
             let api =
-                crate::api::ApiMaildir::new(boites, comptes, remise, domaines, garde, incidents);
+                crate::api::ApiMaildir::new(boites, comptes, remise, domaines, garde, incidents)
+                    .avec_debit(options.api_rate);
             // LA MÊME RÈGLE QUE SMTP : sans file, une soumission qui nomme un
             // destinataire d'ailleurs est refusée. Deux portes, une seule règle.
             let api = match file {

@@ -26,12 +26,15 @@ use std::process::Command;
 use std::sync::Arc;
 
 use ams_api::{Area, Rights, Scope};
-use ams_loop_tokio::http::{Api, Served};
+use ams_loop_tokio::http::{Admission, Api, Served};
 use ams_proto_http::{Method, StatusCode};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 /// Le préambule de §3.4 de RFC 9113.
 const PREAMBULE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+
+/// Les heures que l'admission a reçues pour le compte `horloge`.
+static HEURES_VUES: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
 
 /// Ce que l'API d'essai sait servir.
 struct ApiEssai;
@@ -109,7 +112,7 @@ impl Api for ApiEssai {
     }
 
     fn authenticate(&self, login: &str, password: &[u8]) -> Option<Scope> {
-        (login == "marc" && password == b"secret")
+        (matches!(login, "marc" | "horloge") && password == b"secret")
             .then(|| Scope::one(Area::Mail, Rights::Read).with(Area::Observe, Rights::Read))
     }
 
@@ -130,8 +133,22 @@ impl Api for ApiEssai {
     ) {
     }
 
-    fn session_open(&self, _login: &str, _nonce: u64, _maintenant: u64) -> bool {
-        true
+    /// **LE COMPTE `horloge` NOTE L'HEURE QU'ON LUI DONNE**, et refuse sa
+    /// troisième requête : c'est ce qui éprouve que l'heure se relit à chaque
+    /// requête, et qu'un refus de débit sort bien en `429`. Les autres comptes
+    /// sont toujours admis.
+    fn admit(&self, login: &str, _nonce: u64, maintenant: u64) -> Admission {
+        if login != "horloge" {
+            return Admission::Open;
+        }
+        let mut vues = HEURES_VUES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        vues.push(maintenant);
+        match vues.len() {
+            0..=2 => Admission::Open,
+            _ => Admission::Throttled,
+        }
     }
 
     fn close_session(&self, _login: &str, _nonce: u64) -> bool {
@@ -422,6 +439,90 @@ async fn une_requete_traverse_toute_la_chaine() {
         texte, r#"{"compte":"marc","ressource":"health"}"#,
         "la ressource doit être servie pour le compte du jeton"
     );
+
+    let _ = arret.send(());
+    let _ = tache.await;
+    let _ = std::fs::remove_dir_all(&repertoire);
+}
+
+/// **L'HEURE SE RELIT À CHAQUE REQUÊTE D'UNE MÊME CONNEXION** (0.2.36).
+///
+/// Elle se lisait une fois, à l'acceptation : sur une connexion HTTP/2 gardée
+/// ouverte, un jeton n'expirait donc jamais. Deux requêtes espacées sur la même
+/// connexion doivent voir deux heures, espacées d'autant. Et la troisième, que
+/// la doublure refuse, doit sortir en `429`.
+#[tokio::test]
+async fn l_heure_se_relit_a_chaque_requete_et_le_debit_rend_429() {
+    let repertoire = std::env::temp_dir().join(format!("ams-http-horloge-{}", std::process::id()));
+    std::fs::create_dir_all(&repertoire).expect("répertoire temporaire");
+    let Some((cert, cle)) = certificat_pem(&repertoire) else {
+        let _ = std::fs::remove_dir_all(&repertoire);
+        eprintln!("SAUTÉ : `openssl` n'a pas su fabriquer de certificat.");
+        return;
+    };
+    let (adresse, arret, tache) = ecoute(&cert, &cle).await;
+
+    let connecteur = tokio_rustls::TlsConnector::from(client_tls(&[b"h2"]));
+    let brut = tokio::net::TcpStream::connect(adresse)
+        .await
+        .expect("connexion");
+    let nom = rustls::pki_types::ServerName::try_from("localhost").expect("un nom");
+    let mut flux = connecteur
+        .connect(nom, brut)
+        .await
+        .expect("poignée de main");
+
+    let mut sortie = Vec::from(PREAMBULE);
+    sortie.extend_from_slice(&entete(0, 0x04, 0x00, 0));
+    sortie.extend_from_slice(&requete(
+        1,
+        b"POST",
+        b"/v1/tokens",
+        None,
+        br#"{"login":"horloge","password":"secret"}"#,
+    ));
+    flux.write_all(&sortie).await.expect("écriture");
+    let corps = attendre_un_corps(&mut flux).await.expect("une réponse");
+    let texte = String::from_utf8(corps).expect("de l'UTF-8");
+    let debut = texte.find(':').expect("un premier champ").saturating_add(2);
+    let fin = texte
+        .get(debut..)
+        .and_then(|reste| reste.find('"'))
+        .expect("une fin de chaîne")
+        .saturating_add(debut);
+    let jeton = texte[debut..fin].to_string();
+
+    for rang in [3_u32, 5] {
+        flux.write_all(&requete(rang, b"GET", b"/v1/health", Some(&jeton), &[]))
+            .await
+            .expect("écriture");
+        let corps = attendre_un_corps(&mut flux).await.expect("une réponse");
+        assert!(
+            String::from_utf8_lossy(&corps).contains("health"),
+            "{}",
+            String::from_utf8_lossy(&corps)
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let vues = HEURES_VUES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    assert_eq!(vues.len(), 2, "{vues:?}");
+    let ecart = vues[1].saturating_sub(vues[0]);
+    assert!(
+        ecart >= 40_000,
+        "deux requêtes à cinquante millisecondes d'écart ont vu {ecart} µs : \
+         l'heure est celle de la connexion, pas de la requête"
+    );
+
+    flux.write_all(&requete(7, b"GET", b"/v1/health", Some(&jeton), &[]))
+        .await
+        .expect("écriture");
+    let corps = attendre_un_corps(&mut flux).await.expect("une réponse");
+    let texte = String::from_utf8_lossy(&corps);
+    assert!(texte.contains(r#""status":429"#), "{texte}");
+    assert!(texte.contains("/problems/too-many-requests"), "{texte}");
 
     let _ = arret.send(());
     let _ = tache.await;

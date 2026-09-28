@@ -22,7 +22,7 @@ use crate::error::Reason;
 /// Le `match` ci-dessous la rend exhaustive **à la compilation** : un motif de
 /// plus ne compile pas tant qu'on ne l'y a pas mis. C'est la même discipline
 /// que `Resource::scope`, et pour la même raison.
-fn toutes() -> [Reason; 29] {
+fn toutes() -> [Reason; 30] {
     // Ce `match` ne sert qu'à faire échouer la compilation si un motif
     // s'ajoute : sa valeur est jetée, sa VÉRIFICATION est tout l'objet.
     const fn _exhaustive(reason: Reason) -> u8 {
@@ -56,6 +56,7 @@ fn toutes() -> [Reason; 29] {
             Reason::IdempotencyInFlight => 26,
             Reason::UnknownEncoding => 27,
             Reason::NotADevice => 28,
+            Reason::TooManyRequests => 29,
         }
     }
     [
@@ -88,6 +89,7 @@ fn toutes() -> [Reason; 29] {
         Reason::IdempotencyInFlight,
         Reason::UnknownEncoding,
         Reason::NotADevice,
+        Reason::TooManyRequests,
     ]
 }
 
@@ -321,4 +323,13 @@ fn une_session_sans_appareil_dit_409() {
     let dit = document(Reason::NotADevice);
     assert!(dit.contains("\"status\":409"), "{dit}");
     assert!(dit.contains("clef"), "{dit}");
+}
+
+/// **UN APPAREIL TROP PRESSÉ LIT `429`**, sous son propre type, et quand revenir.
+#[test]
+fn un_appareil_trop_presse_lit_429() {
+    let dit = document(Reason::TooManyRequests);
+    assert!(dit.contains("/problems/too-many-requests"), "{dit}");
+    assert!(dit.contains("\"status\":429"), "{dit}");
+    assert!(dit.contains("une seconde"), "{dit}");
 }

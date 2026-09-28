@@ -41,6 +41,8 @@ struct Entree {
     max_message_octets: u64,
     max_connections: u32,
     tracked_sources: u32,
+    /// Le débit d'un appareil (0.2.36) : la rafale, puis le débit soutenu.
+    debit: [u32; 2],
     bornes: [u32; 7],
     garde: [u32; 5],
     prefixes: [u8; 2],
@@ -249,6 +251,15 @@ fuzz_target!(|entree: Entree| {
             ipv6_prefix_bits: entree.prefixes[1],
         },
         tracked_sources: entree.tracked_sources,
+        // **LE ZÉRO NE TRAVERSE PAS À L'IDENTIQUE, ET C'EST VOULU** : la lecture
+        // lui substitue le défaut, pour qu'un fichier antérieur au réglage ne
+        // fasse pas tout refuser. L'aller-retour s'éprouve donc sur un débit
+        // déjà normalisé — et le zéro, par l'essai d'unité qui le lit.
+        api_rate: ams_guard::Rate {
+            burst: entree.debit[0],
+            per_second: entree.debit[1],
+        }
+        .or_default(),
         timeouts: Timeouts {
             command_seconds: entree.delais[0],
             data_seconds: entree.delais[1],

@@ -423,6 +423,7 @@ authorization: Bearer AQECAAAAAG…</code></pre>
     <tr><td><code>404</code></td><td><code>/problems/not-found</code></td><td>La ressource n'existe pas, <em>ou</em> votre jeton n'ouvre pas la portée qu'elle exige</td></tr>
     <tr><td><code>405</code></td><td><code>/problems/method-not-allowed</code></td><td>La ressource existe mais pas avec ce verbe. Porte <code>allow</code></td></tr>
     <tr><td><code>414</code></td><td><code>/problems/uri-too-long</code></td><td>Plus de segments que le serveur n'en retient</td></tr>
+    <tr><td><code>429</code></td><td><code>/problems/too-many-requests</code></td><td>Cet appareil demande plus vite que son débit (voir <a href="#limites">Limites</a>). Porte <code>retry-after: 1</code> : revenez dans une seconde</td></tr>
     <tr><td><code>500</code>, <code>501</code>, <code>503</code></td><td><code>/problems/internal</code></td><td>Une faute du serveur. Un <code>503</code> est temporaire et mérite d'être réessayé</td></tr>
   </tbody>
 </table>
@@ -1072,8 +1073,9 @@ PUT /v1/me/push
   <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/metrics</span><span class="portee">observe:read</span></div>
   <p>Un objet plat de compteurs entiers. Les noms et le nombre de compteurs dépendent de la version du serveur — ne codez pas en dur la liste attendue.</p>
   <pre><code>{ "mailboxes": 7, "sessions": 2,
-  "wakeupsPrepared": 12, "wakeupsSent": 12, "wakeupsFailed": 0 }</code></pre>
-  <p>Les compteurs sont ceux du compte du jeton. <code>wakeups…</code> comptent les réveils de <strong>ses</strong> appareils, depuis le démarrage du serveur.</p>
+  "wakeupsPrepared": 12, "wakeupsSent": 12, "wakeupsFailed": 0,
+  "requestsThrottled": 0 }</code></pre>
+  <p>Les compteurs sont ceux du compte du jeton. <code>wakeups…</code> comptent les réveils de <strong>ses</strong> appareils, et <code>requestsThrottled</code> les requêtes que son débit a refusées (<code>429</code>), depuis le démarrage du serveur.</p>
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════════ -->
@@ -1095,8 +1097,14 @@ PUT /v1/me/push
     <tr><td>Corps d'une requête JSON</td><td>64 Kio — au-delà, <code>413</code> (<code>/problems/content-too-large</code>)</td></tr>
     <tr><td>Corps d'une soumission ou d'un dépôt</td><td><strong>1 Mio</strong> — le message sans ses pièces jointes ; au-delà, <code>413</code></td></tr>
     <tr><td>Taille d'un message émis</td><td>fixée aussi par la configuration du serveur</td></tr>
+    <tr><td>Débit d'un appareil</td><td><strong>600</strong> requêtes d'un coup, puis <strong>20 par seconde</strong> par défaut (réglables) ; au-delà, <code>429</code> avec <code>retry-after: 1</code></td></tr>
   </tbody>
 </table>
+</div>
+
+<div class="note info">
+  <span class="etiquette">Le débit se compte par appareil, pas par adresse</span>
+  <p>Depuis la 0.2.36, chaque requête authentifiée prend un jeton au seau de <strong>l'appareil</strong> qui a ouvert la session ; les sessions ouvertes par mot de passe partagent le seau de leur compte. Une adresse IP partagée par des milliers d'abonnés mobiles ne fait donc pas payer les uns pour les autres, et se reconnecter ne rend pas la rafale : le seau survit à ses sessions. Un <code>429</code> n'est pas une faute — attendez une seconde et réessayez. <code>/v1/metrics</code> montre combien de requêtes du compte ont été refusées (<code>requestsThrottled</code>).</p>
 </div>
 
 <div class="note prudence">

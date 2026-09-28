@@ -852,6 +852,7 @@ fn toute_reponse_porte_les_memes_protections() {
         StatusCode::CREATED,
         StatusCode::BAD_REQUEST,
         StatusCode::UNAUTHORIZED,
+        StatusCode::TOO_MANY_REQUESTS,
         StatusCode::INTERNAL_SERVER_ERROR,
     ] {
         let champs = super::champs_de_toute_reponse(status, alt);
@@ -871,6 +872,16 @@ fn toute_reponse_porte_les_memes_protections() {
             "{}",
             status.value()
         );
+        // **`retry-after` NE SORT QUE SUR UN 429**, et dit une seconde.
+        let apres = champs
+            .iter()
+            .flatten()
+            .find(|(nom, _)| *nom == b"retry-after")
+            .map(|(_, valeur)| *valeur);
+        match status == StatusCode::TOO_MANY_REQUESTS {
+            true => assert_eq!(apres, Some(&b"1"[..])),
+            false => assert_eq!(apres, None, "{}", status.value()),
+        }
     }
 }
 

@@ -96,6 +96,7 @@ fn type_de(reason: Reason) -> &'static str {
         410 => "/problems/gone",
         413 => "/problems/content-too-large",
         414 => "/problems/uri-too-long",
+        429 => "/problems/too-many-requests",
         501 => "/problems/not-implemented",
         // Tout ce qui est nôtre se dit d'une seule façon : le client n'a rien à
         // en tirer, et le détailler dirait ce que notre code a fait de travers.

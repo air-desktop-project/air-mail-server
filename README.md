@@ -2227,6 +2227,28 @@ de peines en cours **cesse d'apprendre** plutôt que d'oublier un banni : évinc
 « le bannissement qui expire le plus tôt » suffisait à s'en libérer en
 remplissant la table, et le fuzz l'a montré.
 
+### Régler le débit d'un appareil sur l'API
+
+```sh
+./target/release/air-mail-admin config write air-mail.conf \
+    --domain mail.example.com --hosted example.com \
+    --api-requests-burst 600 \
+    --api-requests-per-second 20
+```
+
+Ce sont encore les valeurs par **défaut**. Le garde ci-dessus compte par
+**adresse**, et c'est juste pour ce qui arrive sans jeton ; une requête
+authentifiée, elle, prend un jeton au seau de **l'appareil** qui a ouvert sa
+session — les sessions par mot de passe partageant celui de leur compte. Des
+milliers d'abonnés mobiles derrière une même adresse IPv4 ne paient donc pas les
+uns pour les autres, et se reconnecter ne rend pas la rafale : un seau ne
+s'oublie que plein. Au-delà, l'API répond `429` avec `Retry-After: 1`, et
+`/v1/metrics` compte les refus du compte (`requestsThrottled`).
+
+**Zéro est refusé** par ces deux options : un seau sans contenance, ou qui ne se
+remplit jamais, refuserait tout. Un fichier écrit avant la 0.2.36 décode deux
+zéros, et le serveur les lit comme les valeurs par défaut.
+
 ### Refuser un `HELO` non qualifié
 
 ```sh

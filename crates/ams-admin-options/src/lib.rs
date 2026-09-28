@@ -14,7 +14,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use ams_config::{Configuration, Dkim, Dmarc, Enforcement, Spf, Timeouts, Tls};
-use ams_guard::Thresholds;
+use ams_guard::{Rate, Thresholds};
 use ams_proto_smtp::Limits;
 
 /// Une écoute SMTP : une adresse, et le mode TLS de ce port.
@@ -238,6 +238,8 @@ pub struct Options {
     /// qui dispose d'un `/64` : elle est bornée, et une fois pleine de peines
     /// en cours elle CESSE D'APPRENDRE plutôt que d'oublier un banni.
     pub tracked_sources: u32,
+    /// Le débit d'un appareil sur l'API REST, une fois authentifié.
+    pub api_rate: Rate,
 }
 
 impl Default for Options {
@@ -367,6 +369,8 @@ impl Default for Options {
             // Quatre mille sources : assez pour que la table apprenne, assez peu
             // pour qu'elle tienne dans un budget qu'on peut dire à l'avance.
             tracked_sources: 4096,
+            // LE DÉBIT VIENT DE `ams-guard`, pour la même raison que les seuils.
+            api_rate: Rate::DEFAULT,
         }
     }
 }
@@ -417,6 +421,7 @@ impl Options {
             limits: Limits::DEFAULT,
             guard: self.guard,
             tracked_sources: self.tracked_sources,
+            api_rate: self.api_rate,
             timeouts: Timeouts {
                 command_seconds: self.command_timeout,
                 data_seconds: self.data_timeout,
@@ -855,6 +860,10 @@ OPTIONS DE `config write`
     --ipv4-prefix-bits <n>              1 à 32                  (défaut 32)
     --ipv6-prefix-bits <n>              1 à 128                 (défaut 64)
     --tracked-sources <n>               sources retenues        (défaut 4096)
+
+    LE DÉBIT D'UN APPAREIL SUR L'API REST, une fois authentifié
+    --api-requests-burst <n>            rafale d'un seau plein   (défaut 600)
+    --api-requests-per-second <n>       jetons rendus par seconde (défaut 20)
 
     LES DEUX OPTIONS DKIM VONT ENSEMBLE, ou aucune. Avec elles, le serveur SIGNE
     TOUT CE QU'IL ÉMET : le courrier des comptes authentifiés d'abord, et aussi les
@@ -1627,6 +1636,18 @@ where
             "--ipv6-prefix-bits" => {
                 options.guard.ipv6_prefix_bits = prefixe(&valeur()?, 128)?;
             }
+            "--api-requests-burst" => {
+                options.api_rate.burst = pas_zero(
+                    &valeur()?,
+                    "un seau sans contenance refuserait toute requête authentifiée",
+                )?;
+            }
+            "--api-requests-per-second" => {
+                options.api_rate.per_second = pas_zero(
+                    &valeur()?,
+                    "un seau qui ne se remplit jamais finirait par tout refuser",
+                )?;
+            }
             "--tracked-sources" => {
                 options.tracked_sources = pas_zero(
                     &valeur()?,
@@ -2002,7 +2023,7 @@ fn adresse(valeur: Option<&SocketAddr>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ArgError, Demande, Ecoute, Options, Thresholds, parse};
+    use super::{ArgError, Demande, Ecoute, Options, Rate, Thresholds, parse};
     use core::time::Duration;
     use std::net::SocketAddr;
     use std::path::PathBuf;
@@ -2225,6 +2246,9 @@ mod tests {
                 "ne peut même pas dire `QUIT`",
             ),
             (&["--tracked-sources", "0"], "ne retient rien"),
+            (&["--api-requests-burst", "0"], "sans contenance"),
+            (&["--api-requests-per-second", "0"], "ne se remplit jamais"),
+            (&["--api-requests-burst", "beaucoup"], "n'est pas un nombre"),
             (&["--ipv4-prefix-bits", "0"], "le même seau"),
             (&["--ipv6-prefix-bits", "0"], "le même seau"),
             (&["--ipv4-prefix-bits", "33"], "dépasse 32 bits"),
@@ -2552,7 +2576,7 @@ mod tests {
     /// peut donc pas dériver en silence.
     #[test]
     fn les_quarante_quatre_options_a_valeur_refusent_de_se_taire() {
-        const A_VALEUR: [&str; 44] = [
+        const A_VALEUR: [&str; 46] = [
             "--listen",
             "--maildir",
             "--domain",
@@ -2592,6 +2616,8 @@ mod tests {
             "--ipv4-prefix-bits",
             "--ipv6-prefix-bits",
             "--tracked-sources",
+            "--api-requests-burst",
+            "--api-requests-per-second",
             "--listen-http",
             "--listen-h3",
             "--command-timeout-seconds",
@@ -3231,6 +3257,10 @@ mod tests {
             "48",
             "--tracked-sources",
             "512",
+            "--api-requests-burst",
+            "40",
+            "--api-requests-per-second",
+            "4",
         ]);
         let attendus = Thresholds {
             connections_per_minute: 7,
@@ -3250,6 +3280,12 @@ mod tests {
         let config = options.en_configuration();
         assert_eq!(config.guard, attendus);
         assert_eq!(config.tracked_sources, 512);
+        let debit = Rate {
+            burst: 40,
+            per_second: 4,
+        };
+        assert_eq!(config.api_rate, debit);
+        assert_ne!(debit, Rate::DEFAULT);
         let octets = ams_config::encode(&config).expect("encodable");
         let relue = ams_config::decode(&octets).expect("relisible");
         assert_eq!(relue.guard, attendus);

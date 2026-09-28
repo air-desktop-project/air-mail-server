@@ -116,6 +116,7 @@ fn configuration(
         limits: Limits::DEFAULT,
         guard: Thresholds::DEFAULT,
         tracked_sources: 64,
+        api_rate: ams_guard::Rate::DEFAULT,
         // AUCUNE ÉMISSION : ces essais reçoivent, ils n'émettent pas.
         relay: ams_config::Relay::default(),
         // ET AUCUNE FILE : rien ne sort dans ces essais.

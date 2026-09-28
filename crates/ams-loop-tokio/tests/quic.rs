@@ -580,8 +580,13 @@ impl ams_loop_tokio::http::Api for ApiEssai {
     ) {
     }
 
-    fn session_open(&self, _login: &str, _nonce: u64, _maintenant: u64) -> bool {
-        true
+    fn admit(
+        &self,
+        _login: &str,
+        _nonce: u64,
+        _maintenant: u64,
+    ) -> ams_loop_tokio::http::Admission {
+        ams_loop_tokio::http::Admission::Open
     }
 
     fn close_session(&self, _login: &str, _nonce: u64) -> bool {

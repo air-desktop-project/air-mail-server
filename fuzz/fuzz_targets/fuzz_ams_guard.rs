@@ -14,13 +14,19 @@
 //! Une seconde propriété tient le reste : le garde ne rend jamais un
 //! bannissement dont l'échéance est déjà passée.
 //!
+//! # Et le seau d'un appareil (0.2.36)
+//!
+//! Le même flot fait tourner un seau de jetons : il ne doit JAMAIS laisser
+//! passer plus que sa rafale et ce que le temps écoulé lui a rendu — pas même
+//! quand l'horloge recule, ce qui ne doit rien rendre du tout.
+//!
 //! Harnais **pur** : aucune entrée-sortie (C1).
 
 #![no_main]
 
 use core::time::Duration;
 
-use ams_guard::{Event, Guard, Instant, Key, Slot, Source, Thresholds, Verdict};
+use ams_guard::{Bucket, Event, Guard, Instant, Key, Rate, Slot, Source, Thresholds, Verdict};
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
@@ -147,5 +153,32 @@ fuzz_target!(|entree: Entree| {
                 "le bannissement a été évincé par un flot d'autres sources"
             );
         }
+    }
+
+    // 4. LE SEAU NE LAISSE JAMAIS PASSER PLUS QUE SA RAFALE ET SON DÉBIT.
+    let debit = Rate {
+        burst: u32::from(entree.commands_per_minute),
+        per_second: u32::from(entree.connections_per_minute),
+    }
+    .or_default();
+    let mut seau = Bucket::full(debit, Instant::from_millis(0));
+    let mut ecoule = 0_u64;
+    let mut pris = 0_u64;
+    for coup in &entree.coups {
+        ecoule = ecoule.saturating_add(u64::from(coup.avance % 5000));
+        // Un recul d'horloge de temps en temps : il ne doit rien rendre.
+        let instant = match coup.evenement & 0x80 {
+            0 => ecoule,
+            _ => ecoule.saturating_sub(u64::from(coup.avance)),
+        };
+        if seau.take(debit, Instant::from_millis(instant)) {
+            pris = pris.saturating_add(1);
+        }
+        let plafond = u64::from(debit.burst)
+            .saturating_add(ecoule.saturating_mul(u64::from(debit.per_second)) / 1000);
+        assert!(
+            pris <= plafond,
+            "le seau a laissé passer {pris} requêtes pour un plafond de {plafond}"
+        );
     }
 });

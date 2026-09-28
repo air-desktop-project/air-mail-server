@@ -40,7 +40,7 @@ use std::sync::Arc;
 
 use ams_api::{JSON_MEDIA_TYPE, Resource, Scope};
 use ams_auth::Account;
-use ams_loop_tokio::http::{Api, Served};
+use ams_loop_tokio::http::{Admission, Api, Served};
 use ams_proto_http::{Method, StatusCode};
 use ams_sasl::Credentials;
 use ams_session::http::render::{self, MailboxRow, MessageRow};
@@ -124,6 +124,8 @@ pub struct ApiMaildir {
     /// **C'EST CE QUI REND UN JETON RÉVOCABLE.** Sans ce registre, un jeton se
     /// vérifiait sans rien consulter et n'avait d'autre fin que son expiration.
     sessions: Arc<crate::sessions::Sessions>,
+    /// Le débit de chaque appareil, une fois authentifié (phase 6).
+    debits: crate::debits::Debits,
     /// Le videur (C8), pour voir et lever ses bannissements.
     ///
     /// **LE MÊME QUE CELUI QUI PUNIT**, et non une copie : un état par voie de
@@ -225,6 +227,9 @@ impl ApiMaildir {
             remise,
             domaines,
             sessions: Arc::new(crate::sessions::Sessions::new()),
+            // LE DÉBIT DE DÉPART, que la configuration remplace : voir
+            // `avec_debit`.
+            debits: crate::debits::Debits::new(ams_guard::Rate::DEFAULT),
             guard,
             incidents,
             places: Places::new(VERIFICATIONS_SIMULTANEES),
@@ -253,6 +258,13 @@ impl ApiMaildir {
             // échouerait partout, ce qui est pire que pas de signature.
             dkim: None,
         }
+    }
+
+    /// Lui donne le débit de chaque appareil, tel que la configuration le dit.
+    #[must_use]
+    pub fn avec_debit(mut self, debit: ams_guard::Rate) -> Self {
+        self.debits = crate::debits::Debits::new(debit);
+        self
     }
 
     /// Lui dit quel domaine les appareils font entrer dans leur signature.
@@ -548,6 +560,9 @@ impl ApiMaildir {
         }
         // **ET SES SESSIONS FERMENT**, par mot de passe comme par clef.
         self.sessions.fermer_le_compte(nom);
+        // Ses seaux et ses refus s'oublient aussi : un compte recréé sous ce
+        // nom repart d'un seau plein et d'un compteur à zéro.
+        self.debits.oublier(nom);
         // Et ce que le réveil a compté pour lui s'oublie : un compte recréé
         // sous ce nom n'hérite pas des compteurs de l'ancien.
         if let Some(reveil) = self.reveil.as_ref() {
@@ -2988,6 +3003,10 @@ impl Api for ApiMaildir {
                     ("wakeupsPrepared", self.bilan_du_reveil(account).prepares),
                     ("wakeupsSent", self.bilan_du_reveil(account).transmis),
                     ("wakeupsFailed", self.bilan_du_reveil(account).echoues),
+                    // **CE QUE LE DÉBIT A REFUSÉ SE VOIT** (phase 6) : une
+                    // application qui ralentit sans raison apparente a peut-être
+                    // heurté son seau, et c'est ici qu'on le lit.
+                    ("requestsThrottled", self.debits.refusees(account)),
                 ],
                 sortie,
             )),
@@ -3193,8 +3212,19 @@ impl Api for ApiMaildir {
             .ouvrir(login, nonce, expiry, maintenant, device);
     }
 
-    fn session_open(&self, login: &str, nonce: u64, maintenant: u64) -> bool {
-        self.sessions.ouverte(login, nonce, maintenant)
+    /// # LA SESSION D'ABORD, LE DÉBIT ENSUITE
+    ///
+    /// Une session fermée ne prend pas de jeton : son seau n'a pas à payer ce
+    /// que son jeton ne vaut plus. Et le seau est celui de l'APPAREIL qui a
+    /// ouvert la session — ou celui du compte, pour un mot de passe.
+    fn admit(&self, login: &str, nonce: u64, maintenant: u64) -> Admission {
+        let Some(appareil) = self.sessions.vivante(login, nonce, maintenant) else {
+            return Admission::Closed;
+        };
+        match self.debits.prendre(login, appareil.as_deref(), maintenant) {
+            true => Admission::Open,
+            false => Admission::Throttled,
+        }
     }
 
     fn verify_device(

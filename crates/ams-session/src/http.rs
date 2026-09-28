@@ -93,7 +93,7 @@ pub const MESSAGE_OCTETS_MAX: usize = 1024 * 1024;
 pub const FIELDS_MAX: usize = 8;
 
 /// Combien de champs [`champs_de_toute_reponse`] peut rendre.
-pub const COMMUNS_MAX: usize = 4;
+pub const COMMUNS_MAX: usize = 5;
 
 /// Ce qui ouvre une valeur d'`Alt-Svc` (RFC 7838 §3).
 const ALT_SVC_PREFIXE: &[u8] = b"h3=\":";
@@ -166,6 +166,11 @@ pub fn champs_de_toute_reponse(
         Some((&b"x-content-type-options"[..], &b"nosniff"[..])),
         (status == StatusCode::UNAUTHORIZED).then_some((&b"www-authenticate"[..], &b"Bearer"[..])),
         (!alt_svc.is_empty()).then_some((&b"alt-svc"[..], alt_svc)),
+        // **UN 429 DIT QUAND REVENIR** (§4 de RFC 6585, §10.2.3 de RFC 9110).
+        // Une seconde, toujours : le débit d'un appareil rend au moins un jeton
+        // par seconde (`ams_guard::Rate`), et un client qui reviendrait plus tôt
+        // se ferait refuser pour rien.
+        (status == StatusCode::TOO_MANY_REQUESTS).then_some((&b"retry-after"[..], &b"1"[..])),
     ]
 }
 

@@ -120,14 +120,31 @@ impl Sessions {
     /// **L'EXPIRATION SE REVÉRIFIE ICI**, bien que le jeton la porte et que sa
     /// vérification l'ait déjà lue : une entrée périmée que personne n'a purgée
     /// ne doit pas ouvrir une porte que le jeton fermait.
+    #[cfg(test)]
     #[must_use]
     pub fn ouverte(&self, compte: &str, identifiant: u64, maintenant: u64) -> bool {
+        self.vivante(compte, identifiant, maintenant).is_some()
+    }
+
+    /// Cette session est-elle ouverte, et quel appareil l'a ouverte ?
+    ///
+    /// `None` : elle ne l'est pas. `Some(None)` : elle l'est, par mot de passe.
+    /// **UNE SEULE LECTURE POUR LES DEUX RÉPONSES** : l'admission d'une requête
+    /// a besoin de l'une puis de l'autre, et deux lectures sous deux verrous
+    /// pourraient voir la session se fermer entre les deux.
+    #[must_use]
+    pub fn vivante(
+        &self,
+        compte: &str,
+        identifiant: u64,
+        maintenant: u64,
+    ) -> Option<Option<String>> {
         let table = self.ouvertes.lock().unwrap_or_else(PoisonError::into_inner);
-        table.get(compte).is_some_and(|siennes| {
-            siennes
-                .iter()
-                .any(|(vu, vue)| *vu == identifiant && vue.expiration > maintenant)
-        })
+        table
+            .get(compte)?
+            .iter()
+            .find(|(vu, vue)| *vu == identifiant && vue.expiration > maintenant)
+            .map(|(_, vue)| vue.appareil.clone())
     }
 
     /// Ferme une session. Rend `true` si elle était ouverte.
@@ -158,12 +175,7 @@ impl Sessions {
     /// d'appareil à qui rattacher ce qui n'est plus ouvert.
     #[must_use]
     pub fn appareil(&self, compte: &str, identifiant: u64, maintenant: u64) -> Option<String> {
-        let table = self.ouvertes.lock().unwrap_or_else(PoisonError::into_inner);
-        table
-            .get(compte)?
-            .iter()
-            .find(|(vu, vue)| *vu == identifiant && vue.expiration > maintenant)
-            .and_then(|(_, vue)| vue.appareil.clone())
+        self.vivante(compte, identifiant, maintenant).flatten()
     }
 
     /// Ferme toutes les sessions qu'un appareil a ouvertes, et rend combien.

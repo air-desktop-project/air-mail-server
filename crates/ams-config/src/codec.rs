@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::time::Duration;
 
-use ams_guard::Thresholds;
+use ams_guard::{Rate, Thresholds};
 use ams_proto_smtp::{ClientId, Limits};
 use ams_queue::Backoff;
 use capnp::message::ReaderOptions;
@@ -323,6 +323,9 @@ pub struct Configuration {
     pub guard: Thresholds,
     /// Le nombre de sources que le garde suit en même temps.
     pub tracked_sources: u32,
+    /// Le débit d'un appareil sur l'API REST, une fois authentifié. Chaque
+    /// zéro y prend la valeur de départ : voir [`Rate::or_default`].
+    pub api_rate: Rate,
     /// Les délais.
     pub timeouts: Timeouts,
     /// De quoi chiffrer, ou deux chaînes vides.
@@ -997,6 +1000,14 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
             ipv6_prefix_bits: garde.get_ipv6_prefix_bits(),
         },
         tracked_sources: taille_u32(garde.get_tracked_sources()),
+        // **UN FICHIER ÉCRIT AVANT CES CHAMPS DÉCODE DEUX ZÉROS**, et chacun prend
+        // alors le défaut : on le fait ICI, à la lecture, pour que `config show`
+        // montre ce que le serveur appliquera.
+        api_rate: Rate {
+            burst: garde.get_api_requests_burst(),
+            per_second: garde.get_api_requests_per_second(),
+        }
+        .or_default(),
         timeouts: Timeouts {
             command_seconds: delais.get_command_seconds(),
             data_seconds: delais.get_data_seconds(),
@@ -1089,6 +1100,8 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
             garde.set_ipv4_prefix_bits(config.guard.ipv4_prefix_bits);
             garde.set_ipv6_prefix_bits(config.guard.ipv6_prefix_bits);
             garde.set_tracked_sources(config.tracked_sources);
+            garde.set_api_requests_burst(config.api_rate.burst);
+            garde.set_api_requests_per_second(config.api_rate.per_second);
         }
         {
             let mut delais = ecrit.reborrow().init_timeouts();
@@ -1367,6 +1380,26 @@ mod tests {
     /// Cap'n Proto rend du vide pour un champ qu'un fichier ancien ne porte pas,
     /// et un hôte vide veut dire « pas de relais ». Une mise à jour ne change
     /// donc le chemin du courrier de personne.
+    /// **DEUX ZÉROS PRENNENT LE DÉFAUT**, champ par champ : un fichier écrit
+    /// avant le débit par appareil ne doit pas faire tout refuser.
+    #[test]
+    fn un_debit_a_zero_prend_le_defaut_a_la_lecture() {
+        let mut config = exemple();
+        config.api_rate = Rate {
+            burst: 0,
+            per_second: 0,
+        };
+        let relue = decode(&encode(&config).expect("encodable")).expect("décodable");
+        assert_eq!(relue.api_rate, Rate::DEFAULT);
+        config.api_rate = Rate {
+            burst: 5,
+            per_second: 0,
+        };
+        let relue = decode(&encode(&config).expect("encodable")).expect("décodable");
+        assert_eq!(relue.api_rate.burst, 5);
+        assert_eq!(relue.api_rate.per_second, Rate::DEFAULT.per_second);
+    }
+
     #[test]
     fn un_fichier_sans_relais_remet_en_direct() {
         let config = exemple();
@@ -1382,7 +1415,7 @@ mod tests {
     use super::{Listener, Mtasts, Queue, Relay, Tlsrpt};
     use alloc::string::{String, ToString as _};
     use alloc::vec;
-    use ams_guard::Thresholds;
+    use ams_guard::{Rate, Thresholds};
     use ams_proto_smtp::Limits;
     use core::time::Duration;
 
@@ -1466,6 +1499,10 @@ mod tests {
             limits: Limits::DEFAULT,
             guard: Thresholds::DEFAULT,
             tracked_sources: 4096,
+            api_rate: Rate {
+                burst: 90,
+                per_second: 3,
+            },
             // AUCUNE ÉMISSION dans l'exemple : c'est le défaut, et c'est aussi
             // ce qu'un fichier écrit avant que ce champ n'existe décodera.
             relay: Relay::default(),
@@ -1681,6 +1718,7 @@ mod tests {
         assert_eq!(relue.limits, original.limits);
         assert_eq!(relue.guard, original.guard);
         assert_eq!(relue.timeouts, original.timeouts);
+        assert_eq!(relue.api_rate, original.api_rate);
     }
 
     #[test]

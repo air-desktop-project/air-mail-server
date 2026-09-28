@@ -77,9 +77,11 @@
 extern crate std;
 
 mod guard;
+mod rate;
 mod source;
 mod thresholds;
 
 pub use guard::{Event, Guard, Instant, Slot, Verdict};
+pub use rate::{Bucket, Rate};
 pub use source::{Key, Source};
 pub use thresholds::Thresholds;

@@ -201,6 +201,11 @@ pub enum Reason {
     /// formée, c'est l'état de la session qui l'empêche — une session ouverte
     /// par la clef de l'appareil le pourra.
     NotADevice,
+    /// **Cet appareil demande plus vite que son débit.** `429` (§4 de
+    /// RFC 6585), avec `Retry-After: 1` : un seau vide retrouve toujours un
+    /// jeton dans la seconde. Le débit se compte PAR APPAREIL, et non par
+    /// adresse — voir `ams_guard::Rate`.
+    TooManyRequests,
 }
 
 impl Reason {
@@ -240,6 +245,7 @@ impl Reason {
             | Self::IdempotencyInFlight
             | Self::NotADevice => StatusCode::CONFLICT,
             Self::SyncExpired => StatusCode::GONE,
+            Self::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
             Self::BodyTooLarge => StatusCode::CONTENT_TOO_LARGE,
             Self::AttachmentsNeedDraft | Self::IdempotencyKeyReused | Self::UnknownEncoding => {
                 StatusCode::UNPROCESSABLE_CONTENT
@@ -290,6 +296,9 @@ impl Reason {
             }
             Self::NotADevice => {
                 "cette session n'a pas été ouverte par un appareil ; ouvrez-la avec sa clef"
+            }
+            Self::TooManyRequests => {
+                "trop de requêtes pour cet appareil ; réessayez dans une seconde"
             }
             Self::UnknownEncoding => {
                 "cette partie porte un encodage que le serveur ne sait pas défaire ; lisez le message brut"

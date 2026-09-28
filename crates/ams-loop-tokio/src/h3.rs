@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 
-use ams_api::{Area, JSON_MEDIA_TYPE, PROBLEM_MEDIA_TYPE, Rights, Scope};
+use ams_api::{JSON_MEDIA_TYPE, PROBLEM_MEDIA_TYPE, Scope};
 use ams_guard::{Event as GuardEvent, Source};
 use ams_h3::{Http3, Reponse, Transport};
 use ams_proto_http::{Method, RequestHead, StatusCode};
@@ -27,7 +27,7 @@ use ams_quic_tls::Connection;
 use ams_session::http::{Http, Next};
 
 use crate::guard::SharedGuard;
-use crate::http::Api;
+use crate::http::{Admission, Api};
 
 /// Ce qu'un tampon de travail de la session doit faire.
 ///
@@ -166,6 +166,9 @@ impl<A: Api> ams_h3::Service for ServiceH3<'_, A> {
         let mut portee: (bool, Option<crate::http::ContentRange>) = (false, None);
         // La disposition d'une partie servie : elle ne vient que d'un `Serve`.
         let mut piece: Option<&str> = None;
+        // **UNE SEULE ADMISSION PAR REQUÊTE** : elle prend un jeton au seau de
+        // l'appareil.
+        let admission = crate::http::admettre(self.api, tour.next(), maintenant);
         let (status, media, a_ecrire) = match tour.next() {
             Next::Respond => (tour.status(), PROBLEM_MEDIA_TYPE, tour.body()),
             Next::CheckCredentials { login, password } => {
@@ -254,17 +257,21 @@ impl<A: Api> ams_h3::Service for ServiceH3<'_, A> {
             // d'administration reste IRRÉVOCABLE jusqu'à son heure. C'est
             // l'état d'avant, que cette tranche n'aggrave pas — et la raison
             // pour laquelle l'outil le frappe court par défaut.
-            Next::Serve {
-                account,
-                nonce,
-                scope,
-                ..
-            } if !scope.contains(Scope::one(Area::Admin, Rights::Read))
-                && !self.api.session_open(account, nonce, maintenant) =>
-            {
+            Next::Serve { .. } if admission == Admission::Closed => {
                 let corps = ams_api::problem(ams_api::Reason::SessionClosed, &mut self.rendu)
                     .unwrap_or_default();
                 (StatusCode::UNAUTHORIZED, ams_api::PROBLEM_MEDIA_TYPE, corps)
+            }
+            // **LE MÊME DÉBIT QU'EN HTTP/2** : un appareil qui changerait de
+            // version du protocole ne doit pas y trouver un second seau.
+            Next::Serve { .. } if admission == Admission::Throttled => {
+                let corps = ams_api::problem(ams_api::Reason::TooManyRequests, &mut self.rendu)
+                    .unwrap_or_default();
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    ams_api::PROBLEM_MEDIA_TYPE,
+                    corps,
+                )
             }
             // **LA MÊME RÈGLE QUE DANS L'AUTRE CONDUCTEUR** : deux
             // conducteurs qui n'enrôleraient pas pareil offriraient une porte
@@ -341,8 +348,8 @@ impl<A: Api> ams_h3::Service for ServiceH3<'_, A> {
 // **CE QU'ON ÉCRIT TIENT DANS CE QUI EST ANNONCÉ**, et c'est dit à la
 // compilation plutôt que constaté en production : `avec_champ` perd en silence
 // ce qui dépasse, si bien qu'un champ de trop ne se verrait que dans une réponse
-// où il manque. Deux du composeur, quatre de la session, deux d'une partie,
-// deux de la portée.
+// où il manque. Deux du composeur, cinq de la session (dont le `retry-after` d'un
+// `429`), deux d'une partie, deux de la portée.
 const _: () = assert!(
     ams_h3::CHAMPS_MAX >= 2 + ams_session::http::COMMUNS_MAX + ams_session::http::PIECE_MAX + 2
 );

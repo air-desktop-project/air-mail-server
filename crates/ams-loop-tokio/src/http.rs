@@ -388,15 +388,60 @@ pub trait Api {
         device: Option<&str>,
     );
 
-    /// Cette session est-elle encore ouverte ?
+    /// Cette session est-elle encore ouverte, et son appareil a-t-il encore
+    /// du débit ?
     ///
     /// **CONSULTÉE APRÈS LA VÉRIFICATION DU SCEAU, ET SEULEMENT APRÈS.** La
     /// consulter avant reviendrait à laisser un inconnu faire chercher dans
     /// notre table avec des octets qu'il a choisis.
-    fn session_open(&self, login: &str, nonce: u64, maintenant: u64) -> bool;
+    ///
+    /// **UNE ADMISSION PREND UN JETON** au seau de l'appareil : elle ne se
+    /// demande donc qu'UNE fois par requête. Voir [`Admission`].
+    fn admit(&self, login: &str, nonce: u64, maintenant: u64) -> Admission;
 
     /// Ferme une session. Rend `true` si elle était ouverte.
     fn close_session(&self, login: &str, nonce: u64) -> bool;
+}
+
+/// Ce que le registre dit d'une requête authentifiée.
+///
+/// # LE DÉBIT SE COMPTE ICI, ET NON PAR ADRESSE
+///
+/// Le videur compte par source, et c'est juste pour ce qui arrive SANS
+/// jeton. Une requête authentifiée dit qui elle est : c'est son APPAREIL qui a
+/// un débit, et des milliers d'abonnés mobiles derrière une même adresse IPv4
+/// n'ont pas à se partager le sien.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Admission {
+    /// Servir.
+    Open,
+    /// La session a été fermée : `401`.
+    Closed,
+    /// L'appareil demande plus vite que son débit : `429`, `Retry-After: 1`.
+    Throttled,
+}
+
+/// Ce que le registre dit de cette requête, s'il a quelque chose à en dire.
+///
+/// **UN JETON D'ADMINISTRATION N'EST PAS UNE SESSION** : aucune n'a été
+/// ouverte, il n'y a rien à consulter, et l'exploitant n'a pas de débit — voir
+/// le conducteur. Tout ce qui n'est pas une ressource servie passe aussi.
+///
+/// **LES DEUX CONDUCTEURS L'APPELLENT**, pour ne pas diverger : une règle
+/// appliquée en HTTP/2 et oubliée en HTTP/3 serait une porte par la version du
+/// protocole.
+pub(crate) fn admettre<A: Api>(api: &A, suivant: Next<'_>, maintenant: u64) -> Admission {
+    match suivant {
+        Next::Serve {
+            account,
+            nonce,
+            scope,
+            ..
+        } if !scope.contains(Scope::one(Area::Admin, Rights::Read)) => {
+            api.admit(account, nonce, maintenant)
+        }
+        _ => Admission::Open,
+    }
 }
 
 /// Ce qu'une connexion a fait.
@@ -435,7 +480,6 @@ pub async fn serve_http_connection<S, A>(
     service: &HttpService<'_>,
     api: &A,
     source: Source,
-    maintenant: u64,
 ) -> Result<HttpSummary, Error>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -471,7 +515,7 @@ where
         return Err(Error::Alpn);
     }
 
-    let issue = conduire(&mut chiffre, service, api, source, maintenant, &mut resume).await;
+    let issue = conduire(&mut chiffre, service, api, source, &mut resume).await;
     // On ferme proprement quoi qu'il arrive : un `close_notify` manquant fait
     // croire au pair à une troncature.
     let _ = chiffre.shutdown().await;
@@ -484,7 +528,6 @@ async fn conduire<S, A>(
     service: &HttpService<'_>,
     api: &A,
     source: Source,
-    maintenant: u64,
     resume: &mut HttpSummary,
 ) -> Result<(), Error>
 where
@@ -535,6 +578,15 @@ where
         };
         service.guard.observe(source, GuardEvent::Command);
         let corps_lu = corps.get(..demande.corps).unwrap_or_default();
+        // ── L'HEURE SE LIT À CHAQUE REQUÊTE ─────────────────────────────────
+        //
+        // Elle se lisait UNE FOIS, à l'acceptation de la connexion, et servait
+        // à toutes les requêtes qui la suivaient. Sur une connexion HTTP/2 que
+        // le client garde ouverte — et c'est ce qu'il fait —, un jeton
+        // n'expirait donc JAMAIS : seule une révocation l'arrêtait. Et un jeton
+        // émis tard sur cette connexion naissait avec une échéance déjà
+        // passée pour toutes les autres. HTTP/3 lisait déjà l'heure ici.
+        let maintenant = maintenant();
 
         // La session décide, et ne touche à rien.
         let tour = service
@@ -546,6 +598,9 @@ where
         let mut portee: (bool, Option<ContentRange>) = (false, None);
         // La disposition d'une partie servie : elle ne vient que d'un `Serve`.
         let mut piece: Option<&str> = None;
+        // **UNE SEULE ADMISSION PAR REQUÊTE** : elle prend un jeton au seau de
+        // l'appareil.
+        let admission = admettre(api, tour.next(), maintenant);
         let (status, media, corps_a_ecrire) = match tour.next() {
             Next::Respond => (tour.status(), PROBLEM_MEDIA_TYPE, tour.body()),
             Next::CheckCredentials { login, password } => {
@@ -637,14 +692,7 @@ where
             // d'administration reste IRRÉVOCABLE jusqu'à son heure. C'est
             // l'état d'avant, que cette tranche n'aggrave pas — et la raison
             // pour laquelle l'outil le frappe court par défaut.
-            Next::Serve {
-                account,
-                nonce,
-                scope,
-                ..
-            } if !scope.contains(Scope::one(Area::Admin, Rights::Read))
-                && !api.session_open(account, nonce, maintenant) =>
-            {
+            Next::Serve { .. } if admission == Admission::Closed => {
                 // ── LA SESSION A ÉTÉ FERMÉE ─────────────────────────────────
                 //
                 // Le sceau est bon, l'heure n'est pas passée, et pourtant ce
@@ -658,6 +706,20 @@ where
                 let corps = ams_api::problem(ams_api::Reason::SessionClosed, &mut rendu)
                     .unwrap_or_default();
                 (StatusCode::UNAUTHORIZED, ams_api::PROBLEM_MEDIA_TYPE, corps)
+            }
+            // ── L'APPAREIL DEMANDE PLUS VITE QUE SON DÉBIT ──────────────────
+            //
+            // **CE N'EST PAS UNE FAUTE DU PAIR** pour le videur : un client
+            // pressé n'est pas un attaquant, et le bannir par son adresse
+            // punirait ses voisins. Il lit `429`, et quand revenir.
+            Next::Serve { .. } if admission == Admission::Throttled => {
+                let corps = ams_api::problem(ams_api::Reason::TooManyRequests, &mut rendu)
+                    .unwrap_or_default();
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    ams_api::PROBLEM_MEDIA_TYPE,
+                    corps,
+                )
             }
             // **UN ENRÔLEMENT N'EST PAS UNE SESSION**, et ne passe donc pas
             // par le registre : il n'y a rien à y chercher, et l'y chercher
@@ -1198,9 +1260,7 @@ where
             };
             // Le résultat n'est pas remonté : une connexion qui échoue ne regarde
             // qu'elle. Le journal viendra avec `air-log`.
-            let _ =
-                serve_http_connection(flux, &service, &*api, crate::source_de(pair), maintenant())
-                    .await;
+            let _ = serve_http_connection(flux, &service, &*api, crate::source_de(pair)).await;
             drop(place);
         });
     }

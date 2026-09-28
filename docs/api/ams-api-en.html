@@ -421,6 +421,7 @@ authorization: Bearer AQECAAAAAG…</code></pre>
     <tr><td><code>404</code></td><td><code>/problems/not-found</code></td><td>The resource does not exist, <em>or</em> your token does not open the scope it requires</td></tr>
     <tr><td><code>405</code></td><td><code>/problems/method-not-allowed</code></td><td>The resource exists but not with this verb. Carries <code>allow</code></td></tr>
     <tr><td><code>414</code></td><td><code>/problems/uri-too-long</code></td><td>More segments than the server retains</td></tr>
+    <tr><td><code>429</code></td><td><code>/problems/too-many-requests</code></td><td>This device is asking faster than its rate (see <a href="#limits">Limits</a>). Carries <code>retry-after: 1</code>: come back in one second</td></tr>
     <tr><td><code>500</code>, <code>501</code>, <code>503</code></td><td><code>/problems/internal</code></td><td>A server-side fault. A <code>503</code> is temporary and worth retrying</td></tr>
   </tbody>
 </table>
@@ -1072,8 +1073,9 @@ PUT /v1/me/push
   <div class="ligne"><span class="verbe get">GET</span><span class="chemin">/v1/metrics</span><span class="portee">observe:read</span></div>
   <p>A flat object of integer counters. Their names and number depend on the server version — do not hard-code the list you expect.</p>
   <pre><code>{ "mailboxes": 7, "sessions": 2,
-  "wakeupsPrepared": 12, "wakeupsSent": 12, "wakeupsFailed": 0 }</code></pre>
-  <p>The counters are those of the token's account. <code>wakeups…</code> count wake-ups of <strong>its</strong> devices, since the server started.</p>
+  "wakeupsPrepared": 12, "wakeupsSent": 12, "wakeupsFailed": 0,
+  "requestsThrottled": 0 }</code></pre>
+  <p>The counters are those of the token's account. <code>wakeups…</code> count wake-ups of <strong>its</strong> devices, and <code>requestsThrottled</code> the requests its rate refused (<code>429</code>), since the server started.</p>
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════════ -->
@@ -1095,8 +1097,14 @@ PUT /v1/me/push
     <tr><td>JSON request body</td><td>64 KiB — beyond that, <code>413</code> (<code>/problems/content-too-large</code>)</td></tr>
     <tr><td>Submission or deposit body</td><td><strong>1 MiB</strong> — the message without its attachments; beyond that, <code>413</code></td></tr>
     <tr><td>Sent message size</td><td>also set by the server's configuration</td></tr>
+    <tr><td>Device rate</td><td><strong>600</strong> requests at once, then <strong>20 per second</strong> by default (configurable); beyond that, <code>429</code> with <code>retry-after: 1</code></td></tr>
   </tbody>
 </table>
+</div>
+
+<div class="note info">
+  <span class="etiquette">The rate is counted per device, not per address</span>
+  <p>Since 0.2.36, every authenticated request takes a token from the bucket of the <strong>device</strong> that opened the session; sessions opened with a password share their account's bucket. An IP address shared by thousands of mobile subscribers therefore does not make them pay for one another, and reconnecting does not restore the burst: the bucket outlives its sessions. A <code>429</code> is not a fault — wait one second and retry. <code>/v1/metrics</code> shows how many of the account's requests were refused (<code>requestsThrottled</code>).</p>
 </div>
 
 <div class="note prudence">

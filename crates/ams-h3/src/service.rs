@@ -33,7 +33,7 @@ use ams_proto_http::{RequestHead, StatusCode};
 /// **CETTE BORNE A DÉJÀ ÉTÉ TROP PETITE**, et personne ne l'aurait vu :
 /// [`Reponse::avec_champ`] perd en silence ce qui dépasse. C'est pourquoi
 /// l'appelant en pose une assertion de compilation plutôt que de s'y fier.
-pub const CHAMPS_MAX: usize = 10;
+pub const CHAMPS_MAX: usize = 11;
 
 /// Ce qu'un service rend pour une requête.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

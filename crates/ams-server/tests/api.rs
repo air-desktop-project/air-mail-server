@@ -252,6 +252,7 @@ fn configuration_complete(
         limits: Limits::DEFAULT,
         guard: Thresholds::DEFAULT,
         tracked_sources: 64,
+        api_rate: ams_guard::Rate::DEFAULT,
         // AUCUNE ÉMISSION : ces essais reçoivent, ils n'émettent pas.
         relay: ams_config::Relay::default(),
         // ET AUCUNE FILE : rien ne sort dans ces essais.
@@ -1269,6 +1270,163 @@ fn une_session_fermee_ne_rouvre_plus() {
         "200",
         "un jeton d'administration ne dépend d'aucune session"
     );
+}
+
+/// **UN APPAREIL TROP PRESSÉ LIT `429`, ET SE RECONNECTER NE LUI REND RIEN** (phase 6).
+///
+/// # CE QUE CET ESSAI ÉPROUVE
+///
+/// Que le seau est câblé derrière un vrai jeton, sur une vraie socket : la
+/// rafale passe, la requête suivante lit `429` avec `Retry-After: 1`, et une
+/// SECONDE session du même compte — par mot de passe, donc sans appareil —
+/// tombe dans le même seau au lieu d'en ouvrir un neuf. C'est ce qui empêche
+/// de retrouver sa rafale en se reconnectant.
+///
+/// # IL NE COMPTE PAS AU PLUS JUSTE, ET C'EST VOULU
+///
+/// Le seau se remplit d'un jeton par seconde pendant que l'essai tourne, et
+/// une machine chargée espace les requêtes. L'essai boucle donc jusqu'au
+/// premier refus, et vérifie des bornes qu'aucun ordonnancement ne franchit :
+/// au moins la rafale, puis un refus ; et une session neuve refusée bien avant
+/// la rafale qu'un seau neuf lui aurait donnée.
+#[test]
+fn un_appareil_trop_presse_lit_429_et_se_reconnecter_ne_lui_rend_rien() {
+    // UNE RAFALE DE CINQ, UN JETON PAR SECONDE : assez petit pour l'atteindre
+    // vite, assez grand pour distinguer un seau neuf d'un seau vide.
+    const RAFALE: usize = 5;
+    let atelier = atelier("debit-par-appareil");
+    let Some((cert, cle)) = paire(&atelier.0) else {
+        panic!("{SANS_OPENSSL}");
+    };
+    if std::process::Command::new("curl")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("IGNORÉ : `curl` est absent — cet essai n'a RIEN éprouvé.");
+        return;
+    }
+
+    let empreinte =
+        ams_auth::hash_password(b"secret-initial", b"seize octets ici").expect("hachable");
+    let magasin = atelier.0.join("comptes.bin");
+    std::fs::write(
+        &magasin,
+        ams_config::encode_accounts(&[ams_auth::Account {
+            login: String::from("marie"),
+            hash: empreinte,
+            addresses: vec![String::from("marie@example.com")],
+        }])
+        .expect("encodable"),
+    )
+    .expect("le magasin s'écrit");
+    std::fs::set_permissions(&magasin, std::fs::Permissions::from_mode(0o600))
+        .expect("permissions du magasin");
+
+    let port_smtp = port_libre();
+    let port_http = port_libre();
+    let config = configuration_complete(
+        &atelier,
+        port_smtp,
+        Tls {
+            certificate_chain_path: cert.display().to_string(),
+            private_key_path: cle.display().to_string(),
+        },
+        &magasin.display().to_string(),
+        "",
+        "",
+        &format!("127.0.0.1:{port_http}"),
+        "",
+        CLEF,
+    );
+    let mut lue =
+        ams_config::decode(&std::fs::read(&config).expect("relisible")).expect("décodable");
+    lue.api_rate = ams_guard::Rate {
+        burst: 5,
+        per_second: 1,
+    };
+    std::fs::write(&config, ams_config::encode(&lue).expect("encodable")).expect("écriture");
+    let _serveur = lancer(&config, port_smtp);
+    let base = format!("https://127.0.0.1:{port_http}");
+
+    let jeton_neuf = || -> String {
+        let sortie = std::process::Command::new("curl")
+            .args(["-s", "--insecure", "--http2"])
+            .args(["-H", "Content-Type: application/json"])
+            .args(["-d", r#"{"login":"marie","password":"secret-initial"}"#])
+            .arg(format!("{base}/v1/tokens"))
+            .output()
+            .expect("curl s'exécute");
+        let corps = String::from_utf8_lossy(&sortie.stdout).into_owned();
+        corps
+            .split_once("\"token\":\"")
+            .and_then(|(_, reste)| reste.split_once('"'))
+            .map(|(jeton, _)| jeton.to_string())
+            .unwrap_or_else(|| panic!("un jeton dans {corps}"))
+    };
+    // Une requête, et ses en-têtes et son corps, tels que curl les rend.
+    let appel = |jeton: &str, chemin: &str| -> String {
+        let sortie = std::process::Command::new("curl")
+            .args(["-s", "--insecure", "--http2", "-i"])
+            .args(["-H", &format!("Authorization: Bearer {jeton}")])
+            .arg(format!("{base}{chemin}"))
+            .output()
+            .expect("curl s'exécute");
+        String::from_utf8_lossy(&sortie.stdout).into_owned()
+    };
+    let est_refus = |reponse: &str| reponse.starts_with("HTTP/2 429");
+
+    // ── 1. LA RAFALE PASSE, PUIS UN REFUS ───────────────────────────────────
+    let premier = jeton_neuf();
+    let mut servies = 0_usize;
+    let refus = loop {
+        let reponse = appel(&premier, "/v1/mailboxes");
+        if est_refus(&reponse) {
+            break reponse;
+        }
+        assert!(reponse.starts_with("HTTP/2 200"), "{reponse}");
+        servies = servies.saturating_add(1);
+        assert!(
+            servies < 50,
+            "cinquante requêtes sans refus : le débit n'est pas appliqué"
+        );
+    };
+    assert!(
+        servies >= RAFALE,
+        "la rafale n'est pas passée entière : {servies}"
+    );
+    let refus_minuscule = refus.to_ascii_lowercase();
+    assert!(refus_minuscule.contains("retry-after: 1"), "{refus}");
+    assert!(refus.contains("/problems/too-many-requests"), "{refus}");
+
+    // ── 2. UNE SECONDE SESSION DU MÊME COMPTE N'A PAS DE SEAU NEUF ──────────
+    //
+    // Un seau neuf lui laisserait cinq requêtes. Le seau vide du compte ne peut
+    // en avoir rendu qu'une ou deux pendant ces quelques curl.
+    let second = jeton_neuf();
+    let mut passees = 0_usize;
+    while !est_refus(&appel(&second, "/v1/mailboxes")) {
+        passees = passees.saturating_add(1);
+        assert!(
+            passees < RAFALE,
+            "une session neuve a retrouvé une rafale entière : se reconnecter vide le débit"
+        );
+    }
+
+    // ── 3. LES REFUS SE VOIENT DANS LES MÉTRIQUES DU COMPTE ─────────────────
+    std::thread::sleep(Duration::from_millis(1200));
+    let metriques = appel(&second, "/v1/metrics");
+    assert!(metriques.starts_with("HTTP/2 200"), "{metriques}");
+    let compte = metriques
+        .split_once("\"requestsThrottled\":")
+        .and_then(|(_, reste)| {
+            reste
+                .split(|c: char| !c.is_ascii_digit())
+                .next()
+                .and_then(|chiffres| chiffres.parse::<u64>().ok())
+        })
+        .unwrap_or_else(|| panic!("requestsThrottled dans {metriques}"));
+    assert!(compte >= 2, "deux refus au moins : {metriques}");
 }
 
 /// **UN UTILISATEUR VOIT SES APPAREILS ET EN RÉVOQUE UN, SANS ADMINISTRATEUR.**

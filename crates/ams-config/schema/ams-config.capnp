@@ -749,6 +749,16 @@ struct Guard {
   # chez tous ceux qui ne réécrivent pas leur configuration. Le serveur annonce au
   # démarrage quand il vaut zéro.
   refusedRecipientsPerMinute @7 :UInt32;
+
+  # Le débit d'un APPAREIL sur l'API REST, une fois authentifié : un seau de
+  # jetons par appareil (les sessions ouvertes par mot de passe partagent celui
+  # de leur compte). La rafale, puis les jetons rendus par seconde.
+  #
+  # ZÉRO PREND LE DÉFAUT — six cents, vingt —, et c'est ce qui rend ces champs
+  # ajoutables : un fichier écrit avant eux décode zéro, et deux zéros voudraient
+  # sinon dire « rien ne passe ».
+  apiRequestsBurst @8 :UInt32;
+  apiRequestsPerSecond @9 :UInt32;
 }
 
 # Les délais appartiennent à la boucle : une machine à états qui n'attend jamais
