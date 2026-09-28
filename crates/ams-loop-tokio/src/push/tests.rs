@@ -212,6 +212,20 @@ async fn faux_service(
                     reste = &reste[pris..];
                 }
                 flux.flush().await.expect("vidé");
+                // **ON NE FERME PAS SUR DES OCTETS NON LUS** : le client écrit
+                // encore — l'acquittement de nos réglages, au moins —, et
+                // Linux répond à la fermeture d'une socket qui en a de non lus
+                // par un `RST`, qui détruit chez le client la fin d'une
+                // réponse qu'il n'a pas encore lue. C'est ce qu'a vu la CI, sur
+                // une réponse de 200 000 octets. On ferme proprement, et on lit
+                // jusqu'à ce que le client ferme à son tour.
+                let _ = flux.shutdown().await;
+                let mut reste = [0_u8; 4096];
+                while let Ok(lus) = flux.read(&mut reste).await {
+                    if lus == 0 {
+                        break;
+                    }
+                }
                 return vu;
             }
         }
