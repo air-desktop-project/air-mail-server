@@ -2345,8 +2345,16 @@ HTTPS vérifié que les réveils (il demande `--resolver` et `--mta-sts-anchors`
 Chaque certificat d'une chaîne s'y cherche, et un seul suffit à la refuser.
 **Tant qu'aucune liste n'est chargée, toute attestation se refuse** : on ne
 croit pas une clef dont on ne sait pas si elle a été révoquée. Une relecture qui
-échoue laisse l'ancienne en vigueur et se retente toutes les heures. Un serveur
-sans accès au dehors lit un fichier local à la place :
+échoue laisse l'ancienne en vigueur et se retente toutes les heures.
+
+**UNE LISTE TROP VIEILLE NE SE CROIT PLUS** (0.2.42) : au-delà de sept jours
+(`--android-revocation-max-age <jours>`, 90 au plus), toute attestation se
+refuse comme sans liste — elle ne dit plus ce que Google a révoqué depuis. Le
+journal le dit **dès quarante-huit heures**, pour qu'on répare avant. L'âge est
+celui de la dernière relecture réussie chez Google, ou de la dernière
+modification du fichier local : si la tâche qui le rafraîchit s'arrête, il
+vieillit, et cela se voit. Un serveur sans accès au dehors lit un fichier local
+à la place :
 
 ```sh
 curl -sS -o /var/lib/air-mail/revocation-android.json \

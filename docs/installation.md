@@ -459,7 +459,10 @@ air-mail-admin config write /etc/air-mail/ams.conf … \
 - la liste de révocation de Google se relit chaque jour par HTTPS (il faut
   `--resolver` et `--mta-sts-anchors`) ; **tant qu'aucune n'est chargée, toute
   attestation se refuse**. Sans accès au dehors,
-  `--android-revocation-list <fichier.json>` la lit sur le disque.
+  `--android-revocation-list <fichier.json>` la lit sur le disque — relu chaque
+  heure, et daté de sa dernière modification ;
+- une liste plus vieille que sept jours (`--android-revocation-max-age`) ne se
+  croit plus, et le journal prévient dès quarante-huit heures.
 
 ### Un utilisateur a perdu son seul appareil : la voie de secours
 

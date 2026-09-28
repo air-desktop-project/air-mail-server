@@ -81,6 +81,7 @@ fn configuration(repertoire: &Path, clef: &str) -> PathBuf {
         android_signers: Vec::new(),
         android_roots: String::new(),
         android_revocation: String::new(),
+        android_revocation_max_days: 7,
         require_fqdn_sender: false,
         require_fqdn_recipient: false,
         require_sender_domain: false,

@@ -38,6 +38,9 @@ pub enum Refus {
     /// Aucune liste de révocation n'est encore chargée : on ne croit pas une
     /// clef dont on ne sait pas si Google l'a révoquée.
     SansListe,
+    /// La liste est plus vieille que l'âge admis (0.2.42) : elle ne dit plus
+    /// ce que Google a révoqué depuis.
+    ListePerimee,
     /// Elle n'est pas du base64url, ou pèse trop.
     Illisible,
     /// La politique la refuse — et dit pourquoi.
@@ -51,6 +54,7 @@ impl Refus {
         match self {
             Self::Absente => "aucune attestation, et le serveur l'exige",
             Self::SansListe => "aucune liste de révocation n'est encore chargée",
+            Self::ListePerimee => "la liste de révocation est trop vieille",
             Self::Illisible => "attestation illisible",
             Self::Refusee(raison) => raison.describe(),
         }
@@ -68,6 +72,8 @@ pub struct Juge {
     racines: Vec<Vec<u8>>,
     /// La liste de révocation, partagée avec ce qui la relit.
     liste: Arc<Liste>,
+    /// L'âge, en secondes, au-delà duquel la liste ne se croit plus.
+    age_max: u64,
 }
 
 /// La liste de révocation courante — les numéros de série que Google nomme,
@@ -78,25 +84,38 @@ pub struct Juge {
 /// remplace une autre — voir `ams_attest::read_status_list`.
 #[derive(Debug, Default)]
 pub struct Liste {
-    courante: RwLock<Option<Arc<Vec<u128>>>>,
+    courante: RwLock<Option<Courante>>,
+}
+
+/// Une liste, et la date de ce qu'elle dit.
+#[derive(Debug, Clone)]
+pub struct Courante {
+    /// Les numéros de série, triés.
+    pub series: Arc<Vec<u128>>,
+    /// Quand elle a été publiée — la relecture chez Google, ou la dernière
+    /// modification du fichier —, en secondes depuis l'époque.
+    pub date: u64,
 }
 
 impl Liste {
-    /// Pose une liste neuve. Rend combien de clefs elle nomme.
-    pub fn poser(&self, mut series: Vec<u128>) -> usize {
+    /// Pose une liste neuve, datée. Rend combien de clefs elle nomme.
+    pub fn poser(&self, mut series: Vec<u128>, date: u64) -> usize {
         series.sort_unstable();
         series.dedup();
         let combien = series.len();
         *self
             .courante
             .write()
-            .unwrap_or_else(PoisonError::into_inner) = Some(Arc::new(series));
+            .unwrap_or_else(PoisonError::into_inner) = Some(Courante {
+            series: Arc::new(series),
+            date,
+        });
         combien
     }
 
     /// La liste courante, s'il y en a une.
     #[must_use]
-    pub fn courante(&self) -> Option<Arc<Vec<u128>>> {
+    pub fn courante(&self) -> Option<Courante> {
         self.courante
             .read()
             .unwrap_or_else(PoisonError::into_inner)
@@ -125,6 +144,7 @@ impl Juge {
             signataires: Vec::new(),
             racines: Vec::new(),
             liste: Arc::new(Liste::default()),
+            age_max: 0,
         }
     }
 
@@ -146,6 +166,7 @@ impl Juge {
         paquet: &str,
         signataires: &[[u8; 32]],
         pem_des_racines: Option<&[u8]>,
+        age_max_jours: u16,
     ) -> Result<Self, String> {
         if mode != AndroidAttestation::Off && (paquet.is_empty() || signataires.is_empty()) {
             return Err(String::from(
@@ -173,6 +194,7 @@ impl Juge {
             signataires: signataires.to_vec(),
             racines,
             liste: Arc::new(Liste::default()),
+            age_max: u64::from(age_max_jours).saturating_mul(86_400),
         })
     }
 
@@ -212,7 +234,17 @@ impl Juge {
             (AndroidAttestation::Require, None) => return Err(Refus::Absente),
             (_, Some(encodee)) => encodee,
         };
-        let revoquees = self.liste.courante().ok_or(Refus::SansListe)?;
+        let courante = self.liste.courante().ok_or(Refus::SansListe)?;
+        // **UNE LISTE TROP VIEILLE NE SE CROIT PLUS** (0.2.42) : elle ne dit
+        // rien de ce que Google a révoqué depuis. Refuser, c'est retarder un
+        // enrôlement ; croire, ce serait accepter une clef d'usine qui a fui.
+        let age = u64::try_from(maintenant)
+            .unwrap_or(0)
+            .saturating_sub(courante.date);
+        if age > self.age_max {
+            return Err(Refus::ListePerimee);
+        }
+        let revoquees = courante.series;
         let mut place = std::vec![0_u8; CHAINE_OCTETS_MAX];
         let chaine = ams_api::decode_base64url(encodee.as_bytes(), &mut place)
             .map_err(|_| Refus::Illisible)?;

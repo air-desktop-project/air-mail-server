@@ -16,6 +16,8 @@ macro_rules! vecteur {
 const INVITATION: &str = "invitation d'essai";
 /// 2026-09-28.
 const MAINTENANT: i64 = 1_790_553_600;
+/// Le même instant, comme la liste le date.
+const MAINTENANT_U64: u64 = 1_790_553_600;
 
 fn appareil() -> [u8; 65] {
     <[u8; 65]>::try_from(&vecteur!("appareil.sec1")[..]).expect("soixante-cinq octets")
@@ -58,9 +60,10 @@ fn juge(mode: AndroidAttestation) -> Juge {
         "org.airdesktop.mail",
         &[empreinte()],
         Some(&pem_de_la_racine()),
+        7,
     )
     .expect("un réglage cohérent");
-    assert_eq!(juge.liste().poser(std::vec::Vec::new()), 0);
+    assert_eq!(juge.liste().poser(std::vec::Vec::new(), MAINTENANT_U64), 0);
     juge
 }
 
@@ -170,10 +173,13 @@ fn une_attestation_illisible_ou_refusee_se_refuse() {
         "org.airdesktop.mail",
         &[empreinte()],
         None,
+        7,
     )
     .expect("cohérent");
     assert_eq!(google_seul.racines(), 2);
-    let _ = google_seul.liste().poser(std::vec::Vec::new());
+    let _ = google_seul
+        .liste()
+        .poser(std::vec::Vec::new(), MAINTENANT_U64);
     assert_eq!(
         google_seul.juger(
             &appareil(),
@@ -195,14 +201,15 @@ fn une_attestation_illisible_ou_refusee_se_refuse() {
 
 #[test]
 fn un_reglage_incoherent_ne_fait_pas_de_juge() {
-    assert!(Juge::new(AndroidAttestation::Verify, "", &[empreinte()], None).is_err());
-    assert!(Juge::new(AndroidAttestation::Require, "org.a.b", &[], None).is_err());
-    assert!(Juge::new(AndroidAttestation::Off, "", &[], None).is_ok());
+    assert!(Juge::new(AndroidAttestation::Verify, "", &[empreinte()], None, 7).is_err());
+    assert!(Juge::new(AndroidAttestation::Require, "org.a.b", &[], None, 7).is_err());
+    assert!(Juge::new(AndroidAttestation::Off, "", &[], None, 7).is_ok());
     let vide = Juge::new(
         AndroidAttestation::Verify,
         "org.a.b",
         &[empreinte()],
         Some(b"-----BEGIN PUBLIC KEY-----\n!!!\n-----END PUBLIC KEY-----\n"),
+        7,
     );
     assert!(
         vide.is_err(),
@@ -263,6 +270,7 @@ fn la_liste_de_revocation_decide() {
         "org.airdesktop.mail",
         &[empreinte()],
         Some(&pem_de_la_racine()),
+        7,
     )
     .expect("cohérent");
     assert!(sans.liste().courante().is_none());
@@ -278,7 +286,8 @@ fn la_liste_de_revocation_decide() {
 
     let intermediaire = serie(vecteur!("tee.der"), 1);
     assert_eq!(
-        sans.liste().poser(std::vec![intermediaire, 7, 7, 3]),
+        sans.liste()
+            .poser(std::vec![intermediaire, 7, 7, 3], MAINTENANT_U64),
         3,
         "triée, sans doublon"
     );
@@ -287,7 +296,7 @@ fn la_liste_de_revocation_decide() {
         Err(Refus::Refusee(ams_attest::Refusal::Revoked))
     );
     // Une liste neuve la remplace entière.
-    assert_eq!(sans.liste().poser(std::vec![7]), 1);
+    assert_eq!(sans.liste().poser(std::vec![7], MAINTENANT_U64), 1);
     assert_eq!(
         sans.juger(&appareil(), INVITATION, Some(&chaine), MAINTENANT),
         Ok(Some(Attested::Tee))
@@ -307,4 +316,41 @@ fn une_liste_se_lit_ou_se_refuse() {
         super::lire_la_liste(b"{\"entries\":["),
         Err(ams_attest::Refusal::Malformed)
     );
+}
+
+/// **UNE LISTE TROP VIEILLE NE SE CROIT PLUS** (0.2.42) : sept jours, et une
+/// seconde de plus refuse — comme sans liste.
+#[test]
+fn une_liste_trop_vieille_ne_se_croit_plus() {
+    let juge = juge(AndroidAttestation::Verify);
+    let chaine = encode(vecteur!("tee.der"));
+    let sept_jours: u64 = 604_800;
+    let _ = juge.liste().poser(
+        std::vec::Vec::new(),
+        MAINTENANT_U64.saturating_sub(sept_jours),
+    );
+    assert_eq!(
+        juge.juger(&appareil(), INVITATION, Some(&chaine), MAINTENANT),
+        Ok(Some(Attested::Tee)),
+        "sept jours tout juste passent encore"
+    );
+    let _ = juge.liste().poser(
+        std::vec::Vec::new(),
+        MAINTENANT_U64.saturating_sub(sept_jours.saturating_add(1)),
+    );
+    assert_eq!(
+        juge.juger(&appareil(), INVITATION, Some(&chaine), MAINTENANT),
+        Err(Refus::ListePerimee)
+    );
+    // Une date à venir — une horloge déréglée — ne vieillit pas la liste.
+    let _ = juge
+        .liste()
+        .poser(std::vec::Vec::new(), MAINTENANT_U64.saturating_add(3_600));
+    assert!(
+        juge.juger(&appareil(), INVITATION, Some(&chaine), MAINTENANT)
+            .is_ok()
+    );
+    assert!(!Refus::ListePerimee.dire().is_empty());
+    let courante = juge.liste().courante().expect("posée");
+    assert_eq!(courante.date, MAINTENANT_U64.saturating_add(3_600));
 }

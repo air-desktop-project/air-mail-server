@@ -259,6 +259,11 @@ struct Configuration {
   # attestation se refuse.
   androidRevocation @51 :Text;
 
+  # L'âge, en jours, au-delà duquel la liste de révocation ne se croit plus
+  # (0.2.42) : toute attestation se refuse alors, comme sans liste. ZÉRO PREND
+  # LE DÉFAUT — sept jours —, ce qui rend le champ ajoutable sans rien casser.
+  androidRevocationMaxDays @52 :UInt16;
+
   enum AndroidAttestation {
     off @0;
     verify @1;

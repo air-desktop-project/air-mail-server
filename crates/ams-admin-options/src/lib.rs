@@ -119,6 +119,8 @@ pub struct Options {
     pub android_roots: Option<PathBuf>,
     /// Une liste de révocation locale, au lieu de celle de Google.
     pub android_revocation: Option<PathBuf>,
+    /// L'âge, en jours, au-delà duquel la liste ne se croit plus.
+    pub android_revocation_max_days: u16,
     /// Où écouter en POP3. Vide : POP3 n'est pas servi.
     pub listen_pop3: Option<SocketAddr>,
     /// Les écoutes POP3, chacune avec son mode TLS.
@@ -297,6 +299,7 @@ impl Default for Options {
             android_signers: Vec::new(),
             android_roots: None,
             android_revocation: None,
+            android_revocation_max_days: ams_config::ANDROID_REVOCATION_MAX_DAYS,
             // PAS DE POP3 PAR DÉFAUT : un port ouvert qu'on n'a pas demandé est
             // une surface de plus, et celui-ci ne sert personne sans certificat.
             listen_pop3: None,
@@ -503,6 +506,7 @@ impl Options {
             android_signers: self.android_signers.clone(),
             android_roots: chemin(self.android_roots.as_ref()),
             android_revocation: chemin(self.android_revocation.as_ref()),
+            android_revocation_max_days: self.android_revocation_max_days,
             tlsrpt: ams_config::Tlsrpt {
                 directory: chemin(self.tlsrpt_dir.as_ref()),
                 send: self.tlsrpt_send,
@@ -714,7 +718,7 @@ OPTIONS DE `config write`
     --android-attestation off|verify|require
     --android-package <nom> --android-signer <sha256> [--android-signer …]
     --android-attestation-roots <racines.pem>
-    --android-revocation-list <liste.json>
+    --android-revocation-list <liste.json> [--android-revocation-max-age <jours>]
                         l'attestation de clef d'Android, vérifiée ICI contre les
                         racines de Google — sans Google Play. `verify` juge celle
                         qu'un appareil présente et laisse passer qui n'en a pas
@@ -724,7 +728,9 @@ OPTIONS DE `config write`
                         (PEM de clefs publiques) servent aux essais. La liste de
                         révocation vient de Google, relue chaque jour ; un
                         fichier local la remplace pour un serveur sans accès au
-                        dehors. Tant qu'aucune n'est chargée, rien ne passe.
+                        dehors. Tant qu'aucune n'est chargée, rien ne passe ;
+                        plus vieille que `--android-revocation-max-age` jours
+                        (7 par défaut, 90 au plus), non plus.
     --audit <répertoire>
                         le journal d'audit : un fichier par compte, où
                         s'ajoute ce qui touche à sa sécurité (sessions, refus,
@@ -1450,6 +1456,21 @@ where
             }
             "--android-revocation-list" => {
                 options.android_revocation = Some(PathBuf::from(valeur()?));
+            }
+            "--android-revocation-max-age" => {
+                let jours: u32 = pas_zero(
+                    &valeur()?,
+                    "une liste qui ne vaut aucun jour ferait tout refuser",
+                )?;
+                options.android_revocation_max_days = u16::try_from(jours)
+                    .ok()
+                    .filter(|jours| *jours <= 90)
+                    .ok_or_else(|| {
+                        ArgError::new(
+                            "`--android-revocation-max-age` : 90 jours au plus — au-delà, des \
+                             révocations passeraient sans que rien ne le dise",
+                        )
+                    })?;
             }
             "--resolver" => {
                 let brute = valeur()?;
@@ -2439,6 +2460,12 @@ mod tests {
                 &["--android-attestation", "parfois"],
                 "`off`, `verify` ou `require`",
             ),
+            (&["--android-revocation-max-age", "0"], "aucun jour"),
+            (&["--android-revocation-max-age", "91"], "90 jours au plus"),
+            (
+                &["--android-revocation-max-age", "70000"],
+                "90 jours au plus",
+            ),
             (&["--android-package", "mail"], "n'est pas un nom de paquet"),
             (
                 &["--android-package", "org.1air"],
@@ -2746,7 +2773,8 @@ mod tests {
     /// peut donc pas dériver en silence.
     #[test]
     fn les_quarante_quatre_options_a_valeur_refusent_de_se_taire() {
-        const A_VALEUR: [&str; 51] = [
+        const A_VALEUR: [&str; 52] = [
+            "--android-revocation-max-age",
             "--android-revocation-list",
             "--android-attestation",
             "--android-package",
@@ -4022,6 +4050,8 @@ mod tests {
             "/x/racines.pem",
             "--android-revocation-list",
             "/x/liste.json",
+            "--android-revocation-max-age",
+            "3",
         ];
         let configuration = ecrire(arguments).en_configuration();
         assert_eq!(
@@ -4042,6 +4072,7 @@ mod tests {
         assert_eq!(configuration.android_signers[1], [0xFF; 32]);
         assert_eq!(configuration.android_roots, "/x/racines.pem");
         assert_eq!(configuration.android_revocation, "/x/liste.json");
+        assert_eq!(configuration.android_revocation_max_days, 3);
         for (mode, attendu) in [
             ("off", ams_config::AndroidAttestation::Off),
             ("verify", ams_config::AndroidAttestation::Verify),

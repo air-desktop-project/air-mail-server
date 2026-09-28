@@ -1045,9 +1045,15 @@ fn afficher(config: &Configuration) {
                     format!(", racines en plus `{}`", config.android_roots)
                 },
                 if config.android_revocation.is_empty() {
-                    String::from("lue chez Google chaque jour")
+                    format!(
+                        "lue chez Google chaque jour, crue {} jour(s) au plus",
+                        config.android_revocation_max_days
+                    )
                 } else {
-                    format!("lue dans `{}`", config.android_revocation)
+                    format!(
+                        "lue dans `{}`, crue {} jour(s) au plus après sa modification",
+                        config.android_revocation, config.android_revocation_max_days
+                    )
                 }
             ),
         }

@@ -455,6 +455,9 @@ pub struct Configuration {
     /// La liste de révocation : une chaîne vide pour celle de Google, ou le
     /// chemin d'un fichier local.
     pub android_revocation: String,
+    /// L'âge, en jours, au-delà duquel la liste de révocation ne se croit
+    /// plus. Jamais zéro une fois lu : voir [`ANDROID_REVOCATION_MAX_DAYS`].
+    pub android_revocation_max_days: u16,
     /// La file d'attente du serveur.
     pub queue: Queue,
     /// MTA-STS (RFC 8461).
@@ -838,6 +841,15 @@ impl From<capnp::Error> for Error {
     }
 }
 
+/// L'âge, en jours, au-delà duquel la liste de révocation de Google ne se croit
+/// plus, par défaut (0.2.42).
+///
+/// **SEPT JOURS** : Google demande une relecture quotidienne, et au-delà de
+/// quelques jours ce n'est plus un aléa du réseau mais une panne à réparer. Une
+/// semaine couvre un long week-end ; un mois laisserait passer toute une vague
+/// de révocations sans que rien ne le dise.
+pub const ANDROID_REVOCATION_MAX_DAYS: u16 = 7;
+
 /// Ce que ce serveur fait de l'attestation de clef d'Android.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AndroidAttestation {
@@ -1112,6 +1124,13 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
         },
         android_roots: texte(lu.get_android_roots()?)?,
         android_revocation: texte(lu.get_android_revocation()?)?,
+        // **UN FICHIER ÉCRIT AVANT CE CHAMP DÉCODE ZÉRO**, qui prend le défaut :
+        // on le fait à la lecture, pour que `config show` montre ce qui
+        // s'appliquera.
+        android_revocation_max_days: match lu.get_android_revocation_max_days() {
+            0 => ANDROID_REVOCATION_MAX_DAYS,
+            jours => jours,
+        },
         queue,
         mtasts,
         tlsrpt,
@@ -1286,6 +1305,7 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
         }
         ecrit.set_android_roots(&config.android_roots);
         ecrit.set_android_revocation(&config.android_revocation);
+        ecrit.set_android_revocation_max_days(config.android_revocation_max_days);
         {
             let mut emission = ecrit.reborrow().init_relay();
             emission.set_enabled(config.relay.enabled);
@@ -1479,6 +1499,15 @@ mod tests {
             relue.android_revocation,
             "/var/lib/air-mail/revocation-android.json"
         );
+        assert_eq!(relue.android_revocation_max_days, 3);
+        // Zéro — un fichier antérieur au champ — prend le défaut.
+        let mut ancienne = exemple();
+        ancienne.android_revocation_max_days = 0;
+        let relue = decode(&encode(&ancienne).expect("encodable")).expect("relisible");
+        assert_eq!(
+            relue.android_revocation_max_days,
+            super::ANDROID_REVOCATION_MAX_DAYS
+        );
         for mode in [
             AndroidAttestation::Off,
             AndroidAttestation::Verify,
@@ -1614,6 +1643,7 @@ mod tests {
             android_signers: vec![[7; 32], [8; 32]],
             android_roots: String::from("/var/lib/air-mail/racines-android.pem"),
             android_revocation: String::from("/var/lib/air-mail/revocation-android.json"),
+            android_revocation_max_days: 3,
             // Les trois écoutes d'un serveur réel : le `25` et le `587` en
             // `STARTTLS`, le `465` en TLS implicite.
             smtp_listeners: vec![

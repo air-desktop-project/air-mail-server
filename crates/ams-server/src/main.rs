@@ -3186,6 +3186,7 @@ fn juge_d_attestation(options: &Configuration) -> Result<crate::attestation::Jug
         &options.android_package,
         &options.android_signers,
         racines.as_deref(),
+        options.android_revocation_max_days,
     )?;
     match juge.mode() {
         ams_config::AndroidAttestation::Off => eprintln!(
@@ -3194,11 +3195,13 @@ fn juge_d_attestation(options: &Configuration) -> Result<crate::attestation::Jug
         ),
         mode => eprintln!(
             "air-mail-server : attestation Android `{}` — application `{}`, {} empreinte(s) de \
-             signature, {} racine(s) admise(s), vérifiée ICI sans Google Play.",
+             signature, {} racine(s) admise(s), liste de révocation crue {} jour(s) au plus, \
+             vérifiée ICI sans Google Play.",
             mode.name(),
             options.android_package,
             options.android_signers.len(),
-            juge.racines()
+            juge.racines(),
+            options.android_revocation_max_days
         ),
     }
     Ok(juge)
@@ -3221,27 +3224,40 @@ enum SourceDeListe {
 /// Lit la liste, et la pose si elle se lit entière. Rend `true` si c'est
 /// fait ; sinon le journal dit pourquoi, et l'ancienne reste en vigueur.
 async fn charger_la_liste(liste: &crate::attestation::Liste, source: &SourceDeListe) -> bool {
-    let (octets, d_ou) = match source {
-        SourceDeListe::Fichier(chemin) => (
-            tokio::fs::read(chemin)
+    // **LA DATE EST CELLE DE CE QUE LA LISTE DIT** (0.2.42) : l'instant de la
+    // relecture chez Google ; pour un fichier, sa dernière modification — si la
+    // tâche qui le rafraîchit s'arrête, il vieillit, et cela se voit.
+    let (octets, date, d_ou) = match source {
+        SourceDeListe::Fichier(chemin) => {
+            let date = tokio::fs::metadata(chemin)
                 .await
-                .map_err(|erreur| erreur.to_string()),
-            chemin.display().to_string(),
-        ),
+                .ok()
+                .and_then(|lu| lu.modified().ok())
+                .and_then(|quand| quand.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |depuis| depuis.as_secs());
+            (
+                tokio::fs::read(chemin)
+                    .await
+                    .map_err(|erreur| erreur.to_string()),
+                date,
+                chemin.display().to_string(),
+            )
+        }
         SourceDeListe::Google(transport) => (
             match transport.get(LISTE_DE_GOOGLE, LISTE_OCTETS_MAX).await {
                 Ok(reponse) if reponse.status == 200 => Ok(reponse.body),
                 Ok(reponse) => Err(format!("statut {}", reponse.status)),
                 Err(faute) => Err(format!("{faute:?}")),
             },
+            maintenant(),
             String::from(LISTE_DE_GOOGLE),
         ),
     };
-    match octets.and_then(|octets| {
+    let lue = match octets.and_then(|octets| {
         crate::attestation::lire_la_liste(&octets).map_err(|refus| refus.describe().to_string())
     }) {
         Ok(series) => {
-            let combien = liste.poser(series);
+            let combien = liste.poser(series, date);
             eprintln!(
                 "air-mail-server : liste de révocation Android relue — {combien} clef(s) \
                  révoquée(s) ou suspendue(s), depuis `{d_ou}`"
@@ -3259,7 +3275,19 @@ async fn charger_la_liste(liste: &crate::attestation::Liste, source: &SourceDeLi
             );
             false
         }
+    };
+    // **AU-DELÀ DE QUARANTE-HUIT HEURES, ON LE DIT** — bien avant que l'âge
+    // admis ne fasse tout refuser : l'exploitant a le temps de réparer.
+    if let Some(courante) = liste.courante() {
+        let heures = maintenant().saturating_sub(courante.date) / 3_600;
+        if heures >= 48 {
+            eprintln!(
+                "air-mail-server : ATTENTION — la liste de révocation Android a {heures} heures ; \
+                 au-delà de l'âge admis, toute attestation sera refusée. Vérifier `{d_ou}`."
+            );
+        }
     }
+    lue
 }
 
 /// Relit la liste chaque jour — chaque heure tant qu'elle ne se relit pas.
@@ -3268,16 +3296,20 @@ async fn charger_la_liste(liste: &crate::attestation::Liste, source: &SourceDeLi
 /// `Cache-Control: max-age=86400`. Une clef d'usine révoquée l'est pour de bon,
 /// et un jour de retard ne rouvre rien qu'on ait déjà refusé.
 async fn tenir_la_liste_a_jour(liste: Arc<crate::attestation::Liste>, source: SourceDeListe) {
-    // Un fichier vient d'être lu au démarrage : on attend avant de le relire.
+    // Un fichier vient d'être lu au démarrage, et se relit chaque heure : le
+    // relire coûte une lecture de disque, et c'est ce qui suit sans retard la
+    // tâche qui le rafraîchit.
+    let heure = std::time::Duration::from_secs(3_600);
     let mut prochaine = match source {
-        SourceDeListe::Fichier(_) => std::time::Duration::from_secs(86_400),
+        SourceDeListe::Fichier(_) => heure,
         SourceDeListe::Google(_) => std::time::Duration::ZERO,
     };
     loop {
         tokio::time::sleep(prochaine).await;
-        prochaine = match charger_la_liste(&liste, &source).await {
-            true => std::time::Duration::from_secs(86_400),
-            false => std::time::Duration::from_secs(3_600),
+        let lue = charger_la_liste(&liste, &source).await;
+        prochaine = match (lue, &source) {
+            (true, SourceDeListe::Google(_)) => std::time::Duration::from_secs(86_400),
+            _ => heure,
         };
     }
 }
