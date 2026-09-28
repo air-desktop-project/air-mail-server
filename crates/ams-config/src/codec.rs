@@ -6,6 +6,8 @@ use core::fmt;
 use core::time::Duration;
 
 use ams_guard::{Rate, Thresholds};
+
+use crate::ams_config_capnp::configuration::AndroidAttestation as Lue;
 use ams_proto_smtp::{ClientId, Limits};
 use ams_queue::Backoff;
 use capnp::message::ReaderOptions;
@@ -441,6 +443,15 @@ pub struct Configuration {
     pub fcm_service_account: String,
     /// Le répertoire du journal d'audit, ou une chaîne vide : rien ne s'écrit.
     pub audit: String,
+    /// L'attestation de clef d'Android : ignorée, jugée si présente, ou exigée.
+    pub android_attestation: AndroidAttestation,
+    /// Le nom de paquet de l'application Android.
+    pub android_package: String,
+    /// Les empreintes SHA-256 admises du certificat qui signe l'application.
+    pub android_signers: Vec<[u8; 32]>,
+    /// Un fichier PEM de racines admises en plus de celles de Google, ou une
+    /// chaîne vide.
+    pub android_roots: String,
     /// La file d'attente du serveur.
     pub queue: Queue,
     /// MTA-STS (RFC 8461).
@@ -701,6 +712,10 @@ pub enum Error {
     /// main ferait contacter une adresse que l'API aurait refusée.
     BadPush(String),
 
+    /// L'attestation Android est mal réglée : un mode que ce serveur ne connaît
+    /// pas, ou une empreinte de signature qui ne fait pas trente-deux octets.
+    BadAndroid,
+
     /// Deux mots de passe applicatifs portent le même identifiant.
     ///
     /// L'identifiant est ce par quoi la vérification TROUVE l'entrée : deux
@@ -776,6 +791,10 @@ impl fmt::Display for Error {
                 f,
                 "l'abonnement aux notifications de l'appareil `{id}` est refusé"
             ),
+            Error::BadAndroid => f.write_str(
+                "l'attestation Android est mal réglée : mode inconnu, ou une empreinte de \
+                 signature qui ne fait pas trente-deux octets",
+            ),
             Error::BadDelegation(couple) => write!(
                 f,
                 "la délégation `{couple}` ne se construit pas : de soi à soi, ou des \
@@ -813,6 +832,31 @@ impl fmt::Display for Error {
 impl From<capnp::Error> for Error {
     fn from(cause: capnp::Error) -> Self {
         Error::Malformed(cause.to_string())
+    }
+}
+
+/// Ce que ce serveur fait de l'attestation de clef d'Android.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AndroidAttestation {
+    /// Aucune n'est lue : celle qu'un appareil présente est ignorée.
+    #[default]
+    Off,
+    /// Celle qu'un appareil présente est jugée, et refuse l'enrôlement si elle
+    /// ne passe pas ; un appareil qui n'en présente pas — iOS, un poste — passe.
+    Verify,
+    /// Chaque enrôlement doit en présenter une qui passe.
+    Require,
+}
+
+impl AndroidAttestation {
+    /// Son nom, tel que la ligne de commande et `config show` le disent.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Verify => "verify",
+            Self::Require => "require",
+        }
     }
 }
 
@@ -1047,6 +1091,23 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
         apns_sandbox: lu.get_apns_sandbox(),
         fcm_service_account: texte(lu.get_fcm_service_account()?)?,
         audit: texte(lu.get_audit()?)?,
+        // **UN FICHIER ÉCRIT AVANT CE CHAMP DÉCODE `off`** : rien ne change pour
+        // qui ne réécrit pas sa configuration.
+        android_attestation: match lu.get_android_attestation() {
+            Ok(Lue::Off) => AndroidAttestation::Off,
+            Ok(Lue::Verify) => AndroidAttestation::Verify,
+            Ok(Lue::Require) => AndroidAttestation::Require,
+            Err(_) => return Err(Error::BadAndroid),
+        },
+        android_package: texte(lu.get_android_package()?)?,
+        android_signers: {
+            let mut empreintes = Vec::new();
+            for lue in lu.get_android_signers()?.iter() {
+                empreintes.push(<[u8; 32]>::try_from(lue?).map_err(|_| Error::BadAndroid)?);
+            }
+            empreintes
+        },
+        android_roots: texte(lu.get_android_roots()?)?,
         queue,
         mtasts,
         tlsrpt,
@@ -1205,6 +1266,21 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
         ecrit.set_apns_sandbox(config.apns_sandbox);
         ecrit.set_fcm_service_account(&config.fcm_service_account);
         ecrit.set_audit(&config.audit);
+        ecrit.set_android_attestation(match config.android_attestation {
+            AndroidAttestation::Off => Lue::Off,
+            AndroidAttestation::Verify => Lue::Verify,
+            AndroidAttestation::Require => Lue::Require,
+        });
+        ecrit.set_android_package(&config.android_package);
+        {
+            let mut liste = ecrit.reborrow().init_android_signers(
+                u32::try_from(config.android_signers.len()).unwrap_or(u32::MAX),
+            );
+            for (rang, empreinte) in config.android_signers.iter().enumerate() {
+                liste.set(u32::try_from(rang).unwrap_or(u32::MAX), empreinte);
+            }
+        }
+        ecrit.set_android_roots(&config.android_roots);
         {
             let mut emission = ecrit.reborrow().init_relay();
             emission.set_enabled(config.relay.enabled);
@@ -1384,6 +1460,74 @@ mod tests {
     /// Cap'n Proto rend du vide pour un champ qu'un fichier ancien ne porte pas,
     /// et un hôte vide veut dire « pas de relais ». Une mise à jour ne change
     /// donc le chemin du courrier de personne.
+    /// **L'ATTESTATION ANDROID SE RELIT**, et ce qui est mal réglé se refuse
+    /// (0.2.39) : un mode inconnu, une empreinte qui n'a pas trente-deux octets.
+    #[test]
+    fn l_attestation_android_se_relit_et_se_refuse_mal_reglee() {
+        let config = exemple();
+        let relue = decode(&encode(&config).expect("encodable")).expect("relisible");
+        assert_eq!(relue.android_attestation, AndroidAttestation::Require);
+        assert_eq!(relue.android_package, "org.airdesktop.mail");
+        assert_eq!(relue.android_signers, vec![[7; 32], [8; 32]]);
+        assert_eq!(relue.android_roots, "/var/lib/air-mail/racines-android.pem");
+        for mode in [
+            AndroidAttestation::Off,
+            AndroidAttestation::Verify,
+            AndroidAttestation::Require,
+        ] {
+            let mut autre = exemple();
+            autre.android_attestation = mode;
+            let relue = decode(&encode(&autre).expect("encodable")).expect("relisible");
+            assert_eq!(relue.android_attestation, mode);
+        }
+        assert_eq!(
+            [
+                AndroidAttestation::Off.name(),
+                AndroidAttestation::Verify.name(),
+                AndroidAttestation::Require.name()
+            ],
+            ["off", "verify", "require"]
+        );
+        assert_eq!(AndroidAttestation::default(), AndroidAttestation::Off);
+
+        // Une empreinte de trente et un octets : on l'écrit à la main.
+        let mut message = capnp::message::Builder::new_default();
+        {
+            let octets = encode(&exemple()).expect("encodable");
+            let lu = capnp::serialize::read_message_from_flat_slice(
+                &mut octets.as_slice(),
+                capnp::message::ReaderOptions::new(),
+            )
+            .expect("lisible");
+            let racine: crate::ams_config_capnp::configuration::Reader<'_> =
+                lu.get_root().expect("racine");
+            message.set_root(racine).expect("copiable");
+        }
+        {
+            let mut racine: crate::ams_config_capnp::configuration::Builder<'_> =
+                message.get_root().expect("racine");
+            let mut liste = racine.reborrow().init_android_signers(1);
+            liste.set(0, &[1; 31]);
+        }
+        let courte = capnp::serialize::write_message_to_words(&message);
+        assert_eq!(decode(&courte).map(|_| ()), Err(Error::BadAndroid));
+        assert!(Error::BadAndroid.to_string().contains("trente-deux octets"));
+
+        // Un mode inconnu — écrit par une version future : l'octet qui change
+        // entre `off` et `require` est le sien.
+        let mut eteinte = exemple();
+        eteinte.android_attestation = AndroidAttestation::Off;
+        let eteinte = encode(&eteinte).expect("encodable");
+        let mut inconnue = encode(&exemple()).expect("encodable");
+        let rang = eteinte
+            .iter()
+            .zip(&inconnue)
+            .position(|(a, b)| a != b)
+            .expect("le mode est écrit");
+        inconnue[rang] = 9;
+        assert_eq!(decode(&inconnue).map(|_| ()), Err(Error::BadAndroid));
+    }
+
     /// **DEUX ZÉROS PRENNENT LE DÉFAUT**, champ par champ : un fichier écrit
     /// avant le débit par appareil ne doit pas faire tout refuser.
     #[test]
@@ -1416,7 +1560,7 @@ mod tests {
         assert!(relue.relay.relayhost_password.is_empty());
     }
 
-    use super::{Listener, Mtasts, Queue, Relay, Tlsrpt};
+    use super::{AndroidAttestation, Listener, Mtasts, Queue, Relay, Tlsrpt};
     use alloc::string::{String, ToString as _};
     use alloc::vec;
     use ams_guard::{Rate, Thresholds};
@@ -1456,6 +1600,10 @@ mod tests {
             apns_sandbox: true,
             fcm_service_account: String::from("/var/lib/air-mail/fcm.json"),
             audit: String::from("/var/lib/air-mail/audit"),
+            android_attestation: AndroidAttestation::Require,
+            android_package: String::from("org.airdesktop.mail"),
+            android_signers: vec![[7; 32], [8; 32]],
+            android_roots: String::from("/var/lib/air-mail/racines-android.pem"),
             // Les trois écoutes d'un serveur réel : le `25` et le `587` en
             // `STARTTLS`, le `465` en TLS implicite.
             smtp_listeners: vec![

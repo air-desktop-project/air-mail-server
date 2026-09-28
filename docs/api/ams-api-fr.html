@@ -423,6 +423,7 @@ authorization: Bearer AQECAAAAAG…</code></pre>
     <tr><td><code>404</code></td><td><code>/problems/not-found</code></td><td>La ressource n'existe pas, <em>ou</em> votre jeton n'ouvre pas la portée qu'elle exige</td></tr>
     <tr><td><code>405</code></td><td><code>/problems/method-not-allowed</code></td><td>La ressource existe mais pas avec ce verbe. Porte <code>allow</code></td></tr>
     <tr><td><code>414</code></td><td><code>/problems/uri-too-long</code></td><td>Plus de segments que le serveur n'en retient</td></tr>
+    <tr><td><code>422</code></td><td><code>/problems/attestation-refused</code></td><td>L'attestation Android d'une clef n'est pas recevable (enrôlement, appairage)</td></tr>
     <tr><td><code>429</code></td><td><code>/problems/too-many-requests</code></td><td>Cet appareil demande plus vite que son débit (voir <a href="#limites">Limites</a>). Porte <code>retry-after: 1</code> : revenez dans une seconde</td></tr>
     <tr><td><code>500</code>, <code>501</code>, <code>503</code></td><td><code>/problems/internal</code></td><td>Une faute du serveur. Un <code>503</code> est temporaire et mérite d'être réessayé</td></tr>
   </tbody>
@@ -491,6 +492,12 @@ authorization: Bearer AQECAAAAAG…</code></pre>
     <p>L'<code>invitation</code> et la <code>publicKey</code>, elles, <strong>ne s'échappent jamais</strong> : leur alphabet est celui de §5 de RFC 4648, qui ne contient rien qu'un encodeur JSON échapperait. Les y accepter n'ouvrirait aucun usage.</p>
     <p>Un <code>name</code> de plus de 128 octets une fois déséchappé rend <code>400</code>, <strong>sans consommer l'invitation</strong>.</p>
   </div>
+  <div class="note info">
+    <span class="etiquette">Android : l'attestation de la clef (0.2.39)</span>
+    <p>Un appareil Android peut prouver que sa clef a été <strong>créée dans le matériel</strong> (TEE ou StrongBox), <strong>par notre application</strong>, sur un téléphone <strong>verrouillé au démarrage vérifié</strong>. Il ajoute au corps un champ <code>"attestation"</code> : sa chaîne de certificats d'attestation (<code>KeyStore.getCertificateChain</code>), en DER mis bout à bout — la feuille d'abord, la racine en dernier —, écrite en base64url sans remplissage.</p>
+    <p><strong>Le défi est le SHA-256 de l'invitation</strong>, telle qu'écrite : l'application le calcule et le passe à <code>KeyGenParameterSpec.Builder.setAttestationChallenge</code> <em>avant</em> de créer sa clef. Pour un appairage (<code>POST /v1/me/devices</code>), c'est le SHA-256 du défi d'appairage.</p>
+    <p>Le serveur la vérifie <strong>lui-même</strong>, contre les racines de Google, sans Google Play ni appel réseau. Selon sa configuration, il l'ignore, la juge quand elle est présente, ou l'exige. Refusée — ou absente quand elle est exigée —, l'enrôlement rend <code>422</code> avec <code>/problems/attestation-refused</code>, <strong>sans consommer l'invitation</strong> ; laquelle des règles a manqué ne se dit pas. <code>/v1/me/devices</code> dit ensuite où vit la clef : <code>"attestation": "tee"</code>, <code>"strongbox"</code>, ou <code>null</code>.</p>
+  </div>
   <div class="note prudence">
     <span class="etiquette">Une invitation ne vaut que pour le PREMIER appareil</span>
     <p>Elle n'est pas consommée par un registre : elle cesse de valoir parce que le compte a désormais un appareil. Rejouer la même invitation — même encore valide — rend <code>409</code> avec <code>/problems/conflict</code>.</p>
@@ -503,6 +510,7 @@ authorization: Bearer AQECAAAAAG…</code></pre>
       <tr><td><code>400</code></td><td>La clef n'est pas un point de la courbe, ou n'a pas la bonne taille.</td></tr>
       <tr><td><code>409</code></td><td>Ce compte a déjà un appareil enrôlé.</td></tr>
       <tr><td><code>404</code></td><td>Le compte de l'invitation n'existe plus.</td></tr>
+      <tr><td><code>422</code></td><td>L'attestation Android est refusée, ou absente alors que le serveur l'exige (<code>/problems/attestation-refused</code>).</td></tr>
       <tr><td><code>501</code></td><td>Ce serveur n'a pas de magasin d'appareils configuré.</td></tr>
     </tbody>
   </table>

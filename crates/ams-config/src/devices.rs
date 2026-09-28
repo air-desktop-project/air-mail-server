@@ -20,7 +20,7 @@ use ams_auth::{CLE_OCTETS, Cle, check_login};
 use capnp::message::ReaderOptions;
 use capnp::serialize;
 
-use crate::ams_devices_capnp::{PushChannel as CanalLu, devices};
+use crate::ams_devices_capnp::{KeyAttestation as AttestationLue, PushChannel as CanalLu, devices};
 use crate::codec::{Error, TRAVERSAL_LIMIT_WORDS, texte};
 use crate::push::{Push, PushChannel};
 
@@ -66,6 +66,29 @@ pub struct Device {
     /// **DANS LA FICHE, ET NON À CÔTÉ** : révoquer l'appareil l'éteint, sans
     /// qu'un second fichier puisse l'oublier.
     pub push: Option<Push>,
+    /// Ce que l'attestation de sa clef a établi à l'enrôlement, s'il y en a eu
+    /// une (0.2.39).
+    pub attestation: Option<Attested>,
+}
+
+/// Où vit une clef dont l'attestation a été vérifiée.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Attested {
+    /// Dans l'environnement d'exécution sécurisé du processeur (TEE).
+    Tee,
+    /// Dans une puce de sécurité à part (StrongBox).
+    StrongBox,
+}
+
+impl Attested {
+    /// Son nom, tel que l'API le rend.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Tee => "tee",
+            Self::StrongBox => "strongbox",
+        }
+    }
 }
 
 /// Lit un fichier d'appareils.
@@ -167,6 +190,15 @@ pub fn decode_devices(octets: &[u8]) -> Result<Vec<Device>, Error> {
             ),
         };
 
+        // UNE VALEUR QUE LE SCHÉMA NE CONNAÎT PAS rejette le magasin, comme un
+        // canal inconnu : lui donner un sens par défaut serait lui en inventer
+        // un.
+        let attestation = match appareil.get_attestation() {
+            Ok(AttestationLue::None) => None,
+            Ok(AttestationLue::Tee) => Some(Attested::Tee),
+            Ok(AttestationLue::StrongBox) => Some(Attested::StrongBox),
+            Err(_) => return Err(Error::BadPush(id)),
+        };
         appareils.push(Device {
             login,
             id,
@@ -175,6 +207,7 @@ pub fn decode_devices(octets: &[u8]) -> Result<Vec<Device>, Error> {
             enrolled: appareil.get_enrolled(),
             last_seen: appareil.get_last_seen(),
             push,
+            attestation,
         });
     }
     Ok(appareils)
@@ -201,6 +234,11 @@ pub fn encode_devices(appareils: &[Device]) -> Result<Vec<u8>, Error> {
             case.set_public_key(&appareil.public_key.octets());
             case.set_enrolled(appareil.enrolled);
             case.set_last_seen(appareil.last_seen);
+            case.set_attestation(match appareil.attestation {
+                None => AttestationLue::None,
+                Some(Attested::Tee) => AttestationLue::Tee,
+                Some(Attested::StrongBox) => AttestationLue::StrongBox,
+            });
             if let Some(push) = &appareil.push {
                 case.set_push_channel(match push.channel() {
                     PushChannel::Apns => CanalLu::Apns,

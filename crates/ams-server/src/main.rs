@@ -33,6 +33,7 @@ mod api;
 mod apns;
 mod appareils;
 mod applicatifs;
+mod attestation;
 mod audit;
 mod brouillons;
 mod comptes;
@@ -209,6 +210,7 @@ fn monter_l_api(
     reveil: Option<Arc<crate::reveil::Reveil>>,
     vapid: Option<String>,
     audit: Option<Arc<crate::audit::Audit>>,
+    juge: crate::attestation::Juge,
     file: Option<ams_loop_tokio::Spool>,
     message_max: usize,
     port_h3: Option<u16>,
@@ -383,6 +385,8 @@ fn monter_l_api(
                 Some(audit) => api.avec_audit(audit),
                 None => api,
             };
+            // **ET CE QU'ON EXIGE DE L'ATTESTATION D'UNE CLEF ANDROID** (0.2.39).
+            let api = api.avec_attestation(juge);
             // **ET LA CLÉ QUI SCELLE LES INVITATIONS**, la même que celle des
             // jetons : sans elle, `POST /v1/invitations` rend 501.
             let api = api.avec_scellement(scellement);
@@ -2597,6 +2601,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         reveil.clone(),
         vapid_publique.clone(),
         audit.clone(),
+        juge_d_attestation(&options)?,
         file.as_ref().map(|attente| attente.as_ref().clone()),
         message_max,
         port_h3,
@@ -3126,6 +3131,44 @@ fn dire_les_injections(protocole: &str, commande: &str, combien: u64) {
         "air-mail-server : {protocole} ; {combien} pair(s) ont glissé une commande derrière leur \
          `{commande}` — connexion REFUSÉE"
     );
+}
+
+/// Le juge de l'attestation de clef d'Android, tel que la configuration le
+/// décrit (0.2.39) — et ce qu'on en dit au démarrage.
+///
+/// **UN RÉGLAGE INCOHÉRENT ARRÊTE LE DÉMARRAGE** : juger sans paquet ni
+/// empreinte laisserait passer n'importe quelle application, et un fichier de
+/// racines illisible ferait refuser tous les appareils sans dire pourquoi.
+fn juge_d_attestation(options: &Configuration) -> Result<crate::attestation::Juge, String> {
+    let racines =
+        if options.android_roots.is_empty() {
+            None
+        } else {
+            Some(std::fs::read(&options.android_roots).map_err(|erreur| {
+                format!("racines Android `{}` : {erreur}", options.android_roots)
+            })?)
+        };
+    let juge = crate::attestation::Juge::new(
+        options.android_attestation,
+        &options.android_package,
+        &options.android_signers,
+        racines.as_deref(),
+    )?;
+    match juge.mode() {
+        ams_config::AndroidAttestation::Off => eprintln!(
+            "air-mail-server : attestation Android NON LUE — la clef d'un appareil n'a pas à \
+             prouver où elle vit (`config write … --android-attestation verify|require`)"
+        ),
+        mode => eprintln!(
+            "air-mail-server : attestation Android `{}` — application `{}`, {} empreinte(s) de \
+             signature, {} racine(s) admise(s), vérifiée ICI sans Google Play.",
+            mode.name(),
+            options.android_package,
+            options.android_signers.len(),
+            juge.racines()
+        ),
+    }
+    Ok(juge)
 }
 
 /// Où vivent les clés d'idempotence : `<brouillons>/.cles`.

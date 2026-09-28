@@ -177,6 +177,7 @@ fn appareil(login: &str, id: &str, abonne: bool) -> ams_config::Device {
         public_key: ams_auth::Cle::lire(&CLE).expect("le point générateur"),
         enrolled: 1,
         last_seen: 0,
+        attestation: None,
         push: abonne.then(|| {
             ams_config::Push::new(
                 ams_config::PushChannel::Apns,

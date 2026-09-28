@@ -146,11 +146,13 @@ mod scram;
 pub use accounts::{decode_accounts, encode_accounts};
 pub use app_passwords::{APP_NOM_OCTETS_MAX, decode_app_passwords, encode_app_passwords};
 pub use codec::{
-    Configuration, Dkim, Dmarc, Enforcement, Error, Listener, Mtasts, Queue, Relay, Spf,
-    TRAVERSAL_LIMIT_WORDS, Timeouts, Tls, Tlsrpt, decode, encode,
+    AndroidAttestation, Configuration, Dkim, Dmarc, Enforcement, Error, Listener, Mtasts, Queue,
+    Relay, Spf, TRAVERSAL_LIMIT_WORDS, Timeouts, Tls, Tlsrpt, decode, encode,
 };
 pub use delegations::{Delegation, Rights, decode_delegations, encode_delegations};
-pub use devices::{Device, ID_OCTETS_MAX, NOM_OCTETS_MAX, decode_devices, encode_devices};
+pub use devices::{
+    Attested, Device, ID_OCTETS_MAX, NOM_OCTETS_MAX, decode_devices, encode_devices,
+};
 pub use index::{decode_index, encode_index};
 pub use journal::{
     Delta, Disparu, Journal, Perime, Present, VANISHED_MAX, decode_journal, encode_journal,

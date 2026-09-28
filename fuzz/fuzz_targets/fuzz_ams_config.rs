@@ -148,6 +148,12 @@ struct Entree {
     apns_sandbox: bool,
     fcm_service_account: String,
     audit: String,
+    /// L'attestation Android (0.2.39) : le mode, le paquet, les empreintes, les
+    /// racines.
+    android_mode: u8,
+    android_package: String,
+    android_signers: Vec<[u8; 32]>,
+    android_roots: String,
     /// Le dossier des rapports TLS, et le drapeau de remise — LIBRES tous les
     /// deux, y compris incohérents entre eux.
     tlsrpt: String,
@@ -222,6 +228,14 @@ fuzz_target!(|entree: Entree| {
         apns_sandbox: entree.apns_sandbox,
         fcm_service_account: entree.fcm_service_account.clone(),
         audit: entree.audit.clone(),
+        android_attestation: match entree.android_mode % 3 {
+            0 => ams_config::AndroidAttestation::Off,
+            1 => ams_config::AndroidAttestation::Verify,
+            _ => ams_config::AndroidAttestation::Require,
+        },
+        android_package: entree.android_package.clone(),
+        android_signers: entree.android_signers.clone(),
+        android_roots: entree.android_roots.clone(),
         require_fqdn_helo: entree.helo_qualifie,
         require_fqdn_sender: entree.expediteur_qualifie,
         require_fqdn_recipient: entree.destinataire_qualifie,

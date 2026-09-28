@@ -59,6 +59,7 @@ fn appareil(login: &str, id: &str, clef: &[u8; CLE_OCTETS]) -> Device {
         enrolled: 1_790_000_000,
         last_seen: 1_790_003_600,
         push: None,
+        attestation: None,
     }
 }
 
@@ -441,6 +442,43 @@ fn un_canal_inconnu_est_refuse() {
     // deux premiers octets du troisième.
     octets[rang + 16] = 9;
     octets[rang + 17] = 0;
+    assert!(matches!(
+        decode_devices(&octets),
+        Err(crate::Error::BadPush(_))
+    ));
+}
+
+/// **L'ATTESTATION D'UNE CLEF SE RELIT** — rien, TEE ou StrongBox (0.2.39).
+#[test]
+fn l_attestation_d_une_clef_se_relit() {
+    use crate::Attested;
+    for attestation in [None, Some(Attested::Tee), Some(Attested::StrongBox)] {
+        let mut atteste = appareil("jean", "a1", &CLE_VALIDE);
+        atteste.attestation = attestation;
+        let relu =
+            decode_devices(&encode_devices(&[atteste]).expect("encodable")).expect("relisible");
+        assert_eq!(relu[0].attestation, attestation);
+    }
+    assert_eq!(Attested::Tee.name(), "tee");
+    assert_eq!(Attested::StrongBox.name(), "strongbox");
+}
+
+/// Une attestation d'une sorte inconnue — écrite par une version future — fait
+/// refuser le magasin, comme un canal inconnu.
+#[test]
+fn une_attestation_inconnue_est_refusee() {
+    let mut atteste = appareil("jean", "a1", &CLE_VALIDE);
+    atteste.enrolled = 0x1122_3344_5566_7788;
+    let mut octets = encode_devices(&[atteste]).expect("encodable");
+    let repere = 0x1122_3344_5566_7788_u64.to_le_bytes();
+    let rang = octets
+        .windows(8)
+        .position(|fenetre| fenetre == repere)
+        .expect("la date d'enrôlement est dans les données");
+    // L'attestation, seize bits, loge dans le trou du troisième mot, derrière
+    // le canal.
+    octets[rang + 18] = 9;
+    octets[rang + 19] = 0;
     assert!(matches!(
         decode_devices(&octets),
         Err(crate::Error::BadPush(_))

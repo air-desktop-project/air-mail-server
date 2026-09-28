@@ -284,10 +284,18 @@ impl<A: Api> ams_h3::Service for ServiceH3<'_, A> {
                 account,
                 public_key,
                 name,
+                invitation,
+                attestation,
             } => {
-                let servi = self
-                    .api
-                    .enrol(account, public_key, name, self.source, &mut self.rendu);
+                let servi = self.api.enrol(
+                    account,
+                    public_key,
+                    name,
+                    invitation,
+                    attestation,
+                    self.source,
+                    &mut self.rendu,
+                );
                 (servi.status, servi.media, servi.body)
             }
             Next::Serve {

@@ -367,6 +367,9 @@ pub struct PairingRequest<'a> {
     pub public_key: &'a str,
     /// Le nom que son propriétaire lui donne. Peut être vide.
     pub name: &'a str,
+    /// L'attestation de la clef du NOUVEL appareil, en base64url, s'il en
+    /// présente une (0.2.39). Son défi est le condensat de `challenge`.
+    pub attestation: Option<&'a str>,
 }
 
 /// Lit une demande d'appairage.
@@ -389,7 +392,9 @@ pub fn read_pairing_request(corps: &[u8]) -> Result<PairingRequest<'_>, Error> {
     let mut signature = None;
     let mut public_key = None;
     let mut name = "";
-    // Quel champ : 1 `challenge`, 2 `signature`, 3 `publicKey`, 4 `name`.
+    let mut attestation = None;
+    // Quel champ : 1 `challenge`, 2 `signature`, 3 `publicKey`, 4 `name`,
+    // 5 `attestation`.
     let mut quel = 0_u8;
 
     loop {
@@ -401,11 +406,13 @@ pub fn read_pairing_request(corps: &[u8]) -> Result<PairingRequest<'_>, Error> {
                     clef.is("signature"),
                     clef.is("publicKey"),
                     clef.is("name"),
+                    clef.is("attestation"),
                 ) {
-                    (true, _, _, _) => 1,
-                    (_, true, _, _) => 2,
-                    (_, _, true, _) => 3,
-                    (_, _, _, true) => 4,
+                    (true, _, _, _, _) => 1,
+                    (_, true, _, _, _) => 2,
+                    (_, _, true, _, _) => 3,
+                    (_, _, _, true, _) => 4,
+                    (_, _, _, _, true) => 5,
                     _ => return Err(mauvais),
                 };
             }
@@ -416,6 +423,7 @@ pub fn read_pairing_request(corps: &[u8]) -> Result<PairingRequest<'_>, Error> {
                     2 => signature = Some(clair),
                     3 => public_key = Some(clair),
                     4 => name = clair,
+                    5 => attestation = Some(clair),
                     _ => return Err(mauvais),
                 }
             }
@@ -428,6 +436,7 @@ pub fn read_pairing_request(corps: &[u8]) -> Result<PairingRequest<'_>, Error> {
         signature: signature.ok_or(mauvais)?,
         public_key: public_key.ok_or(mauvais)?,
         name,
+        attestation,
     })
 }
 
@@ -582,6 +591,9 @@ pub struct DeviceRow<'a> {
     /// **LE CANAL, PAS LE JETON** : savoir lequel de ses appareils sonne est
     /// utile à l'utilisateur ; l'adresse où il sonne ne l'est pas.
     pub push: Option<&'a str>,
+    /// Où vit sa clef, si son attestation l'a établi à l'enrôlement (`tee`,
+    /// `strongbox`) ; `None` sinon (0.2.39).
+    pub attestation: Option<&'a str>,
 }
 
 /// Écrit la liste des appareils d'un compte.
@@ -605,6 +617,8 @@ pub fn write_devices<'o>(
         json.field_u64("lastSeenAt", appareil.last_seen)?;
         json.key("push")?;
         ecrire_un_texte_facultatif(&mut json, appareil.push)?;
+        json.key("attestation")?;
+        ecrire_un_texte_facultatif(&mut json, appareil.attestation)?;
         json.end_object()?;
     }
     json.end_array()?;

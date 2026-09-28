@@ -1,0 +1,18 @@
+[package]
+name = "ams-attest"
+description = "Attestation de clef Android (Key Attestation) : chaîne, KeyDescription et politique, sans entrée-sortie"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+p256 = { workspace = true }
+p384 = { workspace = true }
+rsa = { workspace = true }
+sha2 = { workspace = true }
+
+[lints]
+workspace = true

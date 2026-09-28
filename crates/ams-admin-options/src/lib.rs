@@ -109,6 +109,14 @@ pub struct Options {
     pub fcm_service_account: Option<PathBuf>,
     /// Le répertoire du journal d'audit. Vide : rien ne s'écrit.
     pub audit: Option<PathBuf>,
+    /// L'attestation de clef d'Android : ignorée, jugée si présente, exigée.
+    pub android_attestation: ams_config::AndroidAttestation,
+    /// Le nom de paquet de l'application Android.
+    pub android_package: Option<String>,
+    /// Les empreintes SHA-256 admises du certificat qui signe l'application.
+    pub android_signers: Vec<[u8; 32]>,
+    /// Des racines admises en plus de celles de Google.
+    pub android_roots: Option<PathBuf>,
     /// Où écouter en POP3. Vide : POP3 n'est pas servi.
     pub listen_pop3: Option<SocketAddr>,
     /// Les écoutes POP3, chacune avec son mode TLS.
@@ -282,6 +290,10 @@ impl Default for Options {
             apns_sandbox: false,
             fcm_service_account: None,
             audit: None,
+            android_attestation: ams_config::AndroidAttestation::Off,
+            android_package: None,
+            android_signers: Vec::new(),
+            android_roots: None,
             // PAS DE POP3 PAR DÉFAUT : un port ouvert qu'on n'a pas demandé est
             // une surface de plus, et celui-ci ne sert personne sans certificat.
             listen_pop3: None,
@@ -483,6 +495,10 @@ impl Options {
             apns_sandbox: self.apns_sandbox,
             fcm_service_account: chemin(self.fcm_service_account.as_ref()),
             audit: chemin(self.audit.as_ref()),
+            android_attestation: self.android_attestation,
+            android_package: self.android_package.clone().unwrap_or_default(),
+            android_signers: self.android_signers.clone(),
+            android_roots: chemin(self.android_roots.as_ref()),
             tlsrpt: ams_config::Tlsrpt {
                 directory: chemin(self.tlsrpt_dir.as_ref()),
                 send: self.tlsrpt_send,
@@ -691,6 +707,16 @@ OPTIONS DE `config write`
                         FCM, pour les appareils Android : le fichier du compte
                         de service du projet Firebase (lisible du seul compte
                         de service). Sans lui, FCM n'est pas transmis.
+    --android-attestation off|verify|require
+    --android-package <nom> --android-signer <sha256> [--android-signer …]
+    --android-attestation-roots <racines.pem>
+                        l'attestation de clef d'Android, vérifiée ICI contre les
+                        racines de Google — sans Google Play. `verify` juge celle
+                        qu'un appareil présente et laisse passer qui n'en a pas
+                        (iOS, les postes) ; `require` l'exige de tous. Le paquet
+                        et l'empreinte du certificat qui SIGNE l'application
+                        sont exigés dès qu'elle est jugée. Les racines en plus
+                        (PEM de clefs publiques) servent aux essais.
     --audit <répertoire>
                         le journal d'audit : un fichier par compte, où
                         s'ajoute ce qui touche à sa sécurité (sessions, refus,
@@ -1375,6 +1401,45 @@ where
                 options.fcm_service_account = Some(PathBuf::from(valeur()?));
             }
             "--audit" => options.audit = Some(PathBuf::from(valeur()?)),
+            "--android-attestation" => {
+                options.android_attestation = match valeur()?.as_str() {
+                    "off" => ams_config::AndroidAttestation::Off,
+                    "verify" => ams_config::AndroidAttestation::Verify,
+                    "require" => ams_config::AndroidAttestation::Require,
+                    autre => {
+                        return Err(ArgError::new(format!(
+                            "`--android-attestation` attend `off`, `verify` ou `require`, pas \
+                             `{autre}`"
+                        )));
+                    }
+                };
+            }
+            "--android-package" => {
+                let nom = valeur()?;
+                if !paquet_android(&nom) {
+                    return Err(ArgError::new(format!(
+                        "`{nom}` n'est pas un nom de paquet Android : des segments de lettres, \
+                         chiffres et `_`, séparés par des points"
+                    )));
+                }
+                options.android_package = Some(nom);
+            }
+            "--android-signer" => {
+                let brute = valeur()?;
+                let Some(empreinte) = empreinte_sha256(&brute) else {
+                    return Err(ArgError::new(format!(
+                        "`{brute}` n'est pas une empreinte SHA-256 : soixante-quatre chiffres \
+                         hexadécimaux, avec ou sans `:` — ce que `keytool -list -v` ou \
+                         `apksigner verify --print-certs` écrit"
+                    )));
+                };
+                if !options.android_signers.contains(&empreinte) {
+                    options.android_signers.push(empreinte);
+                }
+            }
+            "--android-attestation-roots" => {
+                options.android_roots = Some(PathBuf::from(valeur()?));
+            }
             "--resolver" => {
                 let brute = valeur()?;
                 let adresse: SocketAddr = brute
@@ -1702,6 +1767,20 @@ where
              client découvre un port HTTP/3, et il s'annonce depuis les réponses HTTP/2",
         ));
     }
+    // ── UNE ATTESTATION SANS APPLICATION NE PROUVE RIEN ─────────────────────
+    //
+    // Juger une attestation, c'est vérifier qu'elle nomme NOTRE application :
+    // son paquet, et le certificat qui la signe. Sans eux, toute application
+    // installée sur un téléphone intègre passerait — celle d'un attaquant
+    // comprise.
+    if options.android_attestation != ams_config::AndroidAttestation::Off
+        && (options.android_package.is_none() || options.android_signers.is_empty())
+    {
+        return Err(ArgError::new(
+            "`--android-attestation verify|require` demande `--android-package` et au moins un \
+             `--android-signer` : sans eux, n'importe quelle application passerait",
+        ));
+    }
     // UNE ROTATION QUI NE ROTATIONNE RIEN. Sans API, aucun jeton n'est scellé ni
     // vérifié : renouveler le secret ne changerait rien à rien, et laisserait
     // croire qu'on vient de révoquer quelque chose.
@@ -1859,6 +1938,40 @@ fn valider_les_controles_dns(options: &Options) -> Result<(), ArgError> {
         ));
     }
     Ok(())
+}
+
+/// Un nom de paquet Android : au moins deux segments, séparés par des points,
+/// chacun de lettres ASCII, de chiffres et de `_`, et commençant par une lettre.
+fn paquet_android(nom: &str) -> bool {
+    let segments: Vec<&str> = nom.split('.').collect();
+    segments.len() >= 2
+        && segments.iter().all(|segment| {
+            segment.starts_with(|c: char| c.is_ascii_alphabetic())
+                && segment
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+}
+
+/// Une empreinte SHA-256 écrite en hexadécimal, avec ou sans `:` entre les
+/// octets.
+fn empreinte_sha256(brute: &str) -> Option<[u8; 32]> {
+    let chiffres: Vec<u8> = brute.bytes().filter(|octet| *octet != b':').collect();
+    // **DES CHIFFRES HEXADÉCIMAUX, ET RIEN D'AUTRE** : `from_str_radix` admet un
+    // `+` de tête, et « +f » passerait pour un octet.
+    if chiffres.len() != 64 || !chiffres.iter().all(u8::is_ascii_hexdigit) {
+        return None;
+    }
+    let mut empreinte = [0_u8; 32];
+    // Des chiffres déjà vérifiés : la conversion ne peut pas échouer.
+    let valeur = |chiffre: u8| char::from(chiffre).to_digit(16).unwrap_or(0);
+    for (octet, paire) in empreinte.iter_mut().zip(chiffres.chunks(2)) {
+        let (fort, faible) = paire.split_at(1);
+        let haut = fort.first().copied().map_or(0, valeur);
+        let bas = faible.first().copied().map_or(0, valeur);
+        *octet = u8::try_from((haut << 4) | bas).unwrap_or(0);
+    }
+    Some(empreinte)
 }
 
 /// Les deux options de SCRAM vont ensemble, ou aucune.
@@ -2311,6 +2424,40 @@ mod tests {
             (&["--apns-topic"], "attend une valeur"),
             (&["--fcm-service-account"], "attend une valeur"),
             (&["--audit"], "attend une valeur"),
+            (
+                &["--android-attestation", "parfois"],
+                "`off`, `verify` ou `require`",
+            ),
+            (&["--android-package", "mail"], "n'est pas un nom de paquet"),
+            (
+                &["--android-package", "org.1air"],
+                "n'est pas un nom de paquet",
+            ),
+            (
+                &["--android-package", "org.air-desktop"],
+                "n'est pas un nom de paquet",
+            ),
+            (&["--android-signer", "abcd"], "n'est pas une empreinte"),
+            (
+                &[
+                    "--android-signer",
+                    "+f0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+                ],
+                "n'est pas une empreinte",
+            ),
+            (
+                &["--android-attestation", "verify"],
+                "demande `--android-package`",
+            ),
+            (
+                &[
+                    "--android-attestation",
+                    "require",
+                    "--android-package",
+                    "org.airdesktop.mail",
+                ],
+                "demande `--android-package`",
+            ),
         ] {
             let erreur = parse(arguments).expect_err("refusé");
             assert!(
@@ -2588,7 +2735,11 @@ mod tests {
     /// peut donc pas dériver en silence.
     #[test]
     fn les_quarante_quatre_options_a_valeur_refusent_de_se_taire() {
-        const A_VALEUR: [&str; 46] = [
+        const A_VALEUR: [&str; 50] = [
+            "--android-attestation",
+            "--android-package",
+            "--android-signer",
+            "--android-attestation-roots",
             "--listen",
             "--maildir",
             "--domain",
@@ -3841,6 +3992,65 @@ mod tests {
         assert!(configuration.audit.is_empty());
         let arguments: &[&str] = &["--audit", "/x/audit"];
         assert_eq!(ecrire(arguments).en_configuration().audit, "/x/audit");
+        // L'attestation Android : le mode, le paquet, les empreintes — l'une
+        // écrite comme `keytool` l'écrit, l'autre sans `:` et en minuscules —,
+        // et les racines en plus.
+        let arguments: &[&str] = &[
+            "--android-attestation",
+            "require",
+            "--android-package",
+            "org.airdesktop.mail_2",
+            "--android-signer",
+            "01:02:03:04:05:06:07:08:09:0A:0B:0C:0D:0E:0F:10:11:12:13:14:15:16:17:18:19:1A:1B:1C:1D:1E:1F:20",
+            "--android-signer",
+            "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+            "--android-signer",
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "--android-attestation-roots",
+            "/x/racines.pem",
+        ];
+        let configuration = ecrire(arguments).en_configuration();
+        assert_eq!(
+            configuration.android_attestation,
+            ams_config::AndroidAttestation::Require
+        );
+        assert_eq!(configuration.android_package, "org.airdesktop.mail_2");
+        let premiere: Vec<u8> = (1..=32).collect();
+        assert_eq!(
+            configuration.android_signers.len(),
+            2,
+            "la même empreinte ne compte qu'une fois"
+        );
+        assert_eq!(
+            configuration.android_signers[0].as_slice(),
+            premiere.as_slice()
+        );
+        assert_eq!(configuration.android_signers[1], [0xFF; 32]);
+        assert_eq!(configuration.android_roots, "/x/racines.pem");
+        for (mode, attendu) in [
+            ("off", ams_config::AndroidAttestation::Off),
+            ("verify", ams_config::AndroidAttestation::Verify),
+        ] {
+            let arguments: &[&str] = &[
+                "--android-attestation",
+                mode,
+                "--android-package",
+                "org.airdesktop.mail",
+                "--android-signer",
+                "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            ];
+            assert_eq!(
+                ecrire(arguments).en_configuration().android_attestation,
+                attendu
+            );
+        }
+        let sans: &[&str] = &["--domain", "mail.example.com"];
+        let configuration = ecrire(sans).en_configuration();
+        assert_eq!(
+            configuration.android_attestation,
+            ams_config::AndroidAttestation::Off
+        );
+        assert!(configuration.android_package.is_empty() && configuration.android_roots.is_empty());
     }
 
     #[test]

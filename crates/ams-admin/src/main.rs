@@ -1011,6 +1011,25 @@ fn afficher(config: &Configuration) {
         }
     );
     println!(
+        "attestation Android {}",
+        match config.android_attestation {
+            ams_config::AndroidAttestation::Off => {
+                String::from("NON LUE — la clef d'un appareil n'a pas à prouver où elle vit")
+            }
+            mode => format!(
+                "`{}` — application `{}`, {} empreinte(s) de signature{}",
+                mode.name(),
+                config.android_package,
+                config.android_signers.len(),
+                if config.android_roots.is_empty() {
+                    String::new()
+                } else {
+                    format!(", racines en plus `{}`", config.android_roots)
+                }
+            ),
+        }
+    );
+    println!(
         "journal d'audit    {}",
         if config.audit.is_empty() {
             String::from("AUCUN — ce qui touche à la sécurité des comptes ne s'écrit pas")

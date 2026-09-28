@@ -78,6 +78,7 @@ fn appareil(login: &str, id: &str) -> Device {
         enrolled: 1_790_000_000,
         last_seen: 0,
         push: None,
+        attestation: None,
     }
 }
 

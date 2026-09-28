@@ -22,7 +22,7 @@ use crate::error::Reason;
 /// Le `match` ci-dessous la rend exhaustive **à la compilation** : un motif de
 /// plus ne compile pas tant qu'on ne l'y a pas mis. C'est la même discipline
 /// que `Resource::scope`, et pour la même raison.
-fn toutes() -> [Reason; 30] {
+fn toutes() -> [Reason; 31] {
     // Ce `match` ne sert qu'à faire échouer la compilation si un motif
     // s'ajoute : sa valeur est jetée, sa VÉRIFICATION est tout l'objet.
     const fn _exhaustive(reason: Reason) -> u8 {
@@ -57,6 +57,7 @@ fn toutes() -> [Reason; 30] {
             Reason::UnknownEncoding => 27,
             Reason::NotADevice => 28,
             Reason::TooManyRequests => 29,
+            Reason::AttestationRefused => 30,
         }
     }
     [
@@ -90,6 +91,7 @@ fn toutes() -> [Reason; 30] {
         Reason::UnknownEncoding,
         Reason::NotADevice,
         Reason::TooManyRequests,
+        Reason::AttestationRefused,
     ]
 }
 
@@ -332,4 +334,13 @@ fn un_appareil_trop_presse_lit_429() {
     assert!(dit.contains("/problems/too-many-requests"), "{dit}");
     assert!(dit.contains("\"status\":429"), "{dit}");
     assert!(dit.contains("une seconde"), "{dit}");
+}
+
+/// **UNE ATTESTATION REFUSÉE DIT `422` SOUS SON PROPRE TYPE**, sans dire quelle
+/// règle a manqué.
+#[test]
+fn une_attestation_refusee_a_son_propre_type() {
+    let dit = document(Reason::AttestationRefused);
+    assert!(dit.contains("/problems/attestation-refused"), "{dit}");
+    assert!(dit.contains("\"status\":422"), "{dit}");
 }

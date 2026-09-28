@@ -251,6 +251,15 @@ pub enum Next<'o> {
         public_key: &'o str,
         /// Le nom que son propriétaire lui donne. Peut être vide.
         name: &'o str,
+        /// L'invitation, telle qu'écrite : son condensat est le DÉFI que
+        /// l'attestation de la clef doit porter (0.2.39). Scellée, à usage
+        /// unique et datée, elle rend l'attestation fraîche sans qu'aucun
+        /// défi de plus soit à émettre.
+        invitation: &'o str,
+        /// L'attestation de la clef, en base64url, telle qu'écrite — ou rien.
+        /// Elle n'est pas lue ici : c'est une chaîne de certificats, et la
+        /// politique qui la juge vit chez l'appelant.
+        attestation: Option<&'o str>,
     },
     /// Vérifier cette signature d'appareil, puis appeler [`Http::on_credentials`].
     ///
@@ -1086,7 +1095,7 @@ fn enroler_un_appareil<'o>(
     // déséchappé doit vivre aussi longtemps que la réponse, et le corps de la
     // requête ne peut pas le porter — il est en lecture seule.
     let (place_du_nom, sortie) = couper(sortie, NOM_D_APPAREIL_MAX);
-    let Some((invitation, public_key, name)) = lire_un_enrolement(corps) else {
+    let Some((invitation, public_key, name, attestation)) = lire_un_enrolement(corps) else {
         return Err((Reason::BadToken, sortie));
     };
     // **UN NOM QUI NE TIENT PAS DANS LA BORNE SE REFUSE ICI**, et non au
@@ -1116,6 +1125,8 @@ fn enroler_un_appareil<'o>(
             account: lue.login,
             public_key,
             name,
+            invitation,
+            attestation,
         },
     })
 }
@@ -1130,7 +1141,7 @@ fn enroler_un_appareil<'o>(
 /// contrôle — un nom d'appareil n'en a pas besoin, et l'UTF-8 littéral passe
 /// entier. Décoder les échappements demanderait un tampon que cette machine
 /// n'a pas.
-fn lire_un_enrolement(corps: &[u8]) -> Option<(&str, &str, Option<ams_api::Str<'_>>)> {
+fn lire_un_enrolement(corps: &[u8]) -> Option<Enrolement<'_>> {
     use ams_api::{Event, Reader};
 
     let mut lecteur = Reader::new(corps);
@@ -1139,17 +1150,25 @@ fn lire_un_enrolement(corps: &[u8]) -> Option<(&str, &str, Option<ams_api::Str<'
     // **LE NOM EST FACULTATIF** : un appareil qu'on n'a pas nommé reste un
     // appareil, et refuser l'enrôlement pour cela serait une pédanterie.
     let mut name = None;
+    // **L'ATTESTATION EST FACULTATIVE ICI** : c'est la configuration du
+    // serveur qui dit si elle est exigée, et la session ne la connaît pas.
+    let mut attestation = None;
     let mut attendu = 0_u8;
     loop {
         match lecteur.read() {
             Err(_) => return None,
             Ok(None) => break,
             Ok(Some(Event::Key(clef))) => {
-                attendu = match (clef.is("invitation"), clef.is("publicKey"), clef.is("name")) {
-                    (true, _, _) => 1,
-                    (_, true, _) => 2,
-                    (_, _, true) => 3,
-                    _ => 0,
+                attendu = if clef.is("invitation") {
+                    1
+                } else if clef.is("publicKey") {
+                    2
+                } else if clef.is("name") {
+                    3
+                } else if clef.is("attestation") {
+                    4
+                } else {
+                    0
                 };
             }
             Ok(Some(Event::Text(texte))) => match attendu {
@@ -1162,16 +1181,22 @@ fn lire_un_enrolement(corps: &[u8]) -> Option<(&str, &str, Option<ams_api::Str<'
                 // **LE NOM, LUI, SE DÉSÉCHAPPE**, et l'appelant s'en charge :
                 // c'est lui qui tient le tampon. Voir `enroler_un_appareil`.
                 3 => name = Some(texte),
+                // Une chaîne de certificats en base64url : le même alphabet.
+                4 => attestation = Some(texte.as_plain()?),
                 _ => {}
             },
             Ok(Some(_)) => {}
         }
     }
     match (invitation, public_key) {
-        (Some(invitation), Some(public_key)) => Some((invitation, public_key, name)),
+        (Some(invitation), Some(public_key)) => Some((invitation, public_key, name, attestation)),
         _ => None,
     }
 }
+
+/// Ce qu'un corps d'enrôlement porte : l'invitation, la clef, le nom encore
+/// échappé, et l'attestation.
+type Enrolement<'a> = (&'a str, &'a str, Option<ams_api::Str<'a>>, Option<&'a str>);
 
 /// L'échange d'identifiants contre un jeton.
 fn echanger_un_jeton<'o>(

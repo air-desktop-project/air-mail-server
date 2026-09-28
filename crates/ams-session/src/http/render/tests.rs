@@ -32,6 +32,7 @@ fn appareil() -> DeviceRow<'static> {
         enrolled: 1_790_000_000,
         last_seen: 1_790_003_600,
         push: Some("apns"),
+        attestation: Some("strongbox"),
     }
 }
 
@@ -43,6 +44,7 @@ fn appareil_neuf() -> DeviceRow<'static> {
         enrolled: 1_790_000_000,
         last_seen: 0,
         push: None,
+        attestation: None,
     }
 }
 
@@ -1060,6 +1062,9 @@ fn la_liste_des_appareils_rend_ce_qu_il_faut() {
     // Le canal de l'abonnement, et `null` pour qui n'en a pas.
     assert!(rendu.contains("\"push\":\"apns\""), "{rendu}");
     assert!(rendu.contains("\"push\":null"), "{rendu}");
+    // Où vit la clef, et `null` pour qui n'a pas été attesté.
+    assert!(rendu.contains("\"attestation\":\"strongbox\""), "{rendu}");
+    assert!(rendu.contains("\"attestation\":null"), "{rendu}");
 
     // **ZÉRO S'ÉCRIT, IL NE S'OMET PAS** : un client qui doit distinguer
     // « absent » de « zéro » finit par traiter les deux différemment.
@@ -1306,6 +1311,14 @@ fn une_demande_d_appairage_se_lit() {
         lue.name, "",
         "un appareil qu'on n'a pas nommé reste un appareil"
     );
+    assert_eq!(lue.attestation, None);
+
+    // L'attestation de la clef nouvelle, quand l'appareil en présente une.
+    let lue = read_pairing_request(
+        br#"{"challenge":"AwAA","signature":"MEUC","publicKey":"BB4Y","attestation":"MIIB"}"#,
+    )
+    .expect("lisible");
+    assert_eq!(lue.attestation, Some("MIIB"));
 }
 
 /// **CE QU'UNE DEMANDE D'APPAIRAGE NE PEUT PAS ÊTRE.**

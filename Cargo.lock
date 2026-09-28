@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "ams-admin"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "ams-admin-options",
  "ams-api",
@@ -66,7 +66,7 @@ dependencies = [
 
 [[package]]
 name = "ams-admin-options"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "ams-config",
  "ams-guard",
@@ -77,7 +77,7 @@ dependencies = [
 
 [[package]]
 name = "ams-api"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "ams-proto-http",
  "ams-sasl",
@@ -85,8 +85,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ams-attest"
+version = "0.2.39"
+dependencies = [
+ "p256",
+ "p384",
+ "rsa",
+ "sha2",
+]
+
+[[package]]
 name = "ams-auth"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "ams-sasl",
  "argon2",
@@ -96,7 +106,7 @@ dependencies = [
 
 [[package]]
 name = "ams-config"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "ams-auth",
  "ams-guard",
@@ -109,14 +119,14 @@ dependencies = [
 
 [[package]]
 name = "ams-dane"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "sha2",
 ]
 
 [[package]]
 name = "ams-dkim"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "ed25519-dalek",
  "rsa",
@@ -125,30 +135,30 @@ dependencies = [
 
 [[package]]
 name = "ams-dmarc"
-version = "0.2.38"
+version = "0.2.39"
 
 [[package]]
 name = "ams-dns"
-version = "0.2.38"
+version = "0.2.39"
 
 [[package]]
 name = "ams-fichier"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "ams-field-codec"
-version = "0.2.38"
+version = "0.2.39"
 
 [[package]]
 name = "ams-guard"
-version = "0.2.38"
+version = "0.2.39"
 
 [[package]]
 name = "ams-h3"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "ams-proto-h3",
  "ams-proto-http",
@@ -158,11 +168,11 @@ dependencies = [
 
 [[package]]
 name = "ams-index"
-version = "0.2.38"
+version = "0.2.39"
 
 [[package]]
 name = "ams-loop-tokio"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "ams-api",
  "ams-dane",
@@ -200,15 +210,15 @@ dependencies = [
 
 [[package]]
 name = "ams-mime"
-version = "0.2.38"
+version = "0.2.39"
 
 [[package]]
 name = "ams-mtasts"
-version = "0.2.38"
+version = "0.2.39"
 
 [[package]]
 name = "ams-proto-h2"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "ams-field-codec",
  "ams-proto-http",
@@ -216,7 +226,7 @@ dependencies = [
 
 [[package]]
 name = "ams-proto-h3"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "ams-field-codec",
  "ams-proto-http",
@@ -225,27 +235,27 @@ dependencies = [
 
 [[package]]
 name = "ams-proto-http"
-version = "0.2.38"
+version = "0.2.39"
 
 [[package]]
 name = "ams-proto-imap"
-version = "0.2.38"
+version = "0.2.39"
 
 [[package]]
 name = "ams-proto-pop3"
-version = "0.2.38"
+version = "0.2.39"
 
 [[package]]
 name = "ams-proto-quic"
-version = "0.2.38"
+version = "0.2.39"
 
 [[package]]
 name = "ams-proto-smtp"
-version = "0.2.38"
+version = "0.2.39"
 
 [[package]]
 name = "ams-push"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "aes-gcm",
  "hkdf",
@@ -255,11 +265,11 @@ dependencies = [
 
 [[package]]
 name = "ams-queue"
-version = "0.2.38"
+version = "0.2.39"
 
 [[package]]
 name = "ams-quic"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "ams-proto-quic",
  "ams-quic-crypto",
@@ -267,7 +277,7 @@ dependencies = [
 
 [[package]]
 name = "ams-quic-client"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "ams-proto-h3",
  "ams-proto-quic",
@@ -281,7 +291,7 @@ dependencies = [
 
 [[package]]
 name = "ams-quic-crypto"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -294,7 +304,7 @@ dependencies = [
 
 [[package]]
 name = "ams-quic-tls"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "ams-proto-quic",
  "ams-quic",
@@ -305,17 +315,18 @@ dependencies = [
 
 [[package]]
 name = "ams-sasl"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "sha2",
 ]
 
 [[package]]
 name = "ams-server"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "aes-gcm",
  "ams-api",
+ "ams-attest",
  "ams-auth",
  "ams-config",
  "ams-dkim",
@@ -344,7 +355,7 @@ dependencies = [
 
 [[package]]
 name = "ams-session"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "ams-api",
  "ams-mime",
@@ -358,11 +369,11 @@ dependencies = [
 
 [[package]]
 name = "ams-spf"
-version = "0.2.38"
+version = "0.2.39"
 
 [[package]]
 name = "ams-store"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "ams-config",
  "ams-index",
@@ -371,7 +382,7 @@ dependencies = [
 
 [[package]]
 name = "ams-tls"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "ams-dane",
  "ams-quic-crypto",
@@ -385,7 +396,7 @@ dependencies = [
 
 [[package]]
 name = "ams-tlsrpt"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "ams-mime",
 ]

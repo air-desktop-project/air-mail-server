@@ -324,11 +324,22 @@ pub trait Api {
     /// `public_key` arrive **telle qu'elle a été écrite**, en base64url : la
     /// décoder dans la session aurait demandé un tampon de plus à une machine
     /// qui n'alloue pas.
+    ///
+    /// `invitation` est l'invitation telle qu'écrite : son condensat est le
+    /// défi que doit porter `attestation`, l'attestation de la clef en
+    /// base64url, quand l'appareil en présente une (0.2.39).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "un enrôlement porte ce que l'invitation, la clef et son attestation disent, \
+                  et d'où il vient : les grouper déplacerait la liste sans la raccourcir"
+    )]
     fn enrol<'o>(
         &self,
         account: &str,
         public_key: &str,
         name: &str,
+        invitation: &str,
+        attestation: Option<&str>,
         source: Source,
         sortie: &'o mut [u8],
     ) -> Served<'o>;
@@ -758,8 +769,18 @@ where
                 account,
                 public_key,
                 name,
+                invitation,
+                attestation,
             } => {
-                let servi = api.enrol(account, public_key, name, source, &mut rendu);
+                let servi = api.enrol(
+                    account,
+                    public_key,
+                    name,
+                    invitation,
+                    attestation,
+                    source,
+                    &mut rendu,
+                );
                 if servi.peer_fault {
                     // **LE MÊME COMPTE QU'UN REFUS D'IDENTIFIANTS.** Cette
                     // porte s'ouvre SANS JETON : sans cela, elle offrirait des

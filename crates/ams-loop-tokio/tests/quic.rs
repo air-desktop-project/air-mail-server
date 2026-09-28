@@ -523,6 +523,8 @@ impl ams_loop_tokio::http::Api for ApiEssai {
         _account: &str,
         _public_key: &str,
         _name: &str,
+        _invitation: &str,
+        _attestation: Option<&str>,
         _source: ams_guard::Source,
         _sortie: &'o mut [u8],
     ) -> ams_loop_tokio::http::Served<'o> {

@@ -1025,6 +1025,8 @@ fn un_enrolement_tire_son_compte_de_l_invitation() {
             account: "marc",
             public_key: "BAECAwQ",
             name: "iPhone de Marc",
+            invitation: &invitation,
+            attestation: None,
         }
     );
 }
@@ -1046,6 +1048,8 @@ fn un_enrolement_sans_nom_passe() {
             account: "marc",
             public_key: "BAECAwQ",
             name: "",
+            invitation: &invitation,
+            attestation: None,
         }
     );
 }
@@ -1208,7 +1212,7 @@ fn l_enrolement_garde_son_verbe_et_son_type() {
 fn un_champ_inconnu_n_empeche_pas_un_enrolement() {
     let invitation = une_invitation("marc", MAINTENANT + HEURE);
     let corps = std::format!(
-        r#"{{"attestation":"d'une version future","invitation":"{invitation}","publicKey":"BAECAwQ"}}"#
+        r#"{{"futur":"d'une version future","invitation":"{invitation}","publicKey":"BAECAwQ"}}"#
     );
     let champs = champs_d_enrolement();
     let tete = entete(&champs);
@@ -1222,8 +1226,44 @@ fn un_champ_inconnu_n_empeche_pas_un_enrolement() {
             account: "marc",
             public_key: "BAECAwQ",
             name: "",
+            invitation: &invitation,
+            attestation: None,
         }
     );
+}
+
+/// **L'ATTESTATION DE LA CLEF REMONTE TELLE QU'ÉCRITE**, avec l'invitation
+/// dont le condensat est son défi (0.2.39). La session ne la juge pas : c'est
+/// la politique du serveur qui dit si elle est exigée.
+#[test]
+fn une_attestation_remonte_avec_son_invitation() {
+    let invitation = une_invitation("marc", MAINTENANT + HEURE);
+    let corps = std::format!(
+        r#"{{"invitation":"{invitation}","publicKey":"BAECAwQ","attestation":"MIIB-_"}}"#
+    );
+    let champs = champs_d_enrolement();
+    let tete = entete(&champs);
+    let mut place = [0_u8; PLACE];
+    assert_eq!(
+        une_session()
+            .request(&tete, corps.as_bytes(), MAINTENANT, &mut place)
+            .next(),
+        Next::Enrol {
+            account: "marc",
+            public_key: "BAECAwQ",
+            name: "",
+            invitation: &invitation,
+            attestation: Some("MIIB-_"),
+        }
+    );
+    // Une attestation échappée n'en est pas une : son alphabet n'en a pas
+    // besoin, et l'enrôlement se refuse comme un corps mal formé.
+    let corps = std::format!(
+        r#"{{"invitation":"{invitation}","publicKey":"BAECAwQ","attestation":"\u004d"}}"#
+    );
+    let session = une_session();
+    let tour = session.request(&tete, corps.as_bytes(), MAINTENANT, &mut place);
+    assert!(!matches!(tour.next(), Next::Enrol { .. }));
 }
 
 /// **UN NOM ÉCHAPPÉ S'ENRÔLE, ET C'EST UN PIÈGE RÉEL QUI L'A IMPOSÉ.**
@@ -1260,6 +1300,8 @@ fn un_nom_echappe_s_enrole() {
             account: "marc",
             public_key: "BAECAwQ",
             name: "Téléphone de Renée",
+            invitation: &invitation,
+            attestation: None,
         },
         "un nom échappé doit arriver DÉSÉCHAPPÉ"
     );
@@ -1324,6 +1366,8 @@ fn un_nom_accentue_s_enrole() {
             account: "marc",
             public_key: "BAECAwQ",
             name: "Téléphone de Renée",
+            invitation: &invitation,
+            attestation: None,
         }
     );
 }

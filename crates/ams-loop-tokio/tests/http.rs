@@ -79,6 +79,8 @@ impl Api for ApiEssai {
         account: &str,
         public_key: &str,
         name: &str,
+        _invitation: &str,
+        _attestation: Option<&str>,
         _source: ams_guard::Source,
         sortie: &'o mut [u8],
     ) -> Served<'o> {

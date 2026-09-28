@@ -103,6 +103,16 @@ struct Device {
 
   # Quand l'abonnement a été posé, en secondes depuis l'époque.
   pushSince @10 :UInt64;
+
+  # Ce que l'attestation de la clef a établi à l'enrôlement (0.2.39) : rien,
+  # ou l'endroit où la clef vit. Un fichier antérieur décode `none`.
+  attestation @11 :KeyAttestation;
+}
+
+enum KeyAttestation {
+  none @0;
+  tee @1;
+  strongBox @2;
 }
 
 enum PushChannel {

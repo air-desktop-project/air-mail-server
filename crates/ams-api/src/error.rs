@@ -206,6 +206,11 @@ pub enum Reason {
     /// jeton dans la seconde. Le débit se compte PAR APPAREIL, et non par
     /// adresse — voir `ams_guard::Rate`.
     TooManyRequests,
+    /// **L'attestation de la clef n'est pas recevable** (0.2.39) : absente
+    /// quand le serveur l'exige, ou refusée par sa politique. `422` : la
+    /// demande est bien formée, c'est la clef qui ne prouve pas ce qu'on
+    /// exige d'elle. Laquelle des règles a manqué ne se dit pas au client.
+    AttestationRefused,
 }
 
 impl Reason {
@@ -247,9 +252,10 @@ impl Reason {
             Self::SyncExpired => StatusCode::GONE,
             Self::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
             Self::BodyTooLarge => StatusCode::CONTENT_TOO_LARGE,
-            Self::AttachmentsNeedDraft | Self::IdempotencyKeyReused | Self::UnknownEncoding => {
-                StatusCode::UNPROCESSABLE_CONTENT
-            }
+            Self::AttachmentsNeedDraft
+            | Self::IdempotencyKeyReused
+            | Self::UnknownEncoding
+            | Self::AttestationRefused => StatusCode::UNPROCESSABLE_CONTENT,
         }
     }
 
@@ -300,6 +306,7 @@ impl Reason {
             Self::TooManyRequests => {
                 "trop de requêtes pour cet appareil ; réessayez dans une seconde"
             }
+            Self::AttestationRefused => "l'attestation de la clef n'est pas recevable",
             Self::UnknownEncoding => {
                 "cette partie porte un encodage que le serveur ne sait pas défaire ; lisez le message brut"
             }

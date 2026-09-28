@@ -129,6 +129,9 @@ pub struct ApiMaildir {
     /// Le journal d'audit, quand la configuration en nomme le répertoire
     /// (phase 6). `None` : rien ne s'écrit, et les routes `…/audit` rendent 501.
     audit: Option<Arc<crate::audit::Audit>>,
+    /// Ce que la configuration exige de l'attestation de clef d'Android
+    /// (0.2.39). Éteint par défaut : aucune n'est lue.
+    juge: crate::attestation::Juge,
     /// Le videur (C8), pour voir et lever ses bannissements.
     ///
     /// **LE MÊME QUE CELUI QUI PUNIT**, et non une copie : un état par voie de
@@ -235,6 +238,8 @@ impl ApiMaildir {
             debits: crate::debits::Debits::new(ams_guard::Rate::DEFAULT),
             // PAS DE JOURNAL SANS RÉPERTOIRE : voir `avec_audit`.
             audit: None,
+            // AUCUNE ATTESTATION LUE, SAUF DEMANDE : voir `avec_attestation`.
+            juge: crate::attestation::Juge::eteint(),
             guard,
             incidents,
             places: Places::new(VERIFICATIONS_SIMULTANEES),
@@ -263,6 +268,36 @@ impl ApiMaildir {
             // échouerait partout, ce qui est pire que pas de signature.
             dkim: None,
         }
+    }
+
+    /// Refuse un enrôlement pour son attestation : le journal dit pourquoi, le
+    /// client lit seulement que l'attestation n'est pas recevable.
+    fn refuser_l_attestation<'o>(
+        &self,
+        compte: &str,
+        refus: crate::attestation::Refus,
+        sortie: &'o mut [u8],
+    ) -> Served<'o> {
+        eprintln!(
+            "air-mail-server : attestation Android refusée pour `{compte}` — {}",
+            refus.dire()
+        );
+        let mut servi = probleme(
+            ams_api::Reason::AttestationRefused,
+            ams_api::Reason::AttestationRefused.status(),
+            sortie,
+        );
+        // **UNE ATTESTATION REFUSÉE COMPTE POUR LE VIDEUR**, comme une
+        // invitation forgée : cette porte s'ouvre sans jeton.
+        servi.peer_fault = true;
+        servi
+    }
+
+    /// Lui dit ce qu'exiger de l'attestation de clef d'Android.
+    #[must_use]
+    pub fn avec_attestation(mut self, juge: crate::attestation::Juge) -> Self {
+        self.juge = juge;
+        self
     }
 
     /// Lui donne le journal d'audit.
@@ -967,6 +1002,7 @@ impl ApiMaildir {
                 // magasin compte en millisecondes pour le défi.
                 last_seen: appareil.last_seen / 1_000,
                 push: appareil.push.as_ref().map(|push| push.channel().name()),
+                attestation: appareil.attestation.map(ams_config::Attested::name),
             })
             .collect();
         rendre(render::write_devices(&lignes, sortie))
@@ -1028,6 +1064,17 @@ impl ApiMaildir {
         let Ok(cle) = ams_auth::Cle::lire(lus) else {
             return corps_de_l_enrolement_refuse(sortie);
         };
+        // **L'ATTESTATION DE LA CLEF NOUVELLE** (0.2.39) : son défi est le
+        // condensat du défi d'appairage, que l'approbateur a signé.
+        let atteste = match self.juge.juger(
+            &cle.octets(),
+            demande.challenge,
+            demande.attestation,
+            maintenant_i64(),
+        ) {
+            Ok(atteste) => atteste,
+            Err(refus) => return self.refuser_l_attestation(account, refus, sortie),
+        };
         let id = en_hexadecimal(&ams_sasl::sha256(&cle.octets()));
 
         // **LA SIGNATURE, SANS RIEN ÉCRIRE ENCORE**, et sur CE QU'ELLE APPROUVE :
@@ -1066,6 +1113,7 @@ impl ApiMaildir {
             enrolled: crate::maintenant(),
             last_seen: 0,
             push: None,
+            attestation: atteste,
             public_key: cle,
         };
         // **UNE SEULE ÉCRITURE, QUI DÉCIDE DE TOUT SOUS LE VERROU** : le rejeu,
@@ -1823,11 +1871,17 @@ impl ApiMaildir {
 
     /// Enrôle une clef publique sur un compte, sur la foi d'une invitation que
     /// la session a déjà vérifiée.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "les mêmes que `Api::enrol`, dont elle est le corps"
+    )]
     fn enroler<'o>(
         &self,
         account: &str,
         public_key: &str,
         name: &str,
+        invitation: &str,
+        attestation: Option<&str>,
         source: ams_guard::Source,
         sortie: &'o mut [u8],
     ) -> Served<'o> {
@@ -1869,6 +1923,17 @@ impl ApiMaildir {
         // n'auraient le même condensat qu'au prix d'une collision SHA-256. Et
         // c'est déjà l'EMPREINTE dont l'enrôlement croisé aura besoin pour se
         // faire confirmer de visu.
+        // **L'ATTESTATION, AVANT DE RIEN ÉCRIRE** (0.2.39) : son défi est le
+        // condensat de l'invitation, et une attestation refusée ne consomme
+        // rien.
+        let atteste =
+            match self
+                .juge
+                .juger(&cle.octets(), invitation, attestation, maintenant_i64())
+            {
+                Ok(atteste) => atteste,
+                Err(refus) => return self.refuser_l_attestation(account, refus, sortie),
+            };
         let id = en_hexadecimal(&ams_sasl::sha256(&cle.octets()));
 
         let a_ranger = ams_config::Device {
@@ -1878,6 +1943,7 @@ impl ApiMaildir {
             enrolled: crate::maintenant(),
             last_seen: 0,
             push: None,
+            attestation: atteste,
             public_key: cle,
         };
         if let Err(quoi) = magasin.modifier(move |appareils| {
@@ -3476,10 +3542,20 @@ impl Api for ApiMaildir {
         account: &str,
         public_key: &str,
         name: &str,
+        invitation: &str,
+        attestation: Option<&str>,
         source: ams_guard::Source,
         sortie: &'o mut [u8],
     ) -> Served<'o> {
-        self.enroler(account, public_key, name, source, sortie)
+        self.enroler(
+            account,
+            public_key,
+            name,
+            invitation,
+            attestation,
+            source,
+            sortie,
+        )
     }
 
     fn close_session(&self, login: &str, nonce: u64) -> bool {
@@ -3688,6 +3764,12 @@ fn microsecondes() -> u64 {
 
 /// L'heure, en millisecondes depuis l'époque — l'unité du défi et de la date
 /// de dernière session d'un appareil.
+/// L'instant, en secondes depuis l'époque, signé — ce que compare une date de
+/// certificat.
+fn maintenant_i64() -> i64 {
+    i64::try_from(crate::maintenant()).unwrap_or(i64::MAX)
+}
+
 fn millisecondes() -> u64 {
     microsecondes() / 1_000
 }
@@ -4944,6 +5026,7 @@ mod porte_http {
                 public_key: ams_auth::Cle::lire(&CLE).expect("le point générateur"),
                 enrolled: 1,
                 last_seen: 0,
+                attestation: None,
                 push: Some(
                     ams_config::Push::new(
                         ams_config::PushChannel::Fcm,

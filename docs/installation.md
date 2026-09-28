@@ -440,6 +440,23 @@ air-mail-admin config write /etc/air-mail/ams.conf … \
   `air-mail-admin audit /etc/air-mail/ams.conf --login <compte>` ;
 - sans ce répertoire, rien ne s'écrit et `…/audit` rend `501`.
 
+### L'attestation des clefs Android : prouver où vit la clef
+
+```sh
+air-mail-admin config write /etc/air-mail/ams.conf … \
+    --android-attestation verify \
+    --android-package org.airdesktop.mail \
+    --android-signer "$(apksigner verify --print-certs app.apk | sed -n 's/.*SHA-256 digest: //p')"
+```
+
+- le serveur vérifie la chaîne d'attestation contre les racines de Google,
+  **sans Google Play ni appel réseau** — l'APK peut être signé par
+  air-desktop.org et servi depuis ses serveurs ;
+- `verify` laisse passer les appareils qui n'en présentent pas (iOS, postes) ;
+  `require` l'exige de tous ;
+- le démarrage refuse un mode qui juge sans paquet ni empreinte, et un fichier de
+  racines en plus (`--android-attestation-roots`) sans clef lisible.
+
 ### La délégation : ouvrir une boîte à un autre compte
 
 Une boîte partagée — `support`, `compta` — est un compte comme un autre, dont

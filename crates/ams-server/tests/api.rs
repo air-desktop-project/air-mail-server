@@ -231,6 +231,10 @@ fn configuration_complete(
         apns_sandbox: false,
         fcm_service_account: String::new(),
         audit: String::new(),
+        android_attestation: ams_config::AndroidAttestation::Off,
+        android_package: String::new(),
+        android_signers: Vec::new(),
+        android_roots: String::new(),
         require_fqdn_sender: false,
         require_fqdn_recipient: false,
         require_sender_domain: false,
@@ -1273,6 +1277,340 @@ fn une_session_fermee_ne_rouvre_plus() {
     );
 }
 
+/// Un constructeur DER, pour fabriquer une chaîne d'attestation PENDANT
+/// l'essai : son défi dépend de l'invitation, qui n'existe qu'une fois le
+/// serveur lancé.
+mod attestation_d_essai {
+    use p256::ecdsa::signature::Signer as _;
+    use sha2::Digest as _;
+
+    pub(super) fn tlv(etiquette: &[u8], contenu: &[u8]) -> Vec<u8> {
+        let mut sortie = etiquette.to_vec();
+        let n = contenu.len();
+        if n < 0x80 {
+            sortie.push(u8::try_from(n).expect("court"));
+        } else if n < 0x100 {
+            sortie.extend_from_slice(&[0x81, u8::try_from(n).expect("court")]);
+        } else {
+            let deux = u16::try_from(n).expect("court").to_be_bytes();
+            sortie.extend_from_slice(&[0x82, deux[0], deux[1]]);
+        }
+        sortie.extend_from_slice(contenu);
+        sortie
+    }
+
+    fn seq(parts: &[&[u8]]) -> Vec<u8> {
+        tlv(&[0x30], &parts.concat())
+    }
+
+    fn octets(contenu: &[u8]) -> Vec<u8> {
+        tlv(&[0x04], contenu)
+    }
+
+    fn oid(contenu: &[u8]) -> Vec<u8> {
+        tlv(&[0x06], contenu)
+    }
+
+    fn bits(contenu: &[u8]) -> Vec<u8> {
+        tlv(&[0x03], &[&[0_u8][..], contenu].concat())
+    }
+
+    /// Un entier positif, sous sa forme DER minimale.
+    fn entier(grand_boutien: &[u8]) -> Vec<u8> {
+        let debut = grand_boutien
+            .iter()
+            .position(|octet| *octet != 0)
+            .unwrap_or(grand_boutien.len().saturating_sub(1));
+        let mut chiffres = grand_boutien[debut..].to_vec();
+        if chiffres[0] & 0x80 != 0 {
+            chiffres.insert(0, 0);
+        }
+        tlv(&[0x02], &chiffres)
+    }
+
+    /// Un élément de contexte construit ; forme haute au-delà de 30.
+    fn contexte(numero: u32, contenu: &[u8]) -> Vec<u8> {
+        if numero < 31 {
+            return tlv(&[0xA0 | u8::try_from(numero).expect("petit")], contenu);
+        }
+        let mut groupes = Vec::new();
+        let mut reste = numero;
+        loop {
+            groupes.insert(0, u8::try_from(reste & 0x7F).expect("sept bits"));
+            reste >>= 7;
+            if reste == 0 {
+                break;
+            }
+        }
+        let dernier = groupes.len().saturating_sub(1);
+        for groupe in &mut groupes[..dernier] {
+            *groupe |= 0x80;
+        }
+        tlv(&[&[0xBF][..], &groupes].concat(), contenu)
+    }
+
+    /// La `SubjectPublicKeyInfo` d'une clef P-256.
+    pub(super) fn spki(cle: &p256::ecdsa::SigningKey) -> Vec<u8> {
+        let point = cle.verifying_key().to_sec1_point(false);
+        seq(&[
+            &seq(&[
+                &oid(&[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01]),
+                &oid(&[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07]),
+            ]),
+            &bits(point.as_bytes()),
+        ])
+    }
+
+    /// Un certificat : `sujet` signé par `emetteur`, avec ces extensions.
+    fn certificat(
+        sujet: &p256::ecdsa::SigningKey,
+        emetteur: &p256::ecdsa::SigningKey,
+        extensions: &[&[u8]],
+    ) -> Vec<u8> {
+        let ecdsa_sha256 = seq(&[&oid(&[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x02])]);
+        let nom = seq(&[]);
+        let validite = seq(&[
+            &tlv(&[0x17], b"250101000000Z"),
+            &tlv(&[0x18], b"20350101000000Z"),
+        ]);
+        let mut champs: Vec<Vec<u8>> = vec![
+            contexte(0, &entier(&[2])),
+            entier(&[1]),
+            ecdsa_sha256.clone(),
+            nom.clone(),
+            validite,
+            nom,
+            spki(sujet),
+        ];
+        if !extensions.is_empty() {
+            champs.push(contexte(3, &seq(extensions)));
+        }
+        let refs: Vec<&[u8]> = champs.iter().map(Vec::as_slice).collect();
+        let tbs = seq(&refs);
+        let signature: p256::ecdsa::Signature = emetteur.sign(&tbs);
+        let (r, s_) = signature.split_bytes();
+        let valeur = seq(&[&entier(&r), &entier(&s_)]);
+        seq(&[&tbs, &ecdsa_sha256, &bits(&valeur)])
+    }
+
+    /// L'empreinte du certificat qui signe l'application d'essai.
+    pub(super) fn empreinte() -> [u8; 32] {
+        sha2::Sha256::digest(b"certificat air-desktop.org d'essai").into()
+    }
+
+    /// Une chaîne feuille ‖ intermédiaire ‖ racine, dont la feuille atteste la
+    /// clef `appareil`, sous le défi SHA-256(`invitation`).
+    pub(super) fn chaine(
+        appareil: &p256::ecdsa::SigningKey,
+        racine: &p256::ecdsa::SigningKey,
+        invitation: &str,
+    ) -> Vec<u8> {
+        let intermediaire =
+            p256::ecdsa::SigningKey::from_slice(&[22_u8; 32]).expect("une clef valide");
+        let defi = sha2::Sha256::digest(invitation.as_bytes());
+        let application = seq(&[
+            &tlv(
+                &[0x31],
+                &seq(&[&octets(b"org.airdesktop.mail"), &entier(&[1])]),
+            ),
+            &tlv(&[0x31], &octets(&empreinte())),
+        ]);
+        let description = seq(&[
+            &entier(&[200]),
+            &tlv(&[0x0A], &[1]),
+            &entier(&[200]),
+            &tlv(&[0x0A], &[1]),
+            &octets(&defi),
+            &octets(b""),
+            &seq(&[&contexte(709, &octets(&application))]),
+            &seq(&[
+                &contexte(702, &entier(&[0])),
+                &contexte(
+                    704,
+                    &seq(&[
+                        &octets(&[0; 32]),
+                        &tlv(&[0x01], &[0xFF]),
+                        &tlv(&[0x0A], &[0]),
+                        &octets(&[0; 32]),
+                    ]),
+                ),
+            ]),
+        ]);
+        let extension = seq(&[
+            &oid(&[0x2B, 0x06, 0x01, 0x04, 0x01, 0xD6, 0x79, 0x02, 0x01, 0x11]),
+            &octets(&description),
+        ]);
+        [
+            certificat(appareil, &intermediaire, &[&extension]),
+            certificat(&intermediaire, racine, &[]),
+            certificat(racine, racine, &[]),
+        ]
+        .concat()
+    }
+}
+
+/// **UNE CLEF ANDROID PROUVE OÙ ELLE VIT, ET POUR QUELLE INVITATION** (0.2.39).
+///
+/// # CE QUE CET ESSAI ÉPROUVE
+///
+/// Que l'attestation est câblée de bout en bout, en mode `require` : une
+/// chaîne dont le défi est le SHA-256 de l'invitation, sous une racine admise,
+/// enrôle l'appareil — et le magasin retient que sa clef vit dans le TEE. Sans
+/// attestation, ou avec une attestation fabriquée pour une AUTRE invitation,
+/// l'enrôlement se refuse en `422`, sans consommer l'invitation.
+#[test]
+fn une_attestation_android_se_verifie_a_l_enrolement() {
+    let atelier = atelier("attestation-android");
+    let Some((cert, cle)) = paire(&atelier.0) else {
+        panic!("{SANS_OPENSSL}");
+    };
+    if std::process::Command::new("curl")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("IGNORÉ : `curl` est absent — cet essai n'a RIEN éprouvé.");
+        return;
+    }
+    let empreinte =
+        ams_auth::hash_password(b"secret-initial", b"seize octets ici").expect("hachable");
+    let magasin = atelier.0.join("comptes.bin");
+    std::fs::write(
+        &magasin,
+        ams_config::encode_accounts(&[ams_auth::Account {
+            login: String::from("marie"),
+            hash: empreinte,
+            addresses: vec![String::from("marie@example.com")],
+        }])
+        .expect("encodable"),
+    )
+    .expect("le magasin s'écrit");
+    std::fs::set_permissions(&magasin, std::fs::Permissions::from_mode(0o600))
+        .expect("permissions du magasin");
+    let appareils = atelier.0.join("appareils.bin");
+
+    // LA RACINE D'ESSAI, en PEM de clef publique, admise en plus de Google.
+    let racine = p256::ecdsa::SigningKey::from_slice(&[21_u8; 32]).expect("une clef valide");
+    let standard: String = en_base64url(&attestation_d_essai::spki(&racine))
+        .chars()
+        .map(|c| match c {
+            '-' => '+',
+            '_' => '/',
+            autre => autre,
+        })
+        .collect();
+    let rembourre = format!(
+        "{standard}{}",
+        "=".repeat(4_usize.saturating_sub(standard.len() % 4) % 4)
+    );
+    let racines = atelier.0.join("racines.pem");
+    std::fs::write(
+        &racines,
+        format!("-----BEGIN PUBLIC KEY-----\n{rembourre}\n-----END PUBLIC KEY-----\n"),
+    )
+    .expect("le fichier de racines s'écrit");
+
+    let port_smtp = port_libre();
+    let port_http = port_libre();
+    let config = configuration_complete(
+        &atelier,
+        port_smtp,
+        Tls {
+            certificate_chain_path: cert.display().to_string(),
+            private_key_path: cle.display().to_string(),
+        },
+        &magasin.display().to_string(),
+        &appareils.display().to_string(),
+        "",
+        &format!("127.0.0.1:{port_http}"),
+        "",
+        CLEF,
+    );
+    let mut lue =
+        ams_config::decode(&std::fs::read(&config).expect("relisible")).expect("décodable");
+    lue.android_attestation = ams_config::AndroidAttestation::Require;
+    lue.android_package = String::from("org.airdesktop.mail");
+    lue.android_signers = vec![attestation_d_essai::empreinte()];
+    lue.android_roots = racines.display().to_string();
+    std::fs::write(&config, ams_config::encode(&lue).expect("encodable")).expect("écriture");
+    let _serveur = lancer(&config, port_smtp);
+    let base = format!("https://127.0.0.1:{port_http}");
+
+    let admin = jeton_d_administration();
+    let poster = |chemin: &str, corps: &str, entete: Option<&str>| -> (String, String) {
+        let mut commande = std::process::Command::new("curl");
+        commande
+            .args(["-s", "--insecure", "--http2", "-X", "POST"])
+            .args(["-H", "Content-Type: application/json"])
+            .args(["-d", corps])
+            .args(["-w", "\n%{http_code}"]);
+        if let Some(valeur) = entete {
+            commande.args(["-H", valeur]);
+        }
+        let sortie = commande
+            .arg(format!("{base}{chemin}"))
+            .output()
+            .expect("curl s'exécute");
+        let tout = String::from_utf8_lossy(&sortie.stdout).into_owned();
+        let (corps, code) = tout.rsplit_once('\n').unwrap_or(("", ""));
+        (corps.to_string(), code.to_string())
+    };
+    let inviter = || -> String {
+        let (corps, code) = poster(
+            "/v1/invitations",
+            r#"{"login":"marie"}"#,
+            Some(&format!("Authorization: Bearer {admin}")),
+        );
+        assert_eq!(code, "201", "{corps}");
+        corps
+            .split_once("\"invitation\":\"")
+            .and_then(|(_, reste)| reste.split_once('"'))
+            .map(|(texte, _)| texte.to_string())
+            .unwrap_or_else(|| panic!("une invitation dans {corps}"))
+    };
+    let clef = en_base64url(&cle_publique());
+    let invitation = inviter();
+
+    // ── SANS ATTESTATION, `require` REFUSE ──────────────────────────────────
+    let (corps, code) = poster(
+        "/v1/devices",
+        &format!(r#"{{"invitation":"{invitation}","publicKey":"{clef}"}}"#),
+        None,
+    );
+    assert_eq!(code, "422", "{corps}");
+    assert!(corps.contains("/problems/attestation-refused"), "{corps}");
+
+    // ── UNE ATTESTATION FAITE POUR UNE AUTRE INVITATION NE VAUT PAS ─────────
+    let autre = attestation_d_essai::chaine(&cle_privee(), &racine, "une autre invitation");
+    let (corps, code) = poster(
+        "/v1/devices",
+        &format!(
+            r#"{{"invitation":"{invitation}","publicKey":"{clef}","attestation":"{}"}}"#,
+            en_base64url(&autre)
+        ),
+        None,
+    );
+    assert_eq!(code, "422", "{corps}");
+
+    // ── LA BONNE ENRÔLE, ET LE MAGASIN SAIT OÙ VIT LA CLEF ──────────────────
+    //
+    // La même invitation : les deux refus ne l'ont pas consommée.
+    let bonne = attestation_d_essai::chaine(&cle_privee(), &racine, &invitation);
+    let (corps, code) = poster(
+        "/v1/devices",
+        &format!(
+            r#"{{"invitation":"{invitation}","publicKey":"{clef}","name":"Pixel","attestation":"{}"}}"#,
+            en_base64url(&bonne)
+        ),
+        None,
+    );
+    assert_eq!(code, "201", "{corps}");
+    let ranges = ams_config::decode_devices(&std::fs::read(&appareils).expect("le magasin existe"))
+        .expect("lisible");
+    assert_eq!(ranges.len(), 1);
+    assert_eq!(ranges[0].attestation, Some(ams_config::Attested::Tee));
+}
+
 /// **LE JOURNAL D'AUDIT DIT QUI S'EST CONNECTÉ, QUI A ÉCHOUÉ, ET D'OÙ** (phase 6).
 ///
 /// # CE QUE CET ESSAI ÉPROUVE
@@ -1636,6 +1974,7 @@ fn un_utilisateur_voit_et_revoque_ses_appareils() {
         enrolled: 1_790_000_000,
         last_seen: vu,
         push: None,
+        attestation: None,
     };
     let appareils = atelier.0.join("appareils.bin");
     std::fs::write(

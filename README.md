@@ -267,6 +267,7 @@ des octets **et des actions**. Elles n'attendent jamais.
 | `ams-tls` | TLS 1.3 partout, TLS 1.2 toléré sur les écoutes de courrier (C4, 2026-09-22), échange de clés post-quantique | **implémenté, en entrant et en sortant** |
 | `ams-dkim` | RFC 6376 | **vérifiées, câblées, et posées** |
 | `ams-push` | RFC 8291, RFC 8292 — chiffrement Web Push et jeton VAPID | **implémenté, éprouvé contre l'annexe A de RFC 8291** |
+| `ams-attest` | l'attestation de clef d'Android : chaîne, `KeyDescription`, politique — sans Google Play | **implémenté, éprouvé contre de vraies chaînes de Google** |
 | `ams-spf` | RFC 7208 | **évalué, câblé, et écrit dans le message** |
 | `ams-dmarc` | RFC 7489 | **alignement, politique, et câblé dans la boucle** |
 | `ams-config` | les trois formats binaires : configuration, comptes, index | **implémenté** |
@@ -2282,6 +2283,42 @@ SCRAM compris. Un client de courrier se reconnectant sans cesse, une même
 ouverture — même compte, protocole, adresse et mot de passe — ne s'écrit qu'une
 fois par heure, et un même refus une fois par minute : une adresse inconnue,
 elle, apparaît tout de suite.
+
+### Exiger l'attestation des clefs Android
+
+```sh
+./target/release/air-mail-admin config write air-mail.conf \
+    --domain mail.example.com --hosted example.com \
+    --android-attestation verify \
+    --android-package org.airdesktop.mail \
+    --android-signer AB:CD:…:EF
+```
+
+Un appareil Android peut prouver que sa clef d'appareil a été **créée dans le
+matériel** (TEE ou StrongBox), **par notre application**, sur un téléphone au
+**chargeur verrouillé et au démarrage vérifié**. Le serveur le vérifie **lui-même**
+(`ams-attest`), contre les deux clefs racines de Google épinglées dans le code —
+**sans Google Play, sans appel réseau** : l'application peut être signée par
+air-desktop.org et téléchargée depuis ses serveurs.
+
+- `--android-signer` est l'empreinte **SHA-256 du certificat qui signe l'APK** —
+  celui d'air-desktop.org, et non celui d'un magasin. `apksigner verify
+  --print-certs app.apk` ou `keytool -list -v -keystore …` l'écrivent ; les `:`
+  sont admis. Plusieurs peuvent être donnés, pour une rotation de clef.
+- `verify` juge l'attestation qu'un appareil présente et **laisse passer** qui
+  n'en présente pas (iOS, les postes) ; `require` l'exige de tous ; `off` n'en
+  lit aucune (le défaut).
+- Le défi de l'attestation est le **SHA-256 de l'invitation** (ou du défi
+  d'appairage) : une attestation produite pour une autre invitation ne vaut pas.
+- Une attestation refusée rend `422` au client, **sans dire quelle règle** a
+  manqué ; le journal du serveur, lui, le dit. `GET /v1/me/devices` dit ensuite
+  `"attestation": "tee"` ou `"strongbox"`.
+- `--android-attestation-roots <pem>` admet des racines **en plus** de celles de
+  Google — pour les essais, ou une racine que Google annoncerait avant la
+  prochaine version.
+
+Ce qui n'est pas vérifié : la liste de révocation des clefs d'usine que Google
+publie. Elle change, et viendra d'une mise à jour périodique.
 
 ### Refuser un `HELO` non qualifié
 

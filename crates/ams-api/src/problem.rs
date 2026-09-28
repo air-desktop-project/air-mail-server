@@ -84,6 +84,7 @@ fn type_de(reason: Reason) -> &'static str {
         Reason::AttachmentsNeedDraft => return "/problems/attachments-need-draft",
         Reason::IdempotencyKeyReused => return "/problems/idempotency-key-reused",
         Reason::UnknownEncoding => return "/problems/unknown-encoding",
+        Reason::AttestationRefused => return "/problems/attestation-refused",
         _ => {}
     }
     match reason.status().value() {

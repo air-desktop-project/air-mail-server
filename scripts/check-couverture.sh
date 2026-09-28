@@ -60,6 +60,7 @@ CRATES_SANS_IO=(
     ams-tls
     ams-dkim
     ams-push
+    ams-attest
     ams-spf
     ams-dns
     ams-dmarc

@@ -234,6 +234,30 @@ struct Configuration {
   # `…/audit` rendent 501.
   audit @46 :Text;
 
+  # L'attestation de clef d'Android (0.2.39) : la clef d'un appareil Android
+  # se prouve créée dans le matériel, sous notre application, sur un téléphone
+  # verrouillé. `off` n'en lit aucune ; `verify` juge celle qu'on présente et
+  # laisse passer qui n'en présente pas (iOS, les postes) ; `require` l'exige
+  # de tous. Un fichier écrit avant ce champ décode `off`.
+  androidAttestation @47 :AndroidAttestation;
+
+  # Le nom de paquet de l'application Android, et les empreintes SHA-256 du
+  # certificat qui la SIGNE — celui d'air-desktop.org, trente-deux octets
+  # chacune.
+  androidPackage @48 :Text;
+  androidSigners @49 :List(Data);
+
+  # Des racines admises EN PLUS de celles de Google : un fichier PEM de clefs
+  # publiques (`-----BEGIN PUBLIC KEY-----`). Vide : Google seul. Sert aux
+  # essais, et à une rotation de racine que Google annoncerait.
+  androidRoots @50 :Text;
+
+  enum AndroidAttestation {
+    off @0;
+    verify @1;
+    require @2;
+  }
+
   # MTA-STS (RFC 8461) — la politique qu'un domaine publie en HTTPS.
   #
   # **UN CHAMP AJOUTÉ APRÈS COUP DÉCODE DEUX CHAÎNES VIDES**, et deux chaînes
