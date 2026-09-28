@@ -122,6 +122,14 @@ COMMANDES
                         Écrit sa moitié PUBLIQUE en base64url : c'est ce que
                         les applications donnent au navigateur pour s'abonner.
                         Remplacer la clef désabonnerait tous les navigateurs.
+    device list <magasin> [--login <nom>]
+                        les appareils enrôlés : identifiant, nom, enrôlement,
+                        dernière session, attestation, abonnement.
+    device revoke <magasin> --login <nom> (--id <id> | --all)
+                        révoque un appareil, ou TOUS ceux d'un compte — la voie
+                        de secours quand son titulaire les a perdus : une
+                        invitation ne vaut que pour un compte sans appareil.
+                        Ses sessions cessent de valoir à la requête suivante.
     audit <config> --login <nom> [--limit <n>]
                         le journal d'audit du compte : sessions, refus,
                         appareils, secrets, délégations, abonnements — une
@@ -439,6 +447,16 @@ fn main() -> ExitCode {
             "--name",
             libelle,
         ] => creer_un_applicatif(Path::new(fichier), Path::new(comptes), nom, libelle),
+        ["device", "list", fichier] => lister_les_appareils(Path::new(fichier), None),
+        ["device", "list", fichier, "--login", nom] => {
+            lister_les_appareils(Path::new(fichier), Some(nom))
+        }
+        ["device", "revoke", fichier, "--login", nom, "--id", id] => {
+            revoquer_des_appareils(Path::new(fichier), nom, Some(id))
+        }
+        ["device", "revoke", fichier, "--login", nom, "--all"] => {
+            revoquer_des_appareils(Path::new(fichier), nom, None)
+        }
         ["app-password", "list", fichier] => lister_les_applicatifs(Path::new(fichier), None),
         ["app-password", "list", fichier, "--login", nom] => {
             lister_les_applicatifs(Path::new(fichier), Some(nom))
@@ -2203,6 +2221,101 @@ fn revoquer_un_applicatif(fichier: &Path, nom: &str, id: &str) -> ExitCode {
         Ok(()) => {
             println!(
                 "{} : mot de passe applicatif `{id}` de `{nom}` révoqué",
+                fichier.display()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(message) => {
+            eprintln!("air-mail-admin : {message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Lit le magasin des appareils ; absent, il est vide.
+fn lire_les_appareils(fichier: &Path) -> Result<Vec<ams_config::Device>, String> {
+    match std::fs::read(fichier) {
+        Ok(octets) => ams_config::decode_devices(&octets)
+            .map_err(|erreur| format!("`{}` : {erreur}", fichier.display())),
+        Err(erreur) if erreur.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(erreur) => Err(format!("`{}` : {erreur}", fichier.display())),
+    }
+}
+
+/// Liste les appareils enrôlés, ceux d'un compte ou tous.
+fn lister_les_appareils(fichier: &Path, nom: Option<&str>) -> ExitCode {
+    match lire_les_appareils(fichier) {
+        Ok(appareils) => {
+            let retenus: Vec<_> = appareils
+                .iter()
+                .filter(|appareil| nom.is_none_or(|nom| appareil.login == nom))
+                .collect();
+            if retenus.is_empty() {
+                println!("{} : aucun appareil", fichier.display());
+            }
+            for appareil in retenus {
+                println!(
+                    "{}\t{}\t{}\tenrôlé {}\tvu {}\tattestation {}\tréveil {}",
+                    appareil.login,
+                    appareil.id,
+                    if appareil.name.is_empty() {
+                        "(sans nom)"
+                    } else {
+                        &appareil.name
+                    },
+                    appareil.enrolled,
+                    appareil.last_seen / 1_000,
+                    appareil
+                        .attestation
+                        .map_or("aucune", ams_config::Attested::name),
+                    appareil
+                        .push
+                        .as_ref()
+                        .map_or("aucun", |push| push.channel().name()),
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(message) => {
+            eprintln!("air-mail-admin : {message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Révoque un appareil d'un compte, ou tous.
+///
+/// **SOUS LE VERROU DU MAGASIN**, comme le serveur l'écrit : les deux
+/// programmes ne s'écrasent pas. Le serveur relit le fichier, et une session
+/// dont l'appareil n'y est plus cesse de valoir à la requête suivante.
+fn revoquer_des_appareils(fichier: &Path, nom: &str, id: Option<&str>) -> ExitCode {
+    let resultat = (|| {
+        let _verrou = ams_fichier::verrouiller(fichier)
+            .map_err(|erreur| format!("`{}` : {erreur}", fichier.display()))?;
+        let mut appareils = lire_les_appareils(fichier)?;
+        let avant = appareils.len();
+        appareils
+            .retain(|appareil| appareil.login != nom || id.is_some_and(|id| appareil.id != id));
+        let revoques = avant.saturating_sub(appareils.len());
+        if revoques == 0 {
+            return Err(match id {
+                Some(id) => format!("aucun appareil `{id}` pour `{nom}`"),
+                None => format!("`{nom}` n'a aucun appareil enrôlé"),
+            });
+        }
+        let octets = ams_config::encode_devices(&appareils)
+            .map_err(|erreur| format!("encodage : {erreur}"))?;
+        ams_config::decode_devices(&octets)
+            .map_err(|erreur| format!("le magasin écrit ne se relit pas : {erreur}"))?;
+        ams_fichier::poser(fichier, &octets)
+            .map_err(|erreur| format!("`{}` : {erreur}", fichier.display()))?;
+        Ok(revoques)
+    })();
+    match resultat {
+        Ok(revoques) => {
+            println!(
+                "{} : {revoques} appareil(s) de `{nom}` révoqué(s) — une nouvelle invitation \
+                 l'enrôlera de nouveau s'il n'en reste aucun",
                 fichier.display()
             );
             ExitCode::SUCCESS

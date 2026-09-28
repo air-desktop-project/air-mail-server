@@ -257,6 +257,25 @@ pub enum Resource<'o> {
     /// l'exploitant. Il ne s'écrit pas : un journal qu'on peut retoucher ne
     /// prouve rien.
     OwnAudit,
+    /// `/v1/accounts/{compte}/devices` — les appareils d'un compte : `GET` les
+    /// liste, `DELETE` les révoque TOUS (0.2.41). **ADMINISTRATION SEULE.**
+    ///
+    /// **C'EST LA VOIE DE SECOURS** : une invitation ne vaut que pour un compte
+    /// sans appareil, et un utilisateur qui a perdu son seul téléphone ne peut
+    /// pas en approuver un autre. Sans cette ressource, le réinviter demandait
+    /// de supprimer son compte.
+    AccountDevices {
+        /// Le compte.
+        compte: &'o str,
+    },
+    /// `/v1/accounts/{compte}/devices/{id}` — un appareil d'un compte, pour le
+    /// révoquer. **ADMINISTRATION SEULE.**
+    AccountDevice {
+        /// Le compte.
+        compte: &'o str,
+        /// L'identifiant de l'appareil.
+        id: &'o str,
+    },
     /// `/v1/accounts/{compte}/audit` — le journal d'audit d'un compte.
     /// **ADMINISTRATION SEULE.**
     AccountAudit {
@@ -409,7 +428,9 @@ impl Resource<'_> {
             | Self::Ban { .. }
             | Self::Delegates { .. }
             | Self::Delegate { .. }
-            | Self::AccountAudit { .. } => Area::Admin,
+            | Self::AccountAudit { .. }
+            | Self::AccountDevices { .. }
+            | Self::AccountDevice { .. } => Area::Admin,
             // **UN BROUILLON EST UNE SOUMISSION EN COURS** : il vit sous la même
             // portée qu'elle, et un jeton qui ne peut pas soumettre ne peut pas
             // non plus préparer ce qu'il ne pourra pas envoyer.
@@ -472,6 +493,8 @@ impl Resource<'_> {
             Self::Delegates { .. } | Self::OwnDelegations => &[Method::Get, Method::Head],
             // **UN JOURNAL D'AUDIT SE LIT, ET C'EST TOUT.**
             Self::OwnAudit | Self::AccountAudit { .. } => &[Method::Get, Method::Head],
+            Self::AccountDevices { .. } => &[Method::Get, Method::Head, Method::Delete],
+            Self::AccountDevice { .. } => &[Method::Delete],
             Self::Delegate { .. } => &[Method::Put, Method::Delete],
             Self::Ban { .. } | Self::OwnDevice { .. } | Self::OwnAppPassword { .. } => {
                 &[Method::Delete]
@@ -627,12 +650,17 @@ fn designer<'o>(segments: &Segments<'o>) -> Result<Resource<'o>, Error> {
                 "addresses" => Ok(Resource::AccountAddresses { compte }),
                 "delegates" => Ok(Resource::Delegates { compte }),
                 "audit" => Ok(Resource::AccountAudit { compte }),
+                "devices" => Ok(Resource::AccountDevices { compte }),
                 _ => Err(manque),
             }
         }
         ("accounts", 5) if segments.get(3) == "delegates" => Ok(Resource::Delegate {
             compte: segments.get(2),
             delegue: segments.get(4),
+        }),
+        ("accounts", 5) if segments.get(3) == "devices" => Ok(Resource::AccountDevice {
+            compte: segments.get(2),
+            id: segments.get(4),
         }),
         ("me", 3) if segments.get(2) == "delegations" => Ok(Resource::OwnDelegations),
         ("me", 3) if segments.get(2) == "audit" => Ok(Resource::OwnAudit),

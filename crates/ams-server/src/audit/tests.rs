@@ -64,8 +64,11 @@ fn chaque_evenement_s_ecrit_sur_une_ligne() {
             r#"{"at":7,"event":"device.paired","source":"2001:db8::1","device":"cd34","detail":"Tablette"}"#,
         ),
         (
-            Evenement::AppareilRevoque { appareil: "ab12" },
-            r#"{"at":7,"event":"device.revoked","source":"2001:db8::1","device":"ab12","detail":null}"#,
+            Evenement::AppareilRevoque {
+                appareil: "ab12",
+                par: "admin",
+            },
+            r#"{"at":7,"event":"device.revoked","source":"2001:db8::1","device":"ab12","detail":"admin"}"#,
         ),
         (
             Evenement::SecretChange { par: "admin" },

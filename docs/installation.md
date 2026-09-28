@@ -461,6 +461,27 @@ air-mail-admin config write /etc/air-mail/ams.conf … \
   attestation se refuse**. Sans accès au dehors,
   `--android-revocation-list <fichier.json>` la lit sur le disque.
 
+### Un utilisateur a perdu son seul appareil : la voie de secours
+
+Une invitation ne vaut que pour un compte **sans** appareil, et un utilisateur
+qui a perdu son seul téléphone n'a plus rien pour en approuver un autre. On
+révoque donc tout, puis on réinvite :
+
+```sh
+air-mail-admin device list /var/lib/air-mail/appareils.bin --login marie
+air-mail-admin device revoke /var/lib/air-mail/appareils.bin --login marie --all
+# puis une invitation neuve, par POST /v1/invitations (jeton d'administration)
+```
+
+- la même chose s'obtient par l'API : `GET` et `DELETE
+  /v1/accounts/{compte}/devices`, et `DELETE …/devices/{id}` pour un seul ;
+- **les sessions de l'appareil révoqué cessent de valoir à la requête
+  suivante**, que la révocation vienne de l'API ou de l'outil — le serveur
+  vérifie, à chaque requête, que l'appareil d'une session est toujours au
+  magasin ;
+- l'abonnement aux réveils part avec l'appareil, et le journal d'audit du compte
+  dit `device.revoked` avec `"detail": "admin"`.
+
 ### La délégation : ouvrir une boîte à un autre compte
 
 Une boîte partagée — `support`, `compta` — est un compte comme un autre, dont

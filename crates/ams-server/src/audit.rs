@@ -97,10 +97,13 @@ pub enum Evenement<'a> {
         /// Le nom que son propriétaire lui a donné.
         nom: &'a str,
     },
-    /// Un appareil a été révoqué.
+    /// Un appareil a été révoqué — par son titulaire (`self`) ou par
+    /// l'administration (`admin`).
     AppareilRevoque {
         /// Son identifiant.
         appareil: &'a str,
+        /// Qui l'a révoqué.
+        par: &'static str,
     },
     /// Le secret du compte a changé — par son titulaire, ou par
     /// l'administration.
@@ -189,9 +192,8 @@ pub fn ligne(evenement: Evenement<'_>, source: Option<&str>, quand: u64) -> Vec<
         }
         Evenement::AppareilEnrole { appareil, nom }
         | Evenement::AppareilAppaire { appareil, nom } => (Some(appareil), Some(nom)),
-        Evenement::AppareilRevoque { appareil } | Evenement::Desabonnement { appareil } => {
-            (Some(appareil), None)
-        }
+        Evenement::AppareilRevoque { appareil, par } => (Some(appareil), Some(par)),
+        Evenement::Desabonnement { appareil } => (Some(appareil), None),
         Evenement::SecretChange { par } => (None, Some(par)),
         Evenement::ApplicatifCree { id, .. } | Evenement::ApplicatifRevoque { id } => {
             (None, Some(id))

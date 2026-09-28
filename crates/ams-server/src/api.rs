@@ -385,9 +385,6 @@ impl ApiMaildir {
         use crate::audit::Evenement;
         let source = Some(source);
         match (resource, method) {
-            (Resource::OwnDevice { id }, Method::Delete) => {
-                self.noter(acteur, Evenement::AppareilRevoque { appareil: id }, source);
-            }
             (Resource::OwnAppPassword { id }, Method::Delete) => {
                 self.noter(acteur, Evenement::ApplicatifRevoque { id }, source);
             }
@@ -1467,28 +1464,67 @@ impl ApiMaildir {
     /// ce qui doit être idempotent, c'est l'EFFET, et il l'est — l'appareil
     /// n'est plus là dans les deux cas. Rendre 204 à une révocation qui n'a rien
     /// retiré laisserait croire qu'on a retiré quelque chose.
-    fn revoquer_mon_appareil<'o>(
+    /// Révoque un appareil de ce compte — ou TOUS, quand `id` est `None`.
+    ///
+    /// `par` dit qui révoque : son titulaire (`self`) ou l'administration
+    /// (`admin`), et le journal d'audit l'écrit.
+    ///
+    /// # TOUS, C'EST LA VOIE DE SECOURS (0.2.41)
+    ///
+    /// Une invitation ne vaut que pour un compte sans appareil, et un
+    /// utilisateur qui a perdu son seul téléphone n'a plus rien pour en
+    /// approuver un autre. L'exploitant révoque donc tout, puis réinvite.
+    /// **Révoquer tout sur un compte qui n'a rien est déjà l'état demandé** :
+    /// `204` aussi.
+    fn revoquer_des_appareils<'o>(
         &self,
-        account: &str,
-        id: &str,
+        compte: &str,
+        id: Option<&str>,
+        par: &'static str,
+        source: ams_guard::Source,
         sortie: &'o mut [u8],
     ) -> Served<'o> {
         let Some(magasin) = self.appareils.as_ref() else {
             return pas_encore(sortie);
         };
+        let mut revoques: std::vec::Vec<String> = std::vec::Vec::new();
         match magasin.modifier(|appareils| {
-            let place = appareils
-                .iter()
-                .position(|connu| connu.login == account && connu.id == id)
-                .ok_or(crate::appareils::INTROUVABLE)?;
-            appareils.remove(place);
+            match id {
+                Some(id) => {
+                    let place = appareils
+                        .iter()
+                        .position(|connu| connu.login == compte && connu.id == id)
+                        .ok_or(crate::appareils::INTROUVABLE)?;
+                    revoques.push(appareils.remove(place).id);
+                }
+                None => appareils.retain(|connu| {
+                    let sien = connu.login == compte;
+                    if sien {
+                        revoques.push(connu.id.clone());
+                    }
+                    !sien
+                }),
+            }
             Ok(())
         }) {
             Ok(()) => {
                 // **UNE RÉVOCATION RÉVOQUE** : ses sessions ferment ici, et non
                 // à l'expiration de leurs jetons. L'abonnement, lui, est parti
                 // avec la fiche.
-                self.sessions.fermer_l_appareil(account, id);
+                for appareil in &revoques {
+                    self.sessions.fermer_l_appareil(compte, appareil);
+                    self.noter(
+                        compte,
+                        crate::audit::Evenement::AppareilRevoque { appareil, par },
+                        Some(source),
+                    );
+                }
+                if par == "admin" {
+                    eprintln!(
+                        "air-mail-server : l'administration a révoqué {} appareil(s) de `{compte}`",
+                        revoques.len()
+                    );
+                }
                 sans_contenu()
             }
             Err(quoi) => dire_la_faute(&quoi, sortie),
@@ -3362,7 +3398,18 @@ impl Api for ApiMaildir {
                 self.appairer(account, body, source, sortie)
             }
             Resource::OwnDevices => self.mes_appareils(account, sortie),
-            Resource::OwnDevice { id } => self.revoquer_mon_appareil(account, id, sortie),
+            Resource::OwnDevice { id } => {
+                self.revoquer_des_appareils(account, Some(id), "self", source, sortie)
+            }
+            // **LA VOIE DE SECOURS** (0.2.41) : l'administration voit et révoque
+            // les appareils d'un compte — tous, pour pouvoir le réinviter.
+            Resource::AccountDevices { compte } if matches!(method, Method::Delete) => {
+                self.revoquer_des_appareils(compte, None, "admin", source, sortie)
+            }
+            Resource::AccountDevices { compte } => self.mes_appareils(compte, sortie),
+            Resource::AccountDevice { compte, id } => {
+                self.revoquer_des_appareils(compte, Some(id), "admin", source, sortie)
+            }
             // **L'APPAREIL DE QUI APPELLE, PAR SA SESSION** — `acteur`, et non
             // un titulaire : un abonnement n'est jamais celui d'un autre.
             Resource::OwnPush if matches!(method, Method::Put) => {
@@ -3520,6 +3567,20 @@ impl Api for ApiMaildir {
         let Some(appareil) = self.sessions.vivante(login, nonce, maintenant) else {
             return Admission::Closed;
         };
+        // **UN APPAREIL QUI N'EST PLUS AU MAGASIN N'A PLUS DE SESSION** (0.2.41).
+        // L'API ferme les sessions de ce qu'elle révoque ; mais le magasin se
+        // modifie aussi hors d'elle — `air-mail-admin device revoke`, qui
+        // l'écrit directement. Sans ce contrôle, ses jetons vaudraient encore
+        // jusqu'à leur quart d'heure.
+        if let (Some(id), Some(magasin)) = (appareil.as_deref(), self.appareils.as_ref())
+            && !magasin
+                .vue()
+                .iter()
+                .any(|connu| connu.login == login && connu.id == id)
+        {
+            self.sessions.fermer_l_appareil(login, id);
+            return Admission::Closed;
+        }
         match self.debits.prendre(login, appareil.as_deref(), maintenant) {
             true => Admission::Open,
             false => Admission::Throttled,

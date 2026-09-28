@@ -1278,6 +1278,229 @@ fn une_session_fermee_ne_rouvre_plus() {
     );
 }
 
+/// **LA VOIE DE SECOURS : L'EXPLOITANT RÉVOQUE, PUIS RÉINVITE** (0.2.41).
+///
+/// # CE QUE CET ESSAI ÉPROUVE
+///
+/// Un utilisateur a perdu son seul téléphone. Il ne peut pas en approuver un
+/// autre, et une invitation ne vaut que pour un compte sans appareil. Avant
+/// cette version, le réinviter demandait de supprimer son compte.
+///
+/// L'administration voit ses appareils, les révoque TOUS — les sessions du
+/// téléphone perdu cessent de valoir sur-le-champ —, et une invitation neuve
+/// enrôle de nouveau. Et un appareil retiré du magasin HORS de l'API — ce que
+/// fait `air-mail-admin device revoke` — perd lui aussi ses sessions à la
+/// requête suivante.
+#[test]
+fn l_exploitant_revoque_tout_puis_reinvite() {
+    let atelier = atelier("voie-de-secours");
+    let Some((cert, cle)) = paire(&atelier.0) else {
+        panic!("{SANS_OPENSSL}");
+    };
+    if std::process::Command::new("curl")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("IGNORÉ : `curl` est absent — cet essai n'a RIEN éprouvé.");
+        return;
+    }
+    let empreinte =
+        ams_auth::hash_password(b"secret-initial", b"seize octets ici").expect("hachable");
+    let magasin = atelier.0.join("comptes.bin");
+    std::fs::write(
+        &magasin,
+        ams_config::encode_accounts(&[ams_auth::Account {
+            login: String::from("marie"),
+            hash: empreinte,
+            addresses: vec![String::from("marie@example.com")],
+        }])
+        .expect("encodable"),
+    )
+    .expect("le magasin s'écrit");
+    std::fs::set_permissions(&magasin, std::fs::Permissions::from_mode(0o600))
+        .expect("permissions du magasin");
+    let appareils = atelier.0.join("appareils.bin");
+    let port_smtp = port_libre();
+    let port_http = port_libre();
+    let config = configuration_complete(
+        &atelier,
+        port_smtp,
+        Tls {
+            certificate_chain_path: cert.display().to_string(),
+            private_key_path: cle.display().to_string(),
+        },
+        &magasin.display().to_string(),
+        &appareils.display().to_string(),
+        "",
+        &format!("127.0.0.1:{port_http}"),
+        "",
+        CLEF,
+    );
+    let _serveur = lancer(&config, port_smtp);
+    let base = format!("https://127.0.0.1:{port_http}");
+    let admin = jeton_d_administration();
+
+    let appeler = |verbe: &str, chemin: &str, corps: Option<&str>, jeton: Option<&str>| {
+        let mut commande = std::process::Command::new("curl");
+        commande
+            .args(["-s", "--insecure", "--http2", "-X", verbe])
+            .args(["-w", "\n%{http_code}"]);
+        if let Some(corps) = corps {
+            commande
+                .args(["-H", "Content-Type: application/json"])
+                .args(["-d", corps]);
+        }
+        if let Some(jeton) = jeton {
+            commande.args(["-H", &format!("Authorization: Bearer {jeton}")]);
+        }
+        let sortie = commande
+            .arg(format!("{base}{chemin}"))
+            .output()
+            .expect("curl s'exécute");
+        let tout = String::from_utf8_lossy(&sortie.stdout).into_owned();
+        let (corps, code) = tout.rsplit_once('\n').unwrap_or(("", ""));
+        (corps.to_string(), code.to_string())
+    };
+    let champ = |corps: &str, nom: &str| -> String {
+        corps
+            .split_once(&format!("\"{nom}\":\""))
+            .and_then(|(_, reste)| reste.split_once('"'))
+            .map(|(valeur, _)| valeur.to_string())
+            .unwrap_or_else(|| panic!("`{nom}` dans {corps}"))
+    };
+    // Invite, enrôle cette clef, et ouvre une session par elle.
+    let enroler_et_ouvrir =
+        |privee: &p256::ecdsa::SigningKey, publique: &[u8; 65]| -> (String, String) {
+            let (corps, code) = appeler(
+                "POST",
+                "/v1/invitations",
+                Some(r#"{"login":"marie"}"#),
+                Some(&admin),
+            );
+            assert_eq!(code, "201", "{corps}");
+            let invitation = champ(&corps, "invitation");
+            let (corps, code) = appeler(
+                "POST",
+                "/v1/devices",
+                Some(&format!(
+                    r#"{{"invitation":"{invitation}","publicKey":"{}"}}"#,
+                    en_base64url(publique)
+                )),
+                None,
+            );
+            assert_eq!(code, "201", "{corps}");
+            let appareil = champ(&corps, "id");
+            let (corps, code) = appeler(
+                "POST",
+                "/v1/sessions/challenge",
+                Some(&format!(r#"{{"login":"marie","deviceId":"{appareil}"}}"#)),
+                None,
+            );
+            assert_eq!(code, "201", "{corps}");
+            let defi = champ(&corps, "challenge");
+            let condensat = condensat_a_signer(
+                &champ(&corps, "role"),
+                &champ(&corps, "serverIdentity"),
+                &defi,
+            );
+            let (corps, code) = appeler(
+                "POST",
+                "/v1/sessions",
+                Some(&format!(
+                    r#"{{"challenge":"{defi}","signature":"{}"}}"#,
+                    signer_avec(privee, &condensat)
+                )),
+                None,
+            );
+            assert_eq!(code, "201", "{corps}");
+            (appareil, champ(&corps, "token"))
+        };
+
+    // ── LE TÉLÉPHONE, PUIS SA PERTE ─────────────────────────────────────────
+    let (telephone, jeton) = enroler_et_ouvrir(&cle_privee(), &cle_publique());
+    assert_eq!(appeler("GET", "/v1/mailboxes", None, Some(&jeton)).1, "200");
+    // Une seconde invitation ne sert à rien tant qu'il reste un appareil.
+    let (corps, code) = appeler(
+        "POST",
+        "/v1/invitations",
+        Some(r#"{"login":"marie"}"#),
+        Some(&admin),
+    );
+    assert_eq!(code, "201");
+    let (_, code) = appeler(
+        "POST",
+        "/v1/devices",
+        Some(&format!(
+            r#"{{"invitation":"{}","publicKey":"{}"}}"#,
+            champ(&corps, "invitation"),
+            en_base64url(&cle_publique_de(9))
+        )),
+        None,
+    );
+    assert_eq!(code, "409");
+
+    // ── L'ADMINISTRATION VOIT, PUIS RÉVOQUE TOUT ────────────────────────────
+    let (liste, code) = appeler("GET", "/v1/accounts/marie/devices", None, Some(&admin));
+    assert_eq!(code, "200", "{liste}");
+    assert!(liste.contains(&telephone), "{liste}");
+    // Un jeton d'utilisateur n'y a pas accès.
+    assert_eq!(
+        appeler("GET", "/v1/accounts/marie/devices", None, Some(&jeton)).1,
+        "404"
+    );
+    assert_eq!(
+        appeler("DELETE", "/v1/accounts/marie/devices", None, Some(&admin)).1,
+        "204"
+    );
+    // Le jeton du téléphone perdu ne vaut plus, sur-le-champ.
+    assert_eq!(appeler("GET", "/v1/mailboxes", None, Some(&jeton)).1, "401");
+    // Révoquer tout sur un compte qui n'a rien est déjà l'état demandé.
+    assert_eq!(
+        appeler("DELETE", "/v1/accounts/marie/devices", None, Some(&admin)).1,
+        "204"
+    );
+
+    // ── UNE INVITATION NEUVE ENRÔLE DE NOUVEAU ──────────────────────────────
+    let (nouveau, jeton) = enroler_et_ouvrir(&cle_privee_de(9), &cle_publique_de(9));
+    assert_eq!(appeler("GET", "/v1/mailboxes", None, Some(&jeton)).1, "200");
+    // Un appareil nommé se révoque aussi seul ; un inconnu, non.
+    assert_eq!(
+        appeler(
+            "DELETE",
+            "/v1/accounts/marie/devices/inconnu",
+            None,
+            Some(&admin)
+        )
+        .1,
+        "404"
+    );
+
+    // ── RETIRÉ DU MAGASIN HORS DE L'API, IL PERD SES SESSIONS AUSSI ─────────
+    //
+    // C'est ce que fait `air-mail-admin device revoke` : il écrit le fichier.
+    let restants: Vec<ams_config::Device> =
+        ams_config::decode_devices(&std::fs::read(&appareils).expect("le magasin existe"))
+            .expect("lisible")
+            .into_iter()
+            .filter(|appareil| appareil.id != nouveau)
+            .collect();
+    std::fs::write(
+        &appareils,
+        ams_config::encode_devices(&restants).expect("encodable"),
+    )
+    .expect("écriture");
+    let mut ferme = false;
+    for _ in 0..50 {
+        if appeler("GET", "/v1/mailboxes", None, Some(&jeton)).1 == "401" {
+            ferme = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(ferme, "un appareil retiré du magasin garde ses sessions");
+}
+
 /// Un constructeur DER, pour fabriquer une chaîne d'attestation PENDANT
 /// l'essai : son défi dépend de l'invitation, qui n'existe qu'une fois le
 /// serveur lancé.

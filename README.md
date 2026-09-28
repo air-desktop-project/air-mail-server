@@ -2250,6 +2250,27 @@ s'oublie que plein. Au-delà, l'API répond `429` avec `Retry-After: 1`, et
 remplit jamais, refuserait tout. Un fichier écrit avant la 0.2.36 décode deux
 zéros, et le serveur les lit comme les valeurs par défaut.
 
+### Un utilisateur a perdu son seul appareil : la voie de secours
+
+Une invitation ne vaut que pour un compte **sans** appareil, et un utilisateur
+qui a perdu son seul téléphone n'a plus rien pour en approuver un autre. On
+révoque donc tout, puis on réinvite :
+
+```sh
+air-mail-admin device list /var/lib/air-mail/appareils.bin --login marie
+air-mail-admin device revoke /var/lib/air-mail/appareils.bin --login marie --all
+# puis une invitation neuve, par POST /v1/invitations (jeton d'administration)
+```
+
+- la même chose s'obtient par l'API : `GET` et `DELETE
+  /v1/accounts/{compte}/devices`, et `DELETE …/devices/{id}` pour un seul ;
+- **les sessions de l'appareil révoqué cessent de valoir à la requête
+  suivante**, que la révocation vienne de l'API ou de l'outil — le serveur
+  vérifie, à chaque requête, que l'appareil d'une session est toujours au
+  magasin ;
+- l'abonnement aux réveils part avec l'appareil, et le journal d'audit du compte
+  dit `device.revoked` avec `"detail": "admin"`.
+
 ### Tenir un journal d'audit
 
 ```sh

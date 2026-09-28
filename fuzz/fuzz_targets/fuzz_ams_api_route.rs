@@ -325,6 +325,17 @@ fn segments_de(
             pousser("me");
             pousser("audit");
         }
+        Resource::AccountDevices { compte } => {
+            pousser("accounts");
+            pousser(compte);
+            pousser("devices");
+        }
+        Resource::AccountDevice { compte, id } => {
+            pousser("accounts");
+            pousser(compte);
+            pousser("devices");
+            pousser(id);
+        }
         Resource::AccountAudit { compte } => {
             pousser("accounts");
             pousser(compte);

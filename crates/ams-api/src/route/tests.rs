@@ -29,7 +29,20 @@ fn ou(method: Method, chemin: &[u8]) -> Result<Resource<'static>, Reason> {
 /// Chaque ressource se désigne par son chemin.
 #[test]
 fn chaque_ressource_se_designe() {
-    let cas: [(Method, &[u8], Resource<'_>); 41] = [
+    let cas: [(Method, &[u8], Resource<'_>); 43] = [
+        (
+            Method::Delete,
+            b"/v1/accounts/marie/devices",
+            Resource::AccountDevices { compte: "marie" },
+        ),
+        (
+            Method::Delete,
+            b"/v1/accounts/marie/devices/a1b2",
+            Resource::AccountDevice {
+                compte: "marie",
+                id: "a1b2",
+            },
+        ),
         (Method::Post, b"/v1/tokens", Resource::Tokens),
         (Method::Get, b"/v1/me/audit", Resource::OwnAudit),
         (
@@ -447,6 +460,11 @@ fn les_presque_ressources_se_refusent() {
 #[test]
 fn chaque_ressource_dit_ce_qu_elle_sert() {
     let toutes = [
+        Resource::AccountDevices { compte: "c" },
+        Resource::AccountDevice {
+            compte: "c",
+            id: "a1",
+        },
         Resource::OwnAudit,
         Resource::AccountAudit { compte: "c" },
         Resource::Delegates { compte: "c" },
@@ -984,5 +1002,39 @@ fn le_journal_d_audit_se_lit_seulement() {
         ou(Method::Delete, b"/v1/me/audit").err(),
         None,
         "le chemin existe ; c'est le verbe que la session refusera"
+    );
+}
+
+/// **LES APPAREILS D'UN COMPTE S'ADMINISTRENT** (0.2.41) : la voie de secours
+/// quand leur titulaire les a tous perdus.
+#[test]
+fn les_appareils_d_un_compte_s_administrent() {
+    assert_eq!(
+        Resource::AccountDevices { compte: "c" }.allowed(),
+        &[Method::Get, Method::Head, Method::Delete]
+    );
+    assert_eq!(
+        Resource::AccountDevice {
+            compte: "c",
+            id: "a1"
+        }
+        .allowed(),
+        &[Method::Delete]
+    );
+    assert_eq!(
+        Resource::AccountDevices { compte: "c" }.scope(Method::Delete),
+        Some(Scope::one(Area::Admin, Rights::Write))
+    );
+    assert_eq!(
+        Resource::AccountDevice {
+            compte: "c",
+            id: "a1"
+        }
+        .scope(Method::Delete),
+        Some(Scope::one(Area::Admin, Rights::Write))
+    );
+    assert_eq!(
+        ou(Method::Get, b"/v1/accounts/c/devices/a1/x"),
+        Err(Reason::NoSuchResource)
     );
 }
