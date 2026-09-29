@@ -1,4 +1,7 @@
-"""Un faux relais de sortie : TLS implicite, AUTH PLAIN exigé."""
+"""Un faux relais de sortie : TLS implicite, AUTH PLAIN exigé.
+
+Le mode `xabout` annonce en plus XABOUT (0.2.45), se présente comme un
+air-mail-server, et imprime ce que le client lui a dit."""
 import base64, socket, ssl, sys, threading
 
 port, cert, cle, mode = int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
@@ -17,6 +20,7 @@ def servir(flux):
         haut = cmd.upper()
         if haut.startswith("EHLO"):
             dire("250-relais.essai.test")
+            if mode == "xabout": dire("250-XABOUT")
             if mode == "sans-auth": dire("250 SIZE 52428800")
             else: dire("250-SIZE 52428800"); dire("250 AUTH PLAIN LOGIN")
         elif haut.startswith("AUTH PLAIN"):
@@ -36,6 +40,9 @@ def servir(flux):
                 if not l or l == b".\r\n": break
                 corps += l
             recu.append(corps); dire("250 2.0.0 Ok: queued")
+        elif haut.startswith("XABOUT") and mode == "xabout":
+            print("  XABOUT " + cmd[7:], flush=True)
+            dire("250 2.0.0 air-mail-server version 9.9.9")
         elif haut.startswith("QUIT"): dire("221 Bye"); return
         else: dire("250 Ok")
 

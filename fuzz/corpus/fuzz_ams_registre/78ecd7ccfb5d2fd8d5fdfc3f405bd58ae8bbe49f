@@ -1,0 +1,17 @@
+Receivedz: from a.example(a.example [192.0.2.7])
+Message-ID: <x@ex…………………………………………………………e
+To:b@narro.ch, c@narro.ch
+Subject: Bonjour
+List-Id: <liste.example.com>
+List-Unsubscribe: <mailto:u@example.com>
+AR;-[eal: i=0……………………+…………………………………………………………………………………………………………………………………………………………………………………………………………………ample.com>
+From: A <a@exam…………………………………………………… <mailto:u@example.com>
+AR;-[eal: i=0……………………+…………………ived: from a.exampleØžÑŸxample [192.0ple.com>
+Reply-To: r@autre.example
+To:b@narro.ch, c@narro.ch
+Subject: Bonjour
+List-Id: <liste.example.com>
+List-Unsubscribe: mailto:u@example.com>
+AR;-[eal: i=0
+
+corps

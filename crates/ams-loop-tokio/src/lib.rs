@@ -79,6 +79,10 @@
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+/// Comment air-mail-server se présente par `XABOUT` (0.2.45) : `air-mail-server
+/// version x.y.z`, la version du paquet — du semver, tel que Cargo l'exige.
+pub const PRESENTATION: &str = concat!("air-mail-server version ", env!("CARGO_PKG_VERSION"));
+
 mod certificat;
 mod connection;
 mod delivery;

@@ -102,9 +102,11 @@ fn vocabulaire() -> Vec<Vec<u8>> {
     let annonce = format!(
         "250-{domaine}\r\n250-SIZE 10485760\r\n250-8BITMIME\r\n250-ENHANCEDSTATUSCODES\r\n250-PIPELINING\r\n"
     );
-    liste.push(format!("{annonce}250-CHUNKING\r\n250 STARTTLS\r\n").into_bytes());
-    liste.push(format!("{annonce}250-CHUNKING\r\n250 AUTH PLAIN\r\n").into_bytes());
-    liste.push(format!("{annonce}250 CHUNKING\r\n").into_bytes());
+    // `XABOUT` (0.2.45) est servi par cette cible : il s'annonce juste avant
+    // `STARTTLS` ou `AUTH`, ou en dernier.
+    liste.push(format!("{annonce}250-CHUNKING\r\n250-XABOUT\r\n250 STARTTLS\r\n").into_bytes());
+    liste.push(format!("{annonce}250-CHUNKING\r\n250-XABOUT\r\n250 AUTH PLAIN\r\n").into_bytes());
+    liste.push(format!("{annonce}250-CHUNKING\r\n250 XABOUT\r\n").into_bytes());
     liste.push(format!("220 {domaine} ESMTP\r\n").into_bytes());
     liste.push(format!("250 {domaine}\r\n").into_bytes());
     for texte in [
@@ -158,6 +160,8 @@ fn vocabulaire() -> Vec<Vec<u8>> {
         "451 4.4.3 Temporary error while checking SPF, try again later",
         // Les paramètres ESMTP qu'on ne sert pas (§4.1.1.11).
         "504 5.5.4 Parameter not recognised",
+        // `XABOUT` (0.2.45).
+        "250 2.0.0 air-mail-server version 9.9.9",
     ] {
         liste.push(format!("{texte}\r\n").into_bytes());
     }
@@ -318,7 +322,9 @@ fn liaison(lie: bool) -> Option<[u8; ams_sasl::LIAISON_OCTETS]> {
 
 fuzz_target!(|entree: Entree| {
     let connu = vocabulaire();
-    let config = Config::new(DOMAINE, 2, 10_485_760, Limits::DEFAULT).expect("configurable");
+    let config = Config::new(DOMAINE, 2, 10_485_760, Limits::DEFAULT)
+        .expect("configurable")
+        .with_about(b"air-mail-server version 9.9.9");
     let politique = Politique {
         verdicts: entree.verdicts,
         curseur: Cell::new(0),

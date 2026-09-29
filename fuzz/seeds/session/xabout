@@ -1,0 +1,5 @@
+EHLO client.example.net
+XABOUT air-mail-server version 0.2.45
+XABOUT
+MAIL FROM:<joe@example.net>
+QUIT

@@ -16,6 +16,7 @@ fn reponse(texte: &'static [u8]) -> Reply<'static> {
 /// Une configuration ordinaire : un destinataire, pas d'exigence de chiffrement.
 fn config() -> ClientConfig<'static> {
     ClientConfig {
+        about: None,
         name: b"mail.nous.test",
         sender: b"",
         recipients: &[b"collecte@eux.test"],
@@ -1220,4 +1221,138 @@ fn l_erreur_d_identifiants_se_lit() {
     let texte = std::format!("{}", Error::UnsafeCredentials);
     assert!(texte.contains("relais de sortie"), "{texte}");
     assert!(texte.contains("256"), "{texte}");
+}
+
+// ── `XABOUT` (0.2.45) ───────────────────────────────────────────────────────
+
+/// Une session qui se présente, chiffrée d'emblée (TLS implicite).
+fn presentee(credentials: bool) -> SmtpClient<'static> {
+    SmtpClient::new(ClientConfig {
+        about: Some(b"air-mail-server version 0.2.45"),
+        implicit_tls: true,
+        credentials: credentials.then_some(ClientCredentials {
+            user: b"jean",
+            password: b"secret",
+        }),
+        ..config()
+    })
+    .expect("configurable")
+}
+
+/// **SOUS TLS, UN PAIR QUI ANNONCE `XABOUT` APPREND QUI NOUS SOMMES, ET NOUS
+/// APPRENONS QUI IL EST** — puis la remise continue comme avant.
+#[test]
+fn xabout_se_joue_sous_tls_quand_il_est_annonce() {
+    let mut client = presentee(false);
+    pas(&mut client, b"220 eux.test ESMTP\r\n");
+    let (_, ecrit) = pas(&mut client, b"250-eux.test\r\n250 XABOUT\r\n");
+    assert_eq!(ecrit, b"XABOUT air-mail-server version 0.2.45\r\n");
+    let (_, ecrit) = pas(&mut client, b"250 2.0.0 air-mail-server version 0.2.44\r\n");
+    assert_eq!(ecrit, b"MAIL FROM:<>\r\n");
+    assert_eq!(
+        client.peer_about(),
+        Some(&b"air-mail-server version 0.2.44"[..])
+    );
+
+    // Sans état étendu, la réponse se lit telle quelle.
+    let mut client = presentee(false);
+    pas(&mut client, b"220 eux.test ESMTP\r\n");
+    pas(&mut client, b"250-eux.test\r\n250 XABOUT\r\n");
+    pas(&mut client, b"250 air-mail-server version 1.0.0\r\n");
+    assert_eq!(
+        client.peer_about(),
+        Some(&b"air-mail-server version 1.0.0"[..])
+    );
+}
+
+/// **UNE RÉPONSE QUI NE DIT RIEN NE COÛTE QUE L'INFORMATION** : un refus, un
+/// état étendu seul, un texte qui n'est pas imprimable — et la remise continue,
+/// authentification comprise.
+#[test]
+fn une_reponse_a_xabout_ne_decide_de_rien() {
+    for (reponse_a_xabout, attendu) in [
+        (&b"502 5.5.1 non\r\n"[..], None),
+        (b"250 2.0.0\r\n", None),
+        // L'analyseur refuse les caractères de contrôle, pas l'UTF-8 : c'est
+        // la session qui écarte ce qui n'est pas de l'ASCII imprimable.
+        (b"250 caf\xc3\xa9\r\n", None),
+    ] {
+        let mut client = presentee(true);
+        pas(&mut client, b"220 eux.test ESMTP\r\n");
+        let (_, ecrit) = pas(
+            &mut client,
+            b"250-eux.test\r\n250-XABOUT\r\n250 AUTH PLAIN\r\n",
+        );
+        assert!(ecrit.starts_with(b"XABOUT "));
+        let mut sortie = [0_u8; CLIENT_COMMAND_MAX];
+        let reponse = Reply::parse(reponse_a_xabout, &Limits::DEFAULT).expect("lisible");
+        let geste = client.on_reply(&reponse, &mut sortie).expect("geste");
+        let ClientStep::Send(ecrits) = geste else {
+            panic!("{geste:?}");
+        };
+        assert!(
+            sortie[..ecrits].starts_with(b"AUTH PLAIN "),
+            "l'authentification suit"
+        );
+        assert_eq!(client.peer_about(), attendu);
+    }
+}
+
+/// **NI EN CLAIR, NI SANS ANNONCE, NI SANS PRÉSENTATION** : dans les trois
+/// cas, `XABOUT` ne part pas.
+#[test]
+fn xabout_ne_part_pas_hors_de_ses_conditions() {
+    // En clair : le pair l'annonce, et l'on ne l'envoie pas.
+    let mut client = SmtpClient::new(ClientConfig {
+        about: Some(b"air-mail-server version 0.2.45"),
+        ..config()
+    })
+    .expect("configurable");
+    pas(&mut client, b"220 eux.test ESMTP\r\n");
+    let (_, ecrit) = pas(&mut client, b"250-eux.test\r\n250 XABOUT\r\n");
+    assert_eq!(ecrit, b"MAIL FROM:<>\r\n");
+    // Sous TLS, sans annonce.
+    let mut client = presentee(false);
+    pas(&mut client, b"220 eux.test ESMTP\r\n");
+    let (_, ecrit) = pas(&mut client, b"250 eux.test\r\n");
+    assert_eq!(ecrit, b"MAIL FROM:<>\r\n");
+    assert_eq!(client.peer_about(), None);
+    // Sous TLS, annoncé, mais nous ne nous présentons pas.
+    let mut client = SmtpClient::new(ClientConfig {
+        implicit_tls: true,
+        ..config()
+    })
+    .expect("configurable");
+    pas(&mut client, b"220 eux.test ESMTP\r\n");
+    let (_, ecrit) = pas(&mut client, b"250-eux.test\r\n250 XABOUT\r\n");
+    assert_eq!(ecrit, b"MAIL FROM:<>\r\n");
+}
+
+/// **NOTRE PRÉSENTATION EST DE L'ASCII IMPRIMABLE, BORNÉE** : elle part telle
+/// quelle sur le fil.
+#[test]
+fn une_presentation_douteuse_est_refusee() {
+    let longue = std::vec![b'a'; ams_proto_smtp::XABOUT_MAX + 1];
+    for texte in [&b""[..], b"a\r\nMAIL FROM:<x>", &longue] {
+        let erreur = SmtpClient::new(ClientConfig {
+            about: Some(texte),
+            ..config()
+        })
+        .expect_err("refusée");
+        assert!(matches!(erreur, Error::UnsafeAddress), "{erreur:?}");
+    }
+}
+
+/// **UN TAMPON TROP COURT POUR `XABOUT` EST UNE ERREUR**, et non une commande
+/// tronquée.
+#[test]
+fn un_tampon_trop_court_pour_xabout_le_dit() {
+    let mut client = presentee(false);
+    pas(&mut client, b"220 eux.test ESMTP\r\n");
+    let mut court = [0_u8; 16];
+    let reponse = reponse(b"250-eux.test\r\n250 XABOUT\r\n");
+    assert!(matches!(
+        client.on_reply(&reponse, &mut court),
+        Err(Error::Reply(_))
+    ));
 }

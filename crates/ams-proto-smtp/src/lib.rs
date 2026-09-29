@@ -108,7 +108,7 @@ mod stuff;
 
 pub use answer::{REPLY_LINES_MAX, Reply, ReplyLines, reply_len};
 pub use chunk::{ChunkEvent, ChunkReceiver};
-pub use command::Command;
+pub use command::{Command, XABOUT_MAX};
 pub use data::{DataFault, DataReceiver, Event as DataEvent};
 pub use domain::{ClientId, check_address_literal};
 pub use dsn::{

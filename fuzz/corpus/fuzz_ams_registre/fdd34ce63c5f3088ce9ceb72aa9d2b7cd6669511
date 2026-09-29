@@ -1,0 +1,16 @@
+Received: from afexample (a.exapro.ch
+Subject: Bonjour
+List-Id: <liste.example.com>
+List-Unsubscribe: <mailto:u@examplmple.com>
+From: A <a@example.com>
+Reply-To: r@autre.example
+To: b@narro.ch, c@narþÿÿÿÿÿÿÿro.ch
+Subject: Bonjour
+List-Id: <liste.exampleÕcom>
+List-Unsubscribe: <mailto:u@example.com>
+A¸C-Seal: i=1
+
+corpe.com>
+ARC-Seal: i=1
+
+corps

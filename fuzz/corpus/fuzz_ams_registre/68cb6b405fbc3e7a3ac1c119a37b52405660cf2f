@@ -1,0 +1,9 @@
+Received: from a.ee(a.example [192.0.2.7])
+Message-ID: <x@example.com>
+From: A <a@example.com>
+Reply-To: r@autre.example
+To: b@narro.ch, c@narro.ch
+Subject: Bonjour
+List-Id: <lC-Seal: i=1
+
+corps

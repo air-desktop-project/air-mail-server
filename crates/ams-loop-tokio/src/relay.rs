@@ -240,6 +240,8 @@ pub struct Relay {
     /// n'est pas évalué, et la remise est ce qu'elle était — DANE si le domaine
     /// publie un `TLSA`, opportuniste sinon.
     sts: Option<Arc<crate::mtasts::Sts>>,
+    /// Se présente-t-on par `XABOUT` aux pairs qui l'annoncent (0.2.45) ?
+    presente: bool,
 }
 
 impl Relay {
@@ -268,7 +270,18 @@ impl Relay {
             // bronche, et celui-ci décide de remises.
             sts: None,
             rapports: None,
+            // **ON NE SE PRÉSENTE PAS, SAUF DEMANDE EXPRESSE** : dire son
+            // logiciel et sa version est un choix de l'exploitant.
+            presente: false,
         }
+    }
+
+    /// Se présente par `XABOUT` aux pairs qui l'annoncent, sous TLS — voir
+    /// [`crate::PRESENTATION`].
+    #[must_use]
+    pub fn with_presentation(mut self) -> Self {
+        self.presente = true;
+        self
     }
 
     /// Lui donne de quoi consigner ce qu'il rapportera (RFC 8460).
@@ -642,6 +655,7 @@ impl Relay {
             .map(|adresse| adresse.as_bytes())
             .collect();
         let Ok(mut client) = SmtpClient::new(ClientConfig {
+            about: self.presente.then_some(crate::PRESENTATION.as_bytes()),
             name: self.nom.as_bytes(),
             sender: message.sender.as_bytes(),
             recipients: &destinataires,
@@ -682,7 +696,7 @@ impl Relay {
                 return RelayOutcome::NoEncryption;
             };
             let mut tampon = Vec::new();
-            return match self
+            let issue = match self
                 .dialoguer(&mut chiffre, &mut client, &corps, &mut tampon)
                 .await
             {
@@ -693,6 +707,8 @@ impl Relay {
                 // rend ce qu'on rendrait d'un protocole qu'on ne comprend pas.
                 Suite::Monter => RelayOutcome::Protocol,
             };
+            dire_la_presentation(hote, &client);
+            return issue;
         }
         let mut tampon = Vec::new();
         let issue = match self
@@ -705,6 +721,7 @@ impl Relay {
                     .await
             }
         };
+        dire_la_presentation(hote, &client);
         // **LA POIGNÉE DE MAIN A RÉUSSI SOUS DANE, DONC LE PAIR EST AUTHENTIFIÉ.**
         //
         // Il n'y a pas d'autre chemin : la configuration DANE refuse tout
@@ -1004,4 +1021,16 @@ fn farcir(corps: &[u8]) -> Option<Vec<u8>> {
 async fn ecrire<S: AsyncWrite + Unpin>(flux: &mut S, octets: &[u8]) -> std::io::Result<()> {
     flux.write_all(octets).await?;
     flux.flush().await
+}
+
+/// Dit au journal qu'un pair s'est présenté par `XABOUT` (0.2.45) — un des
+/// nôtres, d'ordinaire. Rien ne s'écrit pour qui ne s'est pas présenté : la
+/// remise, elle, se dit déjà ailleurs.
+fn dire_la_presentation(hote: &str, client: &SmtpClient<'_>) {
+    if let Some(presentation) = client.peer_about() {
+        std::eprintln!(
+            "air-mail-server : remise à {hote} — le pair se présente : {}",
+            String::from_utf8_lossy(presentation)
+        );
+    }
 }

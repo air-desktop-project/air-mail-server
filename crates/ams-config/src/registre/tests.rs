@@ -75,6 +75,7 @@ fn session(issue: IssueSession, statut: StatutDns, salue: StatutSalut, tls: bool
         issue,
         erreur: String::from("délai"),
         version: String::from("0.2.44"),
+        presentation: String::from("air-mail-server version 0.2.45"),
     }
 }
 
@@ -152,6 +153,7 @@ fn transaction(issue: IssueTransaction, complete: bool) -> Transaction {
             version: String::from("TLS1.2"),
             suite: String::from("TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"),
         }),
+        presentation: String::from("air-mail-server version 0.2.45"),
     }
 }
 

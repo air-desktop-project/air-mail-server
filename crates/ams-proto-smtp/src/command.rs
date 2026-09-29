@@ -123,7 +123,25 @@ pub enum Command<'a> {
 
     /// `HELP` — l'argument n'est pas décodé.
     Help,
+
+    /// `XABOUT [présentation]` — une commande PRIVÉE d'air-mail-server
+    /// (0.2.45) : le serveur dit quel logiciel il est, et le client peut dire
+    /// qui il est en argument.
+    ///
+    /// # POURQUOI UN `X`
+    ///
+    /// RFC 5321 §2.2.2 et §4.1.5 réservent les mots commençant par `X` à
+    /// l'usage privé, entre parties qui s'entendent : un mot sans `X` devrait
+    /// être enregistré, et risquerait d'entrer un jour en collision avec une
+    /// extension normalisée d'un autre sens.
+    ///
+    /// L'argument, quand il y en a un, est de l'ASCII imprimable, borné à
+    /// [`XABOUT_MAX`] octets : c'est ce que le registre en retiendra.
+    XAbout(Option<&'a [u8]>),
 }
+
+/// La plus longue présentation qu'un `XABOUT` peut porter.
+pub const XABOUT_MAX: usize = 128;
 
 impl<'a> Command<'a> {
     /// Décode une ligne de commande, **CRLF compris**.
@@ -228,6 +246,22 @@ fn dispatch<'a>(verbe: &'a [u8], reste: &'a [u8], limits: &Limits) -> Result<Com
     }
     if verbe.eq_ignore_ascii_case(b"HELP") {
         return Ok(Command::Help);
+    }
+    if verbe.eq_ignore_ascii_case(b"XABOUT") {
+        let Some(presentation) = reste.strip_prefix(b" ") else {
+            // Pas d'argument : `split_verb` ne laisse rien derrière un verbe
+            // seul.
+            return Ok(Command::XAbout(None));
+        };
+        if presentation.is_empty()
+            || presentation.len() > XABOUT_MAX
+            || !presentation
+                .iter()
+                .all(|octet| (0x20..=0x7E).contains(octet))
+        {
+            return Err(Error::MalformedParameter);
+        }
+        return Ok(Command::XAbout(Some(presentation)));
     }
     if verbe.eq_ignore_ascii_case(b"AUTH") {
         return parse_auth(reste);
@@ -382,7 +416,7 @@ fn no_argument(reste: &[u8]) -> Result<(), Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::Command;
+    use super::{Command, XABOUT_MAX};
     use crate::{ClientId, Error, Limits, Mailbox, Parameters, Path};
 
     /// Extrait l'enveloppe d'un `MAIL`. TOTAL — cf. `path::tests::boite`.
@@ -553,6 +587,24 @@ mod tests {
         assert_eq!(analyser(b"VRFY jean\r\n"), Ok(Command::Vrfy));
         assert_eq!(analyser(b"EXPN liste\r\n"), Ok(Command::Expn));
         assert_eq!(analyser(b"HELP MAIL\r\n"), Ok(Command::Help));
+        // `XABOUT` (0.2.45) : seul, ou avec une présentation imprimable.
+        assert_eq!(analyser(b"XABOUT\r\n"), Ok(Command::XAbout(None)));
+        assert_eq!(
+            analyser(b"xabout air-mail-server version 0.2.45\r\n"),
+            Ok(Command::XAbout(Some(b"air-mail-server version 0.2.45")))
+        );
+        assert_eq!(analyser(b"XABOUT \r\n"), Err(Error::MalformedParameter));
+        assert_eq!(
+            analyser(b"XABOUT caf\xc3\xa9\r\n"),
+            Err(Error::MalformedParameter)
+        );
+        let longue = [b"XABOUT ".as_slice(), &[b'a'; XABOUT_MAX + 1], b"\r\n"].concat();
+        assert_eq!(analyser(&longue), Err(Error::MalformedParameter));
+        let juste = [b"XABOUT ".as_slice(), &[b'a'; XABOUT_MAX], b"\r\n"].concat();
+        assert_eq!(
+            analyser(&juste),
+            Ok(Command::XAbout(Some(&[b'a'; XABOUT_MAX][..])))
+        );
         assert_eq!(analyser(b"VRFY\r\n"), Ok(Command::Vrfy));
     }
 

@@ -278,6 +278,12 @@ struct Configuration {
   # message n'est accepté qu'une fois son constat écrit — sinon `451`.
   registre @56 :Text;
 
+  # `XABOUT` ÉTEINT (0.2.45). Faux — le défaut, y compris pour un fichier écrit
+  # avant — : le serveur répond `air-mail-server version x.y.z`, l'annonce dans
+  # l'EHLO, et se présente aux pairs qui l'annoncent. Vrai : il ne dit à
+  # personne quel logiciel il est.
+  aboutOff @57 :Bool;
+
   enum AttestationMode {
     off @0;
     verify @1;

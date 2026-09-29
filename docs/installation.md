@@ -440,6 +440,15 @@ air-mail-admin config write /etc/air-mail/ams.conf … \
   `air-mail-admin audit /etc/air-mail/ams.conf --login <compte>` ;
 - sans ce répertoire, rien ne s'écrit et `…/audit` rend `501`.
 
+### `XABOUT` : dire, ou taire, quel logiciel on est
+
+- actif par défaut (0.2.45) : le serveur répond à `XABOUT` par
+  `air-mail-server version x.y.z`, l'annonce dans l'`EHLO`, et se présente sous
+  TLS aux serveurs qui l'annoncent ;
+- **c'est une information pour un attaquant aussi** : qui connaît une faille
+  d'une version saura qui la fait tourner. `config write … --about off` fait
+  taire le serveur, qui refuse alors `XABOUT` comme une commande inconnue.
+
 ### Le registre de réception : ce que le serveur savait, conservé
 
 ```sh

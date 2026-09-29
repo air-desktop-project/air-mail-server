@@ -246,6 +246,7 @@ fn configuration_pop3(
         apple_app_id: String::new(),
         apple_development: false,
         registre: String::new(),
+        about: true,
         require_fqdn_sender: false,
         require_fqdn_recipient: false,
         require_sender_domain: false,
@@ -1663,6 +1664,7 @@ fn le_registre_de_reception_consigne_ou_refuse() {
         flux.write_all(
             concat!(
                 "EHLO client.example\r\n",
+                "XABOUT air-mail-server version 9.9.9\r\n",
                 "MAIL FROM:<expediteur@ailleurs.example>\r\n",
                 "RCPT TO:<jean@example.com>\r\n",
                 "DATA\r\n",
@@ -1704,6 +1706,15 @@ fn le_registre_de_reception_consigne_ou_refuse() {
     assert!(
         dit.contains("250 2.0.0"),
         "le message doit être accepté : {dit}"
+    );
+    // `XABOUT` (0.2.45) : annoncé, et le serveur dit ce qu'il est.
+    assert!(dit.contains("250-XABOUT\r\n"), "{dit}");
+    assert!(
+        dit.contains(&format!(
+            "250 2.0.0 air-mail-server version {}\r\n",
+            env!("CARGO_PKG_VERSION")
+        )),
+        "{dit}"
     );
     let noms = remis(&boite);
     assert_eq!(noms.len(), 1, "{noms:?}");
@@ -1750,6 +1761,7 @@ fn le_registre_de_reception_consigne_ou_refuse() {
     );
     assert!(constat.entetes.objet.is_some());
     assert_eq!(constat.salut.nom, "client.example");
+    assert_eq!(constat.presentation, "air-mail-server version 9.9.9");
     assert_eq!(constat.pair, std::net::IpAddr::from([127, 0, 0, 1]));
     let destinataire = &constat.destinataires[0];
     assert_eq!(destinataire.adresse, "jean@example.com");
@@ -1766,6 +1778,7 @@ fn le_registre_de_reception_consigne_ou_refuse() {
             Enregistrement::Session(vue)
                 if vue.id == constat.session
                     && vue.messages == 1
+                    && vue.presentation == "air-mail-server version 9.9.9"
                     && vue.ecoute.starts_with("127.0.0.1:")
                     && vue.port > 0
         )),

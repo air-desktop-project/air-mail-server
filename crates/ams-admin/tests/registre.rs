@@ -84,6 +84,7 @@ fn session(id: u8, pair: IpAddr, helo: &str) -> Enregistrement {
         issue: IssueSession::Servie,
         erreur: String::new(),
         version: String::from("0.2.44"),
+        presentation: String::new(),
     }))
 }
 
@@ -109,6 +110,7 @@ fn transaction(id: u8, pair: IpAddr, message_id: &str) -> Enregistrement {
         salut: Salut::default(),
         pair,
         tls: None,
+        presentation: String::new(),
     }))
 }
 

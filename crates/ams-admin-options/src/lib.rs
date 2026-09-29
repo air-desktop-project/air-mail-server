@@ -129,6 +129,8 @@ pub struct Options {
     pub apple_development: bool,
     /// Le répertoire du registre de réception. Vide : rien ne s'y écrit.
     pub registre: Option<PathBuf>,
+    /// `XABOUT` servi et présenté (0.2.45) — vrai par défaut.
+    pub about: bool,
     /// Où écouter en POP3. Vide : POP3 n'est pas servi.
     pub listen_pop3: Option<SocketAddr>,
     /// Les écoutes POP3, chacune avec son mode TLS.
@@ -312,6 +314,7 @@ impl Default for Options {
             apple_app_id: None,
             apple_development: false,
             registre: None,
+            about: true,
             // PAS DE POP3 PAR DÉFAUT : un port ouvert qu'on n'a pas demandé est
             // une surface de plus, et celui-ci ne sert personne sans certificat.
             listen_pop3: None,
@@ -523,6 +526,7 @@ impl Options {
             apple_app_id: self.apple_app_id.clone().unwrap_or_default(),
             apple_development: self.apple_development,
             registre: chemin(self.registre.as_ref()),
+            about: self.about,
             tlsrpt: ams_config::Tlsrpt {
                 directory: chemin(self.tlsrpt_dir.as_ref()),
                 send: self.tlsrpt_send,
@@ -759,6 +763,12 @@ OPTIONS DE `config write`
                         `--apple-attestation-development` admet les
                         applications signées pour le développement, et elles
                         seules.
+    --about on|off      `XABOUT` (0.2.45) : le serveur répond `air-mail-server
+                        version x.y.z`, l'annonce dans l'EHLO, et se présente —
+                        sous TLS — aux serveurs qui l'annoncent, pour savoir
+                        quand deux air-mail-server se parlent. `off` : il ne
+                        dit à personne quel logiciel il est, et `XABOUT` se
+                        refuse comme une commande inconnue. `on` par défaut.
     --registre <répertoire>
                         le registre de réception : un fichier par jour UTC,
                         scellé à minuit et chaîné au précédent, qui garde de
@@ -1452,6 +1462,17 @@ where
             }
             "--audit" => options.audit = Some(PathBuf::from(valeur()?)),
             "--registre" => options.registre = Some(PathBuf::from(valeur()?)),
+            "--about" => {
+                options.about = match valeur()?.as_str() {
+                    "on" => true,
+                    "off" => false,
+                    autre => {
+                        return Err(ArgError::new(format!(
+                            "`--about` attend `on` ou `off`, pas `{autre}`"
+                        )));
+                    }
+                };
+            }
             "--android-attestation" => {
                 options.android_attestation = mode_d_attestation(argument, &valeur()?)?;
             }
@@ -2578,6 +2599,7 @@ mod tests {
                 &["--apple-attestation", "verify"],
                 "demande `--apple-app-id`",
             ),
+            (&["--about", "peut-etre"], "`on` ou `off`"),
             (&["--android-revocation-max-age", "0"], "aucun jour"),
             (&["--android-revocation-max-age", "91"], "90 jours au plus"),
             (
@@ -2891,7 +2913,8 @@ mod tests {
     /// peut donc pas dériver en silence.
     #[test]
     fn les_quarante_quatre_options_a_valeur_refusent_de_se_taire() {
-        const A_VALEUR: [&str; 55] = [
+        const A_VALEUR: [&str; 56] = [
+            "--about",
             "--registre",
             "--apple-attestation",
             "--apple-app-id",
@@ -4152,6 +4175,11 @@ mod tests {
         );
         assert!(configuration.audit.is_empty());
         assert!(configuration.registre.is_empty());
+        assert!(configuration.about, "XABOUT est servi par défaut");
+        for (mot, attendu) in [("off", false), ("on", true)] {
+            let arguments: &[&str] = &["--about", mot];
+            assert_eq!(ecrire(arguments).en_configuration().about, attendu);
+        }
         let arguments: &[&str] = &["--registre", "/x/registre"];
         assert_eq!(ecrire(arguments).en_configuration().registre, "/x/registre");
         let arguments: &[&str] = &["--audit", "/x/audit"];

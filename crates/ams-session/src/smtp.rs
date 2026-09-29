@@ -679,6 +679,8 @@ pub struct SmtpSession<'a, P: Policy> {
     /// littéral d'adresse compris. C'est ce que le registre de réception
     /// retient (0.2.44) ; rien ne s'en sert pour décider.
     annonce: Tampon<DOMAIN_MAX>,
+    /// Ce que le pair a dit de lui par `XABOUT` (0.2.45), tel qu'écrit.
+    presentation: Tampon<{ ams_proto_smtp::XABOUT_MAX }>,
     /// L'expéditeur de la transaction en cours, sous la forme `local@domaine`.
     expediteur: Tampon<SENDER_MAX>,
     /// Le `MAIL FROM:` de la transaction, retenu QUOI QU'IL ARRIVE.
@@ -800,6 +802,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
             size_len: fin_size,
             helo: Tampon::vide(),
             annonce: Tampon::vide(),
+            presentation: Tampon::vide(),
             expediteur: Tampon::vide(),
             compte: Tampon::vide(),
             scram: EtapeScram::Aucune,
@@ -1157,7 +1160,13 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
             }
         }
 
+        // **ÉTEINT, `XABOUT` N'EXISTE PAS** — pas même mal formé : un `501` sur
+        // son argument trahirait qu'on le connaît.
+        let xabout_eteint = self.config.about().is_none() && est_xabout(line);
         let commande = match Command::parse(line, self.config.limits()) {
+            Ok(_) | Err(_) if xabout_eteint => {
+                return self.on_parse_error(&SmtpError::UnknownVerb, out);
+            }
             Ok(commande) => commande,
             Err(cause) => return self.on_parse_error(&cause, out),
         };
@@ -1199,6 +1208,18 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
             // qu'on fait.
             Command::Expn => self.simple(Code::NOT_IMPLEMENTED, b"EXPN not available", out),
             Command::Help => self.simple(Code::HELP_MESSAGE, b"See RFC 5321", out),
+            Command::XAbout(presentation) => {
+                // Le pair qui se présente l'écrit pour le registre ; celui qui
+                // ne dit rien efface ce qu'il avait dit.
+                match presentation {
+                    Some(texte) => {
+                        self.presentation.poser(&[texte]);
+                    }
+                    None => self.presentation.vider(),
+                }
+                let texte = self.config.about().unwrap_or_default();
+                self.simple(Code::OK, texte, out)
+            }
         }
     }
 
@@ -1294,6 +1315,10 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         // le pair saurait au moins à quoi s'en tenir.
         if self.config.capabilities().dsn {
             lignes[posees] = b"DSN";
+            posees = posees.saturating_add(1);
+        }
+        if self.config.about().is_some() {
+            lignes[posees] = b"XABOUT";
             posees = posees.saturating_add(1);
         }
         // On n'annonce QUE ce que l'appelant a declare savoir conduire, et
@@ -1838,6 +1863,12 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
     #[must_use]
     pub fn announced(&self) -> Option<&[u8]> {
         (!self.annonce.est_vide()).then(|| self.annonce.as_bytes())
+    }
+
+    /// Ce que le pair a dit de lui par `XABOUT`, s'il s'est présenté.
+    #[must_use]
+    pub fn peer_about(&self) -> Option<&[u8]> {
+        (!self.presentation.est_vide()).then(|| self.presentation.as_bytes())
     }
 
     /// Ce que le destinataire de rang `rang` a demandé (RFC 3461).
@@ -2656,6 +2687,14 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         tour.refused_recipient = true;
         Ok(tour)
     }
+}
+
+/// La ligne est-elle un `XABOUT`, bien ou mal formé ?
+fn est_xabout(ligne: &[u8]) -> bool {
+    ligne
+        .get(..6)
+        .is_some_and(|verbe| verbe.eq_ignore_ascii_case(b"XABOUT"))
+        && matches!(ligne.get(6), None | Some(b' ' | b'\r' | b'\n'))
 }
 
 #[cfg(test)]
@@ -4605,6 +4644,76 @@ mod tests {
     }
 
     // ── SPF : ce que la session demande, et ce qu'elle fait du verdict ──────
+
+    /// **`XABOUT` DIT QUEL LOGICIEL PARLE, ET RETIENT QUI S'EST PRÉSENTÉ**
+    /// (0.2.45) — s'il est servi. Éteint, il n'existe pas, pas même mal formé.
+    #[test]
+    fn xabout_se_sert_ou_n_existe_pas() {
+        let texte = |octets: &[u8]| std::string::String::from_utf8_lossy(octets).into_owned();
+        let mut tampon = [0_u8; 512];
+        let mut servie = SmtpSession::new(
+            config().with_about(b"air-mail-server version 0.2.45"),
+            Verdict(RecipientVerdict::Accept, AvecScram::Aucun),
+        );
+        assert_eq!(servie.peer_about(), None);
+        let ehlo = texte(
+            servie
+                .handle(b"EHLO client.example\r\n", &mut tampon)
+                .expect("EHLO")
+                .reply(),
+        );
+        assert!(ehlo.contains("250-XABOUT\r\n"), "{ehlo}");
+        let dit = texte(
+            servie
+                .handle(b"XABOUT air-mail-server version 0.2.44\r\n", &mut tampon)
+                .expect("XABOUT")
+                .reply(),
+        );
+        assert_eq!(dit, "250 2.0.0 air-mail-server version 0.2.45\r\n");
+        assert_eq!(
+            servie.peer_about(),
+            Some(&b"air-mail-server version 0.2.44"[..])
+        );
+        // Sans présentation, la précédente s'efface.
+        let tour = servie.handle(b"xabout\r\n", &mut tampon).expect("XABOUT");
+        assert!(texte(tour.reply()).starts_with("250 "));
+        assert_eq!(servie.peer_about(), None);
+        // Une présentation mal formée : un refus d'argument, puisqu'il existe.
+        let tour = servie
+            .handle(b"XABOUT caf\xc3\xa9\r\n", &mut tampon)
+            .expect("XABOUT");
+        assert!(texte(tour.reply()).starts_with("501 "));
+
+        // ── ÉTEINT ──────────────────────────────────────────────────────────
+        let mut eteinte = acceptante();
+        let ehlo = texte(
+            eteinte
+                .handle(b"EHLO client.example\r\n", &mut tampon)
+                .expect("EHLO")
+                .reply(),
+        );
+        assert!(!ehlo.contains("XABOUT"), "{ehlo}");
+        let inconnue = texte(
+            eteinte
+                .handle(b"FROBNICATE\r\n", &mut tampon)
+                .expect("inconnue")
+                .reply(),
+        );
+        for ligne in [
+            &b"XABOUT\r\n"[..],
+            b"XABOUT air-mail-server version 0.2.44\r\n",
+            b"XABOUT caf\xc3\xa9\r\n",
+            b"XABOUT",
+        ] {
+            let tour = eteinte.handle(ligne, &mut tampon).expect("réponse");
+            assert_eq!(texte(tour.reply()), inconnue);
+        }
+        assert_eq!(eteinte.peer_about(), None);
+        // Un verbe qui ne fait que COMMENCER par `XABOUT` n'en est pas un.
+        assert!(!super::est_xabout(b"XABOUTS\r\n"));
+        assert!(!super::est_xabout(b"XAB"));
+        assert!(super::est_xabout(b"xabout\n"));
+    }
 
     fn session_spf(politique: SenderPolicy) -> SmtpSession<'static, Verdict> {
         let config = Config::new(b"mail.example.com", 2, 10_485_760, Limits::DEFAULT)

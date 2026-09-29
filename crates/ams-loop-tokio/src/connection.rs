@@ -432,20 +432,33 @@ where
     P: Policy,
     D: Delivery,
 {
-    let source = match pair.ip() {
-        std::net::IpAddr::V4(v4) => Source::V4(v4.octets()),
-        std::net::IpAddr::V6(v6) => Source::V6(v6.octets()),
-    };
+    // **UNE ADRESSE IPv4 VUE PAR UNE ÉCOUTE IPv6 RESTE UNE ADRESSE IPv4.** Sur
+    // `[::]`, un pair IPv4 arrive en `::ffff:a.b.c.d` : le garder tel quel
+    // ferait échouer les `ip4:` de SPF — donc DMARC — et rangerait TOUS les
+    // pairs IPv4 dans un seul bloc `/64` du garde. La 0.2.44 l'a fait, 52
+    // secondes en production ; `source_de` est la conversion de toujours.
+    let (pair, ecoute) = adresses_canoniques(pair, ecoute);
     servir(
         stream,
         service,
         policy,
         delivery,
-        source,
+        crate::server::source_de(pair),
         Some((pair, ecoute)),
         mode,
     )
     .await
+}
+
+/// Le pair et l'écoute, une adresse IPv4 « mappée » rendue à sa forme IPv4.
+fn adresses_canoniques(
+    pair: std::net::SocketAddr,
+    ecoute: std::net::SocketAddr,
+) -> (std::net::SocketAddr, std::net::SocketAddr) {
+    let canonique = |adresse: std::net::SocketAddr| {
+        std::net::SocketAddr::new(adresse.ip().to_canonical(), adresse.port())
+    };
+    (canonique(pair), canonique(ecoute))
 }
 
 /// Le corps commun : la conversation, puis — si la remise tient un registre —
@@ -501,6 +514,8 @@ pub(crate) struct Faits {
     inverse: Option<ams_config::registre::Inverse>,
     /// Ce que le pair a annoncé au dernier `HELO` ou `EHLO`.
     annonce: Option<Vec<u8>>,
+    /// Ce que le pair a dit de lui par `XABOUT` (0.2.45).
+    presentation: Option<Vec<u8>>,
     /// Ce que ce nom vaut — résolu une fois par nom annoncé.
     salut: Option<(Vec<u8>, ams_config::registre::Salut)>,
     /// Le rang de la dernière transaction.
@@ -535,6 +550,7 @@ impl Faits {
             inverse_en_cours,
             inverse: None,
             annonce: None,
+            presentation: None,
             salut: None,
             numero: 0,
         }
@@ -612,7 +628,16 @@ impl Faits {
                 .map(|erreur| ams_config::registre::borne(&erreur.to_string()).0)
                 .unwrap_or_default(),
             version: String::from(env!("CARGO_PKG_VERSION")),
+            presentation: self.presentation_lue(),
         }
+    }
+
+    /// Ce que le pair a dit de lui par `XABOUT`, en texte borné.
+    fn presentation_lue(&self) -> String {
+        self.presentation
+            .as_deref()
+            .map(|texte| ams_config::registre::borne_octets(texte).0)
+            .unwrap_or_default()
     }
 }
 
@@ -834,6 +859,10 @@ where
             && etat.faits.annonce.as_deref() != Some(annonce)
         {
             etat.faits.annonce = Some(annonce.to_vec());
+        }
+        // ET CE QU'IL A DIT DE LUI par `XABOUT` — un `XABOUT` nu l'efface.
+        if etat.faits.registre && etat.faits.presentation.as_deref() != session.peer_about() {
+            etat.faits.presentation = session.peer_about().map(<[u8]>::to_vec);
         }
         let Some(fin_ligne) = trouver_crlf(&etat.lecture[..etat.rempli]) else {
             if etat.rempli == capacite {
@@ -1827,6 +1856,7 @@ where
             salut,
             pair: etat.faits.adresse,
             tls: etat.faits.tls(),
+            presentation: etat.faits.presentation_lue(),
         };
         delivery.record(constat);
     }
@@ -2014,6 +2044,108 @@ mod tests {
         drop(serveur);
         let dit = ecriture.await.expect("tâche cliente");
         (resultat, String::from_utf8_lossy(&dit).into_owned())
+    }
+
+    /// Une remise qui tient un registre, et garde ce qu'on lui en dit.
+    #[derive(Default)]
+    struct Consignee {
+        boite: Boite,
+        transactions: Vec<ams_config::registre::Transaction>,
+        sessions: Vec<ams_config::registre::Session>,
+    }
+
+    impl Delivery for Consignee {
+        fn add_recipient(&mut self, address: &[u8]) -> Result<(), DeliveryFailure> {
+            self.boite.add_recipient(address)
+        }
+        fn append(&mut self, chunk: &[u8]) -> Result<(), DeliveryFailure> {
+            self.boite.append(chunk)
+        }
+        fn finish(&mut self) -> Result<(), DeliveryFailure> {
+            self.boite.finish()
+        }
+        fn abort(&mut self) {
+            self.boite.abort();
+        }
+        fn keeps_register(&self) -> bool {
+            true
+        }
+        fn record(&mut self, transaction: ams_config::registre::Transaction) {
+            self.transactions.push(transaction);
+        }
+        fn close(&mut self, session: ams_config::registre::Session) {
+            self.sessions.push(session);
+        }
+    }
+
+    /// **UN PAIR IPv4 SUR UNE ÉCOUTE IPv6 RESTE UN PAIR IPv4** — régression
+    /// de la 0.2.44 : sur `[::]`, il arrive en `::ffff:a.b.c.d`, et le garder
+    /// tel quel faisait échouer les `ip4:` de SPF et rangeait tous les pairs
+    /// IPv4 dans un seul bloc du garde. La trace `Received:`, le registre et
+    /// l'écoute le disent désormais en IPv4.
+    #[tokio::test]
+    async fn un_pair_ipv4_mappe_reste_ipv4() {
+        let (mut serveur, mut client) = tokio::io::duplex(4096);
+        let ecriture = tokio::spawn(async move {
+            let _ = client
+                .write_all(
+                    b"EHLO client.example\r\n\
+                      MAIL FROM:<moi@ailleurs.example>\r\n\
+                      RCPT TO:<jean@example.com>\r\n\
+                      DATA\r\n\
+                      From: moi\r\n\r\nbonjour\r\n.\r\n\
+                      QUIT\r\n",
+                )
+                .await;
+            let _ = client.shutdown().await;
+            let mut recu = Vec::new();
+            let _ = tokio::io::AsyncReadExt::read_to_end(&mut client, &mut recu).await;
+        });
+        let garde = garde_permissif();
+        let service = Service {
+            config: config(),
+            guard: &garde,
+            timeouts: Timeouts::default(),
+            tls: None,
+            spf: None,
+            dkim: None,
+            dmarc: None,
+            reports: None,
+        };
+        let mut remise = Consignee::default();
+        let pair: std::net::SocketAddr = "[::ffff:192.0.2.7]:40000".parse().expect("adresse");
+        let ecoute: std::net::SocketAddr = "[::ffff:127.0.0.1]:25".parse().expect("adresse");
+        let resume = super::serve_connection_from(
+            &mut serveur,
+            &service,
+            NotreDomaine,
+            &mut remise,
+            pair,
+            ecoute,
+            super::TlsMode::StartTls,
+        )
+        .await
+        .expect("servie");
+        drop(serveur);
+        ecriture.await.expect("tâche cliente");
+        assert_eq!(resume.messages, 1);
+        let recu = String::from_utf8_lossy(&remise.boite.recu).into_owned();
+        assert!(recu.contains("192.0.2.7"), "{recu}");
+        assert!(!recu.contains("::ffff"), "{recu}");
+        let v4: std::net::IpAddr = "192.0.2.7".parse().expect("adresse");
+        assert_eq!(remise.transactions.len(), 1);
+        assert_eq!(remise.transactions[0].pair, v4);
+        assert_eq!(remise.sessions.len(), 1);
+        assert_eq!(remise.sessions[0].pair, v4);
+        assert_eq!(remise.sessions[0].port, 40000);
+        assert_eq!(remise.sessions[0].ecoute, "127.0.0.1:25");
+        // Une vraie adresse IPv6 ne change pas.
+        let (pair, ecoute) = super::adresses_canoniques(
+            "[2001:db8::1]:1".parse().expect("adresse"),
+            "[::1]:25".parse().expect("adresse"),
+        );
+        assert_eq!(pair.to_string(), "[2001:db8::1]:1");
+        assert_eq!(ecoute.to_string(), "[::1]:25");
     }
 
     // ── Le cas nominal ──────────────────────────────────────────────────────

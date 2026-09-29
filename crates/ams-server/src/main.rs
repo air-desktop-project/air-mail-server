@@ -1273,6 +1273,21 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         options.limits,
     )
     .map_err(|erreur| format!("domaine `{}` : {erreur}", options.domain))?;
+    // **`XABOUT` (0.2.45)** : dire quel logiciel on est, ou ne le dire à
+    // personne — c'est l'exploitant qui choisit.
+    let config = if options.about {
+        eprintln!(
+            "air-mail-server : XABOUT servi — « {} », annoncé dans l'EHLO et présenté, sous \
+             TLS, aux serveurs qui l'annoncent (`--about off` pour ne le dire à personne)",
+            ams_loop_tokio::PRESENTATION
+        );
+        config.with_about(ams_loop_tokio::PRESENTATION.as_bytes())
+    } else {
+        eprintln!(
+            "air-mail-server : XABOUT ÉTEINT — le serveur ne dit à personne quel logiciel il est"
+        );
+        config
+    };
 
     // LE CHIFFREMENT SE DÉCIDE ICI, ET D'UN SEUL ENDROIT : le matériel existe,
     // donc `STARTTLS` est annoncé. Deux valeurs qui pourraient se contredire —
@@ -1968,6 +1983,11 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         );
         // **UNE LIGNE À LIRE** pour chaque chose qu'on lui ajoute : ce sont des
         // décisions de remise, pas des réglages.
+        let remetteur = if options.about {
+            remetteur.with_presentation()
+        } else {
+            remetteur
+        };
         let remetteur = match mtasts.clone() {
             Some(sts) => remetteur.with_mtasts(sts),
             None => remetteur,

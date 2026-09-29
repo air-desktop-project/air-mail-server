@@ -1,0 +1,4 @@
+250-mail.example.com
+250-XABOUT
+250 SIZE 10485760
+250 2.0.0 air-mail-server version 0.2.45

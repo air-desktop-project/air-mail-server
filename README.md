@@ -2343,6 +2343,36 @@ air-mail-admin registre cherche air-mail.conf --ip 192.0.2.7
 air-mail-admin registre cherche air-mail.conf --domaine example.com --depuis 2026-09-01
 ```
 
+### `XABOUT` : quand deux air-mail-server se parlent
+
+SMTP n'a aucune commande pour savoir à quel logiciel on parle : la bannière
+d'air-mail-server n'en dit rien (`220 mail.example.com ESMTP`). La 0.2.45 ajoute
+une commande **privée**, `XABOUT` — le `X` est celui que RFC 5321 (§2.2.2,
+§4.1.5) réserve à l'usage entre parties qui s'entendent :
+
+```
+C: EHLO mail.example.org
+S: 250-mail.example.com
+S: …
+S: 250-XABOUT
+S: 250 STARTTLS
+C: XABOUT air-mail-server version 0.2.45
+S: 250 2.0.0 air-mail-server version 0.2.45
+```
+
+- **Annoncée dans l'`EHLO`** : un client n'envoie jamais une commande privée à
+  qui ne l'annonce pas — Postfix et d'autres comptent les commandes inconnues
+  comme des fautes.
+- **Présentation mutuelle** : le client dit ce qu'il est en argument, le
+  serveur répond ce qu'il est. La version est celle du paquet, en semver.
+- **Notre client ne l'envoie que sous TLS** : en clair, un tiers sur le chemin
+  réécrirait la réponse. Le journal de remise dit alors
+  `remise à … — le pair se présente : air-mail-server version x.y.z`, et le
+  registre de réception retient ce qu'un pair entrant a dit de lui.
+- **`--about off`** : le serveur ne dit à personne quel logiciel il est ;
+  `XABOUT` se refuse alors exactement comme une commande inconnue, même mal
+  formé, et le client ne se présente plus. Actif par défaut.
+
 ### Exiger l'attestation des clefs Android
 
 ```sh

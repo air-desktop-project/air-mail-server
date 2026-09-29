@@ -108,6 +108,8 @@ pub struct Config<'a> {
     require_fqdn_recipient: bool,
     /// Exige-t-on que le domaine de l'expéditeur EXISTE dans le DNS ?
     require_sender_domain: bool,
+    /// Ce que `XABOUT` répond (0.2.45) ; `None` : la commande n'existe pas.
+    about: Option<&'a [u8]>,
 }
 
 impl<'a> Config<'a> {
@@ -150,7 +152,23 @@ impl<'a> Config<'a> {
             require_fqdn_sender: false,
             require_fqdn_recipient: false,
             require_sender_domain: false,
+            about: None,
         })
+    }
+
+    /// Ce que le serveur répond à `XABOUT` — `air-mail-server version x.y.z`
+    /// (0.2.45). Posé, la commande s'annonce dans l'`EHLO` ; sans cet appel,
+    /// elle n'existe pas, et se refuse comme toute commande inconnue.
+    #[must_use]
+    pub fn with_about(mut self, texte: &'a [u8]) -> Self {
+        self.about = Some(texte);
+        self
+    }
+
+    /// Ce que `XABOUT` répond, s'il est servi.
+    #[must_use]
+    pub fn about(&self) -> Option<&'a [u8]> {
+        self.about
     }
 
     /// Déclare ce que l'appelant sait conduire.

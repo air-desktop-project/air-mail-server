@@ -323,3 +323,48 @@ async fn un_relais_non_verifie_ne_recoit_pas_le_mot_de_passe() {
         "un certificat non vérifié a reçu notre mot de passe"
     );
 }
+
+/// **DEUX AIR-MAIL-SERVER SE RECONNAISSENT** (0.2.45) : sous TLS, le remetteur
+/// qui se présente dit `XABOUT air-mail-server version x.y.z` à un pair qui
+/// l'annonce — et la remise se poursuit, authentification comprise. Celui qui
+/// ne se présente pas ne dit rien.
+#[tokio::test]
+async fn un_remetteur_se_presente_a_qui_l_annonce() {
+    use std::io::Read as _;
+    for presente in [true, false] {
+        let Some(atelier) = materiel("xabout", "relais.essai.test") else {
+            eprintln!("SAUTÉ : `openssl` n'a pas su fabriquer de certificat.");
+            return;
+        };
+        let Some((port, mut enfant)) = relais(&atelier, "xabout") else {
+            eprintln!("SAUTÉ : le relais d'épreuve n'a pas démarré.");
+            return;
+        };
+        let dns = resolveur_courrier_signe(zone(), false).await;
+        let remetteur = remetteur(dns).with_relayhost(hote(&atelier, port, "secret"));
+        let remetteur = if presente {
+            remetteur.with_presentation()
+        } else {
+            remetteur
+        };
+        let destinataires = std::vec![std::string::String::from("marie@ailleurs.test")];
+        let issue = remetteur
+            .send("ailleurs.test", &message(&destinataires))
+            .await;
+        let _ = enfant.kill();
+        let mut dit = std::string::String::new();
+        if let Some(sortie) = enfant.stdout.as_mut() {
+            let _ = sortie.read_to_string(&mut dit);
+        }
+        let _ = enfant.wait();
+        assert!(
+            matches!(issue, RelayOutcome::Delivered { accepted: 1, .. }),
+            "la remise continue : {issue:?}"
+        );
+        let attendu = format!("XABOUT {}", ams_loop_tokio::PRESENTATION);
+        assert_eq!(dit.contains(&attendu), presente, "{dit}");
+        if !presente {
+            assert!(!dit.contains("XABOUT"), "{dit}");
+        }
+    }
+}

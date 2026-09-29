@@ -1414,6 +1414,15 @@ fn afficher(config: &Configuration) {
         }
     );
     println!(
+        "XABOUT             {}",
+        if config.about {
+            "servi — le serveur dit « air-mail-server version x.y.z » et se présente, sous \
+             TLS, aux serveurs qui l'annoncent"
+        } else {
+            "ÉTEINT — le serveur ne dit à personne quel logiciel il est"
+        }
+    );
+    println!(
         "registre           {}",
         if config.registre.is_empty() {
             String::from(

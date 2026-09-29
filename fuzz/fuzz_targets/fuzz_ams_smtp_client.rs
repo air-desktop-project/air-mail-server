@@ -93,6 +93,10 @@ struct Entree<'a> {
     premier: Demande<'a>,
     /// Ce que le second avait demandé — les deux peuvent différer.
     second: Demande<'a>,
+    /// Comment on se présente par `XABOUT` (0.2.45) — LIBRE, y compris vide,
+    /// démesuré ou porteur d'un `CRLF` : c'est `SmtpClient::new` qui doit le
+    /// refuser, et rien de ce qu'il laisse passer ne doit casser une commande.
+    presentation: Option<&'a [u8]>,
 }
 
 /// Ce qu'un destinataire demande du sort de son message.
@@ -142,6 +146,7 @@ fuzz_target!(|entree: Entree<'_>| {
     // **UNE CONFIGURATION REFUSÉE N'EST PAS UN ÉCHEC DE LA CIBLE** : c'est la
     // première des deux défenses qui a joué, et il n'y a plus rien à éprouver.
     let Ok(mut client) = SmtpClient::new(ClientConfig {
+        about: entree.presentation,
         name: b"mail.nous.test",
         sender: b"",
         recipients: destinataires,

@@ -137,6 +137,9 @@ struct Session {
   # Ce qui a interrompu la connexion, quand elle l'a été.
   erreur @14 :Text;
   version @15 :Text;
+  # Ce que le pair a dit de lui par `XABOUT` (0.2.45) — `air-mail-server
+  # version x.y.z` quand c'est un des nôtres. Vide s'il ne s'est pas présenté.
+  presentation @16 :Text;
 }
 
 enum Resultat {
@@ -242,6 +245,8 @@ struct Transaction {
   salut @14 :Salut;
   pair @15 :Data;
   tls @16 :Tls;
+  # Ce que le pair a dit de lui par `XABOUT` (0.2.45).
+  presentation @17 :Text;
 }
 
 # Une transaction écrite `acceptee`, que la remise n'a finalement pas pu

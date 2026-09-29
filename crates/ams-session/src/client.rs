@@ -157,6 +157,16 @@ pub struct ClientConfig<'a> {
     /// annonce pas, les écrire ferait refuser la transaction — un paramètre
     /// qu'on n'annonce pas se refuse, comme ce serveur le fait lui-même.
     pub dsn: Option<ClientDsn<'a>>,
+    /// Comment on se présente par `XABOUT` (0.2.45) — `air-mail-server
+    /// version x.y.z`. **`None` ne se présente pas.**
+    ///
+    /// # SEULEMENT SOUS TLS, ET SEULEMENT SI LE PAIR L'ANNONCE
+    ///
+    /// Une commande privée qu'un serveur n'annonce pas se refuse chez lui
+    /// comme une faute de protocole, et certains en comptent les fautes. En
+    /// clair, un tiers sur le chemin réécrirait la réponse : ce qu'on
+    /// apprendrait du pair ne vaudrait rien.
+    pub about: Option<&'a [u8]>,
 }
 
 /// Ce qu'un déposant a demandé, tel qu'on le passe au saut suivant.
@@ -252,6 +262,8 @@ enum Etat {
     Tls,
     /// On attend la réponse à `AUTH PLAIN`.
     Auth,
+    /// On attend la réponse à `XABOUT`.
+    About,
     /// On attend la réponse à `MAIL FROM:`.
     Enveloppe,
     /// On attend la réponse au `RCPT TO:` de rang `usize`.
@@ -295,6 +307,11 @@ pub struct SmtpClient<'a> {
     diagnostic_len: usize,
     /// L'état étendu que le pair a écrit (RFC 3463 §2), s'il en a écrit un.
     statut: Option<Status>,
+    /// Le dernier `EHLO` annonçait-il `AUTH PLAIN` ?
+    plain_offert: bool,
+    /// Ce que le pair a répondu à `XABOUT`, s'il a répondu.
+    presentation: [u8; ams_proto_smtp::XABOUT_MAX],
+    presentation_len: usize,
 }
 
 impl<'a> SmtpClient<'a> {
@@ -346,6 +363,14 @@ impl<'a> SmtpClient<'a> {
         {
             return Err(Error::UnsafeCredentials);
         }
+        // Notre présentation part telle quelle : de l'ASCII imprimable, borné.
+        if let Some(texte) = config.about
+            && (texte.is_empty()
+                || texte.len() > ams_proto_smtp::XABOUT_MAX
+                || !texte.iter().all(|octet| (0x20..=0x7E).contains(octet)))
+        {
+            return Err(Error::UnsafeAddress);
+        }
         Ok(Self {
             chiffre: config.implicit_tls,
             config,
@@ -357,7 +382,21 @@ impl<'a> SmtpClient<'a> {
             diagnostic: [0; DIAGNOSTIC_MAX],
             diagnostic_len: 0,
             statut: None,
+            plain_offert: false,
+            presentation: [0; ams_proto_smtp::XABOUT_MAX],
+            presentation_len: 0,
         })
+    }
+
+    /// Ce que le pair a dit de lui par `XABOUT` — `air-mail-server version
+    /// x.y.z` quand c'est un des nôtres —, s'il a répondu sous TLS.
+    #[must_use]
+    pub fn peer_about(&self) -> Option<&[u8]> {
+        let vu = self
+            .presentation
+            .get(..self.presentation_len)
+            .unwrap_or_default();
+        (!vu.is_empty()).then_some(vu)
     }
 
     /// Le pair a-t-il pris en charge les demandes de RFC 3461 ?
@@ -423,6 +462,7 @@ impl<'a> SmtpClient<'a> {
             Etat::Banniere => self.sur_banniere(reply, out),
             Etat::Ehlo => self.sur_ehlo(reply, out),
             Etat::Auth => self.sur_auth(reply, out),
+            Etat::About => self.sur_about(reply, out),
             Etat::Helo => self.sur_helo(reply, out),
             Etat::Tls => self.sur_tls(reply, out),
             Etat::Enveloppe => self.sur_enveloppe(reply, out),
@@ -482,10 +522,60 @@ impl<'a> SmtpClient<'a> {
                 outcome: ClientOutcome::NoEncryption,
             });
         }
+        // `AUTH PLAIN` offert ? On le retient : `XABOUT` peut s'intercaler
+        // entre cette réponse et l'authentification.
+        self.plain_offert = reply
+            .parameter(b"AUTH")
+            .unwrap_or_default()
+            .split(|octet| octet.is_ascii_whitespace())
+            .any(|mecanisme| mecanisme.eq_ignore_ascii_case(b"PLAIN"));
+        // ── `XABOUT` (0.2.45) : sous TLS, et s'il est annoncé ──────────────
+        if self.chiffre
+            && reply.offers(b"XABOUT")
+            && let Some(nous) = self.config.about
+        {
+            self.etat = Etat::About;
+            return Ok(ClientStep::Send(ecrire(out, &[b"XABOUT ", nous, b"\r\n"])?));
+        }
+        self.apres_l_ehlo(out)
+    }
+
+    /// Ce qui suit l'`EHLO` : l'authentification, ou l'enveloppe.
+    fn apres_l_ehlo(&mut self, out: &mut [u8]) -> Result<ClientStep, Error> {
         if let Some(identifiants) = self.config.credentials {
-            return self.authentifier(reply, identifiants, out);
+            return self.authentifier(identifiants, out);
         }
         self.enveloppe(out)
+    }
+
+    /// La réponse à `XABOUT`.
+    ///
+    /// **ELLE NE DÉCIDE DE RIEN** : un refus ou une réponse étrange ne coûte
+    /// que l'information, et la remise continue.
+    fn sur_about(&mut self, reply: &Reply<'_>, out: &mut [u8]) -> Result<ClientStep, Error> {
+        self.presentation_len = 0;
+        if reply.code().value() == 250 {
+            // Une réponse analysée a toujours une ligne au moins.
+            let ligne = reply.lines().next().unwrap_or_default();
+            // L'état étendu (`2.0.0`), s'il y en a un, n'est pas la réponse.
+            let texte = match ligne.split_first() {
+                Some((chiffre, _)) if chiffre.is_ascii_digit() => ligne
+                    .iter()
+                    .position(|octet| *octet == b' ')
+                    .and_then(|espace| ligne.get(espace.saturating_add(1)..))
+                    .unwrap_or_default(),
+                _ => ligne,
+            };
+            if texte.iter().all(|octet| (0x20..=0x7E).contains(octet)) {
+                let garde = texte.len().min(self.presentation.len());
+                self.presentation
+                    .get_mut(..garde)
+                    .unwrap_or_default()
+                    .copy_from_slice(texte.get(..garde).unwrap_or_default());
+                self.presentation_len = garde;
+            }
+        }
+        self.apres_l_ehlo(out)
     }
 
     /// Écrit `AUTH PLAIN`, ou renonce en le disant.
@@ -504,7 +594,6 @@ impl<'a> SmtpClient<'a> {
     /// courrier sous une identité que personne n'a vérifiée.
     fn authentifier(
         &mut self,
-        reply: &Reply<'_>,
         identifiants: ClientCredentials<'_>,
         out: &mut [u8],
     ) -> Result<ClientStep, Error> {
@@ -515,12 +604,9 @@ impl<'a> SmtpClient<'a> {
                 outcome: ClientOutcome::NoEncryption,
             });
         }
-        // La liste des mécanismes suit le mot-clé : `AUTH PLAIN LOGIN`.
-        let offerts = reply.parameter(b"AUTH").unwrap_or_default();
-        if !offerts
-            .split(|octet| octet.is_ascii_whitespace())
-            .any(|mecanisme| mecanisme.eq_ignore_ascii_case(b"PLAIN"))
-        {
+        // La liste des mécanismes suit le mot-clé : `AUTH PLAIN LOGIN` — lue
+        // à l'`EHLO`.
+        if !self.plain_offert {
             self.etat = Etat::Fini;
             return Ok(ClientStep::Done {
                 sent: ecrire(out, &[b"QUIT\r\n"])?,

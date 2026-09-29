@@ -161,6 +161,7 @@ struct Entree {
     apple_app_id: String,
     apple_development: bool,
     registre: String,
+    about: bool,
     /// Le dossier des rapports TLS, et le drapeau de remise — LIBRES tous les
     /// deux, y compris incohérents entre eux.
     tlsrpt: String,
@@ -255,6 +256,7 @@ fuzz_target!(|entree: Entree| {
         apple_app_id: entree.apple_app_id.clone(),
         apple_development: entree.apple_development,
         registre: entree.registre.clone(),
+        about: entree.about,
         require_fqdn_helo: entree.helo_qualifie,
         require_fqdn_sender: entree.expediteur_qualifie,
         require_fqdn_recipient: entree.destinataire_qualifie,

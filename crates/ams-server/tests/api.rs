@@ -241,6 +241,7 @@ fn configuration_complete(
         apple_app_id: String::new(),
         apple_development: false,
         registre: String::new(),
+        about: true,
         require_fqdn_sender: false,
         require_fqdn_recipient: false,
         require_sender_domain: false,

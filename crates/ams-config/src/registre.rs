@@ -218,6 +218,8 @@ pub struct Session {
     pub erreur: String,
     /// La version du serveur.
     pub version: String,
+    /// Ce que le pair a dit de lui par `XABOUT`, ou vide.
+    pub presentation: String,
 }
 
 /// Un résultat d'authentification, dans les mots de RFC 8601.
@@ -391,6 +393,8 @@ pub struct Transaction {
     pub pair: IpAddr,
     /// TLS, si la connexion s'est chiffrée.
     pub tls: Option<Tls>,
+    /// Ce que le pair a dit de lui par `XABOUT`, ou vide.
+    pub presentation: String,
 }
 
 /// Une transaction écrite acceptée, que la remise n'a pas pu conclure.
@@ -591,6 +595,7 @@ fn ecrire_session(mut ecrit: session::Builder<'_>, lu: &Session) {
     });
     ecrit.set_erreur(lu.erreur.as_str());
     ecrit.set_version(lu.version.as_str());
+    ecrit.set_presentation(lu.presentation.as_str());
 }
 
 fn ecrire_transaction(mut ecrit: transaction::Builder<'_>, lu: &Transaction) {
@@ -669,6 +674,7 @@ fn ecrire_transaction(mut ecrit: transaction::Builder<'_>, lu: &Transaction) {
         chiffre.set_version(tls.version.as_str());
         chiffre.set_suite(tls.suite.as_str());
     }
+    ecrit.set_presentation(lu.presentation.as_str());
 }
 
 /// Une trame : la longueur, puis l'enregistrement.
@@ -838,6 +844,7 @@ fn lire_session(lu: session::Reader<'_>) -> Session {
         },
         erreur: texte(lu.get_erreur()),
         version: texte(lu.get_version()),
+        presentation: texte(lu.get_presentation()),
     }
 }
 
@@ -925,6 +932,7 @@ fn lire_transaction(lu: transaction::Reader<'_>) -> Transaction {
         salut: lire_salut(lu.get_salut()),
         pair: adresse(lu.get_pair()),
         tls: lire_tls(lu.has_tls(), lu.get_tls()),
+        presentation: texte(lu.get_presentation()),
     }
 }
 
@@ -1264,6 +1272,7 @@ pub fn en_json(quoi: &Enregistrement) -> String {
             );
             objet.texte("erreur", &lu.erreur);
             objet.texte("version", &lu.version);
+            objet.texte("presentation", &lu.presentation);
         }
         Enregistrement::Transaction(lu) => {
             objet.texte("type", "transaction");
@@ -1355,6 +1364,7 @@ pub fn en_json(quoi: &Enregistrement) -> String {
             objet.brut("salut", &json_salut(&lu.salut));
             objet.texte("pair", &alloc::format!("{}", lu.pair));
             objet.brut("tls", &json_tls(lu.tls.as_ref()));
+            objet.texte("presentation", &lu.presentation);
         }
         Enregistrement::Abandon(lu) => {
             objet.texte("type", "abandon");
