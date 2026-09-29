@@ -517,3 +517,108 @@ async fn le_verificateur_se_debogue_sans_dire_d_ou_vient_l_alea() {
     assert!(rendu.contains("127.0.0.1:53"), "{rendu}");
     assert!(!rendu.contains("urandom"), "{rendu}");
 }
+
+// ── LE REGISTRE DE RÉCEPTION (0.2.44) : LE DNS TEL QU'IL RÉPOND ─────────────
+
+async fn resolveur_pour(table: Table) -> crate::resolver::Resolver {
+    let adresse = resolveur(table).await;
+    crate::resolver::Resolver::new(std::vec![adresse], Duration::from_millis(300))
+        .expect("résolveur")
+}
+
+#[tokio::test]
+async fn la_resolution_inverse_se_confirme_ou_non() {
+    use ams_config::registre::StatutDns;
+    let pair: IpAddr = "192.0.2.7".parse().expect("adresse");
+    let mut table = Table::new();
+    table.insert(
+        ("7.2.0.192.in-addr.arpa".to_string(), PTR),
+        Reaction::Rend(std::vec![
+            (PTR, nom("menteur.example.com")),
+            (PTR, nom("vrai.example.com")),
+        ]),
+    );
+    table.insert(
+        ("menteur.example.com".to_string(), A),
+        Reaction::Rend(std::vec![(A, std::vec![203, 0, 113, 1])]),
+    );
+    table.insert(
+        ("vrai.example.com".to_string(), A),
+        Reaction::Rend(std::vec![(A, std::vec![192, 0, 2, 7])]),
+    );
+    let vu = crate::registre::inverse(&resolveur_pour(table.clone()).await, pair).await;
+    assert_eq!(vu.statut, StatutDns::Trouve);
+    assert_eq!(vu.noms, ["menteur.example.com", "vrai.example.com"]);
+    assert_eq!(vu.ttl, 60);
+    assert!(vu.confirmee, "le second nom revient vers le pair");
+    assert!(!vu.authentifiee);
+
+    // Aucun nom ne revient vers le pair : trouvé, non confirmé.
+    table.insert(
+        ("vrai.example.com".to_string(), A),
+        Reaction::Rend(std::vec![(A, std::vec![198, 51, 100, 1])]),
+    );
+    let vu = crate::registre::inverse(&resolveur_pour(table).await, pair).await;
+    assert_eq!(vu.statut, StatutDns::Trouve);
+    assert!(!vu.confirmee);
+
+    // Pas de PTR : le nom n'existe pas, ou n'a rien de ce type.
+    let vu = crate::registre::inverse(&resolveur_pour(Table::new()).await, pair).await;
+    assert_eq!(vu.statut, StatutDns::Absent);
+    let mut vide = Table::new();
+    vide.insert(
+        ("7.2.0.192.in-addr.arpa".to_string(), PTR),
+        Reaction::Rend(std::vec![(TXT, txt("pas un nom"))]),
+    );
+    let vu = crate::registre::inverse(&resolveur_pour(vide).await, pair).await;
+    assert_eq!(vu.statut, StatutDns::Absent);
+
+    // Un résolveur muet : une panne, et rien d'inventé.
+    let mut muet = Table::new();
+    muet.insert(
+        ("7.2.0.192.in-addr.arpa".to_string(), PTR),
+        Reaction::Silence,
+    );
+    let vu = crate::registre::inverse(&resolveur_pour(muet).await, pair).await;
+    assert_eq!(vu.statut, StatutDns::Panne);
+    assert!(vu.noms.is_empty());
+}
+
+#[tokio::test]
+async fn le_nom_du_helo_se_juge() {
+    use ams_config::registre::StatutSalut;
+    let pair: IpAddr = "192.0.2.7".parse().expect("adresse");
+    let mut table = Table::new();
+    table.insert(
+        ("mx.example.com".to_string(), A),
+        Reaction::Rend(std::vec![(A, std::vec![192, 0, 2, 7])]),
+    );
+    table.insert(
+        ("ailleurs.example.com".to_string(), AAAA),
+        Reaction::Rend(std::vec![(
+            AAAA,
+            std::vec![0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+        )]),
+    );
+    table.insert(("muet.example.com".to_string(), A), Reaction::Silence);
+    let resolveur = resolveur_pour(table).await;
+    let juger = |annonce: &'static str| {
+        let resolveur = resolveur.clone();
+        async move {
+            crate::registre::salut(Some(&resolveur), annonce.as_bytes(), pair)
+                .await
+                .statut
+        }
+    };
+    assert_eq!(juger("mx.example.com").await, StatutSalut::PointeLePair);
+    assert_eq!(
+        juger("ailleurs.example.com").await,
+        StatutSalut::PointeAilleurs
+    );
+    assert_eq!(juger("inconnu.example.com").await, StatutSalut::NeResoutPas);
+    assert_eq!(juger("muet.example.com").await, StatutSalut::Panne);
+    assert_eq!(juger("[192.0.2.7]").await, StatutSalut::Litteral);
+    let sans = crate::registre::salut(None, b"mx.example.com", pair).await;
+    assert_eq!(sans.statut, StatutSalut::NonVerifie);
+    assert_eq!(sans.nom, "mx.example.com");
+}

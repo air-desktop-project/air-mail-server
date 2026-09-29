@@ -2305,6 +2305,44 @@ ouverture — même compte, protocole, adresse et mot de passe — ne s'écrit q
 fois par heure, et un même refus une fois par minute : une adresse inconnue,
 elle, apparaît tout de suite.
 
+### Tenir le registre de réception
+
+```sh
+./target/release/air-mail-admin config write air-mail.conf \
+    --domain mail.example.com --hosted example.com \
+    --registre /var/lib/air-mail/registre
+```
+
+Le registre (0.2.44) garde, de chaque session SMTP et de chaque message, **ce
+que le serveur savait à cet instant** — de quoi expliquer après coup pourquoi
+un message a été jugé fiable ou non, et juger la réputation d'un émetteur. Ce
+n'est pas un journal : il **se conserve**. Voir `docs/registre-de-reception.md`.
+
+- **Chaque session** : l'adresse et le port du pair, l'écoute, la résolution
+  inverse telle qu'elle répondait (noms `PTR`, TTL, bit `AD`, confirmation
+  aller-retour), le nom annoncé au `HELO` et ce qu'il résout, TLS (version,
+  suite), les commandes, l'authentification, l'issue.
+- **Chaque message**, refusé compris : l'enveloppe, les destinataires et, pour
+  chacun, la **partie unique du nom Maildir** qui relie le constat au fichier ;
+  les en-têtes utiles (`Message-ID`, `From`, `Reply-To`, `List-Id`… et le
+  **condensat** de l'objet, jamais l'objet) ; SPF, chaque signature DKIM,
+  DMARC ; l'en-tête `Authentication-Results` écrit.
+- **La résolution inverse est ATTENDUE** avant d'écrire un message : elle part
+  dès l'acceptation, et chaque constat porte le DNS tel qu'il répondait.
+- **Un message n'entre qu'une fois son constat écrit** — et synchronisé sur le
+  disque. S'il ne peut pas l'être, disque plein compris, le pair reçoit un
+  `451` et réessaie : aucun message n'entre sans trace.
+- **Un fichier par jour UTC**, scellé à minuit par le condensat de tout ce qui
+  le précède, puis mis en lecture seule ; chaque fichier commence par le
+  condensat du précédent. Une archive retouchée, tronquée ou retirée se voit.
+  Rien ne se supprime.
+
+```sh
+air-mail-admin registre verifie air-mail.conf
+air-mail-admin registre cherche air-mail.conf --ip 192.0.2.7
+air-mail-admin registre cherche air-mail.conf --domaine example.com --depuis 2026-09-01
+```
+
 ### Exiger l'attestation des clefs Android
 
 ```sh

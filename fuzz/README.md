@@ -264,6 +264,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_h2_client` | `seeds/h2-client` | le client HTTP/2 des réveils face à un serveur étranger — rien au-delà des tampons, une réponse finie a un statut final, le découpage ne change rien |
 | `fuzz_ams_push` | `seeds/push` | Web Push — un message chiffré a la taille annoncée, un jeton VAPID est un champ HTTP imprimable |
 | `fuzz_ams_attest` | `seeds/attest` | attestation de clef Android — rien ne panique, et sans racine admise rien n'est accepté |
+| `fuzz_ams_registre` | `seeds/registre` | registre de réception — un fichier ou un bloc d'en-tête quelconques : rien ne panique, ce qui se lit se réécrit à l'identique, les valeurs retenues sont bornées |
 | `fuzz_ams_h3_frame` | `seeds/h3-frame` | le cadrage HTTP/3 — **les types qu'HTTP/2 employait ne passent jamais** (§11.2.1) |
 | `fuzz_ams_h3_connection` | `seeds/h3-connection` | la machine de connexion HTTP/3 — **aucune trame avant les réglages**, un seul flux critique de chaque sorte, et un `GOAWAY` ne remonte pas |
 | `fuzz_ams_h3_driver` | `seeds/h3-driver` | le conducteur HTTP/3 sur des octets — **chaque appel rend la main**, et une faute est définitive |

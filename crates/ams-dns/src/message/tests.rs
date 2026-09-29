@@ -47,7 +47,9 @@ fn enregistrement(texte: &str, kind: u16, class: u16, rdata: &[u8]) -> std::vec:
     let mut octets = nom(texte);
     octets.extend_from_slice(&kind.to_be_bytes());
     octets.extend_from_slice(&class.to_be_bytes());
-    octets.extend_from_slice(&300_u32.to_be_bytes());
+    // Les deux moitiés du TTL portent quelque chose : une lecture qui en
+    // oublierait une se verrait.
+    octets.extend_from_slice(&0x0001_012C_u32.to_be_bytes());
     octets.extend_from_slice(
         &u16::try_from(rdata.len())
             .expect("données courtes")
@@ -81,6 +83,7 @@ fn une_reponse_txt_rend_ses_chaines() {
     let seul = enregistrements[0];
     assert_eq!(seul.kind(), Kind::Txt.code());
     assert_eq!(seul.class(), CLASS_IN);
+    assert_eq!(seul.ttl(), 0x0001_012C);
     assert!(!seul.is_opt());
     assert_eq!(seul.owner().expect("nom").as_bytes(), b"example.com");
     assert_eq!(seul.rdata(), &donnees[..]);
@@ -212,7 +215,9 @@ fn un_proprietaire_illisible_se_voit_aussi() {
     octets.extend_from_slice(&[0xC0, 12]);
     octets.extend_from_slice(&Kind::A.code().to_be_bytes());
     octets.extend_from_slice(&CLASS_IN.to_be_bytes());
-    octets.extend_from_slice(&300_u32.to_be_bytes());
+    // Les deux moitiés du TTL portent quelque chose : une lecture qui en
+    // oublierait une se verrait.
+    octets.extend_from_slice(&0x0001_012C_u32.to_be_bytes());
     octets.extend_from_slice(&4_u16.to_be_bytes());
     octets.extend_from_slice(&[192, 0, 2, 1]);
     let message = Message::parse(&octets).expect("réponse lisible");

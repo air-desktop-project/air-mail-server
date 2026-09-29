@@ -217,4 +217,48 @@ pub trait Delivery {
 
     /// La transaction est abandonnée : rien ne doit en subsister.
     fn abort(&mut self);
+
+    /// Cette remise tient-elle un registre de réception (0.2.44) ?
+    ///
+    /// **VRAI, LA BOUCLE TRAVAILLE POUR LUI** : elle résout l'inverse de
+    /// l'adresse du pair dès l'acceptation, vérifie le nom du `HELO`, et
+    /// ATTEND ces réponses avant de rendre compte d'un message. Faux, elle ne
+    /// pose aucune question de plus au DNS.
+    ///
+    /// **LE DÉFAUT N'EN TIENT PAS.**
+    fn keeps_register(&self) -> bool {
+        false
+    }
+
+    /// Ce que la boucle a constaté du message, pour le registre.
+    ///
+    /// Appelée **une fois par transaction**, juste avant [`Delivery::finish`]
+    /// ou [`Delivery::abort`], avec l'issue déjà posée. Les destinataires n'y
+    /// portent que leur adresse : où chacun est allé — le compte, la partie
+    /// unique du nom Maildir —, c'est la remise qui le sait, et qui le
+    /// complète.
+    ///
+    /// # UN MESSAGE ACCEPTÉ N'EST ACCEPTÉ QU'UNE FOIS CONSIGNÉ
+    ///
+    /// C'est [`Delivery::finish`] qui écrit le constat d'un message accepté,
+    /// et qui rend [`DeliveryFailure::Temporary`] s'il ne le peut pas : le pair
+    /// reçoit un `451` et réessaie. Un message qui entrerait sans trace ni
+    /// verdict est ce que le registre existe pour empêcher.
+    ///
+    /// **LE DÉFAUT L'OUBLIE.**
+    fn record(&mut self, transaction: ams_config::registre::Transaction) {
+        let _ = transaction;
+    }
+
+    /// La connexion se ferme : ce qu'on en a vu, pour le registre.
+    ///
+    /// Appelée une fois, à la fin, que la connexion soit allée à son terme ou
+    /// non — **sauf pour un pair banni**, qui n'a rien reçu : consigner chacune
+    /// de ses tentatives lui donnerait le moyen de remplir le disque de qui
+    /// l'a banni.
+    ///
+    /// **LE DÉFAUT L'OUBLIE.**
+    fn close(&mut self, session: ams_config::registre::Session) {
+        let _ = session;
+    }
 }

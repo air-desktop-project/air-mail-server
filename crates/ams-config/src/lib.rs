@@ -105,6 +105,18 @@ mod ams_delegations_capnp {
     include!("ams_delegations_capnp.rs");
 }
 
+#[allow(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    missing_docs,
+    unused_qualifications,
+    reason = "code généré par capnpc-rust, hors de notre contrôle éditorial"
+)]
+mod ams_registre_capnp {
+    include!("ams_registre_capnp.rs");
+}
+
 mod ams_accounts_capnp {
     include!("ams_accounts_capnp.rs");
 }
@@ -141,6 +153,7 @@ mod devices;
 mod index;
 mod journal;
 mod push;
+pub mod registre;
 mod scram;
 
 pub use accounts::{decode_accounts, encode_accounts};

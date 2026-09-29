@@ -1,0 +1,20 @@
+Received: from afexample (a.example [192.0.2.7])
+Message-ID: <x@example.com>
+From: A <a@example.com>
+Reply-To: r@autre.example
+To: b@narro.ch, c@narro.ch
+Subject: Bonjour
+List-Id: <liste.example.com>
+List-Unsubscribe: <mailto:u@examplmple.com>
+From: A <a@example.com>
+Reply-To: r@autre.example
+To: b@narro.ch, c@narro.ch
+Subject: Bonjour
+List-Id: <liste.example.com>
+List-Unsubscribe: <mailto:u@example.com>
+ARC-Seal: i=1
+
+corpe.com>
+ARC-Seal: i=1
+
+corps

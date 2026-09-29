@@ -489,12 +489,17 @@ where
             // fait, elle, part au journal — **une ligne, à la fermeture**, et
             // pour l'échec aussi : une connexion qui tombe est précisément
             // celle qu'un exploitant cherche.
-            let issue = crate::connection::serve_connection_with(
+            // L'ADRESSE LOCALE DE CETTE CONNEXION, et non celle de l'écoute : une
+            // écoute sur `0.0.0.0` ne dit pas sur quelle adresse le pair est
+            // arrivé, et le registre veut le savoir.
+            let ecoute = flux.local_addr().unwrap_or(pair);
+            let issue = crate::connection::serve_connection_from(
                 &mut flux,
                 &service,
                 &*policy,
                 &mut remise,
-                source_de(pair),
+                pair,
+                ecoute,
                 mode,
             )
             .await;

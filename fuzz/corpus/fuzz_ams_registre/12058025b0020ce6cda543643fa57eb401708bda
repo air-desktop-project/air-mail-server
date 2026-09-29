@@ -1,0 +1,9 @@
+Received: from a.example (a.example [192.0.2.7])
+Message-ID: <x@example.com>xample [191.0.2.7])
+Messsage-ID: <x@example.com>
+From: A <a@example.com>
+Reply-To: r@autre.example
+esssageI-D: <x@e>
+ARC-Seal: i=1
+
+corps

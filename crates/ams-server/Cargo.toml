@@ -46,6 +46,8 @@ rustls = { workspace = true }
 # multi-fils — `block_in_place`, dont la remise Maildir a besoin pour ses `fsync`,
 # n'existe pas sur l'ordonnanceur mono-fil.
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
+# Le condensat des fichiers du registre de réception (0.2.44).
+sha2 = { workspace = true }
 
 [lints]
 workspace = true
@@ -54,7 +56,6 @@ workspace = true
 # Relire un réveil Web Push comme le navigateur le ferait.
 aes-gcm = { workspace = true }
 hkdf = { workspace = true }
-sha2 = { workspace = true }
 # LE CLIENT QUIC D'ESSAI, partagé avec `ams-loop-tokio` : le dupliquer en
 # ferait diverger les copies.
 ams-quic-client = { workspace = true }

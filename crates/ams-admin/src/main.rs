@@ -136,6 +136,18 @@ COMMANDES
                         ligne JSON par entrée, LA PLUS RÉCENTE D'ABORD, et 50
                         par défaut. EN LECTURE SEULE, depuis la machine du
                         serveur et par qui peut lire son répertoire.
+    registre verifie <config>
+                        vérifie le registre de réception : chaque fichier
+                        entier, son sceau juste, et chacun chaîné au
+                        précédent. Une faute rend un code 1.
+    registre cherche <config> [--ip <adresse>] [--domaine <d>]
+                     [--message-id <id>] [--session <hex>]
+                     [--depuis AAAA-MM-JJ] [--jusqu-a AAAA-MM-JJ] [--limit <n>]
+                        les enregistrements qui correspondent, une ligne JSON
+                        chacun, dans l'ordre du temps — les <n> derniers, 100
+                        par défaut. `--domaine` cherche dans le HELO, le PTR,
+                        le MAIL FROM, le From et les domaines SPF, DKIM et
+                        DMARC. EN LECTURE SEULE.
     summary <maildir>   relit une boîte et rend ce que ses noms de fichiers
                         portent : messages numérotés, messages à adopter, noms
                         illisibles, et la réserve d'UID de l'index. EN LECTURE
@@ -318,6 +330,318 @@ fn lire_l_audit(fichier: &Path, nom: &str, limite: usize) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Le répertoire du registre que cette configuration nomme.
+fn repertoire_du_registre(fichier: &Path) -> Result<std::path::PathBuf, ExitCode> {
+    let config = std::fs::read(fichier)
+        .map_err(|erreur| erreur.to_string())
+        .and_then(|octets| ams_config::decode(&octets).map_err(|erreur| erreur.to_string()))
+        .map_err(|erreur| {
+            eprintln!("air-mail-admin : `{}` : {erreur}", fichier.display());
+            ExitCode::FAILURE
+        })?;
+    if config.registre.is_empty() {
+        eprintln!(
+            "air-mail-admin : cette configuration ne tient pas de registre de réception \
+             (`config write … --registre <répertoire>`)"
+        );
+        return Err(ExitCode::FAILURE);
+    }
+    Ok(std::path::PathBuf::from(config.registre))
+}
+
+/// Les fichiers du registre, par jour croissant.
+fn fichiers_du_registre(repertoire: &Path) -> Result<Vec<std::path::PathBuf>, ExitCode> {
+    let mut trouves: Vec<std::path::PathBuf> = std::fs::read_dir(repertoire)
+        .map_err(|erreur| {
+            eprintln!("air-mail-admin : `{}` : {erreur}", repertoire.display());
+            ExitCode::FAILURE
+        })?
+        .filter_map(Result::ok)
+        .map(|entree| entree.path())
+        .filter(|chemin| chemin.extension().is_some_and(|ext| ext == "amsr"))
+        .collect();
+    trouves.sort();
+    Ok(trouves)
+}
+
+/// `registre verifie` : chaque fichier entier et scellé, chacun chaîné au
+/// précédent. Le dernier — celui du jour — peut être encore ouvert.
+fn verifier_le_registre(fichier: &Path) -> ExitCode {
+    use ams_config::registre::{en_hex, verifier};
+    let repertoire = match repertoire_du_registre(fichier) {
+        Ok(repertoire) => repertoire,
+        Err(code) => return code,
+    };
+    let fichiers = match fichiers_du_registre(&repertoire) {
+        Ok(fichiers) => fichiers,
+        Err(code) => return code,
+    };
+    let mut fautes = 0_u32;
+    let mut precedent: Option<[u8; 32]> = None;
+    let dernier = fichiers.len().saturating_sub(1);
+    for (rang, chemin) in fichiers.iter().enumerate() {
+        let nom = chemin
+            .file_name()
+            .map(|nom| nom.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let octets = match std::fs::read(chemin) {
+            Ok(octets) => octets,
+            Err(erreur) => {
+                println!("{nom} : ILLISIBLE — {erreur}");
+                fautes = fautes.saturating_add(1);
+                precedent = None;
+                continue;
+            }
+        };
+        let bilan = match verifier(&octets) {
+            Ok(bilan) => bilan,
+            Err(faute) => {
+                println!("{nom} : FAUTE — {faute}");
+                fautes = fautes.saturating_add(1);
+                precedent = None;
+                continue;
+            }
+        };
+        let chaine = match (rang, bilan.entete.precedent, precedent) {
+            (0, None, _) => String::from("premier de la chaîne"),
+            (0, Some(cite), _) => format!(
+                "cite {}… — un fichier qui n'est plus ici",
+                &en_hex(&cite)[..12]
+            ),
+            (_, Some(cite), Some(attendu)) if cite == attendu => {
+                String::from("chaîné au précédent")
+            }
+            _ => {
+                fautes = fautes.saturating_add(1);
+                String::from("CHAÎNE ROMPUE — il ne cite pas le fichier précédent")
+            }
+        };
+        let etat = match bilan.sceau {
+            Some(sceau) if sceau.tronques > 0 => {
+                format!(
+                    "scellé ({} octet(s) d'une trame coupée retirés)",
+                    sceau.tronques
+                )
+            }
+            Some(_) => String::from("scellé"),
+            None if rang == dernier => String::from("ouvert (le jour en cours)"),
+            None => {
+                fautes = fautes.saturating_add(1);
+                String::from("NON SCELLÉ, alors qu'un jour a suivi")
+            }
+        };
+        println!(
+            "{nom} : {} enregistrement(s), {etat}, {chaine} — {}",
+            bilan.enregistrements,
+            en_hex(&bilan.condensat)
+        );
+        precedent = Some(bilan.condensat);
+    }
+    if fichiers.is_empty() {
+        println!("aucun fichier : le registre n'a encore rien reçu");
+    }
+    if fautes > 0 {
+        eprintln!("air-mail-admin : {fautes} faute(s) dans le registre");
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
+}
+
+/// Ce que `registre cherche` filtre.
+#[derive(Debug, Default)]
+struct Recherche {
+    ip: Option<std::net::IpAddr>,
+    domaine: Option<String>,
+    message_id: Option<String>,
+    session: Option<String>,
+    depuis: Option<String>,
+    jusqu_a: Option<String>,
+    limite: usize,
+}
+
+impl Recherche {
+    fn lire(mots: &[&str]) -> Result<Self, String> {
+        let mut recherche = Self {
+            limite: 100,
+            ..Self::default()
+        };
+        let mut reste = mots.iter();
+        while let Some(option) = reste.next() {
+            let valeur = reste
+                .next()
+                .ok_or_else(|| format!("`{option}` attend une valeur"))?;
+            match *option {
+                "--ip" => {
+                    recherche.ip = Some(
+                        valeur
+                            .parse()
+                            .map_err(|_| format!("`{valeur}` n'est pas une adresse IP"))?,
+                    );
+                }
+                "--domaine" => recherche.domaine = Some(valeur.to_ascii_lowercase()),
+                "--message-id" => recherche.message_id = Some((*valeur).to_owned()),
+                "--session" => recherche.session = Some(valeur.to_ascii_lowercase()),
+                "--depuis" | "--jusqu-a" => {
+                    let jour = valeur.as_bytes();
+                    let forme = jour.len() == 10
+                        && jour.iter().enumerate().all(|(rang, octet)| {
+                            if rang == 4 || rang == 7 {
+                                *octet == b'-'
+                            } else {
+                                octet.is_ascii_digit()
+                            }
+                        });
+                    if !forme {
+                        return Err(format!("`{valeur}` n'est pas un jour AAAA-MM-JJ"));
+                    }
+                    if *option == "--depuis" {
+                        recherche.depuis = Some((*valeur).to_owned());
+                    } else {
+                        recherche.jusqu_a = Some((*valeur).to_owned());
+                    }
+                }
+                "--limit" => {
+                    recherche.limite = valeur
+                        .parse::<usize>()
+                        .ok()
+                        .filter(|limite| *limite > 0)
+                        .ok_or_else(|| {
+                            String::from("`--limit` attend un nombre d'entrées, au moins un")
+                        })?;
+                }
+                autre => return Err(format!("`registre cherche` ne connaît pas `{autre}`")),
+            }
+        }
+        Ok(recherche)
+    }
+
+    fn filtre(&self) -> bool {
+        self.ip.is_some()
+            || self.domaine.is_some()
+            || self.message_id.is_some()
+            || self.session.is_some()
+    }
+
+    fn garde(&self, quoi: &ams_config::registre::Enregistrement) -> bool {
+        use ams_config::registre::{Enregistrement, en_hex};
+        if !self.filtre() {
+            return true;
+        }
+        let contient = |texte: &str| {
+            self.domaine
+                .as_ref()
+                .is_some_and(|domaine| texte.to_ascii_lowercase().contains(domaine.as_str()))
+        };
+        let (session, pair) = match quoi {
+            Enregistrement::Session(vue) => (vue.id, Some(vue.pair)),
+            Enregistrement::Transaction(vue) => (vue.session, Some(vue.pair)),
+            Enregistrement::Abandon(vue) => (vue.session, None),
+            Enregistrement::Entete(_) | Enregistrement::Sceau(_) => return false,
+        };
+        if let Some(ip) = self.ip
+            && pair != Some(ip)
+        {
+            return false;
+        }
+        if let Some(cherche) = &self.session
+            && !en_hex(&session).starts_with(cherche.as_str())
+        {
+            return false;
+        }
+        if let Some(cherche) = &self.message_id {
+            let Enregistrement::Transaction(vue) = quoi else {
+                return false;
+            };
+            if !vue.entetes.message_id.contains(cherche.as_str()) {
+                return false;
+            }
+        }
+        if self.domaine.is_some() {
+            let trouve = match quoi {
+                Enregistrement::Session(vue) => {
+                    contient(&vue.salut.nom) || vue.inverse.noms.iter().any(|nom| contient(nom))
+                }
+                Enregistrement::Transaction(vue) => {
+                    contient(&vue.salut.nom)
+                        || vue.inverse.noms.iter().any(|nom| contient(nom))
+                        || contient(&vue.mail_from)
+                        || contient(&vue.entetes.from)
+                        || vue.spf.as_ref().is_some_and(|spf| contient(&spf.domaine))
+                        || vue.dkim.iter().any(|dkim| contient(&dkim.domaine))
+                        || vue
+                            .dmarc
+                            .as_ref()
+                            .is_some_and(|dmarc| contient(&dmarc.domaine))
+                }
+                _ => false,
+            };
+            if !trouve {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// `registre cherche` : les enregistrements qui correspondent, dans l'ordre du
+/// temps, les derniers d'abord retenus.
+fn chercher_au_registre(fichier: &Path, recherche: &Recherche) -> ExitCode {
+    use ams_config::registre::{en_json, lire_trame, trames_entieres};
+    let repertoire = match repertoire_du_registre(fichier) {
+        Ok(repertoire) => repertoire,
+        Err(code) => return code,
+    };
+    let fichiers = match fichiers_du_registre(&repertoire) {
+        Ok(fichiers) => fichiers,
+        Err(code) => return code,
+    };
+    let mut lignes: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+    for chemin in fichiers {
+        let jour = chemin
+            .file_stem()
+            .map(|nom| nom.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if recherche
+            .depuis
+            .as_ref()
+            .is_some_and(|depuis| jour < *depuis)
+            || recherche
+                .jusqu_a
+                .as_ref()
+                .is_some_and(|jusqu_a| jour > *jusqu_a)
+        {
+            continue;
+        }
+        let octets = match std::fs::read(&chemin) {
+            Ok(octets) => octets,
+            Err(erreur) => {
+                eprintln!("air-mail-admin : `{}` : {erreur}", chemin.display());
+                return ExitCode::FAILURE;
+            }
+        };
+        // Le fichier du jour peut finir sur une trame en cours d'écriture : on
+        // lit ce qui est entier.
+        let (entier, _) = trames_entieres(&octets);
+        let mut debut = 0;
+        while debut < entier {
+            let Ok((quoi, apres)) = lire_trame(&octets, debut) else {
+                break;
+            };
+            if recherche.garde(&quoi) {
+                lignes.push_back(en_json(&quoi));
+                if lignes.len() > recherche.limite {
+                    lignes.pop_front();
+                }
+            }
+            debut = apres;
+        }
+    }
+    for ligne in lignes {
+        println!("{ligne}");
+    }
+    ExitCode::SUCCESS
+}
+
 /// L'aide à écrire si l'un des arguments la demande, ou `None`.
 ///
 /// # `--help` N'EST JAMAIS UN CHEMIN
@@ -377,6 +701,14 @@ fn main() -> ExitCode {
             Ok(limite) if limite > 0 => lire_l_audit(Path::new(fichier), nom, limite),
             _ => {
                 eprintln!("air-mail-admin : `--limit` attend un nombre d'entrées, au moins un");
+                ExitCode::from(2)
+            }
+        },
+        ["registre", "verifie", fichier] => verifier_le_registre(Path::new(fichier)),
+        ["registre", "cherche", fichier, reste @ ..] => match Recherche::lire(reste) {
+            Ok(recherche) => chercher_au_registre(Path::new(fichier), &recherche),
+            Err(message) => {
+                eprintln!("air-mail-admin : {message}");
                 ExitCode::from(2)
             }
         },
@@ -1079,6 +1411,19 @@ fn afficher(config: &Configuration) {
                     format!(", racines en plus `{}`", config.android_roots)
                 },
             ),
+        }
+    );
+    println!(
+        "registre           {}",
+        if config.registre.is_empty() {
+            String::from(
+                "AUCUN — ni la trace des sessions ni le constat des messages ne se conservent",
+            )
+        } else {
+            format!(
+                "sous `{}` (un fichier par jour UTC, scellé et chaîné ; sans lui, `451`)",
+                config.registre
+            )
         }
     );
     println!(

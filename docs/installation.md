@@ -440,6 +440,29 @@ air-mail-admin config write /etc/air-mail/ams.conf … \
   `air-mail-admin audit /etc/air-mail/ams.conf --login <compte>` ;
 - sans ce répertoire, rien ne s'écrit et `…/audit` rend `501`.
 
+### Le registre de réception : ce que le serveur savait, conservé
+
+```sh
+air-mail-admin config write /etc/air-mail/ams.conf … \
+    --registre /var/lib/air-mail/registre
+```
+
+- le répertoire naît en `0700`, les fichiers en `0600`, puis `0400` une fois
+  scellés : **il contient des données personnelles** (adresses, IP des
+  correspondants) et se garde en clair, sans limite de durée — ses copies hors
+  machine demandent le même soin ;
+- il doit vivre sous un chemin que l'unité systemd laisse écrire
+  (`ReadWritePaths=/var/lib/air-mail`) ;
+- **un message n'est accepté qu'une fois son constat écrit** : un disque plein
+  fait répondre `451` à tout le courrier entrant, et le journal le dit ;
+- un fichier par jour UTC, scellé à minuit et chaîné au précédent ; un arrêt
+  brutal ne casse pas la chaîne — la trame coupée est retirée au redémarrage,
+  et le sceau le dit ;
+- le démarrage refuse un dernier fichier qu'il ne sait pas relire, plutôt que
+  d'écrire à la suite d'une chaîne qu'il ne peut pas prolonger ;
+- `air-mail-admin registre verifie <config>` vérifie la chaîne entière ;
+  `registre cherche <config> --ip … | --domaine … | --message-id …` fouille.
+
 ### L'attestation des clefs Android : prouver où vit la clef
 
 ```sh

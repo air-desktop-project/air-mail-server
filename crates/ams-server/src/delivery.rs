@@ -392,6 +392,16 @@ pub struct MaildirDelivery {
     /// **Sans lui, personne n'est réveillé** — c'est l'état d'un serveur sans
     /// magasin d'appareils.
     reveil: Option<Arc<crate::reveil::Reveil>>,
+    /// Le registre de réception (0.2.44).
+    ///
+    /// **Tenu, un message n'est accepté qu'une fois son constat écrit** : sans
+    /// quoi le pair reçoit un `451` et réessaie.
+    registre: Option<Arc<crate::registre::Registre>>,
+    /// Le constat que la boucle a composé pour la transaction en cours.
+    constat: Option<ams_config::registre::Transaction>,
+    /// Où va chaque destinataire, dans l'ordre des `add_recipient` : le
+    /// compte et la partie unique du nom Maildir, ou le relais.
+    routes: Vec<ams_config::registre::Destinataire>,
 }
 
 impl MaildirDelivery {
@@ -427,6 +437,60 @@ impl MaildirDelivery {
             incidents,
             delegations: None,
             reveil: None,
+            registre: None,
+            constat: None,
+            routes: Vec::new(),
+        }
+    }
+
+    /// Lui donne le registre de réception : chaque session et chaque message y
+    /// laissent leur constat, et un message ne s'accepte qu'une fois le sien
+    /// écrit.
+    #[must_use]
+    pub fn avec_registre(mut self, registre: Arc<crate::registre::Registre>) -> Self {
+        self.registre = Some(registre);
+        self
+    }
+
+    /// Écrit un enregistrement au registre, s'il est tenu. Un échec se compte
+    /// et se dit, et se rend à l'appelant.
+    fn consigner(&self, quoi: &ams_config::registre::Enregistrement) -> Result<(), ()> {
+        let Some(registre) = self.registre.as_ref() else {
+            return Ok(());
+        };
+        tokio::task::block_in_place(|| registre.ecrire(quoi)).map_err(|_| {
+            self.incident(crate::incidents::Cause::Registre);
+        })
+    }
+
+    /// Écrit le constat en cours, avec cette issue, s'il y en a un.
+    fn consigner_le_constat(
+        &mut self,
+        issue: Option<ams_config::registre::IssueTransaction>,
+    ) -> Result<(), ()> {
+        let Some(mut constat) = self.constat.take() else {
+            return Ok(());
+        };
+        constat.destinataires = core::mem::take(&mut self.routes);
+        if let Some(issue) = issue {
+            constat.issue = issue;
+        }
+        self.consigner(&ams_config::registre::Enregistrement::Transaction(
+            Box::new(constat),
+        ))
+    }
+
+    /// Une transaction consignée ACCEPTÉE que la remise n'a pas conclue.
+    fn consigner_l_abandon(&self, lien: Option<([u8; 16], u32)>, raison: &str) {
+        if let Some((session, numero)) = lien {
+            let _ = self.consigner(&ams_config::registre::Enregistrement::Abandon(
+                ams_config::registre::Abandon {
+                    session,
+                    numero,
+                    quand: Self::maintenant().saturating_mul(1000),
+                    raison: String::from(raison),
+                },
+            ));
         }
     }
 
@@ -535,6 +599,8 @@ impl Delivery for MaildirDelivery {
         self.entete_signe.clear();
         self.authres.clear();
         self.reserve_dkim = 0;
+        self.constat = None;
+        self.routes.clear();
     }
 
     fn submitter(&mut self, login: &[u8]) {
@@ -634,6 +700,13 @@ impl Delivery for MaildirDelivery {
             self.incident(crate::incidents::Cause::Ecriture);
             return Err(DeliveryFailure::Temporary);
         }
+        self.routes.push(ams_config::registre::Destinataire {
+            adresse: ams_config::registre::borne_octets(address).0,
+            compte: compte.login.clone(),
+            unique: String::from_utf8_lossy(arrivee.unique()).into_owned(),
+            ecarte: false,
+            relaye: false,
+        });
         self.arrivees.push((compte.login.clone(), arrivee));
         Ok(())
     }
@@ -742,6 +815,31 @@ impl Delivery for MaildirDelivery {
         if self.arrivees.is_empty() && self.sortants.is_empty() {
             return Err(DeliveryFailure::Temporary);
         }
+        // ── LE CONSTAT D'ABORD (0.2.44) ─────────────────────────────────────
+        //
+        // **AUCUN MESSAGE N'ENTRE SANS TRACE** : le constat s'écrit — et se
+        // synchronise — avant que le moindre fichier ne soit validé. S'il ne
+        // s'écrit pas, rien n'est remis et le pair reçoit un `451` ; il
+        // réessaiera quand le disque aura de la place.
+        if self.ecarte {
+            let ecartes: Vec<String> = self
+                .routes
+                .iter()
+                .filter(|route| !route.relaye)
+                .map(|route| route.compte.clone())
+                .filter(|compte| self.dossier_de_quarantaine(compte).is_some())
+                .collect();
+            for route in &mut self.routes {
+                route.ecarte = ecartes.contains(&route.compte);
+            }
+        }
+        let lien = self
+            .constat
+            .as_ref()
+            .map(|constat| (constat.session, constat.numero));
+        if self.consigner_le_constat(None).is_err() {
+            return Err(DeliveryFailure::Temporary);
+        }
         // **LE PROLOGUE SE POSE AVANT LE `commit`**, pendant que les fichiers
         // sont encore ouverts : après, il n'y a plus rien à réécrire.
         self.poser_le_prologue();
@@ -755,7 +853,7 @@ impl Delivery for MaildirDelivery {
         // Les boîtes où le message est VRAIMENT arrivé, hors quarantaine : ce
         // sont elles, et elles seules, qui réveillent.
         let mut recues: Vec<String> = Vec::new();
-        tokio::task::block_in_place(|| {
+        let ecrit = tokio::task::block_in_place(|| {
             for (compte, arrivee) in arrivees {
                 // TOUT OU RIEN N'EST PAS TENABLE ICI : les `rename` sont
                 // atomiques un par un, pas ensemble. Un échec au milieu laisse
@@ -789,14 +887,22 @@ impl Delivery for MaildirDelivery {
                 }
             }
             Ok(())
-        })?;
+        });
+        if let Err(cause) = ecrit {
+            self.consigner_l_abandon(lien, "validation du message sur le disque");
+            return Err(cause);
+        }
         // **APRÈS L'ÉCRITURE, ET SANS ATTENDRE** : le signal ne retient rien.
         if let Some(reveil) = &self.reveil {
             for compte in &recues {
                 reveil.signaler(compte);
             }
         }
-        self.deposer_les_sortants()
+        let depose = self.deposer_les_sortants();
+        if depose.is_err() {
+            self.consigner_l_abandon(lien, "dépôt dans la file sortante");
+        }
+        depose
     }
 
     fn abort(&mut self) {
@@ -808,6 +914,32 @@ impl Delivery for MaildirDelivery {
         self.sortants.clear();
         self.corps.clear();
         self.entetes = None;
+        // **UN MESSAGE REFUSÉ SE CONSIGNE AUSSI** : c'est souvent lui qui dit
+        // le plus d'un émetteur. Un constat encore « accepté » ici est celui
+        // d'un `finish` qui a échoué avant de l'écrire — il a été refusé
+        // temporairement.
+        let issue = match self.constat.as_ref().map(|constat| constat.issue) {
+            Some(ams_config::registre::IssueTransaction::Acceptee) => {
+                Some(ams_config::registre::IssueTransaction::RefuseeTemporaire)
+            }
+            _ => None,
+        };
+        let _ = self.consigner_le_constat(issue);
+        self.routes.clear();
+    }
+
+    fn keeps_register(&self) -> bool {
+        self.registre.is_some()
+    }
+
+    fn record(&mut self, transaction: ams_config::registre::Transaction) {
+        self.constat = Some(transaction);
+    }
+
+    fn close(&mut self, session: ams_config::registre::Session) {
+        let _ = self.consigner(&ams_config::registre::Enregistrement::Session(Box::new(
+            session,
+        )));
     }
 }
 
@@ -1096,6 +1228,11 @@ impl MaildirDelivery {
         }
         self.sortants
             .push(String::from_utf8_lossy(address).into_owned());
+        self.routes.push(ams_config::registre::Destinataire {
+            adresse: ams_config::registre::borne_octets(address).0,
+            relaye: true,
+            ..ams_config::registre::Destinataire::default()
+        });
         Ok(())
     }
 

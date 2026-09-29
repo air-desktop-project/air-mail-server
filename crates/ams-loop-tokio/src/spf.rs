@@ -308,7 +308,7 @@ enum Reponse {
 }
 
 /// Le nom de la résolution inverse d'une adresse (RFC 1035 §3.5, RFC 3596 §2.5).
-fn nom_inverse(client: IpAddr) -> String {
+pub(crate) fn nom_inverse(client: IpAddr) -> String {
     match client {
         IpAddr::V4(adresse) => {
             let [a, b, c, d] = adresse.octets();

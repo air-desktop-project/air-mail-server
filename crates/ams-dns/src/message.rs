@@ -205,6 +205,10 @@ fn lire_enregistrement(octets: &[u8], position: usize) -> Option<(Record<'_>, us
     let apres_nom = name::sauter(octets, position).ok()?;
     let kind = lire_u16(octets, apres_nom)?;
     let class = lire_u16(octets, apres_nom.saturating_add(2))?;
+    // Le TTL tient en deux moitiés de seize bits : `lire_u16` suffit, et ne
+    // demande aucune seconde lecture bornée.
+    let ttl = (u32::from(lire_u16(octets, apres_nom.saturating_add(4))?) << 16)
+        | u32::from(lire_u16(octets, apres_nom.saturating_add(6))?);
     let longueur = lire_u16(octets, apres_nom.saturating_add(8))?;
     let donnees = apres_nom.saturating_add(10);
     let fin = donnees.saturating_add(usize::from(longueur));
@@ -216,6 +220,7 @@ fn lire_enregistrement(octets: &[u8], position: usize) -> Option<(Record<'_>, us
             donnees,
             kind,
             class,
+            ttl,
             rdata,
         },
         fin,
@@ -230,6 +235,7 @@ pub struct Record<'a> {
     donnees: usize,
     kind: u16,
     class: u16,
+    ttl: u32,
     rdata: &'a [u8],
 }
 
@@ -248,6 +254,13 @@ impl<'a> Record<'a> {
     #[must_use]
     pub fn class(&self) -> u16 {
         self.class
+    }
+
+    /// Combien de secondes la réponse se garde en cache — ce que le registre
+    /// de réception retient de la résolution inverse.
+    #[must_use]
+    pub fn ttl(&self) -> u32 {
+        self.ttl
     }
 
     /// Est-ce l'`OPT` d'EDNS(0) ? Il n'est pas une donnée.

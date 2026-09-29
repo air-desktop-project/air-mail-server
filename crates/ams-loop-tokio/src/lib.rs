@@ -98,6 +98,7 @@ mod privileges;
 mod push;
 mod queue;
 pub mod quic;
+mod registre;
 mod relay;
 mod reports;
 mod resolver;
@@ -112,7 +113,7 @@ pub use ams_session::{ClientDsn, ClientReport};
 pub use certificat::Certificat;
 pub use connection::{
     DkimTally, DmarcTally, Outcome, Service, Summary, Timeouts, TlsMode, serve_connection,
-    serve_connection_with,
+    serve_connection_from, serve_connection_with,
 };
 pub use delivery::{Delivery, DeliveryFailure};
 pub use dkim::{

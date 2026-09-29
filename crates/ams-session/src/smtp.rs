@@ -675,6 +675,10 @@ pub struct SmtpSession<'a, P: Policy> {
     /// Le nom annoncé au `HELO`, s'il en est un — vide pour un littéral
     /// d'adresse, qui ne désigne aucune politique.
     helo: Tampon<DOMAIN_MAX>,
+    /// Ce que le pair a annoncé au dernier `HELO` ou `EHLO`, TEL QU'ÉCRIT —
+    /// littéral d'adresse compris. C'est ce que le registre de réception
+    /// retient (0.2.44) ; rien ne s'en sert pour décider.
+    annonce: Tampon<DOMAIN_MAX>,
     /// L'expéditeur de la transaction en cours, sous la forme `local@domaine`.
     expediteur: Tampon<SENDER_MAX>,
     /// Le `MAIL FROM:` de la transaction, retenu QUOI QU'IL ARRIVE.
@@ -795,6 +799,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
             size_line,
             size_len: fin_size,
             helo: Tampon::vide(),
+            annonce: Tampon::vide(),
             expediteur: Tampon::vide(),
             compte: Tampon::vide(),
             scram: EtapeScram::Aucune,
@@ -1638,6 +1643,7 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
 
     /// Retient le nom annoncé, s'il en est un.
     fn retenir_le_helo(&mut self, client_id: &ClientId<'_>) {
+        self.annonce.poser(&[client_id.as_bytes()]);
         match client_id {
             ClientId::Domain(nom) => {
                 self.helo.poser(&[nom]);
@@ -1822,6 +1828,16 @@ impl<'a, P: Policy> SmtpSession<'a, P> {
         // certitude plutôt qu'un `?` que rien n'emprunterait.
         let vu = self.envid.get(..self.envid_len).unwrap_or_default();
         (!vu.is_empty()).then_some(vu)
+    }
+
+    /// Ce que le pair a annoncé au dernier `HELO` ou `EHLO`, tel qu'écrit —
+    /// un littéral d'adresse compris, crochets inclus.
+    ///
+    /// **POUR LE REGISTRE, PAS POUR DÉCIDER** : SPF et la trace `Received:`
+    /// lisent le nom retenu, d'où le littéral est exclu.
+    #[must_use]
+    pub fn announced(&self) -> Option<&[u8]> {
+        (!self.annonce.est_vide()).then(|| self.annonce.as_bytes())
     }
 
     /// Ce que le destinataire de rang `rang` a demandé (RFC 3461).
@@ -4683,12 +4699,16 @@ mod tests {
         // ferait vérifier un nom que le pair a cessé d'annoncer.
         let mut session = session_spf(SenderPolicy::Enforce);
         let mut tampon = [0_u8; 512];
+        assert_eq!(session.announced(), None);
         session
             .handle(b"EHLO client.example.net\r\n", &mut tampon)
             .expect("EHLO");
+        assert_eq!(session.announced(), Some(&b"client.example.net"[..]));
         session
             .handle(b"EHLO [192.0.2.1]\r\n", &mut tampon)
             .expect("EHLO");
+        // Le registre, lui, retient le littéral tel qu'écrit.
+        assert_eq!(session.announced(), Some(&b"[192.0.2.1]"[..]));
         let tour = session
             .handle(b"MAIL FROM:<>\r\n", &mut tampon)
             .expect("MAIL");

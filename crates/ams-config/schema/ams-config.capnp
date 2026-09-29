@@ -273,6 +273,11 @@ struct Configuration {
   # L'environnement de développement d'Apple, plutôt que la production.
   appleAttestationDevelopment @55 :Bool;
 
+  # Le répertoire du REGISTRE DE RÉCEPTION (0.2.44) : un fichier par jour UTC,
+  # scellé et chaîné, qui se CONSERVE. Vide : rien ne s'y écrit. Tenu, un
+  # message n'est accepté qu'une fois son constat écrit — sinon `451`.
+  registre @56 :Text;
+
   enum AttestationMode {
     off @0;
     verify @1;

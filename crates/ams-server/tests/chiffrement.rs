@@ -245,6 +245,7 @@ fn configuration_pop3(
         apple_attestation: ams_config::AttestationMode::Off,
         apple_app_id: String::new(),
         apple_development: false,
+        registre: String::new(),
         require_fqdn_sender: false,
         require_fqdn_recipient: false,
         require_sender_domain: false,
@@ -1606,4 +1607,168 @@ fn une_authentification_refusee_se_dit_au_journal() {
         "ce qu'un inconnu a tapé ne doit pas finir au journal"
     );
     assert!(!journal.contains("mauvais"), "un mot de passe au journal !");
+}
+
+/// **UN MESSAGE N'ENTRE QU'UNE FOIS SON CONSTAT ÉCRIT** (0.2.44).
+///
+/// # CE QUE CET ESSAI ÉPROUVE
+///
+/// Le registre de réception de bout en bout. Tant que son répertoire refuse
+/// l'écriture, le message est refusé TEMPORAIREMENT (`451`) et rien n'arrive
+/// dans la boîte. Rendu inscriptible, le même message est accepté, et le
+/// registre porte son constat — relié au fichier Maildir par la partie unique
+/// de son nom —, puis celui de la session à sa fermeture.
+#[test]
+fn le_registre_de_reception_consigne_ou_refuse() {
+    use ams_config::registre::{Enregistrement, IssueTransaction, lire_trame, verifier};
+    let atelier = atelier("registre");
+    let Some((cert, cle)) = paire(&atelier.0) else {
+        panic!("{SANS_OPENSSL}");
+    };
+    let magasin = atelier.0.join("comptes.bin");
+    let empreinte = ams_auth::hash_password(b"ouvre-toi", b"seize octets ici").expect("hachable");
+    std::fs::write(
+        &magasin,
+        ams_config::encode_accounts(&[ams_auth::Account {
+            login: String::from("jean"),
+            hash: empreinte,
+            addresses: vec![String::from("jean@example.com")],
+        }])
+        .expect("encodable"),
+    )
+    .expect("écriture");
+    std::fs::set_permissions(&magasin, std::fs::Permissions::from_mode(0o600))
+        .expect("permissions");
+    let port = port_libre();
+    let config = configuration(
+        &atelier,
+        port,
+        Tls {
+            certificate_chain_path: cert.display().to_string(),
+            private_key_path: cle.display().to_string(),
+        },
+        &magasin.display().to_string(),
+    );
+    let repertoire = atelier.0.join("registre");
+    let mut lue =
+        ams_config::decode(&std::fs::read(&config).expect("relisible")).expect("décodable");
+    lue.registre = repertoire.display().to_string();
+    std::fs::write(&config, ams_config::encode(&lue).expect("encodable")).expect("écriture");
+    let mut serveur = lancer(&config, port);
+
+    let envoyer = |serveur: &mut Serveur| -> String {
+        let mut flux = joindre(serveur, port);
+        flux.set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("délai");
+        flux.write_all(
+            concat!(
+                "EHLO client.example\r\n",
+                "MAIL FROM:<expediteur@ailleurs.example>\r\n",
+                "RCPT TO:<jean@example.com>\r\n",
+                "DATA\r\n",
+                "Message-ID: <essai-registre@ailleurs.example>\r\n",
+                "Subject: constat\r\n\r\nle corps\r\n.\r\n",
+                "QUIT\r\n"
+            )
+            .as_bytes(),
+        )
+        .expect("écriture");
+        lire_jusqu_au_conge(&mut flux, serveur)
+    };
+
+    // ── LE REGISTRE REFUSE L'ÉCRITURE : 451, ET RIEN N'ENTRE ────────────────
+    std::fs::set_permissions(&repertoire, std::fs::Permissions::from_mode(0o500))
+        .expect("lecture seule");
+    let dit = envoyer(&mut serveur);
+    assert!(dit.contains("451"), "sans constat, pas de message : {dit}");
+    let boite = atelier.0.join("boite");
+    let remis = |boite: &Path| -> Vec<String> {
+        let mut noms = Vec::new();
+        for sous in ["new", "cur"] {
+            if let Ok(entrees) = std::fs::read_dir(boite.join("jean").join(sous)) {
+                noms.extend(
+                    entrees
+                        .filter_map(Result::ok)
+                        .map(|entree| entree.file_name().to_string_lossy().into_owned()),
+                );
+            }
+        }
+        noms
+    };
+    assert!(remis(&boite).is_empty(), "rien ne doit être remis");
+
+    // ── INSCRIPTIBLE : ACCEPTÉ, ET CONSIGNÉ ─────────────────────────────────
+    std::fs::set_permissions(&repertoire, std::fs::Permissions::from_mode(0o700))
+        .expect("inscriptible");
+    let dit = envoyer(&mut serveur);
+    assert!(
+        dit.contains("250 2.0.0"),
+        "le message doit être accepté : {dit}"
+    );
+    let noms = remis(&boite);
+    assert_eq!(noms.len(), 1, "{noms:?}");
+
+    // La session se consigne à la fermeture : on l'attend.
+    let mut enregistrements = Vec::new();
+    for _ in 0..50 {
+        enregistrements.clear();
+        for entree in std::fs::read_dir(&repertoire).expect("lisible").flatten() {
+            let octets = std::fs::read(entree.path()).expect("lisible");
+            verifier(&octets).expect("un fichier juste");
+            let mut debut = 0;
+            while let Ok((quoi, apres)) = lire_trame(&octets, debut) {
+                enregistrements.push(quoi);
+                debut = apres;
+            }
+        }
+        if enregistrements
+            .iter()
+            .any(|quoi| matches!(quoi, Enregistrement::Session(vue) if vue.messages == 1))
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(matches!(
+        enregistrements.first(),
+        Some(Enregistrement::Entete(_))
+    ));
+    let transactions: Vec<_> = enregistrements
+        .iter()
+        .filter_map(|quoi| match quoi {
+            Enregistrement::Transaction(vue) => Some(vue),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(transactions.len(), 1, "{enregistrements:?}");
+    let constat = transactions[0];
+    assert_eq!(constat.issue, IssueTransaction::Acceptee);
+    assert_eq!(constat.mail_from, "expediteur@ailleurs.example");
+    assert_eq!(
+        constat.entetes.message_id,
+        "<essai-registre@ailleurs.example>"
+    );
+    assert!(constat.entetes.objet.is_some());
+    assert_eq!(constat.salut.nom, "client.example");
+    assert_eq!(constat.pair, std::net::IpAddr::from([127, 0, 0, 1]));
+    let destinataire = &constat.destinataires[0];
+    assert_eq!(destinataire.adresse, "jean@example.com");
+    assert_eq!(destinataire.compte, "jean");
+    assert!(
+        noms[0].starts_with(&destinataire.unique),
+        "le constat désigne le fichier remis : {} / {}",
+        destinataire.unique,
+        noms[0]
+    );
+    assert!(
+        enregistrements.iter().any(|quoi| matches!(
+            quoi,
+            Enregistrement::Session(vue)
+                if vue.id == constat.session
+                    && vue.messages == 1
+                    && vue.ecoute.starts_with("127.0.0.1:")
+                    && vue.port > 0
+        )),
+        "la session du message se consigne à sa fermeture : {enregistrements:?}"
+    );
 }

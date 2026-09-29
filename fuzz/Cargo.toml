@@ -620,3 +620,10 @@ path = "fuzz_targets/fuzz_ams_attest.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_ams_registre"
+path = "fuzz_targets/fuzz_ams_registre.rs"
+test = false
+doc = false
+bench = false

@@ -464,6 +464,8 @@ pub struct Configuration {
     pub apple_app_id: String,
     /// L'environnement de développement d'Apple, plutôt que la production.
     pub apple_development: bool,
+    /// Le répertoire du registre de réception. Vide : rien ne s'y écrit.
+    pub registre: String,
     /// La file d'attente du serveur.
     pub queue: Queue,
     /// MTA-STS (RFC 8461).
@@ -1145,6 +1147,7 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
         },
         apple_app_id: texte(lu.get_apple_app_id()?)?,
         apple_development: lu.get_apple_attestation_development(),
+        registre: texte(lu.get_registre()?)?,
         queue,
         mtasts,
         tlsrpt,
@@ -1327,6 +1330,7 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
         });
         ecrit.set_apple_app_id(&config.apple_app_id);
         ecrit.set_apple_attestation_development(config.apple_development);
+        ecrit.set_registre(config.registre.as_str());
         {
             let mut emission = ecrit.reborrow().init_relay();
             emission.set_enabled(config.relay.enabled);
@@ -1524,6 +1528,7 @@ mod tests {
         assert_eq!(relue.apple_attestation, AttestationMode::Verify);
         assert_eq!(relue.apple_app_id, "TEAM123456.org.airdesktop.mail");
         assert!(relue.apple_development);
+        assert_eq!(relue.registre, "/var/lib/air-mail/registre");
         for mode in [
             AttestationMode::Off,
             AttestationMode::Verify,
@@ -1694,6 +1699,7 @@ mod tests {
             apple_attestation: AttestationMode::Verify,
             apple_app_id: String::from("TEAM123456.org.airdesktop.mail"),
             apple_development: true,
+            registre: String::from("/var/lib/air-mail/registre"),
             // Les trois écoutes d'un serveur réel : le `25` et le `587` en
             // `STARTTLS`, le `465` en TLS implicite.
             smtp_listeners: vec![

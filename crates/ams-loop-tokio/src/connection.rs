@@ -219,8 +219,10 @@ pub struct Service<'a> {
 ///
 /// Les tampons et le résumé traversent la poignée de main ; le flux, lui, change
 /// de type. C'est toute la raison d'être de cette structure.
-struct Etat {
-    resume: Summary,
+struct Etat<'f> {
+    /// Ce que la connexion a produit, et ce que le registre en retiendra —
+    /// tenu par l'APPELANT, pour survivre à une connexion interrompue.
+    faits: &'f mut Faits,
     lecture: Vec<u8>,
     rempli: usize,
     sortie: Vec<u8>,
@@ -260,8 +262,8 @@ struct EnCours {
     flux: Option<DkimStream>,
 }
 
-impl Etat {
-    fn neuf(config: &Config<'_>) -> Self {
+impl<'f> Etat<'f> {
+    fn neuf(config: &Config<'_>, faits: &'f mut Faits) -> Self {
         // Le tampon de LECTURE est borné par la borne de commande, plus un octet :
         // quand il se remplit sans CRLF, la ligne dépasse forcément la borne, et la
         // session répond « 500 Line too long » d'elle-même. La boucle n'a donc aucune
@@ -269,7 +271,7 @@ impl Etat {
         // fin en attendant un CRLF qui ne vient pas.
         let capacite = config.limits().max_command_octets.saturating_add(1);
         Self {
-            resume: Summary::default(),
+            faits,
             lecture: vec![0_u8; capacite],
             rempli: 0,
             message: None,
@@ -407,14 +409,211 @@ where
     P: Policy,
     D: Delivery,
 {
-    crate::pair::sous(
+    servir(stream, service, policy, delivery, source, None, mode).await
+}
+
+/// Sert une connexion comme [`serve_connection_with`], en disant au registre
+/// de réception d'où elle vient et où elle arrive (0.2.44).
+///
+/// # Errors
+///
+/// Celles de [`serve_connection_with`].
+pub async fn serve_connection_from<S, P, D>(
+    stream: &mut S,
+    service: &Service<'_>,
+    policy: P,
+    delivery: &mut D,
+    pair: std::net::SocketAddr,
+    ecoute: std::net::SocketAddr,
+    mode: TlsMode,
+) -> Result<Summary, Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    P: Policy,
+    D: Delivery,
+{
+    let source = match pair.ip() {
+        std::net::IpAddr::V4(v4) => Source::V4(v4.octets()),
+        std::net::IpAddr::V6(v6) => Source::V6(v6.octets()),
+    };
+    servir(
+        stream,
+        service,
+        policy,
+        delivery,
+        source,
+        Some((pair, ecoute)),
+        mode,
+    )
+    .await
+}
+
+/// Le corps commun : la conversation, puis — si la remise tient un registre —
+/// le constat de la session.
+async fn servir<S, P, D>(
+    stream: &mut S,
+    service: &Service<'_>,
+    policy: P,
+    delivery: &mut D,
+    source: Source,
+    adresses: Option<(std::net::SocketAddr, std::net::SocketAddr)>,
+    mode: TlsMode,
+) -> Result<Summary, Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    P: Policy,
+    D: Delivery,
+{
+    // **UN BANNI NE COÛTE AUCUNE QUESTION AU DNS** : il n'aura rien, et ses
+    // tentatives ne feraient qu'user le résolveur. Demander son avis au garde
+    // ne nourrit pas ses compteurs.
+    let banni = matches!(service.guard.verdict(source), Verdict::Banned { .. });
+    let consigne = delivery.keeps_register() && !banni;
+    let mut faits = Faits::neuf(source, adresses, consigne, service);
+    let issue = crate::pair::sous(
         source,
         crate::pair::Porte::Smtp,
         Box::pin(conduire_smtp(
-            stream, service, policy, delivery, source, mode,
+            stream, service, policy, delivery, source, mode, &mut faits,
         )),
     )
-    .await
+    .await;
+    if consigne {
+        let session = faits.session(&issue).await;
+        delivery.close(session);
+    }
+    issue
+}
+
+/// Ce que la boucle retient d'une connexion : son résumé, et ce que le
+/// registre de réception en gardera.
+pub(crate) struct Faits {
+    resume: Summary,
+    /// Le registre est-il tenu ? Faux, rien de ce qui suit ne se remplit.
+    registre: bool,
+    id: [u8; 16],
+    ouverte: u64,
+    adresse: std::net::IpAddr,
+    adresses: Option<(std::net::SocketAddr, std::net::SocketAddr)>,
+    resolveur: Option<crate::resolver::Resolver>,
+    /// La résolution inverse, partie dès l'acceptation.
+    inverse_en_cours: Option<tokio::task::JoinHandle<ams_config::registre::Inverse>>,
+    inverse: Option<ams_config::registre::Inverse>,
+    /// Ce que le pair a annoncé au dernier `HELO` ou `EHLO`.
+    annonce: Option<Vec<u8>>,
+    /// Ce que ce nom vaut — résolu une fois par nom annoncé.
+    salut: Option<(Vec<u8>, ams_config::registre::Salut)>,
+    /// Le rang de la dernière transaction.
+    numero: u32,
+}
+
+impl Faits {
+    fn neuf(
+        source: Source,
+        adresses: Option<(std::net::SocketAddr, std::net::SocketAddr)>,
+        registre: bool,
+        service: &Service<'_>,
+    ) -> Self {
+        let ouverte = crate::registre::maintenant_ms();
+        let adresse = adresse_du_pair(source);
+        let resolveur = registre
+            .then(|| service.spf.as_ref().map(|spf| spf.resolver().clone()))
+            .flatten();
+        // **LA RÉSOLUTION INVERSE PART MAINTENANT**, en parallèle de la
+        // conversation : elle sera attendue avant d'écrire le premier message.
+        let inverse_en_cours = resolveur.clone().map(|resolveur| {
+            tokio::spawn(async move { crate::registre::inverse(&resolveur, adresse).await })
+        });
+        Self {
+            resume: Summary::default(),
+            registre,
+            id: crate::registre::identifiant(ouverte),
+            ouverte,
+            adresse,
+            adresses,
+            resolveur,
+            inverse_en_cours,
+            inverse: None,
+            annonce: None,
+            salut: None,
+            numero: 0,
+        }
+    }
+
+    /// La résolution inverse, attendue si elle ne l'est pas encore.
+    async fn inverse(&mut self) -> ams_config::registre::Inverse {
+        if let Some(en_cours) = self.inverse_en_cours.take() {
+            self.inverse = Some(en_cours.await.unwrap_or_default());
+        }
+        self.inverse.clone().unwrap_or_default()
+    }
+
+    /// Ce que vaut le nom annoncé — résolu une fois par nom.
+    async fn salut(&mut self) -> ams_config::registre::Salut {
+        let Some(annonce) = self.annonce.clone() else {
+            return ams_config::registre::Salut::default();
+        };
+        if let Some((pour, vu)) = &self.salut
+            && *pour == annonce
+        {
+            return vu.clone();
+        }
+        let vu = crate::registre::salut(self.resolveur.as_ref(), &annonce, self.adresse).await;
+        self.salut = Some((annonce, vu.clone()));
+        vu
+    }
+
+    fn tls(&self) -> Option<ams_config::registre::Tls> {
+        self.resume
+            .chiffrement
+            .map(|chiffrement| ams_config::registre::Tls {
+                version: String::from(chiffrement.version),
+                suite: String::from(chiffrement.suite),
+            })
+    }
+
+    /// Le constat de la session, une fois la connexion finie.
+    async fn session(&mut self, issue: &Result<Summary, Error>) -> ams_config::registre::Session {
+        use ams_config::registre::IssueSession;
+        let inverse = self.inverse().await;
+        let salut = self.salut().await;
+        let resume = self.resume;
+        ams_config::registre::Session {
+            id: self.id,
+            ouverte: self.ouverte,
+            fermee: crate::registre::maintenant_ms(),
+            ecoute: self
+                .adresses
+                .map(|(_, ecoute)| ecoute.to_string())
+                .unwrap_or_default(),
+            pair: self.adresse,
+            port: self.adresses.map_or(0, |(pair, _)| pair.port()),
+            inverse,
+            salut,
+            tls: self.tls(),
+            commandes: resume.commands,
+            messages: resume.messages,
+            authentifiee: resume.authenticated,
+            mecanisme: resume
+                .mecanisme
+                .map(|mecanisme| String::from(mecanisme.nom()))
+                .unwrap_or_default(),
+            issue: match issue {
+                Err(_) => IssueSession::Interrompue,
+                Ok(fin) => match fin.outcome {
+                    Outcome::Throttled => IssueSession::Ralentie,
+                    Outcome::Injected => IssueSession::Injection,
+                    Outcome::Served | Outcome::Banned => IssueSession::Servie,
+                },
+            },
+            erreur: issue
+                .as_ref()
+                .err()
+                .map(|erreur| ams_config::registre::borne(&erreur.to_string()).0)
+                .unwrap_or_default(),
+            version: String::from(env!("CARGO_PKG_VERSION")),
+        }
+    }
 }
 
 /// Le corps de [`serve_connection_with`], sous son pair.
@@ -425,6 +624,7 @@ async fn conduire_smtp<S, P, D>(
     delivery: &mut D,
     source: Source,
     mode: TlsMode,
+    faits: &mut Faits,
 ) -> Result<Summary, Error>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -451,7 +651,7 @@ where
     };
 
     let mut session = SmtpSession::new(service.config, policy);
-    let mut etat = Etat::neuf(&service.config);
+    let mut etat = Etat::neuf(&service.config, faits);
 
     // ON NE PARLE PAS À UN BANNI. Interroger le garde ne compte pas comme un
     // événement : demander son avis ne doit pas nourrir ses compteurs.
@@ -460,8 +660,8 @@ where
     // main coûte du calcul asymétrique, et l'offrir à qui est déjà banni ferait
     // du bannissement une dépense plutôt qu'une économie.
     if matches!(service.guard.verdict(source), Verdict::Banned { .. }) {
-        etat.resume.outcome = Outcome::Banned;
-        return Ok(etat.resume);
+        etat.faits.resume.outcome = Outcome::Banned;
+        return Ok(etat.faits.resume);
     }
 
     if mode == TlsMode::Implicit {
@@ -480,8 +680,8 @@ where
         // **LES OCTETS DE LIAISON VIENNENT D'ICI**, et d'ici seulement : la
         // session ne voit pas la connexion TLS, et c'est C1 qui le veut.
         session.on_tls_established(crate::liaison::liaison_de(chiffre.get_ref().1));
-        etat.resume.tls = true;
-        etat.resume.chiffrement = crate::journal::chiffrement_de(chiffre.get_ref().1);
+        etat.faits.resume.tls = true;
+        etat.faits.resume.chiffrement = crate::journal::chiffrement_de(chiffre.get_ref().1);
         etat.banniere_due = true;
         return servir_chiffre(&mut chiffre, session, etat, service, delivery, source).await;
     }
@@ -496,8 +696,8 @@ where
         let refus = session.unavailable(&mut etat.sortie)?;
         stream.write_all(refus).await?;
         stream.flush().await?;
-        etat.resume.outcome = Outcome::Throttled;
-        return Ok(etat.resume);
+        etat.faits.resume.outcome = Outcome::Throttled;
+        return Ok(etat.faits.resume);
     }
 
     let banniere = session.greeting(&mut etat.sortie)?;
@@ -507,7 +707,7 @@ where
     if conduire(stream, &mut session, &mut etat, service, delivery, source).await?
         == Etape::Terminee
     {
-        return Ok(etat.resume);
+        return Ok(etat.faits.resume);
     }
 
     // Inatteignable : la session n'annonce `STARTTLS` que si les capacités le
@@ -523,8 +723,8 @@ where
     // RFC 3207 §4.2 : le serveur DOIT oublier tout ce que le pair a dit en clair.
     // C'est la session qui le fait, pas la boucle.
     session.on_tls_established(crate::liaison::liaison_de(chiffre.get_ref().1));
-    etat.resume.tls = true;
-    etat.resume.chiffrement = crate::journal::chiffrement_de(chiffre.get_ref().1);
+    etat.faits.resume.tls = true;
+    etat.faits.resume.chiffrement = crate::journal::chiffrement_de(chiffre.get_ref().1);
 
     servir_chiffre(&mut chiffre, session, etat, service, delivery, source).await
 }
@@ -561,7 +761,7 @@ where
 async fn servir_chiffre<S, P, D>(
     chiffre: &mut S,
     mut session: SmtpSession<'_, P>,
-    mut etat: Etat,
+    mut etat: Etat<'_>,
     service: &Service<'_>,
     delivery: &mut D,
     source: Source,
@@ -588,9 +788,9 @@ where
             let refus = session.unavailable(&mut etat.sortie)?;
             chiffre.write_all(refus).await?;
             chiffre.flush().await?;
-            etat.resume.outcome = Outcome::Throttled;
+            etat.faits.resume.outcome = Outcome::Throttled;
             let _ = chiffre.shutdown().await;
-            return Ok(etat.resume);
+            return Ok(etat.faits.resume);
         }
     }
 
@@ -604,14 +804,14 @@ where
     // Sans lui, une coupure et une fin propre se ressemblent, et un pair prudent
     // doit traiter la première comme une troncature possible.
     let _ = chiffre.shutdown().await;
-    Ok(etat.resume)
+    Ok(etat.faits.resume)
 }
 
 /// Le pilote proprement dit : il tourne jusqu'à la fin, ou jusqu'au chiffrement.
 async fn conduire<S, P, D>(
     stream: &mut S,
     session: &mut SmtpSession<'_, P>,
-    etat: &mut Etat,
+    etat: &mut Etat<'_>,
     service: &Service<'_>,
     delivery: &mut D,
     source: Source,
@@ -627,6 +827,14 @@ where
     // format de `PLAIN`, ni annulation par `*`.
     let mut reponse_sasl_attendue = false;
     loop {
+        // CE QUE LE PAIR A ANNONCÉ, retenu pour le registre : la session
+        // l'oublie à la poignée de main, le registre veut le dernier.
+        if etat.faits.registre
+            && let Some(annonce) = session.announced()
+            && etat.faits.annonce.as_deref() != Some(annonce)
+        {
+            etat.faits.annonce = Some(annonce.to_vec());
+        }
         let Some(fin_ligne) = trouver_crlf(&etat.lecture[..etat.rempli]) else {
             if etat.rempli == capacite {
                 // La ligne dépasse la borne. On la donne telle quelle : la
@@ -636,7 +844,7 @@ where
                 stream.write_all(tour.reply()).await?;
                 stream.flush().await?;
                 // Elle a reçu une réponse : elle compte comme les autres.
-                etat.resume.commands = etat.resume.commands.saturating_add(1);
+                etat.faits.resume.commands = etat.faits.resume.commands.saturating_add(1);
                 return Ok(Etape::Terminee);
             }
             let lus = lire(
@@ -668,13 +876,13 @@ where
         // Le résumé porte l'état de la SESSION, pas une déduction de la boucle —
         // et il est relevé AVANT le `match`, dont plusieurs bras rendent la main.
         // Le relever après en aurait perdu la dernière valeur sur un `QUIT`.
-        etat.resume.authenticated = session.is_authenticated();
+        etat.faits.resume.authenticated = session.is_authenticated();
         // **POUR LE JOURNAL, ET RIEN D'AUTRE.** Relevés au même endroit et pour
         // la même raison : un `QUIT` rend la main depuis le `match`, et les
         // relever après perdrait le mécanisme et le compte de la connexion
         // qu'on s'apprête justement à consigner.
-        etat.resume.mecanisme = session.mechanism();
-        etat.resume.compte = session
+        etat.faits.resume.mecanisme = session.mechanism();
+        etat.faits.resume.compte = session
             .submitter()
             .map_or_else(Compte::default, Compte::neuf);
         // C'EST LA SESSION QUI DIT CE QUI EST UNE FAUTE, pas le code de réponse :
@@ -690,13 +898,13 @@ where
             let refus = session.unavailable(&mut etat.sortie)?;
             stream.write_all(refus).await?;
             stream.flush().await?;
-            etat.resume.outcome = Outcome::Injected;
+            etat.faits.resume.outcome = Outcome::Injected;
             return Ok(Etape::Terminee);
         }
 
         stream.write_all(tour.reply()).await?;
         stream.flush().await?;
-        etat.resume.commands = etat.resume.commands.saturating_add(1);
+        etat.faits.resume.commands = etat.faits.resume.commands.saturating_add(1);
 
         // On décale ce qui reste : plusieurs commandes peuvent tenir dans une
         // seule lecture, et les jeter obligerait le pair à les renvoyer.
@@ -722,7 +930,7 @@ where
             let refus = session.unavailable(&mut etat.sortie)?;
             stream.write_all(refus).await?;
             stream.flush().await?;
-            etat.resume.outcome = Outcome::Throttled;
+            etat.faits.resume.outcome = Outcome::Throttled;
             return Ok(Etape::Terminee);
         }
 
@@ -749,7 +957,7 @@ where
                 let remis =
                     recevoir_message(stream, session, delivery, etat, service, source).await?;
                 if remis {
-                    etat.resume.messages = etat.resume.messages.saturating_add(1);
+                    etat.faits.resume.messages = etat.faits.resume.messages.saturating_add(1);
                 }
             }
             Action::ReceiveChunk { size, last } => {
@@ -757,7 +965,7 @@ where
                     recevoir_morceau(stream, session, delivery, etat, service, source, size, last)
                         .await?;
                 if remis {
-                    etat.resume.messages = etat.resume.messages.saturating_add(1);
+                    etat.faits.resume.messages = etat.faits.resume.messages.saturating_add(1);
                 }
             }
         }
@@ -889,7 +1097,10 @@ where
     // porte sur le corps entier, et rassembler celui-ci laisserait le pair
     // choisir combien de mémoire on lui consacre. DMARC, lui, n'a besoin que du
     // bloc d'en-tête — mais il en a besoin même quand DKIM n'est pas vérifié.
-    let suivre = service.dkim.is_some() || service.dmarc.is_some();
+    //
+    // **LE REGISTRE AUSSI** (0.2.44) : les en-têtes utiles d'un message se
+    // consignent même sur un serveur qui ne vérifie ni DKIM ni DMARC.
+    let suivre = service.dkim.is_some() || service.dmarc.is_some() || delivery.keeps_register();
     EnCours {
         echec,
         refuse: false,
@@ -936,6 +1147,18 @@ fn resultat_dmarc(verdict: DmarcVerdict) -> ams_mime::DmarcResult {
         // Une politique qu'on a lue sans pouvoir s'en servir est un défaut
         // PERMANENT de ce que le domaine publie, et non un aléa de réseau.
         DmarcVerdict::Unusable => ams_mime::DmarcResult::PermError,
+    }
+}
+
+/// Le verdict DMARC, dans les mots du registre.
+fn resultat_registre_dmarc(verdict: DmarcVerdict) -> ams_config::registre::Resultat {
+    use ams_config::registre::Resultat;
+    match verdict {
+        DmarcVerdict::Pass => Resultat::Pass,
+        DmarcVerdict::Fail => Resultat::Fail,
+        DmarcVerdict::TempError => Resultat::TempError,
+        DmarcVerdict::NoPolicy => Resultat::None,
+        DmarcVerdict::Unusable => Resultat::PermError,
     }
 }
 
@@ -1057,7 +1280,7 @@ async fn recevoir_message<S, P, D>(
     stream: &mut S,
     session: &mut SmtpSession<'_, P>,
     delivery: &mut D,
-    etat: &mut Etat,
+    etat: &mut Etat<'_>,
     service: &Service<'_>,
     source: Source,
 ) -> Result<bool, Error>
@@ -1150,7 +1373,7 @@ async fn recevoir_morceau<S, P, D>(
     stream: &mut S,
     session: &mut SmtpSession<'_, P>,
     delivery: &mut D,
-    etat: &mut Etat,
+    etat: &mut Etat<'_>,
     service: &Service<'_>,
     source: Source,
     size: u64,
@@ -1234,7 +1457,7 @@ async fn conclure_le_message<S, P, D>(
     stream: &mut S,
     session: &mut SmtpSession<'_, P>,
     delivery: &mut D,
-    etat: &mut Etat,
+    etat: &mut Etat<'_>,
     service: &Service<'_>,
     source: Source,
     en_cours: EnCours,
@@ -1277,6 +1500,17 @@ where
     // n'écrit qu'en son nom », que la remise vérifie sur chaque soumission
     // authentifiée et qui, elle, ne bouge pas.
     let soumission = session.is_authenticated();
+    // **LES EN-TÊTES UTILES, POUR LE REGISTRE** — lus avant que la
+    // vérification ne consomme le suivi. Ce sont des indices : rien ne les
+    // authentifie en soi.
+    let entetes_vus = if etat.faits.registre {
+        flux.as_ref()
+            .map(|lecture| ams_config::registre::en_tetes(lecture.headers()))
+            .unwrap_or_default()
+    } else {
+        ams_config::registre::EnTetes::default()
+    };
+    let mut dmarc_registre: Option<ams_config::registre::Dmarc> = None;
     if !refuse
         && echec.is_none()
         && !soumission
@@ -1305,7 +1539,7 @@ where
                     resultat.domain.clone(),
                     resultat.selector.clone(),
                 ));
-                let compte = &mut etat.resume.dkim;
+                let compte = &mut etat.faits.resume.dkim;
                 match resultat.verdict {
                     DkimVerdict::Pass => {
                         compte.pass = compte.pass.saturating_add(1);
@@ -1331,7 +1565,7 @@ where
                 authentifies.spf = Some(String::from_utf8_lossy(identite.domain).into_owned());
             }
             let resultat = verificateur.verdict(lecture.headers(), &authentifies).await;
-            etat.resume.dmarc = compter_dmarc(etat.resume.dmarc, &resultat);
+            etat.faits.resume.dmarc = compter_dmarc(etat.faits.resume.dmarc, &resultat);
             // C'EST ICI, ET SEULEMENT ICI, QU'UN MESSAGE EST REFUSÉ POUR CE
             // QU'IL PRÉTEND ÊTRE. La quarantaine, elle, REMET : elle déplace le
             // message, elle ne le jette pas.
@@ -1346,6 +1580,20 @@ where
             let ecarte = resultat.designated
                 && resultat.policy == DmarcPolicy::Quarantine
                 && delivery.quarantine();
+            dmarc_registre = resultat
+                .report
+                .as_ref()
+                .map(|_| ams_config::registre::Dmarc {
+                    resultat: resultat_registre_dmarc(resultat.verdict),
+                    domaine: ams_config::registre::borne(&resultat.domain).0,
+                    politique: String::from(match resultat.policy {
+                        DmarcPolicy::None => "none",
+                        DmarcPolicy::Quarantine => "quarantine",
+                        DmarcPolicy::Reject => "reject",
+                    }),
+                    appliquee: resultat.applies,
+                    ecartee: ecarte,
+                });
             // **CE QU'ON ÉCRIT EST CE QU'ON A TROUVÉ**, et non ce que la
             // politique demandait ni ce qu'on en a fait : `pass` quand le
             // message est aligné, `fail` sinon, et rien du tout quand le domaine
@@ -1478,6 +1726,7 @@ where
             ))
         });
     let mut trace = [0_u8; AUTHRES_RESERVE];
+    let mut authentification = String::new();
     if ams_mime::write_authres_padded(
         &mut trace,
         &ams_mime::Authentication {
@@ -1495,6 +1744,91 @@ where
     .is_ok()
     {
         delivery.trace(&trace);
+        authentification = String::from(String::from_utf8_lossy(&trace).trim_end());
+    }
+
+    // ── LE CONSTAT, POUR LE REGISTRE (0.2.44) ───────────────────────────────
+    //
+    // L'issue se pose AVANT de remettre : c'est la remise qui écrit le constat
+    // d'un message accepté, et qui le refuse temporairement si elle ne le peut
+    // pas. La résolution inverse est attendue ici — chaque message porte le
+    // DNS tel qu'il répondait.
+    if etat.faits.registre {
+        use ams_config::registre::{IssueTransaction, Resultat};
+        let issue = if usurpe {
+            IssueTransaction::RefuseePolitique
+        } else if refuse {
+            IssueTransaction::RefuseeDefinitive
+        } else {
+            match echec {
+                None => IssueTransaction::Acceptee,
+                Some(DeliveryFailure::Permanent) => IssueTransaction::RefuseeDefinitive,
+                Some(DeliveryFailure::Temporary) => IssueTransaction::RefuseeTemporaire,
+            }
+        };
+        etat.faits.numero = etat.faits.numero.saturating_add(1);
+        let inverse = etat.faits.inverse().await;
+        let salut = etat.faits.salut().await;
+        let constat = ams_config::registre::Transaction {
+            session: etat.faits.id,
+            numero: etat.faits.numero,
+            recue: crate::registre::maintenant_ms(),
+            soumission,
+            mail_from: session
+                .return_path()
+                .map(|chemin| ams_config::registre::borne_octets(chemin).0)
+                .unwrap_or_default(),
+            destinataires: session
+                .recipients()
+                .take(ams_config::registre::LISTE_MAX)
+                .map(|adresse| ams_config::registre::Destinataire {
+                    adresse: ams_config::registre::borne_octets(adresse).0,
+                    ..ams_config::registre::Destinataire::default()
+                })
+                .collect(),
+            octets: session.received_octets(),
+            entetes: entetes_vus,
+            spf: spf_vu.map(|(resultat, portee, domaine)| ams_config::registre::Spf {
+                resultat: match resultat {
+                    ams_mime::SpfResult::None => Resultat::None,
+                    ams_mime::SpfResult::Neutral => Resultat::Neutral,
+                    ams_mime::SpfResult::Pass => Resultat::Pass,
+                    ams_mime::SpfResult::Fail => Resultat::Fail,
+                    ams_mime::SpfResult::SoftFail => Resultat::SoftFail,
+                    ams_mime::SpfResult::TempError => Resultat::TempError,
+                    ams_mime::SpfResult::PermError => Resultat::PermError,
+                },
+                helo: portee == ams_mime::SpfIdentity::Helo,
+                domaine: ams_config::registre::borne_octets(domaine).0,
+            }),
+            dkim: dkim_vus
+                .iter()
+                .take(ams_config::registre::LISTE_MAX)
+                .map(
+                    |(resultat, domaine, selecteur)| ams_config::registre::Dkim {
+                        resultat: match resultat {
+                            ams_mime::DkimResult::None => Resultat::None,
+                            ams_mime::DkimResult::Pass => Resultat::Pass,
+                            ams_mime::DkimResult::Fail => Resultat::Fail,
+                            ams_mime::DkimResult::Neutral => Resultat::Neutral,
+                            ams_mime::DkimResult::Policy => Resultat::Policy,
+                            ams_mime::DkimResult::TempError => Resultat::TempError,
+                            ams_mime::DkimResult::PermError => Resultat::PermError,
+                        },
+                        domaine: ams_config::registre::borne(domaine).0,
+                        selecteur: ams_config::registre::borne(selecteur).0,
+                    },
+                )
+                .collect(),
+            dmarc: dmarc_registre,
+            authentification,
+            issue,
+            inverse,
+            salut,
+            pair: etat.faits.adresse,
+            tls: etat.faits.tls(),
+        };
+        delivery.record(constat);
     }
 
     let verdict = if refuse || usurpe {

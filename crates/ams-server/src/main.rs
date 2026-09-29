@@ -49,6 +49,7 @@ mod journal;
 mod magasin;
 mod policy;
 mod pop3;
+mod registre;
 mod reveil;
 mod scram;
 mod sessions;
@@ -2237,6 +2238,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         Some(audit) => politique.avec_audit(Arc::clone(audit)),
         None => politique,
     };
+    let registre = registre_de_reception(&options)?;
     // **LE MÊME MAGASIN POUR LA POLITIQUE ET POUR L'API** : l'une y vérifie,
     // l'autre y crée et y révoque.
     let politique = match &applicatifs {
@@ -2853,6 +2855,7 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         let file_pour_la_remise = file_pour_la_remise.clone();
         let delegations_pour_la_remise = delegations.clone();
         let reveil_pour_la_remise = reveil.clone();
+        let registre_pour_la_remise = registre.clone();
         let attente = arret();
         taches.push(tokio::spawn(async move {
             let issue = serve(
@@ -2885,6 +2888,12 @@ async fn servir(fichier: &Path) -> Result<(), String> {
                     // **CE QUI ARRIVE RÉVEILLE** les appareils abonnés.
                     let remise = match reveil_pour_la_remise.clone() {
                         Some(reveil) => remise.avec_reveil(reveil),
+                        None => remise,
+                    };
+                    // **CE QUI ARRIVE SE CONSIGNE** (0.2.44), et n'entre qu'une
+                    // fois consigné.
+                    let remise = match registre_pour_la_remise.clone() {
+                        Some(registre) => remise.avec_registre(registre),
                         None => remise,
                     };
                     let remise = match signature_de_la_remise.clone() {
@@ -3150,6 +3159,47 @@ impl ams_loop_tokio::Bounced for RapportsLocaux {
         }
         true
     }
+}
+
+/// Le registre de réception que la configuration nomme (0.2.44), ouvert — et
+/// la tâche qui le scelle à minuit.
+///
+/// **UNE CHAÎNE QU'ON NE SAIT PAS PROLONGER ARRÊTE LE DÉMARRAGE** : écrire à la
+/// suite d'un fichier qu'on ne sait pas relire romprait ce que le registre
+/// existe pour garantir.
+fn registre_de_reception(
+    options: &Configuration,
+) -> Result<Option<Arc<crate::registre::Registre>>, String> {
+    if options.registre.is_empty() {
+        eprintln!(
+            "air-mail-server : registre de réception NON TENU — ni les sessions ni les \
+             messages ne laissent de constat (`air-mail-admin config write … --registre …`)"
+        );
+        return Ok(None);
+    }
+    let registre = crate::registre::Registre::ouvrir(PathBuf::from(&options.registre))
+        .map(Arc::new)
+        .map_err(|erreur| format!("registre de réception `{}` : {erreur}", options.registre))?;
+    eprintln!(
+        "air-mail-server : registre de réception sous `{}` — un fichier par jour UTC, scellé \
+         à minuit et chaîné au précédent. Un message n'entre qu'une fois son constat écrit \
+         (sinon 451).",
+        options.registre
+    );
+    // **UN JOUR SANS COURRIER SE SCELLE QUAND MÊME** : une minute après minuit
+    // au plus tard.
+    let tenu = Arc::clone(&registre);
+    tokio::spawn(async move {
+        let mut horloge = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            horloge.tick().await;
+            let registre = Arc::clone(&tenu);
+            if let Ok(Err(erreur)) = tokio::task::spawn_blocking(move || registre.tenir()).await {
+                eprintln!("air-mail-server : registre de réception — scellement : {erreur}");
+            }
+        }
+    });
+    Ok(Some(registre))
 }
 
 /// Dit combien de pairs ont tenté d'injecter derrière la montée en chiffrement.

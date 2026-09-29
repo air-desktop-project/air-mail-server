@@ -40,6 +40,8 @@ ams-spf = { workspace = true }
 # Le codec DNS. La boucle parle au résolveur ; le format, lui, s'éprouve à
 # l'étage 1.
 ams-dns = { workspace = true }
+# Les enregistrements du registre de réception (0.2.44).
+ams-config = { workspace = true }
 # DKIM (C9) : la boucle conduit la vérification — elle seule a le droit
 # d'attendre une clé — mais elle n'en décide rien.
 ams-dkim = { workspace = true }

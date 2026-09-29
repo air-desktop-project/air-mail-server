@@ -548,6 +548,14 @@ pub struct Incoming {
 }
 
 impl Incoming {
+    /// La partie UNIQUE du nom de fichier — celle que ni les drapeaux ni la
+    /// taille ne changent, et qui le désigne pour toujours dans sa boîte. C'est
+    /// elle que le registre de réception retient (0.2.44).
+    #[must_use]
+    pub fn unique(&self) -> &[u8] {
+        &self.unique
+    }
+
     /// L'UID que ce message portera.
     #[must_use]
     pub fn uid(&self) -> Uid {
@@ -1029,11 +1037,14 @@ mod tests {
         let mut arrivee = boite.deliver().expect("remise ouverte");
         arrivee.write(b"From: moi\r\n\r\n").expect("écriture");
         arrivee.write(b"bonjour\r\n").expect("écriture");
+        let unique = arrivee.unique().to_vec();
         let uid = arrivee.commit().expect("validation");
         assert_eq!(uid, Uid::FIRST);
 
         let dans_new = noms(&boite, "new");
         assert_eq!(dans_new.len(), 1);
+        // LA PARTIE UNIQUE ANNONCÉE AVANT LA VALIDATION EST CELLE DU NOM.
+        assert!(dans_new[0].starts_with(&unique), "{:?}", dans_new[0]);
         let lu = MessageName::parse(&dans_new[0]).expect("relisible");
         assert_eq!(lu.uid(), Some(Uid::FIRST));
         assert_eq!(lu.size(), Some(22));

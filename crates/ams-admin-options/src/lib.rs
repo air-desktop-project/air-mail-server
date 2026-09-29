@@ -127,6 +127,8 @@ pub struct Options {
     pub apple_app_id: Option<String>,
     /// L'environnement de développement d'Apple, plutôt que la production.
     pub apple_development: bool,
+    /// Le répertoire du registre de réception. Vide : rien ne s'y écrit.
+    pub registre: Option<PathBuf>,
     /// Où écouter en POP3. Vide : POP3 n'est pas servi.
     pub listen_pop3: Option<SocketAddr>,
     /// Les écoutes POP3, chacune avec son mode TLS.
@@ -309,6 +311,7 @@ impl Default for Options {
             apple_attestation: ams_config::AttestationMode::Off,
             apple_app_id: None,
             apple_development: false,
+            registre: None,
             // PAS DE POP3 PAR DÉFAUT : un port ouvert qu'on n'a pas demandé est
             // une surface de plus, et celui-ci ne sert personne sans certificat.
             listen_pop3: None,
@@ -519,6 +522,7 @@ impl Options {
             apple_attestation: self.apple_attestation,
             apple_app_id: self.apple_app_id.clone().unwrap_or_default(),
             apple_development: self.apple_development,
+            registre: chemin(self.registre.as_ref()),
             tlsrpt: ams_config::Tlsrpt {
                 directory: chemin(self.tlsrpt_dir.as_ref()),
                 send: self.tlsrpt_send,
@@ -755,6 +759,14 @@ OPTIONS DE `config write`
                         `--apple-attestation-development` admet les
                         applications signées pour le développement, et elles
                         seules.
+    --registre <répertoire>
+                        le registre de réception : un fichier par jour UTC,
+                        scellé à minuit et chaîné au précédent, qui garde de
+                        chaque session et de chaque message ce que le serveur
+                        savait alors — DNS, TLS, SPF, DKIM, DMARC. Il se
+                        CONSERVE. Tenu, un message n'est accepté qu'une fois
+                        son constat écrit : sinon `451`. Il se lit par
+                        `air-mail-admin registre`.
     --audit <répertoire>
                         le journal d'audit : un fichier par compte, où
                         s'ajoute ce qui touche à sa sécurité (sessions, refus,
@@ -1439,6 +1451,7 @@ where
                 options.fcm_service_account = Some(PathBuf::from(valeur()?));
             }
             "--audit" => options.audit = Some(PathBuf::from(valeur()?)),
+            "--registre" => options.registre = Some(PathBuf::from(valeur()?)),
             "--android-attestation" => {
                 options.android_attestation = mode_d_attestation(argument, &valeur()?)?;
             }
@@ -2878,7 +2891,8 @@ mod tests {
     /// peut donc pas dériver en silence.
     #[test]
     fn les_quarante_quatre_options_a_valeur_refusent_de_se_taire() {
-        const A_VALEUR: [&str; 54] = [
+        const A_VALEUR: [&str; 55] = [
+            "--registre",
             "--apple-attestation",
             "--apple-app-id",
             "--android-revocation-max-age",
@@ -4137,6 +4151,9 @@ mod tests {
             "/x/fcm.json"
         );
         assert!(configuration.audit.is_empty());
+        assert!(configuration.registre.is_empty());
+        let arguments: &[&str] = &["--registre", "/x/registre"];
+        assert_eq!(ecrire(arguments).en_configuration().registre, "/x/registre");
         let arguments: &[&str] = &["--audit", "/x/audit"];
         assert_eq!(ecrire(arguments).en_configuration().audit, "/x/audit");
         // L'attestation Android : le mode, le paquet, les empreintes — l'une

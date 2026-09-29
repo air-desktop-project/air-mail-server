@@ -1,0 +1,5 @@
+Received: from a.example (a.examplÿÿÿ@e [1¹2mple.com>
+FromList-Id: <liste.example.coribe: <mailto:u@example.com>
+ARC-Seal: i=1
+
+corps

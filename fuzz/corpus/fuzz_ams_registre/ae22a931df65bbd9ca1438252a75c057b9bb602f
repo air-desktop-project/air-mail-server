@@ -1,0 +1,41 @@
+Received7])
+Messsage-ID: <x@example.com>
+From: A <a@example.com>
+Reply-To: r@autre.example
+To: b@narro.ch÷ c@narro.ch
+Subject: Bonjour
+List-Id: <liste.example.com>
+List-Unsubscribe: <mailto:u@example.com>
+ARC: from a.example (a.example [192.0.2.7])
+Message-ID: <x@examplerom a.example (a.example [192.0.2.7])
+Messsage-ID: <x@example.com>
+From: A <a@example.com>
+Reply-To.com>xample [192.0.2.7])
+Messsage-ID: <x@example.com>
+From: A <a@example.com>
+Reply-To: r@autr
+From: A <a@example.com>
+Reply-To: r@autre.example
+To: b@narro.ch÷ c@narro.ch
+Subject: Bonjour
+List-Id: <liste.example.com>
+List-Unsubscribe: <mailto:u@example.com>
+ARC: from a.example (a.example [192.0.2.7])
+Message-ID: <x@examplerom a.example (a.example [192.0.2.7])
+Messsage-ID: <x@example.com>
+From: A <a@example.com>
+Reply-To.com>xample [192.0.2.7])
+Messsage-ID: <x@example.com>
+From: A <a@example.com>
+Reply-To: r@autre.example
+To: b@narro.ch, c@nle.ple.com>
+Reply-To: r@autre.example
+mple.com>
+ARC-Seal: i=1
+e.example
+To: b@narro.ch, c@nle.ple.com>
+Reply-To: r@autre.example
+mple.com>
+ARC-Seal: i=1
+
+corps

@@ -48,15 +48,18 @@ pub enum Cause {
     SansFile,
     /// Un compte authentifié a voulu écrire au nom d'un autre.
     Usurpation,
+    /// Le registre de réception n'a pas pu écrire un constat (0.2.44).
+    Registre,
 }
 
 /// Toutes les causes, dans l'ordre où le bilan les dit.
-pub const TOUTES: [Cause; 5] = [
+pub const TOUTES: [Cause; 6] = [
     Cause::BoiteIntrouvable,
     Cause::Ecriture,
     Cause::Validation,
     Cause::SansFile,
     Cause::Usurpation,
+    Cause::Registre,
 ];
 
 impl Cause {
@@ -68,6 +71,7 @@ impl Cause {
             Self::Validation => 2,
             Self::SansFile => 3,
             Self::Usurpation => 4,
+            Self::Registre => 5,
         }
     }
 
@@ -100,6 +104,11 @@ impl Cause {
                  (RFC 6409 §6.1). Le message n'a été ni remis, ni mis en file, ni signé — la \
                  vérification a lieu dès que l'en-tête est complet, avant toute écriture"
             }
+            Self::Registre => {
+                "REGISTRE DE RÉCEPTION IMPOSSIBLE À ÉCRIRE — un constat ne s'est pas écrit (disque \
+                 plein, droits changés). Les messages sont REFUSÉS TEMPORAIREMENT (451) tant \
+                 que cela dure : aucun n'entre sans trace"
+            }
         }
     }
 
@@ -112,6 +121,7 @@ impl Cause {
             Self::Validation => "message(s) reçus EN ENTIER puis perdus à la validation",
             Self::SansFile => "destinataire(s) acceptés par la politique puis refusés",
             Self::Usurpation => "tentative(s) d'écrire au nom d'un autre, refusées",
+            Self::Registre => "constat(s) que le registre de réception n'a pas pu écrire",
         }
     }
 }

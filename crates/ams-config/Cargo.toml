@@ -18,6 +18,8 @@ ams-auth = { workspace = true }
 ams-sasl = { workspace = true }
 ams-index = { workspace = true }
 capnp = { workspace = true }
+# Le condensat des fichiers du registre, et de l objet des messages.
+sha2 = { workspace = true }
 
 
 [lints]

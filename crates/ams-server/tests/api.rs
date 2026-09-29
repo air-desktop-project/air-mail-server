@@ -240,6 +240,7 @@ fn configuration_complete(
         apple_attestation: ams_config::AttestationMode::Off,
         apple_app_id: String::new(),
         apple_development: false,
+        registre: String::new(),
         require_fqdn_sender: false,
         require_fqdn_recipient: false,
         require_sender_domain: false,
