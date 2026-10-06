@@ -2129,8 +2129,17 @@ fn le_journal_d_audit_dit_les_sessions_et_les_refus() {
     // ── 2. LE TITULAIRE LIT SON JOURNAL, LE PLUS RÉCENT D'ABORD ─────────────
     //
     // L'écriture passe par un fil : on laisse la file se vider.
+    //
+    // **CINQ SECONDES NE SUFFISAIENT PAS SOUS CHARGE.** Cette attente était de
+    // cent tours de cinquante millisecondes, et l'essai échouait environ une
+    // fois sur trois quand les quatre cibles d'essai de ce paquet tournaient
+    // ensemble : le fil d'audit n'avait pas fini d'écrire, et
+    // `find("auth.refused")` rendait `None`. Le budget est maintenant de trente
+    // secondes — un essai qui attend trop longtemps ne coûte que du temps le
+    // jour où il échoue VRAIMENT ; un essai qui n'attend pas assez coûte une
+    // enquête à chaque fois qu'il ment.
     let mut journal = String::new();
-    for _ in 0..100 {
+    for _ in 0..600 {
         journal = lire(&jeton, "/v1/me/audit?limit=10", "GET");
         if journal.contains("session.opened") && journal.contains("auth.refused") {
             break;
@@ -2138,8 +2147,14 @@ fn le_journal_d_audit_dit_les_sessions_et_les_refus() {
         std::thread::sleep(Duration::from_millis(50));
     }
     assert!(journal.starts_with("HTTP/2 200"), "{journal}");
-    let ouverte = journal.find("session.opened").expect("la session s'y lit");
-    let refus = journal.find("auth.refused").expect("le refus s'y lit");
+    // **CE QU'ON A VU SE DIT**, sinon l'échec n'apprend rien : un `expect` nu
+    // laissait l'enquêteur relancer l'essai pour savoir ce qui manquait.
+    let ouverte = journal
+        .find("session.opened")
+        .unwrap_or_else(|| panic!("la session devrait s'y lire : {journal}"));
+    let refus = journal
+        .find("auth.refused")
+        .unwrap_or_else(|| panic!("le refus devrait s'y lire : {journal}"));
     assert!(ouverte < refus, "le plus récent d'abord : {journal}");
     assert!(journal.contains(r#""source":"127.0.0.1""#), "{journal}");
     assert!(journal.contains(r#""detail":"password""#), "{journal}");

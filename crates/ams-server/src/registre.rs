@@ -112,11 +112,42 @@ impl Registre {
 
     /// [`Registre::ouvrir`], à cet instant.
     fn ouvrir_a(repertoire: PathBuf, quand: u64) -> std::io::Result<Self> {
+        // **LE MODE S'IMPOSE À CE QU'ON CRÉE, ET SE VÉRIFIE SUR CE QU'ON TROUVE.**
+        //
+        // Un `set_permissions(0o700)` inconditionnel suivait cette création, et
+        // il ÉCRASAIT le mode d'un répertoire que l'exploitant avait posé
+        // lui-même — en l'élargissant au besoin, puisqu'il rend le droit
+        // d'écriture. Dans un produit qui refuse de démarrer quand un magasin
+        // est trop lisible, élargir en silence est l'inverse de la règle.
+        //
+        // On crée donc en `0700`, et sur un répertoire qui existait déjà on
+        // REFUSE plutôt que de corriger : ce qu'on trouve trop ouvert se dit, et
+        // ce qu'on trouve resserré reste tel quel.
+        let neuf = !repertoire.exists();
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
             .create(&repertoire)?;
-        std::fs::set_permissions(&repertoire, std::fs::Permissions::from_mode(0o700))?;
+        if !neuf {
+            let mode = std::fs::metadata(&repertoire)?.permissions().mode() & 0o777;
+            if mode & 0o077 != 0 {
+                return Err(invalide(format!(
+                    "`{}` est en {mode:o} — les autres comptes de cette machine y ont accès, et                      le registre dit qui a écrit à qui. `chmod go= {}`",
+                    repertoire.display(),
+                    repertoire.display()
+                )));
+            }
+            // **CE QU'ON NE PEUT PAS ÉCRIRE SE DIT AU DÉMARRAGE**, et non au
+            // premier message : un `451` par message laisserait l'exploitant
+            // chercher longtemps.
+            if mode & 0o300 != 0o300 {
+                return Err(invalide(format!(
+                    "`{}` est en {mode:o} — le registre ne pourrait pas y créer son fichier du                      jour, et aucun message n'entrerait (`chmod u+wx {}`)",
+                    repertoire.display(),
+                    repertoire.display()
+                )));
+            }
+        }
         let mut etat = Etat {
             courant: None,
             precedent: None,

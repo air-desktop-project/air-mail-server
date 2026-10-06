@@ -167,3 +167,70 @@ fn une_ecriture_impossible_se_rend() {
     assert!(registre.ecrire_a(&abandon(1), LUNDI).is_err());
     let _ = std::fs::remove_dir_all(&repertoire);
 }
+
+/// **LE MODE D'UN RÉPERTOIRE QUE L'EXPLOITANT A POSÉ NE S'ÉCRASE PAS.**
+///
+/// Un `set_permissions(0o700)` inconditionnel suivait la création, et corrigeait
+/// donc en silence le mode d'un répertoire trouvé en place — en l'ÉLARGISSANT au
+/// besoin, puisqu'il rend le droit d'écriture. Dans un produit qui refuse de
+/// démarrer quand un magasin est trop lisible, c'était l'inverse de la règle.
+///
+/// # ET C'EST CE QUI RENDAIT UN ESSAI INSTABLE
+///
+/// `le_registre_de_reception_consigne_ou_refuse` retire le droit d'écriture
+/// pendant que le serveur démarre, et attend un `451`. Quand son `chmod`
+/// tombait AVANT que le serveur n'atteigne ce `set_permissions`, le serveur le
+/// défaisait : le constat s'écrivait, le message entrait, et l'essai échouait.
+/// Une fois sur deux, selon la charge de la machine.
+#[test]
+fn un_mode_resserre_par_l_exploitant_est_respecte() {
+    let repertoire = atelier("mode-resserre");
+    // Le premier passage le crée en 0700, et c'est bien ce qu'on attend.
+    let registre = Registre::ouvrir_a(repertoire.clone(), LUNDI).expect("ouvert");
+    drop(registre);
+
+    // L'exploitant resserre : plus personne n'écrit, pas même nous.
+    std::fs::set_permissions(&repertoire, std::fs::Permissions::from_mode(0o500))
+        .expect("resserrable");
+    let faute = Registre::ouvrir_a(repertoire.clone(), LUNDI).expect_err("doit refuser");
+    let dit = faute.to_string();
+    assert!(dit.contains("500"), "le mode trouvé se dit : {dit}");
+    assert!(dit.contains("chmod u+wx"), "et ce qu'il faut faire : {dit}");
+    // **LE MODE N'A PAS BOUGÉ** : c'est tout l'objet.
+    let mode = std::fs::metadata(&repertoire)
+        .expect("existe")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o500, "le serveur n'a pas touché au mode");
+
+    // On rend le droit d'écriture, et l'ouverture repasse.
+    std::fs::set_permissions(&repertoire, std::fs::Permissions::from_mode(0o700))
+        .expect("relâchable");
+    Registre::ouvrir_a(repertoire, LUNDI).expect("rouvert");
+}
+
+/// **UN RÉPERTOIRE DE REGISTRE OUVERT AUX AUTRES COMPTES FAIT REFUSER LE
+/// DÉMARRAGE.**
+///
+/// Le registre dit qui a écrit à qui, et depuis où. C'est la même règle que pour
+/// le fichier de comptes : trop lisible, il empêche de démarrer — plutôt que
+/// d'être corrigé en silence, ce qui laisserait l'exploitant croire qu'il avait
+/// posé le mode qu'il voulait.
+#[test]
+fn un_registre_lisible_par_les_autres_fait_refuser() {
+    let repertoire = atelier("mode-ouvert");
+    Registre::ouvrir_a(repertoire.clone(), LUNDI).expect("ouvert");
+    std::fs::set_permissions(&repertoire, std::fs::Permissions::from_mode(0o755))
+        .expect("élargissable");
+    let faute = Registre::ouvrir_a(repertoire.clone(), LUNDI).expect_err("doit refuser");
+    let dit = faute.to_string();
+    assert!(dit.contains("755"), "le mode trouvé se dit : {dit}");
+    assert!(dit.contains("chmod go="), "et ce qu'il faut faire : {dit}");
+    let mode = std::fs::metadata(&repertoire)
+        .expect("existe")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o755, "le serveur n'a pas touché au mode");
+}
