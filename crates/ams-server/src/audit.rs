@@ -519,36 +519,94 @@ fn chemins(racine: &Path, compte: &str) -> (PathBuf, PathBuf) {
 
 /// Le fil d'écriture : il vide la file jusqu'à ce que le journal disparaisse.
 fn ecrire_sans_fin(racine: &Path, reception: &Receiver<Ordre>) {
-    while let Ok(ordre) = reception.recv() {
+    while let Ok(premier) = reception.recv() {
+        // **ON VIDE LA FILE D'UN COUP** (0.2.49). Chaque entrée était traitée
+        // seule, et `ajouter` ouvrait alors le fichier, écrivait une ligne et
+        // appelait `sync_data` : UN `fsync` PAR ENTRÉE. Le fil ne suivait plus
+        // dès qu'une rafale arrivait — mesuré sur un essai qui attendait le
+        // journal : plus de soixante secondes pour deux entrées, sous la charge
+        // de quatre cibles d'essai. Et quand la file déborde, `noter` PERD.
+        //
+        // Le lot est borné par la file elle-même : au pire on en sort tout ce
+        // qu'elle peut contenir, jamais plus.
+        let mut lot = Vec::with_capacity(16);
+        lot.push(premier);
+        while lot.len() < FILE_MAX {
+            match reception.try_recv() {
+                Ok(suivant) => lot.push(suivant),
+                Err(_) => break,
+            }
+        }
+        ecrire_le_lot(racine, lot);
+    }
+}
+
+/// Écrit un lot d'ordres : une ouverture et un `fsync` PAR COMPTE, et non par
+/// entrée.
+///
+/// # L'ORDRE SE GARDE LÀ OÙ IL COMPTE
+///
+/// Les lignes d'un même compte s'ajoutent dans l'ordre où elles sont venues.
+/// Entre comptes l'ordre n'a pas de sens — ce sont deux fichiers.
+///
+/// **UN `Oublier` VIDE D'ABORD CE QUI LE PRÉCÈDE** : sans cela, un journal
+/// effacé renaîtrait des lignes encore en attente dans le lot, et un compte
+/// recréé sous le même nom y lirait d'où se connectait quelqu'un d'autre —
+/// exactement ce que `Audit::oublier` existe pour empêcher.
+fn ecrire_le_lot(racine: &Path, lot: Vec<Ordre>) {
+    let mut groupes: Vec<(String, Vec<u8>)> = Vec::new();
+    for ordre in lot {
         match ordre {
             Ordre::Ecrire { compte, ligne } => {
-                if let Err(erreur) = ajouter(racine, &compte, &ligne) {
-                    eprintln!(
-                        "air-mail-server : journal d'audit — une entrée de `{compte}` ne s'écrit \
-                         pas ({erreur})"
-                    );
+                match groupes.iter_mut().find(|(nom, _)| *nom == compte) {
+                    Some((_, tampon)) => tampon.extend_from_slice(&ligne),
+                    None => groupes.push((compte, ligne)),
                 }
             }
             Ordre::Oublier { compte } => {
-                let (courant, ancien) = chemins(racine, &compte);
-                for chemin in [courant, ancien] {
-                    match std::fs::remove_file(&chemin) {
-                        Ok(()) => {}
-                        Err(erreur) if erreur.kind() == std::io::ErrorKind::NotFound => {}
-                        Err(erreur) => eprintln!(
-                            "air-mail-server : journal d'audit de `{compte}` NON effacé \
-                             ({erreur}) — à effacer avant de recréer ce compte"
-                        ),
-                    }
-                }
+                vider(racine, &mut groupes);
+                oublier_un_journal(racine, &compte);
             }
+        }
+    }
+    vider(racine, &mut groupes);
+}
+
+/// Écrit chaque groupe accumulé, puis les oublie.
+fn vider(racine: &Path, groupes: &mut Vec<(String, Vec<u8>)>) {
+    for (compte, lignes) in groupes.drain(..) {
+        if let Err(erreur) = ajouter(racine, &compte, &lignes) {
+            eprintln!(
+                "air-mail-server : journal d'audit — une entrée de `{compte}` ne s'écrit pas \
+                 ({erreur})"
+            );
         }
     }
 }
 
-/// Ajoute une ligne au fichier de ce compte, en le faisant tourner s'il est
-/// plein.
-fn ajouter(racine: &Path, compte: &str, ligne: &[u8]) -> std::io::Result<()> {
+/// Efface les deux fichiers du journal d'un compte.
+fn oublier_un_journal(racine: &Path, compte: &str) {
+    let (courant, ancien) = chemins(racine, compte);
+    for chemin in [courant, ancien] {
+        match std::fs::remove_file(&chemin) {
+            Ok(()) => {}
+            Err(erreur) if erreur.kind() == std::io::ErrorKind::NotFound => {}
+            Err(erreur) => eprintln!(
+                "air-mail-server : journal d'audit de `{compte}` NON effacé ({erreur}) — à \
+                 effacer avant de recréer ce compte"
+            ),
+        }
+    }
+}
+
+/// Ajoute des lignes — déjà concaténées — au fichier de ce compte, en le
+/// faisant tourner s'il est plein.
+///
+/// **LA ROTATION SE JUGE UNE FOIS PAR LOT**, et non par ligne : le fichier peut
+/// donc dépasser `ROTATION_OCTETS` de la taille d'un lot avant de tourner. Le
+/// seuil borne ce qu'on garde, il ne promet pas une taille au octet près, et le
+/// juger par ligne coûtait un `metadata` par entrée.
+fn ajouter(racine: &Path, compte: &str, lignes: &[u8]) -> std::io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt as _;
     let (courant, ancien) = chemins(racine, compte);
     if std::fs::metadata(&courant).is_ok_and(|vu| vu.len() >= ROTATION_OCTETS) {
@@ -559,10 +617,13 @@ fn ajouter(racine: &Path, compte: &str, ligne: &[u8]) -> std::io::Result<()> {
         .append(true)
         .mode(0o600)
         .open(&courant)?;
-    // **UNE SEULE ÉCRITURE PAR LIGNE** : en `O_APPEND`, elle ne s'entrelace
-    // avec rien, et une interruption laisse au pire une ligne sans fin — que la
+    // **UNE SEULE ÉCRITURE PAR LOT** : en `O_APPEND`, elle ne s'entrelace avec
+    // rien, et une interruption laisse au pire une ligne sans fin — que la
     // lecture écarte.
-    fichier.write_all(ligne)?;
+    fichier.write_all(lignes)?;
+    // **UN SEUL `fsync` PAR LOT.** La durabilité se joue au lot et non à la
+    // ligne : ce qui est rendu l'est tout ensemble, et ce qu'une coupure perd,
+    // elle le perdait déjà entre deux `fsync`.
     fichier.sync_data()
 }
 

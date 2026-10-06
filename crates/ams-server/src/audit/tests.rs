@@ -388,3 +388,54 @@ fn la_table_de_regroupement_est_bornee() {
     audit.noter_au_plus("marie", refus, Some("autre"), 5000, 60);
     assert_eq!(taille(), super::RECENTES_MAX);
 }
+
+/// **UN `oublier` N'EST PAS DÉPASSÉ PAR LES LIGNES QUI LE PRÉCÈDENT** (0.2.49).
+///
+/// Le fil d'écriture vide désormais la file PAR LOTS : une ouverture et un
+/// `fsync` par compte au lieu d'un par entrée. Les lignes s'accumulent donc en
+/// mémoire avant d'atteindre le disque — et c'est là le piège. Si un `Oublier`
+/// était traité sans vider d'abord ce qui l'attendait, le journal effacé
+/// RENAÎTRAIT des lignes encore en lot, et un compte recréé sous le même nom y
+/// lirait d'où se connectait quelqu'un d'autre.
+///
+/// L'essai pousse de quoi remplir un lot, demande l'oubli dans le même souffle,
+/// et exige que rien ne reste.
+#[test]
+fn un_oubli_vide_d_abord_ce_qui_le_precede() {
+    let racine = atelier("oubli-apres-lot");
+    let audit = Audit::ouvrir(racine.clone()).expect("le journal s'ouvre");
+    for rang in 1..=200_u64 {
+        audit.noter(
+            "marie",
+            Evenement::SessionOuverte { appareil: None },
+            Some("192.0.2.1"),
+            rang,
+        );
+    }
+    audit.oublier("marie");
+
+    // Le fil travaille à son rythme : on lui laisse le temps de tout traiter,
+    // puis on exige que le journal soit VIDE et le reste.
+    let depart = std::time::Instant::now();
+    while depart.elapsed() < std::time::Duration::from_secs(10) {
+        if audit.lire("marie", 10).is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert!(
+        audit.lire("marie", 10).is_empty(),
+        "le journal effacé ne doit pas renaître du lot"
+    );
+    assert_eq!(audit.perdues(), 0, "rien ne doit avoir été perdu");
+
+    // Et le journal se réécrit normalement après l'oubli.
+    audit.noter(
+        "marie",
+        Evenement::SessionOuverte { appareil: None },
+        Some("192.0.2.9"),
+        99,
+    );
+    assert_eq!(attendre(&audit, "marie", 1).len(), 1);
+}
