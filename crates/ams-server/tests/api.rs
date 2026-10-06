@@ -441,7 +441,7 @@ fn un_client_curl_parle_a_l_api_en_http2() {
         &format!("127.0.0.1:{port_http}"),
         CLEF,
     );
-    let _serveur = lancer(&config, port_smtp);
+    let _serveur = lancer_avec_api(&config, port_smtp, port_http);
 
     let jeton = jeton_d_administration();
     let appeler = |chemin: &str| -> (String, String) {
@@ -756,6 +756,31 @@ const ATTENTE_DU_JOURNAL: Duration = Duration::from_secs(10);
 ///
 /// Si la ligne n'est jamais venue, en le DISANT — avec ce qu'on attendait,
 /// combien de temps, et tout ce que le serveur a écrit pendant ce temps.
+/// Lance le serveur et attend que **l'API REST** soit liée, pas seulement SMTP.
+///
+/// # POURQUOI CE HELPER EXISTE
+///
+/// `lancer` n'attend que l'écoute SMTP, et l'API s'ouvre APRÈS elle. Dix-sept
+/// essais de ce fichier partaient donc leur première requête sur un port qui
+/// pouvait n'être pas encore lié : `curl` ne joignait personne, rendait une
+/// sortie VIDE, et une assertion de la forme `assert!(!rendu.contains("token"))`
+/// s'en trouvait satisfaite. L'essai se croyait au vert sur une requête qui
+/// n'avait pas eu lieu.
+///
+/// C'est ce qui rendait `le_journal_d_audit_dit_les_sessions_et_les_refus`
+/// instable — son refus n'avait jamais lieu, l'entrée d'audit n'était donc pas
+/// EN RETARD mais JAMAIS PRODUITE. Deux correctifs l'ont manqué pour cette
+/// raison : allonger l'attente du journal (0.2.47), puis accélérer le fil
+/// d'audit (0.2.49). Aucun des deux ne pouvait rien pour une requête perdue.
+///
+/// **LE BON COMPORTEMENT DOIT ÊTRE LE PLUS FACILE** : ce helper rend l'attente
+/// automatique, là où dix-sept copies de `lancer` l'oubliaient chacune.
+fn lancer_avec_api(config: &Path, port_smtp: u16, port_http: u16) -> Serveur {
+    let serveur = lancer(config, port_smtp);
+    attendre_le_journal(&serveur, &format!("API REST sur 127.0.0.1:{port_http}"));
+    serveur
+}
+
 fn attendre_le_journal(serveur: &Serveur, motif: &str) -> String {
     let depart = Instant::now();
     loop {
@@ -947,7 +972,7 @@ fn un_utilisateur_change_son_propre_mot_de_passe() {
         "",
         CLEF,
     );
-    let _serveur = lancer(&config, port_smtp);
+    let _serveur = lancer_avec_api(&config, port_smtp, port_http);
 
     let base = format!("https://127.0.0.1:{port_http}");
 
@@ -1197,7 +1222,7 @@ fn une_session_fermee_ne_rouvre_plus() {
         "",
         CLEF,
     );
-    let _serveur = lancer(&config, port_smtp);
+    let _serveur = lancer_avec_api(&config, port_smtp, port_http);
     let base = format!("https://127.0.0.1:{port_http}");
 
     // Un appel quelconque avec ce jeton, et le code qu'il rend.
@@ -1343,7 +1368,7 @@ fn l_exploitant_revoque_tout_puis_reinvite() {
         "",
         CLEF,
     );
-    let _serveur = lancer(&config, port_smtp);
+    let _serveur = lancer_avec_api(&config, port_smtp, port_http);
     let base = format!("https://127.0.0.1:{port_http}");
     let admin = jeton_d_administration();
 
@@ -1925,7 +1950,7 @@ fn enroler_sous_attestation(nom: &str, plateforme: &Plateforme) {
         }
     };
     std::fs::write(&config, ams_config::encode(&lue).expect("encodable")).expect("écriture");
-    let _serveur = lancer(&config, port_smtp);
+    let _serveur = lancer_avec_api(&config, port_smtp, port_http);
     let base = format!("https://127.0.0.1:{port_http}");
 
     let admin = jeton_d_administration();
@@ -2089,7 +2114,18 @@ fn le_journal_d_audit_dit_les_sessions_et_les_refus() {
         ams_config::decode(&std::fs::read(&config).expect("relisible")).expect("décodable");
     lue.audit = repertoire.display().to_string();
     std::fs::write(&config, ams_config::encode(&lue).expect("encodable")).expect("écriture");
-    let _serveur = lancer(&config, port_smtp);
+    let serveur = lancer(&config, port_smtp);
+    // **`lancer` N'ATTEND QUE SMTP, ET L'API S'OUVRE APRÈS.** C'est ce qui
+    // rendait cet essai instable, environ une fois sur vingt passes de la suite
+    // complète : la première requête partait avant que le port de l'API ne soit
+    // lié, `curl` ne joignait personne, et le refus n'avait donc JAMAIS LIEU.
+    // Le journal lu ensuite portait `session.opened` — la troisième requête,
+    // elle, arrivait à temps — et pas `auth.refused`.
+    //
+    // L'entrée n'était ni en retard ni perdue : elle n'était pas produite. D'où
+    // l'inutilité d'allonger l'attente, essayée en 0.2.47, et celle d'accélérer
+    // le fil d'audit, essayée en 0.2.49.
+    attendre_le_journal(&serveur, &format!("API REST sur 127.0.0.1:{port_http}"));
     let base = format!("https://127.0.0.1:{port_http}");
 
     let presenter = |login: &str, secret: &str| -> String {
@@ -2103,7 +2139,17 @@ fn le_journal_d_audit_dit_les_sessions_et_les_refus() {
             .arg(format!("{base}/v1/tokens"))
             .output()
             .expect("curl s'exécute");
-        String::from_utf8_lossy(&sortie.stdout).into_owned()
+        let rendu = String::from_utf8_lossy(&sortie.stdout).into_owned();
+        // **UNE RÉPONSE VIDE N'EST PAS UN REFUS**, et c'est l'autre moitié du
+        // défaut : `assert!(!rendu.contains("token"))` passait pour un `curl`
+        // qui n'avait joint personne. L'essai se croyait donc au vert sur une
+        // requête qui n'avait pas eu lieu.
+        assert!(
+            !rendu.is_empty(),
+            "`curl` n'a rien rendu pour `{login}` — le serveur a-t-il répondu ? {}",
+            serveur.journal()
+        );
+        rendu
     };
     let lire = |jeton: &str, chemin: &str, verbe: &str| -> String {
         let sortie = std::process::Command::new("curl")
@@ -2149,12 +2195,23 @@ fn le_journal_d_audit_dit_les_sessions_et_les_refus() {
     assert!(journal.starts_with("HTTP/2 200"), "{journal}");
     // **CE QU'ON A VU SE DIT**, sinon l'échec n'apprend rien : un `expect` nu
     // laissait l'enquêteur relancer l'essai pour savoir ce qui manquait.
-    let ouverte = journal
-        .find("session.opened")
-        .unwrap_or_else(|| panic!("la session devrait s'y lire : {journal}"));
-    let refus = journal
-        .find("auth.refused")
-        .unwrap_or_else(|| panic!("le refus devrait s'y lire : {journal}"));
+    //
+    // **ET LE JOURNAL DU SERVEUR AVEC** : une entrée d'audit qui manque est soit
+    // jamais produite, soit PERDUE parce que la file a débordé — et seul le
+    // serveur le dit (« entrée(s) PERDUE(S) »). Sans cette trace, les deux cas
+    // se ressemblent, et l'enquête recommence à zéro à chaque échec.
+    let ouverte = journal.find("session.opened").unwrap_or_else(|| {
+        panic!(
+            "la session devrait s'y lire : {journal}\n--- journal du serveur ---\n{}",
+            serveur.journal()
+        )
+    });
+    let refus = journal.find("auth.refused").unwrap_or_else(|| {
+        panic!(
+            "le refus devrait s'y lire : {journal}\n--- journal du serveur ---\n{}",
+            serveur.journal()
+        )
+    });
     assert!(ouverte < refus, "le plus récent d'abord : {journal}");
     assert!(journal.contains(r#""source":"127.0.0.1""#), "{journal}");
     assert!(journal.contains(r#""detail":"password""#), "{journal}");
@@ -2256,7 +2313,7 @@ fn un_appareil_trop_presse_lit_429_et_se_reconnecter_ne_lui_rend_rien() {
         per_second: 1,
     };
     std::fs::write(&config, ams_config::encode(&lue).expect("encodable")).expect("écriture");
-    let _serveur = lancer(&config, port_smtp);
+    let _serveur = lancer_avec_api(&config, port_smtp, port_http);
     let base = format!("https://127.0.0.1:{port_http}");
 
     let jeton_neuf = || -> String {
@@ -2443,7 +2500,7 @@ fn un_utilisateur_voit_et_revoque_ses_appareils() {
         "",
         CLEF,
     );
-    let _serveur = lancer(&config, port_smtp);
+    let _serveur = lancer_avec_api(&config, port_smtp, port_http);
     let base = format!("https://127.0.0.1:{port_http}");
 
     // ── LE JETON D'UNE UTILISATRICE ORDINAIRE ───────────────────────────────
@@ -2583,7 +2640,7 @@ fn sans_magasin_les_appareils_ne_se_servent_pas() {
         "",
         CLEF,
     );
-    let _serveur = lancer(&config, port_smtp);
+    let _serveur = lancer_avec_api(&config, port_smtp, port_http);
     let base = format!("https://127.0.0.1:{port_http}");
 
     let sortie = std::process::Command::new("curl")
@@ -2705,7 +2762,7 @@ fn une_invitation_amorce_le_premier_appareil_et_un_seul() {
         "",
         CLEF,
     );
-    let _serveur = lancer(&config, port_smtp);
+    let _serveur = lancer_avec_api(&config, port_smtp, port_http);
     let base = format!("https://127.0.0.1:{port_http}");
 
     // ── LE JETON D'ADMINISTRATION, SEUL À POUVOIR INVITER ───────────────────
@@ -2905,7 +2962,7 @@ fn un_enrolement_refuse_dit_ce_qu_il_faut() {
         "",
         CLEF,
     );
-    let _serveur = lancer(&config, port_smtp);
+    let _serveur = lancer_avec_api(&config, port_smtp, port_http);
     let base = format!("https://127.0.0.1:{port_http}");
 
     let admin = jeton_d_administration();
@@ -3141,7 +3198,7 @@ fn une_clef_enrolee_ouvre_une_session_et_le_defi_ne_sert_qu_une_fois() {
         "",
         CLEF,
     );
-    let _serveur = lancer(&config, port_smtp);
+    let _serveur = lancer_avec_api(&config, port_smtp, port_http);
     let base = format!("https://127.0.0.1:{port_http}");
 
     let poster = |chemin: &str, corps: &str, entete: Option<&str>| -> (String, String) {
@@ -3535,7 +3592,7 @@ fn un_appareil_enrole_en_approuve_un_autre() {
         "",
         CLEF,
     );
-    let _serveur = lancer(&config, port_smtp);
+    let _serveur = lancer_avec_api(&config, port_smtp, port_http);
     let base = format!("https://127.0.0.1:{port_http}");
 
     let poster = |chemin: &str, corps: &str, entete: Option<&str>| -> (String, String) {
@@ -3803,7 +3860,7 @@ fn un_jeton_seul_n_appaire_rien() {
         "",
         CLEF,
     );
-    let _serveur = lancer(&config, port_smtp);
+    let _serveur = lancer_avec_api(&config, port_smtp, port_http);
     let base = format!("https://127.0.0.1:{port_http}");
 
     let sortie = std::process::Command::new("curl")
@@ -3936,7 +3993,7 @@ fn un_mot_de_passe_pose_par_l_api_rederive_son_verificateur_scram() {
     lue.scram_key = chemin_clef.display().to_string();
     lue.scram_store = chemin_scram.display().to_string();
     std::fs::write(&config, ams_config::encode(&lue).expect("encodable")).expect("écriture");
-    let _serveur = lancer(&config, port_smtp);
+    let _serveur = lancer_avec_api(&config, port_smtp, port_http);
     let base = format!("https://127.0.0.1:{port_http}");
 
     let sortie = std::process::Command::new("curl")
@@ -4079,7 +4136,7 @@ fn un_mot_de_passe_applicatif_ouvre_smtp_et_pas_l_api() {
     let mut lue = ams_config::decode(&std::fs::read(&config).expect("config")).expect("décodable");
     lue.app_passwords = applicatifs.display().to_string();
     std::fs::write(&config, ams_config::encode(&lue).expect("encodable")).expect("écriture");
-    let _serveur = lancer(&config, port_smtp);
+    let _serveur = lancer_avec_api(&config, port_smtp, port_http);
     let base = format!("https://127.0.0.1:{port_http}");
 
     // Un appel HTTP, et rend (corps, code).
@@ -4280,7 +4337,7 @@ fn un_gros_message_arrive_entier_en_http2() {
         "",
         CLEF,
     );
-    let serveur = lancer(&config, port_smtp);
+    let serveur = lancer_avec_api(&config, port_smtp, port_http);
     let base = format!("https://127.0.0.1:{port_http}");
 
     let sortie = std::process::Command::new("curl")
@@ -4423,7 +4480,7 @@ fn un_message_avec_piece_jointe_passe_par_un_brouillon() {
         ams_config::decode(&std::fs::read(&chemin).expect("lisible")).expect("décodable");
     config.drafts = atelier.0.join("brouillons").display().to_string();
     std::fs::write(&chemin, ams_config::encode(&config).expect("encodable")).expect("écrite");
-    let serveur = lancer(&chemin, port_smtp);
+    let serveur = lancer_avec_api(&chemin, port_smtp, port_http);
     let base = format!("https://127.0.0.1:{port_http}");
 
     let sortie = std::process::Command::new("curl")
