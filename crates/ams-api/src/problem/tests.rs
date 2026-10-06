@@ -22,7 +22,7 @@ use crate::error::Reason;
 /// Le `match` ci-dessous la rend exhaustive **à la compilation** : un motif de
 /// plus ne compile pas tant qu'on ne l'y a pas mis. C'est la même discipline
 /// que `Resource::scope`, et pour la même raison.
-fn toutes() -> [Reason; 31] {
+fn toutes() -> [Reason; 32] {
     // Ce `match` ne sert qu'à faire échouer la compilation si un motif
     // s'ajoute : sa valeur est jetée, sa VÉRIFICATION est tout l'objet.
     const fn _exhaustive(reason: Reason) -> u8 {
@@ -58,6 +58,7 @@ fn toutes() -> [Reason; 31] {
             Reason::NotADevice => 28,
             Reason::TooManyRequests => 29,
             Reason::AttestationRefused => 30,
+            Reason::DeliveryUnavailable => 31,
         }
     }
     [
@@ -92,6 +93,7 @@ fn toutes() -> [Reason; 31] {
         Reason::NotADevice,
         Reason::TooManyRequests,
         Reason::AttestationRefused,
+        Reason::DeliveryUnavailable,
     ]
 }
 
@@ -175,8 +177,20 @@ fn nos_propres_fautes_se_disent_pareil() {
         );
     }
 
-    // CE QUI N'EST PAS UNE FAUTE, ET QUI PORTE POURTANT UN 5xx.
-    assert!(document(Reason::NotImplemented).contains("/problems/not-implemented"));
+    // CE QUI N'EST PAS UNE FAUTE, ET QUI PORTE POURTANT UN 5xx. Chacun se nomme,
+    // parce que le client a quelque chose à en tirer : l'un lui dit que
+    // l'exploitant n'a pas configuré la capacité — inutile d'insister —, l'autre
+    // que ce n'est que pour l'instant, et donc qu'il peut revenir.
+    const NOMMES: [(Reason, &str); 2] = [
+        (Reason::NotImplemented, "/problems/not-implemented"),
+        (Reason::DeliveryUnavailable, "/problems/service-unavailable"),
+    ];
+    for (reason, type_attendu) in NOMMES {
+        assert!(
+            document(reason).contains(type_attendu),
+            "{reason:?} devrait se nommer {type_attendu}"
+        );
+    }
 
     // **LES DEUX CAMPS ÉPUISENT LA CLASSE 5** : sans ce compte, un motif de plus
     // s'ajouterait sans que ni l'un ni l'autre ne le réclame.
@@ -186,7 +200,7 @@ fn nos_propres_fautes_se_disent_pareil() {
         .count();
     assert_eq!(
         dans_la_classe_5,
-        NOTRES.len() + 1,
+        NOTRES.len() + NOMMES.len(),
         "un motif 5xx n'est rangé dans aucun des deux camps"
     );
 }
@@ -343,4 +357,30 @@ fn une_attestation_refusee_a_son_propre_type() {
     let dit = document(Reason::AttestationRefused);
     assert!(dit.contains("/problems/attestation-refused"), "{dit}");
     assert!(dit.contains("\"status\":422"), "{dit}");
+}
+
+/// **UNE REMISE INDISPONIBLE DIT `503`, DANS LE DOCUMENT COMME DANS LA LIGNE DE
+/// STATUT.**
+///
+/// §3.1 de RFC 9457 : les deux doivent coïncider. `indisponible()` écrivait un
+/// document `Reason::BadMessage` — donc `"status":400` — sous une ligne `503` :
+/// le client lisait deux codes contradictoires, et le `400` lui disait de
+/// corriger un message qui n'avait rien à se reprocher. Faute de quoi AUCUNE
+/// raison ne valait `503` : il fallait en créer une.
+///
+/// C'est le MÊME défaut que `pas_encore()` avait porté, et que `/v1/me/devices`
+/// avait rendu visible en production. Deux occurrences du même oubli valent un
+/// essai qui le nomme.
+#[test]
+fn une_remise_indisponible_dit_503_des_deux_cotes() {
+    assert_eq!(
+        Reason::DeliveryUnavailable.status().value(),
+        503,
+        "la ligne de statut vaut 503"
+    );
+    let dit = document(Reason::DeliveryUnavailable);
+    assert!(dit.contains("\"status\":503"), "{dit}");
+    assert!(dit.contains("/problems/service-unavailable"), "{dit}");
+    // **ON NE DIT PAS AU CLIENT CE QUI A MANQUÉ**, mais on lui dit quoi faire.
+    assert!(dit.contains("réessayez"), "{dit}");
 }

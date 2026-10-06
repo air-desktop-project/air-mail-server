@@ -211,6 +211,20 @@ pub enum Reason {
     /// demande est bien formée, c'est la clef qui ne prouve pas ce qu'on
     /// exige d'elle. Laquelle des règles a manqué ne se dit pas au client.
     AttestationRefused,
+    /// **La remise n'a pas pu se faire, et ce n'est pas la faute du client**
+    /// (0.2.46) : la file de sortie n'a pas pris le message, ou un destinataire
+    /// n'a pas pu être retenu.
+    ///
+    /// `503`, ET NON `400` : la demande était bonne, c'est ce serveur qui n'a
+    /// pas tenu. Un `400` dirait au client de corriger son message, alors qu'il
+    /// n'a qu'à réessayer — et §3.1 de RFC 9457 veut de toute façon que le
+    /// document porte LE MÊME code que la ligne de statut.
+    ///
+    /// **ELLE EXISTE PARCE QU'AUCUNE AUTRE RAISON NE VALAIT `503`.** Faute de
+    /// quoi `indisponible()` écrivait un document `Reason::BadMessage` — donc
+    /// `"status":400` — sous une ligne `503`. C'est exactement le défaut que
+    /// `pas_encore()` avait déjà porté, et que son commentaire raconte.
+    DeliveryUnavailable,
 }
 
 impl Reason {
@@ -256,6 +270,10 @@ impl Reason {
             | Self::IdempotencyKeyReused
             | Self::UnknownEncoding
             | Self::AttestationRefused => StatusCode::UNPROCESSABLE_CONTENT,
+            // §15.6.4 de RFC 9110 : « the server is currently unable to handle
+            // the request due to a temporary overload or scheduled
+            // maintenance ». Une file qui n'a pas pris est de cet ordre.
+            Self::DeliveryUnavailable => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
 
@@ -307,6 +325,7 @@ impl Reason {
                 "trop de requêtes pour cet appareil ; réessayez dans une seconde"
             }
             Self::AttestationRefused => "l'attestation de la clef n'est pas recevable",
+            Self::DeliveryUnavailable => "la remise n'est pas possible pour l'instant ; réessayez",
             Self::UnknownEncoding => {
                 "cette partie porte un encodage que le serveur ne sait pas défaire ; lisez le message brut"
             }

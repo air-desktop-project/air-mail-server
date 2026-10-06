@@ -2306,22 +2306,13 @@ impl ApiMaildir {
             return notre_faute();
         };
 
-        let mut remise = crate::delivery::MaildirDelivery::new(
-            std::sync::Arc::clone(&self.remise),
-            std::sync::Arc::clone(&self.comptes),
-            std::sync::Arc::clone(&self.incidents),
-        );
-        if let Some(reveil) = self.reveil.clone() {
-            remise = remise.avec_reveil(reveil);
-        }
-        if let Some(file) = self.file.clone() {
-            remise = remise.avec_file(file, self.message_max);
-        }
-        remise = remise.avec_domaines(std::sync::Arc::clone(&self.domaines));
-        if let Some(signataire) = self.dkim.clone() {
-            remise = remise.avec_dkim(signataire);
-        }
-        let issue = deposer(&mut remise, expediteur, &destinataires, &remis);
+        // **UNE SEULE FAÇON DE MONTER LA REMISE, POUR LES DEUX PORTES** (0.2.46).
+        // Celle-ci en avait sa propre copie, et les deux ont divergé : la table
+        // des délégations manquait des DEUX côtés, mais rien ne le disait
+        // puisqu'il n'y avait pas un seul endroit à lire. `une_remise` est
+        // désormais cet endroit.
+        let mut remise = self.une_remise();
+        let issue = deposer(&mut remise, compte, expediteur, &destinataires, &remis);
         if issue.is_err() {
             // **CE N'EST PAS LA FAUTE DU DÉPOSANT**, et ce n'est pas définitif :
             // plus d'UID, disque plein. §15.6.4 de RFC 9110 dit exactement cela,
@@ -2508,6 +2499,23 @@ impl ApiMaildir {
         let frontiere = format!("=_air_{id}_=");
         let mut remise = self.une_remise();
         remise.begin(Some(expediteur));
+        // **CETTE PORTE AUSSI DOIT SE NOMMER** (0.2.46). `begin` remet
+        // l'identité à rien — « la boucle la repose juste après si le pair est
+        // authentifié » —, et la boucle SMTP le fait bien
+        // (`ams_loop_tokio::connection`, `delivery.submitter(compte)`). CETTE
+        // PORTE-LÀ NE LE FAISAIT PAS : la remise restait anonyme, et la garde de
+        // `deposer_les_sortants` — « une transaction anonyme n'émet jamais » —
+        // refusait DÉFINITIVEMENT tout destinataire d'ailleurs.
+        //
+        // Le défaut ne se voyait pas sur une remise locale, qui ne dépose rien
+        // en file : `POST /v1/drafts/{id}/send` rendait `{"delivered":1}` vers
+        // une boîte d'ici et échouait vers le monde entier. Mesuré le
+        // 2026-10-06 sur `mail.narro.ch` en 0.2.45.
+        //
+        // **LE COMPTE AUTHENTIFIÉ, ET NON LE TITULAIRE DU `From:`** : c'est ce
+        // que la boucle SMTP nomme, et `ecrit_bien_en_son_nom` a déjà dit, juste
+        // au-dessus, que ce compte a le droit d'écrire sous cette adresse.
+        remise.submitter(compte.as_bytes());
         for adresse in &destinataires {
             if remise.add_recipient(adresse).is_err() {
                 remise.abort();
@@ -2589,6 +2597,16 @@ impl ApiMaildir {
         remise = remise.avec_domaines(std::sync::Arc::clone(&self.domaines));
         if let Some(signataire) = self.dkim.clone() {
             remise = remise.avec_dkim(signataire);
+        }
+        // **LA MÊME TABLE QUE LA BOUCLE SMTP** (0.2.46). Elle manquait ici, et
+        // tant que la remise ne connaissait pas le nom du déposant la garde
+        // d'usurpation ne pouvait pas se tromper : sans nom, elle refusait tout
+        // relais, et c'est ce refus-là qui cachait celui-ci. Le nom posé, un
+        // compte délégataire écrivant `From: support@…` devenait un usurpateur
+        // aux yeux de sa propre remise — alors que l'API venait de vérifier son
+        // droit `send`. Les deux vérifications doivent lire la même table.
+        if let Some(table) = self.delegations.clone() {
+            remise = remise.avec_delegations(table);
         }
         remise
     }
@@ -4601,7 +4619,12 @@ fn refus_de_depot(sortie: &mut [u8]) -> Served<'_> {
 /// due to a temporary overload or scheduled maintenance ». Un `500` ferait
 /// renoncer un client qui n'a rien fait de mal.
 fn indisponible(sortie: &mut [u8]) -> Served<'_> {
-    match ams_api::problem(ams_api::Reason::BadMessage, sortie) {
+    // **LE MOTIF PORTE LE MÊME CODE QUE LA RÉPONSE** (§3.1 de RFC 9457). Il
+    // portait `BadMessage`, dont le statut vaut 400, sous une ligne à 503 : le
+    // document disait donc `"status":400` quand le serveur disait 503. Mesuré
+    // le 2026-10-06 sur `POST /v1/drafts/{id}/send` vers un destinataire
+    // d'ailleurs, en production. Le même défaut que `pas_encore()` portait.
+    match ams_api::problem(ams_api::Reason::DeliveryUnavailable, sortie) {
         Ok(corps) => Served {
             status: StatusCode::SERVICE_UNAVAILABLE,
             media: ams_api::PROBLEM_MEDIA_TYPE,
@@ -4639,6 +4662,7 @@ const fn notre_faute<'o>() -> Served<'o> {
 /// Séparée pour que `?` serve : l'appelante doit annuler ce qui a commencé.
 fn deposer(
     remise: &mut crate::delivery::MaildirDelivery,
+    compte: &str,
     expediteur: &[u8],
     destinataires: &[Vec<u8>],
     message: &[u8],
@@ -4649,6 +4673,13 @@ fn deposer(
     // `From:` VÉRIFIÉ du déposant, donc l'une des adresses de son compte, et
     // c'est là qu'un rapport de non-remise reviendra.
     remise.begin(Some(expediteur));
+    // **PUIS LE NOM DU DÉPOSANT** (0.2.46), comme la boucle SMTP le fait aussi
+    // (`ams_loop_tokio::connection`, `delivery.submitter(compte)`). `begin`
+    // remet l'identité à rien ; sans ce second geste la remise reste ANONYME, et
+    // la garde de `deposer_les_sortants` — « une transaction anonyme n'émet
+    // jamais » — refuse définitivement tout destinataire d'ailleurs. Le défaut
+    // ne se voyait pas en remise locale, qui ne dépose rien en file.
+    remise.submitter(compte.as_bytes());
     for adresse in destinataires {
         remise.add_recipient(adresse)?;
     }
@@ -4992,6 +5023,8 @@ mod tests {
 mod porte_http {
     use std::sync::Arc;
 
+    use ams_proto_http::StatusCode;
+
     use super::{Account, ApiMaildir};
     use crate::incidents::{Cause, Incidents};
 
@@ -5185,6 +5218,103 @@ mod porte_http {
             incidents.bilan().is_empty(),
             "rien d'anormal, donc rien à dire"
         );
+    }
+
+    /// Une file d'essai, sous `racine`.
+    fn une_file(racine: &std::path::Path) -> ams_loop_tokio::Spool {
+        // `Spool::new` ne crée pas son dossier : le serveur le fait au démarrage.
+        std::fs::create_dir_all(racine.join("file")).expect("dossier");
+        ams_loop_tokio::Spool::new(
+            racine.join("file"),
+            ams_queue::Backoff::DEFAULT,
+            std::string::String::from("mail.example.com"),
+            std::string::String::from("postmaster@example.com"),
+        )
+    }
+
+    /// Ce que la file a reçu.
+    fn en_file(racine: &std::path::Path) -> usize {
+        std::fs::read_dir(racine.join("file"))
+            .map(|entrees| {
+                entrees
+                    .filter_map(Result::ok)
+                    .filter(|entree| {
+                        entree
+                            .path()
+                            .extension()
+                            .is_some_and(|bout| bout == "enveloppe")
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    /// **L'API ÉMET VERS L'AILLEURS, ET NON SEULEMENT VERS SES PROPRES BOÎTES.**
+    ///
+    /// Les deux portes de soumission de l'API posaient `begin`, qui remet
+    /// l'identité du déposant à rien, et ne la reposaient JAMAIS — là où la
+    /// boucle SMTP le fait (`ams_loop_tokio::connection`,
+    /// `delivery.submitter(compte)`). La remise restait donc ANONYME, et la
+    /// garde de `deposer_les_sortants` — « une transaction anonyme n'émet
+    /// jamais » — refusait DÉFINITIVEMENT tout destinataire d'ailleurs.
+    ///
+    /// **LE DÉFAUT NE SE VOYAIT PAS EN REMISE LOCALE**, qui ne dépose rien en
+    /// file : `POST /v1/drafts/{id}/send` rendait `{"delivered":1}` vers une
+    /// boîte d'ici et `503` vers le monde entier. Aucun essai n'attachait de
+    /// file à l'API, et c'est ce qui l'a laissé passer jusqu'en production — vu
+    /// sur `mail.narro.ch` en 0.2.45, le 2026-10-06.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn une_soumission_part_vers_l_ailleurs() {
+        let (ephemere, api, _) = api("sortant-soumission");
+        let api = api.avec_file(une_file(&ephemere.0), 1_048_576);
+        let lettre = b"From: jean@example.com\r\nTo: inconnu@ailleurs.test\r\n\r\nbonjour\r\n";
+        let mut sortie = std::vec![0_u8; 4096];
+        let rendu = api.submissions("jean", lettre, &mut sortie);
+        assert_eq!(
+            rendu.status,
+            StatusCode::OK,
+            "une soumission pour l'ailleurs doit partir, pas échouer"
+        );
+        assert_eq!(en_file(&ephemere.0), 1, "le message doit être EN FILE");
+    }
+
+    /// La même chose par l'autre porte : le brouillon, qui compose puis envoie.
+    ///
+    /// Elle a sa propre suite d'appels — `begin`, `add_recipient`, `append` par
+    /// morceaux, `finish` — et ne passe pas par `deposer`. Les deux portes
+    /// portaient donc le défaut, et il faut deux essais pour les tenir.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn un_brouillon_part_vers_l_ailleurs() {
+        let (ephemere, api, _) = api("sortant-brouillon");
+        let brouillons = Arc::new(crate::brouillons::Brouillons::new(
+            ephemere.0.join("brouillons"),
+            1_048_576,
+        ));
+        let api = api
+            .avec_brouillons(brouillons)
+            .avec_file(une_file(&ephemere.0), 1_048_576);
+
+        let lettre = b"From: jean@example.com\r\nTo: inconnu@ailleurs.test\r\n\r\nbonjour\r\n";
+        let mut sortie = std::vec![0_u8; 4096];
+        let rendu = api.creer_un_brouillon("jean", lettre, &mut sortie);
+        assert_eq!(rendu.status, StatusCode::CREATED, "le brouillon se crée");
+        let corps = std::string::String::from_utf8_lossy(rendu.body).into_owned();
+        let id = corps
+            .split("\"id\":\"")
+            .nth(1)
+            .and_then(|reste| reste.split('"').next())
+            .expect("le brouillon porte un identifiant")
+            .to_string();
+
+        let mut sortie = std::vec![0_u8; 4096];
+        let rendu = api.envoyer_le_brouillon("jean", &id, &mut sortie);
+        assert_eq!(
+            rendu.status,
+            StatusCode::OK,
+            "un brouillon pour l'ailleurs doit partir : {}",
+            std::string::String::from_utf8_lossy(rendu.body)
+        );
+        assert_eq!(en_file(&ephemere.0), 1, "le message doit être EN FILE");
     }
 }
 
