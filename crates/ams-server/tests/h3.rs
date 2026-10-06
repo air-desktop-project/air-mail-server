@@ -221,6 +221,37 @@ fn lancer(config: &Path, motif: &str) -> Serveur {
     );
 }
 
+/// Mène la poignée de main QUIC à son terme, ou rend la main après le délai.
+///
+/// # SEIZE TOURS NE SUFFISAIENT PAS SOUS CHARGE
+///
+/// Cette boucle était recopiée **cinq fois** dans ce fichier, chacune bornée à
+/// seize tours. `Client::ecouter` attend 500 ms par tour, donc huit secondes au
+/// plus — et `un_message_se_lit_par_portees` échouait environ une fois sur huit
+/// quand les quatre cibles d'essai de ce paquet tournent ensemble : la poignée
+/// de main n'avait pas abouti, et l'essai l'affirmait pourtant.
+///
+/// On compte donc en TEMPS et non en tours, avec un budget large. Un essai qui
+/// attend trop ne coûte du temps que le jour où il échoue vraiment ; un essai
+/// qui n'attend pas assez coûte une enquête chaque fois qu'il ment.
+///
+/// **ET IL N'Y EN A PLUS QU'UNE** : cinq copies, c'est cinq budgets à corriger
+/// le jour où celui-ci ne suffit plus.
+async fn serrer_la_main(client: &mut Client) {
+    // **`elapsed` ET NON UNE ADDITION SUR `Instant`** : le dépôt refuse
+    // `clippy::arithmetic_side_effects`, et c'est le motif qu'emploie déjà
+    // `Serveur::attendre_l_ecoute`.
+    let depart = std::time::Instant::now();
+    while depart.elapsed() < std::time::Duration::from_secs(30) {
+        if !client.parler().await && !client.tls().is_handshaking() {
+            return;
+        }
+        if !client.ecouter().await && !client.tls().is_handshaking() {
+            return;
+        }
+    }
+}
+
 /// **UNE REQUÊTE HTTP/3 TRAVERSE LE BINAIRE.**
 ///
 /// La configuration lue, la socket ouverte, les certificats chargés, la session
@@ -256,14 +287,7 @@ async fn une_requete_h3_traverse_le_binaire() {
 
     let adresse = format!("127.0.0.1:{h3}").parse().expect("une adresse");
     let mut client = Client::new(config_client(&autorite), adresse).await;
-    for _ in 0..16 {
-        if !client.parler().await && !client.tls().is_handshaking() {
-            break;
-        }
-        if !client.ecouter().await && !client.tls().is_handshaking() {
-            break;
-        }
-    }
+    serrer_la_main(&mut client).await;
     assert!(
         !client.tls().is_handshaking(),
         "la poignée de main doit aboutir contre le binaire : {}",
@@ -334,14 +358,7 @@ async fn une_soumission_traverse_le_binaire() {
 
     let adresse = format!("127.0.0.1:{h3}").parse().expect("une adresse");
     let mut client = Client::new(config_client(&autorite), adresse).await;
-    for _ in 0..16 {
-        if !client.parler().await && !client.tls().is_handshaking() {
-            break;
-        }
-        if !client.ecouter().await && !client.tls().is_handshaking() {
-            break;
-        }
-    }
+    serrer_la_main(&mut client).await;
     assert!(
         !client.tls().is_handshaking(),
         "la poignée de main doit aboutir : {}",
@@ -494,14 +511,7 @@ async fn l_administration_se_sert_avec_le_bon_jeton() {
 
     let adresse = format!("127.0.0.1:{h3}").parse().expect("une adresse");
     let mut client = Client::new(config_client(&autorite), adresse).await;
-    for _ in 0..16 {
-        if !client.parler().await && !client.tls().is_handshaking() {
-            break;
-        }
-        if !client.ecouter().await && !client.tls().is_handshaking() {
-            break;
-        }
-    }
+    serrer_la_main(&mut client).await;
     assert!(!client.tls().is_handshaking(), "{}", serveur.journal());
 
     // Le jeton d'administration, frappé avec le secret de la configuration —
@@ -610,14 +620,7 @@ async fn un_compte_cree_a_chaud_recoit_du_courrier() {
 
     let adresse = format!("127.0.0.1:{h3}").parse().expect("une adresse");
     let mut client = Client::new(config_client(&autorite), adresse).await;
-    for _ in 0..16 {
-        if !client.parler().await && !client.tls().is_handshaking() {
-            break;
-        }
-        if !client.ecouter().await && !client.tls().is_handshaking() {
-            break;
-        }
-    }
+    serrer_la_main(&mut client).await;
     assert!(!client.tls().is_handshaking(), "{}", serveur.journal());
 
     let admin = frapper_un_jeton(ams_api::Scope::one(
@@ -792,14 +795,7 @@ async fn un_message_se_lit_par_portees() {
 
     let adresse = format!("127.0.0.1:{h3}").parse().expect("une adresse");
     let mut client = Client::new(config_client(&autorite), adresse).await;
-    for _ in 0..16 {
-        if !client.parler().await && !client.tls().is_handshaking() {
-            break;
-        }
-        if !client.ecouter().await && !client.tls().is_handshaking() {
-            break;
-        }
-    }
+    serrer_la_main(&mut client).await;
     assert!(!client.tls().is_handshaking(), "{}", serveur.journal());
 
     let identifiants = br#"{"login":"jean","password":"ouvre-toi"}"#;
