@@ -528,7 +528,39 @@ where
     if matches!(service.guard.verdict(source), Verdict::Banned { .. }) {
         return Err(Error::Refused);
     }
-    let _ = service.guard.observe(source, GuardEvent::Connection);
+    // **LE BANNISSEMENT SE DIT, ET IL SE DIT UNE SEULE FOIS** (0.2.52) : ici,
+    // au moment où il est PRONONCÉ. Les connexions suivantes de cette source
+    // sont refusées par le `return` ci-dessus, avant d'arriver jusqu'à cette
+    // ligne — elles ne peuvent donc pas noyer le journal, et la règle de
+    // `server.rs` est respectée : « consigner chacune de ses tentatives
+    // donnerait à qui frappe le moyen de remplir le disque de celui qui l'a
+    // banni ».
+    //
+    // # POURQUOI CETTE LIGNE MANQUAIT, ET CE QU'ELLE COÛTAIT
+    //
+    // Un refus tombe AVANT la poignée de main — c'est voulu, chiffrer pour une
+    // source bannie offrirait un échange de clés gratuit. Mais le client, lui,
+    // a déjà commencé : il rend une erreur de connexion sécurisée SANS CAUSE
+    // LISIBLE (`curl` dit 35, `CURLE_SSL_CONNECT_ERROR`). Et l'exploitant ne
+    // voyait RIEN. Un client de messagerie qui reconnecte trop vite, ou tout un
+    // bureau derrière une seule adresse, devenait injoignable sans que personne
+    // ne puisse dire pourquoi.
+    // **PAS DE COMPTE À REBOURS** : l'horloge du garde compte en millisecondes
+    // depuis une origine qui lui est propre, et la soustraire d'un
+    // `std::time::Instant` donnerait un nombre faux. La durée du bannissement
+    // est dans la configuration, que le message nomme.
+    if matches!(
+        service.guard.observe(source, GuardEvent::Connection),
+        Verdict::Banned { .. }
+    ) {
+        std::eprintln!(
+            "air-mail-server : API {} — source BANNIE par le garde. Ses connexions suivantes \
+             sont refusées AVANT la poignée de main TLS : le client n'y lira qu'une erreur de \
+             connexion sécurisée, sans cause. Les seuils se règlent par `air-mail-admin config \
+             write … --connections-per-minute … --ban-seconds …`.",
+            crate::connection::adresse_du_pair(source)
+        );
+    }
 
     let accepteur = TlsAcceptor::from(Arc::clone(&service.tls));
     let mut chiffre = tokio::time::timeout(service.timeouts.handshake, accepteur.accept(flux))
@@ -1281,8 +1313,26 @@ where
         };
         let (flux, pair) = match acceptee {
             Ok(connexion) => connexion,
-            Err(_) => {
+            Err(cause) => {
+                // **UN `accept` QUI ÉCHOUE SE DIT** (0.2.52), et il était le
+                // dernier chemin muet de cette boucle. Un pair voit sa
+                // connexion mourir sans explication — `curl` rend 35, « échec
+                // de la poignée de main » —, et l'exploitant ne voyait RIEN.
+                // Descripteurs épuisés, mémoire du noyau, file d'acceptation
+                // pleine : ce sont des pannes d'exploitation, et ce sont
+                // précisément celles qu'il faut pouvoir lire.
+                //
+                // **UNE FOIS, PUIS UNE SUR CENT** : une tempête d'échecs ne
+                // doit pas remplir le disque — la même règle que pour les
+                // entrées d'audit perdues.
                 stats.failed = stats.failed.saturating_add(1);
+                if stats.failed == 1 || stats.failed.is_multiple_of(100) {
+                    std::eprintln!(
+                        "air-mail-server : API — {} connexion(s) PERDUE(S) à l'acceptation \
+                         depuis le démarrage, la dernière : {cause}",
+                        stats.failed
+                    );
+                }
                 continue;
             }
         };
@@ -1309,9 +1359,26 @@ where
                 tls,
                 session,
             };
-            // Le résultat n'est pas remonté : une connexion qui échoue ne regarde
-            // qu'elle. Le journal viendra avec `air-log`.
-            let _ = serve_http_connection(flux, &service, &*api, crate::source_de(pair)).await;
+            // **CE QUI CÈDE SE DIT**, comme pour SMTP, IMAP et POP3 (0.2.52).
+            //
+            // Le résultat était jeté, et le commentaire d'alors disait « le
+            // journal viendra avec `air-log` ». Le coût de ce report s'est
+            // mesuré : une poignée de main TLS qui échouait ne laissait AUCUNE
+            // trace — ni chez le client, qui ne lit qu'une erreur TLS opaque,
+            // ni chez l'exploitant. Trois enquêtes ont été refaites de zéro
+            // faute de cette ligne, sur un défaut qui ne se montre qu'une fois
+            // sur vingt sous charge.
+            let debut = std::time::Instant::now();
+            if let Err(cause) =
+                serve_http_connection(flux, &service, &*api, crate::source_de(pair)).await
+            {
+                // **LE BANNI NE DIT RIEN ICI** : son bannissement s'est déjà dit
+                // une fois, là où il a été prononcé. Consigner chacune de ses
+                // tentatives rendrait le journal remplissable par qui frappe.
+                if !matches!(cause, Error::Refused) {
+                    crate::server::journaliser_l_echec("API", pair, &cause, debut.elapsed());
+                }
+            }
             drop(place);
         });
     }

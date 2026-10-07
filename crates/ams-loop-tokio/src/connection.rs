@@ -1297,7 +1297,7 @@ async fn verifier_le_domaine<P: Policy>(
 /// (`/64` en IPv6), et SPF compare des adresses. Vérifier sur une adresse
 /// repliée autoriserait tout un bloc pour ce qu'une seule machine a le droit
 /// d'émettre.
-fn adresse_du_pair(source: Source) -> std::net::IpAddr {
+pub(crate) fn adresse_du_pair(source: Source) -> std::net::IpAddr {
     match source {
         Source::V4(octets) => std::net::IpAddr::V4(std::net::Ipv4Addr::from(octets)),
         Source::V6(octets) => std::net::IpAddr::V6(std::net::Ipv6Addr::from(octets)),

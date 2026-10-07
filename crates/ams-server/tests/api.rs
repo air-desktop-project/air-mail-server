@@ -490,7 +490,7 @@ fn un_client_curl_parle_a_l_api_en_http2() {
     // quelqu'un à qui l'appliquer.
     let poser = |corps: &str| -> String {
         let sortie = std::process::Command::new("curl")
-            .args(["-s", "--insecure", "--http2", "-X", "PUT"])
+            .args(["-s", "-S", "--insecure", "--http2", "-X", "PUT"])
             .args(["-H", &format!("Authorization: Bearer {jeton}")])
             .args(["-H", "Content-Type: application/json"])
             .args(["-d", corps])
@@ -815,6 +815,15 @@ fn lancer_avec_api(config: &Path, port_smtp: u16, port_http: u16) -> Serveur {
 #[track_caller]
 fn reponse_de_curl(serveur: &Serveur, sortie: &std::process::Output) -> String {
     let dehors = String::from_utf8_lossy(&sortie.stdout).into_owned();
+    // **LE JOURNAL SE LAISSE RATTRAPER AVANT D'ÊTRE LU.** Il arrive par un
+    // tuyau que vide un fil : la ligne que le serveur vient d'écrire peut
+    // n'être pas encore dans l'instantané. Lire trop tôt a déjà fait conclure
+    // à tort, cette nuit, qu'un registre n'avait pas été ouvert. On ne paie ce
+    // délai QUE sur un échec.
+    let journal_du_serveur = || {
+        std::thread::sleep(Duration::from_millis(250));
+        serveur.journal()
+    };
     assert!(
         sortie.status.success(),
         "`curl` n'a pas pu parler au serveur (code {:?}) — ce n'est PAS un refus \
@@ -826,7 +835,7 @@ fn reponse_de_curl(serveur: &Serveur, sortie: &std::process::Output) -> String {
          --- ce que le SERVEUR a dit ---\n{}",
         sortie.status.code(),
         String::from_utf8_lossy(&sortie.stderr),
-        serveur.journal()
+        journal_du_serveur()
     );
     assert!(
         !dehors.is_empty(),
@@ -834,7 +843,7 @@ fn reponse_de_curl(serveur: &Serveur, sortie: &std::process::Output) -> String {
          passer pour une réponse.\n--- sortie d'erreur de curl ---\n{}\n\
          --- ce que le SERVEUR a dit ---\n{}",
         String::from_utf8_lossy(&sortie.stderr),
-        serveur.journal()
+        journal_du_serveur()
     );
     dehors
 }
@@ -1037,7 +1046,7 @@ fn un_utilisateur_change_son_propre_mot_de_passe() {
     // Échange des identifiants contre un jeton, et rend (corps, code).
     let ouvrir = |secret: &str| -> (String, String) {
         let sortie = std::process::Command::new("curl")
-            .args(["-s", "--insecure", "--http2"])
+            .args(["-s", "-S", "--insecure", "--http2"])
             .args(["-H", "Content-Type: application/json"])
             .args([
                 "-d",
@@ -1067,7 +1076,7 @@ fn un_utilisateur_change_son_propre_mot_de_passe() {
     // « moi » nécessaire, et l'essai le constate plutôt que de le supposer.
     let changer = |jeton: &str, corps_json: &str, chemin: &str| -> String {
         let sortie = std::process::Command::new("curl")
-            .args(["-s", "--insecure", "--http2", "-X", "PUT"])
+            .args(["-s", "-S", "--insecure", "--http2", "-X", "PUT"])
             .args(["-H", &format!("Authorization: Bearer {jeton}")])
             .args(["-H", "Content-Type: application/json"])
             .args(["-d", corps_json])
@@ -1286,7 +1295,7 @@ fn une_session_fermee_ne_rouvre_plus() {
     // Un appel quelconque avec ce jeton, et le code qu'il rend.
     let code_de = |jeton: &str, chemin: &str| -> String {
         let sortie = std::process::Command::new("curl")
-            .args(["-s", "--insecure", "--http2"])
+            .args(["-s", "-S", "--insecure", "--http2"])
             .args(["-H", &format!("Authorization: Bearer {jeton}")])
             .args(["-o", "/dev/null", "-w", "%{http_code}"])
             .arg(format!("{base}{chemin}"))
@@ -1297,7 +1306,7 @@ fn une_session_fermee_ne_rouvre_plus() {
 
     // ── 1. UN JETON D'UTILISATEUR, OBTENU PAR LA PORTE ORDINAIRE ────────────
     let sortie = std::process::Command::new("curl")
-        .args(["-s", "--insecure", "--http2"])
+        .args(["-s", "-S", "--insecure", "--http2"])
         .args(["-H", "Content-Type: application/json"])
         .args(["-d", r#"{"login":"marie","password":"secret-initial"}"#])
         .arg(format!("{base}/v1/tokens"))
@@ -1319,7 +1328,7 @@ fn une_session_fermee_ne_rouvre_plus() {
 
     // ── 2. ON LE RÉVOQUE ────────────────────────────────────────────────────
     let sortie = std::process::Command::new("curl")
-        .args(["-s", "--insecure", "--http2", "-X", "DELETE"])
+        .args(["-s", "-S", "--insecure", "--http2", "-X", "DELETE"])
         .args(["-H", &format!("Authorization: Bearer {jeton}")])
         .args(["-o", "/dev/null", "-w", "%{http_code}"])
         .arg(format!("{base}/v1/tokens/current"))
@@ -1343,7 +1352,7 @@ fn une_session_fermee_ne_rouvre_plus() {
 
     // Et le refermer dit qu'il n'y avait plus rien à fermer.
     let sortie = std::process::Command::new("curl")
-        .args(["-s", "--insecure", "--http2", "-X", "DELETE"])
+        .args(["-s", "-S", "--insecure", "--http2", "-X", "DELETE"])
         .args(["-H", &format!("Authorization: Bearer {jeton}")])
         .args(["-o", "/dev/null", "-w", "%{http_code}"])
         .arg(format!("{base}/v1/tokens/current"))
@@ -1433,7 +1442,7 @@ fn l_exploitant_revoque_tout_puis_reinvite() {
     let appeler = |verbe: &str, chemin: &str, corps: Option<&str>, jeton: Option<&str>| {
         let mut commande = std::process::Command::new("curl");
         commande
-            .args(["-s", "--insecure", "--http2", "-X", verbe])
+            .args(["-s", "-S", "--insecure", "--http2", "-X", verbe])
             .args(["-w", "\n%{http_code}"]);
         if let Some(corps) = corps {
             commande
@@ -2015,7 +2024,7 @@ fn enroler_sous_attestation(nom: &str, plateforme: &Plateforme) {
     let poster = |chemin: &str, corps: &str, entete: Option<&str>| -> (String, String) {
         let mut commande = std::process::Command::new("curl");
         commande
-            .args(["-s", "--insecure", "--http2", "-X", "POST"])
+            .args(["-s", "-S", "--insecure", "--http2", "-X", "POST"])
             .args(["-H", "Content-Type: application/json"])
             .args(["-d", corps])
             .args(["-w", "\n%{http_code}"]);
@@ -2188,7 +2197,7 @@ fn le_journal_d_audit_dit_les_sessions_et_les_refus() {
 
     let presenter = |login: &str, secret: &str| -> String {
         let sortie = std::process::Command::new("curl")
-            .args(["-s", "--insecure", "--http2"])
+            .args(["-s", "-S", "--insecure", "--http2"])
             .args(["-H", "Content-Type: application/json"])
             .args([
                 "-d",
@@ -2211,7 +2220,7 @@ fn le_journal_d_audit_dit_les_sessions_et_les_refus() {
     };
     let lire = |jeton: &str, chemin: &str, verbe: &str| -> String {
         let sortie = std::process::Command::new("curl")
-            .args(["-s", "--insecure", "--http2", "-i", "-X", verbe])
+            .args(["-s", "-S", "--insecure", "--http2", "-i", "-X", verbe])
             .args(["-H", &format!("Authorization: Bearer {jeton}")])
             .arg(format!("{base}{chemin}"))
             .output()
@@ -2376,7 +2385,7 @@ fn un_appareil_trop_presse_lit_429_et_se_reconnecter_ne_lui_rend_rien() {
 
     let jeton_neuf = || -> String {
         let sortie = std::process::Command::new("curl")
-            .args(["-s", "--insecure", "--http2"])
+            .args(["-s", "-S", "--insecure", "--http2"])
             .args(["-H", "Content-Type: application/json"])
             .args(["-d", r#"{"login":"marie","password":"secret-initial"}"#])
             .arg(format!("{base}/v1/tokens"))
@@ -2392,7 +2401,7 @@ fn un_appareil_trop_presse_lit_429_et_se_reconnecter_ne_lui_rend_rien() {
     // Une requête, et ses en-têtes et son corps, tels que curl les rend.
     let appel = |jeton: &str, chemin: &str| -> String {
         let sortie = std::process::Command::new("curl")
-            .args(["-s", "--insecure", "--http2", "-i"])
+            .args(["-s", "-S", "--insecure", "--http2", "-i"])
             .args(["-H", &format!("Authorization: Bearer {jeton}")])
             .arg(format!("{base}{chemin}"))
             .output()
@@ -2563,7 +2572,7 @@ fn un_utilisateur_voit_et_revoque_ses_appareils() {
 
     // ── LE JETON D'UNE UTILISATRICE ORDINAIRE ───────────────────────────────
     let sortie = std::process::Command::new("curl")
-        .args(["-s", "--insecure", "--http2"])
+        .args(["-s", "-S", "--insecure", "--http2"])
         .args(["-H", "Content-Type: application/json"])
         .args(["-d", r#"{"login":"marie","password":"secret-initial"}"#])
         .arg(format!("{base}/v1/tokens"))
@@ -2578,7 +2587,7 @@ fn un_utilisateur_voit_et_revoque_ses_appareils() {
 
     let appeler = |methode: &str, chemin: &str| -> (String, String) {
         let sortie = std::process::Command::new("curl")
-            .args(["-s", "--insecure", "--http2", "-X", methode])
+            .args(["-s", "-S", "--insecure", "--http2", "-X", methode])
             .args(["-H", &format!("Authorization: Bearer {jeton}")])
             .args(["-w", "\n%{http_code}"])
             .arg(format!("{base}{chemin}"))
@@ -2702,7 +2711,7 @@ fn sans_magasin_les_appareils_ne_se_servent_pas() {
     let base = format!("https://127.0.0.1:{port_http}");
 
     let sortie = std::process::Command::new("curl")
-        .args(["-s", "--insecure", "--http2"])
+        .args(["-s", "-S", "--insecure", "--http2"])
         .args(["-H", "Content-Type: application/json"])
         .args(["-d", r#"{"login":"marie","password":"secret-initial"}"#])
         .arg(format!("{base}/v1/tokens"))
@@ -2717,7 +2726,7 @@ fn sans_magasin_les_appareils_ne_se_servent_pas() {
 
     for (methode, chemin) in [("GET", "/v1/me/devices"), ("DELETE", "/v1/me/devices/a1")] {
         let sortie = std::process::Command::new("curl")
-            .args(["-s", "--insecure", "--http2", "-X", methode])
+            .args(["-s", "-S", "--insecure", "--http2", "-X", methode])
             .args(["-H", &format!("Authorization: Bearer {jeton}")])
             .args(["-w", "\n%{http_code}"])
             .arg(format!("{base}{chemin}"))
@@ -2828,7 +2837,7 @@ fn une_invitation_amorce_le_premier_appareil_et_un_seul() {
     let poster = |chemin: &str, corps: &str, entete: Option<&str>| -> (String, String) {
         let mut commande = std::process::Command::new("curl");
         commande
-            .args(["-s", "--insecure", "--http2", "-X", "POST"])
+            .args(["-s", "-S", "--insecure", "--http2", "-X", "POST"])
             .args(["-H", "Content-Type: application/json"])
             .args(["-d", corps])
             .args(["-w", "\n%{http_code}"]);
@@ -2955,7 +2964,7 @@ fn une_invitation_amorce_le_premier_appareil_et_un_seul() {
 
     // ── ET L'APPAREIL SE VOIT SOUS SON COMPTE ───────────────────────────────
     let sortie = std::process::Command::new("curl")
-        .args(["-s", "--insecure", "--http2"])
+        .args(["-s", "-S", "--insecure", "--http2"])
         .args(["-H", &format!("Authorization: Bearer {jeton_de_marie}")])
         .arg(format!("{base}/v1/me/devices"))
         .output()
@@ -3025,7 +3034,7 @@ fn un_enrolement_refuse_dit_ce_qu_il_faut() {
 
     let admin = jeton_d_administration();
     let sortie = std::process::Command::new("curl")
-        .args(["-s", "--insecure", "--http2", "-X", "POST"])
+        .args(["-s", "-S", "--insecure", "--http2", "-X", "POST"])
         .args(["-H", "Content-Type: application/json"])
         .args(["-H", &format!("Authorization: Bearer {admin}")])
         .args(["-d", r#"{"login":"marie"}"#])
@@ -3041,7 +3050,7 @@ fn un_enrolement_refuse_dit_ce_qu_il_faut() {
 
     let enroler = |corps: &str| -> String {
         let sortie = std::process::Command::new("curl")
-            .args(["-s", "--insecure", "--http2", "-X", "POST"])
+            .args(["-s", "-S", "--insecure", "--http2", "-X", "POST"])
             .args(["-H", "Content-Type: application/json"])
             .args(["-d", corps])
             .args(["-o", "/dev/null", "-w", "%{http_code}"])
@@ -3262,7 +3271,7 @@ fn une_clef_enrolee_ouvre_une_session_et_le_defi_ne_sert_qu_une_fois() {
     let poster = |chemin: &str, corps: &str, entete: Option<&str>| -> (String, String) {
         let mut commande = std::process::Command::new("curl");
         commande
-            .args(["-s", "--insecure", "--http2", "-X", "POST"])
+            .args(["-s", "-S", "--insecure", "--http2", "-X", "POST"])
             .args(["-H", "Content-Type: application/json"])
             .args(["-d", corps])
             .args(["-w", "\n%{http_code}"]);
@@ -3349,7 +3358,7 @@ fn une_clef_enrolee_ouvre_une_session_et_le_defi_ne_sert_qu_une_fois() {
     // **ET LE JETON OUVRE VRAIMENT LE COURRIER.** Un jeton qu'on rend sans qu'il
     // serve à rien serait une réussite de façade.
     let sortie = std::process::Command::new("curl")
-        .args(["-s", "--insecure", "--http2"])
+        .args(["-s", "-S", "--insecure", "--http2"])
         .args(["-H", &format!("Authorization: Bearer {jeton}")])
         .args(["-o", "/dev/null", "-w", "%{http_code}"])
         .arg(format!("{base}/v1/mailboxes"))
@@ -3417,7 +3426,7 @@ fn une_clef_enrolee_ouvre_une_session_et_le_defi_ne_sert_qu_une_fois() {
     let appeler = |verbe: &str, chemin: &str, corps: &str, avec: &str| -> (String, String) {
         let mut commande = std::process::Command::new("curl");
         commande
-            .args(["-s", "--insecure", "--http2", "-X", verbe])
+            .args(["-s", "-S", "--insecure", "--http2", "-X", verbe])
             .args(["-H", &format!("Authorization: Bearer {avec}")])
             .args(["-w", "\n%{http_code}"]);
         if !corps.is_empty() {
@@ -3656,7 +3665,7 @@ fn un_appareil_enrole_en_approuve_un_autre() {
     let poster = |chemin: &str, corps: &str, entete: Option<&str>| -> (String, String) {
         let mut commande = std::process::Command::new("curl");
         commande
-            .args(["-s", "--insecure", "--http2", "-X", "POST"])
+            .args(["-s", "-S", "--insecure", "--http2", "-X", "POST"])
             .args(["-H", "Content-Type: application/json"])
             .args(["-d", corps])
             .args(["-w", "\n%{http_code}"]);
@@ -3743,7 +3752,7 @@ fn un_appareil_enrole_en_approuve_un_autre() {
 
     // **LES DEUX APPAREILS SONT LÀ**, et le premier n'a pas été révoqué.
     let sortie = std::process::Command::new("curl")
-        .args(["-s", "--insecure", "--http2"])
+        .args(["-s", "-S", "--insecure", "--http2"])
         .args(["-H", &porteur])
         .arg(format!("{base}/v1/me/devices"))
         .output()
@@ -3922,7 +3931,7 @@ fn un_jeton_seul_n_appaire_rien() {
     let base = format!("https://127.0.0.1:{port_http}");
 
     let sortie = std::process::Command::new("curl")
-        .args(["-s", "--insecure", "--http2", "-X", "POST"])
+        .args(["-s", "-S", "--insecure", "--http2", "-X", "POST"])
         .args(["-H", "Content-Type: application/json"])
         .args(["-d", r#"{"login":"marie","password":"secret-initial"}"#])
         .arg(format!("{base}/v1/tokens"))
@@ -3937,7 +3946,7 @@ fn un_jeton_seul_n_appaire_rien() {
 
     let appairer = |corps: &str| -> String {
         let sortie = std::process::Command::new("curl")
-            .args(["-s", "--insecure", "--http2", "-X", "POST"])
+            .args(["-s", "-S", "--insecure", "--http2", "-X", "POST"])
             .args(["-H", "Content-Type: application/json"])
             .args(["-H", &format!("Authorization: Bearer {jeton}")])
             .args(["-d", corps])
@@ -4055,7 +4064,7 @@ fn un_mot_de_passe_pose_par_l_api_rederive_son_verificateur_scram() {
     let base = format!("https://127.0.0.1:{port_http}");
 
     let sortie = std::process::Command::new("curl")
-        .args(["-s", "--insecure", "--http2"])
+        .args(["-s", "-S", "--insecure", "--http2"])
         .args(["-H", "Content-Type: application/json"])
         .args(["-d", r#"{"login":"marie","password":"secret-initial"}"#])
         .arg(format!("{base}/v1/tokens"))
@@ -4071,7 +4080,7 @@ fn un_mot_de_passe_pose_par_l_api_rederive_son_verificateur_scram() {
     // Pose un secret par cette route, avec ce jeton, et rend le code.
     let poser = |jeton: &str, chemin: &str, corps_json: &str| -> String {
         let sortie = std::process::Command::new("curl")
-            .args(["-s", "--insecure", "--http2", "-X", "PUT"])
+            .args(["-s", "-S", "--insecure", "--http2", "-X", "PUT"])
             .args(["-H", &format!("Authorization: Bearer {jeton}")])
             .args(["-H", "Content-Type: application/json"])
             .args(["-d", corps_json])
@@ -4201,7 +4210,7 @@ fn un_mot_de_passe_applicatif_ouvre_smtp_et_pas_l_api() {
     let appeler = |methode: &str, chemin: &str, corps: Option<&str>, jeton: Option<&str>| {
         let mut commande = std::process::Command::new("curl");
         commande
-            .args(["-s", "--insecure", "--http2", "-X", methode])
+            .args(["-s", "-S", "--insecure", "--http2", "-X", methode])
             .args(["-w", "\n%{http_code}"]);
         if let Some(corps) = corps {
             commande
@@ -4235,7 +4244,7 @@ fn un_mot_de_passe_applicatif_ouvre_smtp_et_pas_l_api() {
     .expect("écriture");
     let soumettre = |secret: &str| -> bool {
         std::process::Command::new("curl")
-            .args(["-s", "--insecure", "--ssl-reqd"])
+            .args(["-s", "-S", "--insecure", "--ssl-reqd"])
             .args(["-u", &format!("marie:{secret}")])
             .args(["--mail-from", "marie@example.com"])
             .args(["--mail-rcpt", "marie@example.com"])
@@ -4399,7 +4408,7 @@ fn un_gros_message_arrive_entier_en_http2() {
     let base = format!("https://127.0.0.1:{port_http}");
 
     let sortie = std::process::Command::new("curl")
-        .args(["-s", "--insecure", "--http2"])
+        .args(["-s", "-S", "--insecure", "--http2"])
         .args(["-H", "Content-Type: application/json"])
         .args(["-d", r#"{"login":"marie","password":"secret-initial"}"#])
         .arg(format!("{base}/v1/tokens"))
@@ -4426,7 +4435,7 @@ fn un_gros_message_arrive_entier_en_http2() {
         let fichier = atelier.0.join("message.eml");
         std::fs::write(&fichier, message).expect("écrit");
         let sortie = std::process::Command::new("curl")
-            .args(["-s", "--insecure", "--http2"])
+            .args(["-s", "-S", "--insecure", "--http2"])
             .args(["-H", &format!("Authorization: Bearer {jeton}")])
             .args(["-H", "Content-Type: message/rfc822"])
             .args(["--data-binary", &format!("@{}", fichier.display())])
@@ -4457,7 +4466,7 @@ fn un_gros_message_arrive_entier_en_http2() {
     while relu.len() < gros.len() {
         let debut = relu.len();
         let sortie = std::process::Command::new("curl")
-            .args(["-s", "--insecure", "--http2"])
+            .args(["-s", "-S", "--insecure", "--http2"])
             .args(["-H", &format!("Authorization: Bearer {jeton}")])
             .args(["-r", &format!("{debut}-{}", debut + 64 * 1024 - 1)])
             .arg(format!("{base}/v1/mailboxes/INBOX/messages/{uid}/raw"))
@@ -4550,7 +4559,7 @@ fn un_message_avec_piece_jointe_passe_par_un_brouillon() {
     let base = format!("https://127.0.0.1:{port_http}");
 
     let sortie = std::process::Command::new("curl")
-        .args(["-s", "--insecure", "--http2"])
+        .args(["-s", "-S", "--insecure", "--http2"])
         .args(["-H", "Content-Type: application/json"])
         .args(["-d", r#"{"login":"marie","password":"secret-initial"}"#])
         .arg(format!("{base}/v1/tokens"))
@@ -4569,7 +4578,7 @@ fn un_message_avec_piece_jointe_passe_par_un_brouillon() {
         std::fs::write(&fichier, donnees).expect("écrit");
         let mut commande = std::process::Command::new("curl");
         commande
-            .args(["-s", "--insecure", "--http2", "-X", verbe])
+            .args(["-s", "-S", "--insecure", "--http2", "-X", verbe])
             .args(["-H", &format!("Authorization: Bearer {jeton}")])
             .args(["-w", "\n%{http_code}"]);
         if !type_.is_empty() {
@@ -4658,7 +4667,7 @@ fn un_message_avec_piece_jointe_passe_par_un_brouillon() {
     loop {
         let debut = relu.len();
         let sortie = std::process::Command::new("curl")
-            .args(["-s", "--insecure", "--http2"])
+            .args(["-s", "-S", "--insecure", "--http2"])
             .args(["-H", &format!("Authorization: Bearer {jeton}")])
             .args(["-r", &format!("{debut}-{}", debut + 64 * 1024 - 1)])
             .args(["-w", "\n%{http_code}"])
@@ -4693,7 +4702,7 @@ fn un_message_avec_piece_jointe_passe_par_un_brouillon() {
     loop {
         let debut = piece.len();
         let sortie = std::process::Command::new("curl")
-            .args(["-s", "--insecure", "--http2", "-D"])
+            .args(["-s", "-S", "--insecure", "--http2", "-D"])
             .arg(&entetes)
             .args(["-H", &format!("Authorization: Bearer {jeton}")])
             .args(["-r", &format!("{debut}-{}", debut + 50_000 - 1)])
