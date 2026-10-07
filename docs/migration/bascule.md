@@ -137,6 +137,41 @@ s'authentifiaient avec le nom nu, parce que c'est ainsi qu'on crée un compte.
 Un inventaire qui relève `mail_location` et pas la FORME de l'identifiant est
 un inventaire qui manque la moitié de la migration.
 
+### Les comptes, nommément — relevé du magasin le 2026-10-07
+
+| login | adresses servies |
+|---|---|
+| `thierry.delhaise` | `thierry.delhaise@narro.ch` |
+| `contact` | `contact@narro.ch`, `postmaster@narro.ch`, `abuse@narro.ch`, `root@narro.ch`, `postmaster@mail.narro.ch`, `apple-review@narro.ch` |
+| `vincent.delhaise` | `vincent.delhaise@narro.ch` |
+| `support` | `support@narro.ch` |
+| `kelly.garro` | `kelly.garro@narro.ch` |
+| `ofrou-sierre` | `ofrou-sierre@narro.ch` — la passerelle Milesight, qui ne lit pas son courrier et n'émet que des alertes. Son secret est DÉFINITIF : elle ne sait pas en changer |
+| `dmarc` | `dmarc@narro.ch` — ne reçoit que les rapports agrégés ; le `_dmarc` de la zone y renvoie `rua` et `ruf` |
+
+**Sept, et non les cinq de l'étude** : `ofrou-sierre` et `dmarc` sont nés
+après. Un tableau écrit de mémoire se trompe, celui-ci sort de
+`air-mail-admin account list /var/lib/air-mail/comptes.bin` — et c'est le
+réflexe à avoir avant d'écrire un login dans une commande.
+
+### ET L'AUTRE SERVEUR NE LE NOMME PAS PAREIL
+
+`air-desktop.org`, monté le 2026-10-06, sert la même personne sous un **autre
+login** :
+
+| | login | adresse |
+|---|---|---|
+| **narro.ch** | **`thierry.delhaise`** | `thierry.delhaise@narro.ch` |
+| air-desktop.org | `thierry` | `thierry.delhaise@air-desktop.org` |
+
+Ici, le login est le début de l'adresse ; là-bas, non. Supposer la convention
+d'un serveur sur l'autre fait échouer tout ce qui nomme le compte —
+`account passwd`, `app-password add`, `account remove` — et chaque connexion
+IMAP, SMTP ou POP3, avec pour seul signe un refus d'authentification qui
+ressemble en tout point à un mot de passe faux. Pour `contact`, les deux noms
+coïncident. L'état d'air-desktop.org est dans
+[`docs/deploiement-air-desktop/ETAT-2026-10-06.md`](../deploiement-air-desktop/ETAT-2026-10-06.md).
+
 Ce que cela touche, et ce qui en a été fait :
 
 | Qui | Identifiant à poser | Fait ? |
