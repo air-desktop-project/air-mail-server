@@ -1350,6 +1350,37 @@ décidera si l'on recommence un autre jour.
     #    Le 587 n'a pas de ligne à lui : le pare-feu le ramène sur le 2525, le
     #    même écouteur `STARTTLS` que le 25 — c'est ainsi que Postfix servait
     #    `submission`, par le même démon.
+    # ╔══════════════════════════════════════════════════════════════════════╗
+    # ║  CETTE COMMANDE EST CELLE DU 2026-09-22. NE LA REJOUEZ PAS TELLE     ║
+    # ║  QUELLE SUR LA PRODUCTION D'AUJOURD'HUI.                             ║
+    # ╚══════════════════════════════════════════════════════════════════════╝
+    #
+    #    `config write` REMPLACE LE FICHIER ENTIER. Ce que la production porte
+    #    et que cette commande ne nomme pas serait donc EFFACÉ. Relevé le
+    #    2026-10-07, il manque ici onze choses, toutes acquises depuis :
+    #
+    #      --scram / --scram-key      SCRAM-SHA-256, et `-PLUS` en TLS 1.3
+    #      --devices                  les sessions par clef
+    #      --delegations              l'accès à la boîte d'un autre
+    #      --drafts                   les brouillons de l'API
+    #      --app-passwords            un secret par client (le relevé ARC en vit)
+    #      --registre                 SANS LUI LA RÉCEPTION REFUSE (451)
+    #      --audit                    le journal par compte
+    #      --vapid-key / --vapid-subject   le réveil Web Push
+    #      --spf observe              le verdict SPF
+    #      --dmarc observe / --dmarc-quarantine-folder / --dmarc-report-dir
+    #      --about on                 XABOUT
+    #
+    #    La vérité du jour se lit sur la machine, et nulle part ailleurs :
+    #    `air-mail-admin config show /var/lib/air-mail/air-mail.conf`. La
+    #    procédure sûre pour modifier une configuration vivante — écrire SUR
+    #    une copie du fichier vivant pour que le secret de scellement soit
+    #    REPRIS, puis comparer les deux `config show` — est au bas de
+    #    `docs/arc/feuille-de-route.md`.
+    #
+    #    Et `repeter-la-configuration.sh`, qui rejoue cette commande, ne la
+    #    joue QUE sur un banc : il prouve que le manuel est cohérent, jamais
+    #    qu'il est à jour.
     printf %s "$SECRET_RESEND" | sudo -u air-mail air-mail-admin config write \
         /var/lib/air-mail/air-mail.conf \
         --domain mail.narro.ch --hosted narro.ch --hosted mail.narro.ch \

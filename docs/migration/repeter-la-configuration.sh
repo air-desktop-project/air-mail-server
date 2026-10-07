@@ -249,3 +249,23 @@ if [ "$manques" -ne 0 ]; then
     exit 1
 fi
 echo "OK : les DEUX commandes de \`bascule.md\` sont acceptées, et tout ce qu'elles promettent se relit."
+
+# ── CE QUE CE « OK » NE DIT PAS ─────────────────────────────────────────────
+#
+# Il dit que le manuel est COHÉRENT : ses deux commandes passent, et ce
+# qu'elles promettent se relit. Il ne dit RIEN de la production, qu'il ne
+# regarde jamais — ce banc n'a ni magasin, ni registre, ni la machine. Une
+# commande peut être parfaitement acceptée et avoir cessé de décrire ce que le
+# serveur porte : c'était le cas le 2026-10-07, où onze options manquaient au
+# manuel (SCRAM, appareils, délégations, brouillons, mots de passe applicatifs,
+# registre, audit, VAPID, SPF, DMARC, XABOUT) sans qu'aucun essai d'ici ne
+# puisse s'en apercevoir. `config write` remplaçant le fichier ENTIER, rejouer
+# la commande du manuel sur la vraie machine les effacerait.
+#
+# La seule chose qui dise la vérité du jour est la machine elle-même :
+#   air-mail-admin config show /var/lib/air-mail/air-mail.conf
+echo
+echo "   Ce «OK» dit que le MANUEL est cohérent, pas qu'il est à JOUR : ce banc"
+echo "   ne regarde jamais la production. Avant de rejouer une de ces commandes"
+echo "   sur la machine, comparez-la à \`config show\` — \`config write\` remplace"
+echo "   le fichier entier, et ce qu'elle ne nomme pas serait effacé."

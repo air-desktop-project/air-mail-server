@@ -51,7 +51,12 @@
 # pour une machine, dont l'interface refuse le tiret.
 set -euo pipefail
 
-comptes=(contact thierry.delhaise vincent.delhaise support kelly.garro ofrou-sierre)
+comptes=(contact thierry.delhaise vincent.delhaise support kelly.garro ofrou-sierre dmarc)
+# **`dmarc` EST LE SEPTIÈME, ET IL MANQUAIT À CETTE LISTE.** La boîte des
+# rapports agrégés, née après la bascule : le `_dmarc` de la zone y renvoie
+# `rua` et `ruf`. Personne ne l'ouvre, mais elle s'authentifie comme les autres
+# et son secret se pose comme les autres. Elle a échappé six jours à ce script
+# PARCE QUE LE CONTRÔLE NE REGARDAIT QUE DANS UN SENS — voir plus bas.
 # **CEUX QUI VONT DANS UNE INTERFACE, ET NON DANS UN COURRIER.** Leur secret se
 # tire sans tirets. La liste est une liste, et non un `if` sur un nom : la
 # prochaine passerelle s'ajoute ici, et nulle part ailleurs.
@@ -140,11 +145,32 @@ done
 [ "$manquants" -eq 0 ] || {
     echo "poser-les-secrets : un compte manque — RIEN n'a été touché." >&2
     echo "  Ce script POSE des secrets, il ne crée pas de compte : c'est \`account add\`" >&2
-    echo "  de la §0.4 de \`bascule.md\` qui les écrit. \`ofrou-sierre\` est née le" >&2
-    echo "  2026-09-15, après la phase 0 — elle manque encore au magasin de la machine." >&2
+    echo "  de la §0.4 de \`bascule.md\` qui les écrit." >&2
     exit 1
 }
-dit "les ${#comptes[@]} comptes sont dans $magasin"
+
+# ── ET LE CONTRÔLE DANS L'AUTRE SENS, QUI MANQUAIT ──────────────────────────
+#
+# Le contrôle ci-dessus ne voyait qu'un sens : un compte de la liste absent du
+# magasin arrête tout, mais un compte du magasin absent DE LA LISTE passait
+# sans un mot. C'est ainsi que `ofrou-sierre` d'abord, puis `dmarc`, ont eu un
+# magasin et pas de secret posé — et qu'un script nommé « pose les secrets »
+# pouvait en oublier un sans que rien ne le dise. Une liste écrite à la main
+# vieillit ; le magasin, non.
+oublies=0
+while read -r compte; do
+    [ -n "$compte" ] || continue
+    printf '%s\n' "${comptes[@]}" | grep -qx "$compte" || {
+        echo "  DANS LE MAGASIN, PAS DANS CE SCRIPT : $compte" >&2; oublies=1; }
+done <<< "$connus"
+[ "$oublies" -eq 0 ] || {
+    echo "poser-les-secrets : le magasin porte un compte que ce script ignore —" >&2
+    echo "  RIEN n'a été touché. Ajoutez-le à \`comptes\` (et à \`machines\` si son" >&2
+    echo "  secret se TAPE dans une interface au lieu d'être envoyé), ou dites" >&2
+    echo "  pourquoi il doit rester de côté. Ne le laissez pas muet." >&2
+    exit 1
+}
+dit "les ${#comptes[@]} comptes sont dans $magasin, et le magasin n'en porte pas d'autre"
 
 # **ON REFUSE D'ÉCRASER UN FICHIER DE SECRETS DÉJÀ LÀ.** Deux passages laisseraient
 # des secrets posés dans le magasin dont plus personne n'a le texte.
