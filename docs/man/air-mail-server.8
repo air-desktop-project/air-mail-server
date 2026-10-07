@@ -1,0 +1,194 @@
+.\" -*- coding: utf-8 -*-
+.\" This Source Code Form is subject to the terms of the Mozilla Public
+.\" License, v. 2.0. If a copy of the MPL was not distributed with this
+.\" file, You can obtain one at https://mozilla.org/MPL/2.0/.
+.\"
+.\" La version du .TH est réécrite à la construction du paquet par
+.\" scripts/paquet.sh : ne la corrigez pas à la main.
+.TH AIR-MAIL-SERVER 8 "2026-10-07" "air-mail-server 0.2.52" "Administration système"
+.
+.SH NOM
+air-mail-server \- serveur de courrier SMTP, POP3, IMAP et HTTP
+.
+.SH SYNOPSIS
+.B air-mail-server
+.BI \-\-config " fichier"
+.br
+.B air-mail-server
+.RB [ \-\-help | \-\-version ]
+.
+.SH DESCRIPTION
+.B air-mail-server
+reçoit, range et sert du courrier. Il parle SMTP (remise et soumission), IMAP,
+POP3, et une API REST sur HTTP/2 — chacun en clair avec
+.B STARTTLS
+ou sous TLS implicite, selon ce que la configuration ouvre.
+.PP
+Il ne lit
+.B aucun
+fichier de configuration textuel, ne consulte aucune variable d'environnement
+de réglage et n'accepte aucune autre option que celles ci\-dessous. Sa
+configuration est un
+.B fichier binaire
+produit par
+.BR air-mail-admin (8).
+Deux sources de configuration seraient une de trop : un réglage qui existe à
+deux endroits finit par différer, et c'est toujours au mauvais moment qu'on
+découvre lequel des deux le serveur a cru.
+.
+.SH OPTIONS
+.TP
+.BI \-\-config " fichier"
+la configuration binaire à lire. Obligatoire. Le serveur refuse de démarrer si
+le fichier manque, n'est pas lisible, ou ne se relit pas.
+.TP
+.B \-\-help
+l'aide intégrée, puis sortie.
+.TP
+.B \-\-version
+la version, puis sortie.
+.
+.SH CE QU'IL DIT AU DÉMARRAGE
+Le serveur annonce dans son journal ce qu'il sert vraiment : les protocoles
+ouverts, les domaines hébergés, le chiffrement, le nombre de comptes — et,
+surtout,
+.B ce qui manque
+: «\ EN CLAIR\ », «\ AUTH non annoncé\ », «\ aucun résolveur\ ».
+.PP
+Cette liste est relevée à l'exécution, et c'est délibéré : une liste écrite
+dans cette page vieillirait sans que personne ne s'en aperçoive. Pour savoir ce
+que cette machine\-ci sert, lisez son journal ou
+.BR "air-mail-admin config show" ,
+jamais une documentation.
+.
+.SH PORTS, ET POURQUOI ILS SONT HAUTS
+L'unité systemd livrée tourne avec
+.B CapabilityBoundingSet=
+.B et AmbientCapabilities=
+.B vides
+: le serveur ne possède donc
+.B pas
+.BR CAP_NET_BIND_SERVICE ,
+et ne peut lier
+.B aucun port inférieur à 1024.
+Une configuration qui demanderait
+.B \-\-listen [::]:25
+échouerait au démarrage par «\ Permission denied\ ».
+.PP
+Les ports d'usage se ramènent donc sur des ports hauts par une redirection du
+pare\-feu, en
+.BR PREROUTING .
+Le fichier
+.I /usr/share/doc/air-mail-server/nftables-air-mail.conf.exemple
+en donne une table complète. La correspondance d'usage est\ :
+.PP
+.TS
+tab(|) allbox;
+lb lb lb
+l  l  l .
+usage|réel|protocole
+25, 587|2525|SMTP, STARTTLS
+465|4465|SMTP, TLS implicite
+143|1143|IMAP, STARTTLS
+993|9993|IMAP, TLS implicite
+110|1110|POP3, STLS
+995|9995|POP3, TLS implicite
+.TE
+.PP
+.B UNE REDIRECTION EN PREROUTING NE VOIT PAS LA BOUCLE LOCALE.
+Un paquet né sur la machine traverse
+.BR OUTPUT ,
+non
+.BR PREROUTING ,
+et n'est donc pas redirigé : un programme local qui veut déposer du courrier
+doit viser le
+.B port réel
+(2525), et non le port d'usage (25), sous peine de
+.IR "Connection refused" .
+.PP
+.B ET LES PORTS HAUTS DOIVENT ÊTRE OUVERTS DANS LE PARE-FEU.
+La redirection ayant lieu avant le filtrage, la chaîne
+.B INPUT
+voit arriver du 2525 — pas du 25. Autoriser le 25 seul laisse tout passer
+jusqu'à la redirection, où tout est jeté, sans un mot dans le journal du
+serveur.
+.
+.SH LE REGISTRE DURCIT LA RÉCEPTION
+Si la configuration nomme un registre de réception
+.RB ( \-\-registre ),
+un message n'est accepté qu'une fois son constat
+.B scellé et chaîné
+sur le disque. Quand le registre n'est pas écrivable, le serveur répond
+.B 451
+et n'accepte plus rien : c'est voulu, un registre à trous ne prouverait rien.
+.PP
+Depuis la version 0.2.47, le serveur
+.B exige
+le mode
+.B 0700
+sur ce répertoire et
+.B refuse de démarrer
+s'il est accessible aux autres comptes ou s'il ne pourrait pas y écrire. Il ne
+corrige plus le mode en silence, ce qu'il faisait auparavant.
+.
+.SH FICHIERS
+.TP
+.I /var/lib/air-mail/air-mail.conf
+la configuration binaire, par convention. Son emplacement n'est fixé que par
+.B \-\-config
+et par l'unité systemd.
+.TP
+.I /usr/lib/systemd/system/air-mail-server.service
+l'unité livrée : compte
+.BR air-mail ,
+.BR ProtectSystem=strict ,
+appels système filtrés,
+.B ReadWritePaths=/var/lib/air-mail
+et aucune capacité.
+.TP
+.I /var/lib/air-mail
+le répertoire d'état : boîtes, magasins, file d'attente, registre, journal
+d'audit, cache MTA\-STS. Le seul chemin où le service peut écrire.
+.TP
+.I /usr/share/doc/air-mail-server/nftables-air-mail.conf.exemple
+la table de redirection, en exemple. Elle n'est
+.B jamais
+installée d'office.
+.
+.SH DIAGNOSTICS
+Le code de sortie est 0 pour
+.B \-\-help
+et
+.BR \-\-version ,
+et non nul pour tout démarrage refusé. Les refus les plus fréquents, et leur
+cause réelle\ :
+.TP
+.I Permission denied
+sur une écoute : un port sous 1024 — voir
+.B PORTS
+ci\-dessus.
+.TP
+.I "refuse de démarrer"
+sur le registre : mode autre que 0700, ou propriétaire qui n'est pas celui du
+service.
+.TP
+.B 451
+à la réception : le registre n'est pas écrivable.
+.TP
+.I "Connection refused"
+depuis la machine elle\-même : vous visez le port d'usage au lieu du port réel.
+.
+.SH VOIR AUSSI
+.BR air-mail-admin (8),
+.BR systemd.exec (5),
+.BR nft (8).
+.PP
+Le même texte en HTML\ :
+.IR /usr/share/doc/air-mail-server/air-mail-server.8.html .
+.
+.SH LICENCE
+Mozilla Public License 2.0. Le texte est dans
+.IR /usr/share/doc/air-mail-server/copyright .
+.
+.SH AUTEUR
+Thierry Delhaise <thierry.delhaise@gmail.com>

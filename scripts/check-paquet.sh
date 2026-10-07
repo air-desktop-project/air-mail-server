@@ -185,6 +185,39 @@ for binaire in air-mail-server air-mail-admin; do
 done
 conclure "les deux binaires répondent à \`--version\`"
 
+titre "8ter. les pages de manuel sont là, et portent LA version du paquet"
+commencer
+# **UNE PAGE DE MANUEL QUI ANNONCE UNE AUTRE VERSION EST UN INVENTAIRE PÉRIMÉ.**
+# `paquet.sh` réécrit le `.TH` et la ligne de version du HTML ; si le `.TH`
+# change de forme, le `sed` ne trouve rien, sort 0, et la page partirait avec la
+# version du jour où elle a été écrite. `paquet.sh` le vérifie déjà de son côté
+# — ici on le vérifie sur le PAQUET, qui est ce que l'utilisateur reçoit.
+version=$(dpkg-deb -f "$deb" Version)
+[ -n "$version" ] || rate "le paquet ne déclare pas de \`Version\`"
+for page in air-mail-server air-mail-admin; do
+    roff="$essai/deballe/usr/share/man/man8/$page.8"
+    html="$essai/deballe/usr/share/doc/air-mail-server/$page.8.html"
+    if [ ! -f "$roff" ]; then
+        rate "\`usr/share/man/man8/$page.8\` manque du paquet"
+    elif ! grep -q "air-mail-server $version" "$roff"; then
+        rate "\`$page.8\` n'annonce pas la version \`$version\` dans son \`.TH\`"
+    fi
+    if [ ! -f "$html" ]; then
+        rate "\`usr/share/doc/air-mail-server/$page.8.html\` manque du paquet"
+    elif ! grep -q "air-mail-server $version" "$html"; then
+        rate "\`$page.8.html\` n'annonce pas la version \`$version\`"
+    fi
+done
+# Et le renvoi croisé : chaque page nomme l'autre, sans quoi personne ne trouve
+# la seconde depuis la première.
+for page in air-mail-server:air-mail-admin air-mail-admin:air-mail-server; do
+    de="${page%%:*}"; vers="${page##*:}"
+    roff="$essai/deballe/usr/share/man/man8/$de.8"
+    [ -f "$roff" ] && { grep -q "$vers" "$roff" || \
+        rate "\`$de.8\` ne renvoie pas à \`$vers(8)\`"; }
+done
+conclure "deux pages de manuel, deux pages HTML, à la version du paquet et se renvoyant l'une à l'autre"
+
 titre "8bis. le binaire EMPAQUETÉ connaît les options de la SOURCE"
 commencer
 # **CE QUI COMPTE N'EST PAS QU'IL SOIT IDENTIQUE À `target/release`** — il l'est

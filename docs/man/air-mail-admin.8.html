@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>air-mail-admin(8) — manuel</title>
+<style>
+/* Tout est en ligne : cette page se lit depuis un disque, sans réseau. */
+:root {
+  --encre: #1a1a1a; --fond: #fdfdfc; --tenu: #595959;
+  --filet: #d8d5cf; --code-fond: #f3f1ec; --accent: #7a3b2e;
+  --alerte-fond: #fcf4f2; --alerte-bord: #c0705e;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --encre: #e8e6e1; --fond: #1b1c1e; --tenu: #a8a4a0;
+    --filet: #3a3b3e; --code-fond: #26272a; --accent: #e0a08c;
+    --alerte-fond: #2a211f; --alerte-bord: #a2594a;
+  }
+}
+:root[data-theme="dark"] {
+  --encre: #e8e6e1; --fond: #1b1c1e; --tenu: #a8a4a0;
+  --filet: #3a3b3e; --code-fond: #26272a; --accent: #e0a08c;
+  --alerte-fond: #2a211f; --alerte-bord: #a2594a;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; padding: 2.5rem 16px 5rem; background: var(--fond); color: var(--encre);
+  font: 16px/1.65 "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+}
+.page { max-width: 46rem; margin: 0 auto; }
+.bandeau {
+  display: flex; justify-content: space-between; gap: 1rem; flex-wrap: wrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: .8rem; color: var(--tenu); letter-spacing: .06em;
+  text-transform: uppercase; border-bottom: 1px solid var(--filet);
+  padding-bottom: .6rem; margin-bottom: 2rem;
+}
+h1 {
+  font-size: 1.9rem; line-height: 1.2; margin: 0 0 .3rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  letter-spacing: -.01em;
+}
+.resume { color: var(--tenu); font-size: 1.05rem; margin: 0 0 2.5rem; }
+h2 {
+  font-size: .82rem; text-transform: uppercase; letter-spacing: .13em;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--accent); margin: 3rem 0 .9rem; padding-bottom: .35rem;
+  border-bottom: 1px solid var(--filet);
+}
+h3 {
+  font-size: 1.05rem; margin: 2rem 0 .6rem; font-weight: 600;
+}
+p { margin: 0 0 1rem; }
+code, kbd, pre {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: .88em;
+}
+code { background: var(--code-fond); padding: .1em .35em; border-radius: 3px; }
+pre {
+  background: var(--code-fond); padding: 1rem 1.1rem; border-radius: 5px;
+  overflow-x: auto; line-height: 1.5; margin: 0 0 1.4rem;
+  border-left: 3px solid var(--filet);
+}
+pre code { background: none; padding: 0; }
+dl { margin: 0 0 1.4rem; }
+dt {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: .9rem; font-weight: 600; margin: 1.3rem 0 .35rem;
+  color: var(--encre); word-break: break-word;
+}
+dd { margin: 0 0 0 1.6rem; }
+dd > p:last-child { margin-bottom: 0; }
+strong { font-weight: 600; }
+.cri {
+  background: var(--alerte-fond); border-left: 3px solid var(--alerte-bord);
+  padding: .9rem 1.1rem; margin: 0 0 1.4rem; border-radius: 0 4px 4px 0;
+}
+.cri > :last-child { margin-bottom: 0; }
+.cri strong { color: var(--alerte-bord); }
+table { border-collapse: collapse; width: 100%; margin: 0 0 1.5rem; font-size: .92rem; }
+th, td { text-align: left; padding: .5rem .7rem; border-bottom: 1px solid var(--filet); }
+th {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: .76rem; text-transform: uppercase; letter-spacing: .08em;
+  color: var(--tenu); border-bottom-width: 2px;
+}
+td code { font-size: .85em; }
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+.pied {
+  margin-top: 4rem; padding-top: 1rem; border-top: 1px solid var(--filet);
+  font-size: .85rem; color: var(--tenu);
+}
+ul { margin: 0 0 1.2rem; padding-left: 1.3rem; }
+li { margin-bottom: .3rem; }
+</style>
+</head>
+<body>
+<div class="page">
+<div class="bandeau"><span>air-mail-admin(8)</span><span>Administration système</span><span>air-mail-server 0.2.52</span></div>
+<h1>air-mail-admin</h1>
+<p class="resume">contrôle et configuration d'air-mail-server</p>
+
+<h2>Synopsis</h2>
+<pre><code>air-mail-admin &lt;COMMANDE&gt; [ARGUMENTS]
+air-mail-admin [--help | --version]</code></pre>
+
+<h2>Description</h2>
+<p><code>air-mail-admin</code> est la <strong>seule</strong> porte d'entrée de la
+configuration d'air-mail-server, et le seul moyen d'inspecter ses magasins. Le
+serveur lui-même n'a aucune option de réglage.</p>
+<p>Toutes les commandes agissent sur des <strong>fichiers nommés en
+argument</strong> : il n'y a ni chemin par défaut, ni fichier découvert, ni
+service à joindre. Une commande qui ne nomme pas de fichier ne touche à rien.</p>
+
+<h3>Trois règles qui valent pour tout</h3>
+<div class="cri">
+<p><strong>1. Un secret ne passe jamais par la ligne de commande.</strong>
+<code>account add</code>, <code>account passwd</code> et toute pose de secret
+lisent le mot de passe sur <strong>l'entrée standard</strong>. Ce que
+<code>ps(1)</code> affiche, tout le monde le lit.</p>
+</div>
+<div class="cri">
+<p><strong>2. Lancez ces commandes sous le compte du service.</strong> Plusieurs
+commandes <strong>créent</strong> le fichier qu'elles nomment — un magasin, une
+clé — et le créent au nom de qui les lance. Créé par <code>root</code>, un
+magasin naît <code>root:root 0600</code> et le serveur, qui tourne en
+<code>air-mail</code>, <strong>ne peut plus le lire</strong>. Il ne le dit pas :
+il répond <code>535 Authentication credentials invalid</code> à chaque secret de
+ce magasin, exactement comme si le secret était faux, tandis que les autres
+continuent de marcher.</p>
+<pre><code>sudo -u air-mail air-mail-admin ...</code></pre>
+<p>et, pour s'en assurer, <code>stat -c '%U:%G'</code> sur le magasin.</p>
+</div>
+<p><strong>3. La lecture ne modifie rien.</strong> <code>config show</code>,
+<code>account list</code>, <code>app-password list</code>,
+<code>device list</code>, <code>audit</code>, <code>registre verifie</code>,
+<code>registre cherche</code> et <code>summary</code> sont en lecture seule, sans
+danger sur une machine en service.</p>
+
+<h2>Commandes</h2>
+
+<h3>Configuration</h3>
+<dl>
+<dt>config write &lt;fichier&gt; [OPTIONS]</dt>
+<dd>
+<p>écrit une configuration binaire. C'est le seul moyen d'en produire une : le
+format n'est pas éditable à la main, et c'est délibéré.</p>
+<div class="cri">
+<p><strong>Cette commande remplace le fichier entier.</strong> Une option absente
+de la ligne de commande est <strong>absente de la configuration écrite</strong> —
+donc effacée. Voir <a href="#reecrire">Réécrire une configuration vivante</a>,
+qui n'est pas un conseil de prudence mais la seule procédure sûre.</p>
+</div>
+<p><code>config write --help</code> liste les 89 options et dit, pour chaque
+seuil, où zéro veut dire « jamais » et où il veut dire « tout de suite ».</p>
+</dd>
+<dt>config show &lt;fichier&gt;</dt>
+<dd><p>relit une configuration et l'affiche, y compris <strong>ce qu'elle ne
+porte pas</strong> : « AUCUN MAGASIN », « NON SERVI », « aucune ». C'est la seule
+source de vérité sur ce qu'une machine porte.
+<strong>Le mot de passe du relais n'est pas affiché</strong>, et le secret de
+scellement non plus.</p></dd>
+</dl>
+
+<h3>Comptes</h3>
+<dl>
+<dt>account add &lt;fichier&gt; --login &lt;nom&gt; [--address &lt;adresse&gt;]...</dt>
+<dd><p>ajoute ou <strong>remplace</strong> un compte. Le mot de passe se lit sur
+l'entrée standard. <code>--address</code> est répétable et donne les adresses qui
+arrivent dans cette boîte ; sans aucune, le compte se connecte mais ne reçoit
+rien.</p>
+<p>Le nom du compte est aussi le nom de sa boîte : ni vide, ni <code>.</code>, ni
+<code>..</code>, sans <code>/</code>, sans point en tête.</p></dd>
+<dt>account passwd &lt;fichier&gt; --login &lt;nom&gt;</dt>
+<dd><p>change le seul mot de passe d'un compte existant, le secret venant de
+l'entrée standard.</p>
+<div class="cri">
+<p><strong>À préférer à <code>account add</code> pour ce seul usage.</strong>
+<code>add</code> remplace le compte entier : sans ses <code>--address</code>, il
+<strong>efface les adresses</strong> — le compte s'authentifie encore et ne reçoit
+plus rien, sans que rien ne le dise. Et <code>passwd</code> refuse un compte
+inconnu sans toucher au magasin, là où une faute de frappe ferait créer par
+<code>add</code> un compte fantôme portant le secret qu'on croyait poser
+ailleurs.</p>
+</div></dd>
+<dt>account list &lt;fichier&gt;</dt>
+<dd><p>liste les noms de comptes. Jamais les empreintes.</p>
+<p><strong>C'est lui qui tranche sur un login.</strong> Un login n'est pas une
+adresse, et deux serveurs ne nomment pas forcément le même compte de la même
+façon : la même personne peut être <code>thierry.delhaise</code> ici et
+<code>thierry</code> là. Lisez cette commande avant d'écrire un login dans une
+autre.</p></dd>
+<dt>account remove &lt;fichier&gt; --login &lt;nom&gt; [--app-passwords &lt;applicatifs&gt;] [--delegations &lt;délégations&gt;]</dt>
+<dd><p>retire un compte — et, si l'on nomme leur magasin, ses mots de passe
+applicatifs et ses délégations. Sans cela, un compte recréé sous le même nom en
+<strong>hériterait</strong>.</p></dd>
+</dl>
+
+<h3>SCRAM</h3>
+<dl>
+<dt>account add|passwd ... --scram-key &lt;clé&gt; --scram &lt;fichier&gt;</dt>
+<dd><p>pose aussi un vérificateur SCRAM, dans un magasin séparé et scellé. Les
+deux options vont ensemble ou aucune : sans elles, SCRAM n'existe pas, ni annoncé
+ni stocké. <strong>Le vérificateur ne se dérive que du mot de passe en
+clair</strong> : un compte créé sans ces options n'en aura jamais tant que son
+mot de passe n'aura pas été reposé.</p></dd>
+<dt>scram init &lt;clé&gt;</dt>
+<dd><p>tire la clé de scellement du magasin SCRAM : trente-deux octets du noyau,
+en <code>0600</code>. <strong>Rangez-la ailleurs que le magasin</strong> — c'est
+toute la raison d'être des deux fichiers. Refuse d'écraser une clé existante, une
+clé perdue rendant tous les vérificateurs illisibles.</p></dd>
+<dt>scram bind &lt;comptes&gt; --scram-key &lt;clé&gt; --scram &lt;fichier&gt;</dt>
+<dd><p>lie à l'empreinte actuelle de leur compte les vérificateurs écrits avant
+la 0.2.16, qui sans cela ne s'ouvrent plus. À lancer <strong>une fois</strong>
+après la mise à jour.</p>
+<div class="cri">
+<p><strong>N'employez cette commande que si aucun mot de passe n'a été changé par
+l'API</strong> depuis la dernière dérivation : lier le vérificateur d'un ancien
+mot de passe le rouvrirait. En cas de doute,
+<code>account passwd --scram</code> redérive.</p>
+</div></dd>
+</dl>
+
+<h3>Mots de passe applicatifs</h3>
+<dl>
+<dt>app-password add &lt;applicatifs&gt; --accounts &lt;comptes&gt; --login &lt;nom&gt; --name &lt;nom&gt;</dt>
+<dd><p>crée un mot de passe applicatif : un secret par client de messagerie,
+révocable seul. Il ouvre IMAP, SMTP et POP3 en <code>PLAIN</code>,
+<strong>jamais</strong> l'API REST ni SCRAM.</p>
+<p><strong>Le secret est écrit une seule fois</strong> sur la sortie standard, et
+n'est rangé que sous forme de condensat : copiez-le. Et lancez cette commande
+<code>sudo -u air-mail</code> : elle crée le magasin s'il n'existe pas — voir les
+trois règles, plus haut.</p></dd>
+<dt>app-password list &lt;applicatifs&gt; [--login &lt;nom&gt;]</dt>
+<dd><p>liste identifiants, noms et dates. Jamais un secret.</p></dd>
+<dt>app-password remove &lt;applicatifs&gt; --login &lt;nom&gt; --id &lt;identifiant&gt;</dt>
+<dd><p>révoque un mot de passe applicatif, sur-le-champ.</p></dd>
+</dl>
+
+<h3>Jetons et clefs</h3>
+<dl>
+<dt>token &lt;config&gt; --login &lt;nom&gt; [--minutes &lt;n&gt;]</dt>
+<dd><p>frappe un jeton d'<strong>administration</strong> et l'écrit sur la sortie
+standard. Il se scelle avec le secret que la configuration porte : donc depuis la
+machine du serveur, et par qui peut lire ce fichier.</p>
+<p><strong>Aucun mot de passe n'ouvre l'administration.</strong> C'est ce qui fait
+qu'un compte compromis ne devient jamais le serveur entier, et c'est pourquoi ce
+jeton se frappe ici. <code>--minutes</code> vaut 15 par défaut, et douze heures au
+plus.</p></dd>
+<dt>vapid &lt;chemin&gt;</dt>
+<dd><p>la clef VAPID de Web Push (RFC 8292) : <strong>créée</strong> si le fichier
+n'existe pas — trente-deux octets du noyau, en <code>0600</code> —, et
+<strong>jamais remplacée</strong> s'il existe. Écrit sa moitié publique en
+base64url, ce que les applications donnent au navigateur pour s'abonner. La
+remplacer désabonnerait tous les navigateurs.</p></dd>
+</dl>
+
+<h3>Appareils</h3>
+<dl>
+<dt>device list &lt;magasin&gt; [--login &lt;nom&gt;]</dt>
+<dd><p>les appareils enrôlés : identifiant, nom, enrôlement, dernière session,
+attestation, abonnement.</p></dd>
+<dt>device revoke &lt;magasin&gt; --login &lt;nom&gt; (--id &lt;id&gt; | --all)</dt>
+<dd><p>révoque un appareil, ou tous ceux d'un compte — la voie de secours quand
+son titulaire les a perdus, une invitation ne valant que pour un compte sans
+appareil. Ses sessions cessent de valoir à la requête suivante.</p></dd>
+</dl>
+
+<h3>Inspection</h3>
+<dl>
+<dt>audit &lt;config&gt; --login &lt;nom&gt; [--limit &lt;n&gt;]</dt>
+<dd><p>le journal d'audit du compte : sessions, refus, appareils, secrets,
+délégations, abonnements. Une ligne JSON par entrée, <strong>la plus récente
+d'abord</strong>, 50 par défaut. En lecture seule, depuis la machine du
+serveur.</p></dd>
+<dt>registre verifie &lt;config&gt;</dt>
+<dd><p>vérifie le registre de réception : chaque fichier entier, son sceau juste,
+et chacun chaîné au précédent. Une faute rend un <strong>code de sortie
+1</strong>.</p></dd>
+<dt>registre cherche &lt;config&gt; [--ip &lt;adresse&gt;] [--domaine &lt;d&gt;] [--message-id &lt;id&gt;] [--session &lt;hex&gt;] [--depuis AAAA-MM-JJ] [--jusqu-a AAAA-MM-JJ] [--limit &lt;n&gt;]</dt>
+<dd><p>les enregistrements qui correspondent, une ligne JSON chacun, dans l'ordre
+du temps — les <em>n</em> derniers, 100 par défaut. <code>--domaine</code> cherche
+dans le HELO, le PTR, le MAIL FROM, le From et les domaines SPF, DKIM et DMARC. En
+lecture seule.</p></dd>
+<dt>summary &lt;maildir&gt;</dt>
+<dd><p>relit une boîte et rend ce que ses noms de fichiers portent : messages
+numérotés, messages à adopter, noms illisibles, et la réserve d'UID de l'index. En
+lecture seule — elle n'adopte rien et ne réécrit pas l'index, donc sans danger sur
+une boîte que le serveur tient ouverte.</p></dd>
+</dl>
+
+<h2>Options de « config write »</h2>
+<p>Elles sont au nombre de 89, et <code>air-mail-admin config write --help</code>
+en est la référence exhaustive. Les recopier ici les ferait vieillir. Par
+famille :</p>
+<dl>
+<dt>Identité et boîtes</dt>
+<dd><p><code>--domain</code>, <code>--hosted</code> (répétable),
+<code>--maildir</code>, <code>--accounts</code>, <code>--drafts</code>.</p></dd>
+<dt>Écoutes</dt>
+<dd><p><code>--listen</code>, <code>--listen-smtps</code>,
+<code>--listen-imap</code>, <code>--listen-imaps</code>,
+<code>--listen-pop3</code>, <code>--listen-pop3s</code>,
+<code>--listen-http</code>, <code>--listen-h3</code>.</p>
+<p><strong>Toutes en <code>[::]:port</code></strong> : <code>0.0.0.0</code> est
+pris au mot depuis la 0.2.45 et ne sert que l'IPv4, ce qui ne se voit pas tant
+qu'on n'essaie pas en IPv6.</p></dd>
+<dt>TLS et DKIM</dt>
+<dd><p><code>--tls-cert</code>, <code>--tls-key</code>,
+<code>--dkim-selector</code>, <code>--dkim-key</code>.</p>
+<p><strong>Le type de clé DKIM se décide avec la zone</strong> : une clé Ed25519
+sous un enregistrement <code>k=rsa</code> échoue en silence.</p></dd>
+<dt>Magasins</dt>
+<dd><p><code>--scram</code>, <code>--scram-key</code>, <code>--devices</code>,
+<code>--app-passwords</code>, <code>--delegations</code>.</p></dd>
+<dt>Traces</dt>
+<dd><p><code>--registre</code>, <code>--audit</code>.</p>
+<p><strong>Sans registre écrivable, la réception refuse par 451</strong> — ce
+n'est pas une option de confort.</p></dd>
+<dt>Exigences sur l'enveloppe</dt>
+<dd><p><code>--require-fqdn-helo</code>, <code>--require-fqdn-sender</code>,
+<code>--require-fqdn-recipient</code>, <code>--require-sender-domain</code>.</p></dd>
+<dt>Émission</dt>
+<dd><p><code>--relay</code>, <code>--queue-spool</code>,
+<code>--relayhost</code>, <code>--relayhost-user</code>,
+<code>--relayhost-implicit-tls</code>, et les quatre
+<code>--queue-*-seconds</code>.</p>
+<p>Éteinte par défaut : ce serveur reçoit, il n'émet pas. Le mot de passe du
+relais se lit sur <strong>l'entrée standard</strong>.</p></dd>
+<dt>SPF, DMARC, MTA-STS, TLSRPT</dt>
+<dd><p><code>--spf</code>, <code>--dmarc</code>, <code>--resolver</code>,
+<code>--public-suffix-list</code>, <code>--dmarc-quarantine-folder</code>,
+<code>--dmarc-report-dir</code>, <code>--dmarc-send</code>,
+<code>--mta-sts-anchors</code>, <code>--mta-sts-cache</code>,
+<code>--tlsrpt-dir</code>, <code>--tlsrpt-send</code>.</p></dd>
+<dt>Garde et débit</dt>
+<dd><p><code>--connections-per-minute</code>,
+<code>--commands-per-minute</code>, <code>--invalid-frames-per-minute</code>,
+<code>--refused-recipients-per-minute</code>, <code>--ban-seconds</code>,
+<code>--tracked-sources</code>, <code>--ipv4-prefix-bits</code>,
+<code>--ipv6-prefix-bits</code>, <code>--api-requests-burst</code>,
+<code>--api-requests-per-second</code>.</p></dd>
+<dt>Réveil des appareils</dt>
+<dd><p><code>--push-vapid-key</code>, <code>--push-contact</code>, les
+<code>--apns-*</code>, <code>--fcm-service-account</code>, et les attestations
+<code>--android-*</code> et <code>--apple-*</code>.</p></dd>
+<dt>Divers</dt>
+<dd><p><code>--about</code>, <code>--max-message</code>,
+<code>--max-connections</code>, <code>--command-timeout-seconds</code>,
+<code>--data-timeout-seconds</code>, <code>--quic-idle-seconds</code>,
+<code>--rotate-token-key</code>.</p></dd>
+</dl>
+
+<h2 id="reecrire">Réécrire une configuration vivante</h2>
+<p><code>config write</code> remplace le fichier entier, et deux choses qu'il
+porte <strong>ne se voient pas</strong> dans un <code>config show</code>. Les
+ignorer casse la production en silence.</p>
+<div class="cri">
+<p><strong>1. Le mot de passe du relais n'est pas affiché.</strong> Une
+configuration réécrite avec un secret vide donne un <code>diff(1)</code>
+parfaitement propre — et l'émission cesse.</p>
+</div>
+<div class="cri">
+<p><strong>2. Le secret de scellement est tiré à neuf sur un fichier
+neuf.</strong> Tous les jetons d'API en cours cesseraient de valoir. Écrite
+<strong>sur une copie du fichier vivant</strong>, la configuration le
+<strong>reprend</strong> — et <code>config write</code> le dit : « secret REPRIS
+du fichier existant ».</p>
+</div>
+<p>La procédure sûre, dans cet ordre :</p>
+<pre><code>config show &lt;vivante&gt;              -&gt; la référence
+cp &lt;vivante&gt; &lt;candidate&gt;           # pour que le sceau soit REPRIS
+config write &lt;candidate&gt; ...       # TOUT le jeu d'options
+config show &lt;candidate&gt; | diff     # ne doit montrer QUE l'ajout
+empreinte du secret de relais      # identique des deux côtés</code></pre>
+<p>puis, seulement alors : bascule, redémarrage, et retour arrière si le service
+ne repart pas.</p>
+<div class="cri">
+<p><strong>Une commande de manuel vieillit sans prévenir.</strong> Le jeu
+d'options d'une machine en service grandit ; une commande recopiée d'une
+documentation ne porte que ce que la documentation savait le jour où elle a été
+écrite. La vérité du jour est <code>config show</code>, et rien d'autre.</p>
+</div>
+
+<h2>Exemples</h2>
+<p>Poser le mot de passe d'un compte, sans qu'il passe par <code>ps(1)</code> :</p>
+<pre><code>printf %s "$SECRET" | sudo -u air-mail \
+    air-mail-admin account passwd /var/lib/air-mail/comptes.bin \
+    --login thierry.delhaise</code></pre>
+<p>Un mot de passe applicatif pour un téléphone :</p>
+<pre><code>sudo -u air-mail air-mail-admin app-password add \
+    /var/lib/air-mail/applicatifs.bin \
+    --accounts /var/lib/air-mail/comptes.bin \
+    --login thierry.delhaise --name "iPhone"</code></pre>
+<p>Ce qu'une machine porte vraiment, et ce qui lui manque :</p>
+<pre><code>sudo -u air-mail air-mail-admin config show \
+    /var/lib/air-mail/air-mail.conf</code></pre>
+<p>Retrouver au registre ce qui est arrivé d'un domaine :</p>
+<pre><code>sudo -u air-mail air-mail-admin registre cherche \
+    /var/lib/air-mail/air-mail.conf --domaine example.net --limit 20</code></pre>
+
+<h2>Diagnostics</h2>
+<p>Code de sortie 0 en cas de succès, non nul sinon.
+<code>registre verifie</code> rend <strong>1</strong> sur un sceau faux ou une
+chaîne rompue.</p>
+<p><code>535 Authentication credentials invalid</code> sur un mot de passe
+applicatif dont vous êtes sûr : vérifiez le propriétaire du magasin — voir les
+trois règles, plus haut.</p>
+
+<h2>Fichiers</h2>
+<p>Aucun chemin n'est implicite : tous sont nommés en argument. Par convention,
+sous <code>/var/lib/air-mail</code> : <code>air-mail.conf</code>,
+<code>comptes.bin</code>, <code>scram.bin</code>, <code>appareils.bin</code>,
+<code>applicatifs.bin</code>, <code>delegations.bin</code>,
+<code>registre/</code>, <code>audit/</code>, <code>brouillons/</code>,
+<code>maildir/</code>, <code>file/</code>.</p>
+
+<h2>Voir aussi</h2>
+<p><a href="air-mail-server.8.html">air-mail-server(8)</a>,
+<code>ps(1)</code>, <code>stat(1)</code>.</p>
+
+<div class="pied">
+<p>Mozilla Public License 2.0 — le texte est dans
+<code>/usr/share/doc/air-mail-server/copyright</code>.<br>
+Thierry Delhaise &lt;thierry.delhaise@gmail.com&gt;</p>
+</div>
+</div>
+</body>
+</html>

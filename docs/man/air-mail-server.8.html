@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>air-mail-server(8) — manuel</title>
+<style>
+/* Tout est en ligne : cette page se lit depuis un disque, sans réseau. */
+:root {
+  --encre: #1a1a1a; --fond: #fdfdfc; --tenu: #595959;
+  --filet: #d8d5cf; --code-fond: #f3f1ec; --accent: #7a3b2e;
+  --alerte-fond: #fcf4f2; --alerte-bord: #c0705e;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --encre: #e8e6e1; --fond: #1b1c1e; --tenu: #a8a4a0;
+    --filet: #3a3b3e; --code-fond: #26272a; --accent: #e0a08c;
+    --alerte-fond: #2a211f; --alerte-bord: #a2594a;
+  }
+}
+:root[data-theme="dark"] {
+  --encre: #e8e6e1; --fond: #1b1c1e; --tenu: #a8a4a0;
+  --filet: #3a3b3e; --code-fond: #26272a; --accent: #e0a08c;
+  --alerte-fond: #2a211f; --alerte-bord: #a2594a;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; padding: 2.5rem 16px 5rem; background: var(--fond); color: var(--encre);
+  font: 16px/1.65 "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+}
+.page { max-width: 46rem; margin: 0 auto; }
+.bandeau {
+  display: flex; justify-content: space-between; gap: 1rem; flex-wrap: wrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: .8rem; color: var(--tenu); letter-spacing: .06em;
+  text-transform: uppercase; border-bottom: 1px solid var(--filet);
+  padding-bottom: .6rem; margin-bottom: 2rem;
+}
+h1 {
+  font-size: 1.9rem; line-height: 1.2; margin: 0 0 .3rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  letter-spacing: -.01em;
+}
+.resume { color: var(--tenu); font-size: 1.05rem; margin: 0 0 2.5rem; }
+h2 {
+  font-size: .82rem; text-transform: uppercase; letter-spacing: .13em;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--accent); margin: 3rem 0 .9rem; padding-bottom: .35rem;
+  border-bottom: 1px solid var(--filet);
+}
+h3 {
+  font-size: 1.05rem; margin: 2rem 0 .6rem; font-weight: 600;
+}
+p { margin: 0 0 1rem; }
+code, kbd, pre {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: .88em;
+}
+code { background: var(--code-fond); padding: .1em .35em; border-radius: 3px; }
+pre {
+  background: var(--code-fond); padding: 1rem 1.1rem; border-radius: 5px;
+  overflow-x: auto; line-height: 1.5; margin: 0 0 1.4rem;
+  border-left: 3px solid var(--filet);
+}
+pre code { background: none; padding: 0; }
+dl { margin: 0 0 1.4rem; }
+dt {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: .9rem; font-weight: 600; margin: 1.3rem 0 .35rem;
+  color: var(--encre); word-break: break-word;
+}
+dd { margin: 0 0 0 1.6rem; }
+dd > p:last-child { margin-bottom: 0; }
+strong { font-weight: 600; }
+.cri {
+  background: var(--alerte-fond); border-left: 3px solid var(--alerte-bord);
+  padding: .9rem 1.1rem; margin: 0 0 1.4rem; border-radius: 0 4px 4px 0;
+}
+.cri > :last-child { margin-bottom: 0; }
+.cri strong { color: var(--alerte-bord); }
+table { border-collapse: collapse; width: 100%; margin: 0 0 1.5rem; font-size: .92rem; }
+th, td { text-align: left; padding: .5rem .7rem; border-bottom: 1px solid var(--filet); }
+th {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: .76rem; text-transform: uppercase; letter-spacing: .08em;
+  color: var(--tenu); border-bottom-width: 2px;
+}
+td code { font-size: .85em; }
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+.pied {
+  margin-top: 4rem; padding-top: 1rem; border-top: 1px solid var(--filet);
+  font-size: .85rem; color: var(--tenu);
+}
+ul { margin: 0 0 1.2rem; padding-left: 1.3rem; }
+li { margin-bottom: .3rem; }
+</style>
+</head>
+<body>
+<div class="page">
+<div class="bandeau"><span>air-mail-server(8)</span><span>Administration système</span><span>air-mail-server 0.2.52</span></div>
+<h1>air-mail-server</h1>
+<p class="resume">serveur de courrier SMTP, POP3, IMAP et HTTP</p>
+
+<h2>Synopsis</h2>
+<pre><code>air-mail-server --config &lt;fichier&gt;
+air-mail-server [--help | --version]</code></pre>
+
+<h2>Description</h2>
+<p><code>air-mail-server</code> reçoit, range et sert du courrier. Il parle SMTP
+(remise et soumission), IMAP, POP3, et une API REST sur HTTP/2 — chacun en clair
+avec <code>STARTTLS</code> ou sous TLS implicite, selon ce que la configuration
+ouvre.</p>
+<p>Il ne lit <strong>aucun</strong> fichier de configuration textuel, ne consulte
+aucune variable d'environnement de réglage et n'accepte aucune autre option que
+celles ci-dessous. Sa configuration est un <strong>fichier binaire</strong>
+produit par <a href="air-mail-admin.8.html">air-mail-admin(8)</a>.</p>
+<p>Deux sources de configuration seraient une de trop : un réglage qui existe à
+deux endroits finit par différer, et c'est toujours au mauvais moment qu'on
+découvre lequel des deux le serveur a cru.</p>
+
+<h2>Options</h2>
+<dl>
+<dt>--config &lt;fichier&gt;</dt>
+<dd><p>la configuration binaire à lire. Obligatoire. Le serveur refuse de
+démarrer si le fichier manque, n'est pas lisible, ou ne se relit pas.</p></dd>
+<dt>--help</dt>
+<dd><p>l'aide intégrée, puis sortie.</p></dd>
+<dt>--version</dt>
+<dd><p>la version, puis sortie.</p></dd>
+</dl>
+
+<h2>Ce qu'il dit au démarrage</h2>
+<p>Le serveur annonce dans son journal ce qu'il sert vraiment : les protocoles
+ouverts, les domaines hébergés, le chiffrement, le nombre de comptes — et,
+surtout, <strong>ce qui manque</strong> : « EN CLAIR », « AUTH non annoncé »,
+« aucun résolveur ».</p>
+<p>Cette liste est relevée à l'exécution, et c'est délibéré : une liste écrite
+dans cette page vieillirait sans que personne ne s'en aperçoive. Pour savoir ce
+que cette machine-ci sert, lisez son journal ou
+<code>air-mail-admin config show</code>, jamais une documentation.</p>
+
+<h2>Ports, et pourquoi ils sont hauts</h2>
+<p>L'unité systemd livrée tourne avec <code>CapabilityBoundingSet=</code> et
+<code>AmbientCapabilities=</code> <strong>vides</strong> : le serveur ne possède
+donc <strong>pas</strong> <code>CAP_NET_BIND_SERVICE</code>, et ne peut lier
+<strong>aucun port inférieur à 1024</strong>. Une configuration qui demanderait
+<code>--listen [::]:25</code> échouerait au démarrage par
+« Permission denied ».</p>
+<p>Les ports d'usage se ramènent donc sur des ports hauts par une redirection du
+pare-feu, en <code>PREROUTING</code>. Le fichier
+<code>/usr/share/doc/air-mail-server/nftables-air-mail.conf.exemple</code> en
+donne une table complète.</p>
+<table>
+<thead><tr><th>Usage</th><th>Réel</th><th>Protocole</th></tr></thead>
+<tbody>
+<tr><td><code>25</code>, <code>587</code></td><td><code>2525</code></td><td>SMTP, STARTTLS</td></tr>
+<tr><td><code>465</code></td><td><code>4465</code></td><td>SMTP, TLS implicite</td></tr>
+<tr><td><code>143</code></td><td><code>1143</code></td><td>IMAP, STARTTLS</td></tr>
+<tr><td><code>993</code></td><td><code>9993</code></td><td>IMAP, TLS implicite</td></tr>
+<tr><td><code>110</code></td><td><code>1110</code></td><td>POP3, STLS</td></tr>
+<tr><td><code>995</code></td><td><code>9995</code></td><td>POP3, TLS implicite</td></tr>
+</tbody>
+</table>
+<div class="cri">
+<p><strong>Une redirection en PREROUTING ne voit pas la boucle locale.</strong>
+Un paquet né sur la machine traverse <code>OUTPUT</code>, non
+<code>PREROUTING</code>, et n'est donc pas redirigé : un programme local qui veut
+déposer du courrier doit viser le <strong>port réel</strong>
+(<code>2525</code>), et non le port d'usage (<code>25</code>), sous peine de
+<em>Connection refused</em>.</p>
+</div>
+<div class="cri">
+<p><strong>Et les ports hauts doivent être ouverts dans le pare-feu.</strong>
+La redirection ayant lieu avant le filtrage, la chaîne <code>INPUT</code> voit
+arriver du <code>2525</code> — pas du <code>25</code>. Autoriser le 25 seul
+laisse tout passer jusqu'à la redirection, où tout est jeté, sans un mot dans le
+journal du serveur.</p>
+</div>
+
+<h2>Le registre durcit la réception</h2>
+<p>Si la configuration nomme un registre de réception
+(<code>--registre</code>), un message n'est accepté qu'une fois son constat
+<strong>scellé et chaîné</strong> sur le disque. Quand le registre n'est pas
+écrivable, le serveur répond <strong>451</strong> et n'accepte plus rien : c'est
+voulu, un registre à trous ne prouverait rien.</p>
+<p>Depuis la version 0.2.47, le serveur <strong>exige</strong> le mode
+<code>0700</code> sur ce répertoire et <strong>refuse de démarrer</strong> s'il
+est accessible aux autres comptes ou s'il ne pourrait pas y écrire. Il ne corrige
+plus le mode en silence, ce qu'il faisait auparavant.</p>
+
+<h2>Fichiers</h2>
+<dl>
+<dt>/var/lib/air-mail/air-mail.conf</dt>
+<dd><p>la configuration binaire, par convention. Son emplacement n'est fixé que
+par <code>--config</code> et par l'unité systemd.</p></dd>
+<dt>/usr/lib/systemd/system/air-mail-server.service</dt>
+<dd><p>l'unité livrée : compte <code>air-mail</code>,
+<code>ProtectSystem=strict</code>, appels système filtrés,
+<code>ReadWritePaths=/var/lib/air-mail</code> et aucune capacité.</p></dd>
+<dt>/var/lib/air-mail</dt>
+<dd><p>le répertoire d'état : boîtes, magasins, file d'attente, registre, journal
+d'audit, cache MTA-STS. Le seul chemin où le service peut écrire.</p></dd>
+<dt>/usr/share/doc/air-mail-server/nftables-air-mail.conf.exemple</dt>
+<dd><p>la table de redirection, en exemple. Elle n'est <strong>jamais</strong>
+installée d'office.</p></dd>
+</dl>
+
+<h2>Diagnostics</h2>
+<p>Le code de sortie est 0 pour <code>--help</code> et <code>--version</code>, et
+non nul pour tout démarrage refusé. Les refus les plus fréquents, et leur cause
+réelle :</p>
+<dl>
+<dt>Permission denied</dt>
+<dd><p>sur une écoute : un port sous 1024 — voir <em>Ports</em> ci-dessus.</p></dd>
+<dt>refuse de démarrer</dt>
+<dd><p>sur le registre : mode autre que <code>0700</code>, ou propriétaire qui
+n'est pas celui du service.</p></dd>
+<dt>451</dt>
+<dd><p>à la réception : le registre n'est pas écrivable.</p></dd>
+<dt>Connection refused</dt>
+<dd><p>depuis la machine elle-même : vous visez le port d'usage au lieu du port
+réel.</p></dd>
+</dl>
+
+<h2>Voir aussi</h2>
+<p><a href="air-mail-admin.8.html">air-mail-admin(8)</a>,
+<code>systemd.exec(5)</code>, <code>nft(8)</code>.</p>
+
+<div class="pied">
+<p>Mozilla Public License 2.0 — le texte est dans
+<code>/usr/share/doc/air-mail-server/copyright</code>.<br>
+Thierry Delhaise &lt;thierry.delhaise@gmail.com&gt;</p>
+</div>
+</div>
+</body>
+</html>

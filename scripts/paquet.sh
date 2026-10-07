@@ -118,6 +118,42 @@ chmod 0644 "$arbre/usr/share/doc/air-mail-server/nftables-air-mail.conf.exemple"
 install -m 0644 "$depot/LICENSE" "$arbre/usr/share/doc/air-mail-server/copyright"
 dit "table d'exemple et licence dans /usr/share/doc"
 
+# ── LES PAGES DE MANUEL, ET LEUR PENDANT HTML ───────────────────────────────
+#
+# **LA VERSION DU `.TH` EST RÉÉCRITE ICI.** Les deux sources portent une version
+# en clair pour qu'un `man ./docs/man/air-mail-admin.8` les rende telles quelles
+# pendant qu'on les écrit ; le paquet, lui, doit toujours annoncer la sienne.
+# Une version recopiée à la main dans une page de manuel est un inventaire
+# périmé de plus, et ce dépôt en a déjà trouvé huit.
+#
+# La date reste celle de la dernière rédaction, et c'est voulu : elle dit quand
+# le TEXTE a été revu, non quand le paquet a été construit. Une page qui se
+# redaterait à chaque construction prétendrait être à jour sans que personne ne
+# l'ait relue.
+install -d -m 0755 "$arbre/usr/share/man/man8"
+for page in air-mail-server air-mail-admin; do
+    [ -f "$depot/docs/man/$page.8" ] || {
+        echo "paquet.sh : \`docs/man/$page.8\` est absent." >&2; exit 1; }
+    sed "s/\"air-mail-server [0-9][0-9.]*\"/\"air-mail-server $version\"/" \
+        "$depot/docs/man/$page.8" > "$arbre/usr/share/man/man8/$page.8"
+    chmod 0644 "$arbre/usr/share/man/man8/$page.8"
+    # Le `.TH` doit porter la version du paquet, sans quoi la substitution a
+    # raté en silence — un `sed` qui ne trouve rien sort 0.
+    grep -q "air-mail-server $version" "$arbre/usr/share/man/man8/$page.8" || {
+        echo "paquet.sh : la version n'a pas été posée dans \`$page.8\`." >&2
+        echo "            Le \`.TH\` a changé de forme." >&2; exit 1; }
+
+    [ -f "$depot/docs/man/$page.8.html" ] || {
+        echo "paquet.sh : \`docs/man/$page.8.html\` est absent." >&2; exit 1; }
+    sed "s/air-mail-server [0-9][0-9.]*</air-mail-server $version</" \
+        "$depot/docs/man/$page.8.html" \
+        > "$arbre/usr/share/doc/air-mail-server/$page.8.html"
+    chmod 0644 "$arbre/usr/share/doc/air-mail-server/$page.8.html"
+done
+# **AUCUNE COMPRESSION.** `man` lit le texte nu, et un fichier lisible dans
+# l'arbre installé se relit sans outil le jour où quelque chose ne va pas.
+dit "deux pages de manuel en man8, deux pages HTML dans /usr/share/doc"
+
 # Le maildir se crée au premier courrier, pas à l'installation : l'expédier vide
 # ferait croire que le paquet décide de son emplacement, alors que c'est la
 # configuration qui le dit.
