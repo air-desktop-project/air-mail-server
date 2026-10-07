@@ -84,6 +84,27 @@ Les registres sont **jeunes** — posés les 2026-10-06 et 07 —, le relevé ne
 donc rien encore. L'unique message portant ARC est, dans les deux cas, celui
 envoyé depuis Gmail pour éprouver la chaîne d'en-têtes.
 
+### Comment relever la mesure
+
+Depuis le Mac, dans ce dépôt. Le script lit l'entrée standard, les registres
+vivent sur les serveurs :
+
+```sh
+# narro.ch
+ssh onyx 'sudo air-mail-admin registre cherche \
+  /var/lib/air-mail/air-mail.conf --limit 100000' \
+  | python3 docs/arc/mesure-arc.py
+
+# air-desktop.org
+ssh -i ~/.ssh/id_ed25519_thierry_at_mbp-16i9 root@51.254.212.176 \
+  'sudo -u air-mail air-mail-admin registre cherche \
+   /var/lib/air-mail/air-mail.conf --limit 100000' \
+  | python3 docs/arc/mesure-arc.py
+```
+
+**EN LECTURE SEULE** : `registre cherche` ne touche à rien, et le script ne fait
+que compter.
+
 ### LA PORTE DE DÉCISION
 
 **À relire dans un mois.** La colonne qui décide est `ARC + échec DMARC` : c'est
