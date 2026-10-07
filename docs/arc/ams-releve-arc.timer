@@ -1,0 +1,12 @@
+[Unit]
+Description=Releve mensuel de la mesure ARC
+
+[Timer]
+# Le 7 de chaque mois a 08:00 UTC. `Persistent` rattrape un tir manque
+# pendant que la machine etait arretee.
+OnCalendar=*-*-07 08:00:00
+Persistent=true
+RandomizedDelaySec=900
+
+[Install]
+WantedBy=timers.target

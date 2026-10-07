@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+"""Relève mensuel de la mesure ARC, remis dans une boîte locale.
+
+# POURQUOI IL S'AUTHENTIFIE
+
+La première version déposait sans s'authentifier, sur la boucle locale. Le
+message prétendait venir du domaine du serveur en partant de `127.0.0.1`, qui
+n'est pas dans son SPF : `spf=fail`, donc `dmarc=fail`, et sur narro.ch dont la
+politique est `p=quarantine`, **le relevé est parti au Junk**. La quarantaine
+posée le même jour a fait exactement son travail.
+
+On soumet donc en s'authentifiant, par un MOT DE PASSE APPLICATIF — révocable
+seul, et qui n'ouvre ni l'API REST ni SCRAM. Une soumission authentifiée est
+exemptée de ces contrôles et se fait signer en DKIM.
+
+Usage : ams-releve-arc <config> <domaine> <destinataire> <login> <fichier-secret>
+"""
+import json, smtplib, socket, ssl, subprocess, sys, time
+
+if len(sys.argv) != 6:
+    sys.exit("usage : ams-releve-arc <config> <domaine> <destinataire> "
+             "<login> <fichier-secret>")
+conf, domaine, dest, login, chemin_secret = sys.argv[1:6]
+with open(chemin_secret, encoding="utf-8") as f:
+    secret = f.read().strip()
+if not secret:
+    sys.exit(f"le secret de `{chemin_secret}` est vide")
+hote = f"mail.{domaine}"
+# L'expediteur doit etre une ADRESSE DU COMPTE authentifie : un compte
+# n'ecrit qu'en son nom, et le serveur le verifie.
+de = dest
+
+brut = subprocess.run(
+    ["air-mail-admin", "registre", "cherche", conf, "--limit", "100000"],
+    capture_output=True, text=True)
+
+tr = {"total": 0, "arc": 0, "fail": 0, "arc_et_fail": 0}
+pol, doms = {}, {}
+for ligne in brut.stdout.splitlines():
+    if not ligne.startswith("{"):
+        continue
+    try:
+        e = json.loads(ligne)
+    except Exception:
+        continue
+    if e.get("type") != "transaction":
+        continue
+    tr["total"] += 1
+    a = bool(e.get("entetes", {}).get("arc"))
+    d = e.get("dmarc") or {}
+    echec = d.get("resultat") not in ("pass", None, "")
+    if a:
+        tr["arc"] += 1
+    if echec:
+        tr["fail"] += 1
+        pol[d.get("politique", "?")] = pol.get(d.get("politique", "?"), 0) + 1
+        doms[d.get("domaine", "?")] = doms.get(d.get("domaine", "?"), 0) + 1
+    if a and echec:
+        tr["arc_et_fail"] += 1
+
+verdict = ("NE PAS CONSTRUIRE : aucun courrier qu'ARC sauverait."
+           if tr["arc_et_fail"] == 0 else
+           f"A RECONSIDERER : {tr['arc_et_fail']} message(s) qu'ARC sauverait.")
+
+corps = f"""Releve mensuel de la mesure ARC sur {hote}.
+
+  messages consignes       : {tr['total']}
+  portant des en-tetes ARC : {tr['arc']}
+  en echec DMARC           : {tr['fail']}
+  ARC *et* echec DMARC     : {tr['arc_et_fail']}   <- LA COLONNE QUI DECIDE
+
+Verdict : {verdict}
+
+La colonne qui decide est la derniere : c'est le courrier legitime
+qu'ARC permettrait de rattraper, et rien d'autre. Proche de zero, le
+chantier ams-arc n'achete rien.
+
+Le vrai declencheur n'est pas ARC : c'est le passage de DMARC en
+`enforce`. En `observe`, aucun courrier legitime n'est perdu.
+
+Politiques vues en echec : {pol or 'aucune'}
+Domaines en echec        : {dict(list(doms.items())[:8]) or 'aucun'}
+
+Feuille de route : docs/arc/feuille-de-route.md du depot air-mail-server.
+Releve pose par le minuteur systemd `ams-releve-arc.timer`.
+"""
+if brut.returncode != 0:
+    corps += f"\nATTENTION — `registre cherche` a rendu {brut.returncode} :\n{brut.stderr[:500]}\n"
+
+jeton = f"releve-arc-{time.strftime('%Y%m%d', time.gmtime())}"
+message = (
+    f"From: Releve ARC <{de}>\r\n"
+    f"To: <{dest}>\r\n"
+    f"Subject: [ARC] releve mensuel - {tr['arc_et_fail']} message(s) a rattraper\r\n"
+    f"Date: {time.strftime('%a, %d %b %Y %H:%M:%S +0000', time.gmtime())}\r\n"
+    f"Message-ID: <{jeton}@{domaine}>\r\n"
+    f"MIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n"
+    f"X-Ams-Voie: RELEVE-LOCAL\r\n\r\n" + corps
+)
+
+# **TOUT EN CRLF.** Les en-tetes en portaient, le corps venait d'une chaine
+# Python et avait des fins de ligne NUES : le serveur a refuse par
+# `554 5.6.0 Bare CR or LF in message data`, et il a raison — RFC 5321 §2.3.8
+# n'admet le CR et le LF que par paires. On normalise l'ensemble.
+message = message.replace("\r\n", "\n").replace("\n", "\r\n")
+
+# **LE PORT 2525, ET NON LE 25.** La redirection `nftables` du 25 vit dans le
+# hook `prerouting`, qui ne voit QUE ce qui arrive du dehors : un paquet ne sur
+# cette machine passe par `output` et n'est pas redirige. Depuis la boucle
+# locale, il faut donc viser le port d'ecoute reel.
+socket.setdefaulttimeout(30)
+s = smtplib.SMTP("127.0.0.1", 2525, timeout=30)
+# Le nom annonce est PLEINEMENT QUALIFIE : narro.ch exige `--require-fqdn-helo`.
+s.ehlo(hote)
+if s.has_extn("starttls"):
+    # Le certificat porte `mail.<domaine>`, on se connecte en 127.0.0.1 : la
+    # verification ne peut pas aboutir, et sur la boucle locale elle n'apporte
+    # rien. On chiffre quand meme.
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    s.starttls(context=ctx)
+    s.ehlo(hote)
+# **ON S'AUTHENTIFIE** : sans cela le relevé finit en quarantaine, voir l'entête.
+s.login(login, secret)
+s.sendmail(de, [dest], message.encode("utf-8"))
+s.quit()
+print(f"releve remis a {dest} : total={tr['total']} arc={tr['arc']} "
+      f"fail={tr['fail']} arc_et_fail={tr['arc_et_fail']}")

@@ -105,6 +105,67 @@ ssh -i ~/.ssh/id_ed25519_thierry_at_mbp-16i9 root@51.254.212.176 \
 **EN LECTURE SEULE** : `registre cherche` ne touche à rien, et le script ne fait
 que compter.
 
+### Le relevé part tout seul — un timer sur chaque serveur
+
+Les deux serveurs portent `ams-releve-arc.timer`, posé le 2026-10-07 :
+`OnCalendar=*-*-07 08:00:00`, `Persistent=true` — un relevé le 7 de chaque
+mois, rattrapé si la machine dormait. Il lance `/usr/local/bin/ams-releve-arc`,
+qui compte le registre et **remet le compte rendu dans la boîte locale** de
+`thierry.delhaise`. Le premier arrive donc le 2026-11-07, sans rien à faire.
+
+Le service est en `oneshot`, `ProtectSystem=strict`, `ProtectHome=yes`, et ne
+voit du système que `/var/lib/air-mail` et son secret, **en lecture seule**.
+
+Les trois fichiers sont ici, à côté de ce document : `ams-releve-arc`,
+`ams-releve-arc.service` et `ams-releve-arc.timer`. **La copie versée est celle
+d'onyx** : son `ExecStart` porte les arguments de narro.ch — configuration,
+domaine, adresse de destination, compte, fichier du secret —, et sur un autre
+serveur ce sont ces cinq arguments qu'il faut changer, rien d'autre. Le secret
+n'est jamais dans l'unité : seulement son chemin.
+
+Quatre choses ont dû être apprises en le posant, et elles valent pour tout
+programme local qui veut déposer du courrier sur ces machines :
+
+| Ce qui cassait | Pourquoi | Ce qu'il faut faire |
+|---|---|---|
+| `Connection refused` sur le 25 | la redirection `nftables` vit dans `prerouting`, qui ne voit QUE ce qui vient du dehors ; un paquet né sur la machine passe par `output` | viser le port d'écoute réel, **2525** |
+| `554 5.6.0 Bare CR or LF in message data` | les en-têtes portaient des CRLF, le corps venait d'une chaîne Python et avait des fins de ligne nues | normaliser **tout** le message en CRLF (RFC 5321 §2.3.8) |
+| `FileNotFoundError` sur le secret | `ProtectHome=yes` cache `/root` au service | le secret va dans `/etc/air-mail/`, pas dans `/root` |
+| `535 Authentication credentials invalid` | voir ci-dessous — et c'est le piège qui coûte le plus cher |
+
+### LE PIÈGE DU MAGASIN DE MOTS DE PASSE APPLICATIFS
+
+`air-mail-admin app-password add` **crée le magasin s'il n'existe pas**, et le
+crée au nom de qui lance la commande. Lancé en `root`, le fichier naît
+`root:root 0600` — et le serveur, qui tourne en `air-mail`, **ne peut plus le
+lire**. Il ne dit rien : il répond `535 … credentials invalid` à chaque mot de
+passe applicatif, exactement comme si le secret était faux. Le mot de passe
+principal du compte, lui, continue de marcher — ce qui achève d'égarer.
+
+```sh
+# TOUJOURS, et pas seulement la première fois :
+sudo -u air-mail air-mail-admin app-password add /var/lib/air-mail/applicatifs.bin \
+  --accounts /var/lib/air-mail/comptes.bin --login <compte> --name <appareil>
+```
+
+Et pour s'en assurer : `stat -c '%U:%G' /var/lib/air-mail/applicatifs.bin` doit
+dire `air-mail:air-mail`. **C'est le même geste pour un téléphone** : un secret
+posé en `root` rend muette toute la messagerie de l'appareil.
+
+### Pourquoi le relevé s'authentifie
+
+La première version déposait sans s'authentifier sur la boucle locale. Sur
+narro.ch, `p=quarantine` : `spf=fail`, `dmarc=fail`, et le relevé est parti au
+`.Junk` — la quarantaine que la phase 0 venait de configurer a fonctionné sur
+le premier message qui lui a été soumis, le sien. Le relevé s'authentifie donc
+désormais par un mot de passe applicatif `releve-arc`, et arrive en boîte de
+réception sur les deux serveurs.
+
+Sur air-desktop, cela a demandé d'**ajouter `--app-passwords`** à la
+configuration, qui n'en avait aucun — une réécriture complète de plus, menée
+selon la procédure du bas de ce document, et dont le `diff` n'a bien montré que
+cette ligne.
+
 ### LA PORTE DE DÉCISION
 
 **À relire dans un mois.** La colonne qui décide est `ARC + échec DMARC` : c'est
@@ -246,4 +307,5 @@ Le chantier utile est **1 à 3**, et son déclencheur n'est pas ARC : c'est la
 décision de passer DMARC en `enforce`. Tant que les deux serveurs sont en
 `observe`, aucun courrier légitime n'est perdu, et ARC n'achète rien.
 
-La phase 0 est faite. Elle rendra son chiffre dans un mois.
+La phase 0 est faite, et son relevé part tout seul le 7 de chaque mois. Elle
+rendra son premier chiffre le 2026-11-07.

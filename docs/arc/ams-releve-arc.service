@@ -1,0 +1,15 @@
+[Unit]
+Description=Releve mensuel de la mesure ARC, remis dans une boite locale
+Documentation=https://github.com/air-desktop-project/air-mail-server/blob/main/docs/arc/feuille-de-route.md
+After=air-mail-server.service
+Wants=air-mail-server.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/ams-releve-arc /var/lib/air-mail/air-mail.conf narro.ch thierry.delhaise@narro.ch thierry.delhaise /etc/air-mail/releve-arc.secret
+# EN LECTURE SEULE : il compte le registre et remet un message. Rien d'autre.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+ReadOnlyPaths=/var/lib/air-mail /etc/air-mail/releve-arc.secret
