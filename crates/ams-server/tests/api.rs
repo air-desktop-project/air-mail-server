@@ -441,7 +441,7 @@ fn un_client_curl_parle_a_l_api_en_http2() {
         &format!("127.0.0.1:{port_http}"),
         CLEF,
     );
-    let _serveur = lancer_avec_api(&config, port_smtp, port_http);
+    let serveur = lancer_avec_api(&config, port_smtp, port_http);
 
     let jeton = jeton_d_administration();
     let appeler = |chemin: &str| -> (String, String) {
@@ -454,7 +454,7 @@ fn un_client_curl_parle_a_l_api_en_http2() {
             .arg(format!("https://127.0.0.1:{port_http}{chemin}"))
             .output()
             .expect("curl s'exécute");
-        let tout = String::from_utf8_lossy(&sortie.stdout).into_owned();
+        let tout = reponse_de_curl(&serveur, &sortie);
         let (corps, fin) = tout.rsplit_once('\n').unwrap_or(("", ""));
         (corps.to_string(), fin.to_string())
     };
@@ -500,7 +500,7 @@ fn un_client_curl_parle_a_l_api_en_http2() {
             ))
             .output()
             .expect("curl s'exécute");
-        String::from_utf8_lossy(&sortie.stdout).into_owned()
+        reponse_de_curl(&serveur, &sortie)
     };
     assert_eq!(
         poser(r#"{"password":""}"#),
@@ -781,6 +781,64 @@ fn lancer_avec_api(config: &Path, port_smtp: u16, port_http: u16) -> Serveur {
     serveur
 }
 
+/// Rend la sortie standard de `curl`, ou **dit tout ce qu'on sait** si elle
+/// manque.
+///
+/// # POURQUOI CE HELPER EXISTE
+///
+/// Ces essais pilotent le serveur par des séquences d'appels `curl`, et c'est
+/// cette famille-là qui fournit presque toutes les chutes sous charge. Le motif
+/// qu'ils partageaient — `String::from_utf8_lossy(&sortie.stdout)` sans rien
+/// vérifier — a deux trous, et les deux ont coûté des heures d'enquête :
+///
+///   — **`curl` QUI N'A JOINT PERSONNE REND 0 ET UNE SORTIE VIDE.** Aucun de
+///     ces essais ne passe `-f`, donc `curl` ne se plaint pas d'un `4xx` ni
+///     d'un `5xx` : un code non nul signifie qu'il n'a pas pu PARLER au
+///     serveur. C'est précisément ce qui arrivait quand l'API n'écoutait pas
+///     encore.
+///   — **UNE SORTIE VIDE SATISFAISAIT LES ASSERTIONS NÉGATIVES.** Un
+///     `assert!(!rendu.contains("token"))` était vrai pour une requête qui
+///     n'avait pas eu lieu. L'essai se croyait au vert, et le défaut se
+///     manifestait ailleurs, plus tard, sous une forme incompréhensible.
+///
+/// # CE QU'IL DIT, ET POURQUOI CHAQUE PIÈCE COMPTE
+///
+/// Le code de sortie, la sortie d'erreur de `curl` — qui nomme le refus de
+/// connexion —, et ce qui a quand même été rendu. `#[track_caller]` fait
+/// pointer la panique sur L'APPEL, pas sur ce helper : l'échec dit donc
+/// *laquelle* des requêtes de l'essai a manqué.
+///
+/// **UN ROUGE DOIT S'EXPLIQUER À SA PREMIÈRE OCCURRENCE.** Sur cette famille
+/// d'essais, un défaut se reproduit une fois sur vingt sous charge : rejouer
+/// pour comprendre coûte une demi-heure, et trois enquêtes ont été refaites
+/// de zéro faute de cette trace.
+#[track_caller]
+fn reponse_de_curl(serveur: &Serveur, sortie: &std::process::Output) -> String {
+    let dehors = String::from_utf8_lossy(&sortie.stdout).into_owned();
+    assert!(
+        sortie.status.success(),
+        "`curl` n'a pas pu parler au serveur (code {:?}) — ce n'est PAS un refus \
+         applicatif, aucun appel ici ne passe `-f`.\n\
+         Les codes qu'on voit ici : 7 « connexion refusée » (rien n'écoute), \
+         28 « délai dépassé », 35 « échec de la poignée de main TLS ».\n\
+         --- sortie d'erreur de curl ---\n{}\n\
+         --- ce qui a quand même été rendu ---\n{dehors}\n\
+         --- ce que le SERVEUR a dit ---\n{}",
+        sortie.status.code(),
+        String::from_utf8_lossy(&sortie.stderr),
+        serveur.journal()
+    );
+    assert!(
+        !dehors.is_empty(),
+        "`curl` a rendu une sortie VIDE — une requête qui n'a pas eu lieu ne doit pas \
+         passer pour une réponse.\n--- sortie d'erreur de curl ---\n{}\n\
+         --- ce que le SERVEUR a dit ---\n{}",
+        String::from_utf8_lossy(&sortie.stderr),
+        serveur.journal()
+    );
+    dehors
+}
+
 fn attendre_le_journal(serveur: &Serveur, motif: &str) -> String {
     let depart = Instant::now();
     loop {
@@ -972,7 +1030,7 @@ fn un_utilisateur_change_son_propre_mot_de_passe() {
         "",
         CLEF,
     );
-    let _serveur = lancer_avec_api(&config, port_smtp, port_http);
+    let serveur = lancer_avec_api(&config, port_smtp, port_http);
 
     let base = format!("https://127.0.0.1:{port_http}");
 
@@ -989,7 +1047,7 @@ fn un_utilisateur_change_son_propre_mot_de_passe() {
             .arg(format!("{base}/v1/tokens"))
             .output()
             .expect("curl s'exécute");
-        let tout = String::from_utf8_lossy(&sortie.stdout).into_owned();
+        let tout = reponse_de_curl(&serveur, &sortie);
         let (corps, code) = tout.rsplit_once('\n').unwrap_or(("", ""));
         (corps.to_string(), code.to_string())
     };
@@ -1017,7 +1075,7 @@ fn un_utilisateur_change_son_propre_mot_de_passe() {
             .arg(format!("{base}{chemin}"))
             .output()
             .expect("curl s'exécute");
-        String::from_utf8_lossy(&sortie.stdout).into_owned()
+        reponse_de_curl(&serveur, &sortie)
     };
     assert_eq!(
         changer(
@@ -1222,7 +1280,7 @@ fn une_session_fermee_ne_rouvre_plus() {
         "",
         CLEF,
     );
-    let _serveur = lancer_avec_api(&config, port_smtp, port_http);
+    let serveur = lancer_avec_api(&config, port_smtp, port_http);
     let base = format!("https://127.0.0.1:{port_http}");
 
     // Un appel quelconque avec ce jeton, et le code qu'il rend.
@@ -1234,7 +1292,7 @@ fn une_session_fermee_ne_rouvre_plus() {
             .arg(format!("{base}{chemin}"))
             .output()
             .expect("curl s'exécute");
-        String::from_utf8_lossy(&sortie.stdout).into_owned()
+        reponse_de_curl(&serveur, &sortie)
     };
 
     // ── 1. UN JETON D'UTILISATEUR, OBTENU PAR LA PORTE ORDINAIRE ────────────
@@ -1245,7 +1303,7 @@ fn une_session_fermee_ne_rouvre_plus() {
         .arg(format!("{base}/v1/tokens"))
         .output()
         .expect("curl s'exécute");
-    let corps = String::from_utf8_lossy(&sortie.stdout).into_owned();
+    let corps = reponse_de_curl(&serveur, &sortie);
     let jeton = corps
         .split_once("\"token\":\"")
         .and_then(|(_, reste)| reste.split_once('"'))
@@ -1368,7 +1426,7 @@ fn l_exploitant_revoque_tout_puis_reinvite() {
         "",
         CLEF,
     );
-    let _serveur = lancer_avec_api(&config, port_smtp, port_http);
+    let serveur = lancer_avec_api(&config, port_smtp, port_http);
     let base = format!("https://127.0.0.1:{port_http}");
     let admin = jeton_d_administration();
 
@@ -1389,7 +1447,7 @@ fn l_exploitant_revoque_tout_puis_reinvite() {
             .arg(format!("{base}{chemin}"))
             .output()
             .expect("curl s'exécute");
-        let tout = String::from_utf8_lossy(&sortie.stdout).into_owned();
+        let tout = reponse_de_curl(&serveur, &sortie);
         let (corps, code) = tout.rsplit_once('\n').unwrap_or(("", ""));
         (corps.to_string(), code.to_string())
     };
@@ -1950,7 +2008,7 @@ fn enroler_sous_attestation(nom: &str, plateforme: &Plateforme) {
         }
     };
     std::fs::write(&config, ams_config::encode(&lue).expect("encodable")).expect("écriture");
-    let _serveur = lancer_avec_api(&config, port_smtp, port_http);
+    let serveur = lancer_avec_api(&config, port_smtp, port_http);
     let base = format!("https://127.0.0.1:{port_http}");
 
     let admin = jeton_d_administration();
@@ -1968,7 +2026,7 @@ fn enroler_sous_attestation(nom: &str, plateforme: &Plateforme) {
             .arg(format!("{base}{chemin}"))
             .output()
             .expect("curl s'exécute");
-        let tout = String::from_utf8_lossy(&sortie.stdout).into_owned();
+        let tout = reponse_de_curl(&serveur, &sortie);
         let (corps, code) = tout.rsplit_once('\n').unwrap_or(("", ""));
         (corps.to_string(), code.to_string())
     };
@@ -2139,7 +2197,7 @@ fn le_journal_d_audit_dit_les_sessions_et_les_refus() {
             .arg(format!("{base}/v1/tokens"))
             .output()
             .expect("curl s'exécute");
-        let rendu = String::from_utf8_lossy(&sortie.stdout).into_owned();
+        let rendu = reponse_de_curl(&serveur, &sortie);
         // **UNE RÉPONSE VIDE N'EST PAS UN REFUS**, et c'est l'autre moitié du
         // défaut : `assert!(!rendu.contains("token"))` passait pour un `curl`
         // qui n'avait joint personne. L'essai se croyait donc au vert sur une
@@ -2158,7 +2216,7 @@ fn le_journal_d_audit_dit_les_sessions_et_les_refus() {
             .arg(format!("{base}{chemin}"))
             .output()
             .expect("curl s'exécute");
-        String::from_utf8_lossy(&sortie.stdout).into_owned()
+        reponse_de_curl(&serveur, &sortie)
     };
 
     // ── 1. UN REFUS, PUIS UNE SESSION ───────────────────────────────────────
@@ -2313,7 +2371,7 @@ fn un_appareil_trop_presse_lit_429_et_se_reconnecter_ne_lui_rend_rien() {
         per_second: 1,
     };
     std::fs::write(&config, ams_config::encode(&lue).expect("encodable")).expect("écriture");
-    let _serveur = lancer_avec_api(&config, port_smtp, port_http);
+    let serveur = lancer_avec_api(&config, port_smtp, port_http);
     let base = format!("https://127.0.0.1:{port_http}");
 
     let jeton_neuf = || -> String {
@@ -2324,7 +2382,7 @@ fn un_appareil_trop_presse_lit_429_et_se_reconnecter_ne_lui_rend_rien() {
             .arg(format!("{base}/v1/tokens"))
             .output()
             .expect("curl s'exécute");
-        let corps = String::from_utf8_lossy(&sortie.stdout).into_owned();
+        let corps = reponse_de_curl(&serveur, &sortie);
         corps
             .split_once("\"token\":\"")
             .and_then(|(_, reste)| reste.split_once('"'))
@@ -2339,7 +2397,7 @@ fn un_appareil_trop_presse_lit_429_et_se_reconnecter_ne_lui_rend_rien() {
             .arg(format!("{base}{chemin}"))
             .output()
             .expect("curl s'exécute");
-        String::from_utf8_lossy(&sortie.stdout).into_owned()
+        reponse_de_curl(&serveur, &sortie)
     };
     let est_refus = |reponse: &str| reponse.starts_with("HTTP/2 429");
 
@@ -2500,7 +2558,7 @@ fn un_utilisateur_voit_et_revoque_ses_appareils() {
         "",
         CLEF,
     );
-    let _serveur = lancer_avec_api(&config, port_smtp, port_http);
+    let serveur = lancer_avec_api(&config, port_smtp, port_http);
     let base = format!("https://127.0.0.1:{port_http}");
 
     // ── LE JETON D'UNE UTILISATRICE ORDINAIRE ───────────────────────────────
@@ -2511,7 +2569,7 @@ fn un_utilisateur_voit_et_revoque_ses_appareils() {
         .arg(format!("{base}/v1/tokens"))
         .output()
         .expect("curl s'exécute");
-    let corps = String::from_utf8_lossy(&sortie.stdout).into_owned();
+    let corps = reponse_de_curl(&serveur, &sortie);
     let jeton = corps
         .split_once("\"token\":\"")
         .and_then(|(_, reste)| reste.split_once('"'))
@@ -2526,7 +2584,7 @@ fn un_utilisateur_voit_et_revoque_ses_appareils() {
             .arg(format!("{base}{chemin}"))
             .output()
             .expect("curl s'exécute");
-        let tout = String::from_utf8_lossy(&sortie.stdout).into_owned();
+        let tout = reponse_de_curl(&serveur, &sortie);
         let (corps, code) = tout.rsplit_once('\n').unwrap_or(("", ""));
         (corps.to_string(), code.to_string())
     };
@@ -2640,7 +2698,7 @@ fn sans_magasin_les_appareils_ne_se_servent_pas() {
         "",
         CLEF,
     );
-    let _serveur = lancer_avec_api(&config, port_smtp, port_http);
+    let serveur = lancer_avec_api(&config, port_smtp, port_http);
     let base = format!("https://127.0.0.1:{port_http}");
 
     let sortie = std::process::Command::new("curl")
@@ -2650,7 +2708,7 @@ fn sans_magasin_les_appareils_ne_se_servent_pas() {
         .arg(format!("{base}/v1/tokens"))
         .output()
         .expect("curl s'exécute");
-    let corps = String::from_utf8_lossy(&sortie.stdout).into_owned();
+    let corps = reponse_de_curl(&serveur, &sortie);
     let jeton = corps
         .split_once("\"token\":\"")
         .and_then(|(_, reste)| reste.split_once('"'))
@@ -2665,7 +2723,7 @@ fn sans_magasin_les_appareils_ne_se_servent_pas() {
             .arg(format!("{base}{chemin}"))
             .output()
             .expect("curl s'exécute");
-        let tout = String::from_utf8_lossy(&sortie.stdout).into_owned();
+        let tout = reponse_de_curl(&serveur, &sortie);
         let (corps, code) = tout.rsplit_once('\n').unwrap_or(("", ""));
         assert_eq!(code, "501", "{methode} {chemin}");
 
@@ -2762,7 +2820,7 @@ fn une_invitation_amorce_le_premier_appareil_et_un_seul() {
         "",
         CLEF,
     );
-    let _serveur = lancer_avec_api(&config, port_smtp, port_http);
+    let serveur = lancer_avec_api(&config, port_smtp, port_http);
     let base = format!("https://127.0.0.1:{port_http}");
 
     // ── LE JETON D'ADMINISTRATION, SEUL À POUVOIR INVITER ───────────────────
@@ -2781,7 +2839,7 @@ fn une_invitation_amorce_le_premier_appareil_et_un_seul() {
             .arg(format!("{base}{chemin}"))
             .output()
             .expect("curl s'exécute");
-        let tout = String::from_utf8_lossy(&sortie.stdout).into_owned();
+        let tout = reponse_de_curl(&serveur, &sortie);
         let (corps, code) = tout.rsplit_once('\n').unwrap_or(("", ""));
         (corps.to_string(), code.to_string())
     };
@@ -2902,7 +2960,7 @@ fn une_invitation_amorce_le_premier_appareil_et_un_seul() {
         .arg(format!("{base}/v1/me/devices"))
         .output()
         .expect("curl s'exécute");
-    let liste = String::from_utf8_lossy(&sortie.stdout).into_owned();
+    let liste = reponse_de_curl(&serveur, &sortie);
     assert!(liste.contains(&id), "{liste}");
     assert!(liste.contains("iPhone de Marie"), "{liste}");
 }
@@ -2962,7 +3020,7 @@ fn un_enrolement_refuse_dit_ce_qu_il_faut() {
         "",
         CLEF,
     );
-    let _serveur = lancer_avec_api(&config, port_smtp, port_http);
+    let serveur = lancer_avec_api(&config, port_smtp, port_http);
     let base = format!("https://127.0.0.1:{port_http}");
 
     let admin = jeton_d_administration();
@@ -2974,7 +3032,7 @@ fn un_enrolement_refuse_dit_ce_qu_il_faut() {
         .arg(format!("{base}/v1/invitations"))
         .output()
         .expect("curl s'exécute");
-    let corps = String::from_utf8_lossy(&sortie.stdout).into_owned();
+    let corps = reponse_de_curl(&serveur, &sortie);
     let invitation = corps
         .split_once("\"invitation\":\"")
         .and_then(|(_, reste)| reste.split_once('"'))
@@ -2990,7 +3048,7 @@ fn un_enrolement_refuse_dit_ce_qu_il_faut() {
             .arg(format!("{base}/v1/devices"))
             .output()
             .expect("curl s'exécute");
-        String::from_utf8_lossy(&sortie.stdout).into_owned()
+        reponse_de_curl(&serveur, &sortie)
     };
 
     // **UNE INVITATION FORGÉE : 401**, comme un jeton qui ne se vérifie pas.
@@ -3198,7 +3256,7 @@ fn une_clef_enrolee_ouvre_une_session_et_le_defi_ne_sert_qu_une_fois() {
         "",
         CLEF,
     );
-    let _serveur = lancer_avec_api(&config, port_smtp, port_http);
+    let serveur = lancer_avec_api(&config, port_smtp, port_http);
     let base = format!("https://127.0.0.1:{port_http}");
 
     let poster = |chemin: &str, corps: &str, entete: Option<&str>| -> (String, String) {
@@ -3215,7 +3273,7 @@ fn une_clef_enrolee_ouvre_une_session_et_le_defi_ne_sert_qu_une_fois() {
             .arg(format!("{base}{chemin}"))
             .output()
             .expect("curl s'exécute");
-        let tout = String::from_utf8_lossy(&sortie.stdout).into_owned();
+        let tout = reponse_de_curl(&serveur, &sortie);
         let (corps, code) = tout.rsplit_once('\n').unwrap_or(("", ""));
         (corps.to_string(), code.to_string())
     };
@@ -3371,7 +3429,7 @@ fn une_clef_enrolee_ouvre_une_session_et_le_defi_ne_sert_qu_une_fois() {
             .arg(format!("{base}{chemin}"))
             .output()
             .expect("curl s'exécute");
-        let tout = String::from_utf8_lossy(&sortie.stdout).into_owned();
+        let tout = reponse_de_curl(&serveur, &sortie);
         let (corps, code) = tout.rsplit_once('\n').unwrap_or(("", ""));
         (corps.to_string(), code.to_string())
     };
@@ -3592,7 +3650,7 @@ fn un_appareil_enrole_en_approuve_un_autre() {
         "",
         CLEF,
     );
-    let _serveur = lancer_avec_api(&config, port_smtp, port_http);
+    let serveur = lancer_avec_api(&config, port_smtp, port_http);
     let base = format!("https://127.0.0.1:{port_http}");
 
     let poster = |chemin: &str, corps: &str, entete: Option<&str>| -> (String, String) {
@@ -3609,7 +3667,7 @@ fn un_appareil_enrole_en_approuve_un_autre() {
             .arg(format!("{base}{chemin}"))
             .output()
             .expect("curl s'exécute");
-        let tout = String::from_utf8_lossy(&sortie.stdout).into_owned();
+        let tout = reponse_de_curl(&serveur, &sortie);
         let (corps, code) = tout.rsplit_once('\n').unwrap_or(("", ""));
         (corps.to_string(), code.to_string())
     };
@@ -3690,7 +3748,7 @@ fn un_appareil_enrole_en_approuve_un_autre() {
         .arg(format!("{base}/v1/me/devices"))
         .output()
         .expect("curl s'exécute");
-    let liste = String::from_utf8_lossy(&sortie.stdout).into_owned();
+    let liste = reponse_de_curl(&serveur, &sortie);
     assert!(liste.contains(&telephone), "{liste}");
     assert!(liste.contains(&tablette), "{liste}");
     assert!(liste.contains("la tablette"), "{liste}");
@@ -3860,7 +3918,7 @@ fn un_jeton_seul_n_appaire_rien() {
         "",
         CLEF,
     );
-    let _serveur = lancer_avec_api(&config, port_smtp, port_http);
+    let serveur = lancer_avec_api(&config, port_smtp, port_http);
     let base = format!("https://127.0.0.1:{port_http}");
 
     let sortie = std::process::Command::new("curl")
@@ -3870,7 +3928,7 @@ fn un_jeton_seul_n_appaire_rien() {
         .arg(format!("{base}/v1/tokens"))
         .output()
         .expect("curl s'exécute");
-    let corps = String::from_utf8_lossy(&sortie.stdout).into_owned();
+    let corps = reponse_de_curl(&serveur, &sortie);
     let jeton = corps
         .split_once("\"token\":\"")
         .and_then(|(_, reste)| reste.split_once('"'))
@@ -3887,7 +3945,7 @@ fn un_jeton_seul_n_appaire_rien() {
             .arg(format!("{base}/v1/me/devices"))
             .output()
             .expect("curl s'exécute");
-        String::from_utf8_lossy(&sortie.stdout).into_owned()
+        reponse_de_curl(&serveur, &sortie)
     };
 
     let clef = en_base64url(&cle_publique_de(9));
@@ -3993,7 +4051,7 @@ fn un_mot_de_passe_pose_par_l_api_rederive_son_verificateur_scram() {
     lue.scram_key = chemin_clef.display().to_string();
     lue.scram_store = chemin_scram.display().to_string();
     std::fs::write(&config, ams_config::encode(&lue).expect("encodable")).expect("écriture");
-    let _serveur = lancer_avec_api(&config, port_smtp, port_http);
+    let serveur = lancer_avec_api(&config, port_smtp, port_http);
     let base = format!("https://127.0.0.1:{port_http}");
 
     let sortie = std::process::Command::new("curl")
@@ -4003,7 +4061,7 @@ fn un_mot_de_passe_pose_par_l_api_rederive_son_verificateur_scram() {
         .arg(format!("{base}/v1/tokens"))
         .output()
         .expect("curl s'exécute");
-    let corps = String::from_utf8_lossy(&sortie.stdout).into_owned();
+    let corps = reponse_de_curl(&serveur, &sortie);
     let jeton = corps
         .split_once("\"token\":\"")
         .and_then(|(_, reste)| reste.split_once('"'))
@@ -4021,7 +4079,7 @@ fn un_mot_de_passe_pose_par_l_api_rederive_son_verificateur_scram() {
             .arg(format!("{base}{chemin}"))
             .output()
             .expect("curl s'exécute");
-        String::from_utf8_lossy(&sortie.stdout).into_owned()
+        reponse_de_curl(&serveur, &sortie)
     };
     // Le vérificateur de marie, ouvert sous l'empreinte que son compte porte
     // MAINTENANT ; et la StoredKey que ce mot de passe produirait avec son sel.
@@ -4136,7 +4194,7 @@ fn un_mot_de_passe_applicatif_ouvre_smtp_et_pas_l_api() {
     let mut lue = ams_config::decode(&std::fs::read(&config).expect("config")).expect("décodable");
     lue.app_passwords = applicatifs.display().to_string();
     std::fs::write(&config, ams_config::encode(&lue).expect("encodable")).expect("écriture");
-    let _serveur = lancer_avec_api(&config, port_smtp, port_http);
+    let serveur = lancer_avec_api(&config, port_smtp, port_http);
     let base = format!("https://127.0.0.1:{port_http}");
 
     // Un appel HTTP, et rend (corps, code).
@@ -4157,7 +4215,7 @@ fn un_mot_de_passe_applicatif_ouvre_smtp_et_pas_l_api() {
             .arg(format!("{base}{chemin}"))
             .output()
             .expect("curl s'exécute");
-        let tout = String::from_utf8_lossy(&sortie.stdout).into_owned();
+        let tout = reponse_de_curl(&serveur, &sortie);
         let (corps, code) = tout.rsplit_once('\n').unwrap_or(("", ""));
         (corps.to_string(), code.to_string())
     };
@@ -4347,7 +4405,7 @@ fn un_gros_message_arrive_entier_en_http2() {
         .arg(format!("{base}/v1/tokens"))
         .output()
         .expect("curl s'exécute");
-    let corps = String::from_utf8_lossy(&sortie.stdout).into_owned();
+    let corps = reponse_de_curl(&serveur, &sortie);
     let jeton = corps
         .split_once("\"token\":\"")
         .and_then(|(_, reste)| reste.split_once('"'))
@@ -4376,7 +4434,7 @@ fn un_gros_message_arrive_entier_en_http2() {
             .arg(format!("{base}/v1/mailboxes/INBOX/messages"))
             .output()
             .expect("curl s'exécute");
-        let tout = String::from_utf8_lossy(&sortie.stdout).into_owned();
+        let tout = reponse_de_curl(&serveur, &sortie);
         let (corps, fin) = tout.rsplit_once('\n').unwrap_or(("", ""));
         (corps.to_string(), fin.to_string())
     };
@@ -4405,7 +4463,15 @@ fn un_gros_message_arrive_entier_en_http2() {
             .arg(format!("{base}/v1/mailboxes/INBOX/messages/{uid}/raw"))
             .output()
             .expect("curl s'exécute");
-        assert!(!sortie.stdout.is_empty(), "une tranche vide à {debut}");
+        // **LA TRANCHE PASSE PAR LE MÊME CONTRÔLE QUE TOUT LE RESTE** : une
+        // tranche vide disait seulement « vide à tel rang », sans dire si
+        // `curl` avait joint le serveur. Le helper le dit.
+        let tranche = reponse_de_curl(&serveur, &sortie);
+        assert!(
+            !tranche.is_empty(),
+            "une tranche vide à {debut} sur {} octets attendus",
+            gros.len()
+        );
         relu.extend_from_slice(&sortie.stdout);
     }
     assert_eq!(
@@ -4490,7 +4556,7 @@ fn un_message_avec_piece_jointe_passe_par_un_brouillon() {
         .arg(format!("{base}/v1/tokens"))
         .output()
         .expect("curl s'exécute");
-    let corps = String::from_utf8_lossy(&sortie.stdout).into_owned();
+    let corps = reponse_de_curl(&serveur, &sortie);
     let jeton = corps
         .split_once("\"token\":\"")
         .and_then(|(_, reste)| reste.split_once('"'))
@@ -4518,7 +4584,7 @@ fn un_message_avec_piece_jointe_passe_par_un_brouillon() {
             .arg(format!("{base}{chemin}"))
             .output()
             .expect("curl s'exécute");
-        let tout = String::from_utf8_lossy(&sortie.stdout).into_owned();
+        let tout = reponse_de_curl(&serveur, &sortie);
         let (corps, code) = tout.rsplit_once('\n').unwrap_or(("", ""));
         (corps.to_string(), code.to_string())
     };

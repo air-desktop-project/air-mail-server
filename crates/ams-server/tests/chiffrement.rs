@@ -116,6 +116,57 @@ impl Drop for Serveur {
     }
 }
 
+/// Rend la sortie standard de `curl`, ou **dit tout ce qu'on sait** si elle
+/// manque.
+///
+/// # POURQUOI CE HELPER EXISTE
+///
+/// Ces essais pilotent le serveur par des séquences d'appels `curl`, et c'est
+/// cette famille-là qui fournit presque toutes les chutes sous charge. Le motif
+/// qu'ils partageaient — `String::from_utf8_lossy(&sortie.stdout)` sans rien
+/// vérifier — a deux trous, et les deux ont coûté des heures d'enquête :
+///
+///   — **`curl` QUI N'A JOINT PERSONNE REND 0 ET UNE SORTIE VIDE.** Aucun de
+///     ces essais ne passe `-f`, donc `curl` ne se plaint pas d'un `4xx` ni
+///     d'un `5xx` : un code non nul signifie qu'il n'a pas pu PARLER au
+///     serveur. C'est précisément ce qui arrivait quand l'API n'écoutait pas
+///     encore.
+///   — **UNE SORTIE VIDE SATISFAISAIT LES ASSERTIONS NÉGATIVES.** Un
+///     `assert!(!rendu.contains("token"))` était vrai pour une requête qui
+///     n'avait pas eu lieu. L'essai se croyait au vert, et le défaut se
+///     manifestait ailleurs, plus tard, sous une forme incompréhensible.
+///
+/// # CE QU'IL DIT, ET POURQUOI CHAQUE PIÈCE COMPTE
+///
+/// Le code de sortie, la sortie d'erreur de `curl` — qui nomme le refus de
+/// connexion —, et ce qui a quand même été rendu. `#[track_caller]` fait
+/// pointer la panique sur L'APPEL, pas sur ce helper : l'échec dit donc
+/// *laquelle* des requêtes de l'essai a manqué.
+///
+/// **UN ROUGE DOIT S'EXPLIQUER À SA PREMIÈRE OCCURRENCE.** Sur cette famille
+/// d'essais, un défaut se reproduit une fois sur vingt sous charge : rejouer
+/// pour comprendre coûte une demi-heure, et trois enquêtes ont été refaites
+/// de zéro faute de cette trace.
+#[track_caller]
+fn reponse_de_curl(sortie: &std::process::Output) -> String {
+    let dehors = String::from_utf8_lossy(&sortie.stdout).into_owned();
+    assert!(
+        sortie.status.success(),
+        "`curl` n'a pas pu parler au serveur (code {:?}) — ce n'est PAS un refus \
+         applicatif, aucun appel ici ne passe `-f`.\n--- sortie d'erreur de curl ---\n{}\n\
+         --- ce qui a quand même été rendu ---\n{dehors}",
+        sortie.status.code(),
+        String::from_utf8_lossy(&sortie.stderr)
+    );
+    assert!(
+        !dehors.is_empty(),
+        "`curl` a rendu une sortie VIDE — une requête qui n'a pas eu lieu ne doit pas \
+         passer pour une réponse.\n--- sortie d'erreur de curl ---\n{}",
+        String::from_utf8_lossy(&sortie.stderr)
+    );
+    dehors
+}
+
 /// Se connecte au serveur, ou dit ce qu'il est devenu.
 fn joindre(serveur: &mut Serveur, port: u16) -> TcpStream {
     match TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], port))) {
@@ -713,7 +764,7 @@ fn un_client_curl_releve_le_courrier() {
             curl.args(["-X", brute]);
         }
         let sortie = curl.output().expect("curl s'exécute");
-        String::from_utf8_lossy(&sortie.stdout).into_owned()
+        reponse_de_curl(&sortie)
     };
     let racine = format!("imaps://127.0.0.1:{port_imap}/");
 
@@ -934,7 +985,7 @@ fn un_client_curl_releve_le_courrier_en_pop3() {
             .arg(format!("pop3s://127.0.0.1:{port_pop3}/{chemin}"))
             .output()
             .expect("curl s'exécute");
-        String::from_utf8_lossy(&sortie.stdout).into_owned()
+        reponse_de_curl(&sortie)
     };
 
     // ── `LIST` : un numéro et une taille ────────────────────────────────────
