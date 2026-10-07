@@ -306,12 +306,26 @@ etape_configurer_systeme() {
     mkdir -p "$ETAT_DIR/file" || return 1
     mkdir -p "$ETAT_DIR/tls" || return 1
     mkdir -p "$ETAT_DIR/mtasts" || return 1
+    # Les quatre que la configuration nomme désormais. Le registre et l'audit
+    # ne sont pas du confort : sans registre, la réception refuse par `451`.
+    mkdir -p "$ETAT_DIR/registre" || return 1
+    mkdir -p "$ETAT_DIR/audit" || return 1
+    mkdir -p "$ETAT_DIR/brouillons" || return 1
+    mkdir -p "$ETAT_DIR/rapports-dmarc" || return 1
     
     # Définir les permissions
     chown -R "$COMPTE_SYSTEME:$COMPTE_SYSTEME" "$ETAT_DIR" || return 1
     chmod 0700 "$ETAT_DIR" || return 1
     chmod 0700 "$ETAT_DIR/maildir" || return 1
     chmod 0700 "$ETAT_DIR/file" || return 1
+    # **LE SERVEUR EXIGE `0700` SUR LE REGISTRE DEPUIS 0.2.47** : il REFUSE de
+    # démarrer sur un registre accessible aux autres comptes, ou qu'il ne
+    # pourrait pas écrire. Il ne l'élargit plus en silence, ce qu'il faisait
+    # avant. Les trois autres suivent la même règle, par cohérence.
+    chmod 0700 "$ETAT_DIR/registre" || return 1
+    chmod 0700 "$ETAT_DIR/audit" || return 1
+    chmod 0700 "$ETAT_DIR/brouillons" || return 1
+    chmod 0700 "$ETAT_DIR/rapports-dmarc" || return 1
     
     # Installer les binaires
     dit "Installation des binaires..."
@@ -417,9 +431,17 @@ etape_configurer_serveur() {
     titre "Étape 5 : Configuration du serveur"
     
     # Générer la clé DKIM si elle n'existe pas
+    #
+    # **RSA 2048, ET NON ed25519.** La zone publie `k=rsa` et la clé en place
+    # est une RSA 2048 (vérifié le 2026-10-07) ; ce script tirait de l'ed25519,
+    # si bien que sur une machine neuve la clé et le DNS n'auraient pas
+    # correspondu — DKIM aurait échoué sans que rien ne le dise, l'émission
+    # passant par Resend qui re-signe de son côté. RFC 8463 permet l'ed25519,
+    # mais il se décide AVEC la zone, pas contre elle.
     if [ ! -f "$ETAT_DIR/dkim.pem" ]; then
-        dit "Génération de la clé DKIM..."
-        openssl genpkey -algorithm ed25519 -out "$ETAT_DIR/dkim.pem" || return 1
+        dit "Génération de la clé DKIM (RSA 2048, comme la zone l'annonce)..."
+        openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
+            -out "$ETAT_DIR/dkim.pem" || return 1
         chmod 600 "$ETAT_DIR/dkim.pem" || return 1
         chown "$COMPTE_SYSTEME:$COMPTE_SYSTEME" "$ETAT_DIR/dkim.pem" || return 1
     fi
@@ -427,16 +449,37 @@ etape_configurer_serveur() {
     # Configurer le serveur
     dit "Configuration du serveur..."
     
+    # ╔══════════════════════════════════════════════════════════════════════╗
+    # ║  `config write` REMPLACE LE FICHIER ENTIER, ET CELUI-CI EST CELUI DE  ║
+    # ║  LA PRODUCTION. Toute option retirée d'ici est EFFACÉE de la machine. ║
+    # ╚══════════════════════════════════════════════════════════════════════╝
+    #
+    # Remis à niveau le 2026-10-07 : il manquait DOUZE options que la
+    # production porte, dont `--registre` — sans lui la réception refuse par
+    # `451` — et les trois écoutes IMAP STARTTLS et POP3, qui SONT servies.
+    # Avant de modifier cette liste, lisez ce que la machine porte vraiment :
+    #   air-mail-admin config show /var/lib/air-mail/air-mail.conf
+    # et comparez les deux `config show` après écriture. La procédure sûre est
+    # au bas de `docs/arc/feuille-de-route.md`.
     local cmd_config=(
         "$INSTALL_DIR/air-mail-admin" "config" "write" "$ETAT_DIR/air-mail.conf"
         "--domain" "$DOMAINE_COMPLET"
         "--hosted" "$DOMAINE"
+        # Le sous-domaine du MX est hébergé lui aussi : `postmaster@mail.…`
+        # est une adresse du compte `thierry`.
+        "--hosted" "$DOMAINE_COMPLET"
         "--maildir" "$ETAT_DIR/maildir"
         "--accounts" "$ETAT_DIR/comptes.bin"
         "--listen" "[::]:2525"
         "--listen-smtps" "[::]:4465"
+        # LES SIX ÉCOUTES, et non trois : le pare-feu ramène 143 sur 1143,
+        # 110 sur 1110 et 995 sur 9995, et ces écouteurs doivent exister.
+        "--listen-imap" "[::]:1143"
         "--listen-imaps" "[::]:9993"
-        "--max-message" "52428800"
+        "--listen-pop3" "[::]:1110"
+        "--listen-pop3s" "[::]:9995"
+        # 10 Mio, ce que la machine porte — et non les 50 Mio de narro.ch.
+        "--max-message" "10485760"
         "--tls-cert" "$ETAT_DIR/tls/fullchain.pem"
         "--tls-key" "$ETAT_DIR/tls/privkey.pem"
         "--dkim-selector" "$SELECTEUR_DKIM"
@@ -450,6 +493,23 @@ etape_configurer_serveur() {
         "--require-fqdn-sender"
         "--require-fqdn-recipient"
         "--require-sender-domain"
+        # ── CE QUI MANQUAIT, ET QUI SERAIT EFFACÉ SANS CES LIGNES ──────────
+        # SANS LUI, LA RÉCEPTION REFUSE PAR `451` : le registre n'est pas une
+        # option de confort, le serveur n'accepte un message qu'une fois son
+        # constat scellé.
+        "--registre" "$ETAT_DIR/registre"
+        "--audit" "$ETAT_DIR/audit"
+        "--drafts" "$ETAT_DIR/brouillons"
+        "--app-passwords" "$ETAT_DIR/applicatifs.bin"
+        "--spf" "observe"
+        "--dmarc" "observe"
+        # Un `p=quarantine` est MIS DE CÔTÉ au lieu d'être remis en boîte.
+        "--dmarc-quarantine-folder" "Junk"
+        # Les rapports agrégés se composent et se DÉPOSENT ; `--dmarc-send`
+        # n'est PAS posé — envoyer est un engagement envers les autres
+        # domaines, et c'est une décision à part.
+        "--dmarc-report-dir" "$ETAT_DIR/rapports-dmarc"
+        "--about" "on"
     )
     
     # Ajouter le relais si configuré

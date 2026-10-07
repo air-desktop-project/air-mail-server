@@ -317,7 +317,20 @@ generer_configuration() {
     
     echo ""
     echo "=== Enregistrement SPF ==="
-    echo "$domaine.  IN  TXT  \"v=spf1 mx ~all\""
+    # ── `include:amazonses.com` N'EST PAS DÉCORATIF ─────────────────────────
+    #
+    # Ce script posait `v=spf1 mx ~all`. Or le courrier NE SORT PAS par le MX :
+    # il sort par le relais Resend, qui émet depuis les adresses d'Amazon SES.
+    # Un SPF qui n'autorise que `mx` donne donc `spf=fail` chez le
+    # destinataire sur tout ce que nous envoyons — et l'alignement DMARC
+    # repose alors sur DKIM seul, que Resend réécrit de son côté.
+    #
+    # **ET NON `include:_spf.resend.com`**, qui n'a AUCUN enregistrement TXT :
+    # un `include` vers un nom sans TXT rend un `permerror`, qui est pire
+    # qu'un `fail` puisqu'il invalide l'évaluation entière. Corrigé sur
+    # narro.ch le 2026-10-06 après l'avoir mesuré, et ici le 2026-10-07 : la
+    # zone vivante porte la bonne valeur depuis, ce script posait l'ancienne.
+    echo "$domaine.  IN  TXT  \"v=spf1 mx include:amazonses.com ~all\""
     
     echo ""
     echo "=== Enregistrement DKIM ==="
@@ -389,7 +402,7 @@ generer_json() {
         '. + [{rrset_name: $name, rrset_type: $type, rrset_ttl: $ttl, rrset_values: [$values]}]')
     
     # SPF
-    json=$(echo "$json" | jq --arg name "$domaine" --arg type "TXT" --argjson ttl $TTL_DEFAULT --arg values '"v=spf1 mx ~all"' \
+    json=$(echo "$json" | jq --arg name "$domaine" --arg type "TXT" --argjson ttl $TTL_DEFAULT --arg values '"v=spf1 mx include:amazonses.com ~all"' \
         '. + [{rrset_name: $name, rrset_type: $type, rrset_ttl: $ttl, rrset_values: [$values]}]')
     
     # DKIM
@@ -459,7 +472,7 @@ creer_tous_enregistrements() {
     creer_enregistrement "$zone_id" "$SOUS_DOMAINE" "AAAA" "$IPV6" || erreurs=$((erreurs + 1))
     
     # SPF
-    creer_enregistrement "$zone_id" "@" "TXT" '"v=spf1 mx ~all"' || erreurs=$((erreurs + 1))
+    creer_enregistrement "$zone_id" "@" "TXT" '"v=spf1 mx include:amazonses.com ~all"' || erreurs=$((erreurs + 1))
     
     # DKIM
     creer_enregistrement "$zone_id" "$nom_dkim" "TXT" "$valeur_dkim_decoupee" || erreurs=$((erreurs + 1))
@@ -559,7 +572,7 @@ verifier_configuration() {
     
     # Vérifier SPF
     echo -n "SPF : "
-    verifier_enregistrement "$DOMAINE" "TXT" '"v=spf1 mx ~all"' || erreurs=$((erreurs + 1))
+    verifier_enregistrement "$DOMAINE" "TXT" '"v=spf1 mx include:amazonses.com ~all"' || erreurs=$((erreurs + 1))
     
     # Vérifier DKIM (on vérifie juste que l'enregistrement existe)
     echo -n "DKIM : "

@@ -41,12 +41,20 @@ export LC_ALL=C
 
 # ── Configuration par défaut ─────────────────────────────────────────────────
 
-# Liste des comptes pour air-desktop.org
-# À adapter selon vos besoins
+# ── LES COMPTES, RELEVÉS DU MAGASIN LE 2026-10-07 ───────────────────────────
+#
+# **CETTE LISTE ÉTAIT FAUSSE** : elle portait `postmaster`, `admin` et
+# `thierry`. Or `postmaster` n'est pas un compte mais une ADRESSE du compte
+# `thierry` (avec `postmaster@mail.air-desktop.org`), `admin` n'existe nulle
+# part, et `contact` — qui existe — manquait. Le script s'arrêtait donc en
+# nommant deux comptes introuvables, et n'aurait jamais posé le secret du seul
+# qu'il oubliait.
+#
+# Un login n'est pas une adresse, et sur ce serveur les deux diffèrent :
+# `thierry` sert `thierry.delhaise@air-desktop.org`. `account list` tranche.
 COMPTES=(
-    "postmaster"
-    "admin"
     "thierry"
+    "contact"
 )
 
 # Domaine
@@ -153,7 +161,30 @@ verifier_magasin() {
         echo "  printf %s \"MOT_DE_PASSE_TEMPORAIRE\" | air-mail-admin account add $magasin --login <compte> --address <compte>@$DOMAINE" >&2
         return 1
     }
-    
+
+    # ── ET LE CONTRÔLE DANS L'AUTRE SENS, QUI MANQUAIT ──────────────────────
+    #
+    # Le contrôle ci-dessus ne voyait qu'un sens : un compte de la liste absent
+    # du magasin arrête tout, mais un compte du magasin absent DE LA LISTE
+    # passait sans un mot. C'est ainsi que `contact` pouvait être oublié par un
+    # script dont le nom promet de poser LES secrets. Une liste écrite à la
+    # main vieillit ; le magasin, non.
+    local oublies=0
+    while read -r connu; do
+        [ -n "$connu" ] || continue
+        if ! printf '%s\n' "${COMPTES[@]}" | grep -qx "$connu"; then
+            echo "  DANS LE MAGASIN, PAS DANS CE SCRIPT : $connu" >&2
+            oublies=1
+        fi
+    done <<< "$connus"
+
+    [ "$oublies" -eq 0 ] || {
+        erreur "Le magasin porte un compte que ce script ignore — RIEN n'a été touché"
+        echo "  Ajoutez-le à \`COMPTES\`, ou dites pourquoi il reste de côté." >&2
+        echo "  Ne le laissez pas muet : un compte sans secret posé garde l'ancien." >&2
+        return 1
+    }
+
     return 0
 }
 
@@ -232,21 +263,35 @@ generer_et_poser_secrets() {
         done
         
         printf '\n'
-        printf 'Instructions pour changer de mot de passe :\n'
-        printf '\n'
-        printf '1. Obtenir un jeton avec votre mot de passe actuel :\n'
-        printf '   curl -X POST https://mail.air-desktop.org:8443/v1/tokens\n'
-        printf '   -H \'Content-Type: application/json\'\n'
-        printf '   -d \'{\"login\":\"<compte>\",\"password\":\"<mot-de-passe-actuel>\"}\'\n'
-        printf '\n'
-        printf '2. Changer le mot de passe avec le jeton :\n'
-        printf '   curl -X PUT https://mail.air-desktop.org:8443/v1/me/password\n'
-        printf '   -H \'Authorization: Bearer <jeton>\'\n'
-        printf '   -H \'Content-Type: application/json\'\n'
-        printf '   -d \'{\"current_password\":\"<ancien>\",\"password\":\"<nouveau>\"}\'\n'
-        printf '\n'
-        printf 'Note : Les mots de passe ne sont JAMAIS stockés en clair.\n'
-        printf '      Seules des empreintes (argon2id) sont conservées.\n'
+        # ── CE BLOC NE S'ÉCRIT PAS EN `printf '…\'…\'…'` ────────────────────
+        #
+        # **LE SCRIPT ENTIER NE PASSAIT PAS `bash -n`.** Une apostrophe ne
+        # s'échappe PAS à l'intérieur d'apostrophes : `'-H \'Content-Type\''`
+        # ferme la chaîne au premier `\'`, laisse `Content-Type:` en mot nu, et
+        # le fil des chaînes se perd — jusqu'à ce que le `(argon2id)` de la
+        # dernière ligne soit lu comme une syntaxe de commande. L'erreur était
+        # annoncée quinze lignes plus bas que sa cause, et le script refusait
+        # de s'exécuter du tout : un script de secrets qui ne démarre jamais.
+        #
+        # Un `cat <<'FIN'` ne demande aucun échappement : rien n'y est
+        # interprété, ni apostrophe, ni `$`, ni accent grave.
+        cat <<'FIN'
+Instructions pour changer de mot de passe :
+
+1. Obtenir un jeton avec votre mot de passe actuel :
+   curl -X POST https://mail.air-desktop.org:8443/v1/tokens \
+        -H 'Content-Type: application/json' \
+        -d '{"login":"<compte>","password":"<mot-de-passe-actuel>"}'
+
+2. Changer le mot de passe avec le jeton :
+   curl -X PUT https://mail.air-desktop.org:8443/v1/me/password \
+        -H 'Authorization: Bearer <jeton>' \
+        -H 'Content-Type: application/json' \
+        -d '{"current_password":"<ancien>","password":"<nouveau>"}'
+
+Note : Les mots de passe ne sont JAMAIS stockés en clair.
+       Seules des empreintes (argon2id) sont conservées.
+FIN
     } > "$SORTIE"
     
     chmod 600 "$SORTIE"
