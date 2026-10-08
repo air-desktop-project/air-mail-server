@@ -53,6 +53,47 @@ echo
 
 violations=0
 
+# ── LES DEUX FICHIERS DE VERROU, AVANT TOUT LE RESTE ────────────────────────
+#
+# `--locked` REFUSE de mettre un verrou à jour, et c'est ce qu'on veut : un
+# paquet doit se construire des versions exactes qu'on a éprouvées. Mais la
+# conséquence se découvre mal : un bump de version dans `Cargo.toml` laisse les
+# DEUX verrous sur l'ancienne, et rien ne le dit tant qu'un `cargo` sans
+# `--locked` ne les a pas régénérés par hasard.
+#
+# C'est arrivé deux fois. Le `Cargo.lock` du workspace est resté à 0.2.51 après
+# le bump en 0.2.52 — découvert par hasard en lisant un `git status`. Et
+# `fuzz/Cargo.lock`, lui, a tenu la CI ROUGE du 2026-10-06 au 2026-10-08 :
+# `cargo check --locked` y échouait par « cannot update the lock file », et
+# comme `check-compile` s'arrête là, aucun contrôle suivant ne tournait. En
+# local rien ne se voyait, les verrous étant régénérés par les constructions.
+#
+# Le contrôle tient en une comparaison, et il vient EN PREMIER parce qu'il
+# explique en une ligne ce que `cargo` dit en six.
+version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+verrous_faux=0
+for verrou in Cargo.lock fuzz/Cargo.lock; do
+    [ -f "$verrou" ] || { echo "ÉCHEC : \`$verrou\` est absent." >&2; verrous_faux=1; continue; }
+    # `ams-config` est dans les deux verrous, et porte la version du workspace.
+    pose=$(grep -A1 '^name = "ams-config"$' "$verrou" | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)
+    if [ "$pose" != "$version" ]; then
+        echo "ÉCHEC : \`$verrou\` dit \`$pose\`, \`Cargo.toml\` dit \`$version\`." >&2
+        echo "        \`--locked\` refusera de le corriger. Régénérez-le :" >&2
+        case "$verrou" in
+            fuzz/*) echo "            (cd fuzz && cargo check --bins)" >&2 ;;
+            *)      echo "            cargo check --workspace" >&2 ;;
+        esac
+        verrous_faux=1
+    fi
+done
+if [ "$verrous_faux" -ne 0 ]; then
+    echo >&2
+    echo "ÉCHEC : un verrou ne porte pas la version du workspace." >&2
+    exit 1
+fi
+echo "verrous   : Cargo.lock et fuzz/Cargo.lock sont en $version"
+echo
+
 if cargo check --workspace --all-targets --locked; then
     echo "workspace : compile"
 else
