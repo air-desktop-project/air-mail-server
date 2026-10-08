@@ -67,6 +67,7 @@ members = [
     "crates/ams-h3",
     "crates/ams-quic-client",
     "crates/ams-quic-dial",
+    "crates/ams-asl",
     "crates/ams-api",
     # Étage 3 — exécution
     "crates/ams-fichier",
@@ -95,7 +96,7 @@ exclude = ["fuzz"]
 # Version en LOCKSTEP : toutes les crates du workspace la partagent via
 # `version.workspace = true`. Un seul numéro à incrémenter par release, donc
 # aucune dérive possible entre les paquets.
-version = "0.2.56"
+version = "0.2.57"
 edition = "2024"
 # Égale au `channel` de `rust-toolchain.toml`. Les deux doivent bouger ensemble :
 # ce champ fait échouer le build avec un message clair si quelqu'un compile avec
@@ -135,6 +136,37 @@ ams-quic-tls = { path = "crates/ams-quic-tls", version = "0.2.45" }
 ams-h3 = { path = "crates/ams-h3", version = "0.2.45" }
 ams-quic-client = { path = "crates/ams-quic-client", version = "0.2.45" }
 ams-quic-dial = { path = "crates/ams-quic-dial", version = "0.2.56" }
+ams-asl = { path = "crates/ams-asl", version = "0.2.57" }
+
+# ── `air-service-locator` : SA GRAMMAIRE ET SA POLITIQUE, PAS NOTRE COPIE ───
+#
+# Pour s'annoncer auprès d'un annuaire, ce serveur a besoin de six choses :
+# les identifiants, le codec du protocole, les clés, la liste embarquée des
+# racines, et la politique de reprise. **Toutes existent là-bas, éprouvées**,
+# et les réécrire ici donnerait deux lectures du même protocole dont une
+# finirait par mentir.
+#
+# Elles n'apportent AUCUNE dépendance tierce : mesuré le 2026-10-08, trente-deux
+# crates de leur graphe sont déjà dans le nôtre à la version exacte —
+# `ed25519-dalek`, `sha2`, `p256`, `curve25519-dalek`, `der`, `ecdsa` — et les
+# sept seules nouvelles sont les crates ASL elles-mêmes.
+#
+# **LES DEUX RÉVISIONS NE SE CHOISISSENT PAS SÉPARÉMENT**, et c'est le piège de
+# ce bloc. `asl-client` vit dans le dépôt CLIENT, et son manifeste épingle
+# lui-même `asl-id`, `asl-proto`, `asl-cle` et `asl-racines` sur un commit du
+# dépôt SERVEUR. Si nous en nommions un autre, cargo résoudrait DEUX jeux de
+# ces crates — deux `Identifiant` que le compilateur tient pour deux types
+# différents, et un message d'erreur qui ne dirait pas pourquoi.
+#
+# `f984ae8` est donc le commit que le dépôt client épingle, et non le dernier
+# de `main` là-bas (`81d23c3` au 2026-10-08, un cran plus loin). **Pour avancer
+# ici, il faut avancer là-bas d'abord** : c'est le dépôt client qui décide, et
+# `scripts/check-doublons.sh` attrape l'écart si on l'oublie.
+asl-client = { git = "https://github.com/air-desktop-project/air-service-locator-client.git", rev = "7db07a5" }
+asl-id = { git = "https://github.com/air-desktop-project/air-service-locator-server.git", rev = "f984ae8" }
+asl-proto = { git = "https://github.com/air-desktop-project/air-service-locator-server.git", rev = "f984ae8" }
+asl-cle = { git = "https://github.com/air-desktop-project/air-service-locator-server.git", rev = "f984ae8" }
+asl-racines = { git = "https://github.com/air-desktop-project/air-service-locator-server.git", rev = "f984ae8" }
 ams-proto-smtp = { path = "crates/ams-proto-smtp", version = "0.2.45" }
 ams-queue = { path = "crates/ams-queue", version = "0.2.45" }
 ams-api = { path = "crates/ams-api", version = "0.2.45" }

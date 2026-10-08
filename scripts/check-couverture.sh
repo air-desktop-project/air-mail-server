@@ -77,6 +77,11 @@ CRATES_SANS_IO=(
     # logés : un plafond de message qui refusait tout, un compte de connexions
     # qui n'en servait aucune, un délai SPF qui ajournait chaque message.
     ams-admin-options
+    # CE QU'ON ANNONCE À UN ANNUAIRE, et ce qu'on lit de sa réponse. Elle ne
+    # fait aucune entrée-sortie : composer une annonce, lire une fiche, lire
+    # une réponse, et rien d'autre. Le transport est `ams-quic-dial`, la boucle
+    # est dans `ams-loop-tokio`, et aucune des deux n'est ici.
+    ams-asl
 )
 
 # ── LA SEULE DÉROGATION, ET ELLE EST NOMMÉE ─────────────────────────────────

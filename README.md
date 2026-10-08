@@ -278,6 +278,7 @@ des octets **et des actions**. Elles n'attendent jamais.
 | `ams-h3` | le conducteur HTTP/3 : dans quel ordre les pièces parlent | **flux critiques, réglages, requêtes, `GOAWAY`** |
 | `ams-api` | l'API REST : ce qu'une requête désigne, et le droit qu'elle demande | **routage, portées, jetons scellés, JSON** |
 | `ams-admin-options` | la grammaire de la ligne de commande d'`air-mail-admin` | **options, valeurs refusées, cohérences entre options** |
+| `ams-asl` | ce que ce serveur annonce à un annuaire `air-service-locator`, et ce qu'il lit de sa réponse | **fiche d'identité, annonces composées, cadence du bail** |
 
 ### Étage 3 — exécution
 
@@ -293,7 +294,7 @@ Les seules crates qui lisent, écrivent et attendent. Elles ne décident de rien
 | `ams-server` | le binaire `air-mail-server` | **il tourne** |
 | `ams-admin` | le binaire `air-mail-admin` | **`config write`, `config show`, `account add/list/remove`, `token`** |
 
-**Trente-neuf crates portent du code**, et ce tableau les nomme toutes :
+**Quarante crates portent du code**, et ce tableau les nomme toutes :
 `scripts/check-etages.sh` confronte ses lignes au contenu de `crates/`, et
 l'écart échoue. Un tableau tenu à la main dérive — celui-ci en décrivait
 vingt-quatre sur trente-quatre, et rien ne le disait ; toute la pile QUIC,

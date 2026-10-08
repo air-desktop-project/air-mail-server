@@ -57,6 +57,17 @@ path = "../crates/ams-api"
 [dependencies.ams-proto-quic]
 path = "../crates/ams-proto-quic"
 
+# `ams-asl` ET LA CRATE D'IDENTIFIANTS QU'ELLE EXPOSE. La cible compose une
+# fiche licite pour éprouver l'aller-retour, et elle a besoin de fabriquer un
+# `m-…` et un `u-…` pour cela — c'est `asl-id` qui le sait faire, et la cible
+# la nomme plutôt que de recopier son alphabet.
+[dependencies.ams-asl]
+path = "../crates/ams-asl"
+
+[dependencies.asl-id]
+git = "https://github.com/air-desktop-project/air-service-locator-server.git"
+rev = "f984ae8"
+
 [dependencies.ams-h3]
 path = "../crates/ams-h3"
 
@@ -624,6 +635,13 @@ bench = false
 [[bin]]
 name = "fuzz_ams_registre"
 path = "fuzz_targets/fuzz_ams_registre.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ams_asl_fiche"
+path = "fuzz_targets/fuzz_ams_asl_fiche.rs"
 test = false
 doc = false
 bench = false

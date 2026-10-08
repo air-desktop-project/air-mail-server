@@ -81,7 +81,7 @@ deux fois, les deux fois en changeant un trait que les cibles implémentent ; la
 première, la cible ne compilait plus depuis deux commits sans que rien ne le
 dise.
 
-    scripts/check-fuzz.sh            # la liste, et la compilation des 65 cibles
+    scripts/check-fuzz.sh            # la liste, et la compilation des 72 cibles
     scripts/check-fuzz.sh --smoke    # et vingt secondes chacune
     AMS_FUZZ_SECONDES=300 scripts/check-fuzz.sh --smoke   # une vraie campagne
 
@@ -303,6 +303,7 @@ offert à qui sait écrire quinze octets.
 | `fuzz_ams_index_name` | `seeds/index` | les noms Maildir — **aller-retour de l'UID** |
 | `fuzz_ams_config` | `seeds/config` | les trois formats binaires : configuration, comptes, index |
 | `fuzz_ams_sasl` | `seeds/sasl` | la réponse SASL — **décodage canonique** |
+| `fuzz_ams_asl_fiche` | `seeds/asl-fiche` | la fiche d'identité d'une machine — **aucune troncature ne rend une autre clé** |
 
 **Ce tableau est vérifié, et non tenu à la main** : `check-fuzz.sh` confronte ses
 lignes à la liste des cibles, et l'écart échoue. Une cible ajoutée sans y être
