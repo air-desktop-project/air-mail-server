@@ -76,10 +76,16 @@ pub fn fresh_uid_validity() -> UidValidity {
         .duration_since(UNIX_EPOCH)
         .map_or(1, |ecoule| ecoule.as_secs());
     let horloge = u32::try_from(secondes).unwrap_or(u32::MAX);
-    // `fetch_update` rend la valeur PRÉCÉDENTE ; la nouvelle se recalcule de la
+    // `try_update` rend la valeur PRÉCÉDENTE ; la nouvelle se recalcule de la
     // même façon, et c'est elle qu'on rend.
+    //
+    // **ELLE S'APPELAIT `fetch_update` JUSQU'À RUST 1.99**, qui l'a renommée
+    // « par cohérence » et déprécié l'ancien nom. Le corps n'a pas changé d'un
+    // octet : c'est le même échange-comparaison en boucle, avec le même ordre
+    // mémoire. Seul le nom bouge, et il bouge ici parce que `-D warnings` ne
+    // laisse pas passer une dépréciation.
     let precedente = DERNIERE
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |derniere| {
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |derniere| {
             Some(horloge.max(derniere.saturating_add(1)))
         })
         .unwrap_or(0);

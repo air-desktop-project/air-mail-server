@@ -2,7 +2,7 @@
 
 Crate `cargo-fuzz` **hors du workspace**, et pas par commodité.
 
-`cargo-fuzz` exige un nightly ; le workspace est épinglé sur **stable 1.98.0 en
+`cargo-fuzz` exige un nightly ; le workspace est épinglé sur **stable 1.99.0 en
 version exacte**. Deux toolchains dans un même workspace, ce sont deux LLVM — et
 les profils de couverture que l'un écrit, l'autre ne sait pas les relire. Le gate
 de [C2](../docs/contraintes.md) ne pourrait plus conclure.

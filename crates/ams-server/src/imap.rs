@@ -2522,10 +2522,17 @@ impl BoiteImap {
 
     fn oublier(&mut self, rang: usize) {
         self.vue.forget(rang);
-        for liste in [&mut self.chemins] {
-            if rang < liste.len() {
-                liste.remove(rang);
-            }
+        // **LES TROIS LISTES DESCENDENT ENSEMBLE**, et chacune se teste avant de
+        // retirer : un `remove` hors bornes paniquerait, et les trois listes ne
+        // sont pas forcément de la même longueur que la vue — les drapeaux et
+        // les dates se remplissent paresseusement.
+        //
+        // La première passait par une boucle `for liste in [&mut self.chemins]`,
+        // vestige du temps où plusieurs listes la partageaient ; clippy 1.99
+        // l'a nommée pour ce qu'elle était devenue — une boucle sur un seul
+        // élément —, et la retirer rend les trois cas identiques à lire.
+        if rang < self.chemins.len() {
+            self.chemins.remove(rang);
         }
         if rang < self.drapeaux.len() {
             self.drapeaux.remove(rang);
