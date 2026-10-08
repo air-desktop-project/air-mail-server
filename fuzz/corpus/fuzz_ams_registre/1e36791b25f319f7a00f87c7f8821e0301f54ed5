@@ -1,0 +1,12 @@
+Received: from a.exaUUUUUUUUUU~UUUUmple (a.example [192.0.2.7])
+: Bonjour
+List-Id: <liste.example.com>
+List-Unsubsibe: <mailto:u@example.com>
+ARC-Seal: i=2
+c
+orÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿéÿÿÿÿÿÿÿÿÿÿÿ*ÿÿÿÿpse (a.example [192.0.2.7])
+: Bonjour
+List-Id: <liste.example.com>
+List-Unsubsibe: i=2
+c
+orÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿéÿÿÿÿÿÿÿÿÿÿÿ*ÿÿÿÿps

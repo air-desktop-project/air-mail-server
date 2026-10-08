@@ -1,0 +1,25 @@
+Received: from a.exaUUUUUUUUUUUUUUUUUUUUUUUUUzUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUch
+Subject: Bonjour
+List-Id: <liste.example.com>
+List-Unsubsibe: <mailto:u@example.com>
+ARC-Seal: i=1
+c
+orÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUmple (a.example D: <x c@narro.ch
+Subject: Bonjour
+Lst-Id: <liste.example.com>
+List-Unsubsibe: <mailto:u@example.com>
+ARC-Seal: i=1
+c
+orÿUUUUUUUUUUUUUUUUUUUUUUUUUmple (a
+List-Unsubsibe: <mailto:u@example.com>
+RAC-Seal: i=1ü
+c
+orÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿUUUUUUUUUUU[192.0.2.7])
+]essage-ID: <axpxeml@e.com>‡From: A <a@example.com>
+Reply-To: r@autre.example
+To: b@narro.ch, c@narro.ch
+Subject: Bonjour
+Lst-Id: <liste.example.com>
+List-Unsubsibe: <mailto:u@example.com>
+ARC-Seal: i=2
+ÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿps
