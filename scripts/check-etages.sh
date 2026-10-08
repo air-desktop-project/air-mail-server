@@ -112,6 +112,10 @@ HORS_PERIMETRE=(
     ams-admin
     # Le client QUIC des essais d'interopérabilité : il parle au réseau.
     ams-quic-client
+    # La moitié cliente de la pile, en production : une socket, une horloge, et
+    # la boucle qui fait parler les deux. C'est exactement ce que C1 appelle une
+    # boucle, et c'est pourquoi elle est ici et non au périmètre.
+    ams-quic-dial
 )
 oubliees=$(comm -23 <(echo "$sur_disque") \
     <(printf '%s\n' $crates "${HORS_PERIMETRE[@]}" | sort -u))
