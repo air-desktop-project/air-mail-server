@@ -32,6 +32,29 @@ ams-proto-imap = { workspace = true }
 ams-proto-smtp = { workspace = true }
 ams-store = { workspace = true }
 
+# ── S'ANNONCER AUPRÈS D'UN ANNUAIRE `air-service-locator` ───────────────────
+#
+# `asl enroll` est le SEUL verbe de cet outil qui parle au réseau, et c'est ce
+# qui fait entrer ces six-là. Il lie une clé neuve à cette machine : la clé est
+# générée ici, sa moitié privée ne sort pas, et l'annuaire n'en connaît que la
+# moitié publique (C14 : aucun secret partagé).
+#
+# `ams-asl` compose la fiche, `ams-quic-dial` porte la connexion, `ams-tls` la
+# confiance — ni autorité ni nom, une clé. `asl-client` compose la preuve de
+# possession, `asl-cle` lit le code et le défi, `asl-id` nomme les
+# identifiants, `asl-racines` donne les racines embarquées et leurs adresses.
+ams-asl = { workspace = true }
+ams-quic-dial = { workspace = true }
+ams-tls = { workspace = true }
+asl-client = { workspace = true }
+asl-cle = { workspace = true }
+asl-id = { workspace = true }
+asl-racines = { workspace = true }
+# UN EXÉCUTEUR POUR UN SEUL VERBE. Le reste de cet outil est synchrone, et le
+# reste. `new_current_thread` : un enrôlement est un aller-retour, pas une
+# charge — un ordonnanceur à plusieurs fils serait du poids pour rien.
+tokio = { workspace = true }
+
 # `Credentials` n'est pas dans les dépendances de l'outil : il HACHE des mots de
 # passe, il n'en vérifie aucun. Les essais, eux, doivent vérifier — c'est toute
 # la question qu'ils posent au magasin qu'ils viennent d'écrire.
