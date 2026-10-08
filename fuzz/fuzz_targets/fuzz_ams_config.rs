@@ -49,6 +49,16 @@ struct Entree {
     /// Trois délais depuis que l'inactivité QUIC se règle : la fuzzer aussi,
     /// sans quoi le champ neuf traverserait le format sans jamais être éprouvé.
     delais: [u32; 3],
+    /// LE GROUPE `asl` (0.2.57) : le répertoire d'état, des services, des
+    /// annuaires.
+    ///
+    /// **LIBREMENT INCOHÉRENT**, comme les chemins TLS : des services sans
+    /// répertoire d'état est un cas que la LIGNE DE COMMANDE refuse, et que le
+    /// décodeur doit rendre tel quel. Les lier ici cacherait la différence au
+    /// lieu de l'éprouver.
+    asl_state: String,
+    asl_services: Vec<(String, bool, u16)>,
+    asl_directories: Vec<String>,
     /// Les deux écoutes de l'API — TCP et UDP — et le secret de scellement des
     /// jetons, eux aussi libres : l'un sans l'autre est un cas que le SERVEUR
     /// refuse, et le décodeur, lui, doit les rendre tels quels.
@@ -206,6 +216,26 @@ fn en_ecoutes(brutes: &[(String, bool)]) -> Vec<ams_config::Listener> {
         .collect()
 }
 
+/// Traduit des services tirés de l'entrée en ce que la configuration retient.
+fn en_services(brutes: &[(String, bool, u16)]) -> Vec<ams_config::AslService> {
+    brutes
+        .iter()
+        .map(|(nom, udp, port)| ams_config::AslService {
+            name: nom.clone(),
+            // **LES DEUX PROTOCOLES, TIRÉS DE L'ENTRÉE** : un booléen suffit,
+            // et l'énumération n'en a que deux. Une valeur hors de l'énumération
+            // ne se compose pas depuis Rust — elle se fabrique en corrompant un
+            // octet, et c'est un essai d'`ams-config`, non une cible de fuzz.
+            protocol: if *udp {
+                ams_config::AslProtocol::Udp
+            } else {
+                ams_config::AslProtocol::Tcp
+            },
+            port: *port,
+        })
+        .collect()
+}
+
 fuzz_target!(|entree: Entree| {
     // ── 1. Lire n'importe quoi ne panique jamais ────────────────────────────
     let _ = decode(&entree.octets);
@@ -221,6 +251,11 @@ fuzz_target!(|entree: Entree| {
         imap_listeners: en_ecoutes(&entree.ecoutes_imap),
         pop3_listeners: en_ecoutes(&entree.ecoutes_pop3),
         imap_implicit_tls: entree.imap_implicite,
+        asl: ams_config::Asl {
+            state: entree.asl_state.clone(),
+            services: en_services(&entree.asl_services),
+            directories: entree.asl_directories.clone(),
+        },
         scram_key: entree.scram[0].clone(),
         scram_store: entree.scram[1].clone(),
         devices: entree.appareils.clone(),

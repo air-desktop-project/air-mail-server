@@ -297,6 +297,11 @@ fn configuration_pop3(
         apple_app_id: String::new(),
         apple_development: false,
         registre: String::new(),
+        // **CES BANCS NE S'ANNONCENT PAS** : ils éprouvent le courrier et
+        // l'API, pas la découverte de services. Le défaut — un répertoire
+        // d'état vide — est exactement ce qu'un fichier écrit avant ce
+        // champ décode.
+        asl: ams_config::Asl::default(),
         about: true,
         require_fqdn_sender: false,
         require_fqdn_recipient: false,

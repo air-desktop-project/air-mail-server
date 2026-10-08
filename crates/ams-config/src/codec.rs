@@ -501,6 +501,75 @@ pub struct Configuration {
     ///
     /// Faux par défaut : un ancien fichier garde `STARTTLS`.
     pub imap_implicit_tls: bool,
+    /// S'annoncer auprès d'un annuaire `air-service-locator` (0.2.57).
+    ///
+    /// **ÉTEINT PAR DÉFAUT**, comme le relais et comme l'API : un répertoire
+    /// d'état vide veut dire « on ne s'annonce pas », et c'est ce qu'un fichier
+    /// écrit avant ce champ décode.
+    pub asl: Asl,
+}
+
+/// S'annoncer auprès d'un annuaire `air-service-locator`.
+///
+/// # CE QUI EST ANNONCÉ VIENT D'ICI, ET NON DES ÉCOUTES
+///
+/// Ce serveur connaît les ports qu'il a liés ; il ne connaît pas la redirection
+/// qui les expose, et il ne peut pas la mesurer (C6). L'exploitant écrit donc
+/// ce qui est joignable du dehors, et **l'annuaire le vérifie** : il sonde
+/// chaque point TCP annoncé et rend un verdict.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Asl {
+    /// Le répertoire où vit l'identité de cette machine.
+    ///
+    /// **VIDE ÉTEINT TOUT.** Non vide sans fiche lisible, le serveur refuse de
+    /// démarrer : annoncer est un engagement envers des clients qui vont s'y
+    /// fier, et démarrer sans pouvoir le tenir serait pire que de ne pas
+    /// démarrer.
+    pub state: String,
+    /// Ce qu'on annonce : un nom par point d'écoute.
+    pub services: Vec<AslService>,
+    /// Les annuaires à joindre, sous la forme `hôte:port=n-…`.
+    ///
+    /// **VIDE PREND LES RACINES EMBARQUÉES** dans la bibliothèque, et aucun nom
+    /// n'est résolu : l'annuaire fonctionne sans DNS.
+    pub directories: Vec<String>,
+}
+
+/// Un service annoncé : un nom, un protocole, un port.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AslService {
+    /// Le nom sous lequel les clients le chercheront.
+    ///
+    /// Cette crate ne l'interprète pas : c'est `ams-asl` qui le valide contre
+    /// l'alphabet du protocole, et qui refuse les deux noms réservés. Le faire
+    /// ici ferait deux lectures de la même règle.
+    pub name: String,
+    /// TCP ou UDP. **UDP ne se sonde pas**, et son verdict sera `non_sonde`.
+    pub protocol: AslProtocol,
+    /// Le port qu'un client doit joindre, et non celui que ce serveur a lié.
+    pub port: u16,
+}
+
+/// Le protocole d'un point annoncé.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AslProtocol {
+    /// TCP. **Le seul que l'annuaire sache sonder** : il a une poignée de main.
+    #[default]
+    Tcp,
+    /// UDP. Une sonde n'y distingue pas « écoute et ignore » de « rien
+    /// n'écoute ».
+    Udp,
+}
+
+impl AslProtocol {
+    /// Son nom, tel que la ligne de commande et `config show` le disent.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Tcp => "tcp",
+            Self::Udp => "udp",
+        }
+    }
 }
 
 /// Une écoute, et le mode TLS de ce port.
@@ -700,6 +769,16 @@ pub enum Error {
     /// lire ; en déduire « observe » ferait laisser passer ce que
     /// l'administrateur avait décidé de refuser, et en silence.
     UnknownEnforcement,
+    /// Ce fichier dit un protocole annoncé que cette version ne sait pas lire.
+    ///
+    /// **ON REFUSE PLUTÔT QUE DE CHOISIR**, comme pour `enforcement`, et la
+    /// première écriture de ce décodeur se repliait sur `tcp` — ce qui était la
+    /// mauvaise réponse pour une raison précise : le serveur aurait annoncé
+    /// `tcp/<port>` là où l'exploitant avait écrit autre chose, l'annuaire
+    /// aurait sondé ce point-là, et rendu un verdict **sur un point qui
+    /// n'existe pas**. Un refus au démarrage se lit ; un verdict faux sur un
+    /// service fantôme ne se lit nulle part.
+    UnknownAslProtocol,
     /// Deux comptes portent le même nom.
     ///
     /// Une question sans réponse : le premier arrivé l'emporterait en silence,
@@ -795,6 +874,10 @@ impl fmt::Display for Error {
             }
             Error::UnknownEnforcement => f.write_str(
                 "ce fichier dit quelque chose d'`enforcement` que cette version ne sait pas lire",
+            ),
+            Error::UnknownAslProtocol => f.write_str(
+                "ce fichier annonce un protocole que cette version ne sait pas lire : \
+                 le relire comme `tcp` ferait sonder un point qui n'existe pas",
             ),
             Error::DuplicateDevice(id) => {
                 write!(f, "deux appareils portent l'identifiant `{id}`")
@@ -928,6 +1011,8 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
     // **UNE ÉCOUTE SANS ADRESSE N'EST PAS UNE ÉCOUTE.** Elle se refuse ici
     // plutôt que de laisser l'appelant lire une chaîne vide et ouvrir on ne sait
     // quoi — ou rien, sans le dire.
+    let asl = lire_asl(lu.get_asl()?)?;
+
     let smtp_listeners = lire_les_ecoutes(lu.get_smtp_listeners()?, "smtpListeners")?;
     let imap_listeners = lire_les_ecoutes(lu.get_imap_listeners()?, "imapListeners")?;
     let pop3_listeners = lire_les_ecoutes(lu.get_pop3_listeners()?, "pop3Listeners")?;
@@ -1151,6 +1236,7 @@ pub fn decode(octets: &[u8]) -> Result<Configuration, Error> {
         apple_development: lu.get_apple_attestation_development(),
         registre: texte(lu.get_registre()?)?,
         about: !lu.get_about_off(),
+        asl,
         queue,
         mtasts,
         tlsrpt,
@@ -1335,6 +1421,7 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
         ecrit.set_apple_attestation_development(config.apple_development);
         ecrit.set_registre(config.registre.as_str());
         ecrit.set_about_off(!config.about);
+        ecrire_asl(ecrit.reborrow().init_asl(), &config.asl);
         {
             let mut emission = ecrit.reborrow().init_relay();
             emission.set_enabled(config.relay.enabled);
@@ -1375,6 +1462,91 @@ pub fn encode(config: &Configuration) -> Result<Vec<u8>, Error> {
 /// à convertir, donc à écrire une garde pour un débordement qu'aucune
 /// configuration ne peut produire — quatre milliards d'écoutes. Le `zip`
 /// s'arrête sur la plus courte des deux, et il n'y a plus rien à garder.
+/// Relit le groupe `asl`.
+///
+/// # UN SERVICE SANS NOM N'EST PAS UN SERVICE, ET IL SE REFUSE ICI
+///
+/// La même règle qu'une écoute sans adresse, et pour la même raison : laisser
+/// l'appelant lire une chaîne vide lui ferait annoncer on ne sait quoi — ou
+/// rien, sans le dire.
+///
+/// **CE QUI N'EST PAS VÉRIFIÉ ICI, ET C'EST DÉLIBÉRÉ** : l'alphabet du nom, les
+/// deux noms réservés, le port nul, les doublons. Tout cela est la grammaire du
+/// protocole, elle vit dans `ams-asl`, et la recopier ici en ferait deux
+/// lectures dont une finirait par mentir. Cette crate-ci ne garde que ce qu'elle
+/// est seule à pouvoir dire : le champ est présent, et il n'est pas vide.
+fn lire_asl(lu: crate::ams_config_capnp::asl::Reader<'_>) -> Result<Asl, Error> {
+    use crate::ams_config_capnp::AslProtocol as Lu;
+
+    let mut services = Vec::new();
+    for service in lu.get_services()?.iter() {
+        let name = texte(service.get_name()?)?;
+        if name.is_empty() {
+            return Err(Error::Empty("aslServices"));
+        }
+        services.push(AslService {
+            name,
+            // **UNE VALEUR INCONNUE REFUSE**, comme `enforcement` et comme les
+            // modes d'attestation. Voir [`Error::UnknownAslProtocol`] : se
+            // replier sur `tcp` ferait annoncer un point que personne n'a
+            // écrit, et l'annuaire en rendrait un verdict.
+            protocol: match service.get_protocol() {
+                Ok(Lu::Tcp) => AslProtocol::Tcp,
+                Ok(Lu::Udp) => AslProtocol::Udp,
+                Err(_) => return Err(Error::UnknownAslProtocol),
+            },
+            port: service.get_port(),
+        });
+    }
+
+    let mut directories = Vec::new();
+    for annuaire in lu.get_directories()?.iter() {
+        let texte = texte(annuaire?)?;
+        if texte.is_empty() {
+            return Err(Error::Empty("aslDirectories"));
+        }
+        directories.push(texte);
+    }
+
+    Ok(Asl {
+        state: texte(lu.get_state()?)?,
+        services,
+        directories,
+    })
+}
+
+/// Écrit le groupe `asl`.
+fn ecrire_asl(mut ecrit: crate::ams_config_capnp::asl::Builder<'_>, asl: &Asl) {
+    use crate::ams_config_capnp::AslProtocol as Lu;
+
+    ecrit.set_state(asl.state.as_str());
+
+    // **LES DEUX LISTES S'INITIALISENT AVANT D'ÊTRE REMPLIES**, et chacune
+    // emprunte le constructeur le temps de son tour : c'est l'ordre qu'impose
+    // `capnp`, et l'intercaler autrement ne compile pas.
+    let combien = u32::try_from(asl.services.len()).unwrap_or(u32::MAX);
+    {
+        let mut liste = ecrit.reborrow().init_services(combien);
+        for (rang, service) in (0..combien).zip(&asl.services) {
+            let mut place = liste.reborrow().get(rang);
+            place.set_name(&service.name);
+            place.set_protocol(match service.protocol {
+                AslProtocol::Tcp => Lu::Tcp,
+                AslProtocol::Udp => Lu::Udp,
+            });
+            place.set_port(service.port);
+        }
+    }
+
+    let combien = u32::try_from(asl.directories.len()).unwrap_or(u32::MAX);
+    {
+        let mut liste = ecrit.reborrow().init_directories(combien);
+        for (rang, annuaire) in (0..combien).zip(&asl.directories) {
+            liste.set(rang, annuaire.as_str());
+        }
+    }
+}
+
 fn ecrire_les_ecoutes(
     mut liste: capnp::struct_list::Builder<'_, crate::ams_config_capnp::listener::Owned>,
     combien: u32,
@@ -1655,7 +1827,9 @@ mod tests {
         assert!(relue.relay.relayhost_password.is_empty());
     }
 
-    use super::{AttestationMode, Listener, Mtasts, Queue, Relay, Tlsrpt};
+    use super::{
+        Asl, AslProtocol, AslService, AttestationMode, Listener, Mtasts, Queue, Relay, Tlsrpt,
+    };
     use alloc::string::{String, ToString as _};
     use alloc::vec;
     use ams_guard::{Rate, Thresholds};
@@ -1746,6 +1920,29 @@ mod tests {
                 },
             ],
             imap_implicit_tls: true,
+            // **L'EXEMPLE PORTE LES DEUX PROTOCOLES ET LES DEUX LISTES**, parce
+            // que c'est lui qui éprouve l'aller-retour : un exemple où `asl`
+            // resterait par défaut relirait un groupe vide et ne prouverait rien
+            // du format.
+            asl: Asl {
+                state: String::from("/var/lib/air-mail/asl"),
+                services: vec![
+                    AslService {
+                        name: String::from("air-mail-imaps"),
+                        protocol: AslProtocol::Tcp,
+                        port: 993,
+                    },
+                    AslService {
+                        name: String::from("air-mail-api-h3"),
+                        protocol: AslProtocol::Udp,
+                        port: 8443,
+                    },
+                ],
+                directories: vec![
+                    String::from("[2001:db8::1dd4]:6630=n-0PWT8HZD80QMSPPDZ5CQXXYHQC"),
+                    String::from("192.0.2.9:6630=n-3K3P6H252W8K9370QG1YYTWBWB"),
+                ],
+            },
             maildir: String::from("/var/mail/spool"),
             hosted: vec![String::from("example.com"), String::from("example.org")],
             max_recipients: 100,
@@ -2013,6 +2210,88 @@ mod tests {
             let octets = encode(&original).expect("encodable");
             assert_eq!(decode(&octets), Err(Error::Empty(champ)), "sur `{champ}`");
         }
+    }
+
+    /// **UN SERVICE ANNONCÉ SANS NOM N'EST PAS UN SERVICE.**
+    ///
+    /// Même règle qu'une écoute sans adresse, et même raison : laisser
+    /// l'appelant lire une chaîne vide lui ferait annoncer on ne sait quoi — ou
+    /// rien, sans le dire.
+    #[test]
+    fn un_service_annonce_sans_nom_se_refuse() {
+        let mut original = exemple();
+        original.asl.services[1].name.clear();
+        let octets = encode(&original).expect("encodable");
+        assert_eq!(decode(&octets), Err(Error::Empty("aslServices")));
+    }
+
+    /// **UN ANNUAIRE SANS ADRESSE N'EST PAS UN ANNUAIRE.**
+    #[test]
+    fn un_annuaire_sans_adresse_se_refuse() {
+        let mut original = exemple();
+        original.asl.directories[0].clear();
+        let octets = encode(&original).expect("encodable");
+        assert_eq!(decode(&octets), Err(Error::Empty("aslDirectories")));
+    }
+
+    /// **UN FICHIER ÉCRIT AVANT LE GROUPE `asl` NE S'ANNONCE PAS.**
+    ///
+    /// C'est ce que vaut l'ajout d'un champ : un groupe absent décode un
+    /// répertoire d'état VIDE, et un répertoire vide veut dire « éteint ». Une
+    /// configuration existante se comporte donc exactement comme avant.
+    #[test]
+    fn un_groupe_asl_absent_vaut_eteint() {
+        let mut original = exemple();
+        original.asl = Asl::default();
+        let relue = decode(&encode(&original).expect("encodable")).expect("relisible");
+        assert!(relue.asl.state.is_empty(), "éteint");
+        assert!(relue.asl.services.is_empty());
+        assert!(relue.asl.directories.is_empty());
+        assert_eq!(relue.asl, original.asl);
+    }
+
+    /// **LES DEUX PROTOCOLES TRAVERSENT LE FORMAT, ET SE DISENT.**
+    #[test]
+    fn les_deux_protocoles_annonces_traversent_le_format() {
+        let original = exemple();
+        let relue = decode(&encode(&original).expect("encodable")).expect("relisible");
+        assert_eq!(relue.asl, original.asl);
+        assert_eq!(relue.asl.services[0].protocol, AslProtocol::Tcp);
+        assert_eq!(relue.asl.services[1].protocol, AslProtocol::Udp);
+        assert_eq!(AslProtocol::Tcp.name(), "tcp");
+        assert_eq!(AslProtocol::Udp.name(), "udp");
+        // Et le défaut est `tcp` : c'est le seul que l'annuaire sache sonder,
+        // donc le seul dont le verdict dise quelque chose.
+        assert_eq!(AslProtocol::default(), AslProtocol::Tcp);
+    }
+
+    /// **UN PROTOCOLE ANNONCÉ QUE CETTE VERSION NE SAIT PAS LIRE REFUSE.**
+    ///
+    /// Se replier sur `tcp` ferait annoncer un point que l'exploitant n'a pas
+    /// écrit, et l'annuaire sonderait ce point-là : un verdict sur un service
+    /// fantôme, que personne ne saurait relier à sa cause.
+    ///
+    /// Même méthode que pour les modes d'attestation : deux fichiers qui ne
+    /// diffèrent que par cet octet, et on y écrit une valeur que le schéma ne
+    /// porte pas.
+    #[test]
+    fn un_protocole_annonce_inconnu_se_refuse() {
+        let mut en_tcp = exemple();
+        en_tcp.asl.services[1].protocol = AslProtocol::Tcp;
+        let en_tcp = encode(&en_tcp).expect("encodable");
+        let mut inconnu = encode(&exemple()).expect("encodable");
+        let rang = en_tcp
+            .iter()
+            .zip(&inconnu)
+            .position(|(a, b)| a != b)
+            .expect("le protocole est écrit");
+        inconnu[rang] = 9;
+        assert_eq!(decode(&inconnu).map(|_| ()), Err(Error::UnknownAslProtocol));
+        assert!(
+            Error::UnknownAslProtocol
+                .to_string()
+                .contains("qui n'existe pas")
+        );
     }
 
     /// **UNE ÉCOUTE SANS ADRESSE N'EST PAS UNE ÉCOUTE.**
