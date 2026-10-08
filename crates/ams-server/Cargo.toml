@@ -15,6 +15,14 @@ name = "air-mail-server"
 path = "src/main.rs"
 
 [dependencies]
+# S'ANNONCER AUPRÈS D'UN ANNUAIRE `air-service-locator` : `ams-asl` compose les
+# annonces et lit la fiche d'identité, `asl-proto` nomme le protocole d'un
+# point, `asl-id` les identifiants, `asl-racines` les racines embarquées. La
+# connexion et la reprise sont dans `ams-loop-tokio`, déjà là.
+ams-asl = { workspace = true }
+asl-id = { workspace = true }
+asl-proto = { workspace = true }
+asl-racines = { workspace = true }
 # L'API REST : ses types de ressource, ses portées, ses documents d'erreur.
 ams-api = { workspace = true }
 ams-attest = { workspace = true }
