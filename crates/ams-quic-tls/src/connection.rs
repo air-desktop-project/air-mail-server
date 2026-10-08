@@ -703,6 +703,28 @@ impl Connection {
         matches!(self.etat.state(), State::Closed)
     }
 
+    /// Où la connexion en est, des cinq états de §10.
+    ///
+    /// # POURQUOI CET ACCÈS EXISTE, ALORS QU'`is_closed` EST LÀ
+    ///
+    /// Les deux ne répondent pas à la même question. `is_closed` répond « puis-je
+    /// jeter cet état ? », qui est celle de l'écoute — elle tient une table de
+    /// connexions et doit savoir quand en retirer une.
+    ///
+    /// **Un APPELANT, lui, demande « puis-je encore m'en servir ? », et
+    /// `is_closed` lui répond faux.** Une connexion en `Closing` ou en
+    /// `Draining` n'est pas oubliable et n'est plus utilisable : la première a
+    /// dit sa fermeture, la seconde a reçu celle du pair. Un client qui se
+    /// fierait à `is_closed` continuerait d'y poser des requêtes et
+    /// n'apprendrait rien avant son propre délai.
+    ///
+    /// L'information existait et ne sortait pas ; c'est tout ce que cette
+    /// fonction change.
+    #[must_use]
+    pub const fn etat(&self) -> State {
+        self.etat.state()
+    }
+
     /// N'a-t-on plus rien à émettre, jamais ?
     ///
     /// §10.2.2 : « An endpoint in the draining state MUST NOT send any

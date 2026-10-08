@@ -1,0 +1,49 @@
+[package]
+name = "ams-quic-dial"
+description = "Joindre un pair en QUIC et lui parler HTTP/3 : la moitié cliente de la pile, en production"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# LA PILE, DU CÔTÉ CLIENT. Chacune de ces crates porte déjà les deux moitiés —
+# `Connection::connect` à côté de `Connection::accept`, `Http3Client` à côté
+# d'`Http3`. Cette crate-ci n'ajoute aucun protocole : elle met une socket et
+# une horloge devant ce qui existe.
+ams-h3 = { workspace = true }
+ams-proto-http = { workspace = true }
+ams-proto-quic = { workspace = true }
+ams-quic = { workspace = true }
+ams-quic-tls = { workspace = true }
+
+# LA CONFIGURATION TLS VIENT DE L'APPELANT, et cette ligne ne sert qu'à en
+# nommer le type. Décider à qui l'on fait confiance est une POLITIQUE : le
+# magasin du système pour l'un, une clé épinglée pour l'autre, un vérificateur
+# écrit à la main pour `air-service-locator`, qui ne croit ni autorité ni nom.
+# Cette crate n'en choisit aucune — elle prendrait sinon la décision la plus
+# lourde du lot à la place de qui l'embarque.
+rustls = { workspace = true }
+
+# `net` et `time` : une socket et un délai. `rt` parce qu'un appelant qui
+# attend a besoin d'un exécuteur — mais le choix de l'ordonnanceur reste au
+# binaire, comme pour `ams-loop-tokio`.
+tokio = { workspace = true }
+
+[dev-dependencies]
+# **LE SERVEUR D'EN FACE EST LE NÔTRE, ET LE VRAI.** Un faux pair dirait ce que
+# nous croyons qu'un serveur HTTP/3 dit ; celui-ci refuse un ALPN qui n'est pas
+# le sien, une section qui ne fait pas une requête, un flux hors de son ordre.
+# C'est le seul montage qui prouve que les deux moitiés de la pile se parlent.
+ams-api = { workspace = true }
+ams-guard = { workspace = true }
+ams-loop-tokio = { workspace = true }
+ams-quic-client = { workspace = true }
+ams-session = { workspace = true }
+ams-tls = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[lints]
+workspace = true

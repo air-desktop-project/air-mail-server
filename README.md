@@ -289,10 +289,11 @@ Les seules crates qui lisent, écrivent et attendent. Elles ne décident de rien
 | `ams-loop-tokio` | les boucles Unix, sur tokio | **SMTP, POP3, IMAP, HTTP/2, HTTP/3 sur QUIC, la file, MTA-STS et les rapports** |
 | `ams-store` | Maildir : les fichiers, seule source de vérité | **implémenté** |
 | `ams-quic-client` | un client QUIC et HTTP/3 **pour les essais**, et pour eux seuls | **il parle à notre serveur** |
+| `ams-quic-dial` | joindre un pair en QUIC et lui parler HTTP/3 : la moitié cliente, **en production** | **poignée de main, requêtes, flux tenu, keepalive, extinction annoncée** |
 | `ams-server` | le binaire `air-mail-server` | **il tourne** |
 | `ams-admin` | le binaire `air-mail-admin` | **`config write`, `config show`, `account add/list/remove`, `token`** |
 
-**Trente-huit crates portent du code**, et ce tableau les nomme toutes :
+**Trente-neuf crates portent du code**, et ce tableau les nomme toutes :
 `scripts/check-etages.sh` confronte ses lignes au contenu de `crates/`, et
 l'écart échoue. Un tableau tenu à la main dérive — celui-ci en décrivait
 vingt-quatre sur trente-quatre, et rien ne le disait ; toute la pile QUIC,

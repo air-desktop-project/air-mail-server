@@ -747,10 +747,17 @@ fn une_fermeture_se_dit() {
     let ecrit = serveur.poll_transmit(&mut place, horloge).expect("avance");
     assert!(ecrit > 0, "une fermeture doit partir");
 
+    // **`Closing` N'EST PAS `Closed`, ET CE N'EST PAS LA MÊME QUESTION.**
+    // L'état n'est pas oubliable — on répond encore (§10.2.1) — mais il n'est
+    // plus utilisable : c'est ce que `etat` dit et qu'`is_closed` taisait.
+    assert!(!serveur.is_closed(), "on répond encore : rien à jeter");
+    assert_eq!(serveur.etat(), ams_quic::State::Closing);
+
     // Et le délai finit par l'éteindre.
     horloge = horloge.saturating_add(60_000_000);
     assert!(serveur.on_timeout(horloge), "elle doit s'éteindre");
     assert!(serveur.is_closed());
+    assert_eq!(serveur.etat(), ams_quic::State::Closed);
     assert_eq!(
         serveur.poll_transmit(&mut place, horloge).expect("avance"),
         0,
@@ -1008,6 +1015,12 @@ fn le_pair_peut_fermer() {
         0,
         "§10.2.2 : en Draining, on n'émet plus rien"
     );
+
+    // **ET `is_closed` DIT ENCORE FAUX** : l'état n'est pas oubliable, et la
+    // connexion n'est pourtant plus utilisable. Un client qui s'y fierait
+    // continuerait d'y poser des requêtes.
+    assert!(!serveur.is_closed());
+    assert_eq!(serveur.etat(), ams_quic::State::Draining);
 }
 
 /// **UNE FERMETURE SE REDIT SUR ARRIVÉE, DE MOINS EN MOINS SOUVENT** (§10.2.1).
