@@ -944,7 +944,24 @@ fn http3_configure_s_ouvre() {
         journal.contains("ALPN `h3` seul"),
         "le serveur doit dire ce qu'il ouvre : {journal}"
     );
-    assert!(ecoute_udp_ouverte(h3), "le port UDP {h3} doit être ouvert");
+    // **LE JOURNAL EST DANS LE MESSAGE, ET C'EST LE CŒUR DE CET ESSAI.**
+    //
+    // Le serveur LIE la socket avant de l'annoncer : s'il a écrit cette ligne,
+    // le port était ouvert. Trouver le port libre ensuite veut donc dire qu'il
+    // l'a RELÂCHÉ — c'est-à-dire qu'il est mort entre les deux, et la seule
+    // chose qui puisse le dire est ce qu'il a écrit en mourant.
+    //
+    // Sans le journal, ce refus s'est présenté deux fois comme « le port UDP
+    // 24010 doit être ouvert », ce qui ne désigne aucune cause et envoie
+    // soupçonner l'ouverture elle-même. Le cas le plus probable est une course
+    // de `port_libre()` sur une AUTRE écoute du même serveur — trois ports sont
+    // tirés, et la suite entière tourne en parallèle.
+    assert!(
+        ecoute_udp_ouverte(h3),
+        "le port UDP {h3} doit être ouvert — le serveur l'a pourtant annoncé, \
+         donc il l'a relâché depuis. Ce qu'il a dit :\n{}",
+        serveur.journal()
+    );
 }
 
 /// **SANS `listenHttp`, HTTP/3 NE SE SERT PAS NON PLUS.**

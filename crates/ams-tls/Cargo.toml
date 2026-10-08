@@ -12,6 +12,14 @@ repository.workspace = true
 # La protection de paquet QUIC : vérifiée contre les vecteurs de l'annexe A de
 # RFC 9001, et branchée telle quelle sur l'interface QUIC de rustls.
 ams-dane = { workspace = true }
+# LA CONFIANCE D'`air-service-locator`, dont la moitié PURE n'est pas ici :
+# `asl_racines::identite_attendue` est la règle « clé = identité », écrite une
+# fois pour les deux dépôts et éprouvée chez elle. Ce qui s'ajoute dans
+# `asl.rs` est ce que sa documentation réclame — « l'étage 3 y ajoute la preuve
+# de possession ». `asl-id` nomme l'identifiant ; aucune dépendance tierce
+# nouvelle n'entre par ces deux-là.
+asl-id = { workspace = true }
+asl-racines = { workspace = true }
 ams-quic-crypto = { workspace = true }
 ml-kem = { workspace = true }
 rustls = { workspace = true }
@@ -22,6 +30,11 @@ x25519-dalek = { workspace = true }
 
 
 [dev-dependencies]
+# `asl-cle` POUR LES ESSAIS SEULEMENT : ils fabriquent de VRAIS certificats
+# d'identité, par la fonction même qu'un annuaire emploie. Un certificat
+# fabriqué à la main n'éprouverait que ce que nous croyons qu'un annuaire
+# envoie.
+asl-cle = { workspace = true }
 # Les essais de DANE calculent une empreinte de référence.
 sha2 = { workspace = true }
 

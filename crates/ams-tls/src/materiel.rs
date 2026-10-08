@@ -62,6 +62,18 @@ pub enum Error {
     /// de main échouaient ensuite sur « bad signature ». Le symptôme était très
     /// loin de la cause.
     Mismatched,
+
+    /// On demande une confiance `air-service-locator` **sans aucune identité à
+    /// croire**.
+    ///
+    /// # POURQUOI C'EST UN REFUS, ET NON UNE LISTE VIDE ACCEPTÉE
+    ///
+    /// Elle se monterait très bien, et refuserait ensuite TOUT certificat : une
+    /// connexion qui ne peut pas aboutir, dont la cause serait cherchée dans le
+    /// réseau — le pare-feu, la route, l'adresse — pendant que la configuration
+    /// la portait. Le refus est rendu à qui a écrit cette configuration, dans
+    /// sa main.
+    SansIdentite,
 }
 
 impl fmt::Display for Error {
@@ -78,6 +90,10 @@ impl fmt::Display for Error {
             Error::Mismatched => f.write_str(
                 "la clé privée est valable, mais elle n'est PAS celle de ce certificat \
                  (un renouvellement à moitié écrit donne exactement cela)",
+            ),
+            Error::SansIdentite => f.write_str(
+                "aucune identité d'annuaire à croire : rien à croire, et tout serait \
+                 refusé — la cause serait alors cherchée dans le réseau",
             ),
         }
     }
@@ -421,7 +437,21 @@ mod tests {
             Error::PrivateKey(_) => "clé",
             Error::Rejected(_) => "refus",
             Error::Mismatched => "dépareillée",
+            Error::SansIdentite => "sans identité",
         }
+    }
+
+    /// **LE BRAS `SansIdentite` EST EMPRUNTÉ ICI, ET NON DANS `asl`.**
+    ///
+    /// La faute naît là-bas — `asl_config` la rend quand on ne lui donne
+    /// aucune identité à croire — mais `genre` vit ici, et son contrat est que
+    /// CHAQUE bras soit pris par un essai. Un bras qu'aucun essai n'emprunte
+    /// est un trou de couverture né du test lui-même, ce que la documentation
+    /// de `genre` dit déjà pour les quatre autres.
+    #[test]
+    fn une_confiance_sans_identite_a_son_genre() {
+        let erreur = crate::asl_config(&[]).expect_err("rien à croire se refuse");
+        assert_eq!(genre(&erreur), "sans identité", "{erreur:?}");
     }
 
     #[test]
