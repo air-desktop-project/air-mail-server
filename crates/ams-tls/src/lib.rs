@@ -50,12 +50,14 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+mod asl;
 mod kx;
 mod materiel;
 mod provider;
 mod quic;
 mod relay;
 
+pub use asl::{asl_config, nom_de_serveur};
 pub use kx::{CLIENT_SHARE, SERVER_SHARE, SHARED_SECRET, X25519MlKem768};
 pub use materiel::{
     ALPN_H2, Error as MaterialError, alpn, certified_key, quic_server_config, server_config,

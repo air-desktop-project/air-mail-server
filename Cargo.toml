@@ -96,7 +96,7 @@ exclude = ["fuzz"]
 # Version en LOCKSTEP : toutes les crates du workspace la partagent via
 # `version.workspace = true`. Un seul numéro à incrémenter par release, donc
 # aucune dérive possible entre les paquets.
-version = "0.2.59"
+version = "0.2.60"
 edition = "2024"
 # Égale au `channel` de `rust-toolchain.toml`. Les deux doivent bouger ensemble :
 # ce champ fait échouer le build avec un message clair si quelqu'un compile avec
