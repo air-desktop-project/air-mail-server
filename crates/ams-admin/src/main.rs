@@ -22,6 +22,8 @@ use ams_config::{Configuration, Enforcement};
 
 use ams_admin_options::{Demande, OPTIONS_AIDE};
 
+mod asl;
+
 /// Le texte de `--help`.
 const AIDE: &str = "\
 air-mail-admin — contrôle et configuration d'air-mail-server
@@ -161,6 +163,26 @@ COMMANDES
                         par défaut. `--domaine` cherche dans le HELO, le PTR,
                         le MAIL FROM, le From et les domaines SPF, DKIM et
                         DMARC. EN LECTURE SEULE.
+    asl enroll [<config>] <code>
+                        LIE UNE CLÉ NEUVE À CETTE MACHINE, auprès d'un annuaire
+                        `air-service-locator`. Le code est court, affiché par
+                        l'application, À USAGE UNIQUE et valable quelques
+                        minutes ; il n'ouvre qu'une opération.
+                        LA CLÉ EST GÉNÉRÉE ICI et sa moitié privée ne sort
+                        pas : l'annuaire n'en connaît que la moitié publique,
+                        et il n'y a AUCUN SECRET PARTAGÉ à poser.
+                        Elle s'écrit dans le répertoire que `--asl-state`
+                        nomme, en 0600, ET ELLE APPARTIENT À QUI POSSÈDE CE
+                        RÉPERTOIRE — sans quoi, lancée en root, le serveur ne
+                        pourrait pas la lire et refuserait de s'annoncer sans
+                        rien dire d'évident. Le répertoire doit donc exister :
+                            install -d -m 0700 -o air-mail -g air-mail \
+                                /var/lib/air-mail/asl
+                        Refuse si une fiche est déjà là : réenrôler jetterait
+                        la clé que l'annuaire connaît, et les services de cette
+                        machine disparaîtraient de l'annuaire.
+                        RIEN N'EST ANNONCÉ POUR AUTANT : `config write …
+                        --asl-announce <nom>=<tcp|udp>:<port>` le dit.
     summary <maildir>   relit une boîte et rend ce que ses noms de fichiers
                         portent : messages numérotés, messages à adopter, noms
                         illisibles, et la réserve d'UID de l'index. EN LECTURE
@@ -745,6 +767,18 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         },
+        // **`asl enroll` LIE UNE CLÉ NEUVE À CETTE MACHINE.**
+        //
+        // L'ordre des deux bras compte, et le troisième aussi : `--help` doit
+        // demander l'aide, et non être pris pour un code. C'est le défaut que
+        // `tests/aide.rs` garde pour les sept autres commandes, et il
+        // s'appliquerait mot pour mot ici.
+        ["asl", "enroll", "--help" | "-h"] => {
+            println!("{AIDE}");
+            ExitCode::SUCCESS
+        }
+        ["asl", "enroll", fichier, code] => asl::enroler(Path::new(fichier), code),
+        ["asl", "enroll", code] => asl::enroler(&configuration_par_defaut(), code),
         ["registre", "verifie", fichier] => verifier_le_registre(Path::new(fichier)),
         ["registre", "verifie"] => verifier_le_registre(&configuration_par_defaut()),
         ["registre", "cherche", reste @ ..] if sans_chemin(reste) => match Recherche::lire(reste) {

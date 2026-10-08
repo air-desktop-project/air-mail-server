@@ -38,7 +38,7 @@ use std::process::Command;
 /// **CE TABLEAU EST LA LISTE ENTIÈRE**, et non un échantillon : c'est
 /// précisément parce que le défaut frappait les sept qu'une correction par bras
 /// aurait laissé passer celui qu'on aurait oublié.
-const COMMANDES: [&[&str]; 7] = [
+const COMMANDES: [&[&str]; 8] = [
     &["config", "write"],
     &["config", "show"],
     &["summary"],
@@ -46,6 +46,12 @@ const COMMANDES: [&[&str]; 7] = [
     &["account", "list"],
     &["account", "add"],
     &["account", "remove"],
+    // **`asl enroll` PREND UN CODE EN DERNIÈRE POSITION**, et non un chemin :
+    // c'est la seule des huit dans ce cas. Le défaut serait donc d'un autre
+    // genre — `--help` pris pour un CODE, et grillé auprès de l'annuaire —,
+    // mais la conséquence est la même : l'aide ne s'affiche pas, et l'outil
+    // part faire autre chose avec un mot qui n'en est pas un.
+    &["asl", "enroll"],
 ];
 
 /// Un répertoire d'essai, effacé quand il tombe.
